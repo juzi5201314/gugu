@@ -9,10 +9,15 @@ trait Add[Rhs] {
     type Output
     fn add(self, rhs: Rhs) Self::Output
 }
+
+trait Dim {
+    const N: int
+}
 ```
 
 - 方法签名是契约。可以有默认方法体。
 - 可以有关联类型。
+- 可以有关联常量：`const N: int`。必须 comptime 可求值。在 impl 里写 `const N = 4`（类型可省略）。使用处写 `Self::N` / `Trait::N` / `Type::N`。出现在数组长度、`comptime` 参数、`match` 范围端点里。
 - 可以有无 `self` 的关联函数；调用写 `Trait::name(...)` 或能唯一确定时的 `Type::name(...)`。
 - 泛型参数写在 `[]` 里。
 - 禁止 `trait A: B` 继承。要组合约束写 `T: A + B`。
@@ -73,10 +78,16 @@ trait Try {
     type Value
     type Error
     fn branch(self) Result[Value, Error]
+    fn from_value(v: Value) Self
+    fn from_error(e: Error) Self
 }
 ```
 
-`expr?` = `match expr.branch() { Ok(v) => v, Err(e) => return <从 e 构造当前函数的失败值> }`。`Result[T, E]` 的 `Value = T`、`Error = E`；`Option[T]` 的 `Value = T`、`Error = ()`（失败值是 `None`）。没有 `From` 式的错误转换。当前函数返回类型的 `Try::Error` 必须与操作数的 `Try::Error` 相同（对 `Option` 两边都是 `()`）。
+`expr?` = `match expr.branch() { Ok(v) => v, Err(e) => 把 from_error(e) 交给最内层出口 }`。出口是：最内层 `try` 块（该块表达式的结果），否则最内层具名函数或闭包的 `return`。没有 `From` 式转换。出口处的 `Try::Error` 必须与操作数的 `Try::Error` 相同（对 `Option` 两边都是 `()`）。
+
+`Result[T, E]`：`Value = T`、`Error = E`，`from_value` 是 `Ok`，`from_error` 是 `Err`。`Option[T]`：`Value = T`、`Error = ()`，`from_value` 是 `Some`，`from_error(())` 是 `None`。
+
+`try` 块见 [表达式](expressions.md)。
 
 ### `Index`
 
@@ -92,7 +103,7 @@ trait Index {
 
 ### `Fn` / `Eq` / `Ord` / `Clone`
 
-`Fn(T) U` 见 [函数](functions.md)，不能用户 `impl`。
+`Fn(T) U` 见 [函数](functions.md)，不能用户 `impl`。`Any` 见下，同样不能用户 `impl`。
 
 ```
 trait Eq {
@@ -104,7 +115,17 @@ trait Ord {
 }
 ```
 
-`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Eq)]` / `#[derive(Ord)]` 要求所有字段都实现对应 trait。`Ord` 必须是全序。不要给 `float` 写 `impl Ord`（浮点比较是内置 IEEE）。含浮点字段的 `#[derive(Eq)]` 仍用 IEEE `==`。`Clone` 见 [传递](passing.md)。
+`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Eq)]` / `#[derive(Ord)]` 要求所有字段都实现对应 trait。`Ord` 必须是全序。不要给 `float` 写 `impl Ord`（浮点比较是内置 IEEE）。含浮点字段的 `#[derive(Eq)]` 仍用 IEEE `==`。`TypeId` 的比较由编译器按编号直接做，并提供 `Eq` / `Ord`。`Clone` 见 [传递](passing.md)。
+
+### `Any`
+
+```
+trait Any {
+    fn type_of(self: &Self) TypeId
+}
+```
+
+编译器认识的 lang item，用户不能重新声明、不能手写肯定或否定 impl。编译器给所有拥有 `TypeId` 的类型生成 impl；语言对 `!` 与 `MaybeUninit[T]` 写 `impl !Any`。方法不能是泛型的，否则不能 `dyn Any`。`is` / `downcast` / `downcast_copy` 是 `dyn Any` 的固有方法，见 [类型 · TypeId](types.md)。
 
 ## `impl`
 
@@ -136,11 +157,16 @@ impl Vec[T] {
 - 固有方法默认模块私有，跨模块要 `pub fn`。`pub trait` 的方法全部公开；`impl Trait for Type` 不能改方法可见性。
 - 方法调用默认静态分发、单态化、可内联。
 - 只有写成 `dyn Print` 才走 vtable。哪些 trait 能 `dyn` 见 [类型](types.md)。
-- 关联类型也走 `::`：`Iter::Item`。在 impl 里写 `type Output = Point`；在签名里用 `Self::Output`，不要靠裸名 `Output`。
+- 语言可以对 `dyn Trait` 写固有 impl（`impl dyn Any`）。用户不能给 `dyn Trait` 写固有方法。
+- 关联类型与关联常量都走 `::`：`Iter::Item`、`Dim::N`。在 impl 里写 `type Output = Point`、`const N = 4`；在签名里用 `Self::Output` / `Self::N`，不要靠裸名。
 
 `self` 的类型可以写 `self`、`self: Point`、`self: &Point`。按值 `self` 拷贝接收者；`&Point` 按引用。句柄类型（`Vec`）的方法接 `self` 就是拷贝句柄，能 `push` 到同一块载荷。大位结构体应接 `&Self`。
 
 ```
+impl Dim for [int; 4] {
+    const N = 4
+}
+
 impl Add[Point] for Point {
     type Output = Point
     fn add(self, rhs: Point) Point = ...
@@ -184,7 +210,24 @@ impl Bar for Foo[string] { ... }
 1. 闭世界：编译器看见全部 impl。不需要 Rust 孤儿规则来保证连贯性；用户可以给 `int` 实现自己的 trait，也可以给自己的类型实现 `std` 的 trait。
 2. 两个 impl 都能匹配时，必须能比较具体性：替换次数更少、有更多具体类型构造器的更具体（C++ 部分序那种直觉）。
 3. 无法比较（交叉重叠，例如 `impl Trait for Foo[T: A]` 与 `impl Trait for Foo[T: B]`，而某类型同时是 A 和 B）必须**编译错误**，不能靠声明顺序。没有单独的 `where` 子句；约束写在 `[T: Bound]` 里。
-4. 特化可以改方法体，不能改方法签名与关联类型（关联类型不一致是错误）。
+4. 特化可以改方法体，不能改方法签名、关联类型与关联常量（不一致是错误）。
 5. `dyn Trait` 的 vtable 按**该具体类型选中的最具体 impl** 生成。
+6. 否定 impl 见下。
 
 特化是类型系统的一部分，不是优化提示。
+
+## 否定 impl
+
+```
+impl !Clone for chan[T] {}
+impl !Clone for Join[T] {}
+```
+
+- 体必须为空。表示 `Self` **不得**实现该 trait。
+- 与指向同一 `Self`（经替换后）的肯定 impl 并存是编译错误。
+- 比它更泛的肯定 blanket 被它**挖掉**：`impl[T] Clone for Foo[T]` 与 `impl !Clone for Foo[chan]` 时，`Foo[chan]` 不实现 `Clone`，其它 `Foo[T]` 走肯定 impl。具体性规则与特化相同；挖不干净（交叉重叠）仍是硬错误。
+- `T: Clone` 在否定 impl 匹配时不成立，错误必须指出否定 impl 的位置。
+- 语言义务：`chan[T]`、`Join[T]` 必须有 `impl !Clone`。用户不能再给它们写肯定 `Clone`。语言对 `!`、`MaybeUninit[T]` 写 `impl !Any`；用户不能给其它类型写 `impl !Any`，也不能给 `!` / `MaybeUninit` 写肯定 `Any`。
+- 否定 impl 不进 `dyn` vtable。不能写 `dyn !Clone`。
+
+「不写 impl」仍然表示「没有肯定实现」；否定 impl 用来对抗 blanket 和把「禁止实现」写成闭世界事实。

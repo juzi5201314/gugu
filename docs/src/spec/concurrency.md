@@ -45,7 +45,24 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 - 不存在 nil channel。
 - 在 `chan` 上阻塞只停 G，不绑死 M（除了持有 P 进入 syscall 的那些路径，runtime 必须能把 P 让给别的 M）。
 
-互斥锁、读写锁、条件变量、原子，放在 `std.sync`，用 intrinsic 实现，不是关键字。
+互斥锁、读写锁、条件变量、原子、一次性初始化，放在 `std.sync`，用 intrinsic 实现，不是关键字。
+
+`std.sync.OnceLock[T]` 与 `std.sync.Lazy[T]` 必须存在：
+
+```
+fn new() OnceLock[T]
+fn get(self: &Self) Option[&T]
+fn get_or_init[F: Fn() T](self: &Self, f: F) &T
+fn set(self: &Self, v: T) Result[(), T]
+
+fn Lazy::new[F: Fn() T](f: F) Lazy[T]
+fn get(self: &Self) &T
+```
+
+- `OnceLock::new()` 是 comptime，可放进 `static`。第一次 `get_or_init` / 成功的 `set` 写入槽；并发调用只跑一次 `f`，其它 G 等到完成。返回的 `&T` 指向进程寿命槽。之后通过 `&T` 的并发写仍是数据竞争，除非 `T` 自己同步。
+- `set` 在已初始化时返回 `Err(v)`（把 `v` 交还），不覆盖。
+- `Lazy::new(f)` 的 `f` 若放进 `static`，必须是不捕获的函数或闭包。第一次 `get` 调用 `f`，规则同 `OnceLock`。
+- 不要用 `OnceLock` 模拟「每个 G 一份」——那是 `#[g_local] static`，见 [声明](declarations.md)。
 
 ## `select`
 

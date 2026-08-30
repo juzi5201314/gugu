@@ -41,7 +41,17 @@
 
 ## panic 与恢复
 
-panic 表示程序 bug（越界、对已关闭 channel `send`、显式 `panic(...)`），不是 `Result` 那种可预期失败。
+panic 表示程序 bug（越界、对已关闭 channel `send`、显式 `panic(...)`），不是 `Result` 那种可预期失败。`panic` 与 `std.process.exit` 的类型是 `!`，且必须 `#[track_caller]`。
+
+```
+#[track_caller]
+fn panic(msg: string) !
+
+#[track_caller]
+fn exit(code: int) !
+```
+
+`std.process.exit` 的完整路径见下。语言必须预导入 `panic`，返回 `!`。
 
 ### 不做 Go 式 `recover`
 
@@ -84,7 +94,24 @@ std.panic.catch(fn() { might_panic() })
 5. 主 G panic：见「进程寿命」——展开主 G 后立刻终止进程。
 6. 已经在展开时，`defer` 里又 panic：进程 abort（禁止「panic 套 panic」继续走用户代码）。
 
-`Panic` 是标准库结构体（预导入）：可读消息、源位置、可选载荷。
+`Panic` 是标准库结构体（预导入）：可读消息、源位置、可选载荷。源位置来自 `std.src.caller()`（尊重 `#[track_caller]` 链），不是 `panic` 函数体内部的物理行号。
+
+`std.src` 必须存在：
+
+```
+struct Location {
+    pub file: string
+    pub line: int
+    pub column: int
+}
+
+fn file() string
+fn line() int
+fn column() int
+fn caller() Location
+```
+
+`file` / `line` / `column` 是该调用表达式的物理位置（comptime，1 基；`column` 按该行 Unicode 标量）。`caller` 走 `track_caller` 链；在非 `#[track_caller]` 函数里等于该 `caller()` 调用点自己。
 
 ## 启动顺序
 
@@ -108,4 +135,4 @@ OS 加载镜像
 
 ## 标准库
 
-`std` 与 runtime 同一闭世界。`print` / `println` 是参数包 + `Print` trait 的普通函数，最终走 syscall / `WriteFile`。`std.process.exit` 与 `std.panic.catch` 必须存在，语义按本章。
+`std` 与 runtime 同一闭世界。`print` / `println` 是参数包 + `Print` trait 的普通函数，最终走 syscall / `WriteFile`。`std.process.exit`（`fn exit(code: int) !`）、`std.panic.catch`、`std.src`、`std.mem.MaybeUninit`、`std.sync.OnceLock` / `Lazy`、`std.test.assert` 必须存在，语义按本章、[并发](concurrency.md)、[测试](testing.md) 与 [unsafe](unsafe.md)。

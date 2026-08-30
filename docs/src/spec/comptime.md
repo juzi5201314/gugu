@@ -4,11 +4,12 @@ Gugu 有 Zig 式的 **comptime**：语言的一个子集可以在编译期跑，
 
 ## 能做什么
 
-- 泛型实参、`comptime` 参数、`const`、数组长度都在编译期已知。`const` 项必须能在编译期求值。
-- 可以根据 comptime 条件丢掉死分支、决定 `[T; n]` 的 `N`。
+- 泛型实参、`comptime` 参数、`const`、关联常量、数组长度都在编译期已知。`const` 项与关联常量必须能在编译期求值。
+- 可以根据 comptime 条件丢掉死分支、决定 `[T; n]` 的 `N`。按目标删除整项用 `#[cfg]`，不是 comptime：被裁侧不必类型检查。
+- `size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count`、`std.src.file` / `line` / `column` 必须 comptime 可求值。`type_id[T]().name()` 在 `T` 已知时也是。
 - 禁止把类型当成一等 comptime 值传递：没有 `fn Foo(comptime T: type) type`，对类型抽象只用 `[T]`。禁止在 comptime 里给 `struct` 动态加字段。
 - 单态化、特化选择、内联候选，都可以消费 comptime 已知信息。
-- 编译期可以 panic，效果是编译错误。
+- 编译期可以 panic，效果是编译错误。comptime 里 `panic(...)` 的类型仍是 `!`。
 
 ## 语法
 
@@ -49,5 +50,6 @@ comptime **解释器**执行语言语义（绑定、循环、`if`、函数调用
 
 - comptime 代码不能启动 G（禁止 `async`）、不能 `recv`/`wait`、不能做目标进程的 syscall。读编译期文件、嵌入字节用 intrinsic `embed_file`（参数必须是 comptime 字符串路径）。
 - 编译期堆与运行时堆断开：comptime 分配的值要进目标程序，必须是可物化的常量。
-- 无限循环在 comptime 必须被燃料限制打断并报错。
+- 无限循环在 comptime 必须被燃料限制打断并报错（即使该 `loop` 的类型是 `!`）。
 - 整数在 comptime **溢出是编译错误**，不环绕。
+- `std.src.file` / `line` / `column` 取该调用点在编译中的源位置，必须 comptime 已知。

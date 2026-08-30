@@ -6,7 +6,7 @@
 
 ## 具名函数
 
-无捕获。表达式体与块体见 [声明](declarations.md)。允许递归与相互递归。禁止按签名重载；多态走泛型、特化、枚举。
+无捕获。表达式体与块体见 [声明](declarations.md)。允许递归与相互递归。禁止按签名重载；多态走泛型、`impl Trait`、特化、枚举。参数与返回里的 `impl Trait` 见 [类型](types.md)。
 
 ## 参数传递
 
@@ -32,9 +32,9 @@ let f = fn(x) = x + 1                // 参数/返回可从上下文推断
 
 解析：`fn` 后若是标识符，是具名声明；若是 `(`，是闭包表达式。具名 `fn` 不能出现在函数体里。
 
-参数名在字面量里必有（不用的写 `_`）。类型与返回类型可省略，规则与 `let` 相同：推不出就报错，不会变成动态类型。
+参数名在字面量里必有（不用的写 `_`）。参数可以是不可驳模式：`fn((x, y): (int, int)) int { x + y }`。类型与返回类型可省略，规则与 `let` 相同：推不出就报错，不会变成动态类型。返回 `!` 时必须写出 `!`（不能靠省略，省略是 `()`）。
 
-`return` 与 `?` 只离开该闭包本身，见 [声明](declarations.md)。
+`return` 只离开该闭包本身。`?` 先交给闭包体内最内层 `try`，没有则离开该闭包（该闭包返回类型必须实现 `Try`）。见 [声明](declarations.md)。
 
 调用就是 `add(1, 2)`、`inc(0)`，和具名函数一样。
 
@@ -51,6 +51,7 @@ let f = fn(x) = x + 1                // 参数/返回可从上下文推断
 
 ```
 fn()                            // fn() ()
+fn() !
 fn() int
 fn(int) int
 fn(int, string) bool
@@ -112,7 +113,7 @@ map(xs, inc)                      // 具名函数也可以
 
 ## UFCS
 
-`p.len()` 查找 `len` 对 `p` 的类型：固有 `impl` 优先，然后 trait。与 `Point::len(p)` 等价。没有虚槽、不能在值上改方法。`dyn Trait` 才是虚调用。无 `self` 的关联函数只能 `Type::name(...)`，不能 `value.name()`。
+`p.len()` 查找 `len` 对 `p` 的类型：固有 `impl` 优先，然后 trait。与 `Point::len(p)` 等价。没有虚槽、不能在值上改方法。`dyn Trait` 才是虚调用。`dyn Any` 的 `is` / `downcast` / `downcast_copy` 是挂在 `dyn Any` 上的固有方法，显式类型实参写 `a.downcast::[T]()`。无 `self` 的关联函数只能 `Type::name(...)`，不能 `value.name()`。
 
 ## `async` 与闭包
 

@@ -1,6 +1,6 @@
 # 表达式与语句
 
-块用 `{` `}`。条件不用括号。`if`、`match`、块都是**表达式**：有 `else` 时分支类型必须一致；块的值是最后一条表达式。若最后一条是声明、赋值、`defer`、循环，块类型为 `()`。
+块用 `{` `}`。条件不用括号。`if`、`match`、`try`、块都是**表达式**：有 `else` 时分支类型必须一致，或一臂是 `!`（见 [类型 · never](types.md)）；块的值是最后一条表达式。若最后一条是声明、赋值、`defer`、循环，块类型为 `()`。`return` / `break` / `continue` 是类型为 `!` 的表达式。`if` 的条件是 let 链，见下。
 
 ```
 let x = if i <= 1 {
@@ -14,28 +14,64 @@ let x = if i <= 1 {
 
 `else if` 是 `else` 后紧跟 `if`。
 
-- 用作表达式（`let`、`return`、调用实参等要取值）：必须有 `else`，两分支类型相同。
+- 用作表达式（`let`、`return`、调用实参等要取值）：必须有 `else`，两分支类型相同，或一臂为 `!` 则结果是另一臂的类型。
 - 用作语句（值丢弃）：可以没有 `else`；then 分支的值被丢弃，不强制是 `()`。
 - 没有标号：`break` / `continue` 只作用于最内层循环。禁止 `break 'a`。
 
 没有分号终止语句。块中要丢弃某个表达式的值、以免它成为块值时，写 `_ = expr` 或 `expr;`。赋值 `=` 不是表达式，禁止 `if x = 1`、禁止 `a = b = 0`。
 
-## `match`
+`return expr` / `return`、`break expr` / `break`、`continue` 是表达式，类型 `!`。它们离开最内层具名函数/闭包或最内层循环（`break`/`continue` 不离开函数）。闭包里的 `return` 只离开该闭包。`?` 离开最内层 `try` 块，没有 `try` 才离开最内层函数/闭包。
 
-穷尽匹配，是表达式：
+## `match` / `if` 链 / `let-else`
+
+模式、穷尽性、or / `@` / rest / 范围见 [模式](patterns.md)。`if` / `while` 的条件是 **let 链**，不只是 `bool`。
 
 ```
 let n = match r {
     Ok(v) => v
     Err(_) => 0
 }
+
+let n = r.match {
+    Ok(v) => v
+    Err(_) => 0
+}
+
+if let Ok(x) = a && let Ok(y) = b && x > y {
+    use(x, y)
+}
+
+if ready && let Some(v) = opt {
+    use(v)
+}
+
+let Ok(v) = r else {
+    return
+}
 ```
 
-也允许类型限定：`Result::Ok(v)`。`Ok` / `Err` / `Some` / `None` 在预导入里。
+- 前缀 `match expr { ... }` 与后缀 `expr.match { ... }` 语义相同。后缀挂在优先级第 1 档（与字段、调用、`?` 同级），便于 `foo().bar().match { ... }`。`match` 是关键字，不能当字段名，故 `.match {` 无歧义。
+- let 链只允许用 `&&` 连接，禁止 `||`（否则绑定是否在作用域里取决于哪一臂）。每一段是 `let 模式 = 表达式` 或类型为 `bool` 的表达式。从左到右求值；`let` 失败或 `bool` 为 false 则整链失败。先成功的 `let` 引入的绑定在后续段以及 then 体里可见，在 `else` 里不可见。
+- `if let Ok(v) = r { }` 就是一段式 let 链。`while` / `while let` 同样走 let 链；链失败则结束循环。
+- `else if` 后面可以是新的 let 链。
 
-- 未覆盖变体且无 `_` 必须编译错误。
-- 可以解构元组、结构体、数组、引用。`&Point { x, y }` 把字段**浅拷**到 `x`、`y`（与读 `p.x` 相同），不是 `&int`。
-- 守卫用 `if`：`Some(x) if x > 0 => ...`
+## `try`
+
+`try { ... }` 是表达式。块里的 `?` 把失败交给这个块，而不是 `return` 出函数。
+
+```
+let r = try {
+    let f = open("a")?
+    f.read_i64()?
+}
+```
+
+- 类型必须实现 `Try`（通常由期望类型推成 `Result[T, E]` 或 `Option[T]`）。
+- 块的最后一条表达式的类型是 `Try::Value`，整个 `try` 的值是 `from_value(那条)`。最后一条是声明/赋值/`defer`/循环则 `Value = ()`。
+- `?` 失败时 `try` 的值是 `from_error(e)`，类型仍是该 `Try`。`Error` 必须一致，无隐式转换。
+- `return` / `break` / `continue` 仍穿过 `try`，不把 `try` 当函数。
+- 嵌套 `try`：`?` 只交给最内层。
+- 没有 `try fn`。不要用 `try` 当标识符（它是关键字）。
 
 ## 循环
 
@@ -46,10 +82,13 @@ loop { ... }
 
 for x in xs { ... }
 for i in 0..n { ... }
+
+while let Some(x) = it.next() { ... }
 ```
 
-- `while` / `loop` / `for` 作为表达式时默认类型是 `()`。
-- `break` / `continue` 作用于最内层循环。`loop` 允许 `break expr`，此时 `loop` 的类型是该表达式类型。`while` / `for` 只允许无值 `break`（否则与 `()` 出口不一致）。
+- `while` / `for` / `while let` 作为表达式时类型是 `()`（它们可以正常结束）。只允许无值 `break`。
+- `loop`：没有任何 `break`（含经 `if` / `match` 到达的 `break`）则类型是 `!`。有无值 `break` 则类型是 `()`。有 `break expr` 则类型是该表达式类型；同一 `loop` 里所有 `break expr` 的类型必须相同，且不能混用无值 `break`。
+- `break` / `continue` 作用于最内层循环。
 - `for x in xs` 展开为：`let it = xs.into_iter()`，然后反复 `it.next()`，见 [接口 · IntoIter](traits.md)。
   - `[T; N]` 与 `&[T]`：`Item = T`，每次**拷贝**元素。
   - `Range`（`0..n`）：`Item = int`。`n` 是表达式，常用 `xs.len()`（方法，不是字段）。
@@ -142,7 +181,7 @@ fn println[Ts: Print...](...args: Ts)
 
 ## `?`
 
-操作数必须实现 `Try`，规则见 [接口](traits.md) 与 [类型](types.md)。
+操作数必须实现 `Try`。出口是最内层 `try`，否则最内层函数/闭包，见 [接口 · Try](traits.md)。
 
 ```
 fn load() Result[int, IoError] {
@@ -190,13 +229,13 @@ select {
 - `try_recv()`：`Result[T, TryRecvErr]`。`Err(TryRecvErr::Empty)` 会阻塞；`Err(TryRecvErr::Closed)` 已关闭且收尽。
 - 不存在 nil channel。未初始化的 `let c: chan[int]` 不能读。
 - 进入 `select` 时：先求值每个分支的 channel 表达式以及 `send` 的载荷，再等待。未选中的分支**不发送、不接收**；载荷表达式的副作用已经发生。
-- `select` 是表达式。所有分支（含 `_`）的体类型必须一致，该类型即 `select` 的类型。当语句用时体为 `()`。
+- `select` 是表达式。所有分支（含 `_`）的体类型必须一致（`!` 可与另一臂合流），该类型即 `select` 的类型。当语句用时体为 `()`。
 - `select` 的分支只能是 channel 的 `send` / `recv`，以及 `Join` 的 `wait()`。`try_send` / `try_recv` 不进 `select`。就绪分支随机公平；`_` 是默认、不阻塞。无就绪且无默认则挂起当前 G。
 
 ## 优先级（从紧到松）
 
-1. 路径、调用、索引、字段、后缀 `?`
-2. 前缀 `async`（操作数只是一次调用或 `{` 块；其后的 `.wait()` 挂在 `Join` 上）、一元 `!` `-` `&` `*`
+1. 路径、调用、索引、字段、后缀 `?`、后缀 `.match { ... }`
+2. 前缀 `async`（操作数只是一次调用或 `{` 块；其后的 `.wait()` 挂在 `Join` 上）、一元 `!` `-` `&` `*`（类型位置的 `!` 是 never，不是本层前缀）
 3. `*` `/` `%`
 4. `+` `-`
 5. `<<` `>>`

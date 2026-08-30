@@ -25,14 +25,74 @@
 #[inline]
 #[repr(C)]
 #[derive(Clone, Eq)]
+#[cfg(os = "linux")]
+#[must_use]
 pub fn bar() string = "bar"
 ```
 
 - `#[]` 附着在其后的声明或表达式上。记号是 `#` 后接 `[...]`。
 - `#![...]` 附着在当前模块上。
 - 未知属性必须报错，禁止静默忽略。
-- 语言内建属性：`inline`、`cold`、`repr(C)`、`repr(u8)`、`repr(u16)`、`repr(u32)`、`repr(u64)`、`repr(packed)`、`derive(...)`。
-- `derive` 只允许已经规定的名字：`Clone`、`Eq`、`Ord`。其它名字按未知属性报错。不是插件机制。
+- 语言内建属性：
+  - 优化：`inline`、`cold`
+  - 布局：`repr(C)`、`repr(u8)`、`repr(u16)`、`repr(u32)`、`repr(u64)`、`repr(packed)`、`repr(transparent)`、`repr(align(N))`（`N` comptime 二的幂）
+  - `derive(...)`：只允许 `Clone`、`Eq`、`Ord`。其它名字按未知属性报错。不是插件机制。
+  - 条件编译：`cfg(...)`，见下
+  - 诊断：`must_use`、`allow(lint)`、`warn(lint)`、`deny(lint)`、`forbid(lint)`
+  - 测试：`test`、`should_panic`、`ignore`（见 [测试](testing.md)）
+  - 存储：`g_local`、`os_thread_local`
+  - 调用点：`track_caller`
+  - 链接：`export_name = "..."`、`link_name = "..."`、`link_section = "..."`、`used`、`naked`
+
+### `cfg`
+
+`#[cfg(谓词)]` 使该项或表达式在谓词为假时**不存在**（不参与类型检查、不 codegen）。与 `comptime if` 不同：被裁掉的一侧不必在当前目标上成立。
+
+谓词：
+
+| 谓词 | 为真当 |
+|------|--------|
+| `os = "linux"` / `os = "windows"` | 目标 OS |
+| `arch = "x86_64"` | 目标架构 |
+| `debug` | debug 构建（溢出检查、较密 safepoint 诊断） |
+| `test` | 测试构建，见 [测试](testing.md) |
+| `not(P)` | P 为假 |
+| `all(P, Q, ...)` | 全部为真 |
+| `any(P, Q, ...)` | 至少一个为真 |
+
+未知谓词是编译错误。模块级 `#![cfg(...)]` 使整个文件在该目标上不存在。
+
+### 诊断
+
+诊断分：**错误**（必须修）与 **lint**。lint 四级，从松到紧：
+
+| 级 | 属性 | 效果 |
+|----|------|------|
+| allow | `#[allow(name)]` | 不报 |
+| warn | `#[warn(name)]` | 警告，仍产出镜像 |
+| deny | `#[deny(name)]` | 升为错误，阻止镜像 |
+| forbid | `#[forbid(name)]` | 同 deny，且内层不得再 `allow` / `warn` 把它降回去 |
+
+未写属性时用该 lint 的默认级。外层 `forbid` 覆盖内层任何降级，内层再写 `allow` 是编译错误。`deny` 可被内层 `allow`。未知 lint 名是编译错误。
+
+语言 lint：
+
+| 名字 | 默认 | 何时 |
+|------|------|------|
+| `large_copy` | warn | 按值传递超过实现阈值的位结构体（建议 64 字节），见 [传递](passing.md) |
+| `unused_must_use` | warn | 丢掉带 `#[must_use]` 的值。`expr;` 仍告；只有 `_ = expr`（或把值绑进后续使用的 `let`）才算处理过 |
+| `unused` | warn | 绑定、参数、`use` 引入的名字从未被读。`_` 与 `_` 开头的名字不告 |
+| `dead_code` | warn | 模块私有的 `fn` / `static` / 类型从未被引用（测试构建里 `#[test]` 项不算 dead） |
+
+`#[must_use]` 可标在函数、方法、结构体、枚举、newtype 上。标在类型上：该类型的值被丢掉就告。标在函数上：返回值被丢掉就告。`Result` 与 `Option` 必须带。
+
+`#[allow(large_copy)]` 等附着在声明、表达式或模块（`#![forbid(...)]`）上，作用于该范围。
+
+### `track_caller`
+
+标在 `fn` 上。该函数内的 `std.src.caller()`、以及由它直接调用的其它 `#[track_caller]` 函数，把「调用点」视为**本函数的调用者**的源位置。`panic` / `std.process.exit` 必须带此属性，使诊断指向用户调用点而不是标准库内部。
+
+`std.src.file()` / `line()` / `column()` 始终是**该调用表达式在源文件里的物理位置**（1 基；`column` 按该行的 Unicode 标量计），不受 `track_caller` 影响。
 
 ## 标识符
 
@@ -42,9 +102,11 @@ pub fn bar() string = "bar"
 
 ## 关键字
 
-`as` `async` `break` `chan` `comptime` `const` `continue` `defer` `dyn` `else` `enum` `extern` `false` `fn` `for` `if` `impl` `in` `let` `loop` `match` `pub` `return` `select` `static` `struct` `trait` `true` `type` `unsafe` `use` `while` `yield`
+`as` `align_of` `asm` `async` `break` `chan` `comptime` `const` `continue` `defer` `dyn` `else` `enum` `extern` `false` `fn` `for` `global_asm` `if` `impl` `in` `let` `loop` `match` `offset_of` `pub` `return` `select` `size_of` `static` `struct` `trait` `true` `try` `type` `type_id` `type_id_count` `union` `unsafe` `use` `while` `yield`
 
 `self` 在 `impl` / trait 方法里按关键字处理。`Self` 只在 `impl` / `trait` 里表示当前类型，别处可当普通标识符。
+
+`type_id` / `type_id_count` / `size_of` / `align_of` / `offset_of` / `chan` 用作关键字构造器，见 [类型](types.md)。
 
 `mut` / `var` 不是关键字（绑定默认可变）。`ret` 只在 `defer ret` 里是修饰符。
 
@@ -75,7 +137,7 @@ pub fn bar() string = "bar"
 
 `'A'`、`'\n'`、`'\u{1F600}'`。必须恰好一个 Unicode 标量，类型 `char`。
 
-### 字符串
+### 字符串与字节
 
 | 形式 | 含义 |
 |------|------|
@@ -83,10 +145,15 @@ pub fn bar() string = "bar"
 | `f"..."` | `string`，有转义，有插值 `{expr}`；字面花括号写成 `{{` `}}` |
 | `raw"..."` | `string`，无插值；只认 `\\` 与 `\"`，其余字符原样 |
 | `raw"""..."""` | 同 `raw`，可跨行，可含单个 `"` |
+| `b"..."` | `[byte; N]`（`N` 为字节数），有转义，无插值。可强制成 `&[byte]` |
+| `b'x'` | `byte`。必须恰好一个字节（转义后） |
+| `c"..."` | 静态、不可变、以 `0` 结尾的字节序列；类型 `*byte`。禁止内含 `0` 字节。不是 `string`，不校验 UTF-8 |
 
-普通转义：`\\` `\"` `\n` `\r` `\t` `\0` `\u{HEX}`。
+普通字符串转义：`\\` `\"` `\n` `\r` `\t` `\0` `\u{HEX}`。
 
-`raw"..."` 不得含未转义换行；跨行必须用 `raw"""..."""`。
+`b"..."` / `b'x'` / `c"..."` 额外允许 `\xHH`（恰好两位数的十六进制，一个字节）。`b"..."` 与 `c"..."` 里 `\u{HEX}` 按 UTF-8 编码进字节；编码后若 `c"..."` 出现内含 `0` 则编译错误。`b'x'` 不允许 `\u{HEX}` 解码成多字节。
+
+`raw"..."` 不得含未转义换行；跨行必须用 `raw"""..."""`。没有 `br"..."` / `cr"..."`。
 
 `f"..."` 的 `{` `}` 里是完整表达式，没有 `{x:02}` 这种格式子语言。要补零、十六进制，先调用标准库再插值。表达式里的括号、方括号、花括号按嵌套配对；未配对的 `}` 结束插值。禁止在插值表达式里再写 `f"..."`。
 
@@ -110,3 +177,5 @@ pub fn bar() string = "bar"
 列表、参数、泛型实参、枚举变体实参允许尾逗号。
 
 `&` 一元（类型或表达式里取引用）与二元（按位与）靠上下文区分。`&&` 是一个记号，只表示短路逻辑与，**禁止**把 `&&x` 解析成双重引用。引用的引用写成 `&(&T)`；取双重引用写成 `&(&x)` 或 `& &x`（两个一元 `&` 之间有空白）。
+
+`!` 在**类型位置**是 never 类型；在表达式里是一元逻辑非。`!=` 是一个记号，不会拆成 `!` 与 `=`。类型位置包括：`:` 之后、函数 `()` 之后的返回类型、`fn(...)` 的返回、泛型实参列表、`as` 以外的类型语法。`fn abort() ! { ... }` 的 `!` 是返回类型。
