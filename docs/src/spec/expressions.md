@@ -87,7 +87,7 @@ while let Some(x) = it.next() { ... }
 ```
 
 - `while` / `for` / `while let` 作为表达式时类型是 `()`（它们可以正常结束）。只允许无值 `break`。
-- `loop`：没有任何 `break`（含经 `if` / `match` 到达的 `break`）则类型是 `!`。有无值 `break` 则类型是 `()`。有 `break expr` 则类型是该表达式类型；同一 `loop` 里所有 `break expr` 的类型必须相同，且不能混用无值 `break`。
+- `loop`：没有任何 `break`（含经 `if` / `match` 到达的 `break`）则类型是 `!`。若存在不带表达式的 `break`，则类型是 `()`。有 `break expr` 则类型是该表达式类型；同一 `loop` 里所有 `break expr` 的类型必须相同，且不能混用无值 `break`。
 - `break` / `continue` 作用于最内层循环。
 - `for x in xs` 展开为：`let it = xs.into_iter()`，然后反复 `it.next()`，见 [接口 · IntoIter](traits.md)。
   - `[T; N]` 与 `&[T]`：`Item = T`，每次**拷贝**元素。
@@ -139,7 +139,7 @@ defer ret {
 
 ## 区间与切片下标
 
-`a..b` 是半开区间，类型 `Range`（`start` 含、`end` 不含）。`..` 是记号。没有 `..=`（要闭区间写 `0..(n + 1)`）。`a` 与 `b` 必须是 `int`。禁止单独的 `a..` / `..b` / `..` 当值。
+`a..b` 是半开区间，类型 `Range`（`start` 含、`end` 不含）。`..` 是记号。没有 `..=`（要闭区间写 `0..(n + 1)`）。`a` 与 `b` 必须是 `int`。禁止单独的 `a..` / `..b` / `..` 当值。模式里允许 `char` 范围，那是模式语法，不产生 `Range` 值，见 [模式](patterns.md)。
 
 `xs[i]` 单元素。`xs[a..b]`、`xs[a..]`、`xs[..b]`、`xs[..]` 得到切片 `&[T]`（数组/切片/`Vec`）或 `string`（对 `string`，边界必须在码点上）。不完整区间只允许写在 `[]` 里。
 
@@ -227,7 +227,7 @@ select {
 - `recv()`：阻塞直到收到或关闭。类型 `Result[T, ChanClosed]`。关闭且缓冲收尽后返回 `Err(ChanClosed)`。
 - `try_send(T)`：`Result[(), TrySendErr]`。`Ok(())` 已送出；`Err(TrySendErr::Full)` 缓冲满（无缓冲则没有会合的接收者）；`Err(TrySendErr::Closed)` 已关闭。
 - `try_recv()`：`Result[T, TryRecvErr]`。`Err(TryRecvErr::Empty)` 会阻塞；`Err(TryRecvErr::Closed)` 已关闭且收尽。
-- 不存在 nil channel。未初始化的 `let c: chan[int]` 不能读。
+- 不存在 nil channel。未初始化的 `let c: chan[int]` 不能读：与其它绑定相同，读取未初始化是编译错误，见 [声明 · let](declarations.md)。
 - 进入 `select` 时：先求值每个分支的 channel 表达式以及 `send` 的载荷，再等待。未选中的分支**不发送、不接收**；载荷表达式的副作用已经发生。
 - `select` 是表达式。所有分支（含 `_`）的体类型必须一致（`!` 可与另一臂合流），该类型即 `select` 的类型。当语句用时体为 `()`。
 - `select` 的分支只能是 channel 的 `send` / `recv`，以及 `Join` 的 `wait()`。`try_send` / `try_recv` 不进 `select`。就绪分支随机公平；`_` 是默认、不阻塞。无就绪且无默认则挂起当前协程。

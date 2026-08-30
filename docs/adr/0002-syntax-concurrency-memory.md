@@ -19,9 +19,9 @@
 - 数组 `[T; N]` + 切片 `&[T]`；`Vec` 在 std。
 - `while` / `loop` / `for x in xs`；块级 `defer` 与函数级 `defer ret`。
 - 插值只有 `f"..."`；齐次变参 `...xs: &[T]`；异构参数包 `fn println[Ts: Print...](...args: Ts)`。
-- Zig 式 comptime 解释器 + 独立的范围分析（BCE）。
+- Zig 式 comptime 解释器 + 独立的范围分析（越界检查消除；与规范 comptime 章的「范围 / 约束传播」是同一件事）。
 - 词法：块注释、`raw"..."`、`+=`、按位运算、禁止 `.5`/`5.`、运算符经 trait 重载。
-- GC：精确、分代、Immix 老年代、并发标记与回收、TLAB、写屏障、不在热路径加读屏障。
+- GC：精确、分代、Immix 老年代、并发标记与回收、线程本地分配缓冲（TLAB）、写屏障、不在热路径加读屏障。
 
 ## 后果
 

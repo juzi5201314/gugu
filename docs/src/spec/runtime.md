@@ -11,13 +11,13 @@
 - 第一块堆或固定工作区（GC 尚未就绪）
 - 跳入 `runtime.start`
 
-禁止依赖 libc 初始化。Linux 静态 ELF 直接 `execve`。Windows 镜像带薄 IAT，不链 CRT。体积：几百到两千行量级，长期留在底层。
+禁止依赖 libc 初始化。Linux 静态 ELF 直接 `execve`。Windows 镜像带薄导入地址表（IAT，只挂 ntdll/kernel32 等少量符号），不链 CRT。体积：几百到两千行量级，长期留在底层。
 
 ## Gugu runtime
 
 用本语言实现：
 
-- 并发分代 Immix GC（TLAB、写屏障、根枚举、并发标记与回收）
+- 并发分代 Immix GC（线程本地分配缓冲 TLAB、写屏障、根枚举、并发标记与回收）
 - 多对多调度：协程 / 操作系统线程 / 逻辑处理器、拷贝增长栈、抢占 safepoint、`async` / `yield`
 - `chan[T]` 与 `select`
 - 进程寿命与退出码（见下）
@@ -95,8 +95,6 @@ std.panic.catch(fn() { might_panic() })
 5. 主协程 panic：见「进程寿命」——展开主协程后立刻终止进程。
 6. 已经在展开时，`defer` 里又 panic：进程 abort（禁止「panic 套 panic」继续走用户代码）。
 
-`Panic` 是标准库结构体（预导入）：可读消息与源位置。源位置来自 `std.src.caller()`（尊重 `#[track_caller]` 链），不是 `panic` 函数体内部的物理行号。
-
 `std.src` 必须存在：
 
 ```
@@ -113,6 +111,17 @@ fn caller() Location
 ```
 
 `file` / `line` / `column` 是该调用表达式的物理位置（comptime，1 基；`column` 按该行 Unicode 标量）。`caller` 走 `track_caller` 链；在非 `#[track_caller]` 函数里等于该 `caller()` 调用点自己。
+
+`Panic` 是预导入的 lang item（标准库结构体，用户不能再定义同名类型）：
+
+```
+struct Panic {
+    pub message: string
+    pub location: Location
+}
+```
+
+`message` 是 `panic(...)` 收到的那条 `string`。`location` 来自 `std.src.caller()`（尊重 `#[track_caller]` 链），不是 `panic` 函数体内部的物理行号。`Location` 在 `std.src`，不预导入。
 
 ## 启动顺序
 

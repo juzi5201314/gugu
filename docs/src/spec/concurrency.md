@@ -6,9 +6,9 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 
 - **协程**：有栈绿色协程。用户代码里的并发单位。数量目标：同一进程内百万级。
 - **操作系统线程**：真正执行机器码。
-- **逻辑处理器**：绑定分配缓存（TLAB）、本地运行队列、GC 本地状态。操作系统线程必须持有逻辑处理器才跑协程。
+- **逻辑处理器**：绑定线程本地分配缓冲（TLAB）、本地运行队列、GC 本地状态。操作系统线程必须持有逻辑处理器才跑协程。
 
-禁止用单字母指称这三者。
+诊断信息也必须用这三个全称，不用单字母缩写。
 
 不是 Rust/JS 的 `async fn`：函数没有颜色，没有 `.await` 传染。关键字 `async` **只用来启动新协程**（见下）。普通函数里直接 `ch.recv()` / `h.wait()` 就会挂起当前协程，操作系统线程去跑别的工作。
 
@@ -41,7 +41,7 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 `chan[T]` 是语言类型，运行时在 GC 堆上（句柄，权威状态在堆对象里）。
 
 - 类型与构造：`chan[T]`、`chan[T](n)`。`n` 是 `int` 缓冲长度，`n == 0` 即无缓冲；`n < 0` 在 comptime 是编译错误，运行时是 panic。`chan` 是关键字，这种调用不是下标。
-- 无缓冲：发送与接收会合。
+- 无缓冲：发送与接收会合（一次 `send` 与一次 `recv` 必须配对完成，谁先到谁等）。
 - 发送、接收、关闭、`select`、`try_*` 的类型见 [表达式](expressions.md)。方法名固定为 `send` / `recv` / `try_send` / `try_recv` / `close`，不能重载。
 - 关闭后收尽，`recv` 返回 `Err(ChanClosed)`；再 `send` 或再 `close` 是 panic。
 - 不存在 nil channel。
@@ -50,16 +50,24 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 
 互斥锁、读写锁、条件变量、原子、一次性初始化，放在 `std.sync`，用 intrinsic 实现，不是关键字。
 
-`std.sync.OnceLock[T]` 与 `std.sync.Lazy[T]` 必须存在：
+`std.sync.OnceLock[T]` 必须存在：
 
 ```
-fn new() OnceLock[T]
-fn get(self: &Self) Option[&T]
-fn get_or_init[F: Fn() T](self: &Self, f: F) &T
-fn set(self: &Self, v: T) Result[(), T]
+impl OnceLock[T] {
+    fn new() OnceLock[T]
+    fn get(self: &Self) Option[&T]
+    fn get_or_init[F: Fn() T](self: &Self, f: F) &T
+    fn set(self: &Self, v: T) Result[(), T]
+}
+```
 
-fn Lazy::new[F: Fn() T](f: F) Lazy[T]
-fn get(self: &Self) &T
+`std.sync.Lazy[T]` 必须存在：
+
+```
+impl Lazy[T] {
+    fn new[F: Fn() T](f: F) Lazy[T]
+    fn get(self: &Self) &T
+}
 ```
 
 - `OnceLock::new()` 是 comptime，可放进 `static`。第一次 `get_or_init` / 成功的 `set` 写入槽；并发调用只跑一次 `f`，其它协程等到完成。返回的 `&T` 指向进程寿命槽。之后通过 `&T` 的并发写仍是数据竞争，除非 `T` 自己同步。成功初始化对随后的 `get` 建立 happens-before。

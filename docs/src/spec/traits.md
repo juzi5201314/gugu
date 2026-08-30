@@ -123,7 +123,7 @@ trait Ord {
 }
 ```
 
-`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Print)]` / `#[derive(Clone)]` 要求所有字段都实现对应 trait。`Ord` 必须是全序。不要给 `float` 写 `impl Ord`（浮点比较是内置 IEEE）。含浮点字段的 `#[derive(Eq)]` 仍用 IEEE `==`。`TypeId` 的比较由编译器按编号直接做，并提供 `Eq` / `Ord`。数组与元组：编译器生成 `Clone` / `Eq` / `Ord` / `Print`（元素满足约束时）。`Clone` 见 [传递](passing.md)。
+`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Print)]` / `#[derive(Clone)]` 要求所有字段都实现对应 trait。`Ord` 必须是全序。`float` 的比较是内置 IEEE，语言不提供 `Ord`；用户也不能给 `float` 写固有 impl（固有 impl 只能写在该类型的定义模块）。含浮点字段的 `#[derive(Eq)]` 仍用 IEEE `==`。`TypeId` 的比较由编译器按编号直接做，并提供 `Eq` / `Ord`。数组与元组：编译器生成 `Clone` / `Eq` / `Ord` / `Print`（元素满足约束时）。`Clone` 见 [传递](passing.md)。
 
 ### `Any`
 
@@ -133,7 +133,7 @@ trait Any {
 }
 ```
 
-编译器认识的 lang item，用户不能重新声明、不能手写肯定或否定 impl。编译器给所有拥有 `TypeId` 的类型生成 impl；语言对 `!` 与 `MaybeUninit[T]` 写 `impl !Any`。方法不能是泛型的，否则不能 `dyn Any`。`is` / `downcast` / `downcast_copy` 是 `dyn Any` 的固有方法，见 [类型 · TypeId](types.md)。
+编译器认识的 lang item（按名字挂钩的标准库项，见 [概述 · 术语](overview.md#术语)），用户不能重新声明、不能手写肯定或否定 impl。编译器给所有拥有 `TypeId` 的类型生成 impl；语言对 `!` 与 `MaybeUninit[T]` 写 `impl !Any`。方法不能是泛型的，否则不能 `dyn Any`。`is` / `downcast` / `downcast_copy` 是 `dyn Any` 的固有方法，见 [类型 · TypeId](types.md)。
 
 ## `impl`
 
@@ -216,8 +216,8 @@ impl Bar for Foo[string] { ... }
 具体规则：
 
 1. 闭世界：编译器看见全部 impl。不需要 Rust 孤儿规则来保证连贯性；用户可以给 `int` 实现自己的 trait，也可以给自己的类型实现 `std` 的 trait。
-2. 两个 impl 都能匹配时，必须能比较具体性：替换次数更少、有更多具体类型构造器的更具体（C++ 部分序那种直觉）。
-3. 无法比较（交叉重叠，例如 `impl Trait for Foo[T: A]` 与 `impl Trait for Foo[T: B]`，而某类型同时是 A 和 B）必须**编译错误**，不能靠声明顺序。没有单独的 `where` 子句；约束写在 `[T: Bound]` 里。
+2. 两个 impl 都能匹配时，必须能比较具体性。impl B 比 impl A 更具体，当且仅当：把 A 的类型参数换成某些类型之后，A 的 Self 与 trait 实参能与 B 重合，而反过来（把 B 的参数代入 A）做不到。因此被泛型参数占据的位置更少、出现更多具体类型构造器的更具体。例：`impl Bar for Foo[T]` 经 `T = string` 得到 `impl Bar for Foo[string]`，反过来不行，故后者更具体。
+3. 无法比较则**编译错误**，不能靠声明顺序。典型是交叉重叠：`impl Trait for Foo[T: A]` 与 `impl Trait for Foo[T: B]`，而某类型同时是 A 和 B。没有单独的 `where` 子句；约束写在 `[T: Bound]` 里。
 4. 特化可以改方法体，不能改方法签名、关联类型与关联常量（不一致是错误）。
 5. `dyn Trait` 的 vtable 按**该具体类型选中的最具体 impl** 生成。
 6. 否定 impl 见下。
@@ -233,7 +233,7 @@ impl !Clone for Join[T] {}
 
 - 体必须为空。表示 `Self` **不得**实现该 trait。
 - 与指向同一 `Self`（经替换后）的肯定 impl 并存是编译错误。
-- 比它更泛的肯定 blanket 被它**挖掉**：`impl[T] Clone for Foo[T]` 与 `impl !Clone for Foo[chan]` 时，`Foo[chan]` 不实现 `Clone`，其它 `Foo[T]` 走肯定 impl。具体性规则与特化相同；挖不干净（交叉重叠）仍是硬错误。
+- 比它更泛的肯定 blanket 被它**挖掉**：`impl[T] Clone for Foo[T]` 与 `impl[U] !Clone for Foo[chan[U]]` 时，`Foo[chan[int]]` 不实现 `Clone`，其它 `Foo[T]`（如 `Foo[string]`）走肯定 impl。具体性规则与特化相同；挖不干净（交叉重叠）仍是硬错误。
 - `T: Clone` 在否定 impl 匹配时不成立，错误必须指出否定 impl 的位置。
 - 语言义务：`chan[T]`、`Join[T]` 必须有 `impl !Clone`。用户不能再给它们写肯定 `Clone`。语言对 `!`、`MaybeUninit[T]` 写 `impl !Any`；用户不能给其它类型写 `impl !Any`，也不能给 `!` / `MaybeUninit` 写肯定 `Any`。
 - 否定 impl 不进 `dyn` vtable。不能写 `dyn !Clone`。

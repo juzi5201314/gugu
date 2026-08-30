@@ -20,7 +20,7 @@ Gugu 是 AOT 编译的、健全静态类型的语言：语法刻意简单，语�
 10. **没有对象系统。** 禁止类、继承、原型链、隐式 `this`、运行时加字段。方法是 UFCS / `impl`，默认静态分发。
 11. **闭包是一等公民。** 捕获不增加用户心智负担；逃逸则 GC 延命。
 12. **高并发。** 有栈绿色协程 + 多对多调度 + 抢占 + channel。`async` 只启动协程，不是函数染色。
-13. **系统接口：** Linux 直接 syscall；Windows 薄 IAT（kernel32/ntdll）。默认不链 libc。
+13. **系统接口：** Linux 直接 syscall；Windows 薄导入地址表（IAT，Import Address Table，挂 kernel32/ntdll）。默认不链 libc。
 
 ## 目标
 
@@ -67,8 +67,23 @@ fn inc(i: int) int = i + 1
 pub fn bar() string = "bar"
 ```
 
-`use green` 只引入模块名；要打散写 `use green.{bar}`。插值必须写 `f"..."`。`println` 的多参数是异构参数包，不是模块值。
+`use green` 只引入模块名；要打散写 `use green.{bar}`。插值必须写 `f"..."`。`println` 的多参数各类型可以不同，在调用点单态化（异构参数包）。
 
 ## 源文件
 
 UTF-8，扩展名 `.gg`。文件是模块，目录是包，见 [声明与模块](declarations.md)。
+
+## 术语
+
+规范目前是唯一成文的文档（教程与参考尚未写）。下列术语在后文章节直接使用：
+
+| 术语 | 含义 |
+|------|------|
+| lang item | 编译器按**名字**挂钩的标准库项（类型、trait、函数）。语言语义必须解析到这些定义；用户不能再声明同名项。没有挂钩的普通 `std` 类型不是 lang item。 |
+| lang trait | 作为 lang item 的 trait（如 `Print`、`Any`）。 |
+| ZST / 纯 ZST | 零大小类型：`size_of` 为 0。纯 ZST 作为值不分配 GC 对象头。见 [类型](types.md)。 |
+| TLAB | 线程本地分配缓冲（thread-local allocation buffer）。每个正在跑协程的操作系统工作线程一份，小对象在其中 bump。 |
+| Immix | 老年代 GC 算法：堆分成 block，block 分成 line；标记后可机会性 evacuate（把活对象搬走）整理碎片。见 [内存](memory.md)。 |
+| IAT | Windows PE 的导入地址表（Import Address Table）。「薄 IAT」= 只导入 ntdll/kernel32 等少量符号，不链 CRT。 |
+| 会合 | 无缓冲 channel 上，一次 `send` 与一次 `recv` 必须配对完成（rendezvous）。 |
+| tier-1 | 本规范钉死必须支持的目标：`x86_64-linux` 与 `x86_64-windows`。见 [程序与编译模型](program-model.md)。 |

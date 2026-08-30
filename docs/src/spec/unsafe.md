@@ -34,7 +34,7 @@
 
 `&T` → `*T`、`uint` → `*T` 必须写成类型构造：`(*T)(&x)`、`(*T)(addr)`。`*T` 转回 `&T` 必须由程序员保证非空、存活、对齐。
 
-`std.ptr` 提供（lang item，必须存在）：
+`std.ptr` 提供（lang item——编译器按名字挂钩的标准库项，必须存在，见 [概述 · 术语](overview.md#术语)）：
 
 ```
 unsafe fn ptr_read[T](p: *T) T
@@ -63,7 +63,7 @@ union Word {
 
 ## `MaybeUninit[T]`
 
-`std.mem.MaybeUninit[T]` 是 lang item，布局与 `T` 相同。编译器不扫描其中的 GC 引用，直到 `assume_init`。
+`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#术语)），布局与 `T` 相同。编译器不扫描其中的 GC 引用，直到 `assume_init`。
 
 ```
 fn uninit[T]() MaybeUninit[T]
@@ -73,9 +73,9 @@ fn write(self: &Self, v: T)
 unsafe fn assume_init(self) T
 ```
 
-`uninit` 不初始化。`write` 按位写入（覆盖前一个位模式，不析构）。`assume_init` 把位当成已初始化的 `T`：若尚未写入有效值，未定义行为。`as_ptr` 本身安全；解引用仍要 `unsafe`。
+`uninit` 不初始化。`write` 按位写入（覆盖前一个位模式，不析构）。`assume_init` 把位当成已初始化的 `T`：若尚未写入有效值，未定义行为。`as_ptr` 本身安全；解引用仍要 `unsafe`。ZST 的 `MaybeUninit` 与 `T` 一样不占空间。
 
-ZST 的 `MaybeUninit` 与 `T` 一样不占空间；`assume_init` 对纯 ZST 在安全子集里也可视为已初始化。
+`assume_init` 始终是 `unsafe fn`，调用必须在 `unsafe` 块里。对纯 ZST（见 [类型](types.md)），安全前置条件恒成立——没有待初始化的位——因此调用不是未定义行为。这不是安全重载，也不免除 `unsafe` 块。安全子集允许直接读取未初始化的纯 ZST（本章开头那条例外），不必经过 `MaybeUninit`。
 
 ## `transmute` 与 `unreachable`
 
@@ -98,7 +98,7 @@ ZST 的 `MaybeUninit` 与 `T` 一样不占空间；`assume_init` 对纯 ZST 在�
 | 系统调用 | Linux `syscall`；Windows 对导入符号的调用 |
 | 无检查索引 / 转换 | 误用即未定义行为 |
 | pin | 禁止移动，供 FFI |
-| comptime 嵌入文件 | `embed_file`，只在 comptime 合法 |
+| comptime 嵌入文件 | `std.mem.embed_file`，只在 comptime 合法；签名见 [编译期执行](comptime.md) |
 | `size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count` | 见 [类型](types.md) |
 | volatile / 指针读写 | 见上 |
 | `transmute` | 见上 |
@@ -119,7 +119,7 @@ asm(
 )
 ```
 
-- 第一个实参是 comptime `string`（或 `raw"..."`），AT&T 或 Intel 语法由实现选定一种并在整份编译里固定；tier-1 用 AT&T 表面、与 GNU as 常见记法兼容。
+- 第一个实参是 comptime `string`（或 `raw"..."`），AT&T 或 Intel 语法由实现选定一种并在整份编译里固定；tier-1（本规范钉死的两个支持目标）用 AT&T 表面、与 GNU as 常见记法兼容。
 - `in("reg") expr`：进入时该寄存器保存 `expr` 的值。
 - `out("reg") place` / `lateout("reg") place`：退出时写进可赋值位置。
 - `clobber("reg"...)`：这些寄存器与 `memory` / `cc` 被破坏。必须声明，否则栈图与寄存器分配无效。
@@ -162,7 +162,7 @@ extern "C" fn nt_close(h: *byte) i32
 ```
 
 - ABI 字符串目前必须是 `"C"`。其它字符串是编译错误。
-- 无函数体的 `extern` 是导入：库名与符号必须在编译配置里显式登记。编译器自己把导入写进镜像（Windows IAT；Linux 动态导入表或内建桩）。禁止靠系统 `ld` 事后扫一堆 `.o` 来解析。
+- 无函数体的 `extern` 是导入：库名与符号必须在编译配置里显式登记。编译器自己把导入写进镜像（Windows 导入地址表 IAT；Linux 动态导入表或内建桩）。禁止靠系统 `ld` 事后扫一堆 `.o` 来解析。
 - 有函数体的 `pub extern "C" fn` 是导出。可用 `#[export_name]` 改符号。
 - Linux System V AMD64，Windows x64。C 字符串用 `*byte` 或 `c"..."`；与 `string` 显式转换。交给外部代码的 GC 对象必须 `std.mem.pin` 或先拷到非移动缓冲。
 - `i128` / `u128` 在 `extern "C"` 里：Linux 按 `__int128`；Windows 禁止，见 [类型](types.md)。

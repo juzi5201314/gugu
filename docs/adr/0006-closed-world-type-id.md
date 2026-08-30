@@ -11,7 +11,7 @@
 
 - 做 `TypeId`：编译器分配稠密 `u32` 编号（用户用 `as_int()` 取出），不是哈希。关键字构造器 `type_id[T]()` / `type_id_count()`，与 `size_of` 同形，避免值后 `[]` 当下标。
 - 镜像写一张以编号为下标的类型表（名字、大小、对齐、GC 扫描描述符）。`downcast` 是整数比较。
-- 不做名为 `any` 的类型。擦除走已有的 `dyn Any`。`Any` 是 lang trait，只有 `type_of`（不能叫 `type_id`，那是关键字），不能有泛型方法。
+- 不做名为 `any` 的类型。擦除走已有的 `dyn Any`。`Any` 是 lang trait（编译器按名字挂钩），只有 `type_of`（不能叫 `type_id`，那是关键字），不能有泛型方法。
 - 做窄 downcast：只恢复当初放进盒子的具体 `T`。`is` / `downcast` / `downcast_copy` 是 `dyn Any` 的固有方法，不是 trait 方法。禁止从 `dyn Any` 猜 `dyn Print`。
 - `!` 与 `MaybeUninit[T]` 没有 `TypeId`，语言写 `impl !Any`。用户不能手写 `Any` 的肯定或否定 impl。
 - 盒子浅拷值表示。句柄进盒子只拷句柄字。`dyn Print` 再进 `dyn Any` 只能 downcast 回 `dyn Print`。

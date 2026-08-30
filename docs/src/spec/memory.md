@@ -42,9 +42,9 @@
 | 项 | 要求 |
 |----|------|
 | 精确 | 编译器生成栈图、寄存器图、全局根。禁止 conservative 扫描。 |
-| 分配 | 每个正在运行的 OS 工作线程有 TLAB / 线（Immix line）。小对象 bump，无锁。TLAB 耗尽后从全局堆取 span，全局路径用细粒度锁或无锁结构，禁止「全堆一把大锁」当快路径。 |
-| 年轻代 | 并行拷贝（evacuate）。大多数对象夭折。 |
-| 老年代 | Immix：按 line/block 标记，机会性evacuate 做碎片整理。低占用靠这个，而不是靠永不移动。 |
+| 分配 | 每个正在运行的操作系统工作线程有线程本地分配缓冲（TLAB，thread-local allocation buffer）/ 线（Immix 把堆分成 block，block 再分成 line；小对象在当前 line 上 bump）。无锁。TLAB 耗尽后从全局堆取 span，全局路径用细粒度锁或无锁结构，禁止「全堆一把大锁」当快路径。 |
+| 年轻代 | 并行拷贝（evacuate：把活对象搬到新区域）。大多数对象夭折。 |
+| 老年代 | Immix：按 line / block 标记，机会性 evacuate 做碎片整理。低占用靠这个，而不是靠永不移动。 |
 | 标记 | 并发、多线程。mutator 与 collector 同时跑。 |
 | 回收 | 并发 sweep / 回收空 block；空页可以还回 OS。 |
 | 屏障 | **写屏障**是 IR 原语（分代 + 并发标记需要）。热路径的**读**是普通 load，**不上读屏障**。 |
@@ -65,7 +65,7 @@
 
 ## Arena 与 pin
 
-`std.mem.Arena` 是 lang item，句柄。区域内 bump 分配，成批释放：
+`std.mem.Arena` 是 lang item（编译器按名字挂钩，见 [概述 · 术语](overview.md#术语)），句柄。区域内 bump 分配，成批释放：
 
 ```
 struct Arena
@@ -77,7 +77,7 @@ unsafe fn reset(self)
 unsafe fn destroy(self)
 ```
 
-`n < 0`：comptime 是编译错误，运行时 panic。`alloc` 把 `v` 浅拷进区域，返回指向该槽的 `&T`。区域里的值仍按 `T` 的描述符扫描。`reset` / `destroy` 之后仍使用先前的 `&T` 是未定义行为。
+`with_capacity` 的参数 `n < 0`：comptime 是编译错误，运行时 panic。`alloc` 把 `v` 浅拷进区域，返回指向该槽的 `&T`。区域里的值仍按 `T` 的描述符扫描。`reset` / `destroy` 之后仍使用先前的 `&T` 是未定义行为。
 
 `std.mem.pin`：
 

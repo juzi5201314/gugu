@@ -150,7 +150,7 @@ static COUNTER: int = 0
 
 `Option` `Result` `Some` `None` `Ok` `Err` `Vec` `Range` `Join` `ChanClosed` `TrySendErr` `TryRecvErr` `Panic` `panic` `Print` `Clone` `Eq` `Ord` `Iter` `IntoIter` `Index` `Try` `Fn` `Any` `TypeId`
 
-`size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count` 是关键字，不必 `use`，写法见 [类型](types.md)。`print` / `println` 仍在 `std.io`。`MaybeUninit`、`transmute`、`ptr_read` / `ptr_write`、`volatile_load` / `volatile_store`、`unreachable` 在 `std.mem` / `std.ptr` / `std.hint`（见 [unsafe](unsafe.md)）。`std.src.file` / `line` / `column` / `caller` 见 [词法 · track_caller](lexical.md)。其它标准库类型按模块路径导入。编译器把上表里的 trait 当 lang item：插值、`for`、`?`、`==`、`[]`（用户类型）、`dyn Any` 必须解析到这些定义，用户不能在自己的模块里再声明同名预导入项。`TypeId` 不能由用户再定义。`Any` 的 impl 由编译器生成，见 [类型 · TypeId](types.md)。
+`size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count` 是关键字，不必 `use`，写法见 [类型](types.md)。`print` / `println` 仍在 `std.io`。`MaybeUninit`、`transmute`、`embed_file` 在 `std.mem`；`ptr_read` / `ptr_write`、`volatile_load` / `volatile_store` 在 `std.ptr`；`unreachable` 在 `std.hint`（见 [unsafe](unsafe.md) 与 [编译期执行](comptime.md)）。`std.src.file` / `line` / `column` / `caller` 见 [词法 · track_caller](lexical.md)。其它标准库类型按模块路径导入。编译器把上表里的 trait 当 lang item（按名字挂钩的标准库项，见 [概述 · 术语](overview.md#术语)）：插值、`for`、`?`、`==`、`[]`（用户类型）、`dyn Any` 必须解析到这些定义，用户不能在自己的模块里再声明同名预导入项。`TypeId` 不能由用户再定义。`Any` 的 impl 由编译器生成，见 [类型 · TypeId](types.md)。
 
 ## 结构体与枚举的值
 
