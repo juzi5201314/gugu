@@ -18,26 +18,27 @@
 用本语言实现：
 
 - 并发分代 Immix GC（TLAB、写屏障、根枚举、并发标记与回收）
-- M:N 调度：G/M/P、拷贝增长栈、抢占 safepoint、`async` / `yield`
+- 多对多调度：协程 / 操作系统线程 / 逻辑处理器、拷贝增长栈、抢占 safepoint、`async` / `yield`
 - `chan[T]` 与 `select`
 - 进程寿命与退出码（见下）
-- panic：只展开当前 G；恢复只在监督边界（见下）
+- panic：只展开当前协程；恢复只在监督边界（见下）
 
 `main` 之前必须达到「普通代码可安全分配、可 `async`」的状态。
 
 ## 进程寿命
 
-用户 G = 用户用 `async` 创建的协程，加上跑 `main` 的主 G。runtime 内部的 M、sysmon、GC 工作线程不是用户 G，不等待它们。
+用户协程 = 用户用 `async` 创建的协程，加上跑 `main` 的主协程。runtime 内部的操作系统工作线程、系统监视线程、GC 工作线程不是用户协程，不等待它们。
 
 | 情况 | 行为 |
 |------|------|
-| `main` **正常返回** | 主 G 的 `defer` / `defer ret` 已跑完。runtime **挂起等待所有仍存活的用户 G 结束**，然后进程自然退出。 |
-| `main` **panic** | 只展开主 G（跑它的 defer），然后**立刻终止进程**。其它用户 G 被直接丢掉，**不展开、不跑它们的 defer**（与 Go 里 main panic 导致进程死掉一样）。退出码非 0。 |
-| `std.process.exit(code)` | **立刻**终止进程。不跑任何 G 的剩余 defer，不等待其它 G。需要清理就先自己做，或从 `main` `return`。 |
+| `main` **正常返回**（含返回 `Ok`） | 主协程的 `defer` / `defer ret` 已跑完。runtime **挂起等待所有仍存活的用户协程结束**，然后进程自然退出。 |
+| `main` 返回 `Err(e)` | 把 `e` 打印到 stderr，然后走与正常返回相同的等待路径，最终退出码非 0。不是 panic。 |
+| `main` **panic** | 只展开主协程（跑它的 defer），然后**立刻终止进程**。其它用户协程被直接丢掉，**不展开、不跑它们的 defer**（与 Go 里 main panic 导致进程死掉一样）。退出码非 0。 |
+| `std.process.exit(code)` | **立刻**终止进程。不跑任何协程的剩余 defer，不等待其它协程。需要清理就先自己做，或从 `main` `return`。 |
 
-自然退出的退出码：`main` 正常返回且等待期间没有「分离 G 的未处理 panic」则为 0；分离 G 在等待期间 panic 则打印诊断且退出码非 0。已被某次 `Join.wait()` 收成 `Err` 的 panic 算处理过，不污染退出码。
+自然退出的退出码：`main` 正常返回 `()` / `Ok` 且等待期间没有「分离协程的未处理 panic」则为 0；`main` 返回 `Err` 或分离协程在等待期间 panic 则打印诊断且退出码非 0。已被某次 `Join.wait()` 收成 `Err` 的 panic 算处理过，不污染退出码。
 
-这与 Go **不同**：Go 在 `main` 函数返回后会立刻杀掉其它 goroutine。Gugu 在 `main` 成功返回后会等它们跑完，避免「后台任务写到一半进程没了」。要立刻走，显式 `std.process.exit`。
+这与 Go **不同**：Go 在 `main` 函数返回后会立刻杀掉其它协程。Gugu 在 `main` 成功返回后会等它们跑完，避免「后台任务写到一半进程没了」。要立刻走，显式 `std.process.exit`。
 
 ## panic 与恢复
 
@@ -51,17 +52,17 @@ fn panic(msg: string) !
 fn exit(code: int) !
 ```
 
-`std.process.exit` 的完整路径见下。语言必须预导入 `panic`，返回 `!`。
+`std.process.exit` 的完整路径见下。语言必须预导入 `panic`，返回 `!`。没有按值载荷的 `panic`：消息就是 `string`。
 
 ### 不做 Go 式 `recover`
 
 禁止 `recover()` 这种「必须写在 defer 里才生效、否则静默变成 nop」的原语。它和 `Result` 抢两条错误通道，也容易在错误的栈帧上恢复成功、不变量已经烂了。
 
-Rust 也没有 `recover`：它用线程边界的 `JoinHandle::join() -> Result`，以及显式的 `catch_unwind`。Gugu 对齐这个形状，但把「线程」换成 G。
+Rust 也没有 `recover`：它用线程边界的 `JoinHandle::join() -> Result`，以及显式的 `catch_unwind`。Gugu 对齐这个形状，但把「线程」换成协程。
 
 ### 恢复边界 = 监督边界
 
-隔离一次可能崩掉的计算：把它放进子 G，在父 G 上 `wait`。
+隔离一次可能崩掉的计算：把它放进子协程，在父协程上 `wait`。
 
 ```
 let r = async { dangerous() }.wait()
@@ -71,30 +72,30 @@ match r {
 }
 ```
 
-同一条请求循环里，隔离是 `async { handle(req) }`（丢掉 `Join` 即分离）。某个请求 panic 只杀死那一个 G，监听循环继续。这是监督树，不是在 defer 里捞一把。
+同一条请求循环里，隔离是 `async { handle(req) }`（丢掉 `Join` 即分离）。某个请求 panic 只杀死那一个协程，监听循环继续。这是监督树，不是在 defer 里捞一把。
 
 ### 同栈捕获（不是关键字）
 
-有时不能或不该再开一个 G：导出给 C 的函数禁止把 Gugu panic 展开进 C 栈；测试要断言「这里会 panic」。这些用标准库：
+有时不能或不该再开一个协程：导出给外部函数的函数禁止把 Gugu panic 展开进外部栈；测试要断言「这里会 panic」。这些用标准库：
 
 ```
 std.panic.catch(fn() { might_panic() })
 ```
 
-签名：`fn catch[T, F: Fn() T](f: F) Result[T, Panic]`。在**当前 G、当前栈**上跑 `f`，panic 则展开到 `catch` 边界（该边界以内的 defer 仍跑），然后变成 `Err`。`catch` 以外的 defer 不跑。不能从任意 defer 里「捞当前 panic」——没有隐式 `recover`。
+签名：`fn catch[T, F: Fn() T](f: F) Result[T, Panic]`。在**当前协程、当前栈**上跑 `f`，panic 则展开到 `catch` 边界（该边界以内的 defer 仍跑），然后变成 `Err`。`catch` 以外的 defer 不跑。不能从任意 defer 里「捞当前 panic」——没有隐式 `recover`。
 
-导出为 `extern "C"` 的函数：若 panic 逃出该函数且未被 `catch`，必须 **abort 进程**，禁止把展开继续推进 C。
+导出为 `extern "C"` 的函数：若 panic 逃出该函数且未被 `catch`，必须 **abort 进程**，禁止把展开继续推进外部帧。
 
 ### 展开规则
 
-1. panic 只展开**当前 G**。跑该 G 上仍应执行的 `defer` / `defer ret`（LIFO）。
-2. 其它 G 不被这条 panic 展开。
-3. 子 G 死后，`Join.wait()` 得到 `Result[T, Panic]`：`Ok(T)` 或 `Err(p)`。等待者默认不跟着 panic。
-4. 分离 G（`Join` 被丢掉）panic：打印诊断，该 G 结束。若此时主 G 还在跑，**不**因此终止进程。若主 G 已经正常返回、runtime 正在等待用户 G，该 panic 使最终退出码非 0。
-5. 主 G panic：见「进程寿命」——展开主 G 后立刻终止进程。
+1. panic 只展开**当前协程**。跑该协程上仍应执行的 `defer` / `defer ret`（LIFO）。
+2. 其它协程不被这条 panic 展开。
+3. 子协程死后，`Join.wait()` 得到 `Result[T, Panic]`：`Ok(T)` 或 `Err(p)`。等待者默认不跟着 panic。
+4. 分离协程（`Join` 被丢掉）panic：打印诊断，该协程结束。若此时主协程还在跑，**不**因此终止进程。若主协程已经正常返回、runtime 正在等待用户协程，该 panic 使最终退出码非 0。
+5. 主协程 panic：见「进程寿命」——展开主协程后立刻终止进程。
 6. 已经在展开时，`defer` 里又 panic：进程 abort（禁止「panic 套 panic」继续走用户代码）。
 
-`Panic` 是标准库结构体（预导入）：可读消息、源位置、可选载荷。源位置来自 `std.src.caller()`（尊重 `#[track_caller]` 链），不是 `panic` 函数体内部的物理行号。
+`Panic` 是标准库结构体（预导入）：可读消息与源位置。源位置来自 `std.src.caller()`（尊重 `#[track_caller]` 链），不是 `panic` 函数体内部的物理行号。
 
 `std.src` 必须存在：
 
@@ -119,9 +120,9 @@ fn caller() Location
 OS 加载镜像
   → rt0
   → 不经 GC 的分配可用
-  → runtime 自举（堆、P、主 G、栈图）
-  → 用户 `main`（主 G）
-  → 若 main 正常返回：等待其余用户 G
+  → runtime 自举（堆、逻辑处理器、主协程、栈图）
+  → 用户 `main`（主协程）
+  → 若 main 正常返回：等待其余用户协程
   → 若 main panic 或 process.exit：立即进入收尾/exit
   → runtime 收尾
   → rt0 exit
@@ -131,8 +132,8 @@ OS 加载镜像
 
 ## 与编译器的契约
 
-编译器必须认识：分配点、safepoint、写屏障、换栈、panic 展开与 `catch` 边界、`process.exit`、channel 阻塞点。runtime 仍是普通 Gugu + intrinsic，禁止硬编码一份 C 运行时来充当语义。
+编译器必须认识：分配点、safepoint、写屏障、换栈、panic 展开与 `catch` 边界、`process.exit`、channel 阻塞点、导入的外部函数边界（让出逻辑处理器）、导出函数入口（必要时把当前操作系统线程登记为工作线程）。runtime 仍是普通 Gugu + intrinsic，禁止硬编码一份 C 运行时来充当语义。
 
 ## 标准库
 
-`std` 与 runtime 同一闭世界。`print` / `println` 是参数包 + `Print` trait 的普通函数，最终走 syscall / `WriteFile`。`std.process.exit`（`fn exit(code: int) !`）、`std.panic.catch`、`std.src`、`std.mem.MaybeUninit`、`std.sync.OnceLock` / `Lazy`、`std.test.assert` 必须存在，语义按本章、[并发](concurrency.md)、[测试](testing.md) 与 [unsafe](unsafe.md)。
+`std` 与 runtime 同一闭世界。`print` / `println` 是参数包 + `Print` trait 的普通函数，最终走 syscall / `WriteFile`。`std.process.exit`（`fn exit(code: int) !`）、`std.panic.catch`、`std.src`、`std.mem.MaybeUninit`、`std.mem.Arena`、`std.mem.pin`、`std.sync.OnceLock` / `Lazy`、`std.test.assert` 必须存在，语义按本章、[并发](concurrency.md)、[内存](memory.md)、[测试](testing.md) 与 [unsafe](unsafe.md)。

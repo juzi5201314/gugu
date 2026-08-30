@@ -8,7 +8,7 @@
 
 没有隐式装箱；大结构体按值传会真拷贝（lint `large_copy`，不是类型错误）。逃逸的 `&T` 才升到 GC 堆。
 
-`static` 项是进程寿命存储；含堆引用的 `static` 必须出现在 GC 全局根里。`#[g_local] static` 的槽是**每个 G 一份**，根挂在该 G 上，不进全局根表。`#[os_thread_local] static` 的槽挂在当前 M 上，扫描正在该 M 上跑的 G 时一并扫当前 M 的 TLS。
+`static` 项是进程寿命存储；含堆引用的 `static` 必须出现在 GC 全局根里。`#[coroutine_local] static` 的槽是**每个协程一份**，根挂在该协程上，不进全局根表。`#[os_thread_local] static` 的槽挂在当前操作系统线程上，扫描正在该线程上跑的协程时一并扫当前线程的操作系统线程本地槽。
 
 `MaybeUninit[T]` 在 `assume_init` 之前不当作含活引用；精确扫描必须跳过它。`union` 只含位类型，扫描按其位模式对应的静态类型（整个 union 当一块位，不把重叠字段当多根）。
 
@@ -31,7 +31,7 @@
 
 ## GC：并发分代 Immix
 
-必须同时满足：高吞吐（接近手写分配器）、低占用（能挪动/整理）、高并发（多 OS 线程同时分配与回收）、与百万级有栈协程共存。
+必须同时满足：高吞吐（接近手写分配器）、低占用（能挪动/整理）、高并发（多条操作系统线程同时分配与回收）、与百万级有栈协程共存。
 
 因此算法钉死为：
 
@@ -48,8 +48,8 @@
 | 标记 | 并发、多线程。mutator 与 collector 同时跑。 |
 | 回收 | 并发 sweep / 回收空 block；空页可以还回 OS。 |
 | 屏障 | **写屏障**是 IR 原语（分代 + 并发标记需要）。热路径的**读**是普通 load，**不上读屏障**。 |
-| 根 | 所有可运行与挂起的协程栈、寄存器、全局、`#[g_local]` 槽、当前 M 的 `#[os_thread_local]`、channel 缓冲、TLAB。 |
-| 握手 | 与抢占共用 safepoint。正在跑的 G 到达 safepoint 后才扫描其寄存器；阻塞的 G 栈已经冻结。 |
+| 根 | 所有可运行与挂起的协程栈、寄存器、全局、`#[coroutine_local]` 槽、当前操作系统线程的 `#[os_thread_local]`、channel 缓冲、TLAB、未 `reset` 的 `Arena`。 |
+| 握手 | 与抢占共用 safepoint。正在跑的协程到达 safepoint 后才扫描其寄存器；阻塞的协程栈已经冻结。 |
 
 不采用 ZGC/Shenandoah 那种**每条引用读都加 load barrier / 着色指针**作为默认：它把暂停压到亚毫秒，但会把「接近 C++」的指针追逐打出可见缺口。本语言的暂停目标靠年轻代短、并发标记老年代、以及少分配来达成，而不是靠给每次 load 加税。
 
@@ -61,7 +61,31 @@
 
 - 把堆引用写入堆字段必须经过编译器插入的写屏障。
 - 年轻代拷贝与 Immix evacuate 会移动对象。栈与寄存器里的指针在 safepoint 更新。
-- FFI：把引用交给 C 之前必须 `pin`（禁止移动）或拷贝到非移动缓冲。`#[repr(C)]` 结构体默认不作为可移动 GC 对象的载荷直传。
+- FFI：把引用交给外部函数之前必须 `pin`（禁止移动）或拷贝到非移动缓冲。`#[repr(C)]` 结构体默认不作为可移动 GC 对象的载荷直传。
+
+## Arena 与 pin
+
+`std.mem.Arena` 是 lang item，句柄。区域内 bump 分配，成批释放：
+
+```
+struct Arena
+
+fn new() Arena
+fn with_capacity(n: int) Arena
+fn alloc[T](self, v: T) &T
+unsafe fn reset(self)
+unsafe fn destroy(self)
+```
+
+`n < 0`：comptime 是编译错误，运行时 panic。`alloc` 把 `v` 浅拷进区域，返回指向该槽的 `&T`。区域里的值仍按 `T` 的描述符扫描。`reset` / `destroy` 之后仍使用先前的 `&T` 是未定义行为。
+
+`std.mem.pin`：
+
+```
+fn pin[T, R, F: Fn() R](p: &T, f: F) R
+```
+
+`f` 执行期间 `*p` 不会被移动。`f` 因 panic 展开时仍先取消固定。把引用交给外部函数之前必须 `pin` 或拷到非移动缓冲。
 
 ## 逃逸与闭包
 
@@ -69,4 +93,4 @@
 
 ## 与所有权
 
-没有用户级借用检查器。寿命不够长时对象升到 GC 堆，而不是编译失败。唯一所有权（可移动、可确定性析构）若存在，是额外类型/注解，不是默认。
+没有用户级借用检查器。寿命不够长时对象升到 GC 堆，而不是编译失败。没有 `Drop` / RAII：资源收尾用 `defer` / `defer ret`。

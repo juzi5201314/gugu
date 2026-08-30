@@ -36,11 +36,11 @@ pub fn bar() string = "bar"
 - 语言内建属性：
   - 优化：`inline`、`cold`
   - 布局：`repr(C)`、`repr(u8)`、`repr(u16)`、`repr(u32)`、`repr(u64)`、`repr(packed)`、`repr(transparent)`、`repr(align(N))`（`N` comptime 二的幂）
-  - `derive(...)`：只允许 `Clone`、`Eq`、`Ord`。其它名字按未知属性报错。不是插件机制。
+  - `derive(...)`：只允许 `Clone`、`Eq`、`Ord`、`Print`。其它名字按未知属性报错。不是插件机制。
   - 条件编译：`cfg(...)`，见下
   - 诊断：`must_use`、`allow(lint)`、`warn(lint)`、`deny(lint)`、`forbid(lint)`
   - 测试：`test`、`should_panic`、`ignore`（见 [测试](testing.md)）
-  - 存储：`g_local`、`os_thread_local`
+  - 存储：`coroutine_local`、`os_thread_local`
   - 调用点：`track_caller`
   - 链接：`export_name = "..."`、`link_name = "..."`、`link_section = "..."`、`used`、`naked`
 
@@ -168,7 +168,7 @@ pub fn bar() string = "bar"
 
 `+` `-` `*` `/` `%` `+=` `-=` `*=` `/=` `%=`
 
-`&&` `||` `!`
+`&&` `||` `!` `~`
 
 `&` `|` `^` `<<` `>>` `&=` `|=` `^=` `<<=` `>>=`
 
@@ -179,3 +179,5 @@ pub fn bar() string = "bar"
 `&` 一元（类型或表达式里取引用）与二元（按位与）靠上下文区分。`&&` 是一个记号，只表示短路逻辑与，**禁止**把 `&&x` 解析成双重引用。引用的引用写成 `&(&T)`；取双重引用写成 `&(&x)` 或 `& &x`（两个一元 `&` 之间有空白）。
 
 `!` 在**类型位置**是 never 类型；在表达式里是一元逻辑非。`!=` 是一个记号，不会拆成 `!` 与 `=`。类型位置包括：`:` 之后、函数 `()` 之后的返回类型、`fn(...)` 的返回、泛型实参列表、`as` 以外的类型语法。`fn abort() ! { ... }` 的 `!` 是返回类型。
+
+`~` 只在表达式里出现，是整数的按位取反，不是逻辑非。

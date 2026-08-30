@@ -36,6 +36,20 @@
 
 类型参数包用于异构变参：`fn println[Ts: Print...](...args: Ts)`。`Ts...` 只出现在泛型参数列表里；`Ts: Print...` 表示每个展开后的类型都实现 `Print`。在调用点按实参列表展开并单态化。
 
+`[]` 参数表可以混写类型参数与 `comptime` 参数，适用于 `fn`、`struct`、`enum`、`union`、`trait`、`impl`、`type`：
+
+```
+struct Block[T, comptime N: int] {
+    data: [T; N]
+}
+
+impl[T: Clone, comptime N: int] Clone for [T; N] {
+    fn clone(self: &Self) [T; N] { ... }
+}
+```
+
+`comptime` 参数必须是编译期已知的值（日常是 `int`）。出现在数组长度、`repr(align(N))`、`match` 范围端点等处。类型实参与 comptime 实参都写在同一对 `[]` 里：`Block::[int, 4] { data: [0; 4] }`。函数的 comptime 形参仍可写在参数表里：`fn repeat[T](comptime n: int, x: T)`。禁止另搞一套 const 泛型尖括号。
+
 ## 内置标量
 
 | 名字 | 含义 | x86_64 大小 |
@@ -54,7 +68,7 @@
 
 日常代码用 `byte`、`int`、`uint`、`float`、`bool`、`char`、`string`。精确宽度（含 `i128` / `u128`）与 `f32` 用于布局、SIMD、FFI；它们是一等类型，不是「弱别名」——`byte` 与 `u8` 除外，二者必须是**同一个类型**（只是两个名字）。`int` 与 `i64`、`uint` 与 `u64`、`float` 与 `f64` 同样如此。`isize`/`usize` 在 tier-1 上分别就是 `int`/`uint`。`i128` / `u128` 在 x86_64 上对齐 16。
 
-标量之间禁止隐式转换。显式转换写成类型构造：`int(b)`、`byte(n)`、`float(i)`、`char(u)`、`i128(x)`、`u128(x)`。变窄超出范围则 panic（debug 与 release 都检查）。`char(u)` 的 `u` 必须是 Unicode 标量值（不是代理对、不超过 `0x10FFFF`），否则 panic。`bool` 不能与整数互转。`string` 与字节的转换走标准库（校验 UTF-8）。
+标量之间禁止隐式转换。显式转换写成类型构造：`int(b)`、`byte(n)`、`float(i)`、`char(u)`、`i128(x)`、`u128(x)`。整数变宽按符号或零扩展。整数变窄：debug 超出目标范围则 panic；release 按目标位宽截断（与溢出环绕同一套位）。`char(u)` 的 `u` 必须是 Unicode 标量值（不是代理对、不超过 `0x10FFFF`），否则 debug 与 release 都 panic。`bool` 不能与整数互转。`string` 与字节的转换走标准库（校验 UTF-8）。
 
 `i128` / `u128` 可以出现在 Gugu 函数、结构体、数组里。它们**不是**日常类型。`extern "C"` 的签名里：`x86_64-linux` 按 SysV `__int128`（`rdx:rax`）；`x86_64-windows` 的 C ABI 没有 `__int128`，把 `i128`/`u128` 写进 `extern "C"` 是编译错误。要过 Windows C 边界，拆成两个 `u64` 或 `#[repr(C)]` 结构体。不要抄 Rust 自己的 `i128` 传参。
 
@@ -62,7 +76,9 @@
 
 整数溢出：debug 检查并 panic；release 按位宽环绕。comptime 求值时溢出是编译错误，不环绕。浮点溢出是 IEEE inf / NaN，不 panic。
 
-`==` `!=` `<` `<=` `>` `>=` 对内置标量、`string`、`TypeId`、由它们组成的元组与数组，由编译器直接实现，不走 trait。浮点按 IEEE 754（`NaN != NaN`，涉及 NaN 的序比较为 false）。用户 `struct` / `enum` 没有默认同等；要写 `==` 必须 `#[derive(Eq)]` 或手写 `impl Eq`。
+一元 `-` 只用于有符号整数与浮点。对无符号类型写 `-x` 是编译错误。按位取反是前缀 `~`，只用于整数。
+
+`==` `!=` `<` `<=` `>` `>=` 对内置标量、`string`、`TypeId`、由它们组成的元组与数组，由编译器直接实现，不走 trait。浮点按 IEEE 754（`NaN != NaN`，涉及 NaN 的序比较为 false）。用户 `struct` / `enum` 没有默认同等；要写 `==` 必须 `#[derive(Eq)]` 或手写 `impl Eq`。内置整数与浮点的算术同样由编译器直接降指令；语言同时给出对应的 `Add` 等 impl，使 `T: Add` 能用在 `int` 上。`string` 的 `+` / `+=` 走 `Add` / `AddAssign`，见下。
 
 ## 引用 `&T`
 
@@ -78,11 +94,12 @@
 
 - 合法 UTF-8，非法字节序列进不来（FFI 必须校验或走 `&[byte]`）。
 - 不可变；拼接与插值产生新值。可变缓冲用 `Vec[byte]`。
-- 胖指针：数据指针 + `uint` 长度。可共享 backing。
+- 胖指针：数据指针 + `int` 长度。可共享 backing。
 - 子串仍是 `string`（共享或拷贝由实现选，语义不可变）。
-- 固有方法：`len()` 返回字节数（`uint`）；`chars()` 返回实现 `IntoIter` 且 `Item = char` 的值。
+- 固有方法：`len()` 返回字节数（`int`）；`chars()` 返回实现 `IntoIter` 且 `Item = char` 的值。
 - `s[i]` 类型是 `byte`，按字节计，只读。`string` 不实现 `IntoIter`：`for x in s` 非法。
 - `s[a..b]`、`s[a..]`、`s[..b]`、`s[..]` 得到 `string`；边界必须落在码点上，否则 panic。
+- 拼接：`s + t` 与 `s += t` 走语言提供的 `impl Add[string] for string`（`Output = string`）与 `AddAssign`。新分配。循环里反复 `+` 可以平方代价，缓冲用 `Vec[byte]`。不另设一套「内置字符串加号」。
 
 ## 元组、数组、切片
 
@@ -90,7 +107,7 @@
 - 数组 `[T; N]`：长度属于类型，内联，不经堆。按值拷贝。`N` 必须是编译期整数。值：`[1, 2, 3]` 类型 `[int; 3]`；`[x; N]` 把 `x` 重复 `N` 次（`N` comptime）。
 - 切片 `&[T]`：胖指针（指针 + 长度），不拥有存储。`&[T; N]` 必须能强制成 `&[T]`。
 - 下标：`xs[i]`、`xs[a..b]`、`xs[a..]`、`xs[..b]`、`xs[..]`。不完整区间 `a..` / `..b` / `..` **只**允许出现在 `[]` 里，不能当独立值（独立值必须是 `a..b`，类型 `Range`）。
-- `Vec[T]` 不是内置类型，在 `std`（预导入）：可增长、存储在 GC 堆或传入的 arena。至少提供 `new`、`push`、`len`、`cap`，以及 `IntoIter`（`Item = T`，拷贝元素）。
+- `Vec[T]` 不是内置类型，在 `std`（预导入）：可增长、存储在 GC 堆或传入的 arena。至少提供 `new`、`push`、`len`、`cap`（`len` / `cap` 返回 `int`），以及 `IntoIter`（`Item = T`，拷贝元素）。必须实现 `Clone`（`T: Clone`）、`Eq`（`T: Eq`）、`Print`。
 
 下标类型是 `int`。语言层默认插入越界检查；发布构建也检查。编译器在**证明** `0 <= i < len` 时必须删掉该检查（循环归纳、`if` 守卫、`for i in 0..n`、comptime 已知长度与下标）。证明不了就留检查。`unsafe` 提供无检查下标。
 
@@ -152,6 +169,10 @@ enum Option[T] {
 `Result` 与 `Option` 在预导入中。`?` 的操作数必须实现内建 `Try`（见 [接口](traits.md)）。标准库的 `Result` 与 `Option` 实现 `Try`。禁止对任意用户类型重载 `?`，除非它实现 `Try`。`?` **没有**错误类型的隐式转换：出口处（`try` 块或函数返回类型）的 `Try::Error` 必须与操作数相同。
 
 枚举变体三种：无载荷 `A`、元组式 `B(int, string)`、结构体式 `C { x: int, y: int }`。变体与枚举同可见性，不能给单个变体单独标 `pub`。`#[repr(u8)]`（或其它整数 repr）时允许 `A = 1` 写判别值；无 `#[repr]` 时禁止显式判别值（编译器可做 niche）。
+
+递归类型的字段必须是句柄或 `&T`，不能把无限大的 `Node` 嵌进 `Node`。典型写法：`enum List[T] { Nil, Cons(T, &List[T]) }`，或用 `Vec[Node]` 这种句柄字段。构造逃逸的 `&T` 会升到 GC 堆，见 [传递](passing.md)。
+
+空枚举（零个变体）合法，与 `!` 一样没有值。`match` 穷尽性：不可达的变体（载荷是 `!` 或空枚举）不必写臂。`Result[T, !]` 只写 `Ok(v)` 即穷尽。
 
 ## 函数类型
 
@@ -240,7 +261,7 @@ fn as_int(self) int          // 稠密下标，`0 <= i < type_id_count()`
 fn name(self) string         // 镜像 rodata 里的 intern 字符串；`type_id[T]().name()` 仍是 comptime
 ```
 
-`name` 供诊断与调试，不能用来改布局、不能当求值入口。
+`name` 供诊断与调试，不能用来改布局、不能当求值入口。规范名优先日常名字：`int` 不是 `i64`，`uint` 不是 `u64`，`byte` 不是 `u8`，`float` 不是 `f64`。
 
 ### `Any` 与 downcast
 
@@ -293,20 +314,20 @@ let q: Option[&Point] = a.downcast()   // 靠期望类型推断 T
 
 | 类型 | 含义 |
 |------|------|
-| `chan[T]` | 通道。关键字 `chan`。句柄，权威状态在堆对象上。构造 `chan[T](n)`。 |
-| `Join[T]` | `async` 启动的 G 的句柄。`wait()` 得到 `Result[T, Panic]`。 |
+| `chan[T]` | 通道。关键字 `chan`。句柄，权威状态在堆对象上。构造 `chan[T](n)`，`n: int`。 |
+| `Join[T]` | `async` 启动的协程的句柄。`wait()` 得到 `Result[T, Panic]`。 |
 | `Range` | `a..b` 的类型。`pub start: int`、`pub end: int`，半开。 |
 | `ChanClosed` | 单元结构体。`recv` 在关闭且收尽后返回 `Err(ChanClosed)`。 |
 | `TrySendErr` | `enum TrySendErr { Full, Closed }`。`try_send` 的 `Err`。 |
 | `TryRecvErr` | `enum TryRecvErr { Empty, Closed }`。`try_recv` 的 `Err`。 |
-| `Panic` | panic 载荷（消息、位置、可选值），定义见 [运行时](runtime.md)，预导入。`#[must_use]` 不适用：它是数据，不是「未处理的结果」。 |
+| `Panic` | panic 载荷（消息、源位置），定义见 [运行时](runtime.md)，预导入。`#[must_use]` 不适用：它是数据，不是「未处理的结果」。 |
 | `TypeId` | 闭世界稠密类型编号。见上。预导入。 |
 | `MaybeUninit[T]` | 可能未初始化的 `T`。布局与 `T` 相同，GC **不**把其中的引用当活根，直到 `assume_init`。见 [unsafe](unsafe.md)。 |
 | `!` | never，见上。不是预导入名字，是记号。 |
 
 `Range` 只表示 `int` 区间。`for i in 0..n` 走语言提供的 `Range` 的 `IntoIter`，不是用户写的 impl。
 
-`Result[T, E]` 与 `Option[T]` 带 `#[must_use]`：丢掉未使用的值是 lint `unused_must_use`。`Join[T]` **不**带：丢掉即分离。
+`Result[T, E]` 与 `Option[T]` 带 `#[must_use]`：丢掉未使用的值是 lint `unused_must_use`。`Join[T]` **不**带：丢掉即分离。`Option` / `Result` 在元素满足约束时必须实现 `Clone`、`Eq`、`Print`；元素都 `Ord` 时实现 `Ord`。
 
 ## 布局与 `size_of`
 
@@ -324,9 +345,9 @@ GC 堆对象可以有用户不可见的头；`#[repr(C)]` 的 FFI 结构体默�
 下列为语言关键字构造，必须在 comptime 可求值（`T` 与字段名编译期已知）：
 
 ```
-size_of[T]()         // uint，字节
-align_of[T]()        // uint
-offset_of[T](field)  // uint。具名字段写标识符；newtype / 元组写 `0`
+size_of[T]()         // int，字节
+align_of[T]()        // int
+offset_of[T](field)  // int。具名字段写标识符；newtype / 元组写 `0`
 type_id[T]()         // TypeId，见上；`!` / `MaybeUninit[_]` 非法
 type_id_count()      // int
 ```

@@ -4,9 +4,11 @@
 
 一个 `.gg` 文件是一个模块，模块名是去掉 `.gg` 的文件名。
 
-点分路径对应目录：`std.io` → `std/io.gg`，若存在目录 `std/io/` 则入口文件是 `std/io/mod.gg`。文件系统就是模块树，不另写 `mod foo;`。
+点分路径对应目录：`std.io` → `std/io.gg`，若存在目录 `std/io/` 则入口文件是 `std/io/mod.gg`。文件系统就是模块树，不另写 `mod foo;`。同一路径上 `foo.gg` 与 `foo/mod.gg` 同时存在是编译错误。
 
 一个目录是一个**包**（分发与可见性组）。`pub` 跨模块可见；包级私有不另设第三档，直到有明确的 `pub(package)` 需求。
+
+**编译入口**由编译器命令行指定一个源文件（常规是项目里的 `main.gg`）。从该文件所在的模块树收集可达代码。`std` 是编译器提供的包，用户源树里禁止再定义名为 `std` 的包。测试模式仍以该入口为根收集 `#[test]`，不调用用户 `main`，见 [测试](testing.md)。
 
 模块顶层只允许：`use`、`fn`、`struct`、`enum`、`union`、`trait`、`impl`、`const`、`type`、`static`、`extern`、`global_asm` 声明。禁止模块级 `let`。具名 `fn` 不能写在函数体里（嵌套可调用物用闭包）。
 
@@ -86,7 +88,7 @@ fn println[Ts: Print...](...args: Ts) { ... }
 
 参数是不可驳模式，见 [模式](patterns.md)。`fn add((x, y): (int, int)) int` 合法。
 
-`main` 无参数、返回 `()`，不必 `pub`。runtime 初始化之后调用。返回 `!` 的 `main` 非法。
+`main` 无参数，不必 `pub`。返回类型是 `()` 或 `Result[(), E]`（`E` 实现 `Print`）。runtime 初始化之后调用。返回 `!` 非法。返回 `Err` 的语义见 [运行时](runtime.md)。
 
 禁止函数按签名重载。方法上的额外类型参数写在名字后面：`fn convert[U](self) U`。
 
@@ -129,14 +131,14 @@ static COUNTER: int = 0
 
 `type Name = T` / `type Name[T] = ...`：若右侧**不是** `impl Trait`，这是透明别名（`Ids` 与 `Vec[int]` 同一类型，不能给别名单独 `impl`）。若右侧是 `impl Trait`（TAIT），这是不透明别名，见 [类型 · impl Trait](types.md)。名义包装用单字段元组结构体 `struct Meters(int)`。
 
-`static NAME: T = expr`：进程寿命、有稳定地址。`expr` 必须 comptime。若 `T` 含堆引用，该 static 是 GC 根。读写规则与普通绑定一样（默认可变）。多个 G 无同步地写同一 `static` 是数据竞争。禁止模块级 `let`。
+`static NAME: T = expr`：进程寿命、有稳定地址。`expr` 必须 comptime。若 `T` 含堆引用，该 static 是 GC 根。读写规则与普通绑定一样（默认可变）。多个协程无同步地写同一 `static` 是数据竞争。禁止模块级 `let`。
 
-- `#[g_local] static`：每个 **G** 一份槽，随 G 迁移。该 G 第一次访问时用 `expr` 初始化。GC 根挂在该 G 上。这是用户要的「协程本地」，不是 OS 线程本地。
-- `#[os_thread_local] static`：每个 **M**（OS 线程）一份槽，给 FFI（`errno` 一类）。G 在 safepoint 之后可能换 M，读到的是**当前 M** 的槽。不要在 `recv` / `wait` / `yield` 前后假设还是同一份。普通请求上下文用 `#[g_local]`。
+- `#[coroutine_local] static`：每个**协程**一份槽，随协程迁移到哪条操作系统线程都还是这一份。该协程第一次访问时在**运行时**求值 `expr`（可以分配；不必 comptime）。GC 根挂在该协程上。这是用户要的「协程本地」，不是操作系统线程本地。初始化过程中再次读取同一个 `#[coroutine_local]` 项是 panic（禁止重入）。
+- `#[os_thread_local] static`：每个**操作系统线程**一份槽，给 FFI（`errno` 一类）。同样在该线程第一次访问时运行时求值 `expr`，重入 panic。协程在 safepoint 之后可能换到另一条操作系统线程，读到的是**当前操作系统线程**的槽。不要在 `recv` / `wait` / `yield` 前后假设还是同一份。普通请求上下文用 `#[coroutine_local]`。
 
 进程级一次性初始化用 `std.sync.OnceLock` / `Lazy`，见 [并发](concurrency.md)。
 
-泛型参数写 `[T]`；数组类型写 `[T; N]`。表达式里的下标与泛型见 [类型系统 · 泛型写法](types.md)。`[]` 里只有类型参数（及类型包 `Ts...`），没有 const 泛型；编译期整数用参数上的 `comptime n: int` 或关联常量。
+泛型参数写 `[T]` 或混写 `comptime` 参数：`struct Block[T, comptime N: int]`、`fn repeat[T](comptime n: int, x: T) [T; n]`、`impl[T: Clone, comptime N: int] Clone for [T; N]`。数组类型写 `[T; N]`。表达式里的下标与泛型见 [类型系统 · 泛型写法](types.md)。没有 Rust 那种单独的 const 泛型语法。
 
 结构体字面量只能写在能看见所有被赋值字段的模块里（私有字段 = 同模块，或走关联函数构造）。newtype 构造 `Meters(v)` 同样受内部字段可见性约束。
 

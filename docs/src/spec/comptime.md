@@ -48,7 +48,7 @@ comptime **解释器**执行语言语义（绑定、循环、`if`、函数调用
 
 ## 边界
 
-- comptime 代码不能启动 G（禁止 `async`）、不能 `recv`/`wait`、不能做目标进程的 syscall。读编译期文件、嵌入字节用 intrinsic `embed_file`（参数必须是 comptime 字符串路径）。
+- comptime 代码不能启动协程（禁止 `async`）、不能 `recv`/`wait`、不能做目标进程的 syscall。读编译期文件、嵌入字节用 intrinsic `embed_file`（参数必须是 comptime 字符串路径，相对**写该调用的源文件**所在目录）。
 - 编译期堆与运行时堆断开：comptime 分配的值要进目标程序，必须是可物化的常量。
 - 无限循环在 comptime 必须被燃料限制打断并报错（即使该 `loop` 的类型是 `!`）。
 - 整数在 comptime **溢出是编译错误**，不环绕。

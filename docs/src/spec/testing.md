@@ -42,7 +42,7 @@ fn slow() { }
 - `#[should_panic]`：该测试必须 panic；正常返回则失败。可选 `#[should_panic(eq = "expected")]`：`Panic` 消息必须等于该 comptime 字符串。
 - `#[ignore]`：默认跳过，运行器显式请求时才跑。
 - 同一模块多个 `#[test]` 合法。运行器按模块路径 + 函数名排序，顺序确定。
-- 每个测试在**新的用户 G** 上跑。测试函数 panic 且无 `should_panic` → 该测试失败，其它测试继续。测试里的 `async` / `chan` 与普通程序相同；该测试 G 结束时仍存活的分离 G 按 [运行时](runtime.md) 等待。
+- 每个测试在**新的用户协程**上跑。收集顺序按模块路径 + 函数名排序（列表与失败报告确定）。执行时这些协程**并行**调度。测试函数 panic 且无 `should_panic` → 该测试失败，其它测试继续。测试里的 `async` / `chan` 与普通程序相同；该测试协程结束时仍存活的分离协程按 [运行时](runtime.md) 等待。共享 `static` 是作者的事。
 
 `std.test` 必须存在，且带 `#[track_caller]`：
 

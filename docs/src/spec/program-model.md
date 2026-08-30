@@ -8,7 +8,7 @@ Gugu 程序必须被 **AOT** 编译成本地可执行镜像。可以在同一套
 
 ## 闭世界与全程序编译
 
-一次产生可执行文件的编译必须看见全部可达的 Gugu 代码：用户程序、标准库、用 Gugu 写的 runtime。
+一次产生可执行文件的编译必须看见全部可达的 Gugu 代码：用户程序、标准库、用 Gugu 写的 runtime。可达性从命令行指定的入口源文件起算，见 [声明 · 模块](declarations.md)。
 
 因此：
 
@@ -81,7 +81,7 @@ rt0 入口
   → 不经 GC 的分配可用（rt0 已 mmap 第一块堆或固定缓冲区）
   → 进入 Gugu 写的 runtime 初始化（GC、调度）
   → 调用用户 `main`
-  → 若 main 正常返回：等待其余用户 G
+  → 若 main 正常返回：等待其余用户协程
   → 若 main panic 或 process.exit：立即终止
   → rt0 exit
 ```

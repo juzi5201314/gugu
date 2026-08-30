@@ -36,7 +36,7 @@ trait Dim {
 
 禁止重载：`&&` `||`（短路）、`.`、`=`（赋值）、`async`、`select`、channel 的 `send`/`recv`、`?`（除非该类型实现 `Try`）。一元 `&` 是取引用，不能重载。
 
-内置整数、浮点、`string` 的运算符与 `==` 不走 trait 分发，由编译器直接降成指令；溢出与 IEEE 规则见 [类型](types.md)。`Clone` 见 [传递](passing.md)，只表示深拷贝。
+内置整数、浮点、`string` 的 `==` 与整数/浮点算术由编译器直接降成指令；溢出与 IEEE 规则见 [类型](types.md)。语言同时给出 `Add` 等 impl，以及 `impl Add[string] for string`（`Output = string`）和 `AddAssign`。`Clone` 见 [传递](passing.md)，只表示深拷贝。
 
 ## 语言认识的 trait
 
@@ -48,11 +48,19 @@ trait Dim {
 
 ```
 trait Print {
-    fn print(self, buf: &Vec[byte])
+    fn print(self: &Self, buf: &Vec[byte])
 }
 ```
 
-`f"i = {i}"` 等价于往一个 `Vec[byte]` 里依次 `print` 各段，再把合法 UTF-8 做成 `string`。内置标量、`string`、`bool` 实现 `Print`。不要把 `print` 理解成「直接写 stdout」——那是 `std.io` 在缓冲之后的 syscall。
+`f"i = {i}"` 等价于往一个 `Vec[byte]` 里依次 `print` 各段，再把合法 UTF-8 做成 `string`。接收者是 `&Self`，避免插值大拷贝。不要把 `print` 理解成「直接写 stdout」——那是 `std.io` 在缓冲之后的 syscall。
+
+语言或标准库必须提供的 impl：
+
+- 内置标量、`string`、`bool`、`TypeId`
+- `Option[T]` / `Result[T, E]` / `Vec[T]`（元素实现 `Print` 时）
+- 数组 `[T; N]` 与元组（元素都实现 `Print` 时；由编译器生成，用户不必手写 `comptime N`）
+
+`#[derive(Print)]` 对结构体打印 `Name { field: ..., ... }`，对枚举打印变体名加载荷。整数十进制；`true` / `false`；`string` 输出内容本身（不配额外引号）；`NaN` / `inf` / `-inf` 按这些字面打印。
 
 ### `IntoIter` / `Iter`
 
@@ -115,7 +123,7 @@ trait Ord {
 }
 ```
 
-`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Eq)]` / `#[derive(Ord)]` 要求所有字段都实现对应 trait。`Ord` 必须是全序。不要给 `float` 写 `impl Ord`（浮点比较是内置 IEEE）。含浮点字段的 `#[derive(Eq)]` 仍用 IEEE `==`。`TypeId` 的比较由编译器按编号直接做，并提供 `Eq` / `Ord`。`Clone` 见 [传递](passing.md)。
+`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Print)]` / `#[derive(Clone)]` 要求所有字段都实现对应 trait。`Ord` 必须是全序。不要给 `float` 写 `impl Ord`（浮点比较是内置 IEEE）。含浮点字段的 `#[derive(Eq)]` 仍用 IEEE `==`。`TypeId` 的比较由编译器按编号直接做，并提供 `Eq` / `Ord`。数组与元组：编译器生成 `Clone` / `Eq` / `Ord` / `Print`（元素满足约束时）。`Clone` 见 [传递](passing.md)。
 
 ### `Any`
 
@@ -149,15 +157,15 @@ impl Vec[T] {
 
 这样 `Vec::new` 和 `v.new` 不会混：前者是静态构造，后者会去找值 `v` 上名叫 `new` 的方法（通常没有）。
 
-- `impl Type { ... }` 给类型挂固有方法与关联函数。同一类型可以有多块固有 `impl`，合并看待。
-- 类型参数：出现在 Self 或 trait 实参里的 `T` 由此引入，写作 `impl Vec[T]`、`impl Print for Foo[T]`。blanket `impl Trait for T` 必须写成 `impl[T] Trait for T`（可带约束 `impl[T: Print] Trait for T`）。
+- `impl Type { ... }` 给类型挂固有方法与关联函数。同一类型可以有多块固有 `impl`，合并看待。**固有 impl 只能写在该类型的定义模块**（`int` / `Vec` 等语言类型由标准库或编译器）。其它模块要给已有类型加方法，只能 `impl Trait for Type`。
+- 类型参数：出现在 Self 或 trait 实参里的 `T` 由此引入，写作 `impl Vec[T]`、`impl Print for Foo[T]`。blanket `impl Trait for T` 必须写成 `impl[T] Trait for T`（可带约束 `impl[T: Print] Trait for T`）。`comptime` 参数同样写在 `impl[...]` 里。
 - 带 `self` 的是方法：`p.len()` 与 `Point::len(p)` 等价（UFCS）。没有隐式 `this`；`self` 必须是第一个参数。
 - 不带 `self` 的是关联函数：`Vec::new()` / `Vec[int]::new()`，没有接收者。能从上下文推断时 `let v: Vec[int] = Vec::new()` 即可。
 - `impl Trait for Type` 给类型实现接口。
 - 固有方法默认模块私有，跨模块要 `pub fn`。`pub trait` 的方法全部公开；`impl Trait for Type` 不能改方法可见性。
 - 方法调用默认静态分发、单态化、可内联。
 - 只有写成 `dyn Print` 才走 vtable。哪些 trait 能 `dyn` 见 [类型](types.md)。
-- 语言可以对 `dyn Trait` 写固有 impl（`impl dyn Any`）。用户不能给 `dyn Trait` 写固有方法。
+- 语言可以对 `dyn Trait` 写固有 impl（`impl dyn Any`）。用户不能给 `dyn Trait` 写固有方法。语言为数组和元组生成的 `Clone` / `Eq` / `Ord` / `Print` 视为定义处 impl，用户不能再写一份重叠的固有 impl。
 - 关联类型与关联常量都走 `::`：`Iter::Item`、`Dim::N`。在 impl 里写 `type Output = Point`、`const N = 4`；在签名里用 `Self::Output` / `Self::N`，不要靠裸名。
 
 `self` 的类型可以写 `self`、`self: Point`、`self: &Point`。按值 `self` 拷贝接收者；`&Point` 按引用。句柄类型（`Vec`）的方法接 `self` 就是拷贝句柄，能 `push` 到同一块载荷。大位结构体应接 `&Self`。
@@ -173,11 +181,11 @@ impl Add[Point] for Point {
 }
 
 impl Print for Foo[T] {
-    fn print(self, buf: &Vec[byte]) { ... }
+    fn print(self: &Self, buf: &Vec[byte]) { ... }
 }
 
 impl Print for Foo[string] {
-    fn print(self, buf: &Vec[byte]) { ... }
+    fn print(self: &Self, buf: &Vec[byte]) { ... }
 }
 ```
 

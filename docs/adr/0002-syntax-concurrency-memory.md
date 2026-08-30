@@ -10,7 +10,7 @@
 - 错误：`Result[T, E]` + `match` + `?`。
 - `char` + 精确宽度（`byte`/`u8` 等同名同类型）。字段默认私有。
 - UFCS + `trait`/`impl` + 最具体特化；`dyn Trait` 才虚。值用 `.`，类型关联用 `::`（`Vec::new()`、`Point::len(p)`）。泛型 `[T]`，数组 `[T; N]`。
-- 有栈协程、M:N、抢占、`async` 启动（不是 `async fn` 染色）、`chan[T]` 的 `send`/`recv`、`select`、`yield`。
+- 有栈协程、多对多调度、抢占、`async` 启动（不是 `async fn` 染色）、`chan[T]` 的 `send`/`recv`、`select`、`yield`。
 - 闭包：用户无捕获列表；语义共享+GC 延命；能证伪逃逸则栈/拷贝。
 - 溢出：debug 检查 / release 环绕；下标默认检查，可证明则删。
 - Windows：PE 导入薄 kernel32/ntdll，不扫 syscall 号。默认不链 CRT。
@@ -29,5 +29,5 @@
 - 抢占与 GC 必须共享 safepoint，否则无法同时做到百万协程与并发回收。
 - 特化在闭世界做全局部分序；交叉重叠是硬错误。
 - `println` 走异构参数包单态化，不能写成单一 `&[T]`。
-- panic 只展开当前 G；不做 Go `recover`。恢复靠 `Join.wait() Result[T, Panic]` 与 `std.panic.catch`。
-- `main` 正常返回则等待其余用户 G；`main` panic 或 `process.exit` 则立刻终止进程。
+- panic 只展开当前协程；不做 Go `recover`。恢复靠 `Join.wait() Result[T, Panic]` 与 `std.panic.catch`。
+- `main` 正常返回则等待其余用户协程；`main` panic 或 `process.exit` 则立刻终止进程。

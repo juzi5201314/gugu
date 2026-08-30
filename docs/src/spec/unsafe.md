@@ -164,8 +164,10 @@ extern "C" fn nt_close(h: *byte) i32
 - ABI 字符串目前必须是 `"C"`。其它字符串是编译错误。
 - 无函数体的 `extern` 是导入：库名与符号必须在编译配置里显式登记。编译器自己把导入写进镜像（Windows IAT；Linux 动态导入表或内建桩）。禁止靠系统 `ld` 事后扫一堆 `.o` 来解析。
 - 有函数体的 `pub extern "C" fn` 是导出。可用 `#[export_name]` 改符号。
-- Linux System V AMD64，Windows x64。C 字符串用 `*byte` 或 `c"..."`；与 `string` 显式转换。交给 C 的 GC 对象必须 pin 或先拷到非移动缓冲。
+- Linux System V AMD64，Windows x64。C 字符串用 `*byte` 或 `c"..."`；与 `string` 显式转换。交给外部代码的 GC 对象必须 `std.mem.pin` 或先拷到非移动缓冲。
 - `i128` / `u128` 在 `extern "C"` 里：Linux 按 `__int128`；Windows 禁止，见 [类型](types.md)。
 - `TypeId`、`dyn Trait`、句柄类型不能出现在 `extern "C"` 签名里。
 - `!` 可作为 `extern "C"` 的返回类型（C 的 `_Noreturn` / `noreturn`）。
-- 导出给 C 的函数若发生 panic：必须在导出边界用 `std.panic.catch`，否则 runtime **abort 进程**，禁止把 Gugu 展开推进 C 帧。
+- 导出函数若发生 panic：必须在导出边界用 `std.panic.catch`，否则 runtime **abort 进程**，禁止把 Gugu 展开推进外部帧。
+- **调出：** 导入的外部函数一律视为可能阻塞。调用前让出逻辑处理器，返回后再拿回（与系统调用同一条路）。
+- **调入：** 若当前操作系统线程还不是运行时的工作线程，临时把它登记为工作线程并配逻辑处理器，导出函数返回后拆掉。已经在跑 Gugu 的线程直接进，不再套一层。
