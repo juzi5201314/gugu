@@ -68,13 +68,15 @@ pub fn bar() string = "bar"
 |------|--------|
 | `os = "linux"` / `os = "windows"` | 目标 OS |
 | `arch = "x86_64"` | 目标架构 |
-| `debug` | debug 构建（溢出检查、较密 safepoint 诊断） |
-| `test` | 测试构建，见 [测试](testing.md) |
+| `feature = "name"` | 当前 package 在本解析域启用了 feature，见[包、依赖与构建模型](packages-builds.md) |
+| `test` | test target/harness，见[测试](testing.md) |
+| `bench` | bench target/harness |
+| build.gg 注册的 `name` / `name = "value"` | 当前 package 的 build 输出包含该自定义 cfg |
 | `not(P)` | P 为假 |
 | `all(P, Q, ...)` | 全部为真 |
 | `any(P, Q, ...)` | 至少一个为真 |
 
-未知谓词是编译错误。模块级 `#![cfg(...)]` 使整个文件在该目标上不存在。
+未知谓词、未定义 feature 或未由 build.gg 注册的自定义 cfg 是编译错误。模块级 `#![cfg(...)]` 使整个文件在该 target 上不存在。语言没有 `cfg(debug)`、`cfg(release)`、`cfg(strip)`、`cfg(race)` 或 `cfg(coverage)`。
 
 ### 诊断
 
@@ -225,10 +227,11 @@ pub fn bar() string = "bar"
 | `must_use` | 函数、方法、结构体、newtype、枚举 |
 | `allow`、`warn`、`deny`、`forbid` | 模块、声明、表达式 |
 | `test`、`should_panic`、`ignore` | 具名函数；`should_panic`/`ignore` 必须同时有 `test` |
+| `bench` | 具名函数；只由内建 benchmark harness 收集 |
 | `coroutine_local`、`os_thread_local` | `static`，且二者互斥 |
 | `export_name`、`link_name`、`link_section`、`used`、`naked` | [unsafe 与 intrinsic](unsafe.md)规定的函数、static 或汇编项 |
 
-同一属性重复出现必须语义一致；重复但参数不同、互斥 repr、两个存储属性、`inline` 与 `cold` 同时出现、`test` 与 `extern`/`naked`/`unsafe fn` 冲突，都是编译错误。`cfg` 可以重复，效果是所有谓词的逻辑与；lint 属性按从外到内的作用域覆盖规则合并。
+同一属性重复出现必须语义一致；重复但参数不同、互斥 repr、两个存储属性、`inline` 与 `cold` 同时出现、`test` 与 `bench` 同时出现，或 test/bench 与 `extern`/`naked`/`unsafe fn` 冲突，都是编译错误。`cfg` 可以重复，效果是所有谓词的逻辑与；lint 属性按从外到内的作用域覆盖规则合并。
 
 `cfg(false)` 的节点在解析后、名称解析前删除。它只允许附着于删除后语法仍完整的序列成员；不能删除调用目标、赋值右侧、函数唯一返回类型或其它单一必需表达式。被删除节点的名称、类型和属性参数不再检查，但其外层记号必须已经能成功解析。
 

@@ -4,11 +4,11 @@
 
 一个 `.gg` 文件是一个模块，模块名是去掉 `.gg` 的文件名。
 
-点分路径对应目录：`std.io` → `std/io.gg`，若存在目录 `std/io/` 则入口文件是 `std/io/mod.gg`。文件系统就是模块树，不另写 `mod foo;`。同一路径上 `foo.gg` 与 `foo/mod.gg` 同时存在是编译错误。
+点分路径对应 target 源码根下的目录：`foo.io` → `foo/io.gg`，若存在目录 `foo/io/` 则入口文件是 `foo/io/mod.gg`。文件系统就是模块树，不另写 `mod foo;`。同一路径上 `foo.gg` 与 `foo/mod.gg` 同时存在是编译错误。
 
-一个目录是一个**包**（分发与可见性组）。`pub` 跨模块可见；包级私有不另设第三档，直到有明确的 `pub(package)` 需求。
+一个由 `gugu.toml` 描述的目录是 **package 根**；package 可以有多个 target，每个 target 有独立入口和源码根，见[包、依赖与构建模型](packages-builds.md)。`pub` 跨当前 target 的模块可见，并可作为 lib 的 package API；不另设 `pub(package)`。
 
-**编译入口**由编译器命令行指定一个源文件（常规是项目里的 `main.gg`）。从该文件所在的模块树收集可达代码。`std` 是编译器提供的包，用户源树里禁止再定义名为 `std` 的包。测试模式仍以该入口为根收集 `#[test]`，不调用用户 `main`，见 [测试](testing.md)。
+项目工具从清单选择 target 入口，再由底层编译器从该入口收集闭世界。外部 package 只通过清单中的直接依赖别名进入 `use` 路径；传递依赖不可见。`std` 是编译器提供的保留 package，用户清单、依赖别名和源树都不能定义 `std`。测试 target 不调用用户 main，见[测试](testing.md)。
 
 模块顶层只允许：`use`、`fn`、`struct`、`enum`、`union`、`trait`、`impl`、`const`、`type`、`static`、`extern`、`global_asm` 声明。禁止模块级 `let`。具名 `fn` 不能写在函数体里（嵌套可调用物用闭包）。
 
@@ -176,4 +176,4 @@ Shape::Rect { w: 1, h: 2 }
 
 普通 `static` 的 comptime 初始化按无环依赖求值；`const`/`static` 初始化形成循环是编译错误。`#[coroutine_local] static` 和 `#[os_thread_local] static` 不参与该编译期初始化图，而在首次访问时按[内存](memory.md)和[运行时](runtime.md)的规则初始化。
 
-模块文件不存在、同一路径的 `foo.gg` 与 `foo/mod.gg` 同时存在、入口不属于当前包树，或用户声明保留包名 `std`，都是编译错误。
+模块文件不存在、同一路径的 `foo.gg` 与 `foo/mod.gg` 同时存在、入口不属于所选 target 源码根，或用户声明保留 package/别名 `std`，都是编译错误。

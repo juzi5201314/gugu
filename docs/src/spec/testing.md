@@ -88,3 +88,31 @@ fn inc(i: int) int = i + 1
 `#[should_panic]` 只匹配测试顶层协程逃出的 panic；被 `std.panic.catch` 或 `Join.wait()` 处理的 panic不算。`eq` 只比较 `Panic.message` 的 UTF-8 内容，不比较位置。`#[ignore]` 与 `#[should_panic]` 可以同时出现，显式执行 ignored 测试时仍检查 panic 条件。
 
 失败报告至少包含测试身份、失败类别、主源位置和可用的 `Panic`/`Print` 内容。测试进程最终退出码：所有实际执行的测试成功为 0，只要一个失败或运行器自身初始化失败即非 0；忽略和零匹配不算失败。
+
+## Benchmark Harness
+
+默认 bench target 在 `cfg(bench)` 为真时收集 `#[bench]` 函数；其它 target 中这些项不存在。函数签名必须恰好为：
+
+```text
+#[bench]
+fn name(b: &std.test.Bencher)
+```
+
+benchmark 不能同时标记 `test`、`should_panic` 或 `ignore`，不能是 generic、unsafe、extern 或闭包。每个 benchmark 有独立 panic 边界；panic、未处理的子协程 panic、未执行测量或执行多个顶层测量都会使该 benchmark 失败。
+
+最低 API 为：
+
+```text
+struct Bencher
+
+fn iter[F: Fn()](self: &Self, f: F)
+fn iter_batched[T, S: Fn() T, F: Fn(T)](self: &Self, setup: S, f: F)
+fn bytes(self: &Self, n: int)
+fn black_box[T](value: T) T
+```
+
+`iter` 在预热后自适应选择每个样本的迭代次数；只统计 `f` 的执行。`iter_batched` 在每次测量外调用 setup，并只统计使用新值的 `f`，避免准备过程污染结果。`bytes(n)` 设置每次迭代处理的非负字节数，用于报告吞吐；重复设置覆盖前值。`black_box` 阻止编译器基于值内容删除或常量折叠穿过该点，但不是内存 fence 或同步原语。
+
+运行器至少报告 benchmark 身份、样本数、每样本迭代数、中位数纳秒/迭代以及最小/最大样本。预热时长、样本数和统计扩展可以由工具选择并通过命令行覆盖；这些测量值不是语言确定性的一部分。Benchmark 默认串行执行，只有显式并行选项才能并发，以避免普通命令引入竞争噪声。
+
+`gugu bench` 只缓存编译结果，不缓存或复用历史测量。`harness = false` 的 bench 按普通 main 可执行程序构建和运行，仍处于 `cfg(bench)` 并可以使用 test-dependencies；其中出现 `#[bench]` 是编译错误。
