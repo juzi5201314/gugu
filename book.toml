@@ -1,0 +1,7 @@
+[book]
+title = "Gugu"
+language = "zh"
+src = "docs/src"
+
+[build]
+build-dir = "target/book"
