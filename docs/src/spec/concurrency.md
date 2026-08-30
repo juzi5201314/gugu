@@ -82,3 +82,89 @@ impl Lazy[T] {
 ## 内存序与数据竞争
 
 多个协程可以同时跑在多个操作系统线程上。数据竞争是未定义行为。类型系统**不**静态禁止把 `&T` 送进另一个协程（没有 `Send`/`Sync` 约束）：GC 延命解决的是寿命，不是互斥。跨协程共享可变状态是程序员义务，必须走 `chan`、`std.sync`、原子、或只读共享。编译器可以提供竞态检测器构建，但不保证检出全部数据竞争。
+
+## channel 的线性化与公平
+
+每个 `send`、`recv`、`try_send`、`try_recv` 和 `close` 都有一个单一线性化点。阻塞操作在抵达该点前可以挂起当前协程，但不会占用操作系统线程；恢复后操作要么完成，要么按已关闭/无容量的结果返回。`send` 与 `close` 竞态按线性化先后决定：先完成的发送进入缓冲或与接收会合，先完成的关闭使后续发送 panic。关闭不会丢弃在线性化前已完成的缓冲消息。
+
+关闭后的 `recv` 先收完所有已经线性化的缓冲消息，再永久返回 `Err(ChanClosed)`；关闭后的 `try_recv` 立即返回 `Err(TryRecvErr::Closed)`。未关闭且暂时无消息时，`try_recv` 立即返回 `Err(TryRecvErr::Empty)`，绝不等待。无缓冲 `try_send` 只有已有接收者在同一线性化点等待时才成功，否则立即返回 `Err(TrySendErr::Full)`。
+
+`close` 之前的写入与观察到永久关闭结果的 `recv` / `try_recv` 建立 happens-before。父协程在创建 `async` 子协程前完成的写入对该子协程开始执行可见；子协程完成前的写入在 `Join.wait()` 返回后对等待者可见。仅创建 Join 或轮询未完成状态不建立反向同步。
+
+`select` 对就绪分支进行一次原子提交。存在就绪分支时 default 永不获选；不存在就绪分支时才选择 default 或挂起。多个就绪分支的选择是随机的，并满足弱公平：持续保持就绪的分支不能被调度器永久排除。随机种子、具体轮询算法和不同操作系统线程上的执行顺序不是语言可观察保证。
+
+## 内存序与同步 API
+
+`std.sync.Ordering` 至少包含 `Relaxed`、`Acquire`、`Release`、`AcqRel`、`SeqCst`。原子操作只允许无 GC 引用的 `bool`、整数或指针宽度的精确整数类型；不能对 `string`、句柄、含引用结构体或浮点做原子读改写。
+
+```text
+enum Ordering { Relaxed, Acquire, Release, AcqRel, SeqCst }
+
+struct Atomic[T]
+fn new[T](value: T) Atomic[T]
+fn load[T](self: &Atomic[T], order: Ordering) T
+fn store[T](self: &Atomic[T], value: T, order: Ordering)
+fn swap[T](self: &Atomic[T], value: T, order: Ordering) T
+fn compare_exchange[T](self: &Atomic[T], expected: T, desired: T,
+                       success: Ordering, failure: Ordering) Result[(), T]
+fn fence(order: Ordering)
+```
+
+`load` 只接受 `Relaxed`、`Acquire`、`SeqCst`；`store` 只接受 `Relaxed`、`Release`、`SeqCst`；读改写操作接受 `Relaxed`、`Acquire`、`Release`、`AcqRel`、`SeqCst`。CAS 失败序不能是 `Release`/`AcqRel`，且不能强于成功序；违规是编译错误。成功返回 `Ok(())`，失败返回当时的实际值 `Err(actual)`，不会自动重试。`Acquire` 读与对应 `Release` 写建立同步；`SeqCst` 原子操作还参加全局单一顺序；`Relaxed` 只有原子性，不建立非原子数据的可见性关系。
+
+最低锁接口由标准库提供：`Mutex[T]` 提供 `new`、`lock`、`get`、`unlock` 与 `with_lock`；`RwLock[T]` 提供对应的读锁/写锁和 `with_read` / `with_write`；`Condvar` 提供 `wait`、`notify_one`、`notify_all`。锁操作阻塞时只挂起当前协程。锁的成功解锁与随后成功加锁建立 happens-before；`Condvar.wait` 原子地释放关联锁、挂起并在返回前重新取得锁。唤醒可以是虚假的，调用者必须循环检查条件。
+
+```text
+struct Mutex[T]
+struct MutexGuard[T]
+impl Mutex[T] {
+    fn new(value: T) Mutex[T]
+    fn lock(self: &Self) MutexGuard[T]
+    fn with_lock[R, F: Fn(&T) R](self: &Self, f: F) R
+}
+impl MutexGuard[T] {
+    fn get(self: &Self) &T
+    fn unlock(self: &Self)
+}
+
+struct RwLock[T]
+struct RwReadGuard[T]
+struct RwWriteGuard[T]
+impl RwLock[T] {
+    fn new(value: T) RwLock[T]
+    fn read(self: &Self) RwReadGuard[T]
+    fn write(self: &Self) RwWriteGuard[T]
+    fn with_read[R, F: Fn(T) R](self: &Self, f: F) R
+    fn with_write[R, F: Fn(&T) R](self: &Self, f: F) R
+}
+impl RwReadGuard[T] {
+    fn snapshot(self: &Self) T
+    fn unlock(self: &Self)
+}
+impl RwWriteGuard[T] {
+    fn get(self: &Self) &T
+    fn unlock(self: &Self)
+}
+
+struct Condvar
+impl Condvar {
+    fn new() Condvar
+    fn wait[T](self: &Self, guard: &MutexGuard[T])
+    fn notify_one(self: &Self)
+    fn notify_all(self: &Self)
+}
+```
+
+Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的 `&T`；`snapshot()` 和 `with_read` 只浅拷当前值。若 `T` 含可变句柄，调用者仍须保证不会绕过锁并发写其载荷。每个守卫是共享状态句柄，浅拷守卫仍代表同一次加锁；第一次 `unlock` 释放锁，任何副本再次 `unlock` 都 panic，解锁后再 `get` / `snapshot` / `wait` 也是 panic。
+
+`Atomic::new`、`Mutex::new`、`RwLock::new`、`Condvar::new` 都是 comptime 可求值构造，可用于普通 `static` 初始化。标准库为 `MutexGuard`、`RwReadGuard`、`RwWriteGuard` 提供否定 `Clone` impl；这禁止深拷，但不改变语言按值传递时复制守卫句柄的规则。
+
+守卫 `get` 得到的 `&T` 只允许在对应守卫仍处于已加锁状态时用于同步访问；`unlock` 后继续通过该引用读写属于未同步访问，若与其它访问形成竞争即未定义行为。`Condvar.wait` 释放锁期间不能使用先前取得的引用，返回并重新加锁后可重新获取。锁不提供 poisoning：受保护操作 panic 时 `with_*` 释放锁，但不标记数据是否满足应用不变量。
+
+Mutex 不可重入；同一协程持有守卫时再次 `lock` 会像其它竞争者一样等待，可能造成永久阻塞。标准锁实现必须满足弱公平，持续等待且锁反复可用的协程不能被永久排除。RwLock 不提供隐式读写升级或降级；要切换模式必须先解锁再重新加锁。
+
+
+
+锁守卫不可 Clone，不能跨所属锁使用；`with_lock` / `with_read` / `with_write` 在闭包正常返回或 panic 展开时都释放锁。显式 `lock` 得到的守卫必须显式 `unlock`；忘记解锁会使后续请求永久等待，但不是隐式析构或可捕获异常。锁和原子保证同步，不会替程序员把普通 `&T` 的并发写变成安全操作。
+
+任何没有原子、channel、锁、条件变量或其它明确 happens-before 的并发读写，只要至少一方写入同一内存位置，就是数据竞争和未定义行为。GC 延长寿命不改变该规则。

@@ -5,8 +5,8 @@
 # 语言规范
 
 - [概述与目标](spec/overview.md)
-- [程序与编译模型](spec/program-model.md)
 - [词法结构](spec/lexical.md)
+- [形式语法](spec/syntax.md)
 - [类型系统](spec/types.md)
 - [声明与模块](spec/declarations.md)
 - [表达式与语句](spec/expressions.md)

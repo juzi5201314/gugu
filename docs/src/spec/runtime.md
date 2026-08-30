@@ -145,4 +145,18 @@ OS 加载镜像
 
 ## 标准库
 
-`std` 与 runtime 同一闭世界。`print` / `println` 是参数包 + `Print` trait 的普通函数，最终走 syscall / `WriteFile`。`std.process.exit`（`fn exit(code: int) !`）、`std.panic.catch`、`std.src`、`std.mem.MaybeUninit`、`std.mem.Arena`、`std.mem.pin`、`std.sync.OnceLock` / `Lazy`、`std.test.assert` 必须存在，语义按本章、[并发](concurrency.md)、[内存](memory.md)、[测试](testing.md) 与 [unsafe](unsafe.md)。
+`std` 与 runtime 同一闭世界。`print` / `println` 是参数包 + `Print` trait 的普通函数，最终走 syscall / `WriteFile`。`std.process.exit`、`std.panic.catch`、`std.src`、`std.mem.MaybeUninit`、`std.mem.LocalArena`、`std.mem.SyncArena`、`std.mem.pin`、`std.sync.Atomic` / `Mutex` / `RwLock` / `Condvar` / `OnceLock` / `Lazy`、`std.test.assert` 必须存在，语义按本章、[并发](concurrency.md)、[内存](memory.md)、[测试](testing.md)与[unsafe](unsafe.md)。
+
+## Join 完成与自然退出
+
+每个子协程只有一个完成记录：正常返回时保存 `Ok(T)` 的浅拷表示，panic 展开完成时保存 `Err(Panic)`。任意 `Join.wait()` 都读取该记录；第一次成功读取 `Err` 即把 panic 标记为已处理，之后重复读取仍返回同一错误表示，不重复打印或改变退出码。没有任何 wait 读取错误且句柄已分离时，该 panic 才按未处理规则报告。
+
+主协程正常返回后，runtime 等待所有仍存活的用户协程，包括已经分离和被测试创建的后代。若这些协程因 channel、锁、`select {}` 或外部调用永久阻塞，进程也永久等待；规范不隐式检测死锁或强制取消。`std.process.exit` 和主协程 panic 仍按前文立即终止。
+
+panic 展开时先保存 `Panic`，再按内层块到函数边界执行 block defer 和 `defer ret`；完成记录只在线程栈展开结束后发布。`std.panic.catch` 和 Join 观察到的 `Panic.location` 始终是原始 panic 调用点，不是捕获点或等待点。
+
+## 局部静态初始化
+
+`#[coroutine_local]` 槽由每个协程独立维护，第一次访问时在该协程上执行初始化；初始化成功后发布到该协程，panic 时槽保持未初始化，下一次访问可以重新尝试。`#[os_thread_local]` 对每个操作系统线程使用相同规则。初始化重入同一槽立即 panic，不等待自身。
+
+协程结束后其 coroutine-local 槽与其它根一起失去可达性；语言没有 Drop，不自动执行用户收尾。操作系统工作线程退出时 os-thread-local 槽同理。需要确定收尾必须由 `defer` 显式完成。

@@ -24,7 +24,7 @@
 
 1. 寄存器 / 栈槽（标量、不逃逸的小聚合、ZST）
 2. 栈上的不逃逸聚合与闭包环境（逃逸分析）
-3. arena / 区域：成批分配、成批释放，任何线程在所有权规则允许时都可以 `reset`/`destroy`
+3. `LocalArena` / `SyncArena`：成批分配、成批释放；二者的并发边界见本章。
 4. GC 堆：不规则寿命、图结构、跨协程共享
 
 禁止把 1–3 默认降成 4。
@@ -48,14 +48,14 @@
 | 标记 | 并发、多线程。mutator 与 collector 同时跑。 |
 | 回收 | 并发 sweep / 回收空 block；空页可以还回 OS。 |
 | 屏障 | **写屏障**是 IR 原语（分代 + 并发标记需要）。热路径的**读**是普通 load，**不上读屏障**。 |
-| 根 | 所有可运行与挂起的协程栈、寄存器、全局、`#[coroutine_local]` 槽、当前操作系统线程的 `#[os_thread_local]`、channel 缓冲、TLAB、未 `reset` 的 `Arena`。 |
+| 根 | 所有可运行与挂起的协程栈、寄存器、全局、`#[coroutine_local]` 槽、当前操作系统线程的 `#[os_thread_local]`、channel 缓冲、TLAB，以及仍可从这些根到达且未 `destroy` 的 `LocalArena` / `SyncArena` 区域。 |
 | 握手 | 与抢占共用 safepoint。正在跑的协程到达 safepoint 后才扫描其寄存器；阻塞的协程栈已经冻结。 |
 
 不采用 ZGC/Shenandoah 那种**每条引用读都加 load barrier / 着色指针**作为默认：它把暂停压到亚毫秒，但会把「接近 C++」的指针追逐打出可见缺口。本语言的暂停目标靠年轻代短、并发标记老年代、以及少分配来达成，而不是靠给每次 load 加税。
 
 不采用纯引用计数：原子 RC 在多核上贵，循环仍要追踪。
 
-用户代码在安全子集里不调用 `free`。跨线程「释放」指 collector 并发回收，以及 arena 的显式 `reset`。
+用户代码在安全子集里不调用 `free`。跨线程「释放」指 collector 并发回收，以及区域的显式 `reset` / `destroy`。
 
 ## 写屏障与移动
 
@@ -63,29 +63,50 @@
 - 年轻代拷贝与 Immix evacuate 会移动对象。栈与寄存器里的指针在 safepoint 更新。
 - FFI：把引用交给外部函数之前必须 `pin`（禁止移动）或拷贝到非移动缓冲。`#[repr(C)]` 结构体默认不作为可移动 GC 对象的载荷直传。
 
-## Arena 与 pin
+## LocalArena、SyncArena 与 pin
 
-`std.mem.Arena` 是 lang item（编译器按名字挂钩，见 [概述 · 术语](overview.md#术语)），句柄。区域内 bump 分配，成批释放：
+`std.mem.LocalArena` 与 `std.mem.SyncArena` 是两个不同的 lang item 句柄；不存在未区分二者的 `std.mem.Arena`。二者都把元素按值浅拷进区域，并返回指向区域槽的 `&T`。只要区域句柄仍可达且未 `destroy`，区域槽就按 `T` 的 GC 描述符扫描；句柄不可达后区域可由 GC 回收。
 
+`LocalArena` 在创建它的协程中确定唯一所有者。句柄值可以在该协程内复制；其它协程即使与所有者不并发，也不能调用它的 `alloc`、`reset` 或 `destroy`。区域内元素的只读引用可以传递给其它协程，但所有者在这些引用可能被使用期间不得 reset/destroy，且任何并发写入都必须使用同步原语。违反这些约束是未定义行为。
+
+```text
+struct LocalArena
+
+fn new() LocalArena
+fn with_capacity(n: int) LocalArena
+fn alloc[T](self: &Self, v: T) &T
+unsafe fn reset(self: &Self)
+unsafe fn destroy(self: &Self)
 ```
-struct Arena
 
-fn new() Arena
-fn with_capacity(n: int) Arena
-fn alloc[T](self, v: T) &T
-unsafe fn reset(self)
-unsafe fn destroy(self)
+`SyncArena` 的分配状态可由多个协程和操作系统线程共享；`alloc` 内部同步，返回的引用在 `reset` / `destroy` 前保持有效。`reset` 与 `destroy` 仍是 `unsafe`，调用者必须保证没有并发的 `alloc`、没有正在访问的区域槽，并且之后不再使用被返回的任何 `&T` 或该区域句柄。二者完成后，区域可以重新 `alloc`（`destroy` 除外）；`destroy` 后句柄与旧引用均不可使用。`with_capacity` 的 `n < 0` 在 comptime 是编译错误，运行时 panic。
+
+```text
+struct SyncArena
+
+fn new() SyncArena
+fn with_capacity(n: int) SyncArena
+fn alloc[T](self: &Self, v: T) &T
+unsafe fn reset(self: &Self)
+unsafe fn destroy(self: &Self)
 ```
 
-`with_capacity` 的参数 `n < 0`：comptime 是编译错误，运行时 panic。`alloc` 把 `v` 浅拷进区域，返回指向该槽的 `&T`。区域里的值仍按 `T` 的描述符扫描。`reset` / `destroy` 之后仍使用先前的 `&T` 是未定义行为。
+两种区域都不提供隐式析构、自动 reset 或自动 destroy；将句柄丢弃只使区域成为不可达对象，最终由 GC 回收其区域元数据。`alloc` 只浅拷贝 `v`，不要求 `T: Clone`；区域的批量释放不会运行用户析构函数，因为语言没有 `Drop`。
 
-`std.mem.pin`：
+`std.mem.pin` 用于 GC 移动对象与 FFI：
 
-```
+```text
 fn pin[T, R, F: Fn() R](p: &T, f: F) R
 ```
 
-`f` 执行期间 `*p` 不会被移动。`f` 因 panic 展开时仍先取消固定。把引用交给外部函数之前必须 `pin` 或拷到非移动缓冲。
+`f` 执行期间 `*p` 不会被移动；pin 可以嵌套，固定计数在最外层调用返回或 panic 展开清理完毕后解除。`f` 只能通过传入的槽或闭包捕获访问 `p`；把 `p` 交给外部函数必须在 pin 期间完成，或先拷贝到非移动缓冲。`pin` 不改变引用的类型，也不使 `reset` / `destroy` 后的区域引用重新有效。
+
+## 引用有效性与初始化
+
+安全引用 `&T` 必须始终非空、对齐、指向仍存活且已初始化的 `T` 槽。栈槽在引用逃逸时升到 GC 堆，GC 移动对象时更新所有安全引用；因此安全代码不观察地址变化。原始指针不享有此保证，见[unsafe 与 intrinsic](unsafe.md)。
+
+每个类型字段、数组元素和被读取的绑定都必须已经写入有效位模式；读取未初始化值是编译错误，除非本规范明确允许的纯 ZST 例外。写入一个已初始化的堆字段必须经过写屏障；写入 `MaybeUninit` 或位 union 不以该字段的静态类型作为活引用根。
+
 
 ## 逃逸与闭包
 

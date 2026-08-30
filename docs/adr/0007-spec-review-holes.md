@@ -17,6 +17,7 @@
 ### 语言条款
 
 - 计数一律 `int`：`len` / `cap` / 下标 / `Range` / `size_of` / `align_of` / `offset_of` / `type_id_count` / `TypeId.as_int`。`0..xs.len()` 合法。
+- `type_id_count()` 只在具体类型集合冻结后求值，禁止参与数组长度、泛型实参、布局与可达性，避免类型集合对自身计数产生循环。
 - `[]` 参数表可混写类型参数与 `comptime` 参数，适用于 `fn` / `struct` / `enum` / `union` / `trait` / `impl` / `type`。语言为数组与元组生成 `Clone` / `Eq` / `Ord` / `Print`（元素满足约束时）。
 - `#[coroutine_local]` / `#[os_thread_local]` 的初始化在**第一次访问时运行时求值**（可分配）。同一槽重入初始化则 panic。普通 `static` / `const` 仍必须 comptime。
 - 固有 `impl` 只能写在类型的定义模块（语言类型由标准库 / 编译器）。其它模块加方法只能写 trait。
@@ -27,7 +28,7 @@
 - `derive` 允许 `Print`。`Print` 接收者是 `&Self`。`Option` / `Result` / `Vec` / 数组 / 元组必须有 `Print` / `Eq` / `Clone`（`Ord` 在元素都 `Ord` 时）。
 - 字段访问与 `match` 自动解 `&`，和方法一致。
 - `main` 返回 `()` 或 `Result[(), E]`（`E: Print`）。整数变窄：debug panic，release 按目标位宽截断。
-- `panic` 只接 `string`。`std.mem.Arena` 与 `std.mem.pin` 是必须存在的 lang item。
+- `panic` 只接 `string`。`std.mem.LocalArena`、`std.mem.SyncArena` 与 `std.mem.pin` 是必须存在的 lang item；不保留未区分并发模型的 `std.mem.Arena`。
 
 ## 后果
 

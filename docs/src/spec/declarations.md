@@ -150,7 +150,7 @@ static COUNTER: int = 0
 
 `Option` `Result` `Some` `None` `Ok` `Err` `Vec` `Range` `Join` `ChanClosed` `TrySendErr` `TryRecvErr` `Panic` `panic` `Print` `Clone` `Eq` `Ord` `Iter` `IntoIter` `Index` `Try` `Fn` `Any` `TypeId`
 
-`size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count` 是关键字，不必 `use`，写法见 [类型](types.md)。`print` / `println` 仍在 `std.io`。`MaybeUninit`、`transmute`、`embed_file` 在 `std.mem`；`ptr_read` / `ptr_write`、`volatile_load` / `volatile_store` 在 `std.ptr`；`unreachable` 在 `std.hint`（见 [unsafe](unsafe.md) 与 [编译期执行](comptime.md)）。`std.src.file` / `line` / `column` / `caller` 见 [词法 · track_caller](lexical.md)。其它标准库类型按模块路径导入。编译器把上表里的 trait 当 lang item（按名字挂钩的标准库项，见 [概述 · 术语](overview.md#术语)）：插值、`for`、`?`、`==`、`[]`（用户类型）、`dyn Any` 必须解析到这些定义，用户不能在自己的模块里再声明同名预导入项。`TypeId` 不能由用户再定义。`Any` 的 impl 由编译器生成，见 [类型 · TypeId](types.md)。
+`size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count` 是关键字，不必 `use`，写法见 [类型](types.md)。`print` / `println` 仍在 `std.io`。`MaybeUninit`、`LocalArena`、`SyncArena`、`transmute`、`embed_file` 在 `std.mem`；`addr_of`、`ptr_read` / `ptr_write`、`read_unaligned` / `write_unaligned`、`volatile_load` / `volatile_store` 在 `std.ptr`；`unreachable` 在 `std.hint`（见 [unsafe](unsafe.md) 与 [编译期执行](comptime.md)）。`std.src.file` / `line` / `column` / `caller` 见 [词法 · track_caller](lexical.md)。其它标准库类型按模块路径导入。编译器把上表里的 trait 当 lang item（按名字挂钩的标准库项，见 [概述 · 术语](overview.md#术语)）：插值、`for`、`?`、`==`、`[]`（用户类型）、`dyn Any` 必须解析到这些定义，用户不能在自己的模块里再声明同名预导入项。`TypeId` 不能由用户再定义。`Any` 的 impl 由编译器生成，见 [类型 · TypeId](types.md)。
 
 ## 结构体与枚举的值
 
@@ -166,3 +166,14 @@ Shape::Rect { w: 1, h: 2 }
 
 结构体字面量必须写字段名（禁止只按位置的 `Point(1, 2)`，以免和函数调用、元组式枚举变体混淆）。**单字段**元组结构体除外：`Meters(3)` 与元组变体同一形状。元组式变体用 `名字(值)`。结构体式变体用 `名字 { 字段: 值 }`。无字段结构体的值写成 `Empty {}`，也可以只写类型名 `Empty`（与 `None` 那种零元构造同一观感）。禁止 `Point { x: 1, ..p }` 这种结构体更新；要改副本就逐字段写，或 `clone` 再赋值。模式里的 `Point { x, .. }` 合法，见 [模式](patterns.md)。
 
+## 名称解析与初始化顺序
+
+编译器先为每个模块建立声明表，再解析 `use` 和声明体；同一模块中声明的先后顺序不影响类型、函数、trait、impl、`const` 和 `static` 的名称可见性，但同一命名空间内重复声明同名项是编译错误。值绑定按执行顺序建立，后声明的局部绑定可以遮蔽前一个绑定，但不能回溯使用尚未初始化的槽。
+
+类型名、值名、模块名和构造器名分别解析；同名不自动在不同命名空间之间转换。枚举构造器在其枚举可见的范围内可用，省略限定路径时必须能唯一确定。字段名只在已知结构体/元组类型上解析，方法名只在接收者类型的固有 impl 或满足约束的 trait impl 中解析。
+
+`use` 只建立别名或导入，不复制声明、不执行初始化、不改变原项的可见性。导入的最终目标必须存在且对当前模块可见；别名冲突、循环导入、模块路径大小写不一致和把私有项跨模块导入都是编译错误。`pub use` 只能再导出当前模块有权访问的项。
+
+普通 `static` 的 comptime 初始化按无环依赖求值；`const`/`static` 初始化形成循环是编译错误。`#[coroutine_local] static` 和 `#[os_thread_local] static` 不参与该编译期初始化图，而在首次访问时按[内存](memory.md)和[运行时](runtime.md)的规则初始化。
+
+模块文件不存在、同一路径的 `foo.gg` 与 `foo/mod.gg` 同时存在、入口不属于当前包树，或用户声明保留包名 `std`，都是编译错误。

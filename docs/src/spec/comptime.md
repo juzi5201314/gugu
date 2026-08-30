@@ -6,7 +6,7 @@ Gugu 有 Zig 式的 **comptime**：语言的一个子集可以在编译期跑，
 
 - 泛型实参、`comptime` 参数、`const`、关联常量、数组长度都在编译期已知。`const` 项与关联常量必须能在编译期求值。
 - 可以根据 comptime 条件丢掉死分支、决定 `[T; n]` 的 `N`。按目标删除整项用 `#[cfg]`，不是 comptime：被裁侧不必类型检查。
-- `size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count`、`std.src.file` / `line` / `column` 必须 comptime 可求值。`type_id[T]().name()` 在 `T` 已知时也是。
+- `size_of` / `align_of` / `offset_of` / `type_id`、`std.src.file` / `line` / `column` 必须在相应类型已知时 comptime 可求值。`type_id_count()` 只在闭世界具体类型集合冻结后可求值，且不能参与类型形成。`type_id[T]().name()` 在 `T` 已知时也是 comptime。
 - 禁止把类型当成一等 comptime 值传递：没有 `fn Foo(comptime T: type) type`，对类型抽象只用 `[T]`。禁止在 comptime 里给 `struct` 动态加字段。
 - 单态化、特化选择、内联候选，都可以消费 comptime 已知信息。
 - 编译期可以 panic，效果是编译错误。comptime 里 `panic(...)` 的类型仍是 `!`。
@@ -57,3 +57,15 @@ fn embed_file(comptime path: string) [byte; N]
 - 无限循环在 comptime 必须被燃料限制打断并报错（即使该 `loop` 的类型是 `!`）。
 - 整数在 comptime **溢出是编译错误**，不环绕。
 - `std.src.file` / `line` / `column` 取该调用点在编译中的源位置，必须 comptime 已知。
+
+## 求值环境与阶段边界
+
+comptime 使用与运行时相同的表达式、类型、浅拷、模式、defer 和 panic 语义，但只允许确定性且可在编译宿主中安全模拟的子集。读取未初始化值、越界、除零、无效转换、显式 panic 或违反 unsafe 前置条件都转成带源范围的编译错误；comptime 不产生可被目标程序捕获的 `Panic` 值。
+
+允许的状态只存在于本次 comptime 求值：局部槽、comptime 堆、常量依赖和显式 `embed_file` 输入。禁止读取宿主时间、随机数、环境变量、网络、目标进程 I/O、操作系统线程状态、FFI、内联汇编、原子、锁、channel、`async`、`yield`、`wait` 或 syscall。标准库函数只有其实现本身完全落在该子集内时才能在 comptime 调用。
+
+`cfg` 先删除不存在的项；余下源码全部名称解析和类型检查。普通 `if comptime_condition` 的未选分支仍必须语法与类型正确，只是不执行。`comptime expr` 强制立即求值并把结果物化为常量；不能物化原始宿主指针、运行时句柄、打开的外部资源或指向 comptime 堆的悬空引用。
+
+`const`、普通 `static`、数组长度、判别值、repr 参数和 comptime 泛型实参组成有向依赖图；依赖环是编译错误。函数递归和循环允许，但实现必须以可配置的步骤/内存上限中止不收敛求值，并明确报告资源上限而不是伪装成类型错误。
+
+`embed_file` 的内容字节、规范化后的源相对路径和读取失败都属于编译输入。路径不得逃逸调用源文件所在包允许的编译输入根；符号链接解析后的最终路径同样受限制。实现必须记录该文件依赖，内容变化会使增量缓存失效。
