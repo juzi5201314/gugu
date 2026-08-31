@@ -66,8 +66,8 @@ pub fn bar() string = "bar"
 
 | 谓词 | 为真当 |
 |------|--------|
-| `os = "linux"` / `os = "windows"` | 目标 OS |
-| `arch = "x86_64"` | 目标架构 |
+| `os = "linux"` / `os = "windows"` | 目标 OS；合法目标组合见[平台与 ABI 参考](platform-abi.md) |
+| `arch = "x86_64"` | 目标架构；合法目标组合见[平台与 ABI 参考](platform-abi.md) |
 | `feature = "name"` | 当前 package 在本解析域启用了 feature，见[包、依赖与构建模型](packages-builds.md) |
 | `test` | test target/harness，见[测试](testing.md) |
 | `bench` | bench target/harness |
@@ -76,7 +76,7 @@ pub fn bar() string = "bar"
 | `all(P, Q, ...)` | 全部为真 |
 | `any(P, Q, ...)` | 至少一个为真 |
 
-未知谓词、未定义 feature 或未由 build.gg 注册的自定义 cfg 是编译错误。模块级 `#![cfg(...)]` 使整个文件在该 target 上不存在。语言没有 `cfg(debug)`、`cfg(release)`、`cfg(strip)`、`cfg(race)` 或 `cfg(coverage)`。
+未知谓词、未定义 feature 或未由 build.gg 注册的自定义 cfg 是编译错误。`os` 与 `arch` 是本版本仅有的内建平台键；模块级 `#![cfg(...)]` 使整个文件在该 target 上不存在。语言没有 `cfg(debug)`、`cfg(release)`、`cfg(strip)`、`cfg(race)` 或 `cfg(coverage)`。
 
 ### 诊断
 

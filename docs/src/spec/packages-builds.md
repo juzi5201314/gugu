@@ -22,7 +22,7 @@ workspace
 - **module**：一个 `.gg` 文件。模块路径相对其 target 源码根解析。
 - **package ID**：`source + 规范包名 + 精确版本`。path package 的 source 是规范绝对路径，Git package 的 source 包含规范仓库 URL 与锁定 commit，registry package 的 source 是 registry 身份。
 - **host graph**：为当前宿主平台编译并执行 `build.gg` 的依赖图。
-- **target graph**：为目标三元组编译进普通程序或测试的依赖图。
+- **target graph**：为目标名编译进普通程序或测试的依赖图。
 
 外部 package 只有被当前 package 直接声明为依赖后才能在源码中使用；传递依赖不会自动进入名称解析作用域。
 
@@ -137,7 +137,7 @@ workspace 共享根目录的 `gugu.lock` 和 `target/`。在根执行命令时�
 - `[test-dependencies]`：只进入 test、bench 和 example 的 test graph，不传播给当前 package 的消费者。
 - `[build.dependencies]`：只为宿主平台编译 `build.gg`，不进入任何 target graph 或最终镜像。
 
-目标条件依赖写在 `[target.'cfg(...)'.dependencies]` 和 `[target.'cfg(...)'.test-dependencies]`；build task 的宿主条件依赖写在 `[build.target.'cfg(...)'.dependencies]`。前两者按目标三元组求值，最后一项按宿主三元组求值。条件中的 cfg 名称必须来自规范目标键，不能由同一 package 的 build.gg 反向改变依赖解析。
+目标条件依赖写在 `[target.'cfg(...)'.dependencies]` 和 `[target.'cfg(...)'.test-dependencies]`；build task 的宿主条件依赖写在 `[build.target.'cfg(...)'.dependencies]`。前两者按目标名求值，最后一项按宿主目标名求值。条件中的 cfg 名称必须来自规范目标键，不能由同一 package 的 build.gg 反向改变依赖解析。
 
 Registry 依赖：
 
@@ -205,7 +205,7 @@ Feature 名只能含小写 ASCII 字母、数字、`_`、`-`，不能以分隔�
 
 Feature 必须 additive：启用 feature 不能删除 API、禁用依赖或改变同一 API 的类型；互斥 feature 组合是 package 设计错误，resolver 不提供“最后一个获胜”。源码用 `#[cfg(feature = "name")]` 检查当前 package feature。
 
-同一 package ID 分三域统一 feature：目标普通依赖域、目标 test/bench/example 域、宿主 build.gg 域。每个域内对所有选择 target 取并集；三域之间不泄漏，不同目标三元组之间也不统一。feature 集与目标三元组进入编译缓存 key。
+同一 package ID 分三域统一 feature：目标普通依赖域、目标 test/bench/example 域、宿主 build.gg 域。每个域内对所有选择 target 取并集；三域之间不泄漏，不同目标名之间也不统一。feature 集与目标名进入编译缓存 key。
 
 ## 锁文件
 
@@ -239,7 +239,7 @@ test 与 bench 是正交 target/harness 模式，不是 profile。实现还可�
 
 ## 单一 build.gg
 
-package 根存在 `build.gg` 时，它是唯一 build task。没有该文件且未显式声明 build 路径时，不存在 build task。build.gg 为宿主三元组编译，使用 `[build.dependencies]`，在任何 target 源码解析前执行；它必须提供：
+package 根存在 `build.gg` 时，它是唯一 build task。没有该文件且未显式声明 build 路径时，不存在 build task。build.gg 为宿主目标名编译，使用 `[build.dependencies]`，在任何 target 源码解析前执行；它必须提供：
 
 ```text
 fn main() Result[(), string]
@@ -315,7 +315,7 @@ build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进
 1. **依赖源码缓存**：保存 registry 元数据、不可变归档、解包源码、Git commit/tree 与校验信息。多个 workspace 和并发进程共享。
 2. **编译 action cache**：保存可复用的解析、类型检查、生成物、目标代码或完整镜像 action。规范不规定内部按模块、package、单态化还是镜像分层。
 
-编译 action key 必须完整覆盖会改变输出的输入：编译器构建身份、宿主与目标三元组、target 种类、test/bench/插桩模式、feature 域、完整锁图、所有可达源码与 `embed_file`、build.gg 记录输入和输出内容、cfg、native 链接元数据。绝对 workspace 路径若不影响可观察输出不得进入 key；`std.src.file` 使用 package 相对规范路径以允许跨目录命中。
+编译 action key 必须完整覆盖会改变输出的输入：编译器构建身份、宿主与目标名、target 种类、test/bench/插桩模式、feature 域、完整锁图、所有可达源码与 `embed_file`、build.gg 记录输入和输出内容、cfg、native 链接元数据。绝对 workspace 路径若不影响可观察输出不得进入 key；`std.src.file` 使用 package 相对规范路径以允许跨目录命中。
 
 Linux 默认使用 `$XDG_CACHE_HOME/gugu`（未设置时 `~/.cache/gugu`）、`$XDG_CONFIG_HOME/gugu`、`$XDG_DATA_HOME/gugu`；Windows 使用对应 LocalAppData/RoamingAppData/Known Folder。`GUGU_CACHE_DIR`、`GUGU_CONFIG_DIR`、`GUGU_DATA_DIR` 可以覆盖。首版只规范本地缓存，不定义远程缓存协议。
 
@@ -325,7 +325,7 @@ workspace `target/` 只呈现用户产物、build.gg 生成物和可读日志，
 
 ```text
 target/
-├── <target-triple>/
+├── <target>/
 │   ├── bin/
 │   ├── lib/
 │   ├── tests/

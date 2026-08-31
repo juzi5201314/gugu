@@ -171,8 +171,8 @@ extern "C" fn nt_close(h: *byte) i32
 - ABI 字符串必须是 `"C"`。其它字符串是编译错误。
 - 无函数体的 `extern` 是导入：库名与符号必须在编译配置里显式登记。编译器自己把导入写进镜像（Windows 导入地址表 IAT；Linux 动态导入表或内建桩）。禁止靠系统 `ld` 事后扫一堆 `.o` 来解析。
 - 有函数体的 `pub extern "C" fn` 是导出。可用 `#[export_name]` 改符号。
-- Linux System V AMD64，Windows x64。C 字符串用 `*byte` 或 `c"..."`；与 `string` 显式转换。交给外部代码的 GC 对象必须 `std.mem.pin` 或先拷到非移动缓冲。
-- `i128` / `u128` 在 `extern "C"` 里：Linux 按 `__int128`；Windows 禁止，见 [类型](types.md)。
+- Linux System V AMD64，Windows Microsoft x64。C 字符串用 `*byte` 或 `c"..."`；与 `string` 显式转换。交给外部代码的 GC 对象必须 `std.mem.pin` 或先拷到非移动缓冲。完整目标映射见[平台与 ABI 参考](platform-abi.md)。
+- `i128` / `u128` 在 `extern "C"` 里：Linux 按 `__int128`；Windows 禁止，见[平台与 ABI 参考](platform-abi.md)与[类型](types.md)。
 - `TypeId`、`dyn Trait`、句柄类型不能出现在 `extern "C"` 签名里。
 - `!` 可作为 `extern "C"` 的返回类型（C 的 `_Noreturn` / `noreturn`）。
 - 导出函数若发生 panic：必须在导出边界用 `std.panic.catch`，否则 runtime **abort 进程**，禁止把 Gugu 展开推进外部帧。
@@ -199,7 +199,7 @@ unsafe 不豁免数据竞争或 GC 写屏障。通过原始指针写入 GC 引�
 
 ## FFI 值与展开边界
 
-`extern "C"` 参数和返回类型只允许 C ABI 可表示的整数、浮点、原始指针、`#[repr(C)]`/`#[repr(transparent)]` 聚合以及 `!` 返回；聚合的每个非 ZST 字段也必须递归满足该条件。引用、`string`、切片、函数环境、闭包、`dyn Trait`、`TypeId`、GC 句柄、`LocalArena`、`SyncArena`、channel 和 Join 不能直接出现在签名中。
+`extern "C"` 参数和返回类型只允许 C ABI 可表示的整数、浮点、原始指针、`#[repr(C)]`/`#[repr(transparent)]` 聚合以及 `!` 返回；聚合的每个非 ZST 字段也必须递归满足该条件。引用、`string`、切片、函数环境、闭包、`dyn Trait`、`TypeId`、GC 句柄、`LocalArena`、`SyncArena`、channel 和 Join 不能直接出现在签名中。完整的允许/禁止集合与平台分类见[平台与 ABI 参考](platform-abi.md)。
 
 调用外部函数前，参数按普通左到右规则求值并完成 ABI 转换；返回后再构造 Gugu 值。C 返回无效 `bool`、`char`、枚举或违反 repr 的位模式时，继续把它当安全值使用是未定义行为。外部代码保留的 GC 地址必须在整个保留期间 pin；仅在调用期间临时使用则 pin 覆盖该调用即可。
 

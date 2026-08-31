@@ -22,7 +22,7 @@
 | `--locked` | 要求锁文件已是最新，否则失败 |
 | `--frozen` | 等价于 `--locked --offline` |
 | `--vendor` | 从 workspace `vendor/` 读取依赖 |
-| `--target <triple>` | 目标三元组，默认宿主 |
+| `--target <target>` | 目标名，见[平台与 ABI 参考](platform-abi.md)，默认宿主 |
 | `-p <owner/name>`、`--package <owner/name>` | 选择 package |
 | `--workspace` | 选择整个 workspace |
 | `--lib` | 选择 lib target |
@@ -210,7 +210,7 @@ NDJSON，每行一个 JSON 对象。信封：
 
 ```toml
 [build]
-target = "x86_64-unknown-linux-gnu"
+target = "x86_64-linux"
 jobs = 8
 
 [cache]
@@ -236,7 +236,7 @@ read-allows = ["/usr/include/**"]
 | `GUGU_CONFIG_DIR` | 覆盖配置目录 |
 | `GUGU_DATA_DIR` | 覆盖数据目录 |
 | `GUGU_TARGET_DIR` | 覆盖 workspace target 目录 |
-| `GUGU_BUILD_TARGET` | 默认目标三元组 |
+| `GUGU_BUILD_TARGET` | 默认目标名 |
 | `GUGU_REGISTRY_DEFAULT` | 默认 registry URL |
 | `GUGU_OFFLINE` | 非空等价 `--offline` |
 | `GUGU_LOCKED` | 非空等价 `--locked` |
@@ -247,7 +247,7 @@ read-allows = ["/usr/include/**"]
 
 ```text
 gugu 0.1.0 (commit 8f3c2a1 2026-08-31)
-host: x86_64-unknown-linux-gnu
+host: x86_64-linux
 llvm: 19.1.0
 ```
 
@@ -258,7 +258,7 @@ llvm: 19.1.0
   "version": "0.1.0",
   "commit": "8f3c2a1",
   "commit-date": "2026-08-31",
-  "host": "x86_64-unknown-linux-gnu",
+  "host": "x86_64-linux",
   "llvm": "19.1.0"
 }
 ```
@@ -270,5 +270,6 @@ llvm: 19.1.0
 - 诊断位置格式见[概述](overview.md)。
 - lint 级别与 `#[allow]` 等属性见[词法结构](lexical.md)。
 - target 种类、feature、锁文件、缓存、vendor、发布见[包、依赖与构建模型](packages-builds.md)。
+- 目标名与平台 ABI 见[平台与 ABI 参考](platform-abi.md)。
 - 测试 harness 与 bench 见[测试](testing.md)。
 - `std.env.args` 与 `std.env.vars` 见[标准库](standard-library.md)。

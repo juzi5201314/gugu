@@ -86,7 +86,7 @@ UTF-8，扩展名 `.gg`。文件是模块，目录是包，见 [声明与模块]
 | Immix | 老年代 GC 算法：堆分成 block，block 分成 line；标记后可机会性 evacuate（把活对象搬走）整理碎片。见 [内存](memory.md)。 |
 | IAT | Windows PE 的导入地址表（Import Address Table）。「薄 IAT」= 只导入 ntdll/kernel32 等少量符号，不链 CRT。 |
 | 会合 | 无缓冲 channel 上，一次 `send` 与一次 `recv` 必须配对完成（rendezvous）。 |
-| tier-1 | 本规范钉死必须支持的目标：`x86_64-linux` 与 `x86_64-windows`。见 [程序与编译模型](program-model.md)。 |
+| 已支持目标 | 本规范当前登记并要求支持的目标：`x86_64-linux` 与 `x86_64-windows`。目标模型与 ABI 见[平台与 ABI 参考](platform-abi.md)。 |
 
 ## 规范阅读与一致性规则
 

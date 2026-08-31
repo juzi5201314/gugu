@@ -698,7 +698,7 @@ FastRandom 与 Xoshiro256PlusPlus 共享标准采样方法：无偏 `int(a..b)`�
 
 ## FFI 辅助类型
 
-`std.ffi` 只补 C ABI 的字符串边界，不改变 `extern "C"` 可接受类型集合。`CString` 拥有以单个 NUL 结尾的 byte 序列，`CStr` 是外部拥有、NUL 终止序列的非拥有视图：
+`std.ffi` 提供 C ABI 的字符串边界和目标相关的透明 C 类型别名；它不改变 `extern "C"` 可接受类型集合。别名的完整宽度与符号性表见[平台与 ABI 参考](platform-abi.md)。`CString` 拥有以单个 NUL 结尾的 byte 序列，`CStr` 是外部拥有、NUL 终止序列的非拥有视图：
 
 ```text
 struct CString
@@ -713,5 +713,16 @@ fn CStr.to_bytes(self: &Self) Bytes
 fn CStr.to_string(self: &Self) Result[string, text.Utf8Error]
 fn CStr.to_string_lossy(self: &Self) string
 ```
+
+本模块还导出下列透明别名，用于直接对应 C 头文件中的标量类型：
+
+```text
+c_char c_schar c_uchar c_short c_ushort
+c_int c_uint c_long c_ulong c_longlong c_ulonglong
+c_size c_ssize c_intptr c_uintptr c_ptrdiff c_wchar
+c_bool c_float c_double
+```
+
+这些别名不创建新的类型或 `TypeId`；`c_long`、`c_wchar` 等的目标差异必须按[平台与 ABI 参考](platform-abi.md)的表使用。
 
 `CString.from_*` 拒绝输入中已有 NUL，并在末尾补一个 NUL；as_bytes 不包含终止 NUL，as_ptr 指向以 NUL 结尾的表示。向外部函数传递该指针时，调用方必须让 CString backing 在整个外部调用期间保持 pinned，或把内容复制到 `std.mem` 的非移动缓冲；指针不能跨越可能触发 GC 的 safepoint 保存。`CStr.from_ptr` 要求 pointer 非空、指向可读且最终存在 NUL 的内存；扫描越界、保存超过外部内存寿命或让 CStr 逃逸为长期 Gugu 值都是调用方违反 unsafe 契约。CStr 转换为 Bytes/string 会复制到 Gugu 自有存储，UTF-8 无效时只允许使用 to_string_lossy 或接收 Utf8Error。std.ffi 不提供动态库加载器、C varargs、任意 ABI 转换、外部线程手工注册或跨边界异常封装。
