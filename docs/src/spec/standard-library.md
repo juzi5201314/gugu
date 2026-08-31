@@ -20,7 +20,7 @@ std.src           std.test          std.build         std.hint
 
 runtime、collector、scheduler、platform 和 intrinsic 实现模块是 `std` 的私有实现，不是 package API。用户不能在清单、依赖别名或源树中定义 `std`，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。
 
-`std` 提供语言基座、集合、文本、格式化、I/O、文件、路径、transport 网络、进程、环境、时间、同步、机器数值、随机、FFI、测试和构建接口。JSON、正则表达式、压缩、密码学、TLS、HTTP、WebSocket、QUIC、数据库、时区数据库、命令行框架和大文本 Rope 不属于 `std`；它们可以由官方 Registry package 提供，并独立于工具链发布。
+`std` 提供语言基座、集合、文本、格式化、I/O、文件、路径、transport 网络、进程、环境、时间、同步、机器数值、随机、FFI、测试和构建接口。JSON、正则表达式、压缩、密码学、TLS、HTTP、WebSocket、QUIC、数据库、时区数据库、命令行框架和大文本 Rope 不属于 `std`；它们可以由官方 Registry package 提供，并独立于工具链发布。工具链自身的命令行接口见[工具链与命令行](toolchain-cli.md)。
 
 ## Prelude
 

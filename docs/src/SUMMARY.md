@@ -10,6 +10,7 @@
 - [类型系统](spec/types.md)
 - [声明与模块](spec/declarations.md)
 - [包、依赖与构建模型](spec/packages-builds.md)
+- [工具链与命令行](spec/toolchain-cli.md)
 - [表达式与语句](spec/expressions.md)
 - [模式](spec/patterns.md)
 - [函数与闭包](spec/functions.md)

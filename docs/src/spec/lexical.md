@@ -102,7 +102,7 @@ pub fn bar() string = "bar"
 
 `#[must_use]` 可标在函数、方法、结构体、枚举、newtype 上。标在类型上：该类型的值被丢掉就告。标在函数上：返回值被丢掉就告。`Result` 与 `Option` 必须带。
 
-`#[allow(large_copy)]` 等附着在声明、表达式或模块（`#![forbid(...)]`）上，作用于该范围。
+`#[allow(large_copy)]` 等附着在声明、表达式或模块（`#![forbid(...)]`）上，作用于该范围。命令行 `--warn` / `--deny` / `--forbid` 参数见[工具链与命令行](toolchain-cli.md)。
 
 ### `track_caller`
 

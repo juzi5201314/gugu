@@ -209,7 +209,7 @@ Feature 必须 additive：启用 feature 不能删除 API、禁用依赖或改�
 
 ## 锁文件
 
-workspace 使用根目录的一个 `gugu.lock`。普通解析命令采用 Cargo 行为：锁不存在时创建；清单约束变化、选择 target/feature 需要新节点或锁中节点不再合法时，普通 build/check/test 可以自动更新。`--locked` 要求命令不得改变锁，`--offline` 禁止网络，`--frozen` 同时等价于 locked + offline。
+workspace 使用根目录的一个 `gugu.lock`。普通解析命令采用 Cargo 行为：锁不存在时创建；清单约束变化、选择 target/feature 需要新节点或锁中节点不再合法时，普通 build/check/test 可以自动更新。`--locked` 要求命令不得改变锁，`--offline` 禁止网络，`--frozen` 同时等价于 locked + offline。命令行参数、输出格式与退出码见[工具链与命令行](toolchain-cli.md)。
 
 含 bin、staticlib 或 cdylib 的应用 workspace 应把锁文件提交版本控制。只有普通 lib 的 workspace 可以不提交，但本地构建仍可生成锁；发布归档默认不包含锁。该规则是发布与协作约定，不改变 resolver 算法。
 

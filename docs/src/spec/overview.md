@@ -104,7 +104,7 @@ lint 是既不改变程序类型也不改变运行时语义的诊断。默认 `w
 
 每次编译按以下依赖顺序处理：读取并验证 UTF-8 源文件，词法分析，按 `cfg` 删除不存在的项，解析模块与名称，检查声明和类型，执行必需的 comptime，完成泛型单态化与 trait/方法选择，生成精确布局与运行时元数据，最后生成目标镜像。前一阶段失败时不得把后续阶段的诊断伪装成运行时行为。
 
-受管项目在读取入口源码前，先按[包、依赖与构建模型](packages-builds.md)解析 workspace、锁图、target、feature 与 build.gg 输出；这些结果共同决定本次存在的源文件和 cfg。只有显式单文件底层编译跳过该阶段，且不能使用外部 package、workspace、feature 或 build.gg。
+受管项目在读取入口源码前，先按[包、依赖与构建模型](packages-builds.md)解析 workspace、锁图、target、feature 与 build.gg 输出；这些结果共同决定本次存在的源文件和 cfg。只有显式单文件底层编译跳过该阶段，且不能使用外部 package、workspace、feature 或 build.gg。命令行入口、参数与输出格式见[工具链与命令行](toolchain-cli.md)。
 
 `cfg` 删除发生在名称解析之前；`comptime` 选择发生在类型检查之内，不能让未选分支逃避类型检查。所有程序可达的声明和标准库/runtime 声明必须在闭世界编译中可见，见[程序与编译模型](program-model.md)。
 

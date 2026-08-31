@@ -12,6 +12,8 @@
 
 非测试构建里，`#[test]` 项与 `#[cfg(test)]` 项不存在（与 `cfg` 相同）。
 
+`gugu test` 与 `gugu bench` 的命令行契约见[工具链与命令行](toolchain-cli.md)。
+
 ## `#[test]`
 
 ```

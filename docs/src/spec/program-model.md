@@ -8,7 +8,7 @@ Gugu 程序必须被 **AOT** 编译成本地可执行镜像。可以在同一套
 
 ## 闭世界与全程序编译
 
-一次产生可执行文件或 C 导出库的编译必须看见全部可达的 Gugu 代码：所选 target、其解析后的 package 依赖图、标准库和用 Gugu 写的 runtime。项目工具按 `gugu.toml` 与 `gugu.lock` 选择 target 入口，底层编译器从该入口开始闭世界可达性，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。
+一次产生可执行文件或 C 导出库的编译必须看见全部可达的 Gugu 代码：所选 target、其解析后的 package 依赖图、标准库和用 Gugu 写的 runtime。项目工具按 `gugu.toml` 与 `gugu.lock` 选择 target 入口，底层编译器从该入口开始闭世界可达性，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。命令行入口与参数见[工具链与命令行](toolchain-cli.md)。
 
 因此：
 
