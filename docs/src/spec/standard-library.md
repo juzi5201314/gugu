@@ -15,12 +15,13 @@ std.collections   std.io            std.path          std.fs
 std.net           std.process       std.env           std.time
 std.random        std.math          std.sync          std.resource
 std.mem           std.ptr           std.ffi           std.panic
-std.src           std.test          std.build         std.hint
+std.runtime       std.signal        std.src           std.test
+std.build         std.hint
 ```
 
-runtime、collector、scheduler、platform 和 intrinsic 实现模块是 `std` 的私有实现，不是 package API。用户不能在清单、依赖别名或源树中定义 `std`，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。
+`std.runtime` 与 `std.signal` 是公开的运行时控制和信号订阅 facade；runtime、collector、scheduler、platform 和 intrinsic 的实现模块仍是 `std` 的私有实现，不是 package API。用户不能在清单、依赖别名或源树中定义 `std`，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。
 
-`std` 提供语言基座、集合、文本、格式化、I/O、文件、路径、transport 网络、进程、环境、时间、同步、机器数值、随机、FFI、测试和构建接口。JSON、正则表达式、压缩、密码学、TLS、HTTP、WebSocket、QUIC、数据库、时区数据库、命令行框架和大文本 Rope 不属于 `std`；它们可以由官方 Registry package 提供，并独立于工具链发布。工具链自身的命令行接口见[工具链与命令行](toolchain-cli.md)。
+`std` 提供语言基座、集合、文本、格式化、I/O、文件、路径、transport 网络、进程、环境、时间、运行时控制、信号、同步、机器数值、随机、FFI、测试和构建接口。JSON、正则表达式、压缩、密码学、TLS、HTTP、WebSocket、QUIC、数据库、时区数据库、命令行框架和大文本 Rope 不属于 `std`；它们可以由官方 Registry package 提供，并独立于工具链发布。工具链自身的命令行接口见[工具链与命令行](toolchain-cli.md)。
 
 ## Prelude
 
@@ -594,6 +595,7 @@ fn ShellCommand.with(executable: Path, leading_args: &[OsString], script: string
     ShellCommand
 fn ShellCommand.spawn(self: &Self) Result[Child, process.Error]
 fn ShellCommand.output(self: &Self) Result[process.Output, process.Error]
+fn exit(code: int) !
 
 fn Child.wait(self: &Self) Result[ExitStatus, process.Error]
 fn Child.wait_cancel(self: &Self, cancel: &CancelToken)
@@ -660,6 +662,106 @@ fn sleep_cancel(duration: Duration, cancel: &CancelToken)
 ```
 
 Instant 的比较和相减只对同一进程产生的值定义；不同进程或反序列化值不能互相比较。SystemTime 的 duration_since 在 earlier 晚于当前值时返回 ClockWentBackward，不把墙钟回拨伪装成负 Duration。Duration 不含时区、日历或闰秒；Gregorian 日历和 leap second 不进入稳定语义。sleep(0) 立即返回，正 duration 至少等待该时长；sleep_cancel 被取消时返回 Cancelled，取消不会撤销已经完成的等待。timeout 是带 CancelToken 的操作组合器：它在 deadline 到期时取消本次操作并返回 TimedOut；操作已经在线性化点完成则返回操作结果，超时不强制终止外部资源，调用方必须使用操作自身的取消契约。
+
+## 运行时控制与信号订阅
+
+`std.runtime` 只公开进程级 runtime 控制和观测，不公开调度队列、GC 元数据、协程栈图或 runtime 私有 TLS。启动环境变量、状态转换、资源耗尽和报告格式见[运行时与运维语义](runtime.md)。
+
+```text
+enum RuntimeError {
+    InvalidValue,
+    Terminating,
+}
+
+enum GcTarget {
+    Automatic(uint),
+    Off,
+}
+
+struct TraceConfig {
+    pub scheduler: bool,
+    pub gc: bool,
+    pub signal: bool,
+    pub panic: bool,
+}
+
+struct RuntimeStats {
+    pub live_coroutines: uint,
+    pub live_os_threads: uint,
+    pub logical_processors: uint,
+    pub heap_committed_bytes: uint,
+    pub heap_live_bytes: uint,
+    pub stack_committed_bytes: uint,
+    pub gc_cycles: uint,
+    pub gc_pause_total: Duration,
+    pub signal_events_dropped: uint,
+    pub trace_events_dropped: uint,
+}
+
+fn available_parallelism() uint
+fn parallelism() uint
+fn set_parallelism(value: uint) Result[uint, RuntimeError]
+fn gc_target() GcTarget
+fn set_gc_target(value: GcTarget) Result[GcTarget, RuntimeError]
+fn memory_limit() Option[uint]
+fn set_memory_limit(value: Option[uint]) Result[Option[uint], RuntimeError]
+fn stack_limit() uint
+fn collect()
+fn stats() RuntimeStats
+fn trace_config() TraceConfig
+fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
+```
+
+setter 是进程级操作，按调用的线性化顺序采用最后发布的值；不会建立业务数据的 happens-before。`set_parallelism` 的参数必须大于 0，动态降低只回收空闲逻辑处理器；`set_gc_target` 的 `Automatic(p)` 使用非负百分数，`Off` 只关闭堆增长触发；`set_memory_limit(None)` 表示无软上限。所有 setter 在 `Terminating` 中返回 `RuntimeError::Terminating`。`collect()` 等待一个完整 GC 周期完成，但不保证空闲页返还 OS，也不运行 finalizer。
+
+`RuntimeStats` 是逐字段快照，不是同步原语。计数器在进程内单调递增，当前量可能在返回后立即改变；它不提供 GC 地址、内部队列或 OS 线程身份的稳定观察接口。
+
+`std.signal` 把普通 OS 终止通知显式交给用户。没有订阅者时遵循目标 OS 默认动作；订阅不会自动取消根协程、触发 panic 或等待其它用户协程。fatal signal、`SIGKILL`、`SIGSTOP` 和 Windows 不可拦截的同步 fault 不在订阅集合中。
+
+```text
+enum Signal {
+    Interrupt,
+    Terminate,
+    #[cfg(os = "linux")] Hangup,
+    #[cfg(os = "linux")] User1,
+    #[cfg(os = "linux")] User2,
+    #[cfg(os = "windows")] Break,
+}
+
+enum Error {
+    Closed,
+    Unsupported,
+    InvalidSignal,
+    InvalidCapacity,
+}
+
+struct SignalEvent {
+    pub signal: Signal,
+    pub occurrences: uint,
+}
+
+struct SignalSubscription
+
+fn subscribe(signals: &[Signal]) Result[SignalSubscription, signal.Error]
+fn subscribe_with_capacity(signals: &[Signal], capacity: uint)
+    Result[SignalSubscription, signal.Error]
+fn SignalSubscription.recv(self: &Self) Result[SignalEvent, signal.Error]
+fn SignalSubscription.try_recv(self: &Self)
+    Result[SignalEvent, signal.Error]
+fn SignalSubscription.close(self: &Self)
+fn SignalSubscription.dropped(self: &Self) uint
+```
+
+`signals` 不能为空，重复项合并；默认队列容量为 16，显式容量必须大于 0。一个进程可以有多个订阅，每个订阅收到匹配信号的独立副本。相同信号在同一订阅尚未取走时合并，`occurrences` 饱和递增；计数饱和后的额外到达也计入 `dropped()`。不同信号各占一个队列项。队列满时不阻塞 OS 信号处理路径，新增事件计入 `dropped()`。`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。
+
+`std.panic.panic(message)` 是 `!` 返回的 lang item，必须带 `#[track_caller]`。它与 `catch` 共享当前协程的展开边界；未处理时由[运行时与运维语义](runtime.md)产生 `unhandled-panic` 报告。标准库不提供 Go 式 `recover`，也不提供可以抑制 fatal、替换默认报告或改变退出类别的全局 panic hook。被 `catch` 或 `Join.wait()` 处理的 panic 不自动写 runtime 报告。
+
+```text
+#[track_caller]
+fn panic(message: string) !
+```
+
+运行时 trace 通过 stderr 输出 `gugu-runtime-trace-v1` 逐行 JSON；报告和回溯的环境变量、字段及 fatal 分类见[运行时与运维语义](runtime.md)。
 
 ## 机器数值与数学
 

@@ -294,6 +294,8 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 用户额外导入的 DLL、库名和符号必须在构建配置中登记。导入表由 Gugu 编译器直接写出；缺失导出、名称冲突、导入库未登记和不匹配的调用约定都是编译错误。
 
+普通终止信号的 Gugu 映射、订阅队列和默认动作见[运行时与运维语义](runtime.md)。Linux 的 signal handler、备用栈和 fatal fault 路径必须保持 signal-safe，Windows 的 console/SEH 回调不得直接运行 Gugu 用户代码；具体 syscall、导入符号和 handler 数据结构不是稳定 ABI。用户通过 FFI 修改 signal disposition、mask 或 console handler 后，运行时信号契约不再适用。
+
 ### 外部错误状态
 
 `errno`、Windows last-error 或其它线程局部错误状态属于外部调用的即时结果。若标准库提供读取接口，调用方必须在同一操作系统线程上、紧接外部调用之后读取；在 `yield`、阻塞、再次调用外部函数或可能迁移协程之后读取，不能要求仍是原状态。

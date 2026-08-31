@@ -78,17 +78,18 @@ Gugu 程序必须被 **AOT** 编译成本地可执行镜像。可以在同一套
 
 启动顺序（运行时，不是编译期）：
 
-```
+```text
 rt0 入口
   → 不经 GC 的分配可用（rt0 已 mmap 第一块堆或固定缓冲区）
-  → 进入 Gugu 写的 runtime 初始化（GC、调度）
+  → 解析运行时启动配置并建立 GC、调度、信号和 fatal 报告路径
   → 调用用户 `main`
-  → 若 main 正常返回：等待其余用户协程
-  → 若 main panic 或 process.exit：立即终止
+  → 若 main 正常返回：进入 Waiting，等待其余用户协程
+  → 若 main 返回 Err：记录 MainError，等待其余用户协程
+  → 若 main panic、process.exit 或 fatal：进入 Terminating 并立即结束
   → rt0 exit
 ```
 
-细节见 [运行时](runtime.md)。
+细节见[运行时与运维语义](runtime.md)。
 
 ## IR 义务
 

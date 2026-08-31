@@ -243,6 +243,8 @@ read-allows = ["/usr/include/**"]
 | `GUGU_FORMAT` | 默认输出格式 |
 | `GUGU_COLOR` | 默认颜色策略 |
 
+`GUGU_RUNTIME_*`、`GUGU_BACKTRACE` 和运行时诊断变量由已编译程序的 rt0 读取，不是工具链配置，不参与依赖解析或编译缓存 key。工具链只负责在 `gugu run` 中传递它们；具体变量和优先级见[运行时与运维语义](runtime.md)。
+
 ## `gugu version` 输出
 
 ```text
@@ -272,4 +274,4 @@ llvm: 19.1.0
 - target 种类、feature、锁文件、缓存、vendor、发布见[包、依赖与构建模型](packages-builds.md)。
 - 目标名与平台 ABI 见[平台与 ABI 参考](platform-abi.md)。
 - 测试 harness 与 bench 见[测试](testing.md)。
-- `std.env.args` 与 `std.env.vars` 见[标准库](standard-library.md)。
+- `std.env.args`、`std.env.vars` 与运行时控制环境见[标准库](standard-library.md)和[运行时与运维语义](runtime.md)。
