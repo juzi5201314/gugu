@@ -67,11 +67,11 @@ fn inc(i: int) int = i + 1
 pub fn bar() string = "bar"
 ```
 
-`use green` 只引入模块名；要打散写 `use green.{bar}`。插值必须写 `f"..."`。`println` 的多参数各类型可以不同，在调用点单态化（异构参数包）。
+`use green` 只引入模块名；要打散写 `use green.{bar}`。插值必须写 `f"value={name}"`。`println` 的多参数各类型可以不同，在调用点单态化（异构参数包）。
 
 ## 源文件
 
-UTF-8，扩展名 `.gg`。文件是模块，目录是包，见 [声明与模块](declarations.md)。
+UTF-8，扩展名 `.gg`。文件是模块，目录是包；规范排版见[格式化与代码风格](format-style.md)，模块和可见性见[声明与模块](declarations.md)。
 
 ## 术语
 
@@ -90,6 +90,11 @@ UTF-8，扩展名 `.gg`。文件是模块，目录是包，见 [声明与模块]
 | runtime 状态 | `Booting`、`Running`、`Waiting` 和 `Terminating`；状态转换见[运行时与运维语义](runtime.md)。 |
 | fatal | runtime 无法安全恢复的进程级故障；不进入 `Panic`，不能被 `catch` 或 `Join.wait()` 截获。 |
 | 终止类别 | `success`、`program-failure`、`runtime-failure`、`explicit-exit` 和 `signal`；退出码与结构化原因见[运行时与运维语义](runtime.md)。 |
+| 规范格式 | `gugu fmt` 产生的确定性源码布局；`gugu fmt --check` 可以把差异作为 CI 失败。详见[格式化与代码风格](format-style.md)。 |
+| registry identity | registry 索引规范化后的 HTTPS URL；它与 owner/name、精确版本共同组成 package ID。详见[发布与生态](publishing-ecosystem.md)。 |
+| package checksum | 对 package 规范内容流计算的 SHA-256，不包含压缩元数据和本地路径。 |
+| yanked | registry 标记为不供新解析选择、但仍可由已有锁图下载和构建的版本状态。 |
+| vendor | 从有效锁图物化并带 source/checksum 映射的离线依赖树。 |
 
 ## 规范阅读与一致性规则
 

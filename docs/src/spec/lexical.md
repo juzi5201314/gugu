@@ -4,7 +4,7 @@
 
 ## 空白与换行
 
-空格、制表符、换行都是空白。块用 `{` `}`，不靠缩进。
+空格、制表符、换行都是空白。块用 `{` `}`，不靠缩进。规范排版、缩进、行宽和换行输出见[格式化与代码风格](format-style.md)。
 
 语句之间不写分号。换行结束一条语句，除非该行在词法上未完成。行末记号属于下列集合则必须续行：二元运算符、`(`、`[`、`{`、`,`、`.`、`::`、`..`、`:`、`=`、`=>`、`?`。该规则适用于一切「换行否则结束语句」的上下文，包括 `match` 臂、`let` 右值、调用实参、数组字面量。因此下列各是一条语句：
 
@@ -25,6 +25,8 @@ foo()?
 可选的 `;` 只用于**丢弃表达式的值**（块里不想把某表达式当成块值时）。它不是语句终止符。
 
 ## 注释
+
+注释的语法由本节规定，注释正文、文档用途和规范排版见[格式化与代码风格](format-style.md)。
 
 - `//` 到行末：普通注释。
 - `///` 到行末：文档注释，附着在其后第一个声明上。
@@ -91,7 +93,7 @@ pub fn bar() string = "bar"
 
 未写属性时用该 lint 的默认级。外层 `forbid` 覆盖内层任何降级，内层再写 `allow` 是编译错误。`deny` 可被内层 `allow`。未知 lint 名是编译错误。
 
-语言 lint：
+语言与风格 lint：
 
 | 名字 | 默认 | 何时 |
 |------|------|------|
@@ -99,10 +101,17 @@ pub fn bar() string = "bar"
 | `unused_must_use` | warn | 丢掉带 `#[must_use]` 的值。`expr;` 仍告。只有 `_ = expr`，或绑定到之后确实被读取的具名变量，才算处理过 |
 | `unused` | warn | 绑定、参数、`use` 引入的名字从未被读。`_` 与 `_` 开头的名字不告 |
 | `dead_code` | warn | 模块私有的 `fn` / `static` / 类型从未被引用（测试构建里 `#[test]` 项不算 dead） |
+| `non_snake_case` | warn | 函数、方法、参数、局部绑定、字段或模块不符合 `snake_case` |
+| `non_upper_camel_case` | warn | 类型、trait、枚举或枚举变体不符合 `UpperCamelCase` |
+| `non_screaming_case` | warn | `const` 或 `static` 不符合 `SCREAMING_SNAKE_CASE` |
+| `bad_initialism` | warn | initialism 在同一名称中大小写不一致 |
+| `missing_docs` | warn | 对外可见项缺少有意义的 `///` 文档 |
+| `long_line` | warn | 可拆分的代码行超过 100 列，或独立注释行超过 80 列 |
+| `use_order` | warn | `use` 区域不符合规范排序 |
 
 `#[must_use]` 可标在函数、方法、结构体、枚举、newtype 上。标在类型上：该类型的值被丢掉就告。标在函数上：返回值被丢掉就告。`Result` 与 `Option` 必须带。
 
-`#[allow(large_copy)]` 等附着在声明、表达式或模块（`#![forbid(...)]`）上，作用于该范围。命令行 `--warn` / `--deny` / `--forbid` 参数见[工具链与命令行](toolchain-cli.md)。
+风格 lint 的完整命名规则、注释要求和 `gugu fmt --check` 行为见[格式化与代码风格](format-style.md)。
 
 ### `track_caller`
 

@@ -6,10 +6,12 @@
 
 - [概述与目标](spec/overview.md)
 - [词法结构](spec/lexical.md)
+- [格式化与代码风格](spec/format-style.md)
 - [形式语法](spec/syntax.md)
 - [类型系统](spec/types.md)
 - [声明与模块](spec/declarations.md)
 - [包、依赖与构建模型](spec/packages-builds.md)
+- [发布与生态](spec/publishing-ecosystem.md)
 - [工具链与命令行](spec/toolchain-cli.md)
 - [表达式与语句](spec/expressions.md)
 - [模式](spec/patterns.md)

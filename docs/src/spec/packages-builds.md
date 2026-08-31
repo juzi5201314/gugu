@@ -1,6 +1,6 @@
 # 包、依赖与构建模型
 
-本章规定 Gugu 项目的清单、workspace、package、target、依赖解析、feature、锁文件、构建任务、缓存、vendor 与发布行为。语言模块和可见性见[声明与模块](declarations.md)，闭世界编译和目标镜像见[程序与编译模型](program-model.md)。
+本章规定 Gugu 项目的清单、workspace、package、target、依赖解析、feature、锁文件、构建任务、缓存与 vendor 模型。package 归档、registry 协议、发布、校验和、签名、yank、离线和供应链策略见[发布与生态](publishing-ecosystem.md)。语言模块和可见性见[声明与模块](declarations.md)，闭世界编译和目标镜像见[程序与编译模型](program-model.md)。
 
 Gugu 的项目模型参考 Cargo，依赖下载与编译缓存参考 Go，但不照搬 Rust edition、多 profile、任意 shell build script 或 Go 的模块路径导入。规范中的路径都先按所在清单目录解析，再规范化为不含 `.`、`..` 和符号链接歧义的绝对路径；写入清单或锁文件时必须使用 `/` 分隔的相对路径或规范 URL。
 
@@ -160,7 +160,7 @@ Git 依赖：
 
 ```toml
 [dependencies]
-parser = { git = "https://example.com/acme/parser.git", rev = "8f3c..." }
+parser = { git = "https://example.com/acme/parser.git", rev = "8f3c1a2b4d5e6f708192a3b4c5d6e7f8091a2b3c" }
 parser_dev = { git = "https://example.com/acme/parser.git", branch = "next" }
 ```
 
@@ -182,7 +182,7 @@ package 依赖图、host build graph 和 target graph 都禁止循环。测试�
 
 Resolver 对每个 source + owner/name 优先选择满足全部兼容约束的最高非撤回版本，并尽量统一兼容要求。若同一兼容范围的要求无法统一则报错；互不兼容的版本范围可以得到多个 package ID。选择顺序、回溯顺序和 registry 返回顺序不能改变最终解析图。
 
-Registry 的 yanked 版本不参与新解析；若已存在于有效锁文件中则可以继续使用，显式 update 会尝试移出。精确版本要求也不能绕过新解析的 yanked 限制。
+Registry 的 yanked 版本不参与新解析；若已存在于有效锁文件中则可以继续使用，显式 update 会尝试移出。精确版本要求也不能绕过新解析的 yanked 限制。具体 yank API、警告和严格策略见[发布与生态](publishing-ecosystem.md)。
 
 workspace 根可用 `[patch.<registry>]` 将某个 registry package 临时替换为 path、Git 或另一 registry source。patch 参与整个 workspace 解析并写入锁；成员不能定义 patch。不提供 `replace` 或 resolver 版本开关。
 
@@ -216,7 +216,7 @@ workspace 使用根目录的一个 `gugu.lock`。普通解析命令采用 Cargo 
 锁文件稳定记录：
 
 - package ID、精确版本和 source；
-- registry 归档 SHA-256；
+- registry package 的 package checksum（见[发布与生态](publishing-ecosystem.md)）；
 - Git commit 与规范 tree hash；
 - 已解析的依赖边及其 normal/test/build 范围；
 - target 条件；
@@ -225,7 +225,7 @@ workspace 使用根目录的一个 `gugu.lock`。普通解析命令采用 Cargo 
 
 节点与边按 package ID 和规范字段顺序稳定排序。锁不记录编译器版本、宿主绝对路径、workspace path 内容哈希、构建缓存位置或 strip 状态。Path source 写 workspace 相对规范路径；移出 workspace 的 path 写相对当前 package 的规范路径，不能写机器绝对路径。
 
-锁内容与清单、归档 checksum、Git tree 或 package 自身清单不一致时是解析错误。工具不能在 `--locked` 下悄悄改正。
+锁内容与清单、package checksum、Git tree 或 package 自身清单不一致时是解析错误。工具不能在 `--locked` 下悄悄改正。
 
 ## 单一编译流水线
 
@@ -339,29 +339,27 @@ target/
 
 ## Registry、校验与镜像
 
-Registry 使用稀疏 HTTPS 索引。每条版本记录至少含 owner/name、SemVer、yanked 状态、归档 URL、SHA-256、依赖要求、feature 与发布元数据。registry 必须保证成功发布的 owner/name@version 归档不可变；客户端发现同一 package ID 对应不同 checksum 时报告安全错误。
+Registry 依赖使用稀疏 HTTPS 索引；每条版本记录至少提供 owner/name、SemVer、yanked 状态、package checksum、依赖要求、feature 和发布元数据。registry source identity 是 package ID 的一部分，不同 registry 的同名同版本 package 不能合并。协议版本、索引记录字段、发布 API、不可变归档和可选签名见[发布与生态](publishing-ecosystem.md)。
 
-依赖源可以配置默认 registry、alternate registry、镜像与私有 registry。Registry URL/身份是 package source 的一部分；不同 registry 的同名同版本 package 是不同 package ID。镜像必须提供与原 source 一致的已校验归档，不能改变 source 身份。
+锁文件记录精确 registry source、版本和 package checksum。工具在解包、缓存命中、编译输入和 vendor 物化前验证 checksum；记录不符时隔离损坏 entry，`--offline` 下直接失败。首版不依赖公共 checksum transparency database。
 
-锁文件的 SHA-256 是首次解析后的项目信任记录。首版不依赖公共 checksum transparency database；TLS、registry 权限和已提交锁共同构成下载信任。每次使用缓存归档或解包树前，工具必须验证已存摘要；不一致时删除或隔离并重新下载，`--offline` 下直接失败。
+依赖源可以配置默认 registry、alternate registry、镜像与私有 registry。镜像只替换同一 source 的网络位置，不能改变 source identity、版本、yanked 状态、签名或 checksum。配置、allowlist、认证和重定向规则见[发布与生态](publishing-ecosystem.md)。
 
-Git source 规范化 URL，锁定 commit 与 tree hash。发布包允许 Git 依赖，但必须指定不可变 rev；registry 不替消费者镜像该 Git 仓库。私有 Git 的认证由用户环境或凭据配置提供，不能写入锁文件、package 归档或构建缓存 key 的可导出元数据。
+Git source 规范化 URL，锁定 commit 与 tree hash。发布 package 的 Git 依赖必须指定不可变 `rev`；私有 Git 认证由用户环境或凭据配置提供，不能写入锁文件、package 归档或可导出的构建缓存元数据。
 
 ## Vendor 与离线
 
 `gugu vendor` 严格从当前锁图生成 workspace `vendor/`，复制实际选中的 registry/Git package，并写校验元数据和 source 映射。vendor 树默认只读，不包含 path package、其它 package 的 vendor、VCS 元数据或构建缓存。
 
-存在 `vendor/` 不会自动改变解析。只有 `--vendor` 或 workspace 本地配置显式启用时才从 vendor 读取；vendor 节点、checksum、清单或锁图不一致时失败，不回退网络。`--offline` 禁止 registry、镜像、Git 和 build task 之外的工具链网络访问，只允许已校验全局缓存或显式 vendor；缺少任何节点立即失败。build.gg 自己的网络权限仍由任务权限门决定，`--offline` 同样必须在 `std.build` 网络入口拒绝它。
+存在 `vendor/` 不会自动改变解析。只有 `--vendor` 或 workspace 本地配置显式启用时才从 vendor 读取；vendor 节点、checksum、清单或锁图不一致时失败，不回退网络。`--offline` 禁止 registry、镜像、Git 和其它工具链网络访问，只允许已校验全局缓存或显式 vendor；完整模式组合和 `std.build` 网络边界见[发布与生态](publishing-ecosystem.md)。
 
 `--frozen` 等价于同时启用 `--locked` 与 `--offline`，但不自动启用 vendor。
 
 ## 打包与发布
 
-`gugu package` 生成不可变归档和文件清单。默认候选包括：`gugu.toml`、target 源码、build.gg 与 build task 源码、清单声明资源、README、许可证。默认排除：`target/`、`vendor/`、VCS 数据、`gugu.lock`、编辑器/系统临时文件、未声明生成物和凭据文件。
+`gugu package` 生成发布归档、文件清单和 package checksum；默认排除 target、vendor、VCS 数据、`gugu.lock`、临时文件、未声明生成物和凭据。归档清单、路径安全、规范内容流和 checksum 算法见[发布与生态](publishing-ecosystem.md)。
 
-未写 `include` 时使用默认候选；写了 `include` 时以匹配集合替换普通候选，但 `gugu.toml` 和实际需要的 build.gg 不能排除。随后应用 `exclude`，但不能排除清单或让已声明 target/build 输入缺失。路径按规范相对路径排序；归档清除时间戳、所有者和宿主权限差异，以相同输入生成相同 SHA-256。
-
-发布前必须在仅含归档内容、`--locked` 等价解析和空依赖缓存条件下验证清单、target、依赖 source、Git rev、feature、build 输入路径和文档测试可解析。Path 依赖必须有 registry 版本回退；Git 依赖必须锁定 rev。发布不上传 workspace lock、用户权限授权、全局缓存或 target 产物。
+`gugu publish` 在隔离归档视图中重新验证清单、target、依赖 source、Git rev、feature、build 输入和文档，然后向 registry API 上传不可覆盖的 package。`gugu yank` 只改变 registry 的 yanked 状态，不删除归档或改变 checksum；已有有效锁图仍可使用被 yank 版本。发布、签名和撤回的完整 HTTP 契约见[发布与生态](publishing-ecosystem.md)。
 
 ## 错误与确定性
 

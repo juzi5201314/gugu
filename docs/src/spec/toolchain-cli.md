@@ -18,10 +18,12 @@
 | `--color <auto\|always\|never>` | 颜色输出，默认 `auto` |
 | `-q`、`--quiet` | 只输出错误与最终结果 |
 | `-v`、`--verbose` | 输出详细进度与缓存命中信息 |
-| `--offline` | 禁止网络访问 |
+| `--offline` | 禁止 registry、镜像、Git 和其它工具链网络访问 |
 | `--locked` | 要求锁文件已是最新，否则失败 |
 | `--frozen` | 等价于 `--locked --offline` |
 | `--vendor` | 从 workspace `vendor/` 读取依赖 |
+| `--require-signature` | 要求所有 registry package 具有用户信任配置中的有效签名 |
+| `--deny-yanked` | 拒绝解析结果中包含已锁定的 yanked package |
 | `--target <target>` | 目标名，见[平台与 ABI 参考](platform-abi.md)，默认宿主 |
 | `-p <owner/name>`、`--package <owner/name>` | 选择 package |
 | `--workspace` | 选择整个 workspace |
@@ -82,7 +84,7 @@
 
 ### `gugu fmt`
 
-格式化源码。`--check` 只检查不写入，差异时退出码非 0。`--all` 格式化整个 workspace。
+格式化源码并写回规范排版，具体规则见[格式化与代码风格](format-style.md)。`--check` 只检查不写入，存在差异时退出码为 `1`；`--all` 格式化整个 workspace。该命令不执行 `build.gg`、不下载依赖，也不改写 `vendor/`、`target/` 或清单。
 
 ### `gugu doc`
 
@@ -114,15 +116,19 @@
 
 ### `gugu package`
 
-生成发布归档，见[包、依赖与构建模型](packages-builds.md)。
+生成发布归档、文件清单和 package checksum，见[发布与生态](publishing-ecosystem.md)。不改变 registry 状态。
 
 ### `gugu publish`
 
-发布到 registry。`--dry-run` 只验证不上传；`--token <token>` 提供凭据；`--registry <name>` 选择 registry。
+发布到 registry。`--dry-run` 只执行本地和归档视图检查，不上传；`--registry <name>` 选择 registry；`--sign <key>` 附加可选发布者签名。发布成功后输出 `publish-result`。
 
-### `gugu login`
+### `gugu yank <owner/name>`
 
-保存 registry 凭据到用户配置。`--registry <name>` 选择 registry。
+撤回 registry 中的精确版本：必须提供 `--version <version>`；`--undo` 恢复可解析状态。yank 不删除归档，不改变 checksum，已有锁文件仍可使用。协议和解析语义见[发布与生态](publishing-ecosystem.md)。
+
+### `gugu login <registry>`
+
+保存 registry bearer token 到用户配置。`--registry <name>` 选择 registry；`--token-stdin` 从标准输入读取 token。token 不进入 workspace、清单、锁文件、诊断或日志。
 
 ### `gugu cache`
 
@@ -167,10 +173,19 @@
 NDJSON，每行一个 JSON 对象。信封：
 
 ```json
-{ "reason": "compiler-diagnostic", "payload": { ... } }
+{
+  "reason": "compiler-diagnostic",
+  "payload": {
+    "file": "src/main.gg",
+    "line": 1,
+    "column": 1,
+    "severity": "error",
+    "code": "E0001",
+    "message": "示例诊断",
+    "suggestion": null
+  }
+}
 ```
-
-`reason` 是稳定字符串枚举，至少包括：
 
 - `compiler-diagnostic`：编译诊断
 - `compiler-artifact`：生成物路径
@@ -178,6 +193,9 @@ NDJSON，每行一个 JSON 对象。信封：
 - `test-start` / `test-result` / `test-finish`：测试事件
 - `bench-result`：bench 测量
 - `package-resolve`：依赖解析结果
+- `fmt-diff` / `fmt-result`：格式化检查与结果
+- `publish-result`：package 发布结果
+- `yank-result`：版本撤回结果
 
 `payload` 字段按 reason 定义，字段可增不可删。诊断 payload 至少含 `file`、`line`、`column`、`severity`、`code`、`message`、`suggestion`。
 
@@ -218,8 +236,14 @@ dir = "/path/to/cache"
 max-size = "10GiB"
 
 [registry]
-default = "https://registry.example.com"
-token = "..."  # 不推荐，优先用 gugu login
+default = "public"
+allowed = ["public"]
+require-signature = false
+deny-yanked = false
+
+[registries.public]
+index = "https://registry.example.com/index/"
+api = "https://registry.example.com/api/v1"
 
 [permission]
 enabled = true
@@ -237,7 +261,10 @@ read-allows = ["/usr/include/**"]
 | `GUGU_DATA_DIR` | 覆盖数据目录 |
 | `GUGU_TARGET_DIR` | 覆盖 workspace target 目录 |
 | `GUGU_BUILD_TARGET` | 默认目标名 |
-| `GUGU_REGISTRY_DEFAULT` | 默认 registry URL |
+| `GUGU_REGISTRY_DEFAULT` | 默认 registry 名称或 URL |
+| `GUGU_REGISTRY_ALLOWED` | 允许的 registry 名称，逗号分隔 |
+| `GUGU_REGISTRY_REQUIRE_SIGNATURE` | 非空等价 `--require-signature` |
+| `GUGU_REGISTRY_DENY_YANKED` | 非空等价 `--deny-yanked` |
 | `GUGU_OFFLINE` | 非空等价 `--offline` |
 | `GUGU_LOCKED` | 非空等价 `--locked` |
 | `GUGU_FORMAT` | 默认输出格式 |
@@ -271,7 +298,9 @@ llvm: 19.1.0
 
 - 诊断位置格式见[概述](overview.md)。
 - lint 级别与 `#[allow]` 等属性见[词法结构](lexical.md)。
-- target 种类、feature、锁文件、缓存、vendor、发布见[包、依赖与构建模型](packages-builds.md)。
+- 规范排版与风格 lint 见[格式化与代码风格](format-style.md)。
+- target 种类、feature、锁文件、缓存与 build task 见[包、依赖与构建模型](packages-builds.md)。
+- registry 协议、发布、checksum、签名、yank、offline 与 vendor 见[发布与生态](publishing-ecosystem.md)。
 - 目标名与平台 ABI 见[平台与 ABI 参考](platform-abi.md)。
 - 测试 harness 与 bench 见[测试](testing.md)。
 - `std.env.args`、`std.env.vars` 与运行时控制环境见[标准库](standard-library.md)和[运行时与运维语义](runtime.md)。
