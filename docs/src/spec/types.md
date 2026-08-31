@@ -94,7 +94,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 ## 引用 `&T`
 
-共享写成显式 `&T`。传递规则（`f(x)` 浅拷、`f(&x)` 引用、句柄、禁止用 Clone 当通行证）见 [值、句柄与传递](passing.md)。
+共享写成显式 `&T`。传递规则（`f(x)` 产生语义副本、`f(&x)` 引用槽、身份/COW/resource 句柄）见[值、句柄与传递](passing.md)。
 
 - `&T` 是指向某个绑定或字段槽的引用，永不为空。拷贝 `&T` 只拷地址。
 - 绑定默认可变，通过 `&T` 可以改槽里的 `T`（没有单独的 `&mut T`）。
@@ -104,14 +104,11 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 ## `string`
 
-- 合法 UTF-8，非法字节序列进不来（FFI 必须校验或走 `&[byte]`）。
-- 不可变；拼接与插值产生新值。可变缓冲用 `Vec[byte]`。
-- 胖指针：数据指针 + `int` 长度。可共享 backing。
-- 子串仍是 `string`（共享或拷贝由实现选，语义不可变）。
-- 固有方法：`len()` 返回字节数（`int`）；`chars()` 返回实现 `IntoIter` 且 `Item = char` 的值。
-- `s[i]` 类型是 `byte`，按字节计，只读。`string` 不实现 `IntoIter`：`for x in s` 非法。
-- `s[a..b]`、`s[a..]`、`s[..b]`、`s[..]` 得到 `string`；边界必须落在码点上，否则 panic。
-- 拼接：`s + t` 与 `s += t` 走语言提供的 `impl Add[string] for string`（`Output = string`）与 `AddAssign`。新分配。循环里反复 `+` 可以平方代价，缓冲用 `Vec[byte]`。不另设一套「内置字符串加号」。
+`string` 是合法 UTF-8 的可变 COW 值。短文本可以内联；较长文本共享 backing。赋值、按值传参、返回和模式绑定得到语义独立的 string：真实复制或持久快照把 backing 单向密封，之后修改任一值会分离，不影响其它副本。
+
+`len()`、capacity、range 与修改位置都按 byte 计。string 不支持单整数 `s[i]`；读取使用 `byte_at` / `char_at` 或迭代器。`s[a..b]` 等 range 返回 O(1) COW 快照，端点必须位于 UTF-8 scalar 边界，否则 panic。`==`、顺序与 Hash 按原始 UTF-8 byte 序列工作，不隐式 normalization。
+
+`+` 返回新 string；`+=` 修改左侧并可以复用未密封 backing。完整固有接口、`Bytes` 快照、密封状态与编译器 borrow/transfer 优化见[标准库 · 可变 COW string](standard-library.md#可变-cow-string)。
 
 ## 元组、数组、切片
 
@@ -123,7 +120,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 下标类型是 `int`。语言层默认插入越界检查；发布构建也检查。编译器在**证明** `0 <= i < len` 时必须删掉该检查（循环归纳、`if` 守卫、`for i in 0..n`、comptime 已知长度与下标）。证明不了就留检查。`unsafe` 提供无检查下标。
 
-`[T; N]`、`&[T]`、`Vec[T]` 的下标是语言内置，不走 `Index` trait。`xs[i]` 作为右值拷贝出 `T`；作为左值 `xs[i] = v` 写入该槽（`string` 除外，只读）。用户类型的 `[]` 见 [接口](traits.md) 的 `Index`。
+`[T; N]`、`&[T]`、`Vec[T]` 的下标是语言内置，不走 `Index` trait。`xs[i]` 作为右值拷贝出 `T`；作为左值 `xs[i] = v` 写入该槽。string 不支持单整数下标，只支持规范规定的 range 快照。用户类型的 `[]` 见 [接口](traits.md) 的 `Index`。
 
 ## never：`!`
 
@@ -290,9 +287,9 @@ impl !Any for MaybeUninit[T] {}
 
 其余拥有 `TypeId` 的类型由编译器生成 `impl Any`：`type_of` 就是 `type_id[Self]()`。方法名不能叫 `type_id`，那是关键字。
 
-`dyn Any` 合法。把 `x: T`（`T: Any`）强制成 `dyn Any`：分配一个 GC 对象，**浅拷** `x` 的值表示作载荷；vtable 带载荷的 `TypeId` 与按 `T` 的扫描描述符。句柄（`Vec`、`chan`、另一个 `dyn Print`）进盒子时拷的是句柄字，不是再深拷载荷。因此 `dyn Print` 再进 `dyn Any` 之后，downcast 只能回到 `dyn Print`，不能穿过接口对象猜到原来的 `Point`。
+`dyn Any` 合法。把 `x: T`（`T: Any`）强制成 `dyn Any`：分配一个 GC 对象，并按 T 的值描述符把 x 写入载荷；vtable 带载荷 TypeId，类型表带 GC、COW 与 resource descriptor。身份句柄进盒子时共享对象，string backing 先密封，resource 字段建立盒子持有的 lease。因此 `dyn Print` 再进 `dyn Any` 后，downcast 只能回到 `dyn Print`，不能穿过接口对象猜到原来的 Point。
 
-若 `x` 已经是 `dyn Any`，强制是拷贝胖指针，不再套一层盒子。ZST 的盒子没有载荷字节；实现可以共用一个不移动的永生对象。
+若 x 已经是 `dyn Any`，强制只复制胖指针，不再套一层盒子。ZST 的盒子没有载荷 byte；实现可以共用一个不移动的永生对象。
 
 泛型方法不能放进 `Any` trait。语言给类型 `dyn Any` 写固有 impl（不能用户重载）：
 
@@ -304,7 +301,7 @@ impl dyn Any {
 }
 ```
 
-三者只比较载荷 `TypeId` 与 `type_id[T]()`。相等则 `downcast` 的 `&T` 指向载荷槽，`downcast_copy` 浅拷出 `T`；不等则 `None`，不 panic。`&T` 指向盒子内部：只要该引用或 `dyn Any` 句柄还是 GC 根，盒子活着。
+三者只比较载荷 `TypeId` 与 `type_id[T]()`。相等则 `downcast` 的 `&T` 指向载荷槽，`downcast_copy` 按 T 的值描述符产生语义副本；不等则 `None`，不 panic。`&T` 指向盒子内部：只要该引用或 dyn Any 句柄还是 GC 根，盒子活着。
 
 没有「downcast 成另一个 `dyn Trait`」。要接口对象，直接用 `dyn Print` 擦除。
 

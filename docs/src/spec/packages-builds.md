@@ -287,6 +287,8 @@ build.gg 首次构建必定执行。执行期间调用 `rerun_if_changed` / `rer
 
 `run` 直接执行规范化 executable + argv，不经过 shell。调用记录 executable、argv、cwd 和显式环境供权限门显示，但不会自动追踪子进程读取的文件、网络或其后代进程。获准的进程及后代拥有当前用户的完整宿主权限。
 
+build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进程只能通过 `std.build.run` 启动，使 executable、argv、cwd、环境、权限请求和重跑声明都进入同一 action 记录。需要 shell 时，build task 必须把 shell 本身作为 executable、把脚本作为显式 argv；不存在不透明的 build shell 捷径。
+
 ## 构建任务权限门
 
 权限门默认关闭；关闭时 build.gg 的文件、环境、网络和进程操作全部放行，行为与普通本地程序相同。`--permission` 开启规则检查：

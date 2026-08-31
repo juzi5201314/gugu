@@ -48,7 +48,7 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 - 在 `chan` 上阻塞只停当前协程，不绑死操作系统线程（除了持有逻辑处理器进入系统调用或外部函数的那些路径，runtime 必须能把逻辑处理器让给别的操作系统线程）。
 - `send` 与对应的 `recv`（含 `select` 选中的那对）建立 happens-before：发送方在 `send` 之前对载荷的写入，接收方在 `recv` 返回之后看得见。
 
-互斥锁、读写锁、条件变量、原子、一次性初始化，放在 `std.sync`，用 intrinsic 实现，不是关键字。
+互斥锁、读写锁、条件变量、原子、一次性初始化，放在 `std.sync`，用 intrinsic 实现，不是关键字。`Mutex` 与 `RwLock` 不 poisoning：持锁协程 panic 时 guard 仍释放，后续调用正常获得锁，受保护数据是否满足业务不变量由调用方负责。
 
 `std.sync.OnceLock[T]` 必须存在：
 
@@ -73,6 +73,7 @@ impl Lazy[T] {
 - `OnceLock::new()` 是 comptime，可放进 `static`。第一次 `get_or_init` / 成功的 `set` 写入槽；并发调用只跑一次 `f`，其它协程等到完成。返回的 `&T` 指向进程寿命槽。之后通过 `&T` 的并发写仍是数据竞争，除非 `T` 自己同步。成功初始化对随后的 `get` 建立 happens-before。
 - `set` 在已初始化时返回 `Err(v)`（把 `v` 交还），不覆盖。
 - `Lazy::new(f)` 的 `f` 若放进 `static`，必须是不捕获的函数或闭包。第一次 `get` 调用 `f`，规则同 `OnceLock`。
+- `OnceLock` / `Lazy` 的初始化闭包 panic 后进入永久 Failed 状态；后续 `get`、`get_or_init` 或等待只传播同一失败，不重跑闭包，也不提供 reset。初始化成功后才进入 Ready 并建立前述 happens-before。
 - 不要用 `OnceLock` 模拟「每个协程一份」——那是 `#[coroutine_local] static`，见 [声明](declarations.md)。
 
 ## `select`
@@ -155,16 +156,16 @@ impl Condvar {
 }
 ```
 
-Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的 `&T`；`snapshot()` 和 `with_read` 只浅拷当前值。若 `T` 含可变句柄，调用者仍须保证不会绕过锁并发写其载荷。每个守卫是共享状态句柄，浅拷守卫仍代表同一次加锁；第一次 `unlock` 释放锁，任何副本再次 `unlock` 都 panic，解锁后再 `get` / `snapshot` / `wait` 也是 panic。
+Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的 `&T`；`snapshot()` 和 `with_read` 只产生当前值的语义副本。若 T 含可变身份句柄，调用者仍须保证不会绕过锁并发写其载荷。守卫由 Adaptive Resource Leasing 管理：复制守卫共享同一次加锁的 ResourceCell，最后一个 lease 结束时自动解锁；显式 `unlock` 幂等并让所有副本立即观察已解锁状态。解锁后再 `get` / `snapshot` / `wait` 是 panic。
 
-`Atomic::new`、`Mutex::new`、`RwLock::new`、`Condvar::new` 都是 comptime 可求值构造，可用于普通 `static` 初始化。标准库为 `MutexGuard`、`RwReadGuard`、`RwWriteGuard` 提供否定 `Clone` impl；这禁止深拷，但不改变语言按值传递时复制守卫句柄的规则。
+`Atomic::new`、`Mutex::new`、`RwLock::new`、`Condvar::new` 都是 comptime 可求值构造，可用于普通 static 初始化。标准库为 MutexGuard、RwReadGuard、RwWriteGuard 提供否定 Clone impl；这禁止复制底层加锁动作，但不改变语言按值传递时共享同一 resource lease 的规则。
 
 守卫 `get` 得到的 `&T` 只允许在对应守卫仍处于已加锁状态时用于同步访问；`unlock` 后继续通过该引用读写属于未同步访问，若与其它访问形成竞争即未定义行为。`Condvar.wait` 释放锁期间不能使用先前取得的引用，返回并重新加锁后可重新获取。锁不提供 poisoning：受保护操作 panic 时 `with_*` 释放锁，但不标记数据是否满足应用不变量。
 
-Mutex 不可重入；同一协程持有守卫时再次 `lock` 会像其它竞争者一样等待，可能造成永久阻塞。标准锁实现必须满足弱公平，持续等待且锁反复可用的协程不能被永久排除。RwLock 不提供隐式读写升级或降级；要切换模式必须先解锁再重新加锁。
+Mutex 不可重入；同一协程持有守卫时再次 `lock` 会像其它竞争者一样等待，可能造成永久阻塞。标准锁实现必须满足弱公平，持续等待且锁反复可用的协程不能被永久排除。RwLock 不提供隐式读写升级或降级；要切换模式必须先解锁再重新加锁。RwLock 的读写竞争顺序采用目标平台原生策略，Gugu 不保证写者优先、读者优先或严格 FIFO；调用方不能依赖某种公平策略避免特定锁顺序的阻塞。
 
 
 
-锁守卫不可 Clone，不能跨所属锁使用；`with_lock` / `with_read` / `with_write` 在闭包正常返回或 panic 展开时都释放锁。显式 `lock` 得到的守卫必须显式 `unlock`；忘记解锁会使后续请求永久等待，但不是隐式析构或可捕获异常。锁和原子保证同步，不会替程序员把普通 `&T` 的并发写变成安全操作。
+锁守卫不可 Clone，不能跨所属锁使用；`with_lock` / `with_read` / `with_write` 在闭包正常返回或 panic 展开时都释放锁。显式 `lock` 得到的守卫在最后一个 lease 结束时自动解锁，也可以提前幂等 `unlock`。锁和原子保证同步，不会替程序员把普通 `&T` 的并发写变成安全操作。
 
 任何没有原子、channel、锁、条件变量或其它明确 happens-before 的并发读写，只要至少一方写入同一内存位置，就是数据竞争和未定义行为。GC 延长寿命不改变该规则。

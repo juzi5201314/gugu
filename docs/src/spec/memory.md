@@ -4,9 +4,9 @@
 
 ## 值与引用
 
-按 [值、句柄与传递](passing.md)：`f(x)` 浅拷表示，`f(&x)` 引用槽位。`string`、切片、`chan[T]`、`Vec`、胖 `fn`、`dyn Trait`、`Join[T]` 是句柄——拷贝句柄即共享载荷。用户结构体是位加字段的浅拷，不是「在 GC 里就不能按值传」。
+按[值、句柄与传递](passing.md)：`f(x)` 始终合法，并按具体值描述符执行位复制、身份句柄共享、COW seal 或 resource lease 管理；`f(&x)` 引用槽位。Vec、channel、Join 等身份句柄共享权威对象；string、ByteBuffer、Bytes 是 COW/只读值句柄；File、socket 等外部资源共享 ResourceCell。
 
-没有隐式装箱；大结构体按值传会真拷贝（lint `large_copy`，不是类型错误）。逃逸的 `&T` 才升到 GC 堆。
+没有隐式装箱；大位结构体按值传会真拷贝（lint `large_copy`，不是类型错误）。逃逸的 `&T` 才升到 GC 堆。COW seal 与 resource dup/drop/publish 是固定编译器管理动作，不是用户 Drop。
 
 `static` 项是进程寿命存储；含堆引用的 `static` 必须出现在 GC 全局根里。`#[coroutine_local] static` 的槽是**每个协程一份**，根挂在该协程上，不进全局根表。`#[os_thread_local] static` 的槽挂在当前操作系统线程上，扫描正在该线程上跑的协程时一并扫当前线程的操作系统线程本地槽。
 
@@ -14,9 +14,9 @@
 
 ## 类型表与 `dyn Any` 盒子
 
-镜像有一张以 `TypeId.as_int()` 为下标的只读类型表，至少包含规范名、大小、对齐、以及「若该类型作为值落在 GC 对象里该怎么扫」的描述符。`downcast` 比较的是这套编号，不是对象头哈希。
+镜像有一张以 `TypeId.as_int()` 为下标的只读类型表，至少包含规范名、大小、对齐、GC 扫描描述符、COW 管理描述符与 resource descriptor。`downcast` 比较的是这套编号，不是对象头哈希。
 
-`T → dyn Any` 的盒子是普通 GC 对象：头 + `T` 的值表示（浅拷）。扫描按 `T` 的描述符走载荷槽。`T` 是句柄时，载荷就是那几个句柄字，继续追到 `VecObj` / channel 对象。盒子的 GC 类型（对象头里实现用的索引）可以与载荷的语言 `TypeId` 不同；语言只保证 vtable（或等价槽）里能读到载荷的 `TypeId`。
+`T → dyn Any` 的盒子是普通 GC 对象：头 + T 的值表示。写入载荷按 T 的值描述符产生语义副本；扫描按 GC 描述符走引用槽，死亡时按 resource descriptor 释放仍存活的 lease。T 是身份句柄时载荷继续指向 VecObj / channel；T 是 string/ByteBuffer 时 backing 已密封；T 含资源时盒子属于可逐对象回收的资源区域。
 
 `dyn Any` 本身是胖指针句柄，规则与其它 `dyn Trait` 相同。
 
@@ -53,9 +53,21 @@
 
 不采用 ZGC/Shenandoah 那种**每条引用读都加 load barrier / 着色指针**作为默认：它把暂停压到亚毫秒，但会把「接近 C++」的指针追逐打出可见缺口。本语言的暂停目标靠年轻代短、并发标记老年代、以及少分配来达成，而不是靠给每次 load 加税。
 
-不采用纯引用计数：原子 RC 在多核上贵，循环仍要追踪。
+不采用纯引用计数：普通 GC 引用在多核上使用原子 RC 会使所有指针更新变贵，循环仍需 tracing。Adaptive Resource Leasing 只给稀少的外部资源句柄计 lease，不改变普通对象分配与引用写路径。
 
-用户代码在安全子集里不调用 `free`。跨线程「释放」指 collector 并发回收，以及区域的显式 `reset` / `destroy`。
+用户代码在安全子集里不调用 `free`。跨线程“释放”包括 collector 并发回收、区域显式 reset/destroy，以及 ResourceCell 最后 lease 的受限 release。
+
+## Adaptive Resource Leasing
+
+ResourceCell 从不移动、无 GC 引用的专用 slab 分配，保存 raw resource、open/closed 状态、受限 release 函数和 lease 状态。创建时为 `Local(owner_coroutine)`；发布到 global、channel、async 捕获或共享 GC 图前，必须单向转换为 `Shared` 并建立 happens-before。Local lease 使用非原子计数，Shared lease 使用原子计数，不再降回 Local。
+
+编译器用闭世界摘要选择 borrow、transfer、dup、drop 与 publish。最后一个局部或共享 lease 结束时触发一次 release；显式幂等 close 可以更早把 ResourceCell 原子切到 closed。panic 展开、正常作用域退出和覆盖资源槽都必须运行相同 drop glue。collector 搬迁对象只更新地址，不改变 lease。
+
+含 resource 字段的堆对象不能进入会整区丢弃死亡对象而不逐对象访问的 nursery。它们进入可并发逐对象 sweep 的资源区域；类型表的 resource descriptor 在对象死亡时 drop 字段。普通对象继续使用 TLAB、年轻代并行复制和无读屏障路径。
+
+若 ResourceCell 的最后 lease 只存在于不可达 GC 容器环内，release 可以延迟到 tracing GC 发现并 sweep 该环。常见栈上最后 lease 不依赖 GC。collector 线程只执行固定 descriptor 和无用户代码的计数操作；可能等待的底层清理由 runtime 清理队列执行。
+
+第三方 FFI package 只能通过 `std.resource` 的受限构造接口登记 release。raw state 必须是无 GC 引用的位值；release 不能捕获 owner、访问 GC 图、复活对象、分配、panic、获取 Gugu 锁、等待 channel 或启动协程。语言不提供任意 `Finalize` trait。
 
 ## 写屏障与移动
 
@@ -65,7 +77,7 @@
 
 ## LocalArena、SyncArena 与 pin
 
-`std.mem.LocalArena` 与 `std.mem.SyncArena` 是两个不同的 lang item 句柄；不存在未区分二者的 `std.mem.Arena`。二者都把元素按值浅拷进区域，并返回指向区域槽的 `&T`。只要区域句柄仍可达且未 `destroy`，区域槽就按 `T` 的 GC 描述符扫描；句柄不可达后区域可由 GC 回收。
+`std.mem.LocalArena` 与 `std.mem.SyncArena` 是两个不同的 lang item 句柄；不存在未区分二者的 `std.mem.Arena`。二者把不含 resource 字段的元素按值描述符写进区域，并返回指向区域槽的 `&T`。`T` 的 descriptor 含 resource 是编译错误，避免 reset/destroy 绕过 lease drop。只要区域句柄仍可达且未 destroy，区域槽就按 `T` 的 GC 描述符扫描；句柄不可达后区域可由 GC 回收。
 
 `LocalArena` 在创建它的协程中确定唯一所有者。句柄值可以在该协程内复制；其它协程即使与所有者不并发，也不能调用它的 `alloc`、`reset` 或 `destroy`。区域内元素的只读引用可以传递给其它协程，但所有者在这些引用可能被使用期间不得 reset/destroy，且任何并发写入都必须使用同步原语。违反这些约束是未定义行为。
 
@@ -91,7 +103,7 @@ unsafe fn reset(self: &Self)
 unsafe fn destroy(self: &Self)
 ```
 
-两种区域都不提供隐式析构、自动 reset 或自动 destroy；将句柄丢弃只使区域成为不可达对象，最终由 GC 回收其区域元数据。`alloc` 只浅拷贝 `v`，不要求 `T: Clone`；区域的批量释放不会运行用户析构函数，因为语言没有 `Drop`。
+两种区域都不提供隐式析构、自动 reset 或自动 destroy；将句柄丢弃只使区域成为不可达对象，最终由 GC 回收其区域元数据。`alloc` 不要求 `T: Clone`，但拒绝含 resource descriptor 的 T；区域批量释放不会运行用户代码。
 
 `std.mem.pin` 用于 GC 移动对象与 FFI：
 
@@ -114,4 +126,4 @@ fn pin[T, R, F: Fn() R](p: &T, f: F) R
 
 ## 与所有权
 
-没有用户级借用检查器。寿命不够长时对象升到 GC 堆，而不是编译失败。没有 `Drop` / RAII：资源收尾用 `defer` / `defer ret`。
+没有用户级借用检查器、任意 Drop 或 Finalize。寿命不够长时对象升到 GC 堆，而不是编译失败。普通程序清理逻辑使用 `defer` / `defer ret`；File、socket、Child、管道、锁守卫与第三方外部资源由 Adaptive Resource Leasing 自动执行受限 release。需要观察 flush、commit、shutdown 或 wait 错误时仍必须显式调用相应接口。

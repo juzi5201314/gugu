@@ -50,7 +50,7 @@ pub fn bar() string = "bar"
 - 语言内建属性：
   - 优化：`inline`、`cold`
   - 布局：`repr(C)`、`repr(u8)`、`repr(u16)`、`repr(u32)`、`repr(u64)`、`repr(packed)`、`repr(transparent)`、`repr(align(N))`（`N` comptime 二的幂）
-  - `derive(...)`：只允许 `Clone`、`Eq`、`Ord`、`Print`。其它名字按未知属性报错。不是插件机制。
+  - `derive(...)`：只允许 `Clone`、`Eq`、`Ord`、`Hash`、`StableHash`、`StableOrd`、`Print`。其它名字按未知属性报错。不是插件机制。
   - 条件编译：`cfg(...)`，见下
   - 诊断：`must_use`、`allow(lint)`、`warn(lint)`、`deny(lint)`、`forbid(lint)`
   - 测试：`test`、`should_panic`、`ignore`（见 [测试](testing.md)）
@@ -173,7 +173,7 @@ pub fn bar() string = "bar"
 
 `raw"..."` 不得含未转义换行；跨行必须用 `raw"""..."""`。没有 `br"..."` / `cr"..."`。
 
-`f"..."` 的 `{` `}` 里是完整表达式，没有 `{x:02}` 这种格式子语言。要补零、十六进制，先调用标准库再插值。表达式里的括号、方括号、花括号按嵌套配对；未配对的 `}` 结束插值。禁止在插值表达式里再写 `f"..."`。
+`f"..."` 的 `{` `}` 里是完整表达式；表达式后可以写一个冒号和 Rust 风格静态格式说明，例如 `f"{id:08x}"`、`f"{value:?}"`、`f"{ratio:.digits$e}"`。格式码在编译期选择 `Print` / `Debug` / 进制或指数格式 trait；width 与 precision 的 `name$` 必须引用当前作用域的 `int` 绑定。表达式里的括号、方括号、花括号按嵌套配对；未配对且不属于格式说明的 `}` 结束插值。禁止在插值表达式里再写 `f"..."`。完整格式规则见[标准库 · 静态格式化](standard-library.md#静态格式化)。
 
 ### 数组与元组
 

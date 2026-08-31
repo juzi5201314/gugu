@@ -1,98 +1,90 @@
 # 值、句柄与传递
 
-用户只需要三条：
+用户只需要四条：
 
-1. **`f(x)` 永远合法。** 拷贝的是 `x` 此刻的**表示**（浅拷贝）。没有「`T` 不是 Copy，请 `.clone()`」这种编译错误。
-2. **`f(&x)` 是引用传递。** 指向的是绑定 `x` 的存储，callee 能改到 caller 的那个 `x`。
-3. **要两份互不影响的对象图，才写 `clone`。** `clone` 是深拷贝，不是通行证。
+1. **`f(x)` 永远合法。** 产生 `x` 的语义副本；没有 move 后再用错误，也不要求 `Clone`。
+2. **`f(&x)` 是引用传递。** 引用指向绑定 `x` 的槽，callee 能改 caller 的那个槽。
+3. **身份句柄复制后共享状态。** `Vec`、channel、Join、普通 GC 句柄的副本仍指向同一对象。
+4. **COW 与资源是编译器管理的句柄。** string、ByteBuffer 副本共享密封 backing 但保持独立值语义；Bytes 只读共享；资源副本共享 ResourceCell，并由 Adaptive Resource Leasing 管理最后 release。
 
-对 `Vec` / `string` / `chan` 这种句柄，心智模型就是：
+要两份互不影响的普通对象图时写 `clone`。string 与 ByteBuffer 已有 COW 值语义，不需要为了防止后续修改互相影响而 clone；资源通常不实现 Clone，复制资源值只增加同一底层资源的 lease。
 
-- 传入 `x` 或 `&x`，`v.push(...)` 都会改到**同一块**载荷（调用者看得到）。
-- `v = Vec::new()` 这种**换绑**：传入 `x` 只改 callee 自己那根指针，调用者的 `x` 不动；传入 `&x` 才会换掉调用者的 `x`。
-- `clone()` 之后再 `push` / 换绑，都与原来那块无关。
+编译器内部可以做逃逸分析、拷贝消除、borrow/transfer 摘要、COW seal 与资源 dup/drop 融合；这些只许改变机器码，不许变成用户可见的所有权门槛。
 
-位类型（`int`、`Point` 这种）不是句柄：`f(x)` 里改字段只改副本；要改调用者的那个值必须 `f(&x)`。
-
-编译器内部可以做逃逸分析、拷贝消除、借用式别名分析；这些只许改机器码，不许改成「用户要会 Rust 所有权」。
-
-## 为什么不要 Rust 那套门槛
+## 与 Rust 所有权的边界
 
 | Rust | Gugu |
 |------|------|
-| 非 Copy 的 `f(x)` 是 move，再用 `x` 就报错 | 没有 move 错误。最后一次使用可以偷走表示，那是优化 |
-| 非 Copy 又想留下原值 → 必须 `Clone` | 传递不要求 `Clone` |
-| `&` 带生命周期，逃逸就报错 | `&` 逃逸就把对象升到 GC 堆，见 [内存](memory.md) |
-| `Vec` 再分配会让 `&[T]` 悬空，靠借用检查拦 | 再分配换新 backing，旧切片仍指向旧缓冲（GC 收），见下 |
+| 非 Copy 的 `f(x)` 是 move，再用 `x` 报错 | `f(x)` 始终合法；最后使用的 transfer 是优化 |
+| 非 Copy 又想留下原值通常要 Clone | 参数传递不要求 Clone |
+| `&` 带生命周期，逃逸时报错 | `&` 逃逸时槽升到 GC 堆 |
+| `String` 唯一拥有 backing | Gugu string 用密封式 COW 保持可复制值语义 |
+| Drop 在 owner 退出时运行 | 普通类型没有 Drop；外部资源由 Adaptive Resource Leasing 在最后 lease 结束时 release |
 
-句柄和「GC 上的复杂对象」**不是**第三种用户要学的类型系统。它们只是表示里带指针。浅拷贝句柄 = 共享载荷，这和拷贝 `int` 一样是按位抄，只是位里碰巧是地址。
+编译器管理动作不是任意用户回调。COW seal、resource dup/drop/publish 和 GC 写屏障一样由类型描述符与 intrinsic 固定，不能重载。
 
-## `string` / `Vec`：`f(x)` 既不是 `clone` 也不是 `&x`
+## string、身份句柄与资源句柄
 
-堆上那一坨字节**不会**因为 `f(x)` 被 memcpy。浅拷的是手上那几个机器字（句柄），不是载荷。
+三类按值传递的可观察差异为：
 
-三者对照：
+| 类型 | `f(x)` 的语义 | callee 修改后 caller 的值 | 管理动作 |
+|------|---------------|---------------------------|----------|
+| `string` | O(1) COW 值复制 | 不变；callee 写时分离 | 真实复制或快照 seal backing |
+| `Vec[T]` / channel / Join | 复制身份句柄 | 观察到同一共享对象状态 | 普通 GC 句柄复制 |
+| File / socket / Child 等资源 | 复制同一 ResourceCell 的 lease | 观察到同一 open/closed 状态 | borrow/transfer/dup/drop；跨协程时 publish |
+| `&T` | 复制槽地址 | 双方访问同一槽 | 引用逃逸时装箱 |
 
-| 写法 | `string` / `Vec` 实际做什么 | 代价 | 调用返回后 |
-|------|------------------------------|------|------------|
-| `f(x)` | 拷贝句柄。两边指向**同一块**载荷 | O(1) | `Vec`：callee 的 `push` 调用者看得到；`string` 不可变，两边读同一段 UTF-8 |
-| `f(&x)` | 再套一层：指向**调用者那个局部变量** | O(1) | callee 可以 `x = 另一个`，换掉调用者手上的句柄 |
-| `x.clone()` | 新分配，把载荷字节/元素拷走 | O(n) | 两份独立对象 |
+string 示例：
 
-所以默认既不是 `clone`，也不是 `&x`。是 **Java/Go 那种「抄指针 / 抄头」**：
-
-```
-fn grow(v: Vec[int]) {
-    v.push(1)
+```text
+fn suffix(value: string) {
+    value.push('!')
 }
 
-fn main() {
-    let v = Vec::new()
-    grow(v)          // 拷贝句柄，不是 clone
-    // v.len() == 1，同一块 Vec
+let text = "ok"
+suffix(text)
+// text 仍是 "ok"；参数 backing 可以先共享，push 时分离
+```
 
-    grow2(&v)        // 只有这时 callee 才能写成 v = Vec::new() 换掉 main 里的 v
+身份句柄示例：
+
+```text
+fn grow(values: Vec[int]) {
+    values.push(1)
 }
 
-fn grow2(v: &Vec[int]) {
-    v.push(2)        // 方法自动解引用，改同一块
-    *v = Vec::new()  // 换掉调用者的绑定；普通 grow(v) 做不到
+let values = Vec::new()
+grow(values)
+// values.len() == 1；双方指向同一个 VecObj
+```
+
+资源示例：
+
+```text
+fn inspect(file: File) {
+    // 不逃逸时编译器按 borrow ABI 调用，不必真的 dup lease
+    read_header(file)
 }
+
+let file = File.open(path)?
+inspect(file)
+// file 仍合法；最后一个 lease 结束时自动 release
 ```
 
-方法调用对 `&T` 自动解引用；赋值换绑必须写 `*v`。普通函数不会自动插 `&` / `*`。
+方法调用对 `&Self` 自动取槽地址。`text.push` 因而修改当前 text 槽，必要时把它换绑到新 COW backing；`vec.push` 修改共享 VecObj；`file.close` 原子关闭共享 ResourceCell。普通函数调用不自动给用户暴露 `&` / `*` 转换。
 
-### 句柄长什么样（实现义务，决定语义）
+`clone()` 对普通身份句柄构造语义独立的对象图。string 的 clone 允许物理共享 sealed backing，只要后续修改保持值语义。资源若要复制底层 OS 资源，必须使用该类型明确返回 Result 的 `try_clone` 或等价领域方法，不能由 Clone 隐式执行 syscall。
 
-**`Vec[T]`、`chan[T]`、`Join[T]`、`dyn Trait` 的对象头必须在堆上。** 语言里的值是指向该对象的**一个指针**（或胖指针里的数据指针仍指向堆对象）。`len` / `cap` / 通道队列等可变元数据活在堆对象里，不活在调用栈的拷贝里。否则 `f(v)` 只抄了栈上的旧 `len`，callee `push` 完 caller 还以为是 0——Go slice 的坑，用户心智立刻变复杂。`T → dyn Any` 另分配一个盒子对象，浅拷 `T` 的值表示作载荷，见 [类型 · TypeId](types.md)。
+## 表示类别
 
-**`string` 不可变**，可以是栈上的胖指针 `{ptr, len}`（两字），`f(s)` 抄这两字、共享只读字节。没有人会原地改 `len`，不会出现上面那种不同步。
+实现为每个具体类型生成值描述符，至少区分：
 
-**`&[T]` 切片**是视图：`{ptr, len}` 胖指针，`f(s)` 抄视图头。它不拥有 `len` 的「权威副本」；增长只发生在 `Vec` 上。切片看见的长度是拷贝出来的那份视图长度，这是视图的本意，不是坑。
+- **位值。** 标量、只含位的结构体、元组、数组、枚举。普通复制是 memcpy，两份值独立。
+- **身份句柄。** `Vec`、channel、Join、胖 fn、dyn Trait 与普通 GC/arena 引用。复制指针或胖指针后共享载荷。
+- **COW 值句柄。** string、ByteBuffer 与 Bytes。string/ByteBuffer 复制要保持独立值语义并在必要时 seal；Bytes backing 始终不可变。
+- **资源句柄。** 包含 ResourceCell lease 的类型。复制可以由 borrow/transfer 消除，否则执行固定 dup；槽结束、覆盖或展开时执行固定 drop。
 
-```
-调用者:  v ──► VecObj { len: 0, cap: 8, data ──► [........] }
-grow(v): 拷贝这个箭头
-callee:  v ──► 同一个 VecObj，push 把 len 写成 1
-调用者再读 v.len() 也是 1
-```
-
-`clone()` 才是再 new 一个 `VecObj` 再拷元素。
-
-## 表示：位 vs 句柄
-
-实现把每个类型的值表示分成两类（用户不必声明 `Copy`）：
-
-**位（bits）。** 标量、只含位的结构体 / 元组 / 数组 / 枚举。`f(x)` 是 memcpy。两份值从此独立。`Point { x, y }` 属于这类。
-
-**句柄（handle）。** 表示是指针或胖指针，载荷在别处（GC / arena / 静态）：
-
-- `string`、`&[T]`、`chan[T]`、胖 `fn`、`dyn Trait`、`Join[T]`、`Vec[T]`
-- 用户结构体里的 `&T` 字段
-
-`f(h)` 拷贝句柄字，**共享载荷**。这不是深拷贝，也不该为此报错。
-
-**混合结构体**按字段浅拷：位字段复制，句柄字段共享。`struct Foo { n: int, v: Vec[int] }` 的 `f(foo)` 得到另一个 `Foo`，`n` 独立，`v` 和原来共用缓冲。
+用户结构体按字段组合描述符。包含 string/ByteBuffer 的结构体复制后相应字段保持 COW 值语义；包含 Vec 的字段共享 VecObj；包含资源的字段参加 lease 管理。递归类型仍必须通过句柄或 `&T` 间接连接。
 
 递归类型的字段必须是句柄或 `&T`（`next: Option[&Node]`），不能把无限大的 `Node` 嵌进 `Node`。
 
@@ -132,12 +124,14 @@ trait Clone {
 }
 ```
 
-- 位类型的 `clone` 等于拷贝（可自动实现）。
-- 句柄的 `clone` 复制载荷（新 `Vec`、新 `string` 字节）。`chan` 与 `Join` 有语言给出的 `impl !Clone`，不能深拷、也不能靠 blanket 沾上 `Clone`，见 [接口 · 否定 impl](traits.md)。
-- 混合结构体可 `#[derive(Clone)]`：字段都 `Clone` 才行（含 `chan` 字段则会失败）。
-- **任何类型不实现 `Clone` 也能传入 `f(x)`。**
+- 位值的 clone 等于语义复制（可自动实现）。
+- 普通身份句柄的 clone 复制载荷并构造独立对象。
+- string 的 clone 产生语义独立值；实现可以继续共享 sealed backing，因为任一修改都会分离。
+- channel 与 Join 有语言给出的 `impl !Clone`。资源类型通常也 `impl !Clone`；复制资源值只共享同一个 ResourceCell，复制底层 OS 资源必须使用领域 `try_clone`。
+- 混合结构体可 `#[derive(Clone)]`：字段都 Clone 才行。
+- **任何类型不实现 Clone 也能传入 `f(x)`。**
 
-没有用户级 `Copy` trait。实现内部的「按位可抄」不是语言表面的一部分。
+没有用户级 Copy trait。实现内部的 memcpy、seal、dup/drop 与 publish 由值描述符决定。
 
 ## `Vec` / 切片与再分配
 
@@ -145,31 +139,23 @@ trait Clone {
 
 同一 `Vec` 上的 `push` 所有持有该句柄的人都看得见。并发写入同一 `Vec` 是数据竞争，用 `chan` / `std.sync`。
 
-## 句柄要不要写成 `&x` 才能传？
+## 什么时候写 `&x`
 
-不要。`string` / `Vec` / `chan[T]` 已经是句柄：`f(s)` 就是在分享。`f(&s)` 的类型是 `&string`，表示「callee 可以换成另一根句柄」（改 caller 的那个绑定），日常用不到。
+日常按值传 string、Vec、channel 或资源即可。`f(&x)` 表示 callee 需要直接访问或换掉 caller 的绑定槽，不是“让类型可以传递”的许可证。
 
-用户结构体默认不是句柄。要身份、要图、要到处分享同一个可变对象：
+用户结构体默认按字段产生语义副本。需要共享同一可变身份时，把对象放在 GC 句柄、标准身份容器或 `&T` 后面；需要外部资源寿命时，由标准库或 FFI 包用 `std.resource` 的受限 ResourceCell 封装，不能手写 GC finalizer。
 
-```
-let p = &Point { x: 1, y: 2 }
-f(p)            // p: &Point，拷贝的是引用字
-```
+## 编译器管理动作
 
-或把 `&Point` 放进字段。不要让「这个 struct 在 GC 里」变成一种要 `Clone` 才能过编译的类型种类——在不在堆上是逃逸分析的事。
+编译器必须做逃逸分析、不逃逸栈分配、最后使用消除、大拷贝诊断、精确栈图、COW seal 和资源描述符。对于 COW 值与资源参数，闭世界摘要至少区分 borrow、transfer、真实复制和 publish：
 
-## 编译器（用户看不见的）
+- borrow 只在调用期间使用，不 seal COW backing，也不 dup resource lease；
+- transfer 复用最后一次使用的值表示；
+- 真实 string/ByteBuffer 复制 seal backing，真实资源复制 dup lease；
+- 写入 global、共享 GC 图、channel 或 async 捕获先 publish resource，并 seal 可变 COW backing。
 
-必须做：逃逸分析、不逃逸的栈分配、最后使用的拷贝消除、大拷贝诊断、精确栈图。可以用内部借用 / 别名分析去消写屏障、证明不别名、给 SIMD 开路。
+分析失败的合法降级是装箱、seal、保留 dup/drop 或写屏障；禁止把内部分析失败显示成生命周期、move 或“需要 Clone”错误。
 
-禁止：把内部分析失败显示成生命周期 / move /「需要 Clone」错误。分析失败的合法降级是：装箱到 GC、留下一次浅拷贝、留下一次写屏障。
+普通位值与身份句柄的浅拷不调用用户代码。COW seal、resource dup/drop/publish 是编译器固定管理动作，也不调用可重载用户代码。赋值、参数传递、返回、模式绑定、聚合构造和 dyn Any 装箱都按字段描述符执行相同语义。
 
-## 浅拷与引用的精确定义
-
-一次浅拷按声明顺序复制值表示中的所有机器字。位字段产生独立副本；句柄、引用、函数环境指针和接口数据指针继续指向原载荷。浅拷不调用用户代码、不检查 `Clone`、不改变源槽，也不建立或结束所有权。
-
-赋值、参数传递、返回、模式绑定、数组/元组构造和 `dyn Any` 载荷装箱都使用同一浅拷定义。编译器可以消除不可观察的复制，但不能改变别名关系：优化前共享载荷的句柄在优化后仍共享，优化前独立的位字段在优化后仍不得因复用槽而互相影响。
-
-对 place 写 `&place` 得到指向该槽的引用。对临时构造写引用时，编译器先创建不可见槽再取引用；该槽按引用是否逃逸决定放栈或 GC 堆，生命周期不以当前语句结束。对同一槽取得的多个 `&T` 可以互相看到写入；并发访问仍受[并发与调度](concurrency.md)的数据竞争规则约束。
-
-重新给绑定赋值只替换该槽中的表示；此前指向该槽的 `&T` 看到新值，此前浅拷出去的句柄值仍指向旧载荷。给结构体位字段赋值只改该结构体副本；通过共享句柄修改对象头或载荷则所有句柄观察同一状态。
+重新给绑定赋值时，先为将被覆盖的资源字段执行 drop，再把新值按描述符写入；此前指向该槽的 `&T` 看到新值。panic 展开与正常退出必须对活跃资源槽执行相同 drop glue。collector 搬迁对象只是物理 relocation，不是语义复制，禁止 seal 或 dup。

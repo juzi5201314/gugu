@@ -65,7 +65,7 @@ variant             ::= IDENT
 
 union_declaration   ::= "union" IDENT generic_parameters? "{" field_list? "}" ;
 
-trait_declaration   ::= "trait" IDENT generic_parameters? "{" trait_item* "}" ;
+trait_declaration   ::= "unsafe"? "trait" IDENT generic_parameters? "{" trait_item* "}" ;
 trait_item          ::= associated_type
                       | associated_const
                       | function_signature
@@ -74,7 +74,7 @@ associated_type     ::= "type" IDENT ["=" type] terminator ;
 associated_const    ::= "const" IDENT [":" type] ["=" expression] terminator ;
 function_signature  ::= "fn" IDENT generic_parameters? "(" parameter_list? ")"
                          return_type? terminator ;
-impl_declaration    ::= "impl" generic_parameters? impl_target "{" trait_item* "}" ;
+impl_declaration    ::= "unsafe"? "impl" generic_parameters? impl_target "{" trait_item* "}" ;
 impl_target         ::= type ["for" type] ;
 
 const_declaration   ::= "const" IDENT [":" type] "=" expression terminator ;

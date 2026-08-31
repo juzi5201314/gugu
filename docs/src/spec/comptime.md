@@ -60,7 +60,7 @@ fn embed_file(comptime path: string) [byte; N]
 
 ## 求值环境与阶段边界
 
-comptime 使用与运行时相同的表达式、类型、浅拷、模式、defer 和 panic 语义，但只允许确定性且可在编译宿主中安全模拟的子集。读取未初始化值、越界、除零、无效转换、显式 panic 或违反 unsafe 前置条件都转成带源范围的编译错误；comptime 不产生可被目标程序捕获的 `Panic` 值。
+comptime 使用与运行时相同的表达式、类型、值描述符复制、COW string、模式、defer 和 panic 语义，但只允许确定性且可在编译宿主中安全模拟的子集。ResourceCell 不能在 comptime 构造或发布。读取未初始化值、越界、除零、无效转换、显式 panic 或违反 unsafe 前置条件都转成带源范围的编译错误；comptime 不产生可被目标程序捕获的 Panic 值。
 
 允许的状态只存在于本次 comptime 求值：局部槽、comptime 堆、常量依赖和显式 `embed_file` 输入。禁止读取宿主时间、随机数、环境变量、网络、目标进程 I/O、操作系统线程状态、FFI、内联汇编、原子、锁、channel、`async`、`yield`、`wait` 或 syscall。标准库函数只有其实现本身完全落在该子集内时才能在 comptime 调用。
 

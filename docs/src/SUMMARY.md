@@ -20,4 +20,5 @@
 - [编译期执行](spec/comptime.md)
 - [unsafe 与 intrinsic](spec/unsafe.md)
 - [运行时](spec/runtime.md)
+- [标准库](spec/standard-library.md)
 - [测试](spec/testing.md)

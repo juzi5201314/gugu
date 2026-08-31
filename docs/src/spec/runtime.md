@@ -40,6 +40,8 @@
 
 这与 Go **不同**：Go 在 `main` 函数返回后会立刻杀掉其它协程。Gugu 在 `main` 成功返回后会等它们跑完，避免「后台任务写到一半进程没了」。要立刻走，显式 `std.process.exit`。
 
+`std.process.Child.detach()` 或最后一个 Child lease 自动释放后，子进程不随 Gugu 主协程退出规则被强制终止；runtime supervisor 保留必要的 OS 观察能力并回收其终止记录。显式 `Child.close()` 才会强制终止并等待该子进程。
+
 ## panic 与恢复
 
 panic 表示程序 bug（越界、对已关闭 channel `send`、显式 `panic(...)`），不是 `Result` 那种可预期失败。`panic` 与 `std.process.exit` 的类型是 `!`，且必须 `#[track_caller]`。
@@ -141,15 +143,15 @@ OS 加载镜像
 
 ## 与编译器的契约
 
-编译器必须认识：分配点、safepoint、写屏障、换栈、panic 展开与 `catch` 边界、`process.exit`、channel 阻塞点、导入的外部函数边界（让出逻辑处理器）、导出函数入口（必要时把当前操作系统线程登记为工作线程）。runtime 仍是普通 Gugu + intrinsic，禁止硬编码一份 C 运行时来充当语义。
+编译器必须认识：分配点、safepoint、写屏障、COW seal、resource borrow/transfer/dup/drop/publish、resource descriptor、换栈、panic 展开与 `catch` 边界、`process.exit`、channel 阻塞点、导入的外部函数边界（让出逻辑处理器）、导出函数入口（必要时把当前操作系统线程登记为工作线程）。runtime 仍是普通 Gugu + intrinsic，禁止硬编码一份 C 运行时来充当语义。
 
 ## 标准库
 
-`std` 与 runtime 同一闭世界。`print` / `println` 是参数包 + `Print` trait 的普通函数，最终走 syscall / `WriteFile`。`std.process.exit`、`std.panic.catch`、`std.src`、`std.mem.MaybeUninit`、`std.mem.LocalArena`、`std.mem.SyncArena`、`std.mem.pin`、`std.sync.Atomic` / `Mutex` / `RwLock` / `Condvar` / `OnceLock` / `Lazy`、`std.test.assert` 必须存在，语义按本章、[并发](concurrency.md)、[内存](memory.md)、[测试](testing.md)与[unsafe](unsafe.md)。
+`std` 与 runtime 同一闭世界。`print` / `println` 是参数包 + `Print` trait 的普通函数，最终走 syscall / `WriteFile`。标准库的公开模块、COW string、Bytes、集合、I/O、Path、取消与 Adaptive Resource Leasing 见[标准库](standard-library.md)。`std.process.exit`、`std.panic.catch`、`std.src`、`std.mem.MaybeUninit`、`std.mem.LocalArena`、`std.mem.SyncArena`、`std.mem.pin`、`std.sync.Atomic` / `Mutex` / `RwLock` / `Condvar` / `OnceLock` / `Lazy`、`std.test.assert` 必须存在，语义按本章、[并发](concurrency.md)、[内存](memory.md)、[测试](testing.md)与[unsafe](unsafe.md)。
 
 ## Join 完成与自然退出
 
-每个子协程只有一个完成记录：正常返回时保存 `Ok(T)` 的浅拷表示，panic 展开完成时保存 `Err(Panic)`。任意 `Join.wait()` 都读取该记录；第一次成功读取 `Err` 即把 panic 标记为已处理，之后重复读取仍返回同一错误表示，不重复打印或改变退出码。没有任何 wait 读取错误且句柄已分离时，该 panic 才按未处理规则报告。
+每个子协程只有一个完成记录：正常返回时按 T 的值描述符保存 `Ok(T)`，panic 展开完成时保存 `Err(Panic)`。任意 `Join.wait()` 都从记录产生相应值的语义副本；string 保持 COW，resource 建立等待结果持有的 lease。第一次成功读取 Err 即把 panic 标记为已处理，之后重复读取仍返回同一错误表示，不重复打印或改变退出码。没有任何 wait 读取错误且句柄已分离时，该 panic 才按未处理规则报告。
 
 主协程正常返回后，runtime 等待所有仍存活的用户协程，包括已经分离和被测试创建的后代。若这些协程因 channel、锁、`select {}` 或外部调用永久阻塞，进程也永久等待；规范不隐式检测死锁或强制取消。`std.process.exit` 和主协程 panic 仍按前文立即终止。
 
@@ -159,4 +161,4 @@ panic 展开时先保存 `Panic`，再按内层块到函数边界执行 block de
 
 `#[coroutine_local]` 槽由每个协程独立维护，第一次访问时在该协程上执行初始化；初始化成功后发布到该协程，panic 时槽保持未初始化，下一次访问可以重新尝试。`#[os_thread_local]` 对每个操作系统线程使用相同规则。初始化重入同一槽立即 panic，不等待自身。
 
-协程结束后其 coroutine-local 槽与其它根一起失去可达性；语言没有 Drop，不自动执行用户收尾。操作系统工作线程退出时 os-thread-local 槽同理。需要确定收尾必须由 `defer` 显式完成。
+协程或操作系统线程结束时，runtime 必须对相应 local 槽中的 resource 字段执行 drop glue，再移除这些根；普通字段只失去可达性。语言没有任意用户 Drop / Finalize，普通清理仍靠 defer。ResourceCell 的受限 release 按[内存](memory.md#adaptive-resource-leasing)执行。

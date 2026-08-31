@@ -15,14 +15,18 @@
 - 不对自然对齐不足的 `#[repr(packed)]` 字段取 `&T` 当已对齐引用用
 - 不制造数据竞争
 
-## `unsafe fn` 与 `unsafe` 块
+## `unsafe fn`、`unsafe trait`、`unsafe impl` 与 `unsafe` 块
 
 - `unsafe fn`：调用方必须在 `unsafe` 里调。
+- `unsafe trait`：每个肯定实现都必须写 `unsafe impl`；实现者负责维持 trait 文档规定、编译器无法验证的不变量。调用其安全方法不因此需要 unsafe 块。
+- `unsafe impl Trait for Type`：只允许实现 unsafe trait。违反所声明的不变量属于未定义行为；unsafe impl 的方法体仍需用显式 unsafe 块执行其它 unsafe 操作。
 - `unsafe { }`：此处由程序员维持不变量。
 - 安全函数可以内含 `unsafe` 块，用来封装原语。
 - `#[naked]` 函数必须是 `unsafe fn`。
 
 `unsafe` 不关闭 GC，也不关闭类型检查。
+
+`std.hash.StableHash` 与 `std.cmp.StableOrd` 是标准 unsafe marker trait。编译器验证通过的 derive 可以生成其 impl，源码无需也不能伪装成普通安全 impl；手写实现必须使用 `unsafe impl`。若键的 Eq、Hash 或 Ord 结果后来能通过外部别名改变，则该 unsafe impl 的证明失效。
 
 ## 原始指针 `*T`
 
@@ -46,7 +50,7 @@ unsafe fn volatile_load[T](p: *T) T
 unsafe fn volatile_store[T](p: *T, v: T)
 ```
 
-`addr_of` 是接收 place 的特殊 intrinsic：只计算槽地址，不读取值，也不构造可能未对齐的 `&T`；非 place 实参是编译错误。`ptr_read` 按位拷出，不把源当成“已移走”；`ptr_write` 按位写入，不运行析构。二者要求自然对齐。`read_unaligned` / `write_unaligned` 只接受位类型，允许未对齐地址并逐字节等价复制。`volatile_*` 仍要求自然对齐，只保证该次访存不被删除、合并或移出其它 volatile 访存的顺序；volatile 不是原子操作，不建立 happens-before。悬空、范围不足、无效位模式、数据竞争或错误写屏障仍是未定义行为。
+`addr_of` 是接收 place 的特殊 intrinsic：只计算槽地址，不读取值，也不构造可能未对齐的 `&T`；非 place 实参是编译错误。`ptr_read` / `ptr_write` 按位访问，只允许值描述符没有 COW seal、resource dup/drop/publish 的类型；string、ResourceCell 句柄或含资源字段的类型是编译错误，必须使用普通赋值或领域 API。`ptr_read` 不把源当成已移走，`ptr_write` 不运行管理动作，二者要求自然对齐。`read_unaligned` / `write_unaligned` 只接受位类型，允许未对齐地址并逐 byte 等价复制。`volatile_*` 仍要求自然对齐，只保证该次访存不被删除、合并或移出其它 volatile 访存的顺序；volatile 不是原子操作，不建立 happens-before。悬空、范围不足、无效位模式、数据竞争或错误写屏障仍是未定义行为。
 
 ## `union`
 
@@ -66,7 +70,7 @@ union Word {
 
 ## `MaybeUninit[T]`
 
-`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#术语)），布局与 `T` 相同。编译器不扫描其中的 GC 引用，直到 `assume_init`。
+`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#术语)），布局与 `T` 相同。`T` 的值描述符含 resource 管理动作时不能实例化 MaybeUninit，避免覆盖或未初始化状态绕过 lease drop。其它 T 的 GC 扫描与初始化状态由编译器精确跟踪，直到 `assume_init` 前不能把未写入槽当成有效 T 使用。
 
 ```
 fn uninit[T]() MaybeUninit[T]
@@ -76,13 +80,13 @@ fn write(self: &Self, v: T)
 unsafe fn assume_init(self) T
 ```
 
-`uninit` 不初始化。`write` 按位写入（覆盖前一个位模式，不析构）。`assume_init` 把位当成已初始化的 `T`：若尚未写入有效值，未定义行为。`as_ptr` 本身安全；解引用仍要 `unsafe`。ZST 的 `MaybeUninit` 与 `T` 一样不占空间。
+`uninit` 不初始化。`write` 写入一个此前未初始化的槽；对同一实例重复 write 而未先 `assume_init` 是未定义行为，不能借此覆盖活 GC 引用。`assume_init` 把位当成已初始化的 T：若尚未写入有效值，未定义行为。`as_ptr` 本身安全；解引用仍要 unsafe。ZST 的 MaybeUninit 与 T 一样不占空间。
 
 `assume_init` 始终是 `unsafe fn`，调用必须在 `unsafe` 块里。对纯 ZST（见 [类型](types.md)），安全前置条件恒成立——没有待初始化的位——因此调用不是未定义行为。这不是安全重载，也不免除 `unsafe` 块。安全子集允许直接读取未初始化的纯 ZST（本章开头那条例外），不必经过 `MaybeUninit`。
 
 ## `transmute` 与 `unreachable`
 
-`std.mem.transmute[T, U](x: T) U`：按位重解释。必须在 `unsafe` 里。`size_of[T]()` 必须等于 `size_of[U]()`，否则编译错误。结果对 `U` 无效（含破坏对象头、UTF-8、niche）是未定义行为。
+`std.mem.transmute[T, U](x: T) U`：按位重解释。必须在 `unsafe` 里。`size_of[T]()` 必须等于 `size_of[U]()`，否则编译错误。T 或 U 的值描述符含 COW seal 或 resource 管理动作时也是编译错误；transmute 不能伪造、复制或漏掉管理动作。其它结果若对 U 无效（含破坏对象头、UTF-8、niche）是未定义行为。
 
 `std.hint.unreachable() !`：告诉编译器不可达。若运行到此处，未定义行为。必须在 `unsafe` 里调用。安全的发散用 `panic`。
 
@@ -200,3 +204,5 @@ unsafe 不豁免数据竞争或 GC 写屏障。通过原始指针写入 GC 引�
 调用外部函数前，参数按普通左到右规则求值并完成 ABI 转换；返回后再构造 Gugu 值。C 返回无效 `bool`、`char`、枚举或违反 repr 的位模式时，继续把它当安全值使用是未定义行为。外部代码保留的 GC 地址必须在整个保留期间 pin；仅在调用期间临时使用则 pin 覆盖该调用即可。
 
 外部异常、SEH 或 C++ 异常不得穿过 Gugu 帧，Gugu panic 也不得穿过外部帧。未在边界内转换的跨边界展开必须立即 abort 进程。
+
+`std.ffi.CString` / `CStr` 只提供 C NUL 字符串的拥有与非拥有视图；`CString.as_ptr` 的使用仍须遵守 pin 与 safepoint 规则，`CStr.from_ptr` 的指针有效性、NUL 终止和外部寿命由 unsafe 调用方证明。

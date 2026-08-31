@@ -42,25 +42,19 @@ trait Dim {
 
 这些在预导入里，编译器按名字挂钩。用户给自己的类型 `impl`，不能重新声明这些 trait。
 
-### `Print`
+### `Print` 与格式 trait
 
-插值与 `std.io.print` / `println` 把值写成 UTF-8 字节：
+默认插值与 `std.io.print` / `println` 通过 `Print` 构建 UTF-8 文本：
 
-```
+```text
 trait Print {
-    fn print(self: &Self, buf: &Vec[byte])
+    fn print(self: &Self, out: &Formatter)
 }
 ```
 
-`f"i = {i}"` 等价于往一个 `Vec[byte]` 里依次 `print` 各段，再把合法 UTF-8 做成 `string`。接收者是 `&Self`，避免插值大拷贝。不要把 `print` 理解成「直接写 stdout」——那是 `std.io` 在缓冲之后的 syscall。
+`Formatter` 在 `std.fmt`，只写当前构建中的 string，不直接执行 I/O。接收者是 `&Self`，避免格式化大值时产生语义复制。`Debug`、`Binary`、`Octal`、`LowerHex`、`UpperHex`、`LowerExp` 与 `UpperExp` 分别承接 `?`、`b`、`o`、`x`、`X`、`e`、`E` 格式码；不存在相应 impl 是编译错误，见[标准库 · 静态格式化](standard-library.md#静态格式化)。
 
-语言或标准库必须提供的 impl：
-
-- 内置标量、`string`、`bool`、`TypeId`
-- `Option[T]` / `Result[T, E]` / `Vec[T]`（元素实现 `Print` 时）
-- 数组 `[T; N]` 与元组（元素都实现 `Print` 时；由编译器生成，用户不必手写 `comptime N`）
-
-`#[derive(Print)]` 对结构体打印 `Name { field: ..., ... }`，对枚举打印变体名加载荷。整数十进制；`true` / `false`；`string` 输出内容本身（不配额外引号）；`NaN` / `inf` / `-inf` 按这些字面打印。
+语言或标准库必须为内置标量、string、bool、TypeId，以及元素满足约束的 Option、Result、Vec、数组和元组提供适用实现。`#[derive(Print)]` 对结构体打印 `Name { field: ..., ... }`，对枚举打印变体名加载荷。默认整数十进制；bool 输出 `true` / `false`；string 输出内容本身；`NaN` / `inf` / `-inf` 按这些字面打印。
 
 ### `IntoIter` / `Iter`
 
@@ -77,7 +71,9 @@ trait Iter {
 }
 ```
 
-`IntoIter::Iter` 必须实现 `Iter`，且 `Iter::Item` 与 `IntoIter::Item` 相同，否则该 impl 非法。`for x in xs` 是 `let it = xs.into_iter()` 再循环 `it.next()`。`xs` 按值传入 `into_iter`（句柄则共享载荷）。`[T; N]` 与 `&[T]` 的语言 impl **不**先 memcpy 整个数组，游标按索引逐个浅拷元素。`Range` 由语言提供 `IntoIter`。
+`IntoIter::Iter` 必须实现 Iter，且 `Iter::Item` 与 `IntoIter::Item` 相同，否则该 impl 非法。`for x in xs` 是 `let it = xs.into_iter()` 再循环 `it.next()`。xs 按值描述符传入 `into_iter`。`[T; N]` 与 `&[T]` 的语言 impl 不先复制整个数组，游标按索引逐个产生元素的语义副本。Range 由语言提供 IntoIter。
+
+标准集合的 IntoIter/Iter 实现捕获创建时快照并逐项产生语义副本；创建迭代器后的集合修改不会改变该迭代器观察到的序列，具体封存与分离成本见[标准库 · 集合与 Hash](standard-library.md#集合与-hash)。
 
 ### `Try`
 
@@ -109,7 +105,7 @@ trait Index {
 
 仅用户类型。`a[i]` 调 `index`；`a[i] = v` 调 `index_set`。`[T; N]`、`&[T]`、`Vec[T]`、`string` 不走此 trait。
 
-### `Fn` / `Eq` / `Ord` / `Clone`
+### `Fn` / `Eq` / `Ord` / `Hash` / 稳定键 marker / `Clone`
 
 `Fn(T) U` 见 [函数](functions.md)，不能用户 `impl`。`Any` 见下，同样不能用户 `impl`。
 
@@ -123,7 +119,11 @@ trait Ord {
 }
 ```
 
-`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Print)]` / `#[derive(Clone)]` 要求所有字段都实现对应 trait。`Ord` 必须是全序。`float` 的比较是内置 IEEE，语言不提供 `Ord`；用户也不能给 `float` 写固有 impl（固有 impl 只能写在该类型的定义模块）。含浮点字段的 `#[derive(Eq)]` 仍用 IEEE `==`。`TypeId` 的比较由编译器按编号直接做，并提供 `Eq` / `Ord`。数组与元组：编译器生成 `Clone` / `Eq` / `Ord` / `Print`（元素满足约束时）。`Clone` 见 [传递](passing.md)。
+`Hash` 把值的语义字段馈送给调用方选择的 hasher；相等值必须产生相同输入。`StableHash` 与 `StableOrd` 是没有方法的 unsafe marker trait：前者承诺该值副本的 Eq 与 Hash 可观察结果不能通过外部别名改变，后者对 Ord 作同一承诺。它们不使用 trait 继承；集合约束分别显式写成 `K: Eq + Hash + StableHash` 与 `K: Ord + StableOrd`。
+
+编译器为标量、按 byte 比较的 string/Bytes/Path 和其它内建不可变值提供 marker impl。`#[derive(StableHash)]` 要求本类型同时 derive Eq 与 Hash 且每个参与字段都实现 StableHash；`#[derive(StableOrd)]` 对称地要求 Ord 与 StableOrd。COW 字段在复制进键槽时封存 backing。含可变身份句柄或 resource 字段的类型不能安全 derive；若其 Eq/Hash/Ord 只观察不会变化的身份或其它稳定状态，作者可以显式承担 unsafe impl 契约。
+
+`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Clone)]` / `#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Hash)]` / `#[derive(Print)]` 要求所有参与字段都实现对应 trait；稳定键 marker 的额外派生约束见上。`Ord` 必须是全序，Hash 必须与 Eq 一致。`float` 的比较是内置 IEEE，语言不提供 `Ord`、`Hash` 或稳定键 marker；用户也不能给 `float` 写固有 impl（固有 impl 只能写在该类型的定义模块）。含浮点字段不能派生 Eq、Ord、Hash 或稳定键 marker。`TypeId` 的比较由编译器按编号直接做，并提供 Eq、Ord、Hash、StableHash 与 StableOrd。数组与元组：编译器生成适用的 Clone、Eq、Ord、Hash、StableHash、StableOrd 与 Print（元素满足约束时）。`Clone` 见 [传递](passing.md)。
 
 ### `Any`
 
