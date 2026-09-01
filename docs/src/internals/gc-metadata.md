@@ -318,21 +318,38 @@ flags:          u32
 
 function index与 stack-map function table相同，PC 为 function-relative 半开范围。path 是 package-relative逻辑 UTF-8路径，不含 workspace绝对路径；line/column 从 1开始。`source_strings_len` 不得超过 `u32::MAX`，每个 `path_offset/path_len` 都相对 source string pool并经 checked range验证。flags bit 0 `PANIC_SITE`、bit 1 `SYNTHETIC`，其余为 0。records 按 function index、pc_start、pc_end和路径 bytes排序，范围可以因内联 attribution嵌套；查找选择覆盖 PC 的最短范围，再按记录序打破相等。source string pool按 bytes去重排序，`.gugu.meta` 与运行时 panic/backtrace所需记录不得被 `--strip` 删除。
 
+## scheduler non-moving slab 与 queue-page grace
+
+scheduler raw控制对象不进入moving GC heap。`CoroutineSlot` 固定为128 byte，由相邻的64-byte `CoroutineHot`与64-byte `StackDescriptor`组成；`CoroutineCold`按编译期固定size class分配。两者使用64 KiB分段slab page，page扩容只追加，slot地址和`cold_index`解析在page存活期间不变。`run_link_next`、remote/injection head、producer staging和detached carry只保存`CoroutineHot*`，不得指向可移动对象或另建GC forwarding indirection。hot slot、cold record、wait-node和stack的完整已提交bytes都计入runtime memory limit与内部统计。
+
+slot成为`Dead`后，只有在stack已归还、最后一个Join/handle与runtime root释放、state不含`ENQUEUED|BATCH_PUBLISHING|STACK_SCAN_LOCKED`且所有queue位置都不再引用它时，才能回到同page free list。复用slot必须分配新的`CoroutineId`并推进相应generation；`CoroutineHot*`的allocation/provenance不变。普通复用不等待queue epoch，因为batch producer只把旧head当不透明pointer值、consumer只用atomic exchange摘整链且不会基于旧head执行consumer CAS。
+
+整页解除映射使用独立的queue-page grace，而不是每次enqueue执行generic EBR pin：
+
+1. allocator只选择全部slot均free、未出现在任何head/staging/carry/local/run_next/registry的page，先从free page集合摘除；
+2. coordinator在queue control word中Release发布新的`slab_epoch`与reclaim gate，并阻止新queue participant登记；epoch发布时`publish_active`为true的processor、worker、poller和foreign/callback producer必须完成当前head CAS或detached遍历、flush `pending_node/staging`，到达不持有raw queue pointer的checkpoint后Release写`slab_epoch_seen`并清active；当时inactive的participant不能越过gate开始新batch；
+3. coordinator Acquire等待全部旧epoch participant确认，并再次验证page仍为空且没有queue ownership；此后旧opaque head、局部`next`或staging pointer都不可能重新发布该page；
+4. 才能decommit/unmap hot与cold page并重新开放participant登记。
+
+该grace只在完整GC后的内存回收、memory-limit压力、processor/worker teardown或runtime终止触发；普通publish/pop不读全局slab epoch、不写共享participant计数、不发SeqCst fence。无法让任一registered participant越过checkpoint时保留page，不能用超时猜测安全。
+
 ## root 枚举
 
 一个 GC cycle 的根来源封闭为：
 
-1. 已停协程按[栈图](stack-maps.md)给出的 stack/register root；`Foreign` 与 `DirtyWaiting` 使用保存 PC 的 `ForeignBridge` map 扫描 coroutine stack上的 ABI bridge frame；
-2. `RootRecord` 声明的 global，以及所有已登记 OS thread/TLS 实例和全部 coroutine 的已初始化 local payload；
-3. scheduler/runtime 自己的强句柄表、等待队列载荷和 resource release queue；
-4. 外部线程回调桥建立的临时 root handle；
-5. 正在执行的 pin side table entry。
+1. 已停协程按[栈图](stack-maps.md)给出的 stack/register root；`Foreign` 与 `DirtyWaiting` 使用保存 PC 的 `ForeignBridge` map扫描coroutine stack上的ABI bridge frame；
+2. `RootRecord` 声明的global，以及所有已登记OS thread/TLS实例和全部live `CoroutineCold`的已初始化 coroutine-local payload；
+3. scheduler/runtime的强句柄表、`ProducerHandle.pending_node/staging`、remote/injection head、detached carry、`run_next`、LocalDeque、等待队列载荷、Join结果和resource release queue；
+4. 外部线程回调桥建立的临时root handle；
+5. 正在执行的pin side table entry。
 
-runtime 私有结构必须通过固定的 typed root visitor枚举，不允许对其内存做保守扫描。`ForeignBridgeState` 自身不保存 managed pointer；`lease_word` 是 generation-tagged lifecycle整数，其余字段以 `(Coroutine*, stack_high-relative frame_offset)` 定位 ABI frame。collector在 `STACK_SCAN_LOCKED` 下根据调用点 map扫描和更新其中的 managed root。
+root snapshot开始前，coordinator除停止active processor外，还发布producer stop epoch：每个registered producer完成当前batch CAS、把`pending_node/staging`留在登记record并确认；remote/injection consumer完成当前detached节点的`next`保存或把carry登记后确认。未进入runtime调用的native线程没有staging；正处于runtime callback/waker的线程必须在返回native前经过该checkpoint。全部确认后，queue head与所有owner-only位置在本次snapshot内稳定；恢复时先Release发布metadata，再解除producer gate。不能扫描任意native OS stack来替代该协议。
 
-普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 都只通过已保存的 Gugu stack/map和显式 pin暴露根。attached普通 bridge遇到 GC stop时由 collector按完整 generation立即 retake并转为 detached，不等待 native线程合作；foreign/dirty worker的 OS stack、C/C++ stack和 opaque asm寄存器绝不保守扫描。传给 native的 managed地址必须在进入前 pin，或复制到 non-moving storage。native work永不返回时，相关 coroutine frame/pin会一直保留；普通 processor lease仍可被 GC/scheduler取回，因此该 native work不阻止其它 heap的 mark、relocation或 stop epoch完成。
+runtime私有结构必须通过固定typed root visitor枚举，不允许对其内存做保守扫描。visitor以live registry和queue ownership定位`CoroutineHot`，再由`cold_index`解析`CoroutineCold`；`run_link_next`、`run_batch_len`、processor pointer和slab free metadata都不是managed root。`ForeignBridgeState`自身不保存managed pointer；`lease_word`是generation-tagged lifecycle整数，其余字段以`(CoroutineHot*, stack_high-relative frame_offset)`定位ABI frame。collector在`STACK_SCAN_LOCKED`下根据调用点map扫描和更新其中的managed root。
 
-stack arena、processor stack cache和已经从 live coroutine registry摘除的 slot不属于 root。coroutine完成 defer后，必须先在旧 stack上用 GC barrier把 result或 panic payload移入控制块，再由 `finish_coroutine` 单向切到 worker system stack；持有 `STACK_SCAN_LOCKED` 停止 typed visitor遍历旧 stack并发布空 descriptor后，slot才能交给 cache，随后发布 `Dead`。仍存活的 Join/handle只保留控制块与结果。缓存字节中的旧 pointer pattern绝不保守扫描。Waiting/Runnable stack的冷压缩同样必须持有 scan lock，用旧 map完成全部 `StackInterior`修正并发布新 descriptor后，旧 slot才可进入 cache。
+普通`ForeignBridge`与`ForeignBridge[DirtyCpu]`都只通过已保存的Gugu stack/map和显式pin暴露根。attached普通bridge遇到GC stop时由collector按完整generation立即retake并转为detached，不等待native线程合作；foreign/dirty worker的OS stack、C/C++ stack和opaque asm寄存器绝不保守扫描。传给native的managed地址必须在进入前pin，或复制到non-moving storage。native work永不返回时，相关coroutine frame/pin会一直保留；普通processor lease仍可被GC/scheduler取回，因此该native work不阻止其它heap的mark、relocation或stop epoch完成。
+
+stack arena、processor stack cache和已经从live coroutine registry摘除的stack slot不属于root。coroutine完成defer后，必须先在旧stack上用GC barrier把result或panic payload移入cold control record，再由`finish_coroutine`单向切到worker system stack；持有`STACK_SCAN_LOCKED`停止typed visitor遍历旧stack并发布空descriptor后，stack slot才能交给cache，随后发布`Dead`。仍存活的Join/handle只保留hot/cold control slot与结果。缓存字节中的旧pointer pattern绝不保守扫描。Waiting/Runnable stack的冷压缩同样必须持有scan lock，用旧map完成全部`StackInterior`修正并发布新descriptor后，旧stack slot才可进入cache。
 
 ## write barrier 与 remembered set
 
@@ -368,7 +385,7 @@ major cycle：
 6. 重建 card、关闭 barrier并恢复 mutator；
 7. GC worker与 mutator并发 sweep未 evacuate的 old/resource block，按 line回收死亡对象、把受限 resource动作送入 release queue，并把完全空 block/页归还全局池或 OS。
 
-GC stop 的完成条件只统计 active `LogicalProcessor`。普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 和 `DirtyWaiting` 都没有 processor，因而不需要确认 stop；它们的 ABI frame roots在根枚举阶段保持可见，native work完成后再通过普通 resume safepoint回到 managed heap。
+GC mutator stop的managed执行确认只统计active `LogicalProcessor`；root snapshot还必须等待当时已登记且正在runtime queue primitive中的producer/consumer确认producer stop epoch。停留在普通`ForeignBridge`、`ForeignBridge[DirtyCpu]`或`DirtyWaiting`的native work没有processor且不执行queue primitive时不确认stop；其ABI frame roots保持可见，native线程随后进入callback/waker前必须先经过producer gate。native work完成后再通过普通resume safepoint回到managed heap。
 
 GC worker解释 trace program时使用显式小栈；嵌套上限 32，采用固定 `[TraceFrame; 32]`。mark queue和 release queue无固定上界，使用分段 work deque/pool；并发 sweeper只能取得 block的 `Sweeping` lease，allocator只能取得 `Allocating` lease。
 
@@ -386,6 +403,8 @@ GC worker解释 trace program时使用显式小栈；嵌套上限 32，采用固
 - object header TypeId、payload size、forward 地址和 generation 状态合法；
 - strip 后所有 type/root/vtable/source record、stack map 和 glue 仍存在。
 - `BarrierPermitId` 的 `max_shades` 与 concrete descriptor一致、只关联一个 `NoSafepointRegion`且静态消费不超额，所有 `GcWriteBarrierReserved` 都没有 refill edge；不可见 transfer reservation具有合法 generation、trace descriptor和唯一 publish/cancel结局；
+- `CoroutineHot`、`StackDescriptor`、`CoroutineSlot`的size/alignment/offset与scheduler/backend schema完全一致；所有live cold index可解析，queue root的state/ownership唯一，`run_batch_len`与chain边界合法；
+- slab free slot不含queue/root/scan ownership，page candidate从allocation集合隔离；queue-page grace的participant集合、epoch确认和二次空页验证全部完成后才出现decommit/unmap action；普通queue trace中不能出现per-publish epoch pin、全局refcount或SeqCst fence；
 
 任何静态验证失败阻止产出镜像；Booting 中发现损坏进入 `RuntimeInvariant` fatal。runtime 不能忽略未知 opcode 或把未知类型按无指针对象扫描。
 

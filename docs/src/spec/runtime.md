@@ -49,7 +49,7 @@ ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault 
 
 字节量使用十进制无符号整数，后面可以跟 `B`、`KiB`、`MiB`、`GiB` 或 `TiB`；乘法溢出、零值、未知后缀和其它拼写都是 `InvalidConfiguration`。`GUGU_RUNTIME_PROCS` 不允许 `0`。`GUGU_RUNTIME_TRACE` 的类别名只能是 `scheduler`、`gc`、`signal`、`panic`，重复项合并；`all` 等价于四类全部打开，未知类别属于 `InvalidConfiguration`。`GUGU_RUNTIME_DIAGNOSTICS` 和 `GUGU_BACKTRACE` 只能使用表中列出的值，否则同样属于 `InvalidConfiguration`。`GUGU_RUNTIME_GC_TARGET=off` 只关闭按堆增长触发的自动周期，内存上限和分配失败仍可以强制启动 GC。
 
-运行时环境变量是已编译程序的运行时输入，不参与 package 依赖解析、源码 `cfg` 或编译缓存 key。工具链只负责把环境传给 `gugu run` 启动的程序；直接运行镜像时由宿主环境提供这些值。
+`parallelism` 在执行期间可动态改变。新的并行度对随后开始的managed work生效，已在运行的coroutine不因调整立即迁移。setter 的调度切换是线性化动作，完成前必须由scheduler建立/退役相应processor、发布新的稠密active snapshot并更新processor pool；降低时不能复用旧processor ID，增加时不能按上限预分配thread。公开接口不设置固定processor硬上限，但runtime scheduler元数据必须随实际active processor保持`O(P)`，不得构造`P × P` mailbox；必要资源无法取得时进入`RuntimeInvariant` fatal，不能只更新可见数字形成部分状态。平台因容器/沙箱无法读取quota时可以回退logical processor count，但不能把宿主总核数误称为quota结果。
 
 ## 并行度与阻塞边界
 
@@ -301,7 +301,7 @@ fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 
 `GcTarget::Automatic(p)` 的 `p` 是非负百分数：下一次自动周期的目标堆量为上一次周期结束时存活堆量加上该百分比；`Automatic(100)` 是默认行为。`GcTarget::Off` 关闭增长触发，但不关闭显式 `collect()`、内存上限触发或分配失败前的强制回收。setter 返回旧值，已经开始的 GC 周期不因设置改变而回滚。
 
-`set_memory_limit(Some(n))` 设置 runtime 管理的已提交 heap、stack、allocator metadata与内部 cache的软上限，`None` 恢复无上限；仅保留地址空间但尚未提交的 stack arena计入 `stack_reserved_bytes`，不计入该软上限。setter 返回旧上限，不能撤销已经提交的页，也不能终止外部库分配。到达上限后，runtime依次完成一次完整 GC、flush processor stack cache、decommit完全空闲的 stack页，并压缩从上一个完整 GC以来未增长的 Waiting stack，再决定分配失败；压力路径的额外复制只在上限施压时发生。`collect()` 请求一个从调用线性化点之后开始的完整 GC周期并挂起当前协程直到完成；其它可运行协程可以继续。显式 collect不保证空闲页归还 OS，也不运行 finalizer。
+`RUNTIME_MEMORY_LIMIT` 是runtime管理的soft limit，完整口径包括managed heap及GC metadata、stack arena reservation/commit、stack cache、hot/cold coroutine control slab、wait-node/producer staging、queue carry元数据，以及runtime可归因的native I/O buffer；不承诺限制用户自行取得的opaque foreign allocation、native库内部arena、代码/只读metadata、OS thread stack或映射镜像。runtime以同一口径进行limit判断并在内部memory accounting与trace中记录组成，不能把control slab或cache从触发条件中排除。
 
 `stack_limit()` 返回当前每协程逻辑栈上限。栈上限只能由 `GUGU_RUNTIME_STACK_MAX` 在启动时设置；本版本不提供降低活动栈上限的动态 setter，因为那会使已存在的栈无法满足安全返回条件。
 

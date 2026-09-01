@@ -10,7 +10,7 @@
 
 ## 目标描述符与数值 lowering
 
-当前后端只实现平台注册表中的 `x86_64-linux` 和 `x86_64-windows`。每个 toolchain安装携带不可变 `TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision }`；目标运行时路径与宿主 sysroot分离，descriptor整体进入 compiler identity和 action key，backend不探测宿主 PATH。
+当前后端只实现平台注册表中的`x86_64-linux`和`x86_64-windows`。每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；release镜像只编入该profile选中的一种deque，不生成运行时mode分支。
 
 CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-基线)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。
 
@@ -129,7 +129,11 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 
 budgeted/显式 safepoint poll以 `AtomicLoadAcquire [r15 + poll_flags_offset]`读取当前 processor的两位普通内存 word；x86_64 lowering固定为一次 `test dword ptr [r15 + offset], 0b11` 和 unlikely branch，值为0时不访问 coroutine state、requested epoch或全局 `gc_stop_epoch`。counted strip-mined loop只在 outer chunk edge执行该检查，poll-free inner loop复用既有 induction/latch，不生成独立 countdown或额外每轮分支；只有 uncounted interval大于1的循环路径每次 cycle更新 SSA countdown，到0才读取 poll word。taken cold edge按普通 call-clobber规则 spill全部跨 poll活跃的 caller-saved scalar与 `V128`，并用对应 `PollResume` map保存 roots后切 system stack；fast fallthrough不执行这些 spill。函数入口不发 poll-word load，而由 poisoned `stack_check`复用 prologue容量比较。write barrier、`ForeignLeaf`和普通/dirty bridge规则保持各自 effect fence与交接语义。
 
-runtime layout query还必须验证 `StackDescriptor`、`PollControl` 与 `ProcessorOwnership` 的 size/alignment均为64，`Coroutine.stack`、`LogicalProcessor.poll` 和 `LogicalProcessor.ownership` 的 offset均按64对齐，并证明 poll与ownership范围不重叠。prologue只从 `[r14 + stack_check_offset]`读取 `StackDescriptor` line；loop/显式 poll只从 `[r15 + poll_flags_offset]`读取 `PollControl` line。两种 fast path都恰有一次 ordinary acquire memory operand，禁止附加 lifecycle/global epoch load。任一 layout断言失败都是 compiler/runtime schema不匹配，镜像构建必须失败，不能改用未对齐访问。
+runtime layout query还必须验证`CoroutineHot`与`StackDescriptor`的size/alignment均为64、`CoroutineSlot`的size/alignment为128/64、`offset_of!(CoroutineSlot, stack) == 64`，`PollControl`与`ProcessorOwnership`的size/alignment均为64，`LogicalProcessor.poll/ownership`按64对齐且范围不重叠，以及RemoteBatchHead、LocalDeque head/tail、idle event counter分别占用128-byte padded区域。query返回的`stack_check_offset`是从`CoroutineHot*`基址到descriptor字段的absolute offset，因此prologue仍从`[r14 + stack_check_offset]`读取；loop/显式poll只从`[r15 + poll_flags_offset]`读取`PollControl` line。两种fast path都恰有一次ordinary acquire memory operand，禁止附加lifecycle/global epoch load。任一layout/profile断言失败都是compiler/runtime schema不匹配，镜像构建必须失败，不能改用未对齐访问或其它queue mode。
+
+BatchInbox每个publish batch先Release写producer-local`publish_active`、Acquire读一次read-mostly queue control word；这两步不能移动到节点state/link修改之后。ordinary `run_link_next/run_batch_len`写必须保持在head Release CAS之前；CAS成功后seen epoch/staging clear与Release清active不得移动到它之前。x86_64把Relaxed head load降为普通`mov`、Release/Relaxed compare-exchange降为`lock cmpxchg`、Acquire `head.swap(null)`降为`xchg`，并由LIR effect edge阻止compiler重排；不得额外插入generic epoch pin、SeqCst fence或per-node atomic link。empty-to-nonempty才生成`work_seq`的locked RMW。consumer的ordinary link读必须位于Acquire exchange之后，并在清queue ownership前保存`next`。
+
+Batch publish的CAS retry是合法cyclic runtime CFG，不得包在`NoSafepointRegion`中；`ProducerHandle.pending_node/staging`使poll或GC edge拥有完整typed roots。LocalDeque slot普通load/store只有在所选`Classic64`或`Packed55`算法的ticket ownership证明成立时才能生成；instruction verifier检查Classic64的SeqCst fence/最后一项CAS，或Packed55的single-word AcqRel reservation/commit与`RESETTING`序列，不能把两个mode的内存序拼接。Packed55不能lower为两个独立`u32` lane或16-byte隐藏锁fallback。
 
 `NoSafepointBegin/End` 在 instruction scheduling、poll placement和 verifier阶段保持 effect fence，encoder不为 marker写任何 byte、relocation或 stack map。marker内的 reserved-barrier、atomic和 unlock仍按各自机器指令编码；删除 marker不能允许相邻普通操作跨 region边界重排。
 
@@ -211,7 +215,7 @@ epilogue从固定 slot恢复 callee-saved、`add rsp, frame_size`、`ret`。prol
 
 ## stack map、panic 与 unwind
 
-普通 `ForeignBridge` lowering把 `foreign_bridge.lease_word` 作为完整64-bit expected state。native返回的 hot block只执行一次 `lock cmpxchg qword ptr [r14 + state_offset]`，从精确 `Foreign(g)` 转为 `Running(g)`；成功边先检查当前 processor pending poll/GC再直接恢复 coroutine stack，不能访问 global queue或 scheduler mutex。失败边是 cold block，调用 runtime等待 scan lock、取得 idle processor或 enqueue。该 CAS同时线性化 lifecycle与 processor lease，backend不得另发 `_Psyscall`式 processor状态 store/CAS。DirtyCpu mode在 metadata中固定为 detached并跳过该 hot block。bridge call仍按 C ABI clobber caller-saved值并在进入前物化全部 pointer roots；返回快路径不削弱 stack map要求。
+普通`ForeignBridge` lowering把`foreign_bridge.lease_word`作为完整64-bit expected state。native返回的hot block只执行一次`lock cmpxchg qword ptr [r14 + state_offset]`，从精确`Foreign(g)`转为`Running(g)`；成功边先检查当前processor pending poll/GC再直接恢复coroutine stack，不能访问BatchInbox、injection或任何scheduler控制锁。失败边是cold block，调用runtime等待scan lock、取得idle processor或通过登记的ProducerHandle batch publish。该CAS同时线性化lifecycle与processor lease，backend不得另发`_Psyscall`式processor状态store/CAS。DirtyCpu mode在metadata中固定为detached并跳过该hot block。bridge call仍按C ABI clobber caller-saved值并在进入前物化全部pointer roots；返回快路径不削弱stack map要求。
 
 寄存器分配后按[栈图](stack-maps.md)生成 safepoint root。`CallReturn`/suspend/普通 `ForeignBridge`/`ForeignBridge[DirtyCpu]` 点把所有用户 pointer spill；两种 bridge在 coroutine stack物化 ABI frame并以 high-relative offset登记，native段不生成 native stack map。counted inner chunk edge与 uncounted countdown-only edge都没有 map，只有实际 poll-word检查后的 resume label生成 `PollResume`；poisoned prologue复用 `MorestackEntry`。`ForeignLeaf`只有在其它 effect要求 `CallReturn` 时才建立普通调用记录。instruction offset在 branch relaxation和encoding后最终回填。
 
@@ -281,11 +285,13 @@ encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcod
 - 验证所有 branch/relocation range、symbol resolution和 section权限；
 - 验证 internal/C ABI 参数、callee-save、stack alignment和返回分类；
 - 验证 frame、stack map、unwind和 landing pad逐函数一致；
+- 验证runtime tuning profile digest、所选`LocalDequeMode`和layout query完全一致，release镜像中不存在未选mode或热路径mode branch；
+- 验证BatchInbox每条publish路径的link store先于Release CAS、staging clear晚于CAS，consumer link load晚于Acquire exchange；Classic64/Packed55只使用各自规定的fence/CAS序列，queue common path不调用generic epoch、allocator或control mutex；
 - 验证 ELF/PE header、segment/section、import/export、TLS、relocation和入口范围；
 - 确认 writable section不可执行、stack不可执行、metadata只读且 strip保留；
 - 对相同 image plan重放编码并比较 bytes，禁止时间戳、随机 GUID和目录顺序进入输出。
 
-目标测试使用固定 LIR fixture和 C对照 fixture覆盖整数/floating边界、聚合 ABI、register压力、spill、critical edge、branch relaxation、i128、atomic、panic unwind、stack growth、GC safepoint、no-safepoint marker零编码、ELF relocation和 PE unwind/import。机器码 fixture还必须逐指令断言普通 prologue只有一次 `[r14 + stack_check]` load与共享容量/poll冷分支，budget poll只有一次 `[r15 + poll_flags]` load，并且两者没有 lifecycle/global epoch访问。真实执行 smoke test分别直接启动 Linux ELF和 Windows目标环境中的 PE；只比较反汇编文本不能证明镜像可运行。
+目标测试使用固定LIR fixture和C对照fixture覆盖整数/floating边界、聚合ABI、register压力、spill、critical edge、branch relaxation、i128、atomic、panic unwind、stack growth、GC safepoint、no-safepoint marker零编码、ELF relocation和PE unwind/import。机器码fixture还必须逐指令断言普通prologue只有一次`[r14 + stack_check]`load与共享容量/poll冷分支，budget poll只有一次`[r15 + poll_flags]`load，并且两者没有lifecycle/global epoch访问；BatchInbox每个publish batch只有producer-local active/seen store、一次queue-control load、普通link写、head `lock cmpxchg`和可选empty-transition通知，consumer只有Acquire exchange与普通link读；所选LocalDeque mode的机器序列与profile一致。真实执行smoke test分别直接启动Linux ELF和Windows目标环境中的PE；只比较反汇编文本不能证明镜像可运行。
 
 ## 参考实现资料
 

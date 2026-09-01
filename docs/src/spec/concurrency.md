@@ -33,6 +33,14 @@ signal/APC 只向当前 `LogicalProcessor` 发布抢占/GC请求、投毒正在�
 
 CPU自旋仍然是 `Running` 计算：预算化 poll能让它被抢占，但整个 chunk都会持续占用 CPU。网络等待、channel、计时器和 `std.sync`锁竞争走 `park`，只挂起当前协程，不占住承载它的 worker/processor；这与 CPU抢占是两套机制。poll预算和机器成本表属于 compiler实现与缓存 schema，不是用户可观察的时间片或 wall-clock保证。
 
+## Runnable 顺序与公平
+
+runnable coroutine没有进程级FIFO顺序。当前processor的`run_next`/local deque优先保持局部性；跨processor ready、poller/timer completion、local overflow和steal可以经过分片batch inbox或NUMA injection，因此不同producer、不同shard和不同processor之间允许重排。preferred processor只是性能hint，不建立线程亲和性或后续执行位置保证。程序不能用两个独立wake的观察顺序替代channel、atomic、Join或其它同步。
+
+runtime提供弱公平而非wall-clock时间片：只要进程继续运行、coroutine持续保持Runnable且没有违反`ForeignLeaf`/unsafe契约，它不能被持续产生的新local或remote工作永久排除。实现必须对`run_next`连续命中设限，周期性服务remote/injection，按round-robin检查分片，并在每个detached carry清空前阻止同shard的新head越过；这些service interval、batch size和窃取策略是内部性能schema，不是可观察的纳秒或调度次数承诺。
+
+显式`yield`把当前coroutine放入普通local tail，使当时已有runnable至少获得一次被选择机会；它不承诺下一个执行者、全局FIFO或迁移到其它processor。动态降低parallelism时，Retiring processor上的ready、carry和timer必须完整转移，但它们与其它processor已有工作仍只有上述弱顺序。
+
 ## Channel
 
 `chan[T]` 是语言内建的身份句柄类型。
