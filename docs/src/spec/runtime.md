@@ -53,13 +53,13 @@ ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault 
 
 ## 并行度与阻塞边界
 
-`parallelism` 是同时执行 Gugu 用户代码的目标并行度，不等同于 OS 线程数量，也不赋予程序可观察的处理器身份。阻塞 I/O、计时器等待、channel/锁等待和可能阻塞的外部调用都会挂起当前协程；在[并发公平规则](concurrency.md#抢占)允许的范围内，其它 runnable 协程仍须能够取得执行机会。
+`parallelism` 是同时执行 Gugu 用户代码的目标并行度，不等同于 OS 线程数量，也不赋予程序可观察的处理器身份。阻塞 I/O、计时器等待、channel/锁等待和 `ForeignBridge` 外调会挂起当前协程；`ForeignLeaf` 外调不释放当前 `LogicalProcessor`，也不会把当前协程转换为 `Foreign`。在[并发公平规则](concurrency.md#抢占)允许的范围内，其它 runnable 协程仍须能够取得执行机会。
 
 `parallelism` 的初始值来自 `GUGU_RUNTIME_PROCS`。`std.runtime.set_parallelism(n)` 要求 `n > 0`，成功时发布新目标并返回旧值。增加目标允许 runtime 按需增加并行执行能力；降低目标不中断正在执行的协程、系统调用或外部函数。调用返回表示新目标已经发布，不表示底层 OS 线程数量已经立即收敛。超过宿主 CPU 数量的值合法，但不产生吞吐量保证。
 
-runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和 `extern "C"`，但这些线程怎样与协程和并行执行槽映射只见[调度器内部规范](../internals/scheduler.md)。外部调用期间函数仍在原 OS线程执行，返回后协程按普通调度恢复；外部代码回调 Gugu 必须遵守[平台与 ABI 参考](platform-abi.md)的线程进入和回调边界。
+runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和 `ForeignBridge`；`ForeignLeaf` 始终在当前 worker 和 processor 上直接执行，不触发这项线程扩张。各种外调怎样与协程和并行执行槽映射只见[调度器内部规范](../internals/scheduler.md)。外部调用期间函数仍在原 OS 线程执行，返回后协程按普通调度恢复；外部代码回调 Gugu 必须遵守[平台与 ABI 参考](platform-abi.md)的线程进入和回调边界。
 
-用户协程不能把并行执行槽、工作线程编号或当前 OS 线程身份当作调度稳定性的一部分。`#[os_thread_local]` 只表示 OS 线程槽，`#[coroutine_local]` 只表示协程槽；动态并行度和阻塞外调都可能改变二者的使用时机。
+用户协程不能把并行执行槽、工作线程编号或当前 OS 线程身份当作调度稳定性的一部分。`#[os_thread_local]` 只表示 OS 线程槽，`#[coroutine_local]` 只表示协程槽；动态并行度、阻塞等待和 `ForeignBridge` 都可能改变二者的使用时机。
 
 调度公平、抢占、`yield`、channel 和同步原语的可见性见[并发与调度](concurrency.md)。safepoint、队列、context保存与外调交接只见[调度器](../internals/scheduler.md)和[栈图](../internals/stack-maps.md)；这些机制不能改变既有 happens-before、原子内存序或资源租约规则。
 

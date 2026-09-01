@@ -153,7 +153,8 @@ place               ::= postfix_expression ;
 `let`带初始化器时的模式必须可判定；先声明后赋值只允许简单标识符。`expression terminator`中的分号仅表示丢弃该表达式的值；没有分号的最后表达式是块值。块为空时值为 `()`。赋值不是表达式，因此不能嵌套在调用参数、运算符或条件中。
 
 ```ebnf
-expression          ::= if_expression
+expression          ::= attribute* expression_core ;
+expression_core     ::= if_expression
                       | match_expression
                       | try_expression
                       | loop_expression
@@ -166,6 +167,8 @@ expression          ::= if_expression
                       | break_expression
                       | continue_expression
                       | logical_or_expression ;
+
+`attribute*` 是表达式的语法前缀；属性的可附着位置仍由[词法 · 属性](lexical.md#属性适用位置与冲突)限制。例如 `#[ffi(bridge)]` 可以放在调用表达式前，但不是运行时包装函数。
 
 if_expression       ::= "if" condition block ["else" (if_expression | block)] ;
 condition            ::= condition_part ("&&" condition_part)* ;

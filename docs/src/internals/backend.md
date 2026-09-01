@@ -121,7 +121,7 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 
 只有 descriptor不含 `HAS_RESOURCE`、请求不 large/pinned、高对齐且 footprint不跨 Immix block时才走 allocation fast path。当前 `[r15 + tlab_cursor_offset]`/limit只覆盖 processor本地 span中的一个连续空 line run；checked计算 16 byte header、对齐 padding和 payload，成功时推进 cursor并初始化 header。run不足调用 `gc_refill_line`，它先在本地 8-block span推进 line表，span用尽才访问全局 heap；其它请求调用 `gc_alloc_slow`。offset与 `HeapLayout`由 runtime layout query固定并进入 backend schema。
 
-safepoint poll 读取 `[r14 + state_offset]` 的 preempt/GC bits，通常分支不 taken；slow path 保存登记寄存器并切 system stack。write barrier 先测试全局 marking flag 和 generation/card 条件，调用/inline 规则必须与[GC 元数据](gc-metadata.md#write-barrier-与-remembered-set)相同。
+safepoint poll 读取 `[r14 + state_offset]` 的 preempt/GC bits，通常分支不 taken；slow path 保存登记寄存器并切 system stack。write barrier 先测试全局 marking flag 和 generation/card 条件，调用/inline 规则必须与[GC 元数据](gc-metadata.md#write-barrier-与-remembered-set)相同。`ForeignLeaf` 直接按目标 C ABI 发出调用，不执行 processor 释放或 system-stack bridge；调用前的 `StackCheck` 必须覆盖 caller frame 与声明的 leaf stack budget。未标注和 `ForeignBridge` 调用发出完整交接桩。
 
 ## block layout 与 branch relaxation
 
@@ -196,7 +196,7 @@ epilogue 从固定 slot恢复 callee-saved、`add rsp, frame_size`、`ret`。pro
 
 ## stack map、panic 与 unwind
 
-寄存器分配后按[栈图](stack-maps.md)生成 safepoint root。`CallReturn`/suspend/foreign 点把所有用户 pointer spill；poll可以记录 register root。instruction offset在 branch relaxation 和 encoding 后最终回填。
+寄存器分配后按[栈图](stack-maps.md)生成 safepoint root。`CallReturn`/suspend/`ForeignBridge` 点把所有用户 pointer spill；`ForeignLeaf` 只有在其它 effect 要求 `CallReturn` 时才建立普通调用记录，不能作为 bridge safepoint。leaf 的 pre-call `StackCheck` 仍是独立 safepoint，若增长 stack 必须先完成复制和 root 修正。poll可以记录 register root。instruction offset在 branch relaxation 和 encoding 后最终回填。
 
 每个 function 生成唯一 `UnwindFunction { code_rva: u64, code_size: u32, frame_size: u32, saved_gpr_mask: u16, landing_start: u32, landing_count: u16, flags: u16 }`。landing table 每项固定为 `LandingRecord { pc_start: u32, pc_end: u32, landing_pc: u32, cleanup_chain: u32 }`，按 `pc_start` 严格递增且范围不重叠；offset 都相对 function code 起点，`cleanup_chain == u32::MAX` 表示只恢复传播。
 

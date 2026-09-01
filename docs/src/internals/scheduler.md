@@ -14,9 +14,9 @@
 
 - `Coroutine`：用户协程，拥有可复制 stack、寄存器 context、coroutine-local 和等待状态；
 - `LogicalProcessor`：执行 Gugu 用户代码所需的 runtime capability，数量等于当前 `parallelism` 目标；
-- `WorkerThread`：操作系统线程，绑定一个 processor 时执行用户代码，也能在无 processor 时执行 foreign call、poller 和 runtime 系统工作。
+- `WorkerThread`：操作系统线程，绑定一个 processor 时执行用户代码，也能在无 processor 时执行 `ForeignBridge`、poller 和 runtime 系统工作。
 
-一个 `Coroutine` 同时最多由一个 worker 执行；一个 `LogicalProcessor` 同时最多绑定一个 worker；一个 worker 同时最多绑定一个 processor。阻塞 foreign/system call 可以保留 worker 而释放 processor。
+一个 `Coroutine` 同时最多由一个 worker 执行；一个 `LogicalProcessor` 同时最多绑定一个 worker；一个 worker 同时最多绑定一个 processor。阻塞的 `ForeignBridge`/system call 可以保留 worker 而释放 processor。
 
 ID 表示固定为 `CoroutineId(u64)`、`LogicalProcessorId(u64)` 和 `WorkerThreadId(u64)`，进程内单调分配且不复用。计数溢出说明 runtime 内部不变量已破坏，进入 `RuntimeInvariant` fatal，不能回绕。
 
@@ -108,7 +108,7 @@ per-processor timer 使用以 deadline、timer sequence 为键的连续 binary m
 
 ## WorkerThread
 
-worker 状态固定为 `Booting`、`Running`、`Spinning`、`Parked`、`Foreign` 和 `Stopping`。每个 worker 使用宿主创建的 non-moving OS stack 运行 rt0、scheduler、GC slow path、signal/exception handler 和 C foreign call；Gugu 用户代码运行在 coroutine stack。
+worker 状态固定为 `Booting`、`Running`、`Spinning`、`Parked`、`Foreign` 和 `Stopping`。每个 worker 使用宿主创建的 non-moving OS stack 运行 rt0、scheduler、GC slow path、signal/exception handler 和 `ForeignBridge` C call；`ForeignLeaf` C call 与 Gugu 用户代码一样运行在 coroutine stack。
 
 worker TLS 保存 `WorkerThread*`、当前 processor、当前 coroutine、system-stack bounds、barrier buffer 和 foreign callback depth。TLS 不承载 coroutine-local 用户值。
 
@@ -171,7 +171,7 @@ coroutine 的 `select_rng` 使用 xoshiro256++。一次 next 固定为 `result =
 
 每个 processor 的 timer heap 归该 processor owner 修改；跨 processor 新 timer 通过目标 processor 的 timer inbox 发布并唤醒 poller。全局维护所有 heap 最早 deadline 的原子近似值；过早值只导致多一次 wake，过晚值不允许。
 
-Linux 使用一个进程级 epoll fd、eventfd wakeup 和 timerfd；Windows 使用一个进程级 IO completion port 与 waitable timer。poller 线程/无工作的 worker 把完成事件转换为对应 wait generation 的 ready。regular file、无法异步化的系统调用和所有 `extern "C"` 不占 poller，走 blocking/foreign 交接。
+Linux 使用一个进程级 epoll fd、eventfd wakeup 和 timerfd；Windows 使用一个进程级 IO completion port 与 waitable timer。poller 线程/无工作的 worker 把完成事件转换为对应 wait generation 的 ready。regular file、无法异步化的系统调用和 `ForeignBridge` 不占 poller，走 blocking/foreign 交接；`ForeignLeaf` 留在当前 worker 上直接执行。
 
 poller每批返回事件时保留 OS 提供的批内顺序并写 global ready queue；多事件之间不得额外构造强于[并发规范](../spec/concurrency.md)的可观察先后。timer deadline相同则按 timer ID递增入队，只用于确定实现输出。
 
@@ -181,7 +181,7 @@ poller每批返回事件时保留 OS 提供的批内顺序并写 global ready qu
 
 新用户 coroutine 获得 8 KiB usable stack，加一页不可访问 lower guard；usable size 向宿主页大小取整。stack 向低地址增长，`stack_high` 固定，`stack_low` 和 `stack_guard` 位于低端。主协程也使用同一 heap-managed stack，不直接把初始 OS stack 当用户 stack。
 
-每个 `frame_size != 0` 的 Gugu function prologue 都在修改 `rsp` 前检查 `rsp - required_frame >= stack_guard`，包括有 stack local 的 leaf；只有零 frame、无调用、无 safepoint的真正 leaf 可以省略。失败跳到 `morestack(required_frame)`；该 stub 先保存尚未建立 frame 的参数/return PC，切换到 worker OS stack，再执行增长。
+每个 `frame_size != 0` 的 Gugu function prologue 都在修改 `rsp` 前检查 `rsp - required_frame >= stack_guard`，包括有 stack local 的 leaf；`ForeignLeaf` 还把声明的 `stack = N` 加入这次调用所需的 caller-side reserve。只有零 frame、无调用、无 safepoint的真正 leaf 可以省略。失败跳到 `morestack(required_frame)`；该 stub 先保存尚未建立 frame 的参数/return PC，切换到 worker OS stack，再执行增长。
 
 新容量把下列表达式向上取整为宿主页整数：
 
@@ -195,7 +195,7 @@ GC safepoint 可以收缩等待/暂停 stack：容量大于 32 KiB 且 `used_byt
 
 ### system stack 交接
 
-`system_stack(call)` stub 保存 coroutine context、把 `r14`/TLS current coroutine 保持为 root、切换到 worker OS stack并调用 runtime 函数。runtime 不能保存指向用户 stack 的裸地址；需要回写的位置以 `(Coroutine*, stack slot offset)` 或 GC handle 表示。返回前确认 stack 未被另一个 worker 接管，再恢复最新 context。
+`system_stack(call)` stub 保存 coroutine context、把 `r14`/TLS current coroutine 保持为 root、切换到 worker OS stack并调用 runtime 函数或 `ForeignBridge` C call。runtime 不能保存指向用户 stack 的裸地址；需要回写的位置以 `(Coroutine*, stack slot offset)` 或 GC handle 表示。返回前确认 stack 未被另一个 worker 接管，再恢复最新 context。`ForeignLeaf` 不经过该 stub；它只在调用前通过 `StackCheck` 确保声明的 C stack budget。
 
 ## 抢占
 
@@ -213,7 +213,21 @@ Linux signal 或 Windows APC 只用于中断长时间阻塞的可中断系统调
 
 ## foreign call 与回调
 
-每个 `extern "C"` 调用在 call bridge 前：
+每个导入 C 调用在 lowering 时先确定 `ForeignBridge` 或 `ForeignLeaf`。未标注导入、effect 未知的间接调用和 `#[ffi(bridge)]` 调用点都选择 `ForeignBridge`；只有满足 `#[ffi(leaf)]` 声明且 effect 仍被静态保留的直接调用才选择 `ForeignLeaf`。
+
+### `ForeignLeaf`
+
+`ForeignLeaf` 是当前 worker、processor 和 coroutine stack 上的普通 C ABI call；其声明的 leaf stack budget 为 `N`（省略参数时为 0）：
+
+1. 不建立 `ForeignBridge` map，不切换到 worker system stack，不执行 `Running -> Foreign`；
+2. 不释放 `LogicalProcessor`，不唤醒替代 worker，也不把当前 coroutine 放入 global runnable queue；
+3. 不提供 C 回调 Gugu 的入口。普通 stack map、raw pointer、pin、内存别名、write barrier 和展开边界规则仍然有效；C 调用链不得越过该预算。
+
+leaf 调用必须保持声明者承诺的短时、无不可界定等待和无 runtime 交互，并且 C 调用链不得超过声明的 stack budget。scheduler 不检查 C 函数体；违反承诺时至少会让当前 processor 长时间不可用，错误的 stack budget 还可能破坏 coroutine stack。
+
+### `ForeignBridge`
+
+`ForeignBridge` 调用按以下顺序交接：
 
 1. spill 所有 managed/stack pointer并建立 `ForeignBridge` map；
 2. bridge 保存 user context并切到当前 worker OS stack，此时 lifecycle 暂仍为 Running且 processor 尚未释放；
@@ -223,7 +237,9 @@ Linux signal 或 Windows APC 只用于中断长时间阻塞的可中断系统调
 
 返回后先保存 `errno`/last-error，再 release CAS `Foreign -> Runnable|ENQUEUED`、放入 global runnable queue并唤醒 scheduler；该 worker可以竞争取得 processor，但必须走普通 dequeue 的 `Runnable -> Running` 后才切回 coroutine stack和转换返回值。不能从 Foreign 直接执行用户代码。
 
-外部代码回调 Gugu 时，bridge 查找/建立当前 OS thread 的 worker 登记，取得 processor，创建一个 callback coroutine frame并进入 Gugu。嵌套 callback 以 worker-local depth 区分；返回 C 前必须完成该 callback 的 panic 边界和临时 root 清理。外部线程退出或最外层回调返回后，临时 worker 可以注销。
+### 外部代码回调
+
+只有 `ForeignBridge` 允许外部代码回调 Gugu：bridge 查找/建立当前 OS thread 的 worker 登记，取得 processor，创建一个 callback coroutine frame并进入 Gugu。嵌套 callback 以 worker-local depth 区分；返回 C 前必须完成该 callback 的 panic 边界和临时 root 清理。外部线程退出或最外层回调返回后，临时 worker 可以注销。从 `ForeignLeaf` 回调 Gugu 是违反 leaf unsafe 契约，不进入隐式桥接路径。
 
 ## GC 协作
 
@@ -263,7 +279,7 @@ worker无 runtime/foreign责任后转 Stopping。主线程按 poller、processor
 - processor retire 不丢 runnable、timer、barrier 或 mark work；
 - GC scan lock 下不能执行/复制同一 coroutine。
 
-确定性 runtime 测试必须使用可控 poller/clock 和调度 gate，覆盖 local overflow、半队列窃取、park/wake 竞争、select loser、timer cancel、stack 增长/收缩、foreign 释放 processor、动态 parallelism、GC stop 与 ready 竞争。默认测试不能依赖真实 10 ms 时间片或随机 victim 恰好出现。
+确定性 runtime 测试必须使用可控 poller/clock 和调度 gate，覆盖 local overflow、半队列窃取、park/wake 竞争、select loser、timer cancel、stack 增长/收缩、`ForeignBridge` 释放 processor、`ForeignLeaf` 保留 processor、`#[ffi(bridge)]` 覆盖 leaf、未知间接调用回退 bridge、动态 parallelism、GC stop 与 ready 竞争。默认测试不能依赖真实 10 ms 时间片或随机 victim 恰好出现。
 
 ## 参考实现资料
 

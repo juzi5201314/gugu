@@ -57,7 +57,8 @@ pub fn bar() string = "bar"
   - 诊断：`must_use`、`allow(lint)`、`warn(lint)`、`deny(lint)`、`forbid(lint)`
   - 测试：`test`、`should_panic`、`ignore`（见 [测试](testing.md)）
   - 存储：`coroutine_local`、`os_thread_local`
-  - 调用点：`track_caller`
+  - 调用点：`track_caller`、`ffi(bridge)`
+  - FFI：`ffi(leaf)`
   - 链接：`export_name = "..."`、`link_name = "..."`、`link_section = "..."`、`used`、`naked`
 
 ### `cfg`
@@ -239,8 +240,10 @@ pub fn bar() string = "bar"
 | `bench` | 具名函数；只由内建 benchmark harness 收集 |
 | `coroutine_local`、`os_thread_local` | `static`，且二者互斥 |
 | `export_name`、`link_name`、`link_section`、`used`、`naked` | [unsafe 与 intrinsic](unsafe.md)规定的函数、static 或汇编项 |
+| `ffi(leaf[, stack = N])` | 无函数体的 `extern "C"` 导入项 |
+| `ffi(bridge)` | 直接调用导入 `extern "C"` 函数的表达式 |
 
-同一属性重复出现必须语义一致；重复但参数不同、互斥 repr、两个存储属性、`inline` 与 `cold` 同时出现、`test` 与 `bench` 同时出现，或 test/bench 与 `extern`/`naked`/`unsafe fn` 冲突，都是编译错误。`cfg` 可以重复，效果是所有谓词的逻辑与；lint 属性按从外到内的作用域覆盖规则合并。
+同一属性重复出现必须语义一致；重复但参数不同、互斥 repr、两个存储属性、`inline` 与 `cold` 同时出现、`test` 与 `bench` 同时出现，或 test/bench 与 `extern`/`naked`/`unsafe fn` 冲突，都是编译错误。`ffi(leaf)` 附着在非导入项、`stack` 不是非负整数常量或重复指定不一致、`ffi(bridge)` 附着在非直接 C 调用表达式、两者出现在同一附着位置，都是编译错误。`cfg` 可以重复，效果是所有谓词的逻辑与；lint 属性按从外到内的作用域覆盖规则合并。
 
 `cfg(false)` 的节点在解析后、名称解析前删除。它只允许附着于删除后语法仍完整的序列成员；不能删除调用目标、赋值右侧、函数唯一返回类型或其它单一必需表达式。被删除节点的名称、类型和属性参数不再检查，但其外层记号必须已经能成功解析。
 

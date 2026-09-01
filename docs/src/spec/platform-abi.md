@@ -233,8 +233,6 @@ Gugu 的整数参数和原始指针按 `rdi, rsi, rdx, rcx, r8, r9` 的顺序使
 
 调用点的栈对齐、栈参数顺序和寄存器耗尽后的回退规则遵循 System V AMD64 psABI。Gugu 生成的调用点在执行 `call` 前保持 16 字节栈对齐；SysV 的 128 字节 red zone 不能被用来保存需要跨 safepoint、阻塞或外部保留的 Gugu 根。
 
-- 恢复 runtime登记、panic边界、GC根状态与调度状态。
-
 ### Microsoft x64 桥接
 
 前四个参数槽按位置使用 `rcx`、`rdx`、`r8`、`r9` 或对应的 `xmm0`–`xmm3`；参数不会像 SysV eightbyte 一样拆到多个寄存器。调用方必须为被调用方保留 32 字节 shadow space，并遵循 Microsoft x64 的栈对齐和 prologue/epilogue 约束。
@@ -247,7 +245,11 @@ Windows C ABI 不提供与本章兼容的 `__int128` 参数或返回规则，因
 
 ### 调用边界上的运行时责任
 
-外部调用一律视为可能阻塞，调度与逻辑处理器交接遵循[运行时](runtime.md)的规则。跨到 C 代码前，runtime 必须使用该目标可识别的连续栈和合法栈边界；C 代码不能观察或依赖 Gugu 的内部协程栈布局。
+C ABI 的寄存器、栈槽、布局和符号规则与 runtime 的调度效应正交。compiler 在 lowering metadata 中保留 `ForeignBridge` 或 `ForeignLeaf`，但不能把该模式编码成 C ABI 可观察的额外参数或返回值。
+
+未标注导入和 effect 未知的间接调用使用 `ForeignBridge`：跨到 C 代码前，runtime 必须使用该目标可识别的连续 system stack 和合法栈边界，保存 Gugu context、登记根并释放当前 `LogicalProcessor`；C 代码不能观察或依赖 Gugu 的内部协程栈布局。`#[ffi(bridge)]` 只改变调用点选择，不改变 C 符号或机器级调用约定。
+
+满足 `#[ffi(leaf)]` 契约的直接调用使用 `ForeignLeaf`：调用留在当前 worker、processor 和 coroutine stack 上，不建立 bridge handle、不释放 processor，也不允许 C 回调 Gugu。属性的 `stack = N`（省略时为 0）必须计入 caller frame 之后的 C 调用链空间，compiler 在调用前执行对应 `StackCheck`；leaf 调用仍须遵守本章的 C 类型、指针 pin、内存别名和展开边界规则。
 
 `extern "C"` 导出函数被非 Gugu 线程调用时，必须按运行时的线程接入规则登记该线程；导出函数返回后才能撤销临时登记。C 线程不能直接操作 Gugu 协程句柄或 GC 元数据。
 
@@ -310,7 +312,7 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 ### 外部错误状态
 
-`errno`、Windows last-error 或其它线程局部错误状态属于外部调用的即时结果。若标准库提供读取接口，调用方必须在同一操作系统线程上、紧接外部调用之后读取；在 `yield`、阻塞、再次调用外部函数或可能迁移协程之后读取，不能要求仍是原状态。
+`errno`、Windows last-error 或其它线程局部错误状态属于外部调用的即时结果。`ForeignLeaf` 返回后可在同一 OS thread 上紧接读取；`ForeignBridge` 必须在 C 调用返回、协程重新入队之前由 worker 捕获该值，并由标准库通过本次调用结果读取。调用方在 `yield`、再次调用外部函数或可能迁移协程之后，不能要求仍是未捕获的原线程状态。
 
 ## 原子与机器状态
 
@@ -350,7 +352,7 @@ Gugu 对象文件、静态库和动态库之间不提供独立的 Gugu-to-Gugu A
 5. Linux `i128` 的参数/返回与 Windows 对 `i128` 的编译错误；
 6. 栈对齐、寄存器保存、导入桩、导出 panic 和非 Gugu 线程接入；
 7. ELF/PE 的入口、重定位、保留节、导入表、展开信息和 strip 后必需元数据；
-8. GC 对象 pin、外部保存指针、线程局部错误状态和 safepoint 前后的生命周期。
+8. GC 对象 pin、外部保存指针、`ForeignBridge`/`ForeignLeaf` 调用模式、线程局部错误状态和 safepoint 前后的生命周期。
 
 这些检查必须使用确定性的 C 对照程序或固定镜像 fixture；不能用削弱声明、改变 fixture 或忽略失败来获得通过。规范测试的运行方式见[测试](testing.md)。
 
@@ -365,3 +367,10 @@ Gugu 对象文件、静态库和动态库之间不提供独立的 Gugu-to-Gugu A
 - [Go 内部 ABI 说明](https://go.dev/src/internal/abi/abi-internal.md)
 - [System V AMD64 ABI](https://gitlab.com/x86-psABIs/x86-64-ABI)
 - [Microsoft x64 调用约定](https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention)
+- [Rust Tokio `spawn_blocking`](https://docs.rs/tokio/latest/tokio/task/fn.spawn_blocking.html)
+- [Go cgo 调用约束](https://go.dev/cmd/cgo/)
+- [Go runtime `cgocall`](https://go.dev/src/runtime/cgocall.go)
+- [Zig 语言参考中的外部函数与调用约定](https://ziglang.org/documentation/0.15.2/)
+- [GHC FFI safety](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/ffi.html)
+- [OCaml C 接口与 blocking section](https://ocaml.org/manual/5.3/intfc.html)
+- [Erlang NIF 与 dirty scheduler](https://www.erlang.org/doc/apps/erts/erl_nif.html)

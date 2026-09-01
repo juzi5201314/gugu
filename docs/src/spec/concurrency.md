@@ -34,7 +34,7 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 - 发送、接收、关闭、`select`、`try_*` 的类型见 [表达式](expressions.md)。方法名固定为 `send` / `recv` / `try_send` / `try_recv` / `close`，不能重载。
 - 关闭后收尽，`recv` 返回 `Err(ChanClosed)`；再 `send` 或再 `close` 是 panic。
 - 不存在 nil channel。
-- 在 `chan` 上阻塞只停当前协程，不长期占住承载它的操作系统线程；系统调用或外部函数阻塞时，runtime 必须让其它线程继续利用可用逻辑处理器。
+- 在 `chan` 上阻塞只停当前协程，不长期占住承载它的操作系统线程；系统调用或 `ForeignBridge` 外调阻塞时，runtime 必须让其它线程继续利用可用逻辑处理器。`ForeignLeaf` 的 unsafe 契约禁止不可界定的阻塞。
 - `send` 与对应的 `recv`（含 `select` 选中的那对）建立 happens-before：发送方在 `send` 之前对载荷的写入，接收方在 `recv` 返回之后看得见。
 
 互斥锁、读写锁、条件变量、原子、一次性初始化位于 `std.sync`，不是关键字。`Mutex` 与 `RwLock` 不 poisoning：持锁协程 panic 时 guard 仍释放，后续调用正常获得锁，受保护数据是否满足业务不变量由调用方负责。

@@ -120,7 +120,7 @@ terminator 固定为：
 - `Suspend { reason, resume, cancelled, safepoint }`；
 - `SelectCommit { cases, ready, suspend, safepoint }`。
 
-`Call.unwind` 对可能 panic 的调用必须指向 cleanup block；证明 `nounwind` 的调用使用 `None`。外部 C 调用的 `call_kind` 明确为 `Foreign`，其前后 runtime 交接不能由普通调用优化删除。
+`Call.unwind` 对可能 panic 的调用必须指向 cleanup block；证明 `nounwind` 的调用使用 `None`。外部 C 调用的 `call_kind` 明确为 `ForeignBridge` 或 `ForeignLeaf`，其 C ABI 转换不能由普通调用优化删除；只有 `ForeignBridge` 携带 runtime 交接。
 
 `Suspend` 保存 stable resume/cancelled successor和该点活跃 local，不在 GIR重新决定取消值或协程寿命；`SelectCommit` 只引用 HIR已经固定的一次求值临时槽、case index和提交 operation。机器 context与等待记录由后端/调度器建立。
 
@@ -164,11 +164,11 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 14. `LowerLayoutAndAbi`：把聚合、枚举、调用和返回映射为具体字节布局；
 15. `BuildLirSsa`：构造 LIR、block 参数和 memory SSA。
 
-内联成本按单态化 GIR 计算：普通 statement 为 1，分支为 2，直接调用为 5，分配为 8，可能 suspend 的操作为 32。compiler intrinsic 和不产生独立机器 frame 的 glue 在启发式前强制展开。其余非递归 callee成本不超过 32时成为候选；在整个实例图只有一个直接调用点时上限为 128。递归 SCC、foreign、naked、含 `Suspend` 或无法复制 cleanup 区域的 body从不成为候选。
+内联成本按单态化 GIR 计算：普通 statement 为 1，分支为 2，直接调用为 5，分配为 8，可能 suspend 的操作为 32。compiler intrinsic 和不产生独立机器 frame 的 glue 在启发式前强制展开。其余非递归 callee成本不超过 32时成为候选；在整个实例图只有一个直接调用点时上限为 128。递归 SCC、`ForeignBridge`、`ForeignLeaf`、naked、含 `Suspend` 或无法复制 cleanup 区域的 body从不成为候选；两种外调都只能作为调用边界 lowering，不能把 C 函数体内联进 GIR。
 
 每个 caller的增长预算固定为 `max(floor(original_cost * 20 / 100), 256)`。只对 pass 开始时存在的调用点按 source scope、block ID、statement index和 callee `MonoKey` 排序遍历；候选展开后预计累计增长不超过预算就必须内联，否则必须保留。新暴露调用点留给其 callee 自身已经缓存的优化 body，不在本 caller重复开第二轮，保证管线终止且并行编译不改变结果。
 
-循环 backedge、可能分配的调用、可能阻塞的 runtime 操作、显式 `yield` 和函数 prologue 是 safepoint 候选。`InsertSafepointsAndStackChecks` 对同一 block 中没有任何 intervening statement 的连续 poll只保留第一条；除此之外不得合并或后移。任何无调用的循环路径都必须至少保留一个可达轮询。
+循环 backedge、可能分配的调用、可能阻塞的 runtime 操作、`ForeignBridge`、显式 `yield` 和函数 prologue 是 safepoint 候选。`ForeignLeaf` 不因 C 调用本身产生 safepoint；`InsertSafepointsAndStackChecks` 对同一 block 中没有任何 intervening statement 的连续 poll只保留第一条；除此之外不得合并或后移。任何无调用的循环路径都必须至少保留一个可达轮询。
 
 ## LIR
 
@@ -207,7 +207,7 @@ LIR 只允许以下机器值类型：
 
 每个可能读写内存、分配、调用、原子、volatile、屏障或 safepoint 的操作都消费一个 `Mem` 并产生一个新的 `Mem`。纯算术、地址计算和已证明无读取的常量不消费 memory。合流 block 用 `Mem` block 参数合并各前驱 token。
 
-memory token 只编码顺序，不占机器寄存器。每个普通 memory op 还携带 `AliasClass`：`Stack(StackSlotId)`、`FreshHeap(AllocId)`、`Global(StableDefKey)`、`ThreadLocal(StableDefKey)`、`Heap`、`Foreign`、`Atomic` 或 `Volatile`。不同 stack slot、不同尚未发布 fresh allocation、布局不重叠的不同 global以及不同 TLS定义互不 alias；pointer经未知 call/store/block-parameter merge/整数转换后降为 `Heap` 或 `Foreign`。只有上述封闭规则证明 class不相交时才重排普通 load/store；atomic、volatile、foreign call、safepoint 和 runtime barrier 是任何 class 都不可跨越的 effect fence。
+memory token 只编码顺序，不占机器寄存器。每个普通 memory op 还携带 `AliasClass`：`Stack(StackSlotId)`、`FreshHeap(AllocId)`、`Global(StableDefKey)`、`ThreadLocal(StableDefKey)`、`Heap`、`Foreign`、`Atomic` 或 `Volatile`。不同 stack slot、不同尚未发布 fresh allocation、布局不重叠的不同 global以及不同 TLS定义互不 alias；pointer经未知 call/store/block-parameter merge/整数转换后降为 `Heap` 或 `Foreign`。只有上述封闭规则证明 class不相交时才重排普通 load/store；atomic、volatile、`ForeignCall`（包括 leaf 的外部内存效应）、safepoint 和 runtime barrier 是任何 class 都不可跨越的 effect fence。
 
 ### 指令集合
 
@@ -220,10 +220,10 @@ LIR 指令按封闭类别组织：
 - 内存：`Load`、`Store`、`Memcpy`、`Memmove`、`Memset`；
 - 并发：`AtomicLoad`、`AtomicStore`、`AtomicRmw`、`CompareExchange`、`Fence`；
 - runtime：`GcAlloc`、`GcWriteBarrier`、`SafepointPoll`、`StackCheck`、`CoroutineSwitch`、`Park`、`Ready`；
-- 调用：`Call`、`ForeignCall`；
+- 调用：`Call`、`ForeignCall`；`ForeignCall` 的 mode 必须是 `ForeignBridge` 或 `ForeignLeaf`。
 - 诊断插桩：`CoverageCounter`。
 
-block terminator 固定为 `Jump`、`Branch`、`Switch`、`Invoke`、`Return`、`ResumePanic`、`TailCall`、`Trap` 和 `Unreachable`。可能 panic/unwind 的调用必须使用 `Invoke`，它同时提供 normal 和 unwind 边；确定不 unwind 的调用才使用普通 `Call`。`TailCall` 只允许在没有待执行 cleanup、调用/返回 ABI 完全相同、当前 frame 无活跃 stack root且全部参数能放入寄存器时形成；含 stack argument、sret 或 foreign bridge 的调用不得 tail-call。
+block terminator 固定为 `Jump`、`Branch`、`Switch`、`Invoke`、`Return`、`ResumePanic`、`TailCall`、`Trap` 和 `Unreachable`。可能 panic/unwind 的调用必须使用 `Invoke`，它同时提供 normal 和 unwind 边；确定不 unwind 的调用才使用普通 `Call`。`TailCall` 只允许在没有待执行 cleanup、调用/返回 ABI 完全相同、当前 frame 无活跃 stack root且全部参数能放入寄存器时形成；含 stack argument、sret 或 `ForeignBridge` 的调用不得 tail-call。`ForeignLeaf` 只有在普通 ABI 与 frame 条件全部满足时才可参与同一规则，不能因为 leaf 标记绕过 stack root 或 unwind 检查。
 
 
 ### LIR 固定 pass 管线
@@ -254,7 +254,7 @@ GIR verifier 至少检查：
 - place 投影类型连续，读取前确定初始化，`StorageLive`/`StorageDead` 配对；
 - cleanup 边只沿作用域树向外，panic 与正常出口不混用；
 - concrete body 不含泛型参数、未解析 call 或未知布局；
-- 每个可能 suspend/allocate/block 的路径有合法 safepoint；
+- 每个可能 suspend/allocate/block 的路径有合法 safepoint；`ForeignBridge` 必须有对应 bridge 交接记录，`ForeignLeaf` 必须有合法 leaf stack budget 与 pre-call `StackCheck`，不得伪造需要桥接的 effect；
 - 每个 heap 引用写入经过 `GcWrite` 或被证明属于未发布新对象初始化。
 
 LIR verifier 至少检查：
@@ -263,7 +263,7 @@ LIR verifier 至少检查：
 - memory token 在每条 effect 路径形成连续 SSA 链；
 - `Flags` 不跨 block、不跨可能改写标志的指令；
 - pointer provenance 与 load/store、stack map 和外部调用规则一致；
-- panic/unwind 边、foreign runtime 交接和 safepoint ID 不缺失；
+- panic/unwind 边、`ForeignBridge`/`ForeignLeaf` 的 mode、foreign runtime 交接和 safepoint ID 不缺失；
 - 目标 legalization 后不存在 i128、聚合普通 value 或无编码操作。
 
 release 编译器在进入代码生成前也必须运行完整 verifier。验证失败属于编译器内部错误并停止产出镜像，不能降级成保守机器码继续运行。

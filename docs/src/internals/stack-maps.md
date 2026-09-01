@@ -50,7 +50,7 @@ pin 状态属于目标对象头和 pin token，不是另一类位置。指向 pi
 | 3 | `ForeignBridge` | Gugu 与 C/runtime bridge 完成寄存器保存后的 label |
 | 4 | `MorestackEntry` | prologue 建 frame 前进入 `morestack` 的 slow-path label |
 
-可能分配、可能阻塞或可能触发 GC 的调用一定是 `CallReturn` safepoint。普通不分配 leaf 调用只有在 effect 分析证明 `NO_SAFEPOINT` 时可以不建记录。循环 poll、显式 `yield`、channel/select park 和抢占确认分别建立 `PollResume` 或 `SuspendResume`；每个可增长 frame 的函数建立一个 `MorestackEntry`。
+可能分配、可能阻塞或可能触发 GC 的调用（包括 `ForeignBridge`）一定是 `CallReturn` safepoint。满足 `ForeignLeaf` 契约且 effect 分析证明 `MAY_SAFEPOINT` 未置位的外调不建专用记录；若同一表达式还有其它 effect，则按普通 `CallReturn` 规则登记。leaf 调用前为满足 `stack = N` 发出的 `StackCheck` 仍然是独立 safepoint，stack 增长后必须更新 coroutine 内部 root；循环 poll、显式 `yield`、channel/select park 和抢占确认分别建立 `PollResume` 或 `SuspendResume`；每个可增长 frame 的函数建立一个 `MorestackEntry`。
 
 信号/APC handler 不在任意 PC 直接扫描用户 stack。它只能设置抢占标志、唤醒 worker 或把执行引导到编译器已经登记的 poll slow path；真正暂停和扫描发生在上述 safepoint。
 
@@ -71,7 +71,7 @@ stack map 的通用寄存器编号固定为：
 
 `rsp` 不作为普通根；它由 coroutine context 单独保存。managed pointer 不放入 XMM 寄存器。`r14`/`r15` 是 runtime 保留寄存器，普通用户值不能占用；对应 mask bit 在普通函数中必须为 0，runtime bridge 只通过专用根表扫描它们。
 
-在 `CallReturn`、`SuspendResume`、`ForeignBridge` 点，所有跨该点活跃的用户 managed/stack pointer 必须 spill 到 stack slot，三个寄存器 mask 均为 0。`CallReturn` map 还必须包含本次调用放在 caller outgoing 区的每个 managed/stack 参数 word，以及按值/间接 aggregate 副本中的全部 root-bearing 字段，即使它们在返回后已死；callee 活跃期间这些 slot 仍由 caller frame map 追踪。`PollResume` 可以保留普通寄存器根。`MorestackEntry` 的 `slot_count` 固定为 0，register mask 描述保存到 coroutine morestack scratch 的 managed 参数寄存器；caller stack 参数和 aggregate 副本仍由外层 `CallReturn` map 追踪。
+在 `SuspendResume`、`ForeignBridge` 点，所有跨该点活跃的用户 managed/stack pointer 必须 spill 到 stack slot，三个寄存器 mask 均为 0。`CallReturn` map 还必须包含本次调用放在 caller outgoing 区的每个 managed/stack 参数 word，以及按值/间接 aggregate 副本中的全部 root-bearing 字段，即使它们在返回后已死；callee 活跃期间这些 slot 仍由 caller frame map 追踪。`ForeignLeaf` 若无 `CallReturn` effect 不建立 bridge map，也不把自身当作 GC 停止点；若因其它 effect建立 `CallReturn`，遵循同一 outgoing 参数规则。`PollResume` 可以保留普通寄存器根。`MorestackEntry` 的 `slot_count` 固定为 0，register mask 描述保存到 coroutine morestack scratch 的 managed 参数寄存器；caller stack 参数和 aggregate 副本仍由外层 `CallReturn` map 追踪。
 
 该限制避免 caller frame 依赖 callee-saved 寄存器的跨 frame 追踪，同时保留无调用循环 poll 中的寄存器分配质量。
 
@@ -219,13 +219,13 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 
 - 每个要求 safepoint 的 call/poll/suspend 和每个可增长 frame 的 morestack entry 都有 exact record；
 - 每个 map 与最终活跃/分配位置逐项一致，CallReturn map 覆盖 outgoing managed/stack 参数；
-- call/suspend/foreign 点没有用户 register root，MorestackEntry 只含 ABI 参数 register root；
+- `CallReturn`/`SuspendResume`/`ForeignBridge` 点没有用户 register root；`ForeignLeaf` 若无 `CallReturn` effect 不建立该类 map。`MorestackEntry` 只含 ABI 参数 register root；
 - frame size、return address 和 outgoing 区符合后端 frame layout；
 - 所有 stack root slot 自然对齐且未与非 pointer spill 重叠；
 - section offset、table range、排序和所有保留位合法；
 - strip 不删除 stack map、对应 function range 或 unwind 信息。
 
-runtime 的确定性 fixture 必须覆盖：空 map、只有 stack root、poll register root、interior heap root、stack interior 重定位、多 frame 调用、panic landing pad、foreign bridge和 stack 增长后 GC。
+runtime 的确定性 fixture 必须覆盖：空 map、只有 stack root、poll register root、interior heap root、stack interior 重定位、多 frame 调用、panic landing pad、foreign bridge、foreign leaf 的 pre-call `StackCheck` 和 stack 增长后 GC。
 
 ## 参考实现资料
 

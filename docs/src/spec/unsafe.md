@@ -167,6 +167,22 @@ pub extern "C" fn gugu_on_load() {
 #[link_name = "NtClose"]
 extern "C" fn nt_close(h: *byte) i32
 ```
+导入项可以声明调用效应，也可以在调用点覆盖：
+
+```text
+extern "C" {
+    #[ffi(leaf(stack = 256))]
+    fn strlen(s: *byte) uint
+    fn read(fd: int, buf: *byte, len: uint) int
+}
+
+fn read_once(fd: int, buffer: *byte, length: uint) int {
+    let n = #[ffi(bridge)] read(fd, buffer, length)
+    n
+}
+```
+
+`ffi(leaf)` 与 `ffi(bridge)` 的完整约束见下文。
 
 - ABI 字符串必须是 `"C"`。其它字符串是编译错误。
 - 无函数体的 `extern` 是导入：库名与符号必须在编译配置里显式登记。编译器自己把导入写进镜像（Windows 导入地址表 IAT；Linux 动态导入表或内建桩）。禁止靠系统 `ld` 事后扫一堆 `.o` 来解析。
@@ -176,8 +192,26 @@ extern "C" fn nt_close(h: *byte) i32
 - `TypeId`、`dyn Trait`、句柄类型不能出现在 `extern "C"` 签名里。
 - `!` 可作为 `extern "C"` 的返回类型（C 的 `_Noreturn` / `noreturn`）。
 - 导出函数若发生 panic：必须在导出边界用 `std.panic.catch`，否则 runtime **abort 进程**，禁止把 Gugu 展开推进外部帧。
-- **调出：** 导入的外部函数一律视为可能阻塞；调用期间其它 runnable 协程仍须能按运行时公平规则取得执行机会。具体 context 保存与执行槽交接只见[调度器内部规范](../internals/scheduler.md)。
-- **调入：** 外部线程只能经编译器生成的回调桥进入 Gugu；该桥必须建立配套 runtime 状态、精确根和 panic 边界。线程登记与执行槽取得方式属于[调度器内部规范](../internals/scheduler.md)，不形成外部 ABI。
+
+### 外部调用效应与桥接
+
+C ABI 只规定参数、返回值和寄存器/栈布局，不携带是否等待、是否回调 Gugu 或是否执行很久的信息。每个导入项在 compiler 的类型检查结果中还带一个不暴露给用户类型系统的 `ForeignEffect`：
+
+- 未标注的导入是 `ForeignBridge`。直接调用和无法静态证明为 `ForeignLeaf` 的间接调用都走完整桥接；即使实现最终不阻塞，也只多付桥接成本。
+- `#[ffi(leaf)]` 只能附着在无函数体的 `extern "C"` 导入项上。可选的 `stack = N` 参数表示该 C 调用及其传递调用链在当前 coroutine stack 上额外使用的字节数；`N` 必须是非负整数常量，compiler 按目标 stack alignment 向上取整；省略时 `N = 0`。它是声明者承担的 unsafe 调度契约，不是“可能更快”的提示。外部实现必须同时满足：
+  1. 执行时间须有应用可接受的固定上界，且不得依赖可能等待的 I/O、sleep、mutex/futex/condvar、join 或阻塞式 poll。固定大小的纯计算、内存访问和明确不会等待的系统调用可以满足这一项。
+  2. 不回调 Gugu、不调用 Gugu 导出函数、不调用会分配、触发 GC、park、suspend 或改变调度器状态的 runtime 接口。
+  3. 不在返回后保留任何 Gugu 地址；调用期间传递的 raw pointer 仍须满足 pin、provenance、对齐、寿命和受管引用写入屏障规则。
+  4. C 调用及其传递调用链使用的 coroutine stack 空间不得超过 `stack = N`；不得使用无法按固定上界计入 N 的 `alloca`、纤程切栈或其它栈跳转。compiler 会在调用前把 caller frame 与 N 一起交给 `StackCheck`，但不能验证动态库实际使用量。
+  5. 不让 C/C++ 异常、SEH、`setjmp`/`longjmp` 或其它展开越过边界。
+- `#[ffi(bridge)]` 是调用点属性，只能附着在直接导入 C 函数的表达式上；它强制该次调用走 `ForeignBridge`，即使声明带有 `#[ffi(leaf)]`。它不改变声明，也不影响同一函数的其它调用。函数行为随参数变化、输入规模不固定或调用者不能证明 leaf 条件时，应在该调用点使用它。
+- `ffi(leaf)` 不表示纯函数，也不禁止 C 侧修改外部内存或设置 `errno`/last-error；它只表示该调用不需要释放当前 `LogicalProcessor`。函数项被单态化且保留 leaf effect 时可以保留直调；转换为普通 `fn` 值、经过无法证明 effect 的间接调用或动态分派后，一律按 `ForeignBridge` 处理。语言不提供调用点的“强制 leaf”属性；不确定 stack 预算时，应在调用点使用 `#[ffi(bridge)]`。
+
+compiler 不能检查动态库的函数体。错误的 `ffi(leaf)` 声明违反 unsafe 契约：外部调用若实际等待，会占住当前 processor 并造成其它协程饥饿；若回调 Gugu、跨边界展开或错误使用可移动对象，则同时违反回调、展开或指针规则，行为不受语言保证。保守地使用默认 bridge 只增加桥接开销，不改变正确性边界。
+
+### 外部线程调入
+
+外部线程只能经 compiler 生成的回调桥进入 Gugu；该桥必须建立配套 runtime 状态、精确根和 panic 边界。线程登记与执行槽取得方式属于[调度器内部规范](../internals/scheduler.md)，不形成外部 ABI。`ForeignLeaf` 不提供回调能力；从 leaf C 函数回调 Gugu 是违反其 unsafe 契约，而不是另一种隐式桥接。
 
 ## 原始指针、位模式与别名契约
 

@@ -12,7 +12,7 @@
 
 - stack/root 只扫描编译器明确登记的位置，不做保守扫描；
 - nursery对象在 minor cycle复制，old Immix arena在并发标记后按 block/line存活率选择机会性 evacuation；
-- pinned、正在 foreign boundary 暴露和超大对象可以留在 non-moving region；
+- pinned、正在 `ForeignBridge` 边界暴露和超大对象可以留在 non-moving region；`ForeignLeaf` 传递的可移动对象地址仍必须由调用方 pin，但不会建立 bridge handle。
 - managed pointer 移动后由 collector 更新所有已登记 root/field；
 - raw pointer 不参与追踪，跨 safepoint 必须由 pin 或规范允许的短生命周期保证；
 - collector 不使用 read barrier，mutator write 通过统一 hybrid barrier 维持并发标记和分代 remembered set。
