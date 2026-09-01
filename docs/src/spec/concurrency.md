@@ -21,7 +21,7 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 
 ## 抢占
 
-调度保证分为可合作 managed code 与 opaque native code 两层。可合作 managed code 的每个可达 frame 都有精确 stack map/unwind metadata；compiler 通过可投毒的函数 `StackCheck`、必须挂起的 statepoint和按静态工作预算放置的 poll，保证每条无限 managed 执行路径无限次经过同步 safepoint，并限制两个 safepoint之间的 compiler cost。普通循环不承诺每个 backedge都读取 runtime状态；已知短循环可以不含 loop poll，未知或长循环按固定 chunk插点。只执行有效 managed code的协程即使不主动 `yield`，也不能永久阻止其它 runnable协程或 GC获得执行机会。
+调度保证分为可合作 managed code 与 opaque native code 两层。可合作 managed code 的每个可达 frame 都有精确 stack map/unwind metadata；compiler 通过可投毒的函数 `StackCheck`、必须挂起的 statepoint和按静态工作预算放置的 poll，保证每条无限 managed 执行路径无限次经过同步 safepoint，并限制两个 safepoint之间的 compiler cost。普通循环不承诺每个 backedge都读取 runtime状态；已知短循环可以不含 loop poll，未知或长 counted loop使用 poll-free inner chunk和 outer poll，其它循环才按计算 interval使用 countdown。只执行有效 managed code的协程即使不主动 `yield`，也不能永久阻止其它 runnable协程或 GC获得执行机会。
 
 普通 inline `asm` 不是 safepoint。有限且可返回的 asm 片段可以在 `Running` 中执行，但它造成的延迟持续到片段返回；包含不可证明有限的内部回边、间接控制转移或外部等待的 asm 必须被 compiler 拒绝，或放入带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn`。`global_asm`、默认进入 managed context 的 `#[naked]` 和 dirty native definition 不属于可合作 managed code：从用户协程进入时必须脱离 `LogicalProcessor`，因此不会让它所属的 processor 或 GC stop 永久等待；但 dirty native work 本身可以永不返回，语言不保证该调用完成。
 

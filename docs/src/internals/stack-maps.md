@@ -50,7 +50,7 @@ pin 状态属于目标对象头和 pin token，不是另一类位置。指向 pi
 | 3 | `ForeignBridge` | Gugu 与 C/runtime bridge 完成寄存器保存后的 label |
 | 4 | `MorestackEntry` | prologue建 frame前进入 `morestack_or_poll` 的 slow-path label |
 
-普通/dirty `ForeignBridge`、park/suspend和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record。loop countdown没有 map，只有 interval到期实际读取 poll word的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。
+普通/dirty `ForeignBridge`、park/suspend和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record。counted inner chunk edge与 uncounted countdown-only edge没有 map，只有实际读取 poll word后的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。
 
 signal/APC handler不在任意PC直接扫描用户 stack。它只设置当前 processor的 poll word、投毒 current coroutine的 `stack_check`并唤醒 worker；真正暂停和扫描发生在 compiler登记的 `PollResume`、`MorestackEntry` 或 mandatory statepoint。dirty native stack不属于 Gugu stack map。
 
@@ -69,7 +69,7 @@ stack map 的通用寄存器编号固定为：
 | 6 | `rbp` | 14 | `r15` |
 | 7 | `r8` | 15 | 保留，必须为 0 |
 
-`rsp` 不作为普通根；它由 coroutine context 单独保存。managed pointer 不放入 XMM 寄存器。`r14`/`r15` 是 runtime 保留寄存器，普通用户值不能占用；对应 mask bit 在普通函数中必须为 0，runtime bridge 只通过专用根表扫描它们。
+`rsp` 不作为普通根；它由 coroutine context单独保存。managed pointer不放入 XMM寄存器，`V128` 也禁止 pointer lane并始终属于 non-root；跨 taken poll slow edge活跃的向量值由普通16字节 spill保存，但不进入 root map。`r14`/`r15` 是 runtime保留寄存器，普通用户值不能占用；对应 mask bit在普通函数中必须为0，runtime bridge只通过专用根表扫描它们。
 
 在 `SuspendResume`、`ForeignBridge` 点，所有跨该点活跃的用户 managed/stack pointer必须 spill到 stack slot，三个寄存器 mask均为0。`ForeignBridge[DirtyCpu]` 使用相同 bridge root map，native段不建立额外 stack map；`CallReturn` map必须包含被调方 entry check期间仍活跃的 caller root、outgoing managed/stack参数word和 aggregate副本，即使它们在正常返回后已死。`PollResume`可以保留普通寄存器根。`MorestackEntry` 的 `slot_count`固定为0，register mask描述保存到 coroutine morestack scratch的 managed参数寄存器；caller stack参数和 aggregate副本由外层 `CallReturn` map追踪。`PollFreeLeaf`/`ForeignLeaf` 没有 map，caller prologue必须已把函数内所有 direct leaf `stack = N` 的最大值计入 reserve。
 
@@ -183,7 +183,7 @@ runtime 扫描一个已停在 safepoint 的协程时：
 - `ForeignBridge`：先从 bridge context恢复 user SP/PC；dirty mode不改变扫描算法；
 - `MorestackEntry`：当前函数 frame尚未建立，scratch中的 return PC是 caller PC，scratch GPR由当前 map扫描；slow path可以先处理 poll再决定是否复制 stack。
 
-每步先以 PC查 function range，再用该 function内按 offset排序的 safepoint做 binary search；找不到精确 point、frame越界或 unwind index不匹配都是 `RuntimeInvariant` fatal，不能猜测相邻 map。interval countdown edge不是 safepoint，不能把它的 PC交给 scanner。
+每步先以 PC查 function range，再用该 function内按 offset排序的 safepoint做 binary search；找不到精确 point、frame越界或 unwind index不匹配都是 `RuntimeInvariant` fatal，不能猜测相邻 map。counted inner chunk edge与 uncounted countdown-only edge都不是 safepoint，不能把它们的 PC交给 scanner。
 
 `ForeignBridge` record 的 bridge mode 决定 native 阶段的调度归属。普通 bridge可在 foreign worker上等待；`DIRTY_CPU_BRIDGE` 表示 coroutine 已脱离 processor并由 dirty CPU额度执行。两者都在进入 native 前保存 Gugu context；`ForeignBridgeState` 以 checked high-relative offset定位 coroutine stack上的 ABI frame，collector按本 record扫描其中 roots，不扫描 C/C++/asm 的 OS stack。返回时 bridge worker把结果写回同一 frame，再由 managed resume path构造 Gugu值。
 
@@ -229,10 +229,10 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 - `StackInterior` offset严格落在当前 stack allocation；
 - suspend/foreign点 register mask为0；
 - `MorestackEntry` 的 `slot_count == 0`，只含 ABI参数 register root，且关联函数保留 entry check；
-- `PollResume` 只能位于实际 poll word检查的 resume label，不能位于 countdown-only edge；
+- `PollResume` 只能位于实际 poll-word检查后的 resume label，不能位于 counted inner chunk或 uncounted countdown-only edge；
 - source/unwind index存在且范围合法。
 
-runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、countdown未到期、poisoned `MorestackEntry`、interior heap root、stack interior重定位、多frame调用、panic landing pad、foreign/dirty bridge、`PollFreeLeaf`无map、caller最大 leaf stack reserve和stack增长后GC。
+runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`、interior heap root、stack interior重定位、多frame调用、panic landing pad、foreign/dirty bridge、`PollFreeLeaf`无map、caller最大 leaf stack reserve和stack增长后GC。
 
 - [LLVM Stack Maps and Patch Points](https://llvm.org/docs/StackMaps.html)
 - [Go runtime stack 实现](https://go.dev/src/runtime/stack.go)

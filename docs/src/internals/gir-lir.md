@@ -168,7 +168,7 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 
 每个 caller的增长预算固定为 `max(floor(original_cost * 20 / 100), 256)`。只对 pass 开始时存在的调用点按 source scope、block ID、statement index和 callee `MonoKey` 排序遍历；候选展开后预计累计增长不超过预算就必须内联，否则必须保留。新暴露调用点留给其 callee 自身已经缓存的优化 body，不在本 caller重复开第二轮，保证管线终止且并行编译不改变结果。
 
-`MarkMandatoryStatepointsAndStackChecks` 只标记真正可能发布/挂起 context 的位置：显式 `safepoint_poll`/`yield`、park/suspend、普通/dirty `ForeignBridge`交接、stack growth、allocation/refill slow path和其它直接进入 GC/runtime scheduler的 slow path。每个可能在被调方 entry `StackCheck` 进入 slow path的 managed call仍必须保留 caller `CallReturn` map，但调用点本身不读取 poll word。函数 prologue先保留抽象 `StackCheck`；只有 legalized LIR最终分类为 `PollFreeLeaf` 时才能删除。循环、长直线路径和无检查 leaf调用所需的额外 poll统一由 LIR预算 pass放置，GIR optimizer不得固定逐 backedge策略。
+`MarkMandatoryStatepointsAndStackChecks` 只标记真正可能发布/挂起 context 的位置：显式 `safepoint_poll`/`yield`、park/suspend、普通/dirty `ForeignBridge`交接、stack growth、allocation/refill slow path和其它直接进入 GC/runtime scheduler的 slow path。每个可能在被调方 entry `StackCheck` 进入 slow path的 managed call仍必须保留 caller `CallReturn` map，但调用点本身不读取 poll word。函数 prologue先保留抽象 `StackCheck`；只有 legalized LIR最终分类为 `PollFreeLeaf` 时才能删除。循环、长直线路径和无检查 leaf调用所需的额外 poll统一在全部 loop transformation完成后由 LIR预算 pass放置，GIR optimizer不得固定逐 backedge策略。
 
 ## LIR
 
@@ -197,12 +197,13 @@ LIR 只允许以下机器值类型：
 
 - `I8`、`I16`、`I32`、`I64`；
 - `F32`、`F64`；
+- `V128(lane)`，其中 lane只能是 `I8`、`I16`、`I32`、`I64`、`F32` 或 `F64`，lane数由128 bit总宽度唯一确定；
 - `Ptr`；
 - `Flags`，只在同一 block 内连接比较和条件分支；
 - `Mem`，表示 memory SSA token；
 - `Void`，只用于无普通结果的指令声明。
 
-`i128`/`u128` 在进入 LIR 时拆为低、高两个 `I64`；聚合拆为按 ABI 分类的标量 tuple 或放入 stack slot。ZST 不产生普通 value。`Ptr` 的 provenance 固定为 `GcHeap`、`GcInterior`、`Stack`、`Raw`、`Code`、`Metadata` 或 `Foreign`；优化器不得把 `Raw`/整数推断成可追踪 GC 根。
+`i128`/`u128` 在进入 LIR 时拆为低、高两个 `I64`；聚合拆为按 ABI 分类的标量 tuple 或放入 stack slot。ZST 不产生普通 value。`Ptr` 的 provenance 固定为 `GcHeap`、`GcInterior`、`Stack`、`Raw`、`Code`、`Metadata` 或 `Foreign`；优化器不得把 `Raw`/整数推断成可追踪 GC 根。`V128` 只由 loop vectorizer在函数内部生成，不得含 `Ptr` lane、进入函数 ABI或跨 `Call`/`ForeignCall` 传参返回；它始终是 non-root，不能用于隐藏 managed pointer。
 
 ### memory SSA
 
@@ -217,10 +218,11 @@ LIR 指令按封闭类别组织：
 - 常量与地址：`IConst`、`FConst`、`SymbolAddr`、`StackAddr`、`PtrOffset`；
 - 整数：加减乘、带进位加减、除余、按位、移位、扩展、截断和比较；
 - 浮点：加减乘除、取负、比较、整数转换和位转换；
+- 向量：`VSplat`、`VLoad`、`VStore`、逐 lane算术/按位/比较、`VShuffle`、`VExtractLane`、`VInsertLane` 和 wrapping整数 `VReduceAdd`；只有 target descriptor具有基线 lowering且 cost model判定有收益时才能生成；
 - 控制辅助：`Select`、`TrapIf`；
 - 内存：`Load`、`Store`、`Memcpy`、`Memmove`、`Memset`；
 - 并发：`AtomicLoad`、`AtomicStore`、`AtomicRmw`、`CompareExchange`、`Fence`；
-- runtime：`GcAlloc`、`GcWriteBarrier`、`SafepointPoll { interval: NonZeroU32 }`、`StackCheck`、`CoroutineSwitch`、`Park`、`Ready`；显式 poll的 interval固定为1，loop strip-mining生成计算所得 interval；
+- runtime：`GcAlloc`、`GcWriteBarrier`、`SafepointPoll { interval: NonZeroU32 }`、`StackCheck`、`CoroutineSwitch`、`Park`、`Ready`；显式 poll和 counted-loop外层 poll的 interval固定为1，无法构造 counted outer chunk的循环 fallback才使用大于1的计算 interval；
 - 调用：`Call`、`ForeignCall`；`ForeignCall` 的 mode 必须是普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`。
 - 诊断插桩：`CoverageCounter`。
 
@@ -237,33 +239,42 @@ LIR 构造后按下列顺序运行：
 4. `AlgebraicSimplification`，只使用严格整数/浮点合法恒等式；
 5. `GlobalValueNumbering`；
 6. `DeadStoreAndDeadValueElimination`；
-7. `LoopInvariantCodeMotion`，不得跨越 mandatory statepoint/effect fence；
-8. `StrengthReduction`，保持整数环绕、除零和浮点语义；
-9. `LowerAllocationAndBarrierFastPaths`，展开 TLAB 分配、写屏障和对应 slow edge；
-10. `LowerTargetAbi`，固定 Gugu 内部 ABI 与 C ABI 参数位置；
-11. `LegalizeX86_64`，保证每个操作都有目标指令序列；
-12. `ClassifyPollFreeLeafAndPlaceBudgetedPolls`；
-13. `LowerPollFastPaths`；
-14. `PrepareRegisterAllocation`，分裂关键边并生成并行 copy；
-15. 后端指令选择、寄存器分配和 frame layout。
+7. `CanonicalizeLoops`：构造唯一 preheader、dedicated exit、规范 induction variable和 counted-loop描述，不插入 budget poll；
+8. `LoopInvariantCodeMotion`，不得跨越 mandatory statepoint/effect fence；
+9. `StrengthReduction`，保持整数环绕、除零和浮点语义；
+10. `LoopVersioningAndUnswitching`，只在 runtime alias/alignment check和各版本 effect顺序等价时复制循环；
+11. `LoopVectorizationAndUnrolling`，固定 vector factor、unroll factor、vector main loop和 scalar remainder；
+12. `LowerAllocationAndBarrierFastPaths`，展开 TLAB 分配、写屏障和对应 slow edge；
+13. `LowerTargetAbi`，固定 Gugu 内部 ABI 与 C ABI 参数位置；
+14. `LegalizeX86_64`，保证每个操作都有目标指令序列；
+15. `ClassifyPollFreeLeafAndPlaceBudgetedPolls`；
+16. `LowerPollFastPaths`；
+17. `PrepareRegisterAllocation`，分裂关键边并生成并行 copy；
+18. 后端指令选择、寄存器分配和 frame layout。
 
 任何 pass 都不得删除一个仍可能触发调度或 GC 的 safepoint，不得把 GC provenance 降为 `Raw` 以逃避栈图，也不得把 panic 条件变成未定义行为。浮点优化不使用 reassociation、`NaN` 假设、flush-to-zero 或 fast-math。
 
+`CanonicalizeLoops` 只把可证明有限 trip count、单 latch、固定非零 step和可比较终点的 natural loop标为 counted loop。`LoopVersioningAndUnswitching` 与 `LoopVectorizationAndUnrolling` 在 compiler budget poll尚不存在时完成全部会改变循环 trip count、CFG cycle、vector factor或 unroll factor的变换；只有依赖、alias、panic/effect顺序与整数/浮点语义都证明等价时才能变换，浮点归约不能为向量化重关联。vectorizer使用目标 cost model拒绝保守 legalized单次迭代可能超过 `POLL_BUDGET` 的 factor组合。
+
+budget poll放置后，除 `LowerPollFastPaths`、critical-edge split和不跨 poll的局部 instruction selection外，后续 pass不得再改变循环覆盖范围或把用户操作移过 poll。mandatory statepoint和用户显式 `safepoint_poll()`保持原语义位置；compiler budget poll不是用户可观察事件，放置 pass可以 hoist、sink、合并或替换为 outer-chunk poll，但必须保持下面的路径预算、stack map和 effect边界不变量。
+
 ### `PollSummary` 与预算化插点
 
-poll placement在 target legalization之后、寄存器分配之前运行。x86_64 target固定 `POLL_BUDGET = 4096` cost units；该常量、opcode weight表和算法revision属于 LIR/cache schema，不是语言的 wall-clock或时间片语义。每个 legalized opcode在 target表中有 `1..64` 的非零权重；路径累计使用饱和 `u32`，超过 budget即视为超限。普通/dirty bridge、mandatory statepoint和带 entry `StackCheck` 的 managed call终止当前 poll-free区间；`ForeignLeaf` 以完整 budget的 opaque cost计费，仍由 unsafe leaf契约约束真实运行时间。managed inline asm按已解析 opcode权重求和，不能以单个 opaque instruction规避预算。
+poll placement在全部 loop transformation与 target legalization之后、寄存器分配之前运行。x86_64 target固定 `POLL_BUDGET = 4096` cost units；该常量、vector/unroll cost model、opcode weight表和 strip-mining算法revision属于 LIR/cache schema，不是语言的 wall-clock或时间片语义。每个 legalized opcode在 target表中有 `1..64` 的非零权重；路径累计使用饱和 `u32`，超过 budget即视为超限。普通/dirty bridge、mandatory statepoint和带 entry `StackCheck` 的 managed call终止当前 poll-free区间；`ForeignLeaf` 以完整 budget的 opaque cost计费，仍由 unsafe leaf契约约束真实运行时间。managed inline asm按已解析 opcode权重求和，不能以单个 opaque instruction规避预算。
 
 每个 `MonoKey` 产生固定尺寸的 `PollSummary { entry_stack_check, poll_free_cost, has_poll_free_cycle }`。只有同时满足“无 call、无循环、无 safepoint/unwind、frame payload为0、legalized cost不超过64”的函数才是 `PollFreeLeaf`，可以删除 entry `StackCheck`；直接 caller把它的 `poll_free_cost` 加入路径预算。函数地址被获取或经过间接分派时，入口必须使用带 `StackCheck` 的 checked thunk，不能把 leaf cost隐含在普通 `fn` 值里。其它 out-of-line managed函数保留 entry check，因此 caller只依赖 callee内部 ABI中的 summary，不读取 callee body。
 
 `ClassifyPollFreeLeafAndPlaceBudgetedPolls` 按以下规则处理每个 CFG：
 
-1. 从 mandatory statepoint、entry `StackCheck` 和已有显式 poll处把路径 cost重置为0；在无环区域做最大路径 cost数据流，下一条指令会使值超过 budget时，在最近一个具备完整 stack map的合法边界插入 poll。
+1. 从 mandatory statepoint、entry `StackCheck` 和已有显式 poll处把路径 cost重置为0；在无环区域做最大路径 cost数据流，下一条 instruction会使值超过 budget时，在最近一个具备完整 stack map的合法边界插入 poll。
 2. 编译期已知 trip count且“进入循环前 cost + 全部迭代 cost”不超过 budget的循环不插 loop poll。
-3. 未知 trip count或总 cost超限的 natural loop先规范化唯一 preheader；任一 incoming最大cost不为0时在 preheader插一次 poll以重置预算，再按 `N = max(1, floor(POLL_BUDGET / max(1, body_cost)))` strip-mine。`N = 1` 时在 latch直接 poll；`N > 1` 时使用 SSA countdown，每N次迭代进入一次 poll fast path，不能每轮读取 processor poll word。
-4. nested loop从内到外处理；对 irreducible SCC，在静态频率最低的合法 edge插 poll并重新求 SCC，同频时按 `(from_block, to_block)` ID选择，直到移除所有 poll/statepoint后剩余 CFG无环。
-5. tail-call形成前必须合并 caller/callee summary；若转换后产生没有 poll的递归 backedge，按普通 cyclic SCC插点。优化 pass不能把 poll跨过 mandatory statepoint、atomic/volatile、write barrier、stack-copy critical section或 cleanup边界。
+3. 对仍有超限 poll-free cycle的 counted natural loop，任一 incoming最大cost不为0时先在 preheader插 poll。以 vectorize/unroll后的单次迭代为单位，`optimized_body_cost`取包含 inner latch的最大 legalized路径 cost，`chunk_fixed_cost`取 outer header、limit计算和返回 outer edge的最大固定 cost。若 `chunk_fixed_cost >= POLL_BUDGET` 或 `chunk_fixed_cost + optimized_body_cost > POLL_BUDGET`，必须降低 vector/unroll factor或在合法的无环边界切分，不能产出超限 chunk；否则令 `available = POLL_BUDGET - chunk_fixed_cost`、`N = max(1, floor(available / max(1, optimized_body_cost)))`。一次优化后迭代处理的源码元素数已经包含 vector factor与 unroll factor。
+4. counted loop改写为 outer chunk loop与 poll-free inner loop：outer header以规范剩余 trip count计算 `chunk_iters = min(remaining_iters, N)` 和不会产生用户可观察 overflow的 `chunk_limit`；inner loop复用原 induction variable与 latch比较运行到该 limit，不增加独立 countdown、poll branch或 poll-word load；尚有迭代时 outer edge执行一次 interval为1的 poll再开始下一 chunk。vector main loop、scalar remainder及 runtime-versioned fallback分别计算和验证，最后一段的 outer固定成本与剩余 inner cost沿 loop exit继续传播。
+5. 无法形成 counted loop的 reducible natural loop才使用 SSA countdown fallback。按一次最大 poll-free cycle cost计算 interval；interval为1时在 latch直接 poll，interval大于1时每次 cycle只递减 counter，到0才进入 poll fast path。nested loop从内到外处理，已经由内层 poll切断的路径不重复计费。
+6. 对 irreducible SCC，在静态频率最低的合法 edge插 poll并重新求 SCC，同频时按 `(from_block, to_block)` ID选择，直到移除所有 poll/statepoint后剩余 CFG无环。
+7. tail-call形成前必须合并 caller/callee summary；若转换后产生没有 poll的递归 backedge，按普通 cyclic SCC插点。compiler budget poll只能在本 pass内移动或合并，且不能跨过 mandatory statepoint、用户显式 poll、atomic/volatile、write barrier、stack-copy critical section或 cleanup边界；lowering后它就是普通 safepoint effect fence。
 
-`LowerPollFastPaths` 把 interval poll展开为 countdown和共享 cold poll stub。countdown是普通 SSA整数，不是用户可观察状态；register allocator可以 spill，但不得删除或把多条动态路径错误共享一个 counter。显式 `safepoint_poll()` 和 interval到期都使用相同 `PollResume` map与 per-processor poll word检查。
+`LowerPollFastPaths` 把 counted outer edge和显式 interval-1 poll直接展开为 poll-word检查，把 uncounted interval poll展开为 countdown与共享 cold poll stub。counted inner loop不得生成独立 countdown；uncounted countdown是普通 SSA整数，register allocator可以 spill，但不得删除或让不同动态路径错误共享。所有实际 poll-word检查使用相同 `PollResume` map；只有显式 `safepoint_poll()` 和 interval到期的 edge能够进入 shared slow path。
 
 ## verifier
 
@@ -282,9 +293,12 @@ LIR verifier 至少检查：
 - memory token 在每条 effect 路径形成连续 SSA 链；
 - `Flags` 不跨 block、不跨可能改写标志的指令；
 - pointer provenance 与 load/store、stack map 和外部调用规则一致；
+- `V128` 的 lane、宽度和 target lowering有效，不含 pointer provenance，不出现在函数 ABI或 stack map root中；
 - panic/unwind 边、普通/dirty `ForeignBridge` 与 `ForeignLeaf` 的 mode、foreign runtime 交接和 safepoint ID 不缺失；
 - 目标 legalization 后不存在 i128、聚合普通 value 或无编码操作；
-- `PollSummary` 与实际 entry check一致；把 poll、mandatory statepoint和带 checked entry的 managed call视为路径切断点后，剩余 CFG无循环 SCC，任意 poll-free路径的饱和 cost不超过 `POLL_BUDGET`；countdown interval与 loop body cost完全匹配；
+- `PollSummary` 与实际 entry check一致；把实际 poll、mandatory statepoint和带 checked entry的 managed call视为路径切断点后，剩余 CFG无循环 SCC，任意 poll-free路径的饱和 cost不超过 `POLL_BUDGET`；
+- counted strip-mining的 outer/inner CFG保持原 trip count、step、vector main与 scalar remainder覆盖，`chunk_iters`和 `optimized_body_cost`匹配目标 cost表，inner SCC不存在独立 countdown或 poll-word load；
+- uncounted fallback的 countdown interval与最大 poll-free cycle cost匹配，只有到期 edge具有 `PollResume`；
 
 release 编译器在进入代码生成前也必须运行完整 verifier。验证失败属于编译器内部错误并停止产出镜像，不能降级成保守机器码继续运行。
 
@@ -298,6 +312,9 @@ release 编译器在进入代码生成前也必须运行完整 verifier。验证
 - [Rust 编译器开发指南：单态化](https://rustc-dev-guide.rust-lang.org/backend/monomorph.html)
 - [Go 编译器 SSA 说明](https://go.dev/src/cmd/compile/internal/ssa/README)
 - [OpenJDK counted-loop safepoint strip mining](https://bugs.openjdk.org/browse/JDK-8223051)
+- [OpenJDK loop strip-mining iteration control](https://bugs.openjdk.org/browse/JDK-8186027)
+- [OpenJDK counted-loop safepoint performance](https://bugs.openjdk.org/browse/JDK-8195117)
+- [Go non-cooperative preemption proposal](https://github.com/golang/proposal/blob/master/design/24543-non-cooperative-preemption.md)
 - [OpenJDK thread-local handshakes](https://openjdk.org/jeps/312)
 - [LLVM statepoints](https://llvm.org/docs/Statepoints.html)
 - [Wasmtime interrupting execution](https://docs.wasmtime.dev/examples-interrupting-wasm.html)

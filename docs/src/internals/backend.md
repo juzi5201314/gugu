@@ -107,6 +107,10 @@ RIP-relative code/data addressing是镜像内默认。超过 rel32 距离时 ima
 
 `addss/addsd`、`subss/subsd`、`mulss/mulsd`、`divss/divsd` 和 `ucomiss/ucomisd` 实现普通操作。NaN 比较显式组合 parity/condition flags以匹配语言 `== != < <= > >=`。float 到 integer 的范围/NaN 在 conversion 前检查；不能依赖 `cvtt*` 的 indefinite result 暗中决定语言值。
 
+### 128-bit向量
+
+内部 `V128` 固定映射到 x86-64-v1的 XMM/SSE2，不形成公开 SIMD ABI。连续向量 load/store默认使用 `movdqu`；只有静态对齐证明或 `LoopVersioningAndUnswitching` 的 alignment fast version支配访问时才能使用 `movdqa`。逐 lane整数/浮点操作、比较、shuffle与 wrapping整数 reduction必须完全由 descriptor列出的 SSE2序列 lowering；没有基线序列、需要 pointer lane或成本不优于标量版本时，loop vectorizer必须保留标量循环，不能在 legalization阶段调用 helper或静默 scalarize。浮点 reduction不得改变源顺序，AVX及更高扩展仍由 instruction verifier拒绝。
+
 ### 原子与 fence
 
 自然对齐 1/2/4/8 字节 atomic：
@@ -123,7 +127,7 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 
 只有 descriptor不含 `HAS_RESOURCE`、请求不 large/pinned、高对齐且 footprint不跨 Immix block时才走 allocation fast path。当前 `[r15 + tlab_cursor_offset]`/limit只覆盖 processor本地 span中的一个连续空 line run；checked计算 16 byte header、对齐 padding和 payload，成功时推进 cursor并初始化 header。run不足调用 `gc_refill_line`，它先在本地 8-block span推进 line表，span用尽才访问全局 heap；其它请求调用 `gc_alloc_slow`。offset与 `HeapLayout`由 runtime layout query固定并进入 backend schema。
 
-budgeted/显式 safepoint poll以 `AtomicLoadAcquire [r15 + poll_flags_offset]` 读取当前 processor的两位 word；x86_64 lowering优先使用 `test dword ptr [r15 + offset], 0b11` 和 unlikely branch，值为0时不访问 coroutine状态。interval为1的 loop直接执行该检查；interval大于1时每轮只更新 SSA countdown，到0才重置并读取 poll word。cold slow path使用对应 `PollResume` map保存 roots并切 system stack。函数入口不再发独立 poll word load，而由 poisoned `stack_check`复用现有 prologue比较。write barrier、`ForeignLeaf`和普通/dirty bridge规则保持各自 effect fence与交接语义。
+budgeted/显式 safepoint poll以 `AtomicLoadAcquire [r15 + poll_flags_offset]` 读取当前 processor的两位 word；x86_64 lowering优先使用 `test dword ptr [r15 + offset], 0b11` 和 unlikely branch，值为0时不访问 coroutine状态。counted strip-mined loop只在 outer chunk edge执行该检查，poll-free inner loop复用既有 induction/latch，不生成独立 countdown或额外每轮分支；只有 uncounted interval大于1的 fallback每次 cycle更新 SSA countdown，到0才读取 poll word。taken cold edge按普通 call-clobber规则 spill全部跨 poll活跃的 caller-saved scalar与 `V128`，并用对应 `PollResume` map保存 roots后切 system stack；fast fallthrough不执行这些 spill。函数入口不再发独立 poll word load，而由 poisoned `stack_check`复用现有 prologue比较。write barrier、`ForeignLeaf`和普通/dirty bridge规则保持各自 effect fence与交接语义。
 
 ## block layout 与 branch relaxation
 
@@ -147,11 +151,11 @@ GPR 和 XMM 独立分配。值跨 call 活跃时 GPR 首选 `rbp,r12,r13`；不�
 rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10, rbp, r12, r13
 ```
 
-XMM 顺序为 `xmm0..xmm15`，内部调用全部 clobber。fixed instruction constraint 先占用要求寄存器并在前后 split 冲突 interval。
+XMM 顺序为 `xmm0..xmm15`，承载 `F32`、`F64` 和 non-root `V128`；内部调用与 taken poll slow edge全部 clobber。fixed instruction constraint 先占用要求寄存器并在前后 split冲突 interval；跨这些位置活跃的向量值进入16字节 spill slot，不能进入 stack map。
 
 allocator 维护按结束 position 排序的 active/inactive 集。没有空闲 register 时，在当前 interval 与占用候选中选择 `spill_weight / remaining_length` 最低者 spill；比例用 `u128` 交叉乘法比较，不使用宿主浮点。相等时 spill 稳定 value ID 较大者。interval 在下一 use、call、safepoint和 fixed constraint 前后 split，不能在 instruction 中间 split。
 
-stack spill slot 按 `(size, align, root_class)` 分组复用，只有 live range 不重叠才可共用。root class 为 heap pointer、stack pointer 或 non-pointer；不同 root class 不共用 slot，使 stack map 和栈复制验证不依赖某时刻残留位。slot 分配按 interval 起点/ValueId 排序，选择最低 offset 可用槽。
+stack spill slot 按 `(size, align, root_class)` 分组复用，只有 live range不重叠才可共用。root class为 heap pointer、stack pointer或 non-pointer；不同 root class不共用 slot，使 stack map和栈复制验证不依赖某时刻残留位。`V128` slot固定 size/align均为16并属于 non-pointer。slot分配按 interval起点/ValueId排序，选择最低 offset可用槽。
 
 ### parallel copy
 
@@ -201,7 +205,7 @@ epilogue从固定 slot恢复 callee-saved、`add rsp, frame_size`、`ret`。prol
 
 ## stack map、panic 与 unwind
 
-寄存器分配后按[栈图](stack-maps.md)生成 safepoint root。`CallReturn`/suspend/普通 `ForeignBridge`/`ForeignBridge[DirtyCpu]` 点把所有用户 pointer spill；两种 bridge在 coroutine stack物化 ABI frame并以 high-relative offset登记，native段不生成 native stack map。interval countdown本身没有 map，只有实际 poll fast path的 resume label生成 `PollResume`；poisoned prologue复用 `MorestackEntry`。`ForeignLeaf`只有在其它 effect要求 `CallReturn` 时才建立普通调用记录。instruction offset在 branch relaxation和encoding后最终回填。
+寄存器分配后按[栈图](stack-maps.md)生成 safepoint root。`CallReturn`/suspend/普通 `ForeignBridge`/`ForeignBridge[DirtyCpu]` 点把所有用户 pointer spill；两种 bridge在 coroutine stack物化 ABI frame并以 high-relative offset登记，native段不生成 native stack map。counted inner chunk edge与 uncounted countdown-only edge都没有 map，只有实际 poll-word检查后的 resume label生成 `PollResume`；poisoned prologue复用 `MorestackEntry`。`ForeignLeaf`只有在其它 effect要求 `CallReturn` 时才建立普通调用记录。instruction offset在 branch relaxation和encoding后最终回填。
 
 每个 function 生成唯一 `UnwindFunction { code_rva: u64, code_size: u32, frame_size: u32, saved_gpr_mask: u16, landing_start: u32, landing_count: u16, flags: u16 }`。landing table 每项固定为 `LandingRecord { pc_start: u32, pc_end: u32, landing_pc: u32, cleanup_chain: u32 }`，按 `pc_start` 严格递增且范围不重叠；offset 都相对 function code 起点，`cleanup_chain == u32::MAX` 表示只恢复传播。
 

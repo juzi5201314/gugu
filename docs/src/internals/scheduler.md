@@ -292,9 +292,9 @@ worker无 runtime/foreign责任后转 Stopping。主线程按 poller、processor
 - processor retire不丢 runnable、timer、barrier、mark work或 pending poll flag；
 - GC scan lock下不能执行/复制同一 coroutine；Running processor的 poll-free机器路径cost不超过 `POLL_BUDGET`，且所有 cyclic路径有同步 poll/checked entry。
 
-确定性 runtime测试必须使用可控 poller/clock和调度 gate，覆盖 local overflow、半队列窃取、park/wake竞争、select loser、timer cancel、stack增长/收缩、poisoned `StackCheck` 同时处理增长与抢占、budgeted loop countdown、`ForeignBridge`释放 processor、`ForeignBridge[DirtyCpu]`额度耗尽与释放、`ForeignLeaf`保留 processor、未知间接调用回退 bridge、opaque asm进入 dirty、动态 parallelism、GC epoch发布/确认与 ready竞争。默认测试不能依赖真实10 ms时间片或随机 victim恰好出现。
+确定性 runtime测试必须使用可控 poller/clock和调度 gate，覆盖 local overflow、半队列窃取、park/wake竞争、select loser、timer cancel、stack增长/收缩、poisoned `StackCheck` 同时处理增长与抢占、counted-loop outer chunk、uncounted-loop countdown、`ForeignBridge`释放 processor、`ForeignBridge[DirtyCpu]`额度耗尽与释放、`ForeignLeaf`保留 processor、未知间接调用回退 bridge、opaque asm进入 dirty、动态 parallelism、GC epoch发布/确认与 ready竞争。默认测试不能依赖真实10 ms时间片或随机 victim恰好出现。
 
-poll policy的性能门禁属于 bench/手工 profiling，不进入默认 nextest：至少比较 `POLL_BUDGET` 1024/4096/16384在空整数循环、内存扫描、无 frame调用链、allocation fast path和递归 SCC上的 instructions/iteration、poll-word loads、branch misses与吞吐；同时在可控 GC请求下记录 request到 processor ack的 p50/p99/max cost units和 wall-clock。修改默认4096或 opcode weight必须同时证明 hot-loop回归与 stop-latency收益，不能只优化单一 microbenchmark。
+poll policy的性能门禁属于 bench/手工 profiling，不进入默认 nextest：至少比较 `POLL_BUDGET` 1024/4096/16384在空整数 counted loop、可向量化整数内存扫描、uncounted cyclic CFG、无 frame调用链、allocation fast path和递归 SCC上的 instructions/iteration、poll-word loads、branch misses与吞吐；机器码检查必须证明 counted inner loop没有独立 poll countdown或 poll-word load，并保留基线允许的 vectorize/unroll结果。同时在可控 GC请求下记录 request到 processor ack的 p50/p99/max cost units和 wall-clock。修改默认4096、vector/unroll cost model或 opcode weight必须同时证明 hot-loop回归与 stop-latency收益，不能只优化单一 microbenchmark。
 
 ## 参考实现资料
 
