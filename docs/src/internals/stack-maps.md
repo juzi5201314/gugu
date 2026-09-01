@@ -209,7 +209,7 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 4. 计算有符号 `delta = new_rsp - old_rsp`；
 5. 用旧 frame chain 的每个 map 枚举 `StackInterior` slot；值落在旧 stack range 内时加 `delta`；
 6. 对 top frame 的 `stack_reg_mask` 保存寄存器执行相同更新；
-7. 更新 coroutine context 的 `rsp`、stack bounds 和 guard；
+7. 更新 coroutine context 的 `rsp`、stack bounds、正常 `stack_check`和收缩观察字段；
 8. 发布新 stack 后释放旧 stack。
 
 任何 `StackInterior` 值不为空且不落在当前旧 stack range 内都是 compiler/runtime 契约破坏。heap roots在栈复制时不修改。return PC、code/metadata pointer 和整数不因 stack 地址变化而修改。
@@ -232,7 +232,7 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 - `PollResume` 只能位于实际 poll-word检查后的 resume label，不能位于 counted inner chunk或 uncounted countdown-only edge；
 - source/unwind index存在且范围合法。
 
-runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`、interior heap root、stack interior重定位、多frame调用、panic landing pad、attached foreign快返回、foreign retake后扫描、dirty bridge、`PollFreeLeaf`无map、caller最大 leaf stack reserve和stack增长后GC。
+runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`、interior heap root、stack interior重定位、多frame调用、panic landing pad、attached foreign快返回、foreign retake后扫描、dirty bridge、`PollFreeLeaf`无map、caller最高 leaf stack reserve、stack增长、四窗迟滞收缩和512 B/1 KiB冷 stack重定位后GC。
 
 - [LLVM Stack Maps and Patch Points](https://llvm.org/docs/StackMaps.html)
 - [Go runtime stack 实现](https://go.dev/src/runtime/stack.go)

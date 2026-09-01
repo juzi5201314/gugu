@@ -271,7 +271,9 @@ struct RuntimeStats {
     pub parallelism: uint,
     pub heap_committed_bytes: uint,
     pub heap_live_bytes: uint,
+    pub stack_reserved_bytes: uint,
     pub stack_committed_bytes: uint,
+    pub stack_live_bytes: uint,
     pub dirty_cpu_active: uint,
     pub dirty_cpu_waiting: uint,
     pub gc_cycles: uint,
@@ -299,13 +301,13 @@ fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 
 `GcTarget::Automatic(p)` 的 `p` 是非负百分数：下一次自动周期的目标堆量为上一次周期结束时存活堆量加上该百分比；`Automatic(100)` 是默认行为。`GcTarget::Off` 关闭增长触发，但不关闭显式 `collect()`、内存上限触发或分配失败前的强制回收。setter 返回旧值，已经开始的 GC 周期不因设置改变而回滚。
 
-`set_memory_limit(Some(n))` 设置 runtime 管理内存的软上限，`None` 恢复无上限；setter 返回旧上限。它不能撤销已经提交的页，也不能终止外部库分配。`collect()` 请求一个从调用线性化点之后开始的完整 GC 周期，并挂起当前协程直到该周期完成；其它可运行协程可以继续。调用不保证空闲页归还 OS，也不运行 finalizer。
+`set_memory_limit(Some(n))` 设置 runtime 管理的已提交 heap、stack、allocator metadata与内部 cache的软上限，`None` 恢复无上限；仅保留地址空间但尚未提交的 stack arena计入 `stack_reserved_bytes`，不计入该软上限。setter 返回旧上限，不能撤销已经提交的页，也不能终止外部库分配。到达上限后，runtime依次完成一次完整 GC、flush processor stack cache、decommit完全空闲的 stack页，并压缩从上一个完整 GC以来未增长的 Waiting stack，再决定分配失败；压力路径的额外复制只在上限施压时发生。`collect()` 请求一个从调用线性化点之后开始的完整 GC周期并挂起当前协程直到完成；其它可运行协程可以继续。显式 collect不保证空闲页归还 OS，也不运行 finalizer。
 
 `stack_limit()` 返回当前每协程逻辑栈上限。栈上限只能由 `GUGU_RUNTIME_STACK_MAX` 在启动时设置；本版本不提供降低活动栈上限的动态 setter，因为那会使已存在的栈无法满足安全返回条件。
 
 `safepoint_poll()` 是 compiler绑定的无参数 runtime intrinsic。fast path读取当前 `LogicalProcessor` 的 poll word；slow path可以确认 `gc_stop_epoch`、处理抢占请求、保存 stack map所需 roots、让出当前 coroutine并在恢复后重新检查 epoch。它不是阻塞 I/O API，不创建用户对象，不允许从 asm模板、`#[naked]` 或带函数体的 `#[ffi(dirty_cpu)]` 调用。
 
-`RuntimeStats` 是逐字段快照，不是业务同步原语。`gc_cycles`、`gc_pause_total` 和 dropped 计数单调递增；live/committed/active/waiting 等当前量可随并发运行升降，采样后立即过时。`heap_live_bytes` 不等同于可立即返还 OS 的页数。并行度刚降低时 `dirty_cpu_active` 可以暂时高于新 target；dirty统计不提供同步、取消或强杀 native work 的能力。
+`RuntimeStats` 是逐字段快照，不是业务同步原语。`gc_cycles`、`gc_pause_total` 和 dropped计数单调递增；live/committed/active/waiting等当前量可随并发运行升降，采样后立即过时。`stack_reserved_bytes` 是 stack arena与大栈 reservation占用的虚拟地址总量，`stack_live_bytes` 是 live coroutine逻辑容量之和，`stack_committed_bytes` 是 live与cache共同占用的已提交宿主页；亚页共享、cache和空页回收使三者不存在简单相等关系。`heap_live_bytes` 也不等同于可立即返还 OS的页数。并行度刚降低时 `dirty_cpu_active` 可以暂时高于新 target；dirty统计不提供同步、取消或强杀 native work的能力。
 
 `TraceConfig` 的事件写入 stderr，使用 `gugu-runtime-trace-v1` 的逐行 JSON。事件包含类别、事件名、相对 runtime 启动的单调纳秒时间和可用的协程/不透明执行槽标识；trace 只影响诊断输出，不改变调度、GC 或信号语义。trace 缓冲区满时丢弃事件并增加 `trace_events_dropped`，不能阻塞用户代码或进入用户 panic。
 

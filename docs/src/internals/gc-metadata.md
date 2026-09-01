@@ -332,6 +332,8 @@ runtime 私有结构必须通过固定的 typed root visitor枚举，不允许�
 
 普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 都只通过已保存的 Gugu stack/map和显式 pin暴露根。attached普通 bridge遇到 GC stop时由 collector按完整 generation立即 retake并转为 detached，不等待 native线程合作；foreign/dirty worker的 OS stack、C/C++ stack和 opaque asm寄存器绝不保守扫描。传给 native的 managed地址必须在进入前 pin，或复制到 non-moving storage。native work永不返回时，相关 coroutine frame/pin会一直保留；普通 processor lease仍可被 GC/scheduler取回，因此该 native work不阻止其它 heap的 mark、relocation或 stop epoch完成。
 
+stack arena、processor stack cache和已经从 live coroutine registry摘除的 slot不属于 root。coroutine完成 defer后，必须先在旧 stack上用 GC barrier把 result或 panic payload移入控制块，再由 `finish_coroutine` 单向切到 worker system stack；持有 `STACK_SCAN_LOCKED` 停止 typed visitor遍历旧 stack并发布空 descriptor后，slot才能交给 cache，随后发布 `Dead`。仍存活的 Join/handle只保留控制块与结果。缓存字节中的旧 pointer pattern绝不保守扫描。Waiting/Runnable stack的冷压缩同样必须持有 scan lock，用旧 map完成全部 `StackInterior`修正并发布新 descriptor后，旧 slot才可进入 cache。
+
 ## write barrier 与 remembered set
 
 所有可能覆盖 heap managed field 的写入由 LIR `GcWriteBarrier` lowering 成统一 hybrid barrier：

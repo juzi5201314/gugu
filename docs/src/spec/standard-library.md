@@ -691,7 +691,9 @@ struct RuntimeStats {
     pub parallelism: uint,
     pub heap_committed_bytes: uint,
     pub heap_live_bytes: uint,
+    pub stack_reserved_bytes: uint,
     pub stack_committed_bytes: uint,
+    pub stack_live_bytes: uint,
     pub dirty_cpu_active: uint,
     pub dirty_cpu_waiting: uint,
     pub gc_cycles: uint,
@@ -719,7 +721,7 @@ setter 是进程级操作，按调用的线性化顺序采用最后发布的值�
 
 `safepoint_poll()` 是无参数 compiler intrinsic：fast path检查当前 `LogicalProcessor` 的抢占/GC poll word，slow path可以确认 stop、保存 roots、让出 coroutine并在恢复后继续。它不执行 I/O，不在 asm、`#[naked]` 或带函数体的 `#[ffi(dirty_cpu)]` 中可用。
 
-`RuntimeStats` 是逐字段快照。`dirty_cpu_active` 是当前执行 native work 的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待额度的调用数；二者会随并发调度立即变化，并行度刚降低时 active可以暂时高于新 target。它们不提供取消 native work 的能力，也不是业务同步原语。统计值不提供 GC地址、内部队列或 OS线程身份的稳定观察接口。
+`RuntimeStats` 是逐字段快照。`stack_reserved_bytes`、`stack_committed_bytes`与 `stack_live_bytes` 分别观察地址 reservation、已提交宿主页和 live coroutine逻辑 stack容量，三者会因亚页共享、cache和decommit而不同；具体内存上限与压力回收顺序见[运行时](runtime.md#gc栈与运行时控制-api)。`dirty_cpu_active` 是当前执行 native work的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待额度的调用数；二者会随并发调度立即变化，并行度刚降低时 active可以暂时高于新 target。它们不提供取消 native work的能力，也不是业务同步原语。统计值不提供 GC地址、内部队列或 OS线程身份的稳定观察接口。
 
 `std.signal` 把普通 OS 终止通知显式交给用户。没有订阅者时遵循目标 OS 默认动作；订阅不会自动取消根协程、触发 panic 或等待其它用户协程。fatal signal、`SIGKILL`、`SIGSTOP` 和 Windows 不可拦截的同步 fault 不在订阅集合中。
 

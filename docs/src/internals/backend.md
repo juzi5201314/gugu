@@ -193,7 +193,9 @@ rsp = rsp - frame_size
 store used callee-saved registers to fixed slots
 ```
 
-`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最大值，checked加法溢出直接进入 `StackOverflow` fatal。prologue只做一次容量检查，不在每个 leaf call前重复读取 `stack_check`。`stack_check`正常等于真实 guard，被投毒时为 `usize::MAX`，所以同一比较必然进入 slow stub。stub在 system stack先 acquire处理 processor poll flags，再以真实 guard判断是否扩栈；它不能把 sentinel当作地址解引用。
+`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最高值，checked加法溢出直接进入 `StackOverflow` fatal。prologue只做一次容量检查，不在每个 leaf call前重复读取 `stack_check`。`stack_check`正常等于当前 `stack_low`，被投毒时为 `usize::MAX`，所以同一比较必然进入 slow stub。stub在 system stack先 acquire处理 processor poll flags，再以 `stack_low`判断是否扩栈；它不能把 sentinel当作地址解引用。
+
+每个可作为 `async` body入口的 code descriptor还发布 `entry_required_frame`，值覆盖入口 `required_frame`、ABI entry record和进入首个 checked prologue前的固定字节。runtime据此选择初始 stack class；该值使用与 frame layout相同的 checked计算并进入 backend/runtime schema，禁止另写经验常量。
 
 `frame_size` 必须小于等于 `u32::MAX`；更大的单函数 frame在代码生成前报 `implementation-limit`，不能依赖更高 runtime stack max截断。单函数最终 code size同样必须小于等于 `u32::MAX`，以满足 stack-map、unwind和 source record的相对 offset表示。
 
