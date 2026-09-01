@@ -50,7 +50,9 @@ pin 状态属于目标对象头和 pin token，不是另一类位置。指向 pi
 | 3 | `ForeignBridge` | Gugu 与 C/runtime bridge 完成寄存器保存后的 label |
 | 4 | `MorestackEntry` | prologue建 frame前进入 `morestack_or_poll` 的 slow-path label |
 
-普通/dirty `ForeignBridge`、park/suspend和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record。counted inner chunk edge与 uncounted countdown-only edge没有 map，只有实际读取 poll word后的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。
+普通/dirty `ForeignBridge`、park/suspend、runtime lock acquire的 contention edge和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record。counted inner chunk edge与 uncounted countdown-only edge没有 map，只有实际读取 poll word后的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。`NoSafepointRegion` 内没有 map或 resume PC，begin前/end后的实际 poll仍使用 `PollResume`。
+
+`MorestackEntry` 的固定 scratch发布发生在任何 GC/preempt处理之前，且不写 candidate以下地址；因此 slow path即使同时由容量不足和 poison触发，也能先停机或调度出去。恢复后必须以 GC/stack copy已经修正的 scratch和最新 `stack_low`重试原 `StackCheck`，不能从旧 candidate直接建立 frame。
 
 signal/APC handler不在任意PC直接扫描用户 stack。它只设置当前 processor的 poll word、投毒 current coroutine的 `stack_check`并唤醒 worker；真正暂停和扫描发生在 compiler登记的 `PollResume`、`MorestackEntry` 或 mandatory statepoint。dirty native stack不属于 Gugu stack map。
 
@@ -230,9 +232,10 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 - suspend/foreign点 register mask为0；
 - `MorestackEntry` 的 `slot_count == 0`，只含 ABI参数 register root，且关联函数保留 entry check；
 - `PollResume` 只能位于实际 poll-word检查后的 resume label，不能位于 counted inner chunk或 uncounted countdown-only edge；
+- `NoSafepointRegion` 的机器范围内不存在 safepoint record、call-return map或 poll resume label，紧邻 region的 poll map只能指向 marker外的真实 poll instruction；
 - source/unwind index存在且范围合法。
 
-runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`、interior heap root、stack interior重定位、多frame调用、panic landing pad、attached foreign快返回、foreign retake后扫描、dirty bridge、`PollFreeLeaf`无map、caller最高 leaf stack reserve、stack增长、四窗迟滞收缩和512 B/1 KiB冷 stack重定位后GC。
+runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`同时处理GC与增长、interior heap root、stack interior重定位、多frame调用、panic landing pad、no-safepoint region邻接poll、attached foreign快返回、foreign retake后扫描、dirty bridge、`PollFreeLeaf`无map、caller最高 leaf stack reserve、stack增长、四窗迟滞收缩和512 B/1 KiB冷 stack重定位后GC。
 
 - [LLVM Stack Maps and Patch Points](https://llvm.org/docs/StackMaps.html)
 - [Go runtime stack 实现](https://go.dev/src/runtime/stack.go)

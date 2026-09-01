@@ -8,6 +8,8 @@
 
 除平台 rt0、context switch、signal/exception stub和必须的 machine intrinsic外，官方 scheduler/runtime主体使用 Gugu实现；不得维护一份 Rust语义等价runtime作为正常执行路径。
 
+runtime源码需要在锁所有权或 root publication的常数临界区暂缓 safepoint时，只能使用 compiler内部的 [`NoSafepointRegion`](gir-lir.md#nosafepointregion)；它不是用户 attribute，也不允许建立另一套不受 poll预算约束的 runtime路径。
+
 ## 三层实体
 
 调度器采用 Go 风格的三层模型，但使用完整名称而不是单字母缩写：
@@ -48,7 +50,7 @@ Coroutine {
 }
 ```
 
-`select_scratch` 只保存 readiness bitmap，不保存 managed pointer；source、send payload 和 result slot仍位于用户 frame并由 stack map追踪。runtime typed visitor跳过 scratch bytes。
+`select_scratch` 只保存 readiness bitmap，不保存 managed pointer；source、send payload 和 result slot仍位于用户 frame并由 stack map追踪。需要登记多个 case时，`wait_record` 的 tagged `Select` variant持有 `SelectTxn` 与一个 non-moving `SelectWaitBlock` handle；block按 case数量在取得任何 source锁前从 runtime wait-node size class取得，node只保存 Coroutine handle、generation、case index和 stack-high-relative payload/result offset，由 typed visitor按 descriptor扫描，禁止保存会被 stack copy悬空的裸 pointer。cleanup完成后 block立即归还，scratch bytes仍由 typed visitor跳过。
 
 `ForeignBridgeState` 只在 lifecycle 为 `Foreign` 或 `DirtyWaiting` 时有效，固定保存 `{ mode, call_stub, frame_offset, frame_size, lease_word, dirty_link, error_state }`。compiler 在 coroutine stack 上物化 ABI bridge frame；`frame_offset` 是从逻辑 `stack_high` 到 frame起点的 checked深度，record不保存会因 stack copy失效的裸 stack pointer。`call_stub` 是 non-moving code pointer；`lease_word` 保存本次 bridge generation和进入 native后期望的完整 lifecycle word，不是 pointer；`dirty_link` 只供 `dirty_wait_queue` 使用，不能复用 runnable `run_link`。ABI frame里的 managed/raw pointer按调用点 stack map追踪，交给 native 的 managed地址还必须在进入 bridge前 pin或复制。
 
@@ -67,7 +69,7 @@ Coroutine {
 | 6 | `DirtyWaiting` | bridge roots 已发布，等待 dirty CPU额度且不绑定 worker/processor |
 | 7 | `Dead` | 用户 body、panic 清理和 Join 发布已经结束 |
 
-bit 4固定为 `ENQUEUED`，bit 5固定为 `STACK_SCAN_LOCKED`，bit 6固定为 `FOREIGN_DETACHED`，bit 7保留且必须为0，bits 8..63是56-bit `foreign_generation`。`FOREIGN_DETACHED` 只能与 `Foreign` lifecycle同时出现：为0表示普通 bridge仍保留原 processor lease，为1表示 processor已经被 retake或该调用从一开始就是 dirty bridge。每次从 `Running` 进入普通/active dirty `Foreign` 或 `DirtyWaiting` 时 generation加1；`DirtyWaiting -> Foreign` 保持同一 generation。generation溢出进入 `RuntimeInvariant` fatal，不能回绕。抢占/GC请求不存进 lifecycle word，而存进当前 `LogicalProcessor.poll_flags`。所有 lifecycle转换比较完整 `u64`并携带必要的 acquire/release ordering，不能只比较低位或以互斥锁外普通读写替代；generation使延迟 retaker不能把旧调用误认成新的 `Foreign`，消除 ABA。
+bit 4固定为 `ENQUEUED`，bit 5固定为 `STACK_SCAN_LOCKED`，bit 6固定为 `FOREIGN_DETACHED`，bit 7保留且必须为0，bits 8..63是56-bit `foreign_generation`。`FOREIGN_DETACHED` 只能与 `Foreign` lifecycle同时出现：为0表示普通 bridge仍保留原 processor lease，为1表示 processor已经被 retake或该调用从一开始就是 dirty bridge。每次从 `Running` 进入普通/active dirty `Foreign` 或 `DirtyWaiting` 时 generation加1；`DirtyWaiting -> Foreign` 保持同一 generation。generation溢出进入 `RuntimeInvariant` fatal，不能回绕。抢占与 GC stop通知刻意不占 lifecycle bit：它们只写 active `LogicalProcessor.poll_flags`，并投毒该 processor当时 `Running` coroutine的 `stack_check`；Runnable/Waiting context已经稳定，不需要逐 coroutine通知。fast path禁止读取 lifecycle或全局 GC epoch。所有 lifecycle转换比较完整 `u64`并携带必要的 acquire/release ordering，不能只比较低位或以互斥锁外普通读写替代；generation使延迟 retaker不能把旧调用误认成新的 `Foreign`，消除 ABA。
 
 合法主转换为：
 
@@ -105,7 +107,7 @@ x86_64 `CoroutineContext` 保存 `rsp`、resume `rip`、`rbx`、`rbp`、`r12` �
 
 本地队列容量有严格 256 上界、访问模式是 owner 尾部 push/pop 与 thief 头部 steal，因此使用内联 `[AtomicPtr<Coroutine>; 256]`、`AtomicU32 head` 和 `AtomicU32 tail`，不使用通用 deque。实现必须注释该上界，并以 `debug_assert!(tail.wrapping_sub(head) <= 256)` 检查不变量。
 
-`poll_flags` 是固定小型位掩码：bit 0为 `PREEMPT`，bit 1为 `GC_STOP`，bits 2..31必须为0；debug构建以 `debug_assert!(flags & !0b11 == 0)` 检查。请求方先 release发布关联 epoch/state，再 `fetch_or(Release)`设置 bit；managed fast path以 acquire load读取，值为0时继续。slow path重新 acquire读取并按位处理，只有完成对应动作的一方才能清 bit。processor没有 Running coroutine时，scheduler在绑定新 coroutine前处理 flag或直接确认 epoch。
+`poll_flags` 是普通内存中的固定小型 atomic word，不存在 protected “poll page”或 fault-based trap：bit 0为 `PREEMPT`，bit 1为 `GC_STOP`，bits 2..31必须为0；debug构建以 `debug_assert!(flags & !0b11 == 0)` 检查。请求方先 release发布关联的 processor-local epoch/state，再 `fetch_or(Release)`设置 bit；budgeted/显式 poll只以一次 acquire load读取该 word，值为0时继续。函数 prologue不再读它，而以一次 acquire读取 current coroutine的 `stack_check`；两条 fast path都不读全局 `gc_stop_epoch`或 lifecycle state。slow path重新 acquire读取 flags与所需 epoch，只有完成对应动作的一方才能清 bit。processor没有 Running coroutine时，scheduler在绑定新 coroutine前处理 flag或直接确认 epoch。
 
 x86_64两项目标的 cache line常量固定为 `CACHE_LINE_BYTES = 64`。processor数量由 `parallelism` 严格有界，poll fast path是高频只读、ownership是跨线程调度读写、queue/TLAB是 owner局部写，因此表示固定为两个相邻但不共享的 cache line，而不是通用可变容器：
 
@@ -194,14 +196,29 @@ result 写入 release，恢复 coroutine acquire 后读取。一个 wait generat
 
 ## `select` 提交
 
-每个 channel/Join 控制块创建时取得单调 `WaitSourceId(u64)`；GC 地址移动不改变该 ID。一次 `select` 先按源码顺序求值完成的 HIR/GIR 契约，再按 `WaitSourceId` 排序并只锁一次每个唯一等待源；持锁区禁止 safepoint。重复引用同一 source 的 case 仍各有独立 case index。
-HIR把无 case且无 default的形式标为 `SelectPlan::Never`。scheduler对此不生成 source锁或随机取模，只通过专用 never wait记录把 coroutine置 Waiting；该记录没有普通 waker，何时因 runtime终止而不再执行只消费 `TerminationPlan`。只有至少一个非 default case时才进入下述 readiness算法。
+每个 channel/Join 控制块创建时取得单调 `WaitSourceId(u64)`；GC 地址移动不改变该 ID。一次 `select` 先按源码顺序完成 HIR/GIR规定的一次求值，把 source、send payload、result slot和 barrier需求物化为稳定 case record。任何 scratch增长、随机采样、source排序和可能触发 barrier refill的 reservation都发生在取得 source锁前；持锁机器区间必须由 `NoSafepointRegion`标记并接受同一 `POLL_BUDGET`验证。
 
-coroutine 的 `select_rng` 使用 xoshiro256++。一次 next 固定为 `result = rotl(s0 + s3, 23) + s0`，再执行 `t = s1 << 17; s2 ^= s0; s3 ^= s1; s1 ^= s2; s0 ^= s3; s2 ^= t; s3 = rotl(s3, 45)`，全部 `u64` 环绕。初始 32 字节状态为 BLAKE3-256(`gugu-select-rng-v1`、OS entropy、CoroutineId、进程启动 nonce)；全零时把 `s0` 置 1。该状态不与 `std.random` 共享。
+HIR把无 case且无 default的形式标为 `SelectPlan::Never`。scheduler对此不生成 source锁或随机取模，只通过专用 never wait记录把 coroutine置 Waiting；该记录没有普通 waker，何时因 runtime终止而不再执行只消费 `TerminationPlan`。只有至少一个非 default case时才进入下述算法。
 
-取得任何 source 锁前，runtime 按 case_count 准备 readiness scratch：case 数不超过 64 时使用调用 frame 的一个 `u64` bitmap；更大时把 coroutine-owned `select_scratch` 增长到 `ceil(case_count / 64)` 个 `u64`。该 vector 无固定上界、按 coroutine 复用，增长可以 safepoint但必须发生在持锁前；不让罕见的大 select 永久扩大每个 frame。随后取得全部 source 锁并检查即时 readiness。若有 `n` 个 ready case，令 `threshold = 0u64.wrapping_sub(n) % n`，重复取 xoshiro 值直到 `x >= threshold`，再在源码序 ready 列表中选择 `x % n`；仍持锁原子提交该 case并释放全部锁。接受区长度能被 n 整除，每个 ready case 获得完全相同概率。
+coroutine 的 `select_rng` 使用 xoshiro256++。一次 next固定为 `result = rotl(s0 + s3, 23) + s0`，再执行 `t = s1 << 17; s2 ^= s0; s3 ^= s1; s1 ^= s2; s0 ^= s3; s2 ^= t; s3 = rotl(s3, 45)`，全部 `u64` 环绕。初始32字节状态为 BLAKE3-256(`gugu-select-rng-v1`、OS entropy、CoroutineId、进程启动 nonce)；全零时把 `s0`置1。该状态不与 `std.random`共享。`uniform(n)` 固定使用 threshold rejection：`threshold = 0u64.wrapping_sub(n) % n`，重复取值直到 `x >= threshold`，返回 `x % n`；所有 rejection与 permutation生成都在锁外执行。
 
-没有 ready case且存在 default 时，释放锁并选 default。没有 default时，先以相同无偏采样取得 `start in 0..case_count`，再重复采样 `step in 1..case_count` 直到 `gcd(step, case_count) == 1`，按 `(start + k * step) % case_count` 的完整排列登记共享 winner 的 wait node；`case_count == 1` 时 start 0、step 1。登记完成后通过两阶段 park原子提交等待，waker 的 winner CAS决定唯一 case。channel/Join 自身 wait queue 保持 FIFO，重复执行的持续 ready case具有非零且相等的选择概率，满足语言的随机弱公平；具体随机序列仍不是语言保证。
+取得任何 source锁前，runtime按 `case_count`准备 readiness scratch：case数不超过64时使用调用 frame的一个 `u64` bitmap；更大时把 coroutine-owned `select_scratch`增长到 `ceil(case_count / 64)` 个 `u64`。该 vector无固定上界、按 coroutine复用，且不保存 managed pointer。case record还必须预留其临界写可能产生的 barrier entry；若当前 buffer不足，refill在锁外完成。
+
+### 1–8 case 的展开路径
+
+`case_count <= INLINE_SELECT_CASES = 8` 且 legalized临界成本不超过 `POLL_BUDGET` 时，`LowerConcurrency` 在锁外生成无偏 Fisher–Yates case permutation，并把按 `WaitSourceId`排序、去重后的至多8次 `try_lock`、readiness检查、提交/登记和 unlock完全展开。成功取得第一个 source锁后进入单一 `NoSafepointRegion`；任一 `try_lock`失败就按逆序释放已经取得的锁，退出 region并进入一般路径，禁止持有前一个锁等待后一个锁。最终 LIR没有 region内 backedge、RNG循环或可能阻塞的 lock slow edge。
+
+全部锁取得后，按预生成 permutation选择第一个 ready case，因此稳定 ready集合中的每个 case概率相同；在同一 region内重新验证并提交，再释放全部锁。没有 ready case且存在 default时，在持锁快照下选择 default。没有 default时，在同一快照下登记共享 `SelectTxn` 的 wait node，释放全部锁后执行下面的常数 arm协议。类型布局、屏障或 payload操作使 region成本超限时，即使 case较少也必须使用一般路径，不能扩大 budget或省略 poll。
+
+### 任意 case 数的一般路径
+
+一般路径一次只持有一个 source锁。外层 readiness扫描在每次迭代之间保留正常 budget poll；每个迭代的 lock成功边进入一个无 backedge的 `NoSafepointRegion`，记录一个 case的 readiness后立即 unlock。若 bitmap非空，在锁外用 `uniform(ready_count)`选择 case，只取得该 source锁并重新验证；成功时以该 source操作为线性化点，失败则重新扫描，不能凭过期 bitmap提交。
+
+没有 ready case时，建立 `SelectTxn { generation, phase: Building, winner: UNSET }`，以锁外生成的随机完整排列逐 case登记 wait node；登记循环可以 safepoint，每次仍只取得一个 source锁。Building期间 waker可以 CAS winner并写 result/notified，但不能 ready仍在执行登记的 coroutine。全部 node登记后：存在 default时由 `winner: UNSET -> DEFAULT` 的 CAS与所有 source waker竞争，该 CAS成功就是 default线性化点；没有 default时，以一个无 backedge region把 lifecycle `Running -> Parking`、txn phase `Building -> Armed`并再次检查 winner，随后复用两阶段 park。winner已经产生时撤销 park或直接继续。winner确定后，loser node也按一次一个 source锁注销，清理循环继续接受 budget poll。
+
+source内部锁的 acquire slow edge在尚未持有任何其它 source锁时才可 park；成功 edge的第一项必须是 `NoSafepointBegin`。常见固定尺寸 payload在预留 barrier permit后于同一 region提交。若 payload copy或 barrier工作无法在 budget内完成，第一次 region只发布带 source/generation的 transfer reservation并锁定 buffer slot或 rendezvous waiter，随后在锁外完成可 safepoint的 copy，第二次只取得同一 source锁发布结果；reservation本身进入 typed GC root，close与其它 send/recv必须按其线性化顺序等待或越过，不能观察半初始化 payload。
+
+该协议保持“一次 select只提交一个 case”和“ready时 default不能获选”：较少 case的无竞争机器路径没有新增 poll或 marker指令，任意规模路径则不再跨 case持锁。channel/Join wait queue仍保持 FIFO；持续 ready case在重复 select中具有非零选择概率，满足语言的随机弱公平，具体随机序列不是语言保证。
 
 ## 计时器与 I/O
 
@@ -253,9 +270,9 @@ StackDescriptor {
 }
 ```
 
-正常 `stack_check == stack_low`；抢占/GC请求时为不可能通过无符号边界比较的 `PREEMPT_SENTINEL = usize::MAX`。`flags` bit 0为 `COLD_COMPACTED`，其余位必须为0。`StackDescriptor` 的 `size_of == align_of == 64` 以及 `offset_of!(Coroutine, stack) % 64 == 0` 必须由构建时断言；前面的 lifecycle state和后面的 context/wait/queue写不能与 prologue热读的 `stack_check` 共享 line。
+正常 `stack_check == stack_low`；抢占或 GC请求时固定为 `POLL_SENTINEL = isize::MAX as usize`。官方两目标的 coroutine stack reservation都位于低半 canonical user address，因而真实 `stack_low`、`rsp`与不下溢的 candidate都可表示为非负 `isize`，严格小于 sentinel。`flags` bit 0为 `COLD_COMPACTED`，其余位必须为0。`StackDescriptor` 的 `size_of == align_of == 64` 以及 `offset_of!(Coroutine, stack) % 64 == 0` 必须由构建时断言；前面的 lifecycle state和后面的 context/wait/queue写不能与 prologue热读的 `stack_check` 共享 line。
 
-除 `PollFreeLeaf` 外，每个 Gugu function prologue都在修改 `rsp` 前检查 `rsp - required_frame >= stack_check`；`required_frame = frame_size + max_leaf_reserve`，其中 `max_leaf_reserve` 是本函数全部 direct `ForeignLeaf` call声明 `stack = N` 的最高值，checked计算并按目标 stack alignment取整。失败跳到统一 `morestack_or_poll(required_frame)` stub：先保存尚未建立 frame的参数/return PC并切 system stack；若当前 processor有 pending flag则先执行 poll slow path，仍需扩栈时才按 `stack_low`判断容量。处理完全部请求后把 `stack_check`恢复为当前 `stack_low`；请求仍 pending时保持 sentinel。`PollFreeLeaf` 没有 call，reserve固定为0。
+除 `PollFreeLeaf` 外，每个 Gugu function prologue都在修改 `rsp` 前按机器字计算 `candidate = rsp.wrapping_sub(required_frame)`，再以一次 acquire load和有符号比较检查 `candidate >= stack_check`；真实容量不足但地址算术下溢时 candidate的 `isize`解释为负值，poison时任何真实 candidate都小于 `POLL_SENTINEL`，两种情况共享唯一 taken branch。`required_frame = frame_size + max_leaf_reserve`，其中 `max_leaf_reserve` 是本函数全部 direct `ForeignLeaf` call声明 `stack = N` 的最高值，checked计算并按目标 stack alignment取整。taken edge进入统一 `morestack_or_poll(required_frame)` stub。stub先通过 `r14`把尚未建立 frame的参数/return PC保存到 coroutine固定 scratch，再切 system stack；它必须先处理 processor pending poll/GC并允许当前 coroutine被调度出去，重新取得执行权后再读取最新 `stack_low`决定是否增长。完成全部请求和必要增长后恢复 scratch并重新执行原 prologue。`PollFreeLeaf` 没有 call，reserve固定为0。
 
 增长容量为下式对应的 size class；任何增长都至少回到2 KiB：
 
@@ -290,16 +307,16 @@ processor owner每次绑定 `Running` coroutine时把单调 `run_started_ns`写�
 
 monitor每次醒来 acquire快照 sequence与相关状态，处理已经到期的动作，再计算所有尚需观察动作中最早的绝对单调 deadline。它先发布 armed deadline，然后重新检查 sequence、flags与 active processor计数；任一项改变就重算，否则等待到该 deadline。过早的旧 deadline只造成一次额外 wake，过晚 deadline禁止发布。没有 runnable压力、foreign-retake压力或 maintenance deadline时无限期 park，不保留10 ms、1 ms或20 µs周期；这里以事件深睡取代周期轮询的指数退避。用户 timer仍由独立 poller的 timerfd/waitable timer负责，monitor不复制 timer heap。
 
-调度时间片只在存在竞争时需要：有 runnable work且没有 idle processor时，monitor读取各 `Running` processor的 `run_started_ns`，把最早资格 deadline设为 `run_started_ns + 10 ms`；deadline已经过去就立即请求抢占。没有其它 runnable work时，即使一个 coroutine持续计算也不为它周期唤醒 monitor；新 work发布时会立即发现它已超过10 ms并发出请求。请求方对目标 processor的 `poll_flags` 设置 `PREEMPT`，并把 current coroutine的 `stack_check` release写为 `PREEMPT_SENTINEL`。GC请求仍立即以同一协议设置 `GC_STOP`，不等待调度竞争或时间片。
+调度时间片只在存在竞争时需要：有 runnable work且没有 idle processor时，monitor读取各 `Running` processor的 `run_started_ns`，把最早资格 deadline设为 `run_started_ns + 10 ms`；deadline已经过去就立即请求抢占。没有其它 runnable work时，即使一个 coroutine持续计算也不为它周期唤醒 monitor；新 work发布时会立即发现它已超过10 ms并发出请求。请求方对目标 processor的 `poll_flags` 设置 `PREEMPT`，并把 current coroutine的 `stack_check` release写为 `POLL_SENTINEL`。
 
 Linux monitor使用 `FUTEX_WAIT_BITSET` 的绝对单调 deadline，不改变系统 tick频率。Windows无deadline时等待 monitor event；有deadline时用 `WaitForMultipleObjects` 同时等待该 event与 high-resolution waitable timer，sequence复查封闭“发布状态—arm timer—进入等待”之间的丢唤醒窗口。只有目标不支持 high-resolution timer、确有小于60 ms的已发布 deadline且动作会推进 runnable/GC时，才取得进程内引用计数的 `timeBeginPeriod(1)` lease，并在 deadline取消或进入深睡前匹配 `timeEndPeriod(1)`。poller与 monitor共享该 lease，禁止常驻提升 timer resolution。Windows 11对不可见进程不保证提升后的精度，因此20 µs/10 ms都是内部资格阈值而不是 wall-clock完成保证；正确性依赖 generation wake与同步 poll，不依赖定时器精确命中。
 
 poll slow path：
 
-1. 使用对应 `PollResume`/`MorestackEntry` map保存栈图要求的 roots，并 acquire读取 flags与 requested epoch；
-2. 若 `GC_STOP` epoch未确认，flush TLAB/barrier buffer、保存 context，以 release store发布 `ack_gc_epoch = requested_gc_epoch`并等待 resume；collector只以 acquire load判定确认完成；
-3. 若有 `PREEMPT` 且没有必须继续占用当前 coroutine的 runtime critical section，把 Running转 Runnable、清该 bit并放入 local tail；
-4. 清除已经完成的 flags；全部清空时把当前 coroutine的 `stack_check`恢复为 `stack_low`；
+1. `PollResume` slow edge按 map spill跨 poll roots；`MorestackEntry` 已经在 coroutine固定 scratch保存 entry参数，两者都在接触 runtime lock前切到 worker system stack，再 acquire读取 `poll_flags`；
+2. 若 `GC_STOP` 的 requested epoch未确认，flush TLAB/barrier buffer、保存 context，以 release store发布 `ack_gc_epoch = requested_gc_epoch`并等待 resume；collector只以 acquire load判定确认完成；
+3. 若有 `PREEMPT` 且没有尚未结束的 `NoSafepointRegion` 或其它 runtime critical section，把 Running转 Runnable、清该 bit并放入 local tail；
+4. 清除已经完成的 flags；全部清空时把 current coroutine的 `stack_check`恢复为此时最新的 `stack_low`；
 5. 调度另一 coroutine，恢复或绑定任何 coroutine前重新检查 processor flag与 GC epoch。
 
 compiler的不变量是：持有 `LogicalProcessor` 且状态为 `Running` 的 coroutine，其PC属于带完整 metadata的 managed code或有限 inline asm；每条无限 managed路径无限次经过 poisoned `StackCheck`或 budgeted poll，任意 poll-free路径cost不超过 `POLL_BUDGET`。signal/APC只设置 processor flag、投毒 stack check并唤醒 worker；它不在任意机器PC复制 stack、运行用户 defer或扫描未知寄存器。请求保持 pending直至同步点处理。
@@ -360,7 +377,14 @@ DirtyCpu admission不可在持有 `LogicalProcessor` 时等待。并行度降低
 
 ## GC 协作
 
-major/minor stop请求递增全局 `gc_stop_epoch`。对每个 active processor先 release写入 `requested_gc_epoch`，再设置 `poll_flags.GC_STOP`、投毒其 current coroutine的 `stack_check`并唤醒 worker/poller：
+major/minor stop的 coordinator只对全局 `gc_stop_epoch`执行一次递增；该值只分配 generation，不被 managed fast path读取。coordinator随后按 processor ID遍历 active processors，对每个 processor执行固定发布协议：
+
+1. release写入 `requested_gc_epoch = gc_stop_epoch`；
+2. acquire读取 `current_coroutine`，若完整 lifecycle为 `Running`，release把其 `stack_check`写为 `POLL_SENTINEL`；
+3. 以 `poll_flags.fetch_or(GC_STOP, Release)` 发布请求并唤醒 worker/poller；
+4. 再次 acquire验证 ownership/current；发生切换时，新 owner在 `Runnable -> Running` 前必须先观察 `GC_STOP`，coordinator只需投毒仍绕过绑定边执行的 current coroutine。
+
+因此一次 stop请求写入 `O(active_processors)` 个彼此独占的 `PollControl` line，而不是触碰 `O(live_coroutines)` 个 lifecycle word；global epoch每个 cycle只有一次写入，也不构成 worker共享读取热点。loop/显式 poll通过一次 processor-local load观察 bit，函数 entry通过一次 coroutine-local load观察 sentinel；两条路径都在 slow edge才读取 requested epoch。禁止给 lifecycle增加 `GC_STOP`/`PREEMPT` bit或在 fast path比较 global epoch。
 
 - Running coroutine在下一个同步 safepoint保存 context并确认；compiler保证 Running不包含不可分析的 opaque native frame；
 - Runnable/Waiting coroutine已有稳定 context，取得 `STACK_SCAN_LOCKED` 后可直接扫描；
@@ -394,15 +418,17 @@ worker无 runtime/foreign责任后转 Stopping。主线程按 poller、processor
 - `ForeignBridge[DirtyCpu]` 的 active数量不超过 `dirty_cpu_limit`，每个 DirtyWaiting bridge恰有一个独立 `dirty_link`等待位置和合法 high-relative ABI frame；
 - local queue 距离不超过 256，global intrusive link 不成环；
 - wait generation 单调且 winner/ready 最多一次；
-- `StackDescriptor`、`PollControl`、`ProcessorOwnership` 的64-byte size/alignment/offset断言成立，stack bounds、`stack_check` sentinel、context PC和 stack map匹配；每个 live/cached stack slot只属于一个 span与一个 cache/global位置，arena内部没有逐栈 protection run；
-- processor retire/foreign retake不丢 runnable、timer、TLAB、barrier、mark work或 pending poll flag；
-- GC scan lock下不能执行/复制同一 coroutine；Running processor的 poll-free机器路径cost不超过 `POLL_BUDGET`，且所有 cyclic路径有同步 poll/checked entry。
+- `StackDescriptor`、`PollControl`、`ProcessorOwnership` 的64-byte size/alignment/offset断言成立，stack bounds、`POLL_SENTINEL`、context PC和 stack map匹配；每个 live/cached stack slot只属于一个 span与一个 cache/global位置，arena内部没有逐栈 protection run；
+- processor retire/foreign retake不丢 runnable、timer、TLAB、barrier、mark work或 pending poll flag；GC stop只写 active processor handshake与当时 Running stack guard，不修改全部 coroutine lifecycle；
+- GC scan lock下不能执行/复制同一 coroutine；Running processor的 poll-free机器路径cost不超过 `POLL_BUDGET`，所有 cyclic路径有同步 poll/checked entry；每个 `NoSafepointRegion`无 machine backedge、无 blocking/slow edge且 legalized cost不超过同一 budget。
 
 确定性 runtime测试必须使用可控 VM backend、poller/clock、monitor generation note和调度 gate，覆盖 local overflow、半队列窃取、park/wake竞争、select loser、timer cancel、stack class选择、cache refill/flush上界、span改换class、空页decommit、arena映射次数不随slot增长、四窗收缩迟滞、Waiting冷压缩与唤醒增长、内存压力收缩、三类64-byte控制块布局、poisoned `StackCheck` 同时处理增长与抢占、monitor无deadline深睡且无周期wake、发布更早deadline不丢wake、无竞争长运行不触发周期抢占、竞争出现后的10 ms资格判断、counted-loop outer chunk、uncounted-loop countdown、普通 bridge无压力原 processor快返回、20 µs前后 runnable retake、return/retake完整 state CAS竞争、generation ABA拒绝、idle processor直接恢复、global enqueue慢路径、GC/retirement/callback立即打破 lease、DirtyCpu额度耗尽与释放、ForeignLeaf保留 processor、未知间接调用回退 bridge、opaque asm进入 dirty、动态 parallelism、GC epoch发布/确认与 ready竞争。默认测试不能真实分配百万 stack、依赖真实10 ms/20 µs延迟、真实 OS timer resolution或随机 victim恰好出现。
 
+poll/select确定性测试还必须证明：stop请求不遍历或 CAS非 Running coroutine state，global epoch与 lifecycle不出现在 poll/prologue fast path；普通 prologue只有一次 `stack_check` load与一个共享 taken branch，loop poll只有一次 `poll_flags` load；GC与增长同时 pending时 `MorestackEntry`先停机再按最新 bounds增长。select分别覆盖1–8 case展开路径、try-lock失败释放、超过8 case逐 source路径、Building期 winner、default CAS竞争、大 payload两阶段 reservation、loser逐 source注销，以及 verifier拒绝 region内 backedge/blocking/barrier refill。
+
 完成路径测试还必须证明：`finish_coroutine` 切到 system stack后不再访问旧 `rsp`，result publication先于 stack摘根与 `Dead`，保留 Join handle不会保留 stack slot，GC与完成竞争时旧 slot只发布一次。
 
-poll policy的性能门禁属于 bench/手工 profiling，不进入默认 nextest：至少比较 `POLL_BUDGET` 1024/4096/16384在空整数 counted loop、可向量化整数内存扫描、uncounted cyclic CFG、无 frame调用链、allocation fast path和递归 SCC上的 instructions/iteration、poll-word loads、branch misses与吞吐；机器码检查必须证明 counted inner loop没有独立 poll countdown或 poll-word load，并保留基线允许的 vectorize/unroll结果。同时在可控 GC请求下记录 request到 processor ack的 p50/p99/max cost units和 wall-clock。修改默认4096、vector/unroll cost model或 opcode weight必须同时证明 hot-loop回归与 stop-latency收益，不能只优化单一 microbenchmark。
+poll policy的性能门禁属于 bench/手工 profiling，不进入默认 nextest：至少比较 `POLL_BUDGET` 1024/4096/16384在空整数 counted loop、可向量化整数内存扫描、uncounted cyclic CFG、无 frame调用链、allocation fast path、递归 SCC和1/8/64-case select上的 instructions/iteration、poll-word loads、branch misses与吞吐；机器码检查必须证明普通 prologue只有一次 `[r14 + stack_check]` load、budget poll只有一次 `[r15 + poll_flags]` load、两者都不读取 global epoch/lifecycle，counted inner loop没有独立 poll countdown或 poll-word load，且 `NoSafepointBegin/End`编码为零字节。select基准必须分别比较展开路径、锁竞争后逐 source路径和大 payload reservation。另在可控 GC请求下记录 request到 processor ack的 p50/p99/max cost units和 wall-clock。修改默认4096、inline select门槛、vector/unroll cost model或 opcode weight必须同时证明 hot-path回归与 stop-latency收益，不能只优化单一 microbenchmark。
 
 foreign bridge性能门禁属于 bench/手工 profiling：以真实 C ABI空 stub、约100 ns/1 µs/10 µs CPU工作、受控阻塞、同步 callback和 GC重叠为 workload，分别在单 processor空闲、单 processor有 runnable压力和多 processor饱和场景测量 ns/call、原 processor fast-return率、retake率、idle direct-resume率、global enqueue、scheduler mutex contention、OS thread wakeup、TLAB refill、cache miss与 runnable/GC p99延迟。必须逐项比较立即 handoff基线、20 µs grace和候选 grace；不能只优化空 stub而让阻塞调用、callback或 GC stop失去进度保证。
 

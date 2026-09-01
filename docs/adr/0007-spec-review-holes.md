@@ -24,6 +24,7 @@
 - 测试收集顺序确定，执行时各测试在新的用户协程上**并行**。
 - 编译入口由 CLI 指定源文件；文件系统即模块树；`std` 保留；同名 `foo.gg` 与 `foo/mod.gg` 并存是错误。命令行契约已独立成章，见[工具链与命令行](../src/spec/toolchain-cli.md)。
 - 未标注导入视为可能阻塞或回调，使用普通 `ForeignBridge`：先切 system stack并发布精确 roots；runtime可为短调用暂留可被 GC、回调、退役或 runnable压力取回的逻辑处理器 lease，快速返回时直接恢复。`ForeignBridge[DirtyCpu]`立即释放处理器，只有承担有界时间、stack和无回调契约的 `ForeignLeaf`始终保留处理器。外部操作系统线程调入导出函数时，临时登记为工作线程并取得逻辑处理器，返回后拆掉。
+- managed poll没有 protected page：loop/显式 poll只读 processor-local `poll_flags`，函数 entry只读 coroutine-local poisoned `stack_check`；全局 GC epoch与 lifecycle state不进入 fast path。runtime持锁发布只能使用 compiler内部、零机器码且无 backedge的 `NoSafepointRegion`；任意 case数量的 `select` 不得跨 case持锁，较少 case的展开路径也必须通过同一 poll budget验证。
 - `string` 的 `+` / `+=` 走语言提供的 `Add[string]` / `AddAssign[string]`，与用户类型同一套重载。整数加减仍由编译器直接降指令，同时提供对应 trait impl 供泛型约束使用。
 - `derive` 允许 `Print`。`Print` 接收者是 `&Self`。`Option` / `Result` / `Vec` / 数组 / 元组必须有 `Print` / `Eq` / `Clone`（`Ord` 在元素都 `Ord` 时）。
 - 字段访问与 `match` 自动解 `&`，和方法一致。
@@ -35,3 +36,4 @@
 - 调度章节不再依赖读者认识 Go 的字母表。
 - 数组字段上的 `#[derive(Clone)]` 与 `f"{xs}"` 有定义。
 - 协程本地的 `Vec` 每份协程真正独立，不会变成共享句柄。
+- GC stop请求的写集合按 active processor数量增长，不按 live coroutine数量增长；普通 prologue与 loop poll各保持一次 local load。runtime临界区不会与“每个 cyclic路径都有 poll”的 compiler不变量冲突。

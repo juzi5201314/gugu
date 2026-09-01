@@ -127,9 +127,11 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 
 只有 descriptor不含 `HAS_RESOURCE`、请求不 large/pinned、高对齐且 footprint不跨 Immix block时才走 allocation fast path。当前 `[r15 + tlab_cursor_offset]`/limit只覆盖 processor本地 span中的一个连续空 line run；checked计算 16 byte header、对齐 padding和 payload，成功时推进 cursor并初始化 header。run不足调用 `gc_refill_line`，它先在本地 8-block span推进 line表，span用尽才访问全局 heap；其它请求调用 `gc_alloc_slow`。offset与 `HeapLayout`由 runtime layout query固定并进入 backend schema。
 
-budgeted/显式 safepoint poll以 `AtomicLoadAcquire [r15 + poll_flags_offset]` 读取当前 processor的两位 word；x86_64 lowering优先使用 `test dword ptr [r15 + offset], 0b11` 和 unlikely branch，值为0时不访问 coroutine状态。counted strip-mined loop只在 outer chunk edge执行该检查，poll-free inner loop复用既有 induction/latch，不生成独立 countdown或额外每轮分支；只有 uncounted interval大于1的 fallback每次 cycle更新 SSA countdown，到0才读取 poll word。taken cold edge按普通 call-clobber规则 spill全部跨 poll活跃的 caller-saved scalar与 `V128`，并用对应 `PollResume` map保存 roots后切 system stack；fast fallthrough不执行这些 spill。函数入口不再发独立 poll word load，而由 poisoned `stack_check`复用现有 prologue比较。write barrier、`ForeignLeaf`和普通/dirty bridge规则保持各自 effect fence与交接语义。
+budgeted/显式 safepoint poll以 `AtomicLoadAcquire [r15 + poll_flags_offset]`读取当前 processor的两位普通内存 word；x86_64 lowering固定为一次 `test dword ptr [r15 + offset], 0b11` 和 unlikely branch，值为0时不访问 coroutine state、requested epoch或全局 `gc_stop_epoch`。counted strip-mined loop只在 outer chunk edge执行该检查，poll-free inner loop复用既有 induction/latch，不生成独立 countdown或额外每轮分支；只有 uncounted interval大于1的循环路径每次 cycle更新 SSA countdown，到0才读取 poll word。taken cold edge按普通 call-clobber规则 spill全部跨 poll活跃的 caller-saved scalar与 `V128`，并用对应 `PollResume` map保存 roots后切 system stack；fast fallthrough不执行这些 spill。函数入口不发 poll-word load，而由 poisoned `stack_check`复用 prologue容量比较。write barrier、`ForeignLeaf`和普通/dirty bridge规则保持各自 effect fence与交接语义。
 
-runtime layout query还必须验证 `StackDescriptor`、`PollControl` 与 `ProcessorOwnership` 的 size/alignment均为64，`Coroutine.stack`、`LogicalProcessor.poll` 和 `LogicalProcessor.ownership` 的 offset均按64对齐，并证明 poll与ownership范围不重叠。prologue只从 `[r14 + stack_check_offset]` 读取 `StackDescriptor` line；loop/显式 poll只从 `[r15 + poll_flags_offset]` 读取 `PollControl` line。任一 layout断言失败都是 compiler/runtime schema不匹配，镜像构建必须失败，不能退回未对齐访问。
+runtime layout query还必须验证 `StackDescriptor`、`PollControl` 与 `ProcessorOwnership` 的 size/alignment均为64，`Coroutine.stack`、`LogicalProcessor.poll` 和 `LogicalProcessor.ownership` 的 offset均按64对齐，并证明 poll与ownership范围不重叠。prologue只从 `[r14 + stack_check_offset]`读取 `StackDescriptor` line；loop/显式 poll只从 `[r15 + poll_flags_offset]`读取 `PollControl` line。两种 fast path都恰有一次 ordinary acquire memory operand，禁止附加 lifecycle/global epoch load。任一 layout断言失败都是 compiler/runtime schema不匹配，镜像构建必须失败，不能改用未对齐访问。
+
+`NoSafepointBegin/End` 在 instruction scheduling、poll placement和 verifier阶段保持 effect fence，encoder不为 marker写任何 byte、relocation或 stack map。marker内的 reserved-barrier、atomic和 unlock仍按各自机器指令编码；删除 marker不能允许相邻普通操作跨 region边界重排。
 
 ## block layout 与 branch relaxation
 
@@ -186,20 +188,20 @@ frame_size = align_up(payload_size + 8, 16) - 8
 有调用或 mandatory statepoint的函数至少得到8字节且 `frame_size % 16 == 8`。只有 entry `StackCheck`、没有 frame payload/call/safepoint的函数可以保持 `frame_size = 0`，但仍执行 poisoned guard比较；除 `PollFreeLeaf` 外，prologue在任何 `rsp` 修改前执行：
 
 ```text
-candidate = rsp - required_frame
-if candidate < acquire(current_coroutine.stack_check):
+candidate = rsp - required_frame       // 使用保留 scratch r11
+if signed(candidate) < signed(acquire([r14 + stack_check_offset])):
     morestack_or_poll(required_frame)
 rsp = rsp - frame_size
 store used callee-saved registers to fixed slots
 ```
 
-`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最高值，checked加法溢出直接进入 `StackOverflow` fatal。prologue只做一次容量检查，不在每个 leaf call前重复读取 `stack_check`。`stack_check`正常等于当前 `stack_low`，被投毒时为 `usize::MAX`，所以同一比较必然进入 slow stub。stub在 system stack先 acquire处理 processor poll flags，再以 `stack_low`判断是否扩栈；它不能把 sentinel当作地址解引用。
+`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最高值，checked加法溢出直接进入 `StackOverflow` fatal。常见 signed-disp32范围使用 `lea r11, [rsp - required_frame]`，大 immediate使用 `mov r11, rsp; sub r11, materialized_required_frame`；`r11`是内部 ABI保留 scratch，不承载参数或 root。candidate计算采用机器字 wrapping语义，随后固定为一次 `cmp r11, qword ptr [r14 + stack_check_offset]`与一个 signed-less冷分支 `jl`。官方 stack reservation处于低半 canonical address：正常 candidate与 `stack_low`都是非负 `isize`；容量计算发生地址下溢时 candidate解释为负值；`POLL_SENTINEL = isize::MAX as usize`又高于全部真实 candidate，所以容量不足与 poll/GC poison都由同一 load/branch捕获。prologue不读取 `poll_flags`、requested epoch、global epoch或 lifecycle，也不在每个 leaf call前重复检查。
+
+taken edge尚未建立 callee frame。`morestack_or_poll` 只通过 `r14`把 return PC、九个整数参数寄存器和八个浮点参数寄存器写入 coroutine控制块的固定 scratch；该过程不读取或写入 candidate以下的 user stack。随后切到 worker system stack，acquire读取 processor flags：先完成 GC stop，再处理可接受的 preempt；coroutine被重新调度后仍从同一 `MorestackEntry`恢复。全部 poll动作完成后才读取最新 `stack_low`，容量仍不足时增长，最后装载已经由 GC/stack copy修正的 scratch并重新进入原 prologue。因而 poll-first次序不依赖剩余 user-stack空间，并且增长不会漏掉已经发布的 stop请求。
 
 每个可作为 `async` body入口的 code descriptor还发布 `entry_required_frame`，值覆盖入口 `required_frame`、ABI entry record和进入首个 checked prologue前的固定字节。runtime据此选择初始 stack class；该值使用与 frame layout相同的 checked计算并进入 backend/runtime schema，禁止另写经验常量。
 
 `frame_size` 必须小于等于 `u32::MAX`；更大的单函数 frame在代码生成前报 `implementation-limit`，不能依赖更高 runtime stack max截断。单函数最终 code size同样必须小于等于 `u32::MAX`，以满足 stack-map、unwind和 source record的相对 offset表示。
-
-`morestack_or_poll` 把 return PC、九个整数参数寄存器和八个浮点参数寄存器保存到 coroutine控制块的固定 scratch，并以该函数的 `MorestackEntry` map登记其中哪些 GPR是 heap/stack root；随后切换 worker system stack，按[调度器](scheduler.md#可复制协程栈)先处理 pending poll，再在需要时增长。复制过程用 caller `CallReturn` map修正 outgoing stack参数，恢复后装载已更新 scratch并重新进入原 prologue。scratch每个 coroutine一份且只在该 coroutine Running的 prologue使用；嵌套进入说明契约已破坏，进入 `RuntimeInvariant` fatal。
 
 epilogue从固定 slot恢复 callee-saved、`add rsp, frame_size`、`ret`。prologue/epilogue只能使用 Windows unwind可描述的指令子集；Linux CFI与Windows unwind record都从同一个 `FrameLayout`生成。
 
@@ -283,7 +285,7 @@ encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcod
 - 确认 writable section不可执行、stack不可执行、metadata只读且 strip保留；
 - 对相同 image plan重放编码并比较 bytes，禁止时间戳、随机 GUID和目录顺序进入输出。
 
-目标测试使用固定 LIR fixture和 C 对照 fixture覆盖整数/floating边界、聚合 ABI、register压力、spill、critical edge、branch relaxation、i128、atomic、panic unwind、stack growth、GC safepoint、ELF relocation和 PE unwind/import。真实执行 smoke test分别直接启动 Linux ELF和 Windows目标环境中的 PE；只比较反汇编文本不能证明镜像可运行。
+目标测试使用固定 LIR fixture和 C对照 fixture覆盖整数/floating边界、聚合 ABI、register压力、spill、critical edge、branch relaxation、i128、atomic、panic unwind、stack growth、GC safepoint、no-safepoint marker零编码、ELF relocation和 PE unwind/import。机器码 fixture还必须逐指令断言普通 prologue只有一次 `[r14 + stack_check]` load与共享容量/poll冷分支，budget poll只有一次 `[r15 + poll_flags]` load，并且两者没有 lifecycle/global epoch访问。真实执行 smoke test分别直接启动 Linux ELF和 Windows目标环境中的 PE；只比较反汇编文本不能证明镜像可运行。
 
 ## 参考实现资料
 

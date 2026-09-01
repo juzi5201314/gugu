@@ -244,7 +244,7 @@ collector 使用按 `MonoKey` 摘要字节序排列的 `BTreeSet` 作为 pending
 
 单实例粒度避免 package 内一个无关函数变化使整个目标代码失效。最终 image layout统一放置 fragment并解析 relocation。跨实例内联使 caller key依赖被内联 callee的 GIR/result fingerprint；未内联且保留 entry `StackCheck` 的普通调用只依赖 callee ABI/signature fingerprint，不因 callee body改变而使 caller失效。只有 direct `PollFreeLeaf` 调用额外依赖其固定尺寸 `PollSummary`；leaf分类或 `poll_free_cost` 改变时 caller `BuildLir`必须失效。递归/间接调用始终使用 checked entry，不形成 `BuildLir` query环。
 
-机器码 object key还必须覆盖 target、CPU baseline、内部 ABI revision、panic/unwind模式、GC barrier revision、poll policy revision、stack-map schema和 instrumentation。绝对代码地址和本次闭世界的稠密 `TypeId`不进入 fragment；只以逻辑 symbol/type relocation表示。
+机器码 object key还必须覆盖 target、CPU baseline、内部 ABI revision、panic/unwind模式、GC barrier revision、poll/`NoSafepointRegion` policy revision、stack-map schema和 instrumentation。绝对代码地址和本次闭世界的稠密 `TypeId`不进入 fragment；只以逻辑 symbol/type relocation表示。
 
 ## JIT 兼容发布边界
 

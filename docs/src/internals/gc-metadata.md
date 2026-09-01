@@ -348,6 +348,10 @@ stack arena、processor stack cache和已经从 live coroutine registry摘除的
 
 编译器只有在证明 owner 是尚未发布的新 nursery object、写入发生在任何 safepoint/逃逸之前且旧 slot 未初始化时，才可省略屏障。向 global、old、共享对象、unknown alias 或 foreign 可见内存写 managed pointer 不能省略。
 
+`NoSafepointRegion` 内需要执行 barrier时，compiler在 region外发出 `BarrierReserve { permit }`，其 `BarrierPermitData.max_shades` 由 concrete type descriptor逐 pointer word计算，deletion+insertion每次写至多消费两个 shade slot。buffer不足时在 region外走 refill mandatory statepoint；成功后 compile-time permit证明下一 region拥有足够容量，该 ID不形成 machine value。region内只能使用 `GcWriteBarrierReserved { permit }`，禁止再次检查容量或连接 refill edge；verifier统计实际静态消费，未用额度无需生成归还指令。并发标记关闭时 reservation与 reserved barrier按同一 flag折叠，不给普通 store增加第二次 flag load。
+
+无法在 `POLL_BUDGET` 内完成的 aggregate copy不能因持有 runtime lock而关闭 safepoint。channel/select等 runtime原语必须先在短 region内取得带 generation的不可见 transfer reservation，在 region外完成 descriptor copy与普通 barrier，再在第二个短 region发布；reservation由 typed visitor扫描，未发布 payload不能被 receiver或 close观察。
+
 card table 每 512 heap 地址字节使用 1 byte；0 clean，1 dirty。minor cycle 在 mutator 已停止后以 AcqRel swap 把 dirty card 取为 0并扫描，所有 card 处理完成后才恢复 mutator；因此不存在恢复后清零覆盖新写入的窗口。mutator 用 release store 写 1，collector acquire 取得；重复写 1 是幂等的。
 
 ## collector 使用 metadata 的阶段
@@ -381,6 +385,7 @@ GC worker解释 trace program时使用显式小栈；嵌套上限 32，采用固
 - source record 的 function index、PC range、UTF-8逻辑路径、行列和 flags 合法，`SourceRecord32` 指向 exact record；
 - object header TypeId、payload size、forward 地址和 generation 状态合法；
 - strip 后所有 type/root/vtable/source record、stack map 和 glue 仍存在。
+- `BarrierPermitId` 的 `max_shades` 与 concrete descriptor一致、只关联一个 `NoSafepointRegion`且静态消费不超额，所有 `GcWriteBarrierReserved` 都没有 refill edge；不可见 transfer reservation具有合法 generation、trace descriptor和唯一 publish/cancel结局；
 
 任何静态验证失败阻止产出镜像；Booting 中发现损坏进入 `RuntimeInvariant` fatal。runtime 不能忽略未知 opcode 或把未知类型按无指针对象扫描。
 
