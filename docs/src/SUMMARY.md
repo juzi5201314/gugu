@@ -10,6 +10,7 @@
 - [形式语法](spec/syntax.md)
 - [类型系统](spec/types.md)
 - [声明与模块](spec/declarations.md)
+- [程序与编译模型](spec/program-model.md)
 - [包、依赖与构建模型](spec/packages-builds.md)
 - [发布与生态](spec/publishing-ecosystem.md)
 - [工具链与命令行](spec/toolchain-cli.md)
@@ -26,3 +27,13 @@
 - [运行时与运维语义](spec/runtime.md)
 - [标准库](spec/standard-library.md)
 - [测试](spec/testing.md)
+
+# 编译器内部
+
+- [AST 与 HIR](internals/ast-hir.md)
+- [GIR 与 LIR](internals/gir-lir.md)
+- [单态化与编译缓存](internals/monomorphization-cache.md)
+- [栈图](internals/stack-maps.md)
+- [GC 元数据](internals/gc-metadata.md)
+- [调度器](internals/scheduler.md)
+- [x86_64 后端](internals/backend.md)

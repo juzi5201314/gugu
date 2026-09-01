@@ -71,7 +71,7 @@ trait Iter {
 }
 ```
 
-`IntoIter::Iter` 必须实现 Iter，且 `Iter::Item` 与 `IntoIter::Item` 相同，否则该 impl 非法。`for x in xs` 是 `let it = xs.into_iter()` 再循环 `it.next()`。xs 按值描述符传入 `into_iter`。`[T; N]` 与 `&[T]` 的语言 impl 不先复制整个数组，游标按索引逐个产生元素的语义副本。Range 由语言提供 IntoIter。
+`IntoIter::Iter` 必须实现 Iter，且 `Iter::Item` 与 `IntoIter::Item` 相同，否则该 impl 非法。`for x in xs` 是 `let it = xs.into_iter()` 再循环 `it.next()`。xs 按[值传递](passing.md)规则传入 `into_iter`。`[T; N]` 与 `&[T]` 的语言 impl 不先复制整个数组，游标按索引逐个产生元素的语义副本。Range 由语言提供 IntoIter。
 
 标准集合的 IntoIter/Iter 实现捕获创建时快照并逐项产生语义副本；创建迭代器后的集合修改不会改变该迭代器观察到的序列，具体封存与分离成本见[标准库 · 集合与 Hash](standard-library.md#集合与-hash)。
 

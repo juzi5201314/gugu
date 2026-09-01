@@ -248,20 +248,20 @@ HashMap/HashSet 使用 hashbrown/SwissTable 类的 control-byte group、SIMD loo
 
 File、socket、Child、管道、锁守卫以及第三方 FFI 的外部资源都使用同一套自适应资源租约。资源值可以正常赋值、传参、返回和存入容器，不产生 move 错误；所有副本共享一个 `ResourceCell` 和 open/closed 状态。
 
-ResourceCell 不在普通 GC 对象内联保存 raw OS handle，而从不移动、无 GC 引用的专用 slab 分配。状态从 `Local(owner_coroutine)` 单向发布为 `Shared`：
+ResourceCell 是 raw OS handle、open/closed与 lease的一份共享逻辑身份；物理 slab、计数器和 GC交接只见 [GC 元数据](../internals/gc-metadata.md)。其发布语义从仅创建协程可达单向变为 Shared：
 
-- Local lease 的复制与释放使用非原子计数。
-- 写入共享 GC 图、global、channel，或被 async 捕获时，发布操作先建立 happens-before，再永久切换为原子 lease。
-- 编译器用参数逃逸摘要把不逃逸调用降为 borrow，把最后使用降为 transfer，并融合相邻 dup/drop。
+- 新 resource最初只由创建协程可达；写入 global、channel、async捕获或其它共享图时，发布操作先建立 happens-before，之后跨协程 lease复制与 release必须线程安全。
+- 发布是单向语义状态；实现不能因对象后来只剩一个协程使用而撤销已经建立的共享同步。
+- 参数传递、最后使用和相邻 lease动作可以由实现合并，但不能改变 open/closed状态、happens-before或 release次数；当前算法见 [GIR/LIR](../internals/gir-lir.md)。
 - 最后一个可达 lease 结束时执行受限 release。显式 `close` 可以更早把共享状态原子地切到 closed。
 
 所有公开资源的 `close()` 必须幂等：第一次成功关闭底层资源，之后返回成功且不重复执行 release。关闭后的其它操作返回具体错误的 `Closed` 变体。自动 release 不能报告错误；需要观察 `flush`、`commit`、`shutdown` 或 `Child.wait` 结果的程序必须显式调用相应方法。
 
-受限 release 只能接收不含 GC 引用的位状态；不能捕获 owner、访问 GC 图、复活对象、分配、panic、获取 Gugu 锁、等待 channel 或启动协程。collector 线程不运行用户代码；需要等待的清理必须移交 runtime 清理队列。
+受限 release只能接收不含 managed引用的位状态；不能捕获 owner、访问 managed图、复活对象、分配、panic、获取 Gugu锁、等待 channel或启动协程。它不是用户 finalizer；需要等待的清理必须由领域 API显式移交 runtime supervisor。
 
-含资源字段的类型拥有编译器生成的 resource descriptor。普通 nursery 与 TLAB 不承担引用计数；含资源的 GC 对象进入能够逐对象发现死亡并执行固定 release descriptor 的区域。collector 移动物理对象不是语言复制，禁止因此 dup lease。资源只藏在不可达 GC 容器环中时，释放可以延迟到 tracing GC 发现该环；普通局部最后 lease 仍确定释放。
+含 resource字段的 managed值仍按 Adaptive Resource Leasing保持一次性 release语义；collector物理移动不是语言复制，不能因此增加 lease。资源只藏在不可达 managed容器环中时，release可以延迟到 collector发现该环；普通局部最后 lease仍按[内存与对象模型](memory.md)结束。官方 descriptor与 resource arena实现见 [GC 元数据](../internals/gc-metadata.md)。
 
-`MaybeUninit`、union、transmute、arena 批量释放和原始按位复制不能绕过 resource descriptor，具体限制见[unsafe 与 intrinsic](unsafe.md)和[内存与对象模型](memory.md)。
+`MaybeUninit`、union、transmute、arena批量释放和原始按位复制不能绕过 resource lease语义，具体限制见[unsafe 与 intrinsic](unsafe.md)和[内存与对象模型](memory.md)。
 
 ## I/O
 
@@ -688,7 +688,7 @@ struct TraceConfig {
 struct RuntimeStats {
     pub live_coroutines: uint,
     pub live_os_threads: uint,
-    pub logical_processors: uint,
+    pub parallelism: uint,
     pub heap_committed_bytes: uint,
     pub heap_live_bytes: uint,
     pub stack_committed_bytes: uint,

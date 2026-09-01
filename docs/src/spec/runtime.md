@@ -19,14 +19,15 @@
 
 ## rt0 与启动
 
-每个可执行镜像都有一个不经过普通 Gugu 函数 ABI 的 rt0 入口。rt0 按以下顺序执行：
+每个可执行镜像都有 rt0 入口。用户代码开始前必须依次完成：
 
-1. 保存宿主传入的 argv、环境和初始工作目录快照；
-2. 建立异常/栈保护、线程登记和平台输出通道；
-3. 解析 `GUGU_RUNTIME_*`、`GUGU_BACKTRACE` 等启动配置；
-4. 建立 GC 堆、线程本地分配缓冲、协程根表、调度器和运行时控制表；
-5. 建立主协程、安装 fatal fault 的平台处理路径，并进入 `Running`；
-6. 调用编译器已解析的 `main` 入口。
+1. 固定 argv、环境和初始工作目录快照；
+2. 解析所有启动配置，非法配置按本章 fatal规则结束；
+3. 建立足以安全执行分配、协程、panic、信号转交和 runtime API的运行环境；
+4. 把 runtime状态从 `Booting` 发布为 `Running`；
+5. 调用编译器已经解析的 `main` 入口。
+
+ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault handler的内部次序分别由[后端](../internals/backend.md)、[GC 元数据](../internals/gc-metadata.md)和[调度器](../internals/scheduler.md)规定，不构成额外的用户启动钩子。
 
 `main` 之前必须达到普通代码可以安全分配、启动 `async`、访问 `std.env` 和进入 panic 边界的状态。rt0 不能调用用户定义的 `static` 初始化函数、`defer` 或普通协程；这些机制在 runtime 进入 `Running` 后才有效。
 
@@ -38,7 +39,7 @@
 
 | 环境变量 | 取值 | 默认值 | 作用 |
 |----------|------|--------|------|
-| `GUGU_RUNTIME_PROCS` | 大于 0 的十进制整数 | 启动时的可用并行度，至少为 1 | 初始逻辑处理器数量 |
+| `GUGU_RUNTIME_PROCS` | 大于 0 的十进制整数 | 启动时的可用并行度，至少为 1 | 初始并行度目标 |
 | `GUGU_RUNTIME_GC_TARGET` | `off` 或十进制百分数 | `100` | 自动 GC 的堆增长目标；`100` 表示相对上次存活堆允许增长 100% |
 | `GUGU_RUNTIME_MEMORY_LIMIT` | `off` 或无空白的字节量 | `off` | runtime 管理内存的软上限 |
 | `GUGU_RUNTIME_STACK_MAX` | `64KiB` 至 `isize::MAX` 的字节量 | `1GiB` | 每个用户协程的逻辑栈上限；未提交整个上限的虚拟空间 |
@@ -50,21 +51,21 @@
 
 运行时环境变量是已编译程序的运行时输入，不参与 package 依赖解析、源码 `cfg` 或编译缓存 key。工具链只负责把环境传给 `gugu run` 启动的程序；直接运行镜像时由宿主环境提供这些值。
 
-## 调度器与阻塞边界
+## 并行度与阻塞边界
 
-Gugu runtime 维护逻辑处理器、操作系统工作线程和用户协程三层状态。逻辑处理器数量是 `parallelism`；它表示同时执行 Gugu 用户代码的目标并行度，不等同于 OS 线程数量。阻塞 I/O、计时器等待、channel/锁等待和可能阻塞的外部调用都会挂起当前协程并释放逻辑处理器。
+`parallelism` 是同时执行 Gugu 用户代码的目标并行度，不等同于 OS 线程数量，也不赋予程序可观察的处理器身份。阻塞 I/O、计时器等待、channel/锁等待和可能阻塞的外部调用都会挂起当前协程；在[并发公平规则](concurrency.md#抢占)允许的范围内，其它 runnable 协程仍须能够取得执行机会。
 
-`parallelism` 的初始值来自 `GUGU_RUNTIME_PROCS`。`std.runtime.set_parallelism(n)` 要求 `n > 0`，成功时发布新的逻辑处理器目标并返回旧值。增加目标允许 runtime 按需增加工作线程；降低目标只回收空闲逻辑处理器，不中断正在执行的协程、系统调用或外部函数。调用返回表示新目标已经发布，不表示 OS 工作线程数量已经立即收敛。超过宿主 CPU 数量的值合法，但不产生吞吐量保证。
+`parallelism` 的初始值来自 `GUGU_RUNTIME_PROCS`。`std.runtime.set_parallelism(n)` 要求 `n > 0`，成功时发布新目标并返回旧值。增加目标允许 runtime 按需增加并行执行能力；降低目标不中断正在执行的协程、系统调用或外部函数。调用返回表示新目标已经发布，不表示底层 OS 线程数量已经立即收敛。超过宿主 CPU 数量的值合法，但不产生吞吐量保证。
 
-工作线程可以多于 `parallelism`，因为阻塞的系统调用和 `extern "C"` 调用不能占住逻辑处理器。进入外部调用前，runtime 保存当前协程状态并释放逻辑处理器；返回后重新取得逻辑处理器，再把结果转换成 Gugu 值。外部函数仍在原 OS 线程上执行，runtime 不会在调用中途迁移它。若外部代码从该线程回调 Gugu，必须遵守[平台与 ABI 参考](platform-abi.md)的线程登记和回调边界。
+runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和 `extern "C"`，但这些线程怎样与协程和并行执行槽映射只见[调度器内部规范](../internals/scheduler.md)。外部调用期间函数仍在原 OS线程执行，返回后协程按普通调度恢复；外部代码回调 Gugu 必须遵守[平台与 ABI 参考](platform-abi.md)的线程进入和回调边界。
 
-用户协程不能把逻辑处理器、工作线程编号或当前 OS 线程身份当作调度稳定性的一部分。`#[os_thread_local]` 只表示 OS 线程槽，`#[coroutine_local]` 只表示协程槽；动态并行度和阻塞外调都可能改变二者的使用时机。
+用户协程不能把并行执行槽、工作线程编号或当前 OS 线程身份当作调度稳定性的一部分。`#[os_thread_local]` 只表示 OS 线程槽，`#[coroutine_local]` 只表示协程槽；动态并行度和阻塞外调都可能改变二者的使用时机。
 
-调度公平、抢占 safepoint、`yield`、channel 和同步原语的可见性见[并发与调度](concurrency.md)。本章的动态控制不能改变既有 happens-before、原子内存序或资源租约规则。
+调度公平、抢占、`yield`、channel 和同步原语的可见性见[并发与调度](concurrency.md)。safepoint、队列、context保存与外调交接只见[调度器](../internals/scheduler.md)和[栈图](../internals/stack-maps.md)；这些机制不能改变既有 happens-before、原子内存序或资源租约规则。
 
 ## 进程寿命
 
-用户协程是由 `async` 创建的协程，加上运行 `main` 的主协程。runtime 内部工作线程、系统监视线程和 GC 工作线程不是用户协程，不参与自然退出等待。
+用户协程是由 `async` 创建的协程，加上运行 `main` 的主协程。只有用户协程参与自然退出等待；runtime 的内部活动不延长程序寿命。
 
 | 情况 | 行为 |
 |------|------|
@@ -145,9 +146,9 @@ fatal 是 runtime 无法安全恢复的进程级故障。fatal 不进入 `Panic`
 | `HardwareFault` | 不可安全转换的同步硬件 fault，例如非法指令或保护页之外的访问 | 只允许 best-effort 报告，然后恢复宿主默认终止行为 |
 | `InvalidConfiguration` | 启动环境变量格式、范围或目标组合非法 | `main` 尚未调用，退出类别为 `runtime-failure` |
 
-`GUGU_RUNTIME_MEMORY_LIMIT` 是软上限，不是操作系统的硬隔离。它覆盖 GC 堆、TLAB、runtime 元数据、用户协程栈等 runtime 管理的已提交内存，不覆盖镜像代码、操作系统内核资源或外部库自行分配的内存。runtime 可以因当前对象、页粒度和并发周期暂时超过该值；超过后应提高 GC 频率并回收可达性之外的对象。
+`GUGU_RUNTIME_MEMORY_LIMIT` 是软上限，不是操作系统硬隔离。它覆盖 managed heap、runtime私有 metadata、用户协程栈等 runtime管理的已提交内存，不覆盖镜像代码、操作系统内核资源或外部库自行分配的内存。runtime可以因当前对象、页粒度和并发回收周期暂时超过该值；超过后应提高 collection频率并回收不可达对象。
 
-当分配请求触发软上限时，runtime 依次执行：发布 GC 请求、等待足以完成一次完整周期的 safepoint、再次尝试分配。仍不能满足请求时进入 `OutOfMemory`。显式 `std.runtime.collect()` 也不能保证所有内存都返还宿主，不能改变存活对象的地址语义，也不会运行用户 finalizer；Gugu 不提供任意对象 finalizer。
+分配请求触发软上限时，runtime请求并等待一次完整 collection后再尝试分配；仍不能满足时进入 `OutOfMemory`。显式 `std.runtime.collect()` 也不保证所有内存返还宿主，不改变任何存活值或安全引用的语义，也不运行用户 finalizer。具体 safepoint、heap和 cycle阶段见[GC内部规范](../internals/gc-metadata.md)。
 
 栈增长失败与栈上限的区分是：请求超过逻辑上限属于 `StackOverflow`；请求未超过上限但 runtime 页面分配失败属于 `OutOfMemory`。runtime 栈保护和 emergency report 缓冲区不得依赖当前用户栈仍然可写。
 
@@ -265,7 +266,7 @@ struct TraceConfig {
 struct RuntimeStats {
     pub live_coroutines: uint,
     pub live_os_threads: uint,
-    pub logical_processors: uint,
+    pub parallelism: uint,
     pub heap_committed_bytes: uint,
     pub heap_live_bytes: uint,
     pub stack_committed_bytes: uint,
@@ -289,7 +290,7 @@ fn trace_config() TraceConfig
 fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 ```
 
-`available_parallelism()` 是启动时探测到的正数，失败时返回 1；它不是可用 CPU 的永久承诺。`set_parallelism(0)` 返回 `InvalidValue`；在 `Terminating` 中调用任何 setter 返回 `Terminating`。新值发布后，正在运行的协程不被抢占到一个特定处理器，调度器只在后续调度点收敛。
+`available_parallelism()` 是启动时探测到的正数，失败时返回 1；它不是可用 CPU 的永久承诺。`set_parallelism(0)` 返回 `InvalidValue`；在 `Terminating` 中调用任何 setter 返回 `Terminating`。新值发布后，正在运行的协程不会绑定到某个可观察执行槽，runtime只在后续调度点收敛。
 
 `GcTarget::Automatic(p)` 的 `p` 是非负百分数：下一次自动周期的目标堆量为上一次周期结束时存活堆量加上该百分比；`Automatic(100)` 是默认行为。`GcTarget::Off` 关闭增长触发，但不关闭显式 `collect()`、内存上限触发或分配失败前的强制回收。setter 返回旧值，已经开始的 GC 周期不因设置改变而回滚。
 
@@ -299,7 +300,7 @@ fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 
 `RuntimeStats` 是逐字段快照，不是业务同步原语。计数器在进程内单调递增，当前量可以因并发回收而在采样后改变；`heap_live_bytes` 不等同于可立即返还 OS 的页数。`signal_events_dropped` 和 `trace_events_dropped` 覆盖 runtime 所有订阅和 trace 队列。
 
-`TraceConfig` 的事件写入 stderr，使用 `gugu-runtime-trace-v1` 的逐行 JSON。事件包含类别、事件名、相对 runtime 启动的单调纳秒时间和可用的协程/处理器标识；trace 只影响诊断输出，不改变调度、GC 或信号语义。trace 缓冲区满时丢弃事件并增加 `trace_events_dropped`，不能阻塞用户代码或进入用户 panic。
+`TraceConfig` 的事件写入 stderr，使用 `gugu-runtime-trace-v1` 的逐行 JSON。事件包含类别、事件名、相对 runtime 启动的单调纳秒时间和可用的协程/不透明执行槽标识；trace 只影响诊断输出，不改变调度、GC 或信号语义。trace 缓冲区满时丢弃事件并增加 `trace_events_dropped`，不能阻塞用户代码或进入用户 panic。
 
 ## 局部静态初始化
 
@@ -307,20 +308,9 @@ fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 
 局部静态的释放顺序不构成跨协程或跨 OS 线程契约。协程自然完成时可以释放其 coroutine-local 槽；OS 线程因动态并行度、阻塞外调或进程终止而结束时可以释放其 thread-local 槽。`std.process.exit`、主协程 panic 和 fatal 不保证局部槽的用户清理。
 
-## 编译器与 runtime 的共同契约
+## 实现边界
 
-编译器和 runtime 必须共同保证：
-
-1. 每个可能分配、阻塞、调用外部函数或跨控制流边界的位置都能到达合法 safepoint；
-2. 协程栈增长和栈上限检查在用户帧不可恢复前完成；
-3. GC 根枚举、写屏障、TLAB 和 `RuntimeStats` 观察不会把正在使用的引用误判为死亡；
-4. fatal 路径拥有不依赖普通 GC 堆、用户栈、锁或格式化 trait 的 emergency report 能力；
-5. 外部调用释放逻辑处理器，外部线程回调遵守线程登记和 `extern "C"` 边界；
-6. 动态控制的读写具有单一线性化顺序，但不伪造业务数据的 happens-before；
-7. 信号处理器不执行用户代码、不分配普通对象、不阻塞等待，并把事件转交到 runtime 安全点；
-8. `Terminating` 后不再发布用户协程结果、运行用户 defer 或恢复被丢弃的 panic。
-
-详细的 GC 不变量见[内存与对象模型](memory.md)，调度和 safepoint 见[并发与调度](concurrency.md)，`panic`、`exit`、`std.runtime` 与 `std.signal` 的公开签名见[标准库](standard-library.md)，目标 signal、TLS、入口和 fatal fault 的平台映射见[平台与 ABI 参考](platform-abi.md)。
+本章只规定 runtime状态、配置、公开 facade、报告和进程寿命。compiler/runtime私有共同契约分别位于 [GIR/LIR](../internals/gir-lir.md)、[栈图](../internals/stack-maps.md)、[GC 元数据](../internals/gc-metadata.md)、[调度器](../internals/scheduler.md)和[后端](../internals/backend.md)：这些文档固定 safepoint、frame、root/barrier、metadata、队列和外调交接，但不能为本章增加新的 fatal类别、清理保证、同步关系或退出行为。
 
 ## 设计参考
 

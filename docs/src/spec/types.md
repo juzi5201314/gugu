@@ -8,7 +8,7 @@
 4. 泛型默认单态化。类型擦除必须显式（胖 `fn`、接口对象）。
 5. `pub` 项必须有完全写明的参数类型；非 `()` 的返回类型必须写出（含 `!`）。函数体内部激进推断。
 6. 禁止隐式数值拓宽 / 变窄。仅允许 `!` 合流、数组引用到切片以及函数项/闭包到擦除函数句柄这三类规范强制，见本章“类型形成、推断与转换”。
-7. ZST 合法。ZST（零大小类型）指 `size_of` 为 0 的类型：`()`、空结构体、`[T; 0]`、字段递归全是 ZST 的结构体。**纯 ZST** 就是这种没有堆对象身份的零大小值，不在 GC 堆上分配对象头。句柄类型（`Vec`、`chan`、`dyn Trait`）即使载荷为空也不是 ZST。
+7. ZST 合法。ZST（零大小类型）指 `size_of` 为 0 的类型：`()`、空结构体、`[T; 0]`、字段递归全是 ZST 的结构体。**纯 ZST** 是没有对象身份的零大小值；句柄类型（`Vec`、`chan`、`dyn Trait`）即使逻辑载荷为空也不是 ZST。物理表示见 [GC 元数据](../internals/gc-metadata.md)。
 8. 没有 `null`。缺值用 `Option[T]`。`&T` 永不为空。
 
 ## 泛型写法：`[T]`，不用 `<T>`
@@ -108,7 +108,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 `len()`、capacity、range 与修改位置都按 byte 计。string 不支持单整数 `s[i]`；读取使用 `byte_at` / `char_at` 或迭代器。`s[a..b]` 等 range 返回 O(1) COW 快照，端点必须位于 UTF-8 scalar 边界，否则 panic。`==`、顺序与 Hash 按原始 UTF-8 byte 序列工作，不隐式 normalization。
 
-`+` 返回新 string；`+=` 修改左侧并可以复用未密封 backing。完整固有接口、`Bytes` 快照、密封状态与编译器 borrow/transfer 优化见[标准库 · 可变 COW string](standard-library.md#可变-cow-string)。
+`+` 返回新 string；`+=` 修改左侧而不改变其它 string值。完整固有接口、`Bytes` 快照与 COW值语义见[标准库 · 可变 COW string](standard-library.md#可变-cow-string)；backing复用和管理动作只见 [GIR/LIR](../internals/gir-lir.md)。
 
 ## 元组、数组、切片
 
@@ -196,10 +196,10 @@ fn() !
 
 闭包字面量（表达式）是 `fn(x: int) int { ... }`，见 [函数与闭包](functions.md)。
 
-- 每个闭包字面量有**独特匿名类型**，实现对应的 `Fn(T) U`，供单态化与内联。
-- 写成类型 `fn(T) U` 是擦除句柄（代码 + 环境），间接调用。这是句柄：拷贝即共享环境。
+- 每个闭包字面量有**独特匿名类型**并实现对应的 `Fn(T) U`。
+- 写成类型 `fn(T) U` 会擦除具体 callable类型；该值是句柄，拷贝后继续共享同一环境。物理调用与内部表示不构成优化保证。
 - 具名函数与闭包都可强制成 `fn(T) U`。
-- 热路径泛型用约束 `F: Fn(T) U`，不要把参数写成 `fn(T) U` 除非你就是要擦除。
+- 需要保留 callable具体类型时使用泛型约束 `F: Fn(T) U`；只有明确要擦除类型时才把参数写成 `fn(T) U`。
 - 不想写出类型参数名时用 `impl Trait`，见下。
 
 ## `impl Trait`
@@ -267,7 +267,7 @@ type_id_count()       // int；具体类型集合冻结后的 comptime 常量
 
 ```
 fn as_int(self) int          // 稠密下标，`0 <= i < type_id_count()`
-fn name(self) string         // 镜像 rodata 里的 intern 字符串；`type_id[T]().name()` 仍是 comptime
+fn name(self) string         // 规范类型名；`type_id[T]().name()` 仍是 comptime
 ```
 
 `name` 供诊断与调试，不能用来改布局、不能当求值入口。规范名优先日常名字：`int` 不是 `i64`，`uint` 不是 `u64`，`byte` 不是 `u8`，`float` 不是 `f64`。
@@ -287,9 +287,9 @@ impl !Any for MaybeUninit[T] {}
 
 其余拥有 `TypeId` 的类型由编译器生成 `impl Any`：`type_of` 就是 `type_id[Self]()`。方法名不能叫 `type_id`，那是关键字。
 
-`dyn Any` 合法。把 `x: T`（`T: Any`）强制成 `dyn Any`：分配一个 GC 对象，并按 T 的值描述符把 x 写入载荷；vtable 带载荷 TypeId，类型表带 GC、COW 与 resource descriptor。身份句柄进盒子时共享对象，string backing 先密封，resource 字段建立盒子持有的 lease。因此 `dyn Print` 再进 `dyn Any` 后，downcast 只能回到 `dyn Print`，不能穿过接口对象猜到原来的 Point。
+`dyn Any` 合法。把 `x: T`（`T: Any`）强制成 `dyn Any` 会建立一个保存 T 语义副本的擦除容器：身份句柄继续共享身份，string/COW值完成相应封存，resource字段取得由容器持有的 lease。因此 `dyn Print` 再进 `dyn Any` 后，downcast只能回到 `dyn Print`，不能穿过接口对象猜到原来的 Point。
 
-若 x 已经是 `dyn Any`，强制只复制胖指针，不再套一层盒子。ZST 的盒子没有载荷 byte；实现可以共用一个不移动的永生对象。
+若 x 已经是 `dyn Any`，强制只复制同一擦除句柄，不再嵌套第二层容器。纯 ZST同样可以进入 `dyn Any`，但没有可观察 payload地址或额外身份。
 
 泛型方法不能放进 `Any` trait。语言给类型 `dyn Any` 写固有 impl（不能用户重载）：
 
@@ -301,7 +301,7 @@ impl dyn Any {
 }
 ```
 
-三者只比较载荷 `TypeId` 与 `type_id[T]()`。相等则 `downcast` 的 `&T` 指向载荷槽，`downcast_copy` 按 T 的值描述符产生语义副本；不等则 `None`，不 panic。`&T` 指向盒子内部：只要该引用或 dyn Any 句柄还是 GC 根，盒子活着。
+三者比较容器记录的 `TypeId` 与 `type_id[T]()`。相等则 `downcast` 的 `&T` 指向容器保存的 T槽，`downcast_copy` 按 T 的值语义产生副本；不等则 `None`，不 panic。只要该引用或 `dyn Any` 句柄仍存活，容器和槽就保持有效。
 
 没有「downcast 成另一个 `dyn Trait`」。要接口对象，直接用 `dyn Print` 擦除。
 
@@ -315,7 +315,7 @@ let q: Option[&Point] = a.downcast()   // 靠期望类型推断 T
 
 方法上的显式类型实参必须写 `::[T]`（值后面的 `[]` 是下标）。能推出来就不写。
 
-镜像 rodata 有一张以编号为下标的类型表（名字、`size_of`、`align_of`、GC 扫描描述符）。`downcast` 是一次整数比较，不是哈希探表。不能在运行时登记新类型。
+运行时不能登记新类型。稠密表、擦除容器、vtable、下标比较和扫描描述符的当前表示见 [GC 元数据](../internals/gc-metadata.md)，不构成额外的语言布局或性能保证。
 
 ## 语言类型
 
@@ -323,7 +323,7 @@ let q: Option[&Point] = a.downcast()   // 靠期望类型推断 T
 
 | 类型 | 含义 |
 |------|------|
-| `chan[T]` | 通道。关键字 `chan`。句柄，权威状态在堆对象上。构造 `chan[T](n)`，`n: int`。 |
+| `chan[T]` | 通道。关键字 `chan`。身份句柄，所有副本共享同一通道状态。构造 `chan[T](n)`，`n: int`。 |
 | `Join[T]` | `async` 启动的协程的句柄。`wait()` 得到 `Result[T, Panic]`。 |
 | `Range` | `a..b` 作为**值**时的类型。`pub start: int`、`pub end: int`，半开。只表示 `int` 区间。模式里的 `char` 范围不产生 `Range` 值，见 [模式](patterns.md)。 |
 | `ChanClosed` | 空结构体（无字段；值可写 `ChanClosed` 或 `ChanClosed {}`，与 [声明](declarations.md) 的 `Empty` 相同）。`recv` 在关闭且收尽后返回 `Err(ChanClosed)`。 |

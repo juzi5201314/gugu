@@ -16,7 +16,7 @@
 
 平台文档的名称或版本变化不能自动改变 Gugu 语义。若平台 ABI 的新版本与本章的规范性表格冲突，目标实现必须继续遵守本章；要采用新约定，必须先修订本规范。
 
-本章不承诺 Gugu 内部 ABI。默认调用约定、闭包环境、句柄对象头、vtable、GC 栈图编码、内部符号名和未标注 `repr` 的字段布局都属于编译器实现，可随编译器构建身份改变。
+本章不承诺 Gugu 内部 ABI。默认调用约定、闭包环境、runtime私有对象 metadata、vtable、GC 根编码、内部符号名和未标注 `repr` 的字段布局都属于编译器实现，可随编译器构建身份改变。
 
 ## 目标模型
 
@@ -111,6 +111,10 @@ Linux 目标的默认镜像不依赖动态解释器或 libc 初始化。Windows 
 `int`、`uint`、`float`、`isize` 和 `usize` 的别名关系以及数值转换规则见[类型系统](types.md)。`()` 与 `!` 没有值；`()` 只能在代表 `void` 的返回位置使用，`!` 只能作为不返回函数的返回类型。
 
 引用、切片、字符串、句柄和擦除函数句柄的语言表示不是 C ABI 布局。即使某个实现当前把它们编码成一个或两个机器字，也不能据此形成 FFI 契约。
+
+### CPU 基线
+
+两个目标都要求 x86-64-v1 指令集与 SSE2 浮点。未新增公开 target feature 前，普通程序和 runtime不能要求 AVX、AVX2、BMI、FMA或其它更高扩展；在只满足该基线的 CPU上运行不得触发非法指令。具体 instruction selection不是外部 ABI，见[后端内部规范](../internals/backend.md)。
 
 ### C 数据模型
 
@@ -229,7 +233,7 @@ Gugu 的整数参数和原始指针按 `rdi, rsi, rdx, rcx, r8, r9` 的顺序使
 
 调用点的栈对齐、栈参数顺序和寄存器耗尽后的回退规则遵循 System V AMD64 psABI。Gugu 生成的调用点在执行 `call` 前保持 16 字节栈对齐；SysV 的 128 字节 red zone 不能被用来保存需要跨 safepoint、阻塞或外部保留的 Gugu 根。
 
-SysV callee-saved 的通用寄存器至少包括 `rbx`、`rbp` 和 `r12`–`r15`。Gugu 生成的导入桩必须保存调用者仍需使用的 caller-saved 状态，并在返回前恢复运行时要求的栈图和协程上下文。
+- 恢复 runtime登记、panic边界、GC根状态与调度状态。
 
 ### Microsoft x64 桥接
 
@@ -253,7 +257,7 @@ Windows C ABI 不提供与本章兼容的 `__int128` 参数或返回规则，因
 
 C 导入符号默认使用 `extern` 声明名；`#[link_name = "..."]` 可指定精确外部名。C 导出符号默认使用声明名；`#[export_name = "..."]` 可指定精确外部名。C 边界不使用 Gugu 内部 mangling，也不额外添加平台无关的前导下划线。
 
-符号名不能含 NUL；目标对象格式不接受的名称是编译错误。重复导出、同一导出名指向多个定义、导入名与登记库不匹配都是编译错误。内部 Gugu 符号的 mangling 只要求在一次编译中确定且无冲突，名称和编码不是稳定 ABI，用户不得引用或拼接内部符号。
+符号名不能含 NUL；目标对象格式不接受的名称是编译错误。重复导出、同一导出名指向多个定义、导入名与登记库不匹配都是编译错误。内部 Gugu mangling只要求单次编译确定且无冲突，编码由[后端](../internals/backend.md)版本化，用户不得引用或拼接。
 
 ### 逻辑节
 
@@ -271,6 +275,14 @@ C 导入符号默认使用 `extern` 声明名；`#[link_name = "..."]` 可指定
 | 外部导入 | 动态导入表（仅显式 FFI） | `.idata` |
 
 PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]` 指定的节必须在目标格式上可表示，且不能覆盖 runtime、栈图、类型表、导入表或展开表的保留节；非法节名、权限组合和对齐要求都是编译错误。`--strip` 不能删除运行时必需的栈图、展开信息或 GC 元数据，详见[工具链与命令行](toolchain-cli.md)。
+
+### 可执行镜像形式
+
+没有动态 FFI 导入的 Linux executable必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0完成镜像自身允许的 relative relocation并支持加载基址随机化；不能退化成依赖 libc/系统 linker的启动路径。显式登记动态 `.so` 后才可以加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT和对应 relocation，解释器与 sysroot必须来自选中的 target/toolchain描述而不是宿主 PATH探测。
+
+Windows executable和 `cdylib` 使用 PE32+，包含合法 base-relocation table并设置 ASLR、high-entropy ASLR和 NX兼容标志；默认不导入 CRT。preferred image base、file/section排列和 padding是当前 writer实现细节，外部代码只能依赖本章登记的导入导出、逻辑节、入口、TLS和展开面。
+
+static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
 ### 入口、重定位与 TLS
 
@@ -321,8 +333,8 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 - Gugu 默认 ABI、内部寄存器分配和内部函数符号；
 - 无 `repr` 类型的字段顺序、padding、niche 和 enum 编码；
-- 闭包环境、函数句柄、句柄对象头、vtable、`TypeId` 编号和 GC 元数据；
-- 协程栈、栈图编码、runtime 私有 TLS 和 panic 展开表内部编码；
+- 闭包环境、函数句柄、runtime私有对象 metadata、vtable、`TypeId` 编号和 GC metadata；
+- 协程栈、根编码、runtime 私有 TLS 和 panic 展开表内部编码；
 - 未由目标注册表明确列出的系统调用号、DLL 导出或编译器优化选择。
 
 Gugu 对象文件、静态库和动态库之间不提供独立的 Gugu-to-Gugu ABI。跨编译器版本发布时，C ABI 外的 Gugu 依赖必须重新编译；仅把旧对象文件放入新镜像不是受支持的兼容方式。

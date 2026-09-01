@@ -7,7 +7,7 @@
 不进入 `unsafe` 的代码必须：
 
 - 不把整数当指针解引用
-- 不绕过写屏障
+- 不绕过 compiler/runtime 对受管引用更新的要求
 - 不越界（无检查下标只在 `unsafe`）
 - 不破坏 `string` 的 UTF-8
 - 不把未初始化内存当已初始化值读（ZST 与 `MaybeUninit` 除外）
@@ -50,7 +50,7 @@ unsafe fn volatile_load[T](p: *T) T
 unsafe fn volatile_store[T](p: *T, v: T)
 ```
 
-`addr_of` 是接收 place 的特殊 intrinsic：只计算槽地址，不读取值，也不构造可能未对齐的 `&T`；非 place 实参是编译错误。`ptr_read` / `ptr_write` 按位访问，只允许值描述符没有 COW seal、resource dup/drop/publish 的类型；string、ResourceCell 句柄或含资源字段的类型是编译错误，必须使用普通赋值或领域 API。`ptr_read` 不把源当成已移走，`ptr_write` 不运行管理动作，二者要求自然对齐。`read_unaligned` / `write_unaligned` 只接受位类型，允许未对齐地址并逐 byte 等价复制。`volatile_*` 仍要求自然对齐，只保证该次访存不被删除、合并或移出其它 volatile 访存的顺序；volatile 不是原子操作，不建立 happens-before。悬空、范围不足、无效位模式、数据竞争或错误写屏障仍是未定义行为。
+`addr_of` 是接收 place 的特殊 intrinsic：只计算槽地址，不读取值，也不构造可能未对齐的 `&T`；非 place 实参是编译错误。`ptr_read` / `ptr_write` 按位访问，只允许不带 COW 或 resource 管理语义的类型；string、ResourceCell 句柄或含资源字段的类型是编译错误，必须使用普通赋值或领域 API。`ptr_read` 不把源当成已移走，`ptr_write` 不运行管理动作，二者要求自然对齐。`read_unaligned` / `write_unaligned` 只接受位类型，允许未对齐地址并逐 byte 等价复制。`volatile_*` 仍要求自然对齐，只保证该次访存不被删除、合并或移出其它 volatile 访存的顺序；volatile 不是原子操作，不建立 happens-before。悬空、范围不足、无效位模式、数据竞争或绕过受管引用更新要求仍是未定义行为。
 
 ## `union`
 
@@ -70,7 +70,7 @@ union Word {
 
 ## `MaybeUninit[T]`
 
-`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#术语)），布局与 `T` 相同。`T` 的值描述符含 resource 管理动作时不能实例化 MaybeUninit，避免覆盖或未初始化状态绕过 lease drop。其它 T 的 GC 扫描与初始化状态由编译器精确跟踪，直到 `assume_init` 前不能把未写入槽当成有效 T 使用。
+`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#术语)），布局与 `T` 相同。带 resource 管理语义的 T 不能实例化 MaybeUninit，避免覆盖或未初始化状态绕过 lease release。其它 T 的 GC 扫描与初始化状态由编译器精确跟踪，直到 `assume_init` 前不能把未写入槽当成有效 T 使用。
 
 ```
 fn uninit[T]() MaybeUninit[T]
@@ -86,7 +86,7 @@ unsafe fn assume_init(self) T
 
 ## `transmute` 与 `unreachable`
 
-`std.mem.transmute[T, U](x: T) U`：按位重解释。必须在 `unsafe` 里。`size_of[T]()` 必须等于 `size_of[U]()`，否则编译错误。T 或 U 的值描述符含 COW seal 或 resource 管理动作时也是编译错误；transmute 不能伪造、复制或漏掉管理动作。其它结果若对 U 无效（含破坏对象头、UTF-8、niche）是未定义行为。
+`std.mem.transmute[T, U](x: T) U`：按位重解释。必须在 `unsafe` 里。`size_of[T]()` 必须等于 `size_of[U]()`，否则编译错误。T 或 U 带 COW 或 resource 管理语义时也是编译错误；transmute 不能伪造、复制或漏掉管理动作。其它结果若对 U 无效（含伪造 runtime 私有状态、破坏 UTF-8 或 niche）是未定义行为。
 
 `std.hint.unreachable() !`：告诉编译器不可达。若运行到此处，未定义行为。必须在 `unsafe` 里调用。安全的发散用 `panic`。
 
@@ -96,11 +96,11 @@ unsafe fn assume_init(self) T
 
 | 职责 | 说明 |
 |------|------|
-| 裸分配 / 区域 | GC 堆、`LocalArena` / `SyncArena` 上的未初始化内存；OS `mmap` / `VirtualAlloc` |
-| 写屏障 | 手写 GC 字段赋值 |
-| 栈切换 | 保存 callee-saved 与栈指针 |
+| 受管分配 / 区域 | managed storage、`LocalArena` / `SyncArena` 上的未初始化内存；OS `mmap` / `VirtualAlloc` |
+| 受管引用更新 | 手写 runtime 对 GC 引用槽的更新；当前屏障见 [GC 元数据](../internals/gc-metadata.md#write-barrier-与-remembered-set) |
+| 栈切换 | 保存目标 ABI 状态并切换执行栈；当前 context见[调度器](../internals/scheduler.md) |
 | 栈边界 / SP | GC 与溢出探测 |
-| 栈图 / 类型元数据 | 根遍历 |
+| 根与类型 metadata | 向配套 runtime 登记精确根和类型信息；编码见[栈图](../internals/stack-maps.md)与[GC 元数据](../internals/gc-metadata.md) |
 | 原子 | `xchg`、`cas`、acquire/release/seqcst；channel 与调度握手 |
 | 系统调用 | Linux `syscall`；Windows 对导入符号的调用 |
 | 无检查索引 / 转换 | 误用即未定义行为 |
@@ -110,7 +110,7 @@ unsafe fn assume_init(self) T
 | volatile / 指针读写 | 见上 |
 | `transmute` | 见上 |
 
-未定义行为包括：野指针、数据竞争、破坏 UTF-8 或对象头、漏写屏障、在非 safepoint 认为栈图有效、对 `union` / `MaybeUninit` / `transmute` 的无效位模式。调试器可以抓一部分；没炸不是定义。
+未定义行为包括：野指针、数据竞争、破坏 UTF-8 或 runtime 私有状态、遗漏受管引用更新、在编译器未登记的停止点读取根 metadata，以及对 `union` / `MaybeUninit` / `transmute` 使用无效位模式。当前官方 metadata与屏障契约只见[栈图](../internals/stack-maps.md)和[GC 元数据](../internals/gc-metadata.md)。调试器可以抓一部分；没炸不是定义。
 
 ## `asm` 与 `global_asm`
 
@@ -129,12 +129,12 @@ asm(
 - 第一个实参是 comptime `string`（或 `raw"..."`）。tier-1 目标统一使用 AT&T 表面语法，与 GNU as 常见记法兼容；同一份源码不能按实现选择切换到 Intel 语法。
 - `in("reg") expr`：进入时该寄存器保存 `expr` 的值。
 - `out("reg") place` / `lateout("reg") place`：退出时写进可赋值位置。
-- `clobber("reg"...)`：这些寄存器与 `memory` / `cc` 被破坏。必须声明，否则栈图与寄存器分配无效。
+- `clobber("reg"...)`：这些寄存器与 `memory` / `cc` 被破坏。必须声明，否则根 metadata 与寄存器分配无效。
 - 类型是 `()`。禁止在 `#[naked]` 以外靠它「返回」值而不走 `out`。
 
 `global_asm("...")` 是模块顶层声明。字符串必须 comptime。汇编进镜像，不经 Gugu 函数 prologue。用于 rt0 入口。
 
-`#[naked] unsafe fn`：编译器不生成 prologue / epilogue / 栈图里的普通帧。函数体必须是**恰好一次** `asm(...)` 调用（可带 `clobber`）。调用约定由程序员与链接属性保证。
+`#[naked] unsafe fn`：编译器不生成 prologue / epilogue 或普通帧的根与展开 metadata。函数体必须是**恰好一次** `asm(...)` 调用（可带 `clobber`）。调用约定由程序员与链接属性保证。
 
 ## 链接属性
 
@@ -176,8 +176,8 @@ extern "C" fn nt_close(h: *byte) i32
 - `TypeId`、`dyn Trait`、句柄类型不能出现在 `extern "C"` 签名里。
 - `!` 可作为 `extern "C"` 的返回类型（C 的 `_Noreturn` / `noreturn`）。
 - 导出函数若发生 panic：必须在导出边界用 `std.panic.catch`，否则 runtime **abort 进程**，禁止把 Gugu 展开推进外部帧。
-- **调出：** 导入的外部函数一律视为可能阻塞。调用前让出逻辑处理器，返回后再拿回（与系统调用同一条路）。
-- **调入：** 若当前操作系统线程还不是运行时的工作线程，临时把它登记为工作线程并配逻辑处理器，导出函数返回后拆掉。已经在跑 Gugu 的线程直接进，不再套一层。
+- **调出：** 导入的外部函数一律视为可能阻塞；调用期间其它 runnable 协程仍须能按运行时公平规则取得执行机会。具体 context 保存与执行槽交接只见[调度器内部规范](../internals/scheduler.md)。
+- **调入：** 外部线程只能经编译器生成的回调桥进入 Gugu；该桥必须建立配套 runtime 状态、精确根和 panic 边界。线程登记与执行槽取得方式属于[调度器内部规范](../internals/scheduler.md)，不形成外部 ABI。
 
 ## 原始指针、位模式与别名契约
 
@@ -185,9 +185,9 @@ extern "C" fn nt_close(h: *byte) i32
 
 对 `*T` 的 `ptr_read` / `ptr_write` 和 volatile 操作要求地址按 `align_of[T]()` 对齐、范围有效、位模式对 `T` 有效，并遵守并发同步。`#[repr(packed)]` 未对齐字段必须通过专门的未对齐 intrinsic 或按字节复制；把未对齐地址直接交给上述对齐 API 是未定义行为。
 
-有效位模式至少要求：`bool` 只能为 0/1；`char` 是合法 Unicode 标量；引用非空且有效；`string` 保持 UTF-8 和合法长度；枚举判别值对应有效变体；`TypeId` 在表范围内；句柄对象头与 vtable 指向当前镜像的合法对象。整数、浮点和原始指针接受全部位模式。构造无效位模式后即使尚未读取，只要把它当作已初始化的安全类型传播就是未定义行为。
+有效位模式至少要求：`bool` 只能为 0/1；`char` 是合法 Unicode 标量；引用非空且有效；`string` 保持 UTF-8 和合法长度；枚举判别值对应有效变体；`TypeId` 在表范围内；句柄与 vtable 必须指向当前镜像的合法 runtime状态。整数、浮点和原始指针接受全部位模式。构造无效位模式后即使尚未读取，只要把它当作已初始化的安全类型传播就是未定义行为；runtime私有对象 metadata的具体表示不属于本章。
 
-unsafe 不豁免数据竞争或 GC 写屏障。通过原始指针写入 GC 引用槽时必须调用写屏障 intrinsic；漏屏障是未定义行为。别名本身合法，但两个操作系统线程无同步地访问同一位置且至少一方写入仍是数据竞争。
+unsafe 不豁免数据竞争或受管引用更新契约。通过原始指针写入 GC 引用槽时必须调用对应 intrinsic；当前官方 runtime把它实现为[写屏障](../internals/gc-metadata.md#write-barrier-与-remembered-set)，替代实现可以采用满足相同安全结果的机制。遗漏该操作是未定义行为。别名本身合法，但两个操作系统线程无同步地访问同一位置且至少一方写入仍是数据竞争。
 
 ## `asm` 的求值与约束
 
@@ -195,7 +195,7 @@ unsafe 不豁免数据竞争或 GC 写屏障。通过原始指针写入 GC 引�
 
 普通 `asm` 不是 safepoint，不能在模板内部调用会分配、阻塞、展开 panic、触发 GC 或切换协程栈的 Gugu 函数；需要这些行为必须使用编译器认识的 intrinsic/ABI 边界。`memory` clobber 阻止编译器跨越该 asm 重排普通内存访问，`cc` clobber声明状态标志被破坏；省略真实 clobber 导致的错误结果属于未定义行为。
 
-`global_asm` 和 `#[naked]` 函数不拥有普通栈图或展开信息。它们若建立可被 GC 或 panic 看到的帧，必须通过目标专用 intrinsic 提供完整元数据，否则不得进入 safepoint或展开路径。
+`global_asm` 和 `#[naked]` 函数不拥有 compiler生成的普通根与展开 metadata。它们若建立可被 GC 或 panic 看到的帧，必须通过目标专用 intrinsic 提供配套 runtime要求的完整 metadata，否则不得进入 safepoint或展开路径。
 
 ## FFI 值与展开边界
 

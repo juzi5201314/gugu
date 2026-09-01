@@ -12,14 +12,14 @@ Gugu 是 AOT 编译的、健全静态类型的语言：语法刻意简单，语�
 2. **静态布局。** 数据是 `struct` / `enum` / `union` / 元组 / 数组 / newtype。不是 JavaScript 对象，也不是 Lua table。
 3. **闭世界。** 全程序编译结束前必须能枚举全部可达函数和类型。禁止 `eval`、禁止运行时改布局、禁止加载未知本语言代码。插件只走窄 C ABI。
 4. **单态化、少装箱。** 泛型按使用处展开。擦除必须显式（`dyn Trait`、胖 `fn`）。类型身份是闭世界稠密 `TypeId`；异构容器用 `dyn Any`，不是名为 `any` 的渐进类型。
-5. **分配可见。** 逃逸分析、栈分配、arena。GC 只处理真的堆对象。
+5. **分配不增加所有权语法。** 语言值语义不暴露 stack/heap选择；需要批量寿命时显式使用 arena，需要地址稳定时显式 pin。
 6. **推断 ≠ 开世界。** 闭世界是代码全集可见；省略类型是编译器补全注解。
-7. **运行时是语言的一部分。** 镜像 = 用户码 + Gugu runtime + rt0。runtime 禁止用 Rust 写两遍。
-8. **性能写进编译器。** 分配、写屏障、换栈、safepoint 是 IR 原语。
+7. **运行时是语言的一部分。** 可执行镜像包含满足本规范的 Gugu runtime 与 rt0，不依赖另一个宿主 VM。
+8. **性能策略不能改变语义。** 分配、屏障、换栈、safepoint和 IR lowering只在 [`internals/`](../internals/gir-lir.md)规定。
 9. **必须有 `unsafe` 与 intrinsic。** 否则 GC、调度、channel 无法用本语言写。
 10. **没有对象系统。** 禁止类、继承、原型链、隐式 `this`、运行时加字段。方法是 UFCS / `impl`，默认静态分发。
-11. **闭包是一等公民。** 捕获不增加用户心智负担；逃逸则 GC 延命。
-12. **高并发。** 有栈绿色协程 + 多对多调度 + 抢占 + channel。`async` 只启动协程，不是函数染色。
+11. **闭包是一等公民。** 捕获不增加用户心智负担；捕获状态按闭包实际寿命持续有效。
+12. **高并发。** 协程、抢占、channel和多核并行不要求函数染色；具体 M:N实现见[调度器内部规范](../internals/scheduler.md)。
 13. **系统接口：** Linux 直接 syscall；Windows 薄导入地址表（IAT，Import Address Table，挂 kernel32/ntdll）。默认不链 libc。
 
 ## 目标
@@ -32,10 +32,9 @@ Gugu 是 AOT 编译的、健全静态类型的语言：语法刻意简单，语�
 
 ## 非目标
 
-- 不用 LLVM，不用 Cranelift。自研 x86_64 codegen。
 - 不用系统 `ld` / `link.exe` 作为发布模型。
 - 不是渐进类型，不是字节码 VM，不是 WASM guest。
-- 编译器用 Rust 写，不赋予程序 Rust ABI。
+- Rust编译器、自研后端与 Gugu runtime等官方实现选型只见 [`internals/`](../internals/ast-hir.md)，不赋予程序 Rust ABI或新的语言语义。
 
 ## 示例
 
@@ -75,15 +74,13 @@ UTF-8，扩展名 `.gg`。文件是模块，目录是包；规范排版见[格�
 
 ## 术语
 
-规范目前是唯一成文的文档（教程与参考尚未写）。下列术语在后文章节直接使用：
+`spec/` 是程序、库、工具链与外部 ABI 的唯一公开规范；`internals/` 固定官方 compiler/runtime实现。下列公开术语在后文章节直接使用：
 
 | 术语 | 含义 |
 |------|------|
 | lang item | 编译器按**名字**挂钩的标准库项（类型、trait、函数）。语言语义必须解析到这些定义；用户不能再声明同名项。没有挂钩的普通 `std` 类型不是 lang item。 |
 | lang trait | 作为 lang item 的 trait（如 `Print`、`Any`）。 |
-| ZST / 纯 ZST | 零大小类型：`size_of` 为 0。纯 ZST 作为值不分配 GC 对象头。见 [类型](types.md)。 |
-| TLAB | 线程本地分配缓冲（thread-local allocation buffer）。每个正在跑协程的操作系统工作线程一份，小对象在其中 bump。 |
-| Immix | 老年代 GC 算法：堆分成 block，block 分成 line；标记后可机会性 evacuate（把活对象搬走）整理碎片。见 [内存](memory.md)。 |
+| ZST / 纯 ZST | 零大小类型：`size_of` 为 0。纯 ZST 作为值没有对象身份。见 [类型](types.md)。 |
 | IAT | Windows PE 的导入地址表（Import Address Table）。「薄 IAT」= 只导入 ntdll/kernel32 等少量符号，不链 CRT。 |
 | 会合 | 无缓冲 channel 上，一次 `send` 与一次 `recv` 必须配对完成（rendezvous）。 |
 | 已支持目标 | 本规范当前登记并要求支持的目标：`x86_64-linux` 与 `x86_64-windows`。目标模型与 ABI 见[平台与 ABI 参考](platform-abi.md)。 |
@@ -109,9 +106,9 @@ UTF-8，扩展名 `.gg`。文件是模块，目录是包；规范排版见[格�
 
 lint 是既不改变程序类型也不改变运行时语义的诊断。默认 `warn` 的 lint 不使镜像失效，只有 `deny` / `forbid` 或显式编译错误阻止产出。实现可以提供额外 lint，但未知 lint 名称和未知属性仍必须报编译错误。
 
-## 编译阶段
+## 编译输入边界
 
-每次编译按以下依赖顺序处理：读取并验证 UTF-8 源文件，词法分析，按 `cfg` 删除不存在的项，解析模块与名称，检查声明和类型，执行必需的 comptime，完成泛型单态化与 trait/方法选择，生成精确布局与运行时元数据，最后生成目标镜像。前一阶段失败时不得把后续阶段的诊断伪装成运行时行为。
+一次编译只读取已经登记的源码、清单/锁图、target/feature、build.gg结果、工具链和显式环境输入；同一输入必须得到相同语义结果。AST/HIR/GIR/LIR、query依赖、单态化与镜像写出的阶段顺序由 [`internals/`](../internals/ast-hir.md)唯一规定，前端实现不能产生本规范没有定义的新运行时行为。
 
 受管项目在读取入口源码前，先按[包、依赖与构建模型](packages-builds.md)解析 workspace、锁图、target、feature 与 build.gg 输出；这些结果共同决定本次存在的源文件和 cfg。只有显式单文件底层编译跳过该阶段，且不能使用外部 package、workspace、feature 或 build.gg。命令行入口、参数与输出格式见[工具链与命令行](toolchain-cli.md)。
 

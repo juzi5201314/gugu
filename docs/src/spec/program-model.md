@@ -2,23 +2,21 @@
 
 ## 编译形态
 
-Gugu 程序必须被 **AOT** 编译成本地可执行镜像。可以在同一套 IR 上做 JIT，但 JIT 不得把运行时变成字节码 VM，也不得引入开世界加载。
-
-编译器（前端、中端、x86_64 codegen、可执行文件写出）用 Rust 实现。被编译的程序、标准库、GC、调度器必须是 Gugu（加 rt0）。禁止「runtime 先用 Rust 写一遍，语言再绑定它」。
+Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行时 `eval` 和开世界代码加载不属于本规范。实验性 JIT 只能作为同一闭世界程序的执行实现，不能扩大程序可见的函数、类型或 ABI；具体 compiler/runtime实现语言和 IR/后端结构见 [`internals/`](../internals/ast-hir.md)。
 
 ## 闭世界与全程序编译
 
 一次产生可执行文件或 C 导出库的编译必须看见全部可达的 Gugu 代码：所选 target、其解析后的 package 依赖图、标准库和用 Gugu 写的 runtime。项目工具按 `gugu.toml` 与 `gugu.lock` 选择 target 入口，底层编译器从该入口开始闭世界可达性，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。命令行入口与参数见[工具链与命令行](toolchain-cli.md)。
 
-因此：
+因此，程序可观察模型满足：
 
-- 必须在编译期枚举全部可达函数、类型、vtable（若有）、闭包环境布局。
-- 必须给每个拥有 `TypeId` 的具体类型分配闭世界稠密编号，并写入镜像类型表（编号 → 名字、大小、对齐、GC 扫描描述符、COW 管理描述符、resource descriptor）。禁止运行时往表里加行。
-- 必须据此单态化、去虚、定布局，生成精确栈图、写屏障点、string seal 与 resource borrow/transfer/dup/drop/publish。
-- 禁止在运行时引入新的 Gugu 函数或新的类型布局。
-- 禁止 `eval`、禁止把字符串当代码、禁止对任意值做「当函数调用」。
+- 执行开始前，可达的 Gugu 函数、具体类型、impl、vtable、闭包和导出集合已经封闭；
+- 每个拥有 `TypeId` 的具体类型在该镜像中有唯一稠密编号，运行时不能追加类型；
+- 运行期间不能引入新的 Gugu 函数、类型布局或 impl 选择；
+- 不存在 `eval`、字符串转代码或对任意值执行动态函数调用；
+- 跨语言执行只通过规范规定的 C ABI、系统调用和平台入口。
 
-跨语言边界只允许 **窄 C ABI**（以及 CPU 的 syscall 约定）。这是插件与操作系统的唯一缺口。
+可达性收集、单态化、去虚、布局、栈图与管理动作的内部顺序见[单态化与编译缓存](../internals/monomorphization-cache.md)、[GIR/LIR](../internals/gir-lir.md)和[GC 元数据](../internals/gc-metadata.md)，不在本章重复定义。
 
 ## 支持目标
 
@@ -45,18 +43,9 @@ Gugu 程序必须被 **AOT** 编译成本地可执行镜像。可以在同一套
 
 ## 不使用系统链接器
 
-因为世界是闭的，**连接发生在 IR / codegen，而不是传统 `.o` + 系统 `ld`。**
+发布版 Gugu 工具链必须能从声明的 Gugu/native输入直接产生目标镜像，不把成功建立在调用宿主 `ld`、`link.exe`、`lld` 或其它系统链接器上。该保证只覆盖 Gugu 支持的闭世界镜像和[包构建](packages-builds.md)允许的 native输入，不承诺通用链接器的任意 `.o`、脚本或平台扩展语义。
 
-编译器必须：
-
-1. 把用户码、标准库、runtime 收成一个程序。
-2. 在 IR 层解析符号、内联、裁剪未达代码。
-3. 自己做代码布局：`.text` / `.rodata` / `.data` / `.bss` 以及目标需要的异常/栈图节。
-4. 自己写出完整的 ELF（Linux）或 PE（Windows）静态镜像。
-
-禁止把「能生成可执行文件」建立在调用 `ld` / `link.exe` / `lld` 上。实现可以在开发早期用系统链接器做对照测试，那不是语言的发布模型。
-
-这不是去实现一个通用多目标链接器（LTO、公共 `ld` 语义、任意第三方 `.o`）。那会直接否定「短小精悍」。闭世界语言只需要：**内部符号全部在编译器里解析，最终镜像几乎只剩入口、只读数据、以及（Windows 上）少量导入表。**
+内部符号解析、dead-code elimination、section布局、重定位和 ELF/PE直接写出由[x86_64 后端](../internals/backend.md)唯一规定。开发测试可以把系统工具用作结果对照，但不能成为发布命令的执行依赖或改变产物。
 
 ## 不用 libc 当语义层
 
@@ -70,53 +59,21 @@ Gugu 程序必须被 **AOT** 编译成本地可执行镜像。可以在同一套
 
 ## 目标镜像
 
-一个可执行文件必须包含：
+可执行镜像包含目标 rt0、与该编译器构建配套的 runtime、标准库和闭世界用户程序。rt0 是平台入口而不是普通 Gugu函数；它只负责把宿主进程交给满足[运行时启动契约](runtime.md#rt0-与启动)的环境。
 
-1. **rt0**：极少的汇编（或与汇编等价的、不经 GC 的启动代码）。负责 `_start`、最初的 syscall、最初的 `mmap`、进入 Gugu 写的 runtime。目标量级是几百到两千行，长期允许留在底层。
-2. **runtime**：用 Gugu 写的 GC、调度、channel、启动后的堆。
-3. **用户程序与标准库。**
+镜像是否含动态解释器、默认系统导入、保留 metadata节和外部 ABI由[平台与 ABI 参考](platform-abi.md)唯一规定；内部 fragment、relocation、stack map和启动编码见[后端](../internals/backend.md)。主协程返回、panic、`process.exit`和 fatal之后的状态转换只见[运行时](runtime.md#进程寿命)。
 
-启动顺序（运行时，不是编译期）：
+## 编译器内部表示
 
-```text
-rt0 入口
-  → 不经 GC 的分配可用（rt0 已 mmap 第一块堆或固定缓冲区）
-  → 解析运行时启动配置并建立 GC、调度、信号和 fatal 报告路径
-  → 调用用户 `main`
-  → 若 main 正常返回：进入 Waiting，等待其余用户协程
-  → 若 main 返回 Err：记录 MainError，等待其余用户协程
-  → 若 main panic、process.exit 或 fatal：进入 Terminating 并立即结束
-  → rt0 exit
-```
+AST、HIR、GIR、LIR、query、单态化实例、精确根、stack switch、写屏障、object metadata和后端 relocation都是官方实现内部契约，分别见 [AST/HIR](../internals/ast-hir.md)、[GIR/LIR](../internals/gir-lir.md)、[单态化与缓存](../internals/monomorphization-cache.md)、[栈图](../internals/stack-maps.md)、[GC 元数据](../internals/gc-metadata.md)和[后端](../internals/backend.md)。它们不是用户语法、库调用约定或跨编译器 ABI。
 
-细节见[运行时与运维语义](runtime.md)。
-
-## IR 义务
-
-下列事物必须是编译器 IR 的一等原语，而不是库里的普通函数约定（库函数可以封装它们，但不能是唯一存在形式）：
-
-- 堆分配与对象头
-- 写屏障
-- 栈切换（协程）
-- `unsafe` 指针运算、volatile、原子、`transmute`
-- 精确栈图 / 根扫描所需的元数据（含「跳过 `MaybeUninit`」）
-- 闭世界类型表（`TypeId` 下标）与 `dyn Any` 盒子的载荷扫描描述符
-
-否则 JIT、内联、逃逸分析都无法看见真实代价。
-
-## JIT
-
-若做 JIT，必须：
-
-- 复用同一套 IR 与同一套 runtime 对象模型；
-- 仍然闭世界（或只对已经编译进来的代码做分层编译），禁止变成开世界加载；
-- 不得引入 guest↔host 往返作为常规调用路径。
+实验性 JIT若存在也必须消费同一闭世界结果并满足本章公开语义；其分层编译、patch point和执行缓存只属于 internals，不能成为新的加载/反射能力。
 
 ## 编译闭包与产物确定性
 
-闭世界收集以入口模块和标准库/runtime 根为起点，沿函数调用、类型构造、vtable、测试项、`used`/导出项和 comptime 引用遍历。只有 `cfg` 已删除的项完全不存在；未被普通调用到但被 `type_id[T]()`、导出符号或 `#[used]` 引用的类型与函数仍属于闭世界。
+闭世界集合从入口、标准库/runtime、测试/导出/`used`根和 comptime显式引用得到；`cfg`删除项不在集合中，而 `type_id[T]()`、导出或 `#[used]`引用仍使对应定义可达。具体图遍历和实例键见[单态化与编译缓存](../internals/monomorphization-cache.md)。
 
-编译器必须在单态化和可达类型收集完成后冻结具体类型集合、impl 选择和 `TypeId` 表，再求值 `type_id_count()` 并生成布局、栈图和镜像。`type_id_count()` 不能反向参与类型形成或可达性。类型编号在同一次编译中唯一，但不同编译之间不稳定。无法收敛的递归单态化、无限类型实例生成、缺失 lang item 或无法解析的闭世界依赖都是编译错误。
+`type_id_count()` 返回最终闭世界具体类型数，不能反向参与类型形成或可达性；同一镜像内编号唯一，不同编译间不稳定。无法形成有限闭世界、缺失 lang item或依赖无法解析是编译错误，内部收敛上限与诊断构造见[单态化与编译缓存](../internals/monomorphization-cache.md)。
 
 同一编译器构建身份、同一目标名、同一 target/harness/插桩、相同 feature 与相同输入字节必须产生语义等价的镜像；源文件遍历顺序、哈希表随机种子、操作系统目录枚举顺序不能改变符号选择、特化结果、测试收集顺序或 `TypeId.name()`。实现可以在非语义节中写入构建标识，但可复现构建不得引入时间戳和随机标识。
 
@@ -124,7 +81,7 @@ rt0 入口
 
 ## 目标 ABI 与镜像错误
 
-Gugu 内部调用约定由编译器版本定义并可随整镜像重编译改变；只有 `extern "C"`、导出符号、镜像节和 rt0 入口受平台 ABI 约束，具体目标映射见[平台与 ABI 参考](platform-abi.md)。内部函数、闭包环境、句柄对象头、枚举 niche 和默认字段布局都不是跨编译器 ABI。
+只有 `extern "C"`、导出符号、平台登记的镜像面和 rt0入口受[平台与 ABI 参考](platform-abi.md)约束。Gugu internal call、闭包环境、runtime私有对象 metadata、enum优化和默认字段布局都不是跨编译器 ABI；当前表示由[后端](../internals/backend.md)与[GC 元数据](../internals/gc-metadata.md)版本化。
 
 ELF/PE 写出前必须验证所有重定位、节偏移、导入符号、栈展开信息和入口点均可表示；溢出、重复导出、缺失导入库或符号、非法节属性和目标不支持的重定位都是编译错误，不能产出部分镜像冒充成功。
 
