@@ -48,11 +48,11 @@ pin 状态属于目标对象头和 pin token，不是另一类位置。指向 pi
 | 1 | `PollResume` | safepoint slow path 返回后的 resume label |
 | 2 | `SuspendResume` | 协程重新变为 running 时继续执行的 label |
 | 3 | `ForeignBridge` | Gugu 与 C/runtime bridge 完成寄存器保存后的 label |
-| 4 | `MorestackEntry` | prologue 建 frame 前进入 `morestack` 的 slow-path label |
+| 4 | `MorestackEntry` | prologue建 frame前进入 `morestack_or_poll` 的 slow-path label |
 
-可能分配、可能阻塞或可能触发 GC 的调用（包括 `ForeignBridge`）一定是 `CallReturn` safepoint。满足 `ForeignLeaf` 契约且 effect 分析证明 `MAY_SAFEPOINT` 未置位的外调不建专用记录；若同一表达式还有其它 effect，则按普通 `CallReturn` 规则登记。leaf 调用前为满足 `stack = N` 发出的 `StackCheck` 仍然是独立 safepoint，stack 增长后必须更新 coroutine 内部 root；循环 poll、显式 `yield`、channel/select park 和抢占确认分别建立 `PollResume` 或 `SuspendResume`；每个可增长 frame 的函数建立一个 `MorestackEntry`。
+普通/dirty `ForeignBridge`、park/suspend和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record。loop countdown没有 map，只有 interval到期实际读取 poll word的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。
 
-信号/APC handler 不在任意 PC 直接扫描用户 stack。它只能设置抢占标志、唤醒 worker 或把执行引导到编译器已经登记的 poll slow path；真正暂停和扫描发生在上述 safepoint。
+signal/APC handler不在任意PC直接扫描用户 stack。它只设置当前 processor的 poll word、投毒 current coroutine的 `stack_check`并唤醒 worker；真正暂停和扫描发生在 compiler登记的 `PollResume`、`MorestackEntry` 或 mandatory statepoint。dirty native stack不属于 Gugu stack map。
 
 ## 寄存器规则
 
@@ -71,7 +71,7 @@ stack map 的通用寄存器编号固定为：
 
 `rsp` 不作为普通根；它由 coroutine context 单独保存。managed pointer 不放入 XMM 寄存器。`r14`/`r15` 是 runtime 保留寄存器，普通用户值不能占用；对应 mask bit 在普通函数中必须为 0，runtime bridge 只通过专用根表扫描它们。
 
-在 `SuspendResume`、`ForeignBridge` 点，所有跨该点活跃的用户 managed/stack pointer 必须 spill 到 stack slot，三个寄存器 mask 均为 0。`CallReturn` map 还必须包含本次调用放在 caller outgoing 区的每个 managed/stack 参数 word，以及按值/间接 aggregate 副本中的全部 root-bearing 字段，即使它们在返回后已死；callee 活跃期间这些 slot 仍由 caller frame map 追踪。`ForeignLeaf` 若无 `CallReturn` effect 不建立 bridge map，也不把自身当作 GC 停止点；若因其它 effect建立 `CallReturn`，遵循同一 outgoing 参数规则。`PollResume` 可以保留普通寄存器根。`MorestackEntry` 的 `slot_count` 固定为 0，register mask 描述保存到 coroutine morestack scratch 的 managed 参数寄存器；caller stack 参数和 aggregate 副本仍由外层 `CallReturn` map 追踪。
+在 `SuspendResume`、`ForeignBridge` 点，所有跨该点活跃的用户 managed/stack pointer必须 spill到 stack slot，三个寄存器 mask均为0。`ForeignBridge[DirtyCpu]` 使用相同 bridge root map，native段不建立额外 stack map；`CallReturn` map必须包含被调方 entry check期间仍活跃的 caller root、outgoing managed/stack参数word和 aggregate副本，即使它们在正常返回后已死。`PollResume`可以保留普通寄存器根。`MorestackEntry` 的 `slot_count`固定为0，register mask描述保存到 coroutine morestack scratch的 managed参数寄存器；caller stack参数和 aggregate副本由外层 `CallReturn` map追踪。`PollFreeLeaf`/`ForeignLeaf` 没有 map，caller prologue必须已把函数内所有 direct leaf `stack = N` 的最大值计入 reserve。
 
 该限制避免 caller frame 依赖 callee-saved 寄存器的跨 frame 追踪，同时保留无调用循环 poll 中的寄存器分配质量。
 
@@ -148,7 +148,7 @@ flags:              u8
 reserved:           u16 = 0
 ```
 
-同一函数内按 `pc_offset` 严格递增。flags bit 0 表示该点允许 stack copy，bit 1 表示该点允许 GC scan，bit 2 表示 register mask 有效；未定义位为 0。`pc_offset` 必须严格小于 `code_size` 并指向已登记的指令边界/resume label。
+同一函数内按 `pc_offset` 严格递增。flags bit 0 表示该点允许 stack copy，bit 1 表示该点允许 GC scan，bit 2 表示 register mask 有效，bit 3 表示该 `ForeignBridge` record 的 native work 属于 `DirtyCpu`；bit 3 只能与 kind 3 同时出现。未定义位为 0。`pc_offset` 必须严格小于 `code_size` 并指向已登记的指令边界/resume label。
 
 ### root map record
 
@@ -176,13 +176,16 @@ runtime 扫描一个已停在 safepoint 的协程时：
 
 1. 从 coroutine context 取得 top `pc`、`rsp` 和保存寄存器；
 2. 用排序 function table 查找包含 `pc` 的 function record；
-3. 按 safepoint kind 选 exact `pc_offset`，取得 root map；
-4. 普通 top frame 扫描 stack bitmap；`PollResume` 还扫描保存寄存器，然后从 `[rsp + frame_size]` 取得 return PC并令 caller frame base 为 `rsp + frame_size + 8`；
-5. `MorestackEntry` 只扫描 morestack scratch 的 register mask，从尚未减 frame 的 `[rsp]` 取得 return PC并令 caller frame base 为 `rsp + 8`；
-6. 以 return PC 的 `CallReturn` record 扫描 caller；
-7. 对每个普通 caller 重复固定 frame 公式，直到碰到 coroutine root sentinel frame。
+3. 根据 safepoint kind恢复当前 frame并继续外层遍历：
+- `CallReturn`：当前SP加 `frame_size` 得到 caller SP；caller PC是当前返回地址；
+- `PollResume`：当前 frame不变，从 `resume_pc` 继续；
+- `SuspendResume`：context中的SP/PC已经指向 suspended frame；
+- `ForeignBridge`：先从 bridge context恢复 user SP/PC；dirty mode不改变扫描算法；
+- `MorestackEntry`：当前函数 frame尚未建立，scratch中的 return PC是 caller PC，scratch GPR由当前 map扫描；slow path可以先处理 poll再决定是否复制 stack。
 
-这里 caller frame base 是调用者执行 `call` 时的固定 `rsp`；return address 位于被调函数 frame 顶端。Windows shadow space和 SysV stack arguments 都属于调用者固定 outgoing 区，不改变公式。
+每步先以 PC查 function range，再用该 function内按 offset排序的 safepoint做 binary search；找不到精确 point、frame越界或 unwind index不匹配都是 `RuntimeInvariant` fatal，不能猜测相邻 map。interval countdown edge不是 safepoint，不能把它的 PC交给 scanner。
+
+`ForeignBridge` record 的 bridge mode 决定 native 阶段的调度归属。普通 bridge可在 foreign worker上等待；`DIRTY_CPU_BRIDGE` 表示 coroutine 已脱离 processor并由 dirty CPU额度执行。两者都在进入 native 前保存 Gugu context；`ForeignBridgeState` 以 checked high-relative offset定位 coroutine stack上的 ABI frame，collector按本 record扫描其中 roots，不扫描 C/C++/asm 的 OS stack。返回时 bridge worker把结果写回同一 frame，再由 managed resume path构造 Gugu值。
 
 找不到 function/safepoint、return PC 不在代码区、frame size 越界或 frame 链未在当前 stack range 内终止都进入 `RuntimeInvariant` fatal；禁止退回保守扫描。
 
@@ -219,16 +222,19 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 
 - 每个要求 safepoint 的 call/poll/suspend 和每个可增长 frame 的 morestack entry 都有 exact record；
 - 每个 map 与最终活跃/分配位置逐项一致，CallReturn map 覆盖 outgoing managed/stack 参数；
-- `CallReturn`/`SuspendResume`/`ForeignBridge` 点没有用户 register root；`ForeignLeaf` 若无 `CallReturn` effect 不建立该类 map。`MorestackEntry` 只含 ABI 参数 register root；
-- frame size、return address 和 outgoing 区符合后端 frame layout；
-- 所有 stack root slot 自然对齐且未与非 pointer spill 重叠；
-- section offset、table range、排序和所有保留位合法；
-- strip 不删除 stack map、对应 function range 或 unwind 信息。
+- `CallReturn`/`SuspendResume`/`ForeignBridge` 点没有用户 register root；`PollResume` 与 `MorestackEntry` 只使用各自声明的 register/scratch roots；
+- direct callee的 `PollSummary.entry_stack_check` 与 caller是否生成 `CallReturn` map一致；`PollFreeLeaf`/`ForeignLeaf` 不得伪造 map；
+- `ForeignBridge` dirty mode设置 `DIRTY_CPU_BRIDGE` flag，且对应 `ForeignBridgeState.frame_offset + frame_size` checked落在已用 stack范围；
+- frame size、return address、ABI bridge frame和 outgoing区符合后端 frame layout；
+- `StackInterior` offset严格落在当前 stack allocation；
+- suspend/foreign点 register mask为0；
+- `MorestackEntry` 的 `slot_count == 0`，只含 ABI参数 register root，且关联函数保留 entry check；
+- `PollResume` 只能位于实际 poll word检查的 resume label，不能位于 countdown-only edge；
+- source/unwind index存在且范围合法。
 
-runtime 的确定性 fixture 必须覆盖：空 map、只有 stack root、poll register root、interior heap root、stack interior 重定位、多 frame 调用、panic landing pad、foreign bridge、foreign leaf 的 pre-call `StackCheck` 和 stack 增长后 GC。
-
-## 参考实现资料
+runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、countdown未到期、poisoned `MorestackEntry`、interior heap root、stack interior重定位、多frame调用、panic landing pad、foreign/dirty bridge、`PollFreeLeaf`无map、caller最大 leaf stack reserve和stack增长后GC。
 
 - [LLVM Stack Maps and Patch Points](https://llvm.org/docs/StackMaps.html)
 - [Go runtime stack 实现](https://go.dev/src/runtime/stack.go)
 - [Go runtime stack map 生成入口](https://go.dev/src/cmd/compile/internal/ssagen/ssa.go)
+- [Go runtime asynchronous preemption](https://go.dev/src/runtime/preempt.go)

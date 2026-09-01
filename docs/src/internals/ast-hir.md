@@ -216,7 +216,7 @@ TypeckResults {
 
 自动解引用层数由源码类型决定，没有固定小上界。每个 `AdjustmentRange { start: u32, len: u32 }` 指向 owner 级连续 `adjustment_pool`，避免给每个表达式单独分配小 vector，同时支持任意合法的多层 `&`；range 必须 checked 位于 pool 内。调整枚举只允许自动解引用、方法接收者自动取引用、函数项/闭包擦除、`dyn` 擦除、never 到目标类型和规范允许的数值扩宽。
 
-`EffectSet` 只有 8 个编译器布尔标志，使用零分配 `u32` 位掩码，位固定表示 `MAY_PANIC`、`MAY_ALLOCATE`、`MAY_SAFEPOINT`、`MAY_SUSPEND`、`READS_MEMORY`、`WRITES_MEMORY`、`FOREIGN_CALL` 和 `UNSAFE_OPERATION`。构造/合并后以 `debug_assert!(bits & !KNOWN_EFFECT_BITS == 0)` 检查上界。`FOREIGN_CALL` 同时覆盖 `ForeignBridge` 与 `ForeignLeaf`；`call_resolutions` 对已解析的 C 导入额外记录 compiler-only 的 `ForeignCallMode` 和 leaf stack budget（字节）。`ForeignBridge` 还设置由桥接引入的 `MAY_SAFEPOINT` 与 `MAY_SUSPEND`，`ForeignLeaf` 不因外调本身设置这两个标志；无法证明模式的间接调用选择 `ForeignBridge`。该集合供 GIR 构造和优化验证使用，不是用户可观察的效果类型系统。
+`EffectSet` 只有 8 个 compiler 布尔标志，使用零分配 `u32` 位掩码，位固定表示 `MAY_PANIC`、`MAY_ALLOCATE`、`MAY_SAFEPOINT`、`MAY_SUSPEND`、`READS_MEMORY`、`WRITES_MEMORY`、`FOREIGN_CALL` 和 `UNSAFE_OPERATION`。构造/合并后以 `debug_assert!(bits & !KNOWN_EFFECT_BITS == 0)` 检查上界。`FOREIGN_CALL` 同时覆盖普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 与 `ForeignLeaf`；`call_resolutions` 对已解析的 C 导入或 native definition 额外记录 compiler-only 的 `ForeignCallMode`（`ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`）和 leaf stack budget（字节）。普通 bridge 与 dirty bridge 设置由交接引入的 `MAY_SAFEPOINT` 与 `MAY_SUSPEND`；`ForeignLeaf` 不因外调本身设置这两个标志；无法证明模式的间接调用选择普通 `ForeignBridge`。带函数体的 `ffi(dirty_cpu)` 只允许 native-only operation，并固定记录为 dirty bridge。该集合供 GIR 构造和优化验证使用，不是用户可观察的效果类型系统。
 
 ### 捕获计划
 

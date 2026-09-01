@@ -12,7 +12,7 @@
 
 - stack/root 只扫描编译器明确登记的位置，不做保守扫描；
 - nursery对象在 minor cycle复制，old Immix arena在并发标记后按 block/line存活率选择机会性 evacuation；
-- pinned、正在 `ForeignBridge` 边界暴露和超大对象可以留在 non-moving region；`ForeignLeaf` 传递的可移动对象地址仍必须由调用方 pin，但不会建立 bridge handle。
+- pinned、正在普通 `ForeignBridge` 或 `ForeignBridge[DirtyCpu]` 边界暴露和超大对象可以留在 non-moving region；`ForeignLeaf` 传递的可移动对象地址仍必须由调用方 pin，但不会建立 bridge handle。
 - managed pointer 移动后由 collector 更新所有已登记 root/field；
 - raw pointer 不参与追踪，跨 safepoint 必须由 pin 或规范允许的短生命周期保证；
 - collector 不使用 read barrier，mutator write 通过统一 hybrid barrier 维持并发标记和分代 remembered set。
@@ -322,13 +322,15 @@ function index与 stack-map function table相同，PC 为 function-relative 半�
 
 一个 GC cycle 的根来源封闭为：
 
-1. 已停协程按[栈图](stack-maps.md)给出的 stack/register root；
+1. 已停协程按[栈图](stack-maps.md)给出的 stack/register root；`Foreign` 与 `DirtyWaiting` 使用保存 PC 的 `ForeignBridge` map 扫描 coroutine stack上的 ABI bridge frame；
 2. `RootRecord` 声明的 global，以及所有已登记 OS thread/TLS 实例和全部 coroutine 的已初始化 local payload；
 3. scheduler/runtime 自己的强句柄表、等待队列载荷和 resource release queue；
-4. 已登记 foreign thread 的 bridge handle；
+4. 外部线程回调桥建立的临时 root handle；
 5. 正在执行的 pin side table entry。
 
-runtime 私有结构必须通过固定的 typed root visitor 枚举，不允许对其内存做保守扫描。
+runtime 私有结构必须通过固定的 typed root visitor 枚举，不允许对其内存做保守扫描。`ForeignBridgeState` 自身不保存 managed pointer；它以 `(Coroutine*, stack_high-relative frame_offset)` 定位 ABI frame，collector在 `STACK_SCAN_LOCKED` 下根据调用点 map扫描和更新其中的 managed root。
+
+普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 都只通过已保存的 Gugu stack/map和显式 pin暴露根。foreign/dirty worker 的 OS stack、C/C++ stack和 opaque asm寄存器不在精确 metadata 范围内，collector绝不对其做保守扫描；传给 native 的 managed地址必须在进入前 pin，或改为复制到 non-moving storage。native work永不返回时，相关 coroutine frame/pin会一直保留，但它不阻止其它 heap的 mark、relocation或 stop epoch完成。
 
 ## write barrier 与 remembered set
 
@@ -359,6 +361,8 @@ major cycle：
 5. 在 stop/update阶段搬移所选活对象，利用 forwarding pointer更新全部 root/field；resource arena逐对象处理，不能整区丢弃；
 6. 重建 card、关闭 barrier并恢复 mutator；
 7. GC worker与 mutator并发 sweep未 evacuate的 old/resource block，按 line回收死亡对象、把受限 resource动作送入 release queue，并把完全空 block/页归还全局池或 OS。
+
+GC stop 的完成条件只统计 active `LogicalProcessor`。普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 和 `DirtyWaiting` 都没有 processor，因而不需要确认 stop；它们的 ABI frame roots在根枚举阶段保持可见，native work完成后再通过普通 resume safepoint回到 managed heap。
 
 GC worker解释 trace program时使用显式小栈；嵌套上限 32，采用固定 `[TraceFrame; 32]`。mark queue和 release queue无固定上界，使用分段 work deque/pool；并发 sweeper只能取得 block的 `Sweeping` lease，allocator只能取得 `Allocating` lease。
 

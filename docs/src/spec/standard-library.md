@@ -692,6 +692,8 @@ struct RuntimeStats {
     pub heap_committed_bytes: uint,
     pub heap_live_bytes: uint,
     pub stack_committed_bytes: uint,
+    pub dirty_cpu_active: uint,
+    pub dirty_cpu_waiting: uint,
     pub gc_cycles: uint,
     pub gc_pause_total: Duration,
     pub signal_events_dropped: uint,
@@ -706,6 +708,7 @@ fn set_gc_target(value: GcTarget) Result[GcTarget, RuntimeError]
 fn memory_limit() Option[uint]
 fn set_memory_limit(value: Option[uint]) Result[Option[uint], RuntimeError]
 fn stack_limit() uint
+fn safepoint_poll()
 fn collect()
 fn stats() RuntimeStats
 fn trace_config() TraceConfig
@@ -714,7 +717,9 @@ fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 
 setter 是进程级操作，按调用的线性化顺序采用最后发布的值；不会建立业务数据的 happens-before。`set_parallelism` 的参数必须大于 0，动态降低只回收空闲逻辑处理器；`set_gc_target` 的 `Automatic(p)` 使用非负百分数，`Off` 只关闭堆增长触发；`set_memory_limit(None)` 表示无软上限。所有 setter 在 `Terminating` 中返回 `RuntimeError::Terminating`。`collect()` 等待一个完整 GC 周期完成，但不保证空闲页返还 OS，也不运行 finalizer。
 
-`RuntimeStats` 是逐字段快照，不是同步原语。计数器在进程内单调递增，当前量可能在返回后立即改变；它不提供 GC 地址、内部队列或 OS 线程身份的稳定观察接口。
+`safepoint_poll()` 是无参数 compiler intrinsic：fast path检查当前 `LogicalProcessor` 的抢占/GC poll word，slow path可以确认 stop、保存 roots、让出 coroutine并在恢复后继续。它不执行 I/O，不在 asm、`#[naked]` 或带函数体的 `#[ffi(dirty_cpu)]` 中可用。
+
+`RuntimeStats` 是逐字段快照。`dirty_cpu_active` 是当前执行 native work 的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待额度的调用数；二者会随并发调度立即变化，并行度刚降低时 active可以暂时高于新 target。它们不提供取消 native work 的能力，也不是业务同步原语。统计值不提供 GC地址、内部队列或 OS线程身份的稳定观察接口。
 
 `std.signal` 把普通 OS 终止通知显式交给用户。没有订阅者时遵循目标 OS 默认动作；订阅不会自动取消根协程、触发 panic 或等待其它用户协程。fatal signal、`SIGKILL`、`SIGSTOP` 和 Windows 不可拦截的同步 fault 不在订阅集合中。
 

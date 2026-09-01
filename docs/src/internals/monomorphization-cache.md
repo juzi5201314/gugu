@@ -73,7 +73,7 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 12 | `CollectMonoRoots` | target/harness | 根 `MonoKey` 集合 |
 | 13 | `InstantiateGir` | `MonoKey` | monomorphic GIR |
 | 14 | `LayoutOf` | stable concrete type key | 目标布局 |
-| 15 | `BuildLir` | `MonoKey` | 优化后 LIR |
+| 15 | `BuildLir` | `MonoKey` | 优化后 LIR + `PollSummary` |
 | 16 | `CodegenFragment` | `MonoKey` + LIR fingerprint | 机器码片段 |
 | 17 | `TypeMetadata` | stable concrete type key | 未重定位类型 metadata |
 | 18 | `RuntimeMetadata` | closed-world type/instance set | metadata sections |
@@ -240,11 +240,11 @@ collector 使用按 `MonoKey` 摘要字节序排列的 `BTreeSet` 作为 pending
 - 按 offset 排序的逻辑 relocation；函数/数据引用使用 stable symbol，运行时类型常量/记录使用完整 `StableTypeKey`，源码索引使用 `{ MonoKey, fragment_source_ordinal }`，禁止烘焙本次闭世界的数字 `TypeId`/source record index；
 - 未重定位 stack map、unwind 和 source location 记录；每条保存逻辑路径、byte span、synthetic kind和 fragment source ordinal；
 - 定义符号、引用符号及可见性；
-- LIR result fingerprint 和所有内联 callee fingerprint。
+- LIR result fingerprint、直接计费的 `PollFreeLeaf` summary fingerprint和所有内联 callee fingerprint。
 
-单实例粒度避免 package 内一个无关函数变化使整个目标代码失效。最终 image layout 统一放置 fragment 并解析 relocation。跨实例内联使 caller key 依赖被内联 callee 的 GIR/result fingerprint；未内联的普通调用只依赖 callee ABI/signature fingerprint，不因 callee body 改变而使 caller 失效。
+单实例粒度避免 package 内一个无关函数变化使整个目标代码失效。最终 image layout统一放置 fragment并解析 relocation。跨实例内联使 caller key依赖被内联 callee的 GIR/result fingerprint；未内联且保留 entry `StackCheck` 的普通调用只依赖 callee ABI/signature fingerprint，不因 callee body改变而使 caller失效。只有 direct `PollFreeLeaf` 调用额外依赖其固定尺寸 `PollSummary`；leaf分类或 `poll_free_cost` 改变时 caller `BuildLir`必须失效。递归/间接调用始终使用 checked entry，不形成 `BuildLir` query环。
 
-机器码 object key 还必须覆盖 target、CPU baseline、内部 ABI revision、panic/unwind 模式、GC barrier revision、stack-map schema 和 instrumentation。绝对代码地址和本次闭世界的稠密 `TypeId` 不进入 fragment；只以逻辑 symbol/type relocation 表示。
+机器码 object key还必须覆盖 target、CPU baseline、内部 ABI revision、panic/unwind模式、GC barrier revision、poll policy revision、stack-map schema和 instrumentation。绝对代码地址和本次闭世界的稠密 `TypeId`不进入 fragment；只以逻辑 symbol/type relocation表示。
 
 ## JIT 兼容发布边界
 

@@ -124,4 +124,4 @@ map(xs, inc)                      // F 是具名函数的具体函数项类型
 
 ## 外部函数调用效应
 
-无函数体的 `extern "C"` 导入函数项携带 compiler-only 的 `ForeignEffect`。未标注导入默认为 `ForeignBridge`；`#[ffi(leaf[, stack = N])]` 导入项携带 `ForeignLeaf`。函数项直接调用或单态化后仍能证明其 leaf effect 时，调用可按该 effect lowering；普通 `fn(...) ...` 擦除、无法解析的函数值和动态分派不保留可证明的 leaf effect，调用统一 lowering 为 `ForeignBridge`。调用点的 `#[ffi(bridge)]` 只覆盖当前直接调用，具体声明契约见[unsafe 与 intrinsic](unsafe.md#外部调用效应与桥接)。这些 effect 是编译器优化和 runtime 交接信息，不是用户可写的返回类型或可捕获的异常类型。
+无函数体的 `extern "C"` 导入函数项和带函数体的 `unsafe extern "C" fn` 可以携带 compiler-only 的 `ForeignEffect`：未标注导入为普通 `ForeignBridge`，`#[ffi(leaf(stack = N))]` 为 `ForeignLeaf`，`#[ffi(dirty_cpu)]` 为 `ForeignBridge[DirtyCpu]`。函数项直接调用或单态化后仍能证明其 effect 时，调用可按该 mode lowering；普通 `fn(...) ...` 擦除、无法解析的函数值和动态分派不保留可证明的 leaf/dirty effect，调用统一 lowering 为普通 `ForeignBridge`。带函数体的 dirty function 不能被调用点改成 leaf；调用点的 `#[ffi(bridge)]` 或 `#[ffi(dirty_cpu)]` 只覆盖当前直接 C 调用。具体声明契约见[unsafe 与 intrinsic](unsafe.md#外部调用效应与桥接)。这些 effect 是 compiler 优化和 runtime 交接信息，不是用户可写的返回类型或可捕获的异常类型。

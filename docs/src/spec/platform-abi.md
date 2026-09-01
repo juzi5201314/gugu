@@ -186,9 +186,9 @@ C 数组可以作为 `#[repr(C)]` 聚合的字段；数组不能作为独立的 
 
 ### 生命周期与位模式
 
-`#[repr(C)]` 只固定布局，不固定对象地址。把 GC 对象的地址交给外部代码前，调用方必须在整个外部保留期间使用 `std.mem.pin`，或复制到不会移动的缓冲；C 不能在允许的生命周期之外保存该指针。
+`#[repr(C)]` 只固定布局，不固定对象地址。把 GC 对象的地址交给外部代码前，调用方必须在整个外部保留期间使用 `std.mem.pin`，或复制到不会移动的缓冲；C 不能在允许的生命周期之外保存该指针。pin只固定该 allocation，不递归固定其 managed referent。native 可解引用的内存不得含 managed reference slot；需要表达对象关系时，改用 C ABI raw pointer并分别 pin每个 target，或复制为无 managed reference 的 C buffer。外部代码写 managed reference slot无法满足 compiler write barrier，因此是未定义行为。
 
-外部函数返回后，编译器必须按声明类型构造 Gugu 值。外部代码返回无效 `bool`、`char`、枚举判别值或违反聚合布局的位模式时，继续把该位模式当作安全值使用是未定义行为。整数、浮点和原始指针允许全部位模式，但地址是否可访问仍由 unsafe 契约约束。
+外部函数返回后，compiler 必须按声明类型构造 Gugu 值。外部代码返回无效 `bool`、`char`、枚举判别值或违反聚合布局的位模式时，继续把该位模式当作安全值使用是未定义行为。整数、浮点和原始指针允许全部位模式，但地址是否可访问仍由 unsafe 契约约束。
 
 ## C 布局规则
 
@@ -245,13 +245,15 @@ Windows C ABI 不提供与本章兼容的 `__int128` 参数或返回规则，因
 
 ### 调用边界上的运行时责任
 
-C ABI 的寄存器、栈槽、布局和符号规则与 runtime 的调度效应正交。compiler 在 lowering metadata 中保留 `ForeignBridge` 或 `ForeignLeaf`，但不能把该模式编码成 C ABI 可观察的额外参数或返回值。
+C ABI 的寄存器、栈槽、布局和符号规则与 runtime 的调度效应正交。compiler 在 lowering metadata 中保留普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`，但不能把该模式编码成 C ABI 可观察的额外参数或返回值。
 
-未标注导入和 effect 未知的间接调用使用 `ForeignBridge`：跨到 C 代码前，runtime 必须使用该目标可识别的连续 system stack 和合法栈边界，保存 Gugu context、登记根并释放当前 `LogicalProcessor`；C 代码不能观察或依赖 Gugu 的内部协程栈布局。`#[ffi(bridge)]` 只改变调用点选择，不改变 C 符号或机器级调用约定。
+未标注导入和 effect 未知的间接调用使用普通 `ForeignBridge`：跨到 C 代码前，runtime 必须使用该目标可识别的连续 system stack 和合法栈边界，保存 Gugu context、登记根并释放当前 `LogicalProcessor`；C 代码不能观察或依赖 Gugu 的内部协程栈布局。`#[ffi(bridge)]` 只改变调用点选择，不改变 C 符号或机器级调用约定。
 
-满足 `#[ffi(leaf)]` 契约的直接调用使用 `ForeignLeaf`：调用留在当前 worker、processor 和 coroutine stack 上，不建立 bridge handle、不释放 processor，也不允许 C 回调 Gugu。属性的 `stack = N`（省略时为 0）必须计入 caller frame 之后的 C 调用链空间，compiler 在调用前执行对应 `StackCheck`；leaf 调用仍须遵守本章的 C 类型、指针 pin、内存别名和展开边界规则。
+`#[ffi(dirty_cpu)]` 导入或 native definition、相应调用点，以及 managed `#[naked]` 使用 `ForeignBridge[DirtyCpu]`：持久 bridge state定位 coroutine stack上的 ABI frame和精确 roots，调用释放 `LogicalProcessor`，native stack不进入 Gugu stack map，且 native body不能回调 Gugu。`global_asm` 符号的模式来自显式 extern 声明；dirty CPU额度和等待状态属于 runtime 内部，不进入 C ABI。
 
-`extern "C"` 导出函数被非 Gugu 线程调用时，必须按运行时的线程接入规则登记该线程；导出函数返回后才能撤销临时登记。C 线程不能直接操作 Gugu 协程句柄或 GC 元数据。
+满足 `#[ffi(leaf)]` 契约的直接调用使用 `ForeignLeaf`：调用留在当前 worker、processor和 coroutine stack上，不建立 bridge state、不释放 processor，也不允许 C回调 Gugu。属性的 `stack = N`（省略时为0）计入 caller函数的 `max_leaf_reserve`；caller prologue以所有 direct leaf调用预算的最大值只执行一次 `StackCheck`，不在每个调用点重复检查。leaf调用仍须遵守本章的 C类型、pointer pin、内存别名和展开边界规则。
+
+`extern "C"` 导出函数被非 Gugu 线程调用时，必须按运行时的线程接入规则登记该线程；导出函数返回后才能撤销临时登记。C 线程不能直接操作 Gugu 协程句柄或 GC 元数据。DirtyCpu 与 ForeignLeaf 均不提供从 C 调入 Gugu 的回调桥。
 
 ## 符号、镜像与节
 
@@ -312,7 +314,7 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 ### 外部错误状态
 
-`errno`、Windows last-error 或其它线程局部错误状态属于外部调用的即时结果。`ForeignLeaf` 返回后可在同一 OS thread 上紧接读取；`ForeignBridge` 必须在 C 调用返回、协程重新入队之前由 worker 捕获该值，并由标准库通过本次调用结果读取。调用方在 `yield`、再次调用外部函数或可能迁移协程之后，不能要求仍是未捕获的原线程状态。
+`errno`、Windows last-error 或其它线程局部错误状态属于外部调用的即时结果。`ForeignLeaf` 返回后可在同一 OS thread 上紧接读取；普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 必须在 native 调用返回、协程重新入队之前由执行 worker 捕获该值，并由标准库通过本次调用结果读取。调用方在 `yield`、再次调用外部函数或可能迁移协程之后，不能要求仍是未捕获的原线程状态。
 
 ## 原子与机器状态
 
@@ -352,7 +354,7 @@ Gugu 对象文件、静态库和动态库之间不提供独立的 Gugu-to-Gugu A
 5. Linux `i128` 的参数/返回与 Windows 对 `i128` 的编译错误；
 6. 栈对齐、寄存器保存、导入桩、导出 panic 和非 Gugu 线程接入；
 7. ELF/PE 的入口、重定位、保留节、导入表、展开信息和 strip 后必需元数据；
-8. GC 对象 pin、外部保存指针、`ForeignBridge`/`ForeignLeaf` 调用模式、线程局部错误状态和 safepoint 前后的生命周期。
+8. GC 对象 pin、外部保存指针、普通 `ForeignBridge`/`ForeignBridge[DirtyCpu]`/`ForeignLeaf` 调用模式、线程局部错误状态和 safepoint 前后的生命周期。
 
 这些检查必须使用确定性的 C 对照程序或固定镜像 fixture；不能用削弱声明、改变 fixture 或忽略失败来获得通过。规范测试的运行方式见[测试](testing.md)。
 

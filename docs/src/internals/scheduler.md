@@ -14,11 +14,13 @@
 
 - `Coroutine`：用户协程，拥有可复制 stack、寄存器 context、coroutine-local 和等待状态；
 - `LogicalProcessor`：执行 Gugu 用户代码所需的 runtime capability，数量等于当前 `parallelism` 目标；
-- `WorkerThread`：操作系统线程，绑定一个 processor 时执行用户代码，也能在无 processor 时执行 `ForeignBridge`、poller 和 runtime 系统工作。
+- `WorkerThread`：操作系统线程，绑定一个 processor 时执行用户代码，也能在无 processor 时执行普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]`、poller 和 runtime 系统工作。
 
-一个 `Coroutine` 同时最多由一个 worker 执行；一个 `LogicalProcessor` 同时最多绑定一个 worker；一个 worker 同时最多绑定一个 processor。阻塞的 `ForeignBridge`/system call 可以保留 worker 而释放 processor。
+一个 `Coroutine` 同时最多由一个 worker 执行；一个 `LogicalProcessor` 同时最多绑定一个 worker；一个 worker 同时最多绑定一个 processor。执行中的普通 `ForeignBridge` 和 `ForeignBridge[DirtyCpu]` 可以保留 worker 而释放 processor；dirty work 不取得 processor。
 
 ID 表示固定为 `CoroutineId(u64)`、`LogicalProcessorId(u64)` 和 `WorkerThreadId(u64)`，进程内单调分配且不复用。计数溢出说明 runtime 内部不变量已破坏，进入 `RuntimeInvariant` fatal，不能回绕。
+
+scheduler 维护进程级 `dirty_cpu_target`、`dirty_cpu_limit`、`dirty_cpu_active` 和 intrusive `dirty_wait_queue`。当 `parallelism = 1` 时 target 为 1；否则 target 为 `parallelism - 1`，给 managed scheduler 保留至少一个 CPU 执行槽。`dirty_cpu_limit` 在降低并行度时不能小于已经 active 的数量；超出新 target 的 work 只允许自然排空，期间不接纳新 dirty call。绑定 processor 的 managed worker 上限为 `max(1, parallelism - min(dirty_cpu_active, parallelism - 1))`，因此 `parallelism > 1` 时 dirty worker与 managed worker共享 CPU预算；`parallelism = 1` 时允许一个 managed worker和一个 dirty worker由 OS 时间片复用。没有可用额度时，调用方在已发布 bridge roots且不持有 processor 的 `DirtyWaiting` 状态排队，不创建无界 OS thread，也不在等待额度时执行 native code。
 
 ## Coroutine
 
@@ -35,6 +37,7 @@ Coroutine {
     morestack_scratch: MorestackScratch,
     current_processor: AtomicPtr<LogicalProcessor>,
     wait_record: WaitRecord,
+    foreign_bridge: ForeignBridgeState,
     run_link: intrusive queue link,
     join_state,
     coroutine_locals,
@@ -47,6 +50,8 @@ Coroutine {
 
 `select_scratch` 只保存 readiness bitmap，不保存 managed pointer；source、send payload 和 result slot仍位于用户 frame并由 stack map追踪。runtime typed visitor跳过 scratch bytes。
 
+`ForeignBridgeState` 只在 lifecycle 为 `Foreign` 或 `DirtyWaiting` 时有效，固定保存 `{ mode, call_stub, frame_offset, frame_size, dirty_link, error_state }`。compiler 在 coroutine stack 上物化 ABI bridge frame；`frame_offset` 是从逻辑 `stack_high` 到 frame 起点的 checked 深度，record 不保存会因 stack copy 失效的裸 stack pointer。`call_stub` 是 non-moving code pointer，`dirty_link` 只供 `dirty_wait_queue` 使用，不能复用 runnable `run_link`。ABI frame里的 managed/raw pointer按调用点 stack map追踪，交给 native 的 managed地址还必须在进入 bridge 前 pin或复制。
+
 `morestack_scratch` 保存 return PC、九个 GPR参数和八个 XMM参数；只有 lifecycle Running且当前 PC为 `MorestackEntry` 时有效，并由该 entry map精确扫描，不属于常驻 runtime root。
 
 `state` 低 4 bit 是 lifecycle：
@@ -58,10 +63,11 @@ Coroutine {
 | 2 | `Running` | 正由一个绑定 processor 的 worker 执行 |
 | 3 | `Parking` | 正在提交等待条件，尚未确定是否睡眠 |
 | 4 | `Waiting` | 已挂在 channel/lock/timer/I/O/join 等等待源 |
-| 5 | `Foreign` | 在 worker 的 OS stack 上执行外部调用 |
-| 6 | `Dead` | 用户 body、panic 清理和 Join 发布已经结束 |
+| 5 | `Foreign` | 已取得 worker，在 OS stack 上执行普通或 dirty 外部调用 |
+| 6 | `DirtyWaiting` | bridge roots 已发布，等待 dirty CPU额度且不绑定 worker/processor |
+| 7 | `Dead` | 用户 body、panic 清理和 Join 发布已经结束 |
 
-bits 4..6 固定为 `ENQUEUED`、`PREEMPT_REQUESTED` 和 `STACK_SCAN_LOCKED`；bits 7..31 必须为 0。所有 lifecycle 转换用 compare-exchange 并携带必要的 acquire/release ordering，不能以互斥锁外的普通读写替代。
+bit 4固定为 `ENQUEUED`，bit 5固定为 `STACK_SCAN_LOCKED`；bits 6..31必须为0。抢占/GC请求不存进 coroutine lifecycle word，而存进当前 `LogicalProcessor.poll_flags`。所有 lifecycle转换用 compare-exchange并携带必要的 acquire/release ordering，不能以互斥锁外的普通读写替代。
 
 合法主转换为：
 
@@ -71,6 +77,7 @@ Running -> Runnable
 Running -> Parking -> Waiting -> Runnable
 Running -> Parking -> Running
 Running -> Foreign -> Runnable
+Running -> DirtyWaiting -> Foreign -> Runnable
 Running -> Dead
 ```
 
@@ -90,11 +97,14 @@ x86_64 `CoroutineContext` 保存 `rsp`、resume `rip`、`rbx`、`rbp`、`r12` �
 - 一个容量固定为 256 的本地 runnable ring；
 - 一个 `run_next` 单槽；
 - 当前绑定 worker/coroutine；
+- `poll_flags: AtomicU32`、`requested_gc_epoch: AtomicU64` 和 `ack_gc_epoch: AtomicU64`；只有 processor owner写 ack，collector以 acquire读取；
 - TLAB cursor/limit、write-barrier buffer 和 per-processor mark work；
 - 按 deadline 排序的 timer binary heap；
-- scheduler tick、GC safepoint epoch 和随机窃取状态。
+- scheduler tick和随机窃取状态。
 
 本地队列容量有严格 256 上界、访问模式是 owner 尾部 push/pop 与 thief 头部 steal，因此使用内联 `[AtomicPtr<Coroutine>; 256]`、`AtomicU32 head` 和 `AtomicU32 tail`，不使用通用 deque。实现必须注释该上界，并以 `debug_assert!(tail.wrapping_sub(head) <= 256)` 检查不变量。
+
+`poll_flags` 是固定小型位掩码：bit 0为 `PREEMPT`，bit 1为 `GC_STOP`，bits 2..31必须为0；debug构建以 `debug_assert!(flags & !0b11 == 0)` 检查。三项 poll/epoch字段封装在 `#[repr(align(64))] PollControl` 并补齐一个64-byte cache line，与 local queue head/tail、TLAB和 owner字段分离；这是因为 fast path频繁读、monitor/GC跨线程写，禁止与窃取热点产生伪共享。请求方先 release发布关联 epoch/state，再 `fetch_or(Release)`设置 bit；managed fast path以 acquire load读取，值为0时继续。slow path重新 acquire读取并按位处理，只有完成对应动作的一方才能清 bit。processor没有 Running coroutine时，scheduler在绑定新 coroutine前处理 flag或直接确认 epoch。
 
 owner 在 tail 端放入/取出，thief 只以 CAS 推进 head。slot 写入以 release 发布，读取以 acquire 取得。`u32` counter 自然回绕，距离只在不超过 256 的窗口中按 wrapping arithmetic 解释。
 
@@ -108,7 +118,7 @@ per-processor timer 使用以 deadline、timer sequence 为键的连续 binary m
 
 ## WorkerThread
 
-worker 状态固定为 `Booting`、`Running`、`Spinning`、`Parked`、`Foreign` 和 `Stopping`。每个 worker 使用宿主创建的 non-moving OS stack 运行 rt0、scheduler、GC slow path、signal/exception handler 和 `ForeignBridge` C call；`ForeignLeaf` C call 与 Gugu 用户代码一样运行在 coroutine stack。
+worker 状态固定为 `Booting`、`Running`、`Spinning`、`Parked`、`Foreign` 和 `Stopping`。每个 worker 使用宿主创建的 non-moving OS stack 运行 rt0、scheduler、GC slow path、signal/exception handler、普通 `ForeignBridge` 和 `ForeignBridge[DirtyCpu]` C call；`ForeignLeaf` C call 与 Gugu 用户代码一样运行在 coroutine stack。
 
 worker TLS 保存 `WorkerThread*`、当前 processor、当前 coroutine、system-stack bounds、barrier buffer 和 foreign callback depth。TLS 不承载 coroutine-local 用户值。
 
@@ -171,7 +181,7 @@ coroutine 的 `select_rng` 使用 xoshiro256++。一次 next 固定为 `result =
 
 每个 processor 的 timer heap 归该 processor owner 修改；跨 processor 新 timer 通过目标 processor 的 timer inbox 发布并唤醒 poller。全局维护所有 heap 最早 deadline 的原子近似值；过早值只导致多一次 wake，过晚值不允许。
 
-Linux 使用一个进程级 epoll fd、eventfd wakeup 和 timerfd；Windows 使用一个进程级 IO completion port 与 waitable timer。poller 线程/无工作的 worker 把完成事件转换为对应 wait generation 的 ready。regular file、无法异步化的系统调用和 `ForeignBridge` 不占 poller，走 blocking/foreign 交接；`ForeignLeaf` 留在当前 worker 上直接执行。
+Linux 使用一个进程级 epoll fd、eventfd wakeup 和 timerfd；Windows 使用一个进程级 IO completion port 与 waitable timer。poller 线程/无工作的 worker 把完成事件转换为对应 wait generation 的 ready。regular file、无法异步化的系统调用和普通 `ForeignBridge` 不占 poller，走 blocking/foreign 交接；`ForeignBridge[DirtyCpu]` 走 dirty CPU admission；`ForeignLeaf` 留在当前 worker 上直接执行。
 
 poller每批返回事件时保留 OS 提供的批内顺序并写 global ready queue；多事件之间不得额外构造强于[并发规范](../spec/concurrency.md)的可观察先后。timer deadline相同则按 timer ID递增入队，只用于确定实现输出。
 
@@ -179,9 +189,9 @@ poller每批返回事件时保留 OS 提供的批内顺序并写 global ready qu
 
 ### 分配与检查
 
-新用户 coroutine 获得 8 KiB usable stack，加一页不可访问 lower guard；usable size 向宿主页大小取整。stack 向低地址增长，`stack_high` 固定，`stack_low` 和 `stack_guard` 位于低端。主协程也使用同一 heap-managed stack，不直接把初始 OS stack 当用户 stack。
+新用户 coroutine 获得8 KiB usable stack，加一页不可访问 lower guard；usable size向宿主页大小取整。stack向低地址增长，`stack_high`固定，`stack_low`和真实 `stack_guard`位于低端。`StackDescriptor` 另含 `stack_check: AtomicUsize`：正常值等于真实 guard，抢占/GC请求时为不可能通过无符号边界比较的 `PREEMPT_SENTINEL = usize::MAX`。主 coroutine也使用同一 heap-managed stack，不直接把初始 OS stack当用户 stack。
 
-每个 `frame_size != 0` 的 Gugu function prologue 都在修改 `rsp` 前检查 `rsp - required_frame >= stack_guard`，包括有 stack local 的 leaf；`ForeignLeaf` 还把声明的 `stack = N` 加入这次调用所需的 caller-side reserve。只有零 frame、无调用、无 safepoint的真正 leaf 可以省略。失败跳到 `morestack(required_frame)`；该 stub 先保存尚未建立 frame 的参数/return PC，切换到 worker OS stack，再执行增长。
+除 `PollFreeLeaf` 外，每个 Gugu function prologue都在修改 `rsp` 前检查 `rsp - required_frame >= stack_check`；`required_frame = frame_size + max_leaf_reserve`，其中 `max_leaf_reserve` 是本函数全部 direct `ForeignLeaf` call声明 `stack = N` 的最大值，checked计算并按目标 stack alignment取整。失败跳到统一 `morestack_or_poll(required_frame)` stub：先保存尚未建立 frame的参数/return PC并切 system stack；若当前 processor有 pending flag则先执行 poll slow path，仍需扩栈时才按真实 `stack_guard`增长。处理完全部请求后把 `stack_check`恢复为当前真实 guard；请求仍 pending时保持 sentinel。`PollFreeLeaf` 没有 call，reserve固定为0。
 
 新容量把下列表达式向上取整为宿主页整数：
 
@@ -191,29 +201,29 @@ max(old_capacity * 2, used_bytes + required_frame + 1024, 8192)
 
 请求超过 `GUGU_RUNTIME_STACK_MAX` 或容量 checked arithmetic 失败进入 `StackOverflow` fatal；请求仍在逻辑上限内但页面分配失败进入 `OutOfMemory` fatal。增长只在 safepoint 完成，复制与 `StackInterior` 修正遵循[栈图](stack-maps.md#协程栈复制)。
 
-GC safepoint 可以收缩等待/暂停 stack：容量大于 32 KiB 且 `used_bytes * 4 < capacity` 时，新容量取能容纳 `max(used_bytes * 2 + 1024, 8192)` 的页整数。Running、Foreign、持有 stack scan lock 或本周期已经增长的 stack 不收缩。
+GC safepoint 可以收缩等待/暂停 stack：容量大于 32 KiB 且 `used_bytes * 4 < capacity` 时，新容量取能容纳 `max(used_bytes * 2 + 1024, 8192)` 的页整数。Running、Foreign、DirtyWaiting、持有 stack scan lock 或本周期已经增长的 stack 不收缩。
 
 ### system stack 交接
 
-`system_stack(call)` stub 保存 coroutine context、把 `r14`/TLS current coroutine 保持为 root、切换到 worker OS stack并调用 runtime 函数或 `ForeignBridge` C call。runtime 不能保存指向用户 stack 的裸地址；需要回写的位置以 `(Coroutine*, stack slot offset)` 或 GC handle 表示。返回前确认 stack 未被另一个 worker 接管，再恢复最新 context。`ForeignLeaf` 不经过该 stub；它只在调用前通过 `StackCheck` 确保声明的 C stack budget。
+`system_stack(call)` stub保存 coroutine context、把 `r14`/TLS current coroutine保持为 root、切换到 worker OS stack并调用 runtime函数或 `ForeignBridge` C call。runtime不能保存指向用户 stack的裸地址；需要回写的位置以 `(Coroutine*, stack_high-relative slot offset)` 或 GC handle表示。返回前确认 stack未被另一个 worker接管，再恢复最新 context。`ForeignLeaf` 不经过该 stub；其 stack budget已由 caller prologue的 `max_leaf_reserve`保证。`ForeignBridge[DirtyCpu]`使用同一 stub建立 bridge state，但 native body只能在取得 dirty CPU额度后运行。
 
 ## 抢占
 
-processor scheduler tick 记录连续运行起点。system monitor 每 1 ms 检查；同一 coroutine 连续运行达到 10 ms 后设置 `PREEMPT_REQUESTED` 并令其 poll page/flag 进入 slow 状态。函数 prologue、循环 backedge、分配、调用、channel/select 和显式 safepoint 检查该状态。
+processor scheduler tick记录连续运行起点。system monitor每1 ms检查；同一 coroutine连续运行达到10 ms后，对其 processor的 `poll_flags` 设置 `PREEMPT`，并把当前 coroutine的 `stack_check` release写为 `PREEMPT_SENTINEL`。GC请求立即以同一协议设置 `GC_STOP`，不等待调度时间片。budgeted loop poll和显式 `safepoint_poll()`读取 `[r15 + poll_flags]`；普通函数调用由 callee prologue的 poisoned `StackCheck`响应，caller不重复读取 poll word。
 
 poll slow path：
 
-1. 保存栈图要求的寄存器；
-2. 若 GC stop epoch 未完成，确认 stop 并等待；
-3. 若只需调度抢占，把 Running 转 Runnable、清除 preempt flag并放入 local tail；
-4. 调度另一 coroutine；
-5. 恢复时重新检查 GC epoch。
+1. 使用对应 `PollResume`/`MorestackEntry` map保存栈图要求的 roots，并 acquire读取 flags与 requested epoch；
+2. 若 `GC_STOP` epoch未确认，flush TLAB/barrier buffer、保存 context，以 release store发布 `ack_gc_epoch = requested_gc_epoch`并等待 resume；collector只以 acquire load判定确认完成；
+3. 若有 `PREEMPT` 且没有必须继续占用当前 coroutine的 runtime critical section，把 Running转 Runnable、清该 bit并放入 local tail；
+4. 清除已经完成的 flags；全部清空时把当前 coroutine的 `stack_check`恢复为真实 guard；
+5. 调度另一 coroutine，恢复或绑定任何 coroutine前重新检查 processor flag与 GC epoch。
 
-Linux signal 或 Windows APC 只用于中断长时间阻塞的可中断系统调用、唤醒 worker 或促使代码尽快到达 poll；不在任意机器指令处复制 stack、运行用户 defer 或扫描未知寄存器。
+compiler的不变量是：持有 `LogicalProcessor` 且状态为 `Running` 的 coroutine，其PC属于带完整 metadata的 managed code或有限 inline asm；每条无限 managed路径无限次经过 poisoned `StackCheck`或 budgeted poll，任意 poll-free路径cost不超过 `POLL_BUDGET`。signal/APC只设置 processor flag、投毒 stack check并唤醒 worker；它不在任意机器PC复制 stack、运行用户 defer或扫描未知寄存器。请求保持 pending直至同步点处理。
 
 ## foreign call 与回调
 
-每个导入 C 调用在 lowering 时先确定 `ForeignBridge` 或 `ForeignLeaf`。未标注导入、effect 未知的间接调用和 `#[ffi(bridge)]` 调用点都选择 `ForeignBridge`；只有满足 `#[ffi(leaf)]` 声明且 effect 仍被静态保留的直接调用才选择 `ForeignLeaf`。
+每个导入 C 调用或 native definition 在 lowering 时先确定普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`。未标注导入、effect 未知的间接调用和 `#[ffi(bridge)]` 调用点选择普通 `ForeignBridge`；`#[ffi(dirty_cpu)]` 导入/native definition/调用点和 managed `#[naked]` 选择 `ForeignBridge[DirtyCpu]`；`global_asm` 符号按显式 extern 声明选择；只有满足 `#[ffi(leaf)]` 声明且 effect 仍被静态保留的直接调用才选择 `ForeignLeaf`。
 
 ### `ForeignLeaf`
 
@@ -229,26 +239,28 @@ leaf 调用必须保持声明者承诺的短时、无不可界定等待和无 ru
 
 `ForeignBridge` 调用按以下顺序交接：
 
-1. spill 所有 managed/stack pointer并建立 `ForeignBridge` map；
+1. spill 所有 managed/stack pointer，在 coroutine stack 上物化 ABI bridge frame，写入 `ForeignBridgeState` 的 call stub 与相对 offset，并建立 `ForeignBridge` map；
 2. bridge 保存 user context并切到当前 worker OS stack，此时 lifecycle 暂仍为 Running且 processor 尚未释放；
 3. 在 system stack flush TLAB/barrier buffer并处理已经发布的 GC stop epoch；
-4. release CAS `Running -> Foreign`，随后释放 logical processor并按需唤醒替代 worker；
-5. worker 进入 `Foreign` 状态并按目标 C ABI 调用。
+4. 普通 bridge release CAS `Running -> Foreign`。DirtyCpu bridge在 scheduler lock下尝试取得额度：成功时 CAS `Running -> Foreign` 并递增 active；失败时 CAS `Running -> DirtyWaiting`、用 `foreign_bridge.dirty_link` 发布到 `dirty_wait_queue`；随后都释放 logical processor并按需唤醒替代 worker；
+5. 普通 bridge由当前 worker按目标 C ABI调用。active DirtyCpu bridge由 dirty worker从 `(Coroutine*, stack_high-relative frame_offset)` 重建 ABI frame并在 system stack执行 native body，执行期间不绑定 logical processor，也不允许 native body取得 Gugu processor；进入 `DirtyWaiting` 的原 worker立即返回 scheduler。
 
-返回后先保存 `errno`/last-error，再 release CAS `Foreign -> Runnable|ENQUEUED`、放入 global runnable queue并唤醒 scheduler；该 worker可以竞争取得 processor，但必须走普通 dequeue 的 `Runnable -> Running` 后才切回 coroutine stack和转换返回值。不能从 Foreign 直接执行用户代码。
+native 返回后，执行 worker先把结果写回 bridge frame并捕获 `errno`/last-error。dirty worker在 scheduler lock下递减 active；若 target允许则从 queue取一个 record、CAS `DirtyWaiting -> Foreign` 并把额度直接转交给它，否则唤醒 managed scheduler。完成的调用 release CAS `Foreign -> Runnable|ENQUEUED`、放入 global runnable queue并唤醒 scheduler。worker可以竞争取得 processor，但必须走普通 dequeue 的 `Runnable -> Running` 后才切回 coroutine stack和转换返回值；不能从 Foreign 或 DirtyWaiting 直接执行用户代码。native work不提供 runtime强制取消。
+
+DirtyCpu admission 不可在持有 `LogicalProcessor` 时等待。并行度降低只更新 target；`dirty_cpu_limit` 保持 `max(target, active)` 直至多余 work排空，增加目标则按 FIFO唤醒排队调用。
 
 ### 外部代码回调
 
-只有 `ForeignBridge` 允许外部代码回调 Gugu：bridge 查找/建立当前 OS thread 的 worker 登记，取得 processor，创建一个 callback coroutine frame并进入 Gugu。嵌套 callback 以 worker-local depth 区分；返回 C 前必须完成该 callback 的 panic 边界和临时 root 清理。外部线程退出或最外层回调返回后，临时 worker 可以注销。从 `ForeignLeaf` 回调 Gugu 是违反 leaf unsafe 契约，不进入隐式桥接路径。
+只有普通 `ForeignBridge` 允许外部代码回调 Gugu：bridge 查找/建立当前 OS thread 的 worker 登记，取得 processor，创建一个 callback coroutine frame并进入 Gugu。嵌套 callback 以 worker-local depth 区分；返回 C 前必须完成该 callback 的 panic 边界和临时 root 清理。外部线程退出或最外层回调返回后，临时 worker 可以注销。从 `ForeignLeaf`、`ForeignBridge[DirtyCpu]` 或 `DirtyWaiting` 回调 Gugu 是违反对应 unsafe 契约，不进入隐式桥接路径。
 
 ## GC 协作
 
-major/minor stop 请求递增全局 `gc_stop_epoch`，把所有 active processor 标为需要确认并唤醒 worker/poller：
+major/minor stop请求递增全局 `gc_stop_epoch`。对每个 active processor先 release写入 `requested_gc_epoch`，再设置 `poll_flags.GC_STOP`、投毒其当前 coroutine的 `stack_check`并唤醒 worker/poller：
 
-- Running coroutine 在下一个 safepoint保存 context并确认；
+- Running coroutine 在下一个同步 safepoint保存 context并确认；compiler保证 Running 不包含不可分析的 opaque native frame；
 - Runnable/Waiting coroutine 已有稳定 context，取得 `STACK_SCAN_LOCKED` 后可直接扫描；
 - Parking coroutine 的 context 可能尚未发布，所属 worker必须先完成 park 双检成为 Waiting/Runnable，或撤销 park恢复 Running并在 safepoint停下；processor 在此之前不能确认 stop；
-- Foreign coroutine 的用户 stack 已稳定，外部边界 root 位于 bridge handle；
+- Foreign/DirtyWaiting coroutine 的 Gugu stack已稳定，collector按保存 PC 的 `ForeignBridge` map扫描 ABI frame；native stack不扫描，foreign/dirty worker不是 processor，不参与 stop确认；
 - processor 在 write-barrier buffer flush、TLAB 边界发布后确认 stop。
 
 所有 active processor 确认后进入 stop 阶段。扫描/复制某 coroutine 时持有 stack scan lock；ready 可以设置 Runnable 意图，但在 lock 释放前不能让 worker执行它。GC 完成 relocation 和 metadata 发布后以 release 增加 resume epoch，worker acquire 后恢复。
@@ -257,13 +269,13 @@ major/minor stop 请求递增全局 `gc_stop_epoch`，把所有 active processor
 
 ## 动态并行度
 
-公开 facade按[运行时](../spec/runtime.md#gc栈与运行时控制-api)验证并线性化请求后，向 scheduler发布 `ApplyParallelism { old, new, epoch }`；scheduler不再次决定零值错误、setter返回值或公开状态。增加时按 runnable demand创建/复用 processor并唤醒 worker，不按 new一次性预建线程；必需分配失败上报 runtime fatal入口。
+公开 facade按[运行时](../spec/runtime.md#gc栈与运行时控制-api)验证并线性化请求后，向 scheduler发布 `ApplyParallelism { old, new, epoch }`；scheduler不再次决定零值错误、setter返回值或公开状态。增加时按 runnable demand创建/复用 processor并唤醒 worker，不按 new一次性预建线程；同时提高 dirty target并按 FIFO admission等待项。必需分配失败上报 runtime fatal入口。
 
-降低时把 ID最大的多余 processor标为 `Retiring`。它们不接受新的远程 runnable，完成当前 coroutine后按 local queue、timer inbox、barrier buffer、mark work的固定顺序转移状态，再进入 Idle。processor ID不复用，控制块从 pool重新激活时取得新 ID。
+降低时把 ID最大的多余 processor标为 `Retiring`，并把 dirty target降为 `new == 1 ? 1 : new - 1`；active dirty work不强杀，实际 limit保持不低于 active直到排空。Retiring processor不接受新的远程 runnable，完成当前 coroutine后按 local queue、timer inbox、barrier buffer、mark work的固定顺序转移状态，再进入 Idle。processor ID不复用，控制块从 pool重新激活时取得新 ID。managed worker绑定还必须遵守第一个章节定义的共享 CPU预算。
 
 ## 终止
 
-runtime状态机先根据[进程寿命](../spec/runtime.md#进程寿命)生成 `TerminationPlan { mode, admit_user_coroutines, wait_foreign, report_epoch }`；scheduler只执行该 plan，不决定 `process.exit`、fatal、defer或报告语义。停止接纳后唤醒 parked worker、关闭新 poller注册并等 runtime critical section到达安全边界；是否等待 foreign由 plan给出。
+runtime状态机先根据[进程寿命](../spec/runtime.md#进程寿命)生成 `TerminationPlan { mode, admit_user_coroutines, wait_foreign, report_epoch }`；scheduler只执行该 plan，不决定 `process.exit`、fatal、defer或报告语义。停止接纳后唤醒 parked worker、关闭新 poller注册并等 runtime critical section 到达安全边界；`wait_foreign` 同时覆盖普通 foreign、`DirtyWaiting` 和正在执行的 dirty work。
 
 worker无 runtime/foreign责任后转 Stopping。主线程按 poller、processor、GC、stack pool顺序关闭内部设施，再把 plan结果交给宿主退出。Dead coroutine 的 stack/控制块只有在 Join/handle与 runtime root都释放后回收。
 
@@ -272,14 +284,17 @@ worker无 runtime/foreign责任后转 Stopping。主线程按 poller、processor
 调度器调试构建持续检查：
 
 - `ENQUEUED` 与实际 runnable 位置一一对应；
-- Running/Foreign coroutine 具有唯一 worker，Running 具有唯一 processor；
+- Running/Foreign coroutine 具有唯一 worker，Running 具有唯一 processor，DirtyWaiting 二者都没有；
+- `ForeignBridge[DirtyCpu]` 的 active 数量不超过 `dirty_cpu_limit`，每个 DirtyWaiting bridge恰有一个独立 `dirty_link` 等待位置和合法 high-relative ABI frame；
 - local queue 距离不超过 256，global intrusive link 不成环；
 - wait generation 单调且 winner/ready 最多一次；
-- stack bounds、guard、context PC 和 stack map 匹配；
-- processor retire 不丢 runnable、timer、barrier 或 mark work；
-- GC scan lock 下不能执行/复制同一 coroutine。
+- stack bounds、真实 guard、`stack_check` sentinel、context PC和 stack map匹配；
+- processor retire不丢 runnable、timer、barrier、mark work或 pending poll flag；
+- GC scan lock下不能执行/复制同一 coroutine；Running processor的 poll-free机器路径cost不超过 `POLL_BUDGET`，且所有 cyclic路径有同步 poll/checked entry。
 
-确定性 runtime 测试必须使用可控 poller/clock 和调度 gate，覆盖 local overflow、半队列窃取、park/wake 竞争、select loser、timer cancel、stack 增长/收缩、`ForeignBridge` 释放 processor、`ForeignLeaf` 保留 processor、`#[ffi(bridge)]` 覆盖 leaf、未知间接调用回退 bridge、动态 parallelism、GC stop 与 ready 竞争。默认测试不能依赖真实 10 ms 时间片或随机 victim 恰好出现。
+确定性 runtime测试必须使用可控 poller/clock和调度 gate，覆盖 local overflow、半队列窃取、park/wake竞争、select loser、timer cancel、stack增长/收缩、poisoned `StackCheck` 同时处理增长与抢占、budgeted loop countdown、`ForeignBridge`释放 processor、`ForeignBridge[DirtyCpu]`额度耗尽与释放、`ForeignLeaf`保留 processor、未知间接调用回退 bridge、opaque asm进入 dirty、动态 parallelism、GC epoch发布/确认与 ready竞争。默认测试不能依赖真实10 ms时间片或随机 victim恰好出现。
+
+poll policy的性能门禁属于 bench/手工 profiling，不进入默认 nextest：至少比较 `POLL_BUDGET` 1024/4096/16384在空整数循环、内存扫描、无 frame调用链、allocation fast path和递归 SCC上的 instructions/iteration、poll-word loads、branch misses与吞吐；同时在可控 GC请求下记录 request到 processor ack的 p50/p99/max cost units和 wall-clock。修改默认4096或 opcode weight必须同时证明 hot-loop回归与 stop-latency收益，不能只优化单一 microbenchmark。
 
 ## 参考实现资料
 
@@ -287,3 +302,7 @@ worker无 runtime/foreign责任后转 Stopping。主线程按 poller、processor
 - [Go runtime stack](https://go.dev/src/runtime/stack.go)
 - [Go runtime network poller](https://go.dev/src/runtime/netpoll.go)
 - [Rust 标准库线程 park/unpark](https://doc.rust-lang.org/std/thread/fn.park.html)
+- [Go runtime asynchronous preemption](https://go.dev/src/runtime/preempt.go)
+- [Erlang NIF dirty scheduler](https://www.erlang.org/doc/apps/erts/erl_nif.html)
+- [GHC FFI safety](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/ffi.html)
+- [Wasmtime interrupting execution](https://docs.wasmtime.dev/examples-interrupting-wasm.html)

@@ -92,7 +92,7 @@ fn println[Ts: Print...](...args: Ts) { ... }
 
 禁止函数按签名重载。方法上的额外类型参数写在名字后面：`fn convert[U](self) U`。
 
-`#[track_caller]`、`#[must_use]`、`#[naked]`、`#[cfg]` 和 FFI 调用属性见 [词法 · 属性](lexical.md) 与 [unsafe 与 intrinsic](unsafe.md)。`#[naked]` 的函数必须是 `unsafe fn`，体只能是一次 `asm(...)` 调用。
+`#[track_caller]`、`#[must_use]`、`#[naked]`、`#[cfg]` 和 FFI 调用属性见 [词法 · 属性](lexical.md) 与 [unsafe 与 intrinsic](unsafe.md)。用户态 `#[naked]` 函数必须是 `unsafe extern "C" fn`，体只能是一次 `asm(...)` 调用；从 managed context 调用时默认进入 `ForeignBridge[DirtyCpu]`。
 
 ## 结构体、枚举、`const`、`type`、`static`
 

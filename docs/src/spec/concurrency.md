@@ -21,9 +21,17 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 
 ## 抢占
 
-调度不是纯协作。一个始终执行 Gugu 计算、没有主动 `yield` 的协程不能据此永久阻止其它 runnable协程获得执行机会；程序无需在 CPU循环中手工插入 `yield` 才能满足该保证。
+调度保证分为可合作 managed code 与 opaque native code 两层。可合作 managed code 的每个可达 frame 都有精确 stack map/unwind metadata；compiler 通过可投毒的函数 `StackCheck`、必须挂起的 statepoint和按静态工作预算放置的 poll，保证每条无限 managed 执行路径无限次经过同步 safepoint，并限制两个 safepoint之间的 compiler cost。普通循环不承诺每个 backedge都读取 runtime状态；已知短循环可以不含 loop poll，未知或长循环按固定 chunk插点。只执行有效 managed code的协程即使不主动 `yield`，也不能永久阻止其它 runnable协程或 GC获得执行机会。
 
-该保证不是硬实时截止期：操作系统停顿、foreign code、fatal/terminating状态和可用线程资源仍会影响延迟。时间片、safepoint密度、轮询、异步中断、context保存和 GC握手属于[调度器](../internals/scheduler.md)与[栈图](../internals/stack-maps.md)内部契约，用户代码不能观察或依赖具体数值和位置。
+普通 inline `asm` 不是 safepoint。有限且可返回的 asm 片段可以在 `Running` 中执行，但它造成的延迟持续到片段返回；包含不可证明有限的内部回边、间接控制转移或外部等待的 asm 必须被 compiler 拒绝，或放入带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn`。`global_asm`、默认进入 managed context 的 `#[naked]` 和 dirty native definition 不属于可合作 managed code：从用户协程进入时必须脱离 `LogicalProcessor`，因此不会让它所属的 processor 或 GC stop 永久等待；但 dirty native work 本身可以永不返回，语言不保证该调用完成。
+
+`ForeignLeaf` 是用户承担的 unsafe 契约：错误声明会占住当前 `LogicalProcessor`；若调用永久不返回，该 processor无法确认 GC stop，因而可以永久阻止进程完成 GC。这样的程序违反 unsafe 契约，不在调度/GC活性保证内。无法证明 leaf时使用普通 `ForeignBridge`；它只增加桥接成本，不改变正确性边界。
+
+signal/APC 只向当前 `LogicalProcessor` 发布抢占/GC请求、投毒正在运行 coroutine的 `StackCheck`并唤醒 worker；它不在任意机器 PC扫描栈、复制 coroutine stack或运行用户 defer。函数调用在被调方 prologue响应投毒，长循环在预算化 poll响应；对尚未到达同步点的执行，请求保持 pending。
+
+`std.runtime.safepoint_poll()` 是显式同步 safepoint：fast path读取当前 processor的 poll word，必要时确认 GC stop、处理抢占并让出当前协程。它可以被安全调用，可能挂起或在恢复后继续；必须作为独立 Gugu调用出现，不能写进 inline/global asm模板或 `#[naked]` 函数。把 asm循环拆成有限片段并放回普通 Gugu循环后，compiler的预算化 loop poll已满足活性要求；库也可以在大块工作之间显式调用它，建立更早的合作边界。
+
+CPU自旋仍然是 `Running` 计算：预算化 poll能让它被抢占，但整个 chunk都会持续占用 CPU。网络等待、channel、计时器和 `std.sync`锁竞争走 `park`，只挂起当前协程，不占住承载它的 worker/processor；这与 CPU抢占是两套机制。poll预算和机器成本表属于 compiler实现与缓存 schema，不是用户可观察的时间片或 wall-clock保证。
 
 ## Channel
 
@@ -34,7 +42,7 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 - 发送、接收、关闭、`select`、`try_*` 的类型见 [表达式](expressions.md)。方法名固定为 `send` / `recv` / `try_send` / `try_recv` / `close`，不能重载。
 - 关闭后收尽，`recv` 返回 `Err(ChanClosed)`；再 `send` 或再 `close` 是 panic。
 - 不存在 nil channel。
-- 在 `chan` 上阻塞只停当前协程，不长期占住承载它的操作系统线程；系统调用或 `ForeignBridge` 外调阻塞时，runtime 必须让其它线程继续利用可用逻辑处理器。`ForeignLeaf` 的 unsafe 契约禁止不可界定的阻塞。
+- 在 `chan` 上阻塞只停当前协程，不长期占住承载它的操作系统线程；系统调用或 `ForeignBridge` 外调阻塞时，runtime 必须让其它线程继续利用可用逻辑处理器。`ForeignLeaf` 的 unsafe 契约禁止不可界定的阻塞；`DirtyCpu` 调用即使不等待也不占用逻辑处理器，但会消耗受限的 dirty CPU 执行额度。
 - `send` 与对应的 `recv`（含 `select` 选中的那对）建立 happens-before：发送方在 `send` 之前对载荷的写入，接收方在 `recv` 返回之后看得见。
 
 互斥锁、读写锁、条件变量、原子、一次性初始化位于 `std.sync`，不是关键字。`Mutex` 与 `RwLock` 不 poisoning：持锁协程 panic 时 guard 仍释放，后续调用正常获得锁，受保护数据是否满足业务不变量由调用方负责。

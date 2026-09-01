@@ -101,6 +101,8 @@ selector 优先使用能直接编码的 immediate 和 address mode，只有不�
 
 RIP-relative code/data addressing是镜像内默认。超过 rel32 距离时 image planner 在调用者附近生成 16 字节对齐 veneer：`movabs r11, target; jmp/call r11`。veneer 按 `(source fragment, target symbol, kind)` 去重并进入 stack/unwind 验证。
 
+每个 `LegalizeX86_64` opcode descriptor必须显式携带 `poll_cost: NonZeroU8`，范围1..64；没有条目的 opcode使 backend verifier失败，不能使用隐式默认值。单个 LIR op展开多条机器指令时cost取 descriptor中各指令权重的饱和和；managed asm复用同一 descriptor表。该字段只供 `PollSummary`/`POLL_BUDGET`使用，修改属于 poll policy和backend schema变更。
+
 ### 浮点
 
 `addss/addsd`、`subss/subsd`、`mulss/mulsd`、`divss/divsd` 和 `ucomiss/ucomisd` 实现普通操作。NaN 比较显式组合 parity/condition flags以匹配语言 `== != < <= > >=`。float 到 integer 的范围/NaN 在 conversion 前检查；不能依赖 `cvtt*` 的 indefinite result 暗中决定语言值。
@@ -121,7 +123,7 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 
 只有 descriptor不含 `HAS_RESOURCE`、请求不 large/pinned、高对齐且 footprint不跨 Immix block时才走 allocation fast path。当前 `[r15 + tlab_cursor_offset]`/limit只覆盖 processor本地 span中的一个连续空 line run；checked计算 16 byte header、对齐 padding和 payload，成功时推进 cursor并初始化 header。run不足调用 `gc_refill_line`，它先在本地 8-block span推进 line表，span用尽才访问全局 heap；其它请求调用 `gc_alloc_slow`。offset与 `HeapLayout`由 runtime layout query固定并进入 backend schema。
 
-safepoint poll 读取 `[r14 + state_offset]` 的 preempt/GC bits，通常分支不 taken；slow path 保存登记寄存器并切 system stack。write barrier 先测试全局 marking flag 和 generation/card 条件，调用/inline 规则必须与[GC 元数据](gc-metadata.md#write-barrier-与-remembered-set)相同。`ForeignLeaf` 直接按目标 C ABI 发出调用，不执行 processor 释放或 system-stack bridge；调用前的 `StackCheck` 必须覆盖 caller frame 与声明的 leaf stack budget。未标注和 `ForeignBridge` 调用发出完整交接桩。
+budgeted/显式 safepoint poll以 `AtomicLoadAcquire [r15 + poll_flags_offset]` 读取当前 processor的两位 word；x86_64 lowering优先使用 `test dword ptr [r15 + offset], 0b11` 和 unlikely branch，值为0时不访问 coroutine状态。interval为1的 loop直接执行该检查；interval大于1时每轮只更新 SSA countdown，到0才重置并读取 poll word。cold slow path使用对应 `PollResume` map保存 roots并切 system stack。函数入口不再发独立 poll word load，而由 poisoned `stack_check`复用现有 prologue比较。write barrier、`ForeignLeaf`和普通/dirty bridge规则保持各自 effect fence与交接语义。
 
 ## block layout 与 branch relaxation
 
@@ -175,28 +177,31 @@ outgoing area大小是函数所有 callsite 所需最大值，因而 body 中 `r
 frame_size = align_up(payload_size + 8, 16) - 8
 ```
 
-有调用/safepoint的函数至少得到 8 字节且 `frame_size % 16 == 8`。prologue 在 sub 前执行：
+有调用或 mandatory statepoint的函数至少得到8字节且 `frame_size % 16 == 8`。只有 entry `StackCheck`、没有 frame payload/call/safepoint的函数可以保持 `frame_size = 0`，但仍执行 poisoned guard比较；除 `PollFreeLeaf` 外，prologue在任何 `rsp` 修改前执行：
 
 ```text
-candidate = rsp - frame_size
-if candidate < current_coroutine.stack_guard: morestack(frame_size)
-rsp = candidate
+candidate = rsp - required_frame
+if candidate < acquire(current_coroutine.stack_check):
+    morestack_or_poll(required_frame)
+rsp = rsp - frame_size
 store used callee-saved registers to fixed slots
 ```
 
-`frame_size` 必须小于等于 `u32::MAX`；更大的单函数 frame 在代码生成前报 `implementation-limit`，不能依赖更高 runtime stack max截断。单函数最终 code size同样必须小于等于 `u32::MAX`，以满足 stack-map、unwind和 source record 的相对 offset表示。
+`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最大值，checked加法溢出直接进入 `StackOverflow` fatal。prologue只做一次容量检查，不在每个 leaf call前重复读取 `stack_check`。`stack_check`正常等于真实 guard，被投毒时为 `usize::MAX`，所以同一比较必然进入 slow stub。stub在 system stack先 acquire处理 processor poll flags，再以真实 guard判断是否扩栈；它不能把 sentinel当作地址解引用。
 
-`morestack` 把 return PC、九个整数参数寄存器和八个浮点参数寄存器保存到 coroutine 控制块的固定 scratch，并以该函数的 `MorestackEntry` map 登记其中哪些 GPR 是 heap/stack root；随后切换 worker system stack并按[调度器](scheduler.md#可复制协程栈)增长。复制过程用 caller `CallReturn` map 修正 outgoing stack 参数，恢复后装载已更新 scratch并重新进入原 prologue。scratch 每个 coroutine 一份且只在该 coroutine Running 的 prologue 使用；嵌套增长说明契约已破坏，进入 `RuntimeInvariant` fatal。
+`frame_size` 必须小于等于 `u32::MAX`；更大的单函数 frame在代码生成前报 `implementation-limit`，不能依赖更高 runtime stack max截断。单函数最终 code size同样必须小于等于 `u32::MAX`，以满足 stack-map、unwind和 source record的相对 offset表示。
 
-epilogue 从固定 slot恢复 callee-saved、`add rsp, frame_size`、`ret`。prologue/epilogue只能使用 Windows unwind 可描述的指令子集；Linux CFI 与 Windows unwind record 都从同一个 `FrameLayout` 生成。
+`morestack_or_poll` 把 return PC、九个整数参数寄存器和八个浮点参数寄存器保存到 coroutine控制块的固定 scratch，并以该函数的 `MorestackEntry` map登记其中哪些 GPR是 heap/stack root；随后切换 worker system stack，按[调度器](scheduler.md#可复制协程栈)先处理 pending poll，再在需要时增长。复制过程用 caller `CallReturn` map修正 outgoing stack参数，恢复后装载已更新 scratch并重新进入原 prologue。scratch每个 coroutine一份且只在该 coroutine Running的 prologue使用；嵌套进入说明契约已破坏，进入 `RuntimeInvariant` fatal。
 
-`TailCall` 在 frame仍存在时完成寄存器并行 copy，随后按 epilogue规则恢复 callee-saved并释放 frame，最后 `jmp` callee；调用者原 return address保持在 `rsp` 顶端。eligibility 已保证没有 stack argument/sret/root/cleanup，后端不得临时借用已释放 frame保存参数。
+epilogue从固定 slot恢复 callee-saved、`add rsp, frame_size`、`ret`。prologue/epilogue只能使用 Windows unwind可描述的指令子集；Linux CFI与Windows unwind record都从同一个 `FrameLayout`生成。
 
-真正 leaf 且 frame payload 为 0、无 safepoint、无 unwind cleanup时完全省略 prologue。内部 ABI 不使用 SysV red zone，以保持 Linux/Windows frame和异步 signal 边界一致。
+`TailCall` 在 frame仍存在时完成寄存器并行 copy，随后按 epilogue规则恢复 callee-saved并释放 frame，最后 `jmp` callee；调用者原 return address保持在 `rsp`顶端。eligibility已保证没有 stack argument/sret/root/cleanup；tail target若无 checked entry，形成的 backedge必须已由 poll budget pass覆盖。
+
+只有 LIR `PollSummary` 分类为 `PollFreeLeaf` 的函数完全省略 prologue：frame payload为0、无 call/循环/safepoint/unwind且 legalized cost不超过64。取函数地址时生成带 `StackCheck` 的 checked thunk。内部 ABI不使用 SysV red zone，以保持 Linux/Windows frame和异步 signal边界一致。
 
 ## stack map、panic 与 unwind
 
-寄存器分配后按[栈图](stack-maps.md)生成 safepoint root。`CallReturn`/suspend/`ForeignBridge` 点把所有用户 pointer spill；`ForeignLeaf` 只有在其它 effect 要求 `CallReturn` 时才建立普通调用记录，不能作为 bridge safepoint。leaf 的 pre-call `StackCheck` 仍是独立 safepoint，若增长 stack 必须先完成复制和 root 修正。poll可以记录 register root。instruction offset在 branch relaxation 和 encoding 后最终回填。
+寄存器分配后按[栈图](stack-maps.md)生成 safepoint root。`CallReturn`/suspend/普通 `ForeignBridge`/`ForeignBridge[DirtyCpu]` 点把所有用户 pointer spill；两种 bridge在 coroutine stack物化 ABI frame并以 high-relative offset登记，native段不生成 native stack map。interval countdown本身没有 map，只有实际 poll fast path的 resume label生成 `PollResume`；poisoned prologue复用 `MorestackEntry`。`ForeignLeaf`只有在其它 effect要求 `CallReturn` 时才建立普通调用记录。instruction offset在 branch relaxation和encoding后最终回填。
 
 每个 function 生成唯一 `UnwindFunction { code_rva: u64, code_size: u32, frame_size: u32, saved_gpr_mask: u16, landing_start: u32, landing_count: u16, flags: u16 }`。landing table 每项固定为 `LandingRecord { pc_start: u32, pc_end: u32, landing_pc: u32, cleanup_chain: u32 }`，按 `pc_start` 严格递增且范围不重叠；offset 都相对 function code 起点，`cleanup_chain == u32::MAX` 表示只恢复传播。
 
@@ -208,7 +213,8 @@ panic 不允许越过未登记 C frame。export thunk 捕获 Gugu panic并按平
 
 前端按[不安全边界](../spec/unsafe.md#asm-与-global_asm)唯一规定的 AT&T syntax解析 inline/global asm并生成 `AsmInst`；后端用同一 x86 encoder编码，不调用 `as`。本章只规定约束分配与机器 lowering，不另建一套可接受语法。无法映射到 baseline encoder的已解析指令或 relocation按公开 asm 规则诊断。
 
-inline asm operand先由 constraint 分配 fixed/任意 register或 memory，声明的 clobber加入 interval；未声明却被模板写入的 register由 parser 数据流检查拒绝。普通 inline asm不能读写 `rsp`、`r14`、`r15`，不能跳出模板、定义外部符号或伪造 safepoint。`options(naked)` 只用于平台规范允许的 naked function，完整负责 C/rt0 ABI且不能含普通 Gugu value、GC root、panic或调用。
+inline asm operand先由 constraint分配 fixed/任意 register或 memory，声明的 clobber加入 interval；未声明却被模板写入的 register由 parser数据流检查拒绝。managed inline asm不能读写 `rsp`、`r14`、`r15`，不能跳出模板、定义外部符号或伪造 safepoint；parser必须拒绝内部回边、间接控制转移、外部 call/ret、system/wait class和 repeat-prefixed string instruction。允许 opcode集合由公开 asm规则封闭，不能因宿主 CPU支持更多指令而变化。naked/global/dirty fragment使用 native parser模式，不受 managed有限 CFG限制，但仍必须满足目标 baseline encoder、声明 clobber和对应 ABI约束。
+带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn` 不进入 managed fragment；backend 生成带 bridge mode 的 dirty thunk，参数和返回值只走 C ABI bit/raw-pointer representation。managed `#[naked]` 调用同样默认生成 `ForeignBridge[DirtyCpu]` entry，除非显式保留 `ForeignLeaf`；`global_asm` 符号则按对应 extern 声明 lowering。任何 dirty native fragment 都不得生成伪造的 managed safepoint或依赖 signal 在任意 PC 停止。
 
 global asm 输出独立 fragment，只能引用显式 export/import 和 compiler提供的稳定逻辑符号句柄；不能按字符串猜 Gugu mangled name。
 

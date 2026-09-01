@@ -53,13 +53,15 @@ ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault 
 
 ## 并行度与阻塞边界
 
-`parallelism` 是同时执行 Gugu 用户代码的目标并行度，不等同于 OS 线程数量，也不赋予程序可观察的处理器身份。阻塞 I/O、计时器等待、channel/锁等待和 `ForeignBridge` 外调会挂起当前协程；`ForeignLeaf` 外调不释放当前 `LogicalProcessor`，也不会把当前协程转换为 `Foreign`。在[并发公平规则](concurrency.md#抢占)允许的范围内，其它 runnable 协程仍须能够取得执行机会。
+`parallelism` 是同时执行 Gugu 用户代码的目标并行度，不等同于 OS 线程数量，也不赋予程序可观察的处理器身份。阻塞 I/O、计时器等待、channel/锁等待和普通 `ForeignBridge` 外调会挂起当前协程；`ForeignBridge[DirtyCpu]` 也释放当前 `LogicalProcessor`，但会占用受限 dirty CPU 额度；`ForeignLeaf` 不释放 processor，也不会把当前协程转换为 `Foreign`。在[并发公平规则](concurrency.md#抢占)允许的范围内，其它 runnable 协程仍须能够取得执行机会。
 
 `parallelism` 的初始值来自 `GUGU_RUNTIME_PROCS`。`std.runtime.set_parallelism(n)` 要求 `n > 0`，成功时发布新目标并返回旧值。增加目标允许 runtime 按需增加并行执行能力；降低目标不中断正在执行的协程、系统调用或外部函数。调用返回表示新目标已经发布，不表示底层 OS 线程数量已经立即收敛。超过宿主 CPU 数量的值合法，但不产生吞吐量保证。
 
-runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和 `ForeignBridge`；`ForeignLeaf` 始终在当前 worker 和 processor 上直接执行，不触发这项线程扩张。各种外调怎样与协程和并行执行槽映射只见[调度器内部规范](../internals/scheduler.md)。外部调用期间函数仍在原 OS 线程执行，返回后协程按普通调度恢复；外部代码回调 Gugu 必须遵守[平台与 ABI 参考](platform-abi.md)的线程进入和回调边界。
+runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和普通 `ForeignBridge`。DirtyCpu 与 managed worker 共享 CPU预算：`parallelism > 1` 时至少给 managed scheduler保留一个执行槽；`parallelism = 1` 时允许一个 managed worker和一个 dirty worker由 OS时间片复用。超出 dirty target 的调用在不持有 processor 的状态下排队；降低并行度不强杀已运行 work，因此 active 数量可以暂时高于新 target，且在自然排空前不接纳新调用。`ForeignLeaf` 始终在当前 worker和 processor上直接执行。精确 admission见[调度器内部规范](../internals/scheduler.md)。
 
-用户协程不能把并行执行槽、工作线程编号或当前 OS 线程身份当作调度稳定性的一部分。`#[os_thread_local]` 只表示 OS 线程槽，`#[coroutine_local]` 只表示协程槽；动态并行度、阻塞等待和 `ForeignBridge` 都可能改变二者的使用时机。
+外部调用期间函数仍在原 OS thread 或 dirty worker 上执行；返回后协程按普通调度恢复。普通 `ForeignBridge` 的外部代码回调须遵守[平台与 ABI 参考](platform-abi.md)的线程进入和回调边界；`ForeignBridge[DirtyCpu]` 与 `ForeignLeaf` 禁止回调。
+
+用户协程不能把并行执行槽、工作线程编号或当前 OS 线程身份当作调度稳定性的一部分。`#[os_thread_local]` 只表示 OS 线程槽，`#[coroutine_local]` 只表示协程槽；动态并行度、阻塞等待、普通 `ForeignBridge` 和 `ForeignBridge[DirtyCpu]` 都可能改变二者的使用时机。
 
 调度公平、抢占、`yield`、channel 和同步原语的可见性见[并发与调度](concurrency.md)。safepoint、队列、context保存与外调交接只见[调度器](../internals/scheduler.md)和[栈图](../internals/stack-maps.md)；这些机制不能改变既有 happens-before、原子内存序或资源租约规则。
 
@@ -270,6 +272,8 @@ struct RuntimeStats {
     pub heap_committed_bytes: uint,
     pub heap_live_bytes: uint,
     pub stack_committed_bytes: uint,
+    pub dirty_cpu_active: uint,
+    pub dirty_cpu_waiting: uint,
     pub gc_cycles: uint,
     pub gc_pause_total: Duration,
     pub signal_events_dropped: uint,
@@ -284,6 +288,7 @@ fn set_gc_target(value: GcTarget) Result[GcTarget, RuntimeError]
 fn memory_limit() Option[uint]
 fn set_memory_limit(value: Option[uint]) Result[Option[uint], RuntimeError]
 fn stack_limit() uint
+fn safepoint_poll()
 fn collect()
 fn stats() RuntimeStats
 fn trace_config() TraceConfig
@@ -298,9 +303,13 @@ fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 
 `stack_limit()` 返回当前每协程逻辑栈上限。栈上限只能由 `GUGU_RUNTIME_STACK_MAX` 在启动时设置；本版本不提供降低活动栈上限的动态 setter，因为那会使已存在的栈无法满足安全返回条件。
 
-`RuntimeStats` 是逐字段快照，不是业务同步原语。计数器在进程内单调递增，当前量可以因并发回收而在采样后改变；`heap_live_bytes` 不等同于可立即返还 OS 的页数。`signal_events_dropped` 和 `trace_events_dropped` 覆盖 runtime 所有订阅和 trace 队列。
+`safepoint_poll()` 是 compiler绑定的无参数 runtime intrinsic。fast path读取当前 `LogicalProcessor` 的 poll word；slow path可以确认 `gc_stop_epoch`、处理抢占请求、保存 stack map所需 roots、让出当前 coroutine并在恢复后重新检查 epoch。它不是阻塞 I/O API，不创建用户对象，不允许从 asm模板、`#[naked]` 或带函数体的 `#[ffi(dirty_cpu)]` 调用。
+
+`RuntimeStats` 是逐字段快照，不是业务同步原语。`gc_cycles`、`gc_pause_total` 和 dropped 计数单调递增；live/committed/active/waiting 等当前量可随并发运行升降，采样后立即过时。`heap_live_bytes` 不等同于可立即返还 OS 的页数。并行度刚降低时 `dirty_cpu_active` 可以暂时高于新 target；dirty统计不提供同步、取消或强杀 native work 的能力。
 
 `TraceConfig` 的事件写入 stderr，使用 `gugu-runtime-trace-v1` 的逐行 JSON。事件包含类别、事件名、相对 runtime 启动的单调纳秒时间和可用的协程/不透明执行槽标识；trace 只影响诊断输出，不改变调度、GC 或信号语义。trace 缓冲区满时丢弃事件并增加 `trace_events_dropped`，不能阻塞用户代码或进入用户 panic。
+
+Dirty CPU work 不提供强制取消：`std.process.exit` 或 fatal 路径可以直接终止进程，正常自然退出是否等待仍由 `TerminationPlan.wait_foreign` 决定；等待 dirty work 的协程不会被 runtime 自动改写为成功或取消。
 
 ## 局部静态初始化
 
