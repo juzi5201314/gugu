@@ -328,9 +328,9 @@ function index与 stack-map function table相同，PC 为 function-relative 半�
 4. 外部线程回调桥建立的临时 root handle；
 5. 正在执行的 pin side table entry。
 
-runtime 私有结构必须通过固定的 typed root visitor 枚举，不允许对其内存做保守扫描。`ForeignBridgeState` 自身不保存 managed pointer；它以 `(Coroutine*, stack_high-relative frame_offset)` 定位 ABI frame，collector在 `STACK_SCAN_LOCKED` 下根据调用点 map扫描和更新其中的 managed root。
+runtime 私有结构必须通过固定的 typed root visitor枚举，不允许对其内存做保守扫描。`ForeignBridgeState` 自身不保存 managed pointer；`lease_word` 是 generation-tagged lifecycle整数，其余字段以 `(Coroutine*, stack_high-relative frame_offset)` 定位 ABI frame。collector在 `STACK_SCAN_LOCKED` 下根据调用点 map扫描和更新其中的 managed root。
 
-普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 都只通过已保存的 Gugu stack/map和显式 pin暴露根。foreign/dirty worker 的 OS stack、C/C++ stack和 opaque asm寄存器不在精确 metadata 范围内，collector绝不对其做保守扫描；传给 native 的 managed地址必须在进入前 pin，或改为复制到 non-moving storage。native work永不返回时，相关 coroutine frame/pin会一直保留，但它不阻止其它 heap的 mark、relocation或 stop epoch完成。
+普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 都只通过已保存的 Gugu stack/map和显式 pin暴露根。attached普通 bridge遇到 GC stop时由 collector按完整 generation立即 retake并转为 detached，不等待 native线程合作；foreign/dirty worker的 OS stack、C/C++ stack和 opaque asm寄存器绝不保守扫描。传给 native的 managed地址必须在进入前 pin，或复制到 non-moving storage。native work永不返回时，相关 coroutine frame/pin会一直保留；普通 processor lease仍可被 GC/scheduler取回，因此该 native work不阻止其它 heap的 mark、relocation或 stop epoch完成。
 
 ## write barrier 与 remembered set
 

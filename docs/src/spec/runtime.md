@@ -53,13 +53,13 @@ ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault 
 
 ## 并行度与阻塞边界
 
-`parallelism` 是同时执行 Gugu 用户代码的目标并行度，不等同于 OS 线程数量，也不赋予程序可观察的处理器身份。阻塞 I/O、计时器等待、channel/锁等待和普通 `ForeignBridge` 外调会挂起当前协程；`ForeignBridge[DirtyCpu]` 也释放当前 `LogicalProcessor`，但会占用受限 dirty CPU 额度；`ForeignLeaf` 不释放 processor，也不会把当前协程转换为 `Foreign`。在[并发公平规则](concurrency.md#抢占)允许的范围内，其它 runnable 协程仍须能够取得执行机会。
+`parallelism` 是同时执行 Gugu 用户代码的目标并行度，不等同于 OS线程数量，也不赋予程序可观察的处理器身份。阻塞 I/O、计时器等待、channel/锁等待和普通 `ForeignBridge` 外调会挂起当前协程；普通 bridge可以在短调用期间保留一个 runtime可随时取回的 processor lease，不能因此阻止其它 runnable协程或 GC。`ForeignBridge[DirtyCpu]` 立即释放当前 `LogicalProcessor`，但会占用受限 dirty CPU额度；`ForeignLeaf` 不释放 processor，也不会把当前协程转换为 `Foreign`。
 
 `parallelism` 的初始值来自 `GUGU_RUNTIME_PROCS`。`std.runtime.set_parallelism(n)` 要求 `n > 0`，成功时发布新目标并返回旧值。增加目标允许 runtime 按需增加并行执行能力；降低目标不中断正在执行的协程、系统调用或外部函数。调用返回表示新目标已经发布，不表示底层 OS 线程数量已经立即收敛。超过宿主 CPU 数量的值合法，但不产生吞吐量保证。
 
 runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和普通 `ForeignBridge`。DirtyCpu 与 managed worker 共享 CPU预算：`parallelism > 1` 时至少给 managed scheduler保留一个执行槽；`parallelism = 1` 时允许一个 managed worker和一个 dirty worker由 OS时间片复用。超出 dirty target 的调用在不持有 processor 的状态下排队；降低并行度不强杀已运行 work，因此 active 数量可以暂时高于新 target，且在自然排空前不接纳新调用。`ForeignLeaf` 始终在当前 worker和 processor上直接执行。精确 admission见[调度器内部规范](../internals/scheduler.md)。
 
-外部调用期间函数仍在原 OS thread 或 dirty worker 上执行；返回后协程按普通调度恢复。普通 `ForeignBridge` 的外部代码回调须遵守[平台与 ABI 参考](platform-abi.md)的线程进入和回调边界；`ForeignBridge[DirtyCpu]` 与 `ForeignLeaf` 禁止回调。
+外部调用期间函数仍在原 OS thread或 dirty worker上执行。普通 `ForeignBridge` 若未失去原 processor lease可以直接恢复；lease已被取回或 dirty调用完成时，经 idle processor或普通 runnable调度恢复。程序不能观察两条路径的差异。普通 bridge的外部代码回调须遵守[平台与 ABI参考](platform-abi.md)的线程进入和回调边界；`ForeignBridge[DirtyCpu]` 与 `ForeignLeaf` 禁止回调。
 
 用户协程不能把并行执行槽、工作线程编号或当前 OS 线程身份当作调度稳定性的一部分。`#[os_thread_local]` 只表示 OS 线程槽，`#[coroutine_local]` 只表示协程槽；动态并行度、阻塞等待、普通 `ForeignBridge` 和 `ForeignBridge[DirtyCpu]` 都可能改变二者的使用时机。
 

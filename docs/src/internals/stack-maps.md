@@ -185,7 +185,7 @@ runtime 扫描一个已停在 safepoint 的协程时：
 
 每步先以 PC查 function range，再用该 function内按 offset排序的 safepoint做 binary search；找不到精确 point、frame越界或 unwind index不匹配都是 `RuntimeInvariant` fatal，不能猜测相邻 map。counted inner chunk edge与 uncounted countdown-only edge都不是 safepoint，不能把它们的 PC交给 scanner。
 
-`ForeignBridge` record 的 bridge mode 决定 native 阶段的调度归属。普通 bridge可在 foreign worker上等待；`DIRTY_CPU_BRIDGE` 表示 coroutine 已脱离 processor并由 dirty CPU额度执行。两者都在进入 native 前保存 Gugu context；`ForeignBridgeState` 以 checked high-relative offset定位 coroutine stack上的 ABI frame，collector按本 record扫描其中 roots，不扫描 C/C++/asm 的 OS stack。返回时 bridge worker把结果写回同一 frame，再由 managed resume path构造 Gugu值。
+`ForeignBridge` record的 bridge mode决定 native阶段的调度归属。普通 bridge进入 native时可以保留 generation-tagged processor lease，return、GC、callback、retirement或 scheduler retaker通过同一完整 coroutine state竞争后也可以变为 detached；`DIRTY_CPU_BRIDGE` 从开始执行起就 detached并由 dirty CPU额度运行。两者都在进入 native前保存 Gugu context；`ForeignBridgeState` 以 checked high-relative offset定位 coroutine stack上的 ABI frame，`lease_word` 只是 non-root整数。collector不论 attached/detached都按本 record扫描 frame roots，不扫描 C/C++/asm 的 OS stack。返回 worker把结果写回同一 frame；赢得 lease可直接走 managed resume，失去 lease才经 idle processor或 runnable queue恢复。
 
 找不到 function/safepoint、return PC 不在代码区、frame size 越界或 frame 链未在当前 stack range 内终止都进入 `RuntimeInvariant` fatal；禁止退回保守扫描。
 
@@ -224,7 +224,7 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 - 每个 map 与最终活跃/分配位置逐项一致，CallReturn map 覆盖 outgoing managed/stack 参数；
 - `CallReturn`/`SuspendResume`/`ForeignBridge` 点没有用户 register root；`PollResume` 与 `MorestackEntry` 只使用各自声明的 register/scratch roots；
 - direct callee的 `PollSummary.entry_stack_check` 与 caller是否生成 `CallReturn` map一致；`PollFreeLeaf`/`ForeignLeaf` 不得伪造 map；
-- `ForeignBridge` dirty mode设置 `DIRTY_CPU_BRIDGE` flag，且对应 `ForeignBridgeState.frame_offset + frame_size` checked落在已用 stack范围；
+- 普通 bridge的 `lease_word` 固定保存该 invocation原始 attached `Foreign(g)`；当前 lifecycle只能是该 exact word、带 scan lock的竞争态或同 generation的 detached Foreign。dirty mode设置 `DIRTY_CPU_BRIDGE` flag：active Foreign必须带 `FOREIGN_DETACHED`，DirtyWaiting保持同 generation且不能带该 bit。所有模式的 `ForeignBridgeState.frame_offset + frame_size` checked落在已用 stack范围；
 - frame size、return address、ABI bridge frame和 outgoing区符合后端 frame layout；
 - `StackInterior` offset严格落在当前 stack allocation；
 - suspend/foreign点 register mask为0；
@@ -232,7 +232,7 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 - `PollResume` 只能位于实际 poll-word检查后的 resume label，不能位于 counted inner chunk或 uncounted countdown-only edge；
 - source/unwind index存在且范围合法。
 
-runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`、interior heap root、stack interior重定位、多frame调用、panic landing pad、foreign/dirty bridge、`PollFreeLeaf`无map、caller最大 leaf stack reserve和stack增长后GC。
+runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`、interior heap root、stack interior重定位、多frame调用、panic landing pad、attached foreign快返回、foreign retake后扫描、dirty bridge、`PollFreeLeaf`无map、caller最大 leaf stack reserve和stack增长后GC。
 
 - [LLVM Stack Maps and Patch Points](https://llvm.org/docs/StackMaps.html)
 - [Go runtime stack 实现](https://go.dev/src/runtime/stack.go)

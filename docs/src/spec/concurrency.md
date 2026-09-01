@@ -25,7 +25,7 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 
 普通 inline `asm` 不是 safepoint。有限且可返回的 asm 片段可以在 `Running` 中执行，但它造成的延迟持续到片段返回；包含不可证明有限的内部回边、间接控制转移或外部等待的 asm 必须被 compiler 拒绝，或放入带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn`。`global_asm`、默认进入 managed context 的 `#[naked]` 和 dirty native definition 不属于可合作 managed code：从用户协程进入时必须脱离 `LogicalProcessor`，因此不会让它所属的 processor 或 GC stop 永久等待；但 dirty native work 本身可以永不返回，语言不保证该调用完成。
 
-`ForeignLeaf` 是用户承担的 unsafe 契约：错误声明会占住当前 `LogicalProcessor`；若调用永久不返回，该 processor无法确认 GC stop，因而可以永久阻止进程完成 GC。这样的程序违反 unsafe 契约，不在调度/GC活性保证内。无法证明 leaf时使用普通 `ForeignBridge`；它只增加桥接成本，不改变正确性边界。
+`ForeignLeaf` 是用户承担的 unsafe契约：错误声明会占住当前 `LogicalProcessor`；若调用永久不返回，该 processor无法确认 GC stop，因而可以永久阻止进程完成 GC。这样的程序违反 unsafe契约，不在调度/GC活性保证内。无法证明 leaf时使用普通 `ForeignBridge`；它发布稳定 bridge frame，短调用可以保留 generation-tagged processor lease，但 GC、回调、退役或持续 runnable压力能够立即或延迟取回 lease，因此未知 native work不能永久阻止其它 managed work或 stop epoch。
 
 signal/APC 只向当前 `LogicalProcessor` 发布抢占/GC请求、投毒正在运行 coroutine的 `StackCheck`并唤醒 worker；它不在任意机器 PC扫描栈、复制 coroutine stack或运行用户 defer。函数调用在被调方 prologue响应投毒，长循环在预算化 poll响应；对尚未到达同步点的执行，请求保持 pending。
 

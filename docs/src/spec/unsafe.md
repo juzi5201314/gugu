@@ -201,13 +201,13 @@ fn read_once(fd: int, buffer: *byte, length: uint) int {
 
 C ABI 只规定参数、返回值和寄存器/栈布局，不携带是否等待、是否回调 Gugu 或是否执行很久的信息。每个导入项在 compiler 的类型检查结果中还带一个不暴露给用户类型系统的 `ForeignEffect`：
 
-- 未标注的导入是普通 `ForeignBridge`。直接调用和无法静态证明为 `ForeignLeaf`/`DirtyCpu` 的间接调用都走完整桥接；即使实现最终不阻塞，也只多付桥接成本。
+- 未标注的导入是普通 `ForeignBridge`。直接调用和无法静态证明为 `ForeignLeaf`/`DirtyCpu` 的间接调用都走完整桥接；即使实现最终不阻塞，也必须切 system stack并发布精确 roots。runtime可以短暂保留一个可被 GC、回调、退役或 runnable压力打破的 processor lease，并在 native快速返回时直接恢复；这只是内部调度优化，不减弱“可能阻塞/回调”的保守效应。
 - `#[ffi(leaf(stack = N))]` 可以附着在无函数体的 `extern "C"` 导入项或 `#[naked] unsafe extern "C" fn` 上。`N` 表示 C 调用及其传递调用链在当前 coroutine stack 上额外使用的字节数；必须是非负整数常量，compiler 按目标 stack alignment 向上取整，省略时为 0。它是声明者承担的 unsafe 调度契约，不是性能提示。外部实现必须在固定可接受上界内返回，不依赖不可界定的 I/O、sleep、mutex/futex/condvar、join 或阻塞式 poll，不回调 Gugu，不调用会分配、触发 GC、park、suspend 或改变调度器状态的 runtime 接口，不跨返回保留 Gugu 地址，且不得超过 stack budget 或让异常/`setjmp`/`longjmp` 越过边界。
 - `#[ffi(dirty_cpu)]` 可以附着在无函数体的 `extern "C"` 导入项、带函数体的 `unsafe extern "C" fn`，或一次直接 C 调用表达式。导入项和 native definition 的默认模式是 `ForeignBridge[DirtyCpu]`；调用点属性只覆盖该次调用。它适用于输入规模或参数决定运行时间、可能长时间占用 CPU、或 native 控制流无法提供 stack/safepoint metadata 的函数。带函数体时只能包含本章允许的 opaque native operation，且不能被调用点改成 leaf。dirty 调用不允许回调 Gugu，也不提供强制终止；调用可以无限期占用一个 dirty worker，但不能占住 `LogicalProcessor` 或成为 GC stop 的参与者。
 - `#[ffi(bridge)]` 是调用点属性，只能附着在直接导入 C 函数的表达式上；它强制当前调用使用普通 `ForeignBridge`，即使声明带有 `ffi(leaf)` 或 `ffi(dirty_cpu)`。需要保留 dirty CPU 分类时使用 `#[ffi(dirty_cpu)]`，不能把两种调用点属性同时写在同一表达式上。
 - `ffi(leaf)` 不表示纯函数，也不禁止 C 侧修改外部内存或设置 `errno`/last-error；它只表示该调用不需要释放当前 `LogicalProcessor`。函数项被单态化且保留 leaf effect 时可以保留直调；转换为普通 `fn` 值、经过无法证明 effect 的间接调用或动态分派后，一律按普通 `ForeignBridge` 处理。语言不提供调用点的“强制 leaf”属性；不确定 stack budget 时使用 `#[ffi(bridge)]`。
 
-compiler 不能检查动态库或 opaque asm 的函数体。错误的 `ffi(leaf)` 声明违反 unsafe 契约：实际等待会占住当前 processor；永久不返回会使该 processor永远不能确认 GC stop，从而永久阻止进程完成 GC；错误的 `stack = N` 还可能破坏 coroutine stack。错误的 `ffi(dirty_cpu)` native contract不会让 GC停摆，但可能永久保留 ABI frame roots/pin、耗尽 dirty CPU额度，并使调用方协程永远无法完成。保守地使用普通 bridge会释放 processor；它是未知 native work的正确性路径。
+compiler 不能检查动态库或 opaque asm 的函数体。错误的 `ffi(leaf)` 声明违反 unsafe 契约：实际等待会占住当前 processor；永久不返回会使该 processor永远不能确认 GC stop，从而永久阻止进程完成 GC；错误的 `stack = N` 还可能破坏 coroutine stack。错误的 `ffi(dirty_cpu)` native contract不会让 GC停摆，但可能永久保留 ABI frame roots/pin、耗尽 dirty CPU额度，并使调用方协程永远无法完成。保守地使用普通 bridge时，短暂 lease始终可由 runtime取回，未知 native work不会永久占住 processor；它是正确性路径。
 
 ### 外部线程调入
 

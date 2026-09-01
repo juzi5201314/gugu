@@ -247,7 +247,7 @@ Windows C ABI 不提供与本章兼容的 `__int128` 参数或返回规则，因
 
 C ABI 的寄存器、栈槽、布局和符号规则与 runtime 的调度效应正交。compiler 在 lowering metadata 中保留普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`，但不能把该模式编码成 C ABI 可观察的额外参数或返回值。
 
-未标注导入和 effect 未知的间接调用使用普通 `ForeignBridge`：跨到 C 代码前，runtime 必须使用该目标可识别的连续 system stack 和合法栈边界，保存 Gugu context、登记根并释放当前 `LogicalProcessor`；C 代码不能观察或依赖 Gugu 的内部协程栈布局。`#[ffi(bridge)]` 只改变调用点选择，不改变 C 符号或机器级调用约定。
+未标注导入和 effect未知的间接调用使用普通 `ForeignBridge`：跨到 C代码前，runtime必须使用该目标可识别的连续 system stack和合法栈边界，保存 Gugu context并登记精确根。runtime可以在 native快速返回期间保留可被 retake的 processor lease；GC、回调、退役或持续 runnable压力可以打破 lease并把 processor交给其它 managed work。是否直接恢复或重新入队完全属于 runtime内部，C代码不能观察 processor身份或依赖 Gugu协程栈布局。`#[ffi(bridge)]` 只改变调用点选择，不改变 C符号或机器级调用约定。
 
 `#[ffi(dirty_cpu)]` 导入或 native definition、相应调用点，以及 managed `#[naked]` 使用 `ForeignBridge[DirtyCpu]`：持久 bridge state定位 coroutine stack上的 ABI frame和精确 roots，调用释放 `LogicalProcessor`，native stack不进入 Gugu stack map，且 native body不能回调 Gugu。`global_asm` 符号的模式来自显式 extern 声明；dirty CPU额度和等待状态属于 runtime 内部，不进入 C ABI。
 

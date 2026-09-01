@@ -129,6 +129,8 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 
 budgeted/显式 safepoint poll以 `AtomicLoadAcquire [r15 + poll_flags_offset]` 读取当前 processor的两位 word；x86_64 lowering优先使用 `test dword ptr [r15 + offset], 0b11` 和 unlikely branch，值为0时不访问 coroutine状态。counted strip-mined loop只在 outer chunk edge执行该检查，poll-free inner loop复用既有 induction/latch，不生成独立 countdown或额外每轮分支；只有 uncounted interval大于1的 fallback每次 cycle更新 SSA countdown，到0才读取 poll word。taken cold edge按普通 call-clobber规则 spill全部跨 poll活跃的 caller-saved scalar与 `V128`，并用对应 `PollResume` map保存 roots后切 system stack；fast fallthrough不执行这些 spill。函数入口不再发独立 poll word load，而由 poisoned `stack_check`复用现有 prologue比较。write barrier、`ForeignLeaf`和普通/dirty bridge规则保持各自 effect fence与交接语义。
 
+runtime layout query还必须验证 `StackDescriptor`、`PollControl` 与 `ProcessorOwnership` 的 size/alignment均为64，`Coroutine.stack`、`LogicalProcessor.poll` 和 `LogicalProcessor.ownership` 的 offset均按64对齐，并证明 poll与ownership范围不重叠。prologue只从 `[r14 + stack_check_offset]` 读取 `StackDescriptor` line；loop/显式 poll只从 `[r15 + poll_flags_offset]` 读取 `PollControl` line。任一 layout断言失败都是 compiler/runtime schema不匹配，镜像构建必须失败，不能退回未对齐访问。
+
 ## block layout 与 branch relaxation
 
 先以 entry 的 reverse postorder布局 hot block；panic、unwind、allocation/barrier slow path 和没有 hot predecessor 的 block放在冷区。条件分支优先让静态概率较高边 fallthrough：错误/越界为冷，循环 backedge为热，未知分支保持 GIR successor 顺序。
@@ -204,6 +206,8 @@ epilogue从固定 slot恢复 callee-saved、`add rsp, frame_size`、`ret`。prol
 只有 LIR `PollSummary` 分类为 `PollFreeLeaf` 的函数完全省略 prologue：frame payload为0、无 call/循环/safepoint/unwind且 legalized cost不超过64。取函数地址时生成带 `StackCheck` 的 checked thunk。内部 ABI不使用 SysV red zone，以保持 Linux/Windows frame和异步 signal边界一致。
 
 ## stack map、panic 与 unwind
+
+普通 `ForeignBridge` lowering把 `foreign_bridge.lease_word` 作为完整64-bit expected state。native返回的 hot block只执行一次 `lock cmpxchg qword ptr [r14 + state_offset]`，从精确 `Foreign(g)` 转为 `Running(g)`；成功边先检查当前 processor pending poll/GC再直接恢复 coroutine stack，不能访问 global queue或 scheduler mutex。失败边是 cold block，调用 runtime等待 scan lock、取得 idle processor或 enqueue。该 CAS同时线性化 lifecycle与 processor lease，backend不得另发 `_Psyscall`式 processor状态 store/CAS。DirtyCpu mode在 metadata中固定为 detached并跳过该 hot block。bridge call仍按 C ABI clobber caller-saved值并在进入前物化全部 pointer roots；返回快路径不削弱 stack map要求。
 
 寄存器分配后按[栈图](stack-maps.md)生成 safepoint root。`CallReturn`/suspend/普通 `ForeignBridge`/`ForeignBridge[DirtyCpu]` 点把所有用户 pointer spill；两种 bridge在 coroutine stack物化 ABI frame并以 high-relative offset登记，native段不生成 native stack map。counted inner chunk edge与 uncounted countdown-only edge都没有 map，只有实际 poll-word检查后的 resume label生成 `PollResume`；poisoned prologue复用 `MorestackEntry`。`ForeignLeaf`只有在其它 effect要求 `CallReturn` 时才建立普通调用记录。instruction offset在 branch relaxation和encoding后最终回填。
 
