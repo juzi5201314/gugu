@@ -55,6 +55,7 @@ pub fn bar() string = "bar"
   - `derive(...)`：只允许 `Clone`、`Eq`、`Ord`、`Hash`、`StableHash`、`StableOrd`、`Print`。其它名字按未知属性报错。不是插件机制。
   - 条件编译：`cfg(...)`，见下
   - 诊断：`must_use`、`allow(lint)`、`warn(lint)`、`deny(lint)`、`forbid(lint)`
+  - 编译期：`comptime(expansion_limit = N)`，见[编译期执行](comptime.md)
   - 测试：`test`、`should_panic`、`ignore`（见 [测试](testing.md)）
   - 存储：`coroutine_local`、`os_thread_local`
   - 调用点：`track_caller`、`ffi(bridge)`、`ffi(dirty_cpu)`
@@ -63,7 +64,7 @@ pub fn bar() string = "bar"
 
 ### `cfg`
 
-`#[cfg(谓词)]` 使该项或表达式在谓词为假时**不存在**（不参与类型检查、不 codegen）。与 `comptime if` 不同：被裁掉的一侧不必在当前目标上成立。
+`#[cfg(谓词)]` 使该项或表达式在谓词为假时**不存在**（不参与类型检查、不 codegen）。与 `comptime` 条件和 `comptime source` 不同：被裁掉的一侧不必在当前目标上成立。
 
 谓词：
 
@@ -131,7 +132,8 @@ pub fn bar() string = "bar"
 ## 关键字
 
 `as` `align_of` `asm` `async` `break` `chan` `comptime` `const` `continue` `defer` `dyn` `else` `enum` `extern` `false` `fn` `for` `global_asm` `if` `impl` `in` `let` `loop` `match` `offset_of` `pub` `return` `select` `size_of` `static` `struct` `trait` `true` `try` `type` `type_id` `type_id_count` `union` `unsafe` `use` `while` `yield`
-
+`source` 不是全局保留关键字；只有紧跟 `comptime` 且后接脚本块时，才按 `comptime source`
+语法识别。在普通绑定中，`let source = ...` 合法。
 `self` 在 `impl` / trait 方法里按关键字处理。`Self` 只在 `impl` / `trait` 里表示当前类型，别处可当普通标识符。
 
 `type_id` / `type_id_count` / `size_of` / `align_of` / `offset_of` / `chan` 用作关键字构造器，见 [类型](types.md)。
@@ -238,6 +240,7 @@ pub fn bar() string = "bar"
 | `allow`、`warn`、`deny`、`forbid` | 模块、声明、表达式 |
 | `test`、`should_panic`、`ignore` | 具名函数；`should_panic`/`ignore` 必须同时有 `test` |
 | `bench` | 具名函数；只由内建 benchmark harness 收集 |
+| `comptime(expansion_limit = N)` | 模块或 `comptime source` 位置 |
 | `coroutine_local`、`os_thread_local` | `static`，且二者互斥 |
 | `export_name`、`link_name`、`link_section`、`used`、`naked` | [unsafe 与 intrinsic](unsafe.md)规定的函数、static 或汇编项 |
 | `ffi(leaf[, stack = N])` | 无函数体的 `extern "C"` 导入项或 `#[naked] unsafe extern "C" fn` |
@@ -245,6 +248,7 @@ pub fn bar() string = "bar"
 | `ffi(dirty_cpu)` | 无函数体的 `extern "C"` 导入项、带函数体的 `unsafe extern "C" fn` 或直接 C 调用表达式 |
 
 同一属性重复出现必须语义一致；重复但参数不同、互斥 repr、两个存储属性、`inline` 与 `cold` 同时出现、`test` 与 `bench` 同时出现，或 test/bench 与 `extern`/`naked`/`unsafe fn` 冲突，都是编译错误。`ffi(leaf)` 附着在非 extern 导入且非 naked C 函数、`stack` 不是非负整数常量或重复指定不一致、`ffi(bridge)`/`ffi(dirty_cpu)` 附着在非许可位置、两者出现在同一调用点、带函数体的 `ffi(dirty_cpu)` 缺少 `unsafe extern "C"` 或包含 managed operation，都是编译错误。`naked` 与 `ffi(dirty_cpu)` 同时出现是冗余属性并报错；`cfg` 可以重复，效果是所有谓词的逻辑与；lint 属性按从外到内的作用域覆盖规则合并。
+`comptime(expansion_limit = N)` 的 `N` 必须是正的 comptime `int`，只控制源码宏展开深度；模块属性设置该模块的预算上限，附着在源码宏位置的属性设置该展开子树的预算。局部请求不能超过 compiler profile 的全局硬上限；同一作用域重复指定不同值是编译错误。
 
 `cfg(false)` 的节点在解析后、名称解析前删除。它只允许附着于删除后语法仍完整的序列成员；不能删除调用目标、赋值右侧、函数唯一返回类型或其它单一必需表达式。被删除节点的名称、类型和属性参数不再检查，但其外层记号必须已经能成功解析。
 

@@ -15,7 +15,8 @@ std.collections   std.io            std.path          std.fs
 std.net           std.process       std.env           std.time
 std.random        std.math          std.sync          std.resource
 std.mem           std.ptr           std.ffi           std.panic
-std.runtime       std.signal        std.src           std.test
+std.runtime       std.signal        std.src           std.syntax
+std.test
 std.build         std.hint
 ```
 
@@ -50,6 +51,34 @@ trait Error {
 `message()` 供人阅读，不是稳定机器协议；程序必须匹配具体错误的枚举变体或 kind，不能解析消息文本。`source()` 返回直接原因，没有原因时返回 `None`。错误链必须无环。具体错误另外实现 `Print` 与 `Debug`。
 
 `?` 仍按[表达式与语句](expressions.md)要求传播相同错误类型；跨领域转换必须显式构造、`map` 或由调用者声明的转换完成，标准库不提供隐式错误装箱。
+
+## `std.syntax` 编译期源码解析
+
+`std.syntax` 只在 `comptime` 脚本中可用，是语言级源码宏的解析入口。它使用当前
+compiler identity 的 lexer/parser；它不是运行时字符串解析器，也不执行解析结果中的
+代码。
+
+```text
+struct ParsedSource
+struct SyntaxError
+
+fn parse_source(text: string) Result[ParsedSource, SyntaxError]
+fn parse_expr(text: string) Result[ParsedSource, SyntaxError]
+fn parse_items(text: string) Result[ParsedSource, SyntaxError]
+fn parse_type(text: string) Result[ParsedSource, SyntaxError]
+fn parse_pattern(text: string) Result[ParsedSource, SyntaxError]
+```
+`SyntaxError` 实现 `std.error.Error`，其 `message()`、错误 kind、源文本范围和错误链均
+是确定的；实现不得把 parser 内部地址、线程状态或随机恢复编号暴露给脚本。
+
+`ParsedSource` 是 compiler-owned 的不透明片段值，只能由上述 `parse_*` 函数产生，且
+只能在当前 comptime action 中保存、传递和返回给 `comptime source`。它不能构造、复制
+到运行时对象、写入 `static`、发送到 channel、转成原始指针或物化进目标镜像。
+
+`parse_source` 使用外围源码宏的 source slot；其它入口固定要求表达式、item 列表、
+类型或模式。解析成功并不表示片段的名称、类型、trait、初始化、unsafe 或 ABI 约束
+成立；宏展开后这些约束回到主编译前端检查。解析失败返回 `SyntaxError`，脚本可以
+捕获并转换为自己的 `Error`；宏边界返回的最终 `Err` 才成为编译诊断。
 
 ## 可变 COW `string`
 

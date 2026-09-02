@@ -10,22 +10,44 @@
 
 ## 阶段边界
 
-前端具有下列固定阶段脊柱；类型检查与 comptime 是显式 query 依赖，不靠可变的全局 phase 回跳：
+前端具有下列固定阶段脊柱；类型检查、comptime、源码宏展开和抽象分析是显式 query
+依赖，不靠可变的全局 phase 回跳：
 
 1. `source_snapshot` 固定本次 action 可见的源码字节和逻辑路径；
 2. `lex` 生成 token、换行和注释 trivia；
 3. `parse` 生成 AST，不做名称解析和类型判断；
 4. `configure` 求值 `cfg`，删除未启用的模块项；
-5. `collect_definitions` 为剩余模块项建立定义表；
+5. `collect_definitions` 为当前展开轮次的模块项建立定义表；
 6. `resolve_imports` 和 `resolve_bodies` 解析路径与局部绑定；
 7. `lower_hir` 消除纯语法差异并建立 owner-local HIR；
 8. `check_signatures` 固定声明类型，并按需 type-check comptime callee body；
-9. `evaluate_type_comptime` 固定数组长度、判别值、repr 和泛型实参等类型形成输入；
-10. `type_check` 生成普通 body 的表达式类型、调整、trait/impl 选择和效果表；
-11. `evaluate_body_comptime` 固定剩余影响布局和控制流的编译期值；
-12. `validate_hir` 验证穷尽性、确定初始化、控制流出口和安全边界。
+9. `expand_source_macros` 执行当前轮次的 `comptime source` 脚本，解析
+   `ParsedSource`，登记展开记录并合并生成 AST；
+10. 若第 9 步产生新的源码，回到第 4 步开始下一展开轮次；没有新源码宏时，进入
+    类型形成和 body 检查。展开轮次受[编译期执行](../spec/comptime.md)的深度、次数、
+    字节数和 AST 节点预算约束；不能把半初始化定义表交给下一轮；
+11. `evaluate_type_comptime` 固定数组长度、判别值、repr 和泛型实参等类型形成输入；
+12. `type_check` 生成普通 body 的表达式类型、调整、trait/impl 选择和效果表；
+13. `evaluate_body_comptime` 固定剩余影响布局和控制流的编译期值；
+14. `validate_hir` 验证穷尽性、确定初始化、控制流出口和安全边界；
+15. `build_generic_gir` 生成已完成语义选择的 generic GIR；
+16. `collect_mono_roots`、`instantiate_gir` 闭合可达单态化实例图并固定具体布局输入；
+17. `abstract_analysis` 对闭世界可达的 monomorphic GIR body 求范围、别名、内存版本、效果、可达性和调用摘要固定点，结果供 GIR 优化、lint 和代码生成查询；
+18. LIR lowering 和代码生成只消费上述稳定结果，不能重新执行源码宏或 comptime。
 
-每个 query 只读取不可变产物。`TypeCheck(owner)` 可以依赖它引用的 `EvaluateComptime(def,args)`，后者可以依赖 comptime callee 的 `TypeCheck(callee)`；相同稳定 key 再次出现在依赖栈即按 comptime/type cycle 诊断，不能读取半初始化 HIR。诊断收集器可以并发接收消息，但不得回写 AST/HIR。某个 query 失败时，下游只可以处理显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功产物。
+源码宏 query 只能读取当前展开轮次已经冻结的源快照、配置、定义、签名和编译期输入。
+生成的定义必须在下一轮重新 configure、收集和解析；同一轮不允许宏读取自己或同轮
+后续生成的定义。这样宏依赖始终沿展开轮次单向前进，间接递归由 expansion budget
+或显式 cycle 诊断终止。
+
+每个 query 只读取不可变产物。`TypeCheck(owner)` 可以依赖它引用的
+`EvaluateComptime(def,args)`；`ExpandSourceMacro(call,round)` 可以依赖宏脚本的
+`TypeCheck`、编译期值和 `ParseSource`；`WholeProgramAnalysis(world)` 可以依赖已验证的
+HIR、generic/monomorphic GIR 及其调用摘要。相同稳定 key 再次出现在普通依赖栈即按
+cycle 诊断，允许的递归只由对应 query 显式求 SCC 或 fixpoint，不能读取半初始化结果。
+诊断收集器可以并发接收消息，但不得回写 AST/HIR。某个 query 失败时，下游只可以处理
+显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功
+产物。
 
 ## 索引与 arena
 
@@ -66,7 +88,23 @@ SourceSnapshot {
 
 单个源码文件不得达到或超过 4 GiB。源码必须先通过 UTF-8 与词法换行规则验证；`line_starts[0]` 固定为 0，之后只记录规范化识别出的行首。诊断的行列从原始字节快照计算，不能依赖宿主换行转换。
 
-`Span` 为 `{ file: SourceFileId, start: u32, end: u32, expansion: ExpansionId }`，使用半开字节区间。当前没有用户宏展开时 `ExpansionId` 为 0；编译器生成节点使用父节点 span 和非零的内建 lowering 原因编号，不伪造源码范围。
+`Span` 为 `{ file: SourceFileId, start: u32, end: u32, expansion: ExpansionId }`，使用半开字节区间。原始源码的 `ExpansionId` 为 0；源码宏生成节点使用非零展开记录，不伪造为调用点原始 span。内建 lowering 生成节点仍使用父节点 span 和非零的内建 lowering 原因编号。
+
+源码宏的每次成功展开登记一个不可变 `ExpansionRecord`：
+
+```text
+ExpansionRecord {
+    id: ExpansionId,
+    parent: ExpansionId,
+    macro_call: Span,
+    macro_definition: Span,
+    generated_source: SourceFileId,
+    fragment_kind: SourceSlot,
+    source_hash: BLAKE3-256,
+}
+```
+
+`ExpansionId` 在一次 action 内按外层调用位置、展开轮次和生成片段顺序确定分配；它不是持久语义身份，不能进入稳定定义键、`MonoKey` 或规范常量值。生成节点的路径解析上下文由语言规范的 source slot 规则决定，不能用 `ExpansionId` 的数值偶然消歧。
 
 lexer 输出一个连续 `TokenBuffer`。每个 token 保存 `kind`、`Span` 和可选 `Symbol`/规范化字面量 ID；空白、换行、行注释和块注释作为 trivia 连续保存，并由 token 的前后范围引用。AST 不复制注释正文。格式化器读取同一 `TokenBuffer` 与 AST，因此注释、raw 字符串和字面量原始拼写不会在解析阶段丢失。
 
@@ -93,6 +131,7 @@ AstFile {
 
 - `Use`、`Function`、`Struct`、`Enum`、`Union`、`TypeAlias`、`Const`、`Static`；
 - `Trait`、肯定或否定 `Impl`、`ExternBlock`、`GlobalAsm`；
+- `SourceMacro`：尚未执行的 `comptime source` 节点；
 - parser 恢复用的 `Error`。
 
 函数、trait、impl、结构体、枚举和类型别名的泛型参数都保存声明顺序、约束和 comptime 标志。结构体字段、枚举变体、trait 项和 impl 项保存源码顺序；任何确定性重排都推迟到定义收集或布局阶段。
@@ -105,15 +144,17 @@ AstFile {
 - `if`/let 链、`match`、`loop`、`while`、`for`、`try` 和 `select`；
 - 闭包、`async` 块或调用、普通调用、方法调用、字段、元组字段和下标；
 - 一元、二元、比较、逻辑短路、赋值、复合赋值和半开区间；
-- `unsafe` 块、`comptime`、`intrinsic` 和 `asm`；
+- `unsafe` 块、`comptime`、`SourceMacro`、`intrinsic` 和 `asm`；
 - `return`、`break`、`continue`、后缀 `?` 和字符串插值；
 - parser 恢复用的 `Error`。
 
-`StmtKind` 固定为 `Let`、`LetElse`、`Assign`、`Defer` 和 `Expr`。块尾是否产生值由最后一个表达式语句的 terminator 状态记录，不通过查看源码末字节重新推断。
+`StmtKind` 固定为 `Let`、`LetElse`、`Assign`、`Defer`、`Expr` 和 `SourceMacro`。块尾是否产生值由最后一个表达式语句的 terminator 状态记录，不通过查看源码末字节重新推断。
 
-`PatternKind` 固定为通配、绑定、`&P` 引用模式、字面量、范围、元组、数组/切片、结构体、构造器、or、`@` 和 rest；不存在 `ref`/`ref mut` 节点。每个绑定节点只保存名字、可变性和独立 span；绑定动作由 HIR 按[模式规范](../spec/patterns.md)生成。
+`PatternKind` 固定为通配、绑定、`&P` 引用模式、字面量、范围、元组、数组/切片、结构体、构造器、or、`@`、rest 和 `SourceMacro`；不存在 `ref`/`ref mut` 节点。每个绑定节点只保存名字、可变性和独立 span；绑定动作由 HIR 按[模式规范](../spec/patterns.md)生成。
 
-`TypeKind` 固定为路径、元组、数组、切片、引用、原始指针、函数、`dyn Trait`、`impl Trait`、never、推断占位和错误类型。泛型实参保留类型实参、comptime 实参和参数包展开的语法差异。
+`TypeKind` 固定为路径、元组、数组、切片、引用、原始指针、函数、`dyn Trait`、`impl Trait`、never、`SourceMacro`、推断占位和错误类型。泛型实参保留类型实参、comptime 实参和参数包展开的语法差异。
+
+`SourceMacro` 节点保存脚本 body、插入上下文的 `SourceSlot`、展开预算句柄和调用点 span；它不是普通运行时表达式。解析成功并插入后，成功 HIR 不得残留 `SourceMacro` 节点。
 
 操作符在 AST 中使用封闭枚举，不保存运算符文本。数值字面量同时保存原始 token span 和不带目标类型的任意精度整数/十进制浮点解析结果；类型相关的范围和舍入只在类型检查或 comptime 中完成。
 

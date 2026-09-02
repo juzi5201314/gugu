@@ -31,6 +31,7 @@
 # 编译器内部
 
 - [AST 与 HIR](internals/ast-hir.md)
+- [comptime 与抽象分析](internals/comptime-analysis.md)
 - [GIR 与 LIR](internals/gir-lir.md)
 - [单态化与编译缓存](internals/monomorphization-cache.md)
 - [栈图](internals/stack-maps.md)

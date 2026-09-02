@@ -22,9 +22,11 @@ ATTRIBUTE   = 已通过词法分析的属性内容；
 ## 文件、属性与声明
 
 ```ebnf
-source_file         ::= module_attribute* item* EOF ;
+source_file         ::= module_attribute* source_item* EOF ;
 module_attribute    ::= "#![" attribute "]" ;
+source_item         ::= item | source_macro_item ;
 item                ::= attribute* visibility? declaration ;
+source_macro_item   ::= attribute* "comptime" "source" block ;
 attribute           ::= "#[" ATTRIBUTE "]" ;
 visibility          ::= "pub" ;
 
@@ -59,7 +61,7 @@ field               ::= visibility? IDENT ":" type ;
 
 enum_declaration    ::= "enum" IDENT generic_parameters? "{" variant_list? "}" ;
 variant_list        ::= variant (variant_separator variant)* [variant_separator] ;
-variant             ::= IDENT
+variant              ::= IDENT
                       | IDENT "(" type_list? ")"
                       | IDENT "{" field_list? "}" ;
 
@@ -99,7 +101,8 @@ bounds             ::= bound ("+" bound)* ;
 bound              ::= path generic_arguments?
                       | "Fn" "(" type_list? ")" type ;
 parameter_list     ::= parameter ("," parameter)* [","] ;
-parameter          ::= pattern [":" type]
+parameter          ::= "comptime" pattern ":" type
+                      | pattern [":" type]
                       | "..." IDENT ":" reference_type ;
 return_type        ::= type ;
 type_list          ::= type ("," type)* [","] ;
@@ -113,7 +116,9 @@ type               ::= "!"
                       | array_type
                       | tuple_type
                       | "dyn" dyn_bounds
-                      | impl_type ;
+                      | impl_type
+                      | source_macro_type ;
+source_macro_type   ::= "comptime" "source" block ;
 reference_type     ::= "&" type ;
 raw_pointer_type   ::= "*" type ;
 function_type      ::= "fn" "(" type_list? ")" [type] ;
@@ -128,6 +133,8 @@ path               ::= IDENT ("." IDENT)* ("::" IDENT)* ;
 
 函数、方法的显式类型实参使用 `path :: generic_arguments`；类型名后的方括号是类型实参；值后的方括号是下标。关键字构造器 `chan[T](n)`、`size_of[T]()`、`align_of[T]()`、`offset_of[T](field)`和`type_id[T]()`按[类型系统](types.md)的专门规则解析。
 
+`comptime source` 在模块项列表、块语句列表、表达式、类型和模式位置使用相同的表面记号，由所在语法位置决定其 source slot。`source` 在这里是跟随 `comptime` 的上下文词，不是保留关键字；解析器保留该节点，不把脚本块本身当成生成结果。宏脚本返回的 `ParsedSource` 必须与该 source slot 的片段类别相容；具体展开规则见[编译期执行](comptime.md)。
+
 ## 块、语句与控制流
 
 ```ebnf
@@ -135,8 +142,10 @@ block               ::= "{" statement* [expression] "}" ;
 statement           ::= let_statement
                       | assignment_statement
                       | defer_statement
+                      | source_macro_statement
                       | "yield" terminator
                       | expression terminator ;
+source_macro_statement ::= "comptime" "source" block terminator ;
 
 let_statement       ::= "let" pattern [":" type] ["=" expression]
                         ["else" block] terminator ;
@@ -167,11 +176,13 @@ expression_core     ::= if_expression
                       | break_expression
                       | continue_expression
                       | logical_or_expression ;
+```
 
 `attribute*` 是表达式的语法前缀；属性的可附着位置仍由[词法 · 属性](lexical.md#属性适用位置与冲突)限制。例如 `#[ffi(bridge)]` 可以放在调用表达式前，但不是运行时包装函数。
 
+```ebnf
 if_expression       ::= "if" condition block ["else" (if_expression | block)] ;
-condition            ::= condition_part ("&&" condition_part)* ;
+condition           ::= condition_part ("&&" condition_part)* ;
 condition_part      ::= "let" pattern "=" expression
                       | comparison_expression ("||" comparison_expression)* ;
 
@@ -188,6 +199,8 @@ return_expression   ::= "return" [expression] ;
 break_expression    ::= "break" [expression] ;
 continue_expression ::= "continue" ;
 ```
+
+`comptime source` 在表达式位置通过 `primary_expression` 解析，不作为普通值表达式的隐式常量折叠。
 
 ```ebnf
 select_expression   ::= "select" "{" select_arm* "}" ;
@@ -236,6 +249,7 @@ primary_expression      ::= IDENT
                           | path
                           | block
                           | "unsafe" block
+                          | source_macro_expression
                           | "comptime" (block | unary_expression)
                           | intrinsic_expression
                           | asm_expression
@@ -246,6 +260,7 @@ primary_expression      ::= IDENT
                           | struct_expression
                           | enum_expression
                           | "chan" generic_arguments "(" expression ")" ;
+source_macro_expression ::= "comptime" "source" block ;
 intrinsic_expression    ::= ("size_of" | "align_of" | "type_id") generic_arguments "(" ")"
                           | "offset_of" generic_arguments "(" (IDENT | INT) ")"
                           | "type_id_count" "(" ")" ;
@@ -275,16 +290,18 @@ or_pattern          ::= at_pattern ("|" at_pattern)* ;
 at_pattern          ::= [IDENT "@"] pattern_atom ;
 pattern_atom        ::= "_" | IDENT | literal
                       | range_pattern | tuple_pattern | array_pattern
-                      | struct_pattern | constructor_pattern | "&" pattern ;
+                      | struct_pattern | constructor_pattern | "&" pattern
+                      | source_macro_pattern ;
+source_macro_pattern ::= "comptime" "source" block ;
 range_pattern       ::= expression ".." expression ;
-tuple_pattern      ::= "(" ")" | "(" pattern "," pattern_list? ")" ;
-array_pattern      ::= "[" pattern_list? ["," rest_pattern] "]" ;
+tuple_pattern       ::= "(" ")" | "(" pattern "," pattern_list? ")" ;
+array_pattern       ::= "[" pattern_list? ["," rest_pattern] "]" ;
 rest_pattern        ::= ".." | IDENT "@" ".." ;
-struct_pattern     ::= path "{" field_pattern_list? ["," ".."] "}" ;
-field_pattern_list ::= field_pattern ("," field_pattern)* ;
-field_pattern      ::= IDENT [":" pattern] ;
-constructor_pattern ::= path ("(" pattern_list? ")" | "{" field_pattern_list? "}") ;
-pattern_list       ::= pattern ("," pattern)* [","] ;
+struct_pattern      ::= path "{" field_pattern_list? ["," ".."] "}" ;
+field_pattern_list  ::= field_pattern ("," field_pattern)* ;
+field_pattern       ::= IDENT [":" pattern] ;
+constructor_pattern ::= path ("(" pattern_list? ")" | "{" field_pattern_list? "}")" ;
+pattern_list        ::= pattern ("," pattern)* [","] ;
 ```
 
 模式中的 `range_pattern` 两端必须是同一类型的编译期整数或字符常量；值表达式的 `a..b` 只能产生整数 `Range`。`constructor_pattern`的路径必须解析为当前待匹配枚举或 newtype 的构造器。模式绑定、穷尽性、守卫和 rest 的静态限制见[模式](patterns.md)。
@@ -294,4 +311,5 @@ pattern_list       ::= pattern ("," pattern)* [","] ;
 1. 名称解析、可见性检查和类型检查在生成机器码前完成。源文件中被 `cfg` 裁掉的项不进入这些阶段。
 2. 语法合法不表示程序合法：不可驳约束、穷尽匹配、未初始化读取、泛型约束、`unsafe` 前置条件和 FFI ABI 约束仍分别检查。
 3. 产生式中的 `path` 只是语法形式；它最终只能解析为一个模块项、类型、构造器、方法或关联项。多个候选且无法由接收者、期望类型或显式实参消歧时是编译错误。
-4. 语法树必须保留属性、文档注释、每个表达式的源范围以及插值片段的源范围，供诊断、`track_caller`和文档测试使用。
+4. `comptime source` 的脚本必须返回 `ParsedSource` 或 `Result[ParsedSource, E]`；解析成功后生成的片段重新进入适用的 `cfg`、定义收集、名称解析、类型检查和 HIR 阶段。生成的源码可以包含新的 `comptime source`，但必须服从展开预算。
+5. 语法树必须保留属性、文档注释、每个表达式的源范围以及插值片段的源范围，供诊断、`track_caller`、宏展开链和文档测试使用。

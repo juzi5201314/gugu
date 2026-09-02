@@ -142,7 +142,7 @@ static COUNTER: int = 0
 
 结构体字面量只能写在能看见所有被赋值字段的模块里（私有字段 = 同模块，或走关联函数构造）。newtype 构造 `Meters(v)` 同样受内部字段可见性约束。
 
-`union` 见 [unsafe](unsafe.md)。`trait` / `impl` 见 [接口](traits.md)。`comptime` 见 [编译期执行](comptime.md)。`extern` / `global_asm` / `asm` 见 [unsafe](unsafe.md)。
+`union` 见 [unsafe](unsafe.md)。`trait` / `impl` 见 [接口](traits.md)。`comptime` 与模块级 `comptime source` 见 [编译期执行](comptime.md)。`extern` / `global_asm` / `asm` 见 [unsafe](unsafe.md)。
 
 ## 预导入
 

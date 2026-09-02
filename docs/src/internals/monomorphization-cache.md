@@ -79,8 +79,12 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 18 | `RuntimeMetadata` | closed-world type/instance set | metadata sections |
 | 19 | `PlanImage` | target + roots + fragments | 镜像布局与重定位计划 |
 | 20 | `EmitImage` | image plan fingerprint | 最终镜像 |
+| 21 | `ParseSource` | generated source fingerprint + source slot | `ParsedSource` |
+| 22 | `ExpandSourceMacro` | stable macro call + round + source slot + script inputs | generated source/fragment + expansion record |
+| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy | canonical function summary |
+| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy | sorted summaries and proof facts |
 
-新增、删除或改变 kind 的 key/result 必须改变注册表 schema；不能复用旧编号表达不同含义。
+新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--24 只表达新 query，不得重用或改变既有编号的含义。
 
 ## query 状态机
 
@@ -99,6 +103,8 @@ query 执行期间，线程局部 query stack 记录读取的每个 input/query�
 若当前 stack 再次请求同一 cell，query engine 产生确定性的 cycle 报告。允许递归的语言结构必须由相应 query 显式求 SCC 或 fixpoint，不能靠 query engine 返回半初始化对象：
 
 - 函数签名和模块定义由 `CollectDefinitions` 一次收集；
+- `ExpandSourceMacro` 按 `(stable macro call, expansion round, source slot)` 显式推进有限展开；再次遇到相同展开栈 key 报 expansion cycle，预算耗尽返回失败，不能读取半初始化 AST；
+- `FunctionAnalysisSummary` 与 `WholeProgramAnalysis` 按调用图 SCC 显式求摘要固定点；不收敛只得到 `unknown`，不能由 query engine 返回半初始化摘要；
 - 互递归函数 body 各自 type-check，但只依赖已冻结签名；
 - trait/impl obligation 使用独立 obligation stack 报循环或求规范允许的固定点；
 - 相同 `MonoKey` 的递归调用复用正在收集的实例节点，不再次实例化。
@@ -126,7 +132,7 @@ sorted diagnostics bytes
 - 任一不同、缺失或 schema 不匹配则标为 red，重新执行；
 - 重新执行后若 result fingerprint 与旧值相同，下游仍可保持 green。
 
-query 不允许读取未通过 query/input API 登记的文件、环境、时钟、随机源或全局可变状态。build.gg 输出、`embed_file`、target 配置、feature、锁图和 native link metadata 都作为显式 input query 注入。
+query 不允许读取未通过 query/input API 登记的文件、环境、时钟、随机源或全局可变状态。build.gg 输出、`embed_file`、target 配置、feature、锁图、源码宏生成文本、宏展开属性、解析器 schema 和 native link metadata 都作为显式 input query 注入。
 
 ## 持久 object 格式
 
@@ -157,9 +163,10 @@ compile/v1/tmp/
 compile/v1/quarantine/
 ```
 
-`HH` 是 key 的前两个十六进制字符，`HASH` 是完整 key。目录布局只供同一 `CompilerIdentity` 的 Gugu 工具使用。
+`HH` 是 key 的前两个十六进制字符，`HASH` 是完整 key。目录布局只供同一
+`CompilerIdentity` 的 Gugu 工具使用。
 
-`ActionKey` 由 compiler identity、query kind/key、目标、harness/插桩、feature 域、完整锁图及所有直接输入摘要组成。action record 也是普通 object，其 payload 固定包含：
+`ActionKey` 由 compiler identity、query kind/key、目标、harness/插桩、feature 域、完整锁图、宏展开闭包摘要、分析策略和所有直接输入摘要组成。action record 也是普通 object，其 payload 固定包含：
 
 - action key 的完整 32 字节值；
 - 成功结果 kind 与 object key；

@@ -13,10 +13,10 @@ Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行�
 - 执行开始前，可达的 Gugu 函数、具体类型、impl、vtable、闭包和导出集合已经封闭；
 - 每个拥有 `TypeId` 的具体类型在该镜像中有唯一稠密编号，运行时不能追加类型；
 - 运行期间不能引入新的 Gugu 函数、类型布局或 impl 选择；
-- 不存在 `eval`、字符串转代码或对任意值执行动态函数调用；
+- 运行期间不存在 `eval`、字符串转代码或对任意值执行动态函数调用；编译期间的显式 `comptime source` 只能在闭世界中生成并重新解析源码，不能把动态代码加载能力带入运行时。
 - 跨语言执行只通过规范规定的 C ABI、系统调用和平台入口。
 
-可达性收集、单态化、去虚、布局、栈图与管理动作的内部顺序见[单态化与编译缓存](../internals/monomorphization-cache.md)、[GIR/LIR](../internals/gir-lir.md)和[GC 元数据](../internals/gc-metadata.md)，不在本章重复定义。
+可达性收集、单态化、源码宏展开、抽象分析、布局、栈图与管理动作的内部顺序见[单态化与编译缓存](../internals/monomorphization-cache.md)、[comptime 与抽象分析](../internals/comptime-analysis.md)、[GIR/LIR](../internals/gir-lir.md)和[GC 元数据](../internals/gc-metadata.md)，不在本章重复定义。
 
 ## 支持目标
 
@@ -65,7 +65,7 @@ Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行�
 
 ## 编译器内部表示
 
-AST、HIR、GIR、LIR、query、单态化实例、精确根、stack switch、写屏障、object metadata和后端 relocation都是官方实现内部契约，分别见 [AST/HIR](../internals/ast-hir.md)、[GIR/LIR](../internals/gir-lir.md)、[单态化与缓存](../internals/monomorphization-cache.md)、[栈图](../internals/stack-maps.md)、[GC 元数据](../internals/gc-metadata.md)和[后端](../internals/backend.md)。它们不是用户语法、库调用约定或跨编译器 ABI。
+AST、HIR、GIR、LIR、query、单态化实例、精确根、stack switch、写屏障、object metadata和后端 relocation都是官方实现内部契约，分别见 [AST/HIR](../internals/ast-hir.md)、[comptime 与抽象分析](../internals/comptime-analysis.md)、[GIR/LIR](../internals/gir-lir.md)、[单态化与缓存](../internals/monomorphization-cache.md)、[栈图](../internals/stack-maps.md)、[GC 元数据](../internals/gc-metadata.md)和[后端](../internals/backend.md)。它们不是用户语法、库调用约定或跨编译器 ABI。
 
 实验性 JIT若存在也必须消费同一闭世界结果并满足本章公开语义；其分层编译、patch point和执行缓存只属于 internals，不能成为新的加载/反射能力。
 
@@ -77,7 +77,7 @@ AST、HIR、GIR、LIR、query、单态化实例、精确根、stack switch、写
 
 同一编译器构建身份、同一目标名、同一 target/harness/插桩、相同 feature 与相同输入字节必须产生语义等价的镜像；源文件遍历顺序、哈希表随机种子、操作系统目录枚举顺序不能改变符号选择、特化结果、测试收集顺序或 `TypeId.name()`。实现可以在非语义节中写入构建标识，但可复现构建不得引入时间戳和随机标识。
 
-编译输入包括所选 target 源树、解析后的锁图与 feature、标准库/runtime 源码、目标配置、test/bench/插桩选择、build.gg 的已声明输入和输出、显式 FFI 导入配置以及 `embed_file` 读取的文件。未由清单、锁、build 输出或显式输入声明覆盖的环境变量、当前工作目录、网络、系统时间和宿主进程状态不得影响语言级 comptime 结果。
+编译输入包括所选 target 源树、解析后的锁图与 feature、标准库/runtime 源码、目标配置、test/bench/插桩选择、build.gg 的已声明输入和输出、显式 FFI 导入配置、`embed_file` 读取的文件以及源码宏脚本、展开属性和生成文本。未由清单、锁、build 输出或显式输入声明覆盖的环境变量、当前工作目录、网络、系统时间和宿主进程状态不得影响语言级 comptime 结果。
 
 ## 目标 ABI 与镜像错误
 
