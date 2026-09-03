@@ -188,6 +188,7 @@ NDJSON，每行一个 JSON 对象。信封：
 ```
 
 - `compiler-diagnostic`：编译诊断
+- `cli-error`：命令行解析或配置诊断
 - `compiler-artifact`：生成物路径
 - `build-start` / `build-finish`：构建阶段
 - `test-start` / `test-result` / `test-finish`：测试事件
@@ -197,11 +198,13 @@ NDJSON，每行一个 JSON 对象。信封：
 - `publish-result`：package 发布结果
 - `yank-result`：版本撤回结果
 
-`payload` 字段按 reason 定义，字段可增不可删。诊断 payload 至少含 `file`、`line`、`column`、`severity`、`code`、`message`、`suggestion`。
+`payload` 字段按 reason 定义，字段可增不可删。诊断 payload 至少含 `file`、`line`、`column`、`severity`、`code`、`message`、`suggestion`。`cli-error` 是没有源码范围的工具链诊断，使用 `message` 和 `suggestion` 字段。
 
-### json-diagnostic-short
+`build` 与 `check` 的 bootstrap 输出按以下顺序发布 `build-start`、零个或多个诊断、`build-finish`。`--quiet` 省略进度事件但保留诊断和最终事件；`json-diagnostic-short` 只发布诊断事件，包括 `compiler-diagnostic` 与 `cli-error`。
 
-只输出诊断，每条一行，省略 `build-start` 等进度事件。用于 IDE 快速采集。
+NDJSON 的 `file` 与诊断消息只能包含逻辑相对路径；工作区外的路径使用 `<external>/` 加文件名。诊断、进度和错误 payload 不得包含凭据、token、密码或私钥，检测到敏感键值时使用 `<redacted>`。
+
+`gugu version --format json` 与 `gugu --version --format json` 是版本契约规定的单个 JSON 对象，不使用事件信封；`text` 与两种版本入口输出相同的版本首行。
 
 ## 退出码
 

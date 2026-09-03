@@ -8,6 +8,14 @@
 
 阶段 1 的 `ImagePlan` 是 compiler 内存中的验证结果，不是 ELF、PE、静态库或共享库。`emit-image` action 在本阶段保持 `skipped`，因此成功检查不会写出伪造的目标镜像；任一前置 action 失败时，所有后续 action 都会被跳过，结果中不会留下镜像计划。真正的 machine encoder、镜像 writer 和 rt0 写出分别属于阶段 52、56、57。
 
+## 阶段 2 交付边界
+
+阶段 2 将 `gugu` 作为唯一 CLI 入口：根级全局参数可在子命令前后解析，配置按内置默认、用户配置、当前 workspace 的 `.gugu/config.toml`、`--config`、环境变量、命令行的顺序合并，后层覆盖前层。`--frozen` 在解析结果中同时设置 `offline` 与 `locked`。
+
+规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。阶段 2 只有 `build`、`check`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
+
+`text` 保留人读的 action/诊断/最终结果；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
+
 ## 工程边界
 
 当前实现的模块树如下：
@@ -15,7 +23,7 @@
 ```text
 crates/
 ├── gugu-cli/
-│   └── src/main.rs                 单一 gugu 进程入口与 bootstrap 命令
+│   └── src/main.rs                 单一 gugu 入口、参数解析、输出与 bootstrap 命令
 └── gugu-compiler/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/action.rs               稠密 action graph 与状态迁移
