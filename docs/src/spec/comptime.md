@@ -12,7 +12,7 @@ comptime 宏则运行一段编译期脚本，生成源码文本，再把文本�
 
 - 泛型实参、`comptime` 参数、`const`、关联常量、数组长度都在编译期已知。`const` 项与关联常量必须能在编译期求值。
 - 可以根据 comptime 条件丢掉死分支、决定 `[T; n]` 的 `N`。按目标删除整项用 `#[cfg]`，不是 comptime：被裁侧不必类型检查。
-- `size_of` / `align_of` / `offset_of` / `type_id`、`std.src.file` / `line` / `column` 必须在相应类型已知时 comptime 可求值。`type_id_count()` 只在闭世界具体类型集合冻结后可求值，且不能参与类型形成。`type_id[T]().name()` 在 `T` 已知时也是 comptime。
+- `size_of` / `align_of` / `offset_of`、`std.src.file` / `line` / `column` 必须在相应类型已知时由早期 comptime 求值。`type_id[T]()` 在 `T` 已知后先形成符号化 `TypeId`；`name()` 可早期求值，`as_int()` 与 `type_id_count()` 只能在闭世界具体类型集合冻结后的 late comptime 求值。
 - 禁止把类型当成一等 comptime 值传递：没有 `fn Foo(comptime T: type) type`，对类型抽象只用 `[T]`。禁止在 comptime 里给 `struct` 动态加字段。
 - 单态化、特化和其它需要编译期常量的语义选择都可以消费 comptime 结果；内联等纯优化只消费已经证明的事实。
 - 编译期可以 panic，效果是编译错误。comptime 里 `panic(...)` 的类型仍是 `!`。
@@ -42,6 +42,34 @@ let xs = repeat(N, 1)
 - 块或表达式标 `comptime { ... }` / `comptime expr`：整段在编译期执行，并返回可物化的普通常量。
 - 未标注的表达式若所有输入都是 comptime 已知，编译器必须仍能常量折叠；标 `comptime` 是强制「现在就求值，求不了就报错」。
 
+## 早期与 late comptime
+
+普通 `const`、`static`、类型形成、泛型实参和源码宏脚本的求值，先按其传递依赖归类：
+不直接或传递依赖 late 值的 `const`/`static` 初始化、类型形成和泛型实参使用**早期
+comptime**；源码宏脚本始终使用早期 comptime。直接或传递依赖 `type_id_count()`、或依赖
+comptime `TypeId.as_int()` 数值结果的表达式属于 **late comptime**，这种依赖会沿 `const`、
+`static`、函数返回和普通表达式传播，不能通过先保存到另一个绑定来变回早期值。依赖 late
+值的 `const`/`static` 仍必须在早期固定其类型与存储形状，只能在 late 阶段填写允许的值；
+需要早期结果的使用位置不能引用它。
+
+late comptime 的可发布标量固定为 `bool`、`char`、全部内建整数、`f32`/`float` 和
+`TypeId`；不包含 string、引用、raw pointer、函数值、句柄或资源。已经由早期 comptime
+固定形状的元组、数组或结构体常量可以包含这些 late 标量叶值。显式 `comptime` 块或表达式
+的执行域由其传递依赖决定；没有 late 依赖时属于早期 comptime，有 late 依赖时属于 late
+comptime。late 值只能用于普通运行时值、运行时控制流和不改变形状的常量初始化，禁止用于
+数组长度、类型或布局形成、comptime 泛型实参、`cfg`、源码宏脚本或生成结果、定义/impl
+选择、可达性以及任何会新增具体类型或调用目标的求值。运行时控制流的所有分支仍在早期
+完成名称解析和类型检查，late 值只决定最终镜像中的常量和分支。
+
+编译器在冻结具体类型集合前，必须不执行 late 表达式地收集其完整求值闭包：所有静态解析
+的 callee、类型、impl、布局和符号化 `TypeId` 依赖都进入闭世界输入。无法静态封闭的间接
+调用不能用于 late comptime。具体类型集合与稠密 `TypeId` 分配冻结后，编译器执行受限的
+late evaluator；它只能读取已冻结的 type universe，不能发现新定义、类型、impl 或 callee。
+late 求值失败是编译错误，不得改成运行时求值或重新打开宏展开和单态化。
+
+前端以稳定 late 常量键携带尚未物化的标量，冻结后通过不可变结果表提供数值，不回写已
+冻结的 HIR/GIR。阶段、query 和缓存契约见[comptime 与抽象分析](../internals/comptime-analysis.md)。
+
 ## 源码 comptime 宏
 
 ### 源码宏块
@@ -65,23 +93,25 @@ let xs = repeat(N, 1)
 ```gugu
 const b: int = 2
 
-comptime source {
-    let func = "print"
-    let a = 1
-    let text = f"{func}({a} + {b})"
-    std.syntax.parse_source(text)
+fn generated_sum() int {
+    let value = comptime source {
+        let a = 1
+        let text = f"{a} + {b}"
+        std.syntax.parse_source(text)
+    }
+    value
 }
 ```
 
-上例的 `std.syntax.parse_source` 返回一个 `Result[ParsedSource, SyntaxError]`。成功后编译器
-自动展开为等价的表达式：
+这里的源码宏是 `let value = ...` 的初始化表达式，因此 `parse_source` 使用表达式 source
+slot。它返回 `Result[ParsedSource, SyntaxError]`；成功后初始化器自动展开为：
 
 ```gugu
-print(1 + 2)
+let value = 1 + 2
 ```
 
-`print` 的解析、参数类型检查、效果检查和最终调用仍发生在主编译流程；源码宏只在
-编译期生成语法，不执行生成表达式中的运行时操作。
+加法的名称/运算符解析、参数类型检查和最终运行时求值仍发生在主编译流程；源码宏只在
+编译期生成表达式语法。
 
 ### 语法解析 API
 
@@ -140,8 +170,8 @@ comptime source {
 语义验证。
 
 生成 item 可能引入新的定义、impl、vtable 或具体类型。因此源码宏展开必须在闭世界
-可达性收集、`TypeId` 分配和 `type_id_count()` 冻结之前完成。`type_id_count()` 不能
-参与会改变宏展开结果、定义集合、类型形状或可达性的求值。
+可达性收集、`TypeId` 分配和 late comptime 之前完成。`type_id_count()` 和 comptime
+`TypeId.as_int()` 不能参与宏脚本、生成文本或任何会改变宏展开结果的求值。
 
 ### 递归与资源预算
 
@@ -227,8 +257,11 @@ vtable、`type_id` 和 C 回调等全部根判断，不能靠文本搜索。
 允许的状态只存在于本次 comptime 求值：局部槽、comptime 堆、常量依赖和显式
 `embed_file` 输入。禁止读取宿主时间、随机数、环境变量、网络、目标进程 I/O、操作系统
 线程状态、FFI、内联汇编、原子、锁、channel、`async`、`yield`、`wait` 或 syscall。
-标准库函数只有其实现本身完全落在该子集内时才能在 comptime 调用。`std.syntax.parse_*`
-是编译器提供的纯解析 intrinsic，不读取未登记输入，也不执行生成源码。
+lang item 与标准库函数只有登记在 compiler-owned comptime capability registry 中，且
+当前执行域允许其 capability 时才能调用；不能仅因函数体看起来确定就自动放行。用户函数
+可以在 comptime 调用，但其全部静态 callee 和操作必须传递地通过同一 capability 检查。
+`std.syntax.parse_*` 是只对源码宏域开放的纯解析 intrinsic，不读取未登记输入，也不执行
+生成源码。registry 的公开能力集合见[标准库](standard-library.md#comptime-capability-registry)。
 
 `cfg` 先删除不存在的项；余下源码全部名称解析和类型检查。普通 `if comptime_condition`
 的未选分支仍必须语法与类型正确，只是不执行。普通 `comptime expr` 强制立即求值并把
@@ -236,9 +269,10 @@ vtable、`type_id` 和 C 回调等全部根判断，不能靠文本搜索。
 随后必须回到主前端。任何上下文都不能物化原始宿主指针、运行时句柄、打开的外部
 资源或指向 comptime 堆的悬空引用。
 
-`const`、普通 `static`、数组长度、判别值、repr 参数和 comptime 泛型实参组成有向依赖
-图；依赖环是编译错误。源码宏展开依赖图另行记录；宏脚本递归和源码宏递归允许，但
-必须受上述预算限制并在不收敛时明确报告资源上限。
+早期 `const`、普通 `static`、数组长度、判别值、repr 参数和 comptime 泛型实参组成有向
+依赖图；依赖环是编译错误。late comptime 另形成只依赖早期结果与冻结 type universe 的
+有向图，禁止任何边返回类型形成、源码宏或可达性。源码宏展开依赖图另行记录；宏脚本递归
+和源码宏递归允许，但必须受上述预算限制并在不收敛时明确报告资源上限。
 
 `embed_file` 的内容字节、规范化后的源相对路径和读取失败都属于编译输入。路径不得
 逃逸调用源文件所在包允许的编译输入根；符号链接解析后的最终路径同样受限制。实现

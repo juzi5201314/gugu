@@ -127,11 +127,11 @@ type Table[K] = Vec[K]
 static COUNTER: int = 0
 ```
 
-`const` 必须 comptime 可求值。类型可省略，规则与 `let` 相同。`const` 没有稳定地址，编译器可以内联副本。
+`const` 必须 comptime 可求值；若初始化器不依赖 late 值，则在早期 comptime 完成；若直接或传递依赖 `type_id_count()` 或 comptime `TypeId.as_int()`，则按 late comptime 完成。类型可省略，规则与 `let` 相同。`const` 没有稳定地址，编译器可以内联副本；需要早期结果的位置不能引用 late `const`。
 
 `type Name = T` / `type Name[T] = ...`：若右侧**不是** `impl Trait`，这是透明别名（`Ids` 与 `Vec[int]` 同一类型，不能给别名单独 `impl`）。若右侧是 `impl Trait`（TAIT），这是不透明别名，见 [类型 · impl Trait](types.md)。名义包装用单字段元组结构体 `struct Meters(int)`。
 
-`static NAME: T = expr`：进程寿命、有稳定地址。`expr` 必须 comptime。若 `T` 含堆引用，该 static 是 GC 根。读写规则与普通绑定一样（默认可变）。多个协程无同步地写同一 `static` 是数据竞争。禁止模块级 `let`。
+`static NAME: T = expr`：进程寿命、有稳定地址。`T` 与存储形状必须在早期确定，`expr` 必须由早期或 late comptime 求值；late 初始化只能填写规范允许的 late 标量或早期已固定形状的聚合，不能改变定义、布局或可达性。若 `T` 含堆引用，该 static 是 GC 根。读写规则与普通绑定一样（默认可变）。多个协程无同步地写同一 `static` 是数据竞争。禁止模块级 `let`。
 
 - `#[coroutine_local] static`：每个**协程**一份槽，随协程迁移到哪条操作系统线程都还是这一份。该协程第一次访问时在**运行时**求值 `expr`（可以分配；不必 comptime）。GC 根挂在该协程上。这是用户要的「协程本地」，不是操作系统线程本地。初始化过程中再次读取同一个 `#[coroutine_local]` 项是 panic（禁止重入）。
 - `#[os_thread_local] static`：每个**操作系统线程**一份槽，给 FFI（`errno` 一类）。同样在该线程第一次访问时运行时求值 `expr`，重入 panic。协程在 safepoint 之后可能换到另一条操作系统线程，读到的是**当前操作系统线程**的槽。不要在 `recv` / `wait` / `yield` 前后假设还是同一份。普通请求上下文用 `#[coroutine_local]`。

@@ -10,8 +10,8 @@
 
 ## 阶段边界
 
-前端具有下列固定阶段脊柱；类型检查、comptime、源码宏展开和抽象分析是显式 query
-依赖，不靠可变的全局 phase 回跳：
+前端具有下列固定阶段脊柱；类型检查、早期/late comptime、源码宏展开和抽象分析是显式
+query 依赖，不靠可变的全局 phase 回跳：
 
 1. `source_snapshot` 固定本次 action 可见的源码字节和逻辑路径；
 2. `lex` 生成 token、换行和注释 trivia；
@@ -26,14 +26,22 @@
 10. 若第 9 步产生新的源码，回到第 4 步开始下一展开轮次；没有新源码宏时，进入
     类型形成和 body 检查。展开轮次受[编译期执行](../spec/comptime.md)的深度、次数、
     字节数和 AST 节点预算约束；不能把半初始化定义表交给下一轮；
-11. `evaluate_type_comptime` 固定数组长度、判别值、repr 和泛型实参等类型形成输入；
+11. `evaluate_type_comptime` 固定数组长度、判别值、repr 和泛型实参等早期类型形成输入；
 12. `type_check` 生成普通 body 的表达式类型、调整、trait/impl 选择和效果表；
-13. `evaluate_body_comptime` 固定剩余影响布局和控制流的编译期值；
-14. `validate_hir` 验证穷尽性、确定初始化、控制流出口和安全边界；
-15. `build_generic_gir` 生成已完成语义选择的 generic GIR；
+13. `evaluate_early_body_comptime` 固定除 late comptime 外影响布局和控制流的编译期值，
+    并为每个 late 求值闭包建立稳定 `LateConstKey`；
+14. `validate_hir` 验证穷尽性、确定初始化、控制流出口、安全边界和 late 闭包不反向影响
+    类型、源码宏、impl 选择或可达性；
+15. `build_generic_gir` 生成已完成语义选择的 generic GIR；late 值保留为
+    `LateConstRef(LateConstKey)`；
 16. `collect_mono_roots`、`instantiate_gir` 闭合可达单态化实例图并固定具体布局输入；
-17. `abstract_analysis` 对闭世界可达的 monomorphic GIR body 求范围、别名、内存版本、效果、可达性和调用摘要固定点，结果供 GIR 优化、lint 和代码生成查询；
-18. LIR lowering 和代码生成只消费上述稳定结果，不能重新执行源码宏或 comptime。
+17. `freeze_type_universe` 收集具体类型，按稳定类型键分配稠密 `TypeId`，产生不可变
+    `TypeUniverseKey`；
+18. `evaluate_late_comptime` 只读取冻结 type universe，生成不可变 late 常量表；
+19. `abstract_analysis` 对闭世界可达的 monomorphic GIR body 求范围、别名、内存版本、
+    效果、可达性和调用摘要固定点，并消费 late 常量表；
+20. LIR lowering 和代码生成只消费上述稳定结果，不能重新执行源码宏、早期 comptime，
+    或让 late comptime 产生新依赖。
 
 源码宏 query 只能读取当前展开轮次已经冻结的源快照、配置、定义、签名和编译期输入。
 生成的定义必须在下一轮重新 configure、收集和解析；同一轮不允许宏读取自己或同轮
@@ -41,10 +49,12 @@
 或显式 cycle 诊断终止。
 
 每个 query 只读取不可变产物。`TypeCheck(owner)` 可以依赖它引用的
-`EvaluateComptime(def,args)`；`ExpandSourceMacro(call,round)` 可以依赖宏脚本的
-`TypeCheck`、编译期值和 `ParseSource`；`WholeProgramAnalysis(world)` 可以依赖已验证的
-HIR、generic/monomorphic GIR 及其调用摘要。相同稳定 key 再次出现在普通依赖栈即按
-cycle 诊断，允许的递归只由对应 query 显式求 SCC 或 fixpoint，不能读取半初始化结果。
+`EvaluateEarlyComptime(def,args)`；`ExpandSourceMacro(call,round)` 可以依赖宏脚本的
+`TypeCheck`、早期编译期值和 `ParseSource`；`EvaluateLateComptime(key, universe)` 只能依赖
+冻结的 `TypeUniverseKey`、早期常量和已登记 capability；`WholeProgramAnalysis(world)` 可以
+依赖已验证的 HIR、generic/monomorphic GIR、late 常量表及调用摘要。相同稳定 key 再次出现
+在普通依赖栈即按 cycle 诊断，允许的递归只由对应 query 显式求 SCC 或 fixpoint，不能读取
+半初始化结果。
 诊断收集器可以并发接收消息，但不得回写 AST/HIR。某个 query 失败时，下游只可以处理
 显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功
 产物。
@@ -287,13 +297,13 @@ HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/h
 
 - 不含 `Res::Error`、错误类型或未求解类型变量；
 - 所有路径、调用、操作符、关联项和 impl 已唯一选择；
-- 所有 comptime 实参、数组长度、判别值和布局属性已求值；
+- 所有早期 comptime 实参、数组长度、判别值和布局属性已求值；每个 late 表达式已经验证并归一化为稳定 `LateConstKey`；
 - 每个控制流出口对应确定的作用域清理链；
 - 每个读取 place 在该点确定初始化，所有 unsafe 操作位于合法边界；
 - `async` 捕获、跨 suspend 活跃值和 `select` 分支载荷已经固定；
 - owner 的稳定输入摘要已经计算，且不含 session-local 数字 ID。
 
-冻结后的 HIR 与侧表不可修改。优化、资源动作展开、协程 lowering、逃逸分析和布局选择都属于后续 GIR/LIR 阶段。
+冻结后的 HIR 与侧表不可修改。late comptime 通过独立结果表解析 `LateConstKey`，不回写 HIR；优化、资源动作展开、协程 lowering、逃逸分析和布局选择都属于后续 GIR/LIR 阶段。
 
 ## 诊断与确定性
 
@@ -303,7 +313,7 @@ HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/h
 
 ## 与后续阶段的契约
 
-HIR 向后续阶段只提供：冻结的定义签名、owner body、类型/调整/impl 选择、comptime 值、控制流作用域和稳定输入摘要。GIR 构造器不能读取 token 文本重新推断语义，也不能绕过 HIR 重新执行名称解析。具体控制流、资源管理、GC 与调度 intrinsic 见 [GIR 与 LIR](gir-lir.md)。
+HIR 向后续阶段只提供：冻结的定义签名、owner body、类型/调整/impl 选择、早期 comptime 值、`LateConstKey`、控制流作用域和稳定输入摘要。GIR 构造器不能读取 token 文本重新推断语义，也不能绕过 HIR 重新执行名称解析；late 值只能从对应 `TypeUniverseKey` 的不可变结果表读取。具体控制流、资源管理、GC 与调度 intrinsic 见 [GIR 与 LIR](gir-lir.md)。
 
 ## 参考实现资料
 

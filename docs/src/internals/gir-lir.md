@@ -8,7 +8,7 @@
 AST -> HIR -> generic GIR -> monomorphic GIR -> LIR -> x86_64 machine code
 ```
 
-不得绕过 GIR 直接从 HIR 生成机器码，也不得在 LIR 中重新执行 trait 选择、comptime 求值或语言级模式匹配。
+不得绕过 GIR 直接从 HIR 生成机器码，也不得在 LIR 中重新执行 trait 选择、早期/late comptime 求值或语言级模式匹配。
 
 ## 权威边界
 
@@ -26,7 +26,7 @@ GIR 和 LIR 分别以一个函数、闭包、初始化器或编译器生成 glue
 - `flags`：是否可 panic、可 suspend、可分配、含 unsafe 或属于 runtime glue；
 - `revision`：IR schema版本，当前 GIR和 LIR都为2。
 
-成功产物不允许错误类型、未解析定义、未求值 comptime 值或悬空 arena ID。每个改写 pass 必须在调试构建中运行局部 verifier；跨阶段边界必须运行完整 verifier。
+成功产物不允许错误类型、未解析定义、未物化的早期 comptime 值或悬空 arena ID。GIR 可以保存已经验证的 `LateConstRef`，但它必须指向当前闭世界成功的 late 结果表，不表示延迟执行用户代码；进入 LIR 前必须物化为标量常量或明确的类型 metadata relocation。每个改写 pass 必须在调试构建中运行局部 verifier；跨阶段边界必须运行完整 verifier。
 
 ## GIR
 
@@ -76,8 +76,10 @@ GirLocal {
 
 投影序列存入 body 级连续 pool，`Place` 只保存 base 和 range。一个 place 中所有会执行用户代码或 panic 的下标表达式必须先求值到 local；投影本身不能隐藏调用。
 
-`Operand` 固定为 `Copy(Place)`、`MoveInternal(Place)`、`Constant(ConstId)` 和 `Function(MonoCandidate)`。`MoveInternal` 只表示编译器已经证明源槽在该路径不再读取的存储转移，不改变语言的按值传递语义。
-
+`Operand` 固定为 `Copy(Place)`、`MoveInternal(Place)`、`Constant(ConstId)`、
+`LateConstRef(LateConstKey)` 和 `Function(MonoCandidate)`。`MoveInternal` 只表示编译器已经
+证明源槽在该路径不再读取的存储转移，不改变语言的按值传递语义。`LateConstRef` 只允许
+引用前端已经封闭、并在当前 `TypeUniverseKey` 下成功求值的标量；它不能触发 evaluator。
 `Rvalue` 固定包含：
 
 - `Use`、`UnaryOp`、`BinaryOp`、`CheckedOp`、`Compare`；
@@ -148,14 +150,18 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 ### generic 与 monomorphic GIR
 
-generic GIR 允许 `TyId` 和 `ConstId` 中引用 owner 的泛型参数，也允许 `Operand::Function` 保存尚未替换的 `MonoCandidate`。它必须已经固定 trait/impl 选择规则；选择中剩余的参数只作为规范化 substitution 的输入。
+generic GIR 允许 `TyId` 和 `ConstId` 中引用 owner 的泛型参数，也允许
+`Operand::Function` 保存尚未替换的 `MonoCandidate`。它必须已经固定 trait/impl 选择规则；
+选择中剩余的参数只作为规范化 substitution 的输入。经过前端验证的 `LateConstRef` 可以
+保留，但其类型、静态 callee 闭包和可达边已经固定。
 
 单态化为每个 [`MonoKey`](monomorphization-cache.md#单态化实例) 创建独立 body，并完成：
 
-- 所有类型、常量和关联类型替换；
+- 所有类型、早期常量和关联类型替换；
 - 布局、字段偏移、enum 表示和调用签名确定；
 - 静态分派调用变成具体实例，`dyn` 调用保留明确 vtable 槽；
 - `ValueAction` 和 `ResourceAction` 绑定具体描述符/glue；
+- 每个 `LateConstRef` 都能在冻结后的 late 结果表中唯一解析；
 - 不可实例化、无限递归或仍含参数的 body 报编译错误。
 
 ## GIR 固定 pass 管线
@@ -167,8 +173,8 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 3. `ElaborateValueAndResourceActions`：展开语义复制、COW、resource 和 pin 动作；
 4. `LowerConcurrency`：把 `async`、channel、`select`、等待和取消变成 GIR/runtime原语，并为 runtime lock成功 edge建立结构化 `NoSafepointRegion`；
 5. `Inline`：按下述固定成本模型内联直接调用；
-6. `SimplifyCfg`：删除不可达 block、合并单前驱/单后继 block、折叠常量分支；
-7. `SparseConditionalConstants`：传播常量与不可达边；
+6. `SimplifyCfg`：删除不可达 block、合并单前驱/单后继 block、折叠常量分支；消费 late 值时把 late 结果指纹登记为 pass 输入；
+7. `SparseConditionalConstants`：传播常量与不可达边；消费 late 值时遵循相同登记规则；
 8. `CopyPropagationAndGvn`：传播无副作用 copy，并对纯 rvalue 做全局值编号；
 9. `BoundsCheckElimination`：用支配关系、范围与循环归纳变量消除已证明检查；
 10. `EscapeAndPlacement`：决定 stack、GC heap、arena 和闭包环境位置；
@@ -176,7 +182,7 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 12. `InsertWriteBarriers`：为所有可能的 heap 引用写入生成屏障并删除已证明的新对象初始化屏障；
 13. `MarkMandatoryStatepointsAndStackChecks`：标记真正发布 context 的 statepoint和抽象函数栈检查，不放置预算化 loop poll；
 14. `LowerLayoutAndAbi`：把聚合、枚举、调用和返回映射为具体字节布局；
-15. `BuildLirSsa`：构造 LIR、block 参数和 memory SSA。
+15. `BuildLirSsa`：构造 LIR、block 参数和 memory SSA；把剩余 `LateConstRef` 物化为当前 late 结果，直接 `TypeId` 值仍使用稳定类型 metadata relocation。
 
 内联成本按单态化 GIR 计算：普通 statement 为 1，分支为 2，直接调用为 5，分配为 8，可能 suspend 的操作为 32。compiler intrinsic 和不产生独立机器 frame 的 glue 在启发式前强制展开。其余非递归 callee成本不超过 32时成为候选；在整个实例图只有一个直接调用点时上限为 128。递归 SCC、普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]`、`ForeignLeaf`、naked、含 `Suspend` 或无法复制 cleanup 区域的 body从不成为候选；两种 bridge 和 leaf 外调都只能作为调用边界 lowering，不能把 native 函数体内联进 GIR。
 
@@ -244,6 +250,12 @@ LIR 指令按封闭类别组织：
 - 调用：`Call`、`ForeignCall`；`ForeignCall` 的 mode 必须是普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`。
 - 诊断插桩：`CoverageCounter`。
 
+### 内存 owner lowering
+
+`EscapeAndPlacement` 的 `Managed`、`RuntimeRaw`、`Resource` 和 `Foreign` 分类还决定 storage domain、size class、owner policy、是否可在 local fast path 完成以及 return kind。compiler 只为 `Managed` 产生 `GcAlloc`，不产生用户级 free；raw/resource 的回收由 runtime operation 和稳定 descriptor 完成。
+
+`RuntimeRaw` 的 local pop/bump 可以留在无 safepoint 的短序列；refill、remote return publish、radix forwarding、GC assist、range coalescing 和 platform call 必须落到带正确 stack map/effect 的 slow edge。raw message 只携带 stable descriptor 或 handle，verifier 必须拒绝 managed pointer payload。
+
 block terminator 固定为 `Jump`、`Branch`、`Switch`、`Invoke`、`Return`、`ResumePanic`、`TailCall`、`Trap` 和 `Unreachable`。可能 panic/unwind 的调用必须使用 `Invoke`，它同时提供 normal 和 unwind 边；确定不 unwind 的调用才使用普通 `Call`。`TailCall` 只允许在没有待执行 cleanup、调用/返回 ABI 完全相同、当前 frame 无活跃 stack root且全部参数能放入寄存器时形成；含 stack argument、sret、普通 `ForeignBridge` 或 `ForeignBridge[DirtyCpu]` 的调用不得 tail-call。`ForeignLeaf` 只有在普通 ABI 与 frame 条件全部满足时才可参与同一规则，不能因为 leaf 标记绕过 stack root 或 unwind 检查。
 
 
@@ -263,6 +275,7 @@ LIR 构造后按下列顺序运行：
 10. `LoopVersioningAndUnswitching`，只在 runtime alias/alignment check和各版本 effect顺序等价时复制循环；
 11. `LoopVectorizationAndUnrolling`，固定 vector factor、unroll factor、vector main loop和 scalar remainder；
 12. `LowerAllocationAndBarrierFastPaths`：展开 TLAB分配、普通写屏障和对应 slow edge；`BarrierReserve`在 region外取得足量 buffer permit，`GcWriteBarrierReserved`不得保留 refill edge；
+`LowerAllocationAndBarrierFastPaths` 同时固化 owner-local raw class 与 TLAB fast path 的 slow edge；它不能把 return queue、pressure drain 或 range refill 隐藏在 `PollFreeLeaf` 中，也不能改变现有 `NoSafepointRegion` 和 `POLL_BUDGET` 规则。
 13. `LowerTargetAbi`，固定 Gugu 内部 ABI 与 C ABI 参数位置；
 14. `LegalizeX86_64`，保证每个操作都有目标指令序列；
 15. `ClassifyPollFreeLeafAndPlaceBudgetedPolls`；

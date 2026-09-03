@@ -52,6 +52,45 @@ trait Error {
 
 `?` 仍按[表达式与语句](expressions.md)要求传播相同错误类型；跨领域转换必须显式构造、`map` 或由调用者声明的转换完成，标准库不提供隐式错误装箱。
 
+## comptime capability registry
+
+官方编译器维护一份 compiler-owned、封闭的 comptime capability registry。凡是 lang item、
+intrinsic 或标准库函数调用，只有按解析后的稳定身份登记且当前 comptime 执行域获准时才能
+执行；编译器禁止按函数名称匹配，也禁止因为函数体当前看起来没有副作用就自动授予能力。
+用户代码不能用属性扩展 registry。普通用户函数可以由 comptime 调用，但编译器必须传递
+检查其全部静态 callee；最终遇到的每个语言/标准库操作仍须命中 registry。
+
+registry 区分 `EarlyConst`、`SourceExpand` 与 `LateConst` 三个执行域，并为每个条目记录允许
+的域、是否使用 evaluator heap、允许读取的显式输入、结果种类和 evaluator revision。未登记
+调用或执行域不匹配产生 `comptime-capability` 编译错误，不能推迟到运行时，也不能用空结果
+继续。标准库以 Gugu 实现的登记函数还必须由编译器构建验证器证明其 body 只调用同域允许
+的能力；registry 声明与 body 不符是编译器构建错误。
+
+标量运算、固定形状值的构造、`Option` / `Result` 构造与模式匹配、`?`、局部绑定和控制流是
+evaluator 的语言核心，不作为可伪造的函数条目。当前规范要求 registry 恰好开放下列标准
+能力组；未来增加或删除组必须改变 registry revision 和 compiler identity：
+
+| 能力组 | comptime 执行域 | 允许的效果与输入 |
+|---|---|---|
+| `panic` | `EarlyConst`、`SourceExpand`、`LateConst` | 终止当前求值并产生编译诊断 |
+| `size_of`、`align_of`、`offset_of`、符号化 `type_id`、`TypeId.name` | 三个域 | 只读已登记类型、布局与规范类型名；late 阶段不能发现新类型 |
+| `type_id_count`、comptime `TypeId.as_int` 与依赖编号的序比较 | `LateConst` | 只读已冻结 type universe |
+| `std.src.file`、`line`、`column` | `EarlyConst`、`SourceExpand` | 只读调用点的逻辑源范围 |
+| `std.mem.embed_file` | `EarlyConst`、`SourceExpand` | 读取并登记受 package 输入根约束的文件 |
+| `std.syntax.parse_source`、`parse_expr`、`parse_items`、`parse_type`、`parse_pattern` | `SourceExpand` | 只读 parser schema 与 source slot，返回 compiler-owned `ParsedSource` |
+| `string` 的构造、容量/长度查询、修改、范围快照、字符/字节遍历与 `+` / `+=` | 三个域 | 只使用 evaluator heap；返回结果仍受各域的物化规则限制 |
+| 静态 f-string 格式化、`Formatter` 写入，以及标量、string、`Option`、`Result`、固定数组和元组的内建格式 trait 实现 | 三个域 | 只写 evaluator 内的 string；用户格式 trait 实现继续做传递 capability 检查 |
+| `SyntaxError` 的 `Error` / `Print` / `Debug` 实现 | `SourceExpand` | 只读确定的 parser 错误记录 |
+| `Atomic::new`、`Mutex::new`、`RwLock::new`、`Condvar::new`、`OnceLock::new`、`Lazy::new` | `EarlyConst`、`SourceExpand` | 只构造可物化初始位状态，不执行同步、等待或发布 |
+
+本表之外的标准库函数、方法和 intrinsic 默认不在任何 comptime 执行域中可调用；运行时
+实现使用的纯函数也不会因此自动获得 comptime 能力。未来新增能力必须登记能力组、执行域、
+输入和结果限制，并提升 registry revision 与 compiler identity。
+`LateConst` 即使临时使用 evaluator string 或聚合值，最终也只能发布规范允许的标量叶值。
+`SourceExpand` 返回 `ParsedSource` 是 compiler-owned 结果例外，不能物化为普通常量。registry
+摘要、执行域和每个条目的 evaluator revision 都是编译输入；缓存命中不得绕过 capability
+检查。具体表示与验证见[comptime 与抽象分析](../internals/comptime-analysis.md)。
+
 ## `std.syntax` 编译期源码解析
 
 `std.syntax` 只在 `comptime` 脚本中可用，是语言级源码宏的解析入口。它使用当前

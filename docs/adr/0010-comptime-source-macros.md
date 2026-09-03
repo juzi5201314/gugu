@@ -31,18 +31,46 @@ Gugu 原有的 comptime 设计只描述在编译期计算普通值，例如常�
 
 宏展开 query、生成文本 parser query 和普通 comptime query 分离。展开 round 之间只传递已经冻结的不可变定义和输入，不读取半初始化结果；相同稳定展开栈 key 形成 cycle 时报告 cycle。
 
-### 抽象分析
+### comptime 阶段与 capability
 
-值 `ConstEval`、源码 `SourceExpand` 和运行时 `AbstractAnalysis` 使用不同值域，但可以共享 typed HIR/GIR 的语义节点。`AbstractAnalysis` 在闭世界可达的 Gugu、标准库和 runtime body 上尽可能做跨函数、跨模块、跨 package 的摘要固定点求解，支持范围、符号关系、别名、内存版本、效果、初始化和控制流事实。
+值 comptime 分为 `EarlyConst` 与 `LateConst`。普通常量、类型形成、源码宏和单态化输入使用
+`EarlyConst`；`type_id_count()`、comptime `TypeId.as_int()` 和依赖最终稠密编号的运算使用
+`LateConst`。编译器在单态化实例图闭合后冻结 type universe，再执行只读该集合的 late
+求值。late 结果只能是标量或固定形状聚合中的标量叶值，不能反向改变类型、impl、源码宏、
+可达性或调用图。
 
-分析结果必须健全但允许不完备：`proved` 才能删除边界或其它运行时检查；别名不明、未知调用、FFI、并发写入、预算耗尽或固定点不收敛都产生 `unknown`，并保留检查。类型推断和 trait/impl 选择仍由类型系统的约束求解完成，lint 只消费分析事实而不改变程序语义。
+lang item、intrinsic 和标准库函数的 comptime 可调用性由 compiler-owned capability registry
+决定。条目以稳定身份登记允许的执行域、效果、显式输入、结果种类和 evaluator revision；
+用户属性不能扩展 registry。用户函数传递检查全部静态 callee。registry 摘要与验证器版本
+进入 `CompilerIdentity`。
+
+### 抽象分析与跨 package 摘要
+
+`EarlyConst`、`SourceExpand`、`LateConst` 和运行时 `AbstractAnalysis` 使用不同值域，但可以
+共享 typed HIR/GIR 的语义节点。`AbstractAnalysis` 在闭世界可达的 Gugu、标准库和 runtime
+body 上尽可能做跨函数、跨模块、跨 package 的摘要固定点求解，支持范围、符号关系、别名、
+内存版本、效果、初始化和控制流事实。
+
+分析结果必须健全但允许不完备：`proved` 才能删除边界或其它运行时检查；别名不明、未知
+调用、FFI、并发写入、预算耗尽或固定点不收敛都产生 `unknown`，并保留检查。类型推断和
+trait/impl 选择仍由类型系统的约束求解完成，lint 只消费分析事实而不改变程序语义。
+
+跨 package seam 使用内容寻址的 `PublicFunctionSummaryV1`。公共 payload 只包含稳定函数
+身份、签名/ABI、无条件 effect、条件事实和 interface place，不包含 body provenance、局部
+槽或 private state 身份；private state 折叠为隐藏读写 effect。生产 action 仍完整依赖 GIR、
+目标、策略、impl 和 callee 摘要，因此实现变化会触发重算；若公共语义结果未变，内容对象键
+保持不变，依赖 package 不继续失效。递归 SCC 必须共同求解后再投影单函数摘要。缓存对象
+缺失、损坏或版本不兼容时从闭世界 GIR 重算，不能信任 package 自带摘要或改变程序语义。
 
 ## 后果
 
 - 语言获得了不依赖 AST builder 的自由源码生成能力，字符串到代码必须经过显式 parser 闸门。
 - 生成代码仍由主前端负责语义检查，因此宏不能绕过类型安全、初始化、安全和 ABI 规则。
 - 编译器需要维护展开 source map、query/cache 输入、递归预算和宏诊断链。
+- late comptime 需要冻结 type universe、独立 `LateConstKey`/结果表和受限求值 query，但不会形成第二轮可达性。
+- comptime 可调用的标准能力成为显式、可版本化的 registry，不再由 evaluator 临场推断。
+- 跨 package 摘要以稳定语义内容为复用 seam；实现变化只在公共摘要结果变化时继续传播。
 - 闭世界编译可以提供跨 package 分析和更激进的检查消除，但分析成本必须受预算约束；无法证明时程序保持原有运行时检查。
-- parser、展开、摘要和优化结果都必须按稳定输入缓存，不能依赖线程完成顺序、宿主地址或 session-local ID。
+- parser、展开、late 常量、摘要和优化结果都必须按稳定输入缓存，不能依赖线程完成顺序、宿主地址或 session-local ID。
 
 相关规范：[编译期执行](../src/spec/comptime.md)、[形式语法](../src/spec/syntax.md)、[comptime 与抽象分析](../src/internals/comptime-analysis.md)、[AST 与 HIR](../src/internals/ast-hir.md)、[单态化与编译缓存](../src/internals/monomorphization-cache.md)。

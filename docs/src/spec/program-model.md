@@ -71,13 +71,25 @@ AST、HIR、GIR、LIR、query、单态化实例、精确根、stack switch、写
 
 ## 编译闭包与产物确定性
 
-闭世界集合从入口、标准库/runtime、测试/导出/`used`根和 comptime显式引用得到；`cfg`删除项不在集合中，而 `type_id[T]()`、导出或 `#[used]`引用仍使对应定义可达。具体图遍历和实例键见[单态化与编译缓存](../internals/monomorphization-cache.md)。
+闭世界集合从入口、标准库/runtime、测试/导出/`used` 根、comptime 显式引用和每个 late
+comptime 的静态 callee 闭包得到；`cfg` 删除项不在集合中，而 `type_id[T]()`、导出或
+`#[used]` 引用仍使对应定义可达。具体图遍历和实例键见[单态化与编译缓存](../internals/monomorphization-cache.md)。
 
-`type_id_count()` 返回最终闭世界具体类型数，不能反向参与类型形成或可达性；同一镜像内编号唯一，不同编译间不稳定。无法形成有限闭世界、缺失 lang item或依赖无法解析是编译错误，内部收敛上限与诊断构造见[单态化与编译缓存](../internals/monomorphization-cache.md)。
+实例图闭合后，编译器冻结具体类型集合与稠密 `TypeId`，再执行只读该集合的 late
+comptime。`type_id_count()` 与 comptime `TypeId.as_int()` 不能反向参与类型形成、源码宏、
+impl 选择或可达性；完整限制见[编译期执行](comptime.md#早期与-late-comptime)。无法形成
+有限闭世界、late 求值试图新增依赖、缺失 lang item 或依赖无法解析都是编译错误。
 
-同一编译器构建身份、同一目标名、同一 target/harness/插桩、相同 feature 与相同输入字节必须产生语义等价的镜像；源文件遍历顺序、哈希表随机种子、操作系统目录枚举顺序不能改变符号选择、特化结果、测试收集顺序或 `TypeId.name()`。实现可以在非语义节中写入构建标识，但可复现构建不得引入时间戳和随机标识。
+同一编译器构建身份、同一目标名、同一 target/harness/插桩、相同 feature 与相同输入字节
+必须产生语义等价的镜像；源文件遍历顺序、哈希表随机种子、操作系统目录枚举顺序不能改变
+符号选择、特化结果、测试收集顺序或 `TypeId.name()`。实现可以在非语义节中写入构建标识，
+但可复现构建不得引入时间戳和随机标识。
 
-编译输入包括所选 target 源树、解析后的锁图与 feature、标准库/runtime 源码、目标配置、test/bench/插桩选择、build.gg 的已声明输入和输出、显式 FFI 导入配置、`embed_file` 读取的文件以及源码宏脚本、展开属性和生成文本。未由清单、锁、build 输出或显式输入声明覆盖的环境变量、当前工作目录、网络、系统时间和宿主进程状态不得影响语言级 comptime 结果。
+编译输入包括所选 target 源树、解析后的锁图与 feature、标准库/runtime 源码、目标配置、
+test/bench/插桩选择、build.gg 的已声明输入和输出、显式 FFI 导入配置、`embed_file` 读取的
+文件、源码宏脚本/展开属性/生成文本、comptime capability registry、冻结 type universe、
+late 常量结果以及被消费的跨 package 公共分析摘要。未由这些输入覆盖的环境变量、当前工作
+目录、网络、系统时间和宿主进程状态不得影响语言级 comptime 结果。
 
 ## 目标 ABI 与镜像错误
 

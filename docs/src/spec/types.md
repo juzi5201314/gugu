@@ -239,18 +239,26 @@ fn make_cmp() Cmp = fn(a, b) = a < b
 
 ## `TypeId` 与 `dyn Any`
 
-闭世界一次编译能枚举全部单态化后的具体类型，因此类型身份是**稠密编号**，不是哈希。预导入类型 `TypeId` 布局与 `u32` 相同（大小 4、对齐 4），取值范围 `0 .. type_id_count()`。同一镜像内比较是一次整数运算，`as_int()` 后可作数组下标。没有碰撞。重新编译可以重排编号；禁止跨镜像、跨进程拿 `TypeId` 当稳定密钥。插件只走 C ABI，对岸没有 Gugu `TypeId`。`TypeId` 不能出现在 `extern "C"` 签名里；过边界传 `as_int()` 的值或 `u32`。
+闭世界一次编译能枚举全部单态化后的具体类型，因此类型身份是**稠密编号**，不是哈希。预导入类型 `TypeId` 布局与 `u32` 相同（大小 4、对齐 4），取值范围 `0 .. type_id_count()`。同一镜像内比较是一次整数运算，运行时 `as_int()` 后可作数组下标。没有碰撞。重新编译可以重排编号；禁止跨镜像、跨进程拿 `TypeId` 当稳定密钥。插件只走 C ABI，对岸没有 Gugu `TypeId`。`TypeId` 不能出现在 `extern "C"` 签名里；过边界传 `as_int()` 的值或 `u32`。
 
 这不是开世界反射，也不是公理禁止的渐进类型 `any`。运行时擦除仍然只有显式的 `dyn Trait`。
 
 关键字构造器（与 `size_of` 相同，不是下标）：
 
 ```
-type_id[T]()          // TypeId，comptime（`T` 在该单态里已知）
-type_id_count()       // int；具体类型集合冻结后的 comptime 常量
+type_id[T]()          // T 已知后形成符号化 TypeId；稠密编号在 type universe 冻结后物化
+type_id_count()       // int；late comptime 常量
 ```
 
-`type_id_count()` 不能参与数组长度、类型/布局形成、comptime 泛型实参、`cfg`、可达性或任何可能新增具体类型的求值；这些位置使用它是编译错误。它可以初始化不改变类型形状的标量常量、控制运行时循环，或填充长度已由其它常量确定的元数据。编号个数放不进 `int` 或内部 `u32` 是编译错误。
+`type_id[T]()` 的类型身份、相等性和规范名称不依赖最终稠密编号，可以由早期 comptime 使用。
+运行时读取 `as_int()` 是普通运行时操作；在 comptime 中读取 `as_int()` 的数值结果、依赖该
+结果的序比较以及 `type_id_count()` 属于 late comptime，只能在具体类型集合冻结后求值。
+
+直接或传递依赖 late comptime 的表达式不能参与数组长度、类型/布局形成、comptime 泛型
+实参、`cfg`、源码宏、定义/impl 选择、可达性或任何可能新增具体类型的求值；这些位置
+使用它是编译错误。late 标量可以初始化不改变类型形状的常量、控制运行时分支或循环，
+也可以填充长度已由早期常量固定的元数据。编号个数放不进 `int` 或内部 `u32` 是编译错误。
+完整阶段限制见[编译期执行](comptime.md#早期与-late-comptime)。
 
 ### 谁有编号
 
@@ -263,14 +271,17 @@ type_id_count()       // int；具体类型集合冻结后的 comptime 常量
 
 没有从整数构造 `TypeId` 的安全 API。`transmute` 出越界编号再拿去索引类型表是未定义行为。
 
-`TypeId` 的 `==` / `!=` / 序比较由编译器按编号直接实现，并实现 `Eq`、`Ord`、`Print`（打印规范类型名）。固有方法：
+`TypeId` 的 `==` / `!=` / 序比较由编译器按类型身份或冻结后的编号直接实现，并实现
+`Eq`、`Ord`、`Print`（打印规范类型名）。固有方法：
 
 ```
-fn as_int(self) int          // 稠密下标，`0 <= i < type_id_count()`
-fn name(self) string         // 规范类型名；`type_id[T]().name()` 仍是 comptime
+fn as_int(self) int          // 运行时为普通读取；comptime 调用属于 late comptime
+fn name(self) string         // 规范类型名；comptime TypeId 可早期求值
 ```
 
-`name` 供诊断与调试，不能用来改布局、不能当求值入口。规范名优先日常名字：`int` 不是 `i64`，`uint` 不是 `u64`，`byte` 不是 `u8`，`float` 不是 `f64`。
+`as_int()` 的结果满足 `0 <= i < type_id_count()`。`name()` 供诊断与调试，不能用来改
+布局、不能当求值入口。规范名优先日常名字：`int` 不是 `i64`，`uint` 不是 `u64`，
+`byte` 不是 `u8`，`float` 不是 `f64`。
 
 ### `Any` 与 downcast
 
@@ -351,7 +362,7 @@ let q: Option[&Point] = a.downcast()   // 靠期望类型推断 T
 
 GC 堆对象可以有用户不可见的头；`#[repr(C)]` 的 FFI 结构体默认不当作可移动 GC 对象传递给 C，除非显式 pin，见 [内存](memory.md)。
 
-下列为语言关键字构造，必须在 comptime 可求值（`T` 与字段名编译期已知）：
+下列语言关键字构造按各自阶段执行；`T` 与字段名必须在早期已知，`type_id_count()` 按上述 late comptime 规则求值：
 
 ```
 size_of[T]()         // int，字节

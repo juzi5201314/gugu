@@ -315,7 +315,7 @@ build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进
 1. **依赖源码缓存**：保存 registry 元数据、不可变归档、解包源码、Git commit/tree 与校验信息。多个 workspace 和并发进程共享。
 2. **编译 action cache**：保存可复用的解析、类型检查、生成物、目标代码或完整镜像 action。规范不规定内部按模块、package、单态化还是镜像分层。
 
-编译 action key 必须完整覆盖会改变输出的输入：编译器构建身份、宿主与目标名、target 种类、test/bench/插桩模式、feature 域、完整锁图、所有可达源码与 `embed_file`、源码宏展开闭包与生成文本、宏预算属性、build.gg 记录输入和输出内容、cfg、native 链接元数据。绝对 workspace 路径若不影响可观察输出不得进入 key；`std.src.file` 使用 package 相对规范路径以允许跨目录命中。
+编译 action key 必须完整覆盖会改变输出的输入：编译器构建身份、宿主与目标名、target 种类、test/bench/插桩模式、feature 域、完整锁图、所有可达源码与 `embed_file`、源码宏展开闭包与生成文本、宏预算属性、comptime capability registry、冻结 type universe 与被消费的 late 常量、跨 package 公共分析摘要对象键、build.gg 记录输入和输出内容、cfg、native 链接元数据。公共分析摘要的生产 action 必须因实现输入变化而重算；若重算后的可消费摘要相同，其内容对象键保持不变，依赖 action 不继续失效。绝对 workspace 路径若不影响可观察输出不得进入 key；`std.src.file` 使用 package 相对规范路径以允许跨目录命中。
 
 Linux 默认使用 `$XDG_CACHE_HOME/gugu`（未设置时 `~/.cache/gugu`）、`$XDG_CONFIG_HOME/gugu`、`$XDG_DATA_HOME/gugu`；Windows 使用对应 LocalAppData/RoamingAppData/Known Folder。`GUGU_CACHE_DIR`、`GUGU_CONFIG_DIR`、`GUGU_DATA_DIR` 可以覆盖。首版只规范本地缓存，不定义远程缓存协议。
 

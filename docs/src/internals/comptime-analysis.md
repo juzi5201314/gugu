@@ -6,31 +6,42 @@
 
 [编译期执行](../spec/comptime.md)规定 comptime 脚本、源码宏、解析结果、资源边界和展开预算；[程序与编译模型](../spec/program-model.md)规定闭世界输入与可达性；[AST 与 HIR](ast-hir.md)规定源码宏节点、展开轮次和 `Span`；[GIR 与 LIR](gir-lir.md)规定优化 pass 和 verifier。本章不允许实现用“更聪明的解释”改变这些语义。
 
-## 三个执行域
+## 四个执行域
 
-编译器必须把三种不同的问题分开：
+编译器必须把四种不同的问题分开：
 
 | 执行域 | 值域 | 主要结果 |
 |---|---|---|
-| `ConstEval` | 精确的 comptime 值 | `ConstId`、布局参数、特化输入 |
+| `EarlyConst` | 精确的早期 comptime 值 | `ConstId`、布局参数、特化输入 |
 | `SourceExpand` | 脚本状态与已解析源码片段 | `ParsedSource`、`ExpansionRecord` |
+| `LateConst` | 冻结 type universe 上的受限精确值 | late 标量与 `TypeId` 重定位值 |
 | `AbstractAnalysis` | 范围、关系、别名、内存版本、效果和路径事实 | 证明事实、函数摘要、lint 输入 |
 
-`ConstEval` 只回答“这些输入的确切结果是什么”；它不能通过执行一次具体路径证明未知运行时输入的安全性。`AbstractAnalysis` 不能伪造一个具体常量，也不能把 `unknown` 当成 `true`。类型推断仍是约束求解，trait/impl 选择仍由类型系统决定；分析结果只在这些语义选择完成后被消费。
+`EarlyConst` 和 `LateConst` 只回答“这些输入的确切结果是什么”；它们不能通过执行一次具体
+路径证明未知运行时输入的安全性。`LateConst` 只能读取已经冻结的 type universe，不能
+形成类型、展开源码或改变可达图。`AbstractAnalysis` 不能伪造具体常量，也不能把
+`unknown` 当成 `true`。类型推断仍是约束求解，trait/impl 选择仍由类型系统决定；分析
+结果只在这些语义选择完成后被消费。
 
-三个域可以共享 HIR/GIR 的节点语义、源范围和调用图，但不共享可变求值状态。一个域的缓存结果不能被另一个域解释成不同的值。
+四个域可以共享 HIR/GIR 的节点语义、源范围和调用图，但不共享可变求值状态。一个域的
+缓存结果不能被另一个域解释成不同的值。
 
-## 值 comptime evaluator
+## comptime evaluator
 
 ### 输入与表示
 
-`ConstEval` 接收已解析的 owner、规范化类型、已知实参、目标配置和显式编译输入。它执行 typed HIR 的语义，或者执行由 typed HIR 一次性降低出的受限 evaluator view；generic GIR 和 LIR 不能成为 comptime 语义的第二个来源。
+`EarlyConst` 接收已解析的 owner、规范化类型、已知实参、目标配置和显式编译输入；
+`LateConst` 另接收冻结后的 `TypeUniverseKey`，且只求值前端已登记的 late 常量闭包。两者
+执行 typed HIR 的语义，或者执行由 typed HIR 一次性降低出的受限 evaluator view；
+generic GIR 和 LIR 不能成为 comptime 语义的第二个来源。
 
 每次求值具有不可变输入和独立状态：
 
 ```text
 ConstEvalState {
+    domain: EarlyConst | SourceExpand | LateConst,
     call_key: StableDefinitionKey + canonical arguments,
+    type_universe: None | TypeUniverseKey,
     locals: dense local slots,
     comptime_heap: isolated heap graph,
     dependencies: sorted input/query keys,
@@ -39,9 +50,44 @@ ConstEvalState {
 }
 ```
 
-局部槽和 comptime heap 只在本次求值中存在。值离开 evaluator 前必须归一化为规范 `ConstValue`，再由 interner 得到 `ConstId`；原始指针、宿主地址、运行时句柄、活动 resource lease 和指向 comptime heap 的引用不能进入结果。
+局部槽和 comptime heap 只在本次求值中存在。值离开 evaluator 前必须归一化为规范
+`ConstValue`；早期结果由 interner 得到 `ConstId`，late 结果写入以稳定 `LateConstKey` 索引的
+不可变结果表。原始指针、宿主地址、运行时句柄、活动 resource lease 和指向 comptime heap
+的引用不能进入结果。
 
-`ConstEval` 必须使用与运行时相同的值传递、COW string、模式、`defer`、panic 和溢出语义，但只允许规范规定的确定性子集。禁止的操作在执行点产生带展开链或调用链的编译错误，不得伪造一个空值继续下游。
+所有 comptime 域必须使用与运行时相同的值传递、COW string、模式、`defer`、panic 和
+溢出语义，但只允许规范规定的确定性子集。禁止的操作在执行点产生带展开链或调用链的
+编译错误，不得伪造空值继续下游。
+
+### capability registry
+
+compiler-owned registry 以解析后的 `StableDefKey`、lang item 或 intrinsic ID 为键，每个条目
+固定保存 `{ allowed_domains, effects, explicit_inputs, result_kind, evaluator_revision }`。
+`allowed_domains` 是三个 comptime 域的位掩码；`effects` 至少区分纯计算、evaluator heap
+分配、显式文件输入、源码解析和初始同步位构造。固定能力组以[标准库](../spec/standard-library.md#comptime-capability-registry)
+为准，内部 registry 不能扩大公开集合。
+
+类型检查在建立 comptime call graph 时验证每条边的执行域；evaluator 调用时再次以稳定 ID
+检查同一条目，防止缓存或错误恢复绕过权限。用户函数没有 registry 条目，而是继承调用点
+的执行域并传递检查全部静态 callee。无法静态封闭的间接调用不允许进入 late comptime；
+其它域中的间接调用只有候选集合全部满足同域 capability 时才合法。
+
+registry 的规范摘要、条目 evaluator revision 和验证器 revision 都进入
+`CompilerIdentity`。标准库登记函数 body 与条目效果不符属于 compiler/std 构建错误；用户
+程序命中未登记能力或错误执行域属于 `comptime-capability` 编译错误。
+
+### late comptime 闭包
+
+前端为每个直接或传递依赖 `type_id_count()`、comptime `TypeId.as_int()` 或编号序关系的
+表达式建立 `LateConstKey`。该键包含稳定 owner、表达式节点稳定位置、规范类型、早期参数和
+静态 callee 闭包摘要。闭包中的所有签名、impl、类型和调用目标必须在单态化前确定，并作为
+普通可达性输入；late evaluator 不能新增图边。
+
+单态化实例图和具体类型集合闭合后，`FreezeTypeUniverse` 按 `StableTypeKey` 排序分配
+`TypeId`，得到 `TypeUniverseKey`。`EvaluateLateComptime` 只读取该 key、早期常量、已冻结
+布局和已登记 capability，结果只能包含规范允许的标量叶值。结果通过 late 常量表供 GIR
+重定位、运行时常量初始化和分支操作数消费；不得修改冻结 HIR/GIR，也不得触发新的前端或
+单态化 query。
 
 ### 源码宏返回值
 
@@ -169,7 +215,7 @@ if v.len() > 10 {
 
 每个可变身份对象和可写 place 都有逻辑别名类及 memory version。已知写入只使受影响字段和派生事实失效；未知调用、FFI、并发边界或逃逸引用使保守的对象集合失效。COW string 的 backing seal、resource publish、集合迭代快照和 GC 写入也必须作为 effect 进入状态，而不能仅按语法名字判断。
 
-标准库、runtime 和跨 package Gugu 函数通过稳定的 `FunctionSummary` 提供可消费的契约：
+标准库、runtime 和跨 package Gugu 函数通过健全的 `FunctionSummary` 提供可消费事实：
 
 ```text
 FunctionSummary {
@@ -179,6 +225,8 @@ FunctionSummary {
     read_places,
     write_places,
     alias_effects,
+    reads_hidden_state,
+    writes_hidden_state,
     may_allocate,
     may_panic,
     may_suspend,
@@ -186,22 +234,75 @@ FunctionSummary {
 }
 ```
 
-摘要不能声明比函数真实语义更强的前置条件或后置事实。没有摘要的普通函数按其已知 GIR effect 分析；没有可证明上界的外部函数按未知写入、可能 panic 和可能阻断处理。
+摘要不能声明比函数真实语义更强的前置条件或后置事实。调用点只有证明某组
+`preconditions` 后才能消费对应返回事实；无法证明时仍应用无条件 effect，并把条件事实
+降为 unknown。没有摘要的普通函数按其已知 GIR effect 分析；没有可证明上界的外部函数
+按未知写入、可能 panic 和可能阻断处理。
+
+### 跨 package 公共摘要
+
+跨 package seam 使用 compiler-owned 的 `PublicFunctionSummaryV1`。它是稳定、内容寻址的
+编译产物，不是 Gugu 用户 API、package 发布格式或跨 schema 的 ABI。payload 使用本编译器
+缓存的规范编码，并固定包含：
+
+```text
+PublicFunctionSummaryV1 {
+    schema_revision,
+    analysis_semantics_revision,
+    public_policy_revision,
+    target_semantics,
+    mono_key,
+    signature_and_abi_fingerprint,
+    unconditional_effects,
+    conditional_facts,
+    interface_places,
+}
+```
+
+`interface_places` 只能引用参数序号、返回值、公开 static 的 `StableDefKey`，以及由稳定字段
+键或 tuple/array 下标组成的投影。`conditional_facts` 也只能以这些 interface place 为
+输入和输出，不能把 private type、局部槽或内部控制流标签暴露为可消费事实。局部槽、private
+static、arena ID、裸地址和 session-local 编号不得跨 package；对私有状态的访问折叠为
+`reads_hidden_state` / `writes_hidden_state`。序列按规范编码 byte 序排序，位集合必须拒绝未知
+bit，范围与关系必须通过摘要 verifier。
+
+公共对象只能由 `PublicSummaryPolicyV1` 产生；该策略随 compiler identity 固定抽象域、
+widening、迭代次数和摘要大小上限，不使用 wall-clock deadline。生成 action 以 monomorphic
+GIR 语义指纹、签名/ABI、选定 impl、目标与 cfg/feature、public policy、同一 SCC 的成员及
+全部直接 callee 公共摘要键为输入。生产 provenance 保存在 action record，不写进公共
+payload；公共对象 key 只由上面的可消费语义内容产生。因此 body、源码排版或 callee 实现
+变化会重算生产 action，但若重新证明出的公共摘要完全相同，就得到同一对象 key，依赖
+package 的分析保持 green。签名、ABI、effect 或可消费事实变化必然改变对象 key。
+
+递归和互递归函数按 SCC 共同求固定点；`AnalysisSccSummary` 一次产生该 SCC 的全部内部
+摘要，随后才逐 `MonoKey` 投影公共对象，禁止成员通过半初始化公共摘要互相求值。跨 package
+SCC 使用相同规则，不按 package 人为切断调用环。
+
+公共摘要只由兼容 `CompilerIdentity` 的本地 compiler action 产生。package 归档或 build.gg
+不能提供权威摘要。对象缺失、损坏、schema/target/analysis revision 不匹配或 verifier 失败
+时，编译器必须从当前闭世界可见的 GIR 重算；只有没有 Gugu body 的外部函数才能退化为
+保守 unknown。缓存故障不能改变优化结果之外的程序语义。
 
 ## 全程序求解
 
-闭世界的单态化实例图闭合后，编译器必须尽可能对所有可达 Gugu 函数、标准库和 runtime body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
+闭世界的单态化实例图闭合后，编译器必须尽可能对所有可达 Gugu 函数、标准库和 runtime
+body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 
 1. 按稳定 `MonoKey` 排序建立可达实例图；
 2. 将函数按调用图 SCC 分组；
 3. 对每个 SCC 用确定的初始摘要迭代求解；
 4. 在递归回边应用 widening，直到摘要不再变化或达到分析预算；
-5. 把稳定摘要写入 query cache，并让 caller 的局部分析消费它；
-6. 对无法收敛的部分返回 `unknown`，不删除安全检查。
+5. 验证 SCC 摘要并投影 `PublicFunctionSummaryV1`；
+6. caller 只依赖 callee 的公共对象 key，局部证明另留在当前 world；
+7. 对无法收敛的部分返回 `unknown`，不删除安全检查。
 
-摘要和证明事实按 `MonoKey`、目标、feature/cfg、runtime/标准库版本和分析策略版本缓存。跨 package 的摘要只在导出定义、ABI、effect 和相关源码输入摘要未变化时复用。`ForeignLeaf`、`ForeignBridge`、内联汇编和未登记的 C 回调不能被假定为纯函数；除非有显式且可验证的 ABI 契约，否则按未知处理。
+局部证明按 `MonoKey`、闭世界、目标、feature/cfg、runtime/标准库版本和分析策略缓存；公共
+摘要还按独立 schema、analysis semantics revision 和 `PublicSummaryPolicyV1` 版本化。
+`ForeignLeaf`、`ForeignBridge`、内联汇编和未登记的 C 回调不能被假定为纯函数；除非有显式
+且可验证的 ABI 契约，否则按 unknown 处理。
 
-分析尽力覆盖全程序，但不承诺解决所有人类可读出的关系。健全性优先于完整性：求解超时、内存不足、循环不收敛或 alias 不明都只能降低优化机会，不能改变合法程序的结果。
+分析尽力覆盖全程序，但不承诺解决所有人类可读出的关系。健全性优先于完整性：求解超时、
+内存不足、循环不收敛或 alias 不明都只能降低优化机会，不能改变合法程序的结果。
 
 ## 优化、类型与 lint 的边界
 
@@ -213,26 +314,39 @@ lint 只消费分析结果，不改变类型、控制流语义或运行时错误
 
 ## Query 与 verifier
 
-源码宏和抽象分析必须是独立 query，不能通过可变全局状态把结果塞进 HIR 或 GIR。官方 query 至少包含：
+comptime、源码宏和抽象分析必须是独立 query，不能通过可变全局状态把结果塞进 HIR 或
+GIR。官方 query 至少包含：
 
 ```text
 ParseSource(source_fingerprint, source_slot)
 ExpandSourceMacro(call_key, round, source_slot)
+AnalysisSccSummary(scc_key, analysis_policy)
 FunctionAnalysisSummary(mono_key, analysis_policy)
+PublicFunctionSummary(mono_key, analysis_semantics_revision, public_policy_revision)
 WholeProgramAnalysis(world_key, analysis_policy)
 ```
 
-`ParseSource` 的结果是已验证的 parser fragment 及其 source hash；`ExpandSourceMacro` 的结果包括生成文本/解析结果摘要、`ExpansionRecord`、直接输入和诊断；`FunctionAnalysisSummary` 的结果包括稳定摘要和证明版本；`WholeProgramAnalysis` 的结果包括排序后的可达图、SCC 摘要和可消费事实。所有结果通过已有 query 状态机和 cycle/fixpoint 规则生成，不返回半初始化对象。
+`FreezeTypeUniverse` 产生排序后的具体类型集合、稠密编号与 `TypeUniverseKey`；
+`EvaluateLateComptime` 产生不可变 late 标量。`AnalysisSccSummary` 独占摘要固定点求解，
+`FunctionAnalysisSummary` 只是从已完成 SCC 结果投影单函数内部摘要；
+`PublicFunctionSummary` 验证并擦除非 interface place 后，产生内容寻址公共对象。
+`WholeProgramAnalysis` 包含排序后的可达图、SCC 摘要、公共摘要键和 world-local 证明事实。
+所有结果通过已有 query 状态机和 cycle/fixpoint 规则生成，不返回半初始化对象。
 
-每个 GIR 改写 pass 必须在调试构建运行局部 verifier；跨阶段边界运行完整 verifier。verifier 至少检查：
+每个 GIR 改写 pass 必须在调试构建运行局部 verifier；跨阶段边界运行完整 verifier。verifier
+至少检查：
 
+- late comptime 闭包只读取冻结 type universe，且没有形成新类型、调用边或源码；
 - `proved` 下标事实支配被删除的边界检查；
 - 事实引用的 memory version 在中间没有被可能写入的操作失效；
 - 摘要的调用效果覆盖 callee 的真实操作；
+- 公共摘要只含可表示的 interface place，且条件事实不能在未证明前置条件时使用；
 - 生成 AST 没有遗留 `SourceMacro`、错误节点或未解析定义；
-- 成功 GIR/LIR 没有未求值 comptime 值、悬空 arena ID 或未知语义占位。
+- 成功 GIR/LIR 没有未物化的早期 comptime 值、悬空 arena ID 或未知语义占位；GIR 中合法的
+  `LateConstRef` 必须指向当前冻结 type universe 的成功结果，进入 LIR 前必须物化。
 
-分析失败不产生成功的“猜测摘要”。失败 query 只能缓存本 session 的错误或明确的 unknown 结果；unknown 的优化结果必须与保留全部运行时检查的结果语义等价。
+分析失败不产生成功的“猜测摘要”。失败 query 只能缓存本 session 的错误或明确的 unknown
+结果；unknown 的优化结果必须与保留全部运行时检查的结果语义等价。
 
 ## 确定性与资源
 

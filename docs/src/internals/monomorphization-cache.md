@@ -25,7 +25,7 @@
 BLAKE3-256(domain || 0x00 || canonical_bytes)
 ```
 
-域标签固定包括 `gugu-input-v1`、`gugu-query-key-v1`、`gugu-query-result-v1`、`gugu-mono-v1`、`gugu-object-v1` 和 `gugu-action-v1`。不同域的相同 payload 不能得到可互换身份。
+域标签固定包括 `gugu-input-v1`、`gugu-query-key-v1`、`gugu-query-result-v1`、`gugu-mono-v1`、`gugu-analysis-summary-v1`、`gugu-object-v1` 和 `gugu-action-v1`。不同域的相同 payload 不能得到可互换身份。
 
 规范编码 `GBC1` 使用：
 
@@ -47,6 +47,8 @@ session-local 的 `DefId`、`TyId`、arena ID、指针、线程编号和绝对 w
 
 - 编译器源码 revision 和工作树状态标志；
 - AST、HIR、GIR、LIR、cache、stack-map、GC metadata 与后端 schema 版本；
+- comptime capability registry 摘要、evaluator/验证器 revision、late comptime schema；
+- abstract analysis semantics revision、`PublicSummaryPolicyV1` revision 与公共摘要 schema；
 - runtime 和标准库源码摘要；
 - 编译 compiler 使用的 Rust target、panic 模式及会改变生成物的 Cargo feature；
 - 启用的目标注册表和内建 lang item 表摘要。
@@ -68,23 +70,27 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 7 | `LowerHir` | stable owner key | HIR owner |
 | 8 | `TypeCheck` | stable owner key | typeck 侧表 |
 | 9 | `TraitSelection` | canonical obligation | impl selection |
-| 10 | `EvaluateComptime` | stable definition + args | comptime 值 |
+| 10 | `EvaluateEarlyComptime` | stable definition + args + comptime domain | 早期 comptime 值 |
 | 11 | `BuildGenericGir` | stable owner key | generic GIR |
 | 12 | `CollectMonoRoots` | target/harness | 根 `MonoKey` 集合 |
 | 13 | `InstantiateGir` | `MonoKey` | monomorphic GIR |
 | 14 | `LayoutOf` | stable concrete type key | 目标布局 |
-| 15 | `BuildLir` | `MonoKey` | 优化后 LIR + `PollSummary` |
+| 15 | `BuildLir` | `MonoKey` + consumed late-result fingerprint | 优化后 LIR + `PollSummary` |
 | 16 | `CodegenFragment` | `MonoKey` + LIR fingerprint | 机器码片段 |
 | 17 | `TypeMetadata` | stable concrete type key | 未重定位类型 metadata |
-| 18 | `RuntimeMetadata` | closed-world type/instance set | metadata sections |
-| 19 | `PlanImage` | target + roots + fragments | 镜像布局与重定位计划 |
+| 18 | `RuntimeMetadata` | closed-world type/instance set + late table | metadata sections |
+| 19 | `PlanImage` | target + roots + fragments + late table | 镜像布局与重定位计划 |
 | 20 | `EmitImage` | image plan fingerprint | 最终镜像 |
 | 21 | `ParseSource` | generated source fingerprint + source slot | `ParsedSource` |
 | 22 | `ExpandSourceMacro` | stable macro call + round + source slot + script inputs | generated source/fragment + expansion record |
-| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy | canonical function summary |
-| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy | sorted summaries and proof facts |
+| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy | completed SCC 中的函数摘要投影 |
+| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table | 排序摘要与 world-local 证明事实 |
+| 25 | `FreezeTypeUniverse` | closed-world instance graph | `TypeUniverseKey`、类型序列与稠密编号 |
+| 26 | `EvaluateLateComptime` | `LateConstKey` + `TypeUniverseKey` | late 标量常量 |
+| 27 | `AnalysisSccSummary` | sorted SCC `MonoKey` set + analysis policy | 完整 SCC 摘要固定点 |
+| 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision | 内容寻址跨 package 摘要 |
 
-新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--24 只表达新 query，不得重用或改变既有编号的含义。
+新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--28 只表达登记的新 query，不得重用或改变既有编号的含义。
 
 ## query 状态机
 
@@ -104,7 +110,8 @@ query 执行期间，线程局部 query stack 记录读取的每个 input/query�
 
 - 函数签名和模块定义由 `CollectDefinitions` 一次收集；
 - `ExpandSourceMacro` 按 `(stable macro call, expansion round, source slot)` 显式推进有限展开；再次遇到相同展开栈 key 报 expansion cycle，预算耗尽返回失败，不能读取半初始化 AST；
-- `FunctionAnalysisSummary` 与 `WholeProgramAnalysis` 按调用图 SCC 显式求摘要固定点；不收敛只得到 `unknown`，不能由 query engine 返回半初始化摘要；
+- `EvaluateLateComptime` 只读取已经完成的 `FreezeTypeUniverse`；其依赖图必须是有向无环图，返回类型形成、源码宏或单态化 query 的边是内部错误；
+- `WholeProgramAnalysis` 先建立调用图 SCC，`AnalysisSccSummary` 再按稳定成员顺序显式求摘要固定点；`FunctionAnalysisSummary` 和 `PublicFunctionSummary` 只能投影完成的 SCC 结果，不读取半初始化成员；
 - 互递归函数 body 各自 type-check，但只依赖已冻结签名；
 - trait/impl obligation 使用独立 obligation stack 报循环或求规范允许的固定点；
 - 相同 `MonoKey` 的递归调用复用正在收集的实例节点，不再次实例化。
@@ -113,26 +120,35 @@ query 执行期间，线程局部 query stack 记录读取的每个 input/query�
 
 ## 指纹与 red/green 复用
 
-input fingerprint 为 `gugu-input-v1` 域下的规范输入摘要。query result fingerprint 为：
+input fingerprint 为 `gugu-input-v1` 域下的规范输入摘要。query record 分开保存**依赖
+fingerprint**和**结果 fingerprint**；前者判断是否需要重算，后者判断变化是否应继续传播。
+result fingerprint 的规范输入为：
 
 ```text
 kind number
 query schema version
 canonical key
-sorted direct dependency result fingerprints
 canonical successful result bytes
 sorted diagnostics bytes
 ```
 
-经 `gugu-query-result-v1` 域哈希得到的 32 字节值。
+经 `gugu-query-result-v1` 域哈希得到 32 字节值。直接依赖列表及当时的 input/query result
+fingerprint 另存于 record，不写进结果 fingerprint；否则任一实现依赖变化都会强制向所有
+caller 传播，即使可消费结果逐字节未变，red/green 就失去结果等价的意义。
 
 加载上一 session 的 query record 时，engine 先递归验证直接 input/query 的当前 fingerprint：
 
 - 全部相同则标为 green，直接复用结果；
 - 任一不同、缺失或 schema 不匹配则标为 red，重新执行；
-- 重新执行后若 result fingerprint 与旧值相同，下游仍可保持 green。
+- 重新执行后若 result fingerprint 与旧值相同，只更新本 query 的依赖记录，下游保持 green；
+- 结果 fingerprint 不同才把 red 继续传播给依赖该结果的 query。
 
-query 不允许读取未通过 query/input API 登记的文件、环境、时钟、随机源或全局可变状态。build.gg 输出、`embed_file`、target 配置、feature、锁图、源码宏生成文本、宏展开属性、解析器 schema 和 native link metadata 都作为显式 input query 注入。
+依赖验证不能只比较 result fingerprint：input 内容或 producer provenance 变化必须先使当前
+query 重算；只有重算后确认结果等价，才允许停止传播。`PublicFunctionSummary` 因而可以在
+callee body 改变但公共语义摘要不变时保持同一对象 key 和结果 fingerprint，同时仍保证生产
+action 已针对新 body 重新验证。
+
+query 不允许读取未通过 query/input API 登记的文件、环境、时钟、随机源或全局可变状态。build.gg 输出、`embed_file`、target 配置、feature、锁图、源码宏生成文本、宏展开属性、comptime capability registry、parser/evaluator/analysis schema、late type universe、公共摘要对象键和 native link metadata 都作为显式输入或 `CompilerIdentity` 成分注入。
 
 ## 持久 object 格式
 
@@ -223,7 +239,6 @@ compiler 在 interner 中同时保留 key对应的规范 bytes。相同 `StableT
 - 可达 `dyn Trait` 的 vtable、方法 shim 和 downcast metadata；
 - `type_id[T]`、`type_name[T]` 和 metadata 查询显式要求的类型；
 - global asm、native 导入和 C 回调所引用的内部符号。
-
 collector 使用按 `MonoKey` 摘要字节序排列的 `BTreeSet` 作为 pending 集合；集合无可证明小上界且需要稳定有序 pop，因此不使用稠密位图。已发现实例用 hash table 点查以避免重复，但最终 `MonoId(u32)` 只在收集闭合后按 `MonoKey` 排序分配。hash table 的迭代顺序不得影响工作顺序。
 
 处理一个实例时，collector 从 monomorphic GIR 收集直接调用、函数值、vtable、类型 descriptor、global 和 glue 边，并把未见 key 插入 pending。调用自身或 SCC 中已标记 `Visiting` 的相同 key 只增加图边。沿一条实例化 ancestry 出现超过 256 个不同 `MonoKey`，或同一 generic definition 在 ancestry 中以严格增长的类型结构重复 128 次，报无法收敛的递归单态化；总实例达到 `u32::MAX` 报 `implementation-limit`。
@@ -234,9 +249,20 @@ collector 使用按 `MonoKey` 摘要字节序排列的 `BTreeSet` 作为 pending
 
 ### 具体类型集合与 `TypeId`
 
-实例图闭合后，从签名、local、global、vtable、descriptor、常量和 runtime 根递归收集所有具体类型。类型集合按完整 `StableTypeKey` 字节序排序并分配连续运行时 `TypeId` `0..N`；`N` 必须小于等于 `u32::MAX`，与[类型规范](../spec/types.md#typeid-与-dyn-any)一致。
+实例图闭合后，`FreezeTypeUniverse` 从签名、local、global、vtable、descriptor、早期常量、
+late comptime 闭包中的类型依赖和 runtime 根递归收集所有具体类型。类型集合按完整
+`StableTypeKey` 字节序排序并分配连续运行时 `TypeId` `0..N`；`N` 必须小于等于 `u32::MAX`。
+结果的规范编码经独立 query fingerprint 形成 `TypeUniverseKey`，并在本次 world 内不可变。
 
-单类型 metadata object 可以独立缓存，但其中对其他类型、glue 和 vtable 的引用必须保存稳定 relocation key。最终 `RuntimeMetadata` query 在本次闭世界集合上把这些 key 重定位为稠密 `TypeId`/RVA。含最终数字 `TypeId` 的完整 section 不能跨不同闭世界集合直接复用。
+`EvaluateLateComptime` 随后只读取 `TypeUniverseKey`、冻结布局、早期常量与 capability
+registry，按稳定 `LateConstKey` 顺序生成 late 结果表。任何新类型、实例、impl、宏或定义
+依赖都是内部错误。`WholeProgramAnalysis`、`BuildLir`、`RuntimeMetadata` 和 `PlanImage` 只消费
+该表，不能重新执行 evaluator。
+
+单类型 metadata object 可以独立缓存，但其中对其他类型、glue 和 vtable 的引用必须保存
+稳定 relocation key。最终 `RuntimeMetadata` query 在本次闭世界集合上把这些 key 重定位为
+稠密 `TypeId`/RVA，并填充 late metadata 值。含最终数字 `TypeId` 的完整 section 不能跨不同
+`TypeUniverseKey` 直接复用。
 
 ## 每实例代码缓存
 
@@ -244,12 +270,12 @@ collector 使用按 `MonoKey` 摘要字节序排列的 `BTreeSet` 作为 pending
 
 - 机器码 bytes 与对齐；
 - 本地只读常量 bytes；
-- 按 offset 排序的逻辑 relocation；函数/数据引用使用 stable symbol，运行时类型常量/记录使用完整 `StableTypeKey`，源码索引使用 `{ MonoKey, fragment_source_ordinal }`，禁止烘焙本次闭世界的数字 `TypeId`/source record index；
+- 按 offset 排序的逻辑 relocation；函数/数据引用使用 stable symbol，直接运行时类型常量/记录使用完整 `StableTypeKey`，源码索引使用 `{ MonoKey, fragment_source_ordinal }`；
 - 未重定位 stack map、unwind 和 source location 记录；每条保存逻辑路径、byte span、synthetic kind和 fragment source ordinal；
 - 定义符号、引用符号及可见性；
-- LIR result fingerprint、直接计费的 `PollFreeLeaf` summary fingerprint和所有内联 callee fingerprint。
+- LIR result fingerprint、直接计费的 `PollFreeLeaf` summary fingerprint、所有内联 callee fingerprint，以及该 LIR 实际消费的 late 结果 fingerprint。
 
-单实例粒度避免 package 内一个无关函数变化使整个目标代码失效。最终 image layout统一放置 fragment并解析 relocation。跨实例内联使 caller key依赖被内联 callee的 GIR/result fingerprint；未内联且保留 entry `StackCheck` 的普通调用只依赖 callee ABI/signature fingerprint，不因 callee body改变而使 caller失效。只有 direct `PollFreeLeaf` 调用额外依赖其固定尺寸 `PollSummary`；leaf分类或 `poll_free_cost` 改变时 caller `BuildLir`必须失效。递归/间接调用始终使用 checked entry，不形成 `BuildLir` query环。
+单实例粒度避免 package 内一个无关函数变化使整个目标代码失效。直接 `type_id[T]()` 仍以 `StableTypeKey` relocation 表示，不把本次 world 的稠密编号烘焙进可跨 world 复用的片段。若 GIR 优化或 LIR 物化实际消费了 `type_id_count()`、comptime `TypeId.as_int()` 或其它 late 标量，`BuildLir` key 和 fragment payload 必须包含精确 late 结果 fingerprint；这类片段只能在相同 late 结果下复用。跨实例内联使 caller key依赖被内联 callee的 GIR/result fingerprint；未内联且保留 entry `StackCheck` 的普通调用只依赖 callee ABI/signature fingerprint，不因 callee body改变而使 caller失效。只有 direct `PollFreeLeaf` 调用额外依赖其固定尺寸 `PollSummary`；leaf分类或 `poll_free_cost` 改变时 caller `BuildLir`必须失效。递归/间接调用始终使用 checked entry，不形成 `BuildLir` query环。
 
 机器码 object key还必须覆盖 target、CPU baseline、内部 ABI revision、panic/unwind模式、GC barrier revision、poll/`NoSafepointRegion` policy revision、stack-map schema和 instrumentation。绝对代码地址和本次闭世界的稠密 `TypeId`不进入 fragment；只以逻辑 symbol/type relocation表示。
 
