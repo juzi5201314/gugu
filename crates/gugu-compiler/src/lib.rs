@@ -13,12 +13,17 @@ mod diagnostics;
 mod frontend;
 mod ir;
 mod runtime;
+mod source;
 mod target;
 
 pub use action::{ActionGraph, ActionKind, ActionNode, ActionStatus};
-pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity, Span};
+pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use runtime::{
     IntrinsicBoundary, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
+};
+pub use source::{
+    ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
+    SourceMapError, SourceSlot, SourceSnapshot, Span, SpanError, normalize_logical_path,
 };
 pub use target::{
     Architecture, ObjectFormat, OperatingSystem, Rt0Kind, TargetDescriptor, TargetName,
@@ -61,11 +66,14 @@ impl CompileRequest {
         }
     }
 
-    /// 创建从文件系统读取的单文件请求。
+    /// 创建从文件系统读取的单文件请求；逻辑路径按输入路径推导。
     pub fn single_file_path(path: impl Into<PathBuf>, target: TargetName) -> Self {
         Self {
             target,
-            input: CompileInput::SingleFilePath(path.into()),
+            input: CompileInput::File {
+                path: path.into(),
+                logical_path: None,
+            },
         }
     }
 }
@@ -73,15 +81,22 @@ impl CompileRequest {
 #[derive(Clone, Debug)]
 enum CompileInput {
     EmptyPackage,
-    SingleFileSource { path: PathBuf, source: String },
-    SingleFilePath(PathBuf),
+    SingleFileSource {
+        path: PathBuf,
+        source: String,
+    },
+    File {
+        path: PathBuf,
+        logical_path: Option<PathBuf>,
+    },
 }
 
-/// compiler 阶段 1 返回的内存结果。
+/// compiler 返回的内存结果。
 #[derive(Clone, Debug)]
 pub struct Compilation {
     graph: ActionGraph,
     diagnostics: Diagnostics,
+    source_map: SourceMap,
     image_plan: Option<ImagePlan>,
 }
 
@@ -96,6 +111,11 @@ impl Compilation {
         &self.diagnostics
     }
 
+    /// 返回本次 action 的源码与展开表。
+    pub fn source_map(&self) -> &SourceMap {
+        &self.source_map
+    }
+
     /// 返回成功时的内存镜像计划。
     pub fn image_plan(&self) -> Option<&ImagePlan> {
         self.image_plan.as_ref()
@@ -107,7 +127,7 @@ impl Compilation {
     }
 }
 
-/// 阶段 1 的编译器入口。
+/// 阶段 3/4 的编译器入口。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Compiler;
 
@@ -127,21 +147,23 @@ impl Compiler {
 
         let loaded = match load_input(&request.input) {
             Ok(loaded) => loaded,
-            Err((path, error)) => {
-                diagnostics.push(Diagnostic::source_read(&path, &error));
-                graph.fail(ActionKind::LoadSources, "源文件读取失败");
+            Err(error) => {
+                diagnostics.push(error.diagnostic());
+                graph.fail(ActionKind::LoadSources, "源文件读取或快照校验失败");
                 graph.skip_after(ActionKind::LoadSources, "前置 action 失败");
                 diagnostics.sort();
                 return Compilation {
                     graph,
                     diagnostics,
+                    source_map: SourceMap::empty(),
                     image_plan: None,
                 };
             }
         };
+        let source_map = loaded.source_map();
         graph.complete(ActionKind::LoadSources, loaded.detail());
 
-        let frontend_input = loaded.as_source_input();
+        let frontend_input = loaded.as_source_input(&source_map);
         let frontend = match frontend::bootstrap(frontend_input) {
             Ok(output) => output,
             Err(diagnostic) => {
@@ -152,6 +174,7 @@ impl Compiler {
                 return Compilation {
                     graph,
                     diagnostics,
+                    source_map,
                     image_plan: None,
                 };
             }
@@ -171,6 +194,7 @@ impl Compiler {
             return Compilation {
                 graph,
                 diagnostics,
+                source_map,
                 image_plan: None,
             };
         };
@@ -196,6 +220,7 @@ impl Compiler {
         Compilation {
             graph,
             diagnostics,
+            source_map,
             image_plan,
         }
     }
@@ -204,39 +229,88 @@ impl Compiler {
 #[derive(Clone, Debug)]
 enum LoadedInput {
     EmptyPackage,
-    SingleFile { path: PathBuf, source: String },
+    File { snapshot: SourceSnapshot },
 }
 
 impl LoadedInput {
-    fn as_source_input(&self) -> SourceInput<'_> {
+    fn as_source_input<'a>(&'a self, source_map: &'a SourceMap) -> SourceInput<'a> {
         match self {
             Self::EmptyPackage => SourceInput::EmptyPackage,
-            Self::SingleFile { path, source } => SourceInput::SingleFile { path, source },
+            Self::File { snapshot } => SourceInput::SingleFile {
+                snapshot,
+                source_map,
+            },
         }
+    }
+
+    fn source_map(&self) -> SourceMap {
+        let snapshot = match self {
+            Self::EmptyPackage => return SourceMap::empty(),
+            Self::File { snapshot, .. } => snapshot,
+        };
+        SourceMap::new(vec![snapshot.clone()]).expect("one source path is unique")
     }
 
     fn detail(&self) -> String {
         match self {
             Self::EmptyPackage => "空 package".to_owned(),
-            Self::SingleFile { path, .. } => format!("{}", path.display()),
+            Self::File { snapshot, .. } => format!("{}", snapshot.logical_path()),
         }
     }
 }
 
-fn load_input(input: &CompileInput) -> Result<LoadedInput, (PathBuf, std::io::Error)> {
+#[derive(Debug)]
+enum LoadInputError {
+    Read {
+        path: PathBuf,
+        error: std::io::Error,
+    },
+    Snapshot(SourceError),
+}
+
+impl LoadInputError {
+    fn diagnostic(&self) -> Diagnostic {
+        match self {
+            Self::Read { path, error } => Diagnostic::source_read(path, error),
+            Self::Snapshot(error) => Diagnostic::source_error(error),
+        }
+    }
+}
+
+fn load_input(input: &CompileInput) -> Result<LoadedInput, LoadInputError> {
     match input {
         CompileInput::EmptyPackage => Ok(LoadedInput::EmptyPackage),
-        CompileInput::SingleFileSource { path, source } => Ok(LoadedInput::SingleFile {
-            path: path.clone(),
-            source: source.clone(),
-        }),
-        CompileInput::SingleFilePath(path) => fs::read_to_string(path)
-            .map(|source| LoadedInput::SingleFile {
+        CompileInput::SingleFileSource { path, source } => {
+            SourceSnapshot::from_str(logical_input_path(path), source)
+                .map(|snapshot| LoadedInput::File { snapshot })
+                .map_err(LoadInputError::Snapshot)
+        }
+        CompileInput::File { path, logical_path } => fs::read(path)
+            .map_err(|error| LoadInputError::Read {
                 path: path.clone(),
-                source,
+                error,
             })
-            .map_err(|error| (path.clone(), error)),
+            .and_then(|bytes| {
+                let logical_path = logical_path
+                    .clone()
+                    .unwrap_or_else(|| logical_input_path(path));
+                SourceSnapshot::from_bytes(logical_path, bytes)
+                    .map(|snapshot| LoadedInput::File { snapshot })
+                    .map_err(LoadInputError::Snapshot)
+            }),
     }
+}
+
+fn logical_input_path(path: &std::path::Path) -> PathBuf {
+    if !path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .ok()
+        .and_then(|current| path.strip_prefix(current).ok().map(PathBuf::from))
+        .filter(|relative| !relative.as_os_str().is_empty())
+        .or_else(|| path.file_name().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from("source.gg"))
 }
 
 /// 阶段 1 的内存镜像计划，不是可执行文件。
@@ -297,7 +371,7 @@ impl frontend::FrontendOutput {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionKind, ActionStatus, CompileRequest, Compiler, TargetName};
+    use super::{ActionKind, ActionStatus, CompileRequest, Compiler, DiagnosticCode, TargetName};
 
     #[test]
     fn empty_package_has_complete_graph_without_image() {
@@ -376,5 +450,31 @@ mod tests {
             super::Rt0Kind::WindowsThinImport
         );
         assert!(TargetName::parse("x86_64-freebsd").is_err());
+    }
+
+    #[test]
+    fn bom_source_fails_at_load_sources_with_stable_code() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry = root.path().join("src/main.gg");
+        std::fs::create_dir_all(entry.parent().expect("parent exists")).expect("create src");
+        std::fs::write(&entry, b"\xef\xbb\xbffn main() {}").expect("write bom source");
+        let compilation = Compiler::new().compile(CompileRequest::single_file_path(
+            &entry,
+            TargetName::X86_64Linux,
+        ));
+
+        assert!(!compilation.is_success());
+        assert!(compilation.image_plan().is_none());
+        assert!(compilation.source_map().snapshots().is_empty());
+        let diagnostic = &compilation.diagnostics().items()[0];
+        assert_eq!(diagnostic.code(), DiagnosticCode::SourceBom);
+        assert!(
+            compilation
+                .action_graph()
+                .nodes()
+                .iter()
+                .any(|node| node.kind() == ActionKind::LoadSources
+                    && node.status() == ActionStatus::Failed)
+        );
     }
 }

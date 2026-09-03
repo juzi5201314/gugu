@@ -1,39 +1,6 @@
 use std::fmt;
 
-/// 一个编译 action 中的源码范围。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct Span {
-    path: std::path::PathBuf,
-    start: u32,
-    end: u32,
-}
-
-impl Span {
-    pub(crate) fn new(path: &std::path::Path, start: usize, end: usize) -> Self {
-        debug_assert!(start <= u32::MAX as usize);
-        debug_assert!(end <= u32::MAX as usize);
-        Self {
-            path: path.to_path_buf(),
-            start: start as u32,
-            end: end as u32,
-        }
-    }
-
-    /// 返回该范围所属的源码路径。
-    pub fn path(&self) -> &std::path::Path {
-        &self.path
-    }
-
-    /// 返回半开字节范围的起点。
-    pub fn start(&self) -> u32 {
-        self.start
-    }
-
-    /// 返回半开字节范围的终点。
-    pub fn end(&self) -> u32 {
-        self.end
-    }
-}
+use crate::source::{SourceError, Span};
 
 /// 诊断严重级别。
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -53,7 +20,7 @@ impl fmt::Display for Severity {
     }
 }
 
-/// 阶段 1 使用的稳定诊断代码。
+/// 稳定的源码、清单与路径诊断代码。
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DiagnosticCode {
     /// 源文件无法读取。
@@ -62,6 +29,14 @@ pub enum DiagnosticCode {
     MissingMain,
     /// bootstrap 前端无法识别源文件结构。
     MalformedSource,
+    /// 源文件不是合法 UTF-8。
+    InvalidUtf8,
+    /// 源文件含有 BOM。
+    SourceBom,
+    /// 源码逻辑路径无效。
+    InvalidSourcePath,
+    /// span 越出源码范围。
+    SpanOutOfBounds,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -70,6 +45,10 @@ impl fmt::Display for DiagnosticCode {
             Self::SourceRead => "E0001",
             Self::MissingMain => "E0002",
             Self::MalformedSource => "E0003",
+            Self::InvalidUtf8 => "E0004",
+            Self::SourceBom => "E0005",
+            Self::InvalidSourcePath => "E0006",
+            Self::SpanOutOfBounds => "E0007",
         };
         formatter.write_str(code)
     }
@@ -104,7 +83,34 @@ impl Diagnostic {
         Self::error(
             DiagnosticCode::SourceRead,
             format!("无法读取源文件 `{}`：{error}", path.display()),
-            Some(Span::new(path, 0, 0)),
+            Some(Span::detached(path, 0, 0)),
+        )
+    }
+
+    /// 创建源码快照校验错误诊断。
+    pub(crate) fn source_error(error: &SourceError) -> Self {
+        let (code, path, message, offset) = match error {
+            SourceError::TooLarge { path } => {
+                (DiagnosticCode::SpanOutOfBounds, path, error.to_string(), 0)
+            }
+            SourceError::InvalidUtf8 { path, offset } => (
+                DiagnosticCode::InvalidUtf8,
+                path,
+                error.to_string(),
+                *offset as usize,
+            ),
+            SourceError::Bom { path } => (DiagnosticCode::SourceBom, path, error.to_string(), 0),
+            SourceError::InvalidPath { path } => (
+                DiagnosticCode::InvalidSourcePath,
+                path,
+                error.to_string(),
+                0,
+            ),
+        };
+        Self::error(
+            code,
+            message,
+            Some(Span::detached(std::path::Path::new(path), offset, offset)),
         )
     }
 
@@ -128,16 +134,16 @@ impl Diagnostic {
         self.span.as_ref()
     }
 
-    /// 将诊断渲染为阶段 1 的文本格式。
+    /// 将诊断渲染为阶段 3 的文本格式。
     pub fn render_text(&self) -> String {
         match &self.span {
             Some(span) => format!(
                 "{}[{}] {}:{}:{}: {}",
                 self.severity,
                 self.code,
-                span.path.display(),
-                1,
-                span.start + 1,
+                span.path().display(),
+                span.line(),
+                span.column(),
                 self.message
             ),
             None => format!("{}[{}]: {}", self.severity, self.code, self.message),
@@ -150,7 +156,6 @@ impl Diagnostic {
 pub struct Diagnostics {
     items: Vec<Diagnostic>,
 }
-
 impl Diagnostics {
     pub(crate) fn push(&mut self, diagnostic: Diagnostic) {
         self.items.push(diagnostic);
@@ -158,14 +163,22 @@ impl Diagnostics {
 
     pub(crate) fn sort(&mut self) {
         self.items.sort_by(|left, right| {
-            let left_key = left
-                .span
-                .as_ref()
-                .map(|span| (span.path.as_os_str(), span.start, span.end));
-            let right_key = right
-                .span
-                .as_ref()
-                .map(|span| (span.path.as_os_str(), span.start, span.end));
+            let left_key = left.span.as_ref().map(|span| {
+                (
+                    span.path().as_os_str(),
+                    span.start(),
+                    span.end(),
+                    span.expansion(),
+                )
+            });
+            let right_key = right.span.as_ref().map(|span| {
+                (
+                    span.path().as_os_str(),
+                    span.start(),
+                    span.end(),
+                    span.expansion(),
+                )
+            });
             left_key
                 .cmp(&right_key)
                 .then(left.severity.cmp(&right.severity))
