@@ -11,8 +11,10 @@ pub(crate) enum SourceInput<'a> {
         snapshot: &'a SourceSnapshot,
         source_map: &'a SourceMap,
     },
+    LibraryFile {
+        snapshot: &'a SourceSnapshot,
+    },
 }
-
 #[derive(Clone, Debug)]
 pub(crate) struct FrontendOutput {
     pub(crate) path: Option<PathBuf>,
@@ -31,6 +33,11 @@ pub(crate) fn bootstrap(input: SourceInput<'_>) -> Result<FrontendOutput, Diagno
             snapshot,
             source_map,
         } => check_single_file(snapshot, source_map),
+        SourceInput::LibraryFile { snapshot } => Ok(FrontendOutput {
+            path: Some(snapshot.path().to_path_buf()),
+            has_main: false,
+            source_len: snapshot.content().len() as u32,
+        }),
     }
 }
 

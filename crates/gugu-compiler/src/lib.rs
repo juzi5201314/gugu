@@ -12,12 +12,14 @@ mod backend;
 mod diagnostics;
 mod frontend;
 mod ir;
+mod project;
 mod runtime;
 mod source;
 mod target;
 
 pub use action::{ActionGraph, ActionKind, ActionNode, ActionStatus};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
+pub use project::{Package, Project, ProjectError, Target, TargetKind, TargetSelection, Workspace};
 pub use runtime::{
     IntrinsicBoundary, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
 };
@@ -73,6 +75,36 @@ impl CompileRequest {
             input: CompileInput::File {
                 path: path.into(),
                 logical_path: None,
+                require_main: true,
+            },
+        }
+    }
+
+    /// 创建库 target 入口请求：读取源码快照但不要求可执行 `main`。
+    pub fn library_file(path: impl Into<PathBuf>, target: TargetName) -> Self {
+        Self {
+            target,
+            input: CompileInput::File {
+                path: path.into(),
+                logical_path: None,
+                require_main: false,
+            },
+        }
+    }
+
+    /// 创建项目 target 入口请求；逻辑路径由调用方按 package root 推导。
+    pub fn project_entry(
+        path: impl Into<PathBuf>,
+        logical_path: impl Into<PathBuf>,
+        target: TargetName,
+        require_main: bool,
+    ) -> Self {
+        Self {
+            target,
+            input: CompileInput::File {
+                path: path.into(),
+                logical_path: Some(logical_path.into()),
+                require_main,
             },
         }
     }
@@ -88,6 +120,7 @@ enum CompileInput {
     File {
         path: PathBuf,
         logical_path: Option<PathBuf>,
+        require_main: bool,
     },
 }
 
@@ -229,17 +262,29 @@ impl Compiler {
 #[derive(Clone, Debug)]
 enum LoadedInput {
     EmptyPackage,
-    File { snapshot: SourceSnapshot },
+    File {
+        snapshot: SourceSnapshot,
+        require_main: bool,
+    },
 }
 
 impl LoadedInput {
     fn as_source_input<'a>(&'a self, source_map: &'a SourceMap) -> SourceInput<'a> {
         match self {
             Self::EmptyPackage => SourceInput::EmptyPackage,
-            Self::File { snapshot } => SourceInput::SingleFile {
+            Self::File {
                 snapshot,
-                source_map,
-            },
+                require_main,
+            } => {
+                if *require_main {
+                    SourceInput::SingleFile {
+                        snapshot,
+                        source_map,
+                    }
+                } else {
+                    SourceInput::LibraryFile { snapshot }
+                }
+            }
         }
     }
 
@@ -282,10 +327,17 @@ fn load_input(input: &CompileInput) -> Result<LoadedInput, LoadInputError> {
         CompileInput::EmptyPackage => Ok(LoadedInput::EmptyPackage),
         CompileInput::SingleFileSource { path, source } => {
             SourceSnapshot::from_str(logical_input_path(path), source)
-                .map(|snapshot| LoadedInput::File { snapshot })
+                .map(|snapshot| LoadedInput::File {
+                    snapshot,
+                    require_main: true,
+                })
                 .map_err(LoadInputError::Snapshot)
         }
-        CompileInput::File { path, logical_path } => fs::read(path)
+        CompileInput::File {
+            path,
+            logical_path,
+            require_main,
+        } => fs::read(path)
             .map_err(|error| LoadInputError::Read {
                 path: path.clone(),
                 error,
@@ -295,7 +347,10 @@ fn load_input(input: &CompileInput) -> Result<LoadedInput, LoadInputError> {
                     .clone()
                     .unwrap_or_else(|| logical_input_path(path));
                 SourceSnapshot::from_bytes(logical_path, bytes)
-                    .map(|snapshot| LoadedInput::File { snapshot })
+                    .map(|snapshot| LoadedInput::File {
+                        snapshot,
+                        require_main: *require_main,
+                    })
                     .map_err(LoadInputError::Snapshot)
             }),
     }
@@ -450,6 +505,36 @@ mod tests {
             super::Rt0Kind::WindowsThinImport
         );
         assert!(TargetName::parse("x86_64-freebsd").is_err());
+    }
+
+    #[test]
+    fn library_file_compiles_without_requiring_main() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let entry = root.path().join("src/lib.gg");
+        std::fs::create_dir_all(entry.parent().expect("parent exists")).expect("create src");
+        std::fs::write(&entry, "fn util() int { 1 }\n").expect("write lib");
+        let compilation = Compiler::new().compile(CompileRequest::project_entry(
+            &entry,
+            "src/lib.gg",
+            TargetName::X86_64Linux,
+            false,
+        ));
+
+        // 库 target 没有 main：前端通过，但没有可执行入口，也不挂 runtime。
+        assert!(compilation.is_success());
+        assert!(compilation.image_plan().is_none());
+        assert_eq!(
+            compilation
+                .action_graph()
+                .nodes()
+                .iter()
+                .find(|node| node.kind() == ActionKind::PlanBackend)
+                .map(|node| node.status()),
+            Some(ActionStatus::Complete)
+        );
+        let source_map = compilation.source_map();
+        assert_eq!(source_map.snapshots().len(), 1);
+        assert_eq!(source_map.snapshots()[0].logical_path(), "src/lib.gg");
     }
 
     #[test]

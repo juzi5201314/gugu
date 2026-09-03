@@ -7,7 +7,9 @@ use std::{
 };
 
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, ValueEnum, error::ErrorKind};
-use gugu_compiler::{Compilation, CompileRequest, Compiler, TargetName};
+use gugu_compiler::{
+    Compilation, CompileRequest, Compiler, Project, TargetKind, TargetName, TargetSelection,
+};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -759,33 +761,135 @@ fn print_version(format: OutputFormat) {
 }
 
 fn run_compile(file: Option<PathBuf>, options: &GlobalArgs, check_only: bool) -> i32 {
+    let format = options.format.unwrap_or_default();
     let target = match options.target.as_deref() {
         Some(target) => match TargetName::parse(target) {
             Ok(target) => target,
             Err(error) => {
-                emit_cli_error(options.format.unwrap_or_default(), &error.to_string());
+                emit_cli_error(format, &error.to_string());
                 return 2;
             }
         },
         None => match TargetName::host() {
             Some(target) => target,
             None => {
-                emit_cli_error(
-                    options.format.unwrap_or_default(),
-                    "当前宿主不是已登记的 Gugu 目标",
-                );
+                emit_cli_error(format, "当前宿主不是已登记的 Gugu 目标");
                 return 2;
             }
         },
     };
 
-    let request = match file {
-        Some(file) => CompileRequest::single_file_path(file, target),
-        None => CompileRequest::empty_package(target),
+    let Some(file) = file else {
+        return run_project_compile(options, target, check_only);
     };
-    let compilation = Compiler::new().compile(request);
+    if let Some(message) = single_file_mode_conflict(options) {
+        emit_cli_error(format, &message);
+        return 2;
+    }
+    let compilation = Compiler::new().compile(CompileRequest::single_file_path(file, target));
     print_compilation(&compilation, check_only, options, target);
     i32::from(!compilation.is_success())
+}
+
+fn single_file_mode_conflict(options: &GlobalArgs) -> Option<String> {
+    let conflicts = [
+        options.package.is_some().then_some("-p/--package"),
+        options.workspace.then_some("--workspace"),
+        options.lib.then_some("--lib"),
+        options.bin.is_some().then_some("--bin"),
+        options.test.is_some().then_some("--test"),
+        options.bench.is_some().then_some("--bench"),
+        options.example.is_some().then_some("--example"),
+        options.all_targets.then_some("--all-targets"),
+        options.features.is_some().then_some("--features"),
+        options
+            .no_default_features
+            .then_some("--no-default-features"),
+        options.all_features.then_some("--all-features"),
+    ];
+    let names = conflicts
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("、");
+    (!names.is_empty()).then(|| format!("单文件编译模式不支持参数：{names}"))
+}
+
+fn target_selection(options: &GlobalArgs) -> TargetSelection {
+    if options.all_targets {
+        return TargetSelection::All;
+    }
+    if options.lib {
+        return TargetSelection::Lib;
+    }
+    if let Some(name) = options.test.as_deref() {
+        return TargetSelection::Test(Some(name.to_owned()));
+    }
+    if let Some(name) = options.bench.as_deref() {
+        return TargetSelection::Bench(Some(name.to_owned()));
+    }
+    if let Some(name) = options.example.as_deref() {
+        return TargetSelection::Example(Some(name.to_owned()));
+    }
+    match options.bin.clone().flatten() {
+        Some(name) => TargetSelection::Bin(Some(name.to_owned())),
+        None => TargetSelection::DefaultBuild,
+    }
+}
+
+fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: bool) -> i32 {
+    let format = options.format.unwrap_or_default();
+    let start = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let project = match Project::discover(start) {
+        Ok(project) => project,
+        Err(error) => {
+            emit_cli_error(format, &error.to_string());
+            return 2;
+        }
+    };
+    let selected = match project.select_targets(
+        options.package.as_deref(),
+        options.workspace,
+        &target_selection(options),
+    ) {
+        Ok(selected) => selected,
+        Err(error) => {
+            emit_cli_error(format, &error.to_string());
+            return 2;
+        }
+    };
+
+    let compiler = Compiler::new();
+    let mut failed = false;
+    for (package, package_target) in selected {
+        let requires_main = matches!(package_target.kind(), TargetKind::Bin | TargetKind::Example)
+            || (package_target.kind() == TargetKind::Bench && !package_target.harness());
+        // 逻辑路径按 package root 推导，保证诊断位置与工作目录无关。
+        let logical_path = package_target
+            .entry()
+            .strip_prefix(package.root())
+            .expect("entry is inside package root")
+            .to_path_buf();
+        let request = CompileRequest::project_entry(
+            package_target.entry().to_path_buf(),
+            logical_path,
+            target,
+            requires_main,
+        );
+        let compilation = compiler.compile(request);
+        // 头行只属于 text 输出；json 与 json-diagnostic-short 保持纯事件流。
+        if !options.quiet && format == OutputFormat::Text {
+            println!(
+                "package `{}` target `{}` ({})",
+                package.package_name(),
+                package_target.name(),
+                package_target.kind()
+            );
+        }
+        print_compilation(&compilation, check_only, options, target);
+        failed |= !compilation.is_success();
+    }
+    i32::from(failed)
 }
 
 fn print_compilation(
@@ -1115,7 +1219,7 @@ fn redact_secrets(message: &str) -> String {
 mod tests {
     use super::{
         Cli, ConfigFile, ConfigValues, GlobalArgs, OutputFormat, format_hint, redact_secrets,
-        resolve_global, sanitize_path,
+        sanitize_path,
     };
     use clap::Parser;
     use std::{
@@ -1332,6 +1436,41 @@ mod tests {
         let options =
             super::global_from_values(raw, ConfigValues::default()).expect("options resolve");
         assert_eq!(options.format, Some(OutputFormat::Json));
+    }
+
+    #[test]
+    fn single_file_mode_rejects_project_selectors() {
+        let base = || GlobalArgs {
+            format: Some(OutputFormat::Text),
+            ..GlobalArgs::default()
+        };
+
+        // 纯单文件输入不触发任何冲突。
+        assert!(super::single_file_mode_conflict(&base()).is_none());
+
+        // 项目专属参数与单文件互斥。
+        let mut with_package = base();
+        with_package.package = Some("demo".to_owned());
+        assert_eq!(
+            super::single_file_mode_conflict(&with_package).as_deref(),
+            Some("单文件编译模式不支持参数：-p/--package")
+        );
+
+        let mut with_workspace = base();
+        with_workspace.workspace = true;
+        assert_eq!(
+            super::single_file_mode_conflict(&with_workspace).as_deref(),
+            Some("单文件编译模式不支持参数：--workspace")
+        );
+
+        // 多个冲突参数按声明顺序聚合列出。
+        let mut combined = base();
+        combined.lib = true;
+        combined.all_targets = true;
+        assert_eq!(
+            super::single_file_mode_conflict(&combined).as_deref(),
+            Some("单文件编译模式不支持参数：--lib、--all-targets")
+        );
     }
 }
 
