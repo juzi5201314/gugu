@@ -43,7 +43,13 @@ crates/
     ├── src/action.rs               稠密 action graph 与状态迁移
     ├── src/diagnostics.rs          稳定代码、源码范围与排序
     ├── src/source.rs               源码快照、Span、行首表与展开记录
-    ├── src/project.rs              清单、workspace 与 target 发现
+    ├── src/project/                清单、workspace 与 target 发现
+    │   ├── mod.rs                  项目聚合与选择
+    │   ├── model.rs                package、target 与 workspace 模型
+    │   ├── error.rs                项目发现与选择错误
+    │   ├── manifest.rs             清单 schema 与 package 构建
+    │   ├── targets.rs              target 自动发现与源码布局校验
+    │   └── workspace.rs            workspace 成员与 glob 解析
     ├── src/target.rs               目标注册表与 TargetDescriptor
     ├── src/frontend.rs             阶段 1 的入口结构检查
     ├── src/ir.rs                   main -> ReturnUnit 的 bootstrap IR
