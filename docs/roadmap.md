@@ -35,12 +35,12 @@
   - 实现单一 `gugu` 可执行入口、全局参数优先级、子命令注册、`text`/`json`/`json-diagnostic-short` 输出信封和退出码 `0/1/2/101`。
   - 验收：无子命令等价于 help，`version` 与 `--version` 一致，非法参数不进入编译，NDJSON 不泄漏绝对路径和凭据；覆盖 CLI 规范中的命令解析表。
 
-- [ ] **阶段 03：实现源码快照、规范路径与 Span 系统**（复杂度：2）
+- [x] **阶段 03：实现源码快照、规范路径与 Span 系统**（复杂度：2）
   - 依赖：阶段 01、02。
   - 实现 UTF-8 源码读取、BOM 拒绝、规范化逻辑路径、`SourceSnapshot`、字节/行列映射、宏展开 source context 和稳定文件 ID。
   - 验收：相同输入在不同工作目录、目录枚举顺序和换行环境下产生相同 span 与诊断位置；非法 UTF-8、BOM 和越界 span 有稳定错误。
 
-- [ ] **阶段 04：实现清单、workspace 与 target 发现**（复杂度：3）
+- [x] **阶段 04：实现清单、workspace 与 target 发现**（复杂度：3）
   - 依赖：阶段 02、03。
   - 实现 `gugu.toml` 向父目录查找、package/workspace 层级、默认 source root、lib/bin/test/bench/example target 自动发现、host/target 分离和 `foo.gg` 与 `foo/mod.gg` 冲突检查。
   - 验收：package、虚拟 workspace、单文件模式和 target 选择规则与规范一致；未知核心字段、target 重名、入口越界和保留 package `std` 均在编译前失败。

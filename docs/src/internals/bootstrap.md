@@ -16,6 +16,20 @@
 
 `text` 保留人读的 action/诊断/最终结果；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
+## 阶段 3 交付边界
+
+阶段 3 在 `source` 模块落地源码快照与 Span 系统：`load-sources` 现在把每个输入固化为不可变 `SourceSnapshot`——UTF-8 校验、BOM 拒绝、`u32` 长度上限、BLAKE3-256 内容摘要与规范行首表。逻辑路径按词法归一：解析 `.` 与 `..`、拒绝绝对路径、反斜杠与越界回溯，保证相同输入在不同工作目录与换行环境下产生相同 span。
+
+`Span` 携带源码文件 ID、逻辑路径、半开字节范围、行/列与 `ExpansionId`；行列从行首表二分推导，按 UTF-8 字节计数。`SourceMap` 按逻辑路径排序分配稠密文件 ID、拒绝重复路径，并为阶段 22 的源码宏预留确定性展开注册：`ExpansionRecord` 记录父展开、宏调用与定义位置、生成源码哈希与片段类别，注册顺序按调用位置、轮次与片段顺序稳定。诊断新增 `E0004`~`E0007`（非法 UTF-8、BOM、非法逻辑路径、span 越界），全部诊断按路径、偏移、级别、代码稳定排序。
+
+## 阶段 4 交付边界
+
+阶段 4 在 `project` 模块落地清单、workspace 与 target 发现，并把 CLI 的 `build`/`check` 无文件参数路径切换为项目模式。清单发现从当前目录向父目录查找最近 `gugu.toml`；解析使用 serde 严格 schema，未知核心字段、缺失 `[package].name`、保留 package 名 `std` 与保留依赖别名 `std` 都是编译前错误。
+
+workspace 成员按 `members` glob 展开并扣除 `exclude`，glob 展开按规范相对路径排序、同一路径只算一个成员；根清单可同时是根 package。package 选择遵循规范：显式 `-p` 按规范名或短名唯一匹配，`--workspace` 覆盖默认选择，成员目录启动时构建当前 package，workspace 根启动时依次使用 `default-members`、根 package 或全部成员。
+
+target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`、`benches/`、`examples/` 与 package 根 `build.gg` 的文件与目录形式，`auto-*` 开关与显式 target 表按清单规则生效；`foo.gg` 与 `foo/mod.gg` 同时存在、同种类重名 target、入口越过 package 根均在编译前失败。lib 的默认名是 package 短名把 `-` 换成 `_`。项目模式下每个选中 target 以 `project_entry` 进入同一 action graph：bin 类入口要求合法 main，lib/test/harness 类入口只做源码快照检查。单文件模式（`gugu build <file.gg>`）拒绝 `-p`、`--workspace`、`--features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets`，以退出码 2 失败。依赖解析、锁图与 SemVer 仍属于阶段 5、6。
+
 ## 工程边界
 
 当前实现的模块树如下：
@@ -23,11 +37,13 @@
 ```text
 crates/
 ├── gugu-cli/
-│   └── src/main.rs                 单一 gugu 入口、参数解析、输出与 bootstrap 命令
+│   └── src/main.rs                 单一 gugu 入口、参数解析、输出、项目发现与 bootstrap 命令
 └── gugu-compiler/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/action.rs               稠密 action graph 与状态迁移
     ├── src/diagnostics.rs          稳定代码、源码范围与排序
+    ├── src/source.rs               源码快照、Span、行首表与展开记录
+    ├── src/project.rs              清单、workspace 与 target 发现
     ├── src/target.rs               目标注册表与 TargetDescriptor
     ├── src/frontend.rs             阶段 1 的入口结构检查
     ├── src/ir.rs                   main -> ReturnUnit 的 bootstrap IR
@@ -77,11 +93,12 @@ emit-image
 
 节点状态只有 `pending`、`complete`、`skipped` 和 `failed`。成功路径的 `validate-image` 只验证内存计划；`emit-image` 在阶段 1 为 `skipped`。失败路径从第一个失败节点开始把下游节点标为 `skipped`，编排器不执行降级编译、不调用外部 assembler/linker，也不写出部分产物。
 
-输入有三种明确形态：
+输入形态与阶段扩展如下：
 
 - `empty_package`：没有用户源文件，前端和 IR 成功完成，但没有 executable entry，后端之后的节点跳过，不产生 image plan；
 - `single_file`：调用者提供逻辑路径和内存源码，适合确定性测试与编辑器；
-- `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，读取失败形成 `E0001` 并停止后续 action。
+- `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，逻辑路径按输入路径推导；读取或快照失败形成 `E0001`~`E0007` 并停止后续 action；
+- `project_entry`（阶段 4）：CLI 从清单发现的 target 入口，逻辑路径由 package root 推导，与工作目录无关；bin/example 与 `harness = false` 的 bench 要求合法 main，lib/test 与默认 bench 走库检查，不产生 executable entry。
 
 阶段 1 前端只验证 NUL、`u32` 源长度、`fn main()` 入口和函数体括号，并把合法入口降低为单个 `ReturnUnit`。这不是完整 lexer/parser/type checker；阶段 7、8、12–20 必须替换该实现并保持 action graph 的错误传播契约。因而本阶段的成功只表示 bootstrap 计划合法，不表示已经满足完整语言规范或可以运行目标程序。
 
@@ -98,20 +115,20 @@ emit-image
 
 ## 公开规范归属表
 
-下表给出每条公开规范的实现归属。阶段 1 只交付表中标为“已建立”的工程边界；“后续阶段”表示对应模块尚未实现，不能把当前 bootstrap 检查误认为该章节已经完成。
+下表给出每条公开规范的实现归属。状态列描述截至阶段 4 已交付的边界；未落地部分不能把当前 bootstrap 检查误认为该章节已经完成。
 
-| 公开规范 | 主要实现归属 | 阶段 1 状态 | 完整实现阶段 |
+| 公开规范 | 主要实现归属 | 当前状态 | 完整实现阶段 |
 |---|---|---|---:|
 | `overview` | `action`、`target`、`runtime` | 已建立闭世界/目标边界 | 01–79 |
-| `lexical` | `frontend` lexer | 已登记前端入口 | 07 |
+| `lexical` | `source` 快照、`frontend` lexer | 快照/BOM/UTF-8/逻辑路径已落地；lexer 未实现 | 03、07 |
 | `format-style` | `gugu-cli` fmt 与 formatter | CLI 未接入 | 09 |
 | `syntax` | `frontend` parser | 已登记前端入口 | 08 |
 | `types` | type arena、type checker | 未实现 | 12–20 |
-| `declarations` | module tree、definition collector | 未实现 | 04、10、13 |
+| `declarations` | module tree、definition collector | 清单层模块布局已落地；模块树未实现 | 04、10、13 |
 | `program-model` | action、backend、runtime | 已建立 plan/不写部分镜像契约 | 01、24、52–57 |
-| `packages-builds` | project/workspace resolver | 未实现 | 04–06、72–73 |
+| `packages-builds` | `project` 清单/workspace/target 发现 | 清单发现、workspace、target 自动发现已落地；依赖解析未实现 | 04–06、72–73 |
 | `publishing-ecosystem` | registry、archive、signature | 未实现 | 74 |
-| `toolchain-cli` | `gugu-cli` 与 action orchestrator | 已建立单一入口 | 01；完整为 02、73 |
+| `toolchain-cli` | `gugu-cli` 与 action orchestrator | 已建立单一入口与项目/单文件模式 | 01–04；完整为 73 |
 | `expressions` | frontend、HIR、GIR | 未实现 | 14、20、26 |
 | `patterns` | pattern checker、HIR matrix | 未实现 | 15、20 |
 | `functions` | capture、async、HIR/GIR | 未实现 | 16、20、26 |
@@ -130,12 +147,20 @@ emit-image
 
 ## 验收契约
 
-阶段 1 的确定性测试覆盖以下可观察结果：
+阶段 1–4 的确定性测试覆盖以下可观察结果：
 
 - 空 package 的所有 graph 节点都离开 `pending`，没有 image plan；
 - `fn main() {}` 完成 frontend、IR、backend、runtime 和 image validation，并留下带目标、入口、runtime 源单元数量和 rt0 的内存计划；
 - malformed source 产生稳定诊断，frontend 为 `failed`，下游为 `skipped`，没有 image plan；
 - 两个登记目标使用不同 rt0/object format 边界，未登记目标不能解析；
-- runtime 源资源的逻辑路径、角色和 intrinsic 登记来自同一 `RuntimeResources`，不依赖目录枚举或线程完成顺序。
+
+阶段 3、4 的确定性测试补充覆盖：
+
+- 快照拒绝 BOM、非法 UTF-8（带精确字节偏移）与超长输入；行首表对 LF/CRLF/CR 混合输入给出确定行列映射；逻辑路径词法归一并拒绝绝对路径、反斜杠与越界回溯；
+- `SourceMap` 按逻辑路径排序分配稠密 ID，重复路径拒绝；span 半开范围、未知文件/展开 ID 均有稳定错误；宏展开记录按调用位置、轮次、片段顺序稳定注册并维护父链；
+- BOM 输入使 `load-sources` 失败且诊断携带 `E0005`，下游 action 全部跳过；
+- 单 package、虚拟 workspace、根 package workspace、成员目录启动的 package/target 选择与规范一致；glob 展开排除 `exclude`，`default-members` 只在根启动时生效；
+- 保留名 `std`（package 名与依赖别名）、未知核心字段、`foo.gg` 与 `foo/mod.gg` 冲突、target 重名、入口越过 package 根均在编译前失败；
+- 单文件模式拒绝全部项目选择参数并以退出码 2 失败。
 
 最终镜像写出、Gugu 源 runtime 自举、完整 parser/type checker、GC、scheduler 和双目标 machine code 都不属于本阶段验收；它们必须在路线图后续阶段以各自规范和测试完成。
