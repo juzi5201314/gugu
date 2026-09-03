@@ -3,5 +3,10 @@ name = "gugu-cli"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "gugu"
+path = "src/main.rs"
+
 [dependencies]
 clap.workspace = true
+gugu-compiler = { path = "../gugu-compiler" }

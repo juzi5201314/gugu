@@ -61,6 +61,8 @@ Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行�
 
 可执行镜像包含目标 rt0、与该编译器构建配套的 runtime、标准库和闭世界用户程序。rt0 是平台入口而不是普通 Gugu函数；它只负责把宿主进程交给满足[运行时启动契约](runtime.md#rt0-与启动)的环境。
 
+编译 action 在最终镜像写出前可以保留经过验证的内存计划；该计划不是 ELF、PE、静态库或共享库。只有所有前置阶段成功且目标格式、入口、重定位与运行时必需 metadata 均通过验证后，才允许执行镜像写出。任一阶段失败都必须跳过写出 action，不得留下部分镜像或以外部 assembler、linker、解释执行或降级路径伪造成功；完整 writer 顺序见[后端内部规范](../internals/backend.md)。
+
 镜像是否含动态解释器、默认系统导入、保留 metadata节和外部 ABI由[平台与 ABI 参考](platform-abi.md)唯一规定；内部 fragment、relocation、stack map和启动编码见[后端](../internals/backend.md)。主协程返回、panic、`process.exit`和 fatal之后的状态转换只见[运行时](runtime.md#进程寿命)。
 
 ## 编译器内部表示

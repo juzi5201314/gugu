@@ -1,0 +1,7 @@
+[package]
+name = "gugu-compiler"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu compiler bootstrap and staged action graph"
+
+[dependencies]

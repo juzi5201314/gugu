@@ -25,7 +25,7 @@
 
 ## 一、工程与前端基础
 
-- [ ] **阶段 01：建立 compiler/runtime 工程骨架**（复杂度：4）
+- [x] **阶段 01：建立 compiler/runtime 工程骨架**（复杂度：4）
   - 依赖：无。
   - 建立 Rust compiler bootstrap、`gugu` CLI、目标描述、诊断、前端、IR、后端、runtime 资源的清晰模块边界；登记用 Gugu 编写的标准库/runtime 源树，明确 rt0、必要 intrinsic 与 Gugu runtime 的边界，禁止维护第二套语义等价 Rust runtime。
   - 验收：空 package、单文件入口和一个最简单 `main` 拥有端到端 action graph；无效阶段不会写出镜像；架构文档与模块清单能够定位每条公开规范的实现归属。

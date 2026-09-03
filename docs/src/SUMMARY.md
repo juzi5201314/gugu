@@ -30,6 +30,7 @@
 
 # 编译器内部
 
+- [Compiler bootstrap 与 action graph](internals/bootstrap.md)
 - [AST 与 HIR](internals/ast-hir.md)
 - [comptime 与抽象分析](internals/comptime-analysis.md)
 - [GIR 与 LIR](internals/gir-lir.md)

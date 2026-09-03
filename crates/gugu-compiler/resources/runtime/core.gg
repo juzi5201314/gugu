@@ -1,0 +1,1 @@
+/* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。 */

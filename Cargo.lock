@@ -103,7 +103,12 @@ name = "gugu-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "gugu-compiler",
 ]
+
+[[package]]
+name = "gugu-compiler"
+version = "0.1.0"
 
 [[package]]
 name = "heck"
