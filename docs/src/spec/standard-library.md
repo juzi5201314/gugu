@@ -282,27 +282,35 @@ MultiMap 不作为独立标准类型；使用 `HashMap[K, Vec[V]]` 或 `BTreeMap
 
 Vec、Deque、BinaryHeap、LinkedList、BitSet、SmallVec 和全部 Map/Set 都是共享身份句柄：赋值只复制句柄，通过任一别名修改时，所有别名继续观察同一个逻辑集合。集合内部可以为快照迭代封存并替换 backing；这只改变物理表示，不把集合改成 COW 值语义。
 
-Map 的读取返回 value 的语义副本，不公开会因 rehash、树旋转或紧凑化而失效的 `&K` / `&V`：
+Map 的普通读取返回 value 的语义副本，不公开会因 rehash、树旋转或紧凑化而失效的普通 `&K` / `&V`：
 
 ```text
 impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
     fn get(self: &Self, key: &K) Option[V]
+    fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R]
+    fn for_each_ref[F: Fn(&K, &V) ()](self: &Self, f: F)
     fn insert(self: &Self, key: K, value: V) Option[V]
     fn remove(self: &Self, key: &K) Option[V]
     fn update[F: Fn(V) V](self: &Self, key: &K, f: F) bool
     fn entry(self: &Self, key: K) Entry[K, V]
 }
 
-impl[K: Ord + StableOrd, V] BTreeMap[K, V] { /* 同一组 value 访问操作 */ }
+impl[K: Ord + StableOrd, V] BTreeMap[K, V] {
+    fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R]
+    fn for_each_ref[F: Fn(&K, &V) ()](self: &Self, f: F)
+    /* 其它 value 访问操作同 HashMap */
+}
 ```
 
-SecureHashMap 与 HashMap 使用同一组操作和约束。`update` 只在键存在时调用一次 `f`，把当前 value 的语义副本交给它，再以返回值替换槽；存在时返回 true。Entry 的 `and_modify`、`or_insert` 和 `or_insert_with` 同样只传入或返回语义副本，不产生集合内部引用。Set 的元素约束与对应 Map 的键约束相同。
+SecureHashMap、SmallMap 与 HashMap 使用同一组 value 访问操作和约束。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间按实现当前顺序逐项调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中结构性修改同一 map；结构写入必须等待 view 结束。callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
 
-标准集合的 `iter()` 捕获创建时快照，产生元素的语义副本；Map 的 Item 是 `(K, V)`。拥有独立 backing 的集合创建迭代器时 O(1) 封存 backing，之后通过任一集合别名发生的第一次修改先分离 backing，现有迭代器继续遍历旧快照。内联 Small 容器和 LinkedList 创建迭代器时分别复制至多 N 个槽和当前全部节点值，以保持相同快照语义；因此它们的迭代器创建成本分别是 O(N) 上界和 O(len)。迭代器与集合可以同时存活，修改集合不会让 `next` panic，也不会让迭代结果弱一致。
+`update` 只在键存在时调用一次 `f`，把当前 value 的语义副本交给它，再以返回值替换槽；存在时返回 true。Entry 的 `and_modify`、`or_insert` 和 `or_insert_with` 同样只传入或返回语义副本，不产生集合内部引用。Set 的元素约束与对应 Map 的键约束相同。
+
+标准集合的 `iter()` 捕获创建时快照，产生元素的语义副本；Map 的 Item 是 `(K, V)`。拥有独立 backing 的集合创建迭代器时 O(1) 封存 backing，之后通过任一集合别名发生的第一次修改先分离 backing，现有迭代器继续遍历旧快照。内联 Small 容器和 LinkedList 创建迭代器时分别复制至多 N 个槽和当前全部节点值，以保持相同快照语义；因此它们的迭代器创建成本分别是 O(N) 上界和 O(len)。迭代器与集合可以同时存活，修改集合不会让 `next` panic，也不会让迭代结果弱一致。需要避免大值复制时使用 Map 的 `with_ref`、Map 的 `for_each_ref` 或 LinkedList 的 `for_each_ref`；这些 API 不改变 `iter()` 的 snapshot 语义。
 
 SmallVec 与 SmallMap 的 N 必须是非负 comptime 整数。它们的 GC 对象内含 N 个连续内联槽，复制容器仍只复制共享身份句柄；元素超过 N 后溢出到堆 backing，别名、相等、修改和迭代语义不变。SmallMap 在内联阶段使用至多 N 项的紧凑线性查找，溢出后使用与 HashMap 相同的表表示；N 是调用方明确提供的小规模上界，不是运行时猜测阈值。
 
-LinkedList 的节点是具有稳定 GC 身份且不复用代际的对象。`ListCursor[T]` 绑定 list 身份、node 身份与 node generation；`cursor_front`、`cursor_back`、`insert_before`、`insert_after`、`remove`、`splice_before`、`splice_after` 和 `value` / `update` 都返回 `Result[..., StaleCursor]`，不暴露节点引用。插入和同一 list 内的重排不使既有 cursor 失效；删除节点会使其全部 cursor 变为 stale。把另一 list 的节点 splice 进当前 list 时，目标 cursor 以及两边未移动节点的 cursor 仍有效，绑定到被移动节点旧 list 身份的 cursor 变为 stale。StaleCursor 是普通领域错误，不是 panic 或未定义行为。
+LinkedList 的节点是具有稳定 GC 身份且不复用代际的对象。`ListCursor[T]` 绑定 list 身份、node 身份与 node generation；`cursor_front`、`cursor_back`、`insert_before`、`insert_after`、`remove`、`splice_before`、`splice_after` 和 `value` / `update` 都返回 `Result[..., StaleCursor]`，不暴露节点引用。另提供 `for_each_ref[F: Fn(&T) ()](self: &Self, f: F)`：它在一次受保护遍历中直接访问节点值，不创建 snapshot或复制 T；callback 不能结构性修改该 list，且遵守 scoped view 的无 suspend、无 escape 和 relocation 规则。插入和同一 list 内的重排不使既有 cursor 失效；删除节点会使其全部 cursor 变为 stale。把另一 list 的节点 splice 进当前 list 时，目标 cursor 以及两边未移动节点的 cursor 仍有效，绑定到被移动节点旧 list 身份的 cursor 变为 stale。StaleCursor 是普通领域错误，不是 panic 或未定义行为。
 
 HashMap/HashSet 使用 hashbrown/SwissTable 类的 control-byte group、SIMD lookup 与三角 group probing；具体 group 宽度、装载阈值和内存布局不是稳定 ABI，可以随目标指令集和工具链改变。迭代顺序不保证，也可以在不同进程、不同表和不同工具链间变化。
 
@@ -325,7 +333,7 @@ ResourceCell 是 raw OS handle、open/closed与 lease的一份共享逻辑身份
 
 所有公开资源的 `close()` 必须幂等：第一次成功关闭底层资源，之后返回成功且不重复执行 release。关闭后的其它操作返回具体错误的 `Closed` 变体。自动 release 不能报告错误；需要观察 `flush`、`commit`、`shutdown` 或 `Child.wait` 结果的程序必须显式调用相应方法。
 
-受限 release只能接收不含 managed引用的位状态；不能捕获 owner、访问 managed图、复活对象、分配、panic、获取 Gugu锁、等待 channel或启动协程。它不是用户 finalizer；需要等待的清理必须由领域 API显式移交 runtime supervisor。
+`std.io` 提供组合式 I/O trait。可能阻塞的方法只挂起当前协程，runtime 通过有界 `BlockingBridge` admission 管理操作系统线程：没有 `BridgeCredit` 时不执行系统调用，调用方在等待队列中挂起；取得额度后才进入普通 `ForeignBridge`。`ForeignLeaf` 不得承载可能阻塞的 I/O，`ForeignBridge[DirtyCpu]` 不用于标准库文件操作。
 
 含 resource字段的 managed值仍按 Adaptive Resource Leasing保持一次性 release语义；collector物理移动不是语言复制，不能因此增加 lease。资源只藏在不可达 managed容器环中时，release可以延迟到 collector发现该环；普通局部最后 lease仍按[内存与对象模型](memory.md)结束。官方 descriptor与 resource arena实现见 [GC 元数据](../internals/gc-metadata.md)。
 
@@ -447,7 +455,7 @@ fn read_link(path: Path) Result[Path, io.Error]
 
 OpenOptions 显式设置 read、write、append、truncate、create、create_new 与 follow_symlinks；非法组合在 open 时返回 InvalidInput。`create_new` 只保证单次 OS open 的排他创建语义。`write` 等价于 create + truncate + write_all，不承诺崩溃一致性或原子替换。rename、copy、remove_dir_all 的跨文件系统、部分完成、symlink 和平台差异通过具体 io.Error 变体报告，标准库不把多次 syscall 包装成伪原子操作。
 
-File 实现 Read、Write 与 Seek，并提供 metadata、set_len、sync_data、sync_all、try_clone 和幂等 close。ReadDir 是资源句柄与迭代器；每次 next 返回一个 DirEntry 或该次读取的 io.Error，顺序不保证。File、ReadDir 和复制出来的 OS handle 都按 Adaptive Resource Leasing 管理。
+File 实现 Read、Write 与 Seek，并提供 metadata、set_len、sync_data、sync_all、try_clone 和幂等 close。ReadDir 是资源句柄与迭代器；每次 next 返回一个 DirEntry 或该次读取的 io.Error，顺序不保证。File、ReadDir 和复制出来的 OS handle 都按 Adaptive Resource Leasing 管理。regular file 和无法由 poller 异步化的文件系统操作经过有界 `BlockingBridge`；worker、system stack、bridge frame、waiter 和排队 payload受 runtime tuning profile 与 memory pressure 约束，队列饱和时挂起调用协程，不创建额外无界 OS thread。
 
 ## 网络
 
@@ -764,10 +772,33 @@ struct RuntimeStats {
     pub stack_live_bytes: uint,
     pub dirty_cpu_active: uint,
     pub dirty_cpu_waiting: uint,
+    pub blocking_bridge_active: uint,
+    pub blocking_bridge_waiting: uint,
+    pub blocking_bridge_workers: uint,
+    pub blocking_bridge_queue_bytes: uint,
+    pub timer_live: uint,
+    pub timer_cancelled: uint,
+    pub timer_overflow_bytes: uint,
     pub gc_cycles: uint,
     pub gc_pause_total: Duration,
     pub signal_events_dropped: uint,
     pub trace_events_dropped: uint,
+    pub runtime_committed_bytes: uint,
+    pub pending_return_bytes: uint,
+    pub owner_cache_bytes: uint,
+    pub reclaimable_bytes: uint,
+    pub remote_return_batches: uint,
+    pub remote_return_hops: uint,
+    pub forwarded_messages: uint,
+    pub mark_ticket_batches: uint,
+    pub edge_delta_batches: uint,
+    pub mark_credit_pending: uint,
+    pub shared_handle_resolves: uint,
+    pub shared_handle_forwards: uint,
+    pub turn_region_resets: uint,
+    pub region_promotions: uint,
+    pub compressed_ref_decodes: uint,
+    pub range_reserved_bytes: uint,
 }
 
 fn available_parallelism() uint
@@ -789,7 +820,7 @@ setter 是进程级操作，按调用的线性化顺序采用最后发布的值�
 
 `safepoint_poll()` 是无参数 compiler intrinsic：fast path检查当前 `LogicalProcessor` 的抢占/GC poll word，slow path可以确认 stop、保存 roots、让出 coroutine并在恢复后继续。它不执行 I/O，不在 asm、`#[naked]` 或带函数体的 `#[ffi(dirty_cpu)]` 中可用。
 
-`RuntimeStats` 是逐字段快照。`stack_reserved_bytes`、`stack_committed_bytes`与 `stack_live_bytes` 分别观察地址 reservation、已提交宿主页和 live coroutine逻辑 stack容量，三者会因亚页共享、cache和decommit而不同；具体内存上限与压力回收顺序见[运行时](runtime.md#gc栈与运行时控制-api)。`dirty_cpu_active` 是当前执行 native work的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待额度的调用数；二者会随并发调度立即变化，并行度刚降低时 active可以暂时高于新 target。它们不提供取消 native work的能力，也不是业务同步原语。统计值不提供 GC地址、内部队列或 OS线程身份的稳定观察接口。
+`RuntimeStats` 是逐字段快照。`stack_reserved_bytes`、`stack_committed_bytes`与`stack_live_bytes` 分别观察地址 reservation、已提交宿主页和 live coroutine逻辑 stack容量，三者会因亚页共享、cache和decommit而不同；`dirty_cpu_active` 是当前执行 native work的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待 dirty 额度的调用数。`blocking_bridge_active` 是已取得 BridgeCredit 并执行普通 blocking native 的调用数，`blocking_bridge_waiting` 是 admission waiter 或已发布普通 bridge roots但尚未取得 credit 的调用数，`blocking_bridge_workers` 不超过 `max_blocking_workers`，`blocking_bridge_queue_bytes` 包含 waiter metadata 与排队 payload。timer字段分别统计 active wheel/heap entries、已取消但尚未 compact 的 entries与 overflow heap/runtime slab bytes。上述统计会随并发调度立即变化，不提供取消 native work、强杀线程、固定调度顺序或固定回收时刻的能力。
 
 `std.signal` 把普通 OS 终止通知显式交给用户。没有订阅者时遵循目标 OS 默认动作；订阅不会自动取消根协程、触发 panic 或等待其它用户协程。fatal signal、`SIGKILL`、`SIGSTOP` 和 Windows 不可拦截的同步 fault 不在订阅集合中。
 

@@ -10,7 +10,7 @@
 
 ## 目标描述符与数值 lowering
 
-当前后端只实现平台注册表中的`x86_64-linux`和`x86_64-windows`。每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；release镜像只编入该profile选中的一种deque，不生成运行时mode分支。
+当前后端只实现平台注册表中的`x86_64-linux`和`x86_64-windows`。每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest, backend_cost_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；backend cost profile固定寄存器保留、inline code-size与spill上限。release镜像只编入该profile选中的一种deque，不生成运行时mode分支。
 
 CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-基线)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。
 
@@ -125,11 +125,24 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 
 ### runtime fast path
 
-只有 descriptor不含 `HAS_RESOURCE`、请求不 large/pinned、高对齐且 footprint不跨 Immix block时才走 allocation fast path。当前 `[r15 + tlab_cursor_offset]`/limit只覆盖 processor本地 span中的一个连续空 line run；checked计算 16 byte header、对齐 padding和 payload，成功时推进 cursor并初始化 header。run不足调用 `gc_refill_line`，它先在本地 8-block span推进 line表，span用尽才访问全局 heap；其它请求调用 `gc_alloc_slow`。offset与 `HeapLayout`由 runtime layout query固定并进入 backend schema。
+`EscapeAndPlacement` 的结果决定 managed allocation lowering：
 
-budgeted/显式 safepoint poll以 `AtomicLoadAcquire [r15 + poll_flags_offset]`读取当前 processor的两位普通内存 word；x86_64 lowering固定为一次 `test dword ptr [r15 + offset], 0b11` 和 unlikely branch，值为0时不访问 coroutine state、requested epoch或全局 `gc_stop_epoch`。counted strip-mined loop只在 outer chunk edge执行该检查，poll-free inner loop复用既有 induction/latch，不生成独立 countdown或额外每轮分支；只有 uncounted interval大于1的循环路径每次 cycle更新 SSA countdown，到0才读取 poll word。taken cold edge按普通 call-clobber规则 spill全部跨 poll活跃的 caller-saved scalar与 `V128`，并用对应 `PollResume` map保存 roots后切 system stack；fast fallthrough不执行这些 spill。函数入口不发 poll-word load，而由 poisoned `stack_check`复用 prologue容量比较。write barrier、`ForeignLeaf`和普通/dirty bridge规则保持各自 effect fence与交接语义。
+- `Managed::TurnRegion` 只在当前 coroutine turn 私有、无外部 alias、无 ResourceCell lease 且不需要 FFI 地址时从 `[r15 + turn_region_cursor]` 做 checked bump；region export/publish、promote、transfer 和 reset 全部落到可 safepoint slow edge；
+- `Managed::LocalHeap` 仅在 descriptor不含 `HAS_RESOURCE`、请求不 large/pinned、高对齐且 footprint不跨 Immix block时走 processor-local TLAB/连续空 line run；checked计算 16 byte header、对齐 padding和 payload，成功时推进 cursor并初始化 representation header。run不足调用 `gc_refill_line`，span用尽才访问 owner/domain range；其它请求调用 `gc_alloc_slow`；
+- `Managed::SharedHeap` 走 stable handle allocation/resolution；`SharedAccessBegin/End`、generation check、forwarding grace 和 handle table 更新必须位于带 stack map 的 slow edge，不能污染 LocalHeap direct-pointer fast path；
+- `Managed::Pinned`、large、foreign 和 resource 请求走各自 non-moving/cleanup 路径；`RuntimeRaw` 仍使用 owner-local slab/span pop/bump。所有路径的 offset、size、align、generation 和 representation tag 使用 checked arithmetic，溢出进入 `OutOfMemory` 或 `RuntimeInvariant`，不静默截断。
+
+allocation fast path不能读取 owner lookup、radix route、global gc epoch、SharedHeap handle table、mark mailbox 或 memory limit；这些只能在 refill/slow path处理。`TurnRegion` 和 LocalHeap TLAB 的普通 bump 同样不执行全局原子。
+
+### prologue 与 stack check
 
 runtime layout query还必须验证`CoroutineHot`与`StackDescriptor`的size/alignment均为64、`CoroutineSlot`的size/alignment为128/64、`offset_of!(CoroutineSlot, stack) == 64`，`PollControl`与`ProcessorOwnership`的size/alignment均为64，`LogicalProcessor.poll/ownership`按64对齐且范围不重叠，以及RemoteBatchHead、LocalDeque head/tail、idle event counter分别占用128-byte padded区域。query返回的`stack_check_offset`是从`CoroutineHot*`基址到descriptor字段的absolute offset，因此prologue仍从`[r14 + stack_check_offset]`读取；loop/显式poll只从`[r15 + poll_flags_offset]`读取`PollControl` line。两种fast path都恰有一次ordinary acquire memory operand，禁止附加lifecycle/global epoch load。任一layout/profile断言失败都是compiler/runtime schema不匹配，镜像构建必须失败，不能改用未对齐访问或其它queue mode。
+
+### owner return 与 range lowering
+
+x86_64 backend 对 owner inbox 的 tail/front、staging、route bucket 和统计字段执行独立 cache-line layout assertion。AcqRel batch tail exchange、Release chain link、Acquire consumer read 使用现有 atomic lowering；owner-only free list、front 和 local range cursor不使用原子。新路径不得占用 `r14`/`r15` 内部 ABI，也不得在每次 TLAB allocation 中执行 owner lookup 或 radix hash。
+
+raw return、extent coalescing、commit/decommit 和 typed combining 都是 slow path；平台调用不能落在 `NoSafepointRegion` 或 `PollFreeLeaf`。完整机器序列、generation 检查和 direct/radix profile 见[内存所有权与消息通道](memory-messaging.md#x86_64-backend-与内存序)。
 
 BatchInbox每个publish batch先Release写producer-local`publish_active`、Acquire读一次read-mostly queue control word；这两步不能移动到节点state/link修改之后。ordinary `run_link_next/run_batch_len`写必须保持在head Release CAS之前；CAS成功后seen epoch/staging clear与Release清active不得移动到它之前。x86_64把Relaxed head load降为普通`mov`、Release/Relaxed compare-exchange降为`lock cmpxchg`、Acquire `head.swap(null)`降为`xchg`，并由LIR effect edge阻止compiler重排；不得额外插入generic epoch pin、SeqCst fence或per-node atomic link。empty-to-nonempty才生成`work_seq`的locked RMW。consumer的ordinary link读必须位于Acquire exchange之后，并在清queue ownership前保存`next`。
 
@@ -287,11 +300,24 @@ encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcod
 - 验证 frame、stack map、unwind和 landing pad逐函数一致；
 - 验证runtime tuning profile digest、所选`LocalDequeMode`和layout query完全一致，release镜像中不存在未选mode或热路径mode branch；
 - 验证BatchInbox每条publish路径的link store先于Release CAS、staging clear晚于CAS，consumer link load晚于Acquire exchange；Classic64/Packed55只使用各自规定的fence/CAS序列，queue common path不调用generic epoch、allocator或control mutex；
+- 验证 `ScopedViewBegin/End` token在所有正常、panic和foreign-return边上成对闭合，`ScopedRead` projection没有写入或逃逸，view中的 safepoint 不跨越其 token end；
 - 验证 ELF/PE header、segment/section、import/export、TLS、relocation和入口范围；
 - 确认 writable section不可执行、stack不可执行、metadata只读且 strip保留；
 - 对相同 image plan重放编码并比较 bytes，禁止时间戳、随机 GUID和目录顺序进入输出。
 
-目标测试使用固定LIR fixture和C对照fixture覆盖整数/floating边界、聚合ABI、register压力、spill、critical edge、branch relaxation、i128、atomic、panic unwind、stack growth、GC safepoint、no-safepoint marker零编码、ELF relocation和PE unwind/import。机器码fixture还必须逐指令断言普通prologue只有一次`[r14 + stack_check]`load与共享容量/poll冷分支，budget poll只有一次`[r15 + poll_flags]`load，并且两者没有lifecycle/global epoch访问；BatchInbox每个publish batch只有producer-local active/seen store、一次queue-control load、普通link写、head `lock cmpxchg`和可选empty-transition通知，consumer只有Acquire exchange与普通link读；所选LocalDeque mode的机器序列与profile一致。真实执行smoke test分别直接启动Linux ELF和Windows目标环境中的PE；只比较反汇编文本不能证明镜像可运行。
+### Cost calibration profile
+
+每个 `TargetDescriptor` 关联版本化 `BackendCostProfile`，至少包含 `{ baseline_digest, reserved_registers, inline_hot_bytes, inline_cold_bytes, max_spill_slots, max_spill_bytes_per_call, max_reload_stores, code_size_budget, regression_percent }`。profile固定当前 `r14/r15/r11` 保留寄存器决定，不允许后端在单个函数上临时释放 runtime register或以不同寄存器集逃避成本记录；换寄存器集必须产生新的 compiler/runtime schema和独立 profile。
+
+backend 对每个 monomorphized function 输出 `CostRecord { instruction_bytes, hot_bytes, cold_bytes, peak_live_gpr, peak_live_xmm, spill_slots, spill_bytes, reloads, safepoint_spills, call_count, inline_decisions }`。spill slot、reload/store和 code size使用最终 branch relaxation、frame layout、stack-map生成后的结果，不能用 legalization前估计代替。`inline_decisions`记录 caller/callee stable key、估算与最终 bytes、hot/cold权重和是否因 profile拒绝；跨函数 inline不得只因局部函数短而绕过 caller预算。
+
+profile发布前必须在固定 calibration corpus 上重复生成代码：空/标量热循环、指针写入和 safepoint、长生命周期高寄存器压力、aggregate ABI、runtime glue、深调用链、向量循环、panic/unwind和真实 scheduler/GC/select bridge workload。每类至少记录 release+debuginfo 的 instruction bytes、spill/reload、frame bytes、I-cache/code-size proxy、poll load/branch和端到端吞吐/尾延迟；不得用空函数或单一 microbenchmark 代表全部 workload。结果与同一 profile 的 baseline artifact 比较，任一硬上限超出、校准 corpus 缺少 category 或回归超过 `regression_percent` 时 profile validation失败，release构建不能静默选择该 profile；只允许回到已验证的 `Classic64`/既有 profile，并把失败原因写入诊断。
+
+`r14/r15` 的收益与寄存器压力必须分开报告：至少比较 current-coroutine/current-processor access cycles、peak live GPR、spill/reload、IPC、I-cache miss和 GC/scheduler p99。inline、vectorization、unroll和 instruction scheduling的 cost model只能消费 profile中已校准的权重；后端没有 profile数据时不宣称吞吐、延迟或 spill 改善。
+
+### 机器成本验证
+
+固定LIR fixture和C对照fixture覆盖整数/floating边界、聚合ABI、register压力、spill、critical edge、branch relaxation、i128、atomic、panic unwind、stack growth、GC safepoint、no-safepoint marker零编码、ELF relocation和PE unwind/import。机器码fixture还必须逐指令断言普通prologue只有一次`[r14 + stack_check]`load与共享容量/poll冷分支，budget poll只有一次`[r15 + poll_flags]`load，并且两者没有lifecycle/global epoch访问；BatchInbox每个publish batch只有producer-local active/seen store、一次queue-control load、普通link写、head `lock cmpxchg`和可选empty-transition通知，consumer只有Acquire exchange与普通link读；所选LocalDeque mode的机器序列与profile一致。真实执行smoke test分别直接启动Linux ELF和Windows目标环境中的PE；只比较反汇编文本不能证明镜像可运行。
 
 ## 参考实现资料
 

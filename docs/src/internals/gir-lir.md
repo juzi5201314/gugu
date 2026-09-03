@@ -102,10 +102,19 @@ GirLocal {
 - `ResourceAction { action, place, descriptor }`，其中 action 为 `AcquireLease`、`ReleaseLease`、`Transfer` 或 `Finalize`；
 - `GcWrite { owner, destination, value }`；
 - `Pin { place, token_local }`、`Unpin { token_local }`；
+- `ScopedViewBegin { source, mode, token_local }`、`ScopedViewEnd { token_local }`；
 - `SafepointPoll(SafepointId)`、`StackCheck`；
 - `NoSafepointBegin(NoSafepointRegionId)`、`NoSafepointEnd(NoSafepointRegionId)`；
 - `Atomic`、`Volatile`；
 - `CoverageCounter`、`Nop`。
+
+### Scoped borrowed view
+
+`ScopedViewBegin/End` 只由标准库 `with_ref`、`with_read_ref`、`for_each_ref` 的 lang item lowering生成。`source` 是 map entry、锁保护槽或其它稳定 descriptor place；`mode` 为 `ScopedRead` 或显式 `ScopedWrite`，`token_local` 是不含 managed pointer 的 runtime view token。begin取得结构访问 lease并把 source/value descriptor登记为临时 root/epoch，end在 callback正常返回和每条 panic cleanup边上消费 token；两者不能被普通 `Ref`、`ValueCopy` 或 `MoveInternal` pass替换。
+
+callback body的 `ScopedRead` projection携带只读 access mode，即使源码类型表面写作 `&T` 也不能形成写入 place；只有声明 `ScopedWrite` 的 API可以生成可写 projection。HIR/GIR verifier必须证明 token只在 callback动态 extent内使用、每条出口恰有一次 end、view未写入外部槽/返回值/closure capture/foreign frame/跨协程消息，且所有可达 callee满足[函数与闭包](../spec/functions.md#scoped-borrowed-view-callback)的 no-suspend/no-escape 规则。普通 safepoint可以出现在 view内，但 suspend、可能挂起的 lock/I/O/foreign call 和未登记动态分派必须拒绝。
+
+view lease阻止同一容器的结构性写入、rehash、树旋转或 backing replacement；collector如在 callback内移动对象，必须依据 token更新 descriptor和 projection，不得把整个容器隐式 pin住。`ScopedViewEnd`完成后才允许结构写入继续，token、临时 root和 epoch必须同时闭合；未闭合 token、generation不匹配或 source relocation未修正是 verifier/runtime invariant failure。
 
 语言级普通赋值在具体类型已知后必须展开成所需 `ValueAction`/`ResourceAction` 和最终 `Assign`；优化器只能在证明不改变观察结果时删除动作。向 GC 可达对象的引用字段写入必须成为 `GcWrite`，不能退化为裸 `Assign`。
 
@@ -177,16 +186,18 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 7. `SparseConditionalConstants`：传播常量与不可达边；消费 late 值时遵循相同登记规则；
 8. `CopyPropagationAndGvn`：传播无副作用 copy，并对纯 rvalue 做全局值编号；
 9. `BoundsCheckElimination`：用支配关系、范围与循环归纳变量消除已证明检查；
-10. `EscapeAndPlacement`：决定 stack、GC heap、arena 和闭包环境位置；
+10. `EscapeAndPlacement`：决定 stack、`TurnRegion`、LocalHeap、SharedHeap、pinned storage、arena 和闭包环境位置，生成 export、representation、owner 和 lease 摘要；
 11. `CowAndResourceElision`：只删除被数据流证明不可观察的封存、租约和复制；
 12. `InsertWriteBarriers`：为所有可能的 heap 引用写入生成屏障并删除已证明的新对象初始化屏障；
 13. `MarkMandatoryStatepointsAndStackChecks`：标记真正发布 context 的 statepoint和抽象函数栈检查，不放置预算化 loop poll；
 14. `LowerLayoutAndAbi`：把聚合、枚举、调用和返回映射为具体字节布局；
 15. `BuildLirSsa`：构造 LIR、block 参数和 memory SSA；把剩余 `LateConstRef` 物化为当前 late 结果，直接 `TypeId` 值仍使用稳定类型 metadata relocation。
 
-内联成本按单态化 GIR 计算：普通 statement 为 1，分支为 2，直接调用为 5，分配为 8，可能 suspend 的操作为 32。compiler intrinsic 和不产生独立机器 frame 的 glue 在启发式前强制展开。其余非递归 callee成本不超过 32时成为候选；在整个实例图只有一个直接调用点时上限为 128。递归 SCC、普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]`、`ForeignLeaf`、naked、含 `Suspend` 或无法复制 cleanup 区域的 body从不成为候选；两种 bridge 和 leaf 外调都只能作为调用边界 lowering，不能把 native 函数体内联进 GIR。
+内联成本先按单态化 GIR 计算：普通 statement 为 1，分支为 2，直接调用为 5，分配为 8，可能 suspend 的操作为 32。compiler intrinsic 和不产生独立机器 frame 的 glue 在启发式前强制展开。其余非递归 callee成本不超过 32时成为候选；在整个实例图只有一个直接调用点时上限为 128。递归 SCC、普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]`、`ForeignLeaf`、naked、含 `Suspend` 或无法复制 cleanup 区域的 body从不成为候选；两种 bridge 和 leaf 外调都只能作为调用边界 lowering，不能把 native 函数体内联进 GIR。
 
-每个 caller的增长预算固定为 `max(floor(original_cost * 20 / 100), 256)`。只对 pass 开始时存在的调用点按 source scope、block ID、statement index和 callee `MonoKey` 排序遍历；候选展开后预计累计增长不超过预算就必须内联，否则必须保留。新暴露调用点留给其 callee 自身已经缓存的优化 body，不在本 caller重复开第二轮，保证管线终止且并行编译不改变结果。
+候选必须同时满足当前 `TargetDescriptor` 的 `BackendCostProfile`：按 hot/cold code size估算不能越过 caller的 `inline_hot_bytes` / `inline_cold_bytes`，并预留 caller的 frame、poll、stack-map和 spill预算；profile的 I-cache/code-size权重用于拒绝会扩大冷代码或热点 footprint的候选。没有 profile时使用已验证 baseline，但不能以固定 GIR statement cost 宣称适配任一 CPU。
+
+每个 caller的增长预算由 profile的 code-size budget与 `max(original_cost * 20 / 100, 256)` 两者共同限制。只对 pass 开始时存在的调用点按 source scope、block ID、statement index和 callee `MonoKey` 排序遍历；候选展开后预计累计增长不超过全部预算才内联，否则保留。新暴露调用点留给其 callee自身已经缓存的优化 body，不在本 caller重复开第二轮，保证管线终止且并行编译不改变结果。
 
 `MarkMandatoryStatepointsAndStackChecks` 只标记真正可能发布/挂起 context 的位置：显式 `safepoint_poll`/`yield`、park/suspend、普通/dirty `ForeignBridge`交接、stack growth、allocation/refill slow path、runtime lock acquire的 contention edge和其它直接进入 GC/runtime scheduler的 slow path。每个可能在被调方 entry `StackCheck` 进入 slow path的 managed call仍必须保留 caller `CallReturn` map，但调用点本身不读取 poll word。函数 prologue先保留抽象 `StackCheck`；只有 legalized LIR最终分类为 `PollFreeLeaf` 时才能删除。marker包围的 runtime临界区禁止插入 statepoint；循环、长直线路径和无检查 leaf调用所需的额外 poll统一在全部 loop transformation完成后由 LIR预算 pass放置，GIR optimizer不得固定逐 backedge策略。
 
@@ -246,15 +257,19 @@ LIR 指令按封闭类别组织：
 - 控制辅助：`Select`、`TrapIf`；
 - 内存：`Load`、`Store`、`Memcpy`、`Memmove`、`Memset`；
 - 并发：`AtomicLoad`、`AtomicStore`、`AtomicRmw`、`CompareExchange`、`Fence`；
-- runtime：`GcAlloc`、`BarrierReserve { permit: BarrierPermitId }`、`GcWriteBarrier`、`GcWriteBarrierReserved { permit: BarrierPermitId }`、`SafepointPoll { interval: NonZeroU32 }`、`StackCheck`、`NoSafepointBegin`、`NoSafepointEnd`、`CoroutineSwitch`、`Park`、`Ready`；`BarrierPermitId`只存在于 compiler metadata，不占 machine value/register；显式 poll和 counted-loop外层 poll的 interval固定为1，无法构造 counted outer chunk的循环路径才使用大于1的计算 interval；
+- runtime：`GcAlloc`、`RegionAlloc`、`RegionPublish`、`RegionReset`、`PromoteManaged`、`MarkTicketBatch`、`EdgeDeltaBatch`、`ResolveSharedHandle`、`SharedAccessBegin`、`SharedAccessEnd`、`ForwardSharedHandle`、`DecodeCompressedRef`、`BarrierReserve { permit: BarrierPermitId }`、`GcWriteBarrier`、`GcWriteBarrierReserved { permit: BarrierPermitId }`、`ScopedViewBegin { mode, token }`、`ScopedViewEnd { token }`、`SafepointPoll { interval: NonZeroU32 }`、`StackCheck`、`NoSafepointBegin`、`NoSafepointEnd`、`CoroutineSwitch`、`Park`、`Ready`；`BarrierPermitId`和scoped view token只存在于 compiler/runtime metadata，不占 machine value/register；显式 poll和 counted-loop外层 poll的 interval固定为1，无法构造 counted outer chunk的循环路径才使用大于1的计算 interval；
 - 调用：`Call`、`ForeignCall`；`ForeignCall` 的 mode 必须是普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`。
 - 诊断插桩：`CoverageCounter`。
 
 ### 内存 owner lowering
 
-`EscapeAndPlacement` 的 `Managed`、`RuntimeRaw`、`Resource` 和 `Foreign` 分类还决定 storage domain、size class、owner policy、是否可在 local fast path 完成以及 return kind。compiler 只为 `Managed` 产生 `GcAlloc`，不产生用户级 free；raw/resource 的回收由 runtime operation 和稳定 descriptor 完成。
+`EscapeAndPlacement` 的 managed placement、`RuntimeRaw`、`Resource` 和 `Foreign` 分类还决定 storage domain、size class、owner policy、representation tag、是否可在 local fast path 完成以及 return kind。`Managed::TurnRegion` 只有在闭世界摘要证明当前 coroutine turn 私有、无外部 alias、无 ResourceCell lease 且不需要 FFI 地址时才能选择；analysis 为 `unknown` 时必须选择 LocalHeap 或 SharedHeap 等能够保留原语义的路径。compiler 只为 `Managed` 产生 GC/region operation，不产生用户级 free；raw/resource 的回收由 runtime operation 和稳定 descriptor 完成。
 
-`RuntimeRaw` 的 local pop/bump 可以留在无 safepoint 的短序列；refill、remote return publish、radix forwarding、GC assist、range coalescing 和 platform call 必须落到带正确 stack map/effect 的 slow edge。raw message 只携带 stable descriptor 或 handle，verifier 必须拒绝 managed pointer payload。
+`Managed::TurnRegion` 的 `RegionPublish` 必须在 region descriptor 上登记 export summary、generation、transfer lease 和 receiver；如果 sender 仍需使用语义值，lowering 必须选择 `PromoteManaged` 或语义复制，不能发布 ownership transfer。`Managed::SharedHeap` 的引用必须通过 `ResolveSharedHandle` 建立 access guard；guard/pin 结束前旧 payload 不能复用。compressed reference 只在 cage profile 中由 `DecodeCompressedRef` 产生，FFI 前必须 resolve+pin。
+
+LocalHeap 的本地 direct store 使用 hybrid barrier；跨 owner/block store 还生成 owner-local edge summary 和 `EdgeDeltaBatch`。`MarkTicketBatch`、`EdgeDeltaBatch`、`RegionPublish`、`ForwardSharedHandle` 的消息只能携带 stable descriptor、handle/index、generation、epoch、credit 和 integrity，verifier 必须拒绝 managed pointer payload。
+
+`RuntimeRaw` 的 local pop/bump 可以留在无 safepoint 的短序列；refill、remote return publish、GC assist、mark mailbox drain、credit termination、handle resolve、radix forwarding、range coalescing 和 platform call 必须落到带正确 stack map/effect 的 slow edge。raw message 只携带 stable descriptor 或 handle，不能借此把 managed payload 当作 raw slot。
 
 block terminator 固定为 `Jump`、`Branch`、`Switch`、`Invoke`、`Return`、`ResumePanic`、`TailCall`、`Trap` 和 `Unreachable`。可能 panic/unwind 的调用必须使用 `Invoke`，它同时提供 normal 和 unwind 边；确定不 unwind 的调用才使用普通 `Call`。`TailCall` 只允许在没有待执行 cleanup、调用/返回 ABI 完全相同、当前 frame 无活跃 stack root且全部参数能放入寄存器时形成；含 stack argument、sret、普通 `ForeignBridge` 或 `ForeignBridge[DirtyCpu]` 的调用不得 tail-call。`ForeignLeaf` 只有在普通 ABI 与 frame 条件全部满足时才可参与同一规则，不能因为 leaf 标记绕过 stack root 或 unwind 检查。
 
@@ -318,7 +333,7 @@ GIR verifier 至少检查：
 - 每个可能 suspend/allocate/block 的 slow path有 mandatory statepoint；普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 必须有对应 bridge交接记录，dirty mode必须有额度 admission与 `DIRTY_CPU_BRIDGE` metadata；每个函数的 `max_leaf_reserve` 等于全部 direct `ForeignLeaf stack = N` 的 checked最大值并进入 prologue `required_frame`；
 - 每个 heap 引用写入经过 `GcWrite` 或被证明属于未发布新对象初始化。
 - `NoSafepointBegin/End` ID稠密、正确嵌套且只来自内部 lowering；region单入口、单出口，无 backedge、safepoint、普通/foreign call、panic/unwind、allocation/refill、park/suspend或未预留 barrier；
-- `BarrierPermitId` 稠密且只关联一个 region，reserved barrier的静态消费数不超过 `max_shades`，普通 barrier不能伪装成 reserved barrier；
+- `ScopedViewBegin/End` 的 token、mode、source descriptor和所有正常/panic出口成对；`ScopedRead` projection不得写入、逃逸、进入 foreign frame或跨 suspend，view内 safepoint必须由token root/epoch覆盖；
 
 LIR verifier 至少检查：
 
@@ -330,7 +345,7 @@ LIR verifier 至少检查：
 - panic/unwind 边、普通/dirty `ForeignBridge` 与 `ForeignLeaf` 的 mode、foreign runtime 交接和 safepoint ID 不缺失；
 - 目标 legalization 后不存在 i128、聚合普通 value 或无编码操作；
 - `PollSummary` 与实际 entry check一致；把实际 poll、mandatory statepoint和带 checked entry的 managed call视为路径切断点后，剩余 CFG无循环 SCC，任意 poll-free路径的饱和 cost不超过 `POLL_BUDGET`；
-- counted strip-mining的 outer/inner CFG保持原 trip count、step、vector main与 scalar remainder覆盖，`chunk_iters`和 `optimized_body_cost`匹配目标 cost表，inner SCC不存在独立 countdown或 poll-word load；
+- `ScopedViewBegin/End` 在 lowering 后保持成对、source alias与token metadata一致，不能被优化成普通 reference；view的 read/write mode和 relocation修正与对应 GC descriptor一致；
 - uncounted fallback的 countdown interval与最大 poll-free cycle cost匹配，只有到期 edge具有 `PollResume`；
 - 每个 `NoSafepointRegion` 的 marker、effect fence和 reason匹配 GIR，legalized机器CFG无 backedge，全部路径cost不超过 `POLL_BUDGET`，marker内没有 blocking/slow edge；
 

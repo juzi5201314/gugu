@@ -57,9 +57,9 @@ ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault 
 
 `parallelism` 的初始值来自 `GUGU_RUNTIME_PROCS`。`std.runtime.set_parallelism(n)` 要求 `n > 0`，成功时发布新目标并返回旧值。增加目标允许 runtime 按需增加并行执行能力；降低目标不中断正在执行的协程、系统调用或外部函数。调用返回表示新目标已经发布，不表示底层 OS 线程数量已经立即收敛。超过宿主 CPU 数量的值合法，但不产生吞吐量保证。
 
-runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和普通 `ForeignBridge`。DirtyCpu 与 managed worker 共享 CPU预算：`parallelism > 1` 时至少给 managed scheduler保留一个执行槽；`parallelism = 1` 时允许一个 managed worker和一个 dirty worker由 OS时间片复用。超出 dirty target 的调用在不持有 processor 的状态下排队；降低并行度不强杀已运行 work，因此 active 数量可以暂时高于新 target，且在自然排空前不接纳新调用。`ForeignLeaf` 始终在当前 worker和 processor上直接执行。精确 admission见[调度器内部规范](../internals/scheduler.md)。
+runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和普通 `ForeignBridge`，但统一受 `BlockingBridge` 的 `max_blocking_workers`、worker system stack、BridgeCredit 和 waiter memory cap约束，不能按调用无界创建线程。DirtyCpu 与 managed worker共享 CPU预算：`parallelism > 1` 时至少给 managed scheduler保留一个执行槽；`parallelism = 1` 时允许一个 managed worker和一个 dirty worker由 OS时间片复用。超出 dirty target 的调用在不持有 processor 的状态下排队；降低并行度不强杀已运行 work，因此 active 数量可以暂时高于新 target，且在自然排空前不接纳新 dirty call。
 
-外部调用期间函数仍在原 OS thread或 dirty worker上执行。普通 `ForeignBridge` 若未失去原 processor lease可以直接恢复；lease已被取回或 dirty调用完成时，经 idle processor或普通 runnable调度恢复。程序不能观察两条路径的差异。普通 bridge的外部代码回调须遵守[平台与 ABI参考](platform-abi.md)的线程进入和回调边界；`ForeignBridge[DirtyCpu]` 与 `ForeignLeaf` 禁止回调。
+外部调用期间函数仍在原 OS thread或 dirty worker上执行。普通 `ForeignBridge` 若未失去原 processor lease可以直接恢复；lease已被取回或 dirty调用完成时，经 idle processor或普通 runnable调度恢复。程序不能观察两条路径的差异。普通 bridge的外部代码回调须遵守[平台与 ABI参考](platform-abi.md)的线程进入和回调边界；`ForeignBridge[DirtyCpu]` 与 `ForeignLeaf` 禁止回调。普通 bridge的 admission credit、waiting和worker cap只影响 runtime内部调度，不改变 C ABI结果。
 
 用户协程不能把并行执行槽、工作线程编号或当前 OS 线程身份当作调度稳定性的一部分。`#[os_thread_local]` 只表示 OS 线程槽，`#[coroutine_local]` 只表示协程槽；动态并行度、阻塞等待、普通 `ForeignBridge` 和 `ForeignBridge[DirtyCpu]` 都可能改变二者的使用时机。
 
@@ -148,9 +148,12 @@ fatal 是 runtime 无法安全恢复的进程级故障。fatal 不进入 `Panic`
 | `HardwareFault` | 不可安全转换的同步硬件 fault，例如非法指令或保护页之外的访问 | 只允许 best-effort 报告，然后恢复宿主默认终止行为 |
 | `InvalidConfiguration` | 启动环境变量格式、范围或目标组合非法 | `main` 尚未调用，退出类别为 `runtime-failure` |
 
-`GUGU_RUNTIME_MEMORY_LIMIT` 是软上限，不是操作系统硬隔离。它覆盖 managed heap、runtime私有 metadata、用户协程栈等 runtime管理的已提交内存，不覆盖镜像代码、操作系统内核资源或外部库自行分配的内存。runtime可以因当前对象、页粒度和并发回收周期暂时超过该值；超过后应提高 collection频率并回收不可达对象。
+`GUGU_RUNTIME_MEMORY_LIMIT` 是软上限，不是操作系统硬隔离。它覆盖 managed heap、runtime私有 metadata、用户协程栈等 runtime管理的已提交内存，不覆盖镜像代码、操作系统内核资源或外部库自行分配的内存。runtime可以因当前对象、页粒度和并发回收周期暂时超过该值；超过 `pressure_enter_ratio` 后进入新的 pressure episode，并按 owner drain、collection、trim/decommit 的有界预算推进。
 
-分配请求触发软上限时，runtime请求并等待一次完整 collection后再尝试分配；仍不能满足时进入 `OutOfMemory`。显式 `std.runtime.collect()` 也不保证所有内存返还宿主，不改变任何存活值或安全引用的语义，也不运行用户 finalizer。具体 safepoint、heap和 cycle阶段见[GC内部规范](../internals/gc-metadata.md)。
+该口径还包括 owner-local raw/range cache、producer staging、owner inbox、forwarding chain 和尚未由 owner 消费的 `pending_return_bytes`。这些 bytes 在实际进入可复用 free structure 或完成 decommit 前都算作物理占用；pressure drain 可以先刷新消息和 cache，再执行 collection/trim。
+
+分配请求触发 soft limit 时，当前 pressure episode 至多启动一次 forced full cycle；完成后若仍高于 clear 水位，runtime继续执行有界 owner drain、forwarding grace、sweep、trim/decommit和有限 assist，不在每次临界分配上重复重扫整堆。仍不能取得 headroom时进入 `OutOfMemory`；占用低于 `pressure_clear_ratio` 且 pending/cache/reclaimable 已完成 owner drain 后，才允许下一 episode 再启动 forced cycle。显式 `std.runtime.collect()` 也不保证所有内存返还宿主，不改变任何存活值或安全引用的语义，也不运行用户 finalizer。具体 safepoint、heap和 cycle阶段见[GC内部规范](../internals/gc-metadata.md)。
+allocation debt 只影响自动 collection 的节奏；memory limit 触发的 drain、emergency sweep、decommit 和 `OutOfMemory` 规则不受 `GcTarget::Off` 关闭。具体 debt 公式和 pressure hysteresis 见[内存所有权与消息通道](../internals/memory-messaging.md#allocation-debtpressure-与-backpressure)。
 
 栈增长失败与栈上限的区分是：请求超过逻辑上限属于 `StackOverflow`；请求未超过上限但 runtime 页面分配失败属于 `OutOfMemory`。runtime 栈保护和 emergency report 缓冲区不得依赖当前用户栈仍然可写。
 
@@ -276,12 +279,37 @@ struct RuntimeStats {
     pub stack_live_bytes: uint,
     pub dirty_cpu_active: uint,
     pub dirty_cpu_waiting: uint,
+    pub blocking_bridge_active: uint,
+    pub blocking_bridge_waiting: uint,
+    pub blocking_bridge_workers: uint,
+    pub blocking_bridge_queue_bytes: uint,
+    pub timer_live: uint,
+    pub timer_cancelled: uint,
+    pub timer_overflow_bytes: uint,
     pub gc_cycles: uint,
     pub gc_pause_total: Duration,
     pub signal_events_dropped: uint,
     pub trace_events_dropped: uint,
+    pub runtime_committed_bytes: uint,
+    pub pending_return_bytes: uint,
+    pub owner_cache_bytes: uint,
+    pub reclaimable_bytes: uint,
+    pub remote_return_batches: uint,
+    pub remote_return_hops: uint,
+    pub forwarded_messages: uint,
+    pub mark_ticket_batches: uint,
+    pub edge_delta_batches: uint,
+    pub mark_credit_pending: uint,
+    pub shared_handle_resolves: uint,
+    pub shared_handle_forwards: uint,
+    pub turn_region_resets: uint,
+    pub region_promotions: uint,
+    pub compressed_ref_decodes: uint,
+    pub range_reserved_bytes: uint,
 }
+```
 
+```
 fn available_parallelism() uint
 fn parallelism() uint
 fn set_parallelism(value: uint) Result[uint, RuntimeError]
@@ -302,14 +330,17 @@ fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 `GcTarget::Automatic(p)` 的 `p` 是非负百分数：下一次自动周期的目标堆量为上一次周期结束时存活堆量加上该百分比；`Automatic(100)` 是默认行为。`GcTarget::Off` 关闭增长触发，但不关闭显式 `collect()`、内存上限触发或分配失败前的强制回收。setter 返回旧值，已经开始的 GC 周期不因设置改变而回滚。
 
 `RUNTIME_MEMORY_LIMIT` 是runtime管理的soft limit，完整口径包括managed heap及GC metadata、stack arena reservation/commit、stack cache、hot/cold coroutine control slab、wait-node/producer staging、queue carry元数据，以及runtime可归因的native I/O buffer；不承诺限制用户自行取得的opaque foreign allocation、native库内部arena、代码/只读metadata、OS thread stack或映射镜像。runtime以同一口径进行limit判断并在内部memory accounting与trace中记录组成，不能把control slab或cache从触发条件中排除。
+`pending_return_bytes`、`owner_cache_bytes` 和 `reclaimable_bytes` 分别表示尚未由 owner 消费、已提交但未被 live record 使用、以及 metadata 已确认可重用但尚未进入 free structure 的物理 bytes；这些字段是 `runtime_committed_bytes` 的互斥分类，不应在 limit 判断中重复相加。
 
 `stack_limit()` 返回当前每协程逻辑栈上限。栈上限只能由 `GUGU_RUNTIME_STACK_MAX` 在启动时设置；本版本不提供降低活动栈上限的动态 setter，因为那会使已存在的栈无法满足安全返回条件。
 
 `safepoint_poll()` 是 compiler绑定的无参数 runtime intrinsic。fast path读取当前 `LogicalProcessor` 的 poll word；slow path可以确认 `gc_stop_epoch`、处理抢占请求、保存 stack map所需 roots、让出当前 coroutine并在恢复后重新检查 epoch。它不是阻塞 I/O API，不创建用户对象，不允许从 asm模板、`#[naked]` 或带函数体的 `#[ffi(dirty_cpu)]` 调用。
 
-`RuntimeStats` 是逐字段快照，不是业务同步原语。`gc_cycles`、`gc_pause_total` 和 dropped计数单调递增；live/committed/active/waiting等当前量可随并发运行升降，采样后立即过时。`stack_reserved_bytes` 是 stack arena与大栈 reservation占用的虚拟地址总量，`stack_live_bytes` 是 live coroutine逻辑容量之和，`stack_committed_bytes` 是 live与cache共同占用的已提交宿主页；亚页共享、cache和空页回收使三者不存在简单相等关系。`heap_live_bytes` 也不等同于可立即返还 OS的页数。并行度刚降低时 `dirty_cpu_active` 可以暂时高于新 target；dirty统计不提供同步、取消或强杀 native work的能力。
+`RuntimeStats` 是逐字段快照，不是业务同步原语。`gc_cycles`、`gc_pause_total`、累计 message/handle/region 计数和 dropped 计数单调递增；live/committed/active/waiting 等当前量可随并发运行升降，采样后立即过时。`stack_reserved_bytes` 是 stack arena 与大栈 reservation 占用的虚拟地址总量，`stack_live_bytes` 是 live coroutine 逻辑容量之和，`stack_committed_bytes` 是 live 与 cache 共同占用的已提交宿主页；亚页共享、cache 和空页回收使三者不存在简单相等关系。`heap_live_bytes` 也不等同于可立即返还 OS 的页数。并行度刚降低时 `dirty_cpu_active` 可以暂时高于新 target；`blocking_bridge_active` 是已经取得 BridgeCredit 并执行 native 的调用数，`blocking_bridge_waiting` 是 admission waiter 或已发布 bridge roots但尚未取得 credit 的调用数，`blocking_bridge_workers` 不超过 profile 的 `max_blocking_workers`，`blocking_bridge_queue_bytes` 包含 waiter metadata 与排队 payload。timer字段分别统计 active wheel/heap entries、已标记取消但未 compact 的 entries与 overflow heap/runtime slab bytes。bridge/timer 统计不提供取消 native work、强杀线程或固定调度时刻的能力。
+`runtime_committed_bytes` 不包含 managed heap；`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 和 `range_reserved_bytes` 与既有 heap/stack 统计分开报告。`remote_return_batches`、`remote_return_hops`、`forwarded_messages`、`mark_ticket_batches`、`edge_delta_batches`、`mark_credit_pending`、`shared_handle_resolves`、`shared_handle_forwards`、`turn_region_resets`、`region_promotions` 和 `compressed_ref_decodes` 分别记录 owner return、GC message、handle、region 和 cage profile 的诊断口径；这些字段不构成同步、调度或回收时刻承诺。
 
 `TraceConfig` 的事件写入 stderr，使用 `gugu-runtime-trace-v1` 的逐行 JSON。事件包含类别、事件名、相对 runtime 启动的单调纳秒时间和可用的协程/不透明执行槽标识；trace 只影响诊断输出，不改变调度、GC 或信号语义。trace 缓冲区满时丢弃事件并增加 `trace_events_dropped`，不能阻塞用户代码或进入用户 panic。
+GC trace 的 `mark_publish`、`mark_consume`、`edge_delta_publish`、`region_promote`、`region_transfer`、`region_reset`、`handle_resolve` 和 `handle_forward` 事件与 `return_publish`、`return_consume`、`return_forward`、`block_return`、`owner_retire`、`pressure_drain`、`range_trim` 复用现有 scheduler/gc trace 开关；事件只记录稳定 descriptor/slot identity、bytes、generation、cycle、batch、credit、hop 和 duration，不记录 managed payload 地址或用户对象内容。
 
 Dirty CPU work 不提供强制取消：`std.process.exit` 或 fatal 路径可以直接终止进程，正常自然退出是否等待仍由 `TerminationPlan.wait_foreign` 决定；等待 dirty work 的协程不会被 runtime 自动改写为成功或取消。
 

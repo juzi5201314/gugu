@@ -10,6 +10,14 @@
 
 runtime源码需要在锁所有权或 root publication的常数临界区暂缓 safepoint时，只能使用 compiler内部的 [`NoSafepointRegion`](gir-lir.md#nosafepointregion)；它不是用户 attribute，也不允许建立另一套不受 poll预算约束的 runtime路径。
 
+## 内存返回接缝
+
+stack、control、wait、resource、range 和 Mosaic GC message 的跨 owner 生命周期归还统一遵守[内存所有权与消息通道](memory-messaging.md)。`CoroutineHot`、ready/wake 和 join 的现有布局与线性化语义不改变；raw return 只作用于地址稳定的 slab/span 记录，`MarkTicket`、`EdgeDelta`、`RegionTransfer` 和 `HandleForward` 只作用于 stable managed descriptor/handle。
+
+跨协程完成路径可先用 `ReturnSlabCache` 按 source slab 聚合地址稳定的 stack/control/wait slot，再发送 owner return；`MarkMailbox` 按 target owner、cycle 和 generation 聚合 GC work，二者都不参与 runnable、wake 或 join 的线性化。
+
+ready/wake 消息与 memory return/GC 消息必须在类型和 verifier 上分离。memory/GC message 可以批量延迟，但不能成为 coroutine 可运行性、channel 完成或 join 完成的判据；producer gate、topology epoch、cycle credit 和 queue-page grace 继续覆盖消息存储稳定性。
+
 ## 三层实体
 
 调度器采用 Go 风格的三层模型，但使用完整名称而不是单字母缩写：
@@ -18,7 +26,7 @@ runtime源码需要在锁所有权或 root publication的常数临界区暂缓 s
 - `LogicalProcessor`：执行 Gugu 用户代码所需的 runtime capability，数量等于当前 `parallelism` 目标；
 - `WorkerThread`：操作系统线程，绑定一个 processor 时执行用户代码，也能在无 processor 时执行普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]`、poller 和 runtime 系统工作。
 
-一个 `Coroutine` 同时最多由一个 worker 执行；一个 `LogicalProcessor` 同时最多绑定一个 worker；一个 worker 同时最多绑定一个 processor。普通 `ForeignBridge` 进入 native 时可以让原 worker短暂保留 processor lease，runtime retake后才释放；`ForeignBridge[DirtyCpu]` 立即释放 processor，dirty work不取得 processor。
+一个 `Coroutine` 同时最多由一个 worker 执行；一个 `LogicalProcessor` 同时最多绑定一个 worker；一个 worker同时最多绑定一个 processor。普通 `ForeignBridge` 先经过 `BlockingBridge` admission并取得 `BridgeCredit`，进入 native时可以让原 worker短暂保留 processor lease，runtime retake后才释放；`ForeignBridge[DirtyCpu]`立即释放 processor，dirty work不取得 processor。
 
 ID 表示固定为 `CoroutineId(u64)`、`LogicalProcessorId(u64)` 和 `WorkerThreadId(u64)`，进程内单调分配且不复用。计数溢出说明 runtime 内部不变量已破坏，进入 `RuntimeInvariant` fatal，不能回绕。
 
@@ -60,16 +68,16 @@ CoroutineCold {
     coroutine_locals,
     panic_state,
     select_rng: [u64; 4],
-    select_scratch: Vec<u64>,
+    select_scratch: SelectScratchCache,
     gc_scan_epoch: AtomicU64,
 }
 ```
 
 `CoroutineSlot` 与 `CoroutineCold` 都来自分段 non-moving slab；扩容只能增加新页，不能移动旧 record。`cold_index` 在 segmented cold table 中稠密解析，不形成 managed pointer。`preferred_processor` 只是 last-owner locality hint，只有pointer当前ID与`preferred_processor_id`一致且state仍为active时才有效；这对值防止processor control block复用形成hint ABA，指向`Retiring`时必须忽略。`run_link_next` 和 `run_batch_len` 只由当前 queue owner普通读写：producer在 Release 发布 batch前独占，consumer通过 Acquire摘取后独占；其它访问是 runtime memory-safety错误。`r14` 指向 `CoroutineHot`，`StackDescriptor` 位于同一 `CoroutineSlot` 的固定下一条 cache line。
 
-`select_scratch` 只保存 readiness bitmap，不保存 managed pointer；source、send payload 和 result slot仍位于用户 frame并由 stack map追踪。需要登记多个 case时，`wait_record` 的 tagged `Select` variant持有 `SelectTxn` 与一个 non-moving `SelectWaitBlock` handle；block按 case数量在取得任何 source锁前从 runtime wait-node size class取得，node只保存 Coroutine handle、generation、case index和 stack-high-relative payload/result offset，由 typed visitor按 descriptor扫描，禁止保存会被 stack copy悬空的裸 pointer。cleanup完成后 block立即归还，scratch bytes仍由 typed visitor跳过。
+`select_scratch` 只保存 readiness bitmap，不保存 managed pointer；source、send payload 和 result slot仍位于用户 frame并由 stack map追踪。需要登记多个 case时，`wait_record` 的 tagged `Select` variant持有 `SelectTxn` 与一个 non-moving `SelectWaitBlock` handle；block按 case数量在取得任何 source锁前从 runtime wait-node size class取得，node只保存 Coroutine handle、generation、case index和 stack-high-relative payload/result offset，由 typed visitor按 descriptor扫描，禁止保存会被 stack copy悬空的裸 pointer。cleanup完成后 block立即归还；scratch由同一 `SelectTxn` 的 owner 负责释放或转入有界 cache，typed visitor跳过其 raw bytes。
 
-`ForeignBridgeState` 位于 cold record，只在 lifecycle 为 `Foreign` 或 `DirtyWaiting` 时有效，固定保存 `{ mode, call_stub, frame_offset, frame_size, lease_word, dirty_link, error_state }`。compiler 在 coroutine stack 上物化 ABI bridge frame；`frame_offset` 是从逻辑 `stack_high` 到 frame起点的 checked深度，record不保存会因 stack copy失效的裸 stack pointer。`call_stub` 是 non-moving code pointer；`lease_word` 保存本次 bridge generation和进入 native后期望的完整 lifecycle word，不是 pointer；`dirty_link` 只供 `dirty_wait_queue` 使用，不能复用 runnable `run_link_next`。ABI frame里的 managed/raw pointer按调用点 stack map追踪，交给 native 的 managed地址还必须在进入 bridge前 pin或复制。
+`ForeignBridgeState` 位于 cold record，只在 lifecycle 为 `Foreign` 或 `DirtyWaiting` 时有效，固定保存 `{ mode, call_stub, frame_offset, frame_size, lease_word, dirty_link, bridge_credit, error_state }`。compiler 在 coroutine stack 上物化 ABI bridge frame；`frame_offset` 是从逻辑 `stack_high` 到 frame起点的 checked深度，record不保存会因 stack copy失效的裸 stack pointer。`call_stub` 是 non-moving code pointer；`lease_word` 保存本次 bridge generation和进入 native后期望的完整 lifecycle word，不是 pointer；`dirty_link` 只供 `dirty_wait_queue` 使用，不能复用 runnable `run_link_next`；`bridge_credit` 是 `BlockingBridge` admission发放的非指针额度，attached 与 detached bridge 共用且最多归还一次。ABI frame里的 managed/raw pointer按调用点 stack map追踪，交给 native 的 managed地址还必须在进入 bridge前 pin或复制。
 
 `morestack_scratch` 保存 return PC、九个 GPR参数和八个 XMM参数；只有 lifecycle Running且当前 PC为 `MorestackEntry` 时有效，并由该 entry map精确扫描，不属于常驻 runtime root。
 
@@ -120,7 +128,7 @@ x86_64 `CoroutineContext` 保存 `rsp`、resume `rip`、`rbx`、`rbp`、`r12` �
 - 一个 owner-only injection carry；
 - TLAB cursor/limit、write-barrier buffer和 per-processor mark work；
 - 七个固定小栈 class的本地 cache head与总字节计数；
-- 按 deadline排序的 timer binary heap；
+- 一个 owner-local `TimerWheel` 与 overflow heap；
 - 调度随机状态和 service tick。
 
 active processor表、remote inbox和注入域的内存均为 `O(P)`；每个 processor固定8个 shard用于分散 all-to-one producer对单一 head line的竞争。修改8这个值属于 scheduler性能策略变更，必须通过本章的 shard sweep门禁，不能按 `P` 动态扩成平方级 mailbox。
@@ -174,7 +182,6 @@ target processor owner以 `head.swap(null, Acquire)`取得某 shard当时的完�
 Booting 时按宿主 NUMA topology建立至少一个 `InjectionDomain`；无法可靠探测时只建立一个。每个 domain同样含8个128-byte padded batch head，但允许多个 worker竞争 `swap(null)`，成功者把链登记为自己的 typed injection carry。无合法 preferred processor、目标正在 `Retiring`、local overflow和未归属的外部事件进入 source-local domain；worker先检查当前 NUMA domain，再按随机起点检查其它 domain。一次 winner只在本轮消费一个 publish batch或128项；carry中还有其它 batch且存在 idle demand时，按 `run_batch_len`边界把后续 batch重新发布到其它 injection shard，不能让单 worker私占无界 burst。processor retire、worker stop和producer deregister前必须发布全部 staging/carry。
 
 remote/injection publish只有在 CAS前观察到 `old == null` 时才把进程级 `work_seq`递增一次；普通非空队列追加不写共享 pending word。preferred target为 `Bound`且系统存在 idle processor时，还设置该 target的 `PREEMPT`并投毒当前 `stack_check`，促使 owner尽快 drain/overflow；target为 `Idle`时唤醒一个 worker去绑定它。hint只省略通知，park正确性始终由 queue recheck与 `work_seq`封闭。
-
 ### LocalDeque
 
 本地队列容量有严格256上界，key是稠密递增 ticket，访问模式是 owner尾部 push/pop与 thief头部 steal，因此使用内联 `[UnsafeCell<MaybeUninit<CoroutineHot*>>; 256]`，不使用通用 deque、per-slot allocation或 `P × P`结构。slot普通读写只发生在算法已经证明唯一 ownership的区间；push的 Release tail/head发布与 consumer的 Acquire/CAS取得构成可见性边。head、tail分别占用128-byte区域，debug构建持续检查逻辑距离不超过256。
@@ -187,9 +194,31 @@ remote/injection publish只有在 CAS前观察到 `old == null` 时才把进程�
 
 `run_next` 用于刚 ready、与当前工作具有局部性的一个 coroutine。放入新值时若已有旧值，旧值先进入普通 local deque；同一 coroutine连续从 `run_next`获得优先的次数最多为1，随后必须经过普通队列以维持公平。
 
-local deque满时，owner一次认领最旧128项，按 newest-to-oldest串成 publish batch并送往 idle processor的 remote inbox；没有 idle target时送往 source NUMA injection domain，再放入新项。overflow不访问 runnable全局 mutex，也不逐项分配或逐项通知。
+local deque满时，owner一次认领最旧128项，按 newest-to-oldest串成publish batch并送往 idle processor的 remote inbox；没有 idle target时送往source NUMA injection domain，再放入新项。overflow不访问runnable全局mutex，也不逐项分配或逐项通知。
 
-per-processor timer 使用以 deadline、timer sequence 为键的连续 binary min-heap。timer 数量无固定上界且主要操作为 peek/push/pop，因而使用 `Vec<TimerEntry*>`；取消通过 wait generation 标记失效，pop 时惰性丢弃，避免从 heap 中线性删除。
+### Select scratch
+
+`SelectScratchCache` 是 coroutine cold record 中的固定描述符，不是可任意增长的 `Vec`。每次 `select` 先以内联的8个 `u64` readiness word处理不超过8个 case；超过8个 case时按 `1, 2, 4, ... 1024` 个 word的 size class 从 owner-local raw cache取得，超过1024 word则从 owner slab/extent取得精确或向上取整的临时 allocation。`SelectTxn` 记录 `{ owner, class, capacity_words, used_words, generation }`，scratch只含 bitmap和规范化 source index，不含 managed pointer。
+
+规范化 source 顺序、case-to-word mapping和去重结果组成 immutable `SelectPlanKey`；同一编译期固定 plan 可在 coroutine cold cache中复用 mapping，但 readiness bits和 winner state每次清零。动态 case集合不得伪装成固定 plan，仍按 `WaitSourceId`排序去重并逐 source登记。
+
+select cleanup在 winner提交、取消注销和 payload reservation完成后立即归还 scratch。每个 processor的 retained cache按 size class维护，累计容量不得超过 `select_scratch_cache_bytes` profile上限；超过上限的 allocation直接归还 owner slab/extent，不得由 coroutine长期保留。cache miss只发生在 begin slow path，cache hit不分配；pressure、processor交接、ForeignBridge、GC stop和 owner retire 都必须先清空该 processor cache的可转移 lease。cache与 wait-node 分开计入 runtime pressure，不能以复用掩盖实际 committed bytes。
+
+大于8 case的路径可以 O(k) 构造并登记，但不得在 source 锁内完成排序、分配或跨 source 等待；`SelectTxn` 的每个 source 注册、winner CAS、注销和 scratch class都必须可计数。release profile必须记录 case 数为1/2/8/64/256时的 registration、lock、winner-conflict和 retained-bytes计数；未通过对应 profile门禁不能把大 case路径宣称为固定成本。
+
+### TimerWheel 与 blocking bridge
+
+per-processor timer使用四层、每层256 bucket的 hierarchical timing wheel，并保留一个按 exact deadline、timer sequence排序的 overflow min-heap。wheel的tick和 near horizon来自 runtime tuning profile；deadline按不早于目标时间的 tick 放入 bucket，poll 到 bucket 后仍比较 exact deadline，因此轮盘量化不能提前唤醒。horizon内的 timer 进入 wheel，远期 timer进入 heap；每次 service 按有限 `timer_drain_budget` 把已进入 horizon的 heap项转入 wheel，禁止一次搬运无界数量。
+
+TimerEntry 位于 non-moving owner slab，含 `{ timer_id, generation, deadline, bucket_link, cancelled, owner }`。cancel 只在线性化点标记 generation/cancelled并唤醒等待者，不要求远程调用者取得 timer owner 锁；owner 在 cursor经过 bucket、inbox drain、pressure或 cancel/live 比例达到 profile阈值时批量摘除无效项并归还 entry。bucket 的取消节点不能无限滞留，compact 每次受 `timer_compact_budget` 限制并在后续 service 继续；active timer、cancelled bytes和 overflow heap capacity都计入 runtime pressure。
+
+### Bounded blocking bridge
+
+普通 `ForeignBridge`、`std.fs` 的文件操作、`process wait` 与其它不能使用 poller的阻塞系统调用统一经过 `BlockingBridge` admission；`ForeignLeaf` 不得走该路径，`ForeignBridge[DirtyCpu]` 仍使用独立 dirty admission。`BlockingBridge` 维护独立于 runnable、idle、timer和injection锁的 FIFO gate，并为每次 admitted call保留一个 `BridgeCredit`：attached bridge 进入 native前就占用该 credit，若被 retake，replacement worker只能消费同一个 credit；返回或取消后 credit归还。因此 retake不能通过每个调用无界创建 OS worker。
+
+`max_blocking_workers`、`blocking_worker_stack_bytes`、`blocking_waiter_bytes`和`blocking_service_budget`属于 runtime tuning profile；worker 数量不能超过 `max_blocking_workers`，并且所有 worker system stack、bridge frame、wait node和排队 payload计入 runtime committed/pressure账本。没有 credit时调用方在 `Waiting` 中排队并释放 processor，不执行 native code；取得 credit后才转为 `Foreign`。等待队列有 FIFO service和有限 batch，队列背压表现为协程挂起而非 OS thread oversubscription；waiter metadata达到 profile memory cap时按统一 runtime resource-exhaustion错误结束 admission，不绕过上限创建 worker。
+
+CPU quota/container探测先决定 managed `parallelism`，再按 profile计算 blocking worker cap；探测失败使用 target descriptor的固定 profile，不读取宿主无限制的 CPU 数。active、waiting、credit、worker stack committed和队列 bytes必须进入 `RuntimeStats`，长阻塞调用与短调用的计数分开；任何普通 bridge实现不能以“预计很快”跳过 admission。
 
 ## WorkerThread
 
@@ -220,19 +249,6 @@ active processor少于2时不进入窃取。否则使用 worker-local xorshift64
 
 thief按照已选择的 LocalDeque变体从 victim头部认领当前数量的一半，向上取整，最多128；第一项运行，其余进入 thief local deque。窃取前验证每项 `Runnable|ENQUEUED`，成功取得后只转移 queue ownership，不清 `ENQUEUED`；真正切到 `Running` 时才清 state bits。remote inbox仍由其 target processor owner消费；empty-to-nonempty发布在存在 idle demand时向 target发 `PREEMPT`，owner会在同步 safepoint后 drain并把过量工作发布给 idle processor/injection。
 
-同时spinning worker数不超过 `ceil(active_processors / 2)`。每个spinner最多做 `4 * active_processors` 次victim/poller尝试；之后释放processor并park。创建/唤醒worker时优先复用parked worker，只在有idle processor且没有可唤醒worker时创建OS thread。runnable common path不取得进程级 scheduler mutex；idle、dirty admission和其它控制面锁彼此独立。
-
-## park 与 ready
-
-所有 channel、锁、join、timer、I/O 和 `select` 等待共用两阶段 park 协议：
-
-1. Running coroutine 填写 `WaitRecord { source, generation, payload, result_slot, notified }`；
-2. 在等待源锁内登记 wait node，并把 lifecycle CAS 为 `Parking`；
-3. commit 在同一锁域重新验证条件；已经满足或 notified 时撤销 wait node，CAS `Parking -> Running` 并继续；
-4. 仍需等待时释放 source 锁，park stub 在 lifecycle 仍为 `Parking` 时保存完整 context并切到 worker system stack；
-5. scheduler在context Release发布后Acquire检查notified：为true时调用统一 `ready_publish`；为false时CAS `Parking -> Waiting`，随后再次Acquire检查notified，若已为true则立即调用同一helper；
-6. 只有lifecycle已离开 `Parking` 后，原user stack才可由另一个worker恢复。
-
 waker在等待源的线性化点写result slot，递增/匹配generation，然后：
 
 - 观察到`Waiting`时调用 `ready_publish`；如果调用者正持有目标processor的唯一owner capability，helper以完整CAS设置`Runnable|ENQUEUED`并进入该processor的`run_next/local`，否则通过`ProducerHandle.pending_node`认领并设置`Runnable|ENQUEUED|BATCH_PUBLISHING`，发布到目标remote inbox或injection；
@@ -253,7 +269,7 @@ HIR把无 case且无 default的形式标为 `SelectPlan::Never`。scheduler对�
 
 coroutine 的 `select_rng` 使用 xoshiro256++。一次 next固定为 `result = rotl(s0 + s3, 23) + s0`，再执行 `t = s1 << 17; s2 ^= s0; s3 ^= s1; s1 ^= s2; s0 ^= s3; s2 ^= t; s3 = rotl(s3, 45)`，全部 `u64` 环绕。初始32字节状态为 BLAKE3-256(`gugu-select-rng-v1`、OS entropy、CoroutineId、进程启动 nonce)；全零时把 `s0`置1。该状态不与 `std.random`共享。`uniform(n)` 固定使用 threshold rejection：`threshold = 0u64.wrapping_sub(n) % n`，重复取值直到 `x >= threshold`，返回 `x % n`；所有 rejection与 permutation生成都在锁外执行。
 
-取得任何 source锁前，runtime按 `case_count`准备 readiness scratch：case数不超过64时使用调用 frame的一个 `u64` bitmap；更大时把 coroutine-owned `select_scratch`增长到 `ceil(case_count / 64)` 个 `u64`。该 vector无固定上界、按 coroutine复用，且不保存 managed pointer。case record还必须预留其临界写可能产生的 barrier entry；若当前 buffer不足，refill在锁外完成。
+取得任何 source锁前，runtime按 `case_count` 准备 readiness scratch：case数不超过8时使用 `SelectScratchCache` 的内联8个 `u64`；更大时按 size class或临时 extent取得 `ceil(case_count / 64)` 个 word，并把 capacity、owner和generation记录到 `SelectTxn`。scratch不保存 managed pointer，cleanup后立即归还或进入不超过 `select_scratch_cache_bytes` 的 owner-local cache。case record还必须预留其临界写可能产生的 barrier entry；若当前 buffer不足，refill在锁外完成。
 
 ### 1–8 case 的展开路径
 
@@ -273,9 +289,8 @@ source内部锁的 acquire slow edge在尚未持有任何其它 source锁时才�
 
 ## 计时器与 I/O
 
-每个 processor 的 timer heap 归该 processor owner 修改；跨 processor 新 timer 通过目标 processor 的 timer inbox 发布并唤醒 poller。全局维护所有 heap 最早 deadline 的原子近似值；过早值只导致多一次 wake，过晚值不允许。
-
-Linux 使用一个进程级 epoll fd、eventfd wakeup 和 timerfd；Windows 使用一个进程级 IO completion port 与 waitable timer。poller 线程/无工作的 worker 把完成事件转换为对应 wait generation 的 ready。regular file、无法异步化的系统调用和普通 `ForeignBridge` 不占 poller，走 blocking/foreign 交接；`ForeignBridge[DirtyCpu]` 走 dirty CPU admission；`ForeignLeaf` 留在当前 worker 上直接执行。
+每个 processor 的 `TimerWheel` 与 overflow heap 归该 processor owner 修改；跨 processor 新 timer 通过目标 processor 的 timer inbox 发布并唤醒 poller。全局维护所有 wheel/heap 最早 exact deadline 的原子近似值；过早值只导致多一次 wake，过晚值不允许。wheel 的 bucket、overflow transfer、cancel compact 和 timer service 都受 `timer_drain_budget` / `timer_compact_budget` 限制。
+Linux 使用一个进程级 epoll fd、eventfd wakeup 和 timerfd；Windows 使用一个进程级 IO completion port 与 waitable timer。poller 线程/无工作的 worker 把完成事件转换为对应 wait generation 的 ready。regular file、无法异步化的系统调用和普通 `ForeignBridge` 不占 poller，走有界 `BlockingBridge` admission；`ForeignBridge[DirtyCpu]` 走 dirty CPU admission；`ForeignLeaf` 留在当前 worker 上直接执行。
 
 poller每批返回事件时按合法 preferred processor和shard分组，每组至多128项并通过 `ready_publish` 发布；无合法target的组进入poller所在NUMA domain的injection，不存在global ready queue。batch内部以反向link保持OS提供的批内顺序在target local deque中恢复，多batch之间不得额外构造强于[并发规范](../spec/concurrency.md)的可观察先后。timer deadline相同则按timer ID递增构造同一publish batch，只用于确定实现输出。
 
@@ -428,24 +443,60 @@ DirtyCpu admission不可在持有 `LogicalProcessor` 时等待。并行度降低
 
 ## GC 协作
 
-major/minor stop的 coordinator只对全局 `gc_stop_epoch`执行一次递增；该值只分配 generation，不被 managed fast path读取。coordinator随后按 processor ID遍历 active processors，对每个 processor执行固定发布协议：
+Mosaic GC 将 scheduler 与 collector 的交接分成三类：
+
+1. `TurnRegion` 的 owner-local reset/publish，只要求当前 coroutine 在 region descriptor
+   上到达 typed checkpoint；
+2. `LocalHeap` 的 root snapshot、minor stop、remark 和 direct evacuation，继续使用
+   processor-local poll control；
+3. `SharedHeap` 的 mark mailbox、handle access guard 和 credit termination，不能等待
+   全局扫描所有 incoming field，只能等待对应 owner、guard、pin 和 message lease。
+
+major/minor stop 的 coordinator 对全局 `gc_stop_epoch` 只执行一次递增；该值只分配
+generation，不被 managed fast path读取。coordinator随后按 processor ID遍历 active
+processors，对每个 processor执行固定发布协议：
 
 1. release写入 `requested_gc_epoch = gc_stop_epoch`；
-2. acquire读取 `current_coroutine`，若完整 lifecycle为 `Running`，release把其 `stack_check`写为 `POLL_SENTINEL`；
+2. acquire读取 `current_coroutine`，若完整 lifecycle为 `Running`，release把其 `stack_check`
+   写为 `POLL_SENTINEL`；
 3. 以 `poll_flags.fetch_or(GC_STOP, Release)` 发布请求并唤醒 worker/poller；
-4. 再次 acquire验证 ownership/current；发生切换时，新 owner在 `Runnable -> Running` 前必须先观察 `GC_STOP`，coordinator只需投毒仍绕过绑定边执行的 current coroutine。
+4. 再次 acquire验证 ownership/current；发生切换时，新 owner在 `Runnable -> Running` 前
+   必须先观察 `GC_STOP`，coordinator只需投毒仍绕过绑定边执行的 current coroutine。
 
-因此一次 stop请求写入 `O(active_processors)` 个彼此独占的 `PollControl` line，而不是触碰 `O(live_coroutines)` 个 lifecycle word；global epoch每个 cycle只有一次写入，也不构成 worker共享读取热点。loop/显式 poll通过一次 processor-local load观察 bit，函数 entry通过一次 coroutine-local load观察 sentinel；两条路径都在 slow edge才读取 requested epoch。禁止给 lifecycle增加 `GC_STOP`/`PREEMPT` bit或在 fast path比较 global epoch。
+因此一次 stop请求写入 `O(active_processors)` 个彼此独占的 `PollControl` line，而不是
+触碰 `O(live_coroutines)` 个 lifecycle word；global epoch每个 cycle只有一次写入，也不
+构成 worker共享读取热点。loop/显式 poll通过一次 processor-local load观察 bit，函数 entry
+通过一次 coroutine-local load观察 sentinel；两条路径都在 slow edge才读取 requested epoch。
+禁止给 lifecycle增加 `GC_STOP`/`PREEMPT` bit或在 fast path比较 global epoch。
 
-- Running coroutine在下一个同步 safepoint保存 context并确认；compiler保证 Running不包含不可分析的 opaque native frame；
+- Running coroutine在下一个同步 safepoint保存 context、发布自己的 root slice 和
+  `TurnRegion` registry，并确认；compiler保证 Running不包含不可分析的 opaque native frame；
 - Runnable/Waiting coroutine已有稳定 context，取得 `STACK_SCAN_LOCKED` 后可直接扫描；
-- Parking coroutine的 context可能尚未发布，所属 worker必须先完成 park双检成为 Waiting/Runnable，或撤销 park恢复 Running并在 safepoint停下；processor在此之前不能确认 stop；
-- attached `Foreign(g)` 的 Gugu stack与 bridge frame已经稳定，collector不等待 native返回，而是立即竞争同一 generation的 lease、发布 processor-local状态、转为 `Foreign|FOREIGN_DETACHED`并确认该 processor；detached Foreign/DirtyWaiting直接按保存 PC的 `ForeignBridge` map扫描 ABI frame。任何 native OS stack都不扫描，dirty/detached foreign worker不参与 stop确认；
-- processor只在 write-barrier buffer完成所需 drain、TLAB边界发布且 ownership不再被旧 worker使用后确认 stop。
+- Parking coroutine的 context可能尚未发布，所属 worker必须先完成 park双检成为 Waiting/Runnable，
+  或撤销 park恢复 Running并在 safepoint停下；processor在此之前不能确认 stop；
+- attached `Foreign(g)` 的 Gugu stack与 bridge frame已经稳定，collector不等待 native返回，
+  而是立即竞争同一 generation的 lease、发布 processor-local状态，转为
+  `Foreign|FOREIGN_DETACHED`并确认该 processor；detached Foreign/DirtyWaiting直接按保存 PC
+  的 `ForeignBridge` map扫描 ABI frame。任何 native OS stack都不扫描，dirty/detached foreign
+  worker不参与 stop确认；
+- processor只在 write-barrier buffer、EdgeDelta staging、TLAB边界和当前 owner credit 状态
+  发布完成，且 ownership不再被旧 worker使用后确认 stop；
+- `SharedHeap` access guard、pin、未消费 `MarkTicket`、`RegionTransfer` 和 owner credit
+  必须登记在相应 root/lease record 中，不能依赖 scheduler 误把 message empty 当成 GC 完成。
 
-所有 active processor 确认后进入 stop 阶段。扫描/复制某 coroutine 时持有 stack scan lock；ready 可以设置 Runnable 意图，但在 lock 释放前不能让 worker执行它。GC 完成 relocation 和 metadata 发布后以 release 增加 resume epoch，worker acquire 后恢复。
+`MosaicBaseline` 在所有 active processor 确认后进入现有 stop 阶段；扫描/复制某 coroutine
+时持有 stack scan lock，ready 可以设置 Runnable 意图，但在 lock 释放前不能让 worker执行它。
+GC 完成 LocalHeap relocation、SharedHeap handle publication 和 metadata 发布后，以 release
+增加 resume epoch，worker acquire 后恢复。
 
-空闲 processor/worker优先协助 concurrent mark；scheduler 保留至少一个 worker 处理 poller、timer 和 runnable，不能因 GC work 无限延迟用户调度。
+`MosaicConcurrent` 可以在 SharedHeap 只使用 per-owner root slice、handle forwarding 和
+credit termination，跳过与 shared heap 大小相关的全局 pointer-update stop；仍必须在
+必要的局部 safepoint、handshake、pin、guard、owner retire、queue grace 或 emergency
+pressure 边界同步。它不改变 `safepoint_poll()`、foreign、pin 或 unsafe 语义。
+
+空闲 processor/worker优先协助 owner-local mark、MarkMailbox drain、EdgeDelta 合并和
+SharedHeap forwarding；scheduler 保留至少一个 worker 处理 poller、timer 和 runnable，不能
+因 GC work 无限延迟用户调度。
 
 ## 动态并行度
 
@@ -454,6 +505,7 @@ major/minor stop的 coordinator只对全局 `gc_stop_epoch`执行一次递增；
 降低时把ID最大的多余processor以AcqRel标为`Retiring`，从新active快照移除并发布新的topology epoch；dirty target降为`new == 1 ? 1 : new - 1`，active dirty work不强杀，实际limit保持不低于active直到排空。epoch发布时仍为active且持旧epoch的`ProducerHandle`必须完成当前head CAS、flush指向旧target的staging，Acquire新快照并发布`topology_epoch_seen`后清active；当时inactive的producer下次开始batch必先读取新queue control word，新登记producer直接从当前epoch开始。retirement等待这组旧epoch active producer越过checkpoint后，才最终摘取8个remote head与carry，从而封闭“检查active后、publish前”发生的late enqueue。
 
 Retiring processor若正被attached普通bridge保留，立即按精确generation retake而不等待native返回。完成当前managed coroutine或取得lease并完成producer grace后，按`run_next`、local deque、8个remote head/carry、injection carry、timer inbox、barrier buffer、mark work与pending poll flag的固定顺序转移：runnable按batch边界进入同NUMA injection，timer重新选择active target，其它processor-local状态按所属子系统handoff。确认所有queue ownership为空后才进入Idle并归还pool。旧`preferred_processor`只作为失效hint，后续ready自动走injection。processor ID不复用，控制块重新激活时取得新ID；managed worker绑定仍遵守第一个章节定义的共享CPU预算。
+processor retire 同时必须交接 owner inbox、raw local/range cache、return staging 和 forwarding chain；这些状态不能遗留在已移除的 processor。具体 generation、handoff 和压力排空顺序见[内存所有权与消息通道](memory-messaging.md#owner-retire)。
 
 ## 终止
 

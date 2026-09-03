@@ -36,5 +36,6 @@
 - [单态化与编译缓存](internals/monomorphization-cache.md)
 - [栈图](internals/stack-maps.md)
 - [GC 元数据](internals/gc-metadata.md)
+- [内存所有权与消息通道](internals/memory-messaging.md)
 - [调度器](internals/scheduler.md)
 - [x86_64 后端](internals/backend.md)

@@ -25,7 +25,7 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 
 普通 inline `asm` 不是 safepoint。有限且可返回的 asm 片段可以在 `Running` 中执行，但它造成的延迟持续到片段返回；包含不可证明有限的内部回边、间接控制转移或外部等待的 asm 必须被 compiler 拒绝，或放入带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn`。`global_asm`、默认进入 managed context 的 `#[naked]` 和 dirty native definition 不属于可合作 managed code：从用户协程进入时必须脱离 `LogicalProcessor`，因此不会让它所属的 processor 或 GC stop 永久等待；但 dirty native work 本身可以永不返回，语言不保证该调用完成。
 
-`ForeignLeaf` 是用户承担的 unsafe契约：错误声明会占住当前 `LogicalProcessor`；若调用永久不返回，该 processor无法确认 GC stop，因而可以永久阻止进程完成 GC。这样的程序违反 unsafe契约，不在调度/GC活性保证内。无法证明 leaf时使用普通 `ForeignBridge`；它发布稳定 bridge frame，短调用可以保留 generation-tagged processor lease，但 GC、回调、退役或持续 runnable压力能够立即或延迟取回 lease，因此未知 native work不能永久阻止其它 managed work或 stop epoch。
+`ForeignLeaf` 是用户承担的 unsafe契约：错误声明会占住当前 `LogicalProcessor`；若调用永久不返回，该 processor无法确认 GC stop，因而可以永久阻止进程完成 GC。这样的程序违反 unsafe契约，不在调度/GC活性保证内。无法证明 leaf时使用普通 `ForeignBridge`；它发布稳定 bridge frame并先取得有界 `BlockingBridge` 的 `BridgeCredit`，短调用可以在 attached路径保留 generation-tagged processor lease，GC、回调、退役或持续 runnable压力能够取回 lease。没有 credit时普通 bridge在不持有 processor的 `Waiting` 状态排队，不能通过每个调用创建无界 OS worker；因此未知 native work不能永久阻止其它 managed work或 stop epoch。
 
 signal/APC 只向当前 `LogicalProcessor` 发布抢占/GC请求、投毒正在运行 coroutine的 `StackCheck`并唤醒 worker；它不在任意机器 PC扫描栈、复制 coroutine stack或运行用户 defer。函数调用在被调方 prologue响应投毒，长循环在预算化 poll响应；对尚未到达同步点的执行，请求保持 pending。
 
@@ -141,8 +141,10 @@ impl RwLock[T] {
     fn read(self: &Self) RwReadGuard[T]
     fn write(self: &Self) RwWriteGuard[T]
     fn with_read[R, F: Fn(T) R](self: &Self, f: F) R
+    fn with_read_ref[R, F: Fn(&T) R](self: &Self, f: F) R
     fn with_write[R, F: Fn(&T) R](self: &Self, f: F) R
 }
+
 impl RwReadGuard[T] {
     fn snapshot(self: &Self) T
     fn unlock(self: &Self)
@@ -151,17 +153,9 @@ impl RwWriteGuard[T] {
     fn get(self: &Self) &T
     fn unlock(self: &Self)
 }
-
-struct Condvar
-impl Condvar {
-    fn new() Condvar
-    fn wait[T](self: &Self, guard: &MutexGuard[T])
-    fn notify_one(self: &Self)
-    fn notify_all(self: &Self)
-}
 ```
 
-Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的 `&T`；`snapshot()` 和 `with_read` 只产生当前值的语义副本。若 T 含可变身份句柄，调用者仍须保证不会绕过锁并发写其载荷。守卫由 Adaptive Resource Leasing 管理：复制守卫共享同一次加锁的 ResourceCell，最后一个 lease 结束时自动解锁；显式 `unlock` 幂等并让所有副本立即观察已解锁状态。解锁后再 `get` / `snapshot` / `wait` 是 panic。
+Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的普通 `&T`；`snapshot()` 和 `with_read` 只产生当前值的语义副本。`with_read_ref` 的 callback 参数是[函数与闭包](functions.md#scoped-borrowed-view-callback)定义的 `ScopedRead` view，只有读取权限且不能逃逸；它在读锁保持期间直接访问内部值，不复制 T。`with_write` 保持原有写入语义，callback 参数是普通锁守卫提供的可写 `&T`。若 T 含可变身份句柄，调用者仍须保证不会绕过锁并发写其载荷。守卫由 Adaptive Resource Leasing 管理：复制守卫共享同一次加锁的 ResourceCell，最后一个 lease 结束时自动解锁；显式 `unlock` 幂等并让所有副本立即观察已解锁状态。解锁后再 `get` / `snapshot` / `with_read_ref` / `wait` 是 panic。
 
 `Atomic::new`、`Mutex::new`、`RwLock::new`、`Condvar::new` 都是 comptime 可求值构造，可用于普通 static 初始化。标准库为 MutexGuard、RwReadGuard、RwWriteGuard 提供否定 Clone impl；这禁止复制底层加锁动作，但不改变语言按值传递时共享同一 resource lease 的规则。
 
@@ -169,8 +163,6 @@ Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的 `&T`；`snapshot()` 
 
 Mutex 不可重入；同一协程持有守卫时再次 `lock` 会像其它竞争者一样等待，可能造成永久阻塞。标准锁实现必须满足弱公平，持续等待且锁反复可用的协程不能被永久排除。RwLock 不提供隐式读写升级或降级；要切换模式必须先解锁再重新加锁。RwLock 的读写竞争顺序采用目标平台原生策略，Gugu 不保证写者优先、读者优先或严格 FIFO；调用方不能依赖某种公平策略避免特定锁顺序的阻塞。
 
-
-
-锁守卫不可 Clone，不能跨所属锁使用；`with_lock` / `with_read` / `with_write` 在闭包正常返回或 panic 展开时都释放锁。显式 `lock` 得到的守卫在最后一个 lease 结束时自动解锁，也可以提前幂等 `unlock`。锁和原子保证同步，不会替程序员把普通 `&T` 的并发写变成安全操作。
+锁守卫不可 Clone，不能跨所属锁使用；`with_lock` / `with_read` / `with_read_ref` / `with_write` 在闭包正常返回或 panic 展开时都释放锁。显式 `lock` 得到的守卫在最后一个 lease 结束时自动解锁，也可以提前幂等 `unlock`。锁和原子保证同步，不会替程序员把普通 `&T` 的并发写变成安全操作。
 
 任何没有原子、channel、锁、条件变量或其它明确 happens-before 的并发读写，只要至少一方写入同一内存位置，就是数据竞争和未定义行为。GC 延长寿命不改变该规则。

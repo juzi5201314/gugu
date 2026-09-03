@@ -110,6 +110,12 @@ map(xs, inc)                      // F 是具名函数的具体函数项类型
 
 `async { ... }` / `async f(x)`：闭包按上面的捕获规则延命，然后在新协程上跑。禁止因为捕获栈变量而悬空——必须升到堆或拷贝。
 
+## Scoped borrowed view callback
+
+标准库的 `with_ref`、`with_read_ref` 与 `for_each_ref` 使用 compiler-owned 的 scoped view callback。它们的 callback 参数在源码层可以写作 `&T`，但 HIR 额外标记为 `ScopedRead` view，不等同于普通可写引用；实现必须在 GIR 中保留该访问模式。`ScopedRead` 只允许在 callback 动态 extent 内读取或向已登记的无逃逸 helper 传递，不能写入、存入任何外部槽、作为返回值、跨协程发布或转换为 raw pointer。需要修改值的 API必须显式声明 `ScopedWrite`，不能借用只读 view 的类型检查空缺。
+
+scoped callback 必须是同步调用：其 body、可达的静态 callee 和 compiler intrinsic 不能 `suspend`、`await`、`yield`、进入 `select`、执行可能挂起的锁/I/O/foreign bridge 或把 view 传给无法证明 no-escape 的动态调用。callback 可以触发普通 safepoint；runtime 会通过 view token 注册临时 root/epoch并在 backing relocation 后修正 view。callback 正常返回或 panic 展开时 token 必须闭合，未闭合或逃逸是 compiler internal error，不能降级成普通 `&T`。
+
 ## 调用边界与捕获身份
 
 具名函数项各有唯一的函数项类型；只有在需要 `fn(...) ...` 时才擦除成代码指针加空环境。闭包表达式每次求值创建一个新的闭包值，同一个词法闭包表达式的静态匿名类型不变，但每次执行可以产生不同环境实例。

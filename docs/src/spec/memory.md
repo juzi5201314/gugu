@@ -32,6 +32,8 @@ collector 可以移动 managed 对象。每次 safepoint、等待、恢复和跨
 
 本章不规定 collector算法、heap参数、root编码或写屏障实现。官方 compiler/runtime的当前契约见 [GC 元数据](../internals/gc-metadata.md)与[栈图](../internals/stack-maps.md)；替代实现可以不同，但必须满足本节全部可观察约束。
 
+runtime 可以在不改变语言语义的前提下，为地址稳定的 control、stack、resource 和 GC range descriptor 使用 owner-directed return message。该机制不产生用户级 `free`，不使 managed 地址稳定，不承诺 processor affinity 或回收时刻，也不能让安全代码观察 raw slab、route key 或 batch 延迟。
+
 ## Adaptive Resource Leasing
 
 ResourceCell 是外部资源的共享逻辑身份，保存 raw resource、open/closed 状态、受限 release 操作和 lease 状态。创建后尚未发布时只由创建协程访问；发布到 global、channel、async 捕获或其它共享图前必须单向进入共享状态并建立 happens-before，不能再撤销这次发布。
@@ -41,6 +43,7 @@ ResourceCell 是外部资源的共享逻辑身份，保存 raw resource、open/c
 若最后的 lease 只存在于不可达 managed 容器环内，release 可以推迟到 GC 发现该环；普通作用域中的最后 lease 不依赖 GC 周期。清理可以异步执行，语言不承诺具体执行单元或时刻，只承诺一次性和本节限制；当前 lease 动作与回收队列见 [GIR/LIR](../internals/gir-lir.md)和 [GC 元数据](../internals/gc-metadata.md)。
 
 第三方 FFI package 只能通过 `std.resource` 的受限构造接口登记 release。raw state 必须是无 GC 引用的位值；release 不能捕获 owner、访问 GC 图、复活对象、分配、panic、获取 Gugu 锁、等待 channel 或启动协程。语言不提供任意 `Finalize` trait。
+ResourceCell 的受限 cleanup 完成后可以进入 raw owner return；lease 的一次性线性化、close 结果和 panic/作用域一致性仍由本章规定，不能由 message queue 的消费时刻决定。
 
 ## 移动与 FFI
 

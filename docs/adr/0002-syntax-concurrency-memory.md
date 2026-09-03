@@ -21,7 +21,7 @@
 - 插值只有 `f"..."`；齐次变参 `...xs: &[T]`；异构参数包 `fn println[Ts: Print...](...args: Ts)`。
 - Zig 式 comptime 解释器 + 独立的范围分析（越界检查消除；与规范 comptime 章的「范围 / 约束传播」是同一件事）。
 - 词法：块注释、`raw"..."`、`+=`、按位运算、禁止 `.5`/`5.`、运算符经 trait 重载。
-- GC：精确、分代、Immix 老年代、并发标记与回收、线程本地分配缓冲（TLAB）、写屏障、不在热路径加读屏障。
+- GC：保持精确、分代和移动语义；managed storage 采用 `TurnRegion`、owner-local Immix `LocalHeap` 与 stable-handle `SharedHeap`，使用 MarkTicket/EdgeDelta 消息、owner credit、TLAB、写屏障、局部 forwarding 和 checked pointer compression。LocalHeap direct-pointer 热路径不加 read barrier；SharedHeap resolve/access guard 只在共享对象路径承担额外访问成本。
 
 ## 后果
 

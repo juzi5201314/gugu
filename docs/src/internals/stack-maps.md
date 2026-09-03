@@ -27,16 +27,25 @@
 
 | 类别 | 含义 | GC/栈复制动作 |
 |------|------|---------------|
-| `HeapDirect` | 指向已知对象 payload 起点的强引用/句柄 | 标记对象；移动后写回新 payload 地址 |
-| `HeapInterior` | 指向 GC 对象字段、元素或切片起点 | 通过 heap span metadata 找到对象与内部偏移；移动后按偏移写回 |
+| `HeapDirect` | 指向 LocalHeap 已知对象 payload 起点的强引用 | 标记对象；移动后写回新 payload 地址 |
+| `HeapInterior` | 指向 LocalHeap 对象字段、元素或切片起点 | 通过 heap span metadata 找到对象与内部偏移；移动后按偏移写回 |
+| `SharedHandle` | 指向 SharedHeap stable handle slot 的 managed 引用 | 标记 handle 当前 payload；forwarding 只切换 slot，访问必须处于 access guard |
+| `CompressedRef` | 指向登记 heap cage 内 offset 的压缩 managed 引用 | checked 解码 cage/base/offset/generation；迁移由本地更新或 handle forwarding 完成 |
 | `StackInterior` | 指向当前协程栈范围内的 local/字段 | 不标记 heap；复制栈时加 relocation delta |
 | `NonRoot` | 原始指针、代码、metadata、整数或已死值 | 不扫描、不修改 |
 
-pin 状态属于目标对象头和 pin token，不是另一类位置。指向 pinned 对象的根仍编码为 `HeapDirect`/`HeapInterior`；GC 根据对象头决定不移动。
+pin 状态属于目标对象头和 pin token，不是另一类位置。指向 pinned 对象的根仍编码为
+`HeapDirect`、`HeapInterior`、`SharedHandle` 或 `CompressedRef`；GC 根据对象/handle 状态决定不移动。
 
-`dyn Trait`、slice、string、函数值等多字值只标记实际的 managed data word；长度、容量、vtable 和 code pointer 是 `NonRoot`。`#[repr(packed)]` 不能含 managed 引用，因此 stack root 总能落在自然对齐的完整机器字中。
+`dyn Trait`、slice、string、函数值等多字值只标记实际的 managed data word；长度、容量、
+vtable、cage id 和 code pointer 是 `NonRoot`。`#[repr(packed)]` 不能含 managed 引用，
+因此 stack root 总能落在自然对齐的完整机器字中；compressed reference 只在 compiler
+登记的 cage profile 中作为 managed root 解码。
 
-安全引用若可能越过 frame 生命周期、进入另一个协程或被写入 heap，`EscapeAndPlacement` 必须先把被引用值提升到 heap/arena。成功 LIR 中不允许 heap 对象保存 `StackInterior`，也不允许一个协程保存指向另一协程 stack 的安全引用。
+安全引用若可能越过 frame 生命周期、进入另一个协程或被写入 heap，`EscapeAndPlacement`
+必须先把被引用值提升到 LocalHeap/SharedHeap 或稳定 arena。成功 LIR 中不允许 heap 对象
+保存 `StackInterior`，也不允许一个协程保存指向另一协程 stack 的安全引用。TurnRegion
+中的引用必须随 region export summary 一起登记；region reset 前不能存在外部 root。
 
 ## safepoint 种类
 
@@ -82,7 +91,8 @@ stack map 的通用寄存器编号固定为：
 stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layout 后生成：
 
 1. 从 safepoint 的 LIR 活跃集取得所有 `Ptr` value；`CallReturn` 另加入 outgoing 参数及其 aggregate 副本 descriptor 展开的全部 root word；
-2. 按 provenance 分类为 `HeapDirect`、`HeapInterior`、`StackInterior` 或 `NonRoot`；
+2. 按 provenance 和 representation 分类为 `HeapDirect`、`HeapInterior`、`SharedHandle`、`CompressedRef`、`StackInterior` 或 `NonRoot`；
+
 3. 查询分配结果得到物理寄存器或 frame slot；
 4. 对需要 spill 的 safepoint插入 spill/reload，再重新计算局部活跃与 PC；
 5. 把 stack slot 转成从 frame base 起的 8 字节 slot index；
@@ -90,7 +100,7 @@ stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layou
 7. 对相同 root set 做全局去重；
 8. 指令编码完成后填入最终 `pc_offset`。
 
-一个位置在同一 map 的三类 bitmap/mask 中最多出现一次。重叠 spill、超出 frame、未对齐 managed slot、丢失 provenance 或一个 value 同时有两个未协调的权威位置都是后端错误。
+一个位置在同一 map 的五类 bitmap/mask 中最多出现一次。重叠 spill、超出 frame、未对齐 managed slot、丢失 provenance 或一个 value 同时有两个未协调的权威位置都是后端错误。
 
 GC 活跃性按语义值而不是 Rust/源级 lexical scope 计算。已经 `StorageDead` 或被 `MoveInternal` 消耗的位置不得保留为根；尚未初始化和 `MaybeUninit` payload 不得加入。保留无谓死根会延长对象寿命，因此也属于 verifier 错误，不是允许的保守实现。
 
@@ -104,7 +114,7 @@ Linux 放入 `.gugu.stackmap`，Windows 放入 `.gugustk`。section 内所有整
 
 ```text
 magic:              [u8; 8] = "GUGUSM01"
-version:            u16 = 1
+version:            u16 = 2
 pointer_size:       u8 = 8
 endian:             u8 = 1
 function_count:     u32
@@ -160,18 +170,21 @@ reserved:           u16 = 0
 slot_count:             u32
 heap_direct_reg_mask:   u16
 heap_interior_reg_mask: u16
+shared_handle_reg_mask: u16
+compressed_ref_reg_mask: u16
 stack_reg_mask:         u16
 reserved:               u16 = 0
 heap_direct_slots:      ceil(slot_count / 8) bytes
 heap_interior_slots:    ceil(slot_count / 8) bytes
+shared_handle_slots:    ceil(slot_count / 8) bytes
+compressed_ref_slots:   ceil(slot_count / 8) bytes
 stack_slots:            ceil(slot_count / 8) bytes
 zero_padding_to_4_bytes
 ```
 
-bitmap 的 bit `i` 对应 `[frame_base + i * 8]`，最低有效 bit 先写。超出 `slot_count` 的尾 bit 必须为 0。`slot_count * 8` 不得超过所属函数 `frame_size`。三个位图互斥，三个 register mask 也互斥；bit 15 必须为 0。
+bitmap 的 bit `i` 对应 `[frame_base + i * 8]`，最低有效 bit 先写。超出 `slot_count` 的尾 bit 必须为 0。`slot_count * 8` 不得超过所属函数 `frame_size`。五个位图互斥，五个 register mask 也互斥；bit 15 必须为 0。
 
-map 去重基于完整 record bytes；map table 按 record bytes 字典序分配 `map_index`，不能按发现时序分配。
-
+map 去重基于完整 record bytes；map table 按 record bytes 字典序分配 `map_index`，不能按发现时序分配。version 2 的 `SharedHandle` 和 `CompressedRef` 位置仍是 managed root；decoder 必须拒绝 version 1 记录，避免把新表示误读为旧 bitmap。
 ## stack walk
 
 runtime 扫描一个已停在 safepoint 的协程时：
@@ -185,6 +198,11 @@ runtime 扫描一个已停在 safepoint 的协程时：
 - `ForeignBridge`：先从 bridge context恢复 user SP/PC；dirty mode不改变扫描算法；
 - `MorestackEntry`：当前函数 frame尚未建立，scratch中的 return PC是 caller PC，scratch GPR由当前 map扫描；slow path可以先处理 poll再决定是否复制 stack。
 
+`SharedHandle` 位置由 handle table 的 current payload 和 generation 解析；scanner 不把 slot
+里的 payload 当作另一个 stack root。`CompressedRef` 位置先 checked 验证 cage id、offset
+范围和 generation，再按 representation tag 标记目标；跨 cage 或 stale generation 进入
+`RuntimeInvariant`，不能当成 `HeapDirect` 猜测。
+
 每步先以 PC查 function range，再用该 function内按 offset排序的 safepoint做 binary search；找不到精确 point、frame越界或 unwind index不匹配都是 `RuntimeInvariant` fatal，不能猜测相邻 map。counted inner chunk edge与 uncounted countdown-only edge都不是 safepoint，不能把它们的 PC交给 scanner。
 
 `ForeignBridge` record的 bridge mode决定 native阶段的调度归属。普通 bridge进入 native时可以保留 generation-tagged processor lease，return、GC、callback、retirement或 scheduler retaker通过同一完整 coroutine state竞争后也可以变为 detached；`DIRTY_CPU_BRIDGE` 从开始执行起就 detached并由 dirty CPU额度运行。两者都在进入 native前保存 Gugu context；`ForeignBridgeState` 以 checked high-relative offset定位 coroutine stack上的 ABI frame，`lease_word` 只是 non-root整数。collector不论 attached/detached都按本 record扫描 frame roots，不扫描 C/C++/asm 的 OS stack。返回 worker把结果写回同一 frame；赢得 lease可直接走 managed resume，失去 lease才经 idle processor或 runnable queue恢复。
@@ -195,7 +213,7 @@ panic unwinder 和 backtrace 使用同一 function range 与 frame-size 基础�
 
 ## GC 扫描与更新
 
-`HeapDirect` 位置必须为空值或指向合法 managed payload 起点。`HeapInterior` 位置必须为空值或落在一个已分配 managed object 的 payload 范围内。collector 找到 owner object、记录 interior byte delta、标记/移动 object，然后把位置更新为 `new_payload + delta`。不合法地址进入 `RuntimeInvariant` fatal。
+`HeapDirect` 位置必须为空值或指向合法 LocalHeap/TurnRegion managed payload 起点。`HeapInterior` 位置必须为空值或落在一个已分配 LocalHeap/TurnRegion object 的 payload 范围内。collector 找到 owner object、记录 interior byte delta、标记/移动 object，然后把位置更新为 `new_payload + delta`。`SharedHandle` 位置解析 stable handle slot 的 current payload；`CompressedRef` 位置 checked 解码 cage、offset 和 generation。handle forwarding 只切换 slot，compressed/shared stale generation 或越界进入 `RuntimeInvariant` fatal，不能当成 direct pointer 猜测。
 
 stack slot 就地更新。top register root 更新保存区，恢复用户寄存器前再从该区装载。caller frame 不含 register root。
 
@@ -216,8 +234,6 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 
 任何 `StackInterior` 值不为空且不落在当前旧 stack range 内都是 compiler/runtime 契约破坏。heap roots在栈复制时不修改。return PC、code/metadata pointer 和整数不因 stack 地址变化而修改。
 
-复制期间 coroutine 为非 Running 状态，任何 worker、GC scanner 或 debugger 只能看到旧描述或已完全发布的新描述，不能看到混合边界。
-
 ## 验证要求
 
 编译器在写镜像前必须同时验证机器码与 stack map：
@@ -228,14 +244,16 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 - direct callee的 `PollSummary.entry_stack_check` 与 caller是否生成 `CallReturn` map一致；`PollFreeLeaf`/`ForeignLeaf` 不得伪造 map；
 - 普通 bridge的 `lease_word` 固定保存该 invocation原始 attached `Foreign(g)`；当前 lifecycle只能是该 exact word、带 scan lock的竞争态或同 generation的 detached Foreign。dirty mode设置 `DIRTY_CPU_BRIDGE` flag：active Foreign必须带 `FOREIGN_DETACHED`，DirtyWaiting保持同 generation且不能带该 bit。所有模式的 `ForeignBridgeState.frame_offset + frame_size` checked落在已用 stack范围；
 - frame size、return address、ABI bridge frame和 outgoing区符合后端 frame layout；
+- `HeapDirect`、`HeapInterior`、`SharedHandle`、`CompressedRef` 和 `StackInterior` 的 bitmap/mask 互斥，所有 handle/cage generation 与所属 metadata 一致；
+- `SharedHandle` 访问必须有 access guard 或 pin，compressed reference 必须有登记 cage；
 - `StackInterior` offset严格落在当前 stack allocation；
-- suspend/foreign点 register mask为0；
-- `MorestackEntry` 的 `slot_count == 0`，只含 ABI参数 register root，且关联函数保留 entry check；
-- `PollResume` 只能位于实际 poll-word检查后的 resume label，不能位于 counted inner chunk或 uncounted countdown-only edge；
-- `NoSafepointRegion` 的机器范围内不存在 safepoint record、call-return map或 poll resume label，紧邻 region的 poll map只能指向 marker外的真实 poll instruction；
-- source/unwind index存在且范围合法。
+- `suspend/foreign`点 register mask为0；
+- `MorestackEntry` 的 `slot_count == 0`，只含 ABI 参数 register root，且关联函数保留 entry check；
+- `PollResume` 只能位于实际 poll-word检查后的 resume label，不能位于 counted inner chunk 或 uncounted countdown-only edge；
+- `NoSafepointRegion` 的机器范围内不存在 safepoint record、call-return map 或 poll resume label，紧邻 region 的 poll map 只能指向 marker 外的真实 poll instruction；
+- source/unwind index 存在且范围合法。
 
-runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`同时处理GC与增长、interior heap root、stack interior重定位、多frame调用、panic landing pad、no-safepoint region邻接poll、attached foreign快返回、foreign retake后扫描、dirty bridge、`PollFreeLeaf`无map、caller最高 leaf stack reserve、stack增长、四窗迟滞收缩和512 B/1 KiB冷 stack重定位后GC。
+runtime的确定性 fixture必须覆盖：空map、只有stack root、budgeted poll register root、counted inner chunk、uncounted countdown未到期、poisoned `MorestackEntry`同时处理GC与增长、interior heap root、shared handle root、compressed reference root、stack interior重定位、多frame调用、panic landing pad、no-safepoint region邻接poll、attached foreign快返回、foreign retake后扫描、dirty bridge、`PollFreeLeaf`无map、caller最高 leaf stack reserve、stack增长、四窗迟滞收缩和512 B/1 KiB冷 stack重定位后GC。
 
 - [LLVM Stack Maps and Patch Points](https://llvm.org/docs/StackMaps.html)
 - [Go runtime stack 实现](https://go.dev/src/runtime/stack.go)
