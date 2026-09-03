@@ -20,7 +20,7 @@
 
 阶段 3 在 `source` 模块落地源码快照与 Span 系统：`load-sources` 现在把每个输入固化为不可变 `SourceSnapshot`——UTF-8 校验、BOM 拒绝、`u32` 长度上限、BLAKE3-256 内容摘要与规范行首表。逻辑路径按词法归一：解析 `.` 与 `..`、拒绝绝对路径、反斜杠与越界回溯，保证相同输入在不同工作目录与换行环境下产生相同 span。
 
-`Span` 携带源码文件 ID、逻辑路径、半开字节范围、行/列与 `ExpansionId`；行列从行首表二分推导，按 UTF-8 字节计数。`SourceMap` 按逻辑路径排序分配稠密文件 ID、拒绝重复路径，并为阶段 22 的源码宏预留确定性展开注册：`ExpansionRecord` 记录父展开、宏调用与定义位置、生成源码哈希与片段类别，注册顺序按调用位置、轮次与片段顺序稳定。诊断新增 `E0004`~`E0007`（非法 UTF-8、BOM、非法逻辑路径、span 越界），全部诊断按路径、偏移、级别、代码稳定排序。
+`SourceMap` 按逻辑路径排序分配稠密文件 ID、拒绝重复路径，并为阶段 22 的源码宏预留确定性展开注册：`ExpansionRecord` 记录父展开、宏调用与定义位置、生成源码哈希与片段类别，注册顺序按调用位置、轮次与片段顺序稳定。诊断的源码校验码为 `E0004`~`E0008`（非法 UTF-8、BOM、非法逻辑路径、span 越界、源文件过大），全部诊断按路径、偏移、级别、代码稳定排序。
 
 ## 阶段 4 交付边界
 
@@ -97,7 +97,7 @@ emit-image
 
 - `empty_package`：没有用户源文件，前端和 IR 成功完成，但没有 executable entry，后端之后的节点跳过，不产生 image plan；
 - `single_file`：调用者提供逻辑路径和内存源码，适合确定性测试与编辑器；
-- `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，逻辑路径按输入路径推导；读取或快照失败形成 `E0001`~`E0007` 并停止后续 action；
+- `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，逻辑路径按输入路径推导；读取或快照失败形成 `E0001`~`E0008` 并停止后续 action；
 - `project_entry`（阶段 4）：CLI 从清单发现的 target 入口，逻辑路径由 package root 推导，与工作目录无关；bin/example 与 `harness = false` 的 bench 要求合法 main，lib/test 与默认 bench 走库检查，不产生 executable entry。
 
 阶段 1 前端只验证 NUL、`u32` 源长度、`fn main()` 入口和函数体括号，并把合法入口降低为单个 `ReturnUnit`。这不是完整 lexer/parser/type checker；阶段 7、8、12–20 必须替换该实现并保持 action graph 的错误传播契约。因而本阶段的成功只表示 bootstrap 计划合法，不表示已经满足完整语言规范或可以运行目标程序。

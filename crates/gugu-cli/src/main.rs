@@ -865,11 +865,15 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
         let requires_main = matches!(package_target.kind(), TargetKind::Bin | TargetKind::Example)
             || (package_target.kind() == TargetKind::Bench && !package_target.harness());
         // 逻辑路径按 package root 推导，保证诊断位置与工作目录无关。
-        let logical_path = package_target
+        let Some(logical_path) = package_target
             .entry()
             .strip_prefix(package.root())
-            .expect("entry is inside package root")
-            .to_path_buf();
+            .ok()
+            .map(PathBuf::from)
+        else {
+            emit_cli_error(format, "target 入口不在 package 根内");
+            return 2;
+        };
         let request = CompileRequest::project_entry(
             package_target.entry().to_path_buf(),
             logical_path,
@@ -998,8 +1002,8 @@ fn emit_diagnostic(diagnostic: &gugu_compiler::Diagnostic, format: OutputFormat)
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let payload = json!({
         "file": span.map(|span| sanitize_path(span.path(), &cwd)),
-        "line": span.map_or(0, |_| 1),
-        "column": span.map_or(0, |span| span.start().saturating_add(1)),
+        "line": span.map_or(0, |span| span.line()),
+        "column": span.map_or(0, |span| span.column()),
         "severity": diagnostic.severity().to_string(),
         "code": diagnostic.code().to_string(),
         "message": sanitize_message(diagnostic.message(), span.map(|span| span.path()), &cwd),
@@ -1213,6 +1217,51 @@ fn redact_secrets(message: &str) -> String {
         redacted.replace_range(start..end, "<redacted>");
     }
     redacted
+}
+
+#[cfg(test)]
+fn global_from_values(mut raw: GlobalArgs, config: ConfigValues) -> Result<GlobalArgs, String> {
+    raw.format = Some(raw.format.unwrap_or_default());
+    raw.color = Some(raw.color.unwrap_or_default());
+    raw.offline = raw.frozen || raw.offline;
+    raw.locked = raw.frozen || raw.locked;
+    raw.require_signature = raw.require_signature || config.require_signature.unwrap_or(false);
+    raw.deny_yanked = raw.deny_yanked || config.deny_yanked.unwrap_or(false);
+    raw.target = raw.target.or(config.target);
+    raw.bin = raw
+        .bin
+        .and_then(|value| value)
+        .filter(|value| !value.is_empty())
+        .map(Some);
+    raw.permission = raw.permission || config.permission.unwrap_or(false);
+    raw.read_allows = if raw.read_allows.is_empty() {
+        config.read_allows
+    } else {
+        raw.read_allows
+    };
+    raw.write_allows = if raw.write_allows.is_empty() {
+        config.write_allows
+    } else {
+        raw.write_allows
+    };
+    raw.env_allows = if raw.env_allows.is_empty() {
+        config.env_allows
+    } else {
+        raw.env_allows
+    };
+    raw.net_allows = if raw.net_allows.is_empty() {
+        config.net_allows
+    } else {
+        raw.net_allows
+    };
+    raw.run_allows = if raw.run_allows.is_empty() {
+        config.run_allows
+    } else {
+        raw.run_allows
+    };
+    raw.cache_dir = raw.cache_dir.or(config.cache_dir);
+    raw.target_dir = raw.target_dir.or(config.target_dir);
+    Ok(raw)
 }
 
 #[cfg(test)]
@@ -1472,49 +1521,4 @@ mod tests {
             Some("单文件编译模式不支持参数：--lib、--all-targets")
         );
     }
-}
-
-#[cfg(test)]
-fn global_from_values(mut raw: GlobalArgs, config: ConfigValues) -> Result<GlobalArgs, String> {
-    raw.format = Some(raw.format.unwrap_or_default());
-    raw.color = Some(raw.color.unwrap_or_default());
-    raw.offline = raw.frozen || raw.offline;
-    raw.locked = raw.frozen || raw.locked;
-    raw.require_signature = raw.require_signature || config.require_signature.unwrap_or(false);
-    raw.deny_yanked = raw.deny_yanked || config.deny_yanked.unwrap_or(false);
-    raw.target = raw.target.or(config.target);
-    raw.bin = raw
-        .bin
-        .and_then(|value| value)
-        .filter(|value| !value.is_empty())
-        .map(Some);
-    raw.permission = raw.permission || config.permission.unwrap_or(false);
-    raw.read_allows = if raw.read_allows.is_empty() {
-        config.read_allows
-    } else {
-        raw.read_allows
-    };
-    raw.write_allows = if raw.write_allows.is_empty() {
-        config.write_allows
-    } else {
-        raw.write_allows
-    };
-    raw.env_allows = if raw.env_allows.is_empty() {
-        config.env_allows
-    } else {
-        raw.env_allows
-    };
-    raw.net_allows = if raw.net_allows.is_empty() {
-        config.net_allows
-    } else {
-        raw.net_allows
-    };
-    raw.run_allows = if raw.run_allows.is_empty() {
-        config.run_allows
-    } else {
-        raw.run_allows
-    };
-    raw.cache_dir = raw.cache_dir.or(config.cache_dir);
-    raw.target_dir = raw.target_dir.or(config.target_dir);
-    Ok(raw)
 }

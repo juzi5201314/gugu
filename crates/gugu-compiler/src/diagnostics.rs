@@ -37,6 +37,8 @@ pub enum DiagnosticCode {
     InvalidSourcePath,
     /// span 越出源码范围。
     SpanOutOfBounds,
+    /// 源文件超过 `u32` 字节范围。
+    SourceTooLarge,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -49,6 +51,7 @@ impl fmt::Display for DiagnosticCode {
             Self::SourceBom => "E0005",
             Self::InvalidSourcePath => "E0006",
             Self::SpanOutOfBounds => "E0007",
+            Self::SourceTooLarge => "E0008",
         };
         formatter.write_str(code)
     }
@@ -91,7 +94,7 @@ impl Diagnostic {
     pub(crate) fn source_error(error: &SourceError) -> Self {
         let (code, path, message, offset) = match error {
             SourceError::TooLarge { path } => {
-                (DiagnosticCode::SpanOutOfBounds, path, error.to_string(), 0)
+                (DiagnosticCode::SourceTooLarge, path, error.to_string(), 0)
             }
             SourceError::InvalidUtf8 { path, offset } => (
                 DiagnosticCode::InvalidUtf8,

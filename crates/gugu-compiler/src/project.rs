@@ -254,13 +254,14 @@ impl Project {
         for member in member_manifests {
             manifest_paths.insert(member);
         }
-        if manifest != workspace_manifest && local.package.is_some() {
-            if !manifest_paths.contains(&manifest) {
-                return Err(ProjectError::WorkspaceMember {
-                    path: manifest,
-                    workspace: workspace_root,
-                });
-            }
+        if manifest != workspace_manifest
+            && local.package.is_some()
+            && !manifest_paths.contains(&manifest)
+        {
+            return Err(ProjectError::WorkspaceMember {
+                path: manifest,
+                workspace: workspace_root,
+            });
         }
         if workspace_raw.workspace.is_none() {
             if local.package.is_none() {
@@ -774,10 +775,12 @@ fn discover_targets(
             &mut targets,
             root,
             TargetKind::Lib,
-            &lib_name,
-            Path::new("src/lib.gg"),
-            Vec::new(),
-            true,
+            AutoFile {
+                name: &lib_name,
+                path: Path::new("src/lib.gg"),
+                required_features: Vec::new(),
+                harness: true,
+            },
             manifest,
         )?;
     }
@@ -786,10 +789,12 @@ fn discover_targets(
             &mut targets,
             root,
             TargetKind::Bin,
-            &package.name.as_deref().unwrap_or("main"),
-            Path::new("src/main.gg"),
-            Vec::new(),
-            true,
+            AutoFile {
+                name: package.name.as_deref().unwrap_or("main"),
+                path: Path::new("src/main.gg"),
+                required_features: Vec::new(),
+                harness: true,
+            },
             manifest,
         )?;
         discover_directory_targets(
@@ -868,10 +873,12 @@ fn discover_targets(
             &mut targets,
             root,
             TargetKind::Build,
-            "build",
-            Path::new("build.gg"),
-            Vec::new(),
-            true,
+            AutoFile {
+                name: "build",
+                path: Path::new("build.gg"),
+                required_features: Vec::new(),
+                harness: true,
+            },
             manifest,
         )?;
     }
@@ -949,26 +956,31 @@ fn explicit_target(
     })
 }
 
+/// 自动发现的 target 入口规格。
+struct AutoFile<'a> {
+    name: &'a str,
+    path: &'a Path,
+    required_features: Vec<String>,
+    harness: bool,
+}
+
 fn add_auto_file(
     targets: &mut Vec<Target>,
     root: &Path,
     kind: TargetKind,
-    name: &str,
-    path: &Path,
-    required_features: Vec<String>,
-    harness: bool,
+    file: AutoFile<'_>,
     manifest: &Path,
 ) -> Result<(), ProjectError> {
-    if !root.join(path).is_file() {
+    if !root.join(file.path).is_file() {
         return Ok(());
     }
     targets.push(explicit_target(
         root,
         kind,
-        Some(path.to_path_buf()),
-        Some(name.to_owned()),
-        required_features,
-        harness,
+        Some(file.path.to_path_buf()),
+        Some(file.name.to_owned()),
+        file.required_features,
+        file.harness,
         manifest,
     )?);
     Ok(())
@@ -1172,7 +1184,7 @@ fn sorted_entries(directory: &Path, manifest: &Path) -> Result<Vec<fs::DirEntry>
             path: manifest.to_path_buf(),
             message: error.to_string(),
         })?;
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|entry| entry.file_name());
     Ok(entries)
 }
 
@@ -1222,7 +1234,7 @@ fn collect_directories(
             path: directory.to_path_buf(),
             message: error.to_string(),
         })?;
-    entries.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+    entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
         let file_type = entry.file_type().map_err(|error| ProjectError::Io {
             path: entry.path(),
@@ -1458,9 +1470,13 @@ mod tests {
         );
 
         // src/bin/nested/main.gg 的 source root 是 src，与默认 target 共享。
-        assert!(current.targets().iter().any(
-            |target| target.name() == "nested" && target.source_root() == &package.join("src")
-        ));
+        assert!(
+            current
+                .targets()
+                .iter()
+                .any(|target| target.name() == "nested"
+                    && target.source_root() == package.join("src"))
+        );
 
         // 默认构建集合是 lib + 所有 bin。
         let default = current
@@ -1512,7 +1528,10 @@ mod tests {
         let project = Project::discover(root.path()).expect("workspace discovers");
         assert_eq!(project.workspace().root(), root.path());
         assert!(project.current_package().is_none());
-        assert_eq!(project.workspace().default_members(), [app.clone()]);
+        assert_eq!(
+            project.workspace().default_members(),
+            std::slice::from_ref(&app)
+        );
         assert_eq!(project.packages().len(), 3);
         let defaults = project
             .select_packages(None, false)

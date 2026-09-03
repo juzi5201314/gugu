@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::{
     diagnostics::{Diagnostic, DiagnosticCode},
-    source::{ExpansionId, SourceMap, SourceSnapshot},
+    source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span},
 };
 
 pub(crate) enum SourceInput<'a> {
@@ -46,29 +46,24 @@ fn check_single_file(
     source_map: &SourceMap,
 ) -> Result<FrontendOutput, Diagnostic> {
     let source = snapshot.content();
-    let file = source_map
-        .file_id(snapshot.logical_path())
-        .expect("frontend snapshot is registered");
-    if source.len() > u32::MAX as usize {
-        return Err(Diagnostic::error(
+    // 快照在 load-sources 阶段已保证 u32 上限与路径唯一；这里只做入口结构检查。
+    let file = source_map.file_id(snapshot.logical_path()).ok_or_else(|| {
+        Diagnostic::error(
             DiagnosticCode::MalformedSource,
-            "bootstrap 源文件超过 u32 字节范围",
-            Some(
-                source_map
-                    .span(file, 0, 0, ExpansionId::ROOT)
-                    .expect("valid empty span"),
+            format!(
+                "前端快照逻辑路径 `{}` 未在当前源码表登记",
+                snapshot.logical_path()
             ),
-        ));
-    }
+            None,
+        )
+    })?;
+    let span = |start: usize, end: usize| source_map_span(source_map, file, start, end);
+
     if let Some(offset) = source.as_bytes().iter().position(|byte| *byte == 0) {
         return Err(Diagnostic::error(
             DiagnosticCode::MalformedSource,
             "源文件不能包含 NUL 字节",
-            Some(
-                source_map
-                    .span(file, offset, offset + 1, ExpansionId::ROOT)
-                    .expect("NUL byte is within snapshot"),
-            ),
+            Some(span(offset, offset + 1)?),
         ));
     }
 
@@ -76,11 +71,7 @@ fn check_single_file(
         return Err(Diagnostic::error(
             DiagnosticCode::MissingMain,
             "单文件入口必须包含 `fn main() { ... }`",
-            Some(
-                source_map
-                    .span(file, 0, source.len().min(1), ExpansionId::ROOT)
-                    .expect("valid missing-main span"),
-            ),
+            Some(span(0, source.len().min(1))?),
         ));
     };
     let declaration_end = main_offset + "fn main()".len();
@@ -89,22 +80,14 @@ fn check_single_file(
         return Err(Diagnostic::error(
             DiagnosticCode::MalformedSource,
             "`fn main()` 后必须是函数体",
-            Some(
-                source_map
-                    .span(file, main_offset, declaration_end, ExpansionId::ROOT)
-                    .expect("valid main declaration span"),
-            ),
+            Some(span(main_offset, declaration_end)?),
         ));
     }
     if find_matching_brace(source, body_start).is_none() {
         return Err(Diagnostic::error(
             DiagnosticCode::MalformedSource,
             "main 函数体的花括号不匹配",
-            Some(
-                source_map
-                    .span(file, body_start, body_start + 1, ExpansionId::ROOT)
-                    .expect("opening brace is within snapshot"),
-            ),
+            Some(span(body_start, body_start + 1)?),
         ));
     }
 
@@ -113,6 +96,19 @@ fn check_single_file(
         has_main: true,
         source_len: source.len() as u32,
     })
+}
+
+fn source_map_span(
+    source_map: &SourceMap,
+    file: SourceFileId,
+    start: usize,
+    end: usize,
+) -> Result<Span, Diagnostic> {
+    source_map
+        .span(file, start, end, ExpansionId::ROOT)
+        .map_err(|error| {
+            Diagnostic::error(DiagnosticCode::SpanOutOfBounds, error.to_string(), None)
+        })
 }
 
 fn find_main_declaration(source: &str) -> Option<usize> {

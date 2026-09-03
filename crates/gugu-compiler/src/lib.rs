@@ -299,7 +299,7 @@ impl LoadedInput {
     fn detail(&self) -> String {
         match self {
             Self::EmptyPackage => "空 package".to_owned(),
-            Self::File { snapshot, .. } => format!("{}", snapshot.logical_path()),
+            Self::File { snapshot, .. } => snapshot.logical_path().to_owned(),
         }
     }
 }
@@ -360,12 +360,36 @@ fn logical_input_path(path: &std::path::Path) -> PathBuf {
     if !path.is_absolute() {
         return path.to_path_buf();
     }
+    // 绝对输入优先按工作目录相对名推导；无法剥离时退回末尾两个普通分量，
+    // 保留目录信息、避免同名不同目录被合并，也不依赖宿主硬编码占位名。
     std::env::current_dir()
         .ok()
-        .and_then(|current| path.strip_prefix(current).ok().map(PathBuf::from))
+        .and_then(|current| path.strip_prefix(current).ok())
         .filter(|relative| !relative.as_os_str().is_empty())
-        .or_else(|| path.file_name().map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from("source.gg"))
+        .map(PathBuf::from)
+        .or_else(|| trailing_components(path))
+        .unwrap_or_default()
+}
+
+/// 取出绝对路径末尾两个普通分量作为逻辑名，方便诊断定位且与工作目录无关。
+fn trailing_components(path: &std::path::Path) -> Option<PathBuf> {
+    let names = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_owned()),
+            _ => None,
+        })
+        .rev()
+        .take(2)
+        .collect::<Vec<_>>();
+    if names.is_empty() {
+        return None;
+    }
+    let mut logical = PathBuf::new();
+    for name in names.into_iter().rev() {
+        logical.push(name);
+    }
+    Some(logical)
 }
 
 /// 阶段 1 的内存镜像计划，不是可执行文件。
