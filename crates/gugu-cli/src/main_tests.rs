@@ -53,6 +53,16 @@ fn global_from_values(mut raw: GlobalArgs, config: ConfigValues) -> Result<Globa
 }
 
 #[test]
+fn version_text_output_includes_commit_host_and_llvm() {
+    let lines = super::version_text_lines();
+    assert_eq!(lines.len(), 3);
+    assert!(lines[0].starts_with("gugu "));
+    assert!(lines[0].contains("(commit "));
+    assert!(lines[1].starts_with("host: "));
+    assert_eq!(lines[2], "llvm: not-used");
+}
+
+#[test]
 fn no_subcommand_and_version_are_registered() {
     assert!(
         Cli::try_parse_from(["gugu"])

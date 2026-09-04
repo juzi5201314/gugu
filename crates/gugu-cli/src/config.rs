@@ -43,7 +43,9 @@ struct CacheConfig {
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 struct RegistryConfig {
+    #[serde(rename = "require-signature")]
     require_signature: Option<bool>,
+    #[serde(rename = "deny-yanked")]
     deny_yanked: Option<bool>,
 }
 
@@ -196,14 +198,71 @@ pub(crate) fn environment_text(name: &str) -> Result<Option<String>, String> {
 }
 
 pub(crate) fn environment_flag(name: &str) -> bool {
-    env::var_os(name).is_some_and(|value| {
-        let string = value.to_string_lossy();
-        string == "1" || string.eq_ignore_ascii_case("true")
-    })
+    env::var_os(name).is_some_and(|value| !value.is_empty())
 }
 
 pub(crate) fn environment_path(name: &str) -> Option<PathBuf> {
     env::var_os(name)
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConfigFile, ConfigValues, environment_flag};
+    use std::sync::{Mutex, MutexGuard};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        _lock: MutexGuard<'static, ()>,
+        name: String,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(name: &str, value: Option<&str>) -> Self {
+            let lock = ENV_LOCK.lock().expect("environment test lock");
+            let previous = std::env::var_os(name);
+            unsafe { std::env::set_var(name, value.unwrap_or_default()) };
+            Self {
+                _lock: lock,
+                name: name.to_owned(),
+                previous,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => unsafe { std::env::set_var(&self.name, value) },
+                None => unsafe { std::env::remove_var(&self.name) },
+            }
+        }
+    }
+
+    #[test]
+    fn registry_config_deserializes_kebab_case_keys() {
+        let config = toml::from_str::<ConfigFile>(
+            "[registry]\nrequire-signature = true\ndeny-yanked = true\n",
+        )
+        .expect("registry config parses");
+        let mut values = ConfigValues::default();
+        values.apply(config);
+        assert_eq!(values.require_signature, Some(true));
+        assert_eq!(values.deny_yanked, Some(true));
+    }
+
+    #[test]
+    fn environment_flag_is_enabled_for_any_non_empty_value() {
+        {
+            let _guard = EnvVarGuard::set("GUGU_OFFLINE_TEST", Some("yes"));
+            assert!(environment_flag("GUGU_OFFLINE_TEST"));
+        }
+        {
+            let _guard = EnvVarGuard::set("GUGU_OFFLINE_TEST", Some(""));
+            assert!(!environment_flag("GUGU_OFFLINE_TEST"));
+        }
+    }
 }

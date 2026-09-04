@@ -534,18 +534,42 @@ fn print_help(command_name: Option<&str>) -> i32 {
     0
 }
 
+fn version_identity() -> (String, String, String, String) {
+    let version = env!("CARGO_PKG_VERSION").to_owned();
+    let commit = option_env!("GUGU_COMMIT").unwrap_or("unknown").to_owned();
+    let commit_date = option_env!("GUGU_COMMIT_DATE")
+        .unwrap_or("unknown")
+        .to_owned();
+    let host = TargetName::host()
+        .map(|target| target.to_string())
+        .unwrap_or_else(|| "unknown".to_owned());
+    (version, commit, commit_date, host)
+}
+
+pub(crate) fn version_text_lines() -> Vec<String> {
+    let (version, commit, commit_date, host) = version_identity();
+    vec![
+        format!("gugu {version} (commit {commit} {commit_date})"),
+        format!("host: {host}"),
+        "llvm: not-used".to_owned(),
+    ]
+}
+
 fn print_version(format: OutputFormat) {
+    let (version, commit, commit_date, host) = version_identity();
     match format {
-        OutputFormat::Text => println!("gugu {}", env!("CARGO_PKG_VERSION")),
+        OutputFormat::Text => {
+            for line in version_text_lines() {
+                println!("{line}");
+            }
+        }
         OutputFormat::Json => println!(
             "{}",
             json!({
-                "version": env!("CARGO_PKG_VERSION"),
-                "commit": option_env!("GUGU_COMMIT").unwrap_or("unknown"),
-                "commit-date": option_env!("GUGU_COMMIT_DATE").unwrap_or("unknown"),
-                "host": TargetName::host()
-                    .map(|target| target.to_string())
-                    .unwrap_or_else(|| "unknown".to_owned()),
+                "version": version,
+                "commit": commit,
+                "commit-date": commit_date,
+                "host": host,
                 "llvm": "not-used"
             })
         ),
