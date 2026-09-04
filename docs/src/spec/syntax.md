@@ -13,8 +13,10 @@ INT         = 十进制、十六进制、二进制或八进制整数记号；
 FLOAT       = 含小数点或指数的浮点记号；
 CHAR        = 字符记号；
 BYTE_CHAR   = 字节字符记号；
-STRING      = 普通、插值、raw、字节或 C 字符串记号；
-ATTRIBUTE   = 已通过词法分析的属性内容；
+STRING      = 普通、raw、字节或 C 字符串记号，以及 f-string 的起止、
+              文本片段、插值括号和格式说明记号；
+ATTRIBUTE   = `#` / `#!` / `[` / `]` 与属性内部的扁平记号序列，
+              已由词法器校验闭集属性名与已知参数形状；
 ```
 
 `-` 不属于 `INT` 或 `FLOAT` 的一部分；负数由一元 `-` 表达。`NEWLINE` 只在上一记号不能继续当前语法结构时终止语句。注释在语法分析前删除，但文档注释作为附着信息保留。
@@ -23,11 +25,12 @@ ATTRIBUTE   = 已通过词法分析的属性内容；
 
 ```ebnf
 source_file         ::= module_attribute* source_item* EOF ;
-module_attribute    ::= "#![" attribute "]" ;
+module_attribute    ::= "#" "!" "[" attr_tokens "]" ;
 source_item         ::= item | source_macro_item ;
 item                ::= attribute* visibility? declaration ;
 source_macro_item   ::= attribute* "comptime" "source" block ;
-attribute           ::= "#[" ATTRIBUTE "]" ;
+attribute           ::= "#" "[" attr_tokens "]" ;
+attr_tokens         ::= 词法已扫描并校验的扁平属性内部记号 ；
 visibility          ::= "pub" ;
 
 declaration         ::= use_declaration

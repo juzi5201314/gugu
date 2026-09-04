@@ -13,7 +13,7 @@
 阶段 2 将 `gugu` 作为唯一 CLI 入口：根级全局参数可在子命令前后解析，配置按内置默认、用户配置、当前 workspace 的 `.gugu/config.toml`、`--config`、环境变量、命令行的顺序合并，后层覆盖前层。`--frozen` 在解析结果中同时设置 `offline` 与 `locked`。
 
 规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。阶段 2 只有 `build`、`check`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
-现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已完成工程、源码、清单、workspace、target、依赖解析和缓存输入 bootstrap；完整 lexer、parser、类型系统、runtime、后端与标准库仍按路线图后续阶段推进。
+现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已完成工程、源码、清单、workspace、target、依赖解析、缓存输入和词法分析 bootstrap；完整 parser、类型系统、runtime、后端与标准库仍按路线图后续阶段推进。
 `text` 保留人读的 action/诊断/最终结果；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
 ## 阶段 3 交付边界
@@ -143,7 +143,7 @@ emit-image
 - `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，逻辑路径按输入路径推导；读取或快照失败形成 `E0001`~`E0008` 并停止后续 action；
 - `project_entry`（阶段 4）：CLI 从清单发现的 target 入口，逻辑路径由 package root 推导，与工作目录无关；bin/example 与 `harness = false` 的 bench 要求合法 main，lib/test 与默认 bench 走库检查，不产生 executable entry。
 
-阶段 1 前端只验证 NUL、`u32` 源长度、`fn main()` 入口和函数体括号，并把合法入口降低为单个 `ReturnUnit`。这不是完整 lexer/parser/type checker；阶段 7、8、12–20 必须替换该实现并保持 action graph 的错误传播契约。因而本阶段的成功只表示 bootstrap 计划合法，不表示已经满足完整语言规范或可以运行目标程序。
+阶段 7 前端对每个源码快照运行词法分析：生成带精确 span 的 `TokenBuffer` 与 trivia，校验字面量、最长匹配、闭集属性与 cfg 记号形状。可执行入口改为在 token 上识别 `fn main() {` 或 `fn main() =`。词法诊断 `E0009`–`E0019` 或 `Error` token 会使 Frontend action 失败，并跳过 IR 与 image plan。阶段 1 的括号扫描入口检查已删除；完整 parser 仍属阶段 8。
 
 ## runtime 源资源与实现归属
 
@@ -163,7 +163,7 @@ emit-image
 | 公开规范 | 主要实现归属 | 当前状态 | 完整实现阶段 |
 |---|---|---|---:|
 | `overview` | `action`、`target`、`runtime` | 已建立闭世界/目标边界 | 01–79 |
-| `lexical` | `source` 快照、`frontend` lexer | 快照/BOM/UTF-8/逻辑路径已落地；lexer 未实现 | 03、07 |
+| `lexical` | `source` 快照、`frontend` lexer | 快照与 lexer/trivia/闭集属性词法已落地；parser 未实现 | 03、07 |
 | `format-style` | `gugu-cli` fmt 与 formatter | CLI 未接入 | 09 |
 | `syntax` | `frontend` parser | 已登记前端入口 | 08 |
 | `types` | type arena、type checker | 未实现 | 12–20 |

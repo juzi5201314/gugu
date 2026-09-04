@@ -1,0 +1,20 @@
+42
+0.5
+3.14
+1e-9
+0xFF
+0b1010
+0o755
+"hi\n"
+'A'
+'\u{1F600}'
+b"xy\x00"
+b'x'
+c"ok"
+raw"plain"
+raw"""
+line "quote"
+"""
+f"hello {name} and {id:08x}"
+[1, 2, 3]
+(1, "a")

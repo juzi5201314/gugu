@@ -3,9 +3,9 @@
 
 //! Gugu compiler 的阶段化 bootstrap 接口。
 //!
-//! 阶段 1 只建立 action graph、目标描述、bootstrap 前端、最小 IR、后端
-//! image plan 和 Gugu runtime 源资源登记。它不会执行完整 parser、类型系统、
-//! machine encoder 或最终镜像写出。
+//! compiler bootstrap：源码快照、词法分析、action graph、目标描述、最小 IR、
+//! 后端 image plan 和 Gugu runtime 源资源登记。完整 parser 与类型系统按后续
+//! 阶段替换当前入口检查。
 
 mod action;
 mod backend;
@@ -207,9 +207,11 @@ impl Compiler {
         let frontend_input = loaded.as_source_input(&source_map);
         let frontend = match frontend::bootstrap(frontend_input) {
             Ok(output) => output,
-            Err(diagnostic) => {
-                diagnostics.push(diagnostic);
-                graph.fail(ActionKind::Frontend, "bootstrap 前端检查失败");
+            Err(errors) => {
+                for diagnostic in errors {
+                    diagnostics.push(diagnostic);
+                }
+                graph.fail(ActionKind::Frontend, "前端词法检查失败");
                 graph.skip_after(ActionKind::Frontend, "前置 action 失败");
                 diagnostics.sort();
                 return Compilation {
@@ -283,16 +285,11 @@ impl LoadedInput {
             Self::File {
                 snapshot,
                 require_main,
-            } => {
-                if *require_main {
-                    SourceInput::SingleFile {
-                        snapshot,
-                        source_map,
-                    }
-                } else {
-                    SourceInput::LibraryFile { snapshot }
-                }
-            }
+            } => SourceInput::File {
+                snapshot,
+                source_map,
+                require_main: *require_main,
+            },
         }
     }
 
@@ -470,7 +467,12 @@ impl ImagePlan {
 impl frontend::FrontendOutput {
     fn detail(&self) -> String {
         match &self.path {
-            Some(path) => format!("{}，{} 字节", path.display(), self.source_len),
+            Some(path) => format!(
+                "{}，{} 字节，{} 个记号",
+                path.display(),
+                self.source_len,
+                self.tokens.tokens.len()
+            ),
             None => "空模块".to_owned(),
         }
     }

@@ -116,9 +116,13 @@ ExpansionRecord {
 
 `ExpansionId` 在一次 action 内按外层调用位置、展开轮次和生成片段顺序确定分配；它不是持久语义身份，不能进入稳定定义键、`MonoKey` 或规范常量值。生成节点的路径解析上下文由语言规范的 source slot 规则决定，不能用 `ExpansionId` 的数值偶然消歧。
 
-lexer 输出一个连续 `TokenBuffer`。每个 token 保存 `kind`、`Span` 和可选 `Symbol`/规范化字面量 ID；空白、换行、行注释和块注释作为 trivia 连续保存，并由 token 的前后范围引用。AST 不复制注释正文。格式化器读取同一 `TokenBuffer` 与 AST，因此注释、raw 字符串和字面量原始拼写不会在解析阶段丢失。
+lexer 输出一个连续 `TokenBuffer`。每个 token 保存 `kind`、半开字节区间和可选 `Symbol`；空白、换行、行注释（`//` / `///` / `//!`）和可嵌套块注释作为 trivia 连续保存在每个 token 的前导范围里。AST 不复制注释正文。格式化器读取同一 `TokenBuffer` 与 AST，因此注释、raw 字符串和字面量原始拼写不会在解析阶段丢失。
 
-非法 UTF-8、未闭合字面量和无法形成 token 的字节生成词法错误 token；parser 必须消费该 token 并建立只覆盖当前恢复范围的错误节点，保证恢复过程单调前进。
+`.` 后接数字、以及整数后的孤立 `.`，都拆成 `Dot` 与 `Int`，不形成 `Float`。行末能否结束语句由记号的 `continues_line` 谓词（二元运算符、`(`、`[`、`{`、`,`、`.`、`::`、`..`、`:`、`=`、`=>`、`?`）加上 parser 的括号深度共同决定；词法器把换行保留为 trivia，不插入 `terminator`。`#[]` / `#![]` 内部是扁平记号；词法器校验闭集属性名与 `repr`/`derive`/lint/`ffi`/`cfg` 记号形状，不求值 feature 或自定义 cfg。
+
+`f"..."` 展开为 `FStringStart`、文本片段、插值开闭与内部表达式记号、可选格式说明和 `FStringEnd`。插值内禁止再写 `f"..."`。
+
+非法 UTF-8 在快照阶段拒绝。未闭合字面量/注释、无法形成 token 的字节、非法转义/数字/属性生成词法错误 token 与诊断 `E0009`–`E0019`；parser 必须消费该 token 并建立只覆盖当前恢复范围的错误节点，保证恢复过程单调前进。Frontend 在存在词法诊断或 `Error` token 时失败，不得把错误占位交给 IR 或 image plan。
 
 ## AST
 

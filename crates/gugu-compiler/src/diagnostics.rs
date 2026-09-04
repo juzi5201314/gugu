@@ -39,6 +39,28 @@ pub enum DiagnosticCode {
     SpanOutOfBounds,
     /// 源文件超过 `u32` 字节范围。
     SourceTooLarge,
+    /// 字面量或属性括号未闭合。
+    LexUnterminated,
+    /// 块注释未闭合。
+    LexUnterminatedComment,
+    /// 未知或非法转义。
+    LexInvalidEscape,
+    /// 数字记号非法。
+    LexInvalidNumeric,
+    /// 无法形成合法记号。
+    LexInvalidToken,
+    /// 未知属性名。
+    LexUnknownAttribute,
+    /// 属性参数形状非法。
+    LexInvalidAttributeArg,
+    /// 非法 Unicode scalar。
+    LexInvalidUnicodeScalar,
+    /// C 字符串含内嵌 0 字节。
+    LexCStringNul,
+    /// 字节字符不是恰好一个字节。
+    LexInvalidByteChar,
+    /// f-string 格式说明非法。
+    LexInvalidFormatSpec,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -52,6 +74,17 @@ impl fmt::Display for DiagnosticCode {
             Self::InvalidSourcePath => "E0006",
             Self::SpanOutOfBounds => "E0007",
             Self::SourceTooLarge => "E0008",
+            Self::LexUnterminated => "E0009",
+            Self::LexUnterminatedComment => "E0010",
+            Self::LexInvalidEscape => "E0011",
+            Self::LexInvalidNumeric => "E0012",
+            Self::LexInvalidToken => "E0013",
+            Self::LexUnknownAttribute => "E0014",
+            Self::LexInvalidAttributeArg => "E0015",
+            Self::LexInvalidUnicodeScalar => "E0016",
+            Self::LexCStringNul => "E0017",
+            Self::LexInvalidByteChar => "E0018",
+            Self::LexInvalidFormatSpec => "E0019",
         };
         formatter.write_str(code)
     }
