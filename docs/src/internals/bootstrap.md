@@ -13,7 +13,7 @@
 阶段 2 将 `gugu` 作为唯一 CLI 入口：根级全局参数可在子命令前后解析，配置按内置默认、用户配置、当前 workspace 的 `.gugu/config.toml`、`--config`、环境变量、命令行的顺序合并，后层覆盖前层。`--frozen` 在解析结果中同时设置 `offline` 与 `locked`。
 
 规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。阶段 2 只有 `build`、`check`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
-现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已完成工程、源码、清单、workspace、target、依赖解析、缓存输入和词法分析 bootstrap；完整 parser、类型系统、runtime、后端与标准库仍按路线图后续阶段推进。
+现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已完成工程、源码、清单、workspace、target、依赖解析、缓存输入、词法分析和递归下降 AST；类型系统、runtime、后端与标准库仍按路线图后续阶段推进。
 `text` 保留人读的 action/诊断/最终结果；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
 ## 阶段 3 交付边界
@@ -88,7 +88,11 @@ crates/
     │   ├── target_view.rs          target 用户产物视图与原子物化
     │   ├── cache_tests.rs          缓存输入、损坏隔离、vendor 和 key 确定性测试
     │   └── workspace.rs             workspace 成员与 glob 解析
-    ├── src/frontend.rs             阶段 1 的入口结构检查
+    ├── src/frontend/               词法、递归下降 parser 与稠密 AST
+    │   ├── mod.rs                  Frontend action 入口
+    │   ├── lex.rs                  TokenBuffer、trivia 与字面量
+    │   ├── parse/                  项、类型、表达式、模式
+    │   └── ast.rs                  u32 arena 与节点种类
     ├── src/ir.rs                   main -> ReturnUnit 的 bootstrap IR
     ├── src/backend.rs              目标相关的内存 image plan 输入
     ├── src/runtime.rs              Gugu 源树、rt0 和 intrinsic 登记
@@ -143,7 +147,9 @@ emit-image
 - `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，逻辑路径按输入路径推导；读取或快照失败形成 `E0001`~`E0008` 并停止后续 action；
 - `project_entry`（阶段 4）：CLI 从清单发现的 target 入口，逻辑路径由 package root 推导，与工作目录无关；bin/example 与 `harness = false` 的 bench 要求合法 main，lib/test 与默认 bench 走库检查，不产生 executable entry。
 
-阶段 7 前端对每个源码快照运行词法分析：生成带精确 span 的 `TokenBuffer` 与 trivia，校验字面量、最长匹配、闭集属性与 cfg 记号形状。可执行入口改为在 token 上识别 `fn main() {` 或 `fn main() =`。词法诊断 `E0009`–`E0019` 或 `Error` token 会使 Frontend action 失败，并跳过 IR 与 image plan。阶段 1 的括号扫描入口检查已删除；完整 parser 仍属阶段 8。
+阶段 7 前端对每个源码快照运行词法分析：生成带精确 span 的 `TokenBuffer` 与 trivia，校验字面量、最长匹配、闭集属性与 cfg 记号形状。词法诊断 `E0009`–`E0019` 或 `Error` token 会使 Frontend action 失败，并跳过 IR 与 image plan。阶段 1 的括号扫描入口检查已删除。
+
+阶段 8 在同一 Frontend action 内消费 `TokenBuffer`，用递归下降构造稠密 `u32` AST arena（声明、泛型、类型、块、表达式、模式、`async`/`select`/`try`/`defer`、`comptime source`、FFI 与 asm）。`()`/`[]` 增加分隔符深度，内部换行只作空白；`{` 内换行可以结束语句、字段或臂。比较与 `..` 不结合，主诊断带 `Note` 次诊断。解析诊断 `E0020`–`E0025` 使 Frontend 失败，不得把错误占位交给 IR 或 image plan。可执行入口改为 AST 中名为 `main` 的 `fn`。节点身份不是指针；结构 dump 按 arena 下标，不受线程完成顺序影响。
 
 ## runtime 源资源与实现归属
 
@@ -158,29 +164,29 @@ emit-image
 
 ## 公开规范归属表
 
-下表给出每条公开规范的实现归属。状态列描述截至阶段 4 已交付的边界；未落地部分不能把当前 bootstrap 检查误认为该章节已经完成。
+下表给出每条公开规范的实现归属。状态列描述截至阶段 8 已交付的边界；未落地部分不能把当前 bootstrap 检查误认为该章节已经完成。
 
 | 公开规范 | 主要实现归属 | 当前状态 | 完整实现阶段 |
 |---|---|---|---:|
 | `overview` | `action`、`target`、`runtime` | 已建立闭世界/目标边界 | 01–79 |
-| `lexical` | `source` 快照、`frontend` lexer | 快照与 lexer/trivia/闭集属性词法已落地；parser 未实现 | 03、07 |
+| `lexical` | `source` 快照、`frontend` lexer | 快照与 lexer/trivia/闭集属性词法已落地 | 03、07 |
 | `format-style` | `gugu-cli` fmt 与 formatter | CLI 未接入 | 09 |
-| `syntax` | `frontend` parser | 已登记前端入口 | 08 |
+| `syntax` | `frontend` parser | 递归下降 AST、错误恢复与稳定 dump 已落地 | 08 |
 | `types` | type arena、type checker | 未实现 | 12–20 |
 | `declarations` | module tree、definition collector | 清单层模块布局已落地；模块树未实现 | 04、10、13 |
 | `program-model` | action、backend、runtime | 已建立 plan/不写部分镜像契约 | 01、24、52–57 |
 | `packages-builds` | `project` 清单、依赖解析、workspace、target 与锁图 | 清单发现、workspace、target 自动发现、SemVer、source 候选、三域 feature 与锁图已落地；下载、缓存、vendor 未实现 | 04–06、72–73 |
 | `publishing-ecosystem` | registry、archive、signature | 未实现 | 74 |
 | `toolchain-cli` | `gugu-cli` 与 action orchestrator | 已建立单一入口与项目/单文件模式 | 01–04；完整为 73 |
-| `expressions` | frontend、HIR、GIR | 未实现 | 14、20、26 |
-| `patterns` | pattern checker、HIR matrix | 未实现 | 15、20 |
-| `functions` | capture、async、HIR/GIR | 未实现 | 16、20、26 |
+| `expressions` | frontend、HIR、GIR | 表面语法已解析；类型检查与 lowering 未实现 | 08、14、20、26 |
+| `patterns` | frontend parser、pattern checker | 表面语法已解析；穷尽性未实现 | 08、15、20 |
+| `functions` | frontend parser、capture、async、HIR/GIR | 表面语法已解析；捕获与 lowering 未实现 | 08、16、20、26 |
 | `traits` | trait solver、impl selection | 未实现 | 17、18、20 |
 | `passing` | value/resource lowering | 未实现 | 27 |
 | `memory` | placement、resource runtime、GC | 仅登记 runtime 边界 | 27、30–51 |
 | `concurrency` | scheduler、channel、sync runtime | 仅登记 intrinsic 边界 | 35–37 |
-| `comptime` | evaluator、source expansion、analysis | 未实现 | 21–23 |
-| `unsafe` | safety checker、FFI/asm backend | 仅登记 intrinsic 边界 | 19、58 |
+| `comptime` | evaluator、source expansion、analysis | `comptime source` 语法节点已解析；求值未实现 | 08、21–23 |
+| `unsafe` | safety checker、FFI/asm backend | `extern`/`asm` 语法节点已解析；安全检查未实现 | 08、19、58 |
 | `platform-abi` | `target`、x86 backend、image writer | 已建立两个目标 descriptor | 52–58 |
 | `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界 | 33–51、56–58 |
 | `standard-library` | `runtime` Gugu 源树与 std modules | 已建立源树登记 | 59–68 |
@@ -215,4 +221,4 @@ emit-image
 - 候选版本选择不受输入顺序影响，yanked/无解版本、source candidate 缺失和依赖循环产生稳定错误；
 - 锁图拒绝绝对路径、未知 source、重复 package ID 和悬空边，规范编码排序稳定且重复读写不改变内容；CLI `--locked` 在锁图与清单不一致时于 frontend 前失败。
 
-最终镜像写出、Gugu 源 runtime 自举、完整 parser/type checker、GC、scheduler 和双目标 machine code 都不属于本阶段验收；它们必须在路线图后续阶段以各自规范和测试完成。
+最终镜像写出、Gugu 源 runtime 自举、type checker、GC、scheduler 和双目标 machine code 都不属于本阶段验收；它们必须在路线图后续阶段以各自规范和测试完成。

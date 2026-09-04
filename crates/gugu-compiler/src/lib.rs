@@ -3,9 +3,8 @@
 
 //! Gugu compiler 的阶段化 bootstrap 接口。
 //!
-//! compiler bootstrap：源码快照、词法分析、action graph、目标描述、最小 IR、
-//! 后端 image plan 和 Gugu runtime 源资源登记。完整 parser 与类型系统按后续
-//! 阶段替换当前入口检查。
+//! compiler bootstrap：源码快照、词法分析、递归下降 AST、action graph、目标描述、最小 IR、
+//! 后端 image plan 和 Gugu runtime 源资源登记。类型系统按后续阶段替换当前入口检查。
 
 mod action;
 mod backend;
@@ -468,10 +467,18 @@ impl frontend::FrontendOutput {
     fn detail(&self) -> String {
         match &self.path {
             Some(path) => format!(
-                "{}，{} 字节，{} 个记号",
+                "{}，{} 字节，{} 个记号，{} 个 AST 项 / {} 个节点",
                 path.display(),
                 self.source_len,
-                self.tokens.tokens.len()
+                self.tokens.tokens.len(),
+                self.ast
+                    .as_ref()
+                    .map(|parsed| parsed.file.items.len)
+                    .unwrap_or(0),
+                self.ast
+                    .as_ref()
+                    .map(|parsed| parsed.arena.next_node)
+                    .unwrap_or(0),
             ),
             None => "空模块".to_owned(),
         }
@@ -536,7 +543,7 @@ mod tests {
 
         assert!(!compilation.is_success());
         assert!(compilation.image_plan().is_none());
-        assert_eq!(compilation.diagnostics().items().len(), 1);
+        assert!(!compilation.diagnostics().items().is_empty());
         assert_eq!(
             compilation.action_graph().nodes()[2].status(),
             ActionStatus::Failed

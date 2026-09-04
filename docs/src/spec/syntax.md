@@ -117,12 +117,15 @@ type               ::= "!"
                       | raw_pointer_type
                       | function_type
                       | array_type
+                      | slice_type
                       | tuple_type
                       | "dyn" dyn_bounds
                       | impl_type
                       | source_macro_type ;
 source_macro_type   ::= "comptime" "source" block ;
 reference_type     ::= "&" type ;
+slice_type         ::= "&" "[" type "]" ;
+array_type         ::= "[" type ";" expression "]" ;
 raw_pointer_type   ::= "*" type ;
 function_type      ::= "fn" "(" type_list? ")" [type] ;
 tuple_type         ::= "(" ")"
@@ -134,7 +137,7 @@ impl_type          ::= "impl" bound ("+" bound)* ;
 path               ::= IDENT ("." IDENT)* ("::" IDENT)* ;
 ```
 
-函数、方法的显式类型实参使用 `path :: generic_arguments`；类型名后的方括号是类型实参；值后的方括号是下标。关键字构造器 `chan[T](n)`、`size_of[T]()`、`align_of[T]()`、`offset_of[T](field)`和`type_id[T]()`按[类型系统](types.md)的专门规则解析。
+函数、方法的显式类型实参使用 `path :: generic_arguments`；类型名后的方括号是类型实参；值后的方括号是下标。数组类型必须写成 `[T; N]`；`&[T]` 是切片，`&[T; N]` 是数组引用。路径的 `.` 只在下一记号为 `IDENT` 时继续，因此 `use std.io.{print, println}` 进入分组列表而不是路径段。关键字构造器 `chan[T](n)`、`size_of[T]()`、`align_of[T]()`、`offset_of[T](field)`和`type_id[T]()`按[类型系统](types.md)的专门规则解析。
 
 `comptime source` 在模块项列表、块语句列表、表达式、类型和模式位置使用相同的表面记号，由所在语法位置决定其 source slot。`source` 在这里是跟随 `comptime` 的上下文词，不是保留关键字；解析器保留该节点，不把脚本块本身当成生成结果。宏脚本返回的 `ParsedSource` 必须与该 source slot 的片段类别相容；具体展开规则见[编译期执行](comptime.md)。
 
@@ -303,7 +306,7 @@ rest_pattern        ::= ".." | IDENT "@" ".." ;
 struct_pattern      ::= path "{" field_pattern_list? ["," ".."] "}" ;
 field_pattern_list  ::= field_pattern ("," field_pattern)* ;
 field_pattern       ::= IDENT [":" pattern] ;
-constructor_pattern ::= path ("(" pattern_list? ")" | "{" field_pattern_list? "}")" ;
+constructor_pattern ::= path ("(" pattern_list? ")" | "{" field_pattern_list? "}") ;
 pattern_list        ::= pattern ("," pattern)* [","] ;
 ```
 

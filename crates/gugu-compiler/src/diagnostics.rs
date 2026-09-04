@@ -9,6 +9,8 @@ pub enum Severity {
     Error,
     /// 不阻止生成结果的警告。
     Warning,
+    /// 附着在主诊断上的次级说明，不单独构成失败。
+    Note,
 }
 
 impl fmt::Display for Severity {
@@ -16,6 +18,7 @@ impl fmt::Display for Severity {
         match self {
             Self::Error => formatter.write_str("error"),
             Self::Warning => formatter.write_str("warning"),
+            Self::Note => formatter.write_str("note"),
         }
     }
 }
@@ -61,6 +64,18 @@ pub enum DiagnosticCode {
     LexInvalidByteChar,
     /// f-string 格式说明非法。
     LexInvalidFormatSpec,
+    /// 遇到当前产生式不允许的记号。
+    ParseUnexpected,
+    /// 缺少当前产生式要求的记号。
+    ParseExpected,
+    /// 分隔符未闭合。
+    ParseUnclosed,
+    /// 比较或区间运算符违反非结合约束。
+    ParseInvalidPrecedence,
+    /// 赋值左侧不是 place 形态。
+    ParseInvalidPlace,
+    /// `select` 分支不是允许的 send/recv/wait/default 形态。
+    ParseInvalidSelectArm,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -85,6 +100,12 @@ impl fmt::Display for DiagnosticCode {
             Self::LexCStringNul => "E0017",
             Self::LexInvalidByteChar => "E0018",
             Self::LexInvalidFormatSpec => "E0019",
+            Self::ParseUnexpected => "E0020",
+            Self::ParseExpected => "E0021",
+            Self::ParseUnclosed => "E0022",
+            Self::ParseInvalidPrecedence => "E0023",
+            Self::ParseInvalidPlace => "E0024",
+            Self::ParseInvalidSelectArm => "E0025",
         };
         formatter.write_str(code)
     }
@@ -106,8 +127,25 @@ impl Diagnostic {
         message: impl Into<String>,
         span: Option<Span>,
     ) -> Self {
+        Self::new(Severity::Error, code, message, span)
+    }
+
+    pub(crate) fn note(
+        code: DiagnosticCode,
+        message: impl Into<String>,
+        span: Option<Span>,
+    ) -> Self {
+        Self::new(Severity::Note, code, message, span)
+    }
+
+    fn new(
+        severity: Severity,
+        code: DiagnosticCode,
+        message: impl Into<String>,
+        span: Option<Span>,
+    ) -> Self {
         Self {
-            severity: Severity::Error,
+            severity,
             code,
             message: message.into(),
             span,

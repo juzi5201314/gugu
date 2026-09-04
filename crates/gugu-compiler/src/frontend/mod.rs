@@ -5,14 +5,21 @@ use crate::{
     source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span},
 };
 
+mod ast;
 mod attr;
 mod intern;
 mod lex;
+mod parse;
 mod string;
 mod token;
 
+use ast::{AstArena, AstFile};
 pub(crate) use lex::lex;
-pub(crate) use token::{TokenBuffer, TokenKind};
+#[cfg(test)]
+pub(crate) use parse::{dump_ast, has_main_fn, parent_before_child, parse};
+#[cfg(not(test))]
+pub(crate) use parse::{has_main_fn, parse};
+pub(crate) use token::TokenBuffer;
 
 pub(crate) enum SourceInput<'a> {
     EmptyPackage,
@@ -29,6 +36,13 @@ pub(crate) struct FrontendOutput {
     pub(crate) has_main: bool,
     pub(crate) source_len: u32,
     pub(crate) tokens: TokenBuffer,
+    pub(crate) ast: Option<ParsedAst>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ParsedAst {
+    pub(crate) file: AstFile,
+    pub(crate) arena: AstArena,
 }
 
 pub(crate) fn bootstrap(input: SourceInput<'_>) -> Result<FrontendOutput, Vec<Diagnostic>> {
@@ -38,6 +52,7 @@ pub(crate) fn bootstrap(input: SourceInput<'_>) -> Result<FrontendOutput, Vec<Di
             has_main: false,
             source_len: 0,
             tokens: TokenBuffer::default(),
+            ast: None,
         }),
         SourceInput::File {
             snapshot,
@@ -74,7 +89,11 @@ fn check_file(
         }
         return Err(diagnostics);
     }
-    let has_main = find_main(&lexed.buffer);
+    let parsed = parse(snapshot.content(), source_map, file, &lexed.buffer);
+    if !parsed.diagnostics.is_empty() {
+        return Err(parsed.diagnostics);
+    }
+    let has_main = has_main_fn(&parsed.file, &parsed.arena, &lexed.buffer.intern);
     if require_main && !has_main {
         let span = source_map_span(source_map, file, 0, snapshot.content().len().min(1))?;
         return Err(vec![Diagnostic::error(
@@ -88,6 +107,10 @@ fn check_file(
         has_main,
         source_len: snapshot.content().len() as u32,
         tokens: lexed.buffer,
+        ast: Some(ParsedAst {
+            file: parsed.file,
+            arena: parsed.arena,
+        }),
     })
 }
 
@@ -108,49 +131,7 @@ fn source_map_span(
         })
 }
 
-fn find_main(buffer: &TokenBuffer) -> bool {
-    let tokens = &buffer.tokens;
-    let mut index = 0;
-    while index + 3 < tokens.len() {
-        if tokens[index].kind == TokenKind::KwFn
-            && tokens[index + 1].kind == TokenKind::Ident
-            && tokens[index + 1]
-                .symbol
-                .is_some_and(|symbol| buffer.intern.get_str(symbol) == "main")
-            && tokens[index + 2].kind == TokenKind::LParen
-        {
-            if let Some(close) = matching_paren(tokens, index + 2)
-                && matches!(
-                    tokens.get(close + 1).map(|token| token.kind),
-                    Some(TokenKind::LBrace | TokenKind::Eq)
-                )
-            {
-                return true;
-            }
-            return false;
-        }
-        index += 1;
-    }
-    false
-}
-
-fn matching_paren(tokens: &[token::Token], open: usize) -> Option<usize> {
-    let mut depth = 0_u32;
-    for (offset, token) in tokens[open..].iter().enumerate() {
-        match token.kind {
-            TokenKind::LParen => depth += 1,
-            TokenKind::RParen => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(open + offset);
-                }
-            }
-            TokenKind::Eof => return None,
-            _ => {}
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod lex_tests;
+#[cfg(test)]
+mod parse_tests;

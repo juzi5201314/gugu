@@ -162,7 +162,7 @@ AstFile {
 - `return`、`break`、`continue`、后缀 `?` 和字符串插值；
 - parser 恢复用的 `Error`。
 
-`StmtKind` 固定为 `Let`、`LetElse`、`Assign`、`Defer`、`Expr` 和 `SourceMacro`。块尾是否产生值由最后一个表达式语句的 terminator 状态记录，不通过查看源码末字节重新推断。
+`StmtKind` 固定为 `Let`、`LetElse`、`Assign`、`Defer`、`Yield`、`Expr` 和 `SourceMacro`。块尾是否产生值由最后一个表达式语句的 terminator 状态记录，不通过查看源码末字节重新推断。
 
 `PatternKind` 固定为通配、绑定、`&P` 引用模式、字面量、范围、元组、数组/切片、结构体、构造器、or、`@`、rest 和 `SourceMacro`；不存在 `ref`/`ref mut` 节点。每个绑定节点只保存名字、可变性和独立 span；绑定动作由 HIR 按[模式规范](../spec/patterns.md)生成。
 
@@ -180,7 +180,13 @@ parser 必须满足：
 - 子节点 span 位于父节点 span 内，按源码顺序引用的 range 单调递增；
 - 恢复只能在匹配的闭合分隔符、换行 terminator、分号或模块项起始 token 处同步；
 - 一个缺失 token 只产生一个零宽合成 token，不得被多个节点重复认领；
-- 解析结果不受目录枚举顺序、线程完成顺序或 hash 随机种子影响。
+- 解析结果不受目录枚举顺序、线程完成顺序或 hash 随机种子影响；
+- 节点身份是文件内稠密 `u32`，禁止把指针当地址或 dump 键；结构 dump 只按 arena 下标与源码顺序遍历；
+- 前缀 `unary`/`paren` 在相同起点时父节点 id 小于子节点；中缀 Pratt 与后缀 wrap 先分配操作数再分配父节点，因此父节点 id 更大。
+
+比较运算符与 `..` 不结合：连续出现时发出主诊断，并附着 `Note` 次诊断指向被拒绝的结合方向。`()` 与 `[]` 增加 parser 的分隔符深度，其内部换行只作空白；`{` 内换行可以结束语句、字段或 `select`/`match` 臂。`if`/`while`/`match`/`for` 的条件、scrutinee 与迭代器禁止把紧随路径的 `{` 当成结构体字面量。
+
+路径的 `.` 只在下一记号是标识符时继续；因此 `use std.io.{print, println}` 在 `.` 后进入分组列表，而 `ch.send(1)` 在表达式里是路径调用（最后一段为方法名），与字段调用 `recv`/`send`/`wait` 在 `select` 臂上等价。
 
 ## `cfg` 与定义收集
 
