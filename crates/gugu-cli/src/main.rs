@@ -7,8 +7,9 @@ mod tests;
 
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use gugu_compiler::{
-    CompileRequest, Compiler, Package, Project, ResolveOptions, TargetKind, TargetName,
-    TargetSelection,
+    CachePolicy, CompileRequest, Compiler, DependencyCache, LockGraph, Package, Project,
+    ResolveOptions, TargetKind, TargetName, TargetSelection, candidates_from_lock,
+    default_cache_root, prepare_dependency_inputs,
 };
 use serde_json::json;
 use std::{
@@ -726,6 +727,25 @@ fn resolve_project_lock(
     target: TargetName,
     format: OutputFormat,
 ) -> Result<(), ()> {
+    let path = project.lock_path();
+    let existing = if path.exists() {
+        Some(LockGraph::read(&path).map_err(|error| {
+            emit_cli_error(format, &error.to_string());
+        })?)
+    } else {
+        if options.locked {
+            emit_cli_error(
+                format,
+                &format!("--locked 要求锁文件存在：`{}`", path.display()),
+            );
+            return Err(());
+        }
+        None
+    };
+    let (registry_packages, git_packages) = existing
+        .as_ref()
+        .map(candidates_from_lock)
+        .unwrap_or_default();
     let mut roots = Vec::with_capacity(packages.len());
     let mut root_features = BTreeMap::new();
     let mut root_default_features = BTreeMap::new();
@@ -749,30 +769,46 @@ fn resolve_project_lock(
             roots,
             root_features,
             root_default_features,
+            registry_packages,
+            git_packages,
             ..ResolveOptions::default()
         })
         .map_err(|error| {
             emit_cli_error(format, &error.to_string());
         })?;
-    let path = project.lock_path();
-    if options.locked {
-        let existing = gugu_compiler::LockGraph::read(&path).map_err(|error| {
-            emit_cli_error(format, &error.to_string());
-        })?;
+    if let Some(existing) = existing {
         let expected = graph.to_toml().map_err(|error| {
             emit_cli_error(format, &error.to_string());
         })?;
         let actual = existing.to_toml().map_err(|error| {
             emit_cli_error(format, &error.to_string());
         })?;
-        if actual != expected {
+        if options.locked && actual != expected {
             emit_cli_error(
                 format,
                 "--locked 要求 gugu.lock 与当前清单、目标和 feature 一致",
             );
             return Err(());
         }
-    } else {
+    }
+    let cache_root = options.cache_dir.clone().unwrap_or_else(default_cache_root);
+    let cache = DependencyCache::new(cache_root);
+    let policy = CachePolicy {
+        offline: options.offline,
+        locked: options.locked,
+        vendor: options.vendor,
+    };
+    prepare_dependency_inputs(
+        &graph,
+        &cache,
+        project.workspace().root(),
+        &project.workspace().root().join("vendor"),
+        policy,
+    )
+    .map_err(|error| {
+        emit_cli_error(format, &error.to_string());
+    })?;
+    if !options.locked {
         graph.write(&path).map_err(|error| {
             emit_cli_error(format, &error.to_string());
         })?;

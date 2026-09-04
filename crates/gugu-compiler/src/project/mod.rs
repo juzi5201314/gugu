@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod cache;
 mod dependencies;
 mod error;
 mod manifest;
@@ -14,6 +15,12 @@ mod workspace;
 #[cfg(test)]
 mod support;
 
+pub use cache::candidates_from_lock;
+pub use cache::{
+    ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyInput,
+    PackageFiles, TargetArtifact, TargetView, default_cache_root, materialize_vendor,
+    prepare_dependency_inputs,
+};
 pub use dependencies::{
     DependencyDomain, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,
     PackageId, PackageMetadata, PackageSource, ResolveOptions, TargetCondition, Version,

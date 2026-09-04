@@ -13,7 +13,7 @@
 阶段 2 将 `gugu` 作为唯一 CLI 入口：根级全局参数可在子命令前后解析，配置按内置默认、用户配置、当前 workspace 的 `.gugu/config.toml`、`--config`、环境变量、命令行的顺序合并，后层覆盖前层。`--frozen` 在解析结果中同时设置 `offline` 与 `locked`。
 
 规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。阶段 2 只有 `build`、`check`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
-
+现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已完成工程、源码、清单、workspace、target、依赖解析和缓存输入 bootstrap；完整 lexer、parser、类型系统、runtime、后端与标准库仍按路线图后续阶段推进。
 `text` 保留人读的 action/诊断/最终结果；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
 ## 阶段 3 交付边界
@@ -42,6 +42,18 @@ target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`�
 
 阶段 5 不负责网络下载、registry 协议、缓存、checksum 获取、vendor、patch 远程输入或离线策略；这些能力分别属于阶段 6 和发布阶段。
 
+## 阶段 6 缓存与输入边界
+
+阶段 6 在 `project::cache` 中实现外部依赖输入的闭环。`PackageFiles` 只接受规范相对路径，按 UTF-8 字节序和长度前缀编码文件内容，并以 `gugu-package-v1` 内容流计算 SHA-256。gzip tar 归档先解包并拒绝绝对路径、父目录、符号链接和特殊文件，再校验 checksum；校验成功后才进入缓存。
+
+`DependencyCache` 使用 `dependencies/v1/packages/<package-key>/`、`tmp/` 和 `quarantine/` 布局。条目记录 package identity、registry checksum、文件长度和 BLAKE3 文件摘要；读取时验证目录结构、记录、每个文件和整体 checksum。损坏条目会原子移入 quarantine，读取不会继续消费不可信字节；同一 package 的并发写入使用临时目录和 create-if-absent 发布。
+
+`prepare_dependency_inputs` 以 `LockGraph` 为唯一 package 集合：path package 从本地规范目录读取，registry package 必须匹配锁定 checksum，Git package 必须匹配锁定 source 并验证缓存内容。启用 vendor 时，`vendor/.gugu-vendor.toml` 必须与锁图 package identity、目录映射和内容摘要完全一致，并且不会回退到缓存或网络；path package 仍从本地读取。CLI 在进入 codegen 前执行这一门禁。
+
+`ActionInputs` 将 compiler identity、host/target、target kind、harness/插桩、feature、锁图、源码、嵌入文件、宏/comptime/type universe/late constant、公共摘要、build 输入输出、cfg 和 native link metadata 编码后计算域隔离的 `ActionKey`。`TargetView` 只把已验证的相对产物原子写入 `<target>/<target-name>/`，不会把全局缓存当作用户可见目录。
+
+`--frozen` 在 CLI 中等价于 `--locked` 与 `--offline`；`--vendor` 只改变外部 package 的输入源。锁图重放使用锁定版本重建 resolver 候选，因此清单、target 或 feature 变化在锁门禁处失败，不会到达目标代码生成。
+
 ## 工程边界
 
 当前实现的模块树如下：
@@ -57,8 +69,8 @@ crates/
     ├── src/action.rs               稠密 action graph 与状态迁移
     ├── src/diagnostics.rs          稳定代码、源码范围与排序
     ├── src/source.rs               源码快照、Span、行首表与展开记录
-    ├── src/project/                清单、workspace、target、依赖与锁图
-    │   ├── mod.rs                  项目聚合与选择
+    ├── src/project/                清单、workspace、target、依赖、锁图与缓存输入
+    │   ├── mod.rs                  项目聚合、选择与缓存输入导出
     │   ├── model.rs                package、target 与 workspace 模型
     │   ├── error.rs                项目发现、选择、依赖与锁文件错误
     │   ├── manifest.rs             清单 schema 与 package 构建
@@ -70,8 +82,12 @@ crates/
     │   ├── resolver.rs             候选求解、域传播与循环检查
     │   ├── dependencies.rs         依赖子模块聚合与公共导出
     │   ├── dependencies_tests.rs   依赖解析、feature 和锁图确定性测试
+    │   ├── cache.rs                依赖缓存、vendor、锁图输入和缓存记录
+    │   ├── package_files.rs        归档解包、规范路径和 package checksum
+    │   ├── action_key.rs           完整编译输入编码与 action key
+    │   ├── target_view.rs          target 用户产物视图与原子物化
+    │   ├── cache_tests.rs          缓存输入、损坏隔离、vendor 和 key 确定性测试
     │   └── workspace.rs             workspace 成员与 glob 解析
-    ├── src/target.rs               目标注册表与 TargetDescriptor
     ├── src/frontend.rs             阶段 1 的入口结构检查
     ├── src/ir.rs                   main -> ReturnUnit 的 bootstrap IR
     ├── src/backend.rs              目标相关的内存 image plan 输入

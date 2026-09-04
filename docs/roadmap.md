@@ -50,7 +50,7 @@
   - 实现 path/git/registry source、package identity、SemVer 求解、依赖别名、target 条件、normal/test/build 三域、feature 并集和确定性 `gugu.lock` 编码。
   - 验收：循环依赖、无解版本、source identity 冲突、锁图不一致和 feature 缺失得到稳定错误；锁文件不含绝对路径、token、缓存位置或宿主信息。
 
-- [ ] **阶段 06：实现离线、vendor、checksum 与缓存输入**（复杂度：4）
+- [x] **阶段 06：实现离线、vendor、checksum 与缓存输入**（复杂度：4）
   - 依赖：阶段 05。
   - 实现依赖源码缓存、归档 checksum 验证、`--offline/--locked/--frozen/--vendor` 组合、vendor mapping、损坏缓存隔离、编译 action key 的完整输入集合和 target 视图目录。
   - 验收：无网络替身下可重放已验证锁图；缺包、checksum 污染、vendor 不一致和 frozen 修改均在目标代码生成前失败；缓存命中与否不改变语义结果。

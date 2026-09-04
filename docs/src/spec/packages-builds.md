@@ -321,6 +321,12 @@ build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进
 Linux 默认使用 `$XDG_CACHE_HOME/gugu`（未设置时 `~/.cache/gugu`）、`$XDG_CONFIG_HOME/gugu`、`$XDG_DATA_HOME/gugu`；Windows 使用对应 LocalAppData/RoamingAppData/Known Folder。`GUGU_CACHE_DIR`、`GUGU_CONFIG_DIR`、`GUGU_DATA_DIR` 可以覆盖。首版只规范本地缓存，不定义远程缓存协议。
 
 依赖源码与归档默认不会自动淘汰，只由显式 cache clean/gc 删除，以保证离线可用。编译 action cache 使用可配置容量和最近使用 LRU 自动回收；实现必须保证正在读取或写入的 entry 不被回收。并发写以临时文件、内容哈希验证和原子发布完成；损坏或摘要不符的 entry 必须隔离并重新构建。
+阶段 6 的实现使用以下稳定输入边界：registry archive 先解包为规范相对文件集合，再以 `gugu-package-v1`、路径长度、路径字节、内容长度和内容字节组成内容流计算 SHA-256；缓存条目另外保存每个文件的长度与 BLAKE3 摘要。缓存布局为 `dependencies/v1/packages/<package-key>/record.toml` 与 `files/`，`tmp/` 只放未发布临时目录，损坏条目移入 `quarantine/`。
+
+vendor 根包含严格的 `.gugu-vendor.toml` 映射；每个 registry/Git package 使用由 package identity 派生的 `pkg-<key>` 目录，并记录 source、锁定 registry checksum 和内容摘要。读取 vendor 时 package 集合、目录集合、source、每个文件和整体摘要都必须与锁图一致，path package 仍从本地目录读取。输入准备在 codegen 前完成，cache 与 vendor 不会静默互相回退。
+
+实现中的 `ActionInputs` 按规范固定编码全部影响输出的输入，集合/映射按编码键排序，使用 `gugu-action-v1` BLAKE3 派生 `ActionKey`；缓存命中只改变输入来源，不改变 key 或依赖输入字节。`TargetView` 物化到 workspace target 视图，并拒绝绝对路径与目录穿越。
+
 
 workspace `target/` 只呈现用户产物、build.gg 生成物和可读日志，不是唯一缓存来源：
 

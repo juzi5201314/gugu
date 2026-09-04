@@ -20,9 +20,12 @@ mod target;
 pub use action::{ActionGraph, ActionKind, ActionNode, ActionStatus};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use project::{
-    DependencyDomain, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,
-    Package, PackageId, PackageMetadata, PackageSource, Project, ProjectError, ResolveOptions,
-    Target, TargetCondition, TargetKind, TargetSelection, Version, VersionReq, Workspace,
+    ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyDomain,
+    DependencyInput, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,
+    Package, PackageFiles, PackageId, PackageMetadata, PackageSource, Project, ProjectError,
+    ResolveOptions, Target, TargetArtifact, TargetCondition, TargetKind, TargetSelection,
+    TargetView, Version, VersionReq, Workspace, candidates_from_lock, default_cache_root,
+    materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
     IntrinsicBoundary, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,

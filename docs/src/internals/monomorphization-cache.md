@@ -195,6 +195,9 @@ compile/v1/quarantine/
 writer 在 `tmp/` 中以随机不可猜名称创建同文件系统临时文件，完整写入、刷新文件内容、重新读取并验证摘要后，以 create-if-absent 原子发布到目标路径。目标已存在时验证既有对象并丢弃临时文件；同 key 不同内容是 compiler internal error。Windows 和 Linux 都不得先删除已存在目标再重命名。损坏文件原子移入 `quarantine/` 后重新构建；隔离失败时也必须绕过该 entry，不能继续反序列化。
 
 reader 的已打开文件句柄就是 lease：Linux 即使被 unlink 仍从原 inode 完整读取；Windows 以 `FILE_SHARE_READ` 打开且不授予 delete sharing，使删除非阻塞失败。LRU 回收对候选执行一次非阻塞删除，Linux unlink 后由最后句柄回收，Windows 遇 sharing violation 直接跳过；不得等待活动 reader。writer 只持有 `tmp/` 文件并以 create-if-absent 发布。进程崩溃留下的 `tmp/` 文件不被索引，下一次 cache maintenance 可以清理。
+## 阶段 6 bootstrap 输入实现
+
+阶段 6 的 `project::cache::ActionInputs` 已实现 action key 的输入收集和规范排序，但尚未实现本章定义的持久 object/action record reader、LRU 索引或 query fingerprint 状态机；这些仍属于阶段 11 与阶段 71。阶段 6 的 `DependencyCache` 只负责外部 package 源码输入，不把未验证源码、编译中间对象或 target 视图混入依赖缓存。
 
 ## 单态化实例
 
