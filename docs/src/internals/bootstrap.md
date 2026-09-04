@@ -18,17 +18,17 @@
 
 ## 阶段 3 交付边界
 
-阶段 3 在 `source` 模块落地源码快照与 Span 系统：`load-sources` 现在把每个输入固化为不可变 `SourceSnapshot`——UTF-8 校验、BOM 拒绝、`u32` 长度上限、BLAKE3-256 内容摘要与规范行首表。逻辑路径按词法归一：解析 `.` 与 `..`、拒绝绝对路径、反斜杠与越界回溯，保证相同输入在不同工作目录与换行环境下产生相同 span。
+阶段 3 在 `source` 模块落地源码快照与 Span 系统：`load-sources` 现在把每个输入固化为不可变 `SourceSnapshot`——UTF-8 校验、BOM 拒绝、`u32` 长度上限、BLAKE3-256 内容摘要与规范行首表。逻辑路径按词法归一：解析 `.` 与 `..`、统一为正斜杠分隔符、拒绝绝对路径、反斜杠与越界回溯，保证相同输入在不同操作系统、工作目录与换行环境下产生相同 span。Span 端点必须落在 UTF-8 字符边界，行首表的列号按 Unicode 标量而非字节数计算；Span 携带所属源码表的 `SourceTableId`，跨表的 span 在宏展开注册时被拒绝。
 
 `SourceMap` 按逻辑路径排序分配稠密文件 ID、拒绝重复路径，并为阶段 22 的源码宏预留确定性展开注册：`ExpansionRecord` 记录父展开、宏调用与定义位置、生成源码哈希与片段类别，注册顺序按调用位置、轮次与片段顺序稳定。诊断的源码校验码为 `E0004`~`E0008`（非法 UTF-8、BOM、非法逻辑路径、span 越界、源文件过大），全部诊断按路径、偏移、级别、代码稳定排序。
 
 ## 阶段 4 交付边界
 
-阶段 4 在 `project` 模块落地清单、workspace 与 target 发现，并把 CLI 的 `build`/`check` 无文件参数路径切换为项目模式。清单发现从当前目录向父目录查找最近 `gugu.toml`；解析使用 serde 严格 schema，未知核心字段、缺失 `[package].name`、保留 package 名 `std` 与保留依赖别名 `std` 都是编译前错误。
+阶段 4 在 `project` 模块落地清单、workspace 与 target 发现，并把 CLI 的 `build`/`check` 无文件参数路径切换为项目模式。清单发现从当前目录向父目录查找最近 `gugu.toml`；解析使用 serde 严格 schema，未知核心字段、缺失 `[package].name`、保留 package 名 `std` 与保留依赖别名 `std` 都是编译前错误。workspace 本地配置从 workspace 根目录读取（从当前目录向上找最近的带 `[workspace]` 或 `[package]` 的清单目录），从成员目录启动也能继承根配置。
 
-workspace 成员按 `members` glob 展开并扣除 `exclude`，glob 展开按规范相对路径排序、同一路径只算一个成员；根清单可同时是根 package。package 选择遵循规范：显式 `-p` 按规范名或短名唯一匹配，`--workspace` 覆盖默认选择，成员目录启动时构建当前 package，workspace 根启动时依次使用 `default-members`、根 package 或全部成员。
+workspace 成员按 `members` glob 展开并扣除 `exclude`，glob 展开按规范相对路径排序、同一路径只算一个成员；`exclude` 允许指定非存在目录。根清单可同时是根 package，此时无论从根还是成员目录启动，根 package 都纳入模型。package 选择遵循规范：显式 `-p` 按规范名或短名唯一匹配，`--workspace` 覆盖默认选择并包含根 package，成员目录启动时默认只构建当前 package，workspace 根启动时依次使用 `default-members`、根 package 或全部成员。
 
-target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`、`benches/`、`examples/` 与 package 根 `build.gg` 的文件与目录形式，`auto-*` 开关与显式 target 表按清单规则生效；`foo.gg` 与 `foo/mod.gg` 同时存在、同种类重名 target、入口越过 package 根均在编译前失败。lib 的默认名是 package 短名把 `-` 换成 `_`。项目模式下每个选中 target 以 `project_entry` 进入同一 action graph：bin 类入口要求合法 main，lib/test/harness 类入口只做源码快照检查。单文件模式（`gugu build <file.gg>`）拒绝 `-p`、`--workspace`、`--features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets`，以退出码 2 失败。依赖解析、锁图与 SemVer 仍属于阶段 5、6。
+target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`、`benches/`、`examples/` 与 package 根 `build.gg` 的文件与目录形式，`auto-*` 开关与显式 target 表按清单规则生效；`foo.gg` 与 `foo/mod.gg` 同时存在、同种类重名 target、入口越过 package 根均在编译前失败；target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身，不再误当作目录。lib 的默认名是 package 短名把 `-` 换成 `_`。项目模式下每个选中 target 以 `project_entry` 进入同一 action graph：bin 类入口要求合法 main，lib/test/harness 类入口只做源码快照检查。`required-features` 按当前启用 feature 集合在编译前过滤：未满足的 target 不选择，`--features`/`--all-features`/`--no-default-features` 决定启用集合，未知 feature 名退出码 2。单文件模式（`gugu build <file.gg>`）拒绝 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets`，以退出码 2 失败。依赖解析、锁图与 SemVer 仍属于阶段 5、6。
 
 ## 工程边界
 
@@ -37,7 +37,9 @@ target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`�
 ```text
 crates/
 ├── gugu-cli/
-│   └── src/main.rs                 单一 gugu 入口、参数解析、输出、项目发现与 bootstrap 命令
+│   ├── src/main.rs                 单一 gugu 入口、参数解析与 bootstrap 执行编排
+│   ├── src/config.rs               CLI 配置合并、环境变量与本地配置发现
+│   └── src/output.rs               Text/JSON 格式化、事件流、诊断渲染与敏感信息清理
 └── gugu-compiler/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/action.rs               稠密 action graph 与状态迁移
@@ -162,11 +164,12 @@ emit-image
 
 阶段 3、4 的确定性测试补充覆盖：
 
-- 快照拒绝 BOM、非法 UTF-8（带精确字节偏移）与超长输入；行首表对 LF/CRLF/CR 混合输入给出确定行列映射；逻辑路径词法归一并拒绝绝对路径、反斜杠与越界回溯；
-- `SourceMap` 按逻辑路径排序分配稠密 ID，重复路径拒绝；span 半开范围、未知文件/展开 ID 均有稳定错误；宏展开记录按调用位置、轮次、片段顺序稳定注册并维护父链；
+- 快照拒绝 BOM、非法 UTF-8（带精确字节偏移）与超长输入；行首表对 LF/CRLF/CR 混合输入给出确定行列映射，列号按 Unicode 标量计算，非字符边界偏移在行号计算与 Span 构造时被拒绝；
+- `SourceMap` 按逻辑路径排序分配稠密 ID，重复路径拒绝；Span 绑定 `SourceTableId` 并拒绝跨表 span；span 半开范围、未知文件/展开 ID 均有稳定错误；宏展开记录按调用位置、轮次、片段顺序稳定注册并维护父链；
 - BOM 输入使 `load-sources` 失败且诊断携带 `E0005`，下游 action 全部跳过；
-- 单 package、虚拟 workspace、根 package workspace、成员目录启动的 package/target 选择与规范一致；glob 展开排除 `exclude`，`default-members` 只在根启动时生效；
-- 保留名 `std`（package 名与依赖别名）、未知核心字段、`foo.gg` 与 `foo/mod.gg` 冲突、target 重名、入口越过 package 根均在编译前失败；
+- 单 package、虚拟 workspace、根 package workspace、成员目录启动的 package/target 选择与规范一致；glob 展开排除 `exclude` 并允许非存在目录，`default-members` 只在根启动时生效；
+- 保留名 `std`（package 名与依赖别名）、未知核心字段、`foo.gg` 与 `foo/mod.gg` 冲突、target 重名、入口越过 package 根均在编译前失败；显式 `path` 直接位于 package 根时正确解析源码根为 package 本身；冲突检查忽略 `target` 目录与隐藏目录；
+- target 的 `required-features` 在编译前依据启用 feature 过滤，未知 feature 名以退出码 2 失败；
 - 单文件模式拒绝全部项目选择参数并以退出码 2 失败。
 
 最终镜像写出、Gugu 源 runtime 自举、完整 parser/type checker、GC、scheduler 和双目标 machine code 都不属于本阶段验收；它们必须在路线图后续阶段以各自规范和测试完成。

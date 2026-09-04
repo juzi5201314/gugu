@@ -355,7 +355,14 @@ fn source_root(
             message: "target 入口缺少源码根".to_owned(),
         });
     };
-    let source_root = root.join(first.as_os_str());
+    // 源码根取入口的第一层目录；入口直接位于 package 根时（如 `main.gg`），
+    // 首分量是文件，源码根回退为 package 本身。
+    let first_path = root.join(first.as_os_str());
+    let source_root = if first_path.is_file() {
+        root.to_path_buf()
+    } else {
+        first_path
+    };
     fs::canonicalize(&source_root).map_err(|error| ProjectError::TargetDiscovery {
         package: manifest.to_path_buf(),
         message: format!(
@@ -409,6 +416,12 @@ fn collect_source_files(
     manifest: &Path,
 ) -> Result<(), ProjectError> {
     for entry in sorted_entries(directory, manifest)? {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // 忽略构建输出目录 target 与隐藏目录（如 .git、.gugu 等）。
+        if name_str.starts_with('.') || name_str == "target" {
+            continue;
+        }
         let file_type = entry.file_type().map_err(|error| ProjectError::Io {
             path: entry.path(),
             message: error.to_string(),

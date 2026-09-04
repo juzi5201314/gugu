@@ -196,6 +196,15 @@ pub(crate) fn build_package(manifest: &Path) -> Result<Package, ProjectError> {
     })?;
     let manifest = root.join("gugu.toml");
     let targets = discover_targets(&root, package, &raw, &manifest)?;
+    // `default` 是普通保留 feature；声明集合由 [features] 键提供。
+    let mut declared_features = raw
+        .features
+        .as_ref()
+        .map(|features| features.keys().cloned().collect::<Vec<_>>())
+        .unwrap_or_default();
+    declared_features.push("default".to_owned());
+    declared_features.sort();
+    declared_features.dedup();
     Ok(Package::new(
         root,
         manifest,
@@ -205,6 +214,7 @@ pub(crate) fn build_package(manifest: &Path) -> Result<Package, ProjectError> {
             .version
             .clone()
             .unwrap_or_else(|| "0.0.0".to_owned()),
+        declared_features,
         targets,
     ))
 }

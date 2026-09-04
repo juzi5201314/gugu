@@ -34,7 +34,9 @@ pub(crate) fn discover_workspace_members(
     }
     let mut excluded = BTreeSet::new();
     for pattern in &workspace.exclude {
-        excluded.extend(expand_directory_pattern(root, pattern)?);
+        for directory in expand_exclude_pattern(root, pattern)? {
+            excluded.insert(fs::canonicalize(&directory).unwrap_or(directory));
+        }
     }
     members.retain(|manifest| {
         manifest
@@ -68,26 +70,7 @@ pub(crate) fn resolve_default_members(
 }
 
 fn expand_directory_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ProjectError> {
-    let components = split_pattern(pattern).ok_or_else(|| ProjectError::WorkspaceMember {
-        path: root.join(pattern),
-        workspace: root.to_path_buf(),
-    })?;
-    let mut directories = Vec::new();
-    collect_directories(root, root, &mut directories)?;
-    let mut matches = directories
-        .into_iter()
-        .filter(|directory| {
-            let relative = directory
-                .strip_prefix(root)
-                .expect("directory is under root")
-                .components()
-                .filter_map(|component| component.as_os_str().to_str())
-                .map(str::to_owned)
-                .collect::<Vec<_>>();
-            matches_pattern(&components, &relative)
-        })
-        .collect::<Vec<_>>();
-    matches.sort();
+    let matches = expand_exclude_pattern(root, pattern)?;
     if matches.is_empty() {
         return Err(ProjectError::WorkspaceMember {
             path: root.join(pattern),
@@ -97,12 +80,33 @@ fn expand_directory_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, 
     Ok(matches)
 }
 
-fn collect_directories(
+fn expand_exclude_pattern(root: &Path, pattern: &str) -> Result<Vec<PathBuf>, ProjectError> {
+    let components = split_pattern(pattern).ok_or_else(|| ProjectError::WorkspaceMember {
+        path: root.join(pattern),
+        workspace: root.to_path_buf(),
+    })?;
+    let mut matches = Vec::new();
+    match_directories(root, root, &components, 0, &mut matches)?;
+    matches.sort();
+    Ok(matches)
+}
+
+/// 按 pattern 分量逐段匹配，只下钻可能匹配的前缀目录，避免全树扫描。
+///
+/// `**` 匹配零层或任意层：先消费掉 `**` 的零层匹配（继续匹配剩余
+/// pattern），再对每个子目录保留 `**` 继续下钻。
+fn match_directories(
     root: &Path,
     directory: &Path,
-    output: &mut Vec<PathBuf>,
+    pattern: &[String],
+    index: usize,
+    matches: &mut Vec<PathBuf>,
 ) -> Result<(), ProjectError> {
-    output.push(directory.to_path_buf());
+    if index == pattern.len() {
+        matches.push(directory.to_path_buf());
+        return Ok(());
+    }
+    let current = &pattern[index];
     let mut entries = fs::read_dir(directory)
         .map_err(|error| ProjectError::Io {
             path: directory.to_path_buf(),
@@ -114,19 +118,38 @@ fn collect_directories(
             message: error.to_string(),
         })?;
     entries.sort_by_key(|entry| entry.file_name());
+    let mut subdirectories = Vec::new();
     for entry in entries {
         let file_type = entry.file_type().map_err(|error| ProjectError::Io {
             path: entry.path(),
             message: error.to_string(),
         })?;
-        if file_type.is_symlink() {
+        // 符号链接既不算成员目录，也不是可安全下钻的目标。
+        if file_type.is_symlink() || !file_type.is_dir() {
             continue;
         }
-        if file_type.is_dir() {
-            let path = entry.path();
-            if path.starts_with(root) {
-                collect_directories(root, &path, output)?;
-            }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let path = entry.path();
+        if !path.starts_with(root) {
+            continue;
+        }
+        if current == "**" || wildcard_component(current, name) {
+            subdirectories.push(path);
+        }
+    }
+    if current == "**" {
+        // 零层：跳过 `**`，直接匹配剩余 pattern。
+        match_directories(root, directory, pattern, index + 1, matches)?;
+    }
+    for path in subdirectories {
+        if current == "**" {
+            // 一层：子目录消费 `**` 后继续匹配。
+            match_directories(root, &path, pattern, index, matches)?;
+        } else {
+            match_directories(root, &path, pattern, index + 1, matches)?;
         }
     }
     Ok(())
@@ -144,19 +167,6 @@ fn split_pattern(pattern: &str) -> Option<Vec<String>> {
         components.push(component.to_owned());
     }
     Some(components)
-}
-
-fn matches_pattern(pattern: &[String], path: &[String]) -> bool {
-    if pattern.is_empty() {
-        return path.is_empty();
-    }
-    if pattern[0] == "**" {
-        return matches_pattern(&pattern[1..], path)
-            || (!path.is_empty() && matches_pattern(pattern, &path[1..]));
-    }
-    !path.is_empty()
-        && wildcard_component(&pattern[0], &path[0])
-        && matches_pattern(&pattern[1..], &path[1..])
 }
 
 fn wildcard_component(pattern: &str, value: &str) -> bool {

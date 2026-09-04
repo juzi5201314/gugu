@@ -28,7 +28,7 @@
 | `-p <owner/name>`、`--package <owner/name>` | 选择 package |
 | `--workspace` | 选择整个 workspace |
 | `--lib` | 选择 lib target |
-| `--bin <name>` | 选择 bin target |
+| `--bin <name>` | 选择 bin target；不写名字时选择全部 bin |
 | `--test <name>` | 选择 test target |
 | `--bench <name>` | 选择 bench target |
 | `--example <name>` | 选择 example target |
@@ -62,9 +62,9 @@
 
 ### `gugu build`
 
-编译选中 target。无 target 选择器时，默认选择当前 package 的 lib 与所有 bin；在 workspace 根且无 `-p` 时，选择 `default-members` 或全部成员。
+编译选中 target。无 target 选择器时，默认选择当前 package 的 lib 与所有 bin；在 workspace 根且无 `-p` 时，依次选择 `default-members`、根 package 或全部成员；在成员目录启动时默认只选择当前 package。`--workspace` 覆盖默认选择并包含根 package 在内的全部成员。
 
-`gugu build <file.gg>` 是单文件编译入口：绕过 package 模型，直接把该文件作为闭世界根编译。此时 `-p`、`--workspace`、`--features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets` 非法。`--target`、`--strip`、`--offline` 仍有效。
+`gugu build <file.gg>` 是单文件编译入口：绕过 package 模型，直接把该文件作为闭世界根编译。此时 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets` 非法。`--target`、`--strip`、`--offline` 仍有效。
 
 ### `gugu check`
 

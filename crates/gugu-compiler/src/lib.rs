@@ -25,7 +25,8 @@ pub use runtime::{
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
-    SourceMapError, SourceSlot, SourceSnapshot, Span, SpanError, normalize_logical_path,
+    SourceMapError, SourceSlot, SourceSnapshot, SourceTableId, Span, SpanError,
+    normalize_logical_path,
 };
 pub use target::{
     Architecture, ObjectFormat, OperatingSystem, Rt0Kind, TargetDescriptor, TargetName,
@@ -357,18 +358,41 @@ fn load_input(input: &CompileInput) -> Result<LoadedInput, LoadInputError> {
 }
 
 fn logical_input_path(path: &std::path::Path) -> PathBuf {
-    if !path.is_absolute() {
-        return path.to_path_buf();
+    let relative = if !path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        // 绝对输入优先按工作目录相对名推导；无法剥离时退回末尾两个普通分量，
+        // 保留目录信息、避免同名不同目录被合并，也不依赖宿主硬编码占位名。
+        std::env::current_dir()
+            .ok()
+            .and_then(|current| path.strip_prefix(current).ok())
+            .filter(|relative| !relative.as_os_str().is_empty())
+            .map(PathBuf::from)
+            .or_else(|| trailing_components(path))
+            .unwrap_or_default()
+    };
+    // 无论宿主平台路径分隔符为何（如 Windows 下为反斜杠），
+    // 逻辑输入路径均统一归一为以 `/` 分隔的规范形态。
+    PathBuf::from(path_to_logical_string(&relative))
+}
+
+fn path_to_logical_string(path: &std::path::Path) -> String {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                if let Some(s) = value.to_str() {
+                    components.push(s);
+                }
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                components.push("..");
+            }
+            _ => {}
+        }
     }
-    // 绝对输入优先按工作目录相对名推导；无法剥离时退回末尾两个普通分量，
-    // 保留目录信息、避免同名不同目录被合并，也不依赖宿主硬编码占位名。
-    std::env::current_dir()
-        .ok()
-        .and_then(|current| path.strip_prefix(current).ok())
-        .filter(|relative| !relative.as_os_str().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| trailing_components(path))
-        .unwrap_or_default()
+    components.join("/")
 }
 
 /// 取出绝对路径末尾两个普通分量作为逻辑名，方便诊断定位且与工作目录无关。
@@ -376,7 +400,7 @@ fn trailing_components(path: &std::path::Path) -> Option<PathBuf> {
     let names = path
         .components()
         .filter_map(|component| match component {
-            std::path::Component::Normal(value) => Some(value.to_owned()),
+            std::path::Component::Normal(value) => value.to_str().map(str::to_owned),
             _ => None,
         })
         .rev()
@@ -385,11 +409,8 @@ fn trailing_components(path: &std::path::Path) -> Option<PathBuf> {
     if names.is_empty() {
         return None;
     }
-    let mut logical = PathBuf::new();
-    for name in names.into_iter().rev() {
-        logical.push(name);
-    }
-    Some(logical)
+    let logical = names.into_iter().rev().collect::<Vec<_>>().join("/");
+    Some(PathBuf::from(logical))
 }
 
 /// 阶段 1 的内存镜像计划，不是可执行文件。
@@ -450,7 +471,12 @@ impl frontend::FrontendOutput {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionKind, ActionStatus, CompileRequest, Compiler, DiagnosticCode, TargetName};
+    use std::path::{Path, PathBuf};
+
+    use super::{
+        ActionKind, ActionStatus, CompileRequest, Compiler, DiagnosticCode, TargetName,
+        logical_input_path,
+    };
 
     #[test]
     fn empty_package_has_complete_graph_without_image() {
@@ -584,6 +610,18 @@ mod tests {
                 .iter()
                 .any(|node| node.kind() == ActionKind::LoadSources
                     && node.status() == ActionStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn logical_input_path_normalizes_to_forward_slashes() {
+        assert_eq!(
+            logical_input_path(Path::new("src/main.gg")),
+            PathBuf::from("src/main.gg")
+        );
+        assert_eq!(
+            logical_input_path(Path::new("./src/main.gg")),
+            PathBuf::from("src/main.gg")
         );
     }
 }

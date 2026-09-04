@@ -57,6 +57,13 @@ pub enum ProjectError {
         /// 请求的 target 名称。
         name: Option<String>,
     },
+    /// 启用了 package 未声明的 feature。
+    UnknownFeature {
+        /// 所属 package。
+        package: String,
+        /// 未知 feature 名。
+        feature: String,
+    },
 }
 
 impl fmt::Display for ProjectError {
@@ -105,6 +112,9 @@ impl fmt::Display for ProjectError {
                 ),
                 None => write!(formatter, "package `{package}` 没有 {kind} target"),
             },
+            Self::UnknownFeature { package, feature } => {
+                write!(formatter, "package `{package}` 未声明 feature `{feature}`")
+            }
         }
     }
 }

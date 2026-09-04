@@ -112,6 +112,13 @@ impl Target {
         self.harness
     }
 
+    /// 判断该 target 的 required-features 是否全部被启用。
+    pub fn features_enabled(&self, enabled_features: &[String]) -> bool {
+        self.required_features
+            .iter()
+            .all(|feature| enabled_features.iter().any(|enabled| enabled == feature))
+    }
+
     /// 判断该 target 是否只属于 host graph。
     pub fn is_host_target(&self) -> bool {
         self.kind == TargetKind::Build
@@ -126,6 +133,7 @@ pub struct Package {
     owner: Option<String>,
     name: String,
     version: String,
+    declared_features: Vec<String>,
     targets: Vec<Target>,
 }
 
@@ -136,6 +144,7 @@ impl Package {
         owner: Option<String>,
         name: String,
         version: String,
+        declared_features: Vec<String>,
         targets: Vec<Target>,
     ) -> Self {
         Self {
@@ -144,6 +153,7 @@ impl Package {
             owner,
             name,
             version,
+            declared_features,
             targets,
         }
     }
@@ -186,30 +196,62 @@ impl Package {
         &self.targets
     }
 
+    /// 返回 package 声明的 feature 名（不含隐式默认）。
+    pub fn declared_features(&self) -> &[String] {
+        &self.declared_features
+    }
+
     /// 按选择器返回 target。
     pub fn select_targets(
         &self,
         selection: &TargetSelection,
     ) -> Result<Vec<&Target>, ProjectError> {
+        self.select_targets_in(selection, &[])
+    }
+
+    /// 按选择器与启用的 feature 返回 target。
+    pub fn select_targets_in(
+        &self,
+        selection: &TargetSelection,
+        enabled_features: &[String],
+    ) -> Result<Vec<&Target>, ProjectError> {
+        for feature in enabled_features {
+            if !self
+                .declared_features
+                .iter()
+                .any(|declared| declared == feature)
+            {
+                return Err(ProjectError::UnknownFeature {
+                    package: self.package_name(),
+                    feature: feature.clone(),
+                });
+            }
+        }
         let targets = match selection {
             TargetSelection::DefaultBuild => self
                 .targets
                 .iter()
                 .filter(|target| matches!(target.kind, TargetKind::Lib | TargetKind::Bin))
+                .filter(|target| target.features_enabled(enabled_features))
                 .collect(),
-            TargetSelection::Lib => self.named_targets(TargetKind::Lib, None)?,
-            TargetSelection::Bin(name) => self.named_targets(TargetKind::Bin, name.as_deref())?,
-            TargetSelection::Test(name) => self.named_targets(TargetKind::Test, name.as_deref())?,
+            TargetSelection::Lib => self.named_targets(TargetKind::Lib, None, enabled_features)?,
+            TargetSelection::Bin(name) => {
+                self.named_targets(TargetKind::Bin, name.as_deref(), enabled_features)?
+            }
+            TargetSelection::Test(name) => {
+                self.named_targets(TargetKind::Test, name.as_deref(), enabled_features)?
+            }
             TargetSelection::Bench(name) => {
-                self.named_targets(TargetKind::Bench, name.as_deref())?
+                self.named_targets(TargetKind::Bench, name.as_deref(), enabled_features)?
             }
             TargetSelection::Example(name) => {
-                self.named_targets(TargetKind::Example, name.as_deref())?
+                self.named_targets(TargetKind::Example, name.as_deref(), enabled_features)?
             }
             TargetSelection::All => self
                 .targets
                 .iter()
                 .filter(|target| target.kind != TargetKind::Build)
+                .filter(|target| target.features_enabled(enabled_features))
                 .collect(),
         };
         Ok(targets)
@@ -219,11 +261,13 @@ impl Package {
         &self,
         kind: TargetKind,
         name: Option<&str>,
+        enabled_features: &[String],
     ) -> Result<Vec<&Target>, ProjectError> {
         let targets = self
             .targets
             .iter()
             .filter(|target| target.kind == kind && name.is_none_or(|name| target.name == name))
+            .filter(|target| target.features_enabled(enabled_features))
             .collect::<Vec<_>>();
         if targets.is_empty() {
             return Err(ProjectError::TargetSelection {

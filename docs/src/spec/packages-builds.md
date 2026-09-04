@@ -99,11 +99,11 @@ json = { package = "acme/json", version = "1.2" }
 unused = "warn"
 ```
 
-成员只来自 `workspace.members` 展开后减去 `exclude` 的结果。glob 展开按规范相对路径排序；同一路径匹配多次只算一个成员。path 依赖不会自动成为 workspace 成员，workspace 外的 `gugu.toml` 也不会因位于子目录而自动加入。成员路径必须位于 workspace 根之下且最终指向恰好一个清单。
+成员只来自 `workspace.members` 展开后减去 `exclude` 的结果。glob 展开按规范相对路径排序；同一路径匹配多次只算一个成员。`exclude` 允许指定不存在的目录或 glob 模式；`members` 模式若无法匹配任何目录则是配置错误。path 依赖不会自动成为 workspace 成员，workspace 外的 `gugu.toml` 也不会因位于子目录而自动加入。成员路径必须位于 workspace 根之下且最终指向恰好一个清单。
 
 成员可用 `{ workspace = true }` 继承 `[workspace.package]` 字段、`[workspace.dependencies]` 条目和 `[workspace.lints]`。成员不能覆盖已经继承的 source、版本约束或 lint 级别后再声称继承；需要不同值时必须完全写出本地条目。依赖 feature 可以在继承条目上追加，不能删除根条目启用的 feature。
 
-workspace 共享根目录的 `gugu.lock` 和 `target/`。在根执行命令时，若有 `default-members` 就选择它；没有该字段且根清单同时是 package，就只选择根 package；虚拟 workspace 默认选择全部成员。`-p <owner/name>` 或 `--workspace` 覆盖默认选择。package 名称或 target 名称产生歧义时必须要求更完整的选择参数。
+workspace 共享根目录的 `gugu.lock` 和 `target/`。在根执行命令时，若有 `default-members` 就选择它；没有该字段且根清单同时是 package，就只选择根 package；虚拟 workspace 默认选择全部成员。在成员目录执行命令时，默认只选择当前成员 package。`-p <owner/name>` 或 `--workspace` 覆盖默认选择；`--workspace` 会选择包括根 package 在内的全部成员。package 名称或 target 名称产生歧义时必须要求更完整的选择参数。
 
 根级 `[patch.<registry>]`、workspace 依赖和 lint 只在 workspace 根生效；成员中的对应根级表是错误。语言没有 profile 表。
 
@@ -121,11 +121,11 @@ workspace 共享根目录的 `gugu.lock` 和 `target/`。在根执行命令时�
 | `examples/<name>.gg`、`examples/<name>/main.gg` | 独立 example target |
 | package 根 `build.gg` | 唯一 host build task |
 
-同名的文件形式与目录形式同时存在是错误。`auto-lib`、`auto-bins`、`auto-tests`、`auto-benches`、`auto-examples` 和 `auto-build` 可以分别关闭自动发现。显式 target 路径相对 package 根；两个 target 不能拥有同一 target 名与种类。
+同名的文件形式与目录形式同时存在是错误。`auto-lib`、`auto-bins`、`auto-tests`、`auto-benches`、`auto-examples` 和 `auto-build` 可以分别关闭自动发现。显式 target 路径相对 package 根；两个 target 不能拥有同一 target 名与种类。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身。target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。
 
 `[lib]` 最多一个，默认名是 package 短名把 `-` 换成 `_`。`artifacts = ["gugu"]` 表示它作为其它 Gugu package 的普通依赖入口；还可以包含 `staticlib`、`cdylib`，把该 lib 中的 `pub extern "C"` 导出写成平台静态库或共享库。`staticlib` / `cdylib` 只稳定 C ABI，不形成可在运行时加载新 Gugu 类型的动态库。
 
-`[[bin]]`、`[[test]]`、`[[bench]]`、`[[example]]` 至少接受 `name`、`path`、`required-features`。Test target 始终使用语言内建测试 harness。Bench target 默认 `harness = true` 并收集 `#[bench]`；可以显式写 `harness = false`，此时它是必须提供 main 的普通 benchmark 可执行程序。Example 是普通可执行入口，只有显式选择或相应工具命令才运行。
+`[[bin]]`、`[[test]]`、`[[bench]]`、`[[example]]` 至少接受 `name`、`path`、`required-features`。Test target 始终使用语言内建测试 harness。Bench target 默认 `harness = true` 并收集 `#[bench]`；可以显式写 `harness = false`，此时它是必须提供 main 的普通 benchmark 可执行程序。Example 是普通可执行入口，只有显式选择或相应工具命令才运行。`required-features` 列出的 feature 没有全部启用时，该 target 不进入默认选择（lib+bin 或 all-targets）；显式按名选择时也失败，必须先用 `--features`/`--all-features` 启用。请求未在当前 package 声明的 feature 属于命令行错误（退出码 2）。
 
 普通 bin/example 和 `harness = false` 的 bench 必须提供合法 main；test 与默认 bench 不调用用户 main。bin/test/bench/example 可以使用同 package lib 的公开 API，但不能借此访问 lib 的模块私有项。内联 `#[test]` / `#[bench]` 仍可以访问其所在模块的私有项。具体 harness 见[测试](testing.md)。
 

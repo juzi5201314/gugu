@@ -52,6 +52,30 @@ impl ExpansionId {
     }
 }
 
+/// 进程内唯一源码表身份，用于拒绝跨表混用的 span。
+///
+/// 每个非空源码表由 `SourceMap::new` 分配唯一编号；`0` 表示未绑定表的
+/// 独立 span（如 `SourceSnapshot::span` 与透传诊断），这类 span 不能注册展开。
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SourceTableId(u64);
+
+impl SourceTableId {
+    /// 未绑定任何源码表的 span 身份。
+    pub const UNBOUND: Self = Self(0);
+
+    /// 分配一个新的进程内唯一源码表身份。
+    pub(crate) fn next() -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// 返回线程内唯一编号。
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
+}
+
 /// 源码宏可以插入的语法片段位置。
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum SourceSlot {
@@ -132,7 +156,7 @@ impl std::error::Error for SourceError {}
 pub struct LineColumn {
     /// 行号。
     pub line: u32,
-    /// 按 UTF-8 字节计的列号。
+    /// 按该行 Unicode 标量计的列号。
     pub column: u32,
 }
 
@@ -154,7 +178,7 @@ impl SourceSnapshot {
     ) -> Result<Self, SourceError> {
         let logical_path = normalize_logical_path(path.as_ref())?;
         let bytes = bytes.as_ref();
-        if bytes.len() >= MAX_SOURCE_BYTES {
+        if bytes.len() > MAX_SOURCE_BYTES {
             return Err(SourceError::TooLarge { path: logical_path });
         }
         if bytes.starts_with(b"\xef\xbb\xbf") {
@@ -223,7 +247,18 @@ impl SourceSnapshot {
             .line_starts
             .partition_point(|&start| start as usize <= offset)
             - 1;
-        let column = offset - self.line_starts[line] as usize;
+        let line_start = self.line_starts[line] as usize;
+        // 列号按该行的 Unicode 标量计：字节偏移必须先落在字符边界，
+        // 再统计行首到偏移之间的标量个数（自增列偏移不使用偏移差值）。
+        if offset != line_start && !self.content.is_char_boundary(offset) {
+            return Err(SpanError::OutOfBounds {
+                path: self.logical_path.clone(),
+                start: checked_u32(offset),
+                end: checked_u32(offset),
+                length: checked_u32(self.content.len()),
+            });
+        }
+        let column = self.content[line_start..offset].chars().count();
         Ok(LineColumn {
             line: checked_u32(line + 1),
             column: checked_u32(column + 1),
@@ -232,7 +267,14 @@ impl SourceSnapshot {
 
     /// 创建属于根源码的半开 span。
     pub fn span(&self, file: SourceFileId, start: usize, end: usize) -> Result<Span, SpanError> {
-        Span::from_snapshot(file, self, start, end, ExpansionId::ROOT)
+        Span::from_snapshot(
+            file,
+            SourceTableId::UNBOUND,
+            self,
+            start,
+            end,
+            ExpansionId::ROOT,
+        )
     }
 }
 
@@ -282,6 +324,7 @@ impl std::error::Error for SpanError {}
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Span {
     file: SourceFileId,
+    table: SourceTableId,
     path: PathBuf,
     start: u32,
     end: u32,
@@ -293,6 +336,7 @@ pub struct Span {
 impl Span {
     fn from_snapshot(
         file: SourceFileId,
+        table: SourceTableId,
         snapshot: &SourceSnapshot,
         start: usize,
         end: usize,
@@ -306,9 +350,19 @@ impl Span {
                 length: checked_u32(snapshot.content.len()),
             });
         }
+        // span 端点必须落在字符边界：字节偏移不得把多字节标量切开。
+        if !snapshot.content.is_char_boundary(start) || !snapshot.content.is_char_boundary(end) {
+            return Err(SpanError::OutOfBounds {
+                path: snapshot.logical_path.clone(),
+                start: checked_u32(start),
+                end: checked_u32(end),
+                length: checked_u32(snapshot.content.len()),
+            });
+        }
         let position = snapshot.line_column(start)?;
         Ok(Self {
             file,
+            table,
             path: snapshot.path.clone(),
             start: checked_u32(start),
             end: checked_u32(end),
@@ -321,6 +375,7 @@ impl Span {
     pub(crate) fn detached(path: &Path, start: usize, end: usize) -> Self {
         Self {
             file: SourceFileId::new(0),
+            table: SourceTableId::UNBOUND,
             path: path.to_path_buf(),
             start: checked_u32(start),
             end: checked_u32(end),
@@ -333,6 +388,11 @@ impl Span {
     /// 返回源码文件 ID。
     pub fn file(&self) -> SourceFileId {
         self.file
+    }
+
+    /// 返回该 span 所属的源码表身份。
+    pub fn table(&self) -> SourceTableId {
+        self.table
     }
 
     /// 返回该范围所属的逻辑源码路径。
@@ -437,6 +497,7 @@ impl ExpansionRecord {
 /// 一个编译 action 的稳定源码与展开表。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SourceMap {
+    table: SourceTableId,
     snapshots: Vec<SourceSnapshot>,
     expansions: Vec<ExpansionRecord>,
 }
@@ -452,6 +513,7 @@ impl SourceMap {
         }
         checked_u32(snapshots.len());
         Ok(Self {
+            table: SourceTableId::next(),
             snapshots,
             expansions: Vec::new(),
         })
@@ -460,6 +522,11 @@ impl SourceMap {
     /// 返回空源码表。
     pub fn empty() -> Self {
         Self::default()
+    }
+
+    /// 返回该源码表在本进程内的唯一身份。
+    pub fn table(&self) -> SourceTableId {
+        self.table
     }
 
     /// 返回按稳定文件 ID 排列的源码快照。
@@ -492,7 +559,7 @@ impl SourceMap {
         if expansion != ExpansionId::ROOT && expansion.index() > self.expansions.len() {
             return Err(SpanError::UnknownExpansion(expansion));
         }
-        Span::from_snapshot(file, snapshot, start, end, expansion)
+        Span::from_snapshot(file, self.table, snapshot, start, end, expansion)
     }
 
     /// 注册一个成功的源码宏展开。
@@ -548,6 +615,9 @@ impl SourceMap {
     }
 
     fn validate_span(&self, span: &Span) -> Result<(), SourceMapError> {
+        if span.table != self.table {
+            return Err(SourceMapError::ForeignSpan);
+        }
         if self.snapshot(span.file).is_none() {
             return Err(SourceMapError::UnknownFile(span.file));
         }
@@ -567,6 +637,8 @@ pub enum SourceMapError {
     UnknownFile(SourceFileId),
     /// 引用未知展开。
     UnknownExpansion(ExpansionId),
+    /// 引用的 span 不属于当前源码表。
+    ForeignSpan,
 }
 
 impl fmt::Display for SourceMapError {
@@ -577,6 +649,7 @@ impl fmt::Display for SourceMapError {
             Self::UnknownExpansion(expansion) => {
                 write!(formatter, "未知源码展开 ID {}", expansion.as_u32())
             }
+            Self::ForeignSpan => formatter.write_str("span 不属于当前源码表"),
         }
     }
 }
@@ -718,6 +791,29 @@ mod tests {
     }
 
     #[test]
+    fn line_column_counts_unicode_scalars_not_bytes() {
+        let source = snapshot("src/main.gg", "中中x");
+        // 第 1 个多字节标量从列 1 开始；偏移 0 是列 1。
+        assert_eq!(source.line_column(0), Ok(LineColumn { line: 1, column: 1 }));
+        // 第 3 个字符 x 的起点是字节偏移 6，列号应为 3。
+        assert_eq!(source.line_column(6), Ok(LineColumn { line: 1, column: 3 }));
+        // 非字符边界（字节 1，位于第一个中字内部）必须报错。
+        assert!(source.line_column(1).is_err());
+        assert!(source.line_column(2).is_err());
+        // 字节 3 是第二个中字的起点，列号 2。
+        assert_eq!(source.line_column(3), Ok(LineColumn { line: 1, column: 2 }));
+    }
+
+    #[test]
+    fn spans_reject_non_char_boundary_offsets() {
+        let map = SourceMap::new(vec![snapshot("src/main.gg", "中啊")]).expect("single source");
+        let file = map.file_id("src/main.gg").expect("registered");
+        assert!(map.span(file, 1, 3, ExpansionId::ROOT).is_err());
+        assert!(map.span(file, 0, 1, ExpansionId::ROOT).is_err());
+        assert!(map.span(file, 0, 3, ExpansionId::ROOT).is_ok());
+    }
+
+    #[test]
     fn logical_paths_are_normalized_and_validated() {
         assert_eq!(
             normalize_logical_path(Path::new("src/./a/../b.gg")).as_deref(),
@@ -849,6 +945,45 @@ mod tests {
                 fragment_order: 1,
             })
             .is_err()
+        );
+    }
+
+    #[test]
+    fn cross_table_span_is_rejected() {
+        let first = SourceMap::new(vec![snapshot("a.gg", "a")]).expect("first map");
+        let mut second = SourceMap::new(vec![snapshot("b.gg", "b")]).expect("second map");
+        let file_a = first.file_id("a.gg").expect("file a");
+        let file_b = second.file_id("b.gg").expect("file b");
+        // 另一张表的 span 不能在当前表注册展开。
+        let foreign = first.span(file_a, 0, 1, ExpansionId::ROOT).expect("a span");
+        assert_eq!(
+            second.register_expansion(ExpansionInput {
+                parent: ExpansionId::ROOT,
+                macro_call: foreign.clone(),
+                macro_definition: foreign,
+                generated_source: file_b,
+                fragment_kind: SourceSlot::Item,
+                round: 0,
+                fragment_order: 0,
+            }),
+            Err(SourceMapError::ForeignSpan)
+        );
+        // 同一张表的 span 可以注册。
+        let own = second
+            .span(file_b, 0, 1, ExpansionId::ROOT)
+            .expect("b span");
+        assert!(
+            second
+                .register_expansion(ExpansionInput {
+                    parent: ExpansionId::ROOT,
+                    macro_call: own.clone(),
+                    macro_definition: own,
+                    generated_source: file_b,
+                    fragment_kind: SourceSlot::Item,
+                    round: 0,
+                    fragment_order: 0,
+                })
+                .is_ok()
         );
     }
 }

@@ -102,3 +102,76 @@ fn root_package_workspace_selects_root_package() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].name(), "root");
 }
+
+#[test]
+fn root_started_default_members_override_root_package() {
+    let root = TempDir::new().expect("tempdir");
+    let package_root = package(
+        &root,
+        ".",
+        "[package]\nname = \"root\"\n\n[workspace]\nmembers = [\"sub\"]\ndefault-members = \
+             [\"sub\"]\n",
+        &[
+            ("src/main.gg", "fn main() {}\n"),
+            ("sub/gugu.toml", "[package]\nname = \"sub\"\n"),
+            ("sub/src/lib.gg", "fn s() {}\n"),
+        ],
+    );
+
+    // 根启动：default-members 优先于根 package。
+    let project = Project::discover(&package_root).expect("root workspace discovers");
+    let selected = project
+        .select_packages(None, false)
+        .expect("default selection");
+    assert_eq!(selected.len(), 1);
+    assert_eq!(selected[0].name(), "sub");
+}
+
+#[test]
+fn member_started_workspace_sees_root_package_for_whole_workspace() {
+    let root = TempDir::new().expect("tempdir");
+    let package_root = package(
+        &root,
+        ".",
+        "[package]\nname = \"root\"\n\n[workspace]\nmembers = [\"sub\"]\n",
+        &[
+            ("src/main.gg", "fn main() {}\n"),
+            ("sub/gugu.toml", "[package]\nname = \"sub\"\n"),
+            ("sub/src/lib.gg", "fn s() {}\n"),
+        ],
+    );
+    let sub = package_root.join("sub");
+
+    // 成员目录启动：--workspace 必须包含根 package。
+    let project = Project::discover(&sub).expect("member project discovers");
+    let names = project
+        .select_packages(None, true)
+        .expect("whole workspace")
+        .iter()
+        .map(|package| package.name().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["root".to_owned(), "sub".to_owned()]);
+    // 无 --workspace 时只选当前 package。
+    let current = project
+        .select_packages(None, false)
+        .expect("current selection");
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].name(), "sub");
+}
+
+#[test]
+fn workspace_exclude_allows_nonexistent_directory() {
+    let root = TempDir::new().expect("tempdir");
+    let package_root = package(
+        &root,
+        ".",
+        "[package]\nname = \"root\"\n\n[workspace]\nmembers = [\"sub\"]\nexclude = [\"nonexistent\"]\n",
+        &[
+            ("src/main.gg", "fn main() {}\n"),
+            ("sub/gugu.toml", "[package]\nname = \"sub\"\n"),
+            ("sub/src/lib.gg", "fn s() {}\n"),
+        ],
+    );
+    let project = Project::discover(&package_root).expect("discover with nonexistent exclude");
+    assert_eq!(project.packages().len(), 2);
+}
