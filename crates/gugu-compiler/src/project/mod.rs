@@ -4,6 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+mod dependencies;
 mod error;
 mod manifest;
 mod model;
@@ -13,6 +14,11 @@ mod workspace;
 #[cfg(test)]
 mod support;
 
+pub use dependencies::{
+    DependencyDomain, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,
+    PackageId, PackageMetadata, PackageSource, ResolveOptions, TargetCondition, Version,
+    VersionReq,
+};
 pub use error::ProjectError;
 pub use model::{Package, Target, TargetKind, TargetSelection, Workspace};
 
@@ -120,6 +126,15 @@ impl Project {
         &self.packages
     }
 
+    /// 按 target、host、feature 和 source index 解析 workspace 依赖。
+    pub fn resolve_dependencies(&self, options: ResolveOptions) -> Result<LockGraph, ProjectError> {
+        dependencies::resolve_project(self.workspace.root(), &self.packages, options)
+    }
+
+    /// 返回 workspace 根锁文件路径。
+    pub fn lock_path(&self) -> PathBuf {
+        self.workspace.root().join("gugu.lock")
+    }
     /// 返回从起始目录找到的当前 package（虚拟 workspace 根没有当前 package）。
     pub fn current_package(&self) -> Option<&Package> {
         self.current_package

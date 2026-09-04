@@ -226,6 +226,7 @@ workspace 使用根目录的一个 `gugu.lock`。普通解析命令采用 Cargo 
 节点与边按 package ID 和规范字段顺序稳定排序。锁不记录编译器版本、宿主绝对路径、workspace path 内容哈希、构建缓存位置或 strip 状态。Path source 写 workspace 相对规范路径；移出 workspace 的 path 写相对当前 package 的规范路径，不能写机器绝对路径。
 
 锁内容与清单、package checksum、Git tree 或 package 自身清单不一致时是解析错误。工具不能在 `--locked` 下悄悄改正。
+解析在进入 target 源码的 frontend 前完成。source index 的候选返回顺序、workspace 成员顺序和并发完成顺序都不得影响结果；resolver 按 source/package/version 统一兼容约束，并在同一解析域合并 feature。缺少可验证候选、source identity 冲突、循环依赖、feature 引用缺失和锁图悬空边都必须在 frontend 前失败。`build`/`check` 产生的锁图必须使用规范字段排序编码；`--locked` 只允许读取并验证既有锁图，不能写回或自动修正。
 
 ## 单一编译流水线
 

@@ -28,7 +28,19 @@
 
 workspace 成员按 `members` glob 展开并扣除 `exclude`，glob 展开按规范相对路径排序、同一路径只算一个成员；`exclude` 允许指定非存在目录。根清单可同时是根 package，此时无论从根还是成员目录启动，根 package 都纳入模型。package 选择遵循规范：显式 `-p` 按规范名或短名唯一匹配，`--workspace` 覆盖默认选择并包含根 package，成员目录启动时默认只构建当前 package，workspace 根启动时依次使用 `default-members`、根 package 或全部成员。
 
-target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`、`benches/`、`examples/` 与 package 根 `build.gg` 的文件与目录形式，`auto-*` 开关与显式 target 表按清单规则生效；`foo.gg` 与 `foo/mod.gg` 同时存在、同种类重名 target、入口越过 package 根均在编译前失败；target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身，不再误当作目录。lib 的默认名是 package 短名把 `-` 换成 `_`。项目模式下每个选中 target 以 `project_entry` 进入同一 action graph：bin 类入口要求合法 main，lib/test/harness 类入口只做源码快照检查。`required-features` 按当前启用 feature 集合在编译前过滤：未满足的 target 不选择，`--features`/`--all-features`/`--no-default-features` 决定启用集合，未知 feature 名退出码 2。单文件模式（`gugu build <file.gg>`）拒绝 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets`，以退出码 2 失败。依赖解析、锁图与 SemVer 仍属于阶段 5、6。
+target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`、`benches/`、`examples/` 与 package 根 `build.gg` 的文件与目录形式，`auto-*` 开关与显式 target 表按清单规则生效；`foo.gg` 与 `foo/mod.gg` 同时存在、同种类重名 target、入口越过 package 根均在编译前失败；target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身，不再误当作目录。lib 的默认名是 package 短名把 `-` 换成 `_`。项目模式下每个选中 target 以 `project_entry` 进入同一 action graph：bin 类入口要求合法 main，lib/test/harness 类入口只做源码快照检查。`required-features` 按当前启用 feature 集合在编译前过滤：未满足的 target 不选择，`--features`/`--all-features`/`--no-default-features` 决定启用集合，未知 feature 名退出码 2。单文件模式（`gugu build <file.gg>`）拒绝 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets`，以退出码 2 失败。阶段 5 已将依赖解析接入项目 `build`/`check`：锁图写入 workspace 根 `gugu.lock`，阶段 6 再补齐下载、缓存、checksum 与 vendor。
+
+## 阶段 5 依赖解析边界
+
+阶段 5 在 `project::dependencies` 中实现依赖清单到锁图的单向解析。`Version` 严格解析 SemVer 2.0.0 的三段数字、预发布标识和 build metadata；`VersionReq` 支持 caret、tilde、关系运算、逗号交集和 wildcard，并按 SemVer precedence 比较，build metadata 不参与兼容判断。预发布候选只有约束显式覆盖同一 `major.minor.patch` 时才进入匹配。
+
+每个依赖的身份由规范包名、精确版本和 `path`/`git`/registry source 共同决定。path source 只从已发现 package 和可递归发现的 `gugu.toml` 读取；Git 与 registry source 由 `ResolveOptions` 提供确定性候选索引，候选按版本降序和 package ID 排序，撤回版本不参与新解析。别名只影响边上的名称；同一 package ID 在同一 normal/test/build 上下文只建立一个节点，不兼容版本可以并存。
+
+解析上下文固定分为 target 普通图、target 测试图和 host build 图。普通依赖可由测试图和 build 图读取，test 依赖不传播给消费者，build 依赖只在 host 图激活；target 条件在 target 名上求值，build 条件在 host 名上求值。根 package 的 feature 请求、依赖 feature、`dep:` optional 引用和默认 feature 在各域内做并集，未声明 feature、source 候选缺失、版本无解和图循环都在进入 frontend 前报错。
+
+`LockGraph` 只写规范字段：版本、package ID、checksum、已解析依赖边、边的域与条件，以及 normal/test/build feature 集。package、依赖边和 feature 均在编码前稳定排序并去重；path source 只能写规范相对路径，Git source 必须写完整 commit/tree。锁图读取会验证版本、source、SemVer、域、重复 package ID 和悬空边。CLI 普通 `build`/`check` 自动写根锁文件，`--locked` 只读取并要求规范编码与重新解析结果完全一致。
+
+阶段 5 不负责网络下载、registry 协议、缓存、checksum 获取、vendor、patch 远程输入或离线策略；这些能力分别属于阶段 6 和发布阶段。
 
 ## 工程边界
 
@@ -45,13 +57,20 @@ crates/
     ├── src/action.rs               稠密 action graph 与状态迁移
     ├── src/diagnostics.rs          稳定代码、源码范围与排序
     ├── src/source.rs               源码快照、Span、行首表与展开记录
-    ├── src/project/                清单、workspace 与 target 发现
+    ├── src/project/                清单、workspace、target、依赖与锁图
     │   ├── mod.rs                  项目聚合与选择
     │   ├── model.rs                package、target 与 workspace 模型
-    │   ├── error.rs                项目发现与选择错误
+    │   ├── error.rs                项目发现、选择、依赖与锁文件错误
     │   ├── manifest.rs             清单 schema 与 package 构建
     │   ├── targets.rs              target 自动发现与源码布局校验
-    │   └── workspace.rs            workspace 成员与 glob 解析
+    │   ├── dependency_model.rs     package identity、source、域与 feature 模型
+    │   ├── dependency_manifest.rs  依赖清单与 workspace 继承解析
+    │   ├── semver.rs               SemVer 版本和版本约束
+    │   ├── lock.rs                 确定性 gugu.lock 编解码与校验
+    │   ├── resolver.rs             候选求解、域传播与循环检查
+    │   ├── dependencies.rs         依赖子模块聚合与公共导出
+    │   ├── dependencies_tests.rs   依赖解析、feature 和锁图确定性测试
+    │   └── workspace.rs             workspace 成员与 glob 解析
     ├── src/target.rs               目标注册表与 TargetDescriptor
     ├── src/frontend.rs             阶段 1 的入口结构检查
     ├── src/ir.rs                   main -> ReturnUnit 的 bootstrap IR
@@ -134,7 +153,7 @@ emit-image
 | `types` | type arena、type checker | 未实现 | 12–20 |
 | `declarations` | module tree、definition collector | 清单层模块布局已落地；模块树未实现 | 04、10、13 |
 | `program-model` | action、backend、runtime | 已建立 plan/不写部分镜像契约 | 01、24、52–57 |
-| `packages-builds` | `project` 清单/workspace/target 发现 | 清单发现、workspace、target 自动发现已落地；依赖解析未实现 | 04–06、72–73 |
+| `packages-builds` | `project` 清单、依赖解析、workspace、target 与锁图 | 清单发现、workspace、target 自动发现、SemVer、source 候选、三域 feature 与锁图已落地；下载、缓存、vendor 未实现 | 04–06、72–73 |
 | `publishing-ecosystem` | registry、archive、signature | 未实现 | 74 |
 | `toolchain-cli` | `gugu-cli` 与 action orchestrator | 已建立单一入口与项目/单文件模式 | 01–04；完整为 73 |
 | `expressions` | frontend、HIR、GIR | 未实现 | 14、20、26 |
@@ -171,5 +190,13 @@ emit-image
 - 保留名 `std`（package 名与依赖别名）、未知核心字段、`foo.gg` 与 `foo/mod.gg` 冲突、target 重名、入口越过 package 根均在编译前失败；显式 `path` 直接位于 package 根时正确解析源码根为 package 本身；冲突检查忽略 `target` 目录与隐藏目录；
 - target 的 `required-features` 在编译前依据启用 feature 过滤，未知 feature 名以退出码 2 失败；
 - 单文件模式拒绝全部项目选择参数并以退出码 2 失败。
+
+阶段 5 的确定性测试补充覆盖：
+
+- SemVer 的规范数字、预发布 precedence、caret/tilde/关系/逗号交集/wildcard 与 build metadata 规则；无效约束在候选选择前失败；
+- `cfg(all/any/not(...))` target 条件按 target/host 正确激活，path、Git、registry source 按 package identity 区分，别名不改变 package ID；
+- normal、test、build 三个解析域的传播边界、optional/依赖 feature 并集、默认 feature 与 root `--no-default-features` 状态可重现；
+- 候选版本选择不受输入顺序影响，yanked/无解版本、source candidate 缺失和依赖循环产生稳定错误；
+- 锁图拒绝绝对路径、未知 source、重复 package ID 和悬空边，规范编码排序稳定且重复读写不改变内容；CLI `--locked` 在锁图与清单不一致时于 frontend 前失败。
 
 最终镜像写出、Gugu 源 runtime 自举、完整 parser/type checker、GC、scheduler 和双目标 machine code 都不属于本阶段验收；它们必须在路线图后续阶段以各自规范和测试完成。

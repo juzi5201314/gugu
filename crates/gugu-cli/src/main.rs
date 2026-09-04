@@ -5,17 +5,18 @@ mod output;
 #[path = "main_tests.rs"]
 mod tests;
 
+use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
+use gugu_compiler::{
+    CompileRequest, Compiler, Package, Project, ResolveOptions, TargetKind, TargetName,
+    TargetSelection,
+};
+use serde_json::json;
 use std::{
+    collections::BTreeMap,
     env,
     ffi::OsString,
     path::{Component, PathBuf},
 };
-
-use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
-use gugu_compiler::{
-    CompileRequest, Compiler, Package, Project, TargetKind, TargetName, TargetSelection,
-};
-use serde_json::json;
 
 use crate::{
     config::{ConfigValues, environment_flag, environment_path, environment_text, load_config},
@@ -718,6 +719,67 @@ fn compile_package(
     Ok(failed)
 }
 
+fn resolve_project_lock(
+    project: &Project,
+    packages: &[&Package],
+    options: &GlobalArgs,
+    target: TargetName,
+    format: OutputFormat,
+) -> Result<(), ()> {
+    let mut roots = Vec::with_capacity(packages.len());
+    let mut root_features = BTreeMap::new();
+    let mut root_default_features = BTreeMap::new();
+    for package in packages {
+        roots.push(package.package_name());
+        let enabled = enabled_features(options, package);
+        root_features.insert(
+            package.package_name(),
+            enabled
+                .into_iter()
+                .filter(|feature| feature != "default")
+                .collect(),
+        );
+        root_default_features.insert(package.package_name(), !options.no_default_features);
+    }
+    let host = TargetName::host().unwrap_or(target);
+    let graph = project
+        .resolve_dependencies(ResolveOptions {
+            target: target.to_string(),
+            host: host.to_string(),
+            roots,
+            root_features,
+            root_default_features,
+            ..ResolveOptions::default()
+        })
+        .map_err(|error| {
+            emit_cli_error(format, &error.to_string());
+        })?;
+    let path = project.lock_path();
+    if options.locked {
+        let existing = gugu_compiler::LockGraph::read(&path).map_err(|error| {
+            emit_cli_error(format, &error.to_string());
+        })?;
+        let expected = graph.to_toml().map_err(|error| {
+            emit_cli_error(format, &error.to_string());
+        })?;
+        let actual = existing.to_toml().map_err(|error| {
+            emit_cli_error(format, &error.to_string());
+        })?;
+        if actual != expected {
+            emit_cli_error(
+                format,
+                "--locked 要求 gugu.lock 与当前清单、目标和 feature 一致",
+            );
+            return Err(());
+        }
+    } else {
+        graph.write(&path).map_err(|error| {
+            emit_cli_error(format, &error.to_string());
+        })?;
+    }
+    Ok(())
+}
+
 fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: bool) -> i32 {
     let format = options.format.unwrap_or_default();
     let start = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -735,7 +797,9 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             return 2;
         }
     };
-
+    if resolve_project_lock(&project, &packages, options, target, format).is_err() {
+        return 2;
+    }
     let compiler = Compiler::new();
     let mut failed = false;
     for package in packages {

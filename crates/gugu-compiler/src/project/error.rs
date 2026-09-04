@@ -2,7 +2,7 @@ use std::{fmt, path::PathBuf};
 
 use super::model::TargetKind;
 
-/// 项目清单、workspace 或 target 发现失败。
+/// 项目清单、workspace、target 或依赖解析失败。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ProjectError {
     /// 未发现清单。
@@ -64,6 +64,20 @@ pub enum ProjectError {
         /// 未知 feature 名。
         feature: String,
     },
+    /// 锁文件读取、编码或一致性校验失败。
+    Lockfile {
+        /// 锁文件路径。
+        path: PathBuf,
+        /// 稳定错误说明。
+        message: String,
+    },
+    /// 依赖 source、版本或 feature 解析失败。
+    DependencyResolution {
+        /// 相关 package 或锁图名称。
+        package: String,
+        /// 稳定错误说明。
+        message: String,
+    },
 }
 
 impl fmt::Display for ProjectError {
@@ -114,6 +128,12 @@ impl fmt::Display for ProjectError {
             },
             Self::UnknownFeature { package, feature } => {
                 write!(formatter, "package `{package}` 未声明 feature `{feature}`")
+            }
+            Self::Lockfile { path, message } => {
+                write!(formatter, "锁文件 `{}` 无效：{message}", path.display())
+            }
+            Self::DependencyResolution { package, message } => {
+                write!(formatter, "package `{package}` 的依赖解析失败：{message}")
             }
         }
     }

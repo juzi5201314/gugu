@@ -45,7 +45,7 @@
   - 实现 `gugu.toml` 向父目录查找、package/workspace 层级、默认 source root、lib/bin/test/bench/example target 自动发现、host/target 分离和 `foo.gg` 与 `foo/mod.gg` 冲突检查。
   - 验收：package、虚拟 workspace、单文件模式和 target 选择规则与规范一致；未知核心字段、target 重名、入口越界和保留 package `std` 均在编译前失败。
 
-- [ ] **阶段 05：实现依赖解析、SemVer 与锁图**（复杂度：4）
+- [x] **阶段 05：实现依赖解析、SemVer 与锁图**（复杂度：4）
   - 依赖：阶段 04。
   - 实现 path/git/registry source、package identity、SemVer 求解、依赖别名、target 条件、normal/test/build 三域、feature 并集和确定性 `gugu.lock` 编码。
   - 验收：循环依赖、无解版本、source identity 冲突、锁图不一致和 feature 缺失得到稳定错误；锁文件不含绝对路径、token、缓存位置或宿主信息。

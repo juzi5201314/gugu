@@ -19,7 +19,11 @@ mod target;
 
 pub use action::{ActionGraph, ActionKind, ActionNode, ActionStatus};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
-pub use project::{Package, Project, ProjectError, Target, TargetKind, TargetSelection, Workspace};
+pub use project::{
+    DependencyDomain, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,
+    Package, PackageId, PackageMetadata, PackageSource, Project, ProjectError, ResolveOptions,
+    Target, TargetCondition, TargetKind, TargetSelection, Version, VersionReq, Workspace,
+};
 pub use runtime::{
     IntrinsicBoundary, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
 };
