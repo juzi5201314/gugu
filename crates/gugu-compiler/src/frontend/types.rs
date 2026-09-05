@@ -1,9 +1,8 @@
 //! 类型形成与目标布局基础。
-use std::collections::BTreeMap;
-
 use super::ast::{AstArena, TyId, TyKind};
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Layout {
     pub(crate) size: u64,
