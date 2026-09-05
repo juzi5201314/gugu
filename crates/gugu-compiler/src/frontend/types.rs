@@ -110,6 +110,27 @@ impl TypeArena {
     }
 }
 
+pub(crate) fn form_and_layout(
+    modules: &[super::ParsedModule],
+) -> Result<Vec<Layout>, Vec<Diagnostic>> {
+    let mut layouts = Vec::new();
+    let mut diagnostics = Vec::new();
+    for module in modules {
+        let mut arena = TypeArena::new();
+        for index in 0..module.arena.tys.len() {
+            match arena.layout(&module.arena, TyId(index as u32)) {
+                Ok(layout) => layouts.push(layout),
+                Err(error) => diagnostics.push(error),
+            }
+        }
+    }
+    if diagnostics.is_empty() {
+        Ok(layouts)
+    } else {
+        Err(diagnostics)
+    }
+}
+
 fn align_up(value: u64, align: u64) -> u64 {
     debug_assert!(align.is_power_of_two());
     (value + align - 1) & !(align - 1)

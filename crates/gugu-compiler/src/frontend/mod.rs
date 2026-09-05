@@ -48,6 +48,7 @@ pub(crate) struct FrontendOutput {
     pub(crate) node_count: u64,
     pub(crate) modules: Vec<ParsedModule>,
     pub(crate) names: names::NameResolution,
+    pub(crate) types: Vec<types::Layout>,
 }
 
 #[derive(Clone, Debug)]
@@ -70,6 +71,7 @@ pub(crate) fn bootstrap(input: SourceInput<'_>) -> Result<FrontendOutput, Vec<Di
             node_count: 0,
             modules: Vec::new(),
             names: names::NameResolution::default(),
+            types: Vec::new(),
         }),
         SourceInput::Sources {
             source_map,
@@ -122,7 +124,10 @@ fn check_sources(
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
-    Ok(frontend_output(entry, has_main, source_map, modules, names))
+    let types = types::form_and_layout(&modules)?;
+    Ok(frontend_output(
+        entry, has_main, source_map, modules, names, types,
+    ))
 }
 
 fn parse_modules(
@@ -218,6 +223,7 @@ fn frontend_output(
     source_map: &SourceMap,
     modules: Vec<ParsedModule>,
     names: names::NameResolution,
+    types: Vec<types::Layout>,
 ) -> FrontendOutput {
     FrontendOutput {
         path: Some(PathBuf::from(entry)),
@@ -241,6 +247,7 @@ fn frontend_output(
             .sum(),
         modules,
         names,
+        types,
     }
 }
 
