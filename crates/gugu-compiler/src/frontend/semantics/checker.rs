@@ -13,6 +13,7 @@ mod expr;
 mod flow;
 mod generics;
 mod inference;
+mod methods;
 mod operations;
 
 #[derive(Clone)]
@@ -71,6 +72,8 @@ struct Checker<'m, 'a> {
     callable_bounds: BTreeMap<String, Ty>,
     callable_constraints: Vec<(Ty, Ty, Span)>,
     expression_callables: BTreeMap<u32, Vec<super::model::CallableId>>,
+    trait_constraints: Vec<(super::traits::Obligation, Vec<super::traits::Obligation>)>,
+    dispatches: Vec<super::output::Dispatch>,
 }
 
 pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
@@ -112,18 +115,14 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                     item.span.clone(),
                 );
             }
-            let mut expressions: Vec<_> = checker
-                .expressions
-                .iter()
-                .map(|(id, ty)| (*id, checker.resolve(ty)))
-                .collect();
+            let mut expressions = checker.expressions;
             expressions.sort_by_key(|(id, _)| id.0);
             expressions.dedup_by_key(|(id, _)| id.0);
-            let slots = checker
+            let (slots, slot_storage) = checker
                 .slots
-                .iter()
-                .map(|slot| checker.resolve(&slot.ty))
-                .collect();
+                .into_iter()
+                .map(|slot| (slot.ty, slot.storage))
+                .unzip();
             bodies.push(super::output::CheckedBody {
                 definition: DefRef {
                     module,
@@ -136,8 +135,9 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                 runtime_checks: checker.runtime_checks,
                 patterns: checker.pattern_plans,
                 captures: checker.capture_plans,
-                slot_storage: checker.slots.iter().map(|slot| slot.storage).collect(),
+                slot_storage,
                 variadic_calls: checker.variadic_calls,
+                dispatches: checker.dispatches,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
@@ -199,6 +199,8 @@ impl<'m, 'a> Checker<'m, 'a> {
             callable_bounds: BTreeMap::new(),
             callable_constraints: Vec::new(),
             expression_callables: BTreeMap::new(),
+            trait_constraints: Vec::new(),
+            dispatches: Vec::new(),
         }
     }
     fn arena(&self) -> &'a AstArena {
@@ -251,9 +253,30 @@ impl<'m, 'a> Checker<'m, 'a> {
                 arguments.iter().map(|ty| self.resolve(ty)).collect(),
                 Box::new(self.resolve(signature)),
             ),
+            Ty::Projection(base, interface, name) => Ty::Projection(
+                Box::new(self.resolve(base)),
+                super::traits::TraitRef {
+                    id: interface.id,
+                    arguments: interface
+                        .arguments
+                        .iter()
+                        .map(|ty| self.resolve(ty))
+                        .collect(),
+                },
+                name.clone(),
+            ),
             Ty::Chan(t) => Ty::Chan(Box::new(self.resolve(t))),
             Ty::Join(t) => Ty::Join(Box::new(self.resolve(t))),
             _ => ty.clone(),
+        }
+    }
+    fn normalized(&mut self, ty: &Ty) -> Ty {
+        match self.model.normalize(&self.resolve(ty), &[]) {
+            Ok(ty) => ty,
+            Err(error) => {
+                self.errors.push(error);
+                Ty::Error
+            }
         }
     }
     fn unify(&mut self, actual: &Ty, expected: &Ty, span: &Span) -> Ty {
@@ -269,8 +292,8 @@ impl<'m, 'a> Checker<'m, 'a> {
     }
 
     fn relate(&mut self, actual: &Ty, expected: &Ty, span: &Span, coercion: bool) -> Ty {
-        let a = self.resolve(actual);
-        let b = self.resolve(expected);
+        let a = self.normalized(actual);
+        let b = self.normalized(expected);
         if a == Ty::Error || b == Ty::Error {
             return Ty::Error;
         }
@@ -395,6 +418,19 @@ impl<'m, 'a> Checker<'m, 'a> {
             }
             let ty = match param.ty {
                 Some(id) => self.form(id),
+                None if self.model.is_receiver(self.module, param) => self
+                    .model
+                    .parameters_at(self.module, &f.span)
+                    .get("Self")
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        self.error(
+                            DiagnosticCode::InvalidDeclaration,
+                            "self 只能用于关联方法",
+                            param.span.clone(),
+                        );
+                        Ty::Error
+                    }),
                 None => expected
                     .and_then(|(params, _)| params.get(parameters.len()))
                     .cloned()

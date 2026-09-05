@@ -7,6 +7,8 @@ use super::super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 use std::collections::BTreeMap;
+mod constants;
+pub(super) use constants::ConstantValue;
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Ty {
     Error,
@@ -27,6 +29,7 @@ pub(crate) enum Ty {
     Callable(CallableId, Vec<Ty>, Box<Ty>),
     Named(usize, Vec<Ty>),
     Param(String),
+    Projection(Box<Ty>, super::traits::TraitRef, String),
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     Range,
@@ -139,6 +142,7 @@ pub(crate) struct Nominal {
 pub(crate) struct Model<'a> {
     pub(crate) modules: &'a [ParsedModule],
     pub(crate) nominal: Vec<Nominal>,
+    pub(super) traits: super::traits::Traits,
     names: &'a NameResolution,
     // 模块/FnDecl 编号稠密；匿名闭包没有具名 ItemId，不参与函数地址的初始化依赖。
     function_items: Vec<Vec<Option<ItemId>>>,
@@ -221,6 +225,11 @@ impl<'a> Model<'a> {
                 }
             }
             Ty::Param(name) => name.clone(),
+            Ty::Projection(ty, interface, name) => format!(
+                "<{} as {}>::{name}",
+                self.describe(ty),
+                self.traits.interfaces[interface.id].name
+            ),
             Ty::Range => "Range".into(),
             Ty::Option(t) => format!("Option[{}]", self.describe(t)),
             Ty::Result(t, e) => format!("Result[{}, {}]", self.describe(t), self.describe(e)),
@@ -242,6 +251,7 @@ impl<'a> Model<'a> {
             modules,
             nominal: Vec::new(),
             names,
+            traits: super::traits::Traits::default(),
             function_items: modules
                 .iter()
                 .map(|module| {
@@ -292,6 +302,7 @@ impl<'a> Model<'a> {
                 });
             }
         }
+        model.collect_traits().map_err(|error| vec![error])?;
         for index in 0..model.nominal.len() {
             let def = model.nominal[index].definition;
             let m = &modules[def.module];
@@ -372,18 +383,8 @@ impl<'a> Model<'a> {
                     ty: Some(ty),
                 } = item.kind
                 {
-                    let params = generics
-                        .as_slice(&parsed.arena.generic_params)
-                        .iter()
-                        .filter_map(|param| {
-                            if let GenericParamKind::Type { name, .. } = param.kind {
-                                let name = model.name(module, name).to_owned();
-                                Some((name.clone(), Ty::Param(name)))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect();
+                    let mut params = model.parameters_at(module, &item.span);
+                    params.extend(model.generic_parameters(module, generics));
                     model
                         .form_inner(
                             module,
@@ -398,6 +399,7 @@ impl<'a> Model<'a> {
                 }
             }
         }
+        model.validate_traits().map_err(|error| vec![error])?;
         Ok(model)
     }
     pub(crate) fn name(&self, module: usize, symbol: Symbol) -> &str {
@@ -412,7 +414,7 @@ impl<'a> Model<'a> {
             .map(|s| self.name(module, s.name))
             .collect()
     }
-    fn error(&self, module: usize, message: impl Into<String>) -> Diagnostic {
+    pub(super) fn error(&self, module: usize, message: impl Into<String>) -> Diagnostic {
         Diagnostic::error(
             DiagnosticCode::InvalidType,
             message,
@@ -428,6 +430,15 @@ impl<'a> Model<'a> {
                 if self.modules[module]
                     .configured
                     .item_active(ItemId(i as u32))
+                    && (matches!(item.kind, ItemKind::Trait { .. })
+                        || self
+                            .traits
+                            .owners
+                            .get(module)
+                            .and_then(|owners| owners.get(i))
+                            .copied()
+                            .flatten()
+                            .is_none())
                     && item.name.is_some_and(|s| self.name(module, s) == *first)
                 {
                     return Ok(DefRef {
@@ -480,7 +491,7 @@ impl<'a> Model<'a> {
 
     pub(super) fn parameters_at(&self, module: usize, span: &crate::Span) -> BTreeMap<String, Ty> {
         let arena = &self.modules[module].arena;
-        let mut params = BTreeMap::new();
+        let mut params = self.associated_scope(module, span);
         // parser 先分配内层 FnDecl，逆序遍历使内层同名参数覆盖外层。
         let owners = arena.fns.iter().rev().filter(|function| {
             function.span.start() <= span.start() && function.span.end() >= span.end()
@@ -517,7 +528,7 @@ impl<'a> Model<'a> {
             }
         }
     }
-    fn form_inner(
+    pub(super) fn form_inner(
         &self,
         module: usize,
         id: TyId,
@@ -532,7 +543,7 @@ impl<'a> Model<'a> {
         )
     }
 
-    fn form_kind(
+    pub(super) fn form_kind(
         &self,
         module: usize,
         kind: TyKind,
@@ -578,6 +589,12 @@ impl<'a> Model<'a> {
             ),
             TyKind::Path(path) => {
                 let parts = self.path(module, path);
+                if let Some(ty) = params.get(&parts.join("::")) {
+                    return Ok(ty.clone());
+                }
+                if let Some(ty) = self.projected_type(module, path, params, stack)? {
+                    return Ok(ty);
+                }
                 if parts.len() == 1 {
                     if let Some(t) = params.get(parts[0]) {
                         return Ok(t.clone());
@@ -587,6 +604,10 @@ impl<'a> Model<'a> {
                     }
                 }
                 let args: Vec<_> = a.paths[path.0 as usize]
+                    .segments
+                    .as_slice(&a.segments)
+                    .last()
+                    .expect("路径至少有一段")
                     .args
                     .as_slice(&a.generic_args)
                     .iter()
@@ -648,7 +669,7 @@ impl<'a> Model<'a> {
         })
     }
 
-    fn form_arg(
+    pub(super) fn form_arg(
         &self,
         module: usize,
         arg: GenericArg,
@@ -679,8 +700,16 @@ impl<'a> Model<'a> {
                     .enumerate()
                     .filter(|(i, _)| m.configured.param_active(f.params.start as usize + i))
                     .map(|(_, p)| {
-                        p.ty.ok_or_else(|| self.error(def.module, "形参类型尚未推断"))
-                            .and_then(|t| self.form(def.module, t))
+                        if let Some(ty) = p.ty {
+                            self.form(def.module, ty)
+                        } else if self.is_receiver(def.module, p) {
+                            self.parameters_at(def.module, &f.span)
+                                .get("Self")
+                                .cloned()
+                                .ok_or_else(|| self.error(def.module, "self 只能用于关联方法"))
+                        } else {
+                            Err(self.error(def.module, "形参类型尚未推断"))
+                        }
                     })
                     .collect::<Result<_, _>>()?;
                 let arguments = f
@@ -861,140 +890,15 @@ impl<'a> Model<'a> {
             _ => Err(self.error(module, "构造器名称不唯一，必须使用类型限定")),
         }
     }
-    pub(crate) fn constant_type(&self, module: usize, expr: ExprId) -> Result<Ty, Diagnostic> {
-        self.constant_type_inner(module, expr, &mut Vec::new())
-    }
-
-    fn constant_type_inner(
-        &self,
-        module: usize,
-        expr: ExprId,
-        stack: &mut Vec<DefRef>,
-    ) -> Result<Ty, Diagnostic> {
-        match self.modules[module].arena.exprs[usize::try_from(expr.0).expect("表达式下标")].kind
-        {
-            ExprKind::Literal(LitKind::Int { .. }) => Ok(Ty::int()),
-            ExprKind::Literal(LitKind::Char { .. }) => Ok(Ty::Char),
-            ExprKind::Literal(LitKind::ByteChar { .. }) => Ok(Ty::Int {
-                signed: false,
-                bits: 8,
-            }),
-            ExprKind::Literal(LitKind::Bool(_)) => Ok(Ty::Bool),
-            ExprKind::Literal(LitKind::Float { .. }) => Ok(Ty::Float(64)),
-            ExprKind::Literal(LitKind::String { .. } | LitKind::RawString { .. }) => Ok(Ty::String),
-            ExprKind::Paren(inner) | ExprKind::Unary { expr: inner, .. } => {
-                self.constant_type_inner(module, inner, stack)
-            }
-            ExprKind::Binary { lhs, rhs, op } => {
-                let left = self.constant_type_inner(module, lhs, stack)?;
-                let right = self.constant_type_inner(module, rhs, stack)?;
-                if left != right {
-                    return Err(self.error(module, "常量操作数类型不一致"));
-                }
-                Ok(
-                    if matches!(
-                        op,
-                        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-                    ) {
-                        Ty::Bool
-                    } else {
-                        left
-                    },
-                )
-            }
-            ExprKind::Path(path) => {
-                let def = self.resolve(module, &self.path(module, path))?;
-                if stack.contains(&def) {
-                    return Err(self.error(module, "常量类型推断形成循环"));
-                }
-                match self.modules[def.module].arena.items
-                    [usize::try_from(def.item.0).expect("项下标")]
-                .kind
-                {
-                    ItemKind::Const { ty: Some(ty), .. } | ItemKind::Static { ty, .. } => {
-                        self.form(def.module, ty)
-                    }
-                    ItemKind::Const {
-                        value: Some(value), ..
-                    } => {
-                        stack.push(def);
-                        let ty = self.constant_type_inner(def.module, value, stack);
-                        stack.pop();
-                        ty
-                    }
-                    _ => Err(self.error(module, "端点不是常量")),
-                }
-            }
-            _ => Err(self.error(module, "无法形成常量类型")),
-        }
-    }
-    pub(crate) fn constant_int(&self, module: usize, id: ExprId) -> Result<i128, Diagnostic> {
-        self.constant(module, id, &mut Vec::new())
-    }
-    fn constant(
-        &self,
-        module: usize,
-        id: ExprId,
-        stack: &mut Vec<DefRef>,
-    ) -> Result<i128, Diagnostic> {
-        let a = &self.modules[module].arena;
-        let fail = || self.error(module, "需要可求值且不溢出的整数常量");
-        match a.exprs[id.0 as usize].kind {
-            ExprKind::Literal(LitKind::Int { limbs, .. }) => {
-                let mut n = 0i128;
-                for &limb in limbs.as_slice(&a.int_limbs).iter().rev() {
-                    n = n
-                        .checked_mul(1i128 << 32)
-                        .and_then(|n| n.checked_add(i128::from(limb)))
-                        .ok_or_else(fail)?;
-                }
-                Ok(n)
-            }
-            ExprKind::Literal(LitKind::Char { value, .. }) => Ok(value as i128),
-            ExprKind::Literal(LitKind::ByteChar { value, .. }) => Ok(value as i128),
-            ExprKind::Paren(e) => self.constant(module, e, stack),
-            ExprKind::Unary {
-                op: UnOp::Neg,
-                expr,
-            } => self
-                .constant(module, expr, stack)?
-                .checked_neg()
-                .ok_or_else(fail),
-            ExprKind::Binary { op, lhs, rhs } => {
-                let x = self.constant(module, lhs, stack)?;
-                let y = self.constant(module, rhs, stack)?;
-                match op {
-                    BinOp::Add => x.checked_add(y),
-                    BinOp::Sub => x.checked_sub(y),
-                    BinOp::Mul => x.checked_mul(y),
-                    BinOp::Div => x.checked_div(y),
-                    BinOp::Rem => x.checked_rem(y),
-                    _ => None,
-                }
-                .ok_or_else(fail)
-            }
-            ExprKind::Path(path) => {
-                let def = self.resolve(module, &self.path(module, path))?;
-                if stack.contains(&def) {
-                    return Err(self.error(module, "const/static 初始化依赖形成循环"));
-                }
-                stack.push(def);
-                let item = &self.modules[def.module].arena.items[def.item.0 as usize];
-                let value = match item.kind {
-                    ItemKind::Const { value: Some(v), .. } | ItemKind::Static { value: v, .. } => v,
-                    _ => return Err(fail()),
-                };
-                let result = self.constant(def.module, value, stack);
-                stack.pop();
-                result
-            }
-            _ => Err(fail()),
-        }
-    }
 }
 pub(super) fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
     match ty {
         Ty::Param(s) => bindings.get(s).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::Projection(ty, interface, name) => Ty::Projection(
+            Box::new(substitute(ty, bindings)),
+            interface.substitute(bindings),
+            name.clone(),
+        ),
         Ty::Ref(t) => Ty::Ref(Box::new(substitute(t, bindings))),
         Ty::Ptr(t) => Ty::Ptr(Box::new(substitute(t, bindings))),
         Ty::Array(t, n) => Ty::Array(Box::new(substitute(t, bindings)), *n),
@@ -1006,6 +910,8 @@ pub(super) fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
             Box::new(substitute(t, bindings)),
             Box::new(substitute(e, bindings)),
         ),
+        Ty::Chan(t) => Ty::Chan(Box::new(substitute(t, bindings))),
+        Ty::Join(t) => Ty::Join(Box::new(substitute(t, bindings))),
         Ty::Function(params, ret) => Ty::Function(
             params.iter().map(|ty| substitute(ty, bindings)).collect(),
             Box::new(substitute(ret, bindings)),

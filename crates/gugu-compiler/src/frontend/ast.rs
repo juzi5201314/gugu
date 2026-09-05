@@ -97,6 +97,7 @@ pub(crate) struct PathSegment {
     pub(crate) name: Symbol,
     pub(crate) span: Span,
     pub(crate) colon: bool,
+    pub(crate) args: AstRange<GenericArg>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -104,7 +105,6 @@ pub(crate) struct Path {
     pub(crate) id: AstNodeId,
     pub(crate) span: Span,
     pub(crate) segments: AstRange<PathSegment>,
-    pub(crate) args: AstRange<GenericArg>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

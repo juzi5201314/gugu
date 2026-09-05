@@ -390,28 +390,26 @@ impl Parser<'_> {
     fn parse_path_common(&mut self, with_args: bool) -> super::super::ast::PathId {
         let mark = self.start();
         let mut segments = Vec::new();
-        let first = self.expect_path_ident();
-        segments.push(first);
-        while self.at(TokenKind::Dot) && self.nth(1) == TokenKind::Ident {
+        let mut segment = self.expect_path_ident();
+        loop {
+            if with_args && self.at(TokenKind::LBracket) {
+                segment.args = self.parse_generic_args_optional();
+            }
+            segments.push(segment);
+            let colon = match (self.kind(), self.nth(1)) {
+                (TokenKind::Dot, TokenKind::Ident) => false,
+                (TokenKind::PathSep, TokenKind::Ident) => true,
+                _ => break,
+            };
             self.bump();
-            segments.push(self.expect_path_ident_colon(false));
+            segment = self.expect_path_ident_colon(colon);
         }
-        while self.at(TokenKind::PathSep) && self.nth(1) != TokenKind::LBracket {
-            self.bump();
-            segments.push(self.expect_path_ident_colon(true));
-        }
-        let args = if with_args && self.at(TokenKind::LBracket) {
-            self.parse_generic_args_optional()
-        } else {
-            AstRange::empty()
-        };
         let segments = finish_extend(&mut self.diagnostics, &mut self.arena.segments, segments);
         let span = self.finish_span(mark);
         self.arena.push_path(Path {
             id: mark.id,
             span,
             segments,
-            args,
         })
     }
 
@@ -429,6 +427,7 @@ impl Parser<'_> {
             name: self.symbol_from_token(token),
             span: self.token_span(token),
             colon,
+            args: AstRange::empty(),
         }
     }
 

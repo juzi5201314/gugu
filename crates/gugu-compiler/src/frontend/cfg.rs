@@ -181,6 +181,14 @@ pub(crate) fn configure(
         for &item in file.items.as_slice(&arena.item_ids) {
             configurator.item(item);
         }
+        super::attr::validate_lint_levels(
+            snapshot.content(),
+            file,
+            arena,
+            tokens,
+            &configured,
+            &mut diagnostics,
+        );
     }
     if diagnostics.is_empty() {
         Ok(configured)
@@ -723,7 +731,12 @@ impl Configurator<'_> {
     }
 
     fn path(&mut self, path: super::ast::PathId) {
-        self.generic_args(self.arena.paths[path.0 as usize].args);
+        for segment in self.arena.paths[path.0 as usize]
+            .segments
+            .as_slice(&self.arena.segments)
+        {
+            self.generic_args(segment.args);
+        }
     }
 
     fn generic_args(&mut self, args: AstRange<GenericArg>) {

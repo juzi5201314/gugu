@@ -99,7 +99,7 @@ impl Layouts<'_, '_> {
         let word = Layout { size: 8, align: 8 };
         Ok(Some(match ty {
             Ty::Error | Ty::Var(_) => return Err(invalid("布局类型尚未收敛")),
-            Ty::Param(_) => return Ok(None),
+            Ty::Param(_) | Ty::Projection(..) => return Ok(None),
             Ty::Unit | Ty::Never => Layout { size: 0, align: 1 },
             Ty::Bool => Layout { size: 1, align: 1 },
             Ty::Char => Layout { size: 4, align: 4 },

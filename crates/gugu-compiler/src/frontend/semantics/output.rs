@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
@@ -27,6 +27,21 @@ pub(crate) struct CheckedBody {
     pub(crate) captures: Vec<CapturePlan>,
     pub(crate) slot_storage: Vec<u8>,
     pub(crate) variadic_calls: Vec<VariadicCall>,
+    pub(crate) dispatches: Vec<Dispatch>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Dispatch {
+    pub(crate) expression: ExprId,
+    pub(crate) callable: Option<super::model::CallableId>,
+    pub(crate) implementation: Option<DefRef>,
+    pub(crate) interface: Option<super::traits::TraitRef>,
+    pub(crate) member: Option<u32>,
+    pub(crate) self_ty: Ty,
+    pub(crate) signature: Ty,
+    pub(crate) dereferences: u32,
+    pub(crate) borrow: bool,
+    pub(crate) implicit_receiver: bool,
 }
 
 /// 槽存储标志有三个独立布尔量，固定编码在一个字节中。
@@ -142,6 +157,56 @@ impl CheckedSemantics {
                     .any(|flags| flags & !(ADDRESS_TAKEN | CAPTURED | CROSS_COROUTINE) != 0)
             {
                 return Err(invalid());
+            }
+            for dispatch in &body.dispatches {
+                if dispatch.expression.0 as usize >= module.arena.exprs.len()
+                    || !formed(&dispatch.self_ty, model)
+                    || !formed(&dispatch.signature, model)
+                    || !matches!(dispatch.signature, Ty::Function(..))
+                {
+                    return Err(invalid());
+                }
+                if let Some(id) = dispatch.callable {
+                    if !model
+                        .modules
+                        .get(id.module)
+                        .is_some_and(|module| (id.function as usize) < module.arena.fns.len())
+                        || model.function_definition(id).is_none()
+                    {
+                        return Err(invalid());
+                    }
+                }
+                if let Some(definition) = dispatch.implementation {
+                    if !model
+                        .modules
+                        .get(definition.module)
+                        .and_then(|module| module.arena.items.get(definition.item.0 as usize))
+                        .is_some_and(|item| {
+                            matches!(
+                                item.kind,
+                                super::super::ast::ItemKind::Impl {
+                                    negative: false,
+                                    ..
+                                }
+                            )
+                        })
+                    {
+                        return Err(invalid());
+                    }
+                }
+                if let Some(interface) = &dispatch.interface {
+                    let Some(definition) = model.traits.interfaces.get(interface.id) else {
+                        return Err(invalid());
+                    };
+                    if definition.parameters.len() != interface.arguments.len()
+                        || !interface.arguments.iter().all(|ty| formed(ty, model))
+                        || dispatch
+                            .member
+                            .is_none_or(|member| member as usize >= definition.members.len())
+                    {
+                        return Err(invalid());
+                    }
+                }
             }
             for plan in &body.captures {
                 if !formed(&plan.signature, model) || !matches!(plan.signature, Ty::Function(..)) {
@@ -303,6 +368,20 @@ pub(super) fn formed(ty: &Ty, model: &Model<'_>) -> bool {
                 .get(*index)
                 .is_some_and(|n| n.params.len() == args.len())
                 && args.iter().all(|t| formed(t, model))
+        }
+        Ty::Projection(base, interface, name) => {
+            formed(base, model)
+                && interface.arguments.iter().all(|ty| formed(ty, model))
+                && model
+                    .traits
+                    .interfaces
+                    .get(interface.id)
+                    .is_some_and(|definition| {
+                        definition.parameters.len() == interface.arguments.len()
+                            && definition.members.get(name).is_some_and(|member| {
+                                matches!(member.kind, super::traits::MemberKind::Type(_))
+                            })
+                    })
         }
         Ty::Ref(t)
         | Ty::Ptr(t)

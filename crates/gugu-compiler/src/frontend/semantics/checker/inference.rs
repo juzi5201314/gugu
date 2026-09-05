@@ -170,6 +170,51 @@ impl Checker<'_, '_> {
                 };
             }
         }
+        for (obligation, assumptions) in std::mem::take(&mut self.trait_constraints) {
+            let ty = self.resolve(&obligation.ty);
+            let interface = super::super::traits::TraitRef {
+                id: obligation.interface.id,
+                arguments: obligation
+                    .interface
+                    .arguments
+                    .iter()
+                    .map(|ty| self.resolve(ty))
+                    .collect(),
+            };
+            if let Err(error) = self.model.require_trait(&ty, &interface, &assumptions) {
+                if error.code() == DiagnosticCode::InvalidDeclaration {
+                    self.errors.push(error);
+                    self.errors.push(Diagnostic::note(
+                        DiagnosticCode::InvalidType,
+                        "此处的泛型实参受到上述实现约束",
+                        Some(obligation.span),
+                    ));
+                } else {
+                    self.error(error.code(), error.message(), obligation.span);
+                }
+            }
+        }
+        let mut dispatches = std::mem::take(&mut self.dispatches);
+        for dispatch in &mut dispatches {
+            dispatch.self_ty = self.normalized(&dispatch.self_ty);
+            dispatch.signature = self.normalized(&dispatch.signature);
+            if let Some(interface) = &mut dispatch.interface {
+                for argument in &mut interface.arguments {
+                    *argument = self.normalized(argument);
+                }
+            }
+        }
+        self.dispatches = dispatches;
+        let mut expressions = std::mem::take(&mut self.expressions);
+        for (_, ty) in &mut expressions {
+            *ty = self.normalized(ty);
+        }
+        self.expressions = expressions;
+        let mut slots = std::mem::take(&mut self.slots);
+        for slot in &mut slots {
+            slot.ty = self.normalized(&slot.ty);
+        }
+        self.slots = slots;
         for (ty, lit, negative, span) in std::mem::take(&mut self.literals) {
             if matches!(lit, LitKind::Int { .. })
                 && super::super::numeric::literal_ordinal(

@@ -468,16 +468,19 @@ impl Parser<'_> {
             match self.kind() {
                 TokenKind::LParen => {
                     self.bump();
-                    let args = self.parse_expr_list(TokenKind::RParen);
+                    let args =
+                        self.with_struct(true, |parser| parser.parse_expr_list(TokenKind::RParen));
                     self.expect(TokenKind::RParen, "调用需要 `)`");
                     expr = self.make_call(expr, args);
                 }
                 TokenKind::PathSep if self.nth(1) == TokenKind::LBracket => {
                     self.bump();
-                    let args = self.parse_generic_args_required();
+                    let args = self.with_struct(true, Self::parse_generic_args_required);
                     expr = self.wrap_turbofish(expr, args);
                 }
-                TokenKind::LBracket => expr = self.parse_index(expr),
+                TokenKind::LBracket => {
+                    expr = self.with_struct(true, |parser| parser.parse_index(expr))
+                }
                 TokenKind::Dot => expr = self.parse_dot(expr),
                 TokenKind::Question => {
                     self.bump();
@@ -606,8 +609,8 @@ impl Parser<'_> {
             TokenKind::KwTypeIdCount => self.parse_type_id_count(),
             TokenKind::KwAsm => self.parse_asm(),
             TokenKind::KwChan => self.parse_chan(),
-            TokenKind::LParen => self.parse_paren_or_tuple(),
-            TokenKind::LBracket => self.parse_array(),
+            TokenKind::LParen => self.with_struct(true, Self::parse_paren_or_tuple),
+            TokenKind::LBracket => self.with_struct(true, Self::parse_array),
             TokenKind::Error => {
                 let mark = self.start();
                 self.consume_error_token();
@@ -644,7 +647,7 @@ impl Parser<'_> {
         let mut index = self.cursor + 1;
         while index < self.tokens.len() {
             match self.tokens[index].kind {
-                TokenKind::PathSep => {
+                TokenKind::PathSep | TokenKind::Dot => {
                     index += 1;
                     if self
                         .tokens
@@ -1040,9 +1043,9 @@ impl Parser<'_> {
         self.push_expr(mark, ExprKind::Array(elems))
     }
 
-    fn without_struct<T>(&mut self, f: impl FnOnce(&mut Self) -> T) -> T {
+    fn with_struct<T>(&mut self, allow: bool, f: impl FnOnce(&mut Self) -> T) -> T {
         let previous = self.allow_struct;
-        self.allow_struct = false;
+        self.allow_struct = allow;
         let value = f(self);
         self.allow_struct = previous;
         value
@@ -1051,7 +1054,7 @@ impl Parser<'_> {
     fn parse_if(&mut self) -> ExprId {
         let mark = self.start();
         self.bump();
-        let cond = self.without_struct(|parser| parser.parse_condition());
+        let cond = self.with_struct(false, |parser| parser.parse_condition());
         let then_block = self.parse_block_expr();
         let else_branch = if self.eat(TokenKind::KwElse) {
             if self.at(TokenKind::KwIf) {
@@ -1146,7 +1149,7 @@ impl Parser<'_> {
     fn parse_match(&mut self) -> ExprId {
         let mark = self.start();
         self.bump();
-        let scrutinee = self.without_struct(|parser| parser.parse_expression());
+        let scrutinee = self.with_struct(false, |parser| parser.parse_expression());
         let arms = self.parse_match_arms();
         self.push_expr(mark, ExprKind::Match { scrutinee, arms })
     }
@@ -1200,7 +1203,7 @@ impl Parser<'_> {
     fn parse_while(&mut self) -> ExprId {
         let mark = self.start();
         self.bump();
-        let cond = self.without_struct(|parser| parser.parse_condition());
+        let cond = self.with_struct(false, |parser| parser.parse_condition());
         let body = self.parse_block_expr();
         self.push_expr(mark, ExprKind::While { cond, body })
     }
@@ -1210,7 +1213,7 @@ impl Parser<'_> {
         self.bump();
         let pat = self.parse_pat();
         self.expect(TokenKind::KwIn, "for 需要 `in`");
-        let iter = self.without_struct(|parser| parser.parse_expression());
+        let iter = self.with_struct(false, |parser| parser.parse_expression());
         let body = self.parse_block_expr();
         self.push_expr(mark, ExprKind::For { pat, iter, body })
     }
@@ -1529,7 +1532,6 @@ impl Parser<'_> {
             id: path_id,
             span: self.make_span(lo, hi),
             segments,
-            args: AstRange::empty(),
         }) {
             Some(id) => id,
             None => {

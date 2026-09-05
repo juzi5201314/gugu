@@ -156,12 +156,39 @@ impl Checker<'_, '_> {
                 return ty;
             }
         }
+        if let Some(ret) = self.method_call(callee, type_args, &args, expected) {
+            return ret;
+        }
         let ty = self.typed_callable(callee, type_args, None);
         let ty = match &ty {
             Ty::Param(name) => self.callable_bounds.get(name).cloned().unwrap_or(ty),
             _ => ty,
         };
+        self.invoke(callee, ty, args, None, expected)
+    }
+
+    pub(super) fn invoke(
+        &mut self,
+        callee: ExprId,
+        ty: Ty,
+        args: Vec<ExprId>,
+        receiver: Option<Ty>,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let expr = &self.arena().exprs[callee.0 as usize];
         if let Some((params, ret)) = ty.signature() {
+            if let Some(expected) = expected
+                && !matches!(ret, Ty::Projection(..))
+            {
+                self.unify(ret, expected, &expr.span);
+            }
+            let offset = usize::from(receiver.is_some());
+            if let Some(receiver) = receiver.as_ref() {
+                if let Some(parameter) = params.first() {
+                    self.unify(receiver, parameter, &expr.span);
+                }
+            }
+            let count = args.len() + offset;
             let variadic = self.variadic_element(&ty);
             let heterogeneous = self.callable_parameter_pack(&ty);
             let fixed = params.len() - usize::from(variadic.is_some() || heterogeneous);
@@ -174,9 +201,9 @@ impl Checker<'_, '_> {
             } else {
                 None
             };
-            if args.len() < fixed
-                || variadic.is_none() && !heterogeneous && args.len() != fixed
-                || explicit_pack.is_some_and(|types| args.len() != fixed + types.len())
+            if count < fixed
+                || variadic.is_none() && !heterogeneous && count != fixed
+                || explicit_pack.is_some_and(|types| count != fixed + types.len())
             {
                 self.error(
                     DiagnosticCode::InvalidExpression,
@@ -186,6 +213,7 @@ impl Checker<'_, '_> {
             }
             let mut pack_types = Vec::new();
             for (i, &arg) in args.iter().enumerate() {
+                let i = i + offset;
                 let expected = if i < fixed {
                     params.get(i)
                 } else {
@@ -198,7 +226,17 @@ impl Checker<'_, '_> {
                     pack_types.push(argument);
                 }
             }
+            if let Some(expected) = expected {
+                self.unify(ret, expected, &expr.span);
+            }
             self.require_value_captures(callee);
+            if let Ty::Callable(id, _, _) = &ty {
+                if let Some(definition) = self.model.function_definition(*id) {
+                    if !self.dependencies.contains(&definition) {
+                        self.dependencies.push(definition);
+                    }
+                }
+            }
             self.record_call_dependencies(callee);
             for &argument in &args {
                 self.require_value_captures(argument);

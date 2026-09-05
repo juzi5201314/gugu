@@ -1,7 +1,24 @@
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::source::{ExpansionId, SourceMap};
 
+use super::ast::{AstArena, AstFile, AstRange, AttrKind, Attribute, ExprId, ItemId, StmtId};
+use super::cfg::ConfiguredAst;
 use super::token::{Token, TokenBuffer, TokenKind};
+use crate::Span;
+// 语言当前有 11 个 lint，编译期固定表按位编码，不分配名称集合。
+const NAMES: [&str; 11] = [
+    "large_copy",
+    "unused_must_use",
+    "unused",
+    "dead_code",
+    "non_snake_case",
+    "non_upper_camel_case",
+    "non_screaming_case",
+    "bad_initialism",
+    "missing_docs",
+    "long_line",
+    "use_order",
+];
 
 pub(super) fn validate_attributes(
     source: &str,
@@ -67,6 +84,112 @@ pub(super) fn validate_attributes(
             }
         }
         index = close + 1;
+    }
+}
+
+pub(super) fn validate_lint_levels(
+    source: &str,
+    file: &AstFile,
+    arena: &AstArena,
+    tokens: &TokenBuffer,
+    configured: &ConfiguredAst,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    struct Scope {
+        start: u32,
+        end: u32,
+        forbid: u16,
+        lower: Vec<(u16, Span)>,
+    }
+    let mut scopes = Vec::new();
+    let mut add = |start, end, attributes: AstRange<Attribute>| {
+        let mut scope = Scope {
+            start,
+            end,
+            forbid: 0,
+            lower: Vec::new(),
+        };
+        for attribute in attributes.as_slice(&arena.attrs) {
+            let (open, close) = match attribute.kind {
+                AttrKind::Outer {
+                    token_open,
+                    token_close,
+                }
+                | AttrKind::Inner {
+                    token_open,
+                    token_close,
+                } => (token_open as usize, token_close as usize),
+                _ => continue,
+            };
+            let body = &tokens.tokens[open + 1..close];
+            let Some(level) = body.first().map(|token| token.text(source)) else {
+                continue;
+            };
+            if !matches!(level, "forbid" | "allow" | "warn") {
+                continue;
+            }
+            debug_assert!(NAMES.len() <= u16::BITS as usize);
+            let mut mask = 0;
+            for token in &body[2..body.len() - 1] {
+                if let Some(index) = NAMES.iter().position(|name| *name == token.text(source)) {
+                    mask |= 1 << index;
+                }
+            }
+            if level == "forbid" {
+                scope.forbid |= mask;
+            } else {
+                scope.lower.push((mask, attribute.span.clone()));
+            }
+        }
+        if scope.forbid != 0 || !scope.lower.is_empty() {
+            scopes.push(scope);
+        }
+    };
+    add(
+        0,
+        u32::try_from(source.len()).expect("源码长度受 SourceMap 限制"),
+        file.inner_attributes,
+    );
+    for (index, item) in arena.items.iter().enumerate() {
+        if configured.item_active(ItemId(index as u32)) {
+            add(item.span.start(), item.span.end(), item.attributes);
+        }
+    }
+    for (index, expression) in arena.exprs.iter().enumerate() {
+        if configured.expr_active(ExprId(index as u32)) {
+            add(
+                expression.span.start(),
+                expression.span.end(),
+                expression.attributes,
+            );
+        }
+    }
+    for (index, statement) in arena.stmts.iter().enumerate() {
+        if configured.stmt_active(StmtId(index as u32)) {
+            add(
+                statement.span.start(),
+                statement.span.end(),
+                statement.attributes,
+            );
+        }
+    }
+    scopes.sort_by_key(|scope| (scope.start, std::cmp::Reverse(scope.end)));
+    let mut stack: Vec<(u32, u16)> = Vec::new();
+    for scope in scopes {
+        while stack.last().is_some_and(|(end, _)| *end <= scope.start) {
+            stack.pop();
+        }
+        let mask = stack.last().map_or(0, |(_, mask)| *mask) | scope.forbid;
+        for (lower, span) in scope.lower {
+            if lower & mask != 0 {
+                diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::InvalidDeclaration,
+                    "内层 allow 或 warn 不能降低外层 forbid",
+                    Some(span),
+                ));
+            }
+        }
+        stack.push((scope.end, mask));
     }
 }
 
@@ -461,20 +584,7 @@ fn validate_lint(source: &str, body: &[Token]) -> Result<(), AttrError> {
 }
 
 fn is_lint_name(name: &str) -> bool {
-    matches!(
-        name,
-        "large_copy"
-            | "unused_must_use"
-            | "unused"
-            | "dead_code"
-            | "non_snake_case"
-            | "non_upper_camel_case"
-            | "non_screaming_case"
-            | "bad_initialism"
-            | "missing_docs"
-            | "long_line"
-            | "use_order"
-    )
+    NAMES.contains(&name)
 }
 
 fn validate_comptime(source: &str, body: &[Token]) -> Result<(), AttrError> {

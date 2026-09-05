@@ -104,6 +104,25 @@ impl Checker<'_, '_> {
                             span.clone(),
                         ));
                     }
+                    if let BoundKind::Path(path) = bound.kind {
+                        match self.model.trait_ref(id.module, path, &bindings) {
+                            Ok(interface) => {
+                                let assumptions = self.model.assumptions_at(self.module, span);
+                                match assumptions {
+                                    Ok(assumptions) => self.trait_constraints.push((
+                                        super::super::traits::Obligation {
+                                            ty: bindings[self.model.name(id.module, name)].clone(),
+                                            interface,
+                                            span: span.clone(),
+                                        },
+                                        assumptions,
+                                    )),
+                                    Err(error) => self.errors.push(error),
+                                }
+                            }
+                            Err(error) => self.errors.push(error),
+                        }
+                    }
                 }
             }
         }
@@ -176,6 +195,9 @@ impl Checker<'_, '_> {
 
     pub(super) fn register_callable_bounds(&mut self, function: FnId) {
         let function = &self.arena().fns[function.0 as usize];
+        if let Err(error) = self.model.assumptions_at(self.module, &function.span) {
+            self.errors.push(error);
+        }
         let mut names = std::collections::BTreeSet::new();
         let generics = function.generics.as_slice(&self.arena().generic_params);
         for (index, generic) in generics.iter().enumerate() {

@@ -181,7 +181,7 @@ impl Checker<'_, '_> {
             }
             ExprKind::Index { base, index } => {
                 let ty = self.expression(base, None);
-                self.index(id, &ty, index, &expr.span)
+                self.index(id, &ty, index, false, &expr.span)
             }
             ExprKind::Struct { path, fields } => self.construct(path, fields, expected, &expr.span),
             ExprKind::Return(value) => {
@@ -249,14 +249,7 @@ impl Checker<'_, '_> {
                 let value = match self.resolve(&target) {
                     Ty::Option(t) | Ty::Result(t, _) => *t,
                     Ty::Var(_) => self.fresh(),
-                    _ => {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "try 需要 Try 类型",
-                            expr.span.clone(),
-                        );
-                        Ty::Error
-                    }
+                    ty => self.try_parts(&ty, &expr.span).0,
                 };
                 let base = self.state.clone();
                 self.tries.push(TryState {
@@ -276,7 +269,11 @@ impl Checker<'_, '_> {
                         "try 的出口类型无法唯一确定",
                         expr.span.clone(),
                     ),
-                    _ => {}
+                    ty => {
+                        let result_value = self.try_parts(ty, &expr.span).0;
+                        self.unify(&value, &result_value, &expr.span);
+                        self.language_method(id, ty, "Try", Vec::new(), "from_value", &expr.span);
+                    }
                 }
                 let success = self.state.clone();
                 if success.reachable {
@@ -296,11 +293,10 @@ impl Checker<'_, '_> {
                     .last()
                     .map_or_else(|| self.return_ty.clone(), |context| context.ty.clone());
                 if matches!(self.resolve(&target), Ty::Var(_)) {
-                    let value = self.fresh();
                     let wrapper = match &ty {
-                        Ty::Option(_) => Ty::Option(Box::new(value)),
-                        Ty::Result(_, error) => Ty::Result(Box::new(value), error.clone()),
-                        _ => Ty::Error,
+                        Ty::Option(_) => Ty::Option(Box::new(self.fresh())),
+                        Ty::Result(_, error) => Ty::Result(Box::new(self.fresh()), error.clone()),
+                        _ => ty.clone(),
                     };
                     self.unify(&wrapper, &target, &expr.span);
                 }
@@ -320,21 +316,17 @@ impl Checker<'_, '_> {
                         expr.span.clone(),
                     );
                 }
-                match (&ty, self.resolve(&target)) {
-                    (Ty::Option(t), Ty::Option(_)) => (**t).clone(),
-                    (Ty::Result(t, e), Ty::Result(_, f)) => {
-                        self.relate(e, &f, &expr.span, false);
-                        (**t).clone()
-                    }
-                    _ => {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "? 操作数与最近出口必须具有相同 Try 错误类型",
-                            expr.span.clone(),
-                        );
-                        Ty::Error
-                    }
+                let target = self.resolve(&target);
+                let (value, error) = self.try_parts(&ty, &expr.span);
+                let (_, target_error) = self.try_parts(&target, &expr.span);
+                self.relate(&error, &target_error, &expr.span, false);
+                if !matches!(ty, Ty::Option(_) | Ty::Result(_, _) | Ty::Error) {
+                    self.language_method(id, &ty, "Try", Vec::new(), "branch", &expr.span);
                 }
+                if !matches!(target, Ty::Option(_) | Ty::Result(_, _) | Ty::Error) {
+                    self.language_method(id, &target, "Try", Vec::new(), "from_error", &expr.span);
+                }
+                value
             }
             ExprKind::Unsafe(body) => {
                 self.unsafe_depth += 1;
@@ -469,8 +461,12 @@ impl Checker<'_, '_> {
         } else {
             ty.clone()
         };
-        let checked = if ty == Ty::Never { Ty::Never } else { checked };
-        self.expressions.push((id, self.resolve(&checked)));
+        let checked = if ty == Ty::Never {
+            Ty::Never
+        } else {
+            self.normalized(&checked)
+        };
+        self.expressions.push((id, checked.clone()));
         self.record_callable_value(id);
         checked
     }
@@ -521,6 +517,7 @@ impl Checker<'_, '_> {
         let a = self.arena();
         let p = &a.paths[path.0 as usize];
         let segs = p.segments.as_slice(&a.segments);
+        let path_arguments = segs.last().expect("路径至少有一段").args;
         if let Some(first) = segs.first() {
             if let Some(mut ty) = self.local(first.name, read || segs.len() > 1, &p.span) {
                 if type_args.len != 0 {
@@ -533,13 +530,16 @@ impl Checker<'_, '_> {
                 for s in &segs[1..] {
                     ty = self.field(&ty, self.model.name(self.module, s.name), &s.span);
                 }
-                if p.args.len != 0 {
-                    return self.path_index(expression, &ty, p.args, &p.span);
+                if path_arguments.len != 0 {
+                    return self.path_index(expression, &ty, path_arguments, !read, &p.span);
                 }
                 return ty;
             }
         }
         let parts = self.model.path(self.module, path);
+        if let Some(ty) = self.associated_constant(path) {
+            return ty;
+        }
         if parts == ["None"] {
             return expected
                 .filter(|ty| matches!(ty, Ty::Option(_)))
@@ -561,7 +561,9 @@ impl Checker<'_, '_> {
                     self.dependencies.push(def);
                 }
                 match self.model.value_type(def) {
-                    Ok(ty) if p.args.len != 0 => self.path_index(expression, &ty, p.args, &p.span),
+                    Ok(ty) if path_arguments.len != 0 => {
+                        self.path_index(expression, &ty, path_arguments, !read, &p.span)
+                    }
                     Ok(ty) => self.instantiate_callable(ty, type_args, &p.span),
                     Err(error) => {
                         self.errors.push(error);
@@ -585,6 +587,7 @@ impl Checker<'_, '_> {
         expression: ExprId,
         ty: &Ty,
         arguments: AstRange<GenericArg>,
+        write: bool,
         span: &Span,
     ) -> Ty {
         let [argument] = arguments.as_slice(&self.arena().generic_args) else {
@@ -596,7 +599,9 @@ impl Checker<'_, '_> {
             return Ty::Error;
         };
         match *argument {
-            GenericArg::Expr(index) => self.index(expression, ty, IndexKind::Expr(index), span),
+            GenericArg::Expr(index) => {
+                self.index(expression, ty, IndexKind::Expr(index), write, span)
+            }
             GenericArg::Type(index) => {
                 let TyKind::Path(path) = self.arena().tys[index.0 as usize].kind else {
                     self.error(
@@ -619,14 +624,7 @@ impl Checker<'_, '_> {
                         }
                         (**element).clone()
                     }
-                    _ => {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "此值不支持下标",
-                            span.clone(),
-                        );
-                        Ty::Error
-                    }
+                    _ => self.user_index(expression, ty, write, span),
                 }
             }
         }
@@ -670,7 +668,7 @@ impl Checker<'_, '_> {
             }
             ExprKind::Index { base, index } => {
                 let ty = self.place(base, true);
-                self.index(id, &ty, index, &expr.span)
+                self.index(id, &ty, index, !read, &expr.span)
             }
             ExprKind::Unary {
                 op: UnOp::Deref, ..
@@ -687,7 +685,7 @@ impl Checker<'_, '_> {
         self.expressions.push((id, ty.clone()));
         ty
     }
-    fn field(&mut self, ty: &Ty, name: &str, span: &Span) -> Ty {
+    pub(super) fn field(&mut self, ty: &Ty, name: &str, span: &Span) -> Ty {
         if let Ty::Tuple(ts) = ty.deref() {
             if let Ok(i) = name.parse::<usize>() {
                 if let Some(ty) = ts.get(i) {
@@ -714,7 +712,7 @@ impl Checker<'_, '_> {
         );
         Ty::Error
     }
-    fn index(&mut self, id: ExprId, ty: &Ty, index: IndexKind, span: &Span) -> Ty {
+    fn index(&mut self, id: ExprId, ty: &Ty, index: IndexKind, write: bool, span: &Span) -> Ty {
         match index {
             IndexKind::Expr(i) => {
                 self.expression(i, Some(&Ty::int()));
@@ -728,14 +726,7 @@ impl Checker<'_, '_> {
                         }
                         (**t).clone()
                     }
-                    _ => {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "此类型不支持整数下标",
-                            span.clone(),
-                        );
-                        Ty::Error
-                    }
+                    _ => self.user_index(id, ty, write, span),
                 }
             }
             IndexKind::Range { start, end } => {
@@ -781,8 +772,54 @@ impl Checker<'_, '_> {
         expected: Option<&Ty>,
         span: &Span,
     ) -> Ty {
-        let parts = self.model.path(self.module, path);
-        match self.model.constructor(self.module, &parts, expected) {
+        let mut parts = self.model.path(self.module, path);
+        let scope = self.model.parameters_at(self.module, span);
+        let arguments = self.arena().paths[path.0 as usize]
+            .segments
+            .as_slice(&self.arena().segments)
+            .last()
+            .expect("非空路径")
+            .args;
+        let target = if parts == ["Self"] {
+            scope.get("Self").cloned()
+        } else if arguments.len != 0 {
+            match self
+                .model
+                .form_kind(self.module, TyKind::Path(path), &scope, &mut Vec::new())
+            {
+                Ok(ty) => Some(ty),
+                Err(error) => {
+                    self.errors.push(error);
+                    return Ty::Error;
+                }
+            }
+        } else if expected.is_some() {
+            expected.cloned()
+        } else {
+            self.model
+                .resolve(self.module, &parts)
+                .ok()
+                .and_then(|definition| {
+                    self.model
+                        .nominal
+                        .iter()
+                        .position(|nominal| nominal.definition == definition)
+                })
+                .map(|index| {
+                    Ty::Named(
+                        index,
+                        (0..self.model.nominal[index].params.len())
+                            .map(|_| self.fresh())
+                            .collect(),
+                    )
+                })
+        };
+        if parts == ["Self"]
+            && let Some(Ty::Named(index, _)) = &target
+        {
+            parts = vec![self.model.nominal[*index].name.as_str()];
+        }
+        match self.model.constructor(self.module, &parts, target.as_ref()) {
             Ok(Some((ty, ctor))) => {
                 let mut seen = std::collections::BTreeSet::new();
                 for (i, f) in fields

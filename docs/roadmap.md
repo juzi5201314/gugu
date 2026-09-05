@@ -129,10 +129,11 @@
   - 验收：闭包捕获共享正确槽并延长寿命；遮蔽不改变旧捕获；普通函数无 await 染色；捕获、返回、存储和跨 suspend 不制造悬空引用或借用错误。
   - 接入证据：`CheckedSemantics` schema 2 携带函数项泛型实例身份、捕获槽及存储需求、调用前置条件和参数包计划，经 verifier 进入布局、IR 与镜像计划指纹。`callable_tests` 验证递归/互递归、共享与遮蔽、返回/defer/async 边界、Fn 约束和参数包；128 项工作区测试通过，Linux/Windows CLI `check` 均接受真实函数切片，错误 `build` 输出稳定诊断且无产物。物理环境分配、协程执行和机器码仍由后续 GIR/runtime/backend 阶段实现。
 
-- [ ] **阶段 17：实现 trait、impl、UFCS 与特化选择**（复杂度：5）
+- [x] **阶段 17：实现 trait、impl、UFCS 与特化选择**（复杂度：5）
   - 依赖：阶段 12、14、16。
   - 实现 trait 方法/关联类型/关联常量、固有 impl 归属、trait impl 完整性、方法自动解引用、UFCS、操作符 trait、否定 impl 和闭世界最具体特化。
   - 验收：固有方法优先、trait 候选唯一、重叠特化部分序无歧义；交叉重叠、缺项、错误关联类型、外模块固有 impl 和 `forbid` 相关约束均正确诊断。
+  - 接入证据：`CheckedSemantics` schema 3 保存静态方法/操作符派发、impl 与 trait 身份、接收者调整和关联投影；完整性、模块归属、泛型证据、负实现和特化部分序均由同一接口表检查。150 项工作区测试通过，覆盖冷/热 query 中实际选中的方法、跨模块泛型路径、关联项循环、用户 `Try`、`Index` 与泛型迭代协议；Linux/Windows CLI 接受真实接口切片，缺少必需方法的 `build` 返回 E0040 并停止在镜像计划形成之前。完整 EarlyConst 与单态化实例闭合仍由阶段 21、24 验收。
 
 - [ ] **阶段 18：实现 impl Trait、dyn Trait 与 Any 前端**（复杂度：4）
   - 依赖：阶段 17、12。

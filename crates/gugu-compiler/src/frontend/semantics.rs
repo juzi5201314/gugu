@@ -6,11 +6,14 @@ mod numeric;
 mod output;
 mod patterns;
 mod query;
+mod traits;
 pub(crate) use output::CheckedSemantics;
 #[cfg(test)]
 mod callable_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod trait_tests;
 
 use super::{ParsedModule, names::NameResolution};
 use crate::diagnostics::Diagnostic;

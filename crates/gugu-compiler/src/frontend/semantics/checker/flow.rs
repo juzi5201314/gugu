@@ -183,15 +183,19 @@ impl Checker<'_, '_> {
                     self.discarded_expression = outer;
                 } else {
                     let left = self.place(place, op != AssignOp::Assign);
+                    let trait_assignment =
+                        op != AssignOp::Assign && !self.is_number(&left) && left != Ty::String;
                     let right = self.expression(
                         value,
-                        if matches!(op, AssignOp::Shl | AssignOp::Shr) {
+                        if matches!(op, AssignOp::Shl | AssignOp::Shr) || trait_assignment {
                             None
                         } else {
                             Some(&left)
                         },
                     );
-                    if op != AssignOp::Assign {
+                    if trait_assignment {
+                        self.compound_trait(place, op, &left, &right, &stmt.span);
+                    } else if op != AssignOp::Assign {
                         self.operation_type(
                             place,
                             match op {
@@ -211,6 +215,9 @@ impl Checker<'_, '_> {
                             &right,
                             &stmt.span,
                         );
+                    }
+                    if op != AssignOp::Assign {
+                        self.index_writeback(place, &stmt.span);
                     }
                     self.place_written(place);
                     if let ExprKind::Path(path) = self.arena().exprs[place.0 as usize].kind {
@@ -389,14 +396,7 @@ impl Checker<'_, '_> {
             let elem = match ty.deref() {
                 Ty::Array(t, _) | Ty::Slice(t) => (**t).clone(),
                 Ty::Range => Ty::int(),
-                _ => {
-                    self.error(
-                        DiagnosticCode::InvalidExpression,
-                        "迭代值缺少 IntoIter 实现",
-                        self.arena().exprs[iter.0 as usize].span.clone(),
-                    );
-                    Ty::Error
-                }
+                _ => self.user_iterator(iter, &ty),
             };
             self.bind(pat, &elem, true, Some(false));
         }
