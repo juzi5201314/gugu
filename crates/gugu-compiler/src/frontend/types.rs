@@ -9,18 +9,6 @@ pub(crate) struct Layout {
     pub(crate) align: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum Primitive {
-    Unit,
-    Never,
-    Bool,
-    Byte,
-    Int,
-    Uint,
-    Char,
-    Float,
-}
-
 #[derive(Debug, Default)]
 pub(crate) struct TypeArena {
     layouts: Vec<Option<Layout>>,
