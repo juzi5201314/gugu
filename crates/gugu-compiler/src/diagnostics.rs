@@ -100,6 +100,10 @@ pub enum DiagnosticCode {
     ImportConflict,
     /// 两个不同定义路径产生相同稳定摘要。
     DefinitionHashCollision,
+    /// 类型形成或布局非法。
+    InvalidType,
+    /// 类型递归导致无限大小。
+    RecursiveType,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -142,6 +146,8 @@ impl fmt::Display for DiagnosticCode {
             Self::ImportNotFound => "E0035",
             Self::ImportConflict => "E0036",
             Self::DefinitionHashCollision => "E0037",
+            Self::InvalidType => "E0038",
+            Self::RecursiveType => "E0039",
         };
         formatter.write_str(code)
     }

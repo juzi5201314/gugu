@@ -15,6 +15,7 @@ mod names;
 mod parse;
 mod string;
 mod token;
+mod types;
 
 use ast::{AstArena, AstFile, ItemKind};
 pub(crate) use lex::lex;
