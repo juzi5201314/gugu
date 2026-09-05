@@ -232,6 +232,7 @@ impl Checker<'_, '_> {
                     .signature()
                     .is_some_and(|(params, _)| matches!(params.first(), Some(Ty::Ref(_)))),
             implicit_receiver: selected.receiver,
+            dynamic: selected.dynamic,
         });
         Some(selected)
     }

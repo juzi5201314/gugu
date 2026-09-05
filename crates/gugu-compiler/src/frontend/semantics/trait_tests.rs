@@ -1,16 +1,4 @@
-use crate::{CompileRequest, Compiler, TargetName};
-
-fn accepts(source: &str) -> bool {
-    let result = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
-    if !result.is_success() {
-        eprintln!("{:?}", result.diagnostics().items());
-    }
-    result.is_success()
-}
+use super::tests::accepts;
 
 #[test]
 fn inherent_methods_accept_receiver_and_type_ufcs_forms() {

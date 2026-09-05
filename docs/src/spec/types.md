@@ -220,6 +220,8 @@ fn() !
 - 同一签名里两个 `impl Print` 是两个类型，不必相同。
 - 函数体必须能推到**唯一**隐藏类型；推不出或有两个候选则编译错误。
 - 隐藏类型必须满足写出的全部约束。关联类型通过约束里的绑定不另设语法（需要关联类型时写具名泛型或 TAIT）。
+- APIT 的匿名参数身份来自各自的声明位置，不能由调用方显式点名。RPIT 的隐藏类型由该函数的全部返回路径共同确定；TAIT 的隐藏类型由定义模块中的构造位置共同确定。其它模块只能使用声明的约束，不能通过期望具体类型反向指定或揭露隐藏类型。
+- 不透明声明捕获其声明作用域内的泛型参数；每组具体实参按同一隐藏类型表达式实例化。TAIT 的构造函数不能额外捕获别名作用域外的泛型参数。trait 方法中的 APIT 必须保持声明的约束，impl 不能更换或加严它们。
 - `pub` 函数可以返回 `impl Trait`；对外仍不能点名隐藏类型。
 - trait 方法可以返回 `impl Trait`（RPITIT）。该 impl 对所有实现者可以是不同的具体类型；调用方仍只能当不透明类型用。
 - 禁止：`extern "C"` 签名、`union` 字段、`dyn impl Print`、`impl Trait` 当 `chan`/`Vec` 的类型实参（必须先 TAIT 起名）。
@@ -237,6 +239,8 @@ fn make_cmp() Cmp = fn(a, b) = a < b
 `dyn Trait` 是胖指针：数据 + vtable。这是**显式擦除**。`dyn` 是关键字。泛型默认仍然单态化，不经过 `dyn`。
 
 只有同时满足下列条件的 trait 才能写成 `dyn Trait`：没有关联类型、没有关联常量、没有泛型方法、没有返回 `impl Trait` 的方法、方法接收者是 `self` 或 `self: &Self`。`Print` 可以 `dyn`；`Add`（有 `Output`）不可以。`Any` 可以 `dyn`（见下）。
+
+除接收者本身外，方法签名不能直接或嵌套使用 `Self`，否则不同具体类型的对象无法共享一个安全调用约定。比如 `fn clone(self: &Self) Self` 或 `fn eq(self: &Self, other: &Self) bool` 不能据此形成接口对象。可调用对象使用胖函数类型 `fn(参数类型) 返回类型`；不能把没有调用签名的裸 `dyn Fn` 当作动态函数类型。
 
 `T` 实现 `Trait` 时，`T` 的值可以强制成 `dyn Trait`（分配或复用堆对象，胖指针）。这是显式擦除。
 
@@ -317,7 +321,7 @@ impl dyn Any {
 
 三者比较容器记录的 `TypeId` 与 `type_id[T]()`。相等则 `downcast` 的 `&T` 指向容器保存的 T槽，`downcast_copy` 按 T 的值语义产生副本；不等则 `None`，不 panic。只要该引用或 `dyn Any` 句柄仍存活，容器和槽就保持有效。
 
-没有「downcast 成另一个 `dyn Trait`」。要接口对象，直接用 `dyn Print` 擦除。
+恢复接口类型同样只做精确类型匹配：若容器保存的就是 `dyn Print`，可以取回 `dyn Print`；不能把保存的 `Point` 或另一个接口对象临时转换成 `dyn Print`。要接口对象，应在放入容器前显式按 `dyn Print` 擦除。
 
 ```
 let a: dyn Any = Point { x: 1, y: 2 }

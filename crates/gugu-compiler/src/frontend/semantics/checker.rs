@@ -14,7 +14,9 @@ mod flow;
 mod generics;
 mod inference;
 mod methods;
+mod opaque;
 mod operations;
+mod reflection;
 
 #[derive(Clone)]
 struct State {
@@ -74,11 +76,15 @@ struct Checker<'m, 'a> {
     expression_callables: BTreeMap<u32, Vec<super::model::CallableId>>,
     trait_constraints: Vec<(super::traits::Obligation, Vec<super::traits::Obligation>)>,
     dispatches: Vec<super::output::Dispatch>,
+    hidden_candidates: Vec<(u32, Vec<Ty>, Ty)>,
+    erasures: Vec<super::output::Erasure>,
+    reflections: Vec<super::output::Reflection>,
 }
 
 pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut bodies = Vec::new();
+    let mut hidden_types = vec![None; model.opaques.definitions.len()];
     let mut dependencies: Vec<Vec<Vec<DefRef>>> = model
         .modules
         .iter()
@@ -108,6 +114,7 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                 _ => {}
             }
             checker.finish_inference();
+            checker.finish_hidden(&mut hidden_types);
             if checker.vars.iter().any(Option::is_none) {
                 checker.error(
                     DiagnosticCode::InvalidType,
@@ -138,9 +145,20 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                 slot_storage,
                 variadic_calls: checker.variadic_calls,
                 dispatches: checker.dispatches,
+                erasures: checker.erasures,
+                reflections: checker.reflections,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
+        }
+    }
+    for (id, hidden) in hidden_types.iter().enumerate() {
+        if hidden.is_none() && model.opaque_requires_definition(id as u32) {
+            errors.push(Diagnostic::error(
+                DiagnosticCode::InvalidType,
+                "隐藏类型未能唯一形成",
+                Some(model.opaque_span(id as u32).clone()),
+            ));
         }
     }
     let initialization = match super::initialization::plan(model, &dependencies) {
@@ -155,6 +173,7 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
             bodies,
             initialization,
             input_fingerprint: [0; 32],
+            hidden_types,
         };
         output.verify(model).map_err(|error| vec![error])?;
         Ok(output)
@@ -201,6 +220,9 @@ impl<'m, 'a> Checker<'m, 'a> {
             expression_callables: BTreeMap::new(),
             trait_constraints: Vec::new(),
             dispatches: Vec::new(),
+            hidden_candidates: Vec::new(),
+            erasures: Vec::new(),
+            reflections: Vec::new(),
         }
     }
     fn arena(&self) -> &'a AstArena {
@@ -244,6 +266,22 @@ impl<'m, 'a> Checker<'m, 'a> {
             Ty::Result(t, e) => Ty::Result(Box::new(self.resolve(t)), Box::new(self.resolve(e))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve(t)).collect()),
             Ty::Named(i, args) => Ty::Named(*i, args.iter().map(|t| self.resolve(t)).collect()),
+            Ty::Opaque(id, arguments) => {
+                Ty::Opaque(*id, arguments.iter().map(|ty| self.resolve(ty)).collect())
+            }
+            Ty::Dyn(interfaces) => Ty::Dyn(
+                interfaces
+                    .iter()
+                    .map(|interface| super::traits::TraitRef {
+                        id: interface.id,
+                        arguments: interface
+                            .arguments
+                            .iter()
+                            .map(|ty| self.resolve(ty))
+                            .collect(),
+                    })
+                    .collect(),
+            ),
             Ty::Function(args, ret) => Ty::Function(
                 args.iter().map(|t| self.resolve(t)).collect(),
                 Box::new(self.resolve(ret)),
@@ -299,6 +337,9 @@ impl<'m, 'a> Checker<'m, 'a> {
         }
         if a == b || coercion && a == Ty::Never {
             return b;
+        }
+        if let Some(ty) = self.opaque_relation(&a, &b, span, coercion) {
+            return ty;
         }
         match (&a, &b) {
             (Ty::Var(id), ty) | (ty, Ty::Var(id)) => {
@@ -390,8 +431,19 @@ impl<'m, 'a> Checker<'m, 'a> {
     }
     fn function(&mut self, id: FnId, expected: Option<&Ty>) -> Ty {
         self.register_callable_bounds(id);
+        self.register_apits(id);
         let f = &self.arena().fns[id.0 as usize];
-        let expected = expected.and_then(Ty::signature);
+        let opaque_hint = match expected
+            .map(|ty| self.model.opaque_function(ty))
+            .transpose()
+        {
+            Ok(signature) => signature.flatten(),
+            Err(error) => {
+                self.errors.push(error);
+                None
+            }
+        };
+        let expected = opaque_hint.as_ref().or(expected).and_then(Ty::signature);
         self.return_ty = if let Some(ty) = f.return_ty {
             self.form(ty)
         } else if f.name.is_none() {
@@ -605,10 +657,19 @@ fn contains_var(ty: &Ty, id: u32) -> bool {
         | Ty::Chan(t)
         | Ty::Join(t) => contains_var(t, id),
         Ty::Result(t, e) => contains_var(t, id) || contains_var(e, id),
-        Ty::Tuple(ts) | Ty::Named(_, ts) => ts.iter().any(|t| contains_var(t, id)),
+        Ty::Tuple(ts) | Ty::Named(_, ts) | Ty::Opaque(_, ts) => {
+            ts.iter().any(|t| contains_var(t, id))
+        }
         Ty::Function(ts, ret) => ts.iter().any(|t| contains_var(t, id)) || contains_var(ret, id),
         Ty::Callable(_, arguments, signature) => {
             arguments.iter().any(|ty| contains_var(ty, id)) || contains_var(signature, id)
+        }
+        Ty::Dyn(interfaces) => interfaces
+            .iter()
+            .flat_map(|interface| &interface.arguments)
+            .any(|ty| contains_var(ty, id)),
+        Ty::Projection(base, interface, _) => {
+            contains_var(base, id) || interface.arguments.iter().any(|ty| contains_var(ty, id))
         }
         _ => false,
     }

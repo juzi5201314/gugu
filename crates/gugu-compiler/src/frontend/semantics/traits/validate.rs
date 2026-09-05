@@ -236,7 +236,14 @@ impl Model<'_> {
                     receiver: br,
                     ..
                 },
-            ) => ar == br && same_type(a, b)?,
+            ) => {
+                ar == br
+                    && self.same_opaque_signature(
+                        &self.normalize(&substitute(a, bindings), assumptions)?,
+                        &self.normalize(b, assumptions)?,
+                        assumptions,
+                    )?
+            }
             (MemberKind::Type(Some(a)), MemberKind::Type(Some(b))) => same_type(a, b)?,
             (MemberKind::Const { ty: a, value: av }, MemberKind::Const { ty: b, value: bv }) => {
                 av == bv && same_type(a, b)?
@@ -267,11 +274,29 @@ impl Model<'_> {
         ) else {
             return Ok(bindings);
         };
+        let a_apits: Vec<_> = self
+            .apits(super::super::model::CallableId {
+                module: a.module,
+                function: af.0,
+            })
+            .collect();
+        let b_apits: Vec<_> = self
+            .apits(super::super::model::CallableId {
+                module: b.module,
+                function: bf.0,
+            })
+            .collect();
         let af = &ma.arena.fns[af.0 as usize];
         let bf = &mb.arena.fns[bf.0 as usize];
         let ag = af.generics.as_slice(&ma.arena.generic_params);
         let bg = bf.generics.as_slice(&mb.arena.generic_params);
         let fail = || self.trait_error(b, "方法的泛型约束、unsafe 或参数传递契约与 trait 不一致");
+        if a_apits.len() != b_apits.len() {
+            return Err(fail());
+        }
+        for (&a, &b) in a_apits.iter().zip(&b_apits) {
+            bindings.insert(Self::apit_name(a), Ty::Param(Self::apit_name(b)));
+        }
         if ag.len() != bg.len() || af.unsafety != bf.unsafety || af.extern_abi != bf.extern_abi {
             return Err(fail());
         }
@@ -333,6 +358,26 @@ impl Model<'_> {
         let mut expected_params = self.parameters_at(a.module, &af.span);
         expected_params.extend(bindings.clone());
         let actual_params = self.parameters_at(b.module, &bf.span);
+        let assumptions = self.assumptions_at(b.module, &bf.span)?;
+        for (a_id, b_id) in a_apits.into_iter().zip(b_apits) {
+            let a_bound = self.form_bounds(
+                a.module,
+                self.opaques.definitions[a_id as usize].bounds,
+                &expected_params,
+                &Ty::Param("$parameter".into()),
+            )?;
+            let b_bound = self.form_bounds(
+                b.module,
+                self.opaques.definitions[b_id as usize].bounds,
+                &actual_params,
+                &Ty::Param("$parameter".into()),
+            )?;
+            if self.bound_contract(a_bound, &bindings, &assumptions)?
+                != self.bound_contract(b_bound, &BTreeMap::new(), &assumptions)?
+            {
+                return Err(fail());
+            }
+        }
         for (a_param, b_param) in ag.iter().zip(bg) {
             if let (
                 GenericParamKind::Type { bounds: ab, .. },

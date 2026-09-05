@@ -195,12 +195,29 @@ impl Checker<'_, '_> {
         receiver: bool,
         expected: Option<&Ty>,
     ) -> Ty {
+        if interface.is_none() && receiver {
+            if let Some(result) = self.reflection_method(
+                callee,
+                &self.resolve(&self_ty),
+                name,
+                type_args,
+                args,
+                expected,
+            ) {
+                return result;
+            }
+        }
         if interface.is_none()
             && receiver
             && self.model.fields(&self_ty).is_some_and(|fields| {
-                fields
-                    .iter()
-                    .any(|field| field.name == name && field.ty.signature().is_some())
+                fields.iter().any(|field| {
+                    field.name == name
+                        && (field.ty.signature().is_some()
+                            || self
+                                .model
+                                .opaque_function(&field.ty)
+                                .is_ok_and(|signature| signature.is_some()))
+                })
             })
         {
             let ty = self.field(&self_ty, name, &self.arena().exprs[callee.0 as usize].span);
@@ -255,7 +272,7 @@ impl Checker<'_, '_> {
         }
         let callable = match method.callable {
             Some(id) => self.instantiate_callable(
-                Ty::Callable(id, Vec::new(), Box::new(method.signature)),
+                Ty::Callable(id, method.arguments, Box::new(method.signature)),
                 type_args,
                 span,
             ),
@@ -311,6 +328,7 @@ impl Checker<'_, '_> {
             borrow: actual.as_ref().is_some_and(|ty| matches!(ty, Ty::Ref(_)))
                 && !matches!(target, Ty::Ref(_)),
             implicit_receiver: receiver,
+            dynamic: method.dynamic,
         });
         self.invoke(callee, callable, args.to_vec(), actual, expected)
     }
@@ -420,6 +438,7 @@ impl Checker<'_, '_> {
                 dereferences: 0,
                 borrow: matches!(params.first(), Some(Ty::Ref(_))),
                 implicit_receiver: true,
+                dynamic: selected.dynamic,
             });
         }
         if comparison { Ty::Bool } else { ret.clone() }

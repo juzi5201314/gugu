@@ -416,9 +416,16 @@ impl Model<'_> {
         for name in ["StableHash", "StableOrd"] {
             self.add_language_interface(name, Vec::new(), Vec::new(), true);
         }
-        for name in ["Any", "Fn"] {
-            self.add_language_interface(name, Vec::new(), Vec::new(), false);
-        }
+        self.add_language_interface("Fn", Vec::new(), Vec::new(), false);
+        self.add_language_interface(
+            "Any",
+            Vec::new(),
+            vec![(
+                "type_of",
+                method_kind(vec![Ty::Ref(Box::new(self_ty.clone()))], Ty::TypeId),
+            )],
+            false,
+        );
         let id = self.traits.interfaces.len();
         let output = Ty::Projection(
             Box::new(self_ty.clone()),

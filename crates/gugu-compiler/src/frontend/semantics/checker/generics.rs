@@ -9,7 +9,7 @@ impl Checker<'_, '_> {
         arguments: AstRange<GenericArg>,
         span: &Span,
     ) -> Ty {
-        let Ty::Callable(id, _, signature) = ty else {
+        let Ty::Callable(id, captured, signature) = ty else {
             if arguments.len != 0 {
                 self.error(
                     DiagnosticCode::InvalidExpression,
@@ -47,7 +47,26 @@ impl Checker<'_, '_> {
                 span.clone(),
             );
         }
-        let mut bindings = BTreeMap::new();
+        let context = self.model.callable_context(id);
+        let mut bindings = self.model.parameters_at(id.module, &function.span);
+        bindings.extend(context.keys().cloned().zip(captured));
+        if let Some(definition) = self.model.function_definition(id) {
+            match self.model.value_type(definition) {
+                Ok(formal) => {
+                    let Ty::Callable(_, _, formal) = formal else {
+                        unreachable!("函数项签名");
+                    };
+                    let mut inferred = BTreeMap::new();
+                    if super::super::traits::select::matches(&formal, &signature, &mut inferred) {
+                        bindings.extend(inferred);
+                    }
+                }
+                Err(error) => {
+                    self.errors.push(error);
+                    return Ty::Error;
+                }
+            }
+        }
         let mut index = 0;
         for generic in generics {
             if let GenericParamKind::Type {
@@ -87,6 +106,18 @@ impl Checker<'_, '_> {
                 Ty::Tuple(elements),
             );
         }
+        if arguments.is_empty()
+            && let Some(name) = pack
+        {
+            let ty = self.fresh();
+            bindings.insert(self.model.name(id.module, name).into(), ty);
+        }
+        let associated: Vec<_> = bindings
+            .iter()
+            .filter(|(name, _)| name.starts_with("Self::"))
+            .map(|(name, ty)| (name.clone(), substitute(ty, &bindings)))
+            .collect();
+        bindings.extend(associated);
         for generic in generics {
             if let GenericParamKind::Type {
                 name,
@@ -126,22 +157,8 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        let arguments = generics
-            .iter()
-            .filter_map(|param| {
-                if let GenericParamKind::Type { name, .. } = param.kind {
-                    let name = self.model.name(id.module, name);
-                    Some(
-                        bindings
-                            .get(name)
-                            .cloned()
-                            .unwrap_or_else(|| Ty::Param(name.to_owned())),
-                    )
-                } else {
-                    None
-                }
-            })
-            .collect();
+        self.instantiate_apits(id, &mut bindings, span);
+        let arguments = context.keys().map(|name| bindings[name].clone()).collect();
         Ty::Callable(id, arguments, Box::new(substitute(&signature, &bindings)))
     }
     pub(super) fn typed_callable(
@@ -282,19 +299,25 @@ impl Checker<'_, '_> {
         let parsed = &self.model.modules[id.module];
         let function = &parsed.arena.fns[id.function as usize];
         let generics = function.generics.as_slice(&parsed.arena.generic_params);
-        let names = generics.iter().filter_map(|param| {
-            if let GenericParamKind::Type { name, .. } = param.kind {
-                Some(self.model.name(id.module, name).to_owned())
-            } else {
-                None
-            }
-        });
-        let bindings = names.zip(arguments.iter().cloned()).collect();
+        let bindings: BTreeMap<_, _> = self
+            .model
+            .callable_context(*id)
+            .into_keys()
+            .zip(arguments.iter().cloned())
+            .collect();
         for generic in generics {
             if let GenericParamKind::Type {
-                bounds, pack: true, ..
+                name,
+                bounds,
+                pack: true,
+                ..
             } = generic.kind
             {
+                self.unify(
+                    &bindings[self.model.name(id.module, name)],
+                    &Ty::Tuple(elements.to_vec()),
+                    span,
+                );
                 for bound in bounds.as_slice(&parsed.arena.bounds) {
                     if let Some(signature) = self.bound_signature(id.module, &bound.kind) {
                         let expected = substitute(&signature, &bindings);

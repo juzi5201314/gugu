@@ -4,7 +4,11 @@ use super::{Implementation, Member, MemberKind, Method, Obligation, TraitRef};
 use crate::Diagnostic;
 use std::collections::BTreeMap;
 
-pub(super) fn matches(pattern: &Ty, concrete: &Ty, bindings: &mut BTreeMap<String, Ty>) -> bool {
+pub(in super::super) fn matches(
+    pattern: &Ty,
+    concrete: &Ty,
+    bindings: &mut BTreeMap<String, Ty>,
+) -> bool {
     if let Ty::Param(name) = pattern {
         if let Some(previous) = bindings.get(name) {
             return previous == concrete;
@@ -22,6 +26,13 @@ pub(super) fn matches(pattern: &Ty, concrete: &Ty, bindings: &mut BTreeMap<Strin
         (Ty::Array(a, n), Ty::Array(b, m)) => n == m && matches(a, b, bindings),
         (Ty::Tuple(a), Ty::Tuple(b)) => match_list(a, b, bindings),
         (Ty::Named(i, a), Ty::Named(j, b)) => i == j && match_list(a, b, bindings),
+        (Ty::Opaque(i, a), Ty::Opaque(j, b)) => i == j && match_list(a, b, bindings),
+        (Ty::Dyn(a), Ty::Dyn(b)) => {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(a, b)| a.id == b.id && match_list(&a.arguments, &b.arguments, bindings))
+        }
         (Ty::Result(a, e), Ty::Result(b, f)) => matches(a, b, bindings) && matches(e, f, bindings),
         (Ty::Function(a, r), Ty::Function(b, s)) => {
             match_list(a, b, bindings) && matches(r, s, bindings)
@@ -76,6 +87,9 @@ impl Model<'_> {
             .iter()
             .any(|a| a.ty == *ty && a.interface == *interface)
         {
+            return Ok(());
+        }
+        if self.declared_trait_bounds(ty)?.contains(interface) {
             return Ok(());
         }
         if stack.iter().any(|(t, i)| t == ty && i == interface) {
@@ -171,9 +185,12 @@ impl Model<'_> {
             return false;
         }
         let name = definition.name.as_str();
+        if name == "Any" {
+            return !matches!(ty, Ty::Never | Ty::Var(_) | Ty::Error | Ty::Param(_));
+        }
         if matches!(name, "Clone" | "Eq" | "Ord" | "StableOrd" | "StableHash") {
             return match ty {
-                Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String => true,
+                Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String | Ty::TypeId => true,
                 Ty::Float(_) => name == "Clone",
                 Ty::Array(t, _) | Ty::Option(t) => self.builtin_trait(t, interface),
                 Ty::Tuple(ts) => ts.iter().all(|t| self.builtin_trait(t, interface)),
@@ -292,6 +309,28 @@ impl Model<'_> {
                     .collect::<Result<_, _>>()?,
                 Box::new(recur(signature, stack)?),
             ),
+            Ty::Opaque(id, arguments) => Ty::Opaque(
+                *id,
+                arguments
+                    .iter()
+                    .map(|ty| recur(ty, stack))
+                    .collect::<Result<_, _>>()?,
+            ),
+            Ty::Dyn(interfaces) => Ty::Dyn(
+                interfaces
+                    .iter()
+                    .map(|interface| {
+                        Ok(TraitRef {
+                            id: interface.id,
+                            arguments: interface
+                                .arguments
+                                .iter()
+                                .map(|ty| recur(ty, stack))
+                                .collect::<Result<_, Diagnostic>>()?,
+                        })
+                    })
+                    .collect::<Result<_, Diagnostic>>()?,
+            ),
             _ => ty.clone(),
         })
     }
@@ -303,6 +342,9 @@ impl Model<'_> {
         name: &str,
         assumptions: &[Obligation],
     ) -> Result<Option<Method>, Diagnostic> {
+        if let Some(method) = self.dynamic_method(module, ty, interface, name)? {
+            return Ok(Some(method));
+        }
         if interface.is_none() {
             let mut inherent = Vec::new();
             for implementation in &self.traits.implementations {
@@ -340,9 +382,30 @@ impl Model<'_> {
             }
         }
         let mut interfaces = Vec::new();
+        let declared = self.declared_trait_bounds(ty)?;
         if let Some(interface) = interface {
             interfaces.push(interface.clone());
         } else {
+            interfaces.extend(declared.iter().cloned());
+            for (id, definition) in
+                self.traits
+                    .interfaces
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, definition)| {
+                        definition.definition.is_none() && definition.members.contains_key(name)
+                    })
+            {
+                let arguments = if definition.parameters.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![ty.clone()]
+                };
+                let interface = TraitRef { id, arguments };
+                if self.builtin_trait(ty, &interface) {
+                    interfaces.push(interface);
+                }
+            }
             for bound in assumptions.iter().filter(|bound| bound.ty == *ty) {
                 interfaces.push(bound.interface.clone());
             }
@@ -405,6 +468,7 @@ impl Model<'_> {
                     if assumptions
                         .iter()
                         .any(|b| b.ty == *ty && b.interface == interface)
+                        || declared.contains(&interface)
                         || self.builtin_trait(ty, &interface) =>
                 {
                     methods.push(self.resolved_method(
@@ -436,7 +500,7 @@ impl Model<'_> {
             _ => Err(self.error(module, "trait 方法候选不唯一，需要 UFCS 消歧")),
         }
     }
-    fn resolved_method(
+    pub(in super::super) fn resolved_method(
         &self,
         module: usize,
         member: &Member,
@@ -481,13 +545,23 @@ impl Model<'_> {
                 _ => None,
             }
         });
+        let arguments = callable
+            .map(|id| {
+                self.callable_context(id)
+                    .into_values()
+                    .map(|ty| substitute(&ty, bindings))
+                    .collect()
+            })
+            .unwrap_or_default();
         Ok(Method {
             callable,
+            arguments,
             signature: self.normalize(&substitute(signature, bindings), assumptions)?,
             receiver: *receiver,
             implementation,
             interface: None,
             member: None,
+            dynamic: false,
         })
     }
 }

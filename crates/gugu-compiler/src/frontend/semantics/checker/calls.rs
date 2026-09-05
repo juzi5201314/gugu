@@ -176,6 +176,14 @@ impl Checker<'_, '_> {
         expected: Option<&Ty>,
     ) -> Ty {
         let expr = &self.arena().exprs[callee.0 as usize];
+        let ty = match self.model.opaque_function(&ty) {
+            Ok(Some(signature)) => signature,
+            Ok(None) => ty,
+            Err(error) => {
+                self.errors.push(error);
+                return Ty::Error;
+            }
+        };
         if let Some((params, ret)) = ty.signature() {
             if let Some(expected) = expected
                 && !matches!(ret, Ty::Projection(..))

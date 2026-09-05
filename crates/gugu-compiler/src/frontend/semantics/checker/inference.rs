@@ -33,7 +33,7 @@ impl Checker<'_, '_> {
 
     pub(super) fn builtin_comparable(&self, ty: &Ty) -> bool {
         match self.resolve(ty) {
-            Ty::Bool | Ty::Char | Ty::String | Ty::Unit => true,
+            Ty::Bool | Ty::Char | Ty::String | Ty::Unit | Ty::TypeId => true,
             Ty::Tuple(ts) => ts.iter().all(|t| self.builtin_comparable(t)),
             Ty::Array(t, _) => self.builtin_comparable(&t),
             ty => self.is_number(&ty),
@@ -147,6 +147,13 @@ impl Checker<'_, '_> {
             let actual = self.resolve(&actual);
             let signature = match &actual {
                 Ty::Param(name) => self.callable_bounds.get(name).cloned(),
+                Ty::Opaque(..) => match self.model.opaque_function(&actual) {
+                    Ok(signature) => signature,
+                    Err(error) => {
+                        self.errors.push(error);
+                        continue;
+                    }
+                },
                 _ => actual
                     .signature()
                     .map(|(params, ret)| Ty::Function(params.to_vec(), Box::new(ret.clone()))),
@@ -171,7 +178,16 @@ impl Checker<'_, '_> {
             }
         }
         for (obligation, assumptions) in std::mem::take(&mut self.trait_constraints) {
-            let ty = self.resolve(&obligation.ty);
+            let ty = match self
+                .model
+                .normalize(&self.resolve(&obligation.ty), &assumptions)
+            {
+                Ok(ty) => ty,
+                Err(error) => {
+                    self.errors.push(error);
+                    continue;
+                }
+            };
             let interface = super::super::traits::TraitRef {
                 id: obligation.interface.id,
                 arguments: obligation

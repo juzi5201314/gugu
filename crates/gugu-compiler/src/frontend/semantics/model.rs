@@ -30,6 +30,9 @@ pub(crate) enum Ty {
     Named(usize, Vec<Ty>),
     Param(String),
     Projection(Box<Ty>, super::traits::TraitRef, String),
+    Opaque(u32, Vec<Ty>),
+    Dyn(Vec<super::traits::TraitRef>),
+    TypeId,
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
     Range,
@@ -70,6 +73,7 @@ impl Ty {
             "bool" => Self::Bool,
             "char" => Self::Char,
             "string" => Self::String,
+            "TypeId" => Self::TypeId,
             "int" | "i64" | "isize" => Self::int(),
             "uint" | "u64" | "usize" => Self::Int {
                 signed: false,
@@ -143,6 +147,7 @@ pub(crate) struct Model<'a> {
     pub(crate) modules: &'a [ParsedModule],
     pub(crate) nominal: Vec<Nominal>,
     pub(super) traits: super::traits::Traits,
+    pub(super) opaques: super::opaque::Opaques,
     names: &'a NameResolution,
     // 模块/FnDecl 编号稠密；匿名闭包没有具名 ItemId，不参与函数地址的初始化依赖。
     function_items: Vec<Vec<Option<ItemId>>>,
@@ -198,6 +203,16 @@ impl<'a> Model<'a> {
             Ty::Float(bits) => format!("f{bits}"),
             Ty::Char => "char".into(),
             Ty::String => "string".into(),
+            Ty::TypeId => "TypeId".into(),
+            Ty::Opaque(_, _) => "impl Trait".into(),
+            Ty::Dyn(bounds) => format!(
+                "dyn {}",
+                bounds
+                    .iter()
+                    .map(|bound| self.traits.interfaces[bound.id].name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" + ")
+            ),
             Ty::Ref(t) => format!("&{}", self.describe(t)),
             Ty::Ptr(t) => format!("*{}", self.describe(t)),
             Ty::Slice(t) => format!("[{}]", self.describe(t)),
@@ -252,6 +267,7 @@ impl<'a> Model<'a> {
             nominal: Vec::new(),
             names,
             traits: super::traits::Traits::default(),
+            opaques: super::opaque::Opaques::default(),
             function_items: modules
                 .iter()
                 .map(|module| {
@@ -302,7 +318,11 @@ impl<'a> Model<'a> {
                 });
             }
         }
+        model.collect_opaques().map_err(|error| vec![error])?;
         model.collect_traits().map_err(|error| vec![error])?;
+        model
+            .validate_opaque_bounds()
+            .map_err(|error| vec![error])?;
         for index in 0..model.nominal.len() {
             let def = model.nominal[index].definition;
             let m = &modules[def.module];
@@ -493,10 +513,17 @@ impl<'a> Model<'a> {
         let arena = &self.modules[module].arena;
         let mut params = self.associated_scope(module, span);
         // parser 先分配内层 FnDecl，逆序遍历使内层同名参数覆盖外层。
-        let owners = arena.fns.iter().rev().filter(|function| {
+        let owners = arena.fns.iter().enumerate().rev().filter(|(_, function)| {
             function.span.start() <= span.start() && function.span.end() >= span.end()
         });
-        for owner in owners {
+        for (index, owner) in owners {
+            for id in self.apits(CallableId {
+                module,
+                function: index as u32,
+            }) {
+                let name = Self::apit_name(id);
+                params.insert(name.clone(), Ty::Param(name));
+            }
             for param in owner.generics.as_slice(&arena.generic_params) {
                 if let GenericParamKind::Type { name, .. } = param.kind {
                     let name = self.name(module, name).to_owned();
@@ -505,6 +532,14 @@ impl<'a> Model<'a> {
             }
         }
         params
+    }
+
+    pub(super) fn callable_context(&self, id: CallableId) -> BTreeMap<String, Ty> {
+        let function = &self.modules[id.module].arena.fns[id.function as usize];
+        let mut context = self.parameters_at(id.module, &function.span);
+        // 关联类型路径是由 Self 推导的查找缓存，不构成独立实例参数。
+        context.retain(|name, _| !name.starts_with("Self::"));
+        context
     }
 
     pub(super) fn form_argument(
@@ -535,6 +570,12 @@ impl<'a> Model<'a> {
         params: &BTreeMap<String, Ty>,
         stack: &mut Vec<DefRef>,
     ) -> Result<Ty, Diagnostic> {
+        if matches!(
+            self.modules[module].arena.tys[id.0 as usize].kind,
+            TyKind::Impl(_)
+        ) {
+            return self.form_opaque(module, id, params);
+        }
         self.form_kind(
             module,
             self.modules[module].arena.tys[id.0 as usize].kind,
@@ -665,6 +706,7 @@ impl<'a> Model<'a> {
                 };
                 Ty::Chan(Box::new(self.form_arg(module, *arg, params, stack)?))
             }
+            TyKind::Dyn(paths) => self.form_dyn(module, paths, params)?,
             _ => return Err(self.error(module, "该类型需要对应语义阶段形成")),
         })
     }
@@ -712,17 +754,12 @@ impl<'a> Model<'a> {
                         }
                     })
                     .collect::<Result<_, _>>()?;
-                let arguments = f
-                    .generics
-                    .as_slice(&m.arena.generic_params)
-                    .iter()
-                    .filter_map(|param| {
-                        if let GenericParamKind::Type { name, .. } = param.kind {
-                            Some(Ty::Param(self.name(def.module, name).to_owned()))
-                        } else {
-                            None
-                        }
+                let arguments = self
+                    .callable_context(CallableId {
+                        module: def.module,
+                        function: id.0,
                     })
+                    .into_values()
                     .collect();
                 Ok(Ty::Callable(
                     CallableId {
@@ -905,6 +942,19 @@ pub(super) fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
         Ty::Slice(t) => Ty::Slice(Box::new(substitute(t, bindings))),
         Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| substitute(t, bindings)).collect()),
         Ty::Named(i, args) => Ty::Named(*i, args.iter().map(|t| substitute(t, bindings)).collect()),
+        Ty::Opaque(id, arguments) => Ty::Opaque(
+            *id,
+            arguments
+                .iter()
+                .map(|ty| substitute(ty, bindings))
+                .collect(),
+        ),
+        Ty::Dyn(interfaces) => Ty::Dyn(
+            interfaces
+                .iter()
+                .map(|interface| interface.substitute(bindings))
+                .collect(),
+        ),
         Ty::Option(t) => Ty::Option(Box::new(substitute(t, bindings))),
         Ty::Result(t, e) => Ty::Result(
             Box::new(substitute(t, bindings)),

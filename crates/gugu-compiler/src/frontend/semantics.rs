@@ -3,6 +3,7 @@ mod checker;
 mod initialization;
 pub(crate) mod model;
 mod numeric;
+mod opaque;
 mod output;
 mod patterns;
 mod query;
@@ -10,6 +11,8 @@ mod traits;
 pub(crate) use output::CheckedSemantics;
 #[cfg(test)]
 mod callable_tests;
+#[cfg(test)]
+mod opaque_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

@@ -7,7 +7,7 @@ use crate::{Diagnostic, DiagnosticCode, Span};
 use std::collections::BTreeMap;
 mod associated;
 mod collect;
-mod select;
+pub(super) mod select;
 mod validate;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
@@ -86,6 +86,8 @@ pub(super) struct Method {
     pub(super) callable: Option<CallableId>,
     pub(super) signature: Ty,
     pub(super) receiver: bool,
+    pub(super) dynamic: bool,
+    pub(super) arguments: Vec<Ty>,
     pub(super) implementation: Option<DefRef>,
     pub(super) interface: Option<TraitRef>,
     pub(super) member: Option<u32>,
@@ -176,6 +178,10 @@ impl Model<'_> {
                 }
             }
         }
+        self.expand_requirements(&mut obligations);
+        Ok(obligations)
+    }
+    pub(super) fn expand_requirements(&self, obligations: &mut Vec<Obligation>) {
         let mut index = 0;
         while index < obligations.len() {
             let bound = &obligations[index];
@@ -204,7 +210,6 @@ impl Model<'_> {
             }
             index += 1;
         }
-        Ok(obligations)
     }
     pub(super) fn associated_scope(&self, module: usize, span: &Span) -> BTreeMap<String, Ty> {
         let arena = &self.modules[module].arena;
@@ -311,11 +316,27 @@ impl Model<'_> {
                 _ => {}
             }
         }
-        for function in &arena.fns {
+        for (index, function) in arena.fns.iter().enumerate() {
             if function.span.start() <= span.start() && function.span.end() >= span.end() {
                 result.extend(self.generic_obligations(module, function.generics, &params)?);
+                for id in self.apits(CallableId {
+                    module,
+                    function: index as u32,
+                }) {
+                    let definition = &self.opaques.definitions[id as usize];
+                    result.extend(
+                        self.form_bounds(
+                            module,
+                            definition.bounds,
+                            &params,
+                            &Ty::Param(Self::apit_name(id)),
+                        )?
+                        .traits,
+                    );
+                }
             }
         }
+        self.expand_requirements(&mut result);
         Ok(result)
     }
     pub(super) fn is_receiver(&self, module: usize, param: &Param) -> bool {

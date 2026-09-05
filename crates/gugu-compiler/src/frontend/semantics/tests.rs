@@ -1,5 +1,5 @@
 use crate::{CompileRequest, Compiler, TargetName};
-fn accepts(source: &str) -> bool {
+pub(super) fn accepts(source: &str) -> bool {
     let c = Compiler::new().compile(CompileRequest::single_file(
         "main.gg",
         source,

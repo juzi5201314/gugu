@@ -6,13 +6,14 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 3;
+pub(crate) const SCHEMA_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
     pub(crate) bodies: Vec<CheckedBody>,
     pub(crate) initialization: Vec<Initialization>,
     pub(crate) input_fingerprint: [u8; 32],
+    pub(crate) hidden_types: Vec<Option<Ty>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -28,6 +29,8 @@ pub(crate) struct CheckedBody {
     pub(crate) slot_storage: Vec<u8>,
     pub(crate) variadic_calls: Vec<VariadicCall>,
     pub(crate) dispatches: Vec<Dispatch>,
+    pub(crate) erasures: Vec<Erasure>,
+    pub(crate) reflections: Vec<Reflection>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -42,6 +45,29 @@ pub(crate) struct Dispatch {
     pub(crate) dereferences: u32,
     pub(crate) borrow: bool,
     pub(crate) implicit_receiver: bool,
+    pub(crate) dynamic: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Erasure {
+    pub(crate) expression: ExprId,
+    pub(crate) source: Ty,
+    pub(crate) target: Ty,
+}
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct Reflection {
+    pub(crate) expression: ExprId,
+    pub(crate) kind: ReflectionKind,
+}
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum ReflectionKind {
+    Is(Ty),
+    Downcast(Ty),
+    DowncastCopy(Ty),
+    TypeId(Ty),
+    TypeIdCount,
+    TypeName,
+    TypeAsInt,
 }
 
 /// 槽存储标志有三个独立布尔量，固定编码在一个字节中。
@@ -129,6 +155,21 @@ pub(crate) enum CheckKind {
 
 impl CheckedSemantics {
     pub(crate) fn verify(&self, model: &Model<'_>) -> Result<(), Diagnostic> {
+        if self.hidden_types.len() != model.opaques.definitions.len() {
+            return Err(invalid());
+        }
+        for (id, hidden) in self.hidden_types.iter().enumerate() {
+            if model.opaque_requires_definition(id as u32) != hidden.is_some() {
+                return Err(invalid());
+            }
+            if let Some(ty) = hidden {
+                if !formed(ty, model)
+                    || super::opaque::has_unbound(ty, &model.opaque_context(id as u32))
+                {
+                    return Err(invalid());
+                }
+            }
+        }
         for body in &self.bodies {
             let def = body.definition;
             let Some(module) = model.modules.get(def.module) else {
@@ -158,11 +199,42 @@ impl CheckedSemantics {
             {
                 return Err(invalid());
             }
+            for erasure in &body.erasures {
+                if erasure.expression.0 as usize >= module.arena.exprs.len()
+                    || !formed(&erasure.source, model)
+                    || !formed(&erasure.target, model)
+                    || erasure.source == erasure.target
+                    || !matches!(erasure.target, Ty::Dyn(_) | Ty::Function(..))
+                {
+                    return Err(invalid());
+                }
+            }
+            for reflection in &body.reflections {
+                if reflection.expression.0 as usize >= module.arena.exprs.len() {
+                    return Err(invalid());
+                }
+                if let ReflectionKind::Is(ty)
+                | ReflectionKind::Downcast(ty)
+                | ReflectionKind::DowncastCopy(ty)
+                | ReflectionKind::TypeId(ty) = &reflection.kind
+                {
+                    if !formed(ty, model) || *ty == Ty::Never {
+                        return Err(invalid());
+                    }
+                }
+            }
             for dispatch in &body.dispatches {
                 if dispatch.expression.0 as usize >= module.arena.exprs.len()
                     || !formed(&dispatch.self_ty, model)
                     || !formed(&dispatch.signature, model)
                     || !matches!(dispatch.signature, Ty::Function(..))
+                {
+                    return Err(invalid());
+                }
+                if dispatch.dynamic
+                    && (dispatch.callable.is_some()
+                        || dispatch.implementation.is_some()
+                        || !matches!(&dispatch.self_ty, Ty::Dyn(interfaces) if dispatch.interface.as_ref().is_some_and(|interface| interfaces.contains(interface))))
                 {
                     return Err(invalid());
                 }
@@ -382,6 +454,25 @@ pub(super) fn formed(ty: &Ty, model: &Model<'_>) -> bool {
                                 matches!(member.kind, super::traits::MemberKind::Type(_))
                             })
                     })
+        }
+        Ty::Opaque(id, arguments) => {
+            model.opaques.definitions.get(*id as usize).is_some()
+                && model.opaque_context(*id).len() == arguments.len()
+                && arguments.iter().all(|ty| formed(ty, model))
+        }
+        Ty::Dyn(interfaces) => {
+            !interfaces.is_empty()
+                && interfaces.iter().all(|interface| {
+                    model
+                        .traits
+                        .interfaces
+                        .get(interface.id)
+                        .is_some_and(|definition| {
+                            definition.parameters.len() == interface.arguments.len()
+                        })
+                        && interface.arguments.iter().all(|ty| formed(ty, model))
+                        && model.object_safe(interface.id).is_ok()
+                })
         }
         Ty::Ref(t)
         | Ty::Ptr(t)

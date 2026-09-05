@@ -222,7 +222,7 @@ parser 必须满足：
 
 `frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
-阶段 13–17 的版本化结果为 `CheckedSemantics`（schema 3），它在 TypeCheck query 中序列化，包含：
+阶段 13–18 的版本化结果为 `CheckedSemantics`（schema 4），它在 TypeCheck query 中序列化，包含：
 
 - 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
 - 模块 const/static 的无环初始化顺序与 Process/Coroutine/OsThread 初始化域，以及函数内 static 的声明和延迟初始化器。
@@ -232,16 +232,19 @@ parser 必须满足：
 - 闭包与 async 块的 `CapturePlan`，按原始槽编号排序，记录读前置条件、写入、跨协程和体内初始化依赖。函数体有独立 return/loop/try/defer 状态；闭包构造不会改变外层初始化结果，也不会把尚未执行的函数体记入初始化依赖。
 - 齐次变参和异构类型包的 `VariadicCall`：保留左到右的实参 ID、固定参数数目和具体尾部类型。齐次尾部存储必须可被 GC 跟踪，只有后续分析证明无逃逸才可放入栈帧；异构包供单态化逐位置展开，不生成动态类型数组或盒子。
 - 静态关联调用和用户操作符的 `Dispatch`：保存函数身份、选中 impl、trait 实例和成员序号、规范化 Self/签名，以及接收者解引用次数和借用调整。操作符表达式的结果不会被误记成 callable 值。
+- APIT 的独立匿名类型参数，以及 RPIT/TAIT 的声明身份、完整泛型环境和唯一隐藏类型表。函数实例参数按声明上下文的规范键顺序保存；`Self::关联项` 是由 Self 推导的查找缓存，不作为独立实例参数，避免关联 TAIT 产生伪递归。
+- `Erasure` 记录源类型与目标胖函数或动态接口类型；`impl Trait` 本身不生成擦除计划。具体值进入 `dyn Value` 后再进入 `dyn Any` 时，第二层 payload 的类型仍是 `dyn Value`；复制已经形成的 `dyn Any` 不生成新容器。
+- 动态 `Dispatch` 保存对象安全接口和成员序号，不携带静态 callable/impl。`Reflection` 保存 `is`、`downcast`、`downcast_copy` 的精确目标类型与符号化 TypeId 操作，恢复类型不得穿透既有接口对象。
 
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
 query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果；成功结果经 schema verifier 验证后才能进入布局和 IR，IR 直接持有该结果，镜像计划保留其规范序列化 BLAKE3 指纹。失败诊断存储逻辑文件名和字节范围，缓存命中时重新绑定当前 `SourceMap`，不得复用旧源码表身份。任何检查失败均中止 BuildIr 及后续产物路径。
 
-该结果是阶段 13–17 向 HIR 形成阶段提供的已检查对象，不代替下文的完整 HIR 冻结门禁；完整 unsafe 边界和 GIR cleanup CFG 分别由路线图对应阶段接入。
+该结果是阶段 13–18 向 HIR 形成阶段提供的已检查对象，不代替下文的完整 HIR 冻结门禁；完整 unsafe 边界和 GIR cleanup CFG 分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；稠密 TypeId 分配、vtable 物化和实际容器分配分别留在冻结类型集合及后续 lowering 阶段。
 
 trait 表先收集声明和 impl 头，形成关联类型后再检查方法签名；关联项不泄漏到模块值命名空间。特化使用类型模式包含关系和交集检查，重复参数必须保持相等约束。否定 impl 与肯定 impl 共用选择部分序；泛型调用的 trait 义务在实参推断收敛后验证，失败时保留约束或否定实现的源码位置。关联投影保存 Self、trait 实例和成员名称的完整身份，不能仅以短名称等同两个投影。
 
-语言认识的 `Index`、复合赋值、`Try`、`IntoIter` 和 `Iter` 使用同一接口表；`?` 保留 operand 的 `branch` 与目标的 `from_error` 派发，`try` 正常出口保留 `from_value` 派发。用户 `IntoIter` 的关联迭代器必须实现 `Iter`，两侧 `Item` 投影必须一致。关联常量与数组长度共用类型模型中的常量求值路径；具体值保留类型，并在特化检查中比较求值结果而不是源码拼写。
+语言认识的 `Index`、复合赋值、`Try`、`IntoIter` 和 `Iter` 使用同一接口表；`?` 保留 operand 的 `branch` 与目标的 `from_error` 派发，`try` 正常出口保留 `from_value` 派发。用户 `IntoIter` 的关联迭代器必须实现 `Iter`，两侧 `Item` 投影必须一致；具名泛型、APIT 与不透明返回约束共用关联义务闭包。关联常量与数组长度共用类型模型中的常量求值路径；具体值保留类型，并在特化检查中比较求值结果而不是源码拼写。
 
 ## HIR
 

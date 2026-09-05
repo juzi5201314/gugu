@@ -21,6 +21,7 @@ pub(crate) fn form_and_layout(
 ) -> Result<Vec<Layout>, Vec<Diagnostic>> {
     let mut arena = Layouts {
         model,
+        semantics,
         capturing: capturing_functions(model, semantics),
         complete: BTreeMap::new(),
         active: Vec::new(),
@@ -70,6 +71,7 @@ fn capturing_functions(model: &Model<'_>, semantics: &CheckedSemantics) -> Vec<V
 
 struct Layouts<'m, 'a> {
     model: &'m Model<'a>,
+    semantics: &'m CheckedSemantics,
     capturing: Vec<Vec<bool>>,
     complete: BTreeMap<Ty, Layout>,
     active: Vec<Ty>,
@@ -100,9 +102,15 @@ impl Layouts<'_, '_> {
         Ok(Some(match ty {
             Ty::Error | Ty::Var(_) => return Err(invalid("布局类型尚未收敛")),
             Ty::Param(_) | Ty::Projection(..) => return Ok(None),
+            Ty::Opaque(id, _) => {
+                if !self.model.opaque_requires_definition(*id) {
+                    return Ok(None);
+                }
+                return self.layout(&self.model.hidden_type(ty, &self.semantics.hidden_types)?);
+            }
             Ty::Unit | Ty::Never => Layout { size: 0, align: 1 },
             Ty::Bool => Layout { size: 1, align: 1 },
-            Ty::Char => Layout { size: 4, align: 4 },
+            Ty::Char | Ty::TypeId => Layout { size: 4, align: 4 },
             Ty::Int { bits, .. } | Ty::Float(bits) => Layout {
                 size: u64::from(*bits) / 8,
                 align: u64::from(*bits) / 8,
@@ -116,7 +124,7 @@ impl Layouts<'_, '_> {
                 }
             }
             Ty::Slice(_) => return Ok(None),
-            Ty::String | Ty::Function(..) | Ty::Range => Layout { size: 16, align: 8 },
+            Ty::String | Ty::Function(..) | Ty::Dyn(_) | Ty::Range => Layout { size: 16, align: 8 },
             Ty::Callable(id, _, _) => {
                 if !self.capturing[id.module][id.function as usize] {
                     Layout { size: 0, align: 1 }

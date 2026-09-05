@@ -135,10 +135,11 @@
   - 验收：固有方法优先、trait 候选唯一、重叠特化部分序无歧义；交叉重叠、缺项、错误关联类型、外模块固有 impl 和 `forbid` 相关约束均正确诊断。
   - 接入证据：`CheckedSemantics` schema 3 保存静态方法/操作符派发、impl 与 trait 身份、接收者调整和关联投影；完整性、模块归属、泛型证据、负实现和特化部分序均由同一接口表检查。150 项工作区测试通过，覆盖冷/热 query 中实际选中的方法、跨模块泛型路径、关联项循环、用户 `Try`、`Index` 与泛型迭代协议；Linux/Windows CLI 接受真实接口切片，缺少必需方法的 `build` 返回 E0040 并停止在镜像计划形成之前。完整 EarlyConst 与单态化实例闭合仍由阶段 21、24 验收。
 
-- [ ] **阶段 18：实现 impl Trait、dyn Trait 与 Any 前端**（复杂度：4）
+- [x] **阶段 18：实现 impl Trait、dyn Trait 与 Any 前端**（复杂度：4）
   - 依赖：阶段 17、12。
   - 实现 APIT/RPIT/TAIT 隐藏类型、对象安全判断、胖函数/胖 trait 表示、`dyn Any` 擦除以及 `is/downcast/downcast_copy` 的静态类型检查。
   - 验收：`impl Trait` 保持单态化；不安全对象 trait 不能形成 dyn；Any 只能恢复放入容器的具体类型；不得出现名为 `any` 的渐进类型或跨 dyn Trait 猜测。
+  - 接入证据：`CheckedSemantics` schema 4 保存匿名泛型、不透明声明与唯一隐藏类型、擦除边界、动态派发和精确恢复目标；同一类型模型进入布局与后续计划。165 项工作区测试通过，覆盖独立 APIT、跨模块 RPIT、关联 TAIT、Fn 与 IntoIter 约束传递、嵌套 Self 对象安全、Any payload 身份和缓存 verifier；Linux/Windows CLI 接受真实接口与函数切片，非法 dyn 的 `build` 返回 E0038 且没有镜像计划。TypeId 在本阶段保留符号类型，稠密编号、物理容器及 vtable 由阶段 25 及后续 lowering 物化。
 
 - [ ] **阶段 19：实现 unsafe、原始指针、union 与 intrinsic 检查**（复杂度：4）
   - 依赖：阶段 12、14、17。

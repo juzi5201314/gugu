@@ -92,11 +92,7 @@ impl Checker<'_, '_> {
             function: function.0,
         };
         self.leave_capture(saved, expression, Some(id), signature.clone());
-        let arguments = self
-            .model
-            .parameters_at(self.module, &self.arena().fns[function.0 as usize].span)
-            .into_values()
-            .collect();
+        let arguments = self.model.callable_context(id).into_values().collect();
         Ty::Callable(id, arguments, Box::new(signature))
     }
 

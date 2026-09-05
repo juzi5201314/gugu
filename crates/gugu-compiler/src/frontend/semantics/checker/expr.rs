@@ -358,6 +358,44 @@ impl Checker<'_, '_> {
                         };
                         Ty::Chan(Box::new(ty))
                     }
+                    IntrinsicKind::TypeId => {
+                        let ty = match tys.as_slice(&self.arena().generic_args) {
+                            [argument] => match self.model.form_argument(self.module, *argument) {
+                                Ok(ty) => ty,
+                                Err(error) => {
+                                    self.errors.push(error);
+                                    Ty::Error
+                                }
+                            },
+                            _ => {
+                                self.error(
+                                    DiagnosticCode::InvalidExpression,
+                                    "type_id 需要一个目标类型",
+                                    expr.span.clone(),
+                                );
+                                Ty::Error
+                            }
+                        };
+                        if ty == Ty::Never {
+                            self.error(
+                                DiagnosticCode::InvalidType,
+                                "! 没有 TypeId",
+                                expr.span.clone(),
+                            );
+                        }
+                        self.reflections.push(super::super::output::Reflection {
+                            expression: id,
+                            kind: super::super::output::ReflectionKind::TypeId(ty),
+                        });
+                        Ty::TypeId
+                    }
+                    IntrinsicKind::TypeIdCount => {
+                        self.reflections.push(super::super::output::Reflection {
+                            expression: id,
+                            kind: super::super::output::ReflectionKind::TypeIdCount,
+                        });
+                        Ty::int()
+                    }
                     _ => Ty::int(),
                 }
             }
@@ -466,6 +504,7 @@ impl Checker<'_, '_> {
         } else {
             self.normalized(&checked)
         };
+        self.record_erasure(id, &ty, &checked);
         self.expressions.push((id, checked.clone()));
         self.record_callable_value(id);
         checked
