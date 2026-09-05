@@ -157,6 +157,8 @@ pub(crate) struct Param {
     pub(crate) span: Span,
     pub(crate) comptime: bool,
     pub(crate) variadic: bool,
+    pub(crate) variadic_name: Option<Symbol>,
+    pub(crate) variadic_name_span: Option<Span>,
     pub(crate) pat: Option<PatId>,
     pub(crate) ty: Option<TyId>,
 }
@@ -179,12 +181,15 @@ pub(crate) struct FnDecl {
     pub(crate) params: AstRange<Param>,
     pub(crate) return_ty: Option<TyId>,
     pub(crate) body: FnBody,
+    pub(crate) extern_abi: Option<Symbol>,
+    pub(crate) extern_import: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Field {
     pub(crate) id: AstNodeId,
     pub(crate) span: Span,
+    pub(crate) attributes: AstRange<Attribute>,
     pub(crate) visibility: Visibility,
     pub(crate) name: Option<Symbol>,
     pub(crate) name_span: Option<Span>,
@@ -202,6 +207,7 @@ pub(crate) enum VariantKind {
 pub(crate) struct Variant {
     pub(crate) id: AstNodeId,
     pub(crate) span: Span,
+    pub(crate) attributes: AstRange<Attribute>,
     pub(crate) name: Symbol,
     pub(crate) name_span: Span,
     pub(crate) kind: VariantKind,
@@ -250,11 +256,11 @@ pub(crate) enum ItemKind {
     },
     TypeAlias {
         generics: AstRange<GenericParam>,
-        ty: TyId,
+        ty: Option<TyId>,
     },
     Const {
         ty: Option<TyId>,
-        value: ExprId,
+        value: Option<ExprId>,
     },
     Static {
         ty: TyId,
@@ -266,6 +272,7 @@ pub(crate) enum ItemKind {
         items: AstRange<ItemId>,
     },
     Impl {
+        negative: bool,
         unsafety: bool,
         generics: AstRange<GenericParam>,
         self_ty: TyId,
@@ -424,10 +431,17 @@ pub(crate) struct AsmOperand {
     pub(crate) kind: AsmOperandKind,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum FStringPart {
-    Text(Symbol),
-    Interp { expr: ExprId, spec: Option<Symbol> },
+    Text {
+        text: Symbol,
+        span: Span,
+    },
+    Interp {
+        span: Span,
+        expr: ExprId,
+        spec: Option<Symbol>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -486,7 +500,12 @@ pub(crate) enum ExprKind {
     Closure(FnId),
     Call {
         callee: ExprId,
+        type_args: AstRange<GenericArg>,
         args: AstRange<ExprId>,
+    },
+    TypeApp {
+        base: ExprId,
+        args: AstRange<GenericArg>,
     },
     Field {
         base: ExprId,
@@ -592,8 +611,9 @@ pub(crate) enum PatKind {
     },
     Tuple(AstRange<PatId>),
     Array {
-        elems: AstRange<PatId>,
+        prefix: AstRange<PatId>,
         rest: Option<RestPat>,
+        suffix: AstRange<PatId>,
     },
     Struct {
         path: PathId,
@@ -751,56 +771,100 @@ impl AstArena {
         }
     }
 
-    pub(crate) fn alloc_node(&mut self, file: SourceFileId) -> AstNodeId {
-        debug_assert!(self.next_node < u32::MAX, "AST 节点数达到 u32 上界");
+    pub(crate) fn alloc_node_or_error(&mut self, file: SourceFileId) -> Option<AstNodeId> {
+        if self.next_node >= u32::MAX {
+            return None;
+        }
         let id = AstNodeId {
             file,
             local: self.next_node,
         };
         self.next_node += 1;
-        id
+        Some(id)
     }
 
-    pub(crate) fn push_item(&mut self, item: Item) -> ItemId {
-        let id = ItemId(checked_u32(self.items.len()));
+    pub(crate) fn alloc_node(&mut self, file: SourceFileId) -> AstNodeId {
+        self.alloc_node_or_error(file)
+            .expect("AST 节点数达到 u32 上界")
+    }
+
+    pub(crate) fn try_push_item(&mut self, item: Item) -> Option<ItemId> {
+        let index = self.items.len();
+        if index >= u32::MAX as usize {
+            return None;
+        }
         self.items.push(item);
-        id
+        Some(ItemId(index as u32))
+    }
+
+    pub(crate) fn try_push_expr(&mut self, expr: Expr) -> Option<ExprId> {
+        let index = self.exprs.len();
+        if index >= u32::MAX as usize {
+            return None;
+        }
+        self.exprs.push(expr);
+        Some(ExprId(index as u32))
     }
 
     pub(crate) fn push_expr(&mut self, expr: Expr) -> ExprId {
-        let id = ExprId(checked_u32(self.exprs.len()));
-        self.exprs.push(expr);
-        id
+        self.try_push_expr(expr).expect("AST expr 表达到 u32 上界")
     }
 
-    pub(crate) fn push_stmt(&mut self, stmt: Stmt) -> StmtId {
-        let id = StmtId(checked_u32(self.stmts.len()));
+    pub(crate) fn try_push_stmt(&mut self, stmt: Stmt) -> Option<StmtId> {
+        let index = self.stmts.len();
+        if index >= u32::MAX as usize {
+            return None;
+        }
         self.stmts.push(stmt);
-        id
+        Some(StmtId(index as u32))
+    }
+
+    pub(crate) fn try_push_pat(&mut self, pat: Pat) -> Option<PatId> {
+        let index = self.pats.len();
+        if index >= u32::MAX as usize {
+            return None;
+        }
+        self.pats.push(pat);
+        Some(PatId(index as u32))
     }
 
     pub(crate) fn push_pat(&mut self, pat: Pat) -> PatId {
-        let id = PatId(checked_u32(self.pats.len()));
-        self.pats.push(pat);
-        id
+        self.try_push_pat(pat).expect("AST pat 表达到 u32 上界")
+    }
+
+    pub(crate) fn try_push_ty(&mut self, ty: Ty) -> Option<TyId> {
+        let index = self.tys.len();
+        if index >= u32::MAX as usize {
+            return None;
+        }
+        self.tys.push(ty);
+        Some(TyId(index as u32))
     }
 
     pub(crate) fn push_ty(&mut self, ty: Ty) -> TyId {
-        let id = TyId(checked_u32(self.tys.len()));
-        self.tys.push(ty);
-        id
+        self.try_push_ty(ty).expect("AST ty 表达到 u32 上界")
+    }
+
+    pub(crate) fn try_push_path(&mut self, path: Path) -> Option<PathId> {
+        let index = self.paths.len();
+        if index >= u32::MAX as usize {
+            return None;
+        }
+        self.paths.push(path);
+        Some(PathId(index as u32))
     }
 
     pub(crate) fn push_path(&mut self, path: Path) -> PathId {
-        let id = PathId(checked_u32(self.paths.len()));
-        self.paths.push(path);
-        id
+        self.try_push_path(path).expect("AST path 表达到 u32 上界")
     }
 
-    pub(crate) fn push_fn(&mut self, decl: FnDecl) -> FnId {
-        let id = FnId(checked_u32(self.fns.len()));
+    pub(crate) fn try_push_fn(&mut self, decl: FnDecl) -> Option<FnId> {
+        let index = self.fns.len();
+        if index >= u32::MAX as usize {
+            return None;
+        }
         self.fns.push(decl);
-        id
+        Some(FnId(index as u32))
     }
 }
 
@@ -911,8 +975,18 @@ impl AstArena {
     }
 }
 
-pub(crate) fn extend_range<T>(vec: &mut Vec<T>, items: impl IntoIterator<Item = T>) -> AstRange<T> {
+pub(crate) fn try_extend_range<T>(
+    vec: &mut Vec<T>,
+    items: impl IntoIterator<Item = T>,
+) -> Option<AstRange<T>> {
     let start = vec.len();
+    if start > u32::MAX as usize {
+        return None;
+    }
     vec.extend(items);
-    AstRange::from_indices(start, vec.len() - start)
+    let len = vec.len().checked_sub(start)?;
+    if len > u32::MAX as usize {
+        return None;
+    }
+    Some(AstRange::from_indices(start, len))
 }

@@ -76,6 +76,8 @@ pub enum DiagnosticCode {
     ParseInvalidPlace,
     /// `select` 分支不是允许的 send/recv/wait/default 形态。
     ParseInvalidSelectArm,
+    /// 解析器实现限制（递归深度或 AST 规模上界）。
+    ParseImplementationLimit,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -106,6 +108,7 @@ impl fmt::Display for DiagnosticCode {
             Self::ParseInvalidPrecedence => "E0023",
             Self::ParseInvalidPlace => "E0024",
             Self::ParseInvalidSelectArm => "E0025",
+            Self::ParseImplementationLimit => "E0026",
         };
         formatter.write_str(code)
     }
@@ -118,6 +121,8 @@ pub struct Diagnostic {
     code: DiagnosticCode,
     message: String,
     span: Option<Span>,
+    /// 前端发射顺序；`u32::MAX` 表示未指定，排序时退回到 span。
+    seq: u32,
 }
 
 impl Diagnostic {
@@ -127,7 +132,7 @@ impl Diagnostic {
         message: impl Into<String>,
         span: Option<Span>,
     ) -> Self {
-        Self::new(Severity::Error, code, message, span)
+        Self::new(Severity::Error, code, message, span, u32::MAX)
     }
 
     pub(crate) fn note(
@@ -135,7 +140,12 @@ impl Diagnostic {
         message: impl Into<String>,
         span: Option<Span>,
     ) -> Self {
-        Self::new(Severity::Note, code, message, span)
+        Self::new(Severity::Note, code, message, span, u32::MAX)
+    }
+
+    pub(crate) fn with_seq(mut self, seq: u32) -> Self {
+        self.seq = seq;
+        self
     }
 
     fn new(
@@ -143,12 +153,14 @@ impl Diagnostic {
         code: DiagnosticCode,
         message: impl Into<String>,
         span: Option<Span>,
+        seq: u32,
     ) -> Self {
         Self {
             severity,
             code,
             message: message.into(),
             span,
+            seq,
         }
     }
 
@@ -237,24 +249,9 @@ impl Diagnostics {
 
     pub(crate) fn sort(&mut self) {
         self.items.sort_by(|left, right| {
-            let left_key = left.span.as_ref().map(|span| {
-                (
-                    span.path().as_os_str(),
-                    span.start(),
-                    span.end(),
-                    span.expansion(),
-                )
-            });
-            let right_key = right.span.as_ref().map(|span| {
-                (
-                    span.path().as_os_str(),
-                    span.start(),
-                    span.end(),
-                    span.expansion(),
-                )
-            });
-            left_key
-                .cmp(&right_key)
+            left.seq
+                .cmp(&right.seq)
+                .then_with(|| span_sort_key(left).cmp(&span_sort_key(right)))
                 .then(left.severity.cmp(&right.severity))
                 .then(left.code.cmp(&right.code))
         });
@@ -271,4 +268,17 @@ impl Diagnostics {
             .iter()
             .any(|diagnostic| diagnostic.severity == Severity::Error)
     }
+}
+
+fn span_sort_key(
+    diagnostic: &Diagnostic,
+) -> Option<(&std::ffi::OsStr, u32, u32, crate::source::ExpansionId)> {
+    diagnostic.span.as_ref().map(|span| {
+        (
+            span.path().as_os_str(),
+            span.start(),
+            span.end(),
+            span.expansion(),
+        )
+    })
 }

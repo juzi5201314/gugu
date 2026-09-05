@@ -12,7 +12,8 @@ use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::source::{ExpansionId, SourceFileId, SourceMap, Span};
 
 use super::ast::{
-    AstArena, AstFile, AstNodeId, AstRange, AttrKind, Attribute, ExprId, ItemKind, extend_range,
+    AstArena, AstFile, AstNodeId, AstRange, AttrKind, Attribute, ExprId, FnBody, ItemKind,
+    try_extend_range,
 };
 use super::intern::{Symbol, SymbolInterner};
 use super::token::{Token, TokenBuffer, TokenKind, TriviaKind};
@@ -20,13 +21,34 @@ use super::token::{Token, TokenBuffer, TokenKind, TriviaKind};
 #[cfg(test)]
 pub(crate) use dump::{dump_ast, parent_before_child};
 
+pub(super) fn finish_extend<T>(
+    diagnostics: &mut Vec<Diagnostic>,
+    vec: &mut Vec<T>,
+    items: impl IntoIterator<Item = T>,
+) -> AstRange<T> {
+    match try_extend_range(vec, items) {
+        Some(range) => range,
+        None => {
+            diagnostics.push(Diagnostic::error(
+                DiagnosticCode::ParseImplementationLimit,
+                "实现限制：AST 规模超过上限",
+                None,
+            ));
+            AstRange::empty()
+        }
+    }
+}
+
 pub(crate) fn has_main_fn(file: &AstFile, arena: &AstArena, intern: &SymbolInterner) -> bool {
     file.items.as_slice(&arena.item_ids).iter().any(|id| {
         let item = &arena.items[id.0 as usize];
         match item.kind {
-            ItemKind::Function(fn_id) => arena.fns[fn_id.0 as usize]
-                .name
-                .is_some_and(|name| intern.get_str(name) == "main"),
+            ItemKind::Function(fn_id) => {
+                let decl = &arena.fns[fn_id.0 as usize];
+                decl.name.is_some_and(|name| intern.get_str(name) == "main")
+                    && decl.params.len == 0
+                    && matches!(decl.body, FnBody::Block(_) | FnBody::Eq(_))
+            }
             _ => false,
         }
     })
@@ -42,20 +64,26 @@ pub(crate) fn parse(
     source: &str,
     source_map: &SourceMap,
     file: SourceFileId,
-    buffer: &TokenBuffer,
+    buffer: &mut TokenBuffer,
 ) -> ParseOutput {
+    let empty_symbol = buffer.intern.intern_str("");
     let mut parser = Parser {
         source,
         source_map,
         file,
         tokens: &buffer.tokens,
         trivia: &buffer.trivia,
-        intern: &buffer.intern,
+        intern: &mut buffer.intern,
+        empty_symbol,
         cursor: 0,
         delim_depth: 0,
+        brace_depth: 0,
+        extern_block_abi: None,
         arena: AstArena::with_token_hint(buffer.tokens.len()),
         diagnostics: Vec::new(),
         allow_struct: true,
+        ty_depth: 0,
+        diag_seq: 0,
     };
     let ast_file = parser.parse_file();
     ParseOutput {
@@ -71,12 +99,17 @@ pub(super) struct Parser<'a> {
     pub(super) file: SourceFileId,
     pub(super) tokens: &'a [Token],
     trivia: &'a [super::token::Trivia],
-    pub(super) intern: &'a SymbolInterner,
+    pub(super) intern: &'a mut SymbolInterner,
+    pub(super) empty_symbol: Symbol,
     pub(super) cursor: usize,
     pub(super) delim_depth: u32,
+    pub(super) brace_depth: u32,
+    pub(super) extern_block_abi: Option<Symbol>,
     pub(super) arena: AstArena,
     pub(super) diagnostics: Vec<Diagnostic>,
     pub(super) allow_struct: bool,
+    pub(super) ty_depth: u32,
+    diag_seq: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -110,8 +143,24 @@ impl<'a> Parser<'a> {
         self.at(TokenKind::Ident) && self.text() == expected
     }
 
-    pub(super) fn interned_symbol(token: Token) -> Symbol {
-        token.symbol.expect("词法器必须 intern 标识符与字面量文本")
+    pub(super) fn symbol_from_token(&self, token: Token) -> Symbol {
+        token.symbol.unwrap_or(self.empty_symbol)
+    }
+
+    pub(super) fn interned_symbol(&self, token: Token) -> Symbol {
+        self.symbol_from_token(token)
+    }
+
+    pub(super) fn consume_decl_terminator(&mut self) {
+        if self.eat(TokenKind::Semi)
+            || self.at(TokenKind::Eof)
+            || self.at(TokenKind::RBrace)
+            || self.at_line_end()
+            || self.at_list_separator()
+        {
+            return;
+        }
+        self.error_here(DiagnosticCode::ParseExpected, "声明需要分号或换行");
     }
 
     pub(super) fn bump(&mut self) -> Token {
@@ -121,6 +170,8 @@ impl<'a> Parser<'a> {
             TokenKind::RParen | TokenKind::RBracket => {
                 self.delim_depth = self.delim_depth.saturating_sub(1);
             }
+            TokenKind::LBrace => self.brace_depth += 1,
+            TokenKind::RBrace => self.brace_depth = self.brace_depth.saturating_sub(1),
             _ => {}
         }
         if token.kind != TokenKind::Eof {
@@ -142,9 +193,13 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn at_line_end(&self) -> bool {
-        if self.delim_depth != 0 {
+        if self.brace_depth != 0 {
             return false;
         }
+        self.leading_newline(self.current()) && !self.prev_continues()
+    }
+
+    pub(super) fn at_list_separator(&self) -> bool {
         self.leading_newline(self.current()) && !self.prev_continues()
     }
 
@@ -181,8 +236,24 @@ impl<'a> Parser<'a> {
         }
     }
 
+    pub(super) fn arena_limit(&mut self) {
+        self.error_here(
+            DiagnosticCode::ParseImplementationLimit,
+            "实现限制：AST 规模超过上限",
+        );
+    }
+
     pub(super) fn start(&mut self) -> Mark {
-        let id = self.arena.alloc_node(self.file);
+        let id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                AstNodeId {
+                    file: self.file,
+                    local: u32::MAX,
+                }
+            }
+        };
         Mark {
             id,
             start: self.current().start,
@@ -190,7 +261,16 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn start_at(&mut self, start: u32) -> Mark {
-        let id = self.arena.alloc_node(self.file);
+        let id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                AstNodeId {
+                    file: self.file,
+                    local: u32::MAX,
+                }
+            }
+        };
         Mark { id, start }
     }
 
@@ -227,11 +307,18 @@ impl<'a> Parser<'a> {
         self.arena.exprs[id.0 as usize].span.clone()
     }
 
+    fn next_diag_seq(&mut self) -> u32 {
+        let seq = self.diag_seq;
+        self.diag_seq += 1;
+        seq
+    }
+
     pub(super) fn error_here(&mut self, code: DiagnosticCode, message: impl Into<String>) {
         let token = self.current();
         let span = self.token_span(token);
+        let seq = self.next_diag_seq();
         self.diagnostics
-            .push(Diagnostic::error(code, message, Some(span)));
+            .push(Diagnostic::error(code, message, Some(span)).with_seq(seq));
     }
 
     pub(super) fn error_span(
@@ -240,8 +327,9 @@ impl<'a> Parser<'a> {
         message: impl Into<String>,
         span: Span,
     ) {
+        let seq = self.next_diag_seq();
         self.diagnostics
-            .push(Diagnostic::error(code, message, Some(span)));
+            .push(Diagnostic::error(code, message, Some(span)).with_seq(seq));
     }
 
     pub(super) fn note_span(
@@ -250,8 +338,9 @@ impl<'a> Parser<'a> {
         message: impl Into<String>,
         span: Span,
     ) {
+        let seq = self.next_diag_seq();
         self.diagnostics
-            .push(Diagnostic::note(code, message, Some(span)));
+            .push(Diagnostic::note(code, message, Some(span)).with_seq(seq));
     }
 
     pub(super) fn consume_error_token(&mut self) {
@@ -269,13 +358,17 @@ impl<'a> Parser<'a> {
                 self.consume_error_token();
                 continue;
             }
-            items.push(self.parse_item());
+            let item_id = self.parse_item();
+            if matches!(self.arena.items[item_id.0 as usize].kind, ItemKind::Error) {
+                self.recover_item();
+            }
+            items.push(item_id);
         }
         let eof = self.current();
         AstFile {
             source: self.file,
             inner_attributes: inner,
-            items: extend_range(&mut self.arena.item_ids, items),
+            items: finish_extend(&mut self.diagnostics, &mut self.arena.item_ids, items),
             eof_span: self.token_span(eof),
         }
     }
@@ -290,7 +383,7 @@ impl<'a> Parser<'a> {
             }
             break;
         }
-        extend_range(&mut self.arena.attrs, attrs)
+        finish_extend(&mut self.diagnostics, &mut self.arena.attrs, attrs)
     }
 
     fn at_inner_attr(&self) -> bool {
@@ -421,8 +514,9 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn recover_item(&mut self) {
+        let start = self.cursor;
         while !self.at(TokenKind::Eof) {
-            if self.delim_depth == 0 && self.at_item_start() {
+            if self.cursor > start && self.brace_depth == 0 && self.at_item_start() {
                 break;
             }
             if self.at(TokenKind::LBrace) {
@@ -438,7 +532,8 @@ impl<'a> Parser<'a> {
                 self.skip_balanced(open, close);
                 continue;
             }
-            if self.at(TokenKind::RBrace) && self.delim_depth == 0 {
+            if self.at(TokenKind::RBrace) && self.brace_depth == 0 {
+                self.bump();
                 break;
             }
             self.bump();
@@ -492,7 +587,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn store_attrs(&mut self, attrs: Vec<Attribute>) -> AstRange<Attribute> {
-        extend_range(&mut self.arena.attrs, attrs)
+        finish_extend(&mut self.diagnostics, &mut self.arena.attrs, attrs)
     }
 
     pub(super) fn error_expr(&mut self, mark: Mark) -> ExprId {
@@ -502,22 +597,34 @@ impl<'a> Parser<'a> {
         {
             self.bump();
         }
-        self.arena.push_expr(super::ast::Expr {
+        match self.arena.try_push_expr(super::ast::Expr {
             id: mark.id,
             span: self.span_to(mark, span.end()),
             attributes: AstRange::empty(),
             kind: super::ast::ExprKind::Error,
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                ExprId(u32::MAX)
+            }
+        }
     }
 
     pub(super) fn error_ty(&mut self, mark: Mark) -> super::ast::TyId {
         self.error_here(DiagnosticCode::ParseUnexpected, "此处需要类型");
         let span = self.finish_span(mark);
-        self.arena.push_ty(super::ast::Ty {
+        match self.arena.try_push_ty(super::ast::Ty {
             id: mark.id,
             span,
             kind: super::ast::TyKind::Error,
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                super::ast::TyId(u32::MAX)
+            }
+        }
     }
 
     pub(super) fn error_pat(&mut self, mark: Mark) -> super::ast::PatId {
@@ -526,10 +633,16 @@ impl<'a> Parser<'a> {
             self.bump();
         }
         let span = self.finish_span(mark);
-        self.arena.push_pat(super::ast::Pat {
+        match self.arena.try_push_pat(super::ast::Pat {
             id: mark.id,
             span,
             kind: super::ast::PatKind::Error,
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                super::ast::PatId(u32::MAX)
+            }
+        }
     }
 }

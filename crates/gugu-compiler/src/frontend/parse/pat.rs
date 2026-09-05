@@ -1,22 +1,23 @@
-use super::super::ast::{FieldPat, Pat, PatId, PatKind, RestPat, extend_range};
+use super::super::ast::{FieldPat, LitKind, Pat, PatId, PatKind, RestPat};
 use super::super::token::TokenKind;
-use super::Parser;
+use super::{Parser, finish_extend};
+use crate::diagnostics::DiagnosticCode;
 
 impl Parser<'_> {
     pub(super) fn parse_pat(&mut self) -> PatId {
-        let mark = self.start();
-        let first = self.parse_at_pat_from(mark);
+        let first = self.parse_at_pat();
         if !self.at(TokenKind::Or) {
             return first;
         }
+        let or_mark = self.start();
         let mut alts = vec![first];
         while self.eat(TokenKind::Or) {
             alts.push(self.parse_at_pat());
         }
-        let span = self.finish_span(mark);
-        let alts = extend_range(&mut self.arena.pat_ids, alts);
+        let span = self.finish_span(or_mark);
+        let alts = finish_extend(&mut self.diagnostics, &mut self.arena.pat_ids, alts);
         self.arena.push_pat(Pat {
-            id: mark.id,
+            id: or_mark.id,
             span,
             kind: PatKind::Or(alts),
         })
@@ -38,11 +39,12 @@ impl Parser<'_> {
                     id: mark.id,
                     span: self.finish_span(mark),
                     kind: PatKind::Array {
-                        elems: super::super::ast::AstRange::empty(),
+                        prefix: super::super::ast::AstRange::empty(),
                         rest: Some(RestPat {
-                            name: Some(Self::interned_symbol(name_tok)),
+                            name: Some(self.interned_symbol(name_tok)),
                             span: rest_span,
                         }),
+                        suffix: super::super::ast::AstRange::empty(),
                     },
                 });
             }
@@ -51,7 +53,7 @@ impl Parser<'_> {
                 id: mark.id,
                 span: self.finish_span(mark),
                 kind: PatKind::At {
-                    name: Self::interned_symbol(name_tok),
+                    name: self.interned_symbol(name_tok),
                     name_span: self.token_span(name_tok),
                     pat: inner,
                 },
@@ -89,7 +91,6 @@ impl Parser<'_> {
             | TokenKind::Float
             | TokenKind::Char
             | TokenKind::ByteChar
-            | TokenKind::String
             | TokenKind::KwTrue
             | TokenKind::KwFalse => self.parse_lit_or_range_pat(mark),
             _ => self.error_pat(mark),
@@ -150,20 +151,25 @@ impl Parser<'_> {
             }
         }
         self.expect(TokenKind::RParen, "元组模式需要 `)`");
-        let pats = extend_range(&mut self.arena.pat_ids, pats);
+        let pats = finish_extend(&mut self.diagnostics, &mut self.arena.pat_ids, pats);
         self.push_pat(mark, PatKind::Tuple(pats))
     }
 
     fn parse_array_pat(&mut self, mark: super::Mark) -> PatId {
         self.bump();
-        let mut elems = Vec::new();
+        let mut prefix = Vec::new();
         let mut rest = None;
+        let mut suffix = Vec::new();
+        let mut after_rest = false;
         while !self.at_any(&[TokenKind::RBracket, TokenKind::Eof]) {
             if self.at(TokenKind::DotDot) {
                 let span = self.token_span(self.current());
                 self.bump();
                 rest = Some(RestPat { name: None, span });
-                self.eat(TokenKind::Comma);
+                after_rest = true;
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
                 break;
             }
             if self.at(TokenKind::Ident)
@@ -175,20 +181,36 @@ impl Parser<'_> {
                 let span = self.token_span(self.current());
                 self.bump();
                 rest = Some(RestPat {
-                    name: Some(Self::interned_symbol(name)),
+                    name: Some(self.interned_symbol(name)),
                     span,
                 });
-                self.eat(TokenKind::Comma);
+                after_rest = true;
+                if self.eat(TokenKind::Comma) {
+                    continue;
+                }
                 break;
             }
-            elems.push(self.parse_pat());
+            let pat = self.parse_pat();
+            if after_rest {
+                suffix.push(pat);
+            } else {
+                prefix.push(pat);
+            }
             if !self.eat(TokenKind::Comma) {
                 break;
             }
         }
         self.expect(TokenKind::RBracket, "数组模式需要 `]`");
-        let elems = extend_range(&mut self.arena.pat_ids, elems);
-        self.push_pat(mark, PatKind::Array { elems, rest })
+        let prefix = finish_extend(&mut self.diagnostics, &mut self.arena.pat_ids, prefix);
+        let suffix = finish_extend(&mut self.diagnostics, &mut self.arena.pat_ids, suffix);
+        self.push_pat(
+            mark,
+            PatKind::Array {
+                prefix,
+                rest,
+                suffix,
+            },
+        )
     }
 
     fn parse_field_pat_list(&mut self) -> (super::super::ast::AstRange<FieldPat>, bool) {
@@ -207,15 +229,18 @@ impl Parser<'_> {
                 None
             };
             fields.push(FieldPat {
-                name: Self::interned_symbol(name_tok),
+                name: self.interned_symbol(name_tok),
                 span: self.token_span(name_tok),
                 pat,
             });
-            if !self.eat(TokenKind::Comma) && !self.at_line_end() {
+            if !self.eat(TokenKind::Comma) && !self.at_list_separator() {
                 break;
             }
         }
-        (extend_range(&mut self.arena.field_pats, fields), rest)
+        (
+            finish_extend(&mut self.diagnostics, &mut self.arena.field_pats, fields),
+            rest,
+        )
     }
 
     fn parse_pat_list(&mut self, close: TokenKind) -> super::super::ast::AstRange<PatId> {
@@ -232,11 +257,11 @@ impl Parser<'_> {
                 break;
             }
         }
-        extend_range(&mut self.arena.pat_ids, pats)
+        finish_extend(&mut self.diagnostics, &mut self.arena.pat_ids, pats)
     }
 
     fn parse_lit_or_range_pat(&mut self, mark: super::Mark) -> PatId {
-        let start = self.parse_expression();
+        let start = self.parse_pat_literal_expr();
         if self.at(TokenKind::DotDot) {
             return self.parse_range_after(mark, start);
         }
@@ -249,9 +274,54 @@ impl Parser<'_> {
         self.push_pat(mark, PatKind::Literal(lit))
     }
 
+    fn parse_pat_literal_expr(&mut self) -> super::super::ast::ExprId {
+        let mark = self.start();
+        let kind = match self.kind() {
+            TokenKind::Int => {
+                let token = self.bump();
+                let (radix, limbs) = self.parse_int_limbs(token.text(self.source));
+                LitKind::Int { radix, limbs }
+            }
+            TokenKind::Float => {
+                let token = self.bump();
+                let (digits, exp10) = self.parse_float_parts(token.text(self.source));
+                LitKind::Float { digits, exp10 }
+            }
+            TokenKind::Char => {
+                let token = self.bump();
+                LitKind::Char {
+                    value: '\0',
+                    text: self.interned_symbol(token),
+                }
+            }
+            TokenKind::ByteChar => {
+                let token = self.bump();
+                LitKind::ByteChar {
+                    value: 0,
+                    text: self.interned_symbol(token),
+                }
+            }
+            TokenKind::KwTrue | TokenKind::KwFalse => {
+                let value = self.at(TokenKind::KwTrue);
+                self.bump();
+                LitKind::Bool(value)
+            }
+            _ => {
+                self.error_here(DiagnosticCode::ParseUnexpected, "此处需要字面量模式");
+                return self.error_expr(mark);
+            }
+        };
+        self.arena.push_expr(super::super::ast::Expr {
+            id: mark.id,
+            span: self.finish_span(mark),
+            attributes: super::super::ast::AstRange::empty(),
+            kind: super::super::ast::ExprKind::Literal(kind),
+        })
+    }
+
     fn parse_range_after(&mut self, mark: super::Mark, start: super::super::ast::ExprId) -> PatId {
         self.bump();
-        let end = self.parse_expression();
+        let end = self.parse_pat_literal_expr();
         self.push_pat(mark, PatKind::Range { start, end })
     }
 

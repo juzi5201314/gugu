@@ -2,12 +2,14 @@ use crate::diagnostics::DiagnosticCode;
 
 use super::super::ast::{
     ArenaLens, AstRange, Bound, BoundKind, GenericArg, GenericParam, GenericParamKind, Param, Path,
-    PathSegment, Ty, TyId, TyKind, extend_range,
+    PathSegment, Ty, TyId, TyKind,
 };
 use super::super::token::TokenKind;
-use super::Parser;
+use super::{Parser, finish_extend};
 
 type Checkpoint = (usize, u32, usize, ArenaLens);
+
+const MAX_TY_DEPTH: u32 = 256;
 
 impl Parser<'_> {
     pub(super) fn at_type_start(&self) -> bool {
@@ -29,6 +31,21 @@ impl Parser<'_> {
     }
 
     pub(super) fn parse_ty(&mut self) -> TyId {
+        if self.ty_depth >= MAX_TY_DEPTH {
+            let mark = self.start();
+            self.error_here(
+                DiagnosticCode::ParseImplementationLimit,
+                "类型解析递归深度超过上限",
+            );
+            return self.error_ty(mark);
+        }
+        self.ty_depth += 1;
+        let ty = self.parse_ty_inner();
+        self.ty_depth -= 1;
+        ty
+    }
+
+    fn parse_ty_inner(&mut self) -> TyId {
         let mark = self.start();
         match self.kind() {
             TokenKind::Not => {
@@ -71,15 +88,14 @@ impl Parser<'_> {
 
     fn parse_ref_or_slice(&mut self, mark: super::Mark) -> TyId {
         self.bump();
-        if self.eat(TokenKind::LBracket) {
+        if self.at(TokenKind::LBracket) {
+            let bracket = self.bump();
+            let array_mark = self.start_at(bracket.start);
             let elem = self.parse_ty();
             if self.eat(TokenKind::Semi) {
                 let len = self.parse_expression();
                 self.expect(TokenKind::RBracket, "数组类型需要 `]`");
-                let array = {
-                    let array_mark = self.start_at(mark.start);
-                    self.push_ty(array_mark, TyKind::Array { elem, len })
-                };
+                let array = self.push_ty(array_mark, TyKind::Array { elem, len });
                 return self.push_ty(mark, TyKind::Ref(array));
             }
             self.expect(TokenKind::RBracket, "切片类型需要 `]`");
@@ -116,7 +132,7 @@ impl Parser<'_> {
             }
         }
         self.expect(TokenKind::RParen, "元组类型需要 `)`");
-        let tys = extend_range(&mut self.arena.ty_ids, tys);
+        let tys = finish_extend(&mut self.diagnostics, &mut self.arena.ty_ids, tys);
         self.push_ty(mark, TyKind::Tuple(tys))
     }
 
@@ -139,7 +155,7 @@ impl Parser<'_> {
         while self.eat(TokenKind::Plus) {
             paths.push(self.parse_path_with_args());
         }
-        let paths = extend_range(&mut self.arena.path_ids, paths);
+        let paths = finish_extend(&mut self.diagnostics, &mut self.arena.path_ids, paths);
         self.push_ty(mark, TyKind::Dyn(paths))
     }
 
@@ -163,11 +179,16 @@ impl Parser<'_> {
                 break;
             }
         }
-        extend_range(&mut self.arena.ty_ids, tys)
+        finish_extend(&mut self.diagnostics, &mut self.arena.ty_ids, tys)
     }
 
     pub(super) fn parse_generic_params(&mut self) -> AstRange<GenericParam> {
         if !self.eat(TokenKind::LBracket) {
+            return AstRange::empty();
+        }
+        if self.at(TokenKind::RBracket) {
+            self.error_here(DiagnosticCode::ParseExpected, "泛型参数表不能为空");
+            self.bump();
             return AstRange::empty();
         }
         let mut params = Vec::new();
@@ -178,7 +199,11 @@ impl Parser<'_> {
             }
         }
         self.expect(TokenKind::RBracket, "泛型参数表需要 `]`");
-        extend_range(&mut self.arena.generic_params, params)
+        finish_extend(
+            &mut self.diagnostics,
+            &mut self.arena.generic_params,
+            params,
+        )
     }
 
     fn parse_generic_param(&mut self) -> GenericParam {
@@ -191,7 +216,7 @@ impl Parser<'_> {
                 id: mark.id,
                 span: self.finish_span(mark),
                 kind: GenericParamKind::Comptime {
-                    name: Self::interned_symbol(name_tok),
+                    name: self.interned_symbol(name_tok),
                     name_span: self.token_span(name_tok),
                     ty,
                 },
@@ -208,7 +233,7 @@ impl Parser<'_> {
             id: mark.id,
             span: self.finish_span(mark),
             kind: GenericParamKind::Type {
-                name: Self::interned_symbol(name_tok),
+                name: self.interned_symbol(name_tok),
                 name_span: self.token_span(name_tok),
                 bounds,
                 pack,
@@ -221,7 +246,7 @@ impl Parser<'_> {
         while self.eat(TokenKind::Plus) {
             bounds.push(self.parse_bound());
         }
-        extend_range(&mut self.arena.bounds, bounds)
+        finish_extend(&mut self.diagnostics, &mut self.arena.bounds, bounds)
     }
 
     fn parse_bound(&mut self) -> Bound {
@@ -263,6 +288,11 @@ impl Parser<'_> {
     }
 
     fn parse_generic_arg_list(&mut self) -> AstRange<GenericArg> {
+        if self.at(TokenKind::RBracket) {
+            self.error_here(DiagnosticCode::ParseExpected, "泛型实参表不能为空");
+            self.bump();
+            return AstRange::empty();
+        }
         let mut args = Vec::new();
         while !self.at_any(&[TokenKind::RBracket, TokenKind::Eof]) {
             args.push(self.parse_generic_arg());
@@ -271,11 +301,14 @@ impl Parser<'_> {
             }
         }
         self.expect(TokenKind::RBracket, "泛型实参表需要 `]`");
-        extend_range(&mut self.arena.generic_args, args)
+        finish_extend(&mut self.diagnostics, &mut self.arena.generic_args, args)
     }
 
     fn parse_generic_arg(&mut self) -> GenericArg {
         if self.at_literal_or_expr_only() {
+            return GenericArg::Expr(self.parse_expression());
+        }
+        if self.should_parse_generic_arg_as_expr() {
             return GenericArg::Expr(self.parse_expression());
         }
         let saved = self.checkpoint();
@@ -287,6 +320,42 @@ impl Parser<'_> {
         }
         self.restore(saved);
         GenericArg::Expr(self.parse_expression())
+    }
+
+    fn should_parse_generic_arg_as_expr(&self) -> bool {
+        if !self.at(TokenKind::Ident) {
+            return false;
+        }
+        let mut index = self.cursor;
+        loop {
+            let kind = self.tokens.get(index).map(|token| token.kind);
+            match kind {
+                Some(TokenKind::Ident) => {
+                    index += 1;
+                    match self.tokens.get(index).map(|token| token.kind) {
+                        Some(TokenKind::Dot)
+                            if self
+                                .tokens
+                                .get(index + 1)
+                                .is_some_and(|t| t.kind == TokenKind::Ident) =>
+                        {
+                            index += 2;
+                        }
+                        Some(TokenKind::PathSep)
+                            if self
+                                .tokens
+                                .get(index + 1)
+                                .is_some_and(|t| t.kind == TokenKind::Ident) =>
+                        {
+                            index += 2;
+                        }
+                        Some(TokenKind::RBracket) | Some(TokenKind::Comma) => return true,
+                        _ => return false,
+                    }
+                }
+                _ => return false,
+            }
+        }
     }
 
     fn at_literal_or_expr_only(&self) -> bool {
@@ -327,7 +396,8 @@ impl Parser<'_> {
             self.bump();
             segments.push(self.expect_path_ident_colon(false));
         }
-        while self.eat(TokenKind::PathSep) {
+        while self.at(TokenKind::PathSep) && self.nth(1) != TokenKind::LBracket {
+            self.bump();
             segments.push(self.expect_path_ident_colon(true));
         }
         let args = if with_args && self.at(TokenKind::LBracket) {
@@ -335,7 +405,7 @@ impl Parser<'_> {
         } else {
             AstRange::empty()
         };
-        let segments = extend_range(&mut self.arena.segments, segments);
+        let segments = finish_extend(&mut self.diagnostics, &mut self.arena.segments, segments);
         let span = self.finish_span(mark);
         self.arena.push_path(Path {
             id: mark.id,
@@ -356,7 +426,7 @@ impl Parser<'_> {
             self.expect(TokenKind::Ident, "路径需要标识符")
         };
         PathSegment {
-            name: Self::interned_symbol(token),
+            name: self.symbol_from_token(token),
             span: self.token_span(token),
             colon,
         }
@@ -376,14 +446,14 @@ impl Parser<'_> {
                 break;
             }
         }
-        extend_range(&mut self.arena.params, params)
+        finish_extend(&mut self.diagnostics, &mut self.arena.params, params)
     }
 
     fn parse_param(&mut self) -> Param {
         let mark = self.start();
         if self.at(TokenKind::DotDotDot) {
             self.bump();
-            let _name = self.expect(TokenKind::Ident, "变参需要名字");
+            let name_tok = self.expect(TokenKind::Ident, "变参需要名字");
             self.expect(TokenKind::Colon, "变参需要类型");
             let ty = self.parse_ty();
             return Param {
@@ -391,6 +461,8 @@ impl Parser<'_> {
                 span: self.finish_span(mark),
                 comptime: false,
                 variadic: true,
+                variadic_name: Some(self.interned_symbol(name_tok)),
+                variadic_name_span: Some(self.token_span(name_tok)),
                 pat: None,
                 ty: Some(ty),
             };
@@ -410,6 +482,8 @@ impl Parser<'_> {
             span: self.finish_span(mark),
             comptime,
             variadic: false,
+            variadic_name: None,
+            variadic_name_span: None,
             pat: Some(pat),
             ty,
         }

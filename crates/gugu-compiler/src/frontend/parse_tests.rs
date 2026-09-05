@@ -15,14 +15,15 @@ fn parse_source(source: &str) -> (String, Vec<DiagnosticCode>, bool) {
         "词法失败: {:?}",
         lexed.diagnostics
     );
-    let parsed = parse(snapshot.content(), &map, file, &lexed.buffer);
-    let dump = dump_ast(&parsed.file, &parsed.arena, &lexed.buffer.intern);
+    let mut buffer = lexed.buffer;
+    let parsed = parse(snapshot.content(), &map, file, &mut buffer);
+    let dump = dump_ast(&parsed.file, &parsed.arena, &buffer.intern);
     let codes = parsed
         .diagnostics
         .iter()
         .map(|diagnostic| diagnostic.code())
         .collect();
-    let main = has_main_fn(&parsed.file, &parsed.arena, &lexed.buffer.intern);
+    let main = has_main_fn(&parsed.file, &parsed.arena, &buffer.intern);
     assert!(
         parent_before_child(&parsed.arena),
         "同起点父节点必须先于子节点:\n{dump}"

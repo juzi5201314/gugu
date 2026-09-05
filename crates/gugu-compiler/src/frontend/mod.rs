@@ -89,11 +89,12 @@ fn check_file(
         }
         return Err(diagnostics);
     }
-    let parsed = parse(snapshot.content(), source_map, file, &lexed.buffer);
+    let mut buffer = lexed.buffer;
+    let parsed = parse(snapshot.content(), source_map, file, &mut buffer);
     if !parsed.diagnostics.is_empty() {
         return Err(parsed.diagnostics);
     }
-    let has_main = has_main_fn(&parsed.file, &parsed.arena, &lexed.buffer.intern);
+    let has_main = has_main_fn(&parsed.file, &parsed.arena, &buffer.intern);
     if require_main && !has_main {
         let span = source_map_span(source_map, file, 0, snapshot.content().len().min(1))?;
         return Err(vec![Diagnostic::error(
@@ -106,7 +107,7 @@ fn check_file(
         path: Some(snapshot.path().to_path_buf()),
         has_main,
         source_len: snapshot.content().len() as u32,
-        tokens: lexed.buffer,
+        tokens: buffer,
         ast: Some(ParsedAst {
             file: parsed.file,
             arena: parsed.arena,

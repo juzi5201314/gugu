@@ -1,19 +1,30 @@
 use crate::diagnostics::DiagnosticCode;
 
 use super::super::ast::{
-    AssignOp, AstRange, BinOp, Expr, ExprId, ExprKind, FStringPart, FieldExpr, IndexKind,
-    IntrinsicKind, LitKind, MatchArm, Path, PathId, SelectArm, SelectArmKind, Stmt, StmtId,
-    StmtKind, UnOp, extend_range,
+    AssignOp, AstRange, BinOp, Expr, ExprId, ExprKind, FStringPart, FieldExpr, GenericArg,
+    IndexKind, IntrinsicKind, LitKind, MatchArm, Path, PathId, SelectArm, SelectArmKind, Stmt,
+    StmtId, StmtKind, UnOp,
 };
 use super::super::intern::Symbol;
 use super::super::token::TokenKind;
-use super::{Mark, Parser};
+use super::{Mark, Parser, finish_extend};
 
 enum SelectCall {
     Send { chan: ExprId, payload: ExprId },
     Recv { chan: ExprId },
     Wait { join: ExprId },
 }
+
+const PREC_OR: u8 = 2;
+const PREC_AND: u8 = 4;
+const PREC_CMP: u8 = 6;
+const PREC_RANGE: u8 = 8;
+const PREC_BIT_OR: u8 = 10;
+const PREC_BIT_XOR: u8 = 12;
+const PREC_BIT_AND: u8 = 14;
+const PREC_SHIFT: u8 = 16;
+const PREC_ADD: u8 = 18;
+const PREC_MUL: u8 = 20;
 
 impl Parser<'_> {
     pub(super) fn parse_expression(&mut self) -> ExprId {
@@ -49,8 +60,12 @@ impl Parser<'_> {
                 self.bump();
                 self.push_expr(mark, ExprKind::Continue)
             }
-            _ => self.parse_binary(0, 255),
+            _ => self.parse_binary(0, true),
         }
+    }
+
+    fn parse_expr_no_range(&mut self) -> ExprId {
+        self.parse_binary(0, false)
     }
 
     pub(super) fn parse_block_expr(&mut self) -> ExprId {
@@ -64,7 +79,12 @@ impl Parser<'_> {
     fn parse_block_contents(&mut self) -> (AstRange<StmtId>, Option<ExprId>) {
         let mut stmts = Vec::new();
         let mut tail = None;
-        while !self.at_any(&[TokenKind::RBrace, TokenKind::Eof]) {
+        while !self.at_any(&[
+            TokenKind::RBrace,
+            TokenKind::RParen,
+            TokenKind::RBracket,
+            TokenKind::Eof,
+        ]) {
             if self.at(TokenKind::Error) {
                 self.consume_error_token();
                 continue;
@@ -83,13 +103,16 @@ impl Parser<'_> {
                 stmts.push(self.expr_stmt(expr, true));
                 continue;
             }
-            if self.at(TokenKind::RBrace) {
+            if self.at_any(&[TokenKind::RBrace, TokenKind::RParen, TokenKind::RBracket]) {
                 tail = Some(expr);
                 break;
             }
             stmts.push(self.expr_stmt(expr, false));
         }
-        (extend_range(&mut self.arena.stmt_ids, stmts), tail)
+        (
+            finish_extend(&mut self.diagnostics, &mut self.arena.stmt_ids, stmts),
+            tail,
+        )
     }
 
     fn try_parse_stmt(&mut self) -> Option<StmtId> {
@@ -207,14 +230,26 @@ impl Parser<'_> {
         let op = self.assign_op();
         self.bump();
         let value = self.parse_expression();
-        let mark_id = self.arena.alloc_node(self.file);
+        let mark_id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return StmtId(u32::MAX);
+            }
+        };
         let start = self.expr_span(place).start();
         let end = self.expr_span(value).end();
-        self.arena.push_stmt(Stmt {
+        match self.arena.try_push_stmt(Stmt {
             id: mark_id,
             span: self.make_span(start, end),
             kind: StmtKind::Assign { op, place, value },
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                StmtId(u32::MAX)
+            }
+        }
     }
 
     fn is_place(&self, expr: ExprId) -> bool {
@@ -233,30 +268,48 @@ impl Parser<'_> {
 
     fn expr_stmt(&mut self, expr: ExprId, discarded: bool) -> StmtId {
         let span = self.expr_span(expr);
-        let id = self.arena.alloc_node(self.file);
-        self.arena.push_stmt(Stmt {
+        let id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return StmtId(u32::MAX);
+            }
+        };
+        match self.arena.try_push_stmt(Stmt {
             id,
             span,
             kind: StmtKind::Expr { expr, discarded },
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                StmtId(u32::MAX)
+            }
+        }
     }
 
     fn push_stmt(&mut self, mark: Mark, kind: StmtKind) -> StmtId {
         let span = self.finish_span(mark);
-        self.arena.push_stmt(Stmt {
+        match self.arena.try_push_stmt(Stmt {
             id: mark.id,
             span,
             kind,
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                StmtId(u32::MAX)
+            }
+        }
     }
 
-    fn parse_binary(&mut self, min_prec: u8, max_prec: u8) -> ExprId {
+    fn parse_binary(&mut self, min_prec: u8, allow_range: bool) -> ExprId {
         let mut left = self.parse_unary();
         loop {
-            if self.at(TokenKind::DotDot) && 9 >= min_prec && 9 <= max_prec {
+            if allow_range && self.at(TokenKind::DotDot) && PREC_RANGE >= min_prec {
                 let op_span = self.token_span(self.current());
                 self.bump();
-                let right = self.parse_binary(10, max_prec);
+                let right = self.parse_binary(PREC_RANGE + 1, true);
                 if self.at(TokenKind::DotDot) {
                     self.error_span(
                         DiagnosticCode::ParseInvalidPrecedence,
@@ -275,12 +328,12 @@ impl Parser<'_> {
             let Some((op, prec, assoc)) = self.current_binop() else {
                 break;
             };
-            if prec < min_prec || prec > max_prec {
+            if prec < min_prec {
                 break;
             }
             let op_span = self.token_span(self.current());
             self.bump();
-            let right = self.parse_binary(prec + 1, max_prec);
+            let right = self.parse_binary(prec + 1, allow_range);
             if !assoc
                 && let Some((_, next, _)) = self.current_binop()
                 && next == prec
@@ -303,20 +356,22 @@ impl Parser<'_> {
 
     fn current_binop(&self) -> Option<(BinOp, u8, bool)> {
         Some(match self.kind() {
-            TokenKind::Star | TokenKind::Slash | TokenKind::Percent => (self.mul_op(), 3, true),
-            TokenKind::Plus | TokenKind::Minus => (self.add_op(), 4, true),
-            TokenKind::Shl | TokenKind::Shr => (self.shift_op(), 5, true),
-            TokenKind::And => (BinOp::BitAnd, 6, true),
-            TokenKind::Caret => (BinOp::BitXor, 7, true),
-            TokenKind::Or => (BinOp::BitOr, 8, true),
-            TokenKind::EqEq => (BinOp::Eq, 10, false),
-            TokenKind::Ne => (BinOp::Ne, 10, false),
-            TokenKind::Lt => (BinOp::Lt, 10, false),
-            TokenKind::Le => (BinOp::Le, 10, false),
-            TokenKind::Gt => (BinOp::Gt, 10, false),
-            TokenKind::Ge => (BinOp::Ge, 10, false),
-            TokenKind::AndAnd => (BinOp::And, 11, true),
-            TokenKind::OrOr => (BinOp::Or, 12, true),
+            TokenKind::Star | TokenKind::Slash | TokenKind::Percent => {
+                (self.mul_op(), PREC_MUL, true)
+            }
+            TokenKind::Plus | TokenKind::Minus => (self.add_op(), PREC_ADD, true),
+            TokenKind::Shl | TokenKind::Shr => (self.shift_op(), PREC_SHIFT, true),
+            TokenKind::And => (BinOp::BitAnd, PREC_BIT_AND, true),
+            TokenKind::Caret => (BinOp::BitXor, PREC_BIT_XOR, true),
+            TokenKind::Or => (BinOp::BitOr, PREC_BIT_OR, true),
+            TokenKind::EqEq => (BinOp::Eq, PREC_CMP, false),
+            TokenKind::Ne => (BinOp::Ne, PREC_CMP, false),
+            TokenKind::Lt => (BinOp::Lt, PREC_CMP, false),
+            TokenKind::Le => (BinOp::Le, PREC_CMP, false),
+            TokenKind::Gt => (BinOp::Gt, PREC_CMP, false),
+            TokenKind::Ge => (BinOp::Ge, PREC_CMP, false),
+            TokenKind::AndAnd => (BinOp::And, PREC_AND, true),
+            TokenKind::OrOr => (BinOp::Or, PREC_OR, true),
             _ => return None,
         })
     }
@@ -361,14 +416,18 @@ impl Parser<'_> {
     }
 
     fn parse_postfix(&mut self) -> ExprId {
-        let mut expr = self.parse_primary();
+        let expr = self.parse_primary();
+        self.parse_postfix_suffix(expr)
+    }
+
+    fn parse_postfix_suffix(&mut self, mut expr: ExprId) -> ExprId {
         loop {
             match self.kind() {
                 TokenKind::LParen => {
                     self.bump();
                     let args = self.parse_expr_list(TokenKind::RParen);
                     self.expect(TokenKind::RParen, "调用需要 `)`");
-                    expr = self.wrap(expr, ExprKind::Call { callee: expr, args });
+                    expr = self.make_call(expr, args);
                 }
                 TokenKind::PathSep if self.nth(1) == TokenKind::LBracket => {
                     self.bump();
@@ -387,16 +446,27 @@ impl Parser<'_> {
         expr
     }
 
-    fn wrap_turbofish(
-        &mut self,
-        base: ExprId,
-        args: AstRange<super::super::ast::GenericArg>,
-    ) -> ExprId {
-        if let ExprKind::Path(path) = self.arena.exprs[base.0 as usize].kind {
-            self.arena.paths[path.0 as usize].args = args;
-            return base;
+    fn make_call(&mut self, callee: ExprId, args: AstRange<ExprId>) -> ExprId {
+        let (callee, type_args) = self.split_type_args(callee);
+        self.wrap(
+            callee,
+            ExprKind::Call {
+                callee,
+                type_args,
+                args,
+            },
+        )
+    }
+
+    fn split_type_args(&mut self, expr: ExprId) -> (ExprId, AstRange<GenericArg>) {
+        match self.arena.exprs[expr.0 as usize].kind {
+            ExprKind::TypeApp { base, args } => (base, args),
+            _ => (expr, AstRange::empty()),
         }
-        base
+    }
+
+    fn wrap_turbofish(&mut self, base: ExprId, args: AstRange<GenericArg>) -> ExprId {
+        self.wrap(base, ExprKind::TypeApp { base, args })
     }
 
     fn parse_index(&mut self, base: ExprId) -> ExprId {
@@ -406,16 +476,16 @@ impl Parser<'_> {
             let end = if self.at(TokenKind::RBracket) {
                 None
             } else {
-                Some(self.parse_expression())
+                Some(self.parse_expr_no_range())
             };
             IndexKind::Range { start: None, end }
         } else {
-            let start = self.parse_expression();
+            let start = self.parse_expr_no_range();
             if self.eat(TokenKind::DotDot) {
                 let end = if self.at(TokenKind::RBracket) {
                     None
                 } else {
-                    Some(self.parse_expression())
+                    Some(self.parse_expr_no_range())
                 };
                 IndexKind::Range {
                     start: Some(start),
@@ -444,11 +514,23 @@ impl Parser<'_> {
         }
         if self.at(TokenKind::Int) {
             let token = self.bump();
-            let index = token.text(self.source).parse::<u32>().unwrap_or(0);
+            let span = self.token_span(token);
+            let text = token.text(self.source);
+            let index = match text.parse::<u32>() {
+                Ok(index) => index,
+                Err(_) => {
+                    self.error_span(
+                        DiagnosticCode::ParseExpected,
+                        "元组字段索引超出 u32 范围",
+                        span,
+                    );
+                    0
+                }
+            };
             return self.wrap(base, ExprKind::TupleField { base, index });
         }
         let name_tok = self.expect(TokenKind::Ident, "字段需要标识符");
-        let name = Self::interned_symbol(name_tok);
+        let name = self.interned_symbol(name_tok);
         self.wrap(base, ExprKind::Field { base, name })
     }
 
@@ -513,26 +595,48 @@ impl Parser<'_> {
     }
 
     fn looks_like_type_path_generics(&self) -> bool {
-        if !self.at(TokenKind::Ident) || self.nth(1) != TokenKind::LBracket {
+        if !self.at(TokenKind::Ident) {
             return false;
         }
-        let mut depth = 0_u32;
-        for (offset, token) in self.tokens[self.cursor + 1..].iter().enumerate() {
-            match token.kind {
-                TokenKind::LBracket => depth += 1,
-                TokenKind::RBracket => {
-                    depth = depth.saturating_sub(1);
-                    if depth == 0 {
-                        return matches!(
-                            self.tokens
-                                .get(self.cursor + 2 + offset)
-                                .map(|next| next.kind),
-                            Some(TokenKind::PathSep | TokenKind::LBrace)
-                        );
+        let mut index = self.cursor + 1;
+        while index < self.tokens.len() {
+            match self.tokens[index].kind {
+                TokenKind::PathSep => {
+                    index += 1;
+                    if self
+                        .tokens
+                        .get(index)
+                        .is_none_or(|token| token.kind != TokenKind::Ident)
+                    {
+                        return false;
                     }
+                    index += 1;
                 }
-                TokenKind::Eof => return false,
-                _ => {}
+                TokenKind::LBracket => {
+                    let mut depth = 0_u32;
+                    for (offset, token) in self.tokens[index..].iter().enumerate() {
+                        match token.kind {
+                            TokenKind::LBracket => depth += 1,
+                            TokenKind::RBracket => {
+                                depth = depth.saturating_sub(1);
+                                if depth == 0 {
+                                    return matches!(
+                                        self.tokens.get(index + offset + 1).map(|next| next.kind),
+                                        Some(
+                                            TokenKind::PathSep
+                                                | TokenKind::LBrace
+                                                | TokenKind::LParen
+                                        )
+                                    );
+                                }
+                            }
+                            TokenKind::Eof => return false,
+                            _ => {}
+                        }
+                    }
+                    return false;
+                }
+                _ => return false,
             }
         }
         false
@@ -548,15 +652,15 @@ impl Parser<'_> {
                 None
             };
             fields.push(FieldExpr {
-                name: Self::interned_symbol(name_tok),
+                name: self.interned_symbol(name_tok),
                 span: self.token_span(name_tok),
                 value,
             });
-            if !self.eat(TokenKind::Comma) && !self.at_line_end() {
+            if !self.eat(TokenKind::Comma) && !self.at_list_separator() {
                 break;
             }
         }
-        extend_range(&mut self.arena.field_exprs, fields)
+        finish_extend(&mut self.diagnostics, &mut self.arena.field_exprs, fields)
     }
 
     fn parse_bool(&mut self) -> ExprId {
@@ -578,14 +682,20 @@ impl Parser<'_> {
                 let (digits, exp10) = self.parse_float_parts(token.text(self.source));
                 LitKind::Float { digits, exp10 }
             }
-            TokenKind::Char => LitKind::Char {
-                value: '\0',
-                text: Self::interned_symbol(token),
-            },
-            TokenKind::ByteChar => LitKind::ByteChar {
-                value: 0,
-                text: Self::interned_symbol(token),
-            },
+            TokenKind::Char => {
+                let text = token.text(self.source);
+                LitKind::Char {
+                    value: self.parse_char_value(text),
+                    text: self.interned_symbol(token),
+                }
+            }
+            TokenKind::ByteChar => {
+                let text = token.text(self.source);
+                LitKind::ByteChar {
+                    value: self.parse_byte_char_value(text),
+                    text: self.interned_symbol(token),
+                }
+            }
             _ => unreachable!(),
         };
         self.bump();
@@ -595,7 +705,7 @@ impl Parser<'_> {
     fn parse_string_lit(&mut self) -> ExprId {
         let mark = self.start();
         let token = self.bump();
-        let text = Self::interned_symbol(token);
+        let text = self.interned_symbol(token);
         let kind = match token.kind {
             TokenKind::ByteString => LitKind::ByteString { text },
             TokenKind::CString => LitKind::CString { text },
@@ -613,18 +723,27 @@ impl Parser<'_> {
             match self.kind() {
                 TokenKind::FStringText => {
                     let token = self.bump();
-                    parts.push(FStringPart::Text(Self::interned_symbol(token)));
+                    parts.push(FStringPart::Text {
+                        text: self.interned_symbol(token),
+                        span: self.token_span(token),
+                    });
                 }
                 TokenKind::FStringInterpOpen => {
                     self.bump();
+                    let interp_mark = self.start();
                     let expr = self.parse_expression();
                     let spec = if self.at(TokenKind::FormatSpec) {
-                        Some(Self::interned_symbol(self.bump()))
+                        let token = self.bump();
+                        Some(self.interned_symbol(token))
                     } else {
                         None
                     };
                     self.expect(TokenKind::FStringInterpClose, "插值需要 `}`");
-                    parts.push(FStringPart::Interp { expr, spec });
+                    parts.push(FStringPart::Interp {
+                        span: self.finish_span(interp_mark),
+                        expr,
+                        spec,
+                    });
                 }
                 _ => {
                     self.error_here(DiagnosticCode::ParseUnexpected, "f-string 片段非法");
@@ -633,7 +752,7 @@ impl Parser<'_> {
             }
         }
         self.expect(TokenKind::FStringEnd, "f-string 未结束");
-        let parts = extend_range(&mut self.arena.fstring_parts, parts);
+        let parts = finish_extend(&mut self.diagnostics, &mut self.arena.fstring_parts, parts);
         self.push_expr(mark, ExprKind::FString { parts })
     }
 
@@ -683,7 +802,8 @@ impl Parser<'_> {
         let tys = self.parse_generic_args_required();
         self.expect(TokenKind::LParen, "offset_of 需要 `(`");
         let field = if self.at(TokenKind::Ident) || self.at(TokenKind::Int) {
-            Some(Self::interned_symbol(self.bump()))
+            let token = self.bump();
+            Some(self.interned_symbol(token))
         } else {
             self.error_here(DiagnosticCode::ParseExpected, "offset_of 需要字段名或 `0`");
             None
@@ -723,7 +843,7 @@ impl Parser<'_> {
         self.expect(TokenKind::LParen, "chan 构造需要 `(`");
         let arg = self.parse_expression();
         self.expect(TokenKind::RParen, "chan 构造需要 `)`");
-        let args = extend_range(&mut self.arena.expr_ids, [arg]);
+        let args = finish_extend(&mut self.diagnostics, &mut self.arena.expr_ids, [arg]);
         self.push_expr(
             mark,
             ExprKind::Intrinsic {
@@ -739,7 +859,18 @@ impl Parser<'_> {
         let mark = self.start();
         self.bump();
         self.expect(TokenKind::LParen, "asm 需要 `(`");
-        let template = Self::interned_symbol(self.expect(TokenKind::String, "asm 需要字符串模板"));
+        let template = match self.kind() {
+            TokenKind::String | TokenKind::RawString => {
+                let token = self.bump();
+                self.interned_symbol(token)
+            }
+            _ => {
+                self.error_here(DiagnosticCode::ParseExpected, "asm 需要字符串模板");
+                let mark = self.start();
+                self.error_expr(mark);
+                return self.push_expr(mark, ExprKind::Error);
+            }
+        };
         let mut operands = Vec::new();
         while self.eat(TokenKind::Comma) {
             if self.at(TokenKind::RParen) {
@@ -748,7 +879,11 @@ impl Parser<'_> {
             operands.push(self.parse_asm_operand());
         }
         self.expect(TokenKind::RParen, "asm 需要 `)`");
-        let operands = extend_range(&mut self.arena.asm_operands, operands);
+        let operands = finish_extend(
+            &mut self.diagnostics,
+            &mut self.arena.asm_operands,
+            operands,
+        );
         self.push_expr(mark, ExprKind::Asm { template, operands })
     }
 
@@ -763,34 +898,39 @@ impl Parser<'_> {
                     let mut regs = Vec::new();
                     while !self.at_any(&[TokenKind::RParen, TokenKind::Eof]) {
                         let token = self.expect(TokenKind::String, "clobber 需要寄存器名");
-                        regs.push(Self::interned_symbol(token));
+                        regs.push(self.interned_symbol(token));
                         if !self.eat(TokenKind::Comma) {
                             break;
                         }
                     }
                     self.expect(TokenKind::RParen, "clobber 需要 `)`");
+                    if regs.is_empty() {
+                        self.error_here(
+                            DiagnosticCode::ParseExpected,
+                            "clobber 至少需要一个寄存器",
+                        );
+                    }
                     super::super::ast::AsmOperandKind::Clobber {
-                        regs: extend_range(&mut self.arena.symbols, regs),
+                        regs: finish_extend(&mut self.diagnostics, &mut self.arena.symbols, regs),
                     }
                 }
                 "in" => {
-                    let reg =
-                        Self::interned_symbol(self.expect(TokenKind::String, "in 需要寄存器名"));
+                    let reg_token = self.expect(TokenKind::String, "in 需要寄存器名");
+                    let reg = self.interned_symbol(reg_token);
                     self.expect(TokenKind::RParen, "in 需要 `)`");
                     let expr = self.parse_expression();
                     super::super::ast::AsmOperandKind::In { reg, expr }
                 }
                 "out" => {
-                    let reg =
-                        Self::interned_symbol(self.expect(TokenKind::String, "out 需要寄存器名"));
+                    let reg_token = self.expect(TokenKind::String, "out 需要寄存器名");
+                    let reg = self.interned_symbol(reg_token);
                     self.expect(TokenKind::RParen, "out 需要 `)`");
                     let place = self.parse_expression();
                     super::super::ast::AsmOperandKind::Out { reg, place }
                 }
                 _ => {
-                    let reg = Self::interned_symbol(
-                        self.expect(TokenKind::String, "lateout 需要寄存器名"),
-                    );
+                    let reg_token = self.expect(TokenKind::String, "lateout 需要寄存器名");
+                    let reg = self.interned_symbol(reg_token);
                     self.expect(TokenKind::RParen, "lateout 需要 `)`");
                     let place = self.parse_expression();
                     super::super::ast::AsmOperandKind::Lateout { reg, place }
@@ -824,7 +964,7 @@ impl Parser<'_> {
                 }
             }
             self.expect(TokenKind::RParen, "元组需要 `)`");
-            let elems = extend_range(&mut self.arena.expr_ids, elems);
+            let elems = finish_extend(&mut self.diagnostics, &mut self.arena.expr_ids, elems);
             return self.push_expr(mark, ExprKind::Tuple(elems));
         }
         self.expect(TokenKind::RParen, "括号表达式需要 `)`");
@@ -851,7 +991,7 @@ impl Parser<'_> {
             elems.push(self.parse_expression());
         }
         self.expect(TokenKind::RBracket, "数组需要 `]`");
-        let elems = extend_range(&mut self.arena.expr_ids, elems);
+        let elems = finish_extend(&mut self.diagnostics, &mut self.arena.expr_ids, elems);
         self.push_expr(mark, ExprKind::Array(elems))
     }
 
@@ -901,10 +1041,10 @@ impl Parser<'_> {
         if self.at(TokenKind::KwLet) {
             return self.parse_let_condition();
         }
-        let mut left = self.parse_binary(0, 10);
+        let mut left = self.parse_binary(PREC_AND + 1, true);
         while self.at(TokenKind::OrOr) {
             self.bump();
-            let right = self.parse_binary(0, 10);
+            let right = self.parse_binary(PREC_AND + 1, true);
             left = self.make_binary(BinOp::Or, left, right);
         }
         left
@@ -915,10 +1055,16 @@ impl Parser<'_> {
         self.bump();
         let pat = self.parse_pat();
         self.expect(TokenKind::Eq, "let 条件需要 `=`");
-        let init = self.parse_expression();
-        let stmt_id = self.arena.alloc_node(self.file);
+        let init = self.parse_binary(PREC_AND + 1, false);
+        let stmt_id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return self.push_expr(mark, ExprKind::Error);
+            }
+        };
         let span = self.finish_span(mark);
-        let stmt = self.arena.push_stmt(Stmt {
+        let stmt = match self.arena.try_push_stmt(Stmt {
             id: stmt_id,
             span,
             kind: StmtKind::Let {
@@ -927,8 +1073,14 @@ impl Parser<'_> {
                 init: Some(init),
                 else_block: None,
             },
-        });
-        let stmts = extend_range(&mut self.arena.stmt_ids, [stmt]);
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return self.push_expr(mark, ExprKind::Error);
+            }
+        };
+        let stmts = finish_extend(&mut self.diagnostics, &mut self.arena.stmt_ids, [stmt]);
         self.push_expr(mark, ExprKind::Block { stmts, tail: None })
     }
 
@@ -960,10 +1112,14 @@ impl Parser<'_> {
                 guard,
                 body,
             });
-            let _ = self.eat(TokenKind::Comma) || self.at_line_end();
+            if !self.at(TokenKind::RBrace) {
+                if !self.eat(TokenKind::Comma) && !self.at_list_separator() {
+                    self.error_here(DiagnosticCode::ParseExpected, "match 臂之间需要 `,` 或换行");
+                }
+            }
         }
         self.expect(TokenKind::RBrace, "match 需要 `}`");
-        extend_range(&mut self.arena.match_arms, arms)
+        finish_extend(&mut self.diagnostics, &mut self.arena.match_arms, arms)
     }
 
     fn parse_try(&mut self) -> ExprId {
@@ -1005,10 +1161,17 @@ impl Parser<'_> {
         let mut arms = Vec::new();
         while !self.at_any(&[TokenKind::RBrace, TokenKind::Eof]) {
             arms.push(self.parse_select_arm());
-            let _ = self.eat(TokenKind::Comma) || self.at_line_end();
+            if !self.at(TokenKind::RBrace) {
+                if !self.eat(TokenKind::Comma) && !self.at_list_separator() {
+                    self.error_here(
+                        DiagnosticCode::ParseExpected,
+                        "select 臂之间需要 `,` 或换行",
+                    );
+                }
+            }
         }
         self.expect(TokenKind::RBrace, "select 需要 `}`");
-        let arms = extend_range(&mut self.arena.select_arms, arms);
+        let arms = finish_extend(&mut self.diagnostics, &mut self.arena.select_arms, arms);
         self.push_expr(mark, ExprKind::Select { arms })
     }
 
@@ -1088,14 +1251,39 @@ impl Parser<'_> {
         let inner = if self.at(TokenKind::LBrace) {
             self.parse_block_expr()
         } else {
-            self.parse_postfix()
+            self.parse_async_operand()
         };
-        self.push_expr(mark, ExprKind::Async(inner))
+        let expr = self.push_expr(mark, ExprKind::Async(inner));
+        self.parse_postfix_suffix(expr)
+    }
+
+    fn parse_async_operand(&mut self) -> ExprId {
+        let mut expr = self.parse_primary();
+        loop {
+            match self.kind() {
+                TokenKind::Dot => expr = self.parse_dot(expr),
+                TokenKind::PathSep if self.nth(1) == TokenKind::LBracket => {
+                    self.bump();
+                    let args = self.parse_generic_args_required();
+                    expr = self.wrap_turbofish(expr, args);
+                }
+                TokenKind::LParen => {
+                    self.bump();
+                    let args = self.parse_expr_list(TokenKind::RParen);
+                    self.expect(TokenKind::RParen, "调用需要 `)`");
+                    return self.make_call(expr, args);
+                }
+                _ => {
+                    self.error_here(DiagnosticCode::ParseExpected, "async 操作数必须是一次调用");
+                    return expr;
+                }
+            }
+        }
     }
 
     fn parse_closure(&mut self) -> ExprId {
         let mark = self.start();
-        let fn_id = self.parse_fn_decl(false, false);
+        let fn_id = self.parse_fn_decl(super::item::FnDeclContext::Closure, false, None);
         self.push_expr(mark, ExprKind::Closure(fn_id))
     }
 
@@ -1147,44 +1335,84 @@ impl Parser<'_> {
                 break;
             }
         }
-        extend_range(&mut self.arena.expr_ids, exprs)
+        finish_extend(&mut self.diagnostics, &mut self.arena.expr_ids, exprs)
     }
 
     fn make_binary(&mut self, op: BinOp, lhs: ExprId, rhs: ExprId) -> ExprId {
         let start = self.expr_span(lhs).start();
         let end = self.expr_span(rhs).end();
-        let id = self.arena.alloc_node(self.file);
-        self.arena.push_expr(Expr {
+        let id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return ExprId(u32::MAX);
+            }
+        };
+        match self.arena.try_push_expr(Expr {
             id,
             span: self.make_span(start, end),
             attributes: AstRange::empty(),
             kind: ExprKind::Binary { op, lhs, rhs },
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                ExprId(u32::MAX)
+            }
+        }
     }
 
     fn make_range(&mut self, start: ExprId, end: ExprId) -> ExprId {
         let lo = self.expr_span(start).start();
         let hi = self.expr_span(end).end();
-        let id = self.arena.alloc_node(self.file);
-        self.arena.push_expr(Expr {
+        let id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return ExprId(u32::MAX);
+            }
+        };
+        match self.arena.try_push_expr(Expr {
             id,
             span: self.make_span(lo, hi),
             attributes: AstRange::empty(),
             kind: ExprKind::Range { start, end },
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                ExprId(u32::MAX)
+            }
+        }
     }
 
     fn select_call(&mut self, expr: ExprId) -> Option<SelectCall> {
-        let ExprKind::Call { callee, args } = self.arena.exprs[expr.0 as usize].kind else {
+        let ExprKind::Call {
+            callee,
+            type_args: _,
+            args,
+        } = self.arena.exprs[expr.0 as usize].kind
+        else {
             return None;
         };
         let (name, receiver) = self.select_callee(callee)?;
-        let payload = args.as_slice(&self.arena.expr_ids).first().copied();
+        let arg_slice = args.as_slice(&self.arena.expr_ids);
+        let payload = arg_slice.first().copied();
         match name {
-            "send" => Some(SelectCall::Send {
-                chan: receiver,
-                payload: payload?,
-            }),
+            "send" => {
+                if arg_slice.len() != 1 {
+                    self.error_span(
+                        DiagnosticCode::ParseInvalidSelectArm,
+                        "select 发送臂的 send 必须恰好一个参数",
+                        self.expr_span(expr),
+                    );
+                    return None;
+                }
+                Some(SelectCall::Send {
+                    chan: receiver,
+                    payload: payload?,
+                })
+            }
             "recv" if payload.is_none() => Some(SelectCall::Recv { chan: receiver }),
             "wait" if payload.is_none() => Some(SelectCall::Wait { join: receiver }),
             _ => None,
@@ -1224,43 +1452,85 @@ impl Parser<'_> {
             let hi = prefix[prefix.len() - 1].span.end();
             (prefix, last, lo, hi)
         };
-        let path_id = self.arena.alloc_node(self.file);
-        let segments = extend_range(&mut self.arena.segments, prefix);
-        let path = self.arena.push_path(Path {
+        let path_id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return None;
+            }
+        };
+        let segments = finish_extend(&mut self.diagnostics, &mut self.arena.segments, prefix);
+        let path = match self.arena.try_push_path(Path {
             id: path_id,
             span: self.make_span(lo, hi),
             segments,
             args: AstRange::empty(),
-        });
-        let expr_id = self.arena.alloc_node(self.file);
-        let receiver = self.arena.push_expr(Expr {
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return None;
+            }
+        };
+        let expr_id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return None;
+            }
+        };
+        let receiver = match self.arena.try_push_expr(Expr {
             id: expr_id,
             span: self.make_span(lo, hi),
             attributes: AstRange::empty(),
             kind: ExprKind::Path(path),
-        });
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return None;
+            }
+        };
         Some((receiver, last))
     }
 
     fn wrap(&mut self, base: ExprId, kind: ExprKind) -> ExprId {
         let start = self.expr_span(base).start();
         let end = self.tokens[self.cursor.saturating_sub(1)].end;
-        let id = self.arena.alloc_node(self.file);
-        self.arena.push_expr(Expr {
+        let id = match self.arena.alloc_node_or_error(self.file) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                return ExprId(u32::MAX);
+            }
+        };
+        match self.arena.try_push_expr(Expr {
             id,
             span: self.make_span(start, end),
             attributes: AstRange::empty(),
             kind,
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                ExprId(u32::MAX)
+            }
+        }
     }
 
     fn push_expr(&mut self, mark: Mark, kind: ExprKind) -> ExprId {
         let span = self.finish_span(mark);
-        self.arena.push_expr(Expr {
+        match self.arena.try_push_expr(Expr {
             id: mark.id,
             span,
             attributes: AstRange::empty(),
             kind,
-        })
+        }) {
+            Some(id) => id,
+            None => {
+                self.arena_limit();
+                ExprId(u32::MAX)
+            }
+        }
     }
 }
