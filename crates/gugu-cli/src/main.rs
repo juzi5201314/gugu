@@ -1,4 +1,5 @@
 mod config;
+mod formatting;
 mod output;
 
 #[cfg(test)]
@@ -23,7 +24,6 @@ use crate::{
     config::{ConfigValues, environment_flag, environment_path, environment_text, load_config},
     output::{ColorMode, OutputFormat, emit_cli_error, parse_color, print_compilation},
 };
-
 #[derive(Clone, Debug, Default, Args)]
 pub(crate) struct GlobalArgs {
     /// 输出格式。
@@ -427,6 +427,7 @@ fn execute(cli: Cli) -> i32 {
     match command {
         Command::Build { file } => run_compile(file, &options, false),
         Command::Check { file } => run_compile(file, &options, true),
+        Command::Fmt { check, all } => formatting::run(check, all, &options),
         command => run_registered_command(&command, options.format.unwrap_or_default()),
     }
 }

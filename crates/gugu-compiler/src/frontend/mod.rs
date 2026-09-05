@@ -7,6 +7,7 @@ use crate::{
 
 mod ast;
 mod attr;
+pub(crate) mod format;
 mod intern;
 mod lex;
 mod parse;
