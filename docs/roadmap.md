@@ -23,6 +23,18 @@
 4. 阶段验证通过后才能将该阶段从 `[ ]` 改为 `[x]`。工作区级验证使用 `cargo fmt --all --check`、`cargo build --workspace` 和 `cargo nextest run --workspace`；文档构建使用 `mdbook build -d target/book`。
 5. 代码或规范提交遵守仓库的 `docs/.commit` 跟踪规则；路线图本身不代表任何阶段已实现。
 
+## 路线图使用约束：实现必须形成可运行闭环
+
+单个“实现 X”阶段不得仅新增数据结构、解析器或局部算法；阶段完成前必须把能力接入已有 action graph、query、诊断、缓存 fingerprint、CLI 入口及下游消费者。以下接入规则适用于所有阶段：
+
+1. **归属层接入**：新增模块必须由唯一上游入口调用，禁止只保留未被调用的孤立 API；调用链、错误传播和取消语义必须明确。
+2. **数据流闭环**：输入必须从 `SourceSnapshot`/清单进入，经过对应 query，产出可被下游消费的稳定对象；对象必须进入 action key、缓存校验和确定性排序。
+3. **失败闭环**：错误必须进入统一 `Diagnostic`/退出码/事件输出路径；失败、取消和脏缓存不得写出后续产物。
+4. **阶段桥接**：跨阶段接口必须在本阶段声明 schema、版本和 verifier；下阶段只能消费已验证对象，不能重新解析或猜测上游语义。
+5. **可运行切片**：每个阶段至少交付一个真实输入到真实输出的 smoke slice；仅有单元测试、dump 或“未来接入”不算完成。
+
+路线图中的“基础”表示可被真实调用的基础，不表示仅搭建占位类型。若实现先于消费者完成，应把消费者接入列为同一阶段的验收项，或新增明确的集成阶段，不能提前勾选实现阶段。
+
 ## 一、工程与前端基础
 
 - [x] **阶段 01：建立 compiler/runtime 工程骨架**（复杂度：4）
@@ -82,23 +94,31 @@
 
 ## 二、类型与语言语义
 
-- [x] **阶段 12：实现类型 arena、类型形成与布局基础**（复杂度：4）
+- [ ] **阶段 12：实现类型 arena、类型形成与布局基础**（复杂度：4）
   - 依赖：阶段 08、10、11。
   - 实现标量、引用、原始指针、函数、元组、数组、切片、struct/enum/union/newtype、never、透明别名、`repr` 属性、大小/对齐/字段偏移和递归大小检查。
-  - 验收：类型变量必须唯一收敛；数组长度、对齐、判别值和 offset 在正确阶段确定；`!` 与 `()`、别名与 newtype、句柄与值类型的区分符合规范。
+  - 验收：类型变量必须唯一收敛；数组长度、对齐、判别值和 offset 在正确阶段确定；`!` 与 `()`、别名与 newtype、句柄与值类型的区分符合规范；类型基础由阶段 12a 接入后才算完成。
+
+- [ ] **阶段 12a：接入类型形成与布局 query**（复杂度：3）
+  - 依赖：阶段 11、12。
+  - 将类型 arena、形成器和布局计算接入 `configure -> collect -> resolve -> type_check` 查询链，建立版本化 `TypeRef/Layout`、fingerprint、缓存恢复、统一诊断传播及 GIR/comptime 的消费接口。
+  - 验收：`check/build` 对真实 package 执行类型 query；失败不写 target；缓存命中与冷编译输出一致；下游只消费已验证结果，不重新解析 token 或名称。
+
+- [ ] **阶段 12b：建立前端语义链集成门禁**（复杂度：4）
+  - 依赖：阶段 12a、13–20。
+  - 将声明、表达式、模式、trait、unsafe 检查和 HIR 冻结统一接入 query/action graph，定义 `Validated` 输出、失败传播、缓存边界及 GIR 消费契约。
+  - 验收：真实 `check/build` 从源码运行到冻结 HIR；任何前端失败均无下游产物；冷编译与缓存命中结果、诊断排序和 fingerprint 一致；GIR 不接受未验证 AST。
 
 - [ ] **阶段 13：实现声明、绑定与初始化数据流**（复杂度：3）
   - 依赖：阶段 10、12。
   - 实现 `let`、模式绑定、遮蔽、新槽、函数/结构体/枚举/const/type/static 声明、普通 static 无环初始化、局部 static 延迟初始化标记和所有路径初始化分析。
   - 验收：未初始化读取、模块级 let、static 初始化循环、非法 main 签名和私有字段构造均被拒绝；普通 static 与 coroutine-local/OS-thread-local 的初始化阶段严格分离。
-
 - [ ] **阶段 14：实现表达式、运算符与控制流类型检查**（复杂度：4）
-  - 依赖：阶段 12、13。
+  - 依赖：阶段 12、12a、13。
   - 覆盖 place/value、字段/索引/切片、短路逻辑、整数/浮点规则、显式转换、循环、`if`/`match`/`try` 表达式、返回/分支和 `defer` 注册语义。
-  - 验收：左到右求值、块值、never 合流、除零/移位/边界规则和 `?` 出口与规范一致；用户 trait 运算符不会通过隐式转换获得额外候选。
-
+  - 验收：左到右求值、块值、never 合流、除零/移位/边界规则和 `?` 出口与规范一致；结果接入类型 query、统一诊断和 action graph；用户 trait 运算符不会通过隐式转换获得额外候选。
 - [ ] **阶段 15：实现模式匹配与穷尽性分析**（复杂度：3）
-  - 依赖：阶段 12、14。
+  - 依赖：阶段 12、12a、14。
   - 实现通配/绑定/引用/字面量/范围/元组/数组切片/结构体/构造器/or/`@`/rest 模式、可驳性、let 链、let-else、守卫与有限域覆盖计算。
   - 验收：被匹配表达式只求值一次；重复绑定、or 绑定集合不一致、空范围、不可驳 let 段、非穷尽 match 和错误类型守卫都有稳定诊断；模式不调用用户 Eq/Ord。
 
@@ -123,12 +143,9 @@
   - 验收：安全代码不能越过 unsafe 前置条件；资源/COW 类型不能被位操作绕过；union 只接受位类型；Windows `i128/u128` C 签名、naked、dirty/leaf/bridge 属性按规范拒绝或接受。
 
 - [ ] **阶段 20：构造 AST/HIR 结构与冻结校验**（复杂度：5）
-  - 依赖：阶段 10、12–19。
+  - 依赖：阶段 10、12–19、12a、12b。
   - 实现 `SourceSnapshot -> AST -> configure -> collect -> resolve -> type_check -> HIR` 的固定阶段、owner arena、Res、类型/调整表、捕获计划、cleanup plan、诊断排序和 Validated 冻结接口；为源码宏生成节点保留 expansion source context。
-  - 验收：基础 HIR 结构与冻结校验可独立运行；源码宏在阶段 22 生成的片段重新进入同一前端并最终满足相同 Validated 条件；GIR 只能消费冻结 HIR，不能重新解析 token 或名称。
-
-
-## 三、comptime、闭世界与 IR
+  - 验收：`check/build` action graph 真实执行完整前端链并缓存结果；基础 HIR 结构与冻结校验可独立运行；源码宏在阶段 22 生成的片段重新进入同一前端并最终满足相同 Validated 条件；GIR 只能消费冻结 HIR，不能重新解析 token 或名称。
 
 - [ ] **阶段 21：实现 EarlyConst 与 capability registry**（复杂度：5）
   - 依赖：阶段 11、12、20。
@@ -450,3 +467,18 @@
 ```
 
 阶段之间可以在不违反契约的前提下并行实现，例如前端类型系统与 raw range fake、标准库纯值模块与后端 encoder；但任何并行工作都必须共享稳定 schema，不能各自建立第二套类型、资源、诊断、ABI、root 或 runtime 状态表示。喵~
+
+## 跨阶段接入矩阵
+
+| 能力层 | 上游入口 | 下游消费者 | 完成证据 |
+|---|---|---|---|
+| 源码/项目 | CLI、SourceMap、manifest | query、诊断、ActionKey | 真实 package 可重放 |
+| AST/名称/类型 | parser、cfg、定义表 | HIR、comptime、GIR | `Validated` 严格冻结 |
+| comptime/宏 | HIR、capability registry | 前端重入、可达性、缓存 | 展开后重新走前端 |
+| GIR/LIR | Validated HIR、布局 | verifier、backend、stack map | 每阶段 verifier 通过 |
+| runtime/GC | rt0、range、scheduler | lowering、镜像 metadata | 启动与生命周期 smoke |
+| 标准库 | intrinsic、ABI | compiler 自举、用户 API | compiler/runtime 自举 |
+| backend/image | LIR、target descriptor | CLI emit/run、cache | 双目标镜像 smoke |
+| CLI/生态 | action graph、cache、权限 | 命令、registry、报告 | 命令矩阵与失败路径 |
+
+“实现”阶段必须同时写明输入、输出、调用入口、失败传播和下游消费者；仅新增模块、dump、fixture 或孤立单元测试不得标记完成。
