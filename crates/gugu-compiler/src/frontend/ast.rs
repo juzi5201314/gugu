@@ -153,6 +153,7 @@ pub(crate) struct Bound {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Param {
+    pub(crate) attributes: AstRange<Attribute>,
     pub(crate) id: AstNodeId,
     pub(crate) span: Span,
     pub(crate) comptime: bool,
@@ -199,7 +200,7 @@ pub(crate) struct Field {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VariantKind {
     Unit,
-    Tuple(AstRange<TyId>),
+    Tuple(AstRange<Field>),
     Struct(AstRange<Field>),
 }
 
@@ -233,6 +234,7 @@ pub(crate) enum UseTreeKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct UseItem {
+    pub(crate) attributes: AstRange<Attribute>,
     pub(crate) name: Symbol,
     pub(crate) alias: Option<Symbol>,
     pub(crate) span: Span,
@@ -373,6 +375,7 @@ pub(crate) enum IndexKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct FieldExpr {
+    pub(crate) attributes: AstRange<Attribute>,
     pub(crate) name: Symbol,
     pub(crate) span: Span,
     pub(crate) value: Option<ExprId>,
@@ -380,6 +383,7 @@ pub(crate) struct FieldExpr {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MatchArm {
+    pub(crate) attributes: AstRange<Attribute>,
     pub(crate) id: AstNodeId,
     pub(crate) span: Span,
     pub(crate) pat: PatId,
@@ -412,6 +416,7 @@ pub(crate) enum SelectArmKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SelectArm {
+    pub(crate) attributes: AstRange<Attribute>,
     pub(crate) id: AstNodeId,
     pub(crate) span: Span,
     pub(crate) kind: SelectArmKind,
@@ -594,6 +599,7 @@ pub(crate) enum StmtKind {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Stmt {
+    pub(crate) attributes: AstRange<Attribute>,
     pub(crate) id: AstNodeId,
     pub(crate) span: Span,
     pub(crate) kind: StmtKind,

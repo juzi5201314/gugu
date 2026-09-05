@@ -147,9 +147,9 @@ fn dump_variant(
     out.push('\n');
     match &variant.kind {
         VariantKind::Unit => {}
-        VariantKind::Tuple(tys) => {
-            for ty in tys.as_slice(&arena.ty_ids) {
-                dump_ty(out, arena, *ty, indent + 1);
+        VariantKind::Tuple(fields) => {
+            for field in fields.as_slice(&arena.fields) {
+                dump_ty(out, arena, field.ty, indent + 1);
             }
         }
         VariantKind::Struct(fields) => {

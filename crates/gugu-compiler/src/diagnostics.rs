@@ -78,6 +78,28 @@ pub enum DiagnosticCode {
     ParseInvalidSelectArm,
     /// 解析器实现限制（递归深度或 AST 规模上界）。
     ParseImplementationLimit,
+    /// cfg 谓词使用未知键、值或非法语义组合。
+    CfgInvalidPredicate,
+    /// 模块文件的规范路径无效。
+    ModuleInvalidPath,
+    /// use 指向不存在的模块。
+    ModuleNotFound,
+    /// 模块路径与源码声明仅大小写不一致。
+    ModulePathCaseMismatch,
+    /// 用户声明了编译器保留名称。
+    ReservedName,
+    /// 同一作用域和命名空间存在重复定义。
+    DuplicateDefinition,
+    /// use 依赖图或再导出图形成循环。
+    ImportCycle,
+    /// use 跨模块访问私有项。
+    PrivateImport,
+    /// use 指向模块中不存在的项。
+    ImportNotFound,
+    /// use 别名与已有定义或导入冲突。
+    ImportConflict,
+    /// 两个不同定义路径产生相同稳定摘要。
+    DefinitionHashCollision,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -109,6 +131,17 @@ impl fmt::Display for DiagnosticCode {
             Self::ParseInvalidPlace => "E0024",
             Self::ParseInvalidSelectArm => "E0025",
             Self::ParseImplementationLimit => "E0026",
+            Self::CfgInvalidPredicate => "E0027",
+            Self::ModuleInvalidPath => "E0028",
+            Self::ModuleNotFound => "E0029",
+            Self::ModulePathCaseMismatch => "E0030",
+            Self::ReservedName => "E0031",
+            Self::DuplicateDefinition => "E0032",
+            Self::ImportCycle => "E0033",
+            Self::PrivateImport => "E0034",
+            Self::ImportNotFound => "E0035",
+            Self::ImportConflict => "E0036",
+            Self::DefinitionHashCollision => "E0037",
         };
         formatter.write_str(code)
     }

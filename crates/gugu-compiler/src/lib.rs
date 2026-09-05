@@ -40,10 +40,14 @@ pub use target::{
     TargetParseError,
 };
 
-use std::{fs, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
 use backend::BackendPlan;
-use frontend::SourceInput;
+use frontend::{SourceInput, cfg::CfgContext};
 
 /// 一次 bootstrap 编译请求。
 #[derive(Clone, Debug)]
@@ -100,19 +104,36 @@ impl CompileRequest {
         }
     }
 
-    /// 创建项目 target 入口请求；逻辑路径由调用方按 package root 推导。
-    pub fn project_entry(
-        path: impl Into<PathBuf>,
-        logical_path: impl Into<PathBuf>,
-        target: TargetName,
-        require_main: bool,
+    /// 创建项目 target 请求并携带该解析域的 feature 与直接依赖别名。
+    pub fn project_target(
+        package: &Package,
+        package_target: &Target,
+        package_identity: impl Into<String>,
+        output_target: TargetName,
+        enabled_features: Vec<String>,
+        external_packages: BTreeSet<String>,
     ) -> Self {
+        let target = if package_target.is_host_target() {
+            TargetName::host().unwrap_or(output_target)
+        } else {
+            output_target
+        };
+        let require_main = matches!(package_target.kind(), TargetKind::Bin | TargetKind::Example)
+            || (package_target.kind() == TargetKind::Bench && !package_target.harness());
         Self {
             target,
-            input: CompileInput::File {
-                path: path.into(),
-                logical_path: Some(logical_path.into()),
+            input: CompileInput::Project {
+                package_root: package.root().to_path_buf(),
+                source_root: package_target.source_root().to_path_buf(),
+                entry: package_target.entry().to_path_buf(),
+                package_identity: package_identity.into(),
                 require_main,
+                declared_features: package.declared_features().to_vec(),
+                enabled_features,
+                external_packages,
+                test: package_target.kind() == TargetKind::Test,
+                bench: package_target.kind() == TargetKind::Bench,
+                custom_cfg: BTreeMap::new(),
             },
         }
     }
@@ -129,6 +150,19 @@ enum CompileInput {
         path: PathBuf,
         logical_path: Option<PathBuf>,
         require_main: bool,
+    },
+    Project {
+        package_root: PathBuf,
+        source_root: PathBuf,
+        entry: PathBuf,
+        package_identity: String,
+        require_main: bool,
+        declared_features: Vec<String>,
+        enabled_features: Vec<String>,
+        external_packages: BTreeSet<String>,
+        test: bool,
+        bench: bool,
+        custom_cfg: BTreeMap<String, Option<String>>,
     },
 }
 
@@ -180,13 +214,13 @@ impl Compiler {
 
     /// 执行一次确定性的 bootstrap action graph。
     pub fn compile(&self, request: CompileRequest) -> Compilation {
+        let CompileRequest { target, input } = request;
         let mut graph = ActionGraph::new();
         let mut diagnostics = Diagnostics::default();
-        let target = request.target;
         let descriptor = target.descriptor();
         graph.complete(ActionKind::ResolveTarget, target.to_string());
 
-        let loaded = match load_input(&request.input) {
+        let loaded = match load_input(input, target) {
             Ok(loaded) => loaded,
             Err(error) => {
                 diagnostics.push(error.diagnostic());
@@ -201,17 +235,17 @@ impl Compiler {
                 };
             }
         };
-        let source_map = loaded.source_map();
         graph.complete(ActionKind::LoadSources, loaded.detail());
 
-        let frontend_input = loaded.as_source_input(&source_map);
-        let frontend = match frontend::bootstrap(frontend_input) {
+        let frontend_result = frontend::bootstrap(loaded.as_source_input());
+        let source_map = loaded.source_map;
+        let frontend = match frontend_result {
             Ok(output) => output,
             Err(errors) => {
                 for diagnostic in errors {
                     diagnostics.push(diagnostic);
                 }
-                graph.fail(ActionKind::Frontend, "前端词法检查失败");
+                graph.fail(ActionKind::Frontend, "配置、模块或定义分析失败");
                 graph.skip_after(ActionKind::Frontend, "前置 action 失败");
                 diagnostics.sort();
                 return Compilation {
@@ -270,41 +304,45 @@ impl Compiler {
 }
 
 #[derive(Clone, Debug)]
-enum LoadedInput {
-    EmptyPackage,
-    File {
-        snapshot: SourceSnapshot,
-        require_main: bool,
-    },
+struct FrontendPlan {
+    entry: String,
+    source_root: String,
+    package_identity: String,
+    require_main: bool,
+    cfg: CfgContext,
+    external_packages: BTreeSet<String>,
+}
+
+#[derive(Clone, Debug)]
+struct LoadedInput {
+    source_map: SourceMap,
+    plan: Option<FrontendPlan>,
 }
 
 impl LoadedInput {
-    fn as_source_input<'a>(&'a self, source_map: &'a SourceMap) -> SourceInput<'a> {
-        match self {
-            Self::EmptyPackage => SourceInput::EmptyPackage,
-            Self::File {
-                snapshot,
-                require_main,
-            } => SourceInput::File {
-                snapshot,
-                source_map,
-                require_main: *require_main,
+    fn as_source_input(&self) -> SourceInput<'_> {
+        match &self.plan {
+            None => SourceInput::EmptyPackage,
+            Some(plan) => SourceInput::Sources {
+                source_map: &self.source_map,
+                entry: &plan.entry,
+                source_root: &plan.source_root,
+                package_identity: &plan.package_identity,
+                require_main: plan.require_main,
+                cfg: &plan.cfg,
+                external_packages: &plan.external_packages,
             },
         }
     }
 
-    fn source_map(&self) -> SourceMap {
-        let snapshot = match self {
-            Self::EmptyPackage => return SourceMap::empty(),
-            Self::File { snapshot, .. } => snapshot,
-        };
-        SourceMap::new(vec![snapshot.clone()]).expect("one source path is unique")
-    }
-
     fn detail(&self) -> String {
-        match self {
-            Self::EmptyPackage => "空 package".to_owned(),
-            Self::File { snapshot, .. } => snapshot.logical_path().to_owned(),
+        match &self.plan {
+            None => "空 package".to_owned(),
+            Some(plan) => format!(
+                "{} 个源码模块，入口 {}",
+                self.source_map.snapshots().len(),
+                plan.entry
+            ),
         }
     }
 }
@@ -316,6 +354,10 @@ enum LoadInputError {
         error: std::io::Error,
     },
     Snapshot(SourceError),
+    ModuleTree {
+        path: PathBuf,
+        message: String,
+    },
 }
 
 impl LoadInputError {
@@ -323,42 +365,196 @@ impl LoadInputError {
         match self {
             Self::Read { path, error } => Diagnostic::source_read(path, error),
             Self::Snapshot(error) => Diagnostic::source_error(error),
+            Self::ModuleTree { path, message } => Diagnostic::error(
+                DiagnosticCode::ModuleInvalidPath,
+                message,
+                Some(Span::detached(path, 0, 0)),
+            ),
         }
     }
 }
 
-fn load_input(input: &CompileInput) -> Result<LoadedInput, LoadInputError> {
+fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, LoadInputError> {
     match input {
-        CompileInput::EmptyPackage => Ok(LoadedInput::EmptyPackage),
+        CompileInput::EmptyPackage => Ok(LoadedInput {
+            source_map: SourceMap::empty(),
+            plan: None,
+        }),
         CompileInput::SingleFileSource { path, source } => {
-            SourceSnapshot::from_str(logical_input_path(path), source)
-                .map(|snapshot| LoadedInput::File {
-                    snapshot,
-                    require_main: true,
-                })
-                .map_err(LoadInputError::Snapshot)
+            let snapshot =
+                SourceSnapshot::from_bytes(logical_input_path(&path), source.into_bytes())
+                    .map_err(LoadInputError::Snapshot)?;
+            loaded_single(snapshot, target, true)
         }
         CompileInput::File {
             path,
             logical_path,
             require_main,
-        } => fs::read(path)
-            .map_err(|error| LoadInputError::Read {
+        } => {
+            let bytes = fs::read(&path).map_err(|error| LoadInputError::Read {
                 path: path.clone(),
                 error,
-            })
-            .and_then(|bytes| {
-                let logical_path = logical_path
-                    .clone()
-                    .unwrap_or_else(|| logical_input_path(path));
-                SourceSnapshot::from_bytes(logical_path, bytes)
-                    .map(|snapshot| LoadedInput::File {
-                        snapshot,
-                        require_main: *require_main,
-                    })
-                    .map_err(LoadInputError::Snapshot)
-            }),
+            })?;
+            let logical = logical_path.unwrap_or_else(|| logical_input_path(&path));
+            let snapshot =
+                SourceSnapshot::from_bytes(logical, bytes).map_err(LoadInputError::Snapshot)?;
+            loaded_single(snapshot, target, require_main)
+        }
+        CompileInput::Project {
+            package_root,
+            source_root,
+            entry,
+            package_identity,
+            require_main,
+            declared_features,
+            enabled_features,
+            external_packages,
+            test,
+            bench,
+            custom_cfg,
+        } => load_project_sources(
+            &package_root,
+            &source_root,
+            &entry,
+            package_identity,
+            require_main,
+            CfgContext::new(
+                target,
+                declared_features,
+                enabled_features,
+                test,
+                bench,
+                custom_cfg,
+            ),
+            external_packages,
+        ),
     }
+}
+
+fn loaded_single(
+    snapshot: SourceSnapshot,
+    target: TargetName,
+    require_main: bool,
+) -> Result<LoadedInput, LoadInputError> {
+    let entry = snapshot.logical_path().to_owned();
+    let source_map =
+        SourceMap::new(vec![snapshot]).map_err(|error| LoadInputError::ModuleTree {
+            path: PathBuf::from(&entry),
+            message: error.to_string(),
+        })?;
+    Ok(LoadedInput {
+        source_map,
+        plan: Some(FrontendPlan {
+            entry,
+            source_root: String::new(),
+            package_identity: "single-file".to_owned(),
+            require_main,
+            cfg: CfgContext::target_only(target),
+            external_packages: BTreeSet::new(),
+        }),
+    })
+}
+
+fn load_project_sources(
+    package_root: &Path,
+    source_root: &Path,
+    entry: &Path,
+    package_identity: String,
+    require_main: bool,
+    cfg: CfgContext,
+    external_packages: BTreeSet<String>,
+) -> Result<LoadedInput, LoadInputError> {
+    let mut paths = Vec::new();
+    collect_source_paths(source_root, &mut paths)?;
+    let mut snapshots = Vec::with_capacity(paths.len());
+    for path in paths {
+        snapshots.push(read_project_snapshot(package_root, &path)?);
+    }
+    let entry = project_logical_path(package_root, entry)?;
+    let source_root = if package_root == source_root {
+        String::new()
+    } else {
+        project_logical_path(package_root, source_root)?
+    };
+    let source_map = SourceMap::new(snapshots).map_err(|error| LoadInputError::ModuleTree {
+        path: package_root.to_path_buf(),
+        message: error.to_string(),
+    })?;
+    Ok(LoadedInput {
+        source_map,
+        plan: Some(FrontendPlan {
+            entry,
+            source_root,
+            package_identity,
+            require_main,
+            cfg,
+            external_packages,
+        }),
+    })
+}
+
+fn collect_source_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), LoadInputError> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| LoadInputError::Read {
+            path: directory.to_path_buf(),
+            error,
+        })?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| LoadInputError::Read {
+            path: directory.to_path_buf(),
+            error,
+        })?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with('.') || name == "target" {
+            continue;
+        }
+        let kind = entry.file_type().map_err(|error| LoadInputError::Read {
+            path: entry.path(),
+            error,
+        })?;
+        if kind.is_symlink() {
+            return Err(LoadInputError::ModuleTree {
+                path: entry.path(),
+                message: "target 源码树不允许符号链接".to_owned(),
+            });
+        }
+        if kind.is_dir() {
+            collect_source_paths(&entry.path(), paths)?;
+        } else if kind.is_file() && entry.path().extension().is_some_and(|ext| ext == "gg") {
+            paths.push(entry.path());
+        }
+    }
+    Ok(())
+}
+
+fn read_project_snapshot(
+    package_root: &Path,
+    path: &Path,
+) -> Result<SourceSnapshot, LoadInputError> {
+    let bytes = fs::read(path).map_err(|error| LoadInputError::Read {
+        path: path.to_path_buf(),
+        error,
+    })?;
+    let logical = path
+        .strip_prefix(package_root)
+        .map_err(|_| LoadInputError::ModuleTree {
+            path: path.to_path_buf(),
+            message: "模块源码越过 package 根".to_owned(),
+        })?;
+    SourceSnapshot::from_bytes(logical, bytes).map_err(LoadInputError::Snapshot)
+}
+
+fn project_logical_path(package_root: &Path, path: &Path) -> Result<String, LoadInputError> {
+    let relative = path
+        .strip_prefix(package_root)
+        .map_err(|_| LoadInputError::ModuleTree {
+            path: path.to_path_buf(),
+            message: "target 路径越过 package 根".to_owned(),
+        })?;
+    crate::source::normalize_logical_path(relative).map_err(LoadInputError::Snapshot)
 }
 
 fn logical_input_path(path: &std::path::Path) -> PathBuf {
@@ -468,18 +664,15 @@ impl frontend::FrontendOutput {
     fn detail(&self) -> String {
         match &self.path {
             Some(path) => format!(
-                "{}，{} 字节，{} 个记号，{} 个 AST 项 / {} 个节点",
+                "{}，{} 个模块 / {} 字节，{} 个记号，{} 个 AST 项 / {} 个节点，{} 个定义 / {} 个导入",
                 path.display(),
+                self.modules.len(),
                 self.source_len,
-                self.tokens.tokens.len(),
-                self.ast
-                    .as_ref()
-                    .map(|parsed| parsed.file.items.len)
-                    .unwrap_or(0),
-                self.ast
-                    .as_ref()
-                    .map(|parsed| parsed.arena.next_node)
-                    .unwrap_or(0),
+                self.token_count,
+                self.item_count,
+                self.node_count,
+                self.names.definitions.len(),
+                self.names.imports.len(),
             ),
             None => "空模块".to_owned(),
         }
@@ -488,11 +681,14 @@ impl frontend::FrontendOutput {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        collections::BTreeSet,
+        path::{Path, PathBuf},
+    };
 
     use super::{
-        ActionKind, ActionStatus, CompileRequest, Compiler, DiagnosticCode, TargetName,
-        logical_input_path,
+        ActionKind, ActionStatus, CompileRequest, Compiler, DiagnosticCode, Project, TargetKind,
+        TargetName, logical_input_path,
     };
 
     #[test]
@@ -580,11 +776,9 @@ mod tests {
         let entry = root.path().join("src/lib.gg");
         std::fs::create_dir_all(entry.parent().expect("parent exists")).expect("create src");
         std::fs::write(&entry, "fn util() int { 1 }\n").expect("write lib");
-        let compilation = Compiler::new().compile(CompileRequest::project_entry(
+        let compilation = Compiler::new().compile(CompileRequest::library_file(
             &entry,
-            "src/lib.gg",
             TargetName::X86_64Linux,
-            false,
         ));
 
         // 库 target 没有 main：前端通过，但没有可执行入口，也不挂 runtime。
@@ -602,6 +796,63 @@ mod tests {
         let source_map = compilation.source_map();
         assert_eq!(source_map.snapshots().len(), 1);
         assert_eq!(source_map.snapshots()[0].logical_path(), "src/lib.gg");
+    }
+
+    #[test]
+    fn project_target_snapshots_and_analyzes_its_module_tree() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(
+            root.path().join("gugu.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(src.join("main.gg"), "use platform.{boot}\nfn main() {}\n")
+            .expect("write entry");
+        std::fs::write(
+            src.join("platform.gg"),
+            "#[cfg(os = \"linux\")] pub fn boot() {}\n",
+        )
+        .expect("write module");
+        std::fs::write(root.path().join("build.gg"), "fn configure() {}\n")
+            .expect("write build task");
+        let project = Project::discover(root.path()).expect("discover project");
+        let package = project.current_package().expect("current package");
+        let target = package
+            .targets()
+            .iter()
+            .find(|target| target.kind() == TargetKind::Bin)
+            .expect("bin target");
+        let build_target = package
+            .targets()
+            .iter()
+            .find(|target| target.kind() == TargetKind::Build)
+            .expect("build target");
+        let build_request = CompileRequest::project_target(
+            package,
+            build_target,
+            "demo@1.0.0 (path+.)",
+            TargetName::X86_64Windows,
+            vec!["default".to_owned()],
+            BTreeSet::new(),
+        );
+        assert_eq!(
+            build_request.target,
+            TargetName::host().unwrap_or(TargetName::X86_64Windows)
+        );
+        let compilation = Compiler::new().compile(CompileRequest::project_target(
+            package,
+            target,
+            "demo@1.0.0 (path+.)",
+            TargetName::X86_64Linux,
+            vec!["default".to_owned()],
+            BTreeSet::new(),
+        ));
+
+        assert!(compilation.is_success());
+        assert_eq!(compilation.source_map().snapshots().len(), 2);
+        assert!(compilation.image_plan().is_some());
     }
 
     #[test]

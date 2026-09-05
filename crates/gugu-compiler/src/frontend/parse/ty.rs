@@ -451,12 +451,14 @@ impl Parser<'_> {
 
     fn parse_param(&mut self) -> Param {
         let mark = self.start();
+        let attributes = self.parse_outer_attributes();
         if self.at(TokenKind::DotDotDot) {
             self.bump();
             let name_tok = self.expect(TokenKind::Ident, "变参需要名字");
             self.expect(TokenKind::Colon, "变参需要类型");
             let ty = self.parse_ty();
             return Param {
+                attributes: self.store_attrs(attributes),
                 id: mark.id,
                 span: self.finish_span(mark),
                 comptime: false,
@@ -478,6 +480,7 @@ impl Parser<'_> {
             None
         };
         Param {
+            attributes: self.store_attrs(attributes),
             id: mark.id,
             span: self.finish_span(mark),
             comptime,

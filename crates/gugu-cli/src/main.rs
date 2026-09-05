@@ -8,16 +8,16 @@ mod tests;
 
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use gugu_compiler::{
-    CachePolicy, CompileRequest, Compiler, DependencyCache, LockGraph, Package, Project,
-    ResolveOptions, TargetKind, TargetName, TargetSelection, candidates_from_lock,
-    default_cache_root, prepare_dependency_inputs,
+    CachePolicy, CompileRequest, Compiler, DependencyCache, DependencyDomain, LockGraph, Package,
+    PackageSource, Project, ResolveOptions, TargetKind, TargetName, TargetSelection,
+    candidates_from_lock, default_cache_root, prepare_dependency_inputs,
 };
 use serde_json::json;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     ffi::OsString,
-    path::{Component, PathBuf},
+    path::{Path, PathBuf},
 };
 
 use crate::{
@@ -684,11 +684,13 @@ fn enabled_features(options: &GlobalArgs, package: &Package) -> Vec<String> {
 }
 
 fn compile_package(
+    project_root: &Path,
     package: &Package,
     options: &GlobalArgs,
     target: TargetName,
     check_only: bool,
     compiler: &Compiler,
+    lock: &LockGraph,
     format: OutputFormat,
 ) -> Result<bool, ()> {
     let features = enabled_features(options, package);
@@ -701,33 +703,15 @@ fn compile_package(
     };
     let mut failed = false;
     for package_target in selected {
-        let requires_main = matches!(package_target.kind(), TargetKind::Bin | TargetKind::Example)
-            || (package_target.kind() == TargetKind::Bench && !package_target.harness());
-        // 逻辑路径按 package root 推导，保证诊断位置与工作目录无关。
-        let Some(logical_path) = package_target
-            .entry()
-            .strip_prefix(package.root())
-            .ok()
-            .map(|relative| {
-                let logical = relative
-                    .components()
-                    .filter_map(|component| match component {
-                        Component::Normal(val) => val.to_str(),
-                        _ => None,
-                    })
-                    .collect::<Vec<_>>()
-                    .join("/");
-                PathBuf::from(logical)
-            })
-        else {
-            emit_cli_error(format, "target 入口不在 package 根内");
-            return Err(());
-        };
-        let request = CompileRequest::project_entry(
-            package_target.entry().to_path_buf(),
-            logical_path,
+        let (package_identity, external_packages) =
+            package_resolution(lock, project_root, package, package_target.kind());
+        let request = CompileRequest::project_target(
+            package,
+            package_target,
+            package_identity,
             target,
-            requires_main,
+            features.clone(),
+            external_packages,
         );
         let compilation = compiler.compile(request);
         // 头行只属于 text 输出；json 与 json-diagnostic-short 保持纯事件流。
@@ -751,7 +735,7 @@ fn resolve_project_lock(
     options: &GlobalArgs,
     target: TargetName,
     format: OutputFormat,
-) -> Result<(), ()> {
+) -> Result<LockGraph, ()> {
     let path = project.lock_path();
     let existing = if path.exists() {
         Some(LockGraph::read(&path).map_err(|error| {
@@ -838,7 +822,48 @@ fn resolve_project_lock(
             emit_cli_error(format, &error.to_string());
         })?;
     }
-    Ok(())
+    Ok(graph)
+}
+
+fn package_resolution(
+    lock: &LockGraph,
+    project_root: &Path,
+    package: &Package,
+    target: TargetKind,
+) -> (String, BTreeSet<String>) {
+    let include_test = matches!(
+        target,
+        TargetKind::Test | TargetKind::Bench | TargetKind::Example
+    );
+    let relative = package
+        .root()
+        .strip_prefix(project_root)
+        .expect("workspace package 必须位于项目根内");
+    let locked = lock
+        .packages
+        .iter()
+        .find(|locked| {
+            locked.id.name() == package.package_name()
+                && locked.id.version().to_string() == package.version()
+                && matches!(
+                    locked.id.source(),
+                    PackageSource::Path { path }
+                        if (path == "." && relative.as_os_str().is_empty())
+                            || Path::new(path) == relative
+                )
+        })
+        .expect("已解析锁图必须包含当前 package 的精确 source identity");
+    let aliases = locked
+        .dependencies
+        .iter()
+        .filter(|dependency| {
+            dependency.domain == DependencyDomain::Normal
+                || (include_test && dependency.domain == DependencyDomain::Test)
+                || (target == TargetKind::Build && dependency.domain == DependencyDomain::Build)
+        })
+        .map(|dependency| dependency.alias.clone())
+        .collect();
+    (locked.id.to_string(), aliases)
 }
 
 fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: bool) -> i32 {
@@ -858,13 +883,23 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             return 2;
         }
     };
-    if resolve_project_lock(&project, &packages, options, target, format).is_err() {
-        return 2;
-    }
+    let lock = match resolve_project_lock(&project, &packages, options, target, format) {
+        Ok(lock) => lock,
+        Err(()) => return 2,
+    };
     let compiler = Compiler::new();
     let mut failed = false;
     for package in packages {
-        match compile_package(package, options, target, check_only, &compiler, format) {
+        match compile_package(
+            project.workspace().root(),
+            package,
+            options,
+            target,
+            check_only,
+            &compiler,
+            &lock,
+            format,
+        ) {
             Ok(pkg_failed) => failed |= pkg_failed,
             Err(()) => return 2,
         }

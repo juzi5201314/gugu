@@ -96,6 +96,7 @@ impl Parser<'_> {
             self.bump();
             let mut items = Vec::new();
             while !self.at_any(&[TokenKind::RBrace, TokenKind::Eof]) {
+                let attributes = self.parse_outer_attributes();
                 let name_tok = self.expect(TokenKind::Ident, "use 列表需要标识符");
                 let name = self.interned_symbol(name_tok);
                 let alias = if self.eat(TokenKind::KwAs) {
@@ -105,6 +106,7 @@ impl Parser<'_> {
                     None
                 };
                 items.push(UseItem {
+                    attributes: self.store_attrs(attributes),
                     name,
                     alias,
                     span: self.token_span(name_tok),
@@ -265,17 +267,18 @@ impl Parser<'_> {
         let name_tok = self.expect(TokenKind::Ident, "结构体需要名字");
         let generics = self.parse_generic_params();
         let body = if self.eat(TokenKind::LParen) {
+            let field_mark = self.start();
+            let attrs = self.parse_outer_attributes();
             let vis = if self.eat(TokenKind::KwPub) {
                 Visibility::Pub
             } else {
                 Visibility::Private
             };
-            let field_mark = self.start();
             let ty = self.parse_ty();
             let field = Field {
                 id: field_mark.id,
                 span: self.finish_span(field_mark),
-                attributes: AstRange::empty(),
+                attributes: self.store_attrs(attrs),
                 visibility: vis,
                 name: None,
                 name_span: None,
@@ -334,9 +337,9 @@ impl Parser<'_> {
         let attrs = self.parse_outer_attributes();
         let name_tok = self.expect(TokenKind::Ident, "变体需要名字");
         let kind = if self.eat(TokenKind::LParen) {
-            let tys = self.parse_ty_list(TokenKind::RParen);
+            let fields = self.parse_tuple_field_list(TokenKind::RParen);
             self.expect(TokenKind::RParen, "元组变体需要 `)`");
-            VariantKind::Tuple(tys)
+            VariantKind::Tuple(fields)
         } else if self.eat(TokenKind::LBrace) {
             let fields = self.parse_field_list(TokenKind::RBrace);
             self.expect(TokenKind::RBrace, "结构体变体需要 `}`");
@@ -755,6 +758,28 @@ impl Parser<'_> {
                 continue;
             }
             break;
+        }
+        finish_extend(&mut self.diagnostics, &mut self.arena.fields, fields)
+    }
+
+    fn parse_tuple_field_list(&mut self, close: TokenKind) -> AstRange<Field> {
+        let mut fields = Vec::new();
+        while !self.at(close) && !self.at(TokenKind::Eof) {
+            let mark = self.start();
+            let attrs = self.parse_outer_attributes();
+            let ty = self.parse_ty();
+            fields.push(Field {
+                id: mark.id,
+                span: self.finish_span(mark),
+                attributes: self.store_attrs(attrs),
+                visibility: Visibility::Private,
+                name: None,
+                name_span: None,
+                ty,
+            });
+            if !self.eat(TokenKind::Comma) {
+                break;
+            }
         }
         finish_extend(&mut self.diagnostics, &mut self.arena.fields, fields)
     }

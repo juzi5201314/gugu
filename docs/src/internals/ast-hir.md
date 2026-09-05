@@ -188,21 +188,33 @@ parser 必须满足：
 
 路径的 `.` 只在下一记号是标识符时继续；因此 `use std.io.{print, println}` 在 `.` 后进入分组列表，而 `ch.send(1)` 在表达式里是路径调用（最后一段为方法名），与字段调用 `recv`/`send`/`wait` 在 `select` 臂上等价。
 
-## `cfg` 与定义收集
+## `cfg`、模块表与定义收集
 
-`configure` 在完整解析后运行。未启用项从后续定义表中删除，但其 AST 和词法诊断仍属于解析结果；未启用项不做名称解析、类型检查、comptime 求值和代码生成。`cfg` 自身的语法、未知键和值类型仍必须诊断。
+### 配置视图
 
-定义收集先按 package 规范路径、模块规范路径、源码起始偏移和定义种类排序，再分配 `DefId`。同一命名空间的冲突在分配后统一诊断。局部变量不进入全局定义表；它们按词法作用域分配 owner-local `LocalBindingId(u32)`。
+`configure` 在完整解析后运行，并以本次编译域的不可变 `CfgContext` 求值。上下文固定以下输入：实际编译平台的 `os/arch`、package 已声明与本次已启用的 feature、`test/bench` 模式，以及 `build.gg` 已登记的自定义 flag 或键值。普通 target 使用目标平台；build target 使用 host 平台。未声明 feature、未登记自定义键、错误值类型和错误组合参数必须在定义收集前诊断。
+
+配置结果不改写 parser arena，而为模块、声明、参数、字段、枚举变体、`use` 列表成员、结构体字面量字段、match/select 臂、块语句和表达式列表成员建立稠密 active 表。后续阶段只消费 active 节点：被裁节点不进入导入、名称、类型、comptime 或 codegen。模块级 `#![cfg(...)]` 为假时，整个文件不进入可导入模块表；父节点已被裁时，不再求值其子树属性。
+
+只有删除后仍是完整序列的节点可以 inactive。参数、记录字段、枚举变体、导入列表成员、match/select 臂、块语句、调用/元组/数组等列表元素可以被删除；调用目标、赋值右侧、函数唯一 body、newtype 唯一字段及其它语法必需的单一表达式不能被删除。`cfg` 自身的语法、未知键和值类型始终诊断。
+
+### 模块声明表与导入
+
+每个 target 在前端开始前一次性快照其 source root 下的 `.gg` 文件；目录枚举先排序，隐藏目录、构建输出和符号链接不进入源码树。模块路径由相对 source-root 的规范逻辑路径产生：`foo.gg` 与 `foo/mod.gg` 都声明 `foo`，二者并存是冲突；每个路径分量必须是 ASCII 标识符。active 模块按模块路径字节序分配稠密 `ModuleId`，仅大小写不同的 active 路径必须诊断，不能依赖宿主文件系统的大小写规则。
+
+定义收集完成后解析 `use/pub use`。本地 module/item、当前锁图解析域内的直接依赖别名和保留根 `std` 分开记录；依赖别名来自 normal/test/build 对应域，不能从未启用域泄漏。brace import 可以同时携带目标实际拥有的多个命名空间绑定。公开再导出沿同一导入图解析；循环、找不到的本地目标、跨模块私有访问和同命名空间别名冲突均在 body 名称解析前失败。`use` 不复制目标定义，也不改变目标可见性。
+
+### 稳定定义身份
+
+类型、值、模块、构造器和字段使用分离命名空间。定义候选按精确锁图 package identity、模块规范路径、父定义、源码位置和封闭定义种类收集；局部变量不进入全局定义表，它们在 HIR 中使用 owner-local `LocalBindingId(u32)`。同一作用域、同一命名空间的重复项在稳定身份分配后统一诊断，并附带首次声明范围。
 
 每个定义同时得到：
 
-- `DefPath`：package identity、模块路径、父定义路径、名字、定义种类和同名消歧序号；
-- `StableDefKey`：`DefPath` 的规范编码经 BLAKE3-256 得到的 32 字节值；
-- `DefId`：按 `StableDefKey` 字节序排序后的稠密编号。
+- `DefPath`：package identity、模块路径、父定义路径、名字、定义种类和同名消歧序号；匿名字段、impl 和生成定义使用 owner 路径、节点起始偏移与封闭 kind；
+- `StableDefKey`：`DefPath` 的长度前缀规范编码经 BLAKE3-256 得到的 32 字节值；
+- `DefId`：按 `StableDefKey` 完整字节序排序后的稠密 `u32` 编号。
 
-若两个不同的规范 `DefPath` 得到相同 `StableDefKey`，编译器必须报告 digest collision 并停止，不能合并定义或靠源码顺序消歧。
-
-匿名闭包、匿名 `impl Trait` 和编译器生成定义的路径分量使用其 owner 的稳定键、节点起始偏移和封闭的 lowering kind；不能使用内存地址或并行任务编号。
+目录枚举顺序、线程完成顺序、hash 随机种子和宿主绝对路径不能进入上述身份。若两个不同的规范 `DefPath` 得到相同 `StableDefKey`，编译器必须报告 digest collision 并停止，不能合并定义或靠源码顺序消歧。
 
 ## HIR
 

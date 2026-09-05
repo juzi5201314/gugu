@@ -11,9 +11,10 @@ mod ty;
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::source::{ExpansionId, SourceFileId, SourceMap, Span};
 
+#[cfg(test)]
+use super::ast::FnBody;
 use super::ast::{
-    AstArena, AstFile, AstNodeId, AstRange, AttrKind, Attribute, ExprId, FnBody, ItemKind,
-    try_extend_range,
+    AstArena, AstFile, AstNodeId, AstRange, AttrKind, Attribute, ExprId, ItemKind, try_extend_range,
 };
 use super::intern::{Symbol, SymbolInterner};
 use super::token::{Token, TokenBuffer, TokenKind, TriviaKind};
@@ -39,6 +40,7 @@ pub(super) fn finish_extend<T>(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn has_main_fn(file: &AstFile, arena: &AstArena, intern: &SymbolInterner) -> bool {
     file.items.as_slice(&arena.item_ids).iter().any(|id| {
         let item = &arena.items[id.0 as usize];

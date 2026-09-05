@@ -1,9 +1,9 @@
 use crate::diagnostics::DiagnosticCode;
 
 use super::super::ast::{
-    AssignOp, AstRange, BinOp, Expr, ExprId, ExprKind, FStringPart, FieldExpr, GenericArg,
-    IndexKind, IntrinsicKind, LitKind, MatchArm, Path, PathId, SelectArm, SelectArmKind, Stmt,
-    StmtId, StmtKind, UnOp,
+    AssignOp, AstRange, Attribute, BinOp, Expr, ExprId, ExprKind, FStringPart, FieldExpr,
+    GenericArg, IndexKind, IntrinsicKind, LitKind, MatchArm, Path, PathId, SelectArm,
+    SelectArmKind, Stmt, StmtId, StmtKind, UnOp,
 };
 use super::super::intern::Symbol;
 use super::super::token::TokenKind;
@@ -33,12 +33,15 @@ impl Parser<'_> {
 
     fn parse_expr_with_attrs(&mut self) -> ExprId {
         let attrs = self.parse_outer_attributes();
+        self.parse_expr_with_outer_attrs(attrs)
+    }
+
+    fn parse_expr_with_outer_attrs(&mut self, attrs: Vec<Attribute>) -> ExprId {
         let expr = self.parse_expr_core();
-        if attrs.is_empty() {
-            return expr;
+        if !attrs.is_empty() {
+            let stored = self.store_attrs(attrs);
+            self.arena.exprs[expr.0 as usize].attributes = stored;
         }
-        let stored = self.store_attrs(attrs);
-        self.arena.exprs[expr.0 as usize].attributes = stored;
         expr
     }
 
@@ -89,11 +92,13 @@ impl Parser<'_> {
                 self.consume_error_token();
                 continue;
             }
-            if let Some(stmt) = self.try_parse_stmt() {
-                stmts.push(stmt);
+            let mark = self.start();
+            let attrs = self.parse_outer_attributes();
+            if self.is_stmt_start() {
+                stmts.push(self.parse_stmt(mark, attrs));
                 continue;
             }
-            let expr = self.parse_expression();
+            let expr = self.parse_expr_with_outer_attrs(attrs);
             if self.is_assign_op() {
                 stmts.push(self.finish_assign(expr));
                 continue;
@@ -115,18 +120,24 @@ impl Parser<'_> {
         )
     }
 
-    fn try_parse_stmt(&mut self) -> Option<StmtId> {
+    fn is_stmt_start(&self) -> bool {
+        matches!(
+            self.kind(),
+            TokenKind::KwLet | TokenKind::KwDefer | TokenKind::KwYield
+        ) || (self.kind() == TokenKind::KwComptime && self.peek_source())
+    }
+
+    fn parse_stmt(&mut self, mark: Mark, attrs: Vec<Attribute>) -> StmtId {
         match self.kind() {
-            TokenKind::KwLet => Some(self.parse_let_stmt()),
-            TokenKind::KwDefer => Some(self.parse_defer_stmt()),
-            TokenKind::KwYield => Some(self.parse_yield_stmt()),
-            TokenKind::KwComptime if self.peek_source() => Some(self.parse_source_macro_stmt()),
-            _ => None,
+            TokenKind::KwLet => self.parse_let_stmt(mark, attrs),
+            TokenKind::KwDefer => self.parse_defer_stmt(mark, attrs),
+            TokenKind::KwYield => self.parse_yield_stmt(mark, attrs),
+            TokenKind::KwComptime => self.parse_source_macro_stmt(mark, attrs),
+            _ => unreachable!("parse_stmt 只接收已识别的语句起始记号"),
         }
     }
 
-    fn parse_let_stmt(&mut self) -> StmtId {
-        let mark = self.start();
+    fn parse_let_stmt(&mut self, mark: Mark, attrs: Vec<Attribute>) -> StmtId {
         self.bump();
         let pat = self.parse_pat();
         let ty = if self.eat(TokenKind::Colon) {
@@ -146,6 +157,7 @@ impl Parser<'_> {
         };
         self.push_stmt(
             mark,
+            attrs,
             StmtKind::Let {
                 pat,
                 ty,
@@ -155,8 +167,7 @@ impl Parser<'_> {
         )
     }
 
-    fn parse_defer_stmt(&mut self) -> StmtId {
-        let mark = self.start();
+    fn parse_defer_stmt(&mut self, mark: Mark, attrs: Vec<Attribute>) -> StmtId {
         self.bump();
         let ret = self.ident_text_is("ret") && {
             self.bump();
@@ -167,21 +178,19 @@ impl Parser<'_> {
         } else {
             self.parse_expression()
         };
-        self.push_stmt(mark, StmtKind::Defer { ret, body })
+        self.push_stmt(mark, attrs, StmtKind::Defer { ret, body })
     }
 
-    fn parse_yield_stmt(&mut self) -> StmtId {
-        let mark = self.start();
+    fn parse_yield_stmt(&mut self, mark: Mark, attrs: Vec<Attribute>) -> StmtId {
         self.bump();
-        self.push_stmt(mark, StmtKind::Yield)
+        self.push_stmt(mark, attrs, StmtKind::Yield)
     }
 
-    fn parse_source_macro_stmt(&mut self) -> StmtId {
-        let mark = self.start();
+    fn parse_source_macro_stmt(&mut self, mark: Mark, attrs: Vec<Attribute>) -> StmtId {
         self.bump();
         self.bump();
         let body = self.parse_block_expr();
-        self.push_stmt(mark, StmtKind::SourceMacro { body })
+        self.push_stmt(mark, attrs, StmtKind::SourceMacro { body })
     }
 
     fn is_assign_op(&self) -> bool {
@@ -239,7 +248,12 @@ impl Parser<'_> {
         };
         let start = self.expr_span(place).start();
         let end = self.expr_span(value).end();
+        let attributes = std::mem::replace(
+            &mut self.arena.exprs[place.0 as usize].attributes,
+            AstRange::empty(),
+        );
         match self.arena.try_push_stmt(Stmt {
+            attributes,
             id: mark_id,
             span: self.make_span(start, end),
             kind: StmtKind::Assign { op, place, value },
@@ -275,7 +289,12 @@ impl Parser<'_> {
                 return StmtId(u32::MAX);
             }
         };
+        let attributes = std::mem::replace(
+            &mut self.arena.exprs[expr.0 as usize].attributes,
+            AstRange::empty(),
+        );
         match self.arena.try_push_stmt(Stmt {
+            attributes,
             id,
             span,
             kind: StmtKind::Expr { expr, discarded },
@@ -288,9 +307,11 @@ impl Parser<'_> {
         }
     }
 
-    fn push_stmt(&mut self, mark: Mark, kind: StmtKind) -> StmtId {
+    fn push_stmt(&mut self, mark: Mark, attrs: Vec<Attribute>, kind: StmtKind) -> StmtId {
         let span = self.finish_span(mark);
+        let attributes = self.store_attrs(attrs);
         match self.arena.try_push_stmt(Stmt {
+            attributes,
             id: mark.id,
             span,
             kind,
@@ -645,6 +666,7 @@ impl Parser<'_> {
     fn parse_field_expr_list(&mut self) -> AstRange<FieldExpr> {
         let mut fields = Vec::new();
         while !self.at_any(&[TokenKind::RBrace, TokenKind::Eof]) {
+            let attrs = self.parse_outer_attributes();
             let name_tok = self.expect(TokenKind::Ident, "字段需要名字");
             let value = if self.eat(TokenKind::Colon) {
                 Some(self.parse_expression())
@@ -652,6 +674,7 @@ impl Parser<'_> {
                 None
             };
             fields.push(FieldExpr {
+                attributes: self.store_attrs(attrs),
                 name: self.interned_symbol(name_tok),
                 span: self.token_span(name_tok),
                 value,
@@ -1065,6 +1088,7 @@ impl Parser<'_> {
         };
         let span = self.finish_span(mark);
         let stmt = match self.arena.try_push_stmt(Stmt {
+            attributes: AstRange::empty(),
             id: stmt_id,
             span,
             kind: StmtKind::Let {
@@ -1097,6 +1121,7 @@ impl Parser<'_> {
         let mut arms = Vec::new();
         while !self.at_any(&[TokenKind::RBrace, TokenKind::Eof]) {
             let arm_mark = self.start();
+            let attrs = self.parse_outer_attributes();
             let pat = self.parse_pat();
             let guard = if self.eat(TokenKind::KwIf) {
                 Some(self.parse_expression())
@@ -1106,6 +1131,7 @@ impl Parser<'_> {
             self.expect(TokenKind::FatArrow, "match 臂需要 `=>`");
             let body = self.parse_expression();
             arms.push(MatchArm {
+                attributes: self.store_attrs(attrs),
                 id: arm_mark.id,
                 span: self.finish_span(arm_mark),
                 pat,
@@ -1160,7 +1186,9 @@ impl Parser<'_> {
         self.expect(TokenKind::LBrace, "select 需要 `{`");
         let mut arms = Vec::new();
         while !self.at_any(&[TokenKind::RBrace, TokenKind::Eof]) {
-            arms.push(self.parse_select_arm());
+            let mark = self.start();
+            let attrs = self.parse_outer_attributes();
+            arms.push(self.parse_select_arm(mark, attrs));
             if !self.at(TokenKind::RBrace) {
                 if !self.eat(TokenKind::Comma) && !self.at_list_separator() {
                     self.error_here(
@@ -1175,26 +1203,26 @@ impl Parser<'_> {
         self.push_expr(mark, ExprKind::Select { arms })
     }
 
-    fn parse_select_arm(&mut self) -> SelectArm {
-        let mark = self.start();
+    fn parse_select_arm(&mut self, mark: Mark, attrs: Vec<Attribute>) -> SelectArm {
         if self.at(TokenKind::Ident) && self.text() == "_" {
             self.bump();
             self.expect(TokenKind::FatArrow, "select 默认臂需要 `=>`");
             let body = self.parse_expression();
             return SelectArm {
+                attributes: self.store_attrs(attrs),
                 id: mark.id,
                 span: self.finish_span(mark),
                 kind: SelectArmKind::Default { body },
             };
         }
         if self.at(TokenKind::KwLet) {
-            return self.parse_select_let_arm(mark);
+            return self.parse_select_let_arm(mark, attrs);
         }
         let chan = self.parse_postfix();
-        self.expect_send_arm(mark, chan)
+        self.expect_send_arm(mark, attrs, chan)
     }
 
-    fn parse_select_let_arm(&mut self, mark: Mark) -> SelectArm {
+    fn parse_select_let_arm(&mut self, mark: Mark, attrs: Vec<Attribute>) -> SelectArm {
         self.bump();
         let pat = self.parse_pat();
         self.expect(TokenKind::Eq, "select 接收臂需要 `=`");
@@ -1214,13 +1242,14 @@ impl Parser<'_> {
             }
         };
         SelectArm {
+            attributes: self.store_attrs(attrs),
             id: mark.id,
             span: self.finish_span(mark),
             kind,
         }
     }
 
-    fn expect_send_arm(&mut self, mark: Mark, expr: ExprId) -> SelectArm {
+    fn expect_send_arm(&mut self, mark: Mark, attrs: Vec<Attribute>, expr: ExprId) -> SelectArm {
         self.expect(TokenKind::FatArrow, "select 发送臂需要 `=>`");
         let body = self.parse_expression();
         let kind = match self.select_call(expr) {
@@ -1239,6 +1268,7 @@ impl Parser<'_> {
             }
         };
         SelectArm {
+            attributes: self.store_attrs(attrs),
             id: mark.id,
             span: self.finish_span(mark),
             kind,
