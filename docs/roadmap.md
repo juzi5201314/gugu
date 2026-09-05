@@ -121,6 +121,7 @@
   - 依赖：阶段 12、12a、14。
   - 实现通配/绑定/引用/字面量/范围/元组/数组切片/结构体/构造器/or/`@`/rest 模式、可驳性、let 链、let-else、守卫与有限域覆盖计算。
   - 验收：被匹配表达式只求值一次；重复绑定、or 绑定集合不一致、空范围、不可驳 let 段、非穷尽 match 和错误类型守卫都有稳定诊断；模式不调用用户 Eq/Ord。
+  - 接入证据：`frontend::bootstrap -> semantics::check -> TypeCheck query -> CheckedSemantics verifier -> IR -> ImagePlan`；源码、cfg 和解析结果进入语义指纹，诊断在缓存命中时重绑定当前源码表。`frontend::semantics::tests` 覆盖声明/初始化、短路与退出、检查计划、模式覆盖及冷/热 query；真实 CLI `check/build` 已验证成功检查、结构化错误和失败无产物。完整 HIR 冻结仍由阶段 12b、20 验收。
 
 - [ ] **阶段 16：实现函数、闭包与 async 捕获**（复杂度：4）
   - 依赖：阶段 13、14、15。

@@ -23,11 +23,15 @@ pub(crate) struct IrFunction {
 pub(crate) struct IrModule {
     pub(crate) functions: Vec<IrFunction>,
     pub(crate) entry: Option<FunctionId>,
+    pub(crate) semantics: crate::frontend::CheckedSemantics,
 }
 
-pub(crate) fn lower(frontend: &FrontendOutput) -> IrModule {
+pub(crate) fn lower(frontend: FrontendOutput) -> IrModule {
     if !frontend.has_main {
-        return IrModule::default();
+        return IrModule {
+            semantics: frontend.semantics,
+            ..IrModule::default()
+        };
     }
     IrModule {
         functions: vec![IrFunction {
@@ -35,5 +39,6 @@ pub(crate) fn lower(frontend: &FrontendOutput) -> IrModule {
             operations: vec![IrOperation::ReturnUnit],
         }],
         entry: Some(FunctionId(0)),
+        semantics: frontend.semantics,
     }
 }

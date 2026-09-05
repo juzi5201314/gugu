@@ -216,6 +216,21 @@ parser 必须满足：
 
 目录枚举顺序、线程完成顺序、hash 随机种子和宿主绝对路径不能进入上述身份。若两个不同的规范 `DefPath` 得到相同 `StableDefKey`，编译器必须报告 digest collision 并停止，不能合并定义或靠源码顺序消歧。
 
+## 声明、表达式与模式检查结果
+
+`frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
+
+阶段 13–15 的版本化结果为 `CheckedSemantics`（schema 1），它在 TypeCheck query 中序列化，包含：
+
+- 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
+- 模块 const/static 的无环初始化顺序与 Process/Coroutine/OsThread 初始化域，以及函数内 static 的声明和延迟初始化器。
+- defer 的注册语句、body、函数出口标记和捕获槽；初始化分析保留“已经注册该 action”的条件路径，不能混入未注册分支。
+- 除法、移位、数组和切片边界、UTF-8 边界、浮点转整数与 Unicode scalar 检查。检查引用已求值的表达式；安全模式保留检查，unsafe 的下标操作不登记可省略的边界检查。
+
+query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果；成功结果经 schema verifier 验证后才能进入布局和 IR，IR 直接持有该结果，镜像计划保留其规范序列化 BLAKE3 指纹。失败诊断存储逻辑文件名和字节范围，缓存命中时重新绑定当前 `SourceMap`，不得复用旧源码表身份。任何检查失败均中止 BuildIr 及后续产物路径。
+
+该结果是阶段 13–15 向 HIR 形成阶段提供的已检查对象，不代替下文的完整 HIR 冻结门禁；trait 选择、捕获计划、完整 unsafe 边界和 GIR cleanup CFG 分别由路线图对应阶段接入。
+
 ## HIR
 
 ### owner 与节点表示
@@ -268,6 +283,12 @@ HIR 保留对诊断有价值的 `if`、`match`、循环、`try`、`async`、`sel
 | 返回位置 `impl Trait` | owner 下的独立 opaque 定义 |
 
 `async`、`select` 和 `defer` 在 HIR中保留专用节点，并各自携带由[表达式规范](../spec/expressions.md)生成的一次求值、出口和提交/cleanup计划；GIR只能消费该计划，不能按节点名重新解释随机、公平、取消或展开语义。
+
+## 语义检查输出
+
+阶段 13–15 的 body checker 在 `NameResolution` 完成后消费配置视图。每个函数 owner 建立独立的局部槽表：遮蔽分配新槽，分支状态按所有可达前驱求交，未初始化槽不能作为读操作数。表达式检查产出唯一 `Ty`，对 `never` 采用合流规则；place 检查与赋值定位共享同一接收者和下标求值。
+
+模式检查先生成绑定计划，再执行构造器/标量区间覆盖矩阵。守卫不贡献覆盖，or 模式必须拥有相同绑定集合和类型；覆盖矩阵只拆分边界区间和构造器，不枚举无限标量域。检查失败通过 `Diagnostic` 返回，失败的语义结果不能进入后续 lowering。
 
 ### 类型与调整侧表
 

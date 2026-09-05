@@ -1,125 +1,232 @@
-//! 类型形成与目标布局基础。
-use super::ast::{AstArena, TyId, TyKind};
-use crate::diagnostics::{Diagnostic, DiagnosticCode};
+//! 布局只消费语义类型，禁止将未解析路径伪装成零大小值。
+use super::{
+    ast::{ItemKind, StructBody},
+    semantics::{
+        CheckedSemantics,
+        model::{Model, Ty},
+    },
+};
+use crate::{Diagnostic, DiagnosticCode};
+use std::collections::BTreeMap;
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Layout {
     pub(crate) size: u64,
     pub(crate) align: u64,
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct TypeArena {
-    layouts: Vec<Option<Layout>>,
+pub(crate) fn form_and_layout(
+    model: &Model<'_>,
+    semantics: &CheckedSemantics,
+) -> Result<Vec<Layout>, Vec<Diagnostic>> {
+    let mut arena = Layouts {
+        model,
+        complete: BTreeMap::new(),
+        active: Vec::new(),
+    };
+    for body in &semantics.bodies {
+        for ty in body
+            .slots
+            .iter()
+            .chain(body.expressions.iter().map(|(_, ty)| ty))
+        {
+            arena.layout(ty).map_err(|error| vec![error])?;
+        }
+    }
+    for (index, nominal) in model.nominal.iter().enumerate() {
+        if !nominal.params.is_empty() {
+            continue;
+        }
+        arena
+            .layout(&Ty::Named(index, Vec::new()))
+            .map_err(|error| vec![error])?;
+        for variant in &nominal.variants {
+            for field in &variant.fields {
+                arena.layout(&field.ty).map_err(|error| vec![error])?;
+            }
+        }
+    }
+    Ok(arena.complete.into_values().collect())
 }
 
-impl TypeArena {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
-    pub(crate) fn layout(&mut self, arena: &AstArena, ty: TyId) -> Result<Layout, Diagnostic> {
-        if let Some(layout) = self.layouts.get(ty.0 as usize).and_then(Option::as_ref) {
-            return Ok(*layout);
+struct Layouts<'m, 'a> {
+    model: &'m Model<'a>,
+    complete: BTreeMap<Ty, Layout>,
+    active: Vec<Ty>,
+}
+impl Layouts<'_, '_> {
+    fn layout(&mut self, ty: &Ty) -> Result<Option<Layout>, Diagnostic> {
+        if let Some(layout) = self.complete.get(ty) {
+            return Ok(Some(*layout));
         }
-        let result = match arena.tys.get(ty.0 as usize).map(|t| t.kind) {
-            Some(TyKind::Never) => Layout { size: 0, align: 1 },
-            Some(TyKind::Infer) | Some(TyKind::Error) => {
-                return Err(Diagnostic::error(
-                    DiagnosticCode::InvalidType,
-                    "类型变量未收敛",
-                    None,
-                ));
-            }
-            Some(
-                TyKind::Ref(_)
-                | TyKind::Ptr(_)
-                | TyKind::Fn { .. }
-                | TyKind::Dyn(_)
-                | TyKind::Chan(_),
-            ) => Layout { size: 8, align: 8 },
-            Some(TyKind::Slice(_)) => Layout { size: 16, align: 8 },
-            Some(TyKind::Tuple(types)) => self.aggregate(arena, types.as_slice(&arena.ty_ids))?,
-            Some(TyKind::Array { elem, .. }) => self.layout(arena, elem)?,
-            Some(TyKind::Path(path)) => {
-                let name = arena
-                    .paths
-                    .get(path.0 as usize)
-                    .map(|_| "named")
-                    .unwrap_or("");
-                if name.is_empty() {
-                    return Err(Diagnostic::error(
-                        DiagnosticCode::InvalidType,
-                        "未知类型路径",
-                        None,
-                    ));
-                }
-                Layout { size: 0, align: 1 }
-            }
-            Some(TyKind::Impl(_) | TyKind::SourceMacro { .. }) => {
-                return Err(Diagnostic::error(
-                    DiagnosticCode::InvalidType,
-                    "该类型尚未形成",
-                    None,
-                ));
-            }
-            None => {
-                return Err(Diagnostic::error(
-                    DiagnosticCode::InvalidType,
-                    "类型编号越界",
-                    None,
-                ));
-            }
-        };
-        let index = ty.0 as usize;
-        if self.layouts.len() <= index {
-            self.layouts.resize(index + 1, None);
+        if self.active.contains(ty) {
+            return Err(Diagnostic::error(
+                DiagnosticCode::RecursiveType,
+                "类型形成无限大小递归",
+                None,
+            ));
         }
-        self.layouts[index] = Some(result);
+        self.active.push(ty.clone());
+        let result = self.compute(ty);
+        self.active.pop();
+        let result = result?;
+        if let Some(layout) = result {
+            self.complete.insert(ty.clone(), layout);
+        }
         Ok(result)
     }
-
-    fn aggregate(&mut self, arena: &AstArena, types: &[TyId]) -> Result<Layout, Diagnostic> {
-        let mut size = 0;
-        let mut align = 1;
-        for &ty in types {
-            let layout = self.layout(arena, ty)?;
-            size = align_up(size, layout.align);
-            size = size.checked_add(layout.size).ok_or_else(|| {
-                Diagnostic::error(DiagnosticCode::InvalidType, "类型大小溢出", None)
-            })?;
-            align = align.max(layout.align);
-        }
-        Ok(Layout {
-            size: align_up(size, align),
-            align,
-        })
-    }
-}
-
-pub(crate) fn form_and_layout(
-    modules: &[super::ParsedModule],
-) -> Result<Vec<Layout>, Vec<Diagnostic>> {
-    let mut layouts = Vec::new();
-    let mut diagnostics = Vec::new();
-    for module in modules {
-        let mut arena = TypeArena::new();
-        for index in 0..module.arena.tys.len() {
-            match arena.layout(&module.arena, TyId(index as u32)) {
-                Ok(layout) => layouts.push(layout),
-                Err(error) => diagnostics.push(error),
+    fn compute(&mut self, ty: &Ty) -> Result<Option<Layout>, Diagnostic> {
+        let word = Layout { size: 8, align: 8 };
+        Ok(Some(match ty {
+            Ty::Error | Ty::Var(_) => return Err(invalid("布局类型尚未收敛")),
+            Ty::Param(_) => return Ok(None),
+            Ty::Unit | Ty::Never => Layout { size: 0, align: 1 },
+            Ty::Bool => Layout { size: 1, align: 1 },
+            Ty::Char => Layout { size: 4, align: 4 },
+            Ty::Int { bits, .. } | Ty::Float(bits) => Layout {
+                size: u64::from(*bits) / 8,
+                align: u64::from(*bits) / 8,
+            },
+            Ty::Ptr(_) | Ty::Chan(_) | Ty::Join(_) => word,
+            Ty::Ref(t) => {
+                if matches!(**t, Ty::Slice(_)) {
+                    Layout { size: 16, align: 8 }
+                } else {
+                    word
+                }
             }
-        }
+            Ty::Slice(_) => return Ok(None),
+            Ty::String | Ty::Function(..) | Ty::Range => Layout { size: 16, align: 8 },
+            Ty::Array(elem, n) => {
+                let Some(elem) = self.layout(elem)? else {
+                    return Ok(None);
+                };
+                Layout {
+                    size: elem
+                        .size
+                        .checked_mul(*n)
+                        .ok_or_else(|| invalid("数组布局溢出"))?,
+                    align: elem.align,
+                }
+            }
+            Ty::Tuple(ts) => {
+                let Some(layout) = self.aggregate(ts.iter())? else {
+                    return Ok(None);
+                };
+                layout
+            }
+            Ty::Option(t) => {
+                let Some(payload) = self.layout(t)? else {
+                    return Ok(None);
+                };
+                tagged(payload)?
+            }
+            Ty::Result(t, e) => {
+                let (Some(t), Some(e)) = (self.layout(t)?, self.layout(e)?) else {
+                    return Ok(None);
+                };
+                tagged(Layout {
+                    size: t.size.max(e.size),
+                    align: t.align.max(e.align),
+                })?
+            }
+            Ty::Named(index, _) => {
+                let nominal = &self.model.nominal[*index];
+                let item = &self.model.modules[nominal.definition.module].arena.items
+                    [nominal.definition.item.0 as usize];
+                let variants = self.model.variants(ty).expect("名义类型字段");
+                match item.kind {
+                    ItemKind::Struct {
+                        body: StructBody::Record(_),
+                        ..
+                    } => {
+                        let Some(layout) =
+                            self.aggregate(variants[0].fields.iter().map(|field| &field.ty))?
+                        else {
+                            return Ok(None);
+                        };
+                        layout
+                    }
+                    ItemKind::Struct {
+                        body: StructBody::Newtype(_),
+                        ..
+                    } => {
+                        let Some(layout) = self.layout(&variants[0].fields[0].ty)? else {
+                            return Ok(None);
+                        };
+                        layout
+                    }
+                    ItemKind::Enum { .. } => {
+                        let mut payload = Layout { size: 0, align: 1 };
+                        for variant in variants {
+                            let Some(layout) =
+                                self.aggregate(variant.fields.iter().map(|field| &field.ty))?
+                            else {
+                                return Ok(None);
+                            };
+                            payload.size = payload.size.max(layout.size);
+                            payload.align = payload.align.max(layout.align);
+                        }
+                        if nominal.variants.is_empty() {
+                            payload
+                        } else {
+                            tagged(payload)?
+                        }
+                    }
+                    ItemKind::Union { .. } => {
+                        let fields = variants[0].fields.iter().map(|field| &field.ty);
+                        let mut payload = Layout { size: 0, align: 1 };
+                        for field in fields {
+                            let Some(layout) = self.layout(field)? else {
+                                return Ok(None);
+                            };
+                            payload.size = payload.size.max(layout.size);
+                            payload.align = payload.align.max(layout.align);
+                        }
+                        align_up(payload.size, payload.align).map(|size| Layout {
+                            size,
+                            align: payload.align,
+                        })?
+                    }
+                    _ => return Err(invalid("布局要求名义类型声明")),
+                }
+            }
+        }))
     }
-    if diagnostics.is_empty() {
-        Ok(layouts)
-    } else {
-        Err(diagnostics)
+    fn aggregate<'t>(
+        &mut self,
+        fields: impl Iterator<Item = &'t Ty>,
+    ) -> Result<Option<Layout>, Diagnostic> {
+        let mut total = Layout { size: 0, align: 1 };
+        for ty in fields {
+            let Some(layout) = self.layout(ty)? else {
+                return Ok(None);
+            };
+            total.size = align_up(total.size, layout.align)?
+                .checked_add(layout.size)
+                .ok_or_else(|| invalid("聚合布局溢出"))?;
+            total.align = total.align.max(layout.align);
+        }
+        total.size = align_up(total.size, total.align)?;
+        Ok(Some(total))
     }
 }
-
-fn align_up(value: u64, align: u64) -> u64 {
+fn tagged(payload: Layout) -> Result<Layout, Diagnostic> {
+    let align = payload.align.max(1);
+    let size = align_up(1, align)?
+        .checked_add(payload.size)
+        .ok_or_else(|| invalid("枚举布局溢出"))?;
+    Ok(Layout {
+        size: align_up(size, align)?,
+        align,
+    })
+}
+fn align_up(size: u64, align: u64) -> Result<u64, Diagnostic> {
     debug_assert!(align.is_power_of_two());
-    (value + align - 1) & !(align - 1)
+    size.checked_add(align - 1)
+        .map(|s| s & !(align - 1))
+        .ok_or_else(|| invalid("布局对齐溢出"))
+}
+fn invalid(message: &str) -> Diagnostic {
+    Diagnostic::error(DiagnosticCode::InvalidType, message, None)
 }

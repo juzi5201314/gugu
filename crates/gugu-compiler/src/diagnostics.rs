@@ -24,7 +24,9 @@ impl fmt::Display for Severity {
 }
 
 /// 稳定的源码、清单与路径诊断代码。
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum DiagnosticCode {
     /// 源文件无法读取。
     SourceRead,
@@ -104,6 +106,16 @@ pub enum DiagnosticCode {
     InvalidType,
     /// 类型递归导致无限大小。
     RecursiveType,
+    /// 声明、绑定或初始化数据流非法。
+    InvalidDeclaration,
+    /// 表达式或控制流类型非法。
+    InvalidExpression,
+    /// 模式结构或穷尽性非法。
+    InvalidPattern,
+    /// `let-else` 约束非法。
+    InvalidLetElse,
+    /// `main` 签名非法。
+    InvalidMainSignature,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -148,6 +160,11 @@ impl fmt::Display for DiagnosticCode {
             Self::DefinitionHashCollision => "E0037",
             Self::InvalidType => "E0038",
             Self::RecursiveType => "E0039",
+            Self::InvalidDeclaration => "E0040",
+            Self::InvalidExpression => "E0041",
+            Self::InvalidPattern => "E0042",
+            Self::InvalidLetElse => "E0043",
+            Self::InvalidMainSignature => "E0044",
         };
         formatter.write_str(code)
     }

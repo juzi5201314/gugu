@@ -35,15 +35,18 @@ fn analyze_with_cfg(
         .map(|(path, source)| SourceSnapshot::from_str(path, source).expect("valid source"))
         .collect();
     let source_map = SourceMap::new(snapshots).expect("unique source paths");
-    bootstrap(SourceInput::Sources {
-        source_map: &source_map,
-        entry: "src/main.gg",
-        source_root: "src",
-        package_identity: "acme/demo@1.0.0",
-        require_main: true,
-        cfg,
-        external_packages: &BTreeSet::new(),
-    })
+    bootstrap(
+        SourceInput::Sources {
+            source_map: &source_map,
+            entry: "src/main.gg",
+            source_root: "src",
+            package_identity: "acme/demo@1.0.0",
+            require_main: true,
+            cfg,
+            external_packages: &BTreeSet::new(),
+        },
+        &crate::query::QueryEngine::new(),
+    )
 }
 
 fn codes(result: Result<super::FrontendOutput, Vec<crate::Diagnostic>>) -> Vec<DiagnosticCode> {
@@ -170,6 +173,7 @@ enum Choice {
 }
 fn optional(#[cfg(false)] removed: int, kept: int) {}
 fn main() {
+    let value = 1
     #[cfg(false)] let removed = missing
     let values = [#[cfg(false)] missing, 1]
     let record = Record { #[cfg(false)] secret: missing, shown: 1 }
@@ -177,7 +181,7 @@ fn main() {
         #[cfg(false)] 0 => missing
         _ => 1
     }
-    select {
+    _ = select {
         #[cfg(false)] _ => missing
         _ => 1
     }

@@ -208,13 +208,15 @@ impl Compilation {
 }
 
 /// 阶段 3/4 的编译器入口。
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Compiler;
+#[derive(Clone, Debug, Default)]
+pub struct Compiler {
+    queries: std::sync::Arc<query::QueryEngine>,
+}
 
 impl Compiler {
     /// 创建 bootstrap compiler。
     pub fn new() -> Self {
-        Self
+        Self::default()
     }
 
     /// 执行一次确定性的 bootstrap action graph。
@@ -242,7 +244,7 @@ impl Compiler {
         };
         graph.complete(ActionKind::LoadSources, loaded.detail());
 
-        let frontend_result = frontend::bootstrap(loaded.as_source_input());
+        let frontend_result = frontend::bootstrap(loaded.as_source_input(), &self.queries);
         let source_map = loaded.source_map;
         let frontend = match frontend_result {
             Ok(output) => output,
@@ -250,7 +252,7 @@ impl Compiler {
                 for diagnostic in errors {
                     diagnostics.push(diagnostic);
                 }
-                graph.fail(ActionKind::Frontend, "配置、模块或定义分析失败");
+                graph.fail(ActionKind::Frontend, "配置、名称或语义检查失败");
                 graph.skip_after(ActionKind::Frontend, "前置 action 失败");
                 diagnostics.sort();
                 return Compilation {
@@ -263,10 +265,14 @@ impl Compiler {
         };
         graph.complete(ActionKind::Frontend, frontend.detail());
 
-        let ir = ir::lower(&frontend);
+        let ir = ir::lower(frontend);
         graph.complete(
             ActionKind::BuildIr,
-            format!("{} 个函数", ir.functions.len()),
+            format!(
+                "{} 个函数，{} 个已检查 body",
+                ir.functions.len(),
+                ir.semantics.bodies.len()
+            ),
         );
 
         let Some(backend_plan) = backend::plan(target, &ir) else {
@@ -626,6 +632,7 @@ pub struct ImagePlan {
     function_count: u32,
     runtime_source_count: u32,
     rt0: Rt0Boundary,
+    semantic_fingerprint: [u8; 32],
 }
 
 impl ImagePlan {
@@ -636,6 +643,7 @@ impl ImagePlan {
             function_count: plan.function_count,
             runtime_source_count: attachment.source_count,
             rt0: attachment.rt0,
+            semantic_fingerprint: plan.semantic_fingerprint,
         }
     }
 
@@ -662,6 +670,11 @@ impl ImagePlan {
     /// 返回计划使用的 rt0 边界。
     pub fn rt0(&self) -> Rt0Boundary {
         self.rt0
+    }
+
+    /// 返回已验证前端语义的稳定指纹，用于区分相同入口的不同程序。
+    pub fn semantic_fingerprint(&self) -> [u8; 32] {
+        self.semantic_fingerprint
     }
 }
 

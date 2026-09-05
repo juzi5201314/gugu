@@ -71,11 +71,17 @@ impl Parser<'_> {
         self.parse_binary(0, false)
     }
 
+    pub(super) fn parse_pattern_endpoint(&mut self) -> ExprId {
+        self.parse_binary(PREC_BIT_OR + 1, false)
+    }
+
     pub(super) fn parse_block_expr(&mut self) -> ExprId {
         let mark = self.start();
         self.expect(TokenKind::LBrace, "块需要 `{`");
+        let outer_delimiters = std::mem::replace(&mut self.delim_depth, 0);
         let (stmts, tail) = self.parse_block_contents();
         self.expect(TokenKind::RBrace, "块需要 `}`");
+        self.delim_depth = outer_delimiters;
         self.push_expr(mark, ExprKind::Block { stmts, tail })
     }
 
@@ -123,12 +129,22 @@ impl Parser<'_> {
     fn is_stmt_start(&self) -> bool {
         matches!(
             self.kind(),
-            TokenKind::KwLet | TokenKind::KwDefer | TokenKind::KwYield
+            TokenKind::KwLet | TokenKind::KwDefer | TokenKind::KwYield | TokenKind::KwStatic
         ) || (self.kind() == TokenKind::KwComptime && self.peek_source())
     }
 
     fn parse_stmt(&mut self, mark: Mark, attrs: Vec<Attribute>) -> StmtId {
         match self.kind() {
+            TokenKind::KwStatic => {
+                self.bump();
+                let token = self.expect(TokenKind::Ident, "static 需要名称");
+                let name = self.interned_symbol(token);
+                self.expect(TokenKind::Colon, "static 需要类型标注");
+                let ty = self.parse_ty();
+                self.expect(TokenKind::Eq, "static 需要初始化器");
+                let value = self.parse_expression();
+                self.push_stmt(mark, attrs, StmtKind::Static { name, ty, value })
+            }
             TokenKind::KwLet => self.parse_let_stmt(mark, attrs),
             TokenKind::KwDefer => self.parse_defer_stmt(mark, attrs),
             TokenKind::KwYield => self.parse_yield_stmt(mark, attrs),
@@ -327,6 +343,9 @@ impl Parser<'_> {
     fn parse_binary(&mut self, min_prec: u8, allow_range: bool) -> ExprId {
         let mut left = self.parse_unary();
         loop {
+            if self.at_line_end() {
+                break;
+            }
             if allow_range && self.at(TokenKind::DotDot) && PREC_RANGE >= min_prec {
                 let op_span = self.token_span(self.current());
                 self.bump();
@@ -443,6 +462,9 @@ impl Parser<'_> {
 
     fn parse_postfix_suffix(&mut self, mut expr: ExprId) -> ExprId {
         loop {
+            if self.at_line_end() {
+                break;
+            }
             match self.kind() {
                 TokenKind::LParen => {
                     self.bump();
@@ -1051,9 +1073,27 @@ impl Parser<'_> {
     }
 
     fn parse_condition(&mut self) -> ExprId {
+        let start = self.cursor;
+        let mut left = self.parse_condition_and();
+        while self.eat(TokenKind::OrOr) {
+            let right = self.parse_condition_and();
+            if self.tokens[start..self.cursor]
+                .iter()
+                .any(|token| token.kind == TokenKind::KwLet)
+            {
+                self.error_here(
+                    DiagnosticCode::ParseUnexpected,
+                    "let 链只能使用 &&，不能与 || 混合",
+                );
+            }
+            left = self.make_binary(BinOp::Or, left, right);
+        }
+        left
+    }
+
+    fn parse_condition_and(&mut self) -> ExprId {
         let mut left = self.parse_condition_part();
-        while self.at(TokenKind::AndAnd) {
-            self.bump();
+        while self.eat(TokenKind::AndAnd) {
             let right = self.parse_condition_part();
             left = self.make_binary(BinOp::And, left, right);
         }
@@ -1062,15 +1102,10 @@ impl Parser<'_> {
 
     fn parse_condition_part(&mut self) -> ExprId {
         if self.at(TokenKind::KwLet) {
-            return self.parse_let_condition();
+            self.parse_let_condition()
+        } else {
+            self.parse_binary(PREC_AND + 1, true)
         }
-        let mut left = self.parse_binary(PREC_AND + 1, true);
-        while self.at(TokenKind::OrOr) {
-            self.bump();
-            let right = self.parse_binary(PREC_AND + 1, true);
-            left = self.make_binary(BinOp::Or, left, right);
-        }
-        left
     }
 
     fn parse_let_condition(&mut self) -> ExprId {

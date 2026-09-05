@@ -13,6 +13,7 @@ mod intern;
 mod lex;
 mod names;
 mod parse;
+mod semantics;
 mod string;
 mod token;
 mod types;
@@ -23,6 +24,7 @@ pub(crate) use lex::lex;
 pub(crate) use parse::parse;
 #[cfg(test)]
 pub(crate) use parse::{dump_ast, has_main_fn, parent_before_child, parse};
+pub(crate) use semantics::CheckedSemantics;
 pub(crate) use token::TokenBuffer;
 
 pub(crate) enum SourceInput<'a> {
@@ -49,6 +51,7 @@ pub(crate) struct FrontendOutput {
     pub(crate) modules: Vec<ParsedModule>,
     pub(crate) names: names::NameResolution,
     pub(crate) types: Vec<types::Layout>,
+    pub(crate) semantics: semantics::CheckedSemantics,
 }
 
 #[derive(Clone, Debug)]
@@ -60,7 +63,10 @@ pub(crate) struct ParsedModule {
     pub(crate) configured: cfg::ConfiguredAst,
 }
 
-pub(crate) fn bootstrap(input: SourceInput<'_>) -> Result<FrontendOutput, Vec<Diagnostic>> {
+pub(crate) fn bootstrap(
+    input: SourceInput<'_>,
+    queries: &crate::query::QueryEngine,
+) -> Result<FrontendOutput, Vec<Diagnostic>> {
     match input {
         SourceInput::EmptyPackage => Ok(FrontendOutput {
             path: None,
@@ -72,6 +78,7 @@ pub(crate) fn bootstrap(input: SourceInput<'_>) -> Result<FrontendOutput, Vec<Di
             modules: Vec::new(),
             names: names::NameResolution::default(),
             types: Vec::new(),
+            semantics: semantics::CheckedSemantics::default(),
         }),
         SourceInput::Sources {
             source_map,
@@ -89,6 +96,7 @@ pub(crate) fn bootstrap(input: SourceInput<'_>) -> Result<FrontendOutput, Vec<Di
             require_main,
             cfg,
             external_packages,
+            queries,
         ),
     }
 }
@@ -101,6 +109,7 @@ fn check_sources(
     require_main: bool,
     cfg: &cfg::CfgContext,
     external_packages: &BTreeSet<String>,
+    queries: &crate::query::QueryEngine,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
     let mut modules = parse_modules(source_map, source_root, cfg)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
@@ -124,10 +133,10 @@ fn check_sources(
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
-    let types = types::form_and_layout(&modules)?;
-    Ok(frontend_output(
-        entry, has_main, source_map, modules, names, types,
-    ))
+    let (semantics, types) = semantics::check(&modules, &names, source_map, cfg, queries)?;
+    let mut output = frontend_output(entry, has_main, source_map, modules, names, types);
+    output.semantics = semantics;
+    Ok(output)
 }
 
 fn parse_modules(
@@ -248,6 +257,7 @@ fn frontend_output(
         modules,
         names,
         types,
+        semantics: semantics::CheckedSemantics::default(),
     }
 }
 
@@ -335,7 +345,6 @@ fn has_active_main(module: &ParsedModule) -> bool {
                 declaration
                     .name
                     .is_some_and(|name| module.tokens.intern.get_str(name) == "main")
-                    && declaration.params.len == 0
                     && matches!(declaration.body, ast::FnBody::Block(_) | ast::FnBody::Eq(_))
             }
             _ => false,

@@ -33,20 +33,12 @@ impl Parser<'_> {
             let name_tok = self.bump();
             self.bump();
             if self.at(TokenKind::DotDot) {
-                let rest_span = self.token_span(self.current());
+                self.error_here(
+                    DiagnosticCode::ParseUnexpected,
+                    "rest 绑定只能出现在数组或切片模式内部",
+                );
                 self.bump();
-                return self.arena.push_pat(Pat {
-                    id: mark.id,
-                    span: self.finish_span(mark),
-                    kind: PatKind::Array {
-                        prefix: super::super::ast::AstRange::empty(),
-                        rest: Some(RestPat {
-                            name: Some(self.interned_symbol(name_tok)),
-                            span: rest_span,
-                        }),
-                        suffix: super::super::ast::AstRange::empty(),
-                    },
-                });
+                return self.push_pat(mark, PatKind::Error);
             }
             let inner = self.parse_pat_atom();
             return self.arena.push_pat(Pat {
@@ -82,7 +74,7 @@ impl Parser<'_> {
             TokenKind::Ident => self.parse_ident_or_ctor_pat(mark),
             TokenKind::And => {
                 self.bump();
-                let inner = self.parse_pat();
+                let inner = self.parse_at_pat();
                 self.push_pat(mark, PatKind::Ref(inner))
             }
             TokenKind::LParen => self.parse_tuple_pat(mark),
@@ -93,6 +85,30 @@ impl Parser<'_> {
             | TokenKind::ByteChar
             | TokenKind::KwTrue
             | TokenKind::KwFalse => self.parse_lit_or_range_pat(mark),
+            TokenKind::Minus => {
+                self.bump();
+                let value = self.parse_pat_literal_expr();
+                let super::super::ast::ExprKind::Literal(literal) =
+                    self.arena.exprs[value.0 as usize].kind
+                else {
+                    return self.push_pat(mark, PatKind::Error);
+                };
+                if self.at(TokenKind::DotDot) {
+                    let id = self.arena.alloc_node(self.file);
+                    let start = self.arena.push_expr(super::super::ast::Expr {
+                        id,
+                        span: self.finish_span(mark),
+                        attributes: super::super::ast::AstRange::empty(),
+                        kind: super::super::ast::ExprKind::Unary {
+                            op: super::super::ast::UnOp::Neg,
+                            expr: value,
+                        },
+                    });
+                    self.parse_range_after(mark, start)
+                } else {
+                    self.push_pat(mark, PatKind::NegativeLiteral(literal))
+                }
+            }
             _ => self.error_pat(mark),
         }
     }
@@ -165,6 +181,13 @@ impl Parser<'_> {
             if self.at(TokenKind::DotDot) {
                 let span = self.token_span(self.current());
                 self.bump();
+                if rest.is_some() {
+                    self.error_span(
+                        DiagnosticCode::ParseUnexpected,
+                        "数组模式至多包含一个 `..`",
+                        span.clone(),
+                    );
+                }
                 rest = Some(RestPat { name: None, span });
                 after_rest = true;
                 if self.eat(TokenKind::Comma) {
@@ -180,6 +203,13 @@ impl Parser<'_> {
                 self.bump();
                 let span = self.token_span(self.current());
                 self.bump();
+                if rest.is_some() {
+                    self.error_span(
+                        DiagnosticCode::ParseUnexpected,
+                        "数组模式至多包含一个 `..`",
+                        span.clone(),
+                    );
+                }
                 rest = Some(RestPat {
                     name: Some(self.interned_symbol(name)),
                     span,
@@ -290,14 +320,14 @@ impl Parser<'_> {
             TokenKind::Char => {
                 let token = self.bump();
                 LitKind::Char {
-                    value: '\0',
+                    value: self.parse_char_value(token.text(self.source)),
                     text: self.interned_symbol(token),
                 }
             }
             TokenKind::ByteChar => {
                 let token = self.bump();
                 LitKind::ByteChar {
-                    value: 0,
+                    value: self.parse_byte_char_value(token.text(self.source)),
                     text: self.interned_symbol(token),
                 }
             }
@@ -321,7 +351,7 @@ impl Parser<'_> {
 
     fn parse_range_after(&mut self, mark: super::Mark, start: super::super::ast::ExprId) -> PatId {
         self.bump();
-        let end = self.parse_pat_literal_expr();
+        let end = self.parse_pattern_endpoint();
         self.push_pat(mark, PatKind::Range { start, end })
     }
 

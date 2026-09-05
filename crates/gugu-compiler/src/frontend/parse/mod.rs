@@ -195,7 +195,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(super) fn at_line_end(&self) -> bool {
-        if self.brace_depth != 0 {
+        if self.delim_depth != 0 {
             return false;
         }
         self.leading_newline(self.current()) && !self.prev_continues()

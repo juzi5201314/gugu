@@ -463,6 +463,10 @@ fn dump_stmt(
     out.push_str(&stmt.id.local.to_string());
     out.push(' ');
     match stmt.kind {
+        StmtKind::Static { value, .. } => {
+            out.push_str("static\n");
+            dump_expr(out, arena, intern, value, indent + 1);
+        }
         StmtKind::Let {
             init, else_block, ..
         } => {

@@ -56,6 +56,8 @@ let Ok(v) = r else {
 
 同一块里后一个 `let x` 遮蔽前一个 `x`，引入**新槽**。已经捕获旧槽的闭包继续指向旧槽，不受遮蔽影响。模式 `let` 引入的每个绑定都是新槽。
 
+初始化状态只从能继续执行到当前位置的前驱合流；已经 `return`、`break`、`continue` 或发散的前驱不要求赋值。循环条件与迭代器表达式在进入循环体前执行，其已完成的赋值保留到循环的正常出口；不能仅因循环体里存在赋值就认为循环后已初始化。
+
 ## 函数
 
 ```
@@ -136,6 +138,8 @@ static COUNTER: int = 0
 - `#[coroutine_local] static`：每个**协程**一份槽，随协程迁移到哪条操作系统线程都还是这一份。该协程第一次访问时在**运行时**求值 `expr`（可以分配；不必 comptime）。GC 根挂在该协程上。这是用户要的「协程本地」，不是操作系统线程本地。初始化过程中再次读取同一个 `#[coroutine_local]` 项是 panic（禁止重入）。
 - `#[os_thread_local] static`：每个**操作系统线程**一份槽，给 FFI（`errno` 一类）。同样在该线程第一次访问时运行时求值 `expr`，重入 panic。协程在 safepoint 之后可能换到另一条操作系统线程，读到的是**当前操作系统线程**的槽。不要在 `recv` / `wait` / `yield` 前后假设还是同一份。普通请求上下文用 `#[coroutine_local]`。
 
+函数块内的 `static NAME: T = expr` 为该声明保留进程寿命的独立槽，首次执行到声明时延迟初始化，后续执行复用该槽。初始化器不捕获参数或自动局部槽；其类型显式给出，初始化过程中重入同一槽按局部存储的重入规则 panic。它不改变普通模块级 static 的编译期初始化阶段。
+
 进程级一次性初始化用 `std.sync.OnceLock` / `Lazy`，见 [并发](concurrency.md)。
 
 泛型参数写 `[T]` 或混写 `comptime` 参数：`struct Block[T, comptime N: int]`、`fn repeat[T](comptime n: int, x: T) [T; n]`、`impl[T: Clone, comptime N: int] Clone for [T; N]`。数组类型写 `[T; N]`。表达式里的下标与泛型见 [类型系统 · 泛型写法](types.md)。没有 Rust 那种单独的 const 泛型语法。
@@ -175,5 +179,7 @@ Shape::Rect { w: 1, h: 2 }
 `use` 只建立别名或导入，不复制声明、不执行初始化、不改变原项的可见性。导入的最终目标必须存在且对当前模块可见；别名冲突、循环导入、模块路径大小写不一致和把私有项跨模块导入都是编译错误。`pub use` 只能再导出当前模块有权访问的项。
 
 普通 `static` 的 comptime 初始化按无环依赖求值；`const`/`static` 初始化形成循环是编译错误。`#[coroutine_local] static` 和 `#[os_thread_local] static` 不参与该编译期初始化图，而在首次访问时按[内存](memory.md)和[运行时](runtime.md)的规则初始化。
+
+该依赖包括初始化器直接读取的项和经具名函数间接读取的项。普通编译期初始化不能通过函数调用偷渡到 coroutine-local 或 OS-thread-local 的运行时初始化域；函数自身递归不是初始化循环，经过 const/static 初始化器的环才是。
 
 模块文件不存在、同一路径的 `foo.gg` 与 `foo/mod.gg` 同时存在、入口不属于所选 target 源码根，或用户声明保留 package/别名 `std`，都是编译错误。

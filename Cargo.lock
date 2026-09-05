@@ -295,6 +295,7 @@ dependencies = [
  "blake3",
  "flate2",
  "serde",
+ "serde_json",
  "sha2",
  "tar",
  "tempfile",

@@ -117,6 +117,25 @@ impl ConfiguredAst {
     pub(crate) fn use_item_active(&self, index: usize) -> bool {
         self.use_items.get(index).copied().unwrap_or(false)
     }
+
+    pub(crate) fn param_active(&self, index: usize) -> bool {
+        self.params[index]
+    }
+    pub(crate) fn stmt_active(&self, id: StmtId) -> bool {
+        self.stmts[id.0 as usize]
+    }
+    pub(crate) fn expr_active(&self, id: ExprId) -> bool {
+        self.exprs[id.0 as usize]
+    }
+    pub(crate) fn match_arm_active(&self, index: usize) -> bool {
+        self.match_arms[index]
+    }
+    pub(crate) fn field_expr_active(&self, index: usize) -> bool {
+        self.field_exprs[index]
+    }
+    pub(crate) fn select_arm_active(&self, index: usize) -> bool {
+        self.select_arms[index]
+    }
 }
 
 pub(crate) fn configure(
@@ -334,6 +353,10 @@ impl Configurator<'_> {
             return;
         }
         match stmt.kind {
+            StmtKind::Static { ty, value, .. } => {
+                self.ty(ty);
+                self.expr(value, false);
+            }
             StmtKind::Let {
                 pat,
                 ty,
@@ -625,7 +648,11 @@ impl Configurator<'_> {
             PatKind::SourceMacro { body } => {
                 self.expr(body, false);
             }
-            PatKind::Wildcard | PatKind::Ident(_) | PatKind::Literal(_) | PatKind::Error => {}
+            PatKind::Wildcard
+            | PatKind::Ident(_)
+            | PatKind::Literal(_)
+            | PatKind::NegativeLiteral(_)
+            | PatKind::Error => {}
         }
     }
 

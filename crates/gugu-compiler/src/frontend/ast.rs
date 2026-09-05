@@ -18,13 +18,13 @@ pub(crate) struct AstNodeId {
     pub(crate) local: u32,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ItemId(pub(crate) u32);
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ExprId(pub(crate) u32);
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct StmtId(pub(crate) u32);
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct PatId(pub(crate) u32);
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct TyId(pub(crate) u32);
@@ -572,6 +572,11 @@ pub(crate) struct Expr {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum StmtKind {
+    Static {
+        name: Symbol,
+        ty: TyId,
+        value: ExprId,
+    },
     Let {
         pat: PatId,
         ty: Option<TyId>,
@@ -610,6 +615,7 @@ pub(crate) enum PatKind {
     Wildcard,
     Ident(Symbol),
     Literal(LitKind),
+    NegativeLiteral(LitKind),
     Ref(PatId),
     Range {
         start: ExprId,

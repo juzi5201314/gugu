@@ -5,6 +5,7 @@ pub(crate) struct BackendPlan {
     pub(crate) target: TargetName,
     pub(crate) entry: &'static str,
     pub(crate) function_count: u32,
+    pub(crate) semantic_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(target: TargetName, ir: &IrModule) -> Option<BackendPlan> {
@@ -15,5 +16,6 @@ pub(crate) fn plan(target: TargetName, ir: &IrModule) -> Option<BackendPlan> {
         target,
         entry,
         function_count: ir.functions.len() as u32,
+        semantic_fingerprint: ir.semantics.fingerprint(),
     })
 }

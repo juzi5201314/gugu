@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod model;
 
-pub(crate) use model::NameResolution;
-use model::{
-    DefId, Definition, DefinitionKind, ModuleId, Namespace, ResolvedImport, ResolvedTarget,
-    is_reserved_name, resolution_is_valid, resolved_target_key,
+pub(crate) use model::{
+    DefId, Definition, DefinitionKind, ModuleId, NameResolution, Namespace, ResolvedImport,
+    ResolvedTarget,
 };
+use model::{is_reserved_name, resolution_is_valid, resolved_target_key};
 
 use crate::{
     diagnostics::{Diagnostic, DiagnosticCode},
