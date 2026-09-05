@@ -8,6 +8,8 @@ mod patterns;
 mod query;
 pub(crate) use output::CheckedSemantics;
 #[cfg(test)]
+mod callable_tests;
+#[cfg(test)]
 mod tests;
 
 use super::{ParsedModule, names::NameResolution};

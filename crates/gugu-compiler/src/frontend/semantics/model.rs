@@ -24,6 +24,7 @@ pub(crate) enum Ty {
     Array(Box<Ty>, u64),
     Tuple(Vec<Ty>),
     Function(Vec<Ty>, Box<Ty>),
+    Callable(CallableId, Vec<Ty>, Box<Ty>),
     Named(usize, Vec<Ty>),
     Param(String),
     Option(Box<Ty>),
@@ -31,6 +32,15 @@ pub(crate) enum Ty {
     Range,
     Chan(Box<Ty>),
     Join(Box<Ty>),
+}
+
+/// 函数项和闭包的身份来自模块内稠密 FnDecl 编号，不使用地址。
+#[derive(
+    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
+pub(crate) struct CallableId {
+    pub(crate) module: usize,
+    pub(crate) function: u32,
 }
 impl Ty {
     pub(crate) fn int() -> Self {
@@ -43,6 +53,13 @@ impl Ty {
         match self {
             Self::Ref(t) => t.deref(),
             _ => self,
+        }
+    }
+    pub(crate) fn signature(&self) -> Option<(&[Ty], &Ty)> {
+        match self {
+            Self::Function(params, ret) => Some((params, ret)),
+            Self::Callable(_, _, signature) => signature.signature(),
+            _ => None,
         }
     }
     pub(crate) fn primitive(name: &str) -> Option<Self> {
@@ -123,6 +140,8 @@ pub(crate) struct Model<'a> {
     pub(crate) modules: &'a [ParsedModule],
     pub(crate) nominal: Vec<Nominal>,
     names: &'a NameResolution,
+    // 模块/FnDecl 编号稠密；匿名闭包没有具名 ItemId，不参与函数地址的初始化依赖。
+    function_items: Vec<Vec<Option<ItemId>>>,
 }
 impl<'a> Model<'a> {
     pub(super) fn name_fingerprint(&self) -> [u8; 32] {
@@ -181,6 +200,18 @@ impl<'a> Model<'a> {
             Ty::Array(t, n) => format!("[{}; {n}]", self.describe(t)),
             Ty::Tuple(ts) => format!("({}{})", list(ts), if ts.len() == 1 { "," } else { "" }),
             Ty::Function(ts, ret) => format!("fn({}) {}", list(ts), self.describe(ret)),
+            Ty::Callable(id, arguments, signature) => {
+                let function = &self.modules[id.module].arena.fns[id.function as usize];
+                match function.name {
+                    Some(name) => format!(
+                        "函数项 {}[{}]: {}",
+                        self.name(id.module, name),
+                        list(arguments),
+                        self.describe(signature)
+                    ),
+                    None => format!("闭包: {}", self.describe(signature)),
+                }
+            }
             Ty::Named(def, ts) => {
                 let name = &self.nominal[*def].name;
                 if ts.is_empty() {
@@ -197,6 +228,12 @@ impl<'a> Model<'a> {
             Ty::Join(t) => format!("Join[{}]", self.describe(t)),
         }
     }
+    pub(super) fn function_definition(&self, id: CallableId) -> Option<DefRef> {
+        self.function_items[id.module][id.function as usize].map(|item| DefRef {
+            module: id.module,
+            item,
+        })
+    }
     pub(crate) fn new(
         modules: &'a [ParsedModule],
         names: &'a NameResolution,
@@ -205,6 +242,19 @@ impl<'a> Model<'a> {
             modules,
             nominal: Vec::new(),
             names,
+            function_items: modules
+                .iter()
+                .map(|module| {
+                    let mut functions = vec![None; module.arena.fns.len()];
+                    for (index, item) in module.arena.items.iter().enumerate() {
+                        if let ItemKind::Function(function) = item.kind {
+                            debug_assert!((function.0 as usize) < functions.len());
+                            functions[function.0 as usize] = Some(ItemId(index as u32));
+                        }
+                    }
+                    functions
+                })
+                .collect(),
         };
         for (module, m) in modules.iter().enumerate() {
             for (index, item) in m.arena.items.iter().enumerate() {
@@ -424,12 +474,18 @@ impl<'a> Model<'a> {
     pub(crate) fn form(&self, module: usize, id: TyId) -> Result<Ty, Diagnostic> {
         let arena = &self.modules[module].arena;
         let span = &arena.tys[usize::try_from(id.0).expect("类型下标")].span;
-        let owner = arena
-            .fns
-            .iter()
-            .find(|f| f.span.start() <= span.start() && f.span.end() >= span.end());
+        let params = self.parameters_at(module, span);
+        self.form_inner(module, id, &params, &mut Vec::new())
+    }
+
+    pub(super) fn parameters_at(&self, module: usize, span: &crate::Span) -> BTreeMap<String, Ty> {
+        let arena = &self.modules[module].arena;
         let mut params = BTreeMap::new();
-        if let Some(owner) = owner {
+        // parser 先分配内层 FnDecl，逆序遍历使内层同名参数覆盖外层。
+        let owners = arena.fns.iter().rev().filter(|function| {
+            function.span.start() <= span.start() && function.span.end() >= span.end()
+        });
+        for owner in owners {
             for param in owner.generics.as_slice(&arena.generic_params) {
                 if let GenericParamKind::Type { name, .. } = param.kind {
                     let name = self.name(module, name).to_owned();
@@ -437,7 +493,29 @@ impl<'a> Model<'a> {
                 }
             }
         }
-        self.form_inner(module, id, &params, &mut Vec::new())
+        params
+    }
+
+    pub(super) fn form_argument(
+        &self,
+        module: usize,
+        argument: GenericArg,
+    ) -> Result<Ty, Diagnostic> {
+        match argument {
+            GenericArg::Type(ty) => self.form(module, ty),
+            GenericArg::Expr(expression) => {
+                let expression = &self.modules[module].arena.exprs[expression.0 as usize];
+                let ExprKind::Path(path) = expression.kind else {
+                    return Err(self.error(module, "泛型位置要求类型实参"));
+                };
+                self.form_kind(
+                    module,
+                    TyKind::Path(path),
+                    &self.parameters_at(module, &expression.span),
+                    &mut Vec::new(),
+                )
+            }
+        }
     }
     fn form_inner(
         &self,
@@ -605,14 +683,33 @@ impl<'a> Model<'a> {
                             .and_then(|t| self.form(def.module, t))
                     })
                     .collect::<Result<_, _>>()?;
-                Ok(Ty::Function(
-                    ps,
-                    Box::new(
-                        f.return_ty
-                            .map(|t| self.form(def.module, t))
-                            .transpose()?
-                            .unwrap_or(Ty::Unit),
-                    ),
+                let arguments = f
+                    .generics
+                    .as_slice(&m.arena.generic_params)
+                    .iter()
+                    .filter_map(|param| {
+                        if let GenericParamKind::Type { name, .. } = param.kind {
+                            Some(Ty::Param(self.name(def.module, name).to_owned()))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                Ok(Ty::Callable(
+                    CallableId {
+                        module: def.module,
+                        function: id.0,
+                    },
+                    arguments,
+                    Box::new(Ty::Function(
+                        ps,
+                        Box::new(
+                            f.return_ty
+                                .map(|ty| self.form(def.module, ty))
+                                .transpose()?
+                                .unwrap_or(Ty::Unit),
+                        ),
+                    )),
                 ))
             }
             ItemKind::Static { ty, .. } | ItemKind::Const { ty: Some(ty), .. } => {
@@ -895,7 +992,7 @@ impl<'a> Model<'a> {
         }
     }
 }
-fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
+pub(super) fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
     match ty {
         Ty::Param(s) => bindings.get(s).cloned().unwrap_or_else(|| ty.clone()),
         Ty::Ref(t) => Ty::Ref(Box::new(substitute(t, bindings))),
@@ -908,6 +1005,18 @@ fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
         Ty::Result(t, e) => Ty::Result(
             Box::new(substitute(t, bindings)),
             Box::new(substitute(e, bindings)),
+        ),
+        Ty::Function(params, ret) => Ty::Function(
+            params.iter().map(|ty| substitute(ty, bindings)).collect(),
+            Box::new(substitute(ret, bindings)),
+        ),
+        Ty::Callable(id, arguments, signature) => Ty::Callable(
+            *id,
+            arguments
+                .iter()
+                .map(|ty| substitute(ty, bindings))
+                .collect(),
+            Box::new(substitute(signature, bindings)),
         ),
         _ => ty.clone(),
     }

@@ -6,9 +6,12 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode, Span};
 use std::collections::BTreeMap;
+mod calls;
+mod captures;
 mod defer;
 mod expr;
 mod flow;
+mod generics;
 mod inference;
 mod operations;
 
@@ -16,6 +19,7 @@ mod operations;
 struct State {
     names: BTreeMap<Symbol, usize>,
     initialized: Vec<bool>,
+    callables: Vec<Vec<super::model::CallableId>>,
     cleanup_paths: BTreeMap<usize, CleanupPath>,
     reachable: bool,
 }
@@ -26,6 +30,7 @@ struct CleanupPath {
 }
 struct Slot {
     ty: Ty,
+    storage: u8,
 }
 struct LoopState {
     values: Vec<Ty>,
@@ -59,7 +64,13 @@ struct Checker<'m, 'a> {
     in_cleanup: bool,
     discarded_expression: Option<ExprId>,
     runtime_checks: Vec<super::output::RuntimeCheck>,
+    capture_frames: Vec<captures::CaptureFrame>,
+    capture_plans: Vec<super::output::CapturePlan>,
     pattern_plans: Vec<super::output::PatternPlan>,
+    variadic_calls: Vec<super::output::VariadicCall>,
+    callable_bounds: BTreeMap<String, Ty>,
+    callable_constraints: Vec<(Ty, Ty, Span)>,
+    expression_callables: BTreeMap<u32, Vec<super::model::CallableId>>,
 }
 
 pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
@@ -77,7 +88,9 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
             }
             let mut checker = Checker::new(model, module);
             match item.kind {
-                ItemKind::Function(id) => checker.function(id),
+                ItemKind::Function(id) => {
+                    checker.function(id, None);
+                }
                 ItemKind::Const {
                     ty,
                     value: Some(value),
@@ -122,6 +135,9 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                 cleanup: checker.cleanup_plan,
                 runtime_checks: checker.runtime_checks,
                 patterns: checker.pattern_plans,
+                captures: checker.capture_plans,
+                slot_storage: checker.slots.iter().map(|slot| slot.storage).collect(),
+                variadic_calls: checker.variadic_calls,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
@@ -157,6 +173,7 @@ impl<'m, 'a> Checker<'m, 'a> {
                 names: BTreeMap::new(),
                 cleanup_paths: BTreeMap::new(),
                 initialized: Vec::new(),
+                callables: Vec::new(),
                 reachable: true,
             },
             errors: Vec::new(),
@@ -176,6 +193,12 @@ impl<'m, 'a> Checker<'m, 'a> {
             discarded_expression: None,
             runtime_checks: Vec::new(),
             pattern_plans: Vec::new(),
+            capture_frames: Vec::new(),
+            capture_plans: Vec::new(),
+            variadic_calls: Vec::new(),
+            callable_bounds: BTreeMap::new(),
+            callable_constraints: Vec::new(),
+            expression_callables: BTreeMap::new(),
         }
     }
     fn arena(&self) -> &'a AstArena {
@@ -222,6 +245,11 @@ impl<'m, 'a> Checker<'m, 'a> {
             Ty::Function(args, ret) => Ty::Function(
                 args.iter().map(|t| self.resolve(t)).collect(),
                 Box::new(self.resolve(ret)),
+            ),
+            Ty::Callable(id, arguments, signature) => Ty::Callable(
+                *id,
+                arguments.iter().map(|ty| self.resolve(ty)).collect(),
+                Box::new(self.resolve(signature)),
             ),
             Ty::Chan(t) => Ty::Chan(Box::new(self.resolve(t))),
             Ty::Join(t) => Ty::Join(Box::new(self.resolve(t))),
@@ -304,11 +332,24 @@ impl<'m, 'a> Checker<'m, 'a> {
                 }
                 return self.resolve(&b);
             }
+            (Ty::Callable(left, args, signature), Ty::Callable(right, wanted, expected))
+                if left == right && args.len() == wanted.len() =>
+            {
+                for (argument, expected) in args.iter().zip(wanted) {
+                    self.relate(argument, expected, span, false);
+                }
+                self.relate(signature, expected, span, false);
+                return self.resolve(&b);
+            }
+            (Ty::Callable(_, _, signature), Ty::Function(_, _)) if coercion => {
+                self.relate(signature, &b, span, true);
+                return self.resolve(&b);
+            }
             (Ty::Function(xs, x), Ty::Function(ys, y)) if xs.len() == ys.len() => {
                 for (x, y) in xs.iter().zip(ys) {
                     self.relate(x, y, span, false);
                 }
-                self.relate(x, y, span, false);
+                self.relate(x, y, span, coercion);
                 return self.resolve(&b);
             }
             _ => {}
@@ -324,9 +365,27 @@ impl<'m, 'a> Checker<'m, 'a> {
         );
         Ty::Error
     }
-    fn function(&mut self, id: FnId) {
+    fn function(&mut self, id: FnId, expected: Option<&Ty>) -> Ty {
+        self.register_callable_bounds(id);
         let f = &self.arena().fns[id.0 as usize];
-        self.return_ty = f.return_ty.map_or(Ty::Unit, |ty| self.form(ty));
+        let expected = expected.and_then(Ty::signature);
+        self.return_ty = if let Some(ty) = f.return_ty {
+            self.form(ty)
+        } else if f.name.is_none() {
+            expected.map_or_else(
+                || {
+                    if matches!(f.body, FnBody::Eq(_)) {
+                        self.fresh()
+                    } else {
+                        Ty::Unit
+                    }
+                },
+                |(_, ret)| ret.clone(),
+            )
+        } else {
+            Ty::Unit
+        };
+        let mut parameters = Vec::new();
         for (offset, param) in f.params.as_slice(&self.arena().params).iter().enumerate() {
             if !self.model.modules[self.module]
                 .configured
@@ -336,8 +395,42 @@ impl<'m, 'a> Checker<'m, 'a> {
             }
             let ty = match param.ty {
                 Some(id) => self.form(id),
-                None => self.fresh(),
+                None => expected
+                    .and_then(|(params, _)| params.get(parameters.len()))
+                    .cloned()
+                    .unwrap_or_else(|| self.fresh()),
             };
+            if param.variadic {
+                let trailing = f
+                    .params
+                    .as_slice(&self.arena().params)
+                    .iter()
+                    .enumerate()
+                    .skip(offset + 1)
+                    .any(|(next, _)| {
+                        self.model.modules[self.module]
+                            .configured
+                            .param_active(f.params.start as usize + next)
+                    });
+                if trailing
+                    || !matches!(&ty, Ty::Ref(inner) if matches!(**inner, Ty::Slice(_)))
+                        && !self.is_parameter_pack(id, &ty)
+                {
+                    self.error(
+                        DiagnosticCode::InvalidDeclaration,
+                        "变参必须是最后一个参数，类型为切片或类型参数包",
+                        param.span.clone(),
+                    );
+                }
+            }
+            if !param.variadic && self.is_parameter_pack(id, &ty) {
+                self.error(
+                    DiagnosticCode::InvalidDeclaration,
+                    "类型参数包只能作为变参包使用",
+                    param.span.clone(),
+                );
+            }
+            parameters.push(ty.clone());
             if let Some(pat) = param.pat {
                 self.bind(pat, &ty, true, Some(false));
             }
@@ -371,19 +464,38 @@ impl<'m, 'a> Checker<'m, 'a> {
         }
         if let FnBody::Block(body) | FnBody::Eq(body) = f.body {
             let expected = self.return_ty.clone();
-            self.expression(body, Some(&expected));
+            let actual = self.expression(body, Some(&expected));
+            if f.name.is_none()
+                && f.return_ty.is_none()
+                && actual == Ty::Never
+                && matches!(self.resolve(&self.return_ty), Ty::Var(_) | Ty::Never)
+            {
+                self.error(
+                    DiagnosticCode::InvalidDeclaration,
+                    "never 闭包必须显式写出返回类型 !",
+                    f.span.clone(),
+                );
+            }
             self.run_cleanups(0, true);
             self.defers.clear();
+            if self.state.reachable {
+                self.require_value_captures(body);
+            }
         }
+        Ty::Function(parameters, Box::new(self.return_ty.clone()))
     }
     fn slot(&mut self, name: Symbol, ty: Ty, initialized: bool) {
         let id = self.slots.len();
-        self.slots.push(Slot { ty });
+        self.slots.push(Slot { ty, storage: 0 });
         self.state.initialized.resize(id + 1, false);
+        self.state.callables.resize_with(id + 1, Vec::new);
         self.initialize(id, initialized);
         self.state.names.insert(name, id);
     }
     fn initialize(&mut self, slot: usize, value: bool) {
+        if value {
+            self.capture_slot(slot, false);
+        }
         self.state.initialized[slot] = value;
         for path in self.state.cleanup_paths.values_mut() {
             path.initialized.resize(self.slots.len(), false);
@@ -430,7 +542,12 @@ impl<'m, 'a> Checker<'m, 'a> {
     }
     fn local(&mut self, name: Symbol, read: bool, span: &Span) -> Option<Ty> {
         let id = *self.state.names.get(&name)?;
-        if read && self.state.reachable && self.state.initialized.get(id) != Some(&true) {
+        let captured = self.capture_slot(id, read);
+        if read
+            && !captured
+            && self.state.reachable
+            && self.state.initialized.get(id) != Some(&true)
+        {
             self.error(
                 DiagnosticCode::InvalidDeclaration,
                 "读取未初始化的局部槽",
@@ -454,6 +571,9 @@ fn contains_var(ty: &Ty, id: u32) -> bool {
         Ty::Result(t, e) => contains_var(t, id) || contains_var(e, id),
         Ty::Tuple(ts) | Ty::Named(_, ts) => ts.iter().any(|t| contains_var(t, id)),
         Ty::Function(ts, ret) => ts.iter().any(|t| contains_var(t, id)) || contains_var(ret, id),
+        Ty::Callable(_, arguments, signature) => {
+            arguments.iter().any(|ty| contains_var(ty, id)) || contains_var(signature, id)
+        }
         _ => false,
     }
 }

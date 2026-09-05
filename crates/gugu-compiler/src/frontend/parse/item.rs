@@ -199,7 +199,7 @@ impl Parser<'_> {
             FnDeclContext::RegularFn | FnDeclContext::Closure => (true, false),
             FnDeclContext::TraitMethod | FnDeclContext::ExternImport => (false, true),
         };
-        let body = self.parse_fn_body(require_body, allow_none);
+        let body = self.parse_fn_body(require_body, allow_none, require_name);
         let span = self.finish_span(mark);
         let extern_import = extern_abi.is_some() && matches!(body, FnBody::None);
         match self.arena.try_push_fn(FnDecl {
@@ -237,13 +237,15 @@ impl Parser<'_> {
         }
     }
 
-    fn parse_fn_body(&mut self, require_body: bool, allow_none: bool) -> FnBody {
+    fn parse_fn_body(&mut self, require_body: bool, allow_none: bool, declaration: bool) -> FnBody {
         if self.at(TokenKind::LBrace) {
             return FnBody::Block(self.parse_block_expr());
         }
         if self.eat(TokenKind::Eq) {
             let expr = self.parse_expression();
-            self.consume_decl_terminator();
+            if declaration {
+                self.consume_decl_terminator();
+            }
             return FnBody::Eq(expr);
         }
         if allow_none && (self.at(TokenKind::Semi) || self.at_line_end() || self.at(TokenKind::Eof))

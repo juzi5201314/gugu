@@ -23,7 +23,7 @@ impl Checker<'_, '_> {
                     bits: 8,
                 })),
             },
-            ExprKind::Path(path) => self.path_value(path, true, expected),
+            ExprKind::Path(path) => self.path_value(id, path, true, expected, AstRange::empty()),
             ExprKind::Paren(inner) => self.expression(inner, expected),
             ExprKind::Block { stmts, tail } => self.block(stmts, tail, expected),
             ExprKind::If {
@@ -121,7 +121,11 @@ impl Checker<'_, '_> {
             ExprKind::Unary {
                 op: UnOp::Ref,
                 expr: inner,
-            } => Ty::Ref(Box::new(self.place(inner, true))),
+            } => {
+                let ty = self.place(inner, true);
+                self.address_taken(inner);
+                Ty::Ref(Box::new(ty))
+            }
             ExprKind::Unary {
                 op: UnOp::Deref,
                 expr: inner,
@@ -162,7 +166,11 @@ impl Checker<'_, '_> {
                 self.expression(end, Some(&Ty::int()));
                 Ty::Range
             }
-            ExprKind::Call { callee, args, .. } => self.call(callee, args, expected),
+            ExprKind::Call {
+                callee,
+                type_args,
+                args,
+            } => self.call(callee, type_args, args, expected),
             ExprKind::Field { base, name } => {
                 let ty = self.expression(base, None);
                 self.field(&ty, self.model.name(self.module, name), &expr.span)
@@ -188,6 +196,9 @@ impl Checker<'_, '_> {
                 let ty = value.map_or(Ty::Unit, |v| self.expression(v, Some(&expected)));
                 self.unify(&ty, &expected, &expr.span);
                 self.run_cleanups(0, true);
+                if let Some(value) = value {
+                    self.require_value_captures(value);
+                }
                 self.state.reachable = false;
                 Ty::Never
             }
@@ -332,12 +343,7 @@ impl Checker<'_, '_> {
                 ty
             }
             ExprKind::Comptime(body) => self.expression(body, expected),
-            ExprKind::Async(body) => {
-                let state = self.state.clone();
-                let ty = self.expression(body, None);
-                self.state = state;
-                Ty::Join(Box::new(ty))
-            }
+            ExprKind::Async(body) => self.launch(id, body, expected),
             ExprKind::FString { parts } => {
                 for part in parts.as_slice(&self.arena().fstring_parts) {
                     if let FStringPart::Interp { expr, .. } = part {
@@ -363,7 +369,7 @@ impl Checker<'_, '_> {
                     _ => Ty::int(),
                 }
             }
-            ExprKind::TypeApp { base, .. } => self.expression(base, expected),
+            ExprKind::TypeApp { base, args } => self.typed_callable(base, args, expected),
             ExprKind::Select { arms } => {
                 let base = self.state.clone();
                 let mut states = Vec::new();
@@ -440,26 +446,7 @@ impl Checker<'_, '_> {
                 self.merge(&base, &states);
                 result
             }
-            ExprKind::Closure(id) => {
-                let saved = self.state.clone();
-                let ret = self.return_ty.clone();
-                let loops = std::mem::take(&mut self.loops);
-                let tries = std::mem::take(&mut self.tries);
-                self.function(id);
-                let f = &self.arena().fns[id.0 as usize];
-                let params = f
-                    .params
-                    .as_slice(&self.arena().params)
-                    .iter()
-                    .map(|p| p.ty.map_or(Ty::Error, |t| self.form(t)))
-                    .collect();
-                let ty = Ty::Function(params, Box::new(self.return_ty.clone()));
-                self.state = saved;
-                self.return_ty = ret;
-                self.loops = loops;
-                self.tries = tries;
-                ty
-            }
+            ExprKind::Closure(function) => self.closure(id, function, expected),
             ExprKind::Asm { .. } | ExprKind::SourceMacro { .. } | ExprKind::Error => {
                 self.error(
                     DiagnosticCode::InvalidExpression,
@@ -484,6 +471,7 @@ impl Checker<'_, '_> {
         };
         let checked = if ty == Ty::Never { Ty::Never } else { checked };
         self.expressions.push((id, self.resolve(&checked)));
+        self.record_callable_value(id);
         checked
     }
     pub(super) fn binary_type(&mut self, op: BinOp, left: &Ty, right: &Ty, span: &Span) -> Ty {
@@ -522,14 +510,31 @@ impl Checker<'_, '_> {
             ty
         }
     }
-    fn path_value(&mut self, path: PathId, read: bool, expected: Option<&Ty>) -> Ty {
+    pub(super) fn path_value(
+        &mut self,
+        expression: ExprId,
+        path: PathId,
+        read: bool,
+        expected: Option<&Ty>,
+        type_args: AstRange<GenericArg>,
+    ) -> Ty {
         let a = self.arena();
         let p = &a.paths[path.0 as usize];
         let segs = p.segments.as_slice(&a.segments);
         if let Some(first) = segs.first() {
             if let Some(mut ty) = self.local(first.name, read || segs.len() > 1, &p.span) {
+                if type_args.len != 0 {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "已绑定函数值不能重新指定泛型实参",
+                        p.span.clone(),
+                    );
+                }
                 for s in &segs[1..] {
                     ty = self.field(&ty, self.model.name(self.module, s.name), &s.span);
+                }
+                if p.args.len != 0 {
+                    return self.path_index(expression, &ty, p.args, &p.span);
                 }
                 return ty;
             }
@@ -548,11 +553,16 @@ impl Checker<'_, '_> {
         }
         match self.model.resolve(self.module, &parts) {
             Ok(def) => {
-                if !self.dependencies.contains(&def) {
+                if matches!(
+                    self.model.modules[def.module].arena.items[def.item.0 as usize].kind,
+                    ItemKind::Static { .. } | ItemKind::Const { .. }
+                ) && !self.dependencies.contains(&def)
+                {
                     self.dependencies.push(def);
                 }
                 match self.model.value_type(def) {
-                    Ok(ty) => ty,
+                    Ok(ty) if p.args.len != 0 => self.path_index(expression, &ty, p.args, &p.span),
+                    Ok(ty) => self.instantiate_callable(ty, type_args, &p.span),
                     Err(error) => {
                         self.errors.push(error);
                         Ty::Error
@@ -566,6 +576,58 @@ impl Checker<'_, '_> {
                     a.paths[path.0 as usize].span.clone(),
                 );
                 Ty::Error
+            }
+        }
+    }
+
+    fn path_index(
+        &mut self,
+        expression: ExprId,
+        ty: &Ty,
+        arguments: AstRange<GenericArg>,
+        span: &Span,
+    ) -> Ty {
+        let [argument] = arguments.as_slice(&self.arena().generic_args) else {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "值的方括号下标需要一个参数",
+                span.clone(),
+            );
+            return Ty::Error;
+        };
+        match *argument {
+            GenericArg::Expr(index) => self.index(expression, ty, IndexKind::Expr(index), span),
+            GenericArg::Type(index) => {
+                let TyKind::Path(path) = self.arena().tys[index.0 as usize].kind else {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "值下标不能是类型",
+                        span.clone(),
+                    );
+                    return Ty::Error;
+                };
+                let index_ty =
+                    self.path_value(expression, path, true, Some(&Ty::int()), AstRange::empty());
+                self.unify(&index_ty, &Ty::int(), span);
+                match ty.deref() {
+                    Ty::Array(element, _) | Ty::Slice(element) => {
+                        if self.unsafe_depth == 0 {
+                            self.record_check(
+                                expression,
+                                super::super::output::CheckKind::Bounds { slice: false },
+                            );
+                        }
+                        (**element).clone()
+                    }
+                    _ => {
+                        self.error(
+                            DiagnosticCode::InvalidExpression,
+                            "此值不支持下标",
+                            span.clone(),
+                        );
+                        Ty::Error
+                    }
+                }
             }
         }
     }
@@ -595,7 +657,7 @@ impl Checker<'_, '_> {
                     );
                     return Ty::Error;
                 }
-                self.path_value(path, read, None)
+                self.path_value(id, path, read, None, AstRange::empty())
             }
             ExprKind::Paren(inner) => self.place(inner, read),
             ExprKind::Field { base, name } => {
@@ -710,184 +772,6 @@ impl Checker<'_, '_> {
                     }
                 }
             }
-        }
-    }
-    pub(super) fn call(
-        &mut self,
-        callee: ExprId,
-        args: AstRange<ExprId>,
-        expected: Option<&Ty>,
-    ) -> Ty {
-        let expr = &self.arena().exprs[callee.0 as usize];
-        let args: Vec<_> = args
-            .as_slice(&self.arena().expr_ids)
-            .iter()
-            .copied()
-            .filter(|&id| self.model.modules[self.module].configured.expr_active(id))
-            .collect();
-        if let ExprKind::Path(path) = expr.kind {
-            let parts = self.model.path(self.module, path);
-            if parts.len() == 2 {
-                let receiver_name = self.arena().paths[path.0 as usize]
-                    .segments
-                    .as_slice(&self.arena().segments)[0]
-                    .name;
-                if let Some(receiver) = self.local(receiver_name, true, &expr.span) {
-                    match (&receiver, parts[1]) {
-                        (Ty::Chan(element), "send") => {
-                            if args.len() == 1 {
-                                self.expression(args[0], Some(element));
-                            } else {
-                                self.error(
-                                    DiagnosticCode::InvalidExpression,
-                                    "send 需要一个实参",
-                                    expr.span.clone(),
-                                );
-                            }
-                            return Ty::Unit;
-                        }
-                        (Ty::Chan(element), "recv") if args.is_empty() => {
-                            return Ty::Result(element.clone(), Box::new(Ty::Unit));
-                        }
-                        (Ty::Chan(_), "close") if args.is_empty() => return Ty::Unit,
-                        (Ty::Join(value), "wait") if args.is_empty() => {
-                            return Ty::Result(value.clone(), Box::new(Ty::Unit));
-                        }
-                        (Ty::Chan(_), "recv") | (Ty::Chan(_), "close") | (Ty::Join(_), "wait") => {
-                            self.error(
-                                DiagnosticCode::InvalidExpression,
-                                "并发方法实参数量不符",
-                                expr.span.clone(),
-                            );
-                            return Ty::Error;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            if parts == ["panic"] {
-                for &arg in &args {
-                    self.expression(arg, None);
-                }
-                return Ty::Never;
-            }
-            if parts.len() == 1 {
-                if let Some(target) = Ty::primitive(parts[0]) {
-                    if args.len() != 1 {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "转换需要恰好一个实参",
-                            expr.span.clone(),
-                        );
-                        return Ty::Error;
-                    }
-                    let source = self.expression(args[0], None);
-                    if !(self.is_number(&source) || matches!(source, Ty::Char))
-                        || !matches!(target, Ty::Int { .. } | Ty::Float(_) | Ty::Char)
-                    {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "非法标量转换",
-                            expr.span.clone(),
-                        );
-                    }
-                    if self.number_kind(&source) == inference::NumberKind::Float
-                        && let Ty::Int { signed, bits } = target
-                    {
-                        self.record_check(
-                            callee,
-                            super::super::output::CheckKind::FloatToInt { signed, bits },
-                        );
-                    }
-                    if matches!(target, Ty::Char) {
-                        self.record_check(callee, super::super::output::CheckKind::UnicodeScalar);
-                    }
-                    self.expressions
-                        .push((callee, Ty::Function(vec![source], Box::new(target.clone()))));
-                    return target;
-                }
-            }
-            if let Some(name) = parts.last() {
-                if matches!(*name, "Some" | "Ok" | "Err") {
-                    let wanted = match (expected, *name) {
-                        (Some(Ty::Option(t)), "Some") | (Some(Ty::Result(t, _)), "Ok") => {
-                            Some(&**t)
-                        }
-                        (Some(Ty::Result(_, e)), "Err") => Some(&**e),
-                        _ => None,
-                    };
-                    if args.len() != 1 {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "构造器实参数量不符",
-                            expr.span.clone(),
-                        );
-                        return Ty::Error;
-                    }
-                    let value = self.expression(args[0], wanted);
-                    return match *name {
-                        "Some" => Ty::Option(Box::new(value)),
-                        "Ok" => Ty::Result(
-                            Box::new(value),
-                            Box::new(match expected {
-                                Some(Ty::Result(_, e)) => (**e).clone(),
-                                _ => self.fresh(),
-                            }),
-                        ),
-                        _ => Ty::Result(
-                            Box::new(match expected {
-                                Some(Ty::Result(t, _)) => (**t).clone(),
-                                _ => self.fresh(),
-                            }),
-                            Box::new(value),
-                        ),
-                    };
-                }
-            }
-            if let Ok(Some((ty, ctor))) = self.model.constructor(self.module, &parts, expected) {
-                if ctor.record || ctor.fields.len() != args.len() {
-                    self.error(
-                        DiagnosticCode::InvalidExpression,
-                        "构造器形状或实参数量不符",
-                        expr.span.clone(),
-                    );
-                }
-                for (&arg, field) in args.iter().zip(&ctor.fields) {
-                    if !field.public && self.model.def_module(&ty) != Some(self.module) {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "不能构造私有字段",
-                            expr.span.clone(),
-                        );
-                    }
-                    self.expression(arg, Some(&field.ty));
-                }
-                return ty;
-            }
-        }
-        let ty = self.expression(callee, None);
-        if let Ty::Function(params, ret) = ty {
-            if params.len() != args.len() {
-                self.error(
-                    DiagnosticCode::InvalidExpression,
-                    "调用实参数量不符",
-                    expr.span.clone(),
-                );
-            }
-            for (i, &arg) in args.iter().enumerate() {
-                self.expression(arg, params.get(i));
-            }
-            *ret
-        } else {
-            for &arg in &args {
-                self.expression(arg, None);
-            }
-            self.error(
-                DiagnosticCode::InvalidExpression,
-                "调用目标不是函数",
-                expr.span.clone(),
-            );
-            Ty::Error
         }
     }
     fn construct(

@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 1;
+pub(crate) const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
@@ -24,6 +24,40 @@ pub(crate) struct CheckedBody {
     pub(crate) cleanup: Vec<CleanupRegistration>,
     pub(crate) runtime_checks: Vec<RuntimeCheck>,
     pub(crate) patterns: Vec<PatternPlan>,
+    pub(crate) captures: Vec<CapturePlan>,
+    pub(crate) slot_storage: Vec<u8>,
+    pub(crate) variadic_calls: Vec<VariadicCall>,
+}
+
+/// 槽存储标志有三个独立布尔量，固定编码在一个字节中。
+pub(crate) const ADDRESS_TAKEN: u8 = 1;
+pub(crate) const CAPTURED: u8 = 2;
+pub(crate) const CROSS_COROUTINE: u8 = 4;
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CapturePlan {
+    pub(crate) expression: ExprId,
+    pub(crate) function: Option<super::model::CallableId>,
+    pub(crate) signature: Ty,
+    pub(crate) captures: Vec<CapturedSlot>,
+    pub(crate) coroutine: bool,
+    pub(crate) dependencies: Vec<super::model::DefRef>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CapturedSlot {
+    pub(crate) slot: usize,
+    pub(crate) read_before_write: bool,
+    pub(crate) written: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct VariadicCall {
+    pub(crate) callee: ExprId,
+    pub(crate) arguments: Vec<ExprId>,
+    pub(crate) fixed_count: usize,
+    pub(crate) element: Ty,
+    pub(crate) heterogeneous: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -100,6 +134,66 @@ impl CheckedSemantics {
             }
             if body.slots.iter().any(|ty| !formed(ty, model)) {
                 return Err(invalid());
+            }
+            if body.slot_storage.len() != body.slots.len()
+                || body
+                    .slot_storage
+                    .iter()
+                    .any(|flags| flags & !(ADDRESS_TAKEN | CAPTURED | CROSS_COROUTINE) != 0)
+            {
+                return Err(invalid());
+            }
+            for plan in &body.captures {
+                if !formed(&plan.signature, model) || !matches!(plan.signature, Ty::Function(..)) {
+                    return Err(invalid());
+                }
+                let Some(expression) = module.arena.exprs.get(plan.expression.0 as usize) else {
+                    return Err(invalid());
+                };
+                match (plan.function, &expression.kind) {
+                    (Some(id), super::super::ast::ExprKind::Closure(function))
+                        if id.module == def.module
+                            && id.function == function.0
+                            && !plan.coroutine => {}
+                    (None, super::super::ast::ExprKind::Async(_)) if plan.coroutine => {}
+                    _ => return Err(invalid()),
+                }
+                for dependency in &plan.dependencies {
+                    if !model.modules.get(dependency.module).is_some_and(|module| {
+                        (dependency.item.0 as usize) < module.arena.items.len()
+                            && module.configured.item_active(dependency.item)
+                    }) {
+                        return Err(invalid());
+                    }
+                }
+                let mut previous = None;
+                for capture in &plan.captures {
+                    if capture.slot >= body.slots.len()
+                        || previous.is_some_and(|slot| slot >= capture.slot)
+                        || body.slot_storage[capture.slot] & CAPTURED == 0
+                        || plan.coroutine && body.slot_storage[capture.slot] & CROSS_COROUTINE == 0
+                    {
+                        return Err(invalid());
+                    }
+                    previous = Some(capture.slot);
+                }
+            }
+            for call in &body.variadic_calls {
+                if call.fixed_count > call.arguments.len()
+                    || !formed(&call.element, model)
+                    || !body.expressions.iter().any(|(id, _)| *id == call.callee)
+                    || call
+                        .arguments
+                        .iter()
+                        .any(|arg| !body.expressions.iter().any(|(id, _)| id == arg))
+                {
+                    return Err(invalid());
+                }
+                if call.heterogeneous
+                    && !matches!(&call.element, Ty::Tuple(elements) if elements.len() == call.arguments.len() - call.fixed_count)
+                {
+                    return Err(invalid());
+                }
             }
             for pattern in &body.patterns {
                 if pattern.pattern.0 as usize >= module.arena.pats.len()
@@ -219,6 +313,15 @@ pub(super) fn formed(ty: &Ty, model: &Model<'_>) -> bool {
         | Ty::Join(t) => formed(t, model),
         Ty::Tuple(ts) => ts.iter().all(|t| formed(t, model)),
         Ty::Function(ts, ret) => ts.iter().all(|t| formed(t, model)) && formed(ret, model),
+        Ty::Callable(id, arguments, signature) => {
+            model
+                .modules
+                .get(id.module)
+                .is_some_and(|module| (id.function as usize) < module.arena.fns.len())
+                && arguments.iter().all(|ty| formed(ty, model))
+                && matches!(**signature, Ty::Function(..))
+                && formed(signature, model)
+        }
         Ty::Result(t, e) => formed(t, model) && formed(e, model),
         _ => true,
     }

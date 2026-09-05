@@ -4,6 +4,16 @@ impl Checker<'_, '_> {
         let reachable: Vec<_> = branches.iter().filter(|s| s.reachable).collect();
         self.state = base.clone();
         self.state.reachable = !reachable.is_empty();
+        for (slot, values) in self.state.callables.iter_mut().enumerate() {
+            values.clear();
+            for state in &reachable {
+                if let Some(origins) = state.callables.get(slot) {
+                    values.extend_from_slice(origins);
+                }
+            }
+            values.sort_unstable();
+            values.dedup();
+        }
         self.state.cleanup_paths.clear();
         for branch in &reachable {
             for (&id, path) in &branch.cleanup_paths {
@@ -108,6 +118,22 @@ impl Checker<'_, '_> {
                     );
                 }
                 let annotation = ty.map(|id| self.form(id));
+                if let Some(initializer) = init
+                    && matches!(
+                        self.arena().exprs[initializer.0 as usize].kind,
+                        ExprKind::Closure(_)
+                    )
+                    && let PatKind::Ident(name) = self.arena().pats[pat.0 as usize].kind
+                {
+                    let ty = annotation.unwrap_or_else(|| self.fresh());
+                    let slot = self.slots.len();
+                    self.bind(pat, &ty, false, Some(false));
+                    self.expression(initializer, Some(&ty));
+                    self.initialize(slot, true);
+                    self.state.callables[slot] = self.value_callables(initializer);
+                    debug_assert_eq!(self.state.names.get(&name), Some(&slot));
+                    return;
+                }
                 let value = init
                     .map(|id| self.expression(id, annotation.as_ref()))
                     .or(annotation)
@@ -133,7 +159,14 @@ impl Checker<'_, '_> {
                     }
                     self.state = success;
                 }
+                let origins =
+                    init.map_or_else(Vec::new, |initializer| self.value_callables(initializer));
                 self.bind(pat, &value, init.is_some(), Some(else_block.is_some()));
+                if let PatKind::Ident(name) = self.arena().pats[pat.0 as usize].kind
+                    && let Some(&slot) = self.state.names.get(&name)
+                {
+                    self.state.callables[slot] = origins;
+                }
             }
             StmtKind::Assign { op, place, value } => {
                 let discard = matches!(self.arena().exprs[place.0 as usize].kind,ExprKind::Path(path) if self.model.path(self.module,path).as_slice()==["_"]);
@@ -179,6 +212,7 @@ impl Checker<'_, '_> {
                             &stmt.span,
                         );
                     }
+                    self.place_written(place);
                     if let ExprKind::Path(path) = self.arena().exprs[place.0 as usize].kind {
                         let segs = self.arena().paths[path.0 as usize]
                             .segments
@@ -186,6 +220,7 @@ impl Checker<'_, '_> {
                         if segs.len() == 1 {
                             if let Some(&slot) = self.state.names.get(&segs[0].name) {
                                 self.initialize(slot, true);
+                                self.state.callables[slot] = self.value_callables(value);
                             }
                         }
                     }

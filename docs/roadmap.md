@@ -123,10 +123,11 @@
   - 验收：被匹配表达式只求值一次；重复绑定、or 绑定集合不一致、空范围、不可驳 let 段、非穷尽 match 和错误类型守卫都有稳定诊断；模式不调用用户 Eq/Ord。
   - 接入证据：`frontend::bootstrap -> semantics::check -> TypeCheck query -> CheckedSemantics verifier -> IR -> ImagePlan`；源码、cfg 和解析结果进入语义指纹，诊断在缓存命中时重绑定当前源码表。`frontend::semantics::tests` 覆盖声明/初始化、短路与退出、检查计划、模式覆盖及冷/热 query；真实 CLI `check/build` 已验证成功检查、结构化错误和失败无产物。完整 HIR 冻结仍由阶段 12b、20 验收。
 
-- [ ] **阶段 16：实现函数、闭包与 async 捕获**（复杂度：4）
+- [x] **阶段 16：实现函数、闭包与 async 捕获**（复杂度：4）
   - 依赖：阶段 13、14、15。
   - 实现具名函数、闭包函数字面量、一等函数、函数项擦除、参数包、捕获槽、递归捕获、`async` 新协程语义和 `Join[T]` 类型形成。
   - 验收：闭包捕获共享正确槽并延长寿命；遮蔽不改变旧捕获；普通函数无 await 染色；捕获、返回、存储和跨 suspend 不制造悬空引用或借用错误。
+  - 接入证据：`CheckedSemantics` schema 2 携带函数项泛型实例身份、捕获槽及存储需求、调用前置条件和参数包计划，经 verifier 进入布局、IR 与镜像计划指纹。`callable_tests` 验证递归/互递归、共享与遮蔽、返回/defer/async 边界、Fn 约束和参数包；128 项工作区测试通过，Linux/Windows CLI `check` 均接受真实函数切片，错误 `build` 输出稳定诊断且无产物。物理环境分配、协程执行和机器码仍由后续 GIR/runtime/backend 阶段实现。
 
 - [ ] **阶段 17：实现 trait、impl、UFCS 与特化选择**（复杂度：5）
   - 依赖：阶段 12、14、16。

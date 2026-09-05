@@ -28,8 +28,12 @@ impl Checker<'_, '_> {
         }
         let id = self.cleanup_plan.len();
         match expression.kind {
-            ExprKind::Call { callee, args, .. } => {
-                let ty = self.call(callee, args, None);
+            ExprKind::Call {
+                callee,
+                type_args,
+                args,
+            } => {
+                let ty = self.call(callee, type_args, args, None);
                 self.expressions.push((body, ty));
                 self.defers.push(Deferred {
                     id,

@@ -21,6 +21,7 @@ pub(crate) fn form_and_layout(
 ) -> Result<Vec<Layout>, Vec<Diagnostic>> {
     let mut arena = Layouts {
         model,
+        capturing: capturing_functions(model, semantics),
         complete: BTreeMap::new(),
         active: Vec::new(),
     };
@@ -49,8 +50,27 @@ pub(crate) fn form_and_layout(
     Ok(arena.complete.into_values().collect())
 }
 
+fn capturing_functions(model: &Model<'_>, semantics: &CheckedSemantics) -> Vec<Vec<bool>> {
+    // 模块和 FnDecl 都是稠密编号；Vec<bool> 为每个现有函数保留一位。
+    let mut capturing: Vec<_> = model
+        .modules
+        .iter()
+        .map(|module| vec![false; module.arena.fns.len()])
+        .collect();
+    for plan in semantics.bodies.iter().flat_map(|body| &body.captures) {
+        if let Some(id) = plan.function {
+            debug_assert!(
+                id.module < capturing.len() && (id.function as usize) < capturing[id.module].len()
+            );
+            capturing[id.module][id.function as usize] |= !plan.captures.is_empty();
+        }
+    }
+    capturing
+}
+
 struct Layouts<'m, 'a> {
     model: &'m Model<'a>,
+    capturing: Vec<Vec<bool>>,
     complete: BTreeMap<Ty, Layout>,
     active: Vec<Ty>,
 }
@@ -97,6 +117,13 @@ impl Layouts<'_, '_> {
             }
             Ty::Slice(_) => return Ok(None),
             Ty::String | Ty::Function(..) | Ty::Range => Layout { size: 16, align: 8 },
+            Ty::Callable(id, _, _) => {
+                if !self.capturing[id.module][id.function as usize] {
+                    Layout { size: 0, align: 1 }
+                } else {
+                    Layout { size: 8, align: 8 }
+                }
+            }
             Ty::Array(elem, n) => {
                 let Some(elem) = self.layout(elem)? else {
                     return Ok(None);

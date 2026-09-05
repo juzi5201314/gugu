@@ -143,6 +143,24 @@ impl Checker<'_, '_> {
         self.resolve(ty)
     }
     pub(super) fn finish_inference(&mut self) {
+        for (actual, expected, span) in std::mem::take(&mut self.callable_constraints) {
+            let actual = self.resolve(&actual);
+            let signature = match &actual {
+                Ty::Param(name) => self.callable_bounds.get(name).cloned(),
+                _ => actual
+                    .signature()
+                    .map(|(params, ret)| Ty::Function(params.to_vec(), Box::new(ret.clone()))),
+            };
+            if let Some(signature) = signature {
+                self.relate(&signature, &expected, &span, false);
+            } else {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    "泛型实参不满足 Fn 可调用签名",
+                    span,
+                );
+            }
+        }
         for index in 0..self.vars.len() {
             if self.vars[index].is_none() {
                 self.vars[index] = match self.number_kinds[index] {
@@ -174,6 +192,16 @@ impl Checker<'_, '_> {
             pattern.ty = self.resolve(&pattern.ty);
         }
         self.pattern_plans = patterns;
+        let mut captures = std::mem::take(&mut self.capture_plans);
+        for capture in &mut captures {
+            capture.signature = self.resolve(&capture.signature);
+        }
+        self.capture_plans = captures;
+        let mut calls = std::mem::take(&mut self.variadic_calls);
+        for call in &mut calls {
+            call.element = self.resolve(&call.element);
+        }
+        self.variadic_calls = calls;
         let mut checks = std::mem::take(&mut self.runtime_checks);
         for check in &mut checks {
             match &mut check.kind {

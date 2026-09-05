@@ -227,7 +227,7 @@ fn function_defer_outlives_nested_blocks() {
     ));
 }
 
-fn frontend(
+pub(super) fn frontend(
     sources: &[(&str, &str)],
     queries: &crate::QueryEngine,
 ) -> Result<super::super::FrontendOutput, Vec<crate::Diagnostic>> {
