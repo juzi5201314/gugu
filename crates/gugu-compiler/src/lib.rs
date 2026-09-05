@@ -12,9 +12,14 @@ mod diagnostics;
 mod frontend;
 mod ir;
 mod project;
+mod query;
 mod runtime;
 mod source;
 mod target;
+pub use query::{
+    DependencyFingerprint, ObjectCache, ObjectError, ObjectKey, QueryContext, QueryEngine,
+    QueryError, QueryKey, QueryKind, QueryResult, QueryState,
+};
 
 pub use action::{ActionGraph, ActionKind, ActionNode, ActionStatus};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};

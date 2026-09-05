@@ -199,6 +199,22 @@ reader 的已打开文件句柄就是 lease：Linux 即使被 unlink 仍从原 i
 
 阶段 6 的 `project::cache::ActionInputs` 已实现 action key 的输入收集和规范排序，但尚未实现本章定义的持久 object/action record reader、LRU 索引或 query fingerprint 状态机；这些仍属于阶段 11 与阶段 71。阶段 6 的 `DependencyCache` 只负责外部 package 源码输入，不把未验证源码、编译中间对象或 target 视图混入依赖缓存。
 
+## 阶段 11 实现状态
+
+阶段 11 已在 `gugu-compiler::query` 落地 session 内 query engine 与编译对象存储：
+`QueryKind` 固定登记 1--28，`QueryKey` 使用 schema 与规范 key 形成域隔离摘要；每个
+query cell 按 `Uncomputed -> Computing -> Complete/Failed/Cancelled` 转换，并以条件变量
+让并发请求共享唯一计算结果。成功结果保存不可变 payload、结果 fingerprint 和按稳定 key
+排序去重的直接依赖；失败与取消不会作为成功对象写入持久存储。
+
+`ObjectCache` 使用本章的 `compile/v1/objects/HH/HASH` 布局和 `GUGUCV01` 固定 header，
+写入先在 `tmp/` 完整同步、重新校验，再以 create-if-absent 硬链接发布。读取先检查 magic、
+kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 verifier；损坏或 schema
+不匹配的对象会被移入 `quarantine/`，不可信字节不会交给 verifier 之外的 consumer。
+
+当前阶段只提供可复用的 compiler 基础设施；阶段 71 才会把 action record、LRU 索引、清理
+命令和 target 物化完整接入 CLI。
+
 ## 单态化实例
 
 ### 稳定类型与实例键

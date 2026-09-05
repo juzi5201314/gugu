@@ -75,7 +75,7 @@
   - 实现 host/target cfg 求值、配置裁项、模块声明表、可见性、`use/pub use`、保留名称、稳定 `DefId` 分配和命名空间冲突诊断。
   - 验收：被 cfg 裁掉的项不进入名称解析、类型检查和 codegen；导入循环、私有跨模块导入、大小写路径不一致和重复声明均可确定重现。
 
-- [ ] **阶段 11：实现 query 状态机与内容寻址缓存**（复杂度：4）
+- [x] **阶段 11：实现 query 状态机与内容寻址缓存**（复杂度：4）
   - 依赖：阶段 03、05、06、10。
   - 实现 query 注册表、`Uncomputed/Computing/Complete/Failed/Cancelled` 状态、依赖 fingerprint、结果 fingerprint、BLAKE3 对象、原子发布、损坏校验和确定性依赖排序。
   - 验收：并发请求同一 query 只计算一次；失败不写持久缓存；缓存对象按长度/哈希/版本/IR verifier 校验后才反序列化；上游结果未变时不会传播无意义失效。
