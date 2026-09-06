@@ -374,6 +374,9 @@ fn frontend_action_key(
     for (key, hash) in &frontend.expansion_inputs.macros {
         inputs.add_macro_input(key.clone(), *hash);
     }
+    if !frontend.expansion_inputs.budget.is_empty() {
+        inputs.set_macro_budget(&frontend.expansion_inputs.budget);
+    }
     inputs.set_analysis_policy(frontend::analysis::AnalysisPolicyV1::default().canonical_bytes());
     inputs.set_analysis_world(frontend.analysis.input_fingerprint);
     inputs.key()

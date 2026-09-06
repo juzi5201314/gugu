@@ -342,12 +342,35 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     let cold = frontend(&[("main.gg", source)], &queries).unwrap();
     let warm = frontend(&[("main.gg", source)], &queries).unwrap();
     assert_eq!(cold.semantics, warm.semantics);
+    // 证明链冷热一致，且变量操作数/切片边界必须保持 Unknown（保留检查）。
+    assert_eq!(cold.analysis, warm.analysis);
+    assert_eq!(cold.hir.module().owners, warm.hir.module().owners);
     let checks: Vec<_> = warm
         .semantics
         .bodies
         .iter()
         .flat_map(|body| body.runtime_checks.iter().map(|check| &check.kind))
         .collect();
+    let proofs: Vec<_> = warm
+        .hir
+        .module()
+        .owners
+        .iter()
+        .flat_map(|owner| owner.checks.iter().map(|check| check.proof))
+        .collect();
+    assert_eq!(proofs.len(), checks.len());
+    // 除数是字面量 0 → Disproved；其余变量操作数/切片边界 → Unknown。
+    // 任何检查都不允许是 Proved（无充分事实时不得消除）。
+    assert!(
+        proofs
+            .iter()
+            .all(|proof| *proof != Some(crate::frontend::analysis::ProofStatus::Proved)),
+        "变量操作数与切片边界的检查不得标 Proved：{proofs:?}"
+    );
+    assert_eq!(
+        proofs[0],
+        Some(crate::frontend::analysis::ProofStatus::Disproved)
+    );
     let [
         CheckKind::IntegerDivision {
             ty: division_ty,

@@ -42,7 +42,6 @@ pub(super) fn lower(
     model: &Model<'_>,
     names: &NameResolution,
     checked: &CheckedSemantics,
-    early: &super::comptime::EarlyConstTable,
     sources: &SourceMap,
     cfg: &super::super::cfg::CfgContext,
     entry: Option<CallableId>,
@@ -50,7 +49,7 @@ pub(super) fn lower(
     queries: &crate::QueryEngine,
 ) -> Result<(hir::Validated, super::analysis::AnalysisWorldV1), Vec<Diagnostic>> {
     query::lower(
-        model, names, checked, early, sources, cfg, entry, dependency, queries,
+        model, names, checked, sources, cfg, entry, dependency, queries,
     )
 }
 

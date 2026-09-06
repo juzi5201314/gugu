@@ -44,7 +44,7 @@ impl Default for EvalProfile {
 
 /// 规范的早期常量值；离开 evaluator 前必须归一化为该表示。
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
-pub(in crate::frontend) enum ConstantValue {
+pub(crate) enum ConstantValue {
     Unit,
     Int(i128),
     Float(u64),
@@ -63,7 +63,7 @@ pub(in crate::frontend) enum ConstantValue {
 
 /// 不透明 `ParsedSource` 的内部表示：生成文本与片段类别。
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
-pub(in crate::frontend) struct ParsedFragment {
+pub(crate) struct ParsedFragment {
     /// 片段类别（与解析入口一致）。
     pub(crate) slot: SourceSlot,
     /// 通过语法闸门的生成文本。

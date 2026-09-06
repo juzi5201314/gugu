@@ -1,18 +1,17 @@
-//! AbstractAnalysis：HIR 上的范围证明与函数摘要固定点。
+//! AbstractAnalysis：冻结前 HIR 上的局部证明与跨函数摘要固定点。
 //!
-//! 热路径 place→version 用稠密 `Vec<u32>`（上界为单 owner 槽数）；跨 owner 摘要用
-//! `BTreeMap` 保证确定性序。SCC 成员用稳定排序的 `Vec`。
+//! 证明只依赖 HIR 自身的字面量与类型事实；跨 owner 摘要按效果并集传播，
+//! 从保守初值单调精化，超预算时回退保守值并保留全部检查。
 pub(crate) mod policy;
 pub(crate) mod query;
 pub(crate) mod solver;
 mod types;
 
-pub(crate) use policy::{AnalysisPolicyV1, PUBLIC_SUMMARY_POLICY_REVISION};
+pub(crate) use policy::AnalysisPolicyV1;
 pub(crate) use query::run_world;
-pub(crate) use types::{
-    AnalysisOwnerKey, AnalysisWorldV1, FunctionSummary, ProofFact, ProofStatus, RuntimeCheckKey,
-    WORLD_SCHEMA_VERSION,
-};
+pub(crate) use types::{AnalysisWorldV1, ProofStatus, WORLD_SCHEMA_VERSION};
+#[cfg(test)]
+pub(crate) use types::{FunctionSummary, RuntimeCheckKey};
 
 pub(crate) const ANALYSIS_SEMANTICS_REVISION: u32 = 1;
 
@@ -26,22 +25,9 @@ pub(crate) fn empty_world() -> AnalysisWorldV1 {
         runtime_checks_elided_count: 0,
     }
 }
+
 pub(crate) fn patch_module(module: &mut crate::frontend::hir::Module, world: &AnalysisWorldV1) {
     solver::patch_proofs(module, world);
-}
-
-pub(crate) fn proved_bounds_count(world: &AnalysisWorldV1) -> u32 {
-    world
-        .proofs
-        .iter()
-        .filter(|fact| {
-            fact.status == ProofStatus::Proved
-                && matches!(
-                    fact.key.kind,
-                    crate::frontend::hir::CheckKind::Bounds { .. }
-                )
-        })
-        .count() as u32
 }
 
 #[cfg(test)]

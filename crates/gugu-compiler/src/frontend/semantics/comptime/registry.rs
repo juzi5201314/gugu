@@ -27,12 +27,6 @@ impl Domain {
     /// late 常量域：只读冻结 type universe。
     pub(crate) const LATE_CONST: Self = Self(4);
 
-    /// 判断当前域是否获准。
-    #[cfg(test)]
-    pub(crate) const fn contains(self, other: Self) -> bool {
-        self.0 & other.0 == other.0
-    }
-
     /// 规范名称，用于诊断与摘要编码。
     pub(crate) fn name(self) -> &'static str {
         match self.0 {
@@ -411,12 +405,6 @@ pub(crate) fn lookup(canonical: &str) -> Option<&'static CapabilityEntry> {
         .iter()
         .find(|(path, _)| *path == canonical)
         .map(|(_, entry)| entry)
-}
-
-/// 全部登记路径，按字典序排列，供摘要编码使用。
-#[cfg(test)]
-pub(crate) fn registered_paths() -> impl Iterator<Item = &'static str> {
-    EXACT_ENTRIES.iter().map(|(path, _)| *path)
 }
 
 /// registry 规范摘要：revision + 全部条目的规范编码经域隔离 BLAKE3。

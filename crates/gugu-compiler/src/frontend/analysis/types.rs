@@ -2,93 +2,16 @@
 
 use crate::frontend::hir::{CheckKind, DefId, ExprId};
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 
 pub(crate) const WORLD_SCHEMA_VERSION: u32 = 1;
 
+/// 检查的证明状态：`Proved` 表示 HIR 局部事实可证安全，`Disproved` 表示 HIR 局部
+/// 事实可证必然失败，`Unknown` 表示局部事实不足、必须保留检查。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub(crate) enum ProofStatus {
     Proved,
     Disproved,
     Unknown,
-}
-
-/// 有符号整数范围；`min > max` 表示空；两端均为 `None` 表示 Unknown。
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct IntRange {
-    pub min: Option<i128>,
-    pub max: Option<i128>,
-}
-
-impl IntRange {
-    pub const UNKNOWN: Self = Self {
-        min: None,
-        max: None,
-    };
-
-    pub fn point(value: i128) -> Self {
-        Self {
-            min: Some(value),
-            max: Some(value),
-        }
-    }
-
-    pub fn at_least(min: i128) -> Self {
-        Self {
-            min: Some(min),
-            max: None,
-        }
-    }
-
-    pub fn less_than(max: i128) -> Self {
-        Self {
-            min: None,
-            max: Some(max - 1),
-        }
-    }
-
-    pub fn intersect(self, other: Self) -> Self {
-        let min = match (self.min, other.min) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
-        let max = match (self.max, other.max) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (Some(a), None) => Some(a),
-            (None, Some(b)) => Some(b),
-            (None, None) => None,
-        };
-        if let (Some(lo), Some(hi)) = (min, max)
-            && lo > hi
-        {
-            return Self {
-                min: Some(1),
-                max: Some(0),
-            };
-        }
-        Self { min, max }
-    }
-
-    pub fn union_widen(self, other: Self) -> Self {
-        if self == Self::UNKNOWN || other == Self::UNKNOWN {
-            return Self::UNKNOWN;
-        }
-        let min = match (self.min, other.min) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            _ => None,
-        };
-        let max = match (self.max, other.max) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            _ => None,
-        };
-        Self { min, max }
-    }
-
-    pub fn is_empty(self) -> bool {
-        matches!((self.min, self.max), (Some(lo), Some(hi)) if lo > hi)
-    }
 }
 
 /// 稳定 callable owner 身份（阶段 24 前用 owner 表下标 + `DefId`）。
@@ -111,6 +34,7 @@ pub(crate) struct ProofFact {
     pub status: ProofStatus,
 }
 
+/// 跨函数效果摘要；布尔为真表示"可能发生"，只能从保守初值单调精化为假。
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FunctionSummary {
     pub may_panic: bool,
@@ -121,6 +45,7 @@ pub(crate) struct FunctionSummary {
 }
 
 impl FunctionSummary {
+    /// 保守起点：一切皆可能发生，固定点只能按证据把标志降为假。
     pub fn conservative() -> Self {
         Self {
             may_panic: true,
@@ -129,6 +54,15 @@ impl FunctionSummary {
             reads_hidden_state: true,
             writes_hidden_state: true,
         }
+    }
+
+    /// 效果并集：吸收 `other` 的"可能发生"，用于固定点传播与 callee 合并。
+    pub(crate) fn join_with(&mut self, other: &Self) {
+        self.may_panic |= other.may_panic;
+        self.may_call_unknown |= other.may_call_unknown;
+        self.may_mutate_len |= other.may_mutate_len;
+        self.reads_hidden_state |= other.reads_hidden_state;
+        self.writes_hidden_state |= other.writes_hidden_state;
     }
 }
 

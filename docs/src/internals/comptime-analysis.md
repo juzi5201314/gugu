@@ -300,19 +300,35 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 
 ## 阶段 23 实现桥接
 
-当前 compiler 在 **冻结 HIR + `CheckedSemantics`（schema 7）+ `EarlyConstTable.registry_summary`**
-上运行 `WholeProgramAnalysis`（query schema 1），不等待 monomorphic GIR。`AnalysisOwnerKey`
-为 `(owner 表下标, DefId)`；阶段 24 接入后同一 `AnalysisWorldV1` schema 仅将 callable 身份
-换为 `MonoKey`，`proved` / `unknown` 语义不变。
+当前 compiler 在 **冻结前的 HIR 模块**上运行 `WholeProgramAnalysis`（query schema 1，
+嵌套在 `LowerHir` compute 内按输入指纹独立缓存），不等待 monomorphic GIR，也不回看
+`CheckedSemantics` 侧表——证明只消费 HIR 自身的字面量与类型事实，避免 AST/HIR
+两套表达式编号空间之间的配对歧义。`AnalysisOwnerKey` 为 `(owner 表下标, DefId)`；
+阶段 24 接入后同一 `AnalysisWorldV1` schema 仅将 callable 身份换为 `MonoKey`，
+`proved` / `unknown` 语义不变。
 
 固定 **`analysis_semantics_revision = 1`**、**`PublicSummaryPolicyV1` 占位 revision = 1**
-（默认 SCC 迭代 32、单 owner CFG 块软上限 4096、摘要关系条数软上限 256）。超预算 →
-`budget_exhausted = true` 且相关事实为 `unknown`；**不是**用户 `Error`。
+（默认 SCC 迭代 32）。SCC 轮次超预算 → 摘要整体回退保守值并置 `budget_exhausted = true`；
+**不是**用户 `Error`。当前实现的证明谓词：
 
-证明在 `LowerHir` 构建 Module 后、`Validated::freeze` 前写回 `RuntimeCheck.proof`。后端
-`ImagePlan.runtime_checks_elided_count` 统计 `Proved` 数量，供 smoke；**不改变**语言语义
-（未知路径仍保留 HIR 检查节点）。`ActionInputs` 的 `analysis_policy` 与 `analysis_world`
-指纹进入前端 action key；跨 package `public_summaries` 本阶段为空 map。
+- 数组下标：下标为整数字面量且 base 的 HIR 类型是 `Array(_, len)` 时，与真实长度比较
+  （`0 <= i < len` 才 `Proved`，必然越界为 `Disproved`）；切片长度不可知 → `unknown`。
+- 除法：除数为非零字面量 → `Proved`；为零 → `Disproved`；变量 → `unknown`。
+- 移位：移位量为非负字面量 → `Proved`（spec 只检查负移位量）；负 → `Disproved`。
+- Unicode 标量：字面量可构成合法 scalar → `Proved`，否则 `Disproved`。
+- 浮点转整数与 Utf8Boundary：一律 `unknown`。
+
+跨函数摘要是纯效果并集（`may_panic` / `may_call_unknown` / `may_mutate_len` /
+`reads_hidden_state` / `writes_hidden_state`），从保守初值出发只能单调精化；callee
+摘要按调用图并进 caller， SCC 固定点收敛后导出，超预算保持保守值。摘要不被用于
+证明谓词（证明只依赖过程内事实），供后续阶段消费。
+
+证明在 `LowerHir` 构建 Module 后、`Validated::freeze` 前写回 `RuntimeCheck.proof`；
+world 的输入指纹取 **proof 写回前** 的模块指纹，不混合证明输出。后端
+`ImagePlan.runtime_checks_elided_count` 统计 `Proved` 数量，供 smoke；**不改变**语言
+语义（未知路径仍保留 HIR 检查节点）。`ActionInputs` 的 `macro_budget`、
+`analysis_policy` 与 `analysis_world` 指纹进入前端 action key；跨 package
+`public_summaries` 本阶段为空 map。
 
 
 局部证明按 `MonoKey`、闭世界、目标、feature/cfg、runtime/标准库版本和分析策略缓存；公共

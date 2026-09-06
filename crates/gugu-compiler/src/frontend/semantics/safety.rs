@@ -41,7 +41,7 @@ impl Model<'_> {
         self.type_property(ty, hidden, Property::Managed)
     }
 
-    pub(crate) fn check_proven(
+    pub(super) fn check_proven(
         &self,
         module: usize,
         check: &RuntimeCheck,

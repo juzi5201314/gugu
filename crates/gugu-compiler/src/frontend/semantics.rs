@@ -16,7 +16,7 @@ mod patterns;
 pub(crate) mod query;
 mod safety;
 mod traits;
-pub(crate) use output::{CheckKind, CheckedBody, CheckedSemantics, MemoryOperation};
+pub(crate) use output::{CheckedBody, CheckedSemantics, MemoryOperation};
 #[cfg(test)]
 mod callable_tests;
 #[cfg(test)]
@@ -60,7 +60,6 @@ pub(crate) fn check(
         &model,
         names,
         &checked,
-        &early,
         sources,
         cfg,
         entry,
