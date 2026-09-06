@@ -82,7 +82,7 @@ pub(super) fn check(
     }
 }
 
-pub(super) fn store_errors(errors: &[Diagnostic]) -> QueryError {
+pub(crate) fn store_errors(errors: &[Diagnostic]) -> QueryError {
     let stored: Vec<_> = errors
         .iter()
         .map(|error| StoredDiagnostic {
@@ -103,7 +103,7 @@ pub(super) fn store_errors(errors: &[Diagnostic]) -> QueryError {
     QueryError::Failed(serde_json::to_string(&stored).expect("诊断 schema 序列化"))
 }
 
-pub(super) fn restore_errors(error: QueryError, sources: &SourceMap) -> Vec<Diagnostic> {
+pub(crate) fn restore_errors(error: QueryError, sources: &SourceMap) -> Vec<Diagnostic> {
     let QueryError::Failed(stored) = error else {
         return vec![Diagnostic::error(
             DiagnosticCode::InvalidType,

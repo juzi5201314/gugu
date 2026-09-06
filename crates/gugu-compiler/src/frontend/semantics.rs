@@ -12,7 +12,7 @@ mod numeric;
 mod opaque;
 mod output;
 mod patterns;
-mod query;
+pub(crate) mod query;
 mod safety;
 mod traits;
 pub(crate) use output::{CheckedBody, CheckedSemantics, MemoryOperation};

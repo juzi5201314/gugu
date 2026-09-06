@@ -456,7 +456,10 @@ fn constant_literal(value: &super::super::model::ConstantValue) -> hir::Literal 
         super::super::model::ConstantValue::Unit
         | super::super::model::ConstantValue::Array(_)
         | super::super::model::ConstantValue::Tuple(_)
-        | super::super::model::ConstantValue::Struct(_) => {
+        | super::super::model::ConstantValue::Struct(_)
+        | super::super::model::ConstantValue::ParsedSource(_)
+        | super::super::model::ConstantValue::ResultOk(_)
+        | super::super::model::ConstantValue::ResultErr(_) => {
             unreachable!("trait 关联常量成员只登记标量字面量")
         }
     }

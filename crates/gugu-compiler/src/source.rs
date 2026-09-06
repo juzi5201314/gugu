@@ -501,6 +501,9 @@ impl ExpansionRecord {
 pub struct SourceMap {
     table: SourceTableId,
     snapshots: Vec<SourceSnapshot>,
+    /// 原始快照按逻辑路径排序；生成快照按注册顺序追加。
+    /// 逻辑路径到文件 ID 的稳定索引，覆盖两段快照。
+    path_index: std::collections::BTreeMap<String, u32>,
     expansions: Vec<ExpansionRecord>,
 }
 
@@ -514,9 +517,15 @@ impl SourceMap {
             }
         }
         checked_u32(snapshots.len());
+        let path_index = snapshots
+            .iter()
+            .enumerate()
+            .map(|(index, snapshot)| (snapshot.logical_path.clone(), index as u32))
+            .collect();
         Ok(Self {
             table: SourceTableId::next(),
             snapshots,
+            path_index,
             expansions: Vec::new(),
         })
     }
@@ -531,17 +540,36 @@ impl SourceMap {
         self.table
     }
 
-    /// 返回按稳定文件 ID 排列的源码快照。
+    /// 返回按稳定文件 ID 排列的原始源码快照。
     pub fn snapshots(&self) -> &[SourceSnapshot] {
         &self.snapshots
     }
 
+    /// 追加一个源码宏生成的源码快照；文件 ID 按追加顺序稳定分配。
+    pub fn push_snapshot(
+        &mut self,
+        snapshot: SourceSnapshot,
+    ) -> Result<SourceFileId, SourceMapError> {
+        if self.path_index.contains_key(snapshot.logical_path()) {
+            return Err(SourceMapError::DuplicatePath(
+                snapshot.logical_path().to_owned(),
+            ));
+        }
+        let index = self.snapshots.len();
+        if index > u32::MAX as usize {
+            return Err(SourceMapError::UnknownFile(SourceFileId::new(u32::MAX)));
+        }
+        self.path_index
+            .insert(snapshot.logical_path().to_owned(), index as u32);
+        self.snapshots.push(snapshot);
+        Ok(SourceFileId::new(index as u32))
+    }
+
     /// 按逻辑路径查找稳定文件 ID。
     pub fn file_id(&self, logical_path: &str) -> Option<SourceFileId> {
-        self.snapshots
-            .binary_search_by(|snapshot| snapshot.logical_path.as_str().cmp(logical_path))
-            .ok()
-            .map(|index| SourceFileId::new(checked_u32(index)))
+        self.path_index
+            .get(logical_path)
+            .map(|&index| SourceFileId::new(index))
     }
 
     /// 按稳定文件 ID 取得源码快照。
@@ -851,6 +879,32 @@ mod tests {
         assert_eq!(map.file_id("src/a.gg").map(SourceFileId::index), Some(1));
         assert_eq!(map.file_id("src/missing.gg"), None);
         assert!(SourceMap::new(vec![snapshot("dup.gg", "a"), snapshot("dup.gg", "b")]).is_err());
+    }
+
+    #[test]
+    fn push_snapshot_appends_generated_sources_deterministically() {
+        let mut map =
+            SourceMap::new(vec![snapshot("src/main.gg", "fn main() {}")]).expect("single source");
+        let main = map.file_id("src/main.gg").expect("main registered");
+        let first = map
+            .push_snapshot(snapshot("src/main.gg::exp1/0", "fn one() {}"))
+            .expect("generated snapshot appends");
+        let second = map
+            .push_snapshot(snapshot("src/main.gg::exp1/1", "fn two() {}"))
+            .expect("generated snapshot appends");
+        assert_eq!(main.index(), 0);
+        assert_eq!(first.index(), 1);
+        assert_eq!(second.index(), 2);
+        assert_eq!(
+            map.file_id("src/main.gg::exp1/1").map(SourceFileId::index),
+            Some(2)
+        );
+        // 生成路径与原始路径冲突必须被拒绝，且不改变表内容。
+        assert_eq!(
+            map.push_snapshot(snapshot("src/main.gg", "x")),
+            Err(SourceMapError::DuplicatePath("src/main.gg".to_owned()))
+        );
+        assert_eq!(map.snapshots().len(), 3);
     }
 
     #[test]

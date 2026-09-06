@@ -34,10 +34,10 @@ fn analyze_with_cfg(
         .iter()
         .map(|(path, source)| SourceSnapshot::from_str(path, source).expect("valid source"))
         .collect();
-    let source_map = SourceMap::new(snapshots).expect("unique source paths");
+    let mut source_map = SourceMap::new(snapshots).expect("unique source paths");
     bootstrap(
         SourceInput::Sources {
-            source_map: &source_map,
+            source_map: &mut source_map,
             entry: "src/main.gg",
             source_root: "src",
             package_identity: "acme/demo@1.0.0",

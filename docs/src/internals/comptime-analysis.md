@@ -149,7 +149,9 @@ parse / lex
 
 `#![comptime(expansion_limit = N)]` 为模块设置该模块展开树的深度上限；附着在源码宏位置的同名属性设置该子树上限。属性只能提出不超过 compiler profile 全局硬上限的请求；超过硬上限必须报错，不能静默截断或自动取整。其它总量预算由 compiler profile 固定，并进入 `CompilerIdentity` 或 action key。
 
-完全相同的 `(宏定义稳定键、规范输入、source slot、配置)` 在当前展开栈再次出现时，报告确定性的 expansion cycle；带有不同已知输入的递归可以继续执行，直到任一预算耗尽。达到预算时，诊断必须列出从外层调用到当前节点的完整展开链。普通 comptime 函数递归只消耗 evaluator fuel，不增加源码宏深度；生成新的 `comptime source` 才增加展开深度。
+当前实现的 profile 默认值：深度上限 16（全局硬上限 256）、总展开次数 4096、生成字节 4 MiB、生成 AST 节点 1M、宏脚本 fuel 总池 10M、宏脚本 heap 总池 16 MiB。预算规范编码与全部生成文本摘要经 `ActionInputs` 的 `macro_budget`/`macro_inputs` 进入前端 action key。
+
+完全相同的 `(宏定义稳定键、规范输入、source slot、配置)` 在当前展开栈再次出现时，报告确定性的 expansion cycle（`expansion-cycle`，`E0048`，以宏脚本文本与 source slot 为稳定键）；带有不同已知输入的递归可以继续执行，直到任一预算耗尽（`expansion-limit`，`E0049`）。达到预算时，诊断必须列出从外层调用到当前节点的完整展开链。普通 comptime 函数递归只消耗 evaluator fuel，不增加源码宏深度；生成新的 `comptime source` 才增加展开深度。
 
 ## 抽象分析值域
 
@@ -332,6 +334,21 @@ WholeProgramAnalysis(world_key, analysis_policy)
 `PublicFunctionSummary` 验证并擦除非 interface place 后，产生内容寻址公共对象。
 `WholeProgramAnalysis` 包含排序后的可达图、SCC 摘要、公共摘要键和 world-local 证明事实。
 所有结果通过已有 query 状态机和 cycle/fixpoint 规则生成，不返回半初始化对象。
+
+阶段 22 起两个源码宏 query 在前端注册（schema 1）：
+
+- `ParseSource`（编号 21）的 key 是 `(source slot 字节, 生成文本 BLAKE3)`；计算闭包
+  用主 lexer/parser 对文本做一次性闸门解析，成功返回空结果，失败返回首个语法错误的
+  消息与字节偏移。诊断只经 payload 传递（结构化 `SyntaxError`），不进入持久缓存。
+- `ExpandSourceMacro`（编号 22）的 key 是 `(source slot 字节, 轮次, 脚本文本,
+  名称指纹, cfg 规范串, registry 摘要)` 的域隔离 BLAKE3；计算闭包在 SourceExpand 域
+  执行脚本并按宏边界归一化为 `(source slot, 生成文本)`；失败诊断经
+  `store_errors/restore_errors` 缓存并在命中时按当前源码表重绑定。宏预算的 fuel 与
+  heap 两项在此闭包内累计。
+
+拼接阶段（注册生成快照与展开记录、把片段解析进宿主 arena、执行片段 cfg 与列表
+手术）发生在 query 之外，由轮次驱动器在宿主模块上完成；同一份生成文本在解析闸门
+与拼接各解析一次，两次都使用主 lexer/parser，结果由确定性保证一致。
 
 每个 GIR 改写 pass 必须在调试构建运行局部 verifier；跨阶段边界运行完整 verifier。verifier
 至少检查：

@@ -1,7 +1,7 @@
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
 use crate::source::{ExpansionId, SourceMap};
 
-use super::ast::{AstArena, AstFile, AstRange, AttrKind, Attribute, ExprId, ItemId, StmtId};
+use super::ast::{AstArena, AstRange, AttrKind, Attribute, ExprId, ItemId, StmtId};
 use super::cfg::ConfiguredAst;
 use super::token::{Token, TokenBuffer, TokenKind};
 use crate::Span;
@@ -89,7 +89,7 @@ pub(super) fn validate_attributes(
 
 pub(super) fn validate_lint_levels(
     source: &str,
-    file: &AstFile,
+    inner_attributes: AstRange<Attribute>,
     arena: &AstArena,
     tokens: &TokenBuffer,
     configured: &ConfiguredAst,
@@ -148,7 +148,7 @@ pub(super) fn validate_lint_levels(
     add(
         0,
         u32::try_from(source.len()).expect("源码长度受 SourceMap 限制"),
-        file.inner_attributes,
+        inner_attributes,
     );
     for (index, item) in arena.items.iter().enumerate() {
         if configured.item_active(ItemId(index as u32)) {

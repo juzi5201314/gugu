@@ -16,6 +16,28 @@ use super::{
     token::{Token, TokenBuffer, TokenKind},
 };
 
+/// cfg 裁项遍历的入口根集合。
+pub(crate) enum CfgRoots<'a> {
+    /// 完整文件：内属性加顶层 item 列表。
+    File(&'a AstFile),
+    /// 生成片段：模块 item 列表。
+    Items {
+        inner_attributes: AstRange<Attribute>,
+        items: &'a [ItemId],
+    },
+    /// 生成片段：块语句序列与可选尾表达式。
+    Statements {
+        stmts: &'a [StmtId],
+        tail: Option<ExprId>,
+    },
+    /// 生成片段：语法必需的单一表达式。
+    Expression(ExprId),
+    /// 生成片段：语法必需的单一类型。
+    Type(TyId),
+    /// 生成片段：单一模式。
+    Pattern(PatId),
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct CfgContext {
     target: TargetName,
@@ -125,6 +147,40 @@ impl ConfiguredAst {
         self.module_active
     }
 
+    /// item 活动位图的只读视图。
+    pub(crate) fn items_mut(&mut self) -> &mut [bool] {
+        &mut self.items
+    }
+
+    /// stmt 活动位图的可变视图。
+    pub(crate) fn stmts_mut(&mut self) -> &mut [bool] {
+        &mut self.stmts
+    }
+
+    /// 把生成片段的裁项位合并进宿主位图；`pre` 是片段解析前的 arena 长度。
+    ///
+    /// 片段位图按合并后的 arena 计算，宿主前缀全为 false；宿主位图只追加
+    /// `pre` 之后的新节点位。
+    pub(crate) fn merge_fragment(&mut self, fragment: &ConfiguredAst, pre: super::ast::ArenaLens) {
+        self.items.extend_from_slice(&fragment.items[pre.items..]);
+        self.fields
+            .extend_from_slice(&fragment.fields[pre.fields..]);
+        self.variants
+            .extend_from_slice(&fragment.variants[pre.variants..]);
+        self.use_items
+            .extend_from_slice(&fragment.use_items[pre.use_items..]);
+        self.field_exprs
+            .extend_from_slice(&fragment.field_exprs[pre.field_exprs..]);
+        self.match_arms
+            .extend_from_slice(&fragment.match_arms[pre.match_arms..]);
+        self.select_arms
+            .extend_from_slice(&fragment.select_arms[pre.select_arms..]);
+        self.params
+            .extend_from_slice(&fragment.params[pre.params..]);
+        self.stmts.extend_from_slice(&fragment.stmts[pre.stmts..]);
+        self.exprs.extend_from_slice(&fragment.exprs[pre.exprs..]);
+    }
+
     pub(crate) fn item_active(&self, item: ItemId) -> bool {
         self.items.get(item.0 as usize).copied().unwrap_or(false)
     }
@@ -169,13 +225,66 @@ pub(crate) fn configure(
     tokens: &TokenBuffer,
     context: &CfgContext,
 ) -> Result<ConfiguredAst, Vec<Diagnostic>> {
+    configure_roots(
+        snapshot,
+        source_map,
+        file.source,
+        arena,
+        tokens,
+        context,
+        ExpansionId::ROOT,
+        CfgRoots::File(file),
+    )
+}
+
+/// 对生成片段执行 cfg 裁项；`snapshot` 是生成文本快照，`expansion` 是其展开记录。
+pub(crate) fn configure_fragment(
+    snapshot: &SourceSnapshot,
+    source_map: &SourceMap,
+    file: crate::source::SourceFileId,
+    arena: &AstArena,
+    tokens: &TokenBuffer,
+    context: &CfgContext,
+    expansion: ExpansionId,
+    roots: CfgRoots<'_>,
+) -> Result<ConfiguredAst, Vec<Diagnostic>> {
+    configure_roots(
+        snapshot, source_map, file, arena, tokens, context, expansion, roots,
+    )
+}
+
+fn configure_roots(
+    snapshot: &SourceSnapshot,
+    source_map: &SourceMap,
+    file: crate::source::SourceFileId,
+    arena: &AstArena,
+    tokens: &TokenBuffer,
+    context: &CfgContext,
+    expansion: ExpansionId,
+    roots: CfgRoots<'_>,
+) -> Result<ConfiguredAst, Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
+    let (inner_attributes, walk) = match &roots {
+        CfgRoots::File(file) => (file.inner_attributes, Roots::File(file)),
+        CfgRoots::Items {
+            inner_attributes,
+            items,
+        } => (*inner_attributes, Roots::Items(items)),
+        CfgRoots::Statements { stmts, tail } => {
+            (AstRange::empty(), Roots::Statements((stmts, *tail)))
+        }
+        CfgRoots::Expression(expr) => (AstRange::empty(), Roots::Expression(*expr)),
+        CfgRoots::Type(ty) => (AstRange::empty(), Roots::Type(*ty)),
+        CfgRoots::Pattern(pat) => (AstRange::empty(), Roots::Pattern(*pat)),
+    };
     let module_active = attributes_match(
-        file.inner_attributes.as_slice(&arena.attrs),
+        inner_attributes.as_slice(&arena.attrs),
         snapshot,
         source_map,
         tokens,
         context,
+        file,
+        expansion,
         &mut diagnostics,
     );
     let mut configured = ConfiguredAst {
@@ -200,13 +309,41 @@ pub(crate) fn configure(
             context,
             configured: &mut configured,
             diagnostics: &mut diagnostics,
+            file,
+            expansion,
         };
-        for &item in file.items.as_slice(&arena.item_ids) {
-            configurator.item(item);
+        match walk {
+            Roots::File(file) => {
+                for &item in file.items.as_slice(&arena.item_ids) {
+                    configurator.item(item);
+                }
+            }
+            Roots::Items(items) => {
+                for &item in items {
+                    configurator.item(item);
+                }
+            }
+            Roots::Statements((stmts, tail)) => {
+                for &stmt in stmts {
+                    configurator.stmt(stmt);
+                }
+                if let Some(tail) = tail {
+                    configurator.expr(tail, true);
+                }
+            }
+            Roots::Expression(expr) => {
+                configurator.expr(expr, false);
+            }
+            Roots::Type(ty) => {
+                configurator.ty(ty);
+            }
+            Roots::Pattern(pat) => {
+                configurator.pat(pat);
+            }
         }
         super::attr::validate_lint_levels(
             snapshot.content(),
-            file,
+            inner_attributes,
             arena,
             tokens,
             &configured,
@@ -220,6 +357,15 @@ pub(crate) fn configure(
     }
 }
 
+enum Roots<'a> {
+    File(&'a AstFile),
+    Items(&'a [ItemId]),
+    Statements((&'a [StmtId], Option<ExprId>)),
+    Expression(ExprId),
+    Type(TyId),
+    Pattern(PatId),
+}
+
 struct Configurator<'a> {
     snapshot: &'a SourceSnapshot,
     source_map: &'a SourceMap,
@@ -228,6 +374,8 @@ struct Configurator<'a> {
     context: &'a CfgContext,
     configured: &'a mut ConfiguredAst,
     diagnostics: &'a mut Vec<Diagnostic>,
+    file: crate::source::SourceFileId,
+    expansion: ExpansionId,
 }
 
 impl Configurator<'_> {
@@ -785,6 +933,8 @@ impl Configurator<'_> {
             self.source_map,
             self.tokens,
             self.context,
+            self.file,
+            self.expansion,
             self.diagnostics,
         )
     }
@@ -796,6 +946,8 @@ fn attributes_match(
     source_map: &SourceMap,
     tokens: &TokenBuffer,
     context: &CfgContext,
+    file: crate::source::SourceFileId,
+    expansion: ExpansionId,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> bool {
     let mut active = true;
@@ -807,7 +959,8 @@ fn attributes_match(
             predicate,
             snapshot.content(),
             source_map,
-            tokens.file.expect("配置求值需要源码文件"),
+            file,
+            expansion,
             context,
         )
         .parse()
@@ -850,6 +1003,7 @@ struct PredicateParser<'a> {
     source: &'a str,
     source_map: &'a SourceMap,
     file: crate::source::SourceFileId,
+    expansion: ExpansionId,
     context: &'a CfgContext,
     cursor: usize,
 }
@@ -860,6 +1014,7 @@ impl<'a> PredicateParser<'a> {
         source: &'a str,
         source_map: &'a SourceMap,
         file: crate::source::SourceFileId,
+        expansion: ExpansionId,
         context: &'a CfgContext,
     ) -> Self {
         Self {
@@ -867,6 +1022,7 @@ impl<'a> PredicateParser<'a> {
             source,
             source_map,
             file,
+            expansion,
             context,
             cursor: 0,
         }
@@ -966,7 +1122,7 @@ impl<'a> PredicateParser<'a> {
                 self.file,
                 token.start as usize,
                 token.end as usize,
-                ExpansionId::ROOT,
+                self.expansion,
             )
             .unwrap_or_else(|_| {
                 Span::detached(

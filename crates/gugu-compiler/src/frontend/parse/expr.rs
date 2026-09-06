@@ -79,13 +79,20 @@ impl Parser<'_> {
         let mark = self.start();
         self.expect(TokenKind::LBrace, "块需要 `{`");
         let outer_delimiters = std::mem::replace(&mut self.delim_depth, 0);
-        let (stmts, tail) = self.parse_block_contents();
+        let (stmts, tail) = self.parse_block_contents(false);
         self.expect(TokenKind::RBrace, "块需要 `}`");
         self.delim_depth = outer_delimiters;
         self.push_expr(mark, ExprKind::Block { stmts, tail })
     }
 
-    fn parse_block_contents(&mut self) -> (AstRange<StmtId>, Option<ExprId>) {
+    /// 解析块或语句片段的内部语句序列。
+    ///
+    /// `fragment` 为真时当前处于生成片段：片段结尾（Eof）前的裸表达式成为
+    /// 可选尾表达式，与块结尾的 `}` 语义一致。
+    pub(super) fn parse_block_contents(
+        &mut self,
+        fragment: bool,
+    ) -> (AstRange<StmtId>, Option<ExprId>) {
         let mut stmts = Vec::new();
         let mut tail = None;
         while !self.at_any(&[
@@ -114,7 +121,9 @@ impl Parser<'_> {
                 stmts.push(self.expr_stmt(expr, true));
                 continue;
             }
-            if self.at_any(&[TokenKind::RBrace, TokenKind::RParen, TokenKind::RBracket]) {
+            if self.at_any(&[TokenKind::RBrace, TokenKind::RParen, TokenKind::RBracket])
+                || (fragment && self.at(TokenKind::Eof))
+            {
                 tail = Some(expr);
                 break;
             }

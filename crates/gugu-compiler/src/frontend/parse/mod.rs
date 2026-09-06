@@ -9,12 +9,13 @@ mod pat;
 mod ty;
 
 use crate::diagnostics::{Diagnostic, DiagnosticCode};
-use crate::source::{ExpansionId, SourceFileId, SourceMap, Span};
+use crate::source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span};
 
 #[cfg(test)]
 use super::ast::FnBody;
 use super::ast::{
-    AstArena, AstFile, AstNodeId, AstRange, AttrKind, Attribute, ExprId, ItemKind, try_extend_range,
+    AstArena, AstFile, AstNodeId, AstRange, AttrKind, Attribute, ExprId, ItemId, ItemKind, StmtId,
+    try_extend_range,
 };
 use super::intern::{Symbol, SymbolInterner};
 use super::token::{Token, TokenBuffer, TokenKind, TriviaKind};
@@ -73,6 +74,8 @@ pub(crate) fn parse(
         source,
         source_map,
         file,
+        expansion: ExpansionId::ROOT,
+        token_base: 0,
         tokens: &buffer.tokens,
         trivia: &buffer.trivia,
         intern: &mut buffer.intern,
@@ -95,10 +98,202 @@ pub(crate) fn parse(
     }
 }
 
+/// 源码宏生成片段的解析结果；按片段类别只填充对应根。
+#[derive(Debug)]
+pub(crate) enum FragmentAst {
+    /// 模块 item 列表片段（含片段内属性）。
+    Items {
+        items: Vec<ItemId>,
+        inner_attributes: AstRange<Attribute>,
+    },
+    /// 块语句片段：语句序列与可选尾表达式。
+    Statements(Vec<StmtId>, Option<ExprId>),
+    /// 单个表达式片段。
+    Expression(ExprId),
+    /// 单个类型片段。
+    Type(super::ast::TyId),
+    /// 单个模式片段。
+    Pattern(super::ast::PatId),
+}
+
+/// 片段类别。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FragmentKind {
+    Items,
+    Statements,
+    Expression,
+    Type,
+    Pattern,
+}
+
+/// 把 source slot 映射为片段解析类别。
+pub(crate) fn fragment_kind_of(slot: crate::source::SourceSlot) -> FragmentKind {
+    match slot {
+        crate::source::SourceSlot::Item => FragmentKind::Items,
+        crate::source::SourceSlot::Statement => FragmentKind::Statements,
+        crate::source::SourceSlot::Expression => FragmentKind::Expression,
+        crate::source::SourceSlot::Type => FragmentKind::Type,
+        crate::source::SourceSlot::Pattern => FragmentKind::Pattern,
+    }
+}
+
+/// 把生成源码片段直接解析进一个已存在的 arena 与 token 缓冲。
+///
+/// `arena` 与 `buffer` 由调用方先行取出（`std::mem::take`）；片段 token 会追加进
+/// `buffer`，片段节点追加进 `arena`，二者在函数结束后归还调用方。片段 span 携带
+/// `expansion` 指向的展开记录。
+pub(crate) fn parse_fragment(
+    source: &str,
+    source_map: &SourceMap,
+    file: SourceFileId,
+    expansion: ExpansionId,
+    kind: FragmentKind,
+    arena: AstArena,
+    buffer: &mut TokenBuffer,
+) -> (FragmentAst, AstArena, Vec<Diagnostic>) {
+    let fragment_buffer = {
+        // 片段词法使用独立缓冲（偏移即片段文本偏移），随后符号重映射并追加进宿主缓冲。
+        let snapshot = SourceSnapshot::from_str(std::path::Path::new("<fragment>"), source)
+            .expect("生成片段文本已按 UTF-8 校验");
+        let mut fragment_map = SourceMap::empty();
+        let file = fragment_map.push_snapshot(snapshot).expect("片段快照注册");
+        let lexed = super::lex::lex_in_expansion(
+            fragment_map.snapshot(file).expect("片段快照存在"),
+            &fragment_map,
+            file,
+            expansion,
+        );
+        lexed.buffer
+    };
+    let mut diagnostics = Vec::new();
+    let empty_symbol = buffer.intern.intern_str("");
+    // 符号重映射：片段 token 的 symbol 换成宿主 interner 的同一字符串身份。
+    let mut fragment_tokens = fragment_buffer.tokens;
+    let trivia_offset = buffer.trivia.len() as u32;
+    for token in &mut fragment_tokens {
+        if let Some(symbol) = token.symbol {
+            let text = fragment_buffer.intern.get_str(symbol);
+            token.symbol = Some(buffer.intern.intern_str(text));
+        }
+        token.trivia_start = token
+            .trivia_start
+            .checked_add(trivia_offset)
+            .unwrap_or(u32::MAX);
+    }
+    let token_base = buffer.tokens.len();
+    buffer.tokens.extend(fragment_tokens.iter().copied());
+    buffer.trivia.extend(fragment_buffer.trivia.iter().copied());
+
+    let mut parser = Parser {
+        source,
+        source_map,
+        file,
+        expansion,
+        token_base,
+        tokens: &buffer.tokens,
+        trivia: &buffer.trivia,
+        intern: &mut buffer.intern,
+        empty_symbol,
+        cursor: token_base,
+        delim_depth: 0,
+        brace_depth: 0,
+        extern_block_abi: None,
+        arena,
+        diagnostics: Vec::new(),
+        allow_struct: true,
+        ty_depth: 0,
+        diag_seq: 0,
+    };
+    let fragment = parser.parse_fragment(kind);
+    diagnostics.extend(parser.diagnostics);
+    (fragment, parser.arena, diagnostics)
+}
+
+impl Parser<'_> {
+    fn parse_fragment(&mut self, kind: FragmentKind) -> FragmentAst {
+        match kind {
+            FragmentKind::Items => {
+                let (items, inner_attributes) = self.parse_fragment_items();
+                FragmentAst::Items {
+                    items,
+                    inner_attributes,
+                }
+            }
+            FragmentKind::Statements => {
+                let (stmts, tail) = self.parse_fragment_statements();
+                FragmentAst::Statements(stmts, tail)
+            }
+            FragmentKind::Expression => FragmentAst::Expression(self.parse_fragment_expression()),
+            FragmentKind::Type => FragmentAst::Type(self.parse_fragment_type()),
+            FragmentKind::Pattern => FragmentAst::Pattern(self.parse_fragment_pattern()),
+        }
+    }
+
+    /// 模块 item 片段：解析 item 序列直到片段结尾。
+    fn parse_fragment_items(&mut self) -> (Vec<ItemId>, AstRange<Attribute>) {
+        let inner = self.parse_inner_attributes();
+        let mut items = Vec::new();
+        while !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::Error) {
+                self.consume_error_token();
+                continue;
+            }
+            let item_id = self.parse_item();
+            if matches!(self.arena.items[item_id.0 as usize].kind, ItemKind::Error) {
+                self.recover_item();
+            }
+            items.push(item_id);
+        }
+        (items, inner)
+    }
+
+    /// 语句片段：语句序列直到片段结尾，结尾的裸表达式成为可选尾表达式。
+    ///
+    /// 片段顶层语句由 `parse_block_contents` 追加在 `stmt_ids` 尾部；此处收回
+    /// 顶层追加段（嵌套块语句保留原位），由展开驱动器按插入位置拼接。
+    fn parse_fragment_statements(&mut self) -> (Vec<StmtId>, Option<ExprId>) {
+        let (range, tail) = self.parse_block_contents(true);
+        let stmts: Vec<StmtId> = range.as_slice(&self.arena.stmt_ids).to_vec();
+        let appended = self.arena.stmt_ids.len();
+        self.arena.stmt_ids.truncate(appended - stmts.len());
+        (stmts, tail)
+    }
+
+    /// 表达式片段：恰好一个表达式。
+    fn parse_fragment_expression(&mut self) -> ExprId {
+        let expr = self.parse_expression();
+        self.expect_fragment_end("表达式片段只接受一个表达式");
+        expr
+    }
+
+    /// 类型片段：恰好一个类型。
+    fn parse_fragment_type(&mut self) -> super::ast::TyId {
+        let ty = self.parse_ty();
+        self.expect_fragment_end("类型片段只接受一个类型");
+        ty
+    }
+
+    /// 模式片段：恰好一个模式。
+    fn parse_fragment_pattern(&mut self) -> super::ast::PatId {
+        let pat = self.parse_pat();
+        self.expect_fragment_end("模式片段只接受一个模式");
+        pat
+    }
+
+    fn expect_fragment_end(&mut self, message: &str) {
+        if !self.at(TokenKind::Eof) {
+            self.error_here(DiagnosticCode::ParseUnexpected, message);
+        }
+    }
+}
+
 pub(super) struct Parser<'a> {
     pub(super) source: &'a str,
     pub(super) source_map: &'a SourceMap,
     pub(super) file: SourceFileId,
+    pub(super) expansion: ExpansionId,
+    /// 片段解析时 token 流的起始下标；根解析为 0。
+    pub(super) token_base: usize,
     pub(super) tokens: &'a [Token],
     trivia: &'a [super::token::Trivia],
     pub(super) intern: &'a mut SymbolInterner,
@@ -291,7 +486,7 @@ impl<'a> Parser<'a> {
 
     pub(super) fn make_span(&self, start: u32, end: u32) -> Span {
         self.source_map
-            .span(self.file, start as usize, end as usize, ExpansionId::ROOT)
+            .span(self.file, start as usize, end as usize, self.expansion)
             .unwrap_or_else(|_| {
                 Span::detached(
                     std::path::Path::new("<parse>"),
@@ -487,8 +682,9 @@ impl<'a> Parser<'a> {
     fn token_index(&self, token: Token) -> u32 {
         self.tokens
             .iter()
+            .skip(self.token_base)
             .position(|candidate| candidate.start == token.start && candidate.end == token.end)
-            .map(super::token::checked_u32)
+            .map(|offset| super::token::checked_u32(self.token_base + offset))
             .unwrap_or(0)
     }
 

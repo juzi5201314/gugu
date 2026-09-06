@@ -124,6 +124,14 @@ pub enum DiagnosticCode {
     ComptimeBudget,
     /// comptime 求值执行了 panic。
     ComptimePanic,
+    /// 完全相同的展开键再次出现在当前展开栈。
+    ExpansionCycle,
+    /// 源码宏展开预算或 `expansion_limit` 属性非法。
+    ExpansionLimit,
+    /// 生成片段类别与插入位置不符。
+    ExpansionFragmentMismatch,
+    /// 源码宏脚本在边界返回 `Err`。
+    MacroBoundaryError,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -176,6 +184,10 @@ impl fmt::Display for DiagnosticCode {
             Self::ComptimeCapability => "E0045",
             Self::ComptimeBudget => "E0046",
             Self::ComptimePanic => "E0047",
+            Self::ExpansionCycle => "E0048",
+            Self::ExpansionLimit => "E0049",
+            Self::ExpansionFragmentMismatch => "E0050",
+            Self::MacroBoundaryError => "E0051",
         };
         formatter.write_str(code)
     }

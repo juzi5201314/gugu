@@ -11,7 +11,17 @@ pub(crate) struct Lexed {
 }
 
 pub(crate) fn lex(snapshot: &SourceSnapshot, source_map: &SourceMap, file: SourceFileId) -> Lexed {
-    let mut lexer = Lexer::new(snapshot, source_map, file);
+    lex_in_expansion(snapshot, source_map, file, ExpansionId::ROOT)
+}
+
+/// 在指定源码宏展开上下文中执行词法分析；根源码使用 [`lex`]。
+pub(crate) fn lex_in_expansion(
+    snapshot: &SourceSnapshot,
+    source_map: &SourceMap,
+    file: SourceFileId,
+    expansion: ExpansionId,
+) -> Lexed {
+    let mut lexer = Lexer::new(snapshot, source_map, file, expansion);
     lexer.scan_file();
     validate_attributes(
         lexer.source,
@@ -30,6 +40,7 @@ struct Lexer<'a> {
     bytes: &'a [u8],
     source_map: &'a SourceMap,
     file: SourceFileId,
+    expansion: ExpansionId,
     pos: usize,
     trivia_mark: u32,
     fstring_interp: u32,
@@ -38,7 +49,12 @@ struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
-    fn new(snapshot: &'a SourceSnapshot, source_map: &'a SourceMap, file: SourceFileId) -> Self {
+    fn new(
+        snapshot: &'a SourceSnapshot,
+        source_map: &'a SourceMap,
+        file: SourceFileId,
+        expansion: ExpansionId,
+    ) -> Self {
         let source = snapshot.content();
         let cap = source.len() / 2 + 8;
         Self {
@@ -46,6 +62,7 @@ impl<'a> Lexer<'a> {
             bytes: source.as_bytes(),
             source_map,
             file,
+            expansion,
             pos: 0,
             trivia_mark: 0,
             fstring_interp: 0,
@@ -732,7 +749,7 @@ impl<'a> Lexer<'a> {
     ) {
         let span = self
             .source_map
-            .span(self.file, start, end.max(start), ExpansionId::ROOT)
+            .span(self.file, start, end.max(start), self.expansion)
             .ok();
         self.diagnostics
             .push(Diagnostic::error(code, message, span));

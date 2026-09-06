@@ -233,7 +233,7 @@ impl Compiler {
         let descriptor = target.descriptor();
         graph.complete(ActionKind::ResolveTarget, target.to_string());
 
-        let loaded = match load_input(input, target) {
+        let mut loaded = match load_input(input, target) {
             Ok(loaded) => loaded,
             Err(error) => {
                 diagnostics.push(error.diagnostic());
@@ -369,6 +369,12 @@ fn frontend_action_key(
         inputs.set_cfg(key, value);
     }
     inputs.set_comptime_registry(frontend.comptime_registry.1);
+    for (key, hash) in &frontend.expansion_inputs.macros {
+        inputs.add_macro_input(key.clone(), *hash);
+    }
+    if !frontend.expansion_inputs.budget.is_empty() {
+        inputs.set_macro_budget(&frontend.expansion_inputs.budget);
+    }
     inputs.key()
 }
 
@@ -389,11 +395,11 @@ struct LoadedInput {
 }
 
 impl LoadedInput {
-    fn as_source_input(&self) -> SourceInput<'_> {
-        match &self.plan {
+    fn as_source_input(&mut self) -> SourceInput<'_> {
+        match &mut self.plan {
             None => SourceInput::EmptyPackage,
             Some(plan) => SourceInput::Sources {
-                source_map: &self.source_map,
+                source_map: &mut self.source_map,
                 entry: &plan.entry,
                 source_root: &plan.source_root,
                 package_identity: &plan.package_identity,

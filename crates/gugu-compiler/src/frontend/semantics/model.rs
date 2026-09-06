@@ -162,7 +162,7 @@ pub(crate) struct Model<'a> {
     function_items: Vec<Vec<Option<ItemId>>>,
 }
 impl<'a> Model<'a> {
-    pub(super) fn name_fingerprint(&self) -> [u8; 32] {
+    pub(in crate::frontend) fn name_fingerprint(&self) -> [u8; 32] {
         let mut hash = blake3::Hasher::new_derive_key("gugu-semantic-names-v1");
         for definition in &self.names.definitions {
             hash.update(&definition.stable_key);

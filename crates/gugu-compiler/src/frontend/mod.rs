@@ -8,6 +8,7 @@ use crate::{
 mod ast;
 mod attr;
 pub(crate) mod cfg;
+mod expand;
 pub(crate) mod format;
 pub(crate) mod hir;
 mod intern;
@@ -30,7 +31,7 @@ pub(crate) use token::TokenBuffer;
 pub(crate) enum SourceInput<'a> {
     EmptyPackage,
     Sources {
-        source_map: &'a SourceMap,
+        source_map: &'a mut SourceMap,
         entry: &'a str,
         source_root: &'a str,
         package_identity: &'a str,
@@ -51,6 +52,7 @@ pub(crate) struct FrontendOutput {
     pub(crate) names: names::NameResolution,
     pub(crate) types: Vec<types::Layout>,
     pub(crate) comptime_registry: (u32, [u8; 32]),
+    pub(crate) expansion_inputs: expand::ExpansionInputs,
     #[cfg(test)]
     pub(crate) semantics: semantics::CheckedSemantics,
     pub(crate) hir: hir::Validated,
@@ -80,6 +82,7 @@ pub(crate) fn bootstrap(
             names: names::NameResolution::default(),
             types: Vec::new(),
             comptime_registry: semantics::comptime::registry::EARLY_REGISTRY_IDENTITY,
+            expansion_inputs: expand::ExpansionInputs::default(),
             #[cfg(test)]
             semantics: semantics::CheckedSemantics::default(),
             hir: hir::Validated::freeze(hir::Module::default())
@@ -108,7 +111,7 @@ pub(crate) fn bootstrap(
 }
 
 fn check_sources(
-    source_map: &SourceMap,
+    source_map: &mut SourceMap,
     entry: &str,
     source_root: &str,
     package_identity: &str,
@@ -119,6 +122,15 @@ fn check_sources(
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
     let mut modules = parse_modules(source_map, source_root, cfg)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
+    let expansion_inputs = expand::run(
+        &mut modules,
+        source_map,
+        cfg,
+        queries,
+        package_identity,
+        external_packages,
+    )
+    .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     let entry_file = source_map.file_id(entry).ok_or_else(|| {
         vec![Diagnostic::error(
             DiagnosticCode::ModuleNotFound,
@@ -141,15 +153,24 @@ fn check_sources(
         let span = source_map_span(source_map, entry_file, 0, 0)?;
         return Err(vec![Diagnostic::error(
             DiagnosticCode::MissingMain,
-            "target 入口在 cfg 裁项后必须包含 `fn main() { ... }` 或 `fn main() = ...`",
+            "target 入口在 cfg 裁项与宏展开后必须包含 `fn main() { ... }` 或 `fn main() = ...`",
             Some(span),
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
     let (semantics, types, registry, hir) =
-        semantics::check(&modules, &names, source_map, cfg, entry_function, queries)?;
+        semantics::check(&modules, &names, source_map, cfg, entry_function, queries)
+            .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     Ok(frontend_output(
-        entry, source_map, modules, names, types, registry, semantics, hir,
+        entry,
+        source_map,
+        modules,
+        names,
+        types,
+        registry,
+        expansion_inputs,
+        semantics,
+        hir,
     ))
 }
 
@@ -247,6 +268,7 @@ fn frontend_output(
     names: names::NameResolution,
     types: Vec<types::Layout>,
     comptime_registry: (u32, [u8; 32]),
+    expansion_inputs: expand::ExpansionInputs,
     semantics: semantics::CheckedSemantics,
     hir: hir::Validated,
 ) -> FrontendOutput {
@@ -275,6 +297,7 @@ fn frontend_output(
         names,
         types,
         comptime_registry,
+        expansion_inputs,
         #[cfg(test)]
         semantics,
         hir,

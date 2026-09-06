@@ -231,7 +231,7 @@ pub(super) fn frontend(
     sources: &[(&str, &str)],
     queries: &crate::QueryEngine,
 ) -> Result<super::super::FrontendOutput, Vec<crate::Diagnostic>> {
-    let sources = crate::SourceMap::new(
+    let mut sources = crate::SourceMap::new(
         sources
             .iter()
             .map(|(path, source)| crate::SourceSnapshot::from_str(path, source).unwrap())
@@ -248,7 +248,7 @@ pub(super) fn frontend(
     );
     super::super::bootstrap(
         super::super::SourceInput::Sources {
-            source_map: &sources,
+            source_map: &mut sources,
             entry: "main.gg",
             source_root: "",
             package_identity: "tests/semantics@1.0.0",

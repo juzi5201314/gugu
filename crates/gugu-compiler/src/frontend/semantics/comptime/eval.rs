@@ -14,7 +14,12 @@ use super::super::model::{DefRef, Model, Ty};
 use super::super::traits::MemberKind;
 use super::registry::{self, Domain};
 use crate::frontend::string;
+use crate::query::{QueryEngine, QueryKey, QueryKind};
+use crate::source::{ExpansionId, SourceMap, SourceSlot, SourceSnapshot};
 use crate::{Diagnostic, DiagnosticCode};
+
+/// ParseSource query 的 schema 版本。
+pub(crate) const PARSE_SOURCE_SCHEMA_VERSION: u32 = 1;
 
 /// 单次求值的确定性资源边界，由 compiler profile 固定并进入编译输入。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +53,37 @@ pub(in crate::frontend) enum ConstantValue {
     Array(Vec<ConstantValue>),
     Tuple(Vec<ConstantValue>),
     Struct(BTreeMap<String, ConstantValue>),
+    /// `std.syntax.parse_*` 产生的已解析片段；只在 SourceExpand 域出现。
+    ParsedSource(ParsedFragment),
+    /// `Ok(...)` 构造值；只在 SourceExpand 域出现。
+    ResultOk(Box<ConstantValue>),
+    /// `Err(...)` 构造值；只在 SourceExpand 域出现。
+    ResultErr(Box<ConstantValue>),
+}
+
+/// 不透明 `ParsedSource` 的内部表示：生成文本与片段类别。
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
+pub(in crate::frontend) struct ParsedFragment {
+    /// 片段类别（与解析入口一致）。
+    pub(crate) slot: SourceSlot,
+    /// 通过语法闸门的生成文本。
+    pub(crate) text: String,
+}
+
+/// SourceExpand 域求值的外部上下文。
+pub(in crate::frontend) struct ExpandHost<'a> {
+    /// query 引擎，用于 `ParseSource` 解析闸门。
+    pub(in crate::frontend) queries: &'a QueryEngine,
+}
+
+/// 一次源码宏脚本求值的结果与资源用量。
+pub(in crate::frontend) struct MacroEval {
+    /// 脚本终值。
+    pub(in crate::frontend) value: ConstantValue,
+    /// 消耗的 fuel 步数。
+    pub(in crate::frontend) fuel_used: u64,
+    /// 记账的 comptime heap 字节。
+    pub(in crate::frontend) heap_used: u64,
 }
 
 /// 求值中未完成的控制流出口。
@@ -59,7 +95,7 @@ enum Unwind {
 }
 
 /// 一次 comptime 求值的独立状态。
-pub(super) struct EvalState {
+pub(super) struct EvalState<'a> {
     domain: Domain,
     profile: EvalProfile,
     fuel: u64,
@@ -69,9 +105,19 @@ pub(super) struct EvalState {
     const_stack: Vec<DefRef>,
     frames: Vec<Vec<(String, ConstantValue)>>,
     unwind: Option<Unwind>,
+    /// SourceExpand 域的插入上下文与 query 访问；其它域为空。
+    expand: Option<ExpandState<'a>>,
 }
 
-impl EvalState {
+/// SourceExpand 域的求值上下文。
+struct ExpandState<'a> {
+    /// 当前源码宏的插入 source slot。
+    slot: SourceSlot,
+    /// query 引擎。
+    queries: &'a QueryEngine,
+}
+
+impl<'a> EvalState<'a> {
     fn new(domain: Domain, profile: EvalProfile) -> Self {
         Self {
             domain,
@@ -83,7 +129,20 @@ impl EvalState {
             const_stack: Vec::new(),
             frames: Vec::new(),
             unwind: None,
+            expand: None,
         }
+    }
+
+    fn source_expand(
+        domain: Domain,
+        profile: EvalProfile,
+        slot: SourceSlot,
+        host: &ExpandHost<'a>,
+    ) -> Self {
+        let queries = host.queries;
+        let mut state = Self::new(domain, profile);
+        state.expand = Some(ExpandState { slot, queries });
+        state
     }
 
     fn step(&mut self, span: &crate::Span) -> Result<(), Diagnostic> {
@@ -296,6 +355,37 @@ impl Model<'_> {
         let mut state = EvalState::new(Domain::EARLY_CONST, self.eval_profile());
         let value = self.value(module, expression, &mut state)?;
         Ok(in_type(value, ty))
+    }
+
+    /// 在 SourceExpand 域执行一个源码宏脚本，返回脚本终值与资源用量。
+    ///
+    /// 顶层 `?` 与 `return` 通过 `Unwind::Return` 传出；`break`/`continue` 属于
+    /// 脚本错误。终值可以是 `ParsedSource`、`Ok(...)`/`Err(...)` 或其它
+    /// 编译期值，由宏边界进一步判定。
+    pub(in crate::frontend) fn eval_source_macro(
+        &self,
+        module: usize,
+        body: ExprId,
+        slot: SourceSlot,
+        host: &ExpandHost<'_>,
+    ) -> Result<MacroEval, Diagnostic> {
+        let profile = self.eval_profile();
+        let mut state = EvalState::source_expand(Domain::SOURCE_EXPAND, profile, slot, host);
+        let result = self.value(module, body, &mut state);
+        let returned = state.unwind.take();
+        let fuel_used = profile.fuel - state.fuel;
+        let heap_used = state.heap;
+        result
+            .and_then(|value| match returned {
+                Some(Unwind::Return(value)) => Ok(value),
+                Some(_) => Err(self.fail(module, body, "宏脚本不能在顶层 break 或 continue")),
+                None => Ok(value),
+            })
+            .map(|value| MacroEval {
+                value,
+                fuel_used,
+                heap_used,
+            })
     }
 
     fn fail(&self, module: usize, expression: ExprId, message: &str) -> Diagnostic {
@@ -526,6 +616,14 @@ impl Model<'_> {
             ExprKind::Match { scrutinee, arms } => {
                 self.match_value(module, expression, scrutinee, arms, state)
             }
+            ExprKind::TryOp(inner) => match self.value(module, inner, state)? {
+                ConstantValue::ResultOk(value) => Ok(*value),
+                ConstantValue::ResultErr(error) => {
+                    state.unwind = Some(Unwind::Return(ConstantValue::ResultErr(error)));
+                    Ok(ConstantValue::Unit)
+                }
+                _ => Err(fail()),
+            },
             ExprKind::FString { parts } => self.fstring(module, parts, state),
             ExprKind::Return(value) => {
                 let value = match value {
@@ -557,7 +655,6 @@ impl Model<'_> {
             | ExprKind::Closure(_)
             | ExprKind::SourceMacro { .. }
             | ExprKind::Try(_)
-            | ExprKind::TryOp(_)
             | ExprKind::TypeCallee(_) => Err(fail()),
             _ => Err(fail()),
         }
@@ -710,6 +807,26 @@ impl Model<'_> {
                 state.bind(self.name(module, name).to_owned(), value.clone());
                 self.match_pattern(module, pat, value, state)?
             }
+            PatKind::Constructor { path, fields } => {
+                let segments = self.path(module, path);
+                let fields = fields.as_slice(&arena.pat_ids);
+                match (segments.as_slice(), value) {
+                    (["Ok"], ConstantValue::ResultOk(inner)) => {
+                        if fields.len() != 1 {
+                            return Err(fail("Ok 模式需要恰好一个绑定"));
+                        }
+                        self.match_pattern(module, fields[0], inner, state)?
+                    }
+                    (["Err"], ConstantValue::ResultErr(inner)) => {
+                        if fields.len() != 1 {
+                            return Err(fail("Err 模式需要恰好一个绑定"));
+                        }
+                        self.match_pattern(module, fields[0], inner, state)?
+                    }
+                    (_, ConstantValue::ResultOk(_)) | (_, ConstantValue::ResultErr(_)) => false,
+                    _ => return Err(fail("构造器模式只能匹配 Result 值")),
+                }
+            }
             _ => return Err(fail("comptime match 只支持标量与元组模式")),
         })
     }
@@ -740,6 +857,9 @@ impl Model<'_> {
                         return Err(self.fail(module, expr, "comptime f-string 不支持格式码"));
                     }
                     let value = self.value(module, expr, state)?;
+                    if matches!(value, ConstantValue::ParsedSource(_)) {
+                        return Err(self.fail(module, expr, "f-string 不能插值 ParsedSource"));
+                    }
                     output.push_str(&display_value(&value));
                 }
             }
@@ -890,6 +1010,12 @@ impl Model<'_> {
         }
         self.check_capability(module, &segments, &span, state)?;
         let arguments = self.value_list(module, args, state)?;
+        if state.domain == Domain::SOURCE_EXPAND
+            && let Some(value) =
+                self.expand_builtin(module, expression, &segments, &arguments, &span, state)?
+        {
+            return Ok(value);
+        }
         let def = self
             .resolve(module, &segments)
             .map_err(|_| self.fail(module, expression, "无法在编译期解析被调函数"))?;
@@ -900,6 +1026,128 @@ impl Model<'_> {
             return Err(self.fail(module, expression, "被调端点不是函数"));
         }
         self.interpret_function(def, &arguments, &span, state)
+    }
+
+    /// SourceExpand 域的内建调用：`std.syntax.parse_*` 解析闸门与 `Ok`/`Err` 构造。
+    ///
+    /// 返回 `None` 表示不是内建，沿普通调用路径继续。解析闸门把生成文本经
+    /// `ParseSource` query 送入主 lexer/parser；失败返回 `Err(SyntaxError)`
+    /// 值，由脚本自行捕获或传播到宏边界。
+    fn expand_builtin(
+        &self,
+        module: usize,
+        expression: ExprId,
+        segments: &[&str],
+        arguments: &[ConstantValue],
+        span: &crate::Span,
+        state: &mut EvalState,
+    ) -> Result<Option<ConstantValue>, Diagnostic> {
+        match segments {
+            ["Ok"] | ["Err"] if arguments.len() == 1 => {
+                let payload = Box::new(arguments[0].clone());
+                return Ok(Some(if segments == ["Ok"] {
+                    ConstantValue::ResultOk(payload)
+                } else {
+                    ConstantValue::ResultErr(payload)
+                }));
+            }
+            _ => {}
+        }
+        let canonical = self.external_path(module, segments);
+        let Some(canonical) = canonical else {
+            return Ok(None);
+        };
+        let slot = match canonical.as_str() {
+            "std.syntax.parse_source" => state
+                .expand
+                .as_ref()
+                .map(|expand| expand.slot)
+                .ok_or_else(|| {
+                    capability_error(
+                        span,
+                        "parse_source 需要源码宏插入上下文，请使用 parse_expr 等明确入口"
+                            .to_owned(),
+                    )
+                })?,
+            "std.syntax.parse_items" => SourceSlot::Item,
+            "std.syntax.parse_expr" => SourceSlot::Expression,
+            "std.syntax.parse_type" => SourceSlot::Type,
+            "std.syntax.parse_pattern" => SourceSlot::Pattern,
+            _ => return Ok(None),
+        };
+        let fail = |message: &str| self.fail(module, expression, message);
+        let [ConstantValue::String(text)] = arguments else {
+            return Err(fail("parse_* 需要恰好一个 string 参数"));
+        };
+        let queries = state
+            .expand
+            .as_ref()
+            .map(|expand| expand.queries)
+            .ok_or_else(|| capability_error(span, "parse_* 只能在源码宏脚本中调用".to_owned()))?;
+        let mut key = blake3::Hasher::new_derive_key("gugu-parse-source-input-v1");
+        key.update(&[slot_byte(slot)]);
+        key.update(&(text.len() as u64).to_le_bytes());
+        key.update(text.as_bytes());
+        let input_fingerprint = *key.finalize().as_bytes();
+        let query = QueryKey::new(
+            QueryKind::ParseSource,
+            PARSE_SOURCE_SCHEMA_VERSION,
+            input_fingerprint,
+        );
+        let result = queries.compute(query, |_| match validate_source_fragment(text, slot) {
+            Ok(()) => Ok((
+                serde_json::to_vec(&ParseSourceOutcome {
+                    ok: true,
+                    message: String::new(),
+                    offset: 0,
+                })
+                .expect("ParseSource 结果 schema 序列化"),
+                Vec::new(),
+            )),
+            Err(error) => Ok((
+                serde_json::to_vec(&ParseSourceOutcome {
+                    ok: false,
+                    message: error.0,
+                    offset: error.1,
+                })
+                .expect("ParseSource 结果 schema 序列化"),
+                Vec::new(),
+            )),
+        });
+        let payload = result
+            .map_err(|error| {
+                Diagnostic::error(
+                    DiagnosticCode::InvalidExpression,
+                    format!("解析闸门 query 失败：{error}"),
+                    Some(span.clone()),
+                )
+            })?
+            .payload()
+            .to_vec();
+        let outcome: ParseSourceOutcome = serde_json::from_slice(&payload).map_err(|_| {
+            Diagnostic::error(
+                DiagnosticCode::InvalidExpression,
+                "ParseSource query 缓存 schema 不合法",
+                Some(span.clone()),
+            )
+        })?;
+        if outcome.ok {
+            return Ok(Some(ConstantValue::ResultOk(Box::new(
+                ConstantValue::ParsedSource(ParsedFragment {
+                    slot,
+                    text: text.clone(),
+                }),
+            ))));
+        }
+        let mut fields = BTreeMap::new();
+        fields.insert("message".to_owned(), ConstantValue::String(outcome.message));
+        fields.insert(
+            "offset".to_owned(),
+            ConstantValue::Int(i128::from(outcome.offset)),
+        );
+        Ok(Some(ConstantValue::ResultErr(Box::new(
+            ConstantValue::Struct(fields),
+        ))))
     }
 
     fn comptime_panic(
@@ -1195,6 +1443,76 @@ fn display_value(value: &ConstantValue) -> String {
         ConstantValue::Array(_) | ConstantValue::Tuple(_) | ConstantValue::Struct(_) => {
             "…".to_owned()
         }
+        ConstantValue::ParsedSource(_) => "<parsed source>".to_owned(),
+        ConstantValue::ResultOk(_) => "Ok(…)".to_owned(),
+        ConstantValue::ResultErr(_) => "Err(…)".to_owned(),
+    }
+}
+
+/// `ParseSource` query 的确定性结果。
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ParseSourceOutcome {
+    ok: bool,
+    message: String,
+    offset: u32,
+}
+
+/// source slot 的稳定字节编码。
+pub(in crate::frontend) fn slot_byte(slot: SourceSlot) -> u8 {
+    match slot {
+        SourceSlot::Item => 1,
+        SourceSlot::Statement => 2,
+        SourceSlot::Expression => 3,
+        SourceSlot::Type => 4,
+        SourceSlot::Pattern => 5,
+    }
+}
+
+/// 把生成文本送入主 lexer/parser 的解析闸门；失败返回首个语法错误与字节偏移。
+///
+/// 使用一次性源码表独立解析，成功只代表语法有效；语义正确性由拼接后的
+/// 主前端链保证。
+fn validate_source_fragment(text: &str, slot: SourceSlot) -> Result<(), (String, u32)> {
+    let kind = match slot {
+        SourceSlot::Item => crate::frontend::parse::FragmentKind::Items,
+        SourceSlot::Statement => crate::frontend::parse::FragmentKind::Statements,
+        SourceSlot::Expression => crate::frontend::parse::FragmentKind::Expression,
+        SourceSlot::Type => crate::frontend::parse::FragmentKind::Type,
+        SourceSlot::Pattern => crate::frontend::parse::FragmentKind::Pattern,
+    };
+    let snapshot = SourceSnapshot::from_str(std::path::Path::new("<parsed-source>"), text)
+        .map_err(|_| ("生成文本不是合法 UTF-8 源码".to_owned(), 0_u32))?;
+    let mut sources = SourceMap::empty();
+    let file = sources
+        .push_snapshot(snapshot)
+        .map_err(|_| ("生成文本无法注册源码快照".to_owned(), 0_u32))?;
+    let snapshot = sources.snapshot(file).expect("快照已注册");
+    let lexed = crate::frontend::lex::lex_in_expansion(snapshot, &sources, file, ExpansionId::ROOT);
+    if let Some(first) = lexed.diagnostics.first() {
+        return Err((
+            first.message().to_owned(),
+            first.span().map_or(0, |s| s.start()),
+        ));
+    }
+    let mut buffer = lexed.buffer;
+    if buffer.has_error_tokens() {
+        return Err(("生成文本包含词法错误记号".to_owned(), 0));
+    }
+    let (_, _, diagnostics) = crate::frontend::parse::parse_fragment(
+        text,
+        &sources,
+        file,
+        ExpansionId::ROOT,
+        kind,
+        Default::default(),
+        &mut buffer,
+    );
+    match diagnostics.first() {
+        Some(first) => Err((
+            first.message().to_owned(),
+            first.span().map_or(0, |s| s.start()),
+        )),
+        None => Ok(()),
     }
 }
 
