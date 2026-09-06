@@ -340,11 +340,7 @@ impl Checker<'_, '_> {
             ExprKind::Comptime(body) => self.expression(body, expected),
             ExprKind::Async(body) => self.launch(id, body, expected),
             ExprKind::FString { parts } => {
-                for part in parts.as_slice(&self.arena().fstring_parts) {
-                    if let FStringPart::Interp { expr, .. } = part {
-                        self.expression(*expr, None);
-                    }
-                }
+                self.formatted_parts(parts);
                 Ty::String
             }
             ExprKind::Intrinsic {
@@ -519,7 +515,7 @@ impl Checker<'_, '_> {
                 expr.span.clone(),
             );
         }
-        self.record_erasure(id, &ty, &checked);
+        self.record_adjustment(id, &ty, &checked);
         self.expressions.push((id, checked.clone()));
         self.record_callable_value(id);
         checked

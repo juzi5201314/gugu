@@ -9,6 +9,7 @@ mod ast;
 mod attr;
 pub(crate) mod cfg;
 pub(crate) mod format;
+pub(crate) mod hir;
 mod intern;
 mod lex;
 mod names;
@@ -24,7 +25,6 @@ pub(crate) use lex::lex;
 pub(crate) use parse::parse;
 #[cfg(test)]
 pub(crate) use parse::{dump_ast, has_main_fn, parent_before_child, parse};
-pub(crate) use semantics::CheckedSemantics;
 pub(crate) use token::TokenBuffer;
 
 pub(crate) enum SourceInput<'a> {
@@ -43,7 +43,6 @@ pub(crate) enum SourceInput<'a> {
 #[derive(Clone, Debug)]
 pub(crate) struct FrontendOutput {
     pub(crate) path: Option<PathBuf>,
-    pub(crate) has_main: bool,
     pub(crate) source_len: u64,
     pub(crate) token_count: usize,
     pub(crate) item_count: usize,
@@ -51,7 +50,9 @@ pub(crate) struct FrontendOutput {
     pub(crate) modules: Vec<ParsedModule>,
     pub(crate) names: names::NameResolution,
     pub(crate) types: Vec<types::Layout>,
+    #[cfg(test)]
     pub(crate) semantics: semantics::CheckedSemantics,
+    pub(crate) hir: hir::Validated,
 }
 
 #[derive(Clone, Debug)]
@@ -70,7 +71,6 @@ pub(crate) fn bootstrap(
     match input {
         SourceInput::EmptyPackage => Ok(FrontendOutput {
             path: None,
-            has_main: false,
             source_len: 0,
             token_count: 0,
             item_count: 0,
@@ -78,7 +78,11 @@ pub(crate) fn bootstrap(
             modules: Vec::new(),
             names: names::NameResolution::default(),
             types: Vec::new(),
+            #[cfg(test)]
             semantics: semantics::CheckedSemantics::default(),
+            hir: hir::Validated::freeze(hir::Module::default())
+                .map_err(|error| vec![error])?
+                .0,
         }),
         SourceInput::Sources {
             source_map,
@@ -120,10 +124,17 @@ fn check_sources(
             None,
         )]
     })?;
-    let entry_module = modules
+    let entry_function = modules
         .iter()
-        .find(|module| module.file.source == entry_file);
-    let has_main = entry_module.is_some_and(has_active_main);
+        .enumerate()
+        .find(|(_, module)| module.file.source == entry_file)
+        .and_then(|(module, parsed)| {
+            active_main(parsed).map(|function| semantics::model::CallableId {
+                module,
+                function: function.0,
+            })
+        });
+    let has_main = entry_function.is_some();
     if require_main && !has_main {
         let span = source_map_span(source_map, entry_file, 0, 0)?;
         return Err(vec![Diagnostic::error(
@@ -133,10 +144,11 @@ fn check_sources(
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
-    let (semantics, types) = semantics::check(&modules, &names, source_map, cfg, queries)?;
-    let mut output = frontend_output(entry, has_main, source_map, modules, names, types);
-    output.semantics = semantics;
-    Ok(output)
+    let (semantics, types, hir) =
+        semantics::check(&modules, &names, source_map, cfg, entry_function, queries)?;
+    Ok(frontend_output(
+        entry, source_map, modules, names, types, semantics, hir,
+    ))
 }
 
 fn parse_modules(
@@ -228,15 +240,17 @@ fn module_path_conflict(
 
 fn frontend_output(
     entry: &str,
-    has_main: bool,
     source_map: &SourceMap,
     modules: Vec<ParsedModule>,
     names: names::NameResolution,
     types: Vec<types::Layout>,
+    semantics: semantics::CheckedSemantics,
+    hir: hir::Validated,
 ) -> FrontendOutput {
+    #[cfg(not(test))]
+    drop(semantics);
     FrontendOutput {
         path: Some(PathBuf::from(entry)),
-        has_main,
         source_len: source_map
             .snapshots()
             .iter()
@@ -257,7 +271,9 @@ fn frontend_output(
         modules,
         names,
         types,
-        semantics: semantics::CheckedSemantics::default(),
+        #[cfg(test)]
+        semantics,
+        hir,
     }
 }
 
@@ -331,7 +347,7 @@ fn valid_module_segment(segment: &str) -> bool {
         && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
 }
 
-fn has_active_main(module: &ParsedModule) -> bool {
+fn active_main(module: &ParsedModule) -> Option<ast::FnId> {
     module
         .file
         .items
@@ -339,15 +355,16 @@ fn has_active_main(module: &ParsedModule) -> bool {
         .iter()
         .copied()
         .filter(|&item| module.configured.item_active(item))
-        .any(|item| match module.arena.items[item.0 as usize].kind {
+        .find_map(|item| match module.arena.items[item.0 as usize].kind {
             ItemKind::Function(function) => {
                 let declaration = &module.arena.fns[function.0 as usize];
-                declaration
+                (declaration
                     .name
                     .is_some_and(|name| module.tokens.intern.get_str(name) == "main")
-                    && matches!(declaration.body, ast::FnBody::Block(_) | ast::FnBody::Eq(_))
+                    && matches!(declaration.body, ast::FnBody::Block(_) | ast::FnBody::Eq(_)))
+                .then_some(function)
             }
-            _ => false,
+            _ => None,
         })
 }
 

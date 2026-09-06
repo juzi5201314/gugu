@@ -151,19 +151,29 @@ impl Checker<'_, '_> {
             }
         }
     }
-    pub(super) fn record_erasure(&mut self, expression: ExprId, actual: &Ty, expected: &Ty) {
+    pub(super) fn record_adjustment(&mut self, expression: ExprId, actual: &Ty, expected: &Ty) {
+        use super::super::output::{AdjustmentKind, TypeAdjustment};
         let source = self.resolve(actual);
         let target = self.resolve(expected);
-        if source != target
-            && source != Ty::Never
-            && matches!(target, Ty::Dyn(_) | Ty::Function(..))
-        {
-            self.erasures.push(super::super::output::Erasure {
-                expression,
-                source,
-                target,
-            });
+        if source == target || source == Ty::Never {
+            return;
         }
+        let kind = match &target {
+            Ty::Dyn(_) | Ty::Function(..) => AdjustmentKind::Erase,
+            Ty::Opaque(..) => AdjustmentKind::Opaque,
+            Ty::Ref(inner)
+                if matches!(&**inner, Ty::Slice(_)) && matches!(source.deref(), Ty::Array(..)) =>
+            {
+                AdjustmentKind::ArrayToSlice
+            }
+            _ => return,
+        };
+        self.adjustments.push(TypeAdjustment {
+            expression,
+            source,
+            target,
+            kind,
+        });
     }
     pub(super) fn finish_hidden(&mut self, hidden: &mut [Option<Ty>]) {
         for (id, arguments, ty) in std::mem::take(&mut self.hidden_candidates) {
@@ -195,12 +205,12 @@ impl Checker<'_, '_> {
                 hidden[id as usize] = Some(ty);
             }
         }
-        let mut erasures = std::mem::take(&mut self.erasures);
-        for erasure in &mut erasures {
-            erasure.source = self.normalized(&erasure.source);
-            erasure.target = self.normalized(&erasure.target);
+        let mut adjustments = std::mem::take(&mut self.adjustments);
+        for adjustment in &mut adjustments {
+            adjustment.source = self.normalized(&adjustment.source);
+            adjustment.target = self.normalized(&adjustment.target);
         }
-        self.erasures = erasures;
+        self.adjustments = adjustments;
         let mut reflections = std::mem::take(&mut self.reflections);
         for reflection in &mut reflections {
             use super::super::output::ReflectionKind;

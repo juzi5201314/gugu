@@ -15,6 +15,7 @@ mod defer;
 mod expr;
 mod flow;
 mod foreign;
+mod formatting;
 mod generics;
 mod inference;
 mod memory;
@@ -40,6 +41,8 @@ struct CleanupPath {
 struct Slot {
     ty: Ty,
     storage: u8,
+    name: Symbol,
+    range: [u32; 2],
 }
 struct LoopState {
     values: Vec<Ty>,
@@ -83,8 +86,9 @@ struct Checker<'m, 'a> {
     trait_constraints: Vec<(super::traits::Obligation, Vec<super::traits::Obligation>)>,
     dispatches: Vec<super::output::Dispatch>,
     hidden_candidates: Vec<(u32, Vec<Ty>, Ty)>,
-    erasures: Vec<super::output::Erasure>,
+    adjustments: Vec<super::output::TypeAdjustment>,
     reflections: Vec<super::output::Reflection>,
+    formatting: Vec<super::output::FormattingPart>,
     memory_operations: Vec<super::output::MemoryOperation>,
     foreign_calls: Vec<super::foreign::ForeignCall>,
     call_site: Option<ExprId>,
@@ -141,11 +145,18 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                 checker.finish_native_checks(function);
             }
             let expressions = checker.expressions;
-            let (slots, slot_storage) = checker
-                .slots
-                .into_iter()
-                .map(|slot| (slot.ty, slot.storage))
-                .unzip();
+            let mut slots = Vec::with_capacity(checker.slots.len());
+            let mut slot_storage = Vec::with_capacity(checker.slots.len());
+            let mut slot_origins = Vec::with_capacity(checker.slots.len());
+            for slot in checker.slots {
+                slots.push(slot.ty);
+                slot_storage.push(slot.storage);
+                slot_origins.push(super::output::SlotOrigin {
+                    name: model.name(module, slot.name).to_owned(),
+                    start: slot.range[0],
+                    end: slot.range[1],
+                });
+            }
             bodies.push(super::output::CheckedBody {
                 definition: DefRef {
                     module,
@@ -159,10 +170,12 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                 patterns: checker.pattern_plans,
                 captures: checker.capture_plans,
                 slot_storage,
+                slot_origins,
                 variadic_calls: checker.variadic_calls,
                 dispatches: checker.dispatches,
-                erasures: checker.erasures,
+                adjustments: checker.adjustments,
                 reflections: checker.reflections,
+                formatting: checker.formatting,
                 memory_operations: checker.memory_operations,
                 foreign_calls: checker.foreign_calls,
                 assembly: checker.assembly,
@@ -243,8 +256,9 @@ impl<'m, 'a> Checker<'m, 'a> {
             trait_constraints: Vec::new(),
             dispatches: Vec::new(),
             hidden_candidates: Vec::new(),
-            erasures: Vec::new(),
+            adjustments: Vec::new(),
             reflections: Vec::new(),
+            formatting: Vec::new(),
             memory_operations: Vec::new(),
             foreign_calls: Vec::new(),
             call_site: None,
@@ -562,7 +576,7 @@ impl<'m, 'a> Checker<'m, 'a> {
                 self.bind(pat, &ty, true, Some(false));
             }
             if let Some(name) = param.variadic_name {
-                self.slot(name, ty, true);
+                self.slot(name, ty, true, &param.span);
             }
         }
         if f.name
@@ -612,9 +626,14 @@ impl<'m, 'a> Checker<'m, 'a> {
         self.current_function = outer_function;
         Ty::Function(parameters, Box::new(self.return_ty.clone()))
     }
-    fn slot(&mut self, name: Symbol, ty: Ty, initialized: bool) {
+    fn slot(&mut self, name: Symbol, ty: Ty, initialized: bool, span: &Span) {
         let id = self.slots.len();
-        self.slots.push(Slot { ty, storage: 0 });
+        self.slots.push(Slot {
+            ty,
+            storage: 0,
+            name,
+            range: [span.start(), span.end()],
+        });
         self.state.initialized.resize(id + 1, false);
         self.state.callables.resize_with(id + 1, Vec::new);
         self.initialize(id, initialized);
@@ -659,7 +678,7 @@ impl<'m, 'a> Checker<'m, 'a> {
                 let start = self.slots.len();
                 for binding in result.bindings {
                     debug_assert!(binding.span.start() <= binding.span.end());
-                    self.slot(binding.name, binding.ty, initialized);
+                    self.slot(binding.name, binding.ty, initialized, &binding.span);
                 }
                 self.pattern_plans.push(super::output::PatternPlan {
                     pattern: pat,

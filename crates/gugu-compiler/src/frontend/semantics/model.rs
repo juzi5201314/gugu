@@ -136,6 +136,7 @@ pub(crate) struct FieldInfo {
 }
 #[derive(Clone, Debug)]
 pub(crate) struct Constructor {
+    pub(crate) index: usize,
     pub(crate) name: String,
     pub(crate) fields: Vec<FieldInfo>,
     pub(crate) record: bool,
@@ -373,6 +374,7 @@ impl<'a> Model<'a> {
                 }
                 | ItemKind::Union { fields: range, .. } => fields(*range).map(|fields| {
                     vec![Constructor {
+                        index: 0,
                         name: model.nominal[index].name.clone(),
                         fields,
                         record: true,
@@ -383,6 +385,7 @@ impl<'a> Model<'a> {
                     ..
                 } => field(f, 0).map(|f| {
                     vec![Constructor {
+                        index: 0,
                         name: model.nominal[index].name.clone(),
                         fields: vec![f],
                         record: false,
@@ -393,8 +396,10 @@ impl<'a> Model<'a> {
                     .iter()
                     .enumerate()
                     .filter(|(i, _)| m.configured.variant_active(variants.start as usize + i))
-                    .map(|(_, v)| {
+                    .enumerate()
+                    .map(|(index, (_, v))| {
                         Ok(Constructor {
+                            index,
                             name: model.name(def.module, v.name).to_owned(),
                             fields: match v.kind {
                                 VariantKind::Unit => Vec::new(),
@@ -822,6 +827,7 @@ impl<'a> Model<'a> {
                     n.variants
                         .iter()
                         .map(|v| Constructor {
+                            index: v.index,
                             name: v.name.clone(),
                             record: v.record,
                             fields: v
@@ -839,11 +845,13 @@ impl<'a> Model<'a> {
             }
             Ty::Option(t) => Some(vec![
                 Constructor {
+                    index: 0,
                     name: "Some".into(),
                     fields: vec![field((**t).clone())],
                     record: false,
                 },
                 Constructor {
+                    index: 1,
                     name: "None".into(),
                     fields: vec![],
                     record: false,
@@ -851,11 +859,13 @@ impl<'a> Model<'a> {
             ]),
             Ty::Result(t, e) => Some(vec![
                 Constructor {
+                    index: 0,
                     name: "Ok".into(),
                     fields: vec![field((**t).clone())],
                     record: false,
                 },
                 Constructor {
+                    index: 1,
                     name: "Err".into(),
                     fields: vec![field((**e).clone())],
                     record: false,

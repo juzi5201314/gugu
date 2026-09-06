@@ -1,3 +1,6 @@
+mod format;
+pub(super) use format::{FormatSpec, ParsedCount, format_spec_error, parse_format};
+
 use crate::diagnostics::DiagnosticCode;
 
 #[derive(Clone, Copy, Debug)]
@@ -48,6 +51,57 @@ pub(super) fn decode_string(text: &str) -> std::borrow::Cow<'_, str> {
             let ch = body[offset..].chars().next().expect("正文字符边界");
             result.push(ch);
             offset += ch.len_utf8();
+        }
+    }
+    std::borrow::Cow::Owned(result)
+}
+
+/// b/c 字面量的十六进制转义贡献一个字节，Unicode 转义仍贡献 UTF-8 字节。
+pub(super) fn decode_bytes(text: &str) -> Vec<u8> {
+    let body = &text[2..text.len() - 1];
+    let mut bytes = Vec::with_capacity(body.len());
+    let mut offset = 0;
+    while offset < body.len() {
+        if body.as_bytes()[offset] == b'\\' {
+            let decoded = scan_escape(body, offset, true, true).expect("字节字符串已通过词法检查");
+            if body.as_bytes()[offset + 1] == b'x' {
+                bytes.push(decoded.value as u8);
+            } else {
+                let mut encoded = [0; 4];
+                bytes.extend_from_slice(decoded.value.encode_utf8(&mut encoded).as_bytes());
+            }
+            offset = decoded.next;
+        } else {
+            bytes.push(body.as_bytes()[offset]);
+            offset += 1;
+        }
+    }
+    bytes
+}
+
+pub(super) fn decode_fstring_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.bytes().any(|byte| matches!(byte, b'\\' | b'{' | b'}')) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut result = String::with_capacity(text.len());
+    let mut offset = 0;
+    while offset < text.len() {
+        match text.as_bytes()[offset] {
+            b'\\' => {
+                let decoded =
+                    scan_escape(text, offset, false, true).expect("插值文本已通过词法检查");
+                result.push(decoded.value);
+                offset = decoded.next;
+            }
+            b'{' | b'}' => {
+                result.push(text.as_bytes()[offset] as char);
+                offset += 2;
+            }
+            _ => {
+                let character = text[offset..].chars().next().expect("插值文本字符边界");
+                result.push(character);
+                offset += character.len_utf8();
+            }
         }
     }
     std::borrow::Cow::Owned(result)
@@ -201,88 +255,6 @@ fn scan_unicode_escape(
         utf8_len: ch.len_utf8() as u8,
         is_nul: ch == '\0',
     })
-}
-
-pub(super) fn format_spec_error(spec: &str) -> Option<&'static str> {
-    let bytes = spec.as_bytes();
-    let mut i = 0;
-    if bytes.len() >= 2 && is_align(bytes[1]) {
-        i = 2;
-    } else if bytes.first().copied().is_some_and(is_align) {
-        i = 1;
-    }
-    if bytes.get(i).copied().is_some_and(is_sign) {
-        i += 1;
-    }
-    if bytes.get(i) == Some(&b'#') {
-        i += 1;
-    }
-    if bytes.get(i) == Some(&b'0') {
-        i += 1;
-    }
-    let Some(next) = skip_width(bytes, i) else {
-        return Some("未知格式码");
-    };
-    i = next;
-    if bytes.get(i) == Some(&b'.') {
-        i += 1;
-        let Some(next) = skip_precision(bytes, i) else {
-            return Some("未知格式码");
-        };
-        i = next;
-    }
-    if let Some(&type_code) = bytes.get(i)
-        && is_type_code(type_code)
-    {
-        i += 1;
-    } else if bytes.get(i).is_some() {
-        return Some("未知格式码");
-    }
-    if i == bytes.len() {
-        None
-    } else {
-        Some("未知格式码")
-    }
-}
-
-fn skip_width(bytes: &[u8], i: usize) -> Option<usize> {
-    skip_count(bytes, i)
-}
-
-fn skip_precision(bytes: &[u8], i: usize) -> Option<usize> {
-    skip_count(bytes, i)
-}
-
-fn skip_count(bytes: &[u8], mut i: usize) -> Option<usize> {
-    if bytes.get(i).copied().is_some_and(|b| b.is_ascii_digit()) {
-        while bytes.get(i).copied().is_some_and(|b| b.is_ascii_digit()) {
-            i += 1;
-        }
-        return Some(i);
-    }
-    if bytes.get(i).copied().is_some_and(is_ident_start) {
-        let mut end = i + 1;
-        while bytes.get(end).copied().is_some_and(is_ident_continue) {
-            end += 1;
-        }
-        if bytes.get(end) == Some(&b'$') {
-            return Some(end + 1);
-        }
-        return Some(i);
-    }
-    Some(i)
-}
-
-const fn is_align(byte: u8) -> bool {
-    matches!(byte, b'<' | b'^' | b'>')
-}
-
-const fn is_sign(byte: u8) -> bool {
-    matches!(byte, b'+' | b'-' | b' ')
-}
-
-const fn is_type_code(byte: u8) -> bool {
-    matches!(byte, b'?' | b'b' | b'o' | b'x' | b'X' | b'e' | b'E')
 }
 
 const fn is_ident_start(byte: u8) -> bool {

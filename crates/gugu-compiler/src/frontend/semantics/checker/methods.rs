@@ -231,6 +231,7 @@ impl Checker<'_, '_> {
                 })
         {
             let ty = self.field(&self_ty, name, &self.arena().exprs[callee.0 as usize].span);
+            self.expressions.push((callee, ty.clone()));
             return self.invoke(callee, ty, args.to_vec(), None, expected);
         }
         let span = &self.arena().exprs[callee.0 as usize].span;
@@ -347,7 +348,7 @@ impl Checker<'_, '_> {
             dereferences,
             borrow: actual.as_ref().is_some_and(|ty| matches!(ty, Ty::Ref(_)))
                 && !matches!(target, Ty::Ref(_)),
-            implicit_receiver: receiver,
+            implicit_receiver: receiver && !trait_ufcs,
             dynamic: method.dynamic,
         });
         self.invoke(callee, callable, args.to_vec(), actual, expected)

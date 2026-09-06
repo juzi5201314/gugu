@@ -3,14 +3,13 @@
 
 //! Gugu compiler 的阶段化 bootstrap 接口。
 //!
-//! compiler bootstrap：源码快照、词法分析、递归下降 AST、action graph、目标描述、最小 IR、
-//! 后端 image plan 和 Gugu runtime 源资源登记。类型系统按后续阶段替换当前入口检查。
+//! compiler 前端：源码快照、词法及 AST、名称/类型/控制流检查、版本化查询与冻结 HIR。
+//! 后端目前消费已验证 HIR 形成内存 image plan；机器代码生成由后续后端阶段实现。
 
 mod action;
 mod backend;
 mod diagnostics;
 mod frontend;
-mod ir;
 mod project;
 mod query;
 mod runtime;
@@ -178,6 +177,7 @@ pub struct Compilation {
     diagnostics: Diagnostics,
     source_map: SourceMap,
     image_plan: Option<ImagePlan>,
+    hir: Option<frontend::hir::Validated>,
 }
 
 impl Compilation {
@@ -203,7 +203,7 @@ impl Compilation {
 
     /// 判断本次 action 是否成功且没有错误诊断。
     pub fn is_success(&self) -> bool {
-        !self.diagnostics.has_errors()
+        self.hir.is_some() && !self.diagnostics.has_errors()
     }
 }
 
@@ -239,6 +239,7 @@ impl Compiler {
                     diagnostics,
                     source_map: SourceMap::empty(),
                     image_plan: None,
+                    hir: None,
                 };
             }
         };
@@ -260,22 +261,23 @@ impl Compiler {
                     diagnostics,
                     source_map,
                     image_plan: None,
+                    hir: None,
                 };
             }
         };
         graph.complete(ActionKind::Frontend, frontend.detail());
 
-        let ir = ir::lower(frontend);
+        let hir = frontend.hir;
         graph.complete(
             ActionKind::BuildIr,
             format!(
-                "{} 个函数，{} 个已检查 body",
-                ir.functions.len(),
-                ir.semantics.bodies.len()
+                "{} 个定义，{} 个已冻结 HIR owner",
+                hir.module().definitions.len(),
+                hir.module().owners.len()
             ),
         );
 
-        let Some(backend_plan) = backend::plan(target, &ir) else {
+        let Some(backend_plan) = backend::plan(target, &hir) else {
             graph.complete(ActionKind::PlanBackend, "没有可执行入口");
             graph.skip_after(ActionKind::PlanBackend, "没有可执行入口");
             diagnostics.sort();
@@ -284,6 +286,7 @@ impl Compiler {
                 diagnostics,
                 source_map,
                 image_plan: None,
+                hir: Some(hir),
             };
         };
         graph.complete(ActionKind::PlanBackend, "内存 image plan");
@@ -310,6 +313,7 @@ impl Compiler {
             diagnostics,
             source_map,
             image_plan,
+            hir: Some(hir),
         }
     }
 }
@@ -628,7 +632,7 @@ fn trailing_components(path: &std::path::Path) -> Option<PathBuf> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImagePlan {
     target: TargetName,
-    entry: &'static str,
+    entry: String,
     function_count: u32,
     runtime_source_count: u32,
     rt0: Rt0Boundary,
@@ -653,11 +657,11 @@ impl ImagePlan {
     }
 
     /// 返回入口符号。
-    pub fn entry(&self) -> &'static str {
-        self.entry
+    pub fn entry(&self) -> &str {
+        &self.entry
     }
 
-    /// 返回 bootstrap IR 中的函数数量。
+    /// 返回已冻结的函数、闭包及 async body 数量。
     pub fn function_count(&self) -> u32 {
         self.function_count
     }

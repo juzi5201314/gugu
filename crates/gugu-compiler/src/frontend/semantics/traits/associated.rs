@@ -70,7 +70,7 @@ impl Model<'_> {
         }
         Ok(None)
     }
-    fn association_head(
+    pub(in super::super) fn association_head(
         &self,
         module: usize,
         path: PathId,

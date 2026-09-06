@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 5;
+pub(crate) const SCHEMA_VERSION: u32 = 6;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
@@ -29,14 +29,23 @@ pub(crate) struct CheckedBody {
     pub(crate) patterns: Vec<PatternPlan>,
     pub(crate) captures: Vec<CapturePlan>,
     pub(crate) slot_storage: Vec<u8>,
+    pub(crate) slot_origins: Vec<SlotOrigin>,
     pub(crate) variadic_calls: Vec<VariadicCall>,
     pub(crate) dispatches: Vec<Dispatch>,
-    pub(crate) erasures: Vec<Erasure>,
+    pub(crate) adjustments: Vec<TypeAdjustment>,
     pub(crate) reflections: Vec<Reflection>,
+    pub(crate) formatting: Vec<FormattingPart>,
     pub(crate) memory_operations: Vec<MemoryOperation>,
     pub(crate) foreign_calls: Vec<super::foreign::ForeignCall>,
     pub(crate) assembly: Vec<super::assembly::AssemblyPlan>,
     pub(crate) borrow_checks: Vec<super::borrow::BorrowCheck>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SlotOrigin {
+    pub(crate) name: String,
+    pub(crate) start: u32,
+    pub(crate) end: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -64,10 +73,30 @@ pub(crate) struct Dispatch {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct Erasure {
+pub(crate) struct TypeAdjustment {
     pub(crate) expression: ExprId,
     pub(crate) source: Ty,
     pub(crate) target: Ty,
+    pub(crate) kind: AdjustmentKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum AdjustmentKind {
+    Erase,
+    Opaque,
+    ArrayToSlice,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FormattingPart {
+    pub(crate) part: u32,
+    pub(crate) expression: ExprId,
+    pub(crate) spec: super::super::string::FormatSpec<FormattingCount>,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum FormattingCount {
+    Fixed(u64),
+    Slot(usize),
 }
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Reflection {
@@ -217,6 +246,10 @@ impl CheckedSemantics {
                 return Err(invalid());
             }
             if body.slot_storage.len() != body.slots.len()
+                || body.slot_origins.len() != body.slots.len()
+                || body.slot_origins.iter().any(|origin| {
+                    origin.start > origin.end || origin.end > module.file.eof_span.end()
+                })
                 || body
                     .slot_storage
                     .iter()
@@ -244,12 +277,42 @@ impl CheckedSemantics {
                     return Err(invalid());
                 }
             }
-            for erasure in &body.erasures {
+            for erasure in &body.adjustments {
                 if erasure.expression.0 as usize >= module.arena.exprs.len()
                     || !formed(&erasure.source, model)
                     || !formed(&erasure.target, model)
                     || erasure.source == erasure.target
-                    || !matches!(erasure.target, Ty::Dyn(_) | Ty::Function(..))
+                    || match erasure.kind {
+                        AdjustmentKind::Erase => {
+                            !matches!(erasure.target, Ty::Dyn(_) | Ty::Function(..))
+                        }
+                        AdjustmentKind::Opaque => !matches!(erasure.target, Ty::Opaque(..)),
+                        AdjustmentKind::ArrayToSlice => !matches!(
+                            (erasure.source.deref(), erasure.target.deref()),
+                            (Ty::Array(..), Ty::Slice(_))
+                        ),
+                    }
+                {
+                    return Err(invalid());
+                }
+            }
+            for formatting in &body.formatting {
+                if !matches!(module.arena.fstring_parts.get(formatting.part as usize), Some(super::super::ast::FStringPart::Interp { expr, .. }) if *expr == formatting.expression)
+                    || formatting
+                        .spec
+                        .width
+                        .iter()
+                        .chain(&formatting.spec.precision)
+                        .any(|count| match count {
+                            FormattingCount::Fixed(value) => *value > i64::MAX as u64,
+                            FormattingCount::Slot(slot) => {
+                                body.slots.get(*slot)
+                                    != Some(&Ty::Int {
+                                        signed: true,
+                                        bits: 64,
+                                    })
+                            }
+                        })
                 {
                     return Err(invalid());
                 }
@@ -459,14 +522,6 @@ impl CheckedSemantics {
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn fingerprint(&self) -> [u8; 32] {
-        // Debug 仅承载此私有、版本化 schema，不包含地址、Span 表身份或宿主路径。
-        let mut hash = blake3::Hasher::new_derive_key("gugu-checked-semantics-v1");
-        hash.update(&SCHEMA_VERSION.to_le_bytes());
-        serde_json::to_writer(&mut hash, self).expect("语义 schema 序列化");
-        *hash.finalize().as_bytes()
     }
 }
 

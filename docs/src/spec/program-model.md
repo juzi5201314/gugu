@@ -69,6 +69,8 @@ Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行�
 
 AST、HIR、GIR、LIR、query、单态化实例、精确根、stack switch、写屏障、object metadata和后端 relocation都是官方实现内部契约，分别见 [AST/HIR](../internals/ast-hir.md)、[comptime 与抽象分析](../internals/comptime-analysis.md)、[GIR/LIR](../internals/gir-lir.md)、[单态化与缓存](../internals/monomorphization-cache.md)、[栈图](../internals/stack-maps.md)、[GC 元数据](../internals/gc-metadata.md)和[后端](../internals/backend.md)。它们不是用户语法、库调用约定或跨编译器 ABI。
 
+`check` 与 `build` 共用同一完整前端合法性判定；语法、配置、名称、类型、模式、初始化和 unsafe 检查不能因命令不同而跳过。任何检查失败都阻止下游表示及镜像计划形成。查询缓存命中必须保持诊断级别、附注、排序和源码展开归属，并将位置重新绑定到当前编译的源码表；缓存不得把旧源码表身份带入本次诊断。
+
 实验性 JIT若存在也必须消费同一闭世界结果并满足本章公开语义；其分层编译、patch point和执行缓存只属于 internals，不能成为新的加载/反射能力。
 
 ## 编译闭包与产物确定性

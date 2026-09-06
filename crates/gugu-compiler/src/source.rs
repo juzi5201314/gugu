@@ -77,7 +77,9 @@ impl SourceTableId {
 }
 
 /// 源码宏可以插入的语法片段位置。
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum SourceSlot {
     /// 模块 item 列表。
     Item,

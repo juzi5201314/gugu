@@ -112,7 +112,7 @@ impl Checker<'_, '_> {
                 self.expression(value, Some(&ty));
                 self.state = saved_state;
                 self.state.names = names;
-                self.slot(name, ty.clone(), true);
+                self.slot(name, ty.clone(), true, &stmt.span);
                 self.local_statics.push(super::super::output::LocalStatic {
                     statement: id,
                     initializer: value,

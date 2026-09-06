@@ -3,7 +3,9 @@ use std::fmt;
 use crate::source::{SourceError, Span};
 
 /// 诊断严重级别。
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub enum Severity {
     /// 阻止生成结果的错误。
     Error,
@@ -204,7 +206,11 @@ impl Diagnostic {
         self
     }
 
-    fn new(
+    pub(crate) fn sequence(&self) -> u32 {
+        self.seq
+    }
+
+    pub(crate) fn new(
         severity: Severity,
         code: DiagnosticCode,
         message: impl Into<String>,

@@ -104,10 +104,11 @@
   - 将类型 arena、形成器和布局计算接入 `configure -> collect -> resolve -> type_check` 查询链，建立版本化 `TypeRef/Layout`、fingerprint、缓存恢复、统一诊断传播及 GIR/comptime 的消费接口。
   - 验收：`check/build` 对真实 package 执行类型 query；失败不写 target；缓存命中与冷编译输出一致；下游只消费已验证结果，不重新解析 token 或名称。
 
-- [ ] **阶段 12b：建立前端语义链集成门禁**（复杂度：4）
+- [x] **阶段 12b：建立前端语义链集成门禁**（复杂度：4）
   - 依赖：阶段 12a、13–20。
   - 将声明、表达式、模式、trait、unsafe 检查和 HIR 冻结统一接入 query/action graph，定义 `Validated` 输出、失败传播、缓存边界及 GIR 消费契约。
   - 验收：真实 `check/build` 从源码运行到冻结 HIR；任何前端失败均无下游产物；冷编译与缓存命中结果、诊断排序和 fingerprint 一致；GIR 不接受未验证 AST。
+  - 接入证据：`frontend::bootstrap -> TypeCheck(schema 6) -> 布局检查 -> LowerHir(v1) -> Validated::freeze -> BuildIr/ImagePlan`；backend 只接受冻结凭据，Compilation 成功必须持有 HIR。冷/热 query 与输入文件顺序回归验证相同 HIR、指纹和稳定诊断；真实 CLI 的 check/build 对未被调用的非法函数同样拒绝，退出码 1、镜像计划为空。
 
 - [x] **阶段 13：实现声明、绑定与初始化数据流**（复杂度：3）
   - 依赖：阶段 10、12。
@@ -121,7 +122,7 @@
   - 依赖：阶段 12、12a、14。
   - 实现通配/绑定/引用/字面量/范围/元组/数组切片/结构体/构造器/or/`@`/rest 模式、可驳性、let 链、let-else、守卫与有限域覆盖计算。
   - 验收：被匹配表达式只求值一次；重复绑定、or 绑定集合不一致、空范围、不可驳 let 段、非穷尽 match 和错误类型守卫都有稳定诊断；模式不调用用户 Eq/Ord。
-  - 接入证据：`frontend::bootstrap -> semantics::check -> TypeCheck query -> CheckedSemantics verifier -> IR -> ImagePlan`；源码、cfg 和解析结果进入语义指纹，诊断在缓存命中时重绑定当前源码表。`frontend::semantics::tests` 覆盖声明/初始化、短路与退出、检查计划、模式覆盖及冷/热 query；真实 CLI `check/build` 已验证成功检查、结构化错误和失败无产物。完整 HIR 冻结仍由阶段 12b、20 验收。
+  - 接入证据：声明/表达式/模式结果由 `TypeCheck query` 与 `CheckedSemantics verifier` 交接；源码、cfg 和解析结果进入语义指纹，诊断在缓存命中时重绑定当前源码表。`frontend::semantics::tests` 覆盖声明/初始化、短路与退出、检查计划、模式覆盖及冷/热 query；真实 CLI `check/build` 已验证成功检查、结构化错误和失败无产物。完整 HIR 冻结现已由阶段 12b、20 接入同一链。
 
 - [x] **阶段 16：实现函数、闭包与 async 捕获**（复杂度：4）
   - 依赖：阶段 13、14、15。
@@ -147,10 +148,11 @@
   - 验收：安全代码不能越过 unsafe 前置条件；资源/COW 类型不能被位操作绕过；union 只接受位类型；Windows `i128/u128` C 签名、naked、dirty/leaf/bridge 属性按规范拒绝或接受。
   - 接入证据：`CheckedSemantics` schema 5 保存内存原语、引用投影、外部调用效应、链接属性和汇编计划；类型形成后的布局校验统一检查按位管理边界、重解释大小、packed 自然对齐、寄存器宽度和双目标 C ABI。188 项工作区测试通过，包含 unsafe 函数项与动态方法、MaybeUninit、union、转换、leaf/dirty/bridge 优先级、native-only 限制、managed asm 有限 CFG 及条件清理捕获回归。Linux/Windows 真实 CLI 均接受综合输入；非法 packed 引用的 build 返回 E0038，镜像计划为空。实际外部桥接与机器编码仍分别由阶段 58、52 完成。
 
-- [ ] **阶段 20：构造 AST/HIR 结构与冻结校验**（复杂度：5）
+- [x] **阶段 20：构造 AST/HIR 结构与冻结校验**（复杂度：5）
   - 依赖：阶段 10、12–19、12a、12b。
   - 实现 `SourceSnapshot -> AST -> configure -> collect -> resolve -> type_check -> HIR` 的固定阶段、owner arena、Res、类型/调整表、捕获计划、cleanup plan、诊断排序和 Validated 冻结接口；为源码宏生成节点保留 expansion source context。
   - 验收：`check/build` action graph 真实执行完整前端链并缓存结果；基础 HIR 结构与冻结校验可独立运行；源码宏在阶段 22 生成的片段重新进入同一前端并最终满足相同 Validated 条件；GIR 只能消费冻结 HIR，不能重新解析 token 或名称。
+  - 接入证据：独立 HIR 包含真实函数/闭包/async/static/全局汇编 owner、声明与类型表、调整前后类型、派发、捕获、清理链、格式计数和展开上下文；旧 `main -> ReturnUnit` 路径已删除。verifier 拒绝越界类型/字段、错误捕获归属和缺失清理链。195 项工作区测试通过，构建零 warning；Linux build 与 Windows check 接受同时包含 Any、闭包/async、局部 static、切片、intrinsic、asm、FFI 和动态格式捕获的真实输入，报告 6 个实际 callable owner。源码宏执行、GIR 和机器码仍在各自后续阶段，本阶段只冻结其唯一前端输入。
 
 - [ ] **阶段 21：实现 EarlyConst 与 capability registry**（复杂度：5）
   - 依赖：阶段 11、12、20。

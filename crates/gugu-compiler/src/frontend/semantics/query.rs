@@ -5,9 +5,11 @@ use crate::{Diagnostic, DiagnosticCode, SourceMap};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredDiagnostic {
+    severity: crate::Severity,
+    sequence: u32,
     code: DiagnosticCode,
     message: String,
-    location: Option<(String, u32, u32)>,
+    location: Option<(String, u32, u32, u32)>,
 }
 
 pub(super) fn check(
@@ -15,7 +17,7 @@ pub(super) fn check(
     sources: &SourceMap,
     cfg: &super::super::cfg::CfgContext,
     queries: &QueryEngine,
-) -> Result<CheckedSemantics, Vec<Diagnostic>> {
+) -> Result<(CheckedSemantics, crate::query::DependencyFingerprint), Vec<Diagnostic>> {
     let mut hash = blake3::Hasher::new_derive_key("gugu-type-check-input-v1");
     let configuration = format!("{cfg:?}");
     hash.update(configuration.as_bytes());
@@ -27,7 +29,7 @@ pub(super) fn check(
     hash.update(&model.name_fingerprint());
     let input_fingerprint = *hash.finalize().as_bytes();
     let key = QueryKey::new(QueryKind::TypeCheck, SCHEMA_VERSION, input_fingerprint);
-    let result = queries.compute(key, |context| {
+    let result = queries.compute(key.clone(), |context| {
         for source in sources.snapshots() {
             context.record_dependency(
                 QueryKey::new(QueryKind::SourceSnapshot, 1, source.logical_path()),
@@ -50,25 +52,7 @@ pub(super) fn check(
                     Vec::new(),
                 ))
             }
-            Err(errors) => {
-                let stored: Vec<_> = errors
-                    .iter()
-                    .map(|error| StoredDiagnostic {
-                        code: error.code(),
-                        message: error.message().to_owned(),
-                        location: error.span().map(|span| {
-                            (
-                                span.path().to_string_lossy().into_owned(),
-                                span.start(),
-                                span.end(),
-                            )
-                        }),
-                    })
-                    .collect();
-                Err(QueryError::Failed(
-                    serde_json::to_string(&stored).expect("诊断 schema 序列化"),
-                ))
-            }
+            Err(errors) => Err(store_errors(&errors)),
         }
     });
     match result {
@@ -82,32 +66,88 @@ pub(super) fn check(
                     )]
                 })?;
             output.verify(model).map_err(|error| vec![error])?;
-            Ok(output)
+            Ok((
+                output,
+                crate::query::DependencyFingerprint::new(key, result.fingerprint()),
+            ))
         }
-        Err(QueryError::Failed(stored)) => {
-            let errors: Vec<StoredDiagnostic> =
-                serde_json::from_str(&stored).expect("失败 query 由本 schema 写入");
-            Err(errors
-                .into_iter()
-                .map(|error| {
-                    let span = error.location.map(|(path, start, end)| {
-                        sources
-                            .span(
-                                sources.file_id(&path).expect("相同 query 源路径"),
-                                start as usize,
-                                end as usize,
-                                crate::source::ExpansionId::ROOT,
-                            )
-                            .expect("相同 query 的合法范围")
-                    });
-                    Diagnostic::error(error.code, error.message, span)
-                })
-                .collect())
-        }
-        Err(error) => Err(vec![Diagnostic::error(
+        Err(error) => Err(restore_errors(error, sources)),
+    }
+}
+
+pub(super) fn store_errors(errors: &[Diagnostic]) -> QueryError {
+    let stored: Vec<_> = errors
+        .iter()
+        .map(|error| StoredDiagnostic {
+            severity: error.severity(),
+            sequence: error.sequence(),
+            code: error.code(),
+            message: error.message().to_owned(),
+            location: error.span().map(|span| {
+                (
+                    span.path().to_string_lossy().into_owned(),
+                    span.start(),
+                    span.end(),
+                    span.expansion().as_u32(),
+                )
+            }),
+        })
+        .collect();
+    QueryError::Failed(serde_json::to_string(&stored).expect("诊断 schema 序列化"))
+}
+
+pub(super) fn restore_errors(error: QueryError, sources: &SourceMap) -> Vec<Diagnostic> {
+    let QueryError::Failed(stored) = error else {
+        return vec![Diagnostic::error(
             DiagnosticCode::InvalidType,
             error.to_string(),
             None,
-        )]),
-    }
+        )];
+    };
+    let Ok(errors) = serde_json::from_str::<Vec<StoredDiagnostic>>(&stored) else {
+        return vec![Diagnostic::error(
+            DiagnosticCode::InvalidType,
+            "查询诊断缓存 schema 不合法",
+            None,
+        )];
+    };
+    errors
+        .into_iter()
+        .map(|error| {
+            let span = match error.location {
+                Some((path, start, end, expansion)) => {
+                    let Some(file) = sources.file_id(&path) else {
+                        return Diagnostic::error(
+                            DiagnosticCode::InvalidType,
+                            "查询诊断引用未知源码",
+                            None,
+                        );
+                    };
+                    match sources.span(
+                        file,
+                        start as usize,
+                        end as usize,
+                        crate::ExpansionId::new(expansion),
+                    ) {
+                        Ok(span) => Some(span),
+                        Err(_) => {
+                            return Diagnostic::error(
+                                DiagnosticCode::InvalidType,
+                                "查询诊断源码位置不合法",
+                                None,
+                            );
+                        }
+                    }
+                }
+                None => None,
+            };
+            Diagnostic::new(
+                error.severity,
+                error.code,
+                error.message,
+                span,
+                error.sequence,
+            )
+        })
+        .collect()
 }

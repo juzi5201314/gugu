@@ -13,7 +13,7 @@
 阶段 2 将 `gugu` 作为唯一 CLI 入口：根级全局参数可在子命令前后解析，配置按内置默认、用户配置、当前 workspace 的 `.gugu/config.toml`、`--config`、环境变量、命令行的顺序合并，后层覆盖前层。`--frozen` 在解析结果中同时设置 `offline` 与 `locked`。
 
 规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。阶段 2 只有 `build`、`check`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
-现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已完成工程、源码、清单、workspace、target、依赖解析、缓存输入、词法分析和递归下降 AST；类型系统、runtime、后端与标准库仍按路线图后续阶段推进。
+现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已接入源码、清单、依赖、缓存、词法/AST、类型/语义检查及冻结 HIR；runtime、GIR、后端机器码与标准库仍按路线图对应阶段推进。
 `text` 保留人读的 action/诊断/最终结果；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
 ## 阶段 3 交付边界
@@ -88,12 +88,13 @@ crates/
     │   ├── target_view.rs          target 用户产物视图与原子物化
     │   ├── cache_tests.rs          缓存输入、损坏隔离、vendor 和 key 确定性测试
     │   └── workspace.rs             workspace 成员与 glob 解析
-    ├── src/frontend/               词法、递归下降 parser 与稠密 AST
+    ├── src/frontend/               词法、AST、语义检查与冻结 HIR
     │   ├── mod.rs                  Frontend action 入口
     │   ├── lex.rs                  TokenBuffer、trivia 与字面量
     │   ├── parse/                  项、类型、表达式、模式
-    │   └── ast.rs                  u32 arena 与节点种类
-    ├── src/ir.rs                   main -> ReturnUnit 的 bootstrap IR
+    │   ├── ast.rs                  u32 arena 与节点种类
+    │   ├── semantics/              TypeCheck、布局交接与 AST 到 HIR 形成
+    │   └── hir/                    类型化 owner、侧表与冻结 verifier
     ├── src/backend.rs              目标相关的内存 image plan 输入
     ├── src/runtime.rs              Gugu 源树、rt0 和 intrinsic 登记
     └── resources/
@@ -150,6 +151,8 @@ emit-image
 阶段 7 前端对每个源码快照运行词法分析：生成带精确 span 的 `TokenBuffer` 与 trivia，校验字面量、最长匹配、闭集属性与 cfg 记号形状。词法诊断 `E0009`–`E0019` 或 `Error` token 会使 Frontend action 失败，并跳过 IR 与 image plan。阶段 1 的括号扫描入口检查已删除。
 
 阶段 8 在同一 Frontend action 内消费 `TokenBuffer`，用递归下降构造稠密 `u32` AST arena（声明、泛型、类型、块、表达式、模式、`async`/`select`/`try`/`defer`、`comptime source`、FFI 与 asm）。`()`/`[]` 增加分隔符深度，内部换行只作空白；`{` 单独跟踪花括号深度，块内换行可以结束语句、字段或臂。比较与 `..` 不结合，主诊断带 `Note` 次诊断。解析诊断 `E0020`–`E0026` 使 Frontend 失败，不得把错误占位交给 IR 或 image plan。可执行入口改为 AST 中名为 `main`、无参数且带块体或 `=` 体的 `fn`。节点身份不是指针；结构 dump 按 arena 下标，不受线程完成顺序影响。
+
+阶段 12b/20 将同一 Frontend action 延伸到声明/表达式/模式/trait/unsafe 检查、布局校验和 `LowerHir` query。`BuildIr` 现在登记真实定义与冻结 owner；`Compilation::succeeded` 必须拥有 `Validated`，后端计划只接受此凭据。冷计算和缓存恢复都经过冻结 verifier，失败没有 image plan。旧 `ReturnUnit` IR 已移除；本阶段没有生成目标机器码，`emit-image` 仍跳过。完整交接表见 [AST 与 HIR](ast-hir.md)。
 
 ## runtime 源资源与实现归属
 

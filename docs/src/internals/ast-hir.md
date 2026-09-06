@@ -59,6 +59,8 @@ query 依赖，不靠可变的全局 phase 回跳：
 显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功
 产物。
 
+阶段 12b/20 的现行实现把 `TypeCheck`、布局检查、`LowerHir` 与 `Validated::freeze` 连成单向入口；`LowerHir` 消费已检查的 AST 和语义侧表，直接形成最终的类型化 owner，不向后端暴露构造中的 HIR。上面的源码宏、EarlyConst、LateConst 和 GIR 阶段依赖仍按路线图各自阶段接入，不由本阶段提前执行。
+
 ## 索引与 arena
 
 前端使用稠密 `u32` 索引和 `Vec`/切片 arena，不使用指针作为节点身份：
@@ -77,7 +79,7 @@ query 依赖，不靠可变的全局 phase 回跳：
 
 这些表的元素数量必须小于 `u32::MAX`；达到上界是 `implementation-limit` 编译错误，不能截断或复用仍存活的索引。实现中的索引构造函数必须用 `debug_assert!` 检查从 `usize` 到 `u32` 的转换。
 
-`AstNodeId.local` 按语法节点起始 token 的先后顺序分配；同一起始 token 的父节点先于子节点。`DefId`、`TyId` 和 `LocalHirId` 只用于内存内的稠密访问，不能直接写进持久缓存或最终镜像。持久身份由[单态化与编译缓存](monomorphization-cache.md)定义的稳定键承担。
+`AstNodeId.local` 按语法节点起始 token 的先后顺序分配；同一起始 token 的父节点先于子节点。session 的 AST、Symbol 和 SourceTable 身份不得进入持久 HIR。冻结 HIR 可以编码它自身按稳定定义键和确定性遍历重建的稠密索引；这些索引必须连同完整定义、类型和 owner 表一起验证，不能作为跨 query 的独立身份。跨 query 的持久身份由[单态化与编译缓存](monomorphization-cache.md)定义的稳定键承担。
 
 `PackageId` 按锁图中的 canonical package identity byte序分配，`SourceFileId` 再按 `(PackageId, logical_path bytes)` 分配；目录枚举和并行读取完成顺序不参与。`Symbol` 只在 session内点查，持久编码始终写原 UTF-8 bytes，因此 interner插入时序不构成稳定身份。
 
@@ -222,9 +224,10 @@ parser 必须满足：
 
 `frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
-阶段 13–19 的版本化结果为 `CheckedSemantics`（schema 5），它在 TypeCheck query 中序列化，包含：
+阶段 13–20 的版本化结果为 `CheckedSemantics`（schema 6），它在 TypeCheck query 中序列化，包含：
 
 - 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
+- 每个局部槽的规范名称和声明字节范围；闭包捕获及清理路径的重检查可以据此指向同一个源码绑定，HIR 不把语义检查遍历中临时分配的槽编号当作持久绑定身份。
 - 模块 const/static 的无环初始化顺序与 Process/Coroutine/OsThread 初始化域，以及函数内 static 的声明和延迟初始化器。
 - defer 的注册语句、body、函数出口标记和捕获槽；初始化分析保留“已经注册该 action”的条件路径，不能混入未注册分支。
 - 除法、移位、数组和切片边界、UTF-8 边界、浮点转整数与 Unicode scalar 检查。检查引用已求值的表达式；安全模式保留检查，unsafe 的下标操作不登记可省略的边界检查。
@@ -233,18 +236,19 @@ parser 必须满足：
 - 齐次变参和异构类型包的 `VariadicCall`：保留左到右的实参 ID、固定参数数目和具体尾部类型。齐次尾部存储必须可被 GC 跟踪，只有后续分析证明无逃逸才可放入栈帧；异构包供单态化逐位置展开，不生成动态类型数组或盒子。
 - 静态关联调用和用户操作符的 `Dispatch`：保存函数身份、选中 impl、trait 实例和成员序号、规范化 Self/签名，以及接收者解引用次数和借用调整。操作符表达式的结果不会被误记成 callable 值。
 - APIT 的独立匿名类型参数，以及 RPIT/TAIT 的声明身份、完整泛型环境和唯一隐藏类型表。函数实例参数按声明上下文的规范键顺序保存；`Self::关联项` 是由 Self 推导的查找缓存，不作为独立实例参数，避免关联 TAIT 产生伪递归。
-- `Erasure` 记录源类型与目标胖函数或动态接口类型；`impl Trait` 本身不生成擦除计划。具体值进入 `dyn Value` 后再进入 `dyn Any` 时，第二层 payload 的类型仍是 `dyn Value`；复制已经形成的 `dyn Any` 不生成新容器。
+- `TypeAdjustment` 记录转换前后的类型及 `Erase`、`Opaque`、`ArrayToSlice` 种类；`impl Trait` 的表示转换不等同于擦除。具体值进入 `dyn Value` 后再进入 `dyn Any` 时，第二层 payload 的类型仍是 `dyn Value`；复制已经形成的 `dyn Any` 不生成新容器。
 - 动态 `Dispatch` 保存对象安全接口和成员序号，不携带静态 callable/impl。`Reflection` 保存 `is`、`downcast`、`downcast_copy` 的精确目标类型与符号化 TypeId 操作，恢复类型不得穿透既有接口对象。
 - `MemoryOperation` 保存标准内存原语、源/目标类型与按源码求值的实参 ID；`MaybeUninit` 有独立语义类型，不伪装成已初始化的 T。按位操作的管理属性及大小条件在同一布局模型检查。
 - `BorrowCheck` 保存被借用槽的基类型、完整字段/数组投影及目标类型；类型收敛后由统一聚合布局检查最终自然对齐，显式取引用与方法自动借用共用此检查。动态下标只保留步长条件，不重复执行下标表达式。
 - `ForeignDefinition` 与 `ForeignCall` 保存 C 声明身份、naked/imported 标志和按调用点优先级形成的 bridge/dirty/leaf 效应。`Linkage` 独立保存函数、static 与全局汇编的符号名、节和 used 状态；两张声明表在缓存命中时对照当前模型验证。
 - `AssemblyPlan` 保存求值后的模板、寄存器宽度/方向、输入与输出位置、clobber 位图及 managed/naked/dirty/global 上下文。managed 模板的有限控制流和所有出口的栈增量在前端验证；寄存器值大小由布局检查，机器编码仍属于后端。
+- `FormattingPart` 保存闭集格式码、填充/对齐/标志以及固定计数或已解析的 `int` 局部槽；动态 width/precision 经过读取、初始化和捕获检查，不把 `name$` 文本留给后端解析。
 
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
-query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果；成功结果经 schema verifier 验证后才能进入布局和 IR，IR 直接持有该结果，镜像计划保留其规范序列化 BLAKE3 指纹。失败诊断存储逻辑文件名和字节范围，缓存命中时重新绑定当前 `SourceMap`，不得复用旧源码表身份。任何检查失败均中止 BuildIr 及后续产物路径。
+TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query v1 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
 
-该结果是阶段 13–19 向 HIR 形成阶段提供的已检查对象，不代替下文的完整 HIR 冻结门禁。GIR cleanup CFG、外部桥接执行和汇编机器编码分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；稠密 TypeId 分配、vtable 物化和实际容器分配分别留在冻结类型集合及后续 lowering 阶段。
+镜像计划只从冻结 HIR 读取入口、owner 数量和域隔离的 BLAKE3 指纹；原先仅生成 `main -> ReturnUnit` 的 `ir.rs` 已删除。GIR cleanup CFG、外部桥接执行和汇编机器编码分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；运行时稠密 TypeId 分配、vtable 物化和实际容器分配分别属于冻结类型集合及后续 lowering 阶段。
 
 trait 表先收集声明和 impl 头，形成关联类型后再检查方法签名；关联项不泄漏到模块值命名空间。特化使用类型模式包含关系和交集检查，重复参数必须保持相等约束。否定 impl 与肯定 impl 共用选择部分序；泛型调用的 trait 义务在实参推断收敛后验证，失败时保留约束或否定实现的源码位置。关联投影保存 Self、trait 实例和成员名称的完整身份，不能仅以短名称等同两个投影。
 
@@ -254,7 +258,7 @@ trait 表先收集声明和 impl 头，形成关联类型后再检查方法签�
 
 ### owner 与节点表示
 
-每个具名函数、闭包、常量求值体、static 初始化体和带默认实现的 trait 项是一个 `HirOwner`。owner 保存连续的表达式、语句、模式、局部绑定和作用域 arena：
+每个具名函数、闭包、async 块、常量求值体、模块或局部 static 初始化体、带默认实现的 trait 项和全局汇编都有独立 owner。owner 保存连续的表达式、语句、模式、局部绑定和作用域 arena：
 
 ```text
 HirOwner {
@@ -268,7 +272,7 @@ HirOwner {
 }
 ```
 
-HIR 节点按确定性的前序遍历分配 `LocalHirId`。父子关系、词法作用域和控制流目标都使用 owner-local 稠密 ID。跨 owner 引用只使用 `DefId`；禁止把另一个 owner 的 `LocalHirId` 单独保存。
+HIR 表达式按确定性的父先子后顺序分配 owner-local `ExprId`；关联变长子项使用连续索引池。父子关系、词法作用域和控制流目标都使用 owner-local 稠密 ID。跨 owner 的定义引用使用 `DefId`；捕获来源必须同时保存父 owner 的 `DefId` 和它的 `LocalId`，不能单独保存另一 owner 的局部编号。
 
 模块级 HIR 另存定义签名、泛型参数、where 约束、字段/变体、trait 项和 impl 头。函数体不会内嵌到调用者 HIR，内联只在单态化 GIR 上发生。
 
@@ -280,9 +284,9 @@ HIR 节点按确定性的前序遍历分配 `LocalHirId`。父子关系、词法
 - `Local(LocalBindingId)`；
 - `Primitive(PrimitiveId)`；
 - `Builtin(BuiltinId)`；
-- `Error`。
+- `Associated { definition, self_ty, interface }`。
 
-方法、操作符、下标、调用和关联项的最终选择不以字符串保存。类型检查后，它们分别记录选中的 `DefId`、内建操作编号或 `dyn` vtable 槽。trait 选择记录具体 impl、规范化泛型实参和选择所依赖的约束；后续阶段不得重新按名字搜索一次。
+成功 HIR 的 `Res` 不提供错误占位分支。方法、操作符、下标、调用和关联项的最终选择不以字符串保存。它们记录选中的 `DefId`、内建操作编号或 `dyn` 成员槽；trait 选择记录具体 impl、规范化 Self/签名、泛型实参和接口实例。接收者解引用、自动借用及 UFCS 是否隐含接收者单独记录，后续阶段不得重新按名字搜索一次。
 
 ### 语法归一化
 
@@ -291,17 +295,19 @@ HIR 保留对诊断有价值的 `if`、`match`、循环、`try`、`async`、`sel
 | AST 形式 | HIR 表示 |
 |----------|----------|
 | 表达式体函数 | 与块体相同的单表达式 body |
-| 复合赋值 | 单次求值 place 加显式二元操作和写回 |
-| 方法调用 | 已记录接收者调整和候选集合的 `HirCall` |
-| 用户类型下标 | 已选择 `Index::index` 或 `index_set` 的调用 |
-| `for pattern in value` | 一次 `IntoIter::into_iter`、循环调用 `Iter::next` 和 `Option` 匹配 |
+| 复合赋值 | 单次求值 place、封闭运算符及已选择派发，保留写回目标 |
+| 方法调用 | 已固定目标与接收者调整的 `Call` |
+| 用户类型下标 | 带已选择 `Index::index` / `index_set` 派发的 `Index` |
+| `for pattern in value` | 保留单次迭代源、模式和 body 的 `For`，携带 `into_iter` / `next` 派发 |
 | `expr?` | `HirTryExit { operand, branch_slot, from_error_slot, target }`；槽位与结果规则只引用 [`Try` 规范](../spec/traits.md#try) |
-| 字符串插值 | 按片段顺序写入 builder 的字面量片段和已选择 `Print` 调用 |
+| 字符串插值 | 按源码顺序保存解码文本、类型化值和结构化 FormatSpec；动态计数是 int 读取节点 |
 | `if let`、`while let`、let 链 | 共享被匹配临时槽的条件/模式节点 |
 | 参数位置 `impl Trait` | 独立隐式类型参数 |
 | 返回位置 `impl Trait` | owner 下的独立 opaque 定义 |
 
 `async`、`select` 和 `defer` 在 HIR中保留专用节点，并各自携带由[表达式规范](../spec/expressions.md)生成的一次求值、出口和提交/cleanup计划；GIR只能消费该计划，不能按节点名重新解释随机、公平、取消或展开语义。
+
+字符串转义、字节字符串的单字节 `\xHH` 与 Unicode UTF-8 编码、f-string 的双花括号都在此边界解码。格式能力用闭集格式种类携带，不把格式字符串交给 GIR 重解析；标准库格式 trait 执行与 builder lowering 在阶段 61 完成。
 
 ## 语义检查输出
 
@@ -311,31 +317,19 @@ HIR 保留对诊断有价值的 `if`、`match`、循环、`try`、`async`、`sel
 
 ### 类型与调整侧表
 
-HIR 节点本体不复制完整类型。类型检查为每个 owner 生成等长稠密侧表：
+HIR 节点本体不复制完整类型。每个 owner 的 `expression_inputs` 与 `expression_types` 是与表达式 arena 等长的稠密 `Vec<TypeId>`，分别保存调整前、后的表示；模式和局部绑定只保存 interned `TypeId`。例如结构体先构造再擦除到 `dyn Any` 时，字段检查读取源结构体类型，不能误用擦除后的接口类型。
 
-```text
-TypeckResults {
-    expr_types: IndexVec<ExprId, TyId>,
-    pattern_types: IndexVec<PatId, TyId>,
-    adjustments: IndexVec<ExprId, AdjustmentRange>,
-    call_resolutions: IndexVec<ExprId, CallResolution>,
-    binding_modes: IndexVec<PatId, BindingMode>,
-    effects: IndexVec<ExprId, EffectSet>,
-    closure_captures: IndexVec<ExprId, CaptureRange>,
-    adjustment_pool: Vec<Adjustment>,
-    capture_pool: Vec<Capture>,
-}
-```
+表达式的 `adjustments: Range<u32>` 指向 owner 级连续池。调整闭集为 `Dereference`、`ArrayToSlice`、`NeverTo`、`Erase`、`Opaque`、`Instantiate`；verifier 从输入类型逐步验证调整并要求最终结果等于输出类型。方法自动借用和解引用次数保存在选中派发中，不复制成另一套类型推断。池和索引必须在 `u32` 上界内，任意合法多层引用不受固定深度限制。
 
-自动解引用层数由源码类型决定，没有固定小上界。每个 `AdjustmentRange { start: u32, len: u32 }` 指向 owner 级连续 `adjustment_pool`，避免给每个表达式单独分配小 vector，同时支持任意合法的多层 `&`；range 必须 checked 位于 pool 内。调整枚举只允许自动解引用、方法接收者自动取引用、函数项/闭包擦除、`dyn` 擦除、never 到目标类型和规范允许的数值扩宽。
+派发、捕获、变参、借用约束、外部调用效应、运行时检查、清理和汇编分别保存在 owner 级连续表。调用参数、模式子项、匹配臂、格式片段与退出作用域链使用范围引用共享池，后续阶段不必重新访问 AST。
 
-`EffectSet` 只有 8 个 compiler 布尔标志，使用零分配 `u32` 位掩码，位固定表示 `MAY_PANIC`、`MAY_ALLOCATE`、`MAY_SAFEPOINT`、`MAY_SUSPEND`、`READS_MEMORY`、`WRITES_MEMORY`、`FOREIGN_CALL` 和 `UNSAFE_OPERATION`。构造/合并后以 `debug_assert!(bits & !KNOWN_EFFECT_BITS == 0)` 检查上界。`FOREIGN_CALL` 同时覆盖普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 与 `ForeignLeaf`；`call_resolutions` 对已解析的 C 导入或 native definition 额外记录 compiler-only 的 `ForeignCallMode`（`ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`）和 leaf stack budget（字节）。普通 bridge 与 dirty bridge 设置由交接引入的 `MAY_SAFEPOINT` 与 `MAY_SUSPEND`；`ForeignLeaf` 不因外调本身设置这两个标志；无法证明模式的间接调用选择普通 `ForeignBridge`。带函数体的 `ffi(dirty_cpu)` 只允许 native-only operation，并固定记录为 dirty bridge。该集合供 GIR 构造和优化验证使用，不是用户可观察的效果类型系统。
+`Effects` 的 8 个 compiler 布尔标志使用零分配 `u32` 位掩码，固定为 `PANIC`、`ALLOCATE`、`SAFEPOINT`、`SUSPEND`、`READ`、`WRITE`、`FOREIGN` 和 `UNSAFE`。构造时以 `debug_assert!` 验证已知位，冻结时再次检查。`ForeignCall` 另存调用表达式与已选择的 bridge/dirty/leaf 效应和 leaf stack budget；普通/dirty bridge 携带交接所需 safepoint/suspend，leaf 不因外调本身添加这两个标志。这些是后续 GIR 消费的操作事实，不是用户可观察的效果类型系统。
 
 ### 捕获计划
 
-每个闭包/async节点的 `CaptureRange` 指向 owner级连续 `capture_pool`。`Capture { root: LocalBindingId, projections: ProjectionRange, access: u8, environment_field: u32 }` 的 access位固定为 `READ`、`WRITE`、`ADDRESS_TAKEN`、`CROSSES_SUSPEND` 和 `RECURSIVE`；其它位为 0并以 `debug_assert!` 检查。
+每个闭包/async owner 的 `Capture` 保存环境局部槽、直接父 owner、父局部槽，以及读前置条件、写入和跨协程标志。来源按源码绑定身份归并，遮蔽创建独立局部槽；递归闭包先建立绑定再形成初始化器，因此可以引用自己的槽。冻结校验要求来源 owner 恰为定义父级，来源槽存在且类型一致。
 
-捕获分析从自由 place use收集路径。互不重叠且只读的字段/tuple投影保持独立 capture；一个写入、取地址、动态下标或相互重叠投影把共同前缀合并为同一共享槽。递归闭包另加入自引用环境槽，async把跨 suspend活跃 capture标记 `CROSSES_SUSPEND`。capture按 root绑定的 `HirId`、投影编码排序后分配 environment field，不受 hash或遍历线程影响。
+当前 HIR 按共享根槽记录捕获，保留同一绑定的别名语义；投影分拆与物理环境字段布局属于后续存储选择。只读格式计数同样进入捕获表，不能因它只出现在格式说明里而漏记。
 
 HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/heap或把只读值复制进环境。`EscapeAndPlacement`依据该计划选择 direct value、parent-environment projection或 shared slot；无论选择什么，都必须满足[函数与闭包](../spec/functions.md#捕获语义)这一唯一公开语义。
 
@@ -355,7 +349,9 @@ HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/h
 
 ## HIR 冻结条件
 
-一个 owner 只有同时满足以下条件才可以标为 `Validated` 并交给 GIR：
+阶段 12b/20 的 `Module::verify` 独立检查源范围与展开链、定义稳定排序和无环父关系、类型/声明引用、owner 与所有侧表索引、表达式前向子边和可达性、构造器字段域、捕获来源、类型调整链及控制流出口的完整清理作用域链。`Validated` 的字段私有，唯一构造入口只对 frontend 可见；它持有不可变 `Arc<Module>` 和规范序列化指纹，backend 接口只接受 `&Validated`。
+
+一个 owner 只有同时满足适用阶段的以下条件才可以冻结并交给 GIR；EarlyConst、源码宏、LateConst 的专用条件在对应阶段接入同一门禁：
 
 - 不含 `Res::Error`、错误类型或未求解类型变量；
 - 所有路径、调用、操作符、关联项和 impl 已唯一选择；

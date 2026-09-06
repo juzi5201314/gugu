@@ -21,12 +21,8 @@ pub(crate) struct SymbolInterner {
 impl SymbolInterner {
     pub(crate) fn intern(&mut self, bytes: &[u8]) -> Symbol {
         let hash = hash_bytes(bytes);
-        if let Some(candidates) = self.by_hash.get(&hash) {
-            for &index in candidates {
-                if self.bytes_at(index) == bytes {
-                    return Symbol(index);
-                }
-            }
+        if let Some(symbol) = self.lookup_hashed(bytes, hash) {
+            return symbol;
         }
         debug_assert!(
             self.spans.len() < u32::MAX as usize,
@@ -57,6 +53,19 @@ impl SymbolInterner {
 
     pub(crate) fn get_str(&self, symbol: Symbol) -> &str {
         std::str::from_utf8(self.get(symbol)).expect("intern 只保存 UTF-8")
+    }
+
+    pub(crate) fn lookup_str(&self, text: &str) -> Option<Symbol> {
+        self.lookup_hashed(text.as_bytes(), hash_bytes(text.as_bytes()))
+    }
+
+    fn lookup_hashed(&self, bytes: &[u8], hash: u64) -> Option<Symbol> {
+        self.by_hash
+            .get(&hash)?
+            .iter()
+            .copied()
+            .find(|&index| self.bytes_at(index) == bytes)
+            .map(Symbol)
     }
 
     fn bytes_at(&self, index: u32) -> &[u8] {

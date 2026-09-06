@@ -3,6 +3,7 @@ pub(crate) mod assembly;
 pub(crate) mod borrow;
 mod checker;
 pub(crate) mod foreign;
+mod hir;
 mod initialization;
 pub(crate) mod linkage;
 pub(crate) mod model;
@@ -33,10 +34,27 @@ pub(crate) fn check(
     names: &NameResolution,
     sources: &crate::SourceMap,
     cfg: &super::cfg::CfgContext,
+    entry: Option<model::CallableId>,
     queries: &crate::query::QueryEngine,
-) -> Result<(CheckedSemantics, Vec<super::types::Layout>), Vec<Diagnostic>> {
+) -> Result<
+    (
+        CheckedSemantics,
+        Vec<super::types::Layout>,
+        super::hir::Validated,
+    ),
+    Vec<Diagnostic>,
+> {
     let model = model::Model::new(modules, names)?;
-    let checked = query::check(&model, sources, cfg, queries)?;
+    let (checked, dependency) = query::check(&model, sources, cfg, queries)?;
     let layouts = super::types::form_and_layout(&model, &checked, cfg.target())?;
-    Ok((checked, layouts))
+    let hir = hir::lower(
+        &model,
+        names,
+        &checked,
+        sources,
+        entry,
+        &dependency,
+        queries,
+    )?;
+    Ok((checked, layouts, hir))
 }

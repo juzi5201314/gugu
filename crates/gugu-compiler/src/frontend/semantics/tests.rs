@@ -311,6 +311,30 @@ fn declarations_enforce_visibility_and_initialization_domains() {
 }
 
 #[test]
+fn cached_constraint_failures_preserve_notes_and_current_source_table() {
+    let source = "trait Marker {}\nstruct Box[T] { value: T }\nimpl[T] Marker for Box[T] {}\nimpl !Marker for Box[bool] {}\nfn use_marker[T: Marker](value: T) {}\nfn main() { let value: Box[bool] = Box { value: true }\n use_marker(value) }";
+    let queries = crate::QueryEngine::new();
+    let cold = frontend(&[("main.gg", source)], &queries).unwrap_err();
+    let warm = frontend(&[("main.gg", source)], &queries).unwrap_err();
+    assert!(
+        cold.iter()
+            .any(|diagnostic| diagnostic.severity() == crate::Severity::Note)
+    );
+    assert_eq!(
+        cold.iter()
+            .map(crate::Diagnostic::render_text)
+            .collect::<Vec<_>>(),
+        warm.iter()
+            .map(crate::Diagnostic::render_text)
+            .collect::<Vec<_>>()
+    );
+    assert_ne!(
+        cold[0].span().unwrap().table(),
+        warm[0].span().unwrap().table()
+    );
+}
+
+#[test]
 fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     use super::output::CheckKind;
     let queries = crate::QueryEngine::new();

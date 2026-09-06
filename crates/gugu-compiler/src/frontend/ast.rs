@@ -305,7 +305,7 @@ pub(crate) struct Item {
     pub(crate) kind: ItemKind,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum UnOp {
     Not,
     Neg,
@@ -314,7 +314,7 @@ pub(crate) enum UnOp {
     Deref,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum BinOp {
     Add,
     Sub,
@@ -336,7 +336,7 @@ pub(crate) enum BinOp {
     Ge,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum AssignOp {
     Assign,
     Add,

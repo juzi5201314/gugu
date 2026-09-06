@@ -160,9 +160,9 @@ fn any_plans_preserve_exact_payload_across_cached_queries() {
         .semantics
         .bodies
         .iter()
-        .find(|body| body.erasures.len() == 2)
+        .find(|body| body.adjustments.len() == 2)
         .unwrap();
-    let [object, erased] = main.erasures.as_slice() else {
+    let [object, erased] = main.adjustments.as_slice() else {
         panic!("仅具体值和接口值进入不同擦除容器");
     };
     assert_eq!(object.target, erased.source);
