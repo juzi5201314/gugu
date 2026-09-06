@@ -87,6 +87,7 @@ pub(super) struct Method {
     pub(super) signature: Ty,
     pub(super) receiver: bool,
     pub(super) dynamic: bool,
+    pub(super) unsafety: bool,
     pub(super) arguments: Vec<Ty>,
     pub(super) implementation: Option<DefRef>,
     pub(super) interface: Option<TraitRef>,

@@ -37,6 +37,21 @@ impl Checker<'_, '_> {
                     .filter_map(|state| state.cleanup_paths.get(&id))
                     .all(|path| path.initialized.get(slot) == Some(&true));
             }
+            path.callables.resize_with(self.slots.len(), Vec::new);
+            for (slot, values) in path.callables.iter_mut().enumerate() {
+                values.clear();
+                for state in &reachable {
+                    if let Some(origins) = state
+                        .cleanup_paths
+                        .get(&id)
+                        .and_then(|path| path.callables.get(slot))
+                    {
+                        values.extend_from_slice(origins);
+                    }
+                }
+                values.sort_unstable();
+                values.dedup();
+            }
         }
         for i in 0..self.state.initialized.len() {
             self.state.initialized[i] = reachable
@@ -130,7 +145,7 @@ impl Checker<'_, '_> {
                     self.bind(pat, &ty, false, Some(false));
                     self.expression(initializer, Some(&ty));
                     self.initialize(slot, true);
-                    self.state.callables[slot] = self.value_callables(initializer);
+                    self.assign_callables(slot, self.value_callables(initializer));
                     debug_assert_eq!(self.state.names.get(&name), Some(&slot));
                     return;
                 }
@@ -165,7 +180,7 @@ impl Checker<'_, '_> {
                 if let PatKind::Ident(name) = self.arena().pats[pat.0 as usize].kind
                     && let Some(&slot) = self.state.names.get(&name)
                 {
-                    self.state.callables[slot] = origins;
+                    self.assign_callables(slot, origins);
                 }
             }
             StmtKind::Assign { op, place, value } => {
@@ -212,7 +227,7 @@ impl Checker<'_, '_> {
                                 AssignOp::Assign => unreachable!(),
                             },
                             &left,
-                            &right,
+                            (value, &right),
                             &stmt.span,
                         );
                     }
@@ -227,7 +242,7 @@ impl Checker<'_, '_> {
                         if segs.len() == 1 {
                             if let Some(&slot) = self.state.names.get(&segs[0].name) {
                                 self.initialize(slot, true);
-                                self.state.callables[slot] = self.value_callables(value);
+                                self.assign_callables(slot, self.value_callables(value));
                             }
                         }
                     }
@@ -239,7 +254,15 @@ impl Checker<'_, '_> {
                 self.discarded_expression = outer;
             }
             StmtKind::Defer { body, ret } => self.register_defer(id, body, ret),
-            StmtKind::Yield => {}
+            StmtKind::Yield => {
+                if self.native_definition().is_some() {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "opaque native definition 不能 yield",
+                        stmt.span.clone(),
+                    );
+                }
+            }
             StmtKind::SourceMacro { .. } => self.error(
                 DiagnosticCode::InvalidExpression,
                 "源码宏必须先完成展开",

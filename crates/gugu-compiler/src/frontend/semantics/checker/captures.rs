@@ -108,7 +108,7 @@ impl Checker<'_, '_> {
         } = self.arena().exprs[body.0 as usize].kind
         {
             // 目标和参数在父协程求值；这里只检查调用签名，不执行 callee。
-            let result = self.call(callee, type_args, args, expected_result);
+            let result = self.call(body, callee, type_args, args, expected_result);
             self.expressions.push((body, result.clone()));
             return Ty::Join(Box::new(result));
         }
@@ -205,26 +205,10 @@ impl Checker<'_, '_> {
                 module: self.module,
                 function: function.0,
             }),
-            ExprKind::Path(path) => {
-                let segments = self.arena().paths[path.0 as usize]
-                    .segments
-                    .as_slice(&self.arena().segments);
-                if let Some(segment) = segments.first()
-                    && let Some(&slot) = self.state.names.get(&segment.name)
-                {
-                    if let Some(values) = self.state.callables.get(slot) {
-                        output.extend_from_slice(values);
-                    }
-                } else if let Ok(def) = self
-                    .model
-                    .resolve(self.module, &self.model.path(self.module, path))
-                    && let ItemKind::Function(function) =
-                        self.model.modules[def.module].arena.items[def.item.0 as usize].kind
-                {
-                    output.push(CallableId {
-                        module: def.module,
-                        function: function.0,
-                    });
+            ExprKind::Path(path) => self.collect_path_callables(path, output),
+            ExprKind::TypeCallee(ty) => {
+                if let Some(path) = self.type_value_path(ty) {
+                    self.collect_path_callables(path, output);
                 }
             }
             ExprKind::Paren(inner)
@@ -270,6 +254,22 @@ impl Checker<'_, '_> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn collect_path_callables(&self, path: PathId, output: &mut Vec<CallableId>) {
+        if let Some(slot) = self.path_root(path) {
+            output.extend_from_slice(&self.state.callables[slot]);
+        } else if let Ok(definition) = self
+            .model
+            .resolve(self.module, &self.model.path(self.module, path))
+            && let ItemKind::Function(function) =
+                self.model.modules[definition.module].arena.items[definition.item.0 as usize].kind
+        {
+            output.push(CallableId {
+                module: definition.module,
+                function: function.0,
+            });
         }
     }
 
@@ -324,21 +324,29 @@ impl Checker<'_, '_> {
         }
     }
 
+    pub(super) fn address_taken_path(&mut self, path: PathId) {
+        if let Some(slot) = self.path_root(path) {
+            self.slots[slot].storage |= ADDRESS_TAKEN;
+        }
+    }
+
+    fn path_root(&self, path: PathId) -> Option<usize> {
+        let first = self.arena().paths[path.0 as usize]
+            .segments
+            .as_slice(&self.arena().segments)
+            .first()?;
+        self.state.names.get(&first.name).copied()
+    }
+
     pub(super) fn place_written(&mut self, expression: ExprId) {
         if let Some(slot) = self.place_root(expression) {
             self.capture_slot(slot, false);
         }
     }
 
-    fn place_root(&self, expression: ExprId) -> Option<usize> {
+    pub(super) fn place_root(&self, expression: ExprId) -> Option<usize> {
         match self.arena().exprs[expression.0 as usize].kind {
-            ExprKind::Path(path) => {
-                let first = self.arena().paths[path.0 as usize]
-                    .segments
-                    .as_slice(&self.arena().segments)
-                    .first()?;
-                self.state.names.get(&first.name).copied()
-            }
+            ExprKind::Path(path) => self.path_root(path),
             ExprKind::Field { base, .. }
             | ExprKind::TupleField { base, .. }
             | ExprKind::Index { base, .. } => self.place_root(base),

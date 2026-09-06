@@ -144,6 +144,7 @@ impl Parser<'_> {
     ) -> ItemId {
         let unsafety = self.eat(TokenKind::KwUnsafe);
         if unsafety
+            && !self.at(TokenKind::KwExtern)
             && !self.at(TokenKind::KwFn)
             && !self.at(TokenKind::KwTrait)
             && !self.at(TokenKind::KwImpl)
@@ -158,6 +159,20 @@ impl Parser<'_> {
         }
         if self.at(TokenKind::KwImpl) {
             return self.parse_impl_after_unsafe(mark, attrs, visibility, true);
+        }
+        if self.at(TokenKind::KwExtern) {
+            self.bump();
+            let abi = self.parse_extern_abi_string();
+            let fn_id = self.parse_fn_decl(FnDeclContext::ExternImport, unsafety, Some(abi));
+            let function = &self.arena.fns[fn_id.0 as usize];
+            return self.push_item(
+                mark,
+                attrs,
+                visibility,
+                function.name,
+                function.name_span.clone(),
+                ItemKind::Function(fn_id),
+            );
         }
         let fn_id = self.parse_fn_decl(FnDeclContext::RegularFn, unsafety, None);
         let name = self.arena.fns[fn_id.0 as usize].name;
@@ -678,9 +693,22 @@ impl Parser<'_> {
     fn parse_extern_abi_string(&mut self) -> Symbol {
         let abi_tok = match self.kind() {
             TokenKind::String | TokenKind::RawString => self.bump(),
-            _ => self.expect(TokenKind::String, "extern 需要 `\"C\"` ABI 字符串"),
+            _ => {
+                self.error_here(
+                    DiagnosticCode::ParseExpected,
+                    "extern 需要 `\"C\"` ABI 字符串",
+                );
+                return self.empty_symbol;
+            }
         };
-        self.interned_symbol(abi_tok)
+        let value = super::super::string::decode_string(abi_tok.text(self.source));
+        if value != "C" {
+            self.error_here(
+                DiagnosticCode::ParseExpected,
+                "extern ABI 目前只支持 `\"C\"`",
+            );
+        }
+        self.intern.intern_str(&value)
     }
 
     fn parse_extern_item(
@@ -691,12 +719,6 @@ impl Parser<'_> {
     ) -> ItemId {
         self.bump();
         let abi = self.parse_extern_abi_string();
-        if self.intern.get_str(abi) != "C" {
-            self.error_here(
-                DiagnosticCode::ParseExpected,
-                "extern ABI 目前只支持 `\"C\"`",
-            );
-        }
         if self.eat(TokenKind::LBrace) {
             self.extern_block_abi = Some(abi);
             let items = self.parse_assoc_items(AssocContext::ExternBlock);
@@ -734,10 +756,7 @@ impl Parser<'_> {
     ) -> ItemId {
         self.bump();
         self.expect(TokenKind::LParen, "global_asm 需要 `(`");
-        let template = match self.kind() {
-            TokenKind::String | TokenKind::RawString => self.bump(),
-            _ => self.expect(TokenKind::String, "global_asm 需要字符串模板"),
-        };
+        let template = self.parse_expression();
         self.expect(TokenKind::RParen, "global_asm 需要 `)`");
         self.consume_decl_terminator();
         self.push_item(
@@ -746,9 +765,7 @@ impl Parser<'_> {
             visibility,
             None,
             None,
-            ItemKind::GlobalAsm {
-                template: self.interned_symbol(template),
-            },
+            ItemKind::GlobalAsm { template },
         )
     }
 

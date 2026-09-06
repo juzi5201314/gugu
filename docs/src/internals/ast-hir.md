@@ -222,7 +222,7 @@ parser 必须满足：
 
 `frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
-阶段 13–18 的版本化结果为 `CheckedSemantics`（schema 4），它在 TypeCheck query 中序列化，包含：
+阶段 13–19 的版本化结果为 `CheckedSemantics`（schema 5），它在 TypeCheck query 中序列化，包含：
 
 - 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
 - 模块 const/static 的无环初始化顺序与 Process/Coroutine/OsThread 初始化域，以及函数内 static 的声明和延迟初始化器。
@@ -235,12 +235,16 @@ parser 必须满足：
 - APIT 的独立匿名类型参数，以及 RPIT/TAIT 的声明身份、完整泛型环境和唯一隐藏类型表。函数实例参数按声明上下文的规范键顺序保存；`Self::关联项` 是由 Self 推导的查找缓存，不作为独立实例参数，避免关联 TAIT 产生伪递归。
 - `Erasure` 记录源类型与目标胖函数或动态接口类型；`impl Trait` 本身不生成擦除计划。具体值进入 `dyn Value` 后再进入 `dyn Any` 时，第二层 payload 的类型仍是 `dyn Value`；复制已经形成的 `dyn Any` 不生成新容器。
 - 动态 `Dispatch` 保存对象安全接口和成员序号，不携带静态 callable/impl。`Reflection` 保存 `is`、`downcast`、`downcast_copy` 的精确目标类型与符号化 TypeId 操作，恢复类型不得穿透既有接口对象。
+- `MemoryOperation` 保存标准内存原语、源/目标类型与按源码求值的实参 ID；`MaybeUninit` 有独立语义类型，不伪装成已初始化的 T。按位操作的管理属性及大小条件在同一布局模型检查。
+- `BorrowCheck` 保存被借用槽的基类型、完整字段/数组投影及目标类型；类型收敛后由统一聚合布局检查最终自然对齐，显式取引用与方法自动借用共用此检查。动态下标只保留步长条件，不重复执行下标表达式。
+- `ForeignDefinition` 与 `ForeignCall` 保存 C 声明身份、naked/imported 标志和按调用点优先级形成的 bridge/dirty/leaf 效应。`Linkage` 独立保存函数、static 与全局汇编的符号名、节和 used 状态；两张声明表在缓存命中时对照当前模型验证。
+- `AssemblyPlan` 保存求值后的模板、寄存器宽度/方向、输入与输出位置、clobber 位图及 managed/naked/dirty/global 上下文。managed 模板的有限控制流和所有出口的栈增量在前端验证；寄存器值大小由布局检查，机器编码仍属于后端。
 
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
 query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果；成功结果经 schema verifier 验证后才能进入布局和 IR，IR 直接持有该结果，镜像计划保留其规范序列化 BLAKE3 指纹。失败诊断存储逻辑文件名和字节范围，缓存命中时重新绑定当前 `SourceMap`，不得复用旧源码表身份。任何检查失败均中止 BuildIr 及后续产物路径。
 
-该结果是阶段 13–18 向 HIR 形成阶段提供的已检查对象，不代替下文的完整 HIR 冻结门禁；完整 unsafe 边界和 GIR cleanup CFG 分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；稠密 TypeId 分配、vtable 物化和实际容器分配分别留在冻结类型集合及后续 lowering 阶段。
+该结果是阶段 13–19 向 HIR 形成阶段提供的已检查对象，不代替下文的完整 HIR 冻结门禁。GIR cleanup CFG、外部桥接执行和汇编机器编码分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；稠密 TypeId 分配、vtable 物化和实际容器分配分别留在冻结类型集合及后续 lowering 阶段。
 
 trait 表先收集声明和 impl 头，形成关联类型后再检查方法签名；关联项不泄漏到模块值命名空间。特化使用类型模式包含关系和交集检查，重复参数必须保持相等约束。否定 impl 与肯定 impl 共用选择部分序；泛型调用的 trait 义务在实参推断收敛后验证，失败时保留约束或否定实现的源码位置。关联投影保存 Self、trait 实例和成员名称的完整身份，不能仅以短名称等同两个投影。
 

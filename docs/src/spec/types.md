@@ -363,7 +363,7 @@ let q: Option[&Point] = a.downcast()   // 靠期望类型推断 T
 额外 repr：
 
 - `#[repr(u8)]` 等整数 repr：枚举判别值，见上。
-- `#[repr(packed)]`：去掉字段间填充；所有字段必须是位类型，禁止句柄、引用、`string`、切片、胖函数和 `dyn Trait`。若字段的自然对齐大于 1，不能形成或解引用它的 `&T`；必须在 `unsafe` 中用 `std.ptr.addr_of(field)` 取得原始地址，再调用 `read_unaligned` / `write_unaligned` 或按字节复制，见[unsafe](unsafe.md)。
+- `#[repr(packed)]`：去掉字段间填充；所有字段必须是位类型，禁止句柄、引用、`string`、切片、胖函数和 `dyn Trait`。形成字段引用时必须由容器对齐、完整字段偏移及数组步长证明满足目标的自然对齐；不能证明时，即使在 `unsafe` 中也不能用显式 `&T` 或方法自动借用形成该引用。`std.ptr.addr_of(field)` 只取得原始地址，不形成引用；未对齐读写必须在 `unsafe` 中调用 `read_unaligned` / `write_unaligned` 或按字节复制，见[unsafe](unsafe.md)。
 - `#[repr(transparent)]`：结构体或 newtype 恰好一个非 ZST 字段（其余必须是 ZST）。与那一字段同一 ABI 与布局。供 FFI newtype。
 - `#[repr(align(N))]`：`N` 是 comptime 二的幂。类型对齐至少为 `N`。可与 `C` / `transparent` / `packed` 组合（`packed` 与 `align` 同时出现时，对齐取 `N`，字段仍紧排）。
 

@@ -4,6 +4,35 @@ use super::*;
 impl Checker<'_, '_> {
     pub(super) fn call(
         &mut self,
+        expression: ExprId,
+        callee: ExprId,
+        type_args: AstRange<GenericArg>,
+        args: AstRange<ExprId>,
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let previous = self.call_site.replace(expression);
+        let ty = self.call_inner(callee, type_args, args, expected);
+        if self.model.has_attribute(
+            self.module,
+            self.arena().exprs[expression.0 as usize].attributes,
+            "ffi",
+        ) && self
+            .foreign_calls
+            .last()
+            .is_none_or(|call| call.expression != expression)
+        {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "ffi 调用点属性需要直接 C 调用",
+                self.arena().exprs[expression.0 as usize].span.clone(),
+            );
+        }
+        self.call_site = previous;
+        ty
+    }
+
+    fn call_inner(
+        &mut self,
         callee: ExprId,
         type_args: AstRange<GenericArg>,
         args: AstRange<ExprId>,
@@ -16,7 +45,13 @@ impl Checker<'_, '_> {
             .copied()
             .filter(|&id| self.model.modules[self.module].configured.expr_active(id))
             .collect();
+        if let Some(result) = self.conversion(callee, &args) {
+            return result;
+        }
         if let ExprKind::Path(path) = expr.kind {
+            if let Some(result) = self.memory_call(callee, path, type_args, &args, expected) {
+                return result;
+            }
             let parts = self.model.path(self.module, path);
             if parts.len() == 2 {
                 let receiver_name = self.arena().paths[path.0 as usize]
@@ -57,46 +92,17 @@ impl Checker<'_, '_> {
                 }
             }
             if parts == ["panic"] {
+                if self.native_definition().is_some() {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "opaque native definition 不能 panic",
+                        expr.span.clone(),
+                    );
+                }
                 for &arg in &args {
                     self.expression(arg, None);
                 }
                 return Ty::Never;
-            }
-            if parts.len() == 1 {
-                if let Some(target) = Ty::primitive(parts[0]) {
-                    if args.len() != 1 {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "转换需要恰好一个实参",
-                            expr.span.clone(),
-                        );
-                        return Ty::Error;
-                    }
-                    let source = self.expression(args[0], None);
-                    if !(self.is_number(&source) || matches!(source, Ty::Char))
-                        || !matches!(target, Ty::Int { .. } | Ty::Float(_) | Ty::Char)
-                    {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "非法标量转换",
-                            expr.span.clone(),
-                        );
-                    }
-                    if self.number_kind(&source) == inference::NumberKind::Float
-                        && let Ty::Int { signed, bits } = target
-                    {
-                        self.record_check(
-                            callee,
-                            super::super::output::CheckKind::FloatToInt { signed, bits },
-                        );
-                    }
-                    if matches!(target, Ty::Char) {
-                        self.record_check(callee, super::super::output::CheckKind::UnicodeScalar);
-                    }
-                    self.expressions
-                        .push((callee, Ty::Function(vec![source], Box::new(target.clone()))));
-                    return target;
-                }
             }
             if let Some(name) = parts.last() {
                 if matches!(*name, "Some" | "Ok" | "Err") {
@@ -176,6 +182,13 @@ impl Checker<'_, '_> {
         expected: Option<&Ty>,
     ) -> Ty {
         let expr = &self.arena().exprs[callee.0 as usize];
+        if self.model.callable_is_unsafe(&ty) && self.unsafe_depth == 0 {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "调用 unsafe fn 必须处于显式 unsafe 块中",
+                expr.span.clone(),
+            );
+        }
         let ty = match self.model.opaque_function(&ty) {
             Ok(Some(signature)) => signature,
             Ok(None) => ty,
@@ -269,6 +282,7 @@ impl Checker<'_, '_> {
                         heterogeneous: false,
                     });
             }
+            self.check_foreign_call(callee, &ty);
             ret.clone()
         } else {
             for &arg in &args {

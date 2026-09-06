@@ -22,7 +22,8 @@ pub(in super::super) fn matches(
         | (Ty::Slice(a), Ty::Slice(b))
         | (Ty::Option(a), Ty::Option(b))
         | (Ty::Chan(a), Ty::Chan(b))
-        | (Ty::Join(a), Ty::Join(b)) => matches(a, b, bindings),
+        | (Ty::Join(a), Ty::Join(b))
+        | (Ty::MaybeUninit(a), Ty::MaybeUninit(b)) => matches(a, b, bindings),
         (Ty::Array(a, n), Ty::Array(b, m)) => n == m && matches(a, b, bindings),
         (Ty::Tuple(a), Ty::Tuple(b)) => match_list(a, b, bindings),
         (Ty::Named(i, a), Ty::Named(j, b)) => i == j && match_list(a, b, bindings),
@@ -186,7 +187,10 @@ impl Model<'_> {
         }
         let name = definition.name.as_str();
         if name == "Any" {
-            return !matches!(ty, Ty::Never | Ty::Var(_) | Ty::Error | Ty::Param(_));
+            return !matches!(
+                ty,
+                Ty::Never | Ty::MaybeUninit(_) | Ty::Var(_) | Ty::Error | Ty::Param(_)
+            );
         }
         if matches!(name, "Clone" | "Eq" | "Ord" | "StableOrd" | "StableHash") {
             return match ty {
@@ -283,6 +287,7 @@ impl Model<'_> {
             Ty::Option(t) => Ty::Option(Box::new(recur(t, stack)?)),
             Ty::Chan(t) => Ty::Chan(Box::new(recur(t, stack)?)),
             Ty::Join(t) => Ty::Join(Box::new(recur(t, stack)?)),
+            Ty::MaybeUninit(t) => Ty::MaybeUninit(Box::new(recur(t, stack)?)),
             Ty::Result(t, e) => Ty::Result(Box::new(recur(t, stack)?), Box::new(recur(e, stack)?)),
             Ty::Tuple(ts) => Ty::Tuple(
                 ts.iter()
@@ -562,6 +567,7 @@ impl Model<'_> {
             interface: None,
             member: None,
             dynamic: false,
+            unsafety: self.member_is_unsafe(member),
         })
     }
 }

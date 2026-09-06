@@ -6,7 +6,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
@@ -14,6 +14,8 @@ pub(crate) struct CheckedSemantics {
     pub(crate) initialization: Vec<Initialization>,
     pub(crate) input_fingerprint: [u8; 32],
     pub(crate) hidden_types: Vec<Option<Ty>>,
+    pub(crate) foreign_definitions: Vec<super::foreign::ForeignDefinition>,
+    pub(crate) linkage: Vec<super::linkage::Linkage>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -31,6 +33,19 @@ pub(crate) struct CheckedBody {
     pub(crate) dispatches: Vec<Dispatch>,
     pub(crate) erasures: Vec<Erasure>,
     pub(crate) reflections: Vec<Reflection>,
+    pub(crate) memory_operations: Vec<MemoryOperation>,
+    pub(crate) foreign_calls: Vec<super::foreign::ForeignCall>,
+    pub(crate) assembly: Vec<super::assembly::AssemblyPlan>,
+    pub(crate) borrow_checks: Vec<super::borrow::BorrowCheck>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MemoryOperation {
+    pub(crate) expression: ExprId,
+    pub(crate) kind: super::model::MemoryIntrinsic,
+    pub(crate) value: Ty,
+    pub(crate) result: Ty,
+    pub(crate) arguments: Vec<ExprId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -136,10 +151,12 @@ pub(crate) enum CheckKind {
     /// 除数非零；有符号溢出对按语言规则产生环绕商或零余数。
     IntegerDivision {
         ty: Ty,
+        divisor: ExprId,
     },
     /// 拒绝负移位量，其余移位量按左操作数位宽取模。
     Shift {
         ty: Ty,
+        amount: ExprId,
     },
     /// 单下标检查 0 <= i < len；切片检查 0 <= start <= end <= len。
     Bounds {
@@ -149,12 +166,20 @@ pub(crate) enum CheckKind {
     FloatToInt {
         signed: bool,
         bits: u16,
+        value: ExprId,
     },
-    UnicodeScalar,
+    UnicodeScalar {
+        value: ExprId,
+    },
 }
 
 impl CheckedSemantics {
     pub(crate) fn verify(&self, model: &Model<'_>) -> Result<(), Diagnostic> {
+        if self.foreign_definitions != model.foreign.definitions
+            || self.linkage != model.foreign.linkage
+        {
+            return Err(invalid());
+        }
         if self.hidden_types.len() != model.opaques.definitions.len() {
             return Err(invalid());
         }
@@ -199,6 +224,26 @@ impl CheckedSemantics {
             {
                 return Err(invalid());
             }
+            for check in &body.borrow_checks {
+                if check.expression.0 as usize >= module.arena.exprs.len()
+                    || !formed(&check.base, model)
+                    || !formed(&check.target, model)
+                {
+                    return Err(invalid());
+                }
+            }
+            for operation in &body.memory_operations {
+                if operation.expression.0 as usize >= module.arena.exprs.len()
+                    || !formed(&operation.value, model)
+                    || !formed(&operation.result, model)
+                    || operation
+                        .arguments
+                        .iter()
+                        .any(|id| id.0 as usize >= module.arena.exprs.len())
+                {
+                    return Err(invalid());
+                }
+            }
             for erasure in &body.erasures {
                 if erasure.expression.0 as usize >= module.arena.exprs.len()
                     || !formed(&erasure.source, model)
@@ -218,7 +263,7 @@ impl CheckedSemantics {
                 | ReflectionKind::DowncastCopy(ty)
                 | ReflectionKind::TypeId(ty) = &reflection.kind
                 {
-                    if !formed(ty, model) || *ty == Ty::Never {
+                    if !formed(ty, model) || matches!(ty, Ty::Never | Ty::MaybeUninit(_)) {
                         return Err(invalid());
                     }
                 }
@@ -369,7 +414,9 @@ impl CheckedSemantics {
                 {
                     return Err(invalid());
                 }
-                if let CheckKind::IntegerDivision { ty } | CheckKind::Shift { ty } = &check.kind {
+                if let CheckKind::IntegerDivision { ty, .. } | CheckKind::Shift { ty, .. } =
+                    &check.kind
+                {
                     if !matches!(
                         ty,
                         Ty::Int {
@@ -480,7 +527,8 @@ pub(super) fn formed(ty: &Ty, model: &Model<'_>) -> bool {
         | Ty::Array(t, _)
         | Ty::Option(t)
         | Ty::Chan(t)
-        | Ty::Join(t) => formed(t, model),
+        | Ty::Join(t)
+        | Ty::MaybeUninit(t) => formed(t, model),
         Ty::Tuple(ts) => ts.iter().all(|t| formed(t, model)),
         Ty::Function(ts, ret) => ts.iter().all(|t| formed(t, model)) && formed(ret, model),
         Ty::Callable(id, arguments, signature) => {

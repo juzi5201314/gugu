@@ -114,7 +114,10 @@ impl Model<'_> {
         match arena.exprs[expression.0 as usize].kind {
             ExprKind::Literal(LitKind::Bool(value)) => Ok(ConstantValue::Bool(value)),
             ExprKind::Literal(LitKind::String { text } | LitKind::RawString { text }) => {
-                Ok(ConstantValue::String(self.name(module, text).to_owned()))
+                Ok(ConstantValue::String(
+                    super::super::super::string::decode_string(self.name(module, text))
+                        .into_owned(),
+                ))
             }
             ExprKind::Literal(LitKind::Float { digits, exp10 }) => {
                 let value = format!("{}e{exp10}", self.name(module, digits))

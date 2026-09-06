@@ -145,6 +145,14 @@ impl Checker<'_, '_> {
     pub(super) fn finish_inference(&mut self) {
         for (actual, expected, span) in std::mem::take(&mut self.callable_constraints) {
             let actual = self.resolve(&actual);
+            if self.model.callable_is_unsafe(&actual) {
+                self.error(
+                    DiagnosticCode::InvalidType,
+                    "unsafe 函数项不满足安全 Fn 调用约束",
+                    span,
+                );
+                continue;
+            }
             let signature = match &actual {
                 Ty::Param(name) => self.callable_bounds.get(name).cloned(),
                 Ty::Opaque(..) => match self.model.opaque_function(&actual) {
@@ -263,11 +271,30 @@ impl Checker<'_, '_> {
             call.element = self.resolve(&call.element);
         }
         self.variadic_calls = calls;
+        let mut operations = std::mem::take(&mut self.memory_operations);
+        for operation in &mut operations {
+            operation.value = self.normalized(&operation.value);
+            operation.result = self.normalized(&operation.result);
+        }
+        self.memory_operations = operations;
+        let mut borrows = std::mem::take(&mut self.borrow_checks);
+        for check in &mut borrows {
+            check.base = self.normalized(&check.base);
+            check.target = self.normalized(&check.target);
+        }
+        self.borrow_checks = borrows;
+        let mut assembly = std::mem::take(&mut self.assembly);
+        for plan in &mut assembly {
+            for operand in &mut plan.operands {
+                operand.ty = self.normalized(&operand.ty);
+            }
+        }
+        self.assembly = assembly;
         let mut checks = std::mem::take(&mut self.runtime_checks);
         for check in &mut checks {
             match &mut check.kind {
-                super::super::output::CheckKind::IntegerDivision { ty }
-                | super::super::output::CheckKind::Shift { ty } => *ty = self.resolve(ty),
+                super::super::output::CheckKind::IntegerDivision { ty, .. }
+                | super::super::output::CheckKind::Shift { ty, .. } => *ty = self.resolve(ty),
                 _ => {}
             }
         }

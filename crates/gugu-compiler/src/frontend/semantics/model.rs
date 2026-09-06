@@ -7,8 +7,12 @@ use super::super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 use std::collections::BTreeMap;
+mod attributes;
+pub(crate) use attributes::Representation;
 mod constants;
+mod lang;
 pub(super) use constants::ConstantValue;
+pub(crate) use lang::MemoryIntrinsic;
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Ty {
     Error,
@@ -38,6 +42,7 @@ pub(crate) enum Ty {
     Range,
     Chan(Box<Ty>),
     Join(Box<Ty>),
+    MaybeUninit(Box<Ty>),
 }
 
 /// 函数项和闭包的身份来自模块内稠密 FnDecl 编号，不使用地址。
@@ -142,12 +147,14 @@ pub(crate) struct Nominal {
     pub(crate) params: Vec<String>,
     pub(crate) variants: Vec<Constructor>,
     pub(crate) is_enum: bool,
+    pub(crate) repr: Representation,
 }
 pub(crate) struct Model<'a> {
     pub(crate) modules: &'a [ParsedModule],
     pub(crate) nominal: Vec<Nominal>,
     pub(super) traits: super::traits::Traits,
     pub(super) opaques: super::opaque::Opaques,
+    pub(super) foreign: super::foreign::Foreign,
     names: &'a NameResolution,
     // 模块/FnDecl 编号稠密；匿名闭包没有具名 ItemId，不参与函数地址的初始化依赖。
     function_items: Vec<Vec<Option<ItemId>>>,
@@ -215,6 +222,7 @@ impl<'a> Model<'a> {
             ),
             Ty::Ref(t) => format!("&{}", self.describe(t)),
             Ty::Ptr(t) => format!("*{}", self.describe(t)),
+            Ty::MaybeUninit(t) => format!("MaybeUninit[{}]", self.describe(t)),
             Ty::Slice(t) => format!("[{}]", self.describe(t)),
             Ty::Array(t, n) => format!("[{}; {n}]", self.describe(t)),
             Ty::Tuple(ts) => format!("({}{})", list(ts), if ts.len() == 1 { "," } else { "" }),
@@ -268,6 +276,7 @@ impl<'a> Model<'a> {
             names,
             traits: super::traits::Traits::default(),
             opaques: super::opaque::Opaques::default(),
+            foreign: super::foreign::Foreign::default(),
             function_items: modules
                 .iter()
                 .map(|module| {
@@ -303,11 +312,16 @@ impl<'a> Model<'a> {
                         }
                     })
                     .collect();
+                let definition = DefRef {
+                    module,
+                    item: ItemId(index as u32),
+                };
+                let repr = model
+                    .representation(definition)
+                    .map_err(|error| vec![error])?;
                 model.nominal.push(Nominal {
-                    definition: DefRef {
-                        module,
-                        item: ItemId(index as u32),
-                    },
+                    definition,
+                    repr,
                     name: item
                         .name
                         .map(|s| model.name(module, s).to_owned())
@@ -318,6 +332,7 @@ impl<'a> Model<'a> {
                 });
             }
         }
+        model.collect_foreign()?;
         model.collect_opaques().map_err(|error| vec![error])?;
         model.collect_traits().map_err(|error| vec![error])?;
         model
@@ -662,6 +677,12 @@ impl<'a> Model<'a> {
                     (["Join"], [t]) => return Ok(Ty::Join(Box::new(t.clone()))),
                     _ => {}
                 }
+                if self.external_path(module, &parts).as_deref() == Some("std.mem.MaybeUninit") {
+                    let [inner] = args.as_slice() else {
+                        return Err(self.error(module, "MaybeUninit 需要一个类型实参"));
+                    };
+                    return Ok(Ty::MaybeUninit(Box::new(inner.clone())));
+                }
                 let def = self.resolve(module, &parts)?;
                 if let Some((i, n)) = self
                     .nominal
@@ -843,13 +864,26 @@ impl<'a> Model<'a> {
             _ => None,
         }
     }
-    pub(crate) fn fields(&self, ty: &Ty) -> Option<Vec<FieldInfo>> {
-        match ty.deref() {
-            Ty::Named(i, _) if !self.nominal[*i].is_enum => {
-                self.variants(ty).map(|mut vs| vs.remove(0).fields)
-            }
-            _ => None,
+    pub(crate) fn find_field(&self, ty: &Ty, name: &str) -> Option<(usize, Ty, bool)> {
+        let Ty::Named(index, arguments) = ty.deref() else {
+            return None;
+        };
+        let nominal = &self.nominal[*index];
+        if nominal.is_enum {
+            return None;
         }
+        let (index, field) = nominal.variants[0]
+            .fields
+            .iter()
+            .enumerate()
+            .find(|(_, field)| field.name == name)?;
+        let bindings = nominal
+            .params
+            .iter()
+            .cloned()
+            .zip(arguments.iter().cloned())
+            .collect();
+        Some((index, substitute(&field.ty, &bindings), field.public))
     }
     pub(crate) fn def_module(&self, ty: &Ty) -> Option<usize> {
         match ty.deref() {
@@ -962,6 +996,7 @@ pub(super) fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
         ),
         Ty::Chan(t) => Ty::Chan(Box::new(substitute(t, bindings))),
         Ty::Join(t) => Ty::Join(Box::new(substitute(t, bindings))),
+        Ty::MaybeUninit(t) => Ty::MaybeUninit(Box::new(substitute(t, bindings))),
         Ty::Function(params, ret) => Ty::Function(
             params.iter().map(|ty| substitute(ty, bindings)).collect(),
             Box::new(substitute(ret, bindings)),

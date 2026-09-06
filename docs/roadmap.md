@@ -141,10 +141,11 @@
   - 验收：`impl Trait` 保持单态化；不安全对象 trait 不能形成 dyn；Any 只能恢复放入容器的具体类型；不得出现名为 `any` 的渐进类型或跨 dyn Trait 猜测。
   - 接入证据：`CheckedSemantics` schema 4 保存匿名泛型、不透明声明与唯一隐藏类型、擦除边界、动态派发和精确恢复目标；同一类型模型进入布局与后续计划。165 项工作区测试通过，覆盖独立 APIT、跨模块 RPIT、关联 TAIT、Fn 与 IntoIter 约束传递、嵌套 Self 对象安全、Any payload 身份和缓存 verifier；Linux/Windows CLI 接受真实接口与函数切片，非法 dyn 的 `build` 返回 E0038 且没有镜像计划。TypeId 在本阶段保留符号类型，稠密编号、物理容器及 vtable 由阶段 25 及后续 lowering 物化。
 
-- [ ] **阶段 19：实现 unsafe、原始指针、union 与 intrinsic 检查**（复杂度：4）
+- [x] **阶段 19：实现 unsafe、原始指针、union 与 intrinsic 检查**（复杂度：4）
   - 依赖：阶段 12、14、17。
   - 实现 unsafe 边界、`MaybeUninit`、`transmute`、volatile/unaligned 访问、`unreachable`、原始指针有效位模式、`asm/global_asm` 语法约束、链接属性和 C ABI 签名可表示性检查。
   - 验收：安全代码不能越过 unsafe 前置条件；资源/COW 类型不能被位操作绕过；union 只接受位类型；Windows `i128/u128` C 签名、naked、dirty/leaf/bridge 属性按规范拒绝或接受。
+  - 接入证据：`CheckedSemantics` schema 5 保存内存原语、引用投影、外部调用效应、链接属性和汇编计划；类型形成后的布局校验统一检查按位管理边界、重解释大小、packed 自然对齐、寄存器宽度和双目标 C ABI。188 项工作区测试通过，包含 unsafe 函数项与动态方法、MaybeUninit、union、转换、leaf/dirty/bridge 优先级、native-only 限制、managed asm 有限 CFG 及条件清理捕获回归。Linux/Windows 真实 CLI 均接受综合输入；非法 packed 引用的 build 返回 E0038，镜像计划为空。实际外部桥接与机器编码仍分别由阶段 58、52 完成。
 
 - [ ] **阶段 20：构造 AST/HIR 结构与冻结校验**（复杂度：5）
   - 依赖：阶段 10、12–19、12a、12b。

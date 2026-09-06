@@ -123,6 +123,7 @@ impl Model<'_> {
                 arguments: Vec::new(),
                 implementation: None,
                 dynamic: true,
+                unsafety: self.member_is_unsafe(member),
                 receiver: *receiver,
                 signature: self.normalize(&substitute(signature, &bindings), &[])?,
                 interface: Some(interface.clone()),
@@ -148,7 +149,8 @@ fn uses_self(ty: &Ty) -> bool {
         | Ty::Array(t, _)
         | Ty::Option(t)
         | Ty::Chan(t)
-        | Ty::Join(t) => uses_self(t),
+        | Ty::Join(t)
+        | Ty::MaybeUninit(t) => uses_self(t),
         Ty::Tuple(types) | Ty::Named(_, types) => types.iter().any(uses_self),
         Ty::Function(params, ret) => params.iter().any(uses_self) || uses_self(ret),
         Ty::Result(t, e) => uses_self(t) || uses_self(e),

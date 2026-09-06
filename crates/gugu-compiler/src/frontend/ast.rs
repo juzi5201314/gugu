@@ -286,7 +286,7 @@ pub(crate) enum ItemKind {
         items: AstRange<ItemId>,
     },
     GlobalAsm {
-        template: Symbol,
+        template: ExprId,
     },
     SourceMacro {
         body: ExprId,
@@ -464,6 +464,8 @@ pub(crate) enum ExprKind {
     Path(PathId),
     Literal(LitKind),
     Paren(ExprId),
+    /// 指针/引用类型调用头；同形的值解引用由类型检查区分。
+    TypeCallee(TyId),
     Tuple(AstRange<ExprId>),
     Array(AstRange<ExprId>),
     Repeat {
@@ -550,7 +552,7 @@ pub(crate) enum ExprKind {
         field: Option<Symbol>,
     },
     Asm {
-        template: Symbol,
+        template: ExprId,
         operands: AstRange<AsmOperand>,
     },
     Return(Option<ExprId>),

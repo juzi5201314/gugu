@@ -64,7 +64,7 @@ impl Checker<'_, '_> {
                 Ty::Bool
             };
         }
-        self.operation_type(id, op, &left, &right, span)
+        self.operation_type(id, op, &left, (rhs, &right), span)
     }
 
     pub(super) fn operation_type(
@@ -72,9 +72,10 @@ impl Checker<'_, '_> {
         id: ExprId,
         op: BinOp,
         left: &Ty,
-        right: &Ty,
+        right: (ExprId, &Ty),
         span: &Span,
     ) -> Ty {
+        let (rhs, right) = right;
         if *left == Ty::Never || *right == Ty::Never {
             return Ty::Never;
         }
@@ -86,7 +87,13 @@ impl Checker<'_, '_> {
         }
         if matches!(op, BinOp::Shl | BinOp::Shr) {
             if self.is_integer(left) && self.is_integer(right) {
-                self.record_check(id, CheckKind::Shift { ty: left.clone() });
+                self.record_check(
+                    id,
+                    CheckKind::Shift {
+                        ty: left.clone(),
+                        amount: rhs,
+                    },
+                );
                 return left.clone();
             }
             self.error(
@@ -98,7 +105,13 @@ impl Checker<'_, '_> {
         } else {
             let ty = self.binary_type(op, left, right, span);
             if matches!(op, BinOp::Div | BinOp::Rem) && self.is_integer(&ty) {
-                self.record_check(id, CheckKind::IntegerDivision { ty: ty.clone() });
+                self.record_check(
+                    id,
+                    CheckKind::IntegerDivision {
+                        ty: ty.clone(),
+                        divisor: rhs,
+                    },
+                );
             }
             ty
         }

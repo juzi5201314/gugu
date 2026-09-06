@@ -324,25 +324,51 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
         .iter()
         .flat_map(|body| body.runtime_checks.iter().map(|check| &check.kind))
         .collect();
+    let [
+        CheckKind::IntegerDivision {
+            ty: division_ty,
+            divisor,
+        },
+        CheckKind::Shift {
+            ty: shift_ty,
+            amount,
+        },
+        CheckKind::Bounds { slice: false },
+        CheckKind::Bounds { slice: true },
+        CheckKind::Utf8Boundary,
+        CheckKind::FloatToInt {
+            signed: true,
+            bits: 64,
+            value: float,
+        },
+        CheckKind::UnicodeScalar { value: scalar },
+    ] = checks.as_slice()
+    else {
+        panic!("所有有风险操作都必须保留对应检查，unsafe 下标不生成边界检查");
+    };
+    assert_eq!(division_ty, &super::model::Ty::int());
+    assert_eq!(shift_ty, &super::model::Ty::int());
+    let model = super::model::Model::new(&warm.modules, &warm.names).unwrap();
+    assert_eq!(model.constant_int(0, *divisor).unwrap(), 0);
+    let operand_type = |expression| {
+        &warm
+            .semantics
+            .bodies
+            .iter()
+            .flat_map(|body| &body.expressions)
+            .find(|(id, _)| *id == expression)
+            .unwrap()
+            .1
+    };
     assert_eq!(
-        checks,
-        [
-            &CheckKind::IntegerDivision {
-                ty: super::model::Ty::int()
-            },
-            &CheckKind::Shift {
-                ty: super::model::Ty::int()
-            },
-            &CheckKind::Bounds { slice: false },
-            &CheckKind::Bounds { slice: true },
-            &CheckKind::Utf8Boundary,
-            &CheckKind::FloatToInt {
-                signed: true,
-                bits: 64
-            },
-            &CheckKind::UnicodeScalar,
-        ]
+        operand_type(*amount),
+        &super::model::Ty::Int {
+            signed: false,
+            bits: 8
+        }
     );
+    assert_eq!(operand_type(*float), &super::model::Ty::Float(64));
+    assert_eq!(operand_type(*scalar), &super::model::Ty::int());
     let compiler = Compiler::new();
     let first = compiler.compile(CompileRequest::single_file(
         "main.gg",

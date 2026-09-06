@@ -345,7 +345,8 @@ pub(super) fn has_unbound(ty: &Ty, parameters: &BTreeMap<String, Ty>) -> bool {
         | Ty::Array(t, _)
         | Ty::Option(t)
         | Ty::Chan(t)
-        | Ty::Join(t) => has_unbound(t, parameters),
+        | Ty::Join(t)
+        | Ty::MaybeUninit(t) => has_unbound(t, parameters),
         Ty::Tuple(types) | Ty::Named(_, types) | Ty::Opaque(_, types) => {
             types.iter().any(|ty| has_unbound(ty, parameters))
         }

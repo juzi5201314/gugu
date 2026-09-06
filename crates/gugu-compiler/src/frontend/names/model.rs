@@ -65,7 +65,7 @@ pub(crate) struct Definition {
 pub(crate) enum ResolvedTarget {
     Module(ModuleId),
     Def(DefId),
-    External,
+    External(String),
 }
 
 #[derive(Clone, Debug)]
@@ -84,11 +84,11 @@ pub(crate) struct NameResolution {
     pub(crate) imports: Vec<ResolvedImport>,
 }
 
-pub(super) fn resolved_target_key(target: &ResolvedTarget) -> (u8, u32) {
+pub(super) fn resolved_target_key(target: &ResolvedTarget) -> (u8, u32, &str) {
     match target {
-        ResolvedTarget::Module(module) => (0, module.0),
-        ResolvedTarget::Def(definition) => (1, definition.0),
-        ResolvedTarget::External => (2, 0),
+        ResolvedTarget::Module(module) => (0, module.0, ""),
+        ResolvedTarget::Def(definition) => (1, definition.0, ""),
+        ResolvedTarget::External(path) => (2, 0, path),
     }
 }
 

@@ -41,7 +41,7 @@ struct CandidateSet {
 #[derive(Clone)]
 enum ModuleTarget {
     Local(ModuleId),
-    External,
+    External(String),
 }
 
 #[derive(Clone)]
@@ -58,7 +58,7 @@ struct PendingImport {
 enum BindingTarget {
     Module(ModuleId),
     Def(DefId),
-    External,
+    External(String),
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -681,7 +681,7 @@ fn classify_module(
         return Some(ModuleTarget::Local(module));
     }
     if external {
-        return Some(ModuleTarget::External);
+        return Some(ModuleTarget::External(joined));
     }
     if let Some(module) = folded.get(&joined.to_ascii_lowercase()) {
         diagnostics.push(Diagnostic::error(
@@ -781,7 +781,7 @@ fn resolve_imports(
                         target: match binding.target {
                             BindingTarget::Module(module) => ResolvedTarget::Module(module),
                             BindingTarget::Def(definition) => ResolvedTarget::Def(definition),
-                            BindingTarget::External => ResolvedTarget::External,
+                            BindingTarget::External(path) => ResolvedTarget::External(path),
                         },
                         public: pending[index].public,
                         span: pending[index].span.clone(),
@@ -834,13 +834,13 @@ fn resolve_import(
     state[index] = 1;
     let import = &pending[index];
     let mut bindings = match (&import.target, import.item.as_ref()) {
-        (ModuleTarget::External, None) => vec![Binding {
+        (ModuleTarget::External(path), None) => vec![Binding {
             namespace: Namespace::Module,
-            target: BindingTarget::External,
+            target: BindingTarget::External(path.clone()),
         }],
-        (ModuleTarget::External, Some(_)) => vec![Binding {
+        (ModuleTarget::External(path), Some(name)) => vec![Binding {
             namespace: Namespace::External,
-            target: BindingTarget::External,
+            target: BindingTarget::External(format!("{path}.{name}")),
         }],
         (ModuleTarget::Local(module), None) => vec![Binding {
             namespace: Namespace::Module,

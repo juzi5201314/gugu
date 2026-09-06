@@ -907,18 +907,7 @@ impl Parser<'_> {
         let mark = self.start();
         self.bump();
         self.expect(TokenKind::LParen, "asm 需要 `(`");
-        let template = match self.kind() {
-            TokenKind::String | TokenKind::RawString => {
-                let token = self.bump();
-                self.interned_symbol(token)
-            }
-            _ => {
-                self.error_here(DiagnosticCode::ParseExpected, "asm 需要字符串模板");
-                let mark = self.start();
-                self.error_expr(mark);
-                return self.push_expr(mark, ExprKind::Error);
-            }
-        };
+        let template = self.parse_expression();
         let mut operands = Vec::new();
         while self.eat(TokenKind::Comma) {
             if self.at(TokenKind::RParen) {
@@ -999,6 +988,17 @@ impl Parser<'_> {
     fn parse_paren_or_tuple(&mut self) -> ExprId {
         let mark = self.start();
         self.bump();
+        if self.at(TokenKind::Star) || self.at(TokenKind::And) {
+            let checkpoint = self.checkpoint();
+            let ty = self.parse_ty();
+            if self.eat(TokenKind::RParen)
+                && self.at(TokenKind::LParen)
+                && self.diagnostics.len() == checkpoint.2
+            {
+                return self.push_expr(mark, ExprKind::TypeCallee(ty));
+            }
+            self.restore(checkpoint);
+        }
         if self.eat(TokenKind::RParen) {
             return self.push_expr(mark, ExprKind::Tuple(AstRange::empty()));
         }

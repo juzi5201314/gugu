@@ -196,6 +196,16 @@ impl Checker<'_, '_> {
         expected: Option<&Ty>,
     ) -> Ty {
         if interface.is_none() && receiver {
+            if let Some(result) = self.memory_method(
+                callee,
+                &self.resolve(&self_ty),
+                name,
+                type_args,
+                args,
+                expected,
+            ) {
+                return result;
+            }
             if let Some(result) = self.reflection_method(
                 callee,
                 &self.resolve(&self_ty),
@@ -209,16 +219,16 @@ impl Checker<'_, '_> {
         }
         if interface.is_none()
             && receiver
-            && self.model.fields(&self_ty).is_some_and(|fields| {
-                fields.iter().any(|field| {
-                    field.name == name
-                        && (field.ty.signature().is_some()
-                            || self
-                                .model
-                                .opaque_function(&field.ty)
-                                .is_ok_and(|signature| signature.is_some()))
+            && self
+                .model
+                .find_field(&self_ty, name)
+                .is_some_and(|(_, ty, _)| {
+                    ty.signature().is_some()
+                        || self
+                            .model
+                            .opaque_function(&ty)
+                            .is_ok_and(|signature| signature.is_some())
                 })
-            })
         {
             let ty = self.field(&self_ty, name, &self.arena().exprs[callee.0 as usize].span);
             return self.invoke(callee, ty, args.to_vec(), None, expected);
@@ -270,6 +280,13 @@ impl Checker<'_, '_> {
             );
             return Ty::Error;
         }
+        if method.callable.is_none() && method.unsafety && self.unsafe_depth == 0 {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "调用 unsafe 方法必须处于显式 unsafe 块中",
+                span.clone(),
+            );
+        }
         let callable = match method.callable {
             Some(id) => self.instantiate_callable(
                 Ty::Callable(id, method.arguments, Box::new(method.signature)),
@@ -304,6 +321,9 @@ impl Checker<'_, '_> {
             };
             if let Some(expression) = receiver_expression {
                 self.address_taken(expression);
+                if dereferences == 0 && !matches!(target, Ty::Ref(_)) {
+                    self.implicit_borrow_check(callee, expression, target);
+                }
             }
         }
         let args = if trait_ufcs && receiver {

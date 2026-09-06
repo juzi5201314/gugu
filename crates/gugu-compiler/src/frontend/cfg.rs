@@ -49,6 +49,10 @@ impl CfgContext {
         Self::new(target, [], [], false, false, BTreeMap::new())
     }
 
+    pub(crate) fn target(&self) -> TargetName {
+        self.target
+    }
+
     fn atom(&self, name: &str) -> Option<bool> {
         match name {
             "true" => Some(true),
@@ -285,7 +289,10 @@ impl Configurator<'_> {
             ItemKind::SourceMacro { body } => {
                 self.expr(body, false);
             }
-            ItemKind::Use(_) | ItemKind::GlobalAsm { .. } | ItemKind::Error => {}
+            ItemKind::GlobalAsm { template } => {
+                self.expr(template, false);
+            }
+            ItemKind::Use(_) | ItemKind::Error => {}
         }
     }
 
@@ -472,6 +479,7 @@ impl Configurator<'_> {
             }
             ExprKind::Select { arms } => self.select_arms(arms),
             ExprKind::Closure(function) => self.function(function),
+            ExprKind::TypeCallee(ty) => self.ty(ty),
             ExprKind::Call {
                 callee,
                 type_args,
@@ -522,7 +530,8 @@ impl Configurator<'_> {
                 self.generic_args(tys);
                 self.exprs(args, true);
             }
-            ExprKind::Asm { operands, .. } => {
+            ExprKind::Asm { template, operands } => {
+                self.expr(template, false);
                 for operand in operands.as_slice(&self.arena.asm_operands) {
                     match operand.kind {
                         AsmOperandKind::In { expr, .. }

@@ -3,6 +3,7 @@ use crate::diagnostics::DiagnosticCode;
 #[derive(Clone, Copy, Debug)]
 pub(super) struct DecodedEscape {
     pub(super) next: usize,
+    pub(super) value: char,
     pub(super) utf8_len: u8,
     pub(super) is_nul: bool,
 }
@@ -13,6 +14,43 @@ pub(super) struct EscapeError {
     pub(super) start: usize,
     pub(super) end: usize,
     pub(super) message: &'static str,
+}
+
+/// 输入已经通过词法校验；没有实际转义的字面量直接借用正文。
+pub(super) fn decode_string(text: &str) -> std::borrow::Cow<'_, str> {
+    let raw = text.starts_with("raw");
+    let (open, close) = if text.starts_with("raw\"\"\"") {
+        (6, 3)
+    } else if raw {
+        (4, 1)
+    } else {
+        (1, 1)
+    };
+    let body = &text[open..text.len() - close];
+    let Some(first) = body
+        .as_bytes()
+        .windows(2)
+        .position(|pair| pair[0] == b'\\' && (!raw || matches!(pair[1], b'\\' | b'"')))
+    else {
+        return std::borrow::Cow::Borrowed(body);
+    };
+    let mut result = String::with_capacity(body.len());
+    result.push_str(&body[..first]);
+    let mut offset = first;
+    while offset < body.len() {
+        if body.as_bytes()[offset] == b'\\'
+            && (!raw || matches!(body.as_bytes().get(offset + 1), Some(b'\\' | b'"')))
+        {
+            let decoded = scan_escape(body, offset, false, !raw).expect("字符串已通过词法转义校验");
+            result.push(decoded.value);
+            offset = decoded.next;
+        } else {
+            let ch = body[offset..].chars().next().expect("正文字符边界");
+            result.push(ch);
+            offset += ch.len_utf8();
+        }
+    }
+    std::borrow::Cow::Owned(result)
 }
 
 pub(super) fn scan_escape(
@@ -43,6 +81,7 @@ pub(super) fn scan_escape(
     if let Some(ch) = simple {
         return Ok(DecodedEscape {
             next: slash + 2,
+            value: ch,
             utf8_len: ch.len_utf8() as u8,
             is_nul: ch == '\0',
         });
@@ -97,6 +136,7 @@ fn scan_hex_escape(
     let byte = (hi << 4) | lo;
     Ok(DecodedEscape {
         next: slash + 4,
+        value: char::from(byte),
         utf8_len: 1,
         is_nul: byte == 0,
     })
@@ -157,6 +197,7 @@ fn scan_unicode_escape(
     };
     Ok(DecodedEscape {
         next: offset + 1,
+        value: ch,
         utf8_len: ch.len_utf8() as u8,
         is_nul: ch == '\0',
     })

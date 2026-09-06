@@ -1,5 +1,5 @@
 //! 初始化依赖只消费名称解析后的边；线程/协程局部项不进入编译期 DAG。
-use super::super::ast::{AttrKind, Item, ItemId, ItemKind};
+use super::super::ast::{ItemId, ItemKind};
 use super::model::{DefRef, Model};
 use crate::{Diagnostic, DiagnosticCode};
 
@@ -31,8 +31,8 @@ pub(super) fn plan(
             if !parsed.configured.item_active(ItemId(index as u32)) {
                 continue;
             }
-            let coroutine = has_attribute(model, module, item, "coroutine_local");
-            let thread = has_attribute(model, module, item, "os_thread_local");
+            let coroutine = model.has_attribute(module, item.attributes, "coroutine_local");
+            let thread = model.has_attribute(module, item.attributes, "os_thread_local");
             if (coroutine || thread)
                 && (!matches!(item.kind, ItemKind::Static { .. }) || (coroutine && thread))
             {
@@ -152,19 +152,4 @@ fn visit(
             kind,
         });
     }
-}
-
-fn has_attribute(model: &Model<'_>, module: usize, item: &Item, name: &str) -> bool {
-    let parsed = &model.modules[module];
-    item.attributes
-        .as_slice(&parsed.arena.attrs)
-        .iter()
-        .any(|attr| {
-            let AttrKind::Outer { token_open, .. } = attr.kind else {
-                return false;
-            };
-            parsed.tokens.tokens[token_open as usize + 1]
-                .symbol
-                .is_some_and(|s| model.name(module, s) == name)
-        })
 }

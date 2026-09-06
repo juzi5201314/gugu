@@ -347,7 +347,8 @@ fn validate_repr_item(source: &str, args: &[Token], index: usize) -> Result<usiz
         );
     }
     match token.text(source) {
-        "C" | "u8" | "u16" | "u32" | "u64" | "packed" | "transparent" => Ok(index + 1),
+        "C" | "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+        | "packed" | "transparent" => Ok(index + 1),
         "align" => validate_align(args, index),
         name => err(
             token,

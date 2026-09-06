@@ -500,7 +500,7 @@ impl Parser<'_> {
         })
     }
 
-    fn checkpoint(&self) -> Checkpoint {
+    pub(super) fn checkpoint(&self) -> Checkpoint {
         (
             self.cursor,
             self.delim_depth,
@@ -509,7 +509,7 @@ impl Parser<'_> {
         )
     }
 
-    fn restore(&mut self, saved: Checkpoint) {
+    pub(super) fn restore(&mut self, saved: Checkpoint) {
         self.cursor = saved.0;
         self.delim_depth = saved.1;
         self.diagnostics.truncate(saved.2);

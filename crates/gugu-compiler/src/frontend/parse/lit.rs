@@ -104,9 +104,11 @@ impl Parser<'_> {
         } else {
             text[open..close].chars().next().unwrap_or('\0')
         };
-        let mut buf = [0_u8; 4];
-        let encoded = ch.encode_utf8(&mut buf);
-        encoded.bytes().next().unwrap_or(0)
+        debug_assert!(
+            u32::from(ch) <= u32::from(u8::MAX),
+            "词法检查保证 byte 字符只有一个字节"
+        );
+        ch as u8
     }
 }
 
@@ -121,51 +123,9 @@ fn char_body_start(text: &str) -> usize {
 }
 
 fn escaped_char(text: &str, slash: usize, byte_char: bool) -> char {
-    match scan_escape(text, slash, byte_char, !byte_char) {
-        Ok(decoded) => {
-            let escape = &text[slash..decoded.next];
-            if let Some(hex) = escape
-                .strip_prefix("\\u{")
-                .and_then(|s| s.strip_suffix('}'))
-            {
-                u32::from_str_radix(hex, 16)
-                    .ok()
-                    .and_then(char::from_u32)
-                    .unwrap_or('\0')
-            } else if escape.len() == 4 && escape.starts_with("\\x") {
-                let hi = from_hex(escape.as_bytes()[2]);
-                let lo = from_hex(escape.as_bytes()[3]);
-                match (hi, lo) {
-                    (Some(hi), Some(lo)) => {
-                        char::from_u32(u32::from((hi << 4) | lo)).unwrap_or('\0')
-                    }
-                    _ => '\0',
-                }
-            } else {
-                match escape.as_bytes().get(1) {
-                    Some(b'\\') => '\\',
-                    Some(b'"') => '"',
-                    Some(b'n') => '\n',
-                    Some(b'r') => '\r',
-                    Some(b't') => '\t',
-                    Some(b'0') => '\0',
-                    Some(b'\'') => '\'',
-                    Some(_) => '\0',
-                    None => '\0',
-                }
-            }
-        }
-        Err(_) => '\0',
-    }
-}
-
-fn from_hex(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
+    scan_escape(text, slash, byte_char, !byte_char)
+        .expect("字符已通过词法转义校验")
+        .value
 }
 
 fn mul_add(limbs: &mut Vec<u32>, radix: u32, digit: u32) {

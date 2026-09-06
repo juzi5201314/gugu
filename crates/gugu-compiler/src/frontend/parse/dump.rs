@@ -89,7 +89,10 @@ fn dump_item(
                 dump_item(out, arena, intern, *nested, indent + 1);
             }
         }
-        ItemKind::GlobalAsm { .. } => out.push_str("global_asm\n"),
+        ItemKind::GlobalAsm { template } => {
+            out.push_str("global_asm\n");
+            dump_expr(out, arena, intern, *template, indent + 1);
+        }
         ItemKind::SourceMacro { body } => {
             out.push_str("source_macro\n");
             dump_expr(out, arena, intern, *body, indent + 1);
@@ -349,6 +352,7 @@ fn dump_expr(
                 dump_match_arm(out, arena, intern, arm, indent + 1);
             }
         }
+        ExprKind::TypeCallee(_) => out.push_str("type-callee\n"),
         ExprKind::Loop(body) => {
             out.push_str("loop\n");
             dump_expr(out, arena, intern, body, indent + 1);
@@ -429,7 +433,10 @@ fn dump_expr(
             out.push_str("intrinsic ");
             out.push_str(&format!("{kind:?}\n"));
         }
-        ExprKind::Asm { .. } => out.push_str("asm\n"),
+        ExprKind::Asm { template, .. } => {
+            out.push_str("asm\n");
+            dump_expr(out, arena, intern, template, indent + 1);
+        }
         ExprKind::Return(_) => out.push_str("return\n"),
         ExprKind::Break(_) => out.push_str("break\n"),
         ExprKind::Continue => out.push_str("continue\n"),

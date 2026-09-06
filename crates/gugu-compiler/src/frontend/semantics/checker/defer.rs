@@ -33,7 +33,7 @@ impl Checker<'_, '_> {
                 type_args,
                 args,
             } => {
-                let ty = self.call(callee, type_args, args, None);
+                let ty = self.call(body, callee, type_args, args, None);
                 self.expressions.push((body, ty));
                 self.defers.push(Deferred {
                     id,
@@ -73,6 +73,7 @@ impl Checker<'_, '_> {
             id,
             CleanupPath {
                 initialized: self.state.initialized.clone(),
+                callables: self.state.callables.clone(),
                 mandatory: true,
             },
         );
@@ -111,11 +112,13 @@ impl Checker<'_, '_> {
             };
             if deferred.execute_body {
                 let initialized = std::mem::replace(&mut self.state.initialized, path.initialized);
+                let callables = std::mem::replace(&mut self.state.callables, path.callables);
                 let pending = self.state.cleanup_paths.clone();
                 self.state.names = deferred.names;
                 self.expression(deferred.body, Some(&Ty::Unit));
                 if !path.mandatory {
                     self.state.initialized = initialized;
+                    self.state.callables = callables;
                     self.state.cleanup_paths = pending;
                     self.state.reachable = true;
                 }

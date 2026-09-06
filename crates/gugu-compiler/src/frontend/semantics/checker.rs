@@ -6,13 +6,18 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode, Span};
 use std::collections::BTreeMap;
+mod assembly;
+mod borrow;
 mod calls;
 mod captures;
+mod conversion;
 mod defer;
 mod expr;
 mod flow;
+mod foreign;
 mod generics;
 mod inference;
+mod memory;
 mod methods;
 mod opaque;
 mod operations;
@@ -29,6 +34,7 @@ struct State {
 #[derive(Clone)]
 struct CleanupPath {
     initialized: Vec<bool>,
+    callables: Vec<Vec<super::model::CallableId>>,
     mandatory: bool,
 }
 struct Slot {
@@ -79,6 +85,12 @@ struct Checker<'m, 'a> {
     hidden_candidates: Vec<(u32, Vec<Ty>, Ty)>,
     erasures: Vec<super::output::Erasure>,
     reflections: Vec<super::output::Reflection>,
+    memory_operations: Vec<super::output::MemoryOperation>,
+    foreign_calls: Vec<super::foreign::ForeignCall>,
+    call_site: Option<ExprId>,
+    current_function: Option<FnId>,
+    assembly: Vec<super::assembly::AssemblyPlan>,
+    borrow_checks: Vec<super::borrow::BorrowCheck>,
 }
 
 pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
@@ -111,6 +123,7 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                     let expected = checker.form(ty);
                     checker.expression(value, Some(&expected));
                 }
+                ItemKind::GlobalAsm { template } => checker.global_asm(template),
                 _ => {}
             }
             checker.finish_inference();
@@ -122,9 +135,12 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                     item.span.clone(),
                 );
             }
-            let mut expressions = checker.expressions;
-            expressions.sort_by_key(|(id, _)| id.0);
-            expressions.dedup_by_key(|(id, _)| id.0);
+            checker.expressions.sort_by_key(|(id, _)| id.0);
+            checker.expressions.dedup_by_key(|(id, _)| id.0);
+            if let ItemKind::Function(function) = item.kind {
+                checker.finish_native_checks(function);
+            }
+            let expressions = checker.expressions;
             let (slots, slot_storage) = checker
                 .slots
                 .into_iter()
@@ -147,6 +163,10 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
                 dispatches: checker.dispatches,
                 erasures: checker.erasures,
                 reflections: checker.reflections,
+                memory_operations: checker.memory_operations,
+                foreign_calls: checker.foreign_calls,
+                assembly: checker.assembly,
+                borrow_checks: checker.borrow_checks,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
@@ -174,6 +194,8 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
             initialization,
             input_fingerprint: [0; 32],
             hidden_types,
+            foreign_definitions: model.foreign.definitions.clone(),
+            linkage: model.foreign.linkage.clone(),
         };
         output.verify(model).map_err(|error| vec![error])?;
         Ok(output)
@@ -223,6 +245,12 @@ impl<'m, 'a> Checker<'m, 'a> {
             hidden_candidates: Vec::new(),
             erasures: Vec::new(),
             reflections: Vec::new(),
+            memory_operations: Vec::new(),
+            foreign_calls: Vec::new(),
+            call_site: None,
+            current_function: None,
+            assembly: Vec::new(),
+            borrow_checks: Vec::new(),
         }
     }
     fn arena(&self) -> &'a AstArena {
@@ -305,6 +333,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             ),
             Ty::Chan(t) => Ty::Chan(Box::new(self.resolve(t))),
             Ty::Join(t) => Ty::Join(Box::new(self.resolve(t))),
+            Ty::MaybeUninit(t) => Ty::MaybeUninit(Box::new(self.resolve(t))),
             _ => ty.clone(),
         }
     }
@@ -371,7 +400,8 @@ impl<'m, 'a> Checker<'m, 'a> {
             | (Ty::Slice(x), Ty::Slice(y))
             | (Ty::Option(x), Ty::Option(y))
             | (Ty::Chan(x), Ty::Chan(y))
-            | (Ty::Join(x), Ty::Join(y)) => {
+            | (Ty::Join(x), Ty::Join(y))
+            | (Ty::MaybeUninit(x), Ty::MaybeUninit(y)) => {
                 self.relate(x, y, span, false);
                 return self.resolve(&b);
             }
@@ -406,6 +436,14 @@ impl<'m, 'a> Checker<'m, 'a> {
                 return self.resolve(&b);
             }
             (Ty::Callable(_, _, signature), Ty::Function(_, _)) if coercion => {
+                if self.model.callable_is_unsafe(&a) {
+                    self.error(
+                        DiagnosticCode::InvalidType,
+                        "unsafe 函数项不能擦除成安全 fn 签名",
+                        span.clone(),
+                    );
+                    return Ty::Error;
+                }
                 self.relate(signature, &b, span, true);
                 return self.resolve(&b);
             }
@@ -430,6 +468,7 @@ impl<'m, 'a> Checker<'m, 'a> {
         Ty::Error
     }
     fn function(&mut self, id: FnId, expected: Option<&Ty>) -> Ty {
+        let outer_function = self.current_function.replace(id);
         self.register_callable_bounds(id);
         self.register_apits(id);
         let f = &self.arena().fns[id.0 as usize];
@@ -570,6 +609,7 @@ impl<'m, 'a> Checker<'m, 'a> {
                 self.require_value_captures(body);
             }
         }
+        self.current_function = outer_function;
         Ty::Function(parameters, Box::new(self.return_ty.clone()))
     }
     fn slot(&mut self, name: Symbol, ty: Ty, initialized: bool) {
@@ -589,6 +629,13 @@ impl<'m, 'a> Checker<'m, 'a> {
             path.initialized.resize(self.slots.len(), false);
             path.initialized[slot] = value;
         }
+    }
+    fn assign_callables(&mut self, slot: usize, origins: Vec<super::model::CallableId>) {
+        for path in self.state.cleanup_paths.values_mut() {
+            path.callables.resize_with(self.slots.len(), Vec::new);
+            path.callables[slot].clone_from(&origins);
+        }
+        self.state.callables[slot] = origins;
     }
     fn bind(&mut self, pat: PatId, ty: &Ty, initialized: bool, refutable: Option<bool>) -> bool {
         let ty = if refutable == Some(true) {
@@ -630,6 +677,7 @@ impl<'m, 'a> Checker<'m, 'a> {
     }
     fn local(&mut self, name: Symbol, read: bool, span: &Span) -> Option<Ty> {
         let id = *self.state.names.get(&name)?;
+        let read = read && !matches!(self.resolve(&self.slots[id].ty), Ty::MaybeUninit(_));
         let captured = self.capture_slot(id, read);
         if read
             && !captured
@@ -655,7 +703,8 @@ fn contains_var(ty: &Ty, id: u32) -> bool {
         | Ty::Array(t, _)
         | Ty::Option(t)
         | Ty::Chan(t)
-        | Ty::Join(t) => contains_var(t, id),
+        | Ty::Join(t)
+        | Ty::MaybeUninit(t) => contains_var(t, id),
         Ty::Result(t, e) => contains_var(t, id) || contains_var(e, id),
         Ty::Tuple(ts) | Ty::Named(_, ts) | Ty::Opaque(_, ts) => {
             ts.iter().any(|t| contains_var(t, id))

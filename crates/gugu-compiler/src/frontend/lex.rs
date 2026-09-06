@@ -515,6 +515,12 @@ impl<'a> Lexer<'a> {
     fn scan_raw_triple(&mut self, start: usize) {
         self.pos += 3;
         while self.pos + 2 < self.bytes.len() || self.pos < self.bytes.len() {
+            if self.bytes.get(self.pos) == Some(&b'\\')
+                && matches!(self.bytes.get(self.pos + 1), Some(b'\\' | b'"'))
+            {
+                self.pos += 2;
+                continue;
+            }
             if self.bytes.get(self.pos) == Some(&b'"')
                 && self.bytes.get(self.pos + 1) == Some(&b'"')
                 && self.bytes.get(self.pos + 2) == Some(&b'"')

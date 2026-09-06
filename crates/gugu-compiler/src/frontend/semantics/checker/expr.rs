@@ -2,6 +2,18 @@ use super::*;
 impl Checker<'_, '_> {
     pub(super) fn expression(&mut self, id: ExprId, expected: Option<&Ty>) -> Ty {
         let expr = &self.arena().exprs[id.0 as usize];
+        if self.native_definition().is_some()
+            && matches!(
+                expr.kind,
+                ExprKind::Async(_) | ExprKind::Select { .. } | ExprKind::FString { .. }
+            )
+        {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "opaque native definition 不能分配或执行协程调度操作",
+                expr.span.clone(),
+            );
+        }
         let ty = match expr.kind {
             ExprKind::Literal(lit) => match lit {
                 LitKind::Int { .. } | LitKind::Float { .. } => {
@@ -24,6 +36,7 @@ impl Checker<'_, '_> {
                 })),
             },
             ExprKind::Path(path) => self.path_value(id, path, true, expected, AstRange::empty()),
+            ExprKind::TypeCallee(ty) => self.type_as_value(id, ty),
             ExprKind::Paren(inner) => self.expression(inner, expected),
             ExprKind::Block { stmts, tail } => self.block(stmts, tail, expected),
             ExprKind::If {
@@ -124,6 +137,7 @@ impl Checker<'_, '_> {
             } => {
                 let ty = self.place(inner, true);
                 self.address_taken(inner);
+                self.borrow_check(id, inner, &ty);
                 Ty::Ref(Box::new(ty))
             }
             ExprKind::Unary {
@@ -131,18 +145,7 @@ impl Checker<'_, '_> {
                 expr: inner,
             } => {
                 let ty = self.expression(inner, None);
-                match ty {
-                    Ty::Ref(t) => *t,
-                    Ty::Ptr(t) if self.unsafe_depth > 0 => *t,
-                    _ => {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "解引用需要引用，原始指针还需要 unsafe",
-                            expr.span.clone(),
-                        );
-                        Ty::Error
-                    }
-                }
+                self.dereference(ty, &expr.span)
             }
             ExprKind::Unary { op, expr: inner } => {
                 let ty = self.expression(inner, expected);
@@ -170,7 +173,7 @@ impl Checker<'_, '_> {
                 callee,
                 type_args,
                 args,
-            } => self.call(callee, type_args, args, expected),
+            } => self.call(id, callee, type_args, args, expected),
             ExprKind::Field { base, name } => {
                 let ty = self.expression(base, None);
                 self.field(&ty, self.model.name(self.module, name), &expr.span)
@@ -376,10 +379,10 @@ impl Checker<'_, '_> {
                                 Ty::Error
                             }
                         };
-                        if ty == Ty::Never {
+                        if matches!(ty, Ty::Never | Ty::MaybeUninit(_)) {
                             self.error(
                                 DiagnosticCode::InvalidType,
-                                "! 没有 TypeId",
+                                "! 与 MaybeUninit 没有 TypeId",
                                 expr.span.clone(),
                             );
                         }
@@ -477,7 +480,8 @@ impl Checker<'_, '_> {
                 result
             }
             ExprKind::Closure(function) => self.closure(id, function, expected),
-            ExprKind::Asm { .. } | ExprKind::SourceMacro { .. } | ExprKind::Error => {
+            ExprKind::Asm { template, operands } => self.inline_asm(id, template, operands),
+            ExprKind::SourceMacro { .. } | ExprKind::Error => {
                 self.error(
                     DiagnosticCode::InvalidExpression,
                     "此节点尚未完成对应语义形成",
@@ -504,6 +508,17 @@ impl Checker<'_, '_> {
         } else {
             self.normalized(&checked)
         };
+        if !matches!(expr.kind, ExprKind::Call { .. })
+            && self
+                .model
+                .has_attribute(self.module, expr.attributes, "ffi")
+        {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "ffi 表达式属性必须附着在直接 C 调用上",
+                expr.span.clone(),
+            );
+        }
         self.record_erasure(id, &ty, &checked);
         self.expressions.push((id, checked.clone()));
         self.record_callable_value(id);
@@ -671,31 +686,7 @@ impl Checker<'_, '_> {
     pub(super) fn place(&mut self, id: ExprId, read: bool) -> Ty {
         let expr = &self.arena().exprs[id.0 as usize];
         let ty = match expr.kind {
-            ExprKind::Path(path) => {
-                let segments = self.arena().paths[path.0 as usize]
-                    .segments
-                    .as_slice(&self.arena().segments);
-                let local = segments
-                    .first()
-                    .is_some_and(|segment| self.state.names.contains_key(&segment.name));
-                if !local
-                    && let Ok(def) = self
-                        .model
-                        .resolve(self.module, &self.model.path(self.module, path))
-                    && !matches!(
-                        self.model.modules[def.module].arena.items[def.item.0 as usize].kind,
-                        ItemKind::Static { .. }
-                    )
-                {
-                    self.error(
-                        DiagnosticCode::InvalidExpression,
-                        "常量、函数与构造器没有可赋值或取引用的槽",
-                        expr.span.clone(),
-                    );
-                    return Ty::Error;
-                }
-                self.path_value(id, path, read, None, AstRange::empty())
-            }
+            ExprKind::Path(path) => self.path_place(id, path, read),
             ExprKind::Paren(inner) => self.place(inner, read),
             ExprKind::Field { base, name } => {
                 let ty = self.place(base, true);
@@ -724,7 +715,55 @@ impl Checker<'_, '_> {
         self.expressions.push((id, ty.clone()));
         ty
     }
+    pub(super) fn path_place(&mut self, expression: ExprId, path: PathId, read: bool) -> Ty {
+        let segments = self.arena().paths[path.0 as usize]
+            .segments
+            .as_slice(&self.arena().segments);
+        let local = segments
+            .first()
+            .is_some_and(|segment| self.state.names.contains_key(&segment.name));
+        if !local
+            && let Ok(def) = self
+                .model
+                .resolve(self.module, &self.model.path(self.module, path))
+            && !matches!(
+                self.model.modules[def.module].arena.items[def.item.0 as usize].kind,
+                ItemKind::Static { .. }
+            )
+        {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "常量、函数与构造器没有可赋值或取引用的槽",
+                self.arena().exprs[expression.0 as usize].span.clone(),
+            );
+            return Ty::Error;
+        }
+        self.path_value(expression, path, read, None, AstRange::empty())
+    }
+
+    pub(super) fn dereference(&mut self, ty: Ty, span: &Span) -> Ty {
+        match ty {
+            Ty::Ref(inner) => *inner,
+            Ty::Ptr(inner) if self.unsafe_depth > 0 => *inner,
+            _ => {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    "解引用需要引用，原始指针还需要 unsafe",
+                    span.clone(),
+                );
+                Ty::Error
+            }
+        }
+    }
+
     pub(super) fn field(&mut self, ty: &Ty, name: &str, span: &Span) -> Ty {
+        if self.model.is_union(ty) && self.unsafe_depth == 0 {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "union 字段访问必须处于 unsafe 块中",
+                span.clone(),
+            );
+        }
         if let Ty::Tuple(ts) = ty.deref() {
             if let Ok(i) = name.parse::<usize>() {
                 if let Some(ty) = ts.get(i) {
@@ -732,17 +771,15 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        if let Some(fields) = self.model.fields(ty) {
-            if let Some(f) = fields.iter().find(|f| f.name == name) {
-                if !f.public && self.model.def_module(ty) != Some(self.module) {
-                    self.error(
-                        DiagnosticCode::InvalidExpression,
-                        "不能访问私有字段",
-                        span.clone(),
-                    );
-                }
-                return f.ty.clone();
+        if let Some((_, field, public)) = self.model.find_field(ty, name) {
+            if !public && self.model.def_module(ty) != Some(self.module) {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    "不能访问私有字段",
+                    span.clone(),
+                );
             }
+            return field;
         }
         self.error(
             DiagnosticCode::InvalidExpression,
@@ -907,10 +944,15 @@ impl Checker<'_, '_> {
                         );
                     }
                 }
-                if seen.len() != ctor.fields.len() {
+                let count = if self.model.is_union(&ty) {
+                    1
+                } else {
+                    ctor.fields.len()
+                };
+                if seen.len() != count {
                     self.error(
                         DiagnosticCode::InvalidExpression,
-                        "构造器缺少字段",
+                        "构造器初始化字段数量不符；union 必须恰好选择一个字段",
                         span.clone(),
                     );
                 }
