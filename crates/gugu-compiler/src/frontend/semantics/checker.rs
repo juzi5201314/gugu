@@ -57,6 +57,7 @@ struct TryState {
 }
 struct Checker<'m, 'a> {
     model: &'m Model<'a>,
+    early: &'m super::comptime::EarlyConstTable,
     module: usize,
     slots: Vec<Slot>,
     state: State,
@@ -97,7 +98,10 @@ struct Checker<'m, 'a> {
     borrow_checks: Vec<super::borrow::BorrowCheck>,
 }
 
-pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
+pub(super) fn check(
+    model: &Model<'_>,
+    early: &super::comptime::EarlyConstTable,
+) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut bodies = Vec::new();
     let mut hidden_types = vec![None; model.opaques.definitions.len()];
@@ -111,7 +115,7 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
             if !parsed.configured.item_active(ItemId(index as u32)) {
                 continue;
             }
-            let mut checker = Checker::new(model, module);
+            let mut checker = Checker::new(model, early, module);
             match item.kind {
                 ItemKind::Function(id) => {
                     checker.function(id, None);
@@ -203,6 +207,7 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
     };
     if errors.is_empty() {
         let output = super::output::CheckedSemantics {
+            early_constants: early.clone(),
             bodies,
             initialization,
             input_fingerprint: [0; 32],
@@ -218,9 +223,22 @@ pub(super) fn check(model: &Model<'_>) -> Result<super::output::CheckedSemantics
 }
 
 impl<'m, 'a> Checker<'m, 'a> {
-    fn new(model: &'m Model<'a>, module: usize) -> Self {
+    /// 优先消费 EarlyConstTable 中已求值的整数常量。
+    pub(super) fn early_int(&self, expression: ExprId) -> Option<i128> {
+        match self.early.expression_value(self.module, expression.0) {
+            Some(super::comptime::eval::ConstantValue::Int(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn new(
+        model: &'m Model<'a>,
+        early: &'m super::comptime::EarlyConstTable,
+        module: usize,
+    ) -> Self {
         Self {
             model,
+            early,
             module,
             slots: Vec::new(),
             state: State {
@@ -662,7 +680,7 @@ impl<'m, 'a> Checker<'m, 'a> {
         } else {
             self.resolve(ty)
         };
-        match patterns::check(self.model, self.module, pat, &ty) {
+        match patterns::check(self.model, self.early, self.module, pat, &ty) {
             Ok(result) => {
                 if refutable.is_some_and(|required| required == result.irrefutable) {
                     self.error(

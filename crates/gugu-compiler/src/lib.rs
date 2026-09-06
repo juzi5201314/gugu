@@ -178,6 +178,7 @@ pub struct Compilation {
     source_map: SourceMap,
     image_plan: Option<ImagePlan>,
     hir: Option<frontend::hir::Validated>,
+    action_key: Option<project::ActionKey>,
 }
 
 impl Compilation {
@@ -204,6 +205,11 @@ impl Compilation {
     /// 判断本次 action 是否成功且没有错误诊断。
     pub fn is_success(&self) -> bool {
         self.hir.is_some() && !self.diagnostics.has_errors()
+    }
+
+    /// 返回前端 action 的内容寻址 key；前端失败时为 `None`。
+    pub fn action_key(&self) -> Option<project::ActionKey> {
+        self.action_key
     }
 }
 
@@ -240,6 +246,7 @@ impl Compiler {
                     source_map: SourceMap::empty(),
                     image_plan: None,
                     hir: None,
+                    action_key: None,
                 };
             }
         };
@@ -262,10 +269,20 @@ impl Compiler {
                     source_map,
                     image_plan: None,
                     hir: None,
+                    action_key: None,
                 };
             }
         };
         graph.complete(ActionKind::Frontend, frontend.detail());
+        let action_key = Some(frontend_action_key(
+            target,
+            &source_map,
+            &frontend,
+            loaded
+                .plan
+                .as_ref()
+                .map(|plan| (plan.require_main, &plan.cfg)),
+        ));
 
         let hir = frontend.hir;
         graph.complete(
@@ -287,6 +304,7 @@ impl Compiler {
                 source_map,
                 image_plan: None,
                 hir: Some(hir),
+                action_key,
             };
         };
         graph.complete(ActionKind::PlanBackend, "内存 image plan");
@@ -314,8 +332,44 @@ impl Compiler {
             source_map,
             image_plan,
             hir: Some(hir),
+            action_key,
         }
     }
+}
+
+/// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。
+fn frontend_action_key(
+    target: TargetName,
+    source_map: &SourceMap,
+    frontend: &frontend::FrontendOutput,
+    plan: Option<(bool, &frontend::cfg::CfgContext)>,
+) -> project::ActionKey {
+    const EMPTY_PLAN: (bool, Option<&frontend::cfg::CfgContext>) = (true, None);
+    let (require_main, cfg) = plan
+        .map(|(require_main, cfg)| (require_main, Some(cfg)))
+        .unwrap_or(EMPTY_PLAN);
+    let fallback_cfg;
+    let cfg = match cfg {
+        Some(cfg) => cfg,
+        None => {
+            fallback_cfg = frontend::cfg::CfgContext::target_only(target);
+            &fallback_cfg
+        }
+    };
+    let mut inputs = ActionInputs::new(
+        format!("gugu-compiler-{}", env!("CARGO_PKG_VERSION")),
+        target.to_string(),
+        target.to_string(),
+        if require_main { "bin" } else { "lib" },
+    );
+    for snapshot in source_map.snapshots() {
+        inputs.add_source(snapshot.logical_path(), snapshot.content());
+    }
+    for (key, value) in cfg.action_inputs() {
+        inputs.set_cfg(key, value);
+    }
+    inputs.set_comptime_registry(frontend.comptime_registry.1);
+    inputs.key()
 }
 
 #[derive(Clone, Debug)]

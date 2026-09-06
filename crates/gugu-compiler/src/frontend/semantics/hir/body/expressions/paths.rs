@@ -58,6 +58,9 @@ impl BodyBuilder<'_, '_, '_, '_> {
                         crate::frontend::semantics::model::ConstantValue::String(value) => {
                             hir::Literal::String(value)
                         }
+                        _ => {
+                            return Err(self.error("该常量值不能物化为字面量"));
+                        }
                     };
                     return Ok((hir::ExprKind::Literal(value), 0));
                 }

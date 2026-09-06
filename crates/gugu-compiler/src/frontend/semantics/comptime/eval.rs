@@ -1,0 +1,1288 @@
+//! 早期 comptime evaluator 与受限脚本解释器。
+//!
+//! 每次求值持有独立的 `EvalState`：fuel、确定性 comptime heap 字节账本、调用链、
+//! 深度上限与常量循环栈。能力调用在求值前按封闭 registry 校验执行域；未登记或
+//! 域不符直接产生 `comptime-capability` 编译错误，不得用空结果继续。
+
+use std::collections::BTreeMap;
+
+use super::super::super::ast::{
+    AssignOp, AstRange, BinOp, ExprId, ExprKind, FStringPart, FnBody, IndexKind, ItemKind, LitKind,
+    PatId, PatKind, StmtId, StmtKind, UnOp,
+};
+use super::super::model::{DefRef, Model, Ty};
+use super::super::traits::MemberKind;
+use super::registry::{self, Domain};
+use crate::frontend::string;
+use crate::{Diagnostic, DiagnosticCode};
+
+/// 单次求值的确定性资源边界，由 compiler profile 固定并进入编译输入。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EvalProfile {
+    /// 求值步数上限。
+    pub(crate) fuel: u64,
+    /// comptime heap 字节上限。
+    pub(crate) heap_bytes: u64,
+    /// 用户函数调用与常量展开的深度上限。
+    pub(crate) depth: u32,
+}
+
+impl Default for EvalProfile {
+    fn default() -> Self {
+        Self {
+            fuel: 1_000_000,
+            heap_bytes: 4 * 1024 * 1024,
+            depth: 128,
+        }
+    }
+}
+
+/// 规范的早期常量值；离开 evaluator 前必须归一化为该表示。
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
+pub(in crate::frontend) enum ConstantValue {
+    Unit,
+    Int(i128),
+    Float(u64),
+    Bool(bool),
+    String(String),
+    Array(Vec<ConstantValue>),
+    Tuple(Vec<ConstantValue>),
+    Struct(BTreeMap<String, ConstantValue>),
+}
+
+/// 求值中未完成的控制流出口。
+#[derive(Debug)]
+enum Unwind {
+    Break,
+    Continue,
+    Return(ConstantValue),
+}
+
+/// 一次 comptime 求值的独立状态。
+pub(super) struct EvalState {
+    domain: Domain,
+    profile: EvalProfile,
+    fuel: u64,
+    heap: u64,
+    depth: u32,
+    calls: Vec<String>,
+    const_stack: Vec<DefRef>,
+    frames: Vec<Vec<(String, ConstantValue)>>,
+    unwind: Option<Unwind>,
+}
+
+impl EvalState {
+    fn new(domain: Domain, profile: EvalProfile) -> Self {
+        Self {
+            domain,
+            profile,
+            fuel: profile.fuel,
+            heap: 0,
+            depth: 0,
+            calls: Vec::new(),
+            const_stack: Vec::new(),
+            frames: Vec::new(),
+            unwind: None,
+        }
+    }
+
+    fn step(&mut self, span: &crate::Span) -> Result<(), Diagnostic> {
+        self.fuel = self
+            .fuel
+            .checked_sub(1)
+            .ok_or_else(|| budget_error(span, &self.calls, "comptime 求值步数超过 fuel 上限"))?;
+        Ok(())
+    }
+
+    fn alloc(&mut self, bytes: u64, span: &crate::Span) -> Result<(), Diagnostic> {
+        self.heap = self
+            .heap
+            .checked_add(bytes)
+            .ok_or_else(|| budget_error(span, &self.calls, "comptime heap 账本溢出"))?;
+        if self.heap > self.profile.heap_bytes {
+            return Err(budget_error(
+                span,
+                &self.calls,
+                "comptime heap 分配超过字节上限",
+            ));
+        }
+        Ok(())
+    }
+
+    fn enter(&mut self, name: &str, span: &crate::Span) -> Result<(), Diagnostic> {
+        self.depth += 1;
+        if self.depth > self.profile.depth {
+            return Err(budget_error(span, &self.calls, "comptime 求值深度超过上限"));
+        }
+        self.calls.push(name.to_owned());
+        self.frames.push(Vec::new());
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+        self.calls.pop();
+        self.frames.pop();
+    }
+
+    fn bind(&mut self, name: String, value: ConstantValue) {
+        self.frames
+            .last_mut()
+            .expect("局部帧随 enter/leave 配对")
+            .push((name, value));
+    }
+
+    fn lookup(&self, name: &str) -> Option<ConstantValue> {
+        self.frames
+            .iter()
+            .rev()
+            .flat_map(|frame| frame.iter().rev())
+            .find(|(bound, _)| bound == name)
+            .map(|(_, value)| value.clone())
+    }
+
+    fn slot_mut(&mut self, name: &str) -> Option<&mut ConstantValue> {
+        self.frames
+            .iter_mut()
+            .rev()
+            .flat_map(|frame| frame.iter_mut().rev())
+            .find(|(bound, _)| bound == name)
+            .map(|(_, value)| value)
+    }
+
+    fn with_scope<T>(
+        &mut self,
+        run: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
+    ) -> Result<T, Diagnostic> {
+        self.frames.push(Vec::new());
+        let result = run(self);
+        self.frames.pop();
+        result
+    }
+}
+
+fn budget_error(span: &crate::Span, calls: &[String], reason: &str) -> Diagnostic {
+    let chain = if calls.is_empty() {
+        String::new()
+    } else {
+        format!("，调用链：{}", calls.join(" -> "))
+    };
+    Diagnostic::error(
+        DiagnosticCode::ComptimeBudget,
+        format!("{reason}{chain}"),
+        Some(span.clone()),
+    )
+}
+
+fn capability_error(span: &crate::Span, message: String) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticCode::ComptimeCapability,
+        message,
+        Some(span.clone()),
+    )
+}
+
+impl Model<'_> {
+    pub(super) fn eval_profile(&self) -> EvalProfile {
+        self.eval_profile
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_eval_profile(&mut self, profile: EvalProfile) {
+        self.eval_profile = profile;
+    }
+
+    pub(crate) fn constant_type(&self, module: usize, expr: ExprId) -> Result<Ty, Diagnostic> {
+        self.constant_type_inner(module, expr, &mut Vec::new())
+    }
+
+    fn constant_type_inner(
+        &self,
+        module: usize,
+        expr: ExprId,
+        stack: &mut Vec<DefRef>,
+    ) -> Result<Ty, Diagnostic> {
+        match self.modules[module].arena.exprs[usize::try_from(expr.0).expect("表达式下标")].kind
+        {
+            ExprKind::Literal(LitKind::Int { .. }) => Ok(Ty::int()),
+            ExprKind::Literal(LitKind::Char { .. }) => Ok(Ty::Char),
+            ExprKind::Literal(LitKind::ByteChar { .. }) => Ok(Ty::Int {
+                signed: false,
+                bits: 8,
+            }),
+            ExprKind::Literal(LitKind::Bool(_)) => Ok(Ty::Bool),
+            ExprKind::Literal(LitKind::Float { .. }) => Ok(Ty::Float(64)),
+            ExprKind::Literal(LitKind::String { .. } | LitKind::RawString { .. }) => Ok(Ty::String),
+            ExprKind::Paren(inner) | ExprKind::Unary { expr: inner, .. } => {
+                self.constant_type_inner(module, inner, stack)
+            }
+            ExprKind::Binary { lhs, rhs, op } => {
+                let left = self.constant_type_inner(module, lhs, stack)?;
+                let right = self.constant_type_inner(module, rhs, stack)?;
+                if left != right {
+                    return Err(self.error(module, "常量操作数类型不一致"));
+                }
+                Ok(
+                    if matches!(
+                        op,
+                        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
+                    ) {
+                        Ty::Bool
+                    } else {
+                        left
+                    },
+                )
+            }
+            ExprKind::Path(path) => {
+                let def = match self
+                    .constant_member(module, path)?
+                    .and_then(|member| member.definition)
+                {
+                    Some(def) => def,
+                    None => self.resolve(module, &self.path(module, path))?,
+                };
+                if stack.contains(&def) {
+                    return Err(self.error(module, "常量类型推断形成循环"));
+                }
+                match self.modules[def.module].arena.items
+                    [usize::try_from(def.item.0).expect("项下标")]
+                .kind
+                {
+                    ItemKind::Const { ty: Some(ty), .. } | ItemKind::Static { ty, .. } => {
+                        self.form(def.module, ty)
+                    }
+                    ItemKind::Const {
+                        value: Some(value), ..
+                    } => {
+                        stack.push(def);
+                        let ty = self.constant_type_inner(def.module, value, stack);
+                        stack.pop();
+                        ty
+                    }
+                    _ => Err(self.error(module, "端点不是常量")),
+                }
+            }
+            _ => Err(self.error(module, "无法形成常量类型")),
+        }
+    }
+
+    pub(crate) fn constant_int(
+        &self,
+        module: usize,
+        expression: ExprId,
+    ) -> Result<i128, Diagnostic> {
+        match self.constant_value(module, expression, &Ty::int())? {
+            ConstantValue::Int(value) => Ok(value),
+            _ => Err(self.error(module, "需要整数常量")),
+        }
+    }
+
+    pub(in super::super) fn constant_value(
+        &self,
+        module: usize,
+        expression: ExprId,
+        ty: &Ty,
+    ) -> Result<ConstantValue, Diagnostic> {
+        self.eval_early_const(module, expression, ty)
+    }
+
+    /// 以独立的 `EvalState` 在早期域求值一个常量表达式。
+    pub(in crate::frontend) fn eval_early_const(
+        &self,
+        module: usize,
+        expression: ExprId,
+        ty: &Ty,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let mut state = EvalState::new(Domain::EARLY_CONST, self.eval_profile());
+        let value = self.value(module, expression, &mut state)?;
+        Ok(in_type(value, ty))
+    }
+
+    fn fail(&self, module: usize, expression: ExprId, message: &str) -> Diagnostic {
+        Diagnostic::error(
+            DiagnosticCode::InvalidExpression,
+            message.to_owned(),
+            Some(
+                self.modules[module].arena.exprs[expression.0 as usize]
+                    .span
+                    .clone(),
+            ),
+        )
+    }
+
+    fn value(
+        &self,
+        module: usize,
+        expression: ExprId,
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let arena = &self.modules[module].arena;
+        let span = arena.exprs[expression.0 as usize].span.clone();
+        state.step(&span)?;
+        let fail = || self.fail(module, expression, "需要可求值的编译期表达式");
+        match arena.exprs[expression.0 as usize].kind {
+            ExprKind::Literal(LitKind::Bool(value)) => Ok(ConstantValue::Bool(value)),
+            ExprKind::Literal(LitKind::String { text } | LitKind::RawString { text }) => {
+                let decoded = string::decode_string(self.name(module, text)).into_owned();
+                state.alloc(decoded.len() as u64, &span)?;
+                Ok(ConstantValue::String(decoded))
+            }
+            ExprKind::Literal(LitKind::Float { digits, exp10 }) => {
+                let value = format!("{}e{exp10}", self.name(module, digits))
+                    .parse::<f64>()
+                    .map_err(|_| fail())?;
+                Ok(ConstantValue::Float(value.to_bits()))
+            }
+            ExprKind::Literal(LitKind::Int { limbs, .. }) => {
+                let mut value = 0i128;
+                for &limb in limbs.as_slice(&arena.int_limbs).iter().rev() {
+                    value = value
+                        .checked_mul(1i128 << 32)
+                        .and_then(|value| value.checked_add(i128::from(limb)))
+                        .ok_or_else(fail)?;
+                }
+                Ok(ConstantValue::Int(value))
+            }
+            ExprKind::Literal(LitKind::Char { value, .. }) => {
+                Ok(ConstantValue::Int(i128::from(value as u32)))
+            }
+            ExprKind::Literal(LitKind::ByteChar { value, .. }) => {
+                Ok(ConstantValue::Int(i128::from(value)))
+            }
+            ExprKind::Literal(_) => Err(fail()),
+            ExprKind::Paren(inner)
+            | ExprKind::Comptime(inner)
+            | ExprKind::Unsafe(inner)
+            | ExprKind::TypeApp { base: inner, .. } => self.value(module, inner, state),
+            ExprKind::Unary { op, expr } => {
+                let inner = self.value(module, expr, state)?;
+                match (op, inner) {
+                    (UnOp::Not, ConstantValue::Bool(value)) => Ok(ConstantValue::Bool(!value)),
+                    (UnOp::Neg, ConstantValue::Int(value)) => {
+                        value.checked_neg().map(ConstantValue::Int).ok_or_else(fail)
+                    }
+                    (UnOp::BitNot, ConstantValue::Int(value)) => Ok(ConstantValue::Int(!value)),
+                    (UnOp::Neg, ConstantValue::Float(bits)) => {
+                        Ok(ConstantValue::Float((-f64::from_bits(bits)).to_bits()))
+                    }
+                    _ => Err(fail()),
+                }
+            }
+            ExprKind::Binary { lhs, rhs, op } => {
+                let left = self.value(module, lhs, state)?;
+                if matches!(
+                    (&left, op),
+                    (ConstantValue::Bool(false), BinOp::And)
+                        | (ConstantValue::Bool(true), BinOp::Or)
+                ) {
+                    return Ok(left);
+                }
+                let right = self.value(module, rhs, state)?;
+                evaluate(op, left, right).ok_or_else(fail)
+            }
+            ExprKind::Path(path) => self.path_value(module, expression, path, state),
+            ExprKind::Call { callee, args, .. } => {
+                self.call_value(module, expression, callee, args, state)
+            }
+            ExprKind::Tuple(elements) => {
+                let elements = self.value_list(module, elements, state)?;
+                state.alloc(elements.len() as u64, &span)?;
+                Ok(ConstantValue::Tuple(elements))
+            }
+            ExprKind::Array(elements) => {
+                let elements = self.value_list(module, elements, state)?;
+                state.alloc(elements.len() as u64, &span)?;
+                Ok(ConstantValue::Array(elements))
+            }
+            ExprKind::Repeat { elem, count } => {
+                let element = self.value(module, elem, state)?;
+                let count = self.int_operand(module, count, state)?;
+                if count < 0 {
+                    return Err(fail());
+                }
+                state.alloc(count as u64, &span)?;
+                Ok(ConstantValue::Array(vec![element; count as usize]))
+            }
+            ExprKind::Struct { fields, .. } => {
+                let mut value = BTreeMap::new();
+                for field in fields.as_slice(&arena.field_exprs) {
+                    let name = self.name(module, field.name).to_owned();
+                    let field_value = match field.value {
+                        Some(value) => self.value(module, value, state)?,
+                        None => match state.lookup(&name) {
+                            Some(value) => value,
+                            None => self.module_const(module, &[&name], state)?,
+                        },
+                    };
+                    state.alloc(1, &span)?;
+                    value.insert(name, field_value);
+                }
+                Ok(ConstantValue::Struct(value))
+            }
+            ExprKind::Field { base, name } => {
+                let base = self.value(module, base, state)?;
+                match base {
+                    ConstantValue::Struct(fields) => fields
+                        .get(self.name(module, name))
+                        .cloned()
+                        .ok_or_else(fail),
+                    _ => Err(fail()),
+                }
+            }
+            ExprKind::TupleField { base, index } => {
+                let base = self.value(module, base, state)?;
+                match base {
+                    ConstantValue::Tuple(elements) => {
+                        elements.into_iter().nth(index as usize).ok_or_else(fail)
+                    }
+                    _ => Err(fail()),
+                }
+            }
+            ExprKind::Index { base, index } => {
+                let base = self.value(module, base, state)?;
+                let IndexKind::Expr(index) = index else {
+                    return Err(fail());
+                };
+                let index = self.int_operand(module, index, state)?;
+                let index = usize::try_from(index).map_err(|_| fail())?;
+                match base {
+                    ConstantValue::Array(elements) | ConstantValue::Tuple(elements) => {
+                        elements.into_iter().nth(index).ok_or_else(fail)
+                    }
+                    _ => Err(fail()),
+                }
+            }
+            ExprKind::If {
+                cond,
+                then_block,
+                else_branch,
+            } => {
+                if self.condition(module, cond, state)? {
+                    self.value(module, then_block, state)
+                } else if let Some(else_branch) = else_branch {
+                    self.value(module, else_branch, state)
+                } else {
+                    Ok(ConstantValue::Unit)
+                }
+            }
+            ExprKind::While { cond, body } => {
+                while self.condition(module, cond, state)? {
+                    state.step(&span)?;
+                    self.value(module, body, state)?;
+                    match state.unwind.take() {
+                        None | Some(Unwind::Continue) => {}
+                        Some(Unwind::Break) => break,
+                        Some(unwind @ Unwind::Return(_)) => {
+                            state.unwind = Some(unwind);
+                            break;
+                        }
+                    }
+                }
+                Ok(ConstantValue::Unit)
+            }
+            ExprKind::Loop(body) => {
+                loop {
+                    state.step(&span)?;
+                    self.value(module, body, state)?;
+                    match state.unwind.take() {
+                        None => {}
+                        Some(Unwind::Break) => break,
+                        Some(Unwind::Continue) => {}
+                        Some(unwind @ Unwind::Return(_)) => {
+                            state.unwind = Some(unwind);
+                            break;
+                        }
+                    }
+                }
+                Ok(ConstantValue::Unit)
+            }
+            ExprKind::For { pat, iter, body } => {
+                let ExprKind::Range { start, end } = arena.exprs[iter.0 as usize].kind else {
+                    return Err(fail());
+                };
+                let start = self.int_operand(module, start, state)?;
+                let end = self.int_operand(module, end, state)?;
+                for index in start..end {
+                    state.step(&span)?;
+                    state.with_scope(|state| {
+                        self.bind_pattern(module, pat, &ConstantValue::Int(index), state)?;
+                        self.value(module, body, state)?;
+                        Ok(())
+                    })?;
+                    match state.unwind.take() {
+                        None | Some(Unwind::Continue) => {}
+                        Some(Unwind::Break) => break,
+                        Some(unwind @ Unwind::Return(_)) => {
+                            state.unwind = Some(unwind);
+                            break;
+                        }
+                    }
+                }
+                Ok(ConstantValue::Unit)
+            }
+            ExprKind::Block { stmts, tail } => {
+                state.with_scope(|state| self.block(module, stmts, tail, state))
+            }
+            ExprKind::Match { scrutinee, arms } => {
+                self.match_value(module, expression, scrutinee, arms, state)
+            }
+            ExprKind::FString { parts } => self.fstring(module, parts, state),
+            ExprKind::Return(value) => {
+                let value = match value {
+                    Some(value) => self.value(module, value, state)?,
+                    None => ConstantValue::Unit,
+                };
+                state.unwind = Some(Unwind::Return(value));
+                Ok(ConstantValue::Unit)
+            }
+            ExprKind::Break(value) => {
+                let value = match value {
+                    Some(value) => self.value(module, value, state)?,
+                    None => ConstantValue::Unit,
+                };
+                state.unwind = Some(Unwind::Break);
+                Ok(value)
+            }
+            ExprKind::Continue => {
+                state.unwind = Some(Unwind::Continue);
+                Ok(ConstantValue::Unit)
+            }
+            ExprKind::Intrinsic { .. } => Err(capability_error(
+                &span,
+                "intrinsic 未登记任何 comptime 执行域能力".to_owned(),
+            )),
+            ExprKind::Asm { .. }
+            | ExprKind::Select { .. }
+            | ExprKind::Async(_)
+            | ExprKind::Closure(_)
+            | ExprKind::SourceMacro { .. }
+            | ExprKind::Try(_)
+            | ExprKind::TryOp(_)
+            | ExprKind::TypeCallee(_) => Err(fail()),
+            _ => Err(fail()),
+        }
+    }
+
+    fn value_list(
+        &self,
+        module: usize,
+        elements: AstRange<ExprId>,
+        state: &mut EvalState,
+    ) -> Result<Vec<ConstantValue>, Diagnostic> {
+        elements
+            .as_slice(&self.modules[module].arena.expr_ids)
+            .iter()
+            .map(|&element| self.value(module, element, state))
+            .collect()
+    }
+
+    /// 复用当前求值状态求整数操作数；局部绑定与 fuel 账本保持共享。
+    fn int_operand(
+        &self,
+        module: usize,
+        expression: ExprId,
+        state: &mut EvalState,
+    ) -> Result<i128, Diagnostic> {
+        match self.value(module, expression, state)? {
+            ConstantValue::Int(value) => Ok(value),
+            _ => Err(self.fail(module, expression, "需要整数常量")),
+        }
+    }
+
+    fn condition(
+        &self,
+        module: usize,
+        expression: ExprId,
+        state: &mut EvalState,
+    ) -> Result<bool, Diagnostic> {
+        match self.value(module, expression, state)? {
+            ConstantValue::Bool(value) => Ok(value),
+            _ => Err(self.fail(module, expression, "comptime 条件必须是 bool")),
+        }
+    }
+
+    fn match_value(
+        &self,
+        module: usize,
+        expression: ExprId,
+        scrutinee: ExprId,
+        arms: AstRange<super::super::super::ast::MatchArm>,
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let arena = &self.modules[module].arena;
+        let scrutinee = self.value(module, scrutinee, state)?;
+        for arm in arms.as_slice(&arena.match_arms) {
+            if arm.guard.is_some() {
+                return Err(self.fail(module, expression, "comptime match 不支持守卫"));
+            }
+            state.frames.push(Vec::new());
+            match self.match_pattern(module, arm.pat, &scrutinee, state) {
+                Ok(true) => {
+                    let result = self.value(module, arm.body, state);
+                    state.frames.pop();
+                    return result;
+                }
+                Ok(false) => {
+                    state.frames.pop();
+                }
+                Err(error) => {
+                    state.frames.pop();
+                    return Err(error);
+                }
+            }
+        }
+        Err(self.fail(module, expression, "comptime match 没有匹配分支"))
+    }
+
+    fn match_pattern(
+        &self,
+        module: usize,
+        pat: PatId,
+        value: &ConstantValue,
+        state: &mut EvalState,
+    ) -> Result<bool, Diagnostic> {
+        let arena = &self.modules[module].arena;
+        let span = arena.pats[pat.0 as usize].span.clone();
+        let fail = |message: &str| {
+            Diagnostic::error(
+                DiagnosticCode::InvalidPattern,
+                message.to_owned(),
+                Some(span.clone()),
+            )
+        };
+        Ok(match arena.pats[pat.0 as usize].kind {
+            PatKind::Wildcard => true,
+            PatKind::Ident(name) => {
+                state.bind(self.name(module, name).to_owned(), value.clone());
+                true
+            }
+            PatKind::Literal(lit) => self.literal_pattern(lit).as_ref() == Some(value),
+            PatKind::NegativeLiteral(lit) => match (self.literal_pattern(lit), value) {
+                (Some(ConstantValue::Int(inner)), ConstantValue::Int(value)) => -inner == *value,
+                (Some(ConstantValue::Float(bits)), ConstantValue::Float(value)) => {
+                    f64::from_bits(*value) == -f64::from_bits(bits)
+                }
+                _ => false,
+            },
+            PatKind::Ref(inner) => self.match_pattern(module, inner, value, state)?,
+            PatKind::Range { start, end } => {
+                let ConstantValue::Int(value) = value else {
+                    return Err(fail("范围模式要求整数标量"));
+                };
+                let ConstantValue::Int(start) = self.value(module, start, state)? else {
+                    return Err(fail("范围模式端点必须是整数"));
+                };
+                let ConstantValue::Int(end) = self.value(module, end, state)? else {
+                    return Err(fail("范围模式端点必须是整数"));
+                };
+                start <= *value && *value <= end
+            }
+            PatKind::Tuple(patterns) => {
+                let ConstantValue::Tuple(elements) = value else {
+                    return Err(fail("元组模式要求元组值"));
+                };
+                let patterns = patterns.as_slice(&arena.pat_ids);
+                if patterns.len() != elements.len() {
+                    return Ok(false);
+                }
+                for (pattern, element) in patterns.iter().zip(elements) {
+                    if !self.match_pattern(module, *pattern, element, state)? {
+                        return Ok(false);
+                    }
+                }
+                true
+            }
+            PatKind::Or(patterns) => {
+                let saved = state.frames.last().expect("match 分支帧").len();
+                for pattern in patterns.as_slice(&arena.pat_ids) {
+                    if self.match_pattern(module, *pattern, value, state)? {
+                        return Ok(true);
+                    }
+                    state
+                        .frames
+                        .last_mut()
+                        .expect("match 分支帧")
+                        .truncate(saved);
+                }
+                false
+            }
+            PatKind::At { name, pat, .. } => {
+                state.bind(self.name(module, name).to_owned(), value.clone());
+                self.match_pattern(module, pat, value, state)?
+            }
+            _ => return Err(fail("comptime match 只支持标量与元组模式")),
+        })
+    }
+
+    fn literal_pattern(&self, lit: LitKind) -> Option<ConstantValue> {
+        match lit {
+            LitKind::Bool(value) => Some(ConstantValue::Bool(value)),
+            LitKind::Char { value, .. } => Some(ConstantValue::Int(i128::from(value as u32))),
+            LitKind::ByteChar { value, .. } => Some(ConstantValue::Int(i128::from(value))),
+            _ => None,
+        }
+    }
+
+    fn fstring(
+        &self,
+        module: usize,
+        parts: AstRange<FStringPart>,
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let arena = &self.modules[module].arena;
+        let span = self.modules[module].file.eof_span.clone();
+        let mut output = String::new();
+        for part in parts.as_slice(&arena.fstring_parts) {
+            match *part {
+                FStringPart::Text { text, .. } => output.push_str(self.name(module, text)),
+                FStringPart::Interp { expr, spec, .. } => {
+                    if spec.is_some() {
+                        return Err(self.fail(module, expr, "comptime f-string 不支持格式码"));
+                    }
+                    let value = self.value(module, expr, state)?;
+                    output.push_str(&display_value(&value));
+                }
+            }
+        }
+        state.alloc(output.len() as u64, &span)?;
+        Ok(ConstantValue::String(output))
+    }
+
+    fn module_const(
+        &self,
+        module: usize,
+        segments: &[&str],
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let def = self
+            .resolve(module, segments)
+            .map_err(|_| self.error(module, "未解析的编译期名称"))?;
+        self.item_const_value(def, state)
+    }
+
+    fn item_const_value(
+        &self,
+        def: DefRef,
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let span = self.modules[def.module].file.eof_span.clone();
+        if state.const_stack.contains(&def) {
+            return Err(Diagnostic::error(
+                DiagnosticCode::InvalidDeclaration,
+                "常量初始化形成循环",
+                Some(span),
+            ));
+        }
+        let ItemKind::Const {
+            ty: declared,
+            value: Some(value),
+            ..
+        } = self.modules[def.module].arena.items[def.item.0 as usize].kind
+        else {
+            return Err(Diagnostic::error(
+                DiagnosticCode::InvalidExpression,
+                "端点不是可求值的常量",
+                Some(span),
+            ));
+        };
+        state.const_stack.push(def);
+        let declared = match declared {
+            Some(ty) => self.form(def.module, ty),
+            None => self.constant_type(def.module, value),
+        };
+        let result = match declared {
+            Ok(ty) => self
+                .value(def.module, value, state)
+                .map(|value| in_type(value, &ty)),
+            Err(error) => Err(error),
+        };
+        state.const_stack.pop();
+        result
+    }
+
+    fn path_value(
+        &self,
+        module: usize,
+        expression: ExprId,
+        path: super::super::super::ast::PathId,
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let segments = self.path(module, path);
+        let span = self.modules[module].arena.exprs[expression.0 as usize]
+            .span
+            .clone();
+        self.check_capability(module, &segments, &span, state)?;
+        if segments.len() == 1
+            && let Some(value) = state.lookup(segments[0])
+        {
+            return Ok(value);
+        }
+        if let Some(member) = self.constant_member(module, path)? {
+            if let MemberKind::Const {
+                value: Some(value), ..
+            } = &member.kind
+            {
+                return Ok(value.clone());
+            }
+            if let Some(def) = member.definition {
+                return self.item_const_value(def, state);
+            }
+        }
+        let def = self
+            .resolve(module, &segments)
+            .map_err(|_| self.fail(module, expression, "未解析的编译期名称"))?;
+        if matches!(
+            self.modules[def.module].arena.items[def.item.0 as usize].kind,
+            ItemKind::Function(_)
+        ) {
+            return Err(self.fail(module, expression, "函数值不是可物化的编译期常量"));
+        }
+        self.item_const_value(def, state)
+    }
+
+    /// 求值前按封闭 registry 校验路径身份；未登记或执行域不符立即失败。
+    fn check_capability(
+        &self,
+        module: usize,
+        segments: &[&str],
+        span: &crate::Span,
+        state: &EvalState,
+    ) -> Result<(), Diagnostic> {
+        let canonical =
+            lang_item_identity(segments).or_else(|| self.external_path(module, segments));
+        let Some(canonical) = canonical else {
+            return Ok(());
+        };
+        let Some(entry) = registry::lookup(&canonical) else {
+            return Err(capability_error(
+                span,
+                format!("标准库能力 `{canonical}` 未在 comptime capability registry 登记"),
+            ));
+        };
+        if !entry.domains.allows(state.domain) {
+            return Err(capability_error(
+                span,
+                format!(
+                    "能力 `{canonical}` 不允许在 {} 执行域调用",
+                    state.domain.name()
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn call_value(
+        &self,
+        module: usize,
+        expression: ExprId,
+        callee: ExprId,
+        args: AstRange<ExprId>,
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let arena = &self.modules[module].arena;
+        let span = arena.exprs[expression.0 as usize].span.clone();
+        let ExprKind::Path(path) = arena.exprs[callee.0 as usize].kind else {
+            return Err(self.fail(module, expression, "comptime 只支持直接路径调用"));
+        };
+        let segments = self.path(module, path);
+        if segments == ["panic"] {
+            return Err(self.comptime_panic(module, args, &span, state));
+        }
+        self.check_capability(module, &segments, &span, state)?;
+        let arguments = self.value_list(module, args, state)?;
+        let def = self
+            .resolve(module, &segments)
+            .map_err(|_| self.fail(module, expression, "无法在编译期解析被调函数"))?;
+        if !matches!(
+            self.modules[def.module].arena.items[def.item.0 as usize].kind,
+            ItemKind::Function(_)
+        ) {
+            return Err(self.fail(module, expression, "被调端点不是函数"));
+        }
+        self.interpret_function(def, &arguments, &span, state)
+    }
+
+    fn comptime_panic(
+        &self,
+        module: usize,
+        args: AstRange<ExprId>,
+        span: &crate::Span,
+        state: &mut EvalState,
+    ) -> Diagnostic {
+        let arena = &self.modules[module].arena;
+        let message = args
+            .as_slice(&arena.expr_ids)
+            .first()
+            .and_then(|&argument| self.value(module, argument, state).ok())
+            .and_then(|value| match value {
+                ConstantValue::String(message) => Some(message),
+                _ => None,
+            })
+            .unwrap_or_else(|| "comptime panic".to_owned());
+        Diagnostic::error(
+            DiagnosticCode::ComptimePanic,
+            format!("编译期求值 panic：{message}"),
+            Some(span.clone()),
+        )
+    }
+
+    fn interpret_function(
+        &self,
+        def: DefRef,
+        arguments: &[ConstantValue],
+        span: &crate::Span,
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let parsed = &self.modules[def.module];
+        let ItemKind::Function(function) = parsed.arena.items[def.item.0 as usize].kind else {
+            unreachable!("interpret_function 只处理函数项");
+        };
+        let declaration = &parsed.arena.fns[function.0 as usize];
+        let name = declaration
+            .name
+            .map(|symbol| self.name(def.module, symbol))
+            .unwrap_or("<匿名函数>")
+            .to_owned();
+        match declaration.body {
+            FnBody::None => Err(capability_error(
+                span,
+                format!("外部函数 `{name}` 不能在 comptime 求值"),
+            )),
+            FnBody::Eq(body) => {
+                state.enter(&name, span)?;
+                let bound = self.bind_parameters(def.module, function, arguments, state);
+                let result = match bound {
+                    Ok(()) => self.value(def.module, body, state),
+                    Err(error) => Err(error),
+                };
+                let returned = state.unwind.take();
+                state.leave();
+                let result = result.and_then(|value| match returned {
+                    Some(Unwind::Return(value)) => Ok(value),
+                    Some(_) => Err(capability_error(
+                        span,
+                        format!("函数 `{name}` 在编译期求值中跳出函数体"),
+                    )),
+                    None => Ok(value),
+                });
+                result
+            }
+            FnBody::Block(body) => {
+                state.enter(&name, span)?;
+                let bound = self.bind_parameters(def.module, function, arguments, state);
+                let result = match bound {
+                    Ok(()) => {
+                        let arena = &self.modules[def.module].arena;
+                        match arena.exprs[body.0 as usize].kind {
+                            ExprKind::Block { stmts, tail } => {
+                                state.with_scope(|state| self.block(def.module, stmts, tail, state))
+                            }
+                            _ => self.value(def.module, body, state),
+                        }
+                    }
+                    Err(error) => Err(error),
+                };
+                let returned = state.unwind.take();
+                state.leave();
+                let result = result.and_then(|value| match returned {
+                    Some(Unwind::Return(value)) => Ok(value),
+                    Some(_) => Err(capability_error(
+                        span,
+                        format!("函数 `{name}` 在编译期求值中跳出函数体"),
+                    )),
+                    None => Ok(value),
+                });
+                result
+            }
+        }
+    }
+
+    fn bind_parameters(
+        &self,
+        module: usize,
+        function: super::super::super::ast::FnId,
+        arguments: &[ConstantValue],
+        state: &mut EvalState,
+    ) -> Result<(), Diagnostic> {
+        let parsed = &self.modules[module];
+        let declaration = &parsed.arena.fns[function.0 as usize];
+        let mut bound = 0;
+        for (index, param) in declaration
+            .params
+            .as_slice(&parsed.arena.params)
+            .iter()
+            .enumerate()
+        {
+            if !parsed
+                .configured
+                .param_active(declaration.params.start as usize + index)
+            {
+                continue;
+            }
+            let Some(value) = arguments.get(bound) else {
+                return Err(self.error(module, "comptime 调用实参数量不足"));
+            };
+            bound += 1;
+            let Some(pat) = param.pat else {
+                return Err(self.error(module, "comptime 调用的参数缺少绑定模式"));
+            };
+            self.bind_pattern(module, pat, value, state)?;
+        }
+        if bound != arguments.len() {
+            return Err(self.error(module, "comptime 调用实参数量不符"));
+        }
+        Ok(())
+    }
+
+    fn bind_pattern(
+        &self,
+        module: usize,
+        pat: PatId,
+        value: &ConstantValue,
+        state: &mut EvalState,
+    ) -> Result<(), Diagnostic> {
+        let arena = &self.modules[module].arena;
+        let span = arena.pats[pat.0 as usize].span.clone();
+        let fail = |message: &str| {
+            Diagnostic::error(
+                DiagnosticCode::InvalidPattern,
+                message.to_owned(),
+                Some(span.clone()),
+            )
+        };
+        match arena.pats[pat.0 as usize].kind {
+            PatKind::Wildcard => Ok(()),
+            PatKind::Ident(name) => {
+                state.bind(self.name(module, name).to_owned(), value.clone());
+                Ok(())
+            }
+            PatKind::Tuple(patterns) => {
+                let ConstantValue::Tuple(elements) = value else {
+                    return Err(fail("comptime 解构要求元组值"));
+                };
+                let patterns = patterns.as_slice(&arena.pat_ids);
+                if patterns.len() != elements.len() {
+                    return Err(fail("comptime 解构的元组长度不一致"));
+                }
+                for (pattern, element) in patterns.iter().zip(elements) {
+                    self.bind_pattern(module, *pattern, element, state)?;
+                }
+                Ok(())
+            }
+            _ => Err(fail("comptime 求值只支持标识符、通配与元组绑定模式")),
+        }
+    }
+
+    fn block(
+        &self,
+        module: usize,
+        stmts: AstRange<StmtId>,
+        tail: Option<ExprId>,
+        state: &mut EvalState,
+    ) -> Result<ConstantValue, Diagnostic> {
+        let arena = &self.modules[module].arena;
+        for &statement in stmts.as_slice(&arena.stmt_ids) {
+            state.step(&self.modules[module].file.eof_span)?;
+            self.statement(module, statement, state)?;
+            if state.unwind.is_some() {
+                return Ok(ConstantValue::Unit);
+            }
+        }
+        match tail {
+            Some(tail) if state.unwind.is_none() => self.value(module, tail, state),
+            _ => Ok(ConstantValue::Unit),
+        }
+    }
+
+    fn statement(
+        &self,
+        module: usize,
+        statement: StmtId,
+        state: &mut EvalState,
+    ) -> Result<(), Diagnostic> {
+        let arena = &self.modules[module].arena;
+        let span = arena.stmts[statement.0 as usize].span.clone();
+        let unsupported = |message: &str| {
+            Diagnostic::error(
+                DiagnosticCode::InvalidExpression,
+                message.to_owned(),
+                Some(span.clone()),
+            )
+        };
+        match arena.stmts[statement.0 as usize].kind {
+            StmtKind::Let { pat, init, .. } => {
+                let value = match init {
+                    Some(init) => self.value(module, init, state)?,
+                    None => ConstantValue::Unit,
+                };
+                self.bind_pattern(module, pat, &value, state)
+            }
+            StmtKind::Assign { op, place, value } => {
+                let value = self.value(module, value, state)?;
+                self.assign(module, place, op, value, state)
+            }
+            StmtKind::Expr { expr, .. } => {
+                self.value(module, expr, state)?;
+                Ok(())
+            }
+            StmtKind::Static { .. } | StmtKind::Defer { .. } | StmtKind::Yield => {
+                Err(unsupported("comptime 求值不支持该语句"))
+            }
+            StmtKind::SourceMacro { .. } => Err(unsupported("comptime source 属于源码宏展开域")),
+        }
+    }
+
+    fn assign(
+        &self,
+        module: usize,
+        place: ExprId,
+        op: AssignOp,
+        value: ConstantValue,
+        state: &mut EvalState,
+    ) -> Result<(), Diagnostic> {
+        let arena = &self.modules[module].arena;
+        let span = arena.exprs[place.0 as usize].span.clone();
+        let deny = |message: &str| {
+            Diagnostic::error(
+                DiagnosticCode::InvalidExpression,
+                message.to_owned(),
+                Some(span.clone()),
+            )
+        };
+        let ExprKind::Path(path) = arena.exprs[place.0 as usize].kind else {
+            return Err(deny("comptime 赋值目标必须是局部绑定"));
+        };
+        let segments = self.path(module, path);
+        let [name] = &segments[..] else {
+            return Err(deny("comptime 赋值目标必须是局部绑定"));
+        };
+        let Some(slot) = state.slot_mut(name) else {
+            return Err(deny("comptime 赋值只能写入局部绑定"));
+        };
+        let combined = match op {
+            AssignOp::Assign => value,
+            _ => evaluate(
+                match op {
+                    AssignOp::Add => BinOp::Add,
+                    AssignOp::Sub => BinOp::Sub,
+                    AssignOp::Mul => BinOp::Mul,
+                    AssignOp::Div => BinOp::Div,
+                    AssignOp::Rem => BinOp::Rem,
+                    AssignOp::BitAnd => BinOp::BitAnd,
+                    AssignOp::BitOr => BinOp::BitOr,
+                    AssignOp::BitXor => BinOp::BitXor,
+                    AssignOp::Shl => BinOp::Shl,
+                    AssignOp::Shr => BinOp::Shr,
+                    AssignOp::Assign => unreachable!("赋值分支已处理"),
+                },
+                slot.clone(),
+                value,
+            )
+            .ok_or_else(|| deny("comptime 复合赋值操作数类型不符"))?,
+        };
+        *slot = combined;
+        Ok(())
+    }
+}
+
+fn display_value(value: &ConstantValue) -> String {
+    match value {
+        ConstantValue::Unit => "()".to_owned(),
+        ConstantValue::Int(value) => value.to_string(),
+        ConstantValue::Float(bits) => f64::from_bits(*bits).to_string(),
+        ConstantValue::Bool(value) => value.to_string(),
+        ConstantValue::String(value) => value.clone(),
+        ConstantValue::Array(_) | ConstantValue::Tuple(_) | ConstantValue::Struct(_) => {
+            "…".to_owned()
+        }
+    }
+}
+
+/// 裸 lang item 身份；其余 std 身份由导入解析给出。
+fn lang_item_identity(segments: &[&str]) -> Option<String> {
+    match segments {
+        ["panic"] => Some("panic".to_owned()),
+        ["size_of"] => Some("size_of".to_owned()),
+        ["align_of"] => Some("align_of".to_owned()),
+        ["offset_of"] => Some("offset_of".to_owned()),
+        ["type_id"] => Some("type_id".to_owned()),
+        ["type_id_count"] => Some("type_id_count".to_owned()),
+        _ => None,
+    }
+}
+
+fn in_type(value: ConstantValue, ty: &Ty) -> ConstantValue {
+    match (value, ty) {
+        (ConstantValue::Float(bits), Ty::Float(32)) => {
+            ConstantValue::Float(f64::from(f64::from_bits(bits) as f32).to_bits())
+        }
+        (ConstantValue::Int(value), Ty::Int { signed, bits }) if *bits < 128 => {
+            debug_assert!(*bits > 0, "整数类型至少占一位");
+            let value = if *signed {
+                (value << (128 - bits)) >> (128 - bits)
+            } else {
+                value & ((1i128 << bits) - 1)
+            };
+            ConstantValue::Int(value)
+        }
+        (value, _) => value,
+    }
+}
+
+fn evaluate(op: BinOp, a: ConstantValue, b: ConstantValue) -> Option<ConstantValue> {
+    Some(match (a, b) {
+        (ConstantValue::Int(a), ConstantValue::Int(b)) => match op {
+            BinOp::Add => ConstantValue::Int(a.checked_add(b)?),
+            BinOp::Sub => ConstantValue::Int(a.checked_sub(b)?),
+            BinOp::Mul => ConstantValue::Int(a.checked_mul(b)?),
+            BinOp::Div => ConstantValue::Int(a.checked_div(b)?),
+            BinOp::Rem => ConstantValue::Int(a.checked_rem(b)?),
+            BinOp::BitAnd => ConstantValue::Int(a & b),
+            BinOp::BitOr => ConstantValue::Int(a | b),
+            BinOp::BitXor => ConstantValue::Int(a ^ b),
+            BinOp::Shl => ConstantValue::Int(a.checked_shl(u32::try_from(b).ok()?)?),
+            BinOp::Shr => ConstantValue::Int(a.checked_shr(u32::try_from(b).ok()?)?),
+            BinOp::Eq => ConstantValue::Bool(a == b),
+            BinOp::Ne => ConstantValue::Bool(a != b),
+            BinOp::Lt => ConstantValue::Bool(a < b),
+            BinOp::Le => ConstantValue::Bool(a <= b),
+            BinOp::Gt => ConstantValue::Bool(a > b),
+            BinOp::Ge => ConstantValue::Bool(a >= b),
+            _ => return None,
+        },
+        (ConstantValue::Bool(a), ConstantValue::Bool(b)) => match op {
+            BinOp::And => ConstantValue::Bool(a && b),
+            BinOp::Or => ConstantValue::Bool(a || b),
+            BinOp::Eq => ConstantValue::Bool(a == b),
+            BinOp::Ne => ConstantValue::Bool(a != b),
+            _ => return None,
+        },
+        (ConstantValue::String(mut a), ConstantValue::String(b)) => match op {
+            BinOp::Add => {
+                a.push_str(&b);
+                ConstantValue::String(a)
+            }
+            BinOp::Eq => ConstantValue::Bool(a == b),
+            BinOp::Ne => ConstantValue::Bool(a != b),
+            _ => return None,
+        },
+        (ConstantValue::Float(a), ConstantValue::Float(b)) => {
+            let (a, b) = (f64::from_bits(a), f64::from_bits(b));
+            match op {
+                BinOp::Add => ConstantValue::Float((a + b).to_bits()),
+                BinOp::Sub => ConstantValue::Float((a - b).to_bits()),
+                BinOp::Mul => ConstantValue::Float((a * b).to_bits()),
+                BinOp::Div => ConstantValue::Float((a / b).to_bits()),
+                BinOp::Rem => ConstantValue::Float((a % b).to_bits()),
+                BinOp::Eq => ConstantValue::Bool(a == b),
+                BinOp::Ne => ConstantValue::Bool(a != b),
+                BinOp::Lt => ConstantValue::Bool(a < b),
+                BinOp::Le => ConstantValue::Bool(a <= b),
+                BinOp::Gt => ConstantValue::Bool(a > b),
+                BinOp::Ge => ConstantValue::Bool(a >= b),
+                _ => return None,
+            }
+        }
+        _ => return None,
+    })
+}

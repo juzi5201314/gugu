@@ -392,7 +392,13 @@ impl Checker<'_, '_> {
             coverage.push((arm.pat, arm.guard.is_some()));
         }
         if patterns_valid {
-            match patterns::exhaustive(self.model, self.module, &self.resolve(&ty), &coverage) {
+            match patterns::exhaustive(
+                self.model,
+                self.early,
+                self.module,
+                &self.resolve(&ty),
+                &coverage,
+            ) {
                 Ok(true) => {}
                 Ok(false) => self.error(
                     DiagnosticCode::InvalidPattern,

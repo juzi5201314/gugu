@@ -453,5 +453,11 @@ fn constant_literal(value: &super::super::model::ConstantValue) -> hir::Literal 
         super::super::model::ConstantValue::Float(value) => hir::Literal::Float(*value),
         super::super::model::ConstantValue::Bool(value) => hir::Literal::Bool(*value),
         super::super::model::ConstantValue::String(value) => hir::Literal::String(value.clone()),
+        super::super::model::ConstantValue::Unit
+        | super::super::model::ConstantValue::Array(_)
+        | super::super::model::ConstantValue::Tuple(_)
+        | super::super::model::ConstantValue::Struct(_) => {
+            unreachable!("trait 关联常量成员只登记标量字面量")
+        }
     }
 }

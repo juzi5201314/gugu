@@ -24,18 +24,21 @@ enum P {
 }
 struct C<'m, 'a> {
     model: &'m Model<'a>,
+    early: &'m super::comptime::EarlyConstTable,
     module: usize,
     bindings: BTreeMap<Symbol, Binding>,
     errors: Vec<Diagnostic>,
 }
 pub(crate) fn check(
     model: &Model<'_>,
+    early: &super::comptime::EarlyConstTable,
     module: usize,
     pat: PatId,
     ty: &Ty,
 ) -> Result<CheckedPattern, Vec<Diagnostic>> {
     let mut c = C {
         model,
+        early,
         module,
         bindings: BTreeMap::new(),
         errors: Vec::new(),
@@ -54,6 +57,7 @@ pub(crate) fn check(
 }
 pub(crate) fn exhaustive(
     model: &Model<'_>,
+    early: &super::comptime::EarlyConstTable,
     module: usize,
     ty: &Ty,
     arms: &[(PatId, bool)],
@@ -63,6 +67,7 @@ pub(crate) fn exhaustive(
     for &(pat, guarded) in arms {
         let mut c = C {
             model,
+            early,
             module,
             bindings: BTreeMap::new(),
             errors: Vec::new(),
@@ -80,6 +85,13 @@ pub(crate) fn exhaustive(
     }
 }
 impl C<'_, '_> {
+    /// 优先消费 EarlyConstTable 中已求值的整数常量。
+    fn evaluated_int(&self, expression: ExprId) -> Option<i128> {
+        match self.early.expression_value(self.module, expression.0) {
+            Some(super::comptime::eval::ConstantValue::Int(value)) => Some(*value),
+            _ => self.model.constant_int(self.module, expression).ok(),
+        }
+    }
     fn error(&mut self, message: &str, span: &Span) {
         self.errors.push(Diagnostic::error(
             DiagnosticCode::InvalidPattern,
@@ -185,10 +197,10 @@ impl C<'_, '_> {
                 {
                     self.error("范围端点类型必须与被匹配类型相同", &pat.span);
                 }
-                let x = self.model.constant_int(self.module, *start);
-                let y = self.model.constant_int(self.module, *end);
+                let x = self.evaluated_int(*start);
+                let y = self.evaluated_int(*end);
                 match (x, y) {
-                    (Ok(x), Ok(y))
+                    (Some(x), Some(y))
                         if x < y && ordinal(x, ty).is_some() && ordinal(y, ty).is_some() =>
                     {
                         P::Scalar(

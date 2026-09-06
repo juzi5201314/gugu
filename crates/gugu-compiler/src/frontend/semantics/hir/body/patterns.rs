@@ -1,6 +1,20 @@
 use super::*;
 
 impl BodyBuilder<'_, '_, '_, '_> {
+    fn evaluated_int(&self, expression: ast::ExprId) -> Result<i128, Diagnostic> {
+        match self
+            .compiler
+            .checked
+            .early_constants
+            .expression_value(self.module, expression.0)
+        {
+            Some(crate::frontend::semantics::comptime::eval::ConstantValue::Int(value)) => {
+                Ok(*value)
+            }
+            _ => self.compiler.model.constant_int(self.module, expression),
+        }
+    }
+
     pub(super) fn bind_pattern(
         &mut self,
         pattern: ast::PatId,
@@ -97,8 +111,8 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 )?)
             }
             ast::PatKind::Range { start, end } => {
-                let start = self.compiler.model.constant_int(self.module, *start)?;
-                let end = self.compiler.model.constant_int(self.module, *end)?;
+                let start = self.evaluated_int(*start)?;
+                let end = self.evaluated_int(*end)?;
                 let literal = |value: i128| {
                     if *ty == Ty::Char {
                         char::from_u32(value as u32)

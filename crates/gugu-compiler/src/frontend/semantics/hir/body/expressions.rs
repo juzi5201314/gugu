@@ -4,6 +4,21 @@ mod literals;
 mod paths;
 
 impl BodyBuilder<'_, '_, '_, '_> {
+    fn repeat_count(&self, count: ast::ExprId) -> Result<u64, Diagnostic> {
+        let value = match self
+            .compiler
+            .checked
+            .early_constants
+            .expression_value(self.module, count.0)
+        {
+            Some(crate::frontend::semantics::comptime::eval::ConstantValue::Int(value)) => {
+                Ok(*value)
+            }
+            _ => self.compiler.model.constant_int(self.module, count),
+        };
+        u64::try_from(value?).map_err(|_| self.error("已检查重复长度不在 u64 范围"))
+    }
+
     pub(super) fn expression(&mut self, source: ast::ExprId) -> Result<hir::ExprId, Diagnostic> {
         if let Some(id) = self.expression_map[source.0 as usize] {
             return Ok(id);
@@ -81,8 +96,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
             }
             ast::ExprKind::Repeat { elem, count } => {
                 let value = self.expression(elem)?;
-                let count = u64::try_from(self.compiler.model.constant_int(self.module, count)?)
-                    .map_err(|_| self.error("已检查重复长度不在 u64 范围"))?;
+                let count = self.repeat_count(count)?;
                 hir::ExprKind::Repeat { value, count }
             }
             ast::ExprKind::Struct { path, fields } => self.record_value(path, fields, ty)?,

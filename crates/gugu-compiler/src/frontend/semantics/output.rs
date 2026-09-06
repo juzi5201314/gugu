@@ -6,10 +6,11 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 6;
+pub(crate) const SCHEMA_VERSION: u32 = 7;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
+    pub(crate) early_constants: super::comptime::EarlyConstTable,
     pub(crate) bodies: Vec<CheckedBody>,
     pub(crate) initialization: Vec<Initialization>,
     pub(crate) input_fingerprint: [u8; 32],

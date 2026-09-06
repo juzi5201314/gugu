@@ -17,6 +17,8 @@ pub(super) fn check(
     sources: &SourceMap,
     cfg: &super::super::cfg::CfgContext,
     queries: &QueryEngine,
+    early: &super::comptime::EarlyConstTable,
+    early_dependency: &crate::query::DependencyFingerprint,
 ) -> Result<(CheckedSemantics, crate::query::DependencyFingerprint), Vec<Diagnostic>> {
     let mut hash = blake3::Hasher::new_derive_key("gugu-type-check-input-v1");
     let configuration = format!("{cfg:?}");
@@ -27,6 +29,7 @@ pub(super) fn check(
         hash.update(&source.content_hash());
     }
     hash.update(&model.name_fingerprint());
+    hash.update(&super::comptime::registry::summary());
     let input_fingerprint = *hash.finalize().as_bytes();
     let key = QueryKey::new(QueryKind::TypeCheck, SCHEMA_VERSION, input_fingerprint);
     let result = queries.compute(key.clone(), |context| {
@@ -44,7 +47,11 @@ pub(super) fn check(
             QueryKey::new(QueryKind::ResolveImports, 1, b"names"),
             model.name_fingerprint(),
         );
-        match checker::check(model) {
+        context.record_dependency(
+            early_dependency.key().clone(),
+            early_dependency.fingerprint(),
+        );
+        match checker::check(model, early) {
             Ok(mut output) => {
                 output.input_fingerprint = input_fingerprint;
                 Ok((

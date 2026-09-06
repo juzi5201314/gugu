@@ -118,6 +118,12 @@ pub enum DiagnosticCode {
     InvalidLetElse,
     /// `main` 签名非法。
     InvalidMainSignature,
+    /// comptime 调用未登记能力或执行域未获准。
+    ComptimeCapability,
+    /// comptime 求值超出 fuel、heap 或深度边界。
+    ComptimeBudget,
+    /// comptime 求值执行了 panic。
+    ComptimePanic,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -167,6 +173,9 @@ impl fmt::Display for DiagnosticCode {
             Self::InvalidPattern => "E0042",
             Self::InvalidLetElse => "E0043",
             Self::InvalidMainSignature => "E0044",
+            Self::ComptimeCapability => "E0045",
+            Self::ComptimeBudget => "E0046",
+            Self::ComptimePanic => "E0047",
         };
         formatter.write_str(code)
     }

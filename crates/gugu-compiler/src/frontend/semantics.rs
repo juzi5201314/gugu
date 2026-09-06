@@ -2,6 +2,7 @@
 pub(crate) mod assembly;
 pub(crate) mod borrow;
 mod checker;
+pub(crate) mod comptime;
 pub(crate) mod foreign;
 mod hir;
 mod initialization;
@@ -17,6 +18,8 @@ mod traits;
 pub(crate) use output::{CheckedBody, CheckedSemantics, MemoryOperation};
 #[cfg(test)]
 mod callable_tests;
+#[cfg(test)]
+mod comptime_tests;
 #[cfg(test)]
 mod opaque_tests;
 #[cfg(test)]
@@ -40,12 +43,16 @@ pub(crate) fn check(
     (
         CheckedSemantics,
         Vec<super::types::Layout>,
+        (u32, [u8; 32]),
         super::hir::Validated,
     ),
     Vec<Diagnostic>,
 > {
     let model = model::Model::new(modules, names)?;
-    let (checked, dependency) = query::check(&model, sources, cfg, queries)?;
+    let (early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries)?;
+    let registry_identity = early.registry_identity();
+    let (checked, dependency) =
+        query::check(&model, sources, cfg, queries, &early, &early_dependency)?;
     let layouts = super::types::form_and_layout(&model, &checked, cfg.target())?;
     let hir = hir::lower(
         &model,
@@ -56,5 +63,5 @@ pub(crate) fn check(
         &dependency,
         queries,
     )?;
-    Ok((checked, layouts, hir))
+    Ok((checked, layouts, registry_identity, hir))
 }

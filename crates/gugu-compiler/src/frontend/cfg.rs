@@ -53,6 +53,25 @@ impl CfgContext {
         self.target
     }
 
+    /// 产出进入 action key 的 cfg 键值集合；顺序由 BTreeMap 固定。
+    pub(crate) fn action_inputs(&self) -> BTreeMap<String, String> {
+        let mut map = BTreeMap::new();
+        map.insert("target".to_owned(), self.target.to_string());
+        for feature in &self.enabled_features {
+            map.insert(format!("feature:{feature}"), "1".to_owned());
+        }
+        if self.test {
+            map.insert("test".to_owned(), "1".to_owned());
+        }
+        if self.bench {
+            map.insert("bench".to_owned(), "1".to_owned());
+        }
+        for (key, value) in &self.custom {
+            map.insert(format!("cfg:{key}"), value.clone().unwrap_or_default());
+        }
+        map
+    }
+
     fn atom(&self, name: &str) -> Option<bool> {
         match name {
             "true" => Some(true),

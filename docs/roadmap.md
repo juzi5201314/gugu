@@ -154,10 +154,11 @@
   - 验收：`check/build` action graph 真实执行完整前端链并缓存结果；基础 HIR 结构与冻结校验可独立运行；源码宏在阶段 22 生成的片段重新进入同一前端并最终满足相同 Validated 条件；GIR 只能消费冻结 HIR，不能重新解析 token 或名称。
   - 接入证据：独立 HIR 包含真实函数/闭包/async/static/全局汇编 owner、声明与类型表、调整前后类型、派发、捕获、清理链、格式计数和展开上下文；旧 `main -> ReturnUnit` 路径已删除。verifier 拒绝越界类型/字段、错误捕获归属和缺失清理链。195 项工作区测试通过，构建零 warning；Linux build 与 Windows check 接受同时包含 Any、闭包/async、局部 static、切片、intrinsic、asm、FFI 和动态格式捕获的真实输入，报告 6 个实际 callable owner。源码宏执行、GIR 和机器码仍在各自后续阶段，本阶段只冻结其唯一前端输入。
 
-- [ ] **阶段 21：实现 EarlyConst 与 capability registry**（复杂度：5）
+- [x] **阶段 21：实现 EarlyConst 与 capability registry**（复杂度：5）
   - 依赖：阶段 11、12、20。
   - 实现早期常量、数组长度、布局参数、泛型参数和 comptime 脚本解释器；登记允许的 lang item/intrinsic/std 能力、效果、显式输入和 evaluator revision。
   - 验收：不在 registry 或执行域未授权的调用在求值前失败；comptime 使用确定性堆、fuel、panic 和资源边界；运行时副作用、未登记文件/网络/进程访问不会被 evaluator 偷渡。
+  - 接入证据：`EvaluateEarlyComptime`（schema 1）先于类型检查运行于 `Model -> evaluate -> TypeCheck(schema 7) -> LowerHir` 链，输入指纹与依赖记录包含封闭 registry 摘要；产出按 `(module,item,expr)` 规范排序的 `EarlyConstTable`，checker 的数组长度/范围端点与 HIR 的 Repeat/范围降级优先消费表内结果，缺失位置回退到共享 fuel 的惰性求值。registry 以解析后规范路径登记 `spec/standard-library.md` 能力组（域位掩码、效果、显式输入、结果种类、evaluator revision），`std.io.*` 等未登记路径与 `std.syntax.parse_*` 错域调用在求值前返回 `E0045`；`ConstEvalState` 携带 fuel（默认 100 万步）、4 MiB 确定性 heap 账本与深度上限（`E0046`），`panic` 产生 `E0047`。受限解释器覆盖标量运算、固定形状聚合、局部绑定、控制流、match 与用户函数调用，并沿调用链传递 capability 检查；`comptime` 块强制立即求值，comptime 值参数在调用点要求早期常量。registry 摘要经 `ActionInputs::set_comptime_registry` 进入前端 action key（`Compilation::action_key`，源码/cfg/registry 敏感且确定）。205 项工作区测试通过（新增 10 项），fmt/build 零警告；Linux CLI 真实 `check`/`build` 接受含常量数组、comptime 块、comptime 参数与用户函数求值的 package，未登记能力、错域、panic 与运行时实参均退出码 1 且无镜像产物。`SourceExpand`/`LateConst` 域条目已登记但调用方由阶段 22/25 引入；符号化数组长度与实例物化由阶段 24/25 消费 EarlyConstTable 验收。
 
 - [ ] **阶段 22：实现 `comptime source` 与源码宏展开**（复杂度：5）
   - 依赖：阶段 08、10、20、21。

@@ -258,6 +258,7 @@ impl Checker<'_, '_> {
                     }
                 }
             }
+            self.require_comptime_arguments(&ty, &args, offset);
             self.record_call_dependencies(callee);
             for &argument in &args {
                 self.require_value_captures(argument);
@@ -294,6 +295,62 @@ impl Checker<'_, '_> {
                 expr.span.clone(),
             );
             Ty::Error
+        }
+    }
+
+    /// comptime 值参数的实参必须是早期常量；未求值立即失败，不推迟到运行时。
+    fn require_comptime_arguments(&mut self, ty: &Ty, args: &[ExprId], offset: usize) {
+        let Ty::Callable(id, ..) = ty else { return };
+        let Some(definition) = self.model.function_definition(*id) else {
+            return;
+        };
+        let parsed = &self.model.modules[definition.module];
+        let ItemKind::Function(function) = parsed.arena.items[definition.item.0 as usize].kind
+        else {
+            return;
+        };
+        let declaration = &parsed.arena.fns[function.0 as usize];
+        let mut active_index: usize = 0;
+        for (index, param) in declaration
+            .params
+            .as_slice(&parsed.arena.params)
+            .iter()
+            .enumerate()
+        {
+            if !parsed
+                .configured
+                .param_active(declaration.params.start as usize + index)
+            {
+                continue;
+            }
+            let is_receiver = active_index == 0 && offset == 1;
+            let arg_index = active_index.checked_sub(offset);
+            active_index += 1;
+            if is_receiver || !param.comptime {
+                continue;
+            }
+            let Some(&arg) = arg_index.and_then(|position| args.get(position)) else {
+                continue;
+            };
+            let span = self.arena().exprs[arg.0 as usize].span.clone();
+            let name = param
+                .pat
+                .and_then(|pat| match self.arena().pats[pat.0 as usize].kind {
+                    PatKind::Ident(name) => Some(self.model.name(self.module, name).to_owned()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "comptime 参数".to_owned());
+            if self
+                .model
+                .constant_value(self.module, arg, &Ty::int())
+                .is_err()
+            {
+                self.error(
+                    DiagnosticCode::ComptimeCapability,
+                    format!("comptime 参数 `{name}` 需要编译期已知值"),
+                    span,
+                );
+            }
         }
     }
 

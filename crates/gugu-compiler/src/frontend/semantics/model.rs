@@ -9,9 +9,8 @@ use crate::{Diagnostic, DiagnosticCode};
 use std::collections::BTreeMap;
 mod attributes;
 pub(crate) use attributes::Representation;
-mod constants;
 mod lang;
-pub(super) use constants::ConstantValue;
+pub(super) use super::comptime::eval::ConstantValue;
 pub(crate) use lang::MemoryIntrinsic;
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Ty {
@@ -157,6 +156,8 @@ pub(crate) struct Model<'a> {
     pub(super) opaques: super::opaque::Opaques,
     pub(super) foreign: super::foreign::Foreign,
     names: &'a NameResolution,
+    // comptime 求值资源边界；由 compiler profile 固定，测试可注入更小的边界。
+    pub(super) eval_profile: super::comptime::eval::EvalProfile,
     // 模块/FnDecl 编号稠密；匿名闭包没有具名 ItemId，不参与函数地址的初始化依赖。
     function_items: Vec<Vec<Option<ItemId>>>,
 }
@@ -275,6 +276,7 @@ impl<'a> Model<'a> {
             modules,
             nominal: Vec::new(),
             names,
+            eval_profile: super::comptime::eval::EvalProfile::default(),
             traits: super::traits::Traits::default(),
             opaques: super::opaque::Opaques::default(),
             foreign: super::foreign::Foreign::default(),

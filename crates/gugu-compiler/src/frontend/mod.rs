@@ -50,6 +50,7 @@ pub(crate) struct FrontendOutput {
     pub(crate) modules: Vec<ParsedModule>,
     pub(crate) names: names::NameResolution,
     pub(crate) types: Vec<types::Layout>,
+    pub(crate) comptime_registry: (u32, [u8; 32]),
     #[cfg(test)]
     pub(crate) semantics: semantics::CheckedSemantics,
     pub(crate) hir: hir::Validated,
@@ -78,6 +79,7 @@ pub(crate) fn bootstrap(
             modules: Vec::new(),
             names: names::NameResolution::default(),
             types: Vec::new(),
+            comptime_registry: semantics::comptime::registry::EARLY_REGISTRY_IDENTITY,
             #[cfg(test)]
             semantics: semantics::CheckedSemantics::default(),
             hir: hir::Validated::freeze(hir::Module::default())
@@ -144,10 +146,10 @@ fn check_sources(
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
-    let (semantics, types, hir) =
+    let (semantics, types, registry, hir) =
         semantics::check(&modules, &names, source_map, cfg, entry_function, queries)?;
     Ok(frontend_output(
-        entry, source_map, modules, names, types, semantics, hir,
+        entry, source_map, modules, names, types, registry, semantics, hir,
     ))
 }
 
@@ -244,6 +246,7 @@ fn frontend_output(
     modules: Vec<ParsedModule>,
     names: names::NameResolution,
     types: Vec<types::Layout>,
+    comptime_registry: (u32, [u8; 32]),
     semantics: semantics::CheckedSemantics,
     hir: hir::Validated,
 ) -> FrontendOutput {
@@ -271,6 +274,7 @@ fn frontend_output(
         modules,
         names,
         types,
+        comptime_registry,
         #[cfg(test)]
         semantics,
         hir,

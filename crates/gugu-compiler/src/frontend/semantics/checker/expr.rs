@@ -99,15 +99,18 @@ impl Checker<'_, '_> {
                         _ => None,
                     },
                 );
-                match self.model.constant_int(self.module, count).and_then(|n| {
-                    u64::try_from(n).map_err(|_| {
-                        Diagnostic::error(
-                            DiagnosticCode::InvalidType,
-                            "重复次数必须非负",
-                            Some(expr.span.clone()),
-                        )
-                    })
-                }) {
+                match self
+                    .early_int(count)
+                    .map_or_else(|| self.model.constant_int(self.module, count), Ok)
+                    .and_then(|n| {
+                        u64::try_from(n).map_err(|_| {
+                            Diagnostic::error(
+                                DiagnosticCode::InvalidType,
+                                "重复次数必须非负",
+                                Some(expr.span.clone()),
+                            )
+                        })
+                    }) {
                     Ok(n) => Ty::Array(Box::new(ty), n),
                     Err(e) => {
                         self.errors.push(e);
@@ -337,7 +340,16 @@ impl Checker<'_, '_> {
                 self.unsafe_depth -= 1;
                 ty
             }
-            ExprKind::Comptime(body) => self.expression(body, expected),
+            ExprKind::Comptime(body) => {
+                let ty = self.expression(body, expected);
+                if !matches!(ty, Ty::Error) {
+                    // `comptime` 块强制“现在求值”；不可求值是编译错误，不推迟到运行时。
+                    if let Err(error) = self.model.constant_value(self.module, body, &ty) {
+                        self.errors.push(error);
+                    }
+                }
+                ty
+            }
             ExprKind::Async(body) => self.launch(id, body, expected),
             ExprKind::FString { parts } => {
                 self.formatted_parts(parts);
