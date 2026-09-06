@@ -42,12 +42,16 @@ pub(super) fn lower(
     model: &Model<'_>,
     names: &NameResolution,
     checked: &CheckedSemantics,
+    early: &super::comptime::EarlyConstTable,
     sources: &SourceMap,
+    cfg: &super::super::cfg::CfgContext,
     entry: Option<CallableId>,
     dependency: &crate::query::DependencyFingerprint,
     queries: &crate::QueryEngine,
-) -> Result<hir::Validated, Vec<Diagnostic>> {
-    query::lower(model, names, checked, sources, entry, dependency, queries)
+) -> Result<(hir::Validated, super::analysis::AnalysisWorldV1), Vec<Diagnostic>> {
+    query::lower(
+        model, names, checked, early, sources, cfg, entry, dependency, queries,
+    )
 }
 
 impl<'m, 'a> Builder<'m, 'a> {

@@ -9,9 +9,14 @@ pub(crate) struct BackendPlan {
     pub(crate) entry: String,
     pub(crate) function_count: u32,
     pub(crate) semantic_fingerprint: [u8; 32],
+    pub(crate) runtime_checks_elided_count: u32,
 }
 
-pub(crate) fn plan(target: TargetName, hir: &Validated) -> Option<BackendPlan> {
+pub(crate) fn plan(
+    target: TargetName,
+    hir: &Validated,
+    runtime_checks_elided_count: u32,
+) -> Option<BackendPlan> {
     let module = hir.module();
     let entry = module.entry?;
     Some(BackendPlan {
@@ -28,5 +33,6 @@ pub(crate) fn plan(target: TargetName, hir: &Validated) -> Option<BackendPlan> {
             })
             .count() as u32,
         semantic_fingerprint: hir.fingerprint(),
+        runtime_checks_elided_count,
     })
 }

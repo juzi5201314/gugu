@@ -1,5 +1,6 @@
 //! 类型化表达式与确定初始化检查共用唯一的局部槽表。
 pub(crate) mod assembly;
+pub(crate) use crate::frontend::analysis;
 pub(crate) mod borrow;
 mod checker;
 pub(crate) mod comptime;
@@ -15,7 +16,7 @@ mod patterns;
 pub(crate) mod query;
 mod safety;
 mod traits;
-pub(crate) use output::{CheckedBody, CheckedSemantics, MemoryOperation};
+pub(crate) use output::{CheckKind, CheckedBody, CheckedSemantics, MemoryOperation};
 #[cfg(test)]
 mod callable_tests;
 #[cfg(test)]
@@ -45,6 +46,7 @@ pub(crate) fn check(
         Vec<super::types::Layout>,
         (u32, [u8; 32]),
         super::hir::Validated,
+        analysis::AnalysisWorldV1,
     ),
     Vec<Diagnostic>,
 > {
@@ -54,14 +56,16 @@ pub(crate) fn check(
     let (checked, dependency) =
         query::check(&model, sources, cfg, queries, &early, &early_dependency)?;
     let layouts = super::types::form_and_layout(&model, &checked, cfg.target())?;
-    let hir = hir::lower(
+    let (hir, analysis_world) = hir::lower(
         &model,
         names,
         &checked,
+        &early,
         sources,
+        cfg,
         entry,
         &dependency,
         queries,
     )?;
-    Ok((checked, layouts, registry_identity, hir))
+    Ok((checked, layouts, registry_identity, hir, analysis_world))
 }

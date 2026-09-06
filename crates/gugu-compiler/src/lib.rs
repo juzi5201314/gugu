@@ -294,7 +294,9 @@ impl Compiler {
             ),
         );
 
-        let Some(backend_plan) = backend::plan(target, &hir) else {
+        let Some(backend_plan) =
+            backend::plan(target, &hir, frontend.analysis.runtime_checks_elided_count)
+        else {
             graph.complete(ActionKind::PlanBackend, "没有可执行入口");
             graph.skip_after(ActionKind::PlanBackend, "没有可执行入口");
             diagnostics.sort();
@@ -372,9 +374,8 @@ fn frontend_action_key(
     for (key, hash) in &frontend.expansion_inputs.macros {
         inputs.add_macro_input(key.clone(), *hash);
     }
-    if !frontend.expansion_inputs.budget.is_empty() {
-        inputs.set_macro_budget(&frontend.expansion_inputs.budget);
-    }
+    inputs.set_analysis_policy(frontend::analysis::AnalysisPolicyV1::default().canonical_bytes());
+    inputs.set_analysis_world(frontend.analysis.input_fingerprint);
     inputs.key()
 }
 
@@ -695,6 +696,7 @@ pub struct ImagePlan {
     entry: String,
     function_count: u32,
     runtime_source_count: u32,
+    runtime_checks_elided_count: u32,
     rt0: Rt0Boundary,
     semantic_fingerprint: [u8; 32],
 }
@@ -706,6 +708,7 @@ impl ImagePlan {
             entry: plan.entry,
             function_count: plan.function_count,
             runtime_source_count: attachment.source_count,
+            runtime_checks_elided_count: plan.runtime_checks_elided_count,
             rt0: attachment.rt0,
             semantic_fingerprint: plan.semantic_fingerprint,
         }
@@ -739,6 +742,11 @@ impl ImagePlan {
     /// 返回已验证前端语义的稳定指纹，用于区分相同入口的不同程序。
     pub fn semantic_fingerprint(&self) -> [u8; 32] {
         self.semantic_fingerprint
+    }
+
+    /// 返回 AbstractAnalysis 判定为 `Proved` 的运行时检查数量。
+    pub fn runtime_checks_elided_count(&self) -> u32 {
+        self.runtime_checks_elided_count
     }
 }
 

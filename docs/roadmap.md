@@ -166,10 +166,11 @@
   - 验收：生成源码必须重新经过 cfg、收集、解析、名称、类型、trait、unsafe、ABI 和 HIR；片段类别不匹配、cycle、fuel/字节/节点/深度超限均保留完整展开链诊断。
   - 接入证据：`frontend::expand::run` 在 `parse_modules -> 展开 -> entry/names/semantics::check` 链上驱动轮次闭包：每轮以冻结的名称视图在 SourceExpand 域求值脚本，经 `ParseSource`(21)/`ExpandSourceMacro`(22) query（schema 1）执行解析闸门与脚本求值，随后注册生成快照与展开记录、以非零 `ExpansionId` 解析进宿主 arena、片段 cfg 裁项、原位拼接并修正列表范围；全部宏展开后 `names::analyze`/`TypeCheck`/`LowerHir` 在合并 AST 上重新运行。`Ok`/`Err`/`?` 与结果模式进入受限解释器（仅 SourceExpand 域），`Err` 到边界转 `E0051`；类别不匹配为 `E0050`、自再生循环为 `E0048`（脚本文本+slot 稳定键）、六项预算超限为 `E0049`（含 `expansion_limit` 属性校验，默认深度 16/硬上限 256）；生成代码诊断按规范重锚定为宏调用点主位置+展开链附注。宏预算编码与全部生成文本摘要经 `ActionInputs::macro_budget/macro_inputs` 进入 action key。230 项工作区测试通过（新增 24 项，覆盖五个 slot、嵌套两轮父链、生成 cfg 裁项、边界 Err、`?` 传播、类别不匹配、cycle、深度/属性超限、冷热 query 一致、action key 敏感性与双目标 smoke）；Linux CLI 真实 `check`/`build` 接受含宏 package，非法宏退出码 1 且无镜像产物。
 
-- [ ] **阶段 23：实现 AbstractAnalysis、范围证明与效果传播**（复杂度：5）
+- [x] **阶段 23：实现 AbstractAnalysis、范围证明与效果传播**（复杂度：5）
   - 依赖：阶段 14、20、21、22。
   - 实现 CFG 固定点、范围/符号关系、初始化、别名类、memory version、COW seal、resource publish、并发/FFI unknown、widening/narrowing 和跨函数摘要。
   - 验收：只有 `proved` 才能删除边界检查或生成更强 placement；未知调用、别名、并发和预算耗尽保留原检查；分析不会替代类型推断或 impl 选择。
+  - 接入证据：`TypeCheck -> LowerHir` 内 `analysis::solver` + `Validated::freeze` 前 patch `RuntimeCheck.proof`；`WholeProgramAnalysis` query schema 1（`QueryKind` 24）指纹覆盖 TypeCheck/LowerHir/EarlyConst/HIR/policy；`FrontendOutput.analysis` 与 `ImagePlan.runtime_checks_elided_count` 供 smoke；`ActionInputs.analysis_policy/analysis_world` 进入 action key。221 项工作区测试通过（含 `analysis_policy_bytes_change_action_key`）；`runtime_checks_survive_queries_and_reach_the_backend_plan` 仍保留 Unknown 检查。
 
 - [ ] **阶段 24：实现闭世界可达性与单态化实例图**（复杂度：5）
   - 依赖：阶段 17、18、20、22、23。

@@ -375,6 +375,7 @@ impl Effects {
 pub(crate) struct RuntimeCheck {
     pub(crate) expression: ExprId,
     pub(crate) kind: CheckKind,
+    pub(crate) proof: Option<crate::frontend::semantics::analysis::ProofStatus>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub(crate) enum CheckKind {

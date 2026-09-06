@@ -298,6 +298,23 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 6. caller 只依赖 callee 的公共对象 key，局部证明另留在当前 world；
 7. 对无法收敛的部分返回 `unknown`，不删除安全检查。
 
+## 阶段 23 实现桥接
+
+当前 compiler 在 **冻结 HIR + `CheckedSemantics`（schema 7）+ `EarlyConstTable.registry_summary`**
+上运行 `WholeProgramAnalysis`（query schema 1），不等待 monomorphic GIR。`AnalysisOwnerKey`
+为 `(owner 表下标, DefId)`；阶段 24 接入后同一 `AnalysisWorldV1` schema 仅将 callable 身份
+换为 `MonoKey`，`proved` / `unknown` 语义不变。
+
+固定 **`analysis_semantics_revision = 1`**、**`PublicSummaryPolicyV1` 占位 revision = 1**
+（默认 SCC 迭代 32、单 owner CFG 块软上限 4096、摘要关系条数软上限 256）。超预算 →
+`budget_exhausted = true` 且相关事实为 `unknown`；**不是**用户 `Error`。
+
+证明在 `LowerHir` 构建 Module 后、`Validated::freeze` 前写回 `RuntimeCheck.proof`。后端
+`ImagePlan.runtime_checks_elided_count` 统计 `Proved` 数量，供 smoke；**不改变**语言语义
+（未知路径仍保留 HIR 检查节点）。`ActionInputs` 的 `analysis_policy` 与 `analysis_world`
+指纹进入前端 action key；跨 package `public_summaries` 本阶段为空 map。
+
+
 局部证明按 `MonoKey`、闭世界、目标、feature/cfg、runtime/标准库版本和分析策略缓存；公共
 摘要还按独立 schema、analysis semantics revision 和 `PublicSummaryPolicyV1` 版本化。
 `ForeignLeaf`、`ForeignBridge`、内联汇编和未登记的 C 回调不能被假定为纯函数；除非有显式

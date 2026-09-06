@@ -18,6 +18,8 @@ pub struct ActionInputs {
     comptime_registry: Vec<u8>,
     type_universe: Vec<u8>,
     late_constants: Vec<u8>,
+    analysis_policy: Vec<u8>,
+    analysis_world: [u8; 32],
     public_summaries: BTreeMap<String, [u8; 32]>,
     build_inputs: BTreeMap<String, [u8; 32]>,
     build_outputs: BTreeMap<String, [u8; 32]>,
@@ -128,6 +130,16 @@ impl ActionInputs {
         self.native_link_metadata = bytes.as_ref().to_vec();
     }
 
+    /// 设置 AbstractAnalysis 策略规范字节。
+    pub fn set_analysis_policy(&mut self, bytes: impl AsRef<[u8]>) {
+        self.analysis_policy = bytes.as_ref().to_vec();
+    }
+
+    /// 设置 whole-program 分析 world 输入指纹。
+    pub fn set_analysis_world(&mut self, fingerprint: [u8; 32]) {
+        self.analysis_world = fingerprint;
+    }
+
     /// 计算域隔离的 BLAKE3 action key。
     pub fn key(&self) -> ActionKey {
         let mut canonical = Vec::new();
@@ -146,6 +158,8 @@ impl ActionInputs {
         encode_bytes(&mut canonical, &self.comptime_registry);
         encode_bytes(&mut canonical, &self.type_universe);
         encode_bytes(&mut canonical, &self.late_constants);
+        encode_bytes(&mut canonical, &self.analysis_policy);
+        encode_bytes(&mut canonical, &self.analysis_world);
         encode_digest_map(&mut canonical, &self.public_summaries);
         encode_digest_map(&mut canonical, &self.build_inputs);
         encode_digest_map(&mut canonical, &self.build_outputs);

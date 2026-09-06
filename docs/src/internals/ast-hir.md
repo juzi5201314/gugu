@@ -59,7 +59,8 @@ query 依赖，不靠可变的全局 phase 回跳：
 显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功
 产物。
 
-阶段 12b/20 的现行实现把 `TypeCheck`、布局检查、`LowerHir` 与 `Validated::freeze` 连成单向入口；`LowerHir` 消费已检查的 AST 和语义侧表，直接形成最终的类型化 owner，不向后端暴露构造中的 HIR。上面的源码宏、EarlyConst、LateConst 和 GIR 阶段依赖仍按路线图各自阶段接入，不由本阶段提前执行。
+阶段 23 起，在 monomorphic GIR 未就绪前，`abstract_analysis` 允许消费 `Validated` HIR；
+GIR 就绪后输入升级为 monomorphic GIR，query kind 仍为 `WholeProgramAnalysis`。
 
 ## 索引与 arena
 

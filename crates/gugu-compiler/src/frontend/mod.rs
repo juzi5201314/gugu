@@ -5,6 +5,7 @@ use crate::{
     source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span},
 };
 
+pub(crate) mod analysis;
 mod ast;
 mod attr;
 pub(crate) mod cfg;
@@ -56,6 +57,7 @@ pub(crate) struct FrontendOutput {
     #[cfg(test)]
     pub(crate) semantics: semantics::CheckedSemantics,
     pub(crate) hir: hir::Validated,
+    pub(crate) analysis: analysis::AnalysisWorldV1,
 }
 
 #[derive(Clone, Debug)]
@@ -88,6 +90,7 @@ pub(crate) fn bootstrap(
             hir: hir::Validated::freeze(hir::Module::default())
                 .map_err(|error| vec![error])?
                 .0,
+            analysis: analysis::empty_world(),
         }),
         SourceInput::Sources {
             source_map,
@@ -158,7 +161,7 @@ fn check_sources(
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
-    let (semantics, types, registry, hir) =
+    let (semantics, types, registry, hir, analysis_world) =
         semantics::check(&modules, &names, source_map, cfg, entry_function, queries)
             .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     Ok(frontend_output(
@@ -171,6 +174,7 @@ fn check_sources(
         expansion_inputs,
         semantics,
         hir,
+        analysis_world,
     ))
 }
 
@@ -271,6 +275,7 @@ fn frontend_output(
     expansion_inputs: expand::ExpansionInputs,
     semantics: semantics::CheckedSemantics,
     hir: hir::Validated,
+    analysis: analysis::AnalysisWorldV1,
 ) -> FrontendOutput {
     #[cfg(not(test))]
     drop(semantics);
@@ -301,6 +306,7 @@ fn frontend_output(
         #[cfg(test)]
         semantics,
         hir,
+        analysis,
     }
 }
 

@@ -122,9 +122,11 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     value: self.mapped(*value)?,
                 },
             };
-            self.output
-                .checks
-                .push(hir::RuntimeCheck { expression, kind });
+            self.output.checks.push(hir::RuntimeCheck {
+                expression,
+                kind,
+                proof: None,
+            });
             self.expressions[expression.index()]
                 .as_mut()
                 .expect("计划在表达式形成后转换")
