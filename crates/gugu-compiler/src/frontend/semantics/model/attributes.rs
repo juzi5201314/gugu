@@ -11,6 +11,10 @@ pub(crate) struct Representation {
     pub(crate) tag: Option<(bool, u16)>,
 }
 impl Representation {
+    /// 规范 repr 标志位（C/packed/transparent）；进入稳定类型键编码。
+    pub(crate) fn flags(self) -> u8 {
+        self.flags
+    }
     pub(crate) fn c(self) -> bool {
         self.flags & 1 != 0
     }

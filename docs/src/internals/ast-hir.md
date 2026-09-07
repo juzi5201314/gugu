@@ -64,6 +64,10 @@ query 依赖，不靠可变的全局 phase 回跳：
 侧表，不删除检查节点）；GIR 就绪后输入升级为 monomorphic GIR，query kind 仍为
 `WholeProgramAnalysis`。
 
+阶段 24 起，第 16 步已闭合可达实例图：`CollectMonoRoots` 与 `InstantiateGir`
+在冻结前 HIR 与 `CheckedSemantics` 事实上运行（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)），
+分析身份键升级为 `MonoKey`；GIR 就绪后实例化输入升级为 generic GIR body。
+
 ## 索引与 arena
 
 前端使用稠密 `u32` 索引和 `Vec`/切片 arena，不使用指针作为节点身份：
@@ -227,7 +231,7 @@ parser 必须满足：
 
 `frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
-阶段 13–20 的版本化结果为 `CheckedSemantics`（schema 6），它在 TypeCheck query 中序列化，包含：
+阶段 13–20 的版本化结果为 `CheckedSemantics`（schema 7），它在 TypeCheck query 中序列化，包含：
 
 - 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
 - 每个局部槽的规范名称和声明字节范围；闭包捕获及清理路径的重检查可以据此指向同一个源码绑定，HIR 不把语义检查遍历中临时分配的槽编号当作持久绑定身份。

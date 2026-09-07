@@ -152,7 +152,7 @@ pub(crate) struct Nominal {
 pub(crate) struct Model<'a> {
     pub(crate) modules: &'a [ParsedModule],
     pub(crate) nominal: Vec<Nominal>,
-    pub(super) traits: super::traits::Traits,
+    pub(crate) traits: super::traits::Traits,
     pub(super) opaques: super::opaque::Opaques,
     pub(super) foreign: super::foreign::Foreign,
     names: &'a NameResolution,
@@ -262,7 +262,7 @@ impl<'a> Model<'a> {
             Ty::Join(t) => format!("Join[{}]", self.describe(t)),
         }
     }
-    pub(super) fn function_definition(&self, id: CallableId) -> Option<DefRef> {
+    pub(crate) fn function_definition(&self, id: CallableId) -> Option<DefRef> {
         self.function_items[id.module][id.function as usize].map(|item| DefRef {
             module: id.module,
             item,
@@ -556,7 +556,7 @@ impl<'a> Model<'a> {
         params
     }
 
-    pub(super) fn callable_context(&self, id: CallableId) -> BTreeMap<String, Ty> {
+    pub(crate) fn callable_context(&self, id: CallableId) -> BTreeMap<String, Ty> {
         let function = &self.modules[id.module].arena.fns[id.function as usize];
         let mut context = self.parameters_at(id.module, &function.span);
         // 关联类型路径是由 Self 推导的查找缓存，不构成独立实例参数。
@@ -974,7 +974,7 @@ impl<'a> Model<'a> {
         }
     }
 }
-pub(super) fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
+pub(crate) fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
     match ty {
         Ty::Param(s) => bindings.get(s).cloned().unwrap_or_else(|| ty.clone()),
         Ty::Projection(ty, interface, name) => Ty::Projection(

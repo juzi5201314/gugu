@@ -333,7 +333,15 @@ fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
     let queries = crate::QueryEngine::new();
     let output = compile(&[("main.gg", source)], &queries);
     let module = output.hir.module();
-    let keys = super::callgraph::callable_keys(module);
+    let keys = module
+        .owners
+        .iter()
+        .enumerate()
+        .map(|(index, owner)| super::solver::SccMember {
+            mono_key: output.mono.instances[0].mono_key.clone(),
+            owner: super::callgraph::callable_key_at(module, index),
+        })
+        .collect::<Vec<_>>();
     let mut policy = AnalysisPolicyV1::default();
     policy.max_block_iterations = 1;
     let scc = super::solver::analyze_scc(module, &keys, policy, &|_| {
@@ -355,31 +363,32 @@ fn nested_scc_summaries_match_world_projection() {
     let queries = crate::QueryEngine::new();
     let output = compile(&[("main.gg", source)], &queries);
     let module = output.hir.module();
-    let keys = super::callgraph::callable_keys(module);
     assert_eq!(
-        output.analysis.owners.len(),
-        keys.len(),
-        "每个 callable 都必须有 FunctionAnalysisSummary 投影"
+        output.analysis.instances.len(),
+        output.mono.instances.len(),
+        "每个闭合实例都必须有 FunctionAnalysisSummary 投影"
     );
-    for key in &keys {
+    for instance in &output.mono.instances {
         assert!(
             output
                 .analysis
-                .owners
+                .instances
                 .iter()
-                .any(|record| record.key == *key),
-            "world 缺少 owner {key:?}"
+                .any(|record| record.mono_key == instance.mono_key),
+            "world 缺少实例 {}",
+            instance.symbol
         );
     }
     assert!(
         output
             .analysis
-            .owners
+            .instances
             .iter()
             .filter(|record| record.summary.may_panic)
             .count()
             >= 2,
         "互递归 SCC 必须把 callee 的 may_panic 吸收进双方摘要：{:?}",
-        output.analysis.owners
+        output.analysis.instances
     );
+    let _ = module;
 }

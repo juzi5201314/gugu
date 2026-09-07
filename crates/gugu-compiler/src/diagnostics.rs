@@ -132,6 +132,10 @@ pub enum DiagnosticCode {
     ExpansionFragmentMismatch,
     /// 源码宏脚本在边界返回 `Err`。
     MacroBoundaryError,
+    /// 沿一条实例化 ancestry 的单态化无法收敛。
+    MonoDivergence,
+    /// 单态化实例总数超过实现上界。
+    MonoInstanceLimit,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -188,6 +192,8 @@ impl fmt::Display for DiagnosticCode {
             Self::ExpansionLimit => "E0049",
             Self::ExpansionFragmentMismatch => "E0050",
             Self::MacroBoundaryError => "E0051",
+            Self::MonoDivergence => "E0052",
+            Self::MonoInstanceLimit => "E0053",
         };
         formatter.write_str(code)
     }

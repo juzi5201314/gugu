@@ -111,7 +111,7 @@ impl Model<'_> {
             ),
         ))
     }
-    pub(in super::super) fn select_impl(
+    pub(crate) fn select_impl(
         &self,
         ty: &Ty,
         interface: &TraitRef,
@@ -229,11 +229,7 @@ impl Model<'_> {
             _ => false,
         }
     }
-    pub(in super::super) fn normalize(
-        &self,
-        ty: &Ty,
-        assumptions: &[Obligation],
-    ) -> Result<Ty, Diagnostic> {
+    pub(crate) fn normalize(&self, ty: &Ty, assumptions: &[Obligation]) -> Result<Ty, Diagnostic> {
         self.normalize_inner(ty, assumptions, &mut Vec::new())
     }
     fn normalize_inner(
@@ -339,7 +335,7 @@ impl Model<'_> {
             _ => ty.clone(),
         })
     }
-    pub(in super::super) fn method(
+    pub(crate) fn method(
         &self,
         module: usize,
         ty: &Ty,

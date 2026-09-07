@@ -14,6 +14,7 @@ pub(crate) mod format;
 pub(crate) mod hir;
 mod intern;
 mod lex;
+pub(crate) mod mono;
 mod names;
 mod parse;
 mod semantics;
@@ -58,6 +59,7 @@ pub(crate) struct FrontendOutput {
     pub(crate) semantics: semantics::CheckedSemantics,
     pub(crate) hir: hir::Validated,
     pub(crate) analysis: analysis::AnalysisWorldV1,
+    pub(crate) mono: mono::MonoWorldV1,
 }
 
 #[derive(Clone, Debug)]
@@ -91,6 +93,7 @@ pub(crate) fn bootstrap(
                 .map_err(|error| vec![error])?
                 .0,
             analysis: analysis::empty_world(),
+            mono: mono::empty_world(),
         }),
         SourceInput::Sources {
             source_map,
@@ -161,7 +164,7 @@ fn check_sources(
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
-    let (semantics, types, registry, hir, analysis_world) =
+    let (semantics, types, registry, hir, analysis_world, mono_world) =
         semantics::check(&modules, &names, source_map, cfg, entry_function, queries)
             .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     Ok(frontend_output(
@@ -175,6 +178,7 @@ fn check_sources(
         semantics,
         hir,
         analysis_world,
+        mono_world,
     ))
 }
 
@@ -276,6 +280,7 @@ fn frontend_output(
     semantics: semantics::CheckedSemantics,
     hir: hir::Validated,
     analysis: analysis::AnalysisWorldV1,
+    mono: mono::MonoWorldV1,
 ) -> FrontendOutput {
     #[cfg(not(test))]
     drop(semantics);
@@ -307,6 +312,7 @@ fn frontend_output(
         semantics,
         hir,
         analysis,
+        mono,
     }
 }
 

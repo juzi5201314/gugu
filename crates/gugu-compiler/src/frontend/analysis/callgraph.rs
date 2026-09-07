@@ -1,80 +1,13 @@
 //! 调用图 SCC：Tarjan 产出按凝聚图拓扑可用的分量。
 
 use super::types::AnalysisOwnerKey;
-use crate::frontend::hir::{self, DefinitionKind, Module};
-use std::collections::BTreeMap;
+use crate::frontend::hir::Module;
 
-pub(crate) fn callable_keys(module: &Module) -> Vec<AnalysisOwnerKey> {
-    module
-        .owners
-        .iter()
-        .enumerate()
-        .filter(|(_, owner)| {
-            matches!(
-                module.definitions[owner.definition.index()].kind,
-                DefinitionKind::Function | DefinitionKind::Closure | DefinitionKind::Async
-            )
-        })
-        .map(|(index, owner)| AnalysisOwnerKey {
-            owner_index: u32::try_from(index).expect("owner index"),
-            definition: owner.definition,
-        })
-        .collect()
-}
-
-pub(crate) fn call_graph(
-    module: &Module,
-    keys: &[AnalysisOwnerKey],
-) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
-    let def_to_node: BTreeMap<hir::DefId, usize> = keys
-        .iter()
-        .enumerate()
-        .map(|(node, key)| (key.definition, node))
-        .collect();
-    let mut graph = vec![Vec::new(); keys.len()];
-    for (node, key) in keys.iter().enumerate() {
-        let owner = &module.owners[key.owner_index as usize];
-        collect_calls(owner, &def_to_node, node, &mut graph);
-    }
-    for edges in &mut graph {
-        edges.sort_unstable();
-        edges.dedup();
-    }
-    let scc = tarjan(&graph, keys.len());
-    (graph, scc)
-}
-
-fn collect_calls(
-    owner: &hir::Owner,
-    def_to_node: &BTreeMap<hir::DefId, usize>,
-    node: usize,
-    graph: &mut [Vec<usize>],
-) {
-    for expression in &owner.expressions {
-        let target = match &expression.kind {
-            hir::ExprKind::Call { target, .. } | hir::ExprKind::SpawnCall { target, .. } => target,
-            _ => continue,
-        };
-        if let Some(function) = callee_definition(owner, target)
-            && let Some(&callee) = def_to_node.get(&function)
-        {
-            graph[node].push(callee);
-        }
-    }
-}
-
-pub(crate) fn callee_definition(
-    owner: &hir::Owner,
-    target: &hir::CallTarget,
-) -> Option<hir::DefId> {
-    match target {
-        hir::CallTarget::Dispatch(index) => owner.dispatches[*index as usize].function,
-        hir::CallTarget::Value(value) => match owner.expressions[value.index()].kind {
-            hir::ExprKind::Resolved(hir::Res::Def(definition))
-            | hir::ExprKind::Resolved(hir::Res::Associated { definition, .. }) => Some(definition),
-            _ => None,
-        },
-        hir::CallTarget::Builtin(_) | hir::CallTarget::Constructor { .. } => None,
+/// 按下标取定义级求解身份。
+pub(crate) fn callable_key_at(module: &Module, index: usize) -> AnalysisOwnerKey {
+    AnalysisOwnerKey {
+        owner_index: u32::try_from(index).expect("owner index"),
+        definition: module.owners[index].definition,
     }
 }
 
@@ -100,6 +33,11 @@ fn tarjan(graph: &[Vec<usize>], n: usize) -> Vec<Vec<usize>> {
         }
     }
     scc
+}
+
+/// 通用 Tarjan SCC：节点为稠密下标；分量内成员按序，供实例图与分析共用。
+pub(crate) fn strongly_connected_components(graph: &[Vec<usize>]) -> Vec<Vec<usize>> {
+    tarjan(graph, graph.len())
 }
 
 fn connect(
@@ -137,5 +75,30 @@ fn connect(
         }
         component.sort_unstable();
         scc.push(component);
+    }
+}
+
+/// 调用目标解析出的静态 callee 定义；动态/内建调用为 `None`。
+pub(crate) fn callee_definition(
+    owner: &crate::frontend::hir::Owner,
+    target: &crate::frontend::hir::CallTarget,
+) -> Option<crate::frontend::hir::DefId> {
+    match target {
+        crate::frontend::hir::CallTarget::Dispatch(index) => {
+            owner.dispatches[*index as usize].function
+        }
+        crate::frontend::hir::CallTarget::Value(value) => {
+            match owner.expressions[value.index()].kind {
+                crate::frontend::hir::ExprKind::Resolved(crate::frontend::hir::Res::Def(
+                    definition,
+                ))
+                | crate::frontend::hir::ExprKind::Resolved(
+                    crate::frontend::hir::Res::Associated { definition, .. },
+                ) => Some(definition),
+                _ => None,
+            }
+        }
+        crate::frontend::hir::CallTarget::Builtin(_)
+        | crate::frontend::hir::CallTarget::Constructor { .. } => None,
     }
 }

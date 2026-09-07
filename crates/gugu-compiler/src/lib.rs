@@ -294,9 +294,12 @@ impl Compiler {
             ),
         );
 
-        let Some(backend_plan) =
-            backend::plan(target, &hir, frontend.analysis.runtime_checks_elided_count)
-        else {
+        let Some(backend_plan) = backend::plan(
+            target,
+            &hir,
+            &frontend.mono,
+            frontend.analysis.runtime_checks_elided_count,
+        ) else {
             graph.complete(ActionKind::PlanBackend, "没有可执行入口");
             graph.skip_after(ActionKind::PlanBackend, "没有可执行入口");
             diagnostics.sort();
@@ -379,6 +382,9 @@ fn frontend_action_key(
     }
     inputs.set_analysis_policy(frontend::analysis::AnalysisPolicyV1::default().canonical_bytes());
     inputs.set_analysis_world(frontend.analysis.input_fingerprint);
+    for (key, digest) in &frontend.mono.public_summaries {
+        inputs.add_public_summary(key.clone(), digest);
+    }
     inputs.key()
 }
 
@@ -700,6 +706,9 @@ pub struct ImagePlan {
     function_count: u32,
     runtime_source_count: u32,
     runtime_checks_elided_count: u32,
+    mono_instance_count: u32,
+    mono_root_count: u32,
+    mono_graph_fingerprint: [u8; 32],
     rt0: Rt0Boundary,
     semantic_fingerprint: [u8; 32],
 }
@@ -712,6 +721,9 @@ impl ImagePlan {
             function_count: plan.function_count,
             runtime_source_count: attachment.source_count,
             runtime_checks_elided_count: plan.runtime_checks_elided_count,
+            mono_instance_count: plan.mono_instance_count,
+            mono_root_count: plan.mono_root_count,
+            mono_graph_fingerprint: plan.mono_graph_fingerprint,
             rt0: attachment.rt0,
             semantic_fingerprint: plan.semantic_fingerprint,
         }
@@ -750,6 +762,21 @@ impl ImagePlan {
     /// 返回 AbstractAnalysis 判定为 `Proved` 的运行时检查数量。
     pub fn runtime_checks_elided_count(&self) -> u32 {
         self.runtime_checks_elided_count
+    }
+
+    /// 返回闭世界可达的单态化实例数量。
+    pub fn mono_instance_count(&self) -> u32 {
+        self.mono_instance_count
+    }
+
+    /// 返回闭世界根数量（入口/导出/used/static/asm/harness）。
+    pub fn mono_root_count(&self) -> u32 {
+        self.mono_root_count
+    }
+
+    /// 返回闭世界实例图指纹；实例集合或边变化必然改变该值。
+    pub fn mono_graph_fingerprint(&self) -> [u8; 32] {
+        self.mono_graph_fingerprint
     }
 }
 

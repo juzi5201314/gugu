@@ -16,7 +16,7 @@ pub(crate) struct TraitRef {
     pub(crate) arguments: Vec<Ty>,
 }
 impl TraitRef {
-    pub(super) fn substitute(&self, bindings: &BTreeMap<String, Ty>) -> Self {
+    pub(crate) fn substitute(&self, bindings: &BTreeMap<String, Ty>) -> Self {
         Self {
             id: self.id,
             arguments: self
@@ -28,10 +28,10 @@ impl TraitRef {
     }
 }
 #[derive(Clone, Debug)]
-pub(super) struct Obligation {
-    pub(super) ty: Ty,
-    pub(super) interface: TraitRef,
-    pub(super) span: Span,
+pub(crate) struct Obligation {
+    pub(crate) ty: Ty,
+    pub(crate) interface: TraitRef,
+    pub(crate) span: Span,
 }
 #[derive(Clone)]
 pub(super) enum MemberKind {
@@ -51,7 +51,7 @@ pub(super) struct Member {
     pub(super) definition: Option<DefRef>,
     pub(super) kind: MemberKind,
 }
-pub(super) struct Interface {
+pub(crate) struct Interface {
     pub(super) definition: Option<DefRef>,
     pub(super) name: String,
     pub(super) parameters: Vec<String>,
@@ -74,7 +74,7 @@ pub(super) enum Owner {
     Implementation(usize),
 }
 #[derive(Default)]
-pub(super) struct Traits {
+pub(crate) struct Traits {
     pub(super) interfaces: Vec<Interface>,
     pub(super) implementations: Vec<Implementation>,
     // ItemId 在模块内稠密；索引只访问已有 AST 项。
@@ -82,19 +82,46 @@ pub(super) struct Traits {
     pub(super) projection_equalities: Vec<(Ty, Ty)>,
 }
 #[derive(Clone)]
-pub(super) struct Method {
-    pub(super) callable: Option<CallableId>,
-    pub(super) signature: Ty,
-    pub(super) receiver: bool,
-    pub(super) dynamic: bool,
-    pub(super) unsafety: bool,
-    pub(super) arguments: Vec<Ty>,
-    pub(super) implementation: Option<DefRef>,
-    pub(super) interface: Option<TraitRef>,
-    pub(super) member: Option<u32>,
+pub(crate) struct Method {
+    pub(crate) callable: Option<CallableId>,
+    pub(crate) signature: Ty,
+    pub(crate) receiver: bool,
+    pub(crate) dynamic: bool,
+    pub(crate) unsafety: bool,
+    pub(crate) arguments: Vec<Ty>,
+    pub(crate) implementation: Option<DefRef>,
+    pub(crate) interface: Option<TraitRef>,
+    pub(crate) member: Option<u32>,
 }
 
 impl Model<'_> {
+    /// 按接口成员下标取成员名；成员表为有序 map，下标即键序。
+    pub(crate) fn interface_member_name(&self, interface: usize, member: u32) -> Option<String> {
+        self.traits
+            .interfaces
+            .get(interface)?
+            .members
+            .keys()
+            .nth(member as usize)
+            .cloned()
+    }
+
+    /// 列出接口的全部方法成员名，供 dyn 擦除点物化 vtable 方法集。
+    pub(crate) fn interface_method_members(&self, interface: usize) -> Vec<String> {
+        self.traits
+            .interfaces
+            .get(interface)
+            .map(|definition| {
+                definition
+                    .members
+                    .iter()
+                    .filter(|(_, member)| matches!(member.kind, MemberKind::Method { .. }))
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     pub(super) fn trait_error(&self, definition: DefRef, message: impl Into<String>) -> Diagnostic {
         Diagnostic::error(
             DiagnosticCode::InvalidDeclaration,

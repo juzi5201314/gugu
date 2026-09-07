@@ -338,7 +338,7 @@ fn cached_constraint_failures_preserve_notes_and_current_source_table() {
 fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     use super::output::CheckKind;
     let queries = crate::QueryEngine::new();
-    let source = "fn f(x: int, n: u8, a: &[int], s: string, d: float) { _ = x / 0\n _ = x << n\n _ = a[x]\n _ = s[x..]\n _ = int(d)\n _ = char(x)\n unsafe { _ = a[x] } }\nfn main() {}";
+    let source = "fn f(x: int, n: u8, a: &[int], s: string, d: float) { _ = x / 0\n _ = x << n\n _ = a[x]\n _ = s[x..]\n _ = int(d)\n _ = char(x)\n unsafe { _ = a[x] } }\nfn main() { let data = [1, 2]\n f(1, 2, &data, \"s\", 1.0) }";
     let cold = frontend(&[("main.gg", source)], &queries).unwrap();
     let warm = frontend(&[("main.gg", source)], &queries).unwrap();
     assert_eq!(cold.semantics, warm.semantics);

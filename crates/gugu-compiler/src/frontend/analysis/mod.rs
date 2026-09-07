@@ -15,9 +15,11 @@ mod types;
 
 pub(crate) use policy::AnalysisPolicyV1;
 pub(crate) use query::run_world;
-pub(crate) use types::{AnalysisWorldV1, ProofStatus, WORLD_SCHEMA_VERSION};
 #[cfg(test)]
-pub(crate) use types::{FunctionSummary, RuntimeCheckKey};
+pub(crate) use types::RuntimeCheckKey;
+pub(crate) use types::{
+    AnalysisWorldV1, FunctionSummary, ProofStatus, ReturnRelation, WORLD_SCHEMA_VERSION,
+};
 
 pub(crate) const ANALYSIS_SEMANTICS_REVISION: u32 = 2;
 
@@ -25,7 +27,7 @@ pub(crate) fn empty_world() -> AnalysisWorldV1 {
     AnalysisWorldV1 {
         schema: WORLD_SCHEMA_VERSION,
         input_fingerprint: [0; 32],
-        owners: Vec::new(),
+        instances: Vec::new(),
         proofs: Vec::new(),
         budget_exhausted: false,
         runtime_checks_elided_count: 0,

@@ -1,9 +1,12 @@
 //! 抽象域与可序列化的 world 结果。
+//!
+//! 阶段 24 起，摘要记录与 query 身份键使用 `MonoKey` 规范字节；world-local
+//! 证明键仍为 `(owner 表下标, ExprId)`（不跨 query 持久化）。
 
-use crate::frontend::hir::{CheckKind, DefId, ExprId};
+use crate::frontend::hir::{CheckKind, ExprId};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const WORLD_SCHEMA_VERSION: u32 = 2;
+pub(crate) const WORLD_SCHEMA_VERSION: u32 = 3;
 
 /// 检查的证明状态：`Proved` 表示 HIR 局部事实可证安全，`Disproved` 表示 HIR 局部
 /// 事实可证必然失败，`Unknown` 表示局部事实不足、必须保留检查。
@@ -14,11 +17,11 @@ pub(crate) enum ProofStatus {
     Unknown,
 }
 
-/// 稳定 callable owner 身份（阶段 24 前用 owner 表下标 + `DefId`）。
+/// 定义级求解身份（owner 表下标 + `DefId`）；仅驱动 SCC 求解，不进入 query key。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub(crate) struct AnalysisOwnerKey {
     pub owner_index: u32,
-    pub definition: DefId,
+    pub definition: crate::frontend::hir::DefId,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -109,15 +112,16 @@ impl FunctionSummary {
     }
 }
 
+/// 单态化实例摘要投影；`mono_key` 为规范字节，不含 session-local 编号。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub(crate) struct OwnerSummaryRecord {
-    pub key: AnalysisOwnerKey,
+pub(crate) struct InstanceSummaryRecord {
+    pub mono_key: Vec<u8>,
     pub summary: FunctionSummary,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct SccSummaryV1 {
-    pub owners: Vec<OwnerSummaryRecord>,
+    pub instances: Vec<InstanceSummaryRecord>,
     pub proofs: Vec<ProofFact>,
     pub budget_exhausted: bool,
 }
@@ -126,7 +130,7 @@ pub(crate) struct SccSummaryV1 {
 pub(crate) struct AnalysisWorldV1 {
     pub schema: u32,
     pub input_fingerprint: [u8; 32],
-    pub owners: Vec<OwnerSummaryRecord>,
+    pub instances: Vec<InstanceSummaryRecord>,
     pub proofs: Vec<ProofFact>,
     pub budget_exhausted: bool,
     pub runtime_checks_elided_count: u32,

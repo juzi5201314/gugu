@@ -82,7 +82,9 @@ comptime 的静态 callee 闭包得到；`cfg` 删除项不在集合中，而 `t
 实例图闭合后，编译器冻结具体类型集合与稠密 `TypeId`，再执行只读该集合的 late
 comptime。`type_id_count()` 与 comptime `TypeId.as_int()` 不能反向参与类型形成、源码宏、
 impl 选择或可达性；完整限制见[编译期执行](comptime.md#早期与-late-comptime)。无法形成
-有限闭世界、late 求值试图新增依赖、缺失 lang item 或依赖无法解析都是编译错误。
+有限闭世界、late 求值试图新增依赖、缺失 lang item 或依赖无法解析都是编译错误。递归
+泛型使单态化实例无法收敛报 `mono-divergence`（`E0052`）；实例总数超过实现上界报
+`mono-instance-limit`（`E0053`）。
 
 同一编译器构建身份、同一目标名、同一 target/harness/插桩、相同 feature 与相同输入字节
 必须产生语义等价的镜像；源文件遍历顺序、哈希表随机种子、操作系统目录枚举顺序不能改变

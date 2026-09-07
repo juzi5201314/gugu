@@ -23,21 +23,21 @@ pub(super) enum Origin {
     BuiltinTrait(usize),
 }
 
-pub(super) struct Identities {
+pub(crate) struct Identities {
     pub(super) origins: Vec<Origin>,
     pub(super) named_items: Vec<Option<DefRef>>,
-    pub(super) items: Vec<Vec<Option<hir::DefId>>>,
-    pub(super) functions: Vec<Vec<Option<hir::DefId>>>,
-    pub(super) asynchronous: Vec<Vec<Option<hir::DefId>>>,
-    pub(super) local_statics: Vec<Vec<Option<hir::DefId>>>,
-    pub(super) opaques: Vec<hir::DefId>,
-    pub(super) interfaces: Vec<hir::DefId>,
+    pub(crate) items: Vec<Vec<Option<hir::DefId>>>,
+    pub(crate) functions: Vec<Vec<Option<hir::DefId>>>,
+    pub(crate) asynchronous: Vec<Vec<Option<hir::DefId>>>,
+    pub(crate) local_statics: Vec<Vec<Option<hir::DefId>>>,
+    pub(crate) opaques: Vec<hir::DefId>,
+    pub(crate) interfaces: Vec<hir::DefId>,
 }
 impl Identities {
-    pub(super) fn item(&self, id: DefRef) -> hir::DefId {
+    pub(crate) fn item(&self, id: DefRef) -> hir::DefId {
         self.items[id.module][id.item.0 as usize].expect("active 声明已分配 HIR 身份")
     }
-    pub(super) fn function(&self, id: CallableId) -> hir::DefId {
+    pub(crate) fn function(&self, id: CallableId) -> hir::DefId {
         self.functions[id.module][id.function as usize].expect("已检查函数具有 HIR 身份")
     }
 }

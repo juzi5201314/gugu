@@ -1,52 +1,68 @@
 //! 过程内分析编排与 proof 写回。
+//!
+//! 阶段 24 起 SCC 成员是 `MonoKey` 实例；求解仍在定义级 HIR owner 上求固定点，
+//! 每个实例投影其定义的摘要（GIR 就绪后升级为实例级求解）。
 
 use super::interpret;
 use super::policy::AnalysisPolicyV1;
 use super::types::{
-    AnalysisOwnerKey, AnalysisWorldV1, FunctionSummary, OwnerSummaryRecord, ProofFact,
+    AnalysisOwnerKey, AnalysisWorldV1, FunctionSummary, InstanceSummaryRecord, ProofFact,
     RuntimeCheckKey, SccSummaryV1, WORLD_SCHEMA_VERSION, sort_proofs,
 };
 use crate::frontend::hir::{self, Module};
 use std::collections::BTreeMap;
 
+/// 一个实例 SCC 的求解成员：实例 key 与其定义的 owner 身份。
+#[derive(Clone)]
+pub(crate) struct SccMember {
+    pub mono_key: Vec<u8>,
+    pub owner: AnalysisOwnerKey,
+}
+
 pub(crate) fn analyze_scc(
     module: &Module,
-    keys: &[AnalysisOwnerKey],
+    members: &[SccMember],
     policy: AnalysisPolicyV1,
     callees: &dyn Fn(hir::DefId) -> FunctionSummary,
 ) -> SccSummaryV1 {
-    let mut summaries: BTreeMap<u32, FunctionSummary> = keys
+    // 定义级求解：同一定义的多个实例共享一次解释。
+    let mut owners: Vec<AnalysisOwnerKey> = Vec::new();
+    for member in members {
+        if !owners.contains(&member.owner) {
+            owners.push(member.owner);
+        }
+    }
+    owners.sort_by_key(|owner| owner.owner_index);
+    let mut summaries: BTreeMap<u32, FunctionSummary> = owners
         .iter()
-        .map(|key| (key.owner_index, FunctionSummary::default()))
+        .map(|owner| (owner.owner_index, FunctionSummary::default()))
         .collect();
     let mut budget_exhausted = false;
     for _ in 0..policy.max_scc_iterations {
         let mut changed = false;
-        for key in keys {
+        for owner in &owners {
             let lookup = |def: hir::DefId| {
-                keys.iter()
+                owners
+                    .iter()
                     .find(|item| item.definition == def)
                     .and_then(|item| summaries.get(&item.owner_index).cloned())
                     .unwrap_or_else(|| callees(def))
             };
             let result = interpret::analyze_owner(
                 module,
-                &module.owners[key.owner_index as usize],
-                key.owner_index,
+                &module.owners[owner.owner_index as usize],
+                owner.owner_index,
                 policy,
                 &lookup,
             );
             budget_exhausted |= result.budget_exhausted;
-            let slot = summaries.get_mut(&key.owner_index).expect("summary");
+            let slot = summaries.get_mut(&owner.owner_index).expect("summary");
             if *slot != result.summary {
-                *slot = result.summary;
+                *slot = result.summary.clone();
                 changed = true;
             }
         }
-        if !changed {
-            break;
-        }
-        if budget_exhausted {
+        if !changed || budget_exhausted {
             break;
         }
     }
@@ -56,24 +72,25 @@ pub(crate) fn analyze_scc(
         }
     }
     let mut proofs = Vec::new();
-    for key in keys {
+    for owner in &owners {
         let lookup = |def: hir::DefId| {
-            keys.iter()
+            owners
+                .iter()
                 .find(|item| item.definition == def)
                 .and_then(|item| summaries.get(&item.owner_index).cloned())
                 .unwrap_or_else(|| callees(def))
         };
         let result = interpret::analyze_owner(
             module,
-            &module.owners[key.owner_index as usize],
-            key.owner_index,
+            &module.owners[owner.owner_index as usize],
+            owner.owner_index,
             policy,
             &lookup,
         );
         for (expression, kind, status) in result.proofs {
             proofs.push(ProofFact {
                 key: RuntimeCheckKey {
-                    owner_index: key.owner_index,
+                    owner_index: owner.owner_index,
                     expression,
                     kind,
                 },
@@ -86,18 +103,18 @@ pub(crate) fn analyze_scc(
         }
     }
     sort_proofs(&mut proofs);
-    let owners = keys
+    let instances = members
         .iter()
-        .map(|key| OwnerSummaryRecord {
-            key: *key,
+        .map(|member| InstanceSummaryRecord {
+            mono_key: member.mono_key.clone(),
             summary: summaries
-                .get(&key.owner_index)
+                .get(&member.owner.owner_index)
                 .cloned()
                 .unwrap_or_else(FunctionSummary::conservative),
         })
         .collect();
     SccSummaryV1 {
-        owners,
+        instances,
         proofs,
         budget_exhausted,
     }
@@ -107,16 +124,18 @@ pub(crate) fn world_from_sccs(
     sccs: Vec<SccSummaryV1>,
     input_fingerprint: [u8; 32],
 ) -> AnalysisWorldV1 {
-    let mut owners = Vec::new();
+    let mut instances = Vec::new();
     let mut proofs = Vec::new();
     let mut budget_exhausted = false;
     for scc in sccs {
         budget_exhausted |= scc.budget_exhausted;
-        owners.extend(scc.owners);
+        instances.extend(scc.instances);
         proofs.extend(scc.proofs);
     }
-    owners.sort_by_key(|record| record.key);
+    instances.sort_by(|left, right| left.mono_key.cmp(&right.mono_key));
+    instances.dedup_by(|left, right| left.mono_key == right.mono_key);
     sort_proofs(&mut proofs);
+    proofs.dedup_by(|left, right| left.key == right.key);
     let runtime_checks_elided_count = proofs
         .iter()
         .filter(|fact| fact.status == super::types::ProofStatus::Proved)
@@ -124,7 +143,7 @@ pub(crate) fn world_from_sccs(
     AnalysisWorldV1 {
         schema: WORLD_SCHEMA_VERSION,
         input_fingerprint,
-        owners,
+        instances,
         proofs,
         budget_exhausted,
         runtime_checks_elided_count,

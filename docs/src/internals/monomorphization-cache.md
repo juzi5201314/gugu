@@ -83,14 +83,14 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 20 | `EmitImage` | image plan fingerprint | 最终镜像 |
 | 21 | `ParseSource` | generated source fingerprint + source slot | `ParsedSource` |
 | 22 | `ExpandSourceMacro` | stable macro call + round + source slot + script inputs | generated source/fragment + expansion record |
-| 23 | `FunctionAnalysisSummary` | 阶段 24 前为 `AnalysisOwnerKey` + analysis policy；其后为 `MonoKey` + analysis policy | completed SCC 中的函数摘要投影 |
-| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（当前 schema 2，输入为 proof 写回前的 HIR 模块指纹） | 排序摘要与 world-local 证明事实 |
+| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy（schema 2） | completed SCC 中的函数摘要投影 |
+| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（当前 schema 3，输入含实例图指纹与 proof 写回前的 HIR 模块指纹） | 排序摘要与 world-local 证明事实 |
 | 25 | `FreezeTypeUniverse` | closed-world instance graph | `TypeUniverseKey`、类型序列与稠密编号 |
 | 26 | `EvaluateLateComptime` | `LateConstKey` + `TypeUniverseKey` | late 标量常量 |
-| 27 | `AnalysisSccSummary` | 阶段 24 前为排序后的 `AnalysisOwnerKey` 集 + analysis policy；其后为排序 `MonoKey` 集 + analysis policy | 完整 SCC 摘要固定点 |
+| 27 | `AnalysisSccSummary` | 排序 `MonoKey` 集 + analysis policy（schema 2） | 完整 SCC 摘要固定点 |
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision | 内容寻址跨 package 摘要 |
 
-新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--28 只表达登记的新 query，不得重用或改变既有编号的含义。阶段 24 前，23 与 27 的 callable 身份是 owner 键 `(owner 表下标, DefId)`，不是 `MonoKey`。
+新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--28 只表达登记的新 query，不得重用或改变既有编号的含义。阶段 24 起，23 与 27 的 callable 身份是 `MonoKey`；阶段 24 前为 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
 
 ## query 状态机
 
@@ -214,6 +214,47 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
 
 当前阶段只提供可复用的 compiler 基础设施；阶段 71 才会把 action record、LRU 索引、清理
 命令和 target 物化完整接入 CLI。
+
+## 阶段 24 实现桥接
+
+`CollectMonoRoots`（12，schema 1）与 `InstantiateGir`（13，schema 1）已在
+`gugu-compiler::frontend::mono` 落地，闭合嵌套在 `LowerHir` compute 内、
+`Validated::freeze` 之前执行：
+
+- `StableTypeKey`：语义类型经 GBC1 编码（`u16` kind tag、小端定宽、长度前缀）
+  后按 `gugu-mono-v1` 域哈希；名义定义携带 `Definition.key` 稳定键、repr 标志、
+  对齐与 tag 形态；闭包/opaque 携带 owner 稳定键。泛型参数、投影与未收敛变量
+  出现在具体类型中即 `E0052`。`MonoInterner` 同时保留 digest 与规范字节，
+  相同 digest 不同字节是 `DefinitionHashCollision` 内部错误。
+- `MonoKey`：definition 稳定键、type_arguments、const_arguments、selected_impls、
+  call_abi（当前全部 Gugu，C ABI 导入只登记外部符号不形成实例）、target、
+  harness 与插桩位。const_arguments 现阶段为空——HIR 尚未按调用点记录
+  comptime 实参；阶段 26 GIR `MonoCandidate` 携带后补全，schema 不变。
+- 根：入口、`#[used]`、导出（`#[export_name]`/pub extern C 有体）、static/const
+  初始化器、global asm、harness 域 `#[test]`/`#[bench]` 与 late comptime 依赖
+  实例（`type_id_count`/`TypeId.as_int` 使用者）。lang item 根当前为空集——
+  runtime/std 源树仍是 bootstrap 空单元。`cfg` 裁掉的定义不在 HIR 定义表内，
+  天然不入根。
+- 闭合 driver：pending 为按 key 摘要排序的 `BTreeSet`，迭代 pop 最小 key 实例化
+  并把未见 callee 入队；递归调用复用相同实例节点只形成图边。ancestry 预算按
+  链上不同 key 256 / 同一 definition 严格增长重复 128 报 `E0052`；实例总数
+  达 `u32::MAX` 报 `E0053`。`MonoId` 在闭合后按 key 摘要排序分配。
+- 实例边覆盖全部 dispatch 位点（普通/协程调用、运算符与 `for`/`try`/下标协议
+  派发）、调用点函数值（`Ty::Callable` 实参即类型检查的实例化结果）、闭包与
+  协程捕获计划、类型反射根与 dyn 擦除调整的 vtable 根。泛型体内以实例绑定
+  替换出的具体接收者重新执行闭世界 impl 选择，选中的 impl 稳定键写入实例
+  记录的 `selected_impls`。
+- `InstanceRecordV1` 即当前"每实例 code fragment"骨架：实例键、符号、callee、
+  selected_impls、vtable/metadata 根、外部符号、late comptime 依赖标记与
+  fragment 输入指纹；机器码、relocation 与 stack map 由阶段 52 及之后填充。
+- `PublicFunctionSummary`（28，schema 1）从已完成实例 SCC 投影
+  `PublicFunctionSummaryV1`：效果位集合（未知 bit 由 verifier 拒绝）、参数
+  read/write 位图、条件事实按规范排序；对象 key 为内容摘要。公共摘要经
+  `ActionInputs::add_public_summary` 进入前端 action key；磁盘 object 持久化
+  与跨 package 消费由阶段 71 接入，当前只在 session 内缓存。
+- 分析 query 23/27 已按 `MonoKey` 重键（schema 2），`WholeProgramAnalysis`
+  schema 3 的输入指纹包含实例图指纹；求解仍在定义级 HIR owner 上求固定点，
+  每个实例投影其定义的摘要——GIR 就绪后（阶段 26）升级为实例级求解输入。
 
 ## 单态化实例
 

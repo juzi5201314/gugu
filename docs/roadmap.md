@@ -172,10 +172,11 @@
   - 验收：只有 `proved` 才能删除边界检查或生成更强 placement；未知调用、别名、并发和预算耗尽保留原检查；分析不会替代类型推断或 impl 选择。
   - 接入证据：`LowerHir` 冻结前从 HIR 构造显式 CFG，传播完整 `AbstractState`（区间、差约束、初始化、别名、memory version、效果），循环 header widening 后一轮 narrowing；只有支配检查点的 `Proved` 写入 `RuntimeCheck.proof`，不删除 HIR 检查节点。`[T; N]`/`&[T]` 固有 `len` 降为 `Builtin::Len`。`WholeProgramAnalysis` schema 2，嵌套 `AnalysisSccSummary`(27)/`FunctionAnalysisSummary`(23)（身份为 `AnalysisOwnerKey`，SCC 内不经 query 读半初始化摘要）；`PublicFunctionSummary` 仍为空 map。规范切片 `v.len() > 10` + `for i in 0..n` + `break` 下标 `Proved`；写入/FFI/spawn/预算耗尽保留 `Unknown`。`analysis_semantics_revision = 2`，块迭代预算进入 policy 字节与 action key。249 项工作区测试通过（含字面量回归、归纳变量、len 收窄、失效、冷热一致与嵌套 query 投影）。
 
-- [ ] **阶段 24：实现闭世界可达性与单态化实例图**（复杂度：5）
+- [x] **阶段 24：实现闭世界可达性与单态化实例图**（复杂度：5）
   - 依赖：阶段 17、18、20、22、23。
   - 实现入口、runtime/std、测试/export/used、comptime 和 late closure 根；实现 `StableTypeKey`、`MonoKey`、SCC 实例闭合、公共函数摘要和每实例 code fragment。
   - 验收：删除项不进入实例图；递归泛型和 impl 选择在闭合后稳定；并行单态化结果按稳定 key 排序，跨 package 摘要不暴露 private state 或 session-local ID。
+  - 接入证据：`frontend::mono` 在 `LowerHir` compute 内、冻结前执行 `CollectMonoRoots`(12, schema 1) -> `InstantiateGir`(13, schema 1) -> 闭合 driver -> `WholeProgramAnalysis`(24, schema 3) -> `PublicFunctionSummary`(28, schema 1) 投影 -> proof 写回 -> freeze。`StableTypeKey`/`MonoKey` 按 GBC1 与 `gugu-mono-v1` 域编码，interner 保留规范字节并在 digest 冲突时停止；根覆盖入口/`#[used]`/导出/static 与 global asm 初始化器/harness `#[test]`/late comptime 依赖实例，lang item 根因 bootstrap 空源树当前为空集。driver 以按 key 摘要排序的 `BTreeSet` 稳定 pop，ancestry 预算（256 不同 key / 128 严格增长）报 `E0052`，实例上界报 `E0053`；同 key 递归复用实例节点只形成图环，`MonoId` 闭合后按 key 排序分配。实例边覆盖全部 dispatch 位点（含运算符与 `for`/`try`/下标协议派发，修复阶段 23 调用图缺口）、调用点函数值、闭包/协程捕获、类型反射与 dyn 擦除 vtable 根；泛型体内的 impl 选择在闭合时以替换后的具体接收者重新执行并写入 `selected_impls`。分析 query 23/27 重键为 `MonoKey`（schema 2），world schema 3 输入含实例图指纹，求解仍在定义级投影；公共摘要经 `ActionInputs::add_public_summary` 进入前端 action key。`ImagePlan` 报告 `mono_instance_count`/`mono_root_count`/`mono_graph_fingerprint`。const_arguments（HIR 未按调用点记录 comptime 实参）、机器码 fragment payload（阶段 52）、GIR 级实例求解（阶段 26）、摘要磁盘持久化（阶段 71）与 lang item 根为声明边界。267 项工作区测试通过（新增 18 项：根类别、死代码/裁项排除、泛型分实例、同 key 收敛、严格增长 `E0052`、vtable/元数据根、冷热与乱序一致、公共摘要范围与 action key 敏感性）；fmt/build 零警告；Linux CLI 真实 `check`/`build` 接受含泛型、导出、`#[used]`、dyn 与 trait 派发的 package，非法递归泛型退出码 1 且无镜像产物。
 
 - [ ] **阶段 25：实现 LateConst、FreezeTypeUniverse 与 TypeId**（复杂度：4）
   - 依赖：阶段 18、24。

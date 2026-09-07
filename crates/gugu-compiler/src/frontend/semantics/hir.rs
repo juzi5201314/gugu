@@ -8,7 +8,7 @@ use crate::{Diagnostic, DiagnosticCode, SourceMap};
 use std::collections::BTreeMap;
 mod body;
 mod declarations;
-mod identity;
+pub(crate) mod identity;
 mod query;
 #[cfg(test)]
 mod tests;
@@ -31,7 +31,7 @@ struct Builder<'m, 'a> {
     model: &'m Model<'a>,
     checked: &'m CheckedSemantics,
     sources: &'m SourceMap,
-    identities: Identities,
+    identities: &'m Identities,
     output: hir::Module,
     parameters: Vec<Vec<PendingParameter>>,
     type_intern: BTreeMap<hir::Type, hir::TypeId>,
@@ -47,7 +47,14 @@ pub(super) fn lower(
     entry: Option<CallableId>,
     dependency: &crate::query::DependencyFingerprint,
     queries: &crate::QueryEngine,
-) -> Result<(hir::Validated, super::analysis::AnalysisWorldV1), Vec<Diagnostic>> {
+) -> Result<
+    (
+        hir::Validated,
+        super::analysis::AnalysisWorldV1,
+        crate::frontend::mono::MonoWorldV1,
+    ),
+    Vec<Diagnostic>,
+> {
     query::lower(
         model, names, checked, sources, cfg, entry, dependency, queries,
     )
@@ -56,12 +63,12 @@ pub(super) fn lower(
 impl<'m, 'a> Builder<'m, 'a> {
     fn new(
         model: &'m Model<'a>,
-        names: &'m NameResolution,
+        identities: &'m Identities,
+        definitions: Vec<hir::Definition>,
         checked: &'m CheckedSemantics,
         sources: &'m SourceMap,
         entry: Option<CallableId>,
     ) -> Result<Self, Diagnostic> {
-        let (definitions, identities) = identity::collect(model, names, checked, sources)?;
         let entry = entry.map(|entry| identities.function(entry));
         let expansions = sources
             .expansions()

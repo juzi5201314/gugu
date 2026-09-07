@@ -71,6 +71,10 @@ impl CfgContext {
         Self::new(target, [], [], false, false, BTreeMap::new())
     }
 
+    /// 是否处于 test/bench harness 编译域。
+    pub(crate) fn harness(&self) -> bool {
+        self.test || self.bench
+    }
     pub(crate) fn target(&self) -> TargetName {
         self.target
     }

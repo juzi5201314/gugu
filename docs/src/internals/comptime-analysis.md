@@ -304,11 +304,15 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 （`Goto` / `If` / `Switch` / `Return` / 回边；`for i in 0..n` 的 header 绑定归纳变量），
 在程序点传播 `AbstractState`（可达、区间、稀疏差约束、初始化、别名类、memory version、
 效果）。循环 header 回边 widening，固定点后再做一轮 narrowing。`WholeProgramAnalysis`
-（query schema **2**）嵌套在 `LowerHir` compute 内，输入指纹取 proof 写回前的模块指纹；
-其内再嵌套 `AnalysisSccSummary`（27，schema 1）与 `FunctionAnalysisSummary`（23，schema 1）。
+（query schema **3**）嵌套在 `LowerHir` compute 内，输入指纹取 proof 写回前的模块指纹
+与实例图指纹；其内再嵌套 `AnalysisSccSummary`（27，schema 2）与
+`FunctionAnalysisSummary`（23，schema 2）。
 SCC 内部迭代发生在 `AnalysisSccSummary` 计算闭包的本地 map 中，不通过 query 读半初始化
-摘要；跨 SCC 的 callee 才能走 `FunctionAnalysisSummary` 投影。身份键是
-`AnalysisOwnerKey = (owner 表下标, DefId)`；阶段 24 只把该键换成 `MonoKey`。
+摘要；跨 SCC 的 callee 才能走 `FunctionAnalysisSummary` 投影。阶段 24 起，身份键已换成
+`MonoKey`（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)）：
+SCC（27，schema 2）与函数摘要（23，schema 2）按实例键缓存，world（24，schema 3）
+的输入指纹包含实例图指纹；求解仍在定义级 HIR owner 上求固定点，每个实例投影其
+定义的摘要，GIR 就绪后升级为实例级求解输入。
 证明只消费 HIR，不回看 `CheckedSemantics` 侧表，也不参与类型推断或 impl 选择。
 
 `[T; N]` 与 `&[T]` 的固有 `len` 由类型检查在用户 impl 之前命中，HIR 降为
@@ -335,13 +339,20 @@ SCC 内部迭代发生在 `AnalysisSccSummary` 计算闭包的本地 map 中，�
 别名效果、hidden state、`may_allocate` / `may_panic` / `may_suspend` / `may_call_unknown`）
 以及长度失效用的 `may_mutate_len`；从默认空效果单调精化，join 只加强“可能发生”。
 `Builtin::Len` 是纯函数。直接函数项调用按 `Resolved(Def)` 进入调用图与摘要查找，
-不把已知 callee 当成 unknown。`PublicFunctionSummary` 本阶段仍为空 map。
+不把已知 callee 当成 unknown。`PublicFunctionSummary`（28，schema 1）自阶段 24 起从已完成实例 SCC 投影
+`PublicFunctionSummaryV1`：公共函数实例产生内容寻址摘要对象，经
+`ActionInputs::add_public_summary` 进入前端 action key；私有函数不产生公共对象。
+interface place 只引用参数序号、返回值与公开 static 稳定键投影，私有状态折叠为
+hidden-state 标志；对象 key 只由可消费语义内容产生。磁盘 object 持久化与跨
+package 消费由阶段 71 接入。
 
 证明在 `LowerHir` 构建 Module 后、`Validated::freeze` 前写回 `RuntimeCheck.proof`；
-world 的输入指纹取 **proof 写回前** 的模块指纹，不混合证明输出。后端
-`ImagePlan.runtime_checks_elided_count` 统计 `Proved` 数量，供 smoke；**不改变**语言
-语义。`ActionInputs` 的 `macro_budget`、`analysis_policy` 与 `analysis_world` 指纹进入
-前端 action key。
+单态化闭合与公共摘要投影在同一冻结前窗口执行（`mono::close` -> `run_world` ->
+`summary::project` -> patch -> freeze）。world 的输入指纹取 **proof 写回前** 的模块
+指纹与实例图指纹，不混合证明输出。后端 `ImagePlan.runtime_checks_elided_count`
+统计 `Proved` 数量、`mono_instance_count`/`mono_root_count`/`mono_graph_fingerprint`
+暴露闭世界实例图，供 smoke；**不改变**语言语义。`ActionInputs` 的 `macro_budget`、
+`analysis_policy`、`analysis_world` 指纹与全部公共摘要对象键进入前端 action key。
 
 
 局部证明按 `MonoKey`、闭世界、目标、feature/cfg、runtime/标准库版本和分析策略缓存；公共
@@ -396,14 +407,16 @@ WholeProgramAnalysis(world_key, analysis_policy)
 手术）发生在 query 之外，由轮次驱动器在宿主模块上完成；同一份生成文本在解析闸门
 与拼接各解析一次，两次都使用主 lexer/parser，结果由确定性保证一致。
 
-阶段 23 起分析 query 在前端注册：
+阶段 23 起分析 query 在前端注册；阶段 24 起身份键升级为 `MonoKey`：
 
-- `AnalysisSccSummary`（编号 27，schema 1）的 key 是排序后的 `AnalysisOwnerKey`、
+- `AnalysisSccSummary`（编号 27，schema 2）的 key 是排序后的 `MonoKey` 集、
   analysis policy 与 proof 写回前的模块指纹；计算闭包内对 SCC 成员做摘要固定点，
   不经 query 读取本 SCC 的半初始化结果。
-- `FunctionAnalysisSummary`（编号 23，schema 1）从已完成的 SCC 摘要投影单个 owner。
-- `WholeProgramAnalysis`（编号 24，schema 2）按凝聚图拓扑请求上述嵌套 query，合并
-  为 world-local 证明与摘要；`PublicFunctionSummary` 仍为空。
+- `FunctionAnalysisSummary`（编号 23，schema 2）从已完成的 SCC 摘要投影单个实例。
+- `WholeProgramAnalysis`（编号 24，schema 3）按实例图凝聚拓扑请求上述嵌套 query，
+  合并为 world-local 证明与按实例排序的摘要。
+- `PublicFunctionSummary`（编号 28，schema 1）从已完成实例 SCC 投影公共函数的
+  `PublicFunctionSummaryV1`；对象键进入前端 action key。
 
 每个 GIR 改写 pass 必须在调试构建运行局部 verifier；跨阶段边界运行完整 verifier。verifier
 至少检查：
