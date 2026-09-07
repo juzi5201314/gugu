@@ -6,6 +6,7 @@ use super::policy::AnalysisPolicyV1;
 use super::transfer;
 use super::types::{FunctionSummary, ProofFact, ProofStatus, RuntimeCheckKey};
 use crate::frontend::hir::{self, ExprId, Module, Owner};
+use crate::frontend::mono::instantiate::CallSite;
 
 pub(crate) struct BodyResult {
     pub proofs: Vec<(ExprId, hir::CheckKind, ProofStatus)>,
@@ -18,7 +19,7 @@ pub(crate) fn analyze_owner(
     owner: &Owner,
     owner_index: u32,
     policy: AnalysisPolicyV1,
-    callees: &dyn Fn(hir::DefId) -> FunctionSummary,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> BodyResult {
     let cfg = cfg::build(owner);
     let locals = owner.locals.len();
@@ -95,7 +96,7 @@ fn iterate(
     inbound: &mut [AbstractState],
     rounds: u32,
     narrowing: bool,
-    callees: &dyn Fn(hir::DefId) -> FunctionSummary,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
     proofs: &mut Vec<ProofFact>,
     budget_exhausted: &mut bool,
 ) -> bool {
@@ -131,15 +132,21 @@ fn execute_block(
     cfg: &Cfg,
     id: BlockId,
     state: &mut AbstractState,
-    callees: &dyn Fn(hir::DefId) -> FunctionSummary,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) {
     let block = &cfg.blocks[id.index()];
     for inst in &block.instructions {
         match inst {
             Inst::Eval(expr) => transfer::eval_expr(module, owner, state, *expr, callees),
             Inst::Bind { local, value } => transfer::bind(state, *local, *value),
-            Inst::Assign { place, value } => transfer::assign(owner, state, *place, *value),
+            Inst::Assign { place, value } => transfer::assign(module, owner, state, *place, *value),
             Inst::Increment(local) => transfer::increment(state, *local),
+            Inst::Dispatch(dispatch) => transfer::apply_dispatch(owner, state, *dispatch, callees),
+            Inst::Initialize(statement) => transfer::apply_initializer(state, *statement, callees),
+            Inst::Yield => {
+                state.effects.suspend = true;
+                state.bump_heap();
+            }
         }
         if !state.reachable {
             return;
@@ -219,7 +226,7 @@ fn collect_proofs(
     owner_index: u32,
     cfg: &Cfg,
     inbound: &[AbstractState],
-    callees: &dyn Fn(hir::DefId) -> FunctionSummary,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> Vec<ProofFact> {
     use super::prove;
     let mut proofs = Vec::new();
@@ -243,9 +250,19 @@ fn collect_proofs(
                 match inst {
                     Inst::Bind { local, value } => transfer::bind(&mut state, *local, *value),
                     Inst::Assign { place, value } => {
-                        transfer::assign(owner, &mut state, *place, *value)
+                        transfer::assign(module, owner, &mut state, *place, *value)
                     }
                     Inst::Increment(local) => transfer::increment(&mut state, *local),
+                    Inst::Dispatch(dispatch) => {
+                        transfer::apply_dispatch(owner, &mut state, *dispatch, callees)
+                    }
+                    Inst::Initialize(statement) => {
+                        transfer::apply_initializer(&mut state, *statement, callees)
+                    }
+                    Inst::Yield => {
+                        state.effects.suspend = true;
+                        state.bump_heap();
+                    }
                     Inst::Eval(_) => {}
                 }
             }
@@ -259,7 +276,7 @@ fn summarize(
     owner: &Owner,
     cfg: &Cfg,
     inbound: &[AbstractState],
-    callees: &dyn Fn(hir::DefId) -> FunctionSummary,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> FunctionSummary {
     let mut summary = FunctionSummary::default();
     for (index, inbound_state) in inbound.iter().enumerate() {
@@ -283,13 +300,7 @@ fn summarize(
         summary.writes_hidden_state = true;
         summary.may_call_unknown = true;
     }
-    if owner
-        .expressions
-        .iter()
-        .any(|expression| unknown_call(owner, expression))
-    {
-        summary.may_call_unknown = true;
-    }
+    super::access::summarize(module, owner, callees, &mut summary);
     if !owner.checks.is_empty() {
         summary.may_panic = true;
     }
@@ -303,14 +314,8 @@ fn absorb_effects(summary: &mut FunctionSummary, state: &AbstractState) {
     summary.alias_foreign |= state.effects.foreign;
     summary.may_mutate_len |= state.effects.resource_publish;
     summary.writes_hidden_state |= state.effects.cow_seal;
-}
-
-fn unknown_call(owner: &Owner, expression: &hir::Expression) -> bool {
-    match &expression.kind {
-        hir::ExprKind::Call { target, .. } | hir::ExprKind::SpawnCall { target, .. } => {
-            !matches!(target, hir::CallTarget::Builtin(_))
-                && super::callgraph::callee_definition(owner, target).is_none()
-        }
-        _ => false,
-    }
+    summary.alias_heap |= state.effects.alias_heap;
+    summary.may_call_unknown |= state.effects.call_unknown;
+    summary.reads_hidden_state |= state.effects.reads_hidden;
+    summary.writes_hidden_state |= state.effects.writes_hidden;
 }

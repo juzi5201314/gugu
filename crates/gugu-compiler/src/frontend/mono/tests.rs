@@ -267,7 +267,7 @@ fn multi_module_input_order_does_not_change_graph() {
         ("helper.gg", "pub fn side() int = 1"),
     ];
     let first = compile(sources, &crate::QueryEngine::new());
-    let reversed: Vec<(&str, &str)> = sources.iter().rev().map(|s| *s).collect();
+    let reversed: Vec<(&str, &str)> = sources.iter().rev().copied().collect();
     let second = compile(&reversed, &crate::QueryEngine::new());
     assert_eq!(
         first.mono.graph_fingerprint, second.mono.graph_fingerprint,
@@ -297,11 +297,7 @@ fn public_summaries_cover_public_functions_only() {
         .iter()
         .map(|instance| hex(&digest_of(&instance.mono_key)))
         .collect();
-    let summary_keys: Vec<String> = world
-        .public_summaries
-        .keys()
-        .map(|key| key.clone())
-        .collect();
+    let summary_keys: Vec<String> = world.public_summaries.keys().cloned().collect();
     assert!(!summary_keys.is_empty(), "公共函数必须有摘要对象");
     let matched = api_keys
         .iter()
@@ -318,21 +314,8 @@ fn public_summaries_change_action_key() {
     let mut second = ActionInputs::new(b"c", "host", "host", "bin");
     second.add_public_summary("abc", [2u8; 32]);
     assert_ne!(first.key(), second.key());
-    let mut empty = ActionInputs::new(b"c", "host", "host", "bin");
+    let empty = ActionInputs::new(b"c", "host", "host", "bin");
     assert_ne!(first.key(), empty.key());
-}
-
-#[test]
-fn world_payload_has_no_session_local_ids() {
-    let source = "pub fn api() int = 1\nfn main() { _ = api() }";
-    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
-    let bytes = serde_json::to_vec(&output.mono).expect("world 序列化");
-    // 规范编码不含 owner_index / DefId 字样字段。
-    let text = String::from_utf8_lossy(&bytes);
-    assert!(
-        !text.contains("owner_index"),
-        "公共 world 不得携带 session-local 身份"
-    );
 }
 
 #[test]
@@ -377,4 +360,323 @@ fn empty_package_has_empty_mono_world() {
     ));
     assert!(compilation.is_success());
     assert!(compilation.image_plan().is_none());
+}
+
+#[test]
+fn function_values_retain_their_callable_instances() {
+    let source = "fn leaf() {}\nfn main() { let f: fn() = leaf\n f() }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    assert_eq!(instance_map(&output.mono)["main"], vec!["leaf"]);
+}
+
+#[test]
+fn nested_closure_owns_its_call_edges() {
+    let source = "fn leaf() {}\nfn main() { let f = fn() { leaf() }\n f() }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    let closure = output
+        .mono
+        .instances
+        .iter()
+        .find(|instance| instance.kind == super::keys::MonoKind::Closure)
+        .expect("闭包实例");
+    let leaf = output
+        .mono
+        .instances
+        .iter()
+        .find(|instance| instance.symbol == "leaf")
+        .unwrap();
+    assert_eq!(closure.callees, vec![digest_of(&leaf.mono_key)]);
+}
+
+#[test]
+fn async_and_local_static_bodies_are_reachable_instances() {
+    let source =
+        "fn init() int = 7\nfn main() { let job = async { static S: int = init()\n S }\n _ = job }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    let task = output
+        .mono
+        .instances
+        .iter()
+        .find(|instance| instance.kind == super::keys::MonoKind::Async)
+        .expect("协程 body 必须进入实例图");
+    let initializer = output
+        .mono
+        .instances
+        .iter()
+        .find(|instance| instance.kind == super::keys::MonoKind::StaticInit)
+        .expect("局部 static 初始化器必须进入实例图");
+    let init = output
+        .mono
+        .instances
+        .iter()
+        .find(|instance| instance.symbol == "init")
+        .unwrap();
+    assert!(task.callees.contains(&digest_of(&initializer.mono_key)));
+    assert_eq!(initializer.callees, vec![digest_of(&init.mono_key)]);
+}
+
+#[test]
+fn one_interface_retains_vtables_for_each_concrete_type() {
+    let source = "trait Shape { fn area(self) int }\nstruct A {}\nstruct B {}\nimpl Shape for A { fn area(self) int = 1 }\nimpl Shape for B { fn area(self) int = 2 }\nfn measure(shape: dyn Shape) int = shape.area()\nfn main() { _ = measure(A {})\n _ = measure(B {}) }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    let main = output
+        .mono
+        .instances
+        .iter()
+        .find(|instance| instance.symbol == "main")
+        .unwrap();
+    assert_eq!(main.vtable_roots.len(), 2);
+    assert_ne!(
+        main.vtable_roots[0].self_type,
+        main.vtable_roots[1].self_type
+    );
+}
+
+#[test]
+fn generic_trait_methods_bind_method_arguments_after_impl_selection() {
+    let source = "trait Identity { fn identity[T](self, value: T) T }\nstruct Point {}\nimpl Identity for Point { fn identity[U](self, value: U) U = value }\nfn call[X: Identity](x: X) int = x.identity::[int](1)\nfn main() { _ = call(Point {}) }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    assert_eq!(instance_map(&output.mono)["call"], vec!["identity"]);
+}
+
+#[test]
+fn concrete_instances_reselect_specialized_impls() {
+    let source = "trait Value { fn value(self) int }\nstruct Box[T] { value: T }\nfn generic() int = 1\nfn specialized() int = 2\nimpl Value for Box[T] { fn value(self) int = generic() }\nimpl Value for Box[int] { fn value(self) int = specialized() }\nfn read[T](value: Box[T]) int = value.value()\nfn main() { _ = read(Box { value: 1 }) }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    let reachable = symbols(&output.mono);
+    assert!(reachable.contains(&"specialized"));
+    assert!(!reachable.contains(&"generic"));
+}
+
+#[test]
+fn comptime_value_arguments_distinguish_instances() {
+    let source = "fn repeat(comptime n: int) int = n * 2\nfn main() { _ = repeat(1)\n _ = repeat(2)\n _ = repeat(1) }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    assert_eq!(
+        output
+            .mono
+            .instances
+            .iter()
+            .filter(|instance| instance.symbol == "repeat")
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn late_reflection_in_generic_body_uses_only_concrete_roots() {
+    let source =
+        "fn late[T](value: T) { _ = type_id[T]()\n _ = type_id_count() }\nfn main() { late(1) }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    assert_eq!(
+        output
+            .mono
+            .instances
+            .iter()
+            .filter(|instance| instance.symbol == "late")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn changed_source_with_shared_queries_matches_a_fresh_world() {
+    let queries = crate::QueryEngine::new();
+    let before = "fn a() {}\nfn b() {}\nfn main() { a() }";
+    let after = "fn a() {}\nfn b() {}\nfn main() { b() }";
+    let _ = compile(&[("main.gg", before)], &queries);
+    let warm = compile(&[("main.gg", after)], &queries);
+    let cold = compile(&[("main.gg", after)], &crate::QueryEngine::new());
+    assert_eq!(instance_map(&warm.mono)["main"], vec!["b"]);
+    assert_eq!(warm.mono, cold.mono);
+}
+
+#[test]
+fn public_summary_changes_with_effects_but_not_private_definition_ids() {
+    let source = "pub fn api() int = 1\nfn main() { _ = api() }";
+    let changed = "fn unrelated() {}\npub fn api() int = 1\nfn main() { _ = api() }";
+    let first = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    let second = compile(&[("main.gg", changed)], &crate::QueryEngine::new());
+    assert_eq!(first.mono.public_summaries, second.mono.public_summaries);
+    let queries = crate::QueryEngine::new();
+    let _ = compile(&[("main.gg", source)], &queries);
+    let panicking = "pub fn api() int = panic(\"stop\")\nfn main() { _ = api() }";
+    let warm = compile(&[("main.gg", panicking)], &queries);
+    let cold = compile(&[("main.gg", panicking)], &crate::QueryEngine::new());
+    assert_ne!(first.mono.public_summaries, cold.mono.public_summaries);
+    assert_eq!(warm.mono.public_summaries, cold.mono.public_summaries);
+}
+
+#[test]
+fn fragment_fingerprints_follow_body_and_instance_not_arena_ids() {
+    let source = "pub fn api() int = 1\nfn main() { _ = api() }";
+    let changed = "pub fn api() int = 2\nfn main() { _ = api() }";
+    let first = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    let second = compile(&[("main.gg", changed)], &crate::QueryEngine::new());
+    let fingerprint = |output: &FrontendOutput| {
+        output
+            .mono
+            .instances
+            .iter()
+            .find(|instance| instance.symbol == "api")
+            .unwrap()
+            .fragment_input_fingerprint
+    };
+    assert_ne!(fingerprint(&first), fingerprint(&second));
+    assert_eq!(
+        first.mono.public_summaries, second.mono.public_summaries,
+        "实现常量改变但接口效果未变，公共摘要内容身份应保持不变"
+    );
+}
+
+fn summary<'a>(
+    output: &'a FrontendOutput,
+    symbol: &str,
+) -> &'a crate::frontend::analysis::FunctionSummary {
+    let key = &output
+        .mono
+        .instances
+        .iter()
+        .find(|instance| instance.symbol == symbol)
+        .unwrap()
+        .mono_key;
+    &output
+        .analysis
+        .instances
+        .iter()
+        .find(|instance| &instance.mono_key == key)
+        .unwrap()
+        .summary
+}
+
+#[test]
+fn operator_dispatch_propagates_callee_effects_to_public_summary() {
+    let source = "struct Point { x: int }\nimpl Add[Point] for Point { type Output = Point\n fn add(self, rhs: Point) Point = panic(\"stop\") }\npub fn api() { let p = Point { x: 1 }\n _ = p + p }\nfn main() { api() }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    assert!(summary(&output, "api").may_panic);
+}
+
+#[test]
+fn public_summaries_preserve_hidden_state_effects() {
+    let source = "static SECRET: int = 1\npub fn read() int = SECRET\npub fn write() { SECRET = 2 }\nfn main() { _ = read()\n write() }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    assert!(summary(&output, "read").reads_hidden_state);
+    assert!(summary(&output, "write").writes_hidden_state);
+}
+
+#[test]
+fn each_generic_instance_consumes_its_own_selected_callee_summary() {
+    let source = "trait Value { fn value(self) int }\nstruct Box[T] { value: T }\nimpl Value for Box[T] { fn value(self) int = panic(\"stop\") }\nimpl Value for Box[int] { fn value(self) int = 1 }\nfn read[T](value: Box[T]) int = value.value()\nfn main() { _ = read(Box { value: 1 })\n _ = read(Box { value: true }) }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    let mut effects: Vec<_> = output
+        .mono
+        .instances
+        .iter()
+        .filter(|instance| instance.symbol == "read")
+        .map(|instance| {
+            output
+                .analysis
+                .instances
+                .iter()
+                .find(|record| record.mono_key == instance.mono_key)
+                .unwrap()
+                .summary
+                .may_panic
+        })
+        .collect();
+    effects.sort();
+    assert_eq!(effects, vec![false, true]);
+}
+
+#[test]
+fn exported_c_abi_changes_instance_identity() {
+    let gugu = compile(
+        &[(
+            "main.gg",
+            "#[used]\npub fn api(value: int) int = value\nfn main() {}",
+        )],
+        &crate::QueryEngine::new(),
+    );
+    let c = compile(
+        &[(
+            "main.gg",
+            "#[used]\npub extern \"C\" fn api(value: int) int = value\nfn main() {}",
+        )],
+        &crate::QueryEngine::new(),
+    );
+    let key = |output: &FrontendOutput| {
+        output
+            .mono
+            .instances
+            .iter()
+            .find(|instance| instance.symbol == "api")
+            .unwrap()
+            .mono_key
+            .clone()
+    };
+    assert_ne!(key(&gugu), key(&c));
+}
+
+#[test]
+fn public_parameter_effects_do_not_truncate_after_sixty_four() {
+    let parameters = (0..65)
+        .map(|index| format!("p{index}: int"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source = format!("#[used]\npub fn api({parameters}) int = p64\nfn main() {{}}");
+    let unused = format!("#[used]\npub fn api({parameters}) int = 0\nfn main() {{}}");
+    let read = compile(&[("main.gg", &source)], &crate::QueryEngine::new());
+    let unused = compile(&[("main.gg", &unused)], &crate::QueryEngine::new());
+    assert_eq!(summary(&read, "api").read_params, vec![64]);
+    assert_ne!(read.mono.public_summaries, unused.mono.public_summaries);
+}
+
+#[test]
+fn metadata_roots_change_closed_world_fingerprint() {
+    let first = compile(
+        &[("main.gg", "fn main() { _ = type_id[int]() }")],
+        &crate::QueryEngine::new(),
+    );
+    let second = compile(
+        &[("main.gg", "fn main() { _ = type_id[bool]() }")],
+        &crate::QueryEngine::new(),
+    );
+    assert_ne!(first.mono.metadata_roots, second.mono.metadata_roots);
+    assert_ne!(first.mono.graph_fingerprint, second.mono.graph_fingerprint);
+}
+
+#[test]
+fn packs_and_callable_bounds_preserve_all_concrete_edges() {
+    let source = "fn leaf() {}\nfn consume[Ts...](...args: Ts) { leaf() }\nfn apply[T, U, F: Fn(T) U](f: F, value: T) U = f(value)\nfn inc(value: int) int = value + 1\nfn main() { consume()\n consume(1, true)\n _ = apply(inc, 1) }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    assert_eq!(
+        output
+            .mono
+            .instances
+            .iter()
+            .filter(|instance| instance.symbol == "consume")
+            .count(),
+        2
+    );
+    let map = instance_map(&output.mono);
+    assert_eq!(map["consume"], vec!["leaf"]);
+    assert_eq!(map["apply"], vec!["inc"]);
+}
+
+#[test]
+fn caller_type_parameter_does_not_rebind_callee_parameter() {
+    let source = "fn inner[T](value: T) T = value\nfn outer[T](value: T) { _ = inner(value)\n _ = inner(false) }\nfn main() { outer(1) }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    let inner: Vec<_> = output
+        .mono
+        .instances
+        .iter()
+        .filter(|instance| instance.symbol == "inner")
+        .collect();
+    assert_eq!(inner.len(), 2);
+    assert_ne!(
+        inner[0].signature_and_abi_fingerprint,
+        inner[1].signature_and_abi_fingerprint
+    );
+    assert_eq!(instance_map(&output.mono)["outer"], vec!["inner", "inner"]);
 }

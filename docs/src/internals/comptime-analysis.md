@@ -304,23 +304,22 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 （`Goto` / `If` / `Switch` / `Return` / 回边；`for i in 0..n` 的 header 绑定归纳变量），
 在程序点传播 `AbstractState`（可达、区间、稀疏差约束、初始化、别名类、memory version、
 效果）。循环 header 回边 widening，固定点后再做一轮 narrowing。`WholeProgramAnalysis`
-（query schema **3**）嵌套在 `LowerHir` compute 内，输入指纹取 proof 写回前的模块指纹
-与实例图指纹；其内再嵌套 `AnalysisSccSummary`（27，schema 2）与
-`FunctionAnalysisSummary`（23，schema 2）。
-SCC 内部迭代发生在 `AnalysisSccSummary` 计算闭包的本地 map 中，不通过 query 读半初始化
-摘要；跨 SCC 的 callee 才能走 `FunctionAnalysisSummary` 投影。阶段 24 起，身份键已换成
-`MonoKey`（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)）：
-SCC（27，schema 2）与函数摘要（23，schema 2）按实例键缓存，world（24，schema 3）
-的输入指纹包含实例图指纹；求解仍在定义级 HIR owner 上求固定点，每个实例投影其
-定义的摘要，GIR 就绪后升级为实例级求解输入。
+（query schema **4**）嵌套在 `LowerHir` compute 内，输入指纹取 proof 写回前的模块指纹
+与实例图指纹；其内再嵌套 `AnalysisSccSummary`（27，schema 3）与
+`FunctionAnalysisSummary`（23，schema 3）。身份键为 `MonoKey`
+（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)）。
+SCC 按实例图的凝聚顺序求解，每个实例具有独立固定点状态；解释器共享定义的 HIR
+操作树，但调用点消费该实例实际选中的 callee 摘要。运算符、迭代、try、格式化与局部
+static 初始化器的调用效果均进入分析。函数 query 只投影已完成 SCC，不通过 query
+读取半初始化成员。共享 HIR 的检查必须在所有可达实例中都得到相同安全证明才可省略。
 证明只消费 HIR，不回看 `CheckedSemantics` 侧表，也不参与类型推断或 impl 选择。
 
 `[T; N]` 与 `&[T]` 的固有 `len` 由类型检查在用户 impl 之前命中，HIR 降为
 `Builtin::Len`；数组长度为类型中的 `N`，切片长度进入 `Len` 值槽，可被 `v.len() > 10`
 一类比较收窄。
 
-固定 **`analysis_semantics_revision = 2`**、**`PublicSummaryPolicyV1` 占位 revision = 1**
-（默认 SCC 迭代 32、块迭代 256）。SCC 轮次或块迭代超预算 → 摘要回退保守值、
+固定 **`analysis_semantics_revision = 3`**、**公共摘要策略 revision = 2**
+（默认 SCC 迭代 32、块迭代 256）。SCC 轮次或块迭代超预算 → 摘要取保守值、
 `budget_exhausted = true`，检查保持 `Unknown`；**不是**用户 `Error`。
 
 证明读检查表达式所在程序点、当前 memory version 上的状态：
@@ -409,14 +408,14 @@ WholeProgramAnalysis(world_key, analysis_policy)
 
 阶段 23 起分析 query 在前端注册；阶段 24 起身份键升级为 `MonoKey`：
 
-- `AnalysisSccSummary`（编号 27，schema 2）的 key 是排序后的 `MonoKey` 集、
-  analysis policy 与 proof 写回前的模块指纹；计算闭包内对 SCC 成员做摘要固定点，
+- `AnalysisSccSummary`（编号 27，schema 3）的 key 是排序后的 `MonoKey` 集、
+  analysis policy 与 world 输入指纹；计算闭包内对具体实例做摘要固定点，
   不经 query 读取本 SCC 的半初始化结果。
-- `FunctionAnalysisSummary`（编号 23，schema 2）从已完成的 SCC 摘要投影单个实例。
-- `WholeProgramAnalysis`（编号 24，schema 3）按实例图凝聚拓扑请求上述嵌套 query，
-  合并为 world-local 证明与按实例排序的摘要。
-- `PublicFunctionSummary`（编号 28，schema 1）从已完成实例 SCC 投影公共函数的
-  `PublicFunctionSummaryV1`；对象键进入前端 action key。
+- `FunctionAnalysisSummary`（编号 23，schema 3）从已完成的 SCC 摘要投影单个实例。
+- `WholeProgramAnalysis`（编号 24，schema 4）按实例图凝聚拓扑请求上述嵌套 query，
+  合并为 world-local 共同证明与按实例排序的摘要。
+- `PublicFunctionSummary`（编号 28，schema 2）以已完成 world 的结果指纹隔离生产者输入，
+  投影不含私有定义的效果与参数序号；内容对象键独立于 body 和稠密定义编号，并进入前端 action key。
 
 每个 GIR 改写 pass 必须在调试构建运行局部 verifier；跨阶段边界运行完整 verifier。verifier
 至少检查：

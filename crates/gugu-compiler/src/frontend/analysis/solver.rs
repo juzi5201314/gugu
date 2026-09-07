@@ -1,7 +1,4 @@
-//! 过程内分析编排与 proof 写回。
-//!
-//! 阶段 24 起 SCC 成员是 `MonoKey` 实例；求解仍在定义级 HIR owner 上求固定点，
-//! 每个实例投影其定义的摘要（GIR 就绪后升级为实例级求解）。
+//! 以具体实例为固定点成员；共享 HIR 上的证明取全部可达实例的共同结论。
 
 use super::interpret;
 use super::policy::AnalysisPolicyV1;
@@ -9,92 +6,68 @@ use super::types::{
     AnalysisOwnerKey, AnalysisWorldV1, FunctionSummary, InstanceSummaryRecord, ProofFact,
     RuntimeCheckKey, SccSummaryV1, WORLD_SCHEMA_VERSION, sort_proofs,
 };
-use crate::frontend::hir::{self, Module};
-use std::collections::BTreeMap;
+use crate::frontend::hir::Module;
+use crate::frontend::mono::instantiate::CallSite;
 
 /// 一个实例 SCC 的求解成员：实例 key 与其定义的 owner 身份。
 #[derive(Clone)]
 pub(crate) struct SccMember {
     pub mono_key: Vec<u8>,
     pub owner: AnalysisOwnerKey,
+    pub calls: Vec<(CallSite, usize)>,
 }
 
 pub(crate) fn analyze_scc(
     module: &Module,
     members: &[SccMember],
+    component: &[usize],
     policy: AnalysisPolicyV1,
-    callees: &dyn Fn(hir::DefId) -> FunctionSummary,
+    callees: &dyn Fn(usize) -> FunctionSummary,
 ) -> SccSummaryV1 {
-    // 定义级求解：同一定义的多个实例共享一次解释。
-    let mut owners: Vec<AnalysisOwnerKey> = Vec::new();
-    for member in members {
-        if !owners.contains(&member.owner) {
-            owners.push(member.owner);
-        }
-    }
-    owners.sort_by_key(|owner| owner.owner_index);
-    let mut summaries: BTreeMap<u32, FunctionSummary> = owners
-        .iter()
-        .map(|owner| (owner.owner_index, FunctionSummary::default()))
-        .collect();
+    let mut summaries = vec![FunctionSummary::default(); component.len()];
     let mut budget_exhausted = false;
+    let mut converged = false;
     for _ in 0..policy.max_scc_iterations {
         let mut changed = false;
-        for owner in &owners {
-            let lookup = |def: hir::DefId| {
-                owners
-                    .iter()
-                    .find(|item| item.definition == def)
-                    .and_then(|item| summaries.get(&item.owner_index).cloned())
-                    .unwrap_or_else(|| callees(def))
-            };
-            let result = interpret::analyze_owner(
+        for (position, &index) in component.iter().enumerate() {
+            let result = analyze_member(
                 module,
-                &module.owners[owner.owner_index as usize],
-                owner.owner_index,
+                &members[index],
+                component,
+                &summaries,
                 policy,
-                &lookup,
+                callees,
             );
             budget_exhausted |= result.budget_exhausted;
-            let slot = summaries.get_mut(&owner.owner_index).expect("summary");
-            if *slot != result.summary {
-                *slot = result.summary.clone();
-                changed = true;
-            }
+            let mut next = summaries[position].clone();
+            next.join_with(&result.summary);
+            changed |= next != summaries[position];
+            summaries[position] = next;
         }
-        if !changed || budget_exhausted {
+        if !changed {
+            converged = true;
+            break;
+        }
+        if budget_exhausted {
             break;
         }
     }
+    budget_exhausted |= !converged;
     if budget_exhausted {
-        for summary in summaries.values_mut() {
-            summary.join_with(&FunctionSummary::conservative());
-        }
+        summaries.fill(FunctionSummary::conservative());
     }
     let mut proofs = Vec::new();
-    for owner in &owners {
-        let lookup = |def: hir::DefId| {
-            owners
-                .iter()
-                .find(|item| item.definition == def)
-                .and_then(|item| summaries.get(&item.owner_index).cloned())
-                .unwrap_or_else(|| callees(def))
-        };
-        let result = interpret::analyze_owner(
-            module,
-            &module.owners[owner.owner_index as usize],
-            owner.owner_index,
-            policy,
-            &lookup,
-        );
+    for &index in component {
+        let member = &members[index];
+        let result = analyze_member(module, member, component, &summaries, policy, callees);
         for (expression, kind, status) in result.proofs {
             proofs.push(ProofFact {
                 key: RuntimeCheckKey {
-                    owner_index: owner.owner_index,
+                    owner_index: member.owner.owner_index,
                     expression,
                     kind,
                 },
-                status: if budget_exhausted {
+                status: if budget_exhausted || result.budget_exhausted {
                     super::types::ProofStatus::Unknown
                 } else {
                     status
@@ -103,14 +76,12 @@ pub(crate) fn analyze_scc(
         }
     }
     sort_proofs(&mut proofs);
-    let instances = members
+    let instances = component
         .iter()
-        .map(|member| InstanceSummaryRecord {
-            mono_key: member.mono_key.clone(),
-            summary: summaries
-                .get(&member.owner.owner_index)
-                .cloned()
-                .unwrap_or_else(FunctionSummary::conservative),
+        .zip(summaries)
+        .map(|(&index, summary)| InstanceSummaryRecord {
+            mono_key: members[index].mono_key.clone(),
+            summary,
         })
         .collect();
     SccSummaryV1 {
@@ -118,6 +89,35 @@ pub(crate) fn analyze_scc(
         proofs,
         budget_exhausted,
     }
+}
+
+fn analyze_member(
+    module: &Module,
+    member: &SccMember,
+    component: &[usize],
+    summaries: &[FunctionSummary],
+    policy: AnalysisPolicyV1,
+    callees: &dyn Fn(usize) -> FunctionSummary,
+) -> interpret::BodyResult {
+    debug_assert_eq!(component.len(), summaries.len());
+    let lookup = |site| {
+        let position = member
+            .calls
+            .binary_search_by_key(&site, |(site, _)| *site)
+            .ok()?;
+        let target = member.calls[position].1;
+        Some(match component.binary_search(&target) {
+            Ok(position) => summaries[position].clone(),
+            Err(_) => callees(target),
+        })
+    };
+    interpret::analyze_owner(
+        module,
+        &module.owners[usize::try_from(member.owner.owner_index).expect("owner 编号适配宿主")],
+        member.owner.owner_index,
+        policy,
+        &lookup,
+    )
 }
 
 pub(crate) fn world_from_sccs(
@@ -135,7 +135,15 @@ pub(crate) fn world_from_sccs(
     instances.sort_by(|left, right| left.mono_key.cmp(&right.mono_key));
     instances.dedup_by(|left, right| left.mono_key == right.mono_key);
     sort_proofs(&mut proofs);
-    proofs.dedup_by(|left, right| left.key == right.key);
+    proofs.dedup_by(|candidate, retained| {
+        if candidate.key != retained.key {
+            return false;
+        }
+        if candidate.status != retained.status {
+            retained.status = super::types::ProofStatus::Unknown;
+        }
+        true
+    });
     let runtime_checks_elided_count = proofs
         .iter()
         .filter(|fact| fact.status == super::types::ProofStatus::Proved)

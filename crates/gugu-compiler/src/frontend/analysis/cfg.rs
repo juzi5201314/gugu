@@ -20,6 +20,9 @@ pub(crate) enum Inst {
     Bind { local: LocalId, value: ExprId },
     Assign { place: ExprId, value: ExprId },
     Increment(LocalId),
+    Dispatch(u32),
+    Initialize(u32),
+    Yield,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -71,6 +74,7 @@ struct Builder<'a> {
     blocks: Vec<Block>,
     current: BlockId,
     loops: Vec<LoopFrame>,
+    tries: Vec<(ScopeId, BlockId)>,
     emitted: Vec<bool>,
 }
 
@@ -80,6 +84,7 @@ pub(crate) fn build(owner: &Owner) -> Cfg {
         blocks: Vec::new(),
         current: BlockId(0),
         loops: Vec::new(),
+        tries: Vec::new(),
         emitted: vec![false; owner.expressions.len()],
     };
     let entry = builder.fresh();
@@ -208,10 +213,15 @@ impl<'a> Builder<'a> {
                 let value = *value;
                 self.emit_exit(id, target, value);
             }
-            ExprKind::TryExit { target, value, .. } => {
-                let target = *target;
-                let value = Some(*value);
-                self.emit_exit(id, target, value);
+            ExprKind::Try { body, .. } => self.emit_try(id, *body),
+            ExprKind::TryExit {
+                value,
+                target,
+                branch,
+                from_error,
+                ..
+            } => {
+                self.emit_try_exit(id, *value, *target, *branch, *from_error);
             }
             ExprKind::Binary {
                 operation,
@@ -280,9 +290,17 @@ impl<'a> Builder<'a> {
                     self.switch_to(join);
                 }
             }
-            StatementKind::Assign { place, value, .. } => {
+            StatementKind::Assign {
+                place,
+                value,
+                dispatch,
+                ..
+            } => {
                 self.emit_expr(place);
                 self.emit_expr(value);
+                if let Some(dispatch) = dispatch {
+                    self.push(Inst::Dispatch(dispatch));
+                }
                 self.push(Inst::Assign { place, value });
             }
             StatementKind::Expression(value) => self.emit_expr(value),
@@ -290,7 +308,8 @@ impl<'a> Builder<'a> {
                 let body = self.owner.cleanup[action as usize].body;
                 self.emit_expr(body);
             }
-            StatementKind::Static { .. } | StatementKind::Yield => {}
+            StatementKind::Static { .. } => self.push(Inst::Initialize(id.0)),
+            StatementKind::Yield => self.push(Inst::Yield),
         }
     }
 
@@ -376,8 +395,57 @@ impl<'a> Builder<'a> {
         self.push(Inst::Eval(id));
     }
 
+    fn emit_try(&mut self, id: ExprId, body: ExprId) {
+        let exit = self.fresh();
+        self.tries
+            .push((self.owner.expressions[id.index()].scope, exit));
+        self.emit_expr(body);
+        self.goto(exit, false);
+        self.tries.pop();
+        self.switch_to(exit);
+        self.emitted[id.index()] = true;
+        self.push(Inst::Eval(id));
+    }
+
+    fn emit_try_exit(
+        &mut self,
+        id: ExprId,
+        value: ExprId,
+        target: hir::ExitTarget,
+        branch: Option<u32>,
+        from_error: Option<u32>,
+    ) {
+        self.emit_expr(value);
+        if let Some(dispatch) = branch {
+            self.push(Inst::Dispatch(dispatch));
+        }
+        let success = self.fresh();
+        let failure = self.fresh();
+        self.terminate(Terminator::Switch {
+            value,
+            arms: vec![success, failure],
+        });
+        self.switch_to(failure);
+        if let Some(dispatch) = from_error {
+            self.push(Inst::Dispatch(dispatch));
+        }
+        self.emit_exit(id, target, None);
+        self.switch_to(success);
+        self.emitted[id.index()] = true;
+        self.push(Inst::Eval(id));
+    }
+
     fn emit_for(&mut self, id: ExprId, pattern: hir::PatternId, value: ExprId, body: ExprId) {
         self.emit_expr(value);
+        let ExprKind::For {
+            into_iter, next, ..
+        } = self.owner.expressions[id.index()].kind
+        else {
+            unreachable!("emit_for 只接收 for 表达式");
+        };
+        if let Some(dispatch) = into_iter {
+            self.push(Inst::Dispatch(dispatch));
+        }
         let iv = match self.owner.patterns[pattern.index()].kind {
             PatternKind::Bind(local) => Some(local),
             _ => None,
@@ -421,9 +489,37 @@ impl<'a> Builder<'a> {
             self.loops.pop();
             self.switch_to(exit);
         } else {
-            self.emit_loop(id, None, body);
+            self.emit_iterator_loop(id, value, body, next);
             return;
         }
+        self.emitted[id.index()] = true;
+        self.push(Inst::Eval(id));
+    }
+
+    fn emit_iterator_loop(&mut self, id: ExprId, value: ExprId, body: ExprId, next: Option<u32>) {
+        let header = self.fresh();
+        let loop_body = self.fresh();
+        let exit = self.fresh();
+        self.goto(header, false);
+        self.switch_to(header);
+        if let Some(dispatch) = next {
+            self.push(Inst::Dispatch(dispatch));
+        }
+        // 非 range 迭代器允许零次迭代，后继必须保留为可达路径。
+        self.terminate(Terminator::Switch {
+            value,
+            arms: vec![loop_body, exit],
+        });
+        self.loops.push(LoopFrame {
+            scope: self.owner.expressions[id.index()].scope,
+            latch: header,
+            exit,
+        });
+        self.switch_to(loop_body);
+        self.emit_expr(body);
+        self.goto(header, true);
+        self.loops.pop();
+        self.switch_to(exit);
         self.emitted[id.index()] = true;
         self.push(Inst::Eval(id));
     }
@@ -464,8 +560,18 @@ impl<'a> Builder<'a> {
         self.emitted[id.index()] = true;
         self.push(Inst::Eval(id));
         match target {
-            hir::ExitTarget::Return | hir::ExitTarget::Try(_) => {
+            hir::ExitTarget::Return => {
                 self.terminate(Terminator::Return);
+            }
+            hir::ExitTarget::Try(scope) => {
+                let exit = self
+                    .tries
+                    .iter()
+                    .rev()
+                    .find(|(target, _)| *target == scope)
+                    .map(|(_, exit)| *exit)
+                    .expect("try 退出目标属于包围的 try scope");
+                self.goto(exit, false);
             }
             hir::ExitTarget::Break(scope) => {
                 if let Some(frame) = self.loops.iter().rev().find(|frame| frame.scope == scope) {

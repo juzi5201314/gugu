@@ -2,6 +2,7 @@
 //!
 //! 证明消费 HIR 程序点上的 AbstractState；跨 owner 摘要按调用图 SCC 求解，
 //! 超预算时回退保守值并保留全部检查。
+mod access;
 pub(crate) mod callgraph;
 pub(crate) mod cfg;
 mod domain;
@@ -21,7 +22,7 @@ pub(crate) use types::{
     AnalysisWorldV1, FunctionSummary, ProofStatus, ReturnRelation, WORLD_SCHEMA_VERSION,
 };
 
-pub(crate) const ANALYSIS_SEMANTICS_REVISION: u32 = 2;
+pub(crate) const ANALYSIS_SEMANTICS_REVISION: u32 = 3;
 
 pub(crate) fn empty_world() -> AnalysisWorldV1 {
     AnalysisWorldV1 {

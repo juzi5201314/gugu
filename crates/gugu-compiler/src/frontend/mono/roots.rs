@@ -9,13 +9,13 @@ use super::instantiate::WalkEntry;
 use super::keys::{MonoContext, MonoInterner, MonoKey};
 use crate::Diagnostic;
 use crate::frontend::hir;
-use crate::frontend::semantics::{DefRef, ReflectionKind};
+use crate::frontend::semantics::DefRef;
 use crate::query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// `CollectMonoRoots` 结果 schema。
-pub(crate) const ROOTS_SCHEMA: u32 = 1;
+pub(crate) const ROOTS_SCHEMA: u32 = 2;
 
 /// 一个根实例种子：key、工作条目与类别。
 #[derive(Clone)]
@@ -61,7 +61,7 @@ pub(crate) fn collect(
     let key = QueryKey::new(
         QueryKind::CollectMonoRoots,
         ROOTS_SCHEMA,
-        context.module.input_fingerprint.to_vec(),
+        super::collect::input_fingerprint(context),
     );
     let mut fresh = None;
     let result = queries.compute(key, |_| {
@@ -75,15 +75,14 @@ pub(crate) fn collect(
         fresh = Some(seeds);
         Ok((bytes, Vec::new()))
     });
+    let result = result.map_err(|error| {
+        crate::frontend::semantics::query::restore_errors(error, context.sources)
+    })?;
     if let Some(seeds) = fresh {
         return Ok((roots_v1(&seeds), seeds));
     }
-    let payload: Vec<(u32, RootCategoryV1)> = result
-        .map_err(|error| vec![restore_error(error.to_string())])
-        .and_then(|result| {
-            serde_json::from_slice(result.payload())
-                .map_err(|_| vec![restore_error("CollectMonoRoots 缓存 schema 不合法")])
-        })?;
+    let payload: Vec<(u32, RootCategoryV1)> = serde_json::from_slice(result.payload())
+        .map_err(|_| vec![restore_error("CollectMonoRoots 缓存 schema 不合法")])?;
     let seeds = payload
         .into_iter()
         .map(|(definition, category)| {
@@ -128,10 +127,10 @@ fn compute_roots(
     }
     // 导出与 used：链接属性表。
     for linkage in &context.module.linkage {
-        let category = if linkage.used {
-            RootCategoryV1::Used
-        } else if linkage.export_name.is_some() || is_pub_export(context, linkage.definition) {
+        let category = if linkage.export_name.is_some() {
             RootCategoryV1::Export
+        } else if linkage.used {
+            RootCategoryV1::Used
         } else {
             continue;
         };
@@ -178,28 +177,8 @@ fn compute_roots(
             }
         }
     }
-    // late comptime 依赖实例：使用 `type_id_count()`/`TypeAsInt` 的 owner
-    // 是 late 闭包根，保证其静态 callee 进入闭世界（LateConstKey 由阶段 25 物化）。
-    for body in &context.checked.bodies {
-        if body.reflections.iter().any(|reflection| {
-            matches!(
-                reflection.kind,
-                ReflectionKind::TypeIdCount | ReflectionKind::TypeAsInt
-            )
-        }) && let Some(definition) = context.definition_of(&body.definition)
-        {
-            push(
-                context,
-                interner,
-                &mut seeds,
-                definition,
-                RootCategoryV1::LateClosure,
-            )?;
-        }
-    }
-    // lang item 根：runtime/std 源树当前为 bootstrap 空单元，登记表为空集。
-    // comptime 显式引用的 metadata 类型根由实例遍历中的 `TypeId`/`TypeName`
-    // 反射统一登记，不在此重复收集。
+    // late 依赖随可达的具体 owner 收集，不能把泛型声明当作空实参根。
+    // runtime/std 源树当前为 bootstrap 空单元，lang item 根集合为空。
     Ok(seeds.into_values().collect())
 }
 
@@ -232,25 +211,6 @@ fn push(
         }
     }
     Ok(())
-}
-
-/// 判定 pub extern "C" 有体函数（C 导出）。
-fn is_pub_export(context: &MonoContext<'_>, definition: hir::DefId) -> bool {
-    let Some(reference) = context.definition_ref[definition.index()] else {
-        return false;
-    };
-    let module = &context.model.modules[reference.module];
-    let Some(item) = module.arena.items.get(reference.item.0 as usize) else {
-        return false;
-    };
-    if item.visibility != crate::frontend::ast::Visibility::Pub {
-        return false;
-    }
-    let crate::frontend::ast::ItemKind::Function(function) = item.kind else {
-        return false;
-    };
-    let declaration = &module.arena.fns[function.0 as usize];
-    declaration.extern_abi.is_some() && declaration.body != crate::frontend::ast::FnBody::None
 }
 
 /// 判定测试/基准标记属性。

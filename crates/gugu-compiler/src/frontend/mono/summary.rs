@@ -8,15 +8,15 @@ use super::keys::{MonoKind, hash_domain};
 use crate::frontend::analysis::{
     ANALYSIS_SEMANTICS_REVISION, AnalysisWorldV1, FunctionSummary, ReturnRelation,
 };
-use crate::query::{QueryEngine, QueryKey, QueryKind};
+use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
 use crate::target::TargetName;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// `PublicFunctionSummaryV1` schema。
-pub(crate) const PUBLIC_SCHEMA: u32 = 1;
+pub(crate) const PUBLIC_SCHEMA: u32 = 2;
 /// 公共摘要策略 revision（`PublicSummaryPolicyV1`）。
-pub(crate) const PUBLIC_POLICY_REVISION: u32 = 1;
+pub(crate) const PUBLIC_POLICY_REVISION: u32 = 2;
 
 /// 无条件效果位集合；未知 bit 必须被 verifier 拒绝。
 pub(crate) const EFFECT_MAY_ALLOCATE: u16 = 1;
@@ -43,10 +43,11 @@ pub(crate) struct PublicFunctionSummaryV1 {
     /// 实例 `MonoKey` 规范字节。
     pub mono_key: Vec<u8>,
     pub signature_and_abi_fingerprint: [u8; 32],
-    /// 接口 place：读取的参数序号位图。
-    pub read_params: u64,
-    /// 接口 place：写入的参数序号位图。
-    pub write_params: u64,
+    pub parameter_count: u32,
+    /// 接口 place：读取的参数序号，严格递增。
+    pub read_params: Vec<u32>,
+    /// 接口 place：写入的参数序号，严格递增。
+    pub write_params: Vec<u32>,
     /// 无条件效果位集合（`KNOWN_EFFECTS` 内）。
     pub effects: u16,
     /// 条件事实（按 (kind, parameter) 排序）。
@@ -62,16 +63,58 @@ pub(crate) struct PublicConditionalFactV1 {
 impl PublicFunctionSummaryV1 {
     /// 内容寻址对象 key：`gugu-analysis-summary-v1` 域摘要。
     pub(crate) fn object_key(&self) -> [u8; 32] {
-        let bytes = serde_json::to_vec(self).expect("公共摘要序列化");
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&self.schema_revision.to_le_bytes());
+        bytes.extend_from_slice(&self.analysis_semantics_revision.to_le_bytes());
+        bytes.extend_from_slice(&self.public_policy_revision.to_le_bytes());
+        encode_bytes(&mut bytes, self.target_semantics.as_bytes());
+        encode_bytes(&mut bytes, &self.mono_key);
+        bytes.extend_from_slice(&self.signature_and_abi_fingerprint);
+        bytes.extend_from_slice(&self.parameter_count.to_le_bytes());
+        for parameters in [&self.read_params, &self.write_params] {
+            bytes.extend_from_slice(
+                &u64::try_from(parameters.len())
+                    .expect("参数数量适配 GBC1")
+                    .to_le_bytes(),
+            );
+            for parameter in parameters {
+                bytes.extend_from_slice(&parameter.to_le_bytes());
+            }
+        }
+        bytes.extend_from_slice(&self.effects.to_le_bytes());
+        bytes.extend_from_slice(
+            &u64::try_from(self.conditional_facts.len())
+                .expect("条件事实数量适配 GBC1")
+                .to_le_bytes(),
+        );
+        for fact in &self.conditional_facts {
+            bytes.extend_from_slice(&fact.kind.to_le_bytes());
+            bytes.extend_from_slice(&fact.parameter.to_le_bytes());
+        }
         hash_domain("gugu-analysis-summary-v1", &bytes)
     }
 
     /// verifier：未知效果 bit、乱序条件事实与空实例键都拒绝。
     pub(crate) fn verify(&self) -> Result<(), crate::Diagnostic> {
+        if self.schema_revision != PUBLIC_SCHEMA
+            || self.analysis_semantics_revision != ANALYSIS_SEMANTICS_REVISION
+            || self.public_policy_revision != PUBLIC_POLICY_REVISION
+        {
+            return Err(invalid("公共摘要 schema 或分析策略版本不受支持"));
+        }
+        for parameters in [&self.read_params, &self.write_params] {
+            if parameters.windows(2).any(|pair| pair[0] >= pair[1])
+                || parameters
+                    .iter()
+                    .any(|parameter| *parameter >= self.parameter_count)
+            {
+                return Err(invalid("公共摘要参数 place 未规范排序或超出签名边界"));
+            }
+        }
         if self.effects & !KNOWN_EFFECTS != 0 {
             return Err(invalid("公共摘要含未知效果位"));
         }
-        if self.mono_key.is_empty() {
+        if self.mono_key.len() < 32 {
             return Err(invalid("公共摘要缺少实例键"));
         }
         if self
@@ -81,11 +124,9 @@ impl PublicFunctionSummaryV1 {
         {
             return Err(invalid("公共摘要条件事实未按规范排序"));
         }
-        if self
-            .conditional_facts
-            .iter()
-            .any(|fact| fact.kind != FACT_RETURN_LEN_EQ_PARAM)
-        {
+        if self.conditional_facts.iter().any(|fact| {
+            fact.kind != FACT_RETURN_LEN_EQ_PARAM || fact.parameter >= self.parameter_count
+        }) {
             return Err(invalid("公共摘要含未登记的条件事实"));
         }
         Ok(())
@@ -94,11 +135,12 @@ impl PublicFunctionSummaryV1 {
 
 /// 为闭世界全部公共函数实例投影公共摘要；返回 action key 用的映射。
 ///
-/// 只有已完成实例 SCC 的摘要可被投影；`MonoKey` + 双 revision 构成 query key。
+/// 只有已完成实例 SCC 的摘要可被投影；生产者输入参与 query 身份，内容独立寻址。
 pub(crate) fn project(
     target: TargetName,
     mono: &super::collect::MonoWorldV1,
     world: &AnalysisWorldV1,
+    analysis_dependency: &DependencyFingerprint,
     queries: &QueryEngine,
 ) -> Result<BTreeMap<String, [u8; 32]>, Vec<crate::Diagnostic>> {
     let mut summaries = BTreeMap::new();
@@ -106,30 +148,32 @@ pub(crate) fn project(
         if instance.kind != MonoKind::Function || !instance.public {
             continue;
         }
-        let Some(summary) = world
+        let index = world
             .instances
-            .iter()
-            .find(|record| record.mono_key == instance.mono_key)
-            .map(|record| record.summary.clone())
-        else {
-            continue;
-        };
+            .binary_search_by(|record| record.mono_key.cmp(&instance.mono_key))
+            .map_err(|_| vec![invalid("公共函数缺少已完成的实例摘要")])?;
+        let summary = &world.instances[index].summary;
         let payload = build_payload(
             target,
             &instance.mono_key,
-            instance.fragment_input_fingerprint,
-            &summary,
+            instance.signature_and_abi_fingerprint,
+            instance.parameter_count,
+            summary,
         );
         let key = QueryKey::new(
             QueryKind::PublicFunctionSummary,
             PUBLIC_SCHEMA,
-            public_key_bytes(&instance.mono_key),
+            public_key_bytes(&instance.mono_key, analysis_dependency.fingerprint()),
         );
         let mut fresh = None;
         let result = queries
-            .compute(key, |_| {
+            .compute(key, |context| {
+                context.record_dependency(
+                    analysis_dependency.key().clone(),
+                    analysis_dependency.fingerprint(),
+                );
                 let bytes = serde_json::to_vec(&payload).expect("公共摘要序列化");
-                fresh = Some(payload.clone());
+                fresh = Some(payload);
                 Ok((bytes, Vec::new()))
             })
             .map_err(|error| vec![invalid(error.to_string())])?;
@@ -137,6 +181,15 @@ pub(crate) fn project(
             .or_else(|| serde_json::from_slice(result.payload()).ok())
             .ok_or_else(|| vec![invalid("PublicFunctionSummary 缓存不合法")])?;
         payload.verify().map_err(|error| vec![error])?;
+        if payload.mono_key != instance.mono_key
+            || payload.target_semantics != target.to_string()
+            || payload.signature_and_abi_fingerprint != instance.signature_and_abi_fingerprint
+            || payload.parameter_count != instance.parameter_count
+        {
+            return Err(vec![invalid(
+                "公共摘要与生产者签名、target 或实例身份不一致",
+            )]);
+        }
         let digest = payload.object_key();
         summaries.insert(hex(&digest_of(&instance.mono_key)), digest);
     }
@@ -147,6 +200,7 @@ fn build_payload(
     target: TargetName,
     mono_key: &[u8],
     signature_fingerprint: [u8; 32],
+    parameter_count: u32,
     summary: &FunctionSummary,
 ) -> PublicFunctionSummaryV1 {
     let mut effects = 0u16;
@@ -178,19 +232,38 @@ fn build_payload(
         target_semantics: target.to_string(),
         mono_key: mono_key.to_vec(),
         signature_and_abi_fingerprint: signature_fingerprint,
-        read_params: summary.read_params,
-        write_params: summary.write_params,
+        parameter_count,
+        read_params: if summary.unknown_param_access {
+            (0..parameter_count).collect()
+        } else {
+            summary.read_params.clone()
+        },
+        write_params: if summary.unknown_param_access {
+            (0..parameter_count).collect()
+        } else {
+            summary.write_params.clone()
+        },
         effects,
         conditional_facts,
     }
 }
 
-fn public_key_bytes(mono_key: &[u8]) -> Vec<u8> {
+fn public_key_bytes(mono_key: &[u8], producer: [u8; 32]) -> Vec<u8> {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(&(ANALYSIS_SEMANTICS_REVISION as u64).to_le_bytes());
-    bytes.extend_from_slice(&(PUBLIC_POLICY_REVISION as u64).to_le_bytes());
-    bytes.extend_from_slice(mono_key);
+    bytes.extend_from_slice(&ANALYSIS_SEMANTICS_REVISION.to_le_bytes());
+    bytes.extend_from_slice(&PUBLIC_POLICY_REVISION.to_le_bytes());
+    bytes.extend_from_slice(&producer);
+    encode_bytes(&mut bytes, mono_key);
     bytes
+}
+
+fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
+    out.extend_from_slice(
+        &u64::try_from(bytes.len())
+            .expect("对象字段长度适配 GBC1")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(bytes);
 }
 
 fn digest_of(mono_key: &[u8]) -> [u8; 32] {

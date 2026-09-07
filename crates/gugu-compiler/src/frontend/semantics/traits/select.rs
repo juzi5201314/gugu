@@ -4,11 +4,7 @@ use super::{Implementation, Member, MemberKind, Method, Obligation, TraitRef};
 use crate::Diagnostic;
 use std::collections::BTreeMap;
 
-pub(in super::super) fn matches(
-    pattern: &Ty,
-    concrete: &Ty,
-    bindings: &mut BTreeMap<String, Ty>,
-) -> bool {
+pub(crate) fn matches(pattern: &Ty, concrete: &Ty, bindings: &mut BTreeMap<String, Ty>) -> bool {
     if let Ty::Param(name) = pattern {
         if let Some(previous) = bindings.get(name) {
             return previous == concrete;
@@ -37,6 +33,9 @@ pub(in super::super) fn matches(
         (Ty::Result(a, e), Ty::Result(b, f)) => matches(a, b, bindings) && matches(e, f, bindings),
         (Ty::Function(a, r), Ty::Function(b, s)) => {
             match_list(a, b, bindings) && matches(r, s, bindings)
+        }
+        (Ty::Callable(a, aa, sa), Ty::Callable(b, ab, sb)) => {
+            a == b && match_list(aa, ab, bindings) && matches(sa, sb, bindings)
         }
         (Ty::Projection(a, t, n), Ty::Projection(b, u, m)) => {
             t.id == u.id

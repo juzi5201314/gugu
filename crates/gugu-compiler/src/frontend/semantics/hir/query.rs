@@ -116,17 +116,18 @@ fn form(
     // 分析的输入身份取 proof 写回前的模块指纹；proof 字段不参与
     // 字面量/类型/调用图事实，patch 前后分析结果一致。
     let pre_freeze_fingerprint = module_fingerprint(module);
-    let mut mono_world = mono::close(
+    let context = mono::keys::MonoContext::new(
         model,
         checked,
         identities,
         module,
+        sources,
         cfg.target(),
         cfg.harness(),
-        queries,
-    )
-    .map_err(|errors| super::super::query::store_errors(&errors))?;
-    let world = analysis::run_world(
+    );
+    let mut mono_world = mono::close(&context, queries)
+        .map_err(|errors| super::super::query::store_errors(&errors))?;
+    let (world, analysis_dependency) = analysis::run_world(
         module,
         pre_freeze_fingerprint,
         &mono_world,
@@ -138,8 +139,14 @@ fn form(
         sources,
     )
     .map_err(|errors| super::super::query::store_errors(&errors))?;
-    let summaries = mono::summary::project(cfg.target(), &mono_world, &world, queries)
-        .map_err(|errors| super::super::query::store_errors(&errors))?;
+    let summaries = mono::summary::project(
+        cfg.target(),
+        &mono_world,
+        &world,
+        &analysis_dependency,
+        queries,
+    )
+    .map_err(|errors| super::super::query::store_errors(&errors))?;
     mono_world.public_summaries = summaries;
     analysis::patch_module(module, &world);
     Ok((world, mono_world))

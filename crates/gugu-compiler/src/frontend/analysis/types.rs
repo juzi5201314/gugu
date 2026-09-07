@@ -6,7 +6,7 @@
 use crate::frontend::hir::{CheckKind, ExprId};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const WORLD_SCHEMA_VERSION: u32 = 3;
+pub(crate) const WORLD_SCHEMA_VERSION: u32 = 4;
 
 /// 检查的证明状态：`Proved` 表示 HIR 局部事实可证安全，`Disproved` 表示 HIR 局部
 /// 事实可证必然失败，`Unknown` 表示局部事实不足、必须保留检查。
@@ -50,8 +50,10 @@ pub(crate) struct FunctionSummary {
     pub return_lo: Option<i64>,
     pub return_hi: Option<i64>,
     pub return_relations: Vec<ReturnRelation>,
-    pub read_params: u64,
-    pub write_params: u64,
+    pub read_params: Vec<u32>,
+    pub write_params: Vec<u32>,
+    /// 无体或未知调用可访问全部实参；投影时按实际参数数量展开。
+    pub unknown_param_access: bool,
     pub alias_heap: bool,
     pub alias_foreign: bool,
     pub reads_hidden_state: bool,
@@ -71,8 +73,9 @@ impl FunctionSummary {
             return_lo: None,
             return_hi: None,
             return_relations: Vec::new(),
-            read_params: u64::MAX,
-            write_params: u64::MAX,
+            read_params: Vec::new(),
+            write_params: Vec::new(),
+            unknown_param_access: true,
             alias_heap: true,
             alias_foreign: true,
             reads_hidden_state: true,
@@ -98,8 +101,13 @@ impl FunctionSummary {
         if self.return_relations != other.return_relations {
             self.return_relations.clear();
         }
-        self.read_params |= other.read_params;
-        self.write_params |= other.write_params;
+        self.read_params.extend_from_slice(&other.read_params);
+        self.read_params.sort_unstable();
+        self.read_params.dedup();
+        self.write_params.extend_from_slice(&other.write_params);
+        self.write_params.sort_unstable();
+        self.write_params.dedup();
+        self.unknown_param_access |= other.unknown_param_access;
         self.alias_heap |= other.alias_heap;
         self.alias_foreign |= other.alias_foreign;
         self.reads_hidden_state |= other.reads_hidden_state;

@@ -77,28 +77,3 @@ fn connect(
         scc.push(component);
     }
 }
-
-/// 调用目标解析出的静态 callee 定义；动态/内建调用为 `None`。
-pub(crate) fn callee_definition(
-    owner: &crate::frontend::hir::Owner,
-    target: &crate::frontend::hir::CallTarget,
-) -> Option<crate::frontend::hir::DefId> {
-    match target {
-        crate::frontend::hir::CallTarget::Dispatch(index) => {
-            owner.dispatches[*index as usize].function
-        }
-        crate::frontend::hir::CallTarget::Value(value) => {
-            match owner.expressions[value.index()].kind {
-                crate::frontend::hir::ExprKind::Resolved(crate::frontend::hir::Res::Def(
-                    definition,
-                ))
-                | crate::frontend::hir::ExprKind::Resolved(
-                    crate::frontend::hir::Res::Associated { definition, .. },
-                ) => Some(definition),
-                _ => None,
-            }
-        }
-        crate::frontend::hir::CallTarget::Builtin(_)
-        | crate::frontend::hir::CallTarget::Constructor { .. } => None,
-    }
-}

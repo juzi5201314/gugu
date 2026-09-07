@@ -1,19 +1,19 @@
 //! 指令与终结符的抽象状态转移、assume 与长度/别名失效。
 
-use super::callgraph;
 use super::domain::{AbstractState, AliasClass, Interval, Relation, ValueKey};
 use super::types::FunctionSummary;
 use crate::frontend::ast::{BinOp, UnOp};
 use crate::frontend::hir::{
     self, CallTarget, ExprId, ExprKind, Literal, LocalId, Module, Owner, Res, Type,
 };
+use crate::frontend::mono::instantiate::CallSite;
 
 pub(crate) fn eval_expr(
     module: &Module,
     owner: &Owner,
     state: &mut AbstractState,
     id: ExprId,
-    callees: &dyn Fn(hir::DefId) -> FunctionSummary,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) {
     if !state.reachable {
         return;
@@ -36,6 +36,12 @@ pub(crate) fn eval_expr(
                 module.definitions[definition.index()].kind,
                 hir::DefinitionKind::Static | hir::DefinitionKind::LocalStatic
             ) {
+                state.effects.reads_hidden = true;
+            }
+            if matches!(
+                module.definitions[definition.index()].kind,
+                hir::DefinitionKind::Static | hir::DefinitionKind::LocalStatic
+            ) {
                 for alias in &mut state.alias {
                     if matches!(*alias, AliasClass::Heap) {
                         *alias = AliasClass::Static(definition.0);
@@ -52,11 +58,25 @@ pub(crate) fn eval_expr(
             state.range(ValueKey::Expr(*value)).neg(),
         ),
         ExprKind::Binary {
+            dispatch: Some(dispatch),
+            ..
+        } => {
+            apply_dispatch(owner, state, *dispatch, callees);
+            state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
+            if callees(CallSite::Dispatch(*dispatch)).is_some() {
+                apply_local_effects(module, owner, state, id);
+            } else {
+                apply_effects(owner, state, id);
+            }
+        }
+        ExprKind::Binary {
             operation,
             left,
             right,
-            ..
-        } => eval_binary(state, id, *operation, *left, *right),
+            dispatch: None,
+        } => {
+            eval_binary(state, id, *operation, *left, *right);
+        }
         ExprKind::Range { start, end } => {
             state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
             let _ = (start, end);
@@ -82,15 +102,42 @@ pub(crate) fn eval_expr(
             });
         }
         ExprKind::Call { target, .. } | ExprKind::SpawnCall { target, .. } => {
-            apply_call(owner, state, id, target, callees);
+            apply_call(module, owner, state, id, target, callees);
             if matches!(kind, ExprKind::SpawnCall { .. }) {
                 state.effects.suspend = true;
+                state.effects.allocate = true;
                 state.bump_heap();
             }
         }
-        ExprKind::Index { base, .. } => {
+        ExprKind::Index {
+            base, read, write, ..
+        } => {
+            for dispatch in read.iter().chain(write) {
+                apply_dispatch(owner, state, *dispatch, callees);
+            }
             seed_array_len(module, owner, state, *base);
             state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
+            apply_effects(owner, state, id);
+        }
+        ExprKind::Try { from_value, .. } => {
+            if let Some(dispatch) = from_value {
+                apply_dispatch(owner, state, *dispatch, callees);
+            }
+            apply_effects(owner, state, id);
+        }
+        ExprKind::String { parts } => {
+            for part in &owner.string_parts[usize::try_from(parts.start)
+                .expect("HIR range 适配宿主")
+                ..usize::try_from(parts.end).expect("HIR range 适配宿主")]
+            {
+                if let hir::StringPart::Value {
+                    dispatch: Some(dispatch),
+                    ..
+                } = part
+                {
+                    apply_dispatch(owner, state, *dispatch, callees);
+                }
+            }
             apply_effects(owner, state, id);
         }
         ExprKind::If {
@@ -295,17 +342,42 @@ pub(crate) fn increment(state: &mut AbstractState, local: LocalId) {
     state.set_range(ValueKey::Local(local), next);
 }
 
-pub(crate) fn assign(owner: &Owner, state: &mut AbstractState, place: ExprId, value: ExprId) {
-    if let Some(local) = place_local(owner, place) {
-        bind(state, local, value);
+pub(crate) fn assign(
+    module: &Module,
+    owner: &Owner,
+    state: &mut AbstractState,
+    place: ExprId,
+    value: ExprId,
+) {
+    if let ExprKind::Resolved(Res::Local(local)) = owner.expressions[place.index()].kind {
         state.bump_local(local);
         bind(state, local, value);
     } else {
+        state.effects.alias_heap = true;
+        state.effects.resource_publish = true;
+        state.effects.writes_hidden = true;
         state.bump_heap();
     }
-    let ty = &owner.expressions[place.index()];
-    if ty.effects.0 & hir::Effects::WRITE != 0 {
-        state.effects.cow_seal |= matches_string_write(owner, place);
+    let base = match owner.expressions[place.index()].kind {
+        ExprKind::Index { base, .. } => base,
+        _ => place,
+    };
+    state.effects.cow_seal |= matches!(
+        module.types[owner.expression_types[base.index()].index()],
+        Type::String
+    );
+    if let ExprKind::Resolved(Res::Def(definition)) = owner.expressions[place.index()].kind
+        && matches!(
+            module.definitions[definition.index()].kind,
+            hir::DefinitionKind::Static | hir::DefinitionKind::LocalStatic
+        )
+    {
+        state.effects.writes_hidden = true;
+    }
+    if let Some(local) = place_local(owner, place)
+        && owner.captures.iter().any(|capture| capture.local == local)
+    {
+        state.effects.writes_hidden = true;
     }
 }
 
@@ -333,23 +405,83 @@ pub(crate) fn assume_iv(state: &mut AbstractState, local: LocalId, end: ExprId, 
 }
 
 fn apply_call(
+    module: &Module,
     owner: &Owner,
     state: &mut AbstractState,
     id: ExprId,
     target: &CallTarget,
-    callees: &dyn Fn(hir::DefId) -> FunctionSummary,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) {
-    let summary = match callgraph::callee_definition(owner, target) {
-        Some(definition) => callees(definition),
-        None => match target {
-            CallTarget::Builtin(_) => FunctionSummary::default(),
-            _ => FunctionSummary::conservative(),
-        },
-    };
+    if let Some(summary) = callees(CallSite::Expression(id.0)) {
+        apply_summary(state, &summary);
+        // HIR 的调用效果是类型检查期上界；闭合后由选中实例取代，不再重复并入旧上界。
+        apply_local_effects(module, owner, state, id);
+    } else {
+        if !matches!(
+            target,
+            CallTarget::Builtin(_) | CallTarget::Constructor { .. }
+        ) {
+            apply_summary(state, &FunctionSummary::conservative());
+        }
+        apply_effects(owner, state, id);
+    }
+}
+
+fn apply_local_effects(module: &Module, owner: &Owner, state: &mut AbstractState, id: ExprId) {
+    let adjustments = &owner.expressions[id.index()].adjustments;
+    for adjustment in &owner.adjustments[usize::try_from(adjustments.start)
+        .expect("HIR range 适配宿主")
+        ..usize::try_from(adjustments.end).expect("HIR range 适配宿主")]
+    {
+        if let hir::Adjustment::Erase(ty) = adjustment
+            && matches!(module.types[ty.index()], Type::Dyn(_))
+        {
+            state.effects.allocate = true;
+        }
+    }
+    if owner.foreign_calls.iter().any(|call| call.expression == id) {
+        state.bump_foreign();
+    }
+    state.effects.panic |= owner.checks.iter().any(|check| check.expression == id);
+}
+
+pub(crate) fn apply_dispatch(
+    owner: &Owner,
+    state: &mut AbstractState,
+    dispatch: u32,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+) {
+    let summary = callees(CallSite::Dispatch(dispatch)).unwrap_or_else(|| {
+        let dispatch = &owner.dispatches[usize::try_from(dispatch).expect("dispatch 编号适配宿主")];
+        if dispatch.function.is_none() && !dispatch.dynamic {
+            FunctionSummary::default()
+        } else {
+            FunctionSummary::conservative()
+        }
+    });
+    apply_summary(state, &summary);
+}
+
+pub(crate) fn apply_initializer(
+    state: &mut AbstractState,
+    statement: u32,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+) {
+    apply_summary(
+        state,
+        &callees(CallSite::Initializer(statement)).unwrap_or_else(FunctionSummary::conservative),
+    );
+}
+
+fn apply_summary(state: &mut AbstractState, summary: &FunctionSummary) {
     state.effects.panic |= summary.may_panic;
     state.effects.allocate |= summary.may_allocate;
     state.effects.suspend |= summary.may_suspend;
     state.effects.foreign |= summary.alias_foreign;
+    state.effects.alias_heap |= summary.alias_heap;
+    state.effects.call_unknown |= summary.may_call_unknown;
+    state.effects.reads_hidden |= summary.reads_hidden_state;
+    state.effects.writes_hidden |= summary.writes_hidden_state;
     if summary.may_call_unknown
         || summary.alias_foreign
         || summary.alias_heap
@@ -357,10 +489,7 @@ fn apply_call(
     {
         state.bump_heap();
     }
-    if summary.may_mutate_len {
-        state.effects.resource_publish = true;
-    }
-    apply_effects(owner, state, id);
+    state.effects.resource_publish |= summary.may_mutate_len;
 }
 
 fn apply_effects(owner: &Owner, state: &mut AbstractState, id: ExprId) {
@@ -420,18 +549,12 @@ pub(crate) fn len_key(owner: &Owner, id: ExprId) -> ValueKey {
 pub(crate) fn place_local(owner: &Owner, id: ExprId) -> Option<LocalId> {
     match &owner.expressions[id.index()].kind {
         ExprKind::Resolved(Res::Local(local)) => Some(*local),
-        ExprKind::Field { base, .. }
-        | ExprKind::Unary {
+        ExprKind::Unary {
             operation: UnOp::Deref,
             value: base,
         } => place_local(owner, *base),
         _ => None,
     }
-}
-
-fn matches_string_write(owner: &Owner, place: ExprId) -> bool {
-    let _ = (owner, place);
-    true
 }
 
 fn is_integer_ty(module: &Module, owner: &Owner, id: ExprId) -> bool {

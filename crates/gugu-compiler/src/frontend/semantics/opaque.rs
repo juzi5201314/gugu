@@ -32,10 +32,10 @@ pub(super) struct Bounds {
     pub(super) functions: Vec<Ty>,
 }
 impl Model<'_> {
-    pub(super) fn apit_name(id: u32) -> String {
+    pub(crate) fn apit_name(id: u32) -> String {
         format!("$apit:{id}")
     }
-    pub(super) fn apits(&self, owner: CallableId) -> impl Iterator<Item = u32> + '_ {
+    pub(crate) fn apits(&self, owner: CallableId) -> impl Iterator<Item = u32> + '_ {
         self.opaques
             .definitions
             .iter()

@@ -161,6 +161,10 @@ pub(crate) struct EffectFacts {
     pub foreign: bool,
     pub cow_seal: bool,
     pub resource_publish: bool,
+    pub alias_heap: bool,
+    pub call_unknown: bool,
+    pub reads_hidden: bool,
+    pub writes_hidden: bool,
 }
 
 impl EffectFacts {
@@ -171,6 +175,10 @@ impl EffectFacts {
         self.foreign |= other.foreign;
         self.cow_seal |= other.cow_seal;
         self.resource_publish |= other.resource_publish;
+        self.alias_heap |= other.alias_heap;
+        self.call_unknown |= other.call_unknown;
+        self.reads_hidden |= other.reads_hidden;
+        self.writes_hidden |= other.writes_hidden;
     }
 }
 

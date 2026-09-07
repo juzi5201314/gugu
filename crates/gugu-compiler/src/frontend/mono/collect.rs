@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `MonoWorldV1` schema。
-pub(crate) const MONO_SCHEMA: u32 = 1;
+pub(crate) const MONO_SCHEMA: u32 = 2;
 
 /// 闭合后的实例图：实例按 key 摘要排序，`MonoId` 为排序后下标。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -47,6 +47,9 @@ pub(crate) struct InstanceSummaryV1 {
     pub kind: MonoKind,
     pub symbol: String,
     pub public: bool,
+    pub parameter_count: u32,
+    pub signature_and_abi_fingerprint: [u8; 32],
+    pub call_targets: Vec<(super::instantiate::CallSite, [u8; 32])>,
     /// callee `MonoKey` 摘要（排序去重）。
     pub callees: Vec<[u8; 32]>,
     pub selected_impls: Vec<[u8; 32]>,
@@ -146,17 +149,15 @@ impl<'a, 'b> Driver<'a, 'b> {
         Ok(())
     }
 
-    /// 迭代 driver：pop 最小摘要 key -> 实例化 -> 未见 callee 入队。
+    /// 迭代 driver：按稳定摘要顺序取出实例并登记尚未发现的 callee。
     ///
     /// 同 key 递归复用相同实例节点（`queued`/`done` 判定），只形成图边；
     /// 新 key 的 ancestry = 发现者 ancestry + 发现者链接。
     fn run(&mut self) -> Result<(), Vec<Diagnostic>> {
-        while let Some(digest) = self.pending.iter().next().copied() {
-            self.pending.remove(&digest);
+        while let Some(digest) = self.pending.pop_first() {
             let (entry, ancestry) = self
                 .queued
-                .get(&digest)
-                .cloned()
+                .remove(&digest)
                 .ok_or_else(|| vec![missing_entry()])?;
             let record =
                 instantiate::instantiate(self.context, self.interner, self.queries, &entry)?;
@@ -165,7 +166,7 @@ impl<'a, 'b> Driver<'a, 'b> {
                 definition: entry.key.definition,
                 type_structure: arguments_structure(&arguments),
             };
-            for callee in record.callees.clone() {
+            for callee in &record.callees {
                 self.enqueue_callee(&digest, &ancestry, &link, callee)?;
             }
             if self.done.len() >= u32::MAX as usize {
@@ -181,54 +182,41 @@ impl<'a, 'b> Driver<'a, 'b> {
         parent: &[u8; 32],
         ancestry: &[AncestryLink],
         link: &AncestryLink,
-        callee: super::instantiate::CalleeSeed,
+        callee: &super::instantiate::CalleeSeed,
     ) -> Result<(), Vec<Diagnostic>> {
         let digest = callee.key.digest();
-        if self.done.contains_key(&digest) || self.queued.contains_key(&digest) {
+        if digest == *parent || self.done.contains_key(&digest) || self.queued.contains_key(&digest)
+        {
             return Ok(());
         }
         let mut chain = ancestry.to_vec();
         chain.push(link.clone());
         check_ancestry(&chain, &callee.key, arguments_structure(&callee.arguments))
             .map_err(|error| vec![error])?;
-        let entry = walk_entry(self.context, callee.key, callee.callable, &callee.arguments)
-            .map_err(|error| vec![error])?;
-        let _ = parent;
+        let entry = walk_entry(
+            self.context,
+            callee.key.clone(),
+            callee.definition,
+            &callee.arguments,
+        )
+        .map_err(|error| vec![error])?;
         self.pending.insert(digest);
         self.queued.insert(digest, (entry, chain));
         Ok(())
     }
 
-    /// 实例图：节点为 `MonoId`（done 的摘要排序下标）。
-    #[expect(dead_code, reason = "保留给阶段 26 GIR 与阶段 71 缓存接线复用")]
-    fn instance_graph(&self) -> Vec<Vec<usize>> {
-        let index_of: BTreeMap<[u8; 32], usize> = self
-            .done
-            .keys()
-            .enumerate()
-            .map(|(index, digest)| (*digest, index))
-            .collect();
-        let mut graph = vec![Vec::new(); self.done.len()];
-        for (index, record) in self.done.values().enumerate() {
-            for callee in &record.callees {
-                if let Some(&target) = index_of.get(&callee.key.digest()) {
-                    graph[index].push(target);
-                }
-            }
-        }
-        for edges in &mut graph {
-            edges.sort_unstable();
-            edges.dedup();
-        }
-        graph
-    }
-
-    fn world(&mut self, input_fingerprint: [u8; 32]) -> MonoWorldV1 {
+    fn world(self, input_fingerprint: [u8; 32]) -> MonoWorldV1 {
         let digests: Vec<[u8; 32]> = self.done.keys().copied().collect();
-        let records: Vec<InstanceRecordV1> = self.done.values().cloned().collect();
-        let instances: Vec<_> = records.iter().map(summary_of).collect();
-        let mut metadata_roots: BTreeSet<Vec<u8>> = BTreeSet::new();
         let mut externals: BTreeSet<String> = BTreeSet::new();
+        let instances: Vec<_> = self
+            .done
+            .into_values()
+            .map(|record| {
+                externals.extend(record.externals.iter().cloned());
+                summary_of(record)
+            })
+            .collect();
+        let mut metadata_roots: BTreeSet<Vec<u8>> = BTreeSet::new();
         for instance in &instances {
             metadata_roots.extend(instance.metadata_roots.iter().cloned());
             metadata_roots.extend(
@@ -238,32 +226,32 @@ impl<'a, 'b> Driver<'a, 'b> {
                     .map(|root| root.self_type.clone()),
             );
         }
-        externals.extend(
-            records
-                .iter()
-                .flat_map(|record| record.externals.iter().cloned()),
-        );
-        let mut hash = blake3::Hasher::new_derive_key("gugu-mono-graph-v1");
-        for instance in &instances {
-            hash.update(&instance.mono_key);
-            for callee in &instance.callees {
-                hash.update(callee);
-            }
-        }
         let roots: Vec<[u8; 32]> = digests
             .iter()
             .filter(|digest| self.root_digests.contains(*digest))
             .copied()
             .collect();
-        let root_categories = roots
+        let root_categories: Vec<_> = roots
             .iter()
             .map(|digest| {
                 self.root_categories
                     .get(digest)
                     .copied()
-                    .unwrap_or(RootCategoryV1::LateClosure)
+                    .expect("每个 root digest 都已登记类别")
             })
             .collect();
+        let mut hash = blake3::Hasher::new_derive_key("gugu-mono-graph-v2");
+        serde_json::to_writer(
+            &mut hash,
+            &(
+                &roots,
+                &root_categories,
+                &instances,
+                &metadata_roots,
+                &externals,
+            ),
+        )
+        .expect("闭世界图仅包含可规范序列化的稳定身份与实例事实");
         MonoWorldV1 {
             schema: MONO_SCHEMA,
             input_fingerprint,
@@ -278,7 +266,8 @@ impl<'a, 'b> Driver<'a, 'b> {
     }
 }
 
-fn summary_of(record: &InstanceRecordV1) -> InstanceSummaryV1 {
+fn summary_of(record: InstanceRecordV1) -> InstanceSummaryV1 {
+    let fragment_input_fingerprint = record.fragment_input_fingerprint();
     let mut callees: Vec<[u8; 32]> = record
         .callees
         .iter()
@@ -286,23 +275,26 @@ fn summary_of(record: &InstanceRecordV1) -> InstanceSummaryV1 {
         .collect();
     callees.sort_unstable();
     callees.dedup();
-    let mut vtable_roots = record.vtable_roots.clone();
+    let mut vtable_roots = record.vtable_roots;
     vtable_roots.sort();
     vtable_roots.dedup();
-    let mut metadata_roots = record.metadata_roots.clone();
+    let mut metadata_roots = record.metadata_roots;
     metadata_roots.sort();
     metadata_roots.dedup();
     InstanceSummaryV1 {
-        mono_key: record.mono_key.clone(),
+        mono_key: record.mono_key,
         kind: record.kind,
-        symbol: record.symbol.clone(),
+        symbol: record.symbol,
         public: record.public,
+        parameter_count: record.parameter_count,
+        signature_and_abi_fingerprint: record.signature_and_abi_fingerprint,
+        call_targets: record.call_targets,
         callees,
-        selected_impls: record.selected_impls.clone(),
+        selected_impls: record.selected_impls,
         vtable_roots,
         metadata_roots,
         uses_late_comptime: record.uses_late_comptime,
-        fragment_input_fingerprint: record.fragment_input_fingerprint(),
+        fragment_input_fingerprint,
     }
 }
 

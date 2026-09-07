@@ -279,20 +279,6 @@ fn reassignment_invalidates_slice_length_proof() {
 }
 
 #[test]
-fn callee_mutate_len_invalidates_index() {
-    use crate::frontend::analysis::ProofStatus;
-    use crate::frontend::hir::CheckKind;
-    let source = "fn dirty(xs: &[int]) { xs = xs }\nfn f(v: &[int]) {\n if v.len() > 10 {\n dirty(v)\n _ = v[0]\n }\n }\nfn main() { let a = [0; 16]\n f(&a) }";
-    let statuses = proof_statuses(&[("main.gg", source)]);
-    assert!(
-        statuses.iter().any(|(kind, status)| {
-            matches!(kind, CheckKind::Bounds { slice: false }) && *status == ProofStatus::Unknown
-        }),
-        "可能改长度的 callee 之后必须保留检查：{statuses:?}"
-    );
-}
-
-#[test]
 fn analysis_policy_block_iterations_change_action_key() {
     use crate::project::ActionInputs;
     let mut first = ActionInputs::new(b"c", "host", "host", "bin");
@@ -338,13 +324,26 @@ fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
         .iter()
         .enumerate()
         .map(|(index, owner)| super::solver::SccMember {
-            mono_key: output.mono.instances[0].mono_key.clone(),
+            mono_key: output
+                .mono
+                .instances
+                .iter()
+                .find(|instance| {
+                    instance
+                        .mono_key
+                        .starts_with(&module.definitions[owner.definition.index()].key)
+                })
+                .expect("测试函数的实例已闭合")
+                .mono_key
+                .clone(),
             owner: super::callgraph::callable_key_at(module, index),
+            calls: Vec::new(),
         })
         .collect::<Vec<_>>();
     let mut policy = AnalysisPolicyV1::default();
     policy.max_block_iterations = 1;
-    let scc = super::solver::analyze_scc(module, &keys, policy, &|_| {
+    let component: Vec<_> = (0..keys.len()).collect();
+    let scc = super::solver::analyze_scc(module, &keys, &component, policy, &|_| {
         super::FunctionSummary::default()
     });
     assert!(scc.budget_exhausted, "循环在 1 次块迭代下必须耗尽预算");
@@ -355,6 +354,62 @@ fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
         "预算耗尽不得产生新的 Proved：{:?}",
         scc.proofs
     );
+}
+
+#[test]
+fn callee_write_through_reference_invalidates_slice_length() {
+    use crate::frontend::hir::CheckKind;
+    let source = "fn dirty(xs: & &[int]) { let replacement = [1]\n *xs = &replacement }\nfn f(v: &[int]) { if v.len() > 10 { dirty(&v)\n _ = v[0] } }\nfn main() { let a = [0; 16]\n f(&a) }";
+    let statuses = proof_statuses(&[("main.gg", source)]);
+    assert!(
+        statuses.iter().any(|(kind, status)| {
+            matches!(kind, CheckKind::Bounds { slice: false }) && *status == ProofStatus::Unknown
+        }),
+        "callee 通过引用写入后必须保留检查：{statuses:?}"
+    );
+}
+
+#[test]
+fn readonly_callee_preserves_caller_slice_length() {
+    use crate::frontend::hir::CheckKind;
+    let source = "fn inspect(xs: &[int]) int = xs.len()\nfn f(v: &[int]) { if v.len() > 10 { _ = inspect(v)\n _ = v[0] } }\nfn main() { let a = [0; 16]\n f(&a) }";
+    let statuses = proof_statuses(&[("main.gg", source)]);
+    assert!(
+        statuses.iter().any(|(kind, status)| {
+            matches!(kind, CheckKind::Bounds { slice: false }) && *status == ProofStatus::Proved
+        }),
+        "已证明只读的具体 callee 不应破坏长度事实：{statuses:?}"
+    );
+}
+
+#[test]
+fn shared_check_requires_proof_in_every_instance() {
+    use super::types::{ProofFact, RuntimeCheckKey, SccSummaryV1};
+    use crate::frontend::hir::{CheckKind, ExprId};
+    let key = RuntimeCheckKey {
+        owner_index: 0,
+        expression: ExprId(0),
+        kind: CheckKind::Bounds { slice: false },
+    };
+    for statuses in [
+        [ProofStatus::Proved, ProofStatus::Unknown],
+        [ProofStatus::Unknown, ProofStatus::Proved],
+    ] {
+        let parts = statuses
+            .into_iter()
+            .map(|status| SccSummaryV1 {
+                instances: Vec::new(),
+                proofs: vec![ProofFact {
+                    key: key.clone(),
+                    status,
+                }],
+                budget_exhausted: false,
+            })
+            .collect();
+        let world = super::solver::world_from_sccs(parts, [0; 32]);
+        assert_eq!(world.proof_status(&key), ProofStatus::Unknown);
+        assert_eq!(world.runtime_checks_elided_count, 0);
+    }
 }
 
 #[test]

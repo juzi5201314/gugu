@@ -12,28 +12,20 @@ pub(crate) mod roots;
 pub(crate) mod summary;
 #[cfg(test)]
 mod tests;
+mod types;
 
 pub(crate) use collect::{MonoWorldV1, empty_world};
 pub(crate) use keys::hash_domain;
 
-use crate::frontend::hir::Module;
-use crate::frontend::semantics::{CheckedSemantics, Identities, Model};
 use crate::query::QueryEngine;
-use crate::target::TargetName;
 
 /// 收集根并闭合可达实例图。
 pub(crate) fn close(
-    model: &Model<'_>,
-    checked: &CheckedSemantics,
-    identities: &Identities,
-    module: &Module,
-    target: TargetName,
-    harness: bool,
+    context: &keys::MonoContext<'_>,
     queries: &QueryEngine,
 ) -> Result<MonoWorldV1, Vec<crate::Diagnostic>> {
-    let context = keys::MonoContext::new(model, checked, identities, module, target, harness);
     let mut interner = keys::MonoInterner::default();
-    collect::close(&context, &mut interner, queries)
+    collect::close(context, &mut interner, queries)
 }
 
 /// `MonoKey` 规范字节的域摘要。

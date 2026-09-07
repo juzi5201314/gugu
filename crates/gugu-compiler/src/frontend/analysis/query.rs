@@ -1,8 +1,4 @@
-//! `WholeProgramAnalysis` 与嵌套的 SCC / 函数摘要 query。
-//!
-//! 阶段 24 起：SCC（27）与函数摘要（23）以 `MonoKey` 为身份键，成员来自闭世界
-//! 实例图；world（24）的输入指纹包含实例图指纹。求解仍在定义级 HIR owner 上
-//! 进行，每个实例投影其定义的摘要。
+//! 实例 SCC 按凝聚图顺序完成；函数 query 只投影已完成结果，不递归请求半初始化摘要。
 
 use super::callgraph;
 use super::policy::AnalysisPolicyV1;
@@ -10,25 +6,22 @@ use super::solver::{self, SccMember};
 use super::types::{AnalysisWorldV1, FunctionSummary, SccSummaryV1, WORLD_SCHEMA_VERSION};
 use crate::SourceMap;
 use crate::frontend::cfg::CfgContext;
-use crate::frontend::hir::{self, Module};
-use crate::frontend::mono::MonoWorldV1;
+use crate::frontend::hir::Module;
+use crate::frontend::mono::{MonoWorldV1, digest_of};
 use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
-use std::collections::BTreeMap;
 
-const SCC_SCHEMA: u32 = 2;
-const FUNCTION_SCHEMA: u32 = 2;
+const SCC_SCHEMA: u32 = 3;
+const FUNCTION_SCHEMA: u32 = 3;
 
-/// 实例到定义级 owner 的求解计划。
 struct InstancePlan {
     members: Vec<SccMember>,
     sccs: Vec<Vec<usize>>,
-    /// 定义 -> 首个实例下标（跨 SCC callee 投影用）。
-    first_instance: BTreeMap<hir::DefId, usize>,
 }
 
-/// 运行 whole-program 分析并按输入指纹缓存；`pre_freeze_fingerprint` 是
-/// proof 写回前的 HIR 模块指纹，实例图指纹作为闭世界输入身份的一部分。
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "world 边界固定 HIR、实例图、策略与 query 来源"
+)]
 pub(crate) fn run_world(
     module: &Module,
     pre_freeze_fingerprint: [u8; 32],
@@ -39,7 +32,7 @@ pub(crate) fn run_world(
     policy: AnalysisPolicyV1,
     queries: &QueryEngine,
     sources: &SourceMap,
-) -> Result<AnalysisWorldV1, Vec<crate::Diagnostic>> {
+) -> Result<(AnalysisWorldV1, DependencyFingerprint), Vec<crate::Diagnostic>> {
     let input_fingerprint = input_fingerprint(
         pre_freeze_fingerprint,
         mono.graph_fingerprint,
@@ -54,284 +47,218 @@ pub(crate) fn run_world(
         input_fingerprint,
     );
     let mut fresh = None;
-    let result = queries.compute(key, |context| {
-        context.record_dependency(
-            type_check_dependency.key().clone(),
-            type_check_dependency.fingerprint(),
-        );
-        context.record_dependency(
-            lower_hir_dependency.key().clone(),
-            lower_hir_dependency.fingerprint(),
-        );
-        let plan = plan_instances(module, mono)
-            .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
-        let mut parts = Vec::new();
-        for component in &plan.sccs {
-            let members: Vec<SccMember> = component
-                .iter()
-                .map(|&index| plan.members[index].clone())
-                .collect();
-            parts.push(scc_summary(
-                module,
-                mono,
-                &plan,
-                &members,
-                pre_freeze_fingerprint,
-                policy,
-                queries,
-                type_check_dependency,
-            )?);
-        }
-        for member in &plan.members {
-            let _ = function_summary(
-                module,
-                mono,
-                &plan,
-                member,
-                pre_freeze_fingerprint,
-                policy,
-                queries,
-                type_check_dependency,
-            )?;
-        }
-        let mut world = solver::world_from_sccs(parts, input_fingerprint);
-        world.input_fingerprint = input_fingerprint;
-        let bytes = serde_json::to_vec(&world).expect("analysis world serializes");
-        fresh = Some(world);
-        Ok((bytes, Vec::new()))
-    });
-    let result = result
+    let result = queries
+        .compute(key.clone(), |context| {
+            context.record_dependency(
+                type_check_dependency.key().clone(),
+                type_check_dependency.fingerprint(),
+            );
+            context.record_dependency(
+                lower_hir_dependency.key().clone(),
+                lower_hir_dependency.fingerprint(),
+            );
+            let plan = plan_instances(module, mono)
+                .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
+            let mut completed = vec![None; plan.members.len()];
+            let mut parts = Vec::with_capacity(plan.sccs.len());
+            for component in &plan.sccs {
+                let (part, dependency) = scc_summary(
+                    module,
+                    &plan.members,
+                    component,
+                    input_fingerprint,
+                    policy,
+                    &completed,
+                    queries,
+                )?;
+                context.record_dependency(dependency.key().clone(), dependency.fingerprint());
+                for (&index, record) in component.iter().zip(&part.instances) {
+                    let (summary, function_dependency) = function_summary(
+                        &record.mono_key,
+                        &record.summary,
+                        &dependency,
+                        input_fingerprint,
+                        queries,
+                    )?;
+                    context.record_dependency(
+                        function_dependency.key().clone(),
+                        function_dependency.fingerprint(),
+                    );
+                    completed[index] = Some((summary, function_dependency));
+                }
+                parts.push(part);
+            }
+            let world = solver::world_from_sccs(parts, input_fingerprint);
+            let bytes = serde_json::to_vec(&world).expect("分析 world 可序列化");
+            fresh = Some(world);
+            Ok((bytes, Vec::new()))
+        })
         .map_err(|error| crate::frontend::semantics::query::restore_errors(error, sources))?;
-    if let Some(world) = fresh {
-        return Ok(world);
-    }
-    let world: AnalysisWorldV1 = serde_json::from_slice(result.payload())
-        .map_err(|_| vec![invalid("WholeProgramAnalysis 缓存 schema 不合法")])?;
-    if world.input_fingerprint != input_fingerprint {
+    let dependency = DependencyFingerprint::new(key, result.fingerprint());
+    let world = match fresh {
+        Some(world) => world,
+        None => serde_json::from_slice(result.payload())
+            .map_err(|_| vec![invalid("WholeProgramAnalysis 缓存 schema 不合法")])?,
+    };
+    if world.schema != WORLD_SCHEMA_VERSION || world.input_fingerprint != input_fingerprint {
         return Err(vec![invalid("WholeProgramAnalysis 输入身份不匹配")]);
     }
-    Ok(world)
+    Ok((world, dependency))
 }
 
-/// 从实例图构造求解计划：成员映射、实例 SCC 与定义首个实例。
 fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, crate::Diagnostic> {
-    let mut members = Vec::with_capacity(mono.instances.len());
-    let mut first_instance: BTreeMap<hir::DefId, usize> = BTreeMap::new();
-    for instance in &mono.instances {
-        let definition_key: [u8; 32] = instance.mono_key[..32]
-            .try_into()
-            .map_err(|_| invalid("实例键缺少定义稳定键"))?;
-        let Some(definition) = definition_by_key(module, &definition_key) else {
-            return Err(invalid("实例定义不在定义表内"));
-        };
-        // 无 owner 的实例（静态初始化器、global asm、无体定义）没有分析成员。
-        let Some(owner_index) = module
-            .owners
-            .iter()
-            .position(|owner| owner.definition == definition)
-        else {
-            continue;
-        };
-        let owner = callgraph::callable_key_at(module, owner_index);
-        first_instance.entry(definition).or_insert(members.len());
-        members.push(SccMember {
-            mono_key: instance.mono_key.clone(),
-            owner,
-        });
+    let mut owner_of = vec![None; module.definitions.len()];
+    for (index, owner) in module.owners.iter().enumerate() {
+        owner_of[owner.definition.index()] = Some(index);
     }
-    let mut digests: Vec<[u8; 32]> = members
+    // 定义表按稳定 key 排序；实例表按 digest 排序，映射使用稠密实例下标。
+    let digests: Vec<_> = mono
+        .instances
         .iter()
-        .map(|member| super::super::mono::digest_of(&member.mono_key))
+        .map(|instance| digest_of(&instance.mono_key))
         .collect();
-    digests.sort();
-    let mut graph = vec![Vec::new(); members.len()];
-    for (index, member) in members.iter().enumerate() {
-        let Some(instance) = mono
-            .instances
-            .iter()
-            .find(|instance| instance.mono_key == member.mono_key)
-        else {
-            continue;
-        };
-        for callee in &instance.callees {
-            if let Ok(target) = digests.binary_search(callee) {
-                graph[index].push(target);
-            }
+    let mut body_of_instance = vec![None; mono.instances.len()];
+    let mut selected = Vec::new();
+    for (index, instance) in mono.instances.iter().enumerate() {
+        let key = instance
+            .mono_key
+            .get(..32)
+            .ok_or_else(|| invalid("实例键缺少定义身份"))?;
+        let definition = module
+            .definitions
+            .binary_search_by(|definition| definition.key.as_slice().cmp(key))
+            .map_err(|_| invalid("闭合实例引用未知定义"))?;
+        if let Some(owner) = owner_of[definition] {
+            body_of_instance[index] = Some(selected.len());
+            selected.push((instance, owner));
+        } else if module.definitions[definition].kind
+            != crate::frontend::hir::DefinitionKind::Constant
+        {
+            return Err(invalid("可执行实例缺少 HIR body"));
         }
     }
-    let sccs = callgraph::strongly_connected_components(&graph);
+    let mut members = Vec::with_capacity(selected.len());
+    let mut graph = Vec::with_capacity(selected.len());
+    let target = |digest: &[u8; 32]| {
+        digests
+            .binary_search(digest)
+            .map_err(|_| invalid("实例图含未闭合的 callee"))
+    };
+    for (instance, owner_index) in selected {
+        let calls = instance
+            .call_targets
+            .iter()
+            .map(|(site, digest)| {
+                let index = target(digest)?;
+                let body = body_of_instance[index]
+                    .ok_or_else(|| invalid("调用位点指向无可执行 body 的常量"))?;
+                Ok((*site, body))
+            })
+            .collect::<Result<_, crate::Diagnostic>>()?;
+        let mut successors = Vec::with_capacity(instance.callees.len());
+        for digest in &instance.callees {
+            if let Some(body) = body_of_instance[target(digest)?] {
+                successors.push(body);
+            }
+        }
+        graph.push(successors);
+        members.push(SccMember {
+            mono_key: instance.mono_key.clone(),
+            owner: callgraph::callable_key_at(module, owner_index),
+            calls,
+        });
+    }
     Ok(InstancePlan {
         members,
-        sccs,
-        first_instance,
+        sccs: callgraph::strongly_connected_components(&graph),
     })
 }
 
-fn definition_by_key(module: &Module, key: &[u8; 32]) -> Option<hir::DefId> {
-    module
-        .definitions
-        .binary_search_by(|definition| definition.key.cmp(key))
-        .ok()
-        .map(|index| hir::DefId(index as u32))
-}
-
-#[allow(clippy::too_many_arguments)]
 fn scc_summary(
     module: &Module,
-    mono: &MonoWorldV1,
-    plan: &InstancePlan,
     members: &[SccMember],
-    pre_freeze: [u8; 32],
+    component: &[usize],
+    input: [u8; 32],
     policy: AnalysisPolicyV1,
+    completed: &[Option<(FunctionSummary, DependencyFingerprint)>],
     queries: &QueryEngine,
-    type_check_dependency: &DependencyFingerprint,
-) -> Result<SccSummaryV1, crate::query::QueryError> {
-    let key = QueryKey::new(
-        QueryKind::AnalysisSccSummary,
-        SCC_SCHEMA,
-        scc_fingerprint(members, pre_freeze, policy),
+) -> Result<(SccSummaryV1, DependencyFingerprint), crate::query::QueryError> {
+    let mut bytes = input.to_vec();
+    bytes.extend_from_slice(
+        &u64::try_from(component.len())
+            .expect("SCC 大小适配 GBC1")
+            .to_le_bytes(),
     );
+    for &index in component {
+        bytes.extend_from_slice(&members[index].mono_key);
+    }
+    let key = QueryKey::new(QueryKind::AnalysisSccSummary, SCC_SCHEMA, bytes);
     let mut fresh = None;
-    let result = queries.compute(key, |context| {
-        context.record_dependency(
-            type_check_dependency.key().clone(),
-            type_check_dependency.fingerprint(),
-        );
-        let summary = solver::analyze_scc(module, members, policy, &|def| {
-            resolve_callee_summary(
-                module,
-                mono,
-                plan,
-                def,
-                pre_freeze,
-                policy,
-                queries,
-                type_check_dependency,
-            )
-            .unwrap_or_else(FunctionSummary::conservative)
+    let result = queries.compute(key.clone(), |context| {
+        for &index in component {
+            for &(_, target) in &members[index].calls {
+                if component.binary_search(&target).is_err() {
+                    let (_, dependency) = completed[target].as_ref().expect("外部 callee 已完成");
+                    context.record_dependency(dependency.key().clone(), dependency.fingerprint());
+                }
+            }
+        }
+        let summary = solver::analyze_scc(module, members, component, policy, &|index| {
+            completed[index]
+                .as_ref()
+                .expect("凝聚图拓扑保证外部 callee SCC 已完成")
+                .0
+                .clone()
         });
-        let bytes = serde_json::to_vec(&summary).expect("scc summary serializes");
+        let bytes = serde_json::to_vec(&summary).expect("SCC 摘要可序列化");
         fresh = Some(summary);
         Ok((bytes, Vec::new()))
     })?;
-    if let Some(summary) = fresh {
-        return Ok(summary);
-    }
-    serde_json::from_slice(result.payload())
-        .map_err(|_| crate::query::QueryError::Failed("AnalysisSccSummary schema".into()))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn function_summary(
-    module: &Module,
-    mono: &MonoWorldV1,
-    plan: &InstancePlan,
-    member: &SccMember,
-    pre_freeze: [u8; 32],
-    policy: AnalysisPolicyV1,
-    queries: &QueryEngine,
-    type_check_dependency: &DependencyFingerprint,
-) -> Result<FunctionSummary, crate::query::QueryError> {
-    let key = QueryKey::new(
-        QueryKind::FunctionAnalysisSummary,
-        FUNCTION_SCHEMA,
-        function_fingerprint(member, pre_freeze, policy),
-    );
-    let mut fresh = None;
-    let result = queries.compute(key, |context| {
-        context.record_dependency(
-            type_check_dependency.key().clone(),
-            type_check_dependency.fingerprint(),
-        );
-        let Some(component) = plan.sccs.iter().find(|component| {
-            component
-                .iter()
-                .any(|&index| plan.members[index].mono_key == member.mono_key)
-        }) else {
-            return Err(crate::query::QueryError::Failed("missing scc".into()));
-        };
-        let members: Vec<SccMember> = component
-            .iter()
-            .map(|&index| plan.members[index].clone())
-            .collect();
-        let summary = scc_summary(
-            module,
-            mono,
-            plan,
-            &members,
-            pre_freeze,
-            policy,
-            queries,
-            type_check_dependency,
-        )?;
-        let projected = summary
+    let summary: SccSummaryV1 = match fresh {
+        Some(summary) => summary,
+        None => serde_json::from_slice(result.payload())
+            .map_err(|_| crate::query::QueryError::Failed("SCC 摘要 schema 不合法".into()))?,
+    };
+    if summary.instances.len() != component.len()
+        || summary
             .instances
             .iter()
-            .find(|record| record.mono_key == member.mono_key)
-            .map(|record| record.summary.clone())
-            .unwrap_or_else(FunctionSummary::conservative);
-        let bytes = serde_json::to_vec(&projected).expect("function summary serializes");
-        fresh = Some(projected);
-        Ok((bytes, Vec::new()))
-    })?;
-    if let Some(summary) = fresh {
-        return Ok(summary);
+            .zip(component)
+            .any(|(record, &index)| record.mono_key != members[index].mono_key)
+    {
+        return Err(crate::query::QueryError::Failed(
+            "SCC 缓存成员与实例图不一致".into(),
+        ));
     }
-    serde_json::from_slice(result.payload())
-        .map_err(|_| crate::query::QueryError::Failed("FunctionAnalysisSummary schema".into()))
+    Ok((
+        summary,
+        DependencyFingerprint::new(key, result.fingerprint()),
+    ))
 }
 
-/// 跨 SCC callee：按定义找到首个实例并投影其摘要。
-#[allow(clippy::too_many_arguments)]
-fn resolve_callee_summary(
-    module: &Module,
-    mono: &MonoWorldV1,
-    plan: &InstancePlan,
-    def: hir::DefId,
-    pre_freeze: [u8; 32],
-    policy: AnalysisPolicyV1,
+fn function_summary(
+    mono_key: &[u8],
+    summary: &FunctionSummary,
+    scc: &DependencyFingerprint,
+    input: [u8; 32],
     queries: &QueryEngine,
-    type_check_dependency: &DependencyFingerprint,
-) -> Option<FunctionSummary> {
-    let index = *plan.first_instance.get(&def)?;
-    let member = &plan.members[index];
-    function_summary(
-        module,
-        mono,
-        plan,
-        member,
-        pre_freeze,
-        policy,
-        queries,
-        type_check_dependency,
-    )
-    .ok()
-}
-
-fn scc_fingerprint(
-    members: &[SccMember],
-    pre_freeze: [u8; 32],
-    policy: AnalysisPolicyV1,
-) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("gugu-analysis-scc-v2");
-    hash.update(&pre_freeze);
-    hash.update(&policy.canonical_bytes());
-    for member in members {
-        hash.update(&member.mono_key);
-    }
-    *hash.finalize().as_bytes()
-}
-
-fn function_fingerprint(
-    member: &SccMember,
-    pre_freeze: [u8; 32],
-    policy: AnalysisPolicyV1,
-) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("gugu-analysis-function-v2");
-    hash.update(&pre_freeze);
-    hash.update(&policy.canonical_bytes());
-    hash.update(&member.mono_key);
-    *hash.finalize().as_bytes()
+) -> Result<(FunctionSummary, DependencyFingerprint), crate::query::QueryError> {
+    let mut bytes = input.to_vec();
+    bytes.extend_from_slice(mono_key);
+    let key = QueryKey::new(QueryKind::FunctionAnalysisSummary, FUNCTION_SCHEMA, bytes);
+    let result = queries.compute(key.clone(), |context| {
+        context.record_dependency(scc.key().clone(), scc.fingerprint());
+        Ok((
+            serde_json::to_vec(summary).expect("函数摘要可序列化"),
+            Vec::new(),
+        ))
+    })?;
+    let summary = serde_json::from_slice(result.payload())
+        .map_err(|_| crate::query::QueryError::Failed("函数摘要 schema 不合法".into()))?;
+    Ok((
+        summary,
+        DependencyFingerprint::new(key, result.fingerprint()),
+    ))
 }
 
 /// world 输入指纹：冻结前 HIR、实例图、两级 query 依赖与策略编码。

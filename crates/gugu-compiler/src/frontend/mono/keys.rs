@@ -5,7 +5,7 @@
 //! 携带 `Definition.key` 稳定键。
 
 use crate::{
-    Diagnostic, DiagnosticCode,
+    Diagnostic, DiagnosticCode, SourceMap,
     frontend::{
         hir::{self, Module},
         semantics::{CallableId, DefRef, Identities, Model, TraitRef, Ty},
@@ -37,7 +37,7 @@ pub(crate) enum MonoKind {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MonoKey {
     pub definition: [u8; 32],
-    pub type_arguments: Vec<Vec<u8>>,
+    pub type_arguments: Vec<StableTypeKey>,
     pub const_arguments: Vec<Vec<u8>>,
     pub selected_impls: Vec<[u8; 32]>,
     pub call_abi: MonoCallAbi,
@@ -51,21 +51,26 @@ impl MonoKey {
     pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.definition);
-        encode_byte_sequences(&mut out, &self.type_arguments);
+        encode_u64(
+            &mut out,
+            u64::try_from(self.type_arguments.len()).expect("类型实参数量适配 GBC1"),
+        );
+        for argument in &self.type_arguments {
+            out.extend_from_slice(argument);
+        }
         encode_byte_sequences(&mut out, &self.const_arguments);
-        out.extend_from_slice(
-            &u64::try_from(self.selected_impls.len())
-                .unwrap()
-                .to_le_bytes(),
+        encode_u64(
+            &mut out,
+            u64::try_from(self.selected_impls.len()).expect("impl 数量适配 GBC1"),
         );
         for key in &self.selected_impls {
             out.extend_from_slice(key);
         }
         let abi = match self.call_abi {
-            MonoCallAbi::Gugu => 0u8,
+            MonoCallAbi::Gugu => 0u16,
             MonoCallAbi::C => 1,
         };
-        out.push(abi);
+        out.extend_from_slice(&abi.to_le_bytes());
         encode_string(&mut out, &self.target);
         out.push(u8::from(self.harness_mode));
         out.extend_from_slice(&self.instrumentation_mode.to_le_bytes());
@@ -92,7 +97,7 @@ impl MonoInterner {
     /// 登记 `MonoKey`，返回域摘要；冲突立即报错停止。
     pub(crate) fn intern_key(&mut self, key: &MonoKey) -> Result<[u8; 32], Diagnostic> {
         let canonical = key.canonical_bytes();
-        let digest = key.digest();
+        let digest = hash_domain("gugu-mono-v1", &canonical);
         intern(&mut self.keys, digest, canonical, "MonoKey")
     }
 
@@ -154,10 +159,17 @@ pub(crate) struct MonoContext<'a> {
     pub checked: &'a crate::frontend::semantics::CheckedSemantics,
     pub identities: &'a Identities,
     pub module: &'a Module,
+    pub sources: &'a SourceMap,
     pub target: TargetName,
     pub harness: bool,
-    /// DefId -> `CheckedBody` 下标；闭包/协程/外部声明为 `None`。
-    pub body_of: Vec<Option<usize>>,
+    /// DefId 在本次 HIR 中连续；按定义直接索引 owner 与 callable。
+    pub owner_of: Vec<Option<usize>>,
+    pub callable_of: Vec<Option<CallableId>>,
+    pub nominal_of: Vec<Option<usize>>,
+    pub interface_of: Vec<Option<usize>>,
+    pub opaque_of: Vec<Option<u32>>,
+    /// 每个闭合上下文独占该惰性类型表；不同编译 action 不共享 session-local 类型。
+    pub semantic_types: Vec<std::cell::OnceCell<Ty>>,
     /// DefId -> 声明 `DefRef`；匿名/合成定义为 `None`。
     pub definition_ref: Vec<Option<DefRef>>,
     /// DefId -> 源模块下标。
@@ -170,10 +182,15 @@ impl<'a> MonoContext<'a> {
         checked: &'a crate::frontend::semantics::CheckedSemantics,
         identities: &'a Identities,
         module: &'a Module,
+        sources: &'a SourceMap,
         target: TargetName,
         harness: bool,
     ) -> Self {
-        let mut body_of = vec![None; module.definitions.len()];
+        let mut owner_of = vec![None; module.definitions.len()];
+        let mut callable_of = vec![None; module.definitions.len()];
+        let mut nominal_of = vec![None; module.definitions.len()];
+        let mut interface_of = vec![None; module.definitions.len()];
+        let mut opaque_of = vec![None; module.definitions.len()];
         let mut definition_ref = vec![None; module.definitions.len()];
         let mut definition_module = vec![0usize; module.definitions.len()];
         for (module_index, table) in identities.items.iter().enumerate() {
@@ -183,17 +200,44 @@ impl<'a> MonoContext<'a> {
                     definition_module[index] = module_index;
                     definition_ref[index] = Some(DefRef {
                         module: module_index,
-                        item: crate::frontend::ast::ItemId(item as u32),
+                        item: crate::frontend::ast::ItemId(
+                            u32::try_from(item).expect("AST 项编号不超过 u32"),
+                        ),
                     });
                 }
             }
         }
-        for (index, body) in checked.bodies.iter().enumerate() {
-            if let Some(definition) =
-                identities.items[body.definition.module][body.definition.item.0 as usize]
-            {
-                body_of[definition.index()] = Some(index);
+        for (module_index, functions) in identities.functions.iter().enumerate() {
+            for (function, definition) in functions.iter().enumerate() {
+                if let Some(definition) = definition {
+                    callable_of[definition.index()] = Some(CallableId {
+                        module: module_index,
+                        function: u32::try_from(function).expect("FnId 不超过 u32"),
+                    });
+                    definition_module[definition.index()] = module_index;
+                }
             }
+        }
+        for (index, owner) in module.owners.iter().enumerate() {
+            debug_assert!(owner.definition.index() < owner_of.len());
+            owner_of[owner.definition.index()] = Some(index);
+            let mut definition = owner.definition;
+            while definition_ref[definition.index()].is_none() {
+                definition = module.definitions[definition.index()]
+                    .parent
+                    .expect("匿名 owner 具有具名祖先");
+            }
+            definition_module[owner.definition.index()] = definition_module[definition.index()];
+        }
+        for (index, nominal) in model.nominal.iter().enumerate() {
+            nominal_of[identities.item(nominal.definition).index()] = Some(index);
+        }
+        for (index, definition) in identities.interfaces.iter().enumerate() {
+            interface_of[definition.index()] = Some(index);
+        }
+        for (index, definition) in identities.opaques.iter().enumerate() {
+            opaque_of[definition.index()] =
+                Some(u32::try_from(index).expect("不透明声明编号不超过 u32"));
         }
         Self {
             model,
@@ -201,9 +245,17 @@ impl<'a> MonoContext<'a> {
             identities,
             module,
             target,
+            sources,
             harness,
-            body_of,
             definition_ref,
+            owner_of,
+            callable_of,
+            nominal_of,
+            interface_of,
+            opaque_of,
+            semantic_types: (0..module.types.len())
+                .map(|_| std::cell::OnceCell::new())
+                .collect(),
             definition_module,
         }
     }
@@ -218,11 +270,6 @@ impl<'a> MonoContext<'a> {
 
     pub(crate) fn function_key(&self, id: CallableId) -> [u8; 32] {
         self.definition_key(self.identities.function(id))
-    }
-
-    /// `DefRef` -> `DefId`。
-    pub(crate) fn definition_of(&self, reference: &DefRef) -> Option<hir::DefId> {
-        self.identities.items[reference.module][reference.item.0 as usize]
     }
 
     /// 规范类型字节：具体类型不得含参数、投影或未收敛变量。
@@ -293,6 +340,9 @@ impl<'a> MonoContext<'a> {
             Ty::Callable(id, arguments, signature) => {
                 out.extend_from_slice(&16u16.to_le_bytes());
                 out.extend_from_slice(&self.function_key(*id));
+                out.extend_from_slice(
+                    &(self.call_abi(self.identities.function(*id)) as u16).to_le_bytes(),
+                );
                 encode_u64(out, arguments.len() as u64);
                 for argument in arguments {
                     self.encode_type_into(argument, out)?;
@@ -337,9 +387,19 @@ impl<'a> MonoContext<'a> {
             }
             Ty::Dyn(interfaces) => {
                 out.extend_from_slice(&19u16.to_le_bytes());
-                encode_u64(out, interfaces.len() as u64);
-                for interface in interfaces {
-                    self.encode_trait_ref_into(interface, out)?;
+                let mut canonical = interfaces
+                    .iter()
+                    .map(|interface| {
+                        let mut bytes = Vec::new();
+                        self.encode_trait_ref_into(interface, &mut bytes)?;
+                        Ok(bytes)
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                canonical.sort_unstable();
+                canonical.dedup();
+                encode_u64(out, canonical.len() as u64);
+                for bytes in canonical {
+                    out.extend_from_slice(&bytes);
                 }
             }
             Ty::Option(inner) => {
@@ -427,80 +487,10 @@ pub(crate) fn unify(
     actual: &Ty,
     bindings: &mut BTreeMap<String, Ty>,
 ) -> Result<(), Diagnostic> {
-    let mismatch = || {
-        Err(Diagnostic::error(
-            DiagnosticCode::MonoDivergence,
-            format!("实例化时声明签名与实际签名结构不一致：{declared:?} vs {actual:?}"),
-            None,
-        ))
-    };
-    match (declared, actual) {
-        (Ty::Param(name), actual) => {
-            bindings.insert(name.clone(), actual.clone());
-            Ok(())
-        }
-        (Ty::Ref(a), Ty::Ref(b)) | (Ty::Ptr(a), Ty::Ptr(b)) | (Ty::Slice(a), Ty::Slice(b)) => {
-            unify(a, b, bindings)
-        }
-        (Ty::Array(a, la), Ty::Array(b, lb)) if la == lb => unify(a, b, bindings),
-        // 参数包：声明 Tuple[模式...] 对齐较短实元列表；单元素包接受裸值。
-        (Ty::Tuple(a), Ty::Tuple(b)) => {
-            let (pattern, actual) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-            for (left, right) in pattern.iter().zip(actual) {
-                unify(left, right, bindings)?;
-            }
-            Ok(())
-        }
-        (Ty::Tuple(a), other) if a.len() == 1 => unify(&a[0], other, bindings),
-        (other, Ty::Tuple(b)) if b.len() == 1 => unify(other, &b[0], bindings),
-        (Ty::Function(ap, ar), Ty::Function(bp, br)) if ap.len() == bp.len() => {
-            for (left, right) in ap.iter().zip(bp) {
-                unify(left, right, bindings)?;
-            }
-            unify(ar, br, bindings)
-        }
-        (Ty::Callable(ai, aa, asig), Ty::Callable(bi, ba, bsig)) if ai == bi => {
-            if aa.len() != ba.len() {
-                return mismatch();
-            }
-            for (left, right) in aa.iter().zip(ba) {
-                unify(left, right, bindings)?;
-            }
-            unify(asig, bsig, bindings)
-        }
-        (Ty::Named(ai, aa), Ty::Named(bi, ba)) if ai == bi && aa.len() == ba.len() => {
-            for (left, right) in aa.iter().zip(ba) {
-                unify(left, right, bindings)?;
-            }
-            Ok(())
-        }
-        (Ty::Opaque(ai, aa), Ty::Opaque(bi, ba)) if ai == bi && aa.len() == ba.len() => {
-            for (left, right) in aa.iter().zip(ba) {
-                unify(left, right, bindings)?;
-            }
-            Ok(())
-        }
-        (Ty::Dyn(a), Ty::Dyn(b)) if a.len() == b.len() => {
-            for (left, right) in a.iter().zip(b) {
-                if left.id != right.id || left.arguments.len() != right.arguments.len() {
-                    return mismatch();
-                }
-                for (x, y) in left.arguments.iter().zip(&right.arguments) {
-                    unify(x, y, bindings)?;
-                }
-            }
-            Ok(())
-        }
-        (Ty::Option(a), Ty::Option(b))
-        | (Ty::Chan(a), Ty::Chan(b))
-        | (Ty::Join(a), Ty::Join(b))
-        | (Ty::MaybeUninit(a), Ty::MaybeUninit(b)) => unify(a, b, bindings),
-        (Ty::Result(av, ae), Ty::Result(bv, be)) => {
-            unify(av, bv, bindings)?;
-            unify(ae, be, bindings)
-        }
-        (a, b) if a == b => Ok(()),
-        _ => mismatch(),
+    if crate::frontend::semantics::traits::select::matches(declared, actual, bindings) {
+        Ok(())
+    } else {
+        Err(internal("实例化签名与已经检查的调用点不一致"))
     }
 }
 

@@ -7,7 +7,7 @@ use crate::{Diagnostic, DiagnosticCode, Span};
 use std::collections::BTreeMap;
 mod associated;
 mod collect;
-pub(super) mod select;
+pub(crate) mod select;
 mod validate;
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
@@ -59,8 +59,8 @@ pub(crate) struct Interface {
     pub(super) unsafety: bool,
     pub(super) requirements: Vec<(Ty, TraitRef)>,
 }
-pub(super) struct Implementation {
-    pub(super) definition: DefRef,
+pub(crate) struct Implementation {
+    pub(crate) definition: DefRef,
     pub(super) self_ty: Ty,
     pub(super) interface: Option<TraitRef>,
     pub(super) parameters: BTreeMap<String, Ty>,
@@ -76,7 +76,7 @@ pub(super) enum Owner {
 #[derive(Default)]
 pub(crate) struct Traits {
     pub(super) interfaces: Vec<Interface>,
-    pub(super) implementations: Vec<Implementation>,
+    pub(crate) implementations: Vec<Implementation>,
     // ItemId 在模块内稠密；索引只访问已有 AST 项。
     pub(super) owners: Vec<Vec<Option<Owner>>>,
     pub(super) projection_equalities: Vec<(Ty, Ty)>,

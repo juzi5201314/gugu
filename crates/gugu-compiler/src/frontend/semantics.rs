@@ -18,11 +18,8 @@ mod safety;
 pub(crate) mod traits;
 pub(crate) use hir::identity::Identities;
 pub(crate) use model::{CallableId, DefRef, Model, Ty, substitute};
-pub(crate) use output::{
-    AdjustmentKind, CapturePlan, CheckedBody, CheckedSemantics, Dispatch, MemoryOperation,
-    Reflection, ReflectionKind, TypeAdjustment,
-};
-pub(crate) use traits::{Method, TraitRef};
+pub(crate) use output::{CheckedBody, CheckedSemantics, MemoryOperation};
+pub(crate) use traits::TraitRef;
 #[cfg(test)]
 mod callable_tests;
 #[cfg(test)]
