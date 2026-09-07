@@ -83,14 +83,14 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 20 | `EmitImage` | image plan fingerprint | 最终镜像 |
 | 21 | `ParseSource` | generated source fingerprint + source slot | `ParsedSource` |
 | 22 | `ExpandSourceMacro` | stable macro call + round + source slot + script inputs | generated source/fragment + expansion record |
-| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy | completed SCC 中的函数摘要投影 |
-| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table | 排序摘要与 world-local 证明事实 |
+| 23 | `FunctionAnalysisSummary` | 阶段 24 前为 `AnalysisOwnerKey` + analysis policy；其后为 `MonoKey` + analysis policy | completed SCC 中的函数摘要投影 |
+| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（当前 schema 2，输入为 proof 写回前的 HIR 模块指纹） | 排序摘要与 world-local 证明事实 |
 | 25 | `FreezeTypeUniverse` | closed-world instance graph | `TypeUniverseKey`、类型序列与稠密编号 |
 | 26 | `EvaluateLateComptime` | `LateConstKey` + `TypeUniverseKey` | late 标量常量 |
-| 27 | `AnalysisSccSummary` | sorted SCC `MonoKey` set + analysis policy | 完整 SCC 摘要固定点 |
+| 27 | `AnalysisSccSummary` | 阶段 24 前为排序后的 `AnalysisOwnerKey` 集 + analysis policy；其后为排序 `MonoKey` 集 + analysis policy | 完整 SCC 摘要固定点 |
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision | 内容寻址跨 package 摘要 |
 
-新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--28 只表达登记的新 query，不得重用或改变既有编号的含义。
+新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--28 只表达登记的新 query，不得重用或改变既有编号的含义。阶段 24 前，23 与 27 的 callable 身份是 owner 键 `(owner 表下标, DefId)`，不是 `MonoKey`。
 
 ## query 状态机
 

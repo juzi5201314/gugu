@@ -117,6 +117,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 - 元组：匿名积类型。`(T, U)` 结构等价即同一类型。`()` 是 unit（恰好一个值，ZST）。
 - 数组 `[T; N]`：长度属于类型，内联，不经堆。按值拷贝。`N` 必须是编译期整数。值：`[1, 2, 3]` 类型 `[int; 3]`；`[x; N]` 把 `x` 重复 `N` 次（`N` comptime）。
 - 切片 `&[T]`：胖指针（指针 + 长度），不拥有存储。`&[T; N]` 必须能强制成 `&[T]`。
+- `[T; N]` 与 `&[T]` 的固有方法 `len(self: &Self) int` 由编译器提供：数组返回类型中的 `N`，切片返回胖指针长度。`string` / `Vec[T]` 的 `len` 仍由标准库实现。
 - 下标：`xs[i]`、`xs[a..b]`、`xs[a..]`、`xs[..b]`、`xs[..]`。不完整区间 `a..` / `..b` / `..` **只**允许出现在 `[]` 里，不能当独立值（独立值必须是 `a..b`，类型 `Range`）。
 - `Vec[T]` 不是内置类型，在 `std`（预导入）：可增长、存储在 GC 堆或显式传入的 `LocalArena` / `SyncArena`。至少提供 `new`、`push`、`len`、`cap`（`len` / `cap` 返回 `int`），以及 `IntoIter`（`Item = T`，拷贝元素）。必须实现 `Clone`（`T: Clone`）、`Eq`（`T: Eq`）、`Print`。
 

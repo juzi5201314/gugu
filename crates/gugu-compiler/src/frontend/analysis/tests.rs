@@ -50,24 +50,16 @@ fn conservative_summary_stays_conservative() {
     let mut summary = FunctionSummary::conservative();
     summary.join_with(&FunctionSummary::conservative());
     assert_eq!(summary, FunctionSummary::conservative());
-    let mut optimistic = FunctionSummary {
-        may_panic: false,
-        may_call_unknown: false,
-        may_mutate_len: false,
-        reads_hidden_state: false,
-        writes_hidden_state: false,
-    };
+    let mut optimistic = FunctionSummary::default();
     optimistic.join_with(&FunctionSummary::conservative());
     // 效果并集只能变保守，不能把"可能发生"降级掉。
     assert_eq!(optimistic, FunctionSummary::conservative());
 }
 
-fn proof_statuses(
+fn compile(
     sources: &[(&str, &str)],
-) -> Vec<(
-    crate::frontend::hir::CheckKind,
-    crate::frontend::analysis::ProofStatus,
-)> {
+    queries: &crate::QueryEngine,
+) -> crate::frontend::FrontendOutput {
     let mut map = crate::SourceMap::new(
         sources
             .iter()
@@ -83,41 +75,30 @@ fn proof_statuses(
         false,
         Default::default(),
     );
+    crate::frontend::bootstrap(
+        crate::frontend::SourceInput::Sources {
+            source_map: &mut map,
+            entry: "main.gg",
+            source_root: "",
+            package_identity: "tests/analysis@1.0.0",
+            require_main: true,
+            cfg: &cfg,
+            external_packages: &Default::default(),
+        },
+        queries,
+    )
+    .expect("前端检查通过")
+}
+
+fn proof_statuses(
+    sources: &[(&str, &str)],
+) -> Vec<(
+    crate::frontend::hir::CheckKind,
+    crate::frontend::analysis::ProofStatus,
+)> {
     let queries = crate::QueryEngine::new();
-    let output = crate::frontend::bootstrap(
-        crate::frontend::SourceInput::Sources {
-            source_map: &mut map,
-            entry: "main.gg",
-            source_root: "",
-            package_identity: "tests/analysis@1.0.0",
-            require_main: true,
-            cfg: &cfg,
-            external_packages: &Default::default(),
-        },
-        &queries,
-    )
-    .expect("前端检查通过");
-    // 再跑一遍走缓存命中路径，冷热结果必须一致。
-    let mut map = crate::SourceMap::new(
-        sources
-            .iter()
-            .map(|(path, source)| crate::SourceSnapshot::from_str(path, source).expect("快照"))
-            .collect(),
-    )
-    .expect("源映射");
-    let warm = crate::frontend::bootstrap(
-        crate::frontend::SourceInput::Sources {
-            source_map: &mut map,
-            entry: "main.gg",
-            source_root: "",
-            package_identity: "tests/analysis@1.0.0",
-            require_main: true,
-            cfg: &cfg,
-            external_packages: &Default::default(),
-        },
-        &queries,
-    )
-    .expect("缓存命中路径通过");
+    let output = compile(sources, &queries);
+    let warm = compile(sources, &queries);
     assert_eq!(
         output.hir.module().owners,
         warm.hir.module().owners,
@@ -212,4 +193,193 @@ fn summaries_of_callers_absorb_callee_effects() {
     let source = "fn leaf(x: int) { _ = 1 / 0 }\nfn mid() { leaf(1) }\nfn main() { mid() }";
     let statuses = proof_statuses(&[("main.gg", source)]);
     assert!(!statuses.is_empty());
+}
+
+#[test]
+fn array_slice_len_is_an_int_method() {
+    use crate::frontend::analysis::ProofStatus;
+    let source = "fn main() { let a = [1, 2, 3]\n let n: int = a.len()\n let s = &a\n let m: int = s.len()\n let k: int = [1, 2, 3].len()\n _ = n\n _ = m\n _ = k }";
+    let statuses = proof_statuses(&[("main.gg", source)]);
+    assert!(
+        statuses.is_empty()
+            || statuses
+                .iter()
+                .all(|(_, status)| *status != ProofStatus::Disproved)
+    );
+}
+
+#[test]
+fn loop_iv_and_break_prove_array_index() {
+    use crate::frontend::analysis::ProofStatus;
+    use crate::frontend::hir::CheckKind;
+    let source = "fn f() { let n = 20\n let v = [0; 8]\n for i in 0..n {\n if i >= 2 { break }\n _ = v[i]\n } }\nfn main() { f() }";
+    let statuses = proof_statuses(&[("main.gg", source)]);
+    let bounds: Vec<_> = statuses
+        .iter()
+        .filter(|(kind, _)| matches!(kind, CheckKind::Bounds { slice: false }))
+        .map(|(_, status)| *status)
+        .collect();
+    assert!(
+        bounds.contains(&ProofStatus::Proved),
+        "循环归纳 + break 应收窄 i < 2 < 8：{statuses:?}"
+    );
+}
+
+#[test]
+fn spec_slice_len_and_break_prove_index() {
+    use crate::frontend::analysis::ProofStatus;
+    use crate::frontend::hir::CheckKind;
+    let source = "fn f(v: &[int], n: int) {\n if v.len() > 10 {\n for i in 0..n {\n if i >= 2 { break }\n _ = v[i]\n }\n }\n }\nfn main() { let a = [0; 16]\n f(&a, 20) }";
+    let statuses = proof_statuses(&[("main.gg", source)]);
+    let bounds: Vec<_> = statuses
+        .iter()
+        .filter(|(kind, _)| matches!(kind, CheckKind::Bounds { slice: false }))
+        .map(|(_, status)| *status)
+        .collect();
+    assert!(
+        bounds.contains(&ProofStatus::Proved),
+        "v.len() > 10 且 i < 2 必须证明下标：{statuses:?}"
+    );
+}
+
+#[test]
+fn local_binding_proves_division_and_shift() {
+    use crate::frontend::analysis::ProofStatus;
+    use crate::frontend::hir::CheckKind;
+    let source =
+        "fn f(x: int) { let d = 2\n let s = 3\n _ = x / d\n _ = x << s }\nfn main() { f(8) }";
+    let statuses = proof_statuses(&[("main.gg", source)]);
+    assert!(
+        statuses.iter().any(|(kind, status)| {
+            matches!(kind, CheckKind::Division { .. }) && *status == ProofStatus::Proved
+        }),
+        "局部绑定除数必须 Proved：{statuses:?}"
+    );
+    assert!(
+        statuses.iter().any(|(kind, status)| {
+            matches!(kind, CheckKind::Shift { .. }) && *status == ProofStatus::Proved
+        }),
+        "局部绑定移位量必须 Proved：{statuses:?}"
+    );
+}
+
+#[test]
+fn reassignment_invalidates_slice_length_proof() {
+    use crate::frontend::analysis::ProofStatus;
+    use crate::frontend::hir::CheckKind;
+    let source = "fn f(a: &[int], b: &[int]) { let v = a\n if v.len() > 10 {\n v = b\n _ = v[0]\n } }\nfn main() { let x = [0; 16]\n let y = [0; 1]\n f(&x, &y) }";
+    let statuses = proof_statuses(&[("main.gg", source)]);
+    let after_assign = statuses
+        .iter()
+        .find(|(kind, _)| matches!(kind, CheckKind::Bounds { slice: false }));
+    assert!(
+        after_assign.is_some_and(|(_, status)| *status == ProofStatus::Unknown),
+        "改写切片后长度事实必须失效：{statuses:?}"
+    );
+}
+
+#[test]
+fn callee_mutate_len_invalidates_index() {
+    use crate::frontend::analysis::ProofStatus;
+    use crate::frontend::hir::CheckKind;
+    let source = "fn dirty(xs: &[int]) { xs = xs }\nfn f(v: &[int]) {\n if v.len() > 10 {\n dirty(v)\n _ = v[0]\n }\n }\nfn main() { let a = [0; 16]\n f(&a) }";
+    let statuses = proof_statuses(&[("main.gg", source)]);
+    assert!(
+        statuses.iter().any(|(kind, status)| {
+            matches!(kind, CheckKind::Bounds { slice: false }) && *status == ProofStatus::Unknown
+        }),
+        "可能改长度的 callee 之后必须保留检查：{statuses:?}"
+    );
+}
+
+#[test]
+fn analysis_policy_block_iterations_change_action_key() {
+    use crate::project::ActionInputs;
+    let mut first = ActionInputs::new(b"c", "host", "host", "bin");
+    first.set_analysis_policy(AnalysisPolicyV1::default().canonical_bytes());
+    let mut second = ActionInputs::new(b"c", "host", "host", "bin");
+    let mut policy = AnalysisPolicyV1::default();
+    policy.max_block_iterations = 1;
+    second.set_analysis_policy(policy.canonical_bytes());
+    assert_ne!(first.key(), second.key());
+}
+
+#[test]
+fn ffi_and_spawn_invalidate_slice_index() {
+    use crate::frontend::analysis::ProofStatus;
+    use crate::frontend::hir::CheckKind;
+    let ffi = "#[ffi(leaf(stack = 8))] extern \"C\" fn leaf()\nfn f(v: &[int]) {\n if v.len() > 10 {\n #[ffi(leaf)] leaf()\n _ = v[0]\n }\n }\nfn main() { let a = [0; 16]\n f(&a) }";
+    let ffi_statuses = proof_statuses(&[("main.gg", ffi)]);
+    assert!(
+        ffi_statuses.iter().any(|(kind, status)| {
+            matches!(kind, CheckKind::Bounds { slice: false }) && *status == ProofStatus::Unknown
+        }),
+        "FFI 之后必须保留下标检查：{ffi_statuses:?}"
+    );
+    let spawn = "fn f(v: &[int]) {\n if v.len() > 10 {\n let task = async { 1 }\n _ = task.wait()\n _ = v[0]\n }\n }\nfn main() { let a = [0; 16]\n f(&a) }";
+    let spawn_statuses = proof_statuses(&[("main.gg", spawn)]);
+    assert!(
+        spawn_statuses.iter().any(|(kind, status)| {
+            matches!(kind, CheckKind::Bounds { slice: false }) && *status == ProofStatus::Unknown
+        }),
+        "spawn/wait 之后必须保留下标检查：{spawn_statuses:?}"
+    );
+}
+
+#[test]
+fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
+    use crate::frontend::analysis::ProofStatus;
+    let source = "fn f() { let n = 20\n let v = [0; 8]\n for i in 0..n {\n if i >= 2 { break }\n _ = v[i]\n } }\nfn main() { f() }";
+    let queries = crate::QueryEngine::new();
+    let output = compile(&[("main.gg", source)], &queries);
+    let module = output.hir.module();
+    let keys = super::callgraph::callable_keys(module);
+    let mut policy = AnalysisPolicyV1::default();
+    policy.max_block_iterations = 1;
+    let scc = super::solver::analyze_scc(module, &keys, policy, &|_| {
+        super::FunctionSummary::default()
+    });
+    assert!(scc.budget_exhausted, "循环在 1 次块迭代下必须耗尽预算");
+    assert!(
+        scc.proofs
+            .iter()
+            .all(|fact| fact.status != ProofStatus::Proved),
+        "预算耗尽不得产生新的 Proved：{:?}",
+        scc.proofs
+    );
+}
+
+#[test]
+fn nested_scc_summaries_match_world_projection() {
+    let source = "fn ping() { pong()\n _ = 1 / 0 }\nfn pong() { ping() }\nfn main() { ping() }";
+    let queries = crate::QueryEngine::new();
+    let output = compile(&[("main.gg", source)], &queries);
+    let module = output.hir.module();
+    let keys = super::callgraph::callable_keys(module);
+    assert_eq!(
+        output.analysis.owners.len(),
+        keys.len(),
+        "每个 callable 都必须有 FunctionAnalysisSummary 投影"
+    );
+    for key in &keys {
+        assert!(
+            output
+                .analysis
+                .owners
+                .iter()
+                .any(|record| record.key == *key),
+            "world 缺少 owner {key:?}"
+        );
+    }
+    assert!(
+        output
+            .analysis
+            .owners
+            .iter()
+            .filter(|record| record.summary.may_panic)
+            .count()
+            >= 2,
+        "互递归 SCC 必须把 callee 的 may_panic 吸收进双方摘要：{:?}",
+        output.analysis.owners
+    );
 }

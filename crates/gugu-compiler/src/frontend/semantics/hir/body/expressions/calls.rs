@@ -184,6 +184,18 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 ));
             }
         }
+        if let Some(receiver) = self.array_slice_len_receiver(callee, &arguments)? {
+            self.expression_map[callee.0 as usize] = Some(id);
+            return Ok((
+                hir::ExprKind::Intrinsic {
+                    operation: hir::Builtin::Len,
+                    arguments: self.expression_list([receiver])?,
+                    types: Vec::new(),
+                    field: None,
+                },
+                hir::Effects::READ,
+            ));
+        }
         let selected = self.selected_dispatch(callee, None, None)?;
         let (target, receiver) = if let Some(dispatch) = selected {
             let receiver = if self.output.dispatches[dispatch as usize].implicit_receiver {
@@ -319,6 +331,94 @@ impl BodyBuilder<'_, '_, '_, '_> {
             stack_reserve: plan.stack_reserve,
         });
         Ok(hir::ExprKind::Assembly(id))
+    }
+
+    fn array_slice_len_receiver(
+        &mut self,
+        callee: ast::ExprId,
+        arguments: &[ast::ExprId],
+    ) -> Result<Option<hir::ExprId>, Diagnostic> {
+        if !self.is_array_slice_len(callee, arguments) {
+            return Ok(None);
+        }
+        if self.path_len_is_ufcs(callee) {
+            let receiver = arguments
+                .first()
+                .copied()
+                .ok_or_else(|| self.error("len 需要接收者实参"))?;
+            return Ok(Some(self.expression(receiver)?));
+        }
+        Ok(Some(self.receiver(callee)?))
+    }
+
+    fn is_array_slice_len(&self, callee: ast::ExprId, arguments: &[ast::ExprId]) -> bool {
+        match self.arena().exprs[callee.0 as usize].kind {
+            ast::ExprKind::Field { base, name } => {
+                self.is_len_name(name) && self.facts.ty(base).is_some_and(Self::is_len_self)
+            }
+            ast::ExprKind::Path(path) => self.path_is_array_slice_len(path, arguments),
+            ast::ExprKind::TypeApp { base, .. } | ast::ExprKind::Paren(base) => {
+                self.is_array_slice_len(base, arguments)
+            }
+            _ => false,
+        }
+    }
+
+    fn path_len_is_ufcs(&self, callee: ast::ExprId) -> bool {
+        let ast::ExprKind::Path(path) = self.arena().exprs[callee.0 as usize].kind else {
+            return false;
+        };
+        self.arena().paths[path.0 as usize]
+            .segments
+            .as_slice(&self.arena().segments)
+            .last()
+            .is_some_and(|segment| segment.colon)
+    }
+
+    fn path_is_array_slice_len(&self, path: ast::PathId, arguments: &[ast::ExprId]) -> bool {
+        let segments = self.arena().paths[path.0 as usize]
+            .segments
+            .as_slice(&self.arena().segments);
+        let Some(last) = segments.last() else {
+            return false;
+        };
+        if !self.is_len_name(last.name) || segments.len() < 2 {
+            return false;
+        }
+        if last.colon {
+            return arguments
+                .first()
+                .and_then(|&argument| self.facts.ty(argument))
+                .is_some_and(Self::is_len_self);
+        }
+        self.path_prefix_is_len_self(&segments[..segments.len() - 1])
+    }
+
+    fn path_prefix_is_len_self(&self, prefix: &[ast::PathSegment]) -> bool {
+        let Some(first) = prefix.first() else {
+            return false;
+        };
+        let first_name = self.compiler.model.name(self.module, first.name);
+        let Some(&local) = self.names.get(first_name) else {
+            return false;
+        };
+        let mut ty = self.facts.body.slots[self.local_sources[local.index()]].clone();
+        for segment in &prefix[1..] {
+            let name = self.compiler.model.name(self.module, segment.name);
+            let Some((_, field, _)) = self.compiler.model.find_field(&ty, name) else {
+                return false;
+            };
+            ty = field;
+        }
+        Self::is_len_self(&ty)
+    }
+
+    fn is_len_name(&self, name: crate::frontend::intern::Symbol) -> bool {
+        self.compiler.model.name(self.module, name) == "len"
+    }
+
+    fn is_len_self(ty: &Ty) -> bool {
+        matches!(ty.deref(), Ty::Array(_, _) | Ty::Slice(_))
     }
 }
 

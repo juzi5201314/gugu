@@ -3,7 +3,7 @@
 use crate::frontend::hir::{CheckKind, DefId, ExprId};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const WORLD_SCHEMA_VERSION: u32 = 1;
+pub(crate) const WORLD_SCHEMA_VERSION: u32 = 2;
 
 /// 检查的证明状态：`Proved` 表示 HIR 局部事实可证安全，`Disproved` 表示 HIR 局部
 /// 事实可证必然失败，`Unknown` 表示局部事实不足、必须保留检查。
@@ -34,35 +34,78 @@ pub(crate) struct ProofFact {
     pub status: ProofStatus,
 }
 
-/// 跨函数效果摘要；布尔为真表示"可能发生"，只能从保守初值单调精化为假。
+/// 返回值与参数长度之间的关系。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) enum ReturnRelation {
+    EqLen { parameter: u32 },
+}
+
+/// 跨函数效果摘要。`may_*` 为真表示可能发生；LFP 从全假出发，超预算回退保守值。
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct FunctionSummary {
-    pub may_panic: bool,
-    pub may_call_unknown: bool,
-    pub may_mutate_len: bool,
+    pub preconditions: Vec<()>,
+    pub return_lo: Option<i64>,
+    pub return_hi: Option<i64>,
+    pub return_relations: Vec<ReturnRelation>,
+    pub read_params: u64,
+    pub write_params: u64,
+    pub alias_heap: bool,
+    pub alias_foreign: bool,
     pub reads_hidden_state: bool,
     pub writes_hidden_state: bool,
+    pub may_allocate: bool,
+    pub may_panic: bool,
+    pub may_suspend: bool,
+    pub may_call_unknown: bool,
+    pub may_mutate_len: bool,
 }
 
 impl FunctionSummary {
-    /// 保守起点：一切皆可能发生，固定点只能按证据把标志降为假。
+    /// 保守上界：一切皆可能发生。
     pub fn conservative() -> Self {
         Self {
-            may_panic: true,
-            may_call_unknown: true,
-            may_mutate_len: true,
+            preconditions: Vec::new(),
+            return_lo: None,
+            return_hi: None,
+            return_relations: Vec::new(),
+            read_params: u64::MAX,
+            write_params: u64::MAX,
+            alias_heap: true,
+            alias_foreign: true,
             reads_hidden_state: true,
             writes_hidden_state: true,
+            may_allocate: true,
+            may_panic: true,
+            may_suspend: true,
+            may_call_unknown: true,
+            may_mutate_len: true,
         }
     }
 
-    /// 效果并集：吸收 `other` 的"可能发生"，用于固定点传播与 callee 合并。
+    /// 效果并集：吸收 `other` 的"可能发生"。
     pub(crate) fn join_with(&mut self, other: &Self) {
-        self.may_panic |= other.may_panic;
-        self.may_call_unknown |= other.may_call_unknown;
-        self.may_mutate_len |= other.may_mutate_len;
+        self.return_lo = match (self.return_lo, other.return_lo) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            _ => None,
+        };
+        self.return_hi = match (self.return_hi, other.return_hi) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            _ => None,
+        };
+        if self.return_relations != other.return_relations {
+            self.return_relations.clear();
+        }
+        self.read_params |= other.read_params;
+        self.write_params |= other.write_params;
+        self.alias_heap |= other.alias_heap;
+        self.alias_foreign |= other.alias_foreign;
         self.reads_hidden_state |= other.reads_hidden_state;
         self.writes_hidden_state |= other.writes_hidden_state;
+        self.may_allocate |= other.may_allocate;
+        self.may_panic |= other.may_panic;
+        self.may_suspend |= other.may_suspend;
+        self.may_call_unknown |= other.may_call_unknown;
+        self.may_mutate_len |= other.may_mutate_len;
     }
 }
 
@@ -70,6 +113,13 @@ impl FunctionSummary {
 pub(crate) struct OwnerSummaryRecord {
     pub key: AnalysisOwnerKey,
     pub summary: FunctionSummary,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SccSummaryV1 {
+    pub owners: Vec<OwnerSummaryRecord>,
+    pub proofs: Vec<ProofFact>,
+    pub budget_exhausted: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

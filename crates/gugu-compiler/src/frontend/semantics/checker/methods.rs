@@ -130,6 +130,58 @@ impl Checker<'_, '_> {
             callee, ty, interface, &name, type_args, args, receiver, expected,
         ))
     }
+
+    fn array_slice_len(
+        &mut self,
+        callee: ExprId,
+        self_ty: &Ty,
+        name: &str,
+        type_args: AstRange<GenericArg>,
+        args: &[ExprId],
+        receiver: bool,
+    ) -> Option<Ty> {
+        if name != "len" || !matches!(self_ty.deref(), Ty::Array(_, _) | Ty::Slice(_)) {
+            return None;
+        }
+        let span = &self.arena().exprs[callee.0 as usize].span;
+        if type_args.len != 0 {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "len 没有类型实参",
+                span.clone(),
+            );
+            return Some(Ty::Error);
+        }
+        if receiver {
+            if !args.is_empty() {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    "len 没有值实参",
+                    span.clone(),
+                );
+                return Some(Ty::Error);
+            }
+        } else if args.len() != 1 {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "len 需要一个接收者实参",
+                span.clone(),
+            );
+            return Some(Ty::Error);
+        } else {
+            let actual = self.expression(args[0], Some(self_ty));
+            self.unify(&actual, self_ty, span);
+        }
+        let param = if matches!(self_ty, Ty::Ref(_)) {
+            self_ty.clone()
+        } else {
+            Ty::Ref(Box::new(self_ty.clone()))
+        };
+        self.expressions
+            .push((callee, Ty::Function(vec![param], Box::new(Ty::int()))));
+        Some(Ty::int())
+    }
+
     fn type_head(&mut self, path: PathId, span: &Span) -> Option<Ty> {
         let parts = self.model.path(self.module, path);
         let prefix = &parts[..parts.len() - 1];
@@ -216,6 +268,18 @@ impl Checker<'_, '_> {
             ) {
                 return result;
             }
+        }
+        if interface.is_none()
+            && let Some(result) = self.array_slice_len(
+                callee,
+                &self.resolve(&self_ty),
+                name,
+                type_args,
+                args,
+                receiver,
+            )
+        {
+            return result;
         }
         if interface.is_none()
             && receiver

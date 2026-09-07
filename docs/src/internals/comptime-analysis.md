@@ -300,35 +300,48 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 
 ## 阶段 23 实现桥接
 
-当前 compiler 在 **冻结前的 HIR 模块**上运行 `WholeProgramAnalysis`（query schema 1，
-嵌套在 `LowerHir` compute 内按输入指纹独立缓存），不等待 monomorphic GIR，也不回看
-`CheckedSemantics` 侧表——证明只消费 HIR 自身的字面量与类型事实，避免 AST/HIR
-两套表达式编号空间之间的配对歧义。`AnalysisOwnerKey` 为 `(owner 表下标, DefId)`；
-阶段 24 接入后同一 `AnalysisWorldV1` schema 仅将 callable 身份换为 `MonoKey`，
-`proved` / `unknown` 语义不变。
+当前 compiler 在 **冻结前的 HIR 模块**上运行分析：从每个 callable owner 构造显式 CFG
+（`Goto` / `If` / `Switch` / `Return` / 回边；`for i in 0..n` 的 header 绑定归纳变量），
+在程序点传播 `AbstractState`（可达、区间、稀疏差约束、初始化、别名类、memory version、
+效果）。循环 header 回边 widening，固定点后再做一轮 narrowing。`WholeProgramAnalysis`
+（query schema **2**）嵌套在 `LowerHir` compute 内，输入指纹取 proof 写回前的模块指纹；
+其内再嵌套 `AnalysisSccSummary`（27，schema 1）与 `FunctionAnalysisSummary`（23，schema 1）。
+SCC 内部迭代发生在 `AnalysisSccSummary` 计算闭包的本地 map 中，不通过 query 读半初始化
+摘要；跨 SCC 的 callee 才能走 `FunctionAnalysisSummary` 投影。身份键是
+`AnalysisOwnerKey = (owner 表下标, DefId)`；阶段 24 只把该键换成 `MonoKey`。
+证明只消费 HIR，不回看 `CheckedSemantics` 侧表，也不参与类型推断或 impl 选择。
 
-固定 **`analysis_semantics_revision = 1`**、**`PublicSummaryPolicyV1` 占位 revision = 1**
-（默认 SCC 迭代 32）。SCC 轮次超预算 → 摘要整体回退保守值并置 `budget_exhausted = true`；
-**不是**用户 `Error`。当前实现的证明谓词：
+`[T; N]` 与 `&[T]` 的固有 `len` 由类型检查在用户 impl 之前命中，HIR 降为
+`Builtin::Len`；数组长度为类型中的 `N`，切片长度进入 `Len` 值槽，可被 `v.len() > 10`
+一类比较收窄。
 
-- 数组下标：下标为整数字面量且 base 的 HIR 类型是 `Array(_, len)` 时，与真实长度比较
-  （`0 <= i < len` 才 `Proved`，必然越界为 `Disproved`）；切片长度不可知 → `unknown`。
-- 除法：除数为非零字面量 → `Proved`；为零 → `Disproved`；变量 → `unknown`。
-- 移位：移位量为非负字面量 → `Proved`（spec 只检查负移位量）；负 → `Disproved`。
-- Unicode 标量：字面量可构成合法 scalar → `Proved`，否则 `Disproved`。
-- 浮点转整数与 Utf8Boundary：一律 `unknown`。
+固定 **`analysis_semantics_revision = 2`**、**`PublicSummaryPolicyV1` 占位 revision = 1**
+（默认 SCC 迭代 32、块迭代 256）。SCC 轮次或块迭代超预算 → 摘要回退保守值、
+`budget_exhausted = true`，检查保持 `Unknown`；**不是**用户 `Error`。
 
-跨函数摘要是纯效果并集（`may_panic` / `may_call_unknown` / `may_mutate_len` /
-`reads_hidden_state` / `writes_hidden_state`），从保守初值出发只能单调精化；callee
-摘要按调用图并进 caller， SCC 固定点收敛后导出，超预算保持保守值。摘要不被用于
-证明谓词（证明只依赖过程内事实），供后续阶段消费。
+证明读检查表达式所在程序点、当前 memory version 上的状态：
+
+- 数组 / 切片下标：`0 <= i < N` 或 `0 <= i < Len(base)` 才 `Proved`；字面量越界仍
+  `Disproved`。切片 `Bounds { slice: true }` 仅当两端都落在 `Len` 内才 `Proved`。
+- 除法：除数区间不含 0 → `Proved`；字面量 0 → `Disproved`；否则 `Unknown`。
+- 移位：移位量区间下界 ≥ 0 → `Proved`；负字面量 → `Disproved`。
+- Unicode 标量：值区间完全落在合法 scalar 且不含 surrogate → `Proved`。
+- 浮点转整数与 Utf8Boundary：可保持 `Unknown`。
+- 只有支配该检查点的 `Proved` 写入 `RuntimeCheck.proof`；**不删除** HIR 检查节点
+  （物理消除仍是阶段 29）。
+
+未知调用、别名、并发、FFI、asm、spawn、COW seal、resource publish、长度可能被改写的
+路径一律保留检查。跨函数 `FunctionSummary` 含规范字段（返回区间/关系、读写 place、
+别名效果、hidden state、`may_allocate` / `may_panic` / `may_suspend` / `may_call_unknown`）
+以及长度失效用的 `may_mutate_len`；从默认空效果单调精化，join 只加强“可能发生”。
+`Builtin::Len` 是纯函数。直接函数项调用按 `Resolved(Def)` 进入调用图与摘要查找，
+不把已知 callee 当成 unknown。`PublicFunctionSummary` 本阶段仍为空 map。
 
 证明在 `LowerHir` 构建 Module 后、`Validated::freeze` 前写回 `RuntimeCheck.proof`；
 world 的输入指纹取 **proof 写回前** 的模块指纹，不混合证明输出。后端
 `ImagePlan.runtime_checks_elided_count` 统计 `Proved` 数量，供 smoke；**不改变**语言
-语义（未知路径仍保留 HIR 检查节点）。`ActionInputs` 的 `macro_budget`、
-`analysis_policy` 与 `analysis_world` 指纹进入前端 action key；跨 package
-`public_summaries` 本阶段为空 map。
+语义。`ActionInputs` 的 `macro_budget`、`analysis_policy` 与 `analysis_world` 指纹进入
+前端 action key。
 
 
 局部证明按 `MonoKey`、闭世界、目标、feature/cfg、runtime/标准库版本和分析策略缓存；公共
@@ -382,6 +395,15 @@ WholeProgramAnalysis(world_key, analysis_policy)
 拼接阶段（注册生成快照与展开记录、把片段解析进宿主 arena、执行片段 cfg 与列表
 手术）发生在 query 之外，由轮次驱动器在宿主模块上完成；同一份生成文本在解析闸门
 与拼接各解析一次，两次都使用主 lexer/parser，结果由确定性保证一致。
+
+阶段 23 起分析 query 在前端注册：
+
+- `AnalysisSccSummary`（编号 27，schema 1）的 key 是排序后的 `AnalysisOwnerKey`、
+  analysis policy 与 proof 写回前的模块指纹；计算闭包内对 SCC 成员做摘要固定点，
+  不经 query 读取本 SCC 的半初始化结果。
+- `FunctionAnalysisSummary`（编号 23，schema 1）从已完成的 SCC 摘要投影单个 owner。
+- `WholeProgramAnalysis`（编号 24，schema 2）按凝聚图拓扑请求上述嵌套 query，合并
+  为 world-local 证明与摘要；`PublicFunctionSummary` 仍为空。
 
 每个 GIR 改写 pass 必须在调试构建运行局部 verifier；跨阶段边界运行完整 verifier。verifier
 至少检查：

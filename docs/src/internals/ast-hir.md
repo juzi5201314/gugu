@@ -59,9 +59,10 @@ query 依赖，不靠可变的全局 phase 回跳：
 显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功
 产物。
 
-阶段 23 起，在 monomorphic GIR 未就绪前，`abstract_analysis` 只消费冻结前的 HIR 模块
-（字面量与类型事实自足，不回看 `CheckedSemantics` 侧表）；GIR 就绪后输入升级为
-monomorphic GIR，query kind 仍为 `WholeProgramAnalysis`。
+阶段 23 起，在 monomorphic GIR 未就绪前，`abstract_analysis` 从冻结前 HIR 构造显式 CFG，
+在程序点 `AbstractState` 上证明并只写回 `RuntimeCheck.proof`（不回看 `CheckedSemantics`
+侧表，不删除检查节点）；GIR 就绪后输入升级为 monomorphic GIR，query kind 仍为
+`WholeProgramAnalysis`。
 
 ## 索引与 arena
 

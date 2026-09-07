@@ -202,6 +202,7 @@ pub(crate) enum Builtin {
     DowncastCopy,
     TypeName,
     TypeAsInt,
+    Len,
     Memory(super::super::semantics::model::MemoryIntrinsic),
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -94,7 +94,7 @@ while let Some(x) = it.next() { ... }
 - `break` / `continue` 作用于最内层循环。
 - `for x in xs` 展开为：`let it = xs.into_iter()`，然后反复 `it.next()`，见 [接口 · IntoIter](traits.md)。
   - `[T; N]` 与 `&[T]`：`Item = T`，每次**拷贝**元素。
-  - `Range`（`0..n`）：`Item = int`。`n` 是表达式，常用 `xs.len()`（方法，不是字段）。
+  - `Range`（`0..n`）：`Item = int`。`n` 是表达式，常用 `xs.len()`（方法，不是字段）。`[T; N]` 与 `&[T]` 的 `len` 是语言固有方法，返回 `int`。
   - `string`：不实现 `IntoIter`。用 `s.chars()` 或标准库字节迭代。
   - 其它类型必须实现 `IntoIter`。
   - 要避免大结构体拷贝：遍历下标，或让 `Item = &T`。

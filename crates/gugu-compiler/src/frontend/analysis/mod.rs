@@ -1,10 +1,16 @@
-//! AbstractAnalysis：冻结前 HIR 上的局部证明与跨函数摘要固定点。
+//! AbstractAnalysis：冻结前 HIR 上的 CFG 固定点、范围证明与跨函数摘要。
 //!
-//! 证明只依赖 HIR 自身的字面量与类型事实；跨 owner 摘要按效果并集传播，
-//! 从保守初值单调精化，超预算时回退保守值并保留全部检查。
+//! 证明消费 HIR 程序点上的 AbstractState；跨 owner 摘要按调用图 SCC 求解，
+//! 超预算时回退保守值并保留全部检查。
+pub(crate) mod callgraph;
+pub(crate) mod cfg;
+mod domain;
+mod interpret;
 pub(crate) mod policy;
+mod prove;
 pub(crate) mod query;
 pub(crate) mod solver;
+mod transfer;
 mod types;
 
 pub(crate) use policy::AnalysisPolicyV1;
@@ -13,7 +19,7 @@ pub(crate) use types::{AnalysisWorldV1, ProofStatus, WORLD_SCHEMA_VERSION};
 #[cfg(test)]
 pub(crate) use types::{FunctionSummary, RuntimeCheckKey};
 
-pub(crate) const ANALYSIS_SEMANTICS_REVISION: u32 = 1;
+pub(crate) const ANALYSIS_SEMANTICS_REVISION: u32 = 2;
 
 pub(crate) fn empty_world() -> AnalysisWorldV1 {
     AnalysisWorldV1 {
