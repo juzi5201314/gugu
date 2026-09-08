@@ -318,7 +318,7 @@ impl Diagnostic {
         self.span.as_ref()
     }
 
-    /// 将诊断渲染为阶段 3 的文本格式。
+    /// 将诊断渲染为规范文本格式。
     pub fn render_text(&self) -> String {
         match &self.span {
             Some(span) => format!(

@@ -20,8 +20,9 @@
 1. 实现只进入该阶段所属的真实归属层；不得通过弱化 fixture、跳过 snapshot 或增加平行兼容接口掩盖缺口。
 2. 公开行为与对应 `docs/src/spec/` 章节一致，内部表示与对应 `docs/src/internals/` 章节一致；若发现规范缺口，先在同一阶段修订规范并同步 `docs/src/SUMMARY.md` 导航。
 3. 测试使用固定输入、确定性顺序、进程内替身和明确的失败边界；网络、真实子进程、压力负载和随机性能测量放到专门的 bench/手工验证。
-4. 阶段验证通过后才能将该阶段从 `[ ]` 改为 `[x]`。工作区级验证使用 `cargo fmt --all --check`、`cargo build --workspace` 和 `cargo nextest run --workspace`；文档构建使用 `mdbook build -d target/book`。
+4. 阶段验证通过后从本文件删除该条目，不要把编号写进其它文档。工作区级验证使用 `cargo fmt --all --check`、`cargo build --workspace` 和 `cargo nextest run --workspace`；文档构建使用 `mdbook build -d target/book`。
 5. 代码或规范提交遵守仓库的 `docs/.commit` 跟踪规则；路线图本身不代表任何阶段已实现。
+6. 「阶段 N」只存在于本路线图，是临时任务标识。禁止把阶段号写入 `docs/src/spec/`、`docs/src/internals/`、ADR、代码注释或用户可见输出。实现对照现行规范与 internals 契约；规范有缺口时当场修订规范，不把临时任务编号写进规范。
 
 ## 路线图使用约束：实现必须形成可运行闭环
 

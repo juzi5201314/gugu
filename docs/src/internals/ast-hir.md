@@ -59,18 +59,15 @@ query 依赖，不靠可变的全局 phase 回跳：
 显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功
 产物。
 
-阶段 26 起，`abstract_analysis` 在 `LowerHir` 冻结之后消费 generic GIR body：
-`BuildGenericGir` → `mono::close` → `late::run` → `WholeProgramAnalysis`。
-证明只写入 `AnalysisWorldV1.proofs`（不回看 `CheckedSemantics` 侧表，不删除检查节点，
-不回写 `RuntimeCheck`）；query kind 仍为 `WholeProgramAnalysis`。
-
-阶段 27 起，全程序分析之后运行 `EscapeAndPlacement`：
+`abstract_analysis` 在 `LowerHir` 冻结之后消费 generic GIR body。当前管线为
 `BuildGenericGir` → `mono::close` → `late::run` → `attach_fragments` →
 `WholeProgramAnalysis` → `EscapeAndPlacement` → `PublicFunctionSummary`。
-placement 只写入 `GirWorldV1.placement`，不回写 HIR，也不在本阶段改写 GIR CFG。
+证明只写入 `AnalysisWorldV1.proofs`（不回看 `CheckedSemantics` 侧表，不删除检查节点，
+不回写 `RuntimeCheck`）；query kind 仍为 `WholeProgramAnalysis`。
+placement 只写入 `GirWorldV1.placement`，不回写 HIR，也不改写 GIR CFG。
 
-阶段 24 起，第 16 步已闭合可达实例图：`CollectMonoRoots` 与 `InstantiateGir`
-从冻结 HIR 与 `CheckedSemantics` 收集调用边（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)），
+第 16 步闭合可达实例图：`CollectMonoRoots` 与 `InstantiateGir`
+从冻结 HIR 与 `CheckedSemantics` 收集调用边（见[单态化与编译缓存](monomorphization-cache.md#单态化闭合与公共摘要)），
 分析身份键为 `MonoKey`。`InstantiateGir` 不从 GIR 重解析调用边。
 
 ## 索引与 arena
@@ -236,7 +233,7 @@ parser 必须满足：
 
 `frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
-阶段 13–20 的版本化结果为 `CheckedSemantics`（schema 7），它在 TypeCheck query 中序列化，包含：
+版本化结果为 `CheckedSemantics`（schema 7），它在 TypeCheck query 中序列化，包含：
 
 - 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
 - 每个局部槽的规范名称和声明字节范围；闭包捕获及清理路径的重检查可以据此指向同一个源码绑定，HIR 不把语义检查遍历中临时分配的槽编号当作持久绑定身份。
@@ -260,7 +257,7 @@ parser 必须满足：
 
 TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。当前 schema 为 5：owner 携带显式清理计划表与 `return_plan`，模块类型表在存在定义时 intern `Unit`/`Never`/`Bool`/`Ptr(Unit)`，规范指纹域为 `gugu-validated-hir-v2`；query 只构造、校验并冻结 Module，不再嵌套单态化、late 或全程序分析。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
 
-镜像计划只从冻结 HIR 读取入口、owner 数量和域隔离的 BLAKE3 指纹；原先仅生成 `main -> ReturnUnit` 的 `ir.rs` 已删除。GIR cleanup CFG、外部桥接执行和汇编机器编码分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；运行时稠密 TypeId 分配、vtable 物化和实际容器分配分别属于冻结类型集合及后续 lowering 阶段。
+镜像计划只从冻结 HIR 读取入口、owner 数量和域隔离的 BLAKE3 指纹；原先仅生成 `main -> ReturnUnit` 的 `ir.rs` 已删除。GIR cleanup CFG 已接入；外部桥接执行和汇编机器编码尚未物化。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；运行时稠密 TypeId 分配属于冻结类型集合，vtable 物化和实际容器分配属于后续 lowering。
 
 trait 表先收集声明和 impl 头，形成关联类型后再检查方法签名；关联项不泄漏到模块值命名空间。特化使用类型模式包含关系和交集检查，重复参数必须保持相等约束。否定 impl 与肯定 impl 共用选择部分序；泛型调用的 trait 义务在实参推断收敛后验证，失败时保留约束或否定实现的源码位置。关联投影保存 Self、trait 实例和成员名称的完整身份，不能仅以短名称等同两个投影。
 
@@ -319,11 +316,11 @@ HIR 保留对诊断有价值的 `if`、`match`、循环、`try`、`async`、`sel
 
 `async`、`select` 和 `defer` 在 HIR中保留专用节点，并各自携带由[表达式规范](../spec/expressions.md)生成的一次求值、出口和提交/cleanup计划；GIR只能消费该计划，不能按节点名重新解释随机、公平、取消或展开语义。
 
-字符串转义、字节字符串的单字节 `\xHH` 与 Unicode UTF-8 编码、f-string 的双花括号都在此边界解码。格式能力用闭集格式种类携带，不把格式字符串交给 GIR 重解析；标准库格式 trait 执行与 builder lowering 在阶段 61 完成。
+字符串转义、字节字符串的单字节 `\xHH` 与 Unicode UTF-8 编码、f-string 的双花括号都在此边界解码。格式能力用闭集格式种类携带，不把格式字符串交给 GIR 重解析；标准库格式 trait 执行与 builder lowering 尚未物化。
 
 ## 语义检查输出
 
-阶段 13–15 的 body checker 在 `NameResolution` 完成后消费配置视图。每个函数 owner 建立独立的局部槽表：遮蔽分配新槽，分支状态按所有可达前驱求交，未初始化槽不能作为读操作数。表达式检查产出唯一 `Ty`，对 `never` 采用合流规则；place 检查与赋值定位共享同一接收者和下标求值。
+body checker 在 `NameResolution` 完成后消费配置视图。每个函数 owner 建立独立的局部槽表：遮蔽分配新槽，分支状态按所有可达前驱求交，未初始化槽不能作为读操作数。表达式检查产出唯一 `Ty`，对 `never` 采用合流规则；place 检查与赋值定位共享同一接收者和下标求值。
 
 模式检查先生成绑定计划，再执行构造器/标量区间覆盖矩阵。守卫不贡献覆盖，or 模式必须拥有相同绑定集合和类型；覆盖矩阵只拆分边界区间和构造器，不枚举无限标量域。检查失败通过 `Diagnostic` 返回，失败的语义结果不能进入后续 lowering。
 
@@ -381,7 +378,7 @@ Registration = Static | Flag | Chain
 
 ## HIR 冻结条件
 
-阶段 12b/20 的 `Module::verify` 独立检查源范围与展开链、定义稳定排序和无环父关系、类型/声明引用、owner 与所有侧表索引、表达式前向子边和可达性、构造器字段域、捕获来源、类型调整链及控制流出口的完整清理作用域链。`Validated` 的字段私有，唯一构造入口只对 frontend 可见；它持有不可变 `Arc<Module>` 和规范序列化指纹，backend 接口只接受 `&Validated`。
+`Module::verify` 独立检查源范围与展开链、定义稳定排序和无环父关系、类型/声明引用、owner 与所有侧表索引、表达式前向子边和可达性、构造器字段域、捕获来源、类型调整链及控制流出口的完整清理作用域链。`Validated` 的字段私有，唯一构造入口只对 frontend 可见；它持有不可变 `Arc<Module>` 和规范序列化指纹，backend 接口只接受 `&Validated`。
 
 一个 owner 只有同时满足适用阶段的以下条件才可以冻结并交给 GIR；EarlyConst、源码宏、LateConst 的专用条件在对应阶段接入同一门禁：
 

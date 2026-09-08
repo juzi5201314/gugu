@@ -91,9 +91,9 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision + 已完成 world 的结果指纹（schema 2） | 内容寻址跨 package 摘要 |
 | 29 | `EscapeAndPlacement` | 放置前 GIR 指纹 + 分析输入指纹 + 冻结 HIR 指纹（schema 1，域 `gugu-escape-placement-v1`） | `PlacementWorldV1` |
 
-新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--29 只表达登记的新 query，不得重用或改变既有编号的含义。阶段 24 起，23 与 27 的 callable 身份是 `MonoKey`；阶段 24 前为 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
+新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--29 只表达登记的新 query，不得重用或改变既有编号的含义。query 23 与 27 的 callable 身份是 `MonoKey`；使用 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
 
-阶段 26 起 `BuildGenericGir` 已落地：每个冻结 HIR owner 一份 generic body，依赖 `LowerHir` schema 5 的模块指纹。阶段 27 起 schema 为 2，body 携带 `large_copies`；`GirWorldV1` schema 2 在 fragment 之外保存 placement，指纹域为 `gugu-gir-world-v2`。`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹（含 placement）进入 `ActionInputs` 与 `ImagePlan`；全程序分析仍消费放置前的 GIR 指纹。`LowerHir` 只构造、校验并冻结；单态化闭合、late、分析与 placement 在冻结之后按 `gir → mono → late → analysis → placement → summary` 顺序执行。
+`BuildGenericGir` 为每个冻结 HIR owner 构造一份 generic body，依赖 `LowerHir` schema 5 的模块指纹。当前 schema 为 2，body 携带 `large_copies`；`GirWorldV1` schema 2 在 fragment 之外保存 placement，指纹域为 `gugu-gir-world-v2`。`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹（含 placement）进入 `ActionInputs` 与 `ImagePlan`；全程序分析仍消费放置前的 GIR 指纹。`LowerHir` 只构造、校验并冻结；单态化闭合、late、分析与 placement 在冻结之后按 `gir → mono → late → analysis → placement → summary` 顺序执行。
 
 ## query 状态机
 
@@ -198,14 +198,15 @@ compile/v1/quarantine/
 writer 在 `tmp/` 中以随机不可猜名称创建同文件系统临时文件，完整写入、刷新文件内容、重新读取并验证摘要后，以 create-if-absent 原子发布到目标路径。目标已存在时验证既有对象并丢弃临时文件；同 key 不同内容是 compiler internal error。Windows 和 Linux 都不得先删除已存在目标再重命名。损坏文件原子移入 `quarantine/` 后重新构建；隔离失败时也必须绕过该 entry，不能继续反序列化。
 
 reader 的已打开文件句柄就是 lease：Linux 即使被 unlink 仍从原 inode 完整读取；Windows 以 `FILE_SHARE_READ` 打开且不授予 delete sharing，使删除非阻塞失败。LRU 回收对候选执行一次非阻塞删除，Linux unlink 后由最后句柄回收，Windows 遇 sharing violation 直接跳过；不得等待活动 reader。writer 只持有 `tmp/` 文件并以 create-if-absent 发布。进程崩溃留下的 `tmp/` 文件不被索引，下一次 cache maintenance 可以清理。
-## 阶段 6 bootstrap 输入实现
 
-阶段 6 的 `project::cache::ActionInputs` 已实现 action key 的输入收集和规范排序，但尚未实现本章定义的持久 object/action record reader、LRU 索引或 query fingerprint 状态机；这些仍属于阶段 11 与阶段 71。阶段 6 的 `DependencyCache` 只负责外部 package 源码输入，不把未验证源码、编译中间对象或 target 视图混入依赖缓存。
+## 依赖缓存与 ActionInputs
 
-## 阶段 11 实现状态
+`project::cache::ActionInputs` 已实现 action key 的输入收集和规范排序。session 内 query engine 与编译对象存储见下一节；持久 action record reader、LRU 索引和 CLI cache 子命令尚未接入。`DependencyCache` 只负责外部 package 源码输入，不把未验证源码、编译中间对象或 target 视图混入依赖缓存。
 
-阶段 11 已在 `gugu-compiler::query` 落地 session 内 query engine 与编译对象存储：
-`QueryKind` 固定登记 1--28，`QueryKey` 使用 schema 与规范 key 形成域隔离摘要；每个
+## Query engine 与对象存储
+
+`gugu-compiler::query` 落地 session 内 query engine 与编译对象存储：
+`QueryKind` 固定登记 1--29，`QueryKey` 使用 schema 与规范 key 形成域隔离摘要；每个
 query cell 按 `Uncomputed -> Computing -> Complete/Failed/Cancelled` 转换，并以条件变量
 让并发请求共享唯一计算结果。成功结果保存不可变 payload、结果 fingerprint 和按稳定 key
 排序去重的直接依赖；失败与取消不会作为成功对象写入持久存储。
@@ -215,13 +216,12 @@ query cell 按 `Uncomputed -> Computing -> Complete/Failed/Cancelled` 转换，�
 kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 verifier；损坏或 schema
 不匹配的对象会被移入 `quarantine/`，不可信字节不会交给 verifier 之外的 consumer。
 
-当前阶段只提供可复用的 compiler 基础设施；阶段 71 才会把 action record、LRU 索引、清理
-命令和 target 物化完整接入 CLI。
+当前只提供可复用的 compiler 基础设施；action record、LRU 索引、清理命令和 target 物化尚未完整接入 CLI。
 
-## 阶段 24 实现桥接
+## 单态化闭合与公共摘要
 
 `CollectMonoRoots`（12，schema 2）与 `InstantiateGir`（13，schema 2）已在
-`gugu-compiler::frontend::mono` 落地。阶段 26 起闭合发生在 `LowerHir` 冻结之后，
+`gugu-compiler::frontend::mono` 落地。闭合发生在 `LowerHir` 冻结之后，
 与 generic GIR、late 和全程序分析同一管线：
 
 - `StableTypeKey`：语义类型经 GBC1 编码（`u16` kind tag、小端定宽、长度前缀）
@@ -253,13 +253,13 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
 - `InstanceRecordV1` 保留实例键、具体签名/ABI 指纹、body 输入指纹、调用位点与
   callee 实例映射、selected_impls、vtable/metadata 根、外部符号及 late 依赖。
   fragment 输入指纹不依赖定义表编号，且实现变化会更新；它与公共签名指纹分离。
-  机器码、relocation 与 stack map 由阶段 52 及之后生成。
+  机器码、relocation 与 stack map 由后端代码生成写出。
 - `PublicFunctionSummary`（28，schema 2）从已完成实例 SCC 投影公共摘要：效果位、
   严格递增的 read/write 参数序号、参数数量与条件事实。参数集合没有 64 个的截断边界；
   verifier 检查版本、未知效果位、排序及参数引用范围。对象 key 对规范 GBC1 内容取摘要，
   不包含私有定义或 session-local 编号。生产者输入更新会重算 query，但可消费内容
   未变时对象 key 不变。对象 key 经 `ActionInputs::add_public_summary` 进入前端 action key；
-  磁盘持久化与跨 package 消费由阶段 71 接入。
+  磁盘持久化与跨 package 消费尚未接入 CLI。
 - 分析 query 23/27 的 schema 为 4，world schema 为 5。固定点在 generic GIR body 上求解，
   成员与调用位点按具体实例确定；不把同一泛型定义的首个摘要复制给其它实例。
   SCC 按凝聚图顺序完成，函数 query 仅投影完成结果。共享 HIR 上的检查只有在全部

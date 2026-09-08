@@ -1,4 +1,4 @@
-//! 阶段 22：源码宏展开测试（五个 slot、嵌套轮次、失败边界与缓存一致性）。
+//! 源码宏展开测试（五个 slot、嵌套轮次、失败边界与缓存一致性）。
 
 use crate::{CompileRequest, Compiler, DiagnosticCode, TargetName};
 
@@ -252,7 +252,7 @@ fn invalid_expansion_limit_values_are_rejected() {
 #[test]
 fn macro_in_early_const_domain_is_rejected() {
     // std.syntax.parse_* 只能在 SourceExpand 域调用：普通 comptime 常量中调用
-    // 在求值前返回 E0045（阶段 21 语义）。
+    // 在求值前返回 E0045。
     let compilation = compile(
         "const c: int = comptime {\n    let r = std.syntax.parse_source(\"1\")\n    1\n}\nfn main() { _ = c }",
     );

@@ -1,6 +1,6 @@
 //! 抽象域与可序列化的 world 结果。
 //!
-//! 阶段 24 起，摘要记录与 query 身份键使用 `MonoKey` 规范字节；world-local
+//! 摘要记录与 query 身份键使用 `MonoKey` 规范字节；world-local
 //! 证明键仍为 `(owner 表下标, ExprId)`（不跨 query 持久化）。
 
 use crate::frontend::hir::{CheckKind, ExprId};

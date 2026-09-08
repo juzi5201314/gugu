@@ -94,8 +94,8 @@ registry 的规范摘要、条目 evaluator revision 和验证器 revision 都�
 重定位、运行时常量初始化和分支操作数消费；不得修改冻结 HIR/GIR，也不得触发新的前端或
 单态化 query。
 
-阶段 25 的 late 求值由 `frontend::late` 执行 `FreezeTypeUniverse`（25，schema 1）和
-`EvaluateLateComptime`（26，schema 1）。阶段 26 起该步骤发生在 `LowerHir` 冻结之后、
+late 求值由 `frontend::late` 执行 `FreezeTypeUniverse`（query 25，schema 1）和
+`EvaluateLateComptime`（query 26，schema 1）。该步骤发生在 `LowerHir` 冻结之后、
 `mono::close` 与全程序分析之间，不再嵌在 `LowerHir` compute 内。
 `InstantiateGir` 和实例 world 的 schema 为 3，携带每实例具体类型记录与
 HIR 类型到稳定类型键的绑定；名称、布局、递归字段依赖和 vtable payload 类型
@@ -104,7 +104,7 @@ HIR 类型到稳定类型键的绑定；名称、布局、递归字段依赖和 
 类型记录按完整 32 字节 `StableTypeKey` 摘要排序，下标即 TypeId；同时保留
 规范编码以检查摘要冲突。`!` 与 `MaybeUninit[T]` 不占编号，后者内部类型仍进入
 依赖闭包。unsized 切片保留类型身份但没有固定布局，不能伪造固定大小 descriptor。
-vtable 记录保存接口稳定键与已检查的具体类型编号；物理 GC section 在阶段 39 写出。
+vtable 记录保存接口稳定键与已检查的具体类型编号；物理 GC section 由 [GC 元数据](gc-metadata.md) 写出，当前尚未物化。
 
 `LateKey` 保存实例摘要、owner 内表达式编号、结果类型键和完整静态求值闭包摘要。
 显式 comptime 与依赖 late 的初始化器消费结果表；`type_id[T]` 和计数 intrinsic
@@ -329,7 +329,7 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 6. caller 只依赖 callee 的公共对象 key，局部证明另留在当前 world；
 7. 对无法收敛的部分返回 `unknown`，不删除安全检查。
 
-## 阶段 26 实现桥接
+## 当前分析管线
 
 当前 compiler 在 **冻结后的 generic GIR body** 上运行分析：每个 callable owner 使用
 `BuildGenericGir` 已验证的显式 CFG，在程序点传播 `AbstractState`（可达、区间、稀疏差约束、
@@ -343,7 +343,7 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 `WholeProgramAnalysis`（query schema **5**）输入指纹含冻结 HIR
 指纹、generic GIR 指纹、late/mono 图指纹与策略字节；其内再嵌套 `AnalysisSccSummary`
 （27，schema **4**）与 `FunctionAnalysisSummary`（23，schema **4**）。身份键为 `MonoKey`
-（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)）。
+（见[单态化与编译缓存](monomorphization-cache.md#单态化闭合与公共摘要)）。
 SCC 按实例图的凝聚顺序求解，每个实例具有独立固定点状态；解释器共享 owner 的 generic
 GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir` 仍从 HIR 收集调用边，
 不从 GIR 重解析。运算符、迭代、try、格式化与局部 static 初始化器的调用效果均进入分析。
@@ -372,7 +372,7 @@ GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir
 - Unicode 标量：值区间完全落在合法 scalar 且不含 surrogate → `Proved`。
 - 浮点转整数与 Utf8Boundary：可保持 `Unknown`。
 - 只有支配该检查点的 `Proved` 写入 `AnalysisWorldV1.proofs`；**不删除** HIR 检查节点
-  （物理消除仍是阶段 29）。
+  （物理消除在 LIR 优化管线完成）。
 
 复合赋值按操作符更新原值，范围越过整数位宽时取该类型的保守范围，不能保留未回绕的
 数学结果。循环再次执行表达式时清除该表达式上次求值的等式与范围。引用写入、未知调用、
@@ -386,12 +386,12 @@ GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir
 所有可达返回出口的区间共同形成摘要；调用点消费已选实例的范围。未改写参数的直接 `len`
 返回可形成 `EqLen`，纯调用将该关系映射到实参长度；写入或并发边界后不得恢复旧长度事实。
 `Builtin::Len` 是纯函数。直接函数项调用按 `Resolved(Def)` 进入调用图与摘要查找，
-不把已知 callee 当成 unknown。`PublicFunctionSummary`（28，schema 2）自阶段 24 起从已完成实例 SCC 投影
+不把已知 callee 当成 unknown。`PublicFunctionSummary`（28，schema 2）从已完成实例 SCC 投影
 `PublicFunctionSummaryV1`：公共函数实例产生内容寻址摘要对象，经
 `ActionInputs::add_public_summary` 进入前端 action key；私有函数不产生公共对象。
 interface place 只引用参数序号、返回值与公开 static 稳定键投影，私有状态折叠为
 hidden-state 标志；对象 key 只由可消费语义内容产生。磁盘 object 持久化与跨
-package 消费由阶段 71 接入。
+package 消费尚未接入 CLI。
 
 证明在冻结 HIR 与 generic GIR 就绪后写入 `AnalysisWorldV1.proofs`，不回写 HIR。
 单态化闭合与公共摘要投影在冻结之后执行（`mono::close` → `late::run` →
@@ -439,7 +439,7 @@ WholeProgramAnalysis(world_key, analysis_policy)
 `WholeProgramAnalysis` 包含排序后的可达图、SCC 摘要、公共摘要键和 world-local 证明事实。
 所有结果通过已有 query 状态机和 cycle/fixpoint 规则生成，不返回半初始化对象。
 
-阶段 22 起两个源码宏 query 在前端注册：
+两个源码宏 query 在前端注册：
 
 - `ParseSource`（编号 21，schema 1）的 key 是 `(source slot 字节, 生成文本 BLAKE3)`；计算闭包
   用主 lexer/parser 对文本做一次性闸门解析，成功返回空结果，失败返回首个语法错误的
@@ -454,7 +454,7 @@ WholeProgramAnalysis(world_key, analysis_policy)
 手术）发生在 query 之外，由轮次驱动器在宿主模块上完成；同一份生成文本在解析闸门
 与拼接各解析一次，两次都使用主 lexer/parser，结果由确定性保证一致。
 
-阶段 23 起分析 query 在前端注册；阶段 24 起身份键升级为 `MonoKey`：
+分析 query 在前端注册，身份键为 `MonoKey`：
 
 - `AnalysisSccSummary`（编号 27，schema 4）的 key 是排序后的 `MonoKey` 集、
   analysis policy 与 world 输入指纹；计算闭包内对具体实例做摘要固定点，

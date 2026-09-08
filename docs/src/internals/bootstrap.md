@@ -1,38 +1,38 @@
 # Compiler bootstrap 与 action graph
 
-本章固定官方 compiler 从工程入口逐步接入完整编译管线时的 bootstrap 边界。它是实现说明，不增加 Gugu 语言语义，也不构成跨 compiler identity 的 ABI。公开行为以 [`spec/`](../spec/overview.md) 为准；后续阶段必须在本章登记的归属层继续扩展，不能另起一套语义等价实现。
+本章固定官方 compiler 从工程入口接入完整编译管线时的 bootstrap 边界。它是实现说明，不增加 Gugu 语言语义，也不构成跨 compiler identity 的 ABI。公开行为以 [`spec/`](../spec/overview.md) 为准；后续能力必须在本章登记的归属层继续扩展，不能另起一套语义等价实现。
 
-## 阶段 1 交付边界
+## 工程入口与镜像计划
 
-阶段 1 建立 Rust compiler bootstrap、单一 `gugu` 入口、目标描述、确定性诊断、bootstrap 前端、稠密 IR、后端 image plan 和 Gugu runtime 源资源登记。此阶段可检查空 package、内存中的单文件入口和文件系统单文件入口，并为合法的 `fn main() { ... }` 生成端到端 action graph。
+官方 compiler 以 Rust 实现 bootstrap：单一 `gugu` 入口、目标描述、确定性诊断、前端、稠密 IR、后端 image plan 和 Gugu runtime 源资源登记。它可以检查空 package、内存中的单文件入口和文件系统单文件入口，并为合法的 `fn main() { ... }` 生成端到端 action graph。
 
-阶段 1 的 `ImagePlan` 是 compiler 内存中的验证结果，不是 ELF、PE、静态库或共享库。`emit-image` action 在本阶段保持 `skipped`，因此成功检查不会写出伪造的目标镜像；任一前置 action 失败时，所有后续 action 都会被跳过，结果中不会留下镜像计划。真正的 machine encoder、镜像 writer 和 rt0 写出分别属于阶段 52、56、57。
+`ImagePlan` 是 compiler 内存中的验证结果，不是 ELF、PE、静态库或共享库。`emit-image` action 保持 `skipped`，因此成功检查不会写出伪造的目标镜像；任一前置 action 失败时，所有后续 action 都会被跳过，结果中不会留下镜像计划。machine encoder、镜像 writer 和 rt0 写出分别由[后端](backend.md)与[运行时](../spec/runtime.md#rt0-与启动)契约规定，当前尚未物化。
 
-## 阶段 2 交付边界
+## CLI 入口与输出
 
-阶段 2 将 `gugu` 作为唯一 CLI 入口：根级全局参数可在子命令前后解析，配置按内置默认、用户配置、当前 workspace 的 `.gugu/config.toml`、`--config`、环境变量、命令行的顺序合并，后层覆盖前层。`--frozen` 在解析结果中同时设置 `offline` 与 `locked`。
+`gugu` 是唯一 CLI 入口：根级全局参数可在子命令前后解析，配置按内置默认、用户配置、当前 workspace 的 `.gugu/config.toml`、`--config`、环境变量、命令行的顺序合并，后层覆盖前层。`--frozen` 在解析结果中同时设置 `offline` 与 `locked`。
 
-规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。阶段 2 只有 `build`、`check`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
-现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已接入源码、清单、依赖、缓存、词法/AST、类型/语义检查及冻结 HIR；runtime、GIR、后端机器码与标准库仍按路线图对应阶段推进。
+规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。`build`、`check`、`fmt`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
+现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已接入源码、清单、依赖、缓存、词法/AST、类型/语义检查、冻结 HIR 与 generic GIR；runtime 调度/GC、LIR、后端机器码与标准库语义仍按对应内部契约推进。
 `text` 保留人读的 action/诊断/最终结果；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
-## 阶段 3 交付边界
+## 源码快照与 Span
 
-阶段 3 在 `source` 模块落地源码快照与 Span 系统：`load-sources` 现在把每个输入固化为不可变 `SourceSnapshot`——UTF-8 校验、BOM 拒绝、`u32` 长度上限、BLAKE3-256 内容摘要与规范行首表。逻辑路径按词法归一：解析 `.` 与 `..`、统一为正斜杠分隔符、拒绝绝对路径、反斜杠与越界回溯，保证相同输入在不同操作系统、工作目录与换行环境下产生相同 span。Span 端点必须落在 UTF-8 字符边界，行首表的列号按 Unicode 标量而非字节数计算；Span 携带所属源码表的 `SourceTableId`，跨表的 span 在宏展开注册时被拒绝。
+`source` 模块落地源码快照与 Span 系统：`load-sources` 把每个输入固化为不可变 `SourceSnapshot`——UTF-8 校验、BOM 拒绝、`u32` 长度上限、BLAKE3-256 内容摘要与规范行首表。逻辑路径按词法归一：解析 `.` 与 `..`、统一为正斜杠分隔符、拒绝绝对路径、反斜杠与越界回溯，保证相同输入在不同操作系统、工作目录与换行环境下产生相同 span。Span 端点必须落在 UTF-8 字符边界，行首表的列号按 Unicode 标量而非字节数计算；Span 携带所属源码表的 `SourceTableId`，跨表的 span 在宏展开注册时被拒绝。
 
-`SourceMap` 按逻辑路径排序分配稠密文件 ID、拒绝重复路径，并为阶段 22 的源码宏预留确定性展开注册：`ExpansionRecord` 记录父展开、宏调用与定义位置、生成源码哈希与片段类别，注册顺序按调用位置、轮次与片段顺序稳定。诊断的源码校验码为 `E0004`~`E0008`（非法 UTF-8、BOM、非法逻辑路径、span 越界、源文件过大），全部诊断按路径、偏移、级别、代码稳定排序。
+`SourceMap` 按逻辑路径排序分配稠密文件 ID、拒绝重复路径，并为源码宏提供确定性展开注册：`ExpansionRecord` 记录父展开、宏调用与定义位置、生成源码哈希与片段类别，注册顺序按调用位置、轮次与片段顺序稳定。诊断的源码校验码为 `E0004`~`E0008`（非法 UTF-8、BOM、非法逻辑路径、span 越界、源文件过大），全部诊断按路径、偏移、级别、代码稳定排序。
 
-## 阶段 4 交付边界
+## 清单、workspace 与 target
 
-阶段 4 在 `project` 模块落地清单、workspace 与 target 发现，并把 CLI 的 `build`/`check` 无文件参数路径切换为项目模式。清单发现从当前目录向父目录查找最近 `gugu.toml`；解析使用 serde 严格 schema，未知核心字段、缺失 `[package].name`、保留 package 名 `std` 与保留依赖别名 `std` 都是编译前错误。workspace 本地配置从 workspace 根目录读取（从当前目录向上找最近的带 `[workspace]` 或 `[package]` 的清单目录），从成员目录启动也能继承根配置。
+`project` 模块落地清单、workspace 与 target 发现，并把 CLI 的 `build`/`check` 无文件参数路径切换为项目模式。清单发现从当前目录向父目录查找最近 `gugu.toml`；解析使用 serde 严格 schema，未知核心字段、缺失 `[package].name`、保留 package 名 `std` 与保留依赖别名 `std` 都是编译前错误。workspace 本地配置从 workspace 根目录读取（从当前目录向上找最近的带 `[workspace]` 或 `[package]` 的清单目录），从成员目录启动也能继承根配置。
 
 workspace 成员按 `members` glob 展开并扣除 `exclude`，glob 展开按规范相对路径排序、同一路径只算一个成员；`exclude` 允许指定非存在目录。根清单可同时是根 package，此时无论从根还是成员目录启动，根 package 都纳入模型。package 选择遵循规范：显式 `-p` 按规范名或短名唯一匹配，`--workspace` 覆盖默认选择并包含根 package，成员目录启动时默认只构建当前 package，workspace 根启动时依次使用 `default-members`、根 package 或全部成员。
 
-target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`、`benches/`、`examples/` 与 package 根 `build.gg` 的文件与目录形式，`auto-*` 开关与显式 target 表按清单规则生效；`foo.gg` 与 `foo/mod.gg` 同时存在、同种类重名 target、入口越过 package 根均在编译前失败；target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身，不再误当作目录。lib 的默认名是 package 短名把 `-` 换成 `_`。项目模式下每个选中 target 以 `project_entry` 进入同一 action graph：bin 类入口要求合法 main，lib/test/harness 类入口只做源码快照检查。`required-features` 按当前启用 feature 集合在编译前过滤：未满足的 target 不选择，`--features`/`--all-features`/`--no-default-features` 决定启用集合，未知 feature 名退出码 2。单文件模式（`gugu build <file.gg>`）拒绝 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets`，以退出码 2 失败。阶段 5 已将依赖解析接入项目 `build`/`check`：锁图写入 workspace 根 `gugu.lock`，阶段 6 再补齐下载、缓存、checksum 与 vendor。
+target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`、`benches/`、`examples/` 与 package 根 `build.gg` 的文件与目录形式，`auto-*` 开关与显式 target 表按清单规则生效；`foo.gg` 与 `foo/mod.gg` 同时存在、同种类重名 target、入口越过 package 根均在编译前失败；target 自动发现与冲突检查会忽略构建输出目录 `target` 及隐藏目录。显式 `path` 可直接位于 package 根（如 `main.gg`），其源码根为 package 根本身，不再误当作目录。lib 的默认名是 package 短名把 `-` 换成 `_`。项目模式下每个选中 target 以 `project_entry` 进入同一 action graph：bin 类入口要求合法 main，lib/test/harness 类入口只做源码快照检查。`required-features` 按当前启用 feature 集合在编译前过滤：未满足的 target 不选择，`--features`/`--all-features`/`--no-default-features` 决定启用集合，未知 feature 名退出码 2。单文件模式（`gugu build <file.gg>`）拒绝 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets`，以退出码 2 失败。项目 `build`/`check` 已接入依赖解析：锁图写入 workspace 根 `gugu.lock`，下载、缓存、checksum 与 vendor 由下一节规定。
 
-## 阶段 5 依赖解析边界
+## 依赖解析
 
-阶段 5 在 `project::dependencies` 中实现依赖清单到锁图的单向解析。`Version` 严格解析 SemVer 2.0.0 的三段数字、预发布标识和 build metadata；`VersionReq` 支持 caret、tilde、关系运算、逗号交集和 wildcard，并按 SemVer precedence 比较，build metadata 不参与兼容判断。预发布候选只有约束显式覆盖同一 `major.minor.patch` 时才进入匹配。
+`project::dependencies` 实现依赖清单到锁图的单向解析。`Version` 严格解析 SemVer 2.0.0 的三段数字、预发布标识和 build metadata；`VersionReq` 支持 caret、tilde、关系运算、逗号交集和 wildcard，并按 SemVer precedence 比较，build metadata 不参与兼容判断。预发布候选只有约束显式覆盖同一 `major.minor.patch` 时才进入匹配。
 
 每个依赖的身份由规范包名、精确版本和 `path`/`git`/registry source 共同决定。path source 只从已发现 package 和可递归发现的 `gugu.toml` 读取；Git 与 registry source 由 `ResolveOptions` 提供确定性候选索引，候选按版本降序和 package ID 排序，撤回版本不参与新解析。别名只影响边上的名称；同一 package ID 在同一 normal/test/build 上下文只建立一个节点，不兼容版本可以并存。
 
@@ -40,11 +40,11 @@ target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`�
 
 `LockGraph` 只写规范字段：版本、package ID、checksum、已解析依赖边、边的域与条件，以及 normal/test/build feature 集。package、依赖边和 feature 均在编码前稳定排序并去重；path source 只能写规范相对路径，Git source 必须写完整 commit/tree。锁图读取会验证版本、source、SemVer、域、重复 package ID 和悬空边。CLI 普通 `build`/`check` 自动写根锁文件，`--locked` 只读取并要求规范编码与重新解析结果完全一致。
 
-阶段 5 不负责网络下载、registry 协议、缓存、checksum 获取、vendor、patch 远程输入或离线策略；这些能力分别属于阶段 6 和发布阶段。
+本节不负责 registry 协议、发布签名或 patch 远程输入；这些能力由[发布与生态](../spec/publishing-ecosystem.md)规定。下载、缓存、checksum 与 vendor 见下一节。
 
-## 阶段 6 缓存与输入边界
+## 缓存与输入
 
-阶段 6 在 `project::cache` 中实现外部依赖输入的闭环。`PackageFiles` 只接受规范相对路径，按 UTF-8 字节序和长度前缀编码文件内容，并以 `gugu-package-v1` 内容流计算 SHA-256。gzip tar 归档先解包并拒绝绝对路径、父目录、符号链接和特殊文件，再校验 checksum；校验成功后才进入缓存。
+`project::cache` 实现外部依赖输入的闭环。`PackageFiles` 只接受规范相对路径，按 UTF-8 字节序和长度前缀编码文件内容，并以 `gugu-package-v1` 内容流计算 SHA-256。gzip tar 归档先解包并拒绝绝对路径、父目录、符号链接和特殊文件，再校验 checksum；校验成功后才进入缓存。
 
 `DependencyCache` 使用 `dependencies/v1/packages/<package-key>/`、`tmp/` 和 `quarantine/` 布局。条目记录 package identity、registry checksum、文件长度和 BLAKE3 文件摘要；读取时验证目录结构、记录、每个文件和整体 checksum。损坏条目会原子移入 quarantine，读取不会继续消费不可信字节；同一 package 的并发写入使用临时目录和 create-if-absent 发布。
 
@@ -102,9 +102,9 @@ crates/
         └── runtime/core.gg         runtime Gugu 源单元
 ```
 
-模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责阶段编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。阶段 1 不在 Rust 中实现 Gugu runtime 的调度、GC、资源释放或标准库语义。
+模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的调度、GC、资源释放或标准库语义。
 
-`gugu-compiler` 使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接在这里仅以 `IntrinsicBoundary` 登记，实际 machine intrinsic 必须在后续 backend/runtime 阶段按相应内部契约接入。
+`gugu-compiler` 使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接在这里仅以 `IntrinsicBoundary` 登记，实际 machine intrinsic 必须在 backend/runtime 按相应内部契约接入。
 
 ## 目标描述与 rt0 边界
 
@@ -139,30 +139,30 @@ validate-image
 emit-image
 ```
 
-节点状态只有 `pending`、`complete`、`skipped` 和 `failed`。成功路径的 `validate-image` 只验证内存计划；`emit-image` 在阶段 1 为 `skipped`。失败路径从第一个失败节点开始把下游节点标为 `skipped`，编排器不执行降级编译、不调用外部 assembler/linker，也不写出部分产物。
+节点状态只有 `pending`、`complete`、`skipped` 和 `failed`。成功路径的 `validate-image` 只验证内存计划；`emit-image` 为 `skipped`。失败路径从第一个失败节点开始把下游节点标为 `skipped`，编排器不执行降级编译、不调用外部 assembler/linker，也不写出部分产物。
 
-输入形态与阶段扩展如下：
+输入形态如下：
 
 - `empty_package`：没有用户源文件，前端和 IR 成功完成，但没有 executable entry，后端之后的节点跳过，不产生 image plan；
 - `single_file`：调用者提供逻辑路径和内存源码，适合确定性测试与编辑器；
 - `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，逻辑路径按输入路径推导；读取或快照失败形成 `E0001`~`E0008` 并停止后续 action；
-- `project_entry`（阶段 4）：CLI 从清单发现的 target 入口，逻辑路径由 package root 推导，与工作目录无关；bin/example 与 `harness = false` 的 bench 要求合法 main，lib/test 与默认 bench 走库检查，不产生 executable entry。
+- `project_entry`：CLI 从清单发现的 target 入口，逻辑路径由 package root 推导，与工作目录无关；bin/example 与 `harness = false` 的 bench 要求合法 main，lib/test 与默认 bench 走库检查，不产生 executable entry。
 
-阶段 7 前端对每个源码快照运行词法分析：生成带精确 span 的 `TokenBuffer` 与 trivia，校验字面量、最长匹配、闭集属性与 cfg 记号形状。词法诊断 `E0009`–`E0019` 或 `Error` token 会使 Frontend action 失败，并跳过 IR 与 image plan。阶段 1 的括号扫描入口检查已删除。
+Frontend action 对每个源码快照运行词法分析：生成带精确 span 的 `TokenBuffer` 与 trivia，校验字面量、最长匹配、闭集属性与 cfg 记号形状。词法诊断 `E0009`–`E0019` 或 `Error` token 会使 Frontend action 失败，并跳过 IR 与 image plan。早期括号扫描入口检查已删除。
 
-阶段 8 在同一 Frontend action 内消费 `TokenBuffer`，用递归下降构造稠密 `u32` AST arena（声明、泛型、类型、块、表达式、模式、`async`/`select`/`try`/`defer`、`comptime source`、FFI 与 asm）。`()`/`[]` 增加分隔符深度，内部换行只作空白；`{` 单独跟踪花括号深度，块内换行可以结束语句、字段或臂。比较与 `..` 不结合，主诊断带 `Note` 次诊断。解析诊断 `E0020`–`E0026` 使 Frontend 失败，不得把错误占位交给 IR 或 image plan。可执行入口改为 AST 中名为 `main`、无参数且带块体或 `=` 体的 `fn`。节点身份不是指针；结构 dump 按 arena 下标，不受线程完成顺序影响。
+同一 Frontend action 内消费 `TokenBuffer`，用递归下降构造稠密 `u32` AST arena（声明、泛型、类型、块、表达式、模式、`async`/`select`/`try`/`defer`、`comptime source`、FFI 与 asm）。`()`/`[]` 增加分隔符深度，内部换行只作空白；`{` 单独跟踪花括号深度，块内换行可以结束语句、字段或臂。比较与 `..` 不结合，主诊断带 `Note` 次诊断。解析诊断 `E0020`–`E0026` 使 Frontend 失败，不得把错误占位交给 IR 或 image plan。可执行入口是 AST 中名为 `main`、无参数且带块体或 `=` 体的 `fn`。节点身份不是指针；结构 dump 按 arena 下标，不受线程完成顺序影响。
 
-阶段 12b/20 将同一 Frontend action 延伸到声明/表达式/模式/trait/unsafe 检查、布局校验和 `LowerHir` query。`BuildIr` 现在登记真实定义与冻结 owner；`Compilation::succeeded` 必须拥有 `Validated`，后端计划只接受此凭据。冷计算和缓存恢复都经过冻结 verifier，失败没有 image plan。旧 `ReturnUnit` IR 已移除；本阶段没有生成目标机器码，`emit-image` 仍跳过。完整交接表见 [AST 与 HIR](ast-hir.md)。
+同一 Frontend action 继续做声明/表达式/模式/trait/unsafe 检查、布局校验和 `LowerHir` query。`BuildIr` 登记真实定义与冻结 owner；`Compilation::succeeded` 必须拥有 `Validated`，后端计划只接受此凭据。冷计算和缓存恢复都经过冻结 verifier，失败没有 image plan。旧 `ReturnUnit` IR 已移除；当前没有生成目标机器码，`emit-image` 仍跳过。完整交接表见 [AST 与 HIR](ast-hir.md)。
 
-阶段 26 起 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 增加 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
+`BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
-阶段 27 起 `ImagePlan` 再增加 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 与 `placement-fingerprint`。这些字段记录逃逸与存储选择，不代表已经改写 CFG 做堆装箱或写出机器码。`large_copy` 警告进入 `Compilation` 诊断且不阻止镜像计划；升为错误时 Frontend 失败且没有镜像。
+`ImagePlan` 再增加 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 与 `placement-fingerprint`。这些字段记录逃逸与存储选择，不代表已经改写 CFG 做堆装箱或写出机器码。`large_copy` 警告进入 `Compilation` 诊断且不阻止镜像计划；升为错误时 Frontend 失败且没有镜像。
 
 ## runtime 源资源与实现归属
 
 `RuntimeResources::builtin()` 返回 compiler 构建时嵌入的 Gugu 源文件登记：
 
-| 逻辑路径 | 角色 | 阶段 1 的责任 |
+| 逻辑路径 | 角色 | bootstrap 责任 |
 |---|---|---|
 | `std/prelude.gg` | 标准库源单元 | 证明标准库输入进入 action graph |
 | `runtime/core.gg` | runtime 源单元 | 证明 runtime 输入进入 action graph |
@@ -171,46 +171,46 @@ emit-image
 
 ## 公开规范归属表
 
-下表给出每条公开规范的实现归属。状态列描述截至阶段 8 已交付的边界；未落地部分不能把当前 bootstrap 检查误认为该章节已经完成。
+下表给出每条公开规范的实现归属。状态列描述当前已交付的边界；未落地部分不能把当前 bootstrap 检查误认为该章节已经完成。
 
-| 公开规范 | 主要实现归属 | 当前状态 | 完整实现阶段 |
-|---|---|---|---:|
-| `overview` | `action`、`target`、`runtime` | 已建立闭世界/目标边界 | 01–79 |
-| `lexical` | `source` 快照、`frontend` lexer | 快照与 lexer/trivia/闭集属性词法已落地 | 03、07 |
-| `format-style` | `gugu-cli` fmt 与 formatter | CLI 未接入 | 09 |
-| `syntax` | `frontend` parser | 递归下降 AST、错误恢复与稳定 dump 已落地 | 08 |
-| `types` | type arena、type checker | 未实现 | 12–20 |
-| `declarations` | module tree、definition collector | 清单层模块布局已落地；模块树未实现 | 04、10、13 |
-| `program-model` | action、backend、runtime | 已建立 plan/不写部分镜像契约 | 01、24、52–57 |
-| `packages-builds` | `project` 清单、依赖解析、workspace、target 与锁图 | 清单发现、workspace、target 自动发现、SemVer、source 候选、三域 feature 与锁图已落地；下载、缓存、vendor 未实现 | 04–06、72–73 |
-| `publishing-ecosystem` | registry、archive、signature | 未实现 | 74 |
-| `toolchain-cli` | `gugu-cli` 与 action orchestrator | 已建立单一入口与项目/单文件模式 | 01–04；完整为 73 |
-| `expressions` | frontend、HIR、GIR | 表面语法已解析；类型检查与 lowering 未实现 | 08、14、20、26 |
-| `patterns` | frontend parser、pattern checker | 表面语法已解析；穷尽性未实现 | 08、15、20 |
-| `functions` | frontend parser、capture、async、HIR/GIR | 表面语法已解析；捕获与 lowering 未实现 | 08、16、20、26 |
-| `traits` | trait solver、impl selection | 未实现 | 17、18、20 |
-| `passing` | value/resource lowering | GIR 已按类别展开浅拷、COW seal 与 resource lease；`large_copy` 已接入诊断 | 27 |
-| `memory` | placement、resource runtime、GC | 已记录 TurnRegion/LocalHeap/SharedHeap 选择；runtime 分配与 GC 仍未物化 | 27、30–51 |
-| `concurrency` | scheduler、channel、sync runtime | 仅登记 intrinsic 边界 | 35–37 |
-| `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 | 08、21–26 |
-| `unsafe` | safety checker、FFI/asm backend | `extern`/`asm` 语法节点已解析；安全检查未实现 | 08、19、58 |
-| `platform-abi` | `target`、x86 backend、image writer | 已建立两个目标 descriptor | 52–58 |
-| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界 | 33–51、56–58 |
-| `standard-library` | `runtime` Gugu 源树与 std modules | 已建立源树登记 | 59–68 |
-| `testing` | test collector、harness、CLI | 未实现 | 69–70 |
+| 公开规范 | 主要实现归属 | 当前状态 |
+|---|---|---|
+| `overview` | `action`、`target`、`runtime` | 已建立闭世界/目标边界 |
+| `lexical` | `source` 快照、`frontend` lexer | 快照与 lexer/trivia/闭集属性词法已落地 |
+| `format-style` | `gugu-cli` fmt 与 formatter | `gugu fmt` 已接入 |
+| `syntax` | `frontend` parser | 递归下降 AST、错误恢复与稳定 dump 已落地 |
+| `types` | type arena、type checker | 类型形成、布局、TypeCheck 与冻结 TypeId 已落地 |
+| `declarations` | module tree、definition collector | 模块树、定义收集、绑定与初始化检查已落地 |
+| `program-model` | action、backend、runtime | 已建立 plan/不写部分镜像契约 |
+| `packages-builds` | `project` 清单、依赖解析、workspace、target、锁图与缓存 | 清单发现、workspace、target、SemVer、锁图、依赖缓存与 vendor 已落地；build.gg 闭环未落地 |
+| `publishing-ecosystem` | registry、archive、signature | 未实现 |
+| `toolchain-cli` | `gugu-cli` 与 action orchestrator | 已建立单一入口、项目/单文件模式与 `fmt`/`build`/`check` |
+| `expressions` | frontend、HIR、GIR | 类型检查、HIR 与 generic GIR 已落地；LIR 与机器码未落地 |
+| `patterns` | frontend parser、pattern checker | 穷尽性检查已落地 |
+| `functions` | frontend parser、capture、async、HIR/GIR | 捕获、async 与 HIR 已落地 |
+| `traits` | trait solver、impl selection | 选择、特化与 dyn/Any 前端已落地 |
+| `passing` | value/resource lowering | GIR 已按类别展开浅拷、COW seal 与 resource lease；`large_copy` 已接入诊断 |
+| `memory` | placement、resource runtime、GC | 已记录 TurnRegion/LocalHeap/SharedHeap 选择；runtime 分配与 GC 仍未物化 |
+| `concurrency` | scheduler、channel、sync runtime | 仅登记 intrinsic 边界 |
+| `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 |
+| `unsafe` | safety checker、FFI/asm backend | 前端安全检查已落地；外部桥接执行与机器编码未落地 |
+| `platform-abi` | `target`、x86 backend、image writer | 已建立两个目标 descriptor |
+| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界 |
+| `standard-library` | `runtime` Gugu 源树与 std modules | 已建立源树登记 |
+| `testing` | test collector、harness、CLI | 未实现 |
 
-内部契约也沿同一边界扩展：[`AST/HIR`](ast-hir.md) 消费阶段 1 frontend 的后继实现，[`GIR/LIR`](gir-lir.md) 消费后续 HIR，[`后端`](backend.md) 负责从合法 LIR 到 machine code，[`调度器`](scheduler.md) 和 [`GC 元数据`](gc-metadata.md) 负责 runtime 语义。当前阶段不会为这些后续模块建立平行的占位语义路径。
+内部契约也沿同一边界扩展：[`AST/HIR`](ast-hir.md) 消费 frontend 产物，[`GIR/LIR`](gir-lir.md) 消费冻结 HIR，[`后端`](backend.md) 负责从合法 LIR 到 machine code，[`调度器`](scheduler.md) 和 [`GC 元数据`](gc-metadata.md) 负责 runtime 语义。不得为这些后续模块建立平行的占位语义路径。
 
 ## 验收契约
 
-阶段 1–4 的确定性测试覆盖以下可观察结果：
+确定性测试覆盖以下可观察结果：
 
 - 空 package 的所有 graph 节点都离开 `pending`，没有 image plan；
 - `fn main() {}` 完成 frontend、IR、backend、runtime 和 image validation，并留下带目标、入口、runtime 源单元数量和 rt0 的内存计划；
 - malformed source 产生稳定诊断，frontend 为 `failed`，下游为 `skipped`，没有 image plan；
 - 两个登记目标使用不同 rt0/object format 边界，未登记目标不能解析；
 
-阶段 3、4 的确定性测试补充覆盖：
+源码与项目发现补充覆盖：
 
 - 快照拒绝 BOM、非法 UTF-8（带精确字节偏移）与超长输入；行首表对 LF/CRLF/CR 混合输入给出确定行列映射，列号按 Unicode 标量计算，非字符边界偏移在行号计算与 Span 构造时被拒绝；
 - `SourceMap` 按逻辑路径排序分配稠密 ID，重复路径拒绝；Span 绑定 `SourceTableId` 并拒绝跨表 span；span 半开范围、未知文件/展开 ID 均有稳定错误；宏展开记录按调用位置、轮次、片段顺序稳定注册并维护父链；
@@ -220,7 +220,7 @@ emit-image
 - target 的 `required-features` 在编译前依据启用 feature 过滤，未知 feature 名以退出码 2 失败；
 - 单文件模式拒绝全部项目选择参数并以退出码 2 失败。
 
-阶段 5 的确定性测试补充覆盖：
+依赖解析补充覆盖：
 
 - SemVer 的规范数字、预发布 precedence、caret/tilde/关系/逗号交集/wildcard 与 build metadata 规则；无效约束在候选选择前失败；
 - `cfg(all/any/not(...))` target 条件按 target/host 正确激活，path、Git、registry source 按 package identity 区分，别名不改变 package ID；
@@ -228,4 +228,4 @@ emit-image
 - 候选版本选择不受输入顺序影响，yanked/无解版本、source candidate 缺失和依赖循环产生稳定错误；
 - 锁图拒绝绝对路径、未知 source、重复 package ID 和悬空边，规范编码排序稳定且重复读写不改变内容；CLI `--locked` 在锁图与清单不一致时于 frontend 前失败。
 
-最终镜像写出、Gugu 源 runtime 自举、type checker、GC、scheduler 和双目标 machine code 都不属于本阶段验收；它们必须在路线图后续阶段以各自规范和测试完成。
+最终镜像写出、Gugu 源 runtime 自举、GC、scheduler 和双目标 machine code 必须在各自规范和测试中完成，不能把当前内存计划误认为已经写出可执行镜像。

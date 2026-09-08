@@ -226,7 +226,7 @@ impl Compilation {
     }
 }
 
-/// 阶段 3/4 的编译器入口。
+/// 编译器入口。
 #[derive(Clone, Debug, Default)]
 pub struct Compiler {
     queries: std::sync::Arc<query::QueryEngine>,
@@ -358,10 +358,7 @@ impl Compiler {
             ),
         );
         graph.complete(ActionKind::ValidateImage, "image plan 校验通过");
-        graph.skip_after(
-            ActionKind::ValidateImage,
-            "阶段 1 仅保留内存计划，未写出镜像",
-        );
+        graph.skip_after(ActionKind::ValidateImage, "仅保留内存计划，未写出镜像");
 
         let image_plan = Some(ImagePlan::new(backend_plan, attachment));
         diagnostics.sort();
@@ -736,7 +733,7 @@ fn trailing_components(path: &std::path::Path) -> Option<PathBuf> {
     Some(PathBuf::from(logical))
 }
 
-/// 阶段 1 的内存镜像计划，不是可执行文件。
+/// 内存镜像计划，不是可执行文件。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImagePlan {
     target: TargetName,

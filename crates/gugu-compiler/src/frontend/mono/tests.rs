@@ -1,4 +1,4 @@
-//! 阶段 24 单测：实例闭合、根、稳定性、预算与公共摘要接入。
+//! 实例闭合、根、稳定性、预算与公共摘要接入。
 
 use crate::frontend::FrontendOutput;
 use crate::frontend::mono::{MonoWorldV1, digest_of};

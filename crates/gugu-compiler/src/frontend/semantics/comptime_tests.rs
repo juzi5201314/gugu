@@ -1,4 +1,4 @@
-//! 阶段 21：EarlyConst 域、capability registry 与受限脚本解释器的验收测试。
+//! EarlyConst 域、capability registry 与受限脚本解释器的验收测试。
 use super::comptime::{self, EarlyConstTable};
 use super::model::{Model, Ty};
 use super::tests::{accepts, frontend};

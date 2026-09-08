@@ -7,7 +7,7 @@ pub enum ActionKind {
     ResolveTarget,
     /// 读取用户源输入。
     LoadSources,
-    /// 执行阶段 1 前端检查。
+    /// 执行前端检查。
     Frontend,
     /// 构造 bootstrap IR。
     BuildIr,
@@ -93,7 +93,7 @@ impl ActionNode {
     }
 }
 
-/// 阶段 1 的确定性编译 action graph。
+/// 确定性编译 action graph。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ActionGraph {
     nodes: Vec<ActionNode>,
