@@ -83,13 +83,13 @@ impl Builder<'_> {
             let Some(local) = self.emit_expr(receiver)? else {
                 return Ok((callee, args));
             };
-            args.push(copy_of(local));
+            args.push(self.pass_arg(receiver, local));
         }
         for argument in expr_range(self.owner, &arguments) {
             let Some(local) = self.emit_expr(argument)? else {
                 return Ok((callee, args));
             };
-            args.push(copy_of(local));
+            args.push(self.pass_arg(argument, local));
         }
         Ok((callee, args))
     }
@@ -106,7 +106,7 @@ impl Builder<'_> {
             let Some(local) = self.emit_expr(argument)? else {
                 return Ok(None);
             };
-            operands.push(copy_of(local));
+            operands.push(self.pass_arg(argument, local));
         }
         let dest = self.temp(self.expr_ty(id));
         self.assign(

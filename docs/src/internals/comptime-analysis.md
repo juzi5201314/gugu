@@ -339,7 +339,8 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 
 管线顺序为 `LowerHir`（schema **5**，只构造、校验并冻结）→ `BuildGenericGir` →
 `mono::close` → `late::run` → `gir::attach_fragments` → `WholeProgramAnalysis` →
-`PublicFunctionSummary`。`WholeProgramAnalysis`（query schema **5**）输入指纹含冻结 HIR
+`EscapeAndPlacement` → `PublicFunctionSummary`。分析输入使用放置前的 generic GIR 指纹。
+`WholeProgramAnalysis`（query schema **5**）输入指纹含冻结 HIR
 指纹、generic GIR 指纹、late/mono 图指纹与策略字节；其内再嵌套 `AnalysisSccSummary`
 （27，schema **4**）与 `FunctionAnalysisSummary`（23，schema **4**）。身份键为 `MonoKey`
 （见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)）。

@@ -1,11 +1,14 @@
 //! `BuildGenericGir`：每个冻结 HIR owner 一个 generic body。
 use super::build;
+use super::placement::PlacementWorldV1;
 use super::{GirBody, GirWorldV1, WORLD_SCHEMA, fragments_of, world_fingerprint};
 use crate::frontend::hir::{self, Validated};
 use crate::frontend::mono::MonoWorldV1;
 use crate::frontend::semantics::query::{restore_errors, store_errors};
 use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::{Diagnostic, SourceMap};
+
+pub(crate) const BUILD_SCHEMA: u32 = 2;
 
 pub(crate) fn build_world(
     hir: &Validated,
@@ -17,19 +20,26 @@ pub(crate) fn build_world(
     for (index, owner) in module.owners.iter().enumerate() {
         bodies.push(compute_body(hir, index, owner, queries, sources)?);
     }
-    let fingerprint = world_fingerprint(&bodies, &[], hir.fingerprint());
+    let placement = PlacementWorldV1::empty();
+    let fingerprint = world_fingerprint(&bodies, &[], hir.fingerprint(), &placement);
     Ok(GirWorldV1 {
         schema: WORLD_SCHEMA,
         hir_fingerprint: hir.fingerprint(),
         bodies,
         fragments: Vec::new(),
+        placement,
         fingerprint,
     })
 }
 
 pub(crate) fn attach_fragments(world: GirWorldV1, mono: &MonoWorldV1) -> GirWorldV1 {
     let fragments = fragments_of(mono, &world.bodies);
-    let fingerprint = world_fingerprint(&world.bodies, &fragments, world.hir_fingerprint);
+    let fingerprint = world_fingerprint(
+        &world.bodies,
+        &fragments,
+        world.hir_fingerprint,
+        &world.placement,
+    );
     GirWorldV1 {
         fragments,
         fingerprint,
@@ -50,7 +60,11 @@ fn compute_body(
     hash.update(&hir.fingerprint());
     hash.update(&definition.key);
     hash.update(&(owner_index as u64).to_le_bytes());
-    let key = QueryKey::new(QueryKind::BuildGenericGir, 1, *hash.finalize().as_bytes());
+    let key = QueryKey::new(
+        QueryKind::BuildGenericGir,
+        BUILD_SCHEMA,
+        *hash.finalize().as_bytes(),
+    );
     let mut fresh = None;
     let result = queries
         .compute(key, |context| {

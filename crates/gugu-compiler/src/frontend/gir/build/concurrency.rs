@@ -16,16 +16,17 @@ impl Builder<'_> {
         let Some(channel) = self.emit_expr(channel)? else {
             return Ok(None);
         };
-        let Some(value) = self.emit_expr(value)? else {
+        let Some(payload) = self.emit_expr(value)? else {
             return Ok(None);
         };
         let cancelled = self.send_cancelled(id)?;
         let resume = self.fresh(false);
         let safepoint = self.safepoint(SafepointKind::Suspend, id);
+        let sent = self.pass_arg(value, payload);
         self.terminate(Terminator::Suspend {
             reason: SuspendReason::ChanSend {
                 channel: copy_of(channel),
-                value: copy_of(value),
+                value: sent,
             },
             destination: None,
             resume,
@@ -142,13 +143,14 @@ impl Builder<'_> {
                     let Some(channel) = self.emit_expr(*channel)? else {
                         return Ok(None);
                     };
-                    let Some(value) = self.emit_expr(*value)? else {
+                    let Some(payload) = self.emit_expr(*value)? else {
                         return Ok(None);
                     };
+                    let sent = self.pass_arg(*value, payload);
                     self.select_cases.push(SelectCase {
                         operation: SelectOperation::Send {
                             channel: copy_of(channel),
-                            value: copy_of(value),
+                            value: sent,
                         },
                         destination: None,
                         arm: arm_index as u32,
@@ -246,7 +248,11 @@ impl Builder<'_> {
                 }
             }
             if let Some(value) = self.emit_expr(*body)? {
-                self.assign(Place::local(dest), Rvalue::Use(copy_of(value)));
+                self.copy_value(
+                    Place::local(dest),
+                    Place::local(value),
+                    self.locals[dest.index()].ty,
+                );
                 self.goto(join);
             }
             self.current = saved;
@@ -259,7 +265,11 @@ impl Builder<'_> {
         self.switch_to(otherwise);
         if let Some(body) = default {
             if let Some(value) = self.emit_expr(body)? {
-                self.assign(Place::local(dest), Rvalue::Use(copy_of(value)));
+                self.copy_value(
+                    Place::local(dest),
+                    Place::local(value),
+                    self.locals[dest.index()].ty,
+                );
             }
         } else {
             self.assign_unit(dest);

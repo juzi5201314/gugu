@@ -114,7 +114,7 @@ x = 2
 
 ## 大结构体
 
-`f(big)` 对 1KB 的结构体仍然是浅拷贝，合法。编译器必须对超过 64 字节的按值位结构体发出 lint `large_copy`，提示改 `&T`。这不是类型错误。可用 `#[allow(large_copy)]` 关掉某一处；实际拷贝消除和存储放置见 [GIR/LIR](../internals/gir-lir.md)。诊断通道见 [词法 · 诊断](lexical.md)。
+`f(big)` 对 1KB 的结构体仍然是浅拷贝，合法。编译器必须对超过 64 字节的按值位结构体发出 lint `large_copy`（稳定代码 `E0056`），提示改 `&T`。这不是类型错误。可用 `#[allow(large_copy)]` 关掉某一处；`#[deny]` / `#[forbid]` 升为错误并阻止镜像。实际拷贝消除和存储放置见 [GIR/LIR](../internals/gir-lir.md)。诊断通道见 [词法 · 诊断](lexical.md)。
 
 ## `clone`：只要深拷贝时才出现
 

@@ -64,6 +64,11 @@ query 依赖，不靠可变的全局 phase 回跳：
 证明只写入 `AnalysisWorldV1.proofs`（不回看 `CheckedSemantics` 侧表，不删除检查节点，
 不回写 `RuntimeCheck`）；query kind 仍为 `WholeProgramAnalysis`。
 
+阶段 27 起，全程序分析之后运行 `EscapeAndPlacement`：
+`BuildGenericGir` → `mono::close` → `late::run` → `attach_fragments` →
+`WholeProgramAnalysis` → `EscapeAndPlacement` → `PublicFunctionSummary`。
+placement 只写入 `GirWorldV1.placement`，不回写 HIR，也不在本阶段改写 GIR CFG。
+
 阶段 24 起，第 16 步已闭合可达实例图：`CollectMonoRoots` 与 `InstantiateGir`
 从冻结 HIR 与 `CheckedSemantics` 收集调用边（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)），
 分析身份键为 `MonoKey`。`InstantiateGir` 不从 GIR 重解析调用边。

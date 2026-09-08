@@ -7,7 +7,7 @@ use crate::{
 
 pub(crate) mod analysis;
 mod ast;
-mod attr;
+pub(crate) mod attr;
 pub(crate) mod cfg;
 mod expand;
 pub(crate) mod format;
@@ -63,6 +63,7 @@ pub(crate) struct FrontendOutput {
     pub(crate) analysis: analysis::AnalysisWorldV1,
     pub(crate) mono: mono::MonoWorldV1,
     pub(crate) gir: gir::GirWorldV1,
+    pub(crate) lints: Vec<Diagnostic>,
 }
 
 #[derive(Clone, Debug)]
@@ -98,6 +99,7 @@ pub(crate) fn bootstrap(
             analysis: analysis::empty_world(),
             mono: mono::empty_world(),
             gir: gir::empty_world(),
+            lints: Vec::new(),
         }),
         SourceInput::Sources {
             source_map,
@@ -171,6 +173,8 @@ fn check_sources(
     let (semantics, types, registry, hir, analysis_world, mono_world, gir_world) =
         semantics::check(&modules, &names, source_map, cfg, entry_function, queries)
             .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+    let lints = gir::large_copy_lints(&modules, &gir_world, source_map)
+        .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     Ok(frontend_output(
         entry,
         source_map,
@@ -184,6 +188,7 @@ fn check_sources(
         analysis_world,
         mono_world,
         gir_world,
+        lints,
     ))
 }
 
@@ -287,6 +292,7 @@ fn frontend_output(
     analysis: analysis::AnalysisWorldV1,
     mono: mono::MonoWorldV1,
     gir: gir::GirWorldV1,
+    lints: Vec<Diagnostic>,
 ) -> FrontendOutput {
     #[cfg(not(test))]
     drop(semantics);
@@ -320,6 +326,7 @@ fn frontend_output(
         analysis,
         mono,
         gir,
+        lints,
     }
 }
 

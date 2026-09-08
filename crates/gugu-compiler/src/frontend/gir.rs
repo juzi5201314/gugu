@@ -2,6 +2,8 @@
 pub(crate) mod body;
 mod build;
 mod dump;
+pub(crate) mod passing;
+pub(crate) mod placement;
 mod query;
 #[cfg(test)]
 mod tests;
@@ -9,7 +11,9 @@ mod verify;
 
 pub(crate) use body::{BodyKind, GirBody};
 pub(crate) use dump::dump_world;
-pub(crate) use query::{attach_fragments, build_world};
+pub(crate) use passing::large_copy_lints;
+pub(crate) use placement::run as place_world;
+pub(crate) use query::{BUILD_SCHEMA, attach_fragments, build_world};
 pub(crate) use verify::verify;
 
 use crate::frontend::hir::{self, TypeId};
@@ -17,7 +21,7 @@ use crate::frontend::mono::MonoWorldV1;
 use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const WORLD_SCHEMA: u32 = 1;
+pub(crate) const WORLD_SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct GirFragment {
@@ -32,16 +36,19 @@ pub(crate) struct GirWorldV1 {
     pub(crate) hir_fingerprint: [u8; 32],
     pub(crate) bodies: Vec<GirBody>,
     pub(crate) fragments: Vec<GirFragment>,
+    pub(crate) placement: placement::PlacementWorldV1,
     pub(crate) fingerprint: [u8; 32],
 }
 
 pub(crate) fn empty_world() -> GirWorldV1 {
+    let placement = placement::PlacementWorldV1::empty();
     GirWorldV1 {
         schema: WORLD_SCHEMA,
         hir_fingerprint: [0; 32],
         bodies: Vec::new(),
         fragments: Vec::new(),
-        fingerprint: world_fingerprint(&[], &[], [0; 32]),
+        fingerprint: world_fingerprint(&[], &[], [0; 32], &placement),
+        placement,
     }
 }
 
@@ -49,8 +56,9 @@ pub(crate) fn world_fingerprint(
     bodies: &[GirBody],
     fragments: &[GirFragment],
     hir_fingerprint: [u8; 32],
+    placement: &placement::PlacementWorldV1,
 ) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("gugu-gir-world-v1");
+    let mut hash = blake3::Hasher::new_derive_key("gugu-gir-world-v2");
     hash.update(&hir_fingerprint);
     hash.update(&(bodies.len() as u64).to_le_bytes());
     for body in bodies {
@@ -58,6 +66,7 @@ pub(crate) fn world_fingerprint(
     }
     let fragment_bytes = serde_json::to_vec(fragments).expect("GIR fragment 序列化");
     hash.update(&fragment_bytes);
+    hash.update(&placement.fingerprint);
     *hash.finalize().as_bytes()
 }
 

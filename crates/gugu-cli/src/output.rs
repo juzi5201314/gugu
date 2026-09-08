@@ -198,6 +198,11 @@ pub(crate) fn print_compilation_json(
             "gir-block-count": plan.gir_block_count(),
             "gir-statement-count": plan.gir_statement_count(),
             "gir-fingerprint": plan.gir_fingerprint(),
+            "placement-count": plan.placement_count(),
+            "turn-region-count": plan.turn_region_count(),
+            "local-heap-count": plan.local_heap_count(),
+            "shared-heap-count": plan.shared_heap_count(),
+            "placement-fingerprint": plan.placement_fingerprint(),
             "rt0": plan.rt0().to_string()
         })
     });

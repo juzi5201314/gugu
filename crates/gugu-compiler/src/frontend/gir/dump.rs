@@ -16,7 +16,33 @@ pub(crate) fn dump_world(module: &hir::Module, world: &GirWorldV1) -> String {
     for body in &world.bodies {
         dump_body(&mut out, module, body);
     }
+    dump_placement(&mut out, &world.placement);
     out
+}
+
+fn dump_placement(out: &mut String, world: &super::placement::PlacementWorldV1) {
+    let _ = writeln!(
+        out,
+        "placement schema {} records {} allocs {} fingerprint {}",
+        world.schema,
+        world.records.len(),
+        world.allocs.len(),
+        hex(&world.fingerprint)
+    );
+    for record in &world.records {
+        let _ = writeln!(
+            out,
+            "  local body={} local={} {:?} {:?} export={}",
+            record.body, record.local, record.kind, record.proof, record.export
+        );
+    }
+    for alloc in &world.allocs {
+        let _ = writeln!(
+            out,
+            "  alloc body={} stmt={} {:?} {:?} export={}",
+            alloc.body, alloc.statement, alloc.kind, alloc.proof, alloc.export
+        );
+    }
 }
 
 pub(crate) fn dump_body(out: &mut String, module: &hir::Module, body: &GirBody) {
@@ -98,6 +124,24 @@ fn statement_text(module: &hir::Module, body: &GirBody, statement: &Statement) -
         StatementKind::NoSafepointEnd(id) => format!("NoSafepointEnd({})", id.0),
         StatementKind::SafepointPoll(id) => format!("SafepointPoll({})", id.0),
         StatementKind::Nop => "Nop".to_owned(),
+        StatementKind::ValueAction {
+            action,
+            place,
+            descriptor,
+        } => format!(
+            "ValueAction {action:?} {} : {}",
+            place_text(module, body, *place),
+            type_name(module, *descriptor)
+        ),
+        StatementKind::ResourceAction {
+            action,
+            place,
+            descriptor,
+        } => format!(
+            "ResourceAction {action:?} {} : {}",
+            place_text(module, body, *place),
+            type_name(module, *descriptor)
+        ),
         other => format!("{other:?}"),
     }
 }
@@ -196,6 +240,13 @@ fn rvalue_text(module: &hir::Module, body: &GirBody, rvalue: &Rvalue) -> String 
         Rvalue::RawAddress(place) => format!("addr {}", place_text(module, body, *place)),
         Rvalue::Cast { kind, ty, .. } => format!("cast {kind:?} {}", type_name(module, *ty)),
         Rvalue::Intrinsic { op, .. } => format!("intrinsic {op:?}"),
+        Rvalue::ValueCopy(place) => format!("value_copy {}", place_text(module, body, *place)),
+        Rvalue::CowSnapshot(place) => format!("cow_snapshot {}", place_text(module, body, *place)),
+        Rvalue::DynErase { operand, ty } => format!(
+            "dyn_erase {} -> {}",
+            operand_text(module, body, operand),
+            type_name(module, *ty)
+        ),
         other => format!("{other:?}"),
     }
 }

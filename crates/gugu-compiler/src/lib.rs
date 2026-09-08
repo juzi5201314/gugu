@@ -289,6 +289,9 @@ impl Compiler {
             }
         };
         graph.complete(ActionKind::Frontend, frontend.detail());
+        for diagnostic in frontend.lints.iter().cloned() {
+            diagnostics.push(diagnostic);
+        }
         let action_key = Some(frontend_action_key(
             target,
             &source_map,
@@ -752,6 +755,11 @@ pub struct ImagePlan {
     gir_block_count: u32,
     gir_statement_count: u32,
     gir_fingerprint: [u8; 32],
+    placement_count: u32,
+    turn_region_count: u32,
+    local_heap_count: u32,
+    shared_heap_count: u32,
+    placement_fingerprint: [u8; 32],
     rt0: Rt0Boundary,
     semantic_fingerprint: [u8; 32],
 }
@@ -775,6 +783,11 @@ impl ImagePlan {
             gir_block_count: plan.gir_block_count,
             gir_statement_count: plan.gir_statement_count,
             gir_fingerprint: plan.gir_fingerprint,
+            placement_count: plan.placement_count,
+            turn_region_count: plan.turn_region_count,
+            local_heap_count: plan.local_heap_count,
+            shared_heap_count: plan.shared_heap_count,
+            placement_fingerprint: plan.placement_fingerprint,
             rt0: attachment.rt0,
             semantic_fingerprint: plan.semantic_fingerprint,
         }
@@ -860,6 +873,26 @@ impl ImagePlan {
     /// 返回 generic GIR 世界指纹。
     pub fn gir_fingerprint(&self) -> [u8; 32] {
         self.gir_fingerprint
+    }
+    /// 返回 placement 记录与分配点总数。
+    pub fn placement_count(&self) -> u32 {
+        self.placement_count
+    }
+    /// 返回已证明的 TurnRegion 选择数量。
+    pub fn turn_region_count(&self) -> u32 {
+        self.turn_region_count
+    }
+    /// 返回 LocalHeap 选择数量。
+    pub fn local_heap_count(&self) -> u32 {
+        self.local_heap_count
+    }
+    /// 返回 SharedHeap 选择数量。
+    pub fn shared_heap_count(&self) -> u32 {
+        self.shared_heap_count
+    }
+    /// 返回 placement 世界指纹。
+    pub fn placement_fingerprint(&self) -> [u8; 32] {
+        self.placement_fingerprint
     }
 }
 

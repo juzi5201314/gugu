@@ -7,6 +7,7 @@ use super::transfer_gir::{self, CompareFact};
 use super::types::{FunctionSummary, ProofFact, ProofStatus, ReturnRelation, RuntimeCheckKey};
 use crate::frontend::gir::GirWorldV1;
 use crate::frontend::gir::body::{BlockId, GirBody, Rvalue, StatementKind, Terminator};
+use crate::frontend::gir::passing::PassingTable;
 use crate::frontend::hir::{self, ExprId, Module, Owner};
 use crate::frontend::mono::instantiate::CallSite;
 
@@ -24,6 +25,7 @@ pub(crate) fn analyze_owner(
     policy: AnalysisPolicyV1,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> BodyResult {
+    let passing = PassingTable::new(module);
     let locals = owner.locals.len();
     let exprs = owner.expressions.len();
     let params = owner.parameters.len();
@@ -39,6 +41,7 @@ pub(crate) fn analyze_owner(
         body,
         &mut inbound,
         policy.max_block_iterations,
+        &passing,
         callees,
     ) {
         budget_exhausted = true;
@@ -50,14 +53,23 @@ pub(crate) fn analyze_owner(
             body,
             &mut inbound,
             policy.max_block_iterations,
+            &passing,
             callees,
         );
     }
-    let proofs = collect_proofs(module, owner, owner_index, body, &inbound, callees);
+    let proofs = collect_proofs(
+        module,
+        owner,
+        owner_index,
+        body,
+        &inbound,
+        &passing,
+        callees,
+    );
     let mut summary = if budget_exhausted {
         FunctionSummary::conservative()
     } else {
-        summarize(module, owner, body, &inbound, callees)
+        summarize(module, owner, body, &inbound, &passing, callees)
     };
     if !budget_exhausted && proofs.iter().any(|fact| fact.status != ProofStatus::Proved) {
         summary.may_panic = true;
@@ -102,6 +114,7 @@ fn iterate(
     body: &GirBody,
     inbound: &mut [AbstractState],
     rounds: u32,
+    passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> bool {
     for _ in 0..rounds {
@@ -117,6 +130,7 @@ fn iterate(
                 body,
                 BlockId(index as u32),
                 &mut state,
+                passing,
                 callees,
             );
             changed |= propagate(
@@ -144,6 +158,7 @@ fn narrow(
     body: &GirBody,
     inbound: &mut Vec<AbstractState>,
     rounds: u32,
+    passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) {
     let entry = inbound[body.entry.index()].clone();
@@ -159,7 +174,7 @@ fn narrow(
             }
             let mut state = old.clone();
             let block = BlockId(u32::try_from(index).expect("GIR 块编号可表示"));
-            let compare = execute_block(module, owner, body, block, &mut state, callees);
+            let compare = execute_block(module, owner, body, block, &mut state, passing, callees);
             propagate(
                 module,
                 owner,
@@ -185,6 +200,7 @@ fn execute_block(
     body: &GirBody,
     id: BlockId,
     state: &mut AbstractState,
+    passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> Option<CompareFact> {
     let block = &body.blocks[id.index()];
@@ -198,6 +214,7 @@ fn execute_block(
             body,
             state,
             &statement.kind,
+            passing,
             callees,
             &mut compare,
         );
@@ -256,6 +273,7 @@ fn collect_proofs(
     owner_index: u32,
     body: &GirBody,
     inbound: &[AbstractState],
+    passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> Vec<ProofFact> {
     use super::prove;
@@ -284,6 +302,7 @@ fn collect_proofs(
                 body,
                 &mut state,
                 &statement.kind,
+                passing,
                 callees,
                 &mut compare,
             );
@@ -297,6 +316,7 @@ fn summarize(
     owner: &Owner,
     body: &GirBody,
     inbound: &[AbstractState],
+    passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> FunctionSummary {
     let mut summary = FunctionSummary::default();
@@ -314,6 +334,7 @@ fn summarize(
             body,
             BlockId(index as u32),
             &mut state,
+            passing,
             callees,
         );
         absorb_effects(&mut summary, &state);

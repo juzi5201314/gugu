@@ -21,6 +21,11 @@ pub(crate) struct BackendPlan {
     pub(crate) gir_block_count: u32,
     pub(crate) gir_statement_count: u32,
     pub(crate) gir_fingerprint: [u8; 32],
+    pub(crate) placement_count: u32,
+    pub(crate) turn_region_count: u32,
+    pub(crate) local_heap_count: u32,
+    pub(crate) shared_heap_count: u32,
+    pub(crate) placement_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -32,6 +37,7 @@ pub(crate) fn plan(
 ) -> Option<BackendPlan> {
     let module = hir.module();
     let entry = module.entry?;
+    let placement = gir.placement.counts();
     Some(BackendPlan {
         target,
         entry: module.definitions[entry.index()].name.clone(),
@@ -53,5 +59,10 @@ pub(crate) fn plan(
             .map(|body| body.statements.len() as u32)
             .sum(),
         gir_fingerprint: gir.fingerprint,
+        placement_count: placement.total,
+        turn_region_count: placement.turn_region,
+        local_heap_count: placement.local_heap,
+        shared_heap_count: placement.shared_heap,
+        placement_fingerprint: gir.placement.fingerprint,
     })
 }

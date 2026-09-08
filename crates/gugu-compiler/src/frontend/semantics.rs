@@ -97,6 +97,7 @@ pub(crate) fn check(
         queries,
         sources,
     )?;
+    let gir = super::gir::place_world(&hir, gir, &analysis_world, queries, sources)?;
     let summaries = super::mono::summary::project(
         cfg.target(),
         &mono_world,

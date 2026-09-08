@@ -156,6 +156,8 @@ emit-image
 
 阶段 26 起 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 增加 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
+阶段 27 起 `ImagePlan` 再增加 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 与 `placement-fingerprint`。这些字段记录逃逸与存储选择，不代表已经改写 CFG 做堆装箱或写出机器码。`large_copy` 警告进入 `Compilation` 诊断且不阻止镜像计划；升为错误时 Frontend 失败且没有镜像。
+
 ## runtime 源资源与实现归属
 
 `RuntimeResources::builtin()` 返回 compiler 构建时嵌入的 Gugu 源文件登记：
@@ -187,8 +189,8 @@ emit-image
 | `patterns` | frontend parser、pattern checker | 表面语法已解析；穷尽性未实现 | 08、15、20 |
 | `functions` | frontend parser、capture、async、HIR/GIR | 表面语法已解析；捕获与 lowering 未实现 | 08、16、20、26 |
 | `traits` | trait solver、impl selection | 未实现 | 17、18、20 |
-| `passing` | value/resource lowering | 未实现 | 27 |
-| `memory` | placement、resource runtime、GC | 仅登记 runtime 边界 | 27、30–51 |
+| `passing` | value/resource lowering | GIR 已按类别展开浅拷、COW seal 与 resource lease；`large_copy` 已接入诊断 | 27 |
+| `memory` | placement、resource runtime、GC | 已记录 TurnRegion/LocalHeap/SharedHeap 选择；runtime 分配与 GC 仍未物化 | 27、30–51 |
 | `concurrency` | scheduler、channel、sync runtime | 仅登记 intrinsic 边界 | 35–37 |
 | `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 | 08、21–26 |
 | `unsafe` | safety checker、FFI/asm backend | `extern`/`asm` 语法节点已解析；安全检查未实现 | 08、19、58 |

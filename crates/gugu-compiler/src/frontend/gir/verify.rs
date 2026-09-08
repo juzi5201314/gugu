@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 
 pub(crate) fn verify(module: &hir::Module, body: &GirBody) -> Result<(), Diagnostic> {
     structure(module, body)?;
+    statements(body)?;
     predecessors(body)?;
     storage(body)?;
     cleanup_sequences(module, body)?;
@@ -108,6 +109,66 @@ fn operand_in_body(body: &GirBody, operand: &Operand) -> Result<(), Diagnostic> 
         Operand::Copy(place) | Operand::MoveInternal(place) => place_in_body(body, *place),
         Operand::Constant(id) if id.index() >= body.constants.len() => {
             Err(gir_error("常量引用越界", None))
+        }
+        _ => Ok(()),
+    }
+}
+
+fn statements(body: &GirBody) -> Result<(), Diagnostic> {
+    for statement in &body.statements {
+        match &statement.kind {
+            StatementKind::Assign(place, rvalue) => {
+                place_in_body(body, *place)?;
+                rvalue_in_body(body, rvalue)?;
+            }
+            StatementKind::ValueAction { place, .. }
+            | StatementKind::ResourceAction { place, .. }
+            | StatementKind::SetDiscriminant { place, .. }
+            | StatementKind::Pin { place, .. } => place_in_body(body, *place)?,
+            StatementKind::GcWrite {
+                owner,
+                destination,
+                value,
+            } => {
+                place_in_body(body, *owner)?;
+                place_in_body(body, *destination)?;
+                operand_in_body(body, value)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn rvalue_in_body(body: &GirBody, rvalue: &Rvalue) -> Result<(), Diagnostic> {
+    match rvalue {
+        Rvalue::Use(operand)
+        | Rvalue::UnaryOp { operand, .. }
+        | Rvalue::Cast { operand, .. }
+        | Rvalue::Repeat { operand, .. }
+        | Rvalue::DynErase { operand, .. } => operand_in_body(body, operand),
+        Rvalue::BinaryOp { left, right, .. } | Rvalue::Compare { left, right, .. } => {
+            operand_in_body(body, left)?;
+            operand_in_body(body, right)
+        }
+        Rvalue::CheckedOp { operands, .. }
+        | Rvalue::Aggregate { operands, .. }
+        | Rvalue::AllocObject { operands, .. }
+        | Rvalue::Intrinsic { operands, .. } => {
+            for operand in operands {
+                operand_in_body(body, operand)?;
+            }
+            Ok(())
+        }
+        Rvalue::Discriminant(place)
+        | Rvalue::Len(place)
+        | Rvalue::Ref(place)
+        | Rvalue::RawAddress(place)
+        | Rvalue::ValueCopy(place)
+        | Rvalue::CowSnapshot(place) => place_in_body(body, *place),
+        Rvalue::AllocArray { length, .. } => operand_in_body(body, length),
+        Rvalue::StackSlotAddress(local) if local.index() >= body.locals.len() => {
+            Err(gir_error("StackSlotAddress 越界", None))
         }
         _ => Ok(()),
     }

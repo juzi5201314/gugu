@@ -74,6 +74,8 @@ pub enum QueryKind {
     AnalysisSccSummary = 27,
     /// 跨 package 的公共函数摘要。
     PublicFunctionSummary = 28,
+    /// 逃逸分析与 placement 选择。
+    EscapeAndPlacement = 29,
 }
 
 /// query 的规范身份。

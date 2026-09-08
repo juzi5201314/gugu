@@ -4,12 +4,14 @@ mod checks;
 mod cleanup;
 mod concurrency;
 mod control;
+mod copy;
 mod expr;
 mod lang;
 mod patterns;
 mod place;
 
 use super::body::*;
+use super::passing::PassingTable;
 use super::{Primitives, body_kind, gir_error, primitive_types};
 use crate::frontend::hir::{self, ExprId, TypeId};
 const ADDRESS_TAKEN: u8 = 1;
@@ -87,6 +89,9 @@ struct Builder<'a> {
     loops: Vec<LoopFrame>,
     tries: Vec<TryFrame>,
     live: Vec<bool>,
+    written: Vec<bool>,
+    large_copies: Vec<LargeCopySite>,
+    passing: PassingTable,
     return_block: BlockId,
 }
 
@@ -131,6 +136,9 @@ impl<'a> Builder<'a> {
             loops: Vec::new(),
             tries: Vec::new(),
             live: Vec::new(),
+            written: Vec::new(),
+            large_copies: Vec::new(),
+            passing: PassingTable::new(module),
             return_block: BlockId(0),
         };
         for (index, scope) in builder.source_scopes.iter_mut().enumerate() {
@@ -192,6 +200,7 @@ impl<'a> Builder<'a> {
             select_cases: self.select_cases,
             expression_locals: self.expression_locals,
             match_leaves: self.match_leaves,
+            large_copies: self.large_copies,
             flags: self.flags,
             revision: GIR_REVISION,
             entry: BlockId(0),
@@ -300,6 +309,7 @@ impl<'a> Builder<'a> {
             pinned_storage,
         });
         self.live.push(false);
+        self.written.push(matches!(kind, LocalKind::Argument));
         id
     }
 
@@ -363,6 +373,7 @@ impl<'a> Builder<'a> {
         if !self.live[local.index()] || self.locals[local.index()].pinned_storage {
             return;
         }
+        self.release_local(local);
         self.push_stmt(StatementKind::StorageDead(local));
         self.live[local.index()] = false;
     }
@@ -470,8 +481,7 @@ impl<'a> Builder<'a> {
     }
 
     fn assign_copy(&mut self, dest: Place, src: LocalId) {
-        let operand = copy_of(src);
-        self.assign(dest, Rvalue::Use(operand));
+        self.copy_value(dest, Place::local(src), self.locals[src.index()].ty);
     }
 
     fn assign_unit(&mut self, local: LocalId) {
@@ -551,7 +561,7 @@ impl<'a> Builder<'a> {
         }
         if let Some(place) = self.expression_places[id.index()] {
             let local = self.temp(self.expr_ty(id));
-            self.assign(Place::local(local), Rvalue::Use(Operand::Copy(place)));
+            self.copy_value(Place::local(local), place, self.expr_ty(id));
             self.expression_locals[id.index()] = Some(local);
             return Ok(Some(local));
         }

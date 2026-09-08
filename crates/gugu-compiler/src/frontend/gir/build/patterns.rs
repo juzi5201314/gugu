@@ -38,7 +38,7 @@ impl Builder<'_> {
             self.bind_pattern(place, arm.pattern)?;
             self.match_leaves.push((self.current, row as u32));
             if let Some(value) = self.emit_expr(arm.body)? {
-                self.assign(Place::local(dest), Rvalue::Use(copy_of(value)));
+                self.copy_value(Place::local(dest), Place::local(value), self.expr_ty(id));
                 self.goto(join);
             }
             current_fail = fail;
@@ -360,11 +360,19 @@ impl Builder<'_> {
             | hir::PatternKind::Range { .. } => {}
             hir::PatternKind::Bind(local) => {
                 let dest = self.hir_to_gir[local.index()];
-                self.assign(Place::local(dest), Rvalue::Use(Operand::Copy(place)));
+                self.copy_value(
+                    Place::local(dest),
+                    place,
+                    self.owner.locals[local.index()].ty,
+                );
             }
             hir::PatternKind::At { local, pattern } => {
                 let dest = self.hir_to_gir[local.index()];
-                self.assign(Place::local(dest), Rvalue::Use(Operand::Copy(place)));
+                self.copy_value(
+                    Place::local(dest),
+                    place,
+                    self.owner.locals[local.index()].ty,
+                );
                 self.bind_pattern(place, *pattern)?;
             }
             hir::PatternKind::Ref(inner) => {

@@ -74,8 +74,12 @@
 `check` 同样完成具体类型集合冻结和后期常量求值；后期求值失败属于编译失败，
 不能返回成功计划。bootstrap 的 JSON `image-plan` 包含 `type-id-count`、
 `type-universe-fingerprint`、`late-constant-count` 和 `late-constants-fingerprint`，
-两项 fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的编译计划，
-不代表最终可执行镜像已经写出，也不承诺 TypeId 跨镜像稳定。
+以及 `gir-body-count`、`gir-block-count`、`gir-statement-count`、`gir-fingerprint`、
+`placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 和
+`placement-fingerprint`。fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的
+编译计划，不代表最终可执行镜像已经写出，也不承诺 TypeId 跨镜像稳定。
+`large_copy` 默认警告仍可返回成功计划；`#[deny(large_copy)]` / `#[forbid(large_copy)]`
+使检查失败且 `image-plan` 为 `null`。
 
 ### `gugu run [target] [args...]`
 

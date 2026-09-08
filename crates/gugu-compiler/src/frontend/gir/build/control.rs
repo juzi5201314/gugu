@@ -110,11 +110,15 @@ impl Builder<'_> {
             self.switch_to(normal);
             return Ok(());
         }
-        let rvalue = match operation {
-            crate::frontend::ast::AssignOp::Assign => Rvalue::Use(copy_of(src)),
-            other => compound_assign(other, Operand::Copy(dest), copy_of(src)),
-        };
-        self.assign(dest, rvalue);
+        match operation {
+            crate::frontend::ast::AssignOp::Assign => {
+                self.copy_value(dest, Place::local(src), self.place_ty(dest));
+            }
+            other => {
+                let rvalue = compound_assign(other, Operand::Copy(dest), copy_of(src));
+                self.assign(dest, rvalue);
+            }
+        }
         Ok(())
     }
 

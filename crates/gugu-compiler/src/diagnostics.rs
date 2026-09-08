@@ -140,6 +140,8 @@ pub enum DiagnosticCode {
     LateComptime,
     /// GIR 结构、清理序列或效果区域不满足内部不变量。
     GirInvariant,
+    /// 按值传递超过 64 字节的位结构体。
+    LargeCopy,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -200,6 +202,7 @@ impl fmt::Display for DiagnosticCode {
             Self::MonoInstanceLimit => "E0053",
             Self::LateComptime => "E0054",
             Self::GirInvariant => "E0055",
+            Self::LargeCopy => "E0056",
         };
         formatter.write_str(code)
     }

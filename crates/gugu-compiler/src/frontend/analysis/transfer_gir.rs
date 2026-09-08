@@ -8,6 +8,7 @@ use crate::frontend::gir::body::{
     BinaryOp, BlockId, CompareOp, ConstValue, GirBody, IntrinsicOp, LocalId, Operand, Place,
     Rvalue, StatementKind, Terminator, UnaryOp,
 };
+use crate::frontend::gir::passing::PassingTable;
 use crate::frontend::hir::{self, ExprId, Module, Owner};
 use crate::frontend::mono::instantiate::CallSite;
 
@@ -25,6 +26,7 @@ pub(crate) fn execute_statement(
     body: &GirBody,
     state: &mut AbstractState,
     kind: &StatementKind,
+    passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
     compare: &mut Option<CompareFact>,
 ) {
@@ -35,9 +37,14 @@ pub(crate) fn execute_statement(
             sync_resolved(module, owner, state);
         }
         StatementKind::Atomic { .. } | StatementKind::Volatile { .. } => state.bump_foreign(),
-        StatementKind::ValueAction { .. }
-        | StatementKind::ResourceAction { .. }
-        | StatementKind::GcWrite { .. } => {
+        StatementKind::ValueAction { descriptor, .. } => {
+            let class = passing.class(*descriptor);
+            if class.has_resource() || class.is_unknown() {
+                state.effects.alias_heap = true;
+                state.bump_heap();
+            }
+        }
+        StatementKind::ResourceAction { .. } | StatementKind::GcWrite { .. } => {
             state.effects.alias_heap = true;
             state.bump_heap();
         }
@@ -246,8 +253,11 @@ fn sync_copy(
     place: Place,
     rvalue: &Rvalue,
 ) {
-    let Rvalue::Use(Operand::Copy(src) | Operand::MoveInternal(src)) = rvalue else {
-        return;
+    let src = match rvalue {
+        Rvalue::Use(Operand::Copy(src) | Operand::MoveInternal(src))
+        | Rvalue::ValueCopy(src)
+        | Rvalue::CowSnapshot(src) => src,
+        _ => return,
     };
     if !place.is_local() || !src.is_local() {
         return;

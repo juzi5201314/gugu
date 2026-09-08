@@ -189,6 +189,10 @@ fn query_is_stable_across_cache() {
     let warm = compile_with(&queries, source);
     assert_eq!(cold.gir.fingerprint, warm.gir.fingerprint);
     assert_eq!(
+        cold.gir.placement.fingerprint,
+        warm.gir.placement.fingerprint
+    );
+    assert_eq!(
         serde_json::to_vec(&cold.gir.bodies).unwrap(),
         serde_json::to_vec(&warm.gir.bodies).unwrap()
     );
@@ -218,6 +222,7 @@ fn dump_is_deterministic() {
     assert_eq!(first, second);
     assert!(first.contains("gir-revision 2"));
     assert!(first.contains("body owner=main"));
+    assert!(first.contains("placement schema"));
 }
 
 #[test]
@@ -230,7 +235,275 @@ fn image_plan_reports_gir_counts() {
     let plan = compilation.image_plan().expect("镜像计划");
     assert!(plan.gir_body_count() >= 1);
     assert!(plan.gir_block_count() >= 1);
+    assert!(plan.placement_count() >= 1);
     assert_ne!(plan.gir_fingerprint(), [0; 32]);
+    assert_ne!(plan.placement_fingerprint(), [0; 32]);
+}
+
+fn named_body<'a>(
+    hir: &'a crate::frontend::hir::Validated,
+    world: &'a GirWorldV1,
+    name: &str,
+) -> &'a GirBody {
+    let definition = hir
+        .module()
+        .definitions
+        .iter()
+        .position(|definition| definition.name == name)
+        .map(|index| crate::frontend::hir::DefId(index as u32))
+        .expect(name);
+    world
+        .bodies
+        .iter()
+        .find(|body| body.owner == definition)
+        .unwrap_or_else(|| panic!("缺少 body {name}"))
+}
+
+fn has_rvalue(body: &GirBody, pred: impl Fn(&Rvalue) -> bool) -> bool {
+    body.statements.iter().any(
+        |statement| matches!(&statement.kind, StatementKind::Assign(_, rvalue) if pred(rvalue)),
+    )
+}
+
+fn action_count(body: &GirBody, release: bool) -> usize {
+    body.statements
+        .iter()
+        .filter(|statement| match &statement.kind {
+            StatementKind::ResourceAction { action, .. } => {
+                (*action == ResourceActionKind::ReleaseLease) == release
+                    && (*action == ResourceActionKind::ReleaseLease
+                        || *action == ResourceActionKind::AcquireLease)
+            }
+            _ => false,
+        })
+        .count()
+}
+
+#[test]
+fn bit_copy_emits_value_action_and_reuse_after_call() {
+    let source = "fn take(n: int) { _ = n }\nfn main() { let x = 1\n take(x)\n _ = x + 1 }";
+    let (hir, gir) = compile_gir(source);
+    let body = entry_body(&hir, &gir);
+    verify(hir.module(), body).unwrap();
+    assert!(body.statements.iter().any(|statement| {
+        matches!(
+            statement.kind,
+            StatementKind::ValueAction {
+                action: ValueActionKind::Copy,
+                ..
+            }
+        )
+    }));
+    assert!(has_rvalue(body, |rvalue| matches!(
+        rvalue,
+        Rvalue::ValueCopy(_)
+    )));
+}
+
+#[test]
+fn string_copy_seals_and_chan_shares_identity() {
+    let string =
+        "fn take(s: string) { _ = s }\nfn main() { let t: string = \"ok\"\n take(t)\n _ = t }";
+    let compilation = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        string,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let dump = compilation.dump_gir().expect("string GIR");
+    assert!(dump.contains("cow_snapshot"), "{dump}");
+    let chan = "fn take(c: chan[int]) { _ = c }\nfn main() { let c: chan[int] = chan[int](1)\n take(c)\n _ = c }";
+    let compilation = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        chan,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let dump = compilation.dump_gir().expect("chan GIR");
+    assert!(!dump.contains("cow_snapshot"), "{dump}");
+    assert!(dump.contains("ValueAction Copy"), "{dump}");
+}
+
+#[test]
+fn resource_overwrite_releases_then_acquires() {
+    let source = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n b = ResourceCell { id: 2 }\n _ = b\n}";
+    let (hir, gir) = compile_gir(source);
+    let body = entry_body(&hir, &gir);
+    verify(hir.module(), body).unwrap();
+    assert!(action_count(body, true) >= 1);
+    assert!(action_count(body, false) >= 2);
+}
+
+#[test]
+fn any_erase_seals_source_first() {
+    let source = "use std.any.{Any}\nstruct Value { number: int }\nfn main() { let value: dyn Any = Value { number: 1 }\n _ = value }";
+    let (hir, gir) = compile_gir(source);
+    let body = entry_body(&hir, &gir);
+    let kinds: Vec<_> = body
+        .statements
+        .iter()
+        .filter_map(|statement| match &statement.kind {
+            StatementKind::ValueAction { .. } => Some("action"),
+            StatementKind::Assign(_, Rvalue::ValueCopy(_)) => Some("copy"),
+            StatementKind::Assign(_, Rvalue::DynErase { .. }) => Some("erase"),
+            _ => None,
+        })
+        .collect();
+    let action = kinds.iter().position(|kind| *kind == "action");
+    let erase = kinds.iter().position(|kind| *kind == "erase");
+    assert!(action.is_some() && erase.is_some());
+    assert!(action.unwrap() < erase.unwrap());
+}
+
+#[test]
+fn large_copy_warns_allow_suppresses_and_deny_fails() {
+    let source = "fn take(xs: [uint; 9]) { _ = xs }\nfn main() { take([0; 9]) }";
+    let compilation = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(compilation.is_success());
+    assert!(compilation.image_plan().is_some());
+    assert!(
+        compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == crate::DiagnosticCode::LargeCopy
+                    && diagnostic.severity() == crate::Severity::Warning
+            )
+    );
+    let allowed =
+        "fn take(xs: [uint; 9]) { _ = xs }\n#[allow(large_copy)]\nfn main() { take([0; 9]) }";
+    let compilation = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        allowed,
+        TargetName::X86_64Linux,
+    ));
+    assert!(compilation.is_success());
+    assert!(
+        compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .all(|diagnostic| diagnostic.code() != crate::DiagnosticCode::LargeCopy)
+    );
+    let exact = "fn take(xs: [uint; 8]) { _ = xs }\nfn main() { take([0; 8]) }";
+    let compilation = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        exact,
+        TargetName::X86_64Linux,
+    ));
+    assert!(compilation.is_success());
+    assert!(
+        compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .all(|diagnostic| diagnostic.code() != crate::DiagnosticCode::LargeCopy)
+    );
+    let denied =
+        "#![deny(large_copy)]\nfn take(xs: [uint; 9]) { _ = xs }\nfn main() { take([0; 9]) }";
+    let compilation = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        denied,
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compilation.is_success());
+    assert!(compilation.image_plan().is_none());
+    assert!(
+        compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == crate::DiagnosticCode::LargeCopy
+                    && diagnostic.severity() == crate::Severity::Error
+            )
+    );
+}
+
+#[test]
+fn placement_boxes_escaping_ref_and_keeps_local_stack() {
+    let escape = "fn f(p: &int) { _ = *p }\nfn main() { let x = 1\n f(&x) }";
+    let (hir, gir) = compile_gir(escape);
+    let body = entry_body(&hir, &gir);
+    let taken = body
+        .locals
+        .iter()
+        .enumerate()
+        .find(|(_, local)| local.address_taken)
+        .map(|(index, _)| index as u32)
+        .expect("取地址局部");
+    let record =
+        super::placement::record_of(&gir.placement, body_index(&gir, body), LocalId(taken))
+            .expect("placement");
+    assert_eq!(record.kind, super::placement::PlacementKind::LocalHeap);
+    let local = "fn main() { let x = 1\n let r = &x\n _ = *r }";
+    let (hir, gir) = compile_gir(local);
+    let body = entry_body(&hir, &gir);
+    let taken = body
+        .locals
+        .iter()
+        .enumerate()
+        .find(|(_, local)| local.address_taken)
+        .map(|(index, _)| index as u32)
+        .expect("取地址局部");
+    let record =
+        super::placement::record_of(&gir.placement, body_index(&gir, body), LocalId(taken))
+            .expect("placement");
+    assert_eq!(record.kind, super::placement::PlacementKind::Stack);
+}
+
+#[test]
+fn unknown_generic_and_unknown_call_are_not_turn_region() {
+    let generic = "fn id[T](x: T) T = x\nfn main() { _ = id(1) }";
+    let (hir, gir) = compile_gir(generic);
+    let body = named_body(&hir, &gir, "id");
+    let arg = body
+        .locals
+        .iter()
+        .enumerate()
+        .find(|(_, local)| local.kind == LocalKind::Argument)
+        .map(|(index, _)| index as u32)
+        .expect("泛型参数");
+    let record = super::placement::record_of(&gir.placement, body_index(&gir, body), LocalId(arg))
+        .expect("placement");
+    assert_eq!(record.kind, super::placement::PlacementKind::LocalHeap);
+    assert_ne!(record.kind, super::placement::PlacementKind::TurnRegion);
+    let unknown =
+        "fn apply(f: fn(&int)) { let x = 1\n f(&x) }\nfn main() { apply(fn(p: &int) { _ = *p }) }";
+    let (hir, gir) = compile_gir(unknown);
+    let body = named_body(&hir, &gir, "apply");
+    let taken = body
+        .locals
+        .iter()
+        .enumerate()
+        .find(|(_, local)| local.address_taken)
+        .map(|(index, _)| index as u32)
+        .expect("未知调用取地址");
+    let record =
+        super::placement::record_of(&gir.placement, body_index(&gir, body), LocalId(taken))
+            .expect("placement");
+    assert_ne!(record.kind, super::placement::PlacementKind::TurnRegion);
+}
+
+fn body_index(world: &GirWorldV1, body: &GirBody) -> u32 {
+    world
+        .bodies
+        .iter()
+        .position(|candidate| candidate.owner == body.owner)
+        .expect("body 下标") as u32
 }
 
 #[test]
@@ -349,6 +622,7 @@ fn minimal_body() -> GirBody {
         select_cases: Vec::new(),
         expression_locals: Vec::new(),
         match_leaves: Vec::new(),
+        large_copies: Vec::new(),
         flags: 0,
         revision: GIR_REVISION,
         entry: BlockId(0),

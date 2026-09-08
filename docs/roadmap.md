@@ -194,10 +194,11 @@
   - 验收：return、break、continue、`?`、panic 和正常出口的动作序列与 HIR 一致；scoped view 无逃逸、无 suspend、每条出口恰有一次 end；NoSafepointRegion 只能由登记 intrinsic 产生。
   - 接入证据：`BuildGenericGir`（11，schema 1）为每个冻结 HIR owner 构造 generic body，经结构/前驱/storage/cleanup/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`；`FrontendOutput`/`BuildIr`/`ImagePlan`/`ActionInputs` 消费 body/block/语句计数与 GIR 指纹，`-Zdump-gir` 输出稳定 dump，差异为 E0055。cleanup 序列与 HIR `CleanupPlan` 对齐（`return_defer`/`loop_break`/`try_question` fixtures）；`cancelled` 仅 `ChanSend` 与含 send 的 `SelectCommit`。`LowerHir` schema 5 只构造、校验并冻结；管线为 `gir → mono → late → attach_fragments → WholeProgramAnalysis`（24，schema 5，`analysis_semantics_revision = 5`）→ `PublicFunctionSummary`。分析在 generic GIR 上求固定点，证明只写入 `AnalysisWorldV1.proofs`，调用效果以上界不再覆盖选中实例摘要，unwind 边只在可能 panic 时传播。`InstantiateGir` 仍从 HIR 收集调用边。331 项工作区测试全部通过，fmt/build 零 warning，mdBook 构建通过。单态化 GIR 替换、LIR 与机器码分别仍由阶段 27/28/52 交付。
 
-- [ ] **阶段 27：实现值传递、COW 与 placement 分析 lowering**（复杂度：4）
+- [x] **阶段 27：实现值传递、COW 与 placement 分析 lowering**（复杂度：4）
   - 依赖：阶段 23、26。
   - 实现位值浅拷贝、身份句柄共享、string/ByteBuffer seal、resource lease、`f(x)`/`f(&x)`、大拷贝 lint、escape 与 TurnRegion/LocalHeap/SharedHeap placement 选择。
   - 验收：传递不产生 move/borrow 门槛；句柄身份、COW 独立值和 ResourceCell 一次性 release 语义在赋值/返回/聚合/Any 中一致；分析未知时保留安全通用路径。
+  - 接入证据：`BuildGenericGir` schema 2 在构造期按传递类别展开 `ValueAction`/`CowSnapshot`/`ResourceAction`；调用实参先语义拷再 `MoveInternal`，`dyn Any` 擦除先 seal。`large_copy` 为 `E0056`（默认 warn，`deny`/`forbid` 使 Frontend 失败且无镜像）。管线为 `gir → mono → late → attach_fragments → WholeProgramAnalysis`（24，schema 5，`analysis_semantics_revision = 5`）→ `EscapeAndPlacement`（29，schema 1）→ `PublicFunctionSummary`。`GirWorldV1` schema 2 携带 `PlacementWorldV1`；分析用放置前指纹。未知/逃逸/发布不选 `TurnRegion`。纯位 `ValueAction` 不破坏范围证明。`ImagePlan`/`ActionInputs`/`-Zdump-gir` 消费 placement 计数与指纹。338 项工作区测试全部通过（阶段 27 新增 7 项），fmt/build 零 warning，mdBook 构建通过。Linux CLI `check`/`build` 接受含 `f(x)` 后再用、string COW 与 placement 的真实输入，JSON `image-plan` 含 placement 字段；`#![deny(large_copy)]` 对 `[uint; 9]` 退出码 1 且 `image-plan` 为 null。单态化 GIR 替换、LIR 与堆装箱改写分别仍由阶段 28/29 交付。
 
 - [ ] **阶段 28：实现 LIR SSA、memory SSA 与 verifier**（复杂度：5）
   - 依赖：阶段 26、27。

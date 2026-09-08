@@ -83,9 +83,18 @@ pub(crate) struct GirBody {
     pub(crate) expression_locals: Vec<Option<LocalId>>,
     /// 已选择 match 叶：`(进入叶的 block, HIR arm 行号)`。
     pub(crate) match_leaves: Vec<(BlockId, u32)>,
+    /// 按值复制超过 64 字节的位结构体；lint 在 query 外按属性求值。
+    pub(crate) large_copies: Vec<LargeCopySite>,
     pub(crate) flags: u32,
     pub(crate) revision: u32,
     pub(crate) entry: BlockId,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct LargeCopySite {
+    pub(crate) location: hir::Location,
+    pub(crate) size: u64,
+    pub(crate) ty: TypeId,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

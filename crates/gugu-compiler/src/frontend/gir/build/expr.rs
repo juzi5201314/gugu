@@ -237,7 +237,7 @@ impl Builder<'_> {
             let Some(local) = self.emit_expr(child)? else {
                 return Ok(());
             };
-            operands.push(copy_of(local));
+            operands.push(self.pass_arg(child, local));
         }
         let local = self.temp(self.expr_ty(id));
         self.assign(Place::local(local), Rvalue::Aggregate { kind, operands });
@@ -250,13 +250,8 @@ impl Builder<'_> {
             return Ok(());
         };
         let dest = self.temp(self.expr_ty(id));
-        self.assign(
-            Place::local(dest),
-            Rvalue::Repeat {
-                operand: copy_of(local),
-                count,
-            },
-        );
+        let operand = self.pass_arg(value, local);
+        self.assign(Place::local(dest), Rvalue::Repeat { operand, count });
         self.set_value(id, dest);
         Ok(())
     }
@@ -272,7 +267,7 @@ impl Builder<'_> {
             let Some(local) = self.emit_expr(field.value)? else {
                 return Ok(());
             };
-            operands.push(copy_of(local));
+            operands.push(self.pass_arg(field.value, local));
         }
         let local = self.temp(self.expr_ty(id));
         self.assign(
@@ -503,11 +498,14 @@ impl Builder<'_> {
             hir::Adjustment::ArrayToSlice(ty) => self.cast(id, local, CastKind::ArrayToSlice, *ty),
             hir::Adjustment::NeverTo(ty) => self.cast(id, local, CastKind::NeverTo, *ty),
             hir::Adjustment::Erase(ty) => {
+                let src_ty = self.locals[local.index()].ty;
+                let sealed = self.temp(src_ty);
+                self.copy_value(Place::local(sealed), Place::local(local), src_ty);
                 let dest = self.temp(*ty);
                 self.assign(
                     Place::local(dest),
                     Rvalue::DynErase {
-                        operand: copy_of(local),
+                        operand: Operand::MoveInternal(Place::local(sealed)),
                         ty: *ty,
                     },
                 );

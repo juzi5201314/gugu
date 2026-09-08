@@ -5,6 +5,17 @@ use super::ast::{AstArena, AstRange, AttrKind, Attribute, ExprId, ItemId, StmtId
 use super::cfg::ConfiguredAst;
 use super::token::{Token, TokenBuffer, TokenKind};
 use crate::Span;
+/// `large_copy` 在闭集表中的下标。
+pub(crate) const LARGE_COPY: usize = 0;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum LintLevel {
+    Allow,
+    Warn,
+    Deny,
+    Forbid,
+}
+
 // 语言当前有 11 个 lint，编译期固定表按位编码，不分配名称集合。
 const NAMES: [&str; 11] = [
     "large_copy",
@@ -125,7 +136,7 @@ pub(super) fn validate_lint_levels(
             let Some(level) = body.first().map(|token| token.text(source)) else {
                 continue;
             };
-            if !matches!(level, "forbid" | "allow" | "warn") {
+            if !matches!(level, "forbid" | "allow" | "warn" | "deny") {
                 continue;
             }
             debug_assert!(NAMES.len() <= u16::BITS as usize);
@@ -191,6 +202,170 @@ pub(super) fn validate_lint_levels(
         }
         stack.push((scope.end, mask));
     }
+}
+
+/// 词法嵌套范围内 `lint` 的有效级别；默认 `warn`。
+pub(crate) fn lint_level(
+    source: &str,
+    inner_attributes: AstRange<Attribute>,
+    arena: &AstArena,
+    tokens: &TokenBuffer,
+    configured: &ConfiguredAst,
+    offset: u32,
+    lint: usize,
+) -> LintLevel {
+    debug_assert!(lint < NAMES.len());
+    let mut level = LintLevel::Warn;
+    let mut scopes = Vec::new();
+    collect_lint_scope(
+        &mut scopes,
+        source,
+        tokens,
+        0,
+        u32::try_from(source.len()).expect("源码长度受 SourceMap 限制"),
+        inner_attributes,
+        arena,
+    );
+    for (index, item) in arena.items.iter().enumerate() {
+        if configured.item_active(ItemId(index as u32)) {
+            collect_lint_scope(
+                &mut scopes,
+                source,
+                tokens,
+                item.span.start(),
+                item.span.end(),
+                item.attributes,
+                arena,
+            );
+        }
+    }
+    for (index, expression) in arena.exprs.iter().enumerate() {
+        if configured.expr_active(ExprId(index as u32)) {
+            collect_lint_scope(
+                &mut scopes,
+                source,
+                tokens,
+                expression.span.start(),
+                expression.span.end(),
+                expression.attributes,
+                arena,
+            );
+        }
+    }
+    for (index, statement) in arena.stmts.iter().enumerate() {
+        if configured.stmt_active(StmtId(index as u32)) {
+            collect_lint_scope(
+                &mut scopes,
+                source,
+                tokens,
+                statement.span.start(),
+                statement.span.end(),
+                statement.attributes,
+                arena,
+            );
+        }
+    }
+    scopes.sort_by_key(|scope| (scope.start, std::cmp::Reverse(scope.end)));
+    let bit = 1u16 << lint;
+    for scope in scopes {
+        if offset < scope.start || offset >= scope.end {
+            continue;
+        }
+        if scope.forbid & bit != 0 {
+            level = LintLevel::Forbid;
+            continue;
+        }
+        if let Some(next) = scope.level(bit) {
+            if matches!(level, LintLevel::Forbid) {
+                continue;
+            }
+            level = next;
+        }
+    }
+    level
+}
+
+struct LintScope {
+    start: u32,
+    end: u32,
+    forbid: u16,
+    allow: u16,
+    warn: u16,
+    deny: u16,
+}
+
+impl LintScope {
+    fn level(self, bit: u16) -> Option<LintLevel> {
+        if self.forbid & bit != 0 {
+            Some(LintLevel::Forbid)
+        } else if self.deny & bit != 0 {
+            Some(LintLevel::Deny)
+        } else if self.warn & bit != 0 {
+            Some(LintLevel::Warn)
+        } else if self.allow & bit != 0 {
+            Some(LintLevel::Allow)
+        } else {
+            None
+        }
+    }
+}
+
+fn collect_lint_scope(
+    scopes: &mut Vec<LintScope>,
+    source: &str,
+    tokens: &TokenBuffer,
+    start: u32,
+    end: u32,
+    attributes: AstRange<Attribute>,
+    arena: &AstArena,
+) {
+    let mut scope = LintScope {
+        start,
+        end,
+        forbid: 0,
+        allow: 0,
+        warn: 0,
+        deny: 0,
+    };
+    for attribute in attributes.as_slice(&arena.attrs) {
+        let (open, close) = match attribute.kind {
+            AttrKind::Outer {
+                token_open,
+                token_close,
+            }
+            | AttrKind::Inner {
+                token_open,
+                token_close,
+            } => (token_open as usize, token_close as usize),
+            _ => continue,
+        };
+        let body = &tokens.tokens[open + 1..close];
+        let Some(name) = body.first().map(|token| token.text(source)) else {
+            continue;
+        };
+        let mask = lint_mask(source, &body[2..body.len().saturating_sub(1)]);
+        match name {
+            "forbid" => scope.forbid |= mask,
+            "deny" => scope.deny |= mask,
+            "warn" => scope.warn |= mask,
+            "allow" => scope.allow |= mask,
+            _ => {}
+        }
+    }
+    if scope.forbid != 0 || scope.allow != 0 || scope.warn != 0 || scope.deny != 0 {
+        scopes.push(scope);
+    }
+}
+
+fn lint_mask(source: &str, tokens: &[Token]) -> u16 {
+    debug_assert!(NAMES.len() <= u16::BITS as usize);
+    let mut mask = 0;
+    for token in tokens {
+        if let Some(index) = NAMES.iter().position(|name| *name == token.text(source)) {
+            mask |= 1 << index;
+        }
+    }
+    mask
 }
 
 fn attribute_open(tokens: &[Token], hash: usize) -> Option<usize> {
