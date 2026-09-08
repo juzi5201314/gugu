@@ -9,7 +9,6 @@ use crate::{Diagnostic, SourceMap};
 
 pub(crate) fn build_world(
     hir: &Validated,
-    mono: &MonoWorldV1,
     queries: &QueryEngine,
     sources: &SourceMap,
 ) -> Result<GirWorldV1, Vec<Diagnostic>> {
@@ -18,15 +17,24 @@ pub(crate) fn build_world(
     for (index, owner) in module.owners.iter().enumerate() {
         bodies.push(compute_body(hir, index, owner, queries, sources)?);
     }
-    let fragments = fragments_of(mono, &bodies);
-    let fingerprint = world_fingerprint(&bodies, &fragments, hir.fingerprint());
+    let fingerprint = world_fingerprint(&bodies, &[], hir.fingerprint());
     Ok(GirWorldV1 {
         schema: WORLD_SCHEMA,
         hir_fingerprint: hir.fingerprint(),
         bodies,
-        fragments,
+        fragments: Vec::new(),
         fingerprint,
     })
+}
+
+pub(crate) fn attach_fragments(world: GirWorldV1, mono: &MonoWorldV1) -> GirWorldV1 {
+    let fragments = fragments_of(mono, &world.bodies);
+    let fingerprint = world_fingerprint(&world.bodies, &fragments, world.hir_fingerprint);
+    GirWorldV1 {
+        fragments,
+        fingerprint,
+        ..world
+    }
 }
 
 fn compute_body(
@@ -47,7 +55,7 @@ fn compute_body(
     let result = queries
         .compute(key, |context| {
             context.record_dependency(
-                QueryKey::new(QueryKind::LowerHir, 4, module.input_fingerprint),
+                QueryKey::new(QueryKind::LowerHir, 5, module.input_fingerprint),
                 hir.fingerprint(),
             );
             match build::lower(module, owner) {

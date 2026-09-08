@@ -165,7 +165,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列)` 复用入口。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
 
-generic GIR 在阶段 26 已接入查询、诊断、镜像计划和 action key；单态化替换与分析改走 GIR 固定点分别由后续提交完成，不得从 HIR 再造一份平行 CFG。
+generic GIR 在阶段 26 已接入查询、诊断、镜像计划、action key 与全程序分析：`AbstractAnalysis` 在 generic body 上求固定点，证明写入 `AnalysisWorldV1.proofs`。单态化替换仍由 `InstantiateGir` 从 HIR 收集边；不得从 HIR 再造一份平行分析 CFG。
 
 ### generic 与 monomorphic GIR
 

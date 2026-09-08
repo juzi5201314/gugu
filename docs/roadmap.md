@@ -188,10 +188,11 @@
   - 验收：所有拥有 TypeId 的具体类型恰有一个编号；`!`/MaybeUninit 无编号；late 值不能改变可达性、布局、impl、宏或调用图；编号不作为跨镜像或 C ABI 稳定密钥。
   - 接入证据：`LowerHir` schema 2 在 HIR verifier 与实例图闭合后执行 `FreezeTypeUniverse`（25，schema 1）-> `EvaluateLateComptime`（26，schema 1）-> 全程序分析 -> HIR freeze。实例 schema 3 递归保存签名、局部、泛型、字段与反射类型，按完整 StableTypeKey 摘要排序分配稠密编号；透明与不透明别名归一到具体身份，`!`/MaybeUninit 不占编号，vtable payload 引用由同一类型表校验。早期 TypeId 相等性/名称可用于宏；late HIR evaluator 使用冻结实例调用目标和具体类型绑定，支持固定形状聚合、局部更新、循环、静态调用和标量计算，结果绑定 universe/闭包指纹。E0054 阻断传递 late 值进入数组长度、泛型参数与宏；panic、预算和非法发布结果停止编译。类型表与结果表接入 action key、分析输入及 CLI 镜像计划。299 项工作区测试全部通过（阶段 25 新增 12 项），fmt/build 零 warning，mdBook 构建通过；Linux build 的真实输入报告 8 个 TypeId/3 条后期结果，Windows check 的泛型与隐藏类型切片报告 10 个 TypeId/6 条结果，非法数组长度 build 返回 E0054、退出码 1、image-plan 为 null。GIR 操作树和物理 GC 类型 section 分别仍由阶段 26、39 交付，未声称已写出机器镜像。
 
-- [ ] **阶段 26：实现 GIR 语义 lowering 与 cleanup CFG**（复杂度：5）
+- [x] **阶段 26：实现 GIR 语义 lowering 与 cleanup CFG**（复杂度：5）
   - 依赖：阶段 20、24、25。
   - 实现 place/operand/rvalue、显式 CFG、值描述符动作、COW/resource 动作、suspend、panic、`ScopedViewBegin/End`、`NoSafepointRegion` 和 HIR CleanupPlan 到 cleanup block 的 lowering。
   - 验收：return、break、continue、`?`、panic 和正常出口的动作序列与 HIR 一致；scoped view 无逃逸、无 suspend、每条出口恰有一次 end；NoSafepointRegion 只能由登记 intrinsic 产生。
+  - 接入证据：`BuildGenericGir`（11，schema 1）为每个冻结 HIR owner 构造 generic body，经结构/前驱/storage/cleanup/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`；`FrontendOutput`/`BuildIr`/`ImagePlan`/`ActionInputs` 消费 body/block/语句计数与 GIR 指纹，`-Zdump-gir` 输出稳定 dump，差异为 E0055。cleanup 序列与 HIR `CleanupPlan` 对齐（`return_defer`/`loop_break`/`try_question` fixtures）；`cancelled` 仅 `ChanSend` 与含 send 的 `SelectCommit`。`LowerHir` schema 5 只构造、校验并冻结；管线为 `gir → mono → late → attach_fragments → WholeProgramAnalysis`（24，schema 5，`analysis_semantics_revision = 5`）→ `PublicFunctionSummary`。分析在 generic GIR 上求固定点，证明只写入 `AnalysisWorldV1.proofs`，调用效果以上界不再覆盖选中实例摘要，unwind 边只在可能 panic 时传播。`InstantiateGir` 仍从 HIR 收集调用边。331 项工作区测试全部通过，fmt/build 零 warning，mdBook 构建通过。单态化 GIR 替换、LIR 与机器码分别仍由阶段 27/28/52 交付。
 
 - [ ] **阶段 27：实现值传递、COW 与 placement 分析 lowering**（复杂度：4）
   - 依赖：阶段 23、26。

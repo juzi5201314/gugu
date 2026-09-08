@@ -9,7 +9,7 @@ mod verify;
 
 pub(crate) use body::{BodyKind, GirBody};
 pub(crate) use dump::dump_world;
-pub(crate) use query::build_world;
+pub(crate) use query::{attach_fragments, build_world};
 pub(crate) use verify::verify;
 
 use crate::frontend::hir::{self, TypeId};

@@ -83,16 +83,16 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 20 | `EmitImage` | image plan fingerprint | 最终镜像 |
 | 21 | `ParseSource` | generated source fingerprint + source slot | `ParsedSource` |
 | 22 | `ExpandSourceMacro` | stable macro call + round + source slot + script inputs | generated source/fragment + expansion record |
-| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy + world 输入（schema 3） | completed SCC 中的函数摘要投影 |
-| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（当前 schema 4，输入含实例图指纹与 proof 写回前的 HIR 模块指纹） | 排序摘要与 world-local 证明事实 |
+| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy + world 输入（schema 4） | completed SCC 中的函数摘要投影 |
+| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（当前 schema 5，输入含冻结 HIR 指纹、generic GIR 指纹与实例图/late 指纹） | 排序摘要与 world-local 证明事实 |
 | 25 | `FreezeTypeUniverse` | closed-world instance graph（schema 1；实例 world schema 3） | `TypeUniverseKey`、类型序列与稠密编号 |
 | 26 | `EvaluateLateComptime` | `LateConstKey` + `TypeUniverseKey` + registry（schema 1） | 固定形状 late 标量聚合与类型重定位 |
-| 27 | `AnalysisSccSummary` | 排序 `MonoKey` 集 + analysis policy + world 输入（schema 3） | 完整 SCC 摘要固定点 |
+| 27 | `AnalysisSccSummary` | 排序 `MonoKey` 集 + analysis policy + world 输入（schema 4） | 完整 SCC 摘要固定点 |
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision + 已完成 world 的结果指纹（schema 2） | 内容寻址跨 package 摘要 |
 
 新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--28 只表达登记的新 query，不得重用或改变既有编号的含义。阶段 24 起，23 与 27 的 callable 身份是 `MonoKey`；阶段 24 前为 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
 
-阶段 26 起 `BuildGenericGir` 已落地：每个冻结 HIR owner 一份 generic body，依赖 `LowerHir` schema 4 的模块指纹。`GirWorldV1` 用 fragment 把 mono 实例 digest 映射到 owner body；`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹进入 `ActionInputs` 与 `ImagePlan`。
+阶段 26 起 `BuildGenericGir` 已落地：每个冻结 HIR owner 一份 generic body，依赖 `LowerHir` schema 5 的模块指纹。`GirWorldV1` 用 fragment 把 mono 实例 digest 映射到 owner body；`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹进入 `ActionInputs`、`ImagePlan` 与全程序分析输入。`LowerHir` 只构造、校验并冻结；单态化闭合、late 与分析在冻结之后按 `gir → mono → late → analysis → summary` 顺序执行。
 
 ## query 状态机
 
@@ -220,8 +220,8 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
 ## 阶段 24 实现桥接
 
 `CollectMonoRoots`（12，schema 2）与 `InstantiateGir`（13，schema 2）已在
-`gugu-compiler::frontend::mono` 落地，闭合嵌套在 `LowerHir` compute 内、
-`Validated::freeze` 之前执行：
+`gugu-compiler::frontend::mono` 落地。阶段 26 起闭合发生在 `LowerHir` 冻结之后，
+与 generic GIR、late 和全程序分析同一管线：
 
 - `StableTypeKey`：语义类型经 GBC1 编码（`u16` kind tag、小端定宽、长度前缀）
   后按 `gugu-mono-v1` 域哈希；名义定义携带 `Definition.key` 稳定键、repr 标志、
@@ -247,7 +247,7 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
   以 `(interface, self_type)` 分别保留 vtable。闭包和初始化器的调用不计入外层 body。
   泛型体在绑定具体类型后重新选择 impl，再统一方法自身的泛型实参；trait
   obligation 及所属 impl 参与实例键，body 选择的 impl 也记入实例依赖。
-- `InstantiateGir` 的 session key 同时包含冻结前 HIR 输入指纹与 `MonoKey`。
+- `InstantiateGir` 的 session key 同时包含冻结 HIR 输入指纹与 `MonoKey`。
   同一 session 的源码变化不会重用旧实例；缓存命中仍重建 interner 的类型和实例记录。
 - `InstanceRecordV1` 保留实例键、具体签名/ABI 指纹、body 输入指纹、调用位点与
   callee 实例映射、selected_impls、vtable/metadata 根、外部符号及 late 依赖。
@@ -259,10 +259,11 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
   不包含私有定义或 session-local 编号。生产者输入更新会重算 query，但可消费内容
   未变时对象 key 不变。对象 key 经 `ActionInputs::add_public_summary` 进入前端 action key；
   磁盘持久化与跨 package 消费由阶段 71 接入。
-- 分析 query 23/27 的 schema 为 3，world schema 为 4。共享已检查的 HIR 操作树，
-  但固定点成员与调用位点都按具体实例确定；不把同一泛型定义的首个摘要复制给其它实例。
+- 分析 query 23/27 的 schema 为 4，world schema 为 5。固定点在 generic GIR body 上求解，
+  成员与调用位点按具体实例确定；不把同一泛型定义的首个摘要复制给其它实例。
   SCC 按凝聚图顺序完成，函数 query 仅投影完成结果。共享 HIR 上的检查只有在全部
-  可达实例均证明安全时才省略；未收敛 SCC 置预算耗尽并保留检查。
+  可达实例均证明安全时才省略；未收敛 SCC 置预算耗尽并保留检查。证明只存在于
+  `AnalysisWorldV1.proofs`。
 
 ## 单态化实例
 

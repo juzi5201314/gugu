@@ -339,10 +339,10 @@ impl Builder<'_> {
         let Some(right_local) = self.emit_expr(right)? else {
             return Ok(None);
         };
+        self.emit_check_ops(id)?;
         if let Some(dispatch) = dispatch {
             return self.emit_dispatch_op(id, dispatch, left_local, right_local);
         }
-        self.emit_check_ops(id)?;
         let dest = self.temp(self.expr_ty(id));
         let rvalue = binary_rvalue(operation, copy_of(left_local), copy_of(right_local));
         self.assign(Place::local(dest), rvalue);

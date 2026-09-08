@@ -94,12 +94,12 @@ registry 的规范摘要、条目 evaluator revision 和验证器 revision 都�
 重定位、运行时常量初始化和分支操作数消费；不得修改冻结 HIR/GIR，也不得触发新的前端或
 单态化 query。
 
-阶段 25 的实现由 `frontend::late` 接入 `LowerHir`（schema 2）：先校验 HIR，
-闭合单态化实例，再执行 `FreezeTypeUniverse`（25，schema 1）和
-`EvaluateLateComptime`（26，schema 1），最后进入全程序分析与 HIR 冻结。
+阶段 25 的 late 求值由 `frontend::late` 执行 `FreezeTypeUniverse`（25，schema 1）和
+`EvaluateLateComptime`（26，schema 1）。阶段 26 起该步骤发生在 `LowerHir` 冻结之后、
+`mono::close` 与全程序分析之间，不再嵌在 `LowerHir` compute 内。
 `InstantiateGir` 和实例 world 的 schema 为 3，携带每实例具体类型记录与
 HIR 类型到稳定类型键的绑定；名称、布局、递归字段依赖和 vtable payload 类型
-在冻结前收集。opaque 先还原隐藏类型，透明别名复用原类型键。
+在实例闭合时收集。opaque 先还原隐藏类型，透明别名复用原类型键。
 
 类型记录按完整 32 字节 `StableTypeKey` 摘要排序，下标即 TypeId；同时保留
 规范编码以检查摘要冲突。`!` 与 `MaybeUninit[T]` 不占编号，后者内部类型仍进入
@@ -329,28 +329,36 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 6. caller 只依赖 callee 的公共对象 key，局部证明另留在当前 world；
 7. 对无法收敛的部分返回 `unknown`，不删除安全检查。
 
-## 阶段 23 实现桥接
+## 阶段 26 实现桥接
 
-当前 compiler 在 **冻结前的 HIR 模块**上运行分析：从每个 callable owner 构造显式 CFG
-（`Goto` / `If` / `Switch` / `Return` / 回边；`for i in 0..n` 的 header 绑定归纳变量），
-在程序点传播 `AbstractState`（可达、区间、稀疏差约束、初始化、别名类、memory version、
-效果）。循环 header 回边 widening，固定点后以重新合并全部前驱的同步迭代执行 narrowing；
-每轮保持健全后固定点，精度迭代受同一块预算约束。`WholeProgramAnalysis`
-（query schema **4**）嵌套在 `LowerHir` compute 内，输入指纹取 proof 写回前的模块指纹
-与实例图指纹；其内再嵌套 `AnalysisSccSummary`（27，schema 3）与
-`FunctionAnalysisSummary`（23，schema 3）。身份键为 `MonoKey`
+当前 compiler 在 **冻结后的 generic GIR body** 上运行分析：每个 callable owner 使用
+`BuildGenericGir` 已验证的显式 CFG，在程序点传播 `AbstractState`（可达、区间、稀疏差约束、
+初始化、别名类、memory version、效果）。抽象槽仍按 HIR local/表达式编号索引，GIR 临时值
+经 `expression_locals` 与 `hir_local` 映射。循环 header 回边 widening，固定点后以重新合并
+全部前驱的同步迭代执行 narrowing；每轮保持健全后固定点，精度迭代受同一块预算约束。
+
+管线顺序为 `LowerHir`（schema **5**，只构造、校验并冻结）→ `BuildGenericGir` →
+`mono::close` → `late::run` → `gir::attach_fragments` → `WholeProgramAnalysis` →
+`PublicFunctionSummary`。`WholeProgramAnalysis`（query schema **5**）输入指纹含冻结 HIR
+指纹、generic GIR 指纹、late/mono 图指纹与策略字节；其内再嵌套 `AnalysisSccSummary`
+（27，schema **4**）与 `FunctionAnalysisSummary`（23，schema **4**）。身份键为 `MonoKey`
 （见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)）。
-SCC 按实例图的凝聚顺序求解，每个实例具有独立固定点状态；解释器共享定义的 HIR
-操作树，但调用点消费该实例实际选中的 callee 摘要。运算符、迭代、try、格式化与局部
-static 初始化器的调用效果均进入分析。函数 query 只投影已完成 SCC，不通过 query
-读取半初始化成员。共享 HIR 的检查必须在所有可达实例中都得到相同安全证明才可省略。
-证明只消费 HIR，不回看 `CheckedSemantics` 侧表，也不参与类型推断或 impl 选择。
+SCC 按实例图的凝聚顺序求解，每个实例具有独立固定点状态；解释器共享 owner 的 generic
+GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir` 仍从 HIR 收集调用边，
+不从 GIR 重解析。运算符、迭代、try、格式化与局部 static 初始化器的调用效果均进入分析。
+函数 query 只投影已完成 SCC，不通过 query 读取半初始化成员。共享 HIR 检查必须在所有
+可达实例中都得到相同安全证明才可省略。证明只写入 `AnalysisWorldV1.proofs`，不回写
+`RuntimeCheck`，不回看 `CheckedSemantics` 侧表，也不参与类型推断或 impl 选择。
+
+类型检查期写在调用表达式上的 `PANIC`/`ALLOCATE`/`SUSPEND` 是上界；闭合后由选中实例
+摘要取代，写回调用目的地不再重放该上界。未命中实例的普通调用才回退保守摘要。
 
 `[T; N]` 与 `&[T]` 的固有 `len` 由类型检查在用户 impl 之前命中，HIR 降为
 `Builtin::Len`；数组长度为类型中的 `N`，切片长度进入 `Len` 值槽，可被 `v.len() > 10`
-一类比较收窄。
+一类比较收窄。入口按局部整数类型播种位宽边界（例如 `u8` 移位量下界 ≥ 0）；
+调用 unwind 边只在当前状态已可能 panic 时传播，不把 CFG 上的 cleanup 边当成必然 panic。
 
-固定 **`analysis_semantics_revision = 4`**、**公共摘要策略 revision = 2**（与公共摘要对象复用同一版本常量）
+固定 **`analysis_semantics_revision = 5`**、**公共摘要策略 revision = 2**（与公共摘要对象复用同一版本常量）
 （默认 SCC 迭代 32、块迭代 256）。SCC 轮次或块迭代超预算 → 摘要取保守值、
 `budget_exhausted = true`，检查保持 `Unknown`；**不是**用户 `Error`。
 
@@ -362,7 +370,7 @@ static 初始化器的调用效果均进入分析。函数 query 只投影已完
 - 移位：移位量区间下界 ≥ 0 → `Proved`；负字面量 → `Disproved`。
 - Unicode 标量：值区间完全落在合法 scalar 且不含 surrogate → `Proved`。
 - 浮点转整数与 Utf8Boundary：可保持 `Unknown`。
-- 只有支配该检查点的 `Proved` 写入 `RuntimeCheck.proof`；**不删除** HIR 检查节点
+- 只有支配该检查点的 `Proved` 写入 `AnalysisWorldV1.proofs`；**不删除** HIR 检查节点
   （物理消除仍是阶段 29）。
 
 复合赋值按操作符更新原值，范围越过整数位宽时取该类型的保守范围，不能保留未回绕的
@@ -384,10 +392,10 @@ interface place 只引用参数序号、返回值与公开 static 稳定键投�
 hidden-state 标志；对象 key 只由可消费语义内容产生。磁盘 object 持久化与跨
 package 消费由阶段 71 接入。
 
-证明在 `LowerHir` 构建 Module 后、`Validated::freeze` 前写回 `RuntimeCheck.proof`；
-单态化闭合与公共摘要投影在同一冻结前窗口执行（`mono::close` -> `run_world` ->
-`summary::project` -> patch -> freeze）。world 的输入指纹取 **proof 写回前** 的模块
-指纹与实例图指纹，不混合证明输出。后端 `ImagePlan.runtime_checks_elided_count`
+证明在冻结 HIR 与 generic GIR 就绪后写入 `AnalysisWorldV1.proofs`，不回写 HIR。
+单态化闭合与公共摘要投影在冻结之后执行（`mono::close` → `late::run` →
+`analysis::run_world` → `summary::project`）。world 的输入指纹取冻结 HIR、generic GIR
+与实例图/late 指纹，不混合证明输出。后端 `ImagePlan.runtime_checks_elided_count`
 统计 `Proved` 数量、`mono_instance_count`/`mono_root_count`/`mono_graph_fingerprint`
 暴露闭世界实例图，供 smoke；**不改变**语言语义。`ActionInputs` 的 `macro_budget`、
 `analysis_policy`、`analysis_world` 指纹与全部公共摘要对象键进入前端 action key。
@@ -447,11 +455,11 @@ WholeProgramAnalysis(world_key, analysis_policy)
 
 阶段 23 起分析 query 在前端注册；阶段 24 起身份键升级为 `MonoKey`：
 
-- `AnalysisSccSummary`（编号 27，schema 3）的 key 是排序后的 `MonoKey` 集、
+- `AnalysisSccSummary`（编号 27，schema 4）的 key 是排序后的 `MonoKey` 集、
   analysis policy 与 world 输入指纹；计算闭包内对具体实例做摘要固定点，
   不经 query 读取本 SCC 的半初始化结果。
-- `FunctionAnalysisSummary`（编号 23，schema 3）从已完成的 SCC 摘要投影单个实例。
-- `WholeProgramAnalysis`（编号 24，schema 4）按实例图凝聚拓扑请求上述嵌套 query，
+- `FunctionAnalysisSummary`（编号 23，schema 4）从已完成的 SCC 摘要投影单个实例。
+- `WholeProgramAnalysis`（编号 24，schema 5）按实例图凝聚拓扑请求上述嵌套 query，
   合并为 world-local 共同证明与按实例排序的摘要。
 - `PublicFunctionSummary`（编号 28，schema 2）以已完成 world 的结果指纹隔离生产者输入，
   投影不含私有定义的效果与参数序号；内容对象键独立于 body 和稠密定义编号，并进入前端 action key。

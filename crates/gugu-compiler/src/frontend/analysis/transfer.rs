@@ -1,187 +1,12 @@
 //! 指令与终结符的抽象状态转移、assume 与长度/别名失效。
 
-use super::domain::{AbstractState, AliasClass, Interval, Relation, ValueKey};
+use super::domain::{AbstractState, Interval, Relation, ValueKey};
 use super::types::FunctionSummary;
 use crate::frontend::ast::{BinOp, UnOp};
-use crate::frontend::hir::{
-    self, CallTarget, ExprId, ExprKind, Literal, LocalId, Module, Owner, Res, Type,
-};
+use crate::frontend::hir::{self, CallTarget, ExprId, ExprKind, LocalId, Module, Owner, Res, Type};
 use crate::frontend::mono::instantiate::CallSite;
 
-pub(crate) fn eval_expr(
-    module: &Module,
-    owner: &Owner,
-    state: &mut AbstractState,
-    id: ExprId,
-    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
-) {
-    if !state.reachable {
-        return;
-    }
-    // 同一 HIR 表达式可在循环中再次执行；旧求值的范围与等式不能沿用。
-    state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
-    state.set_range(ValueKey::ExprLen(id), Interval::UNKNOWN);
-    state.relations.retain(|relation| {
-        !matches!(relation.left, ValueKey::Expr(expr) | ValueKey::ExprLen(expr) if expr == id)
-            && !matches!(relation.right, ValueKey::Expr(expr) | ValueKey::ExprLen(expr) if expr == id)
-    });
-    let kind = &owner.expressions[id.index()].kind;
-    match kind {
-        ExprKind::Literal(Literal::Integer(value)) => {
-            let signed = i128::try_from(*value).unwrap_or(i128::MAX);
-            state.set_range(ValueKey::Expr(id), Interval::point(signed));
-        }
-        ExprKind::Literal(Literal::Bool(true)) => {
-            state.set_range(ValueKey::Expr(id), Interval::point(1));
-        }
-        ExprKind::Literal(Literal::Bool(false)) => {
-            state.set_range(ValueKey::Expr(id), Interval::point(0));
-        }
-        ExprKind::Resolved(Res::Local(local)) => copy_local(module, owner, state, id, *local),
-        ExprKind::Resolved(Res::Def(definition)) => {
-            if matches!(
-                module.definitions[definition.index()].kind,
-                hir::DefinitionKind::Static | hir::DefinitionKind::LocalStatic
-            ) {
-                state.effects.reads_hidden = true;
-            }
-            if matches!(
-                module.definitions[definition.index()].kind,
-                hir::DefinitionKind::Static | hir::DefinitionKind::LocalStatic
-            ) {
-                for alias in &mut state.alias {
-                    if matches!(*alias, AliasClass::Heap) {
-                        *alias = AliasClass::Static(definition.0);
-                    }
-                }
-                state.effects.resource_publish = true;
-            }
-        }
-        ExprKind::Unary {
-            operation: UnOp::Neg,
-            value,
-        } => state.set_range(
-            ValueKey::Expr(id),
-            state.range(ValueKey::Expr(*value)).neg(),
-        ),
-        ExprKind::Binary {
-            dispatch: Some(dispatch),
-            ..
-        } => {
-            apply_dispatch(owner, state, *dispatch, callees);
-            state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
-            if callees(CallSite::Dispatch(*dispatch)).is_some() {
-                apply_local_effects(module, owner, state, id);
-            } else {
-                apply_effects(owner, state, id);
-            }
-        }
-        ExprKind::Binary {
-            operation,
-            left,
-            right,
-            dispatch: None,
-        } => {
-            eval_binary(state, id, *operation, *left, *right);
-        }
-        ExprKind::Range { start, end } => {
-            state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
-            let _ = (start, end);
-        }
-        ExprKind::Intrinsic {
-            operation: hir::Builtin::Len,
-            arguments,
-            ..
-        } => {
-            let receiver = owner.expression_ids[arguments.start as usize];
-            let key = len_key(owner, receiver);
-            seed_array_len(module, owner, state, receiver);
-            state.set_range(ValueKey::Expr(id), state.range(key));
-            state.relate(Relation {
-                left: ValueKey::Expr(id),
-                right: key,
-                offset: 0,
-            });
-            state.relate(Relation {
-                left: key,
-                right: ValueKey::Expr(id),
-                offset: 0,
-            });
-        }
-        ExprKind::Call { target, .. } | ExprKind::SpawnCall { target, .. } => {
-            apply_call(module, owner, state, id, target, callees);
-            if matches!(kind, ExprKind::SpawnCall { .. }) {
-                state.effects.suspend = true;
-                state.effects.allocate = true;
-                state.bump_heap();
-            }
-        }
-        ExprKind::Index {
-            base, read, write, ..
-        } => {
-            for dispatch in read.iter().chain(write) {
-                apply_dispatch(owner, state, *dispatch, callees);
-            }
-            seed_array_len(module, owner, state, *base);
-            state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
-            apply_effects(owner, state, id);
-        }
-        ExprKind::Try { from_value, .. } => {
-            if let Some(dispatch) = from_value {
-                apply_dispatch(owner, state, *dispatch, callees);
-            }
-            apply_effects(owner, state, id);
-        }
-        ExprKind::String { parts } => {
-            for part in &owner.string_parts[usize::try_from(parts.start)
-                .expect("HIR range 适配宿主")
-                ..usize::try_from(parts.end).expect("HIR range 适配宿主")]
-            {
-                if let hir::StringPart::Value {
-                    dispatch: Some(dispatch),
-                    ..
-                } = part
-                {
-                    apply_dispatch(owner, state, *dispatch, callees);
-                }
-            }
-            apply_effects(owner, state, id);
-        }
-        ExprKind::If {
-            then_value,
-            else_value,
-            ..
-        } => {
-            let mut interval = state.range(ValueKey::Expr(*then_value));
-            if let Some(else_value) = else_value {
-                interval = interval.join(state.range(ValueKey::Expr(*else_value)));
-            }
-            state.set_range(ValueKey::Expr(id), interval);
-        }
-        ExprKind::Block { tail, .. } => {
-            if let Some(tail) = tail {
-                state.set_range(ValueKey::Expr(id), state.range(ValueKey::Expr(*tail)));
-            }
-        }
-        ExprKind::Assembly(_) => {
-            state.effects.foreign = true;
-            state.bump_foreign();
-        }
-        _ => {
-            apply_effects(owner, state, id);
-            if is_integer_ty(module, owner, id) {
-                // 保持未知，不覆盖已有收窄。
-                if state.range(ValueKey::Expr(id)).is_empty() {
-                    state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
-                }
-            }
-        }
-    }
-    let range = integer_range(module, owner, id, state.range(ValueKey::Expr(id)));
-    state.set_range(ValueKey::Expr(id), range);
-}
-
-fn copy_local(
+pub(crate) fn copy_local(
     module: &Module,
     owner: &Owner,
     state: &mut AbstractState,
@@ -204,22 +29,7 @@ fn copy_local(
     state.set_range(ValueKey::ExprLen(id), len);
 }
 
-fn eval_binary(state: &mut AbstractState, id: ExprId, op: BinOp, left: ExprId, right: ExprId) {
-    let lhs = state.range(ValueKey::Expr(left));
-    let rhs = state.range(ValueKey::Expr(right));
-    let interval = match op {
-        BinOp::Add => lhs.add(rhs),
-        BinOp::Sub => lhs.sub(rhs),
-        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
-            compare_interval(op, lhs, rhs)
-        }
-        BinOp::And | BinOp::Or => Interval::UNKNOWN,
-        _ => Interval::UNKNOWN,
-    };
-    state.set_range(ValueKey::Expr(id), interval);
-}
-
-fn compare_interval(op: BinOp, lhs: Interval, rhs: Interval) -> Interval {
+pub(crate) fn compare_interval(op: BinOp, lhs: Interval, rhs: Interval) -> Interval {
     if lhs.is_empty() || rhs.is_empty() {
         return Interval::EMPTY;
     }
@@ -334,97 +144,124 @@ fn propagate_len(state: &mut AbstractState, expr: ExprId, interval: Interval) {
     }
 }
 
-pub(crate) fn bind(state: &mut AbstractState, local: LocalId, value: ExprId) {
-    let interval = state.range(ValueKey::Expr(value));
-    state.set_range(ValueKey::Local(local), interval);
-    state.set_range(
-        ValueKey::LocalLen(local),
-        state.range(ValueKey::ExprLen(value)),
-    );
-    if local.index() < state.init.len() {
-        state.init[local.index()] = true;
-    }
-}
-
-pub(crate) fn increment(state: &mut AbstractState, local: LocalId) {
-    let next = state.range(ValueKey::Local(local)).add(Interval::point(1));
-    state.set_range(ValueKey::Local(local), next);
-}
-
-pub(crate) fn assign(
+fn apply_len(
     module: &Module,
     owner: &Owner,
     state: &mut AbstractState,
-    place: ExprId,
-    value: ExprId,
-    operation: crate::frontend::ast::AssignOp,
+    id: ExprId,
+    arguments: std::ops::Range<u32>,
 ) {
-    if let ExprKind::Resolved(Res::Local(local)) = owner.expressions[place.index()].kind {
-        state.bump_local(local);
-        use crate::frontend::ast::AssignOp;
-        let previous = state.range(ValueKey::Expr(place));
-        let rhs = state.range(ValueKey::Expr(value));
-        let range = match operation {
-            AssignOp::Assign => rhs,
-            AssignOp::Add => previous.add(rhs),
-            AssignOp::Sub => previous.sub(rhs),
-            _ => Interval::UNKNOWN,
-        };
-        bind(state, local, value);
-        state.set_range(
-            ValueKey::Local(local),
-            integer_range(module, owner, place, range),
-        );
-    } else {
-        state.effects.alias_heap = true;
-        state.effects.resource_publish = true;
-        state.effects.writes_hidden = true;
-        state.bump_heap();
-    }
-    let base = match owner.expressions[place.index()].kind {
-        ExprKind::Index { base, .. } => base,
-        _ => place,
-    };
-    state.effects.cow_seal |= matches!(
-        module.types[owner.expression_types[base.index()].index()],
-        Type::String
-    );
-    if let ExprKind::Resolved(Res::Def(definition)) = owner.expressions[place.index()].kind
-        && matches!(
-            module.definitions[definition.index()].kind,
-            hir::DefinitionKind::Static | hir::DefinitionKind::LocalStatic
-        )
-    {
-        state.effects.writes_hidden = true;
-    }
-    if let Some(local) = place_local(owner, place)
-        && owner.captures.iter().any(|capture| capture.local == local)
-    {
-        state.effects.writes_hidden = true;
+    let receiver = owner.expression_ids[arguments.start as usize];
+    let key = len_key(owner, receiver);
+    seed_array_len(module, owner, state, receiver);
+    state.set_range(ValueKey::Expr(id), state.range(key));
+    state.relate(Relation {
+        left: ValueKey::Expr(id),
+        right: key,
+        offset: 0,
+    });
+    state.relate(Relation {
+        left: key,
+        right: ValueKey::Expr(id),
+        offset: 0,
+    });
+}
+
+pub(crate) fn apply_site(
+    module: &Module,
+    owner: &Owner,
+    state: &mut AbstractState,
+    site: CallSite,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+) {
+    match site {
+        CallSite::Expression(id) => {
+            let expr = ExprId(id);
+            match &owner.expressions[expr.index()].kind {
+                ExprKind::Call { target, .. } | ExprKind::SpawnCall { target, .. } => {
+                    apply_call(module, owner, state, expr, target, callees);
+                    if matches!(
+                        owner.expressions[expr.index()].kind,
+                        ExprKind::SpawnCall { .. }
+                    ) {
+                        state.effects.suspend = true;
+                        state.effects.allocate = true;
+                        state.bump_heap();
+                    }
+                }
+                ExprKind::Intrinsic {
+                    operation: hir::Builtin::Len,
+                    arguments,
+                    ..
+                } => apply_len(module, owner, state, expr, arguments.clone()),
+                _ => apply_effects(owner, state, expr),
+            }
+        }
+        CallSite::Dispatch(dispatch) => apply_dispatch(owner, state, dispatch, callees),
+        CallSite::Initializer(statement) => apply_initializer(state, statement, callees),
     }
 }
 
-pub(crate) fn assume_iv(state: &mut AbstractState, local: LocalId, end: ExprId, take_body: bool) {
-    let mut iv = state.range(ValueKey::Local(local));
-    let bound = state.range(ValueKey::Expr(end));
-    if take_body {
-        iv.hi = iv.hi.min(bound.hi.saturating_sub(1));
-        if iv.lo >= bound.lo && bound.lo != i128::MIN && iv.lo >= bound.lo {
-            // 仍可能进入：i < end 用 end.lo 保守下界不够，保留 i.lo。
+pub(crate) fn refine_compare(
+    state: &mut AbstractState,
+    op: BinOp,
+    left: Option<ValueKey>,
+    left_range: Interval,
+    right: Option<ValueKey>,
+    right_range: Interval,
+    truth: bool,
+) {
+    let op = if truth { op } else { negate(op) };
+    let mut lhs = left_range;
+    let mut rhs = right_range;
+    match op {
+        BinOp::Lt => {
+            lhs.hi = lhs.hi.min(rhs.hi.saturating_sub(1));
+            rhs.lo = rhs.lo.max(lhs.lo.saturating_add(1));
         }
-        state.relate(Relation {
-            left: ValueKey::Local(local),
-            right: ValueKey::Expr(end),
-            offset: -1,
-        });
-    } else {
-        iv.lo = iv.lo.max(bound.lo);
+        BinOp::Le => {
+            lhs.hi = lhs.hi.min(rhs.hi);
+            rhs.lo = rhs.lo.max(lhs.lo);
+        }
+        BinOp::Gt => {
+            refine_compare(state, BinOp::Lt, right, right_range, left, left_range, true);
+            return;
+        }
+        BinOp::Ge => {
+            refine_compare(state, BinOp::Le, right, right_range, left, left_range, true);
+            return;
+        }
+        BinOp::Eq => {
+            let meet = lhs.meet(rhs);
+            lhs = meet;
+            rhs = meet;
+        }
+        _ => return,
     }
-    if iv.is_empty() {
-        state.reachable = false;
-        return;
+    if let Some(key) = left {
+        state.set_range(key, lhs);
+        meet_related(state, key, lhs);
     }
-    state.set_range(ValueKey::Local(local), iv);
+    if let Some(key) = right {
+        state.set_range(key, rhs);
+        meet_related(state, key, rhs);
+    }
+}
+
+fn meet_related(state: &mut AbstractState, key: ValueKey, interval: Interval) {
+    for relation in state.relations.clone() {
+        if relation.offset != 0 {
+            continue;
+        }
+        if relation.left == key {
+            let current = state.range(relation.right);
+            state.set_range(relation.right, current.meet(interval));
+        }
+        if relation.right == key {
+            let current = state.range(relation.left);
+            state.set_range(relation.left, current.meet(interval));
+        }
+    }
 }
 
 fn apply_call(
@@ -558,7 +395,7 @@ pub(crate) fn apply_initializer(
     );
 }
 
-fn apply_summary(state: &mut AbstractState, summary: &FunctionSummary) {
+pub(crate) fn apply_summary(state: &mut AbstractState, summary: &FunctionSummary) {
     state.effects.panic |= summary.may_panic;
     state.effects.allocate |= summary.may_allocate;
     state.effects.suspend |= summary.may_suspend;
@@ -581,7 +418,7 @@ fn apply_summary(state: &mut AbstractState, summary: &FunctionSummary) {
     state.effects.resource_publish |= summary.may_mutate_len;
 }
 
-fn apply_effects(owner: &Owner, state: &mut AbstractState, id: ExprId) {
+pub(crate) fn apply_effects(owner: &Owner, state: &mut AbstractState, id: ExprId) {
     let bits = owner.expressions[id.index()].effects.0;
     if bits & hir::Effects::PANIC != 0 {
         state.effects.panic = true;
@@ -646,23 +483,35 @@ pub(crate) fn place_local(owner: &Owner, id: ExprId) -> Option<LocalId> {
     }
 }
 
-fn is_integer_ty(module: &Module, owner: &Owner, id: ExprId) -> bool {
-    matches!(
-        module.types[owner.expression_types[id.index()].index()],
-        Type::Int { .. }
-    )
+pub(crate) fn integer_range(
+    module: &Module,
+    owner: &Owner,
+    id: ExprId,
+    range: Interval,
+) -> Interval {
+    clamp_integer(module, owner.expression_types[id.index()], range)
 }
 
-fn integer_range(module: &Module, owner: &Owner, id: ExprId, range: Interval) -> Interval {
-    let Type::Int { signed, bits } = module.types[owner.expression_types[id.index()].index()]
-    else {
+pub(crate) fn clamp_integer(module: &Module, ty: hir::TypeId, range: Interval) -> Interval {
+    let Some(bounds) = integer_bounds(module, ty) else {
         return range;
+    };
+    if range.lo < bounds.lo || range.hi > bounds.hi {
+        bounds
+    } else {
+        range
+    }
+}
+
+pub(crate) fn integer_bounds(module: &Module, ty: hir::TypeId) -> Option<Interval> {
+    let Type::Int { signed, bits } = module.types[ty.index()] else {
+        return None;
     };
     debug_assert!(bits > 0 && bits <= 128, "整数位宽由类型形成保证");
     if bits == 128 {
-        return range;
+        return None;
     }
-    let bounds = if signed {
+    Some(if signed {
         let magnitude = 1i128 << (bits - 1);
         Interval {
             lo: -magnitude,
@@ -673,10 +522,5 @@ fn integer_range(module: &Module, owner: &Owner, id: ExprId, range: Interval) ->
             lo: 0,
             hi: (1i128 << bits) - 1,
         }
-    };
-    if range.lo < bounds.lo || range.hi > bounds.hi {
-        bounds
-    } else {
-        range
-    }
+    })
 }

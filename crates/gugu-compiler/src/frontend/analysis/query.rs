@@ -6,12 +6,13 @@ use super::solver::{self, SccMember};
 use super::types::{AnalysisWorldV1, FunctionSummary, SccSummaryV1, WORLD_SCHEMA_VERSION};
 use crate::SourceMap;
 use crate::frontend::cfg::CfgContext;
+use crate::frontend::gir::GirWorldV1;
 use crate::frontend::hir::Module;
 use crate::frontend::mono::{MonoWorldV1, digest_of};
 use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
 
-const SCC_SCHEMA: u32 = 3;
-const FUNCTION_SCHEMA: u32 = 3;
+const SCC_SCHEMA: u32 = 4;
+const FUNCTION_SCHEMA: u32 = 4;
 
 struct InstancePlan {
     members: Vec<SccMember>,
@@ -20,11 +21,12 @@ struct InstancePlan {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "world 边界固定 HIR、实例图、策略与 query 来源"
+    reason = "world 边界固定 HIR、GIR、实例图、策略与 query 来源"
 )]
 pub(crate) fn run_world(
     module: &Module,
-    pre_freeze_fingerprint: [u8; 32],
+    hir_fingerprint: [u8; 32],
+    gir: &GirWorldV1,
     mono: &MonoWorldV1,
     cfg: &CfgContext,
     type_check_dependency: &DependencyFingerprint,
@@ -34,7 +36,8 @@ pub(crate) fn run_world(
     sources: &SourceMap,
 ) -> Result<(AnalysisWorldV1, DependencyFingerprint), Vec<crate::Diagnostic>> {
     let input_fingerprint = input_fingerprint(
-        pre_freeze_fingerprint,
+        hir_fingerprint,
+        gir.fingerprint,
         crate::frontend::mono::hash_domain(
             "gugu-analysis-late-input-v1",
             &[
@@ -76,6 +79,7 @@ pub(crate) fn run_world(
             for component in &plan.sccs {
                 let (part, dependency) = scc_summary(
                     module,
+                    gir,
                     &plan.members,
                     component,
                     input_fingerprint,
@@ -188,6 +192,7 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
 
 fn scc_summary(
     module: &Module,
+    gir: &GirWorldV1,
     members: &[SccMember],
     component: &[usize],
     input: [u8; 32],
@@ -215,7 +220,7 @@ fn scc_summary(
                 }
             }
         }
-        let summary = solver::analyze_scc(module, members, component, policy, &|index| {
+        let summary = solver::analyze_scc(module, gir, members, component, policy, &|index| {
             completed[index]
                 .as_ref()
                 .expect("凝聚图拓扑保证外部 callee SCC 已完成")
@@ -276,7 +281,8 @@ fn function_summary(
 /// world 输入指纹：冻结前 HIR、实例图、两级 query 依赖与策略编码。
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn input_fingerprint(
-    pre_freeze_fingerprint: [u8; 32],
+    hir_fingerprint: [u8; 32],
+    gir_fingerprint: [u8; 32],
     graph_fingerprint: [u8; 32],
     cfg: &CfgContext,
     type_check_dependency: &DependencyFingerprint,
@@ -284,7 +290,8 @@ pub(crate) fn input_fingerprint(
     policy: AnalysisPolicyV1,
 ) -> [u8; 32] {
     let mut hash = blake3::Hasher::new_derive_key("gugu-abstract-analysis-input-v1");
-    hash.update(&pre_freeze_fingerprint);
+    hash.update(&hir_fingerprint);
+    hash.update(&gir_fingerprint);
     hash.update(&graph_fingerprint);
     hash.update(&type_check_dependency.fingerprint());
     hash.update(&lower_hir_dependency.fingerprint());

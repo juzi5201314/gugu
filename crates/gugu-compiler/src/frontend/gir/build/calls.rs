@@ -46,6 +46,7 @@ impl Builder<'_> {
         if let Some(result) = self.emit_lang_call(id, &callee, &args)? {
             return Ok(Some(result));
         }
+        self.emit_check_ops(id)?;
         self.emit_call(id, callee, args)
     }
 
@@ -266,6 +267,7 @@ impl Builder<'_> {
             };
             operands.push(copy_of(local));
         }
+        self.emit_check_ops(id)?;
         if let hir::Builtin::Memory(memory) = operation {
             return self.emit_memory(id, memory, operands);
         }

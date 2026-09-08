@@ -6,7 +6,7 @@
 use crate::frontend::hir::{CheckKind, ExprId};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const WORLD_SCHEMA_VERSION: u32 = 4;
+pub(crate) const WORLD_SCHEMA_VERSION: u32 = 5;
 
 /// 检查的证明状态：`Proved` 表示 HIR 局部事实可证安全，`Disproved` 表示 HIR 局部
 /// 事实可证必然失败，`Unknown` 表示局部事实不足、必须保留检查。
@@ -145,6 +145,8 @@ pub(crate) struct AnalysisWorldV1 {
 }
 
 impl AnalysisWorldV1 {
+    /// 按检查键取证明；缺省为 `Unknown`。测试与摘要投影读取此方法。
+    #[allow(dead_code, reason = "库路径经 world.proofs 投影；测试直接调用")]
     pub fn proof_status(&self, key: &RuntimeCheckKey) -> ProofStatus {
         self.proofs
             .iter()

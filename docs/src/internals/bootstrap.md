@@ -190,7 +190,7 @@ emit-image
 | `passing` | value/resource lowering | 未实现 | 27 |
 | `memory` | placement、resource runtime、GC | 仅登记 runtime 边界 | 27、30–51 |
 | `concurrency` | scheduler、channel、sync runtime | 仅登记 intrinsic 边界 | 35–37 |
-| `comptime` | evaluator、source expansion、analysis | EarlyConst 域与源码宏展开已接入前端轮次闭包；抽象分析未实现 | 08、21–23 |
+| `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 | 08、21–26 |
 | `unsafe` | safety checker、FFI/asm backend | `extern`/`asm` 语法节点已解析；安全检查未实现 | 08、19、58 |
 | `platform-abi` | `target`、x86 backend、image writer | 已建立两个目标 descriptor | 52–58 |
 | `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界 | 33–51、56–58 |

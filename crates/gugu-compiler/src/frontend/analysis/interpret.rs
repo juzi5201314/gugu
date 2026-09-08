@@ -1,10 +1,12 @@
-//! 在 CFG 上做前向固定点，循环 header 使用 widening，收敛后再 narrowing。
+//! 在 generic GIR CFG 上做前向固定点，循环 header 使用 widening，收敛后再 narrowing。
 
-use super::cfg::{self, BlockId, Cfg, Inst, Terminator};
 use super::domain::{AbstractState, Interval, ValueKey};
 use super::policy::AnalysisPolicyV1;
 use super::transfer;
+use super::transfer_gir::{self, CompareFact};
 use super::types::{FunctionSummary, ProofFact, ProofStatus, ReturnRelation, RuntimeCheckKey};
+use crate::frontend::gir::GirWorldV1;
+use crate::frontend::gir::body::{BlockId, GirBody, Rvalue, StatementKind, Terminator};
 use crate::frontend::hir::{self, ExprId, Module, Owner};
 use crate::frontend::mono::instantiate::CallSite;
 
@@ -17,24 +19,24 @@ pub(crate) struct BodyResult {
 pub(crate) fn analyze_owner(
     module: &Module,
     owner: &Owner,
+    body: &GirBody,
     owner_index: u32,
     policy: AnalysisPolicyV1,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> BodyResult {
-    let cfg = cfg::build(owner);
     let locals = owner.locals.len();
     let exprs = owner.expressions.len();
     let params = owner.parameters.len();
-    let mut inbound: Vec<AbstractState> = (0..cfg.blocks.len())
+    let mut inbound: Vec<AbstractState> = (0..body.blocks.len())
         .map(|_| AbstractState::bottom(locals, exprs))
         .collect();
-    inbound[cfg.entry.index()] = AbstractState::entry(locals, exprs, params);
-    seed_param_lens(module, owner, &mut inbound[cfg.entry.index()]);
+    inbound[body.entry.index()] = AbstractState::entry(locals, exprs, params);
+    seed_param_lens(module, owner, &mut inbound[body.entry.index()]);
     let mut budget_exhausted = false;
     if !iterate(
         module,
         owner,
-        &cfg,
+        body,
         &mut inbound,
         policy.max_block_iterations,
         callees,
@@ -45,18 +47,21 @@ pub(crate) fn analyze_owner(
         narrow(
             module,
             owner,
-            &cfg,
+            body,
             &mut inbound,
             policy.max_block_iterations,
             callees,
         );
     }
-    let proofs = collect_proofs(module, owner, owner_index, &cfg, &inbound, callees);
-    let summary = if budget_exhausted {
+    let proofs = collect_proofs(module, owner, owner_index, body, &inbound, callees);
+    let mut summary = if budget_exhausted {
         FunctionSummary::conservative()
     } else {
-        summarize(module, owner, &cfg, &inbound, callees)
+        summarize(module, owner, body, &inbound, callees)
     };
+    if !budget_exhausted && proofs.iter().any(|fact| fact.status != ProofStatus::Proved) {
+        summary.may_panic = true;
+    }
     BodyResult {
         proofs: proofs
             .into_iter()
@@ -67,17 +72,26 @@ pub(crate) fn analyze_owner(
     }
 }
 
+pub(crate) fn body_of<'a>(module: &Module, gir: &'a GirWorldV1, owner_index: u32) -> &'a GirBody {
+    let owner = &module.owners[usize::try_from(owner_index).expect("owner 编号适配宿主")];
+    gir.bodies
+        .iter()
+        .find(|body| body.owner == owner.definition)
+        .expect("每个 HIR owner 都有 generic GIR body")
+}
+
 fn seed_param_lens(module: &Module, owner: &Owner, state: &mut AbstractState) {
     for (index, local) in owner.locals.iter().enumerate() {
+        let id = hir::LocalId(index as u32);
+        if let Some(bounds) = transfer::integer_bounds(module, local.ty) {
+            state.set_range(ValueKey::Local(id), bounds);
+        }
         let mut ty = &module.types[local.ty.index()];
         if let hir::Type::Ref(inner) = ty {
             ty = &module.types[inner.index()];
         }
         if let hir::Type::Array(_, length) = ty {
-            state.set_range(
-                super::domain::ValueKey::LocalLen(hir::LocalId(index as u32)),
-                super::domain::Interval::point(i128::from(*length)),
-            );
+            state.set_range(ValueKey::LocalLen(id), Interval::point(i128::from(*length)));
         }
     }
 }
@@ -85,27 +99,37 @@ fn seed_param_lens(module: &Module, owner: &Owner, state: &mut AbstractState) {
 fn iterate(
     module: &Module,
     owner: &Owner,
-    cfg: &Cfg,
+    body: &GirBody,
     inbound: &mut [AbstractState],
     rounds: u32,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> bool {
     for _ in 0..rounds {
         let mut changed = false;
-        for index in 0..cfg.blocks.len() {
-            if !inbound[index].reachable && index != cfg.entry.index() {
+        for index in 0..body.blocks.len() {
+            if !inbound[index].reachable && index != body.entry.index() {
                 continue;
             }
             let mut state = inbound[index].clone();
-            execute_block(
+            let compare = execute_block(
                 module,
                 owner,
-                cfg,
+                body,
                 BlockId(index as u32),
                 &mut state,
                 callees,
             );
-            changed |= propagate(owner, cfg, inbound, BlockId(index as u32), state, false);
+            changed |= propagate(
+                module,
+                owner,
+                body,
+                inbound,
+                BlockId(index as u32),
+                state,
+                compare.as_ref(),
+                callees,
+                false,
+            );
         }
         if !changed {
             return true;
@@ -117,27 +141,36 @@ fn iterate(
 fn narrow(
     module: &Module,
     owner: &Owner,
-    cfg: &Cfg,
+    body: &GirBody,
     inbound: &mut Vec<AbstractState>,
     rounds: u32,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) {
-    let entry = inbound[cfg.entry.index()].clone();
+    let entry = inbound[body.entry.index()].clone();
     for _ in 0..rounds {
-        // 对已收敛的上界同步应用 F，重新合并全部前驱；F(S) 仍是健全的后固定点。
         let mut next = vec![
             AbstractState::bottom(owner.locals.len(), owner.expressions.len());
-            cfg.blocks.len()
+            body.blocks.len()
         ];
-        next[cfg.entry.index()] = entry.clone();
+        next[body.entry.index()] = entry.clone();
         for (index, old) in inbound.iter().enumerate() {
             if !old.reachable {
                 continue;
             }
             let mut state = old.clone();
-            let block = BlockId(u32::try_from(index).expect("CFG 块编号可表示"));
-            execute_block(module, owner, cfg, block, &mut state, callees);
-            propagate(owner, cfg, &mut next, block, state, true);
+            let block = BlockId(u32::try_from(index).expect("GIR 块编号可表示"));
+            let compare = execute_block(module, owner, body, block, &mut state, callees);
+            propagate(
+                module,
+                owner,
+                body,
+                &mut next,
+                block,
+                state,
+                compare.as_ref(),
+                callees,
+                true,
+            );
         }
         if next == *inbound {
             break;
@@ -149,96 +182,59 @@ fn narrow(
 fn execute_block(
     module: &Module,
     owner: &Owner,
-    cfg: &Cfg,
+    body: &GirBody,
     id: BlockId,
     state: &mut AbstractState,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
-) {
-    let block = &cfg.blocks[id.index()];
-    for inst in &block.instructions {
-        execute_inst(module, owner, state, inst, callees);
+) -> Option<CompareFact> {
+    let block = &body.blocks[id.index()];
+    let mut compare = None;
+    for statement in
+        &body.statements[block.statements.start as usize..block.statements.end as usize]
+    {
+        transfer_gir::execute_statement(
+            module,
+            owner,
+            body,
+            state,
+            &statement.kind,
+            callees,
+            &mut compare,
+        );
         if !state.reachable {
-            return;
+            return compare;
         }
     }
+    compare
 }
 
-fn execute_inst(
+#[allow(clippy::too_many_arguments)]
+fn propagate(
     module: &Module,
     owner: &Owner,
-    state: &mut AbstractState,
-    inst: &Inst,
-    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
-) {
-    match inst {
-        Inst::Eval(expr) => transfer::eval_expr(module, owner, state, *expr, callees),
-        Inst::Bind { local, value } => transfer::bind(state, *local, *value),
-        Inst::Assign {
-            place,
-            value,
-            operation,
-        } => transfer::assign(module, owner, state, *place, *value, *operation),
-        Inst::Increment(local) => transfer::increment(state, *local),
-        Inst::Dispatch(dispatch) => transfer::apply_dispatch(owner, state, *dispatch, callees),
-        Inst::Initialize(statement) => transfer::apply_initializer(state, *statement, callees),
-        Inst::Yield => {
-            state.effects.suspend = true;
-            state.bump_heap();
-        }
-    }
-}
-
-fn propagate(
-    owner: &Owner,
-    cfg: &Cfg,
+    body: &GirBody,
     inbound: &mut [AbstractState],
     id: BlockId,
-    state: AbstractState,
+    mut state: AbstractState,
+    compare: Option<&CompareFact>,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
     narrowing: bool,
 ) -> bool {
-    let Some(terminator) = cfg.blocks[id.index()].terminator.as_ref() else {
-        return false;
-    };
-    match terminator {
-        Terminator::Goto { target, backedge } => {
-            join_into(inbound, *target, &state, *backedge && !narrowing)
-        }
-        Terminator::If {
-            cond,
-            then_block,
-            else_block,
-        } => {
-            let mut then_state = state.clone();
-            let mut else_state = state;
-            transfer::assume(&mut then_state, *cond, true, owner);
-            transfer::assume(&mut else_state, *cond, false, owner);
-            let mut changed = join_into(inbound, *then_block, &then_state, false);
-            changed |= join_into(inbound, *else_block, &else_state, false);
-            changed
-        }
-        Terminator::Iv {
-            local,
-            end,
-            body,
-            exit,
-        } => {
-            let mut body_state = state.clone();
-            let mut exit_state = state;
-            transfer::assume_iv(&mut body_state, *local, *end, true);
-            transfer::assume_iv(&mut exit_state, *local, *end, false);
-            let mut changed = join_into(inbound, *body, &body_state, false);
-            changed |= join_into(inbound, *exit, &exit_state, false);
-            changed
-        }
-        Terminator::Switch { arms, .. } => {
-            let mut changed = false;
-            for &arm in arms {
-                changed |= join_into(inbound, arm, &state, false);
-            }
-            changed
-        }
-        Terminator::Return(_) | Terminator::Unreachable => false,
+    let edges = transfer_gir::successor_states(
+        module,
+        owner,
+        body,
+        &mut state,
+        &body.blocks[id.index()].terminator,
+        compare,
+        callees,
+    );
+    let mut changed = false;
+    for (target, next) in edges {
+        let backedge = target.0 <= id.0 && !narrowing;
+        changed |= join_into(inbound, target, &next, backedge);
     }
+    changed
 }
 
 fn join_into(
@@ -258,29 +254,39 @@ fn collect_proofs(
     module: &Module,
     owner: &Owner,
     owner_index: u32,
-    cfg: &Cfg,
+    body: &GirBody,
     inbound: &[AbstractState],
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> Vec<ProofFact> {
     use super::prove;
     let mut proofs = Vec::new();
-    for (index, block) in cfg.blocks.iter().enumerate() {
+    for (index, block) in body.blocks.iter().enumerate() {
         let mut state = inbound[index].clone();
-        for inst in &block.instructions {
-            if let Inst::Eval(expr) = *inst {
-                for check in owner.checks.iter().filter(|check| check.expression == expr) {
-                    let status = prove::prove_check(module, owner, &state, check);
-                    proofs.push(ProofFact {
-                        key: RuntimeCheckKey {
-                            owner_index,
-                            expression: expr,
-                            kind: check.kind.clone(),
-                        },
-                        status,
-                    });
-                }
+        let mut compare = None;
+        for statement in
+            &body.statements[block.statements.start as usize..block.statements.end as usize]
+        {
+            if let StatementKind::Assign(_, Rvalue::CheckedOp { check, .. }) = &statement.kind {
+                transfer_gir::sync_resolved(module, owner, &mut state);
+                let check = &owner.checks[usize::try_from(*check).expect("检查编号适配宿主")];
+                proofs.push(ProofFact {
+                    key: RuntimeCheckKey {
+                        owner_index,
+                        expression: check.expression,
+                        kind: check.kind.clone(),
+                    },
+                    status: prove::prove_check(module, owner, &state, check),
+                });
             }
-            execute_inst(module, owner, &mut state, inst, callees);
+            transfer_gir::execute_statement(
+                module,
+                owner,
+                body,
+                &mut state,
+                &statement.kind,
+                callees,
+                &mut compare,
+            );
         }
     }
     proofs
@@ -289,7 +295,7 @@ fn collect_proofs(
 fn summarize(
     module: &Module,
     owner: &Owner,
-    cfg: &Cfg,
+    body: &GirBody,
     inbound: &[AbstractState],
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> FunctionSummary {
@@ -298,24 +304,22 @@ fn summarize(
     let mut relation = None;
     let mut saw_return = false;
     for (index, inbound_state) in inbound.iter().enumerate() {
-        if !inbound_state.reachable && index != cfg.entry.index() {
+        if !inbound_state.reachable && index != body.entry.index() {
             continue;
         }
         let mut state = inbound_state.clone();
-        execute_block(
+        let _ = execute_block(
             module,
             owner,
-            cfg,
+            body,
             BlockId(index as u32),
             &mut state,
             callees,
         );
         absorb_effects(&mut summary, &state);
-        if let Some(Terminator::Return(value)) = cfg.blocks[index].terminator {
-            returns = returns.join(value.map_or(Interval::UNKNOWN, |value| {
-                state.range(ValueKey::Expr(value))
-            }));
-            let next = value.and_then(|value| return_relation(owner, &state, value));
+        if matches!(body.blocks[index].terminator, Terminator::Return) {
+            returns = returns.join(state.range(ValueKey::Expr(owner.body)));
+            let next = return_relation(owner, &state, owner.body);
             if !saw_return {
                 relation = next;
             } else if relation != next {
@@ -336,9 +340,6 @@ fn summarize(
     }
     summary.return_relations.extend(relation);
     super::access::summarize(module, owner, callees, &mut summary);
-    if !owner.checks.is_empty() {
-        summary.may_panic = true;
-    }
     summary
 }
 
@@ -367,7 +368,12 @@ fn return_relation(
     if state.heap_version != 0 || state.local_version[local.index()] != 0 {
         return None;
     }
-    let parameter = owner.parameters.iter().position(|pattern| matches!(owner.patterns[pattern.index()].kind, hir::PatternKind::Bind(bound) if bound == local))?;
+    let parameter = owner.parameters.iter().position(|pattern| {
+        matches!(
+            owner.patterns[pattern.index()].kind,
+            hir::PatternKind::Bind(bound) if bound == local
+        )
+    })?;
     Some(ReturnRelation::EqLen {
         parameter: u32::try_from(parameter).expect("参数编号可表示"),
     })

@@ -102,20 +102,24 @@ fn proof_statuses(
     assert_eq!(
         output.hir.module().owners,
         warm.hir.module().owners,
-        "冷热 HIR（含 proof）必须一致"
+        "冷热 HIR 必须一致"
     );
-    output
-        .hir
-        .module()
-        .owners
-        .iter()
-        .flat_map(|owner| {
-            owner
-                .checks
-                .iter()
-                .map(|check| (check.kind.clone(), check.proof.expect("patched")))
-        })
-        .collect()
+    assert_eq!(
+        output.analysis.proofs, warm.analysis.proofs,
+        "冷热证明必须一致"
+    );
+    let mut statuses = Vec::new();
+    for (owner_index, owner) in output.hir.module().owners.iter().enumerate() {
+        for check in &owner.checks {
+            let key = crate::frontend::analysis::RuntimeCheckKey {
+                owner_index: owner_index as u32,
+                expression: check.expression,
+                kind: check.kind.clone(),
+            };
+            statuses.push((check.kind.clone(), output.analysis.proof_status(&key)));
+        }
+    }
+    statuses
 }
 
 #[test]
@@ -366,7 +370,7 @@ fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
     let mut policy = AnalysisPolicyV1::default();
     policy.max_block_iterations = 1;
     let component: Vec<_> = (0..keys.len()).collect();
-    let scc = super::solver::analyze_scc(module, &keys, &component, policy, &|_| {
+    let scc = super::solver::analyze_scc(module, &output.gir, &keys, &component, policy, &|_| {
         super::FunctionSummary::default()
     });
     assert!(scc.budget_exhausted, "循环在 1 次块迭代下必须耗尽预算");

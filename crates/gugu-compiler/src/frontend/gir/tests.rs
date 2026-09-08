@@ -126,7 +126,8 @@ fn try_break_continue_and_panic_have_exit_records() {
 
 #[test]
 fn match_for_select_and_suspend_lower() {
-    let source = "fn main() {\n let x = 1\n _ = match x { 1 => 2, _ => 3 }\n for i in 0..2 { _ = i }\n}";
+    let source =
+        "fn main() {\n let x = 1\n _ = match x { 1 => 2, _ => 3 }\n for i in 0..2 { _ = i }\n}";
     let (hir, gir) = compile_gir(source);
     let body = entry_body(&hir, &gir);
     verify(hir.module(), body).unwrap();

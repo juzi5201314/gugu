@@ -43,21 +43,20 @@ pub(super) fn lower(
     names: &NameResolution,
     checked: &CheckedSemantics,
     sources: &SourceMap,
-    cfg: &super::super::cfg::CfgContext,
     entry: Option<CallableId>,
     dependency: &crate::query::DependencyFingerprint,
     queries: &crate::QueryEngine,
-) -> Result<
-    (
-        hir::Validated,
-        super::analysis::AnalysisWorldV1,
-        crate::frontend::mono::MonoWorldV1,
-    ),
-    Vec<Diagnostic>,
-> {
-    query::lower(
-        model, names, checked, sources, cfg, entry, dependency, queries,
-    )
+) -> Result<(hir::Validated, crate::query::DependencyFingerprint), Vec<Diagnostic>> {
+    query::lower(model, names, checked, sources, entry, dependency, queries)
+}
+
+pub(super) fn identities(
+    model: &Model<'_>,
+    names: &NameResolution,
+    checked: &CheckedSemantics,
+    sources: &SourceMap,
+) -> Result<identity::Identities, Diagnostic> {
+    identity::collect(model, names, checked, sources).map(|(_, identities)| identities)
 }
 
 impl<'m, 'a> Builder<'m, 'a> {

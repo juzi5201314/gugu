@@ -38,8 +38,8 @@ query 依赖，不靠可变的全局 phase 回跳：
 17. `freeze_type_universe` 收集具体类型，按稳定类型键分配稠密 `TypeId`，产生不可变
     `TypeUniverseKey`；
 18. `evaluate_late_comptime` 只读取冻结 type universe，生成不可变 late 常量表；
-19. `abstract_analysis` 对闭世界可达的 monomorphic GIR body 求范围、别名、内存版本、
-    效果、可达性和调用摘要固定点，并消费 late 常量表；
+19. `abstract_analysis` 对闭世界可达实例在 generic GIR body 上求范围、别名、内存版本、
+    效果、可达性和调用摘要固定点，并消费 late 常量表；证明写入分析 world，不回写 HIR；
 20. LIR lowering 和代码生成只消费上述稳定结果，不能重新执行源码宏、早期 comptime，
     或让 late comptime 产生新依赖。
 
@@ -59,14 +59,14 @@ query 依赖，不靠可变的全局 phase 回跳：
 显式错误占位以继续产生同一根因附近的诊断；错误占位不得进入 GIR、单态化或持久成功
 产物。
 
-阶段 23 起，在 monomorphic GIR 未就绪前，`abstract_analysis` 从冻结前 HIR 构造显式 CFG，
-在程序点 `AbstractState` 上证明并只写回 `RuntimeCheck.proof`（不回看 `CheckedSemantics`
-侧表，不删除检查节点）；GIR 就绪后输入升级为 monomorphic GIR，query kind 仍为
-`WholeProgramAnalysis`。
+阶段 26 起，`abstract_analysis` 在 `LowerHir` 冻结之后消费 generic GIR body：
+`BuildGenericGir` → `mono::close` → `late::run` → `WholeProgramAnalysis`。
+证明只写入 `AnalysisWorldV1.proofs`（不回看 `CheckedSemantics` 侧表，不删除检查节点，
+不回写 `RuntimeCheck`）；query kind 仍为 `WholeProgramAnalysis`。
 
 阶段 24 起，第 16 步已闭合可达实例图：`CollectMonoRoots` 与 `InstantiateGir`
-在冻结前 HIR 与 `CheckedSemantics` 事实上运行（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)），
-分析身份键升级为 `MonoKey`；GIR 就绪后实例化输入升级为 generic GIR body。
+从冻结 HIR 与 `CheckedSemantics` 收集调用边（见[单态化与编译缓存](monomorphization-cache.md#阶段-24-实现桥接)），
+分析身份键为 `MonoKey`。`InstantiateGir` 不从 GIR 重解析调用边。
 
 ## 索引与 arena
 
@@ -253,7 +253,7 @@ parser 必须满足：
 
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
-TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。当前 schema 为 4：owner 携带显式清理计划表与 `return_plan`，模块类型表在存在定义时 intern `Unit`/`Never`/`Bool`/`Ptr(Unit)`，规范指纹域为 `gugu-validated-hir-v2`。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
+TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。当前 schema 为 5：owner 携带显式清理计划表与 `return_plan`，模块类型表在存在定义时 intern `Unit`/`Never`/`Bool`/`Ptr(Unit)`，规范指纹域为 `gugu-validated-hir-v2`；query 只构造、校验并冻结 Module，不再嵌套单态化、late 或全程序分析。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
 
 镜像计划只从冻结 HIR 读取入口、owner 数量和域隔离的 BLAKE3 指纹；原先仅生成 `main -> ReturnUnit` 的 `ir.rs` 已删除。GIR cleanup CFG、外部桥接执行和汇编机器编码分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；运行时稠密 TypeId 分配、vtable 物化和实际容器分配分别属于冻结类型集合及后续 lowering 阶段。
 

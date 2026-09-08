@@ -6,6 +6,7 @@ use super::types::{
     AnalysisOwnerKey, AnalysisWorldV1, FunctionSummary, InstanceSummaryRecord, ProofFact,
     RuntimeCheckKey, SccSummaryV1, WORLD_SCHEMA_VERSION, sort_proofs,
 };
+use crate::frontend::gir::GirWorldV1;
 use crate::frontend::hir::Module;
 use crate::frontend::mono::instantiate::CallSite;
 
@@ -19,6 +20,7 @@ pub(crate) struct SccMember {
 
 pub(crate) fn analyze_scc(
     module: &Module,
+    gir: &GirWorldV1,
     members: &[SccMember],
     component: &[usize],
     policy: AnalysisPolicyV1,
@@ -32,6 +34,7 @@ pub(crate) fn analyze_scc(
         for (position, &index) in component.iter().enumerate() {
             let result = analyze_member(
                 module,
+                gir,
                 &members[index],
                 component,
                 &summaries,
@@ -61,7 +64,7 @@ pub(crate) fn analyze_scc(
     let mut proofs = Vec::new();
     for &index in component {
         let member = &members[index];
-        let result = analyze_member(module, member, component, &summaries, policy, callees);
+        let result = analyze_member(module, gir, member, component, &summaries, policy, callees);
         for (expression, kind, status) in result.proofs {
             proofs.push(ProofFact {
                 key: RuntimeCheckKey {
@@ -95,6 +98,7 @@ pub(crate) fn analyze_scc(
 
 fn analyze_member(
     module: &Module,
+    gir: &GirWorldV1,
     member: &SccMember,
     component: &[usize],
     summaries: &[FunctionSummary],
@@ -113,10 +117,12 @@ fn analyze_member(
             Err(_) => callees(target),
         })
     };
+    let owner_index = member.owner.owner_index;
     interpret::analyze_owner(
         module,
-        &module.owners[usize::try_from(member.owner.owner_index).expect("owner 编号适配宿主")],
-        member.owner.owner_index,
+        &module.owners[usize::try_from(owner_index).expect("owner 编号适配宿主")],
+        interpret::body_of(module, gir, owner_index),
+        owner_index,
         policy,
         &lookup,
     )
@@ -157,19 +163,5 @@ pub(crate) fn world_from_sccs(
         proofs,
         budget_exhausted,
         runtime_checks_elided_count,
-    }
-}
-
-pub(crate) fn patch_proofs(module: &mut Module, world: &AnalysisWorldV1) {
-    for (owner_index, owner) in module.owners.iter_mut().enumerate() {
-        let owner_index = u32::try_from(owner_index).expect("owner index");
-        for check in &mut owner.checks {
-            let key = RuntimeCheckKey {
-                owner_index,
-                expression: check.expression,
-                kind: check.kind.clone(),
-            };
-            check.proof = Some(world.proof_status(&key));
-        }
     }
 }

@@ -269,6 +269,9 @@ impl Builder<'_> {
         into_iter: Option<u32>,
         next: Option<u32>,
     ) -> Result<Option<LocalId>, Diagnostic> {
+        if let Some(result) = self.try_emit_range_for(id, pattern, value, body)? {
+            return Ok(result);
+        }
         let Some(iterable) = self.emit_expr(value)? else {
             return Ok(None);
         };
@@ -322,6 +325,75 @@ impl Builder<'_> {
         self.assign_unit(dest);
         self.set_value(id, dest);
         Ok(Some(dest))
+    }
+
+    fn try_emit_range_for(
+        &mut self,
+        id: ExprId,
+        pattern: hir::PatternId,
+        value: ExprId,
+        body: ExprId,
+    ) -> Result<Option<Option<LocalId>>, Diagnostic> {
+        let hir::PatternKind::Bind(local) = self.owner.patterns[pattern.index()].kind else {
+            return Ok(None);
+        };
+        let hir::ExprKind::Range { start, end } = self.owner.expressions[value.index()].kind else {
+            return Ok(None);
+        };
+        let Some(start_local) = self.emit_expr(start)? else {
+            return Ok(Some(None));
+        };
+        let Some(end_local) = self.emit_expr(end)? else {
+            return Ok(Some(None));
+        };
+        let iv = self.hir_to_gir[local.index()];
+        self.assign_copy(Place::local(iv), start_local);
+        let header = self.fresh(false);
+        let exit = self.fresh(false);
+        let body_block = self.fresh(false);
+        self.goto(header);
+        self.switch_to(header);
+        let cond = self.temp(self.primitives.bool_ty);
+        self.assign(
+            Place::local(cond),
+            Rvalue::Compare {
+                op: CompareOp::Lt,
+                left: copy_of(iv),
+                right: copy_of(end_local),
+            },
+        );
+        self.terminate(Terminator::SwitchInt {
+            value: copy_of(cond),
+            targets: vec![(1, body_block)],
+            otherwise: exit,
+        });
+        self.switch_to(body_block);
+        self.loops.push(LoopFrame {
+            scope: self.owner.expressions[body.index()].scope,
+            header,
+            exit,
+            value: None,
+        });
+        let _ = self.emit_expr(body)?;
+        if !self.terminated() {
+            let one =
+                self.const_operand(self.owner.locals[local.index()].ty, ConstValue::Integer(1));
+            self.assign(
+                Place::local(iv),
+                Rvalue::BinaryOp {
+                    op: BinaryOp::Add,
+                    left: copy_of(iv),
+                    right: one,
+                },
+            );
+            self.goto(header);
+        }
+        self.loops.pop();
+        self.switch_to(exit);
+        let dest = self.temp(self.expr_ty(id));
+        self.assign_unit(dest);
+        self.set_value(id, dest);
+        Ok(Some(Some(dest)))
     }
 
     pub(super) fn emit_try(

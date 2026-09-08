@@ -351,27 +351,25 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
         .iter()
         .flat_map(|body| body.runtime_checks.iter().map(|check| &check.kind))
         .collect();
-    let proofs: Vec<_> = warm
-        .hir
-        .module()
-        .owners
-        .iter()
-        .flat_map(|owner| owner.checks.iter().map(|check| check.proof))
-        .collect();
+    let mut proofs = Vec::new();
+    for (owner_index, owner) in warm.hir.module().owners.iter().enumerate() {
+        for check in &owner.checks {
+            let key = crate::frontend::analysis::RuntimeCheckKey {
+                owner_index: owner_index as u32,
+                expression: check.expression,
+                kind: check.kind.clone(),
+            };
+            proofs.push(warm.analysis.proof_status(&key));
+        }
+    }
     assert_eq!(proofs.len(), checks.len());
-    assert_eq!(
-        proofs[1],
-        Some(crate::frontend::analysis::ProofStatus::Proved)
-    );
+    assert_eq!(proofs[1], crate::frontend::analysis::ProofStatus::Proved);
     assert!(
         proofs[2..]
             .iter()
-            .all(|proof| *proof == Some(crate::frontend::analysis::ProofStatus::Unknown))
+            .all(|proof| *proof == crate::frontend::analysis::ProofStatus::Unknown)
     );
-    assert_eq!(
-        proofs[0],
-        Some(crate::frontend::analysis::ProofStatus::Disproved)
-    );
+    assert_eq!(proofs[0], crate::frontend::analysis::ProofStatus::Disproved);
     let [
         CheckKind::IntegerDivision {
             ty: division_ty,

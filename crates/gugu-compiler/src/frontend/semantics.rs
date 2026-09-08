@@ -61,17 +61,50 @@ pub(crate) fn check(
     let (checked, dependency) =
         query::check(&model, sources, cfg, queries, &early, &early_dependency)?;
     let layouts = super::types::form_and_layout(&model, &checked, cfg.target())?;
-    let (hir, analysis_world, mono_world) = hir::lower(
+    let (hir, lower_dependency) = hir::lower(
         &model,
         names,
         &checked,
         sources,
-        cfg,
         entry,
         &dependency,
         queries,
     )?;
-    let gir = super::gir::build_world(&hir, &mono_world, queries, sources)?;
+    let gir = super::gir::build_world(&hir, queries, sources)?;
+    let identities =
+        hir::identities(&model, names, &checked, sources).map_err(|error| vec![error])?;
+    let context = super::mono::keys::MonoContext::new(
+        &model,
+        &checked,
+        &identities,
+        hir.module(),
+        sources,
+        cfg.target(),
+        cfg.harness(),
+    );
+    let mut mono_world = super::mono::close(&context, queries)?;
+    super::late::run(hir.module(), &mut mono_world, queries, sources)?;
+    let gir = super::gir::attach_fragments(gir, &mono_world);
+    let (analysis_world, analysis_dependency) = analysis::run_world(
+        hir.module(),
+        hir.fingerprint(),
+        &gir,
+        &mono_world,
+        cfg,
+        &dependency,
+        &lower_dependency,
+        analysis::AnalysisPolicyV1::default(),
+        queries,
+        sources,
+    )?;
+    let summaries = super::mono::summary::project(
+        cfg.target(),
+        &mono_world,
+        &analysis_world,
+        &analysis_dependency,
+        queries,
+    )?;
+    mono_world.public_summaries = summaries;
     Ok((
         checked,
         layouts,
