@@ -20,9 +20,16 @@ impl BodyBuilder<'_, '_, '_, '_> {
         let start = checked_id(self.output.statement_ids.len())?;
         self.output.statement_ids.extend(nodes);
         self.names = saved;
+        let scope = self.scope;
+        let end_plan = if self.scope_has_block_actions(scope) {
+            Some(self.request_plan(hir::ExitKind::BlockEnd(scope), scope)?)
+        } else {
+            None
+        };
         Ok(hir::ExprKind::Block {
             statements: start..checked_id(self.output.statement_ids.len())?,
             tail,
+            end_plan,
         })
     }
 
@@ -117,13 +124,23 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 captures.dedup();
                 let body = self.branch_expression(body)?;
                 let action = checked_id(self.output.cleanup.len())?;
+                let registration = if ret {
+                    self.registration_of(self.scope)
+                } else {
+                    hir::Registration::Static
+                };
                 self.output.cleanup.push(hir::Cleanup {
                     statement: id,
                     body,
                     scope: if ret { hir::ScopeId(0) } else { self.scope },
                     function_exit: ret,
                     captures,
+                    registration,
+                    unwind_plan: 0,
                 });
+                let scope = self.scope;
+                let unwind_plan = self.request_plan(hir::ExitKind::Unwind(scope), scope)?;
+                self.output.cleanup[action as usize].unwind_plan = unwind_plan;
                 hir::StatementKind::Defer(action)
             }
             ast::StmtKind::Yield => hir::StatementKind::Yield,

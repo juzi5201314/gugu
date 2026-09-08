@@ -253,7 +253,7 @@ parser 必须满足：
 
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
-TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query v1 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
+TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。当前 schema 为 3：owner 携带显式清理计划表，规范指纹域为 `gugu-validated-hir-v2`。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
 
 镜像计划只从冻结 HIR 读取入口、owner 数量和域隔离的 BLAKE3 指纹；原先仅生成 `main -> ReturnUnit` 的 `ir.rs` 已删除。GIR cleanup CFG、外部桥接执行和汇编机器编码分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；运行时稠密 TypeId 分配、vtable 物化和实际容器分配分别属于冻结类型集合及后续 lowering 阶段。
 
@@ -340,6 +340,25 @@ HIR 节点本体不复制完整类型。每个 owner 的 `expression_inputs` 与
 
 HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/heap或把只读值复制进环境。`EscapeAndPlacement`依据该计划选择 direct value、parent-environment projection或 shared slot；无论选择什么，都必须满足[函数与闭包](../spec/functions.md#捕获语义)这一唯一公开语义。
 
+### 清理计划
+
+每个 owner 保存两张连续表 `cleanup_plans: Vec<CleanupPlan>` 与 `cleanup_actions: Vec<CleanupAction>`，为每个控制流出口给出按[表达式规范](../spec/expressions.md#返回循环退出与-defer)排好序的动作序列。GIR 只能消费这些计划，不得按 `return`、panic 或循环种类重新推导动作：
+
+```text
+CleanupPlan { exit: ExitKind, actions: Range<u32>, destination: Option<ScopeId> }
+ExitKind = Return | Break(ScopeId) | Continue(ScopeId) | Try(ScopeId) | BlockEnd(ScopeId) | Unwind(ScopeId)
+CleanupAction = Action { cleanup: u32, guard: Registration } | DrainChain { until: Option<u32> }
+Registration = Static | Flag | Chain
+```
+
+- `Exit`/`TryExit` 节点携带 `plan`，`Block` 节点在其作用域注册过块 defer 时携带 `end_plan`，每个 `Scope` 携带进入时的 `unwind_plan`，每个 `Cleanup` 注册携带注册完成后立即生效的 `unwind_plan`。任意程序点的 panic 展开计划是当前作用域链上最近一次注册的 `unwind_plan`，否则是所在作用域的入口计划；函数作用域的入口 `Unwind` 计划固定为编号 0。
+- 动作序列先列出块 defer：沿出口的作用域链由内向外，每个作用域内按后注册先执行，只包含出口点之前已经注册的 action。`Break`/`Try`/`BlockEnd`/`Continue` 计划只含块 defer；`Return` 与 `Unwind` 计划随后列出函数出口 defer。
+- `defer ret` 的注册表示由注册点到函数作用域之间的控制结构决定：只有 Block 作用域时为 `Static`（到达出口必然已注册）；含 Branch 或 Try 时为 `Flag`（出口按运行时注册标志守卫）；含 Loop 时为 `Chain`（每轮注册一次，出口按每帧 defer 链 LIFO 消费）。块 defer 始终是 `Static`。
+- owner 存在 `Chain` 站点时，`Return`/`Unwind` 计划在每个 `Static`/`Flag` 站点前放置 `DrainChain { until: Some(站点) }`，消费比该站点注册更晚的链记录，末尾以 `DrainChain { until: None }` 消费到链底；未注册的 `Flag` 站点没有 mark，对应的消费直接到链底。没有链站点的 owner 不出现 `DrainChain`。
+- `destination` 是计划执行完毕后控制到达的作用域：`Return`/`Unwind` 为 `None`，`Continue(s)` 为 `s`，`Break(s)`/`Try(s)`/`BlockEnd(s)` 为 `s` 的父作用域。
+
+计划在 owner 全部注册已知后统一物化，因此文本上晚于出口、但可能通过外层循环先执行的链站点也能被出口消费。冻结 verifier 重新计算每个注册的表示、检查每个出口节点引用的计划种类与目标一致、块动作只属于出口作用域链并保持由内向外顺序、函数出口段的站点顺序与链消费配对正确，任何差异都是内部错误。
+
 ### 类型检查顺序
 
 类型检查按定义依赖 SCC 运行：
@@ -363,7 +382,7 @@ HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/h
 - 不含 `Res::Error`、错误类型或未求解类型变量；
 - 所有路径、调用、操作符、关联项和 impl 已唯一选择；
 - 所有早期 comptime 实参、数组长度、判别值和布局属性已求值；每个 late 表达式已经验证并归一化为稳定 `LateConstKey`；
-- 每个控制流出口对应确定的作用域清理链；
+- 每个控制流出口对应确定的作用域清理链，并引用一个已物化的 `CleanupPlan`；
 - 每个读取 place 在该点确定初始化，所有 unsafe 操作位于合法边界；
 - `async` 捕获、跨 suspend 活跃值和 `select` 分支载荷已经固定；
 - owner 的稳定输入摘要已经计算，且不含 session-local 数字 ID。

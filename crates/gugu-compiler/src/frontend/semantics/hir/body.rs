@@ -1,6 +1,7 @@
 use super::super::output::CheckedBody;
 use super::*;
 use crate::Span;
+mod cleanup;
 mod expressions;
 mod patterns;
 mod plans;
@@ -65,6 +66,7 @@ struct BodyBuilder<'b, 'f, 'm, 'a> {
     loops: Vec<hir::ScopeId>,
     tries: Vec<hir::ScopeId>,
     unsafe_depth: usize,
+    pending_plans: Vec<cleanup::PendingPlan>,
 }
 
 impl<'m, 'a> Builder<'m, 'a> {
@@ -167,6 +169,7 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
                 parent: None,
                 kind: hir::ScopeKind::Function,
                 location,
+                unwind_plan: 0,
             }],
             expression_ids: Vec::new(),
             statement_ids: Vec::new(),
@@ -182,6 +185,8 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
             checks: Vec::new(),
             captures: Vec::new(),
             cleanup: Vec::new(),
+            cleanup_plans: Vec::new(),
+            cleanup_actions: Vec::new(),
             assembly: Vec::new(),
             variadic_calls: Vec::new(),
             borrow_constraints: Vec::new(),
@@ -193,7 +198,7 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
         let statement_map = vec![None; compiler.model.modules[module].arena.stmts.len()];
         let slots = vec![None; facts.body.slots.len()];
         let dispatch_map = vec![None; facts.body.dispatches.len()];
-        Ok(Self {
+        let mut builder = Self {
             compiler,
             facts,
             module,
@@ -212,11 +217,16 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
             loops: Vec::new(),
             tries: Vec::new(),
             unsafe_depth: 0,
-        })
+            pending_plans: Vec::new(),
+        };
+        // 函数作用域的入口 Unwind 计划固定占用编号 0。
+        builder.request_plan(hir::ExitKind::Unwind(hir::ScopeId(0)), hir::ScopeId(0))?;
+        Ok(builder)
     }
 
     fn finish(mut self) -> Result<hir::Owner, Diagnostic> {
         self.lower_plans()?;
+        self.materialize_plans()?;
         for (expression, adjustments) in self.expressions.iter_mut().zip(self.adjustments) {
             let start = checked_id(self.output.adjustments.len())?;
             self.output.adjustments.extend(adjustments);
@@ -281,10 +291,12 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
     }
     fn new_scope(&mut self, kind: hir::ScopeKind, span: &Span) -> Result<hir::ScopeId, Diagnostic> {
         let id = hir::ScopeId(checked_id(self.output.scopes.len())?);
+        let unwind_plan = self.request_plan(hir::ExitKind::Unwind(id), id)?;
         self.output.scopes.push(hir::Scope {
             parent: Some(self.scope),
             kind,
             location: identity::location(self.compiler.sources, span)?,
+            unwind_plan,
         });
         self.scope = id;
         Ok(id)

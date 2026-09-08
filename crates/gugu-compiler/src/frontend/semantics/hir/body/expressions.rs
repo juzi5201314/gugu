@@ -178,6 +178,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     from_error: self.selected_dispatch(source, Some("Try"), Some("from_error"))?,
                     target,
                     cleanup: self.cleanup_scopes(target)?,
+                    plan: self.request_plan(Self::exit_kind(target), self.scope)?,
                 }
             }
             ast::ExprKind::Select { arms } => {
@@ -309,6 +310,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     target,
                     value: value.map(|value| self.expression(value)).transpose()?,
                     cleanup: self.cleanup_scopes(target)?,
+                    plan: self.request_plan(Self::exit_kind(target), self.scope)?,
                 }
             }
             ast::ExprKind::Continue => {
@@ -322,6 +324,7 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     target,
                     value: None,
                     cleanup: self.cleanup_scopes(target)?,
+                    plan: self.request_plan(Self::exit_kind(target), self.scope)?,
                 }
             }
             ast::ExprKind::FString { parts } => {

@@ -256,7 +256,9 @@ pub(super) fn children(owner: &hir::Owner, id: ExprId) -> Vec<ExprId> {
                 .iter()
                 .map(|f| f.value),
         ),
-        ExprKind::Block { statements, tail } => {
+        ExprKind::Block {
+            statements, tail, ..
+        } => {
             out.extend(tail);
             for id in &owner.statement_ids[statements.start as usize..statements.end as usize] {
                 match &owner.statements[id.index()].kind {

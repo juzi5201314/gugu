@@ -140,7 +140,9 @@ impl<'p, 'a> Evaluator<'p, 'a> {
                     .nth(usize::try_from(index).map_err(|_| invalid("late 下标越界"))?)
                     .ok_or_else(|| invalid("late 下标越界"))
             }
-            ExprKind::Block { statements, tail } => {
+            ExprKind::Block {
+                statements, tail, ..
+            } => {
                 for statement in
                     &owner.statement_ids[statements.start as usize..statements.end as usize]
                 {

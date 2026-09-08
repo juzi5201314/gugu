@@ -1,6 +1,7 @@
 use super::*;
 use crate::{Diagnostic, DiagnosticCode};
 mod body;
+mod cleanup;
 
 fn invalid(message: &str) -> Diagnostic {
     Diagnostic::error(

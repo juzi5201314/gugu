@@ -31,6 +31,8 @@ pub(crate) struct Owner {
     pub(crate) borrow_constraints: Vec<BorrowConstraint>,
     pub(crate) foreign_calls: Vec<ForeignCall>,
     pub(crate) cleanup: Vec<Cleanup>,
+    pub(crate) cleanup_plans: Vec<CleanupPlan>,
+    pub(crate) cleanup_actions: Vec<CleanupAction>,
     pub(crate) assembly: Vec<Assembly>,
     pub(crate) input_fingerprint: [u8; 32],
 }
@@ -61,6 +63,8 @@ pub(crate) enum ExprKind {
     Block {
         statements: Range<u32>,
         tail: Option<ExprId>,
+        /// 该块作用域正常结束时执行的 `BlockEnd` 计划；没有块 defer 时为 `None`。
+        end_plan: Option<u32>,
     },
     If {
         condition: ExprId,
@@ -95,6 +99,7 @@ pub(crate) enum ExprKind {
         from_error: Option<u32>,
         target: ExitTarget,
         cleanup: Range<u32>,
+        plan: u32,
     },
     Select {
         arms: Range<u32>,
@@ -158,6 +163,7 @@ pub(crate) enum ExprKind {
         target: ExitTarget,
         value: Option<ExprId>,
         cleanup: Range<u32>,
+        plan: u32,
     },
     String {
         parts: Range<u32>,
@@ -320,6 +326,8 @@ pub(crate) struct Scope {
     pub(crate) parent: Option<ScopeId>,
     pub(crate) kind: ScopeKind,
     pub(crate) location: Location,
+    /// 进入该作用域、尚未注册任何新 action 时的 `Unwind` 计划。
+    pub(crate) unwind_plan: u32,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum ScopeKind {
@@ -343,6 +351,50 @@ pub(crate) struct Cleanup {
     pub(crate) scope: ScopeId,
     pub(crate) function_exit: bool,
     pub(crate) captures: Vec<LocalId>,
+    /// 注册点到函数作用域之间的控制结构决定的注册表示。
+    pub(crate) registration: Registration,
+    /// 该 action 注册完成后立即生效的 `Unwind` 计划。
+    pub(crate) unwind_plan: u32,
+}
+
+/// 函数出口 action 的注册表示；块 action 总是 `Static`。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub(crate) enum Registration {
+    /// 注册点与目标作用域之间只有 Block 作用域：到达出口时必然已注册。
+    Static,
+    /// 注册点位于分支或 try 之下：出口按运行时注册标志决定是否执行。
+    Flag,
+    /// 注册点位于循环之下：每轮注册一次，出口按每帧 defer 链 LIFO 消费。
+    Chain,
+}
+
+/// 一个控制流出口的完整清理计划：动作已按规范排序，GIR 只能 intern 与连接。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct CleanupPlan {
+    pub(crate) exit: ExitKind,
+    pub(crate) actions: Range<u32>,
+    /// 计划执行完毕后控制到达的作用域；离开函数（`Return`/`Unwind`）为 `None`。
+    pub(crate) destination: Option<ScopeId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub(crate) enum ExitKind {
+    Return,
+    Break(ScopeId),
+    Continue(ScopeId),
+    Try(ScopeId),
+    /// 块作用域正常结束。
+    BlockEnd(ScopeId),
+    /// 从该作用域内的程序点开始 panic 展开。
+    Unwind(ScopeId),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub(crate) enum CleanupAction {
+    /// 执行一个已注册 action；`Flag` 注册在运行时按标志守卫。
+    Action { cleanup: u32, guard: Registration },
+    /// 按 LIFO 消费 defer 链上比 `until` 站点注册更晚的记录；`None` 消费到链底。
+    DrainChain { until: Option<u32> },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -210,7 +210,9 @@ impl<'a> Builder<'a> {
                 let arms = arms.clone();
                 self.emit_match(id, value, arms);
             }
-            ExprKind::Block { statements, tail } => {
+            ExprKind::Block {
+                statements, tail, ..
+            } => {
                 let statements = statements.clone();
                 let tail = *tail;
                 self.emit_block(id, statements, tail);

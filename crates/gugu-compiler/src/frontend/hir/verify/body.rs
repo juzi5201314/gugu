@@ -100,7 +100,8 @@ impl Module {
                 return Err(invalid("局部槽类型、位置或存储标志不合法"));
             }
         }
-        self.verify_plans(owner)
+        self.verify_plans(owner)?;
+        self.verify_cleanup(owner)
     }
 
     fn expression_edges(
@@ -168,8 +169,14 @@ impl Module {
                         .iter()
                         .all(|field| edge(field.value))
             }
-            ExprKind::Block { statements, tail } => {
-                if !range(statements, owner.statement_ids.len()) {
+            ExprKind::Block {
+                statements,
+                tail,
+                end_plan,
+            } => {
+                if !range(statements, owner.statement_ids.len())
+                    || end_plan.is_some_and(|plan| (plan as usize) >= owner.cleanup_plans.len())
+                {
                     return false;
                 }
                 for id in &owner.statement_ids[statements.start as usize..statements.end as usize] {
@@ -230,12 +237,14 @@ impl Module {
                 from_error,
                 target: exit,
                 cleanup: scopes,
+                plan,
             } => {
                 edge(*value)
                     && dispatch(*branch)
                     && dispatch(*from_error)
                     && target(*exit)
                     && cleanup(scopes)
+                    && (*plan as usize) < owner.cleanup_plans.len()
             }
             ExprKind::Select { arms } => {
                 range(arms, owner.select_arms.len())
@@ -319,7 +328,13 @@ impl Module {
                 target: exit,
                 value,
                 cleanup: scopes,
-            } => target(*exit) && value.is_none_or(&mut edge) && cleanup(scopes),
+                plan,
+            } => {
+                target(*exit)
+                    && value.is_none_or(&mut edge)
+                    && cleanup(scopes)
+                    && (*plan as usize) < owner.cleanup_plans.len()
+            }
             ExprKind::String { parts } => {
                 range(parts, owner.string_parts.len())
                     && owner.string_parts[parts.start as usize..parts.end as usize]

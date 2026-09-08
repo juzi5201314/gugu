@@ -27,7 +27,7 @@ pub(super) fn lower(
         hash.update(&expansion.macro_call().end().to_le_bytes());
     }
     let lower_input_fingerprint = *hash.finalize().as_bytes();
-    let key = QueryKey::new(QueryKind::LowerHir, 2, lower_input_fingerprint);
+    let key = QueryKey::new(QueryKind::LowerHir, 3, lower_input_fingerprint);
     let policy = AnalysisPolicyV1::default();
     let lower_dependency = DependencyFingerprint::new(key.clone(), lower_input_fingerprint);
     // 身份表在 query 外构造：缓存命中路径同样需要它重跑单态化闭合。
@@ -160,7 +160,7 @@ fn form(
 /// 与 `Validated::freeze` 一致的模块规范序列化指纹。
 fn module_fingerprint(module: &hir::Module) -> [u8; 32] {
     let bytes = serde_json::to_vec(module).expect("HIR schema 序列化");
-    *blake3::Hasher::new_derive_key("gugu-validated-hir-v1")
+    *blake3::Hasher::new_derive_key("gugu-validated-hir-v2")
         .update(&bytes)
         .finalize()
         .as_bytes()
