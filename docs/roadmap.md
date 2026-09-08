@@ -2,9 +2,13 @@
 
 ## 使用说明
 
-这份路线图覆盖当前仓库 `docs/src/spec/` 中的公开语言、工具链、标准库、运行时与 ABI 规范，以及 `docs/src/internals/` 中的编译器和 runtime 内部契约。路线图按可交付垂直切片组织，同时显式区分实现阶段与跨阶段里程碑。
+本文件是临时任务文件，不是文档。它把当前仓库 `docs/src/spec/` 中的公开语言、工具链、标准库、运行时与 ABI 规范，以及 `docs/src/internals/` 中的编译器和 runtime 内部契约拆成可交付的实现阶段，用于分阶段实现整个规范。它不属于 mdBook 书籍源，不进入 `docs/src/SUMMARY.md` 导航，也不是规范、教程、参考或 internals 章节，仓库的永久约定（如 `AGENTS.md`）不引用它；整个规范实现完成并通过最终发布门禁后，删除本文件。
 
-复杂度采用 1–5 级，并表示实现难度与所需 AI 推理能力：`1` 是局部、机械、低耦合任务；`2` 是边界清晰的单组件任务；`3` 是一次会话可完成的标准中型子系统；`4` 涉及多个契约、并发不变量或安全边界，需要更强模型与更完整验证；`5` 是跨层集成、GC/调度/后端/ABI/发布门禁等高风险任务，需要最强模型、分阶段验证，通常还应继续拆成 `2/3` 级子阶段。复杂度不是完成状态，所有条目仍使用 `[ ]`。
+「阶段 N」是本文件内部的临时任务标识，只允许出现在本文件和聊天对话中，不得出现在仓库的任何其它位置。其它位置需要指代某项能力时，直接引用对应的规范或 internals 章节。
+
+条目以 `[ ]`/`[x]` 表示完成状态：阶段验证通过后把条目标为 `[x]` 并保留，不删除，以便追踪进度与阶段间依赖。路线图按可交付垂直切片组织，同时显式区分实现阶段与跨阶段里程碑。
+
+复杂度采用 1–5 级，表示实现难度与所需 AI 推理能力，不表示完成状态：`1` 是局部、机械、低耦合任务；`2` 是边界清晰的单组件任务；`3` 是一次会话可完成的标准中型子系统；`4` 涉及多个契约、并发不变量或安全边界，需要更强模型与更完整验证；`5` 是跨层集成、GC/调度/后端/ABI/发布门禁等高风险任务，需要最强模型、分阶段验证，通常还应继续拆成 `2/3` 级子阶段。
 
 路线图的权威依据：
 
@@ -13,16 +17,16 @@
 - 编译器与 runtime 内部契约：[AST/HIR](src/internals/ast-hir.md)、[comptime 分析](src/internals/comptime-analysis.md)、[GIR/LIR](src/internals/gir-lir.md)、[单态化与缓存](src/internals/monomorphization-cache.md)、[栈图](src/internals/stack-maps.md)、[GC 元数据](src/internals/gc-metadata.md)、[内存消息](src/internals/memory-messaging.md)、[调度器](src/internals/scheduler.md)、[x86_64 后端](src/internals/backend.md)。
 - 关键架构约束：[ADR-0001](adr/0001-static-closed-world-runtime.md)、[ADR-0002](adr/0002-syntax-concurrency-memory.md)、[ADR-0003](adr/0003-passing-semantics.md)、[ADR-0004](adr/0004-never-patterns-diagnostics.md)、[ADR-0005](adr/0005-impl-trait-try-test-coroutine-local.md)、[ADR-0006](adr/0006-closed-world-type-id.md)、[ADR-0008](adr/0008-platform-abi-reference.md)、[ADR-0009](adr/0009-owner-directed-memory-messaging.md)、[ADR-0010](adr/0010-comptime-source-macros.md)。
 
-现状基线是 [`gugu-cli`](../crates/gugu-cli/src/main.rs)：当前入口只解析 clap 参数并打印示例文本；`docs/src/guide/` 与 `docs/src/reference/` 也尚未形成完整内容。因此路线图从编译器 bootstrap、runtime 引导和规范测试基础开始，最终以双目标、闭世界、无系统 linker 依赖、可复现和可发布为生产级门槛。
+路线图从编译器 bootstrap、runtime 引导和规范测试基础开始，最终以双目标、闭世界、无系统 linker 依赖、可复现和可发布为生产级门槛。当前进度以本文件中的 `[x]` 标记为准，不在此另行维护会过期的现状描述。
 
 ## 每阶段完成定义
 
 1. 实现只进入该阶段所属的真实归属层；不得通过弱化 fixture、跳过 snapshot 或增加平行兼容接口掩盖缺口。
 2. 公开行为与对应 `docs/src/spec/` 章节一致，内部表示与对应 `docs/src/internals/` 章节一致；若发现规范缺口，先在同一阶段修订规范并同步 `docs/src/SUMMARY.md` 导航。
 3. 测试使用固定输入、确定性顺序、进程内替身和明确的失败边界；网络、真实子进程、压力负载和随机性能测量放到专门的 bench/手工验证。
-4. 阶段验证通过后从本文件删除该条目，不要把编号写进其它文档。工作区级验证使用 `cargo fmt --all --check`、`cargo build --workspace` 和 `cargo nextest run --workspace`；文档构建使用 `mdbook build -d target/book`。
-5. 代码或规范提交遵守仓库的 `docs/.commit` 跟踪规则；路线图本身不代表任何阶段已实现。
-6. 「阶段 N」只存在于本路线图，是临时任务标识。禁止把阶段号写入 `docs/src/spec/`、`docs/src/internals/`、ADR、代码注释或用户可见输出。实现对照现行规范与 internals 契约；规范有缺口时当场修订规范，不把临时任务编号写进规范。
+4. 阶段验证通过后在本文件把该条目标为 `[x]` 并保留，不删除。工作区级验证使用 `cargo fmt --all --check`、`cargo build --workspace` 和 `cargo nextest run --workspace`；文档构建使用 `mdbook build -d target/book`。
+5. 代码或规范提交遵守仓库的 `docs/.commit` 跟踪规则；路线图本身不代表任何阶段已实现，`[x]` 标记也不替代规范、internals 与测试之间的一致性。
+6. 「阶段 N」是临时任务标识，只允许出现在本路线图和聊天对话中。禁止把阶段号写入 `docs/src/spec/`、`docs/src/internals/`、ADR、教程与参考文档、代码与注释、测试与 fixture 名称、提交信息或用户可见输出。实现对照现行规范与 internals 契约；规范有缺口时当场修订规范，不把临时任务编号写进规范。
 
 ## 路线图使用约束：实现必须形成可运行闭环
 
@@ -469,7 +473,7 @@
 - [ ] **阶段 79：执行最终生产发布门禁**（复杂度：5）
   - 依赖：阶段 01–78 全部完成。
   - 执行全 workspace fmt/build/nextest、mdBook、双目标 smoke、CLI 全命令、离线/冻结/签名/损坏缓存、panic/fatal/OOM、GC/stack/scheduler、FFI/ABI、package publish/yank 和文档示例矩阵；整理版本、CompilerIdentity、runtime tuning profile、迁移说明与发布产物清单。
-  - 验收：无 warning、无未实现路径、无占位内容、无未解释规范差异；生产镜像不依赖系统 LLVM/assembler/linker；所有公开章节、内部章节、ADR、测试、教程和参考手册之间可追踪；只有在此阶段通过后才允许把路线图阶段全部改为 `[x]`。
+  - 验收：无 warning、无未实现路径、无占位内容、无未解释规范差异；生产镜像不依赖系统 LLVM/assembler/linker；所有公开章节、内部章节、ADR、测试、教程和参考手册之间可追踪；此阶段通过后删除 `docs/roadmap.md`，路线图不作为文档或发布产物保留。
 
 ## 依赖主线
 
@@ -485,7 +489,7 @@
     -> 双目标验证/安全/性能/教程参考/发布门禁
 ```
 
-阶段之间可以在不违反契约的前提下并行实现，例如前端类型系统与 raw range fake、标准库纯值模块与后端 encoder；但任何并行工作都必须共享稳定 schema，不能各自建立第二套类型、资源、诊断、ABI、root 或 runtime 状态表示。喵~
+阶段之间可以在不违反契约的前提下并行实现，例如前端类型系统与 raw range fake、标准库纯值模块与后端 encoder；但任何并行工作都必须共享稳定 schema，不能各自建立第二套类型、资源、诊断、ABI、root 或 runtime 状态表示。
 
 ## 跨阶段接入矩阵
 
