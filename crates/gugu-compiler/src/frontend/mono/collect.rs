@@ -46,6 +46,8 @@ pub(crate) struct MonoWorldV1 {
 pub(crate) struct InstanceSummaryV1 {
     /// `MonoKey` 规范字节。
     pub mono_key: Vec<u8>,
+    /// HIR 定义编号；generic GIR fragment 用它映射到 owner body。
+    pub definition: u32,
     pub kind: MonoKind,
     pub symbol: String,
     pub public: bool,
@@ -291,6 +293,7 @@ fn summary_of(record: InstanceRecordV1) -> InstanceSummaryV1 {
     metadata_roots.dedup();
     InstanceSummaryV1 {
         mono_key: record.mono_key,
+        definition: record.definition,
         kind: record.kind,
         symbol: record.symbol,
         public: record.public,

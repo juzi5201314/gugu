@@ -33,6 +33,8 @@ pub(crate) struct Owner {
     pub(crate) cleanup: Vec<Cleanup>,
     pub(crate) cleanup_plans: Vec<CleanupPlan>,
     pub(crate) cleanup_actions: Vec<CleanupAction>,
+    /// 函数体正常完成后的 `Return` 计划（覆盖全部已注册 action）。
+    pub(crate) return_plan: u32,
     pub(crate) assembly: Vec<Assembly>,
     pub(crate) input_fingerprint: [u8; 32],
 }

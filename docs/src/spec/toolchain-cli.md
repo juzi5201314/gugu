@@ -47,6 +47,7 @@
 | `--config <path>` | 追加配置文件 |
 | `--cache-dir <path>` | 覆盖缓存目录 |
 | `--target-dir <path>` | 覆盖 target 目录 |
+| `-Z <flag>` | 编译器内部开发开关；见[开发接口](#开发接口) |
 
 参数优先级：命令行参数 > 环境变量 > workspace 本地配置 > 用户配置 > 内置默认。
 
@@ -302,6 +303,16 @@ llvm: 19.1.0
 ```
 
 版本字符串与 commit 共同构成编译器构建身份，进入编译缓存 key。
+
+## 开发接口
+
+`-Z <flag>` 不是稳定用户接口。仅当环境变量 `GUGU_INTERNAL_OPTIONS=1` 时接受；未启用内部选项或 flag 不在下表时，命令行解析以退出码 `2` 失败，不进入编译。
+
+| flag | 行为 |
+| --- | --- |
+| `dump-gir` | `text`：在编译摘要前向 stdout 打印 generic GIR 稳定 dump。`json`：发布 `gir-dump` 事件，payload 含 dump 文本。`json-diagnostic-short` 不 dump。 |
+
+当前只登记 `dump-gir`。dump 文本由 compiler 在进程内生成，不依赖真实子进程。
 
 ## 与语言规范的交叉引用
 

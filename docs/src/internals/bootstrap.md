@@ -154,6 +154,8 @@ emit-image
 
 阶段 12b/20 将同一 Frontend action 延伸到声明/表达式/模式/trait/unsafe 检查、布局校验和 `LowerHir` query。`BuildIr` 现在登记真实定义与冻结 owner；`Compilation::succeeded` 必须拥有 `Validated`，后端计划只接受此凭据。冷计算和缓存恢复都经过冻结 verifier，失败没有 image plan。旧 `ReturnUnit` IR 已移除；本阶段没有生成目标机器码，`emit-image` 仍跳过。完整交接表见 [AST 与 HIR](ast-hir.md)。
 
+阶段 26 起 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 增加 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
+
 ## runtime 源资源与实现归属
 
 `RuntimeResources::builtin()` 返回 compiler 构建时嵌入的 Gugu 源文件登记：

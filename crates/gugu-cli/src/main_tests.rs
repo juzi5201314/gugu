@@ -292,3 +292,22 @@ fn single_file_mode_rejects_project_selectors() {
         Some("单文件编译模式不支持参数：--lib、--all-targets")
     );
 }
+
+#[test]
+fn dump_gir_flag_parses_and_requires_internal_gate() {
+    let cli = Cli::try_parse_from(["gugu", "check", "-Zdump-gir"]).expect("内部选项可解析");
+    assert_eq!(cli.global.z, vec!["dump-gir".to_owned()]);
+    assert!(
+        super::validate_internal_flags(&cli.global, false)
+            .unwrap_err()
+            .contains("未启用")
+    );
+    assert!(super::validate_internal_flags(&cli.global, true).is_ok());
+    let mut unknown = cli.global.clone();
+    unknown.z = vec!["dump-lir".to_owned()];
+    assert!(
+        super::validate_internal_flags(&unknown, true)
+            .unwrap_err()
+            .contains("未知内部选项")
+    );
+}

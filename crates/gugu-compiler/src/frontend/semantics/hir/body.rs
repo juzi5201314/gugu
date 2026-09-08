@@ -187,6 +187,7 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
             cleanup: Vec::new(),
             cleanup_plans: Vec::new(),
             cleanup_actions: Vec::new(),
+            return_plan: 0,
             assembly: Vec::new(),
             variadic_calls: Vec::new(),
             borrow_constraints: Vec::new(),
@@ -226,6 +227,7 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
 
     fn finish(mut self) -> Result<hir::Owner, Diagnostic> {
         self.lower_plans()?;
+        self.output.return_plan = self.request_plan(hir::ExitKind::Return, hir::ScopeId(0))?;
         self.materialize_plans()?;
         for (expression, adjustments) in self.expressions.iter_mut().zip(self.adjustments) {
             let start = checked_id(self.output.adjustments.len())?;

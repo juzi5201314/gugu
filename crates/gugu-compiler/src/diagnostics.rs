@@ -138,6 +138,8 @@ pub enum DiagnosticCode {
     MonoInstanceLimit,
     /// late 值越过类型冻结阶段边界。
     LateComptime,
+    /// GIR 结构、清理序列或效果区域不满足内部不变量。
+    GirInvariant,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -197,6 +199,7 @@ impl fmt::Display for DiagnosticCode {
             Self::MonoDivergence => "E0052",
             Self::MonoInstanceLimit => "E0053",
             Self::LateComptime => "E0054",
+            Self::GirInvariant => "E0055",
         };
         formatter.write_str(code)
     }

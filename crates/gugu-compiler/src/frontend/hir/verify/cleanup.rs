@@ -38,6 +38,12 @@ impl Module {
         for plan in &owner.cleanup_plans {
             self.verify_plan(owner, plan, has_chain)?;
         }
+        let Some(return_plan) = owner.cleanup_plans.get(owner.return_plan as usize) else {
+            return Err(invalid("隐式返回计划越界"));
+        };
+        if return_plan.exit != ExitKind::Return {
+            return Err(invalid("隐式返回计划必须是指向函数作用域的 Return"));
+        }
         for expression in &owner.expressions {
             let valid = match &expression.kind {
                 ExprKind::Exit { target, plan, .. } | ExprKind::TryExit { target, plan, .. } => {

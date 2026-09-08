@@ -176,6 +176,9 @@ pub(crate) struct GlobalArgs {
     /// 覆盖 target 目录。
     #[arg(long, global = true)]
     pub(crate) target_dir: Option<PathBuf>,
+    /// 编译器内部开发开关；正式 CLI 未启用 `GUGU_INTERNAL_OPTIONS=1` 时拒绝。
+    #[arg(short = 'Z', value_name = "FLAG", action = ArgAction::Append, global = true)]
+    pub(crate) z: Vec<String>,
 }
 
 #[derive(Debug, Parser)]
@@ -339,7 +342,7 @@ fn run_process() -> i32 {
     let arguments = env::args_os().collect::<Vec<_>>();
     let format = format_hint(&arguments);
     match Cli::try_parse_from(arguments) {
-        Ok(cli) => execute(cli),
+        Ok(cli) => execute(cli, internal_options_enabled()),
         Err(error) => {
             let exit_code = match error.kind() {
                 ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
@@ -383,7 +386,23 @@ fn format_hint(arguments: &[OsString]) -> OutputFormat {
         .unwrap_or_default()
 }
 
-fn execute(cli: Cli) -> i32 {
+fn internal_options_enabled() -> bool {
+    env::var("GUGU_INTERNAL_OPTIONS").ok().as_deref() == Some("1")
+}
+
+fn validate_internal_flags(options: &GlobalArgs, internal: bool) -> Result<(), String> {
+    for flag in &options.z {
+        if !internal {
+            return Err(format!("内部选项 `-Z{flag}` 未启用"));
+        }
+        if flag != "dump-gir" {
+            return Err(format!("未知内部选项 `-Z{flag}`"));
+        }
+    }
+    Ok(())
+}
+
+fn execute(cli: Cli, internal: bool) -> i32 {
     if cli.version_flag {
         let format = match resolve_format(&cli.global) {
             Ok(format) => format,
@@ -423,6 +442,10 @@ fn execute(cli: Cli) -> i32 {
             return 2;
         }
     };
+    if let Err(error) = validate_internal_flags(&options, internal) {
+        emit_cli_error(options.format.unwrap_or_default(), &error);
+        return 2;
+    }
 
     match command {
         Command::Build { file } => run_compile(file, &options, false),

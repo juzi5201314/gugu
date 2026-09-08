@@ -1,4 +1,7 @@
-use crate::{frontend::hir::Validated, frontend::mono::MonoWorldV1, target::TargetName};
+use crate::{
+    frontend::gir::GirWorldV1, frontend::hir::Validated, frontend::mono::MonoWorldV1,
+    target::TargetName,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct BackendPlan {
@@ -14,12 +17,17 @@ pub(crate) struct BackendPlan {
     pub(crate) type_universe_fingerprint: [u8; 32],
     pub(crate) late_constant_count: u32,
     pub(crate) late_constants_fingerprint: [u8; 32],
+    pub(crate) gir_body_count: u32,
+    pub(crate) gir_block_count: u32,
+    pub(crate) gir_statement_count: u32,
+    pub(crate) gir_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
     target: TargetName,
     hir: &Validated,
     mono: &MonoWorldV1,
+    gir: &GirWorldV1,
     runtime_checks_elided_count: u32,
 ) -> Option<BackendPlan> {
     let module = hir.module();
@@ -37,5 +45,13 @@ pub(crate) fn plan(
         type_universe_fingerprint: mono.universe.fingerprint,
         late_constant_count: mono.late.results.len() as u32,
         late_constants_fingerprint: mono.late.fingerprint,
+        gir_body_count: gir.bodies.len() as u32,
+        gir_block_count: gir.bodies.iter().map(|body| body.blocks.len() as u32).sum(),
+        gir_statement_count: gir
+            .bodies
+            .iter()
+            .map(|body| body.statements.len() as u32)
+            .sum(),
+        gir_fingerprint: gir.fingerprint,
     })
 }

@@ -71,7 +71,7 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 8 | `TypeCheck` | stable owner key | typeck 侧表 |
 | 9 | `TraitSelection` | canonical obligation | impl selection |
 | 10 | `EvaluateEarlyComptime` | stable definition + args + comptime domain | 早期 comptime 值 |
-| 11 | `BuildGenericGir` | stable owner key | generic GIR |
+| 11 | `BuildGenericGir` | 冻结 HIR 指纹 + owner 稳定键 + owner 下标（schema 1，域 `gugu-build-generic-gir-v1`） | generic GIR body |
 | 12 | `CollectMonoRoots` | target/harness | 根 `MonoKey` 集合 |
 | 13 | `InstantiateGir` | `MonoKey` | monomorphic GIR |
 | 14 | `LayoutOf` | stable concrete type key | 目标布局 |
@@ -91,6 +91,8 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision + 已完成 world 的结果指纹（schema 2） | 内容寻址跨 package 摘要 |
 
 新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--28 只表达登记的新 query，不得重用或改变既有编号的含义。阶段 24 起，23 与 27 的 callable 身份是 `MonoKey`；阶段 24 前为 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
+
+阶段 26 起 `BuildGenericGir` 已落地：每个冻结 HIR owner 一份 generic body，依赖 `LowerHir` schema 4 的模块指纹。`GirWorldV1` 用 fragment 把 mono 实例 digest 映射到 owner body；`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹进入 `ActionInputs` 与 `ImagePlan`。
 
 ## query 状态机
 

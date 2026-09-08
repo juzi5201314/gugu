@@ -51,6 +51,7 @@ pub(crate) fn check(
         super::hir::Validated,
         analysis::AnalysisWorldV1,
         super::mono::MonoWorldV1,
+        super::gir::GirWorldV1,
     ),
     Vec<Diagnostic>,
 > {
@@ -70,6 +71,7 @@ pub(crate) fn check(
         &dependency,
         queries,
     )?;
+    let gir = super::gir::build_world(&hir, &mono_world, queries, sources)?;
     Ok((
         checked,
         layouts,
@@ -77,5 +79,6 @@ pub(crate) fn check(
         hir,
         analysis_world,
         mono_world,
+        gir,
     ))
 }

@@ -145,9 +145,9 @@ terminator 固定为：
 - `Suspend { reason, resume, cancelled, safepoint }`；
 - `SelectCommit { cases, ready, suspend, safepoint }`。
 
-`Call.unwind` 对可能 panic 的调用必须指向 cleanup block；证明 `nounwind` 的调用使用 `None`。外部 C 调用的 `call_kind` 明确为普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`，其 C ABI 转换不能由普通调用优化删除；前两者携带 runtime 交接，dirty mode还携带额度 admission。
+`Call` 另存 `site`（HIR 表达式、dispatch 或初始化器编号）与 `call_kind`。`Call.unwind` 对可能 panic 的调用必须指向 cleanup block；证明 `nounwind` 的调用使用 `None`。外部 C 调用的 `call_kind` 明确为普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`，其 C ABI 转换不能由普通调用优化删除；前两者携带 runtime 交接，dirty mode还携带额度 admission。
 
-`Suspend` 保存 stable resume/cancelled successor和该点活跃 local，不在 GIR重新决定取消值或协程寿命；`SelectCommit` 只引用 HIR已经固定的一次求值临时槽、case index和提交 operation。机器 context与等待记录由后端/调度器建立。
+`Suspend` 保存 stable resume/cancelled successor和该点活跃 local，不在 GIR重新决定取消值或协程寿命。`cancelled` 只出现在 `ChanSend` 以及含 send 的 `SelectCommit`：该边指向固定 payload「send on closed channel」的 `Panic` block，其它 suspend 理由不得发明取消值。`SelectCommit` 只引用 HIR已经固定的一次求值临时槽、case index和提交 operation。机器 context与等待记录由后端/调度器建立。
 
 ### cleanup 与控制流
 
@@ -156,6 +156,16 @@ HIR为每个控制流出口提供 `CleanupPlan { exit_kind, action_range, destin
 cleanup block的输入先保存到独立 local；正常链以 `Goto/Return` 结束，unwind链以 `ResumePanic` 结束。构造后 verifier逐出口比较 GIR action ID序列与 HIR `CleanupPlan`，差异是内部错误。返回值、deferred call环境和 resource动作的求值时点都来自 plan，不由 CFG共享改变。
 
 HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成判别值、长度和标量比较 decision DAG；共享测试只能读取已物化临时槽，leaf保存原 matrix row ID。verifier用 row ID检查守卫/臂优先级，不在本章另写一份模式语义。
+
+`ScopedViewBegin`/`ScopedViewEnd` 成对出现：view 存活区间禁止 `Suspend`/`SelectCommit`，禁止把 token 或投影逃出配对区间，每条出口恰有一次 end。`NoSafepointBegin`/`End` 只能由登记的 runtime lock/publish intrinsic 产生；用户表达式不得制造该 region。
+
+### 阶段 26 实现
+
+`BuildGenericGir`（query 11，schema 1，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`（schema 1）。world 以 HIR 指纹、body 指纹和 mono fragment 映射计算域指纹 `gugu-gir-world-v1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#开发接口)）。差异诊断为 `E0055`。
+
+构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列)` 复用入口。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
+
+generic GIR 在阶段 26 已接入查询、诊断、镜像计划和 action key；单态化替换与分析改走 GIR 固定点分别由后续提交完成，不得从 HIR 再造一份平行 CFG。
 
 ### generic 与 monomorphic GIR
 

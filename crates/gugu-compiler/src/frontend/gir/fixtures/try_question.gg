@@ -1,0 +1,8 @@
+fn ok() Result[int, int] = Ok(1)
+fn inner() Result[int, int] {
+    let value = ok()?
+    Ok(value)
+}
+fn main() {
+    _ = inner()
+}

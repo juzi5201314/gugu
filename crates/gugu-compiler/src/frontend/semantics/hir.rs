@@ -121,8 +121,29 @@ impl<'m, 'a> Builder<'m, 'a> {
         })
     }
 
+    fn intern_type(&mut self, formed: hir::Type) -> Result<hir::TypeId, Diagnostic> {
+        if let Some(&id) = self.type_intern.get(&formed) {
+            return Ok(id);
+        }
+        let id = hir::TypeId(checked_id(self.output.types.len())?);
+        self.type_intern.insert(formed.clone(), id);
+        self.output.types.push(formed);
+        Ok(id)
+    }
+
+    fn intern_primitives(&mut self) -> Result<(), Diagnostic> {
+        let unit = self.intern_type(hir::Type::Unit)?;
+        self.intern_type(hir::Type::Never)?;
+        self.intern_type(hir::Type::Bool)?;
+        self.intern_type(hir::Type::Ptr(unit))?;
+        Ok(())
+    }
+
     fn build(mut self) -> Result<hir::Module, Diagnostic> {
         self.collect_parameters()?;
+        if !self.output.definitions.is_empty() {
+            self.intern_primitives()?;
+        }
         self.lower_declarations()?;
         self.lower_owners()?;
         self.output.owners.sort_by_key(|owner| owner.definition);

@@ -253,7 +253,7 @@ parser 必须满足：
 
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
-TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。当前 schema 为 3：owner 携带显式清理计划表，规范指纹域为 `gugu-validated-hir-v2`。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
+TypeCheck query 输入覆盖规范路径、源码内容、cfg 和稳定名称解析结果。schema verifier 验证后的 `CheckedSemantics` 只用于布局和 HIR 形成，不再作为后端的平行输入。`LowerHir` query 登记真实 TypeCheck 依赖 fingerprint，并加入入口和源码展开上下文；成功结果经完整 HIR verifier 后序列化。当前 schema 为 4：owner 携带显式清理计划表与 `return_plan`，模块类型表在存在定义时 intern `Unit`/`Never`/`Bool`/`Ptr(Unit)`，规范指纹域为 `gugu-validated-hir-v2`。缓存命中重新验证 Module、输入身份和规范字节，不能从缓存直接恢复 `Validated` 凭据。失败诊断保存级别、顺序、附注、展开身份及逻辑文件字节范围，并在命中时重绑定当前 `SourceMap`。任何检查失败均中止 BuildIr 及后续产物路径。
 
 镜像计划只从冻结 HIR 读取入口、owner 数量和域隔离的 BLAKE3 指纹；原先仅生成 `main -> ReturnUnit` 的 `ir.rs` 已删除。GIR cleanup CFG、外部桥接执行和汇编机器编码分别由路线图对应阶段接入。隐藏类型只向布局和单态化揭露，外部调用按声明约束检查；运行时稠密 TypeId 分配、vtable 物化和实际容器分配分别属于冻结类型集合及后续 lowering 阶段。
 
@@ -351,6 +351,7 @@ CleanupAction = Action { cleanup: u32, guard: Registration } | DrainChain { unti
 Registration = Static | Flag | Chain
 ```
 
+- owner 另存 `return_plan`：函数体正常落到末尾时与显式 `return` 共用同一 `ExitKind::Return` 计划。冻结 verifier 要求该字段引用 `Return` 计划。
 - `Exit`/`TryExit` 节点携带 `plan`，`Block` 节点在其作用域注册过块 defer 时携带 `end_plan`，每个 `Scope` 携带进入时的 `unwind_plan`，每个 `Cleanup` 注册携带注册完成后立即生效的 `unwind_plan`。任意程序点的 panic 展开计划是当前作用域链上最近一次注册的 `unwind_plan`，否则是所在作用域的入口计划；函数作用域的入口 `Unwind` 计划固定为编号 0。
 - 动作序列先列出块 defer：沿出口的作用域链由内向外，每个作用域内按后注册先执行，只包含出口点之前已经注册的 action。`Break`/`Try`/`BlockEnd`/`Continue` 计划只含块 defer；`Return` 与 `Unwind` 计划随后列出函数出口 defer。
 - `defer ret` 的注册表示由注册点到函数作用域之间的控制结构决定：只有 Block 作用域时为 `Static`（到达出口必然已注册）；含 Branch 或 Try 时为 `Flag`（出口按运行时注册标志守卫）；含 Loop 时为 `Chain`（每轮注册一次，出口按每帧 defer 链 LIFO 消费）。块 defer 始终是 `Static`。

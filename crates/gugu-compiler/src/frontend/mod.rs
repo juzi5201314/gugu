@@ -11,6 +11,7 @@ mod attr;
 pub(crate) mod cfg;
 mod expand;
 pub(crate) mod format;
+pub(crate) mod gir;
 pub(crate) mod hir;
 mod intern;
 pub(crate) mod late;
@@ -61,6 +62,7 @@ pub(crate) struct FrontendOutput {
     pub(crate) hir: hir::Validated,
     pub(crate) analysis: analysis::AnalysisWorldV1,
     pub(crate) mono: mono::MonoWorldV1,
+    pub(crate) gir: gir::GirWorldV1,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +97,7 @@ pub(crate) fn bootstrap(
                 .0,
             analysis: analysis::empty_world(),
             mono: mono::empty_world(),
+            gir: gir::empty_world(),
         }),
         SourceInput::Sources {
             source_map,
@@ -165,7 +168,7 @@ fn check_sources(
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
-    let (semantics, types, registry, hir, analysis_world, mono_world) =
+    let (semantics, types, registry, hir, analysis_world, mono_world, gir_world) =
         semantics::check(&modules, &names, source_map, cfg, entry_function, queries)
             .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     Ok(frontend_output(
@@ -180,6 +183,7 @@ fn check_sources(
         hir,
         analysis_world,
         mono_world,
+        gir_world,
     ))
 }
 
@@ -282,6 +286,7 @@ fn frontend_output(
     hir: hir::Validated,
     analysis: analysis::AnalysisWorldV1,
     mono: mono::MonoWorldV1,
+    gir: gir::GirWorldV1,
 ) -> FrontendOutput {
     #[cfg(not(test))]
     drop(semantics);
@@ -314,6 +319,7 @@ fn frontend_output(
         hir,
         analysis,
         mono,
+        gir,
     }
 }
 

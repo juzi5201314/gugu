@@ -178,6 +178,7 @@ pub struct Compilation {
     source_map: SourceMap,
     image_plan: Option<ImagePlan>,
     hir: Option<frontend::hir::Validated>,
+    gir: Option<frontend::gir::GirWorldV1>,
     action_key: Option<project::ActionKey>,
 }
 
@@ -210,6 +211,18 @@ impl Compilation {
     /// 返回前端 action 的内容寻址 key；前端失败时为 `None`。
     pub fn action_key(&self) -> Option<project::ActionKey> {
         self.action_key
+    }
+
+    /// 返回 generic GIR 的稳定 dump；前端失败时为 `None`。
+    pub fn dump_gir(&self) -> Option<String> {
+        let hir = self.hir.as_ref()?;
+        let gir = self.gir.as_ref()?;
+        Some(frontend::gir::dump_world(hir.module(), gir))
+    }
+
+    /// 返回 generic GIR 世界指纹。
+    pub fn gir_fingerprint(&self) -> Option<[u8; 32]> {
+        self.gir.as_ref().map(|world| world.fingerprint)
     }
 }
 
@@ -246,6 +259,7 @@ impl Compiler {
                     source_map: SourceMap::empty(),
                     image_plan: None,
                     hir: None,
+                    gir: None,
                     action_key: None,
                 };
             }
@@ -269,6 +283,7 @@ impl Compiler {
                     source_map,
                     image_plan: None,
                     hir: None,
+                    gir: None,
                     action_key: None,
                 };
             }
@@ -285,12 +300,26 @@ impl Compiler {
         ));
 
         let hir = frontend.hir;
+        let gir = frontend.gir;
+        let gir_blocks = gir
+            .bodies
+            .iter()
+            .map(|body| body.blocks.len())
+            .sum::<usize>();
+        let gir_stmts = gir
+            .bodies
+            .iter()
+            .map(|body| body.statements.len())
+            .sum::<usize>();
         graph.complete(
             ActionKind::BuildIr,
             format!(
-                "{} 个定义，{} 个已冻结 HIR owner",
+                "{} 个定义，{} 个已冻结 HIR owner，{} 个 GIR body / {} 个 block / {} 条语句",
                 hir.module().definitions.len(),
-                hir.module().owners.len()
+                hir.module().owners.len(),
+                gir.bodies.len(),
+                gir_blocks,
+                gir_stmts
             ),
         );
 
@@ -298,6 +327,7 @@ impl Compiler {
             target,
             &hir,
             &frontend.mono,
+            &gir,
             frontend.analysis.runtime_checks_elided_count,
         ) else {
             graph.complete(ActionKind::PlanBackend, "没有可执行入口");
@@ -309,6 +339,7 @@ impl Compiler {
                 source_map,
                 image_plan: None,
                 hir: Some(hir),
+                gir: Some(gir),
                 action_key,
             };
         };
@@ -337,6 +368,7 @@ impl Compiler {
             source_map,
             image_plan,
             hir: Some(hir),
+            gir: Some(gir),
             action_key,
         }
     }
@@ -384,6 +416,7 @@ fn frontend_action_key(
     }
     inputs.set_analysis_policy(frontend::analysis::AnalysisPolicyV1::default().canonical_bytes());
     inputs.set_analysis_world(frontend.analysis.input_fingerprint);
+    inputs.set_generic_gir(frontend.gir.fingerprint);
     for (key, digest) in &frontend.mono.public_summaries {
         inputs.add_public_summary(key.clone(), digest);
     }
@@ -715,6 +748,10 @@ pub struct ImagePlan {
     type_universe_fingerprint: [u8; 32],
     late_constant_count: u32,
     late_constants_fingerprint: [u8; 32],
+    gir_body_count: u32,
+    gir_block_count: u32,
+    gir_statement_count: u32,
+    gir_fingerprint: [u8; 32],
     rt0: Rt0Boundary,
     semantic_fingerprint: [u8; 32],
 }
@@ -734,6 +771,10 @@ impl ImagePlan {
             type_universe_fingerprint: plan.type_universe_fingerprint,
             late_constant_count: plan.late_constant_count,
             late_constants_fingerprint: plan.late_constants_fingerprint,
+            gir_body_count: plan.gir_body_count,
+            gir_block_count: plan.gir_block_count,
+            gir_statement_count: plan.gir_statement_count,
+            gir_fingerprint: plan.gir_fingerprint,
             rt0: attachment.rt0,
             semantic_fingerprint: plan.semantic_fingerprint,
         }
@@ -803,6 +844,22 @@ impl ImagePlan {
     /// 返回本镜像消费的后期结果指纹。
     pub fn late_constants_fingerprint(&self) -> [u8; 32] {
         self.late_constants_fingerprint
+    }
+    /// 返回 generic GIR body 数量。
+    pub fn gir_body_count(&self) -> u32 {
+        self.gir_body_count
+    }
+    /// 返回 generic GIR block 数量。
+    pub fn gir_block_count(&self) -> u32 {
+        self.gir_block_count
+    }
+    /// 返回 generic GIR 语句数量。
+    pub fn gir_statement_count(&self) -> u32 {
+        self.gir_statement_count
+    }
+    /// 返回 generic GIR 世界指纹。
+    pub fn gir_fingerprint(&self) -> [u8; 32] {
+        self.gir_fingerprint
     }
 }
 

@@ -101,12 +101,21 @@ pub(crate) fn print_compilation(
     }
 }
 
+fn wants_dump_gir(options: &GlobalArgs) -> bool {
+    options.z.iter().any(|flag| flag == "dump-gir")
+}
+
 pub(crate) fn print_compilation_text(
     compilation: &Compilation,
     check_only: bool,
     options: &GlobalArgs,
     target: TargetName,
 ) {
+    if wants_dump_gir(options)
+        && let Some(dump) = compilation.dump_gir()
+    {
+        print!("{dump}");
+    }
     if options.verbose {
         println!("target: {target}");
     }
@@ -164,6 +173,17 @@ pub(crate) fn print_compilation_json(
     for diagnostic in compilation.diagnostics().items() {
         emit_diagnostic(diagnostic, OutputFormat::Json);
     }
+    if wants_dump_gir(options)
+        && let Some(dump) = compilation.dump_gir()
+    {
+        emit_event(
+            "gir-dump",
+            json!({
+                "text": dump,
+                "fingerprint": compilation.gir_fingerprint(),
+            }),
+        );
+    }
     let image_plan = compilation.image_plan().map(|plan| {
         json!({
             "target": plan.target().to_string(),
@@ -174,6 +194,10 @@ pub(crate) fn print_compilation_json(
             "type-universe-fingerprint": plan.type_universe_fingerprint(),
             "late-constant-count": plan.late_constant_count(),
             "late-constants-fingerprint": plan.late_constants_fingerprint(),
+            "gir-body-count": plan.gir_body_count(),
+            "gir-block-count": plan.gir_block_count(),
+            "gir-statement-count": plan.gir_statement_count(),
+            "gir-fingerprint": plan.gir_fingerprint(),
             "rt0": plan.rt0().to_string()
         })
     });

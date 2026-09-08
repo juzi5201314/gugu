@@ -1,0 +1,7 @@
+fn helper() {}
+fn main() {
+    loop {
+        defer helper()
+        break
+    }
+}
