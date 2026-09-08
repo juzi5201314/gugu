@@ -24,7 +24,7 @@ use super::semantics::comptime::eval::{ConstantValue, ExpandHost};
 use super::{ParsedModule, cfg, names, semantics};
 
 /// `ExpandSourceMacro` query 的 schema 版本。
-const EXPAND_SCHEMA_VERSION: u32 = 1;
+const EXPAND_SCHEMA_VERSION: u32 = 2;
 
 /// 展开树深度默认上限与全局硬上限。
 const DEFAULT_DEPTH_LIMIT: u32 = 16;
@@ -126,29 +126,29 @@ struct Fragment {
 /// 文件内有效，按 token 下标分区解析文本来源。
 struct TokenFileTable {
     /// 按 token 下标上界（排他）划分的区域；首个区域是宿主文件。
-    boundaries: Vec<(usize, SourceFileId)>,
+    boundaries: Vec<(usize, SourceFileId, Option<u32>)>,
 }
 
 impl TokenFileTable {
     fn new(module: &ParsedModule) -> Self {
         Self {
-            boundaries: vec![(module.tokens.tokens.len(), module.file.source)],
+            boundaries: vec![(module.tokens.tokens.len(), module.file.source, None)],
         }
     }
 
-    fn push_fragment(&mut self, token_end: usize, file: SourceFileId) {
-        self.boundaries.push((token_end, file));
+    fn push_fragment(&mut self, token_end: usize, file: SourceFileId, depth_limit: u32) {
+        self.boundaries.push((token_end, file, Some(depth_limit)));
     }
 
     fn file_of(&self, token_index: usize) -> SourceFileId {
-        for (end, file) in &self.boundaries {
+        for (end, file, _) in &self.boundaries {
             if token_index < *end {
                 return *file;
             }
         }
         self.boundaries
             .last()
-            .map(|(_, file)| *file)
+            .map(|(_, file, _)| *file)
             .unwrap_or(SourceFileId::new(0))
     }
 }
@@ -185,6 +185,17 @@ pub(crate) fn run(
         // 阶段 A：冻结输入，在同一语义模型上求值本轮全部宏脚本。
         let names = names::analyze(package_identity, external_packages, modules)?;
         let model = semantics::model::Model::new(modules, &names)?;
+        let mut round_hash = blake3::Hasher::new_derive_key("gugu-expand-round-input-v1");
+        for source in sources.snapshots() {
+            round_hash.update(
+                &u64::try_from(source.logical_path().len())
+                    .expect("路径长度可编码")
+                    .to_le_bytes(),
+            );
+            round_hash.update(source.logical_path().as_bytes());
+            round_hash.update(&source.content_hash());
+        }
+        let round_input = *round_hash.finalize().as_bytes();
         let host = ExpandHost { queries };
         let mut fragments = Vec::with_capacity(calls.len());
         for call in &calls {
@@ -195,6 +206,7 @@ pub(crate) fn run(
                 call,
                 &host,
                 round,
+                &round_input,
                 cfg,
                 queries,
                 &mut budget,
@@ -258,6 +270,9 @@ fn collect(modules: &[ParsedModule]) -> Vec<MacroCall> {
         }
         for (index, expr) in arena.exprs.iter().enumerate() {
             if let ExprKind::SourceMacro { body } = expr.kind {
+                if !parsed.configured.expr_active(body) {
+                    continue;
+                }
                 calls.push(MacroCall {
                     module,
                     slot: SourceSlot::Expression,
@@ -270,6 +285,9 @@ fn collect(modules: &[ParsedModule]) -> Vec<MacroCall> {
         }
         for (index, ty) in arena.tys.iter().enumerate() {
             if let TyKind::SourceMacro { body } = ty.kind {
+                if !parsed.configured.expr_active(body) {
+                    continue;
+                }
                 calls.push(MacroCall {
                     module,
                     slot: SourceSlot::Type,
@@ -282,6 +300,9 @@ fn collect(modules: &[ParsedModule]) -> Vec<MacroCall> {
         }
         for (index, pat) in arena.pats.iter().enumerate() {
             if let PatKind::SourceMacro { body } = pat.kind {
+                if !parsed.configured.expr_active(body) {
+                    continue;
+                }
                 calls.push(MacroCall {
                     module,
                     slot: SourceSlot::Pattern,
@@ -413,6 +434,10 @@ fn effective_depth_limit(
 ) -> Result<u32, Vec<Diagnostic>> {
     let module = &modules[call.module];
     let table = &token_files[call.module];
+    let inherited = table
+        .boundaries
+        .iter()
+        .find_map(|(_, file, limit)| (*file == call.call.file()).then_some(*limit).flatten());
     let position_attributes = match call.position {
         MacroPosition::Item(item) => module.arena.items[item.0 as usize].attributes,
         MacroPosition::Stmt(stmt) => module.arena.stmts[stmt.0 as usize].attributes,
@@ -420,6 +445,9 @@ fn effective_depth_limit(
         _ => AstRange::empty(),
     };
     if let Some(limit) = expansion_limit_attribute(module, table, sources, position_attributes)? {
+        return Ok(inherited.map_or(limit, |parent| parent.min(limit)));
+    }
+    if let Some(limit) = inherited {
         return Ok(limit);
     }
     Ok(
@@ -565,6 +593,7 @@ fn evaluate_macro(
     call: &MacroCall,
     host: &ExpandHost<'_>,
     round: u32,
+    round_input: &[u8; 32],
     cfg: &CfgContext,
     queries: &QueryEngine,
     budget: &mut ExpansionBudget,
@@ -574,6 +603,21 @@ fn evaluate_macro(
     let mut hash = blake3::Hasher::new_derive_key("gugu-expand-macro-input-v1");
     hash.update(&[super::semantics::comptime::eval::slot_byte(call.slot)]);
     hash.update(&round.to_le_bytes());
+    hash.update(round_input);
+    hash.update(
+        &u64::try_from(call.module)
+            .expect("模块编号可编码")
+            .to_le_bytes(),
+    );
+    hash.update(&call.call.start().to_le_bytes());
+    hash.update(&call.call.end().to_le_bytes());
+    hash.update(
+        call.call
+            .path()
+            .to_str()
+            .expect("源码逻辑路径为 UTF-8")
+            .as_bytes(),
+    );
     hash.update(&(text.len() as u64).to_le_bytes());
     hash.update(text.as_bytes());
     hash.update(&model.name_fingerprint());
@@ -599,23 +643,13 @@ fn evaluate_macro(
             Ok(evaluated) => evaluated,
             Err(error) => return Err(semantics::query::store_errors(&[error])),
         };
-        budget.fuel_used += evaluated.fuel_used;
-        budget.heap_used += evaluated.heap_used;
-        if budget.fuel_used > budget.fuel_limit {
-            return Err(semantics::query::store_errors(&[
-                budget.limit_error("", "宏脚本 comptime fuel 总量达到上限")
-            ]));
-        }
-        if budget.heap_used > budget.heap_limit {
-            return Err(semantics::query::store_errors(&[
-                budget.limit_error("", "宏脚本 comptime heap 总量达到上限")
-            ]));
-        }
         match boundary_fragment(evaluated.value, boundary_span.clone()) {
             Ok(fragment) => Ok((
                 serde_json::to_vec(&FragmentData {
                     slot: fragment.slot,
                     text: fragment.text,
+                    fuel_used: evaluated.fuel_used,
+                    heap_used: evaluated.heap_used,
                 })
                 .expect("宏展开结果 schema 序列化"),
                 Vec::new(),
@@ -632,6 +666,14 @@ fn evaluate_macro(
                     None,
                 )]
             })?;
+            budget.fuel_used = budget.fuel_used.saturating_add(data.fuel_used);
+            budget.heap_used = budget.heap_used.saturating_add(data.heap_used);
+            if budget.fuel_used > budget.fuel_limit || budget.heap_used > budget.heap_limit {
+                return Err(vec![budget.limit_error(
+                    &chain_text(sources, call),
+                    "宏脚本 fuel 或 heap 总量达到上限",
+                )]);
+            }
             Ok(Fragment {
                 slot: data.slot,
                 text: data.text,
@@ -689,6 +731,8 @@ fn boundary_error_text(payload: &ConstantValue) -> String {
 struct FragmentData {
     slot: SourceSlot,
     text: String,
+    fuel_used: u64,
+    heap_used: u64,
 }
 
 /// 拼接一个宏的生成片段。
@@ -722,6 +766,7 @@ fn splice_one(
             "生成源码总字节达到上限",
         )]);
     }
+    let inherited_limit = effective_depth_limit(token_files, sources, modules, &call)?;
     let host_path = sources
         .snapshot(call.call.file())
         .map(|snapshot| snapshot.logical_path().to_owned())
@@ -774,8 +819,25 @@ fn splice_one(
         &mut module.tokens,
     );
     module.arena = arena;
+    token_files[call.module].push_fragment(module.tokens.tokens.len(), file, inherited_limit);
     if !parse_errors.is_empty() {
         return Err(parse_errors);
+    }
+    if let FragmentAst::Items {
+        inner_attributes, ..
+    } = &fragment_ast
+        && let Some(limit) = expansion_limit_attribute(
+            module,
+            &token_files[call.module],
+            sources,
+            *inner_attributes,
+        )?
+    {
+        token_files[call.module]
+            .boundaries
+            .last_mut()
+            .expect("已注册生成文件区域")
+            .2 = Some(inherited_limit.min(limit));
     }
     let fragment_snapshot = sources.snapshot(file).expect("生成快照已注册");
     let roots = match &fragment_ast {
@@ -811,7 +873,6 @@ fn splice_one(
     }
     let content_hash = *blake3::hash(fragment.text.as_bytes()).as_bytes();
     inputs.macros.insert(logical, content_hash);
-    token_files[call.module].push_fragment(module.tokens.tokens.len(), file);
     splice_ast(module, call.position, fragment_ast)?;
     // 孤儿宏节点（被替换的 item/stmt 条目）必须去激活，避免下一轮重收集。
     deactivate_orphan(module, call.position);

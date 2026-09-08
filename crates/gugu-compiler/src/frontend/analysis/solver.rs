@@ -27,7 +27,7 @@ pub(crate) fn analyze_scc(
     let mut summaries = vec![FunctionSummary::default(); component.len()];
     let mut budget_exhausted = false;
     let mut converged = false;
-    for _ in 0..policy.max_scc_iterations {
+    for iteration in 0..policy.max_scc_iterations {
         let mut changed = false;
         for (position, &index) in component.iter().enumerate() {
             let result = analyze_member(
@@ -39,8 +39,10 @@ pub(crate) fn analyze_scc(
                 callees,
             );
             budget_exhausted |= result.budget_exhausted;
-            let mut next = summaries[position].clone();
-            next.join_with(&result.summary);
+            let mut next = result.summary;
+            if iteration != 0 {
+                next.join_with(&summaries[position]);
+            }
             changed |= next != summaries[position];
             summaries[position] = next;
         }

@@ -63,6 +63,30 @@ pub(crate) enum ConstantValue {
     ResultErr(Box<ConstantValue>),
 }
 
+impl ConstantValue {
+    // 规范账本为每个聚合槽固定计 64 字节，并递归计算拥有的动态负载；不依赖宿主布局。
+    fn heap_bytes(&self) -> u64 {
+        match self {
+            Self::String(text) => u64::try_from(text.len()).expect("字符串长度可编码"),
+            Self::ParsedSource(fragment) => {
+                u64::try_from(fragment.text.len()).expect("片段长度可编码")
+            }
+            Self::Array(values) | Self::Tuple(values) => values.iter().fold(0u64, |size, value| {
+                size.saturating_add(64).saturating_add(value.heap_bytes())
+            }),
+            Self::Struct(fields) => fields.iter().fold(0u64, |size, (name, value)| {
+                size.saturating_add(64)
+                    .saturating_add(u64::try_from(name.len()).expect("字段名长度可编码"))
+                    .saturating_add(value.heap_bytes())
+            }),
+            Self::ResultOk(value) | Self::ResultErr(value) => {
+                64u64.saturating_add(value.heap_bytes())
+            }
+            _ => 0,
+        }
+    }
+}
+
 /// 不透明 `ParsedSource` 的内部表示：生成文本与片段类别。
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ParsedFragment {
@@ -91,9 +115,36 @@ pub(in crate::frontend) struct MacroEval {
 /// 求值中未完成的控制流出口。
 #[derive(Debug)]
 enum Unwind {
-    Break,
+    Break(ConstantValue),
     Continue,
     Return(ConstantValue),
+}
+
+#[derive(Debug)]
+enum EvalError {
+    Diagnostic(Diagnostic),
+    Unwind(Unwind),
+}
+
+type EvalResult<T> = Result<T, EvalError>;
+
+impl From<Diagnostic> for EvalError {
+    fn from(error: Diagnostic) -> Self {
+        Self::Diagnostic(error)
+    }
+}
+
+impl EvalError {
+    fn diagnostic(self, span: &crate::Span) -> Diagnostic {
+        match self {
+            Self::Diagnostic(error) => error,
+            Self::Unwind(_) => Diagnostic::error(
+                DiagnosticCode::InvalidExpression,
+                "comptime 控制流出口超出所属函数或循环",
+                Some(span.clone()),
+            ),
+        }
+    }
 }
 
 /// 一次 comptime 求值的独立状态。
@@ -106,7 +157,8 @@ pub(super) struct EvalState<'a> {
     calls: Vec<String>,
     const_stack: Vec<DefRef>,
     frames: Vec<Vec<(String, ConstantValue)>>,
-    unwind: Option<Unwind>,
+    /// 函数与常量初始化只访问自身词法帧，不可读取调用者局部槽。
+    frame_bases: Vec<usize>,
     /// SourceExpand 域的插入上下文与 query 访问；其它域为空。
     expand: Option<ExpandState<'a>>,
 }
@@ -130,7 +182,7 @@ impl<'a> EvalState<'a> {
             calls: Vec::new(),
             const_stack: Vec::new(),
             frames: Vec::new(),
-            unwind: None,
+            frame_bases: Vec::new(),
             expand: None,
         }
     }
@@ -176,6 +228,7 @@ impl<'a> EvalState<'a> {
             return Err(budget_error(span, &self.calls, "comptime 求值深度超过上限"));
         }
         self.calls.push(name.to_owned());
+        self.frame_bases.push(self.frames.len());
         self.frames.push(Vec::new());
         Ok(())
     }
@@ -184,6 +237,7 @@ impl<'a> EvalState<'a> {
         self.depth -= 1;
         self.calls.pop();
         self.frames.pop();
+        self.frame_bases.pop();
     }
 
     fn bind(&mut self, name: String, value: ConstantValue) {
@@ -193,17 +247,32 @@ impl<'a> EvalState<'a> {
             .push((name, value));
     }
 
-    fn lookup(&self, name: &str) -> Option<ConstantValue> {
-        self.frames
+    fn lookup(
+        &mut self,
+        name: &str,
+        span: &crate::Span,
+    ) -> Result<Option<ConstantValue>, Diagnostic> {
+        let base = self.frame_bases.last().copied().unwrap_or(0);
+        let slot = self.frames[base..]
             .iter()
+            .enumerate()
             .rev()
-            .flat_map(|frame| frame.iter().rev())
-            .find(|(bound, _)| bound == name)
-            .map(|(_, value)| value.clone())
+            .find_map(|(frame, values)| {
+                values
+                    .iter()
+                    .rposition(|(bound, _)| bound == name)
+                    .map(|slot| (base + frame, slot))
+            });
+        let Some((frame, slot)) = slot else {
+            return Ok(None);
+        };
+        self.alloc(self.frames[frame][slot].1.heap_bytes(), span)?;
+        Ok(Some(self.frames[frame][slot].1.clone()))
     }
 
     fn slot_mut(&mut self, name: &str) -> Option<&mut ConstantValue> {
-        self.frames
+        let base = self.frame_bases.last().copied().unwrap_or(0);
+        self.frames[base..]
             .iter_mut()
             .rev()
             .flat_map(|frame| frame.iter_mut().rev())
@@ -211,10 +280,7 @@ impl<'a> EvalState<'a> {
             .map(|(_, value)| value)
     }
 
-    fn with_scope<T>(
-        &mut self,
-        run: impl FnOnce(&mut Self) -> Result<T, Diagnostic>,
-    ) -> Result<T, Diagnostic> {
+    fn with_scope<T, E>(&mut self, run: impl FnOnce(&mut Self) -> Result<T, E>) -> Result<T, E> {
         self.frames.push(Vec::new());
         let result = run(self);
         self.frames.pop();
@@ -395,7 +461,11 @@ impl Model<'_> {
             ));
         }
         let mut state = EvalState::new(Domain::EARLY_CONST, self.eval_profile());
-        let value = self.value(module, expression, &mut state)?;
+        let value = self
+            .value(module, expression, &mut state)
+            .map_err(|error| {
+                error.diagnostic(&self.modules[module].arena.exprs[expression.0 as usize].span)
+            })?;
         Ok(in_type(value, ty))
     }
 
@@ -414,23 +484,22 @@ impl Model<'_> {
         let profile = self.eval_profile();
         let mut state = EvalState::source_expand(Domain::SOURCE_EXPAND, profile, slot, host);
         let result = self.value(module, body, &mut state);
-        let returned = state.unwind.take();
         let fuel_used = profile.fuel - state.fuel;
         let heap_used = state.heap;
-        result
-            .and_then(|value| match returned {
-                Some(Unwind::Return(value)) => Ok(value),
-                Some(_) => Err(self.fail(module, body, "宏脚本不能在顶层 break 或 continue")),
-                None => Ok(value),
-            })
-            .map(|value| MacroEval {
-                value,
-                fuel_used,
-                heap_used,
-            })
+        match result {
+            Ok(value) | Err(EvalError::Unwind(Unwind::Return(value))) => Ok(value),
+            Err(error) => {
+                Err(error.diagnostic(&self.modules[module].arena.exprs[body.0 as usize].span))
+            }
+        }
+        .map(|value| MacroEval {
+            value,
+            fuel_used,
+            heap_used,
+        })
     }
 
-    fn fail(&self, module: usize, expression: ExprId, message: &str) -> Diagnostic {
+    fn fail(&self, module: usize, expression: ExprId, message: &str) -> EvalError {
         Diagnostic::error(
             DiagnosticCode::InvalidExpression,
             message.to_owned(),
@@ -440,6 +509,7 @@ impl Model<'_> {
                     .clone(),
             ),
         )
+        .into()
     }
 
     fn value(
@@ -447,41 +517,19 @@ impl Model<'_> {
         module: usize,
         expression: ExprId,
         state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    ) -> EvalResult<ConstantValue> {
         let arena = &self.modules[module].arena;
         let span = arena.exprs[expression.0 as usize].span.clone();
         state.step(&span)?;
         let fail = || self.fail(module, expression, "需要可求值的编译期表达式");
         match arena.exprs[expression.0 as usize].kind {
-            ExprKind::Literal(LitKind::Bool(value)) => Ok(ConstantValue::Bool(value)),
-            ExprKind::Literal(LitKind::String { text } | LitKind::RawString { text }) => {
-                let decoded = string::decode_string(self.name(module, text)).into_owned();
-                state.alloc(decoded.len() as u64, &span)?;
-                Ok(ConstantValue::String(decoded))
-            }
-            ExprKind::Literal(LitKind::Float { digits, exp10 }) => {
-                let value = format!("{}e{exp10}", self.name(module, digits))
-                    .parse::<f64>()
-                    .map_err(|_| fail())?;
-                Ok(ConstantValue::Float(value.to_bits()))
-            }
-            ExprKind::Literal(LitKind::Int { limbs, .. }) => {
-                let mut value = 0i128;
-                for &limb in limbs.as_slice(&arena.int_limbs).iter().rev() {
-                    value = value
-                        .checked_mul(1i128 << 32)
-                        .and_then(|value| value.checked_add(i128::from(limb)))
-                        .ok_or_else(fail)?;
+            ExprKind::Literal(lit) => {
+                let value = self.literal_value(module, lit).ok_or_else(fail)?;
+                if let ConstantValue::String(text) = &value {
+                    state.alloc(text.len() as u64, &span)?;
                 }
-                Ok(ConstantValue::Int(value))
+                Ok(value)
             }
-            ExprKind::Literal(LitKind::Char { value, .. }) => {
-                Ok(ConstantValue::Int(i128::from(value as u32)))
-            }
-            ExprKind::Literal(LitKind::ByteChar { value, .. }) => {
-                Ok(ConstantValue::Int(i128::from(value)))
-            }
-            ExprKind::Literal(_) => Err(fail()),
             ExprKind::Paren(inner)
             | ExprKind::Comptime(inner)
             | ExprKind::Unsafe(inner)
@@ -510,6 +558,7 @@ impl Model<'_> {
                     return Ok(left);
                 }
                 let right = self.value(module, rhs, state)?;
+                charge_concat(op, &left, &right, state, &span)?;
                 evaluate(op, left, right).ok_or_else(fail)
             }
             ExprKind::Path(path) => self.path_value(module, expression, path, state),
@@ -518,22 +567,23 @@ impl Model<'_> {
             }
             ExprKind::Tuple(elements) => {
                 let elements = self.value_list(module, elements, state)?;
-                state.alloc(elements.len() as u64, &span)?;
                 Ok(ConstantValue::Tuple(elements))
             }
             ExprKind::Array(elements) => {
                 let elements = self.value_list(module, elements, state)?;
-                state.alloc(elements.len() as u64, &span)?;
                 Ok(ConstantValue::Array(elements))
             }
             ExprKind::Repeat { elem, count } => {
                 let element = self.value(module, elem, state)?;
                 let count = self.int_operand(module, count, state)?;
-                if count < 0 {
-                    return Err(fail());
-                }
-                state.alloc(count as u64, &span)?;
-                Ok(ConstantValue::Array(vec![element; count as usize]))
+                let count = usize::try_from(count).map_err(|_| {
+                    budget_error(&span, &state.calls, "comptime 数组长度超出宿主可表示范围")
+                })?;
+                let bytes = u64::try_from(count)
+                    .expect("数组长度可编码")
+                    .saturating_mul(64u64.saturating_add(element.heap_bytes()));
+                state.alloc(bytes, &span)?;
+                Ok(ConstantValue::Array(vec![element; count]))
             }
             ExprKind::Struct { fields, .. } => {
                 let mut value = BTreeMap::new();
@@ -541,12 +591,15 @@ impl Model<'_> {
                     let name = self.name(module, field.name).to_owned();
                     let field_value = match field.value {
                         Some(value) => self.value(module, value, state)?,
-                        None => match state.lookup(&name) {
+                        None => match state.lookup(&name, &span)? {
                             Some(value) => value,
                             None => self.module_const(module, &[&name], state)?,
                         },
                     };
-                    state.alloc(1, &span)?;
+                    state.alloc(
+                        64 + u64::try_from(name.len()).expect("字段名长度可编码"),
+                        &span,
+                    )?;
                     value.insert(name, field_value);
                 }
                 Ok(ConstantValue::Struct(value))
@@ -554,10 +607,9 @@ impl Model<'_> {
             ExprKind::Field { base, name } => {
                 let base = self.value(module, base, state)?;
                 match base {
-                    ConstantValue::Struct(fields) => fields
-                        .get(self.name(module, name))
-                        .cloned()
-                        .ok_or_else(fail),
+                    ConstantValue::Struct(mut fields) => {
+                        fields.remove(self.name(module, name)).ok_or_else(fail)
+                    }
                     _ => Err(fail()),
                 }
             }
@@ -600,34 +652,22 @@ impl Model<'_> {
             ExprKind::While { cond, body } => {
                 while self.condition(module, cond, state)? {
                     state.step(&span)?;
-                    self.value(module, body, state)?;
-                    match state.unwind.take() {
-                        None | Some(Unwind::Continue) => {}
-                        Some(Unwind::Break) => break,
-                        Some(unwind @ Unwind::Return(_)) => {
-                            state.unwind = Some(unwind);
-                            break;
-                        }
+                    match self.value(module, body, state) {
+                        Ok(_) | Err(EvalError::Unwind(Unwind::Continue)) => {}
+                        Err(EvalError::Unwind(Unwind::Break(_))) => break,
+                        Err(error) => return Err(error),
                     }
                 }
                 Ok(ConstantValue::Unit)
             }
-            ExprKind::Loop(body) => {
-                loop {
-                    state.step(&span)?;
-                    self.value(module, body, state)?;
-                    match state.unwind.take() {
-                        None => {}
-                        Some(Unwind::Break) => break,
-                        Some(Unwind::Continue) => {}
-                        Some(unwind @ Unwind::Return(_)) => {
-                            state.unwind = Some(unwind);
-                            break;
-                        }
-                    }
+            ExprKind::Loop(body) => loop {
+                state.step(&span)?;
+                match self.value(module, body, state) {
+                    Ok(_) | Err(EvalError::Unwind(Unwind::Continue)) => {}
+                    Err(EvalError::Unwind(Unwind::Break(value))) => return Ok(value),
+                    Err(error) => return Err(error),
                 }
-                Ok(ConstantValue::Unit)
-            }
+            },
             ExprKind::For { pat, iter, body } => {
                 let ExprKind::Range { start, end } = arena.exprs[iter.0 as usize].kind else {
                     return Err(fail());
@@ -636,18 +676,14 @@ impl Model<'_> {
                 let end = self.int_operand(module, end, state)?;
                 for index in start..end {
                     state.step(&span)?;
-                    state.with_scope(|state| {
+                    let result = state.with_scope(|state| {
                         self.bind_pattern(module, pat, &ConstantValue::Int(index), state)?;
-                        self.value(module, body, state)?;
-                        Ok(())
-                    })?;
-                    match state.unwind.take() {
-                        None | Some(Unwind::Continue) => {}
-                        Some(Unwind::Break) => break,
-                        Some(unwind @ Unwind::Return(_)) => {
-                            state.unwind = Some(unwind);
-                            break;
-                        }
+                        self.value(module, body, state)
+                    });
+                    match result {
+                        Ok(_) | Err(EvalError::Unwind(Unwind::Continue)) => {}
+                        Err(EvalError::Unwind(Unwind::Break(_))) => break,
+                        Err(error) => return Err(error),
                     }
                 }
                 Ok(ConstantValue::Unit)
@@ -660,10 +696,9 @@ impl Model<'_> {
             }
             ExprKind::TryOp(inner) => match self.value(module, inner, state)? {
                 ConstantValue::ResultOk(value) => Ok(*value),
-                ConstantValue::ResultErr(error) => {
-                    state.unwind = Some(Unwind::Return(ConstantValue::ResultErr(error)));
-                    Ok(ConstantValue::Unit)
-                }
+                ConstantValue::ResultErr(error) => Err(EvalError::Unwind(Unwind::Return(
+                    ConstantValue::ResultErr(error),
+                ))),
                 _ => Err(fail()),
             },
             ExprKind::FString { parts } => self.fstring(module, parts, state),
@@ -672,21 +707,16 @@ impl Model<'_> {
                     Some(value) => self.value(module, value, state)?,
                     None => ConstantValue::Unit,
                 };
-                state.unwind = Some(Unwind::Return(value));
-                Ok(ConstantValue::Unit)
+                Err(EvalError::Unwind(Unwind::Return(value)))
             }
             ExprKind::Break(value) => {
                 let value = match value {
                     Some(value) => self.value(module, value, state)?,
                     None => ConstantValue::Unit,
                 };
-                state.unwind = Some(Unwind::Break);
-                Ok(value)
+                Err(EvalError::Unwind(Unwind::Break(value)))
             }
-            ExprKind::Continue => {
-                state.unwind = Some(Unwind::Continue);
-                Ok(ConstantValue::Unit)
-            }
+            ExprKind::Continue => Err(EvalError::Unwind(Unwind::Continue)),
             ExprKind::Intrinsic { kind, tys, .. } => {
                 use crate::frontend::ast::IntrinsicKind;
                 match kind {
@@ -704,11 +734,13 @@ impl Model<'_> {
                         DiagnosticCode::LateComptime,
                         "type_id_count 只能在类型集合冻结后求值",
                         Some(span),
-                    )),
+                    )
+                    .into()),
                     _ => Err(capability_error(
                         &span,
                         "该 intrinsic 尚无可用的早期求值结果".to_owned(),
-                    )),
+                    )
+                    .into()),
                 }
             }
             ExprKind::Asm { .. }
@@ -727,7 +759,11 @@ impl Model<'_> {
         module: usize,
         elements: AstRange<ExprId>,
         state: &mut EvalState,
-    ) -> Result<Vec<ConstantValue>, Diagnostic> {
+    ) -> EvalResult<Vec<ConstantValue>> {
+        state.alloc(
+            u64::from(elements.len).saturating_mul(64),
+            &self.modules[module].file.eof_span,
+        )?;
         elements
             .as_slice(&self.modules[module].arena.expr_ids)
             .iter()
@@ -741,7 +777,7 @@ impl Model<'_> {
         module: usize,
         expression: ExprId,
         state: &mut EvalState,
-    ) -> Result<i128, Diagnostic> {
+    ) -> EvalResult<i128> {
         match self.value(module, expression, state)? {
             ConstantValue::Int(value) => Ok(value),
             _ => Err(self.fail(module, expression, "需要整数常量")),
@@ -753,7 +789,7 @@ impl Model<'_> {
         module: usize,
         expression: ExprId,
         state: &mut EvalState,
-    ) -> Result<bool, Diagnostic> {
+    ) -> EvalResult<bool> {
         match self.value(module, expression, state)? {
             ConstantValue::Bool(value) => Ok(value),
             _ => Err(self.fail(module, expression, "comptime 条件必须是 bool")),
@@ -767,7 +803,7 @@ impl Model<'_> {
         scrutinee: ExprId,
         arms: AstRange<super::super::super::ast::MatchArm>,
         state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    ) -> EvalResult<ConstantValue> {
         let arena = &self.modules[module].arena;
         let scrutinee = self.value(module, scrutinee, state)?;
         for arm in arms.as_slice(&arena.match_arms) {
@@ -799,7 +835,7 @@ impl Model<'_> {
         pat: PatId,
         value: &ConstantValue,
         state: &mut EvalState,
-    ) -> Result<bool, Diagnostic> {
+    ) -> EvalResult<bool> {
         let arena = &self.modules[module].arena;
         let span = arena.pats[pat.0 as usize].span.clone();
         let fail = |message: &str| {
@@ -808,15 +844,17 @@ impl Model<'_> {
                 message.to_owned(),
                 Some(span.clone()),
             )
+            .into()
         };
         Ok(match arena.pats[pat.0 as usize].kind {
             PatKind::Wildcard => true,
             PatKind::Ident(name) => {
+                state.alloc(value.heap_bytes(), &span)?;
                 state.bind(self.name(module, name).to_owned(), value.clone());
                 true
             }
-            PatKind::Literal(lit) => self.literal_pattern(lit).as_ref() == Some(value),
-            PatKind::NegativeLiteral(lit) => match (self.literal_pattern(lit), value) {
+            PatKind::Literal(lit) => self.literal_value(module, lit).as_ref() == Some(value),
+            PatKind::NegativeLiteral(lit) => match (self.literal_value(module, lit), value) {
                 (Some(ConstantValue::Int(inner)), ConstantValue::Int(value)) => -inner == *value,
                 (Some(ConstantValue::Float(bits)), ConstantValue::Float(value)) => {
                     f64::from_bits(*value) == -f64::from_bits(bits)
@@ -866,6 +904,7 @@ impl Model<'_> {
                 false
             }
             PatKind::At { name, pat, .. } => {
+                state.alloc(value.heap_bytes(), &span)?;
                 state.bind(self.name(module, name).to_owned(), value.clone());
                 self.match_pattern(module, pat, value, state)?
             }
@@ -893,11 +932,33 @@ impl Model<'_> {
         })
     }
 
-    fn literal_pattern(&self, lit: LitKind) -> Option<ConstantValue> {
+    fn literal_value(&self, module: usize, lit: LitKind) -> Option<ConstantValue> {
         match lit {
             LitKind::Bool(value) => Some(ConstantValue::Bool(value)),
             LitKind::Char { value, .. } => Some(ConstantValue::Int(i128::from(value as u32))),
             LitKind::ByteChar { value, .. } => Some(ConstantValue::Int(i128::from(value))),
+            LitKind::Int { limbs, .. } => {
+                let mut value = 0i128;
+                for &limb in limbs
+                    .as_slice(&self.modules[module].arena.int_limbs)
+                    .iter()
+                    .rev()
+                {
+                    value = value
+                        .checked_mul(1i128 << 32)?
+                        .checked_add(i128::from(limb))?;
+                }
+                Some(ConstantValue::Int(value))
+            }
+            LitKind::Float { digits, exp10 } => {
+                let value = format!("{}e{exp10}", self.name(module, digits))
+                    .parse::<f64>()
+                    .ok()?;
+                Some(ConstantValue::Float(value.to_bits()))
+            }
+            LitKind::String { text } | LitKind::RawString { text } => Some(ConstantValue::String(
+                string::decode_string(self.name(module, text)).into_owned(),
+            )),
             _ => None,
         }
     }
@@ -907,13 +968,17 @@ impl Model<'_> {
         module: usize,
         parts: AstRange<FStringPart>,
         state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    ) -> EvalResult<ConstantValue> {
         let arena = &self.modules[module].arena;
         let span = self.modules[module].file.eof_span.clone();
         let mut output = String::new();
         for part in parts.as_slice(&arena.fstring_parts) {
             match *part {
-                FStringPart::Text { text, .. } => output.push_str(self.name(module, text)),
+                FStringPart::Text { text, .. } => {
+                    let text = self.name(module, text);
+                    state.alloc(u64::try_from(text.len()).expect("文本长度可编码"), &span)?;
+                    output.push_str(text);
+                }
                 FStringPart::Interp { expr, spec, .. } => {
                     if spec.is_some() {
                         return Err(self.fail(module, expr, "comptime f-string 不支持格式码"));
@@ -922,11 +987,15 @@ impl Model<'_> {
                     if matches!(value, ConstantValue::ParsedSource(_)) {
                         return Err(self.fail(module, expr, "f-string 不能插值 ParsedSource"));
                     }
-                    output.push_str(&display_value(&value));
+                    let text = match value {
+                        ConstantValue::String(text) => text,
+                        value => display_value(&value),
+                    };
+                    state.alloc(u64::try_from(text.len()).expect("插值长度可编码"), &span)?;
+                    output.push_str(&text);
                 }
             }
         }
-        state.alloc(output.len() as u64, &span)?;
         Ok(ConstantValue::String(output))
     }
 
@@ -935,25 +1004,22 @@ impl Model<'_> {
         module: usize,
         segments: &[&str],
         state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    ) -> EvalResult<ConstantValue> {
         let def = self
             .resolve(module, segments)
             .map_err(|_| self.error(module, "未解析的编译期名称"))?;
         self.item_const_value(def, state)
     }
 
-    fn item_const_value(
-        &self,
-        def: DefRef,
-        state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    fn item_const_value(&self, def: DefRef, state: &mut EvalState) -> EvalResult<ConstantValue> {
         let span = self.modules[def.module].file.eof_span.clone();
         if state.const_stack.contains(&def) {
             return Err(Diagnostic::error(
                 DiagnosticCode::InvalidDeclaration,
                 "常量初始化形成循环",
                 Some(span),
-            ));
+            )
+            .into());
         }
         let ItemKind::Const {
             ty: declared,
@@ -965,8 +1031,10 @@ impl Model<'_> {
                 DiagnosticCode::InvalidExpression,
                 "端点不是可求值的常量",
                 Some(span),
-            ));
+            )
+            .into());
         };
+        state.enter("<常量初始化>", &span)?;
         state.const_stack.push(def);
         let declared = match declared {
             Some(ty) => self.form(def.module, ty),
@@ -976,9 +1044,10 @@ impl Model<'_> {
             Ok(ty) => self
                 .value(def.module, value, state)
                 .map(|value| in_type(value, &ty)),
-            Err(error) => Err(error),
+            Err(error) => Err(error.into()),
         };
         state.const_stack.pop();
+        state.leave();
         result
     }
 
@@ -988,14 +1057,14 @@ impl Model<'_> {
         expression: ExprId,
         path: super::super::super::ast::PathId,
         state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    ) -> EvalResult<ConstantValue> {
         let segments = self.path(module, path);
         let span = self.modules[module].arena.exprs[expression.0 as usize]
             .span
             .clone();
         self.check_capability(module, &segments, &span, state)?;
         if segments.len() == 1
-            && let Some(value) = state.lookup(segments[0])
+            && let Some(value) = state.lookup(segments[0], &span)?
         {
             return Ok(value);
         }
@@ -1004,6 +1073,7 @@ impl Model<'_> {
                 value: Some(value), ..
             } = &member.kind
             {
+                state.alloc(value.heap_bytes(), &span)?;
                 return Ok(value.clone());
             }
             if let Some(def) = member.definition {
@@ -1060,7 +1130,7 @@ impl Model<'_> {
         callee: ExprId,
         args: AstRange<ExprId>,
         state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    ) -> EvalResult<ConstantValue> {
         let arena = &self.modules[module].arena;
         let span = arena.exprs[expression.0 as usize].span.clone();
         if let ExprKind::Field { base, name } = arena.exprs[callee.0 as usize].kind {
@@ -1076,7 +1146,8 @@ impl Model<'_> {
                     DiagnosticCode::LateComptime,
                     "TypeId.as_int 只能在类型集合冻结后求值",
                     Some(span),
-                )),
+                )
+                .into()),
                 _ => Err(self.fail(module, expression, "未知 TypeId 方法")),
             };
         }
@@ -1085,7 +1156,7 @@ impl Model<'_> {
         };
         let segments = self.path(module, path);
         if segments == ["panic"] {
-            return Err(self.comptime_panic(module, args, &span, state));
+            return self.comptime_panic(module, args, &span, state);
         }
         self.check_capability(module, &segments, &span, state)?;
         let arguments = self.value_list(module, args, state)?;
@@ -1120,9 +1191,10 @@ impl Model<'_> {
         arguments: &[ConstantValue],
         span: &crate::Span,
         state: &mut EvalState,
-    ) -> Result<Option<ConstantValue>, Diagnostic> {
+    ) -> EvalResult<Option<ConstantValue>> {
         match segments {
             ["Ok"] | ["Err"] if arguments.len() == 1 => {
+                state.alloc(64u64.saturating_add(arguments[0].heap_bytes()), span)?;
                 let payload = Box::new(arguments[0].clone());
                 return Ok(Some(if segments == ["Ok"] {
                     ConstantValue::ResultOk(payload)
@@ -1211,6 +1283,10 @@ impl Model<'_> {
             )
         })?;
         if outcome.ok {
+            state.alloc(
+                64 + u64::try_from(text.len()).expect("源码长度可编码"),
+                span,
+            )?;
             return Ok(Some(ConstantValue::ResultOk(Box::new(
                 ConstantValue::ParsedSource(ParsedFragment {
                     slot,
@@ -1218,6 +1294,10 @@ impl Model<'_> {
                 }),
             ))));
         }
+        state.alloc(
+            192 + 13 + u64::try_from(outcome.message.len()).expect("错误长度可编码"),
+            span,
+        )?;
         let mut fields = BTreeMap::new();
         fields.insert("message".to_owned(), ConstantValue::String(outcome.message));
         fields.insert(
@@ -1235,22 +1315,18 @@ impl Model<'_> {
         args: AstRange<ExprId>,
         span: &crate::Span,
         state: &mut EvalState,
-    ) -> Diagnostic {
-        let arena = &self.modules[module].arena;
-        let message = args
-            .as_slice(&arena.expr_ids)
-            .first()
-            .and_then(|&argument| self.value(module, argument, state).ok())
-            .and_then(|value| match value {
-                ConstantValue::String(message) => Some(message),
-                _ => None,
-            })
-            .unwrap_or_else(|| "comptime panic".to_owned());
-        Diagnostic::error(
+    ) -> EvalResult<ConstantValue> {
+        let arguments = self.value_list(module, args, state)?;
+        let message = match arguments.as_slice() {
+            [ConstantValue::String(message)] => message.as_str(),
+            _ => "comptime panic",
+        };
+        Err(Diagnostic::error(
             DiagnosticCode::ComptimePanic,
             format!("编译期求值 panic：{message}"),
             Some(span.clone()),
         )
+        .into())
     }
 
     fn interpret_function(
@@ -1259,7 +1335,7 @@ impl Model<'_> {
         arguments: &[ConstantValue],
         span: &crate::Span,
         state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    ) -> EvalResult<ConstantValue> {
         let parsed = &self.modules[def.module];
         let ItemKind::Function(function) = parsed.arena.items[def.item.0 as usize].kind else {
             unreachable!("interpret_function 只处理函数项");
@@ -1270,57 +1346,25 @@ impl Model<'_> {
             .map(|symbol| self.name(def.module, symbol))
             .unwrap_or("<匿名函数>")
             .to_owned();
-        match declaration.body {
-            FnBody::None => Err(capability_error(
-                span,
-                format!("外部函数 `{name}` 不能在 comptime 求值"),
-            )),
-            FnBody::Eq(body) => {
-                state.enter(&name, span)?;
-                let bound = self.bind_parameters(def.module, function, arguments, state);
-                let result = match bound {
-                    Ok(()) => self.value(def.module, body, state),
-                    Err(error) => Err(error),
-                };
-                let returned = state.unwind.take();
-                state.leave();
-                let result = result.and_then(|value| match returned {
-                    Some(Unwind::Return(value)) => Ok(value),
-                    Some(_) => Err(capability_error(
-                        span,
-                        format!("函数 `{name}` 在编译期求值中跳出函数体"),
-                    )),
-                    None => Ok(value),
-                });
-                result
+        let body = match declaration.body {
+            FnBody::None => {
+                return Err(capability_error(
+                    span,
+                    format!("外部函数 `{name}` 不能在 comptime 求值"),
+                )
+                .into());
             }
-            FnBody::Block(body) => {
-                state.enter(&name, span)?;
-                let bound = self.bind_parameters(def.module, function, arguments, state);
-                let result = match bound {
-                    Ok(()) => {
-                        let arena = &self.modules[def.module].arena;
-                        match arena.exprs[body.0 as usize].kind {
-                            ExprKind::Block { stmts, tail } => {
-                                state.with_scope(|state| self.block(def.module, stmts, tail, state))
-                            }
-                            _ => self.value(def.module, body, state),
-                        }
-                    }
-                    Err(error) => Err(error),
-                };
-                let returned = state.unwind.take();
-                state.leave();
-                let result = result.and_then(|value| match returned {
-                    Some(Unwind::Return(value)) => Ok(value),
-                    Some(_) => Err(capability_error(
-                        span,
-                        format!("函数 `{name}` 在编译期求值中跳出函数体"),
-                    )),
-                    None => Ok(value),
-                });
-                result
-            }
+            FnBody::Eq(body) | FnBody::Block(body) => body,
+        };
+        state.enter(&name, span)?;
+        let result = self
+            .bind_parameters(def.module, function, arguments, state)
+            .map_err(EvalError::from)
+            .and_then(|()| self.value(def.module, body, state));
+        state.leave();
+        match result {
+            Ok(value) | Err(EvalError::Unwind(Unwind::Return(value))) => Ok(value),
+            Err(error) => Err(error.diagnostic(span).into()),
         }
     }
 
@@ -1380,6 +1424,7 @@ impl Model<'_> {
         match arena.pats[pat.0 as usize].kind {
             PatKind::Wildcard => Ok(()),
             PatKind::Ident(name) => {
+                state.alloc(value.heap_bytes(), &span)?;
                 state.bind(self.name(module, name).to_owned(), value.clone());
                 Ok(())
             }
@@ -1406,27 +1451,19 @@ impl Model<'_> {
         stmts: AstRange<StmtId>,
         tail: Option<ExprId>,
         state: &mut EvalState,
-    ) -> Result<ConstantValue, Diagnostic> {
+    ) -> EvalResult<ConstantValue> {
         let arena = &self.modules[module].arena;
         for &statement in stmts.as_slice(&arena.stmt_ids) {
             state.step(&self.modules[module].file.eof_span)?;
             self.statement(module, statement, state)?;
-            if state.unwind.is_some() {
-                return Ok(ConstantValue::Unit);
-            }
         }
         match tail {
-            Some(tail) if state.unwind.is_none() => self.value(module, tail, state),
+            Some(tail) => self.value(module, tail, state),
             _ => Ok(ConstantValue::Unit),
         }
     }
 
-    fn statement(
-        &self,
-        module: usize,
-        statement: StmtId,
-        state: &mut EvalState,
-    ) -> Result<(), Diagnostic> {
+    fn statement(&self, module: usize, statement: StmtId, state: &mut EvalState) -> EvalResult<()> {
         let arena = &self.modules[module].arena;
         let span = arena.stmts[statement.0 as usize].span.clone();
         let unsupported = |message: &str| {
@@ -1435,6 +1472,7 @@ impl Model<'_> {
                 message.to_owned(),
                 Some(span.clone()),
             )
+            .into()
         };
         match arena.stmts[statement.0 as usize].kind {
             StmtKind::Let { pat, init, .. } => {
@@ -1443,10 +1481,12 @@ impl Model<'_> {
                     None => ConstantValue::Unit,
                 };
                 self.bind_pattern(module, pat, &value, state)
+                    .map_err(EvalError::from)
             }
             StmtKind::Assign { op, place, value } => {
                 let value = self.value(module, value, state)?;
                 self.assign(module, place, op, value, state)
+                    .map_err(EvalError::from)
             }
             StmtKind::Expr { expr, .. } => {
                 self.value(module, expr, state)?;
@@ -1486,6 +1526,10 @@ impl Model<'_> {
         let Some(slot) = state.slot_mut(name) else {
             return Err(deny("comptime 赋值只能写入局部绑定"));
         };
+        let previous = std::mem::replace(slot, ConstantValue::Unit);
+        if op == AssignOp::Add {
+            charge_concat(BinOp::Add, &previous, &value, state, &span)?;
+        }
         let combined = match op {
             AssignOp::Assign => value,
             _ => evaluate(
@@ -1502,14 +1546,32 @@ impl Model<'_> {
                     AssignOp::Shr => BinOp::Shr,
                     AssignOp::Assign => unreachable!("赋值分支已处理"),
                 },
-                slot.clone(),
+                previous,
                 value,
             )
             .ok_or_else(|| deny("comptime 复合赋值操作数类型不符"))?,
         };
-        *slot = combined;
+        *state.slot_mut(name).expect("赋值期间局部槽不改变") = combined;
         Ok(())
     }
+}
+
+fn charge_concat(
+    op: BinOp,
+    left: &ConstantValue,
+    right: &ConstantValue,
+    state: &mut EvalState,
+    span: &crate::Span,
+) -> Result<(), Diagnostic> {
+    if op == BinOp::Add
+        && matches!(
+            (left, right),
+            (ConstantValue::String(_), ConstantValue::String(_))
+        )
+    {
+        state.alloc(left.heap_bytes().saturating_add(right.heap_bytes()), span)?;
+    }
+    Ok(())
 }
 
 fn display_value(value: &ConstantValue) -> String {

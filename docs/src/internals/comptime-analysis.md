@@ -59,6 +59,11 @@ ConstEvalState {
 溢出语义，但只允许规范规定的确定性子集。禁止的操作在执行点产生带展开链或调用链的
 编译错误，不得伪造空值继续下游。
 
+早期与源码宏 evaluator 的 revision 为 **3**。函数及常量初始化各自隔离词法帧，
+复用统一字面量解码；控制流出口通过结构化结果逐层传播，不使用可被父表达式覆盖的
+可变退出标志。确定性 heap 账本为聚合/装箱槽固定计 64 字节，并递归累计其动态负载；
+复制、repeat、拼接与插值均在分配或增长前记账。
+
 ### capability registry
 
 compiler-owned registry 以解析后的 `StableDefKey`、lang item 或 intrinsic ID 为键，每个条目
@@ -146,7 +151,7 @@ parse / lex
   → final definition collection and HIR freeze
 ```
 
-外层 `cfg` 为假的源码宏不执行；生成片段中的 `cfg` 在下一轮删除。每一轮只把已经冻结的定义、签名、配置和显式输入提供给宏脚本。宏不能读取同一轮由后续宏产生的新定义，也不能读取自己的半初始化结果；需要的新定义在下一轮可见。
+外层 `cfg` 为假的源码宏不执行，包括表达式、类型与模式 slot；复用脚本根表达式的 cfg 活动位判断，不建立第二份活动位图。生成片段中的 `cfg` 在拼接当轮删除。每一轮只把已经冻结的定义、签名、配置和显式输入提供给宏脚本。宏不能读取同一轮由后续宏产生的新定义，也不能读取自己的半初始化结果；需要的新定义在下一轮可见。
 
 最终 `DefId` 只能在宏闭包稳定后分配。生成定义的持久身份使用父 `ExpansionKey`、生成片段中的稳定字节偏移、名称和定义种类形成 `StableDefKey`，不能用展开顺序、线程编号或 session-local arena ID。生成 item 可以引入新的函数、类型、impl、vtable 和可达根，因此闭世界收集、`TypeId` 分配和 `type_id_count()` 冻结都必须晚于宏闭包。
 
@@ -172,6 +177,8 @@ parse / lex
 - comptime heap 字节数。
 
 `#![comptime(expansion_limit = N)]` 为模块设置该模块展开树的深度上限；附着在源码宏位置的同名属性设置该子树上限。属性只能提出不超过 compiler profile 全局硬上限的请求；超过硬上限必须报错，不能静默截断或自动取整。其它总量预算由 compiler profile 固定，并进入 `CompilerIdentity` 或 action key。
+生成文件区域同时保存继承的子树深度上限；片段内层属性在注册 token 文件区域后校验，
+其上限与祖先限制取交集，后续轮次读取该有效上限。
 
 当前实现的 profile 默认值：深度上限 16（全局硬上限 256）、总展开次数 4096、生成字节 4 MiB、生成 AST 节点 1M、宏脚本 fuel 总池 10M、宏脚本 heap 总池 16 MiB。预算规范编码与全部生成文本摘要经 `ActionInputs` 的 `macro_budget`/`macro_inputs` 进入前端 action key。
 
@@ -327,7 +334,8 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 当前 compiler 在 **冻结前的 HIR 模块**上运行分析：从每个 callable owner 构造显式 CFG
 （`Goto` / `If` / `Switch` / `Return` / 回边；`for i in 0..n` 的 header 绑定归纳变量），
 在程序点传播 `AbstractState`（可达、区间、稀疏差约束、初始化、别名类、memory version、
-效果）。循环 header 回边 widening，固定点后再做一轮 narrowing。`WholeProgramAnalysis`
+效果）。循环 header 回边 widening，固定点后以重新合并全部前驱的同步迭代执行 narrowing；
+每轮保持健全后固定点，精度迭代受同一块预算约束。`WholeProgramAnalysis`
 （query schema **4**）嵌套在 `LowerHir` compute 内，输入指纹取 proof 写回前的模块指纹
 与实例图指纹；其内再嵌套 `AnalysisSccSummary`（27，schema 3）与
 `FunctionAnalysisSummary`（23，schema 3）。身份键为 `MonoKey`
@@ -342,14 +350,14 @@ static 初始化器的调用效果均进入分析。函数 query 只投影已完
 `Builtin::Len`；数组长度为类型中的 `N`，切片长度进入 `Len` 值槽，可被 `v.len() > 10`
 一类比较收窄。
 
-固定 **`analysis_semantics_revision = 3`**、**公共摘要策略 revision = 2**
+固定 **`analysis_semantics_revision = 4`**、**公共摘要策略 revision = 2**（与公共摘要对象复用同一版本常量）
 （默认 SCC 迭代 32、块迭代 256）。SCC 轮次或块迭代超预算 → 摘要取保守值、
 `budget_exhausted = true`，检查保持 `Unknown`；**不是**用户 `Error`。
 
 证明读检查表达式所在程序点、当前 memory version 上的状态：
 
 - 数组 / 切片下标：`0 <= i < N` 或 `0 <= i < Len(base)` 才 `Proved`；字面量越界仍
-  `Disproved`。切片 `Bounds { slice: true }` 仅当两端都落在 `Len` 内才 `Proved`。
+  `Disproved`。切片 `Bounds { slice: true }` 要求 `0 <= start <= end <= Len`，允许长度处的空切片。
 - 除法：除数区间不含 0 → `Proved`；字面量 0 → `Disproved`；否则 `Unknown`。
 - 移位：移位量区间下界 ≥ 0 → `Proved`；负字面量 → `Disproved`。
 - Unicode 标量：值区间完全落在合法 scalar 且不含 surrogate → `Proved`。
@@ -357,12 +365,19 @@ static 初始化器的调用效果均进入分析。函数 query 只投影已完
 - 只有支配该检查点的 `Proved` 写入 `RuntimeCheck.proof`；**不删除** HIR 检查节点
   （物理消除仍是阶段 29）。
 
+复合赋值按操作符更新原值，范围越过整数位宽时取该类型的保守范围，不能保留未回绕的
+数学结果。循环再次执行表达式时清除该表达式上次求值的等式与范围。引用写入、未知调用、
+挂起和隐藏状态写入使标量与长度事实一同失效。memory version 用入口版本与未知写入版本
+表示，循环写入不能使版本号无限递增；narrowing 使用全部前驱重新构建输入而非对旧上界做 join。
+
 未知调用、别名、并发、FFI、asm、spawn、COW seal、resource publish、长度可能被改写的
 路径一律保留检查。跨函数 `FunctionSummary` 含规范字段（返回区间/关系、读写 place、
 别名效果、hidden state、`may_allocate` / `may_panic` / `may_suspend` / `may_call_unknown`）
-以及长度失效用的 `may_mutate_len`；从默认空效果单调精化，join 只加强“可能发生”。
+以及长度失效用的 `may_mutate_len`；首轮实际分析建立返回范围，后续迭代合并效果与返回上界。
+所有可达返回出口的区间共同形成摘要；调用点消费已选实例的范围。未改写参数的直接 `len`
+返回可形成 `EqLen`，纯调用将该关系映射到实参长度；写入或并发边界后不得恢复旧长度事实。
 `Builtin::Len` 是纯函数。直接函数项调用按 `Resolved(Def)` 进入调用图与摘要查找，
-不把已知 callee 当成 unknown。`PublicFunctionSummary`（28，schema 1）自阶段 24 起从已完成实例 SCC 投影
+不把已知 callee 当成 unknown。`PublicFunctionSummary`（28，schema 2）自阶段 24 起从已完成实例 SCC 投影
 `PublicFunctionSummaryV1`：公共函数实例产生内容寻址摘要对象，经
 `ActionInputs::add_public_summary` 进入前端 action key；私有函数不产生公共对象。
 interface place 只引用参数序号、返回值与公开 static 稳定键投影，私有状态折叠为
@@ -415,16 +430,16 @@ WholeProgramAnalysis(world_key, analysis_policy)
 `WholeProgramAnalysis` 包含排序后的可达图、SCC 摘要、公共摘要键和 world-local 证明事实。
 所有结果通过已有 query 状态机和 cycle/fixpoint 规则生成，不返回半初始化对象。
 
-阶段 22 起两个源码宏 query 在前端注册（schema 1）：
+阶段 22 起两个源码宏 query 在前端注册：
 
-- `ParseSource`（编号 21）的 key 是 `(source slot 字节, 生成文本 BLAKE3)`；计算闭包
+- `ParseSource`（编号 21，schema 1）的 key 是 `(source slot 字节, 生成文本 BLAKE3)`；计算闭包
   用主 lexer/parser 对文本做一次性闸门解析，成功返回空结果，失败返回首个语法错误的
   消息与字节偏移。诊断只经 payload 传递（结构化 `SyntaxError`），不进入持久缓存。
-- `ExpandSourceMacro`（编号 22）的 key 是 `(source slot 字节, 轮次, 脚本文本,
-  名称指纹, cfg 规范串, registry 摘要)` 的域隔离 BLAKE3；计算闭包在 SourceExpand 域
-  执行脚本并按宏边界归一化为 `(source slot, 生成文本)`；失败诊断经
-  `store_errors/restore_errors` 缓存并在命中时按当前源码表重绑定。宏预算的 fuel 与
-  heap 两项在此闭包内累计。
+- `ExpandSourceMacro`（编号 22，schema 2）的 key 包含 source slot、轮次、调用模块和逻辑位置、
+  脚本文本、当轮所有源码内容摘要、名称指纹、cfg 规范串与 registry 摘要。
+  计算闭包在 SourceExpand 域执行脚本，结果保存 `(source slot, 生成文本, fuel 用量, heap 用量)`；
+  求值失败诊断经 `store_errors/restore_errors` 缓存并重绑定当前源码表。
+  action 的总预算在 query 外扣除，冷热命中一致；总量超限不写入宏求值缓存。
 
 拼接阶段（注册生成快照与展开记录、把片段解析进宿主 arena、执行片段 cfg 与列表
 手术）发生在 query 之外，由轮次驱动器在宿主模块上完成；同一份生成文本在解析闸门

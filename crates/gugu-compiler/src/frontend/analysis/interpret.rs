@@ -1,10 +1,10 @@
 //! 在 CFG 上做前向固定点，循环 header 使用 widening，收敛后再 narrowing。
 
 use super::cfg::{self, BlockId, Cfg, Inst, Terminator};
-use super::domain::AbstractState;
+use super::domain::{AbstractState, Interval, ValueKey};
 use super::policy::AnalysisPolicyV1;
 use super::transfer;
-use super::types::{FunctionSummary, ProofFact, ProofStatus, RuntimeCheckKey};
+use super::types::{FunctionSummary, ProofFact, ProofStatus, ReturnRelation, RuntimeCheckKey};
 use crate::frontend::hir::{self, ExprId, Module, Owner};
 use crate::frontend::mono::instantiate::CallSite;
 
@@ -31,34 +31,27 @@ pub(crate) fn analyze_owner(
     inbound[cfg.entry.index()] = AbstractState::entry(locals, exprs, params);
     seed_param_lens(module, owner, &mut inbound[cfg.entry.index()]);
     let mut budget_exhausted = false;
-    let mut proofs = Vec::new();
     if !iterate(
         module,
         owner,
         &cfg,
         &mut inbound,
         policy.max_block_iterations,
-        false,
         callees,
-        &mut proofs,
-        &mut budget_exhausted,
     ) {
         budget_exhausted = true;
     }
     if !budget_exhausted {
-        let _ = iterate(
+        narrow(
             module,
             owner,
             &cfg,
             &mut inbound,
-            1,
-            true,
+            policy.max_block_iterations,
             callees,
-            &mut proofs,
-            &mut budget_exhausted,
         );
     }
-    proofs = collect_proofs(module, owner, owner_index, &cfg, &inbound, callees);
+    let proofs = collect_proofs(module, owner, owner_index, &cfg, &inbound, callees);
     let summary = if budget_exhausted {
         FunctionSummary::conservative()
     } else {
@@ -95,12 +88,8 @@ fn iterate(
     cfg: &Cfg,
     inbound: &mut [AbstractState],
     rounds: u32,
-    narrowing: bool,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
-    proofs: &mut Vec<ProofFact>,
-    budget_exhausted: &mut bool,
 ) -> bool {
-    let _ = proofs;
     for _ in 0..rounds {
         let mut changed = false;
         for index in 0..cfg.blocks.len() {
@@ -116,14 +105,45 @@ fn iterate(
                 &mut state,
                 callees,
             );
-            changed |= propagate(owner, cfg, inbound, BlockId(index as u32), state, narrowing);
+            changed |= propagate(owner, cfg, inbound, BlockId(index as u32), state, false);
         }
         if !changed {
             return true;
         }
     }
-    *budget_exhausted = true;
     false
+}
+
+fn narrow(
+    module: &Module,
+    owner: &Owner,
+    cfg: &Cfg,
+    inbound: &mut Vec<AbstractState>,
+    rounds: u32,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+) {
+    let entry = inbound[cfg.entry.index()].clone();
+    for _ in 0..rounds {
+        // 对已收敛的上界同步应用 F，重新合并全部前驱；F(S) 仍是健全的后固定点。
+        let mut next = vec![
+            AbstractState::bottom(owner.locals.len(), owner.expressions.len());
+            cfg.blocks.len()
+        ];
+        next[cfg.entry.index()] = entry.clone();
+        for (index, old) in inbound.iter().enumerate() {
+            if !old.reachable {
+                continue;
+            }
+            let mut state = old.clone();
+            let block = BlockId(u32::try_from(index).expect("CFG 块编号可表示"));
+            execute_block(module, owner, cfg, block, &mut state, callees);
+            propagate(owner, cfg, &mut next, block, state, true);
+        }
+        if next == *inbound {
+            break;
+        }
+        *inbound = next;
+    }
 }
 
 fn execute_block(
@@ -136,20 +156,34 @@ fn execute_block(
 ) {
     let block = &cfg.blocks[id.index()];
     for inst in &block.instructions {
-        match inst {
-            Inst::Eval(expr) => transfer::eval_expr(module, owner, state, *expr, callees),
-            Inst::Bind { local, value } => transfer::bind(state, *local, *value),
-            Inst::Assign { place, value } => transfer::assign(module, owner, state, *place, *value),
-            Inst::Increment(local) => transfer::increment(state, *local),
-            Inst::Dispatch(dispatch) => transfer::apply_dispatch(owner, state, *dispatch, callees),
-            Inst::Initialize(statement) => transfer::apply_initializer(state, *statement, callees),
-            Inst::Yield => {
-                state.effects.suspend = true;
-                state.bump_heap();
-            }
-        }
+        execute_inst(module, owner, state, inst, callees);
         if !state.reachable {
             return;
+        }
+    }
+}
+
+fn execute_inst(
+    module: &Module,
+    owner: &Owner,
+    state: &mut AbstractState,
+    inst: &Inst,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+) {
+    match inst {
+        Inst::Eval(expr) => transfer::eval_expr(module, owner, state, *expr, callees),
+        Inst::Bind { local, value } => transfer::bind(state, *local, *value),
+        Inst::Assign {
+            place,
+            value,
+            operation,
+        } => transfer::assign(module, owner, state, *place, *value, *operation),
+        Inst::Increment(local) => transfer::increment(state, *local),
+        Inst::Dispatch(dispatch) => transfer::apply_dispatch(owner, state, *dispatch, callees),
+        Inst::Initialize(statement) => transfer::apply_initializer(state, *statement, callees),
+        Inst::Yield => {
+            state.effects.suspend = true;
+            state.bump_heap();
         }
     }
 }
@@ -203,7 +237,7 @@ fn propagate(
             }
             changed
         }
-        Terminator::Return | Terminator::Unreachable => false,
+        Terminator::Return(_) | Terminator::Unreachable => false,
     }
 }
 
@@ -245,27 +279,8 @@ fn collect_proofs(
                         status,
                     });
                 }
-                transfer::eval_expr(module, owner, &mut state, expr, callees);
-            } else {
-                match inst {
-                    Inst::Bind { local, value } => transfer::bind(&mut state, *local, *value),
-                    Inst::Assign { place, value } => {
-                        transfer::assign(module, owner, &mut state, *place, *value)
-                    }
-                    Inst::Increment(local) => transfer::increment(&mut state, *local),
-                    Inst::Dispatch(dispatch) => {
-                        transfer::apply_dispatch(owner, &mut state, *dispatch, callees)
-                    }
-                    Inst::Initialize(statement) => {
-                        transfer::apply_initializer(&mut state, *statement, callees)
-                    }
-                    Inst::Yield => {
-                        state.effects.suspend = true;
-                        state.bump_heap();
-                    }
-                    Inst::Eval(_) => {}
-                }
             }
+            execute_inst(module, owner, &mut state, inst, callees);
         }
     }
     proofs
@@ -279,6 +294,9 @@ fn summarize(
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> FunctionSummary {
     let mut summary = FunctionSummary::default();
+    let mut returns = Interval::EMPTY;
+    let mut relation = None;
+    let mut saw_return = false;
     for (index, inbound_state) in inbound.iter().enumerate() {
         if !inbound_state.reachable && index != cfg.entry.index() {
             continue;
@@ -293,6 +311,18 @@ fn summarize(
             callees,
         );
         absorb_effects(&mut summary, &state);
+        if let Some(Terminator::Return(value)) = cfg.blocks[index].terminator {
+            returns = returns.join(value.map_or(Interval::UNKNOWN, |value| {
+                state.range(ValueKey::Expr(value))
+            }));
+            let next = value.and_then(|value| return_relation(owner, &state, value));
+            if !saw_return {
+                relation = next;
+            } else if relation != next {
+                relation = None;
+            }
+            saw_return = true;
+        }
     }
     if !owner.foreign_calls.is_empty() || !owner.assembly.is_empty() {
         summary.alias_foreign = true;
@@ -300,11 +330,47 @@ fn summarize(
         summary.writes_hidden_state = true;
         summary.may_call_unknown = true;
     }
+    if !returns.is_empty() {
+        summary.return_lo = i64::try_from(returns.lo).ok();
+        summary.return_hi = i64::try_from(returns.hi).ok();
+    }
+    summary.return_relations.extend(relation);
     super::access::summarize(module, owner, callees, &mut summary);
     if !owner.checks.is_empty() {
         summary.may_panic = true;
     }
     summary
+}
+
+fn return_relation(
+    owner: &Owner,
+    state: &AbstractState,
+    mut value: ExprId,
+) -> Option<ReturnRelation> {
+    while let hir::ExprKind::Block {
+        tail: Some(tail), ..
+    } = owner.expressions[value.index()].kind
+    {
+        value = tail;
+    }
+    let hir::ExprKind::Intrinsic {
+        operation: hir::Builtin::Len,
+        ref arguments,
+        ..
+    } = owner.expressions[value.index()].kind
+    else {
+        return None;
+    };
+    let receiver =
+        owner.expression_ids[usize::try_from(arguments.start).expect("表达式列表编号可表示")];
+    let local = transfer::place_local(owner, receiver)?;
+    if state.heap_version != 0 || state.local_version[local.index()] != 0 {
+        return None;
+    }
+    let parameter = owner.parameters.iter().position(|pattern| matches!(owner.patterns[pattern.index()].kind, hir::PatternKind::Bind(bound) if bound == local))?;
+    Some(ReturnRelation::EqLen {
+        parameter: u32::try_from(parameter).expect("参数编号可表示"),
+    })
 }
 
 fn absorb_effects(summary: &mut FunctionSummary, state: &AbstractState) {

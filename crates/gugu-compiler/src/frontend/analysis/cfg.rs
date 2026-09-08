@@ -1,6 +1,6 @@
 //! 从冻结前 HIR 构造过程内显式 CFG。
 
-use crate::frontend::ast::BinOp;
+use crate::frontend::ast::{AssignOp, BinOp};
 use crate::frontend::hir::{
     self, ExprId, ExprKind, LocalId, Owner, PatternKind, ScopeId, StatementKind, StmtId,
 };
@@ -17,8 +17,15 @@ impl BlockId {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Inst {
     Eval(ExprId),
-    Bind { local: LocalId, value: ExprId },
-    Assign { place: ExprId, value: ExprId },
+    Bind {
+        local: LocalId,
+        value: ExprId,
+    },
+    Assign {
+        place: ExprId,
+        value: ExprId,
+        operation: AssignOp,
+    },
     Increment(LocalId),
     Dispatch(u32),
     Initialize(u32),
@@ -46,7 +53,7 @@ pub(crate) enum Terminator {
         value: ExprId,
         arms: Vec<BlockId>,
     },
-    Return,
+    Return(Option<ExprId>),
     Unreachable,
 }
 
@@ -91,7 +98,7 @@ pub(crate) fn build(owner: &Owner) -> Cfg {
     builder.current = entry;
     builder.emit_expr(owner.body);
     if builder.block_mut(builder.current).terminator.is_none() {
-        builder.terminate(Terminator::Return);
+        builder.terminate(Terminator::Return(Some(owner.body)));
     }
     Cfg {
         blocks: builder.blocks,
@@ -143,7 +150,7 @@ impl<'a> Builder<'a> {
                     self.add_pred(arm, self.current);
                 }
             }
-            Terminator::Return | Terminator::Unreachable => {}
+            Terminator::Return(_) | Terminator::Unreachable => {}
         }
         self.block_mut(self.current).terminator = Some(terminator);
     }
@@ -294,14 +301,18 @@ impl<'a> Builder<'a> {
                 place,
                 value,
                 dispatch,
-                ..
+                operation,
             } => {
                 self.emit_expr(place);
                 self.emit_expr(value);
                 if let Some(dispatch) = dispatch {
                     self.push(Inst::Dispatch(dispatch));
                 }
-                self.push(Inst::Assign { place, value });
+                self.push(Inst::Assign {
+                    place,
+                    value,
+                    operation,
+                });
             }
             StatementKind::Expression(value) => self.emit_expr(value),
             StatementKind::Defer(action) => {
@@ -561,7 +572,7 @@ impl<'a> Builder<'a> {
         self.push(Inst::Eval(id));
         match target {
             hir::ExitTarget::Return => {
-                self.terminate(Terminator::Return);
+                self.terminate(Terminator::Return(value));
             }
             hir::ExitTarget::Try(scope) => {
                 let exit = self
@@ -578,7 +589,7 @@ impl<'a> Builder<'a> {
                     let exit = frame.exit;
                     self.goto(exit, false);
                 } else {
-                    self.terminate(Terminator::Return);
+                    self.terminate(Terminator::Return(value));
                 }
             }
             hir::ExitTarget::Continue(scope) => {
@@ -586,7 +597,7 @@ impl<'a> Builder<'a> {
                     let latch = frame.latch;
                     self.goto(latch, false);
                 } else {
-                    self.terminate(Terminator::Return);
+                    self.terminate(Terminator::Return(None));
                 }
             }
         }

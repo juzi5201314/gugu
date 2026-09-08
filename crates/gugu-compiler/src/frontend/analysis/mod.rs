@@ -22,7 +22,7 @@ pub(crate) use types::{
     AnalysisWorldV1, FunctionSummary, ProofStatus, ReturnRelation, WORLD_SCHEMA_VERSION,
 };
 
-pub(crate) const ANALYSIS_SEMANTICS_REVISION: u32 = 3;
+pub(crate) const ANALYSIS_SEMANTICS_REVISION: u32 = 4;
 
 pub(crate) fn empty_world() -> AnalysisWorldV1 {
     AnalysisWorldV1 {

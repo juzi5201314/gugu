@@ -65,25 +65,16 @@ fn prove_slice(
     let end = end
         .map(|end| state.range(ValueKey::Expr(end)))
         .unwrap_or(length);
-    let start_status = compare_bounds(start, length);
-    let end_status = compare_bounds(
-        end,
-        Interval {
-            lo: length.lo.saturating_add(1),
-            hi: length.hi.saturating_add(1),
-        },
-    );
-    match (start_status, end_status) {
-        (super::types::ProofStatus::Proved, super::types::ProofStatus::Proved)
-            if start.hi <= end.lo =>
-        {
-            super::types::ProofStatus::Proved
-        }
-        (super::types::ProofStatus::Disproved, _) | (_, super::types::ProofStatus::Disproved) => {
-            super::types::ProofStatus::Disproved
-        }
-        _ => super::types::ProofStatus::Unknown,
+    if start.is_empty() || end.is_empty() || length.is_empty() {
+        return super::types::ProofStatus::Unknown;
     }
+    if start.lo >= 0 && start.hi <= end.lo && end.hi <= length.lo {
+        return super::types::ProofStatus::Proved;
+    }
+    if start.hi < 0 || end.hi < start.lo || end.lo > length.hi {
+        return super::types::ProofStatus::Disproved;
+    }
+    super::types::ProofStatus::Unknown
 }
 
 fn compare_bounds(index: Interval, length: Interval) -> super::types::ProofStatus {

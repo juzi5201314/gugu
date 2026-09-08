@@ -271,8 +271,16 @@ fn macro_in_early_const_domain_is_rejected() {
 #[test]
 fn cold_and_warm_compilations_agree() {
     let source = "comptime source {\n    std.syntax.parse_items(\"fn gen() int { 3 }\")\n}\nfn main() { _ = gen() }";
-    let cold = compile(source);
-    let warm = compile(source);
+    let compiler = Compiler::new();
+    let run = || {
+        compiler.compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ))
+    };
+    let cold = run();
+    let warm = run();
     assert!(cold.is_success());
     assert!(warm.is_success());
     assert_eq!(
@@ -326,8 +334,16 @@ fn dual_target_macro_smoke() {
 fn query_cache_returns_same_expansion_data() {
     // 相同生成文本复用 ParseSource/ExpandSourceMacro 缓存：两次编译展开记录一致。
     let source = "fn main() { _ = comptime source {\n    std.syntax.parse_source(\"40 + 2\")\n} }";
-    let first = compile(source);
-    let second = compile(source);
+    let compiler = Compiler::new();
+    let run = || {
+        compiler.compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ))
+    };
+    let first = run();
+    let second = run();
     assert!(first.is_success() && second.is_success());
     let extract = |compilation: &crate::Compilation| {
         compilation
@@ -338,4 +354,116 @@ fn query_cache_returns_same_expansion_data() {
             .collect::<Vec<_>>()
     };
     assert_eq!(extract(&first), extract(&second));
+}
+
+#[test]
+fn cached_macro_tracks_constant_input_changes() {
+    let compiler = Compiler::new();
+    let run = |value| {
+        compiler.compile(CompileRequest::single_file(
+        "main.gg",
+        format!("const TEXT: string = \"{value}\"\nfn main() {{ _ = comptime source {{ std.syntax.parse_expr(TEXT) }} }}"),
+        TargetName::X86_64Linux,
+    ))
+    };
+    let first = run("1");
+    assert!(first.is_success(), "{:?}", first.diagnostics().items());
+    let changed = run("true + 1");
+    assert!(
+        !changed.is_success(),
+        "宏输入常量改变后不能复用旧生成表达式"
+    );
+}
+
+#[test]
+fn macro_try_unwinds_before_evaluating_later_operands() {
+    rejects_with(
+        "fn main() { _ = comptime source { std.syntax.parse_expr(\"1 +\")? + panic(\"不得执行\") } }",
+        DiagnosticCode::MacroBoundaryError,
+    );
+}
+
+#[test]
+fn cached_macro_replays_resource_cost_without_caching_action_exhaustion() {
+    let sources = crate::SourceMap::new(vec![
+        crate::SourceSnapshot::from_str(
+            "main.gg",
+            "fn main() { _ = comptime source { std.syntax.parse_expr(\"1\") } }",
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    let cfg = crate::frontend::cfg::CfgContext::new(
+        TargetName::X86_64Linux,
+        [],
+        [],
+        false,
+        false,
+        Default::default(),
+    );
+    let modules = crate::frontend::parse_modules(&sources, "", &cfg).unwrap();
+    let names =
+        crate::frontend::names::analyze("tests/macros@1", &Default::default(), &modules).unwrap();
+    let model = crate::frontend::semantics::model::Model::new(&modules, &names).unwrap();
+    let calls = super::collect(&modules);
+    let queries = crate::QueryEngine::new();
+    let host = super::ExpandHost { queries: &queries };
+    let run = |budget: &mut super::ExpansionBudget| {
+        super::evaluate_macro(
+            &model, &sources, &calls[0], &host, 1, &[0; 32], &cfg, &queries, budget,
+        )
+    };
+    let mut exhausted = super::ExpansionBudget {
+        fuel_limit: 0,
+        ..Default::default()
+    };
+    assert!(run(&mut exhausted).is_err());
+    let mut available = super::ExpansionBudget::default();
+    assert_eq!(
+        run(&mut available)
+            .expect("action 预算失败不能污染宏求值缓存")
+            .text,
+        "1"
+    );
+    let mut exhausted_again = super::ExpansionBudget {
+        heap_limit: 0,
+        ..Default::default()
+    };
+    let errors = match run(&mut exhausted_again) {
+        Err(errors) => errors,
+        Ok(_) => panic!("缓存命中仍必须扣除 heap 预算"),
+    };
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code() == DiagnosticCode::ExpansionLimit)
+    );
+}
+
+#[test]
+fn cfg_deleted_source_slots_never_execute() {
+    for dead in [
+        "fn dead() { _ = comptime source { std.syntax.parse_expr(\"@\")? } }",
+        "type Dead = comptime source { std.syntax.parse_type(\"@\")? }",
+        "fn dead(x: int) { match x { comptime source { std.syntax.parse_pattern(\"@\")? } => () } }",
+    ] {
+        assert!(accepts(&format!("#[cfg(false)]\n{dead}\nfn main() {{}}")));
+    }
+}
+
+#[test]
+fn generated_inner_expansion_attributes_are_validated() {
+    rejects_with(
+        "comptime source { std.syntax.parse_items(\"#![comptime(expansion_limit = 0)]\\nfn generated() {}\") }\nfn main() {}",
+        DiagnosticCode::ExpansionLimit,
+    );
+}
+
+#[test]
+fn generated_subtree_inherits_lowered_depth_budget() {
+    rejects_with(
+        r##"comptime source { std.syntax.parse_items("#![comptime(expansion_limit = 1)]\ncomptime source { std.syntax.parse_items(\"fn generated() {}\") }") }
+fn main() {}"##,
+        DiagnosticCode::ExpansionLimit,
+    );
 }

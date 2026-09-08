@@ -159,18 +159,22 @@
   - 实现早期常量、数组长度、布局参数、泛型参数和 comptime 脚本解释器；登记允许的 lang item/intrinsic/std 能力、效果、显式输入和 evaluator revision。
   - 验收：不在 registry 或执行域未授权的调用在求值前失败；comptime 使用确定性堆、fuel、panic 和资源边界；运行时副作用、未登记文件/网络/进程访问不会被 evaluator 偷渡。
   - 接入证据：`EvaluateEarlyComptime`（schema 1）先于类型检查运行于 `Model -> evaluate -> TypeCheck(schema 7) -> LowerHir` 链，输入指纹与依赖记录包含封闭 registry 摘要；产出按 `(module,item,expr)` 规范排序的 `EarlyConstTable`，checker 的数组长度/范围端点与 HIR 的 Repeat/范围降级优先消费表内结果，缺失位置回退到共享 fuel 的惰性求值。registry 以解析后规范路径登记 `spec/standard-library.md` 能力组（域位掩码、效果、显式输入、结果种类、evaluator revision），`std.io.*` 等未登记路径与 `std.syntax.parse_*` 错域调用在求值前返回 `E0045`；`ConstEvalState` 携带 fuel（默认 100 万步）、4 MiB 确定性 heap 账本与深度上限（`E0046`），`panic` 产生 `E0047`。受限解释器覆盖标量运算、固定形状聚合、局部绑定、控制流、match 与用户函数调用，并沿调用链传递 capability 检查；`comptime` 块强制立即求值，comptime 值参数在调用点要求早期常量。registry 摘要经 `ActionInputs::set_comptime_registry` 进入前端 action key（`Compilation::action_key`，源码/cfg/registry 敏感且确定）。205 项工作区测试通过（新增 10 项），fmt/build 零警告；Linux CLI 真实 `check`/`build` 接受含常量数组、comptime 块、comptime 参数与用户函数求值的 package，未登记能力、错域、panic 与运行时实参均退出码 1 且无镜像产物。`SourceExpand`/`LateConst` 域条目已登记但调用方由阶段 22/25 引入；符号化数组长度与实例物化由阶段 24/25 消费 EarlyConstTable 验收。
+  - 审查修复：evaluator revision 3 隔离函数与常量词法帧、共享字面量模式解码、以结构化出口传播控制流，并在聚合深复制与字符串增长前扣除完整 heap 负载。
 
 - [x] **阶段 22：实现 `comptime source` 与源码宏展开**（复杂度：5）
   - 依赖：阶段 08、10、20、21。
   - 实现 `ParsedSource` 不透明值、`std.syntax.parse_*`、item/statement/expression/type/pattern source slot、轮次闭包、ExpansionId/source map、递归与展开预算。
   - 验收：生成源码必须重新经过 cfg、收集、解析、名称、类型、trait、unsafe、ABI 和 HIR；片段类别不匹配、cycle、fuel/字节/节点/深度超限均保留完整展开链诊断。
   - 接入证据：`frontend::expand::run` 在 `parse_modules -> 展开 -> entry/names/semantics::check` 链上驱动轮次闭包：每轮以冻结的名称视图在 SourceExpand 域求值脚本，经 `ParseSource`(21)/`ExpandSourceMacro`(22) query（schema 1）执行解析闸门与脚本求值，随后注册生成快照与展开记录、以非零 `ExpansionId` 解析进宿主 arena、片段 cfg 裁项、原位拼接并修正列表范围；全部宏展开后 `names::analyze`/`TypeCheck`/`LowerHir` 在合并 AST 上重新运行。`Ok`/`Err`/`?` 与结果模式进入受限解释器（仅 SourceExpand 域），`Err` 到边界转 `E0051`；类别不匹配为 `E0050`、自再生循环为 `E0048`（脚本文本+slot 稳定键）、六项预算超限为 `E0049`（含 `expansion_limit` 属性校验，默认深度 16/硬上限 256）；生成代码诊断按规范重锚定为宏调用点主位置+展开链附注。宏预算编码与全部生成文本摘要经 `ActionInputs::macro_budget/macro_inputs` 进入 action key。230 项工作区测试通过（新增 24 项，覆盖五个 slot、嵌套两轮父链、生成 cfg 裁项、边界 Err、`?` 传播、类别不匹配、cycle、深度/属性超限、冷热 query 一致、action key 敏感性与双目标 smoke）；Linux CLI 真实 `check`/`build` 接受含宏 package，非法宏退出码 1 且无镜像产物。
+  - 审查修复：ExpandSourceMacro schema 2 纳入当轮完整源码与调用位置，缓存资源用量并在 query 外扣除 action 总量；所有 slot 尊重 cfg 活动位，生成子树校验并继承深度预算。
 
 - [x] **阶段 23：实现 AbstractAnalysis、范围证明与效果传播**（复杂度：5）
   - 依赖：阶段 14、20、21、22。
   - 实现 CFG 固定点、范围/符号关系、初始化、别名类、memory version、COW seal、resource publish、并发/FFI unknown、widening/narrowing 和跨函数摘要。
   - 验收：只有 `proved` 才能删除边界检查或生成更强 placement；未知调用、别名、并发和预算耗尽保留原检查；分析不会替代类型推断或 impl 选择。
   - 接入证据：`LowerHir` 冻结前从 HIR 构造显式 CFG，传播完整 `AbstractState`（区间、差约束、初始化、别名、memory version、效果），循环 header widening 后一轮 narrowing；只有支配检查点的 `Proved` 写入 `RuntimeCheck.proof`，不删除 HIR 检查节点。`[T; N]`/`&[T]` 固有 `len` 降为 `Builtin::Len`。`WholeProgramAnalysis` schema 2，嵌套 `AnalysisSccSummary`(27)/`FunctionAnalysisSummary`(23)（身份为 `AnalysisOwnerKey`，SCC 内不经 query 读半初始化摘要）；`PublicFunctionSummary` 仍为空 map。规范切片 `v.len() > 10` + `for i in 0..n` + `break` 下标 `Proved`；写入/FFI/spawn/预算耗尽保留 `Unknown`。`analysis_semantics_revision = 2`，块迭代预算进入 policy 字节与 action key。249 项工作区测试通过（含字面量回归、归纳变量、len 收窄、失效、冷热一致与嵌套 query 投影）。
+  - 审查修复：analysis semantics revision 4 修正引用写入后标量失效、复合赋值、整数回绕及空切片证明；统一状态重放，有限版本格支持真正 narrowing，真实返回出口范围与纯函数长度关系贯通实例摘要和调用点。
+  - 审查验收：新增 17 项确定性回归，316 项工作区测试全部通过；fmt、build 零 warning，mdBook 构建成功。CLI 在 Linux build 与 Windows check 接受覆盖三个阶段的真实输入；嵌套 `?` 失败返回 E0051，未执行后续 panic，镜像计划为空。
 
 - [x] **阶段 24：实现闭世界可达性与单态化实例图**（复杂度：5）
   - 依赖：阶段 17、18、20、22、23。

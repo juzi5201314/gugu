@@ -149,6 +149,64 @@ fn user_functions_are_interpreted_with_capability_propagation() {
 }
 
 #[test]
+fn comptime_calls_use_lexical_scope() {
+    let output = frontend(
+        &[("main.gg", "const X: int = 7\nfn read() int = X\nfn outer() int { let X = 2\n read() }\nconst N: int = outer()\nfn main() { _ = N }")],
+        &QueryEngine::new(),
+    ).expect("常量函数使用定义处名称");
+    let value = output
+        .semantics
+        .early_constants
+        .constants
+        .iter()
+        .find(|entry| entry.key.item == 3 && entry.key.expr == u32::MAX)
+        .unwrap();
+    assert_eq!(value.value, comptime::eval::ConstantValue::Int(7));
+}
+
+#[test]
+fn comptime_match_compares_numeric_literals() {
+    let output = frontend(
+        &[("main.gg", "fn choose(n: int) int { match n { 2 => 9, _ => 4 } }\nconst N: int = choose(2)\nfn main() { _ = N }")],
+        &QueryEngine::new(),
+    ).expect("整数模式可以在编译期匹配");
+    let value = output
+        .semantics
+        .early_constants
+        .constants
+        .iter()
+        .find(|entry| entry.key.item == 1 && entry.key.expr == u32::MAX)
+        .unwrap();
+    assert_eq!(value.value, comptime::eval::ConstantValue::Int(9));
+}
+
+#[test]
+fn comptime_heap_accounts_for_aggregate_payloads() {
+    let output = frontend(
+        &[("main.gg", "const A: [string; 4] = [\"abcdefgh\"; 4]\nconst B: string = (\"abcd\" + \"efgh\") + \"ijkl\"\nfn main() {}")],
+        &QueryEngine::new(),
+    ).expect("普通预算下聚合可求值");
+    let mut model = Model::new(&output.modules, &output.names).unwrap();
+    model.set_eval_profile(comptime::eval::EvalProfile {
+        fuel: 1000,
+        heap_bytes: 16,
+        depth: 128,
+    });
+    for item in &output.modules[0].arena.items[..2] {
+        let ItemKind::Const {
+            value: Some(value), ..
+        } = item.kind
+        else {
+            unreachable!()
+        };
+        let error = model
+            .eval_early_const(0, value, &Ty::int())
+            .expect_err("复制的嵌套负载和拼接结果必须计入堆预算");
+        assert_eq!(error.code(), DiagnosticCode::ComptimeBudget);
+    }
+}
+
+#[test]
 fn cyclic_and_unevaluable_initializers_still_fail_at_use_sites() {
     assert!(!accepts(
         "const A: int = B\nconst B: int = A\nfn main() { let a = [0; A]\n _ = a }"
@@ -182,4 +240,20 @@ fn action_key_is_deterministic_and_input_sensitive() {
         second.action_key().expect("相同输入得到相同 key")
     );
     assert_ne!(first_key, changed.action_key().expect("输入变化改变 key"));
+}
+
+#[test]
+fn comptime_loop_preserves_break_value() {
+    let output = frontend(
+        &[("main.gg", "fn answer() int { let x = loop { break 7 }\n x }\nconst N: int = answer()\nfn main() { _ = N }")],
+        &QueryEngine::new(),
+    ).expect("有值 break 形成循环结果");
+    let value = output
+        .semantics
+        .early_constants
+        .constants
+        .iter()
+        .find(|entry| entry.key.item == 1 && entry.key.expr == u32::MAX)
+        .unwrap();
+    assert_eq!(value.value, comptime::eval::ConstantValue::Int(7));
 }

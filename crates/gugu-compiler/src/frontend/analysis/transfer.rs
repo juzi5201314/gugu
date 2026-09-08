@@ -18,6 +18,13 @@ pub(crate) fn eval_expr(
     if !state.reachable {
         return;
     }
+    // 同一 HIR 表达式可在循环中再次执行；旧求值的范围与等式不能沿用。
+    state.set_range(ValueKey::Expr(id), Interval::UNKNOWN);
+    state.set_range(ValueKey::ExprLen(id), Interval::UNKNOWN);
+    state.relations.retain(|relation| {
+        !matches!(relation.left, ValueKey::Expr(expr) | ValueKey::ExprLen(expr) if expr == id)
+            && !matches!(relation.right, ValueKey::Expr(expr) | ValueKey::ExprLen(expr) if expr == id)
+    });
     let kind = &owner.expressions[id.index()].kind;
     match kind {
         ExprKind::Literal(Literal::Integer(value)) => {
@@ -170,6 +177,8 @@ pub(crate) fn eval_expr(
             }
         }
     }
+    let range = integer_range(module, owner, id, state.range(ValueKey::Expr(id)));
+    state.set_range(ValueKey::Expr(id), range);
 }
 
 fn copy_local(
@@ -348,10 +357,24 @@ pub(crate) fn assign(
     state: &mut AbstractState,
     place: ExprId,
     value: ExprId,
+    operation: crate::frontend::ast::AssignOp,
 ) {
     if let ExprKind::Resolved(Res::Local(local)) = owner.expressions[place.index()].kind {
         state.bump_local(local);
+        use crate::frontend::ast::AssignOp;
+        let previous = state.range(ValueKey::Expr(place));
+        let rhs = state.range(ValueKey::Expr(value));
+        let range = match operation {
+            AssignOp::Assign => rhs,
+            AssignOp::Add => previous.add(rhs),
+            AssignOp::Sub => previous.sub(rhs),
+            _ => Interval::UNKNOWN,
+        };
         bind(state, local, value);
+        state.set_range(
+            ValueKey::Local(local),
+            integer_range(module, owner, place, range),
+        );
     } else {
         state.effects.alias_heap = true;
         state.effects.resource_publish = true;
@@ -416,6 +439,16 @@ fn apply_call(
         apply_summary(state, &summary);
         // HIR 的调用效果是类型检查期上界；闭合后由选中实例取代，不再重复并入旧上界。
         apply_local_effects(module, owner, state, id);
+        if matches!(owner.expressions[id.index()].kind, ExprKind::Call { .. }) {
+            state.set_range(
+                ValueKey::Expr(id),
+                Interval {
+                    lo: summary.return_lo.map(i128::from).unwrap_or(i128::MIN),
+                    hi: summary.return_hi.map(i128::from).unwrap_or(i128::MAX),
+                },
+            );
+            apply_return_relations(module, owner, state, id, &summary);
+        }
     } else {
         if !matches!(
             target,
@@ -424,6 +457,58 @@ fn apply_call(
             apply_summary(state, &FunctionSummary::conservative());
         }
         apply_effects(owner, state, id);
+    }
+}
+
+fn apply_return_relations(
+    module: &Module,
+    owner: &Owner,
+    state: &mut AbstractState,
+    id: ExprId,
+    summary: &FunctionSummary,
+) {
+    if summary.may_call_unknown
+        || summary.may_suspend
+        || summary.may_mutate_len
+        || summary.writes_hidden_state
+        || summary.unknown_param_access
+        || !summary.write_params.is_empty()
+    {
+        return;
+    }
+    let ExprKind::Call {
+        receiver,
+        ref arguments,
+        ..
+    } = owner.expressions[id.index()].kind
+    else {
+        return;
+    };
+    for relation in &summary.return_relations {
+        let super::types::ReturnRelation::EqLen { parameter } = *relation;
+        let argument = receiver
+            .into_iter()
+            .chain(
+                owner.expression_ids[usize::try_from(arguments.start).expect("参数列表起点可表示")
+                    ..usize::try_from(arguments.end).expect("参数列表终点可表示")]
+                    .iter()
+                    .copied(),
+            )
+            .nth(usize::try_from(parameter).expect("参数编号可表示"));
+        let Some(argument) = argument else { continue };
+        seed_array_len(module, owner, state, argument);
+        let key = len_key(owner, argument);
+        state.set_range(ValueKey::Expr(id), state.range(key));
+        state.relate(Relation {
+            left: ValueKey::Expr(id),
+            right: key,
+            offset: 0,
+        });
+        state.relate(Relation {
+            left: key,
+            right: ValueKey::Expr(id),
+            offset: 0,
+        });
     }
 }
 
@@ -486,6 +571,10 @@ fn apply_summary(state: &mut AbstractState, summary: &FunctionSummary) {
         || summary.alias_foreign
         || summary.alias_heap
         || summary.may_mutate_len
+        || summary.may_suspend
+        || summary.writes_hidden_state
+        || summary.unknown_param_access
+        || !summary.write_params.is_empty()
     {
         state.bump_heap();
     }
@@ -562,4 +651,32 @@ fn is_integer_ty(module: &Module, owner: &Owner, id: ExprId) -> bool {
         module.types[owner.expression_types[id.index()].index()],
         Type::Int { .. }
     )
+}
+
+fn integer_range(module: &Module, owner: &Owner, id: ExprId, range: Interval) -> Interval {
+    let Type::Int { signed, bits } = module.types[owner.expression_types[id.index()].index()]
+    else {
+        return range;
+    };
+    debug_assert!(bits > 0 && bits <= 128, "整数位宽由类型形成保证");
+    if bits == 128 {
+        return range;
+    }
+    let bounds = if signed {
+        let magnitude = 1i128 << (bits - 1);
+        Interval {
+            lo: -magnitude,
+            hi: magnitude - 1,
+        }
+    } else {
+        Interval {
+            lo: 0,
+            hi: (1i128 << bits) - 1,
+        }
+    };
+    if range.lo < bounds.lo || range.hi > bounds.hi {
+        bounds
+    } else {
+        range
+    }
 }

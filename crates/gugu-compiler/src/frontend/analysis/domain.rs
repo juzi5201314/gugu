@@ -284,7 +284,7 @@ impl AbstractState {
             }
         }
         for (slot, &alias) in self.alias.iter_mut().zip(&other.alias) {
-            if *slot != alias {
+            if *slot != alias && *slot != AliasClass::Heap {
                 *slot = AliasClass::Heap;
                 changed = true;
             }
@@ -334,7 +334,8 @@ impl AbstractState {
         if matches!(self.alias[index], AliasClass::Unique(_)) {
             self.alias[index] = AliasClass::Unique(local);
         }
-        self.local_version[index] = self.local_version[index].saturating_add(1);
+        // 写入后的动态版本不再与入口版本相同；循环内多次写入合并为未知版本。
+        self.local_version[index] = u32::MAX;
         self.local_len[index] = Interval::UNKNOWN;
         self.relations.retain(|relation| {
             relation.left.local() != Some(local) && relation.right.local() != Some(local)
@@ -342,7 +343,8 @@ impl AbstractState {
     }
 
     pub fn bump_heap(&mut self) {
-        self.heap_version = self.heap_version.saturating_add(1);
+        self.heap_version = u32::MAX;
+        self.local_range.fill(Interval::UNKNOWN);
         for len in &mut self.local_len {
             *len = Interval::UNKNOWN;
         }
@@ -353,7 +355,7 @@ impl AbstractState {
     }
 
     pub fn bump_foreign(&mut self) {
-        self.foreign_version = self.foreign_version.saturating_add(1);
+        self.foreign_version = u32::MAX;
         self.effects.foreign = true;
         for alias in &mut self.alias {
             *alias = match *alias {

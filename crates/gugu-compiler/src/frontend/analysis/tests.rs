@@ -187,6 +187,29 @@ fn statically_failing_checks_are_disproved_and_never_proved() {
 }
 
 #[test]
+fn slicing_accepts_length_endpoints_and_rejects_reversed_ranges() {
+    use crate::frontend::hir::CheckKind;
+    let statuses = proof_statuses(&[(
+        "main.gg",
+        "fn main() { let a = [1, 2]\n _ = a[2..2]\n _ = a[2..]\n _ = a[2..1] }",
+    )]);
+    let slices: Vec<_> = statuses
+        .iter()
+        .filter_map(|(kind, status)| {
+            matches!(kind, CheckKind::Bounds { slice: true }).then_some(*status)
+        })
+        .collect();
+    assert_eq!(
+        slices,
+        [
+            ProofStatus::Proved,
+            ProofStatus::Proved,
+            ProofStatus::Disproved
+        ]
+    );
+}
+
+#[test]
 fn summaries_of_callers_absorb_callee_effects() {
     // caller 无自身调用但有检查（可能 panic）；callee 含除法检查；
     // main 调用两者，其摘要必须包含 may_panic。
@@ -446,4 +469,104 @@ fn nested_scc_summaries_match_world_projection() {
         output.analysis.instances
     );
     let _ = module;
+}
+
+#[test]
+fn writes_through_references_invalidate_scalar_facts() {
+    use crate::frontend::hir::CheckKind;
+    let statuses = proof_statuses(&[(
+        "main.gg",
+        "fn zero(p: &int) { *p = 0 }\nfn main() { let d = 2\n zero(&d)\n _ = 8 / d }",
+    )]);
+    assert!(
+        statuses
+            .iter()
+            .any(|(kind, status)| matches!(kind, CheckKind::Division { .. })
+                && *status == ProofStatus::Unknown),
+        "{statuses:?}"
+    );
+}
+
+#[test]
+fn compound_assignment_updates_the_accumulated_value() {
+    use crate::frontend::hir::CheckKind;
+    let statuses = proof_statuses(&[("main.gg", "fn main() { let d = 1\n d -= 1\n _ = 8 / d }")]);
+    assert!(
+        statuses
+            .iter()
+            .any(|(kind, status)| matches!(kind, CheckKind::Division { .. })
+                && *status == ProofStatus::Disproved),
+        "{statuses:?}"
+    );
+}
+
+#[test]
+fn wrapped_integer_arithmetic_cannot_prove_nonzero() {
+    use crate::frontend::hir::CheckKind;
+    let statuses = proof_statuses(&[(
+        "main.gg",
+        "fn main() { let d: u8 = 255\n let z = d + 1\n _ = d / z }",
+    )]);
+    assert!(
+        statuses
+            .iter()
+            .any(|(kind, status)| matches!(kind, CheckKind::Division { .. })
+                && *status != ProofStatus::Proved),
+        "{statuses:?}"
+    );
+}
+
+#[test]
+fn pure_callee_return_range_proves_array_index() {
+    use crate::frontend::hir::CheckKind;
+    let statuses = proof_statuses(&[(
+        "main.gg",
+        "fn one() int = 1\nfn main() { let a = [3, 4]\n _ = a[one()] }",
+    )]);
+    assert!(
+        statuses.iter().any(
+            |(kind, status)| matches!(kind, CheckKind::Bounds { slice: false })
+                && *status == ProofStatus::Proved
+        ),
+        "{statuses:?}"
+    );
+}
+
+#[test]
+fn narrowing_recovers_loop_exit_bound() {
+    use crate::frontend::hir::CheckKind;
+    let statuses = proof_statuses(&[(
+        "main.gg",
+        "fn main() { let a = [0; 16]\n let i = 0\n while i < 10 { i += 1 }\n _ = a[i] }",
+    )]);
+    assert!(
+        statuses.iter().any(
+            |(kind, status)| matches!(kind, CheckKind::Bounds { slice: false })
+                && *status == ProofStatus::Proved
+        ),
+        "{statuses:?}"
+    );
+}
+
+#[test]
+fn pure_length_summary_refines_caller_and_all_returns_join() {
+    use crate::frontend::hir::CheckKind;
+    let statuses = proof_statuses(&[(
+        "main.gg",
+        "fn length(a: &[int]) int = a.len()\nfn maybe(c: bool) int { if c { return 0 }\n 2 }\nfn f(a: &[int], c: bool) { if length(a) > 1 { _ = a[0] }\n _ = 8 / maybe(c) }\nfn main() { let a = [1, 2]\n f(&a, true) }",
+    )]);
+    assert!(
+        statuses.iter().any(
+            |(kind, status)| matches!(kind, CheckKind::Bounds { slice: false })
+                && *status == ProofStatus::Proved
+        ),
+        "{statuses:?}"
+    );
+    assert!(
+        statuses
+            .iter()
+            .any(|(kind, status)| matches!(kind, CheckKind::Division { .. })
+                && *status == ProofStatus::Unknown),
+        "{statuses:?}"
+    );
 }

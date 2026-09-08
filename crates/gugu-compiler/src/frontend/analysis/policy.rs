@@ -1,7 +1,6 @@
-//! `PublicSummaryPolicyV1` 占位与 whole-program 分析预算。
+//! whole-program 分析预算与统一公共摘要策略。
 
-/// 公共摘要策略 revision（占位，阶段 23 不产出跨 package 对象）。
-const PUBLIC_SUMMARY_POLICY_REVISION: u32 = 1;
+use crate::frontend::mono::summary::PUBLIC_POLICY_REVISION;
 
 /// 摘要固定点的 SCC 迭代上限；超限置 `budget_exhausted`，摘要保持保守值。
 const DEFAULT_MAX_SCC_ITERATIONS: u32 = 32;
@@ -22,7 +21,7 @@ impl Default for AnalysisPolicyV1 {
     fn default() -> Self {
         Self {
             analysis_semantics_revision: super::ANALYSIS_SEMANTICS_REVISION,
-            public_policy_revision: PUBLIC_SUMMARY_POLICY_REVISION,
+            public_policy_revision: PUBLIC_POLICY_REVISION,
             max_scc_iterations: DEFAULT_MAX_SCC_ITERATIONS,
             max_block_iterations: DEFAULT_MAX_BLOCK_ITERATIONS,
         }
