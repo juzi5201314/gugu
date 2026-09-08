@@ -372,18 +372,9 @@ impl<'a> MonoContext<'a> {
                     self.encode_type_into(argument, out)?;
                 }
             }
-            Ty::Opaque(id, arguments) => {
-                let definition = self
-                    .identities
-                    .opaques
-                    .get(*id as usize)
-                    .ok_or_else(|| internal("opaque 类型索引越界"))?;
-                out.extend_from_slice(&18u16.to_le_bytes());
-                out.extend_from_slice(&self.definition_key(*definition));
-                encode_u64(out, arguments.len() as u64);
-                for argument in arguments {
-                    self.encode_type_into(argument, out)?;
-                }
+            Ty::Opaque(..) => {
+                let hidden = self.model.hidden_type(ty, &self.checked.hidden_types)?;
+                self.encode_type_into(&hidden, out)?;
             }
             Ty::Dyn(interfaces) => {
                 out.extend_from_slice(&19u16.to_le_bytes());

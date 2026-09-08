@@ -342,7 +342,7 @@ impl Checker<'_, '_> {
             }
             ExprKind::Comptime(body) => {
                 let ty = self.expression(body, expected);
-                if !matches!(ty, Ty::Error) {
+                if !matches!(ty, Ty::Error) && !self.model.depends_on_late(self.module, body) {
                     // `comptime` 块强制“现在求值”；不可求值是编译错误，不推迟到运行时。
                     if let Err(error) = self.model.constant_value(self.module, body, &ty) {
                         self.errors.push(error);

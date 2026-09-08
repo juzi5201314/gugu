@@ -13,6 +13,7 @@ mod expand;
 pub(crate) mod format;
 pub(crate) mod hir;
 mod intern;
+pub(crate) mod late;
 mod lex;
 pub(crate) mod mono;
 mod names;

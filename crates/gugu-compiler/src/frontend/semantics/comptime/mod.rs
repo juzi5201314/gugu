@@ -5,6 +5,7 @@
 //! 表中缺失的位置回退到带 fuel 的惰性求值路径。
 
 pub(crate) mod eval;
+mod phase;
 pub(crate) mod registry;
 
 use std::collections::BTreeMap;
@@ -19,7 +20,7 @@ use crate::{Diagnostic, DiagnosticCode, SourceMap};
 use super::comptime::eval::ConstantValue;
 
 /// EarlyConst 结果 schema 版本。
-pub(crate) const EARLY_SCHEMA_VERSION: u32 = 1;
+pub(crate) const EARLY_SCHEMA_VERSION: u32 = 2;
 
 /// 表内条目的规范身份；`expr` 为 `u32::MAX` 表示项级初始化器。
 #[derive(
@@ -290,6 +291,9 @@ fn evaluate_item(
     errors: &mut Vec<Diagnostic>,
 ) {
     let Some(value) = value else { return };
+    if model.depends_on_late(module, value) {
+        return;
+    }
     let declared = match ty {
         Some(ty) => model.form(module, ty),
         None => model.constant_type(module, value),

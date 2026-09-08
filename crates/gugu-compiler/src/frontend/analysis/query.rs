@@ -35,7 +35,15 @@ pub(crate) fn run_world(
 ) -> Result<(AnalysisWorldV1, DependencyFingerprint), Vec<crate::Diagnostic>> {
     let input_fingerprint = input_fingerprint(
         pre_freeze_fingerprint,
-        mono.graph_fingerprint,
+        crate::frontend::mono::hash_domain(
+            "gugu-analysis-late-input-v1",
+            &[
+                mono.graph_fingerprint.as_slice(),
+                mono.universe.fingerprint.as_slice(),
+                mono.late.fingerprint.as_slice(),
+            ]
+            .concat(),
+        ),
         cfg,
         type_check_dependency,
         lower_hir_dependency,
@@ -56,6 +64,10 @@ pub(crate) fn run_world(
             context.record_dependency(
                 lower_hir_dependency.key().clone(),
                 lower_hir_dependency.fingerprint(),
+            );
+            context.record_dependency(
+                QueryKey::new(QueryKind::FreezeTypeUniverse, 1, mono.graph_fingerprint),
+                mono.universe.fingerprint,
             );
             let plan = plan_instances(module, mono)
                 .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;

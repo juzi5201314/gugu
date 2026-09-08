@@ -178,10 +178,11 @@
   - 验收：删除项不进入实例图；递归泛型和 impl 选择在闭合后稳定；并行单态化结果按稳定 key 排序，跨 package 摘要不暴露 private state 或 session-local ID。
   - 接入证据：`frontend::mono` 在 `LowerHir` compute 内、冻结前执行 `CollectMonoRoots`(12, schema 2) -> `InstantiateGir`(13, schema 2) -> 闭合 driver -> `WholeProgramAnalysis`(24, schema 4) -> `PublicFunctionSummary`(28, schema 2) -> proof 写回 -> freeze。`StableTypeKey`/`MonoKey` 按 GBC1 编码，实例键包含类型摘要、规范 comptime 实参、选中 impl、真实调用 ABI 与 target/harness；interner 验证摘要对应的规范字节。根覆盖入口/used/export/static/global asm/harness；late 依赖从可达具体实例收集。实例边按 HIR owner 隔离函数值、闭包、协程和局部 static，并覆盖运算符及协议调用；每个具体接收者保留独立 vtable。泛型绑定复用语义检查结果，在具体接收者上重新选择 impl，保留方法泛型、APIT、参数 pack 与 callable 身份。driver 按 key 摘要排序闭合；同 key 递归形成图环，严格增长或 ancestry 超限报 E0052，总数超限报 E0053。分析 query 23/27（schema 3）按实例 SCC 求解，调用点只消费选中实例摘要；共享 HIR 的检查对全部实例取共同证明。公共摘要分离签名/ABI 与 body 指纹，保留参数序号和隐藏状态效果，生产者变化重算但内容相同时对象 key 不变；经 `ActionInputs::add_public_summary` 进入 action key。实例、元数据、vtable、外部符号和片段输入全部进入闭世界指纹；`ImagePlan` 报告实例数、根数和图指纹。当前交付每实例 fragment 输入与依赖，机器码 payload 在阶段 52、GIR 操作树在阶段 26、摘要磁盘持久化在阶段 71 接入；runtime/std 源树仍为 bootstrap 空单元，lang item 根为空。审查回归覆盖缓存失效、泛型特化、嵌套 owner、函数值、comptime 实参、双 vtable、公共效果、共享证明及严格增长拒绝；真实 CLI `check`/`build` 验证闭合计划，不把尚未实现的镜像写出标为成功。
 
-- [ ] **阶段 25：实现 LateConst、FreezeTypeUniverse 与 TypeId**（复杂度：4）
+- [x] **阶段 25：实现 LateConst、FreezeTypeUniverse 与 TypeId**（复杂度：4）
   - 依赖：阶段 18、24。
   - 实现具体类型集合冻结、按 `StableTypeKey` 分配稠密 TypeId、`type_id_count()`、late 结果表、类型名、descriptor/vtable 引用和禁止反向影响类型形成的阶段约束。
   - 验收：所有拥有 TypeId 的具体类型恰有一个编号；`!`/MaybeUninit 无编号；late 值不能改变可达性、布局、impl、宏或调用图；编号不作为跨镜像或 C ABI 稳定密钥。
+  - 接入证据：`LowerHir` schema 2 在 HIR verifier 与实例图闭合后执行 `FreezeTypeUniverse`（25，schema 1）-> `EvaluateLateComptime`（26，schema 1）-> 全程序分析 -> HIR freeze。实例 schema 3 递归保存签名、局部、泛型、字段与反射类型，按完整 StableTypeKey 摘要排序分配稠密编号；透明与不透明别名归一到具体身份，`!`/MaybeUninit 不占编号，vtable payload 引用由同一类型表校验。早期 TypeId 相等性/名称可用于宏；late HIR evaluator 使用冻结实例调用目标和具体类型绑定，支持固定形状聚合、局部更新、循环、静态调用和标量计算，结果绑定 universe/闭包指纹。E0054 阻断传递 late 值进入数组长度、泛型参数与宏；panic、预算和非法发布结果停止编译。类型表与结果表接入 action key、分析输入及 CLI 镜像计划。299 项工作区测试全部通过（阶段 25 新增 12 项），fmt/build 零 warning，mdBook 构建通过；Linux build 的真实输入报告 8 个 TypeId/3 条后期结果，Windows check 的泛型与隐藏类型切片报告 10 个 TypeId/6 条结果，非法数组长度 build 返回 E0054、退出码 1、image-plan 为 null。GIR 操作树和物理 GC 类型 section 分别仍由阶段 26、39 交付，未声称已写出机器镜像。
 
 - [ ] **阶段 26：实现 GIR 语义 lowering 与 cleanup CFG**（复杂度：5）
   - 依赖：阶段 20、24、25。

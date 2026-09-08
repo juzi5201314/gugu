@@ -257,6 +257,7 @@ impl MonoContext<'_> {
 
 /// comptime 实参复用 evaluator 的规范值树，按 GBC1 编码而非 AST 或 ConstId。
 pub(crate) fn encode_constant(
+    context: &MonoContext<'_>,
     value: &crate::frontend::semantics::comptime::eval::ConstantValue,
 ) -> Result<Vec<u8>, Diagnostic> {
     use crate::frontend::semantics::comptime::eval::ConstantValue as Value;
@@ -268,7 +269,11 @@ pub(crate) fn encode_constant(
         );
         out.extend_from_slice(value);
     }
-    fn encode(value: &Value, out: &mut Vec<u8>) -> Result<(), Diagnostic> {
+    fn encode(
+        context: &MonoContext<'_>,
+        value: &Value,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Diagnostic> {
         let tag: u16 = match value {
             Value::Unit => 0,
             Value::Int(_) => 1,
@@ -278,6 +283,7 @@ pub(crate) fn encode_constant(
             Value::Array(_) => 5,
             Value::Tuple(_) => 6,
             Value::Struct(_) => 7,
+            Value::Type(_) => 8,
             Value::ParsedSource(_) | Value::ResultOk(_) | Value::ResultErr(_) => {
                 return Err(invalid("源码宏工作值不能成为单态化实参"));
             }
@@ -289,6 +295,7 @@ pub(crate) fn encode_constant(
             Value::Float(bits) => out.extend_from_slice(&bits.to_le_bytes()),
             Value::Bool(value) => out.push(u8::from(*value)),
             Value::String(value) => bytes(out, value.as_bytes()),
+            Value::Type(ty) => bytes(out, &context.encode_type(ty)?),
             Value::Array(values) | Value::Tuple(values) => {
                 out.extend_from_slice(
                     &u64::try_from(values.len())
@@ -296,7 +303,7 @@ pub(crate) fn encode_constant(
                         .to_le_bytes(),
                 );
                 for value in values {
-                    encode(value, out)?;
+                    encode(context, value, out)?;
                 }
             }
             Value::Struct(fields) => {
@@ -316,7 +323,7 @@ pub(crate) fn encode_constant(
                 );
                 for (name, value) in fields {
                     out.extend_from_slice(&name);
-                    encode(value, out)?;
+                    encode(context, value, out)?;
                 }
             }
             Value::ParsedSource(_) | Value::ResultOk(_) | Value::ResultErr(_) => {
@@ -326,7 +333,7 @@ pub(crate) fn encode_constant(
         Ok(())
     }
     let mut bytes = Vec::new();
-    encode(value, &mut bytes)?;
+    encode(context, value, &mut bytes)?;
     Ok(bytes)
 }
 

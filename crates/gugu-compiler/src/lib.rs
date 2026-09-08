@@ -374,6 +374,8 @@ fn frontend_action_key(
         inputs.set_cfg(key, value);
     }
     inputs.set_comptime_registry(frontend.comptime_registry.1);
+    inputs.set_type_universe(frontend.mono.universe.fingerprint);
+    inputs.set_late_constants(frontend.mono.late.fingerprint);
     for (key, hash) in &frontend.expansion_inputs.macros {
         inputs.add_macro_input(key.clone(), *hash);
     }
@@ -709,6 +711,10 @@ pub struct ImagePlan {
     mono_instance_count: u32,
     mono_root_count: u32,
     mono_graph_fingerprint: [u8; 32],
+    type_id_count: u32,
+    type_universe_fingerprint: [u8; 32],
+    late_constant_count: u32,
+    late_constants_fingerprint: [u8; 32],
     rt0: Rt0Boundary,
     semantic_fingerprint: [u8; 32],
 }
@@ -724,6 +730,10 @@ impl ImagePlan {
             mono_instance_count: plan.mono_instance_count,
             mono_root_count: plan.mono_root_count,
             mono_graph_fingerprint: plan.mono_graph_fingerprint,
+            type_id_count: plan.type_id_count,
+            type_universe_fingerprint: plan.type_universe_fingerprint,
+            late_constant_count: plan.late_constant_count,
+            late_constants_fingerprint: plan.late_constants_fingerprint,
             rt0: attachment.rt0,
             semantic_fingerprint: plan.semantic_fingerprint,
         }
@@ -777,6 +787,22 @@ impl ImagePlan {
     /// 返回闭世界实例图指纹；实例集合或边变化必然改变该值。
     pub fn mono_graph_fingerprint(&self) -> [u8; 32] {
         self.mono_graph_fingerprint
+    }
+    /// 返回当前镜像的稠密类型编号数量。
+    pub fn type_id_count(&self) -> u32 {
+        self.type_id_count
+    }
+    /// 返回冻结类型集合的内容身份。
+    pub fn type_universe_fingerprint(&self) -> [u8; 32] {
+        self.type_universe_fingerprint
+    }
+    /// 返回已物化的后期常量与类型重定位数量。
+    pub fn late_constant_count(&self) -> u32 {
+        self.late_constant_count
+    }
+    /// 返回本镜像消费的后期结果指纹。
+    pub fn late_constants_fingerprint(&self) -> [u8; 32] {
+        self.late_constants_fingerprint
     }
 }
 

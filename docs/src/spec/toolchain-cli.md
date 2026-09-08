@@ -70,6 +70,12 @@
 
 只执行解析、类型检查与代码生成前的全部检查，不生成最终镜像。比 `build` 快，用于 IDE 与快速反馈。target 选择规则同 `build`。
 
+`check` 同样完成具体类型集合冻结和后期常量求值；后期求值失败属于编译失败，
+不能返回成功计划。bootstrap 的 JSON `image-plan` 包含 `type-id-count`、
+`type-universe-fingerprint`、`late-constant-count` 和 `late-constants-fingerprint`，
+两项 fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的编译计划，
+不代表最终可执行镜像已经写出，也不承诺 TypeId 跨镜像稳定。
+
 ### `gugu run [target] [args...]`
 
 编译并运行 bin target。无 target 时按 `default-run` 或唯一 bin 选择；多个 bin 且无 `default-run` 是错误。`--` 之后的参数原样传给程序。

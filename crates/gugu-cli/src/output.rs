@@ -170,6 +170,10 @@ pub(crate) fn print_compilation_json(
             "entry": plan.entry(),
             "function-count": plan.function_count(),
             "runtime-source-count": plan.runtime_source_count(),
+            "type-id-count": plan.type_id_count(),
+            "type-universe-fingerprint": plan.type_universe_fingerprint(),
+            "late-constant-count": plan.late_constant_count(),
+            "late-constants-fingerprint": plan.late_constants_fingerprint(),
             "rt0": plan.rt0().to_string()
         })
     });

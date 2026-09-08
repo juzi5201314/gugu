@@ -10,7 +10,7 @@ use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const INSTANCE_SCHEMA: u32 = 2;
+pub(crate) const INSTANCE_SCHEMA: u32 = 3;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -46,6 +46,8 @@ pub(crate) struct InstanceRecordV1 {
     pub metadata_roots: Vec<Vec<u8>>,
     pub externals: Vec<String>,
     pub uses_late_comptime: bool,
+    pub types: Vec<crate::frontend::late::universe::TypeRecord>,
+    pub type_bindings: Vec<(u32, super::keys::StableTypeKey)>,
 }
 
 /// 同一接口的每个具体接收者都需要独立 vtable。
@@ -185,6 +187,7 @@ pub(crate) fn walk_instance(
         collect_owner(context, interner, entry, owner, &mut edges)?;
     }
     let definition = &context.module.definitions[entry.definition.index()];
+    let (types, type_bindings) = super::universe::collect(context, entry)?;
     Ok(InstanceRecordV1 {
         schema: INSTANCE_SCHEMA,
         mono_key: entry.key.canonical_bytes(),
@@ -205,6 +208,8 @@ pub(crate) fn walk_instance(
         metadata_roots: edges.metadata_roots.into_iter().collect(),
         externals: edges.externals.into_iter().collect(),
         uses_late_comptime: edges.uses_late_comptime,
+        types,
+        type_bindings,
     })
 }
 
@@ -798,7 +803,7 @@ fn constant_arguments(
             ast::ExprId(u32::try_from(index).expect("AST 编号不超过 u32")),
             ty,
         )?;
-        constants.push(super::types::encode_constant(&value)?);
+        constants.push(super::types::encode_constant(context, &value)?);
     }
     Ok(constants)
 }

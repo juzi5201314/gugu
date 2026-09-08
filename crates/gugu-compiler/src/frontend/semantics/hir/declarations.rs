@@ -385,7 +385,7 @@ impl Builder<'_, '_> {
                     ),
                     traits::MemberKind::Const { ty, value } => hir::MemberKind::Constant {
                         ty: self.type_id(ty, scope)?,
-                        value: value.as_ref().map(constant_literal),
+                        value: value.as_ref().and_then(constant_literal),
                     },
                 };
                 Ok(hir::Member {
@@ -447,20 +447,14 @@ fn type_parameter(name: String, pack: bool) -> PendingParameter {
         kind: PendingParameterKind::Type { pack },
     }
 }
-fn constant_literal(value: &super::super::model::ConstantValue) -> hir::Literal {
-    match value {
-        super::super::model::ConstantValue::Int(value) => hir::Literal::Integer(*value as u128),
-        super::super::model::ConstantValue::Float(value) => hir::Literal::Float(*value),
-        super::super::model::ConstantValue::Bool(value) => hir::Literal::Bool(*value),
-        super::super::model::ConstantValue::String(value) => hir::Literal::String(value.clone()),
-        super::super::model::ConstantValue::Unit
-        | super::super::model::ConstantValue::Array(_)
-        | super::super::model::ConstantValue::Tuple(_)
-        | super::super::model::ConstantValue::Struct(_)
-        | super::super::model::ConstantValue::ParsedSource(_)
-        | super::super::model::ConstantValue::ResultOk(_)
-        | super::super::model::ConstantValue::ResultErr(_) => {
-            unreachable!("trait 关联常量成员只登记标量字面量")
-        }
-    }
+fn constant_literal(value: &super::super::model::ConstantValue) -> Option<hir::Literal> {
+    use super::super::model::ConstantValue;
+    Some(match value {
+        ConstantValue::Int(value) => hir::Literal::Integer(*value as u128),
+        ConstantValue::Float(value) => hir::Literal::Float(*value),
+        ConstantValue::Bool(value) => hir::Literal::Bool(*value),
+        ConstantValue::String(value) => hir::Literal::String(value.clone()),
+        // 非字面量常量经成员 definition 的 HIR initializer 消费。
+        _ => return None,
+    })
 }

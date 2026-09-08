@@ -136,6 +136,8 @@ pub enum DiagnosticCode {
     MonoDivergence,
     /// 单态化实例总数超过实现上界。
     MonoInstanceLimit,
+    /// late 值越过类型冻结阶段边界。
+    LateComptime,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -194,6 +196,7 @@ impl fmt::Display for DiagnosticCode {
             Self::MacroBoundaryError => "E0051",
             Self::MonoDivergence => "E0052",
             Self::MonoInstanceLimit => "E0053",
+            Self::LateComptime => "E0054",
         };
         formatter.write_str(code)
     }

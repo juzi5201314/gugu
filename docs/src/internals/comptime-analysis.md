@@ -89,6 +89,30 @@ registry 的规范摘要、条目 evaluator revision 和验证器 revision 都�
 重定位、运行时常量初始化和分支操作数消费；不得修改冻结 HIR/GIR，也不得触发新的前端或
 单态化 query。
 
+阶段 25 的实现由 `frontend::late` 接入 `LowerHir`（schema 2）：先校验 HIR，
+闭合单态化实例，再执行 `FreezeTypeUniverse`（25，schema 1）和
+`EvaluateLateComptime`（26，schema 1），最后进入全程序分析与 HIR 冻结。
+`InstantiateGir` 和实例 world 的 schema 为 3，携带每实例具体类型记录与
+HIR 类型到稳定类型键的绑定；名称、布局、递归字段依赖和 vtable payload 类型
+在冻结前收集。opaque 先还原隐藏类型，透明别名复用原类型键。
+
+类型记录按完整 32 字节 `StableTypeKey` 摘要排序，下标即 TypeId；同时保留
+规范编码以检查摘要冲突。`!` 与 `MaybeUninit[T]` 不占编号，后者内部类型仍进入
+依赖闭包。unsized 切片保留类型身份但没有固定布局，不能伪造固定大小 descriptor。
+vtable 记录保存接口稳定键与已检查的具体类型编号；物理 GC section 在阶段 39 写出。
+
+`LateKey` 保存实例摘要、owner 内表达式编号、结果类型键和完整静态求值闭包摘要。
+显式 comptime 与依赖 late 的初始化器消费结果表；`type_id[T]` 和计数 intrinsic
+形成可供后续 GIR 直接消费的重定位/常量条目。evaluator 只读 HIR、实例调用目标、
+具体类型绑定和 universe，不持有 `Model` 或 query engine。调用闭包在执行前遍历
+全部分支，拒绝未封闭的间接调用与外部函数；循环、调用和聚合分配受 fuel、深度与
+heap 预算约束。结果 verifier 拒绝非固定形状标量聚合以及其它 universe 的类型引用。
+
+早期 evaluator 保留符号 `TypeId` 的相等性和名称，数值编号与序关系只能晚求值。
+阶段依赖沿 const/static、调用与表达式传播，早期使用点报 `E0054`。冻结类型表和
+late 表的指纹共同进入全程序分析输入、action key 与镜像计划；缓存命中仍验证
+schema、身份、排序、布局、引用与结果形状，不重新开启语义形成或可达性收集。
+
 ### 源码宏返回值
 
 源码宏脚本的成功结果是编译器拥有的 `ParsedSource`。它只能由 `std.syntax.parse_*` 产生，不能由 Gugu 代码直接构造。`ParsedSource` 保存解析后的 fragment kind、生成文本摘要、解析上下文和本次 action 的 session-local 句柄；它不是运行时值，也不能写入常量镜像。

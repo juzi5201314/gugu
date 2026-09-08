@@ -185,7 +185,7 @@ impl<'a> Model<'a> {
         }
         *hash.finalize().as_bytes()
     }
-    pub(super) fn describe(&self, ty: &Ty) -> String {
+    pub(crate) fn describe(&self, ty: &Ty) -> String {
         let list = |types: &[Ty]| {
             types
                 .iter()
@@ -207,6 +207,10 @@ impl<'a> Model<'a> {
                 signed: false,
                 bits: 64,
             } => "uint".into(),
+            Ty::Int {
+                signed: false,
+                bits: 8,
+            } => "byte".into(),
             Ty::Int { signed, bits } => format!("{}{bits}", if *signed { 'i' } else { 'u' }),
             Ty::Float(64) => "float".into(),
             Ty::Float(bits) => format!("f{bits}"),

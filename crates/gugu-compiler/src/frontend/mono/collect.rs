@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `MonoWorldV1` schema。
-pub(crate) const MONO_SCHEMA: u32 = 2;
+pub(crate) const MONO_SCHEMA: u32 = 3;
 
 /// 闭合后的实例图：实例按 key 摘要排序，`MonoId` 为排序后下标。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -37,6 +37,8 @@ pub(crate) struct MonoWorldV1 {
     pub graph_fingerprint: [u8; 32],
     /// 公共摘要：实例 key 摘要 hex -> 对象 key（summary 投影阶段填充）。
     pub public_summaries: BTreeMap<String, [u8; 32]>,
+    pub universe: crate::frontend::late::universe::TypeUniverse,
+    pub late: crate::frontend::late::LateTable,
 }
 
 /// 闭合实例的规范摘要投影。
@@ -57,6 +59,8 @@ pub(crate) struct InstanceSummaryV1 {
     pub metadata_roots: Vec<Vec<u8>>,
     pub uses_late_comptime: bool,
     pub fragment_input_fingerprint: [u8; 32],
+    pub types: Vec<crate::frontend::late::universe::TypeRecord>,
+    pub type_bindings: Vec<(u32, super::keys::StableTypeKey)>,
 }
 
 /// 收集根并闭合可达实例图。
@@ -95,6 +99,8 @@ pub(crate) fn empty_world() -> MonoWorldV1 {
         externals: Vec::new(),
         graph_fingerprint: [0; 32],
         public_summaries: BTreeMap::new(),
+        universe: Default::default(),
+        late: Default::default(),
     }
 }
 
@@ -262,6 +268,8 @@ impl<'a, 'b> Driver<'a, 'b> {
             externals: externals.into_iter().collect(),
             graph_fingerprint: *hash.finalize().as_bytes(),
             public_summaries: BTreeMap::new(),
+            universe: Default::default(),
+            late: Default::default(),
         }
     }
 }
@@ -295,6 +303,8 @@ fn summary_of(record: InstanceRecordV1) -> InstanceSummaryV1 {
         metadata_roots,
         uses_late_comptime: record.uses_late_comptime,
         fragment_input_fingerprint,
+        types: record.types,
+        type_bindings: record.type_bindings,
     }
 }
 

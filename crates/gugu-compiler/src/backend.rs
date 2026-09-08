@@ -10,6 +10,10 @@ pub(crate) struct BackendPlan {
     pub(crate) mono_instance_count: u32,
     pub(crate) mono_root_count: u32,
     pub(crate) mono_graph_fingerprint: [u8; 32],
+    pub(crate) type_id_count: u32,
+    pub(crate) type_universe_fingerprint: [u8; 32],
+    pub(crate) late_constant_count: u32,
+    pub(crate) late_constants_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -29,5 +33,9 @@ pub(crate) fn plan(
         mono_instance_count: mono.instances.len() as u32,
         mono_root_count: mono.roots.len() as u32,
         mono_graph_fingerprint: mono.graph_fingerprint,
+        type_id_count: mono.universe.records.len() as u32,
+        type_universe_fingerprint: mono.universe.fingerprint,
+        late_constant_count: mono.late.results.len() as u32,
+        late_constants_fingerprint: mono.late.fingerprint,
     })
 }

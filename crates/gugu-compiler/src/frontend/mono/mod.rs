@@ -13,6 +13,7 @@ pub(crate) mod summary;
 #[cfg(test)]
 mod tests;
 mod types;
+mod universe;
 
 pub(crate) use collect::{MonoWorldV1, empty_world};
 pub(crate) use keys::hash_domain;

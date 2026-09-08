@@ -85,8 +85,8 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 22 | `ExpandSourceMacro` | stable macro call + round + source slot + script inputs | generated source/fragment + expansion record |
 | 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy + world 输入（schema 3） | completed SCC 中的函数摘要投影 |
 | 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（当前 schema 4，输入含实例图指纹与 proof 写回前的 HIR 模块指纹） | 排序摘要与 world-local 证明事实 |
-| 25 | `FreezeTypeUniverse` | closed-world instance graph | `TypeUniverseKey`、类型序列与稠密编号 |
-| 26 | `EvaluateLateComptime` | `LateConstKey` + `TypeUniverseKey` | late 标量常量 |
+| 25 | `FreezeTypeUniverse` | closed-world instance graph（schema 1；实例 world schema 3） | `TypeUniverseKey`、类型序列与稠密编号 |
+| 26 | `EvaluateLateComptime` | `LateConstKey` + `TypeUniverseKey` + registry（schema 1） | 固定形状 late 标量聚合与类型重定位 |
 | 27 | `AnalysisSccSummary` | 排序 `MonoKey` 集 + analysis policy + world 输入（schema 3） | 完整 SCC 摘要固定点 |
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision + 已完成 world 的结果指纹（schema 2） | 内容寻址跨 package 摘要 |
 

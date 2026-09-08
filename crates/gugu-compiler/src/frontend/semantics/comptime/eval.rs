@@ -53,6 +53,8 @@ pub(crate) enum ConstantValue {
     Array(Vec<ConstantValue>),
     Tuple(Vec<ConstantValue>),
     Struct(BTreeMap<String, ConstantValue>),
+    /// 早期类型身份，不包含当前镜像的数字编号。
+    Type(Ty),
     /// `std.syntax.parse_*` 产生的已解析片段；只在 SourceExpand 域出现。
     ParsedSource(ParsedFragment),
     /// `Ok(...)` 构造值；只在 SourceExpand 域出现。
@@ -321,6 +323,35 @@ impl Model<'_> {
                     _ => Err(self.error(module, "端点不是常量")),
                 }
             }
+            ExprKind::Intrinsic {
+                kind: crate::frontend::ast::IntrinsicKind::TypeId,
+                ..
+            } => Ok(Ty::TypeId),
+            ExprKind::Intrinsic { .. } => Ok(Ty::int()),
+            ExprKind::Comptime(inner) => self.constant_type_inner(module, inner, stack),
+            ExprKind::Call { callee, .. } => {
+                match self.modules[module].arena.exprs[callee.0 as usize].kind {
+                    ExprKind::Field { base, name }
+                        if self.constant_type_inner(module, base, stack)? == Ty::TypeId =>
+                    {
+                        match self.name(module, name) {
+                            "name" => Ok(Ty::String),
+                            "as_int" => Ok(Ty::int()),
+                            _ => Err(self.error(module, "未知 TypeId 方法")),
+                        }
+                    }
+                    ExprKind::Path(path) => {
+                        let def = self.resolve(module, &self.path(module, path))?;
+                        let signature = self.value_type(def)?;
+                        Ok(signature
+                            .signature()
+                            .ok_or_else(|| self.error(module, "常量函数没有签名"))?
+                            .1
+                            .clone())
+                    }
+                    _ => Err(self.error(module, "无法形成常量调用类型")),
+                }
+            }
             _ => Err(self.error(module, "无法形成常量类型")),
         }
     }
@@ -352,6 +383,17 @@ impl Model<'_> {
         expression: ExprId,
         ty: &Ty,
     ) -> Result<ConstantValue, Diagnostic> {
+        if self.depends_on_late(module, expression) {
+            return Err(Diagnostic::error(
+                DiagnosticCode::LateComptime,
+                "late 值不能用于早期类型、布局、泛型实参或源码宏",
+                Some(
+                    self.modules[module].arena.exprs[expression.0 as usize]
+                        .span
+                        .clone(),
+                ),
+            ));
+        }
         let mut state = EvalState::new(Domain::EARLY_CONST, self.eval_profile());
         let value = self.value(module, expression, &mut state)?;
         Ok(in_type(value, ty))
@@ -645,10 +687,30 @@ impl Model<'_> {
                 state.unwind = Some(Unwind::Continue);
                 Ok(ConstantValue::Unit)
             }
-            ExprKind::Intrinsic { .. } => Err(capability_error(
-                &span,
-                "intrinsic 未登记任何 comptime 执行域能力".to_owned(),
-            )),
+            ExprKind::Intrinsic { kind, tys, .. } => {
+                use crate::frontend::ast::IntrinsicKind;
+                match kind {
+                    IntrinsicKind::TypeId => {
+                        let [argument] = tys.as_slice(&arena.generic_args) else {
+                            return Err(fail());
+                        };
+                        let ty = self.form_argument(module, *argument)?;
+                        if matches!(ty, Ty::Never | Ty::MaybeUninit(_)) {
+                            return Err(self.fail(module, expression, "该类型没有 TypeId"));
+                        }
+                        Ok(ConstantValue::Type(ty))
+                    }
+                    IntrinsicKind::TypeIdCount => Err(Diagnostic::error(
+                        DiagnosticCode::LateComptime,
+                        "type_id_count 只能在类型集合冻结后求值",
+                        Some(span),
+                    )),
+                    _ => Err(capability_error(
+                        &span,
+                        "该 intrinsic 尚无可用的早期求值结果".to_owned(),
+                    )),
+                }
+            }
             ExprKind::Asm { .. }
             | ExprKind::Select { .. }
             | ExprKind::Async(_)
@@ -1001,6 +1063,23 @@ impl Model<'_> {
     ) -> Result<ConstantValue, Diagnostic> {
         let arena = &self.modules[module].arena;
         let span = arena.exprs[expression.0 as usize].span.clone();
+        if let ExprKind::Field { base, name } = arena.exprs[callee.0 as usize].kind {
+            if args.len != 0 {
+                return Err(self.fail(module, expression, "TypeId 方法不接收参数"));
+            }
+            let ConstantValue::Type(ty) = self.value(module, base, state)? else {
+                return Err(self.fail(module, expression, "comptime 方法要求 TypeId"));
+            };
+            return match self.name(module, name) {
+                "name" => Ok(ConstantValue::String(self.describe(&ty))),
+                "as_int" => Err(Diagnostic::error(
+                    DiagnosticCode::LateComptime,
+                    "TypeId.as_int 只能在类型集合冻结后求值",
+                    Some(span),
+                )),
+                _ => Err(self.fail(module, expression, "未知 TypeId 方法")),
+            };
+        }
         let ExprKind::Path(path) = arena.exprs[callee.0 as usize].kind else {
             return Err(self.fail(module, expression, "comptime 只支持直接路径调用"));
         };
@@ -1440,6 +1519,7 @@ fn display_value(value: &ConstantValue) -> String {
         ConstantValue::Float(bits) => f64::from_bits(*bits).to_string(),
         ConstantValue::Bool(value) => value.to_string(),
         ConstantValue::String(value) => value.clone(),
+        ConstantValue::Type(_) => "TypeId".to_owned(),
         ConstantValue::Array(_) | ConstantValue::Tuple(_) | ConstantValue::Struct(_) => {
             "…".to_owned()
         }
@@ -1549,6 +1629,11 @@ fn in_type(value: ConstantValue, ty: &Ty) -> ConstantValue {
 
 fn evaluate(op: BinOp, a: ConstantValue, b: ConstantValue) -> Option<ConstantValue> {
     Some(match (a, b) {
+        (ConstantValue::Type(a), ConstantValue::Type(b)) => match op {
+            BinOp::Eq => ConstantValue::Bool(a == b),
+            BinOp::Ne => ConstantValue::Bool(a != b),
+            _ => return None,
+        },
         (ConstantValue::Int(a), ConstantValue::Int(b)) => match op {
             BinOp::Add => ConstantValue::Int(a.checked_add(b)?),
             BinOp::Sub => ConstantValue::Int(a.checked_sub(b)?),

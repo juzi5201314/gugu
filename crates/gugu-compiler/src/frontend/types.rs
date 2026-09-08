@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 mod borrow;
 mod foreign;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Layout {
     pub(crate) size: u64,
     pub(crate) align: u64,
@@ -34,13 +34,7 @@ pub(crate) fn form_and_layout(
     model
         .validate_linkage(&semantics.linkage, target)
         .map_err(|error| vec![error])?;
-    let mut arena = Layouts {
-        model,
-        semantics,
-        capturing: capturing_functions(model, semantics),
-        complete: BTreeMap::new(),
-        active: Vec::new(),
-    };
+    let mut arena = Layouts::new(model, semantics);
     for body in &semantics.bodies {
         for ty in body
             .slots
@@ -90,6 +84,18 @@ pub(crate) fn form_and_layout(
     Ok(arena.complete.into_values().collect())
 }
 
+impl<'m, 'a> Layouts<'m, 'a> {
+    pub(crate) fn new(model: &'m Model<'a>, semantics: &'m CheckedSemantics) -> Self {
+        Self {
+            model,
+            semantics,
+            capturing: capturing_functions(model, semantics),
+            complete: BTreeMap::new(),
+            active: Vec::new(),
+        }
+    }
+}
+
 fn capturing_functions(model: &Model<'_>, semantics: &CheckedSemantics) -> Vec<Vec<bool>> {
     // 模块和 FnDecl 都是稠密编号；Vec<bool> 为每个现有函数保留一位。
     let mut capturing: Vec<_> = model
@@ -108,7 +114,7 @@ fn capturing_functions(model: &Model<'_>, semantics: &CheckedSemantics) -> Vec<V
     capturing
 }
 
-struct Layouts<'m, 'a> {
+pub(crate) struct Layouts<'m, 'a> {
     model: &'m Model<'a>,
     semantics: &'m CheckedSemantics,
     capturing: Vec<Vec<bool>>,
@@ -155,7 +161,7 @@ impl Layouts<'_, '_> {
         }
         Ok(())
     }
-    fn layout(&mut self, ty: &Ty) -> Result<Option<Layout>, Diagnostic> {
+    pub(crate) fn layout(&mut self, ty: &Ty) -> Result<Option<Layout>, Diagnostic> {
         if let Some(layout) = self.complete.get(ty) {
             return Ok(Some(*layout));
         }

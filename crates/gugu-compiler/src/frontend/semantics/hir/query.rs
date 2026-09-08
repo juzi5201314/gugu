@@ -27,7 +27,7 @@ pub(super) fn lower(
         hash.update(&expansion.macro_call().end().to_le_bytes());
     }
     let lower_input_fingerprint = *hash.finalize().as_bytes();
-    let key = QueryKey::new(QueryKind::LowerHir, 1, lower_input_fingerprint);
+    let key = QueryKey::new(QueryKind::LowerHir, 2, lower_input_fingerprint);
     let policy = AnalysisPolicyV1::default();
     let lower_dependency = DependencyFingerprint::new(key.clone(), lower_input_fingerprint);
     // 身份表在 query 外构造：缓存命中路径同样需要它重跑单态化闭合。
@@ -113,6 +113,9 @@ fn form(
     queries: &QueryEngine,
     sources: &SourceMap,
 ) -> Result<(analysis::AnalysisWorldV1, mono::MonoWorldV1), crate::query::QueryError> {
+    module
+        .verify()
+        .map_err(|error| super::super::query::store_errors(&[error]))?;
     // 分析的输入身份取 proof 写回前的模块指纹；proof 字段不参与
     // 字面量/类型/调用图事实，patch 前后分析结果一致。
     let pre_freeze_fingerprint = module_fingerprint(module);
@@ -126,6 +129,8 @@ fn form(
         cfg.harness(),
     );
     let mut mono_world = mono::close(&context, queries)
+        .map_err(|errors| super::super::query::store_errors(&errors))?;
+    crate::frontend::late::run(module, &mut mono_world, queries, sources)
         .map_err(|errors| super::super::query::store_errors(&errors))?;
     let (world, analysis_dependency) = analysis::run_world(
         module,

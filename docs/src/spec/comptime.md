@@ -70,6 +70,12 @@ late 求值失败是编译错误，不得改成运行时求值或重新打开宏
 前端以稳定 late 常量键携带尚未物化的标量，冻结后通过不可变结果表提供数值，不回写已
 冻结的 HIR/GIR。阶段、query 和缓存契约见[comptime 与抽象分析](../internals/comptime-analysis.md)。
 
+类型冻结与 late 求值分别由版本化 query 产生只读结果。类型表按完整 `StableTypeKey`
+摘要排序，表下标即本镜像的稠密编号；类型名、布局和 descriptor/vtable 的类型引用
+与编号一起校验。late 结果表绑定准确的 type universe 指纹与静态求值闭包，冷编译
+和缓存命中必须得到相同值。阶段越界使用报 `E0054`；求值中的 panic、预算耗尽
+和未登记能力沿既有 comptime 诊断路径失败，不能产生成功镜像计划。
+
 ## 源码 comptime 宏
 
 ### 源码宏块

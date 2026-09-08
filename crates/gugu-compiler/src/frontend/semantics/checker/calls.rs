@@ -340,16 +340,16 @@ impl Checker<'_, '_> {
                     _ => None,
                 })
                 .unwrap_or_else(|| "comptime 参数".to_owned());
-            if self
-                .model
-                .constant_value(self.module, arg, &Ty::int())
-                .is_err()
-            {
-                self.error(
-                    DiagnosticCode::ComptimeCapability,
-                    format!("comptime 参数 `{name}` 需要编译期已知值"),
-                    span,
-                );
+            if let Err(error) = self.model.constant_value(self.module, arg, &Ty::int()) {
+                if error.code() == DiagnosticCode::LateComptime {
+                    self.errors.push(error);
+                } else {
+                    self.error(
+                        DiagnosticCode::ComptimeCapability,
+                        format!("comptime 参数 `{name}` 需要编译期已知值"),
+                        span,
+                    );
+                }
             }
         }
     }
