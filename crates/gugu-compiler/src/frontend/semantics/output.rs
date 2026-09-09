@@ -1,12 +1,13 @@
 //! 检查器与后续 lowering 的版本化交接对象，不保留未收敛类型。
 use super::super::ast::{ExprId, ItemId};
+use super::model::RuntimeIntrinsic;
 use super::{
     initialization::Initialization,
     model::{DefRef, Model, Ty},
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 7;
+pub(crate) const SCHEMA_VERSION: u32 = 8;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
@@ -37,6 +38,7 @@ pub(crate) struct CheckedBody {
     pub(crate) reflections: Vec<Reflection>,
     pub(crate) formatting: Vec<FormattingPart>,
     pub(crate) memory_operations: Vec<MemoryOperation>,
+    pub(crate) runtime_operations: Vec<RuntimeOperation>,
     pub(crate) foreign_calls: Vec<super::foreign::ForeignCall>,
     pub(crate) assembly: Vec<super::assembly::AssemblyPlan>,
     pub(crate) borrow_checks: Vec<super::borrow::BorrowCheck>,
@@ -55,6 +57,14 @@ pub(crate) struct MemoryOperation {
     pub(crate) kind: super::model::MemoryIntrinsic,
     pub(crate) value: Ty,
     pub(crate) result: Ty,
+    pub(crate) arguments: Vec<ExprId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct RuntimeOperation {
+    pub(crate) expression: ExprId,
+    pub(crate) kind: RuntimeIntrinsic,
+    pub(crate) ty: Ty,
     pub(crate) arguments: Vec<ExprId>,
 }
 
@@ -274,6 +284,18 @@ impl CheckedSemantics {
                         .arguments
                         .iter()
                         .any(|id| id.0 as usize >= module.arena.exprs.len())
+                {
+                    return Err(invalid());
+                }
+            }
+            for operation in &body.runtime_operations {
+                if usize::try_from(operation.expression.0).expect("表达式下标")
+                    >= module.arena.exprs.len()
+                    || !formed(&operation.ty, model)
+                    || operation.arguments.len() != 2
+                    || operation.arguments.iter().any(|id| {
+                        usize::try_from(id.0).expect("表达式下标") >= module.arena.exprs.len()
+                    })
                 {
                     return Err(invalid());
                 }

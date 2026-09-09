@@ -124,7 +124,9 @@ GIR `StackCheck` 携带本函数 `required_frame`，语义是“在建立 frame�
 
 ### `NoSafepointRegion`
 
-`NoSafepointRegion` 是 compiler/runtime内部的结构化 effect region，只能由 `LowerConcurrency` 或登记的 runtime intrinsic生成；用户源码、attribute、inline asm和外部 package都不能构造。`NoSafepointReason`封闭为 `RuntimeLock`、`OwnershipPublish`、`RootPublish`，region ID按 body内 begin出现顺序稠密分配。
+`NoSafepointRegion` 是 compiler/runtime内部的结构化 effect region，只能由 `LowerConcurrency` 或登记的 runtime intrinsic生成；用户源码、attribute、inline asm和外部 package都不能直接构造任意 region。`NoSafepointReason`封闭为 `RuntimeLock`、`OwnershipPublish`、`RootPublish`，region ID按 body内 begin出现顺序稠密分配。
+
+当前登记的 publish 路径为 `std.runtime.ownership_publish`（`OwnershipPublish`）与 `std.runtime.root_publish`（`RootPublish`）。HIR 的 runtime intrinsic 直接进入 GIR 就地展开，不依赖普通函数定义的简单名称匹配，也不形成 callback 或 unwind 边。地址与值先在区域外求值，begin/end 恰好包住一条句柄 `Assign`；需要的 GC 写屏障在 LIR 中展开，并在区域外预留。当前 publish 的 begin/end 位于同一 block；预留 pass 用栈匹配边界，每次插入后重新定位后续未预留 region，跨 block 区域在该 pass 中报告内部错误。
 
 begin/end marker本身不产生机器指令，但从 GIR优化到最终 poll placement一直是不可跨越的 effect fence。region必须正确嵌套、单入口、单出口；成功取得 runtime lock的 CFG edge以 begin作为第一项，unlock完成后立即 end。lock acquire的 contention/park edge、barrier refill、payload准备和随机采样都必须位于 region外。
 
@@ -157,7 +159,7 @@ cleanup block的输入先保存到独立 local；正常链以 `Goto/Return` 结�
 
 HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成判别值、长度和标量比较 decision DAG；共享测试只能读取已物化临时槽，leaf保存原 matrix row ID。verifier用 row ID检查守卫/臂优先级，不在本章另写一份模式语义。
 
-`ScopedViewBegin`/`ScopedViewEnd` 成对出现：view 存活区间禁止 `Suspend`/`SelectCommit`，禁止把 token 或投影逃出配对区间，每条出口恰有一次 end。`NoSafepointBegin`/`End` 只能由登记的 runtime lock/publish intrinsic 产生；用户表达式不得制造该 region。
+`ScopedViewBegin`/`ScopedViewEnd` 成对出现：view 存活区间禁止 `Suspend`/`SelectCommit`，禁止把 token 或投影逃出配对区间，每条出口恰有一次 end。`NoSafepointBegin`/`End` 只能由 `LowerConcurrency` 或登记的 runtime publish intrinsic 产生；用户表达式不得直接制造任意 region。
 
 ### generic GIR 构造
 
@@ -368,12 +370,15 @@ GIR verifier 至少检查：
 
 LIR verifier 至少检查：
 
+`verify_structure` 检查结构不变量，包括 region 嵌套、边界和禁止 effect；固定管线尚未运行屏障预留时，允许 region 内仍有裸 `GcWriteBarrier`，但 `BarrierReserve` 始终禁止位于 region 内。固定管线结束后的 `verify` 再检查 permit 的合法 region 与非零额度、唯一 reserve、支配关系和 shade 消耗，并拒绝区域内残留的裸屏障；poll 预算也在此时追加检查。
+
 - 普通 value 单定义且定义支配使用，block 实参数量和类型完全匹配；
 - memory token 在每条 effect 路径形成连续 SSA 链；
 - `Flags` 不跨 block、不跨可能改写标志的指令；
 - pointer provenance 与 load/store、stack map 和外部调用规则一致；
 - `V128` 的 lane、宽度和 target lowering有效，不含 pointer provenance，不出现在函数 ABI或 stack map root中；
 - panic/unwind 边、普通/dirty `ForeignBridge` 与 `ForeignLeaf` 的 mode、foreign runtime 交接和 safepoint ID 不缺失；
+- `Editor::set_op` 按新 opcode 的唯一 effect 分类同步 safepoint；裸屏障改为已预留屏障后不得留下旧 Barrier safepoint，区域外的 reserve 则保留自身 safepoint；
 - 目标 legalization 后不存在 i128、聚合普通 value 或无编码操作；
 - `PollSummary` 与实际 entry check一致；把实际 poll、mandatory statepoint和带 checked entry的 managed call视为路径切断点后，剩余 CFG无循环 SCC，任意 poll-free路径的饱和 cost不超过 `POLL_BUDGET`；
 - `ScopedViewBegin/End` 在 lowering 后保持成对、source alias与token metadata一致，不能被优化成普通 reference；view的 read/write mode和 relocation修正与对应 GC descriptor一致；
@@ -382,7 +387,7 @@ LIR verifier 至少检查：
 
 release 编译器在进入代码生成前也必须运行完整 verifier。验证失败属于编译器内部错误并停止产出镜像，不能降级成保守机器码继续运行。
 
-`BuildLir`（query 15，schema 2）按具体实例键、GIR/布局、late、placement 与目标指纹隔离缓存。构造结果与缓存恢复都必须经过同一结构 verifier，只有校验凭据能够进入 backend/image plan；失败诊断为 `E0057`。此构造边界验证 SSA、Mem、source scope、指针来源、原子序与 region/barrier，不冒充 target legalization、预算化 poll、寄存器分配或机器码联合校验。固定优化管线在 world 级确定性运行、不写入该缓存；冷/热编译必须得到相同的 `dump_lir` 与 `lir_fingerprint`，每个 pass 之后都运行完整 verifier。
+`BuildLir`（query 15，schema 2）按具体实例键、GIR/布局、late、placement 与目标指纹隔离缓存。构造结果与缓存恢复都必须经过同一结构 verifier，只有校验凭据能够进入 backend/image plan；失败诊断为 `E0057`。此构造边界验证 SSA、Mem、source scope、指针来源、原子序与 region/barrier 的结构，不要求尚未运行的屏障预留 pass 已经完成，也不冒充 target legalization、预算化 poll、寄存器分配或机器码联合校验。固定优化管线在 world 级确定性运行、不写入该缓存；冷/热编译必须得到相同的 `dump_lir` 与 `lir_fingerprint`，每个 pass 之后运行结构 verifier，整条管线结束后运行完整 verifier。
 
 ## IR dump
 

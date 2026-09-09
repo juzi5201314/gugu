@@ -46,6 +46,7 @@ runtime提供弱公平而非wall-clock时间片：只要进程继续运行、cor
 `chan[T]` 是语言内建的身份句柄类型。
 
 - 类型与构造：`chan[T]`、`chan[T](n)`。`n` 是 `int` 缓冲长度，`n == 0` 即无缓冲；`n < 0` 在 comptime 是编译错误，运行时是 panic。`chan` 是关键字，这种调用不是下标。
+- `chan[T](n)` 的 `T` 按类型实参解析，不依赖接收结果的槽是否显式标注类型；例如 `let queue = chan[int](0)` 直接形成 `chan[int]`。
 - 无缓冲：发送与接收会合（一次 `send` 与一次 `recv` 必须配对完成，谁先到谁等）。
 - 发送、接收、关闭、`select`、`try_*` 的类型见 [表达式](expressions.md)。方法名固定为 `send` / `recv` / `try_send` / `try_recv` / `close`，不能重载。
 - 关闭后收尽，`recv` 返回 `Err(ChanClosed)`；再 `send` 或再 `close` 是 panic。

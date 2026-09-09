@@ -1,0 +1,15 @@
+use std.runtime.{ownership_publish, root_publish}
+
+fn main() {
+    let first: chan[int] = chan[int](0)
+    let second: chan[int] = chan[int](0)
+    let publish = fn() {
+        let a: chan[int] = chan[int](0)
+        let b: chan[int] = chan[int](0)
+        ownership_publish(first, a)
+        root_publish(second, b)
+    }
+    publish()
+    _ = first
+    _ = second
+}

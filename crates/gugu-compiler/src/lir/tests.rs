@@ -16,6 +16,7 @@ const CONCRETE: &str = include_str!("fixtures/concrete.gg");
 const EFFECTS: &str = include_str!("fixtures/effects.gg");
 const POLL: &str = include_str!("fixtures/poll.gg");
 const OPTIMIZE: &str = include_str!("fixtures/optimize.gg");
+const PUBLISH: &str = include_str!("fixtures/publish.gg");
 
 fn compile(source: &str) -> Compilation {
     let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -191,6 +192,47 @@ fn managed_store_requires_its_hybrid_barrier() {
     let safepoint = barrier.safepoint.unwrap();
     body.safepoints[safepoint.index()].kind = body::SafepointKind::StackCheck;
     rejected(&compilation, body);
+}
+
+#[test]
+fn barrier_reserve_materializes_permits() {
+    use crate::frontend::gir::body::NoSafepointReason::{OwnershipPublish, RootPublish};
+
+    let compilation = compile(PUBLISH);
+    let body = compilation
+        .lir
+        .as_ref()
+        .expect("已生成 LIR")
+        .world
+        .bodies
+        .iter()
+        .find(|body| !body.no_safepoint_regions.is_empty())
+        .expect("publish 闭包必须保留 NoSafepointRegion");
+    assert_eq!(body.no_safepoint_regions, [OwnershipPublish, RootPublish]);
+    assert_eq!(body.barrier_permits.len(), 2);
+    for (index, permit) in body.barrier_permits.iter().enumerate() {
+        assert_eq!(permit.region, body::id(index));
+        assert_eq!(permit.max_shades, 2);
+    }
+    let mut reserves = [0; 2];
+    let mut barriers = [0; 2];
+    for instruction in &body.instructions {
+        match instruction.op {
+            Op::BarrierReserve(permit) => reserves[permit.index()] += 1,
+            Op::GcWriteBarrierReserved { permit, .. } => barriers[permit.index()] += 1,
+            Op::GcWriteBarrier { .. } => panic!("region 内屏障必须已预留"),
+            _ => {}
+        }
+    }
+    assert_eq!(reserves, [1, 1]);
+    assert_eq!(barriers, [1, 1]);
+    assert!(body.blocks.iter().any(|block| {
+        body.instructions[range(&block.instructions)]
+            .iter()
+            .filter(|instruction| matches!(instruction.op, Op::NoSafepointBegin(_)))
+            .count()
+            == 2
+    }));
 }
 
 #[test]

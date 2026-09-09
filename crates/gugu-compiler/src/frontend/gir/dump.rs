@@ -127,7 +127,13 @@ fn statement_text(module: &hir::Module, body: &GirBody, statement: &Statement) -
             token.0
         ),
         StatementKind::ScopedViewEnd { token } => format!("ScopedViewEnd(_{})", token.0),
-        StatementKind::NoSafepointBegin(id) => format!("NoSafepointBegin({})", id.0),
+        StatementKind::NoSafepointBegin(id) => {
+            let reason = body
+                .no_safepoint_regions
+                .get(id.index())
+                .expect("已验证的 NoSafepointRegion");
+            format!("NoSafepointBegin({}, {reason:?})", id.0)
+        }
         StatementKind::NoSafepointEnd(id) => format!("NoSafepointEnd({})", id.0),
         StatementKind::SafepointPoll(id) => format!("SafepointPoll({})", id.0),
         StatementKind::Nop => "Nop".to_owned(),

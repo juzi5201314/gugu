@@ -820,6 +820,19 @@ setter 是进程级操作，按调用的线性化顺序采用最后发布的值�
 
 `safepoint_poll()` 是无参数 compiler intrinsic：fast path检查当前 `LogicalProcessor` 的抢占/GC poll word，slow path可以确认 stop、保存 roots、让出 coroutine并在恢复后继续。它不执行 I/O，不在 asm、`#[naked]` 或带函数体的 `#[ffi(dirty_cpu)]` 中可用。
 
+`std.runtime` 还登记以下内部 compiler intrinsic；它们按规范路径识别，导入别名不改变原语身份，不是可取地址的普通函数：
+
+```text
+fn ownership_publish[T](place: T, value: T)
+fn root_publish[T](place: T, value: T)
+```
+
+两者均返回 `()`，类型实参可以省略并由目标位置与值共同推断，也可用 `::[T]` 显式指定；只允许一个类型实参和两个值实参。`place` 必须是位置表达式，与 `std.ptr.addr_of` 一样只计算目标地址、不读取旧值；临时值等非位置实参是编译错误。目标地址先于 `value` 求值，二者均在发布区域外完成，随后就地存储句柄。
+
+`T` 必须是受管句柄类型：`&T`、切片、`chan`、`Join`、函数值或 `dyn`。聚合值、`string`、原始指针和位类型不能用于这两个原语；它们不执行 COW、resource 或其它聚合语义复制。
+
+整条存储及其 GC 混合写屏障位于 `NoSafepointRegion` 内，原因分别为 `OwnershipPublish` 与 `RootPublish`。需要写屏障时，区域外的 `BarrierReserve` 保证处理器屏障 buffer 有足够 shade 额度，区域内只允许不带 refill slow edge 的 `GcWriteBarrierReserved`。这两个原语不建立 happens-before，不替代普通赋值或同步操作，也不得写进 asm 模板；调用方不能借此构造任意无 safepoint 区域。
+
 `RuntimeStats` 是逐字段快照。`stack_reserved_bytes`、`stack_committed_bytes`与`stack_live_bytes` 分别观察地址 reservation、已提交宿主页和 live coroutine逻辑 stack容量，三者会因亚页共享、cache和decommit而不同；`dirty_cpu_active` 是当前执行 native work的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待 dirty 额度的调用数。`blocking_bridge_active` 是已取得 BridgeCredit 并执行普通 blocking native 的调用数，`blocking_bridge_waiting` 是 admission waiter 或已发布普通 bridge roots但尚未取得 credit 的调用数，`blocking_bridge_workers` 不超过 `max_blocking_workers`，`blocking_bridge_queue_bytes` 包含 waiter metadata 与排队 payload。timer字段分别统计 active wheel/heap entries、已取消但尚未 compact 的 entries与 overflow heap/runtime slab bytes。上述统计会随并发调度立即变化，不提供取消 native work、强杀线程、固定调度顺序或固定回收时刻的能力。
 
 `std.signal` 把普通 OS 终止通知显式交给用户。没有订阅者时遵循目标 OS 默认动作；订阅不会自动取消根协程、触发 panic 或等待其它用户协程。fatal signal、`SIGKILL`、`SIGSTOP` 和 Windows 不可拦截的同步 fault 不在订阅集合中。

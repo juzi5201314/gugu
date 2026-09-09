@@ -56,6 +56,27 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 effects,
             ));
         }
+        if let Some(operation) = self
+            .facts
+            .body
+            .runtime_operations
+            .iter()
+            .find(|operation| operation.expression == callee)
+        {
+            let destination = self.expression(operation.arguments[0])?;
+            let value = self.expression(operation.arguments[1])?;
+            let types = vec![self.type_id(&operation.ty)?];
+            self.expression_map[usize::try_from(callee.0).expect("表达式下标")] = Some(id);
+            return Ok((
+                hir::ExprKind::Intrinsic {
+                    operation: hir::Builtin::Runtime(operation.kind),
+                    arguments: self.expression_list([destination, value])?,
+                    types,
+                    field: None,
+                },
+                hir::Effects::WRITE,
+            ));
+        }
         if let Some(reflection) = self
             .facts
             .body

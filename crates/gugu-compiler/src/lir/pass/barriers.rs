@@ -6,18 +6,15 @@ use crate::lir::body::Op;
 pub(crate) fn run(editor: &mut Editor) -> Result<bool, Diagnostic> {
     validate_allocations(editor)?;
     let mut changed = false;
-    for (region, begin, end) in regions(editor) {
+    while let Some((region, begin, end)) = next_unreserved(editor)? {
         let mut barriers = Vec::new();
-        let mut reserved = false;
         for index in begin.1..end.1 {
-            match &editor.instruction((begin.0, index)).op {
-                Op::GcWriteBarrier { .. } => barriers.push((begin.0, index)),
-                Op::GcWriteBarrierReserved { .. } => reserved = true,
-                _ => {}
+            if matches!(
+                editor.instruction((begin.0, index)).op,
+                Op::GcWriteBarrier { .. }
+            ) {
+                barriers.push((begin.0, index));
             }
-        }
-        if barriers.is_empty() || reserved {
-            continue;
         }
         let max_shades = u32::try_from(barriers.len())
             .expect("屏障数量适配 u32")
@@ -47,27 +44,39 @@ pub(crate) fn run(editor: &mut Editor) -> Result<bool, Diagnostic> {
     Ok(changed)
 }
 
-/// 收集单 block 内配对的 region（region verifier 保证 begin/end 唯一）。
-fn regions(editor: &Editor) -> Vec<(u32, InstRef, InstRef)> {
-    let mut regions = Vec::new();
+/// 每次插入都会移动同 block 的指令，必须重新配对并定位下一段裸屏障。
+fn next_unreserved(editor: &Editor) -> Result<Option<(u32, InstRef, InstRef)>, Diagnostic> {
     for block in editor.live_blocks() {
-        let mut open: Option<(u32, usize)> = None;
+        let mut open = Vec::new();
         for index in 0..editor.instruction_count(block) {
             match &editor.instruction((block, index)).op {
-                Op::NoSafepointBegin(region) => open = Some((*region, index)),
+                Op::NoSafepointBegin(region) => open.push((*region, index)),
                 Op::NoSafepointEnd(region) => {
-                    if let Some((opened, begin)) = open
-                        && opened == *region
-                    {
-                        regions.push((opened, (block, begin), (block, index)));
-                        open = None;
+                    let Some((opened, begin)) = open.pop() else {
+                        return Err(crate::lir::invalid("NoSafepointRegion end 没有匹配 begin"));
+                    };
+                    if opened != *region {
+                        return Err(crate::lir::invalid("NoSafepointRegion 没有正确嵌套"));
+                    }
+                    if (begin..index).any(|at| {
+                        matches!(
+                            editor.instruction((block, at)).op,
+                            Op::GcWriteBarrier { .. }
+                        )
+                    }) {
+                        return Ok(Some((opened, (block, begin), (block, index))));
                     }
                 }
                 _ => {}
             }
         }
+        if !open.is_empty() {
+            return Err(crate::lir::invalid(
+                "barrier reserve 不支持跨 block 的 NoSafepointRegion",
+            ));
+        }
     }
-    regions
+    Ok(None)
 }
 
 /// 分配点合法性：`GcAlloc` 的 placement 与 align 由 operations verifier 覆盖；

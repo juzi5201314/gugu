@@ -576,13 +576,14 @@ impl Editor {
             .arguments[position] = value;
     }
 
-    /// 替换一条指令的 opcode；不改变操作数或结果。
+    /// 替换 opcode 并同步 safepoint 分类；不改变操作数或结果。
     pub(crate) fn set_op(&mut self, at: InstRef, op: Op) {
-        self.blocks[at.0.index()]
+        let instruction = &mut self.blocks[at.0.index()]
             .as_mut()
             .expect("活跃 block")
-            .insts[at.1]
-            .op = op;
+            .insts[at.1];
+        instruction.safepoint = op.safepoint_kind();
+        instruction.op = op;
     }
 
     pub(crate) fn set_terminator(&mut self, block: BlockId, term: Term) {

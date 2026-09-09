@@ -52,6 +52,9 @@ impl Checker<'_, '_> {
             if let Some(result) = self.memory_call(callee, path, type_args, &args, expected) {
                 return result;
             }
+            if let Some(result) = self.runtime_call(callee, path, type_args, &args, expected) {
+                return result;
+            }
             let parts = self.model.path(self.module, path);
             if parts.len() == 2 {
                 let receiver_name = self.arena().paths[path.0 as usize]

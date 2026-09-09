@@ -1,5 +1,6 @@
-//! lang item 钩子：scoped view 与 NoSafepoint 只能由登记路径产生。
+//! lang item 钩子：scoped view 只能由登记路径产生。
 use super::*;
+use crate::frontend::semantics::model::RuntimeIntrinsic;
 
 impl Builder<'_> {
     /// 没有函数定义的内建 trait 成员名；其它情况返回 None。
@@ -124,14 +125,6 @@ impl Builder<'_> {
         ) {
             return self.emit_scoped_view(id, name.as_str(), args).map(Some);
         }
-        if matches!(
-            name.as_str(),
-            "std.runtime.no_safepoint_lock"
-                | "std.runtime.ownership_publish"
-                | "std.runtime.root_publish"
-        ) {
-            return self.emit_no_safepoint(id, name.as_str(), args).map(Some);
-        }
         Ok(None)
     }
 
@@ -178,40 +171,39 @@ impl Builder<'_> {
         Ok(dest)
     }
 
-    fn emit_no_safepoint(
+    pub(super) fn emit_runtime_intrinsic(
         &mut self,
         id: ExprId,
-        name: &str,
-        args: &[Operand],
-    ) -> Result<LocalId, Diagnostic> {
-        let reason = match name {
-            "std.runtime.no_safepoint_lock" => NoSafepointReason::RuntimeLock,
-            "std.runtime.ownership_publish" => NoSafepointReason::OwnershipPublish,
-            _ => NoSafepointReason::RootPublish,
+        kind: RuntimeIntrinsic,
+        arguments: Range<u32>,
+    ) -> Result<Option<LocalId>, Diagnostic> {
+        let start = usize::try_from(arguments.start).expect("表达式范围起点");
+        let end = usize::try_from(arguments.end).expect("表达式范围终点");
+        let [destination, value] = self.owner.expression_ids[start..end] else {
+            return Err(gir_error(
+                "运行时 publish 原语缺少目标位置或值",
+                Some(&self.source_of(id).location),
+            ));
         };
-        let region = NoSafepointRegionId(self.no_safepoint_regions.len() as u32);
+        let place = self.emit_place(destination)?;
+        let Some(value) = self.emit_expr(value)? else {
+            return Ok(None);
+        };
+        let reason = match kind {
+            RuntimeIntrinsic::OwnershipPublish => NoSafepointReason::OwnershipPublish,
+            RuntimeIntrinsic::RootPublish => NoSafepointReason::RootPublish,
+        };
+        let region = NoSafepointRegionId(
+            u32::try_from(self.no_safepoint_regions.len()).expect("NoSafepointRegion 编号"),
+        );
         self.no_safepoint_regions.push(reason);
         self.push_stmt(StatementKind::NoSafepointBegin(region));
-        let dest = self.temp(self.expr_ty(id));
-        if let Some(callback) = args.first().cloned() {
-            let normal = self.fresh(false);
-            let unwind = self.intern_plan(self.current_unwind(id), CleanupChain::Unwind)?;
-            self.terminate(Terminator::Call {
-                callee: Callee::Value(callback),
-                args: Vec::new(),
-                destination: Place::local(dest),
-                normal,
-                unwind: Some(unwind),
-                call_kind: CallKind::Managed,
-                site: crate::frontend::mono::instantiate::CallSite::Expression(id.0),
-            });
-            self.switch_to(normal);
-        } else {
-            self.assign_unit(dest);
-        }
+        self.assign(place, Rvalue::Use(copy_of(value)));
         self.push_stmt(StatementKind::NoSafepointEnd(region));
+        let dest = self.temp(self.expr_ty(id));
+        self.assign_unit(dest);
         self.set_value(id, dest);
-        Ok(dest)
+        Ok(Some(dest))
     }
 }
 

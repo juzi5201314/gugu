@@ -14,21 +14,27 @@ use crate::{Diagnostic, frontend::hir};
 use std::ops::Range;
 
 pub(crate) fn verify(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
-    verify_structure(body, module)?;
-    let graph = Graph::new(body)?;
-    poll::verify(body, &graph)?;
-    Ok(())
+    let graph = verify_structure_with(body, module, regions::Mode::Complete)?;
+    poll::verify(body, &graph)
 }
 
-/// 结构不变量；poll 预算由 [`verify`] 在固定管线结束后追加检查。
+/// 结构不变量；poll 预算与 region 屏障预留由 [`verify`] 在固定管线结束后追加检查。
 pub(crate) fn verify_structure(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
+    verify_structure_with(body, module, regions::Mode::Structure).map(|_| ())
+}
+
+fn verify_structure_with(
+    body: &Body,
+    module: &hir::Module,
+    mode: regions::Mode,
+) -> Result<Graph, Diagnostic> {
     structure(body, module)?;
     let graph = Graph::new(body)?;
     definitions(body, &graph)?;
     memory(body)?;
     operations::verify(body)?;
     provenance::verify(body, &graph)?;
-    regions::verify(body, &graph)?;
+    regions::verify(body, &graph, mode)?;
     let (ranges, uses) = super::uses::calculate(body);
     if uses != body.uses
         || body
@@ -39,7 +45,7 @@ pub(crate) fn verify_structure(body: &Body, module: &hir::Module) -> Result<(), 
     {
         return Err(invalid("LIR 紧凑 use 链与实际操作数不一致"));
     }
-    Ok(())
+    Ok(graph)
 }
 
 fn valid_range(value: &Range<u32>, len: usize) -> bool {

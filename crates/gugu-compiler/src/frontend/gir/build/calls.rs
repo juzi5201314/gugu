@@ -369,6 +369,7 @@ impl Builder<'_> {
                 self.emit_builtin_value(id, builtin)?;
                 self.value_of(id)
             }
+            hir::Builtin::Runtime(kind) => self.emit_runtime_intrinsic(id, kind, arguments),
             _ => {
                 let types = Vec::new();
                 self.emit_intrinsic(id, builtin, arguments, types, None)
@@ -420,6 +421,9 @@ impl Builder<'_> {
     ) -> Result<Option<LocalId>, Diagnostic> {
         if matches!(operation, hir::Builtin::Panic) {
             return self.emit_panic(id, arguments);
+        }
+        if let hir::Builtin::Runtime(kind) = operation {
+            return self.emit_runtime_intrinsic(id, kind, arguments);
         }
         let mut operands = Vec::new();
         for argument in expr_range(self.owner, &arguments) {

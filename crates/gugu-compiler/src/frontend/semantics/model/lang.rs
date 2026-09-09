@@ -43,6 +43,22 @@ impl MemoryIntrinsic {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum RuntimeIntrinsic {
+    OwnershipPublish,
+    RootPublish,
+}
+
+impl RuntimeIntrinsic {
+    pub(in super::super) fn from_path(path: &str) -> Option<Self> {
+        Some(match path {
+            "std.runtime.ownership_publish" => Self::OwnershipPublish,
+            "std.runtime.root_publish" => Self::RootPublish,
+            _ => return None,
+        })
+    }
+}
+
 impl Model<'_> {
     pub(in super::super) fn external_path(&self, module: usize, path: &[&str]) -> Option<String> {
         self.external_path_inner(module, path, false)

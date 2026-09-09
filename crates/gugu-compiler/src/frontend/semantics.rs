@@ -27,6 +27,8 @@ mod comptime_tests;
 #[cfg(test)]
 mod opaque_tests;
 #[cfg(test)]
+mod runtime_tests;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod trait_tests;

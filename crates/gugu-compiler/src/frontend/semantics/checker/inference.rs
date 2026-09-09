@@ -277,6 +277,11 @@ impl Checker<'_, '_> {
             operation.result = self.normalized(&operation.result);
         }
         self.memory_operations = operations;
+        let mut operations = std::mem::take(&mut self.runtime_operations);
+        for operation in &mut operations {
+            operation.ty = self.normalized(&operation.ty);
+        }
+        self.runtime_operations = operations;
         let mut borrows = std::mem::take(&mut self.borrow_checks);
         for check in &mut borrows {
             check.base = self.normalized(&check.base);

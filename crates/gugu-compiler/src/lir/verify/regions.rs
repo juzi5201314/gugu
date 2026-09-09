@@ -4,6 +4,12 @@ use crate::frontend::gir::body::{CallKind, ViewMode};
 use crate::lir::body::{BlockId, Body, Op, Origin, Terminator, ValueId, id, range};
 use std::collections::{BTreeMap, VecDeque};
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub(super) enum Mode {
+    Structure,
+    Complete,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
     regions: Vec<u32>,
@@ -12,28 +18,33 @@ struct State {
     permits: Vec<Option<u32>>,
 }
 
-pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
+pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<(), Diagnostic> {
     let mut begins = vec![0; body.no_safepoint_regions.len()];
     let mut ends = begins.clone();
-    let mut reserves = vec![0; body.barrier_permits.len()];
+    let mut reserves = if mode == Mode::Complete {
+        vec![0; body.barrier_permits.len()]
+    } else {
+        Vec::new()
+    };
     for instruction in &body.instructions {
         match instruction.op {
             Op::NoSafepointBegin(region) => {
                 begins[usize::try_from(region).expect("region 编号")] += 1
             }
             Op::NoSafepointEnd(region) => ends[usize::try_from(region).expect("region 编号")] += 1,
-            Op::BarrierReserve(permit) => reserves[permit.index()] += 1,
+            Op::BarrierReserve(permit) if mode == Mode::Complete => reserves[permit.index()] += 1,
             _ => {}
         }
     }
     if begins.iter().chain(&ends).any(|count| *count != 1) {
         return Err(invalid("NoSafepointRegion 必须具有唯一 begin/end"));
     }
-    if reserves.iter().any(|count| *count != 1)
-        || body.barrier_permits.iter().any(|permit| {
-            permit.max_shades == 0
-                || !usize::try_from(permit.region).is_ok_and(|index| index < begins.len())
-        })
+    if mode == Mode::Complete
+        && (reserves.iter().any(|count| *count != 1)
+            || body.barrier_permits.iter().any(|permit| {
+                permit.max_shades == 0
+                    || !usize::try_from(permit.region).is_ok_and(|index| index < begins.len())
+            }))
     {
         return Err(invalid("barrier permit 缺少唯一 reserve 或引用非法 region"));
     }
@@ -54,7 +65,7 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
             memberships[usize::try_from(*region).expect("region 编号")][block_id.index()] = true;
         }
         for instruction in &body.instructions[range(&block.instructions)] {
-            if !state.regions.is_empty() && forbidden(&instruction.op) {
+            if !state.regions.is_empty() && forbidden(&instruction.op, mode) {
                 return Err(invalid(
                     "NoSafepointRegion 含有调用、panic、分配或 slow edge",
                 ));
@@ -73,14 +84,14 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
                         return Err(invalid("NoSafepointRegion end 没有匹配 begin"));
                     }
                 }
-                Op::BarrierReserve(permit) => {
+                Op::BarrierReserve(permit) if mode == Mode::Complete => {
                     if !state.regions.is_empty() {
                         return Err(invalid("barrier reserve 必须在 region 外"));
                     }
                     state.permits[permit.index()] =
                         Some(body.barrier_permits[permit.index()].max_shades);
                 }
-                Op::GcWriteBarrierReserved { permit, .. } => {
+                Op::GcWriteBarrierReserved { permit, .. } if mode == Mode::Complete => {
                     let record = &body.barrier_permits[permit.index()];
                     if state.regions.last() != Some(&record.region) {
                         return Err(invalid("预留屏障不在对应 region 内"));
@@ -202,9 +213,10 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn forbidden(op: &Op) -> bool {
+fn forbidden(op: &Op, mode: Mode) -> bool {
     match op {
         Op::GcWriteBarrierReserved { .. } => false,
+        Op::GcWriteBarrier { .. } => mode == Mode::Complete,
         Op::Call(call) | Op::ForeignCall(call) if call.poll_free_leaf => false,
         _ => {
             op.safepoint_kind().is_some()

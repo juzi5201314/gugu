@@ -23,6 +23,7 @@ mod methods;
 mod opaque;
 mod operations;
 mod reflection;
+mod runtime;
 
 #[derive(Clone)]
 struct State {
@@ -91,6 +92,7 @@ struct Checker<'m, 'a> {
     reflections: Vec<super::output::Reflection>,
     formatting: Vec<super::output::FormattingPart>,
     memory_operations: Vec<super::output::MemoryOperation>,
+    runtime_operations: Vec<super::output::RuntimeOperation>,
     foreign_calls: Vec<super::foreign::ForeignCall>,
     call_site: Option<ExprId>,
     current_function: Option<FnId>,
@@ -181,6 +183,7 @@ pub(super) fn check(
                 reflections: checker.reflections,
                 formatting: checker.formatting,
                 memory_operations: checker.memory_operations,
+                runtime_operations: checker.runtime_operations,
                 foreign_calls: checker.foreign_calls,
                 assembly: checker.assembly,
                 borrow_checks: checker.borrow_checks,
@@ -278,6 +281,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             reflections: Vec::new(),
             formatting: Vec::new(),
             memory_operations: Vec::new(),
+            runtime_operations: Vec::new(),
             foreign_calls: Vec::new(),
             call_site: None,
             current_function: None,

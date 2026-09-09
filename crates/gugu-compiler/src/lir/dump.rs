@@ -1,6 +1,6 @@
 use super::{
     World,
-    body::{Definition, Terminator, range},
+    body::{Definition, Op, Terminator, range},
 };
 use std::fmt::Write;
 
@@ -67,13 +67,16 @@ pub(super) fn world(world: &World) -> String {
                 for result in instruction.results.clone() {
                     write!(output, "v{result} ").expect("写入 String");
                 }
-                write!(
-                    output,
-                    "= {:?} {:?}",
-                    instruction.op,
-                    body.args(&instruction.arguments)
-                )
+                match &instruction.op {
+                    Op::NoSafepointBegin(region) => {
+                        let reason = body.no_safepoint_regions
+                            [usize::try_from(*region).expect("NoSafepointRegion 编号")];
+                        write!(output, "= NoSafepointBegin({region}, {reason:?})")
+                    }
+                    operation => write!(output, "= {operation:?}"),
+                }
                 .expect("写入 String");
+                write!(output, " {:?}", body.args(&instruction.arguments)).expect("写入 String");
                 if let Some(memory) = instruction.memory {
                     write!(output, " [m{} -> m{}]", memory.input.0, memory.output.0)
                         .expect("写入 String");

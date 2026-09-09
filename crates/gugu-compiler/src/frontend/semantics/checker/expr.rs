@@ -365,6 +365,13 @@ impl Checker<'_, '_> {
                     IntrinsicKind::Chan => {
                         let ty = match tys.as_slice(&self.arena().generic_args) {
                             [GenericArg::Type(t)] => self.form(*t),
+                            [argument] => match self.model.form_argument(self.module, *argument) {
+                                Ok(ty) => ty,
+                                Err(error) => {
+                                    self.errors.push(error);
+                                    Ty::Error
+                                }
+                            },
                             _ => Ty::Error,
                         };
                         Ty::Chan(Box::new(ty))
