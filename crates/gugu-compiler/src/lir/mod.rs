@@ -3,6 +3,7 @@ mod body;
 mod build;
 mod dump;
 mod effects;
+mod pass;
 mod uses;
 mod verify;
 
@@ -14,7 +15,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub(crate) const SCHEMA: u32 = 1;
+pub(crate) const SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -71,9 +72,63 @@ impl Validated {
             .map(|body| body.safepoints.len())
             .sum()
     }
+    /// 世界内 `SafepointPoll` 数量。
+    pub(crate) fn poll_count(&self) -> usize {
+        self.world
+            .bodies
+            .iter()
+            .flat_map(|body| &body.instructions)
+            .filter(|instruction| matches!(instruction.op, body::Op::SafepointPoll { .. }))
+            .count()
+    }
+    /// 被分类为 poll-free 叶的 managed 直接调用目标数量。
+    pub(crate) fn poll_free_leaf_count(&self) -> usize {
+        let mut keys = std::collections::BTreeSet::new();
+        for body in &self.world.bodies {
+            for instruction in &body.instructions {
+                if let body::Op::Call(call) | body::Op::ForeignCall(call) = &instruction.op
+                    && call.poll_free_leaf
+                    && let body::CallTarget::Instance(key) = call.target
+                {
+                    keys.insert(key);
+                }
+            }
+            for block in &body.blocks {
+                if let body::Terminator::Invoke { call, .. }
+                | body::Terminator::TailCall { call, .. } = &block.terminator
+                    && call.poll_free_leaf
+                    && let body::CallTarget::Instance(key) = call.target
+                {
+                    keys.insert(key);
+                }
+            }
+        }
+        keys.len()
+    }
+    /// poll 摘要按 body 顺序的域哈希。
+    pub(crate) fn poll_summary_fingerprint(&self) -> [u8; 32] {
+        let mut hash = blake3::Hasher::new_derive_key("gugu-lir-poll-summary-v1");
+        for body in &self.world.bodies {
+            hash.update(&serde_json::to_vec(&body.poll_summary).expect("poll 摘要可序列化"));
+        }
+        *hash.finalize().as_bytes()
+    }
     pub(crate) fn dump(&self) -> String {
         dump::world(&self.world)
     }
+    /// 固定管线 revision。
+    pub(crate) fn optimization_revision(&self) -> u32 {
+        pass::policy::PASS_PIPELINE_REVISION
+    }
+    /// poll 预算。
+    pub(crate) fn poll_budget(&self) -> u32 {
+        pass::policy::POLL_BUDGET
+    }
+}
+
+/// 进入 action key 的优化策略规范字节。
+pub(crate) fn optimization_policy_bytes() -> Vec<u8> {
+    pass::policy::OptimizationPolicyV1::default().canonical_bytes()
 }
 
 pub(crate) fn build(
@@ -84,6 +139,7 @@ pub(crate) fn build(
     queries: &QueryEngine,
     sources: &crate::SourceMap,
 ) -> Result<Validated, Vec<Diagnostic>> {
+    let profile = target.descriptor().cost_profile;
     let target = target.to_string();
     let mut hash = blake3::Hasher::new_derive_key("gugu-lir-input-v1");
     hash.update(&hir.fingerprint());
@@ -120,7 +176,7 @@ pub(crate) fn build(
             );
             let body = build::lower(concrete, hir.module(), gir, mono, &target, fingerprint)
                 .and_then(|body| {
-                    verify::verify(&body, hir.module())?;
+                    verify::verify_structure(&body, hir.module())?;
                     Ok(body)
                 })
                 .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
@@ -139,8 +195,12 @@ pub(crate) fn build(
         {
             return Err(vec![invalid("缓存 LIR 没有绑定当前输入或目标")]);
         }
-        verify::verify(&body, hir.module()).map_err(|error| vec![error])?;
+        verify::verify_structure(&body, hir.module()).map_err(|error| vec![error])?;
         bodies.push(body);
+    }
+    pass::optimize_world(&mut bodies, hir.module(), &profile)?;
+    for body in &bodies {
+        verify::verify(body, hir.module()).map_err(|error| vec![error])?;
     }
     let mut world = World {
         schema: SCHEMA,
@@ -157,7 +217,7 @@ pub(crate) fn build(
 }
 
 fn world_fingerprint(world: &World) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("gugu-lir-world-v1");
+    let mut hash = blake3::Hasher::new_derive_key("gugu-lir-world-v2");
     hash.update(&world.schema.to_le_bytes());
     hash.update(world.target.as_bytes());
     hash.update(&world.input_fingerprint);

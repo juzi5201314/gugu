@@ -4,13 +4,20 @@ use super::body::*;
 use crate::frontend::hir::{self, TypeId};
 use std::fmt::Write;
 
-pub(crate) fn dump_world(module: &hir::Module, world: &GirWorldV1) -> String {
+pub(crate) fn dump_world(
+    module: &hir::Module,
+    world: &GirWorldV1,
+    stats: super::pass::GirPassStats,
+) -> String {
     let mut out = String::new();
     let _ = writeln!(
         out,
-        "gir-revision {GIR_REVISION} schema {} bodies {} fingerprint {}",
+        "gir-revision {GIR_REVISION} schema {} bodies {} gir-passes {} inline-count {} checks-elided {} fingerprint {}",
         world.schema,
         world.bodies.len(),
+        stats.passes,
+        stats.inlined,
+        stats.checks_elided,
         hex(&world.fingerprint)
     );
     for body in &world.bodies {

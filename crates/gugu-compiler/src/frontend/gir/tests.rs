@@ -1,4 +1,5 @@
 use super::body::*;
+use super::pass::{GIR_PASS_ORDER, GirPass, GirPassStats};
 use super::*;
 use crate::{CompileRequest, Compiler, SourceMap, SourceSnapshot, TargetName};
 
@@ -217,8 +218,8 @@ fn action_key_includes_generic_gir() {
 #[test]
 fn dump_is_deterministic() {
     let (hir, gir) = compile_gir("fn main() { _ = 1 }");
-    let first = dump_world(hir.module(), &gir);
-    let second = dump_world(hir.module(), &gir);
+    let first = dump_world(hir.module(), &gir, GirPassStats::default());
+    let second = dump_world(hir.module(), &gir, GirPassStats::default());
     assert_eq!(first, second);
     assert!(first.contains("gir-revision 3"));
     assert!(first.contains("body owner=main"));
@@ -517,7 +518,7 @@ fn fixtures_lower_and_verify() {
         for body in &gir.bodies {
             verify(hir.module(), body).unwrap();
         }
-        let dump = dump_world(hir.module(), &gir);
+        let dump = dump_world(hir.module(), &gir, GirPassStats::default());
         assert!(dump.contains("gir-revision 3"));
         assert!(dump.contains("exit plan="));
     }
@@ -636,4 +637,71 @@ impl body::SourceScope {
             scope: body::ScopeId(0),
         }
     }
+}
+
+#[test]
+fn gir_pass_order_is_fixed() {
+    assert_eq!(
+        GIR_PASS_ORDER,
+        &[
+            GirPass::Inline,
+            GirPass::SimplifyCfg,
+            GirPass::SparseConditionalConstants,
+            GirPass::CopyPropagationAndGvn,
+            GirPass::BoundsCheckElimination,
+            GirPass::CowAndResourceElision,
+        ]
+    );
+    assert_eq!(super::pass::GIR_PIPELINE_REVISION, 1);
+}
+
+#[test]
+fn inline_expands_eligible_call_and_removes_call_site() {
+    let output = compile_with(
+        &crate::QueryEngine::new(),
+        include_str!("fixtures/inline.gg"),
+    );
+    assert!(output.gir_stats.inlined >= 1, "纯常量函数必须被内联");
+    let entry = output.hir.module().entry.expect("入口 owner");
+    let index = output
+        .gir
+        .bodies
+        .iter()
+        .position(|body| body.owner == entry)
+        .expect("入口 body");
+    let concrete = output
+        .gir
+        .concrete
+        .iter()
+        .find(|concrete| concrete.generic_body as usize == index)
+        .expect("入口具体体");
+    assert!(
+        !concrete
+            .body
+            .blocks
+            .iter()
+            .any(|block| matches!(block.terminator, Terminator::Call { .. })),
+        "唯一调用点必须被内联掉"
+    );
+}
+
+#[test]
+fn bounds_check_elimination_consumes_analysis_proofs() {
+    let output = compile_with(
+        &crate::QueryEngine::new(),
+        include_str!("fixtures/bounds.gg"),
+    );
+    assert!(
+        output.gir_stats.checks_elided >= 1,
+        "边界检查必须消费 analysis 证明"
+    );
+}
+
+#[test]
+fn gir_pipeline_runs_every_registered_pass() {
+    let output = compile_with(
+        &crate::QueryEngine::new(),
+        include_str!("fixtures/bounds.gg"),
+    );
+    assert_eq!(output.gir_stats.passes, GIR_PASS_ORDER.len() as u32);
 }

@@ -1,0 +1,6 @@
+fn answer() int = 41
+
+fn main() {
+    let value = answer()
+    _ = value
+}

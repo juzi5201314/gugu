@@ -136,6 +136,7 @@ pub(crate) fn lower(
             environments: Vec::new(),
             entry: BlockId(0),
             input_fingerprint,
+            poll_summary: body::PollSummary::default(),
         },
         blocks: Vec::new(),
         block_map: vec![None; concrete.body.blocks.len()],

@@ -41,8 +41,8 @@ pub use source::{
     normalize_logical_path,
 };
 pub use target::{
-    Architecture, ObjectFormat, OperatingSystem, Rt0Kind, TargetDescriptor, TargetName,
-    TargetParseError,
+    Architecture, BackendCostProfile, ObjectFormat, OperatingSystem, Rt0Kind, TargetDescriptor,
+    TargetName, TargetParseError, baseline_cost_profile,
 };
 
 use std::{
@@ -180,6 +180,7 @@ pub struct Compilation {
     image_plan: Option<ImagePlan>,
     hir: Option<frontend::hir::Validated>,
     gir: Option<frontend::gir::GirWorldV1>,
+    gir_stats: frontend::gir::pass::GirPassStats,
     lir: Option<lir::Validated>,
     action_key: Option<project::ActionKey>,
 }
@@ -219,7 +220,7 @@ impl Compilation {
     pub fn dump_gir(&self) -> Option<String> {
         let hir = self.hir.as_ref()?;
         let gir = self.gir.as_ref()?;
-        Some(frontend::gir::dump_world(hir.module(), gir))
+        Some(frontend::gir::dump_world(hir.module(), gir, self.gir_stats))
     }
 
     /// 返回 generic GIR 世界指纹。
@@ -286,6 +287,7 @@ impl Compiler {
                     image_plan: None,
                     hir: None,
                     gir: None,
+                    gir_stats: Default::default(),
                     lir: None,
                     action_key: None,
                 };
@@ -311,6 +313,7 @@ impl Compiler {
                     image_plan: None,
                     hir: None,
                     gir: None,
+                    gir_stats: Default::default(),
                     lir: None,
                     action_key: None,
                 };
@@ -343,6 +346,7 @@ impl Compiler {
                     image_plan: None,
                     hir: Some(frontend.hir),
                     gir: Some(frontend.gir),
+                    gir_stats: frontend.gir_stats,
                     lir: None,
                     action_key: None,
                 };
@@ -402,6 +406,7 @@ impl Compiler {
                 image_plan: None,
                 hir: Some(hir),
                 gir: Some(gir),
+                gir_stats: frontend.gir_stats,
                 lir: Some(lir),
                 action_key,
             };
@@ -429,6 +434,7 @@ impl Compiler {
             image_plan,
             hir: Some(hir),
             gir: Some(gir),
+            gir_stats: frontend.gir_stats,
             lir: Some(lir),
             action_key,
         }
@@ -480,6 +486,9 @@ fn compilation_action_key(
     inputs.set_analysis_world(frontend.analysis.input_fingerprint);
     inputs.set_generic_gir(frontend.gir.fingerprint);
     inputs.set_lir(lir.fingerprint());
+    let mut policy = frontend::gir::pass::policy_bytes();
+    policy.extend_from_slice(&lir::optimization_policy_bytes());
+    inputs.set_optimization_policy(policy);
     for (key, digest) in &frontend.mono.public_summaries {
         inputs.add_public_summary(key.clone(), digest);
     }
@@ -821,6 +830,11 @@ pub struct ImagePlan {
     lir_memory_operation_count: u32,
     lir_safepoint_count: u32,
     lir_fingerprint: [u8; 32],
+    optimization_revision: u32,
+    poll_budget: u32,
+    poll_count: u32,
+    poll_free_leaf_count: u32,
+    poll_summary_fingerprint: [u8; 32],
     placement_count: u32,
     turn_region_count: u32,
     local_heap_count: u32,
@@ -855,6 +869,11 @@ impl ImagePlan {
             lir_memory_operation_count: plan.lir_memory_operation_count,
             lir_safepoint_count: plan.lir_safepoint_count,
             lir_fingerprint: plan.lir_fingerprint,
+            optimization_revision: plan.optimization_revision,
+            poll_budget: plan.poll_budget,
+            poll_count: plan.poll_count,
+            poll_free_leaf_count: plan.poll_free_leaf_count,
+            poll_summary_fingerprint: plan.poll_summary_fingerprint,
             placement_count: plan.placement_count,
             turn_region_count: plan.turn_region_count,
             local_heap_count: plan.local_heap_count,
@@ -990,6 +1009,26 @@ impl ImagePlan {
     /// 返回已验证 LIR 的确定性指纹。
     pub fn lir_fingerprint(&self) -> [u8; 32] {
         self.lir_fingerprint
+    }
+    /// 返回固定优化管线的 revision。
+    pub fn optimization_revision(&self) -> u32 {
+        self.optimization_revision
+    }
+    /// 返回 poll 预算。
+    pub fn poll_budget(&self) -> u32 {
+        self.poll_budget
+    }
+    /// 返回预算化 poll 数量。
+    pub fn poll_count(&self) -> u32 {
+        self.poll_count
+    }
+    /// 返回 poll-free 叶调用目标数量。
+    pub fn poll_free_leaf_count(&self) -> u32 {
+        self.poll_free_leaf_count
+    }
+    /// 返回 poll 摘要指纹。
+    pub fn poll_summary_fingerprint(&self) -> [u8; 32] {
+        self.poll_summary_fingerprint
     }
 }
 

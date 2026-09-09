@@ -24,7 +24,7 @@ GIR 和 LIR 分别以一个函数、闭包、初始化器或编译器生成 glue
 - `signature`：规范化参数、返回类型和 effect；
 - `source_scopes`：可恢复到 HIR span 的内联作用域树；
 - `flags`：是否可 panic、可 suspend、可分配、含 unsafe 或属于 runtime glue；
-- `revision`：IR schema版本，当前 GIR和 LIR都为2。
+- `revision`：IR schema版本，当前 GIR 为 3、LIR 为 2，concrete GIR schema 为 1。
 
 成功产物不允许错误类型、未解析定义、未物化的早期 comptime 值或悬空 arena ID。GIR 可以保存已经验证的 `LateConstRef`，但它必须指向当前闭世界成功的 late 结果表，不表示延迟执行用户代码；进入 LIR 前必须物化为标量常量或明确的类型 metadata relocation。每个改写 pass 必须在调试构建中运行局部 verifier；跨阶段边界必须运行完整 verifier。
 
@@ -161,7 +161,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 ### generic GIR 构造
 
-`BuildGenericGir`（query 11，当前 schema 2，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#开发接口)）。差异诊断为 `E0055`。
+`BuildGenericGir`（query 11，当前 schema 3，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#开发接口)）。差异诊断为 `E0055`。
 
 构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列)` 复用入口。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
 
@@ -171,7 +171,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 构造期按 [传递](../spec/passing.md) 把赋值、参数、返回、模式绑定、聚合字段、`dyn Any` 擦除与 channel send 展开为 `ValueAction` / `CowSnapshot` / `ResourceAction` / `Assign`，不另造平行 IR。位值发 `ValueAction::Copy` + `ValueCopy`；身份句柄发 `ValueAction::Copy` + `Use(Copy)`；`string` / `ByteBuffer` / `Bytes` 发 `CowSnapshot`；`ResourceCell` 在覆盖已写入的非返回槽时先 `ReleaseLease` 再 `AcquireLease`。调用实参先拷到临时槽再 `MoveInternal`，避免二次拷和把 lease 误交给 callee。`StorageDead` 前对 resource / 未知类别的用户与参数槽 `ReleaseLease`；返回槽不在 callee 内释放。分析不确定的泛型参数走 Copy + CowSnapshot + AcquireLease。超过 64 字节的按值位结构体记入 `GirBody.large_copies`，query 外按属性求 `large_copy`（`E0056`，默认 warn；`deny`/`forbid` 使 Frontend 失败且无镜像）。
 
-管线为 `BuildGenericGir` → `mono` → `late` → `attach_fragments` → `WholeProgramAnalysis`（schema 5，`analysis_semantics_revision = 5`）→ `EscapeAndPlacement`（query **29**，schema 1，域 `gugu-escape-placement-v1`）→ `PublicFunctionSummary`。placement 只记录、不改写 CFG。分析使用放置前的 GIR 指纹，避免循环。`GirWorldV1` schema **2** 携带 `PlacementWorldV1`；world 指纹域为 `gugu-gir-world-v2`。未逃逸槽为 Stack；`address_taken` 且引用导出时按 publish / foreign / 其它分别选 SharedHeap / Pinned / LocalHeap。分配点无私有证明不得选 `TurnRegion`；unknown / alias / resource / foreign / escape / publish 走 LocalHeap 或 SharedHeap。`TurnRegion` 要求 `Proved` 且无 UNKNOWN|PUBLISH|FOREIGN|RESOURCE|ALIAS。纯位 `ValueAction` 不进入分析 heap/alias，以免破坏范围证明。
+管线为 `BuildGenericGir` → `mono` → `late` → `attach_fragments` → `WholeProgramAnalysis`（schema 5，`analysis_semantics_revision = 5`）→ `EscapeAndPlacement`（query **29**，schema 1，域 `gugu-escape-placement-v1`）→ `PublicFunctionSummary`。placement 只记录、不改写 CFG。分析使用放置前的 GIR 指纹，避免循环。`GirWorldV1` schema **3** 携带 `PlacementWorldV1`；world 指纹域为 `gugu-gir-world-v3`。未逃逸槽为 Stack；`address_taken` 且引用导出时按 publish / foreign / 其它分别选 SharedHeap / Pinned / LocalHeap。分配点无私有证明不得选 `TurnRegion`；unknown / alias / resource / foreign / escape / publish 走 LocalHeap 或 SharedHeap。`TurnRegion` 要求 `Proved` 且无 UNKNOWN|PUBLISH|FOREIGN|RESOURCE|ALIAS。纯位 `ValueAction` 不进入分析 heap/alias，以免破坏范围证明。
 
 `ImagePlan` 增加 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count`、`placement-fingerprint`。`-Zdump-gir` 打印 ValueAction / ResourceAction / CowSnapshot 与 placement 表。堆装箱改写与 monomorphic GIR 替换尚未物化。
 
@@ -222,6 +222,10 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 每个 caller的增长预算由 profile的 code-size budget与 `max(original_cost * 20 / 100, 256)` 两者共同限制。只对 pass 开始时存在的调用点按 source scope、block ID、statement index和 callee `MonoKey` 排序遍历；候选展开后预计累计增长不超过全部预算才内联，否则保留。新暴露调用点留给其 callee自身已经缓存的优化 body，不在本 caller重复开第二轮，保证管线终止且并行编译不改变结果。
 
 `MarkMandatoryStatepointsAndStackChecks` 只标记真正可能发布/挂起 context 的位置：显式 `safepoint_poll`/`yield`、park/suspend、普通/dirty `ForeignBridge`交接、stack growth、allocation/refill slow path、runtime lock acquire的 contention edge和其它直接进入 GC/runtime scheduler的 slow path。每个可能在被调方 entry `StackCheck` 进入 slow path的 managed call仍必须保留 caller `CallReturn` map，但调用点本身不读取 poll word。函数 prologue先保留抽象 `StackCheck`；只有 legalized LIR最终分类为 `PollFreeLeaf` 时才能删除。marker包围的 runtime临界区禁止插入 statepoint；循环、长直线路径和无检查 leaf调用所需的额外 poll统一在全部 loop transformation完成后由 LIR预算 pass放置，GIR optimizer不得固定逐 backedge策略。
+
+#### 管线实现边界
+
+步骤 1–4 在 generic GIR 构造、`ScopedView`/`NoSafepointRegion` 展开与值传递 lowering 中完成；步骤 10 由 `EscapeAndPlacement` 完成；步骤 12–15 在 GIR→LIR lowering 中完成。步骤 5–9、11 由 `gir::pass` 的固定管线驱动，顺序固定为 `Inline`、`SimplifyCfg`、`SparseConditionalConstants`、`CopyPropagationAndGvn`、`BoundsCheckElimination`、`CowAndResourceElision`，禁止运行时重排；每跑一个 pass 立即运行 `ConcreteBody` 与 GIR verifier，失败为 `E0055`。管线 revision 与 pass 名单进入前端 action key，`-Zdump-gir` 头部打印 `gir-passes`、`inline-count` 与 `checks-elided`。当前 `Inline` 只展开「无参数、无 cleanup、单出口、语句为纯标量赋值」的直接调用；参数传递、投影与跨体作用域复制仍保留为调用，完整展开由后端阶段的内联器承担。`BoundsCheckElimination` 只在 `AnalysisWorldV1.proofs` 为 `Proved` 时把检查分支改为不可达并交给 `SimplifyCfg` 删除。
 
 ## LIR
 
@@ -325,6 +329,8 @@ LIR 构造后按下列顺序运行：
 
 任何 pass 都不得删除一个仍可能触发调度或 GC 的 safepoint，不得把 GC provenance 降为 `Raw` 以逃避栈图，也不得把 panic 条件变成未定义行为。浮点优化不使用 reassociation、`NaN` 假设、flush-to-zero 或 fast-math。
 
+`LowerTargetAbi` 与 `LegalizeX86_64` 当前是校验 pass：它们断言调用/返回 ABI 形态（`by_value`/`sret` 参数编号、`ForeignCall` mode、`TailCall` 资格）与「无 i128/聚合普通 value、无无编码操作、`V128` lane 合法且无 pointer provenance、原子约束成立」，不写回新语义；后端指令选择阶段在同一位置替换为真正的 ABI lowering 与机器合法化。
+
 `CanonicalizeLoops` 只把可证明有限 trip count、单 latch、固定非零 step和可比较终点的 natural loop标为 counted loop。任何 loop pass都不得把 backedge引入 `NoSafepointRegion`、复制 region marker或把 operation移入/移出 region。`LoopVersioningAndUnswitching` 与 `LoopVectorizationAndUnrolling` 在 compiler budget poll尚不存在时完成其它会改变循环 trip count、CFG cycle、vector factor或 unroll factor的变换；只有依赖、alias、panic/effect顺序与整数/浮点语义都证明等价时才能变换，浮点归约不能为向量化重关联。vectorizer使用目标 cost model拒绝保守 legalized单次迭代可能超过 `POLL_BUDGET` 的 factor组合。
 
 budget poll放置后，除 `LowerPollFastPaths`、critical-edge split和不跨 poll的局部 instruction selection外，后续 pass不得再改变循环覆盖范围或把用户操作移过 poll。mandatory statepoint和用户显式 `safepoint_poll()`保持原语义位置；compiler budget poll不是用户可观察事件，放置 pass可以 hoist、sink、合并或替换为 outer-chunk poll，但必须保持下面的路径预算、stack map和 effect边界不变量。
@@ -376,7 +382,7 @@ LIR verifier 至少检查：
 
 release 编译器在进入代码生成前也必须运行完整 verifier。验证失败属于编译器内部错误并停止产出镜像，不能降级成保守机器码继续运行。
 
-`BuildLir`（query 15）按具体实例键、GIR/布局、late、placement 与目标指纹隔离缓存。构造结果与缓存恢复都必须经过同一结构 verifier，只有校验凭据能够进入 backend/image plan；失败诊断为 `E0057`。此构造边界验证 SSA、Mem、source scope、指针来源、原子序与 region/barrier，不冒充 target legalization、预算化 poll、寄存器分配或机器码联合校验。固定优化管线的每个后续边界继续承担其新增不变量。
+`BuildLir`（query 15，schema 2）按具体实例键、GIR/布局、late、placement 与目标指纹隔离缓存。构造结果与缓存恢复都必须经过同一结构 verifier，只有校验凭据能够进入 backend/image plan；失败诊断为 `E0057`。此构造边界验证 SSA、Mem、source scope、指针来源、原子序与 region/barrier，不冒充 target legalization、预算化 poll、寄存器分配或机器码联合校验。固定优化管线在 world 级确定性运行、不写入该缓存；冷/热编译必须得到相同的 `dump_lir` 与 `lir_fingerprint`，每个 pass 之后都运行完整 verifier。
 
 ## IR dump
 

@@ -8,10 +8,12 @@ pub(super) fn world(world: &World) -> String {
     let mut output = String::new();
     writeln!(
         output,
-        "LIR v{} target={} fingerprint={}",
+        "LIR v{} target={} fingerprint={} optimization-revision={} poll-budget={}",
         world.schema,
         world.target,
-        blake3::Hash::from(world.fingerprint).to_hex()
+        blake3::Hash::from(world.fingerprint).to_hex(),
+        crate::lir::pass::policy::PASS_PIPELINE_REVISION,
+        crate::lir::pass::policy::POLL_BUDGET
     )
     .expect("写入 String");
     for body in &world.bodies {
@@ -23,6 +25,14 @@ pub(super) fn world(world: &World) -> String {
         )
         .expect("写入 String");
         writeln!(output, "  signature {:?}", body.signature).expect("写入 String");
+        writeln!(
+            output,
+            "  poll-summary entry_stack_check={} poll_free_cost={} has_poll_free_cycle={}",
+            body.poll_summary.entry_stack_check,
+            body.poll_summary.poll_free_cost,
+            body.poll_summary.has_poll_free_cycle
+        )
+        .expect("写入 String");
         for (index, slot) in body.stack_slots.iter().enumerate() {
             writeln!(
                 output,
@@ -74,6 +84,12 @@ pub(super) fn world(world: &World) -> String {
                 if instruction.op.fence() {
                     output.push_str(" fence");
                 }
+                write!(
+                    output,
+                    " poll-cost={}",
+                    instruction.op.poll_cost_with(&body.assembly)
+                )
+                .expect("写入 String");
                 writeln!(
                     output,
                     " scope={} source={}:{}-{}",

@@ -1,12 +1,21 @@
+use super::pass::{
+    self, LIR_PASS_ORDER, LirPass, barriers, constants,
+    policy::{OptimizationPolicyV1, PASS_PIPELINE_REVISION, POLL_BUDGET},
+    poll,
+    rewrite::Editor,
+};
 use super::{
     body::{self, Body, Op, Provenance, Terminator, Type, ValueId, ValueType, range},
     verify,
 };
 use crate::{Compilation, CompileRequest, Compiler, DiagnosticCode, TargetName};
+use std::num::NonZeroU32;
 
 const SSA: &str = include_str!("fixtures/ssa.gg");
 const CONCRETE: &str = include_str!("fixtures/concrete.gg");
 const EFFECTS: &str = include_str!("fixtures/effects.gg");
+const POLL: &str = include_str!("fixtures/poll.gg");
+const OPTIMIZE: &str = include_str!("fixtures/optimize.gg");
 
 fn compile(source: &str) -> Compilation {
     let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -186,15 +195,21 @@ fn managed_store_requires_its_hybrid_barrier() {
 
 #[test]
 fn missing_safepoint_and_unclosed_region_are_rejected() {
-    let compilation = compile("fn main() {}");
+    // 带参数的叶函数不会被 GIR 内联；这里用带调用的非叶函数保留该记录。
+    let compilation = compile("fn helper(value: int) int { value }\nfn main() { _ = helper(1) }");
     let mut body = named(&compilation, "main").clone();
-    body.instructions[0].safepoint = None;
+    let stack_check = body
+        .instructions
+        .iter()
+        .position(|instruction| matches!(instruction.op, Op::StackCheck))
+        .expect("入口必须保留 StackCheck");
+    body.instructions[stack_check].safepoint = None;
     rejected(&compilation, body);
     let mut body = named(&compilation, "main").clone();
     body.no_safepoint_regions
         .push(crate::frontend::gir::body::NoSafepointReason::RootPublish);
-    body.instructions[0].op = Op::NoSafepointBegin(0);
-    body.instructions[0].safepoint = None;
+    body.instructions[stack_check].op = Op::NoSafepointBegin(0);
+    body.instructions[stack_check].safepoint = None;
     body.safepoints.clear();
     rejected(&compilation, body);
 }
@@ -218,6 +233,212 @@ fn cached_lir_matches_fresh_output_and_action_identity() {
     assert_ne!(cold.lir_fingerprint(), changed.lir_fingerprint());
 }
 
+#[test]
+fn lir_pass_order_is_fixed() {
+    assert_eq!(
+        LIR_PASS_ORDER,
+        &[
+            LirPass::VerifySsaAndMemory,
+            LirPass::CanonicalizeCfg,
+            LirPass::SparseConditionalConstants,
+            LirPass::AlgebraicSimplification,
+            LirPass::GlobalValueNumbering,
+            LirPass::DeadStoreAndDeadValueElimination,
+            LirPass::CanonicalizeLoops,
+            LirPass::LoopInvariantCodeMotion,
+            LirPass::StrengthReduction,
+            LirPass::LoopVersioningAndUnswitching,
+            LirPass::LoopVectorizationAndUnrolling,
+            LirPass::LowerAllocationAndBarrierFastPaths,
+            LirPass::LowerTargetAbi,
+            LirPass::LegalizeX86_64,
+            LirPass::ClassifyPollFreeLeafAndPlaceBudgetedPolls,
+            LirPass::LowerPollFastPaths,
+            LirPass::PrepareRegisterAllocation,
+        ]
+    );
+    assert_eq!(PASS_PIPELINE_REVISION, 1);
+    assert_eq!(POLL_BUDGET, 4096);
+}
+
+/// 用户可观察效果的多重集合；poll 与纯计算不属于可观察效果。
+fn effect_signature(body: &Body) -> Vec<String> {
+    body.instructions
+        .iter()
+        .filter_map(|instruction| match &instruction.op {
+            Op::Load(access) if access.volatile => Some("volatile-load".to_owned()),
+            Op::Store(access) if access.volatile => Some("volatile-store".to_owned()),
+            Op::Atomic { op, .. } => Some(format!("atomic-{op:?}")),
+            Op::ForeignCall(_) => Some("foreign-call".to_owned()),
+            Op::Call(_) => Some("call".to_owned()),
+            Op::TrapIf => Some("trap".to_owned()),
+            Op::GcWriteBarrier { .. } | Op::GcWriteBarrierReserved { .. } => {
+                Some("barrier".to_owned())
+            }
+            Op::InlineAsm(_) => Some("asm".to_owned()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn pipeline_preserves_observable_effects() {
+    let compilation = compile(EFFECTS);
+    let body = named(&compilation, "main").clone();
+    let before = effect_signature(&body);
+    assert!(
+        before.iter().any(|effect| effect == "volatile-store"),
+        "fixture 必须包含可观察效果：{before:?}"
+    );
+    let mut bodies = vec![body];
+    pass::optimize_world(
+        &mut bodies,
+        compilation.hir.as_ref().unwrap().module(),
+        &crate::target::baseline_cost_profile(),
+    )
+    .expect("固定管线必须通过每个 pass 后的结构 verifier");
+    assert_eq!(effect_signature(&bodies[0]), before);
+    verify::verify(&bodies[0], compilation.hir.as_ref().unwrap().module())
+        .expect("优化后的 LIR 必须通过结构 verifier");
+}
+
+#[test]
+fn algebraic_simplification_preserves_wrapping_and_division() {
+    let compilation = compile(
+        "fn identity(x: int) int { let a = x + 0\n let b = a - 0\n return b }\nfn divide(y: int) int = y / 2 + y % 2\nfn main() { _ = identity(7)\n _ = divide(9) }",
+    );
+    let body = named(&compilation, "identity").clone();
+    let expected = interpret(&body, &[7]);
+    let mut editor = Editor::new(body);
+    constants::algebraic_simplify(&mut editor).expect("代数化简");
+    let simplified = editor.finish().expect("finish");
+    assert_eq!(interpret(&simplified, &[7]), expected);
+
+    let mut editor = Editor::new(named(&compilation, "divide").clone());
+    constants::algebraic_simplify(&mut editor).expect("代数化简");
+    let divide = editor.finish().expect("finish");
+    assert!(
+        divide
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, Op::Integer(body::IntOp::DivSigned))),
+        "有符号除法不得被消除"
+    );
+    assert!(
+        divide
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, Op::Integer(body::IntOp::RemSigned))),
+        "取余不得被消除"
+    );
+}
+
+#[test]
+fn infinite_loop_gets_budgeted_poll() {
+    let compilation = compile(POLL);
+    let body = named(&compilation, "spin");
+    assert!(
+        body.instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, Op::SafepointPoll { .. })),
+        "无限循环必须被 poll 切断"
+    );
+    assert!(poll::body_clean_cycle(body).is_none());
+    assert!(!body.poll_summary.has_poll_free_cycle);
+}
+
+#[test]
+fn counted_loop_strip_mining_has_poll_free_inner_loop() {
+    let compilation = compile(POLL);
+    let body = named(&compilation, "chunked");
+    let polls: Vec<_> = body
+        .instructions
+        .iter()
+        .filter(|instruction| matches!(instruction.op, Op::SafepointPoll { .. }))
+        .collect();
+    assert_eq!(polls.len(), 1, "内层必须 poll-free，只有外层每次 poll");
+    assert_eq!(
+        polls[0].op,
+        Op::SafepointPoll {
+            interval: NonZeroU32::new(1).expect("interval 非零"),
+        }
+    );
+    assert!(poll::body_clean_cycle(body).is_none());
+    assert!(poll::body_poll_free_cost(body) <= POLL_BUDGET);
+}
+
+#[test]
+fn small_counted_loop_stays_poll_free() {
+    let compilation = compile(
+        "fn small() int {\n let i = 0\n let total = 0\n while i < 3 {\n total = total + i\n i = i + 1\n }\n return total\n}\nfn main() { _ = small() }",
+    );
+    let body = named(&compilation, "small");
+    assert!(
+        !body
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, Op::SafepointPoll { .. })),
+        "总成本不超预算的计数循环不得插 poll"
+    );
+    assert_eq!(interpret(body, &[]), vec![3]);
+}
+
+#[test]
+fn verifier_rejects_over_budget_poll_free_path() {
+    let compilation = compile(POLL);
+    let mut editor = Editor::new(named(&compilation, "spin").clone());
+    let poll_site = editor
+        .live_blocks()
+        .into_iter()
+        .find_map(|block| {
+            (0..editor.instruction_count(block))
+                .find(|index| {
+                    matches!(
+                        editor.instruction((block, *index)).op,
+                        Op::SafepointPoll { .. }
+                    )
+                })
+                .map(|index| (block, index))
+        })
+        .expect("无限循环必须被 poll 切断");
+    editor.remove_instruction(poll_site).expect("删除 poll");
+    let mut body = editor.finish().expect("finish");
+    super::uses::rebuild(&mut body);
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+        .expect_err("去掉 poll 后的 poll-free 环必须被拒绝");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+}
+
+#[test]
+fn action_key_is_sensitive_to_optimization_policy() {
+    let base = OptimizationPolicyV1::default();
+    let mut changed = base;
+    changed.vector_policy_revision = base.vector_policy_revision + 1;
+    assert_ne!(base.canonical_bytes(), changed.canonical_bytes());
+}
+
+#[test]
+fn optimize_fixture_preserves_results_after_pipeline() {
+    let compilation = compile(OPTIMIZE);
+    assert_eq!(interpret(named(&compilation, "choose"), &[1]), vec![7]);
+    assert_eq!(interpret(named(&compilation, "choose"), &[0]), vec![9]);
+    assert_eq!(interpret(named(&compilation, "countdown"), &[4]), vec![10]);
+}
+
+#[test]
+fn slice_index_lowers_with_element_type() {
+    // 回归：`v[i]` 的 place 类型必须先去引用再取元素，否则 LIR 会报分量不匹配。
+    let compilation =
+        compile("fn g(v: &[int], i: int) int = v[i]\nfn main() { let a = [0; 8]\n _ = g(&a, 1) }");
+    let body = named(&compilation, "g");
+    assert!(
+        body.instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, Op::Load(_))),
+        "下标读取必须 lowering 成一次 Load"
+    );
+}
+
 /// 仅解释 fixture 中的整数 SSA 子集，检验循环回边与合流的可观察结果。
 fn interpret(body: &Body, arguments: &[u64]) -> Vec<u64> {
     let mut values = vec![0u64; body.values.len()];
@@ -233,7 +454,10 @@ fn interpret(body: &Body, arguments: &[u64]) -> Vec<u64> {
                 .map(|value| values[value.index()])
                 .collect();
             let value = match instruction.op {
-                Op::StackCheck => continue,
+                Op::StackCheck
+                | Op::SafepointPoll { .. }
+                | Op::NoSafepointBegin(_)
+                | Op::NoSafepointEnd(_) => continue,
                 Op::IConst(value) => value,
                 Op::Integer(body::IntOp::Add) => args[0].wrapping_add(args[1]),
                 Op::Integer(body::IntOp::Sub) => args[0].wrapping_sub(args[1]),

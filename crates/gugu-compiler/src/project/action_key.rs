@@ -22,6 +22,7 @@ pub struct ActionInputs {
     analysis_world: [u8; 32],
     generic_gir: [u8; 32],
     lir: [u8; 32],
+    optimization_policy: Vec<u8>,
     public_summaries: BTreeMap<String, [u8; 32]>,
     build_inputs: BTreeMap<String, [u8; 32]>,
     build_outputs: BTreeMap<String, [u8; 32]>,
@@ -152,6 +153,11 @@ impl ActionInputs {
         self.lir = fingerprint;
     }
 
+    /// 设置固定优化管线与 poll 预算的规范编码。
+    pub fn set_optimization_policy(&mut self, bytes: impl AsRef<[u8]>) {
+        self.optimization_policy = bytes.as_ref().to_vec();
+    }
+
     /// 计算域隔离的 BLAKE3 action key。
     pub fn key(&self) -> ActionKey {
         let mut canonical = Vec::new();
@@ -174,6 +180,7 @@ impl ActionInputs {
         encode_bytes(&mut canonical, &self.analysis_world);
         encode_bytes(&mut canonical, &self.generic_gir);
         encode_bytes(&mut canonical, &self.lir);
+        encode_bytes(&mut canonical, &self.optimization_policy);
         encode_digest_map(&mut canonical, &self.public_summaries);
         encode_digest_map(&mut canonical, &self.build_inputs);
         encode_digest_map(&mut canonical, &self.build_outputs);

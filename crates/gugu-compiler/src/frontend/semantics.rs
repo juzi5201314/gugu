@@ -52,6 +52,7 @@ pub(crate) fn check(
         analysis::AnalysisWorldV1,
         super::mono::MonoWorldV1,
         super::gir::GirWorldV1,
+        super::gir::pass::GirPassStats,
     ),
     Vec<Diagnostic>,
 > {
@@ -108,6 +109,7 @@ pub(crate) fn check(
     mono_world.public_summaries = summaries;
     let mut gir = gir;
     gir.concrete = super::gir::concrete::build(&context, &gir, &mono_world)?;
+    let gir_stats = super::gir::pass::run(&mut gir, hir.module(), &analysis_world)?;
     gir.fingerprint = super::gir::world_fingerprint(
         &gir.bodies,
         &gir.fragments,
@@ -123,5 +125,6 @@ pub(crate) fn check(
         analysis_world,
         mono_world,
         gir,
+        gir_stats,
     ))
 }

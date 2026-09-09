@@ -28,6 +28,7 @@ impl TargetName {
 
     /// 返回目标的不可变 descriptor。
     pub fn descriptor(self) -> TargetDescriptor {
+        let cost_profile = baseline_cost_profile();
         match self {
             Self::X86_64Linux => TargetDescriptor {
                 name: self,
@@ -36,6 +37,7 @@ impl TargetName {
                 object_format: ObjectFormat::Elf64,
                 pointer_width: 64,
                 rt0: Rt0Kind::LinuxSyscall,
+                cost_profile,
             },
             Self::X86_64Windows => TargetDescriptor {
                 name: self,
@@ -44,6 +46,7 @@ impl TargetName {
                 object_format: ObjectFormat::Pe32Plus,
                 pointer_width: 64,
                 rt0: Rt0Kind::WindowsThinImport,
+                cost_profile,
             },
         }
     }
@@ -155,4 +158,49 @@ pub struct TargetDescriptor {
     pub pointer_width: u8,
     /// rt0 边界。
     pub rt0: Rt0Kind,
+    /// 后端成本基线，供内联、循环与向量化策略消费。
+    pub cost_profile: BackendCostProfile,
+}
+
+/// 后端成本基线：内联与向量化策略共用的校准输入。
+///
+/// `baseline_digest` 绑定成本模型的来源；未校准的目标使用
+/// [`baseline_cost_profile`] 给出的保守取值。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackendCostProfile {
+    /// 成本模型基线的内容身份。
+    pub baseline_digest: [u8; 32],
+    /// 热路径内联的字节上界。
+    pub inline_hot_bytes: u32,
+    /// 冷路径内联的字节上界。
+    pub inline_cold_bytes: u32,
+    /// 单个函数体的代码尺寸预算。
+    pub code_size_budget: u32,
+    /// 一次调用允许的溢出槽数量。
+    pub max_spill_slots: u32,
+    /// 一次调用的溢出字节上界。
+    pub max_spill_bytes_per_call: u32,
+    /// 允许的重载存储数量。
+    pub max_reload_stores: u32,
+    /// 允许的吞吐回退百分比。
+    pub regression_percent: u16,
+    /// 后端是否已提供向量 lowering；未校准时为 `false`。
+    pub vector_lowering: bool,
+}
+
+/// 返回未校准目标共用的保守成本基线。
+pub fn baseline_cost_profile() -> BackendCostProfile {
+    let mut hasher = blake3::Hasher::new_derive_key("gugu-backend-cost-baseline-v1");
+    hasher.update(b"x86_64-v1");
+    BackendCostProfile {
+        baseline_digest: *hasher.finalize().as_bytes(),
+        inline_hot_bytes: 256,
+        inline_cold_bytes: 128,
+        code_size_budget: 4096,
+        max_spill_slots: 64,
+        max_spill_bytes_per_call: 512,
+        max_reload_stores: 256,
+        regression_percent: 5,
+        vector_lowering: false,
+    }
 }

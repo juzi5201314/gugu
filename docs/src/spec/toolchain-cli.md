@@ -76,7 +76,11 @@
 `type-universe-fingerprint`、`late-constant-count` 和 `late-constants-fingerprint`，
 以及 `gir-body-count`、`gir-block-count`、`gir-statement-count`、`gir-fingerprint`、
 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 和
-`placement-fingerprint`。fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的
+`placement-fingerprint`。`build`/`check` 的成功计划还包含 LIR 与固定优化管线的
+`lir-body-count`、`lir-block-count`、`lir-instruction-count`、`lir-memory-operation-count`、
+`lir-safepoint-count`、`lir-fingerprint`、`optimization-revision`、`poll-budget`、
+`poll-count`、`poll-free-leaf-count`、`poll-summary-fingerprint` 与
+`runtime-checks-elided-count`。fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的
 编译计划，不代表最终可执行镜像已经写出，也不承诺 TypeId 跨镜像稳定。
 `large_copy` 默认警告仍可返回成功计划；`#[deny(large_copy)]` / `#[forbid(large_copy)]`
 使检查失败且 `image-plan` 为 `null`。

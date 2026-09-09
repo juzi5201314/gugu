@@ -203,18 +203,24 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
 }
 
 fn forbidden(op: &Op) -> bool {
-    op.safepoint_kind().is_some()
-        || matches!(
-            op,
-            Op::Call(_)
-                | Op::ForeignCall(_)
-                | Op::TrapIf
-                | Op::InlineAsm(_)
-                | Op::BarrierReserve(_)
-                | Op::RegionPublish
-                | Op::RegionReset
-                | Op::ForwardSharedHandle
-        )
+    match op {
+        Op::GcWriteBarrierReserved { .. } => false,
+        Op::Call(call) | Op::ForeignCall(call) if call.poll_free_leaf => false,
+        _ => {
+            op.safepoint_kind().is_some()
+                || matches!(
+                    op,
+                    Op::Call(_)
+                        | Op::ForeignCall(_)
+                        | Op::TrapIf
+                        | Op::InlineAsm(_)
+                        | Op::BarrierReserve(_)
+                        | Op::RegionPublish
+                        | Op::RegionReset
+                        | Op::ForwardSharedHandle
+                )
+        }
+    }
 }
 
 fn view_call(

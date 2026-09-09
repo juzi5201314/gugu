@@ -31,6 +31,7 @@ impl Builder<'_> {
             captures_arguments,
             by_value: Vec::new(),
             sret: None,
+            poll_free_leaf: false,
         };
         Ok(self.emit(
             Op::Call(call),
@@ -163,6 +164,7 @@ impl Builder<'_> {
                     captures_arguments: false,
                     by_value: Vec::new(),
                     sret: None,
+                    poll_free_leaf: false,
                 };
                 let normal = self.fresh(self.source.clone(), true);
                 self.invoke(call, &args, normal, self.target(*unwind))?;
@@ -262,6 +264,7 @@ impl Builder<'_> {
             captures_arguments: false,
             by_value,
             sret,
+            poll_free_leaf: false,
         };
         let values = if let Some(unwind) = unwind {
             let continuation = self.fresh(

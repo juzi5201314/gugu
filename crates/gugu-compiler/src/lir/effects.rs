@@ -1,6 +1,9 @@
 //! effect 分类唯一归属；构造器与 verifier 共用，不能由任意指令自报无副作用。
 use super::body::{Call, Op, RuntimeCall, SafepointKind};
+use super::pass::policy::POLL_BUDGET;
 use crate::frontend::gir::body::CallKind;
+use crate::frontend::hir::Assembly;
+use crate::frontend::semantics::assembly::AssemblyContext;
 
 impl Op {
     pub(crate) fn has_memory(&self) -> bool {
@@ -76,6 +79,108 @@ impl Op {
                 Some(SafepointKind::CallReturn)
             }
             _ => None,
+        }
+    }
+
+    /// 固定 poll 成本表；权重与 [`super::pass::policy::POLL_COST_REVISION`] 绑定。
+    ///
+    /// 成本表本体；只读取内联汇编模板与上下文。
+    pub(crate) fn poll_cost_with(&self, assembly: &[Assembly]) -> u32 {
+        match self {
+            Self::IConst(_)
+            | Self::FConst(_)
+            | Self::SymbolAddr(_)
+            | Self::StackAddr(_)
+            | Self::PtrOffset
+            | Self::Integer(_)
+            | Self::Float(_)
+            | Self::Compare { .. }
+            | Self::Convert(_)
+            | Self::Vector(_)
+            | Self::Select
+            | Self::TrapIf
+            | Self::ScopedViewBegin { .. }
+            | Self::ScopedViewEnd { .. }
+            | Self::SharedAccessBegin { .. }
+            | Self::SharedAccessEnd { .. }
+            | Self::NoSafepointBegin(_)
+            | Self::NoSafepointEnd(_)
+            | Self::CoverageCounter(_)
+            | Self::SafepointPoll { .. }
+            | Self::StackCheck => 1,
+            Self::Load(_) | Self::Store(_) => 4,
+            Self::Memcpy { .. } | Self::Memmove { .. } | Self::Memset { .. } => 8,
+            Self::Atomic { op, .. } => {
+                if *op == super::body::AtomicOp::Fence {
+                    16
+                } else {
+                    8
+                }
+            }
+            Self::BarrierReserve(_)
+            | Self::GcWriteBarrier { .. }
+            | Self::GcWriteBarrierReserved { .. } => 8,
+            Self::GcAlloc { .. }
+            | Self::RegionAlloc { .. }
+            | Self::PromoteManaged
+            | Self::RegionPublish
+            | Self::RegionReset
+            | Self::MarkTicketBatch
+            | Self::EdgeDeltaBatch
+            | Self::ResolveSharedHandle
+            | Self::ForwardSharedHandle
+            | Self::DecodeCompressedRef
+            | Self::CoroutineSwitch
+            | Self::Park
+            | Self::Ready => 16,
+            Self::Call(call) | Self::ForeignCall(call) => match call.kind {
+                CallKind::ForeignLeaf { .. } => POLL_BUDGET,
+                _ => 5,
+            },
+            Self::InlineAsm(index) => {
+                let Some(assembly) = usize::try_from(*index)
+                    .ok()
+                    .and_then(|index| assembly.get(index))
+                else {
+                    return POLL_BUDGET;
+                };
+                if assembly.context != AssemblyContext::Managed {
+                    return POLL_BUDGET;
+                }
+                let lines = assembly
+                    .template
+                    .lines()
+                    .filter(|line| !line.trim().is_empty())
+                    .count();
+                (u32::try_from(lines)
+                    .expect("汇编行数适配 u32")
+                    .saturating_mul(4))
+                .clamp(1, 64)
+            }
+        }
+    }
+
+    /// 切断点判定；显式 poll、分配、屏障、调用、挂起与入口 `StackCheck` 由
+    /// `safepoint_kind` 覆盖；`ForeignLeaf`、native 汇编与 `NoSafepointBegin` 另行切断。
+    pub(crate) fn poll_cut_point_with(&self, assembly: &[Assembly]) -> bool {
+        if let Self::Call(call) | Self::ForeignCall(call) = self
+            && call.poll_free_leaf
+        {
+            return false;
+        }
+        if self.safepoint_kind().is_some() {
+            return true;
+        }
+        match self {
+            Self::Call(call) | Self::ForeignCall(call) => {
+                matches!(call.kind, CallKind::ForeignLeaf { .. })
+            }
+            Self::InlineAsm(index) => usize::try_from(*index)
+                .ok()
+                .and_then(|index| assembly.get(index))
+                .is_none_or(|assembly| assembly.context != AssemblyContext::Managed),
+            Self::NoSafepointBegin(_) => true,
+            _ => false,
         }
     }
 }

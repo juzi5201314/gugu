@@ -182,8 +182,8 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
         };
         if !valid {
             return Err(invalid(&format!(
-                "LIR 指令的类型、arity 或 effect 不合法：{:?}",
-                instruction.op
+                "LIR 指令的类型、arity 或 effect 不合法：{:?} args={:?} results={:?}",
+                instruction.op, args, results
             )));
         }
     }

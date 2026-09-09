@@ -209,12 +209,13 @@
   - 依赖：阶段 26、27。
   - 实现 block parameter SSA、Mem token、封闭 LIR 指令集、provenance、调用/原子/volatile/屏障/safepoint effect、source scope 和结构 verifier。
   - 验收：每个可能内存操作都有正确 Mem 链；合流参数顺序确定；禁止悬空引用、越权 pointer provenance、非法 memory order、未闭合 region、缺失 barrier 和不合法 terminator。
-  - 接入证据：`BuildConcreteGir`（schema 1）把每个实例的操作树绑定到具体布局表、闭合实例键/动态槽与协议展开；`BuildLir`（query 15，schema 1）按实例键、GIR/布局、late、placement 与目标指纹缓存，构造结果与缓存恢复都经同一 `verify`，失败为 `E0057`。`Compilation` 暴露 `lir`/`dump_lir`/`lir_fingerprint`，`ActionInputs` 收录 `lir` 指纹，backend 与 `image-plan` JSON 消费 body/block/指令/内存操作/safepoint 计数。修正了 LIR 暴露的归属层缺口：变参尾物化、内建 `Clone` 与算术 impl 展开、union 聚合、`?` 载荷提取、static/const 初始化返回类型、接收者自动借用/解引用、string 拼接与 `TypeId.name()` 运行期名称。348 项工作区测试全部通过（阶段 28 新增 10 项，含 9 项非法 LIR 拒绝用例），fmt/build 零 warning，mdBook 构建通过；Linux CLI `check`/`build` 接受含变参、迭代器、用户 `Try`/`Index`、union、裸指针构造引用与泛型算术的真实输入，`-Zdump-lir` 打印 Mem 链、provenance、scope 与 source。
+  - 接入证据：`BuildConcreteGir`（schema 1）把每个实例的操作树绑定到具体布局表、闭合实例键/动态槽与协议展开；`BuildLir`（query 15，schema 2）按实例键、GIR/布局、late、placement 与目标指纹缓存，构造结果与缓存恢复都经同一 `verify`，失败为 `E0057`。`Compilation` 暴露 `lir`/`dump_lir`/`lir_fingerprint`，`ActionInputs` 收录 `lir` 指纹，backend 与 `image-plan` JSON 消费 body/block/指令/内存操作/safepoint 计数。修正了 LIR 暴露的归属层缺口：变参尾物化、内建 `Clone` 与算术 impl 展开、union 聚合、`?` 载荷提取、static/const 初始化返回类型、接收者自动借用/解引用、string 拼接与 `TypeId.name()` 运行期名称。348 项工作区测试全部通过（阶段 28 新增 10 项，含 9 项非法 LIR 拒绝用例），fmt/build 零 warning，mdBook 构建通过；Linux CLI `check`/`build` 接受含变参、迭代器、用户 `Try`/`Index`、union、裸指针构造引用与泛型算术的真实输入，`-Zdump-lir` 打印 Mem 链、provenance、scope 与 source。
 
-- [ ] **阶段 29：实现固定优化管线与 poll budget**（复杂度：5）
+- [x] **阶段 29：实现固定优化管线与 poll budget**（复杂度：5）
   - 依赖：阶段 23、28。
   - 按 GIR/LIR 规范实现常量/复制传播、CFG、边界消除、循环、逃逸、placement、COW、defer、vectorizer、poll placement、NoSafepoint 和 barrier reserve pass。
   - 验收：pass 顺序不可任意交换；无限 managed 路径满足 safepoint 与 cost budget；优化不得移动用户可观察求值、cleanup、同步、GC barrier 或 FFI effect；所有 verifier 在每个 pass 后运行。
+  - 接入证据：`gir::pass` 与 `lir::pass` 各驱动一条固定顺序管线，枚举顺序即执行顺序、禁止运行时重排，每跑一个 pass 立即运行结构 verifier（GIR `E0055`、LIR `E0057`）。GIR 侧实现 `Inline`、`SimplifyCfg`、`SparseConditionalConstants`、`CopyPropagationAndGvn`、`BoundsCheckElimination`、`CowAndResourceElision`；LIR 侧实现 CFG 规范化、常量与代数化简、GVN、死存储/死值消除、循环规范化与 LICM、强度削减、版本化与反开关、展开与向量化、屏障预留、ABI 校验、poll 分类与预算化插点、寄存器分配准备。`PollSummary`、`BackendCostProfile`、`OptimizationPolicyV1` 与各 revision 进入前端 action key 与 `image-plan`；`-Zdump-gir` 打印 `gir-passes`/`inline-count`/`checks-elided`，`-Zdump-lir` 打印 `poll-summary` 与逐指令 `poll-cost`。计数循环按 strip mining 拆成「外层每次 poll、内层 poll-free」，无限与不可数循环按一次最大 cycle cost 计算 interval，总成本不超预算的计数循环保持 poll-free；可证明有界的 counted 环由 verifier 复核。测试覆盖固定 pass 顺序、可观察效果不变、代数化简保持环绕与除法、无限循环插点、strip mining 内层 poll-free、超预算 poll-free 环被拒、策略指纹敏感与内联展开；工作区测试全部通过，fmt/build 零 warning。
 
 ## 四、runtime 内存、调度与 GC
 

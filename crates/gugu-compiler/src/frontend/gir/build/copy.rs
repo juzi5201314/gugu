@@ -215,9 +215,11 @@ impl Builder<'_> {
                 | Projection::TupleField { field_ty, .. }
                 | Projection::OpaqueCast(field_ty) => *field_ty,
                 Projection::Deref => deref_ty(self.module, ty).unwrap_or(ty),
-                Projection::Index(_)
-                | Projection::ConstantIndex { .. }
-                | Projection::Subslice { .. } => element_ty(self.module, ty).unwrap_or(ty),
+                Projection::Index(_) | Projection::ConstantIndex { .. } => {
+                    let base = deref_ty(self.module, ty).unwrap_or(ty);
+                    element_ty(self.module, base).unwrap_or(ty)
+                }
+                Projection::Subslice { .. } => element_ty(self.module, ty).unwrap_or(ty),
                 Projection::Downcast(_) => ty,
             };
         }

@@ -32,6 +32,11 @@ pub(crate) struct BackendPlan {
     pub(crate) lir_memory_operation_count: u32,
     pub(crate) lir_safepoint_count: u32,
     pub(crate) lir_fingerprint: [u8; 32],
+    pub(crate) optimization_revision: u32,
+    pub(crate) poll_budget: u32,
+    pub(crate) poll_count: u32,
+    pub(crate) poll_free_leaf_count: u32,
+    pub(crate) poll_summary_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -78,5 +83,11 @@ pub(crate) fn plan(
             .expect("LIR Mem 数量适配 u32"),
         lir_safepoint_count: u32::try_from(lir.safepoints()).expect("LIR safepoint 数量适配 u32"),
         lir_fingerprint: lir.fingerprint(),
+        optimization_revision: lir.optimization_revision(),
+        poll_budget: lir.poll_budget(),
+        poll_count: u32::try_from(lir.poll_count()).expect("poll 数量适配 u32"),
+        poll_free_leaf_count: u32::try_from(lir.poll_free_leaf_count())
+            .expect("poll-free 叶数量适配 u32"),
+        poll_summary_fingerprint: lir.poll_summary_fingerprint(),
     })
 }

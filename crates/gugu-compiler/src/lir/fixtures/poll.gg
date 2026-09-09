@@ -1,0 +1,29 @@
+fn spin() {
+    loop { }
+}
+
+fn sum_to(count: int) int {
+    let index = 0
+    let total = 0
+    while index < count {
+        total = total + index
+        index = index + 1
+    }
+    return total
+}
+
+fn chunked() int {
+    let index = 0
+    let total = 0
+    while index < 1000000 {
+        total = total + index
+        index = index + 1
+    }
+    return total
+}
+
+fn main() {
+    _ = sum_to(1000000)
+    _ = chunked()
+    spin()
+}

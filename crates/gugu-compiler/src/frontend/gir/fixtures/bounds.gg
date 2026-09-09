@@ -1,0 +1,15 @@
+fn f(v: &[int], n: int) {
+    if v.len() > 10 {
+        for i in 0..n {
+            if i >= 2 {
+                break
+            }
+            _ = v[i]
+        }
+    }
+}
+
+fn main() {
+    let a = [0; 16]
+    f(&a, 20)
+}

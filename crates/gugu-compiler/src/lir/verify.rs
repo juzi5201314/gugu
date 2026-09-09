@@ -1,5 +1,6 @@
 //! release 与缓存恢复共用的结构闸门；不能依赖构造器的正确性。
 mod operations;
+mod poll;
 mod provenance;
 mod regions;
 
@@ -8,10 +9,19 @@ use super::body::{
     ValueId, id, range,
 };
 use super::invalid;
+use super::pass::graph::Graph;
 use crate::{Diagnostic, frontend::hir};
 use std::ops::Range;
 
 pub(crate) fn verify(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
+    verify_structure(body, module)?;
+    let graph = Graph::new(body)?;
+    poll::verify(body, &graph)?;
+    Ok(())
+}
+
+/// 结构不变量；poll 预算由 [`verify`] 在固定管线结束后追加检查。
+pub(crate) fn verify_structure(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
     structure(body, module)?;
     let graph = Graph::new(body)?;
     definitions(body, &graph)?;
@@ -304,110 +314,6 @@ pub(super) fn compatible(expected: super::body::ValueType, actual: super::body::
             ))
 }
 
-pub(super) struct Graph {
-    pub(super) order: Vec<BlockId>,
-    pub(super) instruction_blocks: Vec<BlockId>,
-    dominators: Vec<BlockId>,
-}
-impl Graph {
-    fn new(body: &Body) -> Result<Self, Diagnostic> {
-        let mut seen = vec![false; body.blocks.len()];
-        let mut postorder = Vec::new();
-        let mut stack = vec![(body.entry, false)];
-        while let Some((block, exiting)) = stack.pop() {
-            if exiting {
-                postorder.push(block);
-                continue;
-            }
-            if std::mem::replace(&mut seen[block.index()], true) {
-                continue;
-            }
-            stack.push((block, true));
-            edges(body, &body.blocks[block.index()].terminator, |edge| {
-                stack.push((body.edges[edge.index()].to, false))
-            });
-        }
-        if seen.iter().any(|seen| !seen) {
-            return Err(invalid("LIR 含有未连接入口的 block"));
-        }
-        postorder.reverse();
-        let mut rank = vec![0; body.blocks.len()];
-        for (index, block) in postorder.iter().enumerate() {
-            rank[block.index()] = index;
-        }
-        let mut dominators = vec![None; body.blocks.len()];
-        dominators[body.entry.index()] = Some(body.entry);
-        loop {
-            let mut changed = false;
-            for &block in postorder.iter().skip(1) {
-                let mut next = None;
-                for predecessor in
-                    &body.predecessors[range(&body.blocks[block.index()].predecessors)]
-                {
-                    let predecessor = body.edges[predecessor.index()].from;
-                    if dominators[predecessor.index()].is_none() {
-                        continue;
-                    }
-                    next = Some(match next {
-                        None => predecessor,
-                        Some(previous) => intersect(previous, predecessor, &dominators, &rank),
-                    });
-                }
-                if dominators[block.index()] != next {
-                    dominators[block.index()] = next;
-                    changed = true;
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-        let dominators = dominators
-            .into_iter()
-            .collect::<Option<Vec<_>>>()
-            .ok_or_else(|| invalid("支配树无法覆盖全部 block"))?;
-        let mut instruction_blocks = vec![body.entry; body.instructions.len()];
-        for (index, block) in body.blocks.iter().enumerate() {
-            for instruction in range(&block.instructions) {
-                instruction_blocks[instruction] = BlockId(id(index));
-            }
-        }
-        Ok(Self {
-            order: postorder,
-            instruction_blocks,
-            dominators,
-        })
-    }
-    pub(super) fn dominates(&self, dominator: BlockId, mut block: BlockId) -> bool {
-        loop {
-            if block == dominator {
-                return true;
-            }
-            let parent = self.dominators[block.index()];
-            if block == parent {
-                return false;
-            }
-            block = parent;
-        }
-    }
-}
-fn intersect(
-    mut left: BlockId,
-    mut right: BlockId,
-    dominators: &[Option<BlockId>],
-    rank: &[usize],
-) -> BlockId {
-    while left != right {
-        while rank[left.index()] > rank[right.index()] {
-            left = dominators[left.index()].expect("已求得支配块");
-        }
-        while rank[right.index()] > rank[left.index()] {
-            right = dominators[right.index()].expect("已求得支配块");
-        }
-    }
-    left
-}
-
 fn definitions(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
     let mut defined = vec![false; body.values.len()];
     let mut define = |value: ValueId, definition| -> Result<(), Diagnostic> {
@@ -503,7 +409,7 @@ fn dominates_use(body: &Body, graph: &Graph, value: ValueId, site: UseSite) -> b
             graph.dominates(block, use_block)
                 && match site {
                     UseSite::Instruction(use_instruction) if block == use_block => {
-                        instruction.0 < use_instruction.0
+                        instruction.0 < use_instruction.0 || block_independent(body, instruction)
                     }
                     _ => true,
                 }
@@ -521,6 +427,16 @@ fn dominates_use(body: &Body, graph: &Graph, value: ValueId, site: UseSite) -> b
             matches!(site, UseSite::Edge(edge) if edge == normal || result == results.end - results.start && edge == unwind)
         }
     }
+}
+
+fn block_independent(body: &Body, instruction: InstId) -> bool {
+    let instruction = &body.instructions[instruction.index()];
+    matches!(
+        instruction.op,
+        super::body::Op::IConst(_) | super::body::Op::FConst(_)
+    ) && instruction.arguments.is_empty()
+        && instruction.memory.is_none()
+        && instruction.safepoint.is_none()
 }
 
 fn memory(body: &Body) -> Result<(), Diagnostic> {

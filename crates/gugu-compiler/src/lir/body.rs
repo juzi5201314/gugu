@@ -6,7 +6,7 @@ use crate::frontend::gir::placement::PlacementKind;
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, ops::Range};
 
-pub(crate) const REVISION: u32 = 1;
+pub(crate) const REVISION: u32 = 2;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -365,6 +365,8 @@ pub(crate) struct Call {
     /// 按值聚合指针的参数编号、稳定 descriptor 与字节大小。
     pub(crate) by_value: Vec<(u32, [u8; 32], u64)>,
     pub(crate) sret: Option<(u32, u64, [u8; 32])>,
+    /// poll pass 分类出的 managed 直接叶调用；region verifier 与预算数据流消费。
+    pub(crate) poll_free_leaf: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -584,6 +586,17 @@ pub(crate) struct Environment {
     pub(crate) roots: Vec<(u64, Provenance)>,
 }
 
+/// 单个 body 的 poll 预算摘要；由 poll pass 写入，verifier 与预算数据流消费。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PollSummary {
+    /// 入口是否仍保留 `StackCheck`。
+    pub(crate) entry_stack_check: bool,
+    /// 从入口 `StackCheck` 之后起、沿任意路径的饱和 poll 成本。
+    pub(crate) poll_free_cost: u32,
+    /// 去掉 poll/statepoint/checked-entry 调用后的 CFG 是否仍含环。
+    pub(crate) has_poll_free_cycle: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Body {
     pub(crate) revision: u32,
@@ -612,6 +625,7 @@ pub(crate) struct Body {
     pub(crate) environments: Vec<Environment>,
     pub(crate) entry: BlockId,
     pub(crate) input_fingerprint: [u8; 32],
+    pub(crate) poll_summary: PollSummary,
 }
 
 impl Body {

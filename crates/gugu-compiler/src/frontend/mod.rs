@@ -63,6 +63,7 @@ pub(crate) struct FrontendOutput {
     pub(crate) analysis: analysis::AnalysisWorldV1,
     pub(crate) mono: mono::MonoWorldV1,
     pub(crate) gir: gir::GirWorldV1,
+    pub(crate) gir_stats: gir::pass::GirPassStats,
     pub(crate) lints: Vec<Diagnostic>,
 }
 
@@ -99,6 +100,7 @@ pub(crate) fn bootstrap(
             analysis: analysis::empty_world(),
             mono: mono::empty_world(),
             gir: gir::empty_world(),
+            gir_stats: gir::pass::GirPassStats::default(),
             lints: Vec::new(),
         }),
         SourceInput::Sources {
@@ -170,7 +172,7 @@ fn check_sources(
         )]);
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
-    let (semantics, types, registry, hir, analysis_world, mono_world, gir_world) =
+    let (semantics, types, registry, hir, analysis_world, mono_world, gir_world, gir_stats) =
         semantics::check(&modules, &names, source_map, cfg, entry_function, queries)
             .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     let lints = gir::large_copy_lints(&modules, &gir_world, source_map)
@@ -188,6 +190,7 @@ fn check_sources(
         analysis_world,
         mono_world,
         gir_world,
+        gir_stats,
         lints,
     ))
 }
@@ -292,6 +295,7 @@ fn frontend_output(
     analysis: analysis::AnalysisWorldV1,
     mono: mono::MonoWorldV1,
     gir: gir::GirWorldV1,
+    gir_stats: gir::pass::GirPassStats,
     lints: Vec<Diagnostic>,
 ) -> FrontendOutput {
     #[cfg(not(test))]
@@ -326,6 +330,7 @@ fn frontend_output(
         analysis,
         mono,
         gir,
+        gir_stats,
         lints,
     }
 }

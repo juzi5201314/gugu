@@ -1,0 +1,24 @@
+fn choose(flag: bool) int {
+    if flag {
+        return 7
+    }
+    return 9
+}
+
+fn countdown(count: int) int {
+    let total = 0
+    while count > 0 {
+        total = total + count
+        count = count - 1
+    }
+    return total
+}
+
+fn main() {
+    let a = choose(true)
+    let b = countdown(4)
+    let dead = 1 * 1 + 0
+    _ = a
+    _ = b
+    _ = dead
+}
