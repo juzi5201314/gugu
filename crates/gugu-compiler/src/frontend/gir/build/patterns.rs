@@ -135,7 +135,7 @@ impl Builder<'_> {
         ok: BlockId,
         fail: BlockId,
     ) -> Result<(), Diagnostic> {
-        let ty = self.locals[place.local.index()].ty;
+        let ty = self.place_ty(place);
         let expected = self.const_operand(ty, literal_value(literal));
         let cond = self.temp(self.primitives.bool_ty);
         self.assign(
@@ -162,7 +162,7 @@ impl Builder<'_> {
         ok: BlockId,
         fail: BlockId,
     ) -> Result<(), Diagnostic> {
-        let ty = self.locals[place.local.index()].ty;
+        let ty = self.place_ty(place);
         let ge = self.temp(self.primitives.bool_ty);
         let start = self.const_operand(ty, literal_value(start));
         self.assign(

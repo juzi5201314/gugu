@@ -220,7 +220,7 @@ fn dump_is_deterministic() {
     let first = dump_world(hir.module(), &gir);
     let second = dump_world(hir.module(), &gir);
     assert_eq!(first, second);
-    assert!(first.contains("gir-revision 2"));
+    assert!(first.contains("gir-revision 3"));
     assert!(first.contains("body owner=main"));
     assert!(first.contains("placement schema"));
 }
@@ -518,7 +518,7 @@ fn fixtures_lower_and_verify() {
             verify(hir.module(), body).unwrap();
         }
         let dump = dump_world(hir.module(), &gir);
-        assert!(dump.contains("gir-revision 2"));
+        assert!(dump.contains("gir-revision 3"));
         assert!(dump.contains("exit plan="));
     }
 }

@@ -106,6 +106,15 @@ pub(crate) fn check(
         queries,
     )?;
     mono_world.public_summaries = summaries;
+    let mut gir = gir;
+    gir.concrete = super::gir::concrete::build(&context, &gir, &mono_world)?;
+    gir.fingerprint = super::gir::world_fingerprint(
+        &gir.bodies,
+        &gir.fragments,
+        gir.hir_fingerprint,
+        &gir.placement,
+        &gir.concrete,
+    );
     Ok((
         checked,
         layouts,

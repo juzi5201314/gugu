@@ -26,6 +26,12 @@ pub(crate) struct BackendPlan {
     pub(crate) local_heap_count: u32,
     pub(crate) shared_heap_count: u32,
     pub(crate) placement_fingerprint: [u8; 32],
+    pub(crate) lir_body_count: u32,
+    pub(crate) lir_block_count: u32,
+    pub(crate) lir_instruction_count: u32,
+    pub(crate) lir_memory_operation_count: u32,
+    pub(crate) lir_safepoint_count: u32,
+    pub(crate) lir_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -33,6 +39,7 @@ pub(crate) fn plan(
     hir: &Validated,
     mono: &MonoWorldV1,
     gir: &GirWorldV1,
+    lir: &crate::lir::Validated,
     runtime_checks_elided_count: u32,
 ) -> Option<BackendPlan> {
     let module = hir.module();
@@ -64,5 +71,12 @@ pub(crate) fn plan(
         local_heap_count: placement.local_heap,
         shared_heap_count: placement.shared_heap,
         placement_fingerprint: gir.placement.fingerprint,
+        lir_body_count: u32::try_from(lir.bodies()).expect("LIR body 数量适配 u32"),
+        lir_block_count: u32::try_from(lir.blocks()).expect("LIR block 数量适配 u32"),
+        lir_instruction_count: u32::try_from(lir.instructions()).expect("LIR 指令数量适配 u32"),
+        lir_memory_operation_count: u32::try_from(lir.memory_operations())
+            .expect("LIR Mem 数量适配 u32"),
+        lir_safepoint_count: u32::try_from(lir.safepoints()).expect("LIR safepoint 数量适配 u32"),
+        lir_fingerprint: lir.fingerprint(),
     })
 }

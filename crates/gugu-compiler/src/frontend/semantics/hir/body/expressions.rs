@@ -144,16 +144,13 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 let body = self.branch_expression(body)?;
                 self.loops.pop();
                 self.names = names;
+                // 迭代器协议派发按被迭代表达式登记，与 checker 的 `user_iterator` 一致。
                 hir::ExprKind::For {
                     pattern,
                     value,
                     body,
-                    into_iter: self.selected_dispatch(
-                        source,
-                        Some("IntoIter"),
-                        Some("into_iter"),
-                    )?,
-                    next: self.selected_dispatch(source, Some("Iter"), Some("next"))?,
+                    into_iter: self.selected_dispatch(iter, Some("IntoIter"), Some("into_iter"))?,
+                    next: self.selected_dispatch(iter, Some("Iter"), Some("next"))?,
                 }
             }
             ast::ExprKind::Try(body) => {

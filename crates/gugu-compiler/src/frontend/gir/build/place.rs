@@ -1,6 +1,18 @@
 use super::*;
 
 impl Builder<'_> {
+    /// 方法接收者的自动解引用：逐层投影 `Deref` 并物化值。
+    pub(super) fn dereference(&mut self, mut local: LocalId, count: u32) -> LocalId {
+        for _ in 0..count {
+            let place = self.project(Place::local(local), Projection::Deref);
+            let ty = self.place_ty(place);
+            let dest = self.temp(ty);
+            self.copy_value(Place::local(dest), place, ty);
+            local = dest;
+        }
+        local
+    }
+
     pub(super) fn emit_place(&mut self, id: ExprId) -> Result<Place, Diagnostic> {
         let _ = self.emit_expr(id)?;
         if let Some(place) = self.expression_places[id.index()] {
@@ -35,9 +47,30 @@ impl Builder<'_> {
         id: ExprId,
         base: ExprId,
         index: ExprId,
-        _read: Option<u32>,
+        read: Option<u32>,
         _write: Option<u32>,
     ) -> Result<(), Diagnostic> {
+        if let Some(dispatch) = read {
+            let base_place = self.emit_place(base)?;
+            let Some(index_local) = self.emit_expr(index)? else {
+                return Ok(());
+            };
+            self.emit_check_ops(id)?;
+            let parameters = self.dispatch_parameters(dispatch);
+            let mut args = Vec::with_capacity(2);
+            for (position, (local, expression)) in [(base_place.local, base), (index_local, index)]
+                .into_iter()
+                .enumerate()
+            {
+                args.push(match parameters.get(position).copied() {
+                    Some(parameter) => self.dispatch_argument(parameter, local, Some(expression)),
+                    None => copy_of(local),
+                });
+            }
+            let dest = self.call_dispatch(id, dispatch, args)?;
+            self.set_value(id, dest);
+            return Ok(());
+        }
         let place = self.emit_place(base)?;
         let Some(index) = self.emit_expr(index)? else {
             return Ok(());

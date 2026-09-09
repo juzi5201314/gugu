@@ -1,0 +1,10 @@
+fn identity[T](value: T) T = value
+fn main() {
+    let value: int = identity(17)
+    let input: u128 = 18446744073709551623
+    let wide: u128 = identity(input)
+    let message: string = identity("value")
+    _ = value
+    _ = wide
+    _ = message
+}

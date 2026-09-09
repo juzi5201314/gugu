@@ -90,24 +90,116 @@ impl Builder<'_> {
         operation: crate::frontend::ast::AssignOp,
         dispatch: Option<u32>,
     ) -> Result<(), Diagnostic> {
+        if let Some((write, base, index)) = self.index_write(place) {
+            let base_place = self.emit_place(base)?;
+            let Some(index_local) = self.emit_expr(index)? else {
+                return Ok(());
+            };
+            if operation != crate::frontend::ast::AssignOp::Assign {
+                // 复合赋值：读一次元素、更新、再经 `index_set` 写回。
+                let Some(read) = self.index_read(place) else {
+                    return Ok(());
+                };
+                let parameters = self.dispatch_parameters(read);
+                let mut args = Vec::with_capacity(2);
+                for (position, (local, expression)) in
+                    [(base_place.local, base), (index_local, index)]
+                        .into_iter()
+                        .enumerate()
+                {
+                    args.push(match parameters.get(position).copied() {
+                        Some(parameter) => {
+                            self.dispatch_argument(parameter, local, Some(expression))
+                        }
+                        None => copy_of(local),
+                    });
+                }
+                let mut current = self.call_dispatch(place, read, args)?;
+                let Some(src) = self.emit_expr(value)? else {
+                    return Ok(());
+                };
+                if let Some(op) = dispatch.and_then(|dispatch| self.builtin_binary(dispatch)) {
+                    let ty = self.locals[current.index()].ty;
+                    let dest = self.temp(ty);
+                    self.assign(
+                        Place::local(dest),
+                        Rvalue::BinaryOp {
+                            op,
+                            left: copy_of(current),
+                            right: copy_of(src),
+                        },
+                    );
+                    current = dest;
+                } else if let Some(dispatch) = dispatch {
+                    let receiver = self.dispatch_receiver(dispatch, current, None);
+                    self.call_dispatch(place, dispatch, vec![receiver, copy_of(src)])?;
+                }
+                let parameters = self.dispatch_parameters(write);
+                let mut args = Vec::with_capacity(3);
+                for (position, (local, expression)) in [
+                    (base_place.local, base),
+                    (index_local, index),
+                    (current, value),
+                ]
+                .into_iter()
+                .enumerate()
+                {
+                    args.push(match parameters.get(position).copied() {
+                        Some(parameter) => {
+                            self.dispatch_argument(parameter, local, Some(expression))
+                        }
+                        None => copy_of(local),
+                    });
+                }
+                self.call_dispatch(place, write, args)?;
+                return Ok(());
+            }
+            let Some(src) = self.emit_expr(value)? else {
+                return Ok(());
+            };
+            let parameters = self.dispatch_parameters(write);
+            let mut args = Vec::with_capacity(3);
+            for (position, (local, expression)) in
+                [(base_place.local, base), (index_local, index), (src, value)]
+                    .into_iter()
+                    .enumerate()
+            {
+                args.push(match parameters.get(position).copied() {
+                    Some(parameter) => self.dispatch_argument(parameter, local, Some(expression)),
+                    None => copy_of(local),
+                });
+            }
+            self.call_dispatch(place, write, args)?;
+            return Ok(());
+        }
         let dest = self.emit_place(place)?;
         let Some(src) = self.emit_expr(value)? else {
             return Ok(());
         };
         if let Some(dispatch) = dispatch {
-            let tmp = self.temp(self.expr_ty(value));
-            let normal = self.fresh(false);
-            let unwind = self.intern_plan(self.current_unwind(value), CleanupChain::Unwind)?;
-            self.terminate(Terminator::Call {
-                callee: Callee::Dispatch(dispatch),
-                args: vec![Operand::Copy(dest), copy_of(src)],
-                destination: Place::local(tmp),
-                normal,
-                unwind: Some(unwind),
-                call_kind: CallKind::Managed,
-                site: crate::frontend::mono::instantiate::CallSite::Dispatch(dispatch),
-            });
-            self.switch_to(normal);
+            // 内建复合赋值 impl 直接降成读改写。
+            if let Some(op) = self.builtin_binary(dispatch) {
+                self.assign(
+                    dest,
+                    Rvalue::BinaryOp {
+                        op,
+                        left: Operand::Copy(dest),
+                        right: copy_of(src),
+                    },
+                );
+                return Ok(());
+            }
+            let parameters = self.dispatch_parameters(dispatch);
+            let mut args = Vec::with_capacity(2);
+            for (position, (local, expression)) in
+                [(dest.local, place), (src, value)].into_iter().enumerate()
+            {
+                args.push(match parameters.get(position).copied() {
+                    Some(parameter) => self.dispatch_argument(parameter, local, Some(expression)),
+                    None => copy_of(local),
+                });
+            }
+            self.call_dispatch(place, dispatch, args)?;
             return Ok(());
         }
         match operation {
@@ -120,6 +212,30 @@ impl Builder<'_> {
             }
         }
         Ok(())
+    }
+
+    /// 用户下标写入：表达式是带 `index_set` 派发的下标。
+    fn index_write(&self, place: ExprId) -> Option<(u32, ExprId, ExprId)> {
+        match &self.owner.expressions[place.index()].kind {
+            hir::ExprKind::Index {
+                base,
+                index,
+                write: Some(dispatch),
+                ..
+            } => Some((*dispatch, *base, *index)),
+            _ => None,
+        }
+    }
+
+    /// 用户下标读取派发；`None` 表示内建数组/切片下标。
+    fn index_read(&self, place: ExprId) -> Option<u32> {
+        match &self.owner.expressions[place.index()].kind {
+            hir::ExprKind::Index {
+                read: Some(dispatch),
+                ..
+            } => Some(*dispatch),
+            _ => None,
+        }
     }
 
     fn emit_local_static(
@@ -279,8 +395,12 @@ impl Builder<'_> {
         let Some(iterable) = self.emit_expr(value)? else {
             return Ok(None);
         };
+        if into_iter.is_none() && next.is_none() {
+            return self.emit_slice_for(id, pattern, value, body);
+        }
         let iter = if let Some(dispatch) = into_iter {
-            self.call_dispatch(value, dispatch, vec![copy_of(iterable)])?
+            let receiver = self.dispatch_receiver(dispatch, iterable, Some(value));
+            self.call_dispatch(value, dispatch, vec![receiver])?
         } else {
             iterable
         };
@@ -290,7 +410,8 @@ impl Builder<'_> {
         self.goto(header);
         self.switch_to(header);
         let item = if let Some(dispatch) = next {
-            self.call_dispatch(value, dispatch, vec![copy_of(iter)])?
+            let receiver = self.dispatch_receiver(dispatch, iter, None);
+            self.call_dispatch(value, dispatch, vec![receiver])?
         } else {
             iter
         };
@@ -299,11 +420,11 @@ impl Builder<'_> {
         let body_block = self.fresh(false);
         self.terminate(Terminator::SwitchInt {
             value: copy_of(disc),
-            targets: vec![(0, exit), (1, body_block)],
+            targets: vec![(0, body_block), (1, exit)],
             otherwise: exit,
         });
         self.switch_to(body_block);
-        let payload = self.project(Place::local(item), Projection::Downcast(1));
+        let payload = self.project(Place::local(item), Projection::Downcast(0));
         let payload = self.project(
             payload,
             Projection::Field {
@@ -400,6 +521,78 @@ impl Builder<'_> {
         Ok(Some(Some(dest)))
     }
 
+    /// 数组与切片的原生 `for`：按索引推进，不经过用户迭代器协议。
+    fn emit_slice_for(
+        &mut self,
+        id: ExprId,
+        pattern: hir::PatternId,
+        value: ExprId,
+        body: ExprId,
+    ) -> Result<Option<LocalId>, Diagnostic> {
+        let place = self.emit_place(value)?;
+        let int = self.int_ty();
+        let length = self.temp(int);
+        self.assign(Place::local(length), Rvalue::Len(place));
+        let index = self.temp(int);
+        let zero = self.const_operand(int, ConstValue::Integer(0));
+        self.assign(Place::local(index), Rvalue::Use(zero));
+        let header = self.fresh(false);
+        let exit = self.fresh(false);
+        let body_block = self.fresh(false);
+        self.goto(header);
+        self.switch_to(header);
+        let cond = self.temp(self.primitives.bool_ty);
+        self.assign(
+            Place::local(cond),
+            Rvalue::Compare {
+                op: CompareOp::Lt,
+                left: copy_of(index),
+                right: copy_of(length),
+            },
+        );
+        self.terminate(Terminator::SwitchInt {
+            value: copy_of(cond),
+            targets: vec![(1, body_block)],
+            otherwise: exit,
+        });
+        self.switch_to(body_block);
+        let base = if matches!(
+            self.module.types.get(self.place_ty(place).index()),
+            Some(hir::Type::Ref(_))
+        ) {
+            self.project(place, Projection::Deref)
+        } else {
+            place
+        };
+        let element = self.project(base, Projection::Index(index));
+        self.bind_pattern(element, pattern)?;
+        self.loops.push(LoopFrame {
+            scope: self.owner.expressions[body.index()].scope,
+            header,
+            exit,
+            value: None,
+        });
+        let _ = self.emit_expr(body)?;
+        if !self.terminated() {
+            let one = self.const_operand(int, ConstValue::Integer(1));
+            self.assign(
+                Place::local(index),
+                Rvalue::BinaryOp {
+                    op: BinaryOp::Add,
+                    left: copy_of(index),
+                    right: one,
+                },
+            );
+            self.goto(header);
+        }
+        self.loops.pop();
+        self.switch_to(exit);
+        let dest = self.temp(self.expr_ty(id));
+        self.assign_unit(dest);
+        self.set_value(id, dest);
+        Ok(Some(dest))
+    }
+
     pub(super) fn emit_try(
         &mut self,
         id: ExprId,
@@ -420,7 +613,8 @@ impl Builder<'_> {
             return Ok(Some(dest));
         };
         if let Some(dispatch) = from_value {
-            let wrapped = self.call_dispatch(id, dispatch, vec![copy_of(value)])?;
+            let argument = self.dispatch_receiver(dispatch, value, None);
+            let wrapped = self.call_dispatch(id, dispatch, vec![argument])?;
             self.assign_copy(Place::local(dest), wrapped);
         } else {
             self.assign_copy(Place::local(dest), value);
@@ -431,7 +625,6 @@ impl Builder<'_> {
         self.set_value(id, dest);
         Ok(Some(dest))
     }
-
     pub(super) fn emit_try_exit(
         &mut self,
         id: ExprId,
@@ -441,19 +634,22 @@ impl Builder<'_> {
         target: hir::ExitTarget,
         plan: u32,
     ) -> Result<Option<LocalId>, Diagnostic> {
-        let Some(result) = self.emit_expr(value)? else {
+        let Some(operand) = self.emit_expr(value)? else {
             return Ok(None);
         };
-        let disc = if let Some(dispatch) = branch {
-            self.call_dispatch(id, dispatch, vec![copy_of(result)])?
-        } else {
-            let disc = self.temp(self.int_ty());
-            self.assign(
-                Place::local(disc),
-                Rvalue::Discriminant(Place::local(result)),
-            );
-            disc
+        // 用户 `Try` 先经 `branch` 取得 `Result[Value, Error]`；内建 Option/Result 直接检查自身。
+        let source = match branch {
+            Some(dispatch) => {
+                let argument = self.dispatch_receiver(dispatch, operand, None);
+                self.call_dispatch(id, dispatch, vec![argument])?
+            }
+            None => operand,
         };
+        let disc = self.temp(self.int_ty());
+        self.assign(
+            Place::local(disc),
+            Rvalue::Discriminant(Place::local(source)),
+        );
         let ok = self.fresh(false);
         let err = self.fresh(false);
         self.terminate(Terminator::SwitchInt {
@@ -462,18 +658,56 @@ impl Builder<'_> {
             otherwise: err,
         });
         self.switch_to(err);
-        let payload = self.project(Place::local(result), Projection::Downcast(1));
-        let err_local = self.temp(self.expr_ty(value));
-        self.assign(Place::local(err_local), Rvalue::Use(Operand::Copy(payload)));
-        let outgoing = if let Some(dispatch) = from_error {
-            self.call_dispatch(id, dispatch, vec![copy_of(err_local)])?
-        } else {
-            err_local
+        let error_ty = match from_error {
+            Some(dispatch) => self.dispatch_parameters(dispatch).first().copied(),
+            None => match self
+                .module
+                .types
+                .get(self.locals[source.index()].ty.index())
+            {
+                Some(hir::Type::Result(_, error)) => Some(*error),
+                _ => Some(self.primitives.unit),
+            },
+        };
+        let error_ty = error_ty.ok_or_else(|| {
+            Diagnostic::error(
+                crate::diagnostics::DiagnosticCode::LirInvariant,
+                "问号运算符缺少错误类型",
+                None,
+            )
+        })?;
+        let error_place = self.project(Place::local(source), Projection::Downcast(1));
+        let error_place = self.project(
+            error_place,
+            Projection::Field {
+                index: 0,
+                field_ty: error_ty,
+                access: Access::Normal,
+            },
+        );
+        let error = self.temp(error_ty);
+        self.copy_value(Place::local(error), error_place, error_ty);
+        let outgoing = match from_error {
+            Some(dispatch) => {
+                let argument = self.dispatch_receiver(dispatch, error, None);
+                self.call_dispatch(id, dispatch, vec![argument])?
+            }
+            None => error,
         };
         self.emit_exit_value(target, Some(outgoing), plan)?;
         self.switch_to(ok);
-        let dest = self.temp(self.expr_ty(id));
-        self.assign_copy(Place::local(dest), result);
+        let value_ty = self.expr_ty(id);
+        let value_place = self.project(Place::local(source), Projection::Downcast(0));
+        let value_place = self.project(
+            value_place,
+            Projection::Field {
+                index: 0,
+                field_ty: value_ty,
+                access: Access::Normal,
+            },
+        );
+        let dest = self.temp(value_ty);
+        self.copy_value(Place::local(dest), value_place, value_ty);
         self.set_value(id, dest);
         Ok(Some(dest))
     }

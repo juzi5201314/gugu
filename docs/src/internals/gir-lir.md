@@ -191,6 +191,10 @@ generic GIR 允许 `TyId` 和 `ConstId` 中引用 owner 的泛型参数，也允
 - 每个 `LateConstRef` 都能在冻结后的 late 结果表中唯一解析；
 - 不可实例化、无限递归或仍含参数的 body 报编译错误。
 
+具体实例沿用同一 `GirBody` 操作树，类型索引绑定到实例专属的具体布局表，调用位点绑定到闭合实例键或明确的动态槽。表内保存字节大小、对齐、字段偏移、传递类别与稳定类型身份；布局必须复用类型形成器，不能在 LIR 中另算一套布局。早期常量消费既有求值结果，late 引用消费冻结结果表，二者都不能在低层重新执行用户代码。
+
+调用位点必须与被调者签名逐参对齐。变参调用的尾部实参在这里物化成被调者最后一个参数：齐次尾写成 `PackSlice` 内建，`types` 给出元素类型，LIR 用栈槽按顺序存放各实参并交出 `&[T]` 胖指针；异构包写成 `Tuple` 聚合，类型就是 `VariadicCall` 记录的包类型。没有函数定义的内建 trait 方法（如 `Clone::clone`）按派发成员名展开为对应语义动作，不产生调用。`union` 构造使用 `Union { ty, field }`，只初始化指定字段，其余字节保持未初始化。
+
 ## GIR 固定 pass 管线
 
 monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会时为空操作，但不能交换会改变不变量的阶段：
@@ -256,11 +260,13 @@ LIR 只允许以下机器值类型：
 - `Mem`，表示 memory SSA token；
 - `Void`，只用于无普通结果的指令声明。
 
-`i128`/`u128` 在进入 LIR 时拆为低、高两个 `I64`；聚合拆为按 ABI 分类的标量 tuple 或放入 stack slot。ZST 不产生普通 value。`Ptr` 的 provenance 固定为 `GcHeap`、`GcInterior`、`Stack`、`Raw`、`Code`、`Metadata` 或 `Foreign`；优化器不得把 `Raw`/整数推断成可追踪 GC 根。`V128` 只由 loop vectorizer在函数内部生成，不得含 `Ptr` lane、进入函数 ABI或跨 `Call`/`ForeignCall` 传参返回；它始终是 non-root，不能用于隐藏 managed pointer。
+`i128`/`u128` 在进入 LIR 时拆为低、高两个 `I64`；聚合拆为按 ABI 分类的标量 tuple 或放入 stack slot。ZST 不产生普通 value。`Ptr` 的 provenance 固定为 `GcHeap`、`GcInterior`、`Stack`、`Raw`、`Code`、`Metadata` 或 `Foreign`；优化器不得把 `Raw`/整数推断成可追踪 GC 根。`Ptr` 到 `Ptr` 的 `PointerCast` 只能保持原 provenance 或降级为 `Raw`；源码里 `unsafe` 块内的 `(&T)(p)` 使用显式 `RawToReference` 转换，verifier 只接受 `Raw` 来源并保留基址来源。`SymbolAddr` 除实例、global 与类型身份外还解析 type section：`TypeRecords` 给出按稠密 `TypeId` 排列的固定 80 字节记录，`TypeNames` 给出 name pool 基址，供 `TypeId.name()` 在运行期取规范名。`V128` 只由 loop vectorizer在函数内部生成，不得含 `Ptr` lane、进入函数 ABI或跨 `Call`/`ForeignCall` 传参返回；它始终是 non-root，不能用于隐藏 managed pointer。
 
 ### memory SSA
 
 每个可能读写内存、分配、调用、原子、volatile、屏障或 safepoint 的操作都消费一个 `Mem` 并产生一个新的 `Mem`。纯算术、地址计算和已证明无读取的常量不消费 memory。合流 block 用 `Mem` block 参数合并各前驱 token。
+
+SSA 构造只提升无需地址的机器标量；其余值保存于具有具体布局的 storage，`i128/u128` 的普通运算输入输出仍拆成两个 `I64`。地址可逃出当前 frame 的语言槽必须使用 managed storage，不能通过把栈指针改标为 `Raw` 来规避寿命检查。栈槽寿命是随控制流验证的编译器 metadata，不生成机器指令。
 
 memory token 只编码顺序，不占机器寄存器。每个普通 memory op 还携带 `AliasClass`：`Stack(StackSlotId)`、`FreshHeap(AllocId)`、`Global(StableDefKey)`、`ThreadLocal(StableDefKey)`、`Heap`、`Foreign`、`Atomic` 或 `Volatile`。不同 stack slot、不同尚未发布 fresh allocation、布局不重叠的不同 global以及不同 TLS定义互不 alias；pointer经未知 call/store/block-parameter merge/整数转换后降为 `Heap` 或 `Foreign`。只有上述封闭规则证明 class不相交时才重排普通 load/store；atomic、volatile、`ForeignCall`（包括 leaf 的外部内存效应）、safepoint 和 runtime barrier 是任何 class 都不可跨越的 effect fence。
 
@@ -275,8 +281,9 @@ LIR 指令按封闭类别组织：
 - 控制辅助：`Select`、`TrapIf`；
 - 内存：`Load`、`Store`、`Memcpy`、`Memmove`、`Memset`；
 - 并发：`AtomicLoad`、`AtomicStore`、`AtomicRmw`、`CompareExchange`、`Fence`；
-- runtime：`GcAlloc`、`RegionAlloc`、`RegionPublish`、`RegionReset`、`PromoteManaged`、`MarkTicketBatch`、`EdgeDeltaBatch`、`ResolveSharedHandle`、`SharedAccessBegin`、`SharedAccessEnd`、`ForwardSharedHandle`、`DecodeCompressedRef`、`BarrierReserve { permit: BarrierPermitId }`、`GcWriteBarrier`、`GcWriteBarrierReserved { permit: BarrierPermitId }`、`ScopedViewBegin { mode, token }`、`ScopedViewEnd { token }`、`SafepointPoll { interval: NonZeroU32 }`、`StackCheck`、`NoSafepointBegin`、`NoSafepointEnd`、`CoroutineSwitch`、`Park`、`Ready`；`BarrierPermitId`和scoped view token只存在于 compiler/runtime metadata，不占 machine value/register；显式 poll和 counted-loop外层 poll的 interval固定为1，无法构造 counted outer chunk的循环路径才使用大于1的计算 interval；
+- runtime：`GcAlloc`、`RegionAlloc`、`RegionPublish`、`RegionReset`、`PromoteManaged`、`MarkTicketBatch`、`EdgeDeltaBatch`、`ResolveSharedHandle`、`SharedAccessBegin`、`SharedAccessEnd`、`ForwardSharedHandle`、`DecodeCompressedRef`、`BarrierReserve { permit: BarrierPermitId }`、`GcWriteBarrier`、`GcWriteBarrierReserved { permit: BarrierPermitId }`、`ScopedViewBegin { mode, token }`、`ScopedViewEnd { token }`、`SafepointPoll { interval: NonZeroU32 }`、`StackCheck`、`NoSafepointBegin`、`NoSafepointEnd`、`CoroutineSwitch`、`Park`、`Ready`、`Format`（按前端格式计划渲染 `(value, descriptor)` 对）、`Concat`（两组 `(data, len)` 拼成新 `string`）；`BarrierPermitId`和scoped view token只存在于 compiler/runtime metadata，不占 machine value/register；显式 poll和 counted-loop外层 poll的 interval固定为1，无法构造 counted outer chunk的循环路径才使用大于1的计算 interval；
 - 调用：`Call`、`ForeignCall`；`ForeignCall` 的 mode 必须是普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`。
+- 已解析汇编：`InlineAsm` 只保存前端验证过的封闭汇编计划、输入输出约束与 effect；不接受待解析模板文本。
 - 诊断插桩：`CoverageCounter`。
 
 ### 内存 owner lowering
@@ -368,6 +375,8 @@ LIR verifier 至少检查：
 - 每个 `NoSafepointRegion` 的 marker、effect fence和 reason匹配 GIR，legalized机器CFG无 backedge，全部路径cost不超过 `POLL_BUDGET`，marker内没有 blocking/slow edge；
 
 release 编译器在进入代码生成前也必须运行完整 verifier。验证失败属于编译器内部错误并停止产出镜像，不能降级成保守机器码继续运行。
+
+`BuildLir`（query 15）按具体实例键、GIR/布局、late、placement 与目标指纹隔离缓存。构造结果与缓存恢复都必须经过同一结构 verifier，只有校验凭据能够进入 backend/image plan；失败诊断为 `E0057`。此构造边界验证 SSA、Mem、source scope、指针来源、原子序与 region/barrier，不冒充 target legalization、预算化 poll、寄存器分配或机器码联合校验。固定优化管线的每个后续边界继续承担其新增不变量。
 
 ## IR dump
 

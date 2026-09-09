@@ -21,6 +21,7 @@ pub struct ActionInputs {
     analysis_policy: Vec<u8>,
     analysis_world: [u8; 32],
     generic_gir: [u8; 32],
+    lir: [u8; 32],
     public_summaries: BTreeMap<String, [u8; 32]>,
     build_inputs: BTreeMap<String, [u8; 32]>,
     build_outputs: BTreeMap<String, [u8; 32]>,
@@ -146,6 +147,11 @@ impl ActionInputs {
         self.generic_gir = fingerprint;
     }
 
+    /// 设置已通过结构 verifier 的 LIR 世界指纹。
+    pub fn set_lir(&mut self, fingerprint: [u8; 32]) {
+        self.lir = fingerprint;
+    }
+
     /// 计算域隔离的 BLAKE3 action key。
     pub fn key(&self) -> ActionKey {
         let mut canonical = Vec::new();
@@ -167,6 +173,7 @@ impl ActionInputs {
         encode_bytes(&mut canonical, &self.analysis_policy);
         encode_bytes(&mut canonical, &self.analysis_world);
         encode_bytes(&mut canonical, &self.generic_gir);
+        encode_bytes(&mut canonical, &self.lir);
         encode_digest_map(&mut canonical, &self.public_summaries);
         encode_digest_map(&mut canonical, &self.build_inputs);
         encode_digest_map(&mut canonical, &self.build_outputs);

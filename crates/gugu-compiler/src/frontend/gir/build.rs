@@ -229,10 +229,19 @@ impl<'a> Builder<'a> {
     }
 
     fn result_ty(&self) -> TypeId {
-        let Some(signature) = self.module.definitions[self.owner.definition.index()].signature
-        else {
+        let definition = &self.module.definitions[self.owner.definition.index()];
+        let Some(signature) = definition.signature else {
             return self.owner.expression_types[self.owner.body.index()];
         };
+        // static/const 的签名就是值类型，即使它是函数类型也不能取结果的类型。
+        if !matches!(
+            definition.kind,
+            hir::DefinitionKind::Function
+                | hir::DefinitionKind::Closure
+                | hir::DefinitionKind::Async
+        ) {
+            return signature;
+        }
         match &self.module.types[signature.index()] {
             hir::Type::Function { result, .. } => *result,
             hir::Type::Callable { signature, .. } => match &self.module.types[signature.index()] {
@@ -519,7 +528,7 @@ impl<'a> Builder<'a> {
     }
 
     fn expr_ty(&self, id: ExprId) -> TypeId {
-        self.owner.expression_types[id.index()]
+        self.owner.expression_inputs[id.index()]
     }
 
     fn expr_scope(&self, id: ExprId) -> hir::ScopeId {
@@ -549,9 +558,8 @@ impl<'a> Builder<'a> {
 
     fn set_place(&mut self, id: ExprId, place: Place) {
         self.expression_places[id.index()] = Some(place);
-        if place.is_local() {
-            self.expression_locals[id.index()] = Some(place.local);
-        }
+        // 非 local place 的值必须重新物化，不能沿用调整前的 local。
+        self.expression_locals[id.index()] = place.is_local().then_some(place.local);
         self.blocks[self.current.index()].source = self.source_of(id);
     }
 
@@ -560,8 +568,9 @@ impl<'a> Builder<'a> {
             return Ok(Some(local));
         }
         if let Some(place) = self.expression_places[id.index()] {
-            let local = self.temp(self.expr_ty(id));
-            self.copy_value(Place::local(local), place, self.expr_ty(id));
+            let ty = self.place_ty(place);
+            let local = self.temp(ty);
+            self.copy_value(Place::local(local), place, ty);
             self.expression_locals[id.index()] = Some(local);
             return Ok(Some(local));
         }

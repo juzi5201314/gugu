@@ -77,6 +77,13 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 .map(|interface| self.compiler.trait_ref(interface, self.output.definition))
                 .transpose()?,
             member: selected.member,
+            member_name: selected.interface.as_ref().zip(selected.member).and_then(
+                |(interface, member)| {
+                    self.compiler
+                        .model
+                        .interface_member_name(interface.id, member)
+                },
+            ),
             dereferences: selected.dereferences,
             borrow: selected.borrow,
             implicit_receiver: selected.implicit_receiver,

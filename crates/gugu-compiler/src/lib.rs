@@ -4,12 +4,13 @@
 //! Gugu compiler 的阶段化 bootstrap 接口。
 //!
 //! compiler 前端：源码快照、词法及 AST、名称/类型/控制流检查、版本化查询与冻结 HIR。
-//! 后端目前消费已验证 HIR 形成内存 image plan；机器代码生成由后续后端阶段实现。
+//! 后端只消费已验证 LIR 形成内存 image plan；机器代码生成由后续后端阶段实现。
 
 mod action;
 mod backend;
 mod diagnostics;
 mod frontend;
+mod lir;
 mod project;
 mod query;
 mod runtime;
@@ -179,6 +180,7 @@ pub struct Compilation {
     image_plan: Option<ImagePlan>,
     hir: Option<frontend::hir::Validated>,
     gir: Option<frontend::gir::GirWorldV1>,
+    lir: Option<lir::Validated>,
     action_key: Option<project::ActionKey>,
 }
 
@@ -205,10 +207,10 @@ impl Compilation {
 
     /// 判断本次 action 是否成功且没有错误诊断。
     pub fn is_success(&self) -> bool {
-        self.hir.is_some() && !self.diagnostics.has_errors()
+        self.lir.is_some() && !self.diagnostics.has_errors()
     }
 
-    /// 返回前端 action 的内容寻址 key；前端失败时为 `None`。
+    /// 返回完整编译 action 的内容寻址 key；前端或 LIR 失败时为 `None`。
     pub fn action_key(&self) -> Option<project::ActionKey> {
         self.action_key
     }
@@ -223,6 +225,30 @@ impl Compilation {
     /// 返回 generic GIR 世界指纹。
     pub fn gir_fingerprint(&self) -> Option<[u8; 32]> {
         self.gir.as_ref().map(|world| world.fingerprint)
+    }
+
+    /// 返回已通过 verifier 的 LIR dump。
+    pub fn dump_lir(&self) -> Option<String> {
+        self.lir.as_ref().map(lir::Validated::dump)
+    }
+
+    /// 返回 LIR 世界指纹。
+    pub fn lir_fingerprint(&self) -> Option<[u8; 32]> {
+        self.lir.as_ref().map(lir::Validated::fingerprint)
+    }
+
+    /// 返回规范退出码；内部 IR 不变量失败与用户源码错误分开报告。
+    pub fn exit_code(&self) -> i32 {
+        if self
+            .diagnostics
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == DiagnosticCode::LirInvariant)
+        {
+            101
+        } else {
+            i32::from(!self.is_success())
+        }
     }
 }
 
@@ -260,6 +286,7 @@ impl Compiler {
                     image_plan: None,
                     hir: None,
                     gir: None,
+                    lir: None,
                     action_key: None,
                 };
             }
@@ -284,6 +311,7 @@ impl Compiler {
                     image_plan: None,
                     hir: None,
                     gir: None,
+                    lir: None,
                     action_key: None,
                 };
             }
@@ -292,10 +320,39 @@ impl Compiler {
         for diagnostic in frontend.lints.iter().cloned() {
             diagnostics.push(diagnostic);
         }
-        let action_key = Some(frontend_action_key(
+        let lir = match lir::build(
+            &frontend.hir,
+            &frontend.gir,
+            &frontend.mono,
+            target,
+            &self.queries,
+            &source_map,
+        ) {
+            Ok(lir) => lir,
+            Err(errors) => {
+                for error in errors {
+                    diagnostics.push(error);
+                }
+                graph.fail(ActionKind::BuildIr, "LIR 构造或结构校验失败");
+                graph.skip_after(ActionKind::BuildIr, "内部表示无效");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(frontend.hir),
+                    gir: Some(frontend.gir),
+                    lir: None,
+                    action_key: None,
+                };
+            }
+        };
+        let action_key = Some(compilation_action_key(
             target,
             &source_map,
             &frontend,
+            &lir,
             loaded
                 .plan
                 .as_ref()
@@ -317,12 +374,13 @@ impl Compiler {
         graph.complete(
             ActionKind::BuildIr,
             format!(
-                "{} 个定义，{} 个已冻结 HIR owner，{} 个 GIR body / {} 个 block / {} 条语句",
+                "{} 个定义，{} 个已冻结 HIR owner，{} 个 GIR body / {} 个 block / {} 条语句，{} 个 LIR body / {} 条指令 / {} 个 Mem effect",
                 hir.module().definitions.len(),
                 hir.module().owners.len(),
                 gir.bodies.len(),
                 gir_blocks,
-                gir_stmts
+                gir_stmts,
+                lir.bodies(), lir.instructions(), lir.memory_operations()
             ),
         );
 
@@ -331,6 +389,7 @@ impl Compiler {
             &hir,
             &frontend.mono,
             &gir,
+            &lir,
             frontend.analysis.runtime_checks_elided_count,
         ) else {
             graph.complete(ActionKind::PlanBackend, "没有可执行入口");
@@ -343,6 +402,7 @@ impl Compiler {
                 image_plan: None,
                 hir: Some(hir),
                 gir: Some(gir),
+                lir: Some(lir),
                 action_key,
             };
         };
@@ -369,16 +429,18 @@ impl Compiler {
             image_plan,
             hir: Some(hir),
             gir: Some(gir),
+            lir: Some(lir),
             action_key,
         }
     }
 }
 
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。
-fn frontend_action_key(
+fn compilation_action_key(
     target: TargetName,
     source_map: &SourceMap,
     frontend: &frontend::FrontendOutput,
+    lir: &lir::Validated,
     plan: Option<(bool, &frontend::cfg::CfgContext)>,
 ) -> project::ActionKey {
     const EMPTY_PLAN: (bool, Option<&frontend::cfg::CfgContext>) = (true, None);
@@ -417,6 +479,7 @@ fn frontend_action_key(
     inputs.set_analysis_policy(frontend::analysis::AnalysisPolicyV1::default().canonical_bytes());
     inputs.set_analysis_world(frontend.analysis.input_fingerprint);
     inputs.set_generic_gir(frontend.gir.fingerprint);
+    inputs.set_lir(lir.fingerprint());
     for (key, digest) in &frontend.mono.public_summaries {
         inputs.add_public_summary(key.clone(), digest);
     }
@@ -752,6 +815,12 @@ pub struct ImagePlan {
     gir_block_count: u32,
     gir_statement_count: u32,
     gir_fingerprint: [u8; 32],
+    lir_body_count: u32,
+    lir_block_count: u32,
+    lir_instruction_count: u32,
+    lir_memory_operation_count: u32,
+    lir_safepoint_count: u32,
+    lir_fingerprint: [u8; 32],
     placement_count: u32,
     turn_region_count: u32,
     local_heap_count: u32,
@@ -780,6 +849,12 @@ impl ImagePlan {
             gir_block_count: plan.gir_block_count,
             gir_statement_count: plan.gir_statement_count,
             gir_fingerprint: plan.gir_fingerprint,
+            lir_body_count: plan.lir_body_count,
+            lir_block_count: plan.lir_block_count,
+            lir_instruction_count: plan.lir_instruction_count,
+            lir_memory_operation_count: plan.lir_memory_operation_count,
+            lir_safepoint_count: plan.lir_safepoint_count,
+            lir_fingerprint: plan.lir_fingerprint,
             placement_count: plan.placement_count,
             turn_region_count: plan.turn_region_count,
             local_heap_count: plan.local_heap_count,
@@ -890,6 +965,31 @@ impl ImagePlan {
     /// 返回 placement 世界指纹。
     pub fn placement_fingerprint(&self) -> [u8; 32] {
         self.placement_fingerprint
+    }
+
+    /// 返回具体 LIR body 数量。
+    pub fn lir_body_count(&self) -> u32 {
+        self.lir_body_count
+    }
+    /// 返回 LIR block 数量。
+    pub fn lir_block_count(&self) -> u32 {
+        self.lir_block_count
+    }
+    /// 返回 LIR 指令数量。
+    pub fn lir_instruction_count(&self) -> u32 {
+        self.lir_instruction_count
+    }
+    /// 返回消费并产生 Mem 的操作数量。
+    pub fn lir_memory_operation_count(&self) -> u32 {
+        self.lir_memory_operation_count
+    }
+    /// 返回已登记 safepoint 数量。
+    pub fn lir_safepoint_count(&self) -> u32 {
+        self.lir_safepoint_count
+    }
+    /// 返回已验证 LIR 的确定性指纹。
+    pub fn lir_fingerprint(&self) -> [u8; 32] {
+        self.lir_fingerprint
     }
 }
 

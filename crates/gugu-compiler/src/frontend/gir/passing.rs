@@ -335,7 +335,7 @@ fn tuple_class(
     (class, known.then_some(align_up(size, align)))
 }
 
-fn lang_item(module: &hir::Module, definition: hir::DefId) -> Option<PassingClass> {
+pub(crate) fn lang_item(module: &hir::Module, definition: hir::DefId) -> Option<PassingClass> {
     let name = module.definitions.get(definition.index())?.name.as_str();
     Some(match name {
         "Vec" => PassingClass::IDENTITY,

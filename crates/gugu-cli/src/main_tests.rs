@@ -294,9 +294,13 @@ fn single_file_mode_rejects_project_selectors() {
 }
 
 #[test]
-fn dump_gir_flag_parses_and_requires_internal_gate() {
-    let cli = Cli::try_parse_from(["gugu", "check", "-Zdump-gir"]).expect("内部选项可解析");
-    assert_eq!(cli.global.z, vec!["dump-gir".to_owned()]);
+fn dump_internal_flags_parse_and_require_internal_gate() {
+    let cli =
+        Cli::try_parse_from(["gugu", "check", "-Zdump-gir", "-Zdump-lir"]).expect("内部选项可解析");
+    assert_eq!(
+        cli.global.z,
+        vec!["dump-gir".to_owned(), "dump-lir".to_owned()]
+    );
     assert!(
         super::validate_internal_flags(&cli.global, false)
             .unwrap_err()
@@ -304,7 +308,7 @@ fn dump_gir_flag_parses_and_requires_internal_gate() {
     );
     assert!(super::validate_internal_flags(&cli.global, true).is_ok());
     let mut unknown = cli.global.clone();
-    unknown.z = vec!["dump-lir".to_owned()];
+    unknown.z = vec!["dump-unknown".to_owned()];
     assert!(
         super::validate_internal_flags(&unknown, true)
             .unwrap_err()

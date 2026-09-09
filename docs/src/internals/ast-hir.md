@@ -243,7 +243,7 @@ parser 必须满足：
 - 函数项的模块/FnDecl 身份、全部泛型实例实参和调用签名；只有期望擦除签名时才生成函数句柄。无捕获 callable 的布局直接消费捕获表，使用零大小表示，不分配空环境。
 - 闭包与 async 块的 `CapturePlan`，按原始槽编号排序，记录读前置条件、写入、跨协程和体内初始化依赖。函数体有独立 return/loop/try/defer 状态；闭包构造不会改变外层初始化结果，也不会把尚未执行的函数体记入初始化依赖。
 - 齐次变参和异构类型包的 `VariadicCall`：保留左到右的实参 ID、固定参数数目和具体尾部类型。齐次尾部存储必须可被 GC 跟踪，只有后续分析证明无逃逸才可放入栈帧；异构包供单态化逐位置展开，不生成动态类型数组或盒子。
-- 静态关联调用和用户操作符的 `Dispatch`：保存函数身份、选中 impl、trait 实例和成员序号、规范化 Self/签名，以及接收者解引用次数和借用调整。操作符表达式的结果不会被误记成 callable 值。
+- 静态关联调用和用户操作符的 `Dispatch`：保存函数身份、选中 impl、trait 实例和成员序号与规范成员名、规范化 Self/签名，以及接收者解引用次数和借用调整。操作符表达式的结果不会被误记成 callable 值。
 - APIT 的独立匿名类型参数，以及 RPIT/TAIT 的声明身份、完整泛型环境和唯一隐藏类型表。函数实例参数按声明上下文的规范键顺序保存；`Self::关联项` 是由 Self 推导的查找缓存，不作为独立实例参数，避免关联 TAIT 产生伪递归。
 - `TypeAdjustment` 记录转换前后的类型及 `Erase`、`Opaque`、`ArrayToSlice` 种类；`impl Trait` 的表示转换不等同于擦除。具体值进入 `dyn Value` 后再进入 `dyn Any` 时，第二层 payload 的类型仍是 `dyn Value`；复制已经形成的 `dyn Any` 不生成新容器。
 - 动态 `Dispatch` 保存对象安全接口和成员序号，不携带静态 callable/impl。`Reflection` 保存 `is`、`downcast`、`downcast_copy` 的精确目标类型与符号化 TypeId 操作，恢复类型不得穿透既有接口对象。

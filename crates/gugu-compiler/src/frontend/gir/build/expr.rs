@@ -28,16 +28,29 @@ impl Builder<'_> {
                 statements,
                 tail,
                 end_plan,
-            } => return self.emit_block(id, statements, tail, end_plan),
+            } => {
+                let result = self.emit_block(id, statements, tail, end_plan)?;
+                return self.finish_expr(id, result);
+            }
             hir::ExprKind::If {
                 condition,
                 then_value,
                 else_value,
-            } => return self.emit_if(id, condition, then_value, else_value),
-            hir::ExprKind::Match { value, arms } => return self.emit_match(id, value, arms),
-            hir::ExprKind::Loop { body } => return self.emit_loop(id, None, body),
+            } => {
+                let result = self.emit_if(id, condition, then_value, else_value)?;
+                return self.finish_expr(id, result);
+            }
+            hir::ExprKind::Match { value, arms } => {
+                let result = self.emit_match(id, value, arms)?;
+                return self.finish_expr(id, result);
+            }
+            hir::ExprKind::Loop { body } => {
+                let result = self.emit_loop(id, None, body)?;
+                return self.finish_expr(id, result);
+            }
             hir::ExprKind::While { condition, body } => {
-                return self.emit_loop(id, Some(condition), body);
+                let result = self.emit_loop(id, Some(condition), body)?;
+                return self.finish_expr(id, result);
             }
             hir::ExprKind::For {
                 pattern,
@@ -45,8 +58,14 @@ impl Builder<'_> {
                 body,
                 into_iter,
                 next,
-            } => return self.emit_for(id, pattern, value, body, into_iter, next),
-            hir::ExprKind::Try { body, from_value } => return self.emit_try(id, body, from_value),
+            } => {
+                let result = self.emit_for(id, pattern, value, body, into_iter, next)?;
+                return self.finish_expr(id, result);
+            }
+            hir::ExprKind::Try { body, from_value } => {
+                let result = self.emit_try(id, body, from_value)?;
+                return self.finish_expr(id, result);
+            }
             hir::ExprKind::TryExit {
                 value,
                 branch,
@@ -54,26 +73,41 @@ impl Builder<'_> {
                 target,
                 plan,
                 ..
-            } => return self.emit_try_exit(id, value, branch, from_error, target, plan),
-            hir::ExprKind::Select { arms } => return self.emit_select(id, arms),
+            } => {
+                let result = self.emit_try_exit(id, value, branch, from_error, target, plan)?;
+                return self.finish_expr(id, result);
+            }
+            hir::ExprKind::Select { arms } => {
+                let result = self.emit_select(id, arms)?;
+                return self.finish_expr(id, result);
+            }
             hir::ExprKind::Closure { definition } => self.emit_closure(id, definition, false)?,
             hir::ExprKind::Spawn { definition } => self.emit_closure(id, definition, true)?,
             hir::ExprKind::Call {
                 target,
                 receiver,
                 arguments,
-            } => return self.emit_call_expr(id, target, receiver, arguments, false),
+            } => {
+                let result = self.emit_call_expr(id, target, receiver, arguments, false)?;
+                return self.finish_expr(id, result);
+            }
             hir::ExprKind::SpawnCall {
                 target,
                 receiver,
                 arguments,
-            } => return self.emit_call_expr(id, target, receiver, arguments, true),
+            } => {
+                let result = self.emit_call_expr(id, target, receiver, arguments, true)?;
+                return self.finish_expr(id, result);
+            }
             hir::ExprKind::Intrinsic {
                 operation,
                 arguments,
                 types,
                 field,
-            } => return self.emit_intrinsic(id, operation, arguments, types, field),
+            } => {
+                let result = self.emit_intrinsic(id, operation, arguments, types, field)?;
+                return self.finish_expr(id, result);
+            }
             hir::ExprKind::Field { base, index } => self.emit_field(id, base, index)?,
             hir::ExprKind::Index {
                 base,
@@ -88,15 +122,17 @@ impl Builder<'_> {
                 left,
                 right,
                 dispatch,
-            } => return self.emit_binary(id, operation, left, right, dispatch),
+            } => {
+                let result = self.emit_binary(id, operation, left, right, dispatch)?;
+                return self.finish_expr(id, result);
+            }
             hir::ExprKind::Range { start, end } => self.emit_range(id, start, end)?,
             hir::ExprKind::Comptime { value } => {
-                return self.emit_expr(value).map(|local| {
-                    if let Some(local) = local {
-                        self.set_value(id, local);
-                    }
-                    local
-                });
+                let result = self.emit_expr(value)?;
+                if let Some(local) = result {
+                    self.set_value(id, local);
+                }
+                return self.finish_expr(id, result);
             }
             hir::ExprKind::Assembly(index) => self.emit_asm(id, index)?,
             hir::ExprKind::Exit {
@@ -105,15 +141,30 @@ impl Builder<'_> {
                 plan,
                 ..
             } => {
-                return self.emit_exit(id, target, value, plan);
+                let result = self.emit_exit(id, target, value, plan)?;
+                return self.finish_expr(id, result);
             }
             hir::ExprKind::String { parts } => self.emit_string(id, parts)?,
             hir::ExprKind::LetCondition { pattern, value } => {
-                return self.emit_let_condition(id, pattern, value);
+                let result = self.emit_let_condition(id, pattern, value)?;
+                return self.finish_expr(id, result);
             }
         }
         self.apply_adjustments(id)?;
         self.value_of(id)
+    }
+
+    /// 早期返回的表达式臂统一收尾：应用类型调整并物化值。
+    fn finish_expr(
+        &mut self,
+        id: ExprId,
+        result: Option<LocalId>,
+    ) -> Result<Option<LocalId>, Diagnostic> {
+        self.apply_adjustments(id)?;
+        match result {
+            Some(_) => self.value_of(id),
+            None => Ok(None),
+        }
     }
 
     fn emit_resolved(&mut self, id: ExprId, res: hir::Res) -> Result<(), Diagnostic> {
@@ -270,18 +321,26 @@ impl Builder<'_> {
             operands.push(self.pass_arg(field.value, local));
         }
         let local = self.temp(self.expr_ty(id));
-        self.assign(
-            Place::local(local),
-            Rvalue::Aggregate {
-                kind: AggregateKind::Adt {
-                    ty: self.expr_ty(id),
-                    variant,
-                },
-                operands,
-            },
-        );
+        let ty = self.expr_ty(id);
+        let kind = if self.is_union(ty) {
+            let field = self.owner.fields[fields.start as usize..fields.end as usize]
+                .first()
+                .map_or(0, |field| field.field);
+            AggregateKind::Union { ty, field }
+        } else {
+            AggregateKind::Adt { ty, variant }
+        };
+        self.assign(Place::local(local), Rvalue::Aggregate { kind, operands });
         self.set_value(id, local);
         Ok(())
+    }
+
+    fn is_union(&self, ty: TypeId) -> bool {
+        matches!(
+            self.module.types.get(ty.index()),
+            Some(hir::Type::Named { definition, .. })
+                if self.module.definitions[definition.index()].kind == hir::DefinitionKind::Union
+        )
     }
 
     fn emit_unary(&mut self, id: ExprId, operation: UnOp, value: ExprId) -> Result<(), Diagnostic> {
@@ -342,7 +401,6 @@ impl Builder<'_> {
         let rvalue = binary_rvalue(operation, copy_of(left_local), copy_of(right_local));
         self.assign(Place::local(dest), rvalue);
         self.set_value(id, dest);
-        self.apply_adjustments(id)?;
         self.value_of(id)
     }
 
@@ -353,19 +411,30 @@ impl Builder<'_> {
         left: LocalId,
         right: LocalId,
     ) -> Result<Option<LocalId>, Diagnostic> {
-        let dest = self.temp(self.expr_ty(id));
-        let normal = self.fresh(false);
-        let unwind = self.intern_plan(self.current_unwind(id), CleanupChain::Unwind)?;
-        self.terminate(Terminator::Call {
-            callee: Callee::Dispatch(dispatch),
-            args: vec![copy_of(left), copy_of(right)],
-            destination: Place::local(dest),
-            normal,
-            unwind: Some(unwind),
-            call_kind: CallKind::Managed,
-            site: crate::frontend::mono::instantiate::CallSite::Dispatch(dispatch),
-        });
-        self.switch_to(normal);
+        // 内建运算符 impl 没有函数定义，直接降成对应语言运算。
+        if let Some(op) = self.builtin_binary(dispatch) {
+            let ty = self.expr_ty(id);
+            let dest = self.temp(ty);
+            self.assign(
+                Place::local(dest),
+                Rvalue::BinaryOp {
+                    op,
+                    left: copy_of(left),
+                    right: copy_of(right),
+                },
+            );
+            self.set_value(id, dest);
+            return Ok(Some(dest));
+        }
+        let parameters = self.dispatch_parameters(dispatch);
+        let mut args = Vec::with_capacity(2);
+        for (index, local) in [left, right].into_iter().enumerate() {
+            args.push(match parameters.get(index).copied() {
+                Some(parameter) => self.dispatch_argument(parameter, local, None),
+                None => copy_of(local),
+            });
+        }
+        let dest = self.call_dispatch(id, dispatch, args)?;
         self.set_value(id, dest);
         Ok(Some(dest))
     }
@@ -416,7 +485,10 @@ impl Builder<'_> {
 
     fn emit_asm(&mut self, id: ExprId, index: u32) -> Result<(), Diagnostic> {
         let mut operands = Vec::new();
+        let mut naked = false;
         if let Some(assembly) = self.owner.assembly.get(index as usize) {
+            naked =
+                assembly.context == crate::frontend::semantics::assembly::AssemblyContext::Naked;
             for operand in &assembly.operands {
                 let Some(local) = self.emit_expr(operand.value)? else {
                     return Ok(());
@@ -424,7 +496,13 @@ impl Builder<'_> {
                 operands.push(copy_of(local));
             }
         }
-        let dest = self.temp(self.expr_ty(id));
+        // 裸函数体就是这段汇编：返回值由模板按 ABI 写入返回寄存器。
+        let ty = if naked {
+            self.result_ty()
+        } else {
+            self.expr_ty(id)
+        };
+        let dest = self.temp(ty);
         self.assign(
             Place::local(dest),
             Rvalue::Intrinsic {
@@ -469,10 +547,10 @@ impl Builder<'_> {
 
     fn apply_adjustments(&mut self, id: ExprId) -> Result<(), Diagnostic> {
         let adjustments = self.owner.expressions[id.index()].adjustments.clone();
-        let Some(mut local) = self.expression_locals[id.index()] else {
-            if self.expression_places[id.index()].is_some() {
-                return Ok(());
-            }
+        if adjustments.start == adjustments.end {
+            return Ok(());
+        }
+        let Some(mut local) = self.value_of(id)? else {
             return Ok(());
         };
         for adjustment in
@@ -480,6 +558,7 @@ impl Builder<'_> {
         {
             local = self.apply_adjustment(id, local, adjustment)?;
         }
+        self.set_value(id, local);
         Ok(())
     }
 

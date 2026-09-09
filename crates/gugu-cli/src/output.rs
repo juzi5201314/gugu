@@ -116,6 +116,11 @@ pub(crate) fn print_compilation_text(
     {
         print!("{dump}");
     }
+    if options.z.iter().any(|flag| flag == "dump-lir")
+        && let Some(dump) = compilation.dump_lir()
+    {
+        print!("{dump}");
+    }
     if options.verbose {
         println!("target: {target}");
     }
@@ -184,6 +189,17 @@ pub(crate) fn print_compilation_json(
             }),
         );
     }
+    if options.z.iter().any(|flag| flag == "dump-lir")
+        && let Some(dump) = compilation.dump_lir()
+    {
+        emit_event(
+            "lir-dump",
+            json!({
+                "text": dump,
+                "fingerprint": compilation.lir_fingerprint(),
+            }),
+        );
+    }
     let image_plan = compilation.image_plan().map(|plan| {
         json!({
             "target": plan.target().to_string(),
@@ -198,6 +214,12 @@ pub(crate) fn print_compilation_json(
             "gir-block-count": plan.gir_block_count(),
             "gir-statement-count": plan.gir_statement_count(),
             "gir-fingerprint": plan.gir_fingerprint(),
+            "lir-body-count": plan.lir_body_count(),
+            "lir-block-count": plan.lir_block_count(),
+            "lir-instruction-count": plan.lir_instruction_count(),
+            "lir-memory-operation-count": plan.lir_memory_operation_count(),
+            "lir-safepoint-count": plan.lir_safepoint_count(),
+            "lir-fingerprint": plan.lir_fingerprint(),
             "placement-count": plan.placement_count(),
             "turn-region-count": plan.turn_region_count(),
             "local-heap-count": plan.local_heap_count(),

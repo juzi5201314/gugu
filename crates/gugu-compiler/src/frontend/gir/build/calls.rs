@@ -17,7 +17,13 @@ impl Builder<'_> {
         if let hir::CallTarget::Constructor { ty, variant } = target {
             return self.emit_constructor(id, ty, variant, arguments);
         }
-        let (callee, mut args) = self.prepare_call(target, receiver, arguments)?;
+        if !spawn
+            && let Some(result) = self.emit_builtin_dispatch(id, &target, receiver, &arguments)?
+        {
+            return Ok(Some(result));
+        }
+        let (callee, mut args) = self.prepare_call(id, &target, receiver, arguments)?;
+        self.materialize_variadic(id, &target, &mut args)?;
         if self.terminated() {
             return Ok(None);
         }
@@ -50,15 +56,84 @@ impl Builder<'_> {
         self.emit_call(id, callee, args)
     }
 
+    /// 变参调用：把尾部实参物化成被调者最后一个参数。
+    fn materialize_variadic(
+        &mut self,
+        id: ExprId,
+        target: &hir::CallTarget,
+        args: &mut Vec<Operand>,
+    ) -> Result<(), Diagnostic> {
+        let Some(plan) = self
+            .owner
+            .variadic_calls
+            .iter()
+            .find(|plan| plan.expression == id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        let fixed = usize::try_from(plan.fixed_count).expect("实参数量适配宿主");
+        if fixed > args.len() {
+            return Ok(());
+        }
+        let tail = args.split_off(fixed);
+        let parameters = self.call_parameters(target);
+        let Some(tail_ty) = parameters.last().copied() else {
+            return Ok(());
+        };
+        let local = self.temp(tail_ty);
+        if plan.heterogeneous {
+            self.assign(
+                Place::local(local),
+                Rvalue::Aggregate {
+                    kind: AggregateKind::Tuple,
+                    operands: tail,
+                },
+            );
+        } else {
+            self.assign(
+                Place::local(local),
+                Rvalue::Intrinsic {
+                    op: IntrinsicOp::PackSlice,
+                    operands: tail,
+                    types: vec![plan.element],
+                },
+            );
+        }
+        args.push(Operand::MoveInternal(Place::local(local)));
+        Ok(())
+    }
+
+    /// 被调者签名参数表：函数项取表达式类型，方法取派发签名。
+    fn call_parameters(&self, target: &hir::CallTarget) -> Vec<TypeId> {
+        let ty = match target {
+            hir::CallTarget::Value(expression) => self.owner.expression_types[expression.index()],
+            hir::CallTarget::Dispatch(dispatch) => {
+                self.owner.dispatches[*dispatch as usize].signature
+            }
+            _ => return Vec::new(),
+        };
+        let signature = match self.module.types.get(ty.index()) {
+            Some(hir::Type::Function { .. }) => ty,
+            Some(hir::Type::Callable { signature, .. }) => *signature,
+            _ => return Vec::new(),
+        };
+        match self.module.types.get(signature.index()) {
+            Some(hir::Type::Function { parameters, .. }) => parameters.clone(),
+            _ => Vec::new(),
+        }
+    }
+
     fn prepare_call(
         &mut self,
-        target: hir::CallTarget,
+        id: ExprId,
+        target: &hir::CallTarget,
         receiver: Option<ExprId>,
         arguments: Range<u32>,
     ) -> Result<(Callee, Vec<Operand>), Diagnostic> {
         let callee = match target {
             hir::CallTarget::Value(value) => {
-                let Some(local) = self.emit_expr(value)? else {
+                let Some(local) = self.emit_expr(*value)? else {
                     return Ok((
                         Callee::Value(copy_of(self.temp(self.primitives.unit))),
                         Vec::new(),
@@ -67,29 +142,58 @@ impl Builder<'_> {
                 Callee::Value(copy_of(local))
             }
             hir::CallTarget::Dispatch(dispatch) => {
-                if self.owner.dispatches[dispatch as usize].dynamic {
-                    Callee::Dynamic(dispatch)
+                if self.owner.dispatches[*dispatch as usize].dynamic {
+                    Callee::Dynamic(*dispatch)
                 } else {
-                    Callee::Dispatch(dispatch)
+                    Callee::Dispatch(*dispatch)
                 }
             }
-            hir::CallTarget::Builtin(builtin) => Callee::Builtin(builtin),
+            hir::CallTarget::Builtin(builtin) => Callee::Builtin(*builtin),
             hir::CallTarget::Constructor { .. } => {
                 return Ok((Callee::Builtin(hir::Builtin::Some), Vec::new()));
             }
+        };
+        let parameters = match target {
+            hir::CallTarget::Dispatch(dispatch) => self.dispatch_parameters(*dispatch),
+            _ => Vec::new(),
+        };
+        let dereferences = match target {
+            hir::CallTarget::Dispatch(dispatch) => {
+                self.owner.dispatches[*dispatch as usize].dereferences
+            }
+            _ => 0,
         };
         let mut args = Vec::new();
         if let Some(receiver) = receiver {
             let Some(local) = self.emit_expr(receiver)? else {
                 return Ok((callee, args));
             };
-            args.push(self.pass_arg(receiver, local));
+            let local = self.dereference(local, dereferences);
+            args.push(match parameters.first().copied() {
+                Some(parameter) => self.dispatch_argument(parameter, local, Some(receiver)),
+                None => self.pass_arg(receiver, local),
+            });
         }
-        for argument in expr_range(self.owner, &arguments) {
+        let offset = usize::from(receiver.is_some());
+        // 变参尾按元素/包展开，最后一个签名参数是打包类型，不参与逐参借用。
+        let fixed = self
+            .owner
+            .variadic_calls
+            .iter()
+            .find(|plan| plan.expression == id)
+            .map(|plan| usize::try_from(plan.fixed_count).expect("实参数量适配宿主"));
+        for (index, argument) in expr_range(self.owner, &arguments).into_iter().enumerate() {
             let Some(local) = self.emit_expr(argument)? else {
                 return Ok((callee, args));
             };
-            args.push(self.pass_arg(argument, local));
+            let parameter = parameters
+                .get(offset + index)
+                .copied()
+                .filter(|_| fixed.is_none_or(|fixed| offset + index < fixed));
+            args.push(match parameter {
+                Some(parameter) => self.dispatch_argument(parameter, local, Some(argument)),
+                None => self.pass_arg(argument, local),
+            });
         }
         Ok((callee, args))
     }
@@ -144,13 +248,70 @@ impl Builder<'_> {
         Ok(Some(dest))
     }
 
+    /// 派发签名参数表；签名必须已由语义检查物化为函数类型。
+    pub(super) fn dispatch_parameters(&self, dispatch: u32) -> Vec<TypeId> {
+        let signature = self.owner.dispatches[dispatch as usize].signature;
+        match self.module.types.get(signature.index()) {
+            Some(hir::Type::Function { parameters, .. }) => parameters.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// 派发实参：签名参数为 `&T` 而实参不是引用时按语言规则自动借用。
+    pub(super) fn dispatch_argument(
+        &mut self,
+        parameter: TypeId,
+        local: LocalId,
+        expression: Option<ExprId>,
+    ) -> Operand {
+        let reference = matches!(
+            self.module.types.get(parameter.index()),
+            Some(hir::Type::Ref(_))
+        );
+        let already = expression.is_some_and(|id| {
+            matches!(
+                self.module
+                    .types
+                    .get(self.owner.expression_types[id.index()].index()),
+                Some(hir::Type::Ref(_))
+            )
+        });
+        if !reference || already {
+            return copy_of(local);
+        }
+        let place = expression
+            .and_then(|id| self.expression_places[id.index()])
+            .unwrap_or(Place::local(local));
+        let dest = self.temp(parameter);
+        self.assign(Place::local(dest), Rvalue::Ref(place));
+        Operand::MoveInternal(Place::local(dest))
+    }
+
+    /// 派发接收者：按签名首参自动借用。
+    pub(super) fn dispatch_receiver(
+        &mut self,
+        dispatch: u32,
+        local: LocalId,
+        expression: Option<ExprId>,
+    ) -> Operand {
+        match self.dispatch_parameters(dispatch).first().copied() {
+            Some(parameter) => self.dispatch_argument(parameter, local, expression),
+            None => copy_of(local),
+        }
+    }
+
     pub(super) fn call_dispatch(
         &mut self,
         at: ExprId,
         dispatch: u32,
         args: Vec<Operand>,
     ) -> Result<LocalId, Diagnostic> {
-        let dest = self.temp(self.expr_ty(at));
+        let signature = self.owner.dispatches[dispatch as usize].signature;
+        let result = match self.module.types.get(signature.index()) {
+            Some(hir::Type::Function { result, .. }) => *result,
+            _ => self.expr_ty(at),
+        };
+        let dest = self.temp(result);
         let normal = self.fresh(false);
         let unwind = self.intern_plan(self.current_unwind(at), CleanupChain::Unwind)?;
         self.terminate(Terminator::Call {
@@ -285,9 +446,7 @@ impl Builder<'_> {
             hir::Builtin::TypeId | hir::Builtin::TypeAsInt => {
                 intrinsic(IntrinsicOp::TypeId, operands, types)
             }
-            hir::Builtin::TypeIdCount => {
-                Rvalue::Use(self.const_operand(self.expr_ty(id), ConstValue::Integer(0)))
-            }
+            hir::Builtin::TypeIdCount => Rvalue::Use(Operand::LateConstRef { expression: id.0 }),
             hir::Builtin::TypeName => intrinsic(IntrinsicOp::TypeName, operands, types),
             hir::Builtin::Is => intrinsic(IntrinsicOp::Is, operands, types),
             hir::Builtin::Downcast => intrinsic(IntrinsicOp::Downcast, operands, types),

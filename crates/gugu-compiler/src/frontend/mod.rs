@@ -19,7 +19,7 @@ mod lex;
 pub(crate) mod mono;
 mod names;
 mod parse;
-mod semantics;
+pub(crate) mod semantics;
 mod string;
 mod token;
 mod types;

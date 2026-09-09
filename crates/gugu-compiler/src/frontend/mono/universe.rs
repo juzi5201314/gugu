@@ -93,12 +93,22 @@ pub(crate) fn concrete(context: &MonoContext<'_>, ty: &Ty) -> Result<Ty, Diagnos
                 }
             }
         }
+        Ty::Projection(self_ty, interface, _) => {
+            map(self_ty)?;
+            for argument in &mut interface.arguments {
+                map(argument)?;
+            }
+            let normalized = context.model.normalize(&ty, &[])?;
+            if normalized != ty {
+                return concrete(context, &normalized);
+            }
+        }
         _ => {}
     }
     Ok(ty)
 }
 
-fn is_concrete(ty: &Ty) -> bool {
+pub(crate) fn is_concrete(ty: &Ty) -> bool {
     match ty {
         Ty::Error | Ty::Var(_) | Ty::Param(_) | Ty::Projection(..) | Ty::Opaque(..) => false,
         Ty::Ref(t)

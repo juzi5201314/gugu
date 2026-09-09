@@ -222,9 +222,31 @@ impl Model<'_> {
                     | "BitXor"
                     | "Shl"
                     | "Shr"
+                    | "AddAssign"
+                    | "SubAssign"
+                    | "MulAssign"
+                    | "DivAssign"
+                    | "RemAssign"
+                    | "BitAndAssign"
+                    | "BitOrAssign"
+                    | "BitXorAssign"
+                    | "ShlAssign"
+                    | "ShrAssign"
             ),
-            Ty::Float(_) => matches!(name, "Add" | "Sub" | "Mul" | "Div" | "Rem"),
-            Ty::String => name == "Add",
+            Ty::Float(_) => matches!(
+                name,
+                "Add"
+                    | "Sub"
+                    | "Mul"
+                    | "Div"
+                    | "Rem"
+                    | "AddAssign"
+                    | "SubAssign"
+                    | "MulAssign"
+                    | "DivAssign"
+                    | "RemAssign"
+            ),
+            Ty::String => matches!(name, "Add" | "AddAssign"),
             _ => false,
         }
     }

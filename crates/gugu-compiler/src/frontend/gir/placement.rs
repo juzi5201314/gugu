@@ -121,6 +121,7 @@ pub(crate) fn attach(mut world: GirWorldV1, placement: PlacementWorldV1) -> GirW
         &world.fragments,
         world.hir_fingerprint,
         &world.placement,
+        &world.concrete,
     );
     world
 }

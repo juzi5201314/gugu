@@ -142,6 +142,8 @@ pub enum DiagnosticCode {
     GirInvariant,
     /// 按值传递超过 64 字节的位结构体。
     LargeCopy,
+    /// LIR SSA、内存链、provenance 或 effect region 不满足内部不变量。
+    LirInvariant,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -203,6 +205,7 @@ impl fmt::Display for DiagnosticCode {
             Self::LateComptime => "E0054",
             Self::GirInvariant => "E0055",
             Self::LargeCopy => "E0056",
+            Self::LirInvariant => "E0057",
         };
         formatter.write_str(code)
     }

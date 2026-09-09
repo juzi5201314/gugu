@@ -395,7 +395,7 @@ fn validate_internal_flags(options: &GlobalArgs, internal: bool) -> Result<(), S
         if !internal {
             return Err(format!("内部选项 `-Z{flag}` 未启用"));
         }
-        if flag != "dump-gir" {
+        if !matches!(flag.as_str(), "dump-gir" | "dump-lir") {
             return Err(format!("未知内部选项 `-Z{flag}`"));
         }
     }
@@ -629,7 +629,7 @@ fn run_compile(file: Option<PathBuf>, options: &GlobalArgs, check_only: bool) ->
     }
     let compilation = Compiler::new().compile(CompileRequest::single_file_path(file, target));
     print_compilation(&compilation, check_only, options, target);
-    i32::from(!compilation.is_success())
+    compilation.exit_code()
 }
 
 fn single_file_mode_conflict(options: &GlobalArgs) -> Option<String> {
@@ -715,7 +715,7 @@ fn compile_package(
     compiler: &Compiler,
     lock: &LockGraph,
     format: OutputFormat,
-) -> Result<bool, ()> {
+) -> Result<i32, ()> {
     let features = enabled_features(options, package);
     let selected = match package.select_targets_in(&target_selection(options), &features) {
         Ok(selected) => selected,
@@ -724,7 +724,7 @@ fn compile_package(
             return Err(());
         }
     };
-    let mut failed = false;
+    let mut exit_code = 0;
     for package_target in selected {
         let (package_identity, external_packages) =
             package_resolution(lock, project_root, package, package_target.kind());
@@ -747,9 +747,9 @@ fn compile_package(
             );
         }
         print_compilation(&compilation, check_only, options, target);
-        failed |= !compilation.is_success();
+        exit_code = exit_code.max(compilation.exit_code());
     }
-    Ok(failed)
+    Ok(exit_code)
 }
 
 fn resolve_project_lock(
@@ -911,7 +911,7 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
         Err(()) => return 2,
     };
     let compiler = Compiler::new();
-    let mut failed = false;
+    let mut exit_code = 0;
     for package in packages {
         match compile_package(
             project.workspace().root(),
@@ -923,11 +923,11 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             &lock,
             format,
         ) {
-            Ok(pkg_failed) => failed |= pkg_failed,
+            Ok(package_exit_code) => exit_code = exit_code.max(package_exit_code),
             Err(()) => return 2,
         }
     }
-    i32::from(failed)
+    exit_code
 }
 
 fn run_registered_command(command: &Command, format: OutputFormat) -> i32 {

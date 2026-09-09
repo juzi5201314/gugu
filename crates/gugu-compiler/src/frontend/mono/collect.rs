@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `MonoWorldV1` schema。
-pub(crate) const MONO_SCHEMA: u32 = 3;
+pub(crate) const MONO_SCHEMA: u32 = 4;
 
 /// 闭合后的实例图：实例按 key 摘要排序，`MonoId` 为排序后下标。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -63,6 +63,17 @@ pub(crate) struct InstanceSummaryV1 {
     pub fragment_input_fingerprint: [u8; 32],
     pub types: Vec<crate::frontend::late::universe::TypeRecord>,
     pub type_bindings: Vec<(u32, super::keys::StableTypeKey)>,
+    pub substitutions: BTreeMap<String, crate::frontend::semantics::Ty>,
+    pub const_arguments: Vec<Vec<u8>>,
+    pub functions: Vec<FunctionBinding>,
+}
+
+/// 函数值的具体代码身份，不让 LIR 重新选择 impl 或解码 MonoKey。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct FunctionBinding {
+    pub definition: u32,
+    pub type_arguments: Vec<[u8; 32]>,
+    pub instance: [u8; 32],
 }
 
 /// 收集根并闭合可达实例图。
@@ -308,6 +319,17 @@ fn summary_of(record: InstanceRecordV1) -> InstanceSummaryV1 {
         fragment_input_fingerprint,
         types: record.types,
         type_bindings: record.type_bindings,
+        substitutions: record.substitutions,
+        const_arguments: record.const_arguments,
+        functions: record
+            .callees
+            .iter()
+            .map(|callee| FunctionBinding {
+                definition: callee.definition.0,
+                type_arguments: callee.key.type_arguments.clone(),
+                instance: callee.key.digest(),
+            })
+            .collect(),
     }
 }
 

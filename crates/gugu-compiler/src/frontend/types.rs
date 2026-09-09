@@ -9,6 +9,7 @@ use super::{
 use crate::{Diagnostic, DiagnosticCode};
 use std::collections::BTreeMap;
 mod borrow;
+mod concrete;
 mod foreign;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

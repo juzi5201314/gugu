@@ -92,7 +92,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 一元 `-` 只用于有符号整数与浮点。对无符号类型写 `-x` 是编译错误。按位取反是前缀 `~`，只用于整数。
 
-`==` `!=` `<` `<=` `>` `>=` 对内置标量、`string`、`TypeId`、由它们组成的元组与数组，由编译器直接实现，不走 trait。浮点按 IEEE 754（`NaN != NaN`，涉及 NaN 的序比较为 false）。用户 `struct` / `enum` 没有默认同等；要写 `==` 必须 `#[derive(Eq)]` 或手写 `impl Eq`。内置整数与浮点的算术同样由编译器直接降指令；语言同时给出对应的 `Add` 等 impl，使 `T: Add` 能用在 `int` 上。`string` 的 `+` / `+=` 走 `Add` / `AddAssign`，见下。
+`==` `!=` `<` `<=` `>` `>=` 对内置标量、`string`、`TypeId`、由它们组成的元组与数组，由编译器直接实现，不走 trait。浮点按 IEEE 754（`NaN != NaN`，涉及 NaN 的序比较为 false）。用户 `struct` / `enum` 没有默认同等；要写 `==` 必须 `#[derive(Eq)]` 或手写 `impl Eq`。内置整数与浮点的算术同样由编译器直接降指令；语言同时给出对应的 `Add` 等 impl，使 `T: Add` 能用在 `int` 上。`string` 的 `+` / `+=` 也由编译器直接降成拼接，并同样提供 `Add` / `AddAssign` impl 供泛型代码使用，见下。
 
 ## 引用 `&T`
 

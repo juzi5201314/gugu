@@ -205,10 +205,11 @@
   - 验收：传递不产生 move/borrow 门槛；句柄身份、COW 独立值和 ResourceCell 一次性 release 语义在赋值/返回/聚合/Any 中一致；分析未知时保留安全通用路径。
   - 接入证据：`BuildGenericGir` schema 2 在构造期按传递类别展开 `ValueAction`/`CowSnapshot`/`ResourceAction`；调用实参先语义拷再 `MoveInternal`，`dyn Any` 擦除先 seal。`large_copy` 为 `E0056`（默认 warn，`deny`/`forbid` 使 Frontend 失败且无镜像）。管线为 `gir → mono → late → attach_fragments → WholeProgramAnalysis`（24，schema 5，`analysis_semantics_revision = 5`）→ `EscapeAndPlacement`（29，schema 1）→ `PublicFunctionSummary`。`GirWorldV1` schema 2 携带 `PlacementWorldV1`；分析用放置前指纹。未知/逃逸/发布不选 `TurnRegion`。纯位 `ValueAction` 不破坏范围证明。`ImagePlan`/`ActionInputs`/`-Zdump-gir` 消费 placement 计数与指纹。338 项工作区测试全部通过（阶段 27 新增 7 项），fmt/build 零 warning，mdBook 构建通过。Linux CLI `check`/`build` 接受含 `f(x)` 后再用、string COW 与 placement 的真实输入，JSON `image-plan` 含 placement 字段；`#![deny(large_copy)]` 对 `[uint; 9]` 退出码 1 且 `image-plan` 为 null。单态化 GIR 替换、LIR 与堆装箱改写分别仍由阶段 28/29 交付。
 
-- [ ] **阶段 28：实现 LIR SSA、memory SSA 与 verifier**（复杂度：5）
+- [x] **阶段 28：实现 LIR SSA、memory SSA 与 verifier**（复杂度：5）
   - 依赖：阶段 26、27。
   - 实现 block parameter SSA、Mem token、封闭 LIR 指令集、provenance、调用/原子/volatile/屏障/safepoint effect、source scope 和结构 verifier。
   - 验收：每个可能内存操作都有正确 Mem 链；合流参数顺序确定；禁止悬空引用、越权 pointer provenance、非法 memory order、未闭合 region、缺失 barrier 和不合法 terminator。
+  - 接入证据：`BuildConcreteGir`（schema 1）把每个实例的操作树绑定到具体布局表、闭合实例键/动态槽与协议展开；`BuildLir`（query 15，schema 1）按实例键、GIR/布局、late、placement 与目标指纹缓存，构造结果与缓存恢复都经同一 `verify`，失败为 `E0057`。`Compilation` 暴露 `lir`/`dump_lir`/`lir_fingerprint`，`ActionInputs` 收录 `lir` 指纹，backend 与 `image-plan` JSON 消费 body/block/指令/内存操作/safepoint 计数。修正了 LIR 暴露的归属层缺口：变参尾物化、内建 `Clone` 与算术 impl 展开、union 聚合、`?` 载荷提取、static/const 初始化返回类型、接收者自动借用/解引用、string 拼接与 `TypeId.name()` 运行期名称。348 项工作区测试全部通过（阶段 28 新增 10 项，含 9 项非法 LIR 拒绝用例），fmt/build 零 warning，mdBook 构建通过；Linux CLI `check`/`build` 接受含变参、迭代器、用户 `Try`/`Index`、union、裸指针构造引用与泛型算术的真实输入，`-Zdump-lir` 打印 Mem 链、provenance、scope 与 source。
 
 - [ ] **阶段 29：实现固定优化管线与 poll budget**（复杂度：5）
   - 依赖：阶段 23、28。

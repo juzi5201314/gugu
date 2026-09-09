@@ -1,6 +1,7 @@
 //! generic GIR：从冻结 HIR owner 构造显式 CFG，经 query 缓存后进入下游。
 pub(crate) mod body;
 mod build;
+pub(crate) mod concrete;
 mod dump;
 pub(crate) mod passing;
 pub(crate) mod placement;
@@ -21,7 +22,7 @@ use crate::frontend::mono::MonoWorldV1;
 use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const WORLD_SCHEMA: u32 = 2;
+pub(crate) const WORLD_SCHEMA: u32 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct GirFragment {
@@ -37,6 +38,7 @@ pub(crate) struct GirWorldV1 {
     pub(crate) bodies: Vec<GirBody>,
     pub(crate) fragments: Vec<GirFragment>,
     pub(crate) placement: placement::PlacementWorldV1,
+    pub(crate) concrete: Vec<concrete::ConcreteBody>,
     pub(crate) fingerprint: [u8; 32],
 }
 
@@ -47,8 +49,9 @@ pub(crate) fn empty_world() -> GirWorldV1 {
         hir_fingerprint: [0; 32],
         bodies: Vec::new(),
         fragments: Vec::new(),
-        fingerprint: world_fingerprint(&[], &[], [0; 32], &placement),
+        fingerprint: world_fingerprint(&[], &[], [0; 32], &placement, &[]),
         placement,
+        concrete: Vec::new(),
     }
 }
 
@@ -57,8 +60,9 @@ pub(crate) fn world_fingerprint(
     fragments: &[GirFragment],
     hir_fingerprint: [u8; 32],
     placement: &placement::PlacementWorldV1,
+    concrete: &[concrete::ConcreteBody],
 ) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key("gugu-gir-world-v2");
+    let mut hash = blake3::Hasher::new_derive_key("gugu-gir-world-v3");
     hash.update(&hir_fingerprint);
     hash.update(&(bodies.len() as u64).to_le_bytes());
     for body in bodies {
@@ -67,6 +71,9 @@ pub(crate) fn world_fingerprint(
     let fragment_bytes = serde_json::to_vec(fragments).expect("GIR fragment 序列化");
     hash.update(&fragment_bytes);
     hash.update(&placement.fingerprint);
+    for body in concrete {
+        hash.update(&body.fingerprint);
+    }
     *hash.finalize().as_bytes()
 }
 

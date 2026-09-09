@@ -64,30 +64,30 @@ impl Builder<'_> {
     }
 
     fn copy_resource(&mut self, dest: Place, src: Place, ty: TypeId) {
+        self.resource_action(ResourceActionKind::AcquireLease, src, ty);
         self.release_if_live(dest, ty);
-        self.resource_action(ResourceActionKind::AcquireLease, dest, ty);
         self.assign(dest, Rvalue::Use(Operand::Copy(src)));
         self.mark_written(dest);
     }
 
     fn copy_unknown(&mut self, dest: Place, src: Place, ty: TypeId) {
+        self.resource_action(ResourceActionKind::AcquireLease, src, ty);
         self.release_if_live(dest, ty);
         self.value_action(ValueActionKind::Copy, src, ty);
         self.assign(dest, Rvalue::CowSnapshot(src));
-        self.resource_action(ResourceActionKind::AcquireLease, dest, ty);
         self.mark_written(dest);
     }
 
     fn copy_mixed(&mut self, dest: Place, src: Place, ty: TypeId, class: PassingClass) {
+        if class.has_resource() {
+            self.resource_action(ResourceActionKind::AcquireLease, src, ty);
+        }
         self.release_if_live(dest, ty);
         self.value_action(ValueActionKind::Copy, src, ty);
         if class.has_cow() {
             self.assign(dest, Rvalue::CowSnapshot(src));
         } else {
             self.assign(dest, Rvalue::Use(Operand::Copy(src)));
-        }
-        if class.has_resource() {
-            self.resource_action(ResourceActionKind::AcquireLease, dest, ty);
         }
         self.mark_written(dest);
     }
@@ -201,7 +201,7 @@ impl Builder<'_> {
     }
 
     pub(super) fn pass_arg(&mut self, id: ExprId, local: LocalId) -> Operand {
-        let ty = self.expr_ty(id);
+        let ty = self.owner.expression_types[id.index()];
         let dest = self.temp(ty);
         self.copy_value(Place::local(dest), Place::local(local), ty);
         Operand::MoveInternal(Place::local(dest))

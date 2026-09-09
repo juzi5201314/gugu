@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 /// GIR schema revision（见 gir-lir.md「共同表示规则」）。
-pub(crate) const GIR_REVISION: u32 = 2;
+pub(crate) const GIR_REVISION: u32 = 3;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -236,6 +236,8 @@ pub(crate) enum ConstValue {
     String(String),
     Bytes(Vec<u8>),
     CString(Vec<u8>),
+    Aggregate(Vec<ConstValue>),
+    Type([u8; 32]),
     /// 模块级常量或关联常量项；单态化物化其规范值。
     Definition(DefId),
     /// 非法但类型正确的占位不存在：`Never` 只用于 `!` 类型槽的初始化标记。
@@ -287,7 +289,15 @@ pub(crate) enum CheckOpKind {
 pub(crate) enum AggregateKind {
     Tuple,
     Array(TypeId),
-    Adt { ty: TypeId, variant: u32 },
+    Adt {
+        ty: TypeId,
+        variant: u32,
+    },
+    /// union 构造只初始化一个字段；其余字节未初始化。
+    Union {
+        ty: TypeId,
+        field: u32,
+    },
     Range,
     Closure(DefId),
     Coroutine(DefId),
@@ -394,6 +404,8 @@ pub(crate) enum IntrinsicOp {
     Subslice {
         slice: bool,
     },
+    /// 齐次变参尾：把 operands 物化为 `&[T]`，`types = [T]`，长度由 operands 数量决定。
+    PackSlice,
     /// 字符串插值；`parts` 引用 HIR owner 的 string_parts 池。
     Format {
         parts: Range<u32>,

@@ -1,0 +1,15 @@
+use std.ptr as ptr
+#[ffi(leaf(stack = 17))] extern "C" fn leaf(value: int) int
+extern "C" fn external(value: int) int
+fn main() {
+    let value: int
+    let pointer = ptr.addr_of(value)
+    unsafe {
+        ptr.ptr_write(pointer, 2)
+        let read: int = ptr.read_unaligned(pointer)
+        ptr.volatile_store(pointer, read)
+        _ = ptr.volatile_load(pointer)
+    }
+    _ = leaf(unsafe { ptr.ptr_read(pointer) })
+    _ = external(unsafe { ptr.ptr_read(pointer) })
+}

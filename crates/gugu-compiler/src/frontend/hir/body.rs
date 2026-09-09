@@ -236,6 +236,8 @@ pub(crate) struct Dispatch {
     pub(crate) implementation: Option<DefId>,
     pub(crate) interface: Option<TraitRef>,
     pub(crate) member: Option<u32>,
+    /// 接口成员规范名；内建 trait 方法没有函数定义，低层按名字展开。
+    pub(crate) member_name: Option<String>,
     pub(crate) dereferences: u32,
     pub(crate) borrow: bool,
     pub(crate) implicit_receiver: bool,

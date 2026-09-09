@@ -24,7 +24,7 @@ pub(super) fn lower(
         hash.update(&expansion.macro_call().end().to_le_bytes());
     }
     let lower_input_fingerprint = *hash.finalize().as_bytes();
-    let key = QueryKey::new(QueryKind::LowerHir, 5, lower_input_fingerprint);
+    let key = QueryKey::new(QueryKind::LowerHir, 6, lower_input_fingerprint);
     let (definitions, identities) =
         identity::collect(model, names, checked, sources).map_err(|error| vec![error])?;
     let mut fresh = None;

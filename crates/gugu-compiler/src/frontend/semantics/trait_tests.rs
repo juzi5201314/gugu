@@ -142,7 +142,20 @@ fn lint_forbid_is_scoped_and_cfg_removed_nodes_do_not_participate() {
 #[test]
 fn user_index_and_compound_assignment_use_their_designated_traits() {
     assert!(accepts(
-        "struct Cell { value: int }\nimpl Index for Cell { type Output = int\n fn index(self: &Self, i: int) int = self.value\n fn index_set(self: &Self, i: int, v: int) { self.value = v } }\nimpl AddAssign[int] for Cell { fn add_assign(self: &Self, rhs: int) { self.value += rhs } }\nfn main() { let c = Cell { value: 0 }\n c[0] = 1\n c += 2\n let n: int = c[0]\n _ = n }"
+        "struct Cell { value: int }\nimpl Index for Cell { type Output = int\n fn index(self: &Self, i: int) int = self.value\n fn index_set(self: &Self, i: int, v: int) { self.value = v } }\nimpl AddAssign[int] for Cell { fn add_assign(self: &Self, rhs: int) { self.value += rhs } }\nfn main() { let c = Cell { value: 0 }\n c[0] = 1\n c[0] += 2\n c += 2\n let n: int = c[0]\n _ = n }"
+    ));
+}
+
+#[test]
+fn builtin_arithmetic_impls_serve_generic_bounds_and_string_operators() {
+    assert!(accepts(
+        "fn sum[T: Add[T]](a: T, b: T) T::Output = a + b\nfn main() { _ = sum(1, 2)\n _ = sum(\"a\", \"b\") }"
+    ));
+    assert!(accepts(
+        "fn bump[T: AddAssign[T]](value: &T, step: T) { *value += step }\nfn main() { let n = 1\n let _ = bump::[int](&n, 2)\n _ = n }"
+    ));
+    assert!(accepts(
+        "fn main() { let text = \"a\"\n text += \"b\"\n _ = text + \"c\" }"
     ));
 }
 

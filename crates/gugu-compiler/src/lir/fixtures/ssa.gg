@@ -1,0 +1,16 @@
+fn choose(flag: bool, start: int, count: int) int {
+    let value = start
+    if flag { value = value + 1 } else { value = value + 2 }
+    let index = 0
+    while index < count {
+        value = value + index
+        index = index + 1
+    }
+    return value
+}
+fn load(pointer: &int) int = *pointer
+fn main() {
+    let result = choose(true, 10, 4)
+    let result = load(&result)
+    _ = result
+}

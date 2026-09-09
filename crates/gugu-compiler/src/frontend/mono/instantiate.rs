@@ -10,7 +10,7 @@ use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const INSTANCE_SCHEMA: u32 = 3;
+pub(crate) const INSTANCE_SCHEMA: u32 = 4;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -48,6 +48,8 @@ pub(crate) struct InstanceRecordV1 {
     pub uses_late_comptime: bool,
     pub types: Vec<crate::frontend::late::universe::TypeRecord>,
     pub type_bindings: Vec<(u32, super::keys::StableTypeKey)>,
+    pub substitutions: BTreeMap<String, Ty>,
+    pub const_arguments: Vec<Vec<u8>>,
 }
 
 /// 同一接口的每个具体接收者都需要独立 vtable。
@@ -210,6 +212,8 @@ pub(crate) fn walk_instance(
         uses_late_comptime: edges.uses_late_comptime,
         types,
         type_bindings,
+        substitutions: entry.bindings.clone(),
+        const_arguments: entry.key.const_arguments.clone(),
     })
 }
 
@@ -381,7 +385,8 @@ fn callable_type(
             ty = *instantiated;
         }
     }
-    context.type_at(ty, &entry.bindings)
+    let ty = context.type_at(ty, &entry.bindings)?;
+    super::universe::concrete(context, &ty)
 }
 
 struct ResolvedCallee {
@@ -401,6 +406,19 @@ fn resolve_dispatch(
     let self_ty = context
         .model
         .hidden_type(&self_ty, &context.checked.hidden_types)?;
+    // 不透明返回类型的关联类型投影（如 `impl IntoIter` 的 `Self::Iter`）要
+    // 先解开不透明基类型再归一化，否则方法选择只看到接口声明而拿不到实现。
+    let self_ty = match self_ty {
+        Ty::Projection(base, interface, member) => {
+            let base = context
+                .model
+                .hidden_type(&base, &context.checked.hidden_types)?;
+            context
+                .model
+                .normalize(&Ty::Projection(Box::new(base), interface, member), &[])?
+        }
+        ty => ty,
+    };
     let signature = context.type_at(dispatch.signature, &entry.bindings)?;
     if dispatch.dynamic {
         edges.metadata_roots.insert(context.encode_type(&self_ty)?);

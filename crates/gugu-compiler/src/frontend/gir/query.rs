@@ -8,7 +8,7 @@ use crate::frontend::semantics::query::{restore_errors, store_errors};
 use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::{Diagnostic, SourceMap};
 
-pub(crate) const BUILD_SCHEMA: u32 = 2;
+pub(crate) const BUILD_SCHEMA: u32 = 3;
 
 pub(crate) fn build_world(
     hir: &Validated,
@@ -21,13 +21,14 @@ pub(crate) fn build_world(
         bodies.push(compute_body(hir, index, owner, queries, sources)?);
     }
     let placement = PlacementWorldV1::empty();
-    let fingerprint = world_fingerprint(&bodies, &[], hir.fingerprint(), &placement);
+    let fingerprint = world_fingerprint(&bodies, &[], hir.fingerprint(), &placement, &[]);
     Ok(GirWorldV1 {
         schema: WORLD_SCHEMA,
         hir_fingerprint: hir.fingerprint(),
         bodies,
         fragments: Vec::new(),
         placement,
+        concrete: Vec::new(),
         fingerprint,
     })
 }
@@ -39,6 +40,7 @@ pub(crate) fn attach_fragments(world: GirWorldV1, mono: &MonoWorldV1) -> GirWorl
         &fragments,
         world.hir_fingerprint,
         &world.placement,
+        &world.concrete,
     );
     GirWorldV1 {
         fragments,
@@ -69,7 +71,7 @@ fn compute_body(
     let result = queries
         .compute(key, |context| {
             context.record_dependency(
-                QueryKey::new(QueryKind::LowerHir, 5, module.input_fingerprint),
+                QueryKey::new(QueryKind::LowerHir, 6, module.input_fingerprint),
                 hir.fingerprint(),
             );
             match build::lower(module, owner) {
