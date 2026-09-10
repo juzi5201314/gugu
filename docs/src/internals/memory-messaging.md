@@ -814,7 +814,7 @@ owner 身份、slab 描述符、dense size class、消息字段、grace 步骤�
 12. 完成 per-owner root slice、credit termination、MosaicBaseline/MosaicConcurrent stop 边界和 security profile。
 13. 最后加入 typed combining，用于 GlobalRange 和 topology 冷路径，不回流到 allocation/return/GC mark 热路径。
 
-第 1--3 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；Gugu runtime 侧的等价实现随阶段 33/34 的 rt0 与协程控制块落地并复用同一 schema。第 4 步起仍按本顺序推进。
+第 1--3 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；Gugu runtime 侧的等价实现随 rt0 与协程控制块的落地复用同一 schema（见[运行时](../spec/runtime.md#rt0-与启动)与[调度器](scheduler.md)）。第 4 步起仍按本顺序推进。
 
 每个步骤完成后都要同步对应的 spec/internals 条款；实现、规范和测试必须同时改变，不能只引入一个“以后再接”的空接口。
 
