@@ -1,3 +1,6 @@
+// image-plan 的 JSON 信封字段数量接近宏展开上界，显式提高递归上限。
+#![recursion_limit = "256"]
+
 mod config;
 mod formatting;
 mod output;

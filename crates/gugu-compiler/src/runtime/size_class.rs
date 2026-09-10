@@ -13,6 +13,9 @@ use super::slab::{MemoryDomainId, RawInvariant};
 /// slot 头部保留字节；link 与状态字占用这段区域，payload 从其后开始。
 pub(crate) const SLOT_HEADER_BYTES: u32 = 8;
 
+/// ResourceCell header 字节数；`leases` 到 `reserved` 共 64 byte，payload 从其后开始。
+pub(crate) const RESOURCE_SLOT_HEADER_BYTES: u32 = 64;
+
 /// intrusive link 所需的字节数（编码后的 64-bit link）。
 pub(crate) const LINK_BYTES: u32 = 8;
 
@@ -67,6 +70,8 @@ pub(crate) struct RuntimeSizeClass {
     pub(crate) id: RuntimeSizeClassId,
     pub(crate) payload_bytes: u32,
     pub(crate) slot_stride: u32,
+    /// slot 前置 header 字节数；raw 记录为 8，ResourceCell 为 64。
+    pub(crate) header_bytes: u32,
     pub(crate) alignment: u32,
     pub(crate) slots_per_span: u32,
     pub(crate) metadata_bytes: u32,
@@ -86,7 +91,12 @@ impl RuntimeSizeClass {
 
     /// 返回一个 slot 的 payload 起始偏移。
     pub(crate) const fn payload_offset(&self) -> u32 {
-        SLOT_HEADER_BYTES
+        self.header_bytes
+    }
+
+    /// 返回该 class 是否由 lease 计数与 close 状态线性化。
+    pub(crate) const fn is_resource(self) -> bool {
+        matches!(self.policy, DropScanPolicy::ResourceLease)
     }
 
     /// 返回给定 slot 编号在 span 内的字节偏移。
@@ -187,25 +197,48 @@ pub(crate) struct RuntimeSizeClassTable {
 impl RuntimeSizeClassTable {
     /// 由规范阶梯构造 raw plane 的 class 表。
     pub(crate) fn ladder(domain: MemoryDomainId) -> Result<Self, RawInvariant> {
-        let classes = super::RAW_CLASS_LADDER
+        Self::build_ladder(domain, SLOT_HEADER_BYTES, DropScanPolicy::RawNoPointers)
+    }
+
+    /// 由规范阶梯构造 ResourceCell slab 的 class 表；header 固定 64 byte。
+    pub(crate) fn resource_ladder() -> Result<Self, RawInvariant> {
+        Self::build_ladder(
+            MemoryDomainId::RESOURCE,
+            RESOURCE_SLOT_HEADER_BYTES,
+            DropScanPolicy::ResourceLease,
+        )
+    }
+
+    /// 按 header 与 drop/scan 策略构造规范阶梯；阶梯本身由策略选择。
+    fn build_ladder(
+        domain: MemoryDomainId,
+        header_bytes: u32,
+        policy: DropScanPolicy,
+    ) -> Result<Self, RawInvariant> {
+        let ladder = match policy {
+            DropScanPolicy::ResourceLease => &super::RESOURCE_CLASS_LADDER,
+            DropScanPolicy::Managed | DropScanPolicy::RawNoPointers => &super::RAW_CLASS_LADDER,
+        };
+        let classes = ladder
             .iter()
             .enumerate()
             .map(|(index, stride)| RuntimeSizeClass {
                 id: RuntimeSizeClassId(u16::try_from(index).expect("阶梯长度适配 u16")),
-                payload_bytes: stride - SLOT_HEADER_BYTES,
+                payload_bytes: stride - header_bytes,
                 slot_stride: *stride,
+                header_bytes,
                 alignment: (*stride).min(64),
                 slots_per_span: u32::try_from(RAW_SLAB_PAGE_BYTES / u64::from(*stride))
                     .expect("每 span slot 数适配 u32"),
                 metadata_bytes: u32::try_from(RAW_SLAB_PAGE_BYTES % u64::from(*stride))
                     .expect("span metadata 适配 u32"),
-                link_usable: *stride >= LINK_BYTES,
+                link_usable: header_bytes >= LINK_BYTES,
                 clear_mask: ClearField::POINTER
                     | ClearField::LENGTH
                     | ClearField::SECRET
                     | ClearField::RESOURCE_STATE,
                 poison: true,
-                policy: DropScanPolicy::RawNoPointers,
+                policy,
                 domain,
             })
             .collect();
@@ -246,6 +279,7 @@ impl RuntimeSizeClassTable {
             bytes.extend_from_slice(&class.id.raw().to_le_bytes());
             bytes.extend_from_slice(&class.payload_bytes.to_le_bytes());
             bytes.extend_from_slice(&class.slot_stride.to_le_bytes());
+            bytes.extend_from_slice(&class.header_bytes.to_le_bytes());
             bytes.extend_from_slice(&class.alignment.to_le_bytes());
             bytes.extend_from_slice(&class.slots_per_span.to_le_bytes());
             bytes.extend_from_slice(&class.metadata_bytes.to_le_bytes());
@@ -270,11 +304,16 @@ impl RuntimeSizeClassTable {
                     class.id.raw()
                 )));
             }
-            if class.payload_bytes == 0 || class.slot_stride < class.payload_bytes {
-                return Err(RawInvariant::new("size class 的 payload 超出 slot stride"));
+            if class.header_bytes == 0 || class.slot_stride < class.header_bytes {
+                return Err(RawInvariant::new("size class 的 header 超出 slot stride"));
             }
-            if class.slot_stride <= SLOT_HEADER_BYTES {
+            if class.slot_stride <= LINK_BYTES {
                 return Err(RawInvariant::new("size class 的 stride 不足 slot 头部"));
+            }
+            if class.payload_bytes != class.slot_stride - class.header_bytes {
+                return Err(RawInvariant::new(
+                    "size class 的 payload 与 header/stride 不一致",
+                ));
             }
             if !class.alignment.is_power_of_two() || class.slot_stride % class.alignment != 0 {
                 return Err(RawInvariant::new("size class 的 alignment 非法"));
@@ -289,13 +328,26 @@ impl RuntimeSizeClassTable {
                     "size class 的每 span slot 数或 metadata bytes 与页布局不一致",
                 ));
             }
-            if class.link_usable != (class.slot_stride >= LINK_BYTES) {
+            if class.link_usable != (class.header_bytes >= LINK_BYTES) {
                 return Err(RawInvariant::new(
-                    "size class 的 link 复用能力与 stride 不一致",
+                    "size class 的 link 复用能力与 header 不一致",
                 ));
             }
-            if matches!(class.policy, DropScanPolicy::Managed) {
-                return Err(RawInvariant::new("raw size class 不能登记 managed 策略"));
+            match class.policy {
+                DropScanPolicy::Managed => {
+                    return Err(RawInvariant::new("raw size class 不能登记 managed 策略"));
+                }
+                DropScanPolicy::ResourceLease if class.domain != MemoryDomainId::RESOURCE => {
+                    return Err(RawInvariant::new(
+                        "resource lease class 必须属于 Resource domain",
+                    ));
+                }
+                DropScanPolicy::RawNoPointers if class.domain == MemoryDomainId::RESOURCE => {
+                    return Err(RawInvariant::new(
+                        "Resource domain 的 class 必须使用 resource lease 策略",
+                    ));
+                }
+                _ => {}
             }
             class.division().verify(class.slot_stride)?;
         }

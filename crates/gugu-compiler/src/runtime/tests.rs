@@ -12,12 +12,17 @@ use super::message::{
     PublishOutcome, ReturnKind, ReturnMessage, ReturnNodePool, ReturnSlabCache, RingCloseReason,
     stage_message,
 };
+use super::model::CellHeaderSchemaV1;
 use super::model::{
     FieldKind, MessageFieldSchema, MessageSchemaV1, RawPlaneDemand, RawPlanePolicyV1,
-    RuntimeRawContractV1,
+    RawResourceDemand, RuntimeRawContractV1,
 };
 use super::owner::AllocationLevel;
 use super::provider::{FakeRangeProvider, ProviderError, RangeProvider, RangeState};
+use super::resource::{
+    self, CloseOutcome, LeaseOutcome, ReleaseDescriptor, ReleaseFlags, ReleaseRegistry,
+    ResourceCell, ResourceCellTable,
+};
 use super::size_class::{
     ClearField, DropScanPolicy, RuntimeSizeClassId, RuntimeSizeClassTable, StrideDivision,
 };
@@ -25,7 +30,7 @@ use super::slab::{
     Epoch, MemoryDomainId, OwnerToken, RawInvariant, RuntimeSeed, SlabDescriptorId, SlabGeneration,
     SlotState,
 };
-use super::world::RawWorld;
+use super::world::{RawWorld, ResourceShape};
 use super::{OWNER_INBOX_SHARDS, RAW_SLAB_PAGE_BYTES, RETURN_SLAB_CACHE_SETS};
 use crate::TargetName;
 
@@ -576,7 +581,14 @@ fn owner_retire_waits_for_queue_page_grace() {
         seed.next()
     };
     let _ = replacement;
-    assert_eq!(world.token(1).owner_id.raw(), 2, "owner 编号不复用");
+    assert!(
+        world.token(1).owner_id.raw() > world.token(0).owner_id.raw(),
+        "owner 编号不复用"
+    );
+    assert!(
+        world.resource_token(1).owner_id.raw() > world.resource_token(0).owner_id.raw(),
+        "resource owner 编号同样不复用"
+    );
 }
 
 #[test]
@@ -622,6 +634,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             owners: 2,
             message_nodes: 0,
         },
+        RawResourceDemand::default(),
     )
     .expect("契约可构建");
     contract.verify().expect("契约必须自洽");
@@ -650,8 +663,13 @@ fn contract_rejects_address_fields_and_policy_drift() {
         ..RawPlanePolicyV1::default()
     };
     assert!(
-        RuntimeRawContractV1::build(TargetName::X86_64Linux, drifted, RawPlaneDemand::default())
-            .is_err()
+        RuntimeRawContractV1::build(
+            TargetName::X86_64Linux,
+            drifted,
+            RawPlaneDemand::default(),
+            RawResourceDemand::default(),
+        )
+        .is_err()
     );
 }
 
@@ -664,25 +682,39 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         owners: 1,
         message_nodes: 0,
     };
-    let first =
-        RuntimeRawContractV1::build(TargetName::X86_64Linux, RawPlanePolicyV1::default(), demand)
-            .expect("契约可构建");
-    let second =
-        RuntimeRawContractV1::build(TargetName::X86_64Linux, RawPlanePolicyV1::default(), demand)
-            .expect("契约可构建");
+    let first = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        demand,
+        RawResourceDemand::default(),
+    )
+    .expect("契约可构建");
+    let second = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        demand,
+        RawResourceDemand::default(),
+    )
+    .expect("契约可构建");
     assert_eq!(first.fingerprint(), second.fingerprint());
     assert_eq!(first.canonical_bytes(), second.canonical_bytes());
     let revised = RawPlanePolicyV1 {
         revision: 2,
         ..RawPlanePolicyV1::default()
     };
-    let third =
-        RuntimeRawContractV1::build(TargetName::X86_64Linux, revised, demand).expect("契约可构建");
+    let third = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        revised,
+        demand,
+        RawResourceDemand::default(),
+    )
+    .expect("契约可构建");
     assert_ne!(first.fingerprint(), third.fingerprint());
     let windows = RuntimeRawContractV1::build(
         TargetName::X86_64Windows,
         RawPlanePolicyV1::default(),
         demand,
+        RawResourceDemand::default(),
     )
     .expect("契约可构建");
     assert_ne!(first.fingerprint(), windows.fingerprint());
@@ -793,6 +825,469 @@ fn invalid_message_is_rejected_without_dropping_it() {
         Ok(SlotState::ReturnQueued),
         "拒绝的消息不得丢弃 slot 状态"
     );
+}
+
+/// 资源分配样例：8-byte payload 的 File 句柄。
+fn resource_shape() -> ResourceShape {
+    ResourceShape {
+        kind_id: 0,
+        payload_bytes: 8,
+        alignment: 8,
+    }
+}
+
+#[test]
+fn resource_class_ladder_uses_lease_policy_and_dedicated_header() {
+    let world = world(2, 16);
+    let classes = world.resource_classes();
+    assert_eq!(classes.classes().len(), super::RESOURCE_CLASS_LADDER.len());
+    for class in classes.classes() {
+        assert!(class.is_resource());
+        assert_eq!(
+            class.header_bytes,
+            super::size_class::RESOURCE_SLOT_HEADER_BYTES
+        );
+        assert_eq!(class.payload_bytes, class.slot_stride - class.header_bytes);
+        assert_eq!(class.domain, MemoryDomainId::RESOURCE);
+    }
+    let adapted = classes
+        .lookup(8, 8)
+        .expect("存在可承载 8-byte payload 的 class");
+    assert_eq!(adapted.slot_stride, 128);
+}
+
+#[test]
+fn resource_copy_shares_cell_without_double_close() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    world.resource_acquire(handle).expect("复制增加 lease");
+    assert_eq!(world.resource_leases(handle).expect("lease 可读"), 2);
+    assert_eq!(
+        world.release_lease(0, handle).expect("结束一个 lease"),
+        LeaseOutcome::StillLeased
+    );
+    assert_eq!(world.resource_cleanups(), 0);
+    assert_eq!(
+        world.release_lease(0, handle).expect("结束最后 lease"),
+        LeaseOutcome::LastLease
+    );
+    assert_eq!(world.resource_cleanups(), 1);
+    assert!(
+        world.release_lease(0, handle).is_err(),
+        "已回收的 cell 不能再结束 lease"
+    );
+    world.verify_resource_cells().expect("cell 表自洽");
+}
+
+#[test]
+fn close_is_idempotent_and_shares_release_point() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    assert_eq!(
+        world.resource_close(0, handle).expect("首次 close"),
+        CloseOutcome::ClosedNow
+    );
+    assert_eq!(
+        world.resource_close(0, handle).expect("重复 close 幂等"),
+        CloseOutcome::AlreadyClosed
+    );
+    assert_eq!(
+        world.resource_cleanups(),
+        1,
+        "close 只建立一次 release 线性化点"
+    );
+    assert_eq!(
+        world.release_lease(0, handle).expect("结束 lease"),
+        LeaseOutcome::LastLease
+    );
+    assert_eq!(world.resource_cleanups(), 1);
+    assert_eq!(
+        world
+            .table()
+            .state(handle.descriptor, handle.index)
+            .expect("slot 状态"),
+        SlotState::Returned
+    );
+}
+
+#[test]
+fn close_before_last_lease_cleans_once_then_reclaims() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    world.resource_acquire(handle).expect("复制增加 lease");
+    assert_eq!(
+        world.release_lease(0, handle).expect("结束一个 lease"),
+        LeaseOutcome::StillLeased
+    );
+    assert_eq!(
+        world.resource_close(0, handle).expect("close 建立关闭点"),
+        CloseOutcome::ClosedNow
+    );
+    assert_eq!(world.resource_cleanups(), 1, "关闭时执行一次受限 cleanup");
+    assert_eq!(
+        world
+            .table()
+            .state(handle.descriptor, handle.index)
+            .expect("slot 状态"),
+        SlotState::Live,
+        "仍有 lease 时不能回收 slot"
+    );
+    assert_eq!(
+        world.release_lease(0, handle).expect("结束最后 lease"),
+        LeaseOutcome::LastLease
+    );
+    assert_eq!(world.resource_cleanups(), 1);
+    assert_eq!(
+        world
+            .table()
+            .state(handle.descriptor, handle.index)
+            .expect("slot 状态"),
+        SlotState::Returned
+    );
+}
+
+#[test]
+fn publish_is_single_direction() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    world.resource_publish(handle).expect("首次发布成功");
+    assert!(world.resource_cell(handle).expect("cell 可读").is_shared());
+    assert!(
+        world.resource_publish(handle).is_err(),
+        "状态不能回到 Local"
+    );
+    assert_eq!(
+        world.release_lease(0, handle).expect("结束 lease"),
+        LeaseOutcome::LastLease
+    );
+    assert_eq!(world.resource_cleanups(), 1);
+}
+
+#[test]
+fn lease_overflow_is_rejected() {
+    let registry = ReleaseRegistry::builtin().expect("release 目录可构建");
+    let descriptor = registry.for_kind(0).expect("File 描述符");
+    let id = SlabDescriptorId::from_raw(0);
+    let mut cells = ResourceCellTable::new();
+    cells.ensure(id, 1);
+    cells
+        .place(id, 0, &descriptor, 8, 3, 128, 0, 7)
+        .expect("cell 登记成功");
+    let saturated = ResourceCell {
+        leases: u64::MAX,
+        ..*cells.get(id, 0).expect("cell 可读")
+    };
+    cells.restore(id, 0, saturated).expect("恢复边界状态");
+    assert!(cells.acquire(id, 0).is_err(), "lease 不能越过 u64 上界");
+}
+
+#[test]
+fn stale_release_generation_is_rejected() {
+    let registry = ReleaseRegistry::builtin().expect("release 目录可构建");
+    let descriptor = registry.for_kind(0).expect("File 描述符");
+    let id = SlabDescriptorId::from_raw(0);
+    let mut cells = ResourceCellTable::new();
+    cells.ensure(id, 1);
+    cells
+        .place(id, 0, &descriptor, 8, 3, 128, 0, 7)
+        .expect("cell 登记成功");
+    assert!(cells.request_release(id, 0).expect("入队点可用"));
+    assert!(
+        cells
+            .complete_release(id, 0, SlabGeneration::from_raw(8), false)
+            .is_err(),
+        "过期 generation 的 release 必须被拒"
+    );
+    assert!(
+        cells
+            .complete_release(id, 0, SlabGeneration::from_raw(7), false)
+            .expect("匹配 generation")
+    );
+    assert!(
+        !cells
+            .complete_release(id, 0, SlabGeneration::from_raw(7), false)
+            .expect("重复调用"),
+        "受限 cleanup 不得重复执行"
+    );
+}
+
+#[test]
+fn restricted_release_descriptor_rejects_forbidden_capabilities() {
+    let registry = ReleaseRegistry::builtin().expect("release 目录可构建");
+    let descriptor = registry.for_kind(0).expect("File 描述符");
+    descriptor.verify(&registry).expect("登记描述符必须自洽");
+    for flag in [
+        ReleaseFlags::HAS_MANAGED_PAYLOAD,
+        ReleaseFlags::CAPTURES_OWNER,
+        ReleaseFlags::MAY_ALLOCATE,
+        ReleaseFlags::MAY_PANIC,
+        ReleaseFlags::ACQUIRES_LOCK,
+        ReleaseFlags::AWAITS_CHANNEL,
+        ReleaseFlags::SPAWNS,
+    ] {
+        let forbidden = ReleaseDescriptor {
+            flags: flag,
+            ..descriptor
+        };
+        assert!(forbidden.verify(&registry).is_err());
+    }
+    let unregistered = ReleaseDescriptor {
+        release_glue: 9999,
+        ..descriptor
+    };
+    assert!(unregistered.verify(&registry).is_err());
+}
+
+#[test]
+fn resource_descriptor_cannot_enter_region_reset() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    assert!(
+        resource::reject_region_reset(world.table(), handle.descriptor).is_err(),
+        "资源 slot 不能进入整区 reset"
+    );
+    let raw = world
+        .allocate(0, RuntimeSizeClassId::from_raw(0))
+        .expect("raw 分配成功");
+    resource::reject_region_reset(world.table(), raw.slot.descriptor)
+        .expect("raw 记录不受资源隔离约束");
+}
+
+#[test]
+fn panic_unwind_releases_only_unshared_cells() {
+    let mut world = world(2, 16);
+    let first = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    let shared = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    world.resource_publish(shared).expect("共享发布");
+    assert_eq!(world.panic_unwind(0).expect("展开释放"), 1);
+    assert_eq!(world.resource_cleanups(), 1);
+    assert_eq!(world.resource_leases(first).expect("lease 可读"), 0);
+    assert!(world.resource_cell(shared).expect("cell 可读").is_shared());
+    assert_eq!(world.resource_leases(shared).expect("lease 可读"), 1);
+}
+
+#[test]
+fn detach_ends_lease_with_detached_cleanup() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(
+            0,
+            ResourceShape {
+                kind_id: 2,
+                ..resource_shape()
+            },
+        )
+        .expect("进程资源分配成功");
+    assert_eq!(
+        world.resource_detach(0, handle).expect("detach 结束 lease"),
+        LeaseOutcome::LastLease
+    );
+    assert_eq!(world.resource_cleanups(), 1);
+    let record = world.release_records().first().expect("存在 release 记录");
+    assert!(record.detached, "detach 语义必须进入受限 release 记录");
+}
+
+#[test]
+fn shutdown_reclaims_every_resource_slot() {
+    let mut world = world(2, 16);
+    let first = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    let second = world
+        .allocate_resource(1, resource_shape())
+        .expect("资源分配成功");
+    world.resource_publish(second).expect("共享发布");
+    assert_eq!(world.shutdown().expect("进程终止排空"), 2);
+    assert_eq!(world.resource_cleanups(), 2);
+    assert_eq!(world.pending_release_requests(), 0);
+    for handle in [first, second] {
+        assert_eq!(
+            world
+                .table()
+                .state(handle.descriptor, handle.index)
+                .expect("slot 状态"),
+            SlotState::Returned
+        );
+    }
+    world.verify_resource_cells().expect("cell 表自洽");
+    world.resource_ledger_invariant(0).expect("资源账本守恒");
+    world.resource_ledger_invariant(1).expect("资源账本守恒");
+}
+
+#[test]
+fn remote_release_waits_for_owner_service_and_grace() {
+    let mut world = world(2, 32);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    assert_eq!(
+        world.release_lease(1, handle).expect("跨 owner 结束 lease"),
+        LeaseOutcome::LastLease
+    );
+    assert_eq!(
+        world.resource_cleanups(),
+        1,
+        "入队点赢家执行一次受限 cleanup"
+    );
+    assert_eq!(
+        world
+            .table()
+            .state(handle.descriptor, handle.index)
+            .expect("slot 状态"),
+        SlotState::ReturnQueued
+    );
+    let report = world
+        .service(0, shard(0), &ServiceBudget::new(8, 1 << 16))
+        .expect("owner service 成功");
+    assert_eq!(report.items, 1);
+    assert_eq!(
+        world
+            .table()
+            .state(handle.descriptor, handle.index)
+            .expect("slot 状态"),
+        SlotState::Returned
+    );
+    assert_eq!(world.resource_cleanups(), 1);
+    world.release_graced_nodes().expect("grace 后可复用 node");
+    world.verify_resource_cells().expect("cell 表自洽");
+    world.resource_ledger_invariant(0).expect("资源账本守恒");
+}
+
+#[test]
+fn dedicated_mapping_rounds_to_whole_page() {
+    let mut world = world(2, 16);
+    let shape = ResourceShape {
+        kind_id: 4,
+        payload_bytes: 8192,
+        alignment: 8,
+    };
+    let handle = world
+        .allocate_resource(0, shape)
+        .expect("专用 mapping 分配成功");
+    let descriptor = world
+        .table()
+        .descriptor(handle.descriptor)
+        .expect("描述符存在");
+    assert_eq!(descriptor.slot_count(), 1);
+    assert_eq!(descriptor.slot_stride as u64, super::RAW_SLAB_PAGE_BYTES);
+    assert_eq!(descriptor.domain, MemoryDomainId::RESOURCE);
+    assert_eq!(
+        world.release_lease(0, handle).expect("结束 lease"),
+        LeaseOutcome::LastLease
+    );
+    assert_eq!(world.resource_cleanups(), 1);
+    assert_eq!(
+        world
+            .table()
+            .state(handle.descriptor, handle.index)
+            .expect("slot 状态"),
+        SlotState::Returned
+    );
+}
+
+#[test]
+fn resource_ledger_stays_mutually_exclusive() {
+    let mut world = world(2, 16);
+    let first = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    let _second = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    world.resource_ledger_invariant(0).expect("分配后账本守恒");
+    world.release_lease(0, first).expect("结束 lease");
+    world.resource_ledger_invariant(0).expect("回收后账本守恒");
+    world.verify_resource_cells().expect("cell 表自洽");
+}
+
+#[test]
+fn resource_header_layout_is_contiguous() {
+    resource::verify_header_layout().expect("header 字段连续");
+    let schema = CellHeaderSchemaV1::fixed();
+    schema.verify().expect("header schema 自洽");
+    assert_eq!(schema.header_bytes, resource::CELL_HEADER_BYTES);
+    assert_eq!(schema.fields.len(), 12);
+}
+
+#[test]
+fn contract_schema_two_carries_resource_section() {
+    let contract = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        RawPlaneDemand::default(),
+        RawResourceDemand {
+            resource_sites: 2,
+            acquire_sites: 3,
+            release_sites: 2,
+            transfer_sites: 1,
+            finalize_sites: 0,
+            owners: 1,
+            kinds: 0,
+        },
+    )
+    .expect("契约可构建");
+    assert_eq!(contract.schema(), 2);
+    assert_eq!(
+        contract.resource_class_count(),
+        super::RESOURCE_CLASS_LADDER.len() as u32
+    );
+    assert_eq!(
+        contract.resource_kind_count(),
+        resource::RESOURCE_KINDS.len() as u32
+    );
+    assert_eq!(
+        contract.resources().header.header_bytes,
+        resource::CELL_HEADER_BYTES
+    );
+    assert_eq!(
+        contract.unified_release_entry(),
+        resource::UNIFIED_RELEASE_ENTRY
+    );
+    assert_eq!(contract.resource_demand().release_sites, 2);
+    contract.resources().verify().expect("资源契约段自洽");
+    assert!(contract.dump().contains("resource-cell leases"));
+    let mut drifted = contract.resources().release.clone();
+    drifted.fields.push(MessageFieldSchema {
+        name: "zzz.raw_pointer".to_owned(),
+        kind: FieldKind::RawPointer,
+    });
+    assert!(drifted.verify().is_err(), "release 描述符不能携带地址");
+}
+
+#[test]
+fn resource_contract_fingerprint_tracks_demand() {
+    let base = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        RawPlaneDemand::default(),
+        RawResourceDemand::default(),
+    )
+    .expect("契约可构建");
+    let revised = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        RawPlaneDemand::default(),
+        RawResourceDemand {
+            release_sites: 4,
+            ..RawResourceDemand::default()
+        },
+    )
+    .expect("契约可构建");
+    assert_ne!(base.fingerprint(), revised.fingerprint());
 }
 
 const _: () = {

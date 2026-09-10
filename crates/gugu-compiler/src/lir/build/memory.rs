@@ -6,6 +6,7 @@ use crate::lir::body::{
     Access, AliasClass, Conversion, InstId, IntOp, Op, Origin, Provenance, RuntimeCall, Symbol,
     Type, ValueId, ValueType, id,
 };
+use crate::lir::invalid_resource;
 
 impl Builder<'_> {
     pub(super) fn offset(&mut self, pointer: ValueId, offset: u64) -> ValueId {
@@ -289,6 +290,10 @@ impl Builder<'_> {
         bytes: u64,
         placement: PlacementKind,
     ) -> Result<ValueId, Diagnostic> {
+        // 资源隔离的 lowering 层闸门：resource 类布局不得进入 TurnRegion arena。
+        if placement == PlacementKind::TurnRegion && self.layout(ty).passing.has_resource() {
+            return Err(invalid_resource("资源值不能进入 TurnRegion"));
+        }
         let layout = self.layout(ty);
         let descriptor = layout.key;
         let align = u32::try_from(

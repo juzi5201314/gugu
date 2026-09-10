@@ -4,6 +4,7 @@ mod poll;
 mod provenance;
 mod raw_publish;
 mod regions;
+pub(super) mod resource_isolation;
 
 use super::body::{
     BlockId, Body, Definition, EdgeId, InstId, Origin, SafepointId, Terminator, Type, UseSite,

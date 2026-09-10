@@ -4,6 +4,9 @@
 //! free structure 与账本只由 owner 上下文读写。跨 owner 的归还先经过 exactly-once 的
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
+mod resource_impl;
+
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use super::inbox::{
@@ -16,6 +19,7 @@ use super::message::{
 };
 use super::owner::{Allocation, RawOwner};
 use super::provider::{FakeRangeProvider, ProviderStats, RangeDescriptor, RangeProvider};
+use super::resource::{self, ReleaseRegistry, ReleaseTicket, ResourceCellTable};
 use super::size_class::{RuntimeSizeClassId, RuntimeSizeClassTable};
 use super::slab::{
     Epoch, MemoryDomainId, OwnerAccounting, OwnerDirectory, OwnerToken, RawInvariant, RawSlot,
@@ -35,14 +39,25 @@ pub(crate) struct RetireReport {
     pub(crate) reclaimed_spans: u32,
 }
 
+/// 资源分配的 payload 形状；kind 与对齐只作登记，不进入用户可见类型。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResourceShape {
+    pub(crate) kind_id: u8,
+    pub(crate) payload_bytes: u32,
+    pub(crate) alignment: u32,
+}
+
 /// raw plane 的可运行模型世界。
 #[derive(Debug)]
 pub(crate) struct RawWorld {
     classes: RuntimeSizeClassTable,
+    resource_classes: RuntimeSizeClassTable,
     provider: FakeRangeProvider,
+    /// raw 与 resource 共享的 slab 描述符表；descriptor id 全局唯一。
     table: SlabTable,
     directory: OwnerDirectory,
     owners: Vec<RawOwner>,
+    resource_owners: Vec<RawOwner>,
     inboxes: Vec<Arc<OwnerInbox>>,
     consumers: Vec<OwnerConsumer>,
     pool: Arc<ReturnNodePool>,
@@ -53,6 +68,12 @@ pub(crate) struct RawWorld {
     domain_owner: OwnerToken,
     /// 已完成消费但尚未过 queue-page grace 的 node；在 grace 之后才允许复用。
     graced_nodes: Vec<ReturnNodeId>,
+    /// 与 slab descriptor 平行的 ResourceCell header。
+    cells: ResourceCellTable,
+    /// 统一 release 入口的 glue 与描述符目录。
+    registry: ReleaseRegistry,
+    /// 首个关闭者或最后 lease 入队的 release 请求。
+    release_queue: VecDeque<ReleaseTicket>,
 }
 
 impl RawWorld {
@@ -68,24 +89,33 @@ impl RawWorld {
         let domain_owner =
             directory.register(&mut seed, MemoryDomainId::RUNTIME_RAW, Epoch::from_raw(0));
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
+        let resource_classes = RuntimeSizeClassTable::resource_ladder()?;
+        resource::verify_header_layout()?;
+        let registry = ReleaseRegistry::builtin()?;
         let integrity_secret = seed.secret();
         let link_codec = LinkCodec::new(seed.secret());
         let mut owner_list = Vec::with_capacity(owners as usize);
+        let mut resource_owners = Vec::with_capacity(owners as usize);
         let mut inboxes = Vec::with_capacity(owners as usize);
         let mut consumers = Vec::with_capacity(owners as usize);
         for _ in 0..owners {
             let token =
                 directory.register(&mut seed, MemoryDomainId::RUNTIME_RAW, Epoch::from_raw(0));
             owner_list.push(RawOwner::new(token, &classes));
+            let resource_token =
+                directory.register(&mut seed, MemoryDomainId::RESOURCE, Epoch::from_raw(0));
+            resource_owners.push(RawOwner::new(resource_token, &resource_classes));
             inboxes.push(Arc::new(OwnerInbox::new(super::OWNER_INBOX_SHARDS)));
             consumers.push(OwnerConsumer::new(super::OWNER_INBOX_SHARDS));
         }
         Ok(Self {
             classes,
+            resource_classes,
             provider: FakeRangeProvider::new(u64::from(u32::MAX)),
             table: SlabTable::new(),
             directory,
             owners: owner_list,
+            resource_owners,
             inboxes,
             consumers,
             pool: Arc::new(ReturnNodePool::new(node_capacity)),
@@ -95,6 +125,9 @@ impl RawWorld {
             epoch: Epoch::from_raw(0),
             domain_owner,
             graced_nodes: Vec::new(),
+            cells: ResourceCellTable::new(),
+            registry,
+            release_queue: VecDeque::new(),
         })
     }
 
@@ -106,6 +139,11 @@ impl RawWorld {
     /// 返回 owner 的 token。
     pub(crate) fn token(&self, index: u32) -> OwnerToken {
         self.owners[index as usize].token()
+    }
+
+    /// 返回 Resource domain owner 的 token。
+    pub(crate) fn resource_token(&self, index: u32) -> OwnerToken {
+        self.resource_owners[index as usize].token()
     }
 
     /// 返回 owner 的 inbox；producer 通过它发布，不需要接触 owner 本地状态。
@@ -418,7 +456,8 @@ impl RawWorld {
         budget: &ServiceBudget,
     ) -> Result<DrainReport, RawInvariant> {
         let inbox = Arc::clone(&self.inboxes[owner as usize]);
-        let token = self.owners[owner as usize].token();
+        let raw_token = self.owners[owner as usize].token();
+        let resource_token = self.resource_owners[owner as usize].token();
         let snapshot = {
             let consumer = &self.consumers[owner as usize];
             inbox.snapshot(shard, consumer, budget, &self.pool)
@@ -432,6 +471,8 @@ impl RawWorld {
             let message = self
                 .pool
                 .load(message_id, descriptor.class, descriptor.generation);
+            let resource = message.kind == ReturnKind::ResourceRelease;
+            let token = if resource { resource_token } else { raw_token };
             if self.pool.owner_id_of(message_id) != token.owner_id {
                 return Err(RawInvariant::new("消息投递到非目标 owner 的 inbox"));
             }
@@ -470,13 +511,40 @@ impl RawWorld {
                         .accounting_mut(token.owner_id)
                         .ok_or_else(|| RawInvariant::new("consume 缺少 owner 账本"))?;
                     let codec = self.link_codec.clone();
-                    self.owners[owner as usize].consume_return(
-                        slot,
-                        &mut self.table,
-                        &codec,
-                        accounting,
-                        u64::from(message.bytes),
-                    )?;
+                    if resource {
+                        let (cell_generation, detached) = {
+                            let cell = self.cells.get(message.descriptor, message.unit)?;
+                            (cell.generation, cell.is_detached())
+                        };
+                        if cell_generation != message.integrity.generation.raw() {
+                            return Err(RawInvariant::new(
+                                "release 引用了过期 generation 的资源 cell",
+                            ));
+                        }
+                        self.cells.complete_release(
+                            message.descriptor,
+                            message.unit,
+                            message.integrity.generation,
+                            detached,
+                        )?;
+                        self.resource_owners[owner as usize].consume_return(
+                            slot,
+                            &mut self.table,
+                            &codec,
+                            accounting,
+                            u64::from(message.bytes),
+                        )?;
+                        self.cells
+                            .finish_reclaim(message.descriptor, message.unit)?;
+                    } else {
+                        self.owners[owner as usize].consume_return(
+                            slot,
+                            &mut self.table,
+                            &codec,
+                            accounting,
+                            u64::from(message.bytes),
+                        )?;
+                    }
                     consumed += 1;
                 }
                 Resolution::Forward(target) => {
@@ -555,13 +623,21 @@ impl RawWorld {
         inbox.publish_batch(&chain, &self.pool)
     }
 
+    /// 把 owner token 映射到 inbox 槽位；raw owner 与 resource owner 各占一个槽位。
+    fn owner_slot(&self, token: &OwnerToken) -> Result<usize, RawInvariant> {
+        self.owners
+            .iter()
+            .position(|owner| &owner.token() == token)
+            .or_else(|| {
+                self.resource_owners
+                    .iter()
+                    .position(|owner| &owner.token() == token)
+            })
+            .ok_or_else(|| RawInvariant::new("目标 owner 没有登记的 inbox 槽位"))
+    }
+
     fn inbox_for(&self, token: &OwnerToken) -> Result<Arc<OwnerInbox>, RawInvariant> {
-        let raw = token
-            .owner_id
-            .raw()
-            .checked_sub(1)
-            .ok_or_else(|| RawInvariant::new("domain owner 不是 raw slab 的回收目标"))?;
-        let index = usize::try_from(raw).map_err(|_| RawInvariant::new("owner 编号越界"))?;
+        let index = self.owner_slot(token)?;
         self.inboxes
             .get(index)
             .map(Arc::clone)
@@ -711,6 +787,39 @@ impl RawWorld {
         if committed != classified {
             return Err(RawInvariant::new(format!(
                 "账本分类不互斥：committed {committed}，分类合计 {classified}"
+            )));
+        }
+        Ok(())
+    }
+
+    /// 校验 Resource domain 的账本：committed 等于 live、pending、reclaimable 与 cache 之和。
+    pub(crate) fn resource_ledger_invariant(&self, owner: u32) -> Result<(), RawInvariant> {
+        let token = self.resource_owners[owner as usize].token();
+        let accounting = self
+            .directory
+            .accounting(token.owner_id)
+            .ok_or_else(|| RawInvariant::new("资源账本校验引用未知 owner"))?;
+        let mut live = 0_u64;
+        let mut committed = 0_u64;
+        for (index, descriptor) in self.table.descriptors().iter().enumerate() {
+            if descriptor.owner != token {
+                continue;
+            }
+            committed += descriptor.committed_bytes;
+            let id = SlabDescriptorId::from_raw(u32::try_from(index).expect("描述符下标适配 u32"));
+            for slot in 0..descriptor.slot_count() {
+                if self.table.state(id, slot)? == SlotState::Live {
+                    live += u64::from(descriptor.slot_stride);
+                }
+            }
+        }
+        let classified = accounting.pending_return_bytes()
+            + accounting.reclaimable_bytes()
+            + accounting.owner_cache_bytes()
+            + live;
+        if committed != classified {
+            return Err(RawInvariant::new(format!(
+                "资源账本分类不互斥：committed {committed}，分类合计 {classified}"
             )));
         }
         Ok(())

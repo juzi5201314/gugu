@@ -64,6 +64,24 @@ impl GirWorldV1 {
         }
         sites
     }
+
+    /// 返回资源 lease 动作数量：acquire、release、transfer、finalize。
+    pub(crate) fn resource_action_counts(&self) -> (u32, u32, u32, u32) {
+        let mut counts = (0_u32, 0_u32, 0_u32, 0_u32);
+        for body in &self.bodies {
+            for statement in &body.statements {
+                if let body::StatementKind::ResourceAction { action, .. } = &statement.kind {
+                    match action {
+                        body::ResourceActionKind::AcquireLease => counts.0 += 1,
+                        body::ResourceActionKind::ReleaseLease => counts.1 += 1,
+                        body::ResourceActionKind::Transfer => counts.2 += 1,
+                        body::ResourceActionKind::Finalize => counts.3 += 1,
+                    }
+                }
+            }
+        }
+        counts
+    }
 }
 
 pub(crate) fn empty_world() -> GirWorldV1 {

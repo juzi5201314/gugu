@@ -9,7 +9,8 @@ use serde::{Deserialize, Serialize};
 
 use super::inbox::ServiceBudget;
 use super::message::{BatchLimits, RETURN_NODE_ALIGN, RETURN_NODE_BYTES};
-use super::size_class::RuntimeSizeClassTable;
+use super::resource::{self, RESOURCE_KINDS};
+use super::size_class::{DropScanPolicy, RuntimeSizeClassTable};
 use super::slab::MemoryDomainId;
 use super::{
     BATCH_MAX, CACHE_LINE_BYTES, OWNER_INBOX_SHARDS, QUEUE_PAD_BYTES, RAW_SLAB_PAGE_BYTES,
@@ -20,8 +21,11 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的 schema 版本。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 1;
+/// 契约对象的 schema 版本；schema 2 并入 ResourceCell 资源段。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 2;
+
+/// 资源契约段的 schema 版本。
+pub(crate) const RESOURCE_SCHEMA: u32 = 1;
 
 /// 契约对象构建或校验失败。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -91,6 +95,16 @@ pub(crate) enum FieldKind {
     MessageState,
     /// intrusive link 编码。
     Link,
+    /// release glue 的登记编号。
+    ReleaseGlue,
+    /// release descriptor 的稠密编号。
+    ReleaseDescriptor,
+    /// raw payload 字节数。
+    PayloadSize,
+    /// raw payload 的对齐指数。
+    PayloadAlign,
+    /// release 描述符的能力位。
+    Flags,
     /// managed object 地址；只允许出现在被拒绝的 schema 中。
     ManagedAddress,
     /// raw 指针地址；只允许出现在被拒绝的 schema 中。
@@ -113,6 +127,11 @@ impl FieldKind {
             Self::KindTag => "kind-tag",
             Self::MessageState => "message-state",
             Self::Link => "link",
+            Self::ReleaseGlue => "release-glue",
+            Self::ReleaseDescriptor => "release-descriptor",
+            Self::PayloadSize => "payload-size",
+            Self::PayloadAlign => "payload-align",
+            Self::Flags => "flags",
             Self::ManagedAddress => "managed-address",
             Self::RawPointer => "raw-pointer",
         }
@@ -132,7 +151,7 @@ pub(crate) struct MessageFieldSchema {
 }
 
 impl MessageFieldSchema {
-    fn new(name: &str, kind: FieldKind) -> Self {
+    pub(crate) fn new(name: &str, kind: FieldKind) -> Self {
         Self {
             name: name.to_owned(),
             kind,
@@ -226,6 +245,8 @@ impl MessageSchemaV1 {
     }
 }
 
+pub(crate) use super::resource_schema::*;
+
 /// raw plane 的调优 profile。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RawPlanePolicyV1 {
@@ -293,8 +314,11 @@ pub(crate) struct RuntimeRawContractV1 {
     target_semantics: String,
     policy: RawPlanePolicyV1,
     classes: RuntimeSizeClassTable,
+    resource_classes: RuntimeSizeClassTable,
     message: MessageSchemaV1,
+    resources: ResourceSchemaV1,
     demand: RawPlaneDemand,
+    resource_demand: RawResourceDemand,
     ledger_categories: Vec<String>,
     grace_steps: u32,
     fingerprint: [u8; 32],
@@ -309,16 +333,22 @@ impl RuntimeRawContractV1 {
         target: TargetName,
         policy: RawPlanePolicyV1,
         mut demand: RawPlaneDemand,
+        mut resource_demand: RawResourceDemand,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
+        let resource_classes = RuntimeSizeClassTable::resource_ladder()?;
         demand.message_nodes = policy.shards * policy.limits.items;
+        resource_demand.kinds = RESOURCE_KINDS.len() as u32;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
             policy,
             classes,
+            resource_classes,
             message: MessageSchemaV1::runtime_raw(),
+            resources: ResourceSchemaV1::fixed(),
             demand,
+            resource_demand,
             ledger_categories: LEDGER_CATEGORIES
                 .iter()
                 .map(|name| (*name).to_owned())
@@ -349,6 +379,36 @@ impl RuntimeRawContractV1 {
     /// 返回 class 表。
     pub(crate) const fn classes(&self) -> &RuntimeSizeClassTable {
         &self.classes
+    }
+
+    /// 返回 Resource domain 的 class 表。
+    pub(crate) const fn resource_classes(&self) -> &RuntimeSizeClassTable {
+        &self.resource_classes
+    }
+
+    /// 返回资源平面契约段。
+    pub(crate) const fn resources(&self) -> &ResourceSchemaV1 {
+        &self.resources
+    }
+
+    /// 返回资源平面需求视图。
+    pub(crate) const fn resource_demand(&self) -> &RawResourceDemand {
+        &self.resource_demand
+    }
+
+    /// 返回资源 class 数量。
+    pub(crate) fn resource_class_count(&self) -> u32 {
+        self.resource_classes.classes().len() as u32
+    }
+
+    /// 返回登记的资源种类数量。
+    pub(crate) fn resource_kind_count(&self) -> u32 {
+        self.resources.kinds.kinds.len() as u32
+    }
+
+    /// 返回统一 release 入口名。
+    pub(crate) fn unified_release_entry(&self) -> &str {
+        &self.resources.kinds.release_entry
     }
 
     /// 返回消息字段集合。
@@ -457,6 +517,22 @@ impl RuntimeRawContractV1 {
             ));
         }
         self.message.verify()?;
+        self.resource_classes
+            .verify()
+            .map_err(|error| RawModelError::new(error.message().to_owned()))?;
+        if self.resource_classes.classes().iter().any(|class| {
+            class.domain != MemoryDomainId::RESOURCE
+                || class.policy != DropScanPolicy::ResourceLease
+                || class.header_bytes != resource::CELL_HEADER_BYTES
+        }) {
+            return Err(RawModelError::new(
+                "资源 class 必须属于 Resource domain 并使用 64-byte lease header",
+            ));
+        }
+        self.resources.verify()?;
+        if self.resource_demand.kinds != RESOURCE_KINDS.len() as u32 {
+            return Err(RawModelError::new("资源种类数量与登记目录不一致"));
+        }
         if self.grace_steps != GRACE_STEPS {
             return Err(RawModelError::new("queue-page grace 步骤数与契约不一致"));
         }
@@ -499,7 +575,16 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.policy.service_items.to_le_bytes());
         bytes.extend_from_slice(&self.policy.service_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.classes.canonical_bytes());
+        bytes.extend_from_slice(&self.resource_classes.canonical_bytes());
         bytes.extend_from_slice(&self.message.canonical_bytes());
+        bytes.extend_from_slice(&self.resources.canonical_bytes());
+        bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
+        bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
+        bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
+        bytes.extend_from_slice(&self.resource_demand.transfer_sites.to_le_bytes());
+        bytes.extend_from_slice(&self.resource_demand.finalize_sites.to_le_bytes());
+        bytes.extend_from_slice(&self.resource_demand.owners.to_le_bytes());
+        bytes.extend_from_slice(&self.resource_demand.kinds.to_le_bytes());
         bytes.extend_from_slice(&self.demand.coroutine_sites.to_le_bytes());
         bytes.extend_from_slice(&self.demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.demand.runtime_raw_sites.to_le_bytes());
@@ -574,6 +659,67 @@ impl RuntimeRawContractV1 {
             demand.owners,
             self.message_node_capacity()
         ));
+        let resources = self.resources();
+        output.push_str(&format!(
+            "resource schema={} header-bytes={} kinds={} glues={} align-limit={} release-entry={}\n",
+            resources.schema,
+            resources.header.header_bytes,
+            self.resource_kind_count(),
+            resources.release_glue_count,
+            resources.dedicated_align_limit,
+            self.unified_release_entry()
+        ));
+        for field in &resources.header.fields {
+            output.push_str(&format!(
+                "resource-cell {} offset={} bytes={} kind={}\n",
+                field.name,
+                field.offset,
+                field.bytes,
+                field.kind.name()
+            ));
+        }
+        for bit in &resources.states.bits {
+            output.push_str(&format!("resource-state {} bit={}\n", bit.name, bit.bit));
+        }
+        for transition in &resources.states.transitions {
+            output.push_str(&format!(
+                "resource-transition {} -> {} on {}\n",
+                transition.from, transition.to, transition.trigger
+            ));
+        }
+        for field in &resources.release.fields {
+            output.push_str(&format!(
+                "resource-release-field {} {}\n",
+                field.name,
+                field.kind.name()
+            ));
+        }
+        for kind in &resources.kinds.kinds {
+            output.push_str(&format!(
+                "resource-kind {} {} entry={} close-idempotent={}\n",
+                kind.id, kind.name, kind.release_entry, kind.close_idempotent
+            ));
+        }
+        output.push_str(&format!(
+            "resource-demand sites={} acquire={} release={} transfer={} finalize={} owners={}\n",
+            self.resource_demand.resource_sites,
+            self.resource_demand.acquire_sites,
+            self.resource_demand.release_sites,
+            self.resource_demand.transfer_sites,
+            self.resource_demand.finalize_sites,
+            self.resource_demand.owners
+        ));
+        for class in self.resource_classes().classes() {
+            output.push_str(&format!(
+                "resource-class {} stride={} payload={} header={} align={} policy={:?}\n",
+                class.id.raw(),
+                class.slot_stride,
+                class.payload_bytes,
+                class.header_bytes,
+                class.alignment,
+                class.policy
+            ));
+        }
         output
     }
 }
@@ -604,6 +750,7 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) target: TargetName,
     pub(crate) policy: RawPlanePolicyV1,
     pub(crate) demand: RawPlaneDemand,
+    pub(crate) resource_demand: RawResourceDemand,
     /// 生成契约所依据的 LIR 输入指纹。
     pub(crate) lir_fingerprint: [u8; 32],
     /// placement world 指纹。
@@ -620,6 +767,12 @@ pub(crate) fn run(
     key_bytes.extend_from_slice(&inputs.policy.revision.to_le_bytes());
     key_bytes.extend_from_slice(&inputs.policy.limits.items.to_le_bytes());
     key_bytes.extend_from_slice(&inputs.policy.limits.batch_soft_bytes.to_le_bytes());
+    key_bytes.extend_from_slice(&inputs.resource_demand.resource_sites.to_le_bytes());
+    key_bytes.extend_from_slice(&inputs.resource_demand.acquire_sites.to_le_bytes());
+    key_bytes.extend_from_slice(&inputs.resource_demand.release_sites.to_le_bytes());
+    key_bytes.extend_from_slice(&inputs.resource_demand.transfer_sites.to_le_bytes());
+    key_bytes.extend_from_slice(&inputs.resource_demand.finalize_sites.to_le_bytes());
+    key_bytes.extend_from_slice(&inputs.resource_demand.owners.to_le_bytes());
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
     key_bytes.extend_from_slice(&inputs.placement_fingerprint);
     key_bytes.extend_from_slice(inputs.target.to_string().as_bytes());
@@ -639,8 +792,13 @@ pub(crate) fn run(
                 ),
                 inputs.placement_fingerprint,
             );
-            let contract = RuntimeRawContractV1::build(inputs.target, inputs.policy, inputs.demand)
-                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            let contract = RuntimeRawContractV1::build(
+                inputs.target,
+                inputs.policy,
+                inputs.demand,
+                inputs.resource_demand,
+            )
+            .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
             fresh = Some(contract);
             Ok((bytes, Vec::new()))

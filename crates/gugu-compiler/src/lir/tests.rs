@@ -17,6 +17,8 @@ const EFFECTS: &str = include_str!("fixtures/effects.gg");
 const POLL: &str = include_str!("fixtures/poll.gg");
 const OPTIMIZE: &str = include_str!("fixtures/optimize.gg");
 const PUBLISH: &str = include_str!("fixtures/publish.gg");
+/// 资源样例：ResourceCell 的构造、按值转移与结束时释放。
+const RESOURCE: &str = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n _ = b\n}";
 
 fn compile(source: &str) -> Compilation {
     let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -94,6 +96,23 @@ fn region_store(body: &Body, region: u32) -> usize {
         }
     }
     panic!("publish 区域必须包含 Store");
+}
+
+/// 返回资源样例中承载资源调用的 body。
+fn resource_body(compilation: &Compilation) -> Body {
+    compilation
+        .lir
+        .as_ref()
+        .expect("已生成 LIR")
+        .world
+        .bodies
+        .iter()
+        .find(|body| {
+            super::verify::resource_isolation::resource_descriptors(std::slice::from_ref(*body))
+                .is_ok_and(|descriptors| !descriptors.is_empty())
+        })
+        .expect("资源样例必须保留 ResourceAcquire/Release 调用")
+        .clone()
 }
 
 #[test]
@@ -286,6 +305,51 @@ fn publish_region_rejects_bulk_memory_operation() {
     body.operands[usize::try_from(arguments.start).expect("操作数起点")] = byte;
     body.instructions[store].op = Op::Memset { bytes: 8 };
     rejected_raw(&compilation, body);
+}
+
+#[test]
+fn resource_descriptor_cannot_be_region_allocated() {
+    let compilation = compile(RESOURCE);
+    let mut body = resource_body(&compilation);
+    let descriptors =
+        super::verify::resource_isolation::resource_descriptors(std::slice::from_ref(&body))
+            .expect("资源调用必须登记类型描述符");
+    let descriptor = *descriptors.iter().next().expect("资源描述符集合非空");
+    // 常量指令既不是资源调用也不是描述符定义，替换它不会破坏描述符反查。
+    let index = body
+        .instructions
+        .iter()
+        .position(|instruction| matches!(instruction.op, Op::IConst(_)))
+        .expect("资源样例必须保留整数常量");
+    body.instructions[index].op = Op::RegionAlloc {
+        descriptor,
+        align: 8,
+    };
+    let error = super::verify::resource_isolation::verify(std::slice::from_ref(&body))
+        .expect_err("资源描述符不能进入 RegionAlloc");
+    assert_eq!(
+        error.code(),
+        DiagnosticCode::ResourceInvariant,
+        "{}",
+        error.message()
+    );
+}
+
+#[test]
+fn resource_descriptors_are_derived_from_bodies() {
+    let compilation = compile(RESOURCE);
+    let body = resource_body(&compilation);
+    let bodies = std::slice::from_ref(&body);
+    let first = super::verify::resource_isolation::resource_descriptors(bodies)
+        .expect("资源调用必须登记类型描述符");
+    let second = super::verify::resource_isolation::resource_descriptors(bodies)
+        .expect("资源调用必须登记类型描述符");
+    assert_eq!(first, second, "同一 body 的描述符扫描必须确定");
+    assert!(!first.is_empty(), "资源样例必须产生资源描述符");
+    assert!(
+        super::verify::resource_isolation::verify(bodies).is_ok(),
+        "未进入 region 的资源样例必须通过隔离闸门"
+    );
 }
 
 #[test]

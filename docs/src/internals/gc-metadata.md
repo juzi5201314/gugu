@@ -250,6 +250,8 @@ close与最后 lease竞争 `CLOSED` CAS；首个关闭者把 `{ cell, generation
 
 slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理，class包含 header、对齐 padding和 raw payload；超过 4096或 payload对齐超过 64时使用独立 non-moving整页 mapping。每页使用连续 allocation bitmap和 intrusive free index，不把稳定地址放入移动 GC或全局 hash map。release descriptor明确证明 payload无 managed pointer，typed root visitor因此不扫描 cell bytes。
 
+这些 class 阶梯、64-byte header、状态位与 release 描述符 schema 由 compiler 侧 `RuntimeRawContractV1`（schema 2）固定并由 verifier 检查；LIR 资源隔离闸门拒绝 resource 描述符进入 managed region，违规诊断为 `E0059`。runtime 侧实现复用同一 schema 与 verifier，不在本章另立第二份定义。
+
 ## heap arena 与 side metadata
 
 普通 heap 以 2 MiB 对齐 arena管理；每个 arena固定含 64 个 32 KiB Immix block，每个 block含 256 条 128 byte line，基础 allocation granule为 16 byte，宿主页按 4 KiB计算。arena state封闭为 `Free`、`Nursery`、`Aging`、`Old`、`Resource`、`Pinned` 和 `Evacuating`；block另有 `Free`、`Allocating`、`Marked`、`Sweeping`、`Evacuating`。普通对象的 header+padding+payload不得跨 32 KiB block；超过该 footprint、对齐超过 4096或显式 large/pinned 的请求使用独立整页 mapping。

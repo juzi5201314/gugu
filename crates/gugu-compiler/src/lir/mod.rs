@@ -258,6 +258,8 @@ fn verify_world(world: &World, mono: &mono::MonoWorldV1) -> Result<(), Diagnosti
             }
         }
     }
+    // 资源隔离是跨 body 的世界级不变量：描述符集合来自资源调用参数，闸门在分配点生效。
+    verify::resource_isolation::verify(&world.bodies)?;
     Ok(())
 }
 
@@ -334,6 +336,11 @@ fn invalid(message: &str) -> Diagnostic {
 /// runtime raw 平面契约失败：publish 区域或消息字段违反登记的不变量。
 pub(crate) fn invalid_raw(message: &str) -> Diagnostic {
     Diagnostic::error(DiagnosticCode::RuntimeRawInvariant, message, None)
+}
+
+/// 资源隔离失败：resource 类描述符越过资源域边界进入 managed region 分配。
+pub(crate) fn invalid_resource(message: &str) -> Diagnostic {
+    Diagnostic::error(DiagnosticCode::ResourceInvariant, message, None)
 }
 
 #[cfg(test)]

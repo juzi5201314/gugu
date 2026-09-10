@@ -43,6 +43,12 @@ pub(crate) struct BackendPlan {
     pub(crate) raw_batch_soft_bytes: u64,
     pub(crate) raw_message_node_capacity: u32,
     pub(crate) raw_model_fingerprint: [u8; 32],
+    pub(crate) resource_cell_header_bytes: u32,
+    pub(crate) resource_class_count: u32,
+    pub(crate) resource_kind_count: u32,
+    pub(crate) release_descriptor_count: u32,
+    pub(crate) resource_sites: u32,
+    pub(crate) release_sites: u32,
 }
 
 pub(crate) fn plan(
@@ -102,5 +108,11 @@ pub(crate) fn plan(
         raw_batch_soft_bytes: raw.batch_limits().batch_soft_bytes,
         raw_message_node_capacity: raw.message_node_capacity(),
         raw_model_fingerprint: raw.fingerprint(),
+        resource_cell_header_bytes: raw.resources().header.header_bytes,
+        resource_class_count: raw.resource_class_count(),
+        resource_kind_count: raw.resource_kind_count(),
+        release_descriptor_count: raw.resources().release.fields.len() as u32,
+        resource_sites: raw.resource_demand().resource_sites,
+        release_sites: raw.resource_demand().release_sites,
     })
 }

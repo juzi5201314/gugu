@@ -146,6 +146,8 @@ pub enum DiagnosticCode {
     LirInvariant,
     /// runtime raw 平面契约或 publish 序列不满足内部不变量。
     RuntimeRawInvariant,
+    /// 资源值越过资源域边界进入 managed region 分配。
+    ResourceInvariant,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -209,6 +211,7 @@ impl fmt::Display for DiagnosticCode {
             Self::LargeCopy => "E0056",
             Self::LirInvariant => "E0057",
             Self::RuntimeRawInvariant => "E0058",
+            Self::ResourceInvariant => "E0059",
         };
         formatter.write_str(code)
     }

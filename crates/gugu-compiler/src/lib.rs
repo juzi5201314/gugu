@@ -33,8 +33,8 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    HarnessReport, IntrinsicBoundary, OwnerReturnHarness, Rt0Boundary, RuntimeResources,
-    RuntimeSource, RuntimeSourceRole,
+    HarnessReport, IntrinsicBoundary, OwnerReturnHarness, ResourceReleaseHarness,
+    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -54,7 +54,9 @@ use std::{
 
 use backend::BackendPlan;
 use frontend::{SourceInput, cfg::CfgContext};
-use runtime::{RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RuntimeRawContractV1};
+use runtime::{
+    RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, RuntimeRawContractV1,
+};
 
 /// 一次 bootstrap 编译请求。
 #[derive(Clone, Debug)]
@@ -258,7 +260,9 @@ impl Compilation {
         if self.diagnostics.items().iter().any(|diagnostic| {
             matches!(
                 diagnostic.code(),
-                DiagnosticCode::LirInvariant | DiagnosticCode::RuntimeRawInvariant
+                DiagnosticCode::LirInvariant
+                    | DiagnosticCode::RuntimeRawInvariant
+                    | DiagnosticCode::ResourceInvariant
             )
         }) {
             101
@@ -378,11 +382,22 @@ impl Compiler {
             owners: 0,
             message_nodes: 0,
         };
+        let action_counts = frontend.gir.resource_action_counts();
+        let resource_demand = RawResourceDemand {
+            resource_sites: frontend.gir.placement.counts().resource,
+            acquire_sites: action_counts.0,
+            release_sites: action_counts.1,
+            transfer_sites: action_counts.2,
+            finalize_sites: action_counts.3,
+            owners: 0,
+            kinds: 0,
+        };
         let raw_contract = match runtime::run(
             RawModelInputs {
                 target,
                 policy: RawPlanePolicyV1::default(),
                 demand,
+                resource_demand,
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
                 sources: &source_map,
@@ -911,6 +926,12 @@ pub struct ImagePlan {
     raw_batch_soft_bytes: u64,
     raw_message_node_capacity: u32,
     raw_model_fingerprint: [u8; 32],
+    resource_cell_header_bytes: u32,
+    resource_class_count: u32,
+    resource_kind_count: u32,
+    release_descriptor_count: u32,
+    resource_sites: u32,
+    release_sites: u32,
     placement_count: u32,
     turn_region_count: u32,
     local_heap_count: u32,
@@ -960,6 +981,12 @@ impl ImagePlan {
             raw_batch_soft_bytes: raw.batch_limits().batch_soft_bytes,
             raw_message_node_capacity: raw.message_node_capacity(),
             raw_model_fingerprint: raw.fingerprint(),
+            resource_cell_header_bytes: plan.resource_cell_header_bytes,
+            resource_class_count: plan.resource_class_count,
+            resource_kind_count: plan.resource_kind_count,
+            release_descriptor_count: plan.release_descriptor_count,
+            resource_sites: plan.resource_sites,
+            release_sites: plan.release_sites,
             placement_count: plan.placement_count,
             turn_region_count: plan.turn_region_count,
             local_heap_count: plan.local_heap_count,
@@ -1139,6 +1166,30 @@ impl ImagePlan {
     /// 返回 runtime raw 平面契约指纹。
     pub fn raw_model_fingerprint(&self) -> [u8; 32] {
         self.raw_model_fingerprint
+    }
+    /// 返回 ResourceCell header 字节数。
+    pub fn resource_cell_header_bytes(&self) -> u32 {
+        self.resource_cell_header_bytes
+    }
+    /// 返回 Resource domain 的 class 数量。
+    pub fn resource_class_count(&self) -> u32 {
+        self.resource_class_count
+    }
+    /// 返回登记的资源种类数量。
+    pub fn resource_kind_count(&self) -> u32 {
+        self.resource_kind_count
+    }
+    /// 返回 release 描述符字段数量。
+    pub fn release_descriptor_count(&self) -> u32 {
+        self.release_descriptor_count
+    }
+    /// 返回资源分配点数量。
+    pub fn resource_sites(&self) -> u32 {
+        self.resource_sites
+    }
+    /// 返回 lease 结束动作数量。
+    pub fn release_sites(&self) -> u32 {
+        self.release_sites
     }
 }
 
@@ -1383,9 +1434,16 @@ mod tests {
         assert!(plan.raw_batch_max_items() > 0);
         assert!(plan.raw_batch_soft_bytes() > 0);
         assert!(plan.raw_message_node_capacity() >= 8 * plan.raw_batch_max_items());
+        assert_eq!(plan.resource_cell_header_bytes(), 64);
+        assert!(plan.resource_class_count() > 0);
+        assert_eq!(plan.resource_kind_count(), 5);
+        assert!(plan.release_descriptor_count() >= 4);
         let dump = cold.dump_runtime().expect("契约 dump");
-        assert!(dump.contains("runtime-raw schema=1"));
+        assert!(dump.contains("runtime-raw schema=2"));
         assert!(dump.contains("message integrity integrity"));
+        assert!(dump.contains("resource-cell leases offset=0 bytes=8"));
+        assert!(dump.contains("resource-kind 0 File entry=std.resource.release"));
+        assert!(dump.contains("release-entry=std.resource.release"));
         assert_eq!(Some(dump), warm.dump_runtime(), "冷热 dump 必须一致");
         assert_eq!(
             cold.runtime_raw_fingerprint(),
@@ -1393,6 +1451,29 @@ mod tests {
         );
         assert_eq!(cold.action_key(), warm.action_key());
         assert_eq!(cold.exit_code(), 0);
+    }
+
+    #[test]
+    fn image_plan_reports_resource_lease_sites() {
+        let source = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n b = ResourceCell { id: 2 }\n _ = b\n}";
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+        let plan = compilation.image_plan().expect("镜像计划");
+        assert!(
+            plan.resource_sites() > 0,
+            "placement 必须报告 resource 站点"
+        );
+        assert!(plan.release_sites() > 0, "GIR 必须报告 release 站点");
+        assert_eq!(plan.resource_class_count(), 7);
+        assert_eq!(plan.resource_cell_header_bytes(), 64);
     }
 
     #[test]

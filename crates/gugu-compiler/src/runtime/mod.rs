@@ -22,6 +22,9 @@ mod owner;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod provider;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod resource;
+mod resource_schema;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod size_class;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod slab;
@@ -31,10 +34,12 @@ mod world;
 #[cfg(test)]
 mod tests;
 
-pub use harness::{HarnessReport, OwnerReturnHarness};
+pub use harness::{
+    HarnessReport, OwnerReturnHarness, ResourceReleaseHarness, ResourceReleaseReport,
+};
 
 pub(crate) use model::{
-    RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RuntimeRawContractV1, run,
+    RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, RuntimeRawContractV1, run,
 };
 
 /// owner inbox 的 shard 数量；与 scheduler 的 remote inbox 保持一致。
@@ -49,6 +54,10 @@ pub(crate) const CACHE_LINE_BYTES: u64 = 64;
 pub(crate) const RAW_SLAB_PAGE_BYTES: u64 = 65536;
 /// raw slab 的 dense size class 阶梯。
 pub(crate) const RAW_CLASS_LADDER: [u32; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
+/// ResourceCell slab 的 dense size class 阶梯；class 尺寸包含 64-byte header。
+pub(crate) const RESOURCE_CLASS_LADDER: [u32; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
+/// 超过该对齐或 class 上界时改用独立 non-moving 整页 mapping。
+pub(crate) const RESOURCE_DEDICATED_ALIGN_LIMIT: u32 = 64;
 /// consumer-side source slab 聚合 cache 的 set 数量。
 pub(crate) const RETURN_SLAB_CACHE_SETS: u32 = 8;
 /// 每个 set 的关联 way 数量。

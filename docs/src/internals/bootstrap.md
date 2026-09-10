@@ -100,12 +100,16 @@ crates/
     │   ├── mod.rs                  源树/rt0/intrinsic 登记与 raw 平面常量
     │   ├── model.rs                `RuntimeRawContractV1`、消息字段 schema 与 query driver
     │   ├── provider.rs             平台 range 四操作与确定性替身
+    │   ├── resource.rs             ResourceCell slab、lease 状态机与统一 release 入口
+    │   ├── resource_schema.rs      ResourceCell header/状态位/release 描述符/资源种类契约 schema
     │   ├── size_class.rs           dense size class 表与 stride 除法常量
     │   ├── slab.rs                 owner 目录、slab 描述符与 slot 状态机
     │   ├── owner.rs                本地 free path、本地/远程 return 分叉
     │   ├── message.rs              return message、link 编码、producer staging 与 source slab 聚合
     │   ├── inbox.rs                8 shard batch queue、bounded snapshot、epoch gate
-    │   ├── world.rs                owner 上下文 service、转发、grace 与 retire
+    │   ├── world/                  owner 上下文 service、转发、grace 与 retire
+    │   │   ├── mod.rs              raw owner 世界与 ResourceCell 世界骨架
+    │   │   └── resource_impl.rs    资源分配、lease、close、release 与整页 mapping 接入
     │   ├── harness.rs              真实并发可运行切片（bench façade）
     │   └── tests.rs                确定性参照实现的验证套件
     └── resources/
@@ -113,7 +117,7 @@ crates/
         └── runtime/core.gg         runtime Gugu 源单元
 ```
 
-模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的调度、GC、资源释放或标准库语义。
+模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与参照模型（raw 平面、资源租约与 owner-directed return），用于固定 schema、verifier 与参照行为。
 
 `gugu-compiler` 使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接在这里仅以 `IntrinsicBoundary` 登记，实际 machine intrinsic 必须在 backend/runtime 按相应内部契约接入。
 
@@ -167,7 +171,7 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 
 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
-`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 1）构建并校验 runtime raw 平面契约：dense size class、消息字段 schema、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`；契约指纹同时进入 action key。这些字段固定 raw 平面的 schema 与参照行为，不代表 runtime 已在镜像内物化。
+`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 2）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。这些字段固定 raw 平面的 schema 与参照行为，不代表 runtime 已在镜像内物化。
 
 `ImagePlan` 再增加 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 与 `placement-fingerprint`。这些字段记录逃逸与存储选择，不代表已经改写 CFG 做堆装箱或写出机器码。`large_copy` 警告进入 `Compilation` 诊断且不阻止镜像计划；升为错误时 Frontend 失败且没有镜像。
 
@@ -208,7 +212,7 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 | `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 |
 | `unsafe` | safety checker、FFI/asm backend | 前端安全检查已落地；外部桥接执行与机器编码未落地 |
 | `platform-abi` | `target`、x86 backend、image writer | 已建立两个目标 descriptor |
-| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界；raw 平面契约与 owner-directed return 参照实现已落地 |
+| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界；raw 平面契约、资源租约与 owner-directed return 参照实现已落地 |
 | `standard-library` | `runtime` Gugu 源树与 std modules | 已建立源树登记 |
 | `testing` | test collector、harness、CLI | 未实现 |
 

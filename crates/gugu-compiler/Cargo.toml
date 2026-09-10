@@ -17,5 +17,9 @@ tar = "0.4"
 name = "owner_return"
 harness = false
 
+[[bench]]
+name = "resource_release"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"

@@ -257,6 +257,12 @@ pub(crate) fn print_compilation_json(
             "raw-batch-soft-bytes": plan.raw_batch_soft_bytes(),
             "raw-message-node-capacity": plan.raw_message_node_capacity(),
             "raw-model-fingerprint": plan.raw_model_fingerprint(),
+            "raw-resource-cell-header-bytes": plan.resource_cell_header_bytes(),
+            "raw-resource-class-count": plan.resource_class_count(),
+            "raw-resource-kind-count": plan.resource_kind_count(),
+            "raw-release-descriptor-count": plan.release_descriptor_count(),
+            "raw-resource-sites": plan.resource_sites(),
+            "raw-release-sites": plan.release_sites(),
             "rt0": plan.rt0().to_string()
         })
     });
