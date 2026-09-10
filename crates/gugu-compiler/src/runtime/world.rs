@@ -165,7 +165,7 @@ impl RawWorld {
             .ok_or_else(|| RawInvariant::new("引用未知 slab 描述符"))
     }
 
-    /// 返回 provider 统计。
+    /// 返回 provider 统计：reserved/committed 字节与拒绝次数。
     pub(crate) fn provider_stats(&self) -> ProviderStats {
         self.provider.stats()
     }
@@ -665,12 +665,6 @@ impl RawWorld {
     /// 前不得复用，否则 consumer 的 front/last 记账会指向被重新写入的 node。
     pub(crate) fn release_graced_nodes(&mut self) -> Result<u32, RawInvariant> {
         let nodes = std::mem::take(&mut self.graced_nodes);
-        let mut seen = std::collections::BTreeSet::new();
-        for node in &nodes {
-            if !seen.insert(node.raw()) {
-                eprintln!("DEBUG grace: node {} 重复出现", node.raw());
-            }
-        }
         for node in &nodes {
             self.pool.release(*node)?;
         }

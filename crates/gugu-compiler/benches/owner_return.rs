@@ -36,11 +36,12 @@ fn main() {
         total_micros += u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
         clean &= report.invariants_hold;
         println!(
-            "round {round}: published={} consumed={} phantom-nulls={} classes={} invariants={} elapsed={}us",
+            "round {round}: published={} consumed={} phantom-nulls={} classes={} spans={} invariants={} elapsed={}us",
             report.published_items,
             report.consumed_items,
             report.phantom_nulls,
             report.size_classes,
+            report.span_ranges,
             report.invariants_hold,
             report.elapsed_micros
         );

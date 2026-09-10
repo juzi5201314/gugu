@@ -40,8 +40,8 @@ pub struct HarnessReport {
     pub consumed_items: u64,
     /// consumer 观察到的 phantom null 次数。
     pub phantom_nulls: u64,
-    /// 平台 range refill 次数。
-    pub range_refills: u32,
+    /// 从平台预留并 commit 的 span range 数量。
+    pub span_ranges: u32,
     /// 契约登记的 class 数量。
     pub size_classes: u32,
     /// exactly-once 与账本不变量是否保持。
@@ -206,7 +206,7 @@ impl OwnerReturnHarness {
             published_items,
             consumed_items: consumed,
             phantom_nulls,
-            range_refills: world.provider_stats().rejected_requests as u32,
+            span_ranges: world.provider_ranges().len() as u32,
             size_classes: contract.class_count(),
             invariants_hold: clean
                 && consumed == u64::from(self.producers) * u64::from(self.items_per_producer),
