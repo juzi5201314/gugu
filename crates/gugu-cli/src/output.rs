@@ -105,6 +105,10 @@ fn wants_dump_gir(options: &GlobalArgs) -> bool {
     options.z.iter().any(|flag| flag == "dump-gir")
 }
 
+fn wants_dump_runtime(options: &GlobalArgs) -> bool {
+    options.z.iter().any(|flag| flag == "dump-runtime")
+}
+
 pub(crate) fn print_compilation_text(
     compilation: &Compilation,
     check_only: bool,
@@ -118,6 +122,11 @@ pub(crate) fn print_compilation_text(
     }
     if options.z.iter().any(|flag| flag == "dump-lir")
         && let Some(dump) = compilation.dump_lir()
+    {
+        print!("{dump}");
+    }
+    if wants_dump_runtime(options)
+        && let Some(dump) = compilation.dump_runtime()
     {
         print!("{dump}");
     }
@@ -200,6 +209,17 @@ pub(crate) fn print_compilation_json(
             }),
         );
     }
+    if wants_dump_runtime(options)
+        && let Some(dump) = compilation.dump_runtime()
+    {
+        emit_event(
+            "runtime-dump",
+            json!({
+                "text": dump,
+                "fingerprint": compilation.runtime_raw_fingerprint(),
+            }),
+        );
+    }
     let image_plan = compilation.image_plan().map(|plan| {
         json!({
             "target": plan.target().to_string(),
@@ -231,6 +251,12 @@ pub(crate) fn print_compilation_json(
             "local-heap-count": plan.local_heap_count(),
             "shared-heap-count": plan.shared_heap_count(),
             "placement-fingerprint": plan.placement_fingerprint(),
+            "raw-size-class-count": plan.raw_size_class_count(),
+            "raw-shard-count": plan.raw_shard_count(),
+            "raw-batch-max-items": plan.raw_batch_max_items(),
+            "raw-batch-soft-bytes": plan.raw_batch_soft_bytes(),
+            "raw-message-node-capacity": plan.raw_message_node_capacity(),
+            "raw-model-fingerprint": plan.raw_model_fingerprint(),
             "rt0": plan.rt0().to_string()
         })
     });

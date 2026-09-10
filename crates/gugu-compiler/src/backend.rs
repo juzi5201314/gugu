@@ -37,6 +37,12 @@ pub(crate) struct BackendPlan {
     pub(crate) poll_count: u32,
     pub(crate) poll_free_leaf_count: u32,
     pub(crate) poll_summary_fingerprint: [u8; 32],
+    pub(crate) raw_size_class_count: u32,
+    pub(crate) raw_shard_count: u32,
+    pub(crate) raw_batch_max_items: u32,
+    pub(crate) raw_batch_soft_bytes: u64,
+    pub(crate) raw_message_node_capacity: u32,
+    pub(crate) raw_model_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -45,6 +51,7 @@ pub(crate) fn plan(
     mono: &MonoWorldV1,
     gir: &GirWorldV1,
     lir: &crate::lir::Validated,
+    raw: &crate::runtime::RuntimeRawContractV1,
     runtime_checks_elided_count: u32,
 ) -> Option<BackendPlan> {
     let module = hir.module();
@@ -89,5 +96,11 @@ pub(crate) fn plan(
         poll_free_leaf_count: u32::try_from(lir.poll_free_leaf_count())
             .expect("poll-free 叶数量适配 u32"),
         poll_summary_fingerprint: lir.poll_summary_fingerprint(),
+        raw_size_class_count: raw.class_count(),
+        raw_shard_count: raw.shard_count(),
+        raw_batch_max_items: raw.batch_limits().items,
+        raw_batch_soft_bytes: raw.batch_limits().batch_soft_bytes,
+        raw_message_node_capacity: raw.message_node_capacity(),
+        raw_model_fingerprint: raw.fingerprint(),
     })
 }

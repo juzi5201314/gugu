@@ -33,7 +33,8 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    IntrinsicBoundary, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
+    HarnessReport, IntrinsicBoundary, OwnerReturnHarness, Rt0Boundary, RuntimeResources,
+    RuntimeSource, RuntimeSourceRole,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -53,6 +54,7 @@ use std::{
 
 use backend::BackendPlan;
 use frontend::{SourceInput, cfg::CfgContext};
+use runtime::{RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RuntimeRawContractV1};
 
 /// 一次 bootstrap 编译请求。
 #[derive(Clone, Debug)]
@@ -182,6 +184,7 @@ pub struct Compilation {
     gir: Option<frontend::gir::GirWorldV1>,
     gir_stats: frontend::gir::pass::GirPassStats,
     lir: Option<lir::Validated>,
+    raw_contract: Option<RuntimeRawContractV1>,
     action_key: Option<project::ActionKey>,
 }
 
@@ -238,14 +241,26 @@ impl Compilation {
         self.lir.as_ref().map(lir::Validated::fingerprint)
     }
 
+    /// 返回 runtime raw 平面契约的稳定 dump；契约失败时为 `None`。
+    pub fn dump_runtime(&self) -> Option<String> {
+        self.raw_contract.as_ref().map(RuntimeRawContractV1::dump)
+    }
+
+    /// 返回 runtime raw 平面契约指纹。
+    pub fn runtime_raw_fingerprint(&self) -> Option<[u8; 32]> {
+        self.raw_contract
+            .as_ref()
+            .map(RuntimeRawContractV1::fingerprint)
+    }
+
     /// 返回规范退出码；内部 IR 不变量失败与用户源码错误分开报告。
     pub fn exit_code(&self) -> i32 {
-        if self
-            .diagnostics
-            .items()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == DiagnosticCode::LirInvariant)
-        {
+        if self.diagnostics.items().iter().any(|diagnostic| {
+            matches!(
+                diagnostic.code(),
+                DiagnosticCode::LirInvariant | DiagnosticCode::RuntimeRawInvariant
+            )
+        }) {
             101
         } else {
             i32::from(!self.is_success())
@@ -289,6 +304,7 @@ impl Compiler {
                     gir: None,
                     gir_stats: Default::default(),
                     lir: None,
+                    raw_contract: None,
                     action_key: None,
                 };
             }
@@ -315,6 +331,7 @@ impl Compiler {
                     gir: None,
                     gir_stats: Default::default(),
                     lir: None,
+                    raw_contract: None,
                     action_key: None,
                 };
             }
@@ -348,6 +365,48 @@ impl Compiler {
                     gir: Some(frontend.gir),
                     gir_stats: frontend.gir_stats,
                     lir: None,
+                    raw_contract: None,
+                    action_key: None,
+                };
+            }
+        };
+        // runtime raw 平面契约：输入来自冻结前端产物与目标描述，与 LIR 一起构成内部表示。
+        let demand = RawPlaneDemand {
+            coroutine_sites: frontend.gir.coroutine_site_count(),
+            resource_sites: frontend.gir.placement.counts().resource,
+            runtime_raw_sites: frontend.gir.placement.counts().runtime_raw,
+            owners: 0,
+            message_nodes: 0,
+        };
+        let raw_contract = match runtime::run(
+            RawModelInputs {
+                target,
+                policy: RawPlanePolicyV1::default(),
+                demand,
+                lir_fingerprint: lir.fingerprint(),
+                placement_fingerprint: frontend.gir.placement.fingerprint,
+                sources: &source_map,
+            },
+            &self.queries,
+        ) {
+            Ok(contract) => contract,
+            Err(errors) => {
+                for error in errors {
+                    diagnostics.push(error);
+                }
+                graph.fail(ActionKind::BuildIr, "runtime raw 契约校验失败");
+                graph.skip_after(ActionKind::BuildIr, "runtime 契约无效");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(frontend.hir),
+                    gir: Some(frontend.gir),
+                    gir_stats: frontend.gir_stats,
+                    lir: Some(lir),
+                    raw_contract: None,
                     action_key: None,
                 };
             }
@@ -357,6 +416,7 @@ impl Compiler {
             &source_map,
             &frontend,
             &lir,
+            &raw_contract,
             loaded
                 .plan
                 .as_ref()
@@ -394,6 +454,7 @@ impl Compiler {
             &frontend.mono,
             &gir,
             &lir,
+            &raw_contract,
             frontend.analysis.runtime_checks_elided_count,
         ) else {
             graph.complete(ActionKind::PlanBackend, "没有可执行入口");
@@ -408,6 +469,7 @@ impl Compiler {
                 gir: Some(gir),
                 gir_stats: frontend.gir_stats,
                 lir: Some(lir),
+                raw_contract: None,
                 action_key,
             };
         };
@@ -418,14 +480,18 @@ impl Compiler {
         graph.complete(
             ActionKind::AttachRuntime,
             format!(
-                "{} 个 Gugu 源单元，rt0={}",
-                attachment.source_count, attachment.rt0
+                "{} 个 Gugu 源单元，rt0={}，{} 个 raw size class / {} 个 shard / {} 个常驻 node",
+                attachment.source_count,
+                attachment.rt0,
+                raw_contract.class_count(),
+                raw_contract.shard_count(),
+                raw_contract.message_node_capacity()
             ),
         );
         graph.complete(ActionKind::ValidateImage, "image plan 校验通过");
         graph.skip_after(ActionKind::ValidateImage, "仅保留内存计划，未写出镜像");
 
-        let image_plan = Some(ImagePlan::new(backend_plan, attachment));
+        let image_plan = Some(ImagePlan::new(backend_plan, attachment, &raw_contract));
         diagnostics.sort();
         Compilation {
             graph,
@@ -436,6 +502,7 @@ impl Compiler {
             gir: Some(gir),
             gir_stats: frontend.gir_stats,
             lir: Some(lir),
+            raw_contract: Some(raw_contract),
             action_key,
         }
     }
@@ -447,6 +514,7 @@ fn compilation_action_key(
     source_map: &SourceMap,
     frontend: &frontend::FrontendOutput,
     lir: &lir::Validated,
+    raw_contract: &RuntimeRawContractV1,
     plan: Option<(bool, &frontend::cfg::CfgContext)>,
 ) -> project::ActionKey {
     const EMPTY_PLAN: (bool, Option<&frontend::cfg::CfgContext>) = (true, None);
@@ -486,6 +554,8 @@ fn compilation_action_key(
     inputs.set_analysis_world(frontend.analysis.input_fingerprint);
     inputs.set_generic_gir(frontend.gir.fingerprint);
     inputs.set_lir(lir.fingerprint());
+    inputs.set_runtime_raw(raw_contract.fingerprint());
+    inputs.set_query_registry(crate::query::registry_fingerprint());
     let mut policy = frontend::gir::pass::policy_bytes();
     policy.extend_from_slice(&lir::optimization_policy_bytes());
     inputs.set_optimization_policy(policy);
@@ -835,6 +905,12 @@ pub struct ImagePlan {
     poll_count: u32,
     poll_free_leaf_count: u32,
     poll_summary_fingerprint: [u8; 32],
+    raw_size_class_count: u32,
+    raw_shard_count: u32,
+    raw_batch_max_items: u32,
+    raw_batch_soft_bytes: u64,
+    raw_message_node_capacity: u32,
+    raw_model_fingerprint: [u8; 32],
     placement_count: u32,
     turn_region_count: u32,
     local_heap_count: u32,
@@ -845,7 +921,11 @@ pub struct ImagePlan {
 }
 
 impl ImagePlan {
-    fn new(plan: BackendPlan, attachment: runtime::RuntimeAttachment) -> Self {
+    fn new(
+        plan: BackendPlan,
+        attachment: runtime::RuntimeAttachment,
+        raw: &RuntimeRawContractV1,
+    ) -> Self {
         Self {
             target: plan.target,
             entry: plan.entry,
@@ -874,6 +954,12 @@ impl ImagePlan {
             poll_count: plan.poll_count,
             poll_free_leaf_count: plan.poll_free_leaf_count,
             poll_summary_fingerprint: plan.poll_summary_fingerprint,
+            raw_size_class_count: raw.class_count(),
+            raw_shard_count: raw.shard_count(),
+            raw_batch_max_items: raw.batch_limits().items,
+            raw_batch_soft_bytes: raw.batch_limits().batch_soft_bytes,
+            raw_message_node_capacity: raw.message_node_capacity(),
+            raw_model_fingerprint: raw.fingerprint(),
             placement_count: plan.placement_count,
             turn_region_count: plan.turn_region_count,
             local_heap_count: plan.local_heap_count,
@@ -1029,6 +1115,30 @@ impl ImagePlan {
     /// 返回 poll 摘要指纹。
     pub fn poll_summary_fingerprint(&self) -> [u8; 32] {
         self.poll_summary_fingerprint
+    }
+    /// 返回 runtime raw 平面的 dense size class 数量。
+    pub fn raw_size_class_count(&self) -> u32 {
+        self.raw_size_class_count
+    }
+    /// 返回 owner inbox 的 shard 数量。
+    pub fn raw_shard_count(&self) -> u32 {
+        self.raw_shard_count
+    }
+    /// 返回 batch 的 item 上限。
+    pub fn raw_batch_max_items(&self) -> u32 {
+        self.raw_batch_max_items
+    }
+    /// 返回 batch 的 byte 上限。
+    pub fn raw_batch_soft_bytes(&self) -> u64 {
+        self.raw_batch_soft_bytes
+    }
+    /// 返回常驻 message node 容量下限。
+    pub fn raw_message_node_capacity(&self) -> u32 {
+        self.raw_message_node_capacity
+    }
+    /// 返回 runtime raw 平面契约指纹。
+    pub fn raw_model_fingerprint(&self) -> [u8; 32] {
+        self.raw_model_fingerprint
     }
 }
 
@@ -1251,6 +1361,59 @@ mod tests {
                 .iter()
                 .any(|node| node.kind() == ActionKind::LoadSources
                     && node.status() == ActionStatus::Failed)
+        );
+    }
+
+    #[test]
+    fn image_plan_reports_runtime_raw_contract() {
+        let compiler = Compiler::new();
+        let request = || {
+            CompileRequest::single_file(
+                "main.gg",
+                "fn main() { let first = 1\n let second = 2\n _ = first + second }",
+                TargetName::X86_64Linux,
+            )
+        };
+        let cold = compiler.compile(request());
+        let warm = compiler.compile(request());
+        assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
+        let plan = cold.image_plan().expect("可执行入口必须有镜像计划");
+        assert!(plan.raw_size_class_count() > 0);
+        assert_eq!(plan.raw_shard_count(), 8);
+        assert!(plan.raw_batch_max_items() > 0);
+        assert!(plan.raw_batch_soft_bytes() > 0);
+        assert!(plan.raw_message_node_capacity() >= 8 * plan.raw_batch_max_items());
+        let dump = cold.dump_runtime().expect("契约 dump");
+        assert!(dump.contains("runtime-raw schema=1"));
+        assert!(dump.contains("message integrity integrity"));
+        assert_eq!(Some(dump), warm.dump_runtime(), "冷热 dump 必须一致");
+        assert_eq!(
+            cold.runtime_raw_fingerprint(),
+            warm.runtime_raw_fingerprint()
+        );
+        assert_eq!(cold.action_key(), warm.action_key());
+        assert_eq!(cold.exit_code(), 0);
+    }
+
+    #[test]
+    fn configured_target_changes_raw_contract_fingerprint() {
+        let source = "fn main() { let value = 1\n _ = value }";
+        let linux = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        let windows = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Windows,
+        ));
+        assert_eq!(linux.exit_code(), 0);
+        assert_eq!(windows.exit_code(), 0);
+        assert_ne!(
+            linux.runtime_raw_fingerprint(),
+            windows.runtime_raw_fingerprint(),
+            "目标语义必须进入 raw 契约身份"
         );
     }
 

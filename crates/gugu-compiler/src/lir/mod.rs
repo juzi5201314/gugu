@@ -331,5 +331,10 @@ fn invalid(message: &str) -> Diagnostic {
     Diagnostic::error(DiagnosticCode::LirInvariant, message, None)
 }
 
+/// runtime raw 平面契约失败：publish 区域或消息字段违反登记的不变量。
+pub(crate) fn invalid_raw(message: &str) -> Diagnostic {
+    Diagnostic::error(DiagnosticCode::RuntimeRawInvariant, message, None)
+}
+
 #[cfg(test)]
 mod tests;

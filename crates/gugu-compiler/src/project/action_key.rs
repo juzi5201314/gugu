@@ -22,6 +22,8 @@ pub struct ActionInputs {
     analysis_world: [u8; 32],
     generic_gir: [u8; 32],
     lir: [u8; 32],
+    runtime_raw: [u8; 32],
+    query_registry: [u8; 32],
     optimization_policy: Vec<u8>,
     public_summaries: BTreeMap<String, [u8; 32]>,
     build_inputs: BTreeMap<String, [u8; 32]>,
@@ -153,6 +155,16 @@ impl ActionInputs {
         self.lir = fingerprint;
     }
 
+    /// 设置 runtime raw 平面契约指纹。
+    pub fn set_runtime_raw(&mut self, fingerprint: [u8; 32]) {
+        self.runtime_raw = fingerprint;
+    }
+
+    /// 设置 query registry 的登记指纹；新增 query kind 时旧 action record 因此失效。
+    pub fn set_query_registry(&mut self, fingerprint: [u8; 32]) {
+        self.query_registry = fingerprint;
+    }
+
     /// 设置固定优化管线与 poll 预算的规范编码。
     pub fn set_optimization_policy(&mut self, bytes: impl AsRef<[u8]>) {
         self.optimization_policy = bytes.as_ref().to_vec();
@@ -180,6 +192,8 @@ impl ActionInputs {
         encode_bytes(&mut canonical, &self.analysis_world);
         encode_bytes(&mut canonical, &self.generic_gir);
         encode_bytes(&mut canonical, &self.lir);
+        encode_bytes(&mut canonical, &self.runtime_raw);
+        encode_bytes(&mut canonical, &self.query_registry);
         encode_bytes(&mut canonical, &self.optimization_policy);
         encode_digest_map(&mut canonical, &self.public_summaries);
         encode_digest_map(&mut canonical, &self.build_inputs);

@@ -76,6 +76,101 @@ pub enum QueryKind {
     PublicFunctionSummary = 28,
     /// 逃逸分析与 placement 选择。
     EscapeAndPlacement = 29,
+    /// 构造 runtime raw 平面契约。
+    RuntimeRawModel = 30,
+}
+
+/// query registry 的登记 revision；新增 kind 必须递增，旧 revision 的 action/query record
+/// 不得复用。
+pub(crate) const QUERY_REGISTRY_REVISION: u32 = 2;
+
+impl QueryKind {
+    /// 返回 kind 的稳定 ASCII 名。
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::SourceSnapshot => "SourceSnapshot",
+            Self::Lex => "Lex",
+            Self::Parse => "Parse",
+            Self::Configure => "Configure",
+            Self::CollectDefinitions => "CollectDefinitions",
+            Self::ResolveImports => "ResolveImports",
+            Self::LowerHir => "LowerHir",
+            Self::TypeCheck => "TypeCheck",
+            Self::TraitSelection => "TraitSelection",
+            Self::EvaluateEarlyComptime => "EvaluateEarlyComptime",
+            Self::BuildGenericGir => "BuildGenericGir",
+            Self::CollectMonoRoots => "CollectMonoRoots",
+            Self::InstantiateGir => "InstantiateGir",
+            Self::LayoutOf => "LayoutOf",
+            Self::BuildLir => "BuildLir",
+            Self::CodegenFragment => "CodegenFragment",
+            Self::TypeMetadata => "TypeMetadata",
+            Self::RuntimeMetadata => "RuntimeMetadata",
+            Self::PlanImage => "PlanImage",
+            Self::EmitImage => "EmitImage",
+            Self::ParseSource => "ParseSource",
+            Self::ExpandSourceMacro => "ExpandSourceMacro",
+            Self::FunctionAnalysisSummary => "FunctionAnalysisSummary",
+            Self::WholeProgramAnalysis => "WholeProgramAnalysis",
+            Self::FreezeTypeUniverse => "FreezeTypeUniverse",
+            Self::EvaluateLateComptime => "EvaluateLateComptime",
+            Self::AnalysisSccSummary => "AnalysisSccSummary",
+            Self::PublicFunctionSummary => "PublicFunctionSummary",
+            Self::EscapeAndPlacement => "EscapeAndPlacement",
+            Self::RuntimeRawModel => "RuntimeRawModel",
+        }
+    }
+
+    /// 返回全部已登记 kind，按编号升序。
+    pub(crate) const fn all() -> [Self; 30] {
+        [
+            Self::SourceSnapshot,
+            Self::Lex,
+            Self::Parse,
+            Self::Configure,
+            Self::CollectDefinitions,
+            Self::ResolveImports,
+            Self::LowerHir,
+            Self::TypeCheck,
+            Self::TraitSelection,
+            Self::EvaluateEarlyComptime,
+            Self::BuildGenericGir,
+            Self::CollectMonoRoots,
+            Self::InstantiateGir,
+            Self::LayoutOf,
+            Self::BuildLir,
+            Self::CodegenFragment,
+            Self::TypeMetadata,
+            Self::RuntimeMetadata,
+            Self::PlanImage,
+            Self::EmitImage,
+            Self::ParseSource,
+            Self::ExpandSourceMacro,
+            Self::FunctionAnalysisSummary,
+            Self::WholeProgramAnalysis,
+            Self::FreezeTypeUniverse,
+            Self::EvaluateLateComptime,
+            Self::AnalysisSccSummary,
+            Self::PublicFunctionSummary,
+            Self::EscapeAndPlacement,
+            Self::RuntimeRawModel,
+        ]
+    }
+}
+
+/// 返回 query registry 的内容指纹：登记 revision 与全部 kind 编号/名字的规范编码。
+///
+/// 新增或改名 kind 必然改变该指纹，因此旧 action/query record 不会被复用。
+pub(crate) fn registry_fingerprint() -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(8 + QueryKind::all().len() * 24);
+    bytes.extend_from_slice(&QUERY_REGISTRY_REVISION.to_le_bytes());
+    bytes.extend_from_slice(&(QueryKind::all().len() as u32).to_le_bytes());
+    for kind in QueryKind::all() {
+        bytes.extend_from_slice(&(kind as u16).to_le_bytes());
+        bytes.extend_from_slice(kind.name().as_bytes());
+        bytes.push(0);
+    }
+    *blake3::hash(&domain_bytes("gugu-query-registry-v1", &bytes)).as_bytes()
 }
 
 /// query 的规范身份。

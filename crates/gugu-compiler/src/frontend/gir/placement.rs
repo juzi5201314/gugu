@@ -93,7 +93,9 @@ fn tally(counts: &mut PlacementCounts, kind: PlacementKind) {
         PlacementKind::TurnRegion => counts.turn_region += 1,
         PlacementKind::LocalHeap => counts.local_heap += 1,
         PlacementKind::SharedHeap => counts.shared_heap += 1,
-        _ => {}
+        PlacementKind::Resource => counts.resource += 1,
+        PlacementKind::RuntimeRaw => counts.runtime_raw += 1,
+        PlacementKind::Stack | PlacementKind::Pinned | PlacementKind::Foreign => {}
     }
 }
 
@@ -103,6 +105,10 @@ pub(crate) struct PlacementCounts {
     pub(crate) turn_region: u32,
     pub(crate) local_heap: u32,
     pub(crate) shared_heap: u32,
+    /// placement 判定为 `Resource` 的记录数量。
+    pub(crate) resource: u32,
+    /// placement 判定为 `RuntimeRaw` 的记录数量。
+    pub(crate) runtime_raw: u32,
 }
 
 fn fingerprint(records: &[PlacementRecord], allocs: &[AllocPlacement]) -> [u8; 32] {

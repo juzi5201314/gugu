@@ -10,6 +10,13 @@ pub(super) enum Mode {
     Complete,
 }
 
+/// region 的 block 归属；raw publish verifier 用它定位 region 的指令窗口。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct Layout {
+    /// region 编号 → block 是否属于该 region。
+    pub(super) memberships: Vec<Vec<bool>>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct State {
     regions: Vec<u32>,
@@ -18,7 +25,7 @@ struct State {
     permits: Vec<Option<u32>>,
 }
 
-pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<(), Diagnostic> {
+pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<Layout, Diagnostic> {
     let mut begins = vec![0; body.no_safepoint_regions.len()];
     let mut ends = begins.clone();
     let mut reserves = if mode == Mode::Complete {
@@ -207,10 +214,10 @@ pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<(), Diagn
             }
         }
     }
-    for members in memberships {
-        acyclic(body, &members)?;
+    for members in &memberships {
+        acyclic(body, members)?;
     }
-    Ok(())
+    Ok(Layout { memberships })
 }
 
 fn forbidden(op: &Op, mode: Mode) -> bool {

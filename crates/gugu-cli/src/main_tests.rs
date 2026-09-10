@@ -295,11 +295,21 @@ fn single_file_mode_rejects_project_selectors() {
 
 #[test]
 fn dump_internal_flags_parse_and_require_internal_gate() {
-    let cli =
-        Cli::try_parse_from(["gugu", "check", "-Zdump-gir", "-Zdump-lir"]).expect("内部选项可解析");
+    let cli = Cli::try_parse_from([
+        "gugu",
+        "check",
+        "-Zdump-gir",
+        "-Zdump-lir",
+        "-Zdump-runtime",
+    ])
+    .expect("内部选项可解析");
     assert_eq!(
         cli.global.z,
-        vec!["dump-gir".to_owned(), "dump-lir".to_owned()]
+        vec![
+            "dump-gir".to_owned(),
+            "dump-lir".to_owned(),
+            "dump-runtime".to_owned()
+        ]
     );
     assert!(
         super::validate_internal_flags(&cli.global, false)

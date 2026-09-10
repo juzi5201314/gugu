@@ -391,7 +391,9 @@ release 编译器在进入代码生成前也必须运行完整 verifier。验证
 
 ## IR dump
 
-`-Zdump-gir` 和 `-Zdump-lir` 只属于编译器开发接口。dump按稳定定义路径、block ID和 value ID排序，显式打印类型、provenance、memory token、normal/unwind边、source span以及 `NoSafepointRegion` ID/reason/begin/end。地址、hash表桶序和线程编号不得出现。开发开关不进入语言规范，正式 CLI未启用内部选项时不得接受这些参数。
+`BuildLir` 之后的结构检查还包含 publish 区域的 raw 平面契约：`OwnershipPublish`/`RootPublish` 区域内只允许状态写入、字段读写、屏障记录、scoped/shared view 管理与登记原子操作；原子访问必须形成 Release/Acquire 配对（chain link 使用 Release、batch tail exchange 使用 AcqRel、consumer link load 使用 Acquire），禁止新增全局 `SeqCst`；可移动对象的内部地址（`GcInterior`）不得穿过 publish 边界。该检查先于通用指令校验运行，违规诊断为 `E0058` 并阻止镜像计划。
+
+`-Zdump-gir`、`-Zdump-lir` 和 `-Zdump-runtime` 只属于编译器开发接口。dump按稳定定义路径、block ID和 value ID排序，显式打印类型、provenance、memory token、normal/unwind边、source span以及 `NoSafepointRegion` ID/reason/begin/end。地址、hash表桶序和线程编号不得出现。开发开关不进入语言规范，正式 CLI未启用内部选项时不得接受这些参数。
 
 ## 参考实现资料
 

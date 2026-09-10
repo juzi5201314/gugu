@@ -1,7 +1,63 @@
+//! runtime 源树登记、raw 平面契约常量与 owner-directed return 模型。
+//!
+//! 本模块固定 runtime raw 平面的内部契约：owner 身份与路由、slab 描述符、dense size
+//! class、本地分配与回收路径、remote return message、owner inbox、exactly-once return
+//! 与 queue-page grace。契约、verifier 与确定性参照行为由 compiler 持有；Gugu runtime
+//! 的源实现随 runtime/调度/GC 阶段落地，本模块不进入镜像执行路径，也不复制正常执行
+//! 路径。
+
 use crate::target::{Rt0Kind, TargetName};
 
-const STD_PRELUDE_SOURCE: &str = include_str!("../resources/std/prelude.gg");
-const RUNTIME_CORE_SOURCE: &str = include_str!("../resources/runtime/core.gg");
+mod harness;
+mod model;
+
+// raw plane 的参照实现：lib 构建只调用契约对象与 bench facade，确定性验证套件与 bench
+// 直接消费这些状态机与账本。
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod inbox;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod message;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod owner;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod provider;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod size_class;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod slab;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod world;
+
+#[cfg(test)]
+mod tests;
+
+pub use harness::{HarnessReport, OwnerReturnHarness};
+
+pub(crate) use model::{
+    RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RuntimeRawContractV1, run,
+};
+
+/// owner inbox 的 shard 数量；与 scheduler 的 remote inbox 保持一致。
+pub(crate) const OWNER_INBOX_SHARDS: u32 = 8;
+/// 单个 batch 的 item 上限。
+pub(crate) const BATCH_MAX: u32 = 128;
+/// 高争用元数据的填充粒度。
+pub(crate) const QUEUE_PAD_BYTES: u64 = 128;
+/// x86_64 两目标的 cache line 字节数。
+pub(crate) const CACHE_LINE_BYTES: u64 = 64;
+/// scheduler raw 记录使用的分段 slab page 字节数。
+pub(crate) const RAW_SLAB_PAGE_BYTES: u64 = 65536;
+/// raw slab 的 dense size class 阶梯。
+pub(crate) const RAW_CLASS_LADDER: [u32; 7] = [64, 128, 256, 512, 1024, 2048, 4096];
+/// consumer-side source slab 聚合 cache 的 set 数量。
+pub(crate) const RETURN_SLAB_CACHE_SETS: u32 = 8;
+/// 每个 set 的关联 way 数量。
+pub(crate) const RETURN_SLAB_CACHE_WAYS: u32 = 2;
+/// direct mode 下的 temporal target cache 项数。
+pub(crate) const TARGET_CACHE_ENTRIES: u32 = 4;
+
+const STD_PRELUDE_SOURCE: &str = include_str!("../../resources/std/prelude.gg");
+const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

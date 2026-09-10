@@ -2,14 +2,15 @@
 mod operations;
 mod poll;
 mod provenance;
+mod raw_publish;
 mod regions;
 
 use super::body::{
     BlockId, Body, Definition, EdgeId, InstId, Origin, SafepointId, Terminator, Type, UseSite,
     ValueId, id, range,
 };
-use super::invalid;
 use super::pass::graph::Graph;
+use super::{invalid, invalid_raw};
 use crate::{Diagnostic, frontend::hir};
 use std::ops::Range;
 
@@ -31,10 +32,12 @@ fn verify_structure_with(
     structure(body, module)?;
     let graph = Graph::new(body)?;
     definitions(body, &graph)?;
+    // publish 区域是更具体的 runtime raw 契约：先于通用指令校验按 E0058 归类。
+    let layout = regions::verify(body, &graph, mode)?;
+    raw_publish::verify(body, &layout)?;
     memory(body)?;
     operations::verify(body)?;
     provenance::verify(body, &graph)?;
-    regions::verify(body, &graph, mode)?;
     let (ranges, uses) = super::uses::calculate(body);
     if uses != body.uses
         || body

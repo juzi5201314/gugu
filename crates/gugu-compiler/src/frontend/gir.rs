@@ -43,6 +43,29 @@ pub(crate) struct GirWorldV1 {
     pub(crate) fingerprint: [u8; 32],
 }
 
+impl GirWorldV1 {
+    /// 返回协程创建点数量；它是 runtime raw 平面 coroutine slot 需求的下界。
+    pub(crate) fn coroutine_site_count(&self) -> u32 {
+        let mut sites = 0_u32;
+        for body in &self.bodies {
+            for statement in &body.statements {
+                if let body::StatementKind::Assign(_, rvalue) = &statement.kind
+                    && matches!(
+                        rvalue,
+                        body::Rvalue::Intrinsic {
+                            op: body::IntrinsicOp::Spawn(_),
+                            ..
+                        }
+                    )
+                {
+                    sites += 1;
+                }
+            }
+        }
+        sites
+    }
+}
+
 pub(crate) fn empty_world() -> GirWorldV1 {
     let placement = placement::PlacementWorldV1::empty();
     GirWorldV1 {

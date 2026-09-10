@@ -789,6 +789,15 @@ benchmark 与正确性测试分离。至少测量：
 
 必须在 release 构建中比较 cycles/instructions 与 wall time；没有 profile 数据时不得宣称某个 batch threshold、radix level 或 cache size 更快。
 
+## Compiler 侧契约模型与 verifier
+
+owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，schema 1）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯、消息字段 schema、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
+
+- **消息字段 schema** 为每个字段打种类标签，只允许 owner domain/id/generation/route key、descriptor index、unit index、bytes、epoch、integrity 与 link；任何地址种类在 `verify` 中被拒绝，因此“跨 owner 只发送 descriptor/index/generation/epoch/bytes/integrity”是机器检查的契约，而不是注释约定。
+- **需求视图**（`RawPlaneDemand`）由冻结前端产物推导：GIR 协程创建点数量、placement 判定的 `Resource`/`RuntimeRaw` 记录数量与 owner 数量；常驻 message node 容量由 shard 数与 batch item 上限推导为可证明下界。
+- **确定性参照实现**（`runtime` 模块内的 provider、slab、owner、message、inbox 与 world）实现本地 free path 四步顺序、`ReturnQueued` 唯一状态迁移、encoded link、producer staging、8 shard batch queue、consumer drain、source slab 聚合与 owner retire，并由确定性测试替身覆盖。它固定 schema、verifier 与参照行为，不进入镜像执行路径；Gugu runtime 的等价实现随 runtime/调度/GC 阶段落地，两者共享同一 schema 与 verifier。
+- **发布区域 verifier**：LIR 对 `OwnershipPublish`/`RootPublish` 区域执行 raw 平面检查（允许的 op 集合、原子序配对、非可移动内部地址），违规诊断 `E0058`，不写出镜像计划。
+
 ## 实施顺序
 
 1. 固定 `OwnerRecord`、`OwnerToken`、`SlabDescriptor`、`ReturnMessage` 和 generation/state verifier。
@@ -804,6 +813,8 @@ benchmark 与正确性测试分离。至少测量：
 11. 在明确的 heap cage profile 中加入 checked pointer compression；再以真实 workload 评估 decode、cache 和 FFI 成本。
 12. 完成 per-owner root slice、credit termination、MosaicBaseline/MosaicConcurrent stop 边界和 security profile。
 13. 最后加入 typed combining，用于 GlobalRange 和 topology 冷路径，不回流到 allocation/return/GC mark 热路径。
+
+第 1--3 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；Gugu runtime 侧的等价实现随阶段 33/34 的 rt0 与协程控制块落地并复用同一 schema。第 4 步起仍按本顺序推进。
 
 每个步骤完成后都要同步对应的 spec/internals 条款；实现、规范和测试必须同时改变，不能只引入一个“以后再接”的空接口。
 

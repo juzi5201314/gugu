@@ -319,8 +319,10 @@ llvm: 19.1.0
 | flag | 行为 |
 | --- | --- |
 | `dump-gir` | `text`：在编译摘要前向 stdout 打印 generic GIR 稳定 dump。`json`：发布 `gir-dump` 事件，payload 含 dump 文本。`json-diagnostic-short` 不 dump。 |
+| `dump-lir` | `text`：在编译摘要前向 stdout 打印已通过结构 verifier 的 LIR 稳定 dump。`json`：发布 `lir-dump` 事件，payload 含 dump 文本与指纹。`json-diagnostic-short` 不 dump。 |
+| `dump-runtime` | `text`：打印 runtime raw 平面契约（size class、消息字段、grace 步骤、账本分类与需求视图）的稳定 dump。`json`：发布 `runtime-dump` 事件，payload 含 dump 文本与契约指纹。`json-diagnostic-short` 不 dump。 |
 
-当前只登记 `dump-gir`。dump 文本由 compiler 在进程内生成，不依赖真实子进程。
+dump 文本由 compiler 在进程内生成，不依赖真实子进程，也不含地址、宿主绝对路径或线程编号。
 
 ## 与语言规范的交叉引用
 

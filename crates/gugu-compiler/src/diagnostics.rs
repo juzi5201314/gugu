@@ -144,6 +144,8 @@ pub enum DiagnosticCode {
     LargeCopy,
     /// LIR SSA、内存链、provenance 或 effect region 不满足内部不变量。
     LirInvariant,
+    /// runtime raw 平面契约或 publish 序列不满足内部不变量。
+    RuntimeRawInvariant,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -206,6 +208,7 @@ impl fmt::Display for DiagnosticCode {
             Self::GirInvariant => "E0055",
             Self::LargeCopy => "E0056",
             Self::LirInvariant => "E0057",
+            Self::RuntimeRawInvariant => "E0058",
         };
         formatter.write_str(code)
     }

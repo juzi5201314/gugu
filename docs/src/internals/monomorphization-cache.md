@@ -90,8 +90,9 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 27 | `AnalysisSccSummary` | 排序 `MonoKey` 集 + analysis policy + world 输入（schema 4） | 完整 SCC 摘要固定点 |
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision + 已完成 world 的结果指纹（schema 2） | 内容寻址跨 package 摘要 |
 | 29 | `EscapeAndPlacement` | 放置前 GIR 指纹 + 分析输入指纹 + 冻结 HIR 指纹（schema 1，域 `gugu-escape-placement-v1`） | `PlacementWorldV1` |
+| 30 | `RuntimeRawModel` | target 语义 + tuning profile revision + LIR 指纹 + placement 指纹（schema 1，域 `gugu-runtime-raw-v1`） | `RuntimeRawContractV1`（dense size class、消息字段 schema、grace 步骤与账本分类） |
 
-新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--29 只表达登记的新 query，不得重用或改变既有编号的含义。query 23 与 27 的 callable 身份是 `MonoKey`；使用 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
+新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--30 只表达登记的新 query，不得重用或改变既有编号的含义。`RuntimeRawModel` 落地把 registry 登记 revision 提升到 2，并新增 `QueryKind::name()` 与 `query::registry_fingerprint()`：指纹按编号升序编码全部 `(kind, name)`，经 `ActionInputs::set_query_registry` 进入 action key，因此新增或改名 kind 必然使旧 action record 失效。同时 `ActionInputs` 增加 `set_runtime_raw`，记录本次 action 消费的 raw 契约指纹。query 23 与 27 的 callable 身份是 `MonoKey`；使用 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
 
 `BuildGenericGir` 为每个冻结 HIR owner 构造一份 generic body，依赖 `LowerHir` schema 5 的模块指纹。当前 schema 为 2，body 携带 `large_copies`；`GirWorldV1` schema 2 在 fragment 之外保存 placement，指纹域为 `gugu-gir-world-v2`。`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹（含 placement）进入 `ActionInputs` 与 `ImagePlan`；全程序分析仍消费放置前的 GIR 指纹。`LowerHir` 只构造、校验并冻结；单态化闭合、late、分析与 placement 在冻结之后按 `gir → mono → late → analysis → placement → summary` 顺序执行。
 
@@ -206,7 +207,7 @@ reader 的已打开文件句柄就是 lease：Linux 即使被 unlink 仍从原 i
 ## Query engine 与对象存储
 
 `gugu-compiler::query` 落地 session 内 query engine 与编译对象存储：
-`QueryKind` 固定登记 1--29，`QueryKey` 使用 schema 与规范 key 形成域隔离摘要；每个
+`QueryKind` 固定登记 1--30，`QueryKey` 使用 schema 与规范 key 形成域隔离摘要；每个
 query cell 按 `Uncomputed -> Computing -> Complete/Failed/Cancelled` 转换，并以条件变量
 让并发请求共享唯一计算结果。成功结果保存不可变 payload、结果 fingerprint 和按稳定 key
 排序去重的直接依赖；失败与取消不会作为成功对象写入持久存储。

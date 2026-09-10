@@ -219,10 +219,12 @@
 
 ## 四、runtime 内存、调度与 GC
 
-- [ ] **阶段 30：实现 raw slab/span 与 owner-directed return**（复杂度：4）
+- [x] **阶段 30：实现 raw slab/span 与 owner-directed return**（复杂度：4）
   - 依赖：阶段 01、11（使用阶段 01 提供的可替换 fake range provider）。
   - 实现稳定 `OwnerRecord/OwnerToken`、`SlabDescriptor`、dense size class、本地 free path、producer staging、ReturnMessage、8 shard owner inbox、MPSC batch 发布和 exactly-once return。
   - 验收：跨 owner 只发送 descriptor/index/generation/epoch/bytes/integrity，不发送 managed 裸地址；MPSC 交错、远程批量、generation mismatch、owner retire 和链完整性均有确定性测试。
+  - 接入证据：`RuntimeRawModel`（query 30，schema 1）在 `BuildIr` 内、runtime 资源附加前构建 `RuntimeRawContractV1`：目标语义、tuning profile、7 项 dense class 阶梯（64…4096，64 KiB span）、12 字段消息 schema（地址种类在 verifier 中被拒）、queue-page grace 步骤、四类互斥账本与由 GIR 协程创建点、placement 记录推导的需求视图；query registry 登记 revision 提升到 2，`registry_fingerprint` 与契约指纹经 `ActionInputs` 进入 action key，`ImagePlan` 报告 dense class 数、shard 数、batch item/byte 上限、常驻 node 容量与契约指纹，`-Zdump-runtime` 与 `runtime-dump` 事件输出稳定 dump。参照实现覆盖本地四步分配（free list → span bump → domain cache → typed range request，前两步零平台调用并由 provider 统计断言）、`ReturnQueued` 唯一状态迁移与 double return 拒绝、encoded link（空链/校验位/对齐/过期 generation/外来 slab 分类）、producer staging 的 item/byte 双上限与六类触发、8 shard 四步发布与 phantom-null 语义、source slab 聚合的 victim/close、旧 token 转发、queue-page grace 与 owner retire、账本互斥分类；LIR 层 publish 区域契约 verifier 先于通用指令校验运行，违规诊断为 `E0058`。工作区 395 项测试通过（本阶段新增 27 项：raw 平面参照实现 22 项、publish 区域契约 3 项、镜像计划端到端 2 项），构建零 warning，mdBook 构建通过；`cargo bench -p gugu-compiler --bench owner_return` 以真实多 producer 压 MPSC 批量发布，exactly-once 与账本不变量保持；Linux CLI 真实输入的 `image-plan` JSON 含 raw 字段，目标变化使契约指纹变化。PlatformRange 的 guard/wait/wake/entropy 与 debt/pacing、`ResourceCell` release、`CoroutineSlot`/stack class 尺寸分别由阶段 31/32/34/41 交付，Gugu runtime 源实现随 rt0 与调度阶段落地并复用同一 schema。
+  - 审查修复：带 tag 的 node free stack 与独立 `free_next` 车道消除 ABA；head 读取与 CAS 之间的窗口改为重试而非不变量失败；message node 只在 queue-page grace 之后复用，避免 consumer 的 front/last 记账指向被重新写入的 node。
 
 - [ ] **阶段 31：实现 ResourceCell 与自适应资源租约**（复杂度：4）
   - 依赖：阶段 27、30。

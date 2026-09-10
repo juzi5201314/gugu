@@ -96,7 +96,18 @@ crates/
     │   ├── semantics/              TypeCheck、布局交接与 AST 到 HIR 形成
     │   └── hir/                    类型化 owner、侧表与冻结 verifier
     ├── src/backend.rs              目标相关的内存 image plan 输入
-    ├── src/runtime.rs              Gugu 源树、rt0 和 intrinsic 登记
+    ├── src/runtime/                Gugu 源树登记、raw 平面契约与 owner-directed return 参照实现
+    │   ├── mod.rs                  源树/rt0/intrinsic 登记与 raw 平面常量
+    │   ├── model.rs                `RuntimeRawContractV1`、消息字段 schema 与 query driver
+    │   ├── provider.rs             平台 range 四操作与确定性替身
+    │   ├── size_class.rs           dense size class 表与 stride 除法常量
+    │   ├── slab.rs                 owner 目录、slab 描述符与 slot 状态机
+    │   ├── owner.rs                本地 free path、本地/远程 return 分叉
+    │   ├── message.rs              return message、link 编码、producer staging 与 source slab 聚合
+    │   ├── inbox.rs                8 shard batch queue、bounded snapshot、epoch gate
+    │   ├── world.rs                owner 上下文 service、转发、grace 与 retire
+    │   ├── harness.rs              真实并发可运行切片（bench façade）
+    │   └── tests.rs                确定性参照实现的验证套件
     └── resources/
         ├── std/prelude.gg          标准库 Gugu 源单元
         └── runtime/core.gg         runtime Gugu 源单元
@@ -156,6 +167,8 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 
 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
+`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 1）构建并校验 runtime raw 平面契约：dense size class、消息字段 schema、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`；契约指纹同时进入 action key。这些字段固定 raw 平面的 schema 与参照行为，不代表 runtime 已在镜像内物化。
+
 `ImagePlan` 再增加 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 与 `placement-fingerprint`。这些字段记录逃逸与存储选择，不代表已经改写 CFG 做堆装箱或写出机器码。`large_copy` 警告进入 `Compilation` 诊断且不阻止镜像计划；升为错误时 Frontend 失败且没有镜像。
 
 ## runtime 源资源与实现归属
@@ -195,7 +208,7 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 | `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 |
 | `unsafe` | safety checker、FFI/asm backend | 前端安全检查已落地；外部桥接执行与机器编码未落地 |
 | `platform-abi` | `target`、x86 backend、image writer | 已建立两个目标 descriptor |
-| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界 |
+| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界；raw 平面契约与 owner-directed return 参照实现已落地 |
 | `standard-library` | `runtime` Gugu 源树与 std modules | 已建立源树登记 |
 | `testing` | test collector、harness、CLI | 未实现 |
 

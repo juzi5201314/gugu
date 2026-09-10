@@ -56,6 +56,46 @@ fn rejected(compilation: &Compilation, mut body: Body) {
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
 
+/// 断言非法 LIR 在 runtime raw 平面契约上被拒绝。
+fn rejected_raw(compilation: &Compilation, mut body: Body) {
+    super::uses::rebuild(&mut body);
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+        .expect_err("非法 publish 区域必须在后端前失败");
+    assert_eq!(
+        error.code(),
+        DiagnosticCode::RuntimeRawInvariant,
+        "{}",
+        error.message()
+    );
+}
+
+fn publish_body(compilation: &Compilation) -> Body {
+    compilation
+        .lir
+        .as_ref()
+        .expect("已生成 LIR")
+        .world
+        .bodies
+        .iter()
+        .find(|body| !body.no_safepoint_regions.is_empty())
+        .expect("publish 闭包必须保留 NoSafepointRegion")
+        .clone()
+}
+
+/// 返回 region 内第一条 `Store` 的指令下标。
+fn region_store(body: &Body, region: u32) -> usize {
+    let mut inside = false;
+    for (index, instruction) in body.instructions.iter().enumerate() {
+        match instruction.op {
+            Op::NoSafepointBegin(open) if open == region => inside = true,
+            Op::NoSafepointEnd(close) if close == region => inside = false,
+            Op::Store(_) if inside => return index,
+            _ => {}
+        }
+    }
+    panic!("publish 区域必须包含 Store");
+}
+
 #[test]
 fn block_parameters_preserve_branch_and_loop_values() {
     let compilation = compile(SSA);
@@ -192,6 +232,60 @@ fn managed_store_requires_its_hybrid_barrier() {
     let safepoint = barrier.safepoint.unwrap();
     body.safepoints[safepoint.index()].kind = body::SafepointKind::StackCheck;
     rejected(&compilation, body);
+}
+
+#[test]
+fn publish_region_keeps_raw_plane_contract() {
+    let compilation = compile(PUBLISH);
+    let body = publish_body(&compilation);
+    assert!(
+        body.no_safepoint_regions.iter().any(|reason| matches!(
+            reason,
+            crate::frontend::gir::body::NoSafepointReason::OwnershipPublish
+                | crate::frontend::gir::body::NoSafepointReason::RootPublish
+        )),
+        "publish 区域必须保留 reason"
+    );
+    let store = region_store(&body, 0);
+    assert!(matches!(body.instructions[store].op, Op::Store(_)));
+}
+
+#[test]
+fn publish_region_rejects_managed_interior_value() {
+    use crate::lir::body::Provenance;
+
+    let compilation = compile(PUBLISH);
+    let mut body = publish_body(&compilation);
+    let store = region_store(&body, 0);
+    let value = body.args(&body.instructions[store].arguments)[1];
+    assert_eq!(
+        body.values[value.index()].kind.provenance,
+        Some(Provenance::GcHeap),
+        "fixture 的 publish 区域写入的是句柄身份"
+    );
+    body.values[value.index()].kind.provenance = Some(Provenance::GcInterior);
+    rejected_raw(&compilation, body);
+}
+
+#[test]
+fn publish_region_rejects_bulk_memory_operation() {
+    let compilation = compile(PUBLISH);
+    let mut body = publish_body(&compilation);
+    let store = region_store(&body, 0);
+    let arguments = body.instructions[store].arguments.clone();
+    let byte = body
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction.op {
+            Op::IConst(_) if !instruction.results.is_empty() => {
+                Some(ValueId(instruction.results.start))
+            }
+            _ => None,
+        })
+        .expect("fixture 必须含整数常量");
+    body.operands[usize::try_from(arguments.start).expect("操作数起点")] = byte;
+    body.instructions[store].op = Op::Memset { bytes: 8 };
+    rejected_raw(&compilation, body);
 }
 
 #[test]
