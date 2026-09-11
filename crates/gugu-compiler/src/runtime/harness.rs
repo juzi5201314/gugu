@@ -237,7 +237,8 @@ pub struct ResourceReleaseReport {
     pub elapsed_micros: u64,
 }
 
-/// 真实并发的 ResourceCell release burst harness：多 producer 发布，单 owner 消费。
+/// ResourceRelease 消息的真实并发发布 harness：多 producer 发布，单 owner 消费。
+/// lease 与受限 cleanup 在计时前构造，计时只覆盖消息发布、消费与 slot 回收。
 #[derive(Clone, Copy, Debug)]
 pub struct ResourceReleaseHarness {
     producers: u32,
@@ -253,7 +254,7 @@ impl ResourceReleaseHarness {
         }
     }
 
-    /// 运行一轮资源 release burst，并校验 exactly-once cleanup 与账本不变量。
+    /// 运行一轮 ResourceRelease 消息发布与消费，并校验 exactly-once cleanup 与账本不变量。
     pub fn run(self) -> ResourceReleaseReport {
         let policy = RawPlanePolicyV1::default();
         let contract = RuntimeRawContractV1::build(
@@ -327,7 +328,7 @@ impl ResourceReleaseHarness {
                     running.store(false, Ordering::Release);
                 }
                 let _ = running;
-                published.fetch_add(count, Ordering::Relaxed);
+                published.fetch_add(count, Ordering::Release);
                 count
             }));
         }
@@ -336,7 +337,12 @@ impl ResourceReleaseHarness {
         let mut consumed = 0_u64;
         let mut clean = true;
         let mut idle = 0_u32;
-        while producers.iter().any(|handle| !handle.is_finished()) || idle < 4 {
+        while running.load(Ordering::Acquire)
+            && (producers.iter().any(|handle| !handle.is_finished())
+                || published.load(Ordering::Acquire) < u64::from(total)
+                || (consumed < u64::from(total) && idle < 1024)
+                || idle < 4)
+        {
             let mut serviced = 0_u64;
             for index in 0..OWNER_INBOX_SHARDS {
                 let shard = ShardIndex::from_raw(index).expect("shard 编号合法");
@@ -367,6 +373,9 @@ impl ResourceReleaseHarness {
             if handle.join().is_err() {
                 clean = false;
             }
+        }
+        if published.load(Ordering::Acquire) != u64::from(total) {
+            clean = false;
         }
         if world.release_graced_nodes().is_err()
             || world.verify_resource_cells().is_err()
