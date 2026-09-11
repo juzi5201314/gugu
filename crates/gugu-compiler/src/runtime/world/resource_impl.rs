@@ -11,14 +11,15 @@ use super::super::message::{
     FlushTrigger, ProducerStaging, ReturnKind, ReturnMessage, stage_message,
 };
 use super::super::owner::Allocation;
+use super::super::provider::{RangeProvider, RangeState};
 use super::super::resource::{
     self, CloseOutcome, LeaseOutcome, ReleaseRegistry, ReleaseTicket, ResourceHandle,
 };
-use super::super::size_class::RuntimeSizeClassTable;
+use super::super::size_class::{RuntimeSizeClass, RuntimeSizeClassTable};
 use super::super::slab::{
-    MemoryDomainId, OwnerToken, RawInvariant, RawSlot, SlabDescriptorId, SlotState,
+    MemoryDomainId, OwnerToken, RawInvariant, RawSlot, SlabDescriptorId, SlabState, SlotState,
 };
-use super::{RawWorld, ResourceShape};
+use super::{RawWorld, ResourceShape, ServiceBudget};
 
 impl RawWorld {
     /// 返回 Resource domain 的 class 表。
@@ -46,22 +47,127 @@ impl RawWorld {
         self.release_queue.len()
     }
 
+    /// 校验资源句柄仍指向当前 live cell。
+    fn validate_resource_handle(&self, handle: ResourceHandle) -> Result<(), RawInvariant> {
+        let descriptor = self
+            .table
+            .descriptor(handle.descriptor)
+            .ok_or_else(|| RawInvariant::new("资源句柄引用未知 slab"))?;
+        if descriptor.domain != MemoryDomainId::RESOURCE {
+            return Err(RawInvariant::new("资源句柄引用非 Resource slab"));
+        }
+        if descriptor.generation != handle.generation {
+            return Err(RawInvariant::new("资源句柄引用过期 slab generation"));
+        }
+        if self.table.state(handle.descriptor, handle.index)? != SlotState::Live {
+            return Err(RawInvariant::new("资源句柄不再指向 live slot"));
+        }
+        let cell = self.cells.get(handle.descriptor, handle.index)?;
+        if cell.generation != handle.cell_generation.raw() {
+            return Err(RawInvariant::new("资源句柄引用过期 cell generation"));
+        }
+        Ok(())
+    }
+
+    /// 将资源句柄转换为 slab owner API 所需的 descriptor generation。
+    fn slab_slot(&self, handle: ResourceHandle) -> Result<RawSlot, RawInvariant> {
+        let generation = self
+            .table
+            .descriptor(handle.descriptor)
+            .ok_or_else(|| RawInvariant::new("资源句柄引用未知 slab"))?
+            .generation;
+        Ok(RawSlot {
+            descriptor: handle.descriptor,
+            index: handle.index,
+            generation,
+        })
+    }
+
     /// 返回某个资源 slot 的 header。
     pub(crate) fn resource_cell(
         &self,
         handle: ResourceHandle,
     ) -> Result<&resource::ResourceCell, RawInvariant> {
+        self.validate_resource_handle(handle)?;
         self.cells.get(handle.descriptor, handle.index)
     }
 
     /// 返回某个资源 slot 当前的 lease 数。
     pub(crate) fn resource_leases(&self, handle: ResourceHandle) -> Result<u64, RawInvariant> {
-        Ok(self.cells.get(handle.descriptor, handle.index)?.leases)
+        if self.validate_resource_handle(handle).is_ok() {
+            return Ok(self.cells.get(handle.descriptor, handle.index)?.leases);
+        }
+        let cell = self.cells.get(handle.descriptor, handle.index)?;
+        if self.table.state(handle.descriptor, handle.index)? == SlotState::Returned
+            && cell.leases == 0
+            && cell.generation == handle.cell_generation.raw().saturating_add(1)
+        {
+            return Ok(0);
+        }
+        self.validate_resource_handle(handle)?;
+        unreachable!("资源句柄校验应返回错误")
     }
 
     /// 校验 ResourceCell header 表与 slab 状态一致。
     pub(crate) fn verify_resource_cells(&self) -> Result<(), RawInvariant> {
         self.cells.verify(&self.table)
+    }
+
+    /// 复用同 owner、同 dedicated layout 的空 slot，避免每次大资源分配都新增 mapping。
+    fn reuse_dedicated_slot(
+        &mut self,
+        token: OwnerToken,
+        class: &RuntimeSizeClass,
+    ) -> Result<Option<Allocation>, RawInvariant> {
+        let descriptor_id =
+            self.table
+                .descriptors()
+                .iter()
+                .enumerate()
+                .find_map(|(index, descriptor)| {
+                    let id = SlabDescriptorId::from_raw(u32::try_from(index).ok()?);
+                    (descriptor.domain == MemoryDomainId::RESOURCE
+                        && descriptor.owner == token
+                        && descriptor.class == class.id
+                        && descriptor.slot_stride == class.slot_stride
+                        && descriptor.alignment == class.alignment
+                        && descriptor.slot_count() == 1
+                        && descriptor.state == SlabState::Active
+                        && descriptor.free == 1
+                        && self.table.state(id, 0).ok() == Some(SlotState::Returned))
+                    .then_some(id)
+                });
+        let Some(descriptor) = descriptor_id else {
+            return Ok(None);
+        };
+        let codec = self.link_codec.clone();
+        let index = self
+            .table
+            .pop_free(descriptor, &codec)?
+            .ok_or_else(|| RawInvariant::new("dedicated descriptor 的 free slot 缺失"))?;
+        self.table
+            .transition(descriptor, index, SlotState::Returned, SlotState::Live)?;
+        let generation = {
+            let record = self
+                .table
+                .descriptor_mut(descriptor)
+                .ok_or_else(|| RawInvariant::new("dedicated descriptor 缺失"))?;
+            record.live += 1;
+            record.generation
+        };
+        let accounting = self
+            .directory
+            .accounting_mut(token.owner_id)
+            .ok_or_else(|| RawInvariant::new("dedicated 复用缺少 owner 账本"))?;
+        accounting.take_from_cache(u64::from(class.slot_stride));
+        Ok(Some(Allocation {
+            slot: RawSlot {
+                descriptor,
+                index,
+                generation,
+            },
+            level: super::super::owner::AllocationLevel::RangeRequest,
+        }))
     }
 
     /// 分配一个地址稳定的 ResourceCell；超出 class 阶梯或对齐上界时使用整页 mapping。
@@ -104,44 +210,48 @@ impl RawWorld {
                 let stride = resource::dedicated_stride(shape.payload_bytes, shape.alignment)?;
                 let alignment = shape.alignment.max(64);
                 let class = resource::dedicated_class(stride, alignment)?;
-                let (range, bytes) = {
-                    let accounting = self
-                        .directory
-                        .accounting_mut(token.owner_id)
-                        .ok_or_else(|| RawInvariant::new("专用 mapping 缺少 owner 账本"))?;
-                    let commit = resource::reserve_mapping(
-                        &mut self.provider,
-                        accounting,
-                        u64::from(stride),
-                        alignment,
+                if let Some(allocation) = self.reuse_dedicated_slot(token, &class)? {
+                    allocation
+                } else {
+                    let (range, bytes) = {
+                        let accounting = self
+                            .directory
+                            .accounting_mut(token.owner_id)
+                            .ok_or_else(|| RawInvariant::new("专用 mapping 缺少 owner 账本"))?;
+                        let commit = resource::reserve_mapping(
+                            &mut self.provider,
+                            accounting,
+                            u64::from(stride),
+                            alignment,
+                            self.epoch,
+                        )?;
+                        (commit.range, commit.bytes)
+                    };
+                    let descriptor = self.table.create(
+                        &class,
+                        token,
+                        range,
+                        bytes,
+                        u32::from(class.id.raw()),
                         self.epoch,
                     )?;
-                    (commit.range, commit.bytes)
-                };
-                let descriptor = self.table.create(
-                    &class,
-                    token,
-                    range,
-                    bytes,
-                    u32::from(class.id.raw()),
-                    self.epoch,
-                )?;
-                self.table
-                    .transition(descriptor, 0, SlotState::Returned, SlotState::Live)?;
-                let record = self
-                    .table
-                    .descriptor_mut(descriptor)
-                    .ok_or_else(|| RawInvariant::new("专用 mapping 描述符缺失"))?;
-                record.live += 1;
-                record.free -= 1;
-                record.bump_cursor = 1;
-                Allocation {
-                    slot: RawSlot {
-                        descriptor,
-                        index: 0,
-                        generation: record.generation,
-                    },
-                    level: super::super::owner::AllocationLevel::RangeRequest,
+                    self.table
+                        .transition(descriptor, 0, SlotState::Returned, SlotState::Live)?;
+                    let record = self
+                        .table
+                        .descriptor_mut(descriptor)
+                        .ok_or_else(|| RawInvariant::new("专用 mapping 描述符缺失"))?;
+                    record.live += 1;
+                    record.free -= 1;
+                    record.bump_cursor = 1;
+                    Allocation {
+                        slot: RawSlot {
+                            descriptor,
+                            index: 0,
+                            generation: record.generation,
+                        },
+                        level: super::super::owner::AllocationLevel::RangeRequest,
+                    }
                 }
             }
         };
@@ -162,16 +272,27 @@ impl RawWorld {
             u64::from(owner),
             descriptor.generation.raw(),
         )?;
-        Ok(allocation.slot)
+        let cell_generation = self
+            .cells
+            .get(allocation.slot.descriptor, allocation.slot.index)?
+            .generation;
+        Ok(ResourceHandle {
+            descriptor: allocation.slot.descriptor,
+            index: allocation.slot.index,
+            generation: allocation.slot.generation,
+            cell_generation: super::super::slab::SlabGeneration::from_raw(cell_generation),
+        })
     }
 
     /// 复制资源值：增加一个 lease。
     pub(crate) fn resource_acquire(&mut self, handle: ResourceHandle) -> Result<(), RawInvariant> {
+        self.validate_resource_handle(handle)?;
         self.cells.acquire(handle.descriptor, handle.index)
     }
 
     /// 发布到共享图；状态单向进入 Shared。
     pub(crate) fn resource_publish(&mut self, handle: ResourceHandle) -> Result<(), RawInvariant> {
+        self.validate_resource_handle(handle)?;
         self.cells.publish(handle.descriptor, handle.index)
     }
 
@@ -181,6 +302,7 @@ impl RawWorld {
         owner: u32,
         handle: ResourceHandle,
     ) -> Result<CloseOutcome, RawInvariant> {
+        self.validate_resource_handle(handle)?;
         let outcome = self.cells.close(handle.descriptor, handle.index)?;
         if outcome == CloseOutcome::ClosedNow {
             self.request_release(owner, handle)?;
@@ -195,6 +317,7 @@ impl RawWorld {
         owner: u32,
         handle: ResourceHandle,
     ) -> Result<LeaseOutcome, RawInvariant> {
+        self.validate_resource_handle(handle)?;
         let outcome = self.cells.release_lease(handle.descriptor, handle.index)?;
         if outcome == LeaseOutcome::LastLease {
             self.request_release(owner, handle)?;
@@ -209,6 +332,7 @@ impl RawWorld {
         owner: u32,
         handle: ResourceHandle,
     ) -> Result<LeaseOutcome, RawInvariant> {
+        self.validate_resource_handle(handle)?;
         self.cells.mark_detached(handle.descriptor, handle.index)?;
         self.release_lease(owner, handle)
     }
@@ -227,11 +351,7 @@ impl RawWorld {
         {
             return Ok(false);
         }
-        let generation = self
-            .table
-            .descriptor(handle.descriptor)
-            .ok_or_else(|| RawInvariant::new("release 引用未知资源 slab"))?
-            .generation;
+        let generation = handle.cell_generation;
         let detached = self
             .cells
             .get(handle.descriptor, handle.index)?
@@ -245,26 +365,47 @@ impl RawWorld {
         Ok(true)
     }
 
+    /// 从 release queue 取出指定 cell 的 ticket，避免误取其它资源的请求。
+    fn take_release_ticket(
+        &mut self,
+        handle: ResourceHandle,
+    ) -> Result<ReleaseTicket, RawInvariant> {
+        let position = self
+            .release_queue
+            .iter()
+            .position(|ticket| {
+                ticket.descriptor == handle.descriptor
+                    && ticket.index == handle.index
+                    && ticket.generation == handle.cell_generation
+            })
+            .ok_or_else(|| RawInvariant::new("release queue 缺少指定资源 ticket"))?;
+        self.release_queue
+            .remove(position)
+            .ok_or_else(|| RawInvariant::new("release queue ticket 在取出时丢失"))
+    }
+
     /// release worker：执行一次受限 cleanup，并在 lease 归零时归还 slot。
     pub(crate) fn drain_release_queue(&mut self, owner: u32) -> Result<u32, RawInvariant> {
         let mut drained = 0_u32;
         while let Some(ticket) = self.release_queue.pop_front() {
-            let detached = self
-                .cells
-                .get(ticket.descriptor, ticket.index)?
-                .is_detached();
+            let slab_generation = self
+                .table
+                .descriptor(ticket.descriptor)
+                .ok_or_else(|| RawInvariant::new("release 引用未知资源 slab"))?
+                .generation;
             self.cells.complete_release(
                 ticket.descriptor,
                 ticket.index,
                 ticket.generation,
-                detached,
+                ticket.detached,
             )?;
             self.try_reclaim(
                 owner,
                 ResourceHandle {
                     descriptor: ticket.descriptor,
                     index: ticket.index,
-                    generation: ticket.generation,
+                    generation: slab_generation,
+                    cell_generation: ticket.generation,
                 },
             )?;
             drained += 1;
@@ -274,6 +415,11 @@ impl RawWorld {
 
     /// 唯一回收权：lease 归零且 cleanup 完成后归还 slot，跨 owner 时发布 release 消息。
     fn try_reclaim(&mut self, owner: u32, handle: ResourceHandle) -> Result<(), RawInvariant> {
+        let caller_token = self
+            .resource_owners
+            .get(owner as usize)
+            .ok_or_else(|| RawInvariant::new("release 使用了未知 owner"))?
+            .token();
         if !self
             .cells
             .try_begin_reclaim(handle.descriptor, handle.index)?
@@ -285,12 +431,24 @@ impl RawWorld {
             .descriptor(handle.descriptor)
             .ok_or_else(|| RawInvariant::new("回收引用未知资源 slab"))?
             .owner;
-        if self.resource_owners[owner as usize].token() == token {
+        if caller_token == token {
             return self.reclaim_locally(handle);
         }
         // 跨 owner 时先把 slot 推进到唯一 ReturnQueued 状态，再由 owner 消费消息归还。
-        let message = self.queue_remote_release(handle)?;
-        self.publish_release_message(&message, ShardIndex::from_raw(0).expect("shard 0 合法"))
+        let message = match self.queue_remote_release(handle) {
+            Ok(message) => message,
+            Err(error) => {
+                self.rollback_remote_reclaim(handle)?;
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            self.publish_release_message(&message, ShardIndex::from_raw(0).expect("shard 0 合法"))
+        {
+            self.rollback_remote_reclaim(handle)?;
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// 外来执行者结束最后一个 lease：执行受限 cleanup、取得回收权并返回 release 消息。
@@ -302,33 +460,40 @@ impl RawWorld {
         owner: u32,
         handle: ResourceHandle,
     ) -> Result<ReturnMessage, RawInvariant> {
-        let outcome = self.cells.release_lease(handle.descriptor, handle.index)?;
-        if outcome != LeaseOutcome::LastLease {
-            return Err(RawInvariant::new("外来 release 必须结束最后一个 lease"));
-        }
-        if !self.enqueue_release(handle)? {
-            return Err(RawInvariant::new("release 入队点已经被其它路径占用"));
-        }
-        let ticket = self
-            .release_queue
-            .pop_front()
-            .ok_or_else(|| RawInvariant::new("release queue 缺少刚入队的 ticket"))?;
-        if ticket.descriptor != handle.descriptor || ticket.index != handle.index {
-            return Err(RawInvariant::new("release queue 的 ticket 与请求不一致"));
-        }
-        self.cells.complete_release(
-            ticket.descriptor,
-            ticket.index,
-            ticket.generation,
-            ticket.detached,
-        )?;
+        self.validate_resource_handle(handle)?;
         let token = self
             .table
             .descriptor(handle.descriptor)
             .ok_or_else(|| RawInvariant::new("release 引用未知资源 slab"))?
             .owner;
-        if self.resource_owners[owner as usize].token() == token {
+        let caller = self
+            .resource_owners
+            .get(owner as usize)
+            .ok_or_else(|| RawInvariant::new("release 使用了未知 owner"))?;
+        if caller.token() == token {
             return Err(RawInvariant::new("本地 owner 必须走本地回收路径"));
+        }
+        if self.cells.get(handle.descriptor, handle.index)?.leases != 1 {
+            return Err(RawInvariant::new("外来 release 必须结束最后一个 lease"));
+        }
+        let queued = self.enqueue_release(handle)?;
+        if !queued
+            && !self
+                .cells
+                .get(handle.descriptor, handle.index)?
+                .is_release_done()
+        {
+            return Err(RawInvariant::new("已有 release 入队但 cleanup 尚未完成"));
+        }
+        self.cells.release_lease(handle.descriptor, handle.index)?;
+        if queued {
+            let ticket = self.take_release_ticket(handle)?;
+            self.cells.complete_release(
+                ticket.descriptor,
+                ticket.index,
+                ticket.generation,
+                ticket.detached,
+            )?;
         }
         if !self
             .cells
@@ -352,7 +517,12 @@ impl RawWorld {
             (descriptor.owner, descriptor.slot_stride)
         };
         self.begin_slot_return(handle)?;
-        self.message(token, ReturnKind::ResourceRelease, handle, bytes)
+        let message_slot = RawSlot {
+            descriptor: handle.descriptor,
+            index: handle.index,
+            generation: handle.cell_generation,
+        };
+        self.message(token, ReturnKind::ResourceRelease, message_slot, bytes)
     }
 
     /// 把 release 消息发布到目标 owner 的 inbox。
@@ -385,17 +555,13 @@ impl RawWorld {
             (descriptor.owner, u64::from(descriptor.slot_stride))
         };
         let owner_index = self.owner_index_of(token)?;
-        self.resource_owners[owner_index].begin_return(handle, &mut self.table)?;
+        let slot = self.slab_slot(handle)?;
+        self.resource_owners[owner_index].begin_return(slot, &mut self.table)?;
         let accounting = self
             .directory
             .accounting_mut(token.owner_id)
             .ok_or_else(|| RawInvariant::new("资源回收缺少 owner 账本"))?;
-        self.resource_owners[owner_index].queue_return(
-            handle,
-            &mut self.table,
-            accounting,
-            bytes,
-        )?;
+        self.resource_owners[owner_index].queue_return(slot, &mut self.table, accounting, bytes)?;
         Ok(bytes)
     }
 
@@ -409,18 +575,45 @@ impl RawWorld {
         let owner_index = self.owner_index_of(token)?;
         let bytes = self.begin_slot_return(handle)?;
         let codec = self.link_codec.clone();
+        let slot = self.slab_slot(handle)?;
         let accounting = self
             .directory
             .accounting_mut(token.owner_id)
             .ok_or_else(|| RawInvariant::new("资源回收缺少 owner 账本"))?;
         self.resource_owners[owner_index].consume_return(
-            handle,
+            slot,
             &mut self.table,
             &codec,
             accounting,
             bytes,
         )?;
         self.cells.finish_reclaim(handle.descriptor, handle.index)?;
+        Ok(())
+    }
+
+    /// 回滚远程消息发布失败留下的 ReturnQueued 与回收权。
+    fn rollback_remote_reclaim(&mut self, handle: ResourceHandle) -> Result<(), RawInvariant> {
+        let (token, bytes) = {
+            let descriptor = self
+                .table
+                .descriptor(handle.descriptor)
+                .ok_or_else(|| RawInvariant::new("远程回滚引用未知资源 slab"))?;
+            (descriptor.owner, u64::from(descriptor.slot_stride))
+        };
+        let owner_index = self.owner_index_of(token)?;
+        let slot = self.slab_slot(handle)?;
+        let accounting = self
+            .directory
+            .accounting_mut(token.owner_id)
+            .ok_or_else(|| RawInvariant::new("远程回滚缺少 owner 账本"))?;
+        self.resource_owners[owner_index].cancel_return(
+            slot,
+            &mut self.table,
+            accounting,
+            bytes,
+        )?;
+        self.cells
+            .clear_reclaiming(handle.descriptor, handle.index)?;
         Ok(())
     }
 
@@ -442,10 +635,14 @@ impl RawWorld {
             let id = SlabDescriptorId::from_raw(u32::try_from(index).expect("描述符下标适配 u32"));
             for slot in 0..descriptor.slot_count() {
                 if self.table.state(id, slot)? == SlotState::Live {
+                    let cell_generation = self.cells.get(id, slot)?.generation;
                     handles.push(ResourceHandle {
                         descriptor: id,
                         index: slot,
                         generation: descriptor.generation,
+                        cell_generation: super::super::slab::SlabGeneration::from_raw(
+                            cell_generation,
+                        ),
                     });
                 }
             }
@@ -471,24 +668,121 @@ impl RawWorld {
         Ok(released)
     }
 
-    /// 进程终止：结束全部 lease、执行 cleanup 并归还全部资源 slot。
+    /// 排空 shutdown 前已经发布的 return message，并释放 message node。
+    fn drain_shutdown_messages(&mut self) -> Result<(), RawInvariant> {
+        let budget = ServiceBudget::pressure(u32::MAX, u64::MAX);
+        loop {
+            let mut progress = 0_u64;
+            for owner in 0..self.inboxes.len() as u32 {
+                let (forwarded, consumed) = self.drain_all(owner, &budget)?;
+                progress += u64::from(forwarded) + u64::from(consumed);
+            }
+            if progress == 0 {
+                break;
+            }
+        }
+        self.release_graced_nodes()?;
+        Ok(())
+    }
+
+    /// 取出尚未由 worker 消费的 release ticket，并完成受限 cleanup。
+    fn complete_pending_releases(&mut self) -> Result<(), RawInvariant> {
+        while let Some(ticket) = self.release_queue.pop_front() {
+            self.cells.complete_release(
+                ticket.descriptor,
+                ticket.index,
+                ticket.generation,
+                ticket.detached,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// 统计尚未归还的 Resource slot。
+    fn active_resource_slots(&self) -> Result<u32, RawInvariant> {
+        let mut active = 0_u32;
+        for (index, descriptor) in self.table.descriptors().iter().enumerate() {
+            if descriptor.domain != MemoryDomainId::RESOURCE {
+                continue;
+            }
+            let id = SlabDescriptorId::from_raw(u32::try_from(index).expect("描述符下标适配 u32"));
+            for slot in 0..descriptor.slot_count() {
+                if self.table.state(id, slot)? != SlotState::Returned {
+                    active += 1;
+                }
+            }
+        }
+        Ok(active)
+    }
+
+    /// 释放已经没有 live slot 的 Resource domain range。
+    fn release_resource_ranges(&mut self) -> Result<(), RawInvariant> {
+        let ranges: Vec<_> = self
+            .table
+            .descriptors()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, descriptor)| {
+                if descriptor.domain == MemoryDomainId::RESOURCE
+                    && descriptor.live == 0
+                    && descriptor.queued == 0
+                    && descriptor.state != SlabState::Released
+                {
+                    Some((
+                        SlabDescriptorId::from_raw(u32::try_from(index).ok()?),
+                        descriptor.range,
+                        descriptor.committed_bytes,
+                        descriptor.owner,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for (descriptor, range, bytes, owner) in ranges {
+            let provider_range = self
+                .provider
+                .describe(range)
+                .ok_or_else(|| RawInvariant::new("Resource descriptor 引用未知 range"))?;
+            if provider_range.state != RangeState::Released {
+                if provider_range.state == RangeState::Committed {
+                    self.provider.decommit(range)?;
+                }
+                self.provider.release(range)?;
+                let accounting = self
+                    .directory
+                    .accounting_mut(owner.owner_id)
+                    .ok_or_else(|| RawInvariant::new("释放 Resource range 缺少 owner 账本"))?;
+                accounting.release(bytes);
+            }
+            let record = self
+                .table
+                .descriptor_mut(descriptor)
+                .ok_or_else(|| RawInvariant::new("释放 Resource range 缺少 descriptor"))?;
+            record.state = SlabState::Released;
+            record.committed_bytes = 0;
+        }
+        Ok(())
+    }
+
+    /// 进程终止：排空远程 return、结束全部 lease、执行 cleanup 并归还全部资源 slot。
     pub(crate) fn shutdown(&mut self) -> Result<u32, RawInvariant> {
-        let handles = self.live_resource_handles()?;
-        let mut reclaimed = 0_u32;
-        for handle in handles {
+        let active = self.active_resource_slots()?;
+        self.drain_shutdown_messages()?;
+        self.complete_pending_releases()?;
+        for handle in self.live_resource_handles()? {
             let detached = self
                 .cells
                 .get(handle.descriptor, handle.index)?
                 .is_detached();
-            let generation = self
-                .table
-                .descriptor(handle.descriptor)
-                .ok_or_else(|| RawInvariant::new("shutdown 引用未知资源 slab"))?
-                .generation;
             self.cells
                 .request_release(handle.descriptor, handle.index)?;
-            self.cells
-                .complete_release(handle.descriptor, handle.index, generation, detached)?;
+            self.cells.complete_release(
+                handle.descriptor,
+                handle.index,
+                handle.cell_generation,
+                detached,
+            )?;
             self.cells
                 .force_release_all(handle.descriptor, handle.index)?;
             if self
@@ -496,10 +790,13 @@ impl RawWorld {
                 .try_begin_reclaim(handle.descriptor, handle.index)?
             {
                 self.reclaim_locally(handle)?;
-                reclaimed += 1;
             }
         }
-        self.release_queue.clear();
-        Ok(reclaimed)
+        self.complete_pending_releases()?;
+        if !self.release_queue.is_empty() || self.active_resource_slots()? != 0 {
+            return Err(RawInvariant::new("shutdown 未归还全部 Resource slot"));
+        }
+        self.release_resource_ranges()?;
+        Ok(active)
     }
 }

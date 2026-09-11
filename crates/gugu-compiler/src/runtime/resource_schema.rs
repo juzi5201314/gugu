@@ -115,7 +115,7 @@ impl CellHeaderSchemaV1 {
         }
     }
 
-    /// 校验字段连续、宽度非零、合计等于 header 字节数。
+    /// 校验字段数量、名称、种类、固定偏移、宽度连续性与 header 字节数。
     pub(crate) fn verify(&self) -> Result<(), RawModelError> {
         if self.schema != RESOURCE_SCHEMA {
             return Err(RawModelError::new("ResourceCell header schema 版本不匹配"));
@@ -123,15 +123,29 @@ impl CellHeaderSchemaV1 {
         if self.header_bytes != resource::CELL_HEADER_BYTES {
             return Err(RawModelError::new("ResourceCell header 字节数与契约不一致"));
         }
+        if self.fields.len() != CELL_HEADER_LAYOUT.len() {
+            return Err(RawModelError::new(
+                "ResourceCell header 字段数量与契约不一致",
+            ));
+        }
         let mut offset = 0_u32;
-        for field in &self.fields {
-            if field.offset != offset || field.bytes == 0 {
+        for (index, (field, expected)) in self.fields.iter().zip(CELL_HEADER_LAYOUT).enumerate() {
+            let expected_kind = cell_field_kind(expected.name)
+                .ok_or_else(|| RawModelError::new("ResourceCell header 存在未知固定字段"))?;
+            if field.name != expected.name
+                || field.offset != expected.offset
+                || field.bytes != expected.bytes
+                || field.kind != expected_kind
+                || field.offset != offset
+                || field.bytes == 0
+            {
                 return Err(RawModelError::new(format!(
-                    "ResourceCell header 字段 {} 的偏移或宽度不连续",
-                    field.name
+                    "ResourceCell header 字段 {index} 与固定布局不一致"
                 )));
             }
-            offset += field.bytes;
+            offset = offset
+                .checked_add(field.bytes)
+                .ok_or_else(|| RawModelError::new("ResourceCell header 字节数溢出"))?;
         }
         if offset != self.header_bytes {
             return Err(RawModelError::new(
@@ -211,29 +225,39 @@ impl ResourceStateSchemaV1 {
         }
     }
 
-    /// 校验状态位稠密且迁移表非空。
+    /// 校验固定状态位名称、位值与完整迁移表。
     pub(crate) fn verify(&self) -> Result<(), RawModelError> {
         if self.schema != RESOURCE_SCHEMA {
             return Err(RawModelError::new("ResourceCell 状态 schema 版本不匹配"));
         }
         let expected = [
-            resource::STATE_SHARED,
-            resource::STATE_CLOSED,
-            resource::STATE_RELEASE_QUEUED,
-            resource::STATE_RELEASE_DONE,
-            resource::STATE_RECLAIMING,
+            ("shared", resource::STATE_SHARED),
+            ("closed", resource::STATE_CLOSED),
+            ("release-queued", resource::STATE_RELEASE_QUEUED),
+            ("release-done", resource::STATE_RELEASE_DONE),
+            ("reclaiming", resource::STATE_RECLAIMING),
         ];
         if self.bits.len() != expected.len()
             || self
                 .bits
                 .iter()
                 .zip(expected)
-                .any(|(entry, bit)| entry.bit != bit)
+                .any(|(entry, (name, bit))| entry.name != name || entry.bit != bit)
         {
             return Err(RawModelError::new("ResourceCell 状态位集合与契约不一致"));
         }
-        if self.transitions.len() != CELL_TRANSITIONS.len() {
-            return Err(RawModelError::new("ResourceCell 状态迁移数量与契约不一致"));
+        if self.transitions.len() != CELL_TRANSITIONS.len()
+            || self
+                .transitions
+                .iter()
+                .zip(CELL_TRANSITIONS)
+                .any(|(actual, expected)| {
+                    actual.from != expected.from
+                        || actual.to != expected.to
+                        || actual.trigger != expected.trigger
+                })
+        {
+            return Err(RawModelError::new("ResourceCell 状态迁移与契约不一致"));
         }
         Ok(())
     }
@@ -280,10 +304,13 @@ impl ReleaseDescriptorSchemaV1 {
         }
     }
 
-    /// 校验字段无地址、覆盖必需身份且按名字稳定排序。
+    /// 校验字段与固定 cleanup 描述符完全一致，并确认不携带地址。
     pub(crate) fn verify(&self) -> Result<(), RawModelError> {
         if self.schema != RESOURCE_SCHEMA {
             return Err(RawModelError::new("release 描述符 schema 版本不匹配"));
+        }
+        if self.fields != Self::fixed().fields {
+            return Err(RawModelError::new("release 描述符字段与固定契约不一致"));
         }
         for field in &self.fields {
             if field.kind.carries_address() {
@@ -363,7 +390,7 @@ impl ResourceKindCatalogV1 {
         }
     }
 
-    /// 校验编号稠密、入口唯一且 close 幂等。
+    /// 校验资源种类目录与固定编号、名称、入口及 close 语义一致。
     pub(crate) fn verify(&self) -> Result<(), RawModelError> {
         if self.schema != RESOURCE_SCHEMA {
             return Err(RawModelError::new("资源种类 schema 版本不匹配"));
@@ -375,8 +402,14 @@ impl ResourceKindCatalogV1 {
             return Err(RawModelError::new("资源种类数量与契约不一致"));
         }
         for (index, kind) in self.kinds.iter().enumerate() {
-            if usize::from(kind.id) != index {
-                return Err(RawModelError::new("资源种类编号不稠密"));
+            let expected = RESOURCE_KINDS[index];
+            if usize::from(kind.id) != index
+                || kind.id != expected.id
+                || kind.name != expected.name
+                || kind.release_entry != expected.release_entry
+                || kind.close_idempotent != expected.close_idempotent
+            {
+                return Err(RawModelError::new("资源种类登记与固定目录不一致"));
             }
             if kind.release_entry != self.release_entry {
                 return Err(RawModelError::new(format!(

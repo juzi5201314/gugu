@@ -36,11 +36,11 @@ runtime 可以在不改变语言语义的前提下，为地址稳定的 control�
 
 ## Adaptive Resource Leasing
 
-ResourceCell 是外部资源的共享逻辑身份，保存 raw resource、open/closed 状态、受限 release 操作和 lease 状态。创建后尚未发布时只由创建协程访问；发布到 global、channel、async 捕获或其它共享图前必须单向进入共享状态并建立 happens-before，不能再撤销这次发布。
+ResourceCell 是外部资源的共享逻辑身份，保存 raw resource、open/closed 状态、受限 release 操作和 lease 状态。创建后尚未发布时只由创建协程访问；发布到 global、channel、async 捕获或其它共享图前必须单向进入共享状态并建立 happens-before，不能再撤销这次发布。每次 slot 复用都推进 cell generation；携带旧 generation 的 ResourceHandle 即使再次命中相同 descriptor/index 也必须被拒绝。
 
-资源值的复制、传参、返回、覆盖和退出遵循[值传递](passing.md)。最后一个 lease 结束时恰触发一次受限 release；显式幂等 close 可以更早把 ResourceCell 原子切到 closed。panic 展开、正常作用域退出和覆盖资源槽都必须产生相同可观察结果。collector 移动承载 lease 的 managed 值不改变 lease 身份或计数。
+资源值的复制、传参、返回、覆盖和退出遵循[值传递](passing.md)。最后一个 lease 结束时恰触发一次受限 release；显式幂等 close 可以更早把 ResourceCell 原子切到 closed。closed、已进入 release 队列、cleanup 已完成或正在回收的 cell 都不能新增 lease。panic 展开、正常作用域退出和覆盖资源槽都必须产生相同可观察结果；聚合或 projection 覆盖按字段结束旧 lease，不能因外层结构赋值而遗漏字段。collector 移动承载 lease 的 managed 值不改变 lease 身份或计数。
 
-若最后的 lease 只存在于不可达 managed 容器环内，release 可以推迟到 GC 发现该环；普通作用域中的最后 lease 不依赖 GC 周期。清理可以异步执行，语言不承诺具体执行单元或时刻，只承诺一次性和本节限制；当前 lease 动作与回收队列见 [GIR/LIR](../internals/gir-lir.md)和 [GC 元数据](../internals/gc-metadata.md)。
+若最后的 lease 只存在于不可达 managed 容器环内，release 可以推迟到 GC 发现该环；普通作用域中的最后 lease 不依赖 GC 周期。清理可以异步执行，语言不承诺具体执行单元或时刻，只承诺一次性和本节限制。shutdown 必须排空 owner inbox、grace node、pending release ticket 与 active Resource slot，再释放没有 live slot 的 resource range；当前 lease 动作与回收队列见 [GIR/LIR](../internals/gir-lir.md)和 [GC 元数据](../internals/gc-metadata.md)。
 
 第三方 FFI package 只能通过 `std.resource` 的受限构造接口登记 release。raw state 必须是无 GC 引用的位值；release 不能捕获 owner、访问 GC 图、复活对象、分配、panic、获取 Gugu 锁、等待 channel 或启动协程。语言不提供任意 `Finalize` trait。
 ResourceCell 的受限 cleanup 完成后可以进入 raw owner return；lease 的一次性线性化、close 结果和 panic/作用域一致性仍由本章规定，不能由 message queue 的消费时刻决定。

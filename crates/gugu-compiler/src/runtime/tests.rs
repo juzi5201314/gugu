@@ -12,7 +12,7 @@ use super::message::{
     PublishOutcome, ReturnKind, ReturnMessage, ReturnNodePool, ReturnSlabCache, RingCloseReason,
     stage_message,
 };
-use super::model::CellHeaderSchemaV1;
+use super::model::{CellHeaderSchemaV1, ResourceSchemaV1};
 use super::model::{
     FieldKind, MessageFieldSchema, MessageSchemaV1, RawPlaneDemand, RawPlanePolicyV1,
     RawResourceDemand, RuntimeRawContractV1,
@@ -1197,6 +1197,108 @@ fn dedicated_mapping_rounds_to_whole_page() {
             .expect("slot 状态"),
         SlotState::Returned
     );
+    let committed = world.provider_stats().committed_bytes;
+    let reused = world
+        .allocate_resource(0, shape)
+        .expect("dedicated slot 可复用");
+    assert_eq!(
+        (reused.descriptor, reused.index),
+        (handle.descriptor, handle.index)
+    );
+    assert_eq!(world.provider_stats().committed_bytes, committed);
+    world.release_lease(0, reused).expect("释放复用 slot");
+}
+
+#[test]
+fn stale_resource_handle_is_rejected_after_slot_reuse() {
+    let mut world = world(2, 16);
+    let first = world
+        .allocate_resource(0, resource_shape())
+        .expect("首次资源分配成功");
+    world.release_lease(0, first).expect("首次资源释放成功");
+    let second = world
+        .allocate_resource(0, resource_shape())
+        .expect("复用资源 slot 成功");
+    assert_eq!(
+        (first.descriptor, first.index),
+        (second.descriptor, second.index)
+    );
+    assert_ne!(first.cell_generation, second.cell_generation);
+    assert!(world.resource_acquire(first).is_err());
+    assert!(world.resource_close(0, first).is_err());
+    assert!(world.resource_publish(first).is_err());
+    assert!(world.release_lease(0, first).is_err());
+    assert_eq!(world.resource_leases(second).expect("新句柄可读"), 1);
+}
+
+#[test]
+fn closed_resource_rejects_new_lease() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    world.resource_acquire(handle).expect("复制 lease");
+    world
+        .resource_close(0, handle)
+        .expect("建立 close 线性化点");
+    assert!(world.resource_acquire(handle).is_err());
+}
+
+#[test]
+fn shutdown_drains_pending_remote_resource_release() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    world.release_lease(1, handle).expect("跨 owner 结束 lease");
+    assert_eq!(
+        world.table().state(handle.descriptor, handle.index),
+        Ok(SlotState::ReturnQueued)
+    );
+    assert_eq!(world.shutdown().expect("shutdown 排空远程 release"), 1);
+    assert_eq!(
+        world.table().state(handle.descriptor, handle.index),
+        Ok(SlotState::Returned)
+    );
+    world.verify_resource_cells().expect("cell 表自洽");
+    world.resource_ledger_invariant(0).expect("资源账本守恒");
+}
+
+#[test]
+fn remote_release_publish_failure_rolls_back_slot() {
+    let mut world = world(2, 0);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    assert!(world.release_lease(1, handle).is_err());
+    assert_eq!(
+        world.table().state(handle.descriptor, handle.index),
+        Ok(SlotState::Live)
+    );
+    assert_eq!(world.resource_leases(handle).expect("回滚后 lease 可读"), 0);
+    assert_eq!(world.shutdown().expect("shutdown 回收回滚 slot"), 1);
+}
+
+#[test]
+fn foreign_release_reuses_cleanup_after_close() {
+    let mut world = world(2, 16);
+    let handle = world
+        .allocate_resource(0, resource_shape())
+        .expect("资源分配成功");
+    world.resource_close(1, handle).expect("外来 close");
+    let message = world
+        .prepare_foreign_release(1, handle)
+        .expect("复用既有 cleanup");
+    world
+        .publish_release_message(&message, shard(0))
+        .expect("发布 foreign release");
+    world
+        .service(0, shard(0), &ServiceBudget::new(8, 1 << 16))
+        .expect("owner 消费 release");
+    assert_eq!(
+        world.table().state(handle.descriptor, handle.index),
+        Ok(SlotState::Returned)
+    );
 }
 
 #[test]
@@ -1290,13 +1392,32 @@ fn resource_contract_fingerprint_tracks_demand() {
     assert_ne!(base.fingerprint(), revised.fingerprint());
 }
 
-const _: () = {
-    fn assert_send<T: Send>() {}
-    fn assert_checks() {
-        assert_send::<OwnerInbox>();
-        assert_send::<ReturnNodePool>();
-    }
-};
+#[test]
+fn resource_schema_rejects_malformed_fixed_metadata() {
+    let mut header = ResourceSchemaV1::fixed().header;
+    header.fields[0].kind = super::model::CellFieldKind::PayloadSize;
+    assert!(header.verify().is_err());
+
+    let mut state = ResourceSchemaV1::fixed().states;
+    state.transitions[0].to = "Bogus".to_owned();
+    assert!(state.verify().is_err());
+
+    let mut kinds = ResourceSchemaV1::fixed().kinds;
+    kinds.kinds[0].name = "Bogus".to_owned();
+    assert!(kinds.verify().is_err());
+
+    let mut release = ResourceSchemaV1::fixed().release;
+    release.fields[0].name = "Bogus".to_owned();
+    assert!(release.verify().is_err());
+
+    let mut overflow = ResourceSchemaV1::fixed().header;
+    overflow.fields[0].bytes = u32::MAX;
+    overflow.fields[1].offset = u32::MAX;
+    overflow.fields[1].bytes = 1;
+    let result = std::panic::catch_unwind(|| overflow.verify());
+    assert!(result.is_ok());
+    assert!(result.expect("header verify 不应 panic").is_err());
+}
 
 fn _raw_invariant_is_reported(error: RawInvariant) -> String {
     error.message().to_owned()

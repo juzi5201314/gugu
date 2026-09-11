@@ -316,7 +316,11 @@ impl RawWorld {
             source_epoch: self.epoch,
             state: MessageState::Staged,
             integrity: IntegrityTag {
-                generation: descriptor.generation,
+                generation: if kind == ReturnKind::ResourceRelease {
+                    slot.generation
+                } else {
+                    descriptor.generation
+                },
                 class: descriptor.class,
                 owner_id: target.owner_id,
                 route_key: target.route_key,
@@ -504,7 +508,11 @@ impl RawWorld {
                     let slot = RawSlot {
                         descriptor: message.descriptor,
                         index: message.unit,
-                        generation: message.integrity.generation,
+                        generation: if resource {
+                            descriptor.generation
+                        } else {
+                            message.integrity.generation
+                        },
                     };
                     let accounting = self
                         .directory

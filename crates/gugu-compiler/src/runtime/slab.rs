@@ -321,6 +321,11 @@ impl OwnerAccounting {
         self.pending_return_bytes += bytes;
     }
 
+    /// 回滚尚未发布的 return：移除 staging 账本中的 pending 字节。
+    pub(crate) fn cancel_pending(&mut self, bytes: u64) {
+        self.pending_return_bytes = self.pending_return_bytes.saturating_sub(bytes);
+    }
+
     /// owner 消费消息：pending 转为待复用。
     pub(crate) fn consume_pending(&mut self, bytes: u64) {
         self.pending_return_bytes = self.pending_return_bytes.saturating_sub(bytes);

@@ -339,6 +339,30 @@ impl RawOwner {
         Ok(())
     }
 
+    /// 回滚尚未发布的 return：`ReturnQueued` → `Live`。
+    pub(crate) fn cancel_return(
+        &mut self,
+        slot: RawSlot,
+        table: &mut SlabTable,
+        accounting: &mut OwnerAccounting,
+        bytes: u64,
+    ) -> Result<(), RawInvariant> {
+        table.transition(
+            slot.descriptor,
+            slot.index,
+            SlotState::ReturnQueued,
+            SlotState::Live,
+        )?;
+        let record = table
+            .descriptor_mut(slot.descriptor)
+            .ok_or_else(|| RawInvariant::new("cancel return 引用未知 slab"))?;
+        record.live += 1;
+        record.queued -= 1;
+        record.pending_returns = record.pending_returns.saturating_sub(1);
+        accounting.cancel_pending(bytes);
+        Ok(())
+    }
+
     /// owner 消费消息后把 slot 放回 free structure，并推进账本分类。
     pub(crate) fn consume_return(
         &mut self,

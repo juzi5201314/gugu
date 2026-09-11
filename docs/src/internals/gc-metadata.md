@@ -246,7 +246,7 @@ reserved:              u64 = 0
 
 state bit 0 `SHARED`、bit 1 `CLOSED`、bit 2 `RELEASE_QUEUED`、bit 3 `RELEASE_DONE`、bit 4 `RECLAIMING`，其它位为 0。Local状态下 `owner_coroutine` 是唯一可更新者，lease以 relaxed atomic增减；publish先 release发布 raw payload，再 CAS设置 SHARED并把 owner写为 `u64::MAX`，之后所有 lease增减使用 AcqRel。状态不能返回 Local。lease从 `u64::MAX` 再增进入 `RuntimeInvariant` fatal。
 
-close与最后 lease竞争 `CLOSED` CAS；首个关闭者把 `{ cell, generation, descriptor }` 送入 release queue并设置 `RELEASE_QUEUED`，其它路径只结束自身 lease。worker在 generation匹配时执行一次受限 release并设置 `RELEASE_DONE`。worker与最后 lease随后都调用 `try_reclaim`：只有观察到 `leases == 0 && RELEASE_DONE` 并成功 CAS设置 `RECLAIMING` 的一方才能递增 generation、清理 payload并归还 slot。显式 close时仍存在的 handle继续观察 closed，cell地址不会提前复用。普通 resource handle仍是一个稳定 cell pointer。
+close与最后 lease竞争 `CLOSED` CAS；首个关闭者把 `{ cell, generation, descriptor }` 送入 release queue并设置 `RELEASE_QUEUED`，其它路径只结束自身 lease。worker在 generation匹配时执行一次受限 release并设置 `RELEASE_DONE`。worker与最后 lease随后都调用 `try_reclaim`：只有观察到 `leases == 0 && RELEASE_DONE` 并成功 CAS设置 `RECLAIMING` 的一方才能递增 generation、清理 payload并归还 slot。显式 close时仍存在的 handle继续观察 closed，cell地址不会提前复用。ResourceHandle 同时保存 slab descriptor/index、slab generation 与 cell generation；复用相同 slot 后，旧 generation 的 handle 与 release ticket 必须拒绝，避免 ABA。
 
 slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理，class包含 header、对齐 padding和 raw payload；超过 4096或 payload对齐超过 64时使用独立 non-moving整页 mapping。每页使用连续 allocation bitmap和 intrusive free index，不把稳定地址放入移动 GC或全局 hash map。release descriptor明确证明 payload无 managed pointer，typed root visitor因此不扫描 cell bytes。
 

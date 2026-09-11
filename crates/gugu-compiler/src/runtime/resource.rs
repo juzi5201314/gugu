@@ -90,7 +90,9 @@ pub(crate) fn verify_header_layout() -> Result<(), RawInvariant> {
                 field.name
             )));
         }
-        offset += field.bytes;
+        offset = offset
+            .checked_add(field.bytes)
+            .ok_or_else(|| RawInvariant::new("ResourceCell header 字节数溢出"))?;
     }
     if offset != CELL_HEADER_BYTES {
         return Err(RawInvariant::new(
@@ -323,7 +325,7 @@ impl ReleaseRegistry {
     }
 }
 
-/// 一次 release 请求的稳定记录；只携带逻辑序号与 generation。
+/// 一次 release 请求的稳定记录；只携带逻辑序号与 cell generation。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ReleaseTicket {
     pub(crate) descriptor: SlabDescriptorId,
@@ -482,6 +484,7 @@ impl ResourceCellTable {
         if cell.leases != 0 || cell.state != 0 {
             return Err(RawInvariant::new("资源 slot 复用前没有完成回收"));
         }
+        let cell_generation = cell.generation.max(generation);
         *cell = ResourceCell {
             leases: 1,
             state: 0,
@@ -493,7 +496,7 @@ impl ResourceCellTable {
             payload_align_log2,
             flags: 0,
             next_free: 0,
-            generation,
+            generation: cell_generation,
             reserved: 0,
         };
         Ok(())
@@ -517,8 +520,14 @@ impl ResourceCellTable {
         index: u32,
     ) -> Result<(), RawInvariant> {
         let cell = self.get_mut(descriptor, index)?;
-        if cell.is_reclaiming() {
-            return Err(RawInvariant::new("正在回收的资源 cell 不能新增 lease"));
+        if cell.is_reclaiming()
+            || cell.is_closed()
+            || cell.is_release_queued()
+            || cell.is_release_done()
+        {
+            return Err(RawInvariant::new(
+                "已关闭或已进入 release 的资源 cell 不能新增 lease",
+            ));
         }
         if cell.leases == u64::MAX {
             return Err(RawInvariant::new("ResourceCell lease 计数达到上界"));
@@ -665,7 +674,10 @@ impl ResourceCellTable {
         if !cell.is_reclaiming() {
             return Err(RawInvariant::new("回收完成引用未取得回收权的 cell"));
         }
-        cell.generation += 1;
+        cell.generation = cell
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| RawInvariant::new("资源 cell generation 达到上界"))?;
         let generation = cell.generation;
         *cell = ResourceCell::empty();
         cell.generation = generation;
@@ -760,8 +772,17 @@ impl ResourceCellTable {
     }
 }
 
-/// 资源 slot 的引用；地址稳定，等同于 ResourceCell pointer。
-pub(crate) type ResourceHandle = super::slab::RawSlot;
+/// 资源 slot 的引用；地址稳定，且携带独立于 slab 的 per-slot generation。
+///
+/// `generation` 供 slab owner API 校验，`cell_generation` 防止 slot 复用后的旧资源句柄
+/// 访问新资源。两者必须同时匹配当前资源 slot。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResourceHandle {
+    pub(crate) descriptor: SlabDescriptorId,
+    pub(crate) index: u32,
+    pub(crate) generation: SlabGeneration,
+    pub(crate) cell_generation: SlabGeneration,
+}
 
 /// 判断 descriptor 是否是 Resource domain 的记录。
 pub(crate) fn is_resource_descriptor(
