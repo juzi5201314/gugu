@@ -1,5 +1,5 @@
 use super::pass::{
-    self, LIR_PASS_ORDER, LirPass, barriers, constants,
+    self, LIR_PASS_ORDER, LirPass, constants,
     policy::{OptimizationPolicyV1, PASS_PIPELINE_REVISION, POLL_BUDGET},
     poll,
     rewrite::Editor,

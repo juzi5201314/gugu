@@ -6,6 +6,7 @@ use crate::lir::body::{
     Conversion, IntOp, Op, Origin, Provenance, RuntimeCall, Symbol, Type, ValueId, ValueType, id,
     range,
 };
+use crate::lir::invalid_resource;
 
 impl Builder<'_> {
     pub(super) fn intrinsic(
@@ -535,11 +536,16 @@ impl Builder<'_> {
             .map_err(|_| invalid("数组对齐越界"))?;
         let allocation = self.next_allocation;
         self.next_allocation += 1;
+        let placement = if self.layout(element).passing.has_resource() {
+            PlacementKind::Resource
+        } else {
+            PlacementKind::LocalHeap
+        };
         let pointer = self.emit_one(
             Op::GcAlloc {
                 descriptor,
                 align,
-                placement: PlacementKind::LocalHeap,
+                placement,
             },
             &[bytes],
             ValueType::pointer(Provenance::GcHeap),
@@ -619,7 +625,13 @@ impl Builder<'_> {
                 .iter()
                 .position(|candidate| candidate.hir_local == Some(local))
                 .ok_or_else(|| invalid("capture 源槽没有 GIR 身份"))?;
-            captures.push(self.address(g::Place::local(g::LocalId(id(local))))?.0);
+            let local_id = g::LocalId(id(local));
+            if self.layout(self.local_ty(local_id)).passing.has_resource() {
+                return Err(invalid_resource(
+                    "Resource 值不能捕获到 managed closure environment",
+                ));
+            }
+            captures.push(self.address(g::Place::local(local_id))?.0);
         }
         let bytes = u64::try_from(captures.len()).expect("捕获数量") * 8;
         let descriptor = mono::keys::hash_domain(

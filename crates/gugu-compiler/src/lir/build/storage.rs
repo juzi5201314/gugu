@@ -75,7 +75,7 @@ impl Builder<'_> {
             if escape {
                 let placement =
                     placement.map_or(PlacementKind::LocalHeap, |record| match record.kind {
-                        PlacementKind::Stack | PlacementKind::Resource => PlacementKind::LocalHeap,
+                        PlacementKind::Stack => PlacementKind::LocalHeap,
                         kind => kind,
                     });
                 let variable = self.variable(id(index), 0, ValueType::pointer(Provenance::GcHeap));

@@ -290,9 +290,9 @@ impl Builder<'_> {
         bytes: u64,
         placement: PlacementKind,
     ) -> Result<ValueId, Diagnostic> {
-        // 资源隔离的 lowering 层闸门：resource 类布局不得进入 TurnRegion arena。
-        if placement == PlacementKind::TurnRegion && self.layout(ty).passing.has_resource() {
-            return Err(invalid_resource("资源值不能进入 TurnRegion"));
+        // 资源值只能由 Resource placement 管理，不能进入任何 managed heap/region。
+        if self.layout(ty).passing.has_resource() != (placement == PlacementKind::Resource) {
+            return Err(invalid_resource("资源值必须使用 Resource placement"));
         }
         let layout = self.layout(ty);
         let descriptor = layout.key;

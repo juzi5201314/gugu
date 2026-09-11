@@ -372,7 +372,12 @@ impl Builder<'_> {
                     .layout
                     .ok_or_else(|| invalid("对象分配缺少布局"))?
                     .size;
-                let address = self.allocate(object.0, bytes, PlacementKind::LocalHeap)?;
+                let placement = if self.layout(object.0).passing.has_resource() {
+                    PlacementKind::Resource
+                } else {
+                    PlacementKind::LocalHeap
+                };
+                let address = self.allocate(object.0, bytes, placement)?;
                 self.aggregate_into(address, object.0, 0, None, operands)?;
                 Ok(Computed::Values {
                     ty,

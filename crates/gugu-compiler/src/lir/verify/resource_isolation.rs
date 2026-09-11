@@ -28,8 +28,18 @@ pub(crate) fn resource_descriptors(bodies: &[Body]) -> Result<BTreeSet<[u8; 32]>
     let mut descriptors = BTreeSet::new();
     for body in bodies {
         for instruction in &body.instructions {
-            if let Op::Call(call) = &instruction.op {
-                collect(body, call, &instruction.arguments, &mut descriptors)?;
+            match &instruction.op {
+                Op::Call(call) | Op::ForeignCall(call) => {
+                    collect(body, call, &instruction.arguments, &mut descriptors)?;
+                }
+                Op::GcAlloc {
+                    descriptor,
+                    placement,
+                    ..
+                } if *placement == PlacementKind::Resource => {
+                    descriptors.insert(*descriptor);
+                }
+                _ => {}
             }
         }
         for block in &body.blocks {
@@ -59,13 +69,11 @@ pub(crate) fn verify(bodies: &[Body]) -> Result<(), Diagnostic> {
         for instruction in &body.instructions {
             match &instruction.op {
                 Op::RegionAlloc { descriptor, .. } => managed(&descriptors, descriptor)?,
-                // 当前 lowering 对 TurnRegion 只发 RegionAlloc；该分支按契约保留，
-                // 防止后续 placement 扩展绕过分配闸门。
                 Op::GcAlloc {
                     descriptor,
-                    placement: PlacementKind::TurnRegion,
+                    placement,
                     ..
-                } => managed(&descriptors, descriptor)?,
+                } if *placement != PlacementKind::Resource => managed(&descriptors, descriptor)?,
                 _ => {}
             }
         }
@@ -92,23 +100,19 @@ fn collect(
     ) {
         return Ok(());
     }
-    let mut registered = false;
-    for value in body.args(arguments) {
-        let Definition::Instruction { instruction, .. } = body.values[value.index()].definition
-        else {
-            continue;
-        };
-        if let Op::SymbolAddr(Symbol::TypeDescriptor(key)) =
-            &body.instructions[instruction.index()].op
-        {
-            descriptors.insert(*key);
-            registered = true;
-        }
-    }
-    if registered {
+    let values = body.args(arguments);
+    let Some(value) = values.get(1) else {
+        return Err(invalid_resource("资源调用缺少类型描述符参数"));
+    };
+    let Definition::Instruction { instruction, .. } = body.values[value.index()].definition else {
+        return Err(invalid_resource("资源调用的描述符不是符号地址"));
+    };
+    if let Op::SymbolAddr(Symbol::TypeDescriptor(key)) = &body.instructions[instruction.index()].op
+    {
+        descriptors.insert(*key);
         Ok(())
     } else {
-        Err(invalid_resource("资源调用缺少登记的类型描述符"))
+        Err(invalid_resource("资源调用描述符不是登记的类型描述符"))
     }
 }
 

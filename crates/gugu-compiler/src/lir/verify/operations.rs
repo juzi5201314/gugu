@@ -97,16 +97,27 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                 failure,
                 align,
             } => atomic(*op, *ordering, *failure, *align, &args, &results),
-            Op::GcAlloc { align, .. } | Op::RegionAlloc { align, .. } => {
+            Op::GcAlloc { align, .. } => {
                 a == [Type::I64]
                     && r == [Type::Ptr]
                     && results[0].provenance == Some(Provenance::GcHeap)
                     && align.is_power_of_two()
             }
-            Op::RegionPublish
-            | Op::MarkTicketBatch
-            | Op::EdgeDeltaBatch
-            | Op::ForwardSharedHandle => {
+            Op::RegionAlloc { align, .. } => {
+                a == [Type::I64]
+                    && r == [Type::Ptr]
+                    && results[0].provenance == Some(Provenance::GcHeap)
+                    && align.is_power_of_two()
+            }
+            Op::RegionPublish => {
+                a == [Type::Ptr]
+                    && r.is_empty()
+                    && body
+                        .args(&instruction.arguments)
+                        .first()
+                        .is_some_and(|value| region_pointer(body, *value))
+            }
+            Op::MarkTicketBatch | Op::EdgeDeltaBatch | Op::ForwardSharedHandle => {
                 r.is_empty()
                     && !a.is_empty()
                     && args.iter().all(|kind| {
@@ -116,7 +127,11 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                         )
                     })
             }
-            Op::RegionReset => a == [Type::Ptr] && r.is_empty(),
+            Op::RegionReset => {
+                a == [Type::Ptr]
+                    && r.is_empty()
+                    && region_pointer(body, body.args(&instruction.arguments)[0])
+            }
             Op::PromoteManaged => {
                 a == [Type::Ptr]
                     && r == [Type::Ptr]
@@ -168,6 +183,7 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
             Op::ForeignCall(call) => {
                 !call.may_unwind
                     && call.kind != CallKind::Managed
+                    && !matches!(call.target, CallTarget::Runtime(_))
                     && call_valid(call, &args, &results)
             }
             Op::InlineAsm(index) => {
@@ -499,6 +515,37 @@ fn atomic(
     }
 }
 
+fn region_pointer(body: &Body, mut value: ValueId) -> bool {
+    for _ in 0..body.values.len() {
+        let current = &body.values[value.index()];
+        match current.origin {
+            crate::lir::body::Origin::Derived(base) => value = base,
+            crate::lir::body::Origin::Allocation(_) => {
+                let Definition::Instruction { instruction, .. } = current.definition else {
+                    return false;
+                };
+                return matches!(
+                    body.instructions[instruction.index()].op,
+                    Op::RegionAlloc { .. }
+                );
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn resource_call_valid(args: &[ValueType], results: &[ValueType]) -> bool {
+    args.len() == 2
+        && results.is_empty()
+        && args[0].ty == Type::Ptr
+        && matches!(
+            args[0].provenance,
+            Some(Provenance::GcHeap | Provenance::GcInterior | Provenance::Stack)
+        )
+        && args[1] == ValueType::pointer(Provenance::Metadata)
+}
+
 fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
     if call.parameters.len() != args.len()
         || call.results.len() != results.len()
@@ -519,6 +566,9 @@ fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
             )
         })
     {
+        return false;
+    }
+    if matches!(call.target, CallTarget::Runtime(_)) && call.kind != CallKind::Managed {
         return false;
     }
     if call.kind != CallKind::Managed
@@ -551,6 +601,16 @@ fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
                 || args[0].ty != Type::Ptr
                 || args[1].ty != Type::Ptr
                 || args[2] != ValueType::pointer(Provenance::Metadata))
+        {
+            return false;
+        }
+        if matches!(
+            runtime,
+            RuntimeCall::ResourceAcquire
+                | RuntimeCall::ResourceRelease
+                | RuntimeCall::ResourceTransfer
+                | RuntimeCall::ResourceFinalize
+        ) && !resource_call_valid(args, results)
         {
             return false;
         }
