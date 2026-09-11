@@ -4,6 +4,10 @@ use crate::frontend::gir::passing::{self, PassingClass, PassingTable};
 
 impl Builder<'_> {
     pub(super) fn copy_value(&mut self, dest: Place, src: Place, ty: TypeId) {
+        self.copy_value_inner(dest, src, ty, true);
+    }
+
+    fn copy_value_inner(&mut self, dest: Place, src: Place, ty: TypeId, release_dest: bool) {
         if self.terminated() {
             return;
         }
@@ -13,7 +17,7 @@ impl Builder<'_> {
             return;
         }
         if class.is_unknown() {
-            self.copy_unknown(dest, src, ty);
+            self.copy_unknown(dest, src, ty, release_dest);
             return;
         }
         if class.is_pure_identity() {
@@ -25,13 +29,13 @@ impl Builder<'_> {
             return;
         }
         if class.is_pure_resource() {
-            self.copy_resource(dest, src, ty);
+            self.copy_resource(dest, src, ty, release_dest);
             return;
         }
-        if self.copy_fields(dest, src, ty) {
+        if self.copy_fields(dest, src, ty, release_dest) {
             return;
         }
-        self.copy_mixed(dest, src, ty, class);
+        self.copy_mixed(dest, src, ty, class, release_dest);
     }
 
     fn copy_bits(&mut self, dest: Place, src: Place, ty: TypeId) {
@@ -63,26 +67,39 @@ impl Builder<'_> {
         self.mark_written(dest);
     }
 
-    fn copy_resource(&mut self, dest: Place, src: Place, ty: TypeId) {
+    fn copy_resource(&mut self, dest: Place, src: Place, ty: TypeId, release_dest: bool) {
         self.resource_action(ResourceActionKind::AcquireLease, src, ty);
-        self.release_if_live(dest, ty);
+        if release_dest {
+            self.release_if_live(dest, ty);
+        }
         self.assign(dest, Rvalue::Use(Operand::Copy(src)));
         self.mark_written(dest);
     }
 
-    fn copy_unknown(&mut self, dest: Place, src: Place, ty: TypeId) {
+    fn copy_unknown(&mut self, dest: Place, src: Place, ty: TypeId, release_dest: bool) {
         self.resource_action(ResourceActionKind::AcquireLease, src, ty);
-        self.release_if_live(dest, ty);
+        if release_dest {
+            self.release_if_live(dest, ty);
+        }
         self.value_action(ValueActionKind::Copy, src, ty);
         self.assign(dest, Rvalue::CowSnapshot(src));
         self.mark_written(dest);
     }
 
-    fn copy_mixed(&mut self, dest: Place, src: Place, ty: TypeId, class: PassingClass) {
+    fn copy_mixed(
+        &mut self,
+        dest: Place,
+        src: Place,
+        ty: TypeId,
+        class: PassingClass,
+        release_dest: bool,
+    ) {
         if class.has_resource() {
             self.resource_action(ResourceActionKind::AcquireLease, src, ty);
         }
-        self.release_if_live(dest, ty);
+        if release_dest {
+            self.release_if_live(dest, ty);
+        }
         self.value_action(ValueActionKind::Copy, src, ty);
         if class.has_cow() {
             self.assign(dest, Rvalue::CowSnapshot(src));
@@ -92,7 +109,7 @@ impl Builder<'_> {
         self.mark_written(dest);
     }
 
-    fn copy_fields(&mut self, dest: Place, src: Place, ty: TypeId) -> bool {
+    fn copy_fields(&mut self, dest: Place, src: Place, ty: TypeId, release_dest: bool) -> bool {
         if let Some(fields) = passing::struct_fields(self.module, ty) {
             let fields: Vec<_> = fields
                 .iter()
@@ -116,7 +133,8 @@ impl Builder<'_> {
                         access: Access::Normal,
                     },
                 );
-                self.copy_value(dest, src, field_ty);
+                let release_field = release_dest && self.passing().class(field_ty).has_resource();
+                self.copy_value_inner(dest, src, field_ty, release_field);
             }
             return true;
         }
@@ -137,7 +155,8 @@ impl Builder<'_> {
                         field_ty,
                     },
                 );
-                self.copy_value(dest, src, field_ty);
+                let release_field = release_dest && self.passing().class(field_ty).has_resource();
+                self.copy_value_inner(dest, src, field_ty, release_field);
             }
             return true;
         }
@@ -145,12 +164,11 @@ impl Builder<'_> {
     }
 
     fn release_if_live(&mut self, dest: Place, ty: TypeId) {
-        if dest.is_local()
-            && self
-                .written
-                .get(dest.local.index())
-                .copied()
-                .unwrap_or(false)
+        if self
+            .written
+            .get(dest.local.index())
+            .copied()
+            .unwrap_or(false)
             && self.locals[dest.local.index()].kind != LocalKind::Return
         {
             self.resource_action(ResourceActionKind::ReleaseLease, dest, ty);
@@ -169,7 +187,52 @@ impl Builder<'_> {
         if !self.written.get(local.index()).copied().unwrap_or(false) {
             return;
         }
-        self.resource_action(ResourceActionKind::ReleaseLease, Place::local(local), ty);
+        self.release_resources(Place::local(local), ty);
+    }
+
+    fn release_resources(&mut self, place: Place, ty: TypeId) {
+        let class = self.passing().class(ty);
+        if !class.has_resource() && !class.is_unknown() {
+            return;
+        }
+        if class.has_resource()
+            && let Some(fields) = passing::struct_fields(self.module, ty)
+        {
+            let fields: Vec<_> = fields
+                .iter()
+                .enumerate()
+                .map(|(index, field)| (index as u32, field.ty))
+                .collect();
+            for (index, field_ty) in fields {
+                let field = self.project(
+                    place,
+                    Projection::Field {
+                        index,
+                        field_ty,
+                        access: Access::Normal,
+                    },
+                );
+                self.release_resources(field, field_ty);
+            }
+            return;
+        }
+        if class.has_resource()
+            && let Some(fields) = passing::tuple_fields(self.module, ty)
+        {
+            let fields: Vec<_> = fields.iter().copied().enumerate().collect();
+            for (index, field_ty) in fields {
+                let field = self.project(
+                    place,
+                    Projection::TupleField {
+                        index: index as u32,
+                        field_ty,
+                    },
+                );
+                self.release_resources(field, field_ty);
+            }
+            return;
+        }
+        self.resource_action(ResourceActionKind::ReleaseLease, place, ty);
     }
 
     fn value_action(&mut self, action: ValueActionKind, place: Place, descriptor: TypeId) {
@@ -188,10 +251,8 @@ impl Builder<'_> {
         });
     }
 
-    fn mark_written(&mut self, dest: Place) {
-        if dest.is_local()
-            && let Some(slot) = self.written.get_mut(dest.local.index())
-        {
+    pub(super) fn mark_written(&mut self, dest: Place) {
+        if let Some(slot) = self.written.get_mut(dest.local.index()) {
             *slot = true;
         }
     }

@@ -344,6 +344,54 @@ fn resource_overwrite_releases_then_acquires() {
 }
 
 #[test]
+fn resource_projection_overwrite_releases_old_field() {
+    let source = "struct ResourceCell { id: uint }\nstruct Container { cell: ResourceCell }\nfn main() {\n let src = Container { cell: ResourceCell { id: 1 } }\n let dst: Container = Container { cell: ResourceCell { id: 2 } }\n dst = src\n _ = dst\n}";
+    let (hir, gir) = compile_gir(source);
+    let body = entry_body(&hir, &gir);
+    verify(hir.module(), body).unwrap();
+    let module = hir.module();
+    let type_named = |name: &str| {
+        module
+            .types
+            .iter()
+            .enumerate()
+            .find_map(|(index, ty)| match ty {
+                crate::frontend::hir::Type::Named { definition, .. }
+                    if module.definitions[definition.index()].name == name =>
+                {
+                    Some(crate::frontend::hir::TypeId(index as u32))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("缺少类型 {name}"))
+    };
+    let resource_ty = type_named("ResourceCell");
+    let container_ty = type_named("Container");
+    let release_types: Vec<_> = body
+        .statements
+        .iter()
+        .filter_map(|statement| match statement.kind {
+            StatementKind::ResourceAction {
+                action: ResourceActionKind::ReleaseLease,
+                descriptor,
+                ..
+            } => Some(descriptor),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        release_types.contains(&resource_ty),
+        "字段覆盖必须释放 ResourceCell lease: {release_types:?}"
+    );
+    assert!(
+        release_types
+            .iter()
+            .all(|descriptor| *descriptor != container_ty),
+        "聚合 descriptor 不得替代字段级 release: {release_types:?}"
+    );
+}
+
+#[test]
 fn any_erase_seals_source_first() {
     let source = "use std.any.{Any}\nstruct Value { number: int }\nfn main() { let value: dyn Any = Value { number: 1 }\n _ = value }";
     let (hir, gir) = compile_gir(source);

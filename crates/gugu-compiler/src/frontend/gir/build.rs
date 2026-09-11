@@ -487,6 +487,7 @@ impl<'a> Builder<'a> {
             self.flags |= BodyFlags::ALLOCATE;
         }
         self.push_stmt(StatementKind::Assign(place, rvalue));
+        self.mark_written(place);
     }
 
     fn assign_copy(&mut self, dest: Place, src: LocalId) {
