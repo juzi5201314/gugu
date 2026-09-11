@@ -33,7 +33,7 @@ use super::slab::{
     SlotState,
 };
 use super::world::{RawWorld, ResourceShape};
-use super::{OWNER_INBOX_SHARDS, RAW_SLAB_PAGE_BYTES, RETURN_SLAB_CACHE_SETS};
+use super::{OWNER_INBOX_SHARDS, RAW_SLAB_PAGE_BYTES, RETURN_SLAB_CACHE_SETS, Rt0Demand};
 use crate::TargetName;
 
 fn world(owners: u32, nodes: u32) -> RawWorld {
@@ -645,6 +645,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             message_nodes: 0,
         },
         RawResourceDemand::default(),
+        Rt0Demand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -686,6 +687,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             drifted,
             RawPlaneDemand::default(),
             RawResourceDemand::default(),
+            Rt0Demand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
@@ -706,6 +708,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         RawPlanePolicyV1::default(),
         demand,
         RawResourceDemand::default(),
+        Rt0Demand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -714,6 +717,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         RawPlanePolicyV1::default(),
         demand,
         RawResourceDemand::default(),
+        Rt0Demand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -728,6 +732,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         revised,
         demand,
         RawResourceDemand::default(),
+        Rt0Demand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -737,6 +742,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         RawPlanePolicyV1::default(),
         demand,
         RawResourceDemand::default(),
+        Rt0Demand::default(),
         PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
@@ -1363,6 +1369,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
             owners: 1,
             kinds: 0,
         },
+        Rt0Demand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1401,6 +1408,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         RawPlanePolicyV1::default(),
         RawPlaneDemand::default(),
         RawResourceDemand::default(),
+        Rt0Demand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1412,6 +1420,7 @@ fn resource_contract_fingerprint_tracks_demand() {
             release_sites: 4,
             ..RawResourceDemand::default()
         },
+        Rt0Demand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");

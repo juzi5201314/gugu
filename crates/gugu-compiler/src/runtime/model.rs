@@ -15,6 +15,7 @@ use super::platform_schema::{PlatformRangeDemand, PlatformRangeSchemaV1};
 use super::resource::{self, RESOURCE_KINDS};
 use super::size_class::{DropScanPolicy, RuntimeSizeClassTable};
 use super::slab::MemoryDomainId;
+use super::startup_schema::{Rt0Demand, Rt0SchemaV1};
 use super::{
     BATCH_MAX, CACHE_LINE_BYTES, OWNER_INBOX_SHARDS, QUEUE_PAD_BYTES, RAW_SLAB_PAGE_BYTES,
     RETURN_SLAB_CACHE_SETS, RETURN_SLAB_CACHE_WAYS, TARGET_CACHE_ENTRIES,
@@ -24,8 +25,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的 schema 版本；schema 3 并入 PlatformRange 平台段与账本分区。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 3;
+/// 契约对象的 schema 版本；schema 4 并入 rt0 启动、终止与报告契约段。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 4;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -322,6 +323,7 @@ pub(crate) struct RuntimeRawContractV1 {
     resources: ResourceSchemaV1,
     platform: PlatformRangeSchemaV1,
     ledger: LedgerSchemaV1,
+    rt0: Rt0SchemaV1,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -338,6 +340,7 @@ impl RuntimeRawContractV1 {
         policy: RawPlanePolicyV1,
         mut demand: RawPlaneDemand,
         mut resource_demand: RawResourceDemand,
+        rt0_demand: Rt0Demand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -345,6 +348,7 @@ impl RuntimeRawContractV1 {
         demand.message_nodes = policy.shards * policy.limits.items;
         resource_demand.kinds = RESOURCE_KINDS.len() as u32;
         let platform = PlatformRangeSchemaV1::build(profile, platform_range_demand(&demand))?;
+        let rt0 = Rt0SchemaV1::build(rt0_demand)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -355,6 +359,7 @@ impl RuntimeRawContractV1 {
             resources: ResourceSchemaV1::fixed(),
             platform,
             ledger: LedgerSchemaV1::fixed(),
+            rt0,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -438,6 +443,11 @@ impl RuntimeRawContractV1 {
     /// 返回账本契约段。
     pub(crate) const fn ledger(&self) -> &LedgerSchemaV1 {
         &self.ledger
+    }
+
+    /// 返回 rt0 启动、终止与报告契约段。
+    pub(crate) const fn rt0(&self) -> &Rt0SchemaV1 {
+        &self.rt0
     }
 
     /// 返回账本分类名。
@@ -560,6 +570,7 @@ impl RuntimeRawContractV1 {
             return Err(RawModelError::new("平台范围需求与 plane 需求视图不一致"));
         }
         self.ledger.verify()?;
+        self.rt0.verify()?;
         if self.demand.message_nodes != self.policy.shards * self.policy.limits.items {
             return Err(RawModelError::new(
                 "常驻 message node 容量低于 shard 与 batch 上限的乘积",
@@ -597,6 +608,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.resources.canonical_bytes());
         bytes.extend_from_slice(&self.platform.canonical_bytes());
         bytes.extend_from_slice(&self.ledger.canonical_bytes());
+        bytes.extend_from_slice(&self.rt0.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -809,6 +821,7 @@ impl RuntimeRawContractV1 {
             demand.guard_extents,
             demand.owners
         ));
+        output.push_str(&self.rt0.dump());
         output
     }
 }
@@ -846,6 +859,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) profile: PlatformProfile,
     pub(crate) demand: RawPlaneDemand,
     pub(crate) resource_demand: RawResourceDemand,
+    /// rt0 启动需求视图：入口存在性与 main 返回类型。
+    pub(crate) rt0_demand: Rt0Demand,
     /// 生成契约所依据的 LIR 输入指纹。
     pub(crate) lir_fingerprint: [u8; 32],
     /// placement world 指纹。
@@ -868,6 +883,8 @@ pub(crate) fn run(
     key_bytes.extend_from_slice(&inputs.resource_demand.transfer_sites.to_le_bytes());
     key_bytes.extend_from_slice(&inputs.resource_demand.finalize_sites.to_le_bytes());
     key_bytes.extend_from_slice(&inputs.resource_demand.owners.to_le_bytes());
+    key_bytes.push(u8::from(inputs.rt0_demand.entry_present));
+    key_bytes.push(u8::from(inputs.rt0_demand.main_returns_result));
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
     key_bytes.extend_from_slice(&inputs.placement_fingerprint);
     key_bytes.extend_from_slice(inputs.target.to_string().as_bytes());
@@ -893,6 +910,7 @@ pub(crate) fn run(
                 inputs.policy,
                 inputs.demand,
                 inputs.resource_demand,
+                inputs.rt0_demand,
                 inputs.profile,
             )
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;

@@ -275,6 +275,17 @@ pub(crate) fn print_compilation_json(
                 "owners": plan.platform_range_demand().owners,
             }),
             "ledger-category-count": plan.ledger_category_count(),
+            "rt0-step-count": plan.rt0_step_count(),
+            "rt0-lifecycle-count": plan.rt0_lifecycle_count(),
+            "startup-config-var-count": plan.startup_config_var_count(),
+            "startup-fatal-count": plan.startup_fatal_count(),
+            "report-reason-count": plan.report_reason_count(),
+            "rt0-emergency-buffer-bytes": plan.rt0_emergency_buffer_bytes(),
+            "rt0-contract-fingerprint": plan.rt0_contract_fingerprint(),
+            "rt0-demand": json!({
+                "entry-present": plan.rt0_entry_present(),
+                "main-returns-result": plan.rt0_main_returns_result(),
+            }),
             "rt0": plan.rt0().to_string()
         })
     });

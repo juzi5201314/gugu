@@ -56,7 +56,8 @@ use std::{
 use backend::BackendPlan;
 use frontend::{SourceInput, cfg::CfgContext};
 use runtime::{
-    RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, RuntimeRawContractV1,
+    RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, Rt0Demand,
+    RuntimeRawContractV1,
 };
 
 /// 一次 bootstrap 编译请求。
@@ -383,6 +384,25 @@ impl Compiler {
             owners: 0,
             message_nodes: 0,
         };
+        let rt0_demand = {
+            let module = frontend.hir.module();
+            let main_returns_result = module
+                .entry
+                .and_then(|entry| {
+                    frontend
+                        .gir
+                        .bodies
+                        .iter()
+                        .find(|body| body.owner == entry)
+                        .map(|body| body.signature.result)
+                })
+                .and_then(|result| module.types.get(result.index()))
+                .is_some_and(|result| matches!(result, frontend::hir::Type::Result(..)));
+            Rt0Demand {
+                entry_present: module.entry.is_some(),
+                main_returns_result,
+            }
+        };
         let action_counts = frontend.gir.resource_action_counts();
         let resource_demand = RawResourceDemand {
             resource_sites: frontend.gir.placement.counts().resource,
@@ -399,6 +419,7 @@ impl Compiler {
                 policy: RawPlanePolicyV1::default(),
                 demand,
                 resource_demand,
+                rt0_demand,
                 profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
@@ -940,6 +961,15 @@ pub struct ImagePlan {
     platform_contract_fingerprint: [u8; 32],
     platform_range_demand: PlatformRangeDemand,
     ledger_category_count: u32,
+    rt0_step_count: u32,
+    rt0_lifecycle_count: u32,
+    startup_config_var_count: u32,
+    startup_fatal_count: u32,
+    report_reason_count: u32,
+    rt0_emergency_buffer_bytes: u32,
+    rt0_contract_fingerprint: [u8; 32],
+    rt0_entry_present: bool,
+    rt0_main_returns_result: bool,
     placement_count: u32,
     turn_region_count: u32,
     local_heap_count: u32,
@@ -1001,6 +1031,15 @@ impl ImagePlan {
             platform_contract_fingerprint: plan.platform_contract_fingerprint,
             platform_range_demand: plan.platform_demand,
             ledger_category_count: plan.ledger_category_count,
+            rt0_step_count: raw.rt0().steps().len() as u32,
+            rt0_lifecycle_count: raw.rt0().states().len() as u32,
+            startup_config_var_count: raw.rt0().startup_vars().len() as u32,
+            startup_fatal_count: raw.rt0().fatal_kinds().len() as u32,
+            report_reason_count: raw.rt0().report_reasons().len() as u32,
+            rt0_emergency_buffer_bytes: raw.rt0().emergency().capacity_bytes,
+            rt0_contract_fingerprint: raw.rt0().fingerprint(),
+            rt0_entry_present: raw.rt0().demand().entry_present,
+            rt0_main_returns_result: raw.rt0().demand().main_returns_result,
             placement_count: plan.placement_count,
             turn_region_count: plan.turn_region_count,
             local_heap_count: plan.local_heap_count,
@@ -1064,6 +1103,51 @@ impl ImagePlan {
     /// 返回内存账本的分类数量。
     pub fn ledger_category_count(&self) -> u32 {
         self.ledger_category_count
+    }
+
+    /// 返回 rt0 启动序列的步骤数量。
+    pub fn rt0_step_count(&self) -> u32 {
+        self.rt0_step_count
+    }
+
+    /// 返回生命周期状态数量。
+    pub fn rt0_lifecycle_count(&self) -> u32 {
+        self.rt0_lifecycle_count
+    }
+
+    /// 返回启动变量的数量。
+    pub fn startup_config_var_count(&self) -> u32 {
+        self.startup_config_var_count
+    }
+
+    /// 返回 fatal 分类的数量。
+    pub fn startup_fatal_count(&self) -> u32 {
+        self.startup_fatal_count
+    }
+
+    /// 返回报告 reason 目录的数量。
+    pub fn report_reason_count(&self) -> u32 {
+        self.report_reason_count
+    }
+
+    /// 返回 emergency buffer 容量。
+    pub fn rt0_emergency_buffer_bytes(&self) -> u32 {
+        self.rt0_emergency_buffer_bytes
+    }
+
+    /// 返回 rt0 启动契约段的稳定指纹。
+    pub fn rt0_contract_fingerprint(&self) -> [u8; 32] {
+        self.rt0_contract_fingerprint
+    }
+
+    /// 返回编译产物是否含 `main` 入口。
+    pub fn rt0_entry_present(&self) -> bool {
+        self.rt0_entry_present
+    }
+
+    /// 返回 `main` 是否返回 `Result[(), E]`。
+    pub fn rt0_main_returns_result(&self) -> bool {
+        self.rt0_main_returns_result
     }
 
     /// 返回已验证前端语义的稳定指纹，用于区分相同入口的不同程序。
@@ -1514,7 +1598,7 @@ mod tests {
         assert_eq!(plan.resource_kind_count(), 5);
         assert!(plan.release_descriptor_count() >= 4);
         let dump = cold.dump_runtime().expect("契约 dump");
-        assert!(dump.contains("runtime-raw schema=3"));
+        assert!(dump.contains("runtime-raw schema=4"));
         assert!(dump.contains("platform schema=1 profile=linux"));
         assert!(dump.contains("range-op commit mutating=true blocking=false"));
         assert!(dump.contains("extent-class bytes=2097152 align=2097152 huge-page=true"));
@@ -1590,6 +1674,92 @@ mod tests {
             linux.runtime_raw_fingerprint(),
             windows.runtime_raw_fingerprint(),
             "目标语义必须进入 raw 契约身份"
+        );
+    }
+
+    #[test]
+    fn image_plan_reports_rt0_startup_contract() {
+        let source = "fn main() { let value = 1\n _ = value }";
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+        let plan = compilation.image_plan().expect("镜像计划");
+        assert_eq!(plan.rt0_step_count(), 5);
+        assert_eq!(plan.rt0_lifecycle_count(), 4);
+        assert_eq!(plan.startup_config_var_count(), 7);
+        assert_eq!(plan.startup_fatal_count(), 7);
+        assert_eq!(plan.report_reason_count(), 15);
+        assert_eq!(plan.rt0_emergency_buffer_bytes(), 4096);
+        assert!(plan.rt0_entry_present());
+        assert!(!plan.rt0_main_returns_result());
+        let dump = compilation.dump_runtime().expect("runtime dump");
+        assert!(dump.contains("rt0-state booting"));
+        assert!(dump.contains("rt0-transition waiting -> terminating on termination-started"));
+        assert!(dump.contains("startup-var GUGU_RUNTIME_STACK_MAX grammar=stack-max default=1GiB"));
+        assert!(dump.contains("report-schema gugu-runtime-report-v1"));
+        assert!(dump.contains("rt0-facility coroutine-slot-slab"));
+        assert!(dump.contains("rt0-demand entry=true main-result=false"));
+    }
+
+    #[test]
+    fn main_result_type_enters_rt0_demand_and_contract() {
+        let unit = "fn main() { let value = 1\n _ = value }";
+        let result = "fn main() Result[(), string] {\n Err(\"e\")\n}";
+        let unit_compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            unit,
+            TargetName::X86_64Linux,
+        ));
+        let unit_plan = unit_compilation.image_plan().expect("unit main 的镜像计划");
+        assert!(unit_plan.rt0_entry_present());
+        assert!(!unit_plan.rt0_main_returns_result());
+        let result_compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            result,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            result_compilation.is_success(),
+            "{:?}",
+            result_compilation.diagnostics().items()
+        );
+        let result_plan = result_compilation
+            .image_plan()
+            .expect("result main 的镜像计划");
+        assert!(result_plan.rt0_main_returns_result());
+        assert_ne!(
+            unit_plan.rt0_contract_fingerprint(),
+            result_plan.rt0_contract_fingerprint(),
+            "main 返回类型改变 rt0 契约身份"
+        );
+    }
+
+    #[test]
+    fn rt0_contract_fingerprint_is_deterministic_across_compilations() {
+        let source = "fn main() { let value = 1\n _ = value }";
+        let first = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        let second = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert_eq!(
+            first.image_plan().expect("计划").rt0_contract_fingerprint(),
+            second
+                .image_plan()
+                .expect("计划")
+                .rt0_contract_fingerprint()
         );
     }
 

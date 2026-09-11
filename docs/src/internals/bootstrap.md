@@ -96,9 +96,15 @@ crates/
     │   ├── semantics/              TypeCheck、布局交接与 AST 到 HIR 形成
     │   └── hir/                    类型化 owner、侧表与冻结 verifier
     ├── src/backend.rs              目标相关的内存 image plan 输入
-    ├── src/runtime/                Gugu 源树登记、raw 平面契约与 owner-directed return 参照实现
+    ├── src/runtime/                Gugu 源树登记、raw 平面契约、rt0 契约与 owner-directed return 参照实现
     │   ├── mod.rs                  源树/rt0/intrinsic 登记与 raw 平面常量
     │   ├── model.rs                `RuntimeRawContractV1`、消息字段 schema 与 query driver
+    │   ├── startup_kinds.rs        rt0 启动/终止/报告的共享枚举目录与常量
+    │   ├── startup_schema.rs       rt0 启动序列、生命周期、启动变量、fatal/退出/报告契约段
+    │   ├── startup.rs              环境快照与启动配置解析的参照实现
+    │   ├── lifecycle.rs            生命周期状态机与 rt0 启动序列参照实现
+    │   ├── report.rs               emergency buffer 与 text/NDJSON 报告渲染参照实现
+    │   ├── termination.rs          `TerminationPlan` 构造与退出码解析参照实现
     │   ├── provider.rs             平台 range 操作、二次幂 extent 阶梯与确定性替身
     │   ├── platform.rs             Linux/Windows profile 常量与 fake platform
     │   ├── platform_schema.rs      平台操作目录、range 状态迁移与失败映射契约
@@ -113,7 +119,9 @@ crates/
     │   ├── inbox.rs                8 shard batch queue、bounded snapshot、epoch gate
     │   ├── world/                  owner 上下文 service、转发、grace 与 retire
     │   │   ├── mod.rs              raw owner 世界与 ResourceCell 世界骨架
-    │   │   └── resource_impl.rs    资源分配、lease、close、release 与整页 mapping 接入
+    │   │   ├── extent_impl.rs      arena 开立、extent 取用与 trim 门禁接入
+    │   │   ├── resource_impl.rs    资源分配、lease、close、release 与整页 mapping 接入
+    │   │   └── termination_impl.rs rt0 进程模型：boot、终止路径与设施关闭接入
     │   ├── harness.rs              真实并发可运行切片（bench façade）
     │   └── tests.rs                确定性参照实现的验证套件
     └── resources/
@@ -122,7 +130,7 @@ crates/
         └── runtime/platform.gg     std.platform 平台范围适配的 Gugu 源单元
 ```
 
-模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与参照模型（raw 平面、资源租约与 owner-directed return），用于固定 schema、verifier 与参照行为。
+模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与参照模型（raw 平面、资源租约、owner-directed return 与 rt0 启动/终止/报告），用于固定 schema、verifier 与参照行为。
 
 `gugu-compiler` 使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接在这里仅以 `IntrinsicBoundary` 登记，实际 machine intrinsic 必须在 backend/runtime 按相应内部契约接入。
 
@@ -176,9 +184,11 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 
 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
-`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 2）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。
+`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 4）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。
 
 同一契约还并入 `PlatformRangeSchemaV1` 与 `LedgerSchemaV1`，使 `ImagePlan` 增加 `platform-profile`、`platform-op-count`、`platform-range-class-count`、`platform-contract-fingerprint`、`platform-range-demand` 与 `ledger-category-count`。平台操作目录、extent class 阶梯、range 状态迁移与 Linux/Windows 失败映射由同一份契约固定；账本分类是互斥的，`range_reserved_bytes` 与 `runtime_committed_bytes` 相加不重复计数。这些字段固定 raw 平面的 schema 与参照行为，不代表 runtime 已在镜像内物化。
+
+schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命周期状态与单向迁移表、环境快照字段、7 个启动变量的文法与默认值、7 类 fatal 目录、退出类别与码规则、`gugu-runtime-report-v1` 报告 schema（固定字段序与 reason 目录）、`TerminationPlan` 字段与主线程关闭设施顺序、emergency buffer 策略（4096 字节定容、诊断配置非法时回退固定纯文本、先截断 message 再丢 backtrace 帧）。需求视图 `Rt0Demand` 由编译产物推导：`main` 是否存在、`main` 是否返回 `Result[(), E]`（决定 `main-error` 报告路径是否可达），二者进入 query key。`ImagePlan` 增加 `rt0-step-count`、`rt0-lifecycle-count`、`startup-config-var-count`、`startup-fatal-count`、`report-reason-count`、`rt0-emergency-buffer-bytes`、`rt0-contract-fingerprint` 与 `rt0-demand`；契约指纹以派生键 `gugu-rt0-startup-v1` 固定并进入 action key。`startup`/`lifecycle`/`report`/`termination` 参照实现消费同一组枚举：`RawWorld` 的 rt0 进程模型覆盖五步启动、`InvalidConfiguration` fatal、生命周期单向迁移、各终止路径的计划生成、`Terminating` 中的用户代码闸门、`PanicDuringUnwind` 升级与设施关闭的 exactly-once；报告只经定容 emergency buffer 渲染，不调用用户代码。镜像内真正的 rt0 与报告执行路径随 rt0 写出与调度阶段落地，复用同一 schema。
 
 `ImagePlan` 再增加 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 与 `placement-fingerprint`。这些字段记录逃逸与存储选择，不代表已经改写 CFG 做堆装箱或写出机器码。`large_copy` 警告进入 `Compilation` 诊断且不阻止镜像计划；升为错误时 Frontend 失败且没有镜像。
 
@@ -222,7 +232,7 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 | `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 |
 | `unsafe` | safety checker、FFI/asm backend | 前端安全检查已落地；外部桥接执行与机器编码未落地 |
 | `platform-abi` | `target`、x86 backend、image writer | 已建立两个目标 descriptor |
-| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界；raw 平面契约、资源租约与 owner-directed return 参照实现已落地 |
+| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界；raw 平面契约、资源租约、owner-directed return 与 rt0 启动/终止/报告契约及参照实现已落地 |
 | `standard-library` | `runtime` Gugu 源树与 std modules | 已建立源树登记 |
 | `testing` | test collector、harness、CLI | 未实现 |
 

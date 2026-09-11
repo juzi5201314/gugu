@@ -186,7 +186,7 @@ JSON 报告使用 schema `gugu-runtime-report-v1`，每个事件一行，字段�
 
 `event` 是 `panic` 或 `termination`；`class` 是 `success`、`program-failure`、`runtime-failure`、`explicit-exit` 或 `signal`；`reason` 是稳定的小写短名，例如 `main-error`、`unhandled-panic`、`out-of-memory`、`stack-overflow`、`runtime-invariant`、`foreign-unwind`、`panic-during-unwind`、`hardware-fault`、`invalid-configuration` 和 `signal-terminate`。`message`、`location`、`backtrace` 按事件可为空，但字段必须存在。`location` 使用 `file`、`line`、`column` 字段；`backtrace` 是按报告时可解析出的帧数组。
 
-被 `catch` 或 `Join.wait()` 处理的 panic 没有 `event`。未处理的分离 panic 先产生 `event = "panic"`；如果它影响最终自然退出，runtime 随后产生一个 `termination` 事件。`main` 返回 `Err` 直接产生 `termination` 事件。fatal 报告不等待其它协程、不保证用户资源租约的 defer 清理；操作系统最终回收进程资源。
+被 `catch` 或 `Join.wait()` 处理的 panic 没有 `event`。未处理的分离 panic 先产生 `event = "panic"`；如果它影响最终自然退出，runtime 随后产生一个 `termination` 事件。`main` 返回 `Err` 直接产生 `termination` 事件。主协程 panic 也先产生一条 `event = "panic"` 的事件，随后立即产生 `termination` 事件，其 `reason` 为 `unhandled-panic`、退出类别为 `program-failure`；展开期间再入 panic 时终止事件的 `reason` 改为 `panic-during-unwind`、退出类别为 `runtime-failure`。fatal 报告不等待其它协程、不保证用户资源租约的 defer 清理；操作系统最终回收进程资源。
 
 本版本不提供可以替换默认报告、抑制 fatal 或改变退出类别的全局 panic hook。需要机器采集时使用 JSON 模式；需要业务级优雅退出时使用显式 signal 订阅和 `CancelToken`。
 

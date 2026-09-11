@@ -74,6 +74,7 @@ impl OwnerReturnHarness {
             policy,
             RawPlaneDemand::default(),
             super::RawResourceDemand::default(),
+            super::Rt0Demand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -263,6 +264,7 @@ impl ResourceReleaseHarness {
             policy,
             RawPlaneDemand::default(),
             super::RawResourceDemand::default(),
+            super::Rt0Demand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");

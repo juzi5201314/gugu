@@ -6,6 +6,7 @@
 
 mod extent_impl;
 mod resource_impl;
+pub(crate) mod termination_impl;
 
 #[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
@@ -91,6 +92,8 @@ pub(crate) struct RawWorld {
     registry: ReleaseRegistry,
     /// 首个关闭者或最后 lease 入队的 release 请求。
     release_queue: VecDeque<ReleaseTicket>,
+    /// rt0 进程模型：生命周期、启动配置、报告与终止计划；`boot` 之前为 `None`。
+    rt0: Option<termination_impl::Rt0Process>,
 }
 
 impl RawWorld {
@@ -147,6 +150,7 @@ impl RawWorld {
             cells: ResourceCellTable::new(),
             registry,
             release_queue: VecDeque::new(),
+            rt0: None,
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。

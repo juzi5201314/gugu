@@ -509,7 +509,7 @@ processor retire 同时必须交接 owner inbox、raw local/range cache、return
 
 ## 终止
 
-runtime状态机先根据[进程寿命](../spec/runtime.md#进程寿命)生成`TerminationPlan { mode, admit_user_coroutines, wait_foreign, report_epoch }`；scheduler只执行该plan，不决定`process.exit`、fatal、defer或报告语义。停止接纳后先阻止新producer登记，要求全部producer flush `pending_node/staging`并越过最新topology/slab epoch，再唤醒parked worker、关闭新poller注册并等runtime critical section到达安全边界；`wait_foreign`同时覆盖普通foreign、`DirtyWaiting`和正在执行的dirty work。
+runtime状态机先根据[进程寿命](../spec/runtime.md#进程寿命)生成`TerminationPlan { mode, admit_user_coroutines, wait_foreign, report_epoch }`；scheduler只执行该plan，不决定`process.exit`、fatal、defer或报告语义。`mode`取`natural`（自然收尾，等待全部用户协程）、`immediate`（主协程panic后立即收尾，不再等待其余协程）、`explicit-exit`、`fatal`与`signal`之一；失败记录（main-error、unhandled-panic、fatal reason、signal reason）由plan内的reason承载。`admit_user_coroutines`进入`Terminating`后一律关闭。`report_epoch`是必须冲刷的报告数量下界：plan发布终止报告时记录`报告账本已发布数量`，自然成功与显式退出记录当前数量；shutdown完成前报告账本至少要冲刷这么多条。计划构造、退出码解析（Linux按`128 + 信号号`、Windows按登记的非零status）与七类fatal的报告形态由compiler侧确定性参照模型固定，与[bootstrap](bootstrap.md)的rt0契约段共用同一schema；镜像内的Gugu runtime按同一语义执行。停止接纳后先阻止新producer登记，要求全部producer flush `pending_node/staging`并越过最新topology/slab epoch，再唤醒parked worker、关闭新poller注册并等runtime critical section到达安全边界；`wait_foreign`同时覆盖普通foreign、`DirtyWaiting`和正在执行的dirty work。
 
 worker无runtime/foreign责任后转Stopping。主线程按poller、processor、GC、stack arena、coroutine cold slab、`CoroutineSlot` slab顺序关闭内部设施，再把plan结果交给宿主退出。Dead coroutine的stack已经在完成路径归还；最后一个Join/handle与runtime root释放后，hot/cold slot可以在仍映射的slab page内按新generation复用，整页解除映射必须满足GC内部规范定义的queue-page grace period。
 

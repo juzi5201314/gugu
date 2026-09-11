@@ -11,6 +11,19 @@ use crate::target::{Rt0Kind, TargetName};
 mod harness;
 mod model;
 mod platform_schema;
+mod startup_kinds;
+mod startup_schema;
+
+// rt0 启动、生命周期、报告与终止的参照实现：lib 构建只消费契约段，确定性验证
+// 套件直接消费这些状态机。
+#[allow(dead_code, reason = "rt0 参照实现由确定性测试消费")]
+mod lifecycle;
+#[allow(dead_code, reason = "rt0 参照实现由确定性测试消费")]
+mod report;
+#[allow(dead_code, reason = "rt0 参照实现由确定性测试消费")]
+mod startup;
+#[allow(dead_code, reason = "rt0 参照实现由确定性测试消费")]
+mod termination;
 
 // raw plane 的参照实现：lib 构建只调用契约对象与 bench facade，确定性验证套件与 bench
 // 直接消费这些状态机与账本。
@@ -41,6 +54,14 @@ mod world;
 #[cfg(test)]
 mod platform_tests;
 #[cfg(test)]
+mod process_tests;
+#[cfg(test)]
+mod report_tests;
+#[cfg(test)]
+mod startup_tests;
+#[cfg(test)]
+mod termination_tests;
+#[cfg(test)]
 mod tests;
 
 pub use harness::{
@@ -55,6 +76,7 @@ pub(crate) use model::{
     RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, RuntimeRawContractV1, run,
 };
 pub use platform::PlatformProfile;
+pub(crate) use startup_schema::Rt0Demand;
 
 /// owner inbox 的 shard 数量；与 scheduler 的 remote inbox 保持一致。
 pub(crate) const OWNER_INBOX_SHARDS: u32 = 8;

@@ -728,7 +728,6 @@ fn platform_contract_catalog_matches_source_intrinsics_exactly() {
 
 #[test]
 fn cross_owner_extent_return_is_exactly_once_and_gated() {
-    use super::extent::ExtentId;
     let mut world = world(1, 64);
     let class = RuntimeSizeClassId::from_raw(0);
     let allocation = world.allocate(0, class).expect("分配成功");
