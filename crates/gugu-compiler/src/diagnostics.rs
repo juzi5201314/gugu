@@ -29,6 +29,7 @@ impl fmt::Display for Severity {
 #[derive(
     Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
 )]
+#[non_exhaustive]
 pub enum DiagnosticCode {
     /// 源文件无法读取。
     SourceRead,
