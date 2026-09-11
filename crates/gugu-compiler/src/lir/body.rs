@@ -412,6 +412,8 @@ pub(crate) enum Op {
         descriptor: [u8; 32],
         align: u32,
     },
+    /// 平台范围原语；没有机器编码，由 backend 在 runtime 契约中登记。
+    PlatformCall(crate::runtime::PlatformOp),
     RegionPublish,
     RegionReset,
     PromoteManaged,

@@ -10,7 +10,8 @@
 //! 只有同时观察到 \`leases == 0\` 与 \`RELEASE_DONE\` 的一方能把 slot 归还 free
 //! structure 并推进 generation。受限 cleanup 不执行用户代码：它只递增计数器并记录 ticket。
 
-use super::provider::{RangeId, RangeProvider};
+use super::extent::{ExtentId, ExtentTable};
+use super::provider::RangeProvider;
 use super::size_class::{
     DropScanPolicy, RESOURCE_SLOT_HEADER_BYTES, RuntimeSizeClass, RuntimeSizeClassId,
 };
@@ -849,29 +850,40 @@ pub(crate) fn dedicated_stride(payload_bytes: u32, alignment: u32) -> Result<u32
     u32::try_from(rounded).map_err(|_| RawInvariant::new("专用 mapping 的 stride 超出编码宽度"))
 }
 
-/// 构造 Resource domain 的一段已提交 range 的统计。
+/// 从 owner 的 Resource arena 取得一段已提交 extent 的统计。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ResourceRangeCommit {
-    pub(crate) range: RangeId,
+pub(crate) struct ResourceExtentCommit {
+    pub(crate) extent: ExtentId,
     pub(crate) bytes: u64,
 }
 
-/// 预留并提交一段 Resource domain 的 mapping；调用者负责登记 descriptor。
+/// 从 owner 的 Resource arena 取得一段 extent 并提交它的页；调用者负责登记 descriptor。
+///
+/// extent 与平台 range 的映射只发生在 `ExtentTable` 内：descriptor 记录 extent 编号，commit
+/// 与 decommit 以页为粒度作用在所属 arena range 上。
 pub(crate) fn reserve_mapping(
+    extents: &mut ExtentTable,
     provider: &mut dyn RangeProvider,
     accounting: &mut OwnerAccounting,
-    bytes: u64,
-    alignment: u32,
+    owner: u32,
+    class: u32,
     epoch: Epoch,
-) -> Result<ResourceRangeCommit, RawInvariant> {
+) -> Result<ResourceExtentCommit, RawInvariant> {
     let _ = epoch;
-    let range = provider.reserve_aligned(
-        bytes,
-        u64::from(alignment),
-        super::slab::MemoryDomainId::RESOURCE,
-    )?;
-    provider.commit(range)?;
-    accounting.commit(bytes);
-    accounting.take_from_cache(bytes);
-    Ok(ResourceRangeCommit { range, bytes })
+    let extent = extents.allocate(owner, class, super::slab::MemoryDomainId::RESOURCE)?;
+    let range = extents
+        .arena_range_of(extent)
+        .ok_or_else(|| RawInvariant::new("extent 缺少所属 arena"))?;
+    let offset = extents.offset_of_id(extent);
+    let length = extents
+        .descriptor(extent)
+        .ok_or_else(|| RawInvariant::new("extent 描述缺失"))?
+        .bytes;
+    provider.commit_pages(range, offset, length)?;
+    accounting.commit(length);
+    accounting.take_from_cache(length);
+    Ok(ResourceExtentCommit {
+        extent,
+        bytes: length,
+    })
 }

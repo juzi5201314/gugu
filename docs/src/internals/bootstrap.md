@@ -99,7 +99,11 @@ crates/
     ├── src/runtime/                Gugu 源树登记、raw 平面契约与 owner-directed return 参照实现
     │   ├── mod.rs                  源树/rt0/intrinsic 登记与 raw 平面常量
     │   ├── model.rs                `RuntimeRawContractV1`、消息字段 schema 与 query driver
-    │   ├── provider.rs             平台 range 四操作与确定性替身
+    │   ├── provider.rs             平台 range 操作、二次幂 extent 阶梯与确定性替身
+    │   ├── platform.rs             Linux/Windows profile 常量与 fake platform
+    │   ├── platform_schema.rs      平台操作目录、range 状态迁移与失败映射契约
+    │   ├── extent.rs               extent 阶梯、三路 lease 与 queue-page grace 门禁
+    │   ├── ledger.rs               内存账本互斥分类 schema
     │   ├── resource.rs             ResourceCell slab、lease 状态机与统一 release 入口
     │   ├── resource_schema.rs      ResourceCell header/状态位/release 描述符/资源种类契约 schema
     │   ├── size_class.rs           dense size class 表与 stride 除法常量
@@ -114,7 +118,8 @@ crates/
     │   └── tests.rs                确定性参照实现的验证套件
     └── resources/
         ├── std/prelude.gg          标准库 Gugu 源单元
-        └── runtime/core.gg         runtime Gugu 源单元
+        ├── runtime/core.gg         runtime Gugu 源单元
+        └── runtime/platform.gg     std.platform 平台范围适配的 Gugu 源单元
 ```
 
 模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与参照模型（raw 平面、资源租约与 owner-directed return），用于固定 schema、verifier 与参照行为。
@@ -171,7 +176,9 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 
 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
-`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 2）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。这些字段固定 raw 平面的 schema 与参照行为，不代表 runtime 已在镜像内物化。
+`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 2）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。
+
+同一契约还并入 `PlatformRangeSchemaV1` 与 `LedgerSchemaV1`，使 `ImagePlan` 增加 `platform-profile`、`platform-op-count`、`platform-range-class-count`、`platform-contract-fingerprint`、`platform-range-demand` 与 `ledger-category-count`。平台操作目录、extent class 阶梯、range 状态迁移与 Linux/Windows 失败映射由同一份契约固定；账本分类是互斥的，`range_reserved_bytes` 与 `runtime_committed_bytes` 相加不重复计数。这些字段固定 raw 平面的 schema 与参照行为，不代表 runtime 已在镜像内物化。
 
 `ImagePlan` 再增加 `placement-count`、`turn-region-count`、`local-heap-count`、`shared-heap-count` 与 `placement-fingerprint`。这些字段记录逃逸与存储选择，不代表已经改写 CFG 做堆装箱或写出机器码。`large_copy` 警告进入 `Compilation` 诊断且不阻止镜像计划；升为错误时 Frontend 失败且没有镜像。
 
@@ -183,8 +190,11 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 |---|---|---|
 | `std/prelude.gg` | 标准库源单元 | 证明标准库输入进入 action graph |
 | `runtime/core.gg` | runtime 源单元 | 证明 runtime 输入进入 action graph |
+| `std/runtime/platform.gg` | 平台范围适配 | 固定 `std.platform` 的 Gugu 入口与 profile 常量 |
 
-这两个源单元是源树登记输入，不是 Rust runtime 的替代实现。Rust compiler 可以拥有读取、验证和编排逻辑；Gugu runtime 的可观察语义必须最终来自镜像内的 Gugu runtime、rt0 和登记的 machine intrinsic。任何新增 runtime 能力都必须同时说明其 Gugu 源实现、必要 intrinsic 和 compiler lowering，不能在 Rust 中复制一份正常执行路径。
+这些源单元在 `LoadSources` 内注入源码表，与用户源码走同一条解析、cfg 与检查路径。它们是 `std` 的私有实现：只有 `std` 内部模块可以互相引用，非 `std` 模块导入实现模块按保留名拒绝（`E0031`），用户源码占用内建逻辑路径同样被拒绝。`std/runtime/platform.gg` 的 `#[used]` 入口使平台 adapter 成为闭世界镜像的根，不依赖某个用户调用点是否出现。
+
+这些源单元是源树登记输入，不是 Rust runtime 的替代实现。Rust compiler 可以拥有读取、验证和编排逻辑；Gugu runtime 的可观察语义必须最终来自镜像内的 Gugu runtime、rt0 和登记的 machine intrinsic。任何新增 runtime 能力都必须同时说明其 Gugu 源实现、必要 intrinsic 和 compiler lowering，不能在 Rust 中复制一份正常执行路径。
 
 ## 公开规范归属表
 

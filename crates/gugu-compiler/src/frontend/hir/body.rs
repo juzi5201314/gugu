@@ -213,6 +213,7 @@ pub(crate) enum Builtin {
     Len,
     Memory(super::super::semantics::model::MemoryIntrinsic),
     Runtime(super::super::semantics::model::RuntimeIntrinsic),
+    Platform(super::super::semantics::model::PlatformIntrinsic),
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Literal {

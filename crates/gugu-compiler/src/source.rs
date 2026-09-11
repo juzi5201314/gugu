@@ -565,6 +565,34 @@ impl SourceMap {
         Ok(SourceFileId::new(index as u32))
     }
 
+    /// 追加内建源码快照并恢复规范顺序。
+    ///
+    /// 文件 ID 是快照下标，因此重排会改变 ID 分配；调用者必须在任何 `file_id` 查询之前使用
+    /// 本方法，使后续解析看到的 ID 与排序后的表一致。
+    pub fn append_sorted(
+        &mut self,
+        snapshots: impl IntoIterator<Item = SourceSnapshot>,
+    ) -> Result<(), SourceMapError> {
+        let mut combined = std::mem::take(&mut self.snapshots);
+        combined.extend(snapshots);
+        combined.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        for pair in combined.windows(2) {
+            if pair[0].logical_path == pair[1].logical_path {
+                return Err(SourceMapError::DuplicatePath(pair[0].logical_path.clone()));
+            }
+        }
+        if combined.len() > u32::MAX as usize {
+            return Err(SourceMapError::UnknownFile(SourceFileId::new(u32::MAX)));
+        }
+        self.path_index = combined
+            .iter()
+            .enumerate()
+            .map(|(index, snapshot)| (snapshot.logical_path.clone(), index as u32))
+            .collect();
+        self.snapshots = combined;
+        Ok(())
+    }
+
     /// 按逻辑路径查找稳定文件 ID。
     pub fn file_id(&self, logical_path: &str) -> Option<SourceFileId> {
         self.path_index

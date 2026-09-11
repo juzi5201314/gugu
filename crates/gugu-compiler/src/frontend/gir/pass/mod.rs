@@ -486,6 +486,10 @@ pub(crate) fn statement_defined(statement: &Statement) -> Option<LocalId> {
     match &statement.kind {
         StatementKind::Assign(place, _) if place.is_local() => Some(place.local),
         StatementKind::SetDiscriminant { place, .. } if place.is_local() => Some(place.local),
+        StatementKind::PlatformCall {
+            destination: Some(place),
+            ..
+        } if place.is_local() => Some(place.local),
         _ => None,
     }
 }
@@ -509,6 +513,18 @@ pub(crate) fn statement_reads(statement: &Statement, out: &mut BTreeSet<LocalId>
         }
         StatementKind::Pin { place, .. } => {
             out.insert(place.local);
+        }
+        StatementKind::PlatformCall {
+            operands,
+            destination,
+            ..
+        } => {
+            for operand in operands {
+                operand_reads(operand, out);
+            }
+            if let Some(destination) = destination {
+                out.insert(destination.local);
+            }
         }
         StatementKind::ScopedViewBegin { source, .. } => {
             out.insert(source.local);

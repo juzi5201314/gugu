@@ -223,6 +223,8 @@ pub(crate) struct DrainReport {
     pub(crate) items: u32,
     pub(crate) bytes: u64,
     pub(crate) forwarded: u32,
+    /// 本次 service 消费的 extent 归还消息数量；它们不经过 slab 描述符。
+    pub(crate) extent_returns: u32,
     pub(crate) stop: DrainStop,
 }
 

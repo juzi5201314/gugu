@@ -10,15 +10,22 @@ use crate::target::{Rt0Kind, TargetName};
 
 mod harness;
 mod model;
+mod platform_schema;
 
 // raw plane 的参照实现：lib 构建只调用契约对象与 bench facade，确定性验证套件与 bench
 // 直接消费这些状态机与账本。
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod extent;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod inbox;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod ledger;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod message;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod owner;
+#[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
+mod platform;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod provider;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
@@ -32,15 +39,22 @@ mod slab;
 mod world;
 
 #[cfg(test)]
+mod platform_tests;
+#[cfg(test)]
 mod tests;
 
 pub use harness::{
     HarnessReport, OwnerReturnHarness, ResourceReleaseHarness, ResourceReleaseReport,
 };
 
+#[cfg(test)]
+pub use extent::EXTENT_CLASS_LADDER;
+pub use platform_schema::{PlatformOp, PlatformRangeDemand};
+
 pub(crate) use model::{
     RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, RuntimeRawContractV1, run,
 };
+pub use platform::PlatformProfile;
 
 /// owner inbox 的 shard 数量；与 scheduler 的 remote inbox 保持一致。
 pub(crate) const OWNER_INBOX_SHARDS: u32 = 8;
@@ -67,6 +81,7 @@ pub(crate) const TARGET_CACHE_ENTRIES: u32 = 4;
 
 const STD_PRELUDE_SOURCE: &str = include_str!("../../resources/std/prelude.gg");
 const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
+const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,6 +181,11 @@ impl RuntimeResources {
                     logical_path: "runtime/core.gg",
                     source: RUNTIME_CORE_SOURCE,
                     role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/platform.gg",
+                    source: RUNTIME_PLATFORM_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
                 },
             ],
             intrinsics: &[

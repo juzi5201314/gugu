@@ -403,6 +403,9 @@ fn walk_regions(
     }
     for statement in body.block_statements(block) {
         match &statement.kind {
+            StatementKind::PlatformCall { .. } if !open.is_empty() => {
+                return Err(gir_error("NoSafepointRegion 内不能调用平台范围原语", None));
+            }
             StatementKind::NoSafepointBegin(id) => {
                 if id.index() >= body.no_safepoint_regions.len() {
                     return Err(gir_error("NoSafepointRegion 越界", None));

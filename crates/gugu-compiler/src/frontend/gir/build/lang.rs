@@ -207,6 +207,55 @@ impl Builder<'_> {
     }
 }
 
+/// 把平台原语降级为 `StatementKind::PlatformCall`。
+///
+/// 实参按源码顺序求值并保留为 operands；返回值按 `types` 中的结果类型建立临时位置。平台调用
+/// 一律禁止进入 `NoSafepointRegion`，因此这里不生成任何无 safepoint 区域。
+impl Builder<'_> {
+    pub(super) fn emit_platform_call(
+        &mut self,
+        id: ExprId,
+        op: crate::runtime::PlatformOp,
+        arguments: Range<u32>,
+        types: Vec<TypeId>,
+    ) -> Result<Option<LocalId>, Diagnostic> {
+        let mut operands = Vec::new();
+        for argument in expr_range(self.owner, &arguments) {
+            let Some(local) = self.emit_expr(argument)? else {
+                return Ok(None);
+            };
+            operands.push(copy_of(local));
+        }
+        self.emit_check_ops(id)?;
+        // 状态操作返回 `()`，查询返回 `bool`，`entropy` 返回字节切片；结果类型由 HIR 给出。
+        let destination = match types.first() {
+            Some(&ty) if !matches!(self.module.types[ty.index()], hir::Type::Unit) => {
+                let dest = self.temp(ty);
+                Some(Place::local(dest))
+            }
+            _ => None,
+        };
+        self.push_stmt(StatementKind::PlatformCall {
+            op,
+            operands,
+            destination,
+        });
+        match destination {
+            Some(place) => {
+                let dest = place.local;
+                self.set_value(id, dest);
+                Ok(Some(dest))
+            }
+            None => {
+                let dest = self.temp(self.expr_ty(id));
+                self.assign_unit(dest);
+                self.set_value(id, dest);
+                Ok(Some(dest))
+            }
+        }
+    }
+}
+
 fn lang_name(module: &hir::Module, callee: &Callee) -> Option<String> {
     let definition = match callee {
         Callee::Dispatch(index) => module

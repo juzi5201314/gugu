@@ -315,7 +315,10 @@ fn macro_free_sources_keep_baseline_pipeline() {
     let compilation = compile("fn main() { let x = 1\n _ = x }");
     assert!(compilation.is_success());
     assert_eq!(compilation.source_map().expansions().len(), 0);
-    assert_eq!(compilation.source_map().snapshots().len(), 1);
+    assert_eq!(
+        compilation.source_map().snapshots().len(),
+        1 + crate::runtime::RuntimeResources::builtin().sources().len()
+    );
 }
 
 #[test]
@@ -401,7 +404,7 @@ fn cached_macro_replays_resource_cost_without_caching_action_exhaustion() {
         false,
         Default::default(),
     );
-    let modules = crate::frontend::parse_modules(&sources, "", &cfg).unwrap();
+    let modules = crate::frontend::parse_modules(&sources, "", &cfg, &Default::default()).unwrap();
     let names =
         crate::frontend::names::analyze("tests/macros@1", &Default::default(), &modules).unwrap();
     let model = crate::frontend::semantics::model::Model::new(&modules, &names).unwrap();

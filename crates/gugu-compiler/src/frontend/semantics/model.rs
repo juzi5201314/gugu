@@ -12,6 +12,7 @@ pub(crate) use attributes::Representation;
 mod lang;
 pub(super) use super::comptime::eval::ConstantValue;
 pub(crate) use lang::MemoryIntrinsic;
+pub(crate) use lang::PlatformIntrinsic;
 pub(crate) use lang::RuntimeIntrinsic;
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Ty {

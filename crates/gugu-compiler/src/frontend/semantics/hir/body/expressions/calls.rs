@@ -1,5 +1,25 @@
 use super::*;
-use crate::frontend::semantics::{model::MemoryIntrinsic, output::ReflectionKind};
+use crate::frontend::semantics::{
+    model::{MemoryIntrinsic, PlatformIntrinsic},
+    output::ReflectionKind,
+};
+
+/// 平台原语在 HIR 的效果集合。
+///
+/// 每个原语都跨越 runtime 边界，因此必然带 `UNSAFE` 与 `FOREIGN`；`wait` 会睡眠并可能被取消，
+/// 额外带 `SUSPEND`。改变 range 或字状态的原语带 `WRITE`，只读查询只带 `READ`。
+fn platform_effects(kind: PlatformIntrinsic) -> u32 {
+    let mut bits = hir::Effects::UNSAFE | hir::Effects::FOREIGN;
+    if kind.blocking() {
+        bits |= hir::Effects::SUSPEND;
+    }
+    if kind.mutating() {
+        bits |= hir::Effects::WRITE;
+    } else {
+        bits |= hir::Effects::READ;
+    }
+    hir::Effects::new(bits).0
+}
 
 impl BodyBuilder<'_, '_, '_, '_> {
     pub(super) fn call(
@@ -75,6 +95,30 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     field: None,
                 },
                 hir::Effects::WRITE,
+            ));
+        }
+        if let Some(operation) = self
+            .facts
+            .body
+            .platform_operations
+            .iter()
+            .find(|operation| operation.expression == callee)
+        {
+            // 平台原语的实参已经由 checker 定型；这里只按顺序降级，保持求值顺序。
+            let mut arguments = Vec::with_capacity(operation.arguments.len());
+            for &argument in &operation.arguments {
+                arguments.push(self.expression(argument)?);
+            }
+            let types = vec![self.type_id(&operation.ty)?];
+            self.expression_map[usize::try_from(callee.0).expect("表达式下标")] = Some(id);
+            return Ok((
+                hir::ExprKind::Intrinsic {
+                    operation: hir::Builtin::Platform(operation.kind),
+                    arguments: self.expression_list(arguments)?,
+                    types,
+                    field: None,
+                },
+                platform_effects(operation.kind),
             ));
         }
         if let Some(reflection) = self

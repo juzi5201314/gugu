@@ -74,6 +74,11 @@ pub(crate) struct ParsedModule {
     pub(crate) arena: AstArena,
     pub(crate) tokens: TokenBuffer,
     pub(crate) configured: cfg::ConfiguredAst,
+    /// 该模块来自 compiler 内建的源树登记，而不是用户源码。
+    ///
+    /// 内建 `std` 模块是 `std` 的私有实现：用户源码不能声明 `std` 根，非 `std` 模块也不能
+    /// 导入它们；只有 `std` 内部的模块之间可以互相引用。
+    pub(crate) builtin: bool,
 }
 
 pub(crate) fn bootstrap(
@@ -124,6 +129,44 @@ pub(crate) fn bootstrap(
     }
 }
 
+/// 把 compiler 内建的源单元追加进源码表，并返回它们的逻辑路径。
+///
+/// 内建模块与用户源码走同一条解析、cfg 与检查路径；它们的逻辑路径已经是 package 相对路径，
+/// 不经过 `source_root` 的裁剪规则。
+fn inject_builtin_sources(source_map: &mut SourceMap) -> Result<BTreeSet<String>, Vec<Diagnostic>> {
+    let mut paths = BTreeSet::new();
+    let mut snapshots = Vec::new();
+    for source in crate::runtime::RuntimeResources::builtin().sources() {
+        let logical = source.logical_path();
+        if source_map.file_id(logical).is_some() {
+            // 用户源码已经占用同一逻辑路径；这是 package 与内建源树的冲突。
+            return Err(vec![Diagnostic::error(
+                DiagnosticCode::ModuleInvalidPath,
+                format!("内建源单元 `{logical}` 与 package 源码逻辑路径冲突"),
+                None,
+            )]);
+        }
+        let snapshot =
+            SourceSnapshot::from_bytes(logical, source.source().as_bytes()).map_err(|error| {
+                vec![Diagnostic::error(
+                    DiagnosticCode::ModuleInvalidPath,
+                    error.to_string(),
+                    None,
+                )]
+            })?;
+        snapshots.push(snapshot);
+        paths.insert(logical.to_owned());
+    }
+    source_map.append_sorted(snapshots).map_err(|error| {
+        vec![Diagnostic::error(
+            DiagnosticCode::ModuleInvalidPath,
+            error.to_string(),
+            None,
+        )]
+    })?;
+    Ok(paths)
+}
+
 fn check_sources(
     source_map: &mut SourceMap,
     entry: &str,
@@ -134,7 +177,8 @@ fn check_sources(
     external_packages: &BTreeSet<String>,
     queries: &crate::query::QueryEngine,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
-    let mut modules = parse_modules(source_map, source_root, cfg)?;
+    let builtin_paths = inject_builtin_sources(source_map)?;
+    let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
     let expansion_inputs = expand::run(
         &mut modules,
@@ -199,6 +243,7 @@ fn parse_modules(
     source_map: &SourceMap,
     source_root: &str,
     cfg: &cfg::CfgContext,
+    builtin_paths: &BTreeSet<String>,
 ) -> Result<Vec<ParsedModule>, Vec<Diagnostic>> {
     let mut modules = Vec::with_capacity(source_map.snapshots().len());
     let mut diagnostics = Vec::new();
@@ -207,12 +252,16 @@ fn parse_modules(
         let file = source_map
             .file_id(snapshot.logical_path())
             .expect("源码表快照必须有稳定文件 ID");
-        let path = match module_path(snapshot, source_root, source_map, file) {
-            Ok(path) => path,
-            Err(diagnostic) => {
-                diagnostics.push(diagnostic);
-                continue;
-            }
+        let builtin = builtin_paths.contains(snapshot.logical_path());
+        let path = match builtin_module_path(snapshot, builtin_paths) {
+            Some(path) => path,
+            None => match module_path(snapshot, source_root, source_map, file) {
+                Ok(path) => path,
+                Err(diagnostic) => {
+                    diagnostics.push(diagnostic);
+                    continue;
+                }
+            },
         };
         if let Some(previous) = occupied.insert(path.clone(), snapshot.logical_path()) {
             diagnostics.push(module_path_conflict(
@@ -220,7 +269,7 @@ fn parse_modules(
             ));
             continue;
         }
-        match parse_module(snapshot, source_map, file, path, cfg) {
+        match parse_module(snapshot, source_map, file, path, cfg, builtin) {
             Ok(module) => modules.push(module),
             Err(errors) => diagnostics.extend(errors),
         }
@@ -232,12 +281,30 @@ fn parse_modules(
     }
 }
 
+/// 返回内建源单元对应的模块路径。
+///
+/// 内建逻辑路径已经是 package 相对路径（例如 `std/runtime/platform.gg`），直接去掉扩展名并
+/// 把分隔符换成 `.`；它不受用户 `source_root` 约束。
+fn builtin_module_path(
+    snapshot: &SourceSnapshot,
+    builtin_paths: &BTreeSet<String>,
+) -> Option<String> {
+    let logical = snapshot.logical_path();
+    if !builtin_paths.contains(logical) {
+        return None;
+    }
+    logical
+        .strip_suffix(".gg")
+        .map(|path| path.replace('/', "."))
+}
+
 fn parse_module(
     snapshot: &SourceSnapshot,
     source_map: &SourceMap,
     file: SourceFileId,
     path: String,
     cfg: &cfg::CfgContext,
+    builtin: bool,
 ) -> Result<ParsedModule, Vec<Diagnostic>> {
     let lexed = lex(snapshot, source_map, file);
     if !lexed.diagnostics.is_empty() || lexed.buffer.has_error_tokens() {
@@ -262,6 +329,7 @@ fn parse_module(
         arena: parsed.arena,
         tokens,
         configured,
+        builtin,
     })
 }
 

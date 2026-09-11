@@ -48,6 +48,9 @@ pub(crate) fn execute_statement(
             state.effects.alias_heap = true;
             state.bump_heap();
         }
+        // 平台调用可能撤销物理页并改变 mapping 状态；它既不读也不写受管堆，因此按 foreign
+        // 效果处理，并使已解析的 raw 事实失效。
+        StatementKind::PlatformCall { .. } => state.bump_foreign(),
         StatementKind::SetDiscriminant { place, .. } => invalidate_place(body, state, *place),
         _ => {}
     }

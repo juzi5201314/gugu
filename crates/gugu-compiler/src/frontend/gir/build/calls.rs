@@ -425,6 +425,9 @@ impl Builder<'_> {
         if let hir::Builtin::Runtime(kind) = operation {
             return self.emit_runtime_intrinsic(id, kind, arguments);
         }
+        if let hir::Builtin::Platform(kind) = operation {
+            return self.emit_platform_call(id, platform_op(kind), arguments, types);
+        }
         let mut operands = Vec::new();
         for argument in expr_range(self.owner, &arguments) {
             let Some(local) = self.emit_expr(argument)? else {
@@ -591,6 +594,29 @@ impl Builder<'_> {
         let unwind = self.intern_plan(self.current_unwind(id), CleanupChain::Unwind)?;
         self.terminate(Terminator::Panic { payload, unwind });
         Ok(None)
+    }
+}
+
+/// 把语义层的平台原语映射到契约操作；两者的枚举一一对应，映射是全覆盖的。
+fn platform_op(
+    kind: crate::frontend::semantics::model::PlatformIntrinsic,
+) -> crate::runtime::PlatformOp {
+    use crate::frontend::semantics::model::PlatformIntrinsic as Source;
+    use crate::runtime::PlatformOp as Target;
+    match kind {
+        Source::ReserveAligned => Target::ReserveAligned,
+        Source::Commit => Target::Commit,
+        Source::Decommit => Target::Decommit,
+        Source::Release => Target::Release,
+        Source::ProtectGuard => Target::ProtectGuard,
+        Source::Unprotect => Target::Unprotect,
+        Source::Wait => Target::Wait,
+        Source::Wake => Target::Wake,
+        Source::Entropy => Target::Entropy,
+        Source::Zero => Target::Zero,
+        Source::SetDumpPolicy => Target::SetDumpPolicy,
+        Source::LowMemoryHint => Target::LowMemoryHint,
+        Source::HugePageHint => Target::HugePageHint,
     }
 }
 

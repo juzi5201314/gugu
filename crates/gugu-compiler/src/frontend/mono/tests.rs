@@ -348,8 +348,14 @@ fn image_plan_reports_mono_counts() {
         crate::TargetName::X86_64Linux,
     ));
     let plan = compilation.image_plan().expect("镜像计划");
-    assert_eq!(plan.mono_instance_count(), 2, "main + helper 两个实例");
-    assert_eq!(plan.mono_root_count(), 1, "入口是唯一根");
+    // main + helper 两个用户实例，加上内建平台源单元 `#[used]` 入口闭包实例化的
+    // `install`/`table`；平台入口是闭世界镜像的根，不依赖用户是否调用它。
+    assert_eq!(
+        plan.mono_instance_count(),
+        4,
+        "main、helper 与内建平台入口闭包"
+    );
+    assert_eq!(plan.mono_root_count(), 2, "入口与内建平台 `#[used]` 根");
     assert_ne!(plan.mono_graph_fingerprint(), [0u8; 32]);
 }
 

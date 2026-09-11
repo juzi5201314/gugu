@@ -111,6 +111,43 @@ impl Builder<'_> {
             StatementKind::ScopedViewEnd { token } => {
                 self.emit(Op::ScopedViewEnd { token: token.0 }, &[], &[]);
             }
+            StatementKind::PlatformCall {
+                op,
+                operands,
+                destination,
+            } => {
+                let mut arguments = Vec::with_capacity(operands.len());
+                for operand in operands {
+                    let computed = self.operand(operand)?;
+                    arguments.extend(self.computed_values(computed)?);
+                }
+                // 状态操作没有结果；查询返回一个标量，`entropy` 返回胖指针。
+                let results: Vec<ValueType> = match destination {
+                    Some(place) => self
+                        .abi_lanes(self.local_ty(place.local))
+                        .into_iter()
+                        .map(|(_, _, kind)| kind)
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let values = self.emit(
+                    Op::PlatformCall(*op),
+                    &arguments,
+                    &results
+                        .iter()
+                        .map(|kind| (*kind, Origin::None))
+                        .collect::<Vec<_>>(),
+                );
+                if let Some(place) = destination {
+                    self.write_place(
+                        *place,
+                        Computed::Values {
+                            ty: self.local_ty(place.local),
+                            values,
+                        },
+                    )?;
+                }
+            }
             StatementKind::SafepointPoll(_) => {
                 self.emit(
                     Op::SafepointPoll {

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 8;
+pub(crate) const SCHEMA_VERSION: u32 = 9;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
@@ -39,6 +39,7 @@ pub(crate) struct CheckedBody {
     pub(crate) formatting: Vec<FormattingPart>,
     pub(crate) memory_operations: Vec<MemoryOperation>,
     pub(crate) runtime_operations: Vec<RuntimeOperation>,
+    pub(crate) platform_operations: Vec<PlatformOperation>,
     pub(crate) foreign_calls: Vec<super::foreign::ForeignCall>,
     pub(crate) assembly: Vec<super::assembly::AssemblyPlan>,
     pub(crate) borrow_checks: Vec<super::borrow::BorrowCheck>,
@@ -64,6 +65,15 @@ pub(crate) struct MemoryOperation {
 pub(crate) struct RuntimeOperation {
     pub(crate) expression: ExprId,
     pub(crate) kind: RuntimeIntrinsic,
+    pub(crate) ty: Ty,
+    pub(crate) arguments: Vec<ExprId>,
+}
+
+/// 一次平台范围原语调用；参数与返回类型已由 checker 定型。
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct PlatformOperation {
+    pub(crate) expression: ExprId,
+    pub(crate) kind: super::model::PlatformIntrinsic,
     pub(crate) ty: Ty,
     pub(crate) arguments: Vec<ExprId>,
 }
@@ -293,6 +303,18 @@ impl CheckedSemantics {
                     >= module.arena.exprs.len()
                     || !formed(&operation.ty, model)
                     || operation.arguments.len() != 2
+                    || operation.arguments.iter().any(|id| {
+                        usize::try_from(id.0).expect("表达式下标") >= module.arena.exprs.len()
+                    })
+                {
+                    return Err(invalid());
+                }
+            }
+            for operation in &body.platform_operations {
+                if usize::try_from(operation.expression.0).expect("表达式下标")
+                    >= module.arena.exprs.len()
+                    || !formed(&operation.ty, model)
+                    || operation.arguments.len() != operation.kind.value_arguments()
                     || operation.arguments.iter().any(|id| {
                         usize::try_from(id.0).expect("表达式下标") >= module.arena.exprs.len()
                     })

@@ -22,6 +22,7 @@ mod memory;
 mod methods;
 mod opaque;
 mod operations;
+mod platform;
 mod reflection;
 mod runtime;
 
@@ -93,6 +94,7 @@ struct Checker<'m, 'a> {
     formatting: Vec<super::output::FormattingPart>,
     memory_operations: Vec<super::output::MemoryOperation>,
     runtime_operations: Vec<super::output::RuntimeOperation>,
+    platform_operations: Vec<super::output::PlatformOperation>,
     foreign_calls: Vec<super::foreign::ForeignCall>,
     call_site: Option<ExprId>,
     current_function: Option<FnId>,
@@ -184,6 +186,7 @@ pub(super) fn check(
                 formatting: checker.formatting,
                 memory_operations: checker.memory_operations,
                 runtime_operations: checker.runtime_operations,
+                platform_operations: checker.platform_operations,
                 foreign_calls: checker.foreign_calls,
                 assembly: checker.assembly,
                 borrow_checks: checker.borrow_checks,
@@ -282,6 +285,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             formatting: Vec::new(),
             memory_operations: Vec::new(),
             runtime_operations: Vec::new(),
+            platform_operations: Vec::new(),
             foreign_calls: Vec::new(),
             call_site: None,
             current_function: None,

@@ -74,6 +74,7 @@ impl OwnerReturnHarness {
             policy,
             RawPlaneDemand::default(),
             super::RawResourceDemand::default(),
+            super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
         let node_capacity = contract
@@ -262,6 +263,7 @@ impl ResourceReleaseHarness {
             policy,
             RawPlaneDemand::default(),
             super::RawResourceDemand::default(),
+            super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
         let total = self.producers * self.items_per_producer;

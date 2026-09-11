@@ -109,6 +109,7 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && results[0].provenance == Some(Provenance::GcHeap)
                     && align.is_power_of_two()
             }
+            Op::PlatformCall(op) => platform_call_valid(*op, &args, &results),
             Op::RegionPublish => {
                 a == [Type::Ptr]
                     && r.is_empty()
@@ -533,6 +534,74 @@ fn region_pointer(body: &Body, mut value: ValueId) -> bool {
         }
     }
     false
+}
+
+/// 平台范围调用的结构规则。
+///
+/// 实参与结果只允许平台无关的整数、布尔或 `Raw`/`Metadata` provenance：平台调用不得携带
+/// 受管引用穿过 runtime 边界，也不得把 `Mem`/`Void` 当作普通值。状态操作没有结果，查询返回
+/// 一个标量，`entropy` 返回 `Raw` 指针与长度。
+fn platform_call_valid(
+    op: crate::runtime::PlatformOp,
+    args: &[ValueType],
+    results: &[ValueType],
+) -> bool {
+    use crate::runtime::PlatformOp as Kind;
+    let arguments_ok = args.iter().all(|kind| {
+        matches!(kind.ty, Type::I64 | Type::I32)
+            && !matches!(
+                kind.provenance,
+                Some(Provenance::GcHeap | Provenance::GcInterior | Provenance::Stack)
+            )
+    });
+    if !arguments_ok {
+        return false;
+    }
+    match op {
+        // 预留返回一个稳定 range 编号；参数是字节数与对齐，domain 由调用上下文决定。
+        Kind::ReserveAligned => {
+            args.len() == 2
+                && results.len() == 1
+                && results[0].ty == Type::I64
+                && results[0].provenance.is_none()
+        }
+        // `wake` 返回实际释放的等待者数。
+        Kind::Wake => {
+            args.len() == 2
+                && results.len() == 1
+                && results[0].ty == Type::I64
+                && results[0].provenance.is_none()
+        }
+        // `wait` 返回布尔；布尔在 LIR 中是 `I8` 标量。
+        Kind::Wait => {
+            args.len() == 2
+                && results.len() == 1
+                && results[0].ty == Type::I8
+                && results[0].provenance.is_none()
+        }
+        // `low_memory_hint` 是无参数查询。
+        Kind::LowMemoryHint => {
+            args.is_empty()
+                && results.len() == 1
+                && results[0].ty == Type::I8
+                && results[0].provenance.is_none()
+        }
+        // `entropy` 返回平台所有的 `Raw` 字节指针；长度由调用方请求时已知。
+        Kind::Entropy => {
+            args.len() == 1
+                && results.len() == 1
+                && results[0].ty == Type::Ptr
+                && results[0].provenance == Some(Provenance::Raw)
+        }
+        Kind::Commit
+        | Kind::Decommit
+        | Kind::Release
+        | Kind::ProtectGuard
+        | Kind::Unprotect
+        | Kind::Zero
+        | Kind::HugePageHint => args.len() == 1 && results.is_empty(),
+        Kind::SetDumpPolicy => args.len() == 2 && results.is_empty(),
+    }
 }
 
 fn resource_call_valid(args: &[ValueType], results: &[ValueType]) -> bool {

@@ -80,7 +80,13 @@
 `lir-body-count`、`lir-block-count`、`lir-instruction-count`、`lir-memory-operation-count`、
 `lir-safepoint-count`、`lir-fingerprint`、`optimization-revision`、`poll-budget`、
 `poll-count`、`poll-free-leaf-count`、`poll-summary-fingerprint` 与
-`runtime-checks-elided-count`。fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的
+`runtime-checks-elided-count`。runtime raw 契约还报告 `raw-model-fingerprint`、
+`raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、
+`raw-message-node-capacity`、`raw-resource-class-count`、`raw-resource-cell-header-bytes`、
+`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites`、
+`raw-release-sites`，以及平台范围与账本字段 `platform-profile`、`platform-op-count`、
+`platform-range-class-count`、`platform-contract-fingerprint`、`platform-range-demand` 与
+`ledger-category-count`。fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的
 编译计划，不代表最终可执行镜像已经写出，也不承诺 TypeId 跨镜像稳定。
 `large_copy` 默认警告仍可返回成功计划；`#[deny(large_copy)]` / `#[forbid(large_copy)]`
 使检查失败且 `image-plan` 为 `null`。

@@ -131,7 +131,7 @@ impl LinkCodec {
                 });
             }
             return Err(LinkError::Foreign {
-                descriptor: descriptor.range.raw(),
+                descriptor: descriptor.extent.raw(),
             });
         }
         Ok(index)
@@ -458,6 +458,11 @@ impl ReturnNode {
         )
     }
 
+    fn kind(&self) -> ReturnKind {
+        ReturnKind::from_raw(((self.state_kind.load(Ordering::Acquire) >> 8) & 0xFF) as u8)
+            .unwrap_or(ReturnKind::RawSlot)
+    }
+
     fn owner_id(&self) -> OwnerId {
         OwnerId::from_raw(self.owner_id.load(Ordering::Acquire))
     }
@@ -629,6 +634,11 @@ impl ReturnNodePool {
     /// 只读取 node 的 descriptor 编号；consumer 用它定位 slab 后再取完整 payload。
     pub(crate) fn descriptor_of(&self, id: ReturnNodeId) -> SlabDescriptorId {
         self.nodes[id.index()].descriptor()
+    }
+
+    /// 只读取 node 的 return 类别；consumer 用它决定用 slab 还是 extent 的载入键。
+    pub(crate) fn kind_of(&self, id: ReturnNodeId) -> ReturnKind {
+        self.nodes[id.index()].kind()
     }
 
     /// 只读取 node 的目标 owner 编号。

@@ -49,6 +49,12 @@ pub(crate) struct BackendPlan {
     pub(crate) release_descriptor_count: u32,
     pub(crate) resource_sites: u32,
     pub(crate) release_sites: u32,
+    pub(crate) platform_profile: String,
+    pub(crate) platform_op_count: u32,
+    pub(crate) platform_range_class_count: u32,
+    pub(crate) platform_contract_fingerprint: [u8; 32],
+    pub(crate) platform_demand: super::runtime::PlatformRangeDemand,
+    pub(crate) ledger_category_count: u32,
 }
 
 pub(crate) fn plan(
@@ -114,5 +120,14 @@ pub(crate) fn plan(
         release_descriptor_count: raw.resources().release.fields.len() as u32,
         resource_sites: raw.resource_demand().resource_sites,
         release_sites: raw.resource_demand().release_sites,
+        platform_profile: raw.platform().profile().to_owned(),
+        platform_op_count: raw.platform().op_count(),
+        platform_range_class_count: raw.platform().class_count(),
+        platform_contract_fingerprint: *blake3::Hasher::new_derive_key("gugu-platform-range-v1")
+            .update(&raw.platform().canonical_bytes())
+            .finalize()
+            .as_bytes(),
+        platform_demand: *raw.platform_demand(),
+        ledger_category_count: raw.ledger_categories().len() as u32,
     })
 }

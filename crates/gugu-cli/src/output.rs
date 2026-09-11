@@ -263,6 +263,18 @@ pub(crate) fn print_compilation_json(
             "raw-release-descriptor-count": plan.release_descriptor_count(),
             "raw-resource-sites": plan.resource_sites(),
             "raw-release-sites": plan.release_sites(),
+            "platform-profile": plan.platform_profile(),
+            "platform-op-count": plan.platform_op_count(),
+            "platform-range-class-count": plan.platform_range_class_count(),
+            "platform-contract-fingerprint": plan.platform_contract_fingerprint(),
+            "platform-range-demand": json!({
+                "payload-extents": plan.platform_range_demand().payload_extents,
+                "stack-extents": plan.platform_range_demand().stack_extents,
+                "metadata-extents": plan.platform_range_demand().metadata_extents,
+                "guard-extents": plan.platform_range_demand().guard_extents,
+                "owners": plan.platform_range_demand().owners,
+            }),
+            "ledger-category-count": plan.ledger_category_count(),
             "rt0": plan.rt0().to_string()
         })
     });

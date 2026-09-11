@@ -7,8 +7,9 @@
 
 use std::fmt;
 
+use super::extent::ExtentId;
 use super::message::{LinkCodec, LinkError};
-use super::provider::{ProviderError, RangeId};
+use super::provider::ProviderError;
 use super::size_class::RuntimeSizeClass;
 
 /// raw 平面不变量失败；进入 `RuntimeInvariant` 分类而不丢弃任何记录。
@@ -625,7 +626,8 @@ pub(crate) struct SlabDescriptor {
     pub(crate) bump_cursor: u32,
     pub(crate) pending_returns: u32,
     pub(crate) integrity_secret: u32,
-    pub(crate) range: RangeId,
+    /// 承载本 span 的 extent；平台 range 只在 extent 层可见。
+    pub(crate) extent: ExtentId,
     pub(crate) slab_epoch: Epoch,
 }
 
@@ -710,7 +712,7 @@ impl SlabTable {
         &mut self,
         class: &RuntimeSizeClass,
         owner: OwnerToken,
-        range: RangeId,
+        extent: ExtentId,
         span_extent: u64,
         integrity_secret: u32,
         slab_epoch: Epoch,
@@ -744,7 +746,7 @@ impl SlabTable {
             bump_cursor: 0,
             pending_returns: 0,
             integrity_secret,
-            range,
+            extent,
             slab_epoch,
         });
         self.headers.push(vec![0; slots as usize]);
@@ -887,7 +889,7 @@ impl SlabTable {
             if descriptor.live + descriptor.free + descriptor.queued != slots {
                 return Err(RawInvariant::new(format!(
                     "slab {} 的 live/free/queued 计数与 slot 总数不一致",
-                    descriptor.range.raw()
+                    descriptor.extent.raw()
                 )));
             }
         }

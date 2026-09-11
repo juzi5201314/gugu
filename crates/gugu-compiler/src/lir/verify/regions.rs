@@ -237,6 +237,7 @@ fn forbidden(op: &Op, mode: Mode) -> bool {
                         | Op::RegionPublish
                         | Op::RegionReset
                         | Op::ForwardSharedHandle
+                        | Op::PlatformCall(_)
                 )
         }
     }

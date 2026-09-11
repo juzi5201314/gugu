@@ -467,6 +467,8 @@ pub(crate) enum NoSafepointReason {
     RuntimeLock,
     OwnershipPublish,
     RootPublish,
+    /// 平台范围调用；它可能睡眠或撤销物理页，因此同样禁止进入无 safepoint 区域。
+    PlatformCall,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -531,6 +533,12 @@ pub(crate) enum StatementKind {
     },
     ScopedViewEnd {
         token: LocalId,
+    },
+    /// 平台范围原语；实参与结果都已定型，region 与调用点由 verifier 检查。
+    PlatformCall {
+        op: crate::runtime::PlatformOp,
+        operands: Vec<Operand>,
+        destination: Option<Place>,
     },
     SafepointPoll(SafepointId),
     StackCheck,

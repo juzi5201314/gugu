@@ -6,12 +6,12 @@
 //! 真相源。
 
 use super::super::RESOURCE_DEDICATED_ALIGN_LIMIT;
+use super::super::extent::{ExtentOccupancy, TrimReport};
 use super::super::inbox::ShardIndex;
 use super::super::message::{
     FlushTrigger, ProducerStaging, ReturnKind, ReturnMessage, stage_message,
 };
 use super::super::owner::Allocation;
-use super::super::provider::{RangeProvider, RangeState};
 use super::super::resource::{
     self, CloseOutcome, LeaseOutcome, ReleaseRegistry, ReleaseTicket, ResourceHandle,
 };
@@ -195,10 +195,15 @@ impl RawWorld {
                 let codec = self.link_codec.clone();
                 let provider = &mut self.provider;
                 let table = &mut self.table;
+                let extents = &mut self.extents;
                 let slab_epoch = self.epoch;
+                let extent_class = super::super::owner::span_extent_class();
                 self.resource_owners[owner as usize].allocate(
+                    owner,
                     &class,
+                    extent_class,
                     table,
+                    extents,
                     provider,
                     &codec,
                     accounting,
@@ -213,24 +218,29 @@ impl RawWorld {
                 if let Some(allocation) = self.reuse_dedicated_slot(token, &class)? {
                     allocation
                 } else {
-                    let (range, bytes) = {
+                    let (extent, bytes) = {
                         let accounting = self
                             .directory
                             .accounting_mut(token.owner_id)
                             .ok_or_else(|| RawInvariant::new("专用 mapping 缺少 owner 账本"))?;
+                        let extent_class = super::super::extent::class_for_bytes(u64::from(stride))
+                            .ok_or_else(|| {
+                                RawInvariant::new("专用 mapping 超出 extent 阶梯上界")
+                            })?;
                         let commit = resource::reserve_mapping(
+                            &mut self.extents,
                             &mut self.provider,
                             accounting,
-                            u64::from(stride),
-                            alignment,
+                            owner,
+                            extent_class,
                             self.epoch,
                         )?;
-                        (commit.range, commit.bytes)
+                        (commit.extent, commit.bytes)
                     };
                     let descriptor = self.table.create(
                         &class,
                         token,
-                        range,
+                        extent,
                         bytes,
                         u32::from(class.id.raw()),
                         self.epoch,
@@ -715,9 +725,13 @@ impl RawWorld {
         Ok(active)
     }
 
-    /// 释放已经没有 live slot 的 Resource domain range。
-    fn release_resource_ranges(&mut self) -> Result<(), RawInvariant> {
-        let ranges: Vec<_> = self
+    /// 释放已经没有 live slot 的 Resource domain extent。
+    ///
+    /// 与 raw plane 相同：先经 lease、slot、在途 return 与 grace 四条门禁，再撤销物理页并把
+    /// extent 合并回 buddy 阶梯。被门禁拒绝的 extent 保留 committed 状态，由下一次 trim 重试。
+    fn release_resource_ranges(&mut self) -> Result<TrimReport, RawInvariant> {
+        let mut report = TrimReport::default();
+        let candidates: Vec<_> = self
             .table
             .descriptors()
             .iter()
@@ -730,39 +744,43 @@ impl RawWorld {
                 {
                     Some((
                         SlabDescriptorId::from_raw(u32::try_from(index).ok()?),
-                        descriptor.range,
+                        descriptor.extent,
                         descriptor.committed_bytes,
                         descriptor.owner,
+                        descriptor.pending_returns,
                     ))
                 } else {
                     None
                 }
             })
             .collect();
-        for (descriptor, range, bytes, owner) in ranges {
-            let provider_range = self
-                .provider
-                .describe(range)
-                .ok_or_else(|| RawInvariant::new("Resource descriptor 引用未知 range"))?;
-            if provider_range.state != RangeState::Released {
-                if provider_range.state == RangeState::Committed {
-                    self.provider.decommit(range)?;
+        for (descriptor, extent, bytes, owner, pending_returns) in candidates {
+            let occupancy = ExtentOccupancy {
+                live_slots: 0,
+                queued_slots: 0,
+                pending_returns,
+            };
+            match self.poll_trim_extent(extent, occupancy)? {
+                Ok(_) => {}
+                Err(blocked) => {
+                    report.blocked.push((extent, blocked));
+                    continue;
                 }
-                self.provider.release(range)?;
-                let accounting = self
-                    .directory
-                    .accounting_mut(owner.owner_id)
-                    .ok_or_else(|| RawInvariant::new("释放 Resource range 缺少 owner 账本"))?;
-                accounting.release(bytes);
             }
+            let accounting = self
+                .directory
+                .accounting_mut(owner.owner_id)
+                .ok_or_else(|| RawInvariant::new("释放 Resource extent 缺少 owner 账本"))?;
+            accounting.release(bytes);
             let record = self
                 .table
                 .descriptor_mut(descriptor)
-                .ok_or_else(|| RawInvariant::new("释放 Resource range 缺少 descriptor"))?;
+                .ok_or_else(|| RawInvariant::new("释放 Resource extent 缺少 descriptor"))?;
             record.state = SlabState::Released;
             record.committed_bytes = 0;
+            report.trimmed += 1;
         }
-        Ok(())
+        Ok(report)
     }
 
     /// 进程终止：排空远程 return、结束全部 lease、执行 cleanup 并归还全部资源 slot。

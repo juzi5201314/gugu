@@ -13,20 +13,28 @@ fn invalid(message: &str) -> Diagnostic {
 
 impl Module {
     pub(in crate::frontend) fn verify(&self) -> Result<(), Diagnostic> {
-        if !self
+        // 源码表镜像 `SourceMap`：基础源码按逻辑路径排序，宏生成快照按展开顺序追加，内建源单元
+        // 与用户源码一起排序。顺序由 `SourceMap` 保证，HIR 这里只要求路径唯一——它是
+        // `Location.source` 下标与逻辑路径之间的双射，也是缓存命中重绑定位置的前提。
+        let mut paths: Vec<&str> = self
             .sources
+            .iter()
+            .map(|source| source.path.as_str())
+            .collect();
+        paths.sort_unstable();
+        if paths.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(invalid("源码路径不是唯一序列"));
+        }
+        if !self
+            .definitions
             .windows(2)
-            .all(|pair| pair[0].path < pair[1].path)
-            || !self
-                .definitions
-                .windows(2)
-                .all(|pair| pair[0].key < pair[1].key)
+            .all(|pair| pair[0].key < pair[1].key)
             || !self
                 .owners
                 .windows(2)
                 .all(|pair| pair[0].definition < pair[1].definition)
         {
-            return Err(invalid("源码、定义及 owner 身份不是规范唯一序列"));
+            return Err(invalid("定义及 owner 身份不是规范唯一序列"));
         }
         for (index, expansion) in self.expansions.iter().enumerate() {
             if expansion.parent as usize > index

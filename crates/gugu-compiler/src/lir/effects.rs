@@ -28,6 +28,7 @@ impl Op {
             | Self::Atomic { .. }
             | Self::GcAlloc { .. }
             | Self::RegionAlloc { .. }
+            | Self::PlatformCall(_)
             | Self::RegionPublish
             | Self::RegionReset
             | Self::PromoteManaged
@@ -74,6 +75,14 @@ impl Op {
             }
             Self::BarrierReserve(_) | Self::GcWriteBarrier { .. } => Some(SafepointKind::Barrier),
             Self::CoroutineSwitch | Self::Park => Some(SafepointKind::Suspend),
+            // 平台调用进入 runtime 边界：撤销物理页与睡眠都必须在 safepoint 边界之外发生。
+            // `wait` 会阻塞当前协程，因此它是挂起点而不是普通调用返回点；其余操作只跨越
+            // syscall/CRT 边界，返回值即可继续执行。
+            Self::PlatformCall(op) => Some(if op.blocking() {
+                SafepointKind::Suspend
+            } else {
+                SafepointKind::CallReturn
+            }),
             Self::Call(call) | Self::ForeignCall(call) => call.safepoint_kind(),
             Self::ResolveSharedHandle | Self::ForwardSharedHandle => {
                 Some(SafepointKind::CallReturn)
@@ -133,6 +142,9 @@ impl Op {
             | Self::CoroutineSwitch
             | Self::Park
             | Self::Ready => 16,
+            // 平台范围调用进入 syscall/CRT 边界，按最贵的普通 runtime 操作计价；`wait` 会睡眠，
+            // 因此它本身就是 poll 切断点。
+            Self::PlatformCall(_) => POLL_BUDGET,
             Self::Call(call) | Self::ForeignCall(call) => match call.kind {
                 CallKind::ForeignLeaf { .. } => POLL_BUDGET,
                 _ => 5,

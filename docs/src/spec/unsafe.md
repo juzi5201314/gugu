@@ -103,6 +103,7 @@ unsafe fn assume_init(self) T
 | 职责 | 说明 |
 |------|------|
 | 受管分配 / 区域 | managed storage、`LocalArena` / `SyncArena` 上的未初始化内存；OS `mmap` / `VirtualAlloc` |
+| 平台范围 | `std.platform` 的 reserve/commit/decommit/release、guard、wait/wake、entropy、zero 与 dump policy；契约见[标准库](standard-library.md#平台范围与内存账本) |
 | 受管引用更新 | 手写 runtime 对 GC 引用槽的更新；当前屏障见 [GC 元数据](../internals/gc-metadata.md#write-barrier-与-remembered-set) |
 | 栈切换 | 保存目标 ABI 状态并切换执行栈；当前 context见[调度器](../internals/scheduler.md) |
 | 栈边界 / SP | GC 与溢出探测 |
@@ -116,6 +117,8 @@ unsafe fn assume_init(self) T
 | `size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count` | 见 [类型](types.md) |
 | volatile / 指针读写 | 见上 |
 | `transmute` | 见上 |
+
+`std.platform` 原语与其他 intrinsic 一样只能在 `unsafe` 块内调用（`E0041`）。调用方负责对齐、长度、range 状态与 lease 的前置条件：解引用已 `decommit` 或 `released` 的 range、把同一 range 提交两次、在 `release` 之后继续使用地址，以及在没有取得对应 lease 时撤销页面，都是未定义行为。`decommit` 的 lease 与 grace 门禁由 runtime 强制，不能由调用方绕过。
 
 未定义行为包括：野指针、数据竞争、破坏 UTF-8 或 runtime 私有状态、遗漏受管引用更新、在编译器未登记的停止点读取根 metadata，以及对 `union` / `MaybeUninit` / `transmute` 使用无效位模式。当前官方 metadata与屏障契约只见[栈图](../internals/stack-maps.md)和[GC 元数据](../internals/gc-metadata.md)。调试器可以抓一部分；没炸不是定义。
 

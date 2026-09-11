@@ -233,7 +233,7 @@ parser 必须满足：
 
 `frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
-版本化结果为 `CheckedSemantics`（schema 8），它在 TypeCheck query 中序列化，包含：
+版本化结果为 `CheckedSemantics`（schema 9），它在 TypeCheck query 中序列化，包含：
 
 - 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
 - 每个局部槽的规范名称和声明字节范围；闭包捕获及清理路径的重检查可以据此指向同一个源码绑定，HIR 不把语义检查遍历中临时分配的槽编号当作持久绑定身份。
@@ -249,6 +249,7 @@ parser 必须满足：
 - 动态 `Dispatch` 保存对象安全接口和成员序号，不携带静态 callable/impl。`Reflection` 保存 `is`、`downcast`、`downcast_copy` 的精确目标类型与符号化 TypeId 操作，恢复类型不得穿透既有接口对象。
 - `MemoryOperation` 保存标准内存原语、源/目标类型与按源码求值的实参 ID；`MaybeUninit` 有独立语义类型，不伪装成已初始化的 T。按位操作的管理属性及大小条件在同一布局模型检查。
 - `RuntimeOperation` 保存规范路径登记的 `OwnershipPublish` / `RootPublish`、AST callee ID、收敛后的句柄类型与目标位置/值的实参 ID；位置检查与闭包捕获传播在 body checker 完成。HIR 将其记录为带 `WRITE` effect 的 `Builtin::Runtime`，不把 intrinsic 路径当作普通 callable。旧 TypeCheck schema 缺少此表，必须重算。
+- `PlatformOperation` 保存 `std.platform.*` 的固定操作、返回类型与按源码求值的实参 ID。checker 在此层拒绝类型实参、实参个数或类型不符，以及不在 `unsafe` 块内的调用（`E0041`）。HIR 将其记录为 `Builtin::Platform`，effect 由操作自身推导：全部操作带 `UNSAFE`/`FOREIGN`，`wait` 额外带 `SUSPEND`，改变 range 或字状态的操作带 `WRITE`，只读查询带 `READ`。GIR 与 LIR 各有一层 verifier 检查 arity、操作数类型与 provenance，并禁止平台调用进入 `NoSafepointRegion`。旧 TypeCheck schema 缺少此表，必须重算。
 - `BorrowCheck` 保存被借用槽的基类型、完整字段/数组投影及目标类型；类型收敛后由统一聚合布局检查最终自然对齐，显式取引用与方法自动借用共用此检查。动态下标只保留步长条件，不重复执行下标表达式。
 - `ForeignDefinition` 与 `ForeignCall` 保存 C 声明身份、naked/imported 标志和按调用点优先级形成的 bridge/dirty/leaf 效应。`Linkage` 独立保存函数、static 与全局汇编的符号名、节和 used 状态；两张声明表在缓存命中时对照当前模型验证。
 - `AssemblyPlan` 保存求值后的模板、寄存器宽度/方向、输入与输出位置、clobber 位图及 managed/naked/dirty/global 上下文。managed 模板的有限控制流和所有出口的栈增量在前端验证；寄存器值大小由布局检查，机器编码仍属于后端。

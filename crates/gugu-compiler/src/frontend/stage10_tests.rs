@@ -49,6 +49,31 @@ fn analyze_with_cfg(
     )
 }
 
+/// 统计用户源码贡献的定义数量。
+///
+/// 内建平台源单元与用户源码进入同一张定义表，按逻辑路径排除内建单元即可只针对用户源码断言，
+/// 也避免把内建单元的定义个数写死成常量。
+fn user_definitions(output: &super::FrontendOutput) -> usize {
+    let resources = crate::runtime::RuntimeResources::builtin();
+    let builtin: Vec<&str> = resources
+        .sources()
+        .iter()
+        .map(|source| source.logical_path())
+        .collect();
+    output
+        .names
+        .definitions
+        .iter()
+        .filter(|definition| {
+            definition
+                .span
+                .path()
+                .to_str()
+                .is_none_or(|path| !builtin.contains(&path))
+        })
+        .count()
+}
+
 fn codes(result: Result<super::FrontendOutput, Vec<crate::Diagnostic>>) -> Vec<DiagnosticCode> {
     result
         .expect_err("analysis must fail")
@@ -86,8 +111,8 @@ fn cfg_selects_exactly_one_target_and_feature_definition() {
     )
     .expect("windows branch is unique");
 
-    assert_eq!(linux.names.definitions.len(), 2);
-    assert_eq!(windows.names.definitions.len(), 2);
+    assert_eq!(user_definitions(&linux), 2);
+    assert_eq!(user_definitions(&windows), 2);
     assert_eq!(linux.names.imports.len(), 1);
     assert_eq!(windows.names.imports.len(), 1);
 }
@@ -142,7 +167,8 @@ fn cfg_evaluates_registered_build_flags_and_values() {
         &cfg,
     )
     .expect("registered custom cfg resolves");
-    assert_eq!(configured.names.definitions.len(), 3);
+    // cfgs 只裁剪用户项；内建平台源单元始终进入模块树，因此只统计用户定义。
+    assert_eq!(user_definitions(&configured), 3);
 
     let unknown = analyze(
         &[("src/main.gg", "#[cfg(fast_path)] fn main() {}\n")],
@@ -198,7 +224,7 @@ fn main() {
     )
     .expect("cfg 只删除完整序列成员");
 
-    assert_eq!(configured.names.definitions.len(), 10);
+    assert_eq!(user_definitions(&configured), 10);
     assert_eq!(configured.names.imports.len(), 1);
 }
 

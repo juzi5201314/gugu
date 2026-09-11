@@ -287,7 +287,7 @@ LIR 指令按封闭类别组织：
 - 控制辅助：`Select`、`TrapIf`；
 - 内存：`Load`、`Store`、`Memcpy`、`Memmove`、`Memset`；
 - 并发：`AtomicLoad`、`AtomicStore`、`AtomicRmw`、`CompareExchange`、`Fence`；
-- runtime：`GcAlloc`、`RegionAlloc`、`RegionPublish`、`RegionReset`、`PromoteManaged`、`MarkTicketBatch`、`EdgeDeltaBatch`、`ResolveSharedHandle`、`SharedAccessBegin`、`SharedAccessEnd`、`ForwardSharedHandle`、`DecodeCompressedRef`、`BarrierReserve { permit: BarrierPermitId }`、`GcWriteBarrier`、`GcWriteBarrierReserved { permit: BarrierPermitId }`、`ScopedViewBegin { mode, token }`、`ScopedViewEnd { token }`、`SafepointPoll { interval: NonZeroU32 }`、`StackCheck`、`NoSafepointBegin`、`NoSafepointEnd`、`CoroutineSwitch`、`Park`、`Ready`、`Format`（按前端格式计划渲染 `(value, descriptor)` 对）、`Concat`（两组 `(data, len)` 拼成新 `string`）；`BarrierPermitId`和scoped view token只存在于 compiler/runtime metadata，不占 machine value/register；显式 poll和 counted-loop外层 poll的 interval固定为1，无法构造 counted outer chunk的循环路径才使用大于1的计算 interval；
+- runtime：`GcAlloc`、`RegionAlloc`、`RegionPublish`、`RegionReset`、`PromoteManaged`、`MarkTicketBatch`、`EdgeDeltaBatch`、`ResolveSharedHandle`、`SharedAccessBegin`、`SharedAccessEnd`、`ForwardSharedHandle`、`DecodeCompressedRef`、`BarrierReserve { permit: BarrierPermitId }`、`GcWriteBarrier`、`GcWriteBarrierReserved { permit: BarrierPermitId }`、`ScopedViewBegin { mode, token }`、`ScopedViewEnd { token }`、`SafepointPoll { interval: NonZeroU32 }`、`StackCheck`、`NoSafepointBegin`、`NoSafepointEnd`、`CoroutineSwitch`、`Park`、`Ready`、`Format`（按前端格式计划渲染 `(value, descriptor)` 对）、`Concat`（两组 `(data, len)` 拼成新 `string`）、`PlatformCall(op)`（平台范围操作，operand 是整数/布尔标量，结果按操作的 ABI lane 返回）；`BarrierPermitId`和scoped view token只存在于 compiler/runtime metadata，不占 machine value/register；显式 poll和 counted-loop外层 poll的 interval固定为1，无法构造 counted outer chunk的循环路径才使用大于1的计算 interval；
 - 调用：`Call`、`ForeignCall`；`ForeignCall` 的 mode 必须是普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`。
 - 已解析汇编：`InlineAsm` 只保存前端验证过的封闭汇编计划、输入输出约束与 effect；不接受待解析模板文本。
 - 诊断插桩：`CoverageCounter`。
@@ -392,6 +392,8 @@ release 编译器在进入代码生成前也必须运行完整 verifier。验证
 ## IR dump
 
 `BuildLir` 之后的结构检查还包含 publish 区域的 raw 平面契约：`OwnershipPublish`/`RootPublish` 区域内只允许状态写入、字段读写、屏障记录、scoped/shared view 管理与登记原子操作；原子访问必须形成 Release/Acquire 配对（chain link 使用 Release、batch tail exchange 使用 AcqRel、consumer link load 使用 Acquire），禁止新增全局 `SeqCst`；可移动对象的内部地址（`GcInterior`）不得穿过 publish 边界。该检查先于通用指令校验运行，违规诊断为 `E0058` 并阻止镜像计划。
+
+平台调用在 GIR 与 LIR 各有一层 verifier：GIR 拒绝 `NoSafepointRegion` 内的 `PlatformCall`，LIR 检查 arity、operand 类型与 provenance（禁止 managed 指针与 stack provenance 进入平台操作数），并按操作核对结果 lane——`reserve_aligned`/`wake` 返回 `I64`，`wait`/`low_memory_hint` 返回 `I8`，`entropy` 返回 `Raw` 指针，其余无结果。`wait` 是挂起点（`Suspend`），其余只跨越 syscall/CRT 边界（`CallReturn`）。
 
 同一结构检查还包含 LIR 资源隔离闸门：resource 类描述符由 `ResourceAction` 的 acquire/release/transfer/finalize 调用登记的类型描述符汇总，任何 `RegionAlloc` 的目标描述符落在该集合内都诊断为 `E0059`（ResourceInvariant）并阻止镜像计划；`RegionPublish`/`RegionReset` 只能作用于 `RegionAlloc` 产生的 region 指针，其隔离由 `RegionAlloc` 闸门传递保证。
 

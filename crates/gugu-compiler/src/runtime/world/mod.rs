@@ -4,11 +4,16 @@
 //! free structure 与账本只由 owner 上下文读写。跨 owner 的归还先经过 exactly-once 的
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
+mod extent_impl;
 mod resource_impl;
+
+#[cfg(test)]
+pub(crate) use extent_impl::OWNER_ARENA_BYTES;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use super::extent::{ExtentId, ExtentOccupancy, ExtentTable, TrimReport};
 use super::inbox::{
     DrainReport, DrainStop, GraceOutcome, OwnerConsumer, OwnerInbox, ServiceBudget, ShardIndex,
 };
@@ -18,12 +23,14 @@ use super::message::{
     RingCloseReason, StagedChain, flush_staging, stage_message,
 };
 use super::owner::{Allocation, RawOwner};
-use super::provider::{FakeRangeProvider, ProviderStats, RangeDescriptor, RangeProvider};
+use super::platform::FakePlatform;
+use super::provider::{ProviderStats, RangeDescriptor, RangeProvider};
 use super::resource::{self, ReleaseRegistry, ReleaseTicket, ResourceCellTable};
 use super::size_class::{RuntimeSizeClassId, RuntimeSizeClassTable};
 use super::slab::{
-    Epoch, MemoryDomainId, OwnerAccounting, OwnerDirectory, OwnerToken, RawInvariant, RawSlot,
-    Resolution, RuntimeSeed, SlabDescriptorId, SlabGeneration, SlabTable, SlotState,
+    Epoch, MemoryDomainId, OwnerAccounting, OwnerDirectory, OwnerId, OwnerToken, RawInvariant,
+    RawSlot, Resolution, RuntimeSeed, SlabDescriptorId, SlabGeneration, SlabState, SlabTable,
+    SlotState,
 };
 
 /// owner retire 的结果。
@@ -37,6 +44,8 @@ pub(crate) struct RetireReport {
     pub(crate) grace: GraceOutcome,
     /// 回收的 span 数量。
     pub(crate) reclaimed_spans: u32,
+    /// 因 lease、slot、在途 return 或 grace 门禁未通过而保留 committed 的 span 数量。
+    pub(crate) blocked_spans: u32,
 }
 
 /// 资源分配的 payload 形状；kind 与对齐只作登记，不进入用户可见类型。
@@ -52,7 +61,9 @@ pub(crate) struct ResourceShape {
 pub(crate) struct RawWorld {
     classes: RuntimeSizeClassTable,
     resource_classes: RuntimeSizeClassTable,
-    provider: FakeRangeProvider,
+    provider: FakePlatform,
+    /// 全部 owner 的 extent 阶梯；平台 range 只经它暴露给 slab 层。
+    extents: ExtentTable,
     /// raw 与 resource 共享的 slab 描述符表；descriptor id 全局唯一。
     table: SlabTable,
     directory: OwnerDirectory,
@@ -68,6 +79,12 @@ pub(crate) struct RawWorld {
     domain_owner: OwnerToken,
     /// 已完成消费但尚未过 queue-page grace 的 node；在 grace 之后才允许复用。
     graced_nodes: Vec<ReturnNodeId>,
+    /// 已过归还线性化点、正在等 queue-page grace 的 extent 及其账本 owner。
+    ///
+    /// grace 按 epoch 累积，跨多次 owner service 推进；记录在这里使等待中的 extent 不需要重新
+    /// 发布消息，也不会因为一次未走完就丢失归还。owner 与 extent 一起记录：归还完成后描述符
+    /// 槽位会被复用，届时就无法再从 extent 反查账本归属。
+    pending_extent_trims: Vec<(ExtentId, OwnerId)>,
     /// 与 slab descriptor 平行的 ResourceCell header。
     cells: ResourceCellTable,
     /// 统一 release 入口的 glue 与描述符目录。
@@ -108,10 +125,11 @@ impl RawWorld {
             inboxes.push(Arc::new(OwnerInbox::new(super::OWNER_INBOX_SHARDS)));
             consumers.push(OwnerConsumer::new(super::OWNER_INBOX_SHARDS));
         }
-        Ok(Self {
+        let mut world = Self {
             classes,
             resource_classes,
-            provider: FakeRangeProvider::new(u64::from(u32::MAX)),
+            provider: FakePlatform::new(super::PlatformProfile::Linux, u64::from(u32::MAX)),
+            extents: ExtentTable::new(),
             table: SlabTable::new(),
             directory,
             owners: owner_list,
@@ -125,10 +143,20 @@ impl RawWorld {
             epoch: Epoch::from_raw(0),
             domain_owner,
             graced_nodes: Vec::new(),
+            pending_extent_trims: Vec::new(),
             cells: ResourceCellTable::new(),
             registry,
             release_queue: VecDeque::new(),
-        })
+        };
+        // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
+        // 地址，物理页在 extent 被发放时按页提交。
+        for owner in 0..owners {
+            let token = world.owners[owner as usize].token();
+            world.open_arena(owner, token, MemoryDomainId::RUNTIME_RAW)?;
+            let resource_token = world.resource_owners[owner as usize].token();
+            world.open_arena(owner, resource_token, MemoryDomainId::RESOURCE)?;
+        }
+        Ok(world)
     }
 
     /// 返回 owner 数量。
@@ -237,10 +265,15 @@ impl RawWorld {
         let codec = self.link_codec.clone();
         let provider = &mut self.provider;
         let table = &mut self.table;
+        let extents = &mut self.extents;
         let slab_epoch = self.epoch;
+        let extent_class = super::owner::span_extent_class();
         self.owners[owner as usize].allocate(
+            owner,
             &class,
+            extent_class,
             table,
+            extents,
             provider,
             &codec,
             accounting,
@@ -468,14 +501,19 @@ impl RawWorld {
         };
         let mut forwarded = 0_u32;
         let mut consumed = 0_u32;
+        let mut extent_returns = 0_u32;
+        // 先推进上一轮留在 grace 等待里的归还；它们已经过了线性化点，只差 epoch 计步。
+        extent_returns += self.advance_pending_extent_trims()?;
         for node in snapshot.nodes() {
             let message_id = *node;
-            let descriptor_id = self.pool.descriptor_of(message_id);
-            let descriptor = self.descriptor(descriptor_id)?.clone();
-            let message = self
-                .pool
-                .load(message_id, descriptor.class, descriptor.generation);
+            let message = self.load_return_message(message_id)?;
             let resource = message.kind == ReturnKind::ResourceRelease;
+            if message.kind == ReturnKind::Extent {
+                // 上面的载入键分支已经解析过 extent；这里只消费已经过校验的消息。
+                extent_returns += u32::from(self.service_extent_return(owner, &message)?);
+                self.graced_nodes.push(message_id);
+                continue;
+            }
             let token = if resource { resource_token } else { raw_token };
             if self.pool.owner_id_of(message_id) != token.owner_id {
                 return Err(RawInvariant::new("消息投递到非目标 owner 的 inbox"));
@@ -484,6 +522,7 @@ impl RawWorld {
             {
                 return Err(RawInvariant::new("return message integrity 校验失败"));
             }
+            let descriptor = self.descriptor(message.descriptor)?.clone();
             if message.bytes != descriptor.slot_stride {
                 return Err(RawInvariant::new(
                     "return message 的 bytes 与 class stride 不一致",
@@ -578,6 +617,7 @@ impl RawWorld {
             items: snapshot.nodes().len() as u32,
             bytes: snapshot.bytes(),
             forwarded,
+            extent_returns,
             stop: snapshot.stop(),
         })
     }
@@ -705,6 +745,7 @@ impl RawWorld {
                 consumed,
                 grace,
                 reclaimed_spans: 0,
+                blocked_spans: 0,
             });
         }
         let reclaimed = self.reclaim(owner)?;
@@ -714,33 +755,68 @@ impl RawWorld {
             forwarded,
             consumed,
             grace: GraceOutcome::Converged,
-            reclaimed_spans: reclaimed,
+            reclaimed_spans: reclaimed.trimmed,
+            blocked_spans: reclaimed.blocked_count(),
         })
     }
 
-    fn reclaim(&mut self, owner: u32) -> Result<u32, RawInvariant> {
+    /// 回收一个 owner 的空闲 span：逐 extent 通过 lease 与 grace 门禁后撤销物理页。
+    ///
+    /// 被门禁拒绝的 extent 保持 committed，本次不回收，并把原因记进 `RetireReport`；下一次
+    /// retire 或 pressure trim 会重新尝试。绝不因为「看起来空闲」就撤销仍被 allocator、
+    /// scanner 或 forwarder 使用的页。
+    fn reclaim(&mut self, owner: u32) -> Result<TrimReport, RawInvariant> {
         let token = self.owners[owner as usize].token();
-        let mut reclaimed = 0_u32;
-        let mut ranges = Vec::new();
-        for descriptor in self.table.descriptors() {
-            if descriptor.owner == token && descriptor.live == 0 && descriptor.queued == 0 {
-                ranges.push(descriptor.range);
-            }
-        }
-        let bytes: u64 = ranges
+        let mut report = TrimReport::default();
+        let candidates: Vec<_> = self
+            .table
+            .descriptors()
             .iter()
-            .filter_map(|range| self.provider.describe(*range))
-            .map(|range| range.bytes)
-            .sum();
-        for range in ranges {
-            self.provider.decommit(range)?;
-            self.provider.release(range)?;
-            reclaimed += 1;
+            .enumerate()
+            .filter_map(|(index, descriptor)| {
+                if descriptor.owner != token || descriptor.state == SlabState::Released {
+                    return None;
+                }
+                Some((
+                    SlabDescriptorId::from_raw(u32::try_from(index).ok()?),
+                    descriptor.extent,
+                    descriptor.live,
+                    descriptor.queued,
+                    descriptor.pending_returns,
+                    descriptor.committed_bytes,
+                ))
+            })
+            .collect();
+        for (descriptor, extent, live, queued, pending_returns, bytes) in candidates {
+            if live != 0 || queued != 0 {
+                continue;
+            }
+            let occupancy = ExtentOccupancy {
+                live_slots: live,
+                queued_slots: queued,
+                pending_returns,
+            };
+            match self.poll_trim_extent(extent, occupancy)? {
+                Ok(_) => {}
+                Err(blocked) => {
+                    report.blocked.push((extent, blocked));
+                    continue;
+                }
+            }
+            if let Some(accounting) = self.directory.accounting_mut(token.owner_id) {
+                accounting.release(bytes);
+            }
+            // 物理页已经撤销：descriptor 必须同时离开 committed 口径，否则账本分类之和与
+            // committed 不再相等。编号保留但永不复用，state 使二次 reclaim 不再把它当候选。
+            let record = self
+                .table
+                .descriptor_mut(descriptor)
+                .ok_or_else(|| RawInvariant::new("回收 raw extent 缺少 descriptor"))?;
+            record.state = SlabState::Released;
+            record.committed_bytes = 0;
+            report.trimmed += 1;
         }
-        if let Some(accounting) = self.directory.accounting_mut(token.owner_id) {
-            accounting.release(bytes);
-        }
-        Ok(reclaimed)
+        Ok(report)
     }
 
     /// 通过 queue-page grace 并复用已消费的 message node。

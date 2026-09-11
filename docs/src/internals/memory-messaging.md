@@ -303,9 +303,11 @@ Gugu 采用以下范围层级，替代常规路径上的共享全局 free list�
 1. `ProcessorRangeCache`：每个 logical processor 持有少量已 commit 的 span/extent。
 2. `DomainRange`：NUMA/domain owner 持有可分割和可合并的范围。
 3. `GlobalRange`：只处理 processor/domain cache miss、topology 变化和启动/退出。
-4. `PlatformRange`：封装 reserve、commit、decommit、release、guard page 和低内存通知。
+4. `PlatformRange`：封装 reserve、commit、decommit、release、guard page、wait/wake、entropy、zero、dump policy、huge-page hint 和低内存通知。
 
-每一层只把整批 span/extent 交给下一层。普通小对象分配不会逐对象调用 platform adapter。
+每一层只把整批 span/extent 交给下一层。普通小对象分配不会逐对象调用 platform adapter。owner 的每个 memory domain 持有自己的 extent arena：arena 只做一次 `reserve_aligned`，之后全部块从 arena 的二次幂 buddy 阶梯里切出，`commit`/`decommit` 以页为粒度作用在 arena range 的子区间上。slab 层只看到 `ExtentId`，永远看不到平台 range。
+
+平台 adapter 的固定操作集合、range 状态迁移、extent class 阶梯与失败映射由 compiler 持有的 `PlatformRangeSchemaV1` 契约固定，`std.platform` 的每个 Gugu 入口对应契约目录中的一项；契约 verifier 拒绝 Linux 与 Windows 之间的失败映射漂移。
 
 ### Gugu 固有布局
 
@@ -331,7 +333,8 @@ Gugu 采用以下范围层级，替代常规路径上的共享全局 free list�
 - virtual range 可以预留但不立即 commit；commit 以连续页批量执行。
 - 小对象每次释放不触发 decommit；decommit 只在 span/extent 长期空闲、memory pressure 或 owner/domain trim 时发生。
 - stack guard page 和 metadata guard page 永不作为普通 payload 返回。
-- decommit 必须在所有 allocator、scanner、forwarder lease 和 queue-page grace 完成后执行。
+- decommit 必须在所有 allocator、scanner、forwarder lease 和 queue-page grace 完成后执行。四条门禁是：三路 lease 全部归零、extent 上没有 live/queued slot、没有在途 return 消息、grace 已走完固定步数；任一条不成立时 range 保持 committed，诊断点名未满足的条件。
+- 跨 owner 归还 extent 只发布携带 extent 编号的 `ReturnKind::Extent` 消息；归还的线性化点在 producer 侧，lease 未归零时拒绝且不改变状态，grace 未走完时消息被消费但 extent 留在 `ReturnQueued` 由后续 owner service 继续推进，因此同一 extent 不可能被归还两次。
 - platform failure 映射为 `OutOfMemory`、`ResourceExhausted` 或 `RuntimeInvariant`；不能把 commit 失败当作空闲 range。
 - 2 MiB huge-page hint 可以作为平台 profile，但不能成为正确性或固定延迟保证。
 

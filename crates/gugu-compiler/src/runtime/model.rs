@@ -8,7 +8,10 @@
 use serde::{Deserialize, Serialize};
 
 use super::inbox::ServiceBudget;
+use super::ledger::LedgerSchemaV1;
 use super::message::{BatchLimits, RETURN_NODE_ALIGN, RETURN_NODE_BYTES};
+use super::platform::PlatformProfile;
+use super::platform_schema::{PlatformRangeDemand, PlatformRangeSchemaV1};
 use super::resource::{self, RESOURCE_KINDS};
 use super::size_class::{DropScanPolicy, RuntimeSizeClassTable};
 use super::slab::MemoryDomainId;
@@ -21,8 +24,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的 schema 版本；schema 2 并入 ResourceCell 资源段。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 2;
+/// 契约对象的 schema 版本；schema 3 并入 PlatformRange 平台段与账本分区。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 3;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -317,9 +320,10 @@ pub(crate) struct RuntimeRawContractV1 {
     resource_classes: RuntimeSizeClassTable,
     message: MessageSchemaV1,
     resources: ResourceSchemaV1,
+    platform: PlatformRangeSchemaV1,
+    ledger: LedgerSchemaV1,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
-    ledger_categories: Vec<String>,
     grace_steps: u32,
     fingerprint: [u8; 32],
 }
@@ -334,11 +338,13 @@ impl RuntimeRawContractV1 {
         policy: RawPlanePolicyV1,
         mut demand: RawPlaneDemand,
         mut resource_demand: RawResourceDemand,
+        profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
         let resource_classes = RuntimeSizeClassTable::resource_ladder()?;
         demand.message_nodes = policy.shards * policy.limits.items;
         resource_demand.kinds = RESOURCE_KINDS.len() as u32;
+        let platform = PlatformRangeSchemaV1::build(profile, platform_range_demand(&demand))?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -347,12 +353,10 @@ impl RuntimeRawContractV1 {
             resource_classes,
             message: MessageSchemaV1::runtime_raw(),
             resources: ResourceSchemaV1::fixed(),
+            platform,
+            ledger: LedgerSchemaV1::fixed(),
             demand,
             resource_demand,
-            ledger_categories: LEDGER_CATEGORIES
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect(),
             grace_steps: GRACE_STEPS,
             fingerprint: [0; 32],
         };
@@ -421,9 +425,24 @@ impl RuntimeRawContractV1 {
         &self.demand
     }
 
+    /// 返回平台范围契约段。
+    pub(crate) const fn platform(&self) -> &PlatformRangeSchemaV1 {
+        &self.platform
+    }
+
+    /// 返回平台范围需求视图。
+    pub(crate) const fn platform_demand(&self) -> &PlatformRangeDemand {
+        &self.platform.demand
+    }
+
+    /// 返回账本契约段。
+    pub(crate) const fn ledger(&self) -> &LedgerSchemaV1 {
+        &self.ledger
+    }
+
     /// 返回账本分类名。
-    pub(crate) fn ledger_categories(&self) -> &[String] {
-        &self.ledger_categories
+    pub(crate) fn ledger_categories(&self) -> Vec<String> {
+        self.ledger.names()
     }
 
     /// 返回 queue-page grace 的步骤数。
@@ -536,13 +555,11 @@ impl RuntimeRawContractV1 {
         if self.grace_steps != GRACE_STEPS {
             return Err(RawModelError::new("queue-page grace 步骤数与契约不一致"));
         }
-        let expected: Vec<String> = LEDGER_CATEGORIES
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect();
-        if self.ledger_categories != expected {
-            return Err(RawModelError::new("账本分类集合与契约不一致"));
+        self.platform.verify()?;
+        if self.platform.demand != platform_range_demand(&self.demand) {
+            return Err(RawModelError::new("平台范围需求与 plane 需求视图不一致"));
         }
+        self.ledger.verify()?;
         if self.demand.message_nodes != self.policy.shards * self.policy.limits.items {
             return Err(RawModelError::new(
                 "常驻 message node 容量低于 shard 与 batch 上限的乘积",
@@ -578,6 +595,8 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.resource_classes.canonical_bytes());
         bytes.extend_from_slice(&self.message.canonical_bytes());
         bytes.extend_from_slice(&self.resources.canonical_bytes());
+        bytes.extend_from_slice(&self.platform.canonical_bytes());
+        bytes.extend_from_slice(&self.ledger.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -591,10 +610,6 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.demand.owners.to_le_bytes());
         bytes.extend_from_slice(&self.demand.message_nodes.to_le_bytes());
         bytes.extend_from_slice(&self.grace_steps.to_le_bytes());
-        for category in &self.ledger_categories {
-            bytes.extend_from_slice(category.as_bytes());
-            bytes.push(0);
-        }
         bytes
     }
 
@@ -647,8 +662,20 @@ impl RuntimeRawContractV1 {
         for field in &self.message().fields {
             output.push_str(&format!("message {} {}\n", field.name, field.kind.name()));
         }
-        for category in self.ledger_categories() {
-            output.push_str(&format!("ledger {category}\n"));
+        for partition in &self.ledger().partitions {
+            output.push_str(&format!(
+                "ledger-partition {} plane={} total={} members={}\n",
+                partition.name,
+                partition.plane.name(),
+                partition.total,
+                partition.categories.join(",")
+            ));
+        }
+        for category in &self.ledger().categories {
+            output.push_str(&format!(
+                "ledger {} partition={} residual={} counter={}\n",
+                category.name, category.partition, category.residual, category.counter
+            ));
         }
         let demand = self.demand();
         output.push_str(&format!(
@@ -720,17 +747,83 @@ impl RuntimeRawContractV1 {
                 class.policy
             ));
         }
+        let platform = self.platform();
+        output.push_str(&format!(
+            "platform schema={} profile={} page={} huge-page={} guard={} mapping-limit={} zero-on-commit={} entropy={} entropy-available={} dump={} huge-page-hint={} low-memory-hint={}\n",
+            platform.schema,
+            platform.profile(),
+            platform.page_bytes(),
+            platform.huge_page_bytes(),
+            platform.guard_bytes(),
+            platform.policy.mapping_limit,
+            platform.policy.commit_zeroes,
+            platform.policy.entropy_source,
+            platform.policy.entropy_available,
+            platform.dump_policy_default(),
+            platform.policy.huge_page_hint,
+            platform.policy.low_memory_hint
+        ));
+        for op in &platform.ops.ops {
+            output.push_str(&format!(
+                "range-op {} mutating={} blocking={} faults={}\n",
+                op.name,
+                op.mutating,
+                op.blocking,
+                op.fault_classes.join(",")
+            ));
+        }
+        for class in &platform.classes.classes {
+            output.push_str(&format!(
+                "extent-class bytes={} align={} huge-page={}\n",
+                class.bytes, class.alignment, class.huge_page
+            ));
+        }
+        for cost in &platform.states.costs {
+            output.push_str(&format!(
+                "range-state {} rule={} split-by-commit={}\n",
+                cost.state, cost.rule, cost.split_by_commit
+            ));
+        }
+        for transition in &platform.states.transitions {
+            output.push_str(&format!(
+                "range-transition {} -> {} on {}\n",
+                transition.from, transition.to, transition.trigger
+            ));
+        }
+        output.push_str(&format!(
+            "range-trim grace-steps={} leases=allocator,scanner,forwarder\n",
+            self.grace_steps()
+        ));
+        for entry in &platform.fault_map {
+            output.push_str(&format!(
+                "range-fault {} {} -> {}\n",
+                entry.profile, entry.error, entry.class
+            ));
+        }
+        let demand = self.platform_demand();
+        output.push_str(&format!(
+            "range-demand payload={} stack={} metadata={} guard={} owners={}\n",
+            demand.payload_extents,
+            demand.stack_extents,
+            demand.metadata_extents,
+            demand.guard_extents,
+            demand.owners
+        ));
         output
     }
 }
 
-/// 账本的互斥分类。
-pub(crate) const LEDGER_CATEGORIES: [&str; 4] = [
-    "pending-return-bytes",
-    "reclaimable-bytes",
-    "owner-cache-bytes",
-    "live-bytes",
-];
+/// 由 plane 需求视图推导平台范围需求下界。
+///
+/// 规则集中在 `PlatformRangeDemand::derive`；契约只做交叉校验，不重复定义推导。
+fn platform_range_demand(demand: &RawPlaneDemand) -> PlatformRangeDemand {
+    PlatformRangeDemand::derive(
+        demand.owners,
+        demand.coroutine_sites,
+        demand.resource_sites,
+        demand.runtime_raw_sites,
+    )
+}
 
 /// queue-page grace 的固定步骤数。
 pub(crate) const GRACE_STEPS: u32 = 4;
@@ -749,6 +842,8 @@ fn hex(bytes: &[u8]) -> String {
 pub(crate) struct RawModelInputs<'a> {
     pub(crate) target: TargetName,
     pub(crate) policy: RawPlanePolicyV1,
+    /// 平台 profile；决定平台常量、失败映射与 extent 阶梯的端点。
+    pub(crate) profile: PlatformProfile,
     pub(crate) demand: RawPlaneDemand,
     pub(crate) resource_demand: RawResourceDemand,
     /// 生成契约所依据的 LIR 输入指纹。
@@ -776,6 +871,7 @@ pub(crate) fn run(
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
     key_bytes.extend_from_slice(&inputs.placement_fingerprint);
     key_bytes.extend_from_slice(inputs.target.to_string().as_bytes());
+    key_bytes.extend_from_slice(inputs.profile.name().as_bytes());
     let key = QueryKey::new(QueryKind::RuntimeRawModel, RAW_MODEL_SCHEMA, &key_bytes);
     let mut fresh = None;
     let result: QueryResult = queries
@@ -797,6 +893,7 @@ pub(crate) fn run(
                 inputs.policy,
                 inputs.demand,
                 inputs.resource_demand,
+                inputs.profile,
             )
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");

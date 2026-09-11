@@ -33,8 +33,9 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    HarnessReport, IntrinsicBoundary, OwnerReturnHarness, ResourceReleaseHarness,
-    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
+    HarnessReport, IntrinsicBoundary, OwnerReturnHarness, PlatformRangeDemand,
+    ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource,
+    RuntimeSourceRole,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -398,6 +399,7 @@ impl Compiler {
                 policy: RawPlanePolicyV1::default(),
                 demand,
                 resource_demand,
+                profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
                 sources: &source_map,
@@ -932,6 +934,12 @@ pub struct ImagePlan {
     release_descriptor_count: u32,
     resource_sites: u32,
     release_sites: u32,
+    platform_profile: String,
+    platform_op_count: u32,
+    platform_range_class_count: u32,
+    platform_contract_fingerprint: [u8; 32],
+    platform_range_demand: PlatformRangeDemand,
+    ledger_category_count: u32,
     placement_count: u32,
     turn_region_count: u32,
     local_heap_count: u32,
@@ -987,6 +995,12 @@ impl ImagePlan {
             release_descriptor_count: plan.release_descriptor_count,
             resource_sites: plan.resource_sites,
             release_sites: plan.release_sites,
+            platform_profile: plan.platform_profile,
+            platform_op_count: plan.platform_op_count,
+            platform_range_class_count: plan.platform_range_class_count,
+            platform_contract_fingerprint: plan.platform_contract_fingerprint,
+            platform_range_demand: plan.platform_demand,
+            ledger_category_count: plan.ledger_category_count,
             placement_count: plan.placement_count,
             turn_region_count: plan.turn_region_count,
             local_heap_count: plan.local_heap_count,
@@ -1020,6 +1034,36 @@ impl ImagePlan {
     /// 返回计划使用的 rt0 边界。
     pub fn rt0(&self) -> Rt0Boundary {
         self.rt0
+    }
+
+    /// 返回平台范围适配的 profile 名。
+    pub fn platform_profile(&self) -> &str {
+        &self.platform_profile
+    }
+
+    /// 返回平台范围操作目录数量。
+    pub fn platform_op_count(&self) -> u32 {
+        self.platform_op_count
+    }
+
+    /// 返回二次幂 extent 阶梯的 class 数量。
+    pub fn platform_range_class_count(&self) -> u32 {
+        self.platform_range_class_count
+    }
+
+    /// 返回平台范围契约段的稳定指纹。
+    pub fn platform_contract_fingerprint(&self) -> [u8; 32] {
+        self.platform_contract_fingerprint
+    }
+
+    /// 返回平台范围需求下界。
+    pub fn platform_range_demand(&self) -> PlatformRangeDemand {
+        self.platform_range_demand
+    }
+
+    /// 返回内存账本的分类数量。
+    pub fn ledger_category_count(&self) -> u32 {
+        self.ledger_category_count
     }
 
     /// 返回已验证前端语义的稳定指纹，用于区分相同入口的不同程序。
@@ -1256,7 +1300,7 @@ mod tests {
         assert!(compilation.is_success());
         let plan = compilation.image_plan().expect("simple main has a plan");
         assert_eq!(plan.entry(), "main");
-        assert_eq!(plan.runtime_source_count(), 2);
+        assert_eq!(plan.runtime_source_count(), 3);
         assert_eq!(plan.rt0(), super::Rt0Boundary::LinuxSyscall);
         assert_eq!(
             compilation.action_graph().nodes()[7].status(),
@@ -1328,8 +1372,26 @@ mod tests {
             Some(ActionStatus::Complete)
         );
         let source_map = compilation.source_map();
-        assert_eq!(source_map.snapshots().len(), 1);
-        assert_eq!(source_map.snapshots()[0].logical_path(), "src/lib.gg");
+        // 用户源码之后追加 compiler 内建的 std/runtime 源单元。
+        assert_eq!(
+            source_map.snapshots().len(),
+            1 + super::runtime::RuntimeResources::builtin().sources().len()
+        );
+        // 内建源单元的路径排在用户源码之前；库 target 仍然没有可执行入口。
+        assert!(
+            source_map
+                .snapshots()
+                .iter()
+                .any(|snapshot| snapshot.logical_path() == "src/lib.gg")
+        );
+        assert!(compilation.image_plan().is_none());
+        assert!(
+            source_map
+                .snapshots()
+                .iter()
+                .any(|snapshot| snapshot.logical_path() == "std/runtime/platform.gg"),
+            "内建平台源单元必须进入源码表"
+        );
     }
 
     #[test]
@@ -1385,7 +1447,10 @@ mod tests {
         ));
 
         assert!(compilation.is_success());
-        assert_eq!(compilation.source_map().snapshots().len(), 2);
+        assert_eq!(
+            compilation.source_map().snapshots().len(),
+            2 + super::runtime::RuntimeResources::builtin().sources().len()
+        );
         assert!(compilation.image_plan().is_some());
     }
 
@@ -1434,12 +1499,32 @@ mod tests {
         assert!(plan.raw_batch_max_items() > 0);
         assert!(plan.raw_batch_soft_bytes() > 0);
         assert!(plan.raw_message_node_capacity() >= 8 * plan.raw_batch_max_items());
+        assert_eq!(plan.platform_profile(), "linux");
+        assert_eq!(plan.platform_op_count(), 13);
+        assert_eq!(
+            plan.platform_range_class_count(),
+            super::runtime::EXTENT_CLASS_LADDER.len() as u32
+        );
+        assert_eq!(plan.ledger_category_count(), 5);
+        let demand = plan.platform_range_demand();
+        assert!(demand.payload_extents >= demand.owners);
+        assert!(demand.guard_extents >= demand.stack_extents);
         assert_eq!(plan.resource_cell_header_bytes(), 64);
         assert!(plan.resource_class_count() > 0);
         assert_eq!(plan.resource_kind_count(), 5);
         assert!(plan.release_descriptor_count() >= 4);
         let dump = cold.dump_runtime().expect("契约 dump");
-        assert!(dump.contains("runtime-raw schema=2"));
+        assert!(dump.contains("runtime-raw schema=3"));
+        assert!(dump.contains("platform schema=1 profile=linux"));
+        assert!(dump.contains("range-op commit mutating=true blocking=false"));
+        assert!(dump.contains("extent-class bytes=2097152 align=2097152 huge-page=true"));
+        assert!(dump.contains("range-state committed rule=committed-bytes split-by-commit=true"));
+        assert!(dump.contains("range-trim grace-steps=4 leases=allocator,scanner,forwarder"));
+        assert!(dump.contains("range-fault linux out-of-space -> OutOfMemory"));
+        assert!(dump.contains("range-fault windows out-of-space -> OutOfMemory"));
+        assert!(dump.contains("ledger-partition runtime-committed-bytes plane=physical"));
+        assert!(dump.contains("ledger-partition address-space-reserved-bytes plane=virtual"));
+        assert!(dump.contains("ledger reserved-bytes partition=address-space-reserved-bytes"));
         assert!(dump.contains("message integrity integrity"));
         assert!(dump.contains("resource-cell leases offset=0 bytes=8"));
         assert!(dump.contains("resource-kind 0 File entry=std.resource.release"));
@@ -1473,6 +1558,16 @@ mod tests {
         );
         assert!(plan.release_sites() > 0, "GIR 必须报告 release 站点");
         assert_eq!(plan.resource_class_count(), 7);
+        assert_eq!(plan.platform_profile(), "linux");
+        assert_eq!(plan.platform_op_count(), 13);
+        assert_eq!(
+            plan.platform_range_class_count(),
+            super::runtime::EXTENT_CLASS_LADDER.len() as u32
+        );
+        assert_eq!(plan.ledger_category_count(), 5);
+        let demand = plan.platform_range_demand();
+        assert!(demand.payload_extents >= demand.owners);
+        assert!(demand.guard_extents >= demand.stack_extents);
         assert_eq!(plan.resource_cell_header_bytes(), 64);
     }
 

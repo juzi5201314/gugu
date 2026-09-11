@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use super::extent::EXTENT_CLASS_LADDER;
 use super::inbox::{DrainStop, GraceOutcome, OwnerInbox, ServiceBudget, ShardIndex};
 use super::message::{
     BatchLimits, FlushTrigger, IntegrityTag, LinkCodec, LinkError, MessageState, ProducerStaging,
@@ -18,7 +19,8 @@ use super::model::{
     RawResourceDemand, RuntimeRawContractV1,
 };
 use super::owner::AllocationLevel;
-use super::provider::{FakeRangeProvider, ProviderError, RangeProvider, RangeState};
+use super::platform::{FakePlatform, PlatformProfile};
+use super::provider::{ProviderError, RangeProvider, RangeState};
 use super::resource::{
     self, CloseOutcome, LeaseOutcome, ReleaseDescriptor, ReleaseFlags, ReleaseRegistry,
     ResourceCell, ResourceCellTable,
@@ -170,14 +172,15 @@ fn local_allocation_follows_fixed_order() {
     assert_eq!(world.provider_stats().rejected_requests, 0);
     let second = world.allocate(0, class).expect("第二次分配");
     assert_eq!(second.level, AllocationLevel::SpanBump);
-    assert_eq!(world.provider_stats().reserved_bytes, RAW_SLAB_PAGE_BYTES);
+    // 只有被发放的 extent 提交物理页；arena 的其余部分仍计入 range_reserved_bytes。
+    assert_eq!(world.provider_stats().committed_bytes, RAW_SLAB_PAGE_BYTES);
     world
         .local_return(0, first.slot, u64::from(descriptor_stride(&world, class)))
         .expect("本地归还成功");
     let third = world.allocate(0, class).expect("第三次分配");
     assert_eq!(third.level, AllocationLevel::FreeList);
     assert_eq!(third.slot.index, first.slot.index);
-    assert_eq!(world.provider_stats().reserved_bytes, RAW_SLAB_PAGE_BYTES);
+    assert_eq!(world.provider_stats().committed_bytes, RAW_SLAB_PAGE_BYTES);
 }
 
 fn descriptor_stride(world: &RawWorld, class: RuntimeSizeClassId) -> u32 {
@@ -205,18 +208,18 @@ fn span_exhaustion_refills_through_domain_cache() {
             .expect("归还成功");
         let _ = &allocation.slot;
     }
-    assert_eq!(world.provider_stats().reserved_bytes, RAW_SLAB_PAGE_BYTES);
+    assert_eq!(world.provider_stats().committed_bytes, RAW_SLAB_PAGE_BYTES);
     let allocation = world.allocate(0, class).expect("新 span 分配");
     assert_eq!(allocation.level, AllocationLevel::RangeRequest);
     assert_eq!(
-        world.provider_stats().reserved_bytes,
+        world.provider_stats().committed_bytes,
         RAW_SLAB_PAGE_BYTES * 2
     );
 }
 
 #[test]
 fn provider_rejects_illegal_sequences_stably() {
-    let mut provider = FakeRangeProvider::new(1 << 20);
+    let mut provider = FakePlatform::new(PlatformProfile::Linux, 1 << 20);
     assert_eq!(
         provider.reserve_aligned(0, 64, MemoryDomainId::RUNTIME_RAW),
         Err(ProviderError::ZeroBytes)
@@ -228,12 +231,19 @@ fn provider_rejects_illegal_sequences_stably() {
     let range = provider
         .reserve_aligned(4096, 64, MemoryDomainId::RUNTIME_RAW)
         .expect("预留成功");
+    assert_eq!(provider.stats().reserved_bytes, 4096);
+    assert_eq!(provider.stats().committed_bytes, 0);
     assert_eq!(provider.commit(range), Ok(()));
+    assert_eq!(provider.stats().reserved_bytes, 0);
+    assert_eq!(provider.stats().committed_bytes, 4096);
     assert_eq!(provider.commit(range), Err(ProviderError::AlreadyCommitted));
     assert_eq!(provider.decommit(range), Ok(()));
+    assert_eq!(provider.stats().reserved_bytes, 4096);
+    assert_eq!(provider.stats().committed_bytes, 0);
     assert_eq!(provider.decommit(range), Err(ProviderError::NotCommitted));
     assert_eq!(provider.release(range), Ok(()));
     assert_eq!(provider.release(range), Err(ProviderError::DoubleRelease));
+    assert_eq!(provider.stats().reserved_bytes, 0);
     let descriptor = provider.describe(range).expect("描述符存在");
     assert_eq!(descriptor.state, RangeState::Released);
     assert_eq!(
@@ -635,6 +645,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             message_nodes: 0,
         },
         RawResourceDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
     contract.verify().expect("契约必须自洽");
@@ -642,7 +653,14 @@ fn contract_rejects_address_fields_and_policy_drift() {
     assert_eq!(contract.shard_count(), OWNER_INBOX_SHARDS);
     assert_eq!(contract.batch_limits().items, super::BATCH_MAX);
     assert_eq!(contract.grace_steps(), super::model::GRACE_STEPS);
-    assert_eq!(contract.ledger_categories().len(), 4);
+    assert_eq!(contract.ledger_categories().len(), 5);
+    assert_eq!(contract.schema(), super::model::RAW_MODEL_SCHEMA);
+    assert_eq!(contract.platform().profile(), "linux");
+    assert_eq!(contract.platform().op_count(), 13);
+    assert_eq!(
+        contract.platform().class_count(),
+        EXTENT_CLASS_LADDER.len() as u32
+    );
     assert_eq!(contract.dump().contains("managed-address"), false);
 
     let mut schema = MessageSchemaV1::runtime_raw();
@@ -668,6 +686,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             drifted,
             RawPlaneDemand::default(),
             RawResourceDemand::default(),
+            PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
     );
@@ -687,6 +706,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         RawPlanePolicyV1::default(),
         demand,
         RawResourceDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
     let second = RuntimeRawContractV1::build(
@@ -694,6 +714,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         RawPlanePolicyV1::default(),
         demand,
         RawResourceDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
     assert_eq!(first.fingerprint(), second.fingerprint());
@@ -707,6 +728,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         revised,
         demand,
         RawResourceDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
     assert_ne!(first.fingerprint(), third.fingerprint());
@@ -715,6 +737,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         RawPlanePolicyV1::default(),
         demand,
         RawResourceDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
     assert_ne!(first.fingerprint(), windows.fingerprint());
@@ -1326,7 +1349,7 @@ fn resource_header_layout_is_contiguous() {
 }
 
 #[test]
-fn contract_schema_two_carries_resource_section() {
+fn contract_schema_three_carries_resource_and_platform_sections() {
     let contract = RuntimeRawContractV1::build(
         TargetName::X86_64Linux,
         RawPlanePolicyV1::default(),
@@ -1340,9 +1363,10 @@ fn contract_schema_two_carries_resource_section() {
             owners: 1,
             kinds: 0,
         },
+        PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
-    assert_eq!(contract.schema(), 2);
+    assert_eq!(contract.schema(), super::model::RAW_MODEL_SCHEMA);
     assert_eq!(
         contract.resource_class_count(),
         super::RESOURCE_CLASS_LADDER.len() as u32
@@ -1377,6 +1401,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         RawPlanePolicyV1::default(),
         RawPlaneDemand::default(),
         RawResourceDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
     let revised = RuntimeRawContractV1::build(
@@ -1387,6 +1412,7 @@ fn resource_contract_fingerprint_tracks_demand() {
             release_sites: 4,
             ..RawResourceDemand::default()
         },
+        PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
     assert_ne!(base.fingerprint(), revised.fingerprint());

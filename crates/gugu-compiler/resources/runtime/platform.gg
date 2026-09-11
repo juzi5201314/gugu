@@ -1,0 +1,69 @@
+/* Gugu 平台范围适配的源实现单元。
+ *
+ * 本模块是 `std` 的私有实现，不是 package API：非 `std` 模块不能导入它，用户源码也不能声明
+ * `std` 根。平台 adapter 的固定操作集合、二次幂 extent 阶梯、失败映射与内存账本口径由
+ * compiler 持有的 `PlatformRangeSchemaV1` 契约固定；本文件把 `std.platform.*` 原语接进 Gugu
+ * 类型系统，并按目标选择各自的平台常量与 rt0 边界。
+ *
+ * 每个入口都是薄包装：调用方必须在 `unsafe` 块内给出对齐、长度与 lease 的前置条件，包装函数
+ * 只做参数规整与平台常量的选择，不复制参照实现的行为。
+ */
+
+/// 平台范围适配的目标 profile；两个首批目标共享同一套操作与失败分类。
+pub enum PlatformProfile {
+    Linux,
+    Windows,
+}
+
+/// 平台失败的统一分类；与契约中的 `FaultClass` 逐项对应。
+pub enum PlatformFault {
+    OutOfMemory,
+    ResourceExhausted,
+    RuntimeInvariant,
+}
+
+/// 一个已预留 range 的稳定编号；编号永不复用。
+pub struct RangeId {
+    pub raw: uint,
+}
+
+/// 一个 range 的 dump policy；只影响 core dump 归属，不改变生命周期。
+pub enum DumpPolicy {
+    Excluded,
+    Included,
+}
+
+/// 平台常量与当前 profile。
+pub struct PlatformTable {
+    pub profile: PlatformProfile,
+    pub page_bytes: uint,
+    pub huge_page_bytes: uint,
+    pub guard_bytes: uint,
+    pub dump_policy_default: DumpPolicy,
+}
+
+/// 按目标选择平台常量。
+#[cfg(os = "linux")]
+pub fn table() PlatformTable = PlatformTable {
+    profile: PlatformProfile::Linux,
+    page_bytes: 4096,
+    huge_page_bytes: 2097152,
+    guard_bytes: 4096,
+    dump_policy_default: DumpPolicy::Included,
+}
+
+#[cfg(os = "windows")]
+pub fn table() PlatformTable = PlatformTable {
+    profile: PlatformProfile::Windows,
+    page_bytes: 4096,
+    huge_page_bytes: 2097152,
+    guard_bytes: 4096,
+    dump_policy_default: DumpPolicy::Included,
+}
+
+/// 安装平台 adapter 并返回平台表。
+///
+/// `#[used]` 使它成为闭世界镜像的根：两个目标的镜像都会实例化它，平台调用因此进入 GIR 与
+/// LIR 的 verifier，而不依赖某个用户调用点是否出现。
+#[used]
+pub fn install() PlatformTable = table()

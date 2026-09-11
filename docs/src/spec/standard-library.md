@@ -22,6 +22,31 @@ std.build         std.hint
 
 `std.runtime` 与 `std.signal` 是公开的运行时控制和信号订阅 facade；runtime、collector、scheduler、platform 和 intrinsic 的实现模块仍是 `std` 的私有实现，不是 package API。用户不能在清单、依赖别名或源树中定义 `std`，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。
 
+`std` 的私有实现模块由工具链随 compiler 内建源树注入，与用户源码走同一条解析、cfg 与检查路径。它们不是可导入的 package API：只有 `std` 内部的模块可以互相引用，非 `std` 模块导入 `std.runtime`、`std.platform` 等实现模块一律按保留名拒绝（`E0031`）。用户源码占用内建逻辑路径同样是 `E0031`。
+
+## 平台范围与内存账本
+
+`std.platform` 是 `std` 的私有实现模块，向 runtime、collector 与调度器提供平台范围原语。它们绑定 IR 原语，只能在 `unsafe` 块内调用（`E0041`），且不接受类型实参：
+
+```text
+reserve_aligned(bytes, alignment) RangeId
+commit(range)                 decommit(range)            release(range)
+protect_guard(range)          unprotect(range)           zero(range)
+wait(word, expected) bool     wake(word, count) uint     entropy(bytes) *byte
+set_dump_policy(range, policy)                           low_memory_hint() bool
+huge_page_hint(range)
+```
+
+固定操作集合、二次幂 extent 阶梯、range 状态迁移与失败分类由 compiler 持有的 `PlatformRangeSchemaV1` 契约固定；`std.platform` 的每个入口都对应契约目录中的一项，新增操作必须同时登记契约、Gugu 源码与 GIR/LIR 原语。
+
+平台范围的生命周期是 `reserved → committed → decommitted → released`。`reserve_aligned` 只取得虚拟地址，不占物理页；`commit`/`decommit` 以平台页为粒度推进同一 range 的子区间；`release` 归还整个 range。地址只在 `reserved` 与 `committed` 期间有效，`decommitted` 与 `released` 的 range 不得解引用。
+
+每个 owner 在每个 memory domain 上持有自己的 extent arena，arena 按二次幂 class 阶梯切分。`decommit` 只在四类条件同时成立时发生：allocator、scanner、forwarder 三路 lease 全部归零，extent 上没有 live 或 queued slot，没有在途 return 消息，且 queue-page grace 已走完固定步数。任一条不成立时范围保持 committed，诊断必须点名未满足的具体条件；不得因为「看起来空闲」就撤销仍被使用的页。
+
+平台失败统一映射为三个类别，Linux 与 Windows 的映射逐项一致：`OutOfMemory`、`ResourceExhausted`、`RuntimeInvariant`。同一失败在两个目标上必须落到同一类别，契约 verifier 拒绝任何 profile 之间的漂移。失败类别是诊断与恢复策略的依据，不是可捕获的异常。
+
+内存压力统计不重复计数。`range_reserved_bytes` 只统计已预留但尚未提交的虚拟地址；`runtime_committed_bytes` 只统计已提交的物理页，两者严格互斥。`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 与 `live_bytes` 是 `runtime_committed_bytes` 的互斥分类，逐项相加恰好等于它；limit 判断不得把同一物理页计入多个分类。完整字段口径见[运行时](runtime.md#runtimestats)。
+
 `std` 提供语言基座、集合、文本、格式化、I/O、文件、路径、transport 网络、进程、环境、时间、运行时控制、信号、同步、机器数值、随机、FFI、测试和构建接口。JSON、正则表达式、压缩、密码学、TLS、HTTP、WebSocket、QUIC、数据库、时区数据库、命令行框架和大文本 Rope 不属于 `std`；它们可以由官方 Registry package 提供，并独立于工具链发布。工具链自身的命令行接口见[工具链与命令行](toolchain-cli.md)。
 
 ## Prelude

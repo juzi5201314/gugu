@@ -6,8 +6,9 @@
 //! safepoint 分类的慢路径。记录完成生命周期后，只有当前执行者仍持有 slab 时才直接进入
 //! 本地 free list，否则先完成 exactly-once 的 `ReturnQueued` 状态迁移再发布 return message。
 
+use super::extent::{ExtentId, ExtentTable, class_for_bytes};
 use super::message::LinkCodec;
-use super::provider::{RangeId, RangeProvider};
+use super::provider::RangeProvider;
 use super::size_class::{RuntimeSizeClass, RuntimeSizeClassId, RuntimeSizeClassTable};
 use super::slab::{
     Epoch, OwnerAccounting, OwnerToken, RawInvariant, RawSlot, SlabDescriptorId, SlabTable,
@@ -46,18 +47,29 @@ pub(crate) struct Allocation {
     pub(crate) level: AllocationLevel,
 }
 
-/// owner domain 的 local range cache：保存已 commit、可直接切分 span 的 range。
+/// 一个已 decommit、可按 class 复用的 extent。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CachedExtent {
+    pub(crate) class: u32,
+    pub(crate) extent: ExtentId,
+}
+
+/// owner domain 的 local extent cache：保存已 decommit、可直接重新提交的 extent。
+///
+/// cache 里的 extent 仍占用虚拟地址（计入 `range_reserved_bytes`），但没有物理页；重新取用
+/// 时只提交页，不重新走 arena 的 buddy 阶梯。小对象每次释放都不触发 decommit，只有 span 长期
+/// 空闲、memory pressure 或 owner/domain trim 才把 extent 送进这里。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DomainRangeCache {
-    spans: Vec<RangeId>,
+    entries: Vec<CachedExtent>,
     committed_bytes: u64,
     refills: u32,
 }
 
 impl DomainRangeCache {
-    /// 返回尚未切分的 span 数量。
+    /// 返回缓存的 extent 数量。
     pub(crate) fn len(&self) -> usize {
-        self.spans.len()
+        self.entries.len()
     }
 
     /// 返回累计从平台补充的字节数。
@@ -70,26 +82,73 @@ impl DomainRangeCache {
         self.refills
     }
 
-    /// 从 cache 取一个已 commit 的 span。
-    pub(crate) fn take(&mut self) -> Option<RangeId> {
-        self.spans.pop()
+    /// 返回缓存的 extent 快照；用于统计与校验。
+    pub(crate) fn entries(&self) -> &[CachedExtent] {
+        &self.entries
     }
 
-    /// 用平台 range 补充 cache；`reserve_aligned` 与 `commit` 都在这里发生。
+    /// 取一个匹配 class 的已 decommit extent。
+    pub(crate) fn take(&mut self, class: u32) -> Option<ExtentId> {
+        let index = self.entries.iter().position(|entry| entry.class == class)?;
+        Some(self.entries.swap_remove(index).extent)
+    }
+
+    /// 把一个已 decommit 的 extent 放进 cache。
+    pub(crate) fn park(&mut self, class: u32, extent: ExtentId) {
+        self.entries.push(CachedExtent { class, extent });
+    }
+
+    /// 从 owner arena 取得一个 extent 并提交它的页；`reserve_aligned` 只在建 arena 时发生。
     pub(crate) fn refill(
         &mut self,
+        extents: &mut ExtentTable,
         provider: &mut dyn RangeProvider,
-        bytes: u64,
-        alignment: u64,
+        owner: u32,
+        extent_class: u32,
         domain: super::slab::MemoryDomainId,
-    ) -> Result<RangeId, RawInvariant> {
-        let range = provider.reserve_aligned(bytes, alignment, domain)?;
-        provider.commit(range)?;
-        self.spans.push(range);
+    ) -> Result<ExtentId, RawInvariant> {
+        let extent = extents.allocate(owner, extent_class, domain)?;
+        let range = extents
+            .arena_range_of(extent)
+            .ok_or_else(|| RawInvariant::new("extent 缺少所属 arena"))?;
+        let offset = extents.offset_of_id(extent);
+        let bytes = extents
+            .descriptor(extent)
+            .ok_or_else(|| RawInvariant::new("extent 描述缺失"))?
+            .bytes;
+        provider.commit_pages(range, offset, bytes)?;
         self.committed_bytes += bytes;
         self.refills += 1;
-        Ok(range)
+        Ok(extent)
     }
+
+    /// 重新提交一个已缓存的 extent。
+    pub(crate) fn recommit(
+        &mut self,
+        extents: &ExtentTable,
+        provider: &mut dyn RangeProvider,
+        extent: ExtentId,
+    ) -> Result<u64, RawInvariant> {
+        let range = extents
+            .arena_range_of(extent)
+            .ok_or_else(|| RawInvariant::new("缓存 extent 缺少所属 arena"))?;
+        let offset = extents.offset_of_id(extent);
+        let bytes = extents
+            .descriptor(extent)
+            .ok_or_else(|| RawInvariant::new("缓存 extent 描述缺失"))?
+            .bytes;
+        provider.commit_pages(range, offset, bytes)?;
+        self.committed_bytes += bytes;
+        Ok(bytes)
+    }
+}
+
+/// 返回承载一个 raw span 的 extent class 编号。
+///
+/// raw slab page 是 64 KiB，落在二次幂 extent 阶梯的中间；span 一定取得整个 extent，使同一
+/// extent 内的 slot 地址连续且对齐由 extent 自身保证。
+pub(crate) fn span_extent_class() -> u32 {
+    class_for_bytes(super::RAW_SLAB_PAGE_BYTES).expect("raw slab page 落在 extent 阶梯内")
 }
 
 /// 当前正在 bump 的 span 游标。
@@ -176,8 +235,11 @@ impl RawOwner {
     /// 本地分配：free list → span bump → domain cache → typed range request。
     pub(crate) fn allocate(
         &mut self,
+        owner: u32,
         class: &RuntimeSizeClass,
+        extent_class: u32,
         table: &mut SlabTable,
+        extents: &mut ExtentTable,
         provider: &mut dyn RangeProvider,
         codec: &LinkCodec,
         accounting: &mut OwnerAccounting,
@@ -246,35 +308,36 @@ impl RawOwner {
                 });
             }
         }
-        let (range, level) = match self.range_cache.take() {
-            Some(range) => (range, AllocationLevel::DomainCache),
+        let (extent, level) = match self.range_cache.take(extent_class) {
+            Some(extent) => {
+                let bytes = self.range_cache.recommit(extents, provider, extent)?;
+                let _ = bytes;
+                (extent, AllocationLevel::DomainCache)
+            }
             None => {
-                self.range_cache.refill(
+                let extent = self.range_cache.refill(
+                    extents,
                     provider,
-                    super::RAW_SLAB_PAGE_BYTES,
-                    u64::from(class.alignment),
+                    owner,
+                    extent_class,
                     class.domain,
                 )?;
-                let range = self
-                    .range_cache
-                    .take()
-                    .ok_or_else(|| RawInvariant::new("range cache 补充后仍无可用 span"))?;
-                (range, AllocationLevel::RangeRequest)
+                (extent, AllocationLevel::RangeRequest)
             }
         };
-        let extent = provider
-            .describe(range)
-            .ok_or_else(|| RawInvariant::new("range 描述缺失"))?
+        let extent_bytes = extents
+            .descriptor(extent)
+            .ok_or_else(|| RawInvariant::new("extent 描述缺失"))?
             .bytes;
         let descriptor = table.create(
             class,
             self.token,
-            range,
             extent,
+            extent_bytes,
             integrity_secret,
             slab_epoch,
         )?;
-        accounting.commit(extent);
+        accounting.commit(extent_bytes);
         table.transition(descriptor, 0, SlotState::Returned, SlotState::Live)?;
         let record = table
             .descriptor_mut(descriptor)

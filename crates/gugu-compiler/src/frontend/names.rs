@@ -115,7 +115,7 @@ fn validate_modules(
         .filter_map(|module| module.path.split('.').next())
         .collect::<BTreeSet<_>>();
     for module in modules {
-        if module.path.split('.').next() == Some("std") {
+        if !module.builtin && module.path.split('.').next() == Some("std") {
             diagnostics.push(Diagnostic::error(
                 DiagnosticCode::ReservedName,
                 "用户源码不能声明保留模块根 `std`",
@@ -570,6 +570,11 @@ fn collect_imports(
         .filter(|(_, module)| module.configured.module_active())
         .map(|(index, module)| (module.path.to_ascii_lowercase(), ModuleId(index as u32)))
         .collect::<BTreeMap<_, _>>();
+    let builtin: BTreeSet<String> = modules
+        .iter()
+        .filter(|module| module.builtin && module.configured.module_active())
+        .map(|module| module.path.clone())
+        .collect();
     let mut pending = Vec::new();
     for (index, module) in modules.iter().enumerate() {
         if !module.configured.module_active() {
@@ -593,6 +598,8 @@ fn collect_imports(
                 external_packages,
                 &exact,
                 &folded,
+                &builtin,
+                &module.path,
                 item.span.clone(),
                 diagnostics,
             );
@@ -662,10 +669,27 @@ fn classify_module(
     external_packages: &BTreeSet<String>,
     exact: &BTreeMap<&str, ModuleId>,
     folded: &BTreeMap<String, ModuleId>,
+    builtin: &BTreeSet<String>,
+    importer: &str,
     span: Span,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ModuleTarget> {
     let joined = path.join(".");
+    // 内建的 `std` 模块是 `std` 的私有实现：它们优先匹配为本地模块，未登记的 `std.*`
+    // 路径仍然按依赖别名处理。
+    if let Some(&module) = exact.get(joined.as_str())
+        && builtin.contains(&joined)
+    {
+        if !importer.starts_with("std.") && importer != "std" {
+            diagnostics.push(Diagnostic::error(
+                DiagnosticCode::ReservedName,
+                format!("`{joined}` 是 std 的私有实现模块，不是 package API"),
+                Some(span),
+            ));
+            return None;
+        }
+        return Some(ModuleTarget::Local(module));
+    }
     let external = path
         .first()
         .is_some_and(|root| root == "std" || external_packages.contains(root));
