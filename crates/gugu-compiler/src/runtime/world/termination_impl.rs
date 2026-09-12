@@ -6,6 +6,7 @@
 //! 报告冲刷到 `report_epoch`」收尾并恰好一次。报告只经 emergency buffer 渲染；
 //! `Terminating` 中不运行用户 defer、不接纳新协程、不再发布用户失败事件。
 
+use super::super::coroutine::{CompletionValue, CoroutineHandle};
 use super::super::inbox::ServiceBudget;
 use super::super::lifecycle::{BootSequence, Lifecycle};
 use super::super::platform::PlatformProfile;
@@ -23,6 +24,7 @@ use super::super::startup_schema::{
 };
 use super::super::termination::{self, PlanWithReports, ReportSpec, TerminationPlan};
 use super::RawWorld;
+use super::coroutine_impl::CoroutineEntry;
 
 /// `main` 入口的结局；panic 由 `main_panicked`/`complete_main_panic` 单独建模。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -61,6 +63,7 @@ pub(super) struct Rt0Process {
     spawned_user_coroutines: u32,
     defer_runs: u32,
     main_called: bool,
+    main_coroutine: Option<CoroutineHandle>,
     main_error: Option<String>,
     detached_panic: bool,
     termination_emitted: bool,
@@ -92,6 +95,7 @@ impl Rt0Process {
             spawned_user_coroutines: 0,
             defer_runs: 0,
             main_called: false,
+            main_coroutine: None,
             main_error: None,
             detached_panic: false,
             termination_emitted: false,
@@ -129,6 +133,7 @@ impl Rt0Process {
             spawned_user_coroutines: 0,
             defer_runs: 0,
             main_called: false,
+            main_coroutine: None,
             main_error: None,
             detached_panic: false,
             termination_emitted: false,
@@ -182,6 +187,7 @@ impl RawWorld {
         env: Vec<(String, String)>,
         working_directory: String,
         host_parallelism: u32,
+        main_entry: CoroutineEntry,
     ) -> Result<BootReport, RawInvariant> {
         if self.rt0.is_some() {
             return Err(RawInvariant::new("rt0 不能启动两次"));
@@ -199,6 +205,9 @@ impl RawWorld {
         match config {
             Ok(config) => {
                 self.rt0 = Some(Rt0Process::new(snapshot, config, lifecycle, boot));
+                let main = self.create_coroutine(0, main_entry, config.stack_max())?;
+                self.enter_coroutine(main)?;
+                self.rt0_mut()?.main_coroutine = Some(main);
                 Ok(BootReport {
                     started: true,
                     config: Some(config),
@@ -303,22 +312,39 @@ impl RawWorld {
     }
 
     /// 接纳一个新的用户协程；`Booting` 不运行用户函数，`Terminating` 不再启动。
-    pub(crate) fn spawn_user_coroutine(&mut self) -> Result<bool, RawInvariant> {
-        let rt0 = self.rt0_mut()?;
+    pub(crate) fn spawn_user_coroutine(
+        &mut self,
+        owner: u32,
+        entry: CoroutineEntry,
+    ) -> Result<Option<CoroutineHandle>, RawInvariant> {
+        let rt0 = self.rt0_ref()?;
         if !rt0.lifecycle.admission_open() {
-            return Ok(false);
+            return Ok(None);
         }
+        let limit = rt0.config.as_ref().expect("Running配置").stack_max();
+        let handle = self.create_coroutine(owner, entry, limit)?;
+        let rt0 = self.rt0_mut()?;
         rt0.alive_user_coroutines += 1;
         rt0.spawned_user_coroutines += 1;
-        Ok(true)
+        Ok(Some(handle))
     }
 
     /// 一个用户协程自然结束；`Waiting` 中最后一个结束后进入自然退出。
-    pub(crate) fn coroutine_finished(&mut self) -> Result<(), RawInvariant> {
-        let rt0 = self.rt0_mut()?;
-        if rt0.alive_user_coroutines == 0 {
+    pub(crate) fn coroutine_finished(
+        &mut self,
+        handle: CoroutineHandle,
+        owner: u32,
+        value: CompletionValue,
+    ) -> Result<(), RawInvariant> {
+        if self.rt0_ref()?.main_coroutine == Some(handle) {
+            return Err(RawInvariant::new("主协程必须使用main终止路径"));
+        }
+        if self.rt0_ref()?.alive_user_coroutines == 0 {
             return Err(RawInvariant::new("没有存活的用户协程可以结束"));
         }
+        let ticket = self.stage_coroutine_finish(handle, value)?;
+        self.finish_coroutine_on_system(&ticket, owner)?;
+        let rt0 = self.rt0_mut()?;
         rt0.alive_user_coroutines -= 1;
         if rt0.lifecycle.state() != LifecycleStateName::Waiting || rt0.alive_user_coroutines != 0 {
             return Ok(());
@@ -337,13 +363,18 @@ impl RawWorld {
 
     /// `main` 正常返回：仍有存活协程时进入 `Waiting`，否则直接自然收尾。
     pub(crate) fn call_main(&mut self, outcome: MainOutcome) -> Result<(), RawInvariant> {
-        let rt0 = self.rt0_mut()?;
+        let rt0 = self.rt0_ref()?;
         if rt0.main_called {
             return Err(RawInvariant::new("main 只能调用一次"));
         }
         if rt0.lifecycle.state() != LifecycleStateName::Running {
             return Err(RawInvariant::new("main 只能在 Running 中调用"));
         }
+        self.finish_main_stack(CompletionValue::Bits(u64::from(matches!(
+            outcome,
+            MainOutcome::ReturnedErr(_)
+        ))))?;
+        let rt0 = self.rt0_mut()?;
         rt0.main_called = true;
         rt0.boot.call_main();
         match outcome {
@@ -409,6 +440,11 @@ impl RawWorld {
             .pending_panic
             .take()
             .ok_or_else(|| RawInvariant::new("没有待完成的主协程 panic"))?;
+        let panic_handle = self.rt0_ref()?.ledger.next_epoch().max(1);
+        self.finish_main_stack(CompletionValue::Panic {
+            handle: panic_handle,
+            descriptor: 1,
+        })?;
         let rt0 = self.rt0_mut()?;
         if rt0.lifecycle.state() != LifecycleStateName::Running {
             return Err(RawInvariant::new("主协程 panic 只能在 Running 中完成展开"));
@@ -417,6 +453,15 @@ impl RawWorld {
             .transition(LifecycleStateName::Terminating, "termination-started")
             .map_err(RawInvariant::new)?;
         rt0.enter_termination(pending).map_err(RawInvariant::new)
+    }
+
+    fn finish_main_stack(&mut self, value: CompletionValue) -> Result<(), RawInvariant> {
+        let main = self
+            .rt0_ref()?
+            .main_coroutine
+            .ok_or_else(|| RawInvariant::new("main缺少控制块"))?;
+        let ticket = self.stage_coroutine_finish(main, value)?;
+        self.finish_coroutine_on_system(&ticket, 0)
     }
 
     /// 分离协程 panic：发布一份未处理 panic 报告；`Waiting` 中改变自然退出类别。
@@ -543,6 +588,7 @@ impl RawWorld {
         }
         self.release_graced_nodes()?;
         self.epoch = self.epoch.next();
+        self.shutdown_stacks()?;
         let rt0 = self.rt0_mut()?;
         if wait_foreign {
             // 模型中等待是确定性的：外部工作在收尾前全部完成。

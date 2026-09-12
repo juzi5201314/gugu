@@ -1,0 +1,13 @@
+fn recursive(depth: int) int {
+    if depth == 0 { 1 } else { recursive(depth - 1) + 1 }
+}
+
+fn main() {
+    let first = async recursive(3)
+    let second = async {
+        let bytes: [int; 8] = [7; 8]
+        bytes[0]
+    }
+    _ = first
+    _ = second
+}

@@ -14,7 +14,7 @@ impl Builder<'_> {
     }
 
     pub(super) fn emit_place(&mut self, id: ExprId) -> Result<Place, Diagnostic> {
-        let _ = self.emit_expr(id)?;
+        let _ = self.emit_expr_inner(id, false)?;
         if let Some(place) = self.expression_places[id.index()] {
             return Ok(place);
         }

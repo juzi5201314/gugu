@@ -3,6 +3,15 @@ use crate::frontend::ast::{BinOp, UnOp};
 
 impl Builder<'_> {
     pub(super) fn emit_expr(&mut self, id: ExprId) -> Result<Option<LocalId>, Diagnostic> {
+        self.emit_expr_inner(id, true)
+    }
+
+    /// place消费者不物化中间聚合；字段投影与借用必须保留原槽身份。
+    pub(super) fn emit_expr_inner(
+        &mut self,
+        id: ExprId,
+        materialize: bool,
+    ) -> Result<Option<LocalId>, Diagnostic> {
         if self.terminated() {
             return Ok(None);
         }
@@ -10,7 +19,11 @@ impl Builder<'_> {
             return Ok(Some(local));
         }
         if self.expression_places[id.index()].is_some() {
-            return self.value_of(id);
+            return if materialize {
+                self.value_of(id)
+            } else {
+                Ok(None)
+            };
         }
         let kind = self.owner.expressions[id.index()].kind.clone();
         match kind {
@@ -151,7 +164,11 @@ impl Builder<'_> {
             }
         }
         self.apply_adjustments(id)?;
-        self.value_of(id)
+        if materialize {
+            self.value_of(id)
+        } else {
+            Ok(self.expression_locals[id.index()])
+        }
     }
 
     /// 早期返回的表达式臂统一收尾：应用类型调整并物化值。
@@ -547,18 +564,24 @@ impl Builder<'_> {
 
     fn apply_adjustments(&mut self, id: ExprId) -> Result<(), Diagnostic> {
         let adjustments = self.owner.expressions[id.index()].adjustments.clone();
-        if adjustments.start == adjustments.end {
-            return Ok(());
-        }
-        let Some(mut local) = self.value_of(id)? else {
-            return Ok(());
-        };
         for adjustment in
             &self.owner.adjustments[adjustments.start as usize..adjustments.end as usize]
         {
-            local = self.apply_adjustment(id, local, adjustment)?;
+            if matches!(adjustment, hir::Adjustment::Dereference) {
+                let base = match self.expression_places[id.index()] {
+                    Some(place) => place,
+                    None => Place::local(self.require_value(id)?),
+                };
+                let place = self.project(base, Projection::Deref);
+                self.set_place(id, place);
+            } else {
+                let Some(local) = self.value_of(id)? else {
+                    return Ok(());
+                };
+                let local = self.apply_adjustment(id, local, adjustment)?;
+                self.set_value(id, local);
+            }
         }
-        self.set_value(id, local);
         Ok(())
     }
 
@@ -569,11 +592,7 @@ impl Builder<'_> {
         adjustment: &hir::Adjustment,
     ) -> Result<LocalId, Diagnostic> {
         match adjustment {
-            hir::Adjustment::Dereference => {
-                let place = self.project(Place::local(local), Projection::Deref);
-                self.set_place(id, place);
-                self.require_value(id)
-            }
+            hir::Adjustment::Dereference => unreachable!("Deref由place调整路径处理"),
             hir::Adjustment::ArrayToSlice(ty) => self.cast(id, local, CastKind::ArrayToSlice, *ty),
             hir::Adjustment::NeverTo(ty) => self.cast(id, local, CastKind::NeverTo, *ty),
             hir::Adjustment::Erase(ty) => {

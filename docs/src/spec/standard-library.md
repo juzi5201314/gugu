@@ -41,6 +41,8 @@ huge_page_hint(range)
 
 平台范围的生命周期是 `reserved → committed → decommitted → released`。`reserve_aligned` 只取得虚拟地址，不占物理页；`commit`/`decommit` 以平台页为粒度推进同一 range 的子区间；`release` 归还整个 range。地址只在 `reserved` 与 `committed` 期间有效，`decommitted` 与 `released` 的 range 不得解引用。
 
+保护边界可在 reservation 尚未提交时建立，不隐式提交 payload。内部 stack arena 使用首尾各一页的保护范围，逐栈分配与回收不改变 arena 内部页权限；已受保护范围不能被普通子区间 commit 重新开放。未提交保护页只计入预留虚拟容量，不能作为已提交物理页重复记账。
+
 每个 owner 在每个 memory domain 上持有自己的 extent arena，arena 按二次幂 class 阶梯切分。`decommit` 只在四类条件同时成立时发生：allocator、scanner、forwarder 三路 lease 全部归零，extent 上没有 live 或 queued slot，没有在途 return 消息，且 queue-page grace 已走完固定步数。任一条不成立时范围保持 committed，诊断必须点名未满足的具体条件；不得因为「看起来空闲」就撤销仍被使用的页。
 
 平台失败统一映射为三个类别，Linux 与 Windows 的映射逐项一致：`OutOfMemory`、`ResourceExhausted`、`RuntimeInvariant`。同一失败在两个目标上必须落到同一类别，契约 verifier 拒绝任何 profile 之间的漂移。失败类别是诊断与恢复策略的依据，不是可捕获的异常。

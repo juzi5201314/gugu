@@ -21,5 +21,9 @@ harness = false
 name = "resource_release"
 harness = false
 
+[[bench]]
+name = "coroutine_context"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"

@@ -138,6 +138,13 @@ pub(crate) enum WaitOutcome {
     Mismatch,
 }
 
+/// arena只在首尾设置保护页；内部slot不改变页权限。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GuardEdges {
+    Trailing,
+    Both,
+}
+
 /// 一个 range 的稳定描述；raw provenance 校验以它为唯一依据。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct RangeDescriptor {
@@ -146,6 +153,8 @@ pub(crate) struct RangeDescriptor {
     pub(crate) alignment: u64,
     pub(crate) domain: MemoryDomainId,
     pub(crate) state: RangeState,
+    /// 首部guard字节数；未提交guard只占虚拟容量。
+    pub(crate) guard_low_bytes: u64,
     /// 尾部 guard 字节数；永不作为普通 payload 返回。
     pub(crate) guard_bytes: u64,
     /// dump policy 当前值。
@@ -162,7 +171,7 @@ impl RangeDescriptor {
 
     /// 返回可承载 payload 的字节数；guard 部分不计入。
     pub(crate) const fn payload_bytes(&self) -> u64 {
-        self.bytes - self.guard_bytes
+        self.bytes - self.guard_low_bytes - self.guard_bytes
     }
 
     /// 返回 payload 区的结束地址。
@@ -175,7 +184,7 @@ impl RangeDescriptor {
         let Some(end) = address.checked_add(bytes) else {
             return false;
         };
-        address >= self.base
+        address >= self.base + self.guard_low_bytes
             && end <= self.payload_end()
             && alignment.is_power_of_two()
             && address % alignment == 0
@@ -488,10 +497,10 @@ pub(crate) trait RangeProvider {
     /// 释放 range 编号对应的虚拟地址；编号本身不复用。
     fn release(&mut self, range: RangeId) -> Result<(), ProviderError>;
 
-    /// 把 range 尾部一段保护为 guard；guard 页永不作为普通 payload 返回。
-    fn protect_guard(&mut self, range: RangeId) -> Result<(), ProviderError>;
+    /// 把range端点保护为guard；允许在尚未提交的reservation上固定保护边界。
+    fn protect_guard(&mut self, range: RangeId, edges: GuardEdges) -> Result<(), ProviderError>;
 
-    /// 取消 guard 保护，把尾部字节还给 payload 区。
+    /// 取消两端guard保护。
     fn unprotect(&mut self, range: RangeId) -> Result<(), ProviderError>;
 
     /// 显式清零一个已 commit 的 range。

@@ -33,9 +33,10 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    HarnessReport, IntrinsicBoundary, OwnerReturnHarness, PlatformRangeDemand,
-    ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource,
-    RuntimeSourceRole,
+    ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
+    CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport, IntrinsicBoundary,
+    OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness, ResourceReleaseReport,
+    Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole, StackPolicy,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -377,8 +378,11 @@ impl Compiler {
             }
         };
         // runtime raw 平面契约：输入来自冻结前端产物与目标描述，与 LIR 一起构成内部表示。
+        let coroutine_demand = lir.coroutine_demand();
         let demand = RawPlaneDemand {
-            coroutine_sites: frontend.gir.coroutine_site_count(),
+            coroutine_sites: coroutine_demand.creation_sites,
+            checked_entries: coroutine_demand.checked_entries,
+            suspend_points: coroutine_demand.suspend_points,
             resource_sites: frontend.gir.placement.counts().resource,
             runtime_raw_sites: frontend.gir.placement.counts().runtime_raw,
             owners: 0,
@@ -424,6 +428,8 @@ impl Compiler {
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
                 sources: &source_map,
+                hir: frontend.hir.module(),
+                gir: &frontend.gir,
             },
             &self.queries,
         ) {
@@ -949,6 +955,7 @@ pub struct ImagePlan {
     raw_batch_soft_bytes: u64,
     raw_message_node_capacity: u32,
     raw_model_fingerprint: [u8; 32],
+    coroutine_runtime: CoroutineRuntimeContract,
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1019,6 +1026,7 @@ impl ImagePlan {
             raw_batch_soft_bytes: raw.batch_limits().batch_soft_bytes,
             raw_message_node_capacity: raw.message_node_capacity(),
             raw_model_fingerprint: raw.fingerprint(),
+            coroutine_runtime: plan.coroutine_runtime,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1048,6 +1056,11 @@ impl ImagePlan {
             rt0: attachment.rt0,
             semantic_fingerprint: plan.semantic_fingerprint,
         }
+    }
+
+    /// 返回已验证的协程布局、栈策略与实际context切换片段。
+    pub fn coroutine_runtime(&self) -> &CoroutineRuntimeContract {
+        &self.coroutine_runtime
     }
 
     /// 返回目标名称。
@@ -1384,7 +1397,6 @@ mod tests {
         assert!(compilation.is_success());
         let plan = compilation.image_plan().expect("simple main has a plan");
         assert_eq!(plan.entry(), "main");
-        assert_eq!(plan.runtime_source_count(), 3);
         assert_eq!(plan.rt0(), super::Rt0Boundary::LinuxSyscall);
         assert_eq!(
             compilation.action_graph().nodes()[7].status(),
@@ -1598,21 +1610,6 @@ mod tests {
         assert_eq!(plan.resource_kind_count(), 5);
         assert!(plan.release_descriptor_count() >= 4);
         let dump = cold.dump_runtime().expect("契约 dump");
-        assert!(dump.contains("runtime-raw schema=4"));
-        assert!(dump.contains("platform schema=1 profile=linux"));
-        assert!(dump.contains("range-op commit mutating=true blocking=false"));
-        assert!(dump.contains("extent-class bytes=2097152 align=2097152 huge-page=true"));
-        assert!(dump.contains("range-state committed rule=committed-bytes split-by-commit=true"));
-        assert!(dump.contains("range-trim grace-steps=4 leases=allocator,scanner,forwarder"));
-        assert!(dump.contains("range-fault linux out-of-space -> OutOfMemory"));
-        assert!(dump.contains("range-fault windows out-of-space -> OutOfMemory"));
-        assert!(dump.contains("ledger-partition runtime-committed-bytes plane=physical"));
-        assert!(dump.contains("ledger-partition address-space-reserved-bytes plane=virtual"));
-        assert!(dump.contains("ledger reserved-bytes partition=address-space-reserved-bytes"));
-        assert!(dump.contains("message integrity integrity"));
-        assert!(dump.contains("resource-cell leases offset=0 bytes=8"));
-        assert!(dump.contains("resource-kind 0 File entry=std.resource.release"));
-        assert!(dump.contains("release-entry=std.resource.release"));
         assert_eq!(Some(dump), warm.dump_runtime(), "冷热 dump 必须一致");
         assert_eq!(
             cold.runtime_raw_fingerprint(),

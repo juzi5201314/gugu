@@ -352,6 +352,9 @@ impl RawWorld {
         &mut self,
         message_id: ReturnNodeId,
     ) -> Result<ReturnMessage, RawInvariant> {
+        if self.pool.kind_of(message_id) == ReturnKind::StackSpan {
+            return self.load_stack_return(message_id);
+        }
         if self.pool.kind_of(message_id) == ReturnKind::Extent {
             let extent = ExtentId::from_raw(self.pool.descriptor_of(message_id).raw());
             let descriptor = *self

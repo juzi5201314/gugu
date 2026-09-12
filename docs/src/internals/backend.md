@@ -82,6 +82,10 @@ sret destination在 callee执行期间视为 caller未初始化字节，不能�
 
 内部 caller-saved 为所有参数/返回寄存器、`r11` 和 `xmm0..xmm15`。内部 callee-saved 为 `rbp`、`r12`、`r13`；`r14`、`r15` 是必须保持的 runtime register。跨调用活跃值优先分配 callee-saved或 spill。C import/export thunk 把该 ABI 与 SysV/Microsoft x64 完整互换，不能让内部约定泄漏到 `extern "C"`。
 
+context switch 是单独登记的 machine-intrinsic 边界，不使用上述普通函数参数分配：`rdi` 指向待保存 context，`rsi` 指向待恢复 context，`rdx` 是新的 `CoroutineHot*`，`rcx` 是新的 `LogicalProcessor*`。switch 保存 `rsp + 8`、调用者 return PC、`rbx/rbp/r12/r13`，随后重建 `r14/r15`、恢复保存寄存器与 `rsp`，直接跳到保存的 `rip`。完成 trampoline 使用同一片段的 restore-only 入口，不写出可恢复的旧 PC。Linux/Windows 共用这套内部编码；宿主 C 验收 adapter 另行遵守其 nonvolatile 规则，不能把这套内部寄存器约定声明为 C ABI。
+
+片段的 disp8 偏移由同一 `CoroutineContext` layout 生成，`RuntimeRawModel` 携带实际代码字节与 restore 入口偏移，backend 只消费已经 verifier 校验的片段。入口 `StackCheck` 使用 `CoroutineSlot` 基址加固定 64 字节的 `stack_check`，该偏移同时由 Rust 构建时断言、Gugu record 布局和 runtime 契约校验，禁止 backend 另存一个独立数字表。
+
 普通内部调用的 panic 能力由 `Call`/`Invoke` 决定，不额外传隐式错误码。coroutine、GC 和 resource context 通过保留寄存器与显式 metadata 取得，不追加隐藏普通参数。
 
 ## instruction selection

@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::coroutine_schema::{CoroutineDemand, CoroutineRuntimeContract};
 use super::inbox::ServiceBudget;
 use super::ledger::LedgerSchemaV1;
 use super::message::{BatchLimits, RETURN_NODE_ALIGN, RETURN_NODE_BYTES};
@@ -25,8 +26,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的 schema 版本；schema 4 并入 rt0 启动、终止与报告契约段。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 4;
+/// 契约对象的schema版本；schema 5并入协程布局、stack arena与context代码。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 5;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -301,6 +302,8 @@ impl RawPlanePolicyV1 {
 pub(crate) struct RawPlaneDemand {
     /// 协程创建点数量；每个 live 协程占据一个 `CoroutineSlot` 级记录。
     pub(crate) coroutine_sites: u32,
+    pub(crate) checked_entries: u32,
+    pub(crate) suspend_points: u32,
     /// placement 判定的 resource 分配点数量。
     pub(crate) resource_sites: u32,
     /// placement 判定的 runtime raw 分配点数量。
@@ -324,6 +327,7 @@ pub(crate) struct RuntimeRawContractV1 {
     platform: PlatformRangeSchemaV1,
     ledger: LedgerSchemaV1,
     rt0: Rt0SchemaV1,
+    coroutine: CoroutineRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -360,6 +364,11 @@ impl RuntimeRawContractV1 {
             platform,
             ledger: LedgerSchemaV1::fixed(),
             rt0,
+            coroutine: CoroutineRuntimeContract::build(CoroutineDemand {
+                creation_sites: demand.coroutine_sites,
+                checked_entries: demand.checked_entries,
+                suspend_points: demand.suspend_points,
+            })?,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -448,6 +457,10 @@ impl RuntimeRawContractV1 {
     /// 返回 rt0 启动、终止与报告契约段。
     pub(crate) const fn rt0(&self) -> &Rt0SchemaV1 {
         &self.rt0
+    }
+
+    pub(crate) fn coroutine(&self) -> &CoroutineRuntimeContract {
+        &self.coroutine
     }
 
     /// 返回账本分类名。
@@ -571,6 +584,16 @@ impl RuntimeRawContractV1 {
         }
         self.ledger.verify()?;
         self.rt0.verify()?;
+        self.coroutine.verify()?;
+        if self.coroutine.demand
+            != (CoroutineDemand {
+                creation_sites: self.demand.coroutine_sites,
+                checked_entries: self.demand.checked_entries,
+                suspend_points: self.demand.suspend_points,
+            })
+        {
+            return Err(RawModelError::new("协程需求与LIR需求视图不一致"));
+        }
         if self.demand.message_nodes != self.policy.shards * self.policy.limits.items {
             return Err(RawModelError::new(
                 "常驻 message node 容量低于 shard 与 batch 上限的乘积",
@@ -609,6 +632,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.platform.canonical_bytes());
         bytes.extend_from_slice(&self.ledger.canonical_bytes());
         bytes.extend_from_slice(&self.rt0.canonical_bytes());
+        bytes.extend_from_slice(&self.coroutine.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -822,6 +846,7 @@ impl RuntimeRawContractV1 {
             demand.owners
         ));
         output.push_str(&self.rt0.dump());
+        output.push_str(&self.coroutine.dump());
         output
     }
 }
@@ -866,6 +891,8 @@ pub(crate) struct RawModelInputs<'a> {
     /// placement world 指纹。
     pub(crate) placement_fingerprint: [u8; 32],
     pub(crate) sources: &'a SourceMap,
+    pub(crate) hir: &'a crate::frontend::hir::Module,
+    pub(crate) gir: &'a crate::frontend::gir::GirWorldV1,
 }
 
 /// 通过 query 构建并校验契约对象；失败进入 `E0058`。
@@ -873,18 +900,13 @@ pub(crate) fn run(
     inputs: RawModelInputs<'_>,
     queries: &QueryEngine,
 ) -> Result<RuntimeRawContractV1, Vec<Diagnostic>> {
-    let mut key_bytes = Vec::with_capacity(4 + 8 + 8 + 32 + 32 + 198);
-    key_bytes.extend_from_slice(&inputs.policy.revision.to_le_bytes());
-    key_bytes.extend_from_slice(&inputs.policy.limits.items.to_le_bytes());
-    key_bytes.extend_from_slice(&inputs.policy.limits.batch_soft_bytes.to_le_bytes());
-    key_bytes.extend_from_slice(&inputs.resource_demand.resource_sites.to_le_bytes());
-    key_bytes.extend_from_slice(&inputs.resource_demand.acquire_sites.to_le_bytes());
-    key_bytes.extend_from_slice(&inputs.resource_demand.release_sites.to_le_bytes());
-    key_bytes.extend_from_slice(&inputs.resource_demand.transfer_sites.to_le_bytes());
-    key_bytes.extend_from_slice(&inputs.resource_demand.finalize_sites.to_le_bytes());
-    key_bytes.extend_from_slice(&inputs.resource_demand.owners.to_le_bytes());
-    key_bytes.push(u8::from(inputs.rt0_demand.entry_present));
-    key_bytes.push(u8::from(inputs.rt0_demand.main_returns_result));
+    let mut key_bytes = serde_json::to_vec(&(
+        inputs.policy,
+        inputs.demand,
+        inputs.resource_demand,
+        inputs.rt0_demand,
+    ))
+    .expect("runtime需求与策略可序列化");
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
     key_bytes.extend_from_slice(&inputs.placement_fingerprint);
     key_bytes.extend_from_slice(inputs.target.to_string().as_bytes());
@@ -894,7 +916,11 @@ pub(crate) fn run(
     let result: QueryResult = queries
         .compute(key, |context| {
             context.record_dependency(
-                QueryKey::new(QueryKind::BuildLir, 2, inputs.lir_fingerprint),
+                QueryKey::new(
+                    QueryKind::BuildLir,
+                    crate::lir::SCHEMA,
+                    inputs.lir_fingerprint,
+                ),
                 inputs.lir_fingerprint,
             );
             context.record_dependency(
@@ -914,6 +940,8 @@ pub(crate) fn run(
                 inputs.profile,
             )
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
+                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
             fresh = Some(contract);
             Ok((bytes, Vec::new()))
@@ -937,6 +965,8 @@ pub(crate) fn run(
     };
     contract
         .verify()
+        .map_err(|error| vec![error.diagnostic()])?;
+    super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     let _ = inputs.sources;
     Ok(contract)

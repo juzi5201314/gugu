@@ -1,0 +1,136 @@
+/* 协程控制块的Gugu定义；与compiler runtime layout query逐字段交叉校验。
+ * atomic字段的存储车道固定为uint，读改写由登记的machine intrinsic执行。
+ * 这里只在取得owner/scan所有权后读写普通字段，不能把uint读写当作跨worker同步。
+ */
+
+#[repr(C, align(64))]
+pub struct CoroutineHot {
+    pub state: uint,
+    pub run_link_next: *CoroutineHot,
+    pub current_processor: *(),
+    pub preferred_processor: *(),
+    pub preferred_processor_id: uint,
+    pub wait_word: uint,
+    pub cold_index: uint,
+    pub run_batch_len: byte,
+    pub reserved: [byte; 7],
+}
+
+#[repr(C, align(64))]
+pub struct StackDescriptor {
+    pub stack_check: uint,
+    pub stack_low: uint,
+    pub stack_high: uint,
+    pub capacity: uint,
+    pub recent_high_water: uint,
+    pub last_grow_gc_epoch: u32,
+    pub low_use_gc_cycles: byte,
+    pub flags: byte,
+    pub reserved: u16,
+    pub padding: [byte; 16],
+}
+
+#[repr(C, align(64))]
+pub struct CoroutineSlot {
+    pub hot: CoroutineHot,
+    pub stack: StackDescriptor,
+}
+
+#[repr(C)]
+pub struct CoroutineContext {
+    pub rsp: uint,
+    pub rip: uint,
+    pub rbx: uint,
+    pub rbp: uint,
+    pub r12: uint,
+    pub r13: uint,
+}
+
+#[repr(C, align(16))]
+pub struct MorestackScratch {
+    pub return_pc: uint,
+    pub gpr: [uint; 9],
+    pub xmm: [[byte; 16]; 8],
+}
+
+#[repr(C)]
+pub struct RuntimeRecordRef {
+    pub index: uint,
+    pub generation: uint,
+}
+
+#[repr(C)]
+pub struct ForeignBridgeState {
+    pub mode: uint,
+    pub call_stub: uint,
+    pub frame_offset: uint,
+    pub frame_size: uint,
+    pub lease_word: uint,
+    pub dirty_link: uint,
+    pub bridge_credit: uint,
+    pub error_state: uint,
+}
+
+#[repr(C)]
+pub struct CompletionRecord {
+    pub status: uint,
+    pub payload: uint,
+    pub descriptor: uint,
+    pub join_leases: uint,
+}
+
+#[repr(C, align(64))]
+pub struct CoroutineCold {
+    pub id: uint,
+    pub context: CoroutineContext,
+    pub morestack_scratch: MorestackScratch,
+    pub wait_record: [uint; 4],
+    pub foreign_bridge: ForeignBridgeState,
+    pub join_state: CompletionRecord,
+    pub coroutine_locals: RuntimeRecordRef,
+    pub panic_state: RuntimeRecordRef,
+    pub select_rng: [uint; 4],
+    pub select_scratch: [uint; 4],
+    pub gc_scan_epoch: uint,
+}
+
+/// 栈策略错误由rt0提升为不可捕获的StackOverflow，不进入用户Result通道。
+pub enum StackFailure { Overflow }
+
+fn class_ceil(required: uint, limit: uint) Result[uint, StackFailure] {
+    let capacity: uint = 512
+    while capacity < required {
+        if capacity > limit / 2 { return Err(StackFailure::Overflow) }
+        capacity = capacity * 2
+    }
+    if capacity > limit { return Err(StackFailure::Overflow) }
+    Ok(capacity)
+}
+
+/// 调用者传入compiler entry descriptor记录的完整frame与leaf reserve。
+#[used]
+pub fn initial_capacity(entry_required: uint, limit: uint) Result[uint, StackFailure] {
+    if limit < 512 || entry_required > limit - 512 { return Err(StackFailure::Overflow) }
+    let required = entry_required + 512
+    class_ceil(if required < 2048 { 2048 } else { required }, limit)
+}
+
+#[used]
+pub fn growth_capacity(old: uint, used: uint, frame: uint, limit: uint) Result[uint, StackFailure] {
+    if limit < 512 || old > limit / 2 || used > limit - 512 || frame > limit - 512 - used {
+        return Err(StackFailure::Overflow)
+    }
+    let capacity = old * 2
+    let required = used + frame + 512
+    if capacity < required { capacity = required }
+    if capacity < 2048 { capacity = 2048 }
+    class_ceil(capacity, limit)
+}
+
+/// owner/scan lock持有者访问普通stack bounds；poll快路径使用独立atomic intrinsic。
+#[used]
+pub fn stack_bounds(slot: &CoroutineSlot) (uint, uint) = (slot.stack.stack_low, slot.stack.stack_high)
+
+/// context只在release发布后由acquire接手者读取。
+#[used]
+pub fn saved_context(cold: &CoroutineCold) &CoroutineContext = &cold.context

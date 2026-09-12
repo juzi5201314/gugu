@@ -111,6 +111,14 @@ fn proof_statuses(
     let mut statuses = Vec::new();
     for (owner_index, owner) in output.hir.module().owners.iter().enumerate() {
         for check in &owner.checks {
+            let location = &owner.expressions[check.expression.index()].location;
+            let path = &output.hir.module().sources
+                [usize::try_from(location.source).expect("source下标")]
+            .path;
+            // 保留全部输入模块的检查；内建runtime有自己的检查，不能混入本fixture的期望序列。
+            if !sources.iter().any(|(input, _)| *input == path) {
+                continue;
+            }
             let key = crate::frontend::analysis::RuntimeCheckKey {
                 owner_index: owner_index as u32,
                 expression: check.expression,

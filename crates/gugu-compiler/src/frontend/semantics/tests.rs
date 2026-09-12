@@ -345,15 +345,32 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     // 证明链冷热一致；无符号移位量的类型边界可证明非负，未知切片边界仍需检查。
     assert_eq!(cold.analysis, warm.analysis);
     assert_eq!(cold.hir.module().owners, warm.hir.module().owners);
+    let user_module = warm
+        .modules
+        .iter()
+        .position(|module| {
+            warm.hir.module().sources
+                [usize::try_from(module.file.source.as_u32()).expect("source下标")]
+            .path
+                == "main.gg"
+        })
+        .expect("被测输入模块");
     let checks: Vec<_> = warm
         .semantics
         .bodies
         .iter()
+        .filter(|body| body.definition.module == user_module)
         .flat_map(|body| body.runtime_checks.iter().map(|check| &check.kind))
         .collect();
     let mut proofs = Vec::new();
     for (owner_index, owner) in warm.hir.module().owners.iter().enumerate() {
         for check in &owner.checks {
+            let location = &owner.expressions[check.expression.index()].location;
+            if warm.hir.module().sources[usize::try_from(location.source).expect("source下标")].path
+                != "main.gg"
+            {
+                continue;
+            }
             let key = crate::frontend::analysis::RuntimeCheckKey {
                 owner_index: owner_index as u32,
                 expression: check.expression,
@@ -395,12 +412,13 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     assert_eq!(division_ty, &super::model::Ty::int());
     assert_eq!(shift_ty, &super::model::Ty::int());
     let model = super::model::Model::new(&warm.modules, &warm.names).unwrap();
-    assert_eq!(model.constant_int(0, *divisor).unwrap(), 0);
+    assert_eq!(model.constant_int(user_module, *divisor).unwrap(), 0);
     let operand_type = |expression| {
         &warm
             .semantics
             .bodies
             .iter()
+            .filter(|body| body.definition.module == user_module)
             .flat_map(|body| &body.expressions)
             .find(|(id, _)| *id == expression)
             .unwrap()

@@ -121,6 +121,8 @@ match r {
 
 每个子协程只有一个完成记录：正常返回保存 `Ok(T)`，panic 展开完成保存 `Err(Panic)`。任意 `Join.wait()` 都从记录产生对应的语义值；第一次成功读取 `Err` 即把 panic 标记为已处理，重复读取不重复打印，也不改变退出类别。
 
+完成记录的寿命独立于协程栈。协程先完成自己的 defer，将完整返回值或 panic payload 按值传递规则发布为受追踪的完成记录，再归还旧栈；保留或复制 `Join` 只能延长该记录与结果的寿命。记录不能保留指向已归还栈的引用，重复读取仍须执行结果类型规定的语义复制。
+
 分离协程 panic 时打印一份未处理 panic 报告并结束该协程；主协程仍运行时不因此立即终止进程。主协程已经返回、runtime 正在 `Waiting` 时，分离协程 panic 会把自然退出类别改为 `UnhandledPanic`。主协程 panic 立即终止进程。展开期间 defer 再 panic 属于 `PanicDuringUnwind` fatal。
 
 `Panic` 是预导入 lang item，用户不能再定义同名类型：
@@ -156,6 +158,8 @@ fatal 是 runtime 无法安全恢复的进程级故障。fatal 不进入 `Panic`
 allocation debt 只影响自动 collection 的节奏；memory limit 触发的 drain、emergency sweep、decommit 和 `OutOfMemory` 规则不受 `GcTarget::Off` 关闭。具体 debt 公式和 pressure hysteresis 见[内存所有权与消息通道](../internals/memory-messaging.md#allocation-debtpressure-与-backpressure)。
 
 栈增长失败与栈上限的区分是：请求超过逻辑上限属于 `StackOverflow`；请求未超过上限但 runtime 页面分配失败属于 `OutOfMemory`。runtime 栈保护和 emergency report 缓冲区不得依赖当前用户栈仍然可写。
+
+初始栈分配与增长使用同一逻辑上限，尺寸阶梯向上取整后的容量也不得超过上限。诊断 guard 不提供相邻协程之间的隔离；合法 managed code 的栈边界由函数入口检查保证，guard fault 不能变成可捕获的 panic。栈复制保留活跃帧与精确登记的栈内引用，不得把原始指针按数值猜测成需要重定位的引用。
 
 ## 诊断、回溯与报告
 

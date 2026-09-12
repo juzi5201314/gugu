@@ -13,8 +13,8 @@
 //! 都可重现。
 
 use super::provider::{
-    CommitBitmap, DumpPolicy, FAKE_RANGE_BASE, FaultClass, ProviderError, ProviderStats,
-    RangeDescriptor, RangeId, RangeProvider, RangeState, WaitOutcome, WaitWordId,
+    CommitBitmap, DumpPolicy, FAKE_RANGE_BASE, FaultClass, GuardEdges, ProviderError,
+    ProviderStats, RangeDescriptor, RangeId, RangeProvider, RangeState, WaitOutcome, WaitWordId,
 };
 use super::slab::{MemoryDomainId, RuntimeSeed};
 use crate::target::{OperatingSystem, TargetName};
@@ -254,8 +254,11 @@ impl FakePlatform {
             let committed_bytes = self.commits[index].committed_pages() * page;
             committed += committed_bytes;
             reserved += range.bytes - committed_bytes;
-            if self.commits[index].committed_pages() != 0 {
-                guarded += range.guard_bytes;
+            for guard_page in 0..range.guard_low_bytes / page {
+                guarded += u64::from(self.commits[index].is_committed(guard_page)) * page;
+            }
+            for guard_page in (range.bytes - range.guard_bytes) / page..range.bytes / page {
+                guarded += u64::from(self.commits[index].is_committed(guard_page)) * page;
             }
         }
         self.stats.reserved_bytes = reserved;
@@ -292,14 +295,22 @@ impl RangeProvider for FakePlatform {
         if !alignment.is_power_of_two() {
             return Err(self.reject(ProviderError::NonPowerOfTwoAlignment));
         }
-        if self.ranges.len() as u64 >= self.constants.mapping_limit {
+        if self
+            .ranges
+            .iter()
+            .filter(|range| range.state != RangeState::Released)
+            .count()
+            >= usize::try_from(self.constants.mapping_limit).expect("mapping上限适配宿主")
+        {
             return Err(self.reject(ProviderError::MappingLimit));
         }
         let base = Self::align_up(self.next_base, alignment)
             .ok_or_else(|| self.reject(ProviderError::ArithmeticOverflow))?;
         // range 大小按页取整后再登记，使页位图覆盖全部字节且每个子区间都按页对齐。
         let page = self.constants.page_bytes;
-        let rounded = bytes.div_ceil(page) * page;
+        let rounded = bytes
+            .checked_next_multiple_of(page)
+            .ok_or_else(|| self.reject(ProviderError::ArithmeticOverflow))?;
         let Some(end) = base.checked_add(rounded) else {
             return Err(self.reject(ProviderError::ArithmeticOverflow));
         };
@@ -315,6 +326,7 @@ impl RangeProvider for FakePlatform {
             alignment,
             domain,
             state: RangeState::Reserved,
+            guard_low_bytes: 0,
             guard_bytes: 0,
             dump_policy: self.constants.dump_policy_default,
             huge_page: false,
@@ -380,6 +392,14 @@ impl RangeProvider for FakePlatform {
             Ok(span) => span,
             Err(error) => return Err(self.reject(error)),
         };
+        let descriptor = self.ranges[index];
+        if offset < descriptor.guard_low_bytes
+            || offset
+                .checked_add(bytes)
+                .is_none_or(|end| end > descriptor.bytes - descriptor.guard_bytes)
+        {
+            return Err(self.reject(ProviderError::GuardOverlap));
+        }
         let changed = self.commits[index].fill(start, count, true);
         self.ranges[index].state = RangeState::Committed;
         self.stats.committed_total += changed * self.constants.page_bytes;
@@ -417,6 +437,7 @@ impl RangeProvider for FakePlatform {
             return Err(self.reject(ProviderError::DoubleRelease));
         }
         self.ranges[index].state = RangeState::Released;
+        self.ranges[index].guard_low_bytes = 0;
         self.ranges[index].guard_bytes = 0;
         self.ranges[index].bytes = 0;
         self.commits[index] = CommitBitmap::new(0);
@@ -425,18 +446,24 @@ impl RangeProvider for FakePlatform {
         Ok(())
     }
 
-    fn protect_guard(&mut self, range: RangeId) -> Result<(), ProviderError> {
+    fn protect_guard(&mut self, range: RangeId, edges: GuardEdges) -> Result<(), ProviderError> {
         let guard = self.constants.guard_bytes;
         let Some(index) = self.range_index(range)? else {
             return Err(self.reject(ProviderError::UnknownRange));
         };
-        if self.ranges[index].state != RangeState::Committed {
-            return Err(self.reject(ProviderError::NotCommitted));
+        if self.ranges[index].state == RangeState::Released {
+            return Err(self.reject(ProviderError::DoubleRelease));
         }
-        if self.ranges[index].guard_bytes != 0 || self.ranges[index].bytes < guard {
+        let leading = if edges == GuardEdges::Both { guard } else { 0 };
+        let descriptor = &mut self.ranges[index];
+        if descriptor.guard_bytes != 0
+            || descriptor.guard_low_bytes != 0
+            || descriptor.bytes <= guard + leading
+        {
             return Err(self.reject(ProviderError::GuardOverlap));
         }
-        self.ranges[index].guard_bytes = guard;
+        descriptor.guard_low_bytes = leading;
+        descriptor.guard_bytes = guard;
         self.recompute();
         Ok(())
     }
@@ -448,6 +475,7 @@ impl RangeProvider for FakePlatform {
         if self.ranges[index].guard_bytes == 0 {
             return Err(self.reject(ProviderError::NotGuarded));
         }
+        self.ranges[index].guard_low_bytes = 0;
         self.ranges[index].guard_bytes = 0;
         self.recompute();
         Ok(())

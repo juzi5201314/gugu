@@ -72,6 +72,39 @@ impl Validated {
             .map(|body| body.safepoints.len())
             .sum()
     }
+    /// runtime只消费优化后仍存在的创建、入口检查与suspend边界。
+    pub(crate) fn coroutine_demand(&self) -> crate::runtime::CoroutineDemand {
+        let mut demand = crate::runtime::CoroutineDemand::default();
+        for body in &self.world.bodies {
+            demand.checked_entries += u32::from(body.poll_summary.entry_stack_check);
+            let is_spawn = |call: &body::Call| {
+                matches!(
+                    call.target,
+                    body::CallTarget::Runtime(body::RuntimeCall::Spawn)
+                )
+            };
+            for instruction in &body.instructions {
+                if let body::Op::Call(call) = &instruction.op {
+                    demand.creation_sites += u32::from(is_spawn(call));
+                }
+            }
+            for block in &body.blocks {
+                if let body::Terminator::Invoke { call, .. }
+                | body::Terminator::TailCall { call, .. } = &block.terminator
+                {
+                    demand.creation_sites += u32::from(is_spawn(call));
+                }
+            }
+            demand.suspend_points += u32::try_from(
+                body.safepoints
+                    .iter()
+                    .filter(|point| point.kind == body::SafepointKind::Suspend)
+                    .count(),
+            )
+            .expect("suspend数量适配u32");
+        }
+        demand
+    }
     /// 世界内 `SafepointPoll` 数量。
     pub(crate) fn poll_count(&self) -> usize {
         self.world
@@ -163,7 +196,11 @@ pub(crate) fn build(
                 );
             }
             context.record_dependency(
-                QueryKey::new(QueryKind::BuildGenericGir, 3, &concrete.body.owner_key),
+                QueryKey::new(
+                    QueryKind::BuildGenericGir,
+                    gir::BUILD_SCHEMA,
+                    &concrete.body.owner_key,
+                ),
                 concrete.fingerprint,
             );
             context.record_dependency(

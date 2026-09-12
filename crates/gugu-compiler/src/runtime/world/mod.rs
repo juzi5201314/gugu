@@ -4,9 +4,14 @@
 //! free structure 与账本只由 owner 上下文读写。跨 owner 的归还先经过 exactly-once 的
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
+pub(crate) mod coroutine_impl;
 mod extent_impl;
 mod resource_impl;
 pub(crate) mod termination_impl;
+
+#[cfg(test)]
+#[path = "../coroutine_tests.rs"]
+mod coroutine_tests;
 
 #[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
@@ -94,6 +99,10 @@ pub(crate) struct RawWorld {
     release_queue: VecDeque<ReleaseTicket>,
     /// rt0 进程模型：生命周期、启动配置、报告与终止计划；`boot` 之前为 `None`。
     rt0: Option<termination_impl::Rt0Process>,
+    controls: super::coroutine::CoroutineTable,
+    stacks: super::stack_arena::StackAllocator,
+    coroutine_storage: Vec<Option<coroutine_impl::CoroutineStorage>>,
+    completion_barriers: Vec<(super::coroutine::CoroutineHandle, u64, u64)>,
 }
 
 impl RawWorld {
@@ -151,6 +160,10 @@ impl RawWorld {
             registry,
             release_queue: VecDeque::new(),
             rt0: None,
+            controls: super::coroutine::CoroutineTable::default(),
+            stacks: super::stack_arena::StackAllocator::default(),
+            coroutine_storage: Vec::new(),
+            completion_barriers: Vec::new(),
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。
@@ -511,6 +524,11 @@ impl RawWorld {
         for node in snapshot.nodes() {
             let message_id = *node;
             let message = self.load_return_message(message_id)?;
+            if message.kind == ReturnKind::StackSpan {
+                self.service_stack_return(owner, &message)?;
+                self.graced_nodes.push(message_id);
+                continue;
+            }
             let resource = message.kind == ReturnKind::ResourceRelease;
             if message.kind == ReturnKind::Extent {
                 // 上面的载入键分支已经解析过 extent；这里只消费已经过校验的消息。
@@ -739,6 +757,9 @@ impl RawWorld {
             Some(super::slab::OwnerState::Forwarding) => {}
             _ => return Err(RawInvariant::new("owner 已 retire，不能重复 retire")),
         }
+        self.stacks
+            .trim_cache(owner, 0, &mut self.provider)
+            .map_err(|error| self.stack_failure(error))?;
         self.epoch = tick;
         let (forwarded, consumed) = self.drain_all(owner, budget)?;
         self.open_grace(&inbox);

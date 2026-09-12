@@ -4,6 +4,7 @@
 //! 退出码、`Terminating` 的用户代码闸门、报告形态选择、`PanicDuringUnwind` 升级、
 //! producer flush 与设施关闭的 exactly-once。
 
+use super::coroutine::{CompletionValue, CoroutineHandle};
 use super::inbox::ServiceBudget;
 use super::message::{BatchLimits, FlushTrigger, ProducerStaging, ReturnKind, stage_message};
 use super::model::RawPlanePolicyV1;
@@ -12,7 +13,30 @@ use super::startup_schema::{
     ExitCategory, FatalKind, LifecycleStateName, Rt0Step, ShutdownFacility,
 };
 use super::world::RawWorld;
+use super::world::coroutine_impl::CoroutineEntry;
 use super::world::termination_impl::MainOutcome;
+
+fn entry() -> CoroutineEntry {
+    CoroutineEntry {
+        pc: 0x1000,
+        required_frame: 64,
+    }
+}
+
+fn spawn(world: &mut RawWorld) -> CoroutineHandle {
+    let handle = world
+        .spawn_user_coroutine(0, entry())
+        .expect("接纳")
+        .expect("返回协程handle");
+    world.enter_coroutine(handle).expect("首次切入");
+    handle
+}
+
+fn finish(world: &mut RawWorld, handle: CoroutineHandle) {
+    world
+        .coroutine_finished(handle, 0, CompletionValue::Bits(42))
+        .expect("协程结束");
+}
 
 fn budget() -> ServiceBudget {
     RawPlanePolicyV1::default().service_budget()
@@ -24,7 +48,13 @@ fn world() -> RawWorld {
 
 fn boot(world: &mut RawWorld) {
     let report = world
-        .boot(vec!["gugu".to_owned()], vec![], "/work".to_owned(), 4)
+        .boot(
+            vec!["gugu".to_owned()],
+            vec![],
+            "/work".to_owned(),
+            4,
+            entry(),
+        )
         .expect("boot 不产生模型不变量");
     assert!(report.started, "默认配置必须合法");
     assert!(report.errors.is_empty());
@@ -56,7 +86,11 @@ fn boot_publishes_running_after_four_steps() {
 fn boot_cannot_run_twice() {
     let mut world = world();
     boot(&mut world);
-    assert!(world.boot(vec![], vec![], "/".to_owned(), 1).is_err());
+    assert!(
+        world
+            .boot(vec![], vec![], "/".to_owned(), 1, entry())
+            .is_err()
+    );
 }
 
 #[test]
@@ -68,6 +102,7 @@ fn invalid_configuration_is_fatal_before_running() {
             vec![("GUGU_RUNTIME_PROCS".to_owned(), "0".to_owned())],
             "/work".to_owned(),
             4,
+            entry(),
         )
         .expect("boot 不产生模型不变量");
     assert!(!report.started);
@@ -105,6 +140,7 @@ fn invalid_diagnostics_config_uses_emergency_plain_text() {
             ],
             "/work".to_owned(),
             4,
+            entry(),
         )
         .expect("boot 不产生模型不变量");
     let reports = world.rt0_reports().expect("rt0");
@@ -125,6 +161,7 @@ fn valid_diagnostics_format_survives_other_config_failures() {
             ],
             "/work".to_owned(),
             4,
+            entry(),
         )
         .expect("boot 不产生模型不变量");
     let reports = world.rt0_reports().expect("rt0");
@@ -140,30 +177,35 @@ fn valid_diagnostics_format_survives_other_config_failures() {
 fn admission_follows_lifecycle_states() {
     let mut world = world();
     // rt0 启动前没有可运行的进程状态，接纳协程是模型不变量。
-    assert!(world.spawn_user_coroutine().is_err());
+    assert!(world.spawn_user_coroutine(0, entry()).is_err());
     boot(&mut world);
-    assert!(world.spawn_user_coroutine().expect("Running 接纳"));
-    assert!(world.spawn_user_coroutine().expect("Running 接纳"));
-    world.coroutine_finished().expect("协程结束");
+    let first = spawn(&mut world);
+    let second = spawn(&mut world);
+    finish(&mut world, first);
     world.call_main(MainOutcome::Returned).expect("main 返回");
-    assert!(world.spawn_user_coroutine().expect("Waiting 接纳后代协程"));
-    world.coroutine_finished().expect("协程结束");
-    world.coroutine_finished().expect("协程结束");
+    let descendant = spawn(&mut world);
+    finish(&mut world, second);
+    finish(&mut world, descendant);
     assert_eq!(
         world.rt0_state().expect("rt0"),
         LifecycleStateName::Terminating
     );
-    assert!(!world.spawn_user_coroutine().expect("Terminating 拒绝"));
+    assert!(
+        world
+            .spawn_user_coroutine(0, entry())
+            .expect("Terminating拒绝")
+            .is_none()
+    );
 }
 
 #[test]
 fn natural_success_exits_zero_without_reports() {
     let mut world = world();
     boot(&mut world);
-    assert!(world.spawn_user_coroutine().expect("接纳"));
+    let child = spawn(&mut world);
     world.call_main(MainOutcome::Returned).expect("main 返回");
     assert_eq!(world.rt0_state().expect("rt0"), LifecycleStateName::Waiting);
-    world.coroutine_finished().expect("协程结束");
+    finish(&mut world, child);
     assert_eq!(
         world.rt0_state().expect("rt0"),
         LifecycleStateName::Terminating
@@ -182,8 +224,8 @@ fn natural_success_exits_zero_without_reports() {
 fn main_error_still_waits_for_user_coroutines() {
     let mut world = world();
     boot(&mut world);
-    assert!(world.spawn_user_coroutine().expect("接纳"));
-    assert!(world.spawn_user_coroutine().expect("接纳"));
+    let first = spawn(&mut world);
+    let second = spawn(&mut world);
     world
         .call_main(MainOutcome::ReturnedErr("boom".to_owned()))
         .expect("main 返回");
@@ -191,8 +233,8 @@ fn main_error_still_waits_for_user_coroutines() {
     let reports = world.rt0_reports().expect("rt0");
     assert_eq!(reports.len(), 1);
     assert!(reports[0].text().contains("reason: main-error\n"));
-    world.coroutine_finished().expect("协程结束");
-    world.coroutine_finished().expect("协程结束");
+    finish(&mut world, first);
+    finish(&mut world, second);
     let outcome = world.execute_termination(&budget()).expect("终止执行");
     assert_eq!(outcome.category, ExitCategory::ProgramFailure);
     assert_eq!(outcome.code, 1);
@@ -203,7 +245,7 @@ fn main_error_still_waits_for_user_coroutines() {
 fn main_panic_runs_only_main_defers_and_terminates_immediately() {
     let mut world = world();
     boot(&mut world);
-    assert!(world.spawn_user_coroutine().expect("接纳"));
+    let _child = spawn(&mut world);
     world
         .main_panicked("main failed".to_owned(), None)
         .expect("记录主协程 panic");
@@ -257,7 +299,12 @@ fn fatal_boundary_cannot_run_user_code_or_be_caught() {
         .fatal(FatalKind::OutOfMemory, "heap exhausted".to_owned(), None)
         .expect("fatal");
     assert!(world.run_defer(1).is_err());
-    assert!(!world.spawn_user_coroutine().expect("状态查询"));
+    assert!(
+        world
+            .spawn_user_coroutine(0, entry())
+            .expect("状态查询")
+            .is_none()
+    );
     assert_eq!(world.rt0_reports().expect("rt0").len(), 1);
     world
         .fatal(FatalKind::StackOverflow, "second".to_owned(), None)
@@ -272,7 +319,7 @@ fn fatal_boundary_cannot_run_user_code_or_be_caught() {
 fn explicit_exit_terminates_without_waiting_or_reports() {
     let mut world = world();
     boot(&mut world);
-    assert!(world.spawn_user_coroutine().expect("接纳"));
+    let _child = spawn(&mut world);
     world.request_exit(7).expect("显式退出");
     assert_eq!(
         world.rt0_state().expect("rt0"),
@@ -288,12 +335,21 @@ fn explicit_exit_terminates_without_waiting_or_reports() {
 fn detached_panic_in_waiting_downgrades_natural_exit() {
     let mut world = world();
     boot(&mut world);
-    assert!(world.spawn_user_coroutine().expect("接纳"));
+    let child = spawn(&mut world);
     world.call_main(MainOutcome::Returned).expect("main 返回");
     world
         .detached_panic("detached".to_owned(), None)
         .expect("分离 panic");
-    world.coroutine_finished().expect("协程结束");
+    world
+        .coroutine_finished(
+            child,
+            0,
+            CompletionValue::Panic {
+                handle: 1,
+                descriptor: 1,
+            },
+        )
+        .expect("panic完成");
     let outcome = world.execute_termination(&budget()).expect("终止执行");
     assert_eq!(outcome.category, ExitCategory::ProgramFailure);
     assert_eq!(outcome.code, 1);
@@ -307,11 +363,20 @@ fn detached_panic_in_waiting_downgrades_natural_exit() {
 fn detached_panic_during_running_keeps_success_exit() {
     let mut world = world();
     boot(&mut world);
-    assert!(world.spawn_user_coroutine().expect("接纳"));
+    let child = spawn(&mut world);
     world
         .detached_panic("detached".to_owned(), None)
         .expect("分离 panic");
-    world.coroutine_finished().expect("协程结束");
+    world
+        .coroutine_finished(
+            child,
+            0,
+            CompletionValue::Panic {
+                handle: 1,
+                descriptor: 1,
+            },
+        )
+        .expect("panic完成");
     world.call_main(MainOutcome::Returned).expect("main 返回");
     let outcome = world.execute_termination(&budget()).expect("终止执行");
     assert_eq!(outcome.category, ExitCategory::Success);

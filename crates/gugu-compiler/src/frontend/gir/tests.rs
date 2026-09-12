@@ -246,17 +246,10 @@ fn named_body<'a>(
     world: &'a GirWorldV1,
     name: &str,
 ) -> &'a GirBody {
-    let definition = hir
-        .module()
-        .definitions
-        .iter()
-        .position(|definition| definition.name == name)
-        .map(|index| crate::frontend::hir::DefId(index as u32))
-        .expect(name);
     world
         .bodies
         .iter()
-        .find(|body| body.owner == definition)
+        .find(|body| hir.module().definitions[body.owner.index()].name == name)
         .unwrap_or_else(|| panic!("缺少 body {name}"))
 }
 
@@ -472,6 +465,43 @@ fn large_copy_warns_allow_suppresses_and_deny_fails() {
     assert!(compilation.image_plan().is_none());
     assert!(
         compilation
+            .diagnostics()
+            .items()
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == crate::DiagnosticCode::LargeCopy
+                    && diagnostic.severity() == crate::Severity::Error
+            )
+    );
+}
+
+#[test]
+fn borrowed_fields_keep_original_places_without_large_copy() {
+    let source = "#[repr(C, align(64))]\nstruct Large { head: uint, tail: [uint; 9] }\n#[used]\n#[deny(large_copy)]\nfn field(value: &Large) &uint = &value.head\nfn main() {}";
+    let result = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(result.is_success(), "{:?}", result.diagnostics().items());
+    assert!(
+        result
+            .diagnostics()
+            .items()
+            .iter()
+            .all(|diagnostic| diagnostic.code() != crate::DiagnosticCode::LargeCopy)
+    );
+
+    let copying = "struct Large { bytes: [uint; 9] }\n#[used]\n#[deny(large_copy)]\nfn copy(value: &Large) Large = *value\nfn main() {}";
+    let result = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        copying,
+        TargetName::X86_64Linux,
+    ));
+    assert!(!result.is_success());
+    assert!(result.image_plan().is_none());
+    assert!(
+        result
             .diagnostics()
             .items()
             .iter()

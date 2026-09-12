@@ -73,6 +73,8 @@ inspect(file)
 
 方法调用对 `&Self` 自动取槽地址。`text.push` 因而修改当前 text槽并保持其它 string值不变；`vec.push` 修改共享 Vec身份；`file.close` 关闭共享 ResourceCell。普通函数调用不自动给用户暴露 `&` / `*` 转换。
 
+经引用访问字段或对字段取引用时，始终投影到原槽；自动解引用不产生被引用聚合的语义副本。只有把最终投影作为值传递、赋值或返回时，才对该投影的类型执行复制、COW 或 resource 动作。
+
 `clone()` 对普通身份句柄构造语义独立的对象图。string 的 clone 允许物理共享 sealed backing，只要后续修改保持值语义。资源若要复制底层 OS 资源，必须使用该类型明确返回 Result 的 `try_clone` 或等价领域方法，不能由 Clone 隐式执行 syscall。
 
 ## 类型类别的组合规则

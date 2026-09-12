@@ -81,6 +81,10 @@ CoroutineCold {
 
 `morestack_scratch` 保存 return PC、九个 GPR参数和八个 XMM参数；只有 lifecycle Running且当前 PC为 `MorestackEntry` 时有效，并由该 entry map精确扫描，不属于常驻 runtime root。
 
+控制块布局由 `CoroutineRuntimeContract` schema 1 发布：`CoroutineHot` 为 64 B、`StackDescriptor` 为 64 B、`CoroutineSlot` 为 128 B，三者均按 64 B 对齐；`CoroutineContext` 为 48 B，`MorestackScratch` 为 208 B 且按 16 B 对齐，`CoroutineCold` 为 512 B 且按 64 B 对齐。hot 与 cold 分别以 64 KiB 地址稳定页扩容；页表可增长，已公开 record 不移动。cold 表下标是稠密的稳定控制块索引，槽复用必须推进独立 generation，过期 handle 不得认领新协程。
+
+`std/runtime/coroutine.gg` 的 `#[repr(C)]` record 经冻结 HIR、具体 GIR 与真实布局器形成后，逐字段同 machine layout 交叉验证；不重新读取源码推测 offset。契约同时携带 layout 目录、栈策略和实际 x86_64 context 片段，任一大小、对齐、字段偏移或代码版本不匹配都以 `E0058` 停止下游。hot 内的 atomic 存储车道仍为一个机器字，普通 Gugu 字段访问不能替代其 acquire/release machine intrinsic。
+
 `state` 低 4 bit 是 lifecycle：
 
 | 值 | 状态 | 含义 |
@@ -306,6 +310,10 @@ arena 内部固定使用 `512 B, 1, 2, 4, 8, 16, 32 KiB, ... 2 MiB` 的二次幂
 
 arena slot分配只消耗虚拟容量；第一次切入该 stack前才提交覆盖 slot的宿主页。多个亚页 slot共享一个宿主页，只有页内没有 live或本地 cached slot时才可 decommit。`stack_committed_bytes` 包含 cache仍占用的已提交页；reservation本身只计入 `stack_reserved_bytes`。
 
+确定性参照实现把保留虚拟容量、提交宿主页、live stack、cache 与 pending return 分开计数。占用 bitmap 同时覆盖 live、cached 和 in-flight return；只有对应 owner 消费了经过 integrity 校验的 `ReturnKind::StackSpan`，该 slot 才能进入本地 cache 或全局空闲集合。消息只携带逻辑 stack descriptor、generation、class、epoch 与 bytes，不携带 stack 地址。owner 退役沿既有 forwarding/inbox 路径处理 stack return，并 flush 退役 owner 的 cache。
+
+小栈 cache miss 按需取得单个 slot；超过 16 KiB 的 class 直接从对应 span 取得，不参与批量 refill。已有 cached slot 的命中不提交新页，回收超过高水位时才向全局归还。共享宿主页的 decommit 由页面内所有 slot 的占用共同决定，不能只看刚归还的那个 stack。
+
 arena首尾 guard只诊断越过整个 arena的失控访问，不隔离相邻 coroutine，也不属于语言内存安全契约。合法 managed code依靠 compiler prologue边界检查；`ForeignLeaf` 超过声明 `stack = N` 本来就是 unsafe契约破坏。这样避免以每个 stack一个 VMA换取不能覆盖任意 raw-pointer破坏的局部诊断。
 
 ### 分配与检查
@@ -349,6 +357,8 @@ class_ceil(max(old_capacity * 2, used_bytes + required_frame + 512, 2 KiB))
 请求超过 `GUGU_RUNTIME_STACK_MAX` 或容量 checked arithmetic 失败进入 `StackOverflow` fatal；请求仍在逻辑上限内但 arena/页面提交失败进入 `OutOfMemory` fatal。增长只在 safepoint完成，更新 `last_grow_gc_epoch`、清零 `low_use_gc_cycles`与 `COLD_COMPACTED`，复制和 `StackInterior` 修正遵循[栈图](stack-maps.md#协程栈复制)。
 
 stack收缩采用四个完整 GC观察窗的迟滞，不再按一次 `used * 4 < capacity`立即复制。park、preempt和 stack growth slow path以 owner写更新 `recent_high_water`；每个完整 GC在 scan lock下取 `max(recent_high_water, used_bytes)`。只有该值加512 bytes不超过当前容量四分之一、最近四个完整 GC都未发生增长且 stack连续四次满足低占用时才收缩，任一条件失败即清零计数；完成本次采样后以当前 `used_bytes`开始下一观察窗。
+
+一个完整 GC epoch 只能推进一次低占用计数，重复扫描同一 epoch 不能缩短观察窗。复制在独占 scan lock 下先验证活跃字节范围及严格升序、不重叠的 StackInterior slot，再复制并重定位；验证失败保留旧 context/bounds，撤销新 allocation，并进入 `RuntimeInvariant` fatal。只重定位精确登记的 slot 与保存寄存器，数值落在旧栈范围内的普通整数或 NonRoot 原始指针保持原位模式。
 
 满足迟滞后，`Runnable` stack收缩到能容纳 `max(used_bytes + 512, 2 KiB)` 的 class；`Waiting` stack可以冷压缩到能容纳 `max(used_bytes + 256, 512 B)` 的 class并设置 `COLD_COMPACTED`。Running、Parking、Foreign、DirtyWaiting、持有 stack scan lock或本周期已经增长的 stack不收缩。冷 stack唤醒后可以直接恢复；下一次容量不足由普通 prologue一次增长到不低于2 KiB。内存软上限施压时，完整 GC可以把“连续四次”缩短为一次，但仍禁止收缩从上一个完整 GC以来发生过增长的 stack。
 

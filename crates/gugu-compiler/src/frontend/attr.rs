@@ -343,14 +343,15 @@ fn collect_lint_scope(
         let Some(name) = body.first().map(|token| token.text(source)) else {
             continue;
         };
-        let mask = lint_mask(source, &body[2..body.len().saturating_sub(1)]);
-        match name {
-            "forbid" => scope.forbid |= mask,
-            "deny" => scope.deny |= mask,
-            "warn" => scope.warn |= mask,
-            "allow" => scope.allow |= mask,
-            _ => {}
-        }
+        let lane = match name {
+            "forbid" => &mut scope.forbid,
+            "deny" => &mut scope.deny,
+            "warn" => &mut scope.warn,
+            "allow" => &mut scope.allow,
+            _ => continue,
+        };
+        // 只有已通过属性文法校验的lint列表才拥有括号参数；#[used]等裸属性不参与。
+        *lane |= lint_mask(source, &body[2..body.len() - 1]);
     }
     if scope.forbid != 0 || scope.allow != 0 || scope.warn != 0 || scope.deny != 0 {
         scopes.push(scope);

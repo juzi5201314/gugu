@@ -8,11 +8,27 @@
 
 use crate::target::{Rt0Kind, TargetName};
 
+mod context;
+#[allow(dead_code, reason = "协程布局与生命周期的确定性参照实现")]
+mod coroutine;
+mod coroutine_layout;
+mod coroutine_schema;
 mod harness;
 mod model;
 mod platform_schema;
+#[allow(dead_code, reason = "栈尺寸与精确复制协议的确定性参照实现")]
+mod stack;
+#[allow(dead_code, reason = "栈arena与cache的确定性参照实现")]
+mod stack_arena;
 mod startup_kinds;
 mod startup_schema;
+
+pub use context::ContextSwitchCode;
+pub use coroutine::CoroutineContext;
+pub use coroutine_schema::{
+    CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
+    StackPolicy,
+};
 
 // rt0 启动、生命周期、报告与终止的参照实现：lib 构建只消费契约段，确定性验证
 // 套件直接消费这些状态机。
@@ -104,6 +120,7 @@ pub(crate) const TARGET_CACHE_ENTRIES: u32 = 4;
 const STD_PRELUDE_SOURCE: &str = include_str!("../../resources/std/prelude.gg");
 const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
 const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
+const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -208,6 +225,11 @@ impl RuntimeResources {
                     logical_path: "std/runtime/platform.gg",
                     source: RUNTIME_PLATFORM_SOURCE,
                     role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/coroutine.gg",
+                    source: RUNTIME_COROUTINE_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
                 },
             ],
             intrinsics: &[

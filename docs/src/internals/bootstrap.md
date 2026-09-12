@@ -113,6 +113,12 @@ crates/
     │   ├── resource.rs             ResourceCell slab、lease 状态机与统一 release 入口
     │   ├── resource_schema.rs      ResourceCell header/状态位/release 描述符/资源种类契约 schema
     │   ├── size_class.rs           dense size class 表与 stride 除法常量
+    │   ├── coroutine.rs            hot/cold/slot 固定布局、context 与地址稳定控制页
+    │   ├── coroutine_schema.rs     版本化协程布局、栈策略、LIR需求与片段契约
+    │   ├── coroutine_layout.rs     冻结HIR/具体GIR与machine布局交叉验证
+    │   ├── context.rs              x86_64 switch/restore-only 直接编码
+    │   ├── stack.rs                栈尺寸、迟滞收缩与精确StackInterior复制
+    │   ├── stack_arena.rs          双端guard arena、span bitmap与有界cache
     │   ├── slab.rs                 owner 目录、slab 描述符与 slot 状态机
     │   ├── owner.rs                本地 free path、本地/远程 return 分叉
     │   ├── message.rs              return message、link 编码、producer staging 与 source slab 聚合
@@ -121,18 +127,20 @@ crates/
     │   │   ├── mod.rs              raw owner 世界与 ResourceCell 世界骨架
     │   │   ├── extent_impl.rs      arena 开立、extent 取用与 trim 门禁接入
     │   │   ├── resource_impl.rs    资源分配、lease、close、release 与整页 mapping 接入
+    │   │   ├── coroutine_impl.rs   main/子协程创建、栈复制、cold完成发布与owner return
     │   │   └── termination_impl.rs rt0 进程模型：boot、终止路径与设施关闭接入
     │   ├── harness.rs              真实并发可运行切片（bench façade）
     │   └── tests.rs                确定性参照实现的验证套件
     └── resources/
         ├── std/prelude.gg          标准库 Gugu 源单元
         ├── runtime/core.gg         runtime Gugu 源单元
-        └── runtime/platform.gg     std.platform 平台范围适配的 Gugu 源单元
+        ├── runtime/platform.gg     std.platform 平台范围适配的 Gugu 源单元
+        └── runtime/coroutine.gg    固定控制块、栈策略与record访问的 Gugu 源单元
 ```
 
 模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与参照模型（raw 平面、资源租约、owner-directed return 与 rt0 启动/终止/报告），用于固定 schema、verifier 与参照行为。
 
-`gugu-compiler` 使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接在这里仅以 `IntrinsicBoundary` 登记，实际 machine intrinsic 必须在 backend/runtime 按相应内部契约接入。
+`gugu-compiler` 使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
 
 ## 目标描述与 rt0 边界
 
@@ -144,6 +152,10 @@ crates/
 | `x86_64-windows` | PE32+ | 64 | Windows 薄 IAT |
 
 rt0 不是普通 Gugu 函数。Linux 入口和 Windows 薄导入路径由后端与平台 runtime 负责；`RuntimeResources` 只把这项边界附加到 image plan，不实现宿主启动、分配、调度或报告逻辑。这样可以使目标描述进入编译结果，同时保持公开的 rt0 启动契约由 [`运行时规范`](../spec/runtime.md#rt0-与启动) 和 [`平台 ABI`](../spec/platform-abi.md#入口重定位与-tls)唯一规定。
+
+`RuntimeRawModel` schema 5 把协程契约并入同一缓存对象：优化后 LIR 的创建点、入口检查与 suspend 需求，以及固定布局、栈策略和换栈字节都进入 fingerprint。内建 Gugu 协程源通过正常 LoadSources/前端/单态化形成 record，query 的构造与恢复均校验源布局。CLI `image-plan` 暴露 `coroutine-runtime` 和 `coroutine-contract-fingerprint`，`-Zdump-runtime` 输出逐字段 offset、arena/cache 策略和需求计数；任何 verifier 失败不形成 backend/image plan。
+
+rt0 的确定性进程模型不再单独模拟协程数量：main 与获准创建的子协程均取得同一控制表和 stack arena allocation，首次进入时 commit，完成先向 cold 发布结果与 barrier，再在 system-stack 交接点清除旧 context/root 并归还 stack。既有终止计划继续决定是否等待存活子协程；关闭设施按原顺序 drain raw inbox、回收 stack/cache、释放范围。默认测试只运行确定性传输模型，`cargo bench -p gugu-compiler --bench coroutine_context` 执行实际 context 片段，验证独立栈往返、寄存器恢复、processor 重建和 finish 后结果存活。
 
 ## Action graph
 
@@ -176,6 +188,8 @@ emit-image
 - `single_file_path`：compiler 在 `load-sources` action 内读取指定 `.gg` 文件，逻辑路径按输入路径推导；读取或快照失败形成 `E0001`~`E0008` 并停止后续 action；
 - `project_entry`：CLI 从清单发现的 target 入口，逻辑路径由 package root 推导，与工作目录无关；bin/example 与 `harness = false` 的 bench 要求合法 main，lib/test 与默认 bench 走库检查，不产生 executable entry。
 
+空 package 没有内建 runtime 源图，不执行依赖源图的跨语言 record 校验，也不形成可执行入口；固定 machine layout 与契约 verifier 仍照常校验。非空输入一旦装入 runtime 源，就必须形成完整 record 集合，不能把缺失字段当作空 package 处理。
+
 Frontend action 对每个源码快照运行词法分析：生成带精确 span 的 `TokenBuffer` 与 trivia，校验字面量、最长匹配、闭集属性与 cfg 记号形状。词法诊断 `E0009`–`E0019` 或 `Error` token 会使 Frontend action 失败，并跳过 IR 与 image plan。早期括号扫描入口检查已删除。
 
 同一 Frontend action 内消费 `TokenBuffer`，用递归下降构造稠密 `u32` AST arena（声明、泛型、类型、块、表达式、模式、`async`/`select`/`try`/`defer`、`comptime source`、FFI 与 asm）。`()`/`[]` 增加分隔符深度，内部换行只作空白；`{` 单独跟踪花括号深度，块内换行可以结束语句、字段或臂。比较与 `..` 不结合，主诊断带 `Note` 次诊断。解析诊断 `E0020`–`E0026` 使 Frontend 失败，不得把错误占位交给 IR 或 image plan。可执行入口是 AST 中名为 `main`、无参数且带块体或 `=` 体的 `fn`。节点身份不是指针；结构 dump 按 arena 下标，不受线程完成顺序影响。
@@ -184,7 +198,7 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 
 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
-`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 4）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。
+`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 5）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。
 
 同一契约还并入 `PlatformRangeSchemaV1` 与 `LedgerSchemaV1`，使 `ImagePlan` 增加 `platform-profile`、`platform-op-count`、`platform-range-class-count`、`platform-contract-fingerprint`、`platform-range-demand` 与 `ledger-category-count`。平台操作目录、extent class 阶梯、range 状态迁移与 Linux/Windows 失败映射由同一份契约固定；账本分类是互斥的，`range_reserved_bytes` 与 `runtime_committed_bytes` 相加不重复计数。这些字段固定 raw 平面的 schema 与参照行为，不代表 runtime 已在镜像内物化。
 

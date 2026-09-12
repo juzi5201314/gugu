@@ -639,6 +639,8 @@ fn contract_rejects_address_fields_and_policy_drift() {
         RawPlanePolicyV1::default(),
         RawPlaneDemand {
             coroutine_sites: 3,
+            checked_entries: 2,
+            suspend_points: 1,
             resource_sites: 1,
             runtime_raw_sites: 2,
             owners: 2,
@@ -698,6 +700,8 @@ fn contract_rejects_address_fields_and_policy_drift() {
 fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
     let demand = RawPlaneDemand {
         coroutine_sites: 1,
+        checked_entries: 1,
+        suspend_points: 0,
         resource_sites: 0,
         runtime_raw_sites: 1,
         owners: 1,

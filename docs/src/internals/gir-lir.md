@@ -163,7 +163,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 ### generic GIR 构造
 
-`BuildGenericGir`（query 11，当前 schema 3，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#开发接口)）。差异诊断为 `E0055`。
+`BuildGenericGir`（query 11，当前 schema 4，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#开发接口)）。差异诊断为 `E0055`。
 
 构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列)` 复用入口。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
 
@@ -172,6 +172,8 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 ### 值传递与 placement 展开
 
 构造期按 [传递](../spec/passing.md) 把赋值、参数、返回、模式绑定、聚合字段、`dyn Any` 擦除与 channel send 展开为 `ValueAction` / `CowSnapshot` / `ResourceAction` / `Assign`，不另造平行 IR。位值发 `ValueAction::Copy` + `ValueCopy`；身份句柄发 `ValueAction::Copy` + `Use(Copy)`；`string` / `ByteBuffer` / `Bytes` 发 `CowSnapshot`；`ResourceCell` 在覆盖已写入的非返回槽时先 `ReleaseLease` 再 `AcquireLease`，聚合赋值递归处理每个 resource projection。调用实参先拷到临时槽再 `MoveInternal`，避免二次拷和把 lease 误交给 callee。`StorageDead` 前对 resource / 未知类别的用户与参数槽 `ReleaseLease`；返回槽不在 callee 内释放。含 resource 的 local 不得进入 managed closure environment。分析不确定的泛型参数走 Copy + CowSnapshot + AcquireLease。超过 64 字节的按值位结构体记入 `GirBody.large_copies`，query 外按属性求 `large_copy`（`E0056`，默认 warn；`deny`/`forbid` 使 Frontend 失败且无镜像）。
+
+place 与 value 消费共享一条表达式构造路径：字段/下标/借用消费者只构造投影，`Dereference` 调整继续延长原 place，不提前把被引用聚合复制到临时槽。真正的 value 消费才物化最终投影，并执行该值自己的传递动作。由字段取地址产生的引用因此仍指向原槽；仅为了形成 place 不应触发 `large_copy` 或 COW/resource 复制。
 
 管线为 `BuildGenericGir` → `mono` → `late` → `attach_fragments` → `WholeProgramAnalysis`（schema 5，`analysis_semantics_revision = 5`）→ `EscapeAndPlacement`（query **29**，schema 1，域 `gugu-escape-placement-v1`）→ `PublicFunctionSummary`。placement 只记录、不改写 CFG。分析使用放置前的 GIR 指纹，避免循环。`GirWorldV1` schema **3** 携带 `PlacementWorldV1`；world 指纹域为 `gugu-gir-world-v3`。未逃逸槽为 Stack；`address_taken` 且引用导出时按 publish / foreign / 其它分别选 SharedHeap / Pinned / LocalHeap。含 resource passing 的对象与数组分配，以及逃逸的 Resource placement，必须进入独立 Resource domain，不得改写成 LocalHeap 或 managed region；unknown / alias / foreign / escape / publish 按相应 managed 规则选择。分配点无私有证明不得选 `TurnRegion`；`TurnRegion` 要求 `Proved` 且无 UNKNOWN|PUBLISH|FOREIGN|RESOURCE|ALIAS。纯位 `ValueAction` 不进入分析 heap/alias，以免破坏范围证明。
 

@@ -451,18 +451,25 @@ fn platform_guard_wait_wake_entropy_and_dump_policy() {
     let range = provider
         .reserve_aligned(65536, 65536, MemoryDomainId::RUNTIME_RAW)
         .expect("预留成功");
+    provider
+        .protect_guard(range, super::provider::GuardEdges::Trailing)
+        .expect("reservation可固定guard");
     assert_eq!(
-        provider.protect_guard(range),
-        Err(ProviderError::NotCommitted),
-        "未 commit 不得建立 guard"
+        provider.stats().committed_bytes,
+        0,
+        "guard不隐式提交payload"
     );
+    assert_eq!(provider.stats().guarded_bytes, 0, "未提交guard不计入物理页");
+    provider.unprotect(range).expect("取消reservation的guard");
     provider.commit(range).expect("提交成功");
-    provider.protect_guard(range).expect("建立 guard 成功");
+    provider
+        .protect_guard(range, super::provider::GuardEdges::Trailing)
+        .expect("建立guard成功");
     let descriptor = provider.describe(range).expect("描述符存在");
     assert_eq!(descriptor.guard_bytes, 4096);
     assert_eq!(descriptor.payload_bytes(), 65536 - 4096);
     assert_eq!(
-        provider.protect_guard(range),
+        provider.protect_guard(range, super::provider::GuardEdges::Trailing),
         Err(ProviderError::GuardOverlap),
         "重复建立 guard 必须被拒绝"
     );

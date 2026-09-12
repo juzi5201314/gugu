@@ -282,6 +282,8 @@ pub(crate) fn print_compilation_json(
             "report-reason-count": plan.report_reason_count(),
             "rt0-emergency-buffer-bytes": plan.rt0_emergency_buffer_bytes(),
             "rt0-contract-fingerprint": plan.rt0_contract_fingerprint(),
+            "coroutine-runtime": plan.coroutine_runtime(),
+            "coroutine-contract-fingerprint": plan.coroutine_runtime().fingerprint(),
             "rt0-demand": json!({
                 "entry-present": plan.rt0_entry_present(),
                 "main-returns-result": plan.rt0_main_returns_result(),
