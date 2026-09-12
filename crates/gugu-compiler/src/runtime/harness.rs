@@ -79,6 +79,7 @@ impl OwnerReturnHarness {
             super::Rt0Demand::default(),
             SchedulerDemand::default(),
             super::WaitDemand::default(),
+            super::SyncDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -271,6 +272,7 @@ impl ResourceReleaseHarness {
             super::Rt0Demand::default(),
             SchedulerDemand::default(),
             super::WaitDemand::default(),
+            super::SyncDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -713,4 +715,143 @@ fn apply_wait_op(
             Err(_) => WaitReply::Failed,
         },
     }
+}
+
+/// std.sync 互斥锁与原子状态机多线程争用 harness。
+#[derive(Clone, Copy, Debug)]
+pub struct SyncLockHarness {
+    threads: u32,
+    iterations: u32,
+}
+
+/// SyncLockHarness 运行报告。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SyncLockReport {
+    /// 工作线程数。
+    pub threads: u32,
+    /// 每线程迭代次数。
+    pub iterations: u32,
+    /// 执行的同步操作总数。
+    pub total_operations: u64,
+    /// 最终累计计数器。
+    pub final_counter: u64,
+    /// 运行耗时（微秒）。
+    pub elapsed_micros: u64,
+    /// 不变量是否守恒。
+    pub invariants_hold: bool,
+}
+
+impl SyncLockHarness {
+    /// 创建 harness。
+    pub fn new(threads: u32, iterations: u32) -> Self {
+        Self {
+            threads: threads.max(1),
+            iterations: iterations.max(1),
+        }
+    }
+
+    /// 执行一轮真实并发争用测试。
+    pub fn run(self) -> SyncLockReport {
+        let start = Instant::now();
+        let (tx, rx) = mpsc::channel();
+        let owner = thread::spawn(move || run_sync_owner(rx, self.threads, self.iterations));
+        let mut joins = Vec::with_capacity(self.threads as usize);
+        for thread_id in 0..self.threads {
+            let tx = tx.clone();
+            let iters = self.iterations;
+            joins.push(thread::spawn(move || {
+                for _ in 0..iters {
+                    loop {
+                        let (reply_tx, reply_rx) = mpsc::channel();
+                        if tx.send((thread_id, reply_tx)).is_err() {
+                            break;
+                        }
+                        if reply_rx.recv().unwrap_or(false) {
+                            break;
+                        }
+                        thread::yield_now();
+                    }
+                }
+            }));
+        }
+        drop(tx);
+        let mut clean = true;
+        for join in joins {
+            clean &= join.join().is_ok();
+        }
+        let (final_count, invariants_hold) = owner.join().unwrap_or((0, false));
+        let expected = u64::from(self.threads * self.iterations);
+        SyncLockReport {
+            threads: self.threads,
+            iterations: self.iterations,
+            total_operations: expected,
+            final_counter: final_count,
+            elapsed_micros: elapsed_micros(start),
+            invariants_hold: clean && invariants_hold && final_count == expected,
+        }
+    }
+}
+
+fn run_sync_owner(
+    rx: mpsc::Receiver<(u32, mpsc::Sender<bool>)>,
+    threads: u32,
+    iterations: u32,
+) -> (u64, bool) {
+    use super::sync::{MemoryOrdering, MutexLockOutcome};
+    use super::world::coroutine_impl::CoroutineEntry;
+
+    let mut world = RawWorld::new(7, 2, 64, BatchLimits::default()).expect("world");
+    world
+        .boot(
+            vec![],
+            vec![("GUGU_RUNTIME_STACK_MAX".to_owned(), "64KiB".to_owned())],
+            "/".to_owned(),
+            2,
+            CoroutineEntry {
+                pc: 0x1000,
+                required_frame: 64,
+            },
+        )
+        .expect("boot");
+    let mutex = world.mutex_new();
+    let mut atomic = super::sync::AtomicStateMachine::new(0);
+    let mut counter = 0_u64;
+
+    let mut coroutines = Vec::new();
+    for _ in 0..threads {
+        let c = world
+            .spawn_user_coroutine(
+                0,
+                CoroutineEntry {
+                    pc: 0x1000,
+                    required_frame: 64,
+                },
+            )
+            .expect("spawn")
+            .expect("admit");
+        world.enter_coroutine(c).expect("enter");
+        coroutines.push(c);
+    }
+
+    while let Ok((thread_id, reply)) = rx.recv() {
+        let c = coroutines[(thread_id % threads) as usize];
+        let outcome = world.mutex_lock(mutex, c).expect("lock");
+        match outcome {
+            MutexLockOutcome::Acquired => {
+                counter += 1;
+                let _ = atomic.store(u64::from(c.index), counter, MemoryOrdering::Release);
+                let loaded = atomic
+                    .load(u64::from(c.index), MemoryOrdering::Acquire)
+                    .unwrap_or(0);
+                world.mutex_unlock(mutex, c).expect("unlock");
+                let _ = reply.send(loaded == counter);
+            }
+            MutexLockOutcome::Contended { .. } => {
+                let _ = reply.send(false);
+            }
+        }
+    }
+    let expected = u64::from(threads * iterations);
+    let ledger_ok = world.ledger_invariant(0).is_ok();
+    (counter, counter == expected && ledger_ok)
 }

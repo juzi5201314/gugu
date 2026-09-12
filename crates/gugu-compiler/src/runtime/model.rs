@@ -18,6 +18,7 @@ use super::scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 use super::size_class::{DropScanPolicy, RuntimeSizeClassTable};
 use super::slab::MemoryDomainId;
 use super::startup_schema::{Rt0Demand, Rt0SchemaV1};
+use super::sync_schema::{SyncDemand, SyncRuntimeContract};
 use super::wait_schema::{WaitDemand, WaitRuntimeContract};
 use super::{
     BATCH_MAX, CACHE_LINE_BYTES, OWNER_INBOX_SHARDS, QUEUE_PAD_BYTES, RAW_SLAB_PAGE_BYTES,
@@ -28,8 +29,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 7 并入等待源、wait-node 与 select 提交契约。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 7;
+/// 契约对象的schema版本；schema 8 并入 std.sync 原子、锁、OnceLock 与取消契约。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 8;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -332,6 +333,7 @@ pub(crate) struct RuntimeRawContractV1 {
     coroutine: CoroutineRuntimeContract,
     scheduler: SchedulerRuntimeContract,
     wait: WaitRuntimeContract,
+    sync: SyncRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -351,6 +353,7 @@ impl RuntimeRawContractV1 {
         rt0_demand: Rt0Demand,
         scheduler_demand: SchedulerDemand,
         wait_demand: WaitDemand,
+        sync_demand: SyncDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -359,6 +362,7 @@ impl RuntimeRawContractV1 {
         resource_demand.kinds = RESOURCE_KINDS.len() as u32;
         let platform = PlatformRangeSchemaV1::build(profile, platform_range_demand(&demand))?;
         let rt0 = Rt0SchemaV1::build(rt0_demand)?;
+        let sync = SyncRuntimeContract::build(sync_demand, profile)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -377,6 +381,7 @@ impl RuntimeRawContractV1 {
             })?,
             scheduler: SchedulerRuntimeContract::build(scheduler_demand)?,
             wait: WaitRuntimeContract::build(wait_demand, profile)?,
+            sync,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -478,6 +483,11 @@ impl RuntimeRawContractV1 {
     /// 返回等待契约段。
     pub(crate) fn wait(&self) -> &WaitRuntimeContract {
         &self.wait
+    }
+
+    /// 返回同步契约段。
+    pub(crate) fn sync(&self) -> &SyncRuntimeContract {
+        &self.sync
     }
 
     /// 返回账本分类名。
@@ -613,6 +623,7 @@ impl RuntimeRawContractV1 {
         }
         self.scheduler.verify()?;
         self.wait.verify()?;
+        self.sync.verify()?;
         if self.scheduler.demand.spawn_sites != self.demand.coroutine_sites
             || self.scheduler.demand.suspend_points != self.demand.suspend_points
         {
@@ -662,6 +673,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.coroutine.canonical_bytes());
         bytes.extend_from_slice(&self.scheduler.canonical_bytes());
         bytes.extend_from_slice(&self.wait.canonical_bytes());
+        bytes.extend_from_slice(&self.sync.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -878,6 +890,14 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.coroutine.dump());
         output.push_str(&self.scheduler.dump());
         output.push_str(&self.wait.dump());
+        output.push_str(&format!(
+            "sync schema={} profile={} primitives={} total-ops={} fingerprint={}\n",
+            self.sync.schema(),
+            self.sync.profile(),
+            self.sync.primitive_count(),
+            self.sync.demand().total_ops(),
+            hex(&self.sync.fingerprint())
+        ));
         output
     }
 }
@@ -919,6 +939,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) scheduler_demand: SchedulerDemand,
     /// 等待源需求视图：channel / Join / select 调用计数。
     pub(crate) wait_demand: WaitDemand,
+    /// 同步需求视图：atomic / mutex / rwlock / condvar / once / cancel 操作计数。
+    pub(crate) sync_demand: SyncDemand,
     /// 生成契约所依据的 LIR 输入指纹。
     pub(crate) lir_fingerprint: [u8; 32],
     /// placement world 指纹。
@@ -940,6 +962,7 @@ pub(crate) fn run(
         inputs.rt0_demand,
         inputs.scheduler_demand,
         inputs.wait_demand,
+        inputs.sync_demand,
     ))
     .expect("runtime需求与策略可序列化");
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
@@ -974,12 +997,15 @@ pub(crate) fn run(
                 inputs.rt0_demand,
                 inputs.scheduler_demand,
                 inputs.wait_demand,
+                inputs.sync_demand,
                 inputs.profile,
             )
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
+                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
             fresh = Some(contract);
@@ -1008,6 +1034,8 @@ pub(crate) fn run(
     super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
+        .map_err(|error| vec![error.diagnostic()])?;
+    super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     let _ = inputs.sources;
     Ok(contract)

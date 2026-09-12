@@ -18,7 +18,7 @@ impl RawWorld {
             .ok_or_else(|| RawInvariant::new("没有 active processor 可唤醒"))
     }
 
-    fn wake_node(&mut self, node: WaitNodeHandle) -> Result<bool, RawInvariant> {
+    pub(crate) fn wake_node(&mut self, node: WaitNodeHandle) -> Result<bool, RawInvariant> {
         if !self.wait.is_live(node) {
             return Ok(false);
         }

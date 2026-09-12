@@ -37,7 +37,8 @@ pub use runtime::{
     CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport,
     IntrinsicBoundary, OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness,
     ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
-    SchedulerDemand, SchedulerRuntimeContract, StackPolicy, WaitDemand, WaitRuntimeContract,
+    SchedulerDemand, SchedulerRuntimeContract, StackPolicy, SyncDemand, SyncLockHarness,
+    SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -427,6 +428,7 @@ impl Compiler {
                 rt0_demand,
                 scheduler_demand: lir.scheduler_demand(),
                 wait_demand: lir.wait_demand(),
+                sync_demand: lir.sync_demand(),
                 profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
@@ -972,6 +974,10 @@ pub struct ImagePlan {
     wait_contract_fingerprint: [u8; 32],
     wait_demand: WaitDemand,
     wait_runtime: WaitRuntimeContract,
+    sync_contract_fingerprint: [u8; 32],
+    sync_demand: crate::runtime::SyncDemand,
+    sync_primitive_count: u32,
+    sync_runtime: crate::runtime::SyncRuntimeContract,
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1056,6 +1062,10 @@ impl ImagePlan {
             wait_contract_fingerprint: plan.wait_contract_fingerprint,
             wait_demand: plan.wait_demand,
             wait_runtime: plan.wait_runtime,
+            sync_contract_fingerprint: plan.sync_contract_fingerprint,
+            sync_demand: plan.sync_demand,
+            sync_primitive_count: plan.sync_primitive_count,
+            sync_runtime: plan.sync_runtime,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1388,6 +1398,22 @@ impl ImagePlan {
     /// 返回等待契约段。
     pub fn wait_runtime(&self) -> &WaitRuntimeContract {
         &self.wait_runtime
+    }
+    /// 返回同步契约指纹。
+    pub fn sync_contract_fingerprint(&self) -> [u8; 32] {
+        self.sync_contract_fingerprint
+    }
+    /// 返回同步需求视图。
+    pub fn sync_demand(&self) -> crate::runtime::SyncDemand {
+        self.sync_demand
+    }
+    /// 返回同步控制块数量。
+    pub fn sync_primitive_count(&self) -> u32 {
+        self.sync_primitive_count
+    }
+    /// 返回同步契约段。
+    pub fn sync_runtime(&self) -> &crate::runtime::SyncRuntimeContract {
+        &self.sync_runtime
     }
     /// 返回调度需求视图。
     pub fn scheduler_demand(&self) -> crate::runtime::SchedulerDemand {

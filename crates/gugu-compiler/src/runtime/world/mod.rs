@@ -7,6 +7,7 @@
 pub(crate) mod coroutine_impl;
 mod extent_impl;
 mod resource_impl;
+pub(crate) mod sync_impl;
 pub(crate) mod termination_impl;
 mod wait_impl;
 
@@ -17,6 +18,10 @@ mod coroutine_tests;
 #[cfg(test)]
 #[path = "../wait_tests.rs"]
 mod wait_tests;
+
+#[cfg(test)]
+#[path = "../sync_tests.rs"]
+mod sync_tests;
 
 #[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
@@ -111,6 +116,7 @@ pub(crate) struct RawWorld {
     scheduler: super::scheduler::SchedulerWorld,
     wait: super::wait::WaitPlane,
     channels: super::channel::ChannelTable,
+    sync: super::sync::SyncPlane,
 }
 
 impl RawWorld {
@@ -178,6 +184,7 @@ impl RawWorld {
             scheduler,
             wait,
             channels: super::channel::ChannelTable::new(),
+            sync: super::sync::SyncPlane::new(),
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。

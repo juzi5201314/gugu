@@ -1,0 +1,58 @@
+/* 同步控制块的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
+ * Mutex / RwLock / Condvar / OnceLock / Cancel 均对齐至 64 字节（cache line）。
+ */
+
+#[repr(C, align(64))]
+pub struct MutexControl {
+    pub state: uint,
+    pub owner_coroutine: uint,
+    pub wait_q_head: uint,
+    pub lock_count: uint,
+    pub padding: [byte; 32],
+}
+
+#[repr(C, align(64))]
+pub struct RwLockControl {
+    pub state: uint,
+    pub writer_coroutine: uint,
+    pub read_q_head: uint,
+    pub write_q_head: uint,
+    pub padding: [byte; 32],
+}
+
+#[repr(C, align(64))]
+pub struct CondvarControl {
+    pub wait_q_head: uint,
+    pub sequence: uint,
+    pub padding: [byte; 48],
+}
+
+#[repr(C, align(64))]
+pub struct OnceControl {
+    pub state: uint,
+    pub initiator_coroutine: uint,
+    pub wait_q_head: uint,
+    pub value_ready: uint,
+    pub padding: [byte; 32],
+}
+
+#[repr(C, align(64))]
+pub struct CancelControl {
+    pub state: uint,
+    pub generation: uint,
+    pub wait_q_head: uint,
+    pub token_count: uint,
+    pub padding: [byte; 32],
+}
+
+/// 非空 package 必经布局交叉校验。
+#[used]
+pub fn sync_records(
+    mutex: &MutexControl,
+    rwlock: &RwLockControl,
+    condvar: &CondvarControl,
+    once: &OnceControl,
+    cancel: &CancelControl,
+) uint {
+    mutex.state + rwlock.state + condvar.sequence + once.state + cancel.state
+}

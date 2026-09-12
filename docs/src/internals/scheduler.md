@@ -508,6 +508,18 @@ pressure 边界同步。它不改变 `safepoint_poll()`、foreign、pin 或 unsa
 SharedHeap forwarding；scheduler 保留至少一个 worker 处理 poller、timer 和 runnable，不能
 因 GC work 无限延迟用户调度。
 
+## std.sync 同步原语与取消接缝
+
+`std.sync` 原语（Mutex、RwLock、Condvar、OnceLock、Lazy 与 CancelSource/CancelToken）在调度器层提供确定性的挂起、唤醒与生命周期管理：
+
+1. **锁与条件变量挂起**：锁争用（`MutexLockOutcome::Contended`）与条件变量等待（`Condvar.wait`）只将协程挂入 `Waiting` 状态，不占用底层 OS 线程。唤醒通过 `ready_publish` 走标准调度入口，保持局部性与弱公平；
+2. **Non-poisoning 与租约自动解锁**：锁守卫由 `Adaptive Resource Leasing` 管理。当持锁协程执行结束（`finish_coroutine_on_system`）或 panic 展开时，`release_coroutine_locks` 通过租约掉落自动触发解锁，并将锁弱公平交接给下一个等待者。锁状态绝不进入 poisoned，后续协程获取锁始终正常返回；
+3. **OnceLock / Lazy 状态机**：维护 `Uninit` -> `Initializing` -> `Ready` / `Failed` 单向状态机。并发调用中只有一个协程取得初始化执行权（`ExecuteInitializer`），其余协程排队等待。闭包 panic 或异常展开时转入永久 `Failed`，唤醒全部等待者且后续 `get`/`get_or_init` 永久报错，绝不自动重试或提供 reset；
+4. **取消与阻塞操作接缝**：取消是显式、协作且幂等的。
+   - 在 channel 接收接缝（`channel_recv_cancel`）中，若 token 已取消，操作直接返回 `Cancelled`；未收到消息前被取消时安全注销等待节点，不破坏通道环状缓冲，已线性化的消息不丢失；
+   - 在 Join 等待接缝（`join_wait_cancel`）中，取消只注销当前等待者的 wait-node 并返回 `Cancelled`，绝不级联取消、打断或隐式 kill 被等待的目标子协程，目标协程继续正常执行直至完成；
+   - 在子进程等待接缝（`Child.wait_cancel`）中，取消只取消等待者并返回 `Cancelled`，绝不 kill 子进程。
+
 ## 动态并行度
 
 公开facade按[运行时](../spec/runtime.md#gc栈与运行时控制-api)验证并线性化请求后，向scheduler发布`ApplyParallelism { old, new, epoch }`；scheduler不再次决定零值错误、setter返回值或公开状态。增加时按runnable demand从processor pool取得控制块、分配新的稳定ID并重建稠密active快照，按宿主topology归入NUMA domain；只在需要时创建/唤醒worker，不按new一次性预建线程。同时提高dirty target并按FIFO admission等待项，必需分配失败上报runtime fatal入口。

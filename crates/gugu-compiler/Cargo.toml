@@ -33,5 +33,9 @@ harness = false
 name = "channel_wait"
 harness = false
 
+[[bench]]
+name = "sync_lock"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"

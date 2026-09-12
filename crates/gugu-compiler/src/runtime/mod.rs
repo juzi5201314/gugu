@@ -30,6 +30,10 @@ mod stack;
 mod stack_arena;
 mod startup_kinds;
 mod startup_schema;
+#[allow(dead_code, reason = "同步协议的确定性参照实现")]
+pub mod sync;
+pub(crate) mod sync_layout;
+pub mod sync_schema;
 #[allow(dead_code, reason = "等待协议的确定性参照实现")]
 mod wait;
 mod wait_schema;
@@ -41,6 +45,7 @@ pub use coroutine_schema::{
     StackPolicy,
 };
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
+pub use sync_schema::{SyncDemand, SyncRuntimeContract};
 pub use wait_schema::{WaitDemand, WaitRuntimeContract};
 
 // rt0 启动、生命周期、报告与终止的参照实现：lib 构建只消费契约段，确定性验证
@@ -97,7 +102,7 @@ mod tests;
 
 pub use harness::{
     ChannelWaitHarness, ChannelWaitReport, HarnessReport, OwnerReturnHarness,
-    ResourceReleaseHarness, ResourceReleaseReport,
+    ResourceReleaseHarness, ResourceReleaseReport, SyncLockHarness, SyncLockReport,
 };
 
 #[cfg(test)]
@@ -138,6 +143,7 @@ const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg"
 const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
 const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
 const RUNTIME_CHANNEL_SOURCE: &str = include_str!("../../resources/runtime/channel.gg");
+const RUNTIME_SYNC_SOURCE: &str = include_str!("../../resources/runtime/sync.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -251,6 +257,11 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/runtime/channel.gg",
                     source: RUNTIME_CHANNEL_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/sync.gg",
+                    source: RUNTIME_SYNC_SOURCE,
                     role: RuntimeSourceRole::Runtime,
                 },
             ],

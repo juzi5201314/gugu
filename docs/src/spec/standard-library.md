@@ -416,6 +416,7 @@ File、TcpStream、进程 pipe 和内存缓冲实现适用 trait。`print` / `pr
 ```text
 struct CancelSource
 struct CancelToken
+struct Cancelled
 
 fn new() CancelSource
 fn token(self: &Self) CancelToken

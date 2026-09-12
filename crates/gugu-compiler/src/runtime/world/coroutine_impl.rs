@@ -348,6 +348,8 @@ impl RawWorld {
             (state & !255) | CoroutineState::Dead as u64,
             Ordering::Release,
         );
+        self.sync
+            .release_coroutine_locks(u64::from(ticket.coroutine.index));
         self.wake_join(ticket.coroutine)?;
         if self
             .controls

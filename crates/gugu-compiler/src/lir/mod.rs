@@ -186,6 +186,18 @@ impl Validated {
         }
         demand
     }
+    /// 同步需求：从优化后 LIR 统计原子操作与同步原语需求。
+    pub(crate) fn sync_demand(&self) -> crate::runtime::SyncDemand {
+        let mut demand = crate::runtime::SyncDemand::default();
+        for world_body in &self.world.bodies {
+            for instruction in &world_body.instructions {
+                if let body::Op::Atomic { .. } = &instruction.op {
+                    demand.atomic_ops += 1;
+                }
+            }
+        }
+        demand
+    }
     /// 世界内 `SafepointPoll` 数量。
     pub(crate) fn poll_count(&self) -> usize {
         self.world

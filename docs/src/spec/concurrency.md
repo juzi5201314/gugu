@@ -154,6 +154,14 @@ impl RwWriteGuard[T] {
     fn get(self: &Self) &T
     fn unlock(self: &Self)
 }
+
+struct Condvar
+impl Condvar {
+    fn new() Condvar
+    fn wait[T](self: &Self, guard: &MutexGuard[T])
+    fn notify_one(self: &Self)
+    fn notify_all(self: &Self)
+}
 ```
 
 Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的普通 `&T`；`snapshot()` 和 `with_read` 只产生当前值的语义副本。`with_read_ref` 的 callback 参数是[函数与闭包](functions.md#scoped-borrowed-view-callback)定义的 `ScopedRead` view，只有读取权限且不能逃逸；它在读锁保持期间直接访问内部值，不复制 T。`with_write` 保持原有写入语义，callback 参数是普通锁守卫提供的可写 `&T`。若 T 含可变身份句柄，调用者仍须保证不会绕过锁并发写其载荷。守卫由 Adaptive Resource Leasing 管理：复制守卫共享同一次加锁的 ResourceCell，最后一个 lease 结束时自动解锁；显式 `unlock` 幂等并让所有副本立即观察已解锁状态。解锁后再 `get` / `snapshot` / `with_read_ref` / `wait` 是 panic。
