@@ -374,6 +374,24 @@ impl Checker<'_, '_> {
                             },
                             _ => Ty::Error,
                         };
+                        let args = args.as_slice(&self.arena().expr_ids);
+                        if args.len() != 1 {
+                            self.error(
+                                DiagnosticCode::InvalidExpression,
+                                "chan 构造需要一个缓冲长度",
+                                expr.span.clone(),
+                            );
+                        } else if let Some(capacity) = self
+                            .early_int(args[0])
+                            .or_else(|| self.model.constant_int(self.module, args[0]).ok())
+                            && capacity < 0
+                        {
+                            self.error(
+                                DiagnosticCode::InvalidExpression,
+                                "channel 缓冲长度不能为负",
+                                expr.span.clone(),
+                            );
+                        }
                         Ty::Chan(Box::new(ty))
                     }
                     IntrinsicKind::TypeId => {
@@ -454,7 +472,7 @@ impl Checker<'_, '_> {
                             if let Ty::Chan(t) = ty {
                                 self.bind(
                                     pat,
-                                    &Ty::Result(t, Box::new(Ty::Unit)),
+                                    &Ty::Result(t, Box::new(Ty::ChanClosed)),
                                     true,
                                     Some(false),
                                 );
@@ -472,7 +490,7 @@ impl Checker<'_, '_> {
                             if let Ty::Join(t) = ty {
                                 self.bind(
                                     pat,
-                                    &Ty::Result(t, Box::new(Ty::Unit)),
+                                    &Ty::Result(t, Box::new(Ty::Panic)),
                                     true,
                                     Some(false),
                                 );
@@ -485,7 +503,14 @@ impl Checker<'_, '_> {
                             }
                             body
                         }
-                        SelectArmKind::Error => continue,
+                        SelectArmKind::Error => {
+                            self.error(
+                                DiagnosticCode::InvalidExpression,
+                                "select 分支只能是 send、recv 或 wait，禁止 try_send/try_recv",
+                                arm.span.clone(),
+                            );
+                            continue;
+                        }
                     };
                     let ty = self.expression(body, expected);
                     result = self.join(&ty, &result, &arm.span);

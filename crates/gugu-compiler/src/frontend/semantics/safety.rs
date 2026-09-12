@@ -126,6 +126,7 @@ impl Model<'_> {
             | Ty::Slice(_)
             | Ty::Chan(_)
             | Ty::Join(_)
+            | Ty::Panic
             | Ty::Function(..)
             | Ty::Callable(..)
             | Ty::Dyn(_) => Some(false),
@@ -155,7 +156,10 @@ impl Model<'_> {
             | Ty::Float(_)
             | Ty::Ptr(_)
             | Ty::TypeId
-            | Ty::Range => Some(property == Property::Bit),
+            | Ty::Range
+            | Ty::ChanClosed
+            | Ty::TrySendErr
+            | Ty::TryRecvErr => Some(property == Property::Bit),
         }
     }
 

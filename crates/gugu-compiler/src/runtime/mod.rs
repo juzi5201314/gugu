@@ -8,6 +8,9 @@
 
 use crate::target::{Rt0Kind, TargetName};
 
+#[allow(dead_code, reason = "等待协议的确定性参照实现")]
+mod channel;
+mod channel_layout;
 mod context;
 #[allow(dead_code, reason = "协程布局与生命周期的确定性参照实现")]
 mod coroutine;
@@ -19,12 +22,17 @@ mod platform_schema;
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
 mod scheduler_schema;
+#[allow(dead_code, reason = "等待协议的确定性参照实现")]
+mod select;
 #[allow(dead_code, reason = "栈尺寸与精确复制协议的确定性参照实现")]
 mod stack;
 #[allow(dead_code, reason = "栈arena与cache的确定性参照实现")]
 mod stack_arena;
 mod startup_kinds;
 mod startup_schema;
+#[allow(dead_code, reason = "等待协议的确定性参照实现")]
+mod wait;
+mod wait_schema;
 
 pub use context::ContextSwitchCode;
 pub use coroutine::CoroutineContext;
@@ -33,6 +41,7 @@ pub use coroutine_schema::{
     StackPolicy,
 };
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
+pub use wait_schema::{WaitDemand, WaitRuntimeContract};
 
 // rt0 启动、生命周期、报告与终止的参照实现：lib 构建只消费契约段，确定性验证
 // 套件直接消费这些状态机。
@@ -87,7 +96,8 @@ mod termination_tests;
 mod tests;
 
 pub use harness::{
-    HarnessReport, OwnerReturnHarness, ResourceReleaseHarness, ResourceReleaseReport,
+    ChannelWaitHarness, ChannelWaitReport, HarnessReport, OwnerReturnHarness,
+    ResourceReleaseHarness, ResourceReleaseReport,
 };
 
 #[cfg(test)]
@@ -127,6 +137,7 @@ const STD_PRELUDE_SOURCE: &str = include_str!("../../resources/std/prelude.gg");
 const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
 const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
 const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
+const RUNTIME_CHANNEL_SOURCE: &str = include_str!("../../resources/runtime/channel.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -235,6 +246,11 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/runtime/coroutine.gg",
                     source: RUNTIME_COROUTINE_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/channel.gg",
+                    source: RUNTIME_CHANNEL_SOURCE,
                     role: RuntimeSourceRole::Runtime,
                 },
             ],

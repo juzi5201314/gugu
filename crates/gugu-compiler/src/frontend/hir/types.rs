@@ -52,6 +52,10 @@ pub(crate) enum Type {
     Result(TypeId, TypeId),
     Chan(TypeId),
     Join(TypeId),
+    ChanClosed,
+    TrySendErr,
+    TryRecvErr,
+    Panic,
     MaybeUninit(TypeId),
 }
 

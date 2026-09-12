@@ -253,6 +253,20 @@ impl Builder<'_> {
                 args.push(self.descriptor(ty));
                 self.runtime_result(target, args, ty)
             }
+            g::IntrinsicOp::ChanTrySend | g::IntrinsicOp::ChanTryRecv => {
+                let target = if matches!(op, g::IntrinsicOp::ChanTrySend) {
+                    RuntimeCall::ChannelTrySend
+                } else {
+                    RuntimeCall::ChannelTryRecv
+                };
+                let mut args = Vec::new();
+                for operand in operands {
+                    let value = self.operand(operand)?;
+                    args.extend(self.computed_values(value)?);
+                }
+                args.push(self.descriptor(ty));
+                self.runtime_result(target, args, ty)
+            }
             g::IntrinsicOp::Spawn(g::SpawnTarget::Body(definition)) => {
                 self.closure(*definition, ty, true)
             }

@@ -396,6 +396,9 @@ pub(crate) enum IntrinsicOp {
     /// 无缓冲/有缓冲 channel 创建。
     ChanNew,
     ChanClose,
+    /// 非挂起的尝试发送/接收。
+    ChanTrySend,
+    ChanTryRecv,
     /// `static`/`local static` 存储引用；`Deref` 后形成 place。
     StaticRef(DefId),
     /// 启动 `async` 协程；operands 为 callee/接收者/实参或协程环境。

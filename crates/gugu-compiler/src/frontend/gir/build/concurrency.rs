@@ -102,6 +102,64 @@ impl Builder<'_> {
         Ok(Some(dest))
     }
 
+    pub(super) fn emit_chan_try(
+        &mut self,
+        id: ExprId,
+        operation: hir::Builtin,
+        arguments: Range<u32>,
+    ) -> Result<Option<LocalId>, Diagnostic> {
+        let try_send = matches!(operation, hir::Builtin::ChanTrySend);
+        let args = expr_range(self.owner, &arguments);
+        let Some(channel) = args.first().copied() else {
+            return Err(gir_error(
+                if try_send {
+                    "chan.try_send 需要通道与值"
+                } else {
+                    "chan.try_recv 需要通道"
+                },
+                Some(&self.source_of(id).location),
+            ));
+        };
+        if try_send && args.get(1).is_none() {
+            return Err(gir_error(
+                "chan.try_send 需要通道与值",
+                Some(&self.source_of(id).location),
+            ));
+        }
+        let Some(channel) = self.emit_expr(channel)? else {
+            return Ok(None);
+        };
+        let mut operands = vec![copy_of(channel)];
+        if try_send {
+            let Some(value) = args.get(1).copied() else {
+                return Err(gir_error(
+                    "chan.try_send 需要通道与值",
+                    Some(&self.source_of(id).location),
+                ));
+            };
+            let Some(payload) = self.emit_expr(value)? else {
+                return Ok(None);
+            };
+            operands.push(self.pass_arg(value, payload));
+        }
+        let dest = self.temp(self.expr_ty(id));
+        let op = if try_send {
+            IntrinsicOp::ChanTrySend
+        } else {
+            IntrinsicOp::ChanTryRecv
+        };
+        self.assign(
+            Place::local(dest),
+            Rvalue::Intrinsic {
+                op,
+                operands,
+                types: Vec::new(),
+            },
+        );
+        self.set_value(id, dest);
+        Ok(Some(dest))
+    }
+
     pub(super) fn emit_yield(&mut self) -> Result<(), Diagnostic> {
         let resume = self.fresh(false);
         let location = self.blocks[self.current.index()].source.location.clone();

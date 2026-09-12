@@ -1,0 +1,53 @@
+/* 等待源控制块的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
+ * wait-node 只保存协程句柄、generation、case 和下标偏移，禁止裸栈指针。
+ * CoroutineCold.select_scratch 的 4 个 uint 解释为 SelectTxn 描述符；8-word 内联
+ * scratch 是 processor-local cache 的 0 号 class。
+ */
+
+#[repr(C)]
+pub struct SelectTxn {
+    pub phase_winner: uint,
+    pub case_count: uint,
+    pub scratch_handle: uint,
+    pub wait_block: uint,
+}
+
+#[repr(C, align(64))]
+pub struct SelectScratchCache {
+    pub inline_words: [uint; 8],
+}
+
+#[repr(C, align(64))]
+pub struct WaitNode {
+    pub coroutine_index: uint,
+    pub coroutine_generation: uint,
+    pub wait_generation: uint,
+    pub case_index: uint,
+    pub payload_offset: uint,
+    pub result_offset: uint,
+    pub next: uint,
+    pub flags: uint,
+}
+
+#[repr(C, align(64))]
+pub struct ChannelControl {
+    pub source_id: uint,
+    pub generation: uint,
+    pub capacity: uint,
+    pub closed: uint,
+    pub head: uint,
+    pub tail: uint,
+    pub len: uint,
+    pub send_q_head: uint,
+    pub recv_q_head: uint,
+    pub reservation_generation: uint,
+    pub ring_index: uint,
+    pub ring_generation: uint,
+    pub padding: [byte; 32],
+}
+
+/// 非空 package 必经布局交叉校验。
+#[used]
+pub fn wait_records(control: &ChannelControl, node: &WaitNode, txn: &SelectTxn, cache: &SelectScratchCache) uint {
+    control.source_id + node.wait_generation + txn.case_count + cache.inline_words[0]
+}

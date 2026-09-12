@@ -414,6 +414,10 @@ impl<'a> MonoContext<'a> {
                 out.extend_from_slice(&24u16.to_le_bytes());
                 self.encode_type_into(inner, out)?;
             }
+            Ty::ChanClosed => out.extend_from_slice(&25u16.to_le_bytes()),
+            Ty::TrySendErr => out.extend_from_slice(&26u16.to_le_bytes()),
+            Ty::TryRecvErr => out.extend_from_slice(&27u16.to_le_bytes()),
+            Ty::Panic => out.extend_from_slice(&28u16.to_le_bytes()),
         }
         Ok(())
     }

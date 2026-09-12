@@ -6,9 +6,11 @@
 //! 验证使用。
 
 use std::{
+    collections::HashSet,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
+        mpsc,
     },
     thread,
     time::Instant,
@@ -76,6 +78,7 @@ impl OwnerReturnHarness {
             super::RawResourceDemand::default(),
             super::Rt0Demand::default(),
             SchedulerDemand::default(),
+            super::WaitDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -267,6 +270,7 @@ impl ResourceReleaseHarness {
             super::RawResourceDemand::default(),
             super::Rt0Demand::default(),
             SchedulerDemand::default(),
+            super::WaitDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -444,4 +448,269 @@ fn build_message(
     let _ = sequence;
     message.integrity.checksum = super::message::IntegrityTag::compute(&secret, &message);
     message
+}
+
+/// channel ping-pong 与 select 提交的真实并发冒烟结果。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ChannelWaitReport {
+    /// 发送成功次数。
+    pub sent: u64,
+    /// 接收成功次数。
+    pub received: u64,
+    /// select 提交次数。
+    pub select_commits: u64,
+    /// 去重后的 payload 数。
+    pub unique: u64,
+    /// 耗时微秒。
+    pub elapsed_micros: u64,
+    /// exactly-once 与账本是否成立。
+    pub invariants_hold: bool,
+}
+
+/// 多 producer ping-pong 与 select 提交；只校验守恒，不针对吞吐作弊。
+///
+/// `RawWorld` 含协程槽裸指针，不能跨线程移动。producer/consumer 只发送 `Send` 请求，
+/// owner 线程在本地创建世界并串行执行 `try_send`/`try_recv`/`select`。
+#[derive(Clone, Copy, Debug)]
+pub struct ChannelWaitHarness {
+    producers: u32,
+    items: u32,
+}
+
+impl ChannelWaitHarness {
+    /// 创建 harness；每个 producer 至少发送一个 item。
+    pub fn new(producers: u32, items: u32) -> Self {
+        Self {
+            producers: producers.max(1),
+            items: items.max(1),
+        }
+    }
+
+    /// 运行一轮真实线程 ping-pong 与 select 提交。
+    pub fn run(self) -> ChannelWaitReport {
+        let start = Instant::now();
+        let (tx, rx) = mpsc::channel();
+        let owner = thread::spawn(move || run_wait_owner(rx, self.producers, self.items));
+        let joins = spawn_wait_workers(tx.clone(), self.producers, self.items);
+        drop(tx);
+        let mut clean = true;
+        for join in joins {
+            clean &= join.join().is_ok();
+        }
+        let stats = match owner.join() {
+            Ok(stats) => stats,
+            Err(_) => {
+                return ChannelWaitReport {
+                    sent: 0,
+                    received: 0,
+                    select_commits: 0,
+                    unique: 0,
+                    elapsed_micros: elapsed_micros(start),
+                    invariants_hold: false,
+                };
+            }
+        };
+        let total = u64::from(self.producers * self.items);
+        ChannelWaitReport {
+            sent: stats.sent,
+            received: stats.received,
+            select_commits: stats.select_commits,
+            unique: stats.unique,
+            elapsed_micros: elapsed_micros(start),
+            invariants_hold: clean
+                && stats.sent == total
+                && stats.received == total
+                && stats.unique == total
+                && stats.select_commits == u64::from(self.items)
+                && stats.ledger,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WaitOp {
+    Send(u64),
+    Recv,
+}
+
+enum WaitReply {
+    Sent,
+    Received,
+    Retry,
+    Failed,
+}
+
+struct OwnerStats {
+    sent: u64,
+    received: u64,
+    unique: u64,
+    select_commits: u64,
+    ledger: bool,
+}
+
+fn elapsed_micros(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn spawn_wait_workers(
+    tx: mpsc::Sender<(WaitOp, mpsc::Sender<WaitReply>)>,
+    producers: u32,
+    items: u32,
+) -> Vec<thread::JoinHandle<()>> {
+    let total = u64::from(producers * items);
+    let received = Arc::new(AtomicU64::new(0));
+    let mut joins = Vec::with_capacity((producers * 2) as usize);
+    for producer in 0..producers {
+        let tx = tx.clone();
+        joins.push(thread::spawn(move || pump_sends(&tx, producer, items)));
+    }
+    for _ in 0..producers {
+        let tx = tx.clone();
+        let received = Arc::clone(&received);
+        joins.push(thread::spawn(move || pump_recvs(&tx, &received, total)));
+    }
+    joins
+}
+
+fn pump_sends(tx: &mpsc::Sender<(WaitOp, mpsc::Sender<WaitReply>)>, producer: u32, items: u32) {
+    let base = u64::from(producer) * u64::from(items);
+    for offset in 0..items {
+        let payload = base + u64::from(offset) + 1;
+        loop {
+            match submit_wait(tx, WaitOp::Send(payload)) {
+                WaitReply::Sent => break,
+                WaitReply::Retry => thread::yield_now(),
+                WaitReply::Received | WaitReply::Failed => return,
+            }
+        }
+    }
+}
+
+fn pump_recvs(
+    tx: &mpsc::Sender<(WaitOp, mpsc::Sender<WaitReply>)>,
+    received: &AtomicU64,
+    total: u64,
+) {
+    while received.load(Ordering::Acquire) < total {
+        match submit_wait(tx, WaitOp::Recv) {
+            WaitReply::Received => {
+                received.fetch_add(1, Ordering::AcqRel);
+            }
+            WaitReply::Retry => thread::yield_now(),
+            WaitReply::Sent | WaitReply::Failed => return,
+        }
+    }
+}
+
+fn submit_wait(tx: &mpsc::Sender<(WaitOp, mpsc::Sender<WaitReply>)>, op: WaitOp) -> WaitReply {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    if tx.send((op, reply_tx)).is_err() {
+        return WaitReply::Failed;
+    }
+    reply_rx.recv().unwrap_or(WaitReply::Failed)
+}
+
+fn run_wait_owner(
+    rx: mpsc::Receiver<(WaitOp, mpsc::Sender<WaitReply>)>,
+    producers: u32,
+    items: u32,
+) -> OwnerStats {
+    use super::select::{SelectCase, SelectOp, SelectOutcome};
+
+    let (mut world, channel, ready, selector) = boot_wait_world(producers);
+    let mut unique = HashSet::new();
+    let mut stats = OwnerStats {
+        sent: 0,
+        received: 0,
+        unique: 0,
+        select_commits: 0,
+        ledger: false,
+    };
+    while let Ok((op, reply)) = rx.recv() {
+        let message = apply_wait_op(&mut world, channel, op, &mut unique, &mut stats);
+        let _ = reply.send(message);
+    }
+    stats.unique = unique.len() as u64;
+    let cases = [SelectCase {
+        op: SelectOp::Recv { channel: ready },
+        index: 0,
+    }];
+    for _ in 0..items {
+        if world.select(selector, &cases, true).ok() == Some(SelectOutcome::Case(0)) {
+            stats.select_commits += 1;
+        }
+    }
+    stats.ledger = world.ledger_invariant(0).is_ok();
+    stats
+}
+
+fn boot_wait_world(
+    producers: u32,
+) -> (
+    RawWorld,
+    super::channel::ChannelHandle,
+    super::channel::ChannelHandle,
+    super::coroutine::CoroutineHandle,
+) {
+    use super::world::coroutine_impl::CoroutineEntry;
+
+    let mut world = RawWorld::new(11, 1, BATCH_MAX * 4, BatchLimits::default()).expect("world");
+    world
+        .boot(
+            vec![],
+            vec![("GUGU_RUNTIME_STACK_MAX".to_owned(), "64KiB".to_owned())],
+            "/".to_owned(),
+            producers,
+            CoroutineEntry {
+                pc: 0x1000,
+                required_frame: 64,
+            },
+        )
+        .expect("boot");
+    let channel = world.channel_new(i64::from(producers)).expect("channel");
+    let ready = world.channel_new(1).expect("select 源");
+    world
+        .channel_try_send(ready, 1)
+        .expect("ready")
+        .expect("ok");
+    let selector = world
+        .spawn_user_coroutine(
+            0,
+            CoroutineEntry {
+                pc: 0x2000,
+                required_frame: 64,
+            },
+        )
+        .expect("selector")
+        .expect("接纳");
+    world.enter_coroutine(selector).expect("切入");
+    (world, channel, ready, selector)
+}
+
+fn apply_wait_op(
+    world: &mut RawWorld,
+    channel: super::channel::ChannelHandle,
+    op: WaitOp,
+    unique: &mut HashSet<u64>,
+    stats: &mut OwnerStats,
+) -> WaitReply {
+    match op {
+        WaitOp::Send(payload) => match world.channel_try_send(channel, payload) {
+            Ok(Ok(())) => {
+                stats.sent += 1;
+                WaitReply::Sent
+            }
+            Ok(Err(_)) => WaitReply::Retry,
+            Err(_) => WaitReply::Failed,
+        },
+        WaitOp::Recv => match world.channel_try_recv(channel) {
+            Ok(Ok(payload)) => {
+                unique.insert(payload);
+                stats.received += 1;
+                WaitReply::Received
+            }
+            Ok(Err(_)) => WaitReply::Retry,
+            Err(_) => WaitReply::Failed,
+        },
+    }
 }

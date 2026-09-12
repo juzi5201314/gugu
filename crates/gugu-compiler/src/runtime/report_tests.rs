@@ -5,7 +5,7 @@
 
 use super::report::{
     EmergencyBuffer, EmittedReport, RenderFormat, ReportLedger, SourceLocation, collect_backtrace,
-    render, render_format,
+    render_format,
 };
 use super::startup::{BacktraceMode, DiagnosticsFormat};
 use super::startup_schema::{ExitCategory, ReportEvent, ReportReason};

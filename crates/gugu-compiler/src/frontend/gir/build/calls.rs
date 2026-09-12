@@ -361,6 +361,9 @@ impl Builder<'_> {
             hir::Builtin::Panic => self.emit_panic(id, arguments),
             hir::Builtin::ChanSend => self.emit_chan_send(id, arguments),
             hir::Builtin::ChanRecv => self.emit_chan_recv(id, arguments),
+            hir::Builtin::ChanTrySend | hir::Builtin::ChanTryRecv => {
+                self.emit_chan_try(id, builtin, arguments)
+            }
             hir::Builtin::JoinWait => self.emit_join_wait(id, arguments),
             hir::Builtin::Some | hir::Builtin::Ok | hir::Builtin::Err => {
                 self.emit_ctor_builtin(id, builtin, arguments)
@@ -428,6 +431,15 @@ impl Builder<'_> {
         if let hir::Builtin::Platform(kind) = operation {
             return self.emit_platform_call(id, platform_op(kind), arguments, types);
         }
+        match operation {
+            hir::Builtin::ChanSend => return self.emit_chan_send(id, arguments),
+            hir::Builtin::ChanRecv => return self.emit_chan_recv(id, arguments),
+            hir::Builtin::ChanTrySend | hir::Builtin::ChanTryRecv => {
+                return self.emit_chan_try(id, operation, arguments);
+            }
+            hir::Builtin::JoinWait => return self.emit_join_wait(id, arguments),
+            _ => {}
+        }
         let mut operands = Vec::new();
         for argument in expr_range(self.owner, &arguments) {
             let Some(local) = self.emit_expr(argument)? else {
@@ -464,10 +476,18 @@ impl Builder<'_> {
                 if let Some(Operand::Copy(place)) = operands.first() {
                     Rvalue::Len(*place)
                 } else {
-                    intrinsic(IntrinsicOp::TypeId, operands, types)
+                    return Err(gir_error(
+                        "len 缺少可投影的操作数",
+                        Some(&self.source_of(id).location),
+                    ));
                 }
             }
-            _ => intrinsic(IntrinsicOp::TypeId, operands, types),
+            _ => {
+                return Err(gir_error(
+                    "该 intrinsic 没有对应的 GIR 操作",
+                    Some(&self.source_of(id).location),
+                ));
+            }
         };
         self.assign(Place::local(dest), rvalue);
         self.set_value(id, dest);

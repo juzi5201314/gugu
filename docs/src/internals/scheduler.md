@@ -68,14 +68,14 @@ CoroutineCold {
     coroutine_locals,
     panic_state,
     select_rng: [u64; 4],
-    select_scratch: SelectScratchCache,
+    select_scratch: [u64; 4],
     gc_scan_epoch: AtomicU64,
 }
 ```
 
 `CoroutineSlot` 与 `CoroutineCold` 都来自分段 non-moving slab；扩容只能增加新页，不能移动旧 record。`cold_index` 在 segmented cold table 中稠密解析，不形成 managed pointer。`preferred_processor` 只是 last-owner locality hint，只有pointer当前ID与`preferred_processor_id`一致且state仍为active时才有效；这对值防止processor control block复用形成hint ABA，指向`Retiring`时必须忽略。`run_link_next` 和 `run_batch_len` 只由当前 queue owner普通读写：producer在 Release 发布 batch前独占，consumer通过 Acquire摘取后独占；其它访问是 runtime memory-safety错误。`r14` 指向 `CoroutineHot`，`StackDescriptor` 位于同一 `CoroutineSlot` 的固定下一条 cache line。
 
-`select_scratch` 只保存 readiness bitmap，不保存 managed pointer；source、send payload 和 result slot仍位于用户 frame并由 stack map追踪。需要登记多个 case时，`wait_record` 的 tagged `Select` variant持有 `SelectTxn` 与一个 non-moving `SelectWaitBlock` handle；block按 case数量在取得任何 source锁前从 runtime wait-node size class取得，node只保存 Coroutine handle、generation、case index和 stack-high-relative payload/result offset，由 typed visitor按 descriptor扫描，禁止保存会被 stack copy悬空的裸 pointer。cleanup完成后 block立即归还；scratch由同一 `SelectTxn` 的 owner 负责释放或转入有界 cache，typed visitor跳过其 raw bytes。
+`CoroutineCold.select_scratch` 的 4 个 `u64` 是 `SelectTxn` 描述符（相位、winner、scratch handle、wait-block），不是 8-word readiness 内联区。8 个 `u64` 的 `SelectScratchCache` 是 processor-local scratch cache 的 0 号 class，写在 `LogicalProcessor` 上，累计容量受 `select_scratch_cache_bytes` 约束。source、send payload 和 result slot 仍位于用户 frame 并由 stack map 追踪。需要登记多个 case 时，`wait_record` 的 tagged `Select` variant 持有同一 `SelectTxn` 与一个 non-moving `SelectWaitBlock` handle；block 按 case 数量在取得任何 source 锁前从 runtime wait-node size class 取得，node 只保存 Coroutine handle、generation、case index 和 stack-high-relative payload/result offset，由 typed visitor 按 descriptor 扫描，禁止保存会被 stack copy 悬空的裸 pointer。cleanup 完成后 block 立即归还；scratch 由同一 `SelectTxn` 的 owner 负责释放或转入有界 cache，typed visitor 跳过其 raw bytes。
 
 `ForeignBridgeState` 位于 cold record，只在 lifecycle 为 `Foreign` 或 `DirtyWaiting` 时有效，固定保存 `{ mode, call_stub, frame_offset, frame_size, lease_word, dirty_link, bridge_credit, error_state }`。compiler 在 coroutine stack 上物化 ABI bridge frame；`frame_offset` 是从逻辑 `stack_high` 到 frame起点的 checked深度，record不保存会因 stack copy失效的裸 stack pointer。`call_stub` 是 non-moving code pointer；`lease_word` 保存本次 bridge generation和进入 native后期望的完整 lifecycle word，不是 pointer；`dirty_link` 只供 `dirty_wait_queue` 使用，不能复用 runnable `run_link_next`；`bridge_credit` 是 `BlockingBridge` admission发放的非指针额度，attached 与 detached bridge 共用且最多归还一次。ABI frame里的 managed/raw pointer按调用点 stack map追踪，交给 native 的 managed地址还必须在进入 bridge前 pin或复制。
 
@@ -202,7 +202,7 @@ local deque满时，owner一次认领最旧128项，按 newest-to-oldest串成pu
 
 ### Select scratch
 
-`SelectScratchCache` 是 coroutine cold record 中的固定描述符，不是可任意增长的 `Vec`。每次 `select` 先以内联的8个 `u64` readiness word处理不超过8个 case；超过8个 case时按 `1, 2, 4, ... 1024` 个 word的 size class 从 owner-local raw cache取得，超过1024 word则从 owner slab/extent取得精确或向上取整的临时 allocation。`SelectTxn` 记录 `{ owner, class, capacity_words, used_words, generation }`，scratch只含 bitmap和规范化 source index，不含 managed pointer。
+`SelectTxn` 描述符占用 `CoroutineCold.select_scratch` 的 4 个 `u64`，不是可任意增长的 `Vec`。每次 `select` 先用 processor-local `SelectScratchCache` 的 0 号 class（内联 8 个 `u64`）处理不超过 8 个 case；超过 8 个 case 时按 `1, 2, 4, ... 1024` 个 word 的 size class 从该 processor 的 raw cache 取得，超过 1024 word 则从 owner slab/extent 取得精确或向上取整的临时 allocation。`SelectTxn` 记录相位、winner、scratch handle 与 wait-block；scratch 只含 bitmap 和规范化 source index，不含 managed pointer。
 
 规范化 source 顺序、case-to-word mapping和去重结果组成 immutable `SelectPlanKey`；同一编译期固定 plan 可在 coroutine cold cache中复用 mapping，但 readiness bits和 winner state每次清零。动态 case集合不得伪装成固定 plan，仍按 `WaitSourceId`排序去重并逐 source登记。
 
@@ -273,7 +273,7 @@ HIR把无 case且无 default的形式标为 `SelectPlan::Never`。scheduler对�
 
 coroutine 的 `select_rng` 使用 xoshiro256++。一次 next固定为 `result = rotl(s0 + s3, 23) + s0`，再执行 `t = s1 << 17; s2 ^= s0; s3 ^= s1; s1 ^= s2; s0 ^= s3; s2 ^= t; s3 = rotl(s3, 45)`，全部 `u64` 环绕。初始32字节状态为 BLAKE3-256(`gugu-select-rng-v1`、OS entropy、CoroutineId、进程启动 nonce)；全零时把 `s0`置1。该状态不与 `std.random`共享。`uniform(n)` 固定使用 threshold rejection：`threshold = 0u64.wrapping_sub(n) % n`，重复取值直到 `x >= threshold`，返回 `x % n`；所有 rejection与 permutation生成都在锁外执行。
 
-取得任何 source锁前，runtime按 `case_count` 准备 readiness scratch：case数不超过8时使用 `SelectScratchCache` 的内联8个 `u64`；更大时按 size class或临时 extent取得 `ceil(case_count / 64)` 个 word，并把 capacity、owner和generation记录到 `SelectTxn`。scratch不保存 managed pointer，cleanup后立即归还或进入不超过 `select_scratch_cache_bytes` 的 owner-local cache。case record还必须预留其临界写可能产生的 barrier entry；若当前 buffer不足，refill在锁外完成。
+取得任何 source锁前，runtime按 `case_count` 准备 readiness scratch：case数不超过8时使用当前 processor 上 `SelectScratchCache` 的内联8个 `u64`；更大时按 size class或临时 extent取得 `ceil(case_count / 64)` 个 word，并把 handle 写入 `SelectTxn`。scratch不保存 managed pointer，cleanup后立即归还或进入不超过 `select_scratch_cache_bytes` 的 processor-local cache。case record还必须预留其临界写可能产生的 barrier entry；若当前 buffer不足，refill在锁外完成。
 
 ### 1–8 case 的展开路径
 

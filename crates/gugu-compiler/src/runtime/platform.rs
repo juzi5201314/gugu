@@ -52,6 +52,7 @@ impl PlatformProfile {
                 mapping_limit: 1 << 20,
                 entropy_available: true,
                 dump_policy_default: DumpPolicy::Included,
+                select_scratch_cache_bytes: 65536,
             },
             // Windows：VirtualAlloc/VirtualProtect；entropy 来自 BCryptGenRandom。
             Self::Windows => PlatformConstants {
@@ -62,6 +63,7 @@ impl PlatformProfile {
                 mapping_limit: 1 << 20,
                 entropy_available: true,
                 dump_policy_default: DumpPolicy::Included,
+                select_scratch_cache_bytes: 65536,
             },
         }
     }
@@ -104,6 +106,8 @@ pub(crate) struct PlatformConstants {
     /// 平台 entropy 源是否可用；不可用时 `entropy` 映射到 `ResourceExhausted`。
     pub(crate) entropy_available: bool,
     pub(crate) dump_policy_default: DumpPolicy,
+    /// processor-local select scratch cache 的累计字节上限。
+    pub(crate) select_scratch_cache_bytes: u64,
 }
 
 impl PlatformConstants {

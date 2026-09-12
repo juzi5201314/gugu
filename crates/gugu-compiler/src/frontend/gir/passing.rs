@@ -148,7 +148,11 @@ fn classify_size(
         hir::Type::String => (PassingClass::COW, Some(16)),
         hir::Type::Ref(inner) => ref_class(table, module, *inner),
         hir::Type::Slice(_) => (PassingClass::IDENTITY, Some(16)),
-        hir::Type::Chan(_) | hir::Type::Join(_) => (PassingClass::IDENTITY, Some(8)),
+        hir::Type::Chan(_) | hir::Type::Join(_) | hir::Type::Panic => {
+            (PassingClass::IDENTITY, Some(8))
+        }
+        hir::Type::ChanClosed => (PassingClass::BITS, Some(0)),
+        hir::Type::TrySendErr | hir::Type::TryRecvErr => (PassingClass::BITS, Some(1)),
         hir::Type::Function { .. } | hir::Type::Dyn(_) => (PassingClass::IDENTITY, Some(16)),
         hir::Type::Callable { .. } => (PassingClass::IDENTITY, Some(8)),
         hir::Type::Array(elem, count) => array_class(table, module, *elem, *count),

@@ -106,6 +106,7 @@ impl<'a, 'm> Builder<'a, 'm> {
             Ty::Slice(inner) => (TypeKind::Slice(self.intern(inner)?), identity),
             Ty::Chan(inner) => (TypeKind::Channel(self.intern(inner)?), identity),
             Ty::Join(inner) => (TypeKind::Join(self.intern(inner)?), identity),
+            Ty::Panic => (TypeKind::Panic, identity),
             Ty::MaybeUninit(inner) => {
                 let inner = self.intern(inner)?;
                 (TypeKind::MaybeUninit(inner), self.passing(inner)?)
@@ -125,9 +126,14 @@ impl<'a, 'm> Builder<'a, 'm> {
                     passing,
                 )
             }
-            Ty::Tuple(_) | Ty::Named(..) | Ty::Option(_) | Ty::Result(..) | Ty::Range => {
-                self.aggregate(ty)?
-            }
+            Ty::Tuple(_)
+            | Ty::Named(..)
+            | Ty::Option(_)
+            | Ty::Result(..)
+            | Ty::Range
+            | Ty::ChanClosed
+            | Ty::TrySendErr
+            | Ty::TryRecvErr => self.aggregate(ty)?,
             Ty::Callable(callable, arguments, _) => {
                 let arguments = arguments
                     .iter()

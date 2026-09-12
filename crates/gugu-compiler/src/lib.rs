@@ -33,11 +33,11 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
-    CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport, IntrinsicBoundary,
-    OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness, ResourceReleaseReport,
-    Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand,
-    SchedulerRuntimeContract, StackPolicy,
+    ChannelWaitHarness, ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand,
+    CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport,
+    IntrinsicBoundary, OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness,
+    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
+    SchedulerDemand, SchedulerRuntimeContract, StackPolicy, WaitDemand, WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -426,6 +426,7 @@ impl Compiler {
                 resource_demand,
                 rt0_demand,
                 scheduler_demand: lir.scheduler_demand(),
+                wait_demand: lir.wait_demand(),
                 profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
@@ -965,6 +966,12 @@ pub struct ImagePlan {
     scheduler_service_batch: u32,
     scheduler_contract_fingerprint: [u8; 32],
     scheduler_runtime: SchedulerRuntimeContract,
+    wait_inline_select_cases: u32,
+    wait_scratch_class_count: u32,
+    wait_node_class_count: u32,
+    wait_contract_fingerprint: [u8; 32],
+    wait_demand: WaitDemand,
+    wait_runtime: WaitRuntimeContract,
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1043,6 +1050,12 @@ impl ImagePlan {
             scheduler_service_batch: plan.scheduler_service_batch,
             scheduler_contract_fingerprint: plan.scheduler_contract_fingerprint,
             scheduler_runtime: plan.scheduler_runtime,
+            wait_inline_select_cases: plan.wait_inline_select_cases,
+            wait_scratch_class_count: plan.wait_scratch_class_count,
+            wait_node_class_count: plan.wait_node_class_count,
+            wait_contract_fingerprint: plan.wait_contract_fingerprint,
+            wait_demand: plan.wait_demand,
+            wait_runtime: plan.wait_runtime,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1352,6 +1365,30 @@ impl ImagePlan {
     pub fn scheduler_runtime(&self) -> &SchedulerRuntimeContract {
         &self.scheduler_runtime
     }
+    /// 返回内联 select case 上限。
+    pub fn wait_inline_select_cases(&self) -> u32 {
+        self.wait_inline_select_cases
+    }
+    /// 返回 scratch class 数量（不含 0 号内联 class）。
+    pub fn wait_scratch_class_count(&self) -> u32 {
+        self.wait_scratch_class_count
+    }
+    /// 返回 wait-node class 数量。
+    pub fn wait_node_class_count(&self) -> u32 {
+        self.wait_node_class_count
+    }
+    /// 返回等待契约指纹。
+    pub fn wait_contract_fingerprint(&self) -> [u8; 32] {
+        self.wait_contract_fingerprint
+    }
+    /// 返回等待需求视图。
+    pub fn wait_demand(&self) -> WaitDemand {
+        self.wait_demand
+    }
+    /// 返回等待契约段。
+    pub fn wait_runtime(&self) -> &WaitRuntimeContract {
+        &self.wait_runtime
+    }
     /// 返回调度需求视图。
     pub fn scheduler_demand(&self) -> crate::runtime::SchedulerDemand {
         self.scheduler_runtime.demand
@@ -1658,7 +1695,16 @@ mod tests {
         assert_eq!(plan.resource_kind_count(), 5);
         assert!(plan.release_descriptor_count() >= 4);
         let dump = cold.dump_runtime().expect("契约 dump");
-        assert_eq!(Some(dump), warm.dump_runtime(), "冷热 dump 必须一致");
+        assert_eq!(
+            Some(dump.clone()),
+            warm.dump_runtime(),
+            "冷热 dump 必须一致"
+        );
+        assert!(dump.contains("wait schema=1"));
+        assert_eq!(plan.wait_inline_select_cases(), 8);
+        assert_eq!(plan.wait_scratch_class_count(), 11);
+        assert_eq!(plan.wait_node_class_count(), 2);
+        assert_ne!(plan.wait_contract_fingerprint(), [0_u8; 32]);
         assert_eq!(
             cold.runtime_raw_fingerprint(),
             warm.runtime_raw_fingerprint()

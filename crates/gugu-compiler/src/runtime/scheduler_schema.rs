@@ -2,8 +2,8 @@
 //!
 //! 本段把 [`crate::runtime`] 的 local 容量、remote 分片数、batch 上限、service 节奏固定成
 //! 带版本的对象，与 `coroutine_schema` 共用 `build`/`verify`/`canonical_bytes`/
-//! `fingerprint`/`dump` 闭环。timer/poller/monitor/GC-stop/foreign-lease/select 的完整
-//! 状态机由后续阶段消费同一原语，本阶段契约不为它们预留空字节；`PollControl` 的 epoch 槽
+//! `fingerprint`/`dump` 闭环。timer/poller/monitor/GC-stop/foreign-lease 的完整
+//! 状态机由后续模块消费同一原语；select 等待协议由 `WaitRuntimeContract` 固定。`PollControl` 的 epoch 槽
 //! 与 `PREEMPT`/`GC_STOP` 位定义只以注释形式落在调度参考模型的 `ProcessorRecord` 中。
 
 use serde::{Deserialize, Serialize};

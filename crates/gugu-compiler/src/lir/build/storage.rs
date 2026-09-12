@@ -263,6 +263,7 @@ impl Builder<'_> {
             TypeKind::Pointer(_) => one(ValueType::pointer(Provenance::Raw)),
             TypeKind::Channel(_)
             | TypeKind::Join(_)
+            | TypeKind::Panic
             | TypeKind::FunctionItem {
                 capturing: true, ..
             } => one(ValueType::pointer(Provenance::GcHeap)),
@@ -327,6 +328,7 @@ impl Builder<'_> {
             TypeKind::Reference(_) => roots.push((base, Provenance::GcInterior)),
             TypeKind::Channel(_)
             | TypeKind::Join(_)
+            | TypeKind::Panic
             | TypeKind::String
             | TypeKind::Dynamic
             | TypeKind::FunctionItem {

@@ -1492,6 +1492,14 @@ impl Parser<'_> {
             }
             "recv" if payload.is_none() => Some(SelectCall::Recv { chan: receiver }),
             "wait" if payload.is_none() => Some(SelectCall::Wait { join: receiver }),
+            "try_send" | "try_recv" => {
+                self.error_span(
+                    DiagnosticCode::ParseInvalidSelectArm,
+                    "select 禁止 try_send/try_recv",
+                    self.expr_span(expr),
+                );
+                None
+            }
             _ => None,
         }
     }
@@ -1512,6 +1520,8 @@ impl Parser<'_> {
             "send" => Some("send"),
             "recv" => Some("recv"),
             "wait" => Some("wait"),
+            "try_send" => Some("try_send"),
+            "try_recv" => Some("try_recv"),
             _ => None,
         }
     }

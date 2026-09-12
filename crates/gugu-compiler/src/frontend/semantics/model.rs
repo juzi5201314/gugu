@@ -43,6 +43,10 @@ pub(crate) enum Ty {
     Range,
     Chan(Box<Ty>),
     Join(Box<Ty>),
+    ChanClosed,
+    TrySendErr,
+    TryRecvErr,
+    Panic,
     MaybeUninit(Box<Ty>),
 }
 
@@ -120,6 +124,10 @@ impl Ty {
                 bits: 128,
             },
             "Range" => Self::Range,
+            "ChanClosed" => Self::ChanClosed,
+            "TrySendErr" => Self::TrySendErr,
+            "TryRecvErr" => Self::TryRecvErr,
+            "Panic" => Self::Panic,
             _ => return None,
         })
     }
@@ -266,6 +274,10 @@ impl<'a> Model<'a> {
             Ty::Result(t, e) => format!("Result[{}, {}]", self.describe(t), self.describe(e)),
             Ty::Chan(t) => format!("chan[{}]", self.describe(t)),
             Ty::Join(t) => format!("Join[{}]", self.describe(t)),
+            Ty::ChanClosed => "ChanClosed".into(),
+            Ty::TrySendErr => "TrySendErr".into(),
+            Ty::TryRecvErr => "TryRecvErr".into(),
+            Ty::Panic => "Panic".into(),
         }
     }
     pub(crate) fn function_definition(&self, id: CallableId) -> Option<DefRef> {
@@ -688,6 +700,10 @@ impl<'a> Model<'a> {
                         return Ok(Ty::Result(Box::new(t.clone()), Box::new(e.clone())));
                     }
                     (["Join"], [t]) => return Ok(Ty::Join(Box::new(t.clone()))),
+                    (["ChanClosed"], []) => return Ok(Ty::ChanClosed),
+                    (["TrySendErr"], []) => return Ok(Ty::TrySendErr),
+                    (["TryRecvErr"], []) => return Ok(Ty::TryRecvErr),
+                    (["Panic"], []) => return Ok(Ty::Panic),
                     _ => {}
                 }
                 if self.external_path(module, &parts).as_deref() == Some("std.mem.MaybeUninit") {
@@ -879,6 +895,40 @@ impl<'a> Model<'a> {
                     record: false,
                 },
             ]),
+            Ty::ChanClosed => Some(vec![Constructor {
+                index: 0,
+                name: "ChanClosed".into(),
+                fields: vec![],
+                record: true,
+            }]),
+            Ty::TrySendErr => Some(vec![
+                Constructor {
+                    index: 0,
+                    name: "Full".into(),
+                    fields: vec![],
+                    record: false,
+                },
+                Constructor {
+                    index: 1,
+                    name: "Closed".into(),
+                    fields: vec![],
+                    record: false,
+                },
+            ]),
+            Ty::TryRecvErr => Some(vec![
+                Constructor {
+                    index: 0,
+                    name: "Empty".into(),
+                    fields: vec![],
+                    record: false,
+                },
+                Constructor {
+                    index: 1,
+                    name: "Closed".into(),
+                    fields: vec![],
+                    record: false,
+                },
+            ]),
             _ => None,
         }
     }
@@ -941,6 +991,9 @@ impl<'a> Model<'a> {
                 }
                 Ty::Option(_) => path.len() == 1 || path == ["Option", *name],
                 Ty::Result(_, _) => path.len() == 1 || path == ["Result", *name],
+                Ty::ChanClosed => path == ["ChanClosed"],
+                Ty::TrySendErr => path.len() == 1 || path == ["TrySendErr", *name],
+                Ty::TryRecvErr => path.len() == 1 || path == ["TryRecvErr", *name],
                 _ => false,
             };
             if visible {
@@ -950,6 +1003,21 @@ impl<'a> Model<'a> {
                 {
                     return Ok(Some((ty.deref().clone(), variant)));
                 }
+            }
+        }
+        if expected.is_none() {
+            let lang = match path {
+                ["ChanClosed"] => Some(Ty::ChanClosed),
+                ["TrySendErr", "Full" | "Closed"] => Some(Ty::TrySendErr),
+                ["TryRecvErr", "Empty" | "Closed"] => Some(Ty::TryRecvErr),
+                _ => None,
+            };
+            if let Some(ty) = lang
+                && let Some(variant) = self
+                    .variants(&ty)
+                    .and_then(|variants| variants.into_iter().find(|variant| variant.name == *name))
+            {
+                return Ok(Some((ty, variant)));
             }
         }
         for (index, nominal) in self.nominal.iter().enumerate() {
@@ -1015,6 +1083,7 @@ pub(crate) fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
         Ty::Chan(t) => Ty::Chan(Box::new(substitute(t, bindings))),
         Ty::Join(t) => Ty::Join(Box::new(substitute(t, bindings))),
         Ty::MaybeUninit(t) => Ty::MaybeUninit(Box::new(substitute(t, bindings))),
+        Ty::ChanClosed | Ty::TrySendErr | Ty::TryRecvErr | Ty::Panic => ty.clone(),
         Ty::Function(params, ret) => Ty::Function(
             params.iter().map(|ty| substitute(ty, bindings)).collect(),
             Box::new(substitute(ret, bindings)),

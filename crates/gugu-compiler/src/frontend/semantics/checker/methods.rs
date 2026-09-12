@@ -131,6 +131,60 @@ impl Checker<'_, '_> {
         ))
     }
 
+    fn concurrency_method(
+        &mut self,
+        callee: ExprId,
+        self_ty: &Ty,
+        name: &str,
+        args: &[ExprId],
+    ) -> Option<Ty> {
+        let span = self.arena().exprs[callee.0 as usize].span.clone();
+        match (self_ty, name) {
+            (Ty::Chan(element), "send") => {
+                if args.len() == 1 {
+                    self.expression(args[0], Some(element));
+                } else {
+                    self.error(DiagnosticCode::InvalidExpression, "send 需要一个实参", span);
+                }
+                Some(Ty::Unit)
+            }
+            (Ty::Chan(element), "recv") if args.is_empty() => {
+                Some(Ty::Result(element.clone(), Box::new(Ty::ChanClosed)))
+            }
+            (Ty::Chan(element), "try_send") => {
+                if args.len() == 1 {
+                    self.expression(args[0], Some(element));
+                } else {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "try_send 需要一个实参",
+                        span,
+                    );
+                }
+                Some(Ty::Result(Box::new(Ty::Unit), Box::new(Ty::TrySendErr)))
+            }
+            (Ty::Chan(element), "try_recv") if args.is_empty() => {
+                Some(Ty::Result(element.clone(), Box::new(Ty::TryRecvErr)))
+            }
+            (Ty::Chan(_), "close") if args.is_empty() => Some(Ty::Unit),
+            (Ty::Join(value), "wait") if args.is_empty() => {
+                Some(Ty::Result(value.clone(), Box::new(Ty::Panic)))
+            }
+            (Ty::Chan(_), "recv")
+            | (Ty::Chan(_), "try_recv")
+            | (Ty::Chan(_), "close")
+            | (Ty::Join(_), "wait") => {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    "并发方法实参数量不符",
+                    span,
+                );
+                Some(Ty::Error)
+            }
+            _ => None,
+        }
+    }
+
     fn array_slice_len(
         &mut self,
         callee: ExprId,
@@ -248,6 +302,11 @@ impl Checker<'_, '_> {
         expected: Option<&Ty>,
     ) -> Ty {
         if interface.is_none() && receiver {
+            if let Some(result) =
+                self.concurrency_method(callee, &self.resolve(&self_ty), name, args)
+            {
+                return result;
+            }
             if let Some(result) = self.memory_method(
                 callee,
                 &self.resolve(&self_ty),

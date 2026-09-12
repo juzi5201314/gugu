@@ -18,6 +18,7 @@ use super::scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 use super::size_class::{DropScanPolicy, RuntimeSizeClassTable};
 use super::slab::MemoryDomainId;
 use super::startup_schema::{Rt0Demand, Rt0SchemaV1};
+use super::wait_schema::{WaitDemand, WaitRuntimeContract};
 use super::{
     BATCH_MAX, CACHE_LINE_BYTES, OWNER_INBOX_SHARDS, QUEUE_PAD_BYTES, RAW_SLAB_PAGE_BYTES,
     RETURN_SLAB_CACHE_SETS, RETURN_SLAB_CACHE_WAYS, TARGET_CACHE_ENTRIES,
@@ -27,8 +28,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 6并入调度容量、分片与 service 节奏。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 6;
+/// 契约对象的schema版本；schema 7 并入等待源、wait-node 与 select 提交契约。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 7;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -330,6 +331,7 @@ pub(crate) struct RuntimeRawContractV1 {
     rt0: Rt0SchemaV1,
     coroutine: CoroutineRuntimeContract,
     scheduler: SchedulerRuntimeContract,
+    wait: WaitRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -348,6 +350,7 @@ impl RuntimeRawContractV1 {
         mut resource_demand: RawResourceDemand,
         rt0_demand: Rt0Demand,
         scheduler_demand: SchedulerDemand,
+        wait_demand: WaitDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -373,6 +376,7 @@ impl RuntimeRawContractV1 {
                 suspend_points: demand.suspend_points,
             })?,
             scheduler: SchedulerRuntimeContract::build(scheduler_demand)?,
+            wait: WaitRuntimeContract::build(wait_demand, profile)?,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -469,6 +473,11 @@ impl RuntimeRawContractV1 {
     /// 返回调度契约段。
     pub(crate) fn scheduler(&self) -> &SchedulerRuntimeContract {
         &self.scheduler
+    }
+
+    /// 返回等待契约段。
+    pub(crate) fn wait(&self) -> &WaitRuntimeContract {
+        &self.wait
     }
 
     /// 返回账本分类名。
@@ -603,6 +612,7 @@ impl RuntimeRawContractV1 {
             return Err(RawModelError::new("协程需求与LIR需求视图不一致"));
         }
         self.scheduler.verify()?;
+        self.wait.verify()?;
         if self.scheduler.demand.spawn_sites != self.demand.coroutine_sites
             || self.scheduler.demand.suspend_points != self.demand.suspend_points
         {
@@ -651,6 +661,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.rt0.canonical_bytes());
         bytes.extend_from_slice(&self.coroutine.canonical_bytes());
         bytes.extend_from_slice(&self.scheduler.canonical_bytes());
+        bytes.extend_from_slice(&self.wait.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -866,6 +877,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.rt0.dump());
         output.push_str(&self.coroutine.dump());
         output.push_str(&self.scheduler.dump());
+        output.push_str(&self.wait.dump());
         output
     }
 }
@@ -905,6 +917,8 @@ pub(crate) struct RawModelInputs<'a> {
     /// rt0 启动需求视图：入口存在性与 main 返回类型。
     pub(crate) rt0_demand: Rt0Demand,
     pub(crate) scheduler_demand: SchedulerDemand,
+    /// 等待源需求视图：channel / Join / select 调用计数。
+    pub(crate) wait_demand: WaitDemand,
     /// 生成契约所依据的 LIR 输入指纹。
     pub(crate) lir_fingerprint: [u8; 32],
     /// placement world 指纹。
@@ -925,6 +939,7 @@ pub(crate) fn run(
         inputs.resource_demand,
         inputs.rt0_demand,
         inputs.scheduler_demand,
+        inputs.wait_demand,
     ))
     .expect("runtime需求与策略可序列化");
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
@@ -958,10 +973,13 @@ pub(crate) fn run(
                 inputs.resource_demand,
                 inputs.rt0_demand,
                 inputs.scheduler_demand,
+                inputs.wait_demand,
                 inputs.profile,
             )
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
+                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
             fresh = Some(contract);
@@ -988,6 +1006,8 @@ pub(crate) fn run(
         .verify()
         .map_err(|error| vec![error.diagnostic()])?;
     super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
+        .map_err(|error| vec![error.diagnostic()])?;
+    super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     let _ = inputs.sources;
     Ok(contract)

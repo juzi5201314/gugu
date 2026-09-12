@@ -1,5 +1,5 @@
 //! effect 分类唯一归属；构造器与 verifier 共用，不能由任意指令自报无副作用。
-use super::body::{Call, Op, RuntimeCall, SafepointKind};
+use super::body::{Call, CallTarget, Op, RuntimeCall, SafepointKind};
 use super::pass::policy::POLL_BUDGET;
 use crate::frontend::gir::body::CallKind;
 use crate::frontend::hir::Assembly;
@@ -199,6 +199,9 @@ impl Op {
 
 impl Call {
     pub(crate) fn safepoint_kind(&self) -> Option<SafepointKind> {
+        if let CallTarget::Runtime(RuntimeCall::SelectCommit { .. }) = self.target {
+            return Some(SafepointKind::Select);
+        }
         match self.kind {
             CallKind::ForeignBridge => Some(SafepointKind::ForeignBridge),
             CallKind::ForeignBridgeDirtyCpu => Some(SafepointKind::DirtyCpuBridge),
@@ -232,6 +235,7 @@ impl RuntimeCall {
                 (false, false, true, false)
             }
             Self::ValuePublish | Self::ResourceTransfer => (false, false, false, true),
+            Self::ChannelTrySend | Self::ChannelTryRecv => (false, false, false, true),
             Self::ValueTransfer
             | Self::ValueDrop
             | Self::ValueForget

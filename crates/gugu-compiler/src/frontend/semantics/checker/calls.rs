@@ -59,44 +59,6 @@ impl Checker<'_, '_> {
                 return result;
             }
             let parts = self.model.path(self.module, path);
-            if parts.len() == 2 {
-                let receiver_name = self.arena().paths[path.0 as usize]
-                    .segments
-                    .as_slice(&self.arena().segments)[0]
-                    .name;
-                if let Some(receiver) = self.local(receiver_name, true, &expr.span) {
-                    match (&receiver, parts[1]) {
-                        (Ty::Chan(element), "send") => {
-                            if args.len() == 1 {
-                                self.expression(args[0], Some(element));
-                            } else {
-                                self.error(
-                                    DiagnosticCode::InvalidExpression,
-                                    "send 需要一个实参",
-                                    expr.span.clone(),
-                                );
-                            }
-                            return Ty::Unit;
-                        }
-                        (Ty::Chan(element), "recv") if args.is_empty() => {
-                            return Ty::Result(element.clone(), Box::new(Ty::Unit));
-                        }
-                        (Ty::Chan(_), "close") if args.is_empty() => return Ty::Unit,
-                        (Ty::Join(value), "wait") if args.is_empty() => {
-                            return Ty::Result(value.clone(), Box::new(Ty::Unit));
-                        }
-                        (Ty::Chan(_), "recv") | (Ty::Chan(_), "close") | (Ty::Join(_), "wait") => {
-                            self.error(
-                                DiagnosticCode::InvalidExpression,
-                                "并发方法实参数量不符",
-                                expr.span.clone(),
-                            );
-                            return Ty::Error;
-                        }
-                        _ => {}
-                    }
-                }
-            }
             if parts == ["panic"] {
                 if self.native_definition().is_some() {
                     self.error(

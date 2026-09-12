@@ -78,6 +78,10 @@ impl Builder<'_, '_> {
             }
             Ty::Chan(inner) => hir::Type::Chan(self.type_id(inner, owner)?),
             Ty::Join(inner) => hir::Type::Join(self.type_id(inner, owner)?),
+            Ty::ChanClosed => hir::Type::ChanClosed,
+            Ty::TrySendErr => hir::Type::TrySendErr,
+            Ty::TryRecvErr => hir::Type::TryRecvErr,
+            Ty::Panic => hir::Type::Panic,
             Ty::MaybeUninit(inner) => hir::Type::MaybeUninit(self.type_id(inner, owner)?),
         };
         let id = if let Some(&id) = self.type_intern.get(&formed) {

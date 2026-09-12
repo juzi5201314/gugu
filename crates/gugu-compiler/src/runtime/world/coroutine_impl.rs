@@ -94,6 +94,7 @@ impl RawWorld {
             stack: Some(stack),
             image: StackImage::default(),
         });
+        self.wait.bind_join(handle)?;
         Ok(handle)
     }
 
@@ -347,6 +348,7 @@ impl RawWorld {
             (state & !255) | CoroutineState::Dead as u64,
             Ordering::Release,
         );
+        self.wake_join(ticket.coroutine)?;
         if self
             .controls
             .get(ticket.coroutine)?

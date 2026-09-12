@@ -201,7 +201,9 @@ impl Layouts<'_, '_> {
                 size: u64::from(*bits) / 8,
                 align: u64::from(*bits) / 8,
             },
-            Ty::Ptr(_) | Ty::Chan(_) | Ty::Join(_) => word,
+            Ty::Ptr(_) | Ty::Chan(_) | Ty::Join(_) | Ty::Panic => word,
+            Ty::ChanClosed => Layout { size: 0, align: 1 },
+            Ty::TrySendErr | Ty::TryRecvErr => Layout { size: 1, align: 1 },
             Ty::Ref(t) => {
                 if matches!(**t, Ty::Slice(_)) {
                     Layout { size: 16, align: 8 }

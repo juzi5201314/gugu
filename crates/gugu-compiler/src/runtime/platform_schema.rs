@@ -632,6 +632,8 @@ pub(crate) struct PlatformPolicyV1 {
     pub(crate) huge_page_hint: bool,
     /// 低内存提示是否可用。
     pub(crate) low_memory_hint: bool,
+    /// processor-local select scratch cache 字节上限。
+    pub(crate) select_scratch_cache_bytes: u64,
 }
 
 impl PlatformPolicyV1 {
@@ -650,6 +652,7 @@ impl PlatformPolicyV1 {
             dump_policy_default: constants.dump_policy_default.name().to_owned(),
             huge_page_hint: true,
             low_memory_hint: true,
+            select_scratch_cache_bytes: constants.select_scratch_cache_bytes,
         }
     }
 
@@ -689,6 +692,13 @@ impl PlatformPolicyV1 {
                 "平台 entropy 不可用时必须回退到启动期闭世界 seed",
             ));
         }
+        if self.select_scratch_cache_bytes != constants.select_scratch_cache_bytes
+            || self.select_scratch_cache_bytes == 0
+        {
+            return Err(RawModelError::new(
+                "select scratch cache 上限与 profile 常量不一致",
+            ));
+        }
         Ok(())
     }
 
@@ -709,6 +719,7 @@ impl PlatformPolicyV1 {
         bytes.push(0);
         bytes.push(u8::from(self.huge_page_hint));
         bytes.push(u8::from(self.low_memory_hint));
+        bytes.extend_from_slice(&self.select_scratch_cache_bytes.to_le_bytes());
         bytes
     }
 }

@@ -97,6 +97,10 @@ impl MonoContext<'_> {
             hir::Type::Result(value, error) => Ty::Result(boxed(*value)?, boxed(*error)?),
             hir::Type::Chan(inner) => Ty::Chan(boxed(*inner)?),
             hir::Type::Join(inner) => Ty::Join(boxed(*inner)?),
+            hir::Type::ChanClosed => Ty::ChanClosed,
+            hir::Type::TrySendErr => Ty::TrySendErr,
+            hir::Type::TryRecvErr => Ty::TryRecvErr,
+            hir::Type::Panic => Ty::Panic,
             hir::Type::MaybeUninit(inner) => Ty::MaybeUninit(boxed(*inner)?),
         })
     }

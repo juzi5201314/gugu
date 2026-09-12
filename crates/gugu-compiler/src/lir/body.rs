@@ -321,6 +321,8 @@ pub(crate) enum RuntimeCall {
     ChannelClose,
     ChannelSend,
     ChannelReceive,
+    ChannelTrySend,
+    ChannelTryRecv,
     JoinWait,
     Yield,
     Spawn,
@@ -552,6 +554,7 @@ pub(crate) enum SafepointKind {
     ForeignBridge,
     DirtyCpuBridge,
     Barrier,
+    Select,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -21,6 +21,29 @@ fn platform_effects(kind: PlatformIntrinsic) -> u32 {
     hir::Effects::new(bits).0
 }
 
+fn concurrency_builtin(ty: &Ty, name: &str) -> Option<hir::Builtin> {
+    match (ty, name) {
+        (Ty::Chan(_), "send") => Some(hir::Builtin::ChanSend),
+        (Ty::Chan(_), "recv") => Some(hir::Builtin::ChanRecv),
+        (Ty::Chan(_), "try_send") => Some(hir::Builtin::ChanTrySend),
+        (Ty::Chan(_), "try_recv") => Some(hir::Builtin::ChanTryRecv),
+        (Ty::Chan(_), "close") => Some(hir::Builtin::ChanClose),
+        (Ty::Join(_), "wait") => Some(hir::Builtin::JoinWait),
+        _ => None,
+    }
+}
+
+fn concurrency_effects(operation: hir::Builtin) -> u32 {
+    if matches!(
+        operation,
+        hir::Builtin::ChanTrySend | hir::Builtin::ChanTryRecv
+    ) {
+        hir::Effects::READ | hir::Effects::WRITE
+    } else {
+        hir::Effects::SAFEPOINT | hir::Effects::SUSPEND | hir::Effects::READ | hir::Effects::WRITE
+    }
+}
+
 impl BodyBuilder<'_, '_, '_, '_> {
     pub(super) fn call(
         &mut self,
@@ -155,10 +178,10 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 hir::Effects::READ,
             ));
         }
+        if let Some(result) = self.concurrency_method_call(id, callee, &arguments)? {
+            return Ok(result);
+        }
         if let ast::ExprKind::Path(path) = self.arena().exprs[callee.0 as usize].kind {
-            let segments = self.arena().paths[path.0 as usize]
-                .segments
-                .as_slice(&self.arena().segments);
             let names = self.compiler.model.path(self.module, path);
             if names == ["panic"] {
                 let values = arguments
@@ -175,37 +198,6 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     },
                     hir::Effects::PANIC,
                 ));
-            }
-            if segments.len() == 2
-                && let Some(&local) = self.names.get(names[0])
-            {
-                let receiver_ty = &self.facts.body.slots[self.local_sources[local.index()]];
-                let operation = match (receiver_ty, names[1]) {
-                    (Ty::Chan(_), "send") => Some(hir::Builtin::ChanSend),
-                    (Ty::Chan(_), "recv") => Some(hir::Builtin::ChanRecv),
-                    (Ty::Chan(_), "close") => Some(hir::Builtin::ChanClose),
-                    (Ty::Join(_), "wait") => Some(hir::Builtin::JoinWait),
-                    _ => None,
-                };
-                if let Some(operation) = operation {
-                    let mut values = vec![self.receiver(callee)?];
-                    for &argument in &arguments {
-                        values.push(self.expression(argument)?);
-                    }
-                    self.expression_map[callee.0 as usize] = Some(id);
-                    return Ok((
-                        hir::ExprKind::Intrinsic {
-                            operation,
-                            arguments: self.expression_list(values)?,
-                            types: Vec::new(),
-                            field: None,
-                        },
-                        hir::Effects::SAFEPOINT
-                            | hir::Effects::SUSPEND
-                            | hir::Effects::READ
-                            | hir::Effects::WRITE,
-                    ));
-                }
             }
             if let Some((ty, constructor)) =
                 self.compiler
@@ -295,6 +287,57 @@ impl BodyBuilder<'_, '_, '_, '_> {
             },
             effects,
         ))
+    }
+
+    fn concurrency_method_call(
+        &mut self,
+        id: hir::ExprId,
+        callee: ast::ExprId,
+        arguments: &[ast::ExprId],
+    ) -> Result<Option<(hir::ExprKind, u32)>, Diagnostic> {
+        let Some(operation) = self.concurrency_operation(callee) else {
+            return Ok(None);
+        };
+        let mut values = Vec::with_capacity(arguments.len() + 1);
+        values.push(self.receiver(callee)?);
+        for &argument in arguments {
+            values.push(self.expression(argument)?);
+        }
+        self.expression_map[callee.0 as usize] = Some(id);
+        Ok(Some((
+            hir::ExprKind::Intrinsic {
+                operation,
+                arguments: self.expression_list(values)?,
+                types: Vec::new(),
+                field: None,
+            },
+            concurrency_effects(operation),
+        )))
+    }
+
+    fn concurrency_operation(&self, callee: ast::ExprId) -> Option<hir::Builtin> {
+        match self.arena().exprs[callee.0 as usize].kind {
+            ast::ExprKind::Field { base, name } => {
+                let name = self.compiler.model.name(self.module, name);
+                concurrency_builtin(self.facts.ty(base)?, name)
+            }
+            ast::ExprKind::Path(path) => {
+                let segments = self.arena().paths[path.0 as usize]
+                    .segments
+                    .as_slice(&self.arena().segments);
+                if segments.len() != 2 {
+                    return None;
+                }
+                let names = self.compiler.model.path(self.module, path);
+                let local = *self.names.get(names[0])?;
+                let receiver_ty = &self.facts.body.slots[self.local_sources[local.index()]];
+                concurrency_builtin(receiver_ty, names[1])
+            }
+            ast::ExprKind::TypeApp { base, .. } | ast::ExprKind::Paren(base) => {
+                self.concurrency_operation(base)
+            }
+            _ => None,
+        }
     }
 
     pub(in super::super) fn coerce(

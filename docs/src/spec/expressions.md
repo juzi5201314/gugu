@@ -210,7 +210,7 @@ let r = h.wait()
 
 - `async` 的操作数只是**紧随其后的一次调用或一个块**。`async f(x).wait()` 解析为 `(async f(x)).wait()`，不是 `async (f(x).wait())`。
 - `async 调用` 与 `async { 块 }` 都是表达式，类型是 `Join[T]`，`T` 是调用或块的值类型。
-- `wait()`：当前协程阻塞到子协程结束，类型 `Result[T, Panic]`。正常结束是 `Ok(T)`；子协程 panic 并展开完毕后是 `Err(p)`，等待者**不会**跟着 panic。这就是恢复：没有 `recover()`。不要把 `wait()` 的结果当成 `T`。
+- `wait()`：当前协程阻塞到子协程结束，类型 `Result[T, Panic]`。`Panic` 是编译器认识的 lang item：即使标准库尚未给出字段，类型检查也形成该名义类型，不再用 `()` 充当错误。正常结束是 `Ok(T)`；子协程 panic 并展开完毕后是 `Err(p)`，等待者**不会**跟着 panic。这就是恢复：没有 `recover()`。不要把 `wait()` 的结果当成 `T`。
 - 丢掉 `Join`（不 `wait`）= 分离。分离协程 panic 时：主协程仍在跑则只打印、不杀进程；`main` 已正常返回、进程正在等待用户协程结束则记一次未处理 panic（最终退出码非 0）。见 [运行时](runtime.md)。
 - 禁止 `async fn`。没有 `.await`。
 - 同栈隔离用 `std.panic.catch`，不要为了 catch 去发明关键字。

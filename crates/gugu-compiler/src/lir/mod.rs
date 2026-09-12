@@ -138,6 +138,54 @@ impl Validated {
             suspend_points: coroutine.suspend_points,
         }
     }
+    /// 等待源需求：从优化后 LIR 统计 channel / Join / select 调用与 Select safepoint。
+    pub(crate) fn wait_demand(&self) -> crate::runtime::WaitDemand {
+        let mut demand = crate::runtime::WaitDemand::default();
+        let visit = |demand: &mut crate::runtime::WaitDemand, call: &body::Call| {
+            let body::CallTarget::Runtime(target) = call.target else {
+                return;
+            };
+            match target {
+                body::RuntimeCall::ChannelNew => demand.channel_new += 1,
+                body::RuntimeCall::ChannelClose => demand.channel_close += 1,
+                body::RuntimeCall::ChannelSend => demand.channel_send += 1,
+                body::RuntimeCall::ChannelReceive => demand.channel_receive += 1,
+                body::RuntimeCall::ChannelTrySend => demand.channel_try_send += 1,
+                body::RuntimeCall::ChannelTryRecv => demand.channel_try_recv += 1,
+                body::RuntimeCall::JoinWait => demand.join_wait += 1,
+                body::RuntimeCall::SelectCommit { cases, has_default } => {
+                    demand.select_commit += 1;
+                    if cases == 0 && !has_default {
+                        demand.never_select += 1;
+                    }
+                }
+                _ => {}
+            }
+        };
+        for world_body in &self.world.bodies {
+            for instruction in &world_body.instructions {
+                if let body::Op::Call(call) | body::Op::ForeignCall(call) = &instruction.op {
+                    visit(&mut demand, call);
+                }
+            }
+            for block in &world_body.blocks {
+                if let body::Terminator::Invoke { call, .. }
+                | body::Terminator::TailCall { call, .. } = &block.terminator
+                {
+                    visit(&mut demand, call);
+                }
+            }
+            demand.select_safepoints += u32::try_from(
+                world_body
+                    .safepoints
+                    .iter()
+                    .filter(|point| point.kind == body::SafepointKind::Select)
+                    .count(),
+            )
+            .expect("select safepoint 数量适配 u32");
+        }
+        demand
+    }
     /// 世界内 `SafepointPoll` 数量。
     pub(crate) fn poll_count(&self) -> usize {
         self.world

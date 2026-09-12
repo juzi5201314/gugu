@@ -8,10 +8,15 @@ pub(crate) mod coroutine_impl;
 mod extent_impl;
 mod resource_impl;
 pub(crate) mod termination_impl;
+mod wait_impl;
 
 #[cfg(test)]
 #[path = "../coroutine_tests.rs"]
 mod coroutine_tests;
+
+#[cfg(test)]
+#[path = "../wait_tests.rs"]
+mod wait_tests;
 
 #[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
@@ -103,6 +108,9 @@ pub(crate) struct RawWorld {
     stacks: super::stack_arena::StackAllocator,
     coroutine_storage: Vec<Option<coroutine_impl::CoroutineStorage>>,
     completion_barriers: Vec<(super::coroutine::CoroutineHandle, u64, u64)>,
+    scheduler: super::scheduler::SchedulerWorld,
+    wait: super::wait::WaitPlane,
+    channels: super::channel::ChannelTable,
 }
 
 impl RawWorld {
@@ -137,6 +145,9 @@ impl RawWorld {
             inboxes.push(Arc::new(OwnerInbox::new(super::OWNER_INBOX_SHARDS)));
             consumers.push(OwnerConsumer::new(super::OWNER_INBOX_SHARDS));
         }
+        let scheduler =
+            super::scheduler::SchedulerWorld::new(u64::from(owners.max(1)), seed.next())?;
+        let wait = super::wait::WaitPlane::new()?;
         let mut world = Self {
             classes,
             resource_classes,
@@ -164,6 +175,9 @@ impl RawWorld {
             stacks: super::stack_arena::StackAllocator::default(),
             coroutine_storage: Vec::new(),
             completion_barriers: Vec::new(),
+            scheduler,
+            wait,
+            channels: super::channel::ChannelTable::new(),
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。

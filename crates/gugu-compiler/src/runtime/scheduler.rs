@@ -3,10 +3,10 @@
 //! 本模型是 safe Rust 的确定性参考实现，不进入镜像执行路径：真实的 `UnsafeCell` 数组与
 //! 128B head/tail 分离由契约常量与 backend layout query 固定；Linux futex/eventfd 与
 //! Windows `WaitOnAddress`/semaphore 的真实等待只出现在 bench harness，单测用确定性
-//! `FakeWaker` 记录唤醒序列。timer/poller/monitor/GC-stop/foreign-lease/select 的完整
-//! 状态机由后续阶段消费同一原语，本阶段只留数据面与打破点：`PollControl` 的
+//! `FakeWaker` 记录唤醒序列。timer/poller/monitor/GC-stop/foreign-lease 的完整
+//! 状态机由后续模块消费同一原语；select 等待协议由等待平面参照模型实现。`PollControl` 的
 //! `poll_flags`/`requested_gc_epoch`/`ack_gc_epoch` 槽与 `PREEMPT`/`GC_STOP` 位定义只以
-//! 注释形式落在这里，供后续阶段填充。
+//! 注释形式落在这里。
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -294,10 +294,12 @@ pub(crate) struct ProcessorRecord {
     /// service tick。
     pub(crate) service_tick: u64,
     // `PollControl { poll_flags, requested_gc_epoch, ack_gc_epoch }` 的 epoch 槽与
-    // `PREEMPT`/`GC_STOP` 位定义只以注释形式落在这里，供后续阶段填充；本阶段恒无
-    // pending poll，绑定循环先处理占位 flag 再进入选择顺序。
-    /// 占位：是否有 pending 的 GC_STOP/PREEMPT，本阶段只作分支覆盖。
+    // `PREEMPT`/`GC_STOP` 位定义只以注释形式落在这里；当前恒无 pending poll，绑定循环
+    // 先处理占位 flag 再进入选择顺序。
+    /// 占位：是否有 pending 的 GC_STOP/PREEMPT，当前只作分支覆盖。
     pub(crate) pending_poll: bool,
+    /// processor-local scratch cache 的 0 号 class：内联 8 个 word。
+    pub(crate) select_scratch: [u64; 8],
 }
 
 impl ProcessorRecord {
@@ -315,6 +317,7 @@ impl ProcessorRecord {
             rr_cursor: 0,
             service_tick: 0,
             pending_poll: false,
+            select_scratch: [0; 8],
         }
     }
 

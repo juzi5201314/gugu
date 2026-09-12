@@ -182,6 +182,8 @@ pub(crate) enum ReturnKind {
     HeapLineRun,
     /// 独立 mapping 的 extent。
     Extent,
+    /// wait-node 的跨 owner 归还。
+    WaitNode,
 }
 
 impl ReturnKind {
@@ -194,6 +196,7 @@ impl ReturnKind {
             Self::HeapBlock => "HeapBlock",
             Self::HeapLineRun => "HeapLineRun",
             Self::Extent => "Extent",
+            Self::WaitNode => "WaitNode",
         }
     }
 
@@ -205,6 +208,7 @@ impl ReturnKind {
             Self::HeapBlock => 3,
             Self::HeapLineRun => 4,
             Self::Extent => 5,
+            Self::WaitNode => 6,
         }
     }
 
@@ -216,6 +220,7 @@ impl ReturnKind {
             3 => Self::HeapBlock,
             4 => Self::HeapLineRun,
             5 => Self::Extent,
+            6 => Self::WaitNode,
             _ => return None,
         })
     }

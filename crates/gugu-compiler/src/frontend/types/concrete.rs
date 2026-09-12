@@ -28,6 +28,12 @@ impl Layouts<'_, '_> {
                 AggregateKind::Ordered,
                 vec![vec![(**ok).clone()], vec![(**error).clone()]],
             ),
+            Ty::ChanClosed => (None, AggregateKind::Ordered, vec![Vec::new()]),
+            Ty::TrySendErr | Ty::TryRecvErr => (
+                Some(DEFAULT_TAG),
+                AggregateKind::Ordered,
+                vec![Vec::new(), Vec::new()],
+            ),
             Ty::Named(index, _) => {
                 let nominal = &self.model.nominal[*index];
                 let repr = nominal.repr;

@@ -29,5 +29,9 @@ harness = false
 name = "scheduler_runqueue"
 harness = false
 
+[[bench]]
+name = "channel_wait"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"

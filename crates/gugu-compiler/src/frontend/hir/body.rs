@@ -197,6 +197,8 @@ pub(crate) enum Builtin {
     Err,
     ChanSend,
     ChanRecv,
+    ChanTrySend,
+    ChanTryRecv,
     ChanClose,
     JoinWait,
     SizeOf,

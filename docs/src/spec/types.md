@@ -338,7 +338,7 @@ let q: Option[&Point] = a.downcast()   // 靠期望类型推断 T
 
 ## 语言类型
 
-这些由编译器认识（是 lang item：编译器按名字挂钩，用户不能自己再定义同名类型）。除 `MaybeUninit` 与 `!` 外预导入（见 [声明](declarations.md)）。`MaybeUninit` 在 `std.mem`。`Panic` 的字段由标准库给出，见 [运行时](runtime.md)。
+这些由编译器认识（是 lang item：编译器按名字挂钩，用户不能自己再定义同名类型）。除 `MaybeUninit` 与 `!` 外预导入（见 [声明](declarations.md)）。`MaybeUninit` 在 `std.mem`。`Panic` 的字段由标准库给出，见 [运行时](runtime.md)；在标准库结构体尚未接入前，编译器仍形成同名名义类型。
 
 | 类型 | 含义 |
 |------|------|
@@ -348,7 +348,7 @@ let q: Option[&Point] = a.downcast()   // 靠期望类型推断 T
 | `ChanClosed` | 空结构体（无字段；值可写 `ChanClosed` 或 `ChanClosed {}`，与 [声明](declarations.md) 的 `Empty` 相同）。`recv` 在关闭且收尽后返回 `Err(ChanClosed)`。 |
 | `TrySendErr` | `enum TrySendErr { Full, Closed }`。`try_send` 的 `Err`。 |
 | `TryRecvErr` | `enum TryRecvErr { Empty, Closed }`。`try_recv` 的 `Err`。 |
-| `Panic` | 标准库结构体（预导入 lang item）：`message: string`、`location: Location`（`Location` 在 `std.src`）。字段定义见 [运行时](runtime.md)。`#[must_use]` 不适用：它是数据，不是「未处理的结果」。 |
+| `Panic` | 预导入 lang item。标准库结构体字段为 `message: string`、`location: Location`（`Location` 在 `std.src`），定义见 [运行时](runtime.md)。标准库结构体尚未接入时，编译器仍形成该名义类型：8 字节身份句柄，与 `Join` 同一表示车道；用户不能再定义同名类型。`#[must_use]` 不适用：它是数据，不是「未处理的结果」。 |
 | `TypeId` | 闭世界稠密类型编号。见上。预导入。 |
 | `MaybeUninit[T]` | 可能未初始化的 `T`。布局与 `T` 相同，GC **不**把其中的引用当活根，直到 `assume_init`。见 [unsafe](unsafe.md)。 |
 | `!` | never，见上。不是预导入名字，是记号。 |

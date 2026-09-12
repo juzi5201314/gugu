@@ -55,6 +55,7 @@ pub(crate) enum TypeKind {
     Dynamic,
     Channel(u32),
     Join(u32),
+    Panic,
     MaybeUninit(u32),
 }
 
