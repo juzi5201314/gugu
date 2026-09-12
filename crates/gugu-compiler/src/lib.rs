@@ -36,7 +36,8 @@ pub use runtime::{
     ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
     CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport, IntrinsicBoundary,
     OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness, ResourceReleaseReport,
-    Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole, StackPolicy,
+    Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand,
+    SchedulerRuntimeContract, StackPolicy,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -424,6 +425,7 @@ impl Compiler {
                 demand,
                 resource_demand,
                 rt0_demand,
+                scheduler_demand: lir.scheduler_demand(),
                 profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
@@ -956,6 +958,13 @@ pub struct ImagePlan {
     raw_message_node_capacity: u32,
     raw_model_fingerprint: [u8; 32],
     coroutine_runtime: CoroutineRuntimeContract,
+    scheduler_local_capacity: u32,
+    scheduler_remote_shard_count: u32,
+    scheduler_batch_max_items: u32,
+    scheduler_service_interval: u32,
+    scheduler_service_batch: u32,
+    scheduler_contract_fingerprint: [u8; 32],
+    scheduler_runtime: SchedulerRuntimeContract,
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1027,6 +1036,13 @@ impl ImagePlan {
             raw_message_node_capacity: raw.message_node_capacity(),
             raw_model_fingerprint: raw.fingerprint(),
             coroutine_runtime: plan.coroutine_runtime,
+            scheduler_local_capacity: plan.scheduler_local_capacity,
+            scheduler_remote_shard_count: plan.scheduler_remote_shard_count,
+            scheduler_batch_max_items: plan.scheduler_batch_max_items,
+            scheduler_service_interval: plan.scheduler_service_interval,
+            scheduler_service_batch: plan.scheduler_service_batch,
+            scheduler_contract_fingerprint: plan.scheduler_contract_fingerprint,
+            scheduler_runtime: plan.scheduler_runtime,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1307,6 +1323,38 @@ impl ImagePlan {
     /// 返回 runtime raw 平面契约指纹。
     pub fn raw_model_fingerprint(&self) -> [u8; 32] {
         self.raw_model_fingerprint
+    }
+    /// 返回调度本地队列容量。
+    pub fn scheduler_local_capacity(&self) -> u32 {
+        self.scheduler_local_capacity
+    }
+    /// 返回调度 remote 分片数。
+    pub fn scheduler_remote_shard_count(&self) -> u32 {
+        self.scheduler_remote_shard_count
+    }
+    /// 返回调度 batch 上限。
+    pub fn scheduler_batch_max_items(&self) -> u32 {
+        self.scheduler_batch_max_items
+    }
+    /// 返回调度 service 间隔。
+    pub fn scheduler_service_interval(&self) -> u32 {
+        self.scheduler_service_interval
+    }
+    /// 返回调度 service 批量。
+    pub fn scheduler_service_batch(&self) -> u32 {
+        self.scheduler_service_batch
+    }
+    /// 返回调度契约指纹。
+    pub fn scheduler_contract_fingerprint(&self) -> [u8; 32] {
+        self.scheduler_contract_fingerprint
+    }
+    /// 返回调度契约段。
+    pub fn scheduler_runtime(&self) -> &SchedulerRuntimeContract {
+        &self.scheduler_runtime
+    }
+    /// 返回调度需求视图。
+    pub fn scheduler_demand(&self) -> crate::runtime::SchedulerDemand {
+        self.scheduler_runtime.demand
     }
     /// 返回 ResourceCell header 字节数。
     pub fn resource_cell_header_bytes(&self) -> u32 {

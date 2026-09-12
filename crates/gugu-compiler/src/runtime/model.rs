@@ -14,6 +14,7 @@ use super::message::{BatchLimits, RETURN_NODE_ALIGN, RETURN_NODE_BYTES};
 use super::platform::PlatformProfile;
 use super::platform_schema::{PlatformRangeDemand, PlatformRangeSchemaV1};
 use super::resource::{self, RESOURCE_KINDS};
+use super::scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 use super::size_class::{DropScanPolicy, RuntimeSizeClassTable};
 use super::slab::MemoryDomainId;
 use super::startup_schema::{Rt0Demand, Rt0SchemaV1};
@@ -26,8 +27,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 5并入协程布局、stack arena与context代码。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 5;
+/// 契约对象的schema版本；schema 6并入调度容量、分片与 service 节奏。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 6;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -328,6 +329,7 @@ pub(crate) struct RuntimeRawContractV1 {
     ledger: LedgerSchemaV1,
     rt0: Rt0SchemaV1,
     coroutine: CoroutineRuntimeContract,
+    scheduler: SchedulerRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -345,6 +347,7 @@ impl RuntimeRawContractV1 {
         mut demand: RawPlaneDemand,
         mut resource_demand: RawResourceDemand,
         rt0_demand: Rt0Demand,
+        scheduler_demand: SchedulerDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -369,6 +372,7 @@ impl RuntimeRawContractV1 {
                 checked_entries: demand.checked_entries,
                 suspend_points: demand.suspend_points,
             })?,
+            scheduler: SchedulerRuntimeContract::build(scheduler_demand)?,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -461,6 +465,10 @@ impl RuntimeRawContractV1 {
 
     pub(crate) fn coroutine(&self) -> &CoroutineRuntimeContract {
         &self.coroutine
+    }
+    /// 返回调度契约段。
+    pub(crate) fn scheduler(&self) -> &SchedulerRuntimeContract {
+        &self.scheduler
     }
 
     /// 返回账本分类名。
@@ -594,6 +602,15 @@ impl RuntimeRawContractV1 {
         {
             return Err(RawModelError::new("协程需求与LIR需求视图不一致"));
         }
+        self.scheduler.verify()?;
+        if self.scheduler.demand.spawn_sites != self.demand.coroutine_sites
+            || self.scheduler.demand.suspend_points != self.demand.suspend_points
+        {
+            return Err(RawModelError::new("调度需求与LIR需求视图不一致"));
+        }
+        if self.scheduler.demand.yield_sites > self.scheduler.demand.suspend_points {
+            return Err(RawModelError::new("调度 yield 需求超过挂起点上界"));
+        }
         if self.demand.message_nodes != self.policy.shards * self.policy.limits.items {
             return Err(RawModelError::new(
                 "常驻 message node 容量低于 shard 与 batch 上限的乘积",
@@ -633,6 +650,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.ledger.canonical_bytes());
         bytes.extend_from_slice(&self.rt0.canonical_bytes());
         bytes.extend_from_slice(&self.coroutine.canonical_bytes());
+        bytes.extend_from_slice(&self.scheduler.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -847,6 +865,7 @@ impl RuntimeRawContractV1 {
         ));
         output.push_str(&self.rt0.dump());
         output.push_str(&self.coroutine.dump());
+        output.push_str(&self.scheduler.dump());
         output
     }
 }
@@ -875,7 +894,6 @@ fn hex(bytes: &[u8]) -> String {
     }
     text
 }
-
 /// 契约 query 的输入集合。
 pub(crate) struct RawModelInputs<'a> {
     pub(crate) target: TargetName,
@@ -886,6 +904,7 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) resource_demand: RawResourceDemand,
     /// rt0 启动需求视图：入口存在性与 main 返回类型。
     pub(crate) rt0_demand: Rt0Demand,
+    pub(crate) scheduler_demand: SchedulerDemand,
     /// 生成契约所依据的 LIR 输入指纹。
     pub(crate) lir_fingerprint: [u8; 32],
     /// placement world 指纹。
@@ -905,6 +924,7 @@ pub(crate) fn run(
         inputs.demand,
         inputs.resource_demand,
         inputs.rt0_demand,
+        inputs.scheduler_demand,
     ))
     .expect("runtime需求与策略可序列化");
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
@@ -937,6 +957,7 @@ pub(crate) fn run(
                 inputs.demand,
                 inputs.resource_demand,
                 inputs.rt0_demand,
+                inputs.scheduler_demand,
                 inputs.profile,
             )
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;

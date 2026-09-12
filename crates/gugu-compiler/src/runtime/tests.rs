@@ -25,6 +25,7 @@ use super::resource::{
     self, CloseOutcome, LeaseOutcome, ReleaseDescriptor, ReleaseFlags, ReleaseRegistry,
     ResourceCell, ResourceCellTable,
 };
+use super::scheduler_schema::SchedulerDemand;
 use super::size_class::{
     ClearField, DropScanPolicy, RuntimeSizeClassId, RuntimeSizeClassTable, StrideDivision,
 };
@@ -648,6 +649,11 @@ fn contract_rejects_address_fields_and_policy_drift() {
         },
         RawResourceDemand::default(),
         Rt0Demand::default(),
+        SchedulerDemand {
+            spawn_sites: 3,
+            yield_sites: 0,
+            suspend_points: 1,
+        },
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -690,6 +696,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             RawPlaneDemand::default(),
             RawResourceDemand::default(),
             Rt0Demand::default(),
+            SchedulerDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
@@ -707,12 +714,18 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         owners: 1,
         message_nodes: 0,
     };
+    let scheduler = SchedulerDemand {
+        spawn_sites: 1,
+        yield_sites: 0,
+        suspend_points: 0,
+    };
     let first = RuntimeRawContractV1::build(
         TargetName::X86_64Linux,
         RawPlanePolicyV1::default(),
         demand,
         RawResourceDemand::default(),
         Rt0Demand::default(),
+        scheduler,
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -722,6 +735,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         demand,
         RawResourceDemand::default(),
         Rt0Demand::default(),
+        scheduler,
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -737,6 +751,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         demand,
         RawResourceDemand::default(),
         Rt0Demand::default(),
+        scheduler,
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -747,6 +762,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         demand,
         RawResourceDemand::default(),
         Rt0Demand::default(),
+        scheduler,
         PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
@@ -1374,6 +1390,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
             kinds: 0,
         },
         Rt0Demand::default(),
+        SchedulerDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1413,6 +1430,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         RawPlaneDemand::default(),
         RawResourceDemand::default(),
         Rt0Demand::default(),
+        SchedulerDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1425,6 +1443,7 @@ fn resource_contract_fingerprint_tracks_demand() {
             ..RawResourceDemand::default()
         },
         Rt0Demand::default(),
+        SchedulerDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");

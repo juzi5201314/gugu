@@ -105,6 +105,39 @@ impl Validated {
         }
         demand
     }
+    /// 调度需求：创建点与挂起点复用协程口径，yield 点统计全 body 的 `RuntimeCall::Yield`。
+    pub(crate) fn scheduler_demand(&self) -> crate::runtime::SchedulerDemand {
+        let coroutine = self.coroutine_demand();
+        let mut yield_sites = 0_u32;
+        let is_yield = |call: &body::Call| {
+            matches!(
+                call.target,
+                body::CallTarget::Runtime(body::RuntimeCall::Yield)
+            )
+        };
+        for world_body in &self.world.bodies {
+            for instruction in &world_body.instructions {
+                match &instruction.op {
+                    body::Op::Call(call) | body::Op::ForeignCall(call) => {
+                        yield_sites += u32::from(is_yield(call));
+                    }
+                    _ => {}
+                }
+            }
+            for block in &world_body.blocks {
+                if let body::Terminator::Invoke { call, .. }
+                | body::Terminator::TailCall { call, .. } = &block.terminator
+                {
+                    yield_sites += u32::from(is_yield(call));
+                }
+            }
+        }
+        crate::runtime::SchedulerDemand {
+            spawn_sites: coroutine.creation_sites,
+            yield_sites,
+            suspend_points: coroutine.suspend_points,
+        }
+    }
     /// 世界内 `SafepointPoll` 数量。
     pub(crate) fn poll_count(&self) -> usize {
         self.world

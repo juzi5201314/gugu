@@ -8,6 +8,9 @@ use super::slab::RawInvariant;
 pub(crate) const POLL_SENTINEL: usize = isize::MAX as usize;
 pub(crate) const STACK_SCAN_LOCKED: u64 = 1 << 5;
 pub(crate) const ENQUEUED: u64 = 1 << 4;
+pub(crate) const FOREIGN_DETACHED: u64 = 1 << 6;
+pub(crate) const BATCH_PUBLISHING: u64 = 1 << 7;
+pub(crate) const FOREIGN_GENERATION_SHIFT: u32 = 8;
 pub(crate) const COLD_COMPACTED: u8 = 1;
 const CONTROL_PAGE_SLOTS: usize = 512;
 
@@ -38,8 +41,8 @@ impl CoroutineState {
             _ => return Err(RawInvariant::new("协程 lifecycle 未登记")),
         };
         if word & ENQUEUED != 0 && state != Self::Runnable
-            || word & (1 << 6) != 0 && state != Self::Foreign
-            || word & (1 << 7) != 0 && word & ENQUEUED == 0
+            || word & FOREIGN_DETACHED != 0 && state != Self::Foreign
+            || word & BATCH_PUBLISHING != 0 && word & ENQUEUED == 0
         {
             return Err(RawInvariant::new("协程状态位与 lifecycle 不相容"));
         }
@@ -110,9 +113,14 @@ impl CoroutineHot {
                 | (CoroutineState::Runnable, CoroutineState::Running)
                 | (CoroutineState::Running, CoroutineState::Runnable)
                 | (CoroutineState::Running, CoroutineState::Parking)
+                | (CoroutineState::Running, CoroutineState::Foreign)
+                | (CoroutineState::Running, CoroutineState::DirtyWaiting)
+                | (CoroutineState::Running, CoroutineState::Dead)
                 | (CoroutineState::Parking, CoroutineState::Waiting)
                 | (CoroutineState::Parking, CoroutineState::Running)
                 | (CoroutineState::Waiting, CoroutineState::Runnable)
+                | (CoroutineState::Foreign, CoroutineState::Running)
+                | (CoroutineState::DirtyWaiting, CoroutineState::Foreign)
         );
         if !legal {
             return Err(RawInvariant::new("协程状态转换未登记"));
@@ -121,12 +129,81 @@ impl CoroutineHot {
         if CoroutineState::from_word(old)? != from || old & STACK_SCAN_LOCKED != 0 {
             return Err(RawInvariant::new("协程已被执行者或 scanner 认领"));
         }
-        let flags = if to == CoroutineState::Runnable {
-            ENQUEUED
-        } else {
-            0
-        };
-        let next = (old & !255) | to as u64 | flags;
+        let mut next = (old & !255) | to as u64;
+        if to == CoroutineState::Runnable {
+            next |= ENQUEUED;
+        }
+        if from == CoroutineState::Running
+            && matches!(to, CoroutineState::Foreign | CoroutineState::DirtyWaiting)
+        {
+            let generation = (old >> FOREIGN_GENERATION_SHIFT)
+                .checked_add(1)
+                .ok_or_else(|| RawInvariant::new("协程 foreign generation 溢出"))?;
+            next = (next & 255) | (generation << FOREIGN_GENERATION_SHIFT);
+        }
+        if from == CoroutineState::Foreign {
+            next &= !FOREIGN_DETACHED;
+        }
+        self.state
+            .compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| RawInvariant::new("协程状态转换丢失所有权"))?;
+        Ok(())
+    }
+    /// 同一 generation 内把 attached `Foreign` 发布为 detached；lifecycle 值不变。
+    pub(crate) fn retake_detached(&self) -> Result<(), RawInvariant> {
+        let old = self.state.load(Ordering::Acquire);
+        if CoroutineState::from_word(old)? != CoroutineState::Foreign
+            || old & STACK_SCAN_LOCKED != 0
+            || old & FOREIGN_DETACHED != 0
+        {
+            return Err(RawInvariant::new("协程已被执行者或 scanner 认领"));
+        }
+        let next = old | FOREIGN_DETACHED;
+        self.state
+            .compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| RawInvariant::new("协程状态转换丢失所有权"))?;
+        Ok(())
+    }
+    /// 从非 runnable owner 认领单个节点：一次 CAS 置 `Runnable|ENQUEUED|BATCH_PUBLISHING`。
+    pub(crate) fn claim_for_batch(&self) -> Result<(), RawInvariant> {
+        let old = self.state.load(Ordering::Acquire);
+        let from = CoroutineState::from_word(old)?;
+        if !matches!(from, CoroutineState::Waiting | CoroutineState::Foreign)
+            || old & STACK_SCAN_LOCKED != 0
+            || old & ENQUEUED != 0
+        {
+            return Err(RawInvariant::new("协程已被执行者或 scanner 认领"));
+        }
+        let next = (old & !255) | CoroutineState::Runnable as u64 | ENQUEUED | BATCH_PUBLISHING;
+        self.state
+            .compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| RawInvariant::new("协程状态转换丢失所有权"))?;
+        Ok(())
+    }
+    /// 把已排队的 `Runnable` 取为 `Running`，同时清除排队与 batch 认领位。
+    pub(crate) fn take_running(&self) -> Result<(), RawInvariant> {
+        let old = self.state.load(Ordering::Acquire);
+        if CoroutineState::from_word(old)? != CoroutineState::Runnable
+            || old & STACK_SCAN_LOCKED != 0
+            || old & ENQUEUED == 0
+        {
+            return Err(RawInvariant::new("协程已被执行者或 scanner 认领"));
+        }
+        let next = (old & !255 & !ENQUEUED & !BATCH_PUBLISHING) | CoroutineState::Running as u64;
+        self.state
+            .compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| RawInvariant::new("协程状态转换丢失所有权"))?;
+        Ok(())
+    }
+    /// 显式 yield：`Running` 回到 `Runnable|ENQUEUED`，不置 batch 认领位。
+    pub(crate) fn yield_to_runnable(&self) -> Result<(), RawInvariant> {
+        let old = self.state.load(Ordering::Acquire);
+        if CoroutineState::from_word(old)? != CoroutineState::Running
+            || old & STACK_SCAN_LOCKED != 0
+        {
+            return Err(RawInvariant::new("协程已被执行者或 scanner 认领"));
+        }
+        let next = (old & !255 & !BATCH_PUBLISHING) | CoroutineState::Runnable as u64 | ENQUEUED;
         self.state
             .compare_exchange(old, next, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| RawInvariant::new("协程状态转换丢失所有权"))?;

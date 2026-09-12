@@ -24,7 +24,7 @@ use super::slab::{OwnerToken, RawSlot};
 use super::world::{RawWorld, ResourceShape};
 use super::{
     BATCH_MAX, OWNER_INBOX_SHARDS, RawPlaneDemand, RawPlanePolicyV1, RuntimeRawContractV1,
-    size_class::RuntimeSizeClassId,
+    SchedulerDemand, size_class::RuntimeSizeClassId,
 };
 
 /// harness 一轮运行的结果。
@@ -75,6 +75,7 @@ impl OwnerReturnHarness {
             RawPlaneDemand::default(),
             super::RawResourceDemand::default(),
             super::Rt0Demand::default(),
+            SchedulerDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -265,6 +266,7 @@ impl ResourceReleaseHarness {
             RawPlaneDemand::default(),
             super::RawResourceDemand::default(),
             super::Rt0Demand::default(),
+            SchedulerDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");

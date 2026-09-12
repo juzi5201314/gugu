@@ -115,6 +115,9 @@ crates/
     │   ├── size_class.rs           dense size class 表与 stride 除法常量
     │   ├── coroutine.rs            hot/cold/slot 固定布局、context 与地址稳定控制页
     │   ├── coroutine_schema.rs     版本化协程布局、栈策略、LIR需求与片段契约
+    │   ├── scheduler_schema.rs     版本化调度容量、分片、batch 与 service 节奏契约段
+    │   ├── scheduler.rs            runnable 队列、park、steal、topology 与终止的确定性参照模型
+    │   ├── scheduler_tests.rs      调度 deque 双变体、唤醒、retire 与契约闭环的确定性回归
     │   ├── coroutine_layout.rs     冻结HIR/具体GIR与machine布局交叉验证
     │   ├── context.rs              x86_64 switch/restore-only 直接编码
     │   ├── stack.rs                栈尺寸、迟滞收缩与精确StackInterior复制
@@ -198,9 +201,9 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 
 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
-`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 5）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。
+`BuildIr` 之后、附加 runtime 资源之前，compiler 通过 `RuntimeRawModel`（query 30，schema 6）构建并校验 runtime raw 平面契约：dense size class（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、batch 上限、shard 数量、queue-page grace 步骤、账本互斥分类与需求视图。契约失败诊断为 `E0058`（退出码 101），`attach-runtime` 之后的 action 全部跳过且没有镜像计划。`ImagePlan` 因此增加 `raw-size-class-count`、`raw-shard-count`、`raw-batch-max-items`、`raw-batch-soft-bytes`、`raw-message-node-capacity` 与 `raw-model-fingerprint`，以及资源租约字段 `raw-resource-class-count`、`raw-resource-cell-header-bytes`、`raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites` 与 `raw-release-sites`；契约指纹同时进入 action key。
 
-同一契约还并入 `PlatformRangeSchemaV1` 与 `LedgerSchemaV1`，使 `ImagePlan` 增加 `platform-profile`、`platform-op-count`、`platform-range-class-count`、`platform-contract-fingerprint`、`platform-range-demand` 与 `ledger-category-count`。平台操作目录、extent class 阶梯、range 状态迁移与 Linux/Windows 失败映射由同一份契约固定；账本分类是互斥的，`range_reserved_bytes` 与 `runtime_committed_bytes` 相加不重复计数。这些字段固定 raw 平面的 schema 与参照行为，不代表 runtime 已在镜像内物化。
+schema 6 再并入 `SchedulerRuntimeContract`（schema 1）：本地队列容量 256、remote 分片 8、batch 上限 128、service 间隔 61、service 批量 128，以及由优化后 LIR 推导的创建点、`RuntimeCall::Yield` 计数与 suspend 需求。`SchedulerDemand` 与协程需求对齐创建点与挂起点，`yield_sites` 只做上界一致性（`yield_sites <= suspend_points`）。`ImagePlan` 增加 `scheduler-local-capacity`、`scheduler-remote-shard-count`、`scheduler-batch-max-items`、`scheduler-service-interval`、`scheduler-service-batch`、`scheduler-contract-fingerprint` 与 `scheduler-runtime`；契约指纹以派生键 `gugu-scheduler-runtime-v1` 固定并进入 action key。调度参照模型覆盖双变体 deque、`run_next` 限幅、overflow、分片 carry、park 唤醒、steal、topology 与终止执行，真实并发只在 `cargo bench -p gugu-compiler --bench scheduler_runqueue` 中 smoke，确定性正确性由单测承担。
 
 schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命周期状态与单向迁移表、环境快照字段、7 个启动变量的文法与默认值、7 类 fatal 目录、退出类别与码规则、`gugu-runtime-report-v1` 报告 schema（固定字段序与 reason 目录）、`TerminationPlan` 字段与主线程关闭设施顺序、emergency buffer 策略（4096 字节定容、诊断配置非法时回退固定纯文本、先截断 message 再丢 backtrace 帧）。需求视图 `Rt0Demand` 由编译产物推导：`main` 是否存在、`main` 是否返回 `Result[(), E]`（决定 `main-error` 报告路径是否可达），二者进入 query key。`ImagePlan` 增加 `rt0-step-count`、`rt0-lifecycle-count`、`startup-config-var-count`、`startup-fatal-count`、`report-reason-count`、`rt0-emergency-buffer-bytes`、`rt0-contract-fingerprint` 与 `rt0-demand`；契约指纹以派生键 `gugu-rt0-startup-v1` 固定并进入 action key。`startup`/`lifecycle`/`report`/`termination` 参照实现消费同一组枚举：`RawWorld` 的 rt0 进程模型覆盖五步启动、`InvalidConfiguration` fatal、生命周期单向迁移、各终止路径的计划生成、`Terminating` 中的用户代码闸门、`PanicDuringUnwind` 升级与设施关闭的 exactly-once；报告只经定容 emergency buffer 渲染，不调用用户代码。镜像内真正的 rt0 与报告执行路径随 rt0 写出与调度阶段落地，复用同一 schema。
 

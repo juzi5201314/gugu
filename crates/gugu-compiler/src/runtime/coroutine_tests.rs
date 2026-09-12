@@ -472,10 +472,39 @@ fn source_coroutines_feed_validated_layouts_context_and_query_identity() {
         let cold = compile();
         let warm = compile();
         assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
-        let contract = cold.image_plan().unwrap().coroutine_runtime();
+        let plan = cold.image_plan().expect("成功编译有 image-plan");
+        let contract = plan.coroutine_runtime();
         assert_eq!(contract.demand.creation_sites, 2);
         assert!(contract.demand.checked_entries > 0);
+        assert_eq!(plan.scheduler_local_capacity(), 256);
+        assert_eq!(plan.scheduler_remote_shard_count(), 8);
+        assert_eq!(plan.scheduler_batch_max_items(), 128);
+        assert_eq!(plan.scheduler_service_interval(), 61);
+        assert_eq!(plan.scheduler_service_batch(), 128);
+        assert!(plan.scheduler_demand().spawn_sites >= 2);
+        assert_ne!(plan.scheduler_contract_fingerprint(), [0_u8; 32]);
         assert_eq!(cold.action_key(), warm.action_key());
-        assert_eq!(contract, warm.image_plan().unwrap().coroutine_runtime());
+        assert_eq!(
+            contract,
+            warm.image_plan()
+                .expect("成功编译有 image-plan")
+                .coroutine_runtime()
+        );
+        assert_eq!(
+            plan.scheduler_runtime(),
+            warm.image_plan()
+                .expect("成功编译有 image-plan")
+                .scheduler_runtime()
+        );
     }
+}
+
+#[test]
+fn scheduler_constant_drift_fails_before_image_plan() {
+    use crate::runtime::SchedulerRuntimeContract;
+    let contract = SchedulerRuntimeContract::build(crate::runtime::SchedulerDemand::default())
+        .expect("调度契约可构建");
+    let mut drifted = contract.clone();
+    drifted.local_capacity = 255;
+    assert!(drifted.verify().is_err());
 }

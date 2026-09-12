@@ -16,6 +16,9 @@ mod coroutine_schema;
 mod harness;
 mod model;
 mod platform_schema;
+#[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
+mod scheduler;
+mod scheduler_schema;
 #[allow(dead_code, reason = "栈尺寸与精确复制协议的确定性参照实现")]
 mod stack;
 #[allow(dead_code, reason = "栈arena与cache的确定性参照实现")]
@@ -29,6 +32,7 @@ pub use coroutine_schema::{
     CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
     StackPolicy,
 };
+pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 
 // rt0 启动、生命周期、报告与终止的参照实现：lib 构建只消费契约段，确定性验证
 // 套件直接消费这些状态机。
@@ -73,6 +77,8 @@ mod platform_tests;
 mod process_tests;
 #[cfg(test)]
 mod report_tests;
+#[cfg(test)]
+mod scheduler_tests;
 #[cfg(test)]
 mod startup_tests;
 #[cfg(test)]

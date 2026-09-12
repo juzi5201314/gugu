@@ -86,12 +86,16 @@
 `raw-resource-kind-count`、`raw-release-descriptor-count`、`raw-resource-sites`、
 `raw-release-sites`，以及平台范围与账本字段 `platform-profile`、`platform-op-count`、
 `platform-range-class-count`、`platform-contract-fingerprint`、`platform-range-demand` 与
-`ledger-category-count`。fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的
+`ledger-category-count`，以及调度字段 `scheduler-local-capacity`、
+`scheduler-remote-shard-count`、`scheduler-batch-max-items`、`scheduler-service-interval`、
+`scheduler-service-batch`、`scheduler-contract-fingerprint` 与 `scheduler-runtime`。
+fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的
 编译计划，不代表最终可执行镜像已经写出，也不承诺 TypeId 跨镜像稳定。
 `large_copy` 默认警告仍可返回成功计划；`#[deny(large_copy)]` / `#[forbid(large_copy)]`
 使检查失败且 `image-plan` 为 `null`。
-
 协程 runtime 计划在 `coroutine-runtime` 中报告版本化 record 大小、对齐、字段偏移、stack arena/class/cache 策略、x86_64 switch/restore-only 片段，以及来自优化后 LIR 的创建点、入口检查和 suspend 需求。`coroutine-contract-fingerprint` 是该对象的 32 字节内容身份；这些内部字段不构成跨镜像稳定 ABI。
+
+调度 runtime 计划在 `scheduler-runtime` 中报告本地队列容量、分片数、batch 上限、service 节奏，以及来自优化后 LIR 的创建点、`RuntimeCall::Yield` 计数与 suspend 需求。`scheduler-contract-fingerprint` 是该对象的 32 字节内容身份；这些内部字段不构成跨镜像稳定 ABI。
 
 ### `gugu run [target] [args...]`
 
@@ -325,10 +329,9 @@ llvm: 19.1.0
 `-Z <flag>` 不是稳定用户接口。仅当环境变量 `GUGU_INTERNAL_OPTIONS=1` 时接受；未启用内部选项或 flag 不在下表时，命令行解析以退出码 `2` 失败，不进入编译。
 
 | flag | 行为 |
-| --- | --- |
 | `dump-gir` | `text`：在编译摘要前向 stdout 打印 generic GIR 稳定 dump。`json`：发布 `gir-dump` 事件，payload 含 dump 文本。`json-diagnostic-short` 不 dump。 |
 | `dump-lir` | `text`：在编译摘要前向 stdout 打印已通过结构 verifier 的 LIR 稳定 dump。`json`：发布 `lir-dump` 事件，payload 含 dump 文本与指纹。`json-diagnostic-short` 不 dump。 |
-| `dump-runtime` | `text`：打印 runtime raw 契约（size class、消息字段、grace、账本、协程 record offset、stack arena/cache、context 片段入口和需求视图）的稳定 dump。`json`：发布 `runtime-dump` 事件，payload 含 dump 文本与契约指纹。`json-diagnostic-short` 不 dump。 |
+| `dump-runtime` | `text`：打印 runtime raw 契约（size class、消息字段、grace、账本、协程 record offset、stack arena/cache、context 片段入口、调度容量与需求视图）的稳定 dump。`json`：发布 `runtime-dump` 事件，payload 含 dump 文本与契约指纹。`json-diagnostic-short` 不 dump。 |
 
 dump 文本由 compiler 在进程内生成，不依赖真实子进程，也不含地址、宿主绝对路径或线程编号。
 
