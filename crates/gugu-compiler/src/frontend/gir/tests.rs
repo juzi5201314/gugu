@@ -3,7 +3,7 @@ use super::pass::{GIR_PASS_ORDER, GirPass, GirPassStats};
 use super::*;
 use crate::{CompileRequest, Compiler, SourceMap, SourceSnapshot, TargetName};
 
-pub(super) fn compile_gir(source: &str) -> (crate::frontend::hir::Validated, GirWorldV1) {
+pub(crate) fn compile_gir(source: &str) -> (crate::frontend::hir::Validated, GirWorldV1) {
     compile_sources(&[("main.gg", source)])
 }
 
@@ -37,6 +37,11 @@ fn compile_sources(sources: &[(&str, &str)]) -> (crate::frontend::hir::Validated
     )
     .unwrap_or_else(|errors| panic!("{errors:?}"));
     (output.hir, output.gir)
+}
+
+/// 编译单个源文件并返回完整前端产物（含冻结 `mono.universe`）。
+pub(crate) fn compile_frontend(source: &str) -> crate::frontend::FrontendOutput {
+    compile_with(&crate::QueryEngine::new(), source)
 }
 
 fn compile_with(queries: &crate::QueryEngine, source: &str) -> crate::frontend::FrontendOutput {

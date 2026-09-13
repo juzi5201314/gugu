@@ -379,6 +379,31 @@ impl Compiler {
                 };
             }
         };
+        let gc_metadata = match frontend::gc::derive(
+            &frontend.mono.universe,
+            &frontend.gir,
+            frontend.hir.module(),
+        ) {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                diagnostics.push(error);
+                graph.fail(ActionKind::BuildIr, "GC metadata 构造失败");
+                graph.skip_after(ActionKind::BuildIr, "GC metadata 无效");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(frontend.hir),
+                    gir: Some(frontend.gir),
+                    gir_stats: frontend.gir_stats,
+                    lir: Some(lir),
+                    raw_contract: None,
+                    action_key: None,
+                };
+            }
+        };
         // runtime raw 平面契约：输入来自冻结前端产物与目标描述，与 LIR 一起构成内部表示。
         let coroutine_demand = lir.coroutine_demand();
         let demand = RawPlaneDemand {
@@ -430,7 +455,9 @@ impl Compiler {
                 wait_demand: lir.wait_demand(),
                 sync_demand: lir.sync_demand(),
                 stackmap_demand: lir.stackmap_demand(frontend.hir.module()),
-                gc_metadata_demand: gc_metadata_demand(&frontend.mono),
+                gc_metadata_demand: gc_metadata_demand(&gc_metadata),
+                gc_type_section: &gc_metadata.type_section,
+                gc_metadata_section: &gc_metadata.metadata_section,
                 profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
@@ -559,29 +586,12 @@ impl Compiler {
     }
 }
 
-/// 由冻结类型表推导 GC metadata demand。
-///
-/// 真实类型表与 trace/value program 字节在阶段 39 后续接 codec；本阶段保证 demand
-/// 反映类型表/聚合 entry 与 vtable 计数，使契约指纹随闭世界内容变化。
-fn gc_metadata_demand(mono: &frontend::mono::MonoWorldV1) -> runtime::GcMetadataDemand {
-    let records = &mono.universe.records;
-    let vtables = &mono.universe.vtables;
-    runtime::GcMetadataDemand {
-        type_count: records.len() as u32,
-        // trace/value program 字节数：每个 entry 单字节 End 加末尾 sentinel。
-        trace_program_bytes: records.len().saturating_add(1) as u32,
-        value_program_bytes: records.len().saturating_add(1) as u32,
-        vtable_count: vtables.len() as u32,
-        // 至少一个 root 范围（CoroutineFrame）。
-        root_range_count: 1,
-        // glue 与 alloc 站点在阶段 39 由 placement 完成后填；占位 0。
-        glue_count: 0,
-        alloc_site_count: 0,
-        source_count: 0,
-        arena_bytes: 0,
-        block_bytes: 0,
-        line_bytes: 0,
-    }
+/// 将真实 GC metadata bundle 的 section 大小写入 runtime demand。
+fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMetadataDemand {
+    let mut demand = bundle.world.demand();
+    demand.type_section_bytes = bundle.type_section.len() as u32;
+    demand.metadata_section_bytes = bundle.metadata_section.len() as u32;
+    demand
 }
 
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。
@@ -1021,6 +1031,10 @@ pub struct ImagePlan {
     gc_metadata_line_bytes: u32,
     gc_metadata_contract_fingerprint: [u8; 32],
     gc_metadata_demand: crate::runtime::GcMetadataDemand,
+    gc_type_section: Vec<u8>,
+    gc_metadata_section: Vec<u8>,
+    gc_type_section_fingerprint: [u8; 32],
+    gc_metadata_section_fingerprint: [u8; 32],
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1057,6 +1071,12 @@ impl ImagePlan {
         attachment: runtime::RuntimeAttachment,
         raw: &RuntimeRawContractV1,
     ) -> Self {
+        let gc_type_section_fingerprint =
+            frontend::mono::keys::hash_domain("gugu-gc-type-section-v1", &plan.gc_type_section);
+        let gc_metadata_section_fingerprint = frontend::mono::keys::hash_domain(
+            "gugu-gc-metadata-section-v1",
+            &plan.gc_metadata_section,
+        );
         Self {
             target: plan.target,
             entry: plan.entry,
@@ -1125,6 +1145,10 @@ impl ImagePlan {
             gc_metadata_line_bytes: plan.gc_metadata_line_bytes,
             gc_metadata_contract_fingerprint: plan.gc_metadata_contract_fingerprint,
             gc_metadata_demand: plan.gc_metadata_demand,
+            gc_type_section: plan.gc_type_section,
+            gc_metadata_section: plan.gc_metadata_section,
+            gc_type_section_fingerprint,
+            gc_metadata_section_fingerprint,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1537,6 +1561,30 @@ impl ImagePlan {
     /// 返回 GC metadata 需求视图。
     pub fn gc_metadata_demand(&self) -> crate::runtime::GcMetadataDemand {
         self.gc_metadata_demand
+    }
+    /// 返回真实 `.gugu.types` section。
+    pub fn gc_type_section(&self) -> &[u8] {
+        &self.gc_type_section
+    }
+    /// 返回真实 `.gugu.meta` section。
+    pub fn gc_metadata_section(&self) -> &[u8] {
+        &self.gc_metadata_section
+    }
+    /// 返回 type section 字节数。
+    pub fn gc_type_section_bytes(&self) -> u32 {
+        self.gc_type_section.len() as u32
+    }
+    /// 返回 metadata section 字节数。
+    pub fn gc_metadata_section_bytes(&self) -> u32 {
+        self.gc_metadata_section.len() as u32
+    }
+    /// 返回 type section 内容指纹。
+    pub fn gc_type_section_fingerprint(&self) -> [u8; 32] {
+        self.gc_type_section_fingerprint
+    }
+    /// 返回 metadata section 内容指纹。
+    pub fn gc_metadata_section_fingerprint(&self) -> [u8; 32] {
+        self.gc_metadata_section_fingerprint
     }
     /// 返回调度需求视图。
     pub fn scheduler_demand(&self) -> crate::runtime::SchedulerDemand {
@@ -2022,7 +2070,7 @@ mod tests {
 
     #[test]
     fn image_plan_reports_gc_metadata_contract() {
-        let source = "fn main() { let value = 1\n _ = value }";
+        let source = "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }";
         let compilation = Compiler::new().compile(CompileRequest::single_file(
             "main.gg",
             source,
@@ -2038,8 +2086,14 @@ mod tests {
         assert!(plan.gc_metadata_type_count() > 0);
         assert!(plan.gc_metadata_trace_bytes() > 0);
         assert!(plan.gc_metadata_value_bytes() > 0);
-        // 1 个 CoroutineFrame root 范围必须出现。
-        assert_eq!(plan.gc_metadata_root_count(), 1);
+        assert!(plan.gc_type_section_bytes() > 0);
+        assert!(plan.gc_metadata_section_bytes() > 0);
+        assert_eq!(&plan.gc_type_section()[..8], b"GUGUTY01");
+        assert_eq!(&plan.gc_metadata_section()[..8], b"GUGUMT01");
+        assert_ne!(plan.gc_type_section_fingerprint(), [0_u8; 32]);
+        assert_ne!(plan.gc_metadata_section_fingerprint(), [0_u8; 32]);
+        // 根范围只登记具体 GIR 中实际出现的 managed local。
+        assert!(plan.gc_metadata_root_count() > 0);
         // arena/block/line 与契约常量一致。
         assert_eq!(plan.gc_metadata_arena_bytes(), 2 * 1024 * 1024);
         assert_eq!(plan.gc_metadata_block_bytes(), 32 * 1024);
@@ -2049,7 +2103,14 @@ mod tests {
         let dump = compilation.dump_runtime().expect("runtime dump");
         assert!(dump.contains("gc-metadata schema="));
         assert!(dump.contains("gc-metadata-types"));
+        assert!(dump.contains("gc-metadata-sections"));
         assert!(dump.contains("gc-metadata-fingerprint"));
+        // `ResourceCell` 是含 identity/passing 语义的聚合，它的 trace program
+        // 必须携带真实 DIRECT/INTERIOR 指令，而不是只有单字节 END。
+        assert!(
+            plan.gc_metadata_trace_bytes() > plan.gc_metadata_type_count(),
+            "trace program 必须包含逐类型指令而非单字节 END"
+        );
         // 冷/热编译指纹一致。
         let warm = Compiler::new().compile(CompileRequest::single_file(
             "main.gg",
@@ -2062,8 +2123,20 @@ mod tests {
                 .expect("warm plan")
                 .gc_metadata_contract_fingerprint()
         );
+        assert_eq!(
+            plan.gc_type_section_fingerprint(),
+            warm.image_plan()
+                .expect("warm plan")
+                .gc_type_section_fingerprint()
+        );
+        assert_eq!(
+            plan.gc_metadata_section_fingerprint(),
+            warm.image_plan()
+                .expect("warm plan")
+                .gc_metadata_section_fingerprint()
+        );
         // 类型表变化时 GC metadata 指纹必须变化。
-        let bigger = "fn helper(x: int) int = x + 1\n fn main() { _ = helper(1) }";
+        let bigger = "struct ResourceCell { id: uint }\nstruct Extra { id: uint }\nfn helper(x: Extra) Extra = x\nfn main() {\n let value = ResourceCell { id: 1 }\n let extra = Extra { id: 2 }\n _ = helper(extra)\n _ = value\n }";
         let bigger_compilation = Compiler::new().compile(CompileRequest::single_file(
             "main.gg",
             bigger,

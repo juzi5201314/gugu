@@ -3,8 +3,9 @@ use super::instantiate::WalkEntry;
 use super::keys::{MonoContext, StableTypeKey};
 use crate::Diagnostic;
 use crate::frontend::{
+    gir::passing::PassingClass,
     hir,
-    late::universe::{Shape, TypeRecord},
+    late::universe::{MetadataShape, Shape, TypeRecord},
     semantics::Ty,
     types::Layouts,
 };
@@ -231,6 +232,8 @@ impl Collector<'_, '_> {
             return Ok(None);
         }
         let layout = self.layouts.layout(&ty)?.map(|l| (l.size, l.align));
+        let metadata = self.metadata(&ty)?;
+        let passing = self.passing(&ty)?;
         let record = TypeRecord {
             key,
             canonical,
@@ -238,8 +241,127 @@ impl Collector<'_, '_> {
             layout,
             children: children.into_iter().collect(),
             shape,
+            metadata,
+            passing,
         };
         self.records.insert(key, record);
         Ok(Some(key))
+    }
+
+    fn child_key(&mut self, ty: &Ty) -> Result<StableTypeKey, Diagnostic> {
+        let child = concrete(self.context, ty)?;
+        let key = self.context.type_key(&child)?;
+        if let Some(child) = self.visit(&child)? {
+            debug_assert_eq!(child, key);
+        }
+        Ok(key)
+    }
+
+    fn metadata(&mut self, ty: &Ty) -> Result<MetadataShape, Diagnostic> {
+        Ok(match ty {
+            Ty::Ref(inner) | Ty::Chan(inner) | Ty::Join(inner) => {
+                MetadataShape::Direct(self.child_key(inner)?)
+            }
+            Ty::Slice(inner) => MetadataShape::Interior(self.child_key(inner)?),
+            Ty::String => MetadataShape::String,
+            Ty::Array(inner, count) => MetadataShape::Array {
+                element: self.child_key(inner)?,
+                count: *count,
+            },
+            Ty::Tuple(_)
+            | Ty::Named(..)
+            | Ty::Option(_)
+            | Ty::Result(..)
+            | Ty::Range
+            | Ty::ChanClosed
+            | Ty::TrySendErr
+            | Ty::TryRecvErr => {
+                let aggregate = self.layouts.aggregate_layout(ty)?;
+                let variants = aggregate
+                    .variants
+                    .into_iter()
+                    .map(|fields| {
+                        fields
+                            .into_iter()
+                            .map(|(field, offset)| Ok((self.child_key(&field)?, offset)))
+                            .collect::<Result<Vec<_>, Diagnostic>>()
+                    })
+                    .collect::<Result<Vec<_>, Diagnostic>>()?;
+                let tag = aggregate.tag.map(|layout| {
+                    let width = u8::try_from(layout.size).expect("tag 宽度适配 u8");
+                    (0, width)
+                });
+                MetadataShape::Aggregate { tag, variants }
+            }
+            Ty::MaybeUninit(_)
+            | Ty::Ptr(_)
+            | Ty::Function(..)
+            | Ty::Callable(..)
+            | Ty::Dyn(_)
+            | Ty::Panic
+            | Ty::TypeId
+            | Ty::Unit
+            | Ty::Bool
+            | Ty::Int { .. }
+            | Ty::Float(_)
+            | Ty::Char
+            | Ty::Never
+            | Ty::Error
+            | Ty::Var(_)
+            | Ty::Param(_)
+            | Ty::Projection(..)
+            | Ty::Opaque(..) => MetadataShape::None,
+        })
+    }
+
+    /// 该类型的 `PassingClass` 位集合。
+    ///
+    /// 冻结类型表早于具体 GIR 建立，因此这里按 `Ty` 结构直接推导类别；具体 GIR
+    /// 侧若给出更精确的分类，`frontend/gc.rs` 优先采用后者。位定义只有
+    /// `PassingClass` 一处权威，此处不重复书写字面量。
+    fn passing(&self, ty: &Ty) -> Result<u8, Diagnostic> {
+        let bits = PassingClass::BITS.bits();
+        let identity = PassingClass::IDENTITY.bits();
+        let cow = PassingClass::COW.bits();
+        let resource = PassingClass::RESOURCE.bits();
+        Ok(match ty {
+            Ty::String => cow,
+            Ty::Ref(_) | Ty::Slice(_) | Ty::Chan(_) | Ty::Join(_) | Ty::Dyn(_) => identity,
+            Ty::Named(index, _) => {
+                let nominal = &self.context.model.nominal[*index];
+                match nominal.name.as_str() {
+                    "ResourceCell" => resource,
+                    "ByteBuffer" | "Bytes" => cow,
+                    _ => {
+                        let variants = self.context.model.variants(ty).ok_or_else(|| {
+                            crate::Diagnostic::error(
+                                crate::DiagnosticCode::LateComptime,
+                                "名义类型字段不存在",
+                                None,
+                            )
+                        })?;
+                        let mut passing = bits;
+                        for variant in variants {
+                            for field in variant.fields {
+                                passing |= self.passing(&field.ty)?;
+                            }
+                        }
+                        passing
+                    }
+                }
+            }
+            Ty::Array(inner, _) | Ty::Option(inner) | Ty::MaybeUninit(inner) => {
+                self.passing(inner)?
+            }
+            Ty::Tuple(fields) => {
+                let mut passing = bits;
+                for field in fields {
+                    passing |= self.passing(field)?;
+                }
+                passing
+            }
+            Ty::Result(value, error) => self.passing(value)? | self.passing(error)?,
+            _ => bits,
+        })
     }
 }

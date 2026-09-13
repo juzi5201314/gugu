@@ -8,7 +8,7 @@ pub(crate) mod passing;
 pub(crate) mod placement;
 mod query;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 mod verify;
 
 pub(crate) use body::{BodyKind, GirBody};

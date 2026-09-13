@@ -20,6 +20,9 @@ impl PassingClass {
     pub(crate) const COW: Self = Self(4);
     pub(crate) const RESOURCE: Self = Self(8);
     pub(crate) const UNKNOWN: Self = Self(16);
+    pub(crate) const fn bits(self) -> u8 {
+        self.0
+    }
 
     pub(crate) fn union(self, other: Self) -> Self {
         Self(self.0 | other.0)

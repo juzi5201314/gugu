@@ -4,6 +4,22 @@ use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) enum MetadataShape {
+    None,
+    Direct(StableTypeKey),
+    Interior(StableTypeKey),
+    String,
+    Array {
+        element: StableTypeKey,
+        count: u64,
+    },
+    Aggregate {
+        tag: Option<(u64, u8)>,
+        variants: Vec<Vec<(StableTypeKey, u64)>>,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Shape {
     Unit,
     Bool,
@@ -25,6 +41,10 @@ pub(crate) struct TypeRecord {
     pub layout: Option<(u64, u64)>,
     pub children: Vec<StableTypeKey>,
     pub shape: Shape,
+    /// 由具体语义类型推导的 trace/value 结构，不重新猜测机器布局。
+    pub metadata: MetadataShape,
+    /// PassingClass 位集合：bits=1、identity=2、cow=4、resource=8。
+    pub passing: u8,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

@@ -408,6 +408,19 @@ impl RuntimeRawContractV1 {
         Ok(contract)
     }
 
+    pub(crate) fn with_gc_sections(
+        mut self,
+        type_section: Vec<u8>,
+        metadata_section: Vec<u8>,
+    ) -> Result<Self, RawModelError> {
+        self.gc_metadata = self
+            .gc_metadata
+            .with_sections(type_section, metadata_section)?;
+        self.fingerprint = self.compute_fingerprint();
+        self.verify()?;
+        Ok(self)
+    }
+
     /// 返回 schema 版本。
     pub(crate) const fn schema(&self) -> u32 {
         self.schema
@@ -512,10 +525,7 @@ impl RuntimeRawContractV1 {
     }
 
     /// 返回 GC metadata 契约段。
-    #[allow(
-        dead_code,
-        reason = "契约段由阶段 39 的 codec 与 ImagePlan 字段在后续消费"
-    )]
+    #[allow(dead_code, reason = "契约段由 runtime raw 与 ImagePlan 消费")]
     pub(crate) fn gc_metadata(&self) -> &GcMetadataRuntimeContract {
         &self.gc_metadata
     }
@@ -981,6 +991,9 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) stackmap_demand: StackMapDemand,
     /// GC metadata 需求视图：类型表大小、trace/value program 字节数与 arena 布局。
     pub(crate) gc_metadata_demand: GcMetadataDemand,
+    /// 已由 frontend 编码的真实 type/meta section。
+    pub(crate) gc_type_section: &'a [u8],
+    pub(crate) gc_metadata_section: &'a [u8],
     /// 生成契约所依据的 LIR 输入指纹。
     pub(crate) lir_fingerprint: [u8; 32],
     /// placement world 指纹。
@@ -1005,6 +1018,8 @@ pub(crate) fn run(
         inputs.sync_demand,
         inputs.stackmap_demand,
         inputs.gc_metadata_demand,
+        inputs.gc_type_section,
+        inputs.gc_metadata_section,
     ))
     .expect("runtime需求与策略可序列化");
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
@@ -1044,6 +1059,12 @@ pub(crate) fn run(
                 inputs.gc_metadata_demand,
                 inputs.profile,
             )
+            .and_then(|contract| {
+                contract.with_gc_sections(
+                    inputs.gc_type_section.to_vec(),
+                    inputs.gc_metadata_section.to_vec(),
+                )
+            })
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
@@ -1072,6 +1093,12 @@ pub(crate) fn run(
             )]
         })?,
     };
+    let contract = contract
+        .with_gc_sections(
+            inputs.gc_type_section.to_vec(),
+            inputs.gc_metadata_section.to_vec(),
+        )
+        .map_err(|error| vec![error.diagnostic()])?;
     contract
         .verify()
         .map_err(|error| vec![error.diagnostic()])?;

@@ -29,6 +29,8 @@
 
 ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault handler的内部次序分别由[后端](../internals/backend.md)、[GC 元数据](../internals/gc-metadata.md)和[调度器](../internals/scheduler.md)规定，不构成额外的用户启动钩子。
 
+编译器必须把闭世界真实类型表、trace/value program 以及根、vtable、源码和分配站点记录编码进 `.gugu.types`/`.gugutyp` 与 `.gugu.meta`/`.ggmeta`；rt0 在执行用户代码前验证两个 section 的 magic、版本、checked offset/length、program 终止符和引用范围。ImagePlan 只能携带已经验证的 section 字节，不能以 demand 计数或单字节占位 program 代替镜像 metadata。
+
 `main` 之前必须达到普通代码可以安全分配、启动 `async`、访问 `std.env` 和进入 panic 边界的状态。rt0 不能调用用户定义的 `static` 初始化函数、`defer` 或普通协程；这些机制在 runtime 进入 `Running` 后才有效。
 
 启动配置解析失败属于 `InvalidConfiguration` fatal，不能以 `Panic`、`Result` 或 `main` 的错误值交给用户处理；此时 runtime 只输出报告并终止。若诊断配置本身非法，必须使用不依赖该配置的固定纯文本 emergency report。

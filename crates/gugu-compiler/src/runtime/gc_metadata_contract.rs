@@ -2,8 +2,8 @@
 //! 字节数、根/vtable/source/alloc 计数与 arena 布局汇总为一个 fingerprint 进入
 //! `RuntimeRawContractV1`。
 //!
-//! 真实类型表与 program 字节进入 `RuntimeRawModel` 的 compute 内编码并跑
-//! `gc_metadata_schema::boot_verify`，本段只携带 demand 视图与识别常量。
+//! 真实类型表、program 与 type/meta section 字节由前端生成，经
+//! `RuntimeRawModel` 验证后进入契约和 `ImagePlan`；本段同时保留 demand 视图与识别常量。
 
 use serde::{Deserialize, Serialize};
 use std::fmt::Write;
@@ -48,14 +48,15 @@ pub(crate) const TRACE_OP_NAMES: [&str; 5] = [
     "switch",   // 0x04
 ];
 
-/// Value program op 名称（顺序即数值）。
-pub(crate) const VALUE_OP_NAMES: [&str; 6] = [
+/// Value program op 名称（按 ABI 操作码顺序登记）。
+pub(crate) const VALUE_OP_NAMES: [&str; 7] = [
     "end",              // 0x00
     "aggregate",        // 0x10
     "repeat-value",     // 0x11
     "switch-value",     // 0x12
     "cow-publish",      // 0x13
-    "acquire-resource", // 0x14, release-resource 0x15 not listed (share group)
+    "acquire-resource", // 0x14
+    "release-resource", // 0x15
 ];
 
 /// 已验证的 GC metadata runtime 契约。
@@ -72,6 +73,11 @@ pub struct GcMetadataRuntimeContract {
     pub trace_op_names: Vec<String>,
     pub value_op_names: Vec<String>,
     pub demand: GcMetadataDemand,
+    /// 已编码并经过 verifier 的真实镜像 section。
+    #[serde(default)]
+    pub type_section: Vec<u8>,
+    #[serde(default)]
+    pub metadata_section: Vec<u8>,
     pub fingerprint: [u8; 32],
 }
 
@@ -106,11 +112,25 @@ impl GcMetadataRuntimeContract {
                 .map(|name| (*name).to_owned())
                 .collect(),
             demand,
+            type_section: Vec::new(),
+            metadata_section: Vec::new(),
             fingerprint: [0; 32],
         };
         contract.fingerprint = contract.compute_fingerprint();
         contract.verify()?;
         Ok(contract)
+    }
+
+    pub(crate) fn with_sections(
+        mut self,
+        type_section: Vec<u8>,
+        metadata_section: Vec<u8>,
+    ) -> Result<Self, RawModelError> {
+        self.type_section = type_section;
+        self.metadata_section = metadata_section;
+        self.fingerprint = self.compute_fingerprint();
+        self.verify()?;
+        Ok(self)
     }
 
     pub(crate) fn verify(&self) -> Result<(), RawModelError> {
@@ -131,13 +151,39 @@ impl GcMetadataRuntimeContract {
         }
         if self.type_flag_names.len() != GC_TYPE_FLAG_NAMES.len()
             || self.trace_op_names.len() != TRACE_OP_NAMES.len()
-            || self.value_op_names.is_empty()
+            || self.value_op_names.len() != VALUE_OP_NAMES.len()
         {
             return Err(RawModelError::new("GC metadata 名称表长度与登记不一致"));
         }
         for (index, name) in self.type_flag_names.iter().enumerate() {
             if name != GC_TYPE_FLAG_NAMES[index] {
                 return Err(RawModelError::new("GC type flag 名称与登记不一致"));
+            }
+        }
+        for (index, name) in self.trace_op_names.iter().enumerate() {
+            if name != TRACE_OP_NAMES[index] {
+                return Err(RawModelError::new("GC trace op 名称与登记不一致"));
+            }
+        }
+        for (index, name) in self.value_op_names.iter().enumerate() {
+            if name != VALUE_OP_NAMES[index] {
+                return Err(RawModelError::new("GC value op 名称与登记不一致"));
+            }
+        }
+        if !self.type_section.is_empty() || !self.metadata_section.is_empty() {
+            crate::runtime::gc_metadata_section::verify_sections(
+                &self.type_section,
+                &self.metadata_section,
+            )?;
+            if self.demand.type_section_bytes != 0
+                && self.demand.type_section_bytes as usize != self.type_section.len()
+            {
+                return Err(RawModelError::new("GC type section 长度与需求不一致"));
+            }
+            if self.demand.metadata_section_bytes != 0
+                && self.demand.metadata_section_bytes as usize != self.metadata_section.len()
+            {
+                return Err(RawModelError::new("GC metadata section 长度与需求不一致"));
             }
         }
         if self.fingerprint != self.compute_fingerprint() {
@@ -167,18 +213,13 @@ impl GcMetadataRuntimeContract {
             bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
             bytes.extend_from_slice(name.as_bytes());
         }
-        let demand = &self.demand;
-        bytes.extend_from_slice(&demand.type_count.to_le_bytes());
-        bytes.extend_from_slice(&demand.trace_program_bytes.to_le_bytes());
-        bytes.extend_from_slice(&demand.value_program_bytes.to_le_bytes());
-        bytes.extend_from_slice(&demand.vtable_count.to_le_bytes());
-        bytes.extend_from_slice(&demand.glue_count.to_le_bytes());
-        bytes.extend_from_slice(&demand.root_range_count.to_le_bytes());
-        bytes.extend_from_slice(&demand.source_count.to_le_bytes());
-        bytes.extend_from_slice(&demand.alloc_site_count.to_le_bytes());
-        bytes.extend_from_slice(&demand.arena_bytes.to_le_bytes());
-        bytes.extend_from_slice(&demand.block_bytes.to_le_bytes());
-        bytes.extend_from_slice(&demand.line_bytes.to_le_bytes());
+        // demand 身份只有一处定义：契约直接并入 `GcMetadataDemand` 的规范指纹，
+        // 避免同一组计数在两处各自序列化而产生漂移。
+        bytes.extend_from_slice(&self.demand.fingerprint());
+        bytes.extend_from_slice(&(self.type_section.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&self.type_section);
+        bytes.extend_from_slice(&(self.metadata_section.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&self.metadata_section);
         bytes
     }
 
@@ -207,6 +248,20 @@ impl GcMetadataRuntimeContract {
             self.demand.root_range_count,
             self.demand.source_count,
             self.demand.alloc_site_count
+        );
+        let _ = writeln!(
+            out,
+            "gc-metadata-sections type_bytes={} metadata_bytes={} type_fingerprint={} metadata_fingerprint={}",
+            self.type_section.len(),
+            self.metadata_section.len(),
+            hex_lower(crate::frontend::mono::keys::hash_domain(
+                "gugu-gc-type-section-v1",
+                &self.type_section
+            )),
+            hex_lower(crate::frontend::mono::keys::hash_domain(
+                "gugu-gc-metadata-section-v1",
+                &self.metadata_section
+            )),
         );
         let _ = writeln!(
             out,

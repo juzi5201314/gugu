@@ -1623,6 +1623,7 @@ mod gc_metadata_tests {
         GcArenaLayoutV1, GcMetadataDemand, GcMetadataWorldV1, GcRootKindV1, GcRootLocationV1,
         GcRootRangeV1, GcTypeEntryV1, TraceOp, ValueOp, boot_verify,
     };
+    use super::super::gc_metadata_section::{encode_sections, verify_sections};
     use super::super::model::{RawModelError, RuntimeRawContractV1};
     use super::super::platform::PlatformProfile;
     use super::super::scheduler_schema::SchedulerDemand;
@@ -1645,6 +1646,8 @@ mod gc_metadata_tests {
                 flags: 0,
                 trace_offset: 0,
                 value_offset: 0,
+                trace_len: 1,
+                value_len: 0,
             }],
             vtables: Vec::new(),
             trace_program,
@@ -1654,7 +1657,7 @@ mod gc_metadata_tests {
                 kind: GcRootKindV1::CoroutineFrame,
                 location: GcRootLocationV1::Aggregate { offset_bytes: 0 },
                 type_range: (0, 1),
-                word_range: (0, 0),
+                word_range: (0, 1),
             }],
             sources: Vec::new(),
             alloc_sites: Vec::new(),
@@ -1671,6 +1674,48 @@ mod gc_metadata_tests {
     fn boot_verify_accepts_minimal_world() {
         let world = minimal_world();
         boot_verify(&world).expect("最小 world 必须自洽");
+    }
+
+    #[test]
+    fn gc_program_entries_preserve_trace_and_value_actions() {
+        let mut world = minimal_world();
+        world.trace_program = vec![
+            TraceOp::Direct as u8,
+            0,
+            1,
+            TraceOp::End as u8,
+            TraceOp::Interior as u8,
+            1,
+            1,
+            TraceOp::End as u8,
+        ];
+        world.value_program = vec![
+            ValueOp::CowPublish as u8,
+            0,
+            ValueOp::End as u8,
+            ValueOp::AcquireResource as u8,
+            0,
+            ValueOp::ReleaseResource as u8,
+            0,
+            ValueOp::End as u8,
+        ];
+        world.types[0].flags = 0b101;
+        world.types[0].trace_len = 4;
+        world.types[0].value_len = 3;
+        let mut second = world.types[0].clone();
+        second.type_key = [2_u8; 32];
+        second.name = "resource".to_owned();
+        second.flags = 0b1_1110;
+        second.trace_offset = 4;
+        second.trace_len = 4;
+        second.value_offset = 3;
+        second.value_len = 5;
+        world.types.push(second);
+        let (type_section, metadata_section) =
+            encode_sections(&world).expect("真实 program 可编码");
+        verify_sections(&type_section, &metadata_section).expect("真实 program section 自洽");
+        assert_eq!(&type_section[..8], b"GUGUTY01");
+        assert_eq!(&metadata_section[..8], b"GUGUMT01");
     }
 
     #[test]
@@ -1711,13 +1756,37 @@ mod gc_metadata_tests {
             arena_bytes: 0,
             block_bytes: 0,
             line_bytes: 0,
+            type_section_bytes: 0,
+            metadata_section_bytes: 0,
+            world_fingerprint: [0; 32],
         };
         assert_eq!(demand.fingerprint(), demand.fingerprint());
         let mut revised = demand;
         revised.type_count = 8;
         assert_ne!(revised.fingerprint(), demand.fingerprint());
     }
+    #[test]
+    fn gc_sections_round_trip_and_reject_corruption() {
+        let world = minimal_world();
+        let (type_section, metadata_section) = encode_sections(&world).expect("section 编码");
+        assert_eq!(&type_section[..8], b"GUGUTY01");
+        assert_eq!(&metadata_section[..8], b"GUGUMT01");
+        assert!(verify_sections(&type_section, &metadata_section).is_ok());
+        let mut bad_type = type_section.clone();
+        bad_type[0] = b'X';
+        assert!(verify_sections(&bad_type, &metadata_section).is_err());
+        let mut bad_metadata = metadata_section;
+        let length_offset = 80;
+        bad_metadata[length_offset..length_offset + 8].copy_from_slice(&0_u64.to_le_bytes());
+        assert!(verify_sections(&type_section, &bad_metadata).is_err());
+    }
 
+    #[test]
+    fn gc_type_entry_length_is_checked() {
+        let mut world = minimal_world();
+        world.types[0].trace_len = 2;
+        assert!(boot_verify(&world).is_err());
+    }
     #[test]
     fn gc_metadata_contract_rejects_drift_arena_layout() {
         let mut demand = GcMetadataDemand::empty();
@@ -1746,6 +1815,9 @@ mod gc_metadata_tests {
             arena_bytes: 0,
             block_bytes: 0,
             line_bytes: 0,
+            type_section_bytes: 0,
+            metadata_section_bytes: 0,
+            world_fingerprint: [0; 32],
         };
         let contract = RuntimeRawContractV1::build(
             TargetName::X86_64Linux,

@@ -1,14 +1,12 @@
-//! Mosaic GC 元数据契约：类型描述、trace/value program、arena/block/line 布局、
-//! 根来源、glue RVA、source 落点、boot verifier 的精确契约。
+//! Mosaic GC 元数据 schema：类型描述、trace/value program、arena/block/line 布局、
+//! 根来源、glue RVA、source 落点与 boot verifier 的精确契约。
 //!
-//! 阶段 39：契约只携带 demand + section 指纹；section 字节在
-//! `RuntimeRawModel` 的 compute 内真实编码并跑 `boot_verify`。Verifier 拒绝
-//! 一切缺 END、键越界、计数不一致、offset 重叠、trace 与 layout 不一致。
+//! 本模块只定义逻辑世界、program 长度解析与校验规则；镜像 section 的字节布局
+//! 与编解码在 `gc_metadata_section`。boot verifier 必须拒绝缺 END、键越界、
+//! 计数不一致、offset 重叠、trace/value 长度漂移与未知 opcode。
+use std::collections::BTreeSet;
 
-#![allow(
-    dead_code,
-    reason = "schema 与 trace/value program 编解码由阶段 39 codec 与测试联合消费"
-)]
+use super::gc_metadata_contract::{GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES};
 use super::model::RawModelError;
 use serde::{Deserialize, Serialize};
 
@@ -35,9 +33,12 @@ pub(crate) struct GcTypeEntryV1 {
     pub flags: u8,
     /// `trace_program` 在 `GcMetadataSection::Trace` 内的字偏移。
     pub trace_offset: u32,
-    /// `value_program` 在 `GcMetadataSection::Value` 内的字偏移。
-    /// 当 `flags & HAS_VALUE_ACTIONS == 0` 时为 0。
+    /// `value_program` 在 `GcMetadataSection::Value` 内的字偏移；无动作时为 0。
     pub value_offset: u32,
+    /// 当前类型 trace program 的字节长度。
+    pub trace_len: u32,
+    /// 当前类型 value program 的字节长度；无动作时为 0。
+    pub value_len: u32,
 }
 
 /// vtable payload 类型 → 实现接口的索引；描述 trace/program 时进入 vtable RVA 计算。
@@ -74,13 +75,13 @@ pub(crate) enum GcRootLocationV1 {
     Vtable { vtable_index: u32 },
 }
 
-/// Glue 入口：某个类型专属的复制/释放 thunk；阶段 39 仅占位，RVA 字段为 0。
+/// Glue 入口：某个类型专属的复制/释放 thunk；链接阶段尚未分配 RVA 时为 0。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct GcGlueEntryV1 {
     pub type_key: [u8; 32],
-    /// copy thunk 的占位 RVA（运行时占位，阶段 39 留 0）。
+    /// copy thunk 的链接时 RVA；未生成独立 thunk 时为 0。
     pub copy_rva: u32,
-    /// release thunk 的占位 RVA（运行时占位，阶段 39 留 0）。
+    /// release thunk 的链接时 RVA；未生成独立 thunk 时为 0。
     pub release_rva: u32,
 }
 
@@ -134,7 +135,6 @@ pub(crate) struct GcMetadataWorldV1 {
 
 impl GcMetadataWorldV1 {
     pub(crate) const SCHEMA: u32 = 1;
-    pub(crate) const MAGIC: &'static [u8] = b"GUGUGC01";
 }
 
 /// GC metadata demand：进入契约指纹；用于触发 `RuntimeRawModel` 重算。
@@ -151,6 +151,11 @@ pub struct GcMetadataDemand {
     pub arena_bytes: u64,
     pub block_bytes: u32,
     pub line_bytes: u32,
+    /// 编码后的 type/meta section 总字节数。
+    pub type_section_bytes: u32,
+    pub metadata_section_bytes: u32,
+    /// 真实 world 内容指纹；计数相同但布局/program 变化时仍失效缓存。
+    pub world_fingerprint: [u8; 32],
 }
 
 impl GcMetadataDemand {
@@ -167,11 +172,15 @@ impl GcMetadataDemand {
             arena_bytes: 0,
             block_bytes: 0,
             line_bytes: 0,
+            type_section_bytes: 0,
+            metadata_section_bytes: 0,
+            world_fingerprint: [0; 32],
         }
     }
 
+    /// 返回需求视图的稳定指纹。
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
-        let mut bytes = Vec::with_capacity(64);
+        let mut bytes = Vec::with_capacity(128);
         bytes.extend_from_slice(&self.type_count.to_le_bytes());
         bytes.extend_from_slice(&self.trace_program_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.value_program_bytes.to_le_bytes());
@@ -183,7 +192,10 @@ impl GcMetadataDemand {
         bytes.extend_from_slice(&self.arena_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.block_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.line_bytes.to_le_bytes());
-        crate::frontend::mono::keys::hash_domain("gugu-gc-metadata-demand-v1", &bytes)
+        bytes.extend_from_slice(&self.type_section_bytes.to_le_bytes());
+        bytes.extend_from_slice(&self.metadata_section_bytes.to_le_bytes());
+        bytes.extend_from_slice(&self.world_fingerprint);
+        crate::frontend::mono::keys::hash_domain("gugu-gc-metadata-demand-v2", &bytes)
     }
 }
 
@@ -201,6 +213,9 @@ impl GcMetadataWorldV1 {
             arena_bytes: self.arena.arena_bytes,
             block_bytes: self.arena.block_bytes,
             line_bytes: self.arena.line_bytes,
+            type_section_bytes: 0,
+            metadata_section_bytes: 0,
+            world_fingerprint: self.fingerprint(),
         }
     }
 
@@ -232,9 +247,9 @@ pub(crate) enum TraceOp {
     Direct = 0x01,
     /// 0x02: `(base_word, 0|1)` — 当前 base+offset 是 heap 内嵌指针。
     Interior = 0x02,
-    /// 0x03: `(base_word, count, stride, body_len, body)` — 数组，body 是嵌套 program。
+    /// 0x03: `(base_word, count, stride, body_len, body)` — 固定数组重复 nested program。
     Repeat = 0x03,
-    /// 0x04: `(tag_word, tag_offset_byte, tag_width, default_len, body, default_body)`。
+    /// 0x04: `(tag_word, tag_width, default_len, case_count, body_lens, default_body, case_bodies)`。
     Switch = 0x04,
 }
 
@@ -244,11 +259,11 @@ pub(crate) enum TraceOp {
 pub(crate) enum ValueOp {
     /// 0x00: payload 末尾。
     End = 0x00,
-    /// 0x10: `(base_word, body_len, body)` — 按字段递归，body 嵌套 program。
+    /// 0x10: `(base_word, body_len, body)` — 按字段递归。
     Aggregate = 0x10,
     /// 0x11: `(base_word, count, stride, body_len, body)`。
     RepeatValue = 0x11,
-    /// 0x12: `(tag_word, tag_offset_byte, tag_width, case_count, cases...)`。
+    /// 0x12: `(tag_word, tag_width, case_count, body_lens, case_bodies)`。
     SwitchValue = 0x12,
     /// 0x13: `(base_word)` — 字段是 COW，需要 publish。
     CowPublish = 0x13,
@@ -258,30 +273,61 @@ pub(crate) enum ValueOp {
     ReleaseResource = 0x15,
 }
 
-pub(crate) fn trace_op_code(op: TraceOp) -> u8 {
-    op as u8
-}
-
-pub(crate) fn value_op_code(op: ValueOp) -> u8 {
-    op as u8
-}
-
 /// Boot verifier：检查合约字段、key 解析、offset 与 program 字节范围一致。
 pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError> {
     if world.schema != GcMetadataWorldV1::SCHEMA {
         return Err(RawModelError::new("GC metadata schema 不匹配"));
     }
+    // 空闭世界（例如空包）合法：类型表与两个 program 都必须为空，不能只缺其中一项。
     if world.types.is_empty() {
-        return Err(RawModelError::new("GC metadata 类型表为空"));
-    }
-    // keys 必须唯一；flags 位必须自洽。
-    for (index, entry) in world.types.iter().enumerate() {
-        if index as u32 != u32::try_from(index).map_err(|_| RawModelError::new("类型索引溢出"))?
+        if !world.trace_program.is_empty()
+            || !world.value_program.is_empty()
+            || !world.glue.is_empty()
+            || !world.vtables.is_empty()
+            || !world.roots.is_empty()
+            || !world.sources.is_empty()
+            || !world.alloc_sites.is_empty()
         {
-            return Err(RawModelError::new("类型索引与序列不连续"));
+            return Err(RawModelError::new(
+                "空类型表不得携带 program、root 或 vtable",
+            ));
+        }
+        return verify_arena(world);
+    }
+    if world.types.len() > u32::MAX as usize
+        || world.vtables.len() > u32::MAX as usize
+        || world.trace_program.len() > u32::MAX as usize
+        || world.value_program.len() > u32::MAX as usize
+        || world.glue.len() > u32::MAX as usize
+        || world.roots.len() > u32::MAX as usize
+        || world.sources.len() > u32::MAX as usize
+        || world.alloc_sites.len() > u32::MAX as usize
+    {
+        return Err(RawModelError::new(
+            "GC metadata 数量或 program 长度超过 u32",
+        ));
+    }
+    // keys 必须唯一且按 TypeId 的稳定键顺序排列；flags 位必须自洽。
+    let mut keys = BTreeSet::new();
+    let mut previous_key = None;
+    for entry in &world.types {
+        if previous_key.is_some_and(|key| key >= entry.type_key) {
+            return Err(RawModelError::new("类型 key 未按稳定顺序排列"));
+        }
+        previous_key = Some(entry.type_key);
+        if !keys.insert(entry.type_key) {
+            return Err(RawModelError::new("类型 key 重复"));
         }
         if entry.canonical.len() < 2 {
             return Err(RawModelError::new("类型 canonical 字节长度不足"));
+        }
+        if entry.layout.is_none() != (entry.flags & 0b10_0000 != 0) {
+            return Err(RawModelError::new("unsized flag 与 layout 不一致"));
+        }
+        if (entry.flags & 0b1_0000 != 0) && (entry.flags & 0b1000 == 0) {
+            return Err(RawModelError::new(
+                "deferred release flag 缺少 resource flag",
+            ));
         }
         if let Some((size, align)) = entry.layout {
             if !align.is_power_of_two() || size % align != 0 {
@@ -291,21 +337,33 @@ pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError
                 return Err(RawModelError::new("unsized 类型不能携带 layout"));
             }
         }
+        let trace_len = trace_program_len(&world.trace_program, entry.trace_offset)?;
+        if entry.trace_len != trace_len {
+            return Err(RawModelError::new("trace program 长度字段不一致"));
+        }
         let trace_end = entry
             .trace_offset
-            .checked_add(trace_program_len(&world.trace_program, entry.trace_offset)?)
+            .checked_add(trace_len)
             .ok_or_else(|| RawModelError::new("trace program 字节数溢出"))?;
         if trace_end > world.trace_program.len() as u32 {
             return Err(RawModelError::new("trace program 越界"));
         }
         if (entry.flags & 0b100) != 0 {
+            let value_len = value_program_len(&world.value_program, entry.value_offset)?;
+            if entry.value_len != value_len || entry.value_len == 0 {
+                return Err(RawModelError::new("value program 长度字段不一致"));
+            }
             let value_end = entry
                 .value_offset
-                .checked_add(value_program_len(&world.value_program, entry.value_offset)?)
+                .checked_add(value_len)
                 .ok_or_else(|| RawModelError::new("value program 字节数溢出"))?;
             if value_end > world.value_program.len() as u32 {
                 return Err(RawModelError::new("value program 越界"));
             }
+        } else if entry.value_offset != 0 || entry.value_len != 0 {
+            return Err(RawModelError::new(
+                "无 value action 的 entry 不得携带 program",
+            ));
         }
         for key in &entry.children {
             if !world.types.iter().any(|other| &other.type_key == key) {
@@ -314,7 +372,11 @@ pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError
         }
     }
     if !world.vtables.is_empty() {
+        let mut vtable_keys = BTreeSet::new();
         for vtable in &world.vtables {
+            if !vtable_keys.insert((vtable.concrete_type, vtable.interface)) {
+                return Err(RawModelError::new("vtable key 重复"));
+            }
             if !world
                 .types
                 .iter()
@@ -325,128 +387,228 @@ pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError
         }
     }
     // root 范围必须不重叠、引用合法 type。
-    let mut last_type_end: u32 = 0;
+    let mut last_type_start = 0u32;
+    let mut last_type_end = 0u32;
     let mut last_word_end: u32 = 0;
     for root in &world.roots {
-        if root.type_range.0 < last_type_end {
-            return Err(RawModelError::new("root type 范围重叠"));
+        if root.type_range.0 >= root.type_range.1
+            || root.type_range.1 > world.types.len() as u32
+            || root.word_range.0 >= root.word_range.1
+        {
+            return Err(RawModelError::new("root range 为空或越界"));
+        }
+        if root.type_range.0 < last_type_start
+            || (root.type_range.0 != last_type_start && root.type_range.0 < last_type_end)
+        {
+            return Err(RawModelError::new("root type 范围未排序或重叠"));
         }
         if root.word_range.0 < last_word_end {
             return Err(RawModelError::new("root word 范围重叠"));
         }
-        last_type_end = root.type_range.1;
+        last_type_start = root.type_range.0;
+        last_type_end = last_type_end.max(root.type_range.1);
         last_word_end = root.word_range.1;
     }
     if !world.trace_program.ends_with(&[TraceOp::End as u8]) {
         return Err(RawModelError::new("trace program 缺少 END"));
     }
-    if !world.value_program.ends_with(&[ValueOp::End as u8]) {
+    if !world.value_program.is_empty() && !world.value_program.ends_with(&[ValueOp::End as u8]) {
         return Err(RawModelError::new("value program 缺少 END"));
+    }
+    verify_arena(world)
+}
+
+/// 校验 arena/block/line 与契约常量一致；空 world 与真实 world 共用同一条路径。
+fn verify_arena(world: &GcMetadataWorldV1) -> Result<(), RawModelError> {
+    if world.arena.arena_bytes != GC_ARENA_BYTES
+        || world.arena.block_bytes != GC_BLOCK_BYTES
+        || world.arena.line_bytes != GC_LINE_BYTES
+    {
+        return Err(RawModelError::new("GC arena/block/line 与契约常量不一致"));
     }
     Ok(())
 }
 
 /// 计算从 `start` 起的 trace program 长度：扫描嵌套 Repeat/Switch 直到 End。
-fn trace_program_len(bytes: &[u8], start: u32) -> Result<u32, RawModelError> {
-    let mut index = start as usize;
+pub(crate) fn trace_program_len(bytes: &[u8], start: u32) -> Result<u32, RawModelError> {
+    trace_program_len_at(bytes, start, 0)
+}
+
+fn trace_program_len_at(bytes: &[u8], start: u32, depth: u8) -> Result<u32, RawModelError> {
+    if depth > 32 {
+        return Err(RawModelError::new("trace program 嵌套过深"));
+    }
+    let start = usize::try_from(start).map_err(|_| RawModelError::new("trace 起点溢出"))?;
+    let mut index = start;
     loop {
         let op = *bytes
             .get(index)
             .ok_or_else(|| RawModelError::new("trace program 字节缺失"))?;
         index += 1;
         match op {
-            x if x == TraceOp::End as u8 => return Ok((index - start as usize) as u32),
+            x if x == TraceOp::End as u8 => {
+                return u32::try_from(index - start)
+                    .map_err(|_| RawModelError::new("trace program 长度溢出"));
+            }
             x if x == TraceOp::Direct as u8 || x == TraceOp::Interior as u8 => {
                 index = consume_uleb_pair(bytes, index)?;
             }
             x if x == TraceOp::Repeat as u8 => {
                 index = consume_uleb_pair(bytes, index)?;
-                let body_len = decode_uleb(bytes, &mut index)?;
-                index = index
-                    .checked_add(
-                        body_len
-                            .try_into()
-                            .map_err(|_| RawModelError::new("trace program body 长度溢出"))?,
-                    )
-                    .ok_or_else(|| RawModelError::new("trace program body 越界"))?;
+                let _count = decode_uleb(bytes, &mut index)?;
+                let body_len = usize::try_from(decode_uleb(bytes, &mut index)?)
+                    .map_err(|_| RawModelError::new("trace repeat body 长度溢出"))?;
+                let body_end = index
+                    .checked_add(body_len)
+                    .ok_or_else(|| RawModelError::new("trace repeat body 范围溢出"))?;
+                if body_end > bytes.len()
+                    || trace_program_len_at(
+                        bytes,
+                        u32::try_from(index)
+                            .map_err(|_| RawModelError::new("trace body offset 溢出"))?,
+                        depth + 1,
+                    )? as usize
+                        != body_len
+                {
+                    return Err(RawModelError::new("trace repeat body 非法"));
+                }
+                index = body_end;
             }
             x if x == TraceOp::Switch as u8 => {
                 index = consume_uleb_pair(bytes, index)?;
-                let default_len = decode_uleb(bytes, &mut index)?;
-                let case_count: u64 = decode_uleb(bytes, &mut index)?;
-                let mut cases_total = default_len;
+                let default_len = usize::try_from(decode_uleb(bytes, &mut index)?)
+                    .map_err(|_| RawModelError::new("trace default 长度溢出"))?;
+                let case_count = usize::try_from(decode_uleb(bytes, &mut index)?)
+                    .map_err(|_| RawModelError::new("trace case 数量溢出"))?;
+                let total = case_count
+                    .checked_add(1)
+                    .ok_or_else(|| RawModelError::new("trace case 数量溢出"))?;
+                let mut body_lengths = Vec::with_capacity(total);
+                body_lengths.push(default_len);
                 for _ in 0..case_count {
-                    let case_len = decode_uleb(bytes, &mut index)?;
-                    cases_total = cases_total.saturating_add(case_len);
+                    body_lengths.push(
+                        usize::try_from(decode_uleb(bytes, &mut index)?)
+                            .map_err(|_| RawModelError::new("trace case 长度溢出"))?,
+                    );
                 }
-                index = index
-                    .checked_add(
-                        cases_total
-                            .try_into()
-                            .map_err(|_| RawModelError::new("switch case body 长度溢出"))?,
-                    )
-                    .ok_or_else(|| RawModelError::new("switch case body 越界"))?;
+                for body_len in body_lengths {
+                    let body_end = index
+                        .checked_add(body_len)
+                        .ok_or_else(|| RawModelError::new("trace case 范围溢出"))?;
+                    if body_end > bytes.len()
+                        || trace_program_len_at(
+                            bytes,
+                            u32::try_from(index)
+                                .map_err(|_| RawModelError::new("trace case offset 溢出"))?,
+                            depth + 1,
+                        )? as usize
+                            != body_len
+                    {
+                        return Err(RawModelError::new("trace case body 非法"));
+                    }
+                    index = body_end;
+                }
             }
             _ => return Err(RawModelError::new("未知 trace op")),
         }
     }
 }
+pub(crate) fn value_program_len(bytes: &[u8], start: u32) -> Result<u32, RawModelError> {
+    value_program_len_at(bytes, start, 0)
+}
 
-fn value_program_len(bytes: &[u8], start: u32) -> Result<u32, RawModelError> {
-    let mut index = start as usize;
+fn value_program_len_at(bytes: &[u8], start: u32, depth: u8) -> Result<u32, RawModelError> {
+    if depth > 32 {
+        return Err(RawModelError::new("value program 嵌套过深"));
+    }
+    let start = usize::try_from(start).map_err(|_| RawModelError::new("value 起点溢出"))?;
+    let mut index = start;
     loop {
         let op = *bytes
             .get(index)
             .ok_or_else(|| RawModelError::new("value program 字节缺失"))?;
         index += 1;
         match op {
-            x if x == ValueOp::End as u8 => return Ok((index - start as usize) as u32),
+            x if x == ValueOp::End as u8 => {
+                return u32::try_from(index - start)
+                    .map_err(|_| RawModelError::new("value program 长度溢出"));
+            }
             x if x == ValueOp::Aggregate as u8 => {
                 index = consume_uleb_pair(bytes, index)?;
-                let body_len = decode_uleb(bytes, &mut index)?;
-                index = index
-                    .checked_add(
-                        body_len
-                            .try_into()
-                            .map_err(|_| RawModelError::new("value aggregate body 长度溢出"))?,
-                    )
-                    .ok_or_else(|| RawModelError::new("value aggregate body 越界"))?;
+                let body_len = usize::try_from(decode_uleb(bytes, &mut index)?)
+                    .map_err(|_| RawModelError::new("value aggregate body 长度溢出"))?;
+                let body_end = index
+                    .checked_add(body_len)
+                    .ok_or_else(|| RawModelError::new("value aggregate body 范围溢出"))?;
+                if body_end > bytes.len()
+                    || value_program_len_at(
+                        bytes,
+                        u32::try_from(index)
+                            .map_err(|_| RawModelError::new("value body offset 溢出"))?,
+                        depth + 1,
+                    )? as usize
+                        != body_len
+                {
+                    return Err(RawModelError::new("value aggregate body 非法"));
+                }
+                index = body_end;
             }
             x if x == ValueOp::RepeatValue as u8 => {
                 index = consume_uleb_pair(bytes, index)?;
-                let body_len = decode_uleb(bytes, &mut index)?;
-                index = index
-                    .checked_add(
-                        body_len
-                            .try_into()
-                            .map_err(|_| RawModelError::new("value repeat body 长度溢出"))?,
-                    )
-                    .ok_or_else(|| RawModelError::new("value repeat body 越界"))?;
+                let _count = decode_uleb(bytes, &mut index)?;
+                let _stride = decode_uleb(bytes, &mut index)?;
+                let body_len = usize::try_from(decode_uleb(bytes, &mut index)?)
+                    .map_err(|_| RawModelError::new("value repeat body 长度溢出"))?;
+                let body_end = index
+                    .checked_add(body_len)
+                    .ok_or_else(|| RawModelError::new("value repeat body 范围溢出"))?;
+                if body_end > bytes.len()
+                    || value_program_len_at(
+                        bytes,
+                        u32::try_from(index)
+                            .map_err(|_| RawModelError::new("value body offset 溢出"))?,
+                        depth + 1,
+                    )? as usize
+                        != body_len
+                {
+                    return Err(RawModelError::new("value repeat body 非法"));
+                }
+                index = body_end;
             }
             x if x == ValueOp::SwitchValue as u8 => {
                 index = consume_uleb_pair(bytes, index)?;
-                let case_count: u64 = decode_uleb(bytes, &mut index)?;
-                let mut cases_total: u64 = 0;
+                let case_count = usize::try_from(decode_uleb(bytes, &mut index)?)
+                    .map_err(|_| RawModelError::new("value case 数量溢出"))?;
+                let mut body_lengths = Vec::with_capacity(case_count);
                 for _ in 0..case_count {
-                    let case_len = decode_uleb(bytes, &mut index)?;
-                    cases_total = cases_total.saturating_add(case_len);
+                    body_lengths.push(
+                        usize::try_from(decode_uleb(bytes, &mut index)?)
+                            .map_err(|_| RawModelError::new("value case 长度溢出"))?,
+                    );
                 }
-                index = index
-                    .checked_add(
-                        cases_total
-                            .try_into()
-                            .map_err(|_| RawModelError::new("value switch body 长度溢出"))?,
-                    )
-                    .ok_or_else(|| RawModelError::new("value switch body 越界"))?;
+                for body_len in body_lengths {
+                    let body_end = index
+                        .checked_add(body_len)
+                        .ok_or_else(|| RawModelError::new("value case 范围溢出"))?;
+                    if body_end > bytes.len()
+                        || value_program_len_at(
+                            bytes,
+                            u32::try_from(index)
+                                .map_err(|_| RawModelError::new("value case offset 溢出"))?,
+                            depth + 1,
+                        )? as usize
+                            != body_len
+                    {
+                        return Err(RawModelError::new("value case body 非法"));
+                    }
+                    index = body_end;
+                }
             }
-            x if x == ValueOp::CowPublish as u8 => {
-                index = consume_uleb_pair(bytes, index)?;
-            }
-            x if x == ValueOp::AcquireResource as u8 => {
-                index = consume_uleb_pair(bytes, index)?;
-            }
-            x if x == ValueOp::ReleaseResource as u8 => {
-                index = consume_uleb_pair(bytes, index)?;
+            x if x == ValueOp::CowPublish as u8
+                || x == ValueOp::AcquireResource as u8
+                || x == ValueOp::ReleaseResource as u8 =>
+            {
+                let _offset = decode_uleb(bytes, &mut index)?;
             }
             _ => return Err(RawModelError::new("未知 value op")),
         }
@@ -469,8 +631,15 @@ pub(crate) fn decode_uleb(bytes: &[u8], index: &mut usize) -> Result<u64, RawMod
             .get(*index)
             .ok_or_else(|| RawModelError::new("ULEB128 截断"))?;
         *index += 1;
-        result |= u64::from(byte & 0x7F) << shift;
+        let payload = u64::from(byte & 0x7F);
+        if shift == 63 && payload > 1 {
+            return Err(RawModelError::new("ULEB128 数值溢出"));
+        }
+        result |= payload << shift;
         if byte & 0x80 == 0 {
+            if shift != 0 && payload == 0 {
+                return Err(RawModelError::new("ULEB128 非 canonical 编码"));
+            }
             return Ok(result);
         }
         shift += 7;
