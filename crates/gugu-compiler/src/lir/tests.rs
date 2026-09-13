@@ -728,7 +728,7 @@ fn stackmap_rejects_duplicate_root_across_kinds() {
         .expect("根集合非空")
         .clone();
     // 同一身份进入两类位图：verifier 必须拒绝。
-    if point.roots.direct.first().is_some() {
+    if !point.roots.direct.is_empty() {
         point.roots.stack.push(duplicate);
     } else {
         point.roots.direct.push(duplicate);

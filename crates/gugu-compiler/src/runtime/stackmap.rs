@@ -214,7 +214,7 @@ pub(crate) fn scan_roots(
             continue;
         }
         let cage = (word >> 56) as u8;
-        let generation = ((word >> 32) & 0xff_ffff) as u64;
+        let generation = (word >> 32) & 0xff_ffff;
         let offset_value = word & 0xffff_ffff;
         let descriptor = world
             .cages

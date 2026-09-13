@@ -4,7 +4,6 @@
 //! 空世界合法，以及函数/安全点二分查找、五类根扫描、落地选择、复制输入组装与
 //! bridge 帧校验。全部是进程内、确定性、快速测试。
 
-use super::model::RawModelError;
 use super::stackmap::{
     CageDescriptor, HandleSlot, LandingRecord, WalkFunction, WalkMap, WalkSafepoint, WalkWorld,
     copy_input, find_function, find_safepoint, scan_roots, select_landing, verify_bridge_frame,
@@ -67,6 +66,32 @@ fn codec_round_trip_and_empty_world() {
     // 空世界合法：三表计数为 0。
     let empty = encode(&[], &[]).expect("空世界可编码");
     assert_eq!(decode(&empty).expect("空世界可解码"), (0, 0, 0));
+}
+
+#[test]
+fn codec_preserves_fifth_register_root() {
+    let functions = vec![function(0x1000, 64)];
+    let mut fifth = layout(0, 8, 0, 64, 0);
+    fifth.1.registers[4] = 1 << 2;
+    let bytes = encode(&functions, std::slice::from_ref(&fifth)).expect("第五类寄存器根可编码");
+    let map_data = u64::from_le_bytes(bytes[56..64].try_into().expect("map data 偏移")) as usize;
+    assert_eq!(
+        u16::from_le_bytes(
+            bytes[map_data + 12..map_data + 14]
+                .try_into()
+                .expect("第五类掩码")
+        ),
+        1 << 2,
+        "第五类寄存器掩码必须写入 map header"
+    );
+    assert_eq!(decode(&bytes).expect("第五类寄存器根可解码"), (1, 1, 1));
+
+    let mut overlap = fifth;
+    overlap.1.registers[0] = 1 << 2;
+    assert!(
+        encode(&functions, std::slice::from_ref(&overlap)).is_err(),
+        "五类寄存器掩码重叠必须拒绝"
+    );
 }
 
 #[test]
@@ -215,7 +240,7 @@ fn walker_scans_five_root_kinds() {
     };
     // 字布局：direct 非空、interior 带增量、handle 槽 2、压缩引用 cage0 世代 3 偏移 0x40、
     // stack 非空。
-    let compressed = (0u64 << 56) | (3u64 << 32) | 0x40u64;
+    let compressed = 3u64 << 32 | 0x40u64;
     let words = vec![0x1111, 0x2222_0001, 2, compressed, 0x5555];
     let roots = scan_roots(&world, 0, &words).expect("五类根可扫描");
     assert_eq!(roots.len(), 5, "五类根各一个：{roots:?}");
@@ -226,11 +251,11 @@ fn walker_scans_five_root_kinds() {
         "handle 槽 1 代际为 0 必须拒绝"
     );
     // 压缩引用代际过期不得解码。
-    let aged = (0u64 << 56) | (9u64 << 32) | 0x40u64;
+    let aged = 9u64 << 32 | 0x40u64;
     let aged_words = vec![0x1111, 0x2222_0001, 2, aged, 0x5555];
     assert!(scan_roots(&world, 0, &aged_words).is_err());
     // 越过 cage 范围不得解码。
-    let outside = (0u64 << 56) | (3u64 << 32) | 0x2000u64;
+    let outside = 3u64 << 32 | 0x2000u64;
     let outside_words = vec![0x1111, 0x2222_0001, 2, outside, 0x5555];
     assert!(scan_roots(&world, 0, &outside_words).is_err());
     // 空 direct 字容忍跳过。
@@ -281,7 +306,5 @@ fn walker_selects_innermost_landing_and_builds_copy_input() {
     // bridge 帧必须落在已用范围内。
     verify_bridge_frame(8, 16, 32).expect("帧范围内");
     assert!(verify_bridge_frame(8, 32, 32).is_err());
-    let overflow: Result<(), RawModelError> =
-        verify_bridge_frame(u64::MAX, 16, 32).map_err(|error| error);
-    assert!(overflow.is_err());
+    assert!(verify_bridge_frame(u64::MAX, 16, 32).is_err());
 }

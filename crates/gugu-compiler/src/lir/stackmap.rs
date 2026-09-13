@@ -564,7 +564,7 @@ fn collect_invoke(
                 ROOT_DIRECT,
                 LogicalRoot::Slot {
                     slot: u32::MAX,
-                    offset: u64::from(*parameter) << 32 | u64::from(word),
+                    offset: u64::from(*parameter) << 32 | word,
                 },
             );
         }
@@ -739,26 +739,25 @@ fn verify_safepoint(safepoint: &LogicalSafepoint) -> Result<(), crate::Diagnosti
     }
     // `SuspendResume` 与 `ForeignBridge` 点的寄存器掩码为 0：逻辑世界不携带掩码，
     // 该规则由后端在填充掩码时复验；此处断言种类约束已满足（掩码字段不存在即为零）。
-    if safepoint.kind == KIND_MORESTACK_ENTRY {
-        if !safepoint.roots.direct.is_empty()
+    if safepoint.kind == KIND_MORESTACK_ENTRY
+        && (!safepoint.roots.direct.is_empty()
             || !safepoint.roots.interior.is_empty()
             || !safepoint.roots.handle.is_empty()
             || !safepoint.roots.compressed.is_empty()
-            || !safepoint.roots.stack.is_empty()
+            || !safepoint.roots.stack.is_empty())
+    {
+        // `MorestackEntry` 只含 ABI 参数根：槽根与值根不得出现。
+        for root in safepoint
+            .roots
+            .direct
+            .iter()
+            .chain(&safepoint.roots.interior)
+            .chain(&safepoint.roots.handle)
+            .chain(&safepoint.roots.compressed)
+            .chain(&safepoint.roots.stack)
         {
-            // `MorestackEntry` 只含 ABI 参数根：槽根与值根不得出现。
-            for root in safepoint
-                .roots
-                .direct
-                .iter()
-                .chain(&safepoint.roots.interior)
-                .chain(&safepoint.roots.handle)
-                .chain(&safepoint.roots.compressed)
-                .chain(&safepoint.roots.stack)
-            {
-                if !matches!(root, LogicalRoot::Argument { .. }) {
-                    return Err(invalid("MorestackEntry 只允许 ABI 参数根"));
-                }
+            if !matches!(root, LogicalRoot::Argument { .. }) {
+                return Err(invalid("MorestackEntry 只允许 ABI 参数根"));
             }
         }
     }

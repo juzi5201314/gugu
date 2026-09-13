@@ -196,7 +196,7 @@ pub(crate) fn encode(
         output.push(flags);
         output.extend_from_slice(&0u16.to_le_bytes());
     }
-    while output.len() as u64 % TABLE_ALIGN != 0 {
+    while !(output.len() as u64).is_multiple_of(TABLE_ALIGN) {
         output.push(0);
     }
     debug_assert_eq!(output.len() as u64, map_index_offset);
@@ -412,6 +412,9 @@ fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
     }
     // 五个位图互斥。
     let lanes = words.div_ceil(8).max(1);
+    if lanes > 8 {
+        return Err(RawModelError::new("槽位图超过固定 lane 上界"));
+    }
     for lane in 0..lanes {
         let mut merged = 0u64;
         for bitmap in &layout.slots {
@@ -447,10 +450,13 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
     let slot_count = u32::from_le_bytes(record[0..4].try_into().expect("槽字段"));
     let words = slot_count.div_ceil(8) as usize;
     let lanes = words.div_ceil(8).max(1);
+    if lanes > 8 {
+        return Err(RawModelError::new("map 记录槽位图超过固定 lane 上界"));
+    }
     // 头 16 字节后是五组位图，每组 `ceil(slot_count/8)` 字节，再补齐到 4 字节。
     let mut cursor = 16usize;
     let mut bitmaps = [[0u64; 8]; 5];
-    for class in 0..5 {
+    for class in &mut bitmaps {
         let bytes = words;
         if record.len() < cursor + bytes {
             return Err(RawModelError::new("map 记录位图越界"));
@@ -458,11 +464,11 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
         for (lane, chunk) in record[cursor..cursor + bytes].chunks(8).enumerate() {
             let mut word = [0u8; 8];
             word[..chunk.len()].copy_from_slice(chunk);
-            bitmaps[class][lane] = u64::from_le_bytes(word);
+            class[lane] = u64::from_le_bytes(word);
         }
         cursor += bytes;
     }
-    while cursor % 4 != 0 {
+    while !cursor.is_multiple_of(4) {
         if record.get(cursor).copied().unwrap_or(1) != 0 {
             return Err(RawModelError::new("map 记录 padding 必须为 0"));
         }
@@ -472,34 +478,41 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
         return Err(RawModelError::new("map 记录存在多余字节"));
     }
     // 尾 bit 清零与互斥：位图按字节覆盖 `slot_count` 个槽位。
-    for class in 0..5 {
-        let excess_bits = lanes * 64 - words * 8;
-        if excess_bits > 0 && bitmaps[class][lanes - 1] >> (64 - excess_bits) != 0 {
-            return Err(RawModelError::new("槽位图尾 bit 必须为 0"));
-        }
+    let excess_bits = lanes * 64 - words * 8;
+    if excess_bits > 0
+        && bitmaps
+            .iter()
+            .any(|class| class[lanes - 1] >> (64 - excess_bits) != 0)
+    {
+        return Err(RawModelError::new("槽位图尾 bit 必须为 0"));
     }
     for lane in 0..lanes {
         let mut merged = 0u64;
-        for class in 0..5 {
-            if merged & bitmaps[class][lane] != 0 {
+        for class in &bitmaps {
+            if merged & class[lane] != 0 {
                 return Err(RawModelError::new("五类槽位图不互斥"));
             }
-            merged |= bitmaps[class][lane];
+            merged |= class[lane];
         }
     }
-    let masks = [
-        u16::from_le_bytes(record[4..6].try_into().expect("掩码字段")),
-        u16::from_le_bytes(record[6..8].try_into().expect("掩码字段")),
-        u16::from_le_bytes(record[8..10].try_into().expect("掩码字段")),
-        u16::from_le_bytes(record[10..12].try_into().expect("掩码字段")),
-    ];
-    // 记录头只存四个掩码：第五类掩码恒为 0，由编码器保证。
-    let _ = masks;
-    for mask in record[4..12].chunks(2) {
-        let mask = u16::from_le_bytes(mask.try_into().expect("掩码字段"));
-        if mask & (1 << 15) != 0 {
+    // 记录头包含五类完整掩码；最后两个字节为规范保留字段。
+    let mut masks = [0u16; 5];
+    for (index, mask) in masks.iter_mut().enumerate() {
+        let start = 4 + index * 2;
+        *mask = u16::from_le_bytes(record[start..start + 2].try_into().expect("掩码字段"));
+        if *mask & (1 << 15) != 0 {
             return Err(RawModelError::new("寄存器掩码 bit15 必须为 0"));
         }
+    }
+    if u16::from_le_bytes(record[14..16].try_into().expect("保留字段")) != 0 {
+        return Err(RawModelError::new("map 记录保留字段必须为 0"));
+    }
+    let mut merged = 0u16;
+    for mask in masks {
+        if merged & mask != 0 {
+            return Err(RawModelError::new("五类寄存器掩码不互斥"));
+        }
+        merged |= mask;
     }
     let _ = REGISTER_NAMES;
     Ok(())
@@ -508,12 +521,12 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
 fn map_record(layout: &SafepointLayout) -> Vec<u8> {
     let mut output = Vec::new();
     output.extend_from_slice(&layout.slot_count.to_le_bytes());
-    // 记录头固定存四个掩码位段与一个保留 u32：direct、interior、handle、
-    // compressed；stack 类掩码在本阶段恒为 0（挂起与 bridge 点全零规则）。
-    for mask in layout.registers.iter().take(4) {
+    // 记录头固定存五个 u16 掩码：direct、interior、handle、compressed、stack；
+    // 最后两个字节为保留字段，确保第五类寄存器根不被截断。
+    for mask in &layout.registers {
         output.extend_from_slice(&mask.to_le_bytes());
     }
-    output.extend_from_slice(&[0, 0, 0, 0]);
+    output.extend_from_slice(&[0, 0]);
     let words = layout.slot_count.div_ceil(8) as usize;
     for bitmap in &layout.slots {
         // 位图按字读入内存：内存字数与 `slot_count` 覆盖的字节数一致。
