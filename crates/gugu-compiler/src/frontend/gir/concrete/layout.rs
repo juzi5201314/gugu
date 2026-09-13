@@ -58,14 +58,7 @@ impl<'a, 'm> Builder<'a, 'm> {
         self.indices.insert(ty.clone(), index);
         self.types.push(None);
         let layout = self.layouts.layout(&ty)?;
-        let key = if let Ty::Callable(callable, _, _) = &ty {
-            self.context.module.definitions[self.context.identities.function(*callable).index()].key
-        } else {
-            crate::frontend::mono::keys::hash_domain(
-                "gugu-mono-v1",
-                &self.context.encode_type(&ty)?,
-            )
-        };
+        let key = self.context.type_key(&ty)?;
         let (kind, passing) = self.kind(&ty, layout)?;
         self.types[super::index(index)] = Some(TypeLayout {
             key,
@@ -138,11 +131,7 @@ impl<'a, 'm> Builder<'a, 'm> {
                 let arguments = arguments
                     .iter()
                     .filter(|ty| crate::frontend::mono::universe::is_concrete(ty))
-                    .map(|ty| {
-                        self.context.encode_type(ty).map(|bytes| {
-                            crate::frontend::mono::keys::hash_domain("gugu-mono-v1", &bytes)
-                        })
-                    })
+                    .map(|ty| self.context.type_key(ty))
                     .collect::<Result<_, _>>()?;
                 (
                     TypeKind::FunctionItem {

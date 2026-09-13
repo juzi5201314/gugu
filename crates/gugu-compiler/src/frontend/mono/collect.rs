@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `MonoWorldV1` schema。
-pub(crate) const MONO_SCHEMA: u32 = 4;
+pub(crate) const MONO_SCHEMA: u32 = 5;
 
 /// 闭合后的实例图：实例按 key 摘要排序，`MonoId` 为排序后下标。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

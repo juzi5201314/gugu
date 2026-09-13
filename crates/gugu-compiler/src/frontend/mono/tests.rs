@@ -356,6 +356,49 @@ fn function_values_retain_their_callable_instances() {
     assert_eq!(instance_map(&output.mono)["main"], vec!["leaf"]);
 }
 
+/// 函数项类型必须与冻结类型表共用同一个 `StableTypeKey`。
+///
+/// 回归：`Ty::Callable` 曾按 `function_key` 单独成键，而冻结类型表按规范类型字节
+/// 成键，于是 `type_id[T]()` 在 `T` 为函数项时报 `E0054`，且具体 GIR 的
+/// `TypeLayout.key` 无法被 `TypeUniverse::record` 解析。
+#[test]
+fn function_item_type_key_matches_frozen_universe() {
+    let source = "fn helper(x: int) int = x + 1\nfn late[T](value: T) TypeId = type_id[T]()\nfn main() { let id = late(helper)\n _ = id }";
+    let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
+    assert!(
+        output
+            .mono
+            .universe
+            .records
+            .iter()
+            .any(|record| record.name.contains("helper")),
+        "函数项类型必须进入冻结类型表"
+    );
+    for body in &output.gir.concrete {
+        for layout in &body.types {
+            // `Never` 与 `MaybeUninit` 按设计不进入冻结类型表：它们不是可承载值。
+            if matches!(
+                layout.kind,
+                crate::frontend::gir::concrete::TypeKind::Never
+                    | crate::frontend::gir::concrete::TypeKind::MaybeUninit(_)
+            ) {
+                continue;
+            }
+            output
+                .mono
+                .universe
+                .record(&layout.key)
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "具体类型键必须可解析：{}（{:?}）",
+                        error.message(),
+                        layout.kind
+                    )
+                });
+        }
+    }
+}
+
 #[test]
 fn nested_closure_owns_its_call_edges() {
     let source = "fn leaf() {}\nfn main() { let f = fn() { leaf() }\n f() }";

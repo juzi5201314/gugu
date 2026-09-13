@@ -10,7 +10,7 @@ use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const INSTANCE_SCHEMA: u32 = 4;
+pub(crate) const INSTANCE_SCHEMA: u32 = 5;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 //! 在实例闭合期间收集类型及布局；冻结后不再访问可变语义环境。
 use super::instantiate::WalkEntry;
-use super::keys::{MonoContext, StableTypeKey, hash_domain};
+use super::keys::{MonoContext, StableTypeKey};
 use crate::Diagnostic;
 use crate::frontend::{
     hir,
@@ -145,7 +145,7 @@ impl Collector<'_, '_> {
     fn visit(&mut self, ty: &Ty) -> Result<Option<StableTypeKey>, Diagnostic> {
         let ty = concrete(self.context, ty)?;
         let canonical = self.context.encode_type(&ty)?;
-        let key = hash_domain("gugu-mono-v1", &canonical);
+        let key = self.context.type_key(&ty)?;
         if !self.visited.insert(key) {
             return Ok((!matches!(ty, Ty::Never | Ty::MaybeUninit(_))).then_some(key));
         }
@@ -153,7 +153,7 @@ impl Collector<'_, '_> {
         let context = self.context;
         let mut add = |t: &Ty| -> Result<StableTypeKey, Diagnostic> {
             let child = concrete(self.context, t)?;
-            let key = hash_domain("gugu-mono-v1", &self.context.encode_type(&child)?);
+            let key = self.context.type_key(&child)?;
             if let Some(child) = self.visit(&child)? {
                 children.insert(child);
             }

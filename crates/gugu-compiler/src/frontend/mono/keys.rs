@@ -279,6 +279,15 @@ impl<'a> MonoContext<'a> {
         Ok(out)
     }
 
+    /// 类型的唯一稳定键：规范类型字节的 `gugu-mono-v1` 域摘要。
+    ///
+    /// 冻结类型表（`late::universe`）、具体 GIR 类型表与 LIR 符号地址共用本函数，
+    /// 不允许任何调用方对同一 `Ty` 走第二条编码路径——否则 `TypeId`、类型描述符与
+    /// `universe.record` 无法互相解析。
+    pub(crate) fn type_key(&self, ty: &Ty) -> Result<StableTypeKey, Diagnostic> {
+        Ok(hash_domain("gugu-mono-v1", &self.encode_type(ty)?))
+    }
+
     fn encode_type_into(&self, ty: &Ty, out: &mut Vec<u8>) -> Result<(), Diagnostic> {
         let invalid = || {
             Err(Diagnostic::error(
