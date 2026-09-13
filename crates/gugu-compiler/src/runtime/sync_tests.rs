@@ -2,16 +2,20 @@
 
 use super::RawWorld;
 use super::coroutine_impl::CoroutineEntry;
+use super::wait_tests::consume_woken;
 use crate::runtime::PlatformProfile;
-use crate::runtime::coroutine::{CoroutineHandle, CoroutineState};
+use crate::runtime::channel::{RecvOutcome, TrySendErr};
+use crate::runtime::coroutine::{CompletionValue, CoroutineHandle, CoroutineState};
 use crate::runtime::message::BatchLimits;
 use crate::runtime::sync::{
-    AtomicStateMachine, Cancelled, MemoryOrdering, MutexLockOutcome, is_legal_atomic_type,
+    AtomicStateMachine, Cancelled, MemoryOrdering, Mutex, MutexLockOutcome, RwLock,
+    is_legal_atomic_type,
 };
 use crate::runtime::sync_schema::{
     CANCEL_ACTIVE, CANCEL_CANCELLED, MUTEX_CONTENDED, MUTEX_LOCKED, MUTEX_UNLOCKED, ONCE_FAILED,
     ONCE_INITIALIZING, ONCE_READY, ONCE_UNINIT, SYNC_SCHEMA, SyncDemand, SyncRuntimeContract,
 };
+use crate::runtime::wait::{JoinOutcome, WaitResult};
 use crate::{CompileRequest, Compiler, TargetName};
 
 fn entry() -> CoroutineEntry {
@@ -135,6 +139,102 @@ fn atomic_ordering_state_machine_acquire_release_seq_cst() {
         .compare_exchange(1, 999, 300, MemoryOrdering::SeqCst, MemoryOrdering::SeqCst)
         .unwrap();
     assert_eq!(cas_fail, Err(200));
+}
+
+#[test]
+fn cas_ordering_matrix_rejects_invalid_pairs_without_side_effects() {
+    use MemoryOrdering::{AcqRel, Acquire, Relaxed, Release, SeqCst};
+    for success in [Relaxed, Acquire, Release, AcqRel, SeqCst] {
+        for failure in [Relaxed, Acquire, Release, AcqRel, SeqCst] {
+            let allowed = matches!(
+                (success, failure),
+                (Relaxed, Relaxed)
+                    | (Acquire, Relaxed | Acquire)
+                    | (Release, Relaxed)
+                    | (AcqRel, Relaxed | Acquire)
+                    | (SeqCst, Relaxed | Acquire | SeqCst)
+            );
+            for expected in [7, 6] {
+                let mut sm = AtomicStateMachine::new(7);
+                sm.store(5, 7, Release).unwrap();
+                let before = (
+                    sm.value,
+                    sm.release_epoch,
+                    sm.seq_cst_seq,
+                    sm.global_clock,
+                    sm.coroutine_views.clone(),
+                );
+                let result = sm.compare_exchange(8, expected, 9, success, failure);
+                if allowed {
+                    if expected == 7 {
+                        assert_eq!(result, Ok(Ok(())));
+                        assert_eq!(sm.value, 9);
+                    } else {
+                        assert_eq!(result, Ok(Err(7)));
+                        assert_eq!(sm.value, 7);
+                    }
+                } else {
+                    assert!(result.is_err(), "{success:?}/{failure:?}");
+                    assert_eq!(
+                        (
+                            sm.value,
+                            sm.release_epoch,
+                            sm.seq_cst_seq,
+                            sm.global_clock,
+                            sm.coroutine_views
+                        ),
+                        before
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn lock_handoff_never_confuses_wait_node_and_coroutine() {
+    let mut mutex = Mutex::new();
+    assert_eq!(mutex.lock(10, 101), MutexLockOutcome::Acquired);
+    assert_eq!(
+        mutex.lock(20, 202),
+        MutexLockOutcome::Contended { wait_node: 202 }
+    );
+    assert_eq!(
+        mutex.lock(30, 303),
+        MutexLockOutcome::Contended { wait_node: 303 }
+    );
+    assert_eq!(mutex.unlock(10).unwrap(), Some(20));
+    assert_eq!(mutex.owner, Some(20));
+    assert!(mutex.unlock(202).is_err());
+    assert_eq!(mutex.unlock(20).unwrap(), Some(30));
+    assert_eq!(mutex.unlock(30).unwrap(), None);
+    mutex.lock(10, 404);
+    mutex.lock(20, 505);
+    assert_eq!(mutex.release_on_lease_drop(10), Some(20));
+    assert_eq!(mutex.unlock(20).unwrap(), None);
+
+    let mut rw = RwLock::new();
+    assert_eq!(rw.write(10, 101), MutexLockOutcome::Acquired);
+    assert_eq!(
+        rw.read(20, 202),
+        MutexLockOutcome::Contended { wait_node: 202 }
+    );
+    assert_eq!(
+        rw.read(30, 303),
+        MutexLockOutcome::Contended { wait_node: 303 }
+    );
+    assert_eq!(
+        rw.write(40, 404),
+        MutexLockOutcome::Contended { wait_node: 404 }
+    );
+    assert_eq!(rw.unlock_write(10).unwrap(), vec![40]);
+    assert_eq!(rw.writer, Some(40));
+    assert_eq!(rw.unlock_write(40).unwrap(), vec![20, 30]);
+    assert!(rw.unlock_read(202).is_err());
+    assert!(rw.unlock_read(20).unwrap().is_empty());
+    assert!(rw.unlock_read(30).unwrap().is_empty());
+    assert!(rw.readers.is_empty());
+    assert_eq!(rw.writer, None);
 }
 
 #[test]
@@ -316,31 +416,204 @@ fn once_lock_and_lazy_permanent_failed_on_panic() {
 fn cancel_source_and_token_idempotent_cooperative() {
     let mut world = booted();
     let cs = world.cancel_source_new();
-
+    let channel = world.channel_new(0).unwrap();
+    let waiter = running(&mut world);
     assert_eq!(world.sync.cancels[cs.0].state_code(), CANCEL_ACTIVE);
-    assert_eq!(world.cancel_token_is_cancelled(cs).unwrap(), false);
     assert_eq!(world.cancel_token_check(cs), Ok(()));
-
-    // 注册等待者
-    world.sync.cancels[cs.0].register_waiter(100).unwrap();
-    world.sync.cancels[cs.0].register_waiter(200).unwrap();
-
-    // 触发取消
-    let woken = world.cancel_source_cancel(cs).unwrap();
-    assert_eq!(woken, vec![100, 200]);
+    assert!(matches!(
+        world.channel_recv_cancel(channel, cs, waiter).unwrap(),
+        Ok(RecvOutcome::Parked(_))
+    ));
+    world.cancel_source_cancel(cs).unwrap();
     assert_eq!(world.sync.cancels[cs.0].state_code(), CANCEL_CANCELLED);
-    assert_eq!(world.cancel_token_is_cancelled(cs).unwrap(), true);
     assert_eq!(world.cancel_token_check(cs), Err(Cancelled));
-
-    // 幂等取消：二次取消安全，返回空唤醒列表
-    let woken2 = world.cancel_source_cancel(cs).unwrap();
-    assert!(woken2.is_empty());
-
-    // 取消后注册等待者立即返回 Err(Cancelled)
     assert_eq!(
-        world.sync.cancels[cs.0].register_waiter(300),
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::Cancelled)
+    );
+    assert!(world.sync.cancels[cs.0].waiters.is_empty());
+    assert_eq!(
+        world.channel_try_send(channel, 9).unwrap(),
+        Err(TrySendErr::Full)
+    );
+    world.cancel_source_cancel(cs).unwrap();
+    consume_woken(&mut world, waiter);
+    assert_eq!(
+        world.channel_recv_cancel(channel, cs, waiter).unwrap(),
         Err(Cancelled)
     );
+}
+
+#[test]
+fn cancellable_recv_distinguishes_pending_zero_and_closed() {
+    let mut world = booted();
+    let channel = world.channel_new(0).unwrap();
+    let cancel = world.cancel_source_new();
+    let waiter = running(&mut world);
+    assert!(matches!(
+        world.channel_recv_cancel(channel, cancel, waiter).unwrap(),
+        Ok(RecvOutcome::Parked(_))
+    ));
+    assert_eq!(
+        world
+            .controls
+            .get(waiter)
+            .unwrap()
+            .0
+            .hot
+            .lifecycle()
+            .unwrap(),
+        CoroutineState::Waiting
+    );
+    assert_eq!(world.wait.take_delivered(waiter), None);
+    world.channel_try_send(channel, 0).unwrap().unwrap();
+    world.cancel_source_cancel(cancel).unwrap();
+    assert_eq!(
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::Recv(0)),
+        "后到的取消不能覆盖成功接收"
+    );
+    assert!(world.sync.cancels[cancel.0].waiters.is_empty());
+    consume_woken(&mut world, waiter);
+    world.channel_close(channel).unwrap();
+    let fresh = world.cancel_source_new();
+    assert_eq!(
+        world.channel_recv_cancel(channel, fresh, waiter).unwrap(),
+        Ok(RecvOutcome::Closed)
+    );
+}
+
+#[test]
+fn stale_cancel_registration_cannot_cancel_reused_wait_node() {
+    let mut world = booted();
+    let channel = world.channel_new(0).unwrap();
+    let cancel = world.cancel_source_new();
+    let waiter = running(&mut world);
+    let old = match world
+        .channel_recv_cancel(channel, cancel, waiter)
+        .unwrap()
+        .unwrap()
+    {
+        RecvOutcome::Parked(node) => node,
+        outcome => panic!("应挂起：{outcome:?}"),
+    };
+    world.cancel_source_cancel(cancel).unwrap();
+    assert_eq!(
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::Cancelled)
+    );
+    consume_woken(&mut world, waiter);
+    let fresh = world.cancel_source_new();
+    let new = match world
+        .channel_recv_cancel(channel, fresh, waiter)
+        .unwrap()
+        .unwrap()
+    {
+        RecvOutcome::Parked(node) => node,
+        outcome => panic!("应挂起：{outcome:?}"),
+    };
+    assert_eq!(old.index, new.index);
+    assert_ne!(old.generation, new.generation);
+    assert!(!world.wait.is_live(old));
+    let stale = world.cancel_source_new();
+    world.sync.cancels[stale.0].register_waiter(old).unwrap();
+    world.cancel_source_cancel(stale).unwrap();
+    assert_eq!(
+        world
+            .controls
+            .get(waiter)
+            .unwrap()
+            .0
+            .hot
+            .lifecycle()
+            .unwrap(),
+        CoroutineState::Waiting
+    );
+    assert_eq!(world.wait.take_delivered(waiter), None);
+    world.channel_try_send(channel, 17).unwrap().unwrap();
+    assert_eq!(
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::Recv(17))
+    );
+    assert!(world.sync.cancels[fresh.0].waiters.is_empty());
+    consume_woken(&mut world, waiter);
+}
+
+#[test]
+fn cancellable_join_preserves_complete_values_and_pending_state() {
+    for value in [
+        CompletionValue::Bits(0),
+        CompletionValue::Managed {
+            handle: 11,
+            descriptor: 22,
+        },
+        CompletionValue::Panic {
+            handle: 33,
+            descriptor: 44,
+        },
+    ] {
+        for parked in [false, true] {
+            let mut world = booted();
+            let child = running(&mut world);
+            let waiter = running(&mut world);
+            let cancel = world.cancel_source_new();
+            if parked {
+                assert!(matches!(
+                    world.join_wait_cancel(child, cancel, waiter).unwrap(),
+                    Ok(JoinOutcome::Parked(_))
+                ));
+                assert_eq!(world.wait.take_delivered(waiter), None);
+            }
+            world.coroutine_finished(child, 0, value).unwrap();
+            if parked {
+                world.cancel_source_cancel(cancel).unwrap();
+                assert_eq!(
+                    world.wait.take_delivered(waiter),
+                    Some(WaitResult::Join(value))
+                );
+                consume_woken(&mut world, waiter);
+            } else {
+                assert_eq!(
+                    world.join_wait_cancel(child, cancel, waiter).unwrap(),
+                    Ok(JoinOutcome::Completed(value))
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn cancel_join_only_wakes_waiter_and_does_not_overwrite_result() {
+    let mut world = booted();
+    let child = running(&mut world);
+    let waiter = running(&mut world);
+    let cancel = world.cancel_source_new();
+    assert!(matches!(
+        world.join_wait_cancel(child, cancel, waiter).unwrap(),
+        Ok(JoinOutcome::Parked(_))
+    ));
+    world.cancel_source_cancel(cancel).unwrap();
+    assert_eq!(
+        world
+            .controls
+            .get(child)
+            .unwrap()
+            .0
+            .hot
+            .lifecycle()
+            .unwrap(),
+        CoroutineState::Running
+    );
+    assert_eq!(
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::Cancelled)
+    );
+    world
+        .coroutine_finished(child, 0, CompletionValue::Bits(99))
+        .unwrap();
+    assert_eq!(world.wait.take_delivered(waiter), None);
+    consume_woken(&mut world, waiter);
+    assert!(world.sync.cancels[cancel.0].waiters.is_empty());
 }
 
 #[test]

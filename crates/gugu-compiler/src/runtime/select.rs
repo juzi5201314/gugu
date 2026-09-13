@@ -4,12 +4,12 @@
 //! 任一 `try_lock` 失败则逆序释放，不得持锁等下一把，转入一次一把锁的扫描路径。
 //! Building 期 waker 可 CAS winner，但不得 ready 仍在登记的协程。
 
-use super::channel::{ChannelHandle, ChannelTable};
-use super::coroutine::CoroutineHandle;
+use super::channel::{ChannelHandle, ChannelTable, TryRecvErr, TrySendErr};
+use super::coroutine::{CoroutineHandle, CoroutineState, CoroutineTable};
 use super::slab::RawInvariant;
 use super::wait::{
-    SelectTxn, WAIT_NODE_BUILDING, WaitNodeHandle, WaitPlane, WaitSourceId, encode_winner_case,
-    phase_armed, phase_building, winner_default, winner_unset,
+    SelectTxn, WAIT_NODE_BUILDING, WAIT_NODE_SELECT, WAIT_NOTIFIED, WaitNodeHandle, WaitPlane,
+    WaitResult, WaitSourceId, phase_armed, phase_building, winner_default, winner_unset,
 };
 use super::wait_schema::INLINE_SELECT_CASES;
 
@@ -83,7 +83,7 @@ impl SelectRng {
         loop {
             let sample = self.next_u64();
             if sample >= threshold {
-                return (sample % n) as u32;
+                return u32::try_from(sample % n).expect("uniform 的模数来自 u32");
             }
         }
     }
@@ -112,17 +112,18 @@ fn source_of(
     }
 }
 
-fn unique_sorted_sources(
+fn source_order(
     channels: &ChannelTable,
     wait: &WaitPlane,
+    controls: &CoroutineTable,
     cases: &[SelectCase],
-) -> Result<Vec<WaitSourceId>, RawInvariant> {
+) -> Result<Vec<(WaitSourceId, usize)>, RawInvariant> {
     let mut sources = Vec::with_capacity(cases.len());
-    for case in cases {
-        let source = source_of(channels, wait, case)?;
-        if !sources.contains(&source) {
-            sources.push(source);
+    for (index, case) in cases.iter().enumerate() {
+        if let SelectOp::Wait { join } = case.op {
+            controls.get(join)?;
         }
+        sources.push((source_of(channels, wait, case)?, index));
     }
     sources.sort_unstable();
     Ok(sources)
@@ -130,37 +131,44 @@ fn unique_sorted_sources(
 
 fn case_ready(
     channels: &ChannelTable,
-    _wait: &WaitPlane,
-    completed: &[(CoroutineHandle, bool)],
+    controls: &CoroutineTable,
     case: &SelectCase,
 ) -> Result<bool, RawInvariant> {
     match case.op {
         SelectOp::Send { channel, .. } => channels.is_ready_send(channel),
         SelectOp::Recv { channel } => channels.is_ready_recv(channel),
-        SelectOp::Wait { join } => Ok(completed
-            .iter()
-            .any(|(handle, done)| *handle == join && *done)),
+        SelectOp::Wait { join } => {
+            Ok(controls.get(join)?.0.hot.lifecycle()? == CoroutineState::Dead)
+        }
     }
 }
 
 fn try_lock_all(
     wait: &mut WaitPlane,
-    sources: &[WaitSourceId],
-) -> Result<Option<usize>, RawInvariant> {
-    for (index, source) in sources.iter().enumerate() {
-        if !wait.try_lock(*source)? {
-            for held in sources[..index].iter().rev() {
-                wait.unlock(*held)?;
+    sources: &[(WaitSourceId, usize)],
+) -> Result<bool, RawInvariant> {
+    for (index, &(source, _)) in sources.iter().enumerate() {
+        if index > 0 && sources[index - 1].0 == source {
+            continue;
+        }
+        match wait.try_lock(source) {
+            Ok(true) => {}
+            result => {
+                unlock_all(wait, &sources[..index])?;
+                return result;
             }
-            return Ok(None);
         }
     }
-    Ok(Some(sources.len()))
+    Ok(true)
 }
 
-fn unlock_all(wait: &mut WaitPlane, sources: &[WaitSourceId]) -> Result<(), RawInvariant> {
-    for source in sources.iter().rev() {
-        wait.unlock(*source)?;
+fn unlock_all(wait: &mut WaitPlane, sources: &[(WaitSourceId, usize)]) -> Result<(), RawInvariant> {
+    let mut previous = None;
+    for &(source, _) in sources.iter().rev() {
+        if previous != Some(source) {
+            wait.unlock(source)?;
+        }
+        previous = Some(source);
     }
     Ok(())
 }
@@ -169,215 +177,307 @@ fn unlock_all(wait: &mut WaitPlane, sources: &[WaitSourceId]) -> Result<(), RawI
 pub(crate) fn select_commit(
     wait: &mut WaitPlane,
     channels: &mut ChannelTable,
-    completed_joins: &[(CoroutineHandle, bool)],
+    controls: &mut CoroutineTable,
     cases: &[SelectCase],
     has_default: bool,
     rng: &mut SelectRng,
     coroutine: CoroutineHandle,
-) -> Result<(SelectOutcome, SelectTxn), RawInvariant> {
-    let mut txn = SelectTxn {
+) -> Result<(SelectOutcome, Option<WaitNodeHandle>), RawInvariant> {
+    let count = u32::try_from(cases.len())
+        .map_err(|_| RawInvariant::new("select case 数量超出编码范围"))?;
+    if cases.iter().any(|case| case.index > u32::MAX - 2) {
+        return Err(RawInvariant::new("select case index 超出 winner 编码范围"));
+    }
+    controls.get(coroutine)?;
+    let sources = source_order(channels, wait, controls, cases)?;
+    let generation = wait.begin_wait(coroutine)?;
+    let (slot, cold) = controls.get_mut(coroutine)?;
+    slot.hot
+        .wait_word
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    cold.select_scratch = SelectTxn {
         phase_winner: phase_building() << 32,
-        case_count: u64::from(u32::try_from(cases.len()).expect("case 数量")),
+        case_count: u64::from(count),
         scratch_handle: 0,
         wait_block: 0,
-    };
+    }
+    .to_cold();
     if cases.is_empty() && !has_default {
-        let generation = wait.begin_wait(coroutine)?;
         let never = wait.never_source();
         let node = wait.alloc_node(coroutine, never, 0, 0, 0, 0, generation)?;
-        wait.enqueue_source(never, node)?;
         wait.arm_nodes(coroutine, vec![node]);
-        txn.set_phase(phase_armed());
-        return Ok((SelectOutcome::Never, txn));
+        wait.lock(never)?;
+        let result = wait.enqueue_source(never, node);
+        wait.unlock(never)?;
+        result?;
+        arm_select(wait, controls, coroutine)?;
+        return Ok((SelectOutcome::Never, None));
     }
-    let sources = unique_sorted_sources(channels, wait, cases)?;
-    let n = u32::try_from(cases.len()).expect("case 数量");
-    let perm = if n == 0 {
-        Vec::new()
+    let perm = rng.fisher_yates(count);
+    let committed = if count <= INLINE_SELECT_CASES && try_lock_all(wait, &sources)? {
+        let result = commit_locked(wait, channels, controls, cases, &perm, coroutine);
+        unlock_all(wait, &sources)?;
+        result?
     } else {
-        rng.fisher_yates(n)
+        scan_path(wait, channels, controls, cases, &sources, &perm, coroutine)?
     };
-    let inline = cases.len() as u32 <= INLINE_SELECT_CASES;
-    let outcome = if inline {
-        match try_lock_all(wait, &sources)? {
-            Some(_) => {
-                let outcome = commit_locked(
-                    wait,
-                    channels,
-                    completed_joins,
-                    cases,
-                    &perm,
-                    has_default,
-                    &mut txn,
-                    coroutine,
-                )?;
-                unlock_all(wait, &sources)?;
-                outcome
-            }
-            None => scan_path(
-                wait,
-                channels,
-                completed_joins,
-                cases,
-                &sources,
-                &perm,
-                has_default,
-                rng,
-                &mut txn,
-                coroutine,
-            )?,
-        }
-    } else {
-        scan_path(
-            wait,
-            channels,
-            completed_joins,
-            cases,
-            &sources,
-            &perm,
-            has_default,
-            rng,
-            &mut txn,
-            coroutine,
-        )?
-    };
-    Ok((outcome, txn))
+    if let Some(wake) = committed {
+        return Ok((arm_select(wait, controls, coroutine)?, wake));
+    }
+    if has_default {
+        let (_, cold) = controls.get_mut(coroutine)?;
+        let mut txn = SelectTxn::from_cold(cold.select_scratch);
+        let won = txn.cas_winner(winner_unset(), winner_default());
+        debug_assert!(won);
+        txn.set_phase(phase_armed());
+        cold.select_scratch = txn.to_cold();
+        return Ok((SelectOutcome::Default, None));
+    }
+    let wake = register_waiters(
+        wait, channels, controls, cases, &sources, coroutine, generation,
+    )?;
+    Ok((arm_select(wait, controls, coroutine)?, wake))
 }
 
 fn commit_locked(
     wait: &mut WaitPlane,
     channels: &mut ChannelTable,
-    completed: &[(CoroutineHandle, bool)],
+    controls: &mut CoroutineTable,
     cases: &[SelectCase],
     perm: &[u32],
-    has_default: bool,
-    txn: &mut SelectTxn,
     coroutine: CoroutineHandle,
-) -> Result<SelectOutcome, RawInvariant> {
+) -> Result<Option<Option<WaitNodeHandle>>, RawInvariant> {
     for &index in perm {
-        let case = &cases[usize::try_from(index).expect("case 下标")];
-        if case_ready(channels, wait, completed, case)? {
-            txn.cas_winner(winner_unset(), encode_winner_case(case.index));
-            txn.set_phase(phase_armed());
-            return Ok(SelectOutcome::Case(case.index));
+        if let Some(wake) = try_case_locked(
+            wait,
+            channels,
+            controls,
+            &cases[usize::try_from(index).expect("case 下标")],
+            coroutine,
+        )? {
+            return Ok(Some(wake));
         }
     }
-    if has_default && txn.cas_winner(winner_unset(), winner_default()) {
-        txn.set_phase(phase_armed());
-        return Ok(SelectOutcome::Default);
+    Ok(None)
+}
+
+fn selected(
+    controls: &CoroutineTable,
+    coroutine: CoroutineHandle,
+) -> Result<Option<SelectOutcome>, RawInvariant> {
+    let txn = SelectTxn::from_cold(controls.get(coroutine)?.1.select_scratch);
+    Ok(match txn.winner() {
+        value if value == winner_unset() => None,
+        value if value == winner_default() => Some(SelectOutcome::Default),
+        value => Some(SelectOutcome::Case(
+            u32::try_from(value - 2).expect("winner 保存在低 32 位"),
+        )),
+    })
+}
+
+fn try_case_locked(
+    wait: &mut WaitPlane,
+    channels: &mut ChannelTable,
+    controls: &mut CoroutineTable,
+    case: &SelectCase,
+    coroutine: CoroutineHandle,
+) -> Result<Option<Option<WaitNodeHandle>>, RawInvariant> {
+    if selected(controls, coroutine)?.is_some() {
+        return Ok(Some(None));
     }
-    register_waiters(wait, channels, cases, coroutine)?;
-    txn.set_phase(phase_armed());
-    Ok(SelectOutcome::Parked)
+    let selection = Some((coroutine, case.index));
+    match case.op {
+        SelectOp::Send { channel, payload } => {
+            match channels.try_send_locked(wait, controls, channel, payload, selection)? {
+                Ok(wake) => Ok(Some(wake)),
+                Err(TrySendErr::Full) => Ok(None),
+                Err(TrySendErr::Closed) => Err(RawInvariant::new("send on closed channel")),
+            }
+        }
+        SelectOp::Recv { channel } => {
+            match channels.try_recv_locked(wait, controls, channel, selection)? {
+                Ok((_, wake)) => Ok(Some(wake)),
+                Err(TryRecvErr::Empty) => Ok(None),
+                Err(TryRecvErr::Closed) => Ok(Some(None)),
+            }
+        }
+        SelectOp::Wait { join } => {
+            let (slot, cold) = controls.get(join)?;
+            if slot.hot.lifecycle()? != CoroutineState::Dead {
+                return Ok(None);
+            }
+            if cold
+                .join_state
+                .status
+                .load(std::sync::atomic::Ordering::Acquire)
+                & 3
+                == 0
+            {
+                return Err(RawInvariant::new("协程尚未发布完成记录"));
+            }
+            if !wait.try_claim(controls, wait.join_source(join)?, selection, None)? {
+                return Ok(None);
+            }
+            let value = controls
+                .get(join)?
+                .1
+                .join_state
+                .read()
+                .expect("Dead 完成记录已预检且独占 controls");
+            wait.publish_result(coroutine, WaitResult::Join(value));
+            Ok(Some(None))
+        }
+    }
 }
 
 fn scan_path(
     wait: &mut WaitPlane,
     channels: &mut ChannelTable,
-    completed: &[(CoroutineHandle, bool)],
+    controls: &mut CoroutineTable,
     cases: &[SelectCase],
-    sources: &[WaitSourceId],
+    sources: &[(WaitSourceId, usize)],
     perm: &[u32],
-    has_default: bool,
-    rng: &mut SelectRng,
-    txn: &mut SelectTxn,
     coroutine: CoroutineHandle,
-) -> Result<SelectOutcome, RawInvariant> {
-    let mut ready = 0_u64;
-    for source in sources {
-        wait.lock(*source)?;
-        for (bit, case) in cases.iter().enumerate() {
-            if source_of(channels, wait, case)? == *source
-                && case_ready(channels, wait, completed, case)?
-            {
-                ready |= 1 << bit;
+) -> Result<Option<Option<WaitNodeHandle>>, RawInvariant> {
+    let mut ready = vec![0_u64; cases.len().div_ceil(64)];
+    for group in sources.chunk_by(|left, right| left.0 == right.0) {
+        let source = group[0].0;
+        wait.lock(source)?;
+        let probed: Result<(), RawInvariant> = (|| {
+            for &(_, bit) in group {
+                if case_ready(channels, controls, &cases[bit])? {
+                    ready[bit / 64] |= 1_u64 << (bit % 64);
+                }
             }
-        }
-        wait.unlock(*source)?;
+            Ok(())
+        })();
+        wait.unlock(source)?;
+        probed?;
     }
-    let mut ready_cases = Vec::new();
     for &index in perm {
         let bit = usize::try_from(index).expect("case 下标");
-        if ready & (1 << bit) != 0 {
-            ready_cases.push(index);
+        if ready[bit / 64] & (1_u64 << (bit % 64)) == 0 {
+            continue;
         }
-    }
-    if let Some(&winner) = ready_cases.first() {
-        let case = &cases[usize::try_from(winner).expect("case 下标")];
+        let case = &cases[bit];
         let source = source_of(channels, wait, case)?;
         wait.lock(source)?;
-        let still = case_ready(channels, wait, completed, case)?;
-        if still {
-            txn.cas_winner(winner_unset(), encode_winner_case(case.index));
-            txn.set_phase(phase_armed());
-            wait.unlock(source)?;
-            return Ok(SelectOutcome::Case(case.index));
-        }
+        let result = try_case_locked(wait, channels, controls, case, coroutine);
         wait.unlock(source)?;
-        let _ = rng;
+        if let Some(wake) = result? {
+            return Ok(Some(wake));
+        }
     }
-    if has_default && txn.cas_winner(winner_unset(), winner_default()) {
-        txn.set_phase(phase_armed());
-        return Ok(SelectOutcome::Default);
-    }
-    for source in sources {
-        wait.lock(*source)?;
-    }
-    register_waiters(wait, channels, cases, coroutine)?;
-    for source in sources.iter().rev() {
-        wait.unlock(*source)?;
-    }
-    txn.set_phase(phase_armed());
-    Ok(SelectOutcome::Parked)
+    Ok(None)
 }
 
 fn register_waiters(
     wait: &mut WaitPlane,
     channels: &mut ChannelTable,
+    controls: &mut CoroutineTable,
+    cases: &[SelectCase],
+    sources: &[(WaitSourceId, usize)],
+    coroutine: CoroutineHandle,
+    generation: u64,
+) -> Result<Option<WaitNodeHandle>, RawInvariant> {
+    allocate_waiters(wait, channels, cases, coroutine, generation)?;
+    for group in sources.chunk_by(|left, right| left.0 == right.0) {
+        let source = group[0].0;
+        wait.lock(source)?;
+        let result: Result<Option<Option<WaitNodeHandle>>, RawInvariant> = (|| {
+            for &(_, index) in group {
+                let case = &cases[index];
+                if let Some(wake) = try_case_locked(wait, channels, controls, case, coroutine)? {
+                    return Ok(Some(wake));
+                }
+                let node = wait.armed_nodes(coroutine)[index];
+                match case.op {
+                    SelectOp::Send { channel, .. } => {
+                        wait.enqueue(channels.send_queue_mut(channel)?, node)?;
+                        channels.sync_heads(channel)?;
+                    }
+                    SelectOp::Recv { channel } => {
+                        wait.enqueue(channels.recv_queue_mut(channel)?, node)?;
+                        channels.sync_heads(channel)?;
+                    }
+                    SelectOp::Wait { .. } => wait.enqueue_source(source, node)?,
+                }
+            }
+            Ok(None)
+        })();
+        wait.unlock(source)?;
+        if let Some(wake) = result? {
+            return Ok(wake);
+        }
+    }
+    Ok(None)
+}
+
+fn allocate_waiters(
+    wait: &mut WaitPlane,
+    channels: &ChannelTable,
     cases: &[SelectCase],
     coroutine: CoroutineHandle,
-) -> Result<Vec<WaitNodeHandle>, RawInvariant> {
-    let generation = wait.begin_wait(coroutine)?;
+    generation: u64,
+) -> Result<(), RawInvariant> {
     let mut nodes = Vec::with_capacity(cases.len());
     for case in cases {
-        let source = source_of(channels, wait, case)?;
+        let source = source_of(channels, wait, case).expect("所有 case 的源已经预检");
         let payload = match case.op {
             SelectOp::Send { payload, .. } => payload,
-            SelectOp::Recv { .. } | SelectOp::Wait { .. } => 0,
+            _ => 0,
         };
-        let node = wait.alloc_node(
+        match wait.alloc_node(
             coroutine,
             source,
             case.index,
             payload,
             0,
-            WAIT_NODE_BUILDING,
+            WAIT_NODE_SELECT | WAIT_NODE_BUILDING,
             generation,
-        )?;
-        match case.op {
-            SelectOp::Send { channel, .. } => {
-                wait.enqueue(channels.send_queue_mut(channel)?, node)?;
-                channels.sync_heads(channel)?;
-            }
-            SelectOp::Recv { channel } => {
-                wait.enqueue(channels.recv_queue_mut(channel)?, node)?;
-                channels.sync_heads(channel)?;
-            }
-            SelectOp::Wait { join } => {
-                wait.enqueue_source(wait.join_source(join)?, node)?;
+        ) {
+            Ok(node) => nodes.push(node),
+            Err(error) => {
+                for node in nodes {
+                    wait.release_node(node).expect("预备节点尚未入队且仍有效");
+                }
+                return Err(error);
             }
         }
-        wait.arm_building(node, false)?;
-        nodes.push(node);
     }
-    wait.arm_nodes(coroutine, nodes.clone());
-    Ok(nodes)
+    wait.arm_nodes(coroutine, nodes);
+    Ok(())
 }
 
-/// Building 期 CAS winner；不得 ready 仍在登记的协程。
-pub(crate) fn building_cas_winner(txn: &mut SelectTxn, case: u32) -> bool {
-    if txn.phase() != phase_building() {
-        return false;
+/// 先进入 Parking 再公开 Armed，避免 winner 到达后仍被挂起。
+pub(crate) fn arm_select(
+    wait: &mut WaitPlane,
+    controls: &mut CoroutineTable,
+    coroutine: CoroutineHandle,
+) -> Result<SelectOutcome, RawInvariant> {
+    if selected(controls, coroutine)?.is_none() {
+        controls
+            .get(coroutine)?
+            .0
+            .hot
+            .transition(CoroutineState::Running, CoroutineState::Parking)?;
     }
-    txn.cas_winner(winner_unset(), encode_winner_case(case))
+    let (_, cold) = controls.get_mut(coroutine)?;
+    let mut txn = SelectTxn::from_cold(cold.select_scratch);
+    txn.set_phase(phase_armed());
+    cold.select_scratch = txn.to_cold();
+    for index in 0..wait.armed_nodes(coroutine).len() {
+        wait.arm_building(wait.armed_nodes(coroutine)[index], false)?;
+    }
+    if let Some(outcome) = selected(controls, coroutine)? {
+        let hot = &controls.get(coroutine)?.0.hot;
+        if hot.lifecycle()? == CoroutineState::Parking {
+            hot.wait_word
+                .fetch_and(!WAIT_NOTIFIED, std::sync::atomic::Ordering::Release);
+            hot.transition(CoroutineState::Parking, CoroutineState::Running)?;
+        }
+        Ok(outcome)
+    } else {
+        Ok(SelectOutcome::Parked)
+    }
 }

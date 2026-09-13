@@ -3,14 +3,16 @@
 use super::RawWorld;
 use super::coroutine_impl::CoroutineEntry;
 use crate::runtime::PlatformProfile;
-use crate::runtime::channel::{RecvOutcome, SendOutcome, TryRecvErr, TrySendErr};
+use crate::runtime::channel::{ChannelHandle, RecvOutcome, SendOutcome, TryRecvErr, TrySendErr};
 use crate::runtime::coroutine::{CompletionValue, CoroutineHandle, CoroutineState};
 use crate::runtime::inbox::ServiceBudget;
 use crate::runtime::message::{BatchLimits, ReturnKind};
-use crate::runtime::select::{SelectCase, SelectOp, SelectOutcome, building_cas_winner};
+use crate::runtime::select::{SelectCase, SelectOp, SelectOutcome, arm_select};
 use crate::runtime::size_class::RuntimeSizeClassId;
 use crate::runtime::slab::SlotState;
-use crate::runtime::wait::{SelectTxn, phase_building, winner_unset};
+use crate::runtime::wait::{
+    JoinOutcome, SelectTxn, WAIT_NODE_BUILDING, WAIT_NODE_SELECT, WaitResult, phase_building,
+};
 use crate::runtime::wait_schema::{
     INLINE_SELECT_CASES, WAIT_SCHEMA, WaitDemand, WaitRuntimeContract,
 };
@@ -136,7 +138,10 @@ fn unbuffered_rendezvous_and_try_ops() {
     assert_eq!(lifecycle(&world, receiver), CoroutineState::Waiting);
     assert_eq!(world.channel_try_send(channel, 11).unwrap(), Ok(()));
     assert_eq!(lifecycle(&world, receiver), CoroutineState::Runnable);
-    assert_eq!(world.wait.take_delivered(receiver), Some(11));
+    assert_eq!(
+        world.wait.take_delivered(receiver),
+        Some(WaitResult::Recv(11))
+    );
     world.channel_close(channel).expect("close");
     assert_eq!(
         world.channel_try_send(channel, 1).unwrap(),
@@ -161,7 +166,10 @@ fn join_wait_repeats_record_and_detach_does_not_cancel() {
     let mut world = booted();
     let child = running(&mut world);
     let waiter = running(&mut world);
-    assert!(world.join_wait(child, waiter).unwrap().is_err());
+    assert!(matches!(
+        world.join_wait(child, waiter).unwrap(),
+        JoinOutcome::Parked(_)
+    ));
     assert_eq!(lifecycle(&world, waiter), CoroutineState::Waiting);
     world
         .coroutine_finished(child, 0, CompletionValue::Bits(42))
@@ -169,11 +177,11 @@ fn join_wait_repeats_record_and_detach_does_not_cancel() {
     assert_eq!(lifecycle(&world, waiter), CoroutineState::Runnable);
     assert_eq!(
         world.join_wait(child, waiter).unwrap(),
-        Ok(CompletionValue::Bits(42))
+        JoinOutcome::Completed(CompletionValue::Bits(42))
     );
     assert_eq!(
         world.join_wait(child, waiter).unwrap(),
-        Ok(CompletionValue::Bits(42))
+        JoinOutcome::Completed(CompletionValue::Bits(42))
     );
     let detached = running(&mut world);
     world.release_join(detached).expect("分离");
@@ -196,6 +204,11 @@ fn select_ready_beats_default_and_try_lock_fallback() {
         world.select(waiter, &cases, true).unwrap(),
         SelectOutcome::Case(0)
     );
+    assert_eq!(world.wait.take_delivered(waiter), Some(WaitResult::Recv(5)));
+    assert_eq!(
+        world.channel_try_recv(channel).unwrap(),
+        Err(TryRecvErr::Empty)
+    );
     world.wait.fail_try_lock = true;
     let other = world.channel_new(1).expect("channel");
     world.channel_try_send(other, 8).unwrap().unwrap();
@@ -208,29 +221,44 @@ fn select_ready_beats_default_and_try_lock_fallback() {
         world.select(waiter, &cases, true).unwrap(),
         SelectOutcome::Case(0)
     );
+    assert_eq!(world.wait.take_delivered(waiter), Some(WaitResult::Recv(8)));
+    assert_eq!(
+        world.channel_try_recv(other).unwrap(),
+        Err(TryRecvErr::Empty)
+    );
 }
 
 #[test]
-fn select_scan_path_covers_more_than_inline_cases() {
-    let mut world = booted();
-    let mut channels = Vec::new();
-    for _ in 0..9 {
-        channels.push(world.channel_new(1).expect("channel"));
+fn select_scan_crosses_word_boundaries() {
+    for count in [9_usize, 65, 129] {
+        let mut world = booted();
+        let channels: Vec<_> = (0..count).map(|_| world.channel_new(1).unwrap()).collect();
+        world
+            .channel_try_send(channels[count - 1], 21)
+            .unwrap()
+            .unwrap();
+        let cases: Vec<_> = channels
+            .iter()
+            .enumerate()
+            .map(|(index, channel)| SelectCase {
+                op: SelectOp::Recv { channel: *channel },
+                index: u32::try_from(index).unwrap(),
+            })
+            .collect();
+        let waiter = running(&mut world);
+        assert_eq!(
+            world.select(waiter, &cases, false).unwrap(),
+            SelectOutcome::Case(u32::try_from(count - 1).unwrap())
+        );
+        assert_eq!(
+            world.wait.take_delivered(waiter),
+            Some(WaitResult::Recv(21))
+        );
+        assert_eq!(
+            world.channel_try_recv(channels[count - 1]).unwrap(),
+            Err(TryRecvErr::Empty)
+        );
     }
-    world.channel_try_send(channels[4], 21).unwrap().unwrap();
-    let cases: Vec<_> = channels
-        .iter()
-        .enumerate()
-        .map(|(index, channel)| SelectCase {
-            op: SelectOp::Recv { channel: *channel },
-            index: index as u32,
-        })
-        .collect();
-    let waiter = running(&mut world);
-    assert_eq!(
-        world.select(waiter, &cases, false).unwrap(),
-        SelectOutcome::Case(4)
-    );
 }
 
 #[test]
@@ -268,6 +296,11 @@ fn select_loser_is_unlinked_and_wait_generation_readies_once() {
     world.channel_send(first, sender, 3, false).expect("会合");
     assert_eq!(lifecycle(&world, waiter), CoroutineState::Runnable);
     assert_eq!(
+        SelectTxn::from_cold(world.controls.get(waiter).unwrap().1.select_scratch).winner(),
+        SelectTxn::encode_case(0)
+    );
+    assert_eq!(world.wait.take_delivered(waiter), Some(WaitResult::Recv(3)));
+    assert_eq!(
         world.channel_try_send(second, 4).unwrap(),
         Err(TrySendErr::Full),
         "loser 必须已从第二通道注销"
@@ -280,17 +313,521 @@ fn select_loser_is_unlinked_and_wait_generation_readies_once() {
     assert!(world.wait.mark_ready(node).is_err());
 }
 
-#[test]
-fn building_winner_cas_does_not_ready() {
-    let mut txn = SelectTxn {
+fn prepare_building_recv(
+    world: &mut RawWorld,
+    coroutine: CoroutineHandle,
+    channels: &[ChannelHandle],
+    registered: usize,
+) {
+    let generation = world.wait.begin_wait(coroutine).unwrap();
+    world.controls.get_mut(coroutine).unwrap().1.select_scratch = SelectTxn {
         phase_winner: phase_building() << 32,
-        case_count: 1,
+        case_count: u64::try_from(channels.len()).unwrap(),
         scratch_handle: 0,
         wait_block: 0,
-    };
-    assert_eq!(txn.winner(), winner_unset());
-    assert!(building_cas_winner(&mut txn, 0));
-    assert!(!building_cas_winner(&mut txn, 1));
+    }
+    .to_cold();
+    let mut nodes = Vec::new();
+    for (index, channel) in channels.iter().enumerate() {
+        let source = world.channels.source(*channel).unwrap();
+        nodes.push(
+            world
+                .wait
+                .alloc_node(
+                    coroutine,
+                    source,
+                    u32::try_from(index).unwrap(),
+                    0,
+                    0,
+                    WAIT_NODE_SELECT | WAIT_NODE_BUILDING,
+                    generation,
+                )
+                .unwrap(),
+        );
+    }
+    world.wait.arm_nodes(coroutine, nodes);
+    for (index, channel) in channels.iter().enumerate().take(registered) {
+        let source = world.channels.source(*channel).unwrap();
+        let node = world.wait.armed_nodes(coroutine)[index];
+        world.wait.lock(source).unwrap();
+        world
+            .wait
+            .enqueue(world.channels.recv_queue_mut(*channel).unwrap(), node)
+            .unwrap();
+        world.channels.sync_heads(*channel).unwrap();
+        world.wait.unlock(source).unwrap();
+    }
+}
+
+pub(super) fn consume_woken(world: &mut RawWorld, coroutine: CoroutineHandle) {
+    let processor = world.scheduler.active_snapshot()[0];
+    let runnable = world
+        .scheduler
+        .schedule_step(processor)
+        .unwrap()
+        .expect("等待完成必须真的可调度");
+    assert_eq!(runnable.coroutine, coroutine);
+    world
+        .controls
+        .get(coroutine)
+        .unwrap()
+        .0
+        .hot
+        .take_running()
+        .unwrap();
+    assert_eq!(
+        world.scheduler.schedule_step(processor).unwrap(),
+        None,
+        "不能重复发布同一个 waiter"
+    );
+}
+
+#[test]
+fn building_winner_commits_payload_without_premature_ready() {
+    let mut world = booted();
+    let channels = [world.channel_new(0).unwrap(), world.channel_new(0).unwrap()];
+    let waiter = running(&mut world);
+    prepare_building_recv(&mut world, waiter, &channels, 1);
+    world.channel_try_send(channels[0], 11).unwrap().unwrap();
+    assert_eq!(lifecycle(&world, waiter), CoroutineState::Running);
+    assert_eq!(
+        world.wait.armed_nodes(waiter).len(),
+        2,
+        "未完成登记的节点不能提前释放"
+    );
+    assert_eq!(
+        SelectTxn::from_cold(world.controls.get(waiter).unwrap().1.select_scratch).winner(),
+        SelectTxn::encode_case(0)
+    );
+    assert_eq!(
+        arm_select(&mut world.wait, &mut world.controls, waiter).unwrap(),
+        SelectOutcome::Case(0)
+    );
+    world.cleanup_waiters(waiter).unwrap();
+    assert_eq!(
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::Recv(11))
+    );
+    assert_eq!(
+        world.channel_try_send(channels[1], 12).unwrap(),
+        Err(TrySendErr::Full)
+    );
+    assert_eq!(
+        world
+            .scheduler
+            .schedule_step(world.scheduler.active_snapshot()[0])
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn parking_completion_resumes_inline_or_publishes_after_waiting() {
+    for during_transition in [false, true] {
+        let mut world = booted();
+        let channel = world.channel_new(0).unwrap();
+        let waiter = running(&mut world);
+        prepare_building_recv(&mut world, waiter, &[channel], 1);
+        assert_eq!(
+            arm_select(&mut world.wait, &mut world.controls, waiter).unwrap(),
+            SelectOutcome::Parked
+        );
+        assert_eq!(lifecycle(&world, waiter), CoroutineState::Parking);
+        if during_transition {
+            assert!(
+                world
+                    .park_current_wait_with(waiter, |world| {
+                        world.channel_try_send(channel, 7).unwrap().unwrap();
+                    })
+                    .unwrap()
+            );
+            assert_eq!(lifecycle(&world, waiter), CoroutineState::Runnable);
+            consume_woken(&mut world, waiter);
+        } else {
+            world.channel_try_send(channel, 7).unwrap().unwrap();
+            assert_eq!(world.wait.armed_nodes(waiter).len(), 1);
+            assert!(!world.park_current_wait(waiter).unwrap());
+            assert_eq!(lifecycle(&world, waiter), CoroutineState::Running);
+            assert_eq!(
+                world
+                    .scheduler
+                    .schedule_step(world.scheduler.active_snapshot()[0])
+                    .unwrap(),
+                None
+            );
+        }
+        assert_eq!(world.wait.take_delivered(waiter), Some(WaitResult::Recv(7)));
+        assert!(world.wait.armed_nodes(waiter).is_empty());
+    }
+}
+
+#[test]
+fn select_send_commits_buffer_and_both_rendezvous_waitsets() {
+    let mut world = booted();
+    let buffered = world.channel_new(1).unwrap();
+    let sender = running(&mut world);
+    let send = [SelectCase {
+        op: SelectOp::Send {
+            channel: buffered,
+            payload: 7,
+        },
+        index: 0,
+    }];
+    assert_eq!(
+        world.select(sender, &send, false).unwrap(),
+        SelectOutcome::Case(0)
+    );
+    assert_eq!(world.wait.take_delivered(sender), Some(WaitResult::Sent));
+    assert_eq!(world.channel_try_recv(buffered).unwrap(), Ok(7));
+    let channel = world.channel_new(0).unwrap();
+    let receiver = running(&mut world);
+    let recv = [SelectCase {
+        op: SelectOp::Recv { channel },
+        index: 0,
+    }];
+    assert_eq!(
+        world.select(receiver, &recv, false).unwrap(),
+        SelectOutcome::Parked
+    );
+    let send = [SelectCase {
+        op: SelectOp::Send {
+            channel,
+            payload: 13,
+        },
+        index: 0,
+    }];
+    assert_eq!(
+        world.select(sender, &send, false).unwrap(),
+        SelectOutcome::Case(0)
+    );
+    assert_eq!(world.wait.take_delivered(sender), Some(WaitResult::Sent));
+    assert_eq!(
+        world.wait.take_delivered(receiver),
+        Some(WaitResult::Recv(13))
+    );
+    assert_eq!(
+        SelectTxn::from_cold(world.controls.get(receiver).unwrap().1.select_scratch).winner(),
+        SelectTxn::encode_case(0)
+    );
+    consume_woken(&mut world, receiver);
+}
+
+#[test]
+fn select_does_not_rendezvous_with_itself_or_consume_through_loser() {
+    let mut world = booted();
+    let channel = world.channel_new(0).unwrap();
+    let waiter = running(&mut world);
+    let cases = [
+        SelectCase {
+            op: SelectOp::Send {
+                channel,
+                payload: 3,
+            },
+            index: 0,
+        },
+        SelectCase {
+            op: SelectOp::Recv { channel },
+            index: 1,
+        },
+    ];
+    assert_eq!(
+        world.select(waiter, &cases, false).unwrap(),
+        SelectOutcome::Parked
+    );
+    world.channel_try_send(channel, 9).unwrap().unwrap();
+    assert_eq!(world.wait.take_delivered(waiter), Some(WaitResult::Recv(9)));
+    assert_eq!(
+        SelectTxn::from_cold(world.controls.get(waiter).unwrap().1.select_scratch).winner(),
+        SelectTxn::encode_case(1)
+    );
+    assert_eq!(
+        world.channel_try_recv(channel).unwrap(),
+        Err(TryRecvErr::Empty)
+    );
+    consume_woken(&mut world, waiter);
+
+    let other = world.channel_new(0).unwrap();
+    let cases = [
+        SelectCase {
+            op: SelectOp::Recv { channel },
+            index: 0,
+        },
+        SelectCase {
+            op: SelectOp::Recv { channel: other },
+            index: 1,
+        },
+    ];
+    assert_eq!(
+        world.select(waiter, &cases, false).unwrap(),
+        SelectOutcome::Parked
+    );
+    // 留在“已提交、尚未通知”窗口，让另一源真实尝试认领 loser。
+    let wake = world
+        .channels
+        .try_send(&mut world.wait, &mut world.controls, channel, 11)
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        world.channel_try_send(other, 12).unwrap(),
+        Err(TrySendErr::Full)
+    );
+    world.wake_node(wake).unwrap();
+    assert_eq!(
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::Recv(11))
+    );
+    consume_woken(&mut world, waiter);
+}
+
+#[test]
+fn select_recv_refills_buffer_from_blocked_sender() {
+    let mut world = booted();
+    let channel = world.channel_new(1).unwrap();
+    world.channel_try_send(channel, 5).unwrap().unwrap();
+    let sender = running(&mut world);
+    assert!(matches!(
+        world.channel_send(channel, sender, 7, false).unwrap(),
+        SendOutcome::Parked(_)
+    ));
+    let receiver = running(&mut world);
+    assert_eq!(
+        world
+            .select(
+                receiver,
+                &[SelectCase {
+                    op: SelectOp::Recv { channel },
+                    index: 0
+                }],
+                false
+            )
+            .unwrap(),
+        SelectOutcome::Case(0)
+    );
+    assert_eq!(
+        world.wait.take_delivered(receiver),
+        Some(WaitResult::Recv(5))
+    );
+    assert_eq!(world.wait.take_delivered(sender), Some(WaitResult::Sent));
+    assert_eq!(world.channel_try_recv(channel).unwrap(), Ok(7));
+    consume_woken(&mut world, sender);
+}
+
+#[test]
+fn select_preserves_close_results_and_unlocks_error_paths() {
+    let mut world = booted();
+    let channel = world.channel_new(1).unwrap();
+    world.channel_try_send(channel, 0).unwrap().unwrap();
+    world.channel_close(channel).unwrap();
+    let waiter = running(&mut world);
+    assert!(
+        world
+            .select(
+                waiter,
+                &[SelectCase {
+                    op: SelectOp::Send {
+                        channel,
+                        payload: 8
+                    },
+                    index: 0
+                }],
+                false
+            )
+            .is_err()
+    );
+    assert_eq!(world.channel_try_recv(channel).unwrap(), Ok(0));
+    assert_eq!(
+        world
+            .select(
+                waiter,
+                &[SelectCase {
+                    op: SelectOp::Recv { channel },
+                    index: 0
+                }],
+                false
+            )
+            .unwrap(),
+        SelectOutcome::Case(0)
+    );
+    assert_eq!(
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::RecvClosed)
+    );
+    let open = world.channel_new(0).unwrap();
+    assert_eq!(
+        world
+            .select(
+                waiter,
+                &[SelectCase {
+                    op: SelectOp::Recv { channel: open },
+                    index: 0
+                }],
+                false
+            )
+            .unwrap(),
+        SelectOutcome::Parked
+    );
+    world.channel_close(open).unwrap();
+    assert_eq!(
+        world.wait.take_delivered(waiter),
+        Some(WaitResult::RecvClosed)
+    );
+    assert_eq!(
+        SelectTxn::from_cold(world.controls.get(waiter).unwrap().1.select_scratch).winner(),
+        SelectTxn::encode_case(0)
+    );
+    consume_woken(&mut world, waiter);
+}
+
+#[test]
+fn select_join_preserves_completion_variants_before_and_after_park() {
+    for value in [
+        CompletionValue::Bits(42),
+        CompletionValue::Managed {
+            handle: 11,
+            descriptor: 22,
+        },
+        CompletionValue::Panic {
+            handle: 33,
+            descriptor: 44,
+        },
+    ] {
+        for parked in [false, true] {
+            let mut world = booted();
+            let child = running(&mut world);
+            let waiter = running(&mut world);
+            let cases = [SelectCase {
+                op: SelectOp::Wait { join: child },
+                index: 0,
+            }];
+            if parked {
+                assert_eq!(
+                    world.select(waiter, &cases, false).unwrap(),
+                    SelectOutcome::Parked
+                );
+            }
+            world.coroutine_finished(child, 0, value).unwrap();
+            if parked {
+                consume_woken(&mut world, waiter);
+            } else {
+                assert_eq!(
+                    world.select(waiter, &cases, false).unwrap(),
+                    SelectOutcome::Case(0)
+                );
+            }
+            assert_eq!(
+                world.wait.take_delivered(waiter),
+                Some(WaitResult::Join(value))
+            );
+            assert_eq!(
+                SelectTxn::from_cold(world.controls.get(waiter).unwrap().1.select_scratch).winner(),
+                SelectTxn::encode_case(0)
+            );
+        }
+    }
+}
+
+#[test]
+fn losing_join_does_not_observe_later_panic() {
+    let mut world = booted();
+    let child = running(&mut world);
+    let waiter = running(&mut world);
+    let channel = world.channel_new(0).unwrap();
+    let cases = [
+        SelectCase {
+            op: SelectOp::Recv { channel },
+            index: 0,
+        },
+        SelectCase {
+            op: SelectOp::Wait { join: child },
+            index: 1,
+        },
+    ];
+    assert_eq!(
+        world.select(waiter, &cases, false).unwrap(),
+        SelectOutcome::Parked
+    );
+    world.channel_try_send(channel, 5).unwrap().unwrap();
+    world
+        .coroutine_finished(
+            child,
+            0,
+            CompletionValue::Panic {
+                handle: 33,
+                descriptor: 44,
+            },
+        )
+        .unwrap();
+    assert_eq!(world.wait.take_delivered(waiter), Some(WaitResult::Recv(5)));
+    assert_eq!(
+        world
+            .controls
+            .get(child)
+            .unwrap()
+            .1
+            .join_state
+            .status
+            .load(std::sync::atomic::Ordering::Acquire)
+            & 4,
+        0,
+        "loser 不能确认 panic"
+    );
+    assert_eq!(
+        world.read_completion(child).unwrap(),
+        CompletionValue::Panic {
+            handle: 33,
+            descriptor: 44
+        }
+    );
+    assert_eq!(
+        world
+            .controls
+            .get(child)
+            .unwrap()
+            .1
+            .join_state
+            .status
+            .load(std::sync::atomic::Ordering::Acquire)
+            & 4,
+        4
+    );
+}
+
+#[test]
+fn select_clears_previous_result_and_rejects_unencodable_case() {
+    let mut world = booted();
+    let channel = world.channel_new(1).unwrap();
+    let waiter = running(&mut world);
+    world.channel_try_send(channel, 5).unwrap().unwrap();
+    assert!(
+        world
+            .select(
+                waiter,
+                &[SelectCase {
+                    op: SelectOp::Recv { channel },
+                    index: u32::MAX
+                }],
+                false
+            )
+            .is_err()
+    );
+    let cases = [SelectCase {
+        op: SelectOp::Recv { channel },
+        index: 0,
+    }];
+    assert_eq!(
+        world.select(waiter, &cases, false).unwrap(),
+        SelectOutcome::Case(0)
+    );
+    assert_eq!(world.wait.take_delivered(waiter), Some(WaitResult::Recv(5)));
+    assert_eq!(
+        world.select(waiter, &cases, false).unwrap(),
+        SelectOutcome::Parked
+    );
+    assert_eq!(world.wait.take_delivered(waiter), None);
+    world.channel_try_send(channel, 6).unwrap().unwrap();
+    assert_eq!(world.wait.take_delivered(waiter), Some(WaitResult::Recv(6)));
+    consume_woken(&mut world, waiter);
 }
 
 #[test]

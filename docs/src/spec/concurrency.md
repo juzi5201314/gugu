@@ -37,6 +37,8 @@ CPU自旋仍然是 `Running` 计算：预算化 poll能让它被抢占，但整�
 
 runnable coroutine没有进程级FIFO顺序。当前processor的`run_next`/local deque优先保持局部性；跨processor ready、poller/timer completion、local overflow和steal可以经过分片batch inbox或NUMA injection，因此不同producer、不同shard和不同processor之间允许重排。preferred processor只是性能hint，不建立线程亲和性或后续执行位置保证。程序不能用两个独立wake的观察顺序替代channel、atomic、Join或其它同步。
 
+一次等待被成功唤醒，必须已经取得可被调度器消费的 runnable ownership，不能只保留在无人消费的 producer 私有暂存中。提交与挂起交接之间到达的完成通知必须被保留或重新发布，不能让已经完成的等待永久睡下；这不增加跨 producer 的顺序保证。
+
 runtime提供弱公平而非wall-clock时间片：只要进程继续运行、coroutine持续保持Runnable且没有违反`ForeignLeaf`/unsafe契约，它不能被持续产生的新local或remote工作永久排除。实现必须对`run_next`连续命中设限，周期性服务remote/injection，按round-robin检查分片，并在每个detached carry清空前阻止同shard的新head越过；这些service interval、batch size和窃取策略是内部性能schema，不是可观察的纳秒或调度次数承诺。
 
 显式`yield`把当前coroutine放入普通local tail，使当时已有runnable至少获得一次被选择机会；它不承诺下一个执行者、全局FIFO或迁移到其它processor。动态降低parallelism时，Retiring processor上的ready、carry和timer必须完整转移，但它们与其它processor已有工作仍只有上述弱顺序。
@@ -86,6 +88,8 @@ impl Lazy[T] {
 
 一次等待多个 channel 的 `send`/`recv` 以及 `Join.wait()`，随机公平选择就绪分支，可有默认 `_`（不阻塞）。求值顺序与作为表达式的类型规则见 [表达式](expressions.md)。没有分支的 `select {}` 永远挂起当前协程。
 
+分支数量不受单个机器字宽度限制；超过 64 个分支仍执行同一就绪检查与原子提交语义。
+
 ## 内存序与数据竞争
 
 多个协程可以同时跑在多个操作系统线程上。数据竞争是未定义行为。类型系统**不**静态禁止把 `&T` 送进另一个协程（没有 `Send`/`Sync` 约束）：GC 延命解决的是寿命，不是互斥。跨协程共享可变状态是程序员义务，必须走 `chan`、`std.sync`、原子、或只读共享。编译器可以提供竞态检测器构建，但不保证检出全部数据竞争。
@@ -98,7 +102,7 @@ impl Lazy[T] {
 
 `close` 之前的写入与观察到永久关闭结果的 `recv` / `try_recv` 建立 happens-before。父协程在创建 `async` 子协程前完成的写入对该子协程开始执行可见；子协程完成前的写入在 `Join.wait()` 返回后对等待者可见。仅创建 Join 或轮询未完成状态不建立反向同步。
 
-`select` 对就绪分支进行一次原子提交。存在就绪分支时 default 永不获选；不存在就绪分支时才选择 default 或挂起。多个就绪分支的选择是随机的，并满足弱公平：持续保持就绪的分支不能被调度器永久排除。随机种子、具体轮询算法和不同操作系统线程上的执行顺序不是语言可观察保证。
+`select` 对就绪分支进行一次原子提交：胜出、相应 channel 的队列变更与 payload 转移（或 Join 完成记录的读取）以及结果发布必须构成同一个操作。返回选中分支表示该操作已经发生，不能先报告选中再补做 send/recv。阻塞期胜出的分支与立即胜出的分支交付同样完整的结果；未选中的分支不消费消息、不观察 Join panic，也不取消子协程。同一个 waitset 的 send/recv 不能相互会合。存在就绪分支时 default 永不获选；不存在就绪分支时才选择 default 或挂起。多个就绪分支的选择是随机的，并满足弱公平：持续保持就绪的分支不能被调度器永久排除。随机种子、具体轮询算法和不同操作系统线程上的执行顺序不是语言可观察保证。
 
 ## 内存序与同步 API
 
@@ -118,6 +122,18 @@ fn fence(order: Ordering)
 ```
 
 `load` 只接受 `Relaxed`、`Acquire`、`SeqCst`；`store` 只接受 `Relaxed`、`Release`、`SeqCst`；读改写操作接受 `Relaxed`、`Acquire`、`Release`、`AcqRel`、`SeqCst`。CAS 失败序不能是 `Release`/`AcqRel`，且不能强于成功序；违规是编译错误。成功返回 `Ok(())`，失败返回当时的实际值 `Err(actual)`，不会自动重试。`Acquire` 读与对应 `Release` 写建立同步；`SeqCst` 原子操作还参加全局单一顺序；`Relaxed` 只有原子性，不建立非原子数据的可见性关系。
+
+CAS 的失败序按语义能力而非枚举序号判定，合法组合固定如下；非法组合不得修改原子值或可见性状态：
+
+| success | 合法 failure |
+| --- | --- |
+| Relaxed | Relaxed |
+| Acquire | Relaxed、Acquire |
+| Release | Relaxed |
+| AcqRel | Relaxed、Acquire |
+| SeqCst | Relaxed、Acquire、SeqCst |
+
+锁交接后，真正接棒的协程拥有对应锁并可正常解锁；登记等待的标识不能被当作新的持锁者。
 
 最低锁接口由标准库提供：`Mutex[T]` 提供 `new`、`lock`、`get`、`unlock` 与 `with_lock`；`RwLock[T]` 提供对应的读锁/写锁和 `with_read` / `with_write`；`Condvar` 提供 `wait`、`notify_one`、`notify_all`。锁操作阻塞时只挂起当前协程。锁的成功解锁与随后成功加锁建立 happens-before；`Condvar.wait` 原子地释放关联锁、挂起并在返回前重新取得锁。唤醒可以是虚假的，调用者必须循环检查条件。
 

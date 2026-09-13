@@ -427,6 +427,8 @@ fn check(self: &CancelToken) Result[(), Cancelled]
 
 阻塞 I/O、sleep、process wait 和 Join wait 提供接受 token 的变体。默认方法没有隐式 token；丢弃 Join 不取消子协程，`Child.wait_cancel` 也只取消当前等待者，不终止子进程。取消在 safepoint 和已登记的阻塞操作处被观察，返回 `Cancelled`，不是 panic。`cancel` 之前的普通写入与观察到取消的操作建立 happens-before。
 
+尚未完成的 recv/Join 仍然是等待，不产生任何成功值；合法的位值 0 与未完成状态必须可区分。完成后必须保留通道关闭、Join 的位值、managed handle 与 descriptor、panic 等真实结果。挂起操作登记到取消源；正常完成与取消竞争同一个提交点，先提交的结果不能被后到的取消覆盖。完成、取消和错误退出都注销本轮等待，过期的等待节点不得影响复用后的新一轮等待。
+
 ## 路径
 
 `std.path.OsString` 与 `Path` 是不可变、无损的跨平台值。Linux 保留任意非 NUL byte；Windows 保留合法 UTF-16。Path 的连接、替换文件名、父路径和扩展名操作返回新 Path，不修改原值。

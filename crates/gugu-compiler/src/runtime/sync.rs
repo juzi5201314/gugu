@@ -14,9 +14,10 @@ use super::sync_schema::{
     ONCE_INITIALIZING, ONCE_READY, ONCE_UNINIT, ORDERING_ACQ_REL, ORDERING_ACQUIRE,
     ORDERING_RELAXED, ORDERING_RELEASE, ORDERING_SEQ_CST,
 };
+pub use super::wait::WaitNodeHandle;
 
 /// 内存序枚举。
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MemoryOrdering {
     Relaxed = 0,
     Acquire = 1,
@@ -167,7 +168,16 @@ impl AtomicStateMachine {
                 "compare_exchange 失败序不能是 Release 或 AcqRel",
             ));
         }
-        if (failure as usize) > (success as usize) {
+        let allowed = match failure {
+            MemoryOrdering::Relaxed => true,
+            MemoryOrdering::Acquire => matches!(
+                success,
+                MemoryOrdering::Acquire | MemoryOrdering::AcqRel | MemoryOrdering::SeqCst
+            ),
+            MemoryOrdering::SeqCst => success == MemoryOrdering::SeqCst,
+            MemoryOrdering::Release | MemoryOrdering::AcqRel => false,
+        };
+        if !allowed {
             return Err(RawModelError::new("compare_exchange 失败序不能强于成功序"));
         }
         if self.value == expected {
@@ -266,7 +276,8 @@ impl Mutex {
             self.unlocked_explicitly = false;
             MutexLockOutcome::Acquired
         } else {
-            self.wait_queue.push_back(next_node_id);
+            // 持锁交接使用 coroutine；等待 token 只通过 Contended 返回。
+            self.wait_queue.push_back(coroutine);
             MutexLockOutcome::Contended {
                 wait_node: next_node_id,
             }
@@ -304,6 +315,7 @@ impl Mutex {
 pub struct RwLock {
     pub readers: BTreeSet<u64>,
     pub writer: Option<u64>,
+    /// 交接队列保存协程身份，与等待节点 token 分属两个空间。
     pub read_waiters: VecDeque<u64>,
     pub write_waiters: VecDeque<u64>,
 }
@@ -318,7 +330,7 @@ impl RwLock {
             self.readers.insert(coroutine);
             MutexLockOutcome::Acquired
         } else {
-            self.read_waiters.push_back(next_node_id);
+            self.read_waiters.push_back(coroutine);
             MutexLockOutcome::Contended {
                 wait_node: next_node_id,
             }
@@ -330,7 +342,7 @@ impl RwLock {
             self.writer = Some(coroutine);
             MutexLockOutcome::Acquired
         } else {
-            self.write_waiters.push_back(next_node_id);
+            self.write_waiters.push_back(coroutine);
             MutexLockOutcome::Contended {
                 wait_node: next_node_id,
             }
@@ -533,7 +545,7 @@ pub struct Cancelled;
 pub struct CancelSource {
     pub is_cancelled: bool,
     pub generation: u64,
-    pub waiters: Vec<u64>,
+    pub waiters: Vec<WaitNodeHandle>,
 }
 
 impl Default for CancelSource {
@@ -560,7 +572,7 @@ impl CancelSource {
     }
 
     /// 幂等取消。
-    pub fn cancel(&mut self) -> Vec<u64> {
+    pub fn cancel(&mut self) -> Vec<WaitNodeHandle> {
         if self.is_cancelled {
             return Vec::new();
         }
@@ -582,7 +594,7 @@ impl CancelSource {
     }
 
     /// 注册取消等待者。若已取消则立即返回被唤醒。
-    pub fn register_waiter(&mut self, wait_node: u64) -> Result<(), Cancelled> {
+    pub fn register_waiter(&mut self, wait_node: WaitNodeHandle) -> Result<(), Cancelled> {
         if self.is_cancelled {
             Err(Cancelled)
         } else {
@@ -592,7 +604,7 @@ impl CancelSource {
     }
 
     /// 安全注销取消等待者（阻塞操作完成或超时后注销）。
-    pub fn unregister_waiter(&mut self, wait_node: u64) {
+    pub fn unregister_waiter(&mut self, wait_node: WaitNodeHandle) {
         self.waiters.retain(|&w| w != wait_node);
     }
 }

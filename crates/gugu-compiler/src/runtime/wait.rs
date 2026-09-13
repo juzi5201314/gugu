@@ -5,9 +5,10 @@
 
 use std::mem::{align_of, size_of};
 
-use super::coroutine::{CoroutineHandle, CoroutineState, CoroutineTable};
+use super::coroutine::{CompletionValue, CoroutineHandle, CoroutineState, CoroutineTable};
 use super::scheduler::{ProducerHandle, SchedulerWorld, ready_publish};
 use super::slab::RawInvariant;
+use super::sync::CancelHandle;
 
 /// wait-word 的 notified 位；与 `ready_publish` 的 `wait_notified_bit` 一致。
 pub(crate) const WAIT_NOTIFIED: u64 = 1;
@@ -17,6 +18,8 @@ pub(crate) const WAIT_LINK_NONE: u64 = u64::MAX;
 pub(crate) const WAIT_NODE_READIED: u64 = 1;
 /// node 仍登记在 select Building 期，waker 可 CAS winner 但不得 ready。
 pub(crate) const WAIT_NODE_BUILDING: u64 = 2;
+/// select 节点才消费 cold 中的相位和 winner；普通等待不共享该描述符。
+pub(crate) const WAIT_NODE_SELECT: u64 = 4;
 /// winner：尚未提交。
 pub(crate) const WINNER_UNSET: u64 = 0;
 /// winner：default 臂。
@@ -78,6 +81,7 @@ impl SelectTxn {
     }
 
     pub(crate) fn encode_case(index: u32) -> u64 {
+        debug_assert!(index <= u32::MAX - 2);
         WINNER_CASE_BASE + u64::from(index)
     }
 
@@ -153,9 +157,32 @@ const _: () = {
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct WaitNodeHandle {
-    pub(crate) index: u32,
-    pub(crate) generation: u64,
+pub struct WaitNodeHandle {
+    pub index: u32,
+    pub generation: u64,
+}
+
+/// 一轮等待真正提交的结果，不以 payload 0 表示未完成或关闭。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WaitResult {
+    Sent,
+    Recv(u64),
+    RecvClosed,
+    SendClosed,
+    Join(CompletionValue),
+    Cancelled,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum JoinOutcome {
+    Completed(CompletionValue),
+    Parked(WaitNodeHandle),
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct WaitDelivery {
+    generation: u64,
+    result: Option<WaitResult>,
 }
 
 #[derive(Debug)]
@@ -179,6 +206,7 @@ struct WaitNodeRecord {
     occupied: bool,
     source: WaitSourceId,
     readied: bool,
+    cancel_source: Option<CancelHandle>,
 }
 
 /// 等待平面：源表、node slab、Join 源映射与 never 源。
@@ -196,8 +224,8 @@ pub(crate) struct WaitPlane {
     wait_generation: Vec<u64>,
     /// 当前登记的 wait-node，供 loser 注销。
     armed_nodes: Vec<Vec<WaitNodeHandle>>,
-    /// 会合/提交写入的 payload，对应 result slot。
-    delivered: Vec<Option<u64>>,
+    /// 按稠密 coroutine index 存放提交状态；取走结果不解除本轮的唯一认领。
+    delivered: Vec<WaitDelivery>,
     /// 测试注入：使 `try_lock` 失败以覆盖 select 回退路径。
     pub(crate) fail_try_lock: bool,
 }
@@ -262,7 +290,7 @@ impl WaitPlane {
             self.readied_wait.resize(index + 1, 0);
             self.wait_generation.resize(index + 1, 0);
             self.armed_nodes.resize_with(index + 1, Vec::new);
-            self.delivered.resize(index + 1, None);
+            self.delivered.resize(index + 1, WaitDelivery::default());
         }
     }
 
@@ -274,6 +302,8 @@ impl WaitPlane {
             .checked_add(1)
             .ok_or_else(|| RawInvariant::new("wait generation 溢出"))?;
         self.wait_generation[index] = next;
+        debug_assert!(self.armed_nodes[index].is_empty());
+        self.delivered[index] = WaitDelivery::default();
         self.armed_nodes[index].clear();
         Ok(next)
     }
@@ -282,6 +312,12 @@ impl WaitPlane {
         let index = usize::try_from(handle.index).expect("控制块下标");
         self.ensure_coro(index);
         self.armed_nodes[index] = nodes;
+    }
+
+    pub(crate) fn armed_nodes(&self, handle: CoroutineHandle) -> &[WaitNodeHandle] {
+        self.armed_nodes
+            .get(usize::try_from(handle.index).expect("控制块下标"))
+            .map_or(&[], Vec::as_slice)
     }
 
     pub(crate) fn take_armed(&mut self, handle: CoroutineHandle) -> Vec<WaitNodeHandle> {
@@ -296,24 +332,167 @@ impl WaitPlane {
         self.node_record(handle).is_ok()
     }
 
-    pub(crate) fn write_payload(
-        &mut self,
-        handle: WaitNodeHandle,
-        payload: u64,
-    ) -> Result<(), RawInvariant> {
-        self.node_record_mut(handle)?.node.payload_offset = payload;
-        let index = usize::try_from(self.node(handle)?.coroutine_index).expect("控制块下标");
-        self.ensure_coro(index);
-        self.delivered[index] = Some(payload);
-        Ok(())
+    pub(crate) fn publish_result(&mut self, handle: CoroutineHandle, result: WaitResult) {
+        let index = usize::try_from(handle.index).expect("控制块下标");
+        debug_assert_eq!(
+            self.delivered[index].generation,
+            self.wait_generation[index]
+        );
+        debug_assert!(self.delivered[index].result.is_none());
+        self.delivered[index].result = Some(result);
     }
 
-    pub(crate) fn take_delivered(&mut self, handle: CoroutineHandle) -> Option<u64> {
+    pub(crate) fn is_completed(&self, handle: CoroutineHandle) -> bool {
+        let index = usize::try_from(handle.index).expect("控制块下标");
+        self.delivered.get(index).is_some_and(|delivery| {
+            delivery.generation == self.wait_generation[index] && delivery.result.is_some()
+        })
+    }
+
+    pub(crate) fn take_delivered(&mut self, handle: CoroutineHandle) -> Option<WaitResult> {
         let index = usize::try_from(handle.index).expect("控制块下标");
         if self.delivered.len() <= index {
             return None;
         }
-        self.delivered[index].take()
+        self.delivered[index].result.take()
+    }
+
+    fn can_claim(
+        &self,
+        controls: &CoroutineTable,
+        handle: CoroutineHandle,
+        case: Option<u32>,
+    ) -> bool {
+        let Ok((_, cold)) = controls.get(handle) else {
+            return false;
+        };
+        let index = usize::try_from(handle.index).expect("控制块下标");
+        let Some(generation) = self.wait_generation.get(index).copied() else {
+            return false;
+        };
+        generation != 0
+            && self.delivered[index].generation != generation
+            && (case.is_none()
+                || SelectTxn::from_cold(cold.select_scratch).winner() == WINNER_UNSET)
+    }
+
+    pub(crate) fn node_pending(&self, controls: &CoroutineTable, handle: WaitNodeHandle) -> bool {
+        let Ok(node) = self.node(handle) else {
+            return false;
+        };
+        let coroutine = CoroutineHandle {
+            index: u32::try_from(node.coroutine_index).expect("节点保存 u32 控制块下标"),
+            generation: node.coroutine_generation,
+        };
+        let case = (node.flags & WAIT_NODE_SELECT != 0)
+            .then(|| u32::try_from(node.case_index).expect("节点保存 u32 case 下标"));
+        self.wait_generation
+            .get(usize::try_from(coroutine.index).expect("控制块下标"))
+            == Some(&node.wait_generation)
+            && self.can_claim(controls, coroutine, case)
+    }
+
+    fn claim(&mut self, controls: &mut CoroutineTable, handle: CoroutineHandle, case: Option<u32>) {
+        if let Some(case) = case {
+            let (_, cold) = controls
+                .get_mut(handle)
+                .expect("认领前已验证控制块且独占 controls");
+            let mut txn = SelectTxn::from_cold(cold.select_scratch);
+            let won = txn.cas_winner(WINNER_UNSET, SelectTxn::encode_case(case));
+            debug_assert!(won);
+            cold.select_scratch = txn.to_cold();
+        }
+        let index = usize::try_from(handle.index).expect("控制块下标");
+        self.delivered[index].generation = self.wait_generation[index];
+    }
+
+    /// 源锁和独占 controls 使双方预检、winner 认领成为一个参照步骤。
+    pub(crate) fn try_claim(
+        &mut self,
+        controls: &mut CoroutineTable,
+        source: WaitSourceId,
+        current: Option<(CoroutineHandle, u32)>,
+        peer: Option<WaitNodeHandle>,
+    ) -> Result<bool, RawInvariant> {
+        if !self.source_mut(source)?.locked {
+            return Err(RawInvariant::new("等待提交要求持有源锁"));
+        }
+        if let Some((handle, case)) = current
+            && !self.can_claim(controls, handle, Some(case))
+        {
+            return Ok(false);
+        }
+        let peer = if let Some(peer) = peer {
+            if !self.node_pending(controls, peer) {
+                return Ok(false);
+            }
+            if self.source_of(peer)? != source {
+                return Err(RawInvariant::new("wait-node 等待源不匹配"));
+            }
+            let coroutine = self.coroutine_of(peer)?;
+            if current.is_some_and(|(handle, _)| handle == coroutine) {
+                return Ok(false);
+            }
+            let node = self.node(peer)?;
+            let case = (node.flags & WAIT_NODE_SELECT != 0)
+                .then(|| u32::try_from(node.case_index).expect("节点保存 u32 case 下标"));
+            Some((coroutine, case))
+        } else {
+            None
+        };
+        if let Some((handle, case)) = current {
+            self.claim(controls, handle, Some(case));
+        }
+        if let Some((handle, case)) = peer {
+            self.claim(controls, handle, case);
+        }
+        Ok(true)
+    }
+
+    /// FIFO 中跳过已提交节点与本 waitset；只查找，不在认领前移除或消费 payload。
+    pub(crate) fn next_pending(
+        &self,
+        controls: &CoroutineTable,
+        queue: WaitQueue,
+        exclude: Option<CoroutineHandle>,
+    ) -> Result<Option<WaitNodeHandle>, RawInvariant> {
+        let mut cursor = queue.head;
+        while let Some(index) = cursor {
+            let record = self
+                .nodes
+                .get(usize::try_from(index).expect("node 下标"))
+                .filter(|record| record.occupied)
+                .ok_or_else(|| RawInvariant::new("FIFO 指向空闲 wait-node"))?;
+            let node = WaitNodeHandle {
+                index,
+                generation: record.generation,
+            };
+            if self.node_pending(controls, node) && Some(self.coroutine_of(node)?) != exclude {
+                return Ok(Some(node));
+            }
+            cursor = if record.node.next == WAIT_LINK_NONE {
+                None
+            } else {
+                Some(u32::try_from(record.node.next).expect("节点 next 为 u32 下标"))
+            };
+        }
+        Ok(None)
+    }
+
+    pub(crate) fn cancel_source(
+        &self,
+        node: WaitNodeHandle,
+    ) -> Result<Option<CancelHandle>, RawInvariant> {
+        Ok(self.node_record(node)?.cancel_source)
+    }
+
+    pub(crate) fn set_cancel_source(
+        &mut self,
+        node: WaitNodeHandle,
+        cancel: Option<CancelHandle>,
+    ) -> Result<(), RawInvariant> {
+        self.node_record_mut(node)?.cancel_source = cancel;
+        Ok(())
     }
 
     pub(crate) fn source_of(&self, handle: WaitNodeHandle) -> Result<WaitSourceId, RawInvariant> {
@@ -421,6 +600,7 @@ impl WaitPlane {
                 occupied: false,
                 source: WaitSourceId(0),
                 readied: false,
+                cancel_source: None,
             });
             index
         };
@@ -432,6 +612,7 @@ impl WaitPlane {
         record.occupied = true;
         record.source = source;
         record.readied = false;
+        record.cancel_source = None;
         record.node = WaitNode {
             coroutine_index: u64::from(coroutine.index),
             coroutine_generation: coroutine.generation,
@@ -663,31 +844,37 @@ impl WaitPlane {
         }
         Ok(())
     }
+
+    pub(crate) fn node_completed(&self, controls: &CoroutineTable, handle: WaitNodeHandle) -> bool {
+        let Ok(node) = self.node(handle) else {
+            return false;
+        };
+        let coroutine = CoroutineHandle {
+            index: u32::try_from(node.coroutine_index).expect("节点保存 u32 控制块下标"),
+            generation: node.coroutine_generation,
+        };
+        let Ok((_, cold)) = controls.get(coroutine) else {
+            return false;
+        };
+        self.wait_generation
+            .get(usize::try_from(coroutine.index).expect("控制块下标"))
+            == Some(&node.wait_generation)
+            && self.is_completed(coroutine)
+            && (node.flags & WAIT_NODE_SELECT == 0
+                || SelectTxn::from_cold(cold.select_scratch).winner()
+                    == WINNER_CASE_BASE + node.case_index)
+    }
 }
 
-/// `Running → Parking → Waiting`；只挂起协程。
+/// 发布已经进入 Parking 的等待；调用者负责发布前后重查已提交结果。
 pub(crate) fn park_wait(
     tables: &mut CoroutineTable,
     handle: CoroutineHandle,
 ) -> Result<(), RawInvariant> {
-    let (slot, _) = tables.get(handle)?;
-    slot.hot
-        .transition(CoroutineState::Running, CoroutineState::Parking)?;
-    let notified = slot
+    tables
+        .get(handle)?
+        .0
         .hot
-        .wait_word
-        .load(std::sync::atomic::Ordering::Acquire)
-        & WAIT_NOTIFIED
-        != 0;
-    if notified {
-        slot.hot
-            .wait_word
-            .store(0, std::sync::atomic::Ordering::Release);
-        slot.hot
-            .transition(CoroutineState::Parking, CoroutineState::Running)?;
-        return Ok(());
-    }
-    slot.hot
         .transition(CoroutineState::Parking, CoroutineState::Waiting)
 }
 

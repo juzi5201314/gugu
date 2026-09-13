@@ -3,11 +3,13 @@
 //! 全部是进程内、确定性、快速测试；真实并发只在 bench 中运行。窄容量 2/4 与窄 counter
 //! 穷举覆盖空/满、owner-thief 竞争、连续认领、overflow、回绕与 `RESETTING`。
 
-use super::coroutine::{CoroutineHandle, CoroutineState, CoroutineTable};
+use super::coroutine::{
+    BATCH_PUBLISHING, CoroutineHandle, CoroutineState, CoroutineTable, ENQUEUED,
+};
 use super::scheduler::{
     ApplyParallelism, Classic64Deque, Packed55Deque, ProducerHandle, RunnableDeque, RunnableHandle,
-    SchedulerWorld, StealRng, dirty_target, managed_bound, overflow_local, ready_publish,
-    verify_constants, yield_now,
+    SchedulerWorld, StealRng, dirty_target, flush_schedule_staging, managed_bound, overflow_local,
+    ready_publish, verify_constants, yield_now,
 };
 use super::scheduler_schema::{
     SCHED_BATCH_MAX, SCHED_LOCAL_CAPACITY, SCHED_REMOTE_SHARDS, SCHED_SERVICE_BATCH,
@@ -21,6 +23,185 @@ fn table_with(count: u32) -> (CoroutineTable, Vec<CoroutineHandle>) {
         handles.push(table.allocate().expect("控制块可分配"));
     }
     (table, handles)
+}
+
+fn waiting_table(count: u32) -> (CoroutineTable, Vec<CoroutineHandle>) {
+    let (table, handles) = table_with(count);
+    for handle in &handles {
+        for (from, to) in [
+            (CoroutineState::New, CoroutineState::Runnable),
+            (CoroutineState::Runnable, CoroutineState::Running),
+            (CoroutineState::Running, CoroutineState::Parking),
+            (CoroutineState::Parking, CoroutineState::Waiting),
+        ] {
+            table
+                .get(*handle)
+                .unwrap()
+                .0
+                .hot
+                .transition(from, to)
+                .unwrap();
+        }
+    }
+    (table, handles)
+}
+
+fn consume_ready_once(
+    world: &mut SchedulerWorld,
+    table: &CoroutineTable,
+    handles: &[CoroutineHandle],
+) {
+    // table_with 从零连续分配，seen 用稠密控制块下标验证恰好一次交接。
+    let mut seen = vec![false; handles.len()];
+    for processor in world.active_snapshot().to_vec() {
+        while let Some(runnable) = world.schedule_step(processor).unwrap() {
+            let index = usize::try_from(runnable.coroutine.index).unwrap();
+            assert_eq!(handles[index], runnable.coroutine);
+            assert!(
+                !std::mem::replace(&mut seen[index], true),
+                "重复调度 {runnable:?}"
+            );
+            let hot = &table.get(runnable.coroutine).unwrap().0.hot;
+            hot.take_running().unwrap();
+            assert_eq!(
+                hot.state.load(std::sync::atomic::Ordering::Acquire)
+                    & (ENQUEUED | BATCH_PUBLISHING),
+                0
+            );
+        }
+    }
+    assert!(
+        seen.iter().all(|seen| *seen),
+        "存在未交付的 ready: {seen:?}"
+    );
+}
+
+#[test]
+fn ready_non_owner_is_consumed_without_another_event() {
+    let mut world = SchedulerWorld::new(1, 1).unwrap();
+    let target = world.active_snapshot()[0];
+    let (mut table, handles) = waiting_table(1);
+    let snapshot = world.idle().snapshot();
+    assert!(world.idle_mut().park(11, 7, snapshot, false).unwrap());
+    let mut producer = ProducerHandle::new(3);
+    assert!(
+        ready_publish(
+            &mut world,
+            &mut table,
+            target,
+            handles[0],
+            &mut producer,
+            false,
+            1
+        )
+        .unwrap()
+    );
+    assert_eq!(world.idle().woken(), &[(11, 7)]);
+    consume_ready_once(&mut world, &table, &handles);
+    assert_eq!(world.schedule_step(target).unwrap(), None);
+}
+
+#[test]
+fn ready_staging_flushes_target_shard_and_batch_boundaries() {
+    // 三条不同边界：切换 target、切换 shard、同路由 batch 达到 128。
+    for (count, next_target, next_shard) in [(1, 1, 0), (1, 0, 1), (SCHED_BATCH_MAX, 0, 0)] {
+        let mut world = SchedulerWorld::new(2, 1).unwrap();
+        let first = world.active_snapshot()[0];
+        let next = world.active_snapshot()[next_target];
+        let (mut table, handles) = waiting_table(count + 1);
+        let mut producer = ProducerHandle::new(next_shard);
+        for handle in &handles[..usize::try_from(count).unwrap()] {
+            table.get(*handle).unwrap().0.hot.claim_for_batch().unwrap();
+            producer
+                .staging
+                .stage(first, 0, RunnableHandle::new(*handle))
+                .unwrap();
+        }
+        assert!(
+            ready_publish(
+                &mut world,
+                &mut table,
+                next,
+                handles[usize::try_from(count).unwrap()],
+                &mut producer,
+                false,
+                1
+            )
+            .unwrap()
+        );
+        consume_ready_once(&mut world, &table, &handles);
+    }
+}
+
+#[test]
+fn ready_staging_failure_preserves_ownership() {
+    let mut world = SchedulerWorld::new(1, 1).unwrap();
+    let target = world.active_snapshot()[0];
+    let (mut table, handles) = waiting_table(2);
+    let mut producer = ProducerHandle::new(0);
+    table
+        .get(handles[0])
+        .unwrap()
+        .0
+        .hot
+        .claim_for_batch()
+        .unwrap();
+    producer
+        .staging
+        .stage(999, 0, RunnableHandle::new(handles[0]))
+        .unwrap();
+    assert!(
+        ready_publish(
+            &mut world,
+            &mut table,
+            target,
+            handles[1],
+            &mut producer,
+            false,
+            1
+        )
+        .is_err()
+    );
+    assert!(!producer.publish_active);
+    assert_eq!(
+        producer.staging.drain(),
+        Some((999, 0, vec![RunnableHandle::new(handles[0])]))
+    );
+    assert_eq!(
+        table.get(handles[1]).unwrap().0.hot.lifecycle().unwrap(),
+        CoroutineState::Waiting
+    );
+    assert_eq!(
+        flush_schedule_staging(&mut world, &mut producer).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn ready_retiring_target_routes_to_active_injection() {
+    let mut world = SchedulerWorld::new(2, 1).unwrap();
+    let retired = world.active_snapshot()[1];
+    world
+        .apply_parallelism(ApplyParallelism {
+            old: 2,
+            new: 1,
+            epoch: 1,
+        })
+        .unwrap();
+    let (mut table, handles) = waiting_table(1);
+    assert!(
+        ready_publish(
+            &mut world,
+            &mut table,
+            retired,
+            handles[0],
+            &mut ProducerHandle::new(0),
+            false,
+            1
+        )
+        .unwrap()
+    );
+    consume_ready_once(&mut world, &table, &handles);
 }
 
 fn runnable(index: u32) -> RunnableHandle {

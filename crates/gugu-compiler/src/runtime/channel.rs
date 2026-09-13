@@ -4,10 +4,10 @@
 //! 大 payload 两阶段：短临界区只做带 generation 的 reservation，拷贝在锁外，第二段发布；
 //! 未发布 payload 对 recv/close 不可见。运行时负容量 panic。
 
-use super::coroutine::CoroutineHandle;
+use super::coroutine::{CoroutineHandle, CoroutineState, CoroutineTable};
 use super::slab::RawInvariant;
 use super::wait::{
-    WAIT_LINK_NONE, WaitNodeHandle, WaitPlane, WaitQueue, WaitSourceId, WaitSourceKind,
+    WAIT_LINK_NONE, WaitNodeHandle, WaitPlane, WaitQueue, WaitResult, WaitSourceId, WaitSourceKind,
 };
 
 /// 超过该字节视为大 payload，走两阶段 reservation。
@@ -117,6 +117,11 @@ struct ChannelRecord {
     ring: Vec<ChannelSlotState>,
     send_q: WaitQueue,
     recv_q: WaitQueue,
+}
+
+enum SendPreparation {
+    Completed(SendOutcome),
+    Reserved(u64),
 }
 
 /// 通道表：密集下标、generation、固定容量环。
@@ -229,77 +234,168 @@ impl ChannelTable {
     pub(crate) fn try_send(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
         payload: u64,
     ) -> Result<Result<Option<WaitNodeHandle>, TrySendErr>, RawInvariant> {
         let source = self.source(handle)?;
         wait.lock(source)?;
-        let result = self.try_send_locked(wait, handle, payload);
+        let result = self.try_send_locked(wait, controls, handle, payload, None);
         wait.unlock(source)?;
         result
     }
 
-    fn try_send_locked(
+    pub(crate) fn try_send_locked(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
         payload: u64,
+        selection: Option<(CoroutineHandle, u32)>,
     ) -> Result<Result<Option<WaitNodeHandle>, TrySendErr>, RawInvariant> {
         let record = self.record_mut(handle)?;
+        let source = WaitSourceId(record.control.source_id);
         if record.control.closed != 0 {
+            if !wait.try_claim(controls, source, selection, None)? {
+                return Ok(Err(TrySendErr::Full));
+            }
+            if let Some((coroutine, _)) = selection {
+                wait.publish_result(coroutine, WaitResult::SendClosed);
+            }
             return Ok(Err(TrySendErr::Closed));
         }
-        if let Some(waiter) = wait.dequeue(&mut record.recv_q)? {
+        let peer = wait.next_pending(
+            controls,
+            record.recv_q,
+            selection.map(|(coroutine, _)| coroutine),
+        )?;
+        let generation = if peer.is_none() {
+            if !Self::slot_available(record) {
+                return Ok(Err(TrySendErr::Full));
+            }
+            Some(Self::next_reservation_generation(record)?)
+        } else {
+            None
+        };
+        let peer_coroutine = peer.map(|node| wait.coroutine_of(node)).transpose()?;
+        if !wait.try_claim(controls, source, selection, peer)? {
+            return Ok(Err(TrySendErr::Full));
+        }
+        if let Some(node) = peer {
+            let removed = wait
+                .unlink(&mut record.recv_q, node)
+                .expect("源锁内已验证会合节点");
+            debug_assert!(removed);
             Self::sync_queue_heads(record);
-            wait.write_payload(waiter, payload)?;
-            return Ok(Ok(Some(waiter)));
+            wait.publish_result(
+                peer_coroutine.expect("会合节点已解析控制块"),
+                WaitResult::Recv(payload),
+            );
+        } else {
+            Self::commit_slot(
+                record,
+                generation.expect("缓冲提交已预检 generation"),
+                payload,
+            );
         }
-        if record.control.capacity == 0 {
-            return Ok(Err(TrySendErr::Full));
+        if let Some((coroutine, _)) = selection {
+            wait.publish_result(coroutine, WaitResult::Sent);
         }
-        if record.control.len >= record.control.capacity {
-            return Ok(Err(TrySendErr::Full));
-        }
-        self.publish_slot(handle, payload)?;
-        Ok(Ok(None))
+        Ok(Ok(peer))
     }
 
     pub(crate) fn try_recv(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
     ) -> Result<Result<(u64, Option<WaitNodeHandle>), TryRecvErr>, RawInvariant> {
         let source = self.source(handle)?;
         wait.lock(source)?;
-        let result = self.try_recv_locked(wait, handle);
+        let result = self.try_recv_locked(wait, controls, handle, None);
         wait.unlock(source)?;
         result
     }
 
-    fn try_recv_locked(
+    pub(crate) fn try_recv_locked(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
+        selection: Option<(CoroutineHandle, u32)>,
     ) -> Result<Result<(u64, Option<WaitNodeHandle>), TryRecvErr>, RawInvariant> {
-        if let Some(value) = self.take_slot(handle)? {
-            return Ok(Ok((value, None)));
-        }
         let record = self.record_mut(handle)?;
-        if let Some(waiter) = wait.dequeue(&mut record.send_q)? {
-            Self::sync_queue_heads(record);
-            let payload = wait.node(waiter)?.payload_offset;
-            return Ok(Ok((payload, Some(waiter))));
-        }
-        let record = self.record_mut(handle)?;
-        if record.control.closed != 0 {
+        let source = WaitSourceId(record.control.source_id);
+        let buffered = Self::peek_slot(record);
+        let can_refill = buffered.is_none()
+            || record.control.head == record.control.tail
+            || Self::slot_available(record);
+        let peer = if record.control.closed == 0 && can_refill {
+            wait.next_pending(
+                controls,
+                record.send_q,
+                selection.map(|(coroutine, _)| coroutine),
+            )?
+        } else {
+            None
+        };
+        if buffered.is_none() && peer.is_none() {
+            if record.control.closed == 0 {
+                return Ok(Err(TryRecvErr::Empty));
+            }
+            if !wait.try_claim(controls, source, selection, None)? {
+                return Ok(Err(TryRecvErr::Empty));
+            }
+            if let Some((coroutine, _)) = selection {
+                wait.publish_result(coroutine, WaitResult::RecvClosed);
+            }
             return Ok(Err(TryRecvErr::Closed));
         }
-        Ok(Err(TryRecvErr::Empty))
+        let peer_value = peer
+            .map(|node| wait.node(node).map(|node| node.payload_offset))
+            .transpose()?;
+        let peer_coroutine = peer.map(|node| wait.coroutine_of(node)).transpose()?;
+        let refill = if buffered.is_some() && peer.is_some() {
+            Some(Self::next_reservation_generation(record)?)
+        } else {
+            None
+        };
+        if !wait.try_claim(controls, source, selection, peer)? {
+            return Ok(Err(TryRecvErr::Empty));
+        }
+        let payload = if buffered.is_some() {
+            Self::take_slot(record)
+        } else {
+            peer_value.expect("无缓冲会合已验证发送 payload")
+        };
+        if let Some(node) = peer {
+            let removed = wait
+                .unlink(&mut record.send_q, node)
+                .expect("源锁内已验证发送节点");
+            debug_assert!(removed);
+            if let Some(generation) = refill {
+                Self::commit_slot(
+                    record,
+                    generation,
+                    peer_value.expect("补入的 sender 已保存 payload"),
+                );
+            }
+            Self::sync_queue_heads(record);
+            wait.publish_result(
+                peer_coroutine.expect("发送节点已解析控制块"),
+                WaitResult::Sent,
+            );
+        }
+        if let Some((coroutine, _)) = selection {
+            wait.publish_result(coroutine, WaitResult::Recv(payload));
+        }
+        Ok(Ok((payload, peer)))
     }
 
     pub(crate) fn send(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
         coroutine: CoroutineHandle,
         payload: u64,
@@ -308,9 +404,9 @@ impl ChannelTable {
         let source = self.source(handle)?;
         wait.lock(source)?;
         if large {
-            return self.send_large(wait, handle, coroutine, payload, source);
+            return self.send_large(wait, controls, handle, coroutine, payload, source);
         }
-        let outcome = self.send_locked(wait, handle, coroutine, payload);
+        let outcome = self.send_locked(wait, controls, handle, coroutine, payload);
         wait.unlock(source)?;
         outcome
     }
@@ -318,66 +414,77 @@ impl ChannelTable {
     fn send_large(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
         coroutine: CoroutineHandle,
         payload: u64,
         source: WaitSourceId,
     ) -> Result<SendOutcome, RawInvariant> {
-        let record = self.record_mut(handle)?;
-        if record.control.closed != 0 {
-            wait.unlock(source)?;
-            return Err(RawInvariant::new("send on closed channel"));
-        }
-        if let Some(waiter) = wait.dequeue(&mut record.recv_q)? {
-            Self::sync_queue_heads(record);
-            wait.write_payload(waiter, payload)?;
-            wait.unlock(source)?;
-            return Ok(SendOutcome::Sent { wake: Some(waiter) });
-        }
-        if record.control.capacity > 0 && record.control.len < record.control.capacity {
-            let generation = self.reserve_slot(handle)?;
-            wait.unlock(source)?;
-            wait.lock(source)?;
-            if self.record_mut(handle)?.control.closed != 0 {
-                self.abort_reservation(handle, generation)?;
-                wait.unlock(source)?;
-                return Err(RawInvariant::new("send on closed channel"));
-            }
-            self.publish_reserved(handle, generation, payload)?;
-            wait.unlock(source)?;
-            return Ok(SendOutcome::Sent { wake: None });
-        }
-        let outcome = self.park_send(wait, handle, coroutine, payload)?;
+        let prepared = self.prepare_large_send(wait, controls, handle, coroutine, payload);
         wait.unlock(source)?;
-        Ok(outcome)
+        let generation = match prepared? {
+            SendPreparation::Completed(outcome) => return Ok(outcome),
+            SendPreparation::Reserved(generation) => generation,
+        };
+        wait.lock(source)?;
+        let result = self.finish_large_send(handle, generation, payload);
+        wait.unlock(source)?;
+        result.map(|()| SendOutcome::Sent { wake: None })
+    }
+
+    fn prepare_large_send(
+        &mut self,
+        wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
+        handle: ChannelHandle,
+        coroutine: CoroutineHandle,
+        payload: u64,
+    ) -> Result<SendPreparation, RawInvariant> {
+        let record = self.record_mut(handle)?;
+        if record.control.closed == 0
+            && Self::slot_available(record)
+            && wait.next_pending(controls, record.recv_q, None)?.is_none()
+        {
+            self.reserve_slot(handle).map(SendPreparation::Reserved)
+        } else {
+            self.send_locked(wait, controls, handle, coroutine, payload)
+                .map(SendPreparation::Completed)
+        }
+    }
+
+    fn finish_large_send(
+        &mut self,
+        handle: ChannelHandle,
+        generation: u64,
+        payload: u64,
+    ) -> Result<(), RawInvariant> {
+        if self.control(handle)?.closed != 0 {
+            self.abort_reservation(handle, generation)?;
+            Err(RawInvariant::new("send on closed channel"))
+        } else {
+            self.publish_reserved(handle, generation, payload)
+        }
     }
 
     fn send_locked(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
         coroutine: CoroutineHandle,
         payload: u64,
     ) -> Result<SendOutcome, RawInvariant> {
-        let record = self.record_mut(handle)?;
-        if record.control.closed != 0 {
-            return Err(RawInvariant::new("send on closed channel"));
+        match self.try_send_locked(wait, controls, handle, payload, None)? {
+            Ok(wake) => Ok(SendOutcome::Sent { wake }),
+            Err(TrySendErr::Closed) => Err(RawInvariant::new("send on closed channel")),
+            Err(TrySendErr::Full) => self.park_send(wait, controls, handle, coroutine, payload),
         }
-        if let Some(waiter) = wait.dequeue(&mut record.recv_q)? {
-            Self::sync_queue_heads(record);
-            wait.write_payload(waiter, payload)?;
-            return Ok(SendOutcome::Sent { wake: Some(waiter) });
-        }
-        if record.control.capacity > 0 && record.control.len < record.control.capacity {
-            self.publish_slot(handle, payload)?;
-            return Ok(SendOutcome::Sent { wake: None });
-        }
-        self.park_send(wait, handle, coroutine, payload)
     }
 
     fn park_send(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
         coroutine: CoroutineHandle,
         payload: u64,
@@ -386,6 +493,9 @@ impl ChannelTable {
         let generation = wait.begin_wait(coroutine)?;
         let node = wait.alloc_node(coroutine, source, 0, payload, 0, 0, generation)?;
         wait.arm_nodes(coroutine, vec![node]);
+        let hot = &controls.get(coroutine)?.0.hot;
+        hot.wait_word.store(0, std::sync::atomic::Ordering::Relaxed);
+        hot.transition(CoroutineState::Running, CoroutineState::Parking)?;
         let record = self.record_mut(handle)?;
         wait.enqueue(&mut record.send_q, node)?;
         Self::sync_queue_heads(record);
@@ -395,12 +505,13 @@ impl ChannelTable {
     pub(crate) fn recv(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
         coroutine: CoroutineHandle,
     ) -> Result<RecvOutcome, RawInvariant> {
         let source = self.source(handle)?;
         wait.lock(source)?;
-        let outcome = self.recv_locked(wait, handle, coroutine);
+        let outcome = self.recv_locked(wait, controls, handle, coroutine);
         wait.unlock(source)?;
         outcome
     }
@@ -408,32 +519,22 @@ impl ChannelTable {
     fn recv_locked(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
         coroutine: CoroutineHandle,
     ) -> Result<RecvOutcome, RawInvariant> {
-        if let Some(value) = self.take_slot(handle)? {
-            return Ok(RecvOutcome::Value {
-                payload: value,
-                wake: None,
-            });
-        }
-        let record = self.record_mut(handle)?;
-        if let Some(waiter) = wait.dequeue(&mut record.send_q)? {
-            Self::sync_queue_heads(record);
-            let payload = wait.node(waiter)?.payload_offset;
-            return Ok(RecvOutcome::Value {
-                payload,
-                wake: Some(waiter),
-            });
-        }
-        let record = self.record_mut(handle)?;
-        if record.control.closed != 0 {
-            return Ok(RecvOutcome::Closed);
+        match self.try_recv_locked(wait, controls, handle, None)? {
+            Ok((payload, wake)) => return Ok(RecvOutcome::Value { payload, wake }),
+            Err(TryRecvErr::Closed) => return Ok(RecvOutcome::Closed),
+            Err(TryRecvErr::Empty) => {}
         }
         let source = self.source(handle)?;
         let generation = wait.begin_wait(coroutine)?;
         let node = wait.alloc_node(coroutine, source, 0, 0, 0, 0, generation)?;
         wait.arm_nodes(coroutine, vec![node]);
+        let hot = &controls.get(coroutine)?.0.hot;
+        hot.wait_word.store(0, std::sync::atomic::Ordering::Relaxed);
+        hot.transition(CoroutineState::Running, CoroutineState::Parking)?;
         let record = self.record_mut(handle)?;
         wait.enqueue(&mut record.recv_q, node)?;
         Self::sync_queue_heads(record);
@@ -443,11 +544,12 @@ impl ChannelTable {
     pub(crate) fn close(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
     ) -> Result<Vec<WaitNodeHandle>, RawInvariant> {
         let source = self.source(handle)?;
         wait.lock(source)?;
-        let woken = self.close_locked(wait, handle);
+        let woken = self.close_locked(wait, controls, handle);
         wait.unlock(source)?;
         woken
     }
@@ -455,6 +557,7 @@ impl ChannelTable {
     fn close_locked(
         &mut self,
         wait: &mut WaitPlane,
+        controls: &mut CoroutineTable,
         handle: ChannelHandle,
     ) -> Result<Vec<WaitNodeHandle>, RawInvariant> {
         let record = self.record_mut(handle)?;
@@ -462,12 +565,19 @@ impl ChannelTable {
             return Err(RawInvariant::new("close on closed channel"));
         }
         record.control.closed = 1;
+        let source = WaitSourceId(record.control.source_id);
         let mut woken = Vec::new();
-        while let Some(node) = wait.dequeue(&mut record.send_q)? {
-            woken.push(node);
-        }
-        while let Some(node) = wait.dequeue(&mut record.recv_q)? {
-            woken.push(node);
+        for (queue, result) in [
+            (&mut record.send_q, WaitResult::SendClosed),
+            (&mut record.recv_q, WaitResult::RecvClosed),
+        ] {
+            while let Some(node) = wait.dequeue(queue)? {
+                if wait.try_claim(controls, source, None, Some(node))? {
+                    let coroutine = wait.coroutine_of(node).expect("已认领节点的控制块有效");
+                    wait.publish_result(coroutine, result);
+                    woken.push(node);
+                }
+            }
         }
         Self::sync_queue_heads(record);
         Ok(woken)
@@ -478,8 +588,7 @@ impl ChannelTable {
         if record.control.closed != 0 {
             return Ok(true);
         }
-        Ok(record.recv_q.head.is_some()
-            || (record.control.capacity > 0 && record.control.len < record.control.capacity))
+        Ok(record.recv_q.head.is_some() || Self::slot_available(record))
     }
 
     pub(crate) fn is_ready_recv(&self, handle: ChannelHandle) -> Result<bool, RawInvariant> {
@@ -549,14 +658,10 @@ impl ChannelTable {
 
     fn reserve_slot(&mut self, handle: ChannelHandle) -> Result<u64, RawInvariant> {
         let record = self.record_mut(handle)?;
-        if record.control.len >= record.control.capacity {
+        if !Self::slot_available(record) {
             return Err(RawInvariant::new("channel 没有剩余槽可预约"));
         }
-        let generation = record
-            .control
-            .reservation_generation
-            .checked_add(1)
-            .ok_or_else(|| RawInvariant::new("reservation generation 溢出"))?;
+        let generation = Self::next_reservation_generation(record)?;
         record.control.reservation_generation = generation;
         let tail = usize::try_from(record.control.tail).expect("环下标");
         record.ring[tail] = ChannelSlotState::Reserved { generation };
@@ -577,35 +682,52 @@ impl ChannelTable {
             } if reserved == generation => {}
             _ => return Err(RawInvariant::new("未发布 reservation 对 recv 不可见")),
         }
+        Self::commit_slot(record, generation, payload);
+        Ok(())
+    }
+
+    fn slot_available(record: &ChannelRecord) -> bool {
+        record.control.len < record.control.capacity
+            && record.ring[usize::try_from(record.control.tail).expect("环下标")]
+                == ChannelSlotState::Empty
+    }
+
+    fn next_reservation_generation(record: &ChannelRecord) -> Result<u64, RawInvariant> {
+        record
+            .control
+            .reservation_generation
+            .checked_add(1)
+            .ok_or_else(|| RawInvariant::new("reservation generation 溢出"))
+    }
+
+    fn commit_slot(record: &mut ChannelRecord, generation: u64, payload: u64) {
+        debug_assert!(record.control.len < record.control.capacity);
+        let tail = usize::try_from(record.control.tail).expect("环下标");
         record.ring[tail] = ChannelSlotState::Occupied {
             payload,
             generation,
         };
+        record.control.reservation_generation = generation;
         record.control.tail = (record.control.tail + 1) % record.control.capacity;
         record.control.len += 1;
-        Ok(())
     }
 
-    fn publish_slot(&mut self, handle: ChannelHandle, payload: u64) -> Result<(), RawInvariant> {
-        let generation = self.reserve_slot(handle)?;
-        self.publish_reserved(handle, generation, payload)
-    }
-
-    fn take_slot(&mut self, handle: ChannelHandle) -> Result<Option<u64>, RawInvariant> {
-        let record = self.record_mut(handle)?;
+    fn peek_slot(record: &ChannelRecord) -> Option<u64> {
         if record.control.len == 0 {
-            return Ok(None);
+            return None;
         }
-        let head = usize::try_from(record.control.head).expect("环下标");
-        let value = match record.ring[head] {
-            ChannelSlotState::Occupied { payload, .. } => payload,
-            ChannelSlotState::Reserved { .. } | ChannelSlotState::Empty => {
-                return Ok(None);
-            }
-        };
-        record.ring[head] = ChannelSlotState::Empty;
+        match record.ring[usize::try_from(record.control.head).expect("环下标")] {
+            ChannelSlotState::Occupied { payload, .. } => Some(payload),
+            ChannelSlotState::Reserved { .. } | ChannelSlotState::Empty => None,
+        }
+    }
+
+    fn take_slot(record: &mut ChannelRecord) -> u64 {
+        let value = Self::peek_slot(record).expect("认领前已验证缓冲 head 可接收");
+        record.ring[usize::try_from(record.control.head).expect("环下标")] =
+            ChannelSlotState::Empty;
         record.control.head = (record.control.head + 1) % record.control.capacity;
         record.control.len -= 1;
-        Ok(Some(value))
+        value
     }
 }

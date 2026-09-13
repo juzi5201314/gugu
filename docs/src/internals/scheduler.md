@@ -181,6 +181,8 @@ head.compare_exchange_weak(old, first, Release, Relaxed)
 
 CAS失败只用返回的实际 head重写 `last.run_link_next`并重试。成功后 batch整体可见；producer清空 staging，但不逐节点清 `BATCH_PUBLISHING`。旧 head只作为不透明 pointer值写入 producer独占的 last node，producer不得解引用它。control slab page地址稳定且 consumer只用 atomic exchange摘取整链，因此普通 publish不进入 generic epoch、hazard-pointer或全局 refcount协议。
 
+Rust 参照模型通过 `flush_schedule_staging` 消费同一 staging：返回成功前整链必须进入 active target 的 remote carry；退役目标在当前单 NUMA 模型中改投首个 active processor 的 injection carry。目标、shard 和通知序号在 drain 前验证；失败保留 staging/pending ownership 并向调用方返回错误，不能吞掉 stage 失败。空 carry 首次发布递增 work_seq 并唤醒 idle worker，非空追加不重复通知。排空后复用 producer 的空缓冲，不逐次分配或逐节点清认领位。
+
 target processor owner以 `head.swap(null, Acquire)`取得某 shard当时的完整链，并把它保存到该 shard的 typed detached carry；remote head不能混用逐节点 pop或基于旧 head的 consumer CAS。owner每次 service最多转移128项，先从batch首节点读取并验证`run_batch_len`，遍历时先保存`next`；节点真正写入local deque时才把`run_link_next`与`run_batch_len`普通清零，仍需carry或重新发布的batch必须保留原边界。detached carry未清空前不再次摘该 shard的新 head；8个 shard按 round-robin服务，因此持续生产的单一 shard不能永久排除其它 shard。newest-to-oldest遍历依次 push local tail，owner再从 tail pop，batch内实际执行恢复 oldest-to-newest；不额外反转链表。
 
 Booting 时按宿主 NUMA topology建立至少一个 `InjectionDomain`；无法可靠探测时只建立一个。每个 domain同样含8个128-byte padded batch head，但允许多个 worker竞争 `swap(null)`，成功者把链登记为自己的 typed injection carry。无合法 preferred processor、目标正在 `Retiring`、local overflow和未归属的外部事件进入 source-local domain；worker先检查当前 NUMA domain，再按随机起点检查其它 domain。一次 winner只在本轮消费一个 publish batch或128项；carry中还有其它 batch且存在 idle demand时，按 `run_batch_len`边界把后续 batch重新发布到其它 injection shard，不能让单 worker私占无界 burst。processor retire、worker stop和producer deregister前必须发布全部 staging/carry。
@@ -209,6 +211,12 @@ local deque满时，owner一次认领最旧128项，按 newest-to-oldest串成pu
 select cleanup在 winner提交、取消注销和 payload reservation完成后立即归还 scratch。每个 processor的 retained cache按 size class维护，累计容量不得超过 `select_scratch_cache_bytes` profile上限；超过上限的 allocation直接归还 owner slab/extent，不得由 coroutine长期保留。cache miss只发生在 begin slow path，cache hit不分配；pressure、processor交接、ForeignBridge、GC stop和 owner retire 都必须先清空该 processor cache的可转移 lease。cache与 wait-node 分开计入 runtime pressure，不能以复用掩盖实际 committed bytes。
 
 大于8 case的路径可以 O(k) 构造并登记，但不得在 source 锁内完成排序、分配或跨 source 等待；`SelectTxn` 的每个 source 注册、winner CAS、注销和 scratch class都必须可计数。release profile必须记录 case 数为1/2/8/64/256时的 registration、lock、winner-conflict和 retained-bytes计数；未通过对应 profile门禁不能把大 case路径宣称为固定成本。
+
+Rust 参照模型以 cold 的四字描述符作为唯一 winner；readiness 使用锁外分配的多 word bitmap，按 case ordinal 的 `index / 64` 与 `index % 64` 寻址。source 与 ordinal 一起排序后逐 source 扫描/登记，不重复全表扫描；重查失败继续尝试其余候选。通道普通操作与 select 共用锁内认领：预检双方资格、原子认领、队列/ring 变更、完整结果发布，最后才解锁通知。共享结果槽区分 Sent、Recv、关闭、完整 Join 完成记录与 Cancelled；读取结果后仍保留本轮认领 generation，禁止重复完成。Join panic 只在胜出后读取，loser 不标记为已观察。
+
+Building 时可完成 winner 与 payload，但不 ready、不释放仍在登记的节点；普通等待不解释 select scratch 的相位。无 winner 的 selector 先进入 Parking 再发布 Armed，普通 channel/Join 在节点入队前进入 Parking。waker 遇到 Parking 只发布通知，waiter 在发布 Waiting 前后重查结果：此前完成则继续 Running，窗口内完成则真正发布 runnable。所有完成路径逐 source 注销并归还节点，包含尚未入队的预备节点。取消登记保存完整 wait-node index/generation，节点释放前从取消源注销；锁的交接队列则保存 coroutine 身份，两者不得混用。
+
+参照模型的跨模块消费者通过 `RawWorld::take_wait_result` 验证 coroutine handle 后取走完整结果，不直接访问等待平面的存储，也不能只凭选中的 case 计为一次数据传递。
 
 ### TimerWheel 与 blocking bridge
 

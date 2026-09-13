@@ -637,8 +637,14 @@ fn run_wait_owner(
         op: SelectOp::Recv { channel: ready },
         index: 0,
     }];
-    for _ in 0..items {
-        if world.select(selector, &cases, true).ok() == Some(SelectOutcome::Case(0)) {
+    for item in 0..items {
+        let payload = u64::from(item);
+        if world.channel_try_send(ready, payload).ok() == Some(Ok(()))
+            && world.select(selector, &cases, true).ok() == Some(SelectOutcome::Case(0))
+            && world.take_wait_result(selector).ok()
+                == Some(Some(super::wait::WaitResult::Recv(payload)))
+            && world.channel_try_recv(ready).ok() == Some(Err(super::channel::TryRecvErr::Empty))
+        {
             stats.select_commits += 1;
         }
     }
@@ -671,10 +677,6 @@ fn boot_wait_world(
         .expect("boot");
     let channel = world.channel_new(i64::from(producers)).expect("channel");
     let ready = world.channel_new(1).expect("select 源");
-    world
-        .channel_try_send(ready, 1)
-        .expect("ready")
-        .expect("ok");
     let selector = world
         .spawn_user_coroutine(
             0,

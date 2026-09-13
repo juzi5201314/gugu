@@ -3,10 +3,13 @@
 use super::super::channel::{ChannelHandle, RecvOutcome, SendOutcome, TryRecvErr, TrySendErr};
 use super::super::coroutine::{CompletionValue, CoroutineHandle, CoroutineState};
 use super::super::message::ReturnKind;
-use super::super::select::{SelectCase, SelectOutcome, SelectRng, select_commit};
+use super::super::select::{SelectCase, SelectOutcome, SelectRng, arm_select, select_commit};
 use super::super::size_class::RuntimeSizeClassId;
 use super::super::slab::{RawInvariant, RawSlot};
-use super::super::wait::{WaitNodeHandle, park_wait, wake_wait};
+use super::super::wait::{
+    JoinOutcome, SelectTxn, WAIT_NODE_SELECT, WAIT_NOTIFIED, WaitNodeHandle, WaitResult, park_wait,
+    phase_building, wake_wait,
+};
 use super::RawWorld;
 
 impl RawWorld {
@@ -18,37 +21,119 @@ impl RawWorld {
             .ok_or_else(|| RawInvariant::new("没有 active processor 可唤醒"))
     }
 
+    pub(crate) fn take_wait_result(
+        &mut self,
+        coroutine: CoroutineHandle,
+    ) -> Result<Option<WaitResult>, RawInvariant> {
+        self.controls.get(coroutine)?;
+        Ok(self.wait.take_delivered(coroutine))
+    }
+
     pub(crate) fn wake_node(&mut self, node: WaitNodeHandle) -> Result<bool, RawInvariant> {
-        if !self.wait.is_live(node) {
+        if !self.wait.node_completed(&self.controls, node) {
             return Ok(false);
         }
         let handle = self.wait.coroutine_of(node)?;
-        let mut nodes = self.wait.take_armed(handle);
-        if nodes.is_empty() {
-            nodes.push(node);
+        let flags = self.wait.node(node)?.flags;
+        let (slot, cold) = self.controls.get(handle)?;
+        if flags & WAIT_NODE_SELECT != 0
+            && SelectTxn::from_cold(cold.select_scratch).phase() == phase_building()
+        {
+            return Ok(false);
         }
-        let mut woken = false;
-        if self.wait.mark_ready(node)? {
-            let processor = self.wait_processor()?;
-            let mut producer = super::super::scheduler::ProducerHandle::new(1);
-            woken = wake_wait(
-                &mut self.scheduler,
-                &mut self.controls,
-                &mut producer,
-                processor,
-                handle,
-                true,
-            )?;
-        }
-        for candidate in nodes {
-            if self.wait.is_live(candidate) {
-                let source = self.wait.source_of(candidate)?;
-                let _ = self.channels.unlink_waiter(&mut self.wait, candidate)?;
-                let _ = self.wait.unlink_source(source, candidate)?;
-                self.wait.release_node(candidate)?;
+        if slot.hot.lifecycle()? == CoroutineState::Parking {
+            slot.hot
+                .wait_word
+                .fetch_or(WAIT_NOTIFIED, std::sync::atomic::Ordering::Release);
+            if slot.hot.lifecycle()? == CoroutineState::Parking {
+                return Ok(false);
             }
         }
+        if slot.hot.lifecycle()? != CoroutineState::Waiting || !self.wait.mark_ready(node)? {
+            return Ok(false);
+        }
+        let processor = self.wait_processor()?;
+        let mut producer = super::super::scheduler::ProducerHandle::new(1);
+        let woken = wake_wait(
+            &mut self.scheduler,
+            &mut self.controls,
+            &mut producer,
+            processor,
+            handle,
+            true,
+        )?;
+        if woken {
+            self.cleanup_waiters(handle)?;
+        }
         Ok(woken)
+    }
+
+    pub(super) fn cleanup_waiters(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
+        for node in self.wait.take_armed(handle) {
+            if !self.wait.is_live(node) {
+                continue;
+            }
+            let source = self.wait.source_of(node)?;
+            self.wait.lock(source)?;
+            let result = match self.wait.kind_of(source)? {
+                super::super::wait::WaitSourceKind::Channel => {
+                    self.channels.unlink_waiter(&mut self.wait, node)
+                }
+                _ => self.wait.unlink_source(source, node),
+            };
+            self.wait.unlock(source)?;
+            result?;
+            self.unregister_cancel_waiter(node)?;
+            self.wait.release_node(node)?;
+        }
+        Ok(())
+    }
+
+    pub(super) fn park_current_wait(
+        &mut self,
+        coroutine: CoroutineHandle,
+    ) -> Result<bool, RawInvariant> {
+        self.park_current_wait_with(coroutine, |_| {})
+    }
+
+    pub(super) fn park_current_wait_with(
+        &mut self,
+        coroutine: CoroutineHandle,
+        before_waiting: impl FnOnce(&mut Self),
+    ) -> Result<bool, RawInvariant> {
+        if self.wait.is_completed(coroutine) {
+            let hot = &self.controls.get(coroutine)?.0.hot;
+            hot.wait_word
+                .fetch_and(!WAIT_NOTIFIED, std::sync::atomic::Ordering::Release);
+            hot.transition(CoroutineState::Parking, CoroutineState::Running)?;
+            self.cleanup_waiters(coroutine)?;
+            return Ok(false);
+        }
+        before_waiting(self);
+        park_wait(&mut self.controls, coroutine)?;
+        // 配对 waker 的 Release 通知；是否产出值仍以真实交付槽为准。
+        self.controls
+            .get(coroutine)?
+            .0
+            .hot
+            .wait_word
+            .load(std::sync::atomic::Ordering::Acquire);
+        if self.wait.is_completed(coroutine) {
+            let winner = self
+                .wait
+                .armed_nodes(coroutine)
+                .iter()
+                .copied()
+                .find(|node| self.wait.node_completed(&self.controls, *node));
+            if let Some(node) = winner {
+                self.wake_node(node)?;
+            }
+            debug_assert_eq!(
+                self.controls.get(coroutine)?.0.hot.lifecycle()?,
+                CoroutineState::Runnable
+            );
+        }
+        Ok(true)
     }
 
     fn wake_nodes(
@@ -70,7 +155,10 @@ impl RawWorld {
         handle: ChannelHandle,
         payload: u64,
     ) -> Result<Result<(), TrySendErr>, RawInvariant> {
-        match self.channels.try_send(&mut self.wait, handle, payload)? {
+        match self
+            .channels
+            .try_send(&mut self.wait, &mut self.controls, handle, payload)?
+        {
             Ok(wake) => {
                 if let Some(node) = wake {
                     self.wake_node(node)?;
@@ -85,7 +173,10 @@ impl RawWorld {
         &mut self,
         handle: ChannelHandle,
     ) -> Result<Result<u64, TryRecvErr>, RawInvariant> {
-        match self.channels.try_recv(&mut self.wait, handle)? {
+        match self
+            .channels
+            .try_recv(&mut self.wait, &mut self.controls, handle)?
+        {
             Ok((payload, wake)) => {
                 if let Some(node) = wake {
                     self.wake_node(node)?;
@@ -103,18 +194,28 @@ impl RawWorld {
         payload: u64,
         large: bool,
     ) -> Result<SendOutcome, RawInvariant> {
-        let outcome = self
-            .channels
-            .send(&mut self.wait, handle, coroutine, payload, large)?;
+        let outcome = self.channels.send(
+            &mut self.wait,
+            &mut self.controls,
+            handle,
+            coroutine,
+            payload,
+            large,
+        )?;
         match outcome {
             SendOutcome::Sent { wake } => {
                 if let Some(node) = wake {
                     self.wake_node(node)?;
                 }
+                Ok(outcome)
             }
-            SendOutcome::Parked(_) => park_wait(&mut self.controls, coroutine)?,
+            SendOutcome::Parked(_) if self.park_current_wait(coroutine)? => Ok(outcome),
+            SendOutcome::Parked(_) => match self.wait.take_delivered(coroutine) {
+                Some(WaitResult::Sent) => Ok(SendOutcome::Sent { wake: None }),
+                Some(WaitResult::SendClosed) => Err(RawInvariant::new("send on closed channel")),
+                _ => Err(RawInvariant::new("send 完成缺少发送结果")),
+            },
         }
-        Ok(outcome)
     }
 
     pub(crate) fn channel_recv(
@@ -122,21 +223,33 @@ impl RawWorld {
         handle: ChannelHandle,
         coroutine: CoroutineHandle,
     ) -> Result<RecvOutcome, RawInvariant> {
-        let outcome = self.channels.recv(&mut self.wait, handle, coroutine)?;
+        let outcome = self
+            .channels
+            .recv(&mut self.wait, &mut self.controls, handle, coroutine)?;
         match outcome {
             RecvOutcome::Value { wake, .. } => {
                 if let Some(node) = wake {
                     self.wake_node(node)?;
                 }
+                Ok(outcome)
             }
-            RecvOutcome::Parked(_) => park_wait(&mut self.controls, coroutine)?,
-            RecvOutcome::Closed => {}
+            RecvOutcome::Closed => Ok(outcome),
+            RecvOutcome::Parked(_) if self.park_current_wait(coroutine)? => Ok(outcome),
+            RecvOutcome::Parked(_) => match self.wait.take_delivered(coroutine) {
+                Some(WaitResult::Recv(payload)) => Ok(RecvOutcome::Value {
+                    payload,
+                    wake: None,
+                }),
+                Some(WaitResult::RecvClosed) => Ok(RecvOutcome::Closed),
+                _ => Err(RawInvariant::new("recv 完成缺少接收结果")),
+            },
         }
-        Ok(outcome)
     }
 
     pub(crate) fn channel_close(&mut self, handle: ChannelHandle) -> Result<(), RawInvariant> {
-        let woken = self.channels.close(&mut self.wait, handle)?;
+        let woken = self
+            .channels
+            .close(&mut self.wait, &mut self.controls, handle)?;
         self.wake_nodes(woken)
     }
 
@@ -144,30 +257,104 @@ impl RawWorld {
         &mut self,
         handle: CoroutineHandle,
         waiter: CoroutineHandle,
-    ) -> Result<Result<CompletionValue, WaitNodeHandle>, RawInvariant> {
-        let lifecycle = self.controls.get(handle)?.0.hot.lifecycle()?;
-        if lifecycle == CoroutineState::Dead {
-            return Ok(Ok(self.controls.get(handle)?.1.join_state.read()?));
+    ) -> Result<JoinOutcome, RawInvariant> {
+        let outcome = self.begin_join_wait(handle, waiter)?;
+        if matches!(outcome, JoinOutcome::Parked(_)) && !self.park_current_wait(waiter)? {
+            match self.wait.take_delivered(waiter) {
+                Some(WaitResult::Join(value)) => Ok(JoinOutcome::Completed(value)),
+                _ => Err(RawInvariant::new("Join 完成缺少完成记录")),
+            }
+        } else {
+            Ok(outcome)
         }
+    }
+
+    fn completed_join(
+        &self,
+        handle: CoroutineHandle,
+    ) -> Result<Option<CompletionValue>, RawInvariant> {
+        let (slot, cold) = self.controls.get(handle)?;
+        if slot.hot.lifecycle()? == CoroutineState::Dead {
+            cold.join_state.read().map(Some)
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub(super) fn begin_join_wait(
+        &mut self,
+        handle: CoroutineHandle,
+        waiter: CoroutineHandle,
+    ) -> Result<JoinOutcome, RawInvariant> {
+        self.controls.get(waiter)?;
         let source = self.wait.join_source(handle)?;
+        self.wait.lock(source)?;
+        let completed = self.completed_join(handle);
+        self.wait.unlock(source)?;
+        if let Some(value) = completed? {
+            return Ok(JoinOutcome::Completed(value));
+        }
         let generation = self.wait.begin_wait(waiter)?;
         let node = self
             .wait
             .alloc_node(waiter, source, 0, 0, 0, 0, generation)?;
         self.wait.arm_nodes(waiter, vec![node]);
-        self.wait.enqueue_source(source, node)?;
-        park_wait(&mut self.controls, waiter)?;
-        Ok(Err(node))
+        self.wait.lock(source)?;
+        let result = (|| {
+            if let Some(value) = self.completed_join(handle)? {
+                return Ok(JoinOutcome::Completed(value));
+            }
+            let hot = &self.controls.get(waiter)?.0.hot;
+            hot.wait_word.store(0, std::sync::atomic::Ordering::Relaxed);
+            hot.transition(CoroutineState::Running, CoroutineState::Parking)?;
+            self.wait.enqueue_source(source, node)?;
+            Ok(JoinOutcome::Parked(node))
+        })();
+        self.wait.unlock(source)?;
+        if !matches!(result, Ok(JoinOutcome::Parked(_))) {
+            self.cleanup_waiters(waiter)?;
+        }
+        result
     }
 
     pub(crate) fn wake_join(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
-        let source = self.wait.join_source(handle)?;
-        let mut queue = self.wait.take_source_queue(source)?;
-        let mut nodes = Vec::new();
-        while let Some(node) = self.wait.dequeue(&mut queue)? {
-            nodes.push(node);
+        let (slot, cold) = self.controls.get(handle)?;
+        if slot.hot.lifecycle()? != CoroutineState::Dead
+            || cold
+                .join_state
+                .status
+                .load(std::sync::atomic::Ordering::Acquire)
+                & 3
+                == 0
+        {
+            return Err(RawInvariant::new("Join 唤醒要求已发布的 Dead 完成记录"));
         }
-        self.wake_nodes(nodes)
+        let source = self.wait.join_source(handle)?;
+        self.wait.lock(source)?;
+        let result = (|| {
+            let mut queue = self.wait.take_source_queue(source)?;
+            let mut nodes = Vec::new();
+            while let Some(node) = self.wait.dequeue(&mut queue)? {
+                if self
+                    .wait
+                    .try_claim(&mut self.controls, source, None, Some(node))?
+                {
+                    let value = self
+                        .controls
+                        .get(handle)?
+                        .1
+                        .join_state
+                        .read()
+                        .expect("Dead 完成记录已预检");
+                    let waiter = self.wait.coroutine_of(node).expect("已认领 Join 节点有效");
+                    self.wait.publish_result(waiter, WaitResult::Join(value));
+                    nodes.push(node);
+                }
+            }
+            Ok::<_, RawInvariant>(nodes)
+        })();
+        self.wait.unlock(source)?;
+        self.wake_nodes(result?)
     }
 
     pub(crate) fn select(
@@ -176,30 +363,33 @@ impl RawWorld {
         cases: &[SelectCase],
         has_default: bool,
     ) -> Result<SelectOutcome, RawInvariant> {
-        let mut completed = Vec::new();
-        for case in cases {
-            if let super::super::select::SelectOp::Wait { join } = case.op {
-                let done = self.controls.get(join)?.0.hot.lifecycle()? == CoroutineState::Dead;
-                completed.push((join, done));
-            }
-        }
-        let (slot, cold) = self.controls.get_mut(coroutine)?;
-        let _ = slot;
-        let mut rng = SelectRng::from_cold(cold.select_rng);
-        let (outcome, txn) = select_commit(
+        let mut rng = SelectRng::from_cold(self.controls.get(coroutine)?.1.select_rng);
+        let result = select_commit(
             &mut self.wait,
             &mut self.channels,
-            &completed,
+            &mut self.controls,
             cases,
             has_default,
             &mut rng,
             coroutine,
-        )?;
-        let (_, cold) = self.controls.get_mut(coroutine)?;
-        cold.select_rng = rng.s;
-        cold.select_scratch = txn.to_cold();
+        );
+        self.controls.get_mut(coroutine)?.1.select_rng = rng.s;
+        let (mut outcome, wake) = match result {
+            Ok(result) => result,
+            Err(error) => {
+                self.cleanup_waiters(coroutine)?;
+                return Err(error);
+            }
+        };
+        if let Some(node) = wake {
+            self.wake_node(node)?;
+        }
         if matches!(outcome, SelectOutcome::Parked | SelectOutcome::Never) {
-            park_wait(&mut self.controls, coroutine)?;
+            if !self.park_current_wait(coroutine)? {
+                outcome = arm_select(&mut self.wait, &mut self.controls, coroutine)?;
+            }
+        } else {
+            self.cleanup_waiters(coroutine)?;
         }
         Ok(outcome)
     }

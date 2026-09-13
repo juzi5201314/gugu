@@ -11,8 +11,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::coroutine::{BATCH_PUBLISHING, CoroutineHandle, CoroutineState, ENQUEUED};
-use super::inbox::ShardIndex;
+use super::coroutine::{CoroutineHandle, CoroutineState, ENQUEUED};
 use super::scheduler_schema::{
     SCHED_BATCH_MAX, SCHED_LOCAL_CAPACITY, SCHED_REMOTE_SHARDS, SCHED_SERVICE_BATCH,
     SCHED_SERVICE_INTERVAL,
@@ -968,6 +967,71 @@ impl SchedulerWorld {
     }
 }
 
+/// 发布暂存链；先验证目标与通知序号，失败时保留 producer 的 ownership。
+pub(crate) fn flush_schedule_staging(
+    world: &mut SchedulerWorld,
+    producer: &mut ProducerHandle,
+) -> Result<usize, RawInvariant> {
+    if producer.staging.is_empty() {
+        return Ok(0);
+    }
+    let target = producer.staging.target().expect("非空 staging 必有 target");
+    let shard = producer.staging.shard().expect("非空 staging 必有 shard");
+    if shard >= SCHED_REMOTE_SHARDS {
+        return Err(RawInvariant::new("调度 shard 越界"));
+    }
+    let shard = usize::try_from(shard).expect("有效 shard 可用 usize 索引");
+    let retiring = world
+        .processor(target)
+        .ok_or_else(|| RawInvariant::new("调度 staging 引用未知 processor"))?
+        .state
+        == ProcessorState::Retiring;
+    let target = if retiring {
+        *world
+            .active_snapshot()
+            .first()
+            .ok_or_else(|| RawInvariant::new("没有 active processor 可唤醒"))?
+    } else {
+        target
+    };
+    let processor = world.processor(target).expect("发布目标已验证");
+    let empty = if retiring {
+        processor.injection_carry.is_empty()
+    } else {
+        processor.remote_carries[shard].is_empty()
+    };
+    if empty {
+        world
+            .idle
+            .snapshot()
+            .checked_add(1)
+            .ok_or_else(|| RawInvariant::new("调度 work_seq 溢出"))?;
+    }
+    let (_, _, mut chain) = producer.staging.drain().expect("非空 staging");
+    let count = chain.len();
+    let processor = world.processor_mut(target).expect("发布目标已验证");
+    let carry = if retiring {
+        &mut processor.injection_carry
+    } else {
+        &mut processor.remote_carries[shard]
+    };
+    if empty {
+        std::mem::swap(carry, &mut chain);
+    } else {
+        carry.append(&mut chain);
+    }
+    // 归还空缓冲；后续 batch 复用容量，不为每次 wake 分配 staging。
+    producer.staging.handles = chain;
+    if empty {
+        world
+            .idle
+            .notify_empty_to_nonempty()
+            .expect("通知序号已预检");
+        world.idle.unpark_any();
+    }
+    Ok(count)
+}
+
 /// 全通道唯一入口：`ready_publish`。
 ///
 /// `Waiting` 且调用者持有目标唯一 owner 时直接进 `run_next`/local，否则经
@@ -1023,32 +1087,40 @@ pub(crate) fn ready_publish(
         processor.push_run_next(RunnableHandle::new(handle))?;
         return Ok(true);
     }
-    // 经 `pending_node` 认领：先写入仍由原 owner 保活的节点，再 CAS。
+    producer.begin_publish();
+    producer.topology_epoch_seen = world.topology_epoch();
+    let result = ready_batch(world, tables, target, handle, producer);
+    producer.end_publish();
+    result
+}
+
+fn ready_batch(
+    world: &mut SchedulerWorld,
+    tables: &mut super::coroutine::CoroutineTable,
+    target: u64,
+    handle: CoroutineHandle,
+    producer: &mut ProducerHandle,
+) -> Result<bool, RawInvariant> {
+    let shard = u32::try_from(producer.shard_seed % u64::from(SCHED_REMOTE_SHARDS))
+        .expect("shard 取模结果不超过 u32");
+    if !producer.staging.is_empty()
+        && (producer.staging.target() != Some(target)
+            || producer.staging.shard() != Some(shard)
+            || producer.staging.len()
+                == usize::try_from(SCHED_BATCH_MAX).expect("batch 上限可索引"))
+    {
+        flush_schedule_staging(world, producer)?;
+    }
     producer.pending_node = Some(RunnableHandle::new(handle));
-    let (slot, _) = tables.get(handle)?;
-    match slot.hot.claim_for_batch() {
-        Ok(()) => {}
-        Err(_) => {
-            producer.pending_node = None;
-            return Ok(false);
-        }
+    if tables.get(handle)?.0.hot.claim_for_batch().is_err() {
+        producer.pending_node = None;
+        return Ok(false);
     }
+    producer
+        .staging
+        .stage(target, shard, RunnableHandle::new(handle))?;
     producer.pending_node = None;
-    // 目标选择：仍 active 的 preferred 优先，否则本 NUMA injection；`Retiring` 进 injection。
-    let shard = ShardIndex::from_raw((producer.shard_seed % u64::from(SCHED_REMOTE_SHARDS)) as u32)
-        .ok_or_else(|| RawInvariant::new("调度 shard 越界"))?;
-    if retiring {
-        let processor = world
-            .processor_mut(target)
-            .ok_or_else(|| RawInvariant::new("ready 引用未知 processor"))?;
-        processor.injection_carry.push(RunnableHandle::new(handle));
-    } else {
-        producer
-            .staging
-            .stage(target, shard.raw(), RunnableHandle::new(handle))
-            .unwrap_or(());
-    }
-    let _ = BATCH_PUBLISHING;
+    flush_schedule_staging(world, producer)?;
     Ok(true)
 }
 
