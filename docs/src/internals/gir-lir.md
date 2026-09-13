@@ -163,7 +163,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 ### generic GIR 构造
 
-`BuildGenericGir`（query 11，当前 schema 4，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#开发接口)）。差异诊断为 `E0055`。
+`BuildGenericGir`（query 11，当前 schema 5，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#开发接口)）。差异诊断为 `E0055`。
 
 构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列)` 复用入口。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
 
@@ -171,7 +171,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 ### 值传递与 placement 展开
 
-构造期按 [传递](../spec/passing.md) 把赋值、参数、返回、模式绑定、聚合字段、`dyn Any` 擦除与 channel send 展开为 `ValueAction` / `CowSnapshot` / `ResourceAction` / `Assign`，不另造平行 IR。位值发 `ValueAction::Copy` + `ValueCopy`；身份句柄发 `ValueAction::Copy` + `Use(Copy)`；`string` / `ByteBuffer` / `Bytes` 发 `CowSnapshot`；`ResourceCell` 在覆盖已写入的非返回槽时先 `ReleaseLease` 再 `AcquireLease`，聚合赋值递归处理每个 resource projection。调用实参先拷到临时槽再 `MoveInternal`，避免二次拷和把 lease 误交给 callee。`StorageDead` 前对 resource / 未知类别的用户与参数槽 `ReleaseLease`；返回槽不在 callee 内释放。含 resource 的 local 不得进入 managed closure environment。分析不确定的泛型参数走 Copy + CowSnapshot + AcquireLease。超过 64 字节的按值位结构体记入 `GirBody.large_copies`，query 外按属性求 `large_copy`（`E0056`，默认 warn；`deny`/`forbid` 使 Frontend 失败且无镜像）。
+构造期按 [传递](../spec/passing.md) 把赋值、参数、返回、模式绑定、聚合字段、`dyn Any` 擦除与 channel send 展开为 `ValueAction` / `CowSnapshot` / `ResourceAction` / `Assign`，不另造平行 IR。位值发 `ValueAction::Copy` + `ValueCopy`；身份句柄发 `ValueAction::Copy` + `Use(Copy)`；`string` / `ByteBuffer` / `Bytes` 发 `CowSnapshot`；`ResourceCell` 先 `AcquireLease` 保护源，再对已初始化的非返回目的槽 `ReleaseLease`，最后 Assign。初始化状态按 local 下的实际投影前缀记录，不以投影池范围编号作身份；兄弟字段互不覆盖，全部字段复制完成后才将父聚合标为完整。聚合赋值与退出释放逐一处理已初始化的 resource projection。调用实参先拷到临时槽再 `MoveInternal`，避免二次拷和把 lease 误交给 callee。`StorageDead` 前对已初始化的 resource / 未知类别的用户与参数槽 `ReleaseLease`；返回槽不在 callee 内释放。含 resource 的 local 不得进入 managed closure environment。分析不确定的泛型参数走 Copy + CowSnapshot + AcquireLease。超过 64 字节的按值位结构体记入 `GirBody.large_copies`，query 外按属性求 `large_copy`（`E0056`，默认 warn；`deny`/`forbid` 使 Frontend 失败且无镜像）。
 
 place 与 value 消费共享一条表达式构造路径：字段/下标/借用消费者只构造投影，`Dereference` 调整继续延长原 place，不提前把被引用聚合复制到临时槽。真正的 value 消费才物化最终投影，并执行该值自己的传递动作。由字段取地址产生的引用因此仍指向原槽；仅为了形成 place 不应触发 `large_copy` 或 COW/resource 复制。
 

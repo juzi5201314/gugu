@@ -151,6 +151,6 @@ trait Clone {
 
 普通位值与身份句柄的浅拷不调用用户代码。COW seal和 resource lease动作同样不是可重载用户回调；赋值、参数传递、返回、模式绑定、聚合构造和 `dyn Any` 擦除都必须得到本章前述类型类别规定的同一结果。
 
-重新给绑定赋值时，旧 resource值的 lease先结束，再把新值写入；此前指向该槽的 `&T` 观察新值。结构体或 tuple 的聚合赋值按 resource 字段逐一结束旧 lease，projection 写入也必须结束该 projection 中原有 lease，不能只因外层 local 未变就跳过 release。panic展开与正常退出都结束相应活跃 resource槽的 lease。含 resource 的 local 不能捕获到 managed closure environment；必须改用显式资源句柄或在 closure 外完成生命周期管理。collector物理移动对象不是语义复制，不能因此 seal COW或增加 lease。
+重新给绑定赋值时，旧 resource值的 lease先结束，再把新值写入；此前指向该槽的 `&T` 观察新值。首次写入没有旧 lease，不能释放尚未初始化的槽。结构体或 tuple 的聚合赋值按 resource 字段逐一结束旧 lease，每个 projection 独立判断是否已初始化：一个字段写入不能把兄弟字段判为已初始化，完整写入父聚合则覆盖其所有字段。projection 写入必须结束该 projection 中原有 lease，不能只因外层 local 未变就跳过 release。panic展开与正常退出都只结束相应已初始化的活跃 resource槽的 lease。含 resource 的 local 不能捕获到 managed closure environment；必须改用显式资源句柄或在 closure 外完成生命周期管理。collector物理移动对象不是语义复制，不能因此 seal COW或增加 lease。
 
 值物化、最后使用消除、stack放置、精确根和屏障的选择由 [GIR/LIR](../internals/gir-lir.md)、[栈图](../internals/stack-maps.md)与 [GC 元数据](../internals/gc-metadata.md)唯一规定。分析不确定时仍必须接受合法程序并选择保持本章语义的表示，不能报告生命周期、move或“需要 Clone”错误。

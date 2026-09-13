@@ -71,7 +71,7 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 8 | `TypeCheck` | stable owner key | typeck 侧表 |
 | 9 | `TraitSelection` | canonical obligation | impl selection |
 | 10 | `EvaluateEarlyComptime` | stable definition + args + comptime domain | 早期 comptime 值 |
-| 11 | `BuildGenericGir` | 冻结 HIR 指纹 + owner 稳定键 + owner 下标（schema 2，域 `gugu-build-generic-gir-v1`） | generic GIR body（含 `large_copies`） |
+| 11 | `BuildGenericGir` | 冻结 HIR 指纹 + owner 稳定键 + owner 下标（schema 5，域 `gugu-build-generic-gir-v1`） | generic GIR body（含 `large_copies`） |
 | 12 | `CollectMonoRoots` | target/harness | 根 `MonoKey` 集合 |
 | 13 | `InstantiateGir` | `MonoKey` | monomorphic GIR |
 | 14 | `LayoutOf` | stable concrete type key | 目标布局 |
@@ -94,7 +94,7 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 
 新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--30 只表达登记的新 query，不得重用或改变既有编号的含义。`RuntimeRawModel` 落地把 registry 登记 revision 提升到 2，并新增 `QueryKind::name()` 与 `query::registry_fingerprint()`：指纹按编号升序编码全部 `(kind, name)`，经 `ActionInputs::set_query_registry` 进入 action key，因此新增或改名 kind 必然使旧 action record 失效。同时 `ActionInputs` 增加 `set_runtime_raw`，记录本次 action 消费的 raw 契约指纹。query 23 与 27 的 callable 身份是 `MonoKey`；使用 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
 
-`BuildGenericGir` 为每个冻结 HIR owner 构造一份 generic body，依赖 `LowerHir` schema 5 的模块指纹。当前 schema 为 2，body 携带 `large_copies`；`GirWorldV1` schema 2 在 fragment 之外保存 placement，指纹域为 `gugu-gir-world-v2`。`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹（含 placement）进入 `ActionInputs` 与 `ImagePlan`；全程序分析仍消费放置前的 GIR 指纹。`LowerHir` 只构造、校验并冻结；单态化闭合、late、分析与 placement 在冻结之后按 `gir → mono → late → analysis → placement → summary` 顺序执行。
+`BuildGenericGir` 为每个冻结 HIR owner 构造一份 generic body，依赖 `LowerHir` schema 6 的模块指纹。当前 schema 为 5，body 携带 `large_copies`；`GirWorldV1` schema 3 在 fragment 之外保存 placement，指纹域为 `gugu-gir-world-v3`。`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹（含 placement）进入 `ActionInputs` 与 `ImagePlan`；全程序分析仍消费放置前的 GIR 指纹。`LowerHir` 只构造、校验并冻结；单态化闭合、late、分析与 placement 在冻结之后按 `gir → mono → late → analysis → placement → summary` 顺序执行。
 
 ## query 状态机
 

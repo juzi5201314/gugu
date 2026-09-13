@@ -3,7 +3,7 @@ use super::pass::{GIR_PASS_ORDER, GirPass, GirPassStats};
 use super::*;
 use crate::{CompileRequest, Compiler, SourceMap, SourceSnapshot, TargetName};
 
-fn compile_gir(source: &str) -> (crate::frontend::hir::Validated, GirWorldV1) {
+pub(super) fn compile_gir(source: &str) -> (crate::frontend::hir::Validated, GirWorldV1) {
     compile_sources(&[("main.gg", source)])
 }
 
@@ -259,20 +259,6 @@ fn has_rvalue(body: &GirBody, pred: impl Fn(&Rvalue) -> bool) -> bool {
     )
 }
 
-fn action_count(body: &GirBody, release: bool) -> usize {
-    body.statements
-        .iter()
-        .filter(|statement| match &statement.kind {
-            StatementKind::ResourceAction { action, .. } => {
-                (*action == ResourceActionKind::ReleaseLease) == release
-                    && (*action == ResourceActionKind::ReleaseLease
-                        || *action == ResourceActionKind::AcquireLease)
-            }
-            _ => false,
-        })
-        .count()
-}
-
 #[test]
 fn bit_copy_emits_value_action_and_reuse_after_call() {
     let source = "fn take(n: int) { _ = n }\nfn main() { let x = 1\n take(x)\n _ = x + 1 }";
@@ -326,61 +312,128 @@ fn string_copy_seals_and_chan_shares_identity() {
     assert!(dump.contains("ValueAction Copy"), "{dump}");
 }
 
-#[test]
-fn resource_overwrite_releases_then_acquires() {
-    let source = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n b = ResourceCell { id: 2 }\n _ = b\n}";
-    let (hir, gir) = compile_gir(source);
-    let body = entry_body(&hir, &gir);
-    verify(hir.module(), body).unwrap();
-    assert!(action_count(body, true) >= 1);
-    assert!(action_count(body, false) >= 2);
+#[derive(Debug, Eq, PartialEq)]
+enum ResourceEvent {
+    Write,
+    Release,
+}
+
+fn named_local(hir: &hir::Validated, body: &GirBody, name: &str) -> LocalId {
+    let owner = hir
+        .module()
+        .owners
+        .iter()
+        .find(|owner| owner.definition == body.owner)
+        .unwrap();
+    let index = body
+        .locals
+        .iter()
+        .position(|local| {
+            local
+                .hir_local
+                .is_some_and(|id| owner.locals[id.index()].name == name)
+        })
+        .unwrap_or_else(|| panic!("缺少绑定 {name}"));
+    LocalId(u32::try_from(index).unwrap())
+}
+
+fn resource_path(body: &GirBody, place: Place, local: LocalId, path: &[u32]) -> bool {
+    place.local == local && body.projections[place.range()].len() == path.len()
+        && body.projections[place.range()].iter().zip(path).all(|(projection, expected)| {
+            matches!(projection, Projection::Field { index, .. } | Projection::TupleField { index, .. } if index == expected)
+        })
+}
+
+fn resource_events(body: &GirBody, local: LocalId, path: &[u32]) -> Vec<ResourceEvent> {
+    let range = &body.blocks[body.entry.index()].statements;
+    body.statements[usize::try_from(range.start).unwrap()..usize::try_from(range.end).unwrap()]
+        .iter()
+        .filter_map(|statement| match statement.kind {
+            StatementKind::Assign(place, _) if resource_path(body, place, local, path) => {
+                Some(ResourceEvent::Write)
+            }
+            StatementKind::ResourceAction {
+                action: ResourceActionKind::ReleaseLease,
+                place,
+                ..
+            } if resource_path(body, place, local, path) => Some(ResourceEvent::Release),
+            _ => None,
+        })
+        .collect()
 }
 
 #[test]
-fn resource_projection_overwrite_releases_old_field() {
-    let source = "struct ResourceCell { id: uint }\nstruct Container { cell: ResourceCell }\nfn main() {\n let src = Container { cell: ResourceCell { id: 1 } }\n let dst: Container = Container { cell: ResourceCell { id: 2 } }\n dst = src\n _ = dst\n}";
-    let (hir, gir) = compile_gir(source);
+fn resource_fields_first_copy_never_releases_uninitialized() {
+    let (hir, gir) = compile_gir(include_str!("fixtures/resource_fields.gg"));
     let body = entry_body(&hir, &gir);
-    verify(hir.module(), body).unwrap();
-    let module = hir.module();
-    let type_named = |name: &str| {
-        module
-            .types
-            .iter()
-            .enumerate()
-            .find_map(|(index, ty)| match ty {
-                crate::frontend::hir::Type::Named { definition, .. }
-                    if module.definitions[definition.index()].name == name =>
-                {
-                    Some(crate::frontend::hir::TypeId(index as u32))
-                }
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("缺少类型 {name}"))
-    };
-    let resource_ty = type_named("ResourceCell");
-    let container_ty = type_named("Container");
-    let release_types: Vec<_> = body
-        .statements
-        .iter()
-        .filter_map(|statement| match statement.kind {
-            StatementKind::ResourceAction {
-                action: ResourceActionKind::ReleaseLease,
-                descriptor,
-                ..
-            } => Some(descriptor),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        release_types.contains(&resource_ty),
-        "字段覆盖必须释放 ResourceCell lease: {release_types:?}"
+    for name in ["source", "destination"] {
+        let local = named_local(&hir, body, name);
+        for path in [&[1, 1][..], &[1, 2], &[2]] {
+            let events = resource_events(body, local, path);
+            assert_eq!(
+                events.first(),
+                Some(&ResourceEvent::Write),
+                "{name}{path:?}: {events:?}"
+            );
+        }
+    }
+    for name in ["pair", "pair_copy"] {
+        let local = named_local(&hir, body, name);
+        for field in [1, 2] {
+            let events = resource_events(body, local, &[field]);
+            assert_eq!(
+                events.first(),
+                Some(&ResourceEvent::Write),
+                "{name}.{field}: {events:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn resource_projection_overwrite_releases_only_live_fields() {
+    use ResourceEvent::{Release, Write};
+    let (hir, gir) = compile_gir(include_str!("fixtures/resource_fields.gg"));
+    let body = entry_body(&hir, &gir);
+    let destination = named_local(&hir, body, "destination");
+    assert_eq!(
+        resource_events(body, destination, &[1, 1]),
+        [Write, Release, Write]
     );
+    assert_eq!(
+        resource_events(body, destination, &[2]),
+        [Write, Release, Write]
+    );
+    assert_eq!(
+        resource_events(body, destination, &[1, 2]),
+        [Write, Release, Write, Release, Write, Release, Write]
+    );
+    let pair = named_local(&hir, body, "pair_copy");
+    for field in [1, 2] {
+        assert_eq!(
+            resource_events(body, pair, &[field]),
+            [Write, Release, Write]
+        );
+    }
+    let clone_body = named_body(&hir, &gir, "clone_outer");
+    let argument = named_local(&hir, clone_body, "source");
+    for path in [&[1, 1][..], &[1, 2], &[2]] {
+        assert!(
+            clone_body
+                .statements
+                .iter()
+                .any(|statement| matches!(statement.kind,
+            StatementKind::ResourceAction { action: ResourceActionKind::ReleaseLease, place, .. }
+                if resource_path(clone_body, place, argument, path)))
+        );
+    }
     assert!(
-        release_types
+        !clone_body
+            .statements
             .iter()
-            .all(|descriptor| *descriptor != container_ty),
-        "聚合 descriptor 不得替代字段级 release: {release_types:?}"
+            .any(|statement| matches!(statement.kind,
+        StatementKind::ResourceAction { action: ResourceActionKind::ReleaseLease, place, .. }
+            if clone_body.locals[place.local.index()].kind == LocalKind::Return))
     );
 }
 

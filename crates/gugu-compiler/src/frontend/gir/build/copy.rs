@@ -2,6 +2,14 @@
 use super::*;
 use crate::frontend::gir::passing::{self, PassingClass, PassingTable};
 
+/// LocalId 稠密对应 locals；只有部分初始化的聚合才保存投影前缀。
+/// 前缀引用稳定的投影池范围，身份比较使用范围内的实际投影。
+pub(super) enum PlaceInit {
+    Unwritten,
+    Whole,
+    Partial(Vec<Place>),
+}
+
 impl Builder<'_> {
     pub(super) fn copy_value(&mut self, dest: Place, src: Place, ty: TypeId) {
         self.copy_value_inner(dest, src, ty, true);
@@ -46,25 +54,21 @@ impl Builder<'_> {
             }
             if size == 0 {
                 self.assign(dest, Rvalue::Use(Operand::Copy(src)));
-                self.mark_written(dest);
                 return;
             }
         }
         self.value_action(ValueActionKind::Copy, src, ty);
         self.assign(dest, Rvalue::ValueCopy(src));
-        self.mark_written(dest);
     }
 
     fn copy_identity(&mut self, dest: Place, src: Place, ty: TypeId) {
         self.value_action(ValueActionKind::Copy, src, ty);
         self.assign(dest, Rvalue::Use(Operand::Copy(src)));
-        self.mark_written(dest);
     }
 
     fn copy_cow(&mut self, dest: Place, src: Place, ty: TypeId) {
         self.value_action(ValueActionKind::Copy, src, ty);
         self.assign(dest, Rvalue::CowSnapshot(src));
-        self.mark_written(dest);
     }
 
     fn copy_resource(&mut self, dest: Place, src: Place, ty: TypeId, release_dest: bool) {
@@ -73,7 +77,6 @@ impl Builder<'_> {
             self.release_if_live(dest, ty);
         }
         self.assign(dest, Rvalue::Use(Operand::Copy(src)));
-        self.mark_written(dest);
     }
 
     fn copy_unknown(&mut self, dest: Place, src: Place, ty: TypeId, release_dest: bool) {
@@ -83,7 +86,6 @@ impl Builder<'_> {
         }
         self.value_action(ValueActionKind::Copy, src, ty);
         self.assign(dest, Rvalue::CowSnapshot(src));
-        self.mark_written(dest);
     }
 
     fn copy_mixed(
@@ -106,7 +108,6 @@ impl Builder<'_> {
         } else {
             self.assign(dest, Rvalue::Use(Operand::Copy(src)));
         }
-        self.mark_written(dest);
     }
 
     fn copy_fields(&mut self, dest: Place, src: Place, ty: TypeId, release_dest: bool) -> bool {
@@ -136,6 +137,9 @@ impl Builder<'_> {
                 let release_field = release_dest && self.passing().class(field_ty).has_resource();
                 self.copy_value_inner(dest, src, field_ty, release_field);
             }
+            if !self.terminated() {
+                self.mark_written(dest);
+            }
             return true;
         }
         if let Some(fields) = passing::tuple_fields(self.module, ty) {
@@ -158,19 +162,16 @@ impl Builder<'_> {
                 let release_field = release_dest && self.passing().class(field_ty).has_resource();
                 self.copy_value_inner(dest, src, field_ty, release_field);
             }
+            if !self.terminated() {
+                self.mark_written(dest);
+            }
             return true;
         }
         false
     }
 
     fn release_if_live(&mut self, dest: Place, ty: TypeId) {
-        if self
-            .written
-            .get(dest.local.index())
-            .copied()
-            .unwrap_or(false)
-            && self.locals[dest.local.index()].kind != LocalKind::Return
-        {
+        if self.is_written(dest) && self.locals[dest.local.index()].kind != LocalKind::Return {
             self.resource_action(ResourceActionKind::ReleaseLease, dest, ty);
         }
     }
@@ -182,9 +183,6 @@ impl Builder<'_> {
             return;
         }
         if self.locals[local.index()].kind == LocalKind::Return {
-            return;
-        }
-        if !self.written.get(local.index()).copied().unwrap_or(false) {
             return;
         }
         self.release_resources(Place::local(local), ty);
@@ -232,7 +230,9 @@ impl Builder<'_> {
             }
             return;
         }
-        self.resource_action(ResourceActionKind::ReleaseLease, place, ty);
+        if self.is_written(place) {
+            self.resource_action(ResourceActionKind::ReleaseLease, place, ty);
+        }
     }
 
     fn value_action(&mut self, action: ValueActionKind, place: Place, descriptor: TypeId) {
@@ -252,8 +252,41 @@ impl Builder<'_> {
     }
 
     pub(super) fn mark_written(&mut self, dest: Place) {
-        if let Some(slot) = self.written.get_mut(dest.local.index()) {
-            *slot = true;
+        debug_assert_eq!(self.written.len(), self.locals.len());
+        debug_assert!(dest.local.index() < self.locals.len());
+        debug_assert!(dest.range().end <= self.projections.len());
+        let path = &self.projections[dest.range()];
+        let state = &mut self.written[dest.local.index()];
+        if path.is_empty() {
+            *state = PlaceInit::Whole;
+            return;
+        }
+        match state {
+            PlaceInit::Whole => {}
+            PlaceInit::Unwritten => *state = PlaceInit::Partial(vec![dest]),
+            PlaceInit::Partial(places) => {
+                if places
+                    .iter()
+                    .any(|place| path.starts_with(&self.projections[place.range()]))
+                {
+                    return;
+                }
+                places.retain(|place| !self.projections[place.range()].starts_with(path));
+                places.push(dest);
+            }
+        }
+    }
+
+    fn is_written(&self, place: Place) -> bool {
+        debug_assert_eq!(self.written.len(), self.locals.len());
+        debug_assert!(place.local.index() < self.locals.len());
+        debug_assert!(place.range().end <= self.projections.len());
+        match &self.written[place.local.index()] {
+            PlaceInit::Unwritten => false,
+            PlaceInit::Whole => true,
+            PlaceInit::Partial(places) => places.iter().any(|written| {
+                self.projections[place.range()].starts_with(&self.projections[written.range()])
+            }),
         }
     }
 
@@ -299,5 +332,77 @@ fn element_ty(module: &hir::Module, ty: TypeId) -> Option<TypeId> {
     match module.types.get(ty.index())? {
         hir::Type::Array(elem, _) | hir::Type::Slice(elem) => Some(*elem),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(builder: &mut Builder<'_>, place: Place, index: usize) -> Place {
+        let ty = builder.place_ty(place);
+        let field_ty = passing::struct_fields(builder.module, ty).unwrap()[index].ty;
+        builder.project(
+            place,
+            Projection::Field {
+                index: u32::try_from(index).unwrap(),
+                field_ty,
+                access: Access::Normal,
+            },
+        )
+    }
+
+    #[test]
+    fn resource_scope_release_tracks_partial_places() {
+        let (hir, _) = crate::frontend::gir::tests::compile_gir(include_str!(
+            "../fixtures/resource_fields.gg"
+        ));
+        let module = hir.module();
+        let owner = module
+            .owners
+            .iter()
+            .find(|owner| module.definitions[owner.definition.index()].name == "clone_outer")
+            .unwrap();
+        let mut builder = Builder::new(module, owner).unwrap();
+        let local = |name: &str| {
+            owner
+                .locals
+                .iter()
+                .position(|local| local.name == name)
+                .unwrap()
+        };
+        let output = builder.hir_to_gir[local("output")];
+        let source = builder.hir_to_gir[local("source")];
+        let destination_inner = field(&mut builder, Place::local(output), 1);
+        let destination = field(&mut builder, destination_inner, 1);
+        let source_inner = field(&mut builder, Place::local(source), 1);
+        let source = field(&mut builder, source_inner, 1);
+        let ty = builder.place_ty(source);
+        builder.copy_value(destination, source, ty);
+        let repeated_inner = field(&mut builder, Place::local(output), 1);
+        let repeated = field(&mut builder, repeated_inner, 1);
+        assert_ne!(destination.projections, repeated.projections);
+        builder.copy_value(repeated, source, ty);
+        builder.release_local(output);
+        let released: Vec<_> = builder.blocks[builder.current.index()]
+            .statements
+            .iter()
+            .filter_map(|statement| match statement.kind {
+                StatementKind::ResourceAction {
+                    action: ResourceActionKind::ReleaseLease,
+                    place,
+                    ..
+                } => Some(place),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(released.len(), 2, "一次覆盖释放旧值，一次退出释放新值");
+        for place in released {
+            assert_eq!(place.local, output);
+            assert_eq!(
+                builder.projections[place.range()],
+                builder.projections[destination.range()]
+            );
+        }
     }
 }

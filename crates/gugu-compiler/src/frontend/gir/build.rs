@@ -18,6 +18,7 @@ const ADDRESS_TAKEN: u8 = 1;
 const CAPTURED: u8 = 2;
 const CROSS_COROUTINE: u8 = 4;
 use crate::Diagnostic;
+use copy::PlaceInit;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
@@ -89,7 +90,7 @@ struct Builder<'a> {
     loops: Vec<LoopFrame>,
     tries: Vec<TryFrame>,
     live: Vec<bool>,
-    written: Vec<bool>,
+    written: Vec<PlaceInit>,
     large_copies: Vec<LargeCopySite>,
     passing: PassingTable,
     return_block: BlockId,
@@ -318,7 +319,11 @@ impl<'a> Builder<'a> {
             pinned_storage,
         });
         self.live.push(false);
-        self.written.push(matches!(kind, LocalKind::Argument));
+        self.written.push(if kind == LocalKind::Argument {
+            PlaceInit::Whole
+        } else {
+            PlaceInit::Unwritten
+        });
         id
     }
 
@@ -480,6 +485,9 @@ impl<'a> Builder<'a> {
     }
 
     fn assign(&mut self, place: Place, rvalue: Rvalue) {
+        if self.terminated() {
+            return;
+        }
         if matches!(
             rvalue,
             Rvalue::AllocObject { .. } | Rvalue::AllocArray { .. }

@@ -1,0 +1,31 @@
+struct ResourceCell { id: uint }
+struct Inner { bits: uint, first: ResourceCell, second: ResourceCell }
+struct Outer { bits: uint, inner: Inner, last: ResourceCell }
+
+fn clone_outer(source: Outer) Outer {
+    let output = source
+    output.inner.first = ResourceCell { id: 4 }
+    output
+}
+
+fn main() {
+    let source = Outer {
+        bits: 0,
+        inner: Inner {
+            bits: 0,
+            first: ResourceCell { id: 1 },
+            second: ResourceCell { id: 2 },
+        },
+        last: ResourceCell { id: 3 },
+    }
+    let destination = source
+    destination = source
+    destination.inner.second = ResourceCell { id: 4 }
+    destination.inner.second = ResourceCell { id: 5 }
+    let pair = (1, ResourceCell { id: 6 }, ResourceCell { id: 7 })
+    let pair_copy = pair
+    pair_copy = pair
+    let returned = clone_outer(destination)
+    _ = returned
+    _ = pair_copy
+}
