@@ -605,3 +605,35 @@ GC metadata verifier 还必须检查 `BarrierReserve.max_card_marks` 与 concret
 - [Go runtime GC program 与 metadata](https://go.dev/src/runtime/mgcdata.go)
 - [Go runtime hybrid write barrier](https://go.dev/src/runtime/mbarrier.go)
 - [Rust 编译器类型布局与 ABI](https://rustc-dev-guide.rust-lang.org/backend/abi.html)
+
+## 阶段 39 接入证据
+
+`RuntimeRawModel`（query 30）升到 schema 10，在同一 `RuntimeRawContractV1` 中并入
+`GcMetadataRuntimeContract`：schema 1、section 主版本 1、section 魔数 `GUGUGC01`、
+arena 2 MiB / block 32 KiB / line 128 byte，与阶段 30 的 slab/extent 参数同源。
+`GcMetadataDemand` 由冻结类型表（`TypeUniverse.records` 与 `vtables`）推导，
+类型数/vtable 数/trace 与 value program 字节数/根范围计数进入契约 fingerprint，
+并并入 action key 与 query 键，使闭世界内容变化时整体契约身份同步变化。
+`ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `gc-metadata-type-count`、
+`gc-metadata-trace-bytes`、`gc-metadata-value-bytes`、`gc-metadata-vtable-count`、
+`gc-metadata-root-count`、`gc-metadata-arena-bytes`、`gc-metadata-block-bytes`、
+`gc-metadata-line-bytes`、`gc-metadata-contract-fingerprint` 与
+`gc-metadata-demand`；dump 输出三行 `gc-metadata schema=...`、
+`gc-metadata-types ...` 与 `gc-metadata-fingerprint ...`，冷/热编译一致。
+
+`gc_metadata_tests` 覆盖：最小 `GcMetadataWorldV1` 自洽、`boot_verify` 拒绝
+缺 trace/value `End` 与 dangling child key、`GcMetadataDemand` 指纹稳定且随
+字段变化、`GcMetadataRuntimeContract` 拒绝 arena 漂移、`RawModelError` 文本
+展示，以及契约在 `RuntimeRawContractV1::build` 内的端到端集成。
+`tests::image_plan_reports_gc_metadata_contract` 验证镜像计划含完整
+`gc-metadata-*` 字段、dump 行存在、类型表扩张时 GC metadata 指纹变化。
+当前阶段 39 的 trace/value program 对每条 entry 只发单字节 `End`，编码与
+`boot_verify` 均按规范运行；REPEAT_FIELD/ARENA_SLOTS 与 `String`/COW/`ResourceCell`
+资源字段的扩展由阶段 40–47 在 `placement` 与 `LocalHeap` 接入后补齐。
+
+本阶段修复同时在提交 `0813ad6` 中独立完成：
+[`mono/keys.rs`](../internals/monomorphization-cache.md) 统一 `Ty::Callable` 类型
+稳定键，`concrete/layout.rs` 删除 `Callable` 特例，`mono/universe.rs` 改用
+`MonoContext::type_key`，`INSTANCE_SCHEMA` 与 `MONO_SCHEMA` 递增到 5，使旧缓存
+失效；新增 `function_item_type_key_matches_frozen_universe` 回归保证
+`type_id[函数项]()` 不再报 `E0054`。
