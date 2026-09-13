@@ -6,7 +6,7 @@ use crate::frontend::gir::placement::PlacementKind;
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, ops::Range};
 
-pub(crate) const REVISION: u32 = 2;
+pub(crate) const REVISION: u32 = 3;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -78,8 +78,21 @@ impl Type {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub(crate) enum Provenance {
+    /// `HeapDirect`：指向已知对象 payload 起点的强引用。
     GcHeap,
+    /// `HeapInterior`：指向对象字段、元素或切片起点。
     GcInterior,
+    /// `SharedHandle`：指向 SharedHeap stable handle slot 的受管引用。
+    ///
+    /// 与 `GcHeap` 严格区分：handle 只能经解析与 access guard 访问，forwarding 只切换
+    /// slot；误判为直接指针会绕过 guard 与代际校验。
+    SharedHandle,
+    /// `CompressedRef`：指向已登记 heap cage 内 offset 的压缩受管引用。
+    ///
+    /// 与 `GcHeap` 严格区分：必须先经 cage id、offset 范围与 generation 的 checked
+    /// 解码才能标记目标。
+    CompressedRef,
+    /// `StackInterior`：指向当前协程栈范围内的局部或字段。
     Stack,
     Raw,
     Code,
@@ -89,7 +102,24 @@ pub(crate) enum Provenance {
 
 impl Provenance {
     pub(crate) fn managed(self) -> bool {
-        matches!(self, Self::GcHeap | Self::GcInterior)
+        matches!(
+            self,
+            Self::GcHeap | Self::GcInterior | Self::SharedHandle | Self::CompressedRef
+        )
+    }
+
+    /// 返回栈图逻辑根种类判别值：0=Direct、1=Interior、2=Handle、3=Compressed、4=StackInterior。
+    ///
+    /// 判别值随契约冻结，供后续 GC 与压缩引用阶段直接复用；新增种类必须在末尾追加。
+    pub(crate) fn root_kind(self) -> Option<u32> {
+        match self {
+            Self::GcHeap => Some(0),
+            Self::GcInterior => Some(1),
+            Self::SharedHandle => Some(2),
+            Self::CompressedRef => Some(3),
+            Self::Stack => Some(4),
+            Self::Raw | Self::Code | Self::Metadata | Self::Foreign => None,
+        }
     }
 }
 

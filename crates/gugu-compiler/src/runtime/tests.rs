@@ -33,6 +33,7 @@ use super::slab::{
     Epoch, MemoryDomainId, OwnerToken, RawInvariant, RuntimeSeed, SlabDescriptorId, SlabGeneration,
     SlotState,
 };
+use super::stackmap_schema::StackMapDemand;
 use super::sync_schema::SyncDemand;
 use super::wait_schema::WaitDemand;
 use super::world::{RawWorld, ResourceShape};
@@ -658,6 +659,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
         },
         WaitDemand::default(),
         SyncDemand::default(),
+        StackMapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -703,6 +705,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             SchedulerDemand::default(),
             WaitDemand::default(),
             SyncDemand::default(),
+            StackMapDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
@@ -734,6 +737,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         scheduler,
         WaitDemand::default(),
         SyncDemand::default(),
+        StackMapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -746,6 +750,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         scheduler,
         WaitDemand::default(),
         SyncDemand::default(),
+        StackMapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -764,6 +769,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         scheduler,
         WaitDemand::default(),
         SyncDemand::default(),
+        StackMapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -777,6 +783,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         scheduler,
         WaitDemand::default(),
         SyncDemand::default(),
+        StackMapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
@@ -1407,6 +1414,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
         SchedulerDemand::default(),
         WaitDemand::default(),
         SyncDemand::default(),
+        StackMapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1449,6 +1457,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         SchedulerDemand::default(),
         WaitDemand::default(),
         SyncDemand::default(),
+        StackMapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1464,10 +1473,99 @@ fn resource_contract_fingerprint_tracks_demand() {
         SchedulerDemand::default(),
         WaitDemand::default(),
         SyncDemand::default(),
+        StackMapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
     assert_ne!(base.fingerprint(), revised.fingerprint());
+}
+
+#[test]
+fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
+    let demand = StackMapDemand {
+        functions: 2,
+        safepoints: 3,
+        maps: 2,
+        call_return: 1,
+        poll_resume: 1,
+        suspend_resume: 0,
+        foreign_bridge: 0,
+        morestack_entry: 1,
+        alloc_sites: 2,
+        barrier_sites: 1,
+        root_words: 5,
+        functions_with_landing: 1,
+    };
+    let contract = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        RawPlaneDemand::default(),
+        RawResourceDemand::default(),
+        Rt0Demand::default(),
+        SchedulerDemand::default(),
+        WaitDemand::default(),
+        SyncDemand::default(),
+        demand,
+        PlatformProfile::from(TargetName::X86_64Linux),
+    )
+    .expect("栈图契约可构建");
+    contract.verify().expect("栈图契约必须自洽");
+    assert_eq!(contract.schema(), super::model::RAW_MODEL_SCHEMA);
+    assert_eq!(contract.stackmap().demand(), demand);
+    assert!(contract.dump().contains("stackmap schema=1"));
+    // kind 分类与安全点总数不一致必须拒绝。
+    let mut bad = demand;
+    bad.poll_resume += 1;
+    assert!(
+        RuntimeRawContractV1::build(
+            TargetName::X86_64Linux,
+            RawPlanePolicyV1::default(),
+            RawPlaneDemand::default(),
+            RawResourceDemand::default(),
+            Rt0Demand::default(),
+            SchedulerDemand::default(),
+            WaitDemand::default(),
+            SyncDemand::default(),
+            bad,
+            PlatformProfile::from(TargetName::X86_64Linux),
+        )
+        .is_err(),
+        "kind 分类必须求和为安全点总数"
+    );
+    // 去重 map 超过安全点数必须拒绝。
+    let mut overflow = demand;
+    overflow.maps = overflow.safepoints + 1;
+    assert!(
+        RuntimeRawContractV1::build(
+            TargetName::X86_64Linux,
+            RawPlanePolicyV1::default(),
+            RawPlaneDemand::default(),
+            RawResourceDemand::default(),
+            Rt0Demand::default(),
+            SchedulerDemand::default(),
+            WaitDemand::default(),
+            SyncDemand::default(),
+            overflow,
+            PlatformProfile::from(TargetName::X86_64Linux),
+        )
+        .is_err(),
+        "去重 map 不得超过安全点数"
+    );
+    // 栈图需求变化必须改变整体指纹。
+    let plain = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        RawPlaneDemand::default(),
+        RawResourceDemand::default(),
+        Rt0Demand::default(),
+        SchedulerDemand::default(),
+        WaitDemand::default(),
+        SyncDemand::default(),
+        StackMapDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
+    )
+    .expect("空栈图契约可构建");
+    assert_ne!(contract.fingerprint(), plain.fingerprint());
 }
 
 #[test]

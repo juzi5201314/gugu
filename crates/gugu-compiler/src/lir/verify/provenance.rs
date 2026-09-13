@@ -18,6 +18,17 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
             Op::PtrOffset => {
                 let input = body.values[args[0].index()].kind.provenance;
                 let output = results[0].kind.provenance;
+                // handle 与压缩引用不参与偏移推导：二者必须先解析或解码，任何直接
+                // 偏移都是绕过 guard 的越权。
+                if matches!(
+                    input,
+                    Some(Provenance::SharedHandle | Provenance::CompressedRef)
+                ) || matches!(
+                    output,
+                    Some(Provenance::SharedHandle | Provenance::CompressedRef)
+                ) {
+                    return Err(invalid("handle 或压缩引用不能直接做指针偏移"));
+                }
                 if input != output
                     && !matches!(
                         (input, output),
@@ -40,6 +51,17 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
             Op::Convert(Conversion::PointerCast) => {
                 let source = body.values[args[0].index()].kind.provenance;
                 let target = results[0].kind.provenance;
+                // handle 与压缩引用不参与 cast 相容：降级为直接指针会绕过解析，
+                // 升级为 handle 会伪造受管身份。
+                if matches!(
+                    source,
+                    Some(Provenance::SharedHandle | Provenance::CompressedRef)
+                ) || matches!(
+                    target,
+                    Some(Provenance::SharedHandle | Provenance::CompressedRef)
+                ) {
+                    return Err(invalid("handle 或压缩引用不能参与指针转换"));
+                }
                 if source != target && target != Some(Provenance::Raw) {
                     return Err(invalid("pointer cast 不能提升追踪权限"));
                 }
@@ -51,8 +73,13 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
                 if body.values[args[0].index()].kind.provenance != Some(Provenance::Raw) {
                     return Err(invalid("只有裸指针可以显式构造引用"));
                 }
-                if results[0].kind.provenance.is_none() {
-                    return Err(invalid("引用构造缺少目标 provenance"));
+                if results[0].kind.provenance.is_none()
+                    || matches!(
+                        results[0].kind.provenance,
+                        Some(Provenance::SharedHandle | Provenance::CompressedRef)
+                    )
+                {
+                    return Err(invalid("引用构造缺少合法目标 provenance"));
                 }
                 if results[0].origin != Origin::Derived(args[0]) {
                     return Err(invalid("引用构造丢失原始来源"));

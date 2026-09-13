@@ -1,0 +1,82 @@
+fn calls() int {
+    return 42
+}
+
+fn loop_sum(count: int) int {
+    let index = 0
+    let total = 0
+    while index < count {
+        total = total + index
+        index = index + 1
+    }
+    return total
+}
+
+fn suspend_sum(count: int) int {
+    let index = 0
+    let total = 0
+    while index < count {
+        total = total + index
+        index = index + 1
+        yield
+    }
+    return total
+}
+
+fn bridge_probe(value: int) int {
+    return value + 1
+}
+
+fn select_sum(first: chan[int], second: chan[int]) int {
+    let total = 0
+    select {
+        first.send(total) => { total = total + 1 }
+        let got = first.recv() => {
+            total = total + got.match {
+                Ok(value) => value
+                Err(_) => 0
+            }
+        }
+        let other = second.recv() => {
+            total = total + other.match {
+                Ok(value) => value
+                Err(_) => 0
+            }
+        }
+        _ => { total = total + 1 }
+    }
+    return total
+}
+
+fn never_wait(first: chan[int], task: Join[int]) int {
+    let total = 0
+    select {
+        let got = first.recv() => {
+            total = total + got.match {
+                Ok(value) => value
+                Err(_) => 0
+            }
+        }
+        let done = task.wait() => {
+            total = total + done.match {
+                Ok(value) => value
+                Err(_) => 0
+            }
+        }
+    }
+    return total
+}
+
+fn main() {
+    let first: chan[int] = chan[int](1)
+    let second: chan[int] = chan[int](1)
+    let task = async { 1 }
+    _ = calls()
+    _ = loop_sum(64)
+    _ = suspend_sum(8)
+    _ = bridge_probe(7)
+    _ = select_sum(first, second)
+    _ = never_wait(first, task)
+    _ = first
+    _ = second
+}

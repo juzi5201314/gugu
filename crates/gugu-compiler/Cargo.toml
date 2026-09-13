@@ -37,5 +37,9 @@ harness = false
 name = "sync_lock"
 harness = false
 
+[[bench]]
+name = "stackmap_walk"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"

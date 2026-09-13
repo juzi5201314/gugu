@@ -61,6 +61,8 @@ vtable、cage id 和 code pointer 是 `NonRoot`。`#[repr(packed)]` 不能含 ma
 
 普通/dirty `ForeignBridge`、park/suspend、runtime lock acquire的 contention edge和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record。counted inner chunk edge与 uncounted countdown-only edge没有 map，只有实际读取 poll word后的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。`NoSafepointRegion` 内没有 map或 resume PC，begin前/end后的实际 poll仍使用 `PollResume`。
 
+LIR 侧的映射补充：无 default 的 `select` 经挂起路径提交，走 `SuspendResume`；有 default 的非挂起 `select` 走 `CallReturn`。纯分配操作（`GcAlloc` 等）与屏障操作不产生独立记录，只进入函数级分配与屏障站点计数，供后端在填充机器布局时核对。`DecodeCompressedRef` 为纯解码，不建立记录；`ResolveSharedHandle` 与 `ForwardSharedHandle` 调用走 `CallReturn`。
+
 `MorestackEntry` 的固定 scratch发布发生在任何 GC/preempt处理之前，且不写 candidate以下地址；因此 slow path即使同时由容量不足和 poison触发，也能先停机或调度出去。恢复后必须以 GC/stack copy已经修正的 scratch和最新 `stack_low`重试原 `StackCheck`，不能从旧 candidate直接建立 frame。
 
 signal/APC handler不在任意PC直接扫描用户 stack。它只设置当前 processor的 poll word、投毒 current coroutine的 `stack_check`并唤醒 worker；真正暂停和扫描发生在 compiler登记的 `PollResume`、`MorestackEntry` 或 mandatory statepoint。dirty native stack不属于 Gugu stack map。

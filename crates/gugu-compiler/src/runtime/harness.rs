@@ -80,6 +80,7 @@ impl OwnerReturnHarness {
             SchedulerDemand::default(),
             super::WaitDemand::default(),
             super::SyncDemand::default(),
+            super::StackMapDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -274,6 +275,7 @@ impl ResourceReleaseHarness {
             SchedulerDemand::default(),
             super::WaitDemand::default(),
             super::SyncDemand::default(),
+            super::StackMapDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");

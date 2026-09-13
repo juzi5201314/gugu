@@ -28,6 +28,14 @@ mod select;
 mod stack;
 #[allow(dead_code, reason = "栈arena与cache的确定性参照实现")]
 mod stack_arena;
+#[allow(
+    dead_code,
+    reason = "栈图编解码与 walker 由确定性测试与后端联合验证消费"
+)]
+mod stackmap;
+#[allow(dead_code, reason = "栈图 section 编解码由确定性测试消费")]
+mod stackmap_codec;
+pub mod stackmap_schema;
 mod startup_kinds;
 mod startup_schema;
 #[allow(dead_code, reason = "同步协议的确定性参照实现")]
@@ -45,6 +53,7 @@ pub use coroutine_schema::{
     StackPolicy,
 };
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
+pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};
 pub use wait_schema::{WaitDemand, WaitRuntimeContract};
 
@@ -93,6 +102,8 @@ mod process_tests;
 mod report_tests;
 #[cfg(test)]
 mod scheduler_tests;
+#[cfg(test)]
+mod stackmap_tests;
 #[cfg(test)]
 mod startup_tests;
 #[cfg(test)]

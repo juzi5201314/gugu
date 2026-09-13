@@ -156,6 +156,8 @@ fn interior(body: &Body, value: ValueId, what: &str) -> Result<(), Diagnostic> {
             kind.provenance,
             Some(
                 Provenance::GcHeap
+                    | Provenance::SharedHandle
+                    | Provenance::CompressedRef
                     | Provenance::Stack
                     | Provenance::Raw
                     | Provenance::Code

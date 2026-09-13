@@ -17,6 +17,7 @@ const EFFECTS: &str = include_str!("fixtures/effects.gg");
 const POLL: &str = include_str!("fixtures/poll.gg");
 const OPTIMIZE: &str = include_str!("fixtures/optimize.gg");
 const PUBLISH: &str = include_str!("fixtures/publish.gg");
+const STACKMAP: &str = include_str!("fixtures/stackmap.gg");
 /// 资源样例：ResourceCell 的构造、按值转移与结束时释放。
 const RESOURCE: &str = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n _ = b\n}";
 
@@ -615,6 +616,126 @@ fn action_key_is_sensitive_to_optimization_policy() {
     let mut changed = base;
     changed.vector_policy_revision = base.vector_policy_revision + 1;
     assert_ne!(base.canonical_bytes(), changed.canonical_bytes());
+}
+
+#[test]
+fn stackmap_world_covers_call_poll_suspend_and_select() {
+    let compilation = compile(STACKMAP);
+    let world = super::stackmap::derive(
+        &compilation.lir.as_ref().expect("已生成 LIR").world.bodies,
+        compilation.hir.as_ref().unwrap().module(),
+    )
+    .expect("栈图推导必须通过 verifier");
+    // 函数按实例键排序；安全点按（函数序、站点序、种类、身份）确定性排列。
+    assert!(
+        world
+            .functions
+            .windows(2)
+            .all(|pair| pair[0].instance < pair[1].instance),
+        "函数必须按实例键排序"
+    );
+    let kinds: Vec<u8> = world.safepoints.iter().map(|point| point.kind).collect();
+    assert!(
+        kinds.contains(&super::stackmap::KIND_CALL_RETURN),
+        "普通调用必须有 CallReturn 记录：{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&super::stackmap::KIND_POLL_RESUME),
+        "循环 poll 必须有 PollResume 记录：{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&super::stackmap::KIND_SUSPEND_RESUME),
+        "挂起与无 default select 必须有 SuspendResume 记录：{kinds:?}"
+    );
+    assert!(
+        kinds.contains(&super::stackmap::KIND_MORESTACK_ENTRY),
+        "入口检查必须有 MorestackEntry 记录：{kinds:?}"
+    );
+    // kind 分类计数与安全点总数一致；去重 map 不超过安全点数。
+    let demand = compilation
+        .lir
+        .as_ref()
+        .expect("已生成 LIR")
+        .stackmap_demand(compilation.hir.as_ref().unwrap().module());
+    assert_eq!(
+        demand.call_return
+            + demand.poll_resume
+            + demand.suspend_resume
+            + demand.foreign_bridge
+            + demand.morestack_entry,
+        demand.safepoints,
+        "kind 分类必须求和为安全点总数"
+    );
+    assert!(
+        demand.maps <= demand.safepoints && demand.maps > 0,
+        "去重 map 必须非空且不超过安全点数"
+    );
+    assert!(
+        demand.functions_with_landing <= demand.functions,
+        "落地函数不得超过函数总数"
+    );
+    // `MorestackEntry` 只含 ABI 参数根。
+    for point in world
+        .safepoints
+        .iter()
+        .filter(|point| point.kind == super::stackmap::KIND_MORESTACK_ENTRY)
+    {
+        for root in point
+            .roots
+            .direct
+            .iter()
+            .chain(&point.roots.interior)
+            .chain(&point.roots.handle)
+            .chain(&point.roots.compressed)
+            .chain(&point.roots.stack)
+        {
+            assert!(
+                matches!(root, super::stackmap::LogicalRoot::Argument { .. }),
+                "MorestackEntry 只允许 ABI 参数根"
+            );
+        }
+    }
+    // 冷热编译的栈图需求一致。
+    let compiler = Compiler::new();
+    let request = || CompileRequest::single_file("main.gg", STACKMAP, TargetName::X86_64Linux);
+    let cold = compiler.compile(request());
+    let warm = compiler.compile(request());
+    assert!(cold.is_success() && warm.is_success());
+    assert_eq!(
+        cold.image_plan().expect("image-plan").stackmap_demand(),
+        warm.image_plan().expect("image-plan").stackmap_demand()
+    );
+}
+
+#[test]
+fn stackmap_rejects_duplicate_root_across_kinds() {
+    let compilation = compile(STACKMAP);
+    let mut world = super::stackmap::derive(
+        &compilation.lir.as_ref().expect("已生成 LIR").world.bodies,
+        compilation.hir.as_ref().unwrap().module(),
+    )
+    .expect("栈图推导必须通过 verifier");
+    let point = world
+        .safepoints
+        .iter_mut()
+        .find(|point| !point.roots.direct.is_empty() || !point.roots.stack.is_empty())
+        .expect("fixture 必须含非空根集合");
+    let duplicate = point
+        .roots
+        .direct
+        .first()
+        .or(point.roots.stack.first())
+        .expect("根集合非空")
+        .clone();
+    // 同一身份进入两类位图：verifier 必须拒绝。
+    if point.roots.direct.first().is_some() {
+        point.roots.stack.push(duplicate);
+    } else {
+        point.roots.direct.push(duplicate);
+    }
+    world.fingerprint = world.fingerprint_of();
+    let error = super::stackmap::verify_world(&world).expect_err("重复根必须被拒绝");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
 
 #[test]

@@ -229,6 +229,15 @@ fn merge(left: ValueType, right: ValueType) -> Result<ValueType, Diagnostic> {
             if (a.managed() || a == Provenance::Stack)
                 && (b.managed() || b == Provenance::Stack) =>
         {
+            // `SharedHandle` 与 `CompressedRef` 绝不参与降级合流：二者需要 access guard
+            // 或 checked 解码，降级为 `GcInterior` 会绕过各自的不变量。
+            if matches!(
+                (a, b),
+                (Provenance::SharedHandle | Provenance::CompressedRef, _)
+                    | (_, Provenance::SharedHandle | Provenance::CompressedRef)
+            ) {
+                return Err(invalid("SSA 合流不能把 handle 或压缩引用降级为普通堆引用"));
+            }
             Ok(ValueType::pointer(Provenance::GcInterior))
         }
         (

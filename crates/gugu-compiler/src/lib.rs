@@ -37,8 +37,8 @@ pub use runtime::{
     CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport,
     IntrinsicBoundary, OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness,
     ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
-    SchedulerDemand, SchedulerRuntimeContract, StackPolicy, SyncDemand, SyncLockHarness,
-    SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
+    SchedulerDemand, SchedulerRuntimeContract, StackMapDemand, StackPolicy, SyncDemand,
+    SyncLockHarness, SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -429,6 +429,7 @@ impl Compiler {
                 scheduler_demand: lir.scheduler_demand(),
                 wait_demand: lir.wait_demand(),
                 sync_demand: lir.sync_demand(),
+                stackmap_demand: lir.stackmap_demand(frontend.hir.module()),
                 profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
@@ -978,6 +979,12 @@ pub struct ImagePlan {
     sync_demand: crate::runtime::SyncDemand,
     sync_primitive_count: u32,
     sync_runtime: crate::runtime::SyncRuntimeContract,
+    stackmap_function_count: u32,
+    stackmap_safepoint_count: u32,
+    stackmap_map_count: u32,
+    stackmap_root_words: u32,
+    stackmap_contract_fingerprint: [u8; 32],
+    stackmap_demand: crate::runtime::StackMapDemand,
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1066,6 +1073,12 @@ impl ImagePlan {
             sync_demand: plan.sync_demand,
             sync_primitive_count: plan.sync_primitive_count,
             sync_runtime: plan.sync_runtime,
+            stackmap_function_count: plan.stackmap_function_count,
+            stackmap_safepoint_count: plan.stackmap_safepoint_count,
+            stackmap_map_count: plan.stackmap_map_count,
+            stackmap_root_words: plan.stackmap_root_words,
+            stackmap_contract_fingerprint: plan.stackmap_contract_fingerprint,
+            stackmap_demand: plan.stackmap_demand,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1415,6 +1428,30 @@ impl ImagePlan {
     pub fn sync_runtime(&self) -> &crate::runtime::SyncRuntimeContract {
         &self.sync_runtime
     }
+    /// 返回栈图逻辑函数记录数。
+    pub fn stackmap_function_count(&self) -> u32 {
+        self.stackmap_function_count
+    }
+    /// 返回栈图逻辑安全点记录数。
+    pub fn stackmap_safepoint_count(&self) -> u32 {
+        self.stackmap_safepoint_count
+    }
+    /// 返回栈图去重 map 记录数。
+    pub fn stackmap_map_count(&self) -> u32 {
+        self.stackmap_map_count
+    }
+    /// 返回栈图五类根字数合计。
+    pub fn stackmap_root_words(&self) -> u32 {
+        self.stackmap_root_words
+    }
+    /// 返回栈图契约指纹。
+    pub fn stackmap_contract_fingerprint(&self) -> [u8; 32] {
+        self.stackmap_contract_fingerprint
+    }
+    /// 返回栈图需求视图。
+    pub fn stackmap_demand(&self) -> crate::runtime::StackMapDemand {
+        self.stackmap_demand
+    }
     /// 返回调度需求视图。
     pub fn scheduler_demand(&self) -> crate::runtime::SchedulerDemand {
         self.scheduler_runtime.demand
@@ -1731,6 +1768,23 @@ mod tests {
         assert_eq!(plan.wait_scratch_class_count(), 11);
         assert_eq!(plan.wait_node_class_count(), 2);
         assert_ne!(plan.wait_contract_fingerprint(), [0_u8; 32]);
+        assert!(plan.stackmap_function_count() > 0);
+        assert!(plan.stackmap_safepoint_count() > 0);
+        assert!(plan.stackmap_map_count() > 0);
+        assert!(plan.stackmap_map_count() <= plan.stackmap_safepoint_count());
+        assert_ne!(plan.stackmap_contract_fingerprint(), [0_u8; 32]);
+        let stackmap = plan.stackmap_demand();
+        assert_eq!(
+            stackmap.call_return
+                + stackmap.poll_resume
+                + stackmap.suspend_resume
+                + stackmap.foreign_bridge
+                + stackmap.morestack_entry,
+            stackmap.safepoints,
+            "栈图 kind 分类必须求和为安全点总数"
+        );
+        assert!(dump.contains("stackmap schema=1"));
+        assert!(dump.contains("stackmap-root-kinds heap-direct,heap-interior,shared-handle,compressed-ref,stack-interior"));
         assert_eq!(
             cold.runtime_raw_fingerprint(),
             warm.runtime_raw_fingerprint()

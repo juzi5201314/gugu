@@ -17,6 +17,7 @@ use super::resource::{self, RESOURCE_KINDS};
 use super::scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 use super::size_class::{DropScanPolicy, RuntimeSizeClassTable};
 use super::slab::MemoryDomainId;
+use super::stackmap_schema::{StackMapDemand, StackMapRuntimeContract};
 use super::startup_schema::{Rt0Demand, Rt0SchemaV1};
 use super::sync_schema::{SyncDemand, SyncRuntimeContract};
 use super::wait_schema::{WaitDemand, WaitRuntimeContract};
@@ -29,8 +30,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 8 并入 std.sync 原子、锁、OnceLock 与取消契约。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 8;
+/// 契约对象的schema版本；schema 9 并入栈图根种类、safepoint 与 section 常量契约。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 9;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -334,6 +335,7 @@ pub(crate) struct RuntimeRawContractV1 {
     scheduler: SchedulerRuntimeContract,
     wait: WaitRuntimeContract,
     sync: SyncRuntimeContract,
+    stackmap: StackMapRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -358,6 +360,7 @@ impl RuntimeRawContractV1 {
         scheduler_demand: SchedulerDemand,
         wait_demand: WaitDemand,
         sync_demand: SyncDemand,
+        stackmap_demand: StackMapDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -367,6 +370,7 @@ impl RuntimeRawContractV1 {
         let platform = PlatformRangeSchemaV1::build(profile, platform_range_demand(&demand))?;
         let rt0 = Rt0SchemaV1::build(rt0_demand)?;
         let sync = SyncRuntimeContract::build(sync_demand, profile)?;
+        let stackmap = StackMapRuntimeContract::build(stackmap_demand)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -386,6 +390,7 @@ impl RuntimeRawContractV1 {
             scheduler: SchedulerRuntimeContract::build(scheduler_demand)?,
             wait: WaitRuntimeContract::build(wait_demand, profile)?,
             sync,
+            stackmap,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -492,6 +497,11 @@ impl RuntimeRawContractV1 {
     /// 返回同步契约段。
     pub(crate) fn sync(&self) -> &SyncRuntimeContract {
         &self.sync
+    }
+
+    /// 返回栈图契约段。
+    pub(crate) fn stackmap(&self) -> &StackMapRuntimeContract {
+        &self.stackmap
     }
 
     /// 返回账本分类名。
@@ -628,6 +638,7 @@ impl RuntimeRawContractV1 {
         self.scheduler.verify()?;
         self.wait.verify()?;
         self.sync.verify()?;
+        self.stackmap.verify()?;
         if self.scheduler.demand.spawn_sites != self.demand.coroutine_sites
             || self.scheduler.demand.suspend_points != self.demand.suspend_points
         {
@@ -678,6 +689,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.scheduler.canonical_bytes());
         bytes.extend_from_slice(&self.wait.canonical_bytes());
         bytes.extend_from_slice(&self.sync.canonical_bytes());
+        bytes.extend_from_slice(&self.stackmap.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -902,6 +914,7 @@ impl RuntimeRawContractV1 {
             self.sync.demand().total_ops(),
             hex(&self.sync.fingerprint())
         ));
+        output.push_str(&self.stackmap.dump());
         output
     }
 }
@@ -945,6 +958,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) wait_demand: WaitDemand,
     /// 同步需求视图：atomic / mutex / rwlock / condvar / once / cancel 操作计数。
     pub(crate) sync_demand: SyncDemand,
+    /// 栈图需求视图：逻辑函数、安全点、kind 分类与根字数。
+    pub(crate) stackmap_demand: StackMapDemand,
     /// 生成契约所依据的 LIR 输入指纹。
     pub(crate) lir_fingerprint: [u8; 32],
     /// placement world 指纹。
@@ -967,6 +982,7 @@ pub(crate) fn run(
         inputs.scheduler_demand,
         inputs.wait_demand,
         inputs.sync_demand,
+        inputs.stackmap_demand,
     ))
     .expect("runtime需求与策略可序列化");
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
@@ -1002,6 +1018,7 @@ pub(crate) fn run(
                 inputs.scheduler_demand,
                 inputs.wait_demand,
                 inputs.sync_demand,
+                inputs.stackmap_demand,
                 inputs.profile,
             )
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;

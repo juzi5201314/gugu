@@ -1,9 +1,10 @@
 //! LIR 是 backend 的唯一低层输入；构造与缓存恢复共享结构 verifier。
-mod body;
+pub(crate) mod body;
 mod build;
 mod dump;
 mod effects;
 mod pass;
+pub(crate) mod stackmap;
 mod uses;
 mod verify;
 
@@ -195,6 +196,36 @@ impl Validated {
                     demand.atomic_ops += 1;
                 }
             }
+        }
+        demand
+    }
+    /// 栈图需求：从优化后 LIR 推导逻辑函数、安全点、kind 分类与根字数。
+    ///
+    /// 推导失败返回零需求，由 `RuntimeRawContractV1` 的构建路径按 `E0058`
+    /// 拒绝；调用方必须保证传入优化后且已通过 verifier 的 world。
+    pub(crate) fn stackmap_demand(&self, module: &hir::Module) -> crate::runtime::StackMapDemand {
+        let mut demand = crate::runtime::StackMapDemand::default();
+        let Ok(world) = stackmap::derive(&self.world.bodies, module) else {
+            return demand;
+        };
+        demand.functions = world.functions.len() as u32;
+        demand.safepoints = world.safepoints.len() as u32;
+        demand.maps = world.map_count;
+        for safepoint in &world.safepoints {
+            match safepoint.kind {
+                stackmap::KIND_CALL_RETURN => demand.call_return += 1,
+                stackmap::KIND_POLL_RESUME => demand.poll_resume += 1,
+                stackmap::KIND_SUSPEND_RESUME => demand.suspend_resume += 1,
+                stackmap::KIND_FOREIGN_BRIDGE => demand.foreign_bridge += 1,
+                stackmap::KIND_MORESTACK_ENTRY => demand.morestack_entry += 1,
+                _ => {}
+            }
+            demand.root_words += safepoint.roots.words();
+        }
+        for function in &world.functions {
+            demand.alloc_sites += function.alloc_sites;
+            demand.barrier_sites += function.barrier_sites;
+            demand.functions_with_landing += u32::from(function.has_landing);
         }
         demand
     }

@@ -40,9 +40,13 @@ impl Builder<'_> {
             }
         }
         match self.machine_type(pointer).provenance {
-            Some(Provenance::GcHeap | Provenance::GcInterior | Provenance::Stack) => {
-                AliasClass::Heap
-            }
+            Some(
+                Provenance::GcHeap
+                | Provenance::GcInterior
+                | Provenance::SharedHandle
+                | Provenance::CompressedRef
+                | Provenance::Stack,
+            ) => AliasClass::Heap,
             _ => AliasClass::Foreign,
         }
     }

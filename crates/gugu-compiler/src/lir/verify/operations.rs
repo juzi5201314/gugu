@@ -124,7 +124,13 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && args.iter().all(|kind| {
                         !matches!(
                             kind.provenance,
-                            Some(Provenance::GcHeap | Provenance::GcInterior | Provenance::Stack)
+                            Some(
+                                Provenance::GcHeap
+                                    | Provenance::GcInterior
+                                    | Provenance::SharedHandle
+                                    | Provenance::CompressedRef
+                                    | Provenance::Stack
+                            )
                         )
                     })
             }
@@ -139,11 +145,16 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && args[0].provenance.is_some_and(Provenance::managed)
                     && results[0].provenance == Some(Provenance::GcHeap)
             }
-            Op::ResolveSharedHandle | Op::DecodeCompressedRef => {
+            Op::ResolveSharedHandle => {
+                a == [Type::Ptr]
+                    && r == [Type::Ptr]
+                    && results[0].provenance == Some(Provenance::SharedHandle)
+            }
+            Op::DecodeCompressedRef => {
                 a.len() == 1
                     && matches!(a[0], Type::Ptr | Type::I32 | Type::I64)
                     && r == [Type::Ptr]
-                    && results[0].provenance.is_some_and(Provenance::managed)
+                    && results[0].provenance == Some(Provenance::CompressedRef)
             }
             Op::SharedAccessBegin { .. } => a == [Type::Ptr] && r.is_empty(),
             Op::SharedAccessEnd { .. } | Op::ScopedViewEnd { .. } => a.is_empty() && r.is_empty(),
@@ -551,7 +562,13 @@ fn platform_call_valid(
         matches!(kind.ty, Type::I64 | Type::I32)
             && !matches!(
                 kind.provenance,
-                Some(Provenance::GcHeap | Provenance::GcInterior | Provenance::Stack)
+                Some(
+                    Provenance::GcHeap
+                        | Provenance::GcInterior
+                        | Provenance::SharedHandle
+                        | Provenance::CompressedRef
+                        | Provenance::Stack
+                )
             )
     });
     if !arguments_ok {
@@ -610,7 +627,13 @@ fn resource_call_valid(args: &[ValueType], results: &[ValueType]) -> bool {
         && args[0].ty == Type::Ptr
         && matches!(
             args[0].provenance,
-            Some(Provenance::GcHeap | Provenance::GcInterior | Provenance::Stack)
+            Some(
+                Provenance::GcHeap
+                    | Provenance::GcInterior
+                    | Provenance::SharedHandle
+                    | Provenance::CompressedRef
+                    | Provenance::Stack
+            )
         )
         && args[1] == ValueType::pointer(Provenance::Metadata)
 }
@@ -644,7 +667,13 @@ fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
         && args.iter().chain(results).any(|kind| {
             matches!(
                 kind.provenance,
-                Some(Provenance::GcHeap | Provenance::GcInterior | Provenance::Stack)
+                Some(
+                    Provenance::GcHeap
+                        | Provenance::GcInterior
+                        | Provenance::SharedHandle
+                        | Provenance::CompressedRef
+                        | Provenance::Stack
+                )
             )
         })
     {
