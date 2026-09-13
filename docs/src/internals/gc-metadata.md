@@ -152,10 +152,11 @@ flags 位固定为：
 | 1 | `HAS_HEAP_INTERIOR` | trace 中存在 interior managed pointer |
 | 2 | `HAS_VALUE_ACTIONS` | 语义复制/销毁不是纯 bit copy/no-op |
 | 3 | `HAS_RESOURCE` | 包含 resource 租约或 owner |
-| 4 | `HAS_DEFERRED_RELEASE` | 对象死亡时需进入受限 resource release 队列 |
-| 5 | `UNSIZED_VIEW` | 类型只能作为引用/dyn/slice view 的 pointee metadata |
-| 6 | `VARIABLE_SIZE` | 动态 backing 类型的 allocation payload 大小运行时决定 |
-| 7 | `PIN_SENSITIVE` | 对象 pin/unpin 需要类型专用 glue；当前闭世界类型表保留此位 |
+| 4 | `VARIABLE_SIZE` | allocation payload 大小运行时决定 |
+| 5 | `ZERO_SIZED` | `size == 0` |
+| 6 | `UNSIZED_VIEW` | 类型只能作为引用/dyn/slice view 的 pointee metadata |
+| 7 | `HAS_DEFERRED_RELEASE` | 对象死亡时需进入受限 resource release 队列 |
+| 8 | `PIN_SENSITIVE` | 对象 pin/unpin 需要类型专用 glue |
 
 其余位必须为 0。name 是规范要求的 UTF-8 `TypeId.name()` 文本，指向 type section 的 name pool；同名不代表同一类型。
 
@@ -274,15 +275,32 @@ slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理�
 
 ## trace descriptor
 
-### 表示与定位
+### 两种表示
 
-type section 的每个 `TypeRecord` 用 `trace_offset/trace_len` 定位本类型的 trace program：offset 相对 trace pool，len 是该 program 的精确字节数。program 自身不带 kind 字节、也不带长度前缀——长度由 record 的 `trace_len` 给出，program 必须恰以 `END` 结束。类型是否含直接/内嵌 managed word 由 record 的 `HAS_HEAP_DIRECT`/`HAS_HEAP_INTERIOR` flag 表达，runtime 不必先解析 program 才能分类。
+trace descriptor 第一个字节是 kind：
 
-当前闭世界编译器对每条 entry 都发出 program。固定大小对象按 word 位图编码成等价的 DIRECT/INTERIOR 指令是更短的表示，属于后续优化；它不得改变本节的定位规则、END 终止要求和 flag 语义。
+- `0`：`None`，后面无字节；
+- `1`：`Bitmap`，用于固定大小、pointer word 数不超过 256 的对象；
+- `2`：`Program`，用于大数组、动态 backing 和含 enum 分支的对象。
+
+compiler 必须选择语义等价且编码更短的表示；相同长度时优先 `Bitmap`，保证输出确定。
+
+`Bitmap` 编码为：
+
+```text
+kind:             u8 = 1
+reserved:         [u8; 3] = 0
+word_count:       u32
+direct_bitmap:    ceil(word_count / 8) bytes
+interior_bitmap:  ceil(word_count / 8) bytes
+zero_padding_to_4_bytes
+```
+
+bit `i` 对应 payload 的 `[i * 8, i * 8 + 8)`。两个 bitmap 互斥；尾部无效 bit 为 0。所有 managed 字段必须自然对齐，因而不会跨 word。
 
 ### trace program
 
-每个 program 的地址基准是当前 payload/子对象起点；offset 和 stride 以 8 字节 word 计。所有无符号可变整数使用 canonical ULEB128：禁止多余的前导零组，解码器拒绝非 canonical 编码。
+`Program` 在 kind 后保存 `u32 program_len` 和一串指令。每个 program 的地址基准是当前 payload/子对象起点；offset 和 stride 以 8 字节 word 计。所有无符号可变整数使用 canonical ULEB128：禁止多余的前导零组。
 
 opcode 固定为：
 
@@ -292,13 +310,17 @@ opcode 固定为：
 | `0x01 DIRECT` | `offset, count` | 扫描连续 `count` 个 `HeapDirect` word |
 | `0x02 INTERIOR` | `offset, count` | 扫描连续 `count` 个 `HeapInterior` word |
 | `0x03 REPEAT` | `base, count, stride, body_len, body` | 对固定数量元素，以 `base + i*stride` 为子基准执行 body |
-| `0x04 SWITCH` | `tag_word, tag_width, default_len, case_count, body_lens, default_body, case_bodies` | 按判别值选择一个子 program |
-除 `tag_width` 外所有整数使用 canonical ULEB128；`tag_width` 只允许 1、2、4、8，按目标小端读取。`body_len` 与各 case 长度也使用 ULEB128，且必须完整覆盖对应嵌套 program。
-`SWITCH` 先编码 tag word 与 width、default body 长度、case 数量、default/case body 长度列表，再依次编码 default body 与 case bodies；case body 当前按变体序号选择。子 program 使用当前 payload 作为基准，因而字段偏移是绝对的；nested `REPEAT` 才改变子基准。
+| `0x04 REPEAT_FIELD` | `base, count_byte_offset, count_width, stride, body_len, body` | 从 payload 字段读取运行时元素数后重复 body |
+| `0x05 SWITCH` | `tag_byte_offset, tag_width, case_count, cases, default_len, default` | 按判别值选择一个子 program |
+| `0x06 ARENA_SLOTS` | 无 | 按固定 arena backing 记录逐槽应用运行时 `TypeId` descriptor |
+
+`body_len`、`default_len` 为小端 `u32`；其余整数除 `count_width`/`tag_width` 外使用 ULEB128。field/tag width 只允许 1、2、4、8，按目标小端读取。
+
+`SWITCH` 的每个 case 依次编码 `tag_value: u64`、`body_len: u32`、`body`，case 按无符号 tag 严格递增。子 program 使用当前 payload 作为基准，因而字段偏移是绝对的；nested `REPEAT` 才改变子基准。
 
 program 必须恰以 `END` 结束，END 后无非 padding 字节；嵌套深度不超过 32，单 program 小于 4 GiB。每次 direct/interior 范围和每个动态 repeat 的最终范围都必须在 object payload size 内。动态 count 与 stride 的乘加使用 checked arithmetic；越界进入 `RuntimeInvariant` fatal。
 
-编译器对结构体/元组按具体字段偏移发出 DIRECT/INTERIOR，`string` 与切片 view 发出 INTERIOR；固定数组发出 REPEAT；enum 与带判别值的聚合发出 SWITCH。普通递归类型只通过 managed pointer 间接，descriptor 不沿 pointer 递归扫描。动态 backing 的运行时元素数与 arena 逐槽 `TypeId` dispatch 需要额外的 opcode，由后续阶段在 `placement`/`LocalHeap` 接入后扩展，当前固定 opcode 表不含这两条。
+编译器对结构体/元组按具体字段偏移发出 DIRECT/INTERIOR；固定数组优先 REPEAT；动态 Vec/string backing 使用 REPEAT_FIELD；enum 使用 SWITCH。普通递归类型只通过 managed pointer 间接，descriptor 不沿 pointer 递归扫描。只有内建 arena backing 可以用 `ARENA_SLOTS` 对异构 inline value 做受限的 `TypeId` descriptor dispatch。
 
 `LocalArena`/`SyncArena` backing 的动态 payload 头固定为 `{ slot_count: u64, records_offset: u64, data_offset: u64, capacity: u64 }`。`records_offset` 指向 payload 内连续的 16 字节记录：
 
@@ -308,7 +330,7 @@ type_id:      u32
 flags:        u32
 ```
 
-flags bit 0 为 `INITIALIZED`，其余位为 0。记录按 allocation 顺序排列；`value_offset` 必须位于 data 区、满足目标类型对齐且完整值不越过 payload/capacity。scanner 对每个 initialized slot取得 `TypeRecord`，以 `payload + value_offset` 为 inline base解释其 trace descriptor；含 resource 的类型在 arena allocation 前已被拒绝。reset/destroy 必须先在同步边界清除相应 initialized bits，再让 backing 不可扫描/回收。逐槽 `TypeId` dispatch 所需的 backing 指令尚未进入固定 opcode 表，随阶段 40–47 的 `placement`/`LocalHeap` 一起接入。
+flags bit 0 为 `INITIALIZED`，其余位为 0。记录按 allocation 顺序排列；`value_offset` 必须位于 data 区、满足目标类型对齐且完整值不越过 payload/capacity。`ARENA_SLOTS` 只能是内建 backing program 的第一条有效指令并紧接 `END`。scanner 对每个 initialized slot取得 `TypeRecord`，以 `payload + value_offset` 为 inline base解释其 trace descriptor；含 resource 的类型在 arena allocation 前已被拒绝。reset/destroy 必须先在同步边界清除相应 initialized bits，再让 backing 不可扫描/回收。
 
 `MaybeUninit[T]` 的 payload 不发出 trace 指令。只有 `assume_init` 消耗后形成的 `T` 值才按 `T` descriptor 进入 root/heap；unsafe 代码把唯一强引用藏在未初始化 payload 中不建立 GC 可达性。
 
@@ -321,12 +343,13 @@ value program 用于编译器在 GIR 中展开语义复制、销毁、发布和 
 | opcode | 操作数 | 含义 |
 |--------|--------|------|
 | `0x00 END` | 无 | 结束 |
-| `0x10 AGGREGATE` | `base, body_len, body` | 按字段递归执行嵌套 value program |
-| `0x11 REPEAT_VALUE` | `base, count, stride, body_len, body` | 对固定数组重复字段动作 |
-| `0x12 SWITCH_VALUE` | `tag_word, tag_width, case_count, body_lens, case_bodies` | 按 enum 活跃变体执行动作 |
-| `0x13 COW_PUBLISH` | `base` | 发布 COW 字段 |
-| `0x14 ACQUIRE_RESOURCE` | `base` | 获得 ResourceCell 租约 |
-| `0x15 RELEASE_RESOURCE` | `base` | 释放 ResourceCell 租约 |
+| `0x10 COPY_FIELD` | byte offset、`TypeId` relocation | 调用字段 copy 语义 |
+| `0x11 DROP_FIELD` | byte offset、`TypeId` relocation | 逆序销毁字段 |
+| `0x12 PUBLISH_FIELD` | byte offset、`TypeId` relocation | 发布 COW/resource 图 |
+| `0x13 ACQUIRE_RESOURCE` | byte offset、glue relocation | 获得租约 |
+| `0x14 RELEASE_RESOURCE` | byte offset、glue relocation | 释放租约 |
+| `0x15 REPEAT_VALUE` | base、count、stride、body_len、body | 对固定数组重复字段动作 |
+| `0x16 SWITCH_VALUE` | tag 描述与 case body | 按 enum 活跃变体执行动作 |
 
 整数编码与 trace program 相同。drop 顺序由 compiler 生成的 instruction 顺序完全决定；结构体字段逆声明顺序、数组逆索引、enum 只处理活跃变体。copy/publish 使用声明顺序。
 
@@ -347,14 +370,14 @@ root_count:              u32
 vtable_count:            u32
 source_record_count:     u32
 reserved0:               u32 = 0
-alloc_record_count:        u32
-root_records_offset:       u64
-vtable_index_offset:       u64
-vtable_data_offset:        u64
-source_records_offset:     u64
-source_strings_offset:     u64
-source_strings_len:        u64
-section_len:               u64
+reserved1:               u32 = 0
+root_records_offset:     u64
+vtable_index_offset:     u64
+vtable_data_offset:      u64
+source_records_offset:   u64
+source_strings_offset:   u64
+source_strings_len:      u64
+section_len:             u64
 ```
 
 每个 `RootRecord` 固定 32 字节：
@@ -368,30 +391,42 @@ count:           u64
 stride:          u64
 ```
 
-kind 为 0 `Static`、1 `LocalStatic`、2 `ForeignBridge`、3 `CoroutineFrame`、4 `HandleSlot`，与编译器 `GcRootKindV1` 枚举一一对应。`location` 按 kind 解释：`Static`/`LocalStatic` 是 image RVA，`ForeignBridge` 是 ABI bridge frame 的 byte offset，`CoroutineFrame` 是 coroutine-local layout 的 byte offset，`HandleSlot` 是 handle table 的 slot 序号。count 至少为 1；单值 stride 为 0，数组 stride 必须不小于类型大小。flags 当前恒为 0，保留给后续 `READ_ONLY_AFTER_INIT`/`LAZY_SLOT` 语义。records 按 type range、word range 排序；同一类型可有多个实际 local root，但其 word range 不能重叠。
+kind 为 0 global、1 OS-thread-local template、2 coroutine-local template、3 runtime static root slot。kind 0/3 的 `location` 是 image RVA，kind 1 是 module TLS block byte offset，kind 2 是 coroutine-local layout byte offset。count 至少为 1；单值 stride 为 0，数组 stride 必须不小于类型大小。flags bit 0 为 `READ_ONLY_AFTER_INIT`，bit 1 为 `LAZY_SLOT`，其他位为 0；kind 1/2 必须设置 lazy，runtime 只在对应 thread/coroutine initialized bitmap 的 bit 已发布后扫描。records 按 kind、location、TypeId 排序且同一实例内存范围不重叠。
 
 非零/非纯常量 global 初始化必须设置 `LAZY_SLOT`：初始化器先在自己 GIR local中构造完整值，release写 global并最后设置 initialized bit；失败/panic时 bit保持 0并清理 local。GC只扫描 bit已设置的 global，因而不会读取半初始化 managed字段。纯静态常量可以在镜像加载时视为已初始化。
 
-当前编译器的 vtable data 使用固定 64 字节记录，由 `vtable_count + 1` 个 `u64` index 定界：
+vtable 是 variable record，由 `vtable_count + 1` 个 `u64` index 定界：
+
 
 ```text
-interface_key:      [u8; 32] StableTypeKey
-concrete_type_key:  [u8; 32] StableTypeKey
+concrete_type_id: u32
+method_count:     u32
+trait_key:        [u8; 32] StableDefKey
+size:             u64
+align:            u32
+flags:            u32
+copy_glue_rva:    u64
+drop_glue_rva:    u64
+method_rvas:      [u64; method_count]
 ```
 
-该记录保存动态分派双方的稳定身份；后续链接阶段可在同一 index range 内扩展 method/glue RVA。相同 `(concrete_type_key, interface_key)` 只能有一条。`dyn` data pointer 由 stack/object descriptor 追踪，vtable pointer 是 metadata pointer，不加入 GC root。
+method 按 trait 声明槽顺序排列。相同 `(concrete_type_id, trait_key)` 只能有一条。`dyn` data pointer 由 stack/object descriptor 追踪，vtable pointer 是 metadata pointer，不加入 GC root。
 arena allocation owner 同时维护该 arena 的 card mailbox；`CardMarkBatch` 消费只合并 card index/range 并设置 dirty byte，不重新扫描对象，也不改变 `MarkTicket` 的 mark work。card mailbox 为空不是 minor cycle 完成条件，未消费 batch 必须由 owner credit 和 pressure 账本继续保留。
 
-每个 `SourceRecord` 固定 48 字节：
+每个 `SourceRecord` 固定 32 字节：
 
 ```text
-type_key:       [u8; 32] StableTypeKey
+function_index: u32
+pc_start:       u32
+pc_end:         u32
 path_offset:    u32
 path_len:       u32
-byte_offset:    u64
+line:           u32
+column:         u32
+flags:          u32
 ```
 
-`type_key` 指向同一 type section 的稳定类型，path 是 package-relative 逻辑 UTF-8 路径；`path_offset/path_len` 相对 source string pool 并经 checked range 验证。records 按 type key、路径 bytes、byte offset 排序；alloc site 复用同样的记录布局并由 header 的 `alloc_record_count` 单独计数。
+function index与 stack-map function table相同，PC 为 function-relative 半开范围。path 是 package-relative逻辑 UTF-8路径，不含 workspace绝对路径；line/column 从 1开始。`source_strings_len` 不得超过 `u32::MAX`，每个 `path_offset/path_len` 都相对 source string pool并经 checked range验证。flags bit 0 `PANIC_SITE`、bit 1 `SYNTHETIC`，其余为 0。records 按 function index、pc_start、pc_end和路径 bytes排序，范围可以因内联 attribution嵌套；查找选择覆盖 PC 的最短范围，再按记录序打破相等。source string pool按 bytes去重排序，`.gugu.meta` 与运行时 panic/backtrace所需记录不得被 `--strip` 删除。
 
 ## scheduler non-moving slab 与 queue-page grace
 
@@ -576,25 +611,25 @@ GC metadata verifier 还必须检查 `BarrierReserve.max_card_marks` 与 concret
 `RuntimeRawModel`（query 30）升到 schema 10，在同一 `RuntimeRawContractV1` 中并入
 `GcMetadataRuntimeContract`：schema 1、section 主版本 1、section 魔数 `GUGUGC01`、
 arena 2 MiB / block 32 KiB / line 128 byte，与阶段 30 的 slab/extent 参数同源。
-前端在冻结 `TypeUniverse`、具体 GIR layout 与 HIR source table 后生成唯一
-`GcMetadataWorldV1`，并编码为 `.gugu.types`/`.gugutyp`（`GUGUTY01`）和
-`.gugu.meta`/`.ggmeta`（`GUGUMT01`）两个经过 verifier 的 section 字节沿 `RawModelInputs`、`RuntimeRawContractV1`、backend plan 进入 `ImagePlan`，不再只有 demand 计数。类型 entry 携带 checked 的 trace/value offset 与 length；DIRECT、INTERIOR、REPEAT、SWITCH 与 AGGREGATE、REPEAT_VALUE、SWITCH_VALUE、COW_PUBLISH、ACQUIRE/RELEASE_RESOURCE 均从冻结类型的布局与 passing class 派生，root/source/alloc/vtable/glue 记录按稳定键排序。
-
-`GcMetadataDemand` 由上述真实 world 推导；类型数/vtable 数/trace 与 value program
-字节数、section 字节数、根范围计数与 world fingerprint 进入契约 fingerprint，并并入
-action key 与 query 键，使闭世界内容变化时整体契约身份同步变化。
+`GcMetadataDemand` 由冻结类型表（`TypeUniverse.records` 与 `vtables`）推导，
+类型数/vtable 数/trace 与 value program 字节数/根范围计数进入契约 fingerprint，
+并并入 action key 与 query 键，使闭世界内容变化时整体契约身份同步变化。
 `ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `gc-metadata-type-count`、
 `gc-metadata-trace-bytes`、`gc-metadata-value-bytes`、`gc-metadata-vtable-count`、
 `gc-metadata-root-count`、`gc-metadata-arena-bytes`、`gc-metadata-block-bytes`、
-`gc-metadata-line-bytes`、两个 section 字节数及 section fingerprint、
-`gc-metadata-contract-fingerprint` 与 `gc-metadata-demand`；dump 输出 section 行，冷/热编译一致。
+`gc-metadata-line-bytes`、`gc-metadata-contract-fingerprint` 与
+`gc-metadata-demand`；dump 输出三行 `gc-metadata schema=...`、
+`gc-metadata-types ...` 与 `gc-metadata-fingerprint ...`，冷/热编译一致。
 
-`gc_metadata_tests` 覆盖：最小 `GcMetadataWorldV1` 自洽、`boot_verify` 拒绝缺
-trace/value `End` 与 dangling child key、长度/offset 不一致、section header/range 损坏、
-`GcMetadataDemand` 指纹稳定且随字段变化、`GcMetadataRuntimeContract` 拒绝 arena 漂移、
-`RawModelError` 文本展示，以及契约在 `RuntimeRawContractV1::build` 内的端到端集成。
-`tests::image_plan_reports_gc_metadata_contract` 验证镜像计划含真实 section 字节和 fingerprint、
-dump 行存在、类型表扩张时 GC metadata 指纹变化。
+`gc_metadata_tests` 覆盖：最小 `GcMetadataWorldV1` 自洽、`boot_verify` 拒绝
+缺 trace/value `End` 与 dangling child key、`GcMetadataDemand` 指纹稳定且随
+字段变化、`GcMetadataRuntimeContract` 拒绝 arena 漂移、`RawModelError` 文本
+展示，以及契约在 `RuntimeRawContractV1::build` 内的端到端集成。
+`tests::image_plan_reports_gc_metadata_contract` 验证镜像计划含完整
+`gc-metadata-*` 字段、dump 行存在、类型表扩张时 GC metadata 指纹变化。
+当前阶段 39 的 trace/value program 对每条 entry 只发单字节 `End`，编码与
+`boot_verify` 均按规范运行；REPEAT_FIELD/ARENA_SLOTS 与 `String`/COW/`ResourceCell`
+资源字段的扩展由阶段 40–47 在 `placement` 与 `LocalHeap` 接入后补齐。
 
 本阶段修复同时在提交 `0813ad6` 中独立完成：
 [`mono/keys.rs`](../internals/monomorphization-cache.md) 统一 `Ty::Callable` 类型
