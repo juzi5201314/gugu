@@ -264,7 +264,7 @@ fn collect(model: &Model<'_>) -> Result<EarlyConstTable, Vec<Diagnostic>> {
     if !errors.is_empty() {
         return Err(errors);
     }
-    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    entries.sort_by_key(|left| left.0);
     let mut interner = ConstInterner::default();
     let constants = entries
         .into_iter()

@@ -2,6 +2,7 @@
 use super::universe::invalid;
 use crate::Diagnostic;
 use crate::frontend::{
+    ast::BinOp,
     hir::{self, CallTarget, ExprId, ExprKind, StatementKind},
     mono::{MonoWorldV1, instantiate::CallSite, keys::StableTypeKey},
 };
@@ -87,10 +88,10 @@ impl<'a> Program<'a> {
             .into_iter()
             .map(|e| (instance, e))
             .collect();
-        if let Some(callee) = self.callee(instance, expr) {
-            if let Ok(owner) = self.owner(callee) {
-                edges.push((callee, owner.body));
-            }
+        if let Some(callee) = self.callee(instance, expr)
+            && let Ok(owner) = self.owner(callee)
+        {
+            edges.push((callee, owner.body));
         }
         if let ExprKind::Resolved(
             hir::Res::Def(def)
@@ -98,17 +99,14 @@ impl<'a> Program<'a> {
                 definition: def, ..
             },
         ) = owner.expressions[expr.index()].kind
-        {
-            if matches!(
+            && matches!(
                 self.module.definitions[def.index()].kind,
                 hir::DefinitionKind::Constant | hir::DefinitionKind::Static
-            ) {
-                if let Some(callee) = self.constant(def) {
-                    if let Ok(owner) = self.owner(callee) {
-                        edges.push((callee, owner.body));
-                    }
-                }
-            }
+            )
+            && let Some(callee) = self.constant(def)
+            && let Ok(owner) = self.owner(callee)
+        {
+            edges.push((callee, owner.body));
         }
         edges
     }
@@ -153,15 +151,10 @@ impl<'a> Program<'a> {
                             ..
                         } => true,
                         ExprKind::Binary {
-                            operation, left, ..
-                        } if matches!(
-                            operation,
-                            crate::frontend::ast::BinOp::Lt
-                                | crate::frontend::ast::BinOp::Le
-                                | crate::frontend::ast::BinOp::Gt
-                                | crate::frontend::ast::BinOp::Ge
-                        ) =>
-                        {
+                            operation: BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge,
+                            left,
+                            ..
+                        } => {
                             self.module.types[owner.expression_types[left.index()].index()]
                                 == hir::Type::TypeId
                         }

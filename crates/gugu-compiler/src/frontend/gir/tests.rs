@@ -144,7 +144,7 @@ fn match_for_select_and_suspend_lower() {
 #[test]
 fn verifier_rejects_mismatched_cleanup() {
     let (hir, mut gir) = compile_gir("fn helper() {}\nfn main() { defer helper() }");
-    let body = gir.bodies.iter_mut().next().unwrap();
+    let body = gir.bodies.first_mut().unwrap();
     if let Some(record) = body.exit_records.first_mut() {
         record.plan = u32::MAX;
     }
@@ -154,7 +154,7 @@ fn verifier_rejects_mismatched_cleanup() {
 #[test]
 fn verifier_rejects_send_without_cancelled() {
     let (hir, mut gir) = compile_gir("fn main() { _ = 0 }");
-    let body = gir.bodies.iter_mut().next().unwrap();
+    let body = gir.bodies.first_mut().unwrap();
     body.safepoints.push(body::Safepoint {
         kind: body::SafepointKind::Suspend,
         location: hir.module().owners[0].scopes[0].location.clone(),

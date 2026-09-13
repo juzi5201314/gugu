@@ -278,14 +278,11 @@ pub(crate) fn signal_exit_code(
             .linux_number()
             .map(|number| 128 + i64::from(number))
             .ok_or_else(|| format!("Linux 不提供信号 {}", reason.name())),
-        PlatformProfile::Windows => signal
-            .windows_status()
-            .map(|status| i64::from(status))
-            .ok_or_else(|| {
-                format!(
-                    "Windows 的 {} 由宿主决定，不在报告契约中登记",
-                    reason.name()
-                )
-            }),
+        PlatformProfile::Windows => signal.windows_status().map(i64::from).ok_or_else(|| {
+            format!(
+                "Windows 的 {} 由宿主决定，不在报告契约中登记",
+                reason.name()
+            )
+        }),
     }
 }

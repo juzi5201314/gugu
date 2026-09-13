@@ -30,6 +30,9 @@ pub(super) fn lower(module: &hir::Module, owner: &hir::Owner) -> Result<GirBody,
     Ok(body)
 }
 
+/// `materialize_blocks` 的三元产物：块、语句表与 RPO 块序。
+type MaterializedBlocks = (Vec<GirBlock>, Vec<Statement>, Vec<BlockId>);
+
 struct PendingBlock {
     statements: Vec<Statement>,
     terminator: Option<Terminator>,
@@ -680,9 +683,7 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    fn materialize_blocks(
-        &self,
-    ) -> Result<(Vec<GirBlock>, Vec<Statement>, Vec<BlockId>), Diagnostic> {
+    fn materialize_blocks(&self) -> Result<MaterializedBlocks, Diagnostic> {
         let mut incoming = vec![Vec::new(); self.blocks.len()];
         for (index, block) in self.blocks.iter().enumerate() {
             let Some(terminator) = &block.terminator else {

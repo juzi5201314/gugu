@@ -354,11 +354,11 @@ impl RwLock {
             return Err(RawModelError::new("非持读锁协程尝试释放读锁"));
         }
         let mut woken = Vec::new();
-        if self.readers.is_empty() {
-            if let Some(next_writer) = self.write_waiters.pop_front() {
-                self.writer = Some(next_writer);
-                woken.push(next_writer);
-            }
+        if self.readers.is_empty()
+            && let Some(next_writer) = self.write_waiters.pop_front()
+        {
+            self.writer = Some(next_writer);
+            woken.push(next_writer);
         }
         Ok(woken)
     }

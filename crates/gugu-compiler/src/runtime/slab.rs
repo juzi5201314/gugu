@@ -651,8 +651,8 @@ impl SlabDescriptor {
     pub(crate) fn contains_offset(&self, offset: u64, alignment: u64) -> bool {
         offset < self.span_extent
             && alignment.is_power_of_two()
-            && offset % alignment == 0
-            && offset % u64::from(self.slot_stride) == 0
+            && offset.is_multiple_of(alignment)
+            && offset.is_multiple_of(u64::from(self.slot_stride))
     }
 
     /// 判断 slot 编号是否落在本 span 内。
@@ -717,7 +717,7 @@ impl SlabTable {
         integrity_secret: u32,
         slab_epoch: Epoch,
     ) -> Result<SlabDescriptorId, RawInvariant> {
-        if span_extent == 0 || span_extent % u64::from(class.slot_stride) != 0 {
+        if span_extent == 0 || !span_extent.is_multiple_of(u64::from(class.slot_stride)) {
             return Err(RawInvariant::new("span extent 不是 class stride 的整数倍"));
         }
         if span_extent > u64::from(u32::MAX) {

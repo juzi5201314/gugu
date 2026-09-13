@@ -60,14 +60,14 @@ impl Layouts<'_, '_> {
                         ));
                     }
                 }
-                if let Some(id) = function.return_ty {
-                    if !self.abi_type(result, target, Position::Return)? {
-                        return Err(Diagnostic::error(
-                            DiagnosticCode::InvalidType,
-                            "该返回类型不能表示为目标 C ABI 值",
-                            Some(parsed.arena.tys[id.0 as usize].span.clone()),
-                        ));
-                    }
+                if let Some(id) = function.return_ty
+                    && !self.abi_type(result, target, Position::Return)?
+                {
+                    return Err(Diagnostic::error(
+                        DiagnosticCode::InvalidType,
+                        "该返回类型不能表示为目标 C ABI 值",
+                        Some(parsed.arena.tys[id.0 as usize].span.clone()),
+                    ));
                 }
             }
         }

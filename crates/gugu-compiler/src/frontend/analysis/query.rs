@@ -190,6 +190,10 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "SCC 摘要需要 world、成员、依赖与策略一同参与指纹"
+)]
 fn scc_summary(
     module: &Module,
     gir: &GirWorldV1,

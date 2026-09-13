@@ -9,6 +9,9 @@ use super::{
     dependency_model::*,
 };
 
+/// 单个依赖候选：可选 metadata 与可选路径来源下标。
+type CandidateChoice = (Option<PackageMetadata>, Option<usize>);
+
 #[derive(Clone, Debug)]
 struct ResolverContext {
     workspace_root: PathBuf,
@@ -219,13 +222,13 @@ fn unique_candidates(
     let mut unique = BTreeMap::<PackageId, PackageMetadata>::new();
     for candidate in candidates {
         validate_candidate(&candidate, source_kind)?;
-        if let Some(previous) = unique.insert(candidate.id.clone(), candidate.clone()) {
-            if previous != candidate {
-                return Err(dependency_error(
-                    candidate.id.name(),
-                    "同一 package ID 的 source metadata 不一致",
-                ));
-            }
+        if let Some(previous) = unique.insert(candidate.id.clone(), candidate.clone())
+            && previous != candidate
+        {
+            return Err(dependency_error(
+                candidate.id.name(),
+                "同一 package ID 的 source metadata 不一致",
+            ));
         }
     }
     Ok(unique.into_values().collect())
@@ -376,7 +379,7 @@ fn candidate_choices(
     state: &ResolveState,
     pending: &PendingEdge,
     context_domain: DependencyDomain,
-) -> Result<Vec<(Option<PackageMetadata>, Option<usize>)>, ProjectError> {
+) -> Result<Vec<CandidateChoice>, ProjectError> {
     let mut candidates = source_candidates(
         context,
         &state.nodes[pending.parent].metadata.id,

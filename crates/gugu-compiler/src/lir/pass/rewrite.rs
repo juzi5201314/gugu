@@ -1172,10 +1172,8 @@ impl Editor {
             };
             let position = usize::try_from(lifetime.position).unwrap_or(usize::MAX);
             let mut mapped = None;
-            for index in position..origins.len() {
-                if let Some(origin) = origins[index]
-                    && let Some(new_inst) = inst_map[origin.index()]
-                {
+            for origin in origins.iter().skip(position).flatten() {
+                if let Some(new_inst) = inst_map[origin.index()] {
                     mapped = Some(new_inst);
                     break;
                 }
@@ -1191,10 +1189,12 @@ impl Editor {
                 None => {
                     // 该 block 可能已被合并：锚定到最后一个仍存活的原指令之后。
                     let mut previous = None;
-                    for index in (0..position.min(origins.len())).rev() {
-                        if let Some(origin) = origins[index]
-                            && let Some(new_inst) = inst_map[origin.index()]
-                        {
+                    for origin in origins[..position.min(origins.len())]
+                        .iter()
+                        .rev()
+                        .flatten()
+                    {
+                        if let Some(new_inst) = inst_map[origin.index()] {
                             previous = Some(new_inst);
                             break;
                         }

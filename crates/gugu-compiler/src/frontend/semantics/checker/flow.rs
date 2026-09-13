@@ -239,11 +239,11 @@ impl Checker<'_, '_> {
                         let segs = self.arena().paths[path.0 as usize]
                             .segments
                             .as_slice(&self.arena().segments);
-                        if segs.len() == 1 {
-                            if let Some(&slot) = self.state.names.get(&segs[0].name) {
-                                self.initialize(slot, true);
-                                self.assign_callables(slot, self.value_callables(value));
-                            }
+                        if segs.len() == 1
+                            && let Some(&slot) = self.state.names.get(&segs[0].name)
+                        {
+                            self.initialize(slot, true);
+                            self.assign_callables(slot, self.value_callables(value));
                         }
                     }
                 }

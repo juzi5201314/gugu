@@ -167,6 +167,10 @@ fn inject_builtin_sources(source_map: &mut SourceMap) -> Result<BTreeSet<String>
     Ok(paths)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "前端入口需要源码映射、根路径、包身份与 query 引擎"
+)]
 fn check_sources(
     source_map: &mut SourceMap,
     entry: &str,
@@ -350,6 +354,10 @@ fn module_path_conflict(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "汇总所有前端阶段的 world 与诊断，参数即各阶段产物"
+)]
 fn frontend_output(
     entry: &str,
     source_map: &SourceMap,

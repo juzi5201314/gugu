@@ -434,7 +434,7 @@ fn remap_terminator(
                 .map(|block| remap_block(block_map, block))
                 .transpose()?,
             call_kind: *call_kind,
-            site: site.clone(),
+            site: *site,
         },
         Terminator::Return => Terminator::Return,
         Terminator::Panic { payload, unwind } => Terminator::Panic {

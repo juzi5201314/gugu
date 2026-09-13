@@ -20,6 +20,10 @@ pub(crate) struct CompareFact {
     pub right: Operand,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "抽象解释逐语句需要 module/owner/body/state/passing/callees 同时在场"
+)]
 pub(crate) fn execute_statement(
     module: &Module,
     owner: &Owner,
@@ -110,6 +114,10 @@ pub(crate) fn successor_states(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "赋值转移与 execute_statement 共享同一组上下文参数"
+)]
 fn assign(
     module: &Module,
     owner: &Owner,
@@ -542,6 +550,10 @@ fn operand_key(body: &GirBody, operand: &Operand) -> Option<ValueKey> {
     mapped_expr(body, local).map(ValueKey::Expr)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "调用边展开需要调用点、目标 place 与正常/展开后继块"
+)]
 fn call_edges(
     module: &Module,
     owner: &Owner,

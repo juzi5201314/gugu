@@ -709,6 +709,10 @@ fn enabled_features(options: &GlobalArgs, package: &Package) -> Vec<String> {
     features
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "单包编译需要项目根、包、全局选项与共享编译器"
+)]
 fn compile_package(
     project_root: &Path,
     package: &Package,

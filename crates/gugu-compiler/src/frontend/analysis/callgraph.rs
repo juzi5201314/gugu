@@ -40,6 +40,10 @@ pub(crate) fn strongly_connected_components(graph: &[Vec<usize>]) -> Vec<Vec<usi
     tarjan(graph, graph.len())
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tarjan 递归需要并行传递索引与低链数组"
+)]
 fn connect(
     v: usize,
     graph: &[Vec<usize>],

@@ -298,6 +298,10 @@ impl Builder<'_> {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "数组模式测试需要前缀/后缀范围与成功/失败出口块"
+    )]
     fn test_array(
         &mut self,
         place: Place,

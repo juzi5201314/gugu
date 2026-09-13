@@ -202,8 +202,10 @@ fn rejects_dependency_cycles_and_unsatisfied_versions() {
         &[("src/main.gg", "fn main() {}\n")],
     );
     let project = Project::discover(&app).expect("project discovers");
-    let mut options = ResolveOptions::default();
-    options.registry_packages = vec![registry_candidate("acme/json", "2.0.0")];
+    let options = ResolveOptions {
+        registry_packages: vec![registry_candidate("acme/json", "2.0.0")],
+        ..ResolveOptions::default()
+    };
     let unsatisfied = project
         .resolve_dependencies(options)
         .expect_err("unsatisfied version fails");

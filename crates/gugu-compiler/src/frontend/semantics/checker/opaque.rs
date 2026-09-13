@@ -13,16 +13,16 @@ impl Checker<'_, '_> {
         span: &Span,
         coercion: bool,
     ) -> Option<Ty> {
-        if let Ty::Opaque(id, arguments) = expected {
-            if self.model.can_bind_opaque(*id, self.module, span) {
-                match self.model.opaque_bounds(*id, arguments, actual) {
-                    Ok(bounds) => self.enforce_bounds(actual, bounds, span),
-                    Err(error) => self.errors.push(error),
-                }
-                self.hidden_candidates
-                    .push((*id, arguments.clone(), actual.clone()));
-                return Some(expected.clone());
+        if let Ty::Opaque(id, arguments) = expected
+            && self.model.can_bind_opaque(*id, self.module, span)
+        {
+            match self.model.opaque_bounds(*id, arguments, actual) {
+                Ok(bounds) => self.enforce_bounds(actual, bounds, span),
+                Err(error) => self.errors.push(error),
             }
+            self.hidden_candidates
+                .push((*id, arguments.clone(), actual.clone()));
+            return Some(expected.clone());
         }
         if coercion && matches!(expected, Ty::Function(..)) && matches!(actual, Ty::Opaque(..)) {
             match self.model.opaque_function(actual) {
@@ -34,27 +34,27 @@ impl Checker<'_, '_> {
                 }
             }
         }
-        if let Ty::Dyn(interfaces) = expected {
-            if coercion {
-                let assumptions = match self.model.assumptions_at(self.module, span) {
-                    Ok(assumptions) => assumptions,
-                    Err(error) => {
-                        self.errors.push(error);
-                        return Some(Ty::Error);
-                    }
-                };
-                for interface in interfaces {
-                    self.trait_constraints.push((
-                        super::super::traits::Obligation {
-                            ty: actual.clone(),
-                            interface: interface.clone(),
-                            span: span.clone(),
-                        },
-                        assumptions.clone(),
-                    ));
+        if let Ty::Dyn(interfaces) = expected
+            && coercion
+        {
+            let assumptions = match self.model.assumptions_at(self.module, span) {
+                Ok(assumptions) => assumptions,
+                Err(error) => {
+                    self.errors.push(error);
+                    return Some(Ty::Error);
                 }
-                return Some(expected.clone());
+            };
+            for interface in interfaces {
+                self.trait_constraints.push((
+                    super::super::traits::Obligation {
+                        ty: actual.clone(),
+                        interface: interface.clone(),
+                        span: span.clone(),
+                    },
+                    assumptions.clone(),
+                ));
             }
+            return Some(expected.clone());
         }
         None
     }

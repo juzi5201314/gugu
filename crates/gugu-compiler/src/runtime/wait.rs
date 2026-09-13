@@ -107,16 +107,9 @@ impl SelectTxn {
 /// processor-local scratch cache 的 0 号 class：内联 8 个 word。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C, align(64))]
+#[derive(Default)]
 pub(crate) struct SelectScratchCache {
     pub(crate) inline_words: [u64; 8],
-}
-
-impl Default for SelectScratchCache {
-    fn default() -> Self {
-        Self {
-            inline_words: [0; 8],
-        }
-    }
 }
 
 /// wait-node：只保存句柄、generation、case 和下标偏移，禁止裸栈指针。
@@ -573,6 +566,10 @@ impl WaitPlane {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "节点字段与 select case 编码一一对应，拆结构体反而增加拷贝"
+    )]
     pub(crate) fn alloc_node(
         &mut self,
         coroutine: CoroutineHandle,
@@ -780,9 +777,7 @@ impl WaitPlane {
     }
 
     pub(crate) fn release_node(&mut self, handle: WaitNodeHandle) -> Result<(), RawInvariant> {
-        let next = self
-            .free_node
-            .map_or(WAIT_LINK_NONE, |index| u64::from(index));
+        let next = self.free_node.map_or(WAIT_LINK_NONE, u64::from);
         let record = self.node_record_mut(handle)?;
         record.occupied = false;
         record.node = WaitNode {

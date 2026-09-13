@@ -5,6 +5,9 @@ use super::{Implementation, Member, MemberKind, Obligation};
 use crate::Diagnostic;
 use std::collections::BTreeMap;
 
+/// 单个泛型 bound 形式化后的结果：trait 引用或函数类型。
+type FormedBound = (Option<super::TraitRef>, Option<Ty>);
+
 impl Model<'_> {
     pub(in super::super) fn validate_traits(&self) -> Result<(), Diagnostic> {
         for implementation in &self.traits.implementations {
@@ -149,14 +152,12 @@ impl Model<'_> {
                             self.trait_error(def, format!("关联项 `{name}` 不满足 trait 签名"))
                         })?,
                 }
-                if let Some(d) = actual.definition {
-                    if let ItemKind::Function(id) =
+                if let Some(d) = actual.definition
+                    && let ItemKind::Function(id) =
                         self.modules[d.module].arena.items[d.item.0 as usize].kind
-                    {
-                        if self.modules[d.module].arena.fns[id.0 as usize].body == FnBody::None {
-                            return Err(self.trait_error(d, "impl 方法必须提供函数体"));
-                        }
-                    }
+                    && self.modules[d.module].arena.fns[id.0 as usize].body == FnBody::None
+                {
+                    return Err(self.trait_error(d, "impl 方法必须提供函数体"));
                 }
             } else if !matches!(
                 member.kind,
@@ -387,10 +388,7 @@ impl Model<'_> {
                 let form_bounds = |module: usize,
                                    bounds: &[super::super::super::ast::Bound],
                                    params: &BTreeMap<String, Ty>|
-                 -> Result<
-                    Vec<(Option<super::TraitRef>, Option<Ty>)>,
-                    Diagnostic,
-                > {
+                 -> Result<Vec<FormedBound>, Diagnostic> {
                     let mut result = Vec::new();
                     for bound in bounds {
                         result.push(match bound.kind {

@@ -218,14 +218,14 @@ impl Checker<'_, '_> {
         let mut names = std::collections::BTreeSet::new();
         let generics = function.generics.as_slice(&self.arena().generic_params);
         for (index, generic) in generics.iter().enumerate() {
-            if let GenericParamKind::Type { name, pack, .. } = generic.kind {
-                if !names.insert(name) || pack && index + 1 != generics.len() {
-                    self.error(
-                        DiagnosticCode::InvalidDeclaration,
-                        "泛型参数不能重名，类型参数包必须位于最后",
-                        generic.span.clone(),
-                    );
-                }
+            if let GenericParamKind::Type { name, pack, .. } = generic.kind
+                && (!names.insert(name) || pack && index + 1 != generics.len())
+            {
+                self.error(
+                    DiagnosticCode::InvalidDeclaration,
+                    "泛型参数不能重名，类型参数包必须位于最后",
+                    generic.span.clone(),
+                );
             }
         }
         for generic in function.generics.as_slice(&self.arena().generic_params) {
@@ -271,12 +271,11 @@ impl Checker<'_, '_> {
             .as_slice(&parsed.arena.params)
             .iter()
             .enumerate()
-            .filter(|(index, _)| {
+            .rfind(|(index, _)| {
                 parsed
                     .configured
                     .param_active(declaration.params.start as usize + index)
             })
-            .last()
         else {
             return false;
         };

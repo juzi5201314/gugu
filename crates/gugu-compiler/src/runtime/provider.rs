@@ -187,7 +187,7 @@ impl RangeDescriptor {
         address >= self.base + self.guard_low_bytes
             && end <= self.payload_end()
             && alignment.is_power_of_two()
-            && address % alignment == 0
+            && address.is_multiple_of(alignment)
     }
 }
 

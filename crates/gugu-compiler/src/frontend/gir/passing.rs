@@ -359,7 +359,7 @@ pub(crate) fn aggregate_of(
         .find(|aggregate| aggregate.definition == definition)
 }
 
-pub(crate) fn struct_fields<'a>(module: &'a hir::Module, ty: TypeId) -> Option<&'a [hir::Field]> {
+pub(crate) fn struct_fields(module: &hir::Module, ty: TypeId) -> Option<&[hir::Field]> {
     match module.types.get(ty.index())? {
         hir::Type::Named { definition, .. } => {
             if lang_item(module, *definition).is_some() {

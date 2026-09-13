@@ -72,42 +72,40 @@ impl Checker<'_, '_> {
                 }
                 return Ty::Never;
             }
-            if let Some(name) = parts.last() {
-                if matches!(*name, "Some" | "Ok" | "Err") {
-                    let wanted = match (expected, *name) {
-                        (Some(Ty::Option(t)), "Some") | (Some(Ty::Result(t, _)), "Ok") => {
-                            Some(&**t)
-                        }
-                        (Some(Ty::Result(_, e)), "Err") => Some(&**e),
-                        _ => None,
-                    };
-                    if args.len() != 1 {
-                        self.error(
-                            DiagnosticCode::InvalidExpression,
-                            "构造器实参数量不符",
-                            expr.span.clone(),
-                        );
-                        return Ty::Error;
-                    }
-                    let value = self.expression(args[0], wanted);
-                    return match *name {
-                        "Some" => Ty::Option(Box::new(value)),
-                        "Ok" => Ty::Result(
-                            Box::new(value),
-                            Box::new(match expected {
-                                Some(Ty::Result(_, e)) => (**e).clone(),
-                                _ => self.fresh(),
-                            }),
-                        ),
-                        _ => Ty::Result(
-                            Box::new(match expected {
-                                Some(Ty::Result(t, _)) => (**t).clone(),
-                                _ => self.fresh(),
-                            }),
-                            Box::new(value),
-                        ),
-                    };
+            if let Some(name) = parts.last()
+                && matches!(*name, "Some" | "Ok" | "Err")
+            {
+                let wanted = match (expected, *name) {
+                    (Some(Ty::Option(t)), "Some") | (Some(Ty::Result(t, _)), "Ok") => Some(&**t),
+                    (Some(Ty::Result(_, e)), "Err") => Some(&**e),
+                    _ => None,
+                };
+                if args.len() != 1 {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "构造器实参数量不符",
+                        expr.span.clone(),
+                    );
+                    return Ty::Error;
                 }
+                let value = self.expression(args[0], wanted);
+                return match *name {
+                    "Some" => Ty::Option(Box::new(value)),
+                    "Ok" => Ty::Result(
+                        Box::new(value),
+                        Box::new(match expected {
+                            Some(Ty::Result(_, e)) => (**e).clone(),
+                            _ => self.fresh(),
+                        }),
+                    ),
+                    _ => Ty::Result(
+                        Box::new(match expected {
+                            Some(Ty::Result(t, _)) => (**t).clone(),
+                            _ => self.fresh(),
+                        }),
+                        Box::new(value),
+                    ),
+                };
             }
             if let Ok(Some((ty, ctor))) = self.model.constructor(self.module, &parts, expected) {
                 if ctor.record || ctor.fields.len() != args.len() {
@@ -172,10 +170,10 @@ impl Checker<'_, '_> {
                 self.unify(ret, expected, &expr.span);
             }
             let offset = usize::from(receiver.is_some());
-            if let Some(receiver) = receiver.as_ref() {
-                if let Some(parameter) = params.first() {
-                    self.unify(receiver, parameter, &expr.span);
-                }
+            if let Some(receiver) = receiver.as_ref()
+                && let Some(parameter) = params.first()
+            {
+                self.unify(receiver, parameter, &expr.span);
             }
             let count = args.len() + offset;
             let variadic = self.variadic_element(&ty);
@@ -219,12 +217,11 @@ impl Checker<'_, '_> {
                 self.unify(ret, expected, &expr.span);
             }
             self.require_value_captures(callee);
-            if let Ty::Callable(id, _, _) = &ty {
-                if let Some(definition) = self.model.function_definition(*id) {
-                    if !self.dependencies.contains(&definition) {
-                        self.dependencies.push(definition);
-                    }
-                }
+            if let Ty::Callable(id, _, _) = &ty
+                && let Some(definition) = self.model.function_definition(*id)
+                && !self.dependencies.contains(&definition)
+            {
+                self.dependencies.push(definition);
             }
             self.require_comptime_arguments(&ty, &args, offset);
             self.record_call_dependencies(callee);
@@ -353,12 +350,11 @@ impl Checker<'_, '_> {
             .as_slice(&module.arena.params)
             .iter()
             .enumerate()
-            .filter(|(offset, _)| {
+            .rfind(|(offset, _)| {
                 module
                     .configured
                     .param_active(function.params.start as usize + offset)
-            })
-            .last()?
+            })?
             .1;
         if !last.variadic {
             return None;

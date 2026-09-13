@@ -194,7 +194,7 @@ impl ExtentDescriptor {
         address >= self.base
             && end <= self.end()
             && alignment.is_power_of_two()
-            && address % alignment == 0
+            && address.is_multiple_of(alignment)
     }
 }
 
@@ -338,10 +338,10 @@ impl OwnerExtentSpace {
         bytes: u64,
     ) -> Result<Self, RawInvariant> {
         let largest = *EXTENT_CLASS_LADDER.last().expect("class 阶梯非空");
-        if base % largest != 0 {
+        if !base.is_multiple_of(largest) {
             return Err(RawInvariant::new("extent arena 基址未按最大 class 对齐"));
         }
-        if bytes == 0 || bytes % largest != 0 {
+        if bytes == 0 || !bytes.is_multiple_of(largest) {
             return Err(RawInvariant::new(
                 "extent arena 容量必须是最大 class 的整数倍",
             ));

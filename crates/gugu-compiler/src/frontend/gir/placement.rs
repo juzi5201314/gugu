@@ -614,11 +614,11 @@ fn check_turn(kind: PlacementKind, proof: ProofStatus, export: u8) -> Result<(),
 }
 
 #[allow(dead_code, reason = "测试读取 local 下标")]
-pub(crate) fn record_of<'a>(
-    world: &'a PlacementWorldV1,
+pub(crate) fn record_of(
+    world: &PlacementWorldV1,
     body: u32,
     local: LocalId,
-) -> Option<&'a PlacementRecord> {
+) -> Option<&PlacementRecord> {
     world
         .records
         .iter()

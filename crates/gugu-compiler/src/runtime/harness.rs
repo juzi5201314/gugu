@@ -130,8 +130,9 @@ impl OwnerReturnHarness {
                 let mut count = 0_u64;
                 for (index, slot) in slots.iter().enumerate() {
                     let message = build_message(target, secret, *slot, stride, epoch, index as u32);
-                    let forced =
-                        ((index as u32 + 1) % BATCH_MAX == 0).then_some(FlushTrigger::ItemLimit);
+                    let forced = (index as u32 + 1)
+                        .is_multiple_of(BATCH_MAX)
+                        .then_some(FlushTrigger::ItemLimit);
                     match stage_message(&pool, Some(&inbox), &mut staging, &message, shard, forced)
                     {
                         Ok(_) => count += 1,
@@ -316,8 +317,9 @@ impl ResourceReleaseHarness {
                 let mut staging = ProducerStaging::new(BatchLimits::default());
                 let mut count = 0_u64;
                 for (index, message) in batch.iter().enumerate() {
-                    let forced =
-                        ((index as u32 + 1) % BATCH_MAX == 0).then_some(FlushTrigger::ItemLimit);
+                    let forced = (index as u32 + 1)
+                        .is_multiple_of(BATCH_MAX)
+                        .then_some(FlushTrigger::ItemLimit);
                     match stage_message(&pool, Some(&inbox), &mut staging, message, shard, forced) {
                         Ok(_) => count += 1,
                         Err(error) => {

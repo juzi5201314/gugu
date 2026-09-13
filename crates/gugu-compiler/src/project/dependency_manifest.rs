@@ -146,7 +146,7 @@ where
     };
     parse_entries(
         output,
-        table.into_iter(),
+        table,
         domain,
         target,
         package_root,
@@ -211,14 +211,14 @@ fn inherited_value(
         if key == "workspace" {
             continue;
         }
-        if key == "features" {
-            if let (Some(base), Some(extra)) = (
+        if key == "features"
+            && let (Some(base), Some(extra)) = (
                 merged.get_mut(key).and_then(toml::Value::as_array_mut),
                 local.as_array(),
-            ) {
-                base.extend(extra.iter().cloned());
-                continue;
-            }
+            )
+        {
+            base.extend(extra.iter().cloned());
+            continue;
         }
         merged.insert(key.clone(), local.clone());
     }

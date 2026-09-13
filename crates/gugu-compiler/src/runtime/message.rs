@@ -1092,10 +1092,10 @@ pub(crate) fn stage_message(
         pool.link(last, Some(node));
     }
     staging.stage(node, message, shard)?;
-    if let Some(trigger) = forced.or_else(|| staging.flush_trigger()) {
-        if let Some(inbox) = inbox {
-            outcome = Some(flush_staging(pool, inbox, staging, trigger)?);
-        }
+    if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
+        && let Some(inbox) = inbox
+    {
+        outcome = Some(flush_staging(pool, inbox, staging, trigger)?);
     }
     Ok(outcome)
 }

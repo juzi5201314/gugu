@@ -205,15 +205,15 @@ impl Builder<'_> {
             }
             Storage::Capture { .. } | Storage::Values(_) => {}
         }
-        if let Some(arguments) = self.entry_arguments[local.index()].take() {
-            if !matches!(self.storage[local.index()], Storage::Values(_)) {
-                let ty = self.local_ty(local);
-                let destination = self.address(Place::local(local))?.0;
-                if self.indirect_abi(ty) {
-                    self.copy_memory(destination, arguments[0], ty)?;
-                } else {
-                    self.store_abi(destination, ty, &arguments)?;
-                }
+        if let Some(arguments) = self.entry_arguments[local.index()].take()
+            && !matches!(self.storage[local.index()], Storage::Values(_))
+        {
+            let ty = self.local_ty(local);
+            let destination = self.address(Place::local(local))?.0;
+            if self.indirect_abi(ty) {
+                self.copy_memory(destination, arguments[0], ty)?;
+            } else {
+                self.store_abi(destination, ty, &arguments)?;
             }
         }
         Ok(())

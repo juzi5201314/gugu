@@ -138,10 +138,10 @@ pub(super) fn run(
 fn freeze(world: &MonoWorldV1) -> Result<TypeUniverse, Diagnostic> {
     let mut types = BTreeMap::new();
     for record in world.instances.iter().flat_map(|i| &i.types) {
-        if let Some(old) = types.insert(record.key, record.clone()) {
-            if old != *record {
-                return Err(invalid("相同 StableTypeKey 的类型记录不一致"));
-            }
+        if let Some(old) = types.insert(record.key, record.clone())
+            && old != *record
+        {
+            return Err(invalid("相同 StableTypeKey 的类型记录不一致"));
         }
     }
     let mut universe = TypeUniverse {

@@ -612,23 +612,23 @@ impl Checker<'_, '_> {
         let p = &a.paths[path.0 as usize];
         let segs = p.segments.as_slice(&a.segments);
         let path_arguments = segs.last().expect("路径至少有一段").args;
-        if let Some(first) = segs.first() {
-            if let Some(mut ty) = self.local(first.name, read || segs.len() > 1, &p.span) {
-                if type_args.len != 0 {
-                    self.error(
-                        DiagnosticCode::InvalidExpression,
-                        "已绑定函数值不能重新指定泛型实参",
-                        p.span.clone(),
-                    );
-                }
-                for s in &segs[1..] {
-                    ty = self.field(&ty, self.model.name(self.module, s.name), &s.span);
-                }
-                if path_arguments.len != 0 {
-                    return self.path_index(expression, &ty, path_arguments, !read, &p.span);
-                }
-                return ty;
+        if let Some(first) = segs.first()
+            && let Some(mut ty) = self.local(first.name, read || segs.len() > 1, &p.span)
+        {
+            if type_args.len != 0 {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    "已绑定函数值不能重新指定泛型实参",
+                    p.span.clone(),
+                );
             }
+            for s in &segs[1..] {
+                ty = self.field(&ty, self.model.name(self.module, s.name), &s.span);
+            }
+            if path_arguments.len != 0 {
+                return self.path_index(expression, &ty, path_arguments, !read, &p.span);
+            }
+            return ty;
         }
         let parts = self.model.path(self.module, path);
         if let Some(ty) = self.associated_constant(path) {
@@ -640,10 +640,10 @@ impl Checker<'_, '_> {
                 .cloned()
                 .unwrap_or_else(|| Ty::Option(Box::new(self.fresh())));
         }
-        if let Ok(Some((ty, ctor))) = self.model.constructor(self.module, &parts, expected) {
-            if ctor.fields.is_empty() {
-                return ty;
-            }
+        if let Ok(Some((ty, ctor))) = self.model.constructor(self.module, &parts, expected)
+            && ctor.fields.is_empty()
+        {
+            return ty;
         }
         match self.model.resolve(self.module, &parts) {
             Ok(def) => {
@@ -804,12 +804,11 @@ impl Checker<'_, '_> {
                 span.clone(),
             );
         }
-        if let Ty::Tuple(ts) = ty.deref() {
-            if let Ok(i) = name.parse::<usize>() {
-                if let Some(ty) = ts.get(i) {
-                    return ty.clone();
-                }
-            }
+        if let Ty::Tuple(ts) = ty.deref()
+            && let Ok(i) = name.parse::<usize>()
+            && let Some(ty) = ts.get(i)
+        {
+            return ty.clone();
         }
         if let Some((_, field, public)) = self.model.find_field(ty, name) {
             if !public && self.model.def_module(ty) != Some(self.module) {

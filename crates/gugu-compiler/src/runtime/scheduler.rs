@@ -125,7 +125,7 @@ impl RunnableDeque for Classic64Deque {
         Some(handle)
     }
     fn claim_head(&mut self, max: usize) -> Vec<RunnableHandle> {
-        let take = ((self.slots.len() + 1) / 2).min(max).min(self.slots.len());
+        let take = self.slots.len().div_ceil(2).min(max).min(self.slots.len());
         let mut claimed = Vec::with_capacity(take);
         for _ in 0..take {
             if let Some(handle) = self.slots.pop_front() {
@@ -203,7 +203,7 @@ impl RunnableDeque for Packed55Deque {
         if self.packed_distance() == PACKED55_RESETTING {
             return Vec::new();
         }
-        let take = ((self.slots.len() + 1) / 2).min(max).min(self.slots.len());
+        let take = self.slots.len().div_ceil(2).min(max).min(self.slots.len());
         let mut claimed = Vec::with_capacity(take);
         for _ in 0..take {
             if let Some(handle) = self.slots.pop_front() {
@@ -863,10 +863,10 @@ impl SchedulerWorld {
             .ok_or_else(|| RawInvariant::new("调度 service tick 溢出"))?;
         self.processors[index].service_tick = tick;
         // service tick 是 61 的倍数且有外部工作时先 external service。
-        if tick % u64::from(SCHED_SERVICE_INTERVAL) == 0 {
-            if let Some(handle) = self.service_external(index)? {
-                return Ok(Some(handle));
-            }
+        if tick % u64::from(SCHED_SERVICE_INTERVAL) == 0
+            && let Some(handle) = self.service_external(index)?
+        {
+            return Ok(Some(handle));
         }
         // 取 `run_next`。
         if let Some(handle) = self.processors[index].take_run_next() {
@@ -919,7 +919,7 @@ impl SchedulerWorld {
         let start = (self.steal_rng.next() % active.len() as u64) as usize;
         // 互质 step 遍历稠密 snapshot。
         let mut step = (self.steal_rng.next() % active.len().saturating_sub(1) as u64) as usize + 1;
-        while step > 1 && active.len() % step == 0 {
+        while step > 1 && active.len().is_multiple_of(step) {
             step -= 1;
         }
         let mut claimed: Option<RunnableHandle> = None;

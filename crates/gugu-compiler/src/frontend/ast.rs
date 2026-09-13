@@ -786,7 +786,7 @@ impl AstArena {
     }
 
     pub(crate) fn alloc_node_or_error(&mut self, file: SourceFileId) -> Option<AstNodeId> {
-        if self.next_node >= u32::MAX {
+        if self.next_node == u32::MAX {
             return None;
         }
         let id = AstNodeId {

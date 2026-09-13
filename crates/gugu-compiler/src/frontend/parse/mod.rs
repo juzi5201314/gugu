@@ -175,10 +175,7 @@ pub(crate) fn parse_fragment(
             let text = fragment_buffer.intern.get_str(symbol);
             token.symbol = Some(buffer.intern.intern_str(text));
         }
-        token.trivia_start = token
-            .trivia_start
-            .checked_add(trivia_offset)
-            .unwrap_or(u32::MAX);
+        token.trivia_start = token.trivia_start.saturating_add(trivia_offset);
     }
     let token_base = buffer.tokens.len();
     buffer.tokens.extend(fragment_tokens.iter().copied());

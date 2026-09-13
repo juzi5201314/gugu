@@ -292,7 +292,7 @@ pub(crate) fn build(
                 QueryKey::new(
                     QueryKind::BuildGenericGir,
                     gir::BUILD_SCHEMA,
-                    &concrete.body.owner_key,
+                    concrete.body.owner_key,
                 ),
                 concrete.fingerprint,
             );

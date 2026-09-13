@@ -242,6 +242,10 @@ pub(crate) fn configure(
 }
 
 /// 对生成片段执行 cfg 裁项；`snapshot` 是生成文本快照，`expansion` 是其展开记录。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "片段 cfg 需要源码、快照、token 表与展开记录共同定位"
+)]
 pub(crate) fn configure_fragment(
     snapshot: &SourceSnapshot,
     source_map: &SourceMap,
@@ -257,6 +261,10 @@ pub(crate) fn configure_fragment(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "与 configure_fragment 保持同一参数面，便于直接转发"
+)]
 fn configure_roots(
     snapshot: &SourceSnapshot,
     source_map: &SourceMap,
@@ -944,6 +952,10 @@ impl Configurator<'_> {
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "谓词求值需要源码、token 表与诊断收集器一同参与"
+)]
 fn attributes_match(
     attributes: &[Attribute],
     snapshot: &SourceSnapshot,

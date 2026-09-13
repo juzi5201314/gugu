@@ -10,10 +10,13 @@ use crate::frontend::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 
+/// 实例闭合收集结果：类型记录表与稳定键分配表。
+pub(crate) type CollectedTypes = (Vec<TypeRecord>, Vec<(u32, StableTypeKey)>);
+
 pub(crate) fn collect(
     context: &MonoContext<'_>,
     entry: &WalkEntry,
-) -> Result<(Vec<TypeRecord>, Vec<(u32, StableTypeKey)>), Diagnostic> {
+) -> Result<CollectedTypes, Diagnostic> {
     let mut collector = Collector {
         context,
         layouts: Layouts::new(context.model, context.checked),

@@ -184,7 +184,7 @@ fn entry_owner(module: &hir::Module) -> &hir::Owner {
         .unwrap()
 }
 
-fn plan_actions<'a>(owner: &'a hir::Owner, plan: u32) -> &'a [hir::CleanupAction] {
+fn plan_actions(owner: &hir::Owner, plan: u32) -> &[hir::CleanupAction] {
     let plan = &owner.cleanup_plans[plan as usize];
     &owner.cleanup_actions[plan.actions.start as usize..plan.actions.end as usize]
 }

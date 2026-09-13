@@ -2,6 +2,12 @@ use super::{DefId, TypeId};
 use serde::{Deserialize, Serialize};
 
 /// 复合类型仅引用驻留后的子类型；不在每个表达式复制递归 Ty 树。
+///
+/// `TypeId` 是语言内置类型名（见 `docs/src/spec/declarations.md`），不随 lint 改名。
+#[expect(
+    clippy::enum_variant_names,
+    reason = "TypeId 是语言内置类型名，不随 lint 改名"
+)]
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub(crate) enum Type {
     Never,

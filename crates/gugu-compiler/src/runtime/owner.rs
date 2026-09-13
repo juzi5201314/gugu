@@ -233,6 +233,10 @@ impl RawOwner {
     }
 
     /// 本地分配：free list → span bump → domain cache → typed range request。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "本地分配需要同时推进 free list、span、domain cache 与账本"
+    )]
     pub(crate) fn allocate(
         &mut self,
         owner: u32,

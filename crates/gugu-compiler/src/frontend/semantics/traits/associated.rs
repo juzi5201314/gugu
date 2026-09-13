@@ -320,28 +320,26 @@ impl Model<'_> {
                 }
                 implementation
             };
-            if let Some(member) = selected.members.get(name) {
-                if let MemberKind::Const { ty, value } = &member.kind {
-                    candidates.push(Member {
-                        definition: member.definition,
-                        kind: MemberKind::Const {
-                            ty: substitute(ty, &bindings),
-                            value: value.clone(),
-                        },
-                    });
-                }
+            if let Some(member) = selected.members.get(name)
+                && let MemberKind::Const { ty, value } = &member.kind
+            {
+                candidates.push(Member {
+                    definition: member.definition,
+                    kind: MemberKind::Const {
+                        ty: substitute(ty, &bindings),
+                        value: value.clone(),
+                    },
+                });
             }
         }
         for Obligation { ty, interface, .. } in assumptions {
             if ty == base
                 && candidates.is_empty()
                 && qualified.as_ref().is_none_or(|wanted| *wanted == interface)
+                && let Some(member) = self.traits.interfaces[interface.id].members.get(name)
+                && matches!(member.kind, MemberKind::Const { .. })
             {
-                if let Some(member) = self.traits.interfaces[interface.id].members.get(name) {
-                    if matches!(member.kind, MemberKind::Const { .. }) {
-                        candidates.push(member.clone());
-                    }
-                }
+                candidates.push(member.clone());
             }
         }
         match candidates.len() {

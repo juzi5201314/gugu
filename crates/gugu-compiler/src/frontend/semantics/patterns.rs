@@ -49,7 +49,7 @@ pub(crate) fn check(
         bindings.sort_by_key(|binding| binding.span.start());
         Ok(CheckedPattern {
             bindings,
-            irrefutable: covered(model, &[ty.clone()], &[vec![p]]),
+            irrefutable: covered(model, std::slice::from_ref(ty), &[vec![p]]),
         })
     } else {
         Err(c.errors)
@@ -79,7 +79,7 @@ pub(crate) fn exhaustive(
         }
     }
     if errors.is_empty() {
-        Ok(covered(model, &[ty.clone()], &rows))
+        Ok(covered(model, std::slice::from_ref(ty), &rows))
     } else {
         Err(errors)
     }
@@ -249,19 +249,19 @@ impl C<'_, '_> {
                     }
                 };
                 let n = u64::from(prefix.len) + u64::from(suffix.len);
-                if let Some(len) = len {
-                    if n > len || (rest.is_none() && n != len) {
-                        self.error("数组模式长度不符", &pat.span);
-                    }
+                if let Some(len) = len
+                    && (n > len || (rest.is_none() && n != len))
+                {
+                    self.error("数组模式长度不符", &pat.span);
                 }
-                if let Some(rest) = rest {
-                    if let Some(name) = rest.name {
-                        let rest_ty = match len {
-                            Some(len) => Ty::Array(Box::new(elem.clone()), len.saturating_sub(n)),
-                            None => Ty::Ref(Box::new(Ty::Slice(Box::new(elem.clone())))),
-                        };
-                        self.bind(name, &rest_ty, &rest.span);
-                    }
+                if let Some(rest) = rest
+                    && let Some(name) = rest.name
+                {
+                    let rest_ty = match len {
+                        Some(len) => Ty::Array(Box::new(elem.clone()), len.saturating_sub(n)),
+                        None => Ty::Ref(Box::new(Ty::Slice(Box::new(elem.clone())))),
+                    };
+                    self.bind(name, &rest_ty, &rest.span);
                 }
                 let pre = prefix
                     .as_slice(&a.pat_ids)

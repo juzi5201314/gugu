@@ -69,13 +69,12 @@ impl Module {
         for owner in &self.owners {
             self.verify_owner(owner)?;
         }
-        if let Some(entry) = self.entry {
-            if !self.definition(entry)
+        if let Some(entry) = self.entry
+            && (!self.definition(entry)
                 || self.definitions[entry.index()].kind != DefinitionKind::Function
-                || !self.owners.iter().any(|owner| owner.definition == entry)
-            {
-                return Err(invalid("入口没有已验证函数 body"));
-            }
+                || !self.owners.iter().any(|owner| owner.definition == entry))
+        {
+            return Err(invalid("入口没有已验证函数 body"));
         }
         for initialization in &self.initialization {
             if !self.definition(initialization.definition) {

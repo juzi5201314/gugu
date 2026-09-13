@@ -237,12 +237,11 @@ impl CheckedSemantics {
             if model.opaque_requires_definition(id as u32) != hidden.is_some() {
                 return Err(invalid());
             }
-            if let Some(ty) = hidden {
-                if !formed(ty, model)
-                    || super::opaque::has_unbound(ty, &model.opaque_context(id as u32))
-                {
-                    return Err(invalid());
-                }
+            if let Some(ty) = hidden
+                && (!formed(ty, model)
+                    || super::opaque::has_unbound(ty, &model.opaque_context(id as u32)))
+            {
+                return Err(invalid());
             }
         }
         for body in &self.bodies {
@@ -370,10 +369,9 @@ impl CheckedSemantics {
                 | ReflectionKind::Downcast(ty)
                 | ReflectionKind::DowncastCopy(ty)
                 | ReflectionKind::TypeId(ty) = &reflection.kind
+                    && (!formed(ty, model) || matches!(ty, Ty::Never | Ty::MaybeUninit(_)))
                 {
-                    if !formed(ty, model) || matches!(ty, Ty::Never | Ty::MaybeUninit(_)) {
-                        return Err(invalid());
-                    }
+                    return Err(invalid());
                 }
             }
             for dispatch in &body.dispatches {
@@ -391,18 +389,17 @@ impl CheckedSemantics {
                 {
                     return Err(invalid());
                 }
-                if let Some(id) = dispatch.callable {
-                    if !model
+                if let Some(id) = dispatch.callable
+                    && (!model
                         .modules
                         .get(id.module)
                         .is_some_and(|module| (id.function as usize) < module.arena.fns.len())
-                        || model.function_definition(id).is_none()
-                    {
-                        return Err(invalid());
-                    }
+                        || model.function_definition(id).is_none())
+                {
+                    return Err(invalid());
                 }
-                if let Some(definition) = dispatch.implementation {
-                    if !model
+                if let Some(definition) = dispatch.implementation
+                    && !model
                         .modules
                         .get(definition.module)
                         .and_then(|module| module.arena.items.get(definition.item.0 as usize))
@@ -415,9 +412,8 @@ impl CheckedSemantics {
                                 }
                             )
                         })
-                    {
-                        return Err(invalid());
-                    }
+                {
+                    return Err(invalid());
                 }
                 if let Some(interface) = &dispatch.interface {
                     let Some(definition) = model.traits.interfaces.get(interface.id) else {
@@ -524,16 +520,15 @@ impl CheckedSemantics {
                 }
                 if let CheckKind::IntegerDivision { ty, .. } | CheckKind::Shift { ty, .. } =
                     &check.kind
-                {
-                    if !matches!(
+                    && !matches!(
                         ty,
                         Ty::Int {
                             bits: 8 | 16 | 32 | 64 | 128,
                             ..
                         }
-                    ) {
-                        return Err(invalid());
-                    }
+                    )
+                {
+                    return Err(invalid());
                 }
             }
         }

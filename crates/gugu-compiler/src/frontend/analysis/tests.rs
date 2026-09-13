@@ -319,8 +319,10 @@ fn analysis_policy_block_iterations_change_action_key() {
     let mut first = ActionInputs::new(b"c", "host", "host", "bin");
     first.set_analysis_policy(AnalysisPolicyV1::default().canonical_bytes());
     let mut second = ActionInputs::new(b"c", "host", "host", "bin");
-    let mut policy = AnalysisPolicyV1::default();
-    policy.max_block_iterations = 1;
+    let policy = AnalysisPolicyV1 {
+        max_block_iterations: 1,
+        ..AnalysisPolicyV1::default()
+    };
     second.set_analysis_policy(policy.canonical_bytes());
     assert_ne!(first.key(), second.key());
 }
@@ -375,8 +377,10 @@ fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
             calls: Vec::new(),
         })
         .collect::<Vec<_>>();
-    let mut policy = AnalysisPolicyV1::default();
-    policy.max_block_iterations = 1;
+    let policy = AnalysisPolicyV1 {
+        max_block_iterations: 1,
+        ..AnalysisPolicyV1::default()
+    };
     let component: Vec<_> = (0..keys.len()).collect();
     let scc = super::solver::analyze_scc(module, &output.gir, &keys, &component, policy, &|_| {
         super::FunctionSummary::default()

@@ -220,10 +220,8 @@ fn walk_storage(
                 }
                 live[local.index()] = false;
             }
-            StatementKind::Assign(place, _) => {
-                if !live[place.local.index()] {
-                    return Err(gir_error("写入未激活 local", None));
-                }
+            StatementKind::Assign(place, _) if !live[place.local.index()] => {
+                return Err(gir_error("写入未激活 local", None));
             }
             _ => {}
         }
@@ -352,10 +350,8 @@ fn walk_views(
                 }
                 open.push(*token);
             }
-            StatementKind::ScopedViewEnd { token } => {
-                if open.pop() != Some(*token) {
-                    return Err(gir_error("ScopedViewEnd 与 Begin 不成对", None));
-                }
+            StatementKind::ScopedViewEnd { token } if open.pop() != Some(*token) => {
+                return Err(gir_error("ScopedViewEnd 与 Begin 不成对", None));
             }
             _ => {}
         }

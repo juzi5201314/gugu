@@ -798,7 +798,7 @@ fn trip_count(editor: &Editor, natural: &LoopInfo, counted: &CountedLoop) -> Opt
     let initial = u128::from(initial);
     let bound = u128::from(bound);
     let trips = match counted.condition {
-        Condition::Lt if bound > initial => (bound - initial + step - 1) / step,
+        Condition::Lt if bound > initial => (bound - initial).div_ceil(step),
         Condition::Lt => 0,
         Condition::Le if bound >= initial => (bound - initial) / step + 1,
         Condition::Le => 0,

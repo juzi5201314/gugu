@@ -1,5 +1,8 @@
 use std::{cmp::Ordering, collections::BTreeSet, fmt};
 
+/// `parse_partial_version` 结果：数值段、预发布、build 与通配标记。
+type PartialVersion<'src> = (Vec<u64>, Option<&'src str>, Option<&'src str>, bool);
+
 /// SemVer 2.0.0 版本。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Version {
@@ -200,10 +203,10 @@ impl VersionReq {
                 return Err("版本约束不能包含空交集项".to_owned());
             }
             for comparator in parse_comparator(part)? {
-                if let Some(version) = comparator_version(&comparator) {
-                    if version.is_prerelease() {
-                        prerelease_bases.insert(version.prerelease_base());
-                    }
+                if let Some(version) = comparator_version(&comparator)
+                    && version.is_prerelease()
+                {
+                    prerelease_bases.insert(version.prerelease_base());
                 }
                 comparators.push(comparator);
             }
@@ -328,9 +331,7 @@ fn wildcard_bounds(components: Vec<u64>) -> Vec<Comparator> {
     vec![Comparator::GreaterEqual(lower), Comparator::Less(upper)]
 }
 
-fn parse_partial_version(
-    input: &str,
-) -> Result<(Vec<u64>, Option<&str>, Option<&str>, bool), String> {
+fn parse_partial_version(input: &str) -> Result<PartialVersion<'_>, String> {
     let (without_build, build) = input
         .split_once('+')
         .map_or((input, None), |(value, build)| (value, Some(build)));

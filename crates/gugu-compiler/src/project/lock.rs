@@ -144,15 +144,14 @@ fn validate_checksum(
     source: &PackageSource,
     checksum: Option<&String>,
 ) -> Result<(), ProjectError> {
-    if let Some(checksum) = checksum {
-        if !matches!(source, PackageSource::Registry { .. })
+    if let Some(checksum) = checksum
+        && (!matches!(source, PackageSource::Registry { .. })
             || checksum.len() != 64
             || !checksum
                 .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-        {
-            return Err(lock_error("registry checksum 必须是 64 位小写十六进制"));
-        }
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()))
+    {
+        return Err(lock_error("registry checksum 必须是 64 位小写十六进制"));
     }
     Ok(())
 }

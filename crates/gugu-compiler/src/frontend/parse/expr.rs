@@ -1185,10 +1185,11 @@ impl Parser<'_> {
                 guard,
                 body,
             });
-            if !self.at(TokenKind::RBrace) {
-                if !self.eat(TokenKind::Comma) && !self.at_list_separator() {
-                    self.error_here(DiagnosticCode::ParseExpected, "match 臂之间需要 `,` 或换行");
-                }
+            if !self.at(TokenKind::RBrace)
+                && !self.eat(TokenKind::Comma)
+                && !self.at_list_separator()
+            {
+                self.error_here(DiagnosticCode::ParseExpected, "match 臂之间需要 `,` 或换行");
             }
         }
         self.expect(TokenKind::RBrace, "match 需要 `}`");
@@ -1236,13 +1237,14 @@ impl Parser<'_> {
             let mark = self.start();
             let attrs = self.parse_outer_attributes();
             arms.push(self.parse_select_arm(mark, attrs));
-            if !self.at(TokenKind::RBrace) {
-                if !self.eat(TokenKind::Comma) && !self.at_list_separator() {
-                    self.error_here(
-                        DiagnosticCode::ParseExpected,
-                        "select 臂之间需要 `,` 或换行",
-                    );
-                }
+            if !self.at(TokenKind::RBrace)
+                && !self.eat(TokenKind::Comma)
+                && !self.at_list_separator()
+            {
+                self.error_here(
+                    DiagnosticCode::ParseExpected,
+                    "select 臂之间需要 `,` 或换行",
+                );
             }
         }
         self.expect(TokenKind::RBrace, "select 需要 `}`");

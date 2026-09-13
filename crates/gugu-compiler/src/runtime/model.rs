@@ -345,6 +345,10 @@ impl RuntimeRawContractV1 {
     ///
     /// 常驻 message node 容量由 shard 数与 batch item 上限推导：每个 shard 至少能同时容纳
     /// 一个满 batch 的 node，因此它是契约中可证明的下界。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "RawPlane 契约由各子系统 demand 与平台档案共同推导"
+    )]
     pub(crate) fn build(
         target: TargetName,
         policy: RawPlanePolicyV1,

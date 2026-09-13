@@ -470,6 +470,10 @@ impl ResourceCellTable {
     }
 
     /// 登记一个新 cell；创建协程持有首个 lease。
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cell 登记需要描述符、尺寸与 owner 代际共同参与校验"
+    )]
     pub(crate) fn place(
         &mut self,
         descriptor: SlabDescriptorId,
@@ -819,7 +823,7 @@ pub(crate) fn dedicated_class(
     stride: u32,
     alignment: u32,
 ) -> Result<RuntimeSizeClass, RawInvariant> {
-    if stride <= CELL_HEADER_BYTES || stride % alignment != 0 {
+    if stride <= CELL_HEADER_BYTES || !stride.is_multiple_of(alignment) {
         return Err(RawInvariant::new("专用整页 mapping 的 stride 或对齐非法"));
     }
     Ok(RuntimeSizeClass {

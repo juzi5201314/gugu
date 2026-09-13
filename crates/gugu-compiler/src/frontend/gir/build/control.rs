@@ -749,7 +749,6 @@ impl Builder<'_> {
                 if let Some(frame) = self.loops.iter().rev().find(|frame| frame.scope == scope)
                     && let (Some(slot), Some(value)) = (frame.value, value)
                 {
-                    let slot = slot;
                     self.assign_copy(Place::local(slot), value);
                 }
                 self.loops
@@ -768,7 +767,6 @@ impl Builder<'_> {
                 if let Some(frame) = self.tries.iter().rev().find(|frame| frame.scope == scope)
                     && let (Some(slot), Some(value)) = (frame.value, value)
                 {
-                    let slot = slot;
                     self.assign_copy(Place::local(slot), value);
                 }
                 self.tries

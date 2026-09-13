@@ -674,7 +674,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
         contract.platform().class_count(),
         EXTENT_CLASS_LADDER.len() as u32
     );
-    assert_eq!(contract.dump().contains("managed-address"), false);
+    assert!(!contract.dump().contains("managed-address"));
 
     let mut schema = MessageSchemaV1::runtime_raw();
     schema.fields.push(MessageFieldSchema {

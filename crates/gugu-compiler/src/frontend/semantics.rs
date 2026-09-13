@@ -38,6 +38,18 @@ mod unsafe_tests;
 use super::{ParsedModule, names::NameResolution};
 use crate::diagnostics::Diagnostic;
 
+/// 前端语义阶段产物：冻结后的各层 world 与布局。
+pub(crate) type CheckedFrontend = (
+    CheckedSemantics,
+    Vec<super::types::Layout>,
+    (u32, [u8; 32]),
+    super::hir::Validated,
+    analysis::AnalysisWorldV1,
+    super::mono::MonoWorldV1,
+    super::gir::GirWorldV1,
+    super::gir::pass::GirPassStats,
+);
+
 pub(crate) fn check(
     modules: &[ParsedModule],
     names: &NameResolution,
@@ -45,19 +57,7 @@ pub(crate) fn check(
     cfg: &super::cfg::CfgContext,
     entry: Option<model::CallableId>,
     queries: &crate::query::QueryEngine,
-) -> Result<
-    (
-        CheckedSemantics,
-        Vec<super::types::Layout>,
-        (u32, [u8; 32]),
-        super::hir::Validated,
-        analysis::AnalysisWorldV1,
-        super::mono::MonoWorldV1,
-        super::gir::GirWorldV1,
-        super::gir::pass::GirPassStats,
-    ),
-    Vec<Diagnostic>,
-> {
+) -> Result<CheckedFrontend, Vec<Diagnostic>> {
     let model = model::Model::new(modules, names)?;
     let (early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries)?;
     let registry_identity = early.registry_identity();

@@ -154,13 +154,9 @@ fn copy_propagate(editor: &mut Editor) -> Result<bool, Diagnostic> {
 
 fn rewrite_operand(operand: &mut Operand, from: LocalId, to: LocalId) -> bool {
     match operand {
-        Operand::Copy(place) | Operand::MoveInternal(place) => {
-            if place.local == from {
-                place.local = to;
-                true
-            } else {
-                false
-            }
+        Operand::Copy(place) | Operand::MoveInternal(place) if place.local == from => {
+            place.local = to;
+            true
         }
         _ => false,
     }

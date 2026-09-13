@@ -222,18 +222,10 @@ impl AbstractState {
     pub fn entry(locals: usize, exprs: usize, param_count: usize) -> Self {
         let mut state = Self::bottom(locals, exprs);
         state.reachable = true;
-        for range in &mut state.local_range {
-            *range = Interval::UNKNOWN;
-        }
-        for range in &mut state.expr_range {
-            *range = Interval::UNKNOWN;
-        }
-        for range in &mut state.local_len {
-            *range = Interval::UNKNOWN;
-        }
-        for range in &mut state.expr_len {
-            *range = Interval::UNKNOWN;
-        }
+        state.local_range.fill(Interval::UNKNOWN);
+        state.expr_range.fill(Interval::UNKNOWN);
+        state.local_len.fill(Interval::UNKNOWN);
+        state.expr_len.fill(Interval::UNKNOWN);
         for initialized in state.init.iter_mut().take(param_count) {
             *initialized = true;
         }
@@ -345,12 +337,8 @@ impl AbstractState {
     pub fn bump_heap(&mut self) {
         self.heap_version = u32::MAX;
         self.local_range.fill(Interval::UNKNOWN);
-        for len in &mut self.local_len {
-            *len = Interval::UNKNOWN;
-        }
-        for len in &mut self.expr_len {
-            *len = Interval::UNKNOWN;
-        }
+        self.local_len.fill(Interval::UNKNOWN);
+        self.expr_len.fill(Interval::UNKNOWN);
         self.relations.clear();
     }
 

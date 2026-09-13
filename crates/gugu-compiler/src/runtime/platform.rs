@@ -273,7 +273,7 @@ impl FakePlatform {
     /// 把字节区间换算成页区间；越界、非页对齐或长度为 0 时报错。
     fn page_span(&self, bytes: u64, offset: u64, len: u64) -> Result<(u64, u64), ProviderError> {
         let page = self.constants.page_bytes;
-        if len == 0 || offset % page != 0 || len % page != 0 {
+        if len == 0 || !offset.is_multiple_of(page) || !len.is_multiple_of(page) {
             return Err(ProviderError::InvalidSubRange);
         }
         let Some(end) = offset.checked_add(len) else {

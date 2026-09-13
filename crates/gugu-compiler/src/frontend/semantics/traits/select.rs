@@ -4,6 +4,9 @@ use super::{Implementation, Member, MemberKind, Method, Obligation, TraitRef};
 use crate::Diagnostic;
 use std::collections::BTreeMap;
 
+/// 选中实现的下标与关联绑定。
+type SelectedImpl = Option<(usize, BTreeMap<String, Ty>)>;
+
 pub(crate) fn matches(pattern: &Ty, concrete: &Ty, bindings: &mut BTreeMap<String, Ty>) -> bool {
     if let Ty::Param(name) = pattern {
         if let Some(previous) = bindings.get(name) {
@@ -115,7 +118,7 @@ impl Model<'_> {
         ty: &Ty,
         interface: &TraitRef,
         assumptions: &[Obligation],
-    ) -> Result<Option<(usize, BTreeMap<String, Ty>)>, Diagnostic> {
+    ) -> Result<SelectedImpl, Diagnostic> {
         self.select_impl_inner(ty, interface, assumptions, &mut Vec::new())
     }
     fn select_impl_inner(
@@ -124,8 +127,8 @@ impl Model<'_> {
         interface: &TraitRef,
         assumptions: &[Obligation],
         stack: &mut Vec<(Ty, TraitRef)>,
-    ) -> Result<Option<(usize, BTreeMap<String, Ty>)>, Diagnostic> {
-        let mut selected: Option<(usize, BTreeMap<String, Ty>)> = None;
+    ) -> Result<SelectedImpl, Diagnostic> {
+        let mut selected: SelectedImpl = None;
         for (id, implementation) in self.traits.implementations.iter().enumerate() {
             let Some(candidate) = &implementation.interface else {
                 continue;

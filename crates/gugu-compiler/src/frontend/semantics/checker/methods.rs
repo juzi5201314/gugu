@@ -290,6 +290,10 @@ impl Checker<'_, '_> {
         }
         Some(Ty::Named(id, types))
     }
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "方法调用检查需要接收者、trait 接口、类型实参与期望类型"
+    )]
     fn invoke_method(
         &mut self,
         callee: ExprId,
@@ -566,10 +570,10 @@ impl Checker<'_, '_> {
             self.unify(&actual, expected, span);
         }
         if let Some(callable) = selected.callable {
-            if let Some(definition) = self.model.function_definition(callable) {
-                if !self.dependencies.contains(&definition) {
-                    self.dependencies.push(definition);
-                }
+            if let Some(definition) = self.model.function_definition(callable)
+                && !self.dependencies.contains(&definition)
+            {
+                self.dependencies.push(definition);
             }
             self.dispatches.push(super::super::output::Dispatch {
                 expression: id,

@@ -153,10 +153,10 @@ impl Layouts<'_, '_> {
                     return Err(invalid("按位指针访问不能绕过 COW 或 resource 管理动作"));
                 }
             }
-            MemoryIntrinsic::ReadUnaligned | MemoryIntrinsic::WriteUnaligned => {
-                if self.model.is_bit_type(&operation.value, hidden) == Some(false) {
-                    return Err(invalid("未对齐访问只允许位类型"));
-                }
+            MemoryIntrinsic::ReadUnaligned | MemoryIntrinsic::WriteUnaligned
+                if self.model.is_bit_type(&operation.value, hidden) == Some(false) =>
+            {
+                return Err(invalid("未对齐访问只允许位类型"));
             }
             _ => {}
         }

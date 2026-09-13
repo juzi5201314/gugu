@@ -240,32 +240,33 @@ fn collect(modules: &[ParsedModule]) -> Vec<MacroCall> {
         let arena = &parsed.arena;
         for (index, item) in arena.items.iter().enumerate() {
             let id = ItemId(index as u32);
-            if let ItemKind::SourceMacro { body } = item.kind {
-                if parsed.configured.item_active(id) && item_active_in_containers(parsed, id) {
-                    calls.push(MacroCall {
-                        module,
-                        slot: SourceSlot::Item,
-                        script: body,
-                        call: item.span.clone(),
-                        definition: arena.exprs[body.0 as usize].span.clone(),
-                        position: MacroPosition::Item(id),
-                    });
-                }
+            if let ItemKind::SourceMacro { body } = item.kind
+                && parsed.configured.item_active(id)
+                && item_active_in_containers(parsed, id)
+            {
+                calls.push(MacroCall {
+                    module,
+                    slot: SourceSlot::Item,
+                    script: body,
+                    call: item.span.clone(),
+                    definition: arena.exprs[body.0 as usize].span.clone(),
+                    position: MacroPosition::Item(id),
+                });
             }
         }
         for (index, stmt) in arena.stmts.iter().enumerate() {
             let id = StmtId(index as u32);
-            if let StmtKind::SourceMacro { body } = stmt.kind {
-                if parsed.configured.stmt_active(id) {
-                    calls.push(MacroCall {
-                        module,
-                        slot: SourceSlot::Statement,
-                        script: body,
-                        call: stmt.span.clone(),
-                        definition: arena.exprs[body.0 as usize].span.clone(),
-                        position: MacroPosition::Stmt(id),
-                    });
-                }
+            if let StmtKind::SourceMacro { body } = stmt.kind
+                && parsed.configured.stmt_active(id)
+            {
+                calls.push(MacroCall {
+                    module,
+                    slot: SourceSlot::Statement,
+                    script: body,
+                    call: stmt.span.clone(),
+                    definition: arena.exprs[body.0 as usize].span.clone(),
+                    position: MacroPosition::Stmt(id),
+                });
             }
         }
         for (index, expr) in arena.exprs.iter().enumerate() {
@@ -587,6 +588,10 @@ fn script_text(sources: &SourceMap, call: &MacroCall) -> String {
 }
 
 /// `ExpandSourceMacro` query 包装的宏求值。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "宏求值需要轮次、输入指纹、cfg 与预算共同参与缓存键"
+)]
 fn evaluate_macro(
     model: &semantics::model::Model<'_>,
     sources: &SourceMap,
@@ -1063,19 +1068,18 @@ fn find_stmt_position(
 ) -> Option<(ExprId, usize, usize, usize)> {
     let arena = &module.arena;
     for (index, expr) in arena.exprs.iter().enumerate() {
-        if let ExprKind::Block { stmts, .. } = expr.kind {
-            if let Some(offset) = stmts
+        if let ExprKind::Block { stmts, .. } = expr.kind
+            && let Some(offset) = stmts
                 .as_slice(&arena.stmt_ids)
                 .iter()
                 .position(|&stmt| stmt == target)
-            {
-                return Some((
-                    ExprId(index as u32),
-                    stmts.start as usize + offset,
-                    stmts.start as usize,
-                    stmts.len as usize,
-                ));
-            }
+        {
+            return Some((
+                ExprId(index as u32),
+                stmts.start as usize + offset,
+                stmts.start as usize,
+                stmts.len as usize,
+            ));
         }
     }
     None

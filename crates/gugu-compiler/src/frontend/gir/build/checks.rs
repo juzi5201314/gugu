@@ -76,11 +76,11 @@ fn check_operands(
                 let start = start
                     .map(|start| builder.require_value(start))
                     .transpose()?
-                    .map(|local| copy_of(local));
+                    .map(copy_of);
                 let end = end
                     .map(|end| builder.require_value(end))
                     .transpose()?
-                    .map(|local| copy_of(local));
+                    .map(copy_of);
                 Ok([Some(Operand::Copy(base)), start, end]
                     .into_iter()
                     .flatten()

@@ -239,10 +239,10 @@ impl Builder<'_> {
             hir::CallTarget::Constructor { .. } => Callee::Builtin(hir::Builtin::Some),
         };
         let mut args = Vec::new();
-        if let Some(receiver) = receiver {
-            if let Some(local) = self.emit_expr(receiver)? {
-                args.push(copy_of(local));
-            }
+        if let Some(receiver) = receiver
+            && let Some(local) = self.emit_expr(receiver)?
+        {
+            args.push(copy_of(local));
         }
         for argument in expr_range(self.owner, &arguments) {
             if let Some(local) = self.emit_expr(argument)? {

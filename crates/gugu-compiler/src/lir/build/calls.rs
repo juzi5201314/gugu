@@ -198,6 +198,10 @@ impl Builder<'_> {
             Some(Terminator::Branch { condition, yes, no });
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "调用 lowering 需要 callee、实参、目标 place 与正常/展开出口"
+    )]
     fn call(
         &mut self,
         callee: &g::Callee,

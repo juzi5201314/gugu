@@ -38,7 +38,7 @@ fn main() {
         let total = items * producers as u64;
         let started = Instant::now();
 
-        let workers = producers.min(4).max(1);
+        let workers = producers.clamp(1, 4);
         let mut joins = Vec::new();
         for worker in 0..workers {
             let shards = Arc::clone(&shards);
@@ -103,7 +103,7 @@ fn main() {
                     let victim = (rng % 8) as usize;
                     {
                         let mut guard = shards[victim].lock().expect("shard 可锁");
-                        let take = ((guard.len() + 1) / 2).min(128);
+                        let take = guard.len().div_ceil(2).min(128);
                         for _ in 0..take {
                             if let Some(item) = guard.pop_front() {
                                 local.push_back(item);

@@ -136,7 +136,7 @@ impl Parser<'_> {
             .expect("路径至少有一段")
             .name;
         let segs = self.arena.paths[path.0 as usize].segments;
-        if segs.len == 1 && segs.as_slice(&self.arena.segments)[0].colon == false {
+        if segs.len == 1 && !segs.as_slice(&self.arena.segments)[0].colon {
             self.push_pat(mark, PatKind::Ident(name))
         } else {
             self.push_pat(

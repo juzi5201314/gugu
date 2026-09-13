@@ -664,6 +664,10 @@ fn path_text(module: &ParsedModule, path_id: super::ast::PathId) -> Vec<String> 
         .collect()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "模块解析需要精确/折叠表、内建集合与导入者上下文"
+)]
 fn classify_module(
     path: &[String],
     external_packages: &BTreeSet<String>,

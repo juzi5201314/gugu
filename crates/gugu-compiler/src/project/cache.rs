@@ -343,23 +343,23 @@ impl DependencyCache {
             return Err(invalid_error(&files_directory, "缓存目录包含未登记文件"));
         }
         let actual_checksum = actual_files.checksum();
-        if let Some(record_checksum) = record.checksum.as_deref() {
-            if record_checksum != actual_checksum {
-                return Err(CacheError::Checksum {
-                    package: package.to_string(),
-                    expected: record_checksum.to_owned(),
-                    actual: actual_checksum,
-                });
-            }
+        if let Some(record_checksum) = record.checksum.as_deref()
+            && record_checksum != actual_checksum
+        {
+            return Err(CacheError::Checksum {
+                package: package.to_string(),
+                expected: record_checksum.to_owned(),
+                actual: actual_checksum,
+            });
         }
-        if let Some(expected) = expected_checksum {
-            if expected != actual_checksum {
-                return Err(CacheError::Checksum {
-                    package: package.to_string(),
-                    expected: expected.to_owned(),
-                    actual: actual_checksum,
-                });
-            }
+        if let Some(expected) = expected_checksum
+            && expected != actual_checksum
+        {
+            return Err(CacheError::Checksum {
+                package: package.to_string(),
+                expected: expected.to_owned(),
+                actual: actual_checksum,
+            });
         }
         Ok(DependencyInput::new(package.clone(), actual_files))
     }
@@ -521,14 +521,14 @@ fn load_vendor_inputs(
                 actual,
             });
         }
-        if let Some(expected_checksum) = record.checksum.as_deref() {
-            if expected_checksum != actual {
-                return Err(CacheError::Checksum {
-                    package: package.id.to_string(),
-                    expected: expected_checksum.to_owned(),
-                    actual,
-                });
-            }
+        if let Some(expected_checksum) = record.checksum.as_deref()
+            && expected_checksum != actual
+        {
+            return Err(CacheError::Checksum {
+                package: package.id.to_string(),
+                expected: expected_checksum.to_owned(),
+                actual,
+            });
         }
         inputs.push(DependencyInput::new(package.id.clone(), files));
     }

@@ -92,6 +92,10 @@ pub(super) fn plan(
     }
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "初始化依赖遍历需要依赖图、种类表与活跃栈共同推进"
+)]
 fn visit(
     def: DefRef,
     model: &Model<'_>,

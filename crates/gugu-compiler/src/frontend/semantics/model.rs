@@ -996,13 +996,12 @@ impl<'a> Model<'a> {
                 Ty::TryRecvErr => path.len() == 1 || path == ["TryRecvErr", *name],
                 _ => false,
             };
-            if visible {
-                if let Some(variant) = self
+            if visible
+                && let Some(variant) = self
                     .variants(ty)
                     .and_then(|vs| vs.into_iter().find(|v| v.name == *name))
-                {
-                    return Ok(Some((ty.deref().clone(), variant)));
-                }
+            {
+                return Ok(Some((ty.deref().clone(), variant)));
             }
         }
         if expected.is_none() {

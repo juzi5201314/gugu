@@ -55,18 +55,14 @@ impl Model<'_> {
                         }
                     }
                     ExprKind::Path(path) => {
-                        if let Ok(def) = self.resolve(module, &self.path(module, path)) {
-                            if let ItemKind::Function(function) =
+                        if let Ok(def) = self.resolve(module, &self.path(module, path))
+                            && let ItemKind::Function(function) =
                                 self.modules[def.module].arena.items[def.item.0 as usize].kind
-                            {
-                                if let FnBody::Block(body) | FnBody::Eq(body) =
-                                    self.modules[def.module].arena.fns[function.0 as usize].body
-                                {
-                                    if self.late_walk(def.module, body, seen) {
-                                        return true;
-                                    }
-                                }
-                            }
+                            && let FnBody::Block(body) | FnBody::Eq(body) =
+                                self.modules[def.module].arena.fns[function.0 as usize].body
+                            && self.late_walk(def.module, body, seen)
+                        {
+                            return true;
                         }
                     }
                     _ => {}

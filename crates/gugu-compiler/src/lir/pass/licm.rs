@@ -72,13 +72,11 @@ fn preheader_of(editor: &Editor, natural: &LoopInfo) -> Option<BlockId> {
 
 /// 除法、取余与浮点转整数可能触发陷阱，禁止外提。
 fn hoistable(op: &Op) -> bool {
-    match op {
-        Op::Integer(
-            IntOp::DivSigned | IntOp::DivUnsigned | IntOp::RemSigned | IntOp::RemUnsigned,
-        ) => false,
-        Op::Convert(Conversion::FloatToInt { .. }) => false,
-        _ => true,
-    }
+    !matches!(
+        op,
+        Op::Integer(IntOp::DivSigned | IntOp::DivUnsigned | IntOp::RemSigned | IntOp::RemUnsigned)
+            | Op::Convert(Conversion::FloatToInt { .. })
+    )
 }
 
 fn invariant(

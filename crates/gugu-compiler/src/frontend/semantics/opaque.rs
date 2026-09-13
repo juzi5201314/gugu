@@ -70,12 +70,11 @@ impl Model<'_> {
     fn opaque_environment(&self, id: u32) -> BTreeMap<String, Ty> {
         let definition = &self.opaques.definitions[id as usize];
         let mut context = self.parameters_at(definition.module, self.opaque_span(id));
-        if let Origin::Alias(owner) = definition.origin {
-            if let ItemKind::TypeAlias { generics, .. } =
+        if let Origin::Alias(owner) = definition.origin
+            && let ItemKind::TypeAlias { generics, .. } =
                 self.modules[owner.module].arena.items[owner.item.0 as usize].kind
-            {
-                context.extend(self.generic_parameters(owner.module, generics));
-            }
+        {
+            context.extend(self.generic_parameters(owner.module, generics));
         }
         context
     }
@@ -96,10 +95,7 @@ impl Model<'_> {
         let definition = &self.opaques.definitions[id as usize];
         if matches!(definition.origin, Origin::Parameter(_)) {
             let name = Self::apit_name(id);
-            return Ok(params
-                .get(&name)
-                .cloned()
-                .unwrap_or_else(|| Ty::Param(name)));
+            return Ok(params.get(&name).cloned().unwrap_or(Ty::Param(name)));
         }
         let arguments = self
             .opaque_context(id)

@@ -580,7 +580,7 @@ fn validate_derive(source: &str, body: &[Token]) -> Result<(), AttrError> {
             );
         }
     }
-    if args.len() % 2 == 0
+    if args.len().is_multiple_of(2)
         && args
             .last()
             .is_some_and(|token| token.kind == TokenKind::Comma)
