@@ -11,6 +11,7 @@ pub(crate) mod attr;
 pub(crate) mod cfg;
 mod expand;
 pub(crate) mod format;
+pub(crate) mod gc;
 pub(crate) mod gir;
 pub(crate) mod hir;
 mod intern;

@@ -8,6 +8,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::coroutine_schema::{CoroutineDemand, CoroutineRuntimeContract};
+use super::gc_metadata_contract::GcMetadataRuntimeContract;
+use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::ServiceBudget;
 use super::ledger::LedgerSchemaV1;
 use super::message::{BatchLimits, RETURN_NODE_ALIGN, RETURN_NODE_BYTES};
@@ -30,8 +32,9 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 9 并入栈图根种类、safepoint 与 section 常量契约。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 9;
+/// 契约对象的schema版本；schema 10 并入 GC metadata 类型表、trace/value program、
+/// arena/block/line 布局、glue、root、source metadata 契约段。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 10;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -336,6 +339,7 @@ pub(crate) struct RuntimeRawContractV1 {
     wait: WaitRuntimeContract,
     sync: SyncRuntimeContract,
     stackmap: StackMapRuntimeContract,
+    gc_metadata: GcMetadataRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -361,6 +365,7 @@ impl RuntimeRawContractV1 {
         wait_demand: WaitDemand,
         sync_demand: SyncDemand,
         stackmap_demand: StackMapDemand,
+        gc_metadata_demand: GcMetadataDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -371,6 +376,7 @@ impl RuntimeRawContractV1 {
         let rt0 = Rt0SchemaV1::build(rt0_demand)?;
         let sync = SyncRuntimeContract::build(sync_demand, profile)?;
         let stackmap = StackMapRuntimeContract::build(stackmap_demand)?;
+        let gc_metadata = GcMetadataRuntimeContract::build(gc_metadata_demand)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -391,6 +397,7 @@ impl RuntimeRawContractV1 {
             wait: WaitRuntimeContract::build(wait_demand, profile)?,
             sync,
             stackmap,
+            gc_metadata,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -502,6 +509,15 @@ impl RuntimeRawContractV1 {
     /// 返回栈图契约段。
     pub(crate) fn stackmap(&self) -> &StackMapRuntimeContract {
         &self.stackmap
+    }
+
+    /// 返回 GC metadata 契约段。
+    #[allow(
+        dead_code,
+        reason = "契约段由阶段 39 的 codec 与 ImagePlan 字段在后续消费"
+    )]
+    pub(crate) fn gc_metadata(&self) -> &GcMetadataRuntimeContract {
+        &self.gc_metadata
     }
 
     /// 返回账本分类名。
@@ -639,6 +655,7 @@ impl RuntimeRawContractV1 {
         self.wait.verify()?;
         self.sync.verify()?;
         self.stackmap.verify()?;
+        self.gc_metadata.verify()?;
         if self.scheduler.demand.spawn_sites != self.demand.coroutine_sites
             || self.scheduler.demand.suspend_points != self.demand.suspend_points
         {
@@ -690,6 +707,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.wait.canonical_bytes());
         bytes.extend_from_slice(&self.sync.canonical_bytes());
         bytes.extend_from_slice(&self.stackmap.canonical_bytes());
+        bytes.extend_from_slice(&self.gc_metadata.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -915,6 +933,7 @@ impl RuntimeRawContractV1 {
             hex(&self.sync.fingerprint())
         ));
         output.push_str(&self.stackmap.dump());
+        output.push_str(&self.gc_metadata.dump());
         output
     }
 }
@@ -960,6 +979,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) sync_demand: SyncDemand,
     /// 栈图需求视图：逻辑函数、安全点、kind 分类与根字数。
     pub(crate) stackmap_demand: StackMapDemand,
+    /// GC metadata 需求视图：类型表大小、trace/value program 字节数与 arena 布局。
+    pub(crate) gc_metadata_demand: GcMetadataDemand,
     /// 生成契约所依据的 LIR 输入指纹。
     pub(crate) lir_fingerprint: [u8; 32],
     /// placement world 指纹。
@@ -983,6 +1004,7 @@ pub(crate) fn run(
         inputs.wait_demand,
         inputs.sync_demand,
         inputs.stackmap_demand,
+        inputs.gc_metadata_demand,
     ))
     .expect("runtime需求与策略可序列化");
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
@@ -1019,6 +1041,7 @@ pub(crate) fn run(
                 inputs.wait_demand,
                 inputs.sync_demand,
                 inputs.stackmap_demand,
+                inputs.gc_metadata_demand,
                 inputs.profile,
             )
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;

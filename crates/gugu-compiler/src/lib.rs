@@ -430,6 +430,7 @@ impl Compiler {
                 wait_demand: lir.wait_demand(),
                 sync_demand: lir.sync_demand(),
                 stackmap_demand: lir.stackmap_demand(frontend.hir.module()),
+                gc_metadata_demand: gc_metadata_demand(&frontend.mono),
                 profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
@@ -555,6 +556,31 @@ impl Compiler {
             raw_contract: Some(raw_contract),
             action_key,
         }
+    }
+}
+
+/// 由冻结类型表推导 GC metadata demand。
+///
+/// 真实类型表与 trace/value program 字节在阶段 39 后续接 codec；本阶段保证 demand
+/// 反映类型表/聚合 entry 与 vtable 计数，使契约指纹随闭世界内容变化。
+fn gc_metadata_demand(mono: &frontend::mono::MonoWorldV1) -> runtime::GcMetadataDemand {
+    let records = &mono.universe.records;
+    let vtables = &mono.universe.vtables;
+    runtime::GcMetadataDemand {
+        type_count: records.len() as u32,
+        // trace/value program 字节数：每个 entry 单字节 End 加末尾 sentinel。
+        trace_program_bytes: records.len().saturating_add(1) as u32,
+        value_program_bytes: records.len().saturating_add(1) as u32,
+        vtable_count: vtables.len() as u32,
+        // 至少一个 root 范围（CoroutineFrame）。
+        root_range_count: 1,
+        // glue 与 alloc 站点在阶段 39 由 placement 完成后填；占位 0。
+        glue_count: 0,
+        alloc_site_count: 0,
+        source_count: 0,
+        arena_bytes: 0,
+        block_bytes: 0,
+        line_bytes: 0,
     }
 }
 
@@ -985,6 +1011,16 @@ pub struct ImagePlan {
     stackmap_root_words: u32,
     stackmap_contract_fingerprint: [u8; 32],
     stackmap_demand: crate::runtime::StackMapDemand,
+    gc_metadata_type_count: u32,
+    gc_metadata_trace_bytes: u32,
+    gc_metadata_value_bytes: u32,
+    gc_metadata_vtable_count: u32,
+    gc_metadata_root_count: u32,
+    gc_metadata_arena_bytes: u64,
+    gc_metadata_block_bytes: u32,
+    gc_metadata_line_bytes: u32,
+    gc_metadata_contract_fingerprint: [u8; 32],
+    gc_metadata_demand: crate::runtime::GcMetadataDemand,
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1079,6 +1115,16 @@ impl ImagePlan {
             stackmap_root_words: plan.stackmap_root_words,
             stackmap_contract_fingerprint: plan.stackmap_contract_fingerprint,
             stackmap_demand: plan.stackmap_demand,
+            gc_metadata_type_count: plan.gc_metadata_type_count,
+            gc_metadata_trace_bytes: plan.gc_metadata_trace_bytes,
+            gc_metadata_value_bytes: plan.gc_metadata_value_bytes,
+            gc_metadata_vtable_count: plan.gc_metadata_vtable_count,
+            gc_metadata_root_count: plan.gc_metadata_root_count,
+            gc_metadata_arena_bytes: plan.gc_metadata_arena_bytes,
+            gc_metadata_block_bytes: plan.gc_metadata_block_bytes,
+            gc_metadata_line_bytes: plan.gc_metadata_line_bytes,
+            gc_metadata_contract_fingerprint: plan.gc_metadata_contract_fingerprint,
+            gc_metadata_demand: plan.gc_metadata_demand,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1451,6 +1497,46 @@ impl ImagePlan {
     /// 返回栈图需求视图。
     pub fn stackmap_demand(&self) -> crate::runtime::StackMapDemand {
         self.stackmap_demand
+    }
+    /// 返回 GC metadata 类型表条目数。
+    pub fn gc_metadata_type_count(&self) -> u32 {
+        self.gc_metadata_type_count
+    }
+    /// 返回 GC metadata trace program 字节数。
+    pub fn gc_metadata_trace_bytes(&self) -> u32 {
+        self.gc_metadata_trace_bytes
+    }
+    /// 返回 GC metadata value program 字节数。
+    pub fn gc_metadata_value_bytes(&self) -> u32 {
+        self.gc_metadata_value_bytes
+    }
+    /// 返回 GC metadata vtable 条目数。
+    pub fn gc_metadata_vtable_count(&self) -> u32 {
+        self.gc_metadata_vtable_count
+    }
+    /// 返回 GC metadata root 范围条目数。
+    pub fn gc_metadata_root_count(&self) -> u32 {
+        self.gc_metadata_root_count
+    }
+    /// 返回 GC arena 字节数。
+    pub fn gc_metadata_arena_bytes(&self) -> u64 {
+        self.gc_metadata_arena_bytes
+    }
+    /// 返回 GC block 字节数。
+    pub fn gc_metadata_block_bytes(&self) -> u32 {
+        self.gc_metadata_block_bytes
+    }
+    /// 返回 GC line 字节数。
+    pub fn gc_metadata_line_bytes(&self) -> u32 {
+        self.gc_metadata_line_bytes
+    }
+    /// 返回 GC metadata 契约指纹。
+    pub fn gc_metadata_contract_fingerprint(&self) -> [u8; 32] {
+        self.gc_metadata_contract_fingerprint
+    }
+    /// 返回 GC metadata 需求视图。
+    pub fn gc_metadata_demand(&self) -> crate::runtime::GcMetadataDemand {
+        self.gc_metadata_demand
     }
     /// 返回调度需求视图。
     pub fn scheduler_demand(&self) -> crate::runtime::SchedulerDemand {
@@ -1931,6 +2017,72 @@ mod tests {
                 .image_plan()
                 .expect("计划")
                 .rt0_contract_fingerprint()
+        );
+    }
+
+    #[test]
+    fn image_plan_reports_gc_metadata_contract() {
+        let source = "fn main() { let value = 1\n _ = value }";
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+        let plan = compilation.image_plan().expect("镜像计划");
+        // 类型表至少含 int/bool/Unit 等基本类型与 fn main 的签名。
+        assert!(plan.gc_metadata_type_count() > 0);
+        assert!(plan.gc_metadata_trace_bytes() > 0);
+        assert!(plan.gc_metadata_value_bytes() > 0);
+        // 1 个 CoroutineFrame root 范围必须出现。
+        assert_eq!(plan.gc_metadata_root_count(), 1);
+        // arena/block/line 与契约常量一致。
+        assert_eq!(plan.gc_metadata_arena_bytes(), 2 * 1024 * 1024);
+        assert_eq!(plan.gc_metadata_block_bytes(), 32 * 1024);
+        assert_eq!(plan.gc_metadata_line_bytes(), 128);
+        // 指纹必须非零且跨编译稳定。
+        assert_ne!(plan.gc_metadata_contract_fingerprint(), [0_u8; 32]);
+        let dump = compilation.dump_runtime().expect("runtime dump");
+        assert!(dump.contains("gc-metadata schema="));
+        assert!(dump.contains("gc-metadata-types"));
+        assert!(dump.contains("gc-metadata-fingerprint"));
+        // 冷/热编译指纹一致。
+        let warm = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert_eq!(
+            plan.gc_metadata_contract_fingerprint(),
+            warm.image_plan()
+                .expect("warm plan")
+                .gc_metadata_contract_fingerprint()
+        );
+        // 类型表变化时 GC metadata 指纹必须变化。
+        let bigger = "fn helper(x: int) int = x + 1\n fn main() { _ = helper(1) }";
+        let bigger_compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            bigger,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            bigger_compilation.is_success(),
+            "{:?}",
+            bigger_compilation.diagnostics().items()
+        );
+        let bigger_plan = bigger_compilation.image_plan().expect("bigger plan");
+        assert!(
+            bigger_plan.gc_metadata_type_count() > plan.gc_metadata_type_count(),
+            "helper 加入后 GC 类型表必须扩张"
+        );
+        assert_ne!(
+            bigger_plan.gc_metadata_contract_fingerprint(),
+            plan.gc_metadata_contract_fingerprint(),
+            "GC metadata 指纹必须随类型表变化"
         );
     }
 

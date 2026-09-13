@@ -16,6 +16,12 @@ mod context;
 mod coroutine;
 mod coroutine_layout;
 mod coroutine_schema;
+#[allow(
+    dead_code,
+    reason = "GC metadata 契约段由阶段 39 的 codec 与 ImagePlan 字段在后续消费"
+)]
+pub(crate) mod gc_metadata_contract;
+pub(crate) mod gc_metadata_schema;
 mod harness;
 mod model;
 mod platform_schema;
@@ -52,6 +58,17 @@ pub use coroutine_schema::{
     CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
     StackPolicy,
 };
+#[allow(
+    unused_imports,
+    reason = "GcMetadataRuntimeContract 由阶段 39 codec 在后续消费"
+)]
+pub(crate) use gc_metadata_contract::GcMetadataRuntimeContract;
+pub use gc_metadata_schema::GcMetadataDemand;
+#[allow(
+    unused_imports,
+    reason = "GcMetadataWorldV1 由阶段 39 codec 在后续消费"
+)]
+pub(crate) use gc_metadata_schema::GcMetadataWorldV1;
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};

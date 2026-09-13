@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 
 use super::extent::EXTENT_CLASS_LADDER;
+use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::{DrainStop, GraceOutcome, OwnerInbox, ServiceBudget, ShardIndex};
 use super::message::{
     BatchLimits, FlushTrigger, IntegrityTag, LinkCodec, LinkError, MessageState, ProducerStaging,
@@ -660,6 +661,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -706,6 +708,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             WaitDemand::default(),
             SyncDemand::default(),
             StackMapDemand::default(),
+            GcMetadataDemand::empty(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
@@ -738,6 +741,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -751,6 +755,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -770,6 +775,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -784,6 +790,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
@@ -1415,6 +1422,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1458,6 +1466,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1474,6 +1483,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1506,6 +1516,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         WaitDemand::default(),
         SyncDemand::default(),
         demand,
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("栈图契约可构建");
@@ -1527,6 +1538,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             WaitDemand::default(),
             SyncDemand::default(),
             bad,
+            GcMetadataDemand::empty(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1546,6 +1558,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             WaitDemand::default(),
             SyncDemand::default(),
             overflow,
+            GcMetadataDemand::empty(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1562,6 +1575,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         WaitDemand::default(),
         SyncDemand::default(),
         StackMapDemand::default(),
+        GcMetadataDemand::empty(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("空栈图契约可构建");
@@ -1597,4 +1611,164 @@ fn resource_schema_rejects_malformed_fixed_metadata() {
 
 fn _raw_invariant_is_reported(error: RawInvariant) -> String {
     error.message().to_owned()
+}
+
+mod gc_metadata_tests {
+    //! Mosaic GC metadata 契约与 boot verifier 的端到端测试。
+
+    use super::super::gc_metadata_contract::{
+        GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES, GcMetadataRuntimeContract,
+    };
+    use super::super::gc_metadata_schema::{
+        GcArenaLayoutV1, GcMetadataDemand, GcMetadataWorldV1, GcRootKindV1, GcRootLocationV1,
+        GcRootRangeV1, GcTypeEntryV1, TraceOp, ValueOp, boot_verify,
+    };
+    use super::super::model::{RawModelError, RuntimeRawContractV1};
+    use super::super::platform::PlatformProfile;
+    use super::super::scheduler_schema::SchedulerDemand;
+    use super::super::stackmap_schema::StackMapDemand;
+    use super::super::sync_schema::SyncDemand;
+    use super::super::wait_schema::WaitDemand;
+    use super::{RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, Rt0Demand};
+    use crate::TargetName;
+
+    fn minimal_world() -> GcMetadataWorldV1 {
+        let trace_program = vec![TraceOp::End as u8];
+        let value_program = vec![ValueOp::End as u8];
+        GcMetadataWorldV1 {
+            types: vec![GcTypeEntryV1 {
+                type_key: [1_u8; 32],
+                canonical: vec![0u8, 0u8],
+                name: "int".to_owned(),
+                layout: Some((8, 8)),
+                children: Vec::new(),
+                flags: 0,
+                trace_offset: 0,
+                value_offset: 0,
+            }],
+            vtables: Vec::new(),
+            trace_program,
+            value_program,
+            glue: Vec::new(),
+            roots: vec![GcRootRangeV1 {
+                kind: GcRootKindV1::CoroutineFrame,
+                location: GcRootLocationV1::Aggregate { offset_bytes: 0 },
+                type_range: (0, 1),
+                word_range: (0, 0),
+            }],
+            sources: Vec::new(),
+            alloc_sites: Vec::new(),
+            arena: GcArenaLayoutV1 {
+                arena_bytes: GC_ARENA_BYTES,
+                block_bytes: GC_BLOCK_BYTES,
+                line_bytes: GC_LINE_BYTES,
+            },
+            schema: GcMetadataWorldV1::SCHEMA,
+        }
+    }
+
+    #[test]
+    fn boot_verify_accepts_minimal_world() {
+        let world = minimal_world();
+        boot_verify(&world).expect("最小 world 必须自洽");
+    }
+
+    #[test]
+    fn boot_verify_rejects_missing_trace_end() {
+        let mut world = minimal_world();
+        world.trace_program.pop();
+        world.trace_program.push(TraceOp::Direct as u8);
+        assert!(boot_verify(&world).is_err(), "缺 trace END 必须拒绝");
+    }
+
+    #[test]
+    fn boot_verify_rejects_missing_value_end() {
+        let mut world = minimal_world();
+        world.value_program.pop();
+        world.value_program.push(ValueOp::End as u8);
+        world.value_program.push(ValueOp::Aggregate as u8);
+        assert!(boot_verify(&world).is_err(), "缺 value END 必须拒绝");
+    }
+
+    #[test]
+    fn boot_verify_rejects_dangling_child_key() {
+        let mut world = minimal_world();
+        world.types[0].children.push([7_u8; 32]);
+        assert!(boot_verify(&world).is_err(), "child key 不可解析必须拒绝");
+    }
+
+    #[test]
+    fn gc_metadata_demand_fingerprint_is_stable() {
+        let demand = GcMetadataDemand {
+            type_count: 7,
+            trace_program_bytes: 13,
+            value_program_bytes: 11,
+            vtable_count: 2,
+            glue_count: 0,
+            root_range_count: 1,
+            source_count: 0,
+            alloc_site_count: 0,
+            arena_bytes: 0,
+            block_bytes: 0,
+            line_bytes: 0,
+        };
+        assert_eq!(demand.fingerprint(), demand.fingerprint());
+        let mut revised = demand;
+        revised.type_count = 8;
+        assert_ne!(revised.fingerprint(), demand.fingerprint());
+    }
+
+    #[test]
+    fn gc_metadata_contract_rejects_drift_arena_layout() {
+        let mut demand = GcMetadataDemand::empty();
+        demand.arena_bytes = 4 * 1024 * 1024;
+        demand.block_bytes = GC_BLOCK_BYTES;
+        demand.line_bytes = GC_LINE_BYTES;
+        let err = GcMetadataRuntimeContract::build(demand).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "GC arena/block/line 与契约常量不一致",
+            "arena 漂移必须拒绝"
+        );
+    }
+
+    #[test]
+    fn gc_metadata_contract_integrates_into_runtime_raw_model() {
+        let demand = GcMetadataDemand {
+            type_count: 3,
+            trace_program_bytes: 4,
+            value_program_bytes: 4,
+            vtable_count: 0,
+            glue_count: 0,
+            root_range_count: 1,
+            source_count: 0,
+            alloc_site_count: 0,
+            arena_bytes: 0,
+            block_bytes: 0,
+            line_bytes: 0,
+        };
+        let contract = RuntimeRawContractV1::build(
+            TargetName::X86_64Linux,
+            RawPlanePolicyV1::default(),
+            RawPlaneDemand::default(),
+            RawResourceDemand::default(),
+            Rt0Demand::default(),
+            SchedulerDemand::default(),
+            WaitDemand::default(),
+            SyncDemand::default(),
+            StackMapDemand::default(),
+            demand,
+            PlatformProfile::from(TargetName::X86_64Linux),
+        )
+        .expect("契约可构建");
+        contract.verify().expect("契约自洽");
+        assert_eq!(contract.gc_metadata().demand.type_count, 3);
+        assert!(contract.dump().contains("gc-metadata schema="));
+    }
+
+    #[test]
+    fn raw_model_error_displays_message() {
+        let error = RawModelError::new("演示消息");
+        assert_eq!(error.to_string(), "演示消息");
+    }
 }
