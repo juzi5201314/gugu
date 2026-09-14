@@ -8,6 +8,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use super::barrier_schema::MessageFamilyTag;
 use super::inbox::{OwnerInbox, ShardIndex};
 use super::size_class::RuntimeSizeClassId;
 use super::slab::{
@@ -267,6 +268,34 @@ pub(crate) struct ReturnMessage {
     pub(crate) integrity: IntegrityTag,
 }
 
+/// 一条 remembered-set card batch；GC 工作消息族，与 return 消息共用传输与 grace。
+///
+/// 只携带稳定 arena descriptor、generation、card 区间、cycle epoch 与 bytes：card table
+/// 只能由 arena allocation owner 写入，因此 batch 既不携带 field 地址，也不携带 managed
+/// pointer。`card_count == 0` 表示该 batch 只宣告 epoch 前进，不置位任何 card。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CardMarkBatch {
+    /// raw intrusive link；只存在于 non-moving message storage。
+    pub(crate) next: Option<u32>,
+    /// arena allocation owner 的稳定身份。
+    pub(crate) target: OwnerToken,
+    /// arena descriptor 的稠密编号。
+    pub(crate) arena: SlabDescriptorId,
+    /// arena 的 generation；回收后旧 batch 必须被拒绝。
+    pub(crate) arena_generation: u32,
+    /// batch 覆盖的起始 card 序号。
+    pub(crate) card_start: u32,
+    /// batch 覆盖的 card 数量；连续区间。
+    pub(crate) card_count: u32,
+    /// 产生这些键的 GC cycle epoch。
+    pub(crate) cycle_epoch: u64,
+    /// 本次 batch 触及的 distinct card 字节数。
+    pub(crate) bytes: u32,
+    pub(crate) state: MessageState,
+    /// arena generation、owner 与 cycle epoch 的校验信息。
+    pub(crate) integrity: IntegrityTag,
+}
+
 /// 消息 integrity 校验信息。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IntegrityTag {
@@ -300,6 +329,43 @@ impl IntegrityTag {
             digest.as_bytes()[2],
             digest.as_bytes()[3],
         ])
+    }
+    /// 用 per-domain secret 与全部身份字段计算 card batch 的校验值。
+    pub(crate) fn compute_card_mark(secret: &[u8; 32], batch: &CardMarkBatch) -> u32 {
+        let mut hasher = blake3::Hasher::new_derive_key("gugu-card-mark-integrity-v1");
+        hasher.update(secret);
+        hasher.update(&batch.target.domain.raw().to_le_bytes());
+        hasher.update(&batch.target.owner_id.raw().to_le_bytes());
+        hasher.update(&batch.target.generation.raw().to_le_bytes());
+        hasher.update(&batch.target.route_key.raw().to_le_bytes());
+        hasher.update(&MessageFamilyTag::CardMark.raw().to_le_bytes());
+        hasher.update(&batch.arena.raw().to_le_bytes());
+        hasher.update(&batch.arena_generation.to_le_bytes());
+        hasher.update(&batch.card_start.to_le_bytes());
+        hasher.update(&batch.card_count.to_le_bytes());
+        hasher.update(&batch.cycle_epoch.to_le_bytes());
+        hasher.update(&batch.bytes.to_le_bytes());
+        // 只有 card batch 自己的身份进入摘要：`integrity.generation`/`class` 是 return 消息
+        // 的载入键，对 card 族没有语义，因此不参与校验，避免载入键与记录内容互相绑定。
+        let digest = hasher.finalize();
+        u32::from_le_bytes([
+            digest.as_bytes()[0],
+            digest.as_bytes()[1],
+            digest.as_bytes()[2],
+            digest.as_bytes()[3],
+        ])
+    }
+
+    /// 校验 card batch 的 checksum 与本记录的其他身份字段一致。
+    pub(crate) fn verify_card_mark(
+        &self,
+        secret: &[u8; 32],
+        batch: &CardMarkBatch,
+    ) -> Result<(), RawInvariant> {
+        if self.checksum != Self::compute_card_mark(secret, batch) {
+            return Err(RawInvariant::new("card mark batch integrity 校验失败"));
+        }
+        Ok(())
     }
 
     /// 校验 checksum 与本记录的其他身份字段一致。
@@ -339,7 +405,10 @@ impl ReturnNodeId {
 /// 车道分配：`next` 为 encoded node link 或 NULL；`owner_id`、`generation`、`route_key`
 /// 保存目标 owner 身份；`descriptor_unit` 为 `descriptor(32) | unit(32)`；
 /// `bytes_epoch` 为 `bytes(32) | source_epoch(32)`；`state_kind` 为
-/// `state(8) | kind(8) | domain(8)`；`integrity` 保存 integrity checksum；`reuse` 保存
+/// `state_kind` 为 `state(8) | kind(8) | domain(8) | family(8) | 保留`；
+/// `payload_low`/`payload_high` 为消息族专属车道（card batch 用
+/// `arena(32) | card_start(32)` 与 `arena_generation(32) | card_count(32)`）；
+/// `integrity` 保存 integrity checksum；`reuse` 保存
 /// `Free`/`InUse` 复用标记。车道不足一个 cache line 时补齐，node stride 因此是
 /// `RETURN_NODE_BYTES`。
 #[repr(align(64))]
@@ -352,6 +421,8 @@ pub(crate) struct ReturnNode {
     descriptor_unit: AtomicU64,
     bytes_epoch: AtomicU64,
     state_kind: AtomicU64,
+    payload_low: AtomicU64,
+    payload_high: AtomicU64,
     integrity: AtomicU64,
     reuse: AtomicU64,
     /// free stack 专用 link；与 message chain 的 `next` 分离，避免两种语义互相覆盖。
@@ -387,13 +458,49 @@ impl ReturnNode {
         self.state_kind.store(
             message.state.code()
                 | (u64::from(message.kind.raw()) << 8)
-                | (u64::from(message.target.domain.raw()) << 16),
+                | (u64::from(message.target.domain.raw()) << 16)
+                | (u64::from(MessageFamilyTag::Return.raw()) << 24),
+            Ordering::Relaxed,
+        );
+        self.payload_low.store(0, Ordering::Relaxed);
+        self.payload_high.store(0, Ordering::Relaxed);
+        self.integrity
+            .store(u64::from(integrity), Ordering::Relaxed);
+    }
+
+    fn store_card_mark(&self, batch: &CardMarkBatch, integrity: u32) {
+        self.owner_id
+            .store(batch.target.owner_id.raw(), Ordering::Relaxed);
+        self.generation
+            .store(batch.target.generation.raw(), Ordering::Relaxed);
+        self.route_key
+            .store(batch.target.route_key.raw(), Ordering::Relaxed);
+        self.descriptor_unit.store(
+            u64::from(batch.arena.raw()) | (u64::from(batch.card_start) << 32),
+            Ordering::Relaxed,
+        );
+        self.bytes_epoch.store(
+            u64::from(batch.bytes) | ((batch.cycle_epoch & 0xFFFF_FFFF) << 32),
+            Ordering::Relaxed,
+        );
+        self.state_kind.store(
+            batch.state.code()
+                | (u64::from(MessageFamilyTag::CardMark.raw()) << 8)
+                | (u64::from(batch.target.domain.raw()) << 16)
+                | (u64::from(MessageFamilyTag::CardMark.raw()) << 24),
+            Ordering::Relaxed,
+        );
+        self.payload_low
+            .store(batch.cycle_epoch >> 32, Ordering::Relaxed);
+        // card 区间与 arena generation 共用一个车道：低 32 位是 card 数量，高 32 位是
+        // generation，两者都是 32-bit 身份字段，因此无需第三车道。
+        self.payload_high.store(
+            u64::from(batch.card_count) | (u64::from(batch.arena_generation) << 32),
             Ordering::Relaxed,
         );
         self.integrity
             .store(u64::from(integrity), Ordering::Relaxed);
     }
-
     fn load(&self, class: RuntimeSizeClassId, generation: SlabGeneration) -> ReturnMessage {
         let owner_id = self.owner_id.load(Ordering::Relaxed);
         let target_generation = self.generation.load(Ordering::Relaxed);
@@ -422,6 +529,45 @@ impl ReturnNode {
             integrity: IntegrityTag {
                 generation,
                 class,
+                owner_id: OwnerId::from_raw(owner_id),
+                route_key: RouteKey::from_raw(route_key),
+                checksum: integrity as u32,
+            },
+        }
+    }
+
+    /// 从车道重建 card batch；只有 card 族才会调用。
+    fn load_card_mark(&self) -> CardMarkBatch {
+        let owner_id = self.owner_id.load(Ordering::Relaxed);
+        let target_generation = self.generation.load(Ordering::Relaxed);
+        let route_key = self.route_key.load(Ordering::Relaxed);
+        let descriptor_unit = self.descriptor_unit.load(Ordering::Relaxed);
+        let bytes_epoch = self.bytes_epoch.load(Ordering::Relaxed);
+        let state_kind = self.state_kind.load(Ordering::Relaxed);
+        let payload_low = self.payload_low.load(Ordering::Relaxed);
+        let payload_high = self.payload_high.load(Ordering::Relaxed);
+        let integrity = self.integrity.load(Ordering::Relaxed);
+        let arena_generation = (payload_high >> 32) as u32;
+        let domain = MemoryDomainId::from_raw(((state_kind >> 16) & 0xFF) as u8)
+            .unwrap_or(MemoryDomainId::RUNTIME_RAW);
+        CardMarkBatch {
+            next: None,
+            target: OwnerToken {
+                domain,
+                owner_id: OwnerId::from_raw(owner_id),
+                generation: OwnerGeneration::from_raw(target_generation),
+                route_key: RouteKey::from_raw(route_key),
+            },
+            arena: SlabDescriptorId::from_raw((descriptor_unit & 0xFFFF_FFFF) as u32),
+            card_start: (descriptor_unit >> 32) as u32,
+            arena_generation,
+            cycle_epoch: (payload_low << 32) | (bytes_epoch >> 32),
+            card_count: (payload_high & 0xFFFF_FFFF) as u32,
+            bytes: (bytes_epoch & 0xFFFF_FFFF) as u32,
+            state: MessageState::from_code((state_kind & 0xFF) as u8),
+            integrity: IntegrityTag {
+                generation: SlabGeneration::from_raw(u64::from(arena_generation)),
+                class: RuntimeSizeClassId::from_raw(0),
                 owner_id: OwnerId::from_raw(owner_id),
                 route_key: RouteKey::from_raw(route_key),
                 checksum: integrity as u32,
@@ -466,6 +612,14 @@ impl ReturnNode {
     fn kind(&self) -> ReturnKind {
         ReturnKind::from_raw(((self.state_kind.load(Ordering::Acquire) >> 8) & 0xFF) as u8)
             .unwrap_or(ReturnKind::RawSlot)
+    }
+
+    /// 读取消息族判别值；未知取值按 `Return` 回退，由 integrity 与 schema 继续拒绝。
+    fn family(&self) -> MessageFamilyTag {
+        match (self.state_kind.load(Ordering::Acquire) >> 24) & 0xFF {
+            1 => MessageFamilyTag::CardMark,
+            _ => MessageFamilyTag::Return,
+        }
     }
 
     fn owner_id(&self) -> OwnerId {
@@ -600,12 +754,24 @@ impl ReturnNodePool {
         }
     }
 
-    /// 写入一个 node 的 payload 并返回其编号；`next` 由调用者随后发布。
+    /// 写入一个 node 的 return payload；`next` 由调用者随后发布。
     pub(crate) fn store(&self, id: ReturnNodeId, message: &ReturnMessage, integrity: u32) {
         self.nodes[id.index()].store(message, integrity);
     }
 
-    /// 按给定 class 与 generation 读取一个 node 的 payload。
+    /// 写入一个 node 的 card batch payload；`next` 由调用者随后发布。
+    pub(crate) fn store_card_mark(&self, id: ReturnNodeId, batch: &CardMarkBatch, integrity: u32) {
+        self.nodes[id.index()].store_card_mark(batch, integrity);
+    }
+
+    /// 读取一个 node 的 card batch payload。
+    ///
+    /// card 族没有 class 语义，arena generation 来自 batch 自身的 arena 身份，因此载入不
+    /// 需要调用方提供载入键；integrity 仍按 batch 自身的身份字段校验。
+    pub(crate) fn load_card_mark(&self, id: ReturnNodeId) -> CardMarkBatch {
+        self.nodes[id.index()].load_card_mark()
+    }
+    /// 按给定 class 与 generation 读取一个 return payload。
     pub(crate) fn load(
         &self,
         id: ReturnNodeId,
@@ -613,6 +779,11 @@ impl ReturnNodePool {
         generation: SlabGeneration,
     ) -> ReturnMessage {
         self.nodes[id.index()].load(class, generation)
+    }
+
+    /// 只读取 node 的消息族判别值。
+    pub(crate) fn family_of(&self, id: ReturnNodeId) -> MessageFamilyTag {
+        self.nodes[id.index()].family()
     }
 
     /// 以 Release 发布 node 的 next link。
@@ -805,14 +976,17 @@ impl ProducerStaging {
     }
 
     /// 暂存一个 node；target 或 shard 改变时先由调用者刷新旧链。
+    ///
+    /// 载荷无关：return 与 card batch 共用同一 staging，族判别值已在 node 车道上。
     pub(crate) fn stage(
         &mut self,
         node: ReturnNodeId,
-        message: &ReturnMessage,
+        target: OwnerToken,
+        bytes: u32,
         shard: ShardIndex,
     ) -> Result<(), RawInvariant> {
-        if let Some(target) = self.target
-            && target != message.target
+        if let Some(current) = self.target
+            && current != target
         {
             return Err(RawInvariant::new("staging 一次只允许一个 target"));
         }
@@ -821,7 +995,7 @@ impl ProducerStaging {
         {
             return Err(RawInvariant::new("staging 一次只允许一个 shard"));
         }
-        self.target = Some(message.target);
+        self.target = Some(target);
         self.shard = Some(shard);
         match self.last {
             Some(_) => self.last = Some(node),
@@ -831,10 +1005,9 @@ impl ProducerStaging {
             }
         }
         self.count += 1;
-        self.bytes += u64::from(message.bytes);
+        self.bytes += u64::from(bytes);
         Ok(())
     }
-
     /// 返回当前暂存链的发布触发条件；条件不满足时返回 `None`。
     pub(crate) fn flush_trigger(&self) -> Option<FlushTrigger> {
         if self.count >= self.limits.items {
@@ -1091,7 +1264,41 @@ pub(crate) fn stage_message(
     if let Some(last) = staging.last() {
         pool.link(last, Some(node));
     }
-    staging.stage(node, message, shard)?;
+    staging.stage(node, message.target, message.bytes, shard)?;
+    if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
+        && let Some(inbox) = inbox
+    {
+        outcome = Some(flush_staging(pool, inbox, staging, trigger)?);
+    }
+    Ok(outcome)
+}
+
+/// producer 侧：写入 card batch node、链入 staging，并在触发条件满足时发布。
+///
+/// 与 `stage_message` 共用 node pool、staging 与 grace；区别只在车道解释与 integrity
+/// 派生键，因此两个族不可能互相冒充。
+pub(crate) fn stage_card_mark(
+    pool: &ReturnNodePool,
+    inbox: Option<&OwnerInbox>,
+    staging: &mut ProducerStaging,
+    batch: &CardMarkBatch,
+    shard: ShardIndex,
+    forced: Option<FlushTrigger>,
+) -> Result<Option<PublishOutcome>, RawInvariant> {
+    let mut outcome = None;
+    if staging
+        .target()
+        .is_some_and(|target| target != batch.target)
+    {
+        return Err(RawInvariant::new("staging 目标改变前必须先发布旧 chain"));
+    }
+    let node = pool.allocate()?;
+    pool.store_card_mark(node, batch, batch.integrity.checksum);
+    pool.link(node, None);
+    if let Some(last) = staging.last() {
+        pool.link(last, Some(node));
+    }
+    staging.stage(node, batch.target, batch.bytes, shard)?;
     if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
         && let Some(inbox) = inbox
     {

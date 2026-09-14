@@ -252,7 +252,7 @@ LirBody {
 }
 
 ```
-`BarrierPermitData { region: NoSafepointRegionId, max_shades: u32 }` 是稠密的 compile-time证明：`BarrierReserve { permit }` 在 region外保证 processor barrier buffer至少剩余 `max_shades` 个 entry，匹配的 `GcWriteBarrierReserved { permit }` 只消费该额度。permit不进入 SSA value、register allocation、stack map或机器 ABI。
+`BarrierPermitData { region: NoSafepointRegionId, max_shades: u32, max_card_marks: u32 }` 是稠密的 compile-time证明：`BarrierReserve { permit }` 在 region外保证 processor barrier buffer至少剩余 `max_shades` 个 shade slot与 `max_card_marks` 个 distinct card 键额度，匹配的 `GcWriteBarrierReserved { permit }` 只消费该额度。结构 verifier 按 region 窗口重算静态消费上界并要求 permit 额度与之一致：每处 `GcWriteBarrier | GcWriteBarrierReserved` 消费两个 shade slot，每处首次出现的不同写入地址消费一个 card-mark slot。permit不进入 SSA value、register allocation、stack map或机器 ABI。
 
 `ValueData` 保存一个定义位置、一个 `LirType` 和 GC provenance。使用链在构造后生成紧凑的 offset/count 表；优化 pass 更新定义/操作数后统一重建，不维护每个 value 的堆分配链表。
 

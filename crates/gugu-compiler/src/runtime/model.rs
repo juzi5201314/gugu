@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::barrier_schema::{BarrierDemand, BarrierRuntimeContract, MessageFamilyTag};
 use super::coroutine_schema::{CoroutineDemand, CoroutineRuntimeContract};
 use super::gc_metadata_contract::GcMetadataRuntimeContract;
 use super::gc_metadata_schema::GcMetadataDemand;
@@ -32,9 +33,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 10 并入 GC metadata 类型表、trace/value program、
-/// arena/block/line 布局、glue、root、source metadata 契约段。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 10;
+/// 契约对象的schema版本；schema 11 并入 hybrid write barrier 与 remembered-set 契约段。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 11;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -115,6 +115,10 @@ pub(crate) enum FieldKind {
     PayloadSize,
     /// raw payload 的对齐指数。
     PayloadAlign,
+    /// arena 内的 card 序号。
+    CardIndex,
+    /// card 区间长度。
+    CardCount,
     /// release 描述符的能力位。
     Flags,
     /// managed object 地址；只允许出现在被拒绝的 schema 中。
@@ -143,6 +147,8 @@ impl FieldKind {
             Self::ReleaseDescriptor => "release-descriptor",
             Self::PayloadSize => "payload-size",
             Self::PayloadAlign => "payload-align",
+            Self::CardIndex => "card-index",
+            Self::CardCount => "card-count",
             Self::Flags => "flags",
             Self::ManagedAddress => "managed-address",
             Self::RawPointer => "raw-pointer",
@@ -171,18 +177,21 @@ impl MessageFieldSchema {
     }
 }
 
-/// return message 的字段集合。
+/// runtime 消息的字段集合；族判别值与 return 共用同一条传输通道。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MessageSchemaV1 {
     pub(crate) schema: u32,
+    /// 消息族判别值；同一传输通道上的 return 与 GC 工作消息严格分离。
+    pub(crate) family: MessageFamilyTag,
     pub(crate) fields: Vec<MessageFieldSchema>,
 }
 
 impl MessageSchemaV1 {
-    /// 返回 runtime raw 消息的规范字段集合。
+    /// 返回 runtime raw return 消息的规范字段集合。
     pub(crate) fn runtime_raw() -> Self {
         Self {
             schema: 1,
+            family: MessageFamilyTag::Return,
             fields: vec![
                 MessageFieldSchema::new("bytes", FieldKind::Bytes),
                 MessageFieldSchema::new("descriptor", FieldKind::DescriptorIndex),
@@ -200,35 +209,45 @@ impl MessageSchemaV1 {
         }
     }
 
+    /// 返回 GC 工作消息族的 `CardMarkBatch` 字段集合。
+    pub(crate) fn card_mark() -> Self {
+        Self {
+            schema: 1,
+            family: MessageFamilyTag::CardMark,
+            fields: super::barrier_schema::card_mark_fields(),
+        }
+    }
+
+    /// 返回消息族。
+    pub(crate) const fn family(&self) -> MessageFamilyTag {
+        self.family
+    }
+
     /// 校验字段集合不携带任何地址，并且覆盖全部必需身份字段。
     pub(crate) fn verify(&self) -> Result<(), RawModelError> {
-        if self.schema != 1 {
-            return Err(RawModelError::new("return message schema 版本不匹配"));
+        self.verify_family(self.family)
+    }
+
+    /// 按指定族校验字段集合：schema、地址字段、必需身份字段与稳定排序。
+    pub(crate) fn verify_family(&self, family: MessageFamilyTag) -> Result<(), RawModelError> {
+        if self.schema != 1 || self.family != family {
+            return Err(RawModelError::new("runtime 消息 schema 版本或消息族不匹配"));
         }
         if self.fields.is_empty() {
-            return Err(RawModelError::new("return message schema 不能为空"));
+            return Err(RawModelError::new("runtime 消息 schema 不能为空"));
         }
         for field in &self.fields {
             if field.kind.carries_address() {
                 return Err(RawModelError::new(format!(
-                    "return message 字段 `{}` 携带地址，违反跨 owner 只发送逻辑序号",
+                    "runtime 消息字段 `{}` 携带地址，违反跨 owner 只发送逻辑序号",
                     field.name
                 )));
             }
         }
-        for required in [
-            FieldKind::OwnerId,
-            FieldKind::Generation,
-            FieldKind::RouteKey,
-            FieldKind::DescriptorIndex,
-            FieldKind::UnitIndex,
-            FieldKind::Bytes,
-            FieldKind::Integrity,
-            FieldKind::Epoch,
-        ] {
+        for required in required_fields(self.family) {
             if !self.fields.iter().any(|field| field.kind == required) {
                 return Err(RawModelError::new(format!(
-                    "return message schema 缺少必需字段 `{}`",
+                    "runtime 消息 schema 缺少必需字段 `{}`",
                     required.name()
                 )));
             }
@@ -236,7 +255,7 @@ impl MessageSchemaV1 {
         for pair in self.fields.windows(2) {
             if pair[0].name >= pair[1].name {
                 return Err(RawModelError::new(
-                    "return message schema 字段没有按名字稳定排序",
+                    "runtime 消息 schema 字段没有按名字稳定排序",
                 ));
             }
         }
@@ -245,8 +264,10 @@ impl MessageSchemaV1 {
 
     /// 返回规范编码。
     pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(4 + self.fields.len() * 24);
+        let mut bytes = Vec::with_capacity(8 + self.fields.len() * 24);
         bytes.extend_from_slice(&self.schema.to_le_bytes());
+        bytes.push(self.family.raw());
+        bytes.extend_from_slice(&[0; 3]);
         bytes.extend_from_slice(&(self.fields.len() as u32).to_le_bytes());
         for field in &self.fields {
             bytes.extend_from_slice(field.name.as_bytes());
@@ -255,6 +276,29 @@ impl MessageSchemaV1 {
         }
         bytes
     }
+}
+
+/// 返回一个消息族必须覆盖的身份字段。
+fn required_fields(family: MessageFamilyTag) -> Vec<FieldKind> {
+    let mut required = vec![
+        FieldKind::OwnerId,
+        FieldKind::Generation,
+        FieldKind::RouteKey,
+        FieldKind::DescriptorIndex,
+        FieldKind::Bytes,
+        FieldKind::Integrity,
+        FieldKind::Epoch,
+    ];
+    match family {
+        // return 消息用 unit 描述被归还的 slot/line-run/extent 序号。
+        MessageFamilyTag::Return => required.push(FieldKind::UnitIndex),
+        // card batch 用 card 区间描述 remembered-set 键，不占用 return unit。
+        MessageFamilyTag::CardMark => {
+            required.push(FieldKind::CardIndex);
+            required.push(FieldKind::CardCount);
+        }
+    }
+    required
 }
 
 pub(crate) use super::resource_schema::*;
@@ -340,6 +384,7 @@ pub(crate) struct RuntimeRawContractV1 {
     sync: SyncRuntimeContract,
     stackmap: StackMapRuntimeContract,
     gc_metadata: GcMetadataRuntimeContract,
+    barrier: BarrierRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -366,6 +411,7 @@ impl RuntimeRawContractV1 {
         sync_demand: SyncDemand,
         stackmap_demand: StackMapDemand,
         gc_metadata_demand: GcMetadataDemand,
+        barrier_demand: BarrierDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -377,6 +423,7 @@ impl RuntimeRawContractV1 {
         let sync = SyncRuntimeContract::build(sync_demand, profile)?;
         let stackmap = StackMapRuntimeContract::build(stackmap_demand)?;
         let gc_metadata = GcMetadataRuntimeContract::build(gc_metadata_demand)?;
+        let barrier = BarrierRuntimeContract::build(barrier_demand)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -398,6 +445,7 @@ impl RuntimeRawContractV1 {
             sync,
             stackmap,
             gc_metadata,
+            barrier,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -528,6 +576,16 @@ impl RuntimeRawContractV1 {
     #[allow(dead_code, reason = "契约段由 runtime raw 与 ImagePlan 消费")]
     pub(crate) fn gc_metadata(&self) -> &GcMetadataRuntimeContract {
         &self.gc_metadata
+    }
+
+    /// 返回 hybrid write barrier 与 remembered-set 契约段。
+    pub(crate) fn barrier(&self) -> &BarrierRuntimeContract {
+        &self.barrier
+    }
+
+    /// 返回 GC 工作消息族的 `CardMarkBatch` 字段集合。
+    pub(crate) fn card_mark_message(&self) -> &MessageSchemaV1 {
+        &self.barrier.message
     }
 
     /// 返回账本分类名。
@@ -666,6 +724,17 @@ impl RuntimeRawContractV1 {
         self.sync.verify()?;
         self.stackmap.verify()?;
         self.gc_metadata.verify()?;
+        self.barrier.verify()?;
+        if self.message.family() != MessageFamilyTag::Return
+            || self.barrier.message.family() != MessageFamilyTag::CardMark
+        {
+            return Err(RawModelError::new(
+                "runtime raw 契约的消息族判别与登记不一致",
+            ));
+        }
+        if self.demand.message_nodes < u32::from(self.barrier.demand.card_mark_sites != 0) {
+            return Err(RawModelError::new("card-mark 站点存在但常驻 node 容量为零"));
+        }
         if self.scheduler.demand.spawn_sites != self.demand.coroutine_sites
             || self.scheduler.demand.suspend_points != self.demand.suspend_points
         {
@@ -718,6 +787,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.sync.canonical_bytes());
         bytes.extend_from_slice(&self.stackmap.canonical_bytes());
         bytes.extend_from_slice(&self.gc_metadata.canonical_bytes());
+        bytes.extend_from_slice(&self.barrier.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -944,6 +1014,16 @@ impl RuntimeRawContractV1 {
         ));
         output.push_str(&self.stackmap.dump());
         output.push_str(&self.gc_metadata.dump());
+        output.push_str(&self.barrier.dump());
+        output.push_str(&format!(
+            "runtime-message return-fields={} card-mark-fields={} card-mark-family={}\n",
+            self.message.fields.len(),
+            self.card_mark_message().fields.len(),
+            match self.card_mark_message().family() {
+                MessageFamilyTag::Return => "return",
+                MessageFamilyTag::CardMark => "card-mark",
+            },
+        ));
         output
     }
 }
@@ -991,6 +1071,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) stackmap_demand: StackMapDemand,
     /// GC metadata 需求视图：类型表大小、trace/value program 字节数与 arena 布局。
     pub(crate) gc_metadata_demand: GcMetadataDemand,
+    /// barrier 需求视图：permit 额度、reserved/bare 屏障与 edge summary 站点。
+    pub(crate) barrier_demand: BarrierDemand,
     /// 已由 frontend 编码的真实 type/meta section。
     pub(crate) gc_type_section: &'a [u8],
     pub(crate) gc_metadata_section: &'a [u8],
@@ -1018,6 +1100,7 @@ pub(crate) fn run(
         inputs.sync_demand,
         inputs.stackmap_demand,
         inputs.gc_metadata_demand,
+        inputs.barrier_demand,
         inputs.gc_type_section,
         inputs.gc_metadata_section,
     ))
@@ -1057,6 +1140,7 @@ pub(crate) fn run(
                 inputs.sync_demand,
                 inputs.stackmap_demand,
                 inputs.gc_metadata_demand,
+                inputs.barrier_demand,
                 inputs.profile,
             )
             .and_then(|contract| {
@@ -1071,6 +1155,8 @@ pub(crate) fn run(
             super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
+                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
             fresh = Some(contract);
@@ -1107,6 +1193,8 @@ pub(crate) fn run(
     super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
+        .map_err(|error| vec![error.diagnostic()])?;
+    super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     let _ = inputs.sources;
     Ok(contract)

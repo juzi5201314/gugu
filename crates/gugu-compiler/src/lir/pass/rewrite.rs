@@ -303,6 +303,11 @@ impl Editor {
         self.blocks.get(block.index()).and_then(Option::as_ref)
     }
 
+    /// 返回一条指令的第 `position` 个操作数。
+    pub(crate) fn operand(&self, at: InstRef, position: usize) -> ValueId {
+        self.instruction(at).arguments[position]
+    }
+
     pub(crate) fn terminator(&self, block: BlockId) -> &Term {
         &self.block(block).expect("活跃 block").term
     }
@@ -895,10 +900,19 @@ impl Editor {
     }
 
     /// 追加一条 barrier permit，返回其编号。
-    pub(crate) fn add_barrier_permit(&mut self, region: u32, max_shades: u32) -> PermitId {
+    pub(crate) fn add_barrier_permit(
+        &mut self,
+        region: u32,
+        max_shades: u32,
+        max_card_marks: u32,
+    ) -> PermitId {
         let permit = PermitId(id(self.barrier_permits.len()));
         self.barrier_permits
-            .push(super::super::body::BarrierPermit { region, max_shades });
+            .push(super::super::body::BarrierPermit {
+                region,
+                max_shades,
+                max_card_marks,
+            });
         permit
     }
 

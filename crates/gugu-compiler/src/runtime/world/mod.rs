@@ -4,6 +4,7 @@
 //! free structure 与账本只由 owner 上下文读写。跨 owner 的归还先经过 exactly-once 的
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
+pub(crate) mod barrier_impl;
 pub(crate) mod coroutine_impl;
 mod extent_impl;
 mod resource_impl;
@@ -24,11 +25,17 @@ mod wait_tests;
 mod sync_tests;
 
 #[cfg(test)]
+#[path = "../barrier_tests.rs"]
+mod barrier_tests;
+
+#[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
+use super::barrier::BarrierFlushReason;
+use super::barrier_schema::MessageFamilyTag;
 use super::extent::{ExtentId, ExtentOccupancy, ExtentTable, TrimReport};
 use super::inbox::{
     DrainReport, DrainStop, GraceOutcome, OwnerConsumer, OwnerInbox, ServiceBudget, ShardIndex,
@@ -117,6 +124,8 @@ pub(crate) struct RawWorld {
     wait: super::wait::WaitPlane,
     channels: super::channel::ChannelTable,
     sync: super::sync::SyncPlane,
+    /// hybrid write barrier 的 processor 账本、arena card table 与 edge summary。
+    barrier: super::barrier::BarrierPlane,
 }
 
 impl RawWorld {
@@ -185,6 +194,7 @@ impl RawWorld {
             wait,
             channels: super::channel::ChannelTable::new(),
             sync: super::sync::SyncPlane::new(),
+            barrier: super::barrier::BarrierPlane::new(0),
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。
@@ -509,7 +519,7 @@ impl RawWorld {
 
     /// consumer 侧 same-slab 聚合：关闭全部 open ring 并发布。
     pub(crate) fn close_cache(
-        &self,
+        &mut self,
         owner: u32,
         staging: &mut ProducerStaging,
         cache: &mut ReturnSlabCache,
@@ -517,6 +527,16 @@ impl RawWorld {
     ) -> Result<u32, RawInvariant> {
         let closed = cache.close_all(reason);
         let mut published = 0;
+        // cache 关闭是 producer 侧的交接点：GC handoff 与 pressure drain 都必须先把本
+        // processor 的 card 键带出账本，不能让它跟着 ring 一起消失。
+        let barrier_reason = match reason {
+            RingCloseReason::GcHandoff => Some(BarrierFlushReason::MinorStop),
+            RingCloseReason::PressureDrain => Some(BarrierFlushReason::MemoryPressure),
+            _ => None,
+        };
+        if let Some(barrier_reason) = barrier_reason {
+            published += self.flush_all_barriers(owner, barrier_reason)?;
+        }
         for ring in &closed {
             published += self.publish_ring(owner, staging, ring)?;
         }
@@ -544,6 +564,18 @@ impl RawWorld {
         extent_returns += self.advance_pending_extent_trims()?;
         for node in snapshot.nodes() {
             let message_id = *node;
+            // 消息族决定车道解释：card batch 只带 arena/card 序号，不进入 return 路径。
+            if self.pool.family_of(message_id) == MessageFamilyTag::CardMark {
+                let batch = self.pool.load_card_mark(message_id);
+                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
+                {
+                    return Err(RawInvariant::new("card batch 投递到非目标 owner 的 inbox"));
+                }
+                self.service_card_mark(owner, &batch)?;
+                self.graced_nodes.push(message_id);
+                consumed += 1;
+                continue;
+            }
             let message = self.load_return_message(message_id)?;
             if message.kind == ReturnKind::StackSpan {
                 self.service_stack_return(owner, &message)?;
@@ -671,6 +703,8 @@ impl RawWorld {
         owner: u32,
         budget: &ServiceBudget,
     ) -> Result<(u32, u32), RawInvariant> {
+        // drain 之后 owner 不再跑代码，本 owner 的 card 键必须已经离开 processor 账本。
+        self.flush_all_barriers(owner, BarrierFlushReason::ProducerStopGate)?;
         let mut forwarded = 0_u32;
         let mut consumed = 0_u32;
         for index in 0..super::OWNER_INBOX_SHARDS {
@@ -782,6 +816,9 @@ impl RawWorld {
             .trim_cache(owner, 0, &mut self.provider)
             .map_err(|error| self.stack_failure(error))?;
         self.epoch = tick;
+        // retire 是 processor 交接：本 owner 的 barrier 账本必须在 inbox 排空与 grace 之前
+        // 冲刷完，否则 arena owner 会在 card 键落地前看到“已经排空”的假象。
+        self.flush_all_barriers(owner, BarrierFlushReason::ProcessorHandoff)?;
         let (forwarded, consumed) = self.drain_all(owner, budget)?;
         self.open_grace(&inbox);
         let grace = Self::grace_outcome(&inbox);

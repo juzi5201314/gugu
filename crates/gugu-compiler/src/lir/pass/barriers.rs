@@ -1,7 +1,13 @@
 //! 分配与写屏障快路径：为 NoSafepointRegion 预留 barrier permit。
+//!
+//! permit 的额度是 compile-time 证明：`max_shades` 覆盖 region 内每条 hybrid barrier 的两个
+//! shade slot，`max_card_marks` 覆盖 region 内可能触及的**distinct 写入地址**上界。同一
+//! `ValueId` 必然解析到同一地址、同一 512 字节 card，因此可在本地 dedup 表里合并为一个
+//! card-mark slot；不同地址各自计一个 slot（保守上界）。region 内不得再检查容量或连接
+//! refill edge，额度不足只能在 region 外走 mandatory statepoint。
 use super::rewrite::{Editor, InstRef};
 use crate::Diagnostic;
-use crate::lir::body::Op;
+use crate::lir::body::{Op, ValueId};
 
 pub(crate) fn run(editor: &mut Editor) -> Result<bool, Diagnostic> {
     validate_allocations(editor)?;
@@ -19,7 +25,8 @@ pub(crate) fn run(editor: &mut Editor) -> Result<bool, Diagnostic> {
         let max_shades = u32::try_from(barriers.len())
             .expect("屏障数量适配 u32")
             .saturating_mul(2);
-        let permit = editor.add_barrier_permit(region, max_shades);
+        let max_card_marks = card_mark_quota(editor, &barriers)?;
+        let permit = editor.add_barrier_permit(region, max_shades, max_card_marks);
         let input = editor
             .instruction(begin)
             .memory
@@ -42,6 +49,31 @@ pub(crate) fn run(editor: &mut Editor) -> Result<bool, Diagnostic> {
         changed = true;
     }
     Ok(changed)
+}
+
+/// 计算 card-mark 额度：region 内全部屏障的**distinct 写入地址**数量。
+///
+/// 屏障的首操作数是实际写入位置的地址；同一 `ValueId` 在 region 内不可能被重定义，
+/// 因此相同 `ValueId` 必然落在同一 arena 的同一 card 上，可以共用一个 slot。不同
+/// `ValueId` 可能碰巧落在同一 card，但那只会让真实消耗小于额度，不破坏闭包。
+pub(crate) fn card_mark_quota(
+    editor: &Editor,
+    barriers: &[(crate::lir::body::BlockId, usize)],
+) -> Result<u32, Diagnostic> {
+    // 地址集合用有序 `Vec` + 二分查找：region 内屏障数量很小，省掉哈希表分配，
+    // 与 verifier 的复算保持同一个表示。
+    let mut addresses: Vec<ValueId> = Vec::new();
+    for &(block, index) in barriers {
+        let instruction = editor.instruction((block, index));
+        let Op::GcWriteBarrier { .. } = instruction.op else {
+            continue;
+        };
+        let pointer = editor.operand((block, index), 0);
+        if let Err(position) = addresses.binary_search(&pointer) {
+            addresses.insert(position, pointer);
+        }
+    }
+    u32::try_from(addresses.len()).map_err(|_| crate::lir::invalid("card-mark 额度超出 u32"))
 }
 
 /// 每次插入都会移动同 block 的指令，必须重新配对并定位下一段裸屏障。

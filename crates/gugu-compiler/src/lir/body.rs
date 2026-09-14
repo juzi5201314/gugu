@@ -6,7 +6,7 @@ use crate::frontend::gir::placement::PlacementKind;
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, ops::Range};
 
-pub(crate) const REVISION: u32 = 3;
+pub(crate) const REVISION: u32 = 4;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -597,7 +597,10 @@ pub(crate) struct Safepoint {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct BarrierPermit {
     pub(crate) region: u32,
+    /// hybrid barrier 的 shade 额度：`region` 内每条屏障写消费两个 slot。
     pub(crate) max_shades: u32,
+    /// hybrid barrier 的 card-mark 额度：`region` 内每个 distinct 写入地址消费一个 slot。
+    pub(crate) max_card_marks: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

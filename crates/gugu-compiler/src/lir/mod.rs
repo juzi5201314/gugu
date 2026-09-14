@@ -16,7 +16,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub(crate) const SCHEMA: u32 = 2;
+pub(crate) const SCHEMA: u32 = 3;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -187,6 +187,38 @@ impl Validated {
         }
         demand
     }
+    /// barrier 需求：从优化后 LIR 的 permit、region 与独占 store 推导。
+    ///
+    /// permit 额度已经在 pass 中按 region 静态复算并由 verifier 强制，这里只做汇总；
+    /// edge summary 站点按「托管 store」计数，card-mark 站点按 barrier 条数计数。
+    pub(crate) fn barrier_demand(&self) -> crate::runtime::BarrierDemand {
+        let mut demand = crate::runtime::BarrierDemand::default();
+        for world_body in &self.world.bodies {
+            demand.regions += world_body.no_safepoint_regions.len() as u32;
+            demand.permits += world_body.barrier_permits.len() as u32;
+            for permit in &world_body.barrier_permits {
+                demand.max_shades_permit = demand.max_shades_permit.max(permit.max_shades);
+                demand.max_card_marks_permit =
+                    demand.max_card_marks_permit.max(permit.max_card_marks);
+                demand.shade_slots = demand.shade_slots.saturating_add(permit.max_shades);
+                demand.card_mark_slots =
+                    demand.card_mark_slots.saturating_add(permit.max_card_marks);
+            }
+            for instruction in &world_body.instructions {
+                match instruction.op {
+                    body::Op::GcWriteBarrier { .. } => demand.bare_barriers += 1,
+                    body::Op::GcWriteBarrierReserved { .. } => demand.reserved_barriers += 1,
+                    _ => {}
+                }
+            }
+        }
+        // card 键与 edge delta 都只可能由 managed store 的 barrier 产生，因此两个站点视图
+        // 覆盖同一个站点集合：前者统计可能记账的写入，后者统计可能贡献边增删的写入。
+        demand.card_mark_sites = demand.barrier_sites();
+        demand.edge_summary_sites = demand.barrier_sites();
+        demand
+    }
+
     /// 同步需求：从优化后 LIR 统计原子操作与同步原语需求。
     pub(crate) fn sync_demand(&self) -> crate::runtime::SyncDemand {
         let mut demand = crate::runtime::SyncDemand::default();
@@ -199,6 +231,7 @@ impl Validated {
         }
         demand
     }
+
     /// 栈图需求：从优化后 LIR 推导逻辑函数、安全点、kind 分类与根字数。
     ///
     /// 推导失败返回零需求，由 `RuntimeRawContractV1` 的构建路径按 `E0058`

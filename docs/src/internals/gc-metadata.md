@@ -588,7 +588,7 @@ state、lease、pending message、handle access 和 queue grace，才能重新�
 - source record 的 function index、PC range、UTF-8逻辑路径、行列和 flags 合法，`SourceRecord32` 指向 exact record；
 - object header TypeId、payload size、forward 地址和 generation 状态合法；
 - strip 后所有 type/root/vtable/source record、stack map 和 glue 仍存在。
-- `BarrierPermitId` 的 `max_shades` 与 concrete descriptor一致、只关联一个 `NoSafepointRegion`且静态消费不超额，所有 `GcWriteBarrierReserved` 都没有 refill edge；不可见 transfer reservation具有合法 generation、trace descriptor和唯一 publish/cancel结局；
+- `BarrierPermitId` 的 `max_shades`/`max_card_marks` 与该 region 重算的静态消费上界一致、只关联一个 `NoSafepointRegion`且静态消费不超额，所有 `GcWriteBarrierReserved` 都没有 refill edge；不可见 transfer reservation具有合法 generation、trace descriptor和唯一 publish/cancel结局；
 - `CoroutineHot`、`StackDescriptor`、`CoroutineSlot`的size/alignment/offset与scheduler/backend schema完全一致；所有live cold index可解析，queue root的state/ownership唯一，`run_batch_len`与chain边界合法；
 - slab free slot不含queue/root/scan ownership，page candidate从allocation集合隔离；queue-page grace的participant集合、epoch确认和二次空页验证全部完成后才出现decommit/unmap action；普通queue trace中不能出现per-publish epoch pin、全局refcount或SeqCst fence；
 - representation tag 与 `TurnRegion`/`LocalHeap`/`SharedHeap` placement 一致；region export/reset、handle slot、access guard、forwarding grace、pin 和 compressed cage 的 generation/range/state 合法；

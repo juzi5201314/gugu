@@ -402,8 +402,8 @@ fn termination_runs_exactly_once_in_facility_order() {
 fn foreign_work_is_waited_only_when_plan_requests_it() {
     let mut world = world();
     boot(&mut world);
-    world.enter_foreign().expect("登记外部工作");
-    world.enter_foreign().expect("登记外部工作");
+    world.enter_foreign(0).expect("登记外部工作");
+    world.enter_foreign(0).expect("登记外部工作");
     world.leave_foreign().expect("外部工作完成");
     world.call_main(MainOutcome::Returned).expect("main 返回");
     let outcome = world.execute_termination(&budget()).expect("终止执行");

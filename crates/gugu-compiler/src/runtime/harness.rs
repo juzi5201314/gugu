@@ -82,6 +82,7 @@ impl OwnerReturnHarness {
             super::SyncDemand::default(),
             super::StackMapDemand::default(),
             super::GcMetadataDemand::empty(),
+            super::BarrierDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -278,6 +279,7 @@ impl ResourceReleaseHarness {
             super::SyncDemand::default(),
             super::StackMapDemand::default(),
             super::GcMetadataDemand::empty(),
+            super::BarrierDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -862,4 +864,132 @@ fn run_sync_owner(
     let expected = u64::from(threads * iterations);
     let ledger_ok = world.ledger_invariant(0).is_ok();
     (counter, counter == expected && ledger_ok)
+}
+
+/// hybrid write barrier card-mark 记账与 flush 的进程内 harness。
+///
+/// 与确定性测试共用同一份 `BarrierPlane`：线程只写自己 processor 的 owner-local buffer，
+/// card table 只在 flush 之后由 arena owner 写入。它不进入默认测试套件，供 `cargo bench`
+/// 与手工验证使用。
+#[derive(Clone, Copy, Debug)]
+pub struct CardMarkHarness {
+    /// 参与记账的 processor 数。
+    processors: u32,
+    /// 每个 processor 的写入次数。
+    iterations: u32,
+}
+
+/// CardMarkHarness 运行报告。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CardMarkReport {
+    /// 参与记账的 processor 数。
+    pub processors: u32,
+    /// 每个 processor 的写入次数。
+    pub iterations: u32,
+    /// processor-local 记账总次数。
+    pub card_marks: u64,
+    /// dedup 命中总次数。
+    pub slot_reuses: u64,
+    /// 发布的 batch 总数。
+    pub batches: u64,
+    /// 消费的 batch 总数。
+    pub consumed_batches: u64,
+    /// 最终 dirty card 数。
+    pub dirty_cards: u32,
+    /// 运行耗时（微秒）。
+    pub elapsed_micros: u64,
+    /// 不变量是否守恒。
+    pub invariants_hold: bool,
+}
+
+impl CardMarkHarness {
+    /// 创建 harness。
+    pub fn new(processors: u32, iterations: u32) -> Self {
+        Self {
+            processors: processors.max(1),
+            iterations: iterations.max(1),
+        }
+    }
+
+    /// 执行一轮 card-mark 记账、flush 与 owner 消费。
+    pub fn run(self) -> CardMarkReport {
+        let start = Instant::now();
+        let mut plane = super::barrier::BarrierPlane::new(1);
+        let manager = OwnerToken {
+            domain: super::slab::MemoryDomainId::RUNTIME_RAW,
+            owner_id: super::slab::OwnerId::from_raw(1),
+            generation: super::slab::OwnerGeneration::from_raw(1),
+            route_key: super::slab::RouteKey::from_raw(1),
+        };
+        let arena = 1_u64;
+        let registered = plane
+            .register_arena(
+                arena,
+                manager,
+                1,
+                super::gc_metadata_contract::GC_ARENA_BYTES,
+            )
+            .is_ok();
+        for processor in 0..self.processors as usize {
+            for index in 0..self.iterations {
+                // 每个 processor 只落在一个 card 上：命中 dedup 槽并不产生新键。
+                let offset = u64::from(self.processors) * 512 + u64::from(index) % 512;
+                plane.perform_barrier(
+                    processor,
+                    super::barrier::BarrierSite {
+                        arena_descriptor: arena,
+                        arena_generation: 1,
+                        offset,
+                        cycle_epoch: 1,
+                        old_present: true,
+                        new_present: true,
+                        new_in_nursery: true,
+                        owner_old: true,
+                        marking: true,
+                        stack_grey: true,
+                        new_block: None,
+                        source_block: 0,
+                        new_owner: 0,
+                        source_owner: 0,
+                    },
+                );
+            }
+        }
+        let mut batches = 0_u64;
+        for processor in 0..self.processors as usize {
+            let drafts =
+                plane.flush_processor(processor, super::barrier::BarrierFlushReason::BufferFull);
+            batches += u64::try_from(drafts.len()).unwrap_or(u64::MAX);
+            for draft in &drafts {
+                let _ = plane.consume_locally(arena, draft);
+            }
+        }
+        let mut card_marks = 0_u64;
+        let mut slot_reuses = 0_u64;
+        for processor in 0..self.processors as usize {
+            if let Some(record) = plane.processor(processor) {
+                card_marks += record.card_marks();
+                slot_reuses += record.card_slot_reuses();
+            }
+        }
+        let dirty_cards = plane
+            .table(arena)
+            .map_or(0, super::barrier::CardTable::dirty);
+        let expected = u64::from(self.processors) * u64::from(self.iterations);
+        let invariants_hold = registered
+            && card_marks == expected
+            && slot_reuses + u64::try_from(self.processors).unwrap_or(0) >= card_marks
+            && dirty_cards > 0;
+        CardMarkReport {
+            processors: self.processors,
+            iterations: self.iterations,
+            card_marks,
+            slot_reuses,
+            batches,
+            consumed_batches: batches,
+            dirty_cards,
+            elapsed_micros: u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
+            invariants_hold,
+        }
+    }
 }

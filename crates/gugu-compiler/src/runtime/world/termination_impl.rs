@@ -542,7 +542,14 @@ impl RawWorld {
     }
 
     /// 登记一项外部工作；`wait_foreign` 为真时终止要等待它完成。
-    pub(crate) fn enter_foreign(&mut self) -> Result<(), RawInvariant> {
+    ///
+    /// 进入 `ForeignBridge` 是第三个 barrier 触发点：本 processor 的 card 键必须在穿透
+    /// native 边界之前离开账本，否则 native 侧可能长时间不再回到 Gugu 代码。
+    pub(crate) fn enter_foreign(&mut self, owner: u32) -> Result<(), RawInvariant> {
+        self.flush_all_barriers(
+            owner,
+            super::super::barrier::BarrierFlushReason::ForeignBridge,
+        )?;
         let rt0 = self.rt0_mut()?;
         rt0.foreign_work += 1;
         Ok(())

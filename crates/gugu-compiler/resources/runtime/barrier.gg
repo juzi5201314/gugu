@@ -1,0 +1,52 @@
+/* 写屏障与 remembered-set 的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
+ * 每项只保存稳定 arena descriptor、generation、card 序号与 cycle epoch，
+ * 禁止出现 managed pointer、field 地址或栈指针。
+ */
+
+#[repr(C, align(16))]
+pub struct CardMarkEntry {
+    pub arena_descriptor: uint,
+    pub arena_generation: u32,
+    pub card_index: u32,
+    pub cycle_epoch: uint,
+    pub marks: uint,
+}
+
+#[repr(C, align(16))]
+pub struct CardMarkStamp {
+    pub key_low: uint,
+    pub entry: u32,
+    pub arena_generation: u32,
+    pub cycle_epoch: uint,
+    pub reserved: uint,
+}
+
+#[repr(C, align(64))]
+pub struct CardMarkBufferHead {
+    pub len: u32,
+    pub cycle_epoch: u32,
+    pub pending_bytes: uint,
+    pub owner_slot: uint,
+    pub reserved: uint,
+    pub padding: [byte; 32],
+}
+
+#[repr(C, align(32))]
+pub struct CardTableDescriptor {
+    pub arena_descriptor: uint,
+    pub arena_generation: u32,
+    pub card_count: u32,
+    pub dirty: u32,
+    pub minor_pending: u32,
+}
+
+/// 非空 package 必经布局交叉校验。
+#[used]
+pub fn card_mark_records(
+    entry: &CardMarkEntry,
+    stamp: &CardMarkStamp,
+    buffer: &CardMarkBufferHead,
+    table: &CardTableDescriptor,
+) u32 {
+    buffer.len + table.dirty + entry.card_index + stamp.entry
+}

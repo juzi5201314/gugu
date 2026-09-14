@@ -861,7 +861,7 @@ fn root_publish[T](place: T, value: T)
 
 `T` 必须是受管句柄类型：`&T`、切片、`chan`、`Join`、函数值或 `dyn`。聚合值、`string`、原始指针和位类型不能用于这两个原语；它们不执行 COW、resource 或其它聚合语义复制。
 
-整条存储及其 GC 混合写屏障位于 `NoSafepointRegion` 内，原因分别为 `OwnershipPublish` 与 `RootPublish`。需要写屏障时，区域外的 `BarrierReserve` 保证处理器屏障 buffer 有足够 shade 额度，区域内只允许不带 refill slow edge 的 `GcWriteBarrierReserved`。这两个原语不建立 happens-before，不替代普通赋值或同步操作，也不得写进 asm 模板；调用方不能借此构造任意无 safepoint 区域。
+整条存储及其 GC 混合写屏障位于 `NoSafepointRegion` 内，原因分别为 `OwnershipPublish` 与 `RootPublish`。需要写屏障时，区域外的 `BarrierReserve` 保证处理器屏障 buffer 有足够 shade 与 card-mark 额度，区域内只允许不带 refill slow edge 的 `GcWriteBarrierReserved`。这两个原语不建立 happens-before，不替代普通赋值或同步操作，也不得写进 asm 模板；调用方不能借此构造任意无 safepoint 区域。
 
 `RuntimeStats` 是逐字段快照。`stack_reserved_bytes`、`stack_committed_bytes`与`stack_live_bytes` 分别观察地址 reservation、已提交宿主页和 live coroutine逻辑 stack容量，三者会因亚页共享、cache和decommit而不同；`dirty_cpu_active` 是当前执行 native work的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待 dirty 额度的调用数。`blocking_bridge_active` 是已取得 BridgeCredit 并执行普通 blocking native 的调用数，`blocking_bridge_waiting` 是 admission waiter 或已发布普通 bridge roots但尚未取得 credit 的调用数，`blocking_bridge_workers` 不超过 `max_blocking_workers`，`blocking_bridge_queue_bytes` 包含 waiter metadata 与排队 payload。timer字段分别统计 active wheel/heap entries、已取消但尚未 compact 的 entries与 overflow heap/runtime slab bytes。上述统计会随并发调度立即变化，不提供取消 native work、强杀线程、固定调度顺序或固定回收时刻的能力。
 

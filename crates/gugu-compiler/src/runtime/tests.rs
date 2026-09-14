@@ -6,6 +6,7 @@
 
 use std::collections::BTreeSet;
 
+use super::barrier_schema::BarrierDemand;
 use super::extent::EXTENT_CLASS_LADDER;
 use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::{DrainStop, GraceOutcome, OwnerInbox, ServiceBudget, ShardIndex};
@@ -504,7 +505,9 @@ fn ring_close_batches_reach_owner_inbox() {
         .expect("消息可构造");
     pool.store(node, &message, message.integrity.checksum);
     pool.link(node, None);
-    staging.stage(node, &message, shard(0)).expect("暂存成功");
+    staging
+        .stage(node, message.target, message.bytes, shard(0))
+        .expect("暂存成功");
     let mut cache = ReturnSlabCache::new();
     assert!(
         cache
@@ -662,6 +665,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -709,6 +713,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             SyncDemand::default(),
             StackMapDemand::default(),
             GcMetadataDemand::empty(),
+            BarrierDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
@@ -742,6 +747,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -756,6 +762,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -776,6 +783,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -791,6 +799,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
@@ -1423,6 +1432,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1467,6 +1477,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1484,6 +1495,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1517,6 +1529,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         SyncDemand::default(),
         demand,
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("栈图契约可构建");
@@ -1539,6 +1552,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             SyncDemand::default(),
             bad,
             GcMetadataDemand::empty(),
+            BarrierDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1559,6 +1573,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             SyncDemand::default(),
             overflow,
             GcMetadataDemand::empty(),
+            BarrierDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1576,6 +1591,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         SyncDemand::default(),
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
+        BarrierDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("空栈图契约可构建");
@@ -1616,6 +1632,7 @@ fn _raw_invariant_is_reported(error: RawInvariant) -> String {
 mod gc_metadata_tests {
     //! Mosaic GC metadata 契约与 boot verifier 的端到端测试。
 
+    use super::super::barrier_schema::BarrierDemand;
     use super::super::gc_metadata_contract::{
         GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES, GcMetadataRuntimeContract,
     };
@@ -1830,6 +1847,7 @@ mod gc_metadata_tests {
             SyncDemand::default(),
             StackMapDemand::default(),
             demand,
+            BarrierDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .expect("契约可构建");

@@ -8,6 +8,15 @@
 
 use crate::target::{Rt0Kind, TargetName};
 
+#[allow(
+    dead_code,
+    reason = "屏障协议与 edge summary 的确定性参照实现，由 harness、契约与测试消费"
+)]
+mod barrier;
+#[allow(dead_code, reason = "屏障布局交叉校验由 RuntimeRawModel 消费")]
+mod barrier_layout;
+#[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
+pub(crate) mod barrier_schema;
 #[allow(dead_code, reason = "等待协议的确定性参照实现")]
 mod channel;
 mod channel_layout;
@@ -53,6 +62,7 @@ pub mod sync_schema;
 mod wait;
 mod wait_schema;
 
+pub use barrier_schema::{BarrierDemand, BarrierRuntimeContract};
 pub use context::ContextSwitchCode;
 pub use coroutine::CoroutineContext;
 pub use coroutine_schema::{
@@ -120,8 +130,9 @@ mod termination_tests;
 mod tests;
 
 pub use harness::{
-    ChannelWaitHarness, ChannelWaitReport, HarnessReport, OwnerReturnHarness,
-    ResourceReleaseHarness, ResourceReleaseReport, SyncLockHarness, SyncLockReport,
+    CardMarkHarness, CardMarkReport, ChannelWaitHarness, ChannelWaitReport, HarnessReport,
+    OwnerReturnHarness, ResourceReleaseHarness, ResourceReleaseReport, SyncLockHarness,
+    SyncLockReport,
 };
 
 #[cfg(test)]
@@ -163,6 +174,7 @@ const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/plat
 const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
 const RUNTIME_CHANNEL_SOURCE: &str = include_str!("../../resources/runtime/channel.gg");
 const RUNTIME_SYNC_SOURCE: &str = include_str!("../../resources/runtime/sync.gg");
+const RUNTIME_BARRIER_SOURCE: &str = include_str!("../../resources/runtime/barrier.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -281,6 +293,11 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/runtime/sync.gg",
                     source: RUNTIME_SYNC_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/barrier.gg",
+                    source: RUNTIME_BARRIER_SOURCE,
                     role: RuntimeSourceRole::Runtime,
                 },
             ],

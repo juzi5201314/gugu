@@ -371,7 +371,9 @@ fn barrier_reserve_materializes_permits() {
     assert_eq!(body.barrier_permits.len(), 2);
     for (index, permit) in body.barrier_permits.iter().enumerate() {
         assert_eq!(permit.region, body::id(index));
+        // 每个 publish region 只包住一条句柄 Assign：一个 store、一个写入地址。
         assert_eq!(permit.max_shades, 2);
+        assert_eq!(permit.max_card_marks, 1);
     }
     let mut reserves = [0; 2];
     let mut barriers = [0; 2];

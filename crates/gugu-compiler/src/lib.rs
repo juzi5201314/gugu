@@ -33,12 +33,13 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    ChannelWaitHarness, ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand,
-    CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport,
-    IntrinsicBoundary, OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness,
-    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
-    SchedulerDemand, SchedulerRuntimeContract, StackMapDemand, StackPolicy, SyncDemand,
-    SyncLockHarness, SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
+    BarrierDemand, BarrierRuntimeContract, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
+    ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
+    CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport, IntrinsicBoundary,
+    OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness, ResourceReleaseReport,
+    Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand,
+    SchedulerRuntimeContract, StackMapDemand, StackPolicy, SyncDemand, SyncLockHarness,
+    SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -456,6 +457,8 @@ impl Compiler {
                 sync_demand: lir.sync_demand(),
                 stackmap_demand: lir.stackmap_demand(frontend.hir.module()),
                 gc_metadata_demand: gc_metadata_demand(&gc_metadata),
+                barrier_demand: lir.barrier_demand(),
+
                 gc_type_section: &gc_metadata.type_section,
                 gc_metadata_section: &gc_metadata.metadata_section,
                 profile: runtime::PlatformProfile::from(target),
@@ -1035,6 +1038,15 @@ pub struct ImagePlan {
     gc_metadata_section: Vec<u8>,
     gc_type_section_fingerprint: [u8; 32],
     gc_metadata_section_fingerprint: [u8; 32],
+    barrier_contract_fingerprint: [u8; 32],
+    barrier_demand: crate::runtime::BarrierDemand,
+    barrier_card_granularity_bytes: u32,
+    barrier_card_mark_buffer_entries: u32,
+    barrier_card_mark_stamp_entries: u32,
+    barrier_flush_reason_count: u32,
+    barrier_card_mark_batch_fields: u32,
+    barrier_record_count: u32,
+    barrier_runtime: crate::runtime::BarrierRuntimeContract,
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1149,6 +1161,15 @@ impl ImagePlan {
             gc_metadata_section: plan.gc_metadata_section,
             gc_type_section_fingerprint,
             gc_metadata_section_fingerprint,
+            barrier_contract_fingerprint: plan.barrier_contract_fingerprint,
+            barrier_demand: plan.barrier_demand,
+            barrier_card_granularity_bytes: plan.barrier_card_granularity_bytes,
+            barrier_card_mark_buffer_entries: plan.barrier_card_mark_buffer_entries,
+            barrier_card_mark_stamp_entries: plan.barrier_card_mark_stamp_entries,
+            barrier_flush_reason_count: plan.barrier_flush_reason_count,
+            barrier_card_mark_batch_fields: plan.barrier_card_mark_batch_fields,
+            barrier_record_count: plan.barrier_record_count,
+            barrier_runtime: plan.barrier_runtime,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1561,6 +1582,42 @@ impl ImagePlan {
     /// 返回 GC metadata 需求视图。
     pub fn gc_metadata_demand(&self) -> crate::runtime::GcMetadataDemand {
         self.gc_metadata_demand
+    }
+    /// 返回 hybrid write barrier 契约指纹。
+    pub fn barrier_contract_fingerprint(&self) -> [u8; 32] {
+        self.barrier_contract_fingerprint
+    }
+    /// 返回 barrier 需求视图。
+    pub fn barrier_demand(&self) -> crate::runtime::BarrierDemand {
+        self.barrier_demand
+    }
+    /// 返回 card table 粒度（字节）。
+    pub fn barrier_card_granularity_bytes(&self) -> u32 {
+        self.barrier_card_granularity_bytes
+    }
+    /// 返回 processor-local buffer 项数。
+    pub fn barrier_card_mark_buffer_entries(&self) -> u32 {
+        self.barrier_card_mark_buffer_entries
+    }
+    /// 返回 dedup stamp 表项数。
+    pub fn barrier_card_mark_stamp_entries(&self) -> u32 {
+        self.barrier_card_mark_stamp_entries
+    }
+    /// 返回 barrier flush 原因数量。
+    pub fn barrier_flush_reason_count(&self) -> u32 {
+        self.barrier_flush_reason_count
+    }
+    /// 返回 `CardMarkBatch` 字段数。
+    pub fn barrier_card_mark_batch_fields(&self) -> u32 {
+        self.barrier_card_mark_batch_fields
+    }
+    /// 返回 barrier record 数量。
+    pub fn barrier_record_count(&self) -> u32 {
+        self.barrier_record_count
+    }
+    /// 返回已验证的 barrier 契约段。
+    pub fn barrier_runtime(&self) -> &crate::runtime::BarrierRuntimeContract {
+        &self.barrier_runtime
     }
     /// 返回真实 `.gugu.types` section。
     pub fn gc_type_section(&self) -> &[u8] {
@@ -2156,6 +2213,108 @@ mod tests {
             bigger_plan.gc_metadata_contract_fingerprint(),
             plan.gc_metadata_contract_fingerprint(),
             "GC metadata 指纹必须随类型表变化"
+        );
+    }
+
+    #[test]
+    fn image_plan_reports_barrier_contract_for_managed_writes() {
+        let source = "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+        let plan = compilation.image_plan().expect("镜像计划");
+        assert_eq!(plan.barrier_card_granularity_bytes(), 512);
+        assert_eq!(plan.barrier_card_mark_buffer_entries(), 256);
+        assert_eq!(plan.barrier_card_mark_stamp_entries(), 256);
+        assert_eq!(plan.barrier_flush_reason_count(), 6);
+        assert_eq!(plan.barrier_card_mark_batch_fields(), 13);
+        assert_eq!(plan.barrier_record_count(), 4);
+        assert_ne!(plan.barrier_contract_fingerprint(), [0_u8; 32]);
+        // managed store 存在时 barrier 需求非零；每一处写入都被同一站点集合覆盖。
+        let demand = plan.barrier_demand();
+        assert!(demand.barrier_sites() > 0);
+        assert_eq!(demand.card_mark_sites, demand.barrier_sites());
+        assert_eq!(demand.edge_summary_sites, demand.barrier_sites());
+        assert_eq!(
+            plan.barrier_runtime().card_granularity_bytes(),
+            plan.barrier_card_granularity_bytes()
+        );
+        let dump = compilation.dump_runtime().expect("runtime dump");
+        assert!(dump.contains("barrier schema=1 card=512 buffer=256 stamps=256"));
+        assert!(dump.contains("barrier-steps read-old -> shade-old-deleted -> shade-new-inserted -> store -> card-mark -> edge-summary"));
+        assert!(dump.contains("barrier-flush-reasons buffer-full,processor-handoff,foreign-bridge,memory-pressure,minor-stop,producer-stop-gate"));
+        assert!(dump.contains(
+            "barrier-kinds yuasa-deletion,dijkstra-insertion,direct-field,edge-add,edge-drop"
+        ));
+        assert!(dump.contains("barrier-record CardMarkEntry bytes=32 align=16"));
+        assert!(dump.contains("barrier-field CardMarkStamp.entry offset=8"));
+        assert!(dump.contains("barrier-demand"));
+        assert!(dump.contains("barrier-pressure"));
+        assert!(dump.contains("barrier-fingerprint"));
+        // 冷/热编译指纹一致，且 dump 逐字节相同。
+        let warm = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        let warm_plan = warm.image_plan().expect("warm plan");
+        assert_eq!(
+            plan.barrier_contract_fingerprint(),
+            warm_plan.barrier_contract_fingerprint()
+        );
+        assert_eq!(dump, warm.dump_runtime().expect("warm dump"));
+        // 站点数变化必须改变 barrier 指纹。
+        let bigger = "fn main() {\n let value = 1\n let other = 2\n let closure = fn() int { return value + other }\n _ = closure()\n }";
+        let bigger_compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            bigger,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            bigger_compilation.is_success(),
+            "{:?}",
+            bigger_compilation.diagnostics().items()
+        );
+        let bigger_plan = bigger_compilation.image_plan().expect("bigger plan");
+        assert!(
+            bigger_plan.barrier_demand().barrier_sites() > demand.barrier_sites(),
+            "捕获两个 managed local 后 barrier 站点必须增多"
+        );
+        assert_ne!(
+            bigger_plan.barrier_contract_fingerprint(),
+            plan.barrier_contract_fingerprint(),
+            "barrier 指纹必须随站点需求变化"
+        );
+        // Windows 目标同样形成契约，只是 profile 不同。
+        let windows = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Windows,
+        ));
+        assert!(windows.is_success(), "{:?}", windows.diagnostics().items());
+        let windows_plan = windows.image_plan().expect("windows plan");
+        assert_eq!(
+            windows_plan.barrier_card_granularity_bytes(),
+            plan.barrier_card_granularity_bytes()
+        );
+        // barrier 协议本身不含平台差异：card 粒度、buffer 容量与六步序列在两个目标上
+        // 必须相同，平台差异只体现在 raw 契约的其余分段。
+        assert_eq!(
+            windows_plan.barrier_contract_fingerprint(),
+            plan.barrier_contract_fingerprint(),
+            "barrier 协议不得随目标漂移"
+        );
+        assert_ne!(
+            compilation.runtime_raw_fingerprint(),
+            windows.runtime_raw_fingerprint(),
+            "raw 契约整体仍必须随目标分离"
         );
     }
 

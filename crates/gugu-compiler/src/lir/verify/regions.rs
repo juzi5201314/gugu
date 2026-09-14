@@ -22,7 +22,126 @@ struct State {
     regions: Vec<u32>,
     views: BTreeMap<u32, (ValueId, ViewMode)>,
     shared: Vec<u32>,
-    permits: Vec<Option<u32>>,
+    permits: Vec<Option<PermitState>>,
+}
+
+/// 一条路径上某个 permit 的剩余额度与已消费的 card 键。
+///
+/// `seen` 按值编号升序且去重：同一地址在同一 region 内只需一个 card-mark slot，因此只有
+/// 首次出现的地址才扣除 card 额度。合流边取 `min` 剩余额度、取 `seen` 的交集，保证任何
+/// 执行路径都不会超出 compile-time 额度。
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PermitState {
+    shades: u32,
+    cards: u32,
+    seen: Vec<ValueId>,
+}
+
+impl PermitState {
+    fn new(permit: &crate::lir::body::BarrierPermit) -> Self {
+        Self {
+            shades: permit.max_shades,
+            cards: permit.max_card_marks,
+            seen: Vec::new(),
+        }
+    }
+
+    /// 消费一次 hybrid barrier 写入；返回 `false` 表示额度不足。
+    fn consume(&mut self, address: ValueId) -> bool {
+        let Some(shades) = self.shades.checked_sub(2) else {
+            return false;
+        };
+        self.shades = shades;
+        match self.seen.binary_search(&address) {
+            Ok(_) => true,
+            Err(position) => {
+                let Some(cards) = self.cards.checked_sub(1) else {
+                    return false;
+                };
+                self.cards = cards;
+                self.seen.insert(position, address);
+                true
+            }
+        }
+    }
+
+    /// 合流：剩余额度取逐项最小值，已消费键取交集。
+    fn join(previous: &Self, next: &Self) -> Self {
+        let mut seen = Vec::with_capacity(previous.seen.len().min(next.seen.len()));
+        let (mut left, mut right) = (0, 0);
+        while left < previous.seen.len() && right < next.seen.len() {
+            match previous.seen[left].cmp(&next.seen[right]) {
+                std::cmp::Ordering::Less => left += 1,
+                std::cmp::Ordering::Greater => right += 1,
+                std::cmp::Ordering::Equal => {
+                    seen.push(previous.seen[left]);
+                    left += 1;
+                    right += 1;
+                }
+            }
+        }
+        Self {
+            shades: previous.shades.min(next.shades),
+            cards: previous.cards.min(next.cards),
+            seen,
+        }
+    }
+}
+
+/// region 内屏障的静态额度：shade 按写数、card-mark 按 distinct 写入地址数。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct StaticQuota {
+    shades: u32,
+    cards: u32,
+}
+
+/// 复算一个 region 的静态额度；region 必须落在单个 block 内。
+fn static_quota(body: &Body, region: u32) -> Result<StaticQuota, Diagnostic> {
+    let mut window = None;
+    for (block_index, block) in body.blocks.iter().enumerate() {
+        let mut begin = None;
+        for (offset, instruction) in body.instructions[range(&block.instructions)]
+            .iter()
+            .enumerate()
+        {
+            match instruction.op {
+                Op::NoSafepointBegin(id) if id == region => begin = Some(offset),
+                Op::NoSafepointEnd(id) if id == region => {
+                    let Some(begin) = begin else {
+                        return Err(invalid("NoSafepointRegion end 没有匹配 begin"));
+                    };
+                    if window.is_some() {
+                        return Err(invalid("NoSafepointRegion 必须具有唯一 begin/end"));
+                    }
+                    window = Some((block_index, begin, offset));
+                }
+                _ => {}
+            }
+        }
+    }
+    let (block_index, begin, end) =
+        window.ok_or_else(|| invalid("barrier permit 引用的 region 没有唯一 begin/end"))?;
+    let mut barriers = 0_u32;
+    let mut addresses: Vec<ValueId> = Vec::new();
+    let instructions = &body.instructions[range(&body.blocks[block_index].instructions)];
+    for instruction in &instructions[begin..end] {
+        // 构建结果里 region 内只会剩下已预留屏障；结构 verifier 模式允许裸屏障，
+        // 两种 opcode 都是同一个写入地址的 hybrid barrier。
+        if matches!(
+            instruction.op,
+            Op::GcWriteBarrier { .. } | Op::GcWriteBarrierReserved { .. }
+        ) {
+            barriers += 1;
+            let address = body.args(&instruction.arguments)[0];
+            if let Err(position) = addresses.binary_search(&address) {
+                addresses.insert(position, address);
+            }
+        }
+    }
+    Ok(StaticQuota {
+        shades: barriers.saturating_mul(2),
+        cards: u32::try_from(addresses.len()).expect("屏障写入地址数量适配 u32"),
+    })
 }
 
 pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<Layout, Diagnostic> {
@@ -50,10 +169,23 @@ pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<Layout, D
         && (reserves.iter().any(|count| *count != 1)
             || body.barrier_permits.iter().any(|permit| {
                 permit.max_shades == 0
+                    || permit.max_card_marks == 0
                     || !usize::try_from(permit.region).is_ok_and(|index| index < begins.len())
             }))
     {
         return Err(invalid("barrier permit 缺少唯一 reserve 或引用非法 region"));
+    }
+    if mode == Mode::Complete {
+        // permit 的额度必须等于 region 的静态复算值：额度既不能偏小（region 内不得补容量），
+        // 也不能偏大（禁止用宽松 permit 掩盖其它 region 的消费）。
+        for permit in &body.barrier_permits {
+            let quota = static_quota(body, permit.region)?;
+            if permit.max_shades != quota.shades || permit.max_card_marks != quota.cards {
+                return Err(invalid(
+                    "barrier permit 额度与该 region 的静态消费上界不一致",
+                ));
+            }
+        }
     }
     let empty = State {
         regions: Vec::new(),
@@ -96,20 +228,20 @@ pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<Layout, D
                         return Err(invalid("barrier reserve 必须在 region 外"));
                     }
                     state.permits[permit.index()] =
-                        Some(body.barrier_permits[permit.index()].max_shades);
+                        Some(PermitState::new(&body.barrier_permits[permit.index()]));
                 }
                 Op::GcWriteBarrierReserved { permit, .. } if mode == Mode::Complete => {
                     let record = &body.barrier_permits[permit.index()];
                     if state.regions.last() != Some(&record.region) {
                         return Err(invalid("预留屏障不在对应 region 内"));
                     }
+                    let address = body.args(&instruction.arguments)[0];
                     let remaining = state.permits[permit.index()]
+                        .as_mut()
                         .ok_or_else(|| invalid("屏障没有被 reserve 支配"))?;
-                    state.permits[permit.index()] = Some(
-                        remaining
-                            .checked_sub(2)
-                            .ok_or_else(|| invalid("hybrid barrier 超过预留 shade 额度"))?,
-                    );
+                    if !remaining.consume(address) {
+                        return Err(invalid("hybrid barrier 超过预留 shade 或 card-mark 额度"));
+                    }
                 }
                 Op::ScopedViewBegin { token, mode } => {
                     let source = body.args(&instruction.arguments)[0];
@@ -198,11 +330,11 @@ pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<Layout, D
                     }
                     let mut changed = false;
                     for (previous, next) in previous.permits.iter_mut().zip(&state.permits) {
-                        let joined = match (*previous, *next) {
-                            (Some(left), Some(right)) => Some(left.min(right)),
+                        let joined = match (previous.as_ref(), next.as_ref()) {
+                            (Some(left), Some(right)) => Some(PermitState::join(left, right)),
                             _ => None,
                         };
-                        if *previous != joined {
+                        if previous.as_ref() != joined.as_ref() {
                             *previous = joined;
                             changed = true;
                         }

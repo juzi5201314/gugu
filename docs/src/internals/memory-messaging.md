@@ -179,6 +179,17 @@ owner 的本地分配顺序固定为：
 
 消息不得包含普通 managed pointer。若回收动作必须关联 managed 对象，消息只能携带已登记的 stable handle 或 descriptor index；collector 在自己的 root/forwarding 规则内解析它。
 
+### 消息族判别
+
+同一 non-moving node pool 与同一 producer staging 承载两个消息族，族判别值随 payload 写入 node 车道：
+
+| 族 | payload | 载入键 |
+|---|---|---|
+| `return` | `ReturnMessage`：kind、descriptor、unit、bytes、source epoch、state | descriptor 与 class |
+| `card-mark` | `CardMarkBatch`：arena descriptor、arena generation、card range、cycle epoch、bytes、state | arena descriptor 与 arena generation |
+
+`CardMarkBatch` 是 remembered-set 工作消息：它把 mutator 在 `CardMarkBuffer` 里积累的 card 键交给 arena allocation owner，由 owner 在 card table 上置位。batch 只携带稳定序号，不携带 field 地址或 managed pointer；`arena_generation` 与目标 owner token 一起构成 integrity，arena 回收后到达的旧 batch 进入 `RuntimeInvariant`。card batch 只能出现在 GC 工作族，不能占用任何 return kind；两个族共享 producer gate、queue-page grace 与 node 复用规则，但各自使用独立的 integrity 派生键。
+
 ### Producer staging
 
 每个 producer 使用固定数量的 staging slot 或一个当前目标链，不为每个 owner 预分配队列。staging record 在进入 runtime queue primitive 前后都必须遵守 scheduler 已有的 producer gate 和 stop epoch 登记。

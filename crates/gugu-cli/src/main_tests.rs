@@ -325,3 +325,47 @@ fn dump_internal_flags_parse_and_require_internal_gate() {
             .contains("未知内部选项")
     );
 }
+
+#[test]
+fn build_json_reports_barrier_contract_keys() {
+    let source =
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
+    let compilation =
+        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+            "main.gg",
+            source,
+            gugu_compiler::TargetName::X86_64Linux,
+        ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    let payload = super::output::image_plan_payload(plan);
+    for key in [
+        "barrier-card-granularity-bytes",
+        "barrier-card-mark-buffer-entries",
+        "barrier-card-mark-stamp-entries",
+        "barrier-flush-reason-count",
+        "barrier-card-mark-batch-fields",
+        "barrier-record-count",
+        "barrier-contract-fingerprint",
+        "barrier-demand",
+    ] {
+        assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
+    }
+    assert_eq!(payload["barrier-card-granularity-bytes"], 512);
+    assert_eq!(payload["barrier-card-mark-buffer-entries"], 256);
+    assert_eq!(payload["barrier-flush-reason-count"], 6);
+    assert_eq!(payload["barrier-card-mark-batch-fields"], 13);
+    assert_eq!(
+        payload["barrier-demand"]["card-mark-sites"],
+        payload["barrier-demand"]["edge-summary-sites"]
+    );
+    let fingerprint = payload["barrier-contract-fingerprint"]
+        .as_array()
+        .expect("指纹是字节数组");
+    assert_eq!(fingerprint.len(), 32);
+    assert!(fingerprint.iter().any(|byte| byte != &serde_json::json!(0)));
+}
