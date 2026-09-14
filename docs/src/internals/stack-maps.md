@@ -221,7 +221,7 @@ stack slot 就地更新。top register root 更新保存区，恢复用户寄存
 
 raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法性由 unsafe/pin 规则保证；stack map 不能暗中延长 raw pointer 目标的生命周期。
 
-## 协程栈复制
+## 协程栈复制 {#coroutine-stack-replication}
 
 只有 safepoint flags 允许 stack copy 时才可移动 stack。复制固定按以下顺序：
 

@@ -24,7 +24,7 @@ std.build         std.hint
 
 `std` 的私有实现模块由工具链随 compiler 内建源树注入，与用户源码走同一条解析、cfg 与检查路径。它们不是可导入的 package API：只有 `std` 内部的模块可以互相引用，非 `std` 模块导入 `std.runtime`、`std.platform` 等实现模块一律按保留名拒绝（`E0031`）。用户源码占用内建逻辑路径同样是 `E0031`。
 
-## 平台范围与内存账本
+## 平台范围与内存账本 {#platform-ranges-ledger}
 
 `std.platform` 是 `std` 的私有实现模块，向 runtime、collector 与调度器提供平台范围原语。它们绑定 IR 原语，只能在 `unsafe` 块内调用（`E0041`），且不接受类型实参：
 
@@ -47,7 +47,7 @@ huge_page_hint(range)
 
 平台失败统一映射为三个类别，Linux 与 Windows 的映射逐项一致：`OutOfMemory`、`ResourceExhausted`、`RuntimeInvariant`。同一失败在两个目标上必须落到同一类别，契约 verifier 拒绝任何 profile 之间的漂移。失败类别是诊断与恢复策略的依据，不是可捕获的异常。
 
-内存压力统计不重复计数。`range_reserved_bytes` 只统计已预留但尚未提交的虚拟地址；`runtime_committed_bytes` 只统计已提交的物理页，两者严格互斥。`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 与 `live_bytes` 是 `runtime_committed_bytes` 的互斥分类，逐项相加恰好等于它；limit 判断不得把同一物理页计入多个分类。完整字段口径见[运行时](runtime.md#gc栈与运行时控制-api)。
+内存压力统计不重复计数。`range_reserved_bytes` 只统计已预留但尚未提交的虚拟地址；`runtime_committed_bytes` 只统计已提交的物理页，两者严格互斥。`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 与 `live_bytes` 是 `runtime_committed_bytes` 的互斥分类，逐项相加恰好等于它；limit 判断不得把同一物理页计入多个分类。完整字段口径见[运行时](runtime.md#gc-stack-runtime-control-api)。
 
 `std` 提供语言基座、集合、文本、格式化、I/O、文件、路径、transport 网络、进程、环境、时间、运行时控制、信号、同步、机器数值、随机、FFI、测试和构建接口。JSON、正则表达式、压缩、密码学、TLS、HTTP、WebSocket、QUIC、数据库、时区数据库、命令行框架和大文本 Rope 不属于 `std`；它们可以由官方 Registry package 提供，并独立于工具链发布。工具链自身的命令行接口见[工具链与命令行](toolchain-cli.md)。
 
@@ -79,7 +79,7 @@ trait Error {
 
 `?` 仍按[表达式与语句](expressions.md)要求传播相同错误类型；跨领域转换必须显式构造、`map` 或由调用者声明的转换完成，标准库不提供隐式错误装箱。
 
-## comptime capability registry
+## comptime capability registry {#comptime-capability-registry}
 
 官方编译器维护一份 compiler-owned、封闭的 comptime capability registry。凡是 lang item、
 intrinsic 或标准库函数调用，只有按解析后的稳定身份登记且当前 comptime 执行域获准时才能
@@ -146,7 +146,7 @@ fn parse_pattern(text: string) Result[ParsedSource, SyntaxError]
 成立；宏展开后这些约束回到主编译前端检查。解析失败返回 `SyntaxError`，脚本可以
 捕获并转换为自己的 `Error`；宏边界返回的最终 `Err` 才成为编译诊断。
 
-## 可变 COW `string`
+## 可变 COW `string` {#mutable-cow-string}
 
 `string` 是合法 UTF-8 的可变值，不是共享可变身份对象。赋值、参数传递、返回和模式绑定产生语义独立的 string 值；实现先共享只读 backing，直到任一值发生修改。
 
@@ -268,7 +268,7 @@ fn string.lines(self: &Self) impl IntoIter
 
 工具链升级可以升级 Unicode 数据并改变属性、case mapping、normalization 或 segmentation 结果；`unicode_version` 使程序能够记录该版本。string 的默认 Eq、Ord 与 Hash 始终按原始 UTF-8 byte，不随 Unicode 表改变。
 
-## 静态格式化
+## 静态格式化 {#static-formatting}
 
 f-string 的格式说明在编译期解析和类型检查。默认 `{value}` 要求 `Print`；其它格式能力由独立 trait 表达：
 
@@ -288,7 +288,7 @@ trait UpperExp  { fn upper_exp(self: &Self, out: &Formatter) }
 
 `std.fmt.Formatter` 只写入当前构建中的 string，不执行 I/O。格式 trait 实现可以调用 Formatter 的文本、char、padding 和结构化 debug 方法，但不能读取或改变已解析的格式说明。f-string 构建失败只可能是 panic（例如内存耗尽），不返回领域错误。
 
-## 集合与 Hash
+## 集合与 Hash {#collections-and-hash}
 
 `std.collections` 首批稳定提供：
 

@@ -52,7 +52,7 @@ trait Print {
 }
 ```
 
-`Formatter` 在 `std.fmt`，只写当前构建中的 string，不直接执行 I/O。接收者是 `&Self`，避免格式化大值时产生语义复制。`Debug`、`Binary`、`Octal`、`LowerHex`、`UpperHex`、`LowerExp` 与 `UpperExp` 分别承接 `?`、`b`、`o`、`x`、`X`、`e`、`E` 格式码；不存在相应 impl 是编译错误，见[标准库 · 静态格式化](standard-library.md#静态格式化)。
+`Formatter` 在 `std.fmt`，只写当前构建中的 string，不直接执行 I/O。接收者是 `&Self`，避免格式化大值时产生语义复制。`Debug`、`Binary`、`Octal`、`LowerHex`、`UpperHex`、`LowerExp` 与 `UpperExp` 分别承接 `?`、`b`、`o`、`x`、`X`、`e`、`E` 格式码；不存在相应 impl 是编译错误，见[标准库 · 静态格式化](standard-library.md#static-formatting)。
 
 语言或标准库必须为内置标量、string、bool、TypeId，以及元素满足约束的 Option、Result、Vec、数组和元组提供适用实现。`#[derive(Print)]` 对结构体打印 `Name { field: ..., ... }`，对枚举打印变体名加载荷。默认整数十进制；bool 输出 `true` / `false`；string 输出内容本身；`NaN` / `inf` / `-inf` 按这些字面打印。
 
@@ -73,9 +73,9 @@ trait Iter {
 
 `IntoIter::Iter` 必须实现 Iter，且 `Iter::Item` 与 `IntoIter::Item` 相同，否则该 impl 非法。`for x in xs` 是 `let it = xs.into_iter()` 再循环 `it.next()`。xs 按[值传递](passing.md)规则传入 `into_iter`。`[T; N]` 与 `&[T]` 的语言 impl 不先复制整个数组，游标按索引逐个产生元素的语义副本。Range 由语言提供 IntoIter。
 
-标准集合的 IntoIter/Iter 实现捕获创建时快照并逐项产生语义副本；创建迭代器后的集合修改不会改变该迭代器观察到的序列，具体封存与分离成本见[标准库 · 集合与 Hash](standard-library.md#集合与-hash)。
+标准集合的 IntoIter/Iter 实现捕获创建时快照并逐项产生语义副本；创建迭代器后的集合修改不会改变该迭代器观察到的序列，具体封存与分离成本见[标准库 · 集合与 Hash](standard-library.md#collections-and-hash)。
 
-### `Try`
+### `Try` {#try}
 
 ```
 trait Try {
@@ -133,7 +133,7 @@ trait Any {
 }
 ```
 
-编译器认识的 lang item（按名字挂钩的标准库项，见 [概述 · 术语](overview.md#术语)），用户不能重新声明、不能手写肯定或否定 impl。编译器给所有拥有 `TypeId` 的类型生成 impl；语言对 `!` 与 `MaybeUninit[T]` 写 `impl !Any`。方法不能是泛型的，否则不能 `dyn Any`。`is` / `downcast` / `downcast_copy` 是 `dyn Any` 的固有方法，见 [类型 · TypeId](types.md)。
+编译器认识的 lang item（按名字挂钩的标准库项，见 [概述 · 术语](overview.md#terminology)），用户不能重新声明、不能手写肯定或否定 impl。编译器给所有拥有 `TypeId` 的类型生成 impl；语言对 `!` 与 `MaybeUninit[T]` 写 `impl !Any`。方法不能是泛型的，否则不能 `dyn Any`。`is` / `downcast` / `downcast_copy` 是 `dyn Any` 的固有方法，见 [类型 · TypeId](types.md)。
 
 ## `impl`
 

@@ -17,7 +17,7 @@
 
 `Booting`、`Running` 和 `Waiting` 中的运行时控制调用是进程级的；不是 coroutine-local 状态。`Terminating` 一旦开始，任何尚未发布的用户协程结果、defer 和信号事件都不再得到语言层保证。
 
-## rt0 与启动
+## rt0 与启动 {#rt0-and-startup}
 
 每个可执行镜像都有 rt0 入口。用户代码开始前必须依次完成：
 
@@ -65,7 +65,7 @@ runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用�
 
 调度公平、抢占、`yield`、channel 和同步原语的可见性见[并发与调度](concurrency.md)。safepoint、队列、context保存与外调交接只见[调度器](../internals/scheduler.md)和[栈图](../internals/stack-maps.md)；这些机制不能改变既有 happens-before、原子内存序或资源租约规则。
 
-## 进程寿命
+## 进程寿命 {#process-lifetime}
 
 用户协程是由 `async` 创建的协程，加上运行 `main` 的主协程。只有用户协程参与自然退出等待；runtime 的内部活动不延长程序寿命。
 
@@ -136,7 +136,7 @@ struct Panic {
 
 `Panic.location` 是原始 panic 调用点，不是 `catch`、`Join.wait` 或报告点。被 `catch` 或 `Join.wait` 处理的 panic 不自动产生 runtime 报告；报告格式见下文。
 
-## fatal 与资源耗尽
+## fatal 与资源耗尽 {#fatal-resource-exhaustion}
 
 fatal 是 runtime 无法安全恢复的进程级故障。fatal 不进入 `Panic`，不能被 `catch`、`Join.wait` 或用户 defer 截获；所有用户协程停止调度，runtime 尽力输出报告后终止整个进程。
 
@@ -155,7 +155,7 @@ fatal 是 runtime 无法安全恢复的进程级故障。fatal 不进入 `Panic`
 该口径还包括 owner-local raw/range cache、producer staging、owner inbox、forwarding chain 和尚未由 owner 消费的 `pending_return_bytes`。这些 bytes 在实际进入可复用 free structure 或完成 decommit 前都算作物理占用；pressure drain 可以先刷新消息和 cache，再执行 collection/trim。
 
 分配请求触发 soft limit 时，当前 pressure episode 至多启动一次 forced full cycle；完成后若仍高于 clear 水位，runtime继续执行有界 owner drain、forwarding grace、sweep、trim/decommit和有限 assist，不在每次临界分配上重复重扫整堆。仍不能取得 headroom时进入 `OutOfMemory`；占用低于 `pressure_clear_ratio` 且 pending/cache/reclaimable 已完成 owner drain 后，才允许下一 episode 再启动 forced cycle。显式 `std.runtime.collect()` 也不保证所有内存返还宿主，不改变任何存活值或安全引用的语义，也不运行用户 finalizer。具体 safepoint、heap和 cycle阶段见[GC内部规范](../internals/gc-metadata.md)。
-allocation debt 只影响自动 collection 的节奏；memory limit 触发的 drain、emergency sweep、decommit 和 `OutOfMemory` 规则不受 `GcTarget::Off` 关闭。具体 debt 公式和 pressure hysteresis 见[内存所有权与消息通道](../internals/memory-messaging.md#allocation-debtpressure-与-backpressure)。
+allocation debt 只影响自动 collection 的节奏；memory limit 触发的 drain、emergency sweep、decommit 和 `OutOfMemory` 规则不受 `GcTarget::Off` 关闭。具体 debt 公式和 pressure hysteresis 见[内存所有权与消息通道](../internals/memory-messaging.md#allocation-debt-pressure-backpressure)。
 
 栈增长失败与栈上限的区分是：请求超过逻辑上限属于 `StackOverflow`；请求未超过上限但 runtime 页面分配失败属于 `OutOfMemory`。runtime 栈保护和 emergency report 缓冲区不得依赖当前用户栈仍然可写。
 
@@ -250,7 +250,7 @@ signal 报告的 `reason` 使用 `signal-interrupt`、`signal-terminate`、`sign
 
 外部 FFI 或其它库直接修改 signal disposition、signal mask 或 Windows console handler 后，`std.signal` 的行为不再受 Gugu 保证；信号 API 不提供跨边界的 handler 链接或任意 signal number。
 
-## GC、栈与运行时控制 API
+## GC、栈与运行时控制 API {#gc-stack-runtime-control-api}
 
 `std.runtime` 公开的是 runtime 的控制与观测 facade，不公开 scheduler、collector、栈图、TLS 或 GC 元数据对象。所有 setter 都是进程级、线程安全的；多个协程并发调用时，按各自调用的线性化顺序采用最后发布的值，不为业务数据提供同步关系。
 
@@ -341,7 +341,7 @@ fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError]
 `safepoint_poll()` 是 compiler绑定的无参数 runtime intrinsic。fast path读取当前 `LogicalProcessor` 的 poll word；slow path可以确认 `gc_stop_epoch`、处理抢占请求、保存 stack map所需 roots、让出当前 coroutine并在恢复后重新检查 epoch。它不是阻塞 I/O API，不创建用户对象，不允许从 asm模板、`#[naked]` 或带函数体的 `#[ffi(dirty_cpu)]` 调用。
 
 `RuntimeStats` 是逐字段快照，不是业务同步原语。`gc_cycles`、`gc_pause_total`、累计 message/handle/region 计数和 dropped 计数单调递增；live/committed/active/waiting 等当前量可随并发运行升降，采样后立即过时。`stack_reserved_bytes` 是 stack arena 与大栈 reservation 占用的虚拟地址总量，`stack_live_bytes` 是 live coroutine 逻辑容量之和，`stack_committed_bytes` 是 live 与 cache 共同占用的已提交宿主页；亚页共享、cache 和空页回收使三者不存在简单相等关系。`heap_live_bytes` 也不等同于可立即返还 OS 的页数。并行度刚降低时 `dirty_cpu_active` 可以暂时高于新 target；`blocking_bridge_active` 是已经取得 BridgeCredit 并执行 native 的调用数，`blocking_bridge_waiting` 是 admission waiter 或已发布 bridge roots但尚未取得 credit 的调用数，`blocking_bridge_workers` 不超过 profile 的 `max_blocking_workers`，`blocking_bridge_queue_bytes` 包含 waiter metadata 与排队 payload。timer字段分别统计 active wheel/heap entries、已标记取消但未 compact 的 entries与 overflow heap/runtime slab bytes。bridge/timer 统计不提供取消 native work、强杀线程或固定调度时刻的能力。
-`range_reserved_bytes` 是已预留但尚未提交的虚拟地址总量；`runtime_committed_bytes` 是已提交的物理页总量，两者严格互斥：同一字节不能同时计入。`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 与 live record bytes 是 `runtime_committed_bytes` 的互斥分类，逐项相加恰好等于它，limit 判断不得把同一物理页计入多个分类。decommit 只在 allocator、scanner、forwarder 三路 lease 归零、extent 上没有 live/queued slot、没有在途 return 消息且 queue-page grace 走完后发生；平台失败的 Linux/Windows 映射必须一致。契约与门禁见[标准库](standard-library.md#平台范围与内存账本)。
+`range_reserved_bytes` 是已预留但尚未提交的虚拟地址总量；`runtime_committed_bytes` 是已提交的物理页总量，两者严格互斥：同一字节不能同时计入。`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 与 live record bytes 是 `runtime_committed_bytes` 的互斥分类，逐项相加恰好等于它，limit 判断不得把同一物理页计入多个分类。decommit 只在 allocator、scanner、forwarder 三路 lease 归零、extent 上没有 live/queued slot、没有在途 return 消息且 queue-page grace 走完后发生；平台失败的 Linux/Windows 映射必须一致。契约与门禁见[标准库](standard-library.md#platform-ranges-ledger)。
 
 `runtime_committed_bytes` 不包含 managed heap；`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 和 `range_reserved_bytes` 与既有 heap/stack 统计分开报告。`remote_return_batches`、`remote_return_hops`、`forwarded_messages`、`mark_ticket_batches`、`edge_delta_batches`、`mark_credit_pending`、`shared_handle_resolves`、`shared_handle_forwards`、`turn_region_resets`、`region_promotions` 和 `compressed_ref_decodes` 分别记录 owner return、GC message、handle、region 和 cage profile 的诊断口径；这些字段不构成同步、调度或回收时刻承诺。
 

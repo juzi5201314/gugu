@@ -309,7 +309,7 @@ build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进
 
 永久授权放在用户配置目录，不写 workspace、锁文件或 package 归档。授权与否不进入编译缓存 key；它只决定本次需要执行 build.gg 时某个操作能否发生。
 
-## 缓存与 Target 视图
+## 缓存与 Target 视图 {#cache-and-target-view}
 
 工具规范两个全局缓存，内部目录布局不是稳定 API：
 

@@ -72,7 +72,7 @@ pub fn bar() string = "bar"
 
 UTF-8，扩展名 `.gg`。文件是模块，目录是包；规范排版见[格式化与代码风格](format-style.md)，模块和可见性见[声明与模块](declarations.md)。
 
-## 术语
+## 术语 {#terminology}
 
 `spec/` 是程序、库、工具链与外部 ABI 的唯一公开规范；`internals/` 固定官方 compiler/runtime实现。下列公开术语在后文章节直接使用：
 

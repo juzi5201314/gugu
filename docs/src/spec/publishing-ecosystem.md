@@ -59,7 +59,7 @@ mirror = "https://cache.example/internal/"
 json = { package = "acme/json", version = "^1.2", registry = "public" }
 ```
 
-也可以使用清单约定的默认 registry 省略 `registry`。清单不能把 HTTP、文件路径、任意下载 URL 或 registry token 写成依赖 source。path 和 Git 依赖的发布限制见[发布流程](#发布流程)。
+也可以使用清单约定的默认 registry 省略 `registry`。清单不能把 HTTP、文件路径、任意下载 URL 或 registry token 写成依赖 source。path 和 Git 依赖的发布限制见[发布流程](#publish-workflow)。
 
 ### 凭据
 
@@ -148,7 +148,7 @@ GET <index>/<owner>/<name>
 - `deps` 的每个字段按[依赖声明与别名](packages-builds.md)解释；`kind` 只能是 `normal`、`test` 或 `build`，发布归档中的依赖边不得引用本地绝对路径。`target` 为空表示所有目标，否则是规范 `cfg` 表达式文本。
 - `features` 的键和值按清单 feature 规则解释；记录不能声明归档中不存在的 feature。
 - `metadata` 只包含发布元数据，不参与依赖解析或 package checksum；服务端不得把 token、私钥、宿主路径或未声明环境写入其中。
-- `signatures` 是可选签名列表，默认不会改变解析；格式见[可选签名](#可选签名)。
+- `signatures` 是可选签名列表，默认不会改变解析；格式见[可选签名](#optional-signatures)。
 
 未知非核心字段在 `schema = 1` 下可以被客户端忽略，但不能覆盖上述核心字段；未知核心字段类型、重复 JSON 键、非法 UTF-8、非法 checksum、重复版本或记录与归档清单不一致，都是 registry 协议错误。索引记录中的 package 元数据与归档 `gugu.toml` 不一致时，客户端必须以归档清单重新验证，并拒绝不一致记录。
 
@@ -170,7 +170,7 @@ registry、index、download 和 API 的外部 URL 必须使用 HTTPS。工具可
 
 归档内的 `gugu.toml` 必须包含可发布的 `owner`、`name`、显式 SemVer 和 `publish = true`。归档不得包含另一个 package 根、嵌套 `gugu.lock` 或会通过相对路径逃逸的 build 输入。
 
-### Package SHA-256
+### Package SHA-256 {#package-sha-256}
 
 `cksum` 和锁文件中的 registry 摘要计算如下，避免压缩器版本、tar header 和宿主文件系统元数据影响结果。先按归档路径的 UTF-8 字节序排列所有普通文件，然后构造规范内容流：
 
@@ -187,7 +187,7 @@ for each file:
 
 `gugu.lock` 的 `checksum` 字段必须等于记录的 `cksum`。缓存可以另外记录传输归档的原始字节摘要，但该摘要不是 package ID，也不能替代 `checksum`。同一 package 内容由不同合法压缩流传输时，逻辑 checksum 相同；同一 URL 返回逻辑内容不同，即使压缩流能够解开，也必须报告 checksum 错误。
 
-### 发布流程
+### 发布流程 {#publish-workflow}
 
 `gugu publish` 对选中的 package 按以下顺序执行：
 
@@ -214,7 +214,7 @@ Authorization: Bearer example-token
 
 发布命令成功时输出 `publish-result` 事件，至少包含 registry identity、package ID、checksum 和是否为幂等重试；token、私钥和本地绝对路径不能出现在事件中。服务端不接受客户端直接提交索引记录，索引字段必须从已验证归档和服务端拥有权状态产生。
 
-## 可选签名
+## 可选签名 {#optional-signatures}
 
 ### 默认行为
 

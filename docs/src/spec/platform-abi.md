@@ -112,7 +112,7 @@ Linux 目标的默认镜像不依赖动态解释器或 libc 初始化。Windows 
 
 引用、切片、字符串、句柄和擦除函数句柄的语言表示不是 C ABI 布局。即使某个实现当前把它们编码成一个或两个机器字，也不能据此形成 FFI 契约。
 
-### CPU 基线
+### CPU 基线 {#cpu-baseline}
 
 两个目标都要求 x86-64-v1 指令集与 SSE2 浮点。未新增公开 target feature 前，普通程序和 runtime不能要求 AVX、AVX2、BMI、FMA或其它更高扩展；在只满足该基线的 CPU上运行不得触发非法指令。具体 instruction selection不是外部 ABI，见[后端内部规范](../internals/backend.md)。
 
@@ -192,7 +192,7 @@ C 数组可以作为 `#[repr(C)]` 聚合的字段；数组不能作为独立的 
 
 ## C 布局规则
 
-### `repr(C)` 结构体
+### `repr(C)` 结构体 {#repr-c-struct}
 
 `#[repr(C)]` 结构体按声明顺序排列字段。每个字段的偏移是前一字段结束后向上取整到该字段对齐的位置；结构体大小向上取整到最大字段对齐。尾部填充属于布局的一部分，`size_of` 必须包含它。
 
@@ -280,7 +280,7 @@ C 导入符号默认使用 `extern` 声明名；`#[link_name = "..."]` 可指定
 
 PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]` 指定的节必须在目标格式上可表示，且不能覆盖 runtime、栈图、类型表、导入表或展开表的保留节；非法节名、权限组合和对齐要求都是编译错误。`--strip` 不能删除运行时必需的栈图、展开信息或 GC 元数据，详见[工具链与命令行](toolchain-cli.md)。
 
-### 可执行镜像形式
+### 可执行镜像形式 {#executable-image-forms}
 
 没有动态 FFI 导入的 Linux executable必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0完成镜像自身允许的 relative relocation并支持加载基址随机化；不能退化成依赖 libc/系统 linker的启动路径。显式登记动态 `.so` 后才可以加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT和对应 relocation，解释器与 sysroot必须来自选中的 target/toolchain描述而不是宿主 PATH探测。
 
@@ -288,7 +288,7 @@ Windows executable和 `cdylib` 使用 PE32+，包含合法 base-relocation table
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
-### 入口、重定位与 TLS
+### 入口、重定位与 TLS {#entry-relocation-tls}
 
 Linux 镜像的入口由 ELF `e_entry` 指向 rt0；`_start` 是默认启动约定。Windows 镜像的 PE 入口同样直接指向 rt0 初始化路径。入口函数不经过 Gugu 普通函数 ABI，也不能触发 GC 或依赖已初始化的 runtime。
 

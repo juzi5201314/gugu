@@ -6,7 +6,7 @@
 
 官方 compiler 以 Rust 实现 bootstrap：单一 `gugu` 入口、目标描述、确定性诊断、前端、稠密 IR、后端 image plan 和 Gugu runtime 源资源登记。它可以检查空 package、内存中的单文件入口和文件系统单文件入口，并为合法的 `fn main() { ... }` 生成端到端 action graph。
 
-`ImagePlan` 是 compiler 内存中的验证结果，不是 ELF、PE、静态库或共享库。`emit-image` action 保持 `skipped`，因此成功检查不会写出伪造的目标镜像；任一前置 action 失败时，所有后续 action 都会被跳过，结果中不会留下镜像计划。machine encoder、镜像 writer 和 rt0 写出分别由[后端](backend.md)与[运行时](../spec/runtime.md#rt0-与启动)契约规定，当前尚未物化。
+`ImagePlan` 是 compiler 内存中的验证结果，不是 ELF、PE、静态库或共享库。`emit-image` action 保持 `skipped`，因此成功检查不会写出伪造的目标镜像；任一前置 action 失败时，所有后续 action 都会被跳过，结果中不会留下镜像计划。machine encoder、镜像 writer 和 rt0 写出分别由[后端](backend.md)与[运行时](../spec/runtime.md#rt0-and-startup)契约规定，当前尚未物化。
 
 ## CLI 入口与输出
 
@@ -161,7 +161,7 @@ crates/
 | `x86_64-linux` | ELF64 | 64 | Linux syscall |
 | `x86_64-windows` | PE32+ | 64 | Windows 薄 IAT |
 
-rt0 不是普通 Gugu 函数。Linux 入口和 Windows 薄导入路径由后端与平台 runtime 负责；`RuntimeResources` 只把这项边界附加到 image plan，不实现宿主启动、分配、调度或报告逻辑。这样可以使目标描述进入编译结果，同时保持公开的 rt0 启动契约由 [`运行时规范`](../spec/runtime.md#rt0-与启动) 和 [`平台 ABI`](../spec/platform-abi.md#入口重定位与-tls)唯一规定。
+rt0 不是普通 Gugu 函数。Linux 入口和 Windows 薄导入路径由后端与平台 runtime 负责；`RuntimeResources` 只把这项边界附加到 image plan，不实现宿主启动、分配、调度或报告逻辑。这样可以使目标描述进入编译结果，同时保持公开的 rt0 启动契约由 [`运行时规范`](../spec/runtime.md#rt0-and-startup) 和 [`平台 ABI`](../spec/platform-abi.md#entry-relocation-tls)唯一规定。
 
 `RuntimeRawModel` schema 5 把协程契约并入同一缓存对象：优化后 LIR 的创建点、入口检查与 suspend 需求，以及固定布局、栈策略和换栈字节都进入 fingerprint。内建 Gugu 协程源通过正常 LoadSources/前端/单态化形成 record，query 的构造与恢复均校验源布局。CLI `image-plan` 暴露 `coroutine-runtime` 和 `coroutine-contract-fingerprint`，`-Zdump-runtime` 输出逐字段 offset、arena/cache 策略和需求计数；任何 verifier 失败不形成 backend/image plan。
 

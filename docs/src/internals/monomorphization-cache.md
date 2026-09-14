@@ -1,6 +1,6 @@
 # 单态化与编译缓存
 
-本章规定编译器内部的 demand-driven query 图、单态化实例身份和内容寻址编译缓存。外部可观察的缓存输入集合、目录覆盖和清理语义见[包、依赖与构建模型](../spec/packages-builds.md#缓存与-target-视图)；本章固定当前编译器如何实现这些要求，但不把磁盘格式承诺给第三方工具。
+本章规定编译器内部的 demand-driven query 图、单态化实例身份和内容寻址编译缓存。外部可观察的缓存输入集合、目录覆盖和清理语义见[包、依赖与构建模型](../spec/packages-builds.md#cache-and-target-view)；本章固定当前编译器如何实现这些要求，但不把磁盘格式承诺给第三方工具。
 
 ## 权威边界
 
@@ -219,7 +219,7 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
 
 当前只提供可复用的 compiler 基础设施；action record、LRU 索引、清理命令和 target 物化尚未完整接入 CLI。
 
-## 单态化闭合与公共摘要
+## 单态化闭合与公共摘要 {#mono-closure-public-digest}
 
 `CollectMonoRoots`（12，schema 2）与 `InstantiateGir`（13，schema 2）已在
 `gugu-compiler::frontend::mono` 落地。闭合发生在 `LowerHir` 冻结之后，
@@ -267,7 +267,7 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
   可达实例均证明安全时才省略；未收敛 SCC 置预算耗尽并保留检查。证明只存在于
   `AnalysisWorldV1.proofs`。
 
-## 单态化实例
+## 单态化实例 {#mono-instance}
 
 ### 稳定类型与实例键
 
@@ -324,7 +324,7 @@ collector 使用按 `MonoKey` 摘要字节序排列的 `BTreeSet` 作为 pending
 
 首版总是完整单态化，不做跨类型的 polymorphization 或 dictionary sharing。布局相同的不同 `MonoKey` 只有在最终机器码、relocation、stack map、unwind、source record 和可见性全部相同时才由 image planner 做 identical code folding；其符号、诊断和 metadata 身份仍独立。
 
-### 具体类型集合与 `TypeId`
+### 具体类型集合与 `TypeId` {#concrete-type-set-typeid}
 
 实例图闭合后，`FreezeTypeUniverse` 从签名、local、global、vtable、descriptor、早期常量、
 late comptime 闭包中的类型依赖和 runtime 根递归收集所有具体类型。类型集合按完整

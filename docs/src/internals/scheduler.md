@@ -8,7 +8,7 @@
 
 除平台 rt0、context switch、signal/exception stub和必须的 machine intrinsic外，官方 scheduler/runtime主体使用 Gugu实现；不得维护一份 Rust语义等价runtime作为正常执行路径。
 
-runtime源码需要在锁所有权或 root publication的常数临界区暂缓 safepoint时，只能使用 compiler内部的 [`NoSafepointRegion`](gir-lir.md#nosafepointregion)；它不是用户 attribute，也不允许建立另一套不受 poll预算约束的 runtime路径。
+runtime源码需要在锁所有权或 root publication的常数临界区暂缓 safepoint时，只能使用 compiler内部的 [`NoSafepointRegion`](gir-lir.md#no-safepoint-region)；它不是用户 attribute，也不允许建立另一套不受 poll预算约束的 runtime路径。
 
 ## 内存返回接缝
 
@@ -362,7 +362,7 @@ StackDescriptor {
 class_ceil(max(old_capacity * 2, used_bytes + required_frame + 512, 2 KiB))
 ```
 
-请求超过 `GUGU_RUNTIME_STACK_MAX` 或容量 checked arithmetic 失败进入 `StackOverflow` fatal；请求仍在逻辑上限内但 arena/页面提交失败进入 `OutOfMemory` fatal。增长只在 safepoint完成，更新 `last_grow_gc_epoch`、清零 `low_use_gc_cycles`与 `COLD_COMPACTED`，复制和 `StackInterior` 修正遵循[栈图](stack-maps.md#协程栈复制)。
+请求超过 `GUGU_RUNTIME_STACK_MAX` 或容量 checked arithmetic 失败进入 `StackOverflow` fatal；请求仍在逻辑上限内但 arena/页面提交失败进入 `OutOfMemory` fatal。增长只在 safepoint完成，更新 `last_grow_gc_epoch`、清零 `low_use_gc_cycles`与 `COLD_COMPACTED`，复制和 `StackInterior` 修正遵循[栈图](stack-maps.md#coroutine-stack-replication)。
 
 stack收缩采用四个完整 GC观察窗的迟滞，不再按一次 `used * 4 < capacity`立即复制。park、preempt和 stack growth slow path以 owner写更新 `recent_high_water`；每个完整 GC在 scan lock下取 `max(recent_high_water, used_bytes)`。只有该值加512 bytes不超过当前容量四分之一、最近四个完整 GC都未发生增长且 stack连续四次满足低占用时才收缩，任一条件失败即清零计数；完成本次采样后以当前 `used_bytes`开始下一观察窗。
 
@@ -530,7 +530,7 @@ SharedHeap forwarding；scheduler 保留至少一个 worker 处理 poller、time
 
 ## 动态并行度
 
-公开facade按[运行时](../spec/runtime.md#gc栈与运行时控制-api)验证并线性化请求后，向scheduler发布`ApplyParallelism { old, new, epoch }`；scheduler不再次决定零值错误、setter返回值或公开状态。增加时按runnable demand从processor pool取得控制块、分配新的稳定ID并重建稠密active快照，按宿主topology归入NUMA domain；只在需要时创建/唤醒worker，不按new一次性预建线程。同时提高dirty target并按FIFO admission等待项，必需分配失败上报runtime fatal入口。
+公开facade按[运行时](../spec/runtime.md#gc-stack-runtime-control-api)验证并线性化请求后，向scheduler发布`ApplyParallelism { old, new, epoch }`；scheduler不再次决定零值错误、setter返回值或公开状态。增加时按runnable demand从processor pool取得控制块、分配新的稳定ID并重建稠密active快照，按宿主topology归入NUMA domain；只在需要时创建/唤醒worker，不按new一次性预建线程。同时提高dirty target并按FIFO admission等待项，必需分配失败上报runtime fatal入口。
 
 降低时把ID最大的多余processor以AcqRel标为`Retiring`，从新active快照移除并发布新的topology epoch；dirty target降为`new == 1 ? 1 : new - 1`，active dirty work不强杀，实际limit保持不低于active直到排空。epoch发布时仍为active且持旧epoch的`ProducerHandle`必须完成当前head CAS、flush指向旧target的staging，Acquire新快照并发布`topology_epoch_seen`后清active；当时inactive的producer下次开始batch必先读取新queue control word，新登记producer直接从当前epoch开始。retirement等待这组旧epoch active producer越过checkpoint后，才最终摘取8个remote head与carry，从而封闭“检查active后、publish前”发生的late enqueue。
 
@@ -539,7 +539,7 @@ processor retire 同时必须交接 owner inbox、raw local/range cache、return
 
 ## 终止
 
-runtime状态机先根据[进程寿命](../spec/runtime.md#进程寿命)生成`TerminationPlan { mode, admit_user_coroutines, wait_foreign, report_epoch }`；scheduler只执行该plan，不决定`process.exit`、fatal、defer或报告语义。`mode`取`natural`（自然收尾，等待全部用户协程）、`immediate`（主协程panic后立即收尾，不再等待其余协程）、`explicit-exit`、`fatal`与`signal`之一；失败记录（main-error、unhandled-panic、fatal reason、signal reason）由plan内的reason承载。`admit_user_coroutines`进入`Terminating`后一律关闭。`report_epoch`是必须冲刷的报告数量下界：plan发布终止报告时记录`报告账本已发布数量`，自然成功与显式退出记录当前数量；shutdown完成前报告账本至少要冲刷这么多条。计划构造、退出码解析（Linux按`128 + 信号号`、Windows按登记的非零status）与七类fatal的报告形态由compiler侧确定性参照模型固定，与[bootstrap](bootstrap.md)的rt0契约段共用同一schema；镜像内的Gugu runtime按同一语义执行。停止接纳后先阻止新producer登记，要求全部producer flush `pending_node/staging`并越过最新topology/slab epoch，再唤醒parked worker、关闭新poller注册并等runtime critical section到达安全边界；`wait_foreign`同时覆盖普通foreign、`DirtyWaiting`和正在执行的dirty work。
+runtime状态机先根据[进程寿命](../spec/runtime.md#process-lifetime)生成`TerminationPlan { mode, admit_user_coroutines, wait_foreign, report_epoch }`；scheduler只执行该plan，不决定`process.exit`、fatal、defer或报告语义。`mode`取`natural`（自然收尾，等待全部用户协程）、`immediate`（主协程panic后立即收尾，不再等待其余协程）、`explicit-exit`、`fatal`与`signal`之一；失败记录（main-error、unhandled-panic、fatal reason、signal reason）由plan内的reason承载。`admit_user_coroutines`进入`Terminating`后一律关闭。`report_epoch`是必须冲刷的报告数量下界：plan发布终止报告时记录`报告账本已发布数量`，自然成功与显式退出记录当前数量；shutdown完成前报告账本至少要冲刷这么多条。计划构造、退出码解析（Linux按`128 + 信号号`、Windows按登记的非零status）与七类fatal的报告形态由compiler侧确定性参照模型固定，与[bootstrap](bootstrap.md)的rt0契约段共用同一schema；镜像内的Gugu runtime按同一语义执行。停止接纳后先阻止新producer登记，要求全部producer flush `pending_node/staging`并越过最新topology/slab epoch，再唤醒parked worker、关闭新poller注册并等runtime critical section到达安全边界；`wait_foreign`同时覆盖普通foreign、`DirtyWaiting`和正在执行的dirty work。
 
 worker无runtime/foreign责任后转Stopping。主线程按poller、processor、GC、stack arena、coroutine cold slab、`CoroutineSlot` slab顺序关闭内部设施，再把plan结果交给宿主退出。Dead coroutine的stack已经在完成路径归还；最后一个Join/handle与runtime root释放后，hot/cold slot可以在仍映射的slab page内按新generation复用，整页解除映射必须满足GC内部规范定义的queue-page grace period。
 

@@ -44,7 +44,7 @@
 
 `(&U)(p)` 从裸指针构造引用，或 `(&U)(r)` 改变已有引用的指向类型时，必须处于 `unsafe` 块，并由调用者维持引用的完整有效性条件。同类型引用的恒等构造不增加前置条件。固定数组引用到同元素类型切片引用复用通常的安全视图转换；从固定数组裸指针构造切片引用仍需 `unsafe`，长度取该数组长度。普通裸地址不携带切片长度，不能据此构造切片引用；已有切片引用的重解释保留原有长度，不隐式换算元素数量。
 
-`std.ptr` 提供（lang item——编译器按名字挂钩的标准库项，必须存在，见 [概述 · 术语](overview.md#术语)）：
+`std.ptr` 提供（lang item——编译器按名字挂钩的标准库项，必须存在，见 [概述 · 术语](overview.md#terminology)）：
 
 ```text
 fn addr_of[T](place: T) *T
@@ -76,7 +76,7 @@ union Word {
 
 ## `MaybeUninit[T]`
 
-`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#术语)），布局与 `T` 相同。带 resource 管理语义的 T 不能实例化 MaybeUninit，避免覆盖或未初始化状态绕过 lease release。其它 T 的 GC 扫描与初始化状态由编译器精确跟踪，直到 `assume_init` 前不能把未写入槽当成有效 T 使用。
+`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#terminology)），布局与 `T` 相同。带 resource 管理语义的 T 不能实例化 MaybeUninit，避免覆盖或未初始化状态绕过 lease release。其它 T 的 GC 扫描与初始化状态由编译器精确跟踪，直到 `assume_init` 前不能把未写入槽当成有效 T 使用。
 
 ```
 fn uninit[T]() MaybeUninit[T]
@@ -103,8 +103,8 @@ unsafe fn assume_init(self) T
 | 职责 | 说明 |
 |------|------|
 | 受管分配 / 区域 | managed storage、`LocalArena` / `SyncArena` 上的未初始化内存；OS `mmap` / `VirtualAlloc` |
-| 平台范围 | `std.platform` 的 reserve/commit/decommit/release、guard、wait/wake、entropy、zero 与 dump policy；契约见[标准库](standard-library.md#平台范围与内存账本) |
-| 受管引用更新 | 手写 runtime 对 GC 引用槽的更新；当前屏障见 [GC 元数据](../internals/gc-metadata.md#write-barrieredge-summary-与-remembered-set) |
+| 平台范围 | `std.platform` 的 reserve/commit/decommit/release、guard、wait/wake、entropy、zero 与 dump policy；契约见[标准库](standard-library.md#platform-ranges-ledger) |
+| 受管引用更新 | 手写 runtime 对 GC 引用槽的更新；当前屏障见 [GC 元数据](../internals/gc-metadata.md#write-barrier-edge-summary-remembered-set) |
 | 栈切换 | 保存目标 ABI 状态并切换执行栈；当前 context见[调度器](../internals/scheduler.md) |
 | 栈边界 / SP | GC 与溢出探测 |
 | 调度/GC 轮询 | `std.runtime.safepoint_poll()`；检查抢占与 GC stop，可能挂起当前协程 |
@@ -122,7 +122,7 @@ unsafe fn assume_init(self) T
 
 未定义行为包括：野指针、数据竞争、破坏 UTF-8 或 runtime 私有状态、遗漏受管引用更新、在编译器未登记的停止点读取根 metadata，以及对 `union` / `MaybeUninit` / `transmute` 使用无效位模式。当前官方 metadata与屏障契约只见[栈图](../internals/stack-maps.md)和[GC 元数据](../internals/gc-metadata.md)。调试器可以抓一部分；没炸不是定义。
 
-## `asm` 与 `global_asm`
+## `asm` 与 `global_asm` {#asm-global-asm}
 
 内联汇编是表达式，必须在 `unsafe` 里：
 
@@ -208,7 +208,7 @@ fn read_once(fd: int, buffer: *byte, length: uint) int {
 - `!` 可作为 `extern "C"` 的返回类型（C 的 `_Noreturn` / `noreturn`）。
 - 导出函数若发生 panic：必须在导出边界用 `std.panic.catch`，否则 runtime **abort 进程**，禁止把 Gugu 展开推进外部帧。
 
-### 外部调用效应与桥接
+### 外部调用效应与桥接 {#foreign-call-effects-bridging}
 
 C ABI 只规定参数、返回值和寄存器/栈布局，不携带是否等待、是否回调 Gugu 或是否执行很久的信息。每个导入项在 compiler 的类型检查结果中还带一个不暴露给用户类型系统的 `ForeignEffect`：
 
@@ -234,7 +234,7 @@ compiler 不能检查动态库或 opaque asm 的函数体。错误的 `ffi(leaf)
 
 有效位模式至少要求：`bool` 只能为 0/1；`char` 是合法 Unicode 标量；引用非空且有效；`string` 保持 UTF-8 和合法长度；枚举判别值对应有效变体；`TypeId` 在表范围内；句柄与 vtable 必须指向当前镜像的合法 runtime状态。整数、浮点和原始指针接受全部位模式。构造无效位模式后即使尚未读取，只要把它当作已初始化的安全类型传播就是未定义行为；runtime私有对象 metadata的具体表示不属于本章。
 
-unsafe 不豁免数据竞争或受管引用更新契约。通过原始指针写入 GC 引用槽时必须调用对应 intrinsic；当前官方 runtime把它实现为[写屏障](../internals/gc-metadata.md#write-barrieredge-summary-与-remembered-set)，替代实现可以采用满足相同安全结果的机制。遗漏该操作是未定义行为。别名本身合法，但两个操作系统线程无同步地访问同一位置且至少一方写入仍是数据竞争。
+unsafe 不豁免数据竞争或受管引用更新契约。通过原始指针写入 GC 引用槽时必须调用对应 intrinsic；当前官方 runtime把它实现为[写屏障](../internals/gc-metadata.md#write-barrier-edge-summary-remembered-set)，替代实现可以采用满足相同安全结果的机制。遗漏该操作是未定义行为。别名本身合法，但两个操作系统线程无同步地访问同一位置且至少一方写入仍是数据竞争。
 
 ## `asm` 的求值与约束
 

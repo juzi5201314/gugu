@@ -59,11 +59,11 @@ Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行�
 
 ## 目标镜像
 
-可执行镜像包含目标 rt0、与该编译器构建配套的 runtime、标准库和闭世界用户程序。rt0 是平台入口而不是普通 Gugu函数；它只负责把宿主进程交给满足[运行时启动契约](runtime.md#rt0-与启动)的环境。
+可执行镜像包含目标 rt0、与该编译器构建配套的 runtime、标准库和闭世界用户程序。rt0 是平台入口而不是普通 Gugu函数；它只负责把宿主进程交给满足[运行时启动契约](runtime.md#rt0-and-startup)的环境。
 
 编译 action 在最终镜像写出前可以保留经过验证的内存计划；该计划不是 ELF、PE、静态库或共享库。只有所有前置阶段成功且目标格式、入口、重定位与运行时必需 metadata 均通过验证后，才允许执行镜像写出。任一阶段失败都必须跳过写出 action，不得留下部分镜像或以外部 assembler、linker、解释执行或降级路径伪造成功；完整 writer 顺序见[后端内部规范](../internals/backend.md)。
 
-镜像是否含动态解释器、默认系统导入、保留 metadata节和外部 ABI由[平台与 ABI 参考](platform-abi.md)唯一规定；内部 fragment、relocation、stack map和启动编码见[后端](../internals/backend.md)。主协程返回、panic、`process.exit`和 fatal之后的状态转换只见[运行时](runtime.md#进程寿命)。
+镜像是否含动态解释器、默认系统导入、保留 metadata节和外部 ABI由[平台与 ABI 参考](platform-abi.md)唯一规定；内部 fragment、relocation、stack map和启动编码见[后端](../internals/backend.md)。主协程返回、panic、`process.exit`和 fatal之后的状态转换只见[运行时](runtime.md#process-lifetime)。
 
 ## 编译器内部表示
 
@@ -88,7 +88,7 @@ comptime 值实参也参与实例身份；不能把仍带类型占位的声明�
 
 实例图闭合后，编译器冻结具体类型集合与稠密 `TypeId`，再执行只读该集合的 late
 comptime。`type_id_count()` 与 comptime `TypeId.as_int()` 不能反向参与类型形成、源码宏、
-impl 选择或可达性；完整限制见[编译期执行](comptime.md#早期与-late-comptime)。无法形成
+impl 选择或可达性；完整限制见[编译期执行](comptime.md#early-and-late-comptime)。无法形成
 有限闭世界、late 求值试图新增依赖、缺失 lang item 或依赖无法解析都是编译错误。递归
 泛型使单态化实例无法收敛报 `mono-divergence`（`E0052`）；实例总数超过实现上界报
 `mono-instance-limit`（`E0053`）。

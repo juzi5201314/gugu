@@ -110,7 +110,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 `len()`、capacity、range 与修改位置都按 byte 计。string 不支持单整数 `s[i]`；读取使用 `byte_at` / `char_at` 或迭代器。`s[a..b]` 等 range 返回 O(1) COW 快照，端点必须位于 UTF-8 scalar 边界，否则 panic。`==`、顺序与 Hash 按原始 UTF-8 byte 序列工作，不隐式 normalization。
 
-`+` 返回新 string；`+=` 修改左侧而不改变其它 string值。完整固有接口、`Bytes` 快照与 COW值语义见[标准库 · 可变 COW string](standard-library.md#可变-cow-string)；backing复用和管理动作只见 [GIR/LIR](../internals/gir-lir.md)。
+`+` 返回新 string；`+=` 修改左侧而不改变其它 string值。完整固有接口、`Bytes` 快照与 COW值语义见[标准库 · 可变 COW string](standard-library.md#mutable-cow-string)；backing复用和管理动作只见 [GIR/LIR](../internals/gir-lir.md)。
 
 ## 元组、数组、切片
 
@@ -245,7 +245,7 @@ fn make_cmp() Cmp = fn(a, b) = a < b
 
 `T` 实现 `Trait` 时，`T` 的值可以强制成 `dyn Trait`（分配或复用堆对象，胖指针）。这是显式擦除。
 
-## `TypeId` 与 `dyn Any`
+## `TypeId` 与 `dyn Any` {#typeid-dyn-any}
 
 闭世界一次编译能枚举全部单态化后的具体类型，因此类型身份是**稠密编号**，不是哈希。预导入类型 `TypeId` 布局与 `u32` 相同（大小 4、对齐 4），取值范围 `0 .. type_id_count()`。同一镜像内比较是一次整数运算，运行时 `as_int()` 后可作数组下标。没有碰撞。重新编译可以重排编号；禁止跨镜像、跨进程拿 `TypeId` 当稳定密钥。插件只走 C ABI，对岸没有 Gugu `TypeId`。`TypeId` 不能出现在 `extern "C"` 签名里；过边界传 `as_int()` 的值或 `u32`。
 
@@ -266,7 +266,7 @@ type_id_count()       // int；late comptime 常量
 实参、`cfg`、源码宏、定义/impl 选择、可达性或任何可能新增具体类型的求值；这些位置
 使用它是编译错误。late 标量可以初始化不改变类型形状的常量、控制运行时分支或循环，
 也可以填充长度已由早期常量固定的元数据。编号个数放不进 `int` 或内部 `u32` 是编译错误。
-完整阶段限制见[编译期执行](comptime.md#早期与-late-comptime)。
+完整阶段限制见[编译期执行](comptime.md#early-and-late-comptime)。
 
 ### 谁有编号
 
@@ -293,7 +293,7 @@ fn name(self) string         // 规范类型名；comptime TypeId 可早期求�
 
 ### `Any` 与 downcast
 
-`Any` 是 lang trait（编译器按名字挂钩的 trait，见 [概述 · 术语](overview.md#术语)），**不能有泛型方法**（否则不能 `dyn`）。用户不能声明、不能手写 `impl Any`，也不能 `impl !Any` 挖掉语言生成的肯定 impl。语言自己写：
+`Any` 是 lang trait（编译器按名字挂钩的 trait，见 [概述 · 术语](overview.md#terminology)），**不能有泛型方法**（否则不能 `dyn`）。用户不能声明、不能手写 `impl Any`，也不能 `impl !Any` 挖掉语言生成的肯定 impl。语言自己写：
 
 ```
 trait Any {

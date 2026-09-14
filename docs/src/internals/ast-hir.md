@@ -67,7 +67,7 @@ query 依赖，不靠可变的全局 phase 回跳：
 placement 只写入 `GirWorldV1.placement`，不回写 HIR，也不改写 GIR CFG。
 
 第 16 步闭合可达实例图：`CollectMonoRoots` 与 `InstantiateGir`
-从冻结 HIR 与 `CheckedSemantics` 收集调用边（见[单态化与编译缓存](monomorphization-cache.md#单态化闭合与公共摘要)），
+从冻结 HIR 与 `CheckedSemantics` 收集调用边（见[单态化与编译缓存](monomorphization-cache.md#mono-closure-public-digest)），
 分析身份键为 `MonoKey`。`InstantiateGir` 不从 GIR 重解析调用边。
 
 ## 索引与 arena
@@ -342,11 +342,11 @@ HIR 节点本体不复制完整类型。每个 owner 的 `expression_inputs` 与
 
 当前 HIR 按共享根槽记录捕获，保留同一绑定的别名语义；投影分拆与物理环境字段布局属于后续存储选择。只读格式计数同样进入捕获表，不能因它只出现在格式说明里而漏记。
 
-HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/heap或把只读值复制进环境。`EscapeAndPlacement`依据该计划选择 direct value、parent-environment projection或 shared slot；无论选择什么，都必须满足[函数与闭包](../spec/functions.md#捕获语义)这一唯一公开语义。
+HIR只固定哪些源码位置必须共享及其访问摘要，不决定 stack/heap或把只读值复制进环境。`EscapeAndPlacement`依据该计划选择 direct value、parent-environment projection或 shared slot；无论选择什么，都必须满足[函数与闭包](../spec/functions.md#capture-semantics)这一唯一公开语义。
 
 ### 清理计划
 
-每个 owner 保存两张连续表 `cleanup_plans: Vec<CleanupPlan>` 与 `cleanup_actions: Vec<CleanupAction>`，为每个控制流出口给出按[表达式规范](../spec/expressions.md#返回循环退出与-defer)排好序的动作序列。GIR 只能消费这些计划，不得按 `return`、panic 或循环种类重新推导动作：
+每个 owner 保存两张连续表 `cleanup_plans: Vec<CleanupPlan>` 与 `cleanup_actions: Vec<CleanupAction>`，为每个控制流出口给出按[表达式规范](../spec/expressions.md#return-loop-exit-defer)排好序的动作序列。GIR 只能消费这些计划，不得按 `return`、panic 或循环种类重新推导动作：
 
 ```text
 CleanupPlan { exit: ExitKind, actions: Range<u32>, destination: Option<ScopeId> }

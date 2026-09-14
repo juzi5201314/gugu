@@ -98,7 +98,7 @@ map(xs, inc)                      // F 是具名函数的具体函数项类型
 
 用户不要写 `|x|`、不要写捕获列表、不要写 `move`。
 
-## 捕获语义
+## 捕获语义 {#capture-semantics}
 
 用户不写捕获列表，也不处理生命周期错误。闭包可以读写外层绑定，效果像共享同一个可变位置（绑定默认可变）。闭包活多久，被它实际使用的外层状态就活多久；互相引用、送进 `async { }`、存进结构体都合法。实现不能把捕获分析失败变成 move、borrow、Clone或生命周期错误。
 
@@ -112,7 +112,7 @@ map(xs, inc)                      // F 是具名函数的具体函数项类型
 
 `async { ... }` / `async f(x)`：闭包按上面的捕获规则延命，然后在新协程上跑。禁止因为捕获栈变量而悬空——必须升到堆或拷贝。
 
-## Scoped borrowed view callback
+## Scoped borrowed view callback {#scoped-borrowed-view-callback}
 
 标准库的 `with_ref`、`with_read_ref` 与 `for_each_ref` 使用 compiler-owned 的 scoped view callback。它们的 callback 参数在源码层可以写作 `&T`，但 HIR 额外标记为 `ScopedRead` view，不等同于普通可写引用；实现必须在 GIR 中保留该访问模式。`ScopedRead` 只允许在 callback 动态 extent 内读取或向已登记的无逃逸 helper 传递，不能写入、存入任何外部槽、作为返回值、跨协程发布或转换为 raw pointer。需要修改值的 API必须显式声明 `ScopedWrite`，不能借用只读 view 的类型检查空缺。
 
@@ -140,4 +140,4 @@ scoped callback 必须是同步调用：其 body、可达的静态 callee 和 co
 
 ## 外部函数调用效应
 
-无函数体的 `extern "C"` 导入函数项和带函数体的 `unsafe extern "C" fn` 可以携带 compiler-only 的 `ForeignEffect`：未标注导入为普通 `ForeignBridge`，`#[ffi(leaf(stack = N))]` 为 `ForeignLeaf`，`#[ffi(dirty_cpu)]` 为 `ForeignBridge[DirtyCpu]`。函数项直接调用或单态化后仍能证明其 effect 时，调用可按该 mode lowering；普通 `fn(...) ...` 擦除、无法解析的函数值和动态分派不保留可证明的 leaf/dirty effect，调用统一 lowering 为普通 `ForeignBridge`。带函数体的 dirty function 不能被调用点改成 leaf；调用点的 `#[ffi(bridge)]` 或 `#[ffi(dirty_cpu)]` 只覆盖当前直接 C 调用。具体声明契约见[unsafe 与 intrinsic](unsafe.md#外部调用效应与桥接)。这些 effect 是 compiler 优化和 runtime 交接信息，不是用户可写的返回类型或可捕获的异常类型。
+无函数体的 `extern "C"` 导入函数项和带函数体的 `unsafe extern "C" fn` 可以携带 compiler-only 的 `ForeignEffect`：未标注导入为普通 `ForeignBridge`，`#[ffi(leaf(stack = N))]` 为 `ForeignLeaf`，`#[ffi(dirty_cpu)]` 为 `ForeignBridge[DirtyCpu]`。函数项直接调用或单态化后仍能证明其 effect 时，调用可按该 mode lowering；普通 `fn(...) ...` 擦除、无法解析的函数值和动态分派不保留可证明的 leaf/dirty effect，调用统一 lowering 为普通 `ForeignBridge`。带函数体的 dirty function 不能被调用点改成 leaf；调用点的 `#[ffi(bridge)]` 或 `#[ffi(dirty_cpu)]` 只覆盖当前直接 C 调用。具体声明契约见[unsafe 与 intrinsic](unsafe.md#foreign-call-effects-bridging)。这些 effect 是 compiler 优化和 runtime 交接信息，不是用户可写的返回类型或可捕获的异常类型。

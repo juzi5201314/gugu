@@ -12,7 +12,7 @@
 
 当前后端只实现平台注册表中的`x86_64-linux`和`x86_64-windows`。每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest, backend_cost_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；backend cost profile固定寄存器保留、inline code-size与spill上限。release镜像只编入该profile选中的一种deque，不生成运行时mode分支。
 
-CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-基线)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。
+CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。
 
 ## 后端阶段
 
@@ -146,7 +146,7 @@ runtime layout query还必须验证`CoroutineHot`与`StackDescriptor`的size/ali
 
 x86_64 backend 对 owner inbox 的 tail/front、staging、route bucket 和统计字段执行独立 cache-line layout assertion。AcqRel batch tail exchange、Release chain link、Acquire consumer read 使用现有 atomic lowering；owner-only free list、front 和 local range cursor不使用原子。新路径不得占用 `r14`/`r15` 内部 ABI，也不得在每次 TLAB allocation 中执行 owner lookup 或 radix hash。
 
-raw return、extent coalescing、commit/decommit 和 typed combining 都是 slow path；平台调用不能落在 `NoSafepointRegion` 或 `PollFreeLeaf`。完整机器序列、generation 检查和 direct/radix profile 见[内存所有权与消息通道](memory-messaging.md#x86_64-backend-与内存序)。
+raw return、extent coalescing、commit/decommit 和 typed combining 都是 slow path；平台调用不能落在 `NoSafepointRegion` 或 `PollFreeLeaf`。完整机器序列、generation 检查和 direct/radix profile 见[内存所有权与消息通道](memory-messaging.md#backend-memory-ordering)。
 
 BatchInbox每个publish batch先Release写producer-local`publish_active`、Acquire读一次read-mostly queue control word；这两步不能移动到节点state/link修改之后。ordinary `run_link_next/run_batch_len`写必须保持在head Release CAS之前；CAS成功后seen epoch/staging clear与Release清active不得移动到它之前。x86_64把Relaxed head load降为普通`mov`、Release/Relaxed compare-exchange降为`lock cmpxchg`、Acquire `head.swap(null)`降为`xchg`，并由LIR effect edge阻止compiler重排；不得额外插入generic epoch pin、SeqCst fence或per-node atomic link。empty-to-nonempty才生成`work_seq`的locked RMW。consumer的ordinary link读必须位于Acquire exchange之后，并在清queue ownership前保存`next`。
 
@@ -244,7 +244,7 @@ panic 不允许越过未登记 C frame。export thunk 捕获 Gugu panic并按平
 
 ## inline asm 与 global asm
 
-前端按[不安全边界](../spec/unsafe.md#asm-与-global_asm)唯一规定的 AT&T syntax解析 inline/global asm并生成 `AsmInst`；后端用同一 x86 encoder编码，不调用 `as`。本章只规定约束分配与机器 lowering，不另建一套可接受语法。无法映射到 baseline encoder的已解析指令或 relocation按公开 asm 规则诊断。
+前端按[不安全边界](../spec/unsafe.md#asm-global-asm)唯一规定的 AT&T syntax解析 inline/global asm并生成 `AsmInst`；后端用同一 x86 encoder编码，不调用 `as`。本章只规定约束分配与机器 lowering，不另建一套可接受语法。无法映射到 baseline encoder的已解析指令或 relocation按公开 asm 规则诊断。
 
 inline asm operand先由 constraint分配 fixed/任意 register或 memory，声明的 clobber加入 interval；未声明却被模板写入的 register由 parser数据流检查拒绝。managed inline asm不能读写 `rsp`、`r14`、`r15`，不能跳出模板、定义外部符号或伪造 safepoint；parser必须拒绝内部回边、间接控制转移、外部 call/ret、system/wait class和 repeat-prefixed string instruction。允许 opcode集合由公开 asm规则封闭，不能因宿主 CPU支持更多指令而变化。naked/global/dirty fragment使用 native parser模式，不受 managed有限 CFG限制，但仍必须满足目标 baseline encoder、声明 clobber和对应 ABI约束。
 带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn` 不进入 managed fragment；backend 生成带 bridge mode 的 dirty thunk，参数和返回值只走 C ABI bit/raw-pointer representation。managed `#[naked]` 调用同样默认生成 `ForeignBridge[DirtyCpu]` entry，除非显式保留 `ForeignLeaf`；`global_asm` 符号则按对应 extern 声明 lowering。任何 dirty native fragment 都不得生成伪造的 managed safepoint或依赖 signal 在任意 PC 停止。
@@ -280,7 +280,7 @@ fragment relocation 封闭为：
 
 ### Linux ELF64
 
-[平台 ABI](../spec/platform-abi.md#可执行镜像形式)给出 Linux external image profile。static PIE路径的内部 rt0在读取待重定位 global前由 `AT_PHDR` 与首个 `PT_LOAD.p_vaddr` 计算 load bias，只解释 writer生成的 relative relocation，checked写入 `load_bias + addend`并封闭 RELRO；未知 relocation、越界 target或重复执行进入 `RuntimeInvariant` fatal。
+[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出 Linux external image profile。static PIE路径的内部 rt0在读取待重定位 global前由 `AT_PHDR` 与首个 `PT_LOAD.p_vaddr` 计算 load bias，只解释 writer生成的 relative relocation，checked写入 `load_bias + addend`并封闭 RELRO；未知 relocation、越界 target或重复执行进入 `RuntimeInvariant` fatal。
 
 writer把平台登记的逻辑节装入 4096-byte对齐的 RX、R和 RW segment；需要自重定位的 target只落在初始可写 `.data.rel.ro`，完成后转只读。dynamic FFI路径只消费 `TargetDescriptor` 的 interpreter/sysroot/SONAME并生成对应 dynamic tables，不能搜索宿主路径。static archive member按未解析 C symbol精确抽取。
 
@@ -288,7 +288,7 @@ writer把平台登记的逻辑节装入 4096-byte对齐的 RX、R和 RW segment�
 
 ### Windows PE32+
 
-PE writer消费[平台 ABI](../spec/platform-abi.md#可执行镜像形式)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。section按逻辑节映射，绝对 VA全部进入 base-relocation table。
+PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。section按逻辑节映射，绝对 VA全部进入 base-relocation table。
 
 IAT只消费 `TargetDescriptor` 和构建元数据登记的 DLL/symbol并稳定排序；export table只含显式 C export。`staticlib` 写确定性 COFF archive，`cdylib` 写 PE DLL；不需要 `.lib`导入库作为最终写出的中间步骤。
 

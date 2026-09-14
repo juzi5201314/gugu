@@ -14,7 +14,7 @@
 
 ## `TypeId` 与 `dyn Any`
 
-闭世界程序中的 `TypeId` 唯一性、整数范围、名称和 downcast 结果由[类型系统](types.md#typeid-与-dyn-any)规定。`T → dyn Any` 保存 T 的语义副本：身份句柄继续共享身份，COW 值先完成规范要求的封存，resource 值取得相应 lease；容器死亡时这些值按普通生命周期规则处理。
+闭世界程序中的 `TypeId` 唯一性、整数范围、名称和 downcast 结果由[类型系统](types.md#typeid-dyn-any)规定。`T → dyn Any` 保存 T 的语义副本：身份句柄继续共享身份，COW 值先完成规范要求的封存，resource 值取得相应 lease；容器死亡时这些值按普通生命周期规则处理。
 
 类型身份、装箱载荷、vtable和扫描/管理 metadata 都是 compiler/runtime 私有表示，见 [GC 元数据](../internals/gc-metadata.md)，不形成额外的语言布局或可解析镜像接口。`dyn Any` 的公开表示只服从[类型系统](types.md)和[平台 ABI](platform-abi.md)。
 
@@ -28,7 +28,7 @@ managed 对象只要能从仍存活的语言值、static、coroutine-local、OS-
 
 collector 可以移动 managed 对象。每次 safepoint、等待、恢复和跨线程共享后，所有安全引用仍必须指向原语义对象；安全代码不能通过地址观察移动。`pin` 覆盖的对象在回调期间不得移动，raw pointer只受 [unsafe](unsafe.md) 的显式规则保护。
 
-用户安全代码不调用 `free`，也不能观察 collector内部阶段、空间分区、根编码、屏障或回收线程。内存申请无法满足时按[运行时](runtime.md#fatal-与资源耗尽)进入 `OutOfMemory` fatal；GC 不运行任意用户 finalizer。
+用户安全代码不调用 `free`，也不能观察 collector内部阶段、空间分区、根编码、屏障或回收线程。内存申请无法满足时按[运行时](runtime.md#fatal-resource-exhaustion)进入 `OutOfMemory` fatal；GC 不运行任意用户 finalizer。
 
 本章不规定 collector算法、heap参数、root编码或写屏障实现。官方 compiler/runtime的当前契约见 [GC 元数据](../internals/gc-metadata.md)与[栈图](../internals/stack-maps.md)；替代实现可以不同，但必须满足本节全部可观察约束。
 

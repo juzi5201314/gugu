@@ -48,7 +48,7 @@ let xs = repeat(N, 1)
 保存的值是对应 `loop` 的结果，不能被替换成 `()`。整数、浮点、
 字符串与字符字面量模式使用和表达式相同的字面量解释规则。
 
-## 早期与 late comptime
+## 早期与 late comptime {#early-and-late-comptime}
 
 普通 `const`、`static`、类型形成、泛型实参和源码宏脚本的求值，先按其传递依赖归类：
 不直接或传递依赖 late 值的 `const`/`static` 初始化、类型形成和泛型实参使用**早期

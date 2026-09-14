@@ -456,7 +456,7 @@ structure；stale token 只能转发或进入 retired-domain 路径。
 resource arena 不能整区丢弃。最终 release 先完成不执行用户代码的 resource-specific cleanup，再发布 stable cell id 的 `ResourceRelease` 或 raw slot return；resource lease
 不能由 region reset、block candidate 或 mailbox 消费时刻替代。
 
-## Allocation debt、pressure 与 backpressure
+## Allocation debt、pressure 与 backpressure {#allocation-debt-pressure-backpressure}
 
 ### 账本
 
@@ -540,7 +540,7 @@ ready、park、wake 的线性化和即时性仍遵守 scheduler 规范：
 
 状态 bit 7 继续保留为 `BATCH_PUBLISHING`，return message 不占用该 bit；return-specific state 存在 descriptor/message state 中。
 
-### Owner retire
+### Owner retire {#owner-retire}
 
 owner retire 按以下顺序执行：
 
@@ -603,7 +603,7 @@ owner domain、cycle credit 和 return kind；这些是 lowering metadata，不�
 - `PollSummary` 必须把可能触发 region promote、GC assist、message flush、handle resolve 和
   pressure drain 的 backedge 成本纳入；`POLL_BUDGET = 4096` 不因 Mosaic message plane 放宽。
 
-## x86_64 Backend 与内存序
+## x86_64 Backend 与内存序 {#backend-memory-ordering}
 
 ### 热布局
 
@@ -829,7 +829,7 @@ owner 身份、slab 描述符、dense size class、消息字段、grace 步骤�
 12. 完成 per-owner root slice、credit termination、MosaicBaseline/MosaicConcurrent stop 边界和 security profile。
 13. 最后加入 typed combining，用于 GlobalRange 和 topology 冷路径，不回流到 allocation/return/GC mark 热路径。
 
-第 1--4 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；ResourceCell 的 class 阶梯、64-byte header、lease/close 状态机与统一 release 入口同样进入 `RuntimeRawContractV1`（schema 2），覆盖 exactly-once cleanup、generation 匹配与 queue grace。Gugu runtime 侧的等价实现随 rt0 与协程控制块的落地复用同一 schema（见[运行时](../spec/runtime.md#rt0-与启动)与[调度器](scheduler.md)）。第 5 步起仍按本顺序推进。
+第 1--4 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；ResourceCell 的 class 阶梯、64-byte header、lease/close 状态机与统一 release 入口同样进入 `RuntimeRawContractV1`（schema 2），覆盖 exactly-once cleanup、generation 匹配与 queue grace。Gugu runtime 侧的等价实现随 rt0 与协程控制块的落地复用同一 schema（见[运行时](../spec/runtime.md#rt0-and-startup)与[调度器](scheduler.md)）。第 5 步起仍按本顺序推进。
 
 每个步骤完成后都要同步对应的 spec/internals 条款；实现、规范和测试必须同时改变，不能只引入一个“以后再接”的空接口。
 

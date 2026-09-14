@@ -121,7 +121,7 @@ TypeId、state、lease、integrity 和 exactly-once 状态；检查失败进入 
 
 ## `TypeId` 与 descriptor table
 
-单态化闭合后，编译器按[单态化与编译缓存](monomorphization-cache.md#具体类型集合与-typeid)的 `StableTypeKey` 顺序分配 `TypeId`。每个 `0..type_id_count()` 值在 type section 中恰有一条固定 80 字节 `TypeRecord`；记录顺序就是 `TypeId`，不重复保存数字 ID。
+单态化闭合后，编译器按[单态化与编译缓存](monomorphization-cache.md#concrete-type-set-typeid)的 `StableTypeKey` 顺序分配 `TypeId`。每个 `0..type_id_count()` 值在 type section 中恰有一条固定 80 字节 `TypeRecord`；记录顺序就是 `TypeId`，不重复保存数字 ID。
 
 `TypeRecord` 按小端编码：
 
@@ -223,7 +223,7 @@ payload_size_or_forward: AtomicU64
 
 最外层 `pin` 是 safepoint。target 位于 nursery/aging 时，slow path 先把 owner allocation 提升到可固定的 old region，按栈图和 heap descriptor 更新 `p` 及其它强引用，再增加 side-table 计数并设置 `PINNED`；arena 槽 pin 的 owner 是整个 arena backing allocation。已在 old/immortal region 时只更新计数。最外层 unpin 把计数降到 0并清位，但不立即搬移对象，后续 major cycle 才可选择它。
 
-`payload_base = header_base + 16`，高对齐 padding 位于 header之前；layout consumer、FFI lowering与 GC 都只能从统一的 `payload_base` 派生地址，不能各自维护第二套偏移。对外布局是否可见只由 [`repr(C)` 与平台 ABI](../spec/platform-abi.md#reprc-结构体)定义，本节只固定官方 runtime 的私有地址关系。
+`payload_base = header_base + 16`，高对齐 padding 位于 header之前；layout consumer、FFI lowering与 GC 都只能从统一的 `payload_base` 派生地址，不能各自维护第二套偏移。对外布局是否可见只由 [`repr(C)` 与平台 ABI](../spec/platform-abi.md#repr-c-struct)定义，本节只固定官方 runtime 的私有地址关系。
 
 ## ResourceCell slab
 
@@ -476,7 +476,7 @@ managed pointer；`lease_word`是generation-tagged lifecycle整数，其余字�
 普通`ForeignBridge`与`ForeignBridge[DirtyCpu]`都只通过已保存的Gugu stack/map和显式pin暴露根。attached普通bridge遇到GC stop时由collector按完整generation立即retake并转为detached，不等待native线程合作；foreign/dirty worker的OS stack、C/C++ stack和opaque asm寄存器绝不保守扫描。传给native的managed地址必须在进入前pin，或复制到non-moving storage。native work永不返回时，相关coroutine frame/pin会一直保留；普通processor lease仍可被GC/scheduler取回，因此该native work不阻止其它heap的mark、relocation或stop epoch完成。
 stack arena、processor stack cache和已经从live coroutine registry摘除的stack slot不属于root。coroutine完成defer后，必须先在旧stack上用GC barrier把result或panic payload移入cold control record，再由`finish_coroutine`单向切到worker system stack；持有`STACK_SCAN_LOCKED`停止typed visitor遍历旧stack并发布空descriptor后，stack slot才能交给cache，随后发布`Dead`。仍存活的Join/handle只保留hot/cold control slot与结果。缓存字节中的旧pointer pattern绝不保守扫描。Waiting/Runnable stack的冷压缩同样必须持有scan lock，用旧map完成全部`StackInterior`修正并发布新descriptor后，旧stack slot才可进入cache。
 
-## write barrier、edge summary 与 remembered set
+## write barrier、edge summary 与 remembered set {#write-barrier-edge-summary-remembered-set}
 
 所有可能覆盖 heap managed field 的写入由 LIR `GcWriteBarrier` lowering 成统一 hybrid barrier。
 LocalHeap 和 TurnRegion 使用 direct field barrier；SharedHeap handle field 和跨 block edge
@@ -550,7 +550,7 @@ old、SharedHeap、pinned、large 和 resource object 不因 minor cycle 直接�
 
 Mosaic 的 collector 以 `GcPacingProfile` 固定下列内部参数：`min_growth_budget`、`assist_threshold`、`assist_quantum`、`mark_cost_per_byte`、`gc_cpu_fraction`、`remark_cost_budget`、`evacuation_pause_bytes`、`evacuation_pause_roots`、`evacuation_pause_fields`、`pressure_enter_ratio` 和 `pressure_clear_ratio`。这些参数与 `CompilerIdentity`/runtime tuning profile 一起版本化并进入 digest；它们是实现门禁，不是用户可观察的时间单位。
 
-每个 cycle 的 `allocation_debt` 先按[内存所有权与消息通道](memory-messaging.md#allocation-debtpressure-与-backpressure)计算，再乘以 descriptor/profile 的 `mark_cost_per_byte` 形成 mark debt。processor 在 TLAB refill、allocation slow edge 或显式 poll 处最多执行一个 `assist_quantum` 的标记/edge/card 工作；一次 assist 不能无限追债，也不能持有 runtime lock 跨 safepoint。mutator assist 和 collector worker 都归入同一 cycle credit，只有完成的 work 才能归还 credit；没有可消费 work 时不得虚构进度。
+每个 cycle 的 `allocation_debt` 先按[内存所有权与消息通道](memory-messaging.md#allocation-debt-pressure-backpressure)计算，再乘以 descriptor/profile 的 `mark_cost_per_byte` 形成 mark debt。processor 在 TLAB refill、allocation slow edge 或显式 poll 处最多执行一个 `assist_quantum` 的标记/edge/card 工作；一次 assist 不能无限追债，也不能持有 runtime lock 跨 safepoint。mutator assist 和 collector worker 都归入同一 cycle credit，只有完成的 work 才能归还 credit；没有可消费 work 时不得虚构进度。
 
 GC worker 的执行由 `gc_cpu_fraction` 的滑动 cost window 限制。空闲 processor 可以在未使用的 CPU 额度内执行 GC；有 runnable 压力时，超出额度的工作转为 allocation debt 和后续 assist，而不是创建无界 GC worker。memory pressure、cycle termination 和 lease/grace 正确性优先于吞吐预算，但每个 slow edge 仍受 scheduler 的 poll/service budget 限制。
 

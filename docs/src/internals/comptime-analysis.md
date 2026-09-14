@@ -343,7 +343,7 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 `WholeProgramAnalysis`（query schema **5**）输入指纹含冻结 HIR
 指纹、generic GIR 指纹、late/mono 图指纹与策略字节；其内再嵌套 `AnalysisSccSummary`
 （27，schema **4**）与 `FunctionAnalysisSummary`（23，schema **4**）。身份键为 `MonoKey`
-（见[单态化与编译缓存](monomorphization-cache.md#单态化闭合与公共摘要)）。
+（见[单态化与编译缓存](monomorphization-cache.md#mono-closure-public-digest)）。
 SCC 按实例图的凝聚顺序求解，每个实例具有独立固定点状态；解释器共享 owner 的 generic
 GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir` 仍从 HIR 收集调用边，
 不从 GIR 重解析。运算符、迭代、try、格式化与局部 static 初始化器的调用效果均进入分析。

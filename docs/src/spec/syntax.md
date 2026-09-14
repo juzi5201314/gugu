@@ -184,7 +184,7 @@ expression_core     ::= if_expression
                       | logical_or_expression ;
 ```
 
-`attribute*` 是表达式的语法前缀；属性的可附着位置仍由[词法 · 属性](lexical.md#属性适用位置与冲突)限制。例如 `#[ffi(bridge)]` 可以放在调用表达式前，但不是运行时包装函数。
+`attribute*` 是表达式的语法前缀；属性的可附着位置仍由[词法 · 属性](lexical.md#attribute-placement-conflicts)限制。例如 `#[ffi(bridge)]` 可以放在调用表达式前，但不是运行时包装函数。
 
 ```ebnf
 if_expression       ::= "if" condition block ["else" (if_expression | block)] ;

@@ -122,7 +122,7 @@ view lease阻止同一容器的结构性写入、rehash、树旋转或 backing r
 
 GIR `StackCheck` 携带本函数 `required_frame`，语义是“在建立 frame前，以一次 current-coroutine `stack_check` load同时验证容量与 pending poll poison”。任何 pass都禁止把它拆成 processor poll load加容量 load或交换成两个独立分支。taken edge固定进入 `MorestackEntry`：先把 entry roots发布到 coroutine scratch并切 system stack，按 GC stop、允许的 preempt、重新读取 stack bounds与必要 growth的顺序处理，再重试同一个 `StackCheck`。
 
-### `NoSafepointRegion`
+### `NoSafepointRegion` {#no-safepoint-region}
 
 `NoSafepointRegion` 是 compiler/runtime内部的结构化 effect region，只能由 `LowerConcurrency` 或登记的 runtime intrinsic生成；用户源码、attribute、inline asm和外部 package都不能直接构造任意 region。`NoSafepointReason`封闭为 `RuntimeLock`、`OwnershipPublish`、`RootPublish`，region ID按 body内 begin出现顺序稠密分配。
 
@@ -163,7 +163,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 ### generic GIR 构造
 
-`BuildGenericGir`（query 11，当前 schema 5，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#开发接口)）。差异诊断为 `E0055`。
+`BuildGenericGir`（query 11，当前 schema 5，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#development-interface)）。差异诊断为 `E0055`。
 
 构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列)` 复用入口。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
 
@@ -186,7 +186,7 @@ generic GIR 允许 `TyId` 和 `ConstId` 中引用 owner 的泛型参数，也允
 选择中剩余的参数只作为规范化 substitution 的输入。经过前端验证的 `LateConstRef` 可以
 保留，但其类型、静态 callee 闭包和可达边已经固定。
 
-单态化为每个 [`MonoKey`](monomorphization-cache.md#单态化实例) 创建独立 body，并完成：
+单态化为每个 [`MonoKey`](monomorphization-cache.md#mono-instance) 创建独立 body，并完成：
 
 - 所有类型、早期常量和关联类型替换；
 - 布局、字段偏移、enum 表示和调用签名确定；

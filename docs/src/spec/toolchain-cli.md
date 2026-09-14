@@ -47,7 +47,7 @@
 | `--config <path>` | 追加配置文件 |
 | `--cache-dir <path>` | 覆盖缓存目录 |
 | `--target-dir <path>` | 覆盖 target 目录 |
-| `-Z <flag>` | 编译器内部开发开关；见[开发接口](#开发接口) |
+| `-Z <flag>` | 编译器内部开发开关；见[开发接口](#development-interface) |
 
 参数优先级：命令行参数 > 环境变量 > workspace 本地配置 > 用户配置 > 内置默认。
 
@@ -328,7 +328,7 @@ llvm: 19.1.0
 
 版本字符串与 commit 共同构成编译器构建身份，进入编译缓存 key。
 
-## 开发接口
+## 开发接口 {#development-interface}
 
 `-Z <flag>` 不是稳定用户接口。仅当环境变量 `GUGU_INTERNAL_OPTIONS=1` 时接受；未启用内部选项或 flag 不在下表时，命令行解析以退出码 `2` 失败，不进入编译。
 
