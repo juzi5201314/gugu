@@ -47,7 +47,7 @@ huge_page_hint(range)
 
 平台失败统一映射为三个类别，Linux 与 Windows 的映射逐项一致：`OutOfMemory`、`ResourceExhausted`、`RuntimeInvariant`。同一失败在两个目标上必须落到同一类别，契约 verifier 拒绝任何 profile 之间的漂移。失败类别是诊断与恢复策略的依据，不是可捕获的异常。
 
-内存压力统计不重复计数。`range_reserved_bytes` 只统计已预留但尚未提交的虚拟地址；`runtime_committed_bytes` 只统计已提交的物理页，两者严格互斥。`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 与 `live_bytes` 是 `runtime_committed_bytes` 的互斥分类，逐项相加恰好等于它；limit 判断不得把同一物理页计入多个分类。完整字段口径见[运行时](runtime.md#runtimestats)。
+内存压力统计不重复计数。`range_reserved_bytes` 只统计已预留但尚未提交的虚拟地址；`runtime_committed_bytes` 只统计已提交的物理页，两者严格互斥。`pending_return_bytes`、`owner_cache_bytes`、`reclaimable_bytes` 与 `live_bytes` 是 `runtime_committed_bytes` 的互斥分类，逐项相加恰好等于它；limit 判断不得把同一物理页计入多个分类。完整字段口径见[运行时](runtime.md#gc栈与运行时控制-api)。
 
 `std` 提供语言基座、集合、文本、格式化、I/O、文件、路径、transport 网络、进程、环境、时间、运行时控制、信号、同步、机器数值、随机、FFI、测试和构建接口。JSON、正则表达式、压缩、密码学、TLS、HTTP、WebSocket、QUIC、数据库、时区数据库、命令行框架和大文本 Rope 不属于 `std`；它们可以由官方 Registry package 提供，并独立于工具链发布。工具链自身的命令行接口见[工具链与命令行](toolchain-cli.md)。
 

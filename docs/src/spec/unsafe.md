@@ -104,7 +104,7 @@ unsafe fn assume_init(self) T
 |------|------|
 | 受管分配 / 区域 | managed storage、`LocalArena` / `SyncArena` 上的未初始化内存；OS `mmap` / `VirtualAlloc` |
 | 平台范围 | `std.platform` 的 reserve/commit/decommit/release、guard、wait/wake、entropy、zero 与 dump policy；契约见[标准库](standard-library.md#平台范围与内存账本) |
-| 受管引用更新 | 手写 runtime 对 GC 引用槽的更新；当前屏障见 [GC 元数据](../internals/gc-metadata.md#write-barrier-与-remembered-set) |
+| 受管引用更新 | 手写 runtime 对 GC 引用槽的更新；当前屏障见 [GC 元数据](../internals/gc-metadata.md#write-barrieredge-summary-与-remembered-set) |
 | 栈切换 | 保存目标 ABI 状态并切换执行栈；当前 context见[调度器](../internals/scheduler.md) |
 | 栈边界 / SP | GC 与溢出探测 |
 | 调度/GC 轮询 | `std.runtime.safepoint_poll()`；检查抢占与 GC stop，可能挂起当前协程 |
@@ -234,7 +234,7 @@ compiler 不能检查动态库或 opaque asm 的函数体。错误的 `ffi(leaf)
 
 有效位模式至少要求：`bool` 只能为 0/1；`char` 是合法 Unicode 标量；引用非空且有效；`string` 保持 UTF-8 和合法长度；枚举判别值对应有效变体；`TypeId` 在表范围内；句柄与 vtable 必须指向当前镜像的合法 runtime状态。整数、浮点和原始指针接受全部位模式。构造无效位模式后即使尚未读取，只要把它当作已初始化的安全类型传播就是未定义行为；runtime私有对象 metadata的具体表示不属于本章。
 
-unsafe 不豁免数据竞争或受管引用更新契约。通过原始指针写入 GC 引用槽时必须调用对应 intrinsic；当前官方 runtime把它实现为[写屏障](../internals/gc-metadata.md#write-barrier-与-remembered-set)，替代实现可以采用满足相同安全结果的机制。遗漏该操作是未定义行为。别名本身合法，但两个操作系统线程无同步地访问同一位置且至少一方写入仍是数据竞争。
+unsafe 不豁免数据竞争或受管引用更新契约。通过原始指针写入 GC 引用槽时必须调用对应 intrinsic；当前官方 runtime把它实现为[写屏障](../internals/gc-metadata.md#write-barrieredge-summary-与-remembered-set)，替代实现可以采用满足相同安全结果的机制。遗漏该操作是未定义行为。别名本身合法，但两个操作系统线程无同步地访问同一位置且至少一方写入仍是数据竞争。
 
 ## `asm` 的求值与约束
 

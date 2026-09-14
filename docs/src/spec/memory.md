@@ -28,7 +28,7 @@ managed 对象只要能从仍存活的语言值、static、coroutine-local、OS-
 
 collector 可以移动 managed 对象。每次 safepoint、等待、恢复和跨线程共享后，所有安全引用仍必须指向原语义对象；安全代码不能通过地址观察移动。`pin` 覆盖的对象在回调期间不得移动，raw pointer只受 [unsafe](unsafe.md) 的显式规则保护。
 
-用户安全代码不调用 `free`，也不能观察 collector内部阶段、空间分区、根编码、屏障或回收线程。内存申请无法满足时按[运行时](runtime.md#fatal)进入 `OutOfMemory` fatal；GC 不运行任意用户 finalizer。
+用户安全代码不调用 `free`，也不能观察 collector内部阶段、空间分区、根编码、屏障或回收线程。内存申请无法满足时按[运行时](runtime.md#fatal-与资源耗尽)进入 `OutOfMemory` fatal；GC 不运行任意用户 finalizer。
 
 本章不规定 collector算法、heap参数、root编码或写屏障实现。官方 compiler/runtime的当前契约见 [GC 元数据](../internals/gc-metadata.md)与[栈图](../internals/stack-maps.md)；替代实现可以不同，但必须满足本节全部可观察约束。
 
