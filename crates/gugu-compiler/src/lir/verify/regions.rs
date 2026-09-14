@@ -2,6 +2,7 @@ use super::{Graph, edges, invalid};
 use crate::Diagnostic;
 use crate::frontend::gir::body::{CallKind, ViewMode};
 use crate::lir::body::{BlockId, Body, Op, Origin, Terminator, ValueId, id, range};
+use crate::runtime::barrier_schema::CARD_MARK_BUFFER_ENTRIES;
 use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -174,6 +175,19 @@ pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<Layout, D
             }))
     {
         return Err(invalid("barrier permit 缺少唯一 reserve 或引用非法 region"));
+    }
+    // permit 是 compile-time 容量证明：card-mark 额度不得超过 processor 的
+    // `CardMarkBuffer` 容量，否则 region 内必然需要补容量，而补容量只能发生在 region 外。
+    // 这条检查只看 permit 自身字段，因此先于额度一致性检查生效。
+    if mode == Mode::Complete
+        && body
+            .barrier_permits
+            .iter()
+            .any(|permit| permit.max_card_marks > CARD_MARK_BUFFER_ENTRIES)
+    {
+        return Err(invalid(
+            "barrier permit 的 card-mark 额度超过 CardMarkBuffer 容量",
+        ));
     }
     if mode == Mode::Complete {
         // permit 的额度必须等于 region 的静态复算值：额度既不能偏小（region 内不得补容量），

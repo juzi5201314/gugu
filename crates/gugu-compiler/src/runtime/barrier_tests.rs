@@ -28,7 +28,10 @@ fn manager() -> crate::runtime::slab::OwnerToken {
 }
 
 fn world(owners: u32) -> RawWorld {
-    RawWorld::new(7, owners, 64, BatchLimits::default()).expect("raw world")
+    let mut world = RawWorld::new(7, owners, 64, BatchLimits::default()).expect("raw world");
+    // 平面 epoch 与站点 epoch 必须一致；测试统一在 cycle 1 上记账。
+    world.advance_barrier_epoch(0, 1).expect("推进到 cycle 1");
+    world
 }
 
 fn site(arena: u64, generation: u32, offset: u64, epoch: u64) -> BarrierSite {
@@ -132,7 +135,9 @@ fn barrier_demand_changes_fingerprint_and_enters_contract() {
 #[test]
 fn hybrid_barrier_stores_before_it_publishes_the_ledger() {
     let mut plane = BarrierPlane::new(4);
-    let outcome = plane.perform_barrier(0, site(1, 7, 0x40, 4));
+    let outcome = plane
+        .perform_barrier(0, site(1, 7, 0x40, 4))
+        .expect("写屏障成功");
     let store = outcome
         .steps
         .iter()
@@ -154,13 +159,13 @@ fn hybrid_barrier_stores_before_it_publishes_the_ledger() {
     // 标记关闭时两个 shade 步被同一 flag 折叠，业务写入仍完成。
     let mut quiet = site(1, 7, 0x40, 4);
     quiet.marking = false;
-    let outcome = plane.perform_barrier(0, quiet);
+    let outcome = plane.perform_barrier(0, quiet).expect("写屏障成功");
     assert!(!outcome.shaded_old && !outcome.shaded_new);
     assert!(outcome.steps.contains(&HybridStep::Store));
     // 新值不在 nursery 时不产生 card 键。
     let mut old_new = site(1, 7, 0x40, 4);
     old_new.new_in_nursery = false;
-    let outcome = plane.perform_barrier(0, old_new);
+    let outcome = plane.perform_barrier(0, old_new).expect("写屏障成功");
     assert!(!outcome.card_marked);
     assert!(!outcome.steps.contains(&HybridStep::CardMark));
 }
@@ -169,9 +174,9 @@ fn hybrid_barrier_stores_before_it_publishes_the_ledger() {
 fn dedup_reuses_a_slot_and_stamp_conflicts_never_drop_keys() {
     let mut plane = BarrierPlane::new(1);
     let first = site(1, 3, 512, 1);
-    plane.perform_barrier(0, first);
+    plane.perform_barrier(0, first).expect("写屏障成功");
     // 同一 (arena, generation, card) 重复写入只占一个 slot。
-    plane.perform_barrier(0, first);
+    plane.perform_barrier(0, first).expect("写屏障成功");
     let record = plane.processor(0).expect("账本");
     assert_eq!(record.buffer().len(), 1);
     assert_eq!(record.card_slot_reuses(), 1);
@@ -187,7 +192,9 @@ fn dedup_reuses_a_slot_and_stamp_conflicts_never_drop_keys() {
         }
     }
     let collided = collided.expect("256 项直接映射必然能找到冲突 card");
-    plane.perform_barrier(0, site(1, 3, u64::from(collided) * 512, 1));
+    plane
+        .perform_barrier(0, site(1, 3, u64::from(collided) * 512, 1))
+        .expect("写屏障成功");
     let record = plane.processor(0).expect("账本");
     assert_eq!(record.buffer().len(), 2, "stamp 冲突不得丢弃尚未发布的键");
     plane
@@ -213,7 +220,9 @@ fn repeated_keys_flush_as_one_merged_range() {
         .register_arena(5, manager(), 9, GC_ARENA_BYTES)
         .expect("登记 arena");
     for card in 0..4_u64 {
-        plane.perform_barrier(0, site(5, 9, card * 512, 2));
+        plane
+            .perform_barrier(0, site(5, 9, card * 512, 2))
+            .expect("写屏障成功");
     }
     let drafts = plane.flush_processor(0, BarrierFlushReason::ProducerStopGate);
     assert_eq!(drafts.len(), 1, "连续 card 合并成一条 batch");
@@ -232,11 +241,14 @@ fn repeated_keys_flush_as_one_merged_range() {
 fn buffer_bound_forces_a_flush_and_rejects_overflow() {
     let mut plane = BarrierPlane::new(3);
     for card in 0..CARD_MARK_BUFFER_ENTRIES {
-        let outcome = plane.perform_barrier(0, site(2, 4, u64::from(card) * 512, 3));
+        let outcome = plane
+            .perform_barrier(0, site(2, 4, u64::from(card) * 512, 3))
+            .expect("写屏障成功");
         assert!(outcome.flush.is_none(), "额度内不得触发 flush");
     }
-    let outcome =
-        plane.perform_barrier(0, site(2, 4, u64::from(CARD_MARK_BUFFER_ENTRIES) * 512, 3));
+    let outcome = plane
+        .perform_barrier(0, site(2, 4, u64::from(CARD_MARK_BUFFER_ENTRIES) * 512, 3))
+        .expect("写屏障成功");
     assert_eq!(outcome.flush, Some(BarrierFlushReason::BufferFull));
     assert!(!outcome.card_marked, "超额的写入不能在 fast path 上记账");
     assert!(outcome.steps.contains(&HybridStep::Store), "store 已发生");
@@ -244,29 +256,86 @@ fn buffer_bound_forces_a_flush_and_rejects_overflow() {
     let total: u32 = drafts.iter().map(|draft| draft.card_count).sum();
     assert_eq!(total, CARD_MARK_BUFFER_ENTRIES);
     // flush 后同一键可以重新进入 buffer。
-    let outcome = plane.perform_barrier(0, site(2, 4, 0, 3));
+    let outcome = plane
+        .perform_barrier(0, site(2, 4, 0, 3))
+        .expect("写屏障成功");
     assert!(outcome.card_marked);
+
+    // 满 buffer 上重复写入有两个合法结局，且都不能静默丢键：stamp 仍指向该键时命中
+    // dedup 并返回成功；stamp 已被冲突覆盖时保守地报 `BufferFull`，由调用方在 region
+    // 外 flush。两条路径都不新增 slot。
+    let mut plane = BarrierPlane::new(3);
+    for card in 0..CARD_MARK_BUFFER_ENTRIES {
+        plane
+            .perform_barrier(0, site(2, 4, u64::from(card) * 512, 3))
+            .expect("写屏障成功");
+    }
+    let repeat = plane
+        .perform_barrier(0, site(2, 4, 0, 3))
+        .expect("重复键不越界");
+    assert!(
+        repeat.card_marked || repeat.flush == Some(BarrierFlushReason::BufferFull),
+        "满 buffer 上的重复写入要么命中 dedup，要么保守地要求 flush"
+    );
+    assert_eq!(
+        plane.processor(0).expect("账本").buffer().len(),
+        CARD_MARK_BUFFER_ENTRIES,
+        "重复写入不得新增 slot"
+    );
+    // 小规模写入时 stamp 不冲突，重复键必然命中 dedup 且不触发 flush。
+    let mut plane = BarrierPlane::new(3);
+    plane
+        .perform_barrier(0, site(2, 4, 512, 3))
+        .expect("写屏障成功");
+    let repeat = plane
+        .perform_barrier(0, site(2, 4, 512, 3))
+        .expect("写屏障成功");
+    assert!(repeat.card_marked, "无冲突时重复键命中 dedup");
+    assert!(repeat.flush.is_none(), "无冲突时不触发 flush");
+    assert_eq!(plane.processor(0).expect("账本").buffer().len(), 1);
 }
 
 #[test]
-fn epoch_change_invalidates_old_keys() {
+fn epoch_change_flushes_and_never_drops_old_keys() {
     let mut plane = BarrierPlane::new(1);
-    plane.perform_barrier(0, site(1, 1, 512, 1));
+    plane
+        .perform_barrier(0, site(1, 1, 512, 1))
+        .expect("写屏障成功");
     assert_eq!(plane.processor(0).expect("账本").buffer().len(), 1);
-    plane.advance_epoch(2);
+    // epoch 前进必须先交出旧键：草稿属于旧 cycle，绝不能被静默丢弃。
+    let drafts = plane
+        .advance_epoch(2, BarrierFlushReason::MinorStop)
+        .expect("epoch 前进");
+    assert_eq!(drafts.len(), 1, "旧 cycle 的键必须由 epoch 前进交出");
+    assert_eq!(drafts[0].cycle_epoch, 1);
+    assert_eq!(drafts[0].card_start, 1);
     assert!(plane.processor(0).expect("账本").buffer().is_empty());
+    assert_eq!(plane.processor(0).expect("账本").buffer().cycle_epoch(), 2);
+    assert_eq!(plane.cycle_epoch(), 2);
     // 旧 epoch 的键不能再用旧 buffer 的键掩盖新 cycle 的脏度。
-    plane.perform_barrier(0, site(1, 1, 512, 2));
+    plane
+        .perform_barrier(0, site(1, 1, 512, 2))
+        .expect("写屏障成功");
     let record = plane.processor(0).expect("账本");
     assert_eq!(record.buffer().len(), 1);
     assert_eq!(record.buffer().cycle_epoch(), 2);
+    // 站点 epoch 落后于平面时拒绝记账，而不是就地改写 epoch 丢掉旧键。
+    assert!(plane.perform_barrier(0, site(1, 1, 1024, 1)).is_err());
+    // 平面自身也运行时拒绝 epoch 回退，不依赖 debug 断言。
+    assert!(
+        plane
+            .advance_epoch(1, BarrierFlushReason::MinorStop)
+            .is_err()
+    );
 }
 
 #[test]
 fn six_flush_reasons_are_reachable() {
     for (index, reason) in BarrierFlushReason::ALL.into_iter().enumerate() {
         let mut plane = BarrierPlane::new(1);
-        plane.perform_barrier(0, site(1, 1, 512, 1));
+        plane
+            .perform_barrier(0, site(1, 1, 512, 1))
+            .expect("写屏障成功");
         let drafts = plane.flush_processor(0, reason);
         assert_eq!(drafts.len(), 1, "{} 必须冲刷已记账的键", reason.name());
         assert_eq!(plane.processor(0).expect("账本").last_flush(), Some(reason));
@@ -303,7 +372,11 @@ fn card_batch_crosses_owner_and_is_consumed_once() {
     world
         .register_managed_arena(1, SlabDescriptorId::from_raw(3), 11)
         .expect("登记 arena");
-    world.perform_barrier(0, site(3, 11, 1024, 5));
+    // 站点 epoch 必须与平面一致：先推进平面，再记账。
+    world.advance_barrier_epoch(0, 5).expect("推进到 cycle 5");
+    world
+        .perform_barrier(0, site(3, 11, 1024, 5))
+        .expect("写屏障成功");
     let published = world
         .flush_barrier(0, 0, BarrierFlushReason::ProcessorHandoff)
         .expect("发布 batch");
@@ -329,7 +402,9 @@ fn card_batch_crosses_owner_and_is_consumed_once() {
     assert_eq!(world.barrier().consumed_batches(), 1);
     assert!(world.barrier().minor_scan_ready());
     // 幂等：重复置位不改变 dirty 计数。
-    world.perform_barrier(0, site(3, 11, 1024, 5));
+    world
+        .perform_barrier(0, site(3, 11, 1024, 5))
+        .expect("写屏障成功");
     world
         .flush_barrier(0, 0, BarrierFlushReason::MinorStop)
         .expect("再次发布");
@@ -349,7 +424,9 @@ fn arena_owner_writes_its_card_table_without_a_message() {
     world
         .register_managed_arena(0, SlabDescriptorId::from_raw(2), 3)
         .expect("登记 arena");
-    world.perform_barrier(0, site(2, 3, 2048, 1));
+    world
+        .perform_barrier(0, site(2, 3, 2048, 1))
+        .expect("写屏障成功");
     let published = world
         .flush_barrier(0, 0, BarrierFlushReason::MemoryPressure)
         .expect("本地合并写");
@@ -415,8 +492,12 @@ fn minor_stop_gate_requires_every_buffer_flushed() {
     world
         .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
         .expect("登记 arena");
-    world.perform_barrier(0, site(2, 1, 512, 1));
-    world.perform_barrier(1, site(2, 1, 512, 1));
+    world
+        .perform_barrier(0, site(2, 1, 512, 1))
+        .expect("写屏障成功");
+    world
+        .perform_barrier(1, site(2, 1, 512, 1))
+        .expect("写屏障成功");
     // 第二个 processor 仍有记账，minor 请求必须先把两个 buffer 都冲刷。
     let ready = world.request_minor_stop(0).expect("minor stop 请求");
     assert!(ready, "冲刷完成后 minor 门禁开放");
@@ -602,7 +683,9 @@ fn owner_retire_flushes_the_processor_ledger() {
     world
         .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
         .expect("登记 arena");
-    world.perform_barrier(0, site(2, 1, 512, 1));
+    world
+        .perform_barrier(0, site(2, 1, 512, 1))
+        .expect("写屏障成功");
     let target = world.raw_domain_owner();
     world
         .retire(0, target, &ServiceBudget::new(8, 1 << 16))
@@ -621,13 +704,17 @@ fn cache_close_flushes_for_gc_handoff_and_pressure() {
         .expect("登记 arena");
     let mut staging = ProducerStaging::new(BatchLimits::default());
     let mut cache = ReturnSlabCache::new();
-    world.perform_barrier(0, site(3, 1, 512, 1));
+    world
+        .perform_barrier(0, site(3, 1, 512, 1))
+        .expect("写屏障成功");
     world
         .close_cache(0, &mut staging, &mut cache, RingCloseReason::GcHandoff)
         .expect("GC handoff");
     assert_eq!(world.barrier().table(3).expect("card table").dirty(), 1);
     assert!(buffer_empty(&world, 0));
-    world.perform_barrier(0, site(3, 1, 1024, 1));
+    world
+        .perform_barrier(0, site(3, 1, 1024, 1))
+        .expect("写屏障成功");
     world
         .close_cache(0, &mut staging, &mut cache, RingCloseReason::PressureDrain)
         .expect("pressure drain");
@@ -654,7 +741,9 @@ fn foreign_bridge_flushes_before_native_entry() {
     world
         .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
         .expect("登记 arena");
-    world.perform_barrier(0, site(2, 1, 512, 1));
+    world
+        .perform_barrier(0, site(2, 1, 512, 1))
+        .expect("写屏障成功");
     world.enter_foreign(0).expect("进入 foreign bridge");
     assert_eq!(world.barrier().table(2).expect("card table").dirty(), 1);
     assert!(buffer_empty(&world, 0));
@@ -666,7 +755,9 @@ fn drain_flushes_the_producer_stop_gate() {
     world
         .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
         .expect("登记 arena");
-    world.perform_barrier(0, site(2, 1, 512, 1));
+    world
+        .perform_barrier(0, site(2, 1, 512, 1))
+        .expect("写屏障成功");
     let (forwarded, consumed) = world
         .drain_all(0, &ServiceBudget::new(8, 1 << 16))
         .expect("drain");
@@ -682,4 +773,68 @@ fn buffer_empty(world: &RawWorld, processor: usize) -> bool {
         .expect("账本")
         .buffer()
         .is_empty()
+}
+
+#[test]
+fn epoch_advance_publishes_old_keys_and_rejects_stale_sites() {
+    let mut world = world(1);
+    world
+        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
+        .expect("登记 arena");
+    world
+        .perform_barrier(0, site(2, 1, 512, 1))
+        .expect("写屏障成功");
+    // epoch 前进必须把旧 cycle 的键交给 arena owner，而不是清空 buffer。
+    world.advance_barrier_epoch(0, 2).expect("推进到 cycle 2");
+    assert_eq!(world.barrier().table(2).expect("card table").dirty(), 1);
+    assert!(buffer_empty(&world, 0));
+    assert_eq!(world.barrier().cycle_epoch(), 2);
+    // 站点 epoch 落后于平面时拒绝记账，避免就地改写 epoch 丢掉旧键。
+    assert!(world.perform_barrier(0, site(2, 1, 1024, 1)).is_err());
+    // epoch 只能前进：回退会把两批不同 cycle 的卡键混进同一账本。
+    assert!(world.advance_barrier_epoch(0, 1).is_err());
+    // 旧键已经发布到 card table，checkout 之后同一 card 的重复写入仍然幂等。
+    world
+        .perform_barrier(0, site(2, 1, 512, 2))
+        .expect("写屏障成功");
+    world
+        .flush_barrier(0, 0, BarrierFlushReason::MemoryPressure)
+        .expect("本地合并写");
+    assert_eq!(world.barrier().table(2).expect("card table").dirty(), 1);
+}
+
+#[test]
+fn edge_deltas_are_aggregated_and_collected_by_the_owner() {
+    let mut world = world(1);
+    world
+        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
+        .expect("登记 arena");
+
+    // 同一 block 对在同一 epoch 内的 add 与 drop 净零抵消，不发布空 delta。
+    world
+        .perform_barrier(0, site(2, 1, 512, 1))
+        .expect("写屏障成功");
+    let mut dropped = site(2, 1, 512, 1);
+    dropped.new_present = false;
+    world.perform_barrier(0, dropped).expect("写屏障成功");
+    assert_eq!(
+        world.barrier_stats(0).edge_pending,
+        0,
+        "同一 epoch 的 add/drop 净零抵消"
+    );
+    assert!(world.take_edge_deltas(0).is_empty());
+
+    // 只增不删的 edge 保留一条待发布 delta。
+    world
+        .perform_barrier(0, site(2, 1, 1536, 1))
+        .expect("写屏障成功");
+    assert_eq!(
+        world.barrier_stats(0).edge_pending,
+        1,
+        "同一 edge 聚合为一条"
+    );
+    assert_eq!(world.take_edge_deltas(0).len(), 1);
+    assert_eq!(world.barrier_stats(0).edge_deltas, 1);
+    assert_eq!(world.barrier_stats(0).edge_pending, 0, "取走后不再挂起");
+    assert!(world.take_edge_deltas(0).is_empty());
 }

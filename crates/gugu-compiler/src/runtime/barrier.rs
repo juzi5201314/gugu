@@ -18,8 +18,8 @@
 use std::collections::BTreeMap;
 
 use super::barrier_schema::{
-    CARD_GRANULARITY_BYTES, CARD_MARK_BUFFER_ENTRIES, CARD_MARK_STAMP_ENTRIES,
-    CARD_MARKS_PER_WRITE, MessageFamilyTag, SHADE_SLOTS_PER_WRITE, card_index, stamp_slot,
+    CARD_GRANULARITY_BYTES, CARD_MARK_BUFFER_ENTRIES, CARD_MARK_STAMP_ENTRIES, card_index,
+    stamp_slot,
 };
 use super::slab::{OwnerToken, RawInvariant};
 
@@ -195,8 +195,6 @@ pub(crate) struct HybridBarrierOutcome {
     pub(crate) card_marked: bool,
     /// 需要的 flush 原因；buffer 满时必须由调用方在 region 外冲刷。
     pub(crate) flush: Option<BarrierFlushReason>,
-    /// edge summary 的聚合结果。
-    pub(crate) edge: Option<EdgeDeltaRecord>,
 }
 
 /// 一条 edge summary 记录。
@@ -391,14 +389,20 @@ impl CardMarkBuffer {
         self.last_flush
     }
 
-    /// 推进 cycle epoch：epoch 变化时旧键必须整体作废，不能跨 cycle 复用。
-    pub(crate) fn advance_epoch(&mut self, cycle_epoch: u64) {
-        if cycle_epoch != self.cycle_epoch {
-            self.entries.clear();
-            self.stamps.iter_mut().for_each(|stamp| *stamp = None);
-            self.pending_bytes = 0;
-            self.cycle_epoch = cycle_epoch;
+    /// 推进 cycle epoch。
+    ///
+    /// 旧键不能跨 cycle 复用，但也不能因为 epoch 前进而消失：仍有未发布键时返回 `Err`，
+    /// 由调用方先 flush 并把 batch 交给 arena owner，再重新推进 epoch。
+    pub(crate) fn advance_epoch(&mut self, cycle_epoch: u64) -> Result<(), BarrierFlushReason> {
+        if cycle_epoch == self.cycle_epoch {
+            return Ok(());
         }
+        if !self.entries.is_empty() {
+            // cycle 边界与 minor stop 是同一件事：epoch 前进前必须先 drain remembered set。
+            return Err(BarrierFlushReason::MinorStop);
+        }
+        self.cycle_epoch = cycle_epoch;
+        Ok(())
     }
 
     /// 追回一个 card 键。
@@ -634,9 +638,9 @@ impl ProcessorBarrier {
         self.last_flush
     }
 
-    /// 推进 cycle epoch。
-    pub(crate) fn advance_epoch(&mut self, cycle_epoch: u64) {
-        self.buffer.advance_epoch(cycle_epoch);
+    /// 推进 cycle epoch；buffer 仍有未发布键时返回需要 flush 的原因。
+    pub(crate) fn advance_epoch(&mut self, cycle_epoch: u64) -> Result<(), BarrierFlushReason> {
+        self.buffer.advance_epoch(cycle_epoch)
     }
 
     /// 执行一条 hybrid barrier，并把 card 键交给本地账本。
@@ -648,9 +652,17 @@ impl ProcessorBarrier {
         site: BarrierSite,
         edges: &mut EdgeSummary,
     ) -> HybridBarrierOutcome {
-        // mutator 观测到新 cycle 时，旧键必须整体作废才能记账：epoch 变化在这里收敛，
-        // 不要求调用方在每次写入前单独同步。
-        self.buffer.advance_epoch(site.cycle_epoch);
+        // 站点 epoch 与账本不一致：本次写入不记账，也绝不就地改写 epoch，而是把强制
+        // flush 交给调用方。旧键只能经 flush→发布离开账本，不会被静默丢弃。
+        if site.cycle_epoch != self.buffer.cycle_epoch() {
+            return HybridBarrierOutcome {
+                steps: vec![HybridStep::ReadOld, HybridStep::Store],
+                shaded_old: false,
+                shaded_new: false,
+                card_marked: false,
+                flush: Some(BarrierFlushReason::MinorStop),
+            };
+        }
         let mut steps = Vec::with_capacity(6);
         steps.push(HybridStep::ReadOld);
         let shaded_old = site.marking && site.old_present;
@@ -686,39 +698,39 @@ impl ProcessorBarrier {
                 Err(reason) => flush = Some(reason),
             }
         }
-        let edge = if site.source_owner != site.new_owner || site.new_block.is_some() {
-            match site.new_block {
-                Some(target_block) => {
-                    steps.push(HybridStep::EdgeSummary);
-                    let record = if site.new_present {
-                        edges.record_add(
-                            site.source_block,
-                            target_block,
-                            site.arena_generation,
-                            site.cycle_epoch,
-                        )
-                    } else {
-                        edges.record_drop(
-                            site.source_block,
-                            target_block,
-                            site.arena_generation,
-                            site.cycle_epoch,
-                        )
-                    };
-                    Some(record)
-                }
-                None => None,
+        // 跨 owner 或跨 block 的写入进入 owner-local edge summary：source 与 target 属于
+        // 同一 owner 且同一 block 时是私有字段写入，不产生 block edge。聚合结果只有一处
+        // 定义（`EdgeSummary`），由 owner 经 `take_edge_deltas` 取走。
+        let cross_owner = site.source_owner != site.new_owner;
+        let cross_block = site
+            .new_block
+            .is_some_and(|target| target != site.source_block);
+        if (cross_owner || cross_block)
+            && let Some(target_block) = site.new_block
+        {
+            steps.push(HybridStep::EdgeSummary);
+            if site.new_present {
+                edges.record_add(
+                    site.source_block,
+                    target_block,
+                    site.arena_generation,
+                    site.cycle_epoch,
+                );
+            } else {
+                edges.record_drop(
+                    site.source_block,
+                    target_block,
+                    site.arena_generation,
+                    site.cycle_epoch,
+                );
             }
-        } else {
-            None
-        };
+        }
         HybridBarrierOutcome {
             steps,
             shaded_old,
             shaded_new,
             card_marked,
             flush,
-            edge,
         }
     }
 
@@ -731,11 +743,6 @@ impl ProcessorBarrier {
             self.batches += u64::try_from(drafts.len()).expect("batch 数适配 u64");
         }
         drafts
-    }
-
-    /// 单次写入消费的 slot 上界；供契约与测试核对 permit 口径。
-    pub(crate) const fn slot_cost() -> (u32, u32) {
-        (SHADE_SLOTS_PER_WRITE, CARD_MARKS_PER_WRITE)
     }
 }
 
@@ -830,12 +837,38 @@ impl BarrierPlane {
             .ok_or_else(|| RawInvariant::new("arena card table 登记后缺失"))
     }
 
-    /// 推进 cycle epoch：全部 processor 的旧键作废。
-    pub(crate) fn advance_epoch(&mut self, cycle_epoch: u64) {
-        self.cycle_epoch = cycle_epoch;
-        for processor in &mut self.processors {
-            processor.advance_epoch(cycle_epoch);
+    /// 推进 cycle epoch：先冲刷全部 processor 并返回草稿，再切换 epoch。
+    ///
+    /// 返回的草稿必须由调用方发布给对应 arena owner；epoch 前进不允许让任何已记账的 card
+    /// 键消失，因此这里先 flush 再切换，且切换后 buffer 必须为空。
+    pub(crate) fn advance_epoch(
+        &mut self,
+        cycle_epoch: u64,
+        reason: BarrierFlushReason,
+    ) -> Result<Vec<CardMarkDraft>, RawInvariant> {
+        // epoch 只前进：回退会把两批携带不同 epoch 的卡键混进同一账本，因此这里是运行时
+        // 拒绝而不是断言——平面是 crate 内共享状态，调用方不能依赖 debug 构建。
+        if cycle_epoch < self.cycle_epoch {
+            return Err(RawInvariant::new(format!(
+                "barrier 平面的 cycle epoch 不能从 {} 回退到 {cycle_epoch}",
+                self.cycle_epoch
+            )));
         }
+        if cycle_epoch == self.cycle_epoch {
+            return Ok(Vec::new());
+        }
+        let mut drafts = Vec::new();
+        let count = self.processors.len();
+        for processor in 0..count {
+            drafts.append(&mut self.flush_processor(processor, reason));
+        }
+        for processor in &mut self.processors {
+            processor
+                .advance_epoch(cycle_epoch)
+                .expect("flush 之后 buffer 必须为空");
+        }
+        self.cycle_epoch = cycle_epoch;
+        Ok(drafts)
     }
 
     /// 确保 processor 账本存在并返回可变引用。
@@ -917,13 +950,6 @@ impl BarrierPlane {
         self.flushed_by_reason
     }
 
-    /// 冲刷全部 processor 的账本；返回每个 processor 的草稿。
-    pub(crate) fn flush_all(&mut self, reason: BarrierFlushReason) -> Vec<Vec<CardMarkDraft>> {
-        (0..self.processors.len())
-            .map(|processor| self.processor_mut(processor).flush(reason))
-            .collect()
-    }
-
     /// minor stop 门禁：只有所有 buffer 已 flush 且所有 batch 已消费时才允许扫描。
     pub(crate) fn minor_scan_ready(&self) -> bool {
         self.processors
@@ -951,38 +977,28 @@ impl BarrierPlane {
 
     /// mutator 上下文：在一个 processor 上执行一条 hybrid barrier。
     ///
-    /// edge summary 与 buffer 同属本平面，调用方不需要自己持有聚合状态。
+    /// edge summary 与 buffer 同属本平面，调用方不需要自己持有聚合状态。站点 epoch 必须
+    /// 已经由 `advance_epoch` 推进过：这里不代调用方推进，避免在无处发布旧键的层级上丢弃
+    /// remembered-set 内容。
     pub(crate) fn perform_barrier(
         &mut self,
         processor: usize,
         site: BarrierSite,
-    ) -> HybridBarrierOutcome {
+    ) -> Result<HybridBarrierOutcome, RawInvariant> {
         if site.cycle_epoch != self.cycle_epoch {
-            self.advance_epoch(site.cycle_epoch);
+            return Err(RawInvariant::new(format!(
+                "站点 cycle epoch {} 与平面 epoch {} 不一致，调用方必须先 flush 并推进 epoch",
+                site.cycle_epoch, self.cycle_epoch
+            )));
         }
         let mut edges = std::mem::take(&mut self.edges);
         let outcome = self.processor_mut(processor).perform(site, &mut edges);
         self.edges = edges;
-        outcome
+        Ok(outcome)
     }
 
     /// 取出全部待发布的 edge delta。
     pub(crate) fn drain_edges(&mut self) -> Vec<EdgeDeltaRecord> {
         self.edges.drain()
     }
-
-    /// 返回消息族判别值；card batch 只允许出现在 GC 工作族。
-    pub(crate) const fn message_family() -> MessageFamilyTag {
-        MessageFamilyTag::CardMark
-    }
-}
-
-/// 一个 processor 在给定 cycle 内允许写入的最大 distinct card 数。
-pub(crate) const fn buffer_capacity() -> u32 {
-    CARD_MARK_BUFFER_ENTRIES
-}
-
-/// arena 到 card 序号的换算；供 runtime 与测试共用同一常量。
-pub(crate) const fn arena_card_index(base: u64, address: u64) -> Option<u64> {
-    super::barrier_schema::arena_card(base, address)
 }

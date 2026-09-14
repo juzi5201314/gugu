@@ -934,25 +934,31 @@ impl CardMarkHarness {
             for index in 0..self.iterations {
                 // 每个 processor 只落在一个 card 上：命中 dedup 槽并不产生新键。
                 let offset = u64::from(self.processors) * 512 + u64::from(index) % 512;
-                plane.perform_barrier(
-                    processor,
-                    super::barrier::BarrierSite {
-                        arena_descriptor: arena,
-                        arena_generation: 1,
-                        offset,
-                        cycle_epoch: 1,
-                        old_present: true,
-                        new_present: true,
-                        new_in_nursery: true,
-                        owner_old: true,
-                        marking: true,
-                        stack_grey: true,
-                        new_block: None,
-                        source_block: 0,
-                        new_owner: 0,
-                        source_owner: 0,
-                    },
-                );
+                plane
+                    .perform_barrier(
+                        processor,
+                        super::barrier::BarrierSite {
+                            arena_descriptor: arena,
+                            arena_generation: 1,
+                            offset,
+                            cycle_epoch: 1,
+                            old_present: true,
+                            new_present: true,
+                            new_in_nursery: true,
+                            owner_old: true,
+                            marking: true,
+                            stack_grey: true,
+                            // 每个 processor 写入不同 target block：harness 因此同时覆盖
+                            // owner-local edge summary 的聚合与取走路径。
+                            new_block: Some(
+                                u32::try_from(processor + 1).expect("block 编号适配 u32"),
+                            ),
+                            source_block: 0,
+                            new_owner: 0,
+                            source_owner: 0,
+                        },
+                    )
+                    .expect("写屏障成功");
             }
         }
         let mut batches = 0_u64;
@@ -975,11 +981,17 @@ impl CardMarkHarness {
         let dirty_cards = plane
             .table(arena)
             .map_or(0, super::barrier::CardTable::dirty);
+        // edge summary 是 owner-local 聚合：每个 processor 的 target block 不同，因此每个
+        // processor 恰好留下一条待取走 delta；取走后挂起数必须归零。
+        let edge_deltas = u64::try_from(plane.drain_edges().len()).unwrap_or(u64::MAX);
+        let edge_pending_after_drain = plane.edges().pending();
         let expected = u64::from(self.processors) * u64::from(self.iterations);
         let invariants_hold = registered
             && card_marks == expected
             && slot_reuses + u64::try_from(self.processors).unwrap_or(0) >= card_marks
-            && dirty_cards > 0;
+            && dirty_cards > 0
+            && edge_deltas == u64::from(self.processors)
+            && edge_pending_after_drain == 0;
         CardMarkReport {
             processors: self.processors,
             iterations: self.iterations,

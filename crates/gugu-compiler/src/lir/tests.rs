@@ -843,3 +843,59 @@ fn interpret(body: &Body, arguments: &[u64]) -> Vec<u64> {
     }
     panic!("固定有界 fixture 的 LIR 没有终止")
 }
+
+#[test]
+fn permit_quota_beyond_buffer_capacity_is_rejected() {
+    use crate::runtime::barrier_schema::CARD_MARK_BUFFER_ENTRIES;
+
+    // permit 是 compile-time 容量证明：`max_card_marks` 超过 processor 的
+    // `CardMarkBuffer` 容量时，region 内必然需要补容量，而补容量只能发生在 region 外。
+    // verifier 必须在后端前拒绝这种 permit。
+    let compilation = compile(PUBLISH);
+    let mut body = publish_body(&compilation);
+    let permit = body
+        .barrier_permits
+        .iter_mut()
+        .next()
+        .expect("publish region 必须带 permit");
+    permit.max_card_marks = CARD_MARK_BUFFER_ENTRIES + 1;
+    // 必须断言具体分支：额度一致性检查也会以同一错误码拒绝，只断言错误码无法分辨。
+    super::uses::rebuild(&mut body);
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+        .expect_err("超额 permit 必须在后端前失败");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+    assert!(
+        error.message().contains("超过 CardMarkBuffer 容量"),
+        "必须由容量检查拒绝，实际为：{}",
+        error.message()
+    );
+}
+
+#[test]
+fn permit_quota_at_buffer_capacity_passes_the_capacity_check() {
+    use crate::runtime::barrier_schema::CARD_MARK_BUFFER_ENTRIES;
+
+    // 边界是 `>`：额度恰好等于容量时容量检查不触发，随后的失败必须来自额度一致性检查。
+    let compilation = compile(PUBLISH);
+    let mut body = publish_body(&compilation);
+    let permit = body
+        .barrier_permits
+        .iter_mut()
+        .next()
+        .expect("publish region 必须带 permit");
+    permit.max_card_marks = CARD_MARK_BUFFER_ENTRIES;
+    super::uses::rebuild(&mut body);
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+        .expect_err("额度与静态复算不一致仍必须失败");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+    assert!(
+        !error.message().contains("超过 CardMarkBuffer 容量"),
+        "恰好等于容量不得触发容量检查，实际为：{}",
+        error.message()
+    );
+    assert!(
+        error.message().contains("静态消费上界不一致"),
+        "应落到额度一致性检查，实际为：{}",
+        error.message()
+    );
+}

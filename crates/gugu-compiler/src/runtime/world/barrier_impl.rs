@@ -13,12 +13,10 @@ use super::super::barrier::{
     BarrierFlushReason, BarrierPlane, BarrierSite, CardMarkDraft, EdgeDeltaRecord,
     HybridBarrierOutcome,
 };
-use super::super::barrier_schema::MessageFamilyTag;
 use super::super::gc_metadata_contract::GC_ARENA_BYTES;
 use super::super::inbox::ShardIndex;
 use super::super::message::{
-    CardMarkBatch, FlushTrigger, IntegrityTag, MessageState, ProducerStaging, ReturnKind,
-    stage_card_mark,
+    CardMarkBatch, FlushTrigger, IntegrityTag, MessageState, ProducerStaging, stage_card_mark,
 };
 use super::super::slab::{MemoryDomainId, OwnerToken, RawInvariant, SlabDescriptorId};
 use super::RawWorld;
@@ -40,6 +38,10 @@ pub(crate) struct BarrierStats {
     pub(crate) empty_flushes: u64,
     /// 六个原因各自的 flush 次数。
     pub(crate) by_reason: [u64; 6],
+    /// 已取走的跨 block edge delta 总数。
+    pub(crate) edge_deltas: u64,
+    /// edge summary 中尚未取出的 delta 数。
+    pub(crate) edge_pending: u64,
 }
 
 impl RawWorld {
@@ -75,13 +77,53 @@ impl RawWorld {
 
     /// mutator 上下文：在一个 processor 上执行一条 hybrid barrier。
     ///
-    /// buffer 满时返回的 flush 原因必须由调用方在 region 外补容量，不能就地扩容。
+    /// buffer 满或站点 epoch 落后于平面时返回的 flush 原因必须由调用方在 region 外补容量，
+    /// 不能就地扩容，也不能丢弃账本内容。
     pub(crate) fn perform_barrier(
         &mut self,
         processor: usize,
         site: BarrierSite,
-    ) -> HybridBarrierOutcome {
+    ) -> Result<HybridBarrierOutcome, RawInvariant> {
         self.barrier.perform_barrier(processor, site)
+    }
+
+    /// 推进 barrier 平面的 cycle epoch，并把旧 cycle 的 card batch 交给 arena owner。
+    ///
+    /// epoch 前进是 cycle 边界：全部 processor 的 remembered set 必须先冲刷并发布，任何
+    /// 已记账的 card 键都不允许因为 epoch 前进而消失。
+    pub(crate) fn advance_barrier_epoch(
+        &mut self,
+        owner: u32,
+        cycle_epoch: u64,
+    ) -> Result<u32, RawInvariant> {
+        let drafts = self
+            .barrier
+            .advance_epoch(cycle_epoch, BarrierFlushReason::MinorStop)?;
+        self.publish_drafts(owner, drafts)
+    }
+
+    /// 把一个平面交出的草稿按归属本地写或跨 owner 发布。
+    fn publish_drafts(
+        &mut self,
+        owner: u32,
+        drafts: Vec<CardMarkDraft>,
+    ) -> Result<u32, RawInvariant> {
+        let owner_token = self.token(owner);
+        let mut published = 0_u32;
+        for draft in drafts {
+            let local = self
+                .barrier
+                .table(draft.arena_descriptor)
+                .is_some_and(|table| table.manager() == owner_token);
+            if local {
+                self.barrier
+                    .consume_locally(draft.arena_descriptor, &draft)?;
+                continue;
+            }
+            self.publish_card_batch(owner, &draft)?;
+            published += 1;
+        }
+        Ok(published)
     }
 
     /// 冲刷一个 processor 的 barrier 账本，并按归属选择本地写或批量发布。
@@ -221,31 +263,7 @@ impl RawWorld {
         self.barrier.consume_published(arena_descriptor, &draft)
     }
 
-    /// 返回一个 owner 的 card batch 目标 inbox；与 return 消息共用通道。
-    pub(crate) fn card_mark_target(&self, owner: u32) -> OwnerToken {
-        self.token(owner)
-    }
-
-    /// 六个触发点之一：processor 交接（绑定、retire 或换栈）。
-    pub(crate) fn flush_barrier_handoff(
-        &mut self,
-        owner: u32,
-        processor: usize,
-    ) -> Result<u32, RawInvariant> {
-        self.flush_barrier(owner, processor, BarrierFlushReason::ProcessorHandoff)
-    }
-
-    /// 六个触发点之一：进入普通或 dirty bridge。
-    pub(crate) fn flush_barrier_foreign(&mut self, owner: u32) -> Result<u32, RawInvariant> {
-        self.flush_all_barriers(owner, BarrierFlushReason::ForeignBridge)
-    }
-
-    /// 六个触发点之一：memory pressure 的有界 drain。
-    pub(crate) fn flush_barrier_pressure(&mut self, owner: u32) -> Result<u32, RawInvariant> {
-        self.flush_all_barriers(owner, BarrierFlushReason::MemoryPressure)
-    }
-
-    /// 六个触发点之一：minor stop 请求。
+    /// minor stop 请求：冲刷全部 processor，并返回扫描门禁是否已经满足。
     ///
     /// minor cycle 在扫描 remembered set 前必须确认所有 active processor 的 buffer 已
     /// flush、所有旧 epoch batch 已消费；因此请求 stop 时先做同样的冲刷与门禁检查。
@@ -255,13 +273,11 @@ impl RawWorld {
         Ok(self.barrier.minor_scan_ready() && published == 0)
     }
 
-    /// 六个触发点之一：producer stop gate。
-    pub(crate) fn flush_barrier_stop_gate(&mut self, owner: u32) -> Result<u32, RawInvariant> {
-        self.flush_all_barriers(owner, BarrierFlushReason::ProducerStopGate)
-    }
-
-    /// 冲刷一个 owner 当前全部 processor 的账本；retire、foreign bridge、cache 关闭等
-    /// 交接路径都经由它收口。
+    /// 冲刷一个 owner 当前全部 processor 的账本。
+    ///
+    /// 六个触发点都经由它或 `flush_barrier` 收口：owner `retire`、`drain_all`、source-slab
+    /// cache 的 `GcHandoff`/`PressureDrain` 关闭与 `enter_foreign`；`buffer-full` 由
+    /// `perform_barrier` 返回值报告，`minor-stop` 由 `request_minor_stop` 收口。
     pub(super) fn flush_all_barriers(
         &mut self,
         owner: u32,
@@ -273,25 +289,6 @@ impl RawWorld {
             published += self.flush_barrier(owner, processor, reason)?;
         }
         Ok(published)
-    }
-
-    /// 返回 edge summary 的待发布 delta；只做 barrier 侧的本地聚合。
-    pub(crate) fn drain_edge_summary(&mut self) -> Vec<EdgeDeltaRecord> {
-        self.barrier.drain_edges()
-    }
-    /// 返回消息族判别值；card batch 只出现在 GC 工作族。
-    pub(crate) const fn card_mark_family() -> MessageFamilyTag {
-        MessageFamilyTag::CardMark
-    }
-
-    /// 返回 return 消息族判别值，供测试断言两族分离。
-    pub(crate) const fn return_family() -> MessageFamilyTag {
-        MessageFamilyTag::Return
-    }
-
-    /// 返回 `ResourceRelease` 的 return 种类，供测试断言 batch 不占用 return 种类。
-    pub(crate) const fn release_kind() -> ReturnKind {
-        ReturnKind::ResourceRelease
     }
 
     /// 返回一个 owner 的 barrier 统计快照。
@@ -309,8 +306,22 @@ impl RawWorld {
         stats.flushes = self.barrier.flushes();
         stats.empty_flushes = self.barrier.empty_flushes();
         stats.by_reason = self.barrier.flushed_by_reason();
+        stats.edge_pending =
+            u64::try_from(self.barrier.edges().pending()).expect("pending 适配 u64");
+        stats.edge_deltas = self.edge_delta_total;
         let _ = owner;
         stats
+    }
+
+    /// 取走本 owner 的跨 block edge delta。
+    ///
+    /// edge summary 是 owner-local 聚合，只发布给 target owner 的 batch；阶段 45 的
+    /// `EdgeDelta` 传输接手后从这里取出并发布。
+    pub(crate) fn take_edge_deltas(&mut self, owner: u32) -> Vec<EdgeDeltaRecord> {
+        let _ = owner;
+        let deltas = self.barrier.drain_edges();
+        self.edge_delta_total += u64::try_from(deltas.len()).expect("delta 数适配 u64");
+        deltas
     }
 
     /// 返回 domain 归属的 owner token；card batch 只发给 raw owner。

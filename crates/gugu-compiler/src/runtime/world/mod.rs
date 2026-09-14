@@ -126,6 +126,8 @@ pub(crate) struct RawWorld {
     sync: super::sync::SyncPlane,
     /// hybrid write barrier 的 processor 账本、arena card table 与 edge summary。
     barrier: super::barrier::BarrierPlane,
+    /// 已经由 owner 取走的跨 block edge delta 总数。
+    edge_delta_total: u64,
 }
 
 impl RawWorld {
@@ -195,6 +197,7 @@ impl RawWorld {
             channels: super::channel::ChannelTable::new(),
             sync: super::sync::SyncPlane::new(),
             barrier: super::barrier::BarrierPlane::new(0),
+            edge_delta_total: 0,
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。
