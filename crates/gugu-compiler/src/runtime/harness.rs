@@ -92,6 +92,10 @@ impl OwnerReturnHarness {
             .max(self.producers * self.items_per_producer + BATCH_MAX);
         let mut world =
             RawWorld::new(1, 1, node_capacity, BatchLimits::default()).expect("raw world 可创建");
+        // region plane 由同一份契约配置：容量阶梯与对象上界只有一个来源。
+        world
+            .configure_regions(contract.region())
+            .expect("region plane 可配置");
         let target = world.token(0);
         let inbox = world.inbox(0);
         let pool = world.pool();
@@ -289,6 +293,9 @@ impl ResourceReleaseHarness {
         let node_capacity = contract.message_node_capacity().max(total + BATCH_MAX);
         let mut world =
             RawWorld::new(7, 2, node_capacity, BatchLimits::default()).expect("raw world 可创建");
+        world
+            .configure_regions(contract.region())
+            .expect("region plane 可配置");
         let inbox = world.inbox(0);
         let pool = world.pool();
         let shape = ResourceShape {
@@ -1004,6 +1011,198 @@ impl CardMarkHarness {
             dirty_cards,
             elapsed_micros: u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
             invariants_hold,
+        }
+    }
+}
+
+/// TurnRegion 生命周期与 `RegionTransfer` 往返的吞吐 smoke。
+///
+/// 只断言不变量并打印吞吐；确定性正确性由 region 单测承担。不进 `nextest`。
+#[derive(Clone, Copy, Debug)]
+pub struct RegionTransferHarness {
+    /// 每轮建立的 region 数。
+    regions: u32,
+    /// 每个 region 的 bump 次数。
+    bumps: u32,
+}
+
+/// RegionTransferHarness 运行报告。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegionTransferReport {
+    /// 建立的 region 总数。
+    pub regions: u64,
+    /// bump 总次数。
+    pub bumps: u64,
+    /// 整区回收的 region 数。
+    pub resets: u64,
+    /// 保留的 region 数。
+    pub promotions: u64,
+    /// 发出的 transfer 数。
+    pub transfers: u64,
+    /// 采纳的 transfer 数。
+    pub adopted: u64,
+    /// 运行耗时（微秒）。
+    pub elapsed_micros: u64,
+    /// 不变量是否守恒。
+    pub invariants_hold: bool,
+}
+
+impl RegionTransferHarness {
+    /// 创建 harness；region 数与 bump 次数至少为 1。
+    pub fn new(regions: u32, bumps: u32) -> Self {
+        Self {
+            regions: regions.max(1),
+            bumps: bumps.max(1),
+        }
+    }
+
+    /// 执行一轮 region 建立、bump、发布、回收与移交往返。
+    pub fn run(self) -> RegionTransferReport {
+        let start = Instant::now();
+        let contract = super::region_schema::TurnRegionRuntimeContract::build(
+            super::region_schema::TurnRegionDemand::default(),
+        )
+        .expect("TurnRegion 契约可构建");
+        let owner = |owner_id: u64| OwnerToken {
+            domain: super::slab::MemoryDomainId::RUNTIME_RAW,
+            owner_id: super::slab::OwnerId::from_raw(owner_id),
+            generation: super::slab::OwnerGeneration::from_raw(1),
+            route_key: super::slab::RouteKey::from_raw(owner_id),
+        };
+        let sender = owner(1);
+        let receiver = owner(2);
+        let secret = [7_u8; 32];
+        let mut plane = super::region::RegionPlane::new(&[sender, receiver], &contract);
+        let pool = super::message::ReturnNodePool::new(self.regions + 1);
+        let mut resets = 0_u64;
+        let mut promotions = 0_u64;
+        let mut transfers = 0_u64;
+        let mut adopted = 0_u64;
+        let mut bumps = 0_u64;
+        let mut invariants = true;
+        for index in 0..self.regions {
+            let region = match plane.registry_mut(0).open(64) {
+                Ok(region) => region,
+                Err(_) => {
+                    invariants = false;
+                    break;
+                }
+            };
+            let mut offset = 0;
+            for _ in 0..self.bumps {
+                match plane.registry_mut(0).bump(region, 1, 1) {
+                    Ok(next) if next == offset => {
+                        offset += 1;
+                        bumps += 1;
+                    }
+                    _ => {
+                        invariants = false;
+                        break;
+                    }
+                }
+            }
+            if plane.registry_mut(0).publish(region, 0).is_err() {
+                invariants = false;
+                break;
+            }
+            // 三条结束路径轮流覆盖：整区回收、事实不闭合导致的保留、跨 owner 移交。
+            match index % 3 {
+                0 => {
+                    match plane.registry_mut(0).reset(region) {
+                        Ok(super::region::ResetOutcome::Reset { .. }) => resets += 1,
+                        _ => invariants = false,
+                    }
+                    continue;
+                }
+                1 => {
+                    // runtime 观察到 resource lease：门禁拒绝 reset，调用方转为保留。
+                    if plane
+                        .registry_mut(0)
+                        .observe(
+                            region,
+                            super::region_schema::RegionExport::ResourceLease.bit(),
+                        )
+                        .is_err()
+                    {
+                        invariants = false;
+                        break;
+                    }
+                    match plane.registry_mut(0).reset(region) {
+                        Ok(super::region::ResetOutcome::Refused(_)) => {
+                            match plane
+                                .registry_mut(0)
+                                .promote(region, super::region::PromoteReason::Summary)
+                            {
+                                Ok(_) => promotions += 1,
+                                Err(_) => invariants = false,
+                            }
+                        }
+                        _ => invariants = false,
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            let batch = match plane
+                .registry_mut(0)
+                .transfer(region, receiver, 1, 1, &secret)
+            {
+                Ok(batch) => batch,
+                Err(_) => {
+                    invariants = false;
+                    break;
+                }
+            };
+            let node = match pool.allocate() {
+                Ok(node) => node,
+                Err(_) => {
+                    invariants = false;
+                    break;
+                }
+            };
+            pool.store_region_transfer(node, &batch, batch.integrity.checksum);
+            if pool.load_region_transfer(node) != batch {
+                invariants = false;
+            }
+            transfers += 1;
+            if plane.enqueue(batch).is_err() {
+                invariants = false;
+                break;
+            }
+            let Some(pending) = plane.take(receiver) else {
+                invariants = false;
+                break;
+            };
+            let adopted_region = match plane.registry_mut(1).receive(&pending, &secret) {
+                Ok(region) => region,
+                Err(_) => {
+                    invariants = false;
+                    break;
+                }
+            };
+            adopted += 1;
+            if plane.registry_mut(0).confirm(region).is_err() {
+                invariants = false;
+            }
+            match plane.registry_mut(1).receive_reset(adopted_region) {
+                Ok(super::region::ResetOutcome::Reset { .. }) => resets += 1,
+                _ => invariants = false,
+            }
+        }
+        invariants &= plane.pending() == 0;
+        invariants &= plane.active(0) == 0 && plane.active(1) == 0;
+        invariants &= resets + promotions == u64::from(self.regions);
+        invariants &= transfers == adopted;
+        let elapsed_micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        RegionTransferReport {
+            regions: u64::from(self.regions),
+            bumps,
+            resets,
+            promotions,
+            transfers,
+            adopted,
+            elapsed_micros,
+            invariants_hold: invariants,
         }
     }
 }

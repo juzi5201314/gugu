@@ -603,6 +603,28 @@ impl Builder<'_> {
         self.runtime_result(RuntimeCall::Spawn, vec![code, environment], ty)
     }
 
+    /// 闭包环境的 placement：由 `EscapeAndPlacement` 的分配点表按当前语句点查。
+    ///
+    /// 只认「TurnRegion 且带 region 编号」的记录；没有记录或记录不带 region 时回到 LocalHeap，
+    /// 保持完整 managed 语义。这两个字段由 placement verifier 保持自洽。
+    fn environment_placement(&self) -> (PlacementKind, Option<u32>) {
+        self.world
+            .placement
+            .allocs
+            .iter()
+            .find(|alloc| {
+                alloc.body == self.concrete.generic_body && alloc.statement == self.statement
+            })
+            .map_or((PlacementKind::LocalHeap, None), |alloc| {
+                match alloc.region {
+                    Some(region) if alloc.kind == PlacementKind::TurnRegion => {
+                        (PlacementKind::TurnRegion, Some(region))
+                    }
+                    _ => (alloc.kind, None),
+                }
+            })
+    }
+
     pub(super) fn capture_environment(
         &mut self,
         definition: hir::DefId,
@@ -666,21 +688,10 @@ impl Builder<'_> {
                 })
                 .collect(),
         });
-        let size = self.constant(bytes, Type::I64);
-        let allocation = self.next_allocation;
-        self.next_allocation += 1;
-        let environment = self.emit_one(
-            Op::GcAlloc {
-                descriptor,
-                align: 8,
-                placement: PlacementKind::LocalHeap,
-            },
-            &[size],
-            ValueType::pointer(Provenance::GcHeap),
-            Origin::Allocation(allocation),
-        );
-        let zero = self.constant(0, Type::I8);
-        self.emit(Op::Memset { bytes }, &[environment, zero], &[]);
+        // 闭包环境是唯一存活的 managed 分配点：placement 已证明它属于当前 turn 的私有
+        // region 时走 `RegionAlloc`，否则按证明结果选择 stable storage。
+        let (placement, region) = self.environment_placement();
+        let environment = self.allocate_descriptor(descriptor, 8, bytes, placement, region)?;
         for (index, pointer) in captures.into_iter().enumerate() {
             let destination = self.offset(environment, u64::try_from(index).expect("捕获编号") * 8);
             self.store(destination, pointer, 8, false);

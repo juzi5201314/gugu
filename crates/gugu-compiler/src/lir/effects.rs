@@ -29,9 +29,10 @@ impl Op {
             | Self::GcAlloc { .. }
             | Self::RegionAlloc { .. }
             | Self::PlatformCall(_)
-            | Self::RegionPublish
-            | Self::RegionReset
-            | Self::PromoteManaged
+            | Self::RegionPublish { .. }
+            | Self::RegionReset { .. }
+            | Self::PromoteManaged { .. }
+            | Self::RegionTransfer { .. }
             | Self::MarkTicketBatch
             | Self::EdgeDeltaBatch
             | Self::ResolveSharedHandle
@@ -70,7 +71,7 @@ impl Op {
         match self {
             Self::StackCheck => Some(SafepointKind::StackCheck),
             Self::SafepointPoll { .. } => Some(SafepointKind::Poll),
-            Self::GcAlloc { .. } | Self::RegionAlloc { .. } | Self::PromoteManaged => {
+            Self::GcAlloc { .. } | Self::RegionAlloc { .. } | Self::PromoteManaged { .. } => {
                 Some(SafepointKind::Allocation)
             }
             Self::BarrierReserve(_) | Self::GcWriteBarrier { .. } => Some(SafepointKind::Barrier),
@@ -131,9 +132,10 @@ impl Op {
             | Self::GcWriteBarrierReserved { .. } => 8,
             Self::GcAlloc { .. }
             | Self::RegionAlloc { .. }
-            | Self::PromoteManaged
-            | Self::RegionPublish
-            | Self::RegionReset
+            | Self::PromoteManaged { .. }
+            | Self::RegionTransfer { .. }
+            | Self::RegionPublish { .. }
+            | Self::RegionReset { .. }
             | Self::MarkTicketBatch
             | Self::EdgeDeltaBatch
             | Self::ResolveSharedHandle

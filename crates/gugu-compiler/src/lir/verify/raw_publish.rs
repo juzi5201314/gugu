@@ -184,12 +184,16 @@ fn forbidden(op: &Op) -> Option<&'static str> {
         Op::ScopedViewBegin { .. } | Op::ScopedViewEnd { .. } => None,
         Op::SharedAccessBegin { .. } | Op::SharedAccessEnd { .. } => None,
         Op::CoverageCounter(_) => None,
-        Op::GcAlloc { .. } | Op::RegionAlloc { .. } | Op::PromoteManaged => Some("堆分配或提升"),
+        Op::GcAlloc { .. } | Op::RegionAlloc { .. } | Op::PromoteManaged { .. } => {
+            Some("堆分配或提升")
+        }
         Op::MarkTicketBatch | Op::EdgeDeltaBatch => Some("GC 工作消息"),
         Op::ResolveSharedHandle | Op::ForwardSharedHandle | Op::DecodeCompressedRef => {
             Some("stable handle 或压缩引用解析")
         }
-        Op::RegionPublish | Op::RegionReset => Some("region 发布或重置"),
+        Op::RegionPublish { .. } | Op::RegionReset { .. } | Op::RegionTransfer { .. } => {
+            Some("region 发布、重置或移交")
+        }
         Op::BarrierReserve(_) => Some("屏障预留"),
         Op::Memcpy { .. } | Op::Memmove { .. } | Op::Memset { .. } => Some("批量内存操作"),
         Op::Call(_) | Op::ForeignCall(_) => Some("调用或外部桥接"),

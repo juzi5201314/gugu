@@ -380,8 +380,10 @@ fn forbidden(op: &Op, mode: Mode) -> bool {
                         | Op::TrapIf
                         | Op::InlineAsm(_)
                         | Op::BarrierReserve(_)
-                        | Op::RegionPublish
-                        | Op::RegionReset
+                        | Op::RegionPublish { .. }
+                        | Op::RegionReset { .. }
+                        | Op::PromoteManaged { .. }
+                        | Op::RegionTransfer { .. }
                         | Op::ForwardSharedHandle
                         | Op::PlatformCall(_)
                 )
@@ -456,4 +458,322 @@ fn acyclic(body: &Body, members: &[bool]) -> Result<(), Diagnostic> {
     } else {
         Ok(())
     }
+}
+
+/// region 生命周期阶段；顺序即强度。
+const STAGE_NONE: u8 = 0;
+const STAGE_ALLOC: u8 = 1;
+const STAGE_PUBLISHED: u8 = 2;
+const STAGE_ENDED: u8 = 3;
+
+/// 一个 region 在某个程序点上的 must/may 阶段。
+///
+/// must 是全部前驱阶段的最小值，may 是最大值：前者的 `Alloc` 表示「每条路径都分配过」，
+/// 后者的 `Published` 表示「每条路径都恰好停在这一阶段」。两者相等时该阶段在所有路径上都
+/// 成立，这正是发布与结束动作要求的条件。
+#[derive(Clone, Copy, Eq, PartialEq)]
+struct Life {
+    must: u8,
+    must_export: u8,
+    may: u8,
+    may_export: u8,
+}
+
+impl Life {
+    const NONE: Self = Self {
+        must: STAGE_NONE,
+        must_export: 0,
+        may: STAGE_NONE,
+        may_export: 0,
+    };
+
+    fn join(&mut self, other: &Self) {
+        self.must = self.must.min(other.must);
+        self.must_export |= other.must_export;
+        self.may = self.may.max(other.may);
+        self.may_export |= other.may_export;
+    }
+}
+
+/// 一条 region 生命周期指令。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegionOp {
+    Alloc { region: u32 },
+    Publish { region: u32, export: u8 },
+    Reset { region: u32 },
+    Promote { region: u32 },
+    Transfer { region: u32 },
+}
+
+impl RegionOp {
+    fn region(self) -> u32 {
+        match self {
+            Self::Alloc { region }
+            | Self::Publish { region, .. }
+            | Self::Reset { region }
+            | Self::Promote { region }
+            | Self::Transfer { region } => region,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Alloc { .. } => "分配",
+            Self::Publish { .. } => "发布",
+            Self::Reset { .. } => "重置",
+            Self::Promote { .. } => "保留",
+            Self::Transfer { .. } => "移交",
+        }
+    }
+}
+
+fn region_op(op: &Op) -> Option<RegionOp> {
+    match op {
+        Op::RegionAlloc { region, .. } => Some(RegionOp::Alloc { region: *region }),
+        Op::RegionPublish { region, export } => Some(RegionOp::Publish {
+            region: *region,
+            export: *export,
+        }),
+        Op::RegionReset { region } => Some(RegionOp::Reset { region: *region }),
+        Op::PromoteManaged { region } => Some(RegionOp::Promote { region: *region }),
+        Op::RegionTransfer { region } => Some(RegionOp::Transfer { region: *region }),
+        _ => None,
+    }
+}
+
+/// 校验 region 生命周期：分配 → 发布 →（重置 | 保留 | 移交）。
+///
+/// must 分析保证「每条路径都先分配」「没有重复发布也没有结束后再分配」；may 分析保证结束动作
+/// 之前全部路径都恰好停在 `Published`。重置只允许发生在 export summary 闭合（`export == 0`）
+/// 的 region 上；summary 未闭合时只能保留或移交。
+pub(super) fn verify_lifecycle(body: &Body) -> Result<(), Diagnostic> {
+    let reachable = reachable(body);
+    let mut ops: Vec<Vec<RegionOp>> = vec![Vec::new(); body.blocks.len()];
+    let mut regions = 0_u32;
+    let mut allocated = Vec::new();
+    for (index, block) in body.blocks.iter().enumerate() {
+        if !reachable[index] {
+            continue;
+        }
+        for offset in block.instructions.start..block.instructions.end {
+            let instruction = &body.instructions[offset as usize];
+            let Some(op) = region_op(&instruction.op) else {
+                continue;
+            };
+            let region = op.region();
+            regions = regions.max(region + 1);
+            if allocated.len() < regions as usize {
+                allocated.resize(regions as usize, false);
+            }
+            if matches!(op, RegionOp::Alloc { .. }) {
+                allocated[region as usize] = true;
+            }
+            ops[index].push(op);
+        }
+    }
+    if regions == 0 {
+        return Ok(());
+    }
+    for block_ops in &ops {
+        for op in block_ops {
+            if !allocated
+                .get(op.region() as usize)
+                .copied()
+                .unwrap_or(false)
+            {
+                return Err(invalid(&format!(
+                    "LIR region {} 没有分配点（{} 中 {}）",
+                    op.region(),
+                    body.name,
+                    op.name()
+                )));
+            }
+        }
+    }
+    let count = regions as usize;
+    let mut state_in = vec![vec![Life::NONE; count]; body.blocks.len()];
+    let mut state_out = state_in.clone();
+    let entry = body.entry.index();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for (index, block_ops) in ops.iter().enumerate() {
+            if !reachable[index] {
+                continue;
+            }
+            let mut entry_state = vec![Life::NONE; count];
+            if index != entry {
+                let mut first = true;
+                for predecessor in body.predecessors[body.blocks[index].predecessors.start as usize
+                    ..body.blocks[index].predecessors.end as usize]
+                    .iter()
+                {
+                    let source = body.edges[predecessor.index()].from;
+                    if !reachable[source.index()] {
+                        continue;
+                    }
+                    let out = &state_out[source.index()];
+                    if first {
+                        entry_state.clone_from(out);
+                        first = false;
+                    } else {
+                        for (slot, other) in entry_state.iter_mut().zip(out) {
+                            slot.join(other);
+                        }
+                    }
+                }
+            }
+            let mut out = entry_state.clone();
+            for op in block_ops {
+                transition(&mut out, *op);
+            }
+            if entry_state != state_in[index] {
+                state_in[index] = entry_state;
+                changed = true;
+            }
+            if out != state_out[index] {
+                state_out[index] = out;
+                changed = true;
+            }
+        }
+    }
+    for (index, block_ops) in ops.iter().enumerate() {
+        if !reachable[index] {
+            continue;
+        }
+        let mut state = state_in[index].clone();
+        for op in block_ops {
+            check(&mut state, *op)?;
+        }
+    }
+    verify_channel_transfer(body, &reachable)
+}
+
+/// 无校验的阶段迁移；只用于求不动点，必须保持单调。
+fn transition(state: &mut [Life], op: RegionOp) {
+    let slot = &mut state[op.region() as usize];
+    match op {
+        RegionOp::Alloc { .. } => {
+            slot.must = STAGE_ALLOC;
+            slot.may = slot.may.max(STAGE_ALLOC);
+        }
+        RegionOp::Publish { export, .. } => {
+            slot.must = STAGE_PUBLISHED;
+            slot.must_export |= export;
+            slot.may = slot.may.max(STAGE_PUBLISHED);
+            slot.may_export |= export;
+        }
+        RegionOp::Reset { .. } | RegionOp::Promote { .. } | RegionOp::Transfer { .. } => {
+            slot.must = STAGE_ENDED;
+            slot.may = STAGE_ENDED;
+        }
+    }
+}
+
+/// 在收敛后的输入状态上校验一条 region 指令。
+fn check(state: &mut [Life], op: RegionOp) -> Result<(), Diagnostic> {
+    let slot = state[op.region() as usize];
+    match op {
+        RegionOp::Alloc { .. } => {
+            if slot.may == STAGE_PUBLISHED {
+                return Err(invalid("region 结束后才能重新分配"));
+            }
+        }
+        RegionOp::Publish { .. } => {
+            if slot.must != STAGE_ALLOC || slot.may != STAGE_ALLOC {
+                return Err(invalid("region 发布前必须在每条路径上恰好分配一次"));
+            }
+        }
+        RegionOp::Reset { .. } => {
+            if slot.must != STAGE_PUBLISHED || slot.may != STAGE_PUBLISHED {
+                return Err(invalid("region 重置前必须在每条路径上恰好发布一次"));
+            }
+            if slot.must_export | slot.may_export != 0 {
+                return Err(invalid("只有 export summary 闭合的 region 才能重置"));
+            }
+        }
+        RegionOp::Promote { .. } | RegionOp::Transfer { .. } => {
+            if slot.must != STAGE_PUBLISHED || slot.may != STAGE_PUBLISHED {
+                return Err(invalid("region 结束前必须在每条路径上恰好发布一次"));
+            }
+        }
+    }
+    let _ = op.name();
+    transition(state, op);
+    Ok(())
+}
+
+/// region 移交必须落在 channel send 边界上，且 send 携带 region 派生值时必须已经移交。
+///
+/// 两条规则一起使「普通 channel 不获得 transfer 语义」成为结构不变量：`RegionTransfer` 只能
+/// 紧邻一个真实的 `ChannelSend`/`SelectCommit` 出现，普通出口上出现移交就是错误；反过来，
+/// 能追溯到 region 分配点的 send 实参必须先由显式移交放行。
+fn verify_channel_transfer(body: &Body, reachable: &[bool]) -> Result<(), Diagnostic> {
+    for (index, block) in body.blocks.iter().enumerate() {
+        if !reachable[index] {
+            continue;
+        }
+        let sends: Vec<usize> = (block.instructions.start..block.instructions.end)
+            .filter(|offset| {
+                let op = &body.instructions[*offset as usize].op;
+                matches!(op, Op::Call(call) if sends_region(call))
+            })
+            .map(|offset| offset as usize)
+            .collect();
+        let mut transferred: Vec<u32> = Vec::new();
+        for offset in block.instructions.start..block.instructions.end {
+            let instruction = &body.instructions[offset as usize];
+            match &instruction.op {
+                Op::RegionTransfer { region } => {
+                    if !sends.iter().any(|send| *send > offset as usize) {
+                        return Err(invalid("region 移交只能发生在 channel send 边界"));
+                    }
+                    transferred.push(*region);
+                }
+                Op::Call(call) => {
+                    if !sends_region(call) {
+                        continue;
+                    }
+                    for argument in body.args(&instruction.arguments) {
+                        let Some(region) = super::operations::region_of(body, *argument) else {
+                            continue;
+                        };
+                        if !transferred.contains(&region) {
+                            return Err(invalid(
+                                "channel send 携带 region 派生值前必须先移交该 region",
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 该调用是否把 region 的所有权交给另一个 owner。
+fn sends_region(call: &crate::lir::body::Call) -> bool {
+    matches!(
+        call.target,
+        crate::lir::body::CallTarget::Runtime(
+            crate::lir::body::RuntimeCall::ChannelSend
+                | crate::lir::body::RuntimeCall::SelectCommit { .. }
+        )
+    )
+}
+
+/// 从入口可达的 block。
+fn reachable(body: &Body) -> Vec<bool> {
+    let mut seen = vec![false; body.blocks.len()];
+    let mut stack = vec![body.entry];
+    while let Some(block) = stack.pop() {
+        if std::mem::replace(&mut seen[block.index()], true) {
+            continue;
+        }
+        edges(body, &body.blocks[block.index()].terminator, |edge| {
+            stack.push(body.edges[edge.index()].to)
+        });
+    }
+    seen
 }

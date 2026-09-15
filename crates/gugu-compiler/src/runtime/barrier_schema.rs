@@ -650,6 +650,8 @@ pub(crate) enum MessageFamilyTag {
     Return,
     /// GC 工作消息：remembered-set card batch。
     CardMark,
+    /// managed 所有权消息：私有 region descriptor 的整体移交。
+    RegionTransfer,
 }
 
 impl MessageFamilyTag {
@@ -658,6 +660,7 @@ impl MessageFamilyTag {
         match self {
             Self::Return => 0,
             Self::CardMark => 1,
+            Self::RegionTransfer => 2,
         }
     }
 }

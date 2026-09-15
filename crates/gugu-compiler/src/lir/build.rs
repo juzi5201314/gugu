@@ -72,6 +72,28 @@ struct Builder<'a> {
     environment: Option<ValueId>,
     next_allocation: u32,
     fixed_edges: Vec<(EdgeId, ValueId, ValueId)>,
+    /// 正在 lowering 的 generic GIR 语句下标；placement 分配点表按它点查。
+    statement: u32,
+    /// 每个 block 的 region 结束动作；由 `EscapeAndPlacement` 的 region 计划静态决定。
+    region_ends: Vec<Vec<RegionEnd>>,
+}
+
+/// 一个边界 block 上的 region 结束动作。
+///
+/// 每条到达该边界的路径都先登记 export summary，再选择「重置」「保留（promote）」或「移交给
+/// 接收 owner」。三者互斥，`RegionExit.transfer` 由 placement 决定。
+#[derive(Clone, Copy, Debug)]
+struct RegionEnd {
+    region: u32,
+    export: u8,
+    kind: RegionEndKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RegionEndKind {
+    Reset,
+    Promote,
+    Transfer,
 }
 
 pub(crate) fn lower(
@@ -149,6 +171,8 @@ pub(crate) fn lower(
         environment: None,
         next_allocation: 0,
         fixed_edges: Vec::new(),
+        statement: 0,
+        region_ends: region_ends(world, concrete.generic_body, concrete.body.blocks.len()),
     };
     builder.prepare_storage()?;
     builder.prepare_blocks();
@@ -160,20 +184,86 @@ pub(crate) fn lower(
         builder.current = block;
         let input = &builder.gir.blocks[original];
         builder.source = input.source.clone();
-        for statement in builder
+        let start = builder.gir.blocks[original].statements.start;
+        for (offset, statement) in builder
             .gir
             .block_statements(gir::body::BlockId(id(original)))
+            .iter()
+            .enumerate()
         {
+            builder.statement = start + offset as u32;
             builder.source = statement.source.clone();
             builder.statement(&statement.kind)?;
         }
         builder.source = input.source.clone();
+        builder.emit_region_ends(original as u32)?;
         builder.terminator(&input.terminator)?;
     }
     builder.finish()
 }
 
+/// 按 block 汇总 placement 给出的 region 结束动作。
+///
+/// 动作来自静态计划而不是 lowering 期间的动态状态：boundary block 在 CFG 里可能早于它的支配
+/// 分配块被 lowering（回边），只有静态表才能保证每条路径上都发出恰好一次结束动作。
+fn region_ends(world: &gir::GirWorldV1, body: u32, blocks: usize) -> Vec<Vec<RegionEnd>> {
+    let mut ends = vec![Vec::new(); blocks];
+    for plan in world
+        .placement
+        .regions
+        .iter()
+        .filter(|plan| plan.body == body)
+    {
+        for exit in &plan.exits {
+            let Some(slot) = ends.get_mut(exit.block as usize) else {
+                continue;
+            };
+            let kind = if exit.transfer {
+                RegionEndKind::Transfer
+            } else if plan.export == 0 {
+                RegionEndKind::Reset
+            } else {
+                RegionEndKind::Promote
+            };
+            slot.push(RegionEnd {
+                region: plan.region,
+                export: plan.export,
+                kind,
+            });
+        }
+    }
+    for slot in ends.iter_mut() {
+        slot.sort_by_key(|end| end.region);
+    }
+    ends
+}
+
 impl Builder<'_> {
+    /// 在边界 block 的 terminator 之前发出 region 结束动作。
+    fn emit_region_ends(&mut self, block: u32) -> Result<(), Diagnostic> {
+        let Some(ends) = self.region_ends.get(block as usize).cloned() else {
+            return Ok(());
+        };
+        for end in ends {
+            let publish = self.emit(
+                Op::RegionPublish {
+                    region: end.region,
+                    export: end.export,
+                },
+                &[],
+                &[],
+            );
+            debug_assert!(publish.is_empty());
+            let op = match end.kind {
+                RegionEndKind::Reset => Op::RegionReset { region: end.region },
+                RegionEndKind::Promote => Op::PromoteManaged { region: end.region },
+                RegionEndKind::Transfer => Op::RegionTransfer { region: end.region },
+            };
+            self.emit(op, &[], &[]);
+        }
+        Ok(())
+    }
+
     fn layout(&self, ty: u32) -> &TypeLayout {
         &self.concrete.types[usize::try_from(ty).expect("类型编号适配宿主")]
     }

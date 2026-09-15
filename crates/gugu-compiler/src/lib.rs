@@ -36,10 +36,11 @@ pub use runtime::{
     BarrierDemand, BarrierRuntimeContract, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
     ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
     CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport, IntrinsicBoundary,
-    OwnerReturnHarness, PlatformRangeDemand, ResourceReleaseHarness, ResourceReleaseReport,
-    Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand,
-    SchedulerRuntimeContract, StackMapDemand, StackPolicy, SyncDemand, SyncLockHarness,
-    SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
+    OwnerReturnHarness, PlatformRangeDemand, RegionTransferHarness, RegionTransferReport,
+    ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource,
+    RuntimeSourceRole, SchedulerDemand, SchedulerRuntimeContract, StackMapDemand, StackPolicy,
+    SyncDemand, SyncLockHarness, SyncLockReport, SyncRuntimeContract, WaitDemand,
+    WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -415,6 +416,7 @@ impl Compiler {
             runtime_raw_sites: frontend.gir.placement.counts().runtime_raw,
             owners: 0,
             message_nodes: 0,
+            turn_region: lir.turn_region_demand(),
         };
         let rt0_demand = {
             let module = frontend.hir.module();
@@ -1063,6 +1065,18 @@ pub struct ImagePlan {
     pacing_pressure_enter_ratio: u32,
     pacing_pressure_clear_ratio: u32,
     pacing_credit_source_count: u32,
+    turn_region_sites: u32,
+    turn_region_publish_sites: u32,
+    turn_region_reset_sites: u32,
+    turn_region_promote_sites: u32,
+    turn_region_transfer_sites: u32,
+    turn_region_capacity_class_count: u32,
+    turn_region_object_limit: u32,
+    turn_region_max_bytes: u64,
+    turn_region_total_bytes: u64,
+    turn_region_contract_fingerprint: [u8; 32],
+    turn_region_demand: crate::runtime::TurnRegionDemand,
+    turn_region_runtime: crate::runtime::TurnRegionRuntimeContract,
     pacing_demand: crate::runtime::GcPacingDemand,
     pacing_runtime: crate::runtime::GcPacingRuntimeContract,
     resource_cell_header_bytes: u32,
@@ -1204,6 +1218,18 @@ impl ImagePlan {
             pacing_pressure_enter_ratio: plan.pacing_pressure_enter_ratio,
             pacing_pressure_clear_ratio: plan.pacing_pressure_clear_ratio,
             pacing_credit_source_count: plan.pacing_credit_source_count,
+            turn_region_sites: plan.turn_region_sites,
+            turn_region_publish_sites: plan.turn_region_publish_sites,
+            turn_region_reset_sites: plan.turn_region_reset_sites,
+            turn_region_promote_sites: plan.turn_region_promote_sites,
+            turn_region_transfer_sites: plan.turn_region_transfer_sites,
+            turn_region_capacity_class_count: plan.turn_region_capacity_class_count,
+            turn_region_object_limit: plan.turn_region_object_limit,
+            turn_region_max_bytes: plan.turn_region_max_bytes,
+            turn_region_total_bytes: plan.turn_region_total_bytes,
+            turn_region_contract_fingerprint: plan.turn_region_contract_fingerprint,
+            turn_region_demand: plan.turn_region_demand,
+            turn_region_runtime: plan.turn_region_runtime,
             pacing_demand: plan.pacing_demand,
             pacing_runtime: plan.pacing_runtime,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
@@ -1718,6 +1744,66 @@ impl ImagePlan {
     /// 返回 owner credit 来源目录长度。
     pub fn pacing_credit_source_count(&self) -> u32 {
         self.pacing_credit_source_count
+    }
+
+    /// 返回已建立计划的 TurnRegion 数量。
+    pub fn turn_region_sites(&self) -> u32 {
+        self.turn_region_sites
+    }
+
+    /// 返回 `RegionPublish` 站点数。
+    pub fn turn_region_publish_sites(&self) -> u32 {
+        self.turn_region_publish_sites
+    }
+
+    /// 返回 `RegionReset` 站点数。
+    pub fn turn_region_reset_sites(&self) -> u32 {
+        self.turn_region_reset_sites
+    }
+
+    /// 返回 `PromoteManaged` 站点数。
+    pub fn turn_region_promote_sites(&self) -> u32 {
+        self.turn_region_promote_sites
+    }
+
+    /// 返回 `RegionTransfer` 站点数。
+    pub fn turn_region_transfer_sites(&self) -> u32 {
+        self.turn_region_transfer_sites
+    }
+
+    /// 返回容量 class 阶梯长度。
+    pub fn turn_region_capacity_class_count(&self) -> u32 {
+        self.turn_region_capacity_class_count
+    }
+
+    /// 返回单 region 对象数上界。
+    pub fn turn_region_object_limit(&self) -> u32 {
+        self.turn_region_object_limit
+    }
+
+    /// 返回单个 region 的最大 payload 字节上界。
+    pub fn turn_region_max_bytes(&self) -> u64 {
+        self.turn_region_max_bytes
+    }
+
+    /// 返回全部 region 的 payload 字节总和。
+    pub fn turn_region_total_bytes(&self) -> u64 {
+        self.turn_region_total_bytes
+    }
+
+    /// 返回 TurnRegion 契约指纹。
+    pub fn turn_region_contract_fingerprint(&self) -> [u8; 32] {
+        self.turn_region_contract_fingerprint
+    }
+
+    /// 返回 TurnRegion 需求视图。
+    pub fn turn_region_demand(&self) -> crate::runtime::TurnRegionDemand {
+        self.turn_region_demand
+    }
+
+    /// 返回 TurnRegion runtime 契约。
+    pub fn turn_region_runtime(&self) -> &crate::runtime::TurnRegionRuntimeContract {
+        &self.turn_region_runtime
     }
     /// 返回 pacing 需求视图。
     pub fn pacing_demand(&self) -> crate::runtime::GcPacingDemand {
@@ -2321,6 +2407,79 @@ mod tests {
             bigger_plan.gc_metadata_contract_fingerprint(),
             plan.gc_metadata_contract_fingerprint(),
             "GC metadata 指纹必须随类型表变化"
+        );
+    }
+
+    #[test]
+    fn image_plan_reports_turn_region_contract() {
+        let reset_source = "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
+        let transfer_source = "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n }";
+        let reset = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            reset_source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(reset.is_success(), "{:?}", reset.diagnostics().items());
+        let plan = reset.image_plan().expect("镜像计划");
+        // 闭包环境是唯一的 region 站点：建立计划、发布一次、重置一次，没有移交。
+        assert!(plan.turn_region_sites() >= 1);
+        assert!(plan.turn_region_publish_sites() >= 1);
+        assert!(plan.turn_region_reset_sites() >= 1);
+        assert_eq!(plan.turn_region_transfer_sites(), 0);
+        assert_eq!(plan.turn_region_promote_sites(), 0);
+        assert_eq!(
+            plan.turn_region_capacity_class_count(),
+            crate::runtime::region_schema::REGION_CAPACITY_CLASSES.len() as u32
+        );
+        assert_eq!(
+            plan.turn_region_object_limit(),
+            crate::runtime::region_schema::REGION_OBJECT_LIMIT
+        );
+        assert!(plan.turn_region_max_bytes() > 0);
+        assert_eq!(
+            plan.turn_region_total_bytes(),
+            plan.turn_region_demand().total_bytes
+        );
+        assert_ne!(plan.turn_region_contract_fingerprint(), [0_u8; 32]);
+        assert_eq!(
+            plan.turn_region_runtime().capacity_class_count(),
+            plan.turn_region_capacity_class_count()
+        );
+        assert_eq!(
+            plan.turn_region_runtime().transfer_field_count(),
+            13,
+            "RegionTransfer 字段目录必须进入契约"
+        );
+        let dump = reset.dump_runtime().expect("runtime dump");
+        assert!(dump.contains("region schema=1 object-limit=64 max-active=64 transfer-lease=1"));
+        assert!(dump.contains("region-states private,publishing,reset-pending,reset,local-promote,region-transfer,received"));
+        assert!(dump.contains("region-transfer-fields"));
+        assert!(dump.contains("region-demand"));
+        assert!(dump.contains("region-fingerprint"));
+
+        // sender 之后不再使用闭包时整区移交：transfer 需求来自优化后的 LIR。
+        let transfer = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            transfer_source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            transfer.is_success(),
+            "{:?}",
+            transfer.diagnostics().items()
+        );
+        let plan = transfer.image_plan().expect("镜像计划");
+        assert_eq!(plan.turn_region_transfer_sites(), 1);
+        assert_eq!(plan.turn_region_reset_sites(), 0);
+        assert_eq!(plan.turn_region_publish_sites(), 1);
+        assert_eq!(plan.turn_region_sites(), 1);
+        assert_ne!(
+            plan.turn_region_contract_fingerprint(),
+            reset
+                .image_plan()
+                .expect("镜像计划")
+                .turn_region_contract_fingerprint(),
+            "需求变化必须改变 TurnRegion 契约指纹"
         );
     }
 

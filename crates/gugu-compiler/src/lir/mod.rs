@@ -106,6 +106,56 @@ impl Validated {
         }
         demand
     }
+    /// TurnRegion 需求：来自优化后 LIR 的 region 指令，而不是构造期的 placement 计划。
+    ///
+    /// region 编号只在单个 body 内稠密，因此 region 数量按 `(body, region)` 去重；容量 class
+    /// 由 `RegionAlloc` 的字节实参落在哪一档阶梯决定，`max_region_bytes` 是单个 region 的
+    /// payload 上界。
+    pub(crate) fn turn_region_demand(&self) -> crate::runtime::region_schema::TurnRegionDemand {
+        use crate::runtime::region_schema::{REGION_CAPACITY_CLASSES, TurnRegionDemand};
+        let mut demand = TurnRegionDemand::default();
+        let mut classes = 0_u32;
+        for world_body in &self.world.bodies {
+            let mut per_region: Vec<u64> = Vec::new();
+            for instruction in &world_body.instructions {
+                match &instruction.op {
+                    body::Op::RegionAlloc { region, .. } => {
+                        demand.allocations += 1;
+                        let bytes = world_body
+                            .args(&instruction.arguments)
+                            .first()
+                            .map(|value| const_bytes(world_body, *value))
+                            .unwrap_or(0);
+                        if let Some(index) = REGION_CAPACITY_CLASSES
+                            .iter()
+                            .position(|class| u64::from(*class) >= bytes)
+                        {
+                            classes |= 1 << index;
+                        }
+                        let region = *region as usize;
+                        if per_region.len() <= region {
+                            per_region.resize(region + 1, 0);
+                        }
+                        per_region[region] += bytes;
+                    }
+                    body::Op::RegionPublish { .. } => demand.publish_sites += 1,
+                    body::Op::RegionReset { .. } => demand.reset_sites += 1,
+                    body::Op::PromoteManaged { .. } => demand.promote_sites += 1,
+                    body::Op::RegionTransfer { .. } => demand.transfer_sites += 1,
+                    _ => {}
+                }
+            }
+            per_region.retain(|bytes| *bytes != 0);
+            demand.regions += u32::try_from(per_region.len()).expect("region数量适配u32");
+            for bytes in per_region {
+                demand.total_bytes += bytes;
+                demand.max_region_bytes = demand.max_region_bytes.max(bytes);
+            }
+        }
+        demand.capacity_classes = classes.count_ones();
+        demand
+    }
+
     /// 调度需求：创建点与挂起点复用协程口径，yield 点统计全 body 的 `RuntimeCall::Yield`。
     pub(crate) fn scheduler_demand(&self) -> crate::runtime::SchedulerDemand {
         let coroutine = self.coroutine_demand();
@@ -234,7 +284,7 @@ impl Validated {
                 match instruction.op {
                     body::Op::GcAlloc { .. }
                     | body::Op::RegionAlloc { .. }
-                    | body::Op::PromoteManaged => demand.alloc_sites += 1,
+                    | body::Op::PromoteManaged { .. } => demand.alloc_sites += 1,
                     body::Op::GcWriteBarrier { .. } | body::Op::GcWriteBarrierReserved { .. } => {
                         demand.barrier_sites += 1;
                     }
@@ -567,3 +617,17 @@ pub(crate) fn invalid_resource(message: &str) -> Diagnostic {
 
 #[cfg(test)]
 mod tests;
+
+/// 返回一个值对应的整数常量；不是常量时返回 0。
+fn const_bytes(body: &body::Body, value: body::ValueId) -> u64 {
+    let definition = &body.values[value.index()].definition;
+    match definition {
+        body::Definition::Instruction { instruction, .. } => {
+            match &body.instructions[instruction.index()].op {
+                body::Op::IConst(bytes) => *bytes,
+                _ => 0,
+            }
+        }
+        _ => 0,
+    }
+}

@@ -174,11 +174,20 @@ impl RawWorld {
                 buffer_keys = buffer_keys.saturating_add(u64::from(record.buffer().len()));
             }
         }
+        // 在途 region transfer 与 owner pending return 属于同一个 credit 来源：两者都是
+        // 「已经离开生产者、还没被任何 owner 消费」的字节，因此在这里合并而不是新开来源。
+        let region_transfers = self
+            .regions
+            .as_ref()
+            .map_or(0, super::super::region::RegionPlane::pending_bytes);
         CreditSnapshot {
             barrier_buffer_keys: buffer_keys,
             card_mark_batches: self.barrier.pending_batch_bytes(),
             edge_deltas: u64::try_from(self.barrier.edges().pending()).expect("delta 数适配 u64"),
-            pending_return_bytes: self.committed_classes().pending_return_bytes,
+            pending_return_bytes: self
+                .committed_classes()
+                .pending_return_bytes
+                .saturating_add(region_transfers),
             staging_bytes: staging.bytes(),
         }
     }

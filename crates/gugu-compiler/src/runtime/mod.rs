@@ -45,6 +45,8 @@ mod pacing;
 )]
 pub(crate) mod pacing_schema;
 mod platform_schema;
+pub(crate) mod region;
+pub(crate) mod region_schema;
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
 mod scheduler_schema;
@@ -81,6 +83,7 @@ pub use coroutine_schema::{
 };
 pub use gc_metadata_schema::GcMetadataDemand;
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
+pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};
@@ -142,8 +145,8 @@ mod tests;
 
 pub use harness::{
     CardMarkHarness, CardMarkReport, ChannelWaitHarness, ChannelWaitReport, HarnessReport,
-    OwnerReturnHarness, ResourceReleaseHarness, ResourceReleaseReport, SyncLockHarness,
-    SyncLockReport,
+    OwnerReturnHarness, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
+    ResourceReleaseReport, SyncLockHarness, SyncLockReport,
 };
 
 #[cfg(test)]

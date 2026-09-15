@@ -6,7 +6,7 @@ use crate::frontend::gir::placement::PlacementKind;
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, ops::Range};
 
-pub(crate) const REVISION: u32 = 4;
+pub(crate) const REVISION: u32 = 5;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -440,15 +440,34 @@ pub(crate) enum Op {
         align: u32,
         placement: PlacementKind,
     },
+    /// 从当前 body 的私有 region 编号做一次 bump 分配。
+    ///
+    /// `region` 是 body 内按首次出现顺序稠密编号的 region；它与 `EscapeAndPlacement` 的
+    /// `RegionPlan` 一一对应。
     RegionAlloc {
+        region: u32,
         descriptor: [u8; 32],
         align: u32,
     },
     /// 平台范围原语；没有机器编码，由 backend 在 runtime 契约中登记。
     PlatformCall(crate::runtime::PlatformOp),
-    RegionPublish,
-    RegionReset,
-    PromoteManaged,
+    /// 结束 region 的私有阶段并登记 export summary；`export` 为 0 表示 summary 闭合。
+    RegionPublish {
+        region: u32,
+        export: u8,
+    },
+    /// 整区重置；只能跟在同一条路径上 `export == 0` 的 `RegionPublish` 之后。
+    RegionReset {
+        region: u32,
+    },
+    /// 无法证明私有性时整区保留（LocalPromote）：地址保持稳定，且不再 reset。
+    PromoteManaged {
+        region: u32,
+    },
+    /// 把一个私有 region 的所有权整体移交给 channel send 的接收 owner。
+    RegionTransfer {
+        region: u32,
+    },
     MarkTicketBatch,
     EdgeDeltaBatch,
     ResolveSharedHandle,

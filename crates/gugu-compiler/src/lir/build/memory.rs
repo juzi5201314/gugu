@@ -293,6 +293,7 @@ impl Builder<'_> {
         ty: u32,
         bytes: u64,
         placement: PlacementKind,
+        region: Option<u32>,
     ) -> Result<ValueId, Diagnostic> {
         // 资源值只能由 Resource placement 管理，不能进入任何 managed heap/region。
         if self.layout(ty).passing.has_resource() != (placement == PlacementKind::Resource) {
@@ -307,17 +308,35 @@ impl Builder<'_> {
                 .align,
         )
         .map_err(|_| invalid("分配对齐越界"))?;
+        self.allocate_descriptor(descriptor, align, bytes, placement, region)
+    }
+
+    /// 按稳定 descriptor 与对齐做一次 managed 分配。
+    ///
+    /// 闭包环境没有对应的语言类型，只能用它自己的稳定 descriptor；`region` 为 `Some` 时走
+    /// `RegionAlloc`，否则按 placement 走 `GcAlloc`。
+    pub(super) fn allocate_descriptor(
+        &mut self,
+        descriptor: [u8; 32],
+        align: u32,
+        bytes: u64,
+        placement: PlacementKind,
+        region: Option<u32>,
+    ) -> Result<ValueId, Diagnostic> {
         let bytes_value = self.constant(bytes, Type::I64);
         let allocation = self.next_allocation;
         self.next_allocation += 1;
-        let op = if placement == PlacementKind::TurnRegion {
-            Op::RegionAlloc { descriptor, align }
-        } else {
-            Op::GcAlloc {
+        let op = match region {
+            Some(region) if placement == PlacementKind::TurnRegion => Op::RegionAlloc {
+                region,
+                descriptor,
+                align,
+            },
+            _ => Op::GcAlloc {
                 descriptor,
                 align,
                 placement,
-            }
+            },
         };
         let pointer = self.emit_one(
             op,

@@ -841,3 +841,162 @@ fn gir_pipeline_runs_every_registered_pass() {
     );
     assert_eq!(output.gir_stats.passes, GIR_PASS_ORDER.len() as u32);
 }
+
+/// 带捕获环境的闭包在 placement 上形成 region 计划，并记录到分配点的 region 编号。
+#[test]
+fn capturing_closure_forms_region_plan() {
+    let (hir, gir) = compile_gir(
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }",
+    );
+    let body = named_body(&hir, &gir, "main");
+    let index = body_index(&gir, body);
+    let plan = gir
+        .placement
+        .regions
+        .iter()
+        .find(|plan| plan.body == index && plan.allocations > 0)
+        .expect("闭包环境必须形成 region 计划");
+    assert_eq!(plan.export, 0, "无外部事实时 export summary 必须闭合");
+    assert!(!plan.exits.is_empty(), "region 计划必须声明出口");
+    assert!(plan.exits.iter().all(|exit| !exit.transfer));
+    let site = gir
+        .placement
+        .allocs
+        .iter()
+        .find(|alloc| alloc.body == index && alloc.region == Some(plan.region))
+        .expect("分配点必须带 region 编号");
+    assert_eq!(site.kind, super::placement::PlacementKind::TurnRegion);
+}
+
+/// sender 之后不再使用闭包时，channel send 出口整体移交所有权。
+#[test]
+fn channel_send_marks_transfer_exit() {
+    let (hir, gir) = compile_gir(
+        "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n }",
+    );
+    let body = named_body(&hir, &gir, "main");
+    let index = body_index(&gir, body);
+    let plan = gir
+        .placement
+        .regions
+        .iter()
+        .find(|plan| plan.body == index)
+        .expect("移交必须留下 region 计划");
+    assert_eq!(plan.exits.len(), 1);
+    assert!(plan.exits[0].transfer, "send 出口必须标记移交");
+    let site = gir
+        .placement
+        .allocs
+        .iter()
+        .find(|alloc| alloc.body == index && alloc.region == Some(plan.region))
+        .expect("分配点必须带 region 编号");
+    assert_ne!(
+        site.export & super::placement::ExportFlags::TRANSFER,
+        0,
+        "移交语义必须记录在分配点的 export summary 上"
+    );
+}
+
+/// sender 仍在使用闭包时该段不得选 `TurnRegion`：语义要求退回 stable storage。
+#[test]
+fn live_sender_rejects_region_plan() {
+    let (hir, gir) = compile_gir(
+        "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n _ = closure()\n }",
+    );
+    let body = named_body(&hir, &gir, "main");
+    let index = body_index(&gir, body);
+    assert!(
+        gir.placement.regions.iter().all(|plan| plan.body != index),
+        "跨 send 仍存活的闭包不得进入 region"
+    );
+    let site = gir
+        .placement
+        .allocs
+        .iter()
+        .find(|alloc| {
+            alloc.body == index
+                && alloc.statement
+                    == gir
+                        .placement
+                        .allocs
+                        .iter()
+                        .filter(|alloc| alloc.body == index)
+                        .map(|alloc| alloc.statement)
+                        .max()
+                        .expect("分配点")
+        })
+        .expect("环境分配点");
+    assert_eq!(site.kind, super::placement::PlacementKind::SharedHeap);
+    assert_eq!(site.region, None);
+}
+
+/// 普通 channel 不产生 managed 分配点，也不获得 transfer 语义。
+#[test]
+fn channel_allocation_is_runtime_raw_without_region() {
+    let (hir, gir) = compile_gir(
+        "fn main() {\n let channel = chan[int](1)\n channel.send(1)\n let received = channel.recv()\n _ = received\n }",
+    );
+    let body = named_body(&hir, &gir, "main");
+    let index = body_index(&gir, body);
+    assert!(gir.placement.regions.iter().all(|plan| plan.body != index));
+    // channel 句柄的存储由 runtime raw 平面持有：它不产生分配点记录，所以既不可能是
+    // region 候选，也不可能带 transfer 语义。
+    let mut channel_sites = 0;
+    for (statement, kind) in body.statements.iter().enumerate() {
+        if let StatementKind::Assign(
+            _,
+            Rvalue::Intrinsic {
+                op: IntrinsicOp::ChanNew,
+                ..
+            },
+        ) = &kind.kind
+        {
+            channel_sites += 1;
+            let statement = statement as u32;
+            assert!(
+                gir.placement
+                    .allocs
+                    .iter()
+                    .all(|alloc| alloc.body != index || alloc.statement != statement),
+                "channel 建立点不得产生 managed 分配点"
+            );
+        }
+    }
+    assert!(channel_sites >= 1, "样例必须包含 channel 建立点");
+    assert_eq!(gir.placement.counts().turn_region, 0);
+}
+
+/// 被内层闭包捕获的局部带 ALIAS|ESCAPE，内层环境仍可独占 region。
+#[test]
+fn captured_local_is_aliased_while_inner_environment_stays_private() {
+    let (hir, gir) = compile_gir(
+        "fn main() {\n let value = 1\n let outer = fn() int { return value }\n let inner = fn() int { return outer() }\n _ = inner()\n }",
+    );
+    let body = named_body(&hir, &gir, "main");
+    let index = body_index(&gir, body);
+    let captured = body
+        .locals
+        .iter()
+        .enumerate()
+        .find(|(_, local)| local.hir_local.is_some() && !local.address_taken)
+        .map(|(index, _)| index as u32);
+    if let Some(captured) = captured {
+        let record = super::placement::record_of(&gir.placement, index, LocalId(captured));
+        if let Some(record) = record {
+            assert_ne!(
+                record.export
+                    & (super::placement::ExportFlags::ALIAS
+                        | super::placement::ExportFlags::ESCAPE),
+                0,
+                "被捕获的局部必须标记 ALIAS|ESCAPE"
+            );
+        }
+    }
+    assert!(
+        gir.placement
+            .allocs
+            .iter()
+            .any(|alloc| alloc.body == index && alloc.region.is_some()),
+        "内层环境仍必须独占一个 region"
+    );
+}

@@ -3,6 +3,7 @@ pub(crate) mod body;
 mod build;
 pub(crate) mod concrete;
 mod dump;
+mod liveness;
 pub(crate) mod pass;
 pub(crate) mod passing;
 pub(crate) mod placement;

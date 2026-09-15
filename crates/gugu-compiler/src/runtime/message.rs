@@ -296,6 +296,47 @@ pub(crate) struct CardMarkBatch {
     pub(crate) integrity: IntegrityTag,
 }
 
+/// 一条 `RegionTransfer` 消息：把私有 region 的整体所有权移交给目标 owner。
+///
+/// 与 `CardMarkBatch` 一样，消息只携带逻辑身份（region 序号、generation、type summary 编号、
+/// bytes、export summary 与 cycle epoch），不携带任何地址；目标 owner 通过自己的 registry
+/// 采纳这条 region，物理地址仍然只在 owner-local 状态里出现。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RegionTransferBatch {
+    /// raw intrusive link；只存在于 non-moving message storage。
+    pub(crate) next: Option<u32>,
+    /// 接收 region 的 owner 稳定身份。
+    pub(crate) target: OwnerToken,
+    /// 发出 region 的 owner 身份；接收方据此回执并移交账本。
+    pub(crate) source: OwnerId,
+    /// 被移交的 region 序号；只在发送者 registry 内稠密。
+    pub(crate) region: u32,
+    /// 发送者 region 的 generation；回收后旧消息必须被拒绝。
+    pub(crate) region_generation: u32,
+    /// region 内对象的 stable type summary 编号。
+    pub(crate) type_summary: SlabDescriptorId,
+    /// region 的 payload 字节数。
+    pub(crate) bytes: u32,
+    /// 容量 class 下标；接收方按同一档阶梯建立 descriptor。
+    pub(crate) capacity_class: u32,
+    /// 编译器声明的 export summary 位。
+    pub(crate) export_state: u8,
+    /// 发送时 runtime 观察到的 export summary 位。
+    pub(crate) observed: u8,
+    /// 产生这次移交的 transfer epoch。
+    pub(crate) cycle_epoch: u64,
+    pub(crate) state: MessageState,
+    /// region 身份、owner 与 cycle epoch 的校验信息。
+    pub(crate) integrity: IntegrityTag,
+}
+
+impl RegionTransferBatch {
+    /// export summary 的并集；门禁检查使用它。
+    pub(crate) const fn export(&self) -> u8 {
+        self.export_state | self.observed
+    }
+}
+
 /// 消息 integrity 校验信息。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IntegrityTag {
@@ -353,6 +394,32 @@ impl IntegrityTag {
             digest.as_bytes()[1],
             digest.as_bytes()[2],
             digest.as_bytes()[3],
+        ])
+    }
+
+    /// 用 per-domain secret 与 `RegionTransfer` 的全部身份字段计算校验值。
+    pub(crate) fn compute_region_transfer(secret: &[u8; 32], batch: &RegionTransferBatch) -> u32 {
+        let mut hasher = blake3::Hasher::new_derive_key("gugu-region-transfer-integrity-v1");
+        hasher.update(secret);
+        hasher.update(&batch.target.domain.raw().to_le_bytes());
+        hasher.update(&batch.target.owner_id.raw().to_le_bytes());
+        hasher.update(&batch.target.generation.raw().to_le_bytes());
+        hasher.update(&batch.target.route_key.raw().to_le_bytes());
+        hasher.update(&MessageFamilyTag::RegionTransfer.raw().to_le_bytes());
+        hasher.update(&batch.source.raw().to_le_bytes());
+        hasher.update(&batch.region.to_le_bytes());
+        hasher.update(&batch.region_generation.to_le_bytes());
+        hasher.update(&batch.capacity_class.to_le_bytes());
+        hasher.update(&batch.type_summary.raw().to_le_bytes());
+        hasher.update(&batch.bytes.to_le_bytes());
+        hasher.update(&[batch.export_state, batch.observed]);
+        hasher.update(&batch.cycle_epoch.to_le_bytes());
+        let digest = hasher.finalize();
+        u32::from_le_bytes([
+            digest.as_bytes()[4],
+            digest.as_bytes()[5],
+            digest.as_bytes()[6],
+            digest.as_bytes()[7],
         ])
     }
 
@@ -501,6 +568,87 @@ impl ReturnNode {
         self.integrity
             .store(u64::from(integrity), Ordering::Relaxed);
     }
+    fn store_region_transfer(&self, batch: &RegionTransferBatch, integrity: u32) {
+        self.owner_id
+            .store(batch.target.owner_id.raw(), Ordering::Relaxed);
+        self.generation
+            .store(batch.target.generation.raw(), Ordering::Relaxed);
+        self.route_key
+            .store(batch.target.route_key.raw(), Ordering::Relaxed);
+        self.descriptor_unit.store(
+            u64::from(batch.type_summary.raw()) | (u64::from(batch.region) << 32),
+            Ordering::Relaxed,
+        );
+        self.bytes_epoch.store(
+            u64::from(batch.bytes) | ((batch.cycle_epoch & 0xFFFF_FFFF) << 32),
+            Ordering::Relaxed,
+        );
+        self.state_kind.store(
+            batch.state.code()
+                | (u64::from(MessageFamilyTag::RegionTransfer.raw()) << 8)
+                | (u64::from(batch.target.domain.raw()) << 16)
+                | (u64::from(MessageFamilyTag::RegionTransfer.raw()) << 24),
+            Ordering::Relaxed,
+        );
+        self.payload_low.store(
+            u64::from(batch.region_generation) | ((batch.cycle_epoch >> 32) << 32),
+            Ordering::Relaxed,
+        );
+        // export summary 的两个来源、容量 class 与来源 owner 共用一个车道：位 0..8 是编译器
+        // 声明，8..16 是 runtime 观察结果，16..24 是容量 class 下标，24..56 是来源 owner id；
+        // 这些都是稳定的小整数身份，不需要独立车道。
+        self.payload_high.store(
+            u64::from(batch.export_state)
+                | (u64::from(batch.observed) << 8)
+                | (u64::from(batch.capacity_class) << 16)
+                | (u64::from(batch.source.raw()) << 24),
+            Ordering::Relaxed,
+        );
+        self.integrity
+            .store(u64::from(integrity), Ordering::Relaxed);
+    }
+
+    /// 从车道重建 region transfer；只有该消息族才会调用。
+    fn load_region_transfer(&self) -> RegionTransferBatch {
+        let owner_id = self.owner_id.load(Ordering::Relaxed);
+        let target_generation = self.generation.load(Ordering::Relaxed);
+        let route_key = self.route_key.load(Ordering::Relaxed);
+        let descriptor_unit = self.descriptor_unit.load(Ordering::Relaxed);
+        let bytes_epoch = self.bytes_epoch.load(Ordering::Relaxed);
+        let state_kind = self.state_kind.load(Ordering::Relaxed);
+        let payload_low = self.payload_low.load(Ordering::Relaxed);
+        let payload_high = self.payload_high.load(Ordering::Relaxed);
+        let integrity = self.integrity.load(Ordering::Relaxed);
+        let domain = MemoryDomainId::from_raw(((state_kind >> 16) & 0xFF) as u8)
+            .unwrap_or(MemoryDomainId::RUNTIME_RAW);
+        RegionTransferBatch {
+            next: None,
+            target: OwnerToken {
+                domain,
+                owner_id: OwnerId::from_raw(owner_id),
+                generation: OwnerGeneration::from_raw(target_generation),
+                route_key: RouteKey::from_raw(route_key),
+            },
+            source: OwnerId::from_raw((payload_high >> 24) & 0xFFFF_FFFF),
+            region: (descriptor_unit >> 32) as u32,
+            region_generation: (payload_low & 0xFFFF_FFFF) as u32,
+            type_summary: SlabDescriptorId::from_raw((descriptor_unit & 0xFFFF_FFFF) as u32),
+            bytes: (bytes_epoch & 0xFFFF_FFFF) as u32,
+            capacity_class: ((payload_high >> 16) & 0xFF) as u32,
+            export_state: (payload_high & 0xFF) as u8,
+            observed: ((payload_high >> 8) & 0xFF) as u8,
+            cycle_epoch: ((payload_low >> 32) << 32) | ((bytes_epoch >> 32) & 0xFFFF_FFFF),
+            state: MessageState::from_code((state_kind & 0xFF) as u8),
+            integrity: IntegrityTag {
+                generation: SlabGeneration::from_raw(payload_low & 0xFFFF_FFFF),
+                class: RuntimeSizeClassId::from_raw(0),
+                owner_id: OwnerId::from_raw(owner_id),
+                route_key: RouteKey::from_raw(route_key),
+                checksum: integrity as u32,
+            },
+        }
+    }
+
     fn load(&self, class: RuntimeSizeClassId, generation: SlabGeneration) -> ReturnMessage {
         let owner_id = self.owner_id.load(Ordering::Relaxed);
         let target_generation = self.generation.load(Ordering::Relaxed);
@@ -618,6 +766,7 @@ impl ReturnNode {
     fn family(&self) -> MessageFamilyTag {
         match (self.state_kind.load(Ordering::Acquire) >> 24) & 0xFF {
             1 => MessageFamilyTag::CardMark,
+            2 => MessageFamilyTag::RegionTransfer,
             _ => MessageFamilyTag::Return,
         }
     }
@@ -770,6 +919,23 @@ impl ReturnNodePool {
     /// 需要调用方提供载入键；integrity 仍按 batch 自身的身份字段校验。
     pub(crate) fn load_card_mark(&self, id: ReturnNodeId) -> CardMarkBatch {
         self.nodes[id.index()].load_card_mark()
+    }
+
+    /// 写入一个 node 的 region transfer payload。
+    pub(crate) fn store_region_transfer(
+        &self,
+        id: ReturnNodeId,
+        batch: &RegionTransferBatch,
+        integrity: u32,
+    ) {
+        self.nodes[id.index()].store_region_transfer(batch, integrity);
+    }
+
+    /// 读取一个 node 的 region transfer payload。
+    ///
+    /// 与 card 族一样，载入不需要 class/generation 键：integrity 按 batch 自身的身份字段校验。
+    pub(crate) fn load_region_transfer(&self, id: ReturnNodeId) -> RegionTransferBatch {
+        self.nodes[id.index()].load_region_transfer()
     }
     /// 按给定 class 与 generation 读取一个 return payload。
     pub(crate) fn load(
@@ -1299,6 +1465,40 @@ pub(crate) fn stage_card_mark(
         pool.link(last, Some(node));
     }
     staging.stage(node, batch.target, batch.bytes, shard)?;
+    if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
+        && let Some(inbox) = inbox
+    {
+        outcome = Some(flush_staging(pool, inbox, staging, trigger)?);
+    }
+    Ok(outcome)
+}
+
+/// 把一个 region transfer 消息写入 staging chain 并发布到目标 owner 的 inbox。
+///
+/// 复用 return/card 的 producer 路径：node 从同一个 pool 取，chain 由同一套 staging 与
+/// flush 触发器管理，因此 region 移交不会绕过 producer gate 与 queue-page grace。
+pub(crate) fn stage_region_transfer(
+    pool: &ReturnNodePool,
+    inbox: Option<&OwnerInbox>,
+    staging: &mut ProducerStaging,
+    batch: &RegionTransferBatch,
+    shard: ShardIndex,
+    forced: Option<FlushTrigger>,
+) -> Result<Option<PublishOutcome>, RawInvariant> {
+    if staging
+        .target()
+        .is_some_and(|target| target != batch.target)
+    {
+        return Err(RawInvariant::new("staging 目标改变前必须先发布旧 chain"));
+    }
+    let node = pool.allocate()?;
+    pool.store_region_transfer(node, batch, batch.integrity.checksum);
+    pool.link(node, None);
+    if let Some(last) = staging.last() {
+        pool.link(last, Some(node));
+    }
+    staging.stage(node, batch.target, batch.bytes, shard)?;
+    let mut outcome = None;
     if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
         && let Some(inbox) = inbox
     {

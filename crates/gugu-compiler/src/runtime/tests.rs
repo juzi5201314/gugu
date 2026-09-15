@@ -24,6 +24,7 @@ use super::owner::AllocationLevel;
 use super::pacing_schema::GcPacingDemand;
 use super::platform::{FakePlatform, PlatformProfile};
 use super::provider::{ProviderError, RangeProvider, RangeState};
+use super::region_schema::TurnRegionDemand;
 use super::resource::{
     self, CloseOutcome, LeaseOutcome, ReleaseDescriptor, ReleaseFlags, ReleaseRegistry,
     ResourceCell, ResourceCellTable,
@@ -654,6 +655,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             runtime_raw_sites: 2,
             owners: 2,
             message_nodes: 0,
+            turn_region: TurnRegionDemand::default(),
         },
         RawResourceDemand::default(),
         Rt0Demand::default(),
@@ -733,6 +735,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         runtime_raw_sites: 1,
         owners: 1,
         message_nodes: 0,
+        turn_region: TurnRegionDemand::default(),
     };
     let scheduler = SchedulerDemand {
         spawn_sites: 1,

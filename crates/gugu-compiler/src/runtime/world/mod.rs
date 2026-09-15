@@ -8,6 +8,7 @@ pub(crate) mod barrier_impl;
 pub(crate) mod coroutine_impl;
 mod extent_impl;
 pub(crate) mod pacing_impl;
+mod region_impl;
 mod resource_impl;
 pub(crate) mod sync_impl;
 pub(crate) mod termination_impl;
@@ -32,6 +33,10 @@ mod barrier_tests;
 #[cfg(test)]
 #[path = "../pacing_tests.rs"]
 mod pacing_tests;
+#[cfg(test)]
+#[path = "region_tests.rs"]
+mod region_tests;
+
 #[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
 
@@ -134,6 +139,8 @@ pub(crate) struct RawWorld {
     edge_delta_total: u64,
     /// GC debt、owner credit、pacing 与 pressure episode 的执行平面。
     pacing: super::pacing::PacingPlane,
+    /// TurnRegion 私有区与 `RegionTransfer` 投递平面；按已构建的契约配置。
+    regions: Option<super::region::RegionPlane>,
 }
 
 impl RawWorld {
@@ -205,6 +212,7 @@ impl RawWorld {
             barrier: super::barrier::BarrierPlane::new(0),
             edge_delta_total: 0,
             pacing: super::pacing::PacingPlane::default(),
+            regions: None,
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。
@@ -581,6 +589,19 @@ impl RawWorld {
         for node in snapshot.nodes() {
             let message_id = *node;
             // 消息族决定车道解释：card batch 只带 arena/card 序号，不进入 return 路径。
+            if self.pool.family_of(message_id) == MessageFamilyTag::RegionTransfer {
+                let batch = self.pool.load_region_transfer(message_id);
+                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
+                {
+                    return Err(RawInvariant::new(
+                        "region transfer 投递到非目标 owner 的 inbox",
+                    ));
+                }
+                self.service_region_transfer(owner, &batch)?;
+                self.graced_nodes.push(message_id);
+                consumed += 1;
+                continue;
+            }
             if self.pool.family_of(message_id) == MessageFamilyTag::CardMark {
                 let batch = self.pool.load_card_mark(message_id);
                 if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id

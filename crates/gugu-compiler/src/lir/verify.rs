@@ -38,6 +38,7 @@ fn verify_structure_with(
     raw_publish::verify(body, &layout)?;
     memory(body)?;
     operations::verify(body)?;
+    regions::verify_lifecycle(body)?;
     provenance::verify(body, &graph)?;
     let (ranges, uses) = super::uses::calculate(body);
     if uses != body.uses

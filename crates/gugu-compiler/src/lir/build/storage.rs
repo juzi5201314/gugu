@@ -200,7 +200,7 @@ impl Builder<'_> {
                     .layout(ty)
                     .layout
                     .ok_or_else(|| invalid("managed 槽缺少布局"))?;
-                let address = self.allocate(ty, layout.size, placement)?;
+                let address = self.allocate(ty, layout.size, placement, None)?;
                 self.define(variable, address);
             }
             Storage::Capture { .. } | Storage::Values(_) => {}

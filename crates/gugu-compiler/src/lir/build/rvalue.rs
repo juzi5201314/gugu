@@ -414,7 +414,7 @@ impl Builder<'_> {
                 } else {
                     PlacementKind::LocalHeap
                 };
-                let address = self.allocate(object.0, bytes, placement)?;
+                let address = self.allocate(object.0, bytes, placement, None)?;
                 self.aggregate_into(address, object.0, 0, None, operands)?;
                 Ok(Computed::Values {
                     ty,

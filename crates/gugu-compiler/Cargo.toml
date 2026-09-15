@@ -42,6 +42,10 @@ name = "stackmap_walk"
 harness = false
 
 [[bench]]
+name = "region_transfer"
+harness = false
+
+[[bench]]
 name = "barrier_card_mark"
 harness = false
 

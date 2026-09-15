@@ -344,6 +344,17 @@ fn build_json_reports_barrier_contract_keys() {
     let plan = compilation.image_plan().expect("镜像计划");
     let payload = super::output::image_plan_payload(plan);
     for key in [
+        "turn-region-sites",
+        "turn-region-publish-sites",
+        "turn-region-reset-sites",
+        "turn-region-promote-sites",
+        "turn-region-transfer-sites",
+        "turn-region-capacity-class-count",
+        "turn-region-object-limit",
+        "turn-region-max-bytes",
+        "turn-region-total-bytes",
+        "turn-region-contract-fingerprint",
+        "turn-region-demand",
         "barrier-card-granularity-bytes",
         "barrier-card-mark-buffer-entries",
         "barrier-card-mark-stamp-entries",
@@ -355,6 +366,11 @@ fn build_json_reports_barrier_contract_keys() {
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
+    assert_eq!(payload["turn-region-sites"], 1);
+    assert_eq!(payload["turn-region-publish-sites"], 1);
+    assert_eq!(payload["turn-region-reset-sites"], 1);
+    assert_eq!(payload["turn-region-transfer-sites"], 0);
+    assert_eq!(payload["turn-region-object-limit"], 64);
     assert_eq!(payload["barrier-card-granularity-bytes"], 512);
     assert_eq!(payload["barrier-card-mark-buffer-entries"], 256);
     assert_eq!(payload["barrier-flush-reason-count"], 6);

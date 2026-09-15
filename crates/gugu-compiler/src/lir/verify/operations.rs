@@ -110,14 +110,11 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && align.is_power_of_two()
             }
             Op::PlatformCall(op) => platform_call_valid(*op, &args, &results),
-            Op::RegionPublish => {
-                a == [Type::Ptr]
-                    && r.is_empty()
-                    && body
-                        .args(&instruction.arguments)
-                        .first()
-                        .is_some_and(|value| region_pointer(body, *value))
-            }
+            // region 生命周期 op 没有参数与结果：region 身份与顺序由 region 生命周期 verifier 检查。
+            Op::RegionPublish { .. }
+            | Op::RegionReset { .. }
+            | Op::PromoteManaged { .. }
+            | Op::RegionTransfer { .. } => a.is_empty() && r.is_empty(),
             Op::MarkTicketBatch | Op::EdgeDeltaBatch | Op::ForwardSharedHandle => {
                 r.is_empty()
                     && !a.is_empty()
@@ -133,17 +130,6 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                             )
                         )
                     })
-            }
-            Op::RegionReset => {
-                a == [Type::Ptr]
-                    && r.is_empty()
-                    && region_pointer(body, body.args(&instruction.arguments)[0])
-            }
-            Op::PromoteManaged => {
-                a == [Type::Ptr]
-                    && r == [Type::Ptr]
-                    && args[0].provenance.is_some_and(Provenance::managed)
-                    && results[0].provenance == Some(Provenance::GcHeap)
             }
             Op::ResolveSharedHandle => {
                 a == [Type::Ptr]
@@ -527,24 +513,28 @@ fn atomic(
     }
 }
 
-fn region_pointer(body: &Body, mut value: ValueId) -> bool {
+/// 判断一个值是否来自某个私有 region 的分配，并返回 region 编号。
+///
+/// 只沿 `Origin::Derived` 链回溯到分配指令：被 `Load` 出来的指针不是 direct region 来源，
+/// 它的安全性由读写位置自己的 verifier 负责。
+pub(crate) fn region_of(body: &Body, mut value: ValueId) -> Option<u32> {
     for _ in 0..body.values.len() {
         let current = &body.values[value.index()];
         match current.origin {
             crate::lir::body::Origin::Derived(base) => value = base,
             crate::lir::body::Origin::Allocation(_) => {
                 let Definition::Instruction { instruction, .. } = current.definition else {
-                    return false;
+                    return None;
                 };
-                return matches!(
-                    body.instructions[instruction.index()].op,
-                    Op::RegionAlloc { .. }
-                );
+                return match body.instructions[instruction.index()].op {
+                    Op::RegionAlloc { region, .. } => Some(region),
+                    _ => None,
+                };
             }
-            _ => return false,
+            _ => return None,
         }
     }
-    false
+    None
 }
 
 /// 平台范围调用的结构规则。

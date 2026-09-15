@@ -323,6 +323,7 @@ fn resource_descriptor_cannot_be_region_allocated() {
         .position(|instruction| matches!(instruction.op, Op::IConst(_)))
         .expect("资源样例必须保留整数常量");
     body.instructions[index].op = Op::RegionAlloc {
+        region: 0,
         descriptor,
         align: 8,
     };
@@ -898,4 +899,197 @@ fn permit_quota_at_buffer_capacity_passes_the_capacity_check() {
         "应落到额度一致性检查，实际为：{}",
         error.message()
     );
+}
+
+/// TurnRegion：带环境的闭包在 turn 结束时整区发布并重置。
+#[test]
+fn turn_region_ops_close_at_suspend_boundaries() {
+    let compilation = compile(
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }",
+    );
+    let body = named(&compilation, "main");
+    let allocs: Vec<u32> = body
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction.op {
+            Op::RegionAlloc { region, .. } => Some(region),
+            _ => None,
+        })
+        .collect();
+    let publishes: Vec<(u32, u8)> = body
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction.op {
+            Op::RegionPublish { region, export } => Some((region, export)),
+            _ => None,
+        })
+        .collect();
+    let resets: Vec<u32> = body
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction.op {
+            Op::RegionReset { region } => Some(region),
+            _ => None,
+        })
+        .collect();
+    let transfers: Vec<u32> = body
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction.op {
+            Op::RegionTransfer { region } => Some(region),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(allocs.len(), 1, "闭包环境是唯一的 region 分配点");
+    assert_eq!(
+        publishes.len(),
+        resets.len(),
+        "每个出口恰好发布一次并重置一次"
+    );
+    assert!(publishes.iter().any(|(_, export)| *export == 0));
+    assert!(transfers.is_empty(), "普通 turn 结束不产生转移");
+    verify::verify_structure(body, compilation.hir.as_ref().unwrap().module())
+        .expect("region 生命周期必须自洽");
+}
+
+/// channel send 在 sender 之后不再使用该闭包时整区移交，而不是复制或保留。
+#[test]
+fn channel_send_transfers_region_when_sender_is_dead() {
+    let compilation = compile(
+        "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n }",
+    );
+    let body = named(&compilation, "main");
+    let transfers: Vec<u32> = body
+        .instructions
+        .iter()
+        .filter_map(|instruction| match instruction.op {
+            Op::RegionTransfer { region } => Some(region),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(transfers.len(), 1, "移交语义必须落在一个 RegionTransfer 上");
+    let resets = body
+        .instructions
+        .iter()
+        .filter(|instruction| matches!(instruction.op, Op::RegionReset { .. }))
+        .count();
+    assert_eq!(resets, 0, "移交后 sender 不得重置同一个 region");
+    let plan = compilation.image_plan().expect("镜像计划");
+    assert_eq!(plan.turn_region_transfer_sites(), 1);
+    assert!(plan.turn_region_sites() >= 1);
+    verify::verify_structure(body, compilation.hir.as_ref().unwrap().module())
+        .expect("移交路径必须自洽");
+}
+
+/// sender 在 send 之后仍使用闭包时不得选择 region，退回 SharedHeap。
+#[test]
+fn channel_send_with_live_sender_keeps_stable_storage() {
+    let compilation = compile(
+        "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n _ = closure()\n }",
+    );
+    let body = named(&compilation, "main");
+    assert!(
+        body.instructions
+            .iter()
+            .all(|instruction| !matches!(instruction.op, Op::RegionAlloc { .. })),
+        "sender 仍在使用时必须落在 stable storage"
+    );
+    assert!(body.instructions.iter().any(|instruction| matches!(
+        instruction.op,
+        Op::GcAlloc {
+            placement: crate::frontend::gir::placement::PlacementKind::SharedHeap,
+            ..
+        }
+    )));
+    assert_eq!(
+        compilation
+            .image_plan()
+            .expect("镜像计划")
+            .turn_region_sites(),
+        0
+    );
+}
+
+/// 未闭合 export summary 的 region 不允许 reset。
+#[test]
+fn reset_is_rejected_when_export_summary_is_open() {
+    let compilation = compile(
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }",
+    );
+    let mut body = named(&compilation, "main").clone();
+    for instruction in &mut body.instructions {
+        if let Op::RegionPublish { export, .. } = &mut instruction.op {
+            *export = 1;
+        }
+    }
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+        .expect_err("未闭合 summary 不能重置");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+    assert!(
+        error.message().contains("export summary 闭合"),
+        "{}",
+        error.message()
+    );
+}
+
+/// 发布之后缺少结束动作的 region 必须被拒绝。
+#[test]
+fn region_without_end_action_is_rejected() {
+    let compilation = compile(
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }",
+    );
+    let mut body = named(&compilation, "main").clone();
+    body.instructions.retain(|instruction| {
+        !matches!(
+            instruction.op,
+            Op::RegionReset { .. } | Op::RegionTransfer { .. }
+        )
+    });
+    super::uses::rebuild(&mut body);
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+        .expect_err("发布后必须有结束动作");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+}
+
+/// region 移交只能发生在 channel send 边界上。
+#[test]
+fn region_transfer_requires_channel_send_boundary() {
+    let compilation = compile(
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }",
+    );
+    let mut body = named(&compilation, "main").clone();
+    for instruction in &mut body.instructions {
+        // 换成同样不需要 safepoint 的结束动作：生命周期自洽，但普通出口上出现移交必须被
+        // channel 闸门拒绝。
+        if let Op::RegionReset { region } = instruction.op {
+            instruction.op = Op::RegionTransfer { region };
+        }
+    }
+    super::uses::rebuild(&mut body);
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+        .expect_err("普通出口不得移交 region");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+    assert!(
+        error.message().contains("channel send"),
+        "{}",
+        error.message()
+    );
+}
+
+/// region 指令不引用任何值：参数数量由 verifier 强制。
+#[test]
+fn region_lifecycle_ops_carry_no_values() {
+    let compilation = compile(
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }",
+    );
+    let mut body = named(&compilation, "main").clone();
+    for instruction in &mut body.instructions {
+        if matches!(instruction.op, Op::RegionPublish { .. }) {
+            instruction.arguments = 0..1;
+        }
+    }
+    super::uses::rebuild(&mut body);
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+        .expect_err("region 指令不得带参数");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
