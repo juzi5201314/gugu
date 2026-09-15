@@ -415,6 +415,8 @@ mailbox、edge staging、barrier buffer 和转发链清空后归还 credit。coo
 owner credit 并确认 producer/topology epoch 后，才能执行 remark 和终止检测；不能用单个
 mailbox 为空推断全局 mark 完成。
 
+credit 账本按来源分别登记当前在飞量，观测必须来自真实结构而不是推断：未 flush 的 remembered-set 键数、已发布但未消费的 card batch 数、已聚合但未取走的 edge delta 数、尚未由 owner 消费的 return 字节，以及生产者 staging 中未发布的字节。只有五个来源同时归零（`converged`）才允许推进 cycle epoch；`begin_cycle` 在尚未收敛时拒绝，epoch 只能前进。`mark_ticket_batches`、`edge_delta_batches` 与 `mark_credit_pending` 是同一账本的诊断口径：`mark_credit_pending` 不对应可从 committed bytes 中扣除的内存。MarkMailbox 与 `MarkTicket` 的消费在后续阶段接入同一 credit 平面，本阶段不引入平行计数。
+
 ### Block lease 与 candidate
 
 `EdgeDelta` 由 source owner 在 card/line summary 中聚合后发送给 target owner。target
@@ -499,8 +501,11 @@ return_pressure = pending_return_bytes + owner_cache_bytes
 
 forced full cycle 完成后若仍高于 clear 水位，runtime 继续执行 bounded owner drain、forwarding grace、sweep、trim/decommit 和有限 assist，不重复启动同一完整 cycle。若仍无法为请求取得 headroom，则当前分配直接进入 `OutOfMemory`，而不是在每次临界分配上重扫整堆；占用降到 clear 水位后才允许下一 episode 再触发 forced cycle。pressure state 与 episode 标记都由 runtime owner 线性化，跨 owner 的 pending bytes 必须先合并到不会低估物理占用的快照。
 
-GC worker 使用 `gc_cpu_fraction` 的滑动 cost window：有 runnable 压力时，超出窗口的普通 mark/evacuation work转为 debt 和后续 assist；idle processor 可以消费尚未使用的额度。emergency drain 可以暂时越过吞吐预算来恢复内存安全，但不能跳过 generation、lease、root、card batch 或 queue grace 校验。
+pacing 与 drain 的每一步都落到真实动作，不允许只记账：allocation debt 在分配成功后累加，`return_pressure` 由 owner 账本的三类互斥字节汇总；allocation 上的唯一慢路径先按窗口额度偿还 mark debt（没有真实可消费 work 时不记账），再用当前物理快照推进 hysteresis，已处于 episode 时就执行一次有界 drain，allocation debt 越过增长预算且窗口未溢出时启动自动 cycle，最后在软上限内请求 headroom。一次 drain 依次刷新全部 processor 的 barrier 账本、关闭 source-slab cache、以 emergency 预算排空每个 owner 的 inbox、推进 queue-page grace epoch（否则空载 extent 永远停在 `GracePending`，decommit 无法发生）、取出 owner-local edge delta，再把本 cycle 真实完成的 card 工作计入滑动窗口（emergency 越过吞吐预算，普通 cycle 把超出部分转为 mark debt），然后过 remark 终止门禁，再对所有空载 extent 重跑 allocator/scanner/forwarder lease、live/queued slot 与在途 return 四条门禁。未过门禁的 extent 保持 committed 并计入 blocked，绝不会“看起来空闲”就撤销物理页；通过门禁的 extent 同步让名下空载 descriptor 离开 committed 口径，因此物理页与账本总是同一步回落。cycle 只有在五个 credit 来源全部收敛后才推进 barrier epoch，并记录真实 live record 字节作为下一次增长预算的输入；`OutOfMemory` 写入 rt0 的 fatal 报告并让本次分配失败。stack arena 与 raw plane 共用同一个 provider，因此软上限口径直接取 provider 的 committed 总量，不再另加 stack committed（否则会把同一物理页计入两次）。
 
+GC worker 使用 `gc_cpu_fraction` 的滑动 cost window：有 runnable 压力时，超出窗口的普通 mark/evacuation work转为 debt 和后续 assist；idle processor 可以消费尚未使用的额度。emergency drain 可以暂时越过吞吐预算来恢复内存安全，但不能跳过 generation、lease、root、card batch 或 queue grace 校验。窗口预算、assist quantum 与 remark budget 之间必须满足 `window × fraction / 100 ≥ assist_quantum` 且 `assist_threshold ≥ assist_quantum`，否则 profile 自相矛盾，verifier 在镜像写出前拒绝。
+
+返回候选按 extent 整块提交给 relocation pause 预算：只有完整落在 `evacuation_pause_bytes`、`evacuation_pause_roots` 与 `evacuation_pause_fields` 内的前缀会被发布，超出的候选整块延后到下个 cycle，绝不在一个 extent 内部分发布；因为单个 extent 至多等于预算上界，每轮至少能把一个候选交给下一次尝试，不会因为批次总量偏大而永久不进展。
 
 ### Backpressure 归属
 
@@ -829,8 +834,9 @@ owner 身份、slab 描述符、dense size class、消息字段、grace 步骤�
 12. 完成 per-owner root slice、credit termination、MosaicBaseline/MosaicConcurrent stop 边界和 security profile。
 13. 最后加入 typed combining，用于 GlobalRange 和 topology 冷路径，不回流到 allocation/return/GC mark 热路径。
 
-第 1--4 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；ResourceCell 的 class 阶梯、64-byte header、lease/close 状态机与统一 release 入口同样进入 `RuntimeRawContractV1`（schema 2），覆盖 exactly-once cleanup、generation 匹配与 queue grace。Gugu runtime 侧的等价实现随 rt0 与协程控制块的落地复用同一 schema（见[运行时](../spec/runtime.md#rt0-and-startup)与[调度器](scheduler.md)）。第 5 步起仍按本顺序推进。
+第 1--4 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；ResourceCell 的 class 阶梯、64-byte header、lease/close 状态机与统一 release 入口同样进入 `RuntimeRawContractV1`（schema 2），覆盖 exactly-once cleanup、generation 匹配与 queue grace。第 5 步由 PlatformRange/Extent/Ledger 契约段与 extent 阶梯兑现，第 6 步由 `GcPacingRuntimeContract` 与 `PacingPlane` 兑现（见[GC 元数据](gc-metadata.md#gc-pacing--relocation-pause-budget)）。Gugu runtime 侧的等价实现随 rt0 与协程控制块的落地复用同一 schema（见[运行时](../spec/runtime.md#rt0-and-startup)与[调度器](scheduler.md)）。第 7 步起仍按本顺序推进，其中第 8 步的 `MarkMailbox`/`MarkTicket` 消费接入同一 credit 平面。
 
+compiler 侧同一对象还固定 `GcPacingRuntimeContract`：`mosaic-default` profile 的 12 个参数（`min_growth_budget`、`assist_threshold`、`assist_quantum`、`mark_cost_per_byte`、`gc_cpu_fraction`、`gc_cpu_window_cost`、`remark_cost_budget`、`evacuation_pause_bytes`、`evacuation_pause_roots`、`evacuation_pause_fields`、`pressure_enter_ratio`、`pressure_clear_ratio`）、三个 pressure 状态名、三个必须各自 drain 的账本分类（与 `LedgerSchemaV1` 的 committed 分区独立计数器同源）、四种 assist 结局、两种 remark 结局、两种 evacuation 结局及五个 credit 来源目录。verifier 拒绝参数漂移、违反 `0 < clear < enter < 100`、非 block 整数倍的 evacuation payload 上界、窗口预算容不下一次 assist quantum、drain 分类与账本不一致，以及任何未随 `profile_revision` 变化的参数改动；`GcPacingDemand`（分配站点、屏障站点、assist slow edge、受管类型数）进入契约指纹与 action key。
 每个步骤完成后都要同步对应的 spec/internals 条款；实现、规范和测试必须同时改变，不能只引入一个“以后再接”的空接口。
 
 ## snmalloc 对照与明确取舍

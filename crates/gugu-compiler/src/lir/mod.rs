@@ -219,6 +219,34 @@ impl Validated {
         demand
     }
 
+    /// pacing 需求：从优化后 LIR 与冻结类型表推导 debt、assist 与 trace 的口径上界。
+    ///
+    /// 分配站点覆盖 `GcAlloc`、`RegionAlloc` 与 `PromoteManaged`：三者都会推进 cycle 内的
+    /// allocation debt。slow edge 是「允许执行一次 assist」的边界，因此等于分配站点加显式
+    /// `SafepointPoll`；barrier 站点复用同一站点集合，managed_types 由冻结类型表给出。
+    pub(crate) fn pacing_demand(&self, managed_types: u32) -> crate::runtime::GcPacingDemand {
+        let mut demand = crate::runtime::GcPacingDemand {
+            managed_types,
+            ..crate::runtime::GcPacingDemand::default()
+        };
+        for world_body in &self.world.bodies {
+            for instruction in &world_body.instructions {
+                match instruction.op {
+                    body::Op::GcAlloc { .. }
+                    | body::Op::RegionAlloc { .. }
+                    | body::Op::PromoteManaged => demand.alloc_sites += 1,
+                    body::Op::GcWriteBarrier { .. } | body::Op::GcWriteBarrierReserved { .. } => {
+                        demand.barrier_sites += 1;
+                    }
+                    body::Op::SafepointPoll { .. } => demand.slow_edges += 1,
+                    _ => {}
+                }
+            }
+        }
+        demand.slow_edges = demand.slow_edges.saturating_add(demand.alloc_sites);
+        demand
+    }
+
     /// 同步需求：从优化后 LIR 统计原子操作与同步原语需求。
     pub(crate) fn sync_demand(&self) -> crate::runtime::SyncDemand {
         let mut demand = crate::runtime::SyncDemand::default();

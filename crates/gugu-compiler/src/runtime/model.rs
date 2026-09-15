@@ -14,6 +14,7 @@ use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::ServiceBudget;
 use super::ledger::LedgerSchemaV1;
 use super::message::{BatchLimits, RETURN_NODE_ALIGN, RETURN_NODE_BYTES};
+use super::pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
 use super::platform::PlatformProfile;
 use super::platform_schema::{PlatformRangeDemand, PlatformRangeSchemaV1};
 use super::resource::{self, RESOURCE_KINDS};
@@ -33,8 +34,8 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 11 并入 hybrid write barrier 与 remembered-set 契约段。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 11;
+/// 契约对象的schema版本；schema 12 并入 GC debt、credit、pacing 与 pressure 契约段。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 12;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -385,6 +386,7 @@ pub(crate) struct RuntimeRawContractV1 {
     stackmap: StackMapRuntimeContract,
     gc_metadata: GcMetadataRuntimeContract,
     barrier: BarrierRuntimeContract,
+    pacing: GcPacingRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -412,6 +414,7 @@ impl RuntimeRawContractV1 {
         stackmap_demand: StackMapDemand,
         gc_metadata_demand: GcMetadataDemand,
         barrier_demand: BarrierDemand,
+        pacing_demand: GcPacingDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -424,6 +427,7 @@ impl RuntimeRawContractV1 {
         let stackmap = StackMapRuntimeContract::build(stackmap_demand)?;
         let gc_metadata = GcMetadataRuntimeContract::build(gc_metadata_demand)?;
         let barrier = BarrierRuntimeContract::build(barrier_demand)?;
+        let pacing = GcPacingRuntimeContract::build(pacing_demand)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -446,6 +450,7 @@ impl RuntimeRawContractV1 {
             stackmap,
             gc_metadata,
             barrier,
+            pacing,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -581,6 +586,11 @@ impl RuntimeRawContractV1 {
     /// 返回 hybrid write barrier 与 remembered-set 契约段。
     pub(crate) fn barrier(&self) -> &BarrierRuntimeContract {
         &self.barrier
+    }
+
+    /// 返回 GC debt、credit、pacing 与 pressure 契约段。
+    pub(crate) fn pacing(&self) -> &GcPacingRuntimeContract {
+        &self.pacing
     }
 
     /// 返回 GC 工作消息族的 `CardMarkBatch` 字段集合。
@@ -725,6 +735,7 @@ impl RuntimeRawContractV1 {
         self.stackmap.verify()?;
         self.gc_metadata.verify()?;
         self.barrier.verify()?;
+        self.pacing.verify()?;
         if self.message.family() != MessageFamilyTag::Return
             || self.barrier.message.family() != MessageFamilyTag::CardMark
         {
@@ -788,6 +799,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.stackmap.canonical_bytes());
         bytes.extend_from_slice(&self.gc_metadata.canonical_bytes());
         bytes.extend_from_slice(&self.barrier.canonical_bytes());
+        bytes.extend_from_slice(&self.pacing.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1015,6 +1027,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.stackmap.dump());
         output.push_str(&self.gc_metadata.dump());
         output.push_str(&self.barrier.dump());
+        output.push_str(&self.pacing.dump());
         output.push_str(&format!(
             "runtime-message return-fields={} card-mark-fields={} card-mark-family={}\n",
             self.message.fields.len(),
@@ -1073,6 +1086,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) gc_metadata_demand: GcMetadataDemand,
     /// barrier 需求视图：permit 额度、reserved/bare 屏障与 edge summary 站点。
     pub(crate) barrier_demand: BarrierDemand,
+    /// pacing 需求视图：分配站点、屏障站点、assist slow edge 与受管类型数。
+    pub(crate) pacing_demand: GcPacingDemand,
     /// 已由 frontend 编码的真实 type/meta section。
     pub(crate) gc_type_section: &'a [u8],
     pub(crate) gc_metadata_section: &'a [u8],
@@ -1101,6 +1116,7 @@ pub(crate) fn run(
         inputs.stackmap_demand,
         inputs.gc_metadata_demand,
         inputs.barrier_demand,
+        inputs.pacing_demand,
         inputs.gc_type_section,
         inputs.gc_metadata_section,
     ))
@@ -1141,6 +1157,7 @@ pub(crate) fn run(
                 inputs.stackmap_demand,
                 inputs.gc_metadata_demand,
                 inputs.barrier_demand,
+                inputs.pacing_demand,
                 inputs.profile,
             )
             .and_then(|contract| {

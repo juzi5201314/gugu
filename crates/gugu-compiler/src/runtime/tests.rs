@@ -21,6 +21,7 @@ use super::model::{
     RawResourceDemand, RuntimeRawContractV1,
 };
 use super::owner::AllocationLevel;
+use super::pacing_schema::GcPacingDemand;
 use super::platform::{FakePlatform, PlatformProfile};
 use super::provider::{ProviderError, RangeProvider, RangeState};
 use super::resource::{
@@ -666,6 +667,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -714,6 +716,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             StackMapDemand::default(),
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
+            GcPacingDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
@@ -748,6 +751,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -763,6 +767,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -784,6 +789,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -800,6 +806,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
@@ -1433,6 +1440,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1478,6 +1486,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1496,6 +1505,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1530,6 +1540,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         demand,
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("栈图契约可构建");
@@ -1553,6 +1564,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             bad,
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
+            GcPacingDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1574,6 +1586,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             overflow,
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
+            GcPacingDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1592,6 +1605,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         StackMapDemand::default(),
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
+        GcPacingDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("空栈图契约可构建");
@@ -1642,6 +1656,7 @@ mod gc_metadata_tests {
     };
     use super::super::gc_metadata_section::{encode_sections, verify_sections};
     use super::super::model::{RawModelError, RuntimeRawContractV1};
+    use super::super::pacing_schema::GcPacingDemand;
     use super::super::platform::PlatformProfile;
     use super::super::scheduler_schema::SchedulerDemand;
     use super::super::stackmap_schema::StackMapDemand;
@@ -1848,6 +1863,7 @@ mod gc_metadata_tests {
             StackMapDemand::default(),
             demand,
             BarrierDemand::default(),
+            GcPacingDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .expect("契约可构建");

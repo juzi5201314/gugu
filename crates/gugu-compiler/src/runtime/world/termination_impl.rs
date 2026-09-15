@@ -205,6 +205,9 @@ impl RawWorld {
         match config {
             Ok(config) => {
                 self.rt0 = Some(Rt0Process::new(snapshot, config, lifecycle, boot));
+                // 启动配置里的 growth target 与 soft limit 必须立刻进入 pacing 平面，
+                // 否则 limit 触发、forced cycle 与 OOM 规则都不生效。
+                self.apply_startup_pacing()?;
                 let main = self.create_coroutine(0, main_entry, config.stack_max())?;
                 self.enter_coroutine(main)?;
                 self.rt0_mut()?.main_coroutine = Some(main);

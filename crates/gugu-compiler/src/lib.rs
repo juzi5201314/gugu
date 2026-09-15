@@ -458,7 +458,7 @@ impl Compiler {
                 stackmap_demand: lir.stackmap_demand(frontend.hir.module()),
                 gc_metadata_demand: gc_metadata_demand(&gc_metadata),
                 barrier_demand: lir.barrier_demand(),
-
+                pacing_demand: lir.pacing_demand(frontend.mono.universe.records.len() as u32),
                 gc_type_section: &gc_metadata.type_section,
                 gc_metadata_section: &gc_metadata.metadata_section,
                 profile: runtime::PlatformProfile::from(target),
@@ -1047,6 +1047,24 @@ pub struct ImagePlan {
     barrier_card_mark_batch_fields: u32,
     barrier_record_count: u32,
     barrier_runtime: crate::runtime::BarrierRuntimeContract,
+    pacing_contract_fingerprint: [u8; 32],
+    pacing_profile: String,
+    pacing_profile_revision: u32,
+    pacing_min_growth_budget: u64,
+    pacing_assist_threshold: u64,
+    pacing_assist_quantum: u64,
+    pacing_mark_cost_per_byte: u32,
+    pacing_gc_cpu_fraction: u32,
+    pacing_gc_cpu_window_cost: u64,
+    pacing_remark_cost_budget: u64,
+    pacing_evacuation_pause_bytes: u64,
+    pacing_evacuation_pause_roots: u32,
+    pacing_evacuation_pause_fields: u32,
+    pacing_pressure_enter_ratio: u32,
+    pacing_pressure_clear_ratio: u32,
+    pacing_credit_source_count: u32,
+    pacing_demand: crate::runtime::GcPacingDemand,
+    pacing_runtime: crate::runtime::GcPacingRuntimeContract,
     resource_cell_header_bytes: u32,
     resource_class_count: u32,
     resource_kind_count: u32,
@@ -1170,6 +1188,24 @@ impl ImagePlan {
             barrier_card_mark_batch_fields: plan.barrier_card_mark_batch_fields,
             barrier_record_count: plan.barrier_record_count,
             barrier_runtime: plan.barrier_runtime,
+            pacing_contract_fingerprint: plan.pacing_contract_fingerprint,
+            pacing_profile: plan.pacing_profile,
+            pacing_profile_revision: plan.pacing_profile_revision,
+            pacing_min_growth_budget: plan.pacing_min_growth_budget,
+            pacing_assist_threshold: plan.pacing_assist_threshold,
+            pacing_assist_quantum: plan.pacing_assist_quantum,
+            pacing_mark_cost_per_byte: plan.pacing_mark_cost_per_byte,
+            pacing_gc_cpu_fraction: plan.pacing_gc_cpu_fraction,
+            pacing_gc_cpu_window_cost: plan.pacing_gc_cpu_window_cost,
+            pacing_remark_cost_budget: plan.pacing_remark_cost_budget,
+            pacing_evacuation_pause_bytes: plan.pacing_evacuation_pause_bytes,
+            pacing_evacuation_pause_roots: plan.pacing_evacuation_pause_roots,
+            pacing_evacuation_pause_fields: plan.pacing_evacuation_pause_fields,
+            pacing_pressure_enter_ratio: plan.pacing_pressure_enter_ratio,
+            pacing_pressure_clear_ratio: plan.pacing_pressure_clear_ratio,
+            pacing_credit_source_count: plan.pacing_credit_source_count,
+            pacing_demand: plan.pacing_demand,
+            pacing_runtime: plan.pacing_runtime,
             resource_cell_header_bytes: plan.resource_cell_header_bytes,
             resource_class_count: plan.resource_class_count,
             resource_kind_count: plan.resource_kind_count,
@@ -1618,6 +1654,78 @@ impl ImagePlan {
     /// 返回已验证的 barrier 契约段。
     pub fn barrier_runtime(&self) -> &crate::runtime::BarrierRuntimeContract {
         &self.barrier_runtime
+    }
+    /// 返回 GC debt、credit、pacing 与 pressure 契约指纹。
+    pub fn pacing_contract_fingerprint(&self) -> [u8; 32] {
+        self.pacing_contract_fingerprint
+    }
+    /// 返回内建 pacing profile 名。
+    pub fn pacing_profile(&self) -> &str {
+        &self.pacing_profile
+    }
+    /// 返回 pacing profile revision。
+    pub fn pacing_profile_revision(&self) -> u32 {
+        self.pacing_profile_revision
+    }
+    /// 返回增长预算下限。
+    pub fn pacing_min_growth_budget(&self) -> u64 {
+        self.pacing_min_growth_budget
+    }
+    /// 返回 assist 触发阈值。
+    pub fn pacing_assist_threshold(&self) -> u64 {
+        self.pacing_assist_threshold
+    }
+    /// 返回单次 assist 的偿还上界。
+    pub fn pacing_assist_quantum(&self) -> u64 {
+        self.pacing_assist_quantum
+    }
+    /// 返回每 byte 折算的 mark cost unit。
+    pub fn pacing_mark_cost_per_byte(&self) -> u32 {
+        self.pacing_mark_cost_per_byte
+    }
+    /// 返回 GC CPU 比例。
+    pub fn pacing_gc_cpu_fraction(&self) -> u32 {
+        self.pacing_gc_cpu_fraction
+    }
+    /// 返回滑动 cost window 容量。
+    pub fn pacing_gc_cpu_window_cost(&self) -> u64 {
+        self.pacing_gc_cpu_window_cost
+    }
+    /// 返回 remark cost 上界。
+    pub fn pacing_remark_cost_budget(&self) -> u64 {
+        self.pacing_remark_cost_budget
+    }
+    /// 返回 evacuation payload 上界。
+    pub fn pacing_evacuation_pause_bytes(&self) -> u64 {
+        self.pacing_evacuation_pause_bytes
+    }
+    /// 返回 evacuation root 上界。
+    pub fn pacing_evacuation_pause_roots(&self) -> u32 {
+        self.pacing_evacuation_pause_roots
+    }
+    /// 返回 evacuation 字段上界。
+    pub fn pacing_evacuation_pause_fields(&self) -> u32 {
+        self.pacing_evacuation_pause_fields
+    }
+    /// 返回 episode 开启比例。
+    pub fn pacing_pressure_enter_ratio(&self) -> u32 {
+        self.pacing_pressure_enter_ratio
+    }
+    /// 返回 episode 结束比例。
+    pub fn pacing_pressure_clear_ratio(&self) -> u32 {
+        self.pacing_pressure_clear_ratio
+    }
+    /// 返回 owner credit 来源目录长度。
+    pub fn pacing_credit_source_count(&self) -> u32 {
+        self.pacing_credit_source_count
+    }
+    /// 返回 pacing 需求视图。
+    pub fn pacing_demand(&self) -> crate::runtime::GcPacingDemand {
+        self.pacing_demand
+    }
+    /// 返回已验证的 pacing 契约段。
+    pub fn pacing_runtime(&self) -> &crate::runtime::GcPacingRuntimeContract {
+        &self.pacing_runtime
     }
     /// 返回真实 `.gugu.types` section。
     pub fn gc_type_section(&self) -> &[u8] {
@@ -2258,6 +2366,32 @@ mod tests {
         assert!(dump.contains("barrier-demand"));
         assert!(dump.contains("barrier-pressure"));
         assert!(dump.contains("barrier-fingerprint"));
+        // pacing 契约与需求同样进入镜像计划、dump 与指纹身份。
+        assert_eq!(plan.pacing_profile(), "mosaic-default");
+        assert_eq!(plan.pacing_profile_revision(), 1);
+        assert_eq!(plan.pacing_assist_quantum(), 1 << 16);
+        assert_eq!(plan.pacing_gc_cpu_fraction(), 25);
+        assert_eq!(plan.pacing_credit_source_count(), 5);
+        assert_ne!(plan.pacing_contract_fingerprint(), [0_u8; 32]);
+        assert_eq!(
+            plan.pacing_runtime().pressure_enter_ratio(),
+            plan.pacing_pressure_enter_ratio()
+        );
+        // pacing 需求从优化后 LIR 推导：分配站点与屏障站点必须与需求视图一致。
+        let pacing_demand = plan.pacing_demand();
+        assert!(pacing_demand.alloc_sites > 0, "闭包捕获必须产生分配站点");
+        assert_eq!(pacing_demand.barrier_sites, demand.barrier_sites());
+        assert_eq!(
+            pacing_demand.slow_edges,
+            pacing_demand.alloc_sites + 1,
+            "slow edge 等于分配站点加显式 safepoint"
+        );
+        assert!(pacing_demand.managed_types > 0);
+        assert!(dump.contains("pacing schema=1 profile=mosaic-default revision=1"));
+        assert!(dump.contains("pacing-pressure enter=85 clear=70 states=steady,drain,emergency"));
+        assert!(dump.contains("pacing-drain-classes owner-cache-bytes,pending-return-bytes,reclaimable-bytes partition=runtime-committed-bytes"));
+        assert!(dump.contains("pacing-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging"));
+        assert!(dump.contains("pacing-fingerprint"));
         // 冷/热编译指纹一致，且 dump 逐字节相同。
         let warm = Compiler::new().compile(CompileRequest::single_file(
             "main.gg",

@@ -363,6 +363,53 @@ fn build_json_reports_barrier_contract_keys() {
         payload["barrier-demand"]["card-mark-sites"],
         payload["barrier-demand"]["edge-summary-sites"]
     );
+    // pacing 契约与需求使用同一字段口径：JSON 键必须与 dump 的段一一对应。
+    for key in [
+        "pacing-contract-fingerprint",
+        "pacing-profile",
+        "pacing-profile-revision",
+        "pacing-min-growth-budget",
+        "pacing-assist-threshold",
+        "pacing-assist-quantum",
+        "pacing-mark-cost-per-byte",
+        "pacing-gc-cpu-fraction",
+        "pacing-gc-cpu-window-cost",
+        "pacing-remark-cost-budget",
+        "pacing-evacuation-pause-bytes",
+        "pacing-evacuation-pause-roots",
+        "pacing-evacuation-pause-fields",
+        "pacing-pressure-enter-ratio",
+        "pacing-pressure-clear-ratio",
+        "pacing-credit-source-count",
+        "pacing-demand",
+    ] {
+        assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
+    }
+    assert_eq!(payload["pacing-profile"], "mosaic-default");
+    assert_eq!(payload["pacing-gc-cpu-fraction"], 25);
+    assert_eq!(payload["pacing-credit-source-count"], 5);
+    assert_eq!(payload["pacing-pressure-enter-ratio"], 85);
+    assert_eq!(payload["pacing-pressure-clear-ratio"], 70);
+    // pacing 需求与 barrier 需求覆盖同一屏障站点集合。
+    assert_eq!(
+        payload["pacing-demand"]["barrier-sites"],
+        payload["barrier-demand"]["card-mark-sites"]
+    );
+    assert!(
+        payload["pacing-demand"]["alloc-sites"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0
+    );
+    let pacing_fingerprint = payload["pacing-contract-fingerprint"]
+        .as_array()
+        .expect("pacing 指纹是字节数组");
+    assert_eq!(pacing_fingerprint.len(), 32);
+    assert!(
+        pacing_fingerprint
+            .iter()
+            .any(|byte| byte != &serde_json::json!(0))
+    );
     let fingerprint = payload["barrier-contract-fingerprint"]
         .as_array()
         .expect("指纹是字节数组");

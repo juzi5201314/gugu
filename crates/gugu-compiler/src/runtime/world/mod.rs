@@ -7,6 +7,7 @@
 pub(crate) mod barrier_impl;
 pub(crate) mod coroutine_impl;
 mod extent_impl;
+pub(crate) mod pacing_impl;
 mod resource_impl;
 pub(crate) mod sync_impl;
 pub(crate) mod termination_impl;
@@ -29,6 +30,9 @@ mod sync_tests;
 mod barrier_tests;
 
 #[cfg(test)]
+#[path = "../pacing_tests.rs"]
+mod pacing_tests;
+#[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
 
 use std::collections::VecDeque;
@@ -36,7 +40,7 @@ use std::sync::Arc;
 
 use super::barrier::BarrierFlushReason;
 use super::barrier_schema::MessageFamilyTag;
-use super::extent::{ExtentId, ExtentOccupancy, ExtentTable, TrimReport};
+use super::extent::{ExtentId, ExtentTable, TrimReport};
 use super::inbox::{
     DrainReport, DrainStop, GraceOutcome, OwnerConsumer, OwnerInbox, ServiceBudget, ShardIndex,
 };
@@ -128,6 +132,8 @@ pub(crate) struct RawWorld {
     barrier: super::barrier::BarrierPlane,
     /// 已经由 owner 取走的跨 block edge delta 总数。
     edge_delta_total: u64,
+    /// GC debt、owner credit、pacing 与 pressure episode 的执行平面。
+    pacing: super::pacing::PacingPlane,
 }
 
 impl RawWorld {
@@ -198,6 +204,7 @@ impl RawWorld {
             sync: super::sync::SyncPlane::new(),
             barrier: super::barrier::BarrierPlane::new(0),
             edge_delta_total: 0,
+            pacing: super::pacing::PacingPlane::default(),
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。
@@ -303,6 +310,9 @@ impl RawWorld {
         owner: u32,
         class: RuntimeSizeClassId,
     ) -> Result<Allocation, RawInvariant> {
+        // allocation slow edge：本地 fast bump 不读全局状态，慢路径探测由 `slow_edge_due`
+        // 决定；所有全局读取、assist、drain 与 headroom 判定都收敛在 `pacing_slow_edge` 内。
+        self.pacing_slow_edge(0)?;
         let class = *self
             .classes
             .get(class)
@@ -319,7 +329,7 @@ impl RawWorld {
         let extents = &mut self.extents;
         let slab_epoch = self.epoch;
         let extent_class = super::owner::span_extent_class();
-        self.owners[owner as usize].allocate(
+        let allocation = self.owners[owner as usize].allocate(
             owner,
             &class,
             extent_class,
@@ -330,7 +340,10 @@ impl RawWorld {
             accounting,
             secret_index,
             slab_epoch,
-        )
+        )?;
+        // allocation debt 在分配成功之后推进：本地 fast bump 不读全局 debt，这里只记账。
+        self.pacing.observe_allocation(u64::from(class.slot_stride));
+        Ok(allocation)
     }
 
     /// 记录完成生命周期并赢得 return 线性化点。
@@ -853,56 +866,22 @@ impl RawWorld {
     /// scanner 或 forwarder 使用的页。
     fn reclaim(&mut self, owner: u32) -> Result<TrimReport, RawInvariant> {
         let token = self.owners[owner as usize].token();
-        let mut report = TrimReport::default();
-        let candidates: Vec<_> = self
-            .table
-            .descriptors()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, descriptor)| {
-                if descriptor.owner != token || descriptor.state == SlabState::Released {
-                    return None;
-                }
-                Some((
-                    SlabDescriptorId::from_raw(u32::try_from(index).ok()?),
-                    descriptor.extent,
-                    descriptor.live,
-                    descriptor.queued,
-                    descriptor.pending_returns,
-                    descriptor.committed_bytes,
-                ))
+        // 候选、门禁与描述符释放都走 pressure trim 的同一条路径：两处不会各自维护一套
+        // “空闲 extent” 判定，也不会一边撤销物理页一边把字节留在 committed 口径。
+        let empty: Vec<_> = self
+            .trim_candidates()
+            .into_iter()
+            .filter(|(extent, occupancy)| {
+                occupancy.live_slots == 0
+                    && occupancy.queued_slots == 0
+                    && self.table.descriptors().iter().any(|descriptor| {
+                        descriptor.extent == *extent
+                            && descriptor.owner == token
+                            && descriptor.state != SlabState::Released
+                    })
             })
             .collect();
-        for (descriptor, extent, live, queued, pending_returns, bytes) in candidates {
-            if live != 0 || queued != 0 {
-                continue;
-            }
-            let occupancy = ExtentOccupancy {
-                live_slots: live,
-                queued_slots: queued,
-                pending_returns,
-            };
-            match self.poll_trim_extent(extent, occupancy)? {
-                Ok(_) => {}
-                Err(blocked) => {
-                    report.blocked.push((extent, blocked));
-                    continue;
-                }
-            }
-            if let Some(accounting) = self.directory.accounting_mut(token.owner_id) {
-                accounting.release(bytes);
-            }
-            // 物理页已经撤销：descriptor 必须同时离开 committed 口径，否则账本分类之和与
-            // committed 不再相等。编号保留但永不复用，state 使二次 reclaim 不再把它当候选。
-            let record = self
-                .table
-                .descriptor_mut(descriptor)
-                .ok_or_else(|| RawInvariant::new("回收 raw extent 缺少 descriptor"))?;
-            record.state = SlabState::Released;
-            record.committed_bytes = 0;
-            report.trimmed += 1;
-        }
-        Ok(report)
+        self.trim_extents(&empty)
     }
 
     /// 通过 queue-page grace 并复用已消费的 message node。

@@ -100,7 +100,7 @@ pub(crate) struct GcAllocSiteV1 {
     pub location: GcSourceEntryV1,
 }
 
-/// arena/block/line 物理布局参数：阶段 39 与阶段 30–34 的 slab/size class 参数对齐。
+/// arena/block/line 物理布局参数：与 raw slab/size class 的参数同源。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct GcArenaLayoutV1 {
     pub arena_bytes: u64,

@@ -7,7 +7,7 @@
 //! arena 容量取二次幂阶梯的顶层，保证任何 class 的块都能整块落在 arena 内且按自身大小对齐。
 
 use super::super::extent::{
-    ExtentDescriptor, ExtentId, ExtentOccupancy, ExtentState, ExtentTable, TrimBlocked,
+    ExtentDescriptor, ExtentId, ExtentOccupancy, ExtentState, ExtentTable, TrimBlocked, TrimReport,
 };
 use super::super::inbox::ShardIndex;
 #[cfg(test)]
@@ -19,7 +19,7 @@ use super::super::message::{
 use super::super::provider::{DumpPolicy, ProviderError, RangeProvider};
 use super::super::size_class::RuntimeSizeClassId;
 use super::super::slab::{
-    MemoryDomainId, OwnerId, OwnerToken, RawInvariant, SlabDescriptorId, SlabGeneration,
+    MemoryDomainId, OwnerId, OwnerToken, RawInvariant, SlabDescriptorId, SlabGeneration, SlabState,
 };
 use super::RawWorld;
 
@@ -108,6 +108,96 @@ impl RawWorld {
             return Ok(Err(blocked));
         }
         self.trim_extent(extent).map(Ok)
+    }
+
+    /// pressure trim：把全部空闲且无 pending return 的 Live extent 交回 buddy 阶梯。
+    ///
+    /// occupancy 从 slab 描述符表按 extent 聚合而来，不含任何猜测：一个 extent 只有在
+    /// allocator、scanner、forwarder 三路 lease 均归零、没有 live 或 queued slot、也没有在途
+    /// return 时才允许 decommit。
+    ///
+    /// 返回按 extent 编号排序的候选集，供调用方先做 relocation pause 预算判定再执行 trim。
+    pub(super) fn trim_candidates(&self) -> Vec<(ExtentId, ExtentOccupancy)> {
+        // extent → (live, queued, pending)；只统计仍属于某个活跃 extent 的描述符。
+        let mut occupancy: std::collections::BTreeMap<ExtentId, ExtentOccupancy> =
+            std::collections::BTreeMap::new();
+        for descriptor in self.table.descriptors() {
+            if descriptor.state == SlabState::Released {
+                continue;
+            }
+            let entry = occupancy
+                .entry(descriptor.extent)
+                .or_insert_with(ExtentOccupancy::default);
+            entry.live_slots += descriptor.live;
+            entry.queued_slots += descriptor.queued;
+            entry.pending_returns += descriptor.pending_returns;
+        }
+        // 从未发过的 extent 没有被任何描述符引用，天然满足空载门禁。
+        for descriptor in self.extents.descriptors() {
+            if descriptor.state == ExtentState::Live && !occupancy.contains_key(&descriptor.id) {
+                occupancy.insert(descriptor.id, ExtentOccupancy::default());
+            }
+        }
+        let mut candidates: Vec<(ExtentId, ExtentOccupancy)> = occupancy.into_iter().collect();
+        candidates.sort_unstable_by_key(|(extent, _)| *extent);
+        candidates
+    }
+
+    /// 对候选 extent 逐个执行四重门禁；未过门禁的保持 committed 并被计入 `blocked`，
+    /// 由后续 drain 继续推进，而不是“看起来空闲”就撤销物理页。
+    ///
+    /// 通过门禁的 extent 同时让名下全部空载 descriptor 离开 committed 口径：物理页与账本
+    /// 必须同一步回落，否则分类之和会持续虚报已撤销的 extent。
+    pub(super) fn trim_extents(
+        &mut self,
+        candidates: &[(ExtentId, ExtentOccupancy)],
+    ) -> Result<TrimReport, RawInvariant> {
+        let mut report = TrimReport::default();
+        for (extent, occupancy) in candidates {
+            match self.poll_trim_extent(*extent, *occupancy)? {
+                Ok(_) => {
+                    self.release_extent_descriptors(*extent)?;
+                    report.trimmed += 1;
+                }
+                Err(blocked) => report.blocked.push((*extent, blocked)),
+            }
+        }
+        Ok(report)
+    }
+
+    /// 让一个已撤销物理页的 extent 名下全部 descriptor 离开 committed 口径。
+    ///
+    /// 每个 descriptor 的字节先从对应 owner 账本释放，再标记为 `Released` 并把
+    /// `committed_bytes` 清零；编号保留但永不复用，二次 trim 不会再把它当候选。
+    fn release_extent_descriptors(&mut self, extent: ExtentId) -> Result<(), RawInvariant> {
+        let owned: Vec<(SlabDescriptorId, OwnerId, u64)> = self
+            .table
+            .descriptors()
+            .iter()
+            .enumerate()
+            .filter(|(_, descriptor)| {
+                descriptor.extent == extent && descriptor.state != SlabState::Released
+            })
+            .filter_map(|(index, descriptor)| {
+                Some((
+                    SlabDescriptorId::from_raw(u32::try_from(index).ok()?),
+                    descriptor.owner.owner_id,
+                    descriptor.committed_bytes,
+                ))
+            })
+            .collect();
+        for (descriptor, owner_id, bytes) in owned {
+            if let Some(accounting) = self.directory.accounting_mut(owner_id) {
+                accounting.release(bytes);
+            }
+            let record = self
+                .table
+                .descriptor_mut(descriptor)
+                .ok_or_else(|| RawInvariant::new("撤销 extent 缺少 descriptor"))?;
+            record.state = SlabState::Released;
+            record.committed_bytes = 0;
+        }
+        Ok(())
     }
 
     /// 把一个 extent 归入跨 owner 归还：进入 `ReturnQueued` 并构造 `ReturnKind::Extent` 消息。

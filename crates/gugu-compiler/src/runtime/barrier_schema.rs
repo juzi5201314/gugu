@@ -187,10 +187,10 @@ impl BarrierDemand {
     }
 }
 
-/// barrier 账本的分类占用；与阶段 32 的 owner 互斥账本分开报告。
+/// barrier 账本的分类占用；与 owner 互斥账本分开报告。
 ///
 /// `pending_batch_bytes` 是已经进入 staging 但尚未被 arena owner 消费的 card batch 字节；
-/// pressure episode 的消费与 forced full cycle 由后续阶段接入同一分类。
+/// pressure episode 的消费与 forced full cycle 由 `PacingPlane` 接入同一分类。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct BarrierPressureV1 {

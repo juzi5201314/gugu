@@ -34,6 +34,16 @@ pub(crate) mod gc_metadata_schema;
 pub(crate) mod gc_metadata_section;
 mod harness;
 mod model;
+#[allow(
+    dead_code,
+    reason = "pacing 与 pressure 状态机由 world、harness 与确定性测试消费"
+)]
+mod pacing;
+#[allow(
+    dead_code,
+    reason = "pacing 契约段由 runtime raw、LIR 与 ImagePlan 消费"
+)]
+pub(crate) mod pacing_schema;
 mod platform_schema;
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
@@ -70,6 +80,7 @@ pub use coroutine_schema::{
     StackPolicy,
 };
 pub use gc_metadata_schema::GcMetadataDemand;
+pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};
@@ -137,6 +148,12 @@ pub use harness::{
 
 #[cfg(test)]
 pub use extent::EXTENT_CLASS_LADDER;
+#[allow(unused_imports, reason = "pacing 参照实现由 world 与确定性测试消费")]
+pub(crate) use pacing::{
+    AssistOutcome, CommittedClasses, CreditError, CreditPlane, CreditSource, EvacuationFootprint,
+    EvacuationOutcome, HeadroomDecision, PacingPlane, PressureEpisodeStats, PressureState,
+    RemarkOutcome,
+};
 pub use platform_schema::{PlatformOp, PlatformRangeDemand};
 
 pub(crate) use model::{

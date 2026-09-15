@@ -315,7 +315,7 @@ impl RawWorld {
 
     /// 取走本 owner 的跨 block edge delta。
     ///
-    /// edge summary 是 owner-local 聚合，只发布给 target owner 的 batch；阶段 45 的
+    /// edge summary 是 owner-local 聚合，只发布给 target owner 的 batch；
     /// `EdgeDelta` 传输接手后从这里取出并发布。
     pub(crate) fn take_edge_deltas(&mut self, owner: u32) -> Vec<EdgeDeltaRecord> {
         let _ = owner;
