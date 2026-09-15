@@ -258,7 +258,7 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 | `functions` | frontend parser、capture、async、HIR/GIR | 捕获、async 与 HIR 已落地 |
 | `traits` | trait solver、impl selection | 选择、特化与 dyn/Any 前端已落地 |
 | `passing` | value/resource lowering | GIR 已按类别展开浅拷、COW seal 与 resource lease；`large_copy` 已接入诊断 |
-| `memory` | placement、resource runtime、GC | 已记录 TurnRegion/LocalHeap/SharedHeap 选择；runtime 分配与 GC 仍未物化 |
+| `memory` | placement、resource runtime、GC、region registry | 已记录 TurnRegion/LocalHeap/SharedHeap 选择与 region 门禁、promote、transfer 路径；真实 GC 搬迁仍未物化 |
 | `concurrency` | scheduler、channel、sync runtime | 调度基础路径与 channel/Join/select 等待协议参照模型已接入；镜像内执行仍待后续写出 |
 | `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 |
 | `unsafe` | safety checker、FFI/asm backend | 前端安全检查已落地；外部桥接执行与机器编码未落地 |
@@ -266,6 +266,8 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 | `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界；raw 平面契约、资源租约、owner-directed return 与 rt0 启动/终止/报告契约及参照实现已落地 |
 | `standard-library` | `runtime` Gugu 源树与 std modules | 已建立源树登记 |
 | `testing` | test collector、harness、CLI | 未实现 |
+
+`RuntimeRawModel` schema 13 把 TurnRegion 契约并入同一缓存对象：容量 class 阶梯（64 B 起的十档，上界与单个 managed block 同源）、单 region 对象上界、单 owner 活跃 region 上界、transfer lease 上界、export summary 位目录、region 状态目录，以及 `RegionTransfer` 的字段目录与需求视图。`RegionTransfer` 与 return/card 共用同一条传输通道、同一个 node pool、同一套 producer staging 与 queue-page grace，消息只携带 region 序号、generation、type summary 编号、bytes、export state、来源 owner 与目标 owner 身份，不携带地址；receiving owner 采纳后两侧账本一起移动。`ImagePlan` 暴露 `turn-region-*` 与 `turn-region-contract-fingerprint`，`-Zdump-runtime` 输出容量阶梯、位目录、状态目录、字段目录与需求计数。runtime 侧的参照实现（`runtime/region.rs` 与 `world/region_impl.rs`）把同一份契约接到真实 owner 事实：region 容量在 `open` 时 commit 给 owner，`reset` 时 release，`promote` 时保留；resource lease 与 FFI 地址写入观察位后 reset 被拒绝并转为保留；在途 transfer 字节计入 credit 快照的 pending 项。
 
 内部契约也沿同一边界扩展：[`AST/HIR`](ast-hir.md) 消费 frontend 产物，[`GIR/LIR`](gir-lir.md) 消费冻结 HIR，[`后端`](backend.md) 负责从合法 LIR 到 machine code，[`调度器`](scheduler.md) 和 [`GC 元数据`](gc-metadata.md) 负责 runtime 语义。不得为这些后续模块建立平行的占位语义路径。
 

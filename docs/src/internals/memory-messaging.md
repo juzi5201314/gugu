@@ -369,7 +369,10 @@ managed plane 的对象根据 `EscapeAndPlacement` 进入 `TurnRegion`、`LocalH
 
 - `TurnRegion` 是当前 coroutine turn 私有的 owner-local bump region。经过 export summary
   验证后可以整区 reset；它不能包含必须独立 release 的 ResourceCell，也不能留下外部
-  alias。未消费的 `RegionTransfer` 使 region 处于 pending，不能 reset 或复用。
+  alias。summary 是 `external-alias`/`resource-lease`/`ffi-address`/`pending-transfer`/
+  `live-root` 五位掩码，全为 0 才算闭合；未闭合或 transfer lease 非零时只能 `LocalPromote`。
+  未消费的 `RegionTransfer` 使 region 处于 pending，不能 reset 或复用，对应字节计入
+  `pending_return_bytes`。
 - `LocalHeap` 继续使用 2 MiB arena、32 KiB block、Immix line、TLAB、object-start bitmap、
   mark bitmap、card table 和 direct managed pointer。owner 在本地执行 mark、sweep 和
   没有 foreign incoming edge 的 evacuation。

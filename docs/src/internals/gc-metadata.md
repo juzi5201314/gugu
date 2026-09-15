@@ -66,13 +66,18 @@ region state 只能按下列方向转换：
 ```text
 Private → Publishing → LocalPromote
 Private → Publishing → RegionTransfer → Received
-Private → ResetPending → Reset
+Private → Publishing → ResetPending → Reset
 ```
 
-`Publishing` 前必须登记所有可能逃逸的 root、slot 和 identity handle。若 sender 继续
-需要访问对象，compiler/runtime 必须走 `LocalPromote` 或语义复制，不能发布
-`RegionTransfer`。receiver 取得 region generation 后成为唯一 runtime owner；transfer
-message 未消费前，region bytes 属于 pending pressure，不能 reset 或复用。
+export summary 是五位掩码：`external-alias`、`resource-lease`、`ffi-address`、`pending-transfer`、`live-root`。
+只有五位全为 0 时 summary 才算闭合。`Publishing` 前必须登记所有可能逃逸的 root、slot 和
+identity handle；编译器声明的位来自 `RegionPublish` 的操作数，运行时观察到的位来自 owner-local
+事实（外部 alias、ResourceCell lease、pin/foreign 地址、在途 transfer、live root root set）。
+`reset` 因此必须同时满足：状态为 `Publishing`、transfer lease 为 0、summary 闭合。任一条不满足
+时不得释放 region，调用方必须走 `LocalPromote`。若 sender 继续需要访问对象，compiler/runtime
+必须走 `LocalPromote` 或语义复制，不能发布 `RegionTransfer`。receiver 取得 region generation 后
+成为唯一 runtime owner；transfer message 未消费前，region bytes 属于 pending pressure，不能
+reset 或复用，两侧 owner 账本在接收方采纳后才一起移动。
 
 `SharedHeap` 使用 stable handle table。handle 是逻辑 object identity，不是用户可观察的
 整数；其内部键至少包含 table/cage 标识、slot 或 object id 和 generation。slot 保存
