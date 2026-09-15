@@ -15,8 +15,7 @@
 //!    状态迁移，调用方只能按返回值决定的顺序推进。
 
 use super::pacing_schema::{
-    ASSIST_OUTCOME_NAMES, DRAIN_CLASS_NAMES, EVACUATION_OUTCOME_NAMES, GcPacingRuntimeContract,
-    REMARK_OUTCOME_NAMES,
+    ASSIST_OUTCOME_NAMES, EVACUATION_OUTCOME_NAMES, GcPacingRuntimeContract, REMARK_OUTCOME_NAMES,
 };
 
 /// pressure 状态；强度顺序与 `PRESSURE_STATE_NAMES` 一致。
@@ -147,14 +146,18 @@ impl EvacuationOutcome {
     }
 }
 
-/// 一个候选 block 的 relocation footprint。
+/// 一次 pause 预算判定所需的真实工作量度量。
+///
+/// 它同时服务真实的 relocation 与空 extent 的 trim 批：两者记的都是「本次暂停要付出多少
+/// 工作」，但来源不同——relocation 记 payload 复制字节与 root/field 更新数，trim 批记撤销的
+/// 已提交字节与 descriptor 数（空 extent 没有字段工作，因此 `fields` 恒为 0）。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct EvacuationFootprint {
-    /// 需要复制的 payload 字节。
-    pub(crate) copied_bytes: u64,
-    /// 需要更新的 exact root 数。
+    /// 本次暂停搬动或撤销的字节数。
+    pub(crate) bytes: u64,
+    /// 需要更新的 exact root 数；trim 批是批内 descriptor 数。
     pub(crate) roots: u32,
-    /// 需要更新的字段数。
+    /// 需要更新的字段数；空 extent 的 trim 批恒为 0。
     pub(crate) fields: u32,
 }
 
@@ -352,7 +355,9 @@ pub(crate) struct PressureEpisodeStats {
     pub(crate) epoch: u64,
     /// 本 episode 已执行的 forced full cycle 数；至多为 1。
     pub(crate) forced_cycles: u64,
-    /// 已完成的 owner drain 次数。
+    /// 本 episode 已返回过 `Drain` headroom 决策的次数；至多为 1。
+    pub(crate) headroom_drains: u32,
+    /// 已完成的真实 owner drain 次数。
     pub(crate) drains: u64,
     /// 是否已经各自完成一次 pending/cache/reclaimable 分类 drain。
     pub(crate) classes_drained: [bool; 3],
@@ -390,10 +395,32 @@ impl CommittedClasses {
     pub(crate) const fn drained(self, index: usize) -> bool {
         self.get(index) == 0
     }
+}
 
-    /// 返回三类分类名。
-    pub(crate) const fn names() -> [&'static str; 3] {
-        DRAIN_CLASS_NAMES
+/// 一个 cycle 内真实完成工作的累计计数器快照。
+///
+/// 三个来源都是只增不减的全局累计量（processor card 记账、owner 取走的 edge delta 数、
+/// 发布的 batch 数）；per-cycle 工作量由相邻两次快照之差得到，不引入第二套计数口径。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct GcWorkCounters {
+    /// processor 账本累计的 card mark 次数。
+    pub(crate) card_marks: u64,
+    /// owner 已取走的 edge delta 累计数。
+    pub(crate) edge_deltas: u64,
+    /// 已发布的 card batch 累计数。
+    pub(crate) published_batches: u64,
+}
+
+impl GcWorkCounters {
+    /// 返回相对 `baseline` 的 per-cycle 工作量；累计量只增，因此饱和减法就是真实差值。
+    pub(crate) fn since(self, baseline: Self) -> u64 {
+        self.card_marks
+            .saturating_sub(baseline.card_marks)
+            .saturating_add(self.edge_deltas.saturating_sub(baseline.edge_deltas))
+            .saturating_add(
+                self.published_batches
+                    .saturating_sub(baseline.published_batches),
+            )
     }
 }
 
@@ -410,10 +437,26 @@ pub(crate) struct PacingPlane {
     soft_memory_limit: Option<u64>,
     last_live_bytes: u64,
     allocated_since_cycle_bytes: u64,
+    /// 缓存的增长预算；`complete_cycle` 与 `set_target_percent` 维护，慢路径只做标量比较。
+    growth_budget_bytes: u64,
     pending_mark_work: u64,
+    /// 本 cycle 已完成工作的计数器基线；per-cycle 工作量由两次快照之差得到。
+    work_baseline: GcWorkCounters,
     credits: CreditPlane,
     gc_cpu_consumed: u64,
     gc_cpu_window_epoch: u64,
+    /// 最近一次真实快照的 committed 估计；其后每次分配累加，低水位快路不做全局读取。
+    committed_estimate: u64,
+    /// 距上次真实 committed 快照的累计分配字节。
+    allocated_since_poll_bytes: u64,
+    /// 距上次 episode 内有界 drain 的累计分配字节。
+    allocated_since_drain_bytes: u64,
+    /// 距上次自动 cycle 尝试的累计分配字节。
+    allocated_since_cycle_attempt_bytes: u64,
+    /// episode 内是否到了执行一次有界 drain 的节奏点。
+    pressure_drain_due: bool,
+    /// 真实 committed 快照的观测次数；用于锁定慢路径不读全局状态。
+    pressure_snapshots: u64,
     state: PressureState,
     episode: PressureEpisodeStats,
     forced_cycle_total: u64,
@@ -439,16 +482,25 @@ impl Default for PacingPlane {
 impl PacingPlane {
     /// 以已验证契约创建平面；默认不设软上限、按 100% 增长目标。
     pub(crate) fn new(contract: GcPacingRuntimeContract) -> Self {
+        let growth_budget_bytes = contract.min_growth_budget();
         Self {
             contract,
             target_percent: Some(100),
             soft_memory_limit: None,
             last_live_bytes: 0,
             allocated_since_cycle_bytes: 0,
+            growth_budget_bytes,
             pending_mark_work: 0,
+            work_baseline: GcWorkCounters::default(),
             credits: CreditPlane::default(),
             gc_cpu_consumed: 0,
             gc_cpu_window_epoch: 0,
+            committed_estimate: 0,
+            allocated_since_poll_bytes: 0,
+            allocated_since_drain_bytes: 0,
+            allocated_since_cycle_attempt_bytes: 0,
+            pressure_drain_due: false,
+            pressure_snapshots: 0,
             state: PressureState::Steady,
             episode: PressureEpisodeStats::default(),
             forced_cycle_total: 0,
@@ -482,6 +534,7 @@ impl PacingPlane {
     /// 设置自动 GC 增长目标的百分数；`None` 等价于 `GcTarget::Off`。
     pub(crate) fn set_target_percent(&mut self, target: Option<u32>) {
         self.target_percent = target;
+        self.growth_budget_bytes = self.compute_growth_budget(self.last_live_bytes);
     }
 
     /// 返回自动 GC 增长目标。
@@ -564,9 +617,25 @@ impl PacingPlane {
         self.last_live_bytes
     }
 
-    /// 登记一次分配；只累计 debt，不做全局读取。
+    /// 返回最近一次真实快照的 committed 估计；其后每次分配都累加。
+    pub(crate) const fn committed_estimate(&self) -> u64 {
+        self.committed_estimate
+    }
+
+    /// 返回真实 committed 快照的观测次数。
+    pub(crate) const fn pressure_snapshots(&self) -> u64 {
+        self.pressure_snapshots
+    }
+
+    /// 登记一次分配；只累计 debt 与估计，不做任何全局读取。
     pub(crate) fn observe_allocation(&mut self, bytes: u64) {
         self.allocated_since_cycle_bytes = self.allocated_since_cycle_bytes.saturating_add(bytes);
+        self.committed_estimate = self.committed_estimate.saturating_add(bytes);
+        self.allocated_since_poll_bytes = self.allocated_since_poll_bytes.saturating_add(bytes);
+        self.allocated_since_drain_bytes = self.allocated_since_drain_bytes.saturating_add(bytes);
+        self.allocated_since_cycle_attempt_bytes = self
+            .allocated_since_cycle_attempt_bytes
+            .saturating_add(bytes);
     }
 
     /// 登记尚未消费的 mark 工作。
@@ -574,18 +643,28 @@ impl PacingPlane {
         self.pending_mark_work = self.pending_mark_work.saturating_add(cost);
     }
 
-    /// 返回增长预算：`max(min_growth_budget, floor(last_live × target / 100))`。
-    pub(crate) fn growth_budget(&self) -> u64 {
+    /// 计算 `max(min_growth_budget, floor(live × target / 100))`；`GcTarget::Off` 取下限。
+    fn compute_growth_budget(&self, live_bytes: u64) -> u64 {
         let target = self.target_percent.map_or(0, |percent| {
-            u64::from(percent).saturating_mul(self.last_live_bytes) / 100
+            u64::from(percent).saturating_mul(live_bytes) / 100
         });
         self.contract.min_growth_budget().max(target)
+    }
+
+    /// 返回增长预算：`max(min_growth_budget, floor(last_live × target / 100))`。
+    pub(crate) fn growth_budget(&self) -> u64 {
+        self.compute_growth_budget(self.last_live_bytes)
+    }
+
+    /// 返回缓存的增长预算；与 `growth_budget` 同值，供零全局读取的慢路径门禁使用。
+    pub(crate) const fn growth_budget_cached(&self) -> u64 {
+        self.growth_budget_bytes
     }
 
     /// 返回 allocation debt。
     pub(crate) fn allocation_debt(&self) -> u64 {
         self.allocated_since_cycle_bytes
-            .saturating_sub(self.growth_budget())
+            .saturating_sub(self.growth_budget_bytes)
     }
 
     /// 返回 mark debt：allocation debt 折算的 cost unit 加尚未消费的 mark 工作。
@@ -617,11 +696,77 @@ impl PacingPlane {
         self.target_percent.is_some() && self.allocation_debt() > 0
     }
 
-    /// 完成一次 cycle：记录存活字节并清零 cycle 内分配量。
-    pub(crate) fn complete_cycle(&mut self, live_bytes: u64) {
+    /// 返回 soft limit 的 enter 水位。
+    fn enter_watermark(&self) -> Option<u64> {
+        self.soft_memory_limit.map(|limit| {
+            limit.saturating_mul(u64::from(self.contract.pressure_enter_ratio())) / 100
+        })
+    }
+
+    /// 缓存的 committed 估计是否已经触达 enter 水位。
+    fn enter_reached(&self) -> bool {
+        self.enter_watermark()
+            .is_some_and(|enter| self.committed_estimate >= enter)
+    }
+
+    /// 是否应当刷新一次真实 committed 快照：处于 episode、估计触达 enter 水位，或距上次
+    /// 快照又分配了 `pressure_poll_bytes`。三者都是标量比较，低水位时不产生全局读取。
+    pub(crate) fn pressure_poll_due(&self) -> bool {
+        self.state.in_episode()
+            || self.enter_reached()
+            || self.allocated_since_poll_bytes >= self.contract.pressure_poll_bytes()
+    }
+
+    /// 按缓存估计判断 headroom 是否可能不足；为真时调用方必须先刷新真实快照再决定。
+    pub(crate) fn headroom_may_fail(&self, bytes: u64) -> bool {
+        self.soft_memory_limit
+            .is_some_and(|limit| self.committed_estimate.saturating_add(bytes) > limit)
+    }
+
+    /// 是否应当借一次 assist：mark debt 达阈值且窗口还有额度。
+    pub(crate) fn assist_due(&self) -> bool {
+        self.mark_debt() >= self.contract.assist_threshold() && self.gc_cpu_allowance() > 0
+    }
+
+    /// 取走一次 episode 内有界 drain 的节奏点；episode 开启与升级会立即臂化它。
+    pub(crate) fn take_pressure_drain(&mut self) -> bool {
+        let cadence =
+            self.allocated_since_drain_bytes >= self.contract.owner_drain_interval_bytes();
+        if !(self.state.in_episode() && (self.pressure_drain_due || cadence)) {
+            return false;
+        }
+        self.pressure_drain_due = false;
+        self.allocated_since_drain_bytes = 0;
+        true
+    }
+
+    /// 取走一次自动 cycle 的尝试机会；两次尝试之间至少间隔 `min_growth_budget` 的分配量，
+    /// 因此未完成的 cycle 会按节奏退避，而不是在每次分配上重扫整堆。
+    pub(crate) fn take_cycle_attempt(&mut self) -> bool {
+        if !self.should_start_cycle()
+            || self.allocated_since_cycle_attempt_bytes < self.contract.min_growth_budget()
+        {
+            return false;
+        }
+        self.allocated_since_cycle_attempt_bytes = 0;
+        true
+    }
+
+    /// 返回相对基线推进的 per-cycle 工作量。
+    pub(crate) fn cycle_work_cost(&self, counters: GcWorkCounters) -> u64 {
+        counters.since(self.work_baseline)
+    }
+
+    /// 完成一次 cycle：记录存活字节与工作量基线，只重设 cycle 域状态。
+    ///
+    /// `pending_mark_work` 是「拖欠的 mark 工作」，跨 cycle 存活并由后续 assist 归还；
+    /// 在这里清零会让「超窗工作转为 debt 再偿还」的机制在同一个 drain 内被抹掉。
+    pub(crate) fn complete_cycle(&mut self, live_bytes: u64, counters: GcWorkCounters) {
         self.last_live_bytes = live_bytes;
+        self.growth_budget_bytes = self.compute_growth_budget(live_bytes);
         self.allocated_since_cycle_bytes = 0;
-        self.pending_mark_work = 0;
+        self.allocated_since_cycle_attempt_bytes = 0;
+        self.work_baseline = counters;
         self.gc_cpu_consumed = 0;
         self.gc_cpu_window_epoch = self.gc_cpu_window_epoch.saturating_add(1);
     }
@@ -633,19 +778,19 @@ impl PacingPlane {
 
     /// 是否需要在本次分配上执行慢路径探测。
     ///
-    /// 四个条件都不需要全局读取：窗口溢出、已处于 episode、配置了软上限，或本 cycle 的
-    /// 分配量已经达到 `min_growth_budget`（`growth_budget` 的下界，因此这是 allocation debt
-    /// 可能为正的必要条件）。四者都不成立时普通分配不付出任何全局查询。
+    /// 全部条件都是标量比较：窗口溢出、处于 episode、到了刷新真实快照的节奏、本 cycle
+    /// 分配量已达缓存的增长预算，或估计触达 soft limit 的 enter 水位。都不成立时普通分配
+    /// 不付出任何全局查询。
     pub(crate) fn slow_edge_due(&self) -> bool {
         self.window_exhausted()
-            || self.state.in_episode()
-            || self.soft_memory_limit.is_some()
-            || self.allocated_since_cycle_bytes >= self.contract.min_growth_budget()
+            || self.pressure_poll_due()
+            || self.allocated_since_cycle_bytes >= self.growth_budget_bytes
     }
 
     /// 在一个 slow edge 上执行一次 assist。
     ///
-    /// 只有完成的 work 才减少 `mark_debt`；`available` 是调用方在慢路径上真实可消费的 work。
+    /// 只有调用方真实完成并交接的工作才减少 `mark_debt`：`available` 以 cost unit 计，
+    /// 一张 dirty card 折算 `CARD_GRANULARITY_BYTES` 个 mark cost unit（与 barrier 契约同源）。
     /// 没有可消费 work 时返回 `NoWork` 且不改变账本，避免虚构进度。
     pub(crate) fn assist(&mut self, available: u64) -> AssistOutcome {
         let debt = self.mark_debt();
@@ -671,10 +816,14 @@ impl PacingPlane {
         }
         self.assist_cost = self.assist_cost.saturating_add(consumed);
         self.gc_cpu_consumed = self.gc_cpu_consumed.saturating_add(consumed);
-        self.pending_mark_work = self.pending_mark_work.saturating_sub(consumed);
+        // cost unit 先冲抵拖欠的 mark 工作，余量才按 mark_cost_per_byte 折成 allocation
+        // 字节：两项各扣一次会让债务以两倍速度归还。不足一字节的余量留在债务里（偏保守）。
+        let from_pending = consumed.min(self.pending_mark_work);
+        self.pending_mark_work -= from_pending;
+        let remaining = consumed - from_pending;
         self.allocated_since_cycle_bytes = self
             .allocated_since_cycle_bytes
-            .saturating_sub(consumed / u64::from(self.contract.mark_cost_per_byte()));
+            .saturating_sub(remaining / u64::from(self.contract.mark_cost_per_byte()));
         let outcome = if available > quantum {
             AssistOutcome::QuantumTruncated
         } else {
@@ -730,9 +879,11 @@ impl PacingPlane {
         }
     }
 
-    /// 检查一个候选 block 的 relocation footprint 是否整块可发布。
+    /// 判定一次 pause 的 footprint 是否整块落在所有上界内。
+    ///
+    /// 任一维度越界就整批延后，不允许部分发布；调用方负责给出真实度量，不得用估算值。
     pub(crate) fn evacuation(&mut self, footprint: EvacuationFootprint) -> EvacuationOutcome {
-        let admit = footprint.copied_bytes <= self.contract.evacuation_pause_bytes()
+        let admit = footprint.bytes <= self.contract.evacuation_pause_bytes()
             && footprint.roots <= self.contract.evacuation_pause_roots()
             && footprint.fields <= self.contract.evacuation_pause_fields();
         if admit {
@@ -759,9 +910,12 @@ impl PacingPlane {
         committed: u64,
         classes: CommittedClasses,
     ) -> PressureState {
-        // 快照先落地：dump 与 debt 重算都读同一份观测，不重复取全局状态。
+        // 快照先落地：dump、debt 重算与估计都读同一份观测，轮询节奏也在此复位。
         self.last_committed_bytes = committed;
         self.last_classes = classes;
+        self.committed_estimate = committed;
+        self.allocated_since_poll_bytes = 0;
+        self.pressure_snapshots = self.pressure_snapshots.saturating_add(1);
         let Some(limit) = self.soft_memory_limit else {
             self.state = PressureState::Steady;
             return self.state;
@@ -782,17 +936,22 @@ impl PacingPlane {
             }
             return self.state;
         }
-        self.note_drained_classes(classes);
-        if committed < clear && self.episode.all_classes_drained() {
+        // 结束条件：降到 clear 水位以下，且三类分类都已经过一次真实 owner drain 覆盖。
+        // 「当前快照为 0」不算 drain 证据——那会让本来为空的分类不经过任何 drain 就算完成。
+        if committed < clear && self.episode.drains > 0 && self.episode.all_classes_drained() {
             let epoch = self.episode.epoch;
+            let drains = self.episode.drains;
             self.state = PressureState::Steady;
-            // episode 结束后 forced cycle 标记复位，下一次 episode 才有权再启动一次。
+            // episode 结束后 forced cycle 与 headroom 机会复位，下一次 episode 才有权再用。
             self.episode = PressureEpisodeStats {
                 epoch,
                 forced_cycles: 0,
-                drains: self.episode.drains,
+                headroom_drains: 0,
+                drains,
                 classes_drained: [false; 3],
             };
+            self.pressure_drain_due = false;
+            self.allocated_since_drain_bytes = 0;
             return self.state;
         }
         if self.state == PressureState::Emergency && committed < limit {
@@ -825,13 +984,16 @@ impl PacingPlane {
         if !self.state.in_episode() {
             self.open_episode();
         }
-        self.state = if requested >= limit {
+        // 水位口径与 `update_pressure` 一致：占用达到 soft limit 才是 Emergency，否则只是
+        // Drain；用 `requested` 判定会让所有超出请求都被记成 Emergency。
+        self.state = if committed >= limit {
             PressureState::Emergency
         } else {
             PressureState::Drain
         };
-        if self.episode.drains == 0 {
-            self.episode.drains = 1;
+        // headroom 的两次机会用独立计数，不借用真实 owner drain 的次数。
+        if self.episode.headroom_drains == 0 {
+            self.episode.headroom_drains = 1;
             return HeadroomDecision::Drain;
         }
         if self.episode.forced_cycles == 0 {
@@ -864,6 +1026,10 @@ impl PacingPlane {
         self.episode.forced_cycles = 0;
         self.episode.drains = 0;
         self.episode.classes_drained = [false; 3];
+        self.episode.headroom_drains = 0;
+        // episode 一开启就要求一次真实 drain，此后按分配节奏推进。
+        self.pressure_drain_due = true;
+        self.allocated_since_drain_bytes = 0;
     }
 
     /// 返回固定文本 dump；不含地址与宿主信息。
@@ -900,6 +1066,16 @@ impl PacingPlane {
             self.pressure_debt(self.last_committed_bytes),
             Self::return_pressure(self.last_classes),
             self.mark_credit_pending(),
+        )
+        .expect("String写入");
+        writeln!(
+            output,
+            "pacing-drain due={} poll-bytes={} attempt-bytes={} interval-bytes={} snapshots={}",
+            self.pressure_drain_due,
+            self.allocated_since_poll_bytes,
+            self.allocated_since_cycle_attempt_bytes,
+            self.allocated_since_drain_bytes,
+            self.pressure_snapshots,
         )
         .expect("String写入");
         writeln!(

@@ -380,9 +380,8 @@ fn batch_flush_limits_and_target_change() {
         items: 12,
         batch_soft_bytes: 1 << 20,
     };
-    let mut world = world(2, 64);
+    let mut world = RawWorld::new(7, 2, 64, limits).expect("raw world 可创建");
     let class = RuntimeSizeClassId::from_raw(0);
-    let mut staging = ProducerStaging::new(limits);
     let first = world.token(0);
     let second = world.token(1);
     let mut outcomes: Vec<PublishOutcome> = Vec::new();
@@ -406,7 +405,7 @@ fn batch_flush_limits_and_target_change() {
             .expect("消息可构造");
         outcomes.extend(
             world
-                .publish_message(&mut staging, &message, shard(0), None)
+                .publish_message(0, &message, shard(0), None)
                 .expect("发布成功"),
         );
     }
@@ -423,10 +422,18 @@ fn batch_flush_limits_and_target_change() {
         "目标改变必须强制刷新旧 chain"
     );
 
-    let mut staging = ProducerStaging::new(BatchLimits {
-        items: 1024,
-        batch_soft_bytes: 64,
-    });
+    // byte 上限属于 world 自己的 staging，因此换一个用更小 byte 预算构建的世界。
+    let mut world = RawWorld::new(
+        7,
+        2,
+        64,
+        BatchLimits {
+            items: 1024,
+            batch_soft_bytes: 64,
+        },
+    )
+    .expect("raw world 可创建");
+    let first = world.token(0);
     let mut byte_trigger = None;
     for _ in 0..4_u32 {
         let allocation = world.allocate(0, class).expect("分配成功");
@@ -446,7 +453,7 @@ fn batch_flush_limits_and_target_change() {
             )
             .expect("消息可构造");
         let produced = world
-            .publish_message(&mut staging, &message, shard(0), None)
+            .publish_message(0, &message, shard(0), None)
             .expect("发布成功");
         if let Some(outcome) = produced.last() {
             byte_trigger = Some(outcome.trigger);
@@ -493,35 +500,21 @@ fn ring_close_batches_reach_owner_inbox() {
     let second = world.allocate(0, class).expect("分配成功");
     world.queue_return(0, first.slot, stride).expect("归还");
     world.queue_return(0, second.slot, stride).expect("归还");
-    let mut staging = ProducerStaging::new(BatchLimits::default());
-    let target = world.token(0);
-    let pool = world.pool();
-    let node = pool.allocate().expect("node 可用");
-    let message = world
-        .message(
-            target,
-            ReturnKind::RawSlot,
-            first.slot,
-            descriptor_stride(&world, class),
-        )
-        .expect("消息可构造");
-    pool.store(node, &message, message.integrity.checksum);
-    pool.link(node, None);
-    staging
-        .stage(node, message.target, message.bytes, shard(0))
-        .expect("暂存成功");
-    let mut cache = ReturnSlabCache::new();
-    assert!(
-        cache
-            .insert(
+    // cache 由 world 持有：consumer 侧 same-slab 聚合经 `cache_return_slot` 进入。
+    assert_eq!(
+        world
+            .cache_return_slot(
+                0,
                 (second.slot.descriptor, second.slot.generation),
                 second.slot.index,
                 stride
             )
-            .is_none()
+            .expect("聚合成功"),
+        0,
+        "首个 slot 只登记 ring，不发布"
     );
     let published = world
-        .close_cache(0, &mut staging, &mut cache, RingCloseReason::PressureDrain)
+        .close_cache(0, RingCloseReason::PressureDrain)
         .expect("ring 关闭必须发布 batch");
     assert_eq!(published, 1);
     let report = world

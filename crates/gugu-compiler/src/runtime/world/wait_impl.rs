@@ -412,11 +412,8 @@ impl RawWorld {
         let message = self.message(token, ReturnKind::WaitNode, allocation.slot, stride)?;
         let shard = super::super::inbox::ShardIndex::from_raw(0)
             .ok_or_else(|| RawInvariant::new("wait-node shard"))?;
-        let mut staging = super::super::message::ProducerStaging::new(
-            super::super::message::BatchLimits::default(),
-        );
         self.publish_message(
-            &mut staging,
+            owner,
             &message,
             shard,
             Some(super::super::message::FlushTrigger::OwnerPressure),

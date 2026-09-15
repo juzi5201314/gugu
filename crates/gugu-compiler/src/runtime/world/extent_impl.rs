@@ -23,6 +23,35 @@ use super::super::slab::{
 };
 use super::RawWorld;
 
+/// 一个 trim 候选：门禁所需的 occupancy 加 pause 预算所需的真实度量。
+///
+/// `revoked_bytes` 与 `descriptors` 与 `occupancy` 在同一次描述符表扫描里聚合：pause 判定
+/// 因此用的是物理事实而不是估算，release 时落账的也是同一批字节与描述符。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) struct TrimCandidate {
+    /// 候选 extent。
+    pub(super) extent: ExtentId,
+    /// allocator/scanner/forwarder 门禁读取的占用。
+    pub(super) occupancy: ExtentOccupancy,
+    /// 本 extent 名下尚未 `Released` 的 descriptor 的已提交字节。
+    pub(super) revoked_bytes: u64,
+    /// 本 extent 名下的 descriptor 数。
+    pub(super) descriptors: u32,
+}
+
+impl Default for TrimCandidate {
+    /// 空候选：`ExtentId` 没有语义上的零值，默认候选只用于「未发过的 extent」占位，
+    /// 调用方必须在插入时写入真实编号。
+    fn default() -> Self {
+        Self {
+            extent: ExtentId::from_raw(0),
+            occupancy: ExtentOccupancy::default(),
+            revoked_bytes: 0,
+            descriptors: 0,
+        }
+    }
+}
+
 /// 一个 owner arena 的容量；等于二次幂 extent 阶梯的顶层。
 pub(crate) const OWNER_ARENA_BYTES: u64 = 2 * 1024 * 1024;
 
@@ -112,35 +141,42 @@ impl RawWorld {
 
     /// pressure trim：把全部空闲且无 pending return 的 Live extent 交回 buddy 阶梯。
     ///
-    /// occupancy 从 slab 描述符表按 extent 聚合而来，不含任何猜测：一个 extent 只有在
-    /// allocator、scanner、forwarder 三路 lease 均归零、没有 live 或 queued slot、也没有在途
-    /// return 时才允许 decommit。
+    /// occupancy 与 pause 度量都从 slab 描述符表按 extent 聚合而来，不含任何猜测：一个
+    /// extent 只有在 allocator、scanner、forwarder 三路 lease 均归零、没有 live 或 queued
+    /// slot、也没有在途 return 时才允许 decommit。
     ///
-    /// 返回按 extent 编号排序的候选集，供调用方先做 relocation pause 预算判定再执行 trim。
-    pub(super) fn trim_candidates(&self) -> Vec<(ExtentId, ExtentOccupancy)> {
-        // extent → (live, queued, pending)；只统计仍属于某个活跃 extent 的描述符。
-        let mut occupancy: std::collections::BTreeMap<ExtentId, ExtentOccupancy> =
+    /// 返回按 extent 编号排序的候选集（`BTreeMap` 自身有序），供调用方先做 pause 预算判定
+    /// 再执行 trim。
+    pub(super) fn trim_candidates(&self) -> Vec<TrimCandidate> {
+        let mut candidates: std::collections::BTreeMap<ExtentId, TrimCandidate> =
             std::collections::BTreeMap::new();
         for descriptor in self.table.descriptors() {
             if descriptor.state == SlabState::Released {
                 continue;
             }
-            let entry = occupancy
-                .entry(descriptor.extent)
-                .or_insert_with(ExtentOccupancy::default);
-            entry.live_slots += descriptor.live;
-            entry.queued_slots += descriptor.queued;
-            entry.pending_returns += descriptor.pending_returns;
+            let entry = candidates.entry(descriptor.extent).or_default();
+            entry.extent = descriptor.extent;
+            entry.occupancy.live_slots += descriptor.live;
+            entry.occupancy.queued_slots += descriptor.queued;
+            entry.occupancy.pending_returns += descriptor.pending_returns;
+            entry.revoked_bytes = entry
+                .revoked_bytes
+                .saturating_add(descriptor.committed_bytes);
+            entry.descriptors = entry.descriptors.saturating_add(1);
         }
         // 从未发过的 extent 没有被任何描述符引用，天然满足空载门禁。
         for descriptor in self.extents.descriptors() {
-            if descriptor.state == ExtentState::Live && !occupancy.contains_key(&descriptor.id) {
-                occupancy.insert(descriptor.id, ExtentOccupancy::default());
+            if descriptor.state == ExtentState::Live && !candidates.contains_key(&descriptor.id) {
+                candidates.insert(
+                    descriptor.id,
+                    TrimCandidate {
+                        extent: descriptor.id,
+                        ..TrimCandidate::default()
+                    },
+                );
             }
         }
-        let mut candidates: Vec<(ExtentId, ExtentOccupancy)> = occupancy.into_iter().collect();
-        candidates.sort_unstable_by_key(|(extent, _)| *extent);
-        candidates
+        candidates.into_values().collect()
     }
 
     /// 对候选 extent 逐个执行四重门禁；未过门禁的保持 committed 并被计入 `blocked`，
@@ -150,16 +186,16 @@ impl RawWorld {
     /// 必须同一步回落，否则分类之和会持续虚报已撤销的 extent。
     pub(super) fn trim_extents(
         &mut self,
-        candidates: &[(ExtentId, ExtentOccupancy)],
+        candidates: &[TrimCandidate],
     ) -> Result<TrimReport, RawInvariant> {
         let mut report = TrimReport::default();
-        for (extent, occupancy) in candidates {
-            match self.poll_trim_extent(*extent, *occupancy)? {
+        for candidate in candidates {
+            match self.poll_trim_extent(candidate.extent, candidate.occupancy)? {
                 Ok(_) => {
-                    self.release_extent_descriptors(*extent)?;
+                    self.release_extent_descriptors(candidate.extent)?;
                     report.trimmed += 1;
                 }
-                Err(blocked) => report.blocked.push((*extent, blocked)),
+                Err(blocked) => report.blocked.push((candidate.extent, blocked)),
             }
         }
         Ok(report)

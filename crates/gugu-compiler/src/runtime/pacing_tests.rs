@@ -1,13 +1,15 @@
 //! GC debt、credit、pacing 与 pressure drain 的确定性回归；不睡眠、不读熵、不启动线程。
 
 use super::RawWorld;
+use crate::runtime::barrier::{BarrierFlushReason, BarrierSite};
+use crate::runtime::barrier_schema::CARD_GRANULARITY_BYTES;
 use crate::runtime::inbox::ServiceBudget;
+use crate::runtime::message::BatchLimits;
 use crate::runtime::message::ReturnKind;
-use crate::runtime::message::{BatchLimits, ProducerStaging};
 use crate::runtime::pacing::{
     AssistOutcome, CommittedClasses, CreditPlane, CreditSnapshot, CreditSource,
-    EvacuationFootprint, EvacuationOutcome, HeadroomDecision, PacingPlane, PressureState,
-    RemarkOutcome,
+    EvacuationFootprint, EvacuationOutcome, GcWorkCounters, HeadroomDecision, PacingPlane,
+    PressureState, RemarkOutcome,
 };
 use crate::runtime::pacing_schema::{
     ASSIST_OUTCOME_NAMES, ASSIST_QUANTUM, ASSIST_THRESHOLD, DRAIN_CLASS_NAMES,
@@ -16,7 +18,7 @@ use crate::runtime::pacing_schema::{
     REMARK_COST_BUDGET,
 };
 use crate::runtime::size_class::RuntimeSizeClassId;
-use crate::runtime::slab::MemoryDomainId;
+use crate::runtime::slab::{MemoryDomainId, SlabDescriptorId};
 use crate::runtime::{PlatformProfile, Rt0Demand};
 use crate::runtime::{RawResourceDemand, SchedulerDemand, StackMapDemand, SyncDemand, WaitDemand};
 use crate::runtime::{barrier_schema::BarrierDemand, gc_metadata_schema::GcMetadataDemand};
@@ -28,6 +30,26 @@ fn world(owners: u32, nodes: u32) -> RawWorld {
 
 fn shard(index: u32) -> crate::runtime::inbox::ShardIndex {
     crate::runtime::inbox::ShardIndex::from_raw(index).expect("shard 编号合法")
+}
+
+/// 一道会产生 card 键的 hybrid 屏障写入：old 指向 nursery 且位于 old generation。
+fn card_site(arena: u64, generation: u32, offset: u64, epoch: u64) -> BarrierSite {
+    BarrierSite {
+        arena_descriptor: arena,
+        arena_generation: generation,
+        offset,
+        cycle_epoch: epoch,
+        old_present: true,
+        new_present: true,
+        new_in_nursery: true,
+        owner_old: true,
+        marking: true,
+        stack_grey: true,
+        new_block: Some(9),
+        source_block: 3,
+        new_owner: 0,
+        source_owner: 1,
+    }
 }
 
 /// 用内建契约创建平面；不修改任何参数。
@@ -56,9 +78,14 @@ fn pacing_contract_is_self_consistent_and_rejects_drift() {
     assert_eq!(contract.remark_outcomes, ["complete", "continuation"]);
     assert_eq!(contract.evacuation_outcomes, EVACUATION_OUTCOME_NAMES);
     assert_eq!(contract.credit_sources.len(), 5);
+    assert_eq!(contract.pressure_poll_bytes(), 1 << 20);
+    assert_eq!(contract.owner_drain_items(), 64);
+    assert_eq!(contract.owner_drain_bytes(), 1 << 16);
+    assert_eq!(contract.owner_drain_interval_bytes(), 1 << 20);
     assert_ne!(contract.fingerprint(), [0_u8; 32]);
     let dump = contract.dump();
-    assert!(dump.contains("pacing schema=1 profile=mosaic-default"));
+    assert!(dump.contains("pacing schema=2 profile=mosaic-default revision=2"));
+    assert!(dump.contains("pacing-drain poll=1048576 items=64 bytes=65536 interval=1048576"));
     assert!(dump.contains("pacing-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging"));
     assert!(
         dump.contains(
@@ -77,6 +104,10 @@ fn pacing_contract_rejects_parameter_and_catalog_drift() {
         Box::new(|c: &mut GcPacingRuntimeContract| c.pressure_enter_ratio = 60),
         Box::new(|c: &mut GcPacingRuntimeContract| c.pressure_clear_ratio = 0),
         Box::new(|c: &mut GcPacingRuntimeContract| c.evacuation_pause_bytes = 4096),
+        Box::new(|c: &mut GcPacingRuntimeContract| c.pressure_poll_bytes = 0),
+        Box::new(|c: &mut GcPacingRuntimeContract| c.owner_drain_items = 0),
+        Box::new(|c: &mut GcPacingRuntimeContract| c.owner_drain_bytes = 1),
+        Box::new(|c: &mut GcPacingRuntimeContract| c.owner_drain_interval_bytes = 0),
         Box::new(|c: &mut GcPacingRuntimeContract| c.drain_classes = vec!["live-bytes".to_owned()]),
         Box::new(|c: &mut GcPacingRuntimeContract| c.credit_sources = vec!["only-one".to_owned()]),
         Box::new(|c: &mut GcPacingRuntimeContract| c.profile = "other".to_owned()),
@@ -118,7 +149,7 @@ fn growth_budget_and_debt_follow_the_documented_formula() {
     assert_eq!(plane.mark_debt(), 4095 * u64::from(MARK_COST_PER_BYTE));
     assert!(plane.should_start_cycle());
     // 存活量涨大时预算取 max(min_growth_budget, last_live × target%)。
-    plane.complete_cycle(MIN_GROWTH_BUDGET * 4);
+    plane.complete_cycle(MIN_GROWTH_BUDGET * 4, GcWorkCounters::default());
     assert_eq!(plane.growth_budget(), MIN_GROWTH_BUDGET * 4);
     assert_eq!(plane.allocation_debt(), 0);
     // `GcTarget::Off` 只关闭 debt 触发，不关闭其它路径。
@@ -154,6 +185,24 @@ fn assist_stays_within_quantum_and_never_invents_progress() {
 }
 
 #[test]
+fn assist_repays_only_the_cost_it_actually_completed() {
+    let mut plane = pacing_plane();
+    // 拖欠的 mark 工作与 allocation debt 同时非零：偿还量只能从两项合计里扣一次。
+    plane.observe_allocation(MIN_GROWTH_BUDGET + ASSIST_THRESHOLD);
+    plane.observe_mark_work(ASSIST_THRESHOLD);
+    let before = plane.mark_debt();
+    assert_eq!(before, ASSIST_THRESHOLD * 2);
+    assert_eq!(plane.assist(ASSIST_QUANTUM), AssistOutcome::WithinQuantum);
+    assert_eq!(
+        plane.mark_debt(),
+        before - ASSIST_QUANTUM,
+        "债务只能按真实偿还量下降一次"
+    );
+    // 拖欠工作优先被冲抵，allocation debt 只在余量里按 mark_cost_per_byte 折字节。
+    assert_eq!(plane.allocation_debt(), ASSIST_THRESHOLD);
+}
+
+#[test]
 fn gc_cpu_window_limits_worker_work_and_defers_to_debt() {
     let mut plane = pacing_plane();
     let budget = plane.contract().gc_cpu_window_budget();
@@ -168,10 +217,41 @@ fn gc_cpu_window_limits_worker_work_and_defers_to_debt() {
     // emergency 可以越过吞吐预算，但不会凭空产生 credit。
     let emergency = plane.worker_work(4096, true);
     assert_eq!(emergency, 4096);
-    // 窗口在 cycle 边界前进并复位。
-    plane.complete_cycle(0);
+    // 窗口在 cycle 边界前进并复位，但拖欠的 mark 工作必须跨 cycle 存活由 assist 归还。
+    let deferred = budget - budget / 2;
+    plane.complete_cycle(0, GcWorkCounters::default());
     assert!(!plane.window_exhausted());
-    assert_eq!(plane.mark_debt(), 0);
+    assert_eq!(
+        plane.mark_debt(),
+        deferred,
+        "deferred mark debt 不得在同一个 drain 内被清零"
+    );
+}
+
+#[test]
+fn cycle_work_cost_is_per_cycle_and_advances_the_baseline() {
+    let mut plane = pacing_plane();
+    let first = GcWorkCounters {
+        card_marks: 5,
+        edge_deltas: 2,
+        published_batches: 1,
+    };
+    assert_eq!(plane.cycle_work_cost(first), 8);
+    plane.complete_cycle(0, first);
+    let second = GcWorkCounters {
+        card_marks: 9,
+        edge_deltas: 3,
+        published_batches: 2,
+    };
+    assert_eq!(plane.cycle_work_cost(second), 6, "第二个 cycle 只计增量");
+    plane.complete_cycle(0, second);
+    // 累计值涨到远超 remark 预算，也只影响两次快照之间的差值。
+    let huge = GcWorkCounters {
+        card_marks: 1 << 30,
+        edge_deltas: 0,
+        published_batches: 0,
+    };
+    assert_eq!(plane.cycle_work_cost(huge), (1 << 30) - 9);
 }
 
 #[test]
@@ -198,7 +278,7 @@ fn evacuation_defers_whole_block_when_any_bound_is_exceeded() {
     // 三项都恰好命中上界时允许整块发布。
     assert_eq!(
         plane.evacuation(EvacuationFootprint {
-            copied_bytes: contract.evacuation_pause_bytes(),
+            bytes: contract.evacuation_pause_bytes(),
             roots: contract.evacuation_pause_roots(),
             fields: contract.evacuation_pause_fields(),
         }),
@@ -207,17 +287,17 @@ fn evacuation_defers_whole_block_when_any_bound_is_exceeded() {
     // 任一上界超出都整块延后，不允许部分发布。
     for footprint in [
         EvacuationFootprint {
-            copied_bytes: contract.evacuation_pause_bytes() + 1,
+            bytes: contract.evacuation_pause_bytes() + 1,
             roots: 1,
             fields: 1,
         },
         EvacuationFootprint {
-            copied_bytes: 1,
+            bytes: 1,
             roots: contract.evacuation_pause_roots() + 1,
             fields: 1,
         },
         EvacuationFootprint {
-            copied_bytes: 1,
+            bytes: 1,
             roots: 1,
             fields: contract.evacuation_pause_fields() + 1,
         },
@@ -277,15 +357,25 @@ fn pressure_hysteresis_opens_once_and_closes_after_all_classes_drain() {
     assert_eq!(plane.state(), PressureState::Steady);
     assert_eq!(plane.update_pressure(860, full), PressureState::Drain);
     assert_eq!(plane.episode().epoch, 1);
-    // clear 水位以下但分类未 drain 完时不得结束 episode。
+    // 分类为空不构成 drain 证据：一次真实 drain 发生前不得结束 episode。
+    assert_eq!(
+        plane.update_pressure(600, CommittedClasses::default()),
+        PressureState::Drain
+    );
+    // 分类未全部 drain 完时同样不得结束。
     let partial = CommittedClasses {
         pending_return_bytes: 0,
         owner_cache_bytes: 5,
         reclaimable_bytes: 0,
     };
     assert_eq!(plane.update_pressure(600, partial), PressureState::Drain);
-    // 分类全部 drain 完后，降到 clear 水位以下才结束。
+    // 一次真实 owner drain 覆盖三类分类并降到 clear 水位以下，episode 才结束。
     let drained = CommittedClasses::default();
+    assert_eq!(
+        plane.note_drain(drained),
+        3,
+        "三类分类都必须被这次 drain 覆盖"
+    );
     assert_eq!(plane.update_pressure(600, drained), PressureState::Steady);
     // 达到 soft limit 进入 Emergency。
     plane.set_soft_memory_limit(Some(1000));
@@ -294,14 +384,11 @@ fn pressure_hysteresis_opens_once_and_closes_after_all_classes_drain() {
         PressureState::Emergency
     );
     assert_eq!(plane.state().name(), "emergency");
-    // 一度进入 Emergency 后，即使回到 limit 以下，只要三类分类尚未全部 drain 就仍处于 episode；
-    // 这里分类已全部归零且低于 clear 水位，因此 episode 结束。
+    // 回到 limit 以下仍需一次真实 drain 才能结束新 episode。
+    assert_eq!(plane.update_pressure(600, drained), PressureState::Drain);
+    plane.note_drain(drained);
     assert_eq!(plane.update_pressure(600, drained), PressureState::Steady);
     // 结束 episode 后 forced cycle 标记复位。
-    assert_eq!(
-        plane.update_pressure(600, CommittedClasses::default()),
-        PressureState::Steady
-    );
     assert_eq!(plane.episode().forced_cycles, 0);
 }
 
@@ -327,6 +414,7 @@ fn one_pressure_episode_forces_at_most_one_full_cycle_then_oom() {
     assert_eq!(plane.episode().forced_cycles, 1);
     assert!(!plane.episode().all_classes_drained());
     // 分类 drain 完成并降到 clear 水位后结束 episode，下一 episode 才有权再强制一次。
+    plane.note_drain(CommittedClasses::default());
     plane.update_pressure(500, CommittedClasses::default());
     assert_eq!(plane.state(), PressureState::Steady);
     assert_eq!(plane.request_headroom(1000, 10), HeadroomDecision::Drain);
@@ -338,6 +426,47 @@ fn one_pressure_episode_forces_at_most_one_full_cycle_then_oom() {
 }
 
 #[test]
+fn headroom_accounts_the_requested_bytes_without_faking_emergency() {
+    let mut plane = pacing_plane();
+    plane.set_soft_memory_limit(Some(1000));
+    // committed 只有 900，但本次请求 200 字节会把占用推过 limit：必须进入 drain 链。
+    assert_eq!(plane.request_headroom(900, 200), HeadroomDecision::Drain);
+    assert_eq!(
+        plane.state(),
+        PressureState::Drain,
+        "committed 未达 limit 不得记为 emergency"
+    );
+    // 同一 episode 内第二次请求升级为 forced cycle，而不是直接 OOM。
+    assert_eq!(
+        plane.request_headroom(900, 200),
+        HeadroomDecision::ForcedCycle
+    );
+    // 请求本身低于 limit 且 committed 也低于 limit 时直接放行。
+    let mut idle = pacing_plane();
+    idle.set_soft_memory_limit(Some(1000));
+    assert_eq!(idle.request_headroom(100, 100), HeadroomDecision::Granted);
+}
+
+#[test]
+fn episode_drains_are_paced_by_the_interval_budget() {
+    let mut plane = pacing_plane();
+    plane.set_soft_memory_limit(Some(1000));
+    assert_eq!(
+        plane.update_pressure(860, CommittedClasses::default()),
+        PressureState::Drain
+    );
+    assert!(
+        plane.take_pressure_drain(),
+        "episode 开启立即要求一次 drain"
+    );
+    assert!(!plane.take_pressure_drain(), "同一节奏点不重复 drain");
+    plane.observe_allocation(1024);
+    assert!(!plane.take_pressure_drain(), "未到间隔不得重复 drain");
+    plane.observe_allocation(1 << 20);
+    assert!(plane.take_pressure_drain(), "越过间隔后推进下一次 drain");
+}
+
+#[test]
 fn world_reports_real_credit_sources_and_drains_them() {
     // 每条消息立即发布：credit 观测面对的是真实 inbox 内容，而不是未发布的 staging。
     let limits = BatchLimits {
@@ -345,14 +474,13 @@ fn world_reports_real_credit_sources_and_drains_them() {
         batch_soft_bytes: 1,
     };
     let mut world = RawWorld::new(7, 1, 64, limits).expect("raw world 可创建");
-    let mut staging = ProducerStaging::new(limits);
     // 初始状态：没有任何在飞 credit。
-    let snapshot = world.credit_snapshot(&staging);
+    let snapshot = world.credit_snapshot();
     assert_eq!(snapshot.card_mark_batches, 0);
     assert_eq!(snapshot.edge_deltas, 0);
     assert_eq!(snapshot.pending_return_bytes, 0);
     assert_eq!(snapshot.staging_bytes, 0);
-    assert!(world.begin_pacing_cycle(1, &staging).expect("cycle 边界"));
+    assert!(world.begin_pacing_cycle(1).expect("cycle 边界"));
     // 分配后 allocation debt 真实推进。
     let class = RuntimeSizeClassId::from_raw(0);
     let allocation = world.allocate(0, class).expect("分配成功");
@@ -386,9 +514,13 @@ fn world_reports_real_credit_sources_and_drains_them() {
         )
         .expect("消息可构造");
     world
-        .publish_message(&mut staging, &message, shard(0), None)
+        .publish_message(0, &message, shard(0), None)
         .expect("发布成功");
-    assert_eq!(staging.count(), 0);
+    assert_eq!(
+        world.credit_snapshot().staging_bytes,
+        0,
+        "item 上限为 1 时 staging 必须立即冲刷"
+    );
     let (_, consumed) = world
         .drain_all(0, &ServiceBudget::new(8, 1 << 16))
         .expect("drain 成功");
@@ -397,7 +529,7 @@ fn world_reports_real_credit_sources_and_drains_them() {
     // 消费后 slot 进入 reclaimable，再由 ledger_invariant 证明分类互斥。
     world.ledger_invariant(0).expect("账本互斥成立");
     // credit 快照随后收敛：消息不再挂在 pending 上。
-    let snapshot = world.credit_snapshot(&staging);
+    let snapshot = world.credit_snapshot();
     assert_eq!(snapshot.pending_return_bytes, 0);
     assert_eq!(snapshot.edge_deltas, 0);
 }
@@ -419,7 +551,6 @@ fn pressure_drain_is_a_real_slice_that_frees_committed_bytes() {
             .slot_stride,
     );
     // 分配、归还、构造真实 return message 并发布到目标 inbox。
-    let mut staging = ProducerStaging::new(limits);
     for _ in 0..8 {
         let allocation = world.allocate(0, class).expect("分配成功");
         world
@@ -434,22 +565,26 @@ fn pressure_drain_is_a_real_slice_that_frees_committed_bytes() {
             )
             .expect("消息可构造");
         world
-            .publish_message(&mut staging, &message, shard(0), None)
+            .publish_message(0, &message, shard(0), None)
             .expect("发布成功");
     }
-    assert_eq!(staging.count(), 0, "item 上限为 1 时 staging 必须立即冲刷");
+    assert_eq!(
+        world.credit_snapshot().staging_bytes,
+        0,
+        "item 上限为 1 时 staging 必须立即冲刷"
+    );
     let committed_before = world.pressure_committed_bytes();
     assert!(committed_before > 0);
     // 归还并发布后 pending 分类真实非零：消息在 drain 前归属 pending。
     assert!(world.committed_classes().pending_return_bytes > 0);
-    assert!(world.credit_snapshot(&staging).pending_return_bytes > 0);
+    assert!(world.credit_snapshot().pending_return_bytes > 0);
     // 第一次 drain：消息被消费，pending 必须归零。
-    let first = world.pressure_drain(false).expect("drain 成功");
+    let first = world.run_gc_cycle(false).expect("drain 成功");
     assert_eq!(first.forced_cycles, 0);
     assert_eq!(first.forwarded_messages, 0);
     assert_eq!(first.consumed_messages, 8);
     assert_eq!(world.committed_classes().pending_return_bytes, 0);
-    assert!(world.credit_snapshot(&staging).pending_return_bytes == 0);
+    assert!(world.credit_snapshot().pending_return_bytes == 0);
     assert!(first.blocked_extents > 0 || first.trimmed_extents > 0);
     assert_eq!(first.edge_deltas, 0);
     // 每个完成的 cycle 都真实推进一次 barrier cycle epoch；credit 收敛是推进前提。
@@ -457,7 +592,7 @@ fn pressure_drain_is_a_real_slice_that_frees_committed_bytes() {
     assert_eq!(epoch_after_first, 1);
     assert_eq!(first.remark, RemarkOutcome::Complete);
     // forced drain 走同一入口，并额外把本次 episode 的 forced cycle 记一。
-    let forced = world.pressure_drain(true).expect("forced drain 成功");
+    let forced = world.run_gc_cycle(true).expect("forced drain 成功");
     assert_eq!(forced.forced_cycles, 1);
     assert_eq!(world.barrier().cycle_epoch(), epoch_after_first + 1);
     world.ledger_invariant(0).expect("drain 后账本仍互斥");
@@ -465,7 +600,7 @@ fn pressure_drain_is_a_real_slice_that_frees_committed_bytes() {
     let mut trimmed = first.trimmed_extents + forced.trimmed_extents;
     for _ in 0..16 {
         trimmed += world
-            .pressure_drain(false)
+            .run_gc_cycle(false)
             .expect("drain 成功")
             .trimmed_extents;
     }
@@ -535,7 +670,7 @@ fn frame_pacing_contract_is_wired_into_the_raw_contract() {
     assert_eq!(contract.pacing().demand().alloc_sites, 3);
     assert_eq!(contract.pacing().demand().slow_edges, 5);
     let dump = contract.dump();
-    assert!(dump.contains("pacing schema=1"));
+    assert!(dump.contains("pacing schema=2"));
     assert!(
         dump.contains("pacing-demand alloc-sites=3 barrier-sites=2 slow-edges=5 managed-types=11")
     );
@@ -663,7 +798,6 @@ fn cycle_keeps_candidates_beyond_the_relocation_budget_for_the_next_cycle() {
         }
     }
     assert!(allocations.len() > 600, "两个 arena 必须被真实填满");
-    let mut staging = ProducerStaging::new(limits);
     for (owner, slot) in allocations {
         world.queue_return(owner, slot, bytes).expect("归还成功");
         let message = world
@@ -675,14 +809,14 @@ fn cycle_keeps_candidates_beyond_the_relocation_budget_for_the_next_cycle() {
             )
             .expect("消息可构造");
         world
-            .publish_message(&mut staging, &message, shard(0), None)
+            .publish_message(owner, &message, shard(0), None)
             .expect("发布成功");
     }
     // 走完 grace：第一个 cycle 只能发布落在预算内的前缀，其余整块延后。
     let mut deferred = 0_u32;
     let mut trimmed = 0_u32;
     for _ in 0..8 {
-        let report = world.pressure_drain(false).expect("drain 成功");
+        let report = world.run_gc_cycle(false).expect("drain 成功");
         deferred = deferred.max(report.deferred_extents);
         trimmed += report.trimmed_extents;
     }
@@ -696,4 +830,174 @@ fn cycle_keeps_candidates_beyond_the_relocation_budget_for_the_next_cycle() {
     );
     world.ledger_invariant(0).expect("账本互斥");
     world.ledger_invariant(1).expect("账本互斥");
+}
+
+#[test]
+fn assist_flushes_real_card_keys_and_repays_matching_cost() {
+    let mut world = world(1, 64);
+    world
+        .register_managed_arena(0, SlabDescriptorId::from_raw(3), 1)
+        .expect("登记 arena");
+    // 造出一张真实未 flush 的 dirty card。
+    world
+        .perform_barrier(0, card_site(3, 1, 512, 0))
+        .expect("写屏障成功");
+    let buffered = world
+        .barrier()
+        .processor(0)
+        .expect("processor 账本")
+        .buffer()
+        .len();
+    assert!(buffered > 0, "屏障必须留下未 flush 的 card 键");
+    // 把 allocation debt 推到 assist 阈值之上。
+    world.observe_allocation(MIN_GROWTH_BUDGET + ASSIST_THRESHOLD);
+    let outcome = world.assist_on_slow_edge(0).expect("assist 成功");
+    assert_eq!(outcome, AssistOutcome::WithinQuantum);
+    // 键真的离开了 processor 账本，且偿还量与交出的键数同源。
+    assert_eq!(
+        world
+            .barrier()
+            .processor(0)
+            .expect("processor 账本")
+            .buffer()
+            .len(),
+        0,
+        "assist 必须真实交出 card 键"
+    );
+    assert_eq!(
+        world.pacing().assist_cost(),
+        u64::from(CARD_GRANULARITY_BYTES)
+    );
+    assert_eq!(world.pacing().assist_by_outcome(), [0, 1, 0, 0]);
+    assert_eq!(
+        world.pacing().mark_debt(),
+        ASSIST_THRESHOLD - u64::from(CARD_GRANULARITY_BYTES),
+        "allocation debt 按 mark_cost_per_byte 折算后扣减"
+    );
+}
+
+#[test]
+fn assist_without_real_work_records_nothing() {
+    let mut world = world(1, 64);
+    world.observe_allocation(MIN_GROWTH_BUDGET + ASSIST_THRESHOLD);
+    let debt = world.pacing().mark_debt();
+    let outcome = world.assist_on_slow_edge(0).expect("assist 成功");
+    assert_eq!(outcome, AssistOutcome::NoWork);
+    assert_eq!(world.pacing().assist_cost(), 0, "没有交接就没成本");
+    assert_eq!(world.pacing().mark_debt(), debt, "空 assist 不得虚构进度");
+}
+
+#[test]
+fn cycle_stays_incomplete_without_credit_convergence_instead_of_failing() {
+    let mut world = world(1, 64);
+    let class = RuntimeSizeClassId::from_raw(0);
+    let allocation = world.allocate(0, class).expect("分配成功");
+    let bytes = u64::from(
+        world
+            .classes()
+            .get(class)
+            .expect("class 已登记")
+            .slot_stride,
+    );
+    // 只登记归还、不发布消息：pending 字节留在账本上，credit 无法收敛。
+    world
+        .queue_return(0, allocation.slot, bytes)
+        .expect("归还成功");
+    let report = world.run_gc_cycle(false).expect("未收敛不是错误");
+    assert!(!report.cycle_completed, "credit 未收敛不得宣布 cycle 完成");
+    assert!(!report.credits_converged);
+    assert_eq!(report.edge_deltas, 0);
+    // barrier epoch 可以先行（remark 已完整），但 credit 平面不追平：两个水位必须单调一致。
+    assert_eq!(
+        world.pacing().credits().cycle_epoch(),
+        0,
+        "credit 未收敛时不得推进 credit epoch"
+    );
+    assert_eq!(world.credit_snapshot().pending_return_bytes, bytes);
+}
+
+#[test]
+fn drain_flushes_the_world_owned_return_staging() {
+    // 大 batch 上限：消息留在 world 自己的 staging 里，drain 必须真实冲刷它。
+    let limits = BatchLimits {
+        items: 1 << 20,
+        batch_soft_bytes: 1 << 20,
+    };
+    let mut world = RawWorld::new(7, 1, 64, limits).expect("raw world 可创建");
+    let class = RuntimeSizeClassId::from_raw(0);
+    let allocation = world.allocate(0, class).expect("分配成功");
+    let bytes = u64::from(
+        world
+            .classes()
+            .get(class)
+            .expect("class 已登记")
+            .slot_stride,
+    );
+    world
+        .queue_return(0, allocation.slot, bytes)
+        .expect("归还成功");
+    let message = world
+        .message(
+            world.token(0),
+            ReturnKind::RawSlot,
+            allocation.slot,
+            u32::try_from(bytes).expect("stride 适配 u32"),
+        )
+        .expect("消息可构造");
+    world
+        .publish_message(0, &message, shard(0), None)
+        .expect("发布成功");
+    assert!(
+        world.credit_snapshot().staging_bytes > 0,
+        "未冲刷字节必须可观测"
+    );
+    let report = world.run_gc_cycle(false).expect("drain 成功");
+    assert_eq!(
+        world.credit_snapshot().staging_bytes,
+        0,
+        "drain 必须冲刷真实 staging"
+    );
+    assert!(report.consumed_messages >= 1, "冲刷后的消息必须被消费");
+}
+
+#[test]
+fn steady_state_allocation_reads_no_committed_snapshot() {
+    let mut world = world(1, 64);
+    world.set_memory_limit(Some(1 << 40));
+    let class = RuntimeSizeClassId::from_raw(0);
+    let snapshots = world.pacing().pressure_snapshots();
+    for _ in 0..64 {
+        world.allocate(0, class).expect("分配成功");
+    }
+    // 软上限远未触及、poll 间隔未到：快路径不得读任何全局 committed 快照。
+    assert_eq!(world.pacing().pressure_snapshots(), snapshots);
+    assert_eq!(world.pacing().state(), PressureState::Steady);
+}
+
+#[test]
+fn cycle_does_not_double_count_flush_statistics() {
+    let mut world = world(1, 64);
+    let processors = u64::try_from(world.barrier().processor_count()).expect("处理器数适配 u64");
+    let before = world.barrier_stats().by_reason[BarrierFlushReason::MemoryPressure.index()];
+    world.run_gc_cycle(false).expect("cycle 成功");
+    let after = world.barrier_stats().by_reason[BarrierFlushReason::MemoryPressure.index()];
+    assert_eq!(
+        after - before,
+        processors,
+        "memory-pressure 每 owner 只冲刷一遍 barrier 账本"
+    );
+}
+
+#[test]
+fn consecutive_cycles_advance_the_epoch_with_per_cycle_work() {
+    let mut world = world(1, 64);
+    let before = world.barrier().cycle_epoch();
+    let first = world.run_gc_cycle(false).expect("第一次 cycle");
+    let second = world.run_gc_cycle(false).expect("第二次 cycle");
+    assert!(first.cycle_completed, "第一次 cycle 必须完成");
+    assert!(second.cycle_completed, "累计工作量增长不得挡住第二次 cycle");
+    assert_eq!(first.remark, RemarkOutcome::Complete);
+    assert_eq!(second.remark, RemarkOutcome::Complete);
+    assert_eq!(world.barrier().cycle_epoch(), before + 2);
+    world.ledger_invariant(0).expect("账本仍互斥");
 }

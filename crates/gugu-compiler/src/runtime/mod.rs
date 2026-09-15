@@ -34,15 +34,11 @@ pub(crate) mod gc_metadata_schema;
 pub(crate) mod gc_metadata_section;
 mod harness;
 mod model;
-#[allow(
-    dead_code,
-    reason = "pacing 与 pressure 状态机由 world、harness 与确定性测试消费"
-)]
+/// 结局/状态名字目录、credit 诊断访问器与 `PacingPlane::dump` 构成 pacing 诊断面，
+/// 唯一消费入口是 runtime dump 与确定性测试套件；真正无人消费的项（分类名目录、
+/// 未使用的重导出）已经删除，这里只为仍被 dump 引用的诊断面开例外。
+#[allow(dead_code, reason = "pacing 诊断面由 runtime dump 与确定性测试消费")]
 mod pacing;
-#[allow(
-    dead_code,
-    reason = "pacing 契约段由 runtime raw、LIR 与 ImagePlan 消费"
-)]
 pub(crate) mod pacing_schema;
 mod platform_schema;
 pub(crate) mod region;
@@ -151,12 +147,6 @@ pub use harness::{
 
 #[cfg(test)]
 pub use extent::EXTENT_CLASS_LADDER;
-#[allow(unused_imports, reason = "pacing 参照实现由 world 与确定性测试消费")]
-pub(crate) use pacing::{
-    AssistOutcome, CommittedClasses, CreditError, CreditPlane, CreditSource, EvacuationFootprint,
-    EvacuationOutcome, HeadroomDecision, PacingPlane, PressureEpisodeStats, PressureState,
-    RemarkOutcome,
-};
 pub use platform_schema::{PlatformOp, PlatformRangeDemand};
 
 pub(crate) use model::{

@@ -47,7 +47,7 @@ use super::barrier::BarrierFlushReason;
 use super::barrier_schema::MessageFamilyTag;
 use super::extent::{ExtentId, ExtentTable, TrimReport};
 use super::inbox::{
-    DrainReport, DrainStop, GraceOutcome, OwnerConsumer, OwnerInbox, ServiceBudget, ShardIndex,
+    DrainReport, GraceOutcome, OwnerConsumer, OwnerInbox, ServiceBudget, ShardIndex,
 };
 use super::message::{
     BatchLimits, FlushTrigger, IntegrityTag, LinkCodec, MessageState, ProducerStaging,
@@ -137,6 +137,10 @@ pub(crate) struct RawWorld {
     barrier: super::barrier::BarrierPlane,
     /// 已经由 owner 取走的跨 block edge delta 总数。
     edge_delta_total: u64,
+    /// 每个 owner 的 return producer staging；未发布的链必须在 drain/retire 前交出。
+    return_stagings: Vec<ProducerStaging>,
+    /// 每个 owner 的 source-slab return cache；关闭时把 ring 转成 return batch。
+    return_caches: Vec<ReturnSlabCache>,
     /// GC debt、owner credit、pacing 与 pressure episode 的执行平面。
     pacing: super::pacing::PacingPlane,
     /// TurnRegion 私有区与 `RegionTransfer` 投递平面；按已构建的契约配置。
@@ -212,6 +216,8 @@ impl RawWorld {
             barrier: super::barrier::BarrierPlane::new(0),
             edge_delta_total: 0,
             pacing: super::pacing::PacingPlane::default(),
+            return_stagings: (0..owners).map(|_| ProducerStaging::new(limits)).collect(),
+            return_caches: (0..owners).map(|_| ReturnSlabCache::new()).collect(),
             regions: None,
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
@@ -320,11 +326,13 @@ impl RawWorld {
     ) -> Result<Allocation, RawInvariant> {
         // allocation slow edge：本地 fast bump 不读全局状态，慢路径探测由 `slow_edge_due`
         // 决定；所有全局读取、assist、drain 与 headroom 判定都收敛在 `pacing_slow_edge` 内。
-        self.pacing_slow_edge(0)?;
+        // 先解析 class 再把本次请求的 slot 字节交给 headroom：软上限必须看到真实请求大小，
+        // 否则越界分配会被放行到下一次分配才被发现。
         let class = *self
             .classes
             .get(class)
             .ok_or_else(|| RawInvariant::new("分配引用未知 class"))?;
+        self.pacing_slow_edge(owner, u64::from(class.slot_stride))?;
         let token = self.owners[owner as usize].token();
         let secret_index = u32::from(class.id.raw());
         let accounting = self
@@ -436,51 +444,56 @@ impl RawWorld {
         Ok(message)
     }
 
-    /// producer 侧：按目标 owner 路由，必要时先刷新旧 chain 再暂存。
+    /// producer 侧：用本 owner 的 world-owned staging 按目标 owner 路由。
     ///
     /// 返回本次调用产生的发布记录：目标改变时先有一条 `TargetChanged`，随后可能有一条由
-    /// item/byte 上限或显式触发产生的发布。
+    /// item/byte 上限或显式触发产生的发布。staging 由 `RawWorld` 持有，因此未发布的字节是
+    /// credit 平面可以观测、也必须可以冲刷的真实在飞量。
     pub(crate) fn publish_message(
-        &self,
-        staging: &mut ProducerStaging,
+        &mut self,
+        owner: u32,
         message: &ReturnMessage,
         shard: ShardIndex,
         forced: Option<FlushTrigger>,
     ) -> Result<Vec<PublishOutcome>, RawInvariant> {
         let mut outcomes = Vec::new();
-        if let Some(previous) = staging.target()
+        if let Some(previous) = self.return_stagings[owner as usize].target()
             && previous != message.target
         {
             let inbox = self.inbox_for(&previous)?;
             outcomes.push(flush_staging(
                 &self.pool,
                 &inbox,
-                staging,
+                &mut self.return_stagings[owner as usize],
                 FlushTrigger::TargetChanged,
             )?);
         }
         let inbox = self.inbox_for(&message.target)?;
-        if let Some(outcome) =
-            stage_message(&self.pool, Some(&inbox), staging, message, shard, forced)?
-        {
+        if let Some(outcome) = stage_message(
+            &self.pool,
+            Some(&inbox),
+            &mut self.return_stagings[owner as usize],
+            message,
+            shard,
+            forced,
+        )? {
             outcomes.push(outcome);
         }
         Ok(outcomes)
     }
 
     /// 把关闭的 source-slab ring 转成一个 return batch 并发布。
+    ///
+    /// ring 批次直接进入目标 owner 的 inbox，不经过 producer staging：staging 只承载单条
+    /// return/card 消息，因此这里由 owner 自己推导目标与 shard。
     pub(crate) fn publish_ring(
         &self,
         owner: u32,
-        staging: &mut ProducerStaging,
         closed: &super::message::ClosedRing,
     ) -> Result<u32, RawInvariant> {
-        let target = staging
-            .target()
-            .ok_or_else(|| RawInvariant::new("ring 关闭缺少目标 owner"))?;
-        let shard = staging
-            .shard()
-            .ok_or_else(|| RawInvariant::new("ring 关闭缺少目标 shard"))?;
+        let target = self.token(owner);
+        let shard = ShardIndex::from_raw(owner % super::OWNER_INBOX_SHARDS)
+            .ok_or_else(|| RawInvariant::new("ring 关闭的 shard 编号越界"))?;
         let descriptor = self.descriptor(closed.key.0)?.clone();
         let mut first = None;
         let mut last = None;
@@ -541,18 +554,18 @@ impl RawWorld {
         Ok(message)
     }
 
-    /// consumer 侧 same-slab 聚合：关闭全部 open ring 并发布。
+    /// consumer 侧 same-slab 聚合：关闭本 owner 的 return cache 并发布。
+    ///
+    /// cache 与 staging 都由 `RawWorld` 持有，因此这里关闭的是 owner 真实的 cache；
+    /// `GcHandoff`/`PressureDrain` 顺带把本 owner 的 barrier 账本带出，避免 card 键跟着
+    /// ring 一起消失。
     pub(crate) fn close_cache(
         &mut self,
         owner: u32,
-        staging: &mut ProducerStaging,
-        cache: &mut ReturnSlabCache,
         reason: RingCloseReason,
     ) -> Result<u32, RawInvariant> {
-        let closed = cache.close_all(reason);
+        let closed = self.return_caches[owner as usize].close_all(reason);
         let mut published = 0;
-        // cache 关闭是 producer 侧的交接点：GC handoff 与 pressure drain 都必须先把本
-        // processor 的 card 键带出账本，不能让它跟着 ring 一起消失。
         let barrier_reason = match reason {
             RingCloseReason::GcHandoff => Some(BarrierFlushReason::MinorStop),
             RingCloseReason::PressureDrain => Some(BarrierFlushReason::MemoryPressure),
@@ -562,9 +575,49 @@ impl RawWorld {
             published += self.flush_all_barriers(owner, barrier_reason)?;
         }
         for ring in &closed {
-            published += self.publish_ring(owner, staging, ring)?;
+            published += self.publish_ring(owner, ring)?;
         }
         Ok(published)
+    }
+
+    /// 把一个 owner 尚未发布的 return chain 交给目标 owner 的 inbox。
+    ///
+    /// credit 观测到的 `producer-staging` 字节就是这里的输入；drain/retire 前必须冲刷，
+    /// 否则「cycle 边界前 credit 收敛」会看到真实的在飞量而不是观测盲区。
+    pub(crate) fn flush_return_staging(
+        &mut self,
+        owner: u32,
+        trigger: FlushTrigger,
+    ) -> Result<u32, RawInvariant> {
+        let Some(target) = self.return_stagings[owner as usize].target() else {
+            return Ok(0);
+        };
+        let inbox = self.inbox_for(&target)?;
+        let outcome = flush_staging(
+            &self.pool,
+            &inbox,
+            &mut self.return_stagings[owner as usize],
+            trigger,
+        )?;
+        Ok(outcome.items)
+    }
+
+    /// 把一个返回 slot 追加到 owner 的 source-slab 聚合 cache，并发布被关闭的 ring。
+    ///
+    /// 这是 consumer 侧 same-slab 聚合的接入点：命中同一 `(descriptor, generation)` 时继续
+    /// 填充，victim ring 被驱逐时立即整批发布给目标 owner。返回本次发布的 slot 数。
+    pub(crate) fn cache_return_slot(
+        &mut self,
+        owner: u32,
+        key: (SlabDescriptorId, SlabGeneration),
+        slot: u32,
+        bytes: u64,
+    ) -> Result<u32, RawInvariant> {
+        let closed = self.return_caches[owner as usize].insert(key, slot, bytes);
+        match closed {
+            Some(ring) => self.publish_ring(owner, &ring),
+            None => Ok(0),
+        }
     }
 
     /// owner 上下文：按固定顺序 service 一个 shard。
@@ -742,20 +795,7 @@ impl RawWorld {
     ) -> Result<(u32, u32), RawInvariant> {
         // drain 之后 owner 不再跑代码，本 owner 的 card 键必须已经离开 processor 账本。
         self.flush_all_barriers(owner, BarrierFlushReason::ProducerStopGate)?;
-        let mut forwarded = 0_u32;
-        let mut consumed = 0_u32;
-        for index in 0..super::OWNER_INBOX_SHARDS {
-            let shard = ShardIndex::from_raw(index).expect("shard 编号合法");
-            loop {
-                let report = self.service(owner, shard, budget)?;
-                forwarded += report.forwarded;
-                consumed += report.items - report.forwarded;
-                if report.items == 0 || report.stop != DrainStop::Budget {
-                    break;
-                }
-            }
-        }
-        Ok((forwarded, consumed))
+        self.drain_inboxes(owner, budget, true)
     }
 
     fn forward_message(
@@ -889,20 +929,20 @@ impl RawWorld {
         let token = self.owners[owner as usize].token();
         // 候选、门禁与描述符释放都走 pressure trim 的同一条路径：两处不会各自维护一套
         // “空闲 extent” 判定，也不会一边撤销物理页一边把字节留在 committed 口径。
-        let empty: Vec<_> = self
+        let owned: Vec<_> = self
             .trim_candidates()
             .into_iter()
-            .filter(|(extent, occupancy)| {
-                occupancy.live_slots == 0
-                    && occupancy.queued_slots == 0
+            .filter(|candidate| {
+                candidate.occupancy.live_slots == 0
+                    && candidate.occupancy.queued_slots == 0
                     && self.table.descriptors().iter().any(|descriptor| {
-                        descriptor.extent == *extent
+                        descriptor.extent == candidate.extent
                             && descriptor.owner == token
                             && descriptor.state != SlabState::Released
                     })
             })
             .collect();
-        self.trim_extents(&empty)
+        self.trim_extents(&owned)
     }
 
     /// 通过 queue-page grace 并复用已消费的 message node。

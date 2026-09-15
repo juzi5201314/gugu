@@ -2,24 +2,37 @@
 //!
 //! 接入遵循三条归属规则：
 //!
-//! 1. debt 只在真实 slow edge 上推进：分配、slow service、cache 关闭与 cycle 边界各记一次；
-//!    本地 fast bump 不读全局 debt，因此这里不给 `allocate` 加任何全局查询。
-//! 2. forced full cycle 与 pressure drain 必须落到真实动作：排空全部 owner inbox、关闭
-//!    source-slab cache、trim/decommit extent、取走 edge delta、重算 committed 快照。没有
-//!    headroom 时走 rt0 的 `OutOfMemory` fatal，而不是把分配失败伪装成成功。
+//! 1. debt 只在真实 slow edge 上推进：分配、slow service、cache 关闭与 cycle 边界各记一次。
+//!    慢路径门禁全部是标量比较，只有到节奏点才读全局快照，因此本地 fast bump 不读全局状态。
+//! 2. forced full cycle 与 pressure drain 必须落到真实动作：冲刷未发布的 return staging、关闭
+//!    owner 真实的 source-slab cache、排空 owner inbox、trim/decommit extent、取走 edge delta、
+//!    重算 committed 快照。没有 headroom 时走 rt0 的 `OutOfMemory` fatal，而不是把分配失败
+//!    伪装成成功。
 //! 3. credit 是观测：每次观测都从当前物理状态取数（未 flush 键数、未消费 batch 数、未取走
-//!    delta 数、pending return 字节、staging 字节），因此「收敛」是可验证的物理事实。
+//!    delta 数、pending return 字节、staging 字节），因此「收敛」是可验证的物理事实；未收敛
+//!    只表示本轮 cycle 未完成，不是错误。
 
-use super::super::extent::{ExtentId, ExtentOccupancy};
-use super::super::inbox::ServiceBudget;
-use super::super::message::{BatchLimits, ProducerStaging, ReturnSlabCache, RingCloseReason};
+use super::super::barrier::BarrierFlushReason;
+use super::super::barrier_schema::CARD_GRANULARITY_BYTES;
+use super::super::inbox::{DrainStop, ServiceBudget, ShardIndex};
+use super::super::message::{FlushTrigger, RingCloseReason};
 use super::super::pacing::{
-    CommittedClasses, CreditSnapshot, EvacuationFootprint, EvacuationOutcome, HeadroomDecision,
-    PacingPlane, PressureState, RemarkOutcome,
+    AssistOutcome, CommittedClasses, CreditSnapshot, EvacuationFootprint, EvacuationOutcome,
+    GcWorkCounters, HeadroomDecision, PacingPlane, PressureState, RemarkOutcome,
 };
 use super::super::slab::RawInvariant;
 use super::super::startup_kinds::FatalKind;
 use super::RawWorld;
+use super::extent_impl::TrimCandidate;
+
+/// 一次 drain 的作用域。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DrainScope {
+    /// episode 内的有界 owner drain：每 shard 一次有界 service，不完成 cycle。
+    Bounded,
+    /// 完整 GC cycle：穷尽排空 inbox、过 remark 门禁、推进 cycle epoch 并记录工作量。
+    Cycle,
+}
 
 /// 一次 pressure drain 的结果；进入统计与 dump。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -40,10 +53,14 @@ pub(crate) struct PressureDrainReport {
     pub(crate) edge_deltas: u64,
     /// drain 之后重算的 committed 字节。
     pub(crate) committed_after: u64,
-    /// 本 cycle 真实计入滑动窗口的 GC cost unit。
+    /// 本 cycle 真实计入滑动窗口的 GC cost unit；有界 drain 不消耗吞吐窗口，恒为 0。
     pub(crate) work_cost: u64,
-    /// 本 cycle 的 remark 结局。
+    /// 本 cycle 的 remark 结局；有界 drain 不执行 remark，保持 `Complete` 默认值。
     pub(crate) remark: RemarkOutcome,
+    /// 本 cycle 是否真实完成（remark 通过、credit 收敛并推进了 cycle epoch）。
+    pub(crate) cycle_completed: bool,
+    /// cycle 边界检查时五个 credit 来源是否收敛。
+    pub(crate) credits_converged: bool,
 }
 
 impl RawWorld {
@@ -163,11 +180,19 @@ impl RawWorld {
         classes
     }
 
+    /// 返回全部 owner 尚未发布的 return staging 字节。
+    fn return_staging_bytes(&self) -> u64 {
+        self.return_stagings.iter().fold(0_u64, |total, staging| {
+            total.saturating_add(staging.bytes())
+        })
+    }
+
     /// 按当前物理状态重建 credit 快照。
     ///
     /// 五个来源各自对应一个真实结构：processor buffer、已发布 batch 账本、edge summary、
-    /// owner pending 字节与生产者 staging；没有对应路径的来源保持为零而不是猜测。
-    pub(crate) fn credit_snapshot(&self, staging: &ProducerStaging) -> CreditSnapshot {
+    /// owner pending 字节与 `RawWorld` 持有的 producer staging；没有对应路径的来源保持为零
+    /// 而不是猜测。
+    pub(crate) fn credit_snapshot(&self) -> CreditSnapshot {
         let mut buffer_keys = 0_u64;
         for processor in 0..self.barrier.processor_count() {
             if let Some(record) = self.barrier.processor(processor) {
@@ -188,19 +213,16 @@ impl RawWorld {
                 .committed_classes()
                 .pending_return_bytes
                 .saturating_add(region_transfers),
-            staging_bytes: staging.bytes(),
+            staging_bytes: self.return_staging_bytes(),
         }
     }
 
     /// 在真实 cycle 边界推进 credit 与 debt。
     ///
     /// 返回 `false` 表示 credit 尚未收敛：此时不得推进 epoch，也不得宣布 cycle 完成。
-    pub(crate) fn begin_pacing_cycle(
-        &mut self,
-        cycle_epoch: u64,
-        staging: &ProducerStaging,
-    ) -> Result<bool, RawInvariant> {
-        let snapshot = self.credit_snapshot(staging);
+    /// 这是正常的状态机结果，不是错误——调用方按节奏重试即可。
+    pub(crate) fn begin_pacing_cycle(&mut self, cycle_epoch: u64) -> Result<bool, RawInvariant> {
+        let snapshot = self.credit_snapshot();
         self.pacing.observe_credits(snapshot);
         if !self.pacing.credits().converged() {
             return Ok(false);
@@ -211,9 +233,9 @@ impl RawWorld {
         Ok(true)
     }
 
-    /// 完成一次 cycle：记录存活字节并清零 cycle 内 debt。
-    pub(crate) fn complete_pacing_cycle(&mut self, live_bytes: u64) {
-        self.pacing.complete_cycle(live_bytes);
+    /// 完成一次 cycle：记录存活字节与工作量基线。
+    pub(crate) fn complete_pacing_cycle(&mut self, live_bytes: u64, counters: GcWorkCounters) {
+        self.pacing.complete_cycle(live_bytes, counters);
     }
 
     /// 登记一次分配 debt；只在分配真正成功后调用。
@@ -240,8 +262,9 @@ impl RawWorld {
             .pacing
             .request_headroom(self.pressure_committed_bytes(), bytes);
         match decision {
-            HeadroomDecision::Granted | HeadroomDecision::ForcedCycle => Ok(decision),
-            HeadroomDecision::Drain => Ok(decision),
+            HeadroomDecision::Granted | HeadroomDecision::Drain | HeadroomDecision::ForcedCycle => {
+                Ok(decision)
+            }
             HeadroomDecision::OutOfMemory => {
                 let message = format!(
                     "无法在 soft memory limit 内取得 {bytes} 字节 headroom，当前 committed {}",
@@ -253,54 +276,89 @@ impl RawWorld {
         }
     }
 
-    /// allocation slow edge：按当前真实可消费的 GC work 执行最多一个 assist。
+    /// allocation slow edge：用一次真实有界交接偿还 mark debt，并返回 assist 结局。
     ///
-    /// 可消费 work 取自真实结构：未 flush 的 remembered-set 键按每个键一个 card-mark cost
-    /// unit 计数，已取走但未处理的 edge delta 按每条一个 unit 计数；两者都没有时返回
-    /// `NoWork` 而不记账，避免虚构进度。
-    pub(crate) fn assist_on_slow_edge(&mut self) -> super::super::pacing::AssistOutcome {
-        let mut buffer_keys = 0_u64;
-        for processor in 0..self.barrier.processor_count() {
-            if let Some(record) = self.barrier.processor(processor) {
-                buffer_keys = buffer_keys.saturating_add(u64::from(record.buffer().len()));
-            }
-        }
-        let edges = u64::try_from(self.barrier.edges().pending()).expect("delta 数适配 u64");
-        let available = buffer_keys.saturating_add(edges).saturating_mul(u64::from(
-            super::super::barrier_schema::CARD_GRANULARITY_BYTES,
-        ));
-        self.pacing.assist(available)
+    /// 交接动作是以 memory pressure 原因冲刷本 owner 的 processor barrier 账本：一张交出的
+    /// dirty card 折算 `CARD_GRANULARITY_BYTES` 个 mark cost unit（与 barrier 契约同源）。
+    /// 没有真实交出任何键时返回 `NoWork` 而不记账，避免虚构进度。edge summary 属于 cycle
+    /// credit，必须留给 cycle 边界取走，因此这里不动它。
+    pub(crate) fn assist_on_slow_edge(
+        &mut self,
+        owner: u32,
+    ) -> Result<AssistOutcome, RawInvariant> {
+        let (_, card_keys) =
+            self.flush_all_barriers_counted(owner, BarrierFlushReason::MemoryPressure)?;
+        let available = card_keys.saturating_mul(u64::from(CARD_GRANULARITY_BYTES));
+        Ok(self.pacing.assist(available))
     }
 
-    /// 执行一次有界 pressure drain，并按 `forced` 决定是否启动本 episode 的 forced full cycle。
+    /// 排空一个 owner 的 inbox。
     ///
-    /// drain 顺序与规范一致：先刷新 barrier 与 cache、排空 inbox、再 trim/decommit，最后重算
-    /// committed 快照。forced cycle 使用同一入口，但会把 service 预算提升到 emergency 档并
-    /// 推进 cycle epoch；一次 episode 只允许一次，由 `PacingPlane` 线性化。
-    pub(crate) fn pressure_drain(
+    /// `exhaustive` 为真时循环到 inbox 为空（cycle 必须收敛）；为假时每 shard 只做一次有界
+    /// service，剩余消息留给下一个节奏点，因此单次 drain 的暂停是有界的。
+    pub(super) fn drain_inboxes(
+        &mut self,
+        owner: u32,
+        budget: &ServiceBudget,
+        exhaustive: bool,
+    ) -> Result<(u32, u32), RawInvariant> {
+        let mut forwarded = 0_u32;
+        let mut consumed = 0_u32;
+        for index in 0..super::super::OWNER_INBOX_SHARDS {
+            let shard = ShardIndex::from_raw(index).expect("shard 编号合法");
+            loop {
+                let report = self.service(owner, shard, budget)?;
+                forwarded += report.forwarded;
+                consumed += report.items - report.forwarded;
+                if report.items == 0 || report.stop != DrainStop::Budget || !exhaustive {
+                    break;
+                }
+            }
+        }
+        Ok((forwarded, consumed))
+    }
+
+    /// 执行一次完整 GC cycle；`forced` 表示本 episode 的 forced full cycle。
+    pub(crate) fn run_gc_cycle(
         &mut self,
         forced: bool,
     ) -> Result<PressureDrainReport, RawInvariant> {
+        self.pressure_drain(DrainScope::Cycle, forced)
+    }
+
+    /// 执行一次 episode 内的有界 owner drain：有界预算、不完成 cycle。
+    pub(crate) fn bounded_owner_drain(&mut self) -> Result<PressureDrainReport, RawInvariant> {
+        self.pressure_drain(DrainScope::Bounded, false)
+    }
+
+    /// 执行一次 pressure drain。
+    ///
+    /// 两种作用域共用同一条实现：都先交出尚未发布的 return 链与 owner cache、排空 inbox、
+    /// 推进 grace epoch、取走 edge delta、在 pause 预算内 trim/decommit 并重算 committed
+    /// 快照；只有 `Cycle` 会过 remark 门禁、推进 cycle epoch 并记录工作量与基线。
+    fn pressure_drain(
+        &mut self,
+        scope: DrainScope,
+        forced: bool,
+    ) -> Result<PressureDrainReport, RawInvariant> {
         let mut report = PressureDrainReport::default();
-        // 1. processor 账本与 source-slab cache 先交出各自持有的键与 slot。
-        let mut staging = ProducerStaging::new(BatchLimits::default());
+        // 1. 先交出未发布的 return 链，再关闭 owner 真实的 source-slab cache；`PressureDrain`
+        //    关闭顺带以 memory-pressure 原因冲刷本 owner 的 barrier 账本，因此不需要重复 flush。
         for owner in 0..self.owners.len() as u32 {
-            self.flush_all_barriers(
-                owner,
-                super::super::barrier::BarrierFlushReason::MemoryPressure,
-            )?;
-            let mut cache = ReturnSlabCache::new();
-            self.close_cache(
-                owner,
-                &mut staging,
-                &mut cache,
-                RingCloseReason::PressureDrain,
-            )?;
+            self.flush_return_staging(owner, FlushTrigger::OwnerPressure)?;
+            self.close_cache(owner, RingCloseReason::PressureDrain)?;
         }
-        // 2. 用 emergency 预算排空全部 owner 的 inbox。
-        let budget = ServiceBudget::pressure(u32::MAX, u64::MAX);
+        // 2. 排空 owner inbox：cycle 需要彻底排空，有界 drain 只做一次有界 service。
+        let budget = match scope {
+            DrainScope::Cycle => ServiceBudget::pressure(u32::MAX, u64::MAX),
+            DrainScope::Bounded => {
+                let contract = self.pacing.contract();
+                ServiceBudget::pressure(contract.owner_drain_items(), contract.owner_drain_bytes())
+            }
+        };
         for owner in 0..self.owners.len() as u32 {
-            let (forwarded, consumed) = self.drain_all(owner, &budget)?;
+            let (forwarded, consumed) =
+                self.drain_inboxes(owner, &budget, scope == DrainScope::Cycle)?;
             report.forwarded_messages += u64::from(forwarded);
             report.consumed_messages += u64::from(consumed);
         }
@@ -313,33 +371,43 @@ impl RawWorld {
         self.advance_pending_extent_trims()?;
         // 3. 取走 owner-local edge summary：它属于 cycle credit，必须在 drain 结束前交出。
         report.edge_deltas =
-            u64::try_from(self.take_edge_deltas(0).len()).expect("delta 数适配 u64");
-        // 4. 把本 cycle 真实完成的 GC 工作计入滑动窗口：automatic cycle 超窗的部分转为
-        //    mark debt 由后续 assist 偿还，pressure drain 属于 emergency，可越过吞吐预算。
-        let cost = self.gc_work_cost();
-        let done = self.pacing.worker_work(cost, forced);
-        report.work_cost = done;
-        // 5. remark 是 cycle 终止门禁：超预算时发布 continuation 并保持 barrier 开启，
-        //    因此本 cycle 不推进 epoch，也不宣布收敛。
-        let remark = self
-            .pacing
-            .remark(cost, true)
-            .map_err(|message| RawInvariant::new(message.to_owned()))?;
-        report.remark = remark;
-        if remark == RemarkOutcome::Complete {
-            // cycle 边界：先要求五个 credit 来源全部收敛，再推进 barrier epoch；
-            // 未收敛则说明仍有在飞工作，本 cycle 不得宣布完成。
-            let next = self.barrier.cycle_epoch().saturating_add(1);
-            if !self.begin_pacing_cycle(next, &staging)? {
-                return Err(RawInvariant::new("cycle 边界前 credit 未收敛"));
-            }
-            self.advance_barrier_epoch(0, next)?;
-            if forced {
-                report.forced_cycles = 1;
+            u64::try_from(self.take_edge_deltas().len()).expect("delta 数适配 u64");
+        // 4. cycle 路径把「本 cycle 真实完成的工作」计入滑动窗口：非 forced cycle 超窗的部分
+        //    转为 mark debt 由后续 assist 偿还，forced cycle 属于 emergency，可越过吞吐预算。
+        //    有界 drain 不计费：它由 pause 预算约束，其工作量在 cycle 边界按 per-cycle delta
+        //    一次性计入，避免同一个 cycle 重复计费。
+        let counters = self.work_counters();
+        if scope == DrainScope::Cycle {
+            let cost = self.pacing.cycle_work_cost(counters);
+            report.work_cost = self.pacing.worker_work(cost, forced);
+            // 5. remark 是 cycle 终止门禁：超预算时发布 continuation 并保持 barrier 开启，
+            //    因此本 cycle 不推进 epoch，也不宣布收敛。
+            let remark = self
+                .pacing
+                .remark(cost, true)
+                .map_err(|message| RawInvariant::new(message.to_owned()))?;
+            report.remark = remark;
+            if remark == RemarkOutcome::Complete {
+                let next = self.barrier.cycle_epoch().saturating_add(1);
+                // 先推进 barrier epoch：它可能把新草稿发布成 card batch，这些批次必须在收敛
+                // 检查之前落地，否则新 credit epoch 会以「零在飞」开始却已有发布中的工作。
+                self.advance_barrier_epoch(0, next)?;
+                for owner in 0..self.owners.len() as u32 {
+                    let (forwarded, consumed) = self.drain_inboxes(owner, &budget, true)?;
+                    report.forwarded_messages += u64::from(forwarded);
+                    report.consumed_messages += u64::from(consumed);
+                }
+                report.credits_converged = self.begin_pacing_cycle(next)?;
+                if report.credits_converged {
+                    report.cycle_completed = true;
+                    if forced {
+                        report.forced_cycles = 1;
+                    }
+                }
             }
         }
-        // 6. trim/decommit：候选按 extent 整块判定，只有完整落在 relocation pause 预算内的
-        //    前缀才会被发布；超出的候选整块延后到下个 cycle，绝不部分发布一个 extent。
+        // 6. trim/decommit：候选按 extent 整块判定，只有完整落在 pause 预算内的前缀才会被
+        //    发布；超出的候选整块延后到下个 cycle，绝不部分发布一个 extent。
         let candidates = self.trim_candidates();
         let accepted = self.relocation_batch(&candidates);
         report.deferred_extents =
@@ -347,9 +415,11 @@ impl RawWorld {
         let trimmed = self.trim_extents(&accepted)?;
         report.trimmed_extents = trimmed.trimmed;
         report.blocked_extents = trimmed.blocked_count();
-        // 7. cycle 完成：记录真实 live record 字节并复位 cycle 内 debt 与窗口。
-        let live = self.live_record_bytes();
-        self.complete_pacing_cycle(live);
+        // 7. 只有完整 cycle 才记录 live record 字节并复位 cycle 内 debt、窗口与工作量基线。
+        if report.cycle_completed {
+            let live = self.live_record_bytes();
+            self.complete_pacing_cycle(live, counters);
+        }
         report.committed_after = self.pressure_committed_bytes();
         let classes = self.committed_classes();
         self.pacing.note_drain(classes);
@@ -357,49 +427,41 @@ impl RawWorld {
         Ok(report)
     }
 
-    /// 返回本 cycle 真实完成的 GC 工作 cost unit。
+    /// 返回 barrier 平面与 edge 取走的累计计数器快照。
     ///
-    /// card 键是 mark 工作的真实单位：未 flush 键在 drain 中已全部交出，因此用 barrier 的
-    /// 累计记账（card 数 + 已取走 edge delta 数）作为本 cycle 的工作量，而不是估算值。
-    fn gc_work_cost(&self) -> u64 {
-        let stats = self.barrier_stats(0);
-        stats
-            .card_marks
-            .saturating_add(stats.edge_deltas)
-            .saturating_add(stats.published_batches)
+    /// per-cycle 工作量由相邻两次快照之差得到：累计量只增，因此差值就是本 cycle 的真实工作，
+    /// 不会像直接使用累计值那样跨 cycle 单调增长。
+    fn work_counters(&self) -> GcWorkCounters {
+        let stats = self.barrier_stats();
+        GcWorkCounters {
+            card_marks: stats.card_marks,
+            edge_deltas: stats.edge_deltas,
+            published_batches: stats.published_batches,
+        }
     }
 
-    /// 选出一批可发布的返回候选：按 extent 整块累加 footprint，直到再放进一个 extent 就会
-    /// 超过 relocation pause 预算为止。
+    /// 选出一批可发布的返回候选：按 extent 整块累加真实 pause footprint，直到再放进一个
+    /// extent 就会超过预算为止。
     ///
-    /// 空载 extent 不携带任何待更新 field，因此 `fields` 恒为 0；`copied_bytes` 是本批撤销的
-    /// 提交字节，`roots` 是本批各自的 extent 描述符（一个 extent 一个根）。三者都取自
-    /// slab/extent 描述符表，不采用估算。
-    ///
-    /// 每个候选都完整落在预算内才被接受（不能在 extent 内部分发布），剩余候选保持不变，
-    /// 由下个 cycle 继续；因为单个 extent 至多等于预算上界，所以每轮至少能推进一个候选，
-    /// 不会因为批次总量偏大而永久不进展。
-    fn relocation_batch(
-        &mut self,
-        candidates: &[(ExtentId, ExtentOccupancy)],
-    ) -> Vec<(ExtentId, ExtentOccupancy)> {
+    /// footprint 取自候选自身的真实度量：`bytes` 是本批撤销的已提交字节，`roots` 是本批触达
+    /// 的 descriptor 数；空 extent 不携带任何字段更新，因此 `fields` 恒为 0。每个候选都必须
+    /// 完整落在预算内（不在 extent 内部分发布），剩余候选保持不变由下个 cycle 继续。
+    fn relocation_batch(&mut self, candidates: &[TrimCandidate]) -> Vec<TrimCandidate> {
         let mut accepted = Vec::new();
         let mut bytes = 0_u64;
-        for (extent, occupancy) in candidates {
-            let extent_bytes = self
-                .extents
-                .descriptor(*extent)
-                .map_or(0_u64, |descriptor| descriptor.bytes);
+        let mut roots = 0_u32;
+        for candidate in candidates {
             let footprint = EvacuationFootprint {
-                copied_bytes: bytes.saturating_add(extent_bytes),
-                roots: u32::try_from(accepted.len() + 1).expect("候选数适配 u32"),
+                bytes: bytes.saturating_add(candidate.revoked_bytes),
+                roots: roots.saturating_add(candidate.descriptors),
                 fields: 0,
             };
             if self.pacing.evacuation(footprint) == EvacuationOutcome::Defer {
                 break;
             }
-            bytes = footprint.copied_bytes;
-            accepted.push((*extent, *occupancy));
+            bytes = footprint.bytes;
+            roots = footprint.roots;
+            accepted.push(*candidate);
         }
         accepted
     }
@@ -407,52 +469,59 @@ impl RawWorld {
     /// 推进一次 headroom 请求：先 drain，必要时再执行 forced cycle，最后重新检查。
     ///
     /// 返回 `true` 表示已经取得 headroom；`false` 表示两次机会用尽，调用方必须进入
-    /// `OutOfMemory`。
+    /// `OutOfMemory`。缓存估计远离 limit 时不会读任何全局快照。
     pub(crate) fn relieve_pressure(&mut self, bytes: u64) -> Result<bool, RawInvariant> {
+        if !self.pacing.headroom_may_fail(bytes) {
+            return Ok(true);
+        }
+        // 估计已经触到 limit：刷新真实快照后再决定，不能用估计值做拒绝判定。
+        self.poll_pressure();
         match self.request_headroom(bytes)? {
             HeadroomDecision::Granted => Ok(true),
             HeadroomDecision::Drain => {
-                self.pressure_drain(false)?;
+                self.bounded_owner_drain()?;
                 match self.request_headroom(bytes)? {
                     HeadroomDecision::Granted => Ok(true),
                     HeadroomDecision::ForcedCycle => {
-                        self.pressure_drain(true)?;
+                        self.run_gc_cycle(true)?;
                         Ok(self.request_headroom(bytes)? == HeadroomDecision::Granted)
                     }
-                    HeadroomDecision::Drain => Ok(false),
-                    HeadroomDecision::OutOfMemory => Ok(false),
+                    HeadroomDecision::Drain | HeadroomDecision::OutOfMemory => Ok(false),
                 }
             }
             HeadroomDecision::ForcedCycle => {
-                self.pressure_drain(true)?;
+                self.run_gc_cycle(true)?;
                 Ok(self.request_headroom(bytes)? == HeadroomDecision::Granted)
             }
             HeadroomDecision::OutOfMemory => Ok(false),
         }
     }
 
-    /// allocation 上的唯一慢路径：按需借 assist、推进 hysteresis、执行有界 drain、
-    /// 按 allocation debt 启动自动 cycle，并在软上限内请求 headroom。
+    /// allocation 上的唯一慢路径：借 assist、按节奏推进 pressure 与自动 cycle，并请求 headroom。
     ///
-    /// 全部全局读取都发生在这个函数里，并且只有 `PacingPlane::slow_edge_due` 为真时才会被
-    /// 调用，因此本地 fast bump 仍然无查询。无法取得 headroom 时 `OutOfMemory` 会写入 rt0
-    /// 的 fatal 报告并让本次分配失败，而不是继续分配。
-    pub(crate) fn pacing_slow_edge(&mut self, bytes: u64) -> Result<(), RawInvariant> {
+    /// 门禁全部是标量比较；真实全局快照只在 `pressure_poll_due` 为真或 headroom 可能不足时
+    /// 才读。无法取得 headroom 时 `OutOfMemory` 会写入 rt0 的 fatal 报告并让本次分配失败。
+    pub(crate) fn pacing_slow_edge(&mut self, owner: u32, bytes: u64) -> Result<(), RawInvariant> {
         if !self.pacing.slow_edge_due() {
             return Ok(());
         }
-        // 1. 先按窗口额度偿还 mark debt；没有真实可消费 work 时 assist 不记账。
-        let _ = self.assist_on_slow_edge();
-        // 2. 用当前物理快照推进 pressure hysteresis。
-        self.poll_pressure();
-        // 3. 已处于 episode：执行一次有界 drain，让 pending/cache/reclaimable 真实下降。
-        if self.pacing.state().in_episode() {
-            self.pressure_drain(false)?;
+        // 1. 只有 mark debt 达阈值且窗口还有额度时才做真实的有界 assist。
+        if self.pacing.assist_due() {
+            let _ = self.assist_on_slow_edge(owner)?;
         }
-        // 4. allocation debt 越过增长预算且窗口未溢出时启动自动 cycle。窗口已溢出意味着
-        //    本 cycle 的 GC 吞吐额度用完，此时必须延后而不是继续重扫。
-        if self.pacing.should_start_cycle() && !self.pacing.window_exhausted() {
-            self.pressure_drain(false)?;
+        // 2. 到节奏点才刷新真实 committed 快照并推进 hysteresis。
+        if self.pacing.pressure_poll_due() {
+            self.poll_pressure();
+        }
+        // 3. episode 内按节奏执行一次有界 drain，让 pending/cache/reclaimable 真实下降；
+        //    不在每次分配上重扫整堆。
+        if self.pacing.take_pressure_drain() {
+            self.bounded_owner_drain()?;
+        }
+        // 4. allocation debt 越过缓存预算且窗口未溢出时尝试自动 cycle；两次尝试之间有分配量
+        //    退避，未完成的 cycle 不会在每次分配上重试。
+        if !self.pacing.window_exhausted() && self.pacing.take_cycle_attempt() {
+            self.run_gc_cycle(false)?;
         }
         // 5. 软上限内请求 headroom：不足时按 drain → forced cycle → OOM 的顺序真实推进。
         self.relieve_pressure(bytes)?;

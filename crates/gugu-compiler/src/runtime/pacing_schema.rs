@@ -13,15 +13,16 @@ use std::fmt::Write;
 
 use super::gc_metadata_contract::GC_BLOCK_BYTES;
 use super::ledger::{LEDGER_PARTITION_COMMITTED, LedgerSchemaV1};
+use super::message::RETURN_NODE_BYTES;
 use super::model::RawModelError;
 
 /// pacing 契约段的 schema 版本。
-pub(crate) const PACING_SCHEMA: u32 = 1;
+pub(crate) const PACING_SCHEMA: u32 = 2;
 
 /// 内建 pacing profile 名；与 runtime tuning profile 一起版本化。
 pub(crate) const PACING_PROFILE_NAME: &str = "mosaic-default";
 /// pacing profile 的 revision；任何参数变化都必须递增。
-pub(crate) const PACING_PROFILE_REVISION: u32 = 1;
+pub(crate) const PACING_PROFILE_REVISION: u32 = 2;
 
 /// cost unit 的名字；debt、assist 与 GC CPU 窗口都用它计量。
 pub(crate) const PACING_COST_UNIT: &str = "mark-cost-unit";
@@ -46,6 +47,14 @@ pub(crate) const EVACUATION_PAUSE_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const EVACUATION_PAUSE_ROOTS: u32 = 4096;
 /// 一次 relocation 允许更新的字段数上界。
 pub(crate) const EVACUATION_PAUSE_FIELDS: u32 = 65536;
+/// 缓存 committed 快照的刷新间隔：每累计分配这么多字节强制轮询一次真实快照。
+pub(crate) const PRESSURE_POLL_BYTES: u64 = 1 << 20;
+/// episode 内一次有界 owner drain 对单个 shard 的 item 预算。
+pub(crate) const OWNER_DRAIN_ITEMS: u32 = 64;
+/// episode 内一次有界 owner drain 对单个 shard 的 byte 预算。
+pub(crate) const OWNER_DRAIN_BYTES: u64 = 1 << 16;
+/// episode 内两次有界 owner drain 之间必须新增的分配字节。
+pub(crate) const OWNER_DRAIN_INTERVAL_BYTES: u64 = 1 << 20;
 
 /// 开启 pressure episode 的占用比例（百分数）。
 pub(crate) const PRESSURE_ENTER_RATIO: u32 = 85;
@@ -139,6 +148,14 @@ pub struct GcPacingRuntimeContract {
     pub evacuation_pause_roots: u32,
     /// evacuation 字段上界。
     pub evacuation_pause_fields: u32,
+    /// 缓存 committed 快照的刷新间隔。
+    pub pressure_poll_bytes: u64,
+    /// 有界 owner drain 的单 shard item 预算。
+    pub owner_drain_items: u32,
+    /// 有界 owner drain 的单 shard byte 预算。
+    pub owner_drain_bytes: u64,
+    /// 两次有界 owner drain 之间必须新增的分配字节。
+    pub owner_drain_interval_bytes: u64,
     /// episode 开启比例。
     pub pressure_enter_ratio: u32,
     /// episode 结束比例。
@@ -239,6 +256,26 @@ impl GcPacingRuntimeContract {
         self.evacuation_pause_fields
     }
 
+    /// 返回缓存 committed 快照的刷新间隔。
+    pub const fn pressure_poll_bytes(&self) -> u64 {
+        self.pressure_poll_bytes
+    }
+
+    /// 返回有界 owner drain 的单 shard item 预算。
+    pub const fn owner_drain_items(&self) -> u32 {
+        self.owner_drain_items
+    }
+
+    /// 返回有界 owner drain 的单 shard byte 预算。
+    pub const fn owner_drain_bytes(&self) -> u64 {
+        self.owner_drain_bytes
+    }
+
+    /// 返回两次有界 owner drain 之间的分配字节间隔。
+    pub const fn owner_drain_interval_bytes(&self) -> u64 {
+        self.owner_drain_interval_bytes
+    }
+
     /// 返回 episode 开启比例。
     pub const fn pressure_enter_ratio(&self) -> u32 {
         self.pressure_enter_ratio
@@ -276,6 +313,10 @@ impl GcPacingRuntimeContract {
             evacuation_pause_bytes: EVACUATION_PAUSE_BYTES,
             evacuation_pause_roots: EVACUATION_PAUSE_ROOTS,
             evacuation_pause_fields: EVACUATION_PAUSE_FIELDS,
+            pressure_poll_bytes: PRESSURE_POLL_BYTES,
+            owner_drain_items: OWNER_DRAIN_ITEMS,
+            owner_drain_bytes: OWNER_DRAIN_BYTES,
+            owner_drain_interval_bytes: OWNER_DRAIN_INTERVAL_BYTES,
             pressure_enter_ratio: PRESSURE_ENTER_RATIO,
             pressure_clear_ratio: PRESSURE_CLEAR_RATIO,
             pressure_states: PRESSURE_STATE_NAMES
@@ -342,6 +383,10 @@ impl GcPacingRuntimeContract {
             || self.evacuation_pause_bytes != EVACUATION_PAUSE_BYTES
             || self.evacuation_pause_roots != EVACUATION_PAUSE_ROOTS
             || self.evacuation_pause_fields != EVACUATION_PAUSE_FIELDS
+            || self.pressure_poll_bytes != PRESSURE_POLL_BYTES
+            || self.owner_drain_items != OWNER_DRAIN_ITEMS
+            || self.owner_drain_bytes != OWNER_DRAIN_BYTES
+            || self.owner_drain_interval_bytes != OWNER_DRAIN_INTERVAL_BYTES
             || self.pressure_enter_ratio != PRESSURE_ENTER_RATIO
             || self.pressure_clear_ratio != PRESSURE_CLEAR_RATIO
         {
@@ -375,7 +420,18 @@ impl GcPacingRuntimeContract {
                 "assist 阈值与 remark 预算都必须容纳至少一次 assist quantum",
             ));
         }
-        return Ok(());
+        if self.pressure_poll_bytes == 0 || self.owner_drain_interval_bytes == 0 {
+            return Err(RawModelError::new(
+                "pressure 轮询与有界 drain 间隔都必须为正",
+            ));
+        }
+        // 有界 drain 的 byte 预算必须容下至少一个 return node，否则每次 drain 都无法推进。
+        if self.owner_drain_items == 0 || self.owner_drain_bytes < u64::from(RETURN_NODE_BYTES) {
+            return Err(RawModelError::new(
+                "有界 owner drain 预算必须至少容纳一个 return node",
+            ));
+        }
+        Ok(())
     }
 
     /// 校验 pressure hysteresis 与 relocation 预算的整除关系。
@@ -390,7 +446,9 @@ impl GcPacingRuntimeContract {
         }
         // 候选 block 要么整体发布，要么整体延后：payload 上界必须覆盖整数个 block。
         if self.evacuation_pause_bytes < u64::from(GC_BLOCK_BYTES)
-            || self.evacuation_pause_bytes % u64::from(GC_BLOCK_BYTES) != 0
+            || !self
+                .evacuation_pause_bytes
+                .is_multiple_of(u64::from(GC_BLOCK_BYTES))
         {
             return Err(RawModelError::new(
                 "evacuation payload 上界必须是 block 的整数倍",
@@ -453,6 +511,18 @@ impl GcPacingRuntimeContract {
                 "drain 分类必须与内存账本 committed 分区的独立计数器一致",
             ));
         }
+        // trim 批按 extent 整块判定；pause 上界必须覆盖最大 extent class，否则
+        // relocation_batch 会永久延后全部候选，trim 不再进展而没有任何报错。
+        let largest_extent = super::extent::EXTENT_CLASS_LADDER
+            .iter()
+            .copied()
+            .max()
+            .expect("extent class 阶梯非空");
+        if self.evacuation_pause_bytes < largest_extent {
+            return Err(RawModelError::new(
+                "evacuation payload 上界必须覆盖最大 extent class",
+            ));
+        }
         Ok(())
     }
 
@@ -472,6 +542,10 @@ impl GcPacingRuntimeContract {
         bytes.extend_from_slice(&self.evacuation_pause_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.evacuation_pause_roots.to_le_bytes());
         bytes.extend_from_slice(&self.evacuation_pause_fields.to_le_bytes());
+        bytes.extend_from_slice(&self.pressure_poll_bytes.to_le_bytes());
+        bytes.extend_from_slice(&self.owner_drain_items.to_le_bytes());
+        bytes.extend_from_slice(&self.owner_drain_bytes.to_le_bytes());
+        bytes.extend_from_slice(&self.owner_drain_interval_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.pressure_enter_ratio.to_le_bytes());
         bytes.extend_from_slice(&self.pressure_clear_ratio.to_le_bytes());
         push_names(&mut bytes, &self.pressure_states);
@@ -523,6 +597,15 @@ impl GcPacingRuntimeContract {
             output,
             "pacing-evacuation bytes={} roots={} fields={}",
             self.evacuation_pause_bytes, self.evacuation_pause_roots, self.evacuation_pause_fields,
+        )
+        .expect("String写入");
+        writeln!(
+            output,
+            "pacing-drain poll={} items={} bytes={} interval={}",
+            self.pressure_poll_bytes,
+            self.owner_drain_items,
+            self.owner_drain_bytes,
+            self.owner_drain_interval_bytes,
         )
         .expect("String写入");
         writeln!(

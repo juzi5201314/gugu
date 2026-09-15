@@ -1065,6 +1065,10 @@ pub struct ImagePlan {
     pacing_pressure_enter_ratio: u32,
     pacing_pressure_clear_ratio: u32,
     pacing_credit_source_count: u32,
+    pacing_pressure_poll_bytes: u64,
+    pacing_owner_drain_items: u32,
+    pacing_owner_drain_bytes: u64,
+    pacing_owner_drain_interval_bytes: u64,
     turn_region_sites: u32,
     turn_region_publish_sites: u32,
     turn_region_reset_sites: u32,
@@ -1218,6 +1222,10 @@ impl ImagePlan {
             pacing_pressure_enter_ratio: plan.pacing_pressure_enter_ratio,
             pacing_pressure_clear_ratio: plan.pacing_pressure_clear_ratio,
             pacing_credit_source_count: plan.pacing_credit_source_count,
+            pacing_pressure_poll_bytes: plan.pacing_pressure_poll_bytes,
+            pacing_owner_drain_items: plan.pacing_owner_drain_items,
+            pacing_owner_drain_bytes: plan.pacing_owner_drain_bytes,
+            pacing_owner_drain_interval_bytes: plan.pacing_owner_drain_interval_bytes,
             turn_region_sites: plan.turn_region_sites,
             turn_region_publish_sites: plan.turn_region_publish_sites,
             turn_region_reset_sites: plan.turn_region_reset_sites,
@@ -1744,6 +1752,22 @@ impl ImagePlan {
     /// 返回 owner credit 来源目录长度。
     pub fn pacing_credit_source_count(&self) -> u32 {
         self.pacing_credit_source_count
+    }
+    /// 返回 committed 快照的刷新间隔。
+    pub fn pacing_pressure_poll_bytes(&self) -> u64 {
+        self.pacing_pressure_poll_bytes
+    }
+    /// 返回有界 owner drain 的单 shard item 预算。
+    pub fn pacing_owner_drain_items(&self) -> u32 {
+        self.pacing_owner_drain_items
+    }
+    /// 返回有界 owner drain 的单 shard byte 预算。
+    pub fn pacing_owner_drain_bytes(&self) -> u64 {
+        self.pacing_owner_drain_bytes
+    }
+    /// 返回两次有界 owner drain 之间的分配字节间隔。
+    pub fn pacing_owner_drain_interval_bytes(&self) -> u64 {
+        self.pacing_owner_drain_interval_bytes
     }
 
     /// 返回已建立计划的 TurnRegion 数量。
@@ -2527,10 +2551,14 @@ mod tests {
         assert!(dump.contains("barrier-fingerprint"));
         // pacing 契约与需求同样进入镜像计划、dump 与指纹身份。
         assert_eq!(plan.pacing_profile(), "mosaic-default");
-        assert_eq!(plan.pacing_profile_revision(), 1);
+        assert_eq!(plan.pacing_profile_revision(), 2);
         assert_eq!(plan.pacing_assist_quantum(), 1 << 16);
         assert_eq!(plan.pacing_gc_cpu_fraction(), 25);
         assert_eq!(plan.pacing_credit_source_count(), 5);
+        assert_eq!(plan.pacing_pressure_poll_bytes(), 1 << 20);
+        assert_eq!(plan.pacing_owner_drain_items(), 64);
+        assert_eq!(plan.pacing_owner_drain_bytes(), 1 << 16);
+        assert_eq!(plan.pacing_owner_drain_interval_bytes(), 1 << 20);
         assert_ne!(plan.pacing_contract_fingerprint(), [0_u8; 32]);
         assert_eq!(
             plan.pacing_runtime().pressure_enter_ratio(),
@@ -2546,7 +2574,8 @@ mod tests {
             "slow edge 等于分配站点加显式 safepoint"
         );
         assert!(pacing_demand.managed_types > 0);
-        assert!(dump.contains("pacing schema=1 profile=mosaic-default revision=1"));
+        assert!(dump.contains("pacing schema=2 profile=mosaic-default revision=2"));
+        assert!(dump.contains("pacing-drain poll=1048576 items=64 bytes=65536 interval=1048576"));
         assert!(dump.contains("pacing-pressure enter=85 clear=70 states=steady,drain,emergency"));
         assert!(dump.contains("pacing-drain-classes owner-cache-bytes,pending-return-bytes,reclaimable-bytes partition=runtime-committed-bytes"));
         assert!(dump.contains("pacing-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging"));

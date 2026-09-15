@@ -381,7 +381,7 @@ fn card_batch_crosses_owner_and_is_consumed_once() {
         .flush_barrier(0, 0, BarrierFlushReason::ProcessorHandoff)
         .expect("发布 batch");
     assert_eq!(published, 1, "非 owner processor 必须发布 CardMarkBatch");
-    let stats = world.barrier_stats(0);
+    let stats = world.barrier_stats();
     assert_eq!(stats.published_batches, 1);
     assert_eq!(world.barrier().pending_batch_bytes(), 1);
     assert!(
@@ -696,19 +696,17 @@ fn owner_retire_flushes_the_processor_ledger() {
 
 #[test]
 fn cache_close_flushes_for_gc_handoff_and_pressure() {
-    use crate::runtime::message::{ProducerStaging, ReturnSlabCache, RingCloseReason};
+    use crate::runtime::message::RingCloseReason;
 
     let mut world = world(1);
     world
         .register_managed_arena(0, SlabDescriptorId::from_raw(3), 1)
         .expect("登记 arena");
-    let mut staging = ProducerStaging::new(BatchLimits::default());
-    let mut cache = ReturnSlabCache::new();
     world
         .perform_barrier(0, site(3, 1, 512, 1))
         .expect("写屏障成功");
     world
-        .close_cache(0, &mut staging, &mut cache, RingCloseReason::GcHandoff)
+        .close_cache(0, RingCloseReason::GcHandoff)
         .expect("GC handoff");
     assert_eq!(world.barrier().table(3).expect("card table").dirty(), 1);
     assert!(buffer_empty(&world, 0));
@@ -716,7 +714,7 @@ fn cache_close_flushes_for_gc_handoff_and_pressure() {
         .perform_barrier(0, site(3, 1, 1024, 1))
         .expect("写屏障成功");
     world
-        .close_cache(0, &mut staging, &mut cache, RingCloseReason::PressureDrain)
+        .close_cache(0, RingCloseReason::PressureDrain)
         .expect("pressure drain");
     assert_eq!(world.barrier().table(3).expect("card table").dirty(), 2);
     assert!(buffer_empty(&world, 0));
@@ -818,23 +816,23 @@ fn edge_deltas_are_aggregated_and_collected_by_the_owner() {
     dropped.new_present = false;
     world.perform_barrier(0, dropped).expect("写屏障成功");
     assert_eq!(
-        world.barrier_stats(0).edge_pending,
+        world.barrier_stats().edge_pending,
         0,
         "同一 epoch 的 add/drop 净零抵消"
     );
-    assert!(world.take_edge_deltas(0).is_empty());
+    assert!(world.take_edge_deltas().is_empty());
 
     // 只增不删的 edge 保留一条待发布 delta。
     world
         .perform_barrier(0, site(2, 1, 1536, 1))
         .expect("写屏障成功");
     assert_eq!(
-        world.barrier_stats(0).edge_pending,
+        world.barrier_stats().edge_pending,
         1,
         "同一 edge 聚合为一条"
     );
-    assert_eq!(world.take_edge_deltas(0).len(), 1);
-    assert_eq!(world.barrier_stats(0).edge_deltas, 1);
-    assert_eq!(world.barrier_stats(0).edge_pending, 0, "取走后不再挂起");
-    assert!(world.take_edge_deltas(0).is_empty());
+    assert_eq!(world.take_edge_deltas().len(), 1);
+    assert_eq!(world.barrier_stats().edge_deltas, 1);
+    assert_eq!(world.barrier_stats().edge_pending, 0, "取走后不再挂起");
+    assert!(world.take_edge_deltas().is_empty());
 }

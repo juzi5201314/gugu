@@ -553,9 +553,9 @@ old、SharedHeap、pinned、large 和 resource object 不因 minor cycle 直接�
 
 ## GC pacing 与 relocation pause budget {#gc-pacing--relocation-pause-budget}
 
-Mosaic 的 collector 以 `GcPacingProfile` 固定下列内部参数：`min_growth_budget`、`assist_threshold`、`assist_quantum`、`mark_cost_per_byte`、`gc_cpu_fraction`、`gc_cpu_window_cost`、`remark_cost_budget`、`evacuation_pause_bytes`、`evacuation_pause_roots`、`evacuation_pause_fields`、`pressure_enter_ratio` 和 `pressure_clear_ratio`。这些参数与 `CompilerIdentity`/runtime tuning profile 一起版本化并进入 digest；它们是实现门禁，不是用户可观察的时间单位。当前版本只登记唯一 profile `mosaic-default`，参数不允许被环境变量覆盖：任何参数变动都必须递增 profile revision 并同时更新契约、预算数字与端到端 GC workload，否则 verifier 在镜像写出前拒绝。`GcPacingRuntimeContract` 把这些参数、pressure 状态目录、必须各自 drain 的账本分类、assist/remark/evacuation 结局与 credit 来源目录固定为带版本对象；`GcPacingDemand`（分配站点、屏障站点、assist slow edge、受管类型数）由优化后 LIR 与冻结类型表推导并进入契约指纹。
+Mosaic 的 collector 以 `GcPacingProfile` 固定下列内部参数：`min_growth_budget`、`assist_threshold`、`assist_quantum`、`mark_cost_per_byte`、`gc_cpu_fraction`、`gc_cpu_window_cost`、`remark_cost_budget`、`evacuation_pause_bytes`、`evacuation_pause_roots`、`evacuation_pause_fields`、`pressure_enter_ratio`、`pressure_clear_ratio`、`pressure_poll_bytes`、`owner_drain_items`、`owner_drain_bytes` 和 `owner_drain_interval_bytes`。这些参数与 `CompilerIdentity`/runtime tuning profile 一起版本化并进入 digest；它们是实现门禁，不是用户可观察的时间单位。当前版本只登记唯一 profile `mosaic-default`，参数不允许被环境变量覆盖：任何参数变动都必须递增 profile revision 并同时更新契约、预算数字与端到端 GC workload，否则 verifier 在镜像写出前拒绝。`GcPacingRuntimeContract` 把这些参数、pressure 状态目录、必须各自 drain 的账本分类、assist/remark/evacuation 结局与 credit 来源目录固定为带版本对象；`GcPacingDemand`（分配站点、屏障站点、assist slow edge、受管类型数）由优化后 LIR 与冻结类型表推导并进入契约指纹。
 
-每个 cycle 的 `allocation_debt` 先按[内存所有权与消息通道](memory-messaging.md#allocation-debt-pressure-backpressure)计算，再乘以 descriptor/profile 的 `mark_cost_per_byte` 形成 mark debt。processor 在 TLAB refill、allocation slow edge 或显式 poll 处最多执行一个 `assist_quantum` 的标记/edge/card 工作；一次 assist 不能无限追债，也不能持有 runtime lock 跨 safepoint。mutator assist 和 collector worker 都归入同一 cycle credit，只有完成的 work 才能归还 credit；没有可消费 work 时不得虚构进度：assist 必须报告 `none`/`within-quantum`/`quantum-truncated`/`no-work` 四种结局之一，可消费 work 为零时不得记账。
+每个 cycle 的 `allocation_debt` 先按[内存所有权与消息通道](memory-messaging.md#allocation-debt-pressure-backpressure)计算，再乘以 descriptor/profile 的 `mark_cost_per_byte` 形成 mark debt。processor 在 TLAB refill、allocation slow edge 或显式 poll 处最多执行一个 `assist_quantum` 的标记/edge/card 工作；一次 assist 不能无限追债，也不能持有 runtime lock 跨 safepoint。mutator assist 和 collector worker 都归入同一 cycle credit，只有完成的 work 才能归还 credit；没有可消费 work 时不得虚构进度：assist 必须报告 `none`/`within-quantum`/`quantum-truncated`/`no-work` 四种结局之一，可消费 work 为零时不得记账。偿还量按一个 cost unit 只扣一次的口径分摊：先冲抵拖欠的 `pending_mark_work`，余量再按 `mark_cost_per_byte` 折成 allocation 字节；assist 的真实交接是它自己 owner 的 processor 账本交出的 dirty card 键数，edge summary 留给 cycle 边界取走，未收敛的 credit 只表示本轮 cycle 未完成，不会把分配变成错误。
 
 GC worker 的执行由 `gc_cpu_fraction` 的滑动 cost window 限制。空闲 processor 可以在未使用的 CPU 额度内执行 GC；有 runnable 压力时，超出额度的工作转为 allocation debt 和后续 assist，而不是创建无界 GC worker。窗口预算为 `gc_cpu_window_cost × gc_cpu_fraction / 100`，必须至少能容纳一次 `assist_quantum`；cycle 完成时窗口复位。memory pressure、cycle termination 和 lease/grace 正确性优先于吞吐预算，但每个 slow edge 仍受 scheduler 的 poll/service budget 限制。
 
@@ -636,20 +636,23 @@ arena 2 MiB / block 32 KiB / line 128 byte，与 slab/extent 参数同源。
 `boot_verify` 均按规范运行；REPEAT_FIELD/ARENA_SLOTS 与 `String`/COW/`ResourceCell`
 资源字段的扩展在 `placement` 与 `LocalHeap` 接入后补齐，不改变上述定位规则。
 
-同一对象中的 `GcPacingRuntimeContract`（pacing schema 1）把
-`GcPacingProfile` 的 12 个参数固定为唯一 `mosaic-default` revision：
+同一对象中的 `GcPacingRuntimeContract`（pacing schema 2）把
+`GcPacingProfile` 的 16 个参数固定为唯一 `mosaic-default` revision 2：
 `min_growth_budget`、`assist_threshold`、`assist_quantum`、`mark_cost_per_byte`、
 `gc_cpu_fraction`、`gc_cpu_window_cost`、`remark_cost_budget`、
 `evacuation_pause_bytes`、`evacuation_pause_roots`、`evacuation_pause_fields`、
-`pressure_enter_ratio` 与 `pressure_clear_ratio`；契约还登记三个 pressure 状态
+`pressure_enter_ratio`、`pressure_clear_ratio`、`pressure_poll_bytes`、
+`owner_drain_items`、`owner_drain_bytes` 与 `owner_drain_interval_bytes`；
+契约还登记三个 pressure 状态
 （`steady`/`drain`/`emergency`）、三个必须各自完成 owner drain 的账本分类
 （`owner-cache-bytes`/`pending-return-bytes`/`reclaimable-bytes`，与
 `LedgerSchemaV1` 的 committed 分区独立计数器逐项同源）、四种 assist 结局、
 两种 remark 结局、两种 evacuation 结局与五个 credit 来源
 （`barrier-buffer`/`card-mark-batch`/`edge-delta`/`pending-return`/`producer-staging`）。
 verifier 拒绝参数漂移、`0 < clear < enter < 100` 之外的 hysteresis、非 block 整数倍的
-evacuation payload 上界、装不下一次 assist quantum 的窗口预算、与账本不一致的 drain
-分类，以及内容与登记指纹不一致的契约。`GcPacingDemand`（分配站点、屏障站点、
+evacuation payload 上界、小于 extent 阶梯顶层的 evacuation payload 上界、装不下一次
+assist quantum 的窗口预算、四个 drain 节奏参数的零值、小于一个 return node 的
+`owner_drain_bytes`、与账本不一致的 drain 分类，以及内容与登记指纹不一致的契约。`GcPacingDemand`（分配站点、屏障站点、
 assist slow edge、受管类型数）由优化后 LIR 与冻结类型表推导并进入契约指纹。
 `ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `pacing-contract-fingerprint`、
 `pacing-profile`、`pacing-profile-revision`、`pacing-min-growth-budget`、
@@ -657,9 +660,11 @@ assist slow edge、受管类型数）由优化后 LIR 与冻结类型表推导�
 `pacing-gc-cpu-fraction`、`pacing-gc-cpu-window-cost`、`pacing-remark-cost-budget`、
 `pacing-evacuation-pause-bytes`、`pacing-evacuation-pause-roots`、
 `pacing-evacuation-pause-fields`、`pacing-pressure-enter-ratio`、
-`pacing-pressure-clear-ratio`、`pacing-credit-source-count` 与 `pacing-demand`，
+`pacing-pressure-clear-ratio`、`pacing-credit-source-count`、
+`pacing-pressure-poll-bytes`、`pacing-owner-drain-items`、`pacing-owner-drain-bytes`、
+`pacing-owner-drain-interval-bytes` 与 `pacing-demand`，
 dump 输出 `pacing`/`pacing-budget`/`pacing-cpu`/`pacing-remark`/`pacing-evacuation`、
-`pacing-pressure`/`pacing-drain-classes`/`pacing-assist-outcomes`/
+`pacing-pressure`/`pacing-drain-classes`/`pacing-drain`/`pacing-assist-outcomes`/
 `pacing-remark-outcomes`/`pacing-evacuation-outcomes`/`pacing-credit-sources`/
 `pacing-demand`/`pacing-fingerprint`，冷/热编译逐字节一致。
 
@@ -667,41 +672,59 @@ dump 输出 `pacing`/`pacing-budget`/`pacing-cpu`/`pacing-remark`/`pacing-evacua
 `max(min_growth_budget, last_live × target / 100)`，`allocation_debt`、`mark_debt` 与
 `pressure_debt` 按[内存所有权与消息通道](memory-messaging.md#allocation-debt-pressure-backpressure)
 的公式以饱和整数 cost unit 计算；assist 只在真实 slow edge 上借用且不超过一个 quantum，
-没有可消费 work 时返回 `no-work` 而不记账；`gc_cpu_fraction` 窗口内的普通 worker 工作
-超出预算的部分转为 debt，emergency drain 可以越过吞吐预算；remark 在 barrier 已开启的
-前提下按预算给出 `complete`/`continuation`；relocation 的 bytes/root/field 三项任一超出
-即整 block `defer`。pressure episode 由平面线性化：enter 水位开启、达 soft limit 进入
-`emergency`、降到 clear 水位且三类分类各自 drain 完成后结束，一个 episode 至多一次
-forced full cycle，用尽 drain 与 forced cycle 仍无 headroom 才进入 `OutOfMemory`。
-credit 账本用真实结构观测五个来源并要求全部归零才能推进 cycle epoch。
+没有可消费 work 时返回 `no-work` 而不记账，偿还量先冲抵 `pending_mark_work`、余量再按
+`mark_cost_per_byte` 折算 allocation 字节；`gc_cpu_fraction` 窗口内的普通 worker 工作
+超出预算的部分转为 debt，emergency drain 可以越过吞吐预算；cycle 工作量取累计计数器
+相对上一次基线的差值，因此 remark 门禁不会因为累计值增长而永久拒绝后续 cycle；
+remark 在 barrier 已开启的前提下按预算给出 `complete`/`continuation`；relocation 的
+bytes/root/field 三项任一超出即整 block `defer`。pressure episode 由平面线性化：enter
+水位开启、达 soft limit 进入 `emergency`、请求字节与 committed 之和越过 limit 只进入
+`drain`，降到 clear 水位且三类分类都被一次真实 owner drain 覆盖后才结束，一个 episode
+至多授权一次 forced full cycle，用尽 drain 与 forced cycle 仍无 headroom 才进入
+`OutOfMemory`；committed 快照按 `pressure_poll_bytes` 间隔刷新，有界 drain 按
+`owner_drain_interval_bytes` 节奏推进。credit 账本用真实结构观测五个来源并要求全部归零
+才能推进 credit epoch，credit epoch 只单调前进：未收敛的 cycle 不推进它，下个完成的
+cycle 会追平 barrier epoch。
 
 `world/pacing_impl.rs` 把这些决定接到真实路径：分配成功后累加 allocation debt；分配上的
-唯一慢路径 `pacing_slow_edge` 由 `PacingPlane::slow_edge_due` 把关（四个条件都不需要全局读
-取，未触发时普通分配不付任何查询），先借 assist、再推进 hysteresis、在 episode 内执行有界
-drain、按 allocation debt 启动自动 cycle，最后在软上限内请求 headroom：无法取得 headroom 时
-写入 rt0 的 `OutOfMemory` fatal，并让本次分配失败。`pressure_drain` 依次刷新全部 processor 的
-barrier 账本、关闭 source-slab cache、以 emergency 预算排空每个 owner 的 inbox、推进
-queue-page grace epoch、取出 owner-local edge delta，把本 cycle 的真实 card 工作计入滑动窗口
-（emergency 越过吞吐预算，普通 cycle 把超出部分转为 mark debt），过 remark 终止门禁后再对所有
-空载 extent 重跑 lease、live/queued slot 与在途 return 四条门禁；未过门禁的 extent 保持
-committed 并计入 `blocked_extents`，超出一轮 relocation pause 预算的候选整块计入
-`deferred_extents`、由下个 cycle 继续（单个 extent 至多等于预算上界，因此每轮至少推进一个
-候选）。通过门禁的 extent 在 `decommit` 的同一步让名下空载 descriptor 离开 committed 口径，
-物理页与账本不会各走一边。cycle 边界先要求五个 credit 来源收敛再推进 barrier epoch，并调用
-`complete_cycle` 记录真实 live record 字节（`committed − pending − reclaimable − cache` 的残差，
-由 `ledger_invariant` 在运行时强制守恒）。软上限口径直接取 provider 的 committed 总量：
+唯一慢路径 `pacing_slow_edge(owner, bytes)` 由 `PacingPlane::slow_edge_due` 把关（assist 阈值、
+cost window、`pressure_poll_bytes` 的 poll 节奏与 `min_growth_budget` 的 cycle 尝试节奏都不需要
+全局读取，未触发时普通分配不付任何查询），先借一次真实 assist、再按节奏推进 hysteresis、在
+episode 内执行一次有界 owner drain、按 allocation debt 启动自动 cycle，最后用「committed 估计
++ 本次请求字节」判断是否需要真正推进 headroom；只有可能越过 limit 时才刷新快照并走
+drain → forced cycle → `OutOfMemory` 链，无法取得 headroom 时写入 rt0 的 fatal 并让本次分配
+失败。drain 分 `Cycle` 与 `Bounded` 两种作用域、共用一条实现：都先交出未发布的 return
+staging、再关闭 owner 真实的 source-slab cache（关闭顺带以 memory-pressure 原因冲刷该 owner
+的 processor 账本，同一次 drain 不再重复冲刷、也不虚增空 flush 统计）、排空 owner inbox、
+推进 queue-page grace epoch、取出 owner-local edge delta；只有 full cycle 过 remark 终止门禁、
+把 per-cycle 的 card 工作计入滑动窗口（emergency 越过吞吐预算，普通 cycle 把超出部分转为
+mark debt，拖欠的 mark 工作跨 cycle 存活由 assist 归还）并推进 epoch。随后对所有空载 extent
+重跑 lease、live/queued slot 与在途 return 四条门禁，pause footprint 取候选自身撤销的
+committed 字节与 descriptor 数而不是合成值；未过门禁的 extent 保持 committed 并计入
+`blocked_extents`，超出一轮 relocation pause 预算的候选整块计入 `deferred_extents`、由下个
+cycle 继续（单个 extent 至多等于预算上界，因此每轮至少推进一个候选）。通过门禁的 extent 在
+`decommit` 的同一步让名下空载 descriptor 离开 committed 口径，物理页与账本不会各走一边。
+cycle 推进 barrier epoch 后立即排空新 epoch 发布的批次并取走新 edge delta，再要求五个 credit
+来源收敛：收敛则 credit epoch 同步前进并调用 `complete_cycle` 记录真实 live record 字节
+（`committed − pending − reclaimable − cache` 的残差，由 `ledger_invariant` 在运行时强制守恒），
+未收敛则本轮 cycle 未完成、credit epoch 保持落后并在下个完成 cycle 追平。软上限口径直接取 provider 的 committed 总量：
 stack arena 与 raw plane 共用同一 provider，加一次 stack committed 会把同一物理页计入两次，
 因此 `pressure_committed_bytes` 只做覆盖校验。`PacingPlane`/`CreditPlane`/`PressureEpisodeStats`
 提供 `pacing-state`/`pacing-debt`/`pacing-pressure`/`pacing-credit`/`pacing-assists`/
 `pacing-outcomes`/`pacing-gc-cpu` 各段 dump。
 
-`pacing_tests` 覆盖：契约自洽与九类参数/目录漂移拒绝、指纹随需求变化、debt 公式与
-`GcTarget::Off` 只关闭 debt 触发、assist 的四种结局与不虚构进度、cost window 拒绝越过预算
-并把超出部分转为 debt、remark continuation 与未开启 barrier 拒绝、evacuation 三项上界、
-credit 收敛与 epoch 只能前进、hysteresis 开启/结束条件、一个 episode 至多一次 forced cycle
-后才是 OOM、world 侧真实 credit 观测与 drain、空载 extent 过 grace 后 committed 真实回落、
-allocation 慢路径真实启动自动 cycle 并记录 live record 残差、软上限下分配被真实拒绝、
-以及候选超出 relocation 预算时整块延后而预算内前缀仍真实 decommit；契约在
+`pacing_tests` 覆盖：契约自洽与参数/目录漂移拒绝、指纹随需求变化、debt 公式与
+`GcTarget::Off` 只关闭 debt 触发、assist 的四种结局与不虚构进度、assist 只按真实交接的
+键数偿还（`pending_mark_work` 与 allocation debt 各扣一次）、没有交接时 `no-work` 不记账、
+cost window 拒绝越过预算并把超出部分转为 debt、deferred mark 工作跨 cycle 存活、
+per-cycle 工作量取自累计计数器差值、remark continuation 与未开启 barrier 拒绝、
+evacuation 三项上界、credit 收敛与 epoch 只能前进、hysteresis 开启/结束条件（分类为空不算
+drain 证据）、一个 episode 至多一次 forced cycle 后才是 OOM、请求字节与 committed 之和才决定
+headroom、episode drain 的节奏门禁、world 侧真实 credit 观测与 drain、drain 冲刷真实 return
+staging、稳态分配不读全局快照、memory-pressure 每 owner 只冲刷一遍、连续 cycle 持续推进
+epoch、空载 extent 过 grace 后 committed 真实回落、allocation 慢路径真实启动自动 cycle 并
+记录 live record 残差、软上限下分配被真实拒绝、未收敛的 cycle 既不报错也不推进 credit
+epoch，以及候选超出 relocation 预算时整块延后而预算内前缀仍真实 decommit；契约在
 `RuntimeRawContractV1::build`、镜像计划与 CLI JSON 内的端到端集成同样验证。
 契约还同样固定 Callable 的稳定类型键修复，该修复在提交 `0813ad6` 中独立完成：
 [`mono/keys.rs`](monomorphization-cache.md) 统一 `Ty::Callable` 类型

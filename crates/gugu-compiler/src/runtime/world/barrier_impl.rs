@@ -136,12 +136,26 @@ impl RawWorld {
         processor: usize,
         reason: BarrierFlushReason,
     ) -> Result<u32, RawInvariant> {
+        Ok(self.flush_barrier_counted(owner, processor, reason)?.0)
+    }
+
+    /// 与 `flush_barrier` 共用同一实现，额外返回本次真实交出的 card 键数。
+    ///
+    /// assist 用这个计数确认「完成的工作」：键数是本次真的离开 processor 账本的 dirty
+    /// card 数（本地直接写或成功发布），因此不会把未发生的标记工作算成进度。
+    pub(crate) fn flush_barrier_counted(
+        &mut self,
+        owner: u32,
+        processor: usize,
+        reason: BarrierFlushReason,
+    ) -> Result<(u32, u64), RawInvariant> {
         let drafts = self.barrier.flush_processor(processor, reason);
         if drafts.is_empty() {
-            return Ok(0);
+            return Ok((0, 0));
         }
         let owner_token = self.token(owner);
         let mut published = 0_u32;
+        let mut card_keys = 0_u64;
         for draft in drafts {
             let local = self
                 .barrier
@@ -150,13 +164,14 @@ impl RawWorld {
             if local {
                 self.barrier
                     .consume_locally(draft.arena_descriptor, &draft)?;
-                continue;
+            } else {
+                self.publish_card_batch(owner, &draft)?;
+                published += 1;
             }
-            self.publish_card_batch(owner, &draft)?;
-            published += 1;
+            card_keys = card_keys.saturating_add(u64::from(draft.card_count));
         }
         self.barrier.record_publish(&[]);
-        Ok(published)
+        Ok((published, card_keys))
     }
 
     /// 把一条 card batch 发布到 arena allocation owner 的 card mailbox。
@@ -275,24 +290,40 @@ impl RawWorld {
 
     /// 冲刷一个 owner 当前全部 processor 的账本。
     ///
-    /// 六个触发点都经由它或 `flush_barrier` 收口：owner `retire`、`drain_all`、source-slab
-    /// cache 的 `GcHandoff`/`PressureDrain` 关闭与 `enter_foreign`；`buffer-full` 由
-    /// `perform_barrier` 返回值报告，`minor-stop` 由 `request_minor_stop` 收口。
+    /// 七个触发点都经由它或 `flush_barrier` 收口：owner `retire`、`drain_all`、source-slab
+    /// cache 的 `GcHandoff`/`PressureDrain` 关闭、`enter_foreign` 与 allocation slow edge 上的
+    /// assist；`buffer-full` 由 `perform_barrier` 返回值报告，`minor-stop` 由
+    /// `request_minor_stop` 收口。
     pub(super) fn flush_all_barriers(
         &mut self,
         owner: u32,
         reason: BarrierFlushReason,
     ) -> Result<u32, RawInvariant> {
-        let processors = self.barrier.processor_count();
-        let mut published = 0;
-        for processor in 0..processors {
-            published += self.flush_barrier(owner, processor, reason)?;
-        }
-        Ok(published)
+        Ok(self.flush_all_barriers_counted(owner, reason)?.0)
     }
 
-    /// 返回一个 owner 的 barrier 统计快照。
-    pub(crate) fn barrier_stats(&self, owner: u32) -> BarrierStats {
+    /// 与 `flush_all_barriers` 共用同一实现，额外返回本次真实交出的 card 键数。
+    pub(super) fn flush_all_barriers_counted(
+        &mut self,
+        owner: u32,
+        reason: BarrierFlushReason,
+    ) -> Result<(u32, u64), RawInvariant> {
+        let processors = self.barrier.processor_count();
+        let mut published = 0_u32;
+        let mut card_keys = 0_u64;
+        for processor in 0..processors {
+            let (batch_published, keys) = self.flush_barrier_counted(owner, processor, reason)?;
+            published += batch_published;
+            card_keys = card_keys.saturating_add(keys);
+        }
+        Ok((published, card_keys))
+    }
+
+    /// 返回 barrier 平面的统计快照。
+    ///
+    /// barrier 平面是全局唯一的：全部 processor 账本、card table 与 edge summary 都在同一
+    /// 平面上，因此统计快照不带 owner 参数。
+    pub(crate) fn barrier_stats(&self) -> BarrierStats {
         let mut stats = BarrierStats::default();
         let processors = self.barrier.processor_count();
         for processor in 0..processors {
@@ -309,16 +340,14 @@ impl RawWorld {
         stats.edge_pending =
             u64::try_from(self.barrier.edges().pending()).expect("pending 适配 u64");
         stats.edge_deltas = self.edge_delta_total;
-        let _ = owner;
         stats
     }
 
-    /// 取走本 owner 的跨 block edge delta。
+    /// 取走全局 edge summary 中已聚合的跨 block edge delta。
     ///
-    /// edge summary 是 owner-local 聚合，只发布给 target owner 的 batch；
-    /// `EdgeDelta` 传输接手后从这里取出并发布。
-    pub(crate) fn take_edge_deltas(&mut self, owner: u32) -> Vec<EdgeDeltaRecord> {
-        let _ = owner;
+    /// edge summary 是 owner-local 聚合，只发布给 target owner 的 batch；`EdgeDelta` 传输
+    /// 接手后从这里取出并发布。平面是全局唯一的，因此不带 owner 参数。
+    pub(crate) fn take_edge_deltas(&mut self) -> Vec<EdgeDeltaRecord> {
         let deltas = self.barrier.drain_edges();
         self.edge_delta_total += u64::try_from(deltas.len()).expect("delta 数适配 u64");
         deltas

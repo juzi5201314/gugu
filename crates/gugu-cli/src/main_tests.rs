@@ -397,6 +397,10 @@ fn build_json_reports_barrier_contract_keys() {
         "pacing-pressure-enter-ratio",
         "pacing-pressure-clear-ratio",
         "pacing-credit-source-count",
+        "pacing-pressure-poll-bytes",
+        "pacing-owner-drain-items",
+        "pacing-owner-drain-bytes",
+        "pacing-owner-drain-interval-bytes",
         "pacing-demand",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
@@ -404,6 +408,10 @@ fn build_json_reports_barrier_contract_keys() {
     assert_eq!(payload["pacing-profile"], "mosaic-default");
     assert_eq!(payload["pacing-gc-cpu-fraction"], 25);
     assert_eq!(payload["pacing-credit-source-count"], 5);
+    assert_eq!(payload["pacing-pressure-poll-bytes"], 1 << 20);
+    assert_eq!(payload["pacing-owner-drain-items"], 64);
+    assert_eq!(payload["pacing-owner-drain-bytes"], 1 << 16);
+    assert_eq!(payload["pacing-owner-drain-interval-bytes"], 1 << 20);
     assert_eq!(payload["pacing-pressure-enter-ratio"], 85);
     assert_eq!(payload["pacing-pressure-clear-ratio"], 70);
     // pacing 需求与 barrier 需求覆盖同一屏障站点集合。
