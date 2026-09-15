@@ -971,7 +971,7 @@ impl Editor {
 
         let mut value_map: Vec<Option<ValueId>> = vec![None; values.len()];
         let mut out_values: Vec<Value> = Vec::with_capacity(values.len());
-        // 阶段 1：分配全部 value 与定义；记录每条指令的结果范围与内存输出。
+        // 步骤 1：分配全部 value 与定义；记录每条指令的结果范围与内存输出。
         let mut inst_map: Vec<Option<InstId>> = vec![None; instruction_count];
         let mut inst_results: Vec<(Range<u32>, Option<ValueId>)> = Vec::new();
         let mut invoke_results: Vec<Option<(Range<u32>, ValueId)>> = vec![None; live_blocks.len()];
@@ -1073,7 +1073,7 @@ impl Editor {
             }
         }
 
-        // 阶段 2：构建边。
+        // 步骤 2：构建边。
         let mut out_operands: Vec<ValueId> = Vec::new();
         let mut out_edges: Vec<Edge> = Vec::with_capacity(live_edges.len());
         for (from, to, unwind, arguments) in &live_edges {
@@ -1089,7 +1089,7 @@ impl Editor {
             });
         }
 
-        // 阶段 3：构建 block、指令与终结符。
+        // 步骤 3：构建 block、指令与终结符。
         let mut out_inst_blocks: Vec<BlockId> = Vec::with_capacity(inst_results.len());
         let mut out_blocks: Vec<Block> = Vec::with_capacity(live_blocks.len());
         let mut out_instructions: Vec<Instruction> = Vec::with_capacity(inst_results.len());
