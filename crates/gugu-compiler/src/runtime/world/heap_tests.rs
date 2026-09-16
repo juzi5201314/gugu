@@ -4,15 +4,26 @@
 
 use super::RawWorld;
 use super::heap_impl::ManagedPlacement;
+use crate::TargetName;
+use crate::runtime::barrier_schema::BarrierDemand;
 use crate::runtime::gc_metadata_contract::{GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES};
 use crate::runtime::gc_metadata_schema::{
     GcArenaLayoutV1, GcMetadataWorldV1, GcRootKindV1, GcRootLocationV1, GcRootRangeV1,
     GcTypeEntryV1, TraceKind, boot_verify,
 };
 use crate::runtime::gc_metadata_section::encode_sections;
-use crate::runtime::local_heap::{GENERATION_AGING, GENERATION_OLD, HeapArenaKind};
+use crate::runtime::local_heap::{
+    CycleReport, GENERATION_AGING, GENERATION_OLD, HeapArenaKind, LocalHeap,
+};
 use crate::runtime::local_heap_schema::{LocalHeapDemand, LocalHeapRuntimeContract};
+use crate::runtime::mark_schema::MarkDemand;
+use crate::runtime::message::BatchLimits;
+use crate::runtime::pacing_schema::GcPacingDemand;
 use crate::runtime::platform::PlatformProfile;
+use crate::runtime::{
+    RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, Rt0Demand, RuntimeRawContractV1,
+    SchedulerDemand, StackMapDemand, SyncDemand, WaitDemand,
+};
 
 /// 构造一个 16 字节双指针类型与一个 8 字节无指针类型的 metadata world。
 fn metadata_world() -> (GcMetadataWorldV1, Vec<u8>, Vec<u8>) {
@@ -77,17 +88,69 @@ fn metadata_world() -> (GcMetadataWorldV1, Vec<u8>, Vec<u8>) {
     (world, type_section, metadata_section)
 }
 
-/// 配置一个已接入 LocalHeap 的 world。
+/// 用内建 metadata world 构造一个已验证的整体契约。
+fn gc_contract() -> RuntimeRawContractV1 {
+    let (metadata, type_section, metadata_section) = metadata_world();
+    let mut gc_demand = metadata.demand();
+    gc_demand.type_section_bytes = u32::try_from(type_section.len()).expect("section 长度适配 u32");
+    gc_demand.metadata_section_bytes =
+        u32::try_from(metadata_section.len()).expect("section 长度适配 u32");
+    // mark 的根站点与 GC metadata 的 root range 同源，跨段相等性由契约自身强制。
+    let mark_demand = MarkDemand {
+        root_sites: gc_demand.root_range_count,
+        ..MarkDemand::default()
+    };
+    // LocalHeap 的 managed 类型数与最大 payload 必须与冻结类型表一致，否则跨段校验拒绝。
+    let max_object_bytes = metadata
+        .types
+        .iter()
+        .filter_map(|entry| entry.layout.map(|(size, _)| size))
+        .max()
+        .unwrap_or(0);
+    let local_heap_demand = LocalHeapDemand {
+        managed_types: gc_demand.type_count,
+        max_object_bytes,
+        ..LocalHeapDemand::default()
+    };
+    let contract = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        RawPlaneDemand::default(),
+        RawResourceDemand::default(),
+        Rt0Demand::default(),
+        SchedulerDemand::default(),
+        WaitDemand::default(),
+        SyncDemand::default(),
+        StackMapDemand::default(),
+        gc_demand,
+        BarrierDemand::default(),
+        GcPacingDemand::default(),
+        mark_demand,
+        local_heap_demand,
+        PlatformProfile::Linux,
+    )
+    .expect("契约可构建")
+    .with_gc_sections(type_section, metadata_section)
+    .expect("section 可挂载");
+    contract
+}
+
+/// 配置一个已接入 LocalHeap 与 mark 平面的 world。
 fn heap_world() -> RawWorld {
-    let contract =
-        LocalHeapRuntimeContract::build(LocalHeapDemand::default(), PlatformProfile::Linux)
-            .expect("契约可构建");
-    let (_, type_section, metadata_section) = metadata_world();
-    let mut world = RawWorld::new(7, 1, 64, crate::runtime::message::BatchLimits::default())
-        .expect("world 可创建");
-    world
-        .configure_local_heap(&contract, &type_section, &metadata_section)
-        .expect("LocalHeap 可配置");
+    let contract = gc_contract();
+    configured_world(&contract, 7, 1, 64)
+}
+
+/// 按给定契约创建并配置 world。
+fn configured_world(
+    contract: &RuntimeRawContractV1,
+    seed: u64,
+    owners: u32,
+    nodes: u32,
+) -> RawWorld {
+    let mut world =
+        RawWorld::new(seed, owners, nodes, BatchLimits::default()).expect("world 可创建");
+    world.configure_gc(contract).expect("GC 平面可配置");
     world
 }
 
@@ -99,7 +162,7 @@ fn leaf(world: &mut RawWorld, placement: ManagedPlacement) -> u64 {
 }
 
 #[test]
-fn configure_local_heap_exposes_contract_and_counts() {
+fn configure_gc_exposes_contract_and_counts() {
     let world = heap_world();
     assert!(world.local_heap_configured());
     assert_eq!(world.managed_root_count(), 0);
@@ -291,15 +354,8 @@ fn pin_promotes_nursery_object_and_counts_nesting() {
 
 #[test]
 fn managed_addresses_are_owner_local() {
-    let contract =
-        LocalHeapRuntimeContract::build(LocalHeapDemand::default(), PlatformProfile::Linux)
-            .expect("契约可构建");
-    let (_, type_section, metadata_section) = metadata_world();
-    let mut world = RawWorld::new(11, 2, 64, crate::runtime::message::BatchLimits::default())
-        .expect("world 可创建");
-    world
-        .configure_local_heap(&contract, &type_section, &metadata_section)
-        .expect("LocalHeap 可配置");
+    let contract = gc_contract();
+    let mut world = configured_world(&contract, 11, 2, 64);
     let first = world
         .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
         .expect("owner 0 可分配");
@@ -315,6 +371,50 @@ fn managed_addresses_are_owner_local() {
     assert!(world.managed_object(second).is_ok());
     assert!(world.managed_counters(0).expect("计数").objects == 1);
     assert!(world.managed_counters(1).expect("计数").objects == 1);
+}
+
+#[test]
+fn mark_bitmap_clears_only_the_marked_block() {
+    // mark 位图按「一 granule 一位」组织：epoch 切换时只能清本 block 的区间。若按字节累加，
+    // block ≥ 1 会清掉 block 0 的位而保留自己的陈旧位——第二个 cycle 重复标记同一对象时，
+    // 陈旧位会让 mark_object 误判为「已标记」。
+    let contract =
+        LocalHeapRuntimeContract::build(LocalHeapDemand::default(), PlatformProfile::Linux)
+            .expect("契约可构建");
+    let mut heap = LocalHeap::new(&contract);
+    let arena = heap.attach_arena(HeapArenaKind::Old, 0x2000_0000, &contract);
+    heap.commit_block(arena, 0).expect("block 0 可提交");
+    heap.commit_block(arena, 1).expect("block 1 可提交");
+    // 填满 block 0，使后续对象落到 block 1。
+    let mut block0_last = 0_u64;
+    let mut block1 = 0_u64;
+    for _ in 0..4096 {
+        let address = heap
+            .allocate(HeapArenaKind::Old, 1, 8, 16)
+            .expect("old 对象可分配");
+        if heap.block_of(address).expect("block 可解析") == 0 {
+            block0_last = address;
+        } else {
+            block1 = address;
+            break;
+        }
+    }
+    assert_ne!(block1, 0, "必须有对象落到第二个 block");
+    heap.begin_mark_cycle();
+    assert!(heap.mark_object(block1).expect("可标记").is_some());
+    assert!(heap.mark_object(block0_last).expect("可标记").is_some());
+    // 下一个 cycle：两个 block 的陈旧位必须各自清掉，重复标记同一对象仍返回 Some。
+    heap.begin_mark_cycle();
+    assert!(
+        heap.mark_object(block1).expect("可标记").is_some(),
+        "block 1 的陈旧位必须被清掉"
+    );
+    assert!(heap.mark_object(block0_last).expect("可标记").is_some());
+    // sweep 不得回收已标记对象。
+    let mut report = CycleReport::default();
+    heap.sweep_unmarked(&mut report).expect("sweep 可执行");
+    assert!(heap.object_at(block1).is_ok(), "已标记对象必须保留");
+    assert!(heap.object_at(block0_last).is_ok(), "已标记对象必须保留");
 }
 
 #[test]
@@ -358,7 +458,7 @@ fn real_compile_sections_drive_local_heap_allocation_and_collection() {
         compilation.diagnostics().items()
     );
     let plan = compilation.image_plan().expect("镜像计划");
-    let contract = plan.local_heap_runtime().clone();
+    let raw = compilation.raw_contract().expect("真实契约存在");
     let types = crate::runtime::gc_metadata_section::decode_sections(
         plan.gc_type_section(),
         plan.gc_metadata_section(),
@@ -366,13 +466,7 @@ fn real_compile_sections_drive_local_heap_allocation_and_collection() {
     .expect("section 可解码");
     let mut world = RawWorld::new(3, 1, 64, crate::runtime::message::BatchLimits::default())
         .expect("world 可创建");
-    world
-        .configure_local_heap(
-            &contract,
-            plan.gc_type_section(),
-            plan.gc_metadata_section(),
-        )
-        .expect("真实契约可配置");
+    world.configure_gc(raw).expect("真实契约可配置");
     let slot = world
         .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
         .expect("根槽可登记");

@@ -255,19 +255,23 @@ impl HeapArena {
     }
 
     /// test-and-mark：只在首次标记时返回 true。
-    fn mark_granule(&mut self, granule: usize, block: u32) -> bool {
+    ///
+    /// mark 位图按「一个 granule 一位」组织，因此 epoch 切换时只能清掉**本 block 自己**的
+    /// granule 区间：起点由该 block 的 granule 下标推导（`block * per_block / 64`），而不是
+    /// 从 arena 起点累加字节。按字节累加会让 block ≥ 1 清掉 block 0 的位并保留自己的陈旧位。
+    fn mark_granule(&mut self, granule: usize, block: u32, granule_bytes: u32) -> bool {
         let epoch = self.mark_epoch;
-        let words = self.lines_per_block() * 128 / 16 / 64;
-        let blocks = self.blocks.len();
+        let granule_bytes = usize::try_from(granule_bytes).expect("granule 字节数适配宿主");
+        let per_block = (self.lines_per_block() * 128) / granule_bytes;
+        let words = per_block / 64;
+        let block_index = usize::try_from(block).expect("block 下标适配宿主");
+        let start = block_index * per_block / 64;
         let slot = self
             .blocks
-            .get_mut(block as usize)
+            .get_mut(block_index)
             .and_then(Option::as_mut)
             .expect("标记必然发生在已提交 block");
         if slot.mark_epoch != epoch {
-            let lines = self.line_live.len() / blocks.max(1);
-            let first = block as usize * lines / 128 * 128 / 16;
-            let start = first / 64;
             self.mark[start..start + words].fill(0);
             slot.mark_epoch = epoch;
         }
@@ -497,8 +501,6 @@ pub(crate) struct LocalHeap {
     tlab_refills: u64,
     /// 扫描对象的 pointer word 暂存区；复用避免每次扫描分配。
     scratch: Vec<(u64, u64)>,
-    /// 待处理对象的标记栈；同样复用。
-    worklist: Vec<u64>,
 }
 
 impl LocalHeap {
@@ -522,7 +524,6 @@ impl LocalHeap {
             evacuated_objects: 0,
             tlab_refills: 0,
             scratch: Vec::with_capacity(16),
-            worklist: Vec::with_capacity(32),
         }
     }
 
@@ -1245,6 +1246,98 @@ impl LocalHeap {
             .ok_or_else(|| HeapError::invalid("trace 引用了不存在的类型"))
     }
 
+    /// 推进 mark cycle：全部 arena 的 mark epoch 前进一。
+    pub(crate) fn begin_mark_cycle(&mut self) {
+        for arena in &mut self.arenas {
+            arena.mark_epoch += 1;
+        }
+    }
+
+    /// 登记一次完成的 world 级 major cycle。
+    ///
+    /// world 负责 mark pass 与 sweep 的编排，本方法只把「一个 major cycle 已完成」计入
+    /// LocalHeap 自己的累计计数，使 `HeapCounters::major_cycles` 仍是真实观测。
+    pub(crate) fn note_major_cycle(&mut self) {
+        self.major_cycles += 1;
+    }
+
+    /// 标记一个对象；首次标记返回对象描述，重复标记返回 `None`。
+    ///
+    /// 这是 world 级 mark pass 的唯一标记入口：对象可能位于任意 arena（包括其它类别），
+    /// 因此按 payload 地址反查 arena/block/granule，再由 arena 的位图做 test-and-mark。
+    pub(crate) fn mark_object(&mut self, address: u64) -> Result<Option<HeapObject>, HeapError> {
+        let block_bytes = u64::from(self.block_bytes);
+        let granule_bytes = self.granule_bytes;
+        let payload = self.resolve(address)?;
+        let (arena_index, offset) = self.locate(payload)?;
+        let header_offset = offset - OBJECT_HEADER_BYTES;
+        let block = u32::try_from(header_offset / block_bytes)
+            .map_err(|_| HeapError::invalid("block 下标超出 u32"))?;
+        let arena = &mut self.arenas[arena_index];
+        let granule = arena.granule(header_offset, granule_bytes);
+        if !arena.mark_granule(granule, block, granule_bytes) {
+            return Ok(None);
+        }
+        self.object_at(address).map(Some)
+    }
+
+    /// 收集一个对象的 pointer word；返回 `(payload 内偏移, 值)` 列表。
+    ///
+    /// world 级 mark pass 用它把对象图交给 `mark_worklists`；scratch 在返回时被取走，
+    /// 因此调用方拿到的是本对象独占的副本，不会与下一次扫描互相覆盖。
+    pub(crate) fn trace_pointers(
+        &mut self,
+        address: u64,
+        types: &GcRuntimeMetadata,
+    ) -> Result<Vec<(u64, u64)>, HeapError> {
+        let object = self.object_at(address)?;
+        let trace = self.trace_for(object.type_index, types)?;
+        self.collect_words(address, &trace)?;
+        Ok(std::mem::take(&mut self.scratch))
+    }
+
+    /// 返回一个地址对应的 ticket 身份：`(arena descriptor, header 偏移, block)`。
+    ///
+    /// 跨 owner 的 mark ticket 只携带稳定身份，目标 owner 用 `object_at_ticket` 反查对象。
+    pub(crate) fn ticket_identity(&self, address: u64) -> Result<(u64, u32, u32), HeapError> {
+        let payload = self.resolve(address)?;
+        let (arena_index, offset) = self.locate(payload)?;
+        let header_offset = offset - OBJECT_HEADER_BYTES;
+        let block = u32::try_from(header_offset / u64::from(self.block_bytes))
+            .map_err(|_| HeapError::invalid("block 下标超出 u32"))?;
+        let descriptor = self.arenas[arena_index].descriptor;
+        let offset = u32::try_from(header_offset)
+            .map_err(|_| HeapError::invalid("对象 header 偏移超出 u32"))?;
+        Ok((descriptor, offset, block))
+    }
+
+    /// 按 ticket 身份在本 heap 内反查目标对象。
+    ///
+    /// descriptor 不属于本 heap、偏移越过容量、或该 granule 没有 object-start 都表示 ticket
+    /// 已过期；三者都进入不变量失败而不是返回空对象。
+    pub(crate) fn object_at_ticket(
+        &self,
+        arena_descriptor: u64,
+        header_offset: u64,
+    ) -> Result<HeapObject, HeapError> {
+        let block_bytes = u64::from(self.block_bytes);
+        let arena = self
+            .arenas
+            .iter()
+            .find(|arena| arena.descriptor == arena_descriptor)
+            .ok_or_else(|| HeapError::invalid("mark ticket 的目标 arena 不属于该 LocalHeap"))?;
+        let capacity = block_bytes * arena.blocks.len() as u64;
+        if header_offset >= capacity {
+            return Err(HeapError::invalid("mark ticket 的对象偏移越过 arena 容量"));
+        }
+        let granule = arena.granule(header_offset, self.granule_bytes);
+        if !arena.has_object_start(granule) {
+            return Err(HeapError::invalid("mark ticket 的目标对象已过期"));
+        }
+        let address = arena.base + header_offset + OBJECT_HEADER_BYTES;
+        self.object_at(address)
+    }
+
     /// minor cycle：从根与 remembered set 出发搬运 nursery 存活对象。
     pub(crate) fn collect_minor(
         &mut self,
@@ -1265,63 +1358,6 @@ impl LocalHeap {
         self.age_objects(&aging);
         self.reset_nursery();
         self.minor_cycles += 1;
-        self.scanned_words += u64::from(report.scanned_words);
-        Ok(report)
-    }
-
-    /// major cycle：标记后做 owner-local line 回收。
-    pub(crate) fn collect_major(
-        &mut self,
-        types: &GcRuntimeMetadata,
-        roots: &mut [u64],
-        dirty: &[(usize, u32)],
-    ) -> Result<CycleReport, HeapError> {
-        for arena in &mut self.arenas {
-            arena.mark_epoch += 1;
-        }
-        let mut report = CycleReport::default();
-        let mut worklist = std::mem::take(&mut self.worklist);
-        worklist.clear();
-        for slot in roots.iter() {
-            if *slot != 0 {
-                worklist.push(self.resolve(*slot)?);
-            }
-        }
-        for (arena_index, card) in dirty {
-            for address in self.card_objects(*arena_index, *card) {
-                worklist.push(address);
-            }
-        }
-        while let Some(address) = worklist.pop() {
-            let object = self.object_at(address)?;
-            let granule = {
-                let (arena_index, offset) = self.locate(address)?;
-                let block =
-                    u32::try_from((offset - OBJECT_HEADER_BYTES) / u64::from(self.block_bytes))
-                        .expect("block 下标");
-                let arena = &mut self.arenas[arena_index];
-                let granule = arena.granule(offset - OBJECT_HEADER_BYTES, self.granule_bytes);
-                if !arena.mark_granule(granule, block) {
-                    continue;
-                }
-                granule
-            };
-            let _ = granule;
-            report.marked += 1;
-            let trace = self.trace_for(object.type_index, types)?;
-            report.scanned_words += self.collect_words(address, &trace)?;
-            let scratch = std::mem::take(&mut self.scratch);
-            for (_, value) in &scratch {
-                if *value != 0 {
-                    let target = self.resolve(*value)?;
-                    worklist.push(target);
-                }
-            }
-            self.scratch = scratch;
-        }
-        self.worklist = worklist;
-        self.sweep(&mut report)?;
-        self.major_cycles += 1;
         self.scanned_words += u64::from(report.scanned_words);
         Ok(report)
     }
@@ -1349,7 +1385,7 @@ impl LocalHeap {
     }
 
     /// 返回一个 card 覆盖范围内的对象起点。
-    fn card_objects(&self, arena_index: usize, card: u32) -> Vec<u64> {
+    pub(crate) fn card_objects(&self, arena_index: usize, card: u32) -> Vec<u64> {
         let arena = match self.arenas.get(arena_index) {
             Some(arena) if arena.kind != HeapArenaKind::Nursery => arena,
             _ => return Vec::new(),
@@ -1440,8 +1476,8 @@ impl LocalHeap {
         self.nursery_bytes = 0;
     }
 
-    /// 回收未标记对象占用的 line。
-    fn sweep(&mut self, report: &mut CycleReport) -> Result<(), HeapError> {
+    /// 回收未标记对象占用的 line；world 级 major cycle 的 sweep 阶段。
+    pub(crate) fn sweep_unmarked(&mut self, report: &mut CycleReport) -> Result<(), HeapError> {
         for arena_index in 0..self.arenas.len() {
             if self.arenas[arena_index].kind == HeapArenaKind::Nursery {
                 continue;

@@ -55,15 +55,20 @@ fn heap_error(error: HeapError) -> RawInvariant {
 }
 
 impl RawWorld {
-    /// 按契约与镜像 section 配置每个 owner 的 LocalHeap。
-    pub(crate) fn configure_local_heap(
+    /// 按已验证契约配置每个 owner 的 LocalHeap 与 mark 平面。
+    ///
+    /// 两段配置必须一起完成：credit 池上界由 `policy`（shard × batch item）与根槽数共同推导，
+    /// 单独的 `LocalHeapRuntimeContract` 无法得到合法 mark 契约，因此入口只接受整体契约。
+    pub(crate) fn configure_gc(
         &mut self,
-        contract: &LocalHeapRuntimeContract,
-        type_section: &[u8],
-        metadata_section: &[u8],
+        raw: &super::super::RuntimeRawContractV1,
     ) -> Result<(), RawInvariant> {
-        let types = decode_sections(type_section, metadata_section)
-            .map_err(|error| RawInvariant::new(error.message().to_owned()))?;
+        let contract = raw.local_heap();
+        let types = decode_sections(
+            &raw.gc_metadata().type_section,
+            &raw.gc_metadata().metadata_section,
+        )
+        .map_err(|error| RawInvariant::new(error.message().to_owned()))?;
         let block_class = class_for_bytes(u64::from(contract.block_bytes()))
             .ok_or_else(|| RawInvariant::new("32 KiB block 不在 extent 阶梯中"))?;
         let owners = self.owners.len();
@@ -74,6 +79,7 @@ impl RawWorld {
         self.managed_root_kinds.clear();
         self.heap_cycle_epoch = 0;
         self.heap_block_class = block_class;
+        self.configure_mark(raw.mark())?;
         Ok(())
     }
 
@@ -82,21 +88,21 @@ impl RawWorld {
         self.local_heaps.is_some()
     }
 
-    fn heap(&self, owner: u32) -> Result<&LocalHeap, RawInvariant> {
+    pub(super) fn heap(&self, owner: u32) -> Result<&LocalHeap, RawInvariant> {
         self.local_heaps
             .as_ref()
             .and_then(|heaps| heaps.get(owner as usize))
             .ok_or_else(|| RawInvariant::new("LocalHeap 未按契约配置"))
     }
 
-    fn heap_mut(&mut self, owner: u32) -> Result<&mut LocalHeap, RawInvariant> {
+    pub(super) fn heap_mut(&mut self, owner: u32) -> Result<&mut LocalHeap, RawInvariant> {
         self.local_heaps
             .as_mut()
             .and_then(|heaps| heaps.get_mut(owner as usize))
             .ok_or_else(|| RawInvariant::new("LocalHeap 未按契约配置"))
     }
 
-    fn types(&self) -> Result<&GcRuntimeMetadata, RawInvariant> {
+    pub(super) fn types(&self) -> Result<&GcRuntimeMetadata, RawInvariant> {
         self.gc_types
             .as_ref()
             .ok_or_else(|| RawInvariant::new("运行时可读 GC 类型表未解码"))
@@ -198,11 +204,16 @@ impl RawWorld {
             .map_err(heap_error)?;
         let descriptor = self.heap(owner)?.arena_of(address).map_err(heap_error)?.1;
         let source_block = self.heap(owner)?.block_of(address).map_err(heap_error)?;
-        let new_in_nursery = value != 0 && self.heap(owner)?.in_nursery(value);
+        let new_owner = if value == 0 {
+            owner
+        } else {
+            self.owner_of(value)?
+        };
+        let new_in_nursery = value != 0 && self.heap(new_owner)?.in_nursery(value);
         let new_block = if value == 0 {
             None
         } else {
-            self.heap(owner)?.block_of(value).ok()
+            self.heap(new_owner)?.block_of(value).ok()
         };
         self.heap_mut(owner)?
             .set_field(address, offset, value)
@@ -220,7 +231,7 @@ impl RawWorld {
             stack_grey: true,
             new_block,
             source_block,
-            new_owner: owner,
+            new_owner,
             source_owner: owner,
         };
         self.perform_barrier(processor, site).map(|_| ())
@@ -304,23 +315,8 @@ impl RawWorld {
         result.map_err(heap_error)
     }
 
-    /// 触发一次 major cycle。
-    pub(crate) fn collect_major(&mut self, owner: u32) -> Result<CycleReport, RawInvariant> {
-        self.flush_remembered_set(owner)?;
-        let dirty = self.drain_dirty_cards(owner)?;
-        let types = self.types()?.clone();
-        let mut roots = std::mem::take(&mut self.managed_roots);
-        let result = self
-            .heap_mut(owner)?
-            .collect_major(&types, &mut roots, &dirty);
-        self.managed_roots = roots;
-        self.heap_cycle_epoch += 1;
-        self.advance_barrier_epoch(owner, self.heap_cycle_epoch)?;
-        result.map_err(heap_error)
-    }
-
-    /// 返回 managed 地址所属的 owner；跨 owner 引用是不变量失败。
-    fn owner_of(&self, address: u64) -> Result<u32, RawInvariant> {
+    /// 返回 managed 地址所属的 owner；跨 owner 引用必须由 world 级 mark pass 解析。
+    pub(crate) fn owner_of(&self, address: u64) -> Result<u32, RawInvariant> {
         let heaps = self
             .local_heaps
             .as_ref()
@@ -335,7 +331,7 @@ impl RawWorld {
         ))
     }
 
-    fn heap_contract(&self) -> Result<&LocalHeapRuntimeContract, RawInvariant> {
+    pub(super) fn heap_contract(&self) -> Result<&LocalHeapRuntimeContract, RawInvariant> {
         self.local_heap_contract
             .as_ref()
             .ok_or_else(|| RawInvariant::new("LocalHeap 未按契约配置"))
@@ -362,7 +358,10 @@ impl RawWorld {
     }
 
     /// 取走每个 arena 的 dirty card。
-    fn drain_dirty_cards(&mut self, owner: u32) -> Result<Vec<(usize, u32)>, RawInvariant> {
+    pub(super) fn drain_dirty_cards(
+        &mut self,
+        owner: u32,
+    ) -> Result<Vec<(usize, u32)>, RawInvariant> {
         let descriptors = self.heap(owner)?.arena_descriptors();
         let mut cards = Vec::new();
         for (index, descriptor) in descriptors {

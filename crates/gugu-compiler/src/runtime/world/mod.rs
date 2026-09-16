@@ -8,6 +8,7 @@ pub(crate) mod barrier_impl;
 pub(crate) mod coroutine_impl;
 mod extent_impl;
 pub(crate) mod heap_impl;
+pub(crate) mod mark_impl;
 pub(crate) mod pacing_impl;
 mod region_impl;
 mod resource_impl;
@@ -150,8 +151,14 @@ pub(crate) struct RawWorld {
     pacing: super::pacing::PacingPlane,
     /// TurnRegion 私有区与 `RegionTransfer` 投递平面；按已构建的契约配置。
     regions: Option<super::region::RegionPlane>,
-    /// LocalHeap 契约快照；`configure_local_heap` 之后才可用。
+    /// LocalHeap 契约快照；`configure_gc` 之后才可用。
     local_heap_contract: Option<super::local_heap_schema::LocalHeapRuntimeContract>,
+    /// MarkMailbox、owner credit 与终止检测的执行平面；`configure_gc` 之后才可用。
+    mark: Option<super::mark::MarkPlane>,
+    /// 每个 owner 的 mark worklist；元素是待标记对象的 payload 地址。
+    mark_worklists: Vec<Vec<u64>>,
+    /// 已收敛的 mark cycle epoch；未收敛的 cycle 不推进它。
+    mark_cycle_epoch: u64,
     /// 每个 owner 的 LocalHeap Immix arena 集合。
     local_heaps: Option<Vec<super::local_heap::LocalHeap>>,
     /// 从镜像 section 解码出的运行时可读 GC 类型表。
@@ -239,6 +246,9 @@ impl RawWorld {
             return_caches: (0..owners).map(|_| ReturnSlabCache::new()).collect(),
             regions: None,
             local_heap_contract: None,
+            mark: None,
+            mark_worklists: Vec::new(),
+            mark_cycle_epoch: 0,
             local_heaps: None,
             gc_types: None,
             managed_roots: Vec::new(),
@@ -692,6 +702,17 @@ impl RawWorld {
                 consumed += 1;
                 continue;
             }
+            if self.pool.family_of(message_id) == MessageFamilyTag::MarkTicket {
+                let ticket = self.pool.load_mark_ticket(message_id);
+                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
+                {
+                    return Err(RawInvariant::new("mark ticket 投递到非目标 owner 的 inbox"));
+                }
+                self.service_mark_ticket(owner, &ticket)?;
+                self.graced_nodes.push(message_id);
+                consumed += 1;
+                continue;
+            }
             let message = self.load_return_message(message_id)?;
             if message.kind == ReturnKind::StackSpan {
                 self.service_stack_return(owner, &message)?;
@@ -852,7 +873,7 @@ impl RawWorld {
     }
 
     /// 把 owner token 映射到 inbox 槽位；raw owner 与 resource owner 各占一个槽位。
-    fn owner_slot(&self, token: &OwnerToken) -> Result<usize, RawInvariant> {
+    pub(super) fn owner_slot(&self, token: &OwnerToken) -> Result<usize, RawInvariant> {
         self.owners
             .iter()
             .position(|owner| &owner.token() == token)
@@ -864,7 +885,7 @@ impl RawWorld {
             .ok_or_else(|| RawInvariant::new("目标 owner 没有登记的 inbox 槽位"))
     }
 
-    fn inbox_for(&self, token: &OwnerToken) -> Result<Arc<OwnerInbox>, RawInvariant> {
+    pub(super) fn inbox_for(&self, token: &OwnerToken) -> Result<Arc<OwnerInbox>, RawInvariant> {
         let index = self.owner_slot(token)?;
         self.inboxes
             .get(index)

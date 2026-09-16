@@ -262,6 +262,12 @@ impl Compilation {
             .map(RuntimeRawContractV1::fingerprint)
     }
 
+    /// 返回已验证的契约对象本身；供确定性测试用真实契约配置 world。
+    #[cfg(test)]
+    pub(crate) fn raw_contract(&self) -> Option<&RuntimeRawContractV1> {
+        self.raw_contract.as_ref()
+    }
+
     /// 返回规范退出码；内部 IR 不变量失败与用户源码错误分开报告。
     pub fn exit_code(&self) -> i32 {
         if self.diagnostics.items().iter().any(|diagnostic| {
