@@ -2625,10 +2625,10 @@ mod tests {
         assert!(dump.contains("local-heap-fingerprint"));
         // pacing 契约与需求同样进入镜像计划、dump 与指纹身份。
         assert_eq!(plan.pacing_profile(), "mosaic-default");
-        assert_eq!(plan.pacing_profile_revision(), 2);
+        assert_eq!(plan.pacing_profile_revision(), 3);
         assert_eq!(plan.pacing_assist_quantum(), 1 << 16);
         assert_eq!(plan.pacing_gc_cpu_fraction(), 25);
-        assert_eq!(plan.pacing_credit_source_count(), 5);
+        assert_eq!(plan.pacing_credit_source_count(), 9);
         assert_eq!(plan.pacing_pressure_poll_bytes(), 1 << 20);
         assert_eq!(plan.pacing_owner_drain_items(), 64);
         assert_eq!(plan.pacing_owner_drain_bytes(), 1 << 16);
@@ -2648,11 +2648,11 @@ mod tests {
             "slow edge 等于分配站点加显式 safepoint"
         );
         assert!(pacing_demand.managed_types > 0);
-        assert!(dump.contains("pacing schema=2 profile=mosaic-default revision=2"));
+        assert!(dump.contains("pacing schema=3 profile=mosaic-default revision=3"));
         assert!(dump.contains("pacing-drain poll=1048576 items=64 bytes=65536 interval=1048576"));
         assert!(dump.contains("pacing-pressure enter=85 clear=70 states=steady,drain,emergency"));
         assert!(dump.contains("pacing-drain-classes owner-cache-bytes,pending-return-bytes,reclaimable-bytes partition=runtime-committed-bytes"));
-        assert!(dump.contains("pacing-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging"));
+        assert!(dump.contains("pacing-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging,mark-credit,mark-mailbox,mark-worklist,forwarding-work"));
         assert!(dump.contains("pacing-fingerprint"));
         // 冷/热编译指纹一致，且 dump 逐字节相同。
         let warm = Compiler::new().compile(CompileRequest::single_file(

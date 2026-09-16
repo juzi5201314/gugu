@@ -214,6 +214,8 @@ impl RawWorld {
                 .pending_return_bytes
                 .saturating_add(region_transfers),
             staging_bytes: self.return_staging_bytes(),
+            // mark 平面尚未接入：四个 mark 来源暂时保持 0，由 mark cycle 接入后从真实结构观测。
+            ..CreditSnapshot::default()
         }
     }
 
@@ -384,7 +386,7 @@ impl RawWorld {
             //    因此本 cycle 不推进 epoch，也不宣布收敛。
             let remark = self
                 .pacing
-                .remark(cost, true)
+                .remark(cost, true, true)
                 .map_err(|message| RawInvariant::new(message.to_owned()))?;
             report.remark = remark;
             if remark == RemarkOutcome::Complete {

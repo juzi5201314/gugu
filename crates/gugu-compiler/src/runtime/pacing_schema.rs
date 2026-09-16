@@ -16,13 +16,16 @@ use super::ledger::{LEDGER_PARTITION_COMMITTED, LedgerSchemaV1};
 use super::message::RETURN_NODE_BYTES;
 use super::model::RawModelError;
 
-/// pacing 契约段的 schema 版本。
-pub(crate) const PACING_SCHEMA: u32 = 2;
+/// pacing 契约段的 schema 版本；schema 3 把 cycle credit 目录从 5 个来源扩展到 9 个。
+pub(crate) const PACING_SCHEMA: u32 = 3;
 
 /// 内建 pacing profile 名；与 runtime tuning profile 一起版本化。
 pub(crate) const PACING_PROFILE_NAME: &str = "mosaic-default";
 /// pacing profile 的 revision；任何参数变化都必须递增。
-pub(crate) const PACING_PROFILE_REVISION: u32 = 2;
+///
+/// revision 3 随 credit 目录一起递增：mark-credit/mark-mailbox/mark-worklist/forwarding-work
+/// 四项让「cycle 是否收敛」的判定口径发生变化，属于 profile 身份的一部分。
+pub(crate) const PACING_PROFILE_REVISION: u32 = 3;
 
 /// cost unit 的名字；debt、assist 与 GC CPU 窗口都用它计量。
 pub(crate) const PACING_COST_UNIT: &str = "mark-cost-unit";
@@ -79,12 +82,21 @@ pub(crate) const REMARK_OUTCOME_NAMES: [&str; 2] = ["complete", "continuation"];
 /// evacuation 决策的两种结局名。
 pub(crate) const EVACUATION_OUTCOME_NAMES: [&str; 2] = ["admit", "defer"];
 /// 占用 owner credit 的在飞来源目录。
-pub(crate) const CREDIT_SOURCE_NAMES: [&str; 5] = [
+///
+/// 前五项是 batch/gate/grace 底座已有的在飞量；后四项由 mark cycle 接入同一 credit 平面：
+/// `mark-credit` 是已 acquire 且尚未归还的 owner credit；`mark-mailbox` 是已发布但尚未被目标
+/// owner 消费的 mark ticket；`mark-worklist` 是各 owner 本地 mark worklist 深度之和；
+/// `forwarding-work` 是在途转发中的 GC 工作消息。四项都由真实结构观测，不新增平行计数。
+pub(crate) const CREDIT_SOURCE_NAMES: [&str; 9] = [
     "barrier-buffer",
     "card-mark-batch",
     "edge-delta",
     "pending-return",
     "producer-staging",
+    "mark-credit",
+    "mark-mailbox",
+    "mark-worklist",
+    "forwarding-work",
 ];
 
 /// 从优化后 LIR 与冻结世界推导的 pacing 需求，不是运行时计数。

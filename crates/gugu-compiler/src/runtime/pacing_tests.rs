@@ -78,16 +78,16 @@ fn pacing_contract_is_self_consistent_and_rejects_drift() {
     assert_eq!(contract.assist_outcomes, ASSIST_OUTCOME_NAMES);
     assert_eq!(contract.remark_outcomes, ["complete", "continuation"]);
     assert_eq!(contract.evacuation_outcomes, EVACUATION_OUTCOME_NAMES);
-    assert_eq!(contract.credit_sources.len(), 5);
+    assert_eq!(contract.credit_sources.len(), 9);
     assert_eq!(contract.pressure_poll_bytes(), 1 << 20);
     assert_eq!(contract.owner_drain_items(), 64);
     assert_eq!(contract.owner_drain_bytes(), 1 << 16);
     assert_eq!(contract.owner_drain_interval_bytes(), 1 << 20);
     assert_ne!(contract.fingerprint(), [0_u8; 32]);
     let dump = contract.dump();
-    assert!(dump.contains("pacing schema=2 profile=mosaic-default revision=2"));
+    assert!(dump.contains("pacing schema=3 profile=mosaic-default revision=3"));
     assert!(dump.contains("pacing-drain poll=1048576 items=64 bytes=65536 interval=1048576"));
-    assert!(dump.contains("pacing-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging"));
+    assert!(dump.contains("pacing-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging,mark-credit,mark-mailbox,mark-worklist,forwarding-work"));
     assert!(
         dump.contains(
             "pacing-drain-classes owner-cache-bytes,pending-return-bytes,reclaimable-bytes"
@@ -259,17 +259,52 @@ fn cycle_work_cost_is_per_cycle_and_advances_the_baseline() {
 fn remark_over_budget_publishes_continuation_and_requires_open_barrier() {
     let mut plane = pacing_plane();
     // barrier 未开启时不得执行 remark：mark cycle 尚未终止。
-    assert!(plane.remark(1, false).is_err());
+    assert!(plane.remark(1, false, true).is_err());
     assert_eq!(
-        plane.remark(REMARK_COST_BUDGET, true).expect("预算内"),
+        plane
+            .remark(REMARK_COST_BUDGET, true, true)
+            .expect("预算内"),
         RemarkOutcome::Complete
     );
     assert_eq!(plane.remark_continuations(), 0);
     assert_eq!(
-        plane.remark(REMARK_COST_BUDGET + 1, true).expect("超预算"),
+        plane
+            .remark(REMARK_COST_BUDGET + 1, true, true)
+            .expect("超预算"),
         RemarkOutcome::Continuation
     );
     assert_eq!(plane.remark_continuations(), 1);
+    // mark 阶段未收敛时，即使 cost 在预算内也必须发布 continuation：不能宣布 cycle 收敛。
+    assert_eq!(
+        plane.remark(0, true, false).expect("mark 未收敛"),
+        RemarkOutcome::Continuation
+    );
+    assert_eq!(plane.remark_continuations(), 2);
+}
+
+#[test]
+fn mark_credit_source_blocks_cycle_until_it_returns() {
+    let mut plane = pacing_plane();
+    // 只有 mark mailbox 一项非零：mailbox 为空不是完成条件，必须继续等待归还。
+    plane.observe_credits(CreditSnapshot {
+        mark_mailbox: 1,
+        ..CreditSnapshot::default()
+    });
+    assert!(!plane.credits().converged());
+    assert!(!plane.credits_converged());
+    assert_eq!(plane.mark_credit_pending(), 1);
+    // credit 未收敛时 cycle 边界拒绝推进，返回 `Outstanding` 而不是静默前进。
+    let error = plane
+        .begin_cycle(1)
+        .expect_err("未收敛时 cycle 边界必须失败");
+    assert_eq!(
+        error,
+        crate::runtime::pacing::CreditError::Outstanding { pending: 1 }
+    );
+    // mark ticket 被消费后四个 mark 来源一起归零，cycle 才能推进。
+    plane.observe_credits(CreditSnapshot::default());
+    assert!(plane.credits_converged());
+    plane.begin_cycle(1).expect("收敛后可以推进 epoch");
 }
 
 #[test]
@@ -318,6 +353,7 @@ fn credit_requires_every_source_to_converge() {
         edge_deltas: 0,
         pending_return_bytes: 0,
         staging_bytes: 3,
+        ..CreditSnapshot::default()
     });
     assert!(!plane.credits().converged());
     assert_eq!(plane.mark_credit_pending(), 3);
@@ -672,7 +708,7 @@ fn frame_pacing_contract_is_wired_into_the_raw_contract() {
     assert_eq!(contract.pacing().demand().alloc_sites, 3);
     assert_eq!(contract.pacing().demand().slow_edges, 5);
     let dump = contract.dump();
-    assert!(dump.contains("pacing schema=2"));
+    assert!(dump.contains("pacing schema=3"));
     assert!(
         dump.contains("pacing-demand alloc-sites=3 barrier-sites=2 slow-edges=5 managed-types=11")
     );

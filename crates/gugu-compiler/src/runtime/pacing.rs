@@ -174,16 +174,28 @@ pub(crate) enum CreditSource {
     PendingReturn,
     /// producer staging 中尚未发布的 chain。
     ProducerStaging,
+    /// 已 acquire 且尚未归还的 mark owner credit。
+    MarkCredit,
+    /// 已发布但尚未被目标 owner 消费的 mark ticket。
+    MarkMailbox,
+    /// 各 owner 本地 mark worklist 的深度之和。
+    MarkWorklist,
+    /// 在途转发中的 GC 工作消息。
+    ForwardingWork,
 }
 
 impl CreditSource {
     /// 全部来源；顺序即契约目录顺序。
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 9] = [
         Self::BarrierBuffer,
         Self::CardMarkBatch,
         Self::EdgeDelta,
         Self::PendingReturn,
         Self::ProducerStaging,
+        Self::MarkCredit,
+        Self::MarkMailbox,
+        Self::MarkWorklist,
+        Self::ForwardingWork,
     ];
 
     /// 返回来源判别值。
@@ -194,6 +206,10 @@ impl CreditSource {
             Self::EdgeDelta => 2,
             Self::PendingReturn => 3,
             Self::ProducerStaging => 4,
+            Self::MarkCredit => 5,
+            Self::MarkMailbox => 6,
+            Self::MarkWorklist => 7,
+            Self::ForwardingWork => 8,
         }
     }
 }
@@ -207,8 +223,8 @@ impl CreditSource {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CreditPlane {
     cycle_epoch: u64,
-    outstanding: [u64; 5],
-    peak: [u64; 5],
+    outstanding: [u64; 9],
+    peak: [u64; 9],
     observations: u64,
 }
 
@@ -223,8 +239,8 @@ impl CreditPlane {
     pub(crate) const fn new(cycle_epoch: u64) -> Self {
         Self {
             cycle_epoch,
-            outstanding: [0; 5],
-            peak: [0; 5],
+            outstanding: [0; 9],
+            peak: [0; 9],
             observations: 0,
         }
     }
@@ -271,7 +287,7 @@ impl CreditPlane {
         self.observations += 1;
     }
 
-    /// 一次性登记全部五个来源；runtime 在 cycle 边界用同一个物理快照调用。
+    /// 一次性登记全部九个来源；runtime 在 cycle 边界用同一个物理快照调用。
     pub(crate) fn observe_all(&mut self, snapshot: CreditSnapshot) {
         for source in CreditSource::ALL {
             self.observe(source, snapshot.get(source));
@@ -292,12 +308,12 @@ impl CreditPlane {
             });
         }
         self.cycle_epoch = cycle_epoch;
-        self.peak = [0; 5];
+        self.peak = [0; 9];
         Ok(())
     }
 }
 
-/// 五个 credit 来源的物理在飞量快照。
+/// 全部 credit 来源的物理在飞量快照。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct CreditSnapshot {
     /// processor-local buffer 中尚未 flush 的 card 键数。
@@ -310,6 +326,14 @@ pub(crate) struct CreditSnapshot {
     pub(crate) pending_return_bytes: u64,
     /// producer staging 中尚未发布的字节。
     pub(crate) staging_bytes: u64,
+    /// 已 acquire 且尚未归还的 mark owner credit 数。
+    pub(crate) mark_credit: u64,
+    /// 已发布但尚未被目标 owner 消费的 mark ticket 数。
+    pub(crate) mark_mailbox: u64,
+    /// 各 owner 本地 mark worklist 深度之和。
+    pub(crate) mark_worklist: u64,
+    /// 在途转发中的 GC 工作消息数。
+    pub(crate) forwarding_work: u64,
 }
 
 impl CreditSnapshot {
@@ -321,6 +345,10 @@ impl CreditSnapshot {
             CreditSource::EdgeDelta => self.edge_deltas,
             CreditSource::PendingReturn => self.pending_return_bytes,
             CreditSource::ProducerStaging => self.staging_bytes,
+            CreditSource::MarkCredit => self.mark_credit,
+            CreditSource::MarkMailbox => self.mark_mailbox,
+            CreditSource::MarkWorklist => self.mark_worklist,
+            CreditSource::ForwardingWork => self.forwarding_work,
         }
     }
 }
@@ -524,6 +552,11 @@ impl PacingPlane {
     /// 返回 credit 账本。
     pub(crate) const fn credits(&self) -> &CreditPlane {
         &self.credits
+    }
+
+    /// 返回 cycle credit 是否已经全部收敛；world 与终止检测读取。
+    pub(crate) fn credits_converged(&self) -> bool {
+        self.credits.converged()
     }
 
     /// 用一个物理在飞量快照更新全部 credit 来源；runtime 在 cycle 边界与交接点调用。
@@ -861,21 +894,22 @@ impl PacingPlane {
 
     /// 执行一次 remark。
     ///
-    /// barrier 必须先处于开启状态；超出预算时发布 continuation，不恢复普通 barrier，
-    /// 也不允许在此宣布 cycle 收敛。
+    /// barrier 必须先处于开启状态；mark 阶段尚未收敛时发布 continuation，超预算时同样发布
+    /// continuation：两种情况都不恢复普通 barrier，也不允许在此宣布 cycle 收敛。
     pub(crate) fn remark(
         &mut self,
         cost: u64,
         barrier_open: bool,
+        mark_converged: bool,
     ) -> Result<RemarkOutcome, &'static str> {
         if !barrier_open {
             return Err("remark 要求 hybrid barrier 处于开启状态");
         }
-        if cost <= self.contract.remark_cost_budget() {
-            Ok(RemarkOutcome::Complete)
-        } else {
+        if !mark_converged || cost > self.contract.remark_cost_budget() {
             self.remark_continuations += 1;
             Ok(RemarkOutcome::Continuation)
+        } else {
+            Ok(RemarkOutcome::Complete)
         }
     }
 

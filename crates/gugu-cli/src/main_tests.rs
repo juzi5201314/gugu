@@ -448,7 +448,7 @@ fn build_json_reports_barrier_contract_keys() {
     }
     assert_eq!(payload["pacing-profile"], "mosaic-default");
     assert_eq!(payload["pacing-gc-cpu-fraction"], 25);
-    assert_eq!(payload["pacing-credit-source-count"], 5);
+    assert_eq!(payload["pacing-credit-source-count"], 9);
     assert_eq!(payload["pacing-pressure-poll-bytes"], 1 << 20);
     assert_eq!(payload["pacing-owner-drain-items"], 64);
     assert_eq!(payload["pacing-owner-drain-bytes"], 1 << 16);
