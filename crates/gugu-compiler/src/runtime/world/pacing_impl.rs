@@ -59,7 +59,7 @@ pub(crate) struct PressureDrainReport {
     pub(crate) remark: RemarkOutcome,
     /// 本 cycle 是否真实完成（remark 通过、credit 收敛并推进了 cycle epoch）。
     pub(crate) cycle_completed: bool,
-    /// cycle 边界检查时五个 credit 来源是否收敛。
+    /// cycle 边界检查时九个 credit 来源是否收敛。
     pub(crate) credits_converged: bool,
     /// 本 cycle 的 mark cycle epoch；未配置 mark 平面时为 0。
     pub(crate) mark_cycle: u64,
@@ -199,9 +199,9 @@ impl RawWorld {
 
     /// 按当前物理状态重建 credit 快照。
     ///
-    /// 五个来源各自对应一个真实结构：processor buffer、已发布 batch 账本、edge summary、
-    /// owner pending 字节与 `RawWorld` 持有的 producer staging；没有对应路径的来源保持为零
-    /// 而不是猜测。
+    /// 九个来源各自对应一个真实结构：processor buffer、已发布 batch 账本、edge summary、
+    /// owner pending 字节、`RawWorld` 持有的 producer staging，以及 mark 平面的 credit 账本、
+    /// mailbox、owner worklist 与转发中的 ticket；没有对应路径的来源保持为零而不是猜测。
     pub(crate) fn credit_snapshot(&self) -> CreditSnapshot {
         let mut buffer_keys = 0_u64;
         for processor in 0..self.barrier.processor_count() {

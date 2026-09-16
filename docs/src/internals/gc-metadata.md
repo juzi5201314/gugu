@@ -736,7 +736,7 @@ committed 字节与 descriptor 数而不是合成值；未过门禁的 extent �
 `blocked_extents`，超出一轮 relocation pause 预算的候选整块计入 `deferred_extents`、由下个
 cycle 继续（单个 extent 至多等于预算上界，因此每轮至少推进一个候选）。通过门禁的 extent 在
 `decommit` 的同一步让名下空载 descriptor 离开 committed 口径，物理页与账本不会各走一边。
-cycle 推进 barrier epoch 后立即排空新 epoch 发布的批次并取走新 edge delta，再要求五个 credit
+cycle 推进 barrier epoch 后立即排空新 epoch 发布的批次并取走新 edge delta，再要求九个 credit
 来源收敛：收敛则 credit epoch 同步前进并调用 `complete_cycle` 记录真实 live record 字节
 （`committed − pending − reclaimable − cache` 的残差，由 `ledger_invariant` 在运行时强制守恒），
 未收敛则本轮 cycle 未完成、credit epoch 保持落后并在下个完成 cycle 追平。软上限口径直接取 provider 的 committed 总量：
