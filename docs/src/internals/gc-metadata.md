@@ -173,7 +173,7 @@ Linux 使用 `.gugu.types`，Windows 使用 `.gugutyp`。header 字段顺序为�
 
 ```text
 magic:                [u8; 8] = "GUGUTY01"
-version:              u16 = 1
+version:              u16 = 2
 pointer_size:         u8 = 8
 endian:               u8 = 1
 type_count:           u32
@@ -190,6 +190,8 @@ section_len:          u64
 ```
 
 所有 pool offset 8 字节对齐、位于 section 内且不重叠。record、program 和 name 按内容稳定排序后布局，但 `TypeRecord` 本身仍按 `TypeId` 顺序。所有 padding 为 0。
+
+type section 的版本 2 把记录固定为 80 byte：`size u64`、`align u32`、`flags u32`、`name_offset/name_len u32`、`trace_offset/trace_len u32`、`value_offset/value_len u32`、`copy/drop/publish_glue_rva u64` 与两个保留字，记录里不再存放稳定键，记录顺序即 `TypeId`。本表的编码是规范性定义：encoder 只负责产出能被本表解码且语义等价的字节，不要求与表逐字节一致；`trace_kind` 与 type flag 的一致性由 verifier 交叉校验。
 
 ## heap object header
 
@@ -277,6 +279,8 @@ slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理�
 解析 `HeapInterior` 时先通过 radix map找 descriptor；独立 large/pinned mapping直接用其 payload起点验证。普通 arena在当前 4 KiB页的 start-bitmap范围向前找最近 start bit；本页没有或该对象未覆盖目标地址时使用 `page_covering_object`。找到 header后 checked验证 `payload <= ptr < payload + payload_size`。一页只有 256 个 granule、4 个 `u64` bitmap word，因此最多扫描 4 个 word。
 
 每个 logical processor从全局 nursery一次取得 8 个 block组成的 256 KiB本地 span，但 bump cursor/limit始终只覆盖当前可用 line run；对象不得越过 block。run耗尽时先在本地 span的 line表推进，无需全局同步；8 个 block用完才 refill。old allocation同样从 line表选择连续空 line，不能退化为不看 Immix line的整段 bump。含 resource、需要 pin、独立 large或高对齐请求绕过 nursery。2 MiB/32 KiB/128 byte/16 byte与 8-block span的关系写入同一 `HeapLayout`常量并逐项断言。
+
+本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 1` 契约段（arena 2 MiB、block 32 KiB、line 128 byte、granule 16 byte、TLAB span 8 block、object-start/mark 各 131072 bit、`page_covering_object` 512 项、card 表 4096 byte、`ObjectHeader`/`HeapArenaMetadata`/`HeapPinEntry` 三条记录、arena/block/generation/representation 目录与 `HeapTriggerProfile`），派生规模只由 arena/block/line 参数推导；`RuntimeRawModel` schema 升到 14，`local-heap-*` 段、dump 行与需求视图进入 `ImagePlan` 与 CLI JSON，`resources/runtime/heap.gg` 提供同源 Gugu 记录并由 `local_heap_layout::verify_source` 逐字段校验布局。运行时参照实现按契约建立每 owner 的 nursery/old/resource/pinned/large arena：32 KiB block 经 extent 层按页提交（不进入 `OwnerAccounting`，因此 `runtime_committed_bytes` 口径不变），分配在 line run 内推进并记录块内碎片，nursery 走 8 block 局部 span，`gc_trace.rs` 的解释器按 Bitmap/Program 扫描 managed word 并用 granule + 页内起点向前扫描解析 interior 指针。block 选择式 major evacuation、跨 owner `SharedHeap` handle、radix page map 的镜像落地与空 block 交还 provider 分别由阶段 45–47 与 55 接手；heap 公共统计属阶段 67。
 
 ## trace descriptor
 
