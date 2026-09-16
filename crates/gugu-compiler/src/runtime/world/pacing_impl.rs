@@ -61,6 +61,16 @@ pub(crate) struct PressureDrainReport {
     pub(crate) cycle_completed: bool,
     /// cycle 边界检查时五个 credit 来源是否收敛。
     pub(crate) credits_converged: bool,
+    /// 本 cycle 的 mark cycle epoch；未配置 mark 平面时为 0。
+    pub(crate) mark_cycle: u64,
+    /// 本 cycle mark pass 真实标记的对象数。
+    pub(crate) mark_marked: u64,
+    /// 累计发布的 mark ticket 数。
+    pub(crate) mark_tickets_published: u64,
+    /// 累计消费的 mark ticket 数。
+    pub(crate) mark_tickets_consumed: u64,
+    /// 本 cycle 的 mark 阶段是否收敛；未配置 mark 平面时恒为真。
+    pub(crate) mark_converged: bool,
 }
 
 impl RawWorld {
@@ -214,8 +224,20 @@ impl RawWorld {
                 .pending_return_bytes
                 .saturating_add(region_transfers),
             staging_bytes: self.return_staging_bytes(),
-            // mark 平面尚未接入：四个 mark 来源暂时保持 0，由 mark cycle 接入后从真实结构观测。
-            ..CreditSnapshot::default()
+            // 四个 mark 来源由 mark 平面与 worklist 观测；未配置平面时保持 0，不猜测。
+            mark_credit: self
+                .mark
+                .as_ref()
+                .map_or(0, super::super::mark::MarkPlane::mark_credit_pending),
+            mark_mailbox: self
+                .mark
+                .as_ref()
+                .map_or(0, super::super::mark::MarkPlane::mailbox_pending),
+            mark_worklist: self.mark_worklist_items(),
+            forwarding_work: self
+                .mark
+                .as_ref()
+                .map_or(0, super::super::mark::MarkPlane::forwarded_pending),
         }
     }
 
@@ -374,7 +396,20 @@ impl RawWorld {
         // 3. 取走 owner-local edge summary：它属于 cycle credit，必须在 drain 结束前交出。
         report.edge_deltas =
             u64::try_from(self.take_edge_deltas().len()).expect("delta 数适配 u64");
-        // 4. cycle 路径把「本 cycle 真实完成的工作」计入滑动窗口：非 forced cycle 超窗的部分
+        // 4. mark 阶段：配置了 GC 平面时先跑完 mark pass，它决定 remark 的收敛门禁，并把整堆
+        //    标记工作量计入 cycle cost 窗口；未收敛时 remark 只能发布 continuation。
+        let mut mark_converged = true;
+        if scope == DrainScope::Cycle && self.mark_configured() {
+            let owners = u32::try_from(self.owners.len()).expect("owner 数适配 u32");
+            let pass = self.run_mark_pass(&(0..owners).collect::<Vec<_>>())?;
+            report.mark_cycle = pass.cycle;
+            report.mark_marked = pass.marked;
+            report.mark_tickets_published = pass.tickets_published;
+            report.mark_tickets_consumed = pass.tickets_consumed;
+            mark_converged = pass.termination.converged();
+        }
+        report.mark_converged = mark_converged;
+        // 5. cycle 路径把「本 cycle 真实完成的工作」计入滑动窗口：非 forced cycle 超窗的部分
         //    转为 mark debt 由后续 assist 偿还，forced cycle 属于 emergency，可越过吞吐预算。
         //    有界 drain 不计费：它由 pause 预算约束，其工作量在 cycle 边界按 per-cycle delta
         //    一次性计入，避免同一个 cycle 重复计费。
@@ -382,11 +417,11 @@ impl RawWorld {
         if scope == DrainScope::Cycle {
             let cost = self.pacing.cycle_work_cost(counters);
             report.work_cost = self.pacing.worker_work(cost, forced);
-            // 5. remark 是 cycle 终止门禁：超预算时发布 continuation 并保持 barrier 开启，
-            //    因此本 cycle 不推进 epoch，也不宣布收敛。
+            // 6. remark 是 cycle 终止门禁：mark 未收敛或超预算时发布 continuation 并保持
+            //    barrier 开启，因此本 cycle 不推进 epoch，也不宣布收敛。
             let remark = self
                 .pacing
-                .remark(cost, true, true)
+                .remark(cost, true, mark_converged)
                 .map_err(|message| RawInvariant::new(message.to_owned()))?;
             report.remark = remark;
             if remark == RemarkOutcome::Complete {
@@ -404,6 +439,13 @@ impl RawWorld {
                     report.cycle_completed = true;
                     if forced {
                         report.forced_cycles = 1;
+                    }
+                    // 7. mark 阶段收敛后才宣布 cycle 完成，并对全部 owner 执行 sweep。
+                    if self.mark_configured() {
+                        self.finish_mark_cycle()?;
+                        for owner in 0..self.owners.len() as u32 {
+                            self.sweep_owner(owner)?;
+                        }
                     }
                 }
             }
@@ -439,6 +481,7 @@ impl RawWorld {
             card_marks: stats.card_marks,
             edge_deltas: stats.edge_deltas,
             published_batches: stats.published_batches,
+            marks: self.mark.as_ref().map_or(0, |plane| plane.stats().marks),
         }
     }
 

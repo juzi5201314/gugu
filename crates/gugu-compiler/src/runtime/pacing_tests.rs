@@ -237,6 +237,7 @@ fn cycle_work_cost_is_per_cycle_and_advances_the_baseline() {
         card_marks: 5,
         edge_deltas: 2,
         published_batches: 1,
+        marks: 0,
     };
     assert_eq!(plane.cycle_work_cost(first), 8);
     plane.complete_cycle(0, first);
@@ -244,6 +245,7 @@ fn cycle_work_cost_is_per_cycle_and_advances_the_baseline() {
         card_marks: 9,
         edge_deltas: 3,
         published_batches: 2,
+        marks: 0,
     };
     assert_eq!(plane.cycle_work_cost(second), 6, "第二个 cycle 只计增量");
     plane.complete_cycle(0, second);
@@ -252,8 +254,17 @@ fn cycle_work_cost_is_per_cycle_and_advances_the_baseline() {
         card_marks: 1 << 30,
         edge_deltas: 0,
         published_batches: 0,
+        marks: 0,
     };
     assert_eq!(plane.cycle_work_cost(huge), (1 << 30) - 9);
+    // mark 工作量进入同一 cost 窗口：per-cycle 差值必须包含它。
+    let marked = GcWorkCounters {
+        card_marks: 1 << 30,
+        edge_deltas: 0,
+        published_batches: 0,
+        marks: 7,
+    };
+    assert_eq!(plane.cycle_work_cost(marked), (1 << 30) - 9 + 7);
 }
 
 #[test]

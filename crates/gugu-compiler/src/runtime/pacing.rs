@@ -427,8 +427,9 @@ impl CommittedClasses {
 
 /// 一个 cycle 内真实完成工作的累计计数器快照。
 ///
-/// 三个来源都是只增不减的全局累计量（processor card 记账、owner 取走的 edge delta 数、
-/// 发布的 batch 数）；per-cycle 工作量由相邻两次快照之差得到，不引入第二套计数口径。
+/// 四个来源都是只增不减的全局累计量（processor card 记账、owner 取走的 edge delta 数、
+/// 发布的 batch 数、mark cycle 累计标记数）；per-cycle 工作量由相邻两次快照之差得到，
+/// 不引入第二套计数口径。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct GcWorkCounters {
     /// processor 账本累计的 card mark 次数。
@@ -437,6 +438,8 @@ pub(crate) struct GcWorkCounters {
     pub(crate) edge_deltas: u64,
     /// 已发布的 card batch 累计数。
     pub(crate) published_batches: u64,
+    /// mark cycle 累计标记的对象数。
+    pub(crate) marks: u64,
 }
 
 impl GcWorkCounters {
@@ -449,6 +452,7 @@ impl GcWorkCounters {
                 self.published_batches
                     .saturating_sub(baseline.published_batches),
             )
+            .saturating_add(self.marks.saturating_sub(baseline.marks))
     }
 }
 
