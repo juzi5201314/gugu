@@ -84,6 +84,7 @@ impl OwnerReturnHarness {
             super::GcMetadataDemand::empty(),
             super::BarrierDemand::default(),
             super::GcPacingDemand::default(),
+            super::MarkDemand::default(),
             super::LocalHeapDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
@@ -287,6 +288,7 @@ impl ResourceReleaseHarness {
             super::GcMetadataDemand::empty(),
             super::BarrierDemand::default(),
             super::GcPacingDemand::default(),
+            super::MarkDemand::default(),
             super::LocalHeapDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )

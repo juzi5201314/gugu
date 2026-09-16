@@ -1,0 +1,48 @@
+/* MarkMailbox、owner credit 与 cycle 终止记录的 Gugu 定义；
+ * 与 compiler runtime layout query 逐字段交叉校验。
+ * 每项只保存 owner 序号、generation/epoch、pending/done 计数与收敛条件观测值，
+ * 禁止出现 managed pointer、field 地址或栈指针。
+ */
+
+#[repr(C, align(64))]
+pub struct MarkMailboxHead {
+    pub owner_descriptor: uint,
+    pub cycle_epoch: uint,
+    pub topology_epoch: u32,
+    pub pending: u32,
+    pub consumed: uint,
+    pub forwarded: uint,
+    pub last_credit: u32,
+    pub consumer_slots: u32,
+    pub padding: [byte; 16],
+}
+
+#[repr(C, align(64))]
+pub struct MarkCreditHead {
+    pub owner_descriptor: uint,
+    pub cycle_epoch: uint,
+    pub granted: uint,
+    pub issued: uint,
+    pub in_flight: uint,
+    pub done: uint,
+    pub returned: uint,
+    pub padding: [byte; 8],
+}
+
+#[repr(C, align(8))]
+pub struct MarkTerminationRecord {
+    pub cycle_epoch: uint,
+    pub topology_epoch: u32,
+    pub state: u32,
+    pub conditions: [uint; 7],
+}
+
+/// 非空 package 必经布局交叉校验。
+#[used]
+pub fn mark_records(
+    mailbox: &MarkMailboxHead,
+    credit: &MarkCreditHead,
+    termination: &MarkTerminationRecord,
+) uint {
+    mailbox.consumed + mailbox.forwarded + credit.in_flight + credit.granted + termination.cycle_epoch
+}

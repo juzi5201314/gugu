@@ -612,7 +612,7 @@ fn compile_slice_reports_barrier_contract_end_to_end() {
     assert!(dump.contains("barrier schema=1 card=512 buffer=256 stamps=256"));
     assert!(dump.contains("barrier-flush-reasons buffer-full,processor-handoff,foreign-bridge,memory-pressure,minor-stop,producer-stop-gate"));
     assert!(dump.contains(
-        "runtime-message return-fields=12 card-mark-fields=13 card-mark-family=card-mark"
+        "runtime-message return-fields=12 card-mark-fields=13 mark-ticket-fields=14 card-mark-family=card-mark"
     ));
 }
 

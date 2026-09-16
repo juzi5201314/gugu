@@ -28,16 +28,17 @@ use super::startup_schema::{Rt0Demand, Rt0SchemaV1};
 use super::sync_schema::{SyncDemand, SyncRuntimeContract};
 use super::wait_schema::{WaitDemand, WaitRuntimeContract};
 use super::{
-    BATCH_MAX, CACHE_LINE_BYTES, OWNER_INBOX_SHARDS, QUEUE_PAD_BYTES, RAW_SLAB_PAGE_BYTES,
-    RETURN_SLAB_CACHE_SETS, RETURN_SLAB_CACHE_WAYS, TARGET_CACHE_ENTRIES,
+    BATCH_MAX, CACHE_LINE_BYTES, MarkDemand, MarkRuntimeContract, OWNER_INBOX_SHARDS,
+    QUEUE_PAD_BYTES, RAW_SLAB_PAGE_BYTES, RETURN_SLAB_CACHE_SETS, RETURN_SLAB_CACHE_WAYS,
+    TARGET_CACHE_ENTRIES,
 };
 use crate::{
     Diagnostic, DiagnosticCode, SourceMap, TargetName,
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 12 并入 GC debt、credit、pacing 与 pressure 契约段。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 14;
+/// 契约对象的schema版本；schema 15 并入 MarkMailbox、owner credit 与终止检测契约段。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 15;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -231,7 +232,6 @@ impl MessageSchemaV1 {
     }
 
     /// 返回 GC 工作消息族的 `MarkTicket` 字段集合。
-    #[allow(dead_code, reason = "MarkRuntimeContract 在 mark 契约段消费该访问器")]
     pub(crate) fn mark_ticket() -> Self {
         Self {
             schema: 1,
@@ -423,6 +423,7 @@ pub(crate) struct RuntimeRawContractV1 {
     pacing: GcPacingRuntimeContract,
     region: TurnRegionRuntimeContract,
     local_heap: LocalHeapRuntimeContract,
+    mark: MarkRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -451,6 +452,7 @@ impl RuntimeRawContractV1 {
         gc_metadata_demand: GcMetadataDemand,
         barrier_demand: BarrierDemand,
         pacing_demand: GcPacingDemand,
+        mark_demand: MarkDemand,
         local_heap_demand: LocalHeapDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
@@ -467,6 +469,12 @@ impl RuntimeRawContractV1 {
         let pacing = GcPacingRuntimeContract::build(pacing_demand)?;
         let region = TurnRegionRuntimeContract::build(demand.turn_region)?;
         let local_heap = LocalHeapRuntimeContract::build(local_heap_demand, profile)?;
+        // credit 池上界是「常驻 message node 容量加根槽数」：任何在飞 mark ticket 占一个
+        // non-moving node，根 seed 不占 node 但每根槽每 cycle 至多一次。
+        let mark = MarkRuntimeContract::build(
+            mark_demand,
+            u64::from(demand.message_nodes) + u64::from(mark_demand.root_sites),
+        )?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -492,6 +500,7 @@ impl RuntimeRawContractV1 {
             pacing,
             region,
             local_heap,
+            mark,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -578,6 +587,16 @@ impl RuntimeRawContractV1 {
     /// 返回 LocalHeap Immix/TLAB/分代契约段。
     pub(crate) const fn local_heap(&self) -> &LocalHeapRuntimeContract {
         &self.local_heap
+    }
+
+    /// 返回 MarkMailbox、owner credit 与终止检测契约段。
+    pub(crate) const fn mark(&self) -> &MarkRuntimeContract {
+        &self.mark
+    }
+
+    /// 返回 GC 工作消息族的 `MarkTicket` 字段集合。
+    pub(crate) fn mark_ticket_message(&self) -> &MessageSchemaV1 {
+        &self.mark.ticket_fields
     }
 
     /// 返回需求视图。
@@ -796,11 +815,29 @@ impl RuntimeRawContractV1 {
                 "LocalHeap 需求与 barrier/gc metadata 契约不一致",
             ));
         }
+        self.mark.verify()?;
+        if self.mark.demand.root_sites != self.gc_metadata.demand.root_range_count
+            || self.mark.demand.barrier_sites != self.barrier.demand.card_mark_sites
+            || self.mark.demand.edge_delta_sites != self.barrier.demand.edge_summary_sites
+            || self.mark.demand.ticket_sites != self.local_heap.demand.shared_sites
+        {
+            return Err(RawModelError::new(
+                "mark 需求与 gc metadata/barrier/LocalHeap 契约不一致",
+            ));
+        }
+        if self.mark.credit_pool
+            != u64::from(self.demand.message_nodes) + u64::from(self.mark.demand.root_sites)
+        {
+            return Err(RawModelError::new(
+                "mark credit 池上界与常驻 node 容量加根槽数不一致",
+            ));
+        }
         if self.region.demand() != self.demand.turn_region {
             return Err(RawModelError::new("TurnRegion 需求与LIR需求视图不一致"));
         }
         if self.message.family() != MessageFamilyTag::Return
             || self.barrier.message.family() != MessageFamilyTag::CardMark
+            || self.mark.ticket_fields.family() != MessageFamilyTag::MarkTicket
             || super::region_schema::region_transfer_fields() != self.region.transfer_fields
         {
             return Err(RawModelError::new(
@@ -866,6 +903,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.pacing.canonical_bytes());
         bytes.extend_from_slice(&self.region.canonical_bytes());
         bytes.extend_from_slice(&self.local_heap.canonical_bytes());
+        bytes.extend_from_slice(&self.mark.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1096,10 +1134,12 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.pacing.dump());
         output.push_str(&self.region.dump());
         output.push_str(&self.local_heap.dump());
+        output.push_str(&self.mark.dump());
         output.push_str(&format!(
-            "runtime-message return-fields={} card-mark-fields={} card-mark-family={}\n",
+            "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} card-mark-family={}\n",
             self.message.fields.len(),
             self.card_mark_message().fields.len(),
+            self.mark_ticket_message().fields.len(),
             match self.card_mark_message().family() {
                 MessageFamilyTag::Return => "return",
                 MessageFamilyTag::CardMark => "card-mark",
@@ -1158,6 +1198,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) barrier_demand: BarrierDemand,
     /// pacing 需求视图：分配站点、屏障站点、assist slow edge 与受管类型数。
     pub(crate) pacing_demand: GcPacingDemand,
+    /// mark 需求视图：根站点、屏障站点、shared 站点与 edge delta 站点。
+    pub(crate) mark_demand: MarkDemand,
     /// LocalHeap 需求视图：placement 站点、类型 footprint 与屏障站点。
     pub(crate) local_heap_demand: LocalHeapDemand,
     /// 已由 frontend 编码的真实 type/meta section。
@@ -1189,6 +1231,7 @@ pub(crate) fn run(
         inputs.gc_metadata_demand,
         inputs.barrier_demand,
         inputs.pacing_demand,
+        inputs.mark_demand,
         inputs.local_heap_demand,
         inputs.gc_type_section,
         inputs.gc_metadata_section,
@@ -1231,6 +1274,7 @@ pub(crate) fn run(
                 inputs.gc_metadata_demand,
                 inputs.barrier_demand,
                 inputs.pacing_demand,
+                inputs.mark_demand,
                 inputs.local_heap_demand,
                 inputs.profile,
             )
@@ -1250,6 +1294,8 @@ pub(crate) fn run(
             super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::local_heap_layout::verify_source(contract.local_heap(), inputs.hir, inputs.gir)
+                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            super::mark_layout::verify_source(contract.mark(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
             fresh = Some(contract);
@@ -1290,6 +1336,8 @@ pub(crate) fn run(
     super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     super::local_heap_layout::verify_source(contract.local_heap(), inputs.hir, inputs.gir)
+        .map_err(|error| vec![error.diagnostic()])?;
+    super::mark_layout::verify_source(contract.mark(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     let _ = inputs.sources;
     Ok(contract)

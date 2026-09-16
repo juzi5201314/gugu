@@ -461,6 +461,17 @@ impl Compiler {
             owners: 0,
             kinds: 0,
         };
+        let barrier_demand = lir.barrier_demand();
+        let gc_demand = gc_metadata_demand(&gc_metadata);
+        let local_heap_demand =
+            lir.local_heap_demand(managed_type_count, large_type_count, max_object_bytes);
+        // mark 需求完全由已有三份 demand 推导，不新增 LIR 遍历，避免出现第二份站点口径。
+        let mark_demand = runtime::MarkDemand {
+            root_sites: gc_demand.root_range_count,
+            barrier_sites: barrier_demand.card_mark_sites,
+            ticket_sites: local_heap_demand.shared_sites,
+            edge_delta_sites: barrier_demand.edge_summary_sites,
+        };
         let raw_contract = match runtime::run(
             RawModelInputs {
                 target,
@@ -472,14 +483,11 @@ impl Compiler {
                 wait_demand: lir.wait_demand(),
                 sync_demand: lir.sync_demand(),
                 stackmap_demand: lir.stackmap_demand(frontend.hir.module()),
-                gc_metadata_demand: gc_metadata_demand(&gc_metadata),
-                barrier_demand: lir.barrier_demand(),
+                gc_metadata_demand: gc_demand,
+                barrier_demand,
                 pacing_demand: lir.pacing_demand(frontend.mono.universe.records.len() as u32),
-                local_heap_demand: lir.local_heap_demand(
-                    managed_type_count,
-                    large_type_count,
-                    max_object_bytes,
-                ),
+                mark_demand,
+                local_heap_demand,
                 gc_type_section: &gc_metadata.type_section,
                 gc_metadata_section: &gc_metadata.metadata_section,
                 profile: runtime::PlatformProfile::from(target),

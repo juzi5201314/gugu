@@ -57,6 +57,8 @@ mod local_heap_layout;
     reason = "LocalHeap 契约段由 runtime raw、world 与 ImagePlan 消费"
 )]
 pub(crate) mod local_heap_schema;
+#[allow(dead_code, reason = "mark record 布局交叉校验由 RuntimeRawModel 消费")]
+mod mark_layout;
 #[allow(dead_code, reason = "mark 契约段由 runtime raw、世界与 ImagePlan 消费")]
 pub(crate) mod mark_schema;
 mod model;
@@ -105,6 +107,7 @@ pub use coroutine_schema::{
 };
 pub use gc_metadata_schema::GcMetadataDemand;
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
+pub use mark_schema::{MarkDemand, MarkRuntimeContract};
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
 pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
@@ -214,6 +217,7 @@ const RUNTIME_CHANNEL_SOURCE: &str = include_str!("../../resources/runtime/chann
 const RUNTIME_SYNC_SOURCE: &str = include_str!("../../resources/runtime/sync.gg");
 const RUNTIME_BARRIER_SOURCE: &str = include_str!("../../resources/runtime/barrier.gg");
 const RUNTIME_HEAP_SOURCE: &str = include_str!("../../resources/runtime/heap.gg");
+const RUNTIME_MARK_SOURCE: &str = include_str!("../../resources/runtime/mark.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +346,11 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/runtime/heap.gg",
                     source: RUNTIME_HEAP_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/mark.gg",
+                    source: RUNTIME_MARK_SOURCE,
                     role: RuntimeSourceRole::Runtime,
                 },
             ],

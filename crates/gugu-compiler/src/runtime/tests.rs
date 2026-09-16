@@ -11,6 +11,7 @@ use super::extent::EXTENT_CLASS_LADDER;
 use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::{DrainStop, GraceOutcome, OwnerInbox, ServiceBudget, ShardIndex};
 use super::local_heap_schema::LocalHeapDemand;
+use super::mark_schema::MarkDemand;
 use super::message::{
     BatchLimits, FlushTrigger, IntegrityTag, LinkCodec, LinkError, MessageState, ProducerStaging,
     PublishOutcome, ReturnKind, ReturnMessage, ReturnNodePool, ReturnSlabCache, RingCloseReason,
@@ -664,6 +665,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -714,6 +716,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
             GcPacingDemand::default(),
+            MarkDemand::default(),
             LocalHeapDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
@@ -751,6 +754,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -768,6 +772,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -791,6 +796,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -809,6 +815,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Windows),
     )
@@ -1444,6 +1451,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -1491,6 +1499,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -1511,6 +1520,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -1547,6 +1557,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -1572,6 +1583,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
             GcPacingDemand::default(),
+            MarkDemand::default(),
             LocalHeapDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
@@ -1595,6 +1607,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
             GcPacingDemand::default(),
+            MarkDemand::default(),
             LocalHeapDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
@@ -1615,6 +1628,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        MarkDemand::default(),
         LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
@@ -1666,6 +1680,7 @@ mod gc_metadata_tests {
     };
     use super::super::gc_metadata_section::{decode_sections, encode_sections, verify_sections};
     use super::super::local_heap_schema::LocalHeapDemand;
+    use super::super::mark_schema::MarkDemand;
     use super::super::model::{RawModelError, RuntimeRawContractV1};
     use super::super::pacing_schema::GcPacingDemand;
     use super::super::platform::PlatformProfile;
@@ -2068,6 +2083,10 @@ mod gc_metadata_tests {
             demand,
             BarrierDemand::default(),
             GcPacingDemand::default(),
+            MarkDemand {
+                root_sites: 1,
+                ..MarkDemand::default()
+            },
             LocalHeapDemand {
                 managed_types: 3,
                 ..LocalHeapDemand::default()
