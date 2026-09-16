@@ -89,7 +89,7 @@ fn metadata_world() -> (GcMetadataWorldV1, Vec<u8>, Vec<u8>) {
 }
 
 /// 用内建 metadata world 构造一个已验证的整体契约。
-fn gc_contract() -> RuntimeRawContractV1 {
+pub(super) fn gc_contract() -> RuntimeRawContractV1 {
     let (metadata, type_section, metadata_section) = metadata_world();
     let mut gc_demand = metadata.demand();
     gc_demand.type_section_bytes = u32::try_from(type_section.len()).expect("section 长度适配 u32");
@@ -142,7 +142,7 @@ fn heap_world() -> RawWorld {
 }
 
 /// 按给定契约创建并配置 world。
-fn configured_world(
+pub(super) fn configured_world(
     contract: &RuntimeRawContractV1,
     seed: u64,
     owners: u32,

@@ -1,0 +1,130 @@
+//! world 级 mark cycle 闭环测试：跨 owner ticket、credit 轨迹与收敛判定都走真实路径。
+
+use super::heap_impl::ManagedPlacement;
+use super::heap_tests::{configured_world, gc_contract};
+use crate::runtime::gc_metadata_schema::GcRootKindV1;
+use crate::runtime::mark::MarkCondition;
+
+/// 2 owner：owner 0 的 holder 指向 owner 1 的 child，mark pass 必须跨 owner 完成标记。
+#[test]
+fn mark_pass_traces_cross_owner_tickets_and_records_credit_trace() {
+    let contract = gc_contract();
+    let mut world = configured_world(&contract, 5, 2, 64);
+    let slot = world
+        .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
+        .expect("根槽可登记");
+    let holder = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("holder 可分配");
+    let child = world
+        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery)
+        .expect("child 可分配");
+    world.set_managed_root(slot, holder).expect("根可写");
+    world
+        .store_managed_field(0, 0, holder, 0, child)
+        .expect("跨 owner store 可执行");
+    let pass = world.run_mark_pass(&[0, 1]).expect("mark pass 可执行");
+    assert_eq!(pass.marked, 2, "两个 owner 的对象都必须被标记");
+    assert_eq!(pass.tickets_published, 1, "跨 owner 引用必须走 ticket");
+    assert_eq!(pass.tickets_consumed, 1);
+    assert!(
+        pass.termination.converged(),
+        "未收敛条件 {:?}",
+        pass.termination.blocking()
+    );
+    // credit 轨迹：源 owner 0 acquire → 目标 consume → 归还，无遗留。
+    let plane = world.mark_plane().expect("mark 平面已配置");
+    assert_eq!(plane.credit(0).expect("账本可读").returned(), 1);
+    assert_eq!(plane.credit(0).expect("账本可读").pending(), 0);
+    assert_eq!(plane.mailbox(1).expect("mailbox 可读").consumed(), 1);
+    assert_eq!(plane.mailbox(1).expect("mailbox 可读").pending(), 0);
+    assert_eq!(plane.mark_credit_pending(), 0);
+    assert_eq!(plane.mailbox_pending(), 0);
+    assert_eq!(plane.forwarded_pending(), 0);
+    // 四个 mark credit 来源在收敛后必须全部归零。
+    let snapshot = world.credit_snapshot();
+    assert_eq!(snapshot.mark_credit, 0);
+    assert_eq!(snapshot.mark_mailbox, 0);
+    assert_eq!(snapshot.mark_worklist, 0);
+    assert_eq!(snapshot.forwarding_work, 0);
+    world.finish_mark_cycle().expect("收敛后可完成 cycle");
+    assert_eq!(world.mark_worklist_items(), 0, "完成后 worklist 必须清空");
+    assert!(world.managed_object(holder).is_ok());
+    assert!(world.managed_object(child).is_ok());
+}
+
+/// 1 owner：owner 内环不产生 ticket，且重复 pass 必须收敛并推进 cycle epoch。
+#[test]
+fn cyclic_owner_local_graph_terminates_without_tickets() {
+    let contract = gc_contract();
+    let mut world = configured_world(&contract, 9, 1, 64);
+    let slot = world
+        .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
+        .expect("根槽可登记");
+    let first = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("对象可分配");
+    let second = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("对象可分配");
+    world.set_managed_root(slot, first).expect("根可写");
+    world
+        .store_managed_field(0, 0, first, 0, second)
+        .expect("store 可执行");
+    world
+        .store_managed_field(0, 0, second, 0, first)
+        .expect("store 可执行");
+    let pass = world.run_mark_pass(&[0]).expect("mark pass 可执行");
+    assert_eq!(pass.marked, 2, "环上两个对象都必须被标记");
+    assert_eq!(pass.tickets_published, 0, "owner 内环不产生 ticket");
+    assert_eq!(pass.cycle, 1);
+    assert!(pass.termination.converged());
+    world.finish_mark_cycle().expect("收敛后可完成 cycle");
+    // 图未变，但第二个 cycle 仍必须重新走完并收敛，epoch 必须推进。
+    let pass = world.run_mark_pass(&[0]).expect("第二个 mark pass 可执行");
+    assert_eq!(pass.cycle, 2);
+    assert_eq!(pass.marked, 2);
+    assert!(pass.termination.converged());
+    assert_eq!(
+        world
+            .mark_plane()
+            .expect("mark 平面已配置")
+            .mark_credit_pending(),
+        0
+    );
+}
+
+/// 只有七个条件同时为 0 才允许宣布完成；有 owner 未参与时不得推进。
+#[test]
+fn mark_pass_refuses_completion_while_a_mailbox_is_occupied() {
+    let contract = gc_contract();
+    let mut world = configured_world(&contract, 17, 2, 64);
+    let slot = world
+        .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
+        .expect("根槽可登记");
+    let holder = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("holder 可分配");
+    let child = world
+        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery)
+        .expect("child 可分配");
+    world.set_managed_root(slot, holder).expect("根可写");
+    world
+        .store_managed_field(0, 0, holder, 0, child)
+        .expect("跨 owner store 可执行");
+    // scope 只含 owner 0：ticket 投给 owner 1 却无人消费，mailbox 与 pending-credit 非 0。
+    let pass = world.run_mark_pass(&[0]).expect("mark pass 可执行");
+    assert_eq!(pass.termination.get(MarkCondition::Mailbox), 1);
+    assert!(pass.termination.get(MarkCondition::PendingCredit) >= 1);
+    assert!(!pass.termination.converged());
+    assert!(
+        world.finish_mark_cycle().is_err(),
+        "mailbox 非空时不得宣布 cycle 完成"
+    );
+    // 把 owner 1 纳入 scope 后同一 cycle 必须继续并收敛。
+    let pass = world.run_mark_pass(&[0, 1]).expect("补齐 owner 后可执行");
+    assert!(pass.termination.converged());
+    assert_eq!(pass.tickets_consumed, 1);
+    world.finish_mark_cycle().expect("收敛后可完成");
+    assert!(world.managed_object(child).is_ok());
+}

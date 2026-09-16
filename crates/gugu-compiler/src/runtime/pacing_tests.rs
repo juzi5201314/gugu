@@ -1,8 +1,10 @@
 //! GC debt、credit、pacing 与 pressure drain 的确定性回归；不睡眠、不读熵、不启动线程。
 
 use super::RawWorld;
+use super::heap_impl::ManagedPlacement;
 use crate::runtime::barrier::{BarrierFlushReason, BarrierSite};
 use crate::runtime::barrier_schema::CARD_GRANULARITY_BYTES;
+use crate::runtime::gc_metadata_schema::GcRootKindV1;
 use crate::runtime::inbox::ServiceBudget;
 use crate::runtime::local_heap_schema::LocalHeapDemand;
 use crate::runtime::mark_schema::MarkDemand;
@@ -1053,4 +1055,43 @@ fn consecutive_cycles_advance_the_epoch_with_per_cycle_work() {
     assert_eq!(second.remark, RemarkOutcome::Complete);
     assert_eq!(world.barrier().cycle_epoch(), before + 2);
     world.ledger_invariant(0).expect("账本仍互斥");
+}
+
+#[test]
+fn pressure_cycle_runs_mark_pass_and_sweeps_when_gc_is_configured() {
+    // 配置了 GC 平面的 world：cycle 必须先跑完 mark pass，再按收敛结果 remark 与 sweep。
+    let contract = super::heap_tests::gc_contract();
+    let mut world = super::heap_tests::configured_world(&contract, 13, 2, 64);
+    let slot = world
+        .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
+        .expect("根槽可登记");
+    let nursery = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("对象可分配");
+    world.set_managed_root(slot, nursery).expect("根可写");
+    // minor 把根对象搬进 old generation，sweep 才可能回收它所在 arena 的未标记对象。
+    world.collect_minor(0).expect("minor 可执行");
+    let live = world.managed_root(slot).expect("根可读");
+    let dead = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Pinned)
+        .expect("old 对象可分配");
+    let report = world.run_gc_cycle(false).expect("cycle 可执行");
+    assert_eq!(report.remark, RemarkOutcome::Complete);
+    assert!(report.mark_converged, "mark 收敛后 cycle 才能完成");
+    assert_eq!(report.mark_cycle, 1);
+    assert!(report.mark_marked >= 1, "cycle 必须真正标记根对象");
+    assert_eq!(
+        report.mark_tickets_published, 0,
+        "owner 内对象不需要 ticket"
+    );
+    assert!(report.cycle_completed);
+    assert!(report.credits_converged);
+    // sweep 阶段：未标记对象被回收，标记对象必须存活。
+    assert!(world.managed_object(live).is_ok(), "标记对象必须存活");
+    assert!(
+        world.managed_object(dead).is_err(),
+        "未标记对象必须被 sweep 回收"
+    );
+    assert_eq!(world.credit_snapshot().mark_worklist, 0);
+    assert_eq!(world.credit_snapshot().mark_credit, 0);
 }

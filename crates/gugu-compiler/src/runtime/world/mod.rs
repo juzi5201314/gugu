@@ -39,6 +39,14 @@ mod heap_tests;
 #[cfg(test)]
 #[path = "../pacing_tests.rs"]
 mod pacing_tests;
+
+#[cfg(test)]
+#[path = "../mark_tests.rs"]
+mod mark_tests;
+
+#[cfg(test)]
+#[path = "mark_tests.rs"]
+mod mark_world_tests;
 #[cfg(test)]
 #[path = "region_tests.rs"]
 mod region_tests;
