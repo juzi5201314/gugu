@@ -33,6 +33,16 @@ pub(crate) mod gc_metadata_contract;
 pub(crate) mod gc_metadata_schema;
 pub(crate) mod gc_metadata_section;
 mod harness;
+#[allow(
+    dead_code,
+    reason = "LocalHeap record 布局交叉校验由 RuntimeRawModel 消费"
+)]
+mod local_heap_layout;
+#[allow(
+    dead_code,
+    reason = "LocalHeap 契约段由 runtime raw、world 与 ImagePlan 消费"
+)]
+pub(crate) mod local_heap_schema;
 mod model;
 /// 结局/状态名字目录、credit 诊断访问器与 `PacingPlane::dump` 构成 pacing 诊断面，
 /// 唯一消费入口是 runtime dump 与确定性测试套件；真正无人消费的项（分类名目录、
@@ -78,13 +88,13 @@ pub use coroutine_schema::{
     StackPolicy,
 };
 pub use gc_metadata_schema::GcMetadataDemand;
+pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
 pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};
 pub use wait_schema::{WaitDemand, WaitRuntimeContract};
-
 // rt0 启动、生命周期、报告与终止的参照实现：lib 构建只消费契约段，确定性验证
 // 套件直接消费这些状态机。
 #[allow(dead_code, reason = "rt0 参照实现由确定性测试消费")]
@@ -122,6 +132,8 @@ mod slab;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod world;
 
+#[cfg(test)]
+mod heap_tests;
 #[cfg(test)]
 mod platform_tests;
 #[cfg(test)]
@@ -185,6 +197,7 @@ const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/cor
 const RUNTIME_CHANNEL_SOURCE: &str = include_str!("../../resources/runtime/channel.gg");
 const RUNTIME_SYNC_SOURCE: &str = include_str!("../../resources/runtime/sync.gg");
 const RUNTIME_BARRIER_SOURCE: &str = include_str!("../../resources/runtime/barrier.gg");
+const RUNTIME_HEAP_SOURCE: &str = include_str!("../../resources/runtime/heap.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -308,6 +321,11 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/runtime/barrier.gg",
                     source: RUNTIME_BARRIER_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/heap.gg",
+                    source: RUNTIME_HEAP_SOURCE,
                     role: RuntimeSourceRole::Runtime,
                 },
             ],

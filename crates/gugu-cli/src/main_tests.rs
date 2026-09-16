@@ -363,6 +363,10 @@ fn build_json_reports_barrier_contract_keys() {
         "barrier-record-count",
         "barrier-contract-fingerprint",
         "barrier-demand",
+        "local-heap-contract-fingerprint",
+        "local-heap-runtime",
+        "local-heap-trigger",
+        "local-heap-demand",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
@@ -378,6 +382,43 @@ fn build_json_reports_barrier_contract_keys() {
     assert_eq!(
         payload["barrier-demand"]["card-mark-sites"],
         payload["barrier-demand"]["edge-summary-sites"]
+    );
+    // LocalHeap 的 arena/block/line、位图、TLAB 与触发参数必须进入 JSON 且与 dump 同源。
+    assert_eq!(
+        payload["local-heap-runtime"]["arena-bytes"],
+        2 * 1024 * 1024
+    );
+    assert_eq!(payload["local-heap-runtime"]["block-bytes"], 32 * 1024);
+    assert_eq!(payload["local-heap-runtime"]["line-bytes"], 128);
+    assert_eq!(payload["local-heap-runtime"]["tlab-span-bytes"], 256 * 1024);
+    assert_eq!(payload["local-heap-runtime"]["bitmap-bytes"], 16 * 1024);
+    assert_eq!(payload["local-heap-runtime"]["page-cover-entries"], 512);
+    assert_eq!(
+        payload["local-heap-runtime"]["records"]
+            .as_array()
+            .expect("记录布局数组")
+            .len(),
+        3
+    );
+    assert_eq!(
+        payload["local-heap-trigger"]["minor-trigger-bytes"],
+        256 * 1024
+    );
+    assert_eq!(payload["local-heap-trigger"]["tenure-age"], 2);
+    // 真实编译的 managed 类型数来自冻结类型表，必须与 GC metadata 契约一致。
+    assert!(
+        payload["local-heap-demand"]["managed-types"]
+            .as_u64()
+            .unwrap()
+            >= 1
+    );
+    assert_eq!(
+        payload["local-heap-demand"]["managed-types"],
+        payload["gc-metadata-type-count"]
+    );
+    assert_eq!(
+        payload["local-heap-demand"]["barrier-sites"],
+        payload["barrier-demand"]["card-mark-sites"]
     );
     // pacing 契约与需求使用同一字段口径：JSON 键必须与 dump 的段一一对应。
     for key in [

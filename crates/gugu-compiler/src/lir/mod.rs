@@ -297,6 +297,65 @@ impl Validated {
         demand
     }
 
+    /// LocalHeap 需求：从优化后 LIR 统计 placement、pin 与 managed store 站点。
+    ///
+    /// 类型侧口径（managed 类型数、超过单 block 的类型数、最大 payload）由冻结类型表给出，
+    /// 因此调用方必须传入同一份计数，跨段相等性由 runtime raw 契约复验。
+    pub(crate) fn local_heap_demand(
+        &self,
+        managed_types: u32,
+        large_types: u32,
+        max_object_bytes: u64,
+    ) -> crate::runtime::LocalHeapDemand {
+        use crate::frontend::gir::placement::PlacementKind;
+        let mut demand = crate::runtime::LocalHeapDemand {
+            managed_types,
+            large_types,
+            max_object_bytes,
+            ..crate::runtime::LocalHeapDemand::default()
+        };
+        let visit = |demand: &mut crate::runtime::LocalHeapDemand, call: &body::Call| {
+            let body::CallTarget::Runtime(target) = call.target else {
+                return;
+            };
+            match target {
+                body::RuntimeCall::Pin => demand.pin_sites += 1,
+                body::RuntimeCall::Unpin => demand.unpin_sites += 1,
+                _ => {}
+            }
+        };
+        for world_body in &self.world.bodies {
+            for instruction in &world_body.instructions {
+                match &instruction.op {
+                    body::Op::GcAlloc { placement, .. } => {
+                        demand.alloc_sites += 1;
+                        match placement {
+                            PlacementKind::Pinned => demand.pinned_sites += 1,
+                            PlacementKind::Resource => demand.resource_sites += 1,
+                            PlacementKind::SharedHeap => demand.shared_sites += 1,
+                            PlacementKind::LocalHeap => {}
+                            _ => {}
+                        }
+                    }
+                    body::Op::PromoteManaged { .. } => demand.promote_sites += 1,
+                    body::Op::GcWriteBarrier { .. } | body::Op::GcWriteBarrierReserved { .. } => {
+                        demand.barrier_sites += 1;
+                    }
+                    body::Op::Call(call) | body::Op::ForeignCall(call) => visit(&mut demand, call),
+                    _ => {}
+                }
+            }
+            for block in &world_body.blocks {
+                if let body::Terminator::Invoke { call, .. }
+                | body::Terminator::TailCall { call, .. } = &block.terminator
+                {
+                    visit(&mut demand, call);
+                }
+            }
+        }
+        demand
+    }
+
     /// 同步需求：从优化后 LIR 统计原子操作与同步原语需求。
     pub(crate) fn sync_demand(&self) -> crate::runtime::SyncDemand {
         let mut demand = crate::runtime::SyncDemand::default();

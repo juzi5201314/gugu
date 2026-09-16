@@ -13,6 +13,7 @@ use super::gc_metadata_contract::GcMetadataRuntimeContract;
 use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::ServiceBudget;
 use super::ledger::LedgerSchemaV1;
+use super::local_heap_schema::{LocalHeapDemand, LocalHeapRuntimeContract};
 use super::message::{BatchLimits, RETURN_NODE_ALIGN, RETURN_NODE_BYTES};
 use super::pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
 use super::platform::PlatformProfile;
@@ -36,7 +37,7 @@ use crate::{
 };
 
 /// 契约对象的schema版本；schema 12 并入 GC debt、credit、pacing 与 pressure 契约段。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 13;
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 14;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -399,6 +400,7 @@ pub(crate) struct RuntimeRawContractV1 {
     barrier: BarrierRuntimeContract,
     pacing: GcPacingRuntimeContract,
     region: TurnRegionRuntimeContract,
+    local_heap: LocalHeapRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -427,6 +429,7 @@ impl RuntimeRawContractV1 {
         gc_metadata_demand: GcMetadataDemand,
         barrier_demand: BarrierDemand,
         pacing_demand: GcPacingDemand,
+        local_heap_demand: LocalHeapDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -441,6 +444,7 @@ impl RuntimeRawContractV1 {
         let barrier = BarrierRuntimeContract::build(barrier_demand)?;
         let pacing = GcPacingRuntimeContract::build(pacing_demand)?;
         let region = TurnRegionRuntimeContract::build(demand.turn_region)?;
+        let local_heap = LocalHeapRuntimeContract::build(local_heap_demand, profile)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -465,6 +469,7 @@ impl RuntimeRawContractV1 {
             barrier,
             pacing,
             region,
+            local_heap,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -546,6 +551,11 @@ impl RuntimeRawContractV1 {
     /// 返回 TurnRegion 契约段。
     pub(crate) const fn region(&self) -> &TurnRegionRuntimeContract {
         &self.region
+    }
+
+    /// 返回 LocalHeap Immix/TLAB/分代契约段。
+    pub(crate) const fn local_heap(&self) -> &LocalHeapRuntimeContract {
+        &self.local_heap
     }
 
     /// 返回需求视图。
@@ -756,6 +766,14 @@ impl RuntimeRawContractV1 {
         self.barrier.verify()?;
         self.pacing.verify()?;
         self.region.verify()?;
+        self.local_heap.verify()?;
+        if self.local_heap.demand().managed_types != self.gc_metadata.demand.type_count
+            || self.local_heap.demand().barrier_sites != self.barrier.demand.card_mark_sites
+        {
+            return Err(RawModelError::new(
+                "LocalHeap 需求与 barrier/gc metadata 契约不一致",
+            ));
+        }
         if self.region.demand() != self.demand.turn_region {
             return Err(RawModelError::new("TurnRegion 需求与LIR需求视图不一致"));
         }
@@ -825,6 +843,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.barrier.canonical_bytes());
         bytes.extend_from_slice(&self.pacing.canonical_bytes());
         bytes.extend_from_slice(&self.region.canonical_bytes());
+        bytes.extend_from_slice(&self.local_heap.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1054,6 +1073,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.barrier.dump());
         output.push_str(&self.pacing.dump());
         output.push_str(&self.region.dump());
+        output.push_str(&self.local_heap.dump());
         output.push_str(&format!(
             "runtime-message return-fields={} card-mark-fields={} card-mark-family={}\n",
             self.message.fields.len(),
@@ -1115,6 +1135,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) barrier_demand: BarrierDemand,
     /// pacing 需求视图：分配站点、屏障站点、assist slow edge 与受管类型数。
     pub(crate) pacing_demand: GcPacingDemand,
+    /// LocalHeap 需求视图：placement 站点、类型 footprint 与屏障站点。
+    pub(crate) local_heap_demand: LocalHeapDemand,
     /// 已由 frontend 编码的真实 type/meta section。
     pub(crate) gc_type_section: &'a [u8],
     pub(crate) gc_metadata_section: &'a [u8],
@@ -1144,6 +1166,7 @@ pub(crate) fn run(
         inputs.gc_metadata_demand,
         inputs.barrier_demand,
         inputs.pacing_demand,
+        inputs.local_heap_demand,
         inputs.gc_type_section,
         inputs.gc_metadata_section,
     ))
@@ -1185,6 +1208,7 @@ pub(crate) fn run(
                 inputs.gc_metadata_demand,
                 inputs.barrier_demand,
                 inputs.pacing_demand,
+                inputs.local_heap_demand,
                 inputs.profile,
             )
             .and_then(|contract| {
@@ -1201,6 +1225,8 @@ pub(crate) fn run(
             super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
+                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            super::local_heap_layout::verify_source(contract.local_heap(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
             fresh = Some(contract);
@@ -1239,6 +1265,8 @@ pub(crate) fn run(
     super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
+        .map_err(|error| vec![error.diagnostic()])?;
+    super::local_heap_layout::verify_source(contract.local_heap(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     let _ = inputs.sources;
     Ok(contract)

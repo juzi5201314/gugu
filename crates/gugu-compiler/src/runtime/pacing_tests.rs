@@ -4,6 +4,7 @@ use super::RawWorld;
 use crate::runtime::barrier::{BarrierFlushReason, BarrierSite};
 use crate::runtime::barrier_schema::CARD_GRANULARITY_BYTES;
 use crate::runtime::inbox::ServiceBudget;
+use crate::runtime::local_heap_schema::LocalHeapDemand;
 use crate::runtime::message::BatchLimits;
 use crate::runtime::message::ReturnKind;
 use crate::runtime::pacing::{
@@ -662,6 +663,7 @@ fn frame_pacing_contract_is_wired_into_the_raw_contract() {
             slow_edges: 5,
             managed_types: 11,
         },
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -691,6 +693,7 @@ fn frame_pacing_contract_is_wired_into_the_raw_contract() {
             alloc_sites: 4,
             ..GcPacingDemand::default()
         },
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");

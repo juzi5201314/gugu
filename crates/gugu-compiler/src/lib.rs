@@ -406,6 +406,20 @@ impl Compiler {
                 };
             }
         };
+        // LocalHeap 类型侧口径与 GC metadata 共用同一份冻结类型表：managed 类型数、超过单个
+        // Immix block 的类型数与最大 payload 都由这些记录推导，避免两处口径漂移。
+        let managed_type_count = frontend.mono.universe.records.len() as u32;
+        let mut large_type_count = 0_u32;
+        let mut max_object_bytes = 0_u64;
+        for record in &frontend.mono.universe.records {
+            let (size, _) = record.layout.unwrap_or((0, 1));
+            max_object_bytes = max_object_bytes.max(size);
+            if size + u64::from(runtime::local_heap_schema::HEAP_OBJECT_HEADER_BYTES)
+                > u64::from(runtime::gc_metadata_contract::GC_BLOCK_BYTES)
+            {
+                large_type_count += 1;
+            }
+        }
         // runtime raw 平面契约：输入来自冻结前端产物与目标描述，与 LIR 一起构成内部表示。
         let coroutine_demand = lir.coroutine_demand();
         let demand = RawPlaneDemand {
@@ -461,6 +475,11 @@ impl Compiler {
                 gc_metadata_demand: gc_metadata_demand(&gc_metadata),
                 barrier_demand: lir.barrier_demand(),
                 pacing_demand: lir.pacing_demand(frontend.mono.universe.records.len() as u32),
+                local_heap_demand: lir.local_heap_demand(
+                    managed_type_count,
+                    large_type_count,
+                    max_object_bytes,
+                ),
                 gc_type_section: &gc_metadata.type_section,
                 gc_metadata_section: &gc_metadata.metadata_section,
                 profile: runtime::PlatformProfile::from(target),
@@ -1049,6 +1068,9 @@ pub struct ImagePlan {
     barrier_card_mark_batch_fields: u32,
     barrier_record_count: u32,
     barrier_runtime: crate::runtime::BarrierRuntimeContract,
+    local_heap_contract_fingerprint: [u8; 32],
+    local_heap_demand: crate::runtime::LocalHeapDemand,
+    local_heap_runtime: crate::runtime::LocalHeapRuntimeContract,
     pacing_contract_fingerprint: [u8; 32],
     pacing_profile: String,
     pacing_profile_revision: u32,
@@ -1206,6 +1228,9 @@ impl ImagePlan {
             barrier_card_mark_batch_fields: plan.barrier_card_mark_batch_fields,
             barrier_record_count: plan.barrier_record_count,
             barrier_runtime: plan.barrier_runtime,
+            local_heap_contract_fingerprint: plan.local_heap_contract_fingerprint,
+            local_heap_demand: plan.local_heap_demand,
+            local_heap_runtime: plan.local_heap_runtime,
             pacing_contract_fingerprint: plan.pacing_contract_fingerprint,
             pacing_profile: plan.pacing_profile,
             pacing_profile_revision: plan.pacing_profile_revision,
@@ -1688,6 +1713,22 @@ impl ImagePlan {
     /// 返回已验证的 barrier 契约段。
     pub fn barrier_runtime(&self) -> &crate::runtime::BarrierRuntimeContract {
         &self.barrier_runtime
+    }
+    /// 返回 LocalHeap 契约指纹。
+    pub fn local_heap_contract_fingerprint(&self) -> [u8; 32] {
+        self.local_heap_contract_fingerprint
+    }
+    /// 返回 nursery 触发与年龄参数。
+    pub fn local_heap_trigger(&self) -> crate::runtime::HeapTriggerProfile {
+        self.local_heap_runtime.trigger()
+    }
+    /// 返回 LocalHeap 需求视图。
+    pub fn local_heap_demand(&self) -> crate::runtime::LocalHeapDemand {
+        self.local_heap_demand
+    }
+    /// 返回已验证的 LocalHeap Immix/TLAB/分代契约段。
+    pub fn local_heap_runtime(&self) -> &crate::runtime::LocalHeapRuntimeContract {
+        &self.local_heap_runtime
     }
     /// 返回 GC debt、credit、pacing 与 pressure 契约指纹。
     pub fn pacing_contract_fingerprint(&self) -> [u8; 32] {
@@ -2549,6 +2590,39 @@ mod tests {
         assert!(dump.contains("barrier-demand"));
         assert!(dump.contains("barrier-pressure"));
         assert!(dump.contains("barrier-fingerprint"));
+        // LocalHeap 的 arena/block/line 与 GC metadata 契约同源，位图、TLAB 与记录布局
+        // 只由这一组参数推导；需求视图则与 barrier/gc metadata 的站点口径一致。
+        let local_heap = plan.local_heap_runtime();
+        assert_eq!(local_heap.arena_bytes(), plan.gc_metadata_arena_bytes());
+        assert_eq!(local_heap.block_bytes(), plan.gc_metadata_block_bytes());
+        assert_eq!(local_heap.line_bytes(), plan.gc_metadata_line_bytes());
+        assert_eq!(
+            local_heap.tlab_span_bytes(),
+            8 * u64::from(plan.gc_metadata_block_bytes())
+        );
+        assert_eq!(
+            local_heap.object_start_bits,
+            (plan.gc_metadata_arena_bytes() / 16) as u32
+        );
+        assert_eq!(local_heap.bitmap_bytes, local_heap.mark_bits / 8);
+        assert_eq!(local_heap.page_cover_entries, 512);
+        assert_eq!(local_heap.card_bytes, 4096);
+        assert_eq!(
+            plan.local_heap_demand().barrier_sites,
+            demand.barrier_sites()
+        );
+        assert_eq!(
+            plan.local_heap_demand().managed_types,
+            plan.gc_metadata_type_count()
+        );
+        assert!(plan.local_heap_demand().large_types >= 1);
+        assert_ne!(plan.local_heap_contract_fingerprint(), [0_u8; 32]);
+        assert!(dump.contains("local-heap schema=1 arena=2097152 block=32768 line=128"));
+        assert!(dump.contains("local-heap-bitmaps object-start-bits=131072 mark-bits=131072"));
+        assert!(dump.contains("local-heap-record HeapArenaMetadata bytes=55576"));
+        assert!(dump.contains("local-heap-trigger revision=1"));
+        assert!(dump.contains("local-heap-demand"));
+        assert!(dump.contains("local-heap-fingerprint"));
         // pacing 契约与需求同样进入镜像计划、dump 与指纹身份。
         assert_eq!(plan.pacing_profile(), "mosaic-default");
         assert_eq!(plan.pacing_profile_revision(), 2);

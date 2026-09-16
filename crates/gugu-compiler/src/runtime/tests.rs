@@ -10,6 +10,7 @@ use super::barrier_schema::BarrierDemand;
 use super::extent::EXTENT_CLASS_LADDER;
 use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::{DrainStop, GraceOutcome, OwnerInbox, ServiceBudget, ShardIndex};
+use super::local_heap_schema::LocalHeapDemand;
 use super::message::{
     BatchLimits, FlushTrigger, IntegrityTag, LinkCodec, LinkError, MessageState, ProducerStaging,
     PublishOutcome, ReturnKind, ReturnMessage, ReturnNodePool, ReturnSlabCache, RingCloseReason,
@@ -663,6 +664,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -712,6 +714,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
             GcPacingDemand::default(),
+            LocalHeapDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
@@ -748,6 +751,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -764,6 +768,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -786,6 +791,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -803,6 +809,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
@@ -1437,6 +1444,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1483,6 +1491,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1502,6 +1511,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1537,6 +1547,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("栈图契约可构建");
@@ -1561,6 +1572,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
             GcPacingDemand::default(),
+            LocalHeapDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1583,6 +1595,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             GcMetadataDemand::empty(),
             BarrierDemand::default(),
             GcPacingDemand::default(),
+            LocalHeapDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1602,6 +1615,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         GcMetadataDemand::empty(),
         BarrierDemand::default(),
         GcPacingDemand::default(),
+        LocalHeapDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("空栈图契约可构建");
@@ -1651,6 +1665,7 @@ mod gc_metadata_tests {
         GcRootRangeV1, GcTypeEntryV1, TraceKind, TraceOp, ValueOp, boot_verify, encode_uleb,
     };
     use super::super::gc_metadata_section::{decode_sections, encode_sections, verify_sections};
+    use super::super::local_heap_schema::LocalHeapDemand;
     use super::super::model::{RawModelError, RuntimeRawContractV1};
     use super::super::pacing_schema::GcPacingDemand;
     use super::super::platform::PlatformProfile;
@@ -2053,11 +2068,18 @@ mod gc_metadata_tests {
             demand,
             BarrierDemand::default(),
             GcPacingDemand::default(),
+            LocalHeapDemand {
+                managed_types: 3,
+                ..LocalHeapDemand::default()
+            },
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .expect("契约可构建");
         contract.verify().expect("契约自洽");
         assert_eq!(contract.gc_metadata().demand.type_count, 3);
+        // LocalHeap 的类型侧口径必须与 GC metadata 的类型表一致。
+        assert_eq!(contract.local_heap().demand().managed_types, 3);
+        assert!(contract.dump().contains("local-heap schema="));
         assert!(contract.dump().contains("gc-metadata schema="));
     }
 
