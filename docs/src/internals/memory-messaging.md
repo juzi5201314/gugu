@@ -375,7 +375,12 @@ managed plane 的对象根据 `EscapeAndPlacement` 进入 `TurnRegion`、`LocalH
   `pending_return_bytes`。
 - `LocalHeap` 继续使用 2 MiB arena、32 KiB block、Immix line、TLAB、object-start bitmap、
   mark bitmap、card table 和 direct managed pointer。owner 在本地执行 mark、sweep 和
-  没有 foreign incoming edge 的 evacuation。
+  没有 foreign incoming edge 的 evacuation。mark bitmap 是「一 granule 一位」，每个 block
+  记自己的 epoch：epoch 切换时只清本 block 的 granule 区间，陈旧位不会让同一对象在下一个
+  cycle 被误判为已标记。world 级 mark pass 只通过这些原语访问 heap——`mark_object`（test-and-
+  mark）、`trace_pointers`（对象图 → `(payload 偏移, 值)`）、`ticket_identity`（地址 → arena
+  descriptor / header 偏移 / block）与 `object_at_ticket`（ticket 身份 → 目标对象），sweep 由
+  `sweep_unmarked` 承担。
 - `SharedHeap` 保存跨 owner、共享身份或无法证明私有性的对象。shared field 使用 stable
   handle 或受保护的 compressed reference；handle forwarding 只切换 stable slot 的
   current payload，不直接改写另一个 owner 的任意 field。
@@ -418,7 +423,19 @@ mailbox、edge staging、barrier buffer 和转发链清空后归还 credit。coo
 owner credit 并确认 producer/topology epoch 后，才能执行 remark 和终止检测；不能用单个
 mailbox 为空推断全局 mark 完成。
 
-credit 账本按来源分别登记当前在飞量，观测必须来自真实结构而不是推断：未 flush 的 remembered-set 键数、已发布但未消费的 card batch 数、已聚合但未取走的 edge delta 数、尚未由 owner 消费的 return 字节，以及生产者 staging 中未发布的字节。只有五个来源同时归零（`converged`）才允许推进 cycle epoch；`begin_cycle` 在尚未收敛时拒绝，epoch 只能前进。`mark_ticket_batches`、`edge_delta_batches` 与 `mark_credit_pending` 是同一账本的诊断口径：`mark_credit_pending` 不对应可从 committed bytes 中扣除的内存。MarkMailbox 与 `MarkTicket` 的消费在后续阶段接入同一 credit 平面，本阶段不引入平行计数。
+credit 账本按来源分别登记当前在飞量，观测必须来自真实结构而不是推断：未 flush 的 remembered-set 键数、已发布但未消费的 card batch 数、已聚合但未取走的 edge delta 数、尚未由 owner 消费的 return 字节、生产者 staging 中未发布的字节，以及 mark 阶段接入的已 acquire 未归还 credit、已发布未消费 ticket、owner 本地 worklist 深度与转发中的 ticket。九个来源（`barrier-buffer`/`card-mark-batch`/`edge-delta`/`pending-return`/`producer-staging`/`mark-credit`/`mark-mailbox`/`mark-worklist`/`forwarding-work`）同时归零（`converged`）才允许推进 cycle epoch；`begin_cycle` 在尚未收敛时拒绝，epoch 只能前进。`mark_ticket_batches`、`edge_delta_batches` 与 `mark_credit_pending` 都是同一账本的诊断口径：`mark_credit_pending` 不对应可从 committed bytes 中扣除的内存，也不是完成条件——「mailbox 为空」只说明没有待消费 ticket，credit 必须实际归还。
+
+### Root snapshot、mark cycle 与终止检测
+
+mark 阶段是 world 级、按 cycle 组织的固定算法，`runtime/mark.rs` 的 `MarkPlane` 是契约 `MarkRuntimeContract`（mark schema 1，profile `mosaic-mark` revision 1）的确定性对偶：
+
+- **credit 生命周期**：`acquire` 为 InFlight，目标 owner `consume` 后为 Done，源 owner `settle` 归还后为 Returned。一次 cycle 内 credit id 稠密不复用，因此重复 ticket 会落在 `CreditNotInFlight` 而不是被静默丢弃；池上界是「常驻 message node 容量 + 根槽数」，耗尽即 `PoolExhausted`。
+- **root snapshot gate**：进入 mark 前必须由全部 owner 登记六类参与者——producer stop epoch 已发布、远端 consumer 已在边界排空、根槽按 owner 分片登记完成、region registry 无在途移交、全部 access guard 为 0、本地 worklist 已清空登记。确认幂等（重复进入同一 cycle 只补缺项），直接重复登记同一项才是 `DuplicateConfirm`。
+- **跨 owner 标记**：owner 只在自己上下文内标记；遇到指向别的 owner 的对象时，mark pass 发布一条 `MarkTicket`——只携带目标 arena descriptor、arena 内 header 偏移、source block、cycle/topology epoch、credit 与 bytes，不含任何 managed 地址。目标 owner 用 `object_at_ticket` 在自己的 arena 内反查：descriptor 不属于本 heap、偏移越过容量或该 granule 没有 object-start 都表示 ticket 已过期，进入不变量失败。owner 已 retire 时按 `Forward` 复用同一个 credit 转发，被转发的 ticket 离开在飞集合的时刻是最终目标 consume，而不是转发本身。
+- **七个收敛条件**：`local-worklist`、`published-batch`、`mailbox`、`barrier-buffer`、`producer-epoch`、`forwarding-work`、`pending-credit` 全部为 0 才允许 remark；每个条件绑定到上面九个 credit 来源的一个子集，并集必须恰好覆盖它们。`barrier-buffer` 覆盖 `barrier-buffer`/`card-mark-batch`/`edge-delta`，`forwarding-work` 覆盖在途 region 移交与转发的 ticket，`pending-credit` 覆盖 mark credit。
+- **终止与 remark 门禁**：mark 未收敛时 `remark` 只能给出 continuation，barrier 保持开启、cycle 不推进 epoch；收敛后 `complete` 才清空 worklist并推进 `mark_cycle_epoch`，随后对全部 owner 执行 sweep。
+
+跨 owner 标记不改写对方 arena，因此 marker 与 arena 之间没有数据竞争；`MarkMailbox` 仍是单 consumer MPSC，且只承载 GC 后台工作。
 
 ### Block lease 与 candidate
 
@@ -508,7 +525,7 @@ headroom 判定必须同时看当前 committed 与本次请求字节：仅当两
 
 pacing 与 drain 的每一步都落到真实动作，不允许只记账：allocation debt 在分配成功后累加，`return_pressure` 由 owner 账本的三类互斥字节汇总；allocation 上的唯一慢路径先按窗口额度偿还 mark debt（没有真实可消费 work 时不记账），再在 `pressure_poll_bytes` 节奏点用当前物理快照推进 hysteresis，已处于 episode 且到达 drain 节奏点时执行一次有界 owner drain，allocation debt 越过增长预算且窗口未溢出时启动自动 cycle，最后用「committed 估计 + 本次请求字节」判断是否需要真正推进 headroom。drain 分两种作用域但共用同一条实现：有界 owner drain 每 shard 只做一次 `owner_drain_items`/`owner_drain_bytes` 预算的 service、不完成 cycle、不计吞吐窗口；full cycle 穷尽排空 inbox、过 remark 终止门禁并推进 cycle epoch。两者都先交出尚未发布的 return staging、再关闭 owner 真实的 source-slab cache（关闭顺带以 memory-pressure 原因冲刷该 owner 的 processor 账本，因此同一次 drain 不会重复冲刷同一账本、也不会把空 flush 计入统计）、排空 owner inbox、推进 queue-page grace epoch（否则空载 extent 永远停在 `GracePending`，decommit 无法发生）、取出 owner-local edge delta，再把本 cycle 相对上一次基线真实完成的 card 工作计入滑动窗口（emergency 越过吞吐预算，普通 cycle 把超出部分转为 mark debt；工作量取自累计计数器的差值，因此不会随累计量持续增长而误判）。随后对所有空载 extent 重跑 allocator/scanner/forwarder lease、live/queued slot 与在途 return 四条门禁，pause footprint 直接取候选自身撤销的 committed 字节与 descriptor 数，未过门禁的 extent 保持 committed 并计入 blocked，绝不会“看起来空闲”就撤销物理页；通过门禁的 extent 同步让名下空载 descriptor 离开 committed 口径，因此物理页与账本总是同一步回落。
 
-cycle 在 remark 通过后推进 barrier epoch，并立刻把新 epoch 发布的 card batch 排空、取走随之产生的 edge delta，随后才要求五个 credit 来源收敛：收敛时 credit epoch 与 barrier epoch 同步前进，未收敛时只表示本轮 cycle 未完成（不是错误，分配照常成功），credit epoch 保持落后并在下一个完成的 cycle 单调追平。完成的 cycle 记录真实 live record 字节作为下一次增长预算的输入；`OutOfMemory` 写入 rt0 的 fatal 报告并让本次分配失败。stack arena 与 raw plane 共用同一个 provider，因此软上限口径直接取 provider 的 committed 总量，不再另加 stack committed（否则会把同一物理页计入两次）。
+cycle 在 remark 通过后推进 barrier epoch，并立刻把新 epoch 发布的 card batch 排空、取走随之产生的 edge delta，随后才要求九个 credit 来源收敛：收敛时 credit epoch 与 barrier epoch 同步前进，未收敛时只表示本轮 cycle 未完成（不是错误，分配照常成功），credit epoch 保持落后并在下一个完成的 cycle 单调追平。完成的 cycle 记录真实 live record 字节作为下一次增长预算的输入；`OutOfMemory` 写入 rt0 的 fatal 报告并让本次分配失败。stack arena 与 raw plane 共用同一个 provider，因此软上限口径直接取 provider 的 committed 总量，不再另加 stack committed（否则会把同一物理页计入两次）。
 
 GC worker 使用 `gc_cpu_fraction` 的滑动 cost window：有 runnable 压力时，超出窗口的普通 mark/evacuation work转为 debt 和后续 assist；idle processor 可以消费尚未使用的额度。emergency drain 可以暂时越过吞吐预算来恢复内存安全，但不能跳过 generation、lease、root、card batch 或 queue grace 校验。窗口预算、assist quantum 与 remark budget 之间必须满足 `window × fraction / 100 ≥ assist_quantum` 且 `assist_threshold ≥ assist_quantum`，否则 profile 自相矛盾，verifier 在镜像写出前拒绝。
 
@@ -841,9 +858,9 @@ owner 身份、slab 描述符、dense size class、消息字段、grace 步骤�
 12. 完成 per-owner root slice、credit termination、MosaicBaseline/MosaicConcurrent stop 边界和 security profile。
 13. 最后加入 typed combining，用于 GlobalRange 和 topology 冷路径，不回流到 allocation/return/GC mark 热路径。
 
-第 1--4 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；ResourceCell 的 class 阶梯、64-byte header、lease/close 状态机与统一 release 入口同样进入 `RuntimeRawContractV1`（schema 2），覆盖 exactly-once cleanup、generation 匹配与 queue grace。第 5 步由 PlatformRange/Extent/Ledger 契约段与 extent 阶梯兑现，第 6 步由 `GcPacingRuntimeContract` 与 `PacingPlane` 兑现（见[GC 元数据](gc-metadata.md#gc-pacing--relocation-pause-budget)）。Gugu runtime 侧的等价实现随 rt0 与协程控制块的落地复用同一 schema（见[运行时](../spec/runtime.md#rt0-and-startup)与[调度器](scheduler.md)）。第 7 步起仍按本顺序推进，其中第 8 步的 `MarkMailbox`/`MarkTicket` 消费接入同一 credit 平面。
+第 1--4 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；ResourceCell 的 class 阶梯、64-byte header、lease/close 状态机与统一 release 入口同样进入 `RuntimeRawContractV1`（schema 2），覆盖 exactly-once cleanup、generation 匹配与 queue grace。第 5 步由 PlatformRange/Extent/Ledger 契约段与 extent 阶梯兑现，第 6 步由 `GcPacingRuntimeContract` 与 `PacingPlane` 兑现（见[GC 元数据](gc-metadata.md#gc-pacing--relocation-pause-budget)）。Gugu runtime 侧的等价实现随 rt0 与协程控制块的落地复用同一 schema（见[运行时](../spec/runtime.md#rt0-and-startup)与[调度器](scheduler.md)）。第 7 步的 `MarkMailbox`/`MarkTicket` 消费、root snapshot 与终止检测已按同一 credit 平面落地：`MarkRuntimeContract` 固定 mailbox/credit 目录、七项收敛条件与来源绑定，`MarkPlane` 是确定性对偶，`world/mark_impl.rs` 把 root snapshot、跨 owner ticket 与 mark pass 接到真实 arena，mark 未收敛时 `remark` 只发布 continuation。
 
-compiler 侧同一对象还固定 `GcPacingRuntimeContract`：`mosaic-default` profile 的 16 个参数（`min_growth_budget`、`assist_threshold`、`assist_quantum`、`mark_cost_per_byte`、`gc_cpu_fraction`、`gc_cpu_window_cost`、`remark_cost_budget`、`evacuation_pause_bytes`、`evacuation_pause_roots`、`evacuation_pause_fields`、`pressure_enter_ratio`、`pressure_clear_ratio`、`pressure_poll_bytes`、`owner_drain_items`、`owner_drain_bytes`、`owner_drain_interval_bytes`）、三个 pressure 状态名、三个必须各自 drain 的账本分类（与 `LedgerSchemaV1` 的 committed 分区独立计数器同源）、四种 assist 结局、两种 remark 结局、两种 evacuation 结局及五个 credit 来源目录。verifier 拒绝参数漂移、违反 `0 < clear < enter < 100`、非 block 整数倍或小于 extent 阶梯顶层的 evacuation payload 上界、窗口预算容不下一次 assist quantum、drain 节奏参数为零、`owner_drain_bytes` 小于一个 return node、drain 分类与账本不一致，以及任何未随 `profile_revision` 变化的参数改动；`GcPacingDemand`（分配站点、屏障站点、assist slow edge、受管类型数）进入契约指纹与 action key。
+compiler 侧同一对象还固定 `GcPacingRuntimeContract`：`mosaic-default` profile 的 16 个参数（`min_growth_budget`、`assist_threshold`、`assist_quantum`、`mark_cost_per_byte`、`gc_cpu_fraction`、`gc_cpu_window_cost`、`remark_cost_budget`、`evacuation_pause_bytes`、`evacuation_pause_roots`、`evacuation_pause_fields`、`pressure_enter_ratio`、`pressure_clear_ratio`、`pressure_poll_bytes`、`owner_drain_items`、`owner_drain_bytes`、`owner_drain_interval_bytes`）、三个 pressure 状态名、三个必须各自 drain 的账本分类（与 `LedgerSchemaV1` 的 committed 分区独立计数器同源）、四种 assist 结局、两种 remark 结局、两种 evacuation 结局及九个 credit 来源目录。verifier 拒绝参数漂移、违反 `0 < clear < enter < 100`、非 block 整数倍或小于 extent 阶梯顶层的 evacuation payload 上界、窗口预算容不下一次 assist quantum、drain 节奏参数为零、`owner_drain_bytes` 小于一个 return node、drain 分类与账本不一致，以及任何未随 `profile_revision` 变化的参数改动；`GcPacingDemand`（分配站点、屏障站点、assist slow edge、受管类型数）进入契约指纹与 action key。同一对象还固定 `MarkRuntimeContract`（mark schema 1，profile `mosaic-mark` revision 1）：每 owner 单 consumer mailbox、`owner(8) | counter(24)` 的 credit id、六个 cycle 状态、三个 credit 转移、六类 root snapshot 参与者、七项收敛条件与「条件 → credit 来源」绑定，以及 `MarkMailboxHead`/`MarkCreditHead`/`MarkTerminationRecord` 三条 record 布局；`MarkTicket` 的 14 个字段只允许稳定 arena descriptor、对象偏移、source block、cycle/topology epoch、credit 与 bytes，任何 managed 地址都会被 verifier 拒绝。`MarkDemand` 完全由 `GcMetadataDemand`、`BarrierDemand` 与 `LocalHeapDemand` 推导，不新增 LIR 遍历。
 每个步骤完成后都要同步对应的 spec/internals 条款；实现、规范和测试必须同时改变，不能只引入一个“以后再接”的空接口。
 
 ## snmalloc 对照与明确取舍

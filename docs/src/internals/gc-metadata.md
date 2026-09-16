@@ -640,8 +640,8 @@ arena 2 MiB / block 32 KiB / line 128 byte，与 slab/extent 参数同源。
 `boot_verify` 均按规范运行；REPEAT_FIELD/ARENA_SLOTS 与 `String`/COW/`ResourceCell`
 资源字段的扩展在 `placement` 与 `LocalHeap` 接入后补齐，不改变上述定位规则。
 
-同一对象中的 `GcPacingRuntimeContract`（pacing schema 2）把
-`GcPacingProfile` 的 16 个参数固定为唯一 `mosaic-default` revision 2：
+同一对象中的 `GcPacingRuntimeContract`（pacing schema 3）把
+`GcPacingProfile` 的 16 个参数固定为唯一 `mosaic-default` revision 3：
 `min_growth_budget`、`assist_threshold`、`assist_quantum`、`mark_cost_per_byte`、
 `gc_cpu_fraction`、`gc_cpu_window_cost`、`remark_cost_budget`、
 `evacuation_pause_bytes`、`evacuation_pause_roots`、`evacuation_pause_fields`、
@@ -651,8 +651,9 @@ arena 2 MiB / block 32 KiB / line 128 byte，与 slab/extent 参数同源。
 （`steady`/`drain`/`emergency`）、三个必须各自完成 owner drain 的账本分类
 （`owner-cache-bytes`/`pending-return-bytes`/`reclaimable-bytes`，与
 `LedgerSchemaV1` 的 committed 分区独立计数器逐项同源）、四种 assist 结局、
-两种 remark 结局、两种 evacuation 结局与五个 credit 来源
-（`barrier-buffer`/`card-mark-batch`/`edge-delta`/`pending-return`/`producer-staging`）。
+两种 remark 结局、两种 evacuation 结局与九个 credit 来源
+（`barrier-buffer`/`card-mark-batch`/`edge-delta`/`pending-return`/`producer-staging`
+加上 mark 阶段接入的 `mark-credit`/`mark-mailbox`/`mark-worklist`/`forwarding-work`）。
 verifier 拒绝参数漂移、`0 < clear < enter < 100` 之外的 hysteresis、非 block 整数倍的
 evacuation payload 上界、小于 extent 阶梯顶层的 evacuation payload 上界、装不下一次
 assist quantum 的窗口预算、四个 drain 节奏参数的零值、小于一个 return node 的
@@ -672,6 +673,31 @@ dump 输出 `pacing`/`pacing-budget`/`pacing-cpu`/`pacing-remark`/`pacing-evacua
 `pacing-remark-outcomes`/`pacing-evacuation-outcomes`/`pacing-credit-sources`/
 `pacing-demand`/`pacing-fingerprint`，冷/热编译逐字节一致。
 
+`MarkRuntimeContract`（mark schema 1，profile `mosaic-mark` revision 1，域 `gugu-mark-runtime-v1`）
+把 mark 阶段的执行门禁固定成带版本对象：每 owner 单 consumer 的 `MarkMailbox`、`owner(8) |
+counter(24)` 的 credit id、六个 cycle 状态（`idle`/`snapshot`/`marking`/`converging`/`remark`/
+`complete`）、三个 credit 转移（`acquire`/`consume`/`return`）、六类 root snapshot 参与者
+（`producer-stop-epoch`/`remote-consumer`/`root-slice`/`region-registry`/`handle-access-guard`/
+`local-worklist`）、七项收敛条件（`local-worklist`/`published-batch`/`mailbox`/`barrier-buffer`/
+`producer-epoch`/`forwarding-work`/`pending-credit`）以及「条件 → credit 来源」绑定。verifier
+要求条件来源的并集恰好覆盖九个 credit 来源（既不遗漏也不重复绑定）、`mailbox_consumers == 1`、
+`owner_bits + counter_bits == 32`、credit 池为正，并逐字段校验 `MarkMailboxHead`（64 字节 /
+align 64）、`MarkCreditHead`（64 / 64）与 `MarkTerminationRecord`（72 / 8）三条 record 布局与
+`std/runtime/mark.gg` 的 Gugu 布局一致。`MarkTicket` 的 14 个字段只含稳定 arena descriptor、
+对象偏移、source block、cycle/topology epoch、credit 与 bytes，任何 managed 地址都会被
+`verify_family` 拒绝。credit 池上界取「常驻 message node 容量 + 根槽数」：在飞的 ticket 占一个
+non-moving node，根 seed 不占 node 但每个根槽每 cycle 至多一次，因此池耗尽就是契约违约。
+
+`ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `mark-contract-fingerprint`、`mark-runtime`、
+`mark-cycle-states`、`mark-conditions`、`mark-snapshot-participants`、`mark-credit-pool`、
+`mark-mailbox-consumers`、`mark-ticket-fields`、`mark-records` 与 `mark-demand`，dump 输出
+`mark`/`mark-cycle-states`/`mark-conditions`/`mark-condition-sources`/`mark-credit-sources`/
+`mark-credit-transitions`/`mark-snapshot-participants`/`mark-mailbox`/`mark-record`/`mark-field`/
+`mark-ticket-fields`/`mark-demand`/`mark-fingerprint`。`mark_demand` 完全由 `GcMetadataDemand`
+的 `root_range_count`、`BarrierDemand` 的 `card_mark_sites`/`edge_summary_sites` 与
+`LocalHeapDemand` 的 `shared_sites` 推导，不新增 LIR 遍历，跨段相等性由 `RuntimeRawContractV1`
+的 verifier 强制。
+
 `runtime/pacing.rs` 的 `PacingPlane` 是契约的运行时对偶：`growth_budget` 取
 `max(min_growth_budget, last_live × target / 100)`，`allocation_debt`、`mark_debt` 与
 `pressure_debt` 按[内存所有权与消息通道](memory-messaging.md#allocation-debt-pressure-backpressure)
@@ -686,9 +712,11 @@ bytes/root/field 三项任一超出即整 block `defer`。pressure episode 由�
 `drain`，降到 clear 水位且三类分类都被一次真实 owner drain 覆盖后才结束，一个 episode
 至多授权一次 forced full cycle，用尽 drain 与 forced cycle 仍无 headroom 才进入
 `OutOfMemory`；committed 快照按 `pressure_poll_bytes` 间隔刷新，有界 drain 按
-`owner_drain_interval_bytes` 节奏推进。credit 账本用真实结构观测五个来源并要求全部归零
+`owner_drain_interval_bytes` 节奏推进。credit 账本用真实结构观测九个来源并要求全部归零
 才能推进 credit epoch，credit epoch 只单调前进：未收敛的 cycle 不推进它，下个完成的
-cycle 会追平 barrier epoch。
+cycle 会追平 barrier epoch。mark 阶段的四个来源（`mark-credit`/`mark-mailbox`/
+`mark-worklist`/`forwarding-work`）由 `MarkPlane` 与 owner worklist 直接观测，并同样进入
+`credit_snapshot`，因此 per-cycle cost 窗口包含整堆标记工作量。
 
 `world/pacing_impl.rs` 把这些决定接到真实路径：分配成功后累加 allocation debt；分配上的
 唯一慢路径 `pacing_slow_edge(owner, bytes)` 由 `PacingPlane::slow_edge_due` 把关（assist 阈值、
