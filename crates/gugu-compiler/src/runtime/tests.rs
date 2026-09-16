@@ -1648,9 +1648,9 @@ mod gc_metadata_tests {
     };
     use super::super::gc_metadata_schema::{
         GcArenaLayoutV1, GcMetadataDemand, GcMetadataWorldV1, GcRootKindV1, GcRootLocationV1,
-        GcRootRangeV1, GcTypeEntryV1, TraceOp, ValueOp, boot_verify,
+        GcRootRangeV1, GcTypeEntryV1, TraceKind, TraceOp, ValueOp, boot_verify, encode_uleb,
     };
-    use super::super::gc_metadata_section::{encode_sections, verify_sections};
+    use super::super::gc_metadata_section::{decode_sections, encode_sections, verify_sections};
     use super::super::model::{RawModelError, RuntimeRawContractV1};
     use super::super::pacing_schema::GcPacingDemand;
     use super::super::platform::PlatformProfile;
@@ -1661,9 +1661,10 @@ mod gc_metadata_tests {
     use super::{RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, Rt0Demand};
     use crate::TargetName;
 
+    /// 最小自洽 world：一个无指针的 8 字节类型，trace 为 `None` 表示。
     fn minimal_world() -> GcMetadataWorldV1 {
-        let trace_program = vec![TraceOp::End as u8];
-        let value_program = vec![ValueOp::End as u8];
+        let trace_program = vec![TraceKind::None as u8];
+        let value_program = Vec::new();
         GcMetadataWorldV1 {
             types: vec![GcTypeEntryV1 {
                 type_key: [1_u8; 32],
@@ -1704,63 +1705,255 @@ mod gc_metadata_tests {
         boot_verify(&world).expect("最小 world 必须自洽");
     }
 
-    #[test]
-    fn gc_program_entries_preserve_trace_and_value_actions() {
-        let mut world = minimal_world();
-        world.trace_program = vec![
-            TraceOp::Direct as u8,
-            0,
-            1,
-            TraceOp::End as u8,
-            TraceOp::Interior as u8,
-            1,
-            1,
-            TraceOp::End as u8,
-        ];
-        world.value_program = vec![
-            ValueOp::CowPublish as u8,
-            0,
-            ValueOp::End as u8,
-            ValueOp::AcquireResource as u8,
-            0,
-            ValueOp::ReleaseResource as u8,
-            0,
-            ValueOp::End as u8,
-        ];
-        world.types[0].flags = 0b101;
-        world.types[0].trace_len = 4;
-        world.types[0].value_len = 3;
-        let mut second = world.types[0].clone();
-        second.type_key = [2_u8; 32];
-        second.name = "resource".to_owned();
-        second.flags = 0b1_1110;
-        second.trace_offset = 4;
-        second.trace_len = 4;
-        second.value_offset = 3;
-        second.value_len = 5;
-        world.types.push(second);
-        let (type_section, metadata_section) =
-            encode_sections(&world).expect("真实 program 可编码");
-        verify_sections(&type_section, &metadata_section).expect("真实 program section 自洽");
-        assert_eq!(&type_section[..8], b"GUGUTY01");
-        assert_eq!(&metadata_section[..8], b"GUGUMT01");
+    /// 构造 Program 表示：`kind, u32 program_len, program`。
+    fn program_descriptor(program: &[u8]) -> Vec<u8> {
+        let mut out = vec![TraceKind::Program as u8];
+        out.extend_from_slice(&(program.len() as u32).to_le_bytes());
+        out.extend_from_slice(program);
+        out
+    }
+
+    /// 构造 Bitmap 表示：`kind, reserved[3], word_count u32, direct, interior, padding`。
+    fn bitmap_descriptor(word_count: u32, direct: &[u32], interior: &[u32]) -> Vec<u8> {
+        let bytes = usize::try_from(word_count.div_ceil(8)).expect("bitmap 字节数");
+        let body = 8 + bytes * 2;
+        let mut out = vec![0u8; body.next_multiple_of(4)];
+        out[0] = TraceKind::Bitmap as u8;
+        out[4..8].copy_from_slice(&word_count.to_le_bytes());
+        for word in direct {
+            out[8 + (word / 8) as usize] |= 1 << (word % 8);
+        }
+        for word in interior {
+            out[8 + bytes + (word / 8) as usize] |= 1 << (word % 8);
+        }
+        out
+    }
+
+    /// 构造一条只有 copy-field 动作的 value program。
+    fn copy_field_program(offset: u64, type_index: u64) -> Vec<u8> {
+        let mut out = vec![ValueOp::CopyField as u8];
+        encode_uleb(&mut out, offset);
+        encode_uleb(&mut out, type_index);
+        out.push(ValueOp::End as u8);
+        out
     }
 
     #[test]
-    fn boot_verify_rejects_missing_trace_end() {
+    fn gc_program_entries_preserve_trace_and_value_actions() {
         let mut world = minimal_world();
-        world.trace_program.pop();
-        world.trace_program.push(TraceOp::Direct as u8);
+        // 类型 0：Program 表示，含一个 DIRECT 扫描位。
+        let program = vec![TraceOp::Direct as u8, 0, 1, TraceOp::End as u8];
+        let descriptor = program_descriptor(&program);
+        world.trace_program = descriptor.clone();
+        world.value_program = copy_field_program(0, 0);
+        world.types[0].flags = 0b101;
+        world.types[0].trace_len = descriptor.len() as u32;
+        world.types[0].value_len = 4;
+        // 类型 1：Bitmap 表示，直接位 0、interior 位 1，value 覆盖正向与逆向两类动作。
+        let mut second = world.types[0].clone();
+        second.type_key = [2_u8; 32];
+        second.name = "holder".to_owned();
+        second.layout = Some((16, 8));
+        second.flags = 0b1_1111;
+        let bitmap = bitmap_descriptor(2, &[0], &[1]);
+        second.trace_offset = world.types[0].trace_len;
+        second.trace_len = bitmap.len() as u32;
+        world.trace_program.extend_from_slice(&bitmap);
+        let value = vec![
+            ValueOp::CopyField as u8,
+            0,
+            0,
+            ValueOp::DropField as u8,
+            0,
+            0,
+            ValueOp::End as u8,
+        ];
+        second.value_offset = world.value_program.len() as u32;
+        second.value_len = value.len() as u32;
+        world.value_program.extend_from_slice(&value);
+        world.types.push(second);
+        let (type_section, metadata_section) =
+            encode_sections(&world).expect("真实 descriptor 可编码");
+        verify_sections(&type_section, &metadata_section).expect("真实 descriptor section 自洽");
+        assert_eq!(&type_section[..8], b"GUGUTY01");
+        assert_eq!(&metadata_section[..8], b"GUGUMT01");
+        let decoded = decode_sections(&type_section, &metadata_section).expect("section 可解码");
+        assert_eq!(decoded.types().len(), 2);
+        assert_eq!(decoded.types()[1].trace, bitmap);
+        assert_eq!(decoded.types()[1].size, 16);
+    }
+
+    #[test]
+    fn boot_verify_rejects_truncated_trace_program() {
+        let mut world = minimal_world();
+        // Program 声明 1 字节 program，但不含 END。
+        world.trace_program = program_descriptor(&[TraceOp::Direct as u8]);
+        world.types[0].trace_len = world.trace_program.len() as u32;
         assert!(boot_verify(&world).is_err(), "缺 trace END 必须拒绝");
     }
 
     #[test]
-    fn boot_verify_rejects_missing_value_end() {
+    fn boot_verify_rejects_truncated_value_program() {
         let mut world = minimal_world();
-        world.value_program.pop();
-        world.value_program.push(ValueOp::End as u8);
-        world.value_program.push(ValueOp::Aggregate as u8);
+        world.value_program = vec![ValueOp::CopyField as u8, 0, 0];
+        world.types[0].flags = 0b100;
+        world.types[0].value_len = 3;
         assert!(boot_verify(&world).is_err(), "缺 value END 必须拒绝");
+    }
+
+    #[test]
+    fn trace_bitmap_rejects_overlapping_kinds() {
+        let mut world = minimal_world();
+        let bitmap = bitmap_descriptor(8, &[0], &[0]);
+        world.trace_program = bitmap.clone();
+        world.types[0].layout = Some((64, 8));
+        world.types[0].flags = 0b11;
+        world.types[0].trace_len = bitmap.len() as u32;
+        assert!(boot_verify(&world).is_err(), "同一 word 不得同时是两种指针");
+    }
+
+    #[test]
+    fn trace_bitmap_rejects_non_zero_padding() {
+        let mut world = minimal_world();
+        let mut bitmap = bitmap_descriptor(8, &[0], &[1]);
+        let last = bitmap.len() - 1;
+        bitmap[last] = 1;
+        world.trace_program = bitmap.clone();
+        world.types[0].layout = Some((64, 8));
+        world.types[0].flags = 0b11;
+        world.types[0].trace_len = bitmap.len() as u32;
+        assert!(boot_verify(&world).is_err(), "bitmap padding 必须为零");
+    }
+
+    #[test]
+    fn trace_bitmap_rejects_tail_bits() {
+        let mut world = minimal_world();
+        let bitmap = bitmap_descriptor(3, &[3], &[]);
+        world.trace_program = bitmap.clone();
+        world.types[0].layout = Some((24, 8));
+        world.types[0].flags = 0b1;
+        world.types[0].trace_len = bitmap.len() as u32;
+        assert!(boot_verify(&world).is_err(), "尾部无效 bit 必须为零");
+    }
+
+    #[test]
+    fn trace_bitmap_word_count_must_match_layout() {
+        let mut world = minimal_world();
+        let bitmap = bitmap_descriptor(4, &[0], &[]);
+        world.trace_program = bitmap.clone();
+        world.types[0].layout = Some((64, 8));
+        world.types[0].flags = 0b1;
+        world.types[0].trace_len = bitmap.len() as u32;
+        assert!(
+            boot_verify(&world).is_err(),
+            "bitmap word 数必须等于 payload word 数"
+        );
+    }
+
+    #[test]
+    fn type_flags_must_match_trace_descriptor() {
+        let mut world = minimal_world();
+        let program = vec![TraceOp::Interior as u8, 0, 1, TraceOp::End as u8];
+        world.trace_program = program_descriptor(&program);
+        world.types[0].flags = 0;
+        world.types[0].trace_len = world.trace_program.len() as u32;
+        assert!(
+            boot_verify(&world).is_err(),
+            "interior flag 必须与 descriptor 一致"
+        );
+        world.types[0].flags = 0b10;
+        boot_verify(&world).expect("flag 与 descriptor 一致时必须通过");
+    }
+
+    #[test]
+    fn value_wrapper_body_must_be_class_homogeneous() {
+        let mut world = minimal_world();
+        // RepeatValue body 同时包含 COPY_FIELD 与 DROP_FIELD。
+        let mut program = vec![ValueOp::RepeatValue as u8, 0, 1, 0];
+        let body = [
+            ValueOp::CopyField as u8,
+            0,
+            0,
+            ValueOp::DropField as u8,
+            0,
+            0,
+            ValueOp::End as u8,
+        ];
+        program.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        program.extend_from_slice(&body);
+        program.push(ValueOp::End as u8);
+        world.value_program = program.clone();
+        world.types[0].flags = 0b100;
+        world.types[0].value_len = program.len() as u32;
+        assert!(
+            boot_verify(&world).is_err(),
+            "wrapper body 不得混用两类动作"
+        );
+    }
+
+    #[test]
+    fn value_operand_type_index_is_range_checked() {
+        let mut world = minimal_world();
+        let program = copy_field_program(0, 7);
+        world.value_program = program.clone();
+        world.types[0].flags = 0b100;
+        world.types[0].value_len = program.len() as u32;
+        assert!(boot_verify(&world).is_err(), "越界的类型索引必须拒绝");
+    }
+
+    #[test]
+    fn trace_switch_cases_require_increasing_tags() {
+        let mut world = minimal_world();
+        let mut program = vec![TraceOp::Switch as u8, 0, 1, 2];
+        for tag in [2u64, 1] {
+            program.extend_from_slice(&tag.to_le_bytes());
+            program.extend_from_slice(&1u32.to_le_bytes());
+            program.push(TraceOp::End as u8);
+        }
+        program.extend_from_slice(&1u32.to_le_bytes());
+        program.push(TraceOp::End as u8);
+        world.trace_program = program_descriptor(&program);
+        world.types[0].flags = 0;
+        world.types[0].trace_len = world.trace_program.len() as u32;
+        assert!(boot_verify(&world).is_err(), "case tag 必须严格递增");
+    }
+
+    #[test]
+    fn trace_repeat_field_and_arena_slots_are_parsed() {
+        let mut world = minimal_world();
+        let mut program = vec![TraceOp::RepeatField as u8, 0, 8, 4, 1];
+        program.extend_from_slice(&1u32.to_le_bytes());
+        program.push(TraceOp::End as u8);
+        program.push(TraceOp::ArenaSlots as u8);
+        program.push(TraceOp::End as u8);
+        world.trace_program = program_descriptor(&program);
+        world.types[0].flags = 0;
+        world.types[0].trace_len = world.trace_program.len() as u32;
+        boot_verify(&world).expect("REPEAT_FIELD 与 ARENA_SLOTS 必须可解析");
+    }
+
+    #[test]
+    fn decoded_metadata_is_checked_against_demand() {
+        let world = minimal_world();
+        let (type_section, metadata_section) = encode_sections(&world).expect("section 编码");
+        let mut demand = GcMetadataDemand::empty();
+        demand.type_count = 3;
+        demand.trace_program_bytes = 1;
+        let contract = GcMetadataRuntimeContract::build(demand).expect("契约可构建");
+        assert!(
+            contract
+                .with_sections(type_section, metadata_section)
+                .is_err(),
+            "解码后的类型数与 demand 不一致必须拒绝"
+        );
+    }
+
+    #[test]
+    fn type_section_version_drift_is_rejected() {
+        let world = minimal_world();
+        let (mut type_section, metadata_section) = encode_sections(&world).expect("section 编码");
+        type_section[8..10].copy_from_slice(&1u16.to_le_bytes());
+        assert!(verify_sections(&type_section, &metadata_section).is_err());
     }
 
     #[test]

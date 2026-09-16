@@ -12,9 +12,11 @@ use super::gc_metadata_schema::GcMetadataDemand;
 use super::model::RawModelError;
 
 /// GC metadata 契约段 schema 版本。
-pub(crate) const GC_METADATA_SCHEMA: u32 = 1;
-/// GC metadata section 主版本。
+pub(crate) const GC_METADATA_SCHEMA: u32 = 2;
+/// GC metadata section 主版本（root/vtable/source 段，未随 trace 编码变化）。
 pub(crate) const GC_METADATA_SECTION_VERSION: u16 = 1;
+/// type section 主版本；schema 2 起 trace descriptor 带 kind 字节、value program 带两阶段动作。
+pub(crate) const GC_METADATA_TYPE_SECTION_VERSION: u16 = 2;
 /// GC metadata section 魔数。
 pub(crate) const GC_METADATA_MAGIC: &[u8; 8] = b"GUGUGC01";
 
@@ -39,24 +41,34 @@ pub(crate) const GC_TYPE_FLAG_NAMES: [&str; 8] = [
     "pin-sensitive",
 ];
 
+/// trace descriptor 表示名称（顺序即判别值）。
+pub(crate) const TRACE_KIND_NAMES: [&str; 3] = [
+    "none",    // 0
+    "bitmap",  // 1
+    "program", // 2
+];
+
 /// Trace program op 名称（顺序即数值）。
-pub(crate) const TRACE_OP_NAMES: [&str; 5] = [
-    "end",      // 0x00
-    "direct",   // 0x01
-    "interior", // 0x02
-    "repeat",   // 0x03
-    "switch",   // 0x04
+pub(crate) const TRACE_OP_NAMES: [&str; 7] = [
+    "end",          // 0x00
+    "direct",       // 0x01
+    "interior",     // 0x02
+    "repeat",       // 0x03
+    "repeat-field", // 0x04
+    "switch",       // 0x05
+    "arena-slots",  // 0x06
 ];
 
 /// Value program op 名称（按 ABI 操作码顺序登记）。
-pub(crate) const VALUE_OP_NAMES: [&str; 7] = [
+pub(crate) const VALUE_OP_NAMES: [&str; 8] = [
     "end",              // 0x00
-    "aggregate",        // 0x10
-    "repeat-value",     // 0x11
-    "switch-value",     // 0x12
-    "cow-publish",      // 0x13
-    "acquire-resource", // 0x14
-    "release-resource", // 0x15
+    "copy-field",       // 0x10
+    "drop-field",       // 0x11
+    "publish-field",    // 0x12
+    "acquire-resource", // 0x13
+    "release-resource", // 0x14
+    "repeat-value",     // 0x15
+    "switch-value",     // 0x16
 ];
 
 /// 已验证的 GC metadata runtime 契约。
@@ -64,11 +76,16 @@ pub(crate) const VALUE_OP_NAMES: [&str; 7] = [
 #[serde(rename_all = "kebab-case")]
 pub struct GcMetadataRuntimeContract {
     pub schema: u32,
+    /// metadata section 主版本。
     pub section_version: u16,
+    /// type section 主版本。
+    pub type_section_version: u16,
     pub magic: String,
     pub arena_bytes: u64,
     pub block_bytes: u32,
     pub line_bytes: u32,
+    /// trace descriptor 表示名称目录。
+    pub trace_kind_names: Vec<String>,
     pub type_flag_names: Vec<String>,
     pub trace_op_names: Vec<String>,
     pub value_op_names: Vec<String>,
@@ -93,12 +110,17 @@ impl GcMetadataRuntimeContract {
         let mut contract = Self {
             schema: GC_METADATA_SCHEMA,
             section_version: GC_METADATA_SECTION_VERSION,
+            type_section_version: GC_METADATA_TYPE_SECTION_VERSION,
             magic: std::str::from_utf8(GC_METADATA_MAGIC)
                 .expect("GC metadata magic 是合法 UTF-8")
                 .to_owned(),
             arena_bytes: GC_ARENA_BYTES,
             block_bytes: GC_BLOCK_BYTES,
             line_bytes: GC_LINE_BYTES,
+            trace_kind_names: TRACE_KIND_NAMES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect(),
             type_flag_names: GC_TYPE_FLAG_NAMES
                 .iter()
                 .map(|name| (*name).to_owned())
@@ -140,6 +162,9 @@ impl GcMetadataRuntimeContract {
         if self.section_version != GC_METADATA_SECTION_VERSION {
             return Err(RawModelError::new("GC metadata section 版本不匹配"));
         }
+        if self.type_section_version != GC_METADATA_TYPE_SECTION_VERSION {
+            return Err(RawModelError::new("GC type section 版本不匹配"));
+        }
         if self.magic.as_bytes() != GC_METADATA_MAGIC {
             return Err(RawModelError::new("GC metadata magic 不匹配"));
         }
@@ -149,11 +174,17 @@ impl GcMetadataRuntimeContract {
         {
             return Err(RawModelError::new("GC arena 布局与契约常量不一致"));
         }
-        if self.type_flag_names.len() != GC_TYPE_FLAG_NAMES.len()
+        if self.trace_kind_names.len() != TRACE_KIND_NAMES.len()
+            || self.type_flag_names.len() != GC_TYPE_FLAG_NAMES.len()
             || self.trace_op_names.len() != TRACE_OP_NAMES.len()
             || self.value_op_names.len() != VALUE_OP_NAMES.len()
         {
             return Err(RawModelError::new("GC metadata 名称表长度与登记不一致"));
+        }
+        for (index, name) in self.trace_kind_names.iter().enumerate() {
+            if name != TRACE_KIND_NAMES[index] {
+                return Err(RawModelError::new("GC trace 表示名称与登记不一致"));
+            }
         }
         for (index, name) in self.type_flag_names.iter().enumerate() {
             if name != GC_TYPE_FLAG_NAMES[index] {
@@ -171,10 +202,11 @@ impl GcMetadataRuntimeContract {
             }
         }
         if !self.type_section.is_empty() || !self.metadata_section.is_empty() {
-            crate::runtime::gc_metadata_section::verify_sections(
+            let decoded = crate::runtime::gc_metadata_section::decode_sections(
                 &self.type_section,
                 &self.metadata_section,
             )?;
+            verify_decoded_metadata(&decoded, &self.demand)?;
             if self.demand.type_section_bytes != 0
                 && self.demand.type_section_bytes as usize != self.type_section.len()
             {
@@ -196,11 +228,16 @@ impl GcMetadataRuntimeContract {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.schema.to_le_bytes());
         bytes.extend_from_slice(&self.section_version.to_le_bytes());
+        bytes.extend_from_slice(&self.type_section_version.to_le_bytes());
         bytes.extend_from_slice(self.magic.as_bytes());
         bytes.push(0);
         bytes.extend_from_slice(&self.arena_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.block_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.line_bytes.to_le_bytes());
+        for name in &self.trace_kind_names {
+            bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+            bytes.extend_from_slice(name.as_bytes());
+        }
         for name in &self.type_flag_names {
             bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
             bytes.extend_from_slice(name.as_bytes());
@@ -234,8 +271,14 @@ impl GcMetadataRuntimeContract {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "gc-metadata schema={} magic={} arena={} block={} line={}",
-            self.schema, self.magic, self.arena_bytes, self.block_bytes, self.line_bytes
+            "gc-metadata schema={} metadata-section={} type-section={} magic={} arena={} block={} line={}",
+            self.schema,
+            self.section_version,
+            self.type_section_version,
+            self.magic,
+            self.arena_bytes,
+            self.block_bytes,
+            self.line_bytes
         );
         let _ = writeln!(
             out,
@@ -248,6 +291,13 @@ impl GcMetadataRuntimeContract {
             self.demand.root_range_count,
             self.demand.source_count,
             self.demand.alloc_site_count
+        );
+        let _ = writeln!(
+            out,
+            "gc-metadata-encoding kinds={} trace_ops={} value_ops={}",
+            self.trace_kind_names.join(","),
+            self.trace_op_names.join(","),
+            self.value_op_names.join(",")
         );
         let _ = writeln!(
             out,
@@ -270,6 +320,46 @@ impl GcMetadataRuntimeContract {
         );
         out
     }
+}
+
+/// 校验解码后的运行时可读类型表与需求视图一致，并保持与编码器相同的布局不变量。
+///
+/// 这是 demand 与真实镜像 metadata 之间的唯一交叉校验：计数相同但布局、flags 或
+/// descriptor 字节漂移时，契约在此失败而不是把漂移带进运行时。
+fn verify_decoded_metadata(
+    decoded: &crate::runtime::gc_metadata_section::GcRuntimeMetadata,
+    demand: &GcMetadataDemand,
+) -> Result<(), RawModelError> {
+    let types = decoded.types();
+    if types.len() != demand.type_count as usize {
+        return Err(RawModelError::new(
+            "GC type section 解码后的类型数与需求不一致",
+        ));
+    }
+    let mut trace_bytes = 0usize;
+    for entry in types {
+        if entry.name.is_empty() {
+            return Err(RawModelError::new("GC type section 缺少类型名"));
+        }
+        if entry.align == 0 || !entry.align.is_power_of_two() || entry.size % entry.align != 0 {
+            return Err(RawModelError::new("GC type section 解码后的布局非法"));
+        }
+        if entry.flags & 0b10_0000 != 0 && entry.size != 0 {
+            return Err(RawModelError::new(
+                "GC type section 的 unsized 类型携带非零 size",
+            ));
+        }
+        if entry.trace.is_empty() {
+            return Err(RawModelError::new("GC type section 缺少 trace descriptor"));
+        }
+        trace_bytes = trace_bytes
+            .checked_add(entry.trace.len())
+            .ok_or_else(|| RawModelError::new("GC trace 字节数溢出"))?;
+    }
+    if trace_bytes != demand.trace_program_bytes as usize {
+        return Err(RawModelError::new("GC trace 字节数与需求不一致"));
+    }
+    Ok(())
 }
 
 fn hex_lower(bytes: [u8; 32]) -> String {

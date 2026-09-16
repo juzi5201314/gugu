@@ -7,9 +7,10 @@
 //! `verify_sections`；编码器与校验器共享同一组记录尺寸常量，任何一侧漂移都会
 //! 在写出镜像前失败。
 
+use super::gc_metadata_contract::GC_METADATA_TYPE_SECTION_VERSION;
 use super::gc_metadata_schema::{
     GcMetadataWorldV1, GcRootKindV1, GcRootLocationV1, GcSourceEntryV1, boot_verify,
-    trace_program_len, value_program_len,
+    trace_descriptor_len, value_program_len,
 };
 use super::model::RawModelError;
 
@@ -81,7 +82,7 @@ fn encode_type_section(world: &GcMetadataWorldV1) -> Result<Vec<u8>, RawModelErr
         .map_err(|_| RawModelError::new("type section 超过宿主地址空间"))?;
     let mut out = vec![0u8; TYPE_HEADER_BYTES];
     out[0..8].copy_from_slice(b"GUGUTY01");
-    out[8..10].copy_from_slice(&1u16.to_le_bytes());
+    out[8..10].copy_from_slice(&GC_METADATA_TYPE_SECTION_VERSION.to_le_bytes());
     out[10] = 8;
     out[11] = 1;
     put_u32(&mut out, 12, world.types.len() as u32)?;
@@ -306,7 +307,8 @@ pub(crate) fn verify_sections(
     if type_section.len() < TYPE_HEADER_BYTES || &type_section[0..8] != b"GUGUTY01" {
         return Err(RawModelError::new("type section header 非法"));
     }
-    if u16::from_le_bytes(type_section[8..10].try_into().expect("type version")) != 1
+    if u16::from_le_bytes(type_section[8..10].try_into().expect("type version"))
+        != GC_METADATA_TYPE_SECTION_VERSION
         || type_section[10] != 8
         || type_section[11] != 1
     {
@@ -415,13 +417,17 @@ pub(crate) fn verify_sections(
         }
         let trace_start = u32::try_from(record_trace_offset)
             .map_err(|_| RawModelError::new("trace record offset 溢出"))?;
-        if trace_program_len(trace_pool, trace_start)? as usize != record_trace_len {
-            return Err(RawModelError::new("type record trace END 不一致"));
+        if trace_descriptor_len(trace_pool, trace_start)? as usize != record_trace_len {
+            return Err(RawModelError::new(
+                "type record trace descriptor 长度不一致",
+            ));
         }
         if record_value_len != 0 {
             let value_start = u32::try_from(record_value_offset)
                 .map_err(|_| RawModelError::new("value record offset 溢出"))?;
-            if value_program_len(value_pool, value_start)? as usize != record_value_len {
+            if value_program_len(value_pool, value_start, type_count as u32)? as usize
+                != record_value_len
+            {
                 return Err(RawModelError::new("type record value END 不一致"));
             }
         }
@@ -594,4 +600,115 @@ fn pad_to(buffer: &mut Vec<u8>, offset: usize) {
     if buffer.len() < offset {
         buffer.resize(offset, 0);
     }
+}
+
+/// 运行时可读的 GC 类型表；只包含收集器消费的布局、flags 与 trace descriptor。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GcRuntimeMetadata {
+    types: Vec<GcRuntimeType>,
+}
+
+/// 单个运行时可读类型；记录顺序就是稠密 `TypeId`，section 不重复保存数字 ID 或稳定键。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GcRuntimeType {
+    /// 诊断用类型名。
+    pub name: String,
+    /// payload 字节数；`0` 表示 ZST。
+    pub size: u64,
+    /// payload 对齐字节数。
+    pub align: u64,
+    /// `GcTypeEntryV1.flags` 的低八位。
+    pub flags: u8,
+    /// 原始 trace descriptor 字节（含 kind 字节与负载）。
+    pub trace: Vec<u8>,
+}
+
+impl GcRuntimeMetadata {
+    /// 返回全部类型，顺序与冻结类型表的稠密 `TypeId` 一致。
+    pub(crate) fn types(&self) -> &[GcRuntimeType] {
+        &self.types
+    }
+}
+
+/// 在结构校验通过后把镜像 section 解码成运行时可读类型表。
+///
+/// 解码器只接受通过 `verify_sections` 的字节：长度、hash 与版本校验都在这里完成，
+/// 因此运行时不需要再持有第二份等价表示。
+pub(crate) fn decode_sections(
+    type_section: &[u8],
+    metadata_section: &[u8],
+) -> Result<GcRuntimeMetadata, RawModelError> {
+    verify_sections(type_section, metadata_section)?;
+    let type_count = usize::try_from(read_u32(type_section, 12)?)
+        .map_err(|_| RawModelError::new("type 数量适配宿主失败"))?;
+    let records_offset = usize::try_from(read_u64(type_section, 24)?)
+        .map_err(|_| RawModelError::new("type records offset 适配宿主失败"))?;
+    let trace_offset = usize::try_from(read_u64(type_section, 32)?)
+        .map_err(|_| RawModelError::new("type trace offset 适配宿主失败"))?;
+    let trace_len = usize::try_from(read_u64(type_section, 40)?)
+        .map_err(|_| RawModelError::new("type trace 长度适配宿主失败"))?;
+    let name_offset = usize::try_from(read_u64(type_section, 64)?)
+        .map_err(|_| RawModelError::new("type name offset 适配宿主失败"))?;
+    let name_len = usize::try_from(read_u64(type_section, 72)?)
+        .map_err(|_| RawModelError::new("type name 长度适配宿主失败"))?;
+    let trace_end = trace_offset
+        .checked_add(trace_len)
+        .ok_or_else(|| RawModelError::new("type trace 范围溢出"))?;
+    let name_end = name_offset
+        .checked_add(name_len)
+        .ok_or_else(|| RawModelError::new("type name 范围溢出"))?;
+    let trace_pool = type_section
+        .get(trace_offset..trace_end)
+        .ok_or_else(|| RawModelError::new("type trace pool 越界"))?;
+    let name_pool = type_section
+        .get(name_offset..name_end)
+        .ok_or_else(|| RawModelError::new("type name pool 越界"))?;
+    let mut types = Vec::with_capacity(type_count);
+    for index in 0..type_count {
+        let start = records_offset
+            .checked_add(
+                index
+                    .checked_mul(TYPE_RECORD_BYTES)
+                    .ok_or_else(|| RawModelError::new("type record 下标溢出"))?,
+            )
+            .ok_or_else(|| RawModelError::new("type record 起点溢出"))?;
+        let record = type_section
+            .get(start..start + TYPE_RECORD_BYTES)
+            .ok_or_else(|| RawModelError::new("type record 越界"))?;
+        let size = u64::from_le_bytes(record[0..8].try_into().expect("type size 宽度"));
+        let align = u32::from_le_bytes(record[8..12].try_into().expect("type align 宽度"));
+        let flags = u32::from_le_bytes(record[12..16].try_into().expect("type flags 宽度"));
+        let name_at = usize::try_from(u32::from_le_bytes(
+            record[16..20].try_into().expect("name offset 宽度"),
+        ))
+        .map_err(|_| RawModelError::new("name offset 适配宿主失败"))?;
+        let name_count = usize::try_from(u32::from_le_bytes(
+            record[20..24].try_into().expect("name len 宽度"),
+        ))
+        .map_err(|_| RawModelError::new("name len 适配宿主失败"))?;
+        let name = name_pool
+            .get(name_at..name_at + name_count)
+            .ok_or_else(|| RawModelError::new("type name record 越界"))?;
+        let trace_at = usize::try_from(u32::from_le_bytes(
+            record[24..28].try_into().expect("trace offset 宽度"),
+        ))
+        .map_err(|_| RawModelError::new("trace offset 适配宿主失败"))?;
+        let trace_count = usize::try_from(u32::from_le_bytes(
+            record[28..32].try_into().expect("trace len 宽度"),
+        ))
+        .map_err(|_| RawModelError::new("trace len 适配宿主失败"))?;
+        let descriptor = trace_pool
+            .get(trace_at..trace_at + trace_count)
+            .ok_or_else(|| RawModelError::new("trace descriptor 越界"))?;
+        types.push(GcRuntimeType {
+            name: std::str::from_utf8(name)
+                .map_err(|_| RawModelError::new("type name 非法 UTF-8"))?
+                .to_owned(),
+            size,
+            align: u64::from(align),
+            flags: u8::try_from(flags).map_err(|_| RawModelError::new("type flags 越界"))?,
+            trace: descriptor.to_vec(),
+        });
+    }
+    Ok(GcRuntimeMetadata { types })
 }

@@ -11,8 +11,8 @@ use crate::frontend::{
 };
 use crate::runtime::gc_metadata_schema::{
     GcAllocSiteV1, GcArenaLayoutV1, GcGlueEntryV1, GcMetadataWorldV1, GcRootKindV1,
-    GcRootLocationV1, GcRootRangeV1, GcSourceEntryV1, GcTypeEntryV1, GcVtableEntryV1, TraceOp,
-    ValueOp, boot_verify, encode_uleb,
+    GcRootLocationV1, GcRootRangeV1, GcSourceEntryV1, GcTypeEntryV1, GcVtableEntryV1,
+    TRACE_BITMAP_MAX_WORDS, TraceKind, TraceOp, ValueOp, boot_verify, encode_uleb,
 };
 
 /// 编译期 GC metadata 两个镜像 section；world 是两段的唯一逻辑来源。
@@ -40,6 +40,7 @@ pub(crate) fn derive(
         .map(|layout| (layout.key, layout.passing.bits()))
         .collect::<BTreeMap<_, _>>();
 
+    let mut encoder = ValueEncoder::new(universe);
     for record in &universe.records {
         let trace_offset = u32::try_from(trace_program.len()).expect("trace program 适配 u32");
         let trace = trace_for(record, universe)?;
@@ -49,10 +50,18 @@ pub(crate) fn derive(
             .get(&record.key)
             .copied()
             .unwrap_or(record.passing);
-        let value_offset = u32::try_from(value_program.len()).expect("value program 适配 u32");
-        let value = value_for(record, passing, universe)?;
-        let value_len = u32::try_from(value.len()).expect("value program 长度适配 u32");
-        value_program.extend_from_slice(&value);
+        let value = encoder.program(record)?;
+        let has_value_actions = passing & PassingClass::COW.bits() != 0
+            || passing & PassingClass::RESOURCE.bits() != 0
+            || value.len() > 1;
+        let (value_offset, value_len) = if has_value_actions {
+            let offset = u32::try_from(value_program.len()).expect("value program 适配 u32");
+            let length = u32::try_from(value.len()).expect("value program 长度适配 u32");
+            value_program.extend_from_slice(&value);
+            (offset, length)
+        } else {
+            (0, 0)
+        };
         let (has_direct, has_interior) = trace_flags(&record.metadata, universe)?;
         let mut flags = 0u8;
         if has_direct {
@@ -61,7 +70,7 @@ pub(crate) fn derive(
         if has_interior {
             flags |= 1 << 1;
         }
-        if value.len() > 1 {
+        if has_value_actions {
             flags |= 1 << 2;
             glue.push(GcGlueEntryV1 {
                 type_key: record.key,
@@ -87,9 +96,9 @@ pub(crate) fn derive(
             children: record.children.clone(),
             flags,
             trace_offset,
-            value_offset: if value.len() > 1 { value_offset } else { 0 },
+            value_offset,
             trace_len,
-            value_len: if value.len() > 1 { value_len } else { 0 },
+            value_len,
         });
     }
 
@@ -137,14 +146,184 @@ pub(crate) fn derive(
     })
 }
 
+/// 生成一个类型的 trace descriptor：kind 字节加表示负载，并在等长时优先 Bitmap。
 fn trace_for(
     record: &crate::frontend::late::universe::TypeRecord,
     universe: &TypeUniverse,
 ) -> Result<Vec<u8>, Diagnostic> {
-    let mut out = Vec::new();
-    emit_trace(&record.metadata, 0, universe, &mut out)?;
-    out.push(TraceOp::End as u8);
-    Ok(out)
+    let program = trace_program_for(&record.metadata, 0, universe)?;
+    let flat = flat_trace(record, universe)?;
+    match flat {
+        FlatTrace::NoPointers => Ok(vec![TraceKind::None as u8]),
+        FlatTrace::Words {
+            word_count,
+            direct,
+            interior,
+        } => {
+            let bitmap = encode_trace_bitmap(word_count, &direct, &interior);
+            let encoded_program = encode_trace_program(&program);
+            // 编码等长时优先 Bitmap，因此这里用 `<=` 而不是 `<`。
+            if bitmap.len() <= encoded_program.len() {
+                Ok(bitmap)
+            } else {
+                Ok(encoded_program)
+            }
+        }
+        FlatTrace::NotFlat => Ok(encode_trace_program(&program)),
+    }
+}
+
+/// 扁平 word 位图可行性；`NoPointers` 表示类型没有 tracked managed pointer。
+enum FlatTrace {
+    NoPointers,
+    NotFlat,
+    Words {
+        word_count: u32,
+        /// 直接指针所在的 payload word 下标。
+        direct: Vec<u32>,
+        /// interior 指针所在的 payload word 下标。
+        interior: Vec<u32>,
+    },
+}
+
+/// 尝试把类型的 trace 压成扁平 word 位图；带判别值、动态长度或超过 256 word 时返回 `NotFlat`。
+fn flat_trace(
+    record: &crate::frontend::late::universe::TypeRecord,
+    universe: &TypeUniverse,
+) -> Result<FlatTrace, Diagnostic> {
+    let Some((size, _)) = record.layout else {
+        return Ok(FlatTrace::NotFlat);
+    };
+    let word_count = size.div_ceil(8);
+    if word_count == 0 || word_count > u64::from(TRACE_BITMAP_MAX_WORDS) {
+        return Ok(FlatTrace::NotFlat);
+    }
+    let mut words = FlatWords {
+        word_count: u32::try_from(word_count).expect("bitmap word 数适配 u32"),
+        direct: Vec::new(),
+        interior: Vec::new(),
+    };
+    if !collect_flat_words(&record.metadata, 0, universe, &mut words)? {
+        return Ok(FlatTrace::NotFlat);
+    }
+    if words.direct.is_empty() && words.interior.is_empty() {
+        return Ok(FlatTrace::NoPointers);
+    }
+    Ok(FlatTrace::Words {
+        word_count: words.word_count,
+        direct: words.direct,
+        interior: words.interior,
+    })
+}
+
+struct FlatWords {
+    word_count: u32,
+    direct: Vec<u32>,
+    interior: Vec<u32>,
+}
+
+impl FlatWords {
+    fn push(&mut self, word: u64, interior: bool) -> Result<(), Diagnostic> {
+        let word = u32::try_from(word).map_err(|_| invalid("trace word 下标溢出"))?;
+        if word >= self.word_count {
+            return Err(invalid("trace word 下标超出 payload"));
+        }
+        let target = if interior {
+            &mut self.interior
+        } else {
+            &mut self.direct
+        };
+        if !target.contains(&word) {
+            target.push(word);
+        }
+        Ok(())
+    }
+}
+
+/// 收集定长对象的 pointer word；返回 `false` 表示无法扁平表示。
+fn collect_flat_words(
+    shape: &MetadataShape,
+    base: u64,
+    universe: &TypeUniverse,
+    words: &mut FlatWords,
+) -> Result<bool, Diagnostic> {
+    match shape {
+        MetadataShape::None => Ok(true),
+        MetadataShape::Direct(_) => {
+            words.push(base / 8, false)?;
+            Ok(true)
+        }
+        MetadataShape::Interior(_) | MetadataShape::String => {
+            words.push(base / 8, true)?;
+            Ok(true)
+        }
+        MetadataShape::Array { element, count } => {
+            let child = universe.record(element)?;
+            let Some((stride, _)) = child.layout else {
+                return Ok(false);
+            };
+            for index in 0..*count {
+                if !collect_flat_words(
+                    &child.metadata,
+                    base.saturating_add(stride.saturating_mul(index)),
+                    universe,
+                    words,
+                )? {
+                    return Ok(false);
+                }
+            }
+            Ok(true)
+        }
+        MetadataShape::Aggregate { tag, variants } => {
+            if tag.is_some() {
+                return Ok(false);
+            }
+            for variant in variants {
+                for (child, offset) in variant {
+                    let record = universe.record(child)?;
+                    if !collect_flat_words(
+                        &record.metadata,
+                        base.saturating_add(*offset),
+                        universe,
+                        words,
+                    )? {
+                        return Ok(false);
+                    }
+                }
+            }
+            Ok(true)
+        }
+    }
+}
+
+/// 编码 Bitmap 表示：`kind, reserved[3], word_count u32, direct, interior, padding-to-4`。
+fn encode_trace_bitmap(word_count: u32, direct: &[u32], interior: &[u32]) -> Vec<u8> {
+    let bitmap_bytes = usize::try_from(word_count.div_ceil(8)).expect("bitmap 字节数适配宿主");
+    let body = 8 + bitmap_bytes * 2;
+    let length = body.next_multiple_of(4);
+    let mut out = vec![0u8; length];
+    out[0] = TraceKind::Bitmap as u8;
+    out[4..8].copy_from_slice(&word_count.to_le_bytes());
+    for word in direct {
+        out[8 + (word / 8) as usize] |= 1 << (word % 8);
+    }
+    for word in interior {
+        out[8 + bitmap_bytes + (word / 8) as usize] |= 1 << (word % 8);
+    }
+    out
+}
+
+/// 编码 Program 表示：`kind, u32 program_len, program`。
+fn encode_trace_program(program: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(program.len() + 5);
+    out.push(TraceKind::Program as u8);
+    out.extend_from_slice(
+        &u32::try_from(program.len())
+            .expect("trace program 长度适配 u32")
+            .to_le_bytes(),
+    );
+    out.extend_from_slice(program);
+    out
 }
 
 fn trace_flags(shape: &MetadataShape, universe: &TypeUniverse) -> Result<(bool, bool), Diagnostic> {
@@ -169,6 +348,18 @@ fn trace_flags(shape: &MetadataShape, universe: &TypeUniverse) -> Result<(bool, 
     })
 }
 
+/// 生成一条 trace program（不含 kind 与长度前缀）。
+fn trace_program_for(
+    shape: &MetadataShape,
+    base: u64,
+    universe: &TypeUniverse,
+) -> Result<Vec<u8>, Diagnostic> {
+    let mut out = Vec::new();
+    emit_trace(shape, base, universe, &mut out)?;
+    out.push(TraceOp::End as u8);
+    Ok(out)
+}
+
 fn emit_trace(
     shape: &MetadataShape,
     base: u64,
@@ -189,171 +380,264 @@ fn emit_trace(
         }
         MetadataShape::Array { element, count } => {
             let child = universe.record(element)?;
-            let mut body = Vec::new();
-            emit_trace(&child.metadata, 0, universe, &mut body)?;
-            body.push(TraceOp::End as u8);
+            let body = trace_program_for(&child.metadata, 0, universe)?;
             if body.len() > 1 && *count > 0 {
                 out.push(TraceOp::Repeat as u8);
                 encode_uleb(out, base / 8);
                 encode_uleb(out, *count);
                 encode_uleb(out, child.layout.map_or(0, |layout| layout.0 / 8));
-                encode_uleb(
-                    out,
-                    u64::try_from(body.len()).expect("trace body 适配 uleb"),
+                out.extend_from_slice(
+                    &u32::try_from(body.len())
+                        .expect("trace body 适配 u32")
+                        .to_le_bytes(),
                 );
                 out.extend_from_slice(&body);
             }
         }
-        MetadataShape::Aggregate { tag, variants } => {
-            if let Some((tag_offset, width)) = tag {
-                let mut bodies = Vec::with_capacity(variants.len());
-                for variant in variants {
-                    let mut body = Vec::new();
-                    for (child, offset) in variant {
-                        let record = universe.record(child)?;
-                        emit_trace(&record.metadata, base + *offset, universe, &mut body)?;
-                    }
-                    body.push(TraceOp::End as u8);
-                    bodies.push(body);
-                }
-                let default = bodies
-                    .first()
-                    .cloned()
-                    .unwrap_or_else(|| vec![TraceOp::End as u8]);
-                out.push(TraceOp::Switch as u8);
-                // trace program 的地址与偏移一律以 8 字节 word 计。
-                encode_uleb(out, (base + *tag_offset) / 8);
-                encode_uleb(out, u64::from(*width));
-                encode_uleb(
-                    out,
-                    u64::try_from(default.len()).expect("trace default 适配 uleb"),
-                );
-                encode_uleb(
-                    out,
-                    u64::try_from(bodies.len()).expect("trace case 数量适配 uleb"),
-                );
-                for body in &bodies {
-                    encode_uleb(
-                        out,
-                        u64::try_from(body.len()).expect("trace case 适配 uleb"),
-                    );
-                }
-                out.extend_from_slice(&default);
-                for body in bodies {
-                    out.extend_from_slice(&body);
-                }
-            } else {
-                for variant in variants {
-                    for (child, offset) in variant {
-                        let record = universe.record(child)?;
-                        emit_trace(&record.metadata, base + *offset, universe, out)?;
-                    }
+        MetadataShape::Aggregate {
+            tag: None,
+            variants,
+        } => {
+            for variant in variants {
+                for (child, offset) in variant {
+                    let record = universe.record(child)?;
+                    emit_trace(&record.metadata, base + *offset, universe, out)?;
                 }
             }
+        }
+        MetadataShape::Aggregate {
+            tag: Some((tag_offset, width)),
+            variants,
+        } => {
+            let mut bodies = Vec::with_capacity(variants.len());
+            for variant in variants {
+                let body = trace_program_for_variant(variant, base, universe)?;
+                bodies.push(body);
+            }
+            out.push(TraceOp::Switch as u8);
+            // tag 操作数以 payload 字节计，判别值按 8 字节小端记录。
+            encode_uleb(out, base + *tag_offset);
+            encode_uleb(out, u64::from(*width));
+            encode_uleb(
+                out,
+                u64::try_from(bodies.len()).expect("trace case 数量适配 uleb"),
+            );
+            for (index, body) in bodies.iter().enumerate() {
+                out.extend_from_slice(&(index as u64).to_le_bytes());
+                out.extend_from_slice(
+                    &u32::try_from(body.len())
+                        .expect("trace case 适配 u32")
+                        .to_le_bytes(),
+                );
+                out.extend_from_slice(body);
+            }
+            // 前端只产生稠密判别值；未命中任何 case 的 tag 属于违反类型系统，因此 default
+            // 为空动作而不是复述 variant 0，避免在非法 tag 上扫描无关字节。
+            out.extend_from_slice(&1u32.to_le_bytes());
+            out.push(TraceOp::End as u8);
         }
     }
     Ok(())
 }
 
-fn value_for(
-    record: &crate::frontend::late::universe::TypeRecord,
-    passing: u8,
-    universe: &TypeUniverse,
-) -> Result<Vec<u8>, Diagnostic> {
-    let mut out = Vec::new();
-    emit_value(&record.metadata, passing, 0, universe, &mut out)?;
-    out.push(ValueOp::End as u8);
-    Ok(out)
-}
-
-fn emit_value(
-    shape: &MetadataShape,
-    passing: u8,
+fn trace_program_for_variant(
+    variant: &[([u8; 32], u64)],
     base: u64,
     universe: &TypeUniverse,
-    out: &mut Vec<u8>,
-) -> Result<(), Diagnostic> {
-    if passing & PassingClass::RESOURCE.bits() != 0 {
-        out.push(ValueOp::AcquireResource as u8);
-        encode_uleb(out, base);
-        out.push(ValueOp::ReleaseResource as u8);
-        encode_uleb(out, base);
-        return Ok(());
+) -> Result<Vec<u8>, Diagnostic> {
+    let mut body = Vec::new();
+    for (child, offset) in variant {
+        let record = universe.record(child)?;
+        emit_trace(&record.metadata, base + *offset, universe, &mut body)?;
     }
-    if passing & PassingClass::COW.bits() != 0 {
-        out.push(ValueOp::CowPublish as u8);
-        encode_uleb(out, base);
-    }
-    match shape {
-        MetadataShape::Array { element, count } => {
-            let child = universe.record(element)?;
-            let mut body = Vec::new();
-            emit_value(&child.metadata, child.passing, 0, universe, &mut body)?;
-            body.push(ValueOp::End as u8);
-            if body.len() > 1 && *count > 0 {
-                out.push(ValueOp::RepeatValue as u8);
-                encode_uleb(out, base);
-                encode_uleb(out, *count);
-                encode_uleb(out, child.layout.map_or(0, |layout| layout.0));
-                encode_uleb(
-                    out,
-                    u64::try_from(body.len()).expect("value body 适配 uleb"),
-                );
-                out.extend_from_slice(&body);
-            }
+    body.push(TraceOp::End as u8);
+    Ok(body)
+}
+
+/// value program 生成器：按类型记忆化，避免共享子类型重复展开。
+struct ValueEncoder<'a> {
+    universe: &'a TypeUniverse,
+    cache: BTreeMap<[u8; 32], Vec<u8>>,
+}
+
+impl<'a> ValueEncoder<'a> {
+    fn new(universe: &'a TypeUniverse) -> Self {
+        Self {
+            universe,
+            cache: BTreeMap::new(),
         }
-        MetadataShape::Aggregate { tag, variants } => {
-            if let Some((tag_offset, width)) = tag {
+    }
+
+    /// 返回类型自身的 value program：正向类动作在前、逆向类动作在后。
+    fn program(
+        &mut self,
+        record: &crate::frontend::late::universe::TypeRecord,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        if let Some(program) = self.cache.get(&record.key) {
+            return Ok(program.clone());
+        }
+        let mut out = Vec::new();
+        self.emit(&record.metadata, 0, ValueDirection::Forward, &mut out)?;
+        self.emit(&record.metadata, 0, ValueDirection::Backward, &mut out)?;
+        out.push(ValueOp::End as u8);
+        self.cache.insert(record.key, out.clone());
+        Ok(out)
+    }
+
+    /// 类型是否需要语义 copy/drop：COW/resource 类别或 program 含结构动作。
+    fn has_actions(
+        &mut self,
+        record: &crate::frontend::late::universe::TypeRecord,
+    ) -> Result<bool, Diagnostic> {
+        if record.passing & PassingClass::COW.bits() != 0
+            || record.passing & PassingClass::RESOURCE.bits() != 0
+        {
+            return Ok(true);
+        }
+        Ok(self.program(record)?.len() > 1)
+    }
+
+    fn emit(
+        &mut self,
+        shape: &MetadataShape,
+        base: u64,
+        direction: ValueDirection,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Diagnostic> {
+        match shape {
+            // 指针与句柄类型自身的类别动作由引用它的字段指令表达，这里没有结构动作。
+            MetadataShape::None
+            | MetadataShape::Direct(_)
+            | MetadataShape::Interior(_)
+            | MetadataShape::String => Ok(()),
+            MetadataShape::Array { element, count } => {
+                let child = self.universe.record(element)?;
+                let mut body = Vec::new();
+                self.field_action(child, 0, direction, &mut body)?;
+                body.push(ValueOp::End as u8);
+                if body.len() > 1 {
+                    out.push(ValueOp::RepeatValue as u8);
+                    encode_uleb(out, base / 8);
+                    encode_uleb(out, *count);
+                    encode_uleb(out, child.layout.map_or(0, |layout| layout.0 / 8));
+                    out.extend_from_slice(
+                        &u32::try_from(body.len())
+                            .expect("value body 适配 u32")
+                            .to_le_bytes(),
+                    );
+                    out.extend_from_slice(&body);
+                }
+                Ok(())
+            }
+            MetadataShape::Aggregate {
+                tag: None,
+                variants,
+            } => {
+                for variant in variants {
+                    let mut ordered = variant.iter().collect::<Vec<_>>();
+                    if direction == ValueDirection::Backward {
+                        ordered.reverse();
+                    }
+                    for (child, offset) in ordered {
+                        let record = self.universe.record(child)?;
+                        self.field_action(record, base + *offset, direction, out)?;
+                    }
+                }
+                Ok(())
+            }
+            MetadataShape::Aggregate {
+                tag: Some((tag_offset, width)),
+                variants,
+            } => {
                 let mut bodies = Vec::with_capacity(variants.len());
                 for variant in variants {
                     let mut body = Vec::new();
-                    for (child, offset) in variant {
-                        let record = universe.record(child)?;
-                        emit_value(
-                            &record.metadata,
-                            record.passing,
-                            base + *offset,
-                            universe,
-                            &mut body,
-                        )?;
+                    let mut ordered = variant.iter().collect::<Vec<_>>();
+                    if direction == ValueDirection::Backward {
+                        ordered.reverse();
+                    }
+                    for (child, offset) in ordered {
+                        let record = self.universe.record(child)?;
+                        self.field_action(record, base + *offset, direction, &mut body)?;
                     }
                     body.push(ValueOp::End as u8);
                     bodies.push(body);
                 }
-                out.push(ValueOp::SwitchValue as u8);
-                encode_uleb(out, base + *tag_offset);
-                encode_uleb(out, u64::from(*width));
-                encode_uleb(
-                    out,
-                    u64::try_from(bodies.len()).expect("value case 数量适配 uleb"),
-                );
-                for body in &bodies {
+                if bodies.iter().any(|body| body.len() > 1) {
+                    out.push(ValueOp::SwitchValue as u8);
+                    encode_uleb(out, base + *tag_offset);
+                    encode_uleb(out, u64::from(*width));
                     encode_uleb(
                         out,
-                        u64::try_from(body.len()).expect("value case 适配 uleb"),
+                        u64::try_from(bodies.len()).expect("value case 数量适配 uleb"),
                     );
-                }
-                for body in bodies {
-                    out.extend_from_slice(&body);
-                }
-            } else {
-                for variant in variants {
-                    for (child, offset) in variant {
-                        let record = universe.record(child)?;
-                        emit_value(
-                            &record.metadata,
-                            record.passing,
-                            base + *offset,
-                            universe,
-                            out,
-                        )?;
+                    for (index, body) in bodies.iter().enumerate() {
+                        out.extend_from_slice(&(index as u64).to_le_bytes());
+                        out.extend_from_slice(
+                            &u32::try_from(body.len())
+                                .expect("value case 适配 u32")
+                                .to_le_bytes(),
+                        );
+                        out.extend_from_slice(body);
                     }
+                    out.extend_from_slice(&1u32.to_le_bytes());
+                    out.push(ValueOp::End as u8);
                 }
+                Ok(())
             }
         }
-        _ => {}
     }
-    Ok(())
+
+    /// 发出一个字段的类别动作：resource 走 acquire/release，COW 先 publish，其余按 copy/drop。
+    fn field_action(
+        &mut self,
+        child: &crate::frontend::late::universe::TypeRecord,
+        offset: u64,
+        direction: ValueDirection,
+        out: &mut Vec<u8>,
+    ) -> Result<(), Diagnostic> {
+        let index = self
+            .universe
+            .type_id(&child.key)
+            .ok_or_else(|| invalid("字段类型不在冻结 GC 类型表"))?;
+        if child.passing & PassingClass::RESOURCE.bits() != 0 {
+            out.push(match direction {
+                ValueDirection::Forward => ValueOp::AcquireResource as u8,
+                ValueDirection::Backward => ValueOp::ReleaseResource as u8,
+            });
+            encode_uleb(out, offset);
+            encode_uleb(out, u64::from(index));
+            return Ok(());
+        }
+        if !self.has_actions(child)? {
+            return Ok(());
+        }
+        match direction {
+            ValueDirection::Forward => {
+                if child.passing & PassingClass::COW.bits() != 0 {
+                    out.push(ValueOp::PublishField as u8);
+                    encode_uleb(out, offset);
+                    encode_uleb(out, u64::from(index));
+                }
+                out.push(ValueOp::CopyField as u8);
+                encode_uleb(out, offset);
+                encode_uleb(out, u64::from(index));
+            }
+            ValueDirection::Backward => {
+                out.push(ValueOp::DropField as u8);
+                encode_uleb(out, offset);
+                encode_uleb(out, u64::from(index));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// value 动作方向；wrapper body 内必须同类。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ValueDirection {
+    Forward,
+    Backward,
 }
 
 fn roots(
@@ -502,27 +786,32 @@ mod tests {
         derive(&output.mono.universe, &output.gir, output.hir.module()).expect("GC metadata 可推导")
     }
 
-    /// 取某类型 trace program 中第一条 SWITCH 的 `(tag_word, tag_width)`。
+    /// 取某类型 trace descriptor 中第一条 SWITCH 的 `(tag_byte_offset, tag_width)`。
     fn switch_tag(entry: &GcTypeEntryV1, world: &GcMetadataWorldV1) -> (u64, u64) {
-        let program = &world.trace_program
+        let descriptor = &world.trace_program
             [entry.trace_offset as usize..(entry.trace_offset + entry.trace_len) as usize];
+        assert_eq!(
+            descriptor[0],
+            TraceKind::Program as u8,
+            "含判别值的聚合必须是 Program 表示"
+        );
+        let program = &descriptor[5..];
         let switch = program
             .iter()
             .position(|byte| *byte == TraceOp::Switch as u8)
             .expect("带判别值的聚合必须发出 SWITCH");
         let mut index = switch + 1;
-        let tag_word = crate::runtime::gc_metadata_schema::decode_uleb(program, &mut index)
-            .expect("tag word 可解码");
+        let tag_byte_offset = crate::runtime::gc_metadata_schema::decode_uleb(program, &mut index)
+            .expect("tag 字节偏移可解码");
         let tag_width = crate::runtime::gc_metadata_schema::decode_uleb(program, &mut index)
             .expect("tag width 可解码");
-        (tag_word, tag_width)
+        (tag_byte_offset, tag_width)
     }
 
     #[test]
-    fn trace_program_uses_word_units_for_switch_tag() {
-        // `Holder` 的 `Option[int]` 字段位于字节偏移 8。trace program 的 offset
-        // 一律以 8 字节 word 计，因此判别值必须编码为 word 1；若误用字节单位就会
-        // 得到 8，runtime 将按错误的基准读取判别值。
+    fn trace_program_uses_byte_units_for_switch_tag() {
+        // `Holder` 的 `Option[int]` 字段位于字节偏移 8。SWITCH 的 tag 操作数按 payload
+        // 字节计，因此必须是 8；若误用 word 单位就会得到 1，runtime 将按错误基准读判别值。
         let bundle = derive_source(
             "struct Holder { head: uint, body: Option[int] }\nfn main() {\n let value = Holder { head: 1, body: Option.Some(2) }\n _ = value\n }",
         );
@@ -532,10 +821,10 @@ mod tests {
             .iter()
             .find(|entry| entry.name == "Holder")
             .expect("Holder 必须进入冻结类型表");
-        let (tag_word, tag_width) = switch_tag(holder, &bundle.world);
+        let (tag_byte_offset, tag_width) = switch_tag(holder, &bundle.world);
         assert_eq!(
-            tag_word, 1,
-            "SWITCH tag 必须以 word 计（字节偏移 8 → word 1）"
+            tag_byte_offset, 8,
+            "SWITCH tag 必须以 payload 字节计（字节偏移 8）"
         );
         assert_eq!(tag_width, 1, "Option 判别值宽度为 1 字节");
 
@@ -549,7 +838,7 @@ mod tests {
         assert_eq!(
             switch_tag(option, &bundle.world).0,
             0,
-            "顶层 tag 位于 word 0"
+            "顶层 tag 位于字节 0"
         );
     }
 
