@@ -443,9 +443,37 @@ fn build_json_reports_barrier_contract_keys() {
         "pacing-owner-drain-bytes",
         "pacing-owner-drain-interval-bytes",
         "pacing-demand",
+        "mark-contract-fingerprint",
+        "mark-runtime",
+        "mark-cycle-states",
+        "mark-conditions",
+        "mark-snapshot-participants",
+        "mark-credit-pool",
+        "mark-mailbox-consumers",
+        "mark-ticket-fields",
+        "mark-records",
+        "mark-demand",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
+    assert_eq!(payload["mark-conditions"], 7);
+    assert_eq!(payload["mark-snapshot-participants"], 6);
+    assert_eq!(payload["mark-mailbox-consumers"], 1);
+    assert_eq!(payload["mark-ticket-fields"], 14);
+    assert_eq!(payload["mark-records"], 3);
+    // mark 需求与 GC metadata/barrier/LocalHeap 需求覆盖同一站点集合。
+    assert_eq!(
+        payload["mark-demand"]["root-sites"],
+        payload["gc-metadata-demand"]["root_range_count"]
+    );
+    assert_eq!(
+        payload["mark-demand"]["barrier-sites"],
+        payload["barrier-demand"]["card-mark-sites"]
+    );
+    assert_eq!(
+        payload["mark-demand"]["ticket-sites"],
+        payload["local-heap-demand"]["shared-sites"]
+    );
     assert_eq!(payload["pacing-profile"], "mosaic-default");
     assert_eq!(payload["pacing-gc-cpu-fraction"], 25);
     assert_eq!(payload["pacing-credit-source-count"], 9);

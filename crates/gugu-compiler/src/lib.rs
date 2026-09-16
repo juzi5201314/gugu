@@ -1085,6 +1085,16 @@ pub struct ImagePlan {
     local_heap_contract_fingerprint: [u8; 32],
     local_heap_demand: crate::runtime::LocalHeapDemand,
     local_heap_runtime: crate::runtime::LocalHeapRuntimeContract,
+    mark_contract_fingerprint: [u8; 32],
+    mark_demand: crate::runtime::MarkDemand,
+    mark_runtime: crate::runtime::MarkRuntimeContract,
+    mark_cycle_state_count: u32,
+    mark_condition_count: u32,
+    mark_snapshot_participant_count: u32,
+    mark_credit_pool: u64,
+    mark_mailbox_consumer_count: u32,
+    mark_ticket_field_count: u32,
+    mark_record_count: u32,
     pacing_contract_fingerprint: [u8; 32],
     pacing_profile: String,
     pacing_profile_revision: u32,
@@ -1245,6 +1255,16 @@ impl ImagePlan {
             local_heap_contract_fingerprint: plan.local_heap_contract_fingerprint,
             local_heap_demand: plan.local_heap_demand,
             local_heap_runtime: plan.local_heap_runtime,
+            mark_contract_fingerprint: plan.mark_contract_fingerprint,
+            mark_demand: plan.mark_demand,
+            mark_runtime: plan.mark_runtime,
+            mark_cycle_state_count: plan.mark_cycle_state_count,
+            mark_condition_count: plan.mark_condition_count,
+            mark_snapshot_participant_count: plan.mark_snapshot_participant_count,
+            mark_credit_pool: plan.mark_credit_pool,
+            mark_mailbox_consumer_count: plan.mark_mailbox_consumer_count,
+            mark_ticket_field_count: plan.mark_ticket_field_count,
+            mark_record_count: plan.mark_record_count,
             pacing_contract_fingerprint: plan.pacing_contract_fingerprint,
             pacing_profile: plan.pacing_profile,
             pacing_profile_revision: plan.pacing_profile_revision,
@@ -1743,6 +1763,56 @@ impl ImagePlan {
     /// 返回已验证的 LocalHeap Immix/TLAB/分代契约段。
     pub fn local_heap_runtime(&self) -> &crate::runtime::LocalHeapRuntimeContract {
         &self.local_heap_runtime
+    }
+
+    /// 返回 mark 契约指纹。
+    pub fn mark_contract_fingerprint(&self) -> [u8; 32] {
+        self.mark_contract_fingerprint
+    }
+
+    /// 返回 mark 需求视图。
+    pub fn mark_demand(&self) -> crate::runtime::MarkDemand {
+        self.mark_demand
+    }
+
+    /// 返回 mark cycle 状态数量。
+    pub fn mark_cycle_state_count(&self) -> u32 {
+        self.mark_cycle_state_count
+    }
+
+    /// 返回收敛条件数量。
+    pub fn mark_condition_count(&self) -> u32 {
+        self.mark_condition_count
+    }
+
+    /// 返回 root snapshot 参与者数量。
+    pub fn mark_snapshot_participant_count(&self) -> u32 {
+        self.mark_snapshot_participant_count
+    }
+
+    /// 返回 cycle credit 池上界。
+    pub fn mark_credit_pool(&self) -> u64 {
+        self.mark_credit_pool
+    }
+
+    /// 返回 MarkMailbox consumer 数量。
+    pub fn mark_mailbox_consumer_count(&self) -> u32 {
+        self.mark_mailbox_consumer_count
+    }
+
+    /// 返回 `MarkTicket` 字段数量。
+    pub fn mark_ticket_field_count(&self) -> u32 {
+        self.mark_ticket_field_count
+    }
+
+    /// 返回 mark record 数量。
+    pub fn mark_record_count(&self) -> u32 {
+        self.mark_record_count
+    }
+
+    /// 返回 mark 契约段。
+    pub fn mark_runtime(&self) -> &crate::runtime::MarkRuntimeContract {
+        &self.mark_runtime
     }
     /// 返回 GC debt、credit、pacing 与 pressure 契约指纹。
     pub fn pacing_contract_fingerprint(&self) -> [u8; 32] {
@@ -2637,6 +2707,36 @@ mod tests {
         assert!(dump.contains("local-heap-trigger revision=1"));
         assert!(dump.contains("local-heap-demand"));
         assert!(dump.contains("local-heap-fingerprint"));
+        // mark 契约：每 owner 单 consumer、七个收敛条件、六类参与者与三条 record 布局。
+        assert_eq!(plan.mark_mailbox_consumer_count(), 1);
+        assert_eq!(plan.mark_condition_count(), 7);
+        assert_eq!(plan.mark_snapshot_participant_count(), 6);
+        assert_eq!(plan.mark_cycle_state_count(), 6);
+        assert_eq!(plan.mark_ticket_field_count(), 14);
+        assert_eq!(plan.mark_record_count(), 3);
+        assert!(plan.mark_credit_pool() > 0);
+        // mark 需求覆盖的站点集合与 gc metadata/barrier/LocalHeap 三份需求一致。
+        assert_eq!(
+            plan.mark_demand().root_sites,
+            plan.gc_metadata_demand().root_range_count
+        );
+        assert_eq!(plan.mark_demand().barrier_sites, demand.card_mark_sites);
+        assert_eq!(
+            plan.mark_demand().ticket_sites,
+            plan.local_heap_demand().shared_sites
+        );
+        assert_eq!(
+            plan.mark_demand().edge_delta_sites,
+            demand.edge_summary_sites
+        );
+        assert_ne!(plan.mark_contract_fingerprint(), [0_u8; 32]);
+        assert!(dump.contains("mark schema=1 profile=mosaic-mark revision=1"));
+        assert!(dump.contains(
+            "mark-conditions local-worklist,published-batch,mailbox,barrier-buffer,producer-epoch,forwarding-work,pending-credit"
+        ));
+        assert!(dump.contains("mark-record MarkMailboxHead bytes=64 align=64"));
+        assert!(dump.contains("mark-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging,mark-credit,mark-mailbox,mark-worklist,forwarding-work"));
+        assert!(dump.contains("mark-fingerprint"));
         // pacing 契约与需求同样进入镜像计划、dump 与指纹身份。
         assert_eq!(plan.pacing_profile(), "mosaic-default");
         assert_eq!(plan.pacing_profile_revision(), 3);
