@@ -130,6 +130,10 @@ pub(crate) enum FieldKind {
     ManagedAddress,
     /// raw 指针地址；只允许出现在被拒绝的 schema 中。
     RawPointer,
+    /// mark owner credit 的稠密编号。
+    Credit,
+    /// 产生 mark 工作的 source block 序号。
+    SourceBlock,
 }
 
 impl FieldKind {
@@ -158,6 +162,8 @@ impl FieldKind {
             Self::Flags => "flags",
             Self::ManagedAddress => "managed-address",
             Self::RawPointer => "raw-pointer",
+            Self::Credit => "credit",
+            Self::SourceBlock => "source-block",
         }
     }
 
@@ -221,6 +227,16 @@ impl MessageSchemaV1 {
             schema: 1,
             family: MessageFamilyTag::CardMark,
             fields: super::barrier_schema::card_mark_fields(),
+        }
+    }
+
+    /// 返回 GC 工作消息族的 `MarkTicket` 字段集合。
+    #[allow(dead_code, reason = "MarkRuntimeContract 在 mark 契约段消费该访问器")]
+    pub(crate) fn mark_ticket() -> Self {
+        Self {
+            schema: 1,
+            family: MessageFamilyTag::MarkTicket,
+            fields: super::mark_schema::mark_ticket_fields(),
         }
     }
 
@@ -307,6 +323,12 @@ fn required_fields(family: MessageFamilyTag) -> Vec<FieldKind> {
         MessageFamilyTag::RegionTransfer => {
             required.push(FieldKind::UnitIndex);
             required.push(FieldKind::ExportSummary);
+        }
+        // mark ticket 用目标对象偏移描述待标记对象，并携带 owner credit 与 source block。
+        MessageFamilyTag::MarkTicket => {
+            required.push(FieldKind::UnitIndex);
+            required.push(FieldKind::Credit);
+            required.push(FieldKind::SourceBlock);
         }
     }
     required
@@ -1082,6 +1104,7 @@ impl RuntimeRawContractV1 {
                 MessageFamilyTag::Return => "return",
                 MessageFamilyTag::CardMark => "card-mark",
                 MessageFamilyTag::RegionTransfer => "region-transfer",
+                MessageFamilyTag::MarkTicket => "mark-ticket",
             },
         ));
         output

@@ -57,6 +57,8 @@ mod local_heap_layout;
     reason = "LocalHeap 契约段由 runtime raw、world 与 ImagePlan 消费"
 )]
 pub(crate) mod local_heap_schema;
+#[allow(dead_code, reason = "mark 契约段由 runtime raw、世界与 ImagePlan 消费")]
+pub(crate) mod mark_schema;
 mod model;
 /// 结局/状态名字目录、credit 诊断访问器与 `PacingPlane::dump` 构成 pacing 诊断面，
 /// 唯一消费入口是 runtime dump 与确定性测试套件；真正无人消费的项（分类名目录、

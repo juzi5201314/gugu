@@ -337,6 +337,37 @@ impl RegionTransferBatch {
     }
 }
 
+/// 一条跨 owner 的 GC 工作消息：把一个待标记对象交给它的 arena owner。
+///
+/// 与 `CardMarkBatch`/`RegionTransferBatch` 共用同一条传输、staging 与 grace；区别只在
+/// 车道解释与 integrity 派生键。消息只携带稳定身份——目标 arena descriptor、目标对象在
+/// arena 内的 header 偏移、产生引用的 source block、cycle/topology epoch、owner credit 与
+/// bytes——不含任何 managed 地址：目标 owner 用自己的 arena 反查偏移对应的对象。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MarkTicket {
+    /// raw intrusive link；只存在于 non-moving message storage。
+    pub(crate) next: Option<u32>,
+    /// 目标 arena owner 的稳定身份。
+    pub(crate) target: OwnerToken,
+    /// 目标对象所在 arena 的 descriptor 稠密编号。
+    pub(crate) target_arena: SlabDescriptorId,
+    /// 目标对象 header 在 arena 内的字节偏移；arena 不超过 2 MiB，适配 u32。
+    pub(crate) target_offset: u32,
+    /// 产生这条 mark 工作的 source block 序号。
+    pub(crate) source_block: u32,
+    /// 产生这条 ticket 的 GC cycle epoch。
+    pub(crate) cycle_epoch: u64,
+    /// producer topology epoch；拓扑变化后旧 ticket 必须被拒绝。
+    pub(crate) topology_epoch: u32,
+    /// 该 ticket 占用的 owner credit 稠密编号；consume 后由还款收口。
+    pub(crate) credit: u32,
+    /// 目标对象占用的字节数。
+    pub(crate) bytes: u32,
+    pub(crate) state: MessageState,
+    /// 目标身份、cycle/topology epoch 与 credit 的校验信息。
+    pub(crate) integrity: IntegrityTag,
+}
+
 /// 消息 integrity 校验信息。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct IntegrityTag {
@@ -423,6 +454,44 @@ impl IntegrityTag {
         ])
     }
 
+    /// 用 per-domain secret 与 `MarkTicket` 的全部身份字段计算校验值。
+    pub(crate) fn compute_mark_ticket(secret: &[u8; 32], ticket: &MarkTicket) -> u32 {
+        let mut hasher = blake3::Hasher::new_derive_key("gugu-mark-ticket-integrity-v1");
+        hasher.update(secret);
+        hasher.update(&ticket.target.domain.raw().to_le_bytes());
+        hasher.update(&ticket.target.owner_id.raw().to_le_bytes());
+        hasher.update(&ticket.target.generation.raw().to_le_bytes());
+        hasher.update(&ticket.target.route_key.raw().to_le_bytes());
+        hasher.update(&MessageFamilyTag::MarkTicket.raw().to_le_bytes());
+        hasher.update(&ticket.target_arena.raw().to_le_bytes());
+        hasher.update(&ticket.target_offset.to_le_bytes());
+        hasher.update(&ticket.source_block.to_le_bytes());
+        hasher.update(&ticket.cycle_epoch.to_le_bytes());
+        hasher.update(&ticket.topology_epoch.to_le_bytes());
+        hasher.update(&ticket.credit.to_le_bytes());
+        hasher.update(&ticket.bytes.to_le_bytes());
+        // 取字节 8..12：card 族用 0..4、region 族用 4..8，三族不共用摘要前缀。
+        let digest = hasher.finalize();
+        u32::from_le_bytes([
+            digest.as_bytes()[8],
+            digest.as_bytes()[9],
+            digest.as_bytes()[10],
+            digest.as_bytes()[11],
+        ])
+    }
+
+    /// 校验 mark ticket 的 checksum 与本记录的其他身份字段一致。
+    pub(crate) fn verify_mark_ticket(
+        &self,
+        secret: &[u8; 32],
+        ticket: &MarkTicket,
+    ) -> Result<(), RawInvariant> {
+        if self.checksum != Self::compute_mark_ticket(secret, ticket) {
+            return Err(RawInvariant::new("mark ticket integrity 校验失败"));
+        }
+        Ok(())
+    }
+
     /// 校验 card batch 的 checksum 与本记录的其他身份字段一致。
     pub(crate) fn verify_card_mark(
         &self,
@@ -474,7 +543,10 @@ impl ReturnNodeId {
 /// `bytes_epoch` 为 `bytes(32) | source_epoch(32)`；`state_kind` 为
 /// `state_kind` 为 `state(8) | kind(8) | domain(8) | family(8) | 保留`；
 /// `payload_low`/`payload_high` 为消息族专属车道（card batch 用
-/// `arena(32) | card_start(32)` 与 `arena_generation(32) | card_count(32)`）；
+/// `arena(32) | card_start(32)` 与 `arena_generation(32) | card_count(32)`；mark ticket 用
+/// `cycle_epoch(64)` 与 `credit(32) | source_block(32)`，并把 `descriptor_unit` 解释成
+/// `target_arena(32) | target_offset(32)`、`bytes_epoch` 解释成
+/// `bytes(32) | topology_epoch(32)`）；
 /// `integrity` 保存 integrity checksum；`reuse` 保存
 /// `Free`/`InUse` 复用标记。车道不足一个 cache line 时补齐，node stride 因此是
 /// `RETURN_NODE_BYTES`。
@@ -649,6 +721,78 @@ impl ReturnNode {
         }
     }
 
+    fn store_mark_ticket(&self, ticket: &MarkTicket, integrity: u32) {
+        self.owner_id
+            .store(ticket.target.owner_id.raw(), Ordering::Relaxed);
+        self.generation
+            .store(ticket.target.generation.raw(), Ordering::Relaxed);
+        self.route_key
+            .store(ticket.target.route_key.raw(), Ordering::Relaxed);
+        self.descriptor_unit.store(
+            u64::from(ticket.target_arena.raw()) | (u64::from(ticket.target_offset) << 32),
+            Ordering::Relaxed,
+        );
+        self.bytes_epoch.store(
+            u64::from(ticket.bytes) | (u64::from(ticket.topology_epoch) << 32),
+            Ordering::Relaxed,
+        );
+        self.state_kind.store(
+            ticket.state.code()
+                | (u64::from(MessageFamilyTag::MarkTicket.raw()) << 8)
+                | (u64::from(ticket.target.domain.raw()) << 16)
+                | (u64::from(MessageFamilyTag::MarkTicket.raw()) << 24),
+            Ordering::Relaxed,
+        );
+        self.payload_low
+            .store(ticket.cycle_epoch, Ordering::Relaxed);
+        self.payload_high.store(
+            u64::from(ticket.credit) | (u64::from(ticket.source_block) << 32),
+            Ordering::Relaxed,
+        );
+        self.integrity
+            .store(u64::from(integrity), Ordering::Relaxed);
+    }
+
+    /// 从车道重建 mark ticket；只有 mark 族才会调用。
+    fn load_mark_ticket(&self) -> MarkTicket {
+        let owner_id = self.owner_id.load(Ordering::Relaxed);
+        let target_generation = self.generation.load(Ordering::Relaxed);
+        let route_key = self.route_key.load(Ordering::Relaxed);
+        let descriptor_unit = self.descriptor_unit.load(Ordering::Relaxed);
+        let bytes_epoch = self.bytes_epoch.load(Ordering::Relaxed);
+        let state_kind = self.state_kind.load(Ordering::Relaxed);
+        let payload_low = self.payload_low.load(Ordering::Relaxed);
+        let payload_high = self.payload_high.load(Ordering::Relaxed);
+        let integrity = self.integrity.load(Ordering::Relaxed);
+        let domain = MemoryDomainId::from_raw(((state_kind >> 16) & 0xFF) as u8)
+            .unwrap_or(MemoryDomainId::RUNTIME_RAW);
+        // 车道按固定位宽掩码后截断到目标字段宽度：每个身份字段只占 32-bit，掩码已保证无溢出。
+        MarkTicket {
+            next: None,
+            target: OwnerToken {
+                domain,
+                owner_id: OwnerId::from_raw(owner_id),
+                generation: OwnerGeneration::from_raw(target_generation),
+                route_key: RouteKey::from_raw(route_key),
+            },
+            target_arena: SlabDescriptorId::from_raw((descriptor_unit & 0xFFFF_FFFF) as u32),
+            target_offset: (descriptor_unit >> 32) as u32,
+            source_block: (payload_high >> 32) as u32,
+            cycle_epoch: payload_low,
+            topology_epoch: (bytes_epoch >> 32) as u32,
+            credit: (payload_high & 0xFFFF_FFFF) as u32,
+            bytes: (bytes_epoch & 0xFFFF_FFFF) as u32,
+            state: MessageState::from_code((state_kind & 0xFF) as u8),
+            integrity: IntegrityTag {
+                generation: SlabGeneration::from_raw(target_generation),
+                class: RuntimeSizeClassId::from_raw(0),
+                owner_id: OwnerId::from_raw(owner_id),
+                route_key: RouteKey::from_raw(route_key),
+                checksum: integrity as u32,
+            },
+        }
+    }
+
     fn load(&self, class: RuntimeSizeClassId, generation: SlabGeneration) -> ReturnMessage {
         let owner_id = self.owner_id.load(Ordering::Relaxed);
         let target_generation = self.generation.load(Ordering::Relaxed);
@@ -767,6 +911,7 @@ impl ReturnNode {
         match (self.state_kind.load(Ordering::Acquire) >> 24) & 0xFF {
             1 => MessageFamilyTag::CardMark,
             2 => MessageFamilyTag::RegionTransfer,
+            3 => MessageFamilyTag::MarkTicket,
             _ => MessageFamilyTag::Return,
         }
     }
@@ -936,6 +1081,19 @@ impl ReturnNodePool {
     /// 与 card 族一样，载入不需要 class/generation 键：integrity 按 batch 自身的身份字段校验。
     pub(crate) fn load_region_transfer(&self, id: ReturnNodeId) -> RegionTransferBatch {
         self.nodes[id.index()].load_region_transfer()
+    }
+
+    /// 写入一个 node 的 mark ticket payload。
+    pub(crate) fn store_mark_ticket(&self, id: ReturnNodeId, ticket: &MarkTicket, integrity: u32) {
+        self.nodes[id.index()].store_mark_ticket(ticket, integrity);
+    }
+
+    /// 读取一个 node 的 mark ticket payload。
+    ///
+    /// 与 card/region 族一样，载入不需要 class/generation 键：integrity 按 ticket 自身的身份
+    /// 字段校验。
+    pub(crate) fn load_mark_ticket(&self, id: ReturnNodeId) -> MarkTicket {
+        self.nodes[id.index()].load_mark_ticket()
     }
     /// 按给定 class 与 generation 读取一个 return payload。
     pub(crate) fn load(
@@ -1499,6 +1657,40 @@ pub(crate) fn stage_region_transfer(
     }
     staging.stage(node, batch.target, batch.bytes, shard)?;
     let mut outcome = None;
+    if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
+        && let Some(inbox) = inbox
+    {
+        outcome = Some(flush_staging(pool, inbox, staging, trigger)?);
+    }
+    Ok(outcome)
+}
+
+/// 把一个 mark ticket 写入 staging chain 并发布到目标 owner 的 inbox。
+///
+/// 复用 return/card/region 的 producer 路径：node 从同一个 pool 取，chain 由同一套 staging
+/// 与 flush 触发器管理，因此跨 owner 标记不会绕过 producer gate 与 queue-page grace。
+pub(crate) fn stage_mark_ticket(
+    pool: &ReturnNodePool,
+    inbox: Option<&OwnerInbox>,
+    staging: &mut ProducerStaging,
+    ticket: &MarkTicket,
+    shard: ShardIndex,
+    forced: Option<FlushTrigger>,
+) -> Result<Option<PublishOutcome>, RawInvariant> {
+    let mut outcome = None;
+    if staging
+        .target()
+        .is_some_and(|target| target != ticket.target)
+    {
+        return Err(RawInvariant::new("staging 目标改变前必须先发布旧 chain"));
+    }
+    let node = pool.allocate()?;
+    pool.store_mark_ticket(node, ticket, ticket.integrity.checksum);
+    pool.link(node, None);
+    if let Some(last) = staging.last() {
+        pool.link(last, Some(node));
+    }
+    staging.stage(node, ticket.target, ticket.bytes, shard)?;
     if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
         && let Some(inbox) = inbox
     {

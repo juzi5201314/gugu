@@ -652,6 +652,8 @@ pub(crate) enum MessageFamilyTag {
     CardMark,
     /// managed 所有权消息：私有 region descriptor 的整体移交。
     RegionTransfer,
+    /// GC 工作消息：跨 owner 的 mark ticket。
+    MarkTicket,
 }
 
 impl MessageFamilyTag {
@@ -661,6 +663,7 @@ impl MessageFamilyTag {
             Self::Return => 0,
             Self::CardMark => 1,
             Self::RegionTransfer => 2,
+            Self::MarkTicket => 3,
         }
     }
 }
