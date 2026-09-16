@@ -57,6 +57,11 @@ mod local_heap_layout;
     reason = "LocalHeap 契约段由 runtime raw、world 与 ImagePlan 消费"
 )]
 pub(crate) mod local_heap_schema;
+#[allow(
+    dead_code,
+    reason = "MarkMailbox 与 owner credit 参照实现由 world 与确定性测试消费"
+)]
+mod mark;
 #[allow(dead_code, reason = "mark record 布局交叉校验由 RuntimeRawModel 消费")]
 mod mark_layout;
 #[allow(dead_code, reason = "mark 契约段由 runtime raw、世界与 ImagePlan 消费")]
