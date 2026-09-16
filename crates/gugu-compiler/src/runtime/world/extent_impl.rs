@@ -104,6 +104,19 @@ impl RawWorld {
         Ok(extent)
     }
 
+    /// 为一个 managed heap block 提交物理页并返回它在 arena 内的偏移。
+    ///
+    /// managed heap 的 32 KiB block 与 slab extent 共用同一 provider 提交路径，但不进入
+    /// `OwnerAccounting`，因此 `runtime_committed_bytes` 的口径与 `spec/runtime.md` 一致。
+    pub(super) fn commit_managed_block(
+        &mut self,
+        owner: u32,
+        class: u32,
+    ) -> Result<u64, RawInvariant> {
+        let extent = self.take_extent(owner, class, MemoryDomainId::MANAGED_LOCAL)?;
+        Ok(self.extents.offset_of_id(extent))
+    }
+
     /// 归还一个 extent：先撤销它的物理页，再合并回 buddy 阶梯。
     ///
     /// 调用者必须先通过 `poll_trim` 的四条门禁；这里只执行平台侧动作。

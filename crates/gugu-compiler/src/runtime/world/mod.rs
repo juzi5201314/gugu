@@ -7,6 +7,7 @@
 pub(crate) mod barrier_impl;
 pub(crate) mod coroutine_impl;
 mod extent_impl;
+pub(crate) mod heap_impl;
 pub(crate) mod pacing_impl;
 mod region_impl;
 mod resource_impl;
@@ -29,6 +30,10 @@ mod sync_tests;
 #[cfg(test)]
 #[path = "../barrier_tests.rs"]
 mod barrier_tests;
+
+#[cfg(test)]
+#[path = "heap_tests.rs"]
+mod heap_tests;
 
 #[cfg(test)]
 #[path = "../pacing_tests.rs"]
@@ -145,6 +150,20 @@ pub(crate) struct RawWorld {
     pacing: super::pacing::PacingPlane,
     /// TurnRegion 私有区与 `RegionTransfer` 投递平面；按已构建的契约配置。
     regions: Option<super::region::RegionPlane>,
+    /// LocalHeap 契约快照；`configure_local_heap` 之后才可用。
+    local_heap_contract: Option<super::local_heap_schema::LocalHeapRuntimeContract>,
+    /// 每个 owner 的 LocalHeap Immix arena 集合。
+    local_heaps: Option<Vec<super::local_heap::LocalHeap>>,
+    /// 从镜像 section 解码出的运行时可读 GC 类型表。
+    gc_types: Option<super::gc_metadata_section::GcRuntimeMetadata>,
+    /// 模型根槽数组；每个槽是 managed pointer 或 0。
+    managed_roots: Vec<u64>,
+    /// 根槽的 `(root kind, type index)` 登记。
+    managed_root_kinds: Vec<(u32, u32)>,
+    /// LocalHeap cycle epoch；每次 minor/major 前进一。
+    heap_cycle_epoch: u64,
+    /// LocalHeap block 对应的 extent class 编号。
+    heap_block_class: u32,
 }
 
 impl RawWorld {
@@ -219,6 +238,13 @@ impl RawWorld {
             return_stagings: (0..owners).map(|_| ProducerStaging::new(limits)).collect(),
             return_caches: (0..owners).map(|_| ReturnSlabCache::new()).collect(),
             regions: None,
+            local_heap_contract: None,
+            local_heaps: None,
+            gc_types: None,
+            managed_roots: Vec::new(),
+            managed_root_kinds: Vec::new(),
+            heap_cycle_epoch: 0,
+            heap_block_class: 0,
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。

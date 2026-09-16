@@ -32,7 +32,21 @@ mod coroutine_schema;
 pub(crate) mod gc_metadata_contract;
 pub(crate) mod gc_metadata_schema;
 pub(crate) mod gc_metadata_section;
+#[allow(
+    dead_code,
+    reason = "LocalHeap record 布局交叉校验由 RuntimeRawModel 消费"
+)]
+#[allow(
+    dead_code,
+    reason = "trace descriptor 解释器由 LocalHeap 与 world 消费"
+)]
+pub(crate) mod gc_trace;
 mod harness;
+#[allow(
+    dead_code,
+    reason = "LocalHeap Immix/TLAB/分代参照实现由 world 与确定性测试消费"
+)]
+pub(crate) mod local_heap;
 #[allow(
     dead_code,
     reason = "LocalHeap record 布局交叉校验由 RuntimeRawModel 消费"
