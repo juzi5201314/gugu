@@ -63,7 +63,8 @@ impl RawWorld {
         self.mark.is_some()
     }
 
-    fn mark_plane(&self) -> Result<&MarkPlane, RawInvariant> {
+    /// 返回 mark 平面；未配置时失败。
+    pub(crate) fn mark_plane(&self) -> Result<&MarkPlane, RawInvariant> {
         self.mark
             .as_ref()
             .ok_or_else(|| RawInvariant::new("mark 平面未按契约配置"))
@@ -93,21 +94,35 @@ impl RawWorld {
         self.mark_plane_mut()?
             .begin_cycle(cycle, topology)
             .map_err(mark_error)?;
+        // mark 位图按 arena 的 epoch 判定陈旧位：跨 owner 标记会写别的 owner 的 arena，
+        // 因此每个 owner 的 mark epoch 都必须与 cycle 一起前进。
+        let owners = u32::try_from(self.owners.len()).expect("owner 数适配 u32");
+        for owner in 0..owners {
+            self.heap_mut(owner)?.begin_mark_cycle();
+        }
         // producer stop epoch 必须先发布：grace 之后未登记的 participant 不得再开始新 batch。
         let inbox = self.inbox(0);
         self.open_grace(&inbox);
-        for owner in scope {
-            self.confirm_owner_snapshot(*owner)?;
+        self.confirm_snapshot_all()?;
+        self.seed_mark_roots(scope)?;
+        Ok(cycle)
+    }
+
+    /// 收齐全部 owner 的 snapshot 确认并发布 gate。
+    ///
+    /// snapshot gate 是 world 级屏障：全部 owner 都必须停下，而 scope 只决定随后哪些 owner 的
+    /// worklist 参与本轮标记。确认动作各自幂等，因此重复进入同一 cycle 可以补齐。
+    fn confirm_snapshot_all(&mut self) -> Result<(), RawInvariant> {
+        let owners = u32::try_from(self.owners.len()).expect("owner 数适配 u32");
+        for owner in 0..owners {
+            self.confirm_owner_snapshot(owner)?;
         }
-        let ready = self.mark_plane()?.snapshot_ready();
-        if !ready {
+        if !self.mark_plane()?.snapshot_ready() {
             return Err(RawInvariant::new("root snapshot gate 未收齐全部参与者确认"));
         }
         self.mark_plane_mut()?
             .release_snapshot()
-            .map_err(mark_error)?;
-        self.seed_mark_roots(scope)?;
-        Ok(cycle)
+            .map_err(mark_error)
     }
 
     /// 完成一个 owner 的六类 snapshot 确认；每项确认前都执行对应真实动作。
@@ -155,9 +170,12 @@ impl RawWorld {
         owner: u32,
         kind: MarkParticipant,
     ) -> Result<(), RawInvariant> {
-        self.mark_plane_mut()?
-            .confirm_snapshot(owner, kind)
-            .map_err(mark_error)
+        let plane = self.mark_plane_mut()?;
+        // 重新进入同一 cycle 时补确认：已登记的项不再重复登记，动作本身幂等。
+        if plane.snapshot_confirmed(owner, kind) {
+            return Ok(());
+        }
+        plane.confirm_snapshot(owner, kind).map_err(mark_error)
     }
 
     /// 用根槽与 remembered set seed 参与本次 cycle 的 owner worklist。
@@ -436,15 +454,7 @@ impl RawWorld {
                 cycle = self.begin_mark_cycle(scope)?;
             }
             MarkCycleState::Snapshot => {
-                for owner in scope {
-                    self.confirm_owner_snapshot(*owner)?;
-                }
-                if !self.mark_plane()?.snapshot_ready() {
-                    return Err(RawInvariant::new("root snapshot gate 未收齐全部参与者确认"));
-                }
-                self.mark_plane_mut()?
-                    .release_snapshot()
-                    .map_err(mark_error)?;
+                self.confirm_snapshot_all()?;
                 self.seed_mark_roots(scope)?;
             }
             MarkCycleState::Marking | MarkCycleState::Converging | MarkCycleState::Remark => {}

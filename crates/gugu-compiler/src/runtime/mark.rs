@@ -348,6 +348,13 @@ impl RootSnapshotGate {
         self.open
     }
 
+    /// 返回某个 owner 的某项确认是否已经登记。
+    pub(crate) fn confirmed(&self, owner: u32, kind: MarkParticipant) -> bool {
+        self.confirmed
+            .get(owner as usize)
+            .is_some_and(|mask| mask & (1_u64 << kind.index()) != 0)
+    }
+
     /// 登记一个 owner 的一项确认；重复确认必须失败。
     pub(crate) fn confirm(&mut self, owner: u32, kind: MarkParticipant) -> Result<(), MarkError> {
         if !self.open {
@@ -648,6 +655,8 @@ pub(crate) struct MarkPlane {
     state: MarkCycleState,
     credits: Vec<MarkCredit>,
     mailboxes: Vec<MarkMailbox>,
+    /// 已转发但尚未被最终目标 consume 的 credit 编号；`forwarding-work` 的真实在飞量。
+    forwarded_in_flight: Vec<u32>,
     gate: Option<RootSnapshotGate>,
     stats: MarkStats,
     last: Option<MarkTermination>,
@@ -668,6 +677,7 @@ impl MarkPlane {
             state: MarkCycleState::Idle,
             credits,
             mailboxes,
+            forwarded_in_flight: Vec::new(),
             gate: None,
             stats: MarkStats::default(),
             last: None,
@@ -716,6 +726,13 @@ impl MarkPlane {
             .ok_or(MarkError::UnknownOwner { owner })
     }
 
+    /// 返回一个 owner 的 credit 账本可变引用；状态机测试与偿还路径使用。
+    pub(crate) fn credit_mut(&mut self, owner: u32) -> Result<&mut MarkCredit, MarkError> {
+        self.credits
+            .get_mut(owner as usize)
+            .ok_or(MarkError::UnknownOwner { owner })
+    }
+
     /// 返回一个 owner 的 mailbox。
     pub(crate) fn mailbox(&self, owner: u32) -> Result<&MarkMailbox, MarkError> {
         self.mailboxes
@@ -745,10 +762,18 @@ impl MarkPlane {
             mailbox.reset(cycle, topology);
         }
         self.gate = Some(RootSnapshotGate::open(cycle, topology, self.owner_count()));
+        self.forwarded_in_flight.clear();
         self.last = None;
         self.state = MarkCycleState::Snapshot;
         self.stats.snapshots += 1;
         Ok(())
+    }
+
+    /// 返回某个 owner 的某项 snapshot 确认是否已经登记。
+    pub(crate) fn snapshot_confirmed(&self, owner: u32, kind: MarkParticipant) -> bool {
+        self.gate
+            .as_ref()
+            .is_some_and(|gate| gate.confirmed(owner, kind))
     }
 
     /// 登记一个 owner 的一项 snapshot 确认。
@@ -843,6 +868,14 @@ impl MarkPlane {
             .ok_or(MarkError::UnknownOwner { owner })?
             .consume(credit)?;
         self.credits[source as usize].consume(credit_local(credit))?;
+        // 被转发的 ticket 走到最终目标才离开在飞集合；未转发过的编号不在集合里。
+        if let Some(index) = self
+            .forwarded_in_flight
+            .iter()
+            .position(|candidate| *candidate == credit)
+        {
+            self.forwarded_in_flight.swap_remove(index);
+        }
         self.stats.tickets_consumed += 1;
         Ok(())
     }
@@ -862,6 +895,9 @@ impl MarkPlane {
             .get_mut(target as usize)
             .ok_or(MarkError::UnknownOwner { owner: target })?
             .publish(credit);
+        if !self.forwarded_in_flight.contains(&credit) {
+            self.forwarded_in_flight.push(credit);
+        }
         self.stats.tickets_forwarded += 1;
         Ok(())
     }
@@ -901,12 +937,9 @@ impl MarkPlane {
             .fold(0_u64, u64::saturating_add)
     }
 
-    /// 返回全部 mailbox 已转发的 ticket 数。
+    /// 返回因转发而仍在途、尚未被最终目标消费的 ticket 数。
     pub(crate) fn forwarded_pending(&self) -> u64 {
-        self.mailboxes
-            .iter()
-            .map(MarkMailbox::forwarded)
-            .fold(0_u64, u64::saturating_add)
+        self.forwarded_in_flight.len() as u64
     }
 
     /// 登记 cycle 内真实标记的对象数。
