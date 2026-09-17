@@ -124,6 +124,40 @@ handle、compressed reference、MarkTicket、EdgeDelta 和 RegionTransfer 的 ve
 TypeId、state、lease、integrity 和 exactly-once 状态；检查失败进入 `RuntimeInvariant`，
 不能退化为普通对象扫描或 raw free。
 
+`RuntimeRawModel`（query 30）当前为 schema 18，在同一 `RuntimeRawContractV1` 中并入
+`SharedHeapRuntimeContract`（schema 1，profile `mosaic-shared-handle` revision 1）：stable
+handle 身份按高 4 位 tag `0xA`、12 位 table、24 位 generation、24 位 slot 编码，table 是逻辑
+表身份而不是宿主地址；`SharedHandleSlot` 固定 64 byte / 64 byte 对齐，登记 generation、状态、
+current/old payload identity、forward generation、grace epoch、access guard、pin、mark ticket、
+forwarding lease 与 owner/block/payload 字节数，`SharedPayloadRecord` 固定 32 byte 且只含
+payload identity、block/offset、generation、owner、bytes 与状态，两者由内建
+`std/runtime/heap.gg` 逐字段交叉校验。slot 状态目录固定为
+`free`/`live`/`forwarding`/`grace`/`reclaimable`/`owned-free`，唯一允许的迁移是
+`free -> live`、`live -> forwarding`、`forwarding -> grace`、`grace -> live`、
+`live -> owned-free`、`grace -> reclaimable -> live` 与已释放槽的下一次发布
+`owned-free -> live`（发布时推进 handle generation，因此复用不会让旧 handle 重新生效）；
+forwarding grace 步数为 4，只有 grace 走满且 access guard、pin lease、mark ticket 与
+forwarding lease 全部为 0 才释放旧 payload。`SharedHeapDemand` 由优化后 LIR 推导并强制
+`alloc_sites == resolve_sites == handle_slots`、`access_begin_sites == access_end_sites`、
+`payload_copy_sites == forward_sites`。`HandleForward` 作为 GC 工作消息族的判别值 5 登记
+16 个字段（handle table/slot、handle/forward generation、old/new payload identity、
+cycle/topology epoch、target owner 身份、bytes、state、integrity、family），字段集合禁止携带
+managed 或 raw 地址；mark ticket 的 `ticket_sites` 与 `mark_sites`、共享字段屏障站点与
+`barrier_sites` 由契约交叉校验。`runtime/shared_heap.rs` 是这套身份的确定性参照实现：
+payload 与 slot 都是稠密编号，free 槽用稠密栈复用，generation 是唯一的 ABA 防线，
+`resolve_payload` 只接受当前 heap 产生的 fresh identity，重复解析、过期 table/slot/generation、
+被 pin 的 forward、非递增 forward generation 与提前回收都返回不变量失败。
+
+`ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `shared-heap-contract-fingerprint`、
+`shared-heap-demand`、`shared-heap-profile`、`shared-heap-profile-revision`、
+`shared-heap-handle-tag`、`shared-heap-slot-bytes`、`shared-heap-payload-record-bytes`、
+`shared-heap-forwarding-grace-steps`、`shared-heap-state-count`、
+`shared-heap-transition-count`、`shared-heap-forward-fields` 与 `shared-heap-records`。
+`runtime::shared_heap_tests` 覆盖 guard 期间旧 payload 可读、四步 grace 后才能回收、
+guard/pin/mark ticket 阻止提前回收、pin 推迟 forward 且不改变 generation、重复解析与过期
+身份拒绝、释放后复用推进 generation、搬迁保持字节并线性化 current payload，以及每个 cycle
+至多一次 side mark。
+
 ## `TypeId` 与 descriptor table
 
 单态化闭合后，编译器按[单态化与编译缓存](monomorphization-cache.md#concrete-type-set-typeid)的 `StableTypeKey` 顺序分配 `TypeId`。每个 `0..type_id_count()` 值在 type section 中恰有一条固定 80 字节 `TypeRecord`；记录顺序就是 `TypeId`，不重复保存数字 ID。

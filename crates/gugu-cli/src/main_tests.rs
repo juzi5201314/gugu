@@ -367,6 +367,18 @@ fn build_json_reports_barrier_contract_keys() {
         "local-heap-runtime",
         "local-heap-trigger",
         "local-heap-demand",
+        "shared-heap-contract-fingerprint",
+        "shared-heap-demand",
+        "shared-heap-profile",
+        "shared-heap-profile-revision",
+        "shared-heap-handle-tag",
+        "shared-heap-slot-bytes",
+        "shared-heap-payload-record-bytes",
+        "shared-heap-forwarding-grace-steps",
+        "shared-heap-state-count",
+        "shared-heap-transition-count",
+        "shared-heap-forward-fields",
+        "shared-heap-records",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
@@ -480,7 +492,7 @@ fn build_json_reports_barrier_contract_keys() {
     );
     assert_eq!(
         payload["mark-demand"]["ticket-sites"],
-        payload["local-heap-demand"]["shared-sites"]
+        payload["shared-heap-demand"]["mark-sites"]
     );
     assert_eq!(payload["pacing-profile"], "mosaic-default");
     assert_eq!(payload["pacing-gc-cpu-fraction"], 25);
@@ -512,6 +524,65 @@ fn build_json_reports_barrier_contract_keys() {
             .any(|byte| byte != &serde_json::json!(0))
     );
     let fingerprint = payload["barrier-contract-fingerprint"]
+        .as_array()
+        .expect("指纹是字节数组");
+    assert_eq!(fingerprint.len(), 32);
+    assert!(fingerprint.iter().any(|byte| byte != &serde_json::json!(0)));
+}
+
+/// sender 在 send 之后仍使用闭包时必须落 SharedHeap；JSON 契约键与 dump 同源。
+#[test]
+fn build_json_reports_shared_heap_contract_keys() {
+    let source = "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n _ = closure()\n }";
+    let compilation =
+        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+            "main.gg",
+            source,
+            gugu_compiler::TargetName::X86_64Linux,
+        ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    let payload = super::output::image_plan_payload(plan);
+    for key in [
+        "shared-heap-contract-fingerprint",
+        "shared-heap-demand",
+        "shared-heap-profile",
+        "shared-heap-profile-revision",
+        "shared-heap-handle-tag",
+        "shared-heap-slot-bytes",
+        "shared-heap-payload-record-bytes",
+        "shared-heap-forwarding-grace-steps",
+        "shared-heap-state-count",
+        "shared-heap-transition-count",
+        "shared-heap-forward-fields",
+        "shared-heap-records",
+    ] {
+        assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
+    }
+    let demand = &payload["shared-heap-demand"];
+    // 分配、解析与 slot 上界是同一个站点集合：每个 fresh payload 恰解析一次。
+    assert_eq!(demand["alloc-sites"], demand["resolve-sites"]);
+    assert_eq!(demand["alloc-sites"], demand["handle-slots"]);
+    assert!(demand["alloc-sites"].as_u64().unwrap_or(0) > 0);
+    assert!(demand["access-begin-sites"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(demand["access-begin-sites"], demand["access-end-sites"]);
+    assert_eq!(payload["shared-heap-profile"], "mosaic-shared-handle");
+    assert_eq!(payload["shared-heap-profile-revision"], 1);
+    assert_eq!(payload["shared-heap-handle-tag"], 10);
+    assert_eq!(payload["shared-heap-slot-bytes"], 64);
+    assert_eq!(payload["shared-heap-payload-record-bytes"], 32);
+    assert_eq!(payload["shared-heap-forwarding-grace-steps"], 4);
+    assert_eq!(payload["shared-heap-state-count"], 6);
+    assert_eq!(payload["shared-heap-transition-count"], 8);
+    assert_eq!(payload["shared-heap-forward-fields"], 16);
+    assert_eq!(payload["shared-heap-records"], 2);
+    // LocalHeap 不再为共享 guard/handle 保留容量字段。
+    assert!(payload["local-heap-demand"].get("shared-sites").is_none());
+    let fingerprint = payload["shared-heap-contract-fingerprint"]
         .as_array()
         .expect("指纹是字节数组");
     assert_eq!(fingerprint.len(), 32);

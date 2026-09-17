@@ -5,6 +5,7 @@ mod provenance;
 mod raw_publish;
 mod regions;
 pub(super) mod resource_isolation;
+mod shared_access;
 
 use super::body::{
     BlockId, Body, Definition, EdgeId, InstId, Origin, SafepointId, Terminator, Type, UseSite,
@@ -40,6 +41,7 @@ fn verify_structure_with(
     operations::verify(body)?;
     regions::verify_lifecycle(body)?;
     provenance::verify(body, &graph)?;
+    shared_access::verify(body)?;
     let (ranges, uses) = super::uses::calculate(body);
     if uses != body.uses
         || body

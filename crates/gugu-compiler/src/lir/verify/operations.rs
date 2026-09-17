@@ -144,6 +144,25 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
             }
             Op::SharedAccessBegin { .. } => a == [Type::Ptr] && r.is_empty(),
             Op::SharedAccessEnd { .. } | Op::ScopedViewEnd { .. } => a.is_empty() && r.is_empty(),
+            // 共享字段屏障不带参数与结果：地址与新值留在它关联的 Store 里，token 与 permit
+            // 由 shared access verifier 与 region 生命周期 verifier 交叉检查。
+            Op::SharedFieldBarrier { store, token } => {
+                a.is_empty()
+                    && r.is_empty()
+                    && *token != 0
+                    && store.index() < body.instructions.len()
+            }
+            Op::SharedFieldBarrierReserved {
+                store,
+                token,
+                permit,
+            } => {
+                a.is_empty()
+                    && r.is_empty()
+                    && *token != 0
+                    && store.index() < body.instructions.len()
+                    && permit.index() < body.barrier_permits.len()
+            }
             Op::ScopedViewBegin { .. } => a == [Type::Ptr] && r.is_empty(),
             Op::BarrierReserve(permit) => {
                 a.is_empty() && r.is_empty() && permit.index() < body.barrier_permits.len()

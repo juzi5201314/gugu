@@ -1,6 +1,7 @@
 use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::frontend::gir::body::{LocalId, LocalKind, Place, Projection, Rvalue, StatementKind};
 use crate::frontend::gir::placement::{ExportFlags, PlacementKind};
+use crate::frontend::hir;
 use crate::lir::body::{
     Lifetime, Op, Origin, Provenance, SlotId, StackSlot, Type, ValueId, ValueType, id,
 };
@@ -78,7 +79,14 @@ impl Builder<'_> {
                         PlacementKind::Stack => PlacementKind::LocalHeap,
                         kind => kind,
                     });
-                let variable = self.variable(id(index), 0, ValueType::pointer(Provenance::GcHeap));
+                // SharedHeap 的 Heap storage 保存 stable handle；其余 placement 保存 direct pointer。
+                // 两种车道严格区分，因此 handle 不可能被当作地址送进 LocalHeap 的地址 API。
+                let kind = if placement == PlacementKind::SharedHeap {
+                    ValueType::pointer(Provenance::SharedHandle)
+                } else {
+                    ValueType::pointer(Provenance::GcHeap)
+                };
+                let variable = self.variable(id(index), 0, kind);
                 self.storage.push(Storage::Heap {
                     variable,
                     placement,
@@ -130,9 +138,12 @@ impl Builder<'_> {
                 .collect();
         }
         if !self.owner.captures.is_empty() {
-            self.environment = Some(
-                self.entry_parameter(ValueType::pointer(Provenance::GcHeap), (u32::MAX - 2, 0)),
-            );
+            let kind = if self.shared_environment(self.owner.definition)? {
+                ValueType::pointer(Provenance::SharedHandle)
+            } else {
+                ValueType::pointer(Provenance::GcHeap)
+            };
+            self.environment = Some(self.entry_parameter(kind, (u32::MAX - 2, 0)));
         }
         for index in 0..self.gir.locals.len() {
             if self.gir.locals[index].kind != LocalKind::Argument {
@@ -172,17 +183,49 @@ impl Builder<'_> {
             }
         }
         if let Some(environment) = self.environment {
-            for (offset, capture) in self.owner.captures.iter().enumerate() {
+            let shared = self.shared_environment(self.owner.definition)?;
+            let mut offset = 0u64;
+            let mut loaded = Vec::with_capacity(self.owner.captures.len());
+            // 共享环境只开一个 guard 覆盖全部捕获读取：同一个 handle 的多次解析不该产生多个
+            // guard；读出的值先留在 SSA，guard 结束后再写进各自的栈副本。
+            if shared {
+                self.begin_shared(environment);
+            }
+            for capture in &self.owner.captures {
                 let local = self
                     .gir
                     .locals
                     .iter()
                     .position(|local| local.hir_local == Some(capture.local))
                     .ok_or_else(|| invalid("capture 没有具体 local"))?;
-                let offset = u64::try_from(offset).expect("捕获数量适配 u64") * 8;
+                let ty = self.local_ty(LocalId(id(local)));
+                if shared {
+                    // 共享环境按值捕获：每个捕获按 ABI 车道顺序占用连续 8-byte 槽，读出时先复制
+                    // 到栈副本，再把副本地址当作 capture storage，因此 guard 内不会留下地址。
+                    let mut values = Vec::new();
+                    for (index, kind) in self.abi_lanes(ty).into_iter().enumerate() {
+                        let source = self.offset(
+                            environment,
+                            offset + u64::try_from(index).expect("车道编号") * 8,
+                        );
+                        values.push(self.load(source, kind.2, 8, false));
+                    }
+                    offset += u64::try_from(values.len()).expect("车道数适配 u64") * 8;
+                    loaded.push((local, ty, values));
+                    continue;
+                }
                 let address = self.offset(environment, offset);
                 let address = self.load(address, ValueType::pointer(Provenance::GcHeap), 8, false);
                 self.storage[local] = Storage::Capture { address };
+                offset += 8;
+            }
+            if shared {
+                self.end_shared()?;
+                for (local, ty, values) in loaded {
+                    let temporary = self.temporary(ty)?;
+                    self.store_abi(temporary, ty, &values)?;
+                    self.storage[local] = Storage::Capture { address: temporary };
+                }
             }
         }
         Ok(())
@@ -261,12 +304,20 @@ impl Builder<'_> {
             }
             TypeKind::Reference(_) => one(ValueType::pointer(Provenance::GcInterior)),
             TypeKind::Pointer(_) => one(ValueType::pointer(Provenance::Raw)),
-            TypeKind::Channel(_)
-            | TypeKind::Join(_)
-            | TypeKind::Panic
-            | TypeKind::FunctionItem {
-                capturing: true, ..
-            } => one(ValueType::pointer(Provenance::GcHeap)),
+            TypeKind::FunctionItem {
+                definition,
+                capturing: true,
+                ..
+            } => one(ValueType::pointer(
+                if self.closure_is_shared(hir::DefId(*definition)) {
+                    Provenance::SharedHandle
+                } else {
+                    Provenance::GcHeap
+                },
+            )),
+            TypeKind::Channel(_) | TypeKind::Join(_) | TypeKind::Panic => {
+                one(ValueType::pointer(Provenance::GcHeap))
+            }
             TypeKind::MaybeUninit(_) => None,
             _ => None,
         }
@@ -326,14 +377,23 @@ impl Builder<'_> {
     fn collect_roots(&self, ty: u32, base: u64, roots: &mut Vec<(u64, Provenance)>) {
         match self.kind(ty) {
             TypeKind::Reference(_) => roots.push((base, Provenance::GcInterior)),
+            TypeKind::FunctionItem {
+                definition,
+                capturing: true,
+                ..
+            } => roots.push((
+                base,
+                if self.closure_is_shared(hir::DefId(*definition)) {
+                    Provenance::SharedHandle
+                } else {
+                    Provenance::GcHeap
+                },
+            )),
             TypeKind::Channel(_)
             | TypeKind::Join(_)
             | TypeKind::Panic
             | TypeKind::String
-            | TypeKind::Dynamic
-            | TypeKind::FunctionItem {
-                capturing: true, ..
-            } => roots.push((base, Provenance::GcHeap)),
+            | TypeKind::Dynamic => roots.push((base, Provenance::GcHeap)),
             TypeKind::Function { .. } => roots.push((base + 8, Provenance::GcHeap)),
             TypeKind::Array { element, count } => {
                 let size = self.layout(*element).layout.expect("元素布局").size;

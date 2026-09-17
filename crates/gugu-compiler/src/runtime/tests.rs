@@ -651,6 +651,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             owners: 2,
             message_nodes: 0,
             turn_region: TurnRegionDemand::default(),
+            shared_heap: crate::runtime::SharedHeapDemand::default(),
         },
         RawResourceDemand::default(),
         Rt0Demand::default(),
@@ -735,6 +736,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         owners: 1,
         message_nodes: 0,
         turn_region: TurnRegionDemand::default(),
+        shared_heap: crate::runtime::SharedHeapDemand::default(),
     };
     let scheduler = SchedulerDemand {
         spawn_sites: 1,

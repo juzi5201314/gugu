@@ -85,6 +85,17 @@ mod scheduler;
 mod scheduler_schema;
 #[allow(dead_code, reason = "等待协议的确定性参照实现")]
 mod select;
+#[allow(
+    dead_code,
+    reason = "stable handle 与 forwarding grace 的确定性参照实现"
+)]
+mod shared_heap;
+mod shared_heap_layout;
+#[allow(
+    dead_code,
+    reason = "shared heap 契约段由 runtime raw、世界与 ImagePlan 消费"
+)]
+pub(crate) mod shared_heap_schema;
 #[allow(dead_code, reason = "栈尺寸与精确复制协议的确定性参照实现")]
 mod stack;
 #[allow(dead_code, reason = "栈arena与cache的确定性参照实现")]
@@ -122,6 +133,7 @@ pub use mark_schema::{MarkDemand, MarkRuntimeContract};
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
 pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
+pub use shared_heap_schema::{SharedHeapDemand, SharedHeapRuntimeContract};
 pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};
 pub use wait_schema::{WaitDemand, WaitRuntimeContract};
@@ -174,6 +186,8 @@ mod process_tests;
 mod report_tests;
 #[cfg(test)]
 mod scheduler_tests;
+#[cfg(test)]
+mod shared_heap_tests;
 #[cfg(test)]
 mod stackmap_tests;
 #[cfg(test)]

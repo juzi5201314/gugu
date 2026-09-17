@@ -76,6 +76,13 @@ struct Builder<'a> {
     statement: u32,
     /// 每个 block 的 region 结束动作；由 `EscapeAndPlacement` 的 region 计划静态决定。
     region_ends: Vec<Vec<RegionEnd>>,
+    /// 单调递增的 shared access token；每个 body 内唯一且非零。
+    next_shared_token: u32,
+    /// 当前打开的 shared access guard 栈；栈顶是最近一次 `SharedAccessBegin` 的 token。
+    ///
+    /// 共享 place 的字段访问必须在这个 guard 内发生：`address`/`read_place`/`write_place`
+    /// 用它决定 `SharedFieldBarrier` 关联的 token，并阻止 guard 内的派生地址泄漏到 guard 外。
+    shared_guards: Vec<u32>,
 }
 
 /// 一个边界 block 上的 region 结束动作。
@@ -173,6 +180,8 @@ pub(crate) fn lower(
         fixed_edges: Vec::new(),
         statement: 0,
         region_ends: region_ends(world, concrete.generic_body, concrete.body.blocks.len()),
+        next_shared_token: 0,
+        shared_guards: Vec::new(),
     };
     builder.prepare_storage()?;
     builder.prepare_blocks();
@@ -267,6 +276,106 @@ impl Builder<'_> {
     fn layout(&self, ty: u32) -> &TypeLayout {
         &self.concrete.types[usize::try_from(ty).expect("类型编号适配宿主")]
     }
+
+    /// 判断一个 local 的 storage 是否是 SharedHeap stable handle。
+    ///
+    /// handle 不是地址：它的字段访问必须经过 access guard，`address`/`read_place`/`write_place`
+    /// 因此走共享路径而不是 direct pointer 路径。
+    pub(super) fn is_shared(&self, local: gir::body::LocalId) -> bool {
+        matches!(
+            self.storage[local.index()],
+            Storage::Heap {
+                placement: gir::placement::PlacementKind::SharedHeap,
+                ..
+            }
+        )
+    }
+
+    /// 返回该 local 的 SharedHeap handle 值。
+    pub(super) fn shared_handle(
+        &mut self,
+        local: gir::body::LocalId,
+    ) -> Result<ValueId, Diagnostic> {
+        let Storage::Heap { variable, .. } = self.storage[local.index()] else {
+            return Err(invalid("shared handle 需要 Heap storage"));
+        };
+        self.read(variable)
+    }
+
+    /// 打开一段 shared access guard；返回该 guard 的 token。
+    pub(super) fn begin_shared(&mut self, handle: ValueId) -> u32 {
+        self.next_shared_token += 1;
+        let token = self.next_shared_token;
+        self.emit(Op::SharedAccessBegin { token }, &[handle], &[]);
+        self.shared_guards.push(token);
+        token
+    }
+
+    /// 关闭最近打开的 shared access guard。
+    pub(super) fn end_shared(&mut self) -> Result<(), Diagnostic> {
+        let token = self
+            .shared_guards
+            .pop()
+            .ok_or_else(|| invalid("shared access guard 栈为空"))?;
+        self.emit(Op::SharedAccessEnd { token }, &[], &[]);
+        Ok(())
+    }
+
+    /// 返回当前打开的 shared access guard 的 token。
+    pub(super) fn active_shared_token(&self) -> Option<u32> {
+        self.shared_guards.last().copied()
+    }
+
+    /// 闭包环境的表示：由 placement 的分配点表决定，`SharedHeap` 环境以 stable handle 传递。
+    ///
+    /// 环境分配点就是闭包字面量所在的语句，因此按「闭包定义 → (body, statement) → 分配记录」
+    /// 唯一点查。同一闭包本体出现互相冲突的表示时必须拒绝：一个 LIR body 只有一条环境车道，
+    /// 不允许在同一个 body 里混用 handle 与 direct pointer。
+    pub(super) fn shared_environment(&self, definition: hir::DefId) -> Result<bool, Diagnostic> {
+        let mut observed: Option<gir::placement::PlacementKind> = None;
+        for (body, gir_body) in self.world.bodies.iter().enumerate() {
+            for (statement, value) in gir_body.statements.iter().enumerate() {
+                let gir::body::StatementKind::Assign(
+                    _,
+                    gir::body::Rvalue::Aggregate {
+                        kind: gir::body::AggregateKind::Closure(closure),
+                        ..
+                    },
+                ) = &value.kind
+                else {
+                    continue;
+                };
+                if *closure != definition {
+                    continue;
+                }
+                let body = u32::try_from(body).expect("body 下标适配 u32");
+                let statement = u32::try_from(statement).expect("语句下标适配 u32");
+                let kind = self
+                    .world
+                    .placement
+                    .allocs
+                    .iter()
+                    .find(|alloc| alloc.body == body && alloc.statement == statement)
+                    .map_or(gir::placement::PlacementKind::LocalHeap, |alloc| alloc.kind);
+                if let Some(observed) = observed
+                    && observed != kind
+                {
+                    return Err(invalid("同一闭包本体不能同时由 shared 与 local 环境实例化"));
+                }
+                observed = Some(kind);
+            }
+        }
+        Ok(observed == Some(gir::placement::PlacementKind::SharedHeap))
+    }
+
+    /// 非失败版本的闭包环境探测：ABI 车道与 root 推导用它决定 environment lane。
+    ///
+    /// 冲突表示由 `prepare_entry` 与 `capture_environment` 明确拒绝，这里只对车道推导给出
+    /// 保守答案（按 direct pointer），不会让冲突悄悄进入镜像。
+    pub(super) fn closure_is_shared(&self, definition: hir::DefId) -> bool {
+        self.shared_environment(definition).unwrap_or(false)
+    }
+
     fn local_ty(&self, local: gir::body::LocalId) -> u32 {
         self.gir.locals[local.index()].ty.0
     }

@@ -18,16 +18,30 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
             Op::PtrOffset => {
                 let input = body.values[args[0].index()].kind.provenance;
                 let output = results[0].kind.provenance;
-                // handle 与压缩引用不参与偏移推导：二者必须先解析或解码，任何直接
-                // 偏移都是绕过 guard 的越权。
+                // 压缩引用不参与偏移推导：它必须先经 `DecodeCompressedRef` 解码。
+                if matches!(input, Some(Provenance::CompressedRef))
+                    || matches!(output, Some(Provenance::CompressedRef))
+                {
+                    return Err(invalid("压缩引用不能直接做指针偏移"));
+                }
+                // SharedHandle 的偏移是 guard 内的字段投影：它保持 handle provenance，
+                // 由 shared access verifier 强制「只在派生它的 guard 内使用」。
                 if matches!(
-                    input,
-                    Some(Provenance::SharedHandle | Provenance::CompressedRef)
-                ) || matches!(
-                    output,
-                    Some(Provenance::SharedHandle | Provenance::CompressedRef)
+                    (input, output),
+                    (
+                        Some(Provenance::SharedHandle),
+                        Some(Provenance::SharedHandle)
+                    )
                 ) {
-                    return Err(invalid("handle 或压缩引用不能直接做指针偏移"));
+                    if results[0].origin != Origin::Derived(args[0]) {
+                        return Err(invalid("PtrOffset 丢失基址来源"));
+                    }
+                    return Ok(());
+                }
+                if matches!(input, Some(Provenance::SharedHandle))
+                    || matches!(output, Some(Provenance::SharedHandle))
+                {
+                    return Err(invalid("handle 的偏移必须保持 handle provenance"));
                 }
                 if input != output
                     && !matches!(

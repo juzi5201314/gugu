@@ -257,8 +257,6 @@ pub struct LocalHeapDemand {
     pub pinned_sites: u32,
     /// Resource placement 的分配站点数。
     pub resource_sites: u32,
-    /// SharedHeap placement 的分配站点数。
-    pub shared_sites: u32,
     /// TurnRegion 提升站点数。
     pub promote_sites: u32,
     /// `RuntimeCall::Pin` 站点数。
@@ -282,7 +280,6 @@ impl LocalHeapDemand {
         bytes.extend_from_slice(&self.alloc_sites.to_le_bytes());
         bytes.extend_from_slice(&self.pinned_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_sites.to_le_bytes());
-        bytes.extend_from_slice(&self.shared_sites.to_le_bytes());
         bytes.extend_from_slice(&self.promote_sites.to_le_bytes());
         bytes.extend_from_slice(&self.pin_sites.to_le_bytes());
         bytes.extend_from_slice(&self.unpin_sites.to_le_bytes());
@@ -298,11 +295,10 @@ impl LocalHeapDemand {
         let placements = self
             .pinned_sites
             .checked_add(self.resource_sites)
-            .and_then(|total| total.checked_add(self.shared_sites))
             .ok_or_else(|| RawModelError::new("placement 站点数溢出"))?;
         if placements > self.alloc_sites {
             return Err(RawModelError::new(
-                "Pinned/Resource/SharedHeap placement 站点数不得超过 LocalHeap placement",
+                "Pinned/Resource placement 站点数不得超过 LocalHeap placement",
             ));
         }
         if self.large_types > self.managed_types {
@@ -697,11 +693,10 @@ impl LocalHeapRuntimeContract {
         );
         let _ = writeln!(
             out,
-            "local-heap-demand alloc={} pinned={} resource={} shared={} promote={} pin={} unpin={} barrier={} managed-types={} large-types={} max-object-bytes={}",
+            "local-heap-demand alloc={} pinned={} resource={} promote={} pin={} unpin={} barrier={} managed-types={} large-types={} max-object-bytes={}",
             self.demand.alloc_sites,
             self.demand.pinned_sites,
             self.demand.resource_sites,
-            self.demand.shared_sites,
             self.demand.promote_sites,
             self.demand.pin_sites,
             self.demand.unpin_sites,

@@ -221,7 +221,6 @@ fn local_heap_demand_rejects_impossible_placement_and_large_counts() {
         alloc_sites: 3,
         pinned_sites: 1,
         resource_sites: 1,
-        shared_sites: 1,
         promote_sites: 1,
         pin_sites: 1,
         unpin_sites: 1,
@@ -232,7 +231,7 @@ fn local_heap_demand_rejects_impossible_placement_and_large_counts() {
     };
     assert!(manifest.verify(GC_BLOCK_BYTES).is_ok());
     let mut oversized = manifest;
-    oversized.alloc_sites = 2;
+    oversized.alloc_sites = 1;
     assert!(oversized.verify(GC_BLOCK_BYTES).is_err());
     let mut wrong_large = manifest;
     wrong_large.large_types = 0;

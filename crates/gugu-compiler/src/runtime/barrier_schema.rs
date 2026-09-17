@@ -682,6 +682,8 @@ pub(crate) enum MessageFamilyTag {
     MarkTicket,
     /// GC 工作消息：跨 block 的边增删差量。
     EdgeDelta,
+    /// GC 工作消息：跨 owner 的 shared handle 搬迁。
+    HandleForward,
 }
 
 impl MessageFamilyTag {
@@ -693,6 +695,7 @@ impl MessageFamilyTag {
             Self::RegionTransfer => 2,
             Self::MarkTicket => 3,
             Self::EdgeDelta => 4,
+            Self::HandleForward => 5,
         }
     }
 
@@ -704,6 +707,7 @@ impl MessageFamilyTag {
             Self::RegionTransfer => "region-transfer",
             Self::MarkTicket => "mark-ticket",
             Self::EdgeDelta => "edge-delta",
+            Self::HandleForward => "handle-forward",
         }
     }
 }

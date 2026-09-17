@@ -477,6 +477,17 @@ pub(crate) enum Op {
     SharedAccessEnd {
         token: u32,
     },
+    /// 共享字段写入的屏障记录；`store` 指向同一个 guard 内更早的 Store。
+    SharedFieldBarrier {
+        store: InstId,
+        token: u32,
+    },
+    /// 已经过 `BarrierReserve` 的共享字段屏障；`permit` 与同 region 的 LocalHeap 屏障共用额度。
+    SharedFieldBarrierReserved {
+        store: InstId,
+        token: u32,
+        permit: PermitId,
+    },
     ForwardSharedHandle,
     DecodeCompressedRef,
     BarrierReserve(PermitId),

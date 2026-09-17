@@ -643,7 +643,11 @@ impl Builder<'_> {
                 Origin::None,
             ));
         }
+        let (placement, region) = self.environment_placement();
+        let shared = placement == PlacementKind::SharedHeap;
         let mut captures = Vec::with_capacity(owner.captures.len());
+        let mut shared_values = Vec::with_capacity(owner.captures.len());
+        let mut shared_bytes = 0u64;
         for capture in &owner.captures {
             let local = if capture.owner == self.owner.definition {
                 capture.source
@@ -662,14 +666,46 @@ impl Builder<'_> {
                 .position(|candidate| candidate.hir_local == Some(local))
                 .ok_or_else(|| invalid("capture 源槽没有 GIR 身份"))?;
             let local_id = g::LocalId(id(local));
-            if self.layout(self.local_ty(local_id)).passing.has_resource() {
+            let ty = self.local_ty(local_id);
+            if self.layout(ty).passing.has_resource() {
                 return Err(invalid_resource(
                     "Resource 值不能捕获到 managed closure environment",
                 ));
             }
-            captures.push(self.address(g::Place::local(local_id))?.0);
+            if shared {
+                // 共享环境按值捕获：direct pointer 会跟着 payload 跨 owner，因此只允许标量、
+                // 聚合数据与 stable handle；指针车道一律在 lowering 阶段拒绝。
+                if self.abi_lanes(ty).iter().any(|(_, _, kind)| {
+                    matches!(
+                        kind.provenance,
+                        Some(
+                            Provenance::GcHeap
+                                | Provenance::GcInterior
+                                | Provenance::Stack
+                                | Provenance::Raw
+                                | Provenance::CompressedRef
+                                | Provenance::Code
+                                | Provenance::Metadata
+                                | Provenance::Foreign
+                        )
+                    )
+                }) {
+                    return Err(invalid(
+                        "共享闭包环境不能按值捕获 direct pointer，只能捕获标量或 stable handle",
+                    ));
+                }
+                shared_bytes +=
+                    u64::try_from(self.abi_lanes(ty).len()).expect("车道数适配 u64") * 8;
+                shared_values.push((local_id, ty));
+            } else {
+                captures.push(self.address(g::Place::local(local_id))?.0);
+            }
         }
-        let bytes = u64::try_from(captures.len()).expect("捕获数量") * 8;
+        let bytes = if shared {
+            shared_bytes
+        } else {
+            u64::try_from(captures.len()).expect("捕获数量适配 u64") * 8
+        };
         let descriptor = mono::keys::hash_domain(
             "gugu-capture-environment-v1",
             &self.module.definitions[definition.index()].key,
@@ -677,25 +713,54 @@ impl Builder<'_> {
         self.body.environments.push(crate::lir::body::Environment {
             descriptor,
             bytes,
-            roots: captures
-                .iter()
-                .enumerate()
-                .map(|(index, value)| {
-                    (
-                        u64::try_from(index).expect("捕获编号") * 8,
-                        self.machine_type(*value).provenance.expect("捕获槽为指针"),
-                    )
-                })
-                .collect(),
+            // 共享环境按值保存数据与 handle，不含 LocalHeap 的 managed 根；环境自身的移动由
+            // stable handle 与 forwarding grace 负责，因此这里不登记 root。
+            roots: if shared {
+                Vec::new()
+            } else {
+                captures
+                    .iter()
+                    .enumerate()
+                    .map(|(index, value)| {
+                        (
+                            u64::try_from(index).expect("捕获编号") * 8,
+                            self.machine_type(*value).provenance.expect("捕获槽为指针"),
+                        )
+                    })
+                    .collect()
+            },
         });
         // 闭包环境是唯一存活的 managed 分配点：placement 已证明它属于当前 turn 的私有
         // region 时走 `RegionAlloc`，否则按证明结果选择 stable storage。
-        let (placement, region) = self.environment_placement();
-        let environment = self.allocate_descriptor(descriptor, 8, bytes, placement, region)?;
-        for (index, pointer) in captures.into_iter().enumerate() {
-            let destination = self.offset(environment, u64::try_from(index).expect("捕获编号") * 8);
-            self.store(destination, pointer, 8, false);
+        if !shared {
+            let environment = self.allocate_descriptor(descriptor, 8, bytes, placement, region)?;
+            for (index, pointer) in captures.into_iter().enumerate() {
+                let destination =
+                    self.offset(environment, u64::try_from(index).expect("捕获编号") * 8);
+                self.store(destination, pointer, 8, false);
+            }
+            return Ok(environment);
         }
+        let mut values = Vec::with_capacity(shared_values.len());
+        for (local_id, _) in &shared_values {
+            values.push(self.read_place(g::Place::local(*local_id))?);
+        }
+        let environment = self.allocate_descriptor(descriptor, 8, bytes, placement, region)?;
+        self.begin_shared(environment);
+        let mut offset = 0u64;
+        for ((_, ty), computed) in shared_values.iter().zip(values) {
+            let lanes = self.computed_values(computed)?;
+            debug_assert_eq!(lanes.len(), self.abi_lanes(*ty).len());
+            for (index, value) in lanes.into_iter().enumerate() {
+                let destination = self.offset(
+                    environment,
+                    offset + u64::try_from(index).expect("车道编号") * 8,
+                );
+                self.store(destination, value, 8, false);
+            }
+            offset += u64::try_from(self.abi_lanes(*ty).len()).expect("车道数适配 u64") * 8;
+        }
+        self.end_shared()?;
         Ok(environment)
     }
 

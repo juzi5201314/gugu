@@ -427,6 +427,7 @@ impl Compiler {
         }
         // runtime raw 平面契约：输入来自冻结前端产物与目标描述，与 LIR 一起构成内部表示。
         let coroutine_demand = lir.coroutine_demand();
+        let shared_heap_demand = lir.shared_heap_demand(max_object_bytes);
         let demand = RawPlaneDemand {
             coroutine_sites: coroutine_demand.creation_sites,
             checked_entries: coroutine_demand.checked_entries,
@@ -436,6 +437,7 @@ impl Compiler {
             owners: 0,
             message_nodes: 0,
             turn_region: lir.turn_region_demand(),
+            shared_heap: shared_heap_demand,
         };
         let rt0_demand = {
             let module = frontend.hir.module();
@@ -470,11 +472,12 @@ impl Compiler {
         let gc_demand = gc_metadata_demand(&gc_metadata);
         let local_heap_demand =
             lir.local_heap_demand(managed_type_count, large_type_count, max_object_bytes);
-        // mark 需求完全由已有三份 demand 推导，不新增 LIR 遍历，避免出现第二份站点口径。
+        // mark 需求完全由已有三份 demand 推导，不新增 LIR 遍历，避免出现第二份站点口径；
+        // 跨 owner ticket 的来源就是 SharedHeap 的共享字段屏障站点。
         let mark_demand = runtime::MarkDemand {
             root_sites: gc_demand.root_range_count,
             barrier_sites: barrier_demand.card_mark_sites,
-            ticket_sites: local_heap_demand.shared_sites,
+            ticket_sites: shared_heap_demand.mark_sites,
             edge_delta_sites: barrier_demand.edge_summary_sites,
         };
         let raw_contract = match runtime::run(
@@ -1087,6 +1090,9 @@ pub struct ImagePlan {
     local_heap_contract_fingerprint: [u8; 32],
     local_heap_demand: crate::runtime::LocalHeapDemand,
     local_heap_runtime: crate::runtime::LocalHeapRuntimeContract,
+    shared_heap_contract_fingerprint: [u8; 32],
+    shared_heap_demand: crate::runtime::SharedHeapDemand,
+    shared_heap_runtime: crate::runtime::SharedHeapRuntimeContract,
     mark_contract_fingerprint: [u8; 32],
     mark_demand: crate::runtime::MarkDemand,
     mark_runtime: crate::runtime::MarkRuntimeContract,
@@ -1260,6 +1266,9 @@ impl ImagePlan {
             local_heap_contract_fingerprint: plan.local_heap_contract_fingerprint,
             local_heap_demand: plan.local_heap_demand,
             local_heap_runtime: plan.local_heap_runtime,
+            shared_heap_contract_fingerprint: plan.shared_heap_contract_fingerprint,
+            shared_heap_demand: plan.shared_heap_demand,
+            shared_heap_runtime: plan.shared_heap_runtime,
             mark_contract_fingerprint: plan.mark_contract_fingerprint,
             mark_demand: plan.mark_demand,
             mark_runtime: plan.mark_runtime,
@@ -1784,6 +1793,21 @@ impl ImagePlan {
     /// 返回已验证的 LocalHeap Immix/TLAB/分代契约段。
     pub fn local_heap_runtime(&self) -> &crate::runtime::LocalHeapRuntimeContract {
         &self.local_heap_runtime
+    }
+
+    /// 返回 SharedHeap 契约指纹。
+    pub fn shared_heap_contract_fingerprint(&self) -> [u8; 32] {
+        self.shared_heap_contract_fingerprint
+    }
+
+    /// 返回 SharedHeap 需求视图。
+    pub fn shared_heap_demand(&self) -> crate::runtime::SharedHeapDemand {
+        self.shared_heap_demand
+    }
+
+    /// 返回已验证的 SharedHeap stable handle 与 forwarding grace 契约段。
+    pub fn shared_heap_runtime(&self) -> &crate::runtime::SharedHeapRuntimeContract {
+        &self.shared_heap_runtime
     }
 
     /// 返回 mark 契约指纹。
@@ -2759,7 +2783,7 @@ mod tests {
         assert_eq!(plan.mark_ticket_field_count(), 15);
         assert_eq!(plan.mark_record_count(), 5);
         assert!(plan.mark_credit_pool() > 0);
-        // mark 需求覆盖的站点集合与 gc metadata/barrier/LocalHeap 三份需求一致。
+        // mark 需求覆盖的站点集合与 gc metadata/barrier/SharedHeap 三份需求一致。
         assert_eq!(
             plan.mark_demand().root_sites,
             plan.gc_metadata_demand().root_range_count
@@ -2767,7 +2791,7 @@ mod tests {
         assert_eq!(plan.mark_demand().barrier_sites, demand.card_mark_sites);
         assert_eq!(
             plan.mark_demand().ticket_sites,
-            plan.local_heap_demand().shared_sites
+            plan.shared_heap_demand().mark_sites
         );
         assert_eq!(
             plan.mark_demand().edge_delta_sites,

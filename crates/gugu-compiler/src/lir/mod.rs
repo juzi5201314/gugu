@@ -332,8 +332,7 @@ impl Validated {
                         match placement {
                             PlacementKind::Pinned => demand.pinned_sites += 1,
                             PlacementKind::Resource => demand.resource_sites += 1,
-                            PlacementKind::SharedHeap => demand.shared_sites += 1,
-                            PlacementKind::LocalHeap => {}
+                            PlacementKind::LocalHeap | PlacementKind::SharedHeap => {}
                             _ => {}
                         }
                     }
@@ -352,6 +351,80 @@ impl Validated {
                     visit(&mut demand, call);
                 }
             }
+        }
+        demand
+    }
+
+    /// SharedHeap 需求：从优化后 LIR 的 handle 指令与 placement 推导。
+    ///
+    /// 分配站点与解析站点分别计数，再由 `SharedHeapDemand::verify` 强制相等：任何一个
+    /// SharedHeap allocation 缺少对应解析都会在契约构建阶段变成 `E0058`。pin 站点只看
+    /// `RuntimeCall::Pin`/`Unpin` 的第一参数 provenance 是否为 SharedHandle，因此 LocalHeap
+    /// 的 pin 不会进入共享段。payload 复制站点与 forward 站点同源，共享字段屏障站点按
+    /// `SharedFieldBarrier`/`SharedFieldBarrierReserved` 计数，mark 站点取同一集合（每次共享
+    /// 字段写入都可能产生跨 owner 标记）。最大 payload 字节数由调用方传入的冻结类型表上界
+    /// 给出，没有共享分配时保持 0。
+    pub(crate) fn shared_heap_demand(
+        &self,
+        max_payload_bytes: u64,
+    ) -> crate::runtime::SharedHeapDemand {
+        use crate::frontend::gir::placement::PlacementKind;
+        let mut demand = crate::runtime::SharedHeapDemand::default();
+        for world_body in &self.world.bodies {
+            let shared_pin = |call: &body::Call, arguments: &std::ops::Range<u32>| {
+                if !matches!(
+                    call.target,
+                    body::CallTarget::Runtime(body::RuntimeCall::Pin | body::RuntimeCall::Unpin)
+                ) {
+                    return false;
+                }
+                world_body.args(arguments).first().is_some_and(|value| {
+                    world_body.values[value.index()].kind.provenance
+                        == Some(body::Provenance::SharedHandle)
+                })
+            };
+            for instruction in &world_body.instructions {
+                match &instruction.op {
+                    body::Op::GcAlloc { placement, .. } => {
+                        if *placement == PlacementKind::SharedHeap {
+                            demand.alloc_sites += 1;
+                        }
+                    }
+                    body::Op::ResolveSharedHandle => demand.resolve_sites += 1,
+                    body::Op::SharedAccessBegin { .. } => demand.access_begin_sites += 1,
+                    body::Op::SharedAccessEnd { .. } => demand.access_end_sites += 1,
+                    body::Op::ForwardSharedHandle => demand.forward_sites += 1,
+                    body::Op::SharedFieldBarrier { .. }
+                    | body::Op::SharedFieldBarrierReserved { .. } => demand.barrier_sites += 1,
+                    body::Op::Call(call) | body::Op::ForeignCall(call) => {
+                        if shared_pin(call, &instruction.arguments) {
+                            demand.pin_sites += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            for block in &world_body.blocks {
+                match &block.terminator {
+                    body::Terminator::Invoke {
+                        call, arguments, ..
+                    }
+                    | body::Terminator::TailCall {
+                        call, arguments, ..
+                    } => {
+                        if shared_pin(call, arguments) {
+                            demand.pin_sites += 1;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        demand.handle_slots = demand.alloc_sites;
+        demand.payload_copy_sites = demand.forward_sites;
+        demand.mark_sites = demand.barrier_sites;
+        if demand.alloc_sites != 0 {
+            demand.max_payload_bytes = max_payload_bytes;
         }
         demand
     }

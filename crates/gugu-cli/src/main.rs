@@ -1,5 +1,6 @@
-// image-plan 的 JSON 信封字段数量接近宏展开上界，显式提高递归上限。
-#![recursion_limit = "512"]
+// image-plan 的 JSON 信封字段数量接近宏展开上界，显式提高递归上限；
+// SharedHeap 段落追加后键数继续增长，因此上界同步调高。
+#![recursion_limit = "1024"]
 
 mod config;
 mod formatting;

@@ -34,6 +34,8 @@ collector 可以移动 managed 对象。每次 safepoint、等待、恢复和跨
 
 runtime 可以在不改变语言语义的前提下，为地址稳定的 control、stack、resource 和 GC range descriptor 使用 owner-directed return message。该机制不产生用户级 `free`，不使 managed 地址稳定，不承诺 processor affinity 或回收时刻，也不能让安全代码观察 raw slab、route key 或 batch 延迟。
 
+跨 owner 发布过的 managed 对象以稳定句柄暴露：句柄由 `table/slot/generation` 组成，table 是逻辑表身份而不是宿主地址，每次 slot 复用都会推进 generation，因此携带旧 generation 的句柄必须被拒绝，而不允许按 slot 猜测对象。句柄必须经 access guard 解析后才可访问，guard 期间该句柄捕获的 payload 保持有效；`pin` 把访问提升为不移动 lease。发布之后不得把任何 direct pointer 当作长期身份继续使用——它既不是句柄，也不能跨 owner 传递。
+
 ## Adaptive Resource Leasing
 
 ResourceCell 是外部资源的共享逻辑身份，保存 raw resource、open/closed 状态、受限 release 操作和 lease 状态。创建后尚未发布时只由创建协程访问；发布到 global、channel、async 捕获或其它共享图前必须单向进入共享状态并建立 happens-before，不能再撤销这次发布。每次 slot 复用都推进 cell generation；携带旧 generation 的 ResourceHandle 即使再次命中相同 descriptor/index 也必须被拒绝。

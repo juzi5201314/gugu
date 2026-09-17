@@ -55,3 +55,44 @@ pub struct HeapBlockRecord {
 pub fn heap_records(header: &ObjectHeader, arena: &HeapArenaMetadata, pin: &HeapPinEntry, block: &HeapBlockRecord) u32 {
     arena.state + arena.pin_count + pin.count + arena.generation + pin.arena + block.state + block.generation
 }
+
+/* SharedHeap 的稳定身份槽与 payload 记录；与 compiler runtime layout query 逐字段交叉校验。
+ * 槽只保存 handle generation、状态、payload identity 与 lease 计数，payload 记录只保存逻辑
+ * 身份与 block/offset；两者都禁止出现 managed pointer、field 地址或栈指针。
+ */
+
+#[repr(C, align(64))]
+pub struct SharedHandleSlot {
+    pub generation: u32,
+    pub state: u32,
+    pub current_payload: uint,
+    pub old_payload: uint,
+    pub forward_generation: u32,
+    pub grace_epoch: u32,
+    pub access_guards: u32,
+    pub pin_leases: u32,
+    pub mark_tickets: u32,
+    pub forwarding_leases: u32,
+    pub owner_id: u32,
+    pub block_id: u32,
+    pub payload_bytes: u32,
+    pub reserved: u32,
+}
+
+#[repr(C, align(8))]
+pub struct SharedPayloadRecord {
+    pub payload_generation: u32,
+    pub payload_slot: u32,
+    pub block_id: u32,
+    pub block_offset: u32,
+    pub generation: u32,
+    pub owner_id: u32,
+    pub bytes: u32,
+    pub state: u32,
+}
+
+/// 非空 package 必经布局交叉校验。
+#[used]
+pub fn shared_heap_records(slot: &SharedHandleSlot, payload: &SharedPayloadRecord) u32 {
+    slot.state + slot.access_guards + slot.pin_leases + payload.state + payload.bytes + slot.owner_id + payload.generation
+}

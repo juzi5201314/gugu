@@ -725,7 +725,7 @@ fn compile_slice_reports_barrier_contract_end_to_end() {
     assert!(dump.contains("barrier schema=2 card=512 buffer=256 stamps=256"));
     assert!(dump.contains("barrier-flush-reasons buffer-full,processor-handoff,foreign-bridge,memory-pressure,minor-stop,producer-stop-gate"));
     assert!(dump.contains(
-        "runtime-message return-fields=12 card-mark-fields=13 mark-ticket-fields=15 edge-delta-fields=18 card-mark-family=card-mark"
+        "runtime-message return-fields=12 card-mark-fields=13 mark-ticket-fields=15 edge-delta-fields=18 handle-forward-fields=16 card-mark-family=card-mark"
     ));
     assert!(dump.contains(
         "edge schema=1 profile=mosaic-edge revision=1 quantum=4096 edge-buffer=512 deltas-per-write=2 trace-executor=2 candidate-schema=1 edge-delta-fields=18"

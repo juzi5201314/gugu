@@ -5,9 +5,10 @@ use super::pass::{
     rewrite::Editor,
 };
 use super::{
-    body::{self, Body, Op, Provenance, Terminator, Type, ValueId, ValueType, range},
+    body::{self, Body, Op, Provenance, Terminator, Type, ValueId, ValueType, id, range},
     verify,
 };
+use crate::frontend::gir::placement::PlacementKind;
 use crate::{Compilation, CompileRequest, Compiler, DiagnosticCode, TargetName};
 use std::num::NonZeroU32;
 
@@ -1092,7 +1093,7 @@ fn region_lifecycle_ops_carry_no_values() {
     );
     let mut body = named(&compilation, "main").clone();
     for instruction in &mut body.instructions {
-        if matches!(instruction.op, Op::RegionPublish { .. }) {
+        if let Op::RegionPublish { .. } = instruction.op {
             instruction.arguments = 0..1;
         }
     }
@@ -1101,3 +1102,150 @@ fn region_lifecycle_ops_carry_no_values() {
         .expect_err("region 指令不得带参数");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
+
+/// sender 在 send 之后仍使用闭包：共享存储必须走 handle + guard。
+#[test]
+fn shared_handle_storage_is_guard_wrapped() {
+    let compilation = compile(SHARED_SENDER);
+    let body = shared_body(&compilation);
+    let mut allocations = 0;
+    let mut begins = 0;
+    let mut ends = 0;
+    let mut barriers = 0;
+    let mut stores = 0;
+    let mut loads = 0;
+    for (index, instruction) in body.instructions.iter().enumerate() {
+        match &instruction.op {
+            Op::GcAlloc {
+                placement: PlacementKind::SharedHeap,
+                ..
+            } => {
+                allocations += 1;
+                let value = ValueId(id(range(&instruction.results).start));
+                let next = &body.instructions[index + 1];
+                assert!(
+                    matches!(next.op, Op::ResolveSharedHandle),
+                    "fresh shared payload 必须紧跟解析"
+                );
+                assert_eq!(body.args(&next.arguments), [value]);
+                assert_eq!(
+                    body.values[range(&next.results).start].kind.provenance,
+                    Some(Provenance::SharedHandle)
+                );
+            }
+            Op::SharedAccessBegin { .. } => begins += 1,
+            Op::SharedAccessEnd { .. } => ends += 1,
+            Op::SharedFieldBarrier { .. } => barriers += 1,
+            Op::Store(_) => stores += 1,
+            Op::Load(_) => loads += 1,
+            _ => {}
+        }
+    }
+    assert_eq!(allocations, 1, "该源码只有一个 shared 环境分配");
+    assert_eq!(begins, ends, "guard 必须成对");
+    assert!(begins > 0 && loads > 0, "共享读取必须经过 guard");
+    let _ = (stores, barriers);
+}
+
+/// 两个捕获的共享环境：第二个捕获必须经 `PtrOffset` 落在同一个 guard 内。
+#[test]
+fn shared_environment_offset_stays_inside_guard() {
+    let compilation = compile(
+        "fn main() {\n let channel = chan[fn() int](1)\n let a = 1\n let b = 2\n let closure = fn() int { return a + b }\n channel.send(closure)\n _ = closure()\n }",
+    );
+    let body = shared_body(&compilation);
+    let mut offsets = 0;
+    for (token, instruction) in guard_members(&body) {
+        if let Op::PtrOffset = instruction.op {
+            let Some(base) = body.args(&instruction.arguments).first() else {
+                continue;
+            };
+            if body.values[base.index()].kind.provenance != Some(Provenance::SharedHandle) {
+                continue;
+            }
+            offsets += 1;
+            assert!(token.is_some(), "shared 字段偏移必须在 guard 内");
+        }
+    }
+    assert!(offsets > 0, "第二个捕获必须产生共享字段偏移");
+}
+
+/// 缺少 guard 结束、或 fresh payload 没有被解析的 body 必须被拒绝。
+#[test]
+fn shared_guard_and_resolution_rules_are_enforced() {
+    let compilation = compile(SHARED_SENDER);
+    let mut missing_end = shared_body(&compilation);
+    missing_end
+        .instructions
+        .retain(|instruction| !matches!(instruction.op, Op::SharedAccessEnd { .. }));
+    super::uses::rebuild(&mut missing_end);
+    let error = verify::verify(&missing_end, compilation.hir.as_ref().unwrap().module())
+        .expect_err("guard 必须结束");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+
+    let mut missing_resolve = shared_body(&compilation);
+    missing_resolve
+        .instructions
+        .retain(|instruction| !matches!(instruction.op, Op::ResolveSharedHandle));
+    super::uses::rebuild(&mut missing_resolve);
+    let error = verify::verify(&missing_resolve, compilation.hir.as_ref().unwrap().module())
+        .expect_err("fresh payload 必须被解析");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+
+    let mut wrong_token = shared_body(&compilation);
+    for instruction in &mut wrong_token.instructions {
+        if let Op::SharedAccessEnd { token } = &mut instruction.op {
+            *token += 7;
+        }
+    }
+    super::uses::rebuild(&mut wrong_token);
+    let error = verify::verify(&wrong_token, compilation.hir.as_ref().unwrap().module())
+        .expect_err("guard 的 begin/end 必须配对");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+}
+
+/// 返回含 SharedHeap 分配的 body 的可变副本。
+fn shared_body(compilation: &Compilation) -> Body {
+    compilation
+        .lir
+        .as_ref()
+        .expect("已生成 LIR")
+        .world
+        .bodies
+        .iter()
+        .find(|body| {
+            body.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.op,
+                    Op::GcAlloc {
+                        placement: PlacementKind::SharedHeap,
+                        ..
+                    }
+                )
+            })
+        })
+        .expect("存在 SharedHeap 分配")
+        .clone()
+}
+
+/// 返回每个指令与它当时所处的 guard token。
+fn guard_members(body: &Body) -> Vec<(Option<u32>, &crate::lir::body::Instruction)> {
+    let mut members = Vec::new();
+    let mut stack: Vec<u32> = Vec::new();
+    for block in &body.blocks {
+        for instruction in &body.instructions[range(&block.instructions)] {
+            match &instruction.op {
+                Op::SharedAccessBegin { token } => stack.push(*token),
+                Op::SharedAccessEnd { .. } => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+            members.push((stack.last().copied(), instruction));
+        }
+    }
+    members
+}
+
+/// sender 在 send 之后仍使用闭包：闭包环境必须落在 SharedHeap。
+const SHARED_SENDER: &str = "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n _ = closure()\n }";

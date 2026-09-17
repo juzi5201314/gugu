@@ -76,10 +76,9 @@ impl Builder<'_> {
     }
 
     pub(super) fn store(&mut self, pointer: ValueId, value: ValueId, align: u32, volatile: bool) {
-        let heap = self
-            .machine_type(pointer)
-            .provenance
-            .is_some_and(Provenance::managed);
+        let provenance = self.machine_type(pointer).provenance;
+        let heap = provenance.is_some_and(Provenance::managed);
+        let shared = provenance == Some(Provenance::SharedHandle);
         let managed = self
             .machine_type(value)
             .provenance
@@ -102,21 +101,57 @@ impl Builder<'_> {
             &[],
         );
         if let Some(old) = old {
-            self.emit(Op::GcWriteBarrier { store }, &[pointer, old, value], &[]);
+            if shared {
+                // 共享字段写入的屏障记录必须绑定当前 guard：它让 GC 在 payload 搬迁期间知道
+                // 哪一次写入属于哪个 token，而不是把 handle 当作 direct pointer 记账。
+                // 结构性保证：SharedHandle 地址只能由 `shared_address` 派生，而它要求 guard 已打开。
+                let token = self
+                    .active_shared_token()
+                    .expect("shared 字段写入必然在 access guard 内");
+                self.emit(Op::SharedFieldBarrier { store, token }, &[], &[]);
+            } else {
+                self.emit(Op::GcWriteBarrier { store }, &[pointer, old, value], &[]);
+            }
         }
     }
 
     pub(super) fn address(&mut self, place: Place) -> Result<(ValueId, u32), Diagnostic> {
+        if self.is_shared(place.local) {
+            // handle 不是地址：把 shared place 直接当 direct pointer 会让字段访问绕过 guard
+            // 与代际校验，因此这里必须拒绝，而不是返回一个看起来像地址的值。
+            return Err(invalid("shared place 的地址只能在 access guard 内派生"));
+        }
+        self.address_mode(place, false)
+    }
+
+    /// 在已打开的 guard 内解析 shared place 的字段地址；派生值保持 handle provenance。
+    pub(super) fn shared_address(&mut self, place: Place) -> Result<(ValueId, u32), Diagnostic> {
+        if self.active_shared_token().is_none() {
+            return Err(invalid("shared place 的地址只能在 access guard 内派生"));
+        }
+        self.address_mode(place, true)
+    }
+
+    fn address_mode(&mut self, place: Place, shared: bool) -> Result<(ValueId, u32), Diagnostic> {
         let mut ty = self.local_ty(place.local);
-        let mut address = match self.storage[place.local.index()].clone() {
-            Storage::Stack { address, .. } | Storage::Capture { address } => Some(address),
-            Storage::Heap { variable, .. } => Some(self.read(variable)?),
-            Storage::Values(_) => None,
+        let mut address = if shared {
+            Some(self.shared_handle(place.local)?)
+        } else {
+            match self.storage[place.local.index()].clone() {
+                Storage::Stack { address, .. } | Storage::Capture { address } => Some(address),
+                Storage::Heap { variable, .. } => Some(self.read(variable)?),
+                Storage::Values(_) => None,
+            }
         };
         let mut variant = 0;
         for projection in self.gir.projections_of(place) {
             match projection {
                 Projection::Deref => {
+                    if shared {
+                        return Err(invalid(
+                            "shared payload 不保存 direct pointer，不能在 guard 内解引用",
+                        ));
+                    }
                     let inner = match self.kind(ty) {
                         TypeKind::Reference(inner) | TypeKind::Pointer(inner) => *inner,
                         // static ref 的 generic GIR 仍使用其值类型标注；绑定后的符号地址已经是 storage 地址。
@@ -138,6 +173,11 @@ impl Builder<'_> {
                 }
                 Projection::Field { index, .. } | Projection::TupleField { index, .. } => {
                     if let TypeKind::Reference(inner) = self.kind(ty) {
+                        if shared {
+                            return Err(invalid(
+                                "shared payload 不保存 direct pointer，不能穿透引用字段",
+                            ));
+                        }
                         let inner = *inner;
                         address = Some(if let Some(pointer) = address {
                             self.load(
@@ -344,6 +384,16 @@ impl Builder<'_> {
             ValueType::pointer(Provenance::GcHeap),
             Origin::Allocation(allocation),
         );
+        if placement == PlacementKind::SharedHeap {
+            // fresh payload 的唯一 use 必须是解析：解析结果才是可发布、可跨 owner 传递的身份。
+            // payload 字节由运行时在建立记录时零初始化，因此共享路径不再补 `Memset`。
+            return Ok(self.emit_one(
+                Op::ResolveSharedHandle,
+                &[pointer],
+                ValueType::pointer(Provenance::SharedHandle),
+                Origin::Derived(pointer),
+            ));
+        }
         let zero = self.constant(0, Type::I8);
         self.emit(Op::Memset { bytes }, &[pointer, zero], &[]);
         Ok(pointer)
@@ -370,6 +420,15 @@ impl Builder<'_> {
             .ok_or_else(|| invalid("内存复制缺少布局"))?;
         if layout.size == 0 {
             return Ok(());
+        }
+        if self.machine_type(destination).provenance == Some(Provenance::SharedHandle)
+            && !self.roots(ty).is_empty()
+        {
+            // 带 managed 根的聚合整块复制会退化成 runtime 调用，而 guard 不允许跨调用；
+            // 共享 payload 的 managed 字段必须逐字段写入，由 `SharedFieldBarrier` 记账。
+            return Err(invalid(
+                "共享 payload 的 managed 聚合写入必须逐字段进行，不能整块复制",
+            ));
         }
         if self
             .machine_type(destination)
@@ -399,6 +458,9 @@ impl Builder<'_> {
                 ty: self.local_ty(place.local),
                 values: self.local_values(place.local)?,
             });
+        }
+        if self.is_shared(place.local) {
+            return self.read_shared_place(place);
         }
         let (address, ty) = self.address(place)?;
         if let Some(lanes) = self.scalar_lanes(ty) {
@@ -450,11 +512,77 @@ impl Builder<'_> {
             }
             return Ok(());
         }
+        if self.is_shared(place.local) {
+            return self.write_shared_place(place, value);
+        }
         let (destination, ty) = self.address(place)?;
         match value {
             Computed::Address { address, .. } => self.copy_memory(destination, address, ty),
             Computed::Values { values, .. } => self.store_abi(destination, ty, &values),
         }
+    }
+
+    /// 在 access guard 内读取一个 shared place。
+    ///
+    /// 标量车道在 guard 内直接载入；聚合读取必须在 `SharedAccessEnd` 之前物化到栈副本，
+    /// 因为从 handle 派生的地址不允许活过 guard。
+    fn read_shared_place(&mut self, place: Place) -> Result<Computed, Diagnostic> {
+        let handle = self.shared_handle(place.local)?;
+        self.begin_shared(handle);
+        let (address, ty) = self.shared_address(place)?;
+        let computed = match self.scalar_lanes(ty) {
+            Some(lanes) => {
+                let align = self
+                    .layout(ty)
+                    .layout
+                    .ok_or_else(|| invalid("load 类型缺少布局"))?
+                    .align;
+                let values = lanes
+                    .into_iter()
+                    .map(|(offset, kind)| {
+                        let address = self.offset(address, offset);
+                        self.load(
+                            address,
+                            kind,
+                            u32::try_from(align.min(kind.ty.bytes().expect("标量大小")))
+                                .expect("标量对齐"),
+                            false,
+                        )
+                    })
+                    .collect();
+                Computed::Values { ty, values }
+            }
+            None => {
+                let size = self
+                    .layout(ty)
+                    .layout
+                    .ok_or_else(|| invalid("聚合读取缺少布局"))?
+                    .size;
+                let temporary = self.temporary(ty)?;
+                if size != 0 {
+                    self.emit(Op::Memmove { bytes: size }, &[temporary, address], &[]);
+                }
+                Computed::Address {
+                    ty,
+                    address: temporary,
+                }
+            }
+        };
+        self.end_shared()?;
+        Ok(computed)
+    }
+
+    /// 在 access guard 内写入一个 shared place；字段屏障由 `store` 绑定同一个 token。
+    fn write_shared_place(&mut self, place: Place, value: Computed) -> Result<(), Diagnostic> {
+        let handle = self.shared_handle(place.local)?;
+        self.begin_shared(handle);
+        let (destination, ty) = self.shared_address(place)?;
+        match value {
+            Computed::Address { address, .. } => self.copy_memory(destination, address, ty)?,
+            Computed::Values { values, .. } => self.store_abi(destination, ty, &values)?,
+        }
+        self.end_shared()?;
+        Ok(())
     }
 
     pub(super) fn integer_resize(&mut self, value: ValueId, target: Type, signed: bool) -> ValueId {

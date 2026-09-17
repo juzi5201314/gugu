@@ -22,6 +22,7 @@ use super::platform_schema::{PlatformRangeDemand, PlatformRangeSchemaV1};
 use super::region_schema::TurnRegionRuntimeContract;
 use super::resource::{self, RESOURCE_KINDS};
 use super::scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
+use super::shared_heap_schema::{SharedHeapDemand, SharedHeapRuntimeContract};
 use super::size_class::{DropScanPolicy, RuntimeSizeClassTable};
 use super::slab::MemoryDomainId;
 use super::stackmap_schema::{StackMapDemand, StackMapRuntimeContract};
@@ -40,10 +41,11 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 17 相对版本 16 的变化：并入 `EdgeRuntimeContract`（候选相位目录、block 状态目录、
-/// `EdgeDelta` 字段集合与 `EdgeDemand`），并把本地堆契约升到 schema 3（见
-/// `LocalHeapRuntimeContract`）；运行时在 `configure_gc` 期间逐项校对边契约与实现常量。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 17;
+/// 版本 18 相对版本 17 的变化：并入 `SharedHeapRuntimeContract`（stable handle 身份位宽、
+/// handle slot 与 payload record 布局、slot 状态机、`HandleForward` 字段集合与
+/// `SharedHeapDemand`），并把 SharedHeap 相关需求从 `LocalHeapDemand` 移出；mark ticket 的
+/// 需求来源改为 SharedHeap 契约段。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 18;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -146,6 +148,8 @@ pub(crate) enum FieldKind {
     Sequence,
     /// signed 边差量。
     Delta,
+    /// shared payload 的逻辑身份；与地址类字段严格分离。
+    PayloadIdentity,
 }
 
 impl FieldKind {
@@ -179,6 +183,7 @@ impl FieldKind {
             Self::TargetBlock => "target-block",
             Self::Sequence => "sequence",
             Self::Delta => "delta",
+            Self::PayloadIdentity => "payload-identity",
         }
     }
 
@@ -263,6 +268,15 @@ impl MessageSchemaV1 {
         }
     }
 
+    /// 返回 GC 工作消息族的 `HandleForward` 字段集合。
+    pub(crate) fn handle_forward() -> Self {
+        Self {
+            schema: 1,
+            family: MessageFamilyTag::HandleForward,
+            fields: super::shared_heap_schema::handle_forward_fields(),
+        }
+    }
+
     /// 返回消息族。
     pub(crate) const fn family(&self) -> MessageFamilyTag {
         self.family
@@ -302,6 +316,31 @@ impl MessageSchemaV1 {
                 return Err(RawModelError::new(
                     "runtime 消息 schema 字段没有按名字稳定排序",
                 ));
+            }
+        }
+        if family == MessageFamilyTag::HandleForward {
+            // 两个 payload identity 与两条 generation 车道必须按名字存在：只数 kind 无法区分
+            // old/new payload，也无法区分 handle/forward generation。
+            for (name, kind) in [
+                ("handle_table", FieldKind::DescriptorIndex),
+                ("handle_slot", FieldKind::UnitIndex),
+                ("handle_generation", FieldKind::Generation),
+                ("forward_generation", FieldKind::Generation),
+                ("old_payload", FieldKind::PayloadIdentity),
+                ("new_payload", FieldKind::PayloadIdentity),
+            ] {
+                let field = self
+                    .fields
+                    .iter()
+                    .find(|field| field.name == name)
+                    .ok_or_else(|| {
+                        RawModelError::new(format!("HandleForward schema 缺少字段 `{name}`"))
+                    })?;
+                if field.kind != kind {
+                    return Err(RawModelError::new(format!(
+                        "HandleForward 字段 `{name}` 的种类与登记不一致"
+                    )));
+                }
             }
         }
         Ok(())
@@ -360,6 +399,12 @@ fn required_fields(family: MessageFamilyTag) -> Vec<FieldKind> {
             required.push(FieldKind::Sequence);
             required.push(FieldKind::Delta);
             required.push(FieldKind::Credit);
+        }
+        // handle forward 用 handle slot/table 与两个 payload identity 描述一次搬迁；两条
+        // generation 车道（handle/forward）与 target owner 身份同名检查在 `verify_family` 中。
+        MessageFamilyTag::HandleForward => {
+            required.push(FieldKind::UnitIndex);
+            required.push(FieldKind::PayloadIdentity);
         }
     }
     required
@@ -429,6 +474,8 @@ pub(crate) struct RawPlaneDemand {
     pub(crate) message_nodes: u32,
     /// TurnRegion 需求视图；由优化后 LIR 的 region 指令推导。
     pub(crate) turn_region: super::region_schema::TurnRegionDemand,
+    /// SharedHeap 需求视图；由优化后 LIR 的 handle 指令与 placement 推导。
+    pub(crate) shared_heap: SharedHeapDemand,
 }
 
 /// runtime raw 平面的契约对象。
@@ -456,6 +503,7 @@ pub(crate) struct RuntimeRawContractV1 {
     local_heap: LocalHeapRuntimeContract,
     mark: MarkRuntimeContract,
     edge: EdgeRuntimeContract,
+    shared_heap: SharedHeapRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -512,6 +560,7 @@ impl RuntimeRawContractV1 {
             &barrier,
             &mark,
         )?;
+        let shared_heap = SharedHeapRuntimeContract::build(demand.shared_heap)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -539,6 +588,7 @@ impl RuntimeRawContractV1 {
             local_heap,
             mark,
             edge,
+            shared_heap,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -701,6 +751,16 @@ impl RuntimeRawContractV1 {
         &self.edge
     }
 
+    /// 返回 SharedHeap stable handle、guard 与 forwarding grace 契约段。
+    pub(crate) fn shared_heap(&self) -> &SharedHeapRuntimeContract {
+        &self.shared_heap
+    }
+
+    /// 返回 `HandleForward` 消息字段集合。
+    pub(crate) fn handle_forward_message(&self) -> &MessageSchemaV1 {
+        self.shared_heap.handle_forward_fields()
+    }
+
     /// 返回 GC debt、credit、pacing 与 pressure 契约段。
     pub(crate) fn pacing(&self) -> &GcPacingRuntimeContract {
         &self.pacing
@@ -860,6 +920,7 @@ impl RuntimeRawContractV1 {
         }
         self.mark.verify()?;
         self.edge.verify(&self.barrier, &self.mark)?;
+        self.shared_heap.verify()?;
         if self.edge.demand().edge_sites != self.barrier.demand.edge_summary_sites
             || self.edge.demand().reserve_slots != self.barrier.demand.shade_slots
         {
@@ -868,10 +929,10 @@ impl RuntimeRawContractV1 {
         if self.mark.demand.root_sites != self.gc_metadata.demand.root_range_count
             || self.mark.demand.barrier_sites != self.barrier.demand.card_mark_sites
             || self.mark.demand.edge_delta_sites != self.barrier.demand.edge_summary_sites
-            || self.mark.demand.ticket_sites != self.local_heap.demand.shared_sites
+            || self.mark.demand.ticket_sites != self.shared_heap.demand.mark_sites
         {
             return Err(RawModelError::new(
-                "mark 需求与 gc metadata/barrier/LocalHeap 契约不一致",
+                "mark 需求与 gc metadata/barrier/SharedHeap 契约不一致",
             ));
         }
         if self.mark.credit_pool
@@ -887,6 +948,7 @@ impl RuntimeRawContractV1 {
         if self.message.family() != MessageFamilyTag::Return
             || self.barrier.message.family() != MessageFamilyTag::CardMark
             || self.mark.ticket_fields.family() != MessageFamilyTag::MarkTicket
+            || self.shared_heap.handle_forward.family() != MessageFamilyTag::HandleForward
             || super::region_schema::region_transfer_fields() != self.region.transfer_fields
         {
             return Err(RawModelError::new(
@@ -953,6 +1015,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.region.canonical_bytes());
         bytes.extend_from_slice(&self.local_heap.canonical_bytes());
         bytes.extend_from_slice(&self.mark.canonical_bytes());
+        bytes.extend_from_slice(&self.shared_heap.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1184,19 +1247,22 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.region.dump());
         output.push_str(&self.local_heap.dump());
         output.push_str(&self.mark.dump());
+        output.push_str(&self.shared_heap.dump());
         self.edge.dump_into(&mut output);
         output.push_str(&format!(
-            "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} edge-delta-fields={} card-mark-family={}\n",
+            "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} edge-delta-fields={} handle-forward-fields={} card-mark-family={}\n",
             self.message.fields.len(),
             self.card_mark_message().fields.len(),
             self.mark_ticket_message().fields.len(),
             self.edge.edge_delta_fields.fields.len(),
+            self.handle_forward_message().fields.len(),
             match self.card_mark_message().family() {
                 MessageFamilyTag::Return => "return",
                 MessageFamilyTag::CardMark => "card-mark",
                 MessageFamilyTag::RegionTransfer => "region-transfer",
                 MessageFamilyTag::MarkTicket => "mark-ticket",
                 MessageFamilyTag::EdgeDelta => "edge-delta",
+                MessageFamilyTag::HandleForward => "handle-forward",
             },
         ));
         output
@@ -1347,6 +1413,12 @@ pub(crate) fn run(
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::local_heap_layout::verify_source(contract.local_heap(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            super::shared_heap_layout::verify_source(
+                contract.shared_heap(),
+                inputs.hir,
+                inputs.gir,
+            )
+            .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::mark_layout::verify_source(contract.mark(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
@@ -1388,6 +1460,8 @@ pub(crate) fn run(
     super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     super::local_heap_layout::verify_source(contract.local_heap(), inputs.hir, inputs.gir)
+        .map_err(|error| vec![error.diagnostic()])?;
+    super::shared_heap_layout::verify_source(contract.shared_heap(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     super::mark_layout::verify_source(contract.mark(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;

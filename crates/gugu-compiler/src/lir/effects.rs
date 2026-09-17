@@ -43,6 +43,8 @@ impl Op {
             | Self::BarrierReserve(_)
             | Self::GcWriteBarrier { .. }
             | Self::GcWriteBarrierReserved { .. }
+            | Self::SharedFieldBarrier { .. }
+            | Self::SharedFieldBarrierReserved { .. }
             | Self::ScopedViewBegin { .. }
             | Self::ScopedViewEnd { .. }
             | Self::SafepointPoll { .. }
@@ -74,7 +76,9 @@ impl Op {
             Self::GcAlloc { .. } | Self::RegionAlloc { .. } | Self::PromoteManaged { .. } => {
                 Some(SafepointKind::Allocation)
             }
-            Self::BarrierReserve(_) | Self::GcWriteBarrier { .. } => Some(SafepointKind::Barrier),
+            Self::BarrierReserve(_)
+            | Self::GcWriteBarrier { .. }
+            | Self::SharedFieldBarrier { .. } => Some(SafepointKind::Barrier),
             Self::CoroutineSwitch | Self::Park => Some(SafepointKind::Suspend),
             // 平台调用进入 runtime 边界：撤销物理页与睡眠都必须在 safepoint 边界之外发生。
             // `wait` 会阻塞当前协程，因此它是挂起点而不是普通调用返回点；其余操作只跨越
@@ -129,7 +133,9 @@ impl Op {
             }
             Self::BarrierReserve(_)
             | Self::GcWriteBarrier { .. }
-            | Self::GcWriteBarrierReserved { .. } => 8,
+            | Self::GcWriteBarrierReserved { .. }
+            | Self::SharedFieldBarrier { .. }
+            | Self::SharedFieldBarrierReserved { .. } => 8,
             Self::GcAlloc { .. }
             | Self::RegionAlloc { .. }
             | Self::PromoteManaged { .. }
