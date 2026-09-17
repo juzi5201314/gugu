@@ -659,7 +659,7 @@ GC metadata verifier 还必须检查 `BarrierReserve.max_card_marks` 与 concret
 
 ## 实现接入证据 {#implementation-evidence}
 
-`RuntimeRawModel`（query 30）升到 schema 12，在同一 `RuntimeRawContractV1` 中并入
+`RuntimeRawModel`（query 30）在该阶段升到 schema 12、当前为 schema 17，在同一 `RuntimeRawContractV1` 中并入
 `GcMetadataRuntimeContract`：schema 1、section 主版本 1、section 魔数 `GUGUGC01`、
 arena 2 MiB / block 32 KiB / line 128 byte，与 slab/extent 参数同源。
 `GcMetadataDemand` 由冻结类型表（`TypeUniverse.records` 与 `vtables`）推导，

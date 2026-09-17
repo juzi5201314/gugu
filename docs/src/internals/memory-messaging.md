@@ -905,7 +905,7 @@ benchmark 与正确性测试分离。至少测量：
 
 ## Compiler 侧契约模型与 verifier
 
-owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，schema 2）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
+owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，当时 schema 2、当前 17）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
 
 - **消息字段 schema** 为每个字段打种类标签，只允许 owner domain/id/generation/route key、descriptor index、unit index、bytes、epoch、integrity 与 link；任何地址种类在 `verify` 中被拒绝，因此“跨 owner 只发送 descriptor/index/generation/epoch/bytes/integrity”是机器检查的契约，而不是注释约定。
 - **需求视图**（`RawPlaneDemand`）由冻结前端产物推导：GIR 协程创建点数量、placement 判定的 `Resource`/`RuntimeRaw` 记录数量与 owner 数量；常驻 message node 容量由 shard 数与 batch item 上限推导为可证明下界。资源侧另由 `RawResourceDemand` 给出资源站点、acquire/release/transfer 站点、owner 数与资源种类数的统计口径；当前 `RuntimeRawContractV1` 只固化 resource ladder 与该需求视图，ResourceReleaseHarness 的 node capacity 按 total item 与 batch 上限设置，release queue 使用动态 `VecDeque`，不声称由 `RawResourceDemand` 推导 slab 或队列容量。
