@@ -727,10 +727,12 @@ slot(32)` 的 credit id、六个 cycle 状态（`idle`/`snapshot`/`marking`/`con
 `MarkMailboxHead`（64 字节 / align 64）、`MarkCreditHead`（64 / 64）、`MarkTerminationRecord`
 （72 / 8）、`EdgeDeltaHead`（96 / 32）与 `CandidateCursorHead`（64 / 64）五条 record 布局与
 `std/runtime/mark.gg` 的 Gugu 布局一致。`MarkTicket` 的 15 个字段只含稳定 arena descriptor、
-对象偏移、source block 全局身份、cycle/topology epoch、credit 与 bytes，任何 managed 地址都会被
-`verify_family` 拒绝。`source_block` 是全局块身份（`descriptor * 64 + block`）而不是 arena 内
-下标：消费端据此解析来源 owner 并确认该 block 仍然提交在对应 heap 里，只带下标的编码会被拒收。
-消费一条 ticket 的顺序是「完整性 → 目标目录解析 → 对象与世代 → 来源身份 → 消费 credit」，
+对象偏移、目标 block 世代、source block 全局身份、cycle/topology epoch、credit 与 bytes，任何
+managed 地址都会被 `verify_family` 拒绝。`source_block` 是全局块身份（`descriptor * 64 + block`）
+而不是 arena 内下标：消费端据此解析来源 owner 并确认该 block 仍然提交在对应 heap 里，只带下标的
+编码会被拒收。目标 block 世代同样在消费端复核：目标对象解析成功后其所属 block 的当前世代必须
+等于 ticket 携带值，复用过 block 的 arena 不能接受旧 ticket。消费一条 ticket 的顺序是「完整性 →
+目标目录解析 → 对象与世代 → 来源身份 → 消费 credit」，
 因此被拒绝的 ticket 不会留下已经被扣掉的 credit，也不会把来源记到错误的 arena 上。
 
 credit 池上界取「常驻 message node 容量 + 根槽数」：在飞的 ticket 与 edge delta 各占一个
