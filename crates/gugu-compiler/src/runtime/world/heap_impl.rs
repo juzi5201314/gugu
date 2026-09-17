@@ -364,7 +364,12 @@ impl RawWorld {
     /// incoming lease 归零本身就是候选的产生条件，因此 major cycle 不能只依赖 mutator 的 dirty
     /// 集合：那会把「已经没有外部引用的块」留到下一次写入才被发现。这里按真实事实筛：状态为
     /// `active`、四类 lease 全为零、非 nursery、且块内仍有对象（空块直接跳过，避免每轮重复
-    /// 建组—释放空块）。返回登记的块数。
+    /// 建组—释放空块），并排除块内仍有本轮标记对象的块。返回登记的块数。
+    ///
+    /// 调用时序固定在 `finish_mark_cycle` 之后、`sweep_owner` 之前：标记 gate 读的是**本轮**
+    /// cycle 的标记位，而 arena 的 `mark_epoch` 只在 `begin_mark_cycle` 前进、收尾与 sweep 都不
+    /// 推进它，因此此刻读到的仍是本轮结果。提前到收尾之前会读到尚未收敛的中间标记，退到 sweep
+    /// 之后则无法区分「本轮清空的块」与「本来就没有对象的块」。
     pub(crate) fn seed_zero_lease_candidates(&mut self) -> Result<u64, RawInvariant> {
         if self.candidates.is_none() {
             return Ok(0);
