@@ -837,6 +837,73 @@ fn node_pool_reports_double_release() {
     assert!(pool.allocate().is_err());
 }
 
+/// HandleForward 的车道往返必须保持 handle 身份、forward generation 与两条 payload identity。
+#[test]
+fn handle_forward_lane_round_trip_preserves_identity() {
+    use crate::runtime::message::{HandleForward, IntegrityTag, MessageState};
+    use crate::runtime::shared_heap_schema::SharedPayloadId;
+    use crate::runtime::slab::{OwnerGeneration, OwnerId, RouteKey};
+
+    let pool = ReturnNodePool::new(2);
+    let node = pool.allocate().expect("node 可用");
+    let secret = [7_u8; 32];
+    let mut message = HandleForward {
+        next: None,
+        target: crate::runtime::slab::OwnerToken {
+            domain: MemoryDomainId::RUNTIME_RAW,
+            owner_id: OwnerId::from_raw(3),
+            generation: OwnerGeneration::from_raw(9),
+            route_key: RouteKey::from_raw(11),
+        },
+        handle_table: 5,
+        handle_slot: 4097,
+        handle_generation: 13,
+        forward_generation: 2,
+        old_payload: SharedPayloadId::new(17, 21),
+        new_payload: SharedPayloadId::new(23, 29),
+        cycle_epoch: 31,
+        topology_epoch: 37,
+        bytes: 128,
+        state: MessageState::Staged,
+        integrity: IntegrityTag {
+            generation: crate::runtime::slab::SlabGeneration::from_raw(9),
+            class: crate::runtime::size_class::RuntimeSizeClassId::from_raw(0),
+            owner_id: OwnerId::from_raw(3),
+            route_key: RouteKey::from_raw(11),
+            checksum: 0,
+        },
+    };
+    message.integrity.checksum = IntegrityTag::compute_handle_forward(&secret, &message);
+    pool.store_handle_forward(node, &message, message.integrity.checksum);
+    assert_eq!(
+        pool.family_of(node),
+        crate::runtime::barrier_schema::MessageFamilyTag::HandleForward
+    );
+    let loaded = pool.load_handle_forward(node);
+    assert_eq!(loaded.handle_table, message.handle_table);
+    assert_eq!(loaded.handle_slot, message.handle_slot);
+    assert_eq!(loaded.handle_generation, message.handle_generation);
+    assert_eq!(loaded.forward_generation, message.forward_generation);
+    assert_eq!(loaded.old_payload, message.old_payload);
+    assert_eq!(loaded.new_payload, message.new_payload);
+    assert_eq!(loaded.cycle_epoch, message.cycle_epoch);
+    assert_eq!(loaded.topology_epoch, message.topology_epoch);
+    assert_eq!(loaded.bytes, message.bytes);
+    loaded
+        .integrity
+        .verify_handle_forward(&secret, &loaded)
+        .expect("车道往返后 integrity 必须仍然通过");
+    // 篡改任一条 payload identity 都必须破坏校验：两条身份都参与摘要。
+    let mut tampered = loaded;
+    tampered.new_payload = SharedPayloadId::new(23, 30);
+    assert!(
+        tampered
+            .integrity
+            .verify_handle_forward(&secret, &tampered)
+            .is_err()
+    );
+}
+
 #[test]
 fn raw_invariant_uses_the_registered_diagnostic_code() {
     assert_eq!(

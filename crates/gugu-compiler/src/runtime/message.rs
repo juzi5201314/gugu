@@ -12,6 +12,7 @@ use super::barrier_schema::MessageFamilyTag;
 use super::inbox::{OwnerInbox, ShardIndex};
 use super::local_heap::{BlockRef, ManagedBlockId};
 use super::mark_schema::GcCreditId;
+use super::shared_heap_schema::SharedPayloadId;
 use super::size_class::RuntimeSizeClassId;
 use super::slab::{
     Epoch, MemoryDomainId, OwnerGeneration, OwnerId, OwnerToken, RawInvariant, RouteKey,
@@ -457,6 +458,41 @@ pub(crate) struct MarkTicket {
     pub(crate) integrity: IntegrityTag,
 }
 
+/// 一条跨 owner 的 GC 工作消息：把一个 shared handle 的搬迁结果交给目标 owner。
+///
+/// 与其它 GC 消息共用同一条传输、staging 与 grace；只携带稳定 handle 身份、两条 payload
+/// identity、forward generation、cycle/topology epoch 与 bytes。`old_payload` 让目标 owner
+/// 知道哪个 payload 进入 forwarding grace，`new_payload` 是搬迁后必须解析到的 payload；
+/// 两者都是逻辑身份，不是地址。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct HandleForward {
+    /// raw intrusive link；只存在于 non-moving message storage。
+    pub(crate) next: Option<u32>,
+    /// 目标 owner 的稳定身份（handle 表的拥有者）。
+    pub(crate) target: OwnerToken,
+    /// stable handle 的逻辑表身份。
+    pub(crate) handle_table: u32,
+    /// stable handle 的 slot 编号。
+    pub(crate) handle_slot: u32,
+    /// stable handle 的 generation；目标 owner 必须按它校验 handle 仍然有效。
+    pub(crate) handle_generation: u32,
+    /// 本次搬迁推进到的 forward generation；跳号或回退都必须被拒绝。
+    pub(crate) forward_generation: u32,
+    /// 搬迁前的 payload identity；它进入 forwarding grace。
+    pub(crate) old_payload: SharedPayloadId,
+    /// 搬迁后的 payload identity；linearize 之后必须解析到它。
+    pub(crate) new_payload: SharedPayloadId,
+    /// 搬迁发生的 GC cycle epoch。
+    pub(crate) cycle_epoch: u64,
+    /// producer topology epoch；拓扑变化后旧消息必须被拒绝。
+    pub(crate) topology_epoch: u32,
+    /// payload 的逻辑字节数。
+    pub(crate) bytes: u32,
+    pub(crate) state: MessageState,
+    /// handle 身份、两条 payload identity 与 epoch 的校验信息。
+    pub(crate) integrity: IntegrityTag,
+}
+
 /// 一条跨 owner 的 GC 工作消息：把一个 block 对的边增删交给 target 的 manager。
 ///
 /// 与其它 GC 消息共用同一条传输、staging 与 grace；只携带稳定 `BlockRef` 身份、block 对内
@@ -652,6 +688,48 @@ impl IntegrityTag {
     ) -> Result<(), RawInvariant> {
         if self.checksum != Self::compute_mark_ticket(secret, ticket) {
             return Err(RawInvariant::new("mark ticket integrity 校验失败"));
+        }
+        Ok(())
+    }
+
+    /// 用 per-domain secret 与 `HandleForward` 的全部身份字段计算校验值。
+    ///
+    /// 域分离键与 mark/edge 族不同，因此同一条消息不能被解释成另一族而通过校验。
+    pub(crate) fn compute_handle_forward(secret: &[u8; 32], message: &HandleForward) -> u32 {
+        let mut hasher = blake3::Hasher::new_derive_key("gugu-handle-forward-integrity-v1");
+        hasher.update(secret);
+        hasher.update(&message.target.domain.raw().to_le_bytes());
+        hasher.update(&message.target.owner_id.raw().to_le_bytes());
+        hasher.update(&message.target.generation.raw().to_le_bytes());
+        hasher.update(&message.target.route_key.raw().to_le_bytes());
+        hasher.update(&MessageFamilyTag::HandleForward.raw().to_le_bytes());
+        hasher.update(&message.handle_table.to_le_bytes());
+        hasher.update(&message.handle_slot.to_le_bytes());
+        hasher.update(&message.handle_generation.to_le_bytes());
+        hasher.update(&message.forward_generation.to_le_bytes());
+        hasher.update(&message.old_payload.raw().to_le_bytes());
+        hasher.update(&message.new_payload.raw().to_le_bytes());
+        hasher.update(&message.cycle_epoch.to_le_bytes());
+        hasher.update(&message.topology_epoch.to_le_bytes());
+        hasher.update(&message.bytes.to_le_bytes());
+        // 取字节 12..16：card 族用 0..4、region 族用 4..8、mark 族用 8..12，四族不共用前缀。
+        let digest = hasher.finalize();
+        u32::from_le_bytes([
+            digest.as_bytes()[12],
+            digest.as_bytes()[13],
+            digest.as_bytes()[14],
+            digest.as_bytes()[15],
+        ])
+    }
+
+    /// 校验 handle forward 的 checksum 与本记录的其他身份字段一致。
+    pub(crate) fn verify_handle_forward(
+        &self,
+        secret: &[u8; 32],
+        message: &HandleForward,
+    ) -> Result<(), RawInvariant> {
+        if self.checksum != Self::compute_handle_forward(secret, message) {
+            return Err(RawInvariant::new("handle forward integrity 校验失败"));
         }
         Ok(())
     }
@@ -990,6 +1068,91 @@ impl ReturnNode {
         }
     }
 
+    fn store_handle_forward(&self, message: &HandleForward, integrity: u32) {
+        self.owner_id
+            .store(message.target.owner_id.raw(), Ordering::Relaxed);
+        self.generation
+            .store(message.target.generation.raw(), Ordering::Relaxed);
+        self.route_key
+            .store(message.target.route_key.raw(), Ordering::Relaxed);
+        // handle 身份与 forward generation 共用一个车道对：低半是 table，高半是 slot；
+        // generation 车道承载 handle generation 与 forward generation。
+        self.descriptor_unit.store(
+            u64::from(message.handle_table) | (u64::from(message.handle_slot) << 32),
+            Ordering::Relaxed,
+        );
+        self.bytes_epoch.store(
+            u64::from(message.bytes) | (u64::from(message.topology_epoch) << 32),
+            Ordering::Relaxed,
+        );
+        self.state_kind.store(
+            message.state.code()
+                | (u64::from(MessageFamilyTag::HandleForward.raw()) << 8)
+                | (u64::from(message.target.domain.raw()) << 16)
+                | (u64::from(MessageFamilyTag::HandleForward.raw()) << 24),
+            Ordering::Relaxed,
+        );
+        self.payload_low
+            .store(message.cycle_epoch, Ordering::Relaxed);
+        self.payload_high.store(
+            u64::from(message.handle_generation) | (u64::from(message.forward_generation) << 32),
+            Ordering::Relaxed,
+        );
+        // 两条 payload identity 各占一条 64-bit 车道：它们是逻辑身份而不是地址，因此可以
+        // 原样编码，不需要掩码或拆分。
+        self.sequence
+            .store(message.old_payload.raw(), Ordering::Relaxed);
+        self.delta
+            .store(message.new_payload.raw(), Ordering::Relaxed);
+        self.credit.store(0, Ordering::Relaxed);
+        self.integrity
+            .store(u64::from(integrity), Ordering::Relaxed);
+    }
+
+    /// 从车道重建 handle forward；只有该消息族才会调用。
+    fn load_handle_forward(&self) -> HandleForward {
+        let owner_id = self.owner_id.load(Ordering::Relaxed);
+        let target_generation = self.generation.load(Ordering::Relaxed);
+        let route_key = self.route_key.load(Ordering::Relaxed);
+        let descriptor_unit = self.descriptor_unit.load(Ordering::Relaxed);
+        let bytes_epoch = self.bytes_epoch.load(Ordering::Relaxed);
+        let state_kind = self.state_kind.load(Ordering::Relaxed);
+        let payload_low = self.payload_low.load(Ordering::Relaxed);
+        let payload_high = self.payload_high.load(Ordering::Relaxed);
+        let old_payload = self.sequence.load(Ordering::Relaxed);
+        let new_payload = self.delta.load(Ordering::Relaxed);
+        let integrity = self.integrity.load(Ordering::Relaxed);
+        let domain = MemoryDomainId::from_raw(((state_kind >> 16) & 0xFF) as u8)
+            .unwrap_or(MemoryDomainId::RUNTIME_RAW);
+        // 车道按固定位宽掩码后截断到目标字段宽度：每个身份字段只占 32-bit，掩码已保证无溢出。
+        HandleForward {
+            next: None,
+            target: OwnerToken {
+                domain,
+                owner_id: OwnerId::from_raw(owner_id),
+                generation: OwnerGeneration::from_raw(target_generation),
+                route_key: RouteKey::from_raw(route_key),
+            },
+            handle_table: (descriptor_unit & 0xFFFF_FFFF) as u32,
+            handle_slot: (descriptor_unit >> 32) as u32,
+            handle_generation: (payload_high & 0xFFFF_FFFF) as u32,
+            forward_generation: (payload_high >> 32) as u32,
+            old_payload: SharedPayloadId::from_raw(old_payload),
+            new_payload: SharedPayloadId::from_raw(new_payload),
+            cycle_epoch: payload_low,
+            topology_epoch: (bytes_epoch >> 32) as u32,
+            bytes: (bytes_epoch & 0xFFFF_FFFF) as u32,
+            state: MessageState::from_code((state_kind & 0xFF) as u8),
+            integrity: IntegrityTag {
+                generation: SlabGeneration::from_raw(target_generation),
+                class: RuntimeSizeClassId::from_raw(0),
+                owner_id: OwnerId::from_raw(owner_id),
+                route_key: RouteKey::from_raw(route_key),
+                checksum: integrity as u32,
+            },
+        }
+    }
+
     fn store_edge_delta(&self, delta: &EdgeDelta, integrity: u32) {
         self.owner_id
             .store(delta.target.owner_id.raw(), Ordering::Relaxed);
@@ -1194,6 +1357,7 @@ impl ReturnNode {
             2 => MessageFamilyTag::RegionTransfer,
             3 => MessageFamilyTag::MarkTicket,
             4 => MessageFamilyTag::EdgeDelta,
+            5 => MessageFamilyTag::HandleForward,
             _ => MessageFamilyTag::Return,
         }
     }
@@ -1389,6 +1553,25 @@ impl ReturnNodePool {
     pub(crate) fn load_edge_delta(&self, id: ReturnNodeId) -> EdgeDelta {
         self.nodes[id.index()].load_edge_delta()
     }
+
+    /// 写入一个 node 的 handle forward payload。
+    pub(crate) fn store_handle_forward(
+        &self,
+        id: ReturnNodeId,
+        message: &HandleForward,
+        integrity: u32,
+    ) {
+        self.nodes[id.index()].store_handle_forward(message, integrity);
+    }
+
+    /// 读取一个 node 的 handle forward payload。
+    ///
+    /// 与其它 GC 族一样，载入不需要 class/generation 键：integrity 按记录自身的身份字段校验，
+    /// 两条 payload identity 原样解码后由目标 owner 在自己的 SharedHeap 表里校验。
+    pub(crate) fn load_handle_forward(&self, id: ReturnNodeId) -> HandleForward {
+        self.nodes[id.index()].load_handle_forward()
+    }
+
     /// 按给定 class 与 generation 读取一个 return payload。
     pub(crate) fn load(
         &self,
@@ -1985,6 +2168,40 @@ pub(crate) fn stage_mark_ticket(
         pool.link(last, Some(node));
     }
     staging.stage(node, ticket.target, ticket.bytes, shard)?;
+    if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
+        && let Some(inbox) = inbox
+    {
+        outcome = Some(flush_staging(pool, inbox, staging, trigger)?);
+    }
+    Ok(outcome)
+}
+
+/// 把一个 handle forward 写入 staging chain 并发布到目标 owner 的 inbox。
+///
+/// 复用 return/card/region/mark/edge 的 producer 路径：node 从同一个 pool 取，chain 由同一套
+/// staging 与 flush 触发器管理，因此 handle 搬迁通知不会绕过 producer gate 与 queue-page grace。
+pub(crate) fn stage_handle_forward(
+    pool: &ReturnNodePool,
+    inbox: Option<&OwnerInbox>,
+    staging: &mut ProducerStaging,
+    message: &HandleForward,
+    shard: ShardIndex,
+    forced: Option<FlushTrigger>,
+) -> Result<Option<PublishOutcome>, RawInvariant> {
+    let mut outcome = None;
+    if staging
+        .target()
+        .is_some_and(|target| target != message.target)
+    {
+        return Err(RawInvariant::new("staging 目标改变前必须先发布旧 chain"));
+    }
+    let node = pool.allocate()?;
+    pool.store_handle_forward(node, message, message.integrity.checksum);
+    pool.link(node, None);
+    if let Some(last) = staging.last() {
+        pool.link(last, Some(node));
+    }
+    staging.stage(node, message.target, message.bytes, shard)?;
     if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
         && let Some(inbox) = inbox
     {
