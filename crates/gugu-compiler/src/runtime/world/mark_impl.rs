@@ -17,10 +17,12 @@ use super::super::mark::{
 };
 use super::super::mark_schema::MarkRuntimeContract;
 use super::super::message::{
-    FlushTrigger, IntegrityTag, MarkTicket, MessageState, flush_staging, stage_mark_ticket,
+    FlushTrigger, IntegrityTag, MarkTarget, MarkTicket, MessageState, flush_staging,
+    stage_mark_ticket,
 };
 use super::super::slab::{RawInvariant, SlabDescriptorId};
 use super::RawWorld;
+use super::heap_impl::shared_heap_error;
 
 /// 一次 mark pass 的结果；进入 world 级 major cycle 报告与测试。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,7 +87,7 @@ impl RawWorld {
     }
 
     /// 开始一个新 mark cycle：固定身份、授权 credit、打开并确认 snapshot、seed 根。
-    fn begin_mark_cycle(&mut self, scope: &[u32]) -> Result<u64, RawInvariant> {
+    pub(super) fn begin_mark_cycle(&mut self, scope: &[u32]) -> Result<u64, RawInvariant> {
         let cycle = self.mark_cycle_epoch + 1;
         let topology = self
             .directory()
@@ -99,6 +101,13 @@ impl RawWorld {
         let owners = u32::try_from(self.owners.len()).expect("owner 数适配 u32");
         for owner in 0..owners {
             self.heap_mut(owner)?.begin_mark_cycle();
+        }
+        // 共享对象按 handle 标记：每个 cycle 每个对象至多一次 side mark，因此这里把同一
+        // cycle epoch 推进到 SharedHeap，重复或过期 ticket 的判定口径与 LocalHeap 一致。
+        if let Some(heap) = self.shared_heap.as_mut() {
+            let epoch = u32::try_from(cycle)
+                .map_err(|_| RawInvariant::new("mark cycle epoch 超出 SharedHeap 位宽"))?;
+            heap.begin_mark_cycle(epoch).map_err(shared_heap_error)?;
         }
         // producer stop epoch 必须先发布：grace 之后未登记的 participant 不得再开始新 batch。
         let inbox = self.inbox(0);
@@ -265,9 +274,11 @@ impl RawWorld {
                     owner,
                     target_owner,
                     source_block,
-                    target_block_generation,
-                    descriptor,
-                    offset,
+                    MarkTarget::Local {
+                        arena: descriptor,
+                        offset,
+                        block_generation: target_block_generation,
+                    },
                     bytes,
                 )?;
             }
@@ -283,44 +294,27 @@ impl RawWorld {
         source: u32,
         target: u32,
         source_block: u32,
-        target_block_generation: u32,
-        descriptor: SlabDescriptorId,
-        offset: u32,
+        mark: MarkTarget,
         bytes: u32,
     ) -> Result<(), RawInvariant> {
         let credit = self
             .mark_plane_mut()?
             .publish_ticket(source, target)
             .map_err(mark_error)?;
-        self.stage_ticket(
-            source,
-            target,
-            credit,
-            source_block,
-            target_block_generation,
-            descriptor,
-            offset,
-            bytes,
-        )
+        self.stage_ticket(source, target, credit, source_block, mark, bytes)
     }
 
     /// 把一条已持有 credit 的 ticket 重新投递给目标 owner。
     ///
     /// 转发必须复用同一个 credit：`ticket.credit` 只在最终目标的 consume 处收口，重发时再
     /// acquire 一个新 credit 会让旧 credit 永远停在 InFlight，termination 不再收敛。
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "ticket 身份字段与消息布局一一对应，拆结构体只会把同一份身份拆成两处"
-    )]
-    fn stage_ticket(
+    pub(super) fn stage_ticket(
         &mut self,
         source: u32,
         target: u32,
         credit: crate::runtime::mark_schema::GcCreditId,
         source_block: u32,
-        target_block_generation: u32,
-        descriptor: SlabDescriptorId,
-        offset: u32,
+        mark: MarkTarget,
         bytes: u32,
     ) -> Result<(), RawInvariant> {
         let plane = self.mark_plane()?;
@@ -330,9 +324,7 @@ impl RawWorld {
         let mut ticket = MarkTicket {
             next: None,
             target: target_token,
-            target_arena: descriptor,
-            target_offset: offset,
-            target_block_generation,
+            mark,
             source_block,
             cycle_epoch,
             topology_epoch,
@@ -403,9 +395,7 @@ impl RawWorld {
                     target_index,
                     ticket.credit,
                     ticket.source_block,
-                    ticket.target_block_generation,
-                    ticket.target_arena,
-                    ticket.target_offset,
+                    ticket.mark,
                     ticket.bytes,
                 );
             }
@@ -415,25 +405,53 @@ impl RawWorld {
                 ));
             }
         }
-        // 全部身份校验都必须发生在消费 credit 之前：校验失败的消息不能留下已经扣掉的信用。
-        let object = self
-            .heap(owner)?
-            .object_at_ticket(
-                u64::from(ticket.target_arena.raw()),
-                u64::from(ticket.target_offset),
-            )
-            .map_err(|_| RawInvariant::new("mark ticket 的目标对象已过期"))?;
-        // 目标 block 必须仍是同一个 generation：复用过 block 的 arena 不能接受旧 ticket。
-        let target_generation = self
-            .heap(owner)?
-            .block_ref(object.object_start)
-            .map_err(heap_error)?
-            .generation;
-        if target_generation != ticket.target_block_generation {
-            return Err(RawInvariant::new(
-                "mark ticket 的目标 block generation 已过期",
-            ));
-        }
+        let mark = match ticket.mark {
+            MarkTarget::Local {
+                arena,
+                offset,
+                block_generation,
+            } => {
+                // 全部身份校验都必须发生在消费 credit 之前：校验失败的消息不能留下已经扣掉的信用。
+                let object = self
+                    .heap(owner)?
+                    .object_at_ticket(u64::from(arena.raw()), u64::from(offset))
+                    .map_err(|_| RawInvariant::new("mark ticket 的目标对象已过期"))?;
+                // 目标 block 必须仍是同一个 generation：复用过 block 的 arena 不能接受旧 ticket。
+                let target_generation = self
+                    .heap(owner)?
+                    .block_ref(object.object_start)
+                    .map_err(heap_error)?
+                    .generation;
+                if target_generation != block_generation {
+                    return Err(RawInvariant::new(
+                        "mark ticket 的目标 block generation 已过期",
+                    ));
+                }
+                Some(object.object_start)
+            }
+            MarkTarget::Shared {
+                handle_table,
+                handle_slot,
+                handle_generation,
+            } => {
+                // 共享目标只经 handle 标记：重复或过期 handle 在写任何 bitmap 之前被拒绝，
+                // ticket 的 mark lease 在同一个分支内 exactly once 结清。
+                let handle = super::super::shared_heap_schema::SharedHandle::new(
+                    handle_table,
+                    handle_slot,
+                    handle_generation,
+                )
+                .map_err(|error| RawInvariant::new(error.message().to_owned()))?;
+                let heap = self
+                    .shared_heap
+                    .as_mut()
+                    .ok_or_else(|| RawInvariant::new("mark ticket 指向未配置的 SharedHeap"))?;
+                if heap.mark_ticket(handle).map_err(shared_heap_error)? {
+                    heap.finish_mark_ticket(handle).map_err(shared_heap_error)?;
+                }
+                None
+            }
+        };
         // 来源身份必须是全局块身份：它编码了 arena descriptor 与 arena 内下标，因此这里能解析出
         // 来源 owner 并确认该 block 仍然存在。只带 arena 内下标的旧编码会解析到错误的 arena。
         self.resolve_source_block(ticket.source_block)?;
@@ -446,7 +464,10 @@ impl RawWorld {
                 ticket.topology_epoch,
             )
             .map_err(mark_error)?;
-        self.mark_worklists[owner as usize].push(object.object_start);
+        if let Some(address) = mark {
+            // owner-local 目标在 credit 收口后入队：入队前不再有任何可能失败的校验。
+            self.mark_worklists[owner as usize].push(address);
+        }
         Ok(())
     }
 

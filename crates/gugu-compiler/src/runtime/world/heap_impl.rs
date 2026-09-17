@@ -74,6 +74,11 @@ pub(super) fn heap_error(error: HeapError) -> RawInvariant {
     error.into_invariant()
 }
 
+/// SharedHeap 参照实现失败在运行时平面上就是不变量失败：没有可恢复分支。
+pub(super) fn shared_heap_error(error: super::super::shared_heap::SharedHeapError) -> RawInvariant {
+    RawInvariant::new(error.message())
+}
+
 impl RawWorld {
     /// 按已验证契约配置每个 owner 的 LocalHeap 与 mark 平面。
     ///
@@ -94,6 +99,17 @@ impl RawWorld {
         let owners = self.owners.len();
         self.local_heaps = Some((0..owners).map(|_| LocalHeap::new(contract)).collect());
         self.local_heap_contract = Some(contract.clone());
+        // SharedHeap 表在配置期建立：handle 身份与 payload 记录只按已验证契约初始化，
+        // 之后的 allocate/resolve/forward 都是幂等的表操作。
+        let shared_contract = raw.shared_heap();
+        if shared_contract.schema() != super::super::shared_heap_schema::SHARED_HEAP_SCHEMA {
+            return Err(RawInvariant::new("SharedHeap 契约 schema 与运行时不一致"));
+        }
+        self.shared_heap = Some(super::super::shared_heap::SharedHeap::new(
+            0,
+            shared_contract,
+        ));
+        self.shared_heap_contract = Some(shared_contract.clone());
         self.gc_types = Some(types);
         self.managed_roots.clear();
         self.managed_root_kinds.clear();
@@ -209,6 +225,33 @@ impl RawWorld {
     /// 返回 nursery 自上次 minor 起的分配字节数。
     pub(crate) fn nursery_bytes(&self, owner: u32) -> Result<u64, RawInvariant> {
         Ok(self.heap(owner)?.nursery_bytes())
+    }
+
+    /// 返回按契约配置的 SharedHeap 表；未配置时拒绝。
+    pub(crate) fn shared_heap(
+        &self,
+    ) -> Result<&super::super::shared_heap::SharedHeap, RawInvariant> {
+        self.shared_heap
+            .as_ref()
+            .ok_or_else(|| RawInvariant::new("SharedHeap 未按契约配置"))
+    }
+
+    /// 返回按契约配置的 SharedHeap 表（可变）。
+    pub(crate) fn shared_heap_mut(
+        &mut self,
+    ) -> Result<&mut super::super::shared_heap::SharedHeap, RawInvariant> {
+        self.shared_heap
+            .as_mut()
+            .ok_or_else(|| RawInvariant::new("SharedHeap 未按契约配置"))
+    }
+
+    /// 返回 SharedHeap 契约快照；未配置时拒绝。
+    pub(crate) fn shared_heap_contract(
+        &self,
+    ) -> Result<&super::super::shared_heap_schema::SharedHeapRuntimeContract, RawInvariant> {
+        self.shared_heap_contract
+            .as_ref()
+            .ok_or_else(|| RawInvariant::new("SharedHeap 契约未配置"))
     }
 
     /// 分配一个 managed 对象。

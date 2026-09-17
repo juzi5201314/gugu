@@ -339,24 +339,107 @@ impl RegionTransferBatch {
     }
 }
 
+/// 一条 mark ticket 的目标身份。
+///
+/// 两种形式都不含 managed 地址：owner-local 目标用 arena descriptor + header 偏移，跨 owner
+/// 共享目标用 stable handle 的 `table/slot/generation`。目标种类的判别值参与 integrity，
+/// 因此不能靠猜测字段来源来解释一条 ticket。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MarkTarget {
+    /// 目标对象在目标 owner 的本地 arena 内。
+    Local {
+        /// 目标对象所在 arena 的 descriptor 稠密编号。
+        arena: SlabDescriptorId,
+        /// 目标对象 header 在 arena 内的字节偏移；arena 不超过 2 MiB，适配 u32。
+        offset: u32,
+        /// 目标对象所属 block 的 generation；目标 owner 解析 block 后必须校验它。
+        block_generation: u32,
+    },
+    /// 目标对象是跨 owner 发布的 shared payload。
+    Shared {
+        /// stable handle 的逻辑表身份。
+        handle_table: u32,
+        /// stable handle 的 slot 编号。
+        handle_slot: u32,
+        /// stable handle 的 generation；重放旧 handle 必然失败。
+        handle_generation: u32,
+    },
+}
+
+impl MarkTarget {
+    /// 本地偏移目标的种类判别值。
+    pub(crate) const LOCAL_KIND: u32 = 1;
+    /// 共享 handle 目标的种类判别值。
+    pub(crate) const SHARED_KIND: u32 = 2;
+
+    /// 返回目标种类判别值。
+    pub(crate) const fn kind(self) -> u32 {
+        match self {
+            Self::Local { .. } => Self::LOCAL_KIND,
+            Self::Shared { .. } => Self::SHARED_KIND,
+        }
+    }
+
+    /// 返回 lane 里的身份低位：local 为 arena descriptor，shared 为 handle table。
+    pub(crate) const fn identity_low(self) -> u32 {
+        match self {
+            Self::Local { arena, .. } => arena.raw(),
+            Self::Shared { handle_table, .. } => handle_table,
+        }
+    }
+
+    /// 返回 lane 里的身份高位：local 为 header 偏移，shared 为 handle slot。
+    pub(crate) const fn identity_high(self) -> u32 {
+        match self {
+            Self::Local { offset, .. } => offset,
+            Self::Shared { handle_slot, .. } => handle_slot,
+        }
+    }
+
+    /// 返回 lane 里的 generation：local 为 block generation，shared 为 handle generation。
+    pub(crate) const fn generation(self) -> u32 {
+        match self {
+            Self::Local {
+                block_generation, ..
+            } => block_generation,
+            Self::Shared {
+                handle_generation, ..
+            } => handle_generation,
+        }
+    }
+
+    /// 由判别值与身份车道还原目标；未知判别值或非法身份直接拒绝。
+    pub(crate) fn decode(kind: u32, low: u32, high: u32, generation: u32) -> Option<Self> {
+        match kind {
+            Self::LOCAL_KIND => Some(Self::Local {
+                arena: SlabDescriptorId::from_raw(low),
+                offset: high,
+                block_generation: generation,
+            }),
+            Self::SHARED_KIND => Some(Self::Shared {
+                handle_table: low,
+                handle_slot: high,
+                handle_generation: generation,
+            }),
+            _ => None,
+        }
+    }
+}
+
 /// 一条跨 owner 的 GC 工作消息：把一个待标记对象交给它的 arena owner。
 ///
 /// 与 `CardMarkBatch`/`RegionTransferBatch` 共用同一条传输、staging 与 grace；区别只在
-/// 车道解释与 integrity 派生键。消息只携带稳定身份——目标 arena descriptor、目标对象在
-/// arena 内的 header 偏移、产生引用的 source block、cycle/topology epoch、owner credit 与
-/// bytes——不含任何 managed 地址：目标 owner 用自己的 arena 反查偏移对应的对象。
+/// 车道解释与 integrity 派生键。消息只携带稳定身份——目标 owner token、`MarkTarget`、
+/// 产生引用的 source block、cycle/topology epoch、owner credit 与 bytes——不含任何 managed
+/// 地址：目标 owner 用自己的 arena 或 SharedHeap 表反查目标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MarkTicket {
     /// raw intrusive link；只存在于 non-moving message storage。
     pub(crate) next: Option<u32>,
     /// 目标 arena owner 的稳定身份。
     pub(crate) target: OwnerToken,
-    /// 目标对象所在 arena 的 descriptor 稠密编号。
-    pub(crate) target_arena: SlabDescriptorId,
-    /// 目标对象 header 在 arena 内的字节偏移；arena 不超过 2 MiB，适配 u32。
-    pub(crate) target_offset: u32,
-    /// 目标对象所属 block 的 generation；目标 owner 解析 block 后必须校验它。
-    pub(crate) target_block_generation: u32,
+    /// 目标对象身份。
+    pub(crate) mark: MarkTarget,
     /// 产生这条 mark 工作的 source block：全局块身份（`descriptor * 64 + block`）。
     ///
     /// 消费端据此解析来源 owner 并确认来源块仍然存在；只带 arena 内下标的编码会被拒绝。
@@ -501,9 +584,10 @@ impl IntegrityTag {
         hasher.update(&ticket.target.generation.raw().to_le_bytes());
         hasher.update(&ticket.target.route_key.raw().to_le_bytes());
         hasher.update(&MessageFamilyTag::MarkTicket.raw().to_le_bytes());
-        hasher.update(&ticket.target_arena.raw().to_le_bytes());
-        hasher.update(&ticket.target_offset.to_le_bytes());
-        hasher.update(&ticket.target_block_generation.to_le_bytes());
+        hasher.update(&ticket.mark.kind().to_le_bytes());
+        hasher.update(&ticket.mark.identity_low().to_le_bytes());
+        hasher.update(&ticket.mark.identity_high().to_le_bytes());
+        hasher.update(&ticket.mark.generation().to_le_bytes());
         hasher.update(&ticket.source_block.to_le_bytes());
         hasher.update(&ticket.cycle_epoch.to_le_bytes());
         hasher.update(&ticket.topology_epoch.to_le_bytes());
@@ -821,8 +905,10 @@ impl ReturnNode {
             .store(ticket.target.generation.raw(), Ordering::Relaxed);
         self.route_key
             .store(ticket.target.route_key.raw(), Ordering::Relaxed);
+        // 身份车道按目标种类解释：低半是 arena descriptor 或 handle table，高半是对象偏移
+        // 或 handle slot；generation 车道同理承载 block generation 或 handle generation。
         self.descriptor_unit.store(
-            u64::from(ticket.target_arena.raw()) | (u64::from(ticket.target_offset) << 32),
+            u64::from(ticket.mark.identity_low()) | (u64::from(ticket.mark.identity_high()) << 32),
             Ordering::Relaxed,
         );
         self.bytes_epoch.store(
@@ -839,10 +925,12 @@ impl ReturnNode {
         self.payload_low
             .store(ticket.cycle_epoch, Ordering::Relaxed);
         self.payload_high.store(
-            u64::from(ticket.target_block_generation) | (u64::from(ticket.source_block) << 32),
+            u64::from(ticket.mark.generation()) | (u64::from(ticket.source_block) << 32),
             Ordering::Relaxed,
         );
-        self.sequence.store(0, Ordering::Relaxed);
+        // mark 族不使用 sequence/delta 的序列语义：两条车道承载目标种类与 handle generation。
+        self.sequence
+            .store(u64::from(ticket.mark.kind()), Ordering::Relaxed);
         self.delta.store(0, Ordering::Relaxed);
         self.credit.store(ticket.credit.raw(), Ordering::Relaxed);
         self.integrity
@@ -859,11 +947,24 @@ impl ReturnNode {
         let state_kind = self.state_kind.load(Ordering::Relaxed);
         let payload_low = self.payload_low.load(Ordering::Relaxed);
         let payload_high = self.payload_high.load(Ordering::Relaxed);
+        let sequence = self.sequence.load(Ordering::Relaxed);
         let credit = self.credit.load(Ordering::Relaxed);
         let integrity = self.integrity.load(Ordering::Relaxed);
         let domain = MemoryDomainId::from_raw(((state_kind >> 16) & 0xFF) as u8)
             .unwrap_or(MemoryDomainId::RUNTIME_RAW);
         // 车道按固定位宽掩码后截断到目标字段宽度：每个身份字段只占 32-bit，掩码已保证无溢出。
+        // 未知目标种类是真正的编码失败，按本地偏移解释会静默标记错误对象。
+        let mark = MarkTarget::decode(
+            (sequence & 0xFFFF_FFFF) as u32,
+            (descriptor_unit & 0xFFFF_FFFF) as u32,
+            (descriptor_unit >> 32) as u32,
+            (payload_high & 0xFFFF_FFFF) as u32,
+        )
+        .unwrap_or(MarkTarget::Local {
+            arena: SlabDescriptorId::from_raw((descriptor_unit & 0xFFFF_FFFF) as u32),
+            offset: (descriptor_unit >> 32) as u32,
+            block_generation: (payload_high & 0xFFFF_FFFF) as u32,
+        });
         MarkTicket {
             next: None,
             target: OwnerToken {
@@ -872,9 +973,7 @@ impl ReturnNode {
                 generation: OwnerGeneration::from_raw(target_generation),
                 route_key: RouteKey::from_raw(route_key),
             },
-            target_arena: SlabDescriptorId::from_raw((descriptor_unit & 0xFFFF_FFFF) as u32),
-            target_offset: (descriptor_unit >> 32) as u32,
-            target_block_generation: (payload_high & 0xFFFF_FFFF) as u32,
+            mark,
             source_block: (payload_high >> 32) as u32,
             cycle_epoch: payload_low,
             topology_epoch: (bytes_epoch >> 32) as u32,

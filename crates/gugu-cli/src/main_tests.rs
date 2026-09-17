@@ -479,7 +479,7 @@ fn build_json_reports_barrier_contract_keys() {
     assert_eq!(payload["mark-conditions"], 7);
     assert_eq!(payload["mark-snapshot-participants"], 6);
     assert_eq!(payload["mark-mailbox-consumers"], 1);
-    assert_eq!(payload["mark-ticket-fields"], 15);
+    assert_eq!(payload["mark-ticket-fields"], 18);
     assert_eq!(payload["mark-records"], 5);
     // mark 需求与 GC metadata/barrier/LocalHeap 需求覆盖同一站点集合。
     assert_eq!(

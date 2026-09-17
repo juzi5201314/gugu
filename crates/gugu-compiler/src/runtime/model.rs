@@ -318,6 +318,28 @@ impl MessageSchemaV1 {
                 ));
             }
         }
+        if family == MessageFamilyTag::MarkTicket {
+            // 目标形式由判别值决定：缺少任何一个身份字段都会让消费端无法判断该解析 arena
+            // 偏移还是 handle slot。
+            for (name, kind) in [
+                ("target-kind", FieldKind::KindTag),
+                ("target-handle-table", FieldKind::DescriptorIndex),
+                ("target-handle-generation", FieldKind::Generation),
+            ] {
+                let field = self
+                    .fields
+                    .iter()
+                    .find(|field| field.name == name)
+                    .ok_or_else(|| {
+                        RawModelError::new(format!("MarkTicket schema 缺少字段 `{name}`"))
+                    })?;
+                if field.kind != kind {
+                    return Err(RawModelError::new(format!(
+                        "MarkTicket 字段 `{name}` 的种类与登记不一致"
+                    )));
+                }
+            }
+        }
         if family == MessageFamilyTag::HandleForward {
             // 两个 payload identity 与两条 generation 车道必须按名字存在：只数 kind 无法区分
             // old/new payload，也无法区分 handle/forward generation。
@@ -391,6 +413,9 @@ fn required_fields(family: MessageFamilyTag) -> Vec<FieldKind> {
             required.push(FieldKind::UnitIndex);
             required.push(FieldKind::Credit);
             required.push(FieldKind::SourceBlock);
+            // 目标种类与 handle 身份：跨 owner 目标必须能分辨 arena 偏移与 handle slot。
+            required.push(FieldKind::DescriptorIndex);
+            required.push(FieldKind::KindTag);
         }
         // edge delta 用稳定 block 身份描述边端点，并携带 sequence、signed 差量与 credit。
         MessageFamilyTag::EdgeDelta => {

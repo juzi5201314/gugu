@@ -24,7 +24,11 @@ use super::pacing_schema::CREDIT_SOURCE_NAMES;
 /// 版本 3 相对版本 2 的变化：`MarkTicket` 的 `source_block` 从「arena 内下标」改为全局块身份
 /// （`descriptor * 64 + block`）。只带下标的旧编码会让接收端无法判断来源属于哪个 arena，因此
 /// 消费端必须按全局身份解析并校验来源块仍然存在。
-pub(crate) const MARK_SCHEMA: u32 = 3;
+/// 版本 4 相对版本 3 的变化：`MarkTicket` 的目标从「arena descriptor + offset」扩展为
+/// `MarkTarget`（owner-local 偏移或跨 owner stable handle），并新增 `target-kind`、
+/// `target-handle-table` 与 `target-handle-generation` 三个字段。旧编码没有目标种类，
+/// 消费端无法判断一个 ticket 指向 arena 偏移还是 handle slot，因此必须拒绝。
+pub(crate) const MARK_SCHEMA: u32 = 4;
 
 /// 内建 mark profile 名。
 pub(crate) const MARK_PROFILE_NAME: &str = "mosaic-mark";
@@ -44,7 +48,7 @@ pub(crate) const MARK_CREDIT_GENERATION_BITS: u32 = 32;
 /// credit slot 的初始 generation；0 表示无效 id。
 pub(crate) const MARK_CREDIT_INITIAL_GENERATION: u32 = 1;
 /// `MarkTicket` 的规范字段数。
-pub(crate) const MARK_TICKET_FIELDS: u32 = 15;
+pub(crate) const MARK_TICKET_FIELDS: u32 = 18;
 /// `EdgeDelta` 的规范字段数。
 pub(crate) const EDGE_DELTA_FIELDS: u32 = 18;
 
@@ -79,8 +83,12 @@ pub(crate) const MARK_SNAPSHOT_PARTICIPANTS: [&str; 6] = [
     "local-worklist",
 ];
 
-/// 登记 `MarkTicket` 的字段集合：只允许稳定 arena descriptor、对象偏移、source block、
-/// cycle/topology epoch、credit 与 bytes，任何地址字段都在 verifier 中被拒绝。
+/// 登记 `MarkTicket` 的字段集合：只允许稳定 arena descriptor 或 handle 身份、对象偏移、
+/// source block、cycle/topology epoch、credit 与 bytes，任何地址字段都在 verifier 中被拒绝。
+///
+/// `target-kind` 判别目标形式：owner-local 用 `target_arena` + `object_offset` +
+/// `target_block_generation`，跨 owner 共享对象用 `target-handle-table` + `object_offset`
+/// （handle slot）+ `target-handle-generation`；两种形式未使用的身份字段必须为 0。
 pub(crate) fn mark_ticket_fields() -> Vec<MessageFieldSchema> {
     let mut fields = vec![
         MessageFieldSchema::new("bytes", FieldKind::Bytes),
@@ -91,6 +99,9 @@ pub(crate) fn mark_ticket_fields() -> Vec<MessageFieldSchema> {
         MessageFieldSchema::new("object_offset", FieldKind::UnitIndex),
         MessageFieldSchema::new("source_block", FieldKind::SourceBlock),
         MessageFieldSchema::new("state", FieldKind::MessageState),
+        MessageFieldSchema::new("target-kind", FieldKind::KindTag),
+        MessageFieldSchema::new("target-handle-generation", FieldKind::Generation),
+        MessageFieldSchema::new("target-handle-table", FieldKind::DescriptorIndex),
         MessageFieldSchema::new("target.domain", FieldKind::OwnerDomain),
         MessageFieldSchema::new("target.generation", FieldKind::Generation),
         MessageFieldSchema::new("target.owner_id", FieldKind::OwnerId),

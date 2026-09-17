@@ -167,6 +167,7 @@ struct AccessRecord {
 /// `payloads` 与 `payload_generations` 是 payload 槽的 SoA 表示，free 栈保存可复用编号。
 /// `cycle_epoch` 与 `mark_epochs` 让「每个 cycle 每个对象至多一次 side mark」可判定：mark ticket
 /// 只延迟旧 payload 回收，不改变 current payload。
+#[derive(Debug)]
 pub(crate) struct SharedHeap {
     table: u32,
     grace_steps: u32,

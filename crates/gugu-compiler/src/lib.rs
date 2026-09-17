@@ -2780,7 +2780,7 @@ mod tests {
         assert_eq!(plan.mark_condition_count(), 7);
         assert_eq!(plan.mark_snapshot_participant_count(), 6);
         assert_eq!(plan.mark_cycle_state_count(), 6);
-        assert_eq!(plan.mark_ticket_field_count(), 15);
+        assert_eq!(plan.mark_ticket_field_count(), 18);
         assert_eq!(plan.mark_record_count(), 5);
         assert!(plan.mark_credit_pool() > 0);
         // mark 需求覆盖的站点集合与 gc metadata/barrier/SharedHeap 三份需求一致。
@@ -2798,7 +2798,7 @@ mod tests {
             demand.edge_summary_sites
         );
         assert_ne!(plan.mark_contract_fingerprint(), [0_u8; 32]);
-        assert!(dump.contains("mark schema=3 profile=mosaic-mark revision=2"));
+        assert!(dump.contains("mark schema=4 profile=mosaic-mark revision=2"));
         assert!(dump.contains(
             "mark-conditions local-worklist,published-batch,mailbox,barrier-buffer,producer-epoch,forwarding-work,pending-credit"
         ));

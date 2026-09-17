@@ -172,6 +172,9 @@ pub(crate) struct RawWorld {
     regions: Option<super::region::RegionPlane>,
     /// LocalHeap 契约快照；`configure_gc` 之后才可用。
     local_heap_contract: Option<super::local_heap_schema::LocalHeapRuntimeContract>,
+    /// SharedHeap 契约快照与 stable handle 表；`configure_gc` 之后才可用。
+    shared_heap_contract: Option<super::shared_heap_schema::SharedHeapRuntimeContract>,
+    shared_heap: Option<super::shared_heap::SharedHeap>,
     /// MarkMailbox、owner credit 与终止检测的执行平面；`configure_gc` 之后才可用。
     mark: Option<super::mark::MarkPlane>,
     /// 每个 owner 的 mark worklist；元素是待标记对象的 payload 地址。
@@ -279,6 +282,8 @@ impl RawWorld {
             return_caches: (0..owners).map(|_| ReturnSlabCache::new()).collect(),
             regions: None,
             local_heap_contract: None,
+            shared_heap_contract: None,
+            shared_heap: None,
             mark: None,
             mark_worklists: Vec::new(),
             cycle_epoch: 0,

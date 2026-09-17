@@ -62,6 +62,115 @@ fn mark_ticket_source_identity_is_global_and_resolved() {
     assert!(world.managed_object(child).is_ok());
 }
 
+/// 共享 handle ticket：车道往返后消费端只经 handle 标记，lease 在消费处结清。
+#[test]
+fn shared_mark_ticket_round_trips_and_settles_handle_lease() {
+    use crate::runtime::message::MarkTarget;
+
+    let contract = gc_contract();
+    let mut world = configured_world(&contract, 23, 2, 64);
+    // 来源身份必须是可解析的全局 block 身份：用 owner 0 上真实分配的对象所在 block。
+    let holder = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("holder 可分配");
+    let source_block = world
+        .managed_block_ref(0, holder)
+        .expect("源 block")
+        .id
+        .raw();
+    // 共享对象走真实 allocate + resolve，得到 stable handle。
+    let payload = world
+        .shared_heap_mut()
+        .expect("SharedHeap 已配置")
+        .allocate_payload(1, 3, 0, 16)
+        .expect("payload 可建立");
+    let handle = world
+        .shared_heap_mut()
+        .expect("SharedHeap 已配置")
+        .resolve_payload(payload)
+        .expect("payload 可发布");
+    // credit 只能在 cycle 内 acquire：先打开 cycle，再入队共享 ticket。
+    world.begin_mark_cycle(&[0, 1]).expect("mark cycle 可开始");
+    let credit = world
+        .mark_plane_mut()
+        .expect("mark 平面已配置")
+        .publish_ticket(0, 1)
+        .expect("credit 可 acquire");
+    world
+        .stage_ticket(
+            0,
+            1,
+            credit,
+            source_block,
+            MarkTarget::Shared {
+                handle_table: handle.table(),
+                handle_slot: handle.slot(),
+                handle_generation: handle.generation(),
+            },
+            16,
+        )
+        .expect("共享 ticket 可入队");
+    let pass = world.run_mark_pass(&[0, 1]).expect("mark pass 可执行");
+    assert_eq!(
+        pass.tickets_consumed, 1,
+        "共享 ticket 必须被目标 owner 消费"
+    );
+    let record = world
+        .shared_heap()
+        .expect("SharedHeap 已配置")
+        .slot_record(handle)
+        .expect("slot 可读");
+    assert_eq!(record.mark_tickets, 0, "mark lease 必须在消费处结清");
+    assert_eq!(record.access_guards, 0);
+    assert_eq!(
+        world
+            .mark_plane()
+            .expect("mark 平面已配置")
+            .mark_credit_pending(),
+        0
+    );
+    // 反向：过期 handle generation 的 ticket 必须在写任何标记之前失败。
+    // 换一个新的 world：上一个 cycle 的 credit 已经消费，未归还的 credit 不允许开新 cycle。
+    let mut stale = configured_world(&contract, 23, 2, 64);
+    let stale_source = stale
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("holder 可分配");
+    let stale_block = stale
+        .managed_block_ref(0, stale_source)
+        .expect("源 block")
+        .id
+        .raw();
+    stale
+        .begin_mark_cycle(&[0, 1])
+        .expect("stale world 的 mark cycle 可开始");
+    let credit = stale
+        .mark_plane_mut()
+        .expect("mark 平面已配置")
+        .publish_ticket(0, 1)
+        .expect("credit 可 acquire");
+    stale
+        .stage_ticket(
+            0,
+            1,
+            credit,
+            stale_block,
+            MarkTarget::Shared {
+                handle_table: handle.table(),
+                handle_slot: handle.slot(),
+                handle_generation: handle.generation() + 1,
+            },
+            16,
+        )
+        .expect("过期 ticket 仍可入队");
+    let error = stale
+        .run_mark_pass(&[0, 1])
+        .expect_err("过期 handle 必须被拒绝");
+    assert!(
+        error.to_string().contains("generation mismatch"),
+        "失败原因必须点名 handle 代际：{error}"
+    );
+}
+
 /// 2 owner：owner 0 的 holder 指向 owner 1 的 child，mark pass 必须跨 owner 完成标记。
 #[test]
 fn mark_pass_traces_cross_owner_tickets_and_records_credit_trace() {
