@@ -235,15 +235,20 @@ impl RawWorld {
             .edges
             .as_ref()
             .ok_or_else(|| RawInvariant::new("边平面尚未配置"))?;
-        Ok(edges
+        edges
             .applied_pairs()
             .into_iter()
-            .map(|(source, destination, count)| BlockPairCount {
-                source: source.id,
-                target: destination.id,
-                count: u32::try_from(count).unwrap_or(u32::MAX),
+            .map(|(source, destination, count)| {
+                // 已应用计数必须能用 u32 表示：候选平面的计数、试验删除与出边减量都按它推理，
+                // 放不下就是真的不变量破损，不能截断成一个偏大的值继续判定。
+                Ok(BlockPairCount {
+                    source: source.id,
+                    target: destination.id,
+                    count: u32::try_from(count)
+                        .map_err(|_| RawInvariant::new("已应用边计数超出候选平面的 u32 范围"))?,
+                })
             })
-            .collect())
+            .collect()
     }
 
     /// 执行一条候选动作；每一步都立刻回填平面要求的确认。
