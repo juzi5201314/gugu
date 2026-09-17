@@ -5,6 +5,64 @@ use super::heap_tests::{configured_world, gc_contract};
 use crate::runtime::gc_metadata_schema::GcRootKindV1;
 use crate::runtime::mark::MarkCondition;
 
+/// ticket 的来源身份必须是可解析的全局块身份，且真实跨 owner 路径必须带着它完成校验。
+#[test]
+fn mark_ticket_source_identity_is_global_and_resolved() {
+    use crate::runtime::local_heap::ManagedBlockId;
+
+    let contract = gc_contract();
+    let mut world = configured_world(&contract, 13, 2, 64);
+    let holder = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .expect("holder 可分配");
+    let child = world
+        .allocate_managed(1, 0, 16, ManagedPlacement::Old)
+        .expect("child 可分配");
+    let source_id = world.managed_block_ref(0, holder).expect("源 block").id;
+    // 正向：真实存在的 block 身份必须解析回同一个身份。
+    assert_eq!(
+        world
+            .resolve_source_block(source_id.raw())
+            .expect("全局身份必须可解析"),
+        source_id
+    );
+    assert!(
+        source_id.raw() == source_id.arena() * 64 + source_id.index(),
+        "全局身份必须同时编码 arena 与下标"
+    );
+    // 反向 A：descriptor 超出已登记范围，无法解析出 owner。
+    let error = world
+        .resolve_source_block(u32::MAX)
+        .expect_err("无法解析的身份必须被拒绝");
+    assert!(
+        error.to_string().contains("来源 block 身份无法解析"),
+        "失败原因必须点名来源身份：{error}"
+    );
+    // 反向 B：身份可解析，但该 block 没有提交在本 heap 里。
+    let uncommitted =
+        ManagedBlockId::new(source_id.arena(), 63).expect("身份可构造");
+    let error = world
+        .resolve_source_block(uncommitted.raw())
+        .expect_err("未提交的 block 必须被拒绝");
+    assert!(
+        error.to_string().contains("来源 block 已不存在"),
+        "失败原因必须点名来源块：{error}"
+    );
+    // 真实路径：跨 owner 引用必须发布并消费，消费过程会校验来源身份。
+    let slot = world
+        .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
+        .expect("根槽可登记");
+    world.set_managed_root(slot, holder).expect("根可写");
+    world
+        .store_managed_field(0, 0, holder, 0, child)
+        .expect("跨 owner store 可执行");
+    let pass = world.run_mark_pass(&[0, 1]).expect("mark pass 可执行");
+    assert_eq!(pass.tickets_published, 1, "跨 owner 引用必须走 ticket");
+    assert_eq!(pass.tickets_consumed, 1);
+    assert_eq!(world.mark_worklist_items(), 0, "工作项必须被消费掉");
+    assert!(world.managed_object(child).is_ok());
+}
+
 /// 2 owner：owner 0 的 holder 指向 owner 1 的 child，mark pass 必须跨 owner 完成标记。
 #[test]
 fn mark_pass_traces_cross_owner_tickets_and_records_credit_trace() {

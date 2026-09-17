@@ -17,6 +17,7 @@ use std::{
 };
 
 use super::inbox::ShardIndex;
+use super::local_heap::{BlockRef, ManagedBlockId};
 use super::message::{
     BatchLimits, FlushTrigger, MessageState, ProducerStaging, ReturnKind, ReturnMessage,
     stage_message,
@@ -955,20 +956,23 @@ impl CardMarkHarness {
                             arena_generation: 1,
                             offset,
                             cycle_epoch: 1,
-                            old_present: true,
-                            new_present: true,
+                            // source 与 target 落在不同 block：harness 因此同时覆盖
+                            // owner-local edge summary 的聚合与取走路径。
+                            source: BlockRef {
+                                id: ManagedBlockId(0),
+                                generation: 1,
+                            },
+                            old: None,
+                            new: Some(BlockRef {
+                                id: ManagedBlockId(
+                                    u32::try_from(processor + 1).expect("block 编号适配 u32"),
+                                ),
+                                generation: 1,
+                            }),
                             new_in_nursery: true,
                             owner_old: true,
                             marking: true,
                             stack_grey: true,
-                            // 每个 processor 写入不同 target block：harness 因此同时覆盖
-                            // owner-local edge summary 的聚合与取走路径。
-                            new_block: Some(
-                                u32::try_from(processor + 1).expect("block 编号适配 u32"),
-                            ),
-                            source_block: 0,
-                            new_owner: 0,
-                            source_owner: 0,
                         },
                     )
                     .expect("写屏障成功");
@@ -976,8 +980,9 @@ impl CardMarkHarness {
         }
         let mut batches = 0_u64;
         for processor in 0..self.processors as usize {
-            let drafts =
-                plane.flush_processor(processor, super::barrier::BarrierFlushReason::BufferFull);
+            let drafts = plane
+                .flush_processor(processor, super::barrier::BarrierFlushReason::BufferFull)
+                .expect("flush 可执行");
             batches += u64::try_from(drafts.len()).unwrap_or(u64::MAX);
             for draft in &drafts {
                 let _ = plane.consume_locally(arena, draft);
@@ -995,8 +1000,9 @@ impl CardMarkHarness {
             .table(arena)
             .map_or(0, super::barrier::CardTable::dirty);
         // edge summary 是 owner-local 聚合：每个 processor 的 target block 不同，因此每个
-        // processor 恰好留下一条待取走 delta；取走后挂起数必须归零。
-        let edge_deltas = u64::try_from(plane.drain_edges().len()).unwrap_or(u64::MAX);
+        // processor 恰好留下一条待发布 delta；发布后挂起数必须归零。
+        let edge_deltas =
+            u64::try_from(plane.publish_edges(1).expect("边差量可发布").len()).unwrap_or(u64::MAX);
         let edge_pending_after_drain = plane.edges().pending();
         let expected = u64::from(self.processors) * u64::from(self.iterations);
         let invariants_hold = registered
@@ -1016,6 +1022,355 @@ impl CardMarkHarness {
             elapsed_micros: u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX),
             invariants_hold,
         }
+    }
+}
+
+/// EdgeNode 夹具源码：harness 与回归测试共用同一份真实编译输入。
+const EDGE_NODE_SOURCE: &str = include_str!("fixtures/edge_nodes.gg");
+
+/// 真实 `Compilation` 消费者的边与候选 harness。
+///
+/// 与其余 harness 不同，这里的输入是**编译器真实产物**：`Compiler` 编译 EdgeNode 夹具，harness
+/// 用镜像计划的 LocalHeap/GC metadata/edge 契约配置 `RawWorld`，再按真实类型表建立跨 owner
+/// 引用、跑标记与候选判定。它不参数化契约常量，只参数化轮数与每轮的节点数。
+#[derive(Clone, Copy, Debug)]
+pub struct EdgeCandidateHarness {
+    /// 完整 cycle 轮数。
+    rounds: u32,
+    /// 每个 owner 每轮的节点数。
+    nodes: u32,
+}
+
+/// EdgeCandidateHarness 运行报告。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EdgeCandidateReport {
+    /// 编译轮次。
+    pub rounds: u32,
+    /// 每轮每 owner 的节点数。
+    pub nodes: u32,
+    /// 夹具真实类型表里的 managed 类型数。
+    pub managed_types: u64,
+    /// 建立的跨 owner 引用总数。
+    pub cross_owner_stores: u64,
+    /// 发布的 `EdgeDelta` 总数。
+    pub edge_deltas: u64,
+    /// 目标 owner 应用后的入边计数总和。
+    pub applied_edges: i64,
+    /// 发布的 mark ticket 总数。
+    pub mark_tickets: u64,
+    /// 候选平面消耗的工作单位。
+    pub candidate_work_units: u64,
+    /// 候选释放的 block 数。
+    pub blocks_released: u64,
+    /// 运行耗时（微秒）。
+    pub elapsed_micros: u64,
+    /// 不变量是否守恒。
+    pub invariants_hold: bool,
+}
+
+impl EdgeCandidateHarness {
+    /// 创建 harness；轮数与节点数至少为 1。
+    pub fn new(rounds: u32, nodes: u32) -> Self {
+        Self {
+            rounds: rounds.max(1),
+            nodes: nodes.max(1),
+        }
+    }
+
+    /// 编译夹具、按真实契约驱动 `rounds` 轮边发布、标记与候选判定。
+    pub fn run(self) -> EdgeCandidateReport {
+        use crate::runtime::gc_metadata_section::decode_sections;
+        use crate::runtime::world::heap_impl::ManagedPlacement;
+        use crate::{CompileRequest, Compiler, TargetName};
+
+        let start = Instant::now();
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            EDGE_NODE_SOURCE,
+            TargetName::X86_64Linux,
+        ));
+        let plan = compilation.image_plan().expect("夹具必须编译成功");
+        let contract = compilation.raw_contract().expect("真实契约必须存在");
+        let types = decode_sections(plan.gc_type_section(), plan.gc_metadata_section())
+            .expect("section 可解码");
+        // 与计划断言同一口径：同名占位项不参与，取带布局的记录。
+        let node = types
+            .types()
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.name.ends_with("EdgeNode"))
+            .max_by_key(|(_, entry)| entry.size)
+            .expect("EdgeNode 必须存在");
+        let tail = types
+            .types()
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.name.ends_with("EdgeNodeTail"))
+            .max_by_key(|(_, entry)| entry.size)
+            .expect("EdgeNodeTail 必须存在");
+        let node_type = u32::try_from(node.0).expect("类型下标适配 u32");
+        let tail_type = u32::try_from(tail.0).expect("类型下标适配 u32");
+        let (node_size, tail_size) = (node.1.size, tail.1.size);
+
+        let budget = super::inbox::ServiceBudget::pressure(u32::MAX, u64::MAX);
+        let mut report = EdgeCandidateReport {
+            rounds: self.rounds,
+            nodes: self.nodes,
+            managed_types: u64::from(plan.local_heap_demand().managed_types),
+            cross_owner_stores: 0,
+            edge_deltas: 0,
+            applied_edges: 0,
+            mark_tickets: 0,
+            candidate_work_units: 0,
+            blocks_released: 0,
+            elapsed_micros: 0,
+            invariants_hold: true,
+        };
+        let trace = std::env::var_os("GUGU_BENCH_TRACE").is_some();
+        let mut clean = true;
+        for round in 0..self.rounds {
+            // 每轮用一个新 world：harness 度量的是同一条真实路径的重复执行，跨 cycle 的信用与
+            // 候选状态由世界级测试覆盖，不在这里耦合进吞吐口径。
+            let node_capacity = self.nodes.saturating_mul(4).max(64);
+            let mut world =
+                RawWorld::new(53 + u64::from(round), 2, node_capacity, BatchLimits::default())
+                    .expect("world 可创建");
+            world.configure_gc(contract).expect("真实契约可配置");
+            let mut world_stores = 0_u64;
+            // 每轮重建引用：owner 0 的每个节点指向 owner 1 的对应节点并反向指回。
+            let mut sources = Vec::with_capacity(self.nodes as usize);
+            let mut targets = Vec::with_capacity(self.nodes as usize);
+            for _ in 0..self.nodes {
+                let source =
+                    match world.allocate_managed(0, node_type, node_size, ManagedPlacement::Old) {
+                        Ok(address) => address,
+                        Err(error) => {
+                            if trace {
+                                eprintln!("edge-candidates 第 {round} 轮分配 source 失败: {error:?}");
+                            }
+                            clean = false;
+                            break;
+                        }
+                    };
+                let target =
+                    match world.allocate_managed(1, tail_type, tail_size, ManagedPlacement::Old) {
+                        Ok(address) => address,
+                        Err(error) => {
+                            if trace {
+                                eprintln!("edge-candidates 第 {round} 轮分配 target 失败: {error:?}");
+                            }
+                            clean = false;
+                            break;
+                        }
+                    };
+                if let Err(error) = world.store_managed_field(0, 0, source, 8, target) {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮正向写入失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+                if let Err(error) = world.store_managed_field(1, 0, target, 0, source) {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮反向写入失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+                report.cross_owner_stores += 2;
+                world_stores += 2;
+                sources.push(source);
+                targets.push(target);
+            }
+            if sources.len() as u32 != self.nodes {
+                clean = false;
+                break;
+            }
+            // 只有本轮的第一个节点对挂根：其余节点会成为真实的垃圾，用来覆盖候选回收路径。
+            let slot_source = match world
+                .register_managed_root(super::gc_metadata_schema::GcRootKindV1::CoroutineFrame, 0)
+            {
+                Ok(slot) => slot,
+                Err(error) => {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮登记 owner 0 根槽失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            };
+            let slot_target = match world
+                .register_managed_root(super::gc_metadata_schema::GcRootKindV1::CoroutineFrame, 1)
+            {
+                Ok(slot) => slot,
+                Err(error) => {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮登记 owner 1 根槽失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            };
+            clean &= world.set_managed_root(slot_source, sources[0]).is_ok();
+            clean &= world.set_managed_root(slot_target, targets[0]).is_ok();
+            // 每轮按 block 对核对多重计数：同一 block 对里的写入必须精确累加。
+            let source_ref = match world.managed_block_ref(0, sources[0]) {
+                Ok(reference) => reference,
+                Err(error) => {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮解析 source block 失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            };
+            let target_ref = match world.managed_block_ref(1, targets[0]) {
+                Ok(reference) => reference,
+                Err(error) => {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮解析 target block 失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            };
+            let published = match world.publish_edge_deltas() {
+                Ok(records) => records,
+                Err(error) => {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮发布边差量失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            };
+            report.edge_deltas += u64::try_from(published.len()).unwrap_or(u64::MAX);
+            for owner in 0..2 {
+                if let Err(error) = world.drain_all(owner, &budget) {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮排空 owner {owner} 失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            }
+            // 真实 cycle 顺序：两个 owner 一起标记 → 候选判定 → 收尾并推进 epoch。
+            let mark = match world.run_mark_pass(&[0, 1]) {
+                Ok(pass) => pass,
+                Err(error) => {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮 mark pass 失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            };
+            report.mark_tickets += mark.tickets_published;
+            clean &= mark.termination.converged();
+            clean &= mark.tickets_published == mark.tickets_consumed;
+            if trace && (!mark.termination.converged() || mark.tickets_published != mark.tickets_consumed)
+            {
+                eprintln!("edge-candidates 第 {round} 轮标记未结清: {mark:?}");
+            }
+            // 票据先落 producer staging：排空两个 owner 让对端真正消费本轮发布的跨 owner 工作。
+            for owner in 0..2 {
+                if let Err(error) = world.drain_all(owner, &budget) {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮标记后排水 owner {owner} 失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            }
+            let mut actions = Vec::new();
+            loop {
+                let driven = match world.drive_candidates(plan.edge_runtime().candidate_quantum) {
+                    Ok(report) => report,
+                    Err(error) => {
+                        if trace {
+                            eprintln!("edge-candidates 第 {round} 轮候选推进失败: {error:?}");
+                        }
+                        clean = false;
+                        break;
+                    }
+                };
+                report.candidate_work_units += u64::from(driven.work_units);
+                actions.extend(driven.actions.iter().cloned());
+                let stats = world.candidate_stats().expect("统计可读");
+                if stats.jobs_started == stats.jobs_completed + stats.jobs_invalidated {
+                    break;
+                }
+            }
+            if trace && !actions.is_empty() {
+                eprintln!(
+                    "edge-candidates 第 {round} 轮候选动作 {} 个，挂根节点对存活: {}",
+                    actions.len(),
+                    world.managed_object(sources[0]).is_ok() && world.managed_object(targets[0]).is_ok(),
+                );
+            }
+            clean &= world.mark_worklist_items() == 0;
+            clean &= world.release_graced_nodes().is_ok();
+            clean &= world.finish_mark_cycle().is_ok();
+            clean &= world.advance_cycle_epoch(0).is_ok();
+            // 只有本轮挂根的第一个节点对必须存活；未挂根的节点会被候选回收，这是真实行为。
+            let rooted_alive = world.managed_object(sources[0]).is_ok()
+                && world.managed_object(targets[0]).is_ok()
+                && world
+                    .managed_block_ref(0, sources[0])
+                    .is_ok_and(|current| current == source_ref)
+                && world
+                    .managed_block_ref(1, targets[0])
+                    .is_ok_and(|current| current == target_ref);
+            if trace && !rooted_alive {
+                eprintln!(
+                    "edge-candidates 第 {round} 轮挂根节点对被回收或搬迁: source_alive={} target_alive={} source_block={:?} target_block={:?}",
+                    world.managed_object(sources[0]).is_ok(),
+                    world.managed_object(targets[0]).is_ok(),
+                    world.managed_block_ref(0, sources[0]).ok(),
+                    world.managed_block_ref(1, targets[0]).ok(),
+                );
+            }
+            clean &= rooted_alive;
+            if world.mark_worklist_items() != 0 && trace {
+                eprintln!(
+                    "edge-candidates 第 {round} 轮残留工作项: {}",
+                    world.mark_worklist_items()
+                );
+            }
+            // 全局守恒：所有活跃 block 对的已应用入边计数之和必须等于累计成功的跨 owner 写入数。
+            // 这条不变量与 block 拓扑无关：计数既不能塌成布尔标志，也不能丢边或多记。
+            let pairs = match world.edge_pairs() {
+                Ok(pairs) => pairs,
+                Err(error) => {
+                    if trace {
+                        eprintln!("edge-candidates 第 {round} 轮读取边对失败: {error:?}");
+                    }
+                    clean = false;
+                    break;
+                }
+            };
+            let applied: i64 = pairs.iter().map(|(_, _, count)| *count).sum();
+            let expected = i64::try_from(world_stores).expect("计数适配 i64");
+            clean &= applied == expected;
+            if trace && applied != expected {
+                let plane = world.edge_plane().expect("边平面");
+                eprintln!(
+                    "edge-candidates 第 {round} 轮计数不守恒: applied={applied} expected={expected} held={} pending={} pairs={pairs:?}",
+                    plane.held_records(),
+                    plane.pending_credits(),
+                );
+            }
+            report.applied_edges = applied;
+            let stats = world.candidate_stats().expect("统计可读");
+            report.blocks_released = stats.blocks_released;
+            clean &= stats.jobs_started == stats.jobs_completed + stats.jobs_invalidated;
+            if !clean {
+                break;
+            }
+        }
+        report.elapsed_micros = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
+        report.invariants_hold = clean;
+        report
     }
 }
 

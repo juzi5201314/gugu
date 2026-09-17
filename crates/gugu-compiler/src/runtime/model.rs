@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::barrier_schema::{BarrierDemand, BarrierRuntimeContract, MessageFamilyTag};
 use super::coroutine_schema::{CoroutineDemand, CoroutineRuntimeContract};
+use super::edge_schema::{EdgeDemand, EdgeRuntimeContract};
 use super::gc_metadata_contract::GcMetadataRuntimeContract;
 use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::ServiceBudget;
@@ -37,8 +38,12 @@ use crate::{
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
 };
 
-/// 契约对象的schema版本；schema 15 并入 MarkMailbox、owner credit 与终止检测契约段。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 15;
+/// `RuntimeRawContractV1` 的 schema 版本。
+///
+/// 版本 17 相对版本 16 的变化：并入 `EdgeRuntimeContract`（候选相位目录、block 状态目录、
+/// `EdgeDelta` 字段集合与 `EdgeDemand`），并把本地堆契约升到 schema 3（见
+/// `LocalHeapRuntimeContract`）；运行时在 `configure_gc` 期间逐项校对边契约与实现常量。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 17;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -135,6 +140,12 @@ pub(crate) enum FieldKind {
     Credit,
     /// 产生 mark 工作的 source block 序号。
     SourceBlock,
+    /// 边变更的 target block 序号。
+    TargetBlock,
+    /// block 对内单调递增的发布序号。
+    Sequence,
+    /// signed 边差量。
+    Delta,
 }
 
 impl FieldKind {
@@ -165,6 +176,9 @@ impl FieldKind {
             Self::RawPointer => "raw-pointer",
             Self::Credit => "credit",
             Self::SourceBlock => "source-block",
+            Self::TargetBlock => "target-block",
+            Self::Sequence => "sequence",
+            Self::Delta => "delta",
         }
     }
 
@@ -237,6 +251,15 @@ impl MessageSchemaV1 {
             schema: 1,
             family: MessageFamilyTag::MarkTicket,
             fields: super::mark_schema::mark_ticket_fields(),
+        }
+    }
+
+    /// 返回 GC 工作消息族的 `EdgeDelta` 字段集合。
+    pub(crate) fn edge_delta() -> Self {
+        Self {
+            schema: 1,
+            family: MessageFamilyTag::EdgeDelta,
+            fields: super::mark_schema::edge_delta_fields(),
         }
     }
 
@@ -329,6 +352,14 @@ fn required_fields(family: MessageFamilyTag) -> Vec<FieldKind> {
             required.push(FieldKind::UnitIndex);
             required.push(FieldKind::Credit);
             required.push(FieldKind::SourceBlock);
+        }
+        // edge delta 用稳定 block 身份描述边端点，并携带 sequence、signed 差量与 credit。
+        MessageFamilyTag::EdgeDelta => {
+            required.push(FieldKind::SourceBlock);
+            required.push(FieldKind::TargetBlock);
+            required.push(FieldKind::Sequence);
+            required.push(FieldKind::Delta);
+            required.push(FieldKind::Credit);
         }
     }
     required
@@ -424,6 +455,7 @@ pub(crate) struct RuntimeRawContractV1 {
     region: TurnRegionRuntimeContract,
     local_heap: LocalHeapRuntimeContract,
     mark: MarkRuntimeContract,
+    edge: EdgeRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -475,6 +507,11 @@ impl RuntimeRawContractV1 {
             mark_demand,
             u64::from(demand.message_nodes) + u64::from(mark_demand.root_sites),
         )?;
+        let edge = EdgeRuntimeContract::build(
+            EdgeDemand::derive(&barrier.demand, &mark.demand)?,
+            &barrier,
+            &mark,
+        )?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -501,6 +538,7 @@ impl RuntimeRawContractV1 {
             region,
             local_heap,
             mark,
+            edge,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -656,6 +694,11 @@ impl RuntimeRawContractV1 {
     /// 返回 hybrid write barrier 与 remembered-set 契约段。
     pub(crate) fn barrier(&self) -> &BarrierRuntimeContract {
         &self.barrier
+    }
+
+    /// 返回 `EdgeDelta` 消息与候选回收契约段。
+    pub(crate) fn edge(&self) -> &EdgeRuntimeContract {
+        &self.edge
     }
 
     /// 返回 GC debt、credit、pacing 与 pressure 契约段。
@@ -816,6 +859,12 @@ impl RuntimeRawContractV1 {
             ));
         }
         self.mark.verify()?;
+        self.edge.verify(&self.barrier, &self.mark)?;
+        if self.edge.demand().edge_sites != self.barrier.demand.edge_summary_sites
+            || self.edge.demand().reserve_slots != self.barrier.demand.shade_slots
+        {
+            return Err(RawModelError::new("edge 需求与 barrier 契约不一致"));
+        }
         if self.mark.demand.root_sites != self.gc_metadata.demand.root_range_count
             || self.mark.demand.barrier_sites != self.barrier.demand.card_mark_sites
             || self.mark.demand.edge_delta_sites != self.barrier.demand.edge_summary_sites
@@ -1135,16 +1184,19 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.region.dump());
         output.push_str(&self.local_heap.dump());
         output.push_str(&self.mark.dump());
+        self.edge.dump_into(&mut output);
         output.push_str(&format!(
-            "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} card-mark-family={}\n",
+            "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} edge-delta-fields={} card-mark-family={}\n",
             self.message.fields.len(),
             self.card_mark_message().fields.len(),
             self.mark_ticket_message().fields.len(),
+            self.edge.edge_delta_fields.fields.len(),
             match self.card_mark_message().family() {
                 MessageFamilyTag::Return => "return",
                 MessageFamilyTag::CardMark => "card-mark",
                 MessageFamilyTag::RegionTransfer => "region-transfer",
                 MessageFamilyTag::MarkTicket => "mark-ticket",
+                MessageFamilyTag::EdgeDelta => "edge-delta",
             },
         ));
         output

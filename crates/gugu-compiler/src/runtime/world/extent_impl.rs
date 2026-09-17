@@ -111,10 +111,29 @@ impl RawWorld {
     pub(super) fn commit_managed_block(
         &mut self,
         owner: u32,
+        arena: u32,
         class: u32,
-    ) -> Result<u64, RawInvariant> {
-        let extent = self.take_extent(owner, class, MemoryDomainId::MANAGED_LOCAL)?;
-        Ok(self.extents.offset_of_id(extent))
+    ) -> Result<(ExtentId, u64), RawInvariant> {
+        if self.extents.arena_domain(arena) != Some(MemoryDomainId::MANAGED_LOCAL)
+            || !self.extents.spaces_of(owner).contains(&arena)
+        {
+            return Err(RawInvariant::new(
+                "managed block 的 owner/domain 与 arena 不符",
+            ));
+        }
+        let extent = self.extents.allocate_in_arena(arena, class)?;
+        let range = self
+            .extents
+            .arena_range(arena)
+            .ok_or_else(|| RawInvariant::new("managed block 的 arena range 缺失"))?;
+        let offset = self.extents.offset_of_id(extent);
+        let bytes = self
+            .extents
+            .descriptor(extent)
+            .ok_or_else(|| RawInvariant::new("managed extent 缺失"))?
+            .bytes;
+        self.provider.commit_pages(range, offset, bytes)?;
+        Ok((extent, offset))
     }
 
     /// 归还一个 extent：先撤销它的物理页，再合并回 buddy 阶梯。

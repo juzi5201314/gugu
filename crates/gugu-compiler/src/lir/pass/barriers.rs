@@ -5,6 +5,11 @@
 //! `ValueId` 必然解析到同一地址、同一 512 字节 card，因此可在本地 dedup 表里合并为一个
 //! card-mark slot；不同地址各自计一个 slot（保守上界）。region 内不得再检查容量或连接
 //! refill edge，额度不足只能在 region 外走 mandatory statepoint。
+//!
+//! 同一条写入最多产生 `EDGE_DELTAS_PER_WRITE` 条跨 block 边变更（撤销旧目标加新增新目标），
+//! 它与 shade 上界同源：`EDGE_DELTAS_PER_WRITE == SHADE_SLOTS_PER_WRITE`，所以 `max_shades`
+//! 同时是 processor edge scratch 的容量证明，不需要第二份额度字段。region 内边 scratch
+//! 只追加、不合并、不发布；合并与发布都发生在 region 外的 slow edge 与 cycle 边界。
 use super::rewrite::{Editor, InstRef};
 use crate::Diagnostic;
 use crate::lir::body::{Op, ValueId};

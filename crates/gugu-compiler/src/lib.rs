@@ -35,7 +35,8 @@ pub use project::{
 pub use runtime::{
     BarrierDemand, BarrierRuntimeContract, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
     ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
-    CoroutineRecordLayout, CoroutineRuntimeContract, HarnessReport, IntrinsicBoundary,
+    CoroutineRecordLayout, CoroutineRuntimeContract, EdgeCandidateHarness, EdgeCandidateReport,
+    EdgeDemand, EdgeRuntimeContract, HarnessReport, IntrinsicBoundary,
     OwnerReturnHarness, PlatformRangeDemand, RegionTransferHarness, RegionTransferReport,
     ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource,
     RuntimeSourceRole, SchedulerDemand, SchedulerRuntimeContract, StackMapDemand, StackPolicy,
@@ -262,8 +263,7 @@ impl Compilation {
             .map(RuntimeRawContractV1::fingerprint)
     }
 
-    /// 返回已验证的契约对象本身；供确定性测试用真实契约配置 world。
-    #[cfg(test)]
+    /// 返回已验证的契约对象本身；供确定性测试与 `EdgeCandidateHarness` 用真实契约配置 world。
     pub(crate) fn raw_contract(&self) -> Option<&RuntimeRawContractV1> {
         self.raw_contract.as_ref()
     }
@@ -1082,6 +1082,9 @@ pub struct ImagePlan {
     barrier_card_mark_batch_fields: u32,
     barrier_record_count: u32,
     barrier_runtime: crate::runtime::BarrierRuntimeContract,
+    edge_contract_fingerprint: [u8; 32],
+    edge_demand: crate::runtime::EdgeDemand,
+    edge_runtime: crate::runtime::EdgeRuntimeContract,
     local_heap_contract_fingerprint: [u8; 32],
     local_heap_demand: crate::runtime::LocalHeapDemand,
     local_heap_runtime: crate::runtime::LocalHeapRuntimeContract,
@@ -1252,6 +1255,9 @@ impl ImagePlan {
             barrier_card_mark_batch_fields: plan.barrier_card_mark_batch_fields,
             barrier_record_count: plan.barrier_record_count,
             barrier_runtime: plan.barrier_runtime,
+            edge_contract_fingerprint: plan.edge_contract_fingerprint,
+            edge_demand: plan.edge_demand,
+            edge_runtime: plan.edge_runtime,
             local_heap_contract_fingerprint: plan.local_heap_contract_fingerprint,
             local_heap_demand: plan.local_heap_demand,
             local_heap_runtime: plan.local_heap_runtime,
@@ -1752,6 +1758,22 @@ impl ImagePlan {
     pub fn local_heap_contract_fingerprint(&self) -> [u8; 32] {
         self.local_heap_contract_fingerprint
     }
+
+    /// 返回 `EdgeDelta` 消息与候选回收契约指纹。
+    pub fn edge_contract_fingerprint(&self) -> [u8; 32] {
+        self.edge_contract_fingerprint
+    }
+
+    /// 返回候选回收需求视图：edge 站点数与 scratch 预留。
+    pub fn edge_demand(&self) -> crate::runtime::EdgeDemand {
+        self.edge_demand
+    }
+
+    /// 返回已验证的 `EdgeDelta` 消息与候选回收契约段。
+    pub fn edge_runtime(&self) -> &crate::runtime::EdgeRuntimeContract {
+        &self.edge_runtime
+    }
+
     /// 返回 nursery 触发与年龄参数。
     pub fn local_heap_trigger(&self) -> crate::runtime::HeapTriggerProfile {
         self.local_heap_runtime.trigger()
@@ -2663,7 +2685,7 @@ mod tests {
             plan.barrier_card_granularity_bytes()
         );
         let dump = compilation.dump_runtime().expect("runtime dump");
-        assert!(dump.contains("barrier schema=1 card=512 buffer=256 stamps=256"));
+        assert!(dump.contains("barrier schema=2 card=512 buffer=256 stamps=256"));
         assert!(dump.contains("barrier-steps read-old -> shade-old-deleted -> shade-new-inserted -> store -> card-mark -> edge-summary"));
         assert!(dump.contains("barrier-flush-reasons buffer-full,processor-handoff,foreign-bridge,memory-pressure,minor-stop,producer-stop-gate"));
         assert!(dump.contains(
@@ -2701,19 +2723,36 @@ mod tests {
         );
         assert!(plan.local_heap_demand().large_types >= 1);
         assert_ne!(plan.local_heap_contract_fingerprint(), [0_u8; 32]);
-        assert!(dump.contains("local-heap schema=1 arena=2097152 block=32768 line=128"));
+        assert!(dump.contains("local-heap schema=3 arena=2097152 block=32768 line=128"));
         assert!(dump.contains("local-heap-bitmaps object-start-bits=131072 mark-bits=131072"));
         assert!(dump.contains("local-heap-record HeapArenaMetadata bytes=55576"));
         assert!(dump.contains("local-heap-trigger revision=1"));
         assert!(dump.contains("local-heap-demand"));
         assert!(dump.contains("local-heap-fingerprint"));
+        // 边契约：候选回收相位、block 状态与 `EdgeDelta` 字段集合都进入镜像计划。
+        assert_ne!(plan.edge_contract_fingerprint(), [0_u8; 32]);
+        assert_eq!(plan.edge_runtime().candidate_quantum, 4096);
+        assert_eq!(plan.edge_runtime().phases.len(), 10);
+        assert_eq!(plan.edge_runtime().phases[0], "discover");
+        assert_eq!(plan.edge_runtime().states, ["active", "candidate", "reclaiming", "free"]);
+        // `EdgeDelta` 的规范字段集合：18 个字段，全部不带地址（schema 自带校验）。
+        assert_eq!(plan.edge_runtime().edge_delta_field_count(), 18);
+        // 边需求必须与 barrier/mark 的同一组站点计数一致：三份契约不允许各自记账。
+        assert_eq!(plan.edge_demand().edge_sites, demand.edge_summary_sites);
+        assert_eq!(plan.edge_demand().reserve_slots, demand.shade_slots);
+        assert_eq!(plan.edge_demand().edge_sites, plan.mark_demand().edge_delta_sites);
+        assert!(dump.contains("edge schema="));
+        assert!(dump.contains("edge-demand "));
+        assert!(dump.contains("edge-phases "));
+        assert!(dump.contains("edge-states "));
+        assert!(dump.contains("edge-fingerprint "));
         // mark 契约：每 owner 单 consumer、七个收敛条件、六类参与者与三条 record 布局。
         assert_eq!(plan.mark_mailbox_consumer_count(), 1);
         assert_eq!(plan.mark_condition_count(), 7);
         assert_eq!(plan.mark_snapshot_participant_count(), 6);
         assert_eq!(plan.mark_cycle_state_count(), 6);
-        assert_eq!(plan.mark_ticket_field_count(), 14);
-        assert_eq!(plan.mark_record_count(), 3);
+        assert_eq!(plan.mark_ticket_field_count(), 15);
+        assert_eq!(plan.mark_record_count(), 5);
         assert!(plan.mark_credit_pool() > 0);
         // mark 需求覆盖的站点集合与 gc metadata/barrier/LocalHeap 三份需求一致。
         assert_eq!(
@@ -2730,7 +2769,7 @@ mod tests {
             demand.edge_summary_sites
         );
         assert_ne!(plan.mark_contract_fingerprint(), [0_u8; 32]);
-        assert!(dump.contains("mark schema=1 profile=mosaic-mark revision=1"));
+        assert!(dump.contains("mark schema=3 profile=mosaic-mark revision=2"));
         assert!(dump.contains(
             "mark-conditions local-worklist,published-batch,mailbox,barrier-buffer,producer-epoch,forwarding-work,pending-credit"
         ));

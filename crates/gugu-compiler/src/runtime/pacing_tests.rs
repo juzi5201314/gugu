@@ -6,6 +6,7 @@ use crate::runtime::barrier::{BarrierFlushReason, BarrierSite};
 use crate::runtime::barrier_schema::CARD_GRANULARITY_BYTES;
 use crate::runtime::gc_metadata_schema::GcRootKindV1;
 use crate::runtime::inbox::ServiceBudget;
+use crate::runtime::local_heap::{BlockRef, ManagedBlockId};
 use crate::runtime::local_heap_schema::LocalHeapDemand;
 use crate::runtime::mark_schema::MarkDemand;
 use crate::runtime::message::BatchLimits;
@@ -22,7 +23,7 @@ use crate::runtime::pacing_schema::{
     REMARK_COST_BUDGET,
 };
 use crate::runtime::size_class::RuntimeSizeClassId;
-use crate::runtime::slab::{MemoryDomainId, SlabDescriptorId};
+use crate::runtime::slab::MemoryDomainId;
 use crate::runtime::{PlatformProfile, Rt0Demand};
 use crate::runtime::{RawResourceDemand, SchedulerDemand, StackMapDemand, SyncDemand, WaitDemand};
 use crate::runtime::{barrier_schema::BarrierDemand, gc_metadata_schema::GcMetadataDemand};
@@ -36,6 +37,14 @@ fn shard(index: u32) -> crate::runtime::inbox::ShardIndex {
     crate::runtime::inbox::ShardIndex::from_raw(index).expect("shard 编号合法")
 }
 
+/// 一个稳定 block 身份；测试用固定 generation。
+fn block(id: u32) -> BlockRef {
+    BlockRef {
+        id: ManagedBlockId(id),
+        generation: 1,
+    }
+}
+
 /// 一道会产生 card 键的 hybrid 屏障写入：old 指向 nursery 且位于 old generation。
 fn card_site(arena: u64, generation: u32, offset: u64, epoch: u64) -> BarrierSite {
     BarrierSite {
@@ -43,16 +52,13 @@ fn card_site(arena: u64, generation: u32, offset: u64, epoch: u64) -> BarrierSit
         arena_generation: generation,
         offset,
         cycle_epoch: epoch,
-        old_present: true,
-        new_present: true,
+        source: block(3),
+        old: Some(block(3)),
+        new: Some(block(3)),
         new_in_nursery: true,
         owner_old: true,
         marking: true,
         stack_grey: true,
-        new_block: Some(9),
-        source_block: 3,
-        new_owner: 0,
-        source_owner: 1,
     }
 }
 
@@ -890,9 +896,7 @@ fn cycle_keeps_candidates_beyond_the_relocation_budget_for_the_next_cycle() {
 #[test]
 fn assist_flushes_real_card_keys_and_repays_matching_cost() {
     let mut world = world(1, 64);
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(3), 1)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 3, 1).expect("登记 arena");
     // 造出一张真实未 flush 的 dirty card。
     world
         .perform_barrier(0, card_site(3, 1, 512, 0))

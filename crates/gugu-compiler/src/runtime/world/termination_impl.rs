@@ -147,6 +147,11 @@ impl Rt0Process {
         }
     }
 
+    /// 由运行时内部（例如 GC 失败取消）发布一条 fatal 报告；返回报告序号。
+    pub(crate) fn emit_runtime_report(&mut self, spec: ReportSpec) -> u64 {
+        self.emit(spec)
+    }
+
     fn emit(&mut self, spec: ReportSpec) -> u64 {
         let frames = collect_backtrace(self.backtrace_mode, &[]);
         self.ledger.emit(

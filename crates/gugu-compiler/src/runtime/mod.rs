@@ -17,6 +17,12 @@ mod barrier;
 mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
+#[allow(dead_code, reason = "候选平面由周期汇合阶段的世界推进与确定性测试消费")]
+pub(crate) mod candidate;
+#[allow(dead_code, reason = "候选决议结构由 world 候选推进与确定性测试消费")]
+pub(crate) mod candidate_schema;
+#[cfg(test)]
+mod candidate_tests;
 #[allow(dead_code, reason = "等待协议的确定性参照实现")]
 mod channel;
 mod channel_layout;
@@ -25,6 +31,8 @@ mod context;
 mod coroutine;
 mod coroutine_layout;
 mod coroutine_schema;
+pub(crate) mod edge;
+pub(crate) mod edge_schema;
 #[allow(
     dead_code,
     reason = "GC metadata 契约段由 runtime raw 与 ImagePlan 消费"
@@ -32,10 +40,6 @@ mod coroutine_schema;
 pub(crate) mod gc_metadata_contract;
 pub(crate) mod gc_metadata_schema;
 pub(crate) mod gc_metadata_section;
-#[allow(
-    dead_code,
-    reason = "LocalHeap record 布局交叉校验由 RuntimeRawModel 消费"
-)]
 #[allow(
     dead_code,
     reason = "trace descriptor 解释器由 LocalHeap 与 world 消费"
@@ -110,6 +114,8 @@ pub use coroutine_schema::{
     CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
     StackPolicy,
 };
+
+pub use edge_schema::{EdgeDemand, EdgeRuntimeContract};
 pub use gc_metadata_schema::GcMetadataDemand;
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
 pub use mark_schema::{MarkDemand, MarkRuntimeContract};
@@ -157,6 +163,8 @@ mod slab;
 mod world;
 
 #[cfg(test)]
+mod edge_tests;
+#[cfg(test)]
 mod heap_tests;
 #[cfg(test)]
 mod platform_tests;
@@ -174,11 +182,15 @@ mod startup_tests;
 mod termination_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+#[path = "trace_tests.rs"]
+mod trace_tests;
 
 pub use harness::{
-    CardMarkHarness, CardMarkReport, ChannelWaitHarness, ChannelWaitReport, HarnessReport,
-    OwnerReturnHarness, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
-    ResourceReleaseReport, SyncLockHarness, SyncLockReport,
+    CardMarkHarness, CardMarkReport, ChannelWaitHarness, ChannelWaitReport, EdgeCandidateHarness,
+    EdgeCandidateReport, HarnessReport, OwnerReturnHarness, RegionTransferHarness,
+    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, SyncLockHarness,
+    SyncLockReport,
 };
 
 #[cfg(test)]

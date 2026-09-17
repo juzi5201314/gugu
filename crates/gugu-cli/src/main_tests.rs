@@ -398,7 +398,7 @@ fn build_json_reports_barrier_contract_keys() {
             .as_array()
             .expect("记录布局数组")
             .len(),
-        3
+        4
     );
     assert_eq!(
         payload["local-heap-trigger"]["minor-trigger-bytes"],
@@ -453,14 +453,22 @@ fn build_json_reports_barrier_contract_keys() {
         "mark-ticket-fields",
         "mark-records",
         "mark-demand",
+        "edge-contract-fingerprint",
+        "edge-runtime",
+        "edge-demand",
+        "edge-candidate-quantum",
+        "edge-candidate-schema",
+        "edge-phase-count",
+        "edge-block-state-count",
+        "edge-delta-field-count",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
     assert_eq!(payload["mark-conditions"], 7);
     assert_eq!(payload["mark-snapshot-participants"], 6);
     assert_eq!(payload["mark-mailbox-consumers"], 1);
-    assert_eq!(payload["mark-ticket-fields"], 14);
-    assert_eq!(payload["mark-records"], 3);
+    assert_eq!(payload["mark-ticket-fields"], 15);
+    assert_eq!(payload["mark-records"], 5);
     // mark 需求与 GC metadata/barrier/LocalHeap 需求覆盖同一站点集合。
     assert_eq!(
         payload["mark-demand"]["root-sites"],

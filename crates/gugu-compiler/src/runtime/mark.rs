@@ -13,122 +13,121 @@
 //!    进入不变量失败，而不是被静默丢弃。
 //! 3. root snapshot gate 未收齐全部参与者确认前不得进入 mark 阶段；gate 只能开一次、关一次。
 
+use super::barrier_schema::MessageFamilyTag;
 use super::mark_schema::{
-    MARK_CONVERGENCE_CONDITIONS, MARK_CREDIT_COUNTER_BITS, MARK_CREDIT_OWNER_BITS,
+    GcCreditId, MARK_CONVERGENCE_CONDITIONS, MARK_CREDIT_INITIAL_GENERATION,
     MARK_MAILBOX_CONSUMERS, MARK_SNAPSHOT_PARTICIPANTS, MarkRuntimeContract,
 };
 
-/// 一个 owner credit 的生命周期状态。
+/// 一个 credit slot 的生命周期状态。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CreditState {
-    /// 已 acquire，尚未被任何 owner consume。
+    /// 已 acquire，尚未被目标 owner consume。
     InFlight,
     /// 已被目标 owner consume，等待归还。
     Done,
-    /// 已归还，本 cycle 内不再复用。
+    /// 已归还；slot 回到 free list，下一次 acquire 推进 generation。
     Returned,
 }
 
-/// 一个 owner 的 credit 账本。
+/// 一个 credit slot 的占用者身份与状态。
 ///
-/// `states` 按 acquire 顺序稠密排列，下标就是局部 credit 编号；一次 cycle 内编号不复用，
-/// 因此同一编号不会先归还再被重新发出——重复 ticket 才能被可靠地判成 `CreditNotInFlight`。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct MarkCredit {
-    owner: u32,
-    granted: u64,
-    states: Vec<CreditState>,
+/// 身份字段在 acquire 时固定、consume 时逐项校验：family、来源/目标 owner、cycle 与 topology
+/// 都参与校验，因此一个 slot 不可能被另一族或另一 cycle 的消息误用。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CreditSlot {
+    generation: u32,
+    source: u32,
+    target: u32,
+    family: MessageFamilyTag,
+    cycle: u64,
+    topology: u32,
+    state: CreditState,
+}
+
+/// 一个 owner 的分类计数。
+///
+/// slot 的占用者身份、generation 与 cycle/topology 都由池本身持有，账本只保留在飞、Done 与
+/// returned 三个计数，避免同一份状态在两处各写一遍。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct OwnerCredit {
     in_flight: u64,
     done: u64,
     returned: u64,
+    issued: u64,
 }
 
-impl MarkCredit {
-    /// 创建一个 owner 的账本。
-    pub(crate) const fn new(owner: u32) -> Self {
+impl OwnerCredit {
+    /// 返回已 acquire 且尚未 consume 的 credit 数。
+    pub(crate) const fn pending(&self) -> u64 {
+        self.in_flight
+    }
+
+    /// 返回已 consume 但尚未归还的 credit 数。
+    pub(crate) const fn done(&self) -> u64 {
+        self.done
+    }
+
+    /// 返回已归还的 credit 累计数。
+    pub(crate) const fn returned(&self) -> u64 {
+        self.returned
+    }
+
+    /// 返回已 acquire 的 credit 累计数。
+    pub(crate) const fn issued(&self) -> u64 {
+        self.issued
+    }
+}
+
+/// 共享、可复用的 credit slot pool。
+///
+/// `capacity` 是**同时在飞**的上界：任何在飞的 mark ticket 或 edge delta 都占一个 non-moving
+/// node，因此「node 容量加根槽数」是可证明的授权额度。归还的 slot 进 free list 并推进
+/// generation，因此一次 cycle 内的累计 issue 次数不受该上界限制，而重放旧 id 必然失败。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CreditPool {
+    capacity: u64,
+    slots: Vec<CreditSlot>,
+    free: Vec<u32>,
+    in_flight: u64,
+    done: u64,
+    returned: u64,
+    owners: Vec<OwnerCredit>,
+}
+
+impl CreditPool {
+    /// 按授权上界与 owner 数创建空池。
+    pub(crate) fn new(capacity: u64, owners: u32) -> Self {
         Self {
-            owner,
-            granted: 0,
-            states: Vec::new(),
+            capacity,
+            slots: Vec::new(),
+            free: Vec::new(),
             in_flight: 0,
             done: 0,
             returned: 0,
+            owners: vec![OwnerCredit::default(); owners as usize],
         }
     }
 
-    /// 以新的授权上界开始一个 cycle，清空全部状态。
-    pub(crate) fn reset(&mut self, granted: u64) {
-        self.granted = granted;
-        self.states.clear();
-        self.in_flight = 0;
-        self.done = 0;
-        self.returned = 0;
+    /// 返回同时在飞的授权上界。
+    pub(crate) const fn capacity(&self) -> u64 {
+        self.capacity
     }
 
-    /// 返回本 cycle 授权的 credit 上界。
-    pub(crate) const fn granted(&self) -> u64 {
-        self.granted
-    }
-
-    /// 返回尚未 acquire 的额度。
+    /// 返回尚未 acquire 的在飞额度。
     pub(crate) fn available(&self) -> u64 {
-        self.granted.saturating_sub(self.states.len() as u64)
+        self.capacity.saturating_sub(self.in_flight + self.done)
     }
 
-    /// acquire 一个 credit，返回局部稠密编号。
-    pub(crate) fn acquire(&mut self) -> Result<u32, MarkError> {
-        if self.states.len() as u64 >= self.granted {
-            return Err(MarkError::PoolExhausted {
-                owner: self.owner,
-                granted: self.granted,
-            });
-        }
-        let local = u32::try_from(self.states.len()).map_err(|_| MarkError::PoolExhausted {
-            owner: self.owner,
-            granted: self.granted,
-        })?;
-        self.states.push(CreditState::InFlight);
-        self.in_flight += 1;
-        Ok(local)
+    /// 返回一个 owner 的分类计数。
+    pub(crate) fn owner(&self, owner: u32) -> Result<OwnerCredit, MarkError> {
+        self.owners
+            .get(owner as usize)
+            .copied()
+            .ok_or(MarkError::UnknownOwner { owner })
     }
 
-    /// 目标 owner 消费一个 credit：InFlight → Done。
-    pub(crate) fn consume(&mut self, local: u32) -> Result<(), MarkError> {
-        match self.states.get(local as usize) {
-            None => Err(MarkError::CreditNotIssued {
-                owner: self.owner,
-                credit: local,
-            }),
-            Some(CreditState::InFlight) => {
-                self.states[local as usize] = CreditState::Done;
-                self.in_flight -= 1;
-                self.done += 1;
-                Ok(())
-            }
-            Some(_) => Err(MarkError::CreditNotInFlight {
-                owner: self.owner,
-                credit: local,
-            }),
-        }
-    }
-
-    /// 归还一个已 consume 的 credit：Done → Returned。
-    pub(crate) fn return_credit(&mut self, local: u32) -> Result<(), MarkError> {
-        match self.states.get(local as usize) {
-            Some(CreditState::Done) => {
-                self.states[local as usize] = CreditState::Returned;
-                self.done -= 1;
-                self.returned += 1;
-                Ok(())
-            }
-            _ => Err(MarkError::CreditNotDone {
-                owner: self.owner,
-                credit: local,
-            }),
-        }
-    }
-
-    /// 返回已 acquire 且尚未归还的 credit 数。
+    /// 返回全部 owner 尚未归还的 credit 数。
     pub(crate) const fn pending(&self) -> u64 {
         self.in_flight + self.done
     }
@@ -143,31 +142,297 @@ impl MarkCredit {
         self.returned
     }
 
-    /// 本 owner 的 credit 是否全部归还。
-    pub(crate) fn converged(&self) -> bool {
-        self.in_flight == 0 && self.done == 0
+    /// 返回已创建的 slot 数；它只随真实并发需求增长。
+    pub(crate) fn slot_count(&self) -> u64 {
+        self.slots.len() as u64
     }
 
-    /// 把一个局部编号编码成跨 owner 的 credit id：`owner(8) | counter(24)`。
-    pub(crate) fn credit_id(&self, owner_index: u32, local: u32) -> Result<u32, MarkError> {
-        if owner_index >= 1 << MARK_CREDIT_OWNER_BITS || local >= 1 << MARK_CREDIT_COUNTER_BITS {
+    /// 为一个跨 owner 工作记录 acquire 一个 credit。
+    ///
+    /// 身份字段在成功返回前就已固定，且 acquire 之前完成全部可失败判定：额度耗尽不会留下
+    /// 半初始化的 slot。
+    pub(crate) fn acquire_work(
+        &mut self,
+        source: u32,
+        target: u32,
+        family: MessageFamilyTag,
+        cycle: u64,
+        topology: u32,
+    ) -> Result<GcCreditId, MarkError> {
+        if self.owners.get(source as usize).is_none() {
+            return Err(MarkError::UnknownOwner { owner: source });
+        }
+        if self.owners.get(target as usize).is_none() {
+            return Err(MarkError::UnknownOwner { owner: target });
+        }
+        if self.pending() >= self.capacity {
             return Err(MarkError::PoolExhausted {
-                owner: self.owner,
-                granted: self.granted,
+                owner: source,
+                granted: self.capacity,
             });
         }
-        Ok((owner_index << MARK_CREDIT_COUNTER_BITS) | local)
+        let index = match self.free.pop() {
+            Some(index) => {
+                let slot = &mut self.slots[index as usize];
+                // 复用推进 generation：旧 id 即使再次命中同一 slot 也必然被拒绝。
+                slot.generation =
+                    slot.generation
+                        .checked_add(1)
+                        .ok_or(MarkError::PoolExhausted {
+                            owner: source,
+                            granted: self.capacity,
+                        })?;
+                index
+            }
+            None => {
+                let index =
+                    u32::try_from(self.slots.len()).map_err(|_| MarkError::PoolExhausted {
+                        owner: source,
+                        granted: self.capacity,
+                    })?;
+                self.slots.push(CreditSlot {
+                    generation: MARK_CREDIT_INITIAL_GENERATION,
+                    source,
+                    target,
+                    family,
+                    cycle,
+                    topology,
+                    state: CreditState::InFlight,
+                });
+                index
+            }
+        };
+        let slot = &mut self.slots[index as usize];
+        slot.source = source;
+        slot.target = target;
+        slot.family = family;
+        slot.cycle = cycle;
+        slot.topology = topology;
+        slot.state = CreditState::InFlight;
+        let generation = slot.generation;
+        self.owners[source as usize].in_flight += 1;
+        self.owners[source as usize].issued += 1;
+        self.in_flight += 1;
+        Ok(GcCreditId::new(index, generation))
     }
-}
 
-/// 从 credit id 解出源 owner 编号。
-pub(crate) const fn credit_source(credit: u32) -> u32 {
-    credit >> MARK_CREDIT_COUNTER_BITS
-}
+    /// 校验一个 credit 可以被目标 owner 消费，不改变状态。
+    ///
+    /// 乱序记录在应用之前必须完成同样的身份校验，但它的 credit 不能被 consume：consume 是
+    /// 「已应用」的线性化点。校验失败不改变任何状态，因此错误族或过期记录不会污染新 slot。
+    pub(crate) fn validate_consume(
+        &self,
+        id: GcCreditId,
+        family: MessageFamilyTag,
+        owner: u32,
+        cycle: u64,
+        topology: u32,
+    ) -> Result<(), MarkError> {
+        if self.owners.get(owner as usize).is_none() {
+            return Err(MarkError::UnknownOwner { owner });
+        }
+        let slot = self.slot(id)?;
+        if slot.state != CreditState::InFlight {
+            return Err(MarkError::CreditNotInFlight {
+                owner: slot.source,
+                credit: id,
+            });
+        }
+        if slot.family != family {
+            return Err(MarkError::CreditFamilyMismatch {
+                credit: id,
+                expected: slot.family.name(),
+            });
+        }
+        if slot.target != owner {
+            return Err(MarkError::CreditTargetMismatch {
+                credit: id,
+                target: slot.target,
+            });
+        }
+        if slot.cycle != cycle {
+            return Err(MarkError::StaleCycle {
+                ticket: cycle,
+                current: slot.cycle,
+            });
+        }
+        if slot.topology != topology {
+            return Err(MarkError::StaleTopology {
+                ticket: topology,
+                current: slot.topology,
+            });
+        }
+        Ok(())
+    }
 
-/// 从 credit id 解出源 owner 的局部编号。
-pub(crate) const fn credit_local(credit: u32) -> u32 {
-    credit & ((1 << MARK_CREDIT_COUNTER_BITS) - 1)
+    /// 校验一个 credit 仍在本 cycle 的在飞集合里，且属于给定族；转发路径使用。
+    ///
+    /// 转发是源 owner 侧的操作，因此不检查目标 owner，只检查 generation、状态、族与 epoch。
+    pub(crate) fn validate_in_flight(
+        &self,
+        id: GcCreditId,
+        family: MessageFamilyTag,
+        cycle: u64,
+        topology: u32,
+    ) -> Result<(), MarkError> {
+        let slot = self.slot(id)?;
+        if slot.state != CreditState::InFlight {
+            return Err(MarkError::CreditNotInFlight {
+                owner: slot.source,
+                credit: id,
+            });
+        }
+        if slot.family != family {
+            return Err(MarkError::CreditFamilyMismatch {
+                credit: id,
+                expected: slot.family.name(),
+            });
+        }
+        if slot.cycle != cycle {
+            return Err(MarkError::StaleCycle {
+                ticket: cycle,
+                current: slot.cycle,
+            });
+        }
+        if slot.topology != topology {
+            return Err(MarkError::StaleTopology {
+                ticket: topology,
+                current: slot.topology,
+            });
+        }
+        Ok(())
+    }
+
+    /// 把一条在飞 credit 的目标 owner 改成新的目标；转发路径使用。
+    ///
+    /// 源 owner 与 generation 不变：只有最终目标能 consume，而归还仍然记在源 owner 账本上。
+    pub(crate) fn retarget(&mut self, id: GcCreditId, target: u32) -> Result<(), MarkError> {
+        if self.owners.get(target as usize).is_none() {
+            return Err(MarkError::UnknownOwner { owner: target });
+        }
+        let slot = self.slot(id)?;
+        if slot.state != CreditState::InFlight {
+            return Err(MarkError::CreditNotInFlight {
+                owner: slot.source,
+                credit: id,
+            });
+        }
+        self.slots[id.slot() as usize].target = target;
+        Ok(())
+    }
+
+    /// 目标 owner 消费一个 credit：校验全部身份字段后才改变状态。
+    pub(crate) fn consume_work(
+        &mut self,
+        owner: u32,
+        id: GcCreditId,
+        family: MessageFamilyTag,
+        cycle: u64,
+        topology: u32,
+    ) -> Result<(), MarkError> {
+        if self.owners.get(owner as usize).is_none() {
+            return Err(MarkError::UnknownOwner { owner });
+        }
+        let slot = self.slot(id)?;
+        if slot.state != CreditState::InFlight {
+            return Err(MarkError::CreditNotInFlight {
+                owner: slot.source,
+                credit: id,
+            });
+        }
+        if slot.family != family {
+            return Err(MarkError::CreditFamilyMismatch {
+                credit: id,
+                expected: slot.family.name(),
+            });
+        }
+        if slot.target != owner {
+            return Err(MarkError::CreditTargetMismatch {
+                credit: id,
+                target: slot.target,
+            });
+        }
+        if slot.cycle != cycle {
+            return Err(MarkError::StaleCycle {
+                ticket: cycle,
+                current: slot.cycle,
+            });
+        }
+        if slot.topology != topology {
+            return Err(MarkError::StaleTopology {
+                ticket: topology,
+                current: slot.topology,
+            });
+        }
+        let source = slot.source;
+        let slot = &mut self.slots[id.slot() as usize];
+        slot.state = CreditState::Done;
+        self.owners[source as usize].in_flight -= 1;
+        self.owners[source as usize].done += 1;
+        self.in_flight -= 1;
+        self.done += 1;
+        Ok(())
+    }
+
+    /// 归还一个已 consume 的 credit：Done → Returned 并回到 free list。
+    pub(crate) fn return_work(&mut self, id: GcCreditId) -> Result<(), MarkError> {
+        let slot = self.slot(id)?;
+        if slot.state != CreditState::Done {
+            return Err(MarkError::CreditNotDone {
+                owner: slot.source,
+                credit: id,
+            });
+        }
+        let source = slot.source;
+        let slot = &mut self.slots[id.slot() as usize];
+        slot.state = CreditState::Returned;
+        self.owners[source as usize].done -= 1;
+        self.owners[source as usize].returned += 1;
+        self.done -= 1;
+        self.returned += 1;
+        self.free.push(id.slot());
+        Ok(())
+    }
+
+    /// 归还一个 owner 全部已 consume 的 credit；返回归还数量。
+    pub(crate) fn settle_owner(&mut self, owner: u32) -> Result<u64, MarkError> {
+        if self.owners.get(owner as usize).is_none() {
+            return Err(MarkError::UnknownOwner { owner });
+        }
+        let mut pending = Vec::new();
+        for (index, slot) in self.slots.iter().enumerate() {
+            if slot.state == CreditState::Done && slot.source == owner {
+                pending.push(GcCreditId::new(
+                    u32::try_from(index).expect("credit slot 下标适配 u32"),
+                    slot.generation,
+                ));
+            }
+        }
+        let mut returned = 0_u64;
+        for id in pending {
+            self.return_work(id)?;
+            returned += 1;
+        }
+        Ok(returned)
+    }
+
+    /// 取一个 slot 并校验 generation；generation 不匹配即旧 id 重放。
+    fn slot(&self, id: GcCreditId) -> Result<CreditSlot, MarkError> {
+        let slot = self
+            .slots
+            .get(id.slot() as usize)
+            .ok_or(MarkError::CreditNotIssued {
+                owner: 0,
+                credit: id,
+            })?;
+        if !id.is_valid() || slot.generation != id.generation() {
+            return Err(MarkError::CreditNotIssued {
+                owner: slot.source,
+                credit: id,
+            });
+        }
+        Ok(*slot)
+    }
 }
 
 /// 一个 owner 的 mark mailbox；每 owner 单 consumer。
@@ -179,7 +444,7 @@ pub(crate) struct MarkMailbox {
     pending: u64,
     consumed: u64,
     forwarded: u64,
-    last_credit: Option<u32>,
+    last_credit: Option<GcCreditId>,
     consumer_slots: u32,
 }
 
@@ -224,13 +489,13 @@ impl MarkMailbox {
     }
 
     /// 发布一条 ticket。
-    pub(crate) fn publish(&mut self, credit: u32) {
+    pub(crate) fn publish(&mut self, credit: GcCreditId) {
         self.pending += 1;
         self.last_credit = Some(credit);
     }
 
     /// 单 consumer 消费一条 ticket。
-    pub(crate) fn consume(&mut self, credit: u32) -> Result<(), MarkError> {
+    pub(crate) fn consume(&mut self, credit: GcCreditId) -> Result<(), MarkError> {
         if self.pending == 0 {
             return Err(MarkError::MailboxEmpty { owner: self.owner });
         }
@@ -241,7 +506,7 @@ impl MarkMailbox {
     }
 
     /// 转发一条 ticket：从本 owner 的 mailbox 移除。
-    pub(crate) fn forward(&mut self, _credit: u32) -> Result<(), MarkError> {
+    pub(crate) fn forward(&mut self, _credit: GcCreditId) -> Result<(), MarkError> {
         if self.pending == 0 {
             return Err(MarkError::MailboxEmpty { owner: self.owner });
         }
@@ -265,8 +530,8 @@ impl MarkMailbox {
         self.forwarded
     }
 
-    /// 返回最近一次消费或发布的 credit 编号。
-    pub(crate) const fn last_credit(&self) -> Option<u32> {
+    /// 返回最近一次消费或发布的 credit 身份。
+    pub(crate) const fn last_credit(&self) -> Option<GcCreditId> {
         self.last_credit
     }
 }
@@ -535,6 +800,10 @@ pub(crate) struct MarkStats {
     pub(crate) tickets_forwarded: u64,
     /// 已归还的 credit 数。
     pub(crate) credits_returned: u64,
+    /// 已发布的 edge delta 数。
+    pub(crate) edge_deltas_published: u64,
+    /// 已应用的 edge delta 数。
+    pub(crate) edge_deltas_consumed: u64,
     /// cycle 内累计标记的对象数。
     pub(crate) marks: u64,
     /// cycle 内累计确认的 snapshot 参与者数。
@@ -548,12 +817,19 @@ pub(crate) enum MarkError {
     UnknownOwner { owner: u32 },
     /// 一个 owner 的 credit 池已经耗尽。
     PoolExhausted { owner: u32, granted: u64 },
-    /// 引用了从未 acquire 的 credit。
-    CreditNotIssued { owner: u32, credit: u32 },
+    /// 引用了从未 acquire 的 credit，或重放了 generation 已过期的旧 id。
+    CreditNotIssued { owner: u32, credit: GcCreditId },
     /// credit 不在 InFlight 状态；重复 ticket 落在这里。
-    CreditNotInFlight { owner: u32, credit: u32 },
+    CreditNotInFlight { owner: u32, credit: GcCreditId },
     /// credit 不在 Done 状态，不能归还。
-    CreditNotDone { owner: u32, credit: u32 },
+    CreditNotDone { owner: u32, credit: GcCreditId },
+    /// credit 的持有族与当前消息族不符。
+    CreditFamilyMismatch {
+        credit: GcCreditId,
+        expected: &'static str,
+    },
+    /// credit 的目标 owner 与当前消费者不符。
+    CreditTargetMismatch { credit: GcCreditId, target: u32 },
     /// 进入新 cycle 时仍有 credit 未归还。
     CycleOutstanding { pending: u64 },
     /// ticket 的 cycle 与当前 cycle 不符。
@@ -588,18 +864,38 @@ impl std::fmt::Display for MarkError {
                 )
             }
             Self::CreditNotIssued { owner, credit } => {
-                write!(formatter, "owner {owner} 引用了未签发的 credit {credit}")
+                write!(
+                    formatter,
+                    "owner {owner} 引用了未签发的 credit {:#x}",
+                    credit.raw()
+                )
             }
             Self::CreditNotInFlight { owner, credit } => {
                 write!(
                     formatter,
-                    "owner {owner} 的 credit {credit} 不在 InFlight 状态（重复 ticket）"
+                    "owner {owner} 的 credit {:#x} 不在 InFlight 状态（重复 ticket）",
+                    credit.raw()
                 )
             }
             Self::CreditNotDone { owner, credit } => {
                 write!(
                     formatter,
-                    "owner {owner} 的 credit {credit} 不在 Done 状态，不能归还"
+                    "owner {owner} 的 credit {:#x} 不在 Done 状态，不能归还",
+                    credit.raw()
+                )
+            }
+            Self::CreditFamilyMismatch { credit, expected } => {
+                write!(
+                    formatter,
+                    "credit {:#x} 的持有族与 {expected} 不符",
+                    credit.raw()
+                )
+            }
+            Self::CreditTargetMismatch { credit, target } => {
+                write!(
+                    formatter,
+                    "credit {:#x} 的目标 owner 不是 {target}",
+                    credit.raw()
                 )
             }
             Self::CycleOutstanding { pending } => {
@@ -646,29 +942,29 @@ impl std::fmt::Display for MarkError {
     }
 }
 
-/// mark 平面：credit 账本、mailbox、snapshot gate 与终止判定。
+/// mark 平面：共享 credit 池、mailbox、snapshot gate 与终止判定。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct MarkPlane {
     contract: MarkRuntimeContract,
     cycle: u64,
     topology: u32,
     state: MarkCycleState,
-    credits: Vec<MarkCredit>,
+    credits: CreditPool,
     mailboxes: Vec<MarkMailbox>,
-    /// 已转发但尚未被最终目标 consume 的 credit 编号；`forwarding-work` 的真实在飞量。
-    forwarded_in_flight: Vec<u32>,
+    /// 已转发但尚未被最终目标 consume 的 credit 身份；`forwarding-work` 的真实在飞量。
+    forwarded_in_flight: Vec<GcCreditId>,
     gate: Option<RootSnapshotGate>,
     stats: MarkStats,
     last: Option<MarkTermination>,
 }
 
 impl MarkPlane {
-    /// 按契约创建平面；owner 数越过 credit id 的 owner 位宽时报错。
+    /// 按契约创建平面；credit 池按「同时在飞」的授权上界一次配置，不随每轮 issue 增长。
     pub(crate) fn new(contract: &MarkRuntimeContract, owners: u32) -> Result<Self, MarkError> {
-        if owners >= 1 << contract.credit_owner_bits() {
+        if owners == 0 {
             return Err(MarkError::UnknownOwner { owner: owners });
         }
-        let credits = (0..owners).map(MarkCredit::new).collect();
+        let credits = CreditPool::new(contract.credit_pool(), owners);
         let mailboxes = (0..owners).map(MarkMailbox::new).collect();
         Ok(Self {
             contract: contract.clone(),
@@ -716,21 +1012,22 @@ impl MarkPlane {
 
     /// 返回 owner 数量。
     pub(crate) fn owner_count(&self) -> u32 {
-        u32::try_from(self.credits.len()).expect("owner 数适配 u32")
+        u32::try_from(self.mailboxes.len()).expect("owner 数适配 u32")
     }
 
-    /// 返回一个 owner 的 credit 账本。
-    pub(crate) fn credit(&self, owner: u32) -> Result<&MarkCredit, MarkError> {
-        self.credits
-            .get(owner as usize)
-            .ok_or(MarkError::UnknownOwner { owner })
+    /// 返回共享 credit 池。
+    pub(crate) const fn credits(&self) -> &CreditPool {
+        &self.credits
     }
 
-    /// 返回一个 owner 的 credit 账本可变引用；状态机测试与偿还路径使用。
-    pub(crate) fn credit_mut(&mut self, owner: u32) -> Result<&mut MarkCredit, MarkError> {
-        self.credits
-            .get_mut(owner as usize)
-            .ok_or(MarkError::UnknownOwner { owner })
+    /// 返回共享 credit 池的可变引用；世界级发布与结算路径使用。
+    pub(crate) fn credits_mut(&mut self) -> &mut CreditPool {
+        &mut self.credits
+    }
+
+    /// 返回一个 owner 的分类计数。
+    pub(crate) fn credit(&self, owner: u32) -> Result<OwnerCredit, MarkError> {
+        self.credits.owner(owner)
     }
 
     /// 返回一个 owner 的 mailbox。
@@ -740,7 +1037,10 @@ impl MarkPlane {
             .ok_or(MarkError::UnknownOwner { owner })
     }
 
-    /// 开始一个 cycle：固定 cycle/topology、按契约授权 credit、打开 gate。
+    /// 开始一个 cycle：固定 cycle/topology、打开 gate。
+    ///
+    /// credit 池的授权在构造时固定，因此这里只要求上一轮已经全部归还；池不因 cycle 推进而
+    /// 增长，也不清空已经归还的 slot。
     pub(crate) fn begin_cycle(&mut self, cycle: u64, topology: u32) -> Result<(), MarkError> {
         if !matches!(self.state, MarkCycleState::Idle | MarkCycleState::Complete) {
             return Err(MarkError::CycleState {
@@ -754,10 +1054,6 @@ impl MarkPlane {
         }
         self.cycle = cycle;
         self.topology = topology;
-        let granted = self.contract.credit_pool();
-        for credit in &mut self.credits {
-            credit.reset(granted);
-        }
         for mailbox in &mut self.mailboxes {
             mailbox.reset(cycle, topology);
         }
@@ -812,22 +1108,49 @@ impl MarkPlane {
         Ok(())
     }
 
-    /// 为一个 owner acquire 一个 credit，返回跨 owner 编码的 credit id。
-    pub(crate) fn acquire(&mut self, owner: u32) -> Result<u32, MarkError> {
-        let credit = self
-            .credits
-            .get_mut(owner as usize)
-            .ok_or(MarkError::UnknownOwner { owner })?;
-        let local = credit.acquire()?;
-        credit.credit_id(owner, local)
-    }
-
-    /// 发布一条跨 owner ticket：源 owner acquire credit，目标 mailbox 入队。
-    pub(crate) fn publish_ticket(&mut self, source: u32, target: u32) -> Result<u32, MarkError> {
+    /// 为一个 owner acquire 一个 mark ticket credit。
+    ///
+    /// mark ticket 仍拒绝自投递：源与目标相同意味着本 owner 自己就能标记，跨 owner 通道只会
+    /// 浪费一个 slot 与一次 grace。
+    pub(crate) fn acquire_ticket(
+        &mut self,
+        source: u32,
+        target: u32,
+    ) -> Result<GcCreditId, MarkError> {
         if source == target {
             return Err(MarkError::SelfTicket { owner: source });
         }
-        let credit = self.acquire(source)?;
+        self.credits.acquire_work(
+            source,
+            target,
+            MessageFamilyTag::MarkTicket,
+            self.cycle,
+            self.topology,
+        )
+    }
+
+    /// 为一个跨 block 边差量 acquire 一个 credit；同一 owner 内的跨 block 边是合法输入。
+    pub(crate) fn acquire_edge_delta(
+        &mut self,
+        source: u32,
+        target: u32,
+    ) -> Result<GcCreditId, MarkError> {
+        self.credits.acquire_work(
+            source,
+            target,
+            MessageFamilyTag::EdgeDelta,
+            self.cycle,
+            self.topology,
+        )
+    }
+
+    /// 发布一条跨 owner ticket：源 owner acquire credit，目标 mailbox 入队。
+    pub(crate) fn publish_ticket(
+        &mut self,
+        source: u32,
+        target: u32,
+    ) -> Result<GcCreditId, MarkError> {
+        let credit = self.acquire_ticket(source, target)?;
         self.mailboxes
             .get_mut(target as usize)
             .ok_or(MarkError::UnknownOwner { owner: target })?
@@ -836,57 +1159,74 @@ impl MarkPlane {
         Ok(credit)
     }
 
-    /// 目标 owner 消费一条 ticket：校验 cycle/topology 与源 owner 后收口 credit。
+    /// 目标 owner 消费一条 ticket：credit 身份校验先于 mailbox 状态改变。
+    ///
+    /// 顺序是刻意的：错误族、错误目标、过期 generation 或重复 consume 都不允许改动 mailbox
+    /// 计数，否则一次非法投递就会让 pending 与 credit 账本互相矛盾。
     pub(crate) fn consume_ticket(
         &mut self,
         owner: u32,
-        credit: u32,
+        credit: GcCreditId,
         cycle: u64,
         topology: u32,
     ) -> Result<(), MarkError> {
-        if cycle != self.cycle {
-            return Err(MarkError::StaleCycle {
-                ticket: cycle,
-                current: self.cycle,
-            });
-        }
-        if topology != self.topology {
-            return Err(MarkError::StaleTopology {
-                ticket: topology,
-                current: self.topology,
-            });
-        }
-        let source = credit_source(credit);
-        if source as usize >= self.credits.len() {
-            return Err(MarkError::UnknownOwner { owner: source });
-        }
-        if source == owner {
-            return Err(MarkError::SelfTicket { owner });
-        }
+        self.credits.validate_consume(
+            credit,
+            MessageFamilyTag::MarkTicket,
+            owner,
+            cycle,
+            topology,
+        )?;
         self.mailboxes
             .get_mut(owner as usize)
             .ok_or(MarkError::UnknownOwner { owner })?
             .consume(credit)?;
-        self.credits[source as usize].consume(credit_local(credit))?;
-        // 被转发的 ticket 走到最终目标才离开在飞集合；未转发过的编号不在集合里。
-        if let Some(index) = self
-            .forwarded_in_flight
-            .iter()
-            .position(|candidate| *candidate == credit)
-        {
-            self.forwarded_in_flight.swap_remove(index);
-        }
+        self.credits
+            .consume_work(owner, credit, MessageFamilyTag::MarkTicket, cycle, topology)?;
+        self.drop_forwarded(credit);
         self.stats.tickets_consumed += 1;
         Ok(())
     }
 
-    /// 把一个 owner 的 ticket 转发给另一个 owner。
+    /// 目标 owner 消费一条 edge delta：与 ticket 共用同一信用原语，但允许同一 owner 内跨 block。
+    pub(crate) fn consume_edge_delta(
+        &mut self,
+        owner: u32,
+        credit: GcCreditId,
+        cycle: u64,
+        topology: u32,
+    ) -> Result<(), MarkError> {
+        self.credits.validate_consume(
+            credit,
+            MessageFamilyTag::EdgeDelta,
+            owner,
+            cycle,
+            topology,
+        )?;
+        self.credits
+            .consume_work(owner, credit, MessageFamilyTag::EdgeDelta, cycle, topology)?;
+        self.drop_forwarded(credit);
+        self.stats.edge_deltas_consumed += 1;
+        Ok(())
+    }
+
+    /// 把一个 owner 的 ticket 转发给另一个 owner；复用同一个 credit。
     pub(crate) fn forward_ticket(
         &mut self,
         owner: u32,
         target: u32,
-        credit: u32,
+        credit: GcCreditId,
     ) -> Result<(), MarkError> {
+        // 转发是源 owner 侧的操作：只要求 credit 仍是本 cycle 的 MarkTicket，
+        // 不把目标 owner 当作校验条件。
+        self.credits.validate_in_flight(
+            credit,
+            MessageFamilyTag::MarkTicket,
+            self.cycle,
+            self.topology,
+        )?;
+        // 目标随转发改变：credit 的 target 必须跟着走，否则最终目标无法通过目标校验。
+        self.credits.retarget(credit, target)?;
         self.mailboxes
             .get_mut(owner as usize)
             .ok_or(MarkError::UnknownOwner { owner })?
@@ -902,31 +1242,51 @@ impl MarkPlane {
         Ok(())
     }
 
+    /// 把一条在飞 edge credit 转投给新的目标 owner；管理权转移路径使用。
+    pub(crate) fn forward_edge_delta(
+        &mut self,
+        credit: GcCreditId,
+        target: u32,
+    ) -> Result<(), MarkError> {
+        self.credits.validate_in_flight(
+            credit,
+            MessageFamilyTag::EdgeDelta,
+            self.cycle,
+            self.topology,
+        )?;
+        self.credits.retarget(credit, target)?;
+        self.stats.tickets_forwarded += 1;
+        Ok(())
+    }
+
+    /// 被转发的记录走到最终目标才离开在飞集合；未转发过的身份不在集合里。
+    fn drop_forwarded(&mut self, credit: GcCreditId) {
+        if let Some(index) = self
+            .forwarded_in_flight
+            .iter()
+            .position(|candidate| *candidate == credit)
+        {
+            self.forwarded_in_flight.swap_remove(index);
+        }
+    }
+
     /// 归还一个 owner 全部已 consume 的 credit；返回归还数量。
     pub(crate) fn settle_owner(&mut self, owner: u32) -> Result<u64, MarkError> {
-        let credit = self
-            .credits
-            .get_mut(owner as usize)
-            .ok_or(MarkError::UnknownOwner { owner })?;
-        let done: Vec<u32> = (0..credit.states.len())
-            .filter(|index| credit.states[*index] == CreditState::Done)
-            .map(|index| u32::try_from(index).expect("credit 下标适配 u32"))
-            .collect();
-        let mut returned = 0_u64;
-        for local in done {
-            credit.return_credit(local)?;
-            returned += 1;
-        }
+        let returned = self.credits.settle_owner(owner)?;
         self.stats.credits_returned = self.stats.credits_returned.saturating_add(returned);
         Ok(returned)
     }
 
+    /// 归还一个具体的 credit；边差量在应用完成后立即还款，不等 cycle 末尾。
+    pub(crate) fn return_credit(&mut self, credit: GcCreditId) -> Result<(), MarkError> {
+        self.credits.return_work(credit)?;
+        self.stats.credits_returned = self.stats.credits_returned.saturating_add(1);
+        Ok(())
+    }
+
     /// 返回全部 owner 尚未归还的 credit 数。
     pub(crate) fn mark_credit_pending(&self) -> u64 {
-        self.credits
-            .iter()
-            .map(MarkCredit::pending)
-            .fold(0_u64, u64::saturating_add)
+        self.credits.pending()
     }
 
     /// 返回全部 mailbox 尚未消费的 ticket 数。
@@ -1018,21 +1378,24 @@ impl MarkPlane {
         let mut output = String::new();
         writeln!(
             output,
-            "mark-plane cycle={} topology={} state={} owners={} credits={} mailboxes={}",
+            "mark-plane cycle={} topology={} state={} owners={} credits={} slots={} mailboxes={}",
             self.cycle,
             self.topology,
             self.state.name(),
             self.owner_count(),
-            self.credits.len(),
+            self.credits.capacity(),
+            self.credits.slot_count(),
             self.mailboxes.len(),
         )
         .expect("String写入");
-        for (owner, credit) in self.credits.iter().enumerate() {
+        for owner in 0..self.owner_count() {
+            let credit = self.credits.owner(owner).expect("owner 已登记");
             writeln!(
                 output,
-                "mark-plane-credit {} granted={} pending={} done={} returned={}",
+                "mark-plane-credit {} granted={} issued={} pending={} done={} returned={}",
                 owner,
-                credit.granted(),
+                self.credits.capacity(),
+                credit.issued(),
                 credit.pending(),
                 credit.done(),
                 credit.returned(),

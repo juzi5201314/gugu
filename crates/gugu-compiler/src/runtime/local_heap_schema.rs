@@ -17,8 +17,12 @@ use super::gc_metadata_contract::{GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES}
 use super::model::RawModelError;
 use super::platform::PlatformProfile;
 
-/// LocalHeap 契约段的 schema 版本。
-pub(crate) const LOCAL_HEAP_SCHEMA: u32 = 1;
+/// 本地堆契约段 schema。
+///
+/// 版本 3 相对版本 2 的变化：块记录新增 `candidate_job` 绑定与 `active/candidate/reclaiming/free`
+/// 状态语义、lease 计数成为候选 gate 的输入、块世代在释放时推进、`ManagedBlockId` 的 arena 部分
+/// 就是 arena descriptor（世代与记录读写必须按 descriptor 定位）。
+pub(crate) const LOCAL_HEAP_SCHEMA: u32 = 3;
 
 /// allocation granule：object-start bitmap 每一位对应一个 granule。
 pub(crate) const HEAP_GRANULE_BYTES: u32 = 16;
@@ -46,8 +50,7 @@ pub(crate) const HEAP_ARENA_STATE_NAMES: [&str; 7] = [
     "evacuating",
 ];
 /// block 状态名；顺序即状态强度。
-pub(crate) const HEAP_BLOCK_STATE_NAMES: [&str; 5] =
-    ["free", "allocating", "marked", "sweeping", "evacuating"];
+pub(crate) const HEAP_BLOCK_STATE_NAMES: [&str; 4] = ["active", "candidate", "reclaiming", "free"];
 /// generation 名；顺序即 object header 的编码。
 pub(crate) const HEAP_GENERATION_NAMES: [&str; 4] = ["nursery", "aging", "old", "immortal"];
 /// managed representation 名；顺序即 object header 的编码。
@@ -95,6 +98,26 @@ pub struct HeapRecordField {
     pub bytes: u32,
 }
 
+/// 与 Gugu side metadata 同源；路由与完整 manager token 仅由世界的 arena 登记表持有。
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct HeapBlockRecord {
+    pub block_id: u32,
+    pub generation: u32,
+    pub arena_descriptor: u32,
+    pub block_index: u32,
+    pub manager_owner: u64,
+    pub incoming_leases: u64,
+    pub mutation_version: u64,
+    pub allocator_leases: u32,
+    pub scanner_leases: u32,
+    pub evacuation_leases: u32,
+    pub candidate_job: u32,
+    pub state: u32,
+    pub reserved: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<HeapBlockRecord>() == 64);
 /// 一条运行时记录的完整布局；由 `heap.gg` 逐字段交叉校验。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -117,8 +140,8 @@ const fn field(name: &'static str, offset: u32, bytes: u32) -> (&'static str, u3
     (name, offset, bytes)
 }
 
-/// `ObjectHeader`、`HeapArenaMetadata` 与 `HeapPinEntry` 的字段表。
-const HEAP_RECORD_SPECS: [HeapRecordSpec; 3] = [
+/// heap header、arena、pin 与 block 的字段表。
+const HEAP_RECORD_SPECS: [HeapRecordSpec; 4] = [
     HeapRecordSpec {
         name: "ObjectHeader",
         bytes: HEAP_OBJECT_HEADER_BYTES,
@@ -155,6 +178,26 @@ const HEAP_RECORD_SPECS: [HeapRecordSpec; 3] = [
             field("offset", 4, 4),
             field("generation", 8, 4),
             field("count", 12, 4),
+        ],
+    },
+    HeapRecordSpec {
+        name: "HeapBlockRecord",
+        bytes: 64,
+        alignment: 64,
+        fields: &[
+            field("block_id", 0, 4),
+            field("generation", 4, 4),
+            field("arena_descriptor", 8, 4),
+            field("block_index", 12, 4),
+            field("manager_owner", 16, 8),
+            field("incoming_leases", 24, 8),
+            field("mutation_version", 32, 8),
+            field("allocator_leases", 40, 4),
+            field("scanner_leases", 44, 4),
+            field("evacuation_leases", 48, 4),
+            field("candidate_job", 52, 4),
+            field("state", 56, 4),
+            field("reserved", 60, 4),
         ],
     },
 ];

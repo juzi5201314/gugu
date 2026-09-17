@@ -2,21 +2,31 @@
 
 use super::RawWorld;
 use crate::runtime::barrier::{
-    BarrierFlushReason, BarrierPlane, BarrierSite, CardKey, CardMarkDraft, EdgeSummary, HybridStep,
+    BarrierFlushReason, BarrierPlane, BarrierSite, CardKey, CardMarkDraft, EdgeChange, EdgeSummary,
+    HybridStep,
 };
 use crate::runtime::barrier_schema::{
     BARRIER_SCHEMA, BarrierDemand, BarrierRuntimeContract, CARD_GRANULARITY_BYTES,
-    CARD_MARK_BUFFER_ENTRIES, CARD_MARK_STAMP_ENTRIES, GC_ARENA_CARDS, HYBRID_BARRIER_STEPS,
-    MessageFamilyTag, arena_card, card_index, stamp_slot,
+    CARD_MARK_BUFFER_ENTRIES, CARD_MARK_STAMP_ENTRIES, EDGE_BUFFER_ENTRIES, EDGE_DELTAS_PER_WRITE,
+    GC_ARENA_CARDS, HYBRID_BARRIER_STEPS, MessageFamilyTag, arena_card, card_index, stamp_slot,
 };
 use crate::runtime::gc_metadata_contract::{GC_ARENA_BYTES, GcMetadataRuntimeContract};
 use crate::runtime::gc_metadata_schema::GcMetadataDemand;
 use crate::runtime::inbox::ServiceBudget;
+use crate::runtime::local_heap::{BlockRef, ManagedBlockId};
 use crate::runtime::message::BatchLimits;
 use crate::runtime::size_class::RuntimeSizeClassId;
 use crate::runtime::slab::SlabDescriptorId;
 use crate::runtime::{GcMetadataDemand as _UnusedGcMetadataDemand, PlatformProfile};
 use crate::{CompileRequest, Compiler, TargetName};
+
+/// 一个稳定 block 身份；测试用固定 generation。
+fn block(id: u32) -> BlockRef {
+    BlockRef {
+        id: ManagedBlockId(id),
+        generation: 1,
+    }
+}
 
 fn manager() -> crate::runtime::slab::OwnerToken {
     crate::runtime::slab::OwnerToken {
@@ -34,22 +44,39 @@ fn world(owners: u32) -> RawWorld {
     world
 }
 
+/// 一道卡片测试用的写入：目标与被写对象同 block，因此不产生跨 block 边。
 fn site(arena: u64, generation: u32, offset: u64, epoch: u64) -> BarrierSite {
+    edge_site(
+        arena,
+        generation,
+        offset,
+        epoch,
+        Some(block(3)),
+        Some(block(3)),
+    )
+}
+
+/// 一道显式指定 old/new block 身份的写入。
+fn edge_site(
+    arena: u64,
+    generation: u32,
+    offset: u64,
+    epoch: u64,
+    old: Option<BlockRef>,
+    new: Option<BlockRef>,
+) -> BarrierSite {
     BarrierSite {
         arena_descriptor: arena,
         arena_generation: generation,
         offset,
         cycle_epoch: epoch,
-        old_present: true,
-        new_present: true,
+        source: block(3),
+        old,
+        new,
         new_in_nursery: true,
         owner_old: true,
         marking: true,
         stack_grey: true,
-        new_block: Some(9),
-        source_block: 3,
-        new_owner: 0,
-        source_owner: 1,
     }
 }
 
@@ -66,6 +93,14 @@ fn barrier_contract_is_self_consistent_and_rejects_drift() {
     assert_eq!(contract.flush_reason_count(), 6);
     assert_eq!(contract.card_mark_batch_field_count(), 13);
     assert_eq!(contract.record_count(), 4);
+    // edge scratch 与 shade 额度同源：region 内每条写入最多两条边变更。
+    assert_eq!(contract.edge_deltas_per_write, EDGE_DELTAS_PER_WRITE);
+    assert_eq!(contract.edge_buffer_entries, EDGE_BUFFER_ENTRIES);
+    assert_eq!(
+        contract.edge_deltas_per_write,
+        contract.shade_slots_per_write
+    );
+    assert!(contract.edge_buffer_entries >= contract.edge_deltas_per_write);
     assert_eq!(
         GC_ARENA_CARDS,
         GC_ARENA_BYTES / u64::from(CARD_GRANULARITY_BYTES)
@@ -122,8 +157,9 @@ fn barrier_demand_changes_fingerprint_and_enters_contract() {
     assert!(
         drifted
             .dump()
-            .contains("barrier schema=1 card=512 buffer=256 stamps=256")
+            .contains("barrier schema=2 card=512 buffer=256 stamps=256")
     );
+    assert!(drifted.dump().contains("edges-per-write=2 edge-buffer=512"));
     assert!(drifted.dump().contains("read-old -> shade-old-deleted"));
     assert!(
         drifted
@@ -200,7 +236,9 @@ fn dedup_reuses_a_slot_and_stamp_conflicts_never_drop_keys() {
     plane
         .register_arena(1, manager(), 3, GC_ARENA_BYTES)
         .expect("登记 arena");
-    let drafts = plane.flush_processor(0, BarrierFlushReason::BufferFull);
+    let drafts = plane
+        .flush_processor(0, BarrierFlushReason::BufferFull)
+        .expect("flush 可执行");
     assert_eq!(drafts.len(), 2, "两个不相邻 card 各自成一条 batch");
     assert_eq!(
         plane.table(1).expect("card table").dirty(),
@@ -224,7 +262,9 @@ fn repeated_keys_flush_as_one_merged_range() {
             .perform_barrier(0, site(5, 9, card * 512, 2))
             .expect("写屏障成功");
     }
-    let drafts = plane.flush_processor(0, BarrierFlushReason::ProducerStopGate);
+    let drafts = plane
+        .flush_processor(0, BarrierFlushReason::ProducerStopGate)
+        .expect("flush 可执行");
     assert_eq!(drafts.len(), 1, "连续 card 合并成一条 batch");
     assert_eq!(drafts[0].card_start, 0);
     assert_eq!(drafts[0].card_count, 4);
@@ -252,7 +292,9 @@ fn buffer_bound_forces_a_flush_and_rejects_overflow() {
     assert_eq!(outcome.flush, Some(BarrierFlushReason::BufferFull));
     assert!(!outcome.card_marked, "超额的写入不能在 fast path 上记账");
     assert!(outcome.steps.contains(&HybridStep::Store), "store 已发生");
-    let drafts = plane.flush_processor(0, BarrierFlushReason::BufferFull);
+    let drafts = plane
+        .flush_processor(0, BarrierFlushReason::BufferFull)
+        .expect("flush 可执行");
     let total: u32 = drafts.iter().map(|draft| draft.card_count).sum();
     assert_eq!(total, CARD_MARK_BUFFER_ENTRIES);
     // flush 后同一键可以重新进入 buffer。
@@ -336,7 +378,7 @@ fn six_flush_reasons_are_reachable() {
         plane
             .perform_barrier(0, site(1, 1, 512, 1))
             .expect("写屏障成功");
-        let drafts = plane.flush_processor(0, reason);
+        let drafts = plane.flush_processor(0, reason).expect("flush 可执行");
         assert_eq!(drafts.len(), 1, "{} 必须冲刷已记账的键", reason.name());
         assert_eq!(plane.processor(0).expect("账本").last_flush(), Some(reason));
         assert!(plane.processor(0).expect("账本").buffer().is_empty());
@@ -352,6 +394,7 @@ fn six_flush_reasons_are_reachable() {
     assert!(
         plane
             .flush_processor(0, BarrierFlushReason::MemoryPressure)
+            .expect("flush 可执行")
             .is_empty()
     );
     assert_eq!(
@@ -369,9 +412,7 @@ fn six_flush_reasons_are_reachable() {
 #[test]
 fn card_batch_crosses_owner_and_is_consumed_once() {
     let mut world = world(2);
-    world
-        .register_managed_arena(1, SlabDescriptorId::from_raw(3), 11)
-        .expect("登记 arena");
+    world.register_managed_arena(1, 3, 11).expect("登记 arena");
     // 站点 epoch 必须与平面一致：先推进平面，再记账。
     world.advance_barrier_epoch(0, 5).expect("推进到 cycle 5");
     world
@@ -421,9 +462,7 @@ fn card_batch_crosses_owner_and_is_consumed_once() {
 #[test]
 fn arena_owner_writes_its_card_table_without_a_message() {
     let mut world = world(1);
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 3)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 2, 3).expect("登记 arena");
     world
         .perform_barrier(0, site(2, 3, 2048, 1))
         .expect("写屏障成功");
@@ -438,9 +477,7 @@ fn arena_owner_writes_its_card_table_without_a_message() {
 #[test]
 fn generation_mismatch_and_wrong_owner_are_invariant_violations() {
     let mut world = world(2);
-    world
-        .register_managed_arena(1, SlabDescriptorId::from_raw(4), 6)
-        .expect("登记 arena");
+    world.register_managed_arena(1, 4, 6).expect("登记 arena");
 
     // generation 漂移：owner 消费必须拒绝。
     let draft = CardMarkDraft {
@@ -489,9 +526,7 @@ fn generation_mismatch_and_wrong_owner_are_invariant_violations() {
 #[test]
 fn minor_stop_gate_requires_every_buffer_flushed() {
     let mut world = world(1);
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 2, 1).expect("登记 arena");
     world
         .perform_barrier(0, site(2, 1, 512, 1))
         .expect("写屏障成功");
@@ -518,25 +553,103 @@ fn minor_stop_gate_requires_every_buffer_flushed() {
 }
 
 #[test]
-fn edge_summary_orders_adds_before_drops_and_cancels_within_epoch() {
+fn edge_summary_counts_multiple_field_edges_and_publishes_net_delta() {
+    let source = block(1);
+    let target = block(2);
     let mut edges = EdgeSummary::default();
-    let add = edges.record_add(1, 2, 7, 10);
-    assert!(add.add);
-    assert_eq!(edges.drain().len(), 1, "add 先被发布");
-    // 更早 epoch 的 drop 必须被提升到已发布 add 的 epoch。
-    let drop = edges.record_drop(1, 2, 7, 9);
-    assert!(!drop.add);
-    assert_eq!(drop.epoch, add.epoch, "drop 不得早于已发布的 add");
-    let drained = edges.drain();
-    assert_eq!(drained.len(), 1);
-    assert!(!drained[0].add);
+    // 同一个 block 对的两条字段边必须各自计数：删掉一条之后仍有边。
+    assert!(
+        edges
+            .apply(EdgeChange {
+                source,
+                target,
+                delta: 1
+            })
+            .expect("加边")
+    );
+    assert!(
+        !edges
+            .apply(EdgeChange {
+                source,
+                target,
+                delta: 1
+            })
+            .expect("加边")
+    );
+    assert_eq!(
+        edges.incoming_leases(target),
+        1,
+        "同一对 block 只算一份 incoming lease"
+    );
+    let published = edges.publish(10).expect("发布");
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].delta, 2, "两条字段边合并成净差量 2");
+    assert_eq!(published[0].sequence, 1);
+    assert!(
+        edges.publish(10).expect("再发布").is_empty(),
+        "净零不再发布"
+    );
 
-    // 同一 epoch 内 add 与 drop 净零抵消。
-    let mut edges = EdgeSummary::default();
-    edges.record_add(3, 4, 1, 5);
-    edges.record_drop(3, 4, 1, 5);
+    // 删掉一条：仍然活跃，但净差量为 -1。
+    edges
+        .apply(EdgeChange {
+            source,
+            target,
+            delta: -1,
+        })
+        .expect("删边");
+    assert_eq!(edges.incoming_leases(target), 1, "仍有一条活边");
+    let published = edges.publish(11).expect("发布");
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].delta, -1);
+    assert_eq!(published[0].sequence, 2);
+
+    // 删掉最后一条：incoming lease 归零，随后清退零计数对。
+    edges
+        .apply(EdgeChange {
+            source,
+            target,
+            delta: -1,
+        })
+        .expect("删边");
+    assert_eq!(edges.incoming_leases(target), 0);
+    let published = edges.publish(12).expect("发布");
+    assert_eq!(published[0].delta, -1);
+    assert_eq!(published[0].sequence, 3);
+    assert_eq!(edges.retire_zero_pairs(), 1, "零计数对必须被清退");
     assert_eq!(edges.pending(), 0);
-    assert!(edges.drain().is_empty());
+
+    // 计数下溢是真正的不变量失败，不能饱和成零。
+    assert!(
+        edges
+            .apply(EdgeChange {
+                source,
+                target,
+                delta: -1
+            })
+            .is_err(),
+        "未记录的删边必须失败"
+    );
+
+    // 同一 epoch 内 add 与 drop 净零：不分配记录也不消耗序号。
+    let mut edges = EdgeSummary::default();
+    edges
+        .apply(EdgeChange {
+            source,
+            target,
+            delta: 1,
+        })
+        .expect("加边");
+    edges
+        .apply(EdgeChange {
+            source,
+            target,
+            delta: -1,
+        })
+        .expect("删边");
+    assert_eq!(edges.pending(), 0);
+    assert!(edges.publish(5).expect("发布").is_empty());
+    assert_eq!(edges.incoming_leases(target), 0);
 }
 
 #[test]
@@ -609,11 +722,19 @@ fn compile_slice_reports_barrier_contract_end_to_end() {
     assert_eq!(plan.barrier_card_mark_batch_fields(), 13);
     assert_ne!(plan.barrier_contract_fingerprint(), [0_u8; 32]);
     let dump = compilation.dump_runtime().expect("runtime dump");
-    assert!(dump.contains("barrier schema=1 card=512 buffer=256 stamps=256"));
+    assert!(dump.contains("barrier schema=2 card=512 buffer=256 stamps=256"));
     assert!(dump.contains("barrier-flush-reasons buffer-full,processor-handoff,foreign-bridge,memory-pressure,minor-stop,producer-stop-gate"));
     assert!(dump.contains(
-        "runtime-message return-fields=12 card-mark-fields=13 mark-ticket-fields=14 card-mark-family=card-mark"
+        "runtime-message return-fields=12 card-mark-fields=13 mark-ticket-fields=15 edge-delta-fields=18 card-mark-family=card-mark"
     ));
+    assert!(dump.contains(
+        "edge schema=1 profile=mosaic-edge revision=1 quantum=4096 edge-buffer=512 deltas-per-write=2 trace-executor=2 candidate-schema=1 edge-delta-fields=18"
+    ));
+    assert!(dump.contains(
+        "edge-phases discover,trace,trial,scc,validate,commit,sweep,release,complete,invalidate"
+    ));
+    assert!(dump.contains("edge-states active,candidate,reclaiming,free"));
+    assert!(dump.contains("edge-fingerprint"));
 }
 
 #[test]
@@ -680,9 +801,7 @@ fn card_index_helpers_agree_with_the_contract_granularity() {
 #[test]
 fn owner_retire_flushes_the_processor_ledger() {
     let mut world = world(1);
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 2, 1).expect("登记 arena");
     world
         .perform_barrier(0, site(2, 1, 512, 1))
         .expect("写屏障成功");
@@ -699,9 +818,7 @@ fn cache_close_flushes_for_gc_handoff_and_pressure() {
     use crate::runtime::message::RingCloseReason;
 
     let mut world = world(1);
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(3), 1)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 3, 1).expect("登记 arena");
     world
         .perform_barrier(0, site(3, 1, 512, 1))
         .expect("写屏障成功");
@@ -736,9 +853,7 @@ fn foreign_bridge_flushes_before_native_entry() {
             },
         )
         .expect("boot");
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 2, 1).expect("登记 arena");
     world
         .perform_barrier(0, site(2, 1, 512, 1))
         .expect("写屏障成功");
@@ -750,9 +865,7 @@ fn foreign_bridge_flushes_before_native_entry() {
 #[test]
 fn drain_flushes_the_producer_stop_gate() {
     let mut world = world(1);
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 2, 1).expect("登记 arena");
     world
         .perform_barrier(0, site(2, 1, 512, 1))
         .expect("写屏障成功");
@@ -776,9 +889,7 @@ fn buffer_empty(world: &RawWorld, processor: usize) -> bool {
 #[test]
 fn epoch_advance_publishes_old_keys_and_rejects_stale_sites() {
     let mut world = world(1);
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 2, 1).expect("登记 arena");
     world
         .perform_barrier(0, site(2, 1, 512, 1))
         .expect("写屏障成功");
@@ -802,37 +913,79 @@ fn epoch_advance_publishes_old_keys_and_rejects_stale_sites() {
 }
 
 #[test]
-fn edge_deltas_are_aggregated_and_collected_by_the_owner() {
+fn edge_summary_aggregates_per_block_pair_for_the_owner() {
     let mut world = world(1);
-    world
-        .register_managed_arena(0, SlabDescriptorId::from_raw(2), 1)
-        .expect("登记 arena");
+    world.register_managed_arena(0, 2, 1).expect("登记 arena");
 
     // 同一 block 对在同一 epoch 内的 add 与 drop 净零抵消，不发布空 delta。
     world
-        .perform_barrier(0, site(2, 1, 512, 1))
+        .perform_barrier(0, edge_site(2, 1, 512, 1, None, Some(block(9))))
         .expect("写屏障成功");
-    let mut dropped = site(2, 1, 512, 1);
-    dropped.new_present = false;
-    world.perform_barrier(0, dropped).expect("写屏障成功");
+    world
+        .perform_barrier(0, edge_site(2, 1, 512, 1, Some(block(9)), None))
+        .expect("写屏障成功");
+    // scratch 只在 slow edge 合并进聚合表；合并前后统计都必须包含真实记录。
+    assert_eq!(
+        world.barrier_stats().edge_pending,
+        2,
+        "尚未合并的变更仍必须计入 pending"
+    );
+    world
+        .flush_barrier(0, 0, BarrierFlushReason::ProducerStopGate)
+        .expect("合并边 scratch");
     assert_eq!(
         world.barrier_stats().edge_pending,
         0,
         "同一 epoch 的 add/drop 净零抵消"
     );
-    assert!(world.take_edge_deltas().is_empty());
+    assert_eq!(world.barrier().edges().pending(), 0);
 
-    // 只增不删的 edge 保留一条待发布 delta。
+    // 先建立一条 A→B 边，再覆盖到第三个 block：撤销旧边与新增新边各自留在聚合表里。
     world
-        .perform_barrier(0, site(2, 1, 1536, 1))
+        .perform_barrier(0, edge_site(2, 1, 1536, 1, None, Some(block(7))))
         .expect("写屏障成功");
+    world
+        .flush_barrier(0, 0, BarrierFlushReason::ProducerStopGate)
+        .expect("合并边 scratch");
+    assert_eq!(world.block_incoming_leases(block(7)), 1);
+    world
+        .perform_barrier(0, edge_site(2, 1, 2048, 1, Some(block(7)), Some(block(9))))
+        .expect("写屏障成功");
+    world
+        .flush_barrier(0, 0, BarrierFlushReason::ProducerStopGate)
+        .expect("合并边 scratch");
+    let summary = world.barrier().edges();
+    // 只有从未发布过的那个 block 对留下待发布差量；被撤销的那对净差量已在同一 epoch 内
+    // 抵消（它还没有发布过任何 delta）。
+    assert_eq!(summary.pending(), 1, "覆盖写入只对新增目标留下净差量");
+    assert_eq!(summary.active_pairs(), 1, "只有仍活跃的那个 block 对计入");
+    assert_eq!(world.block_incoming_leases(block(7)), 0, "旧目标边已撤销");
+    assert_eq!(world.block_incoming_leases(block(9)), 1);
+
+    // 同一 block 对的两条字段边：删一条之后仍需再删一条才归零。
+    world
+        .perform_barrier(0, edge_site(2, 1, 2560, 1, None, Some(block(9))))
+        .expect("写屏障成功");
+    world
+        .flush_barrier(0, 0, BarrierFlushReason::ProducerStopGate)
+        .expect("合并边 scratch");
     assert_eq!(
-        world.barrier_stats().edge_pending,
+        world.block_incoming_leases(block(9)),
         1,
-        "同一 edge 聚合为一条"
+        "同一对 block 的两条字段边只算一份 incoming lease"
     );
-    assert_eq!(world.take_edge_deltas().len(), 1);
-    assert_eq!(world.barrier_stats().edge_deltas, 1);
-    assert_eq!(world.barrier_stats().edge_pending, 0, "取走后不再挂起");
-    assert!(world.take_edge_deltas().is_empty());
+    world
+        .perform_barrier(0, edge_site(2, 1, 3072, 1, Some(block(9)), None))
+        .expect("写屏障成功");
+    world
+        .flush_barrier(0, 0, BarrierFlushReason::ProducerStopGate)
+        .expect("合并边 scratch");
+    assert_eq!(world.block_incoming_leases(block(9)), 1, "删掉一条后仍有边");
+    world
+        .perform_barrier(0, edge_site(2, 1, 3584, 1, Some(block(9)), None))
+        .expect("写屏障成功");
+    world
+        .flush_barrier(0, 0, BarrierFlushReason::ProducerStopGate)
+        .expect("合并边 scratch");
+    assert_eq!(world.block_incoming_leases(block(9)), 0, "最后一条边已删除");
 }

@@ -1,6 +1,6 @@
-/* MarkMailbox、owner credit 与 cycle 终止记录的 Gugu 定义；
+/* MarkMailbox、owner credit、cycle 终止记录、EdgeDelta 头部与 candidate 游标的 Gugu 定义；
  * 与 compiler runtime layout query 逐字段交叉校验。
- * 每项只保存 owner 序号、generation/epoch、pending/done 计数与收敛条件观测值，
+ * 每项只保存 owner 序号、generation/epoch、block 身份、pending/done 计数与收敛条件观测值，
  * 禁止出现 managed pointer、field 地址或栈指针。
  */
 
@@ -12,9 +12,9 @@ pub struct MarkMailboxHead {
     pub pending: u32,
     pub consumed: uint,
     pub forwarded: uint,
-    pub last_credit: u32,
+    pub last_credit: uint,
     pub consumer_slots: u32,
-    pub padding: [byte; 16],
+    pub padding: [byte; 12],
 }
 
 #[repr(C, align(64))]
@@ -37,12 +37,50 @@ pub struct MarkTerminationRecord {
     pub conditions: [uint; 7],
 }
 
+#[repr(C, align(32))]
+pub struct EdgeDeltaHead {
+    pub source_block: u32,
+    pub target_block: u32,
+    pub source_generation: u32,
+    pub target_generation: u32,
+    pub cycle_epoch: uint,
+    pub sequence: uint,
+    pub delta: int,
+    pub credit: uint,
+    pub topology_epoch: u32,
+    pub state: u32,
+    pub target_owner: uint,
+    pub target_owner_generation: uint,
+    pub route_key: uint,
+    pub bytes: u32,
+    pub integrity: u32,
+    pub domain: u32,
+    pub reserved: u32,
+}
+
+#[repr(C, align(64))]
+pub struct CandidateCursorHead {
+    pub job: u32,
+    pub phase: u32,
+    pub cycle_epoch: uint,
+    pub topology_epoch: u32,
+    pub dirty: u32,
+    pub work_units: uint,
+    pub block_count: uint,
+    pub edge_count: uint,
+    pub cursor: uint,
+    pub reserved: uint,
+}
+
 /// 非空 package 必经布局交叉校验。
 #[used]
 pub fn mark_records(
     mailbox: &MarkMailboxHead,
     credit: &MarkCreditHead,
     termination: &MarkTerminationRecord,
+    edge: &EdgeDeltaHead,
+    cursor: &CandidateCursorHead,
 ) uint {
-    mailbox.consumed + mailbox.forwarded + credit.in_flight + credit.granted + termination.cycle_epoch
+    let total = mailbox.consumed + mailbox.forwarded + credit.in_flight + credit.granted
+    total + termination.cycle_epoch + edge.sequence + cursor.work_units
 }

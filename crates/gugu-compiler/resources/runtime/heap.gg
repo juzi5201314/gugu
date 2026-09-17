@@ -33,8 +33,25 @@ pub struct HeapPinEntry {
     pub count: u32,
 }
 
+#[repr(C, align(64))]
+pub struct HeapBlockRecord {
+    pub block_id: u32,
+    pub generation: u32,
+    pub arena_descriptor: u32,
+    pub block_index: u32,
+    pub manager_owner: uint,
+    pub incoming_leases: uint,
+    pub mutation_version: uint,
+    pub allocator_leases: u32,
+    pub scanner_leases: u32,
+    pub evacuation_leases: u32,
+    pub candidate_job: u32,
+    pub state: u32,
+    pub reserved: u32,
+}
+
 /// 非空 package 必经布局交叉校验。
 #[used]
-pub fn heap_records(header: &ObjectHeader, arena: &HeapArenaMetadata, pin: &HeapPinEntry) u32 {
-    arena.state + arena.pin_count + pin.count + arena.generation + pin.arena
+pub fn heap_records(header: &ObjectHeader, arena: &HeapArenaMetadata, pin: &HeapPinEntry, block: &HeapBlockRecord) u32 {
+    arena.state + arena.pin_count + pin.count + arena.generation + pin.arena + block.state + block.generation
 }

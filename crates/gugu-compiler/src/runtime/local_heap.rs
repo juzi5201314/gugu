@@ -13,10 +13,51 @@
 //! remembered set 标记后做 owner-local line 回收（空 block 留在 arena 内复用，交还 provider 属于
 //! 后续阶段）。major 的 block 选择式 evacuation 与 SharedHeap 的跨 owner 传输不在本阶段。
 
+use super::edge_schema::EDGE_NO_JOB;
 use super::gc_metadata_section::GcRuntimeMetadata;
 use super::gc_trace::walk_descriptor;
-use super::local_heap_schema::{HeapTriggerProfile, LocalHeapRuntimeContract};
+use super::local_heap_schema::{HeapBlockRecord, HeapTriggerProfile, LocalHeapRuntimeContract};
 use super::slab::RawInvariant;
+
+/// 全局稠密 block 身份；arena descriptor 在世界生命周期内不复用。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct ManagedBlockId(pub(crate) u32);
+
+impl ManagedBlockId {
+    pub(crate) fn new(descriptor: u32, block: u32) -> Result<Self, RawInvariant> {
+        if block >= 64 {
+            return Err(RawInvariant::new("arena 的 block 下标必须小于 64"));
+        }
+        descriptor
+            .checked_mul(64)
+            .and_then(|base| base.checked_add(block))
+            .map(Self)
+            .ok_or_else(|| RawInvariant::new("全局 block 身份溢出"))
+    }
+
+    pub(crate) const fn arena(self) -> u32 {
+        self.0 / 64
+    }
+
+    pub(crate) const fn index(self) -> u32 {
+        self.0 % 64
+    }
+
+    /// 返回身份的原始编码（`descriptor * 64 + block`）。
+    ///
+    /// 需要把块身份放进定长消息字段时用它：只取 `index()` 会丢掉 arena 部分，让接收端无法判断
+    /// 这是哪个 arena 的 block。
+    pub(crate) const fn raw(self) -> u32 {
+        self.0
+    }
+}
+
+/// 消息与候选游标只保存稳定身份，不保存 payload 地址。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub(crate) struct BlockRef {
+    pub(crate) id: ManagedBlockId,
+    pub(crate) generation: u32,
+}
 
 /// arena 类别；顺序即稠密下标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -136,6 +177,7 @@ pub(crate) struct HeapObject {
 /// 一个 Immix block；payload 只为已提交的 block 分配。
 #[derive(Debug)]
 struct HeapBlock {
+    record: super::local_heap_schema::HeapBlockRecord,
     /// arena 内字节偏移。
     offset: u64,
     /// 下一个候选 line；等于 `lines_per_block` 表示 block 已满。
@@ -150,7 +192,8 @@ struct HeapBlock {
 #[derive(Debug)]
 pub(crate) struct HeapArena {
     kind: HeapArenaKind,
-    descriptor: u64,
+    descriptor: u32,
+    manager_owner: u64,
     base: u64,
     blocks: Vec<Option<HeapBlock>>,
     /// 一 line 一字节的 line 表。
@@ -172,11 +215,12 @@ pub(crate) struct HeapArena {
 impl HeapArena {
     fn new(
         kind: HeapArenaKind,
-        descriptor: u64,
+        descriptor: u32,
         base: u64,
         contract: &LocalHeapRuntimeContract,
     ) -> Self {
         let blocks = usize::try_from(contract.blocks_per_arena).expect("block 数适配宿主");
+        debug_assert_eq!(blocks, 64, "block id 编码与 2 MiB / 32 KiB 契约同源");
         let words =
             usize::try_from(contract.object_start_bits / 64).expect("bitmap word 数适配宿主");
         let lines = usize::try_from(contract.blocks_per_arena * contract.lines_per_block)
@@ -184,6 +228,7 @@ impl HeapArena {
         Self {
             kind,
             descriptor,
+            manager_owner: 0,
             base,
             blocks: (0..blocks).map(|_| None).collect(),
             line_live: vec![LINE_FREE; lines],
@@ -228,6 +273,18 @@ impl HeapArena {
             .ok_or_else(|| HeapError::invalid("LocalHeap block 下标越界"))?;
         if slot.is_none() {
             *slot = Some(HeapBlock {
+                record: super::local_heap_schema::HeapBlockRecord {
+                    block_id: ManagedBlockId::new(self.descriptor, index)
+                        .map_err(|error| HeapError::invalid(error.message()))?
+                        .0,
+                    generation: 1,
+                    arena_descriptor: self.descriptor,
+                    block_index: index,
+                    manager_owner: self.manager_owner,
+                    candidate_job: u32::MAX,
+                    state: 3,
+                    ..Default::default()
+                },
                 offset: u64::from(index) * u64::from(block_bytes),
                 free_line: 0,
                 mark_epoch: 0,
@@ -443,6 +500,7 @@ impl HeapArena {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct Tlab {
     pub active: bool,
+    pub arena: usize,
     pub start_block: u32,
     pub end_block: u32,
 }
@@ -495,9 +553,10 @@ pub(crate) struct LocalHeap {
     nursery_bytes: u64,
     minor_cycles: u64,
     major_cycles: u64,
-    next_descriptor: u64,
     scanned_words: u64,
     evacuated_objects: u64,
+    /// 本 cycle 搬迁过的 `(旧 block, 新 block)` 对；由世界在 cycle 边界取走用于重建 block 对计数。
+    relocations: Vec<(ManagedBlockId, ManagedBlockId)>,
     tlab_refills: u64,
     /// 扫描对象的 pointer word 暂存区；复用避免每次扫描分配。
     scratch: Vec<(u64, u64)>,
@@ -519,9 +578,9 @@ impl LocalHeap {
             nursery_bytes: 0,
             minor_cycles: 0,
             major_cycles: 0,
-            next_descriptor: 1,
             scanned_words: 0,
             evacuated_objects: 0,
+            relocations: Vec::new(),
             tlab_refills: 0,
             scratch: Vec::with_capacity(16),
         }
@@ -559,6 +618,27 @@ impl LocalHeap {
         })
     }
 
+    /// 按登记顺序选取已有容量；nursery 的活动 TLAB 必须仍属于所选 arena。
+    pub(crate) fn allocatable_arena(&self, kind: HeapArenaKind, span: u32) -> Option<usize> {
+        if kind == HeapArenaKind::Nursery && self.tlab.active {
+            let arena = &self.arenas[self.tlab.arena];
+            if (self.tlab.start_block..self.tlab.end_block).any(|index| {
+                arena
+                    .block(index)
+                    .is_some_and(|block| block.free_line < self.lines_per_block)
+            }) {
+                return Some(self.tlab.arena);
+            }
+        }
+        self.arenas_of(kind)
+            .find(|index| self.has_allocatable(*index, span))
+    }
+
+    pub(crate) fn uncommitted_arena(&self, kind: HeapArenaKind) -> Option<usize> {
+        self.arenas_of(kind)
+            .find(|index| self.arenas[*index].committed < 64)
+    }
+
     pub(crate) fn minor_due(&self) -> bool {
         self.nursery_bytes >= self.trigger.minor_trigger_bytes
     }
@@ -592,14 +672,21 @@ impl LocalHeap {
     pub(crate) fn attach_arena(
         &mut self,
         kind: HeapArenaKind,
+        descriptor: u32,
         base: u64,
         contract: &LocalHeapRuntimeContract,
     ) -> usize {
-        let descriptor = self.next_descriptor;
-        self.next_descriptor += 1;
         self.arenas
             .push(HeapArena::new(kind, descriptor, base, contract));
         self.arenas.len() - 1
+    }
+
+    pub(crate) fn set_arena_manager(&mut self, index: usize, owner: u64) {
+        let arena = &mut self.arenas[index];
+        arena.manager_owner = owner;
+        for block in arena.blocks.iter_mut().flatten() {
+            block.record.manager_owner = owner;
+        }
     }
 
     /// 在指定 arena 中提交一个 block。
@@ -629,18 +716,23 @@ impl LocalHeap {
     /// 分配一个 managed 对象；返回 payload 地址。
     pub(crate) fn allocate(
         &mut self,
-        kind: HeapArenaKind,
+        arena_index: usize,
         type_index: u32,
         payload_bytes: u64,
         align: u64,
     ) -> Result<u64, HeapError> {
+        let kind = self
+            .arenas
+            .get(arena_index)
+            .ok_or_else(|| HeapError::invalid("分配引用未知 arena"))?
+            .kind;
         let total = OBJECT_HEADER_BYTES
             .checked_add(payload_bytes)
             .ok_or_else(|| HeapError::invalid("对象 footprint 溢出"))?;
         let (arena_index, block, offset) = if kind == HeapArenaKind::Large {
-            self.allocate_large(total)?
+            self.allocate_large(arena_index, total)?
         } else {
-            self.allocate_small(kind, total, align)?
+            self.allocate_small(arena_index, total, align)?
         };
         let arena = &mut self.arenas[arena_index];
         let generation = if kind == HeapArenaKind::Old {
@@ -659,6 +751,12 @@ impl LocalHeap {
         let block_ref = arena
             .block_mut(block)
             .ok_or_else(|| HeapError::invalid("block 缺失"))?;
+        block_ref.record.state = 0;
+        block_ref.record.mutation_version = block_ref
+            .record
+            .mutation_version
+            .checked_add(1)
+            .ok_or_else(|| HeapError::invalid("block mutation version 溢出"))?;
         let local = offset - block_ref.offset;
         write_word(&mut block_ref.bytes, local + HEADER_CONTROL, control)?;
         write_word(
@@ -680,46 +778,52 @@ impl LocalHeap {
     /// 小对象分配：nursery 走 TLAB span，其余类别走该类别的 arena。
     fn allocate_small(
         &mut self,
-        kind: HeapArenaKind,
+        arena_index: usize,
         total: u64,
         align: u64,
     ) -> Result<(usize, u32, u64), HeapError> {
-        let arena_index = self.arenas_of(kind).next().ok_or(HeapError::NoCapacity)?;
-        if kind == HeapArenaKind::Nursery && !self.tlab.active {
+        let kind = self.arenas[arena_index].kind;
+        if kind == HeapArenaKind::Nursery && (!self.tlab.active || self.tlab.arena != arena_index) {
             self.refill_tlab(arena_index)?;
         }
-        let candidates: Vec<u32> = if kind == HeapArenaKind::Nursery {
-            (self.tlab.start_block..self.tlab.end_block).collect()
+        let range = if kind == HeapArenaKind::Nursery {
+            self.tlab.start_block..self.tlab.end_block
         } else {
-            let arena = &self.arenas[arena_index];
-            arena
-                .committed_blocks()
-                .into_iter()
-                .filter(|block| {
-                    arena.block(*block).is_some_and(|block| {
-                        (block.free_line as usize) < self.lines_per_block as usize
-                    })
-                })
-                .collect()
+            0..self.arenas[arena_index].blocks.len() as u32
         };
-        for block in candidates {
+        for block in range {
             let arena = &mut self.arenas[arena_index];
-            if let Ok(offset) = arena.allocate_in_block(block, total, align, self.granule_bytes) {
-                return Ok((arena_index, block, offset));
+            let Some(slot) = arena.block_mut(block) else {
+                continue;
+            };
+            if slot.free_line >= self.lines_per_block {
+                continue;
+            }
+            slot.record.allocator_leases += 1;
+            let result = arena.allocate_in_block(block, total, align, self.granule_bytes);
+            arena
+                .block_mut(block)
+                .expect("分配期间 block 已提交")
+                .record
+                .allocator_leases -= 1;
+            match result {
+                Ok(offset) => return Ok((arena_index, block, offset)),
+                Err(HeapError::NoCapacity) => {}
+                Err(error) => return Err(error),
             }
         }
         if kind == HeapArenaKind::Nursery {
-            self.tlab.active = false;
+            self.release_tlab()?;
         }
         Err(HeapError::NoCapacity)
     }
 
     /// 大对象：占用若干连续空 block。
-    fn allocate_large(&mut self, total: u64) -> Result<(usize, u32, u64), HeapError> {
-        let arena_index = self
-            .arenas_of(HeapArenaKind::Large)
-            .next()
-            .ok_or(HeapError::NoCapacity)?;
+    fn allocate_large(
+        &mut self,
+        arena_index: usize,
+        total: u64,
+    ) -> Result<(usize, u32, u64), HeapError> {
         let span = u32::try_from(total.div_ceil(u64::from(self.block_bytes)))
             .map_err(|_| HeapError::invalid("大对象 block 数溢出"))?;
         let arena = &mut self.arenas[arena_index];
@@ -735,6 +839,7 @@ impl LocalHeap {
                 .block_mut(start + step)
                 .ok_or_else(|| HeapError::invalid("block 缺失"))?;
             block.free_line = u32::MAX;
+            block.record.state = 0;
         }
         Ok((
             arena_index,
@@ -745,15 +850,41 @@ impl LocalHeap {
 
     /// 取一段新的 TLAB span；没有连续空 block 时报容量不足。
     fn refill_tlab(&mut self, arena_index: usize) -> Result<(), HeapError> {
+        self.release_tlab()?;
         let span = self.tlab_span_blocks;
         let arena = &self.arenas[arena_index];
         let start = arena.free_span(span).ok_or(HeapError::NoCapacity)?;
+        for index in start..start + span {
+            self.arenas[arena_index]
+                .block_mut(index)
+                .expect("TLAB 覆盖已提交 block")
+                .record
+                .allocator_leases += 1;
+        }
         self.tlab = Tlab {
             active: true,
+            arena: arena_index,
             start_block: start,
             end_block: start + span,
         };
         self.tlab_refills += 1;
+        Ok(())
+    }
+
+    fn release_tlab(&mut self) -> Result<(), HeapError> {
+        if self.tlab.active {
+            for index in self.tlab.start_block..self.tlab.end_block {
+                let record = &mut self.arenas[self.tlab.arena]
+                    .block_mut(index)
+                    .ok_or_else(|| HeapError::invalid("TLAB block 缺失"))?
+                    .record;
+                record.allocator_leases = record
+                    .allocator_leases
+                    .checked_sub(1)
+                    .ok_or_else(|| HeapError::invalid("TLAB allocator lease 下溢"))?;
+            }
+            self.tlab.active = false;
+        }
         Ok(())
     }
 
@@ -840,6 +971,17 @@ impl LocalHeap {
         read_word(&block.bytes, payload_offset - block.offset + offset)
     }
 
+    /// 返回 payload 内字段在 **arena 内**的字节偏移。
+    ///
+    /// card 表按 arena 内的 512 byte 粒度索引，因此 barrier 的 card 键必须用这个偏移，
+    /// 而不是调用者传入的 payload 字段偏移。
+    pub(crate) fn field_offset(&self, address: u64, offset: u64) -> Result<u64, HeapError> {
+        let (_, payload_offset) = self.locate(address)?;
+        payload_offset
+            .checked_add(offset)
+            .ok_or_else(|| HeapError::invalid("字段的 arena 内偏移溢出"))
+    }
+
     /// 写入对象 payload 中的 8 字节字段。
     pub(crate) fn set_field(
         &mut self,
@@ -897,7 +1039,7 @@ impl LocalHeap {
     /// 返回地址所属 arena 的下标与 barrier 身份。
     pub(crate) fn arena_of(&self, address: u64) -> Result<(usize, u64), HeapError> {
         let (index, _) = self.locate(address)?;
-        Ok((index, self.arenas[index].descriptor))
+        Ok((index, u64::from(self.arenas[index].descriptor)))
     }
 
     /// 返回地址所在 block 的 arena 内下标；按对象 header 归属计算。
@@ -905,6 +1047,111 @@ impl LocalHeap {
         let (_, offset) = self.locate(address)?;
         let header = offset.saturating_sub(OBJECT_HEADER_BYTES);
         Ok(u32::try_from(header / u64::from(self.block_bytes)).expect("block 下标适配 u32"))
+    }
+
+    /// 解析一个 payload 地址所属的稳定 block 身份。
+    pub(crate) fn block_ref(&self, address: u64) -> Result<BlockRef, HeapError> {
+        let payload = self.resolve(address)?;
+        let (arena, offset) = self.locate(payload)?;
+        let index = u32::try_from((offset - OBJECT_HEADER_BYTES) / u64::from(self.block_bytes))
+            .map_err(|_| HeapError::invalid("block 下标超出 u32"))?;
+        let record = &self.arenas[arena]
+            .block(index)
+            .ok_or_else(|| HeapError::invalid("对象 block 未提交"))?
+            .record;
+        Ok(BlockRef {
+            id: ManagedBlockId(record.block_id),
+            generation: record.generation,
+        })
+    }
+
+    /// 返回一个 block 的当前 generation；该身份不属于本 heap 时报不变量失败。
+    ///
+    /// `ManagedBlockId` 的 arena 部分就是 arena descriptor，因此必须按 descriptor 定位 arena：
+    /// 只按 arena 内下标扫描会让 arena ≥ 1 的 block 读到 arena 0 同号 block 的世代。
+    pub(crate) fn block_generation(&self, id: ManagedBlockId) -> Result<u32, HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        arena
+            .block(id.index())
+            .map(|block| block.record.generation)
+            .ok_or_else(|| HeapError::invalid("block 身份不属于该 LocalHeap"))
+    }
+
+    /// 推进一个 block 的 mutation version；候选 job 按它判断快照是否仍然有效。
+    pub(crate) fn note_block_mutation(&mut self, id: ManagedBlockId) -> Result<(), RawInvariant> {
+        let arena = self
+            .arenas
+            .iter_mut()
+            .find(|arena| u64::from(arena.descriptor) == u64::from(id.arena()))
+            .ok_or_else(|| RawInvariant::new("block 身份不属于该 LocalHeap"))?;
+        let block = arena
+            .block_mut(id.index())
+            .ok_or_else(|| RawInvariant::new("block 未提交"))?;
+        block.record.mutation_version = block
+            .record
+            .mutation_version
+            .checked_add(1)
+            .ok_or_else(|| RawInvariant::new("block mutation version 溢出"))?;
+        Ok(())
+    }
+
+    /// 返回一个已提交 block 的记录快照；候选平面按它判断 lease、状态与版本。
+    pub(crate) fn block_record(&self, id: ManagedBlockId) -> Result<HeapBlockRecord, HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        arena
+            .block(id.index())
+            .map(|block| block.record)
+            .ok_or_else(|| HeapError::invalid("block 身份不属于该 LocalHeap"))
+    }
+
+    /// 以唯一写入路径更新一个已提交 block 的记录。
+    ///
+    /// 调用方先 `block_record` 读出，再改自己负责的字段写回：descriptor 与 block 下标必须与
+    /// 目标 block 一致，因此写错身份会在这里失败而不是静默改到别的 block。
+    pub(crate) fn update_block_record(
+        &mut self,
+        id: ManagedBlockId,
+        record: HeapBlockRecord,
+    ) -> Result<(), HeapError> {
+        if record.arena_descriptor != id.arena() || record.block_index != id.index() {
+            return Err(HeapError::invalid("块记录的 arena 与下标和目标身份不一致"));
+        }
+        let arena = self
+            .arenas
+            .iter_mut()
+            .find(|arena| u64::from(arena.descriptor) == u64::from(id.arena()))
+            .ok_or_else(|| HeapError::invalid("block 身份不属于该 LocalHeap"))?;
+        let block = arena
+            .block_mut(id.index())
+            .ok_or_else(|| HeapError::invalid("block 未提交"))?;
+        block.record = record;
+        Ok(())
+    }
+
+    /// 统计一个 block 内的 pin 与含 resource 实例的对象数：候选 gate 的直接输入。
+    ///
+    /// 只看 object-start 位图给出的对象起点，不扫描 payload；pin 与 resource 都是分配时写入
+    /// header 的真实状态，因此这里不引入第二份计数。
+    pub(crate) fn block_pin_and_resource_counts(
+        &self,
+        id: ManagedBlockId,
+    ) -> Result<(u32, u32), HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        if !arena.mapped(id.index()) {
+            return Err(HeapError::invalid("请求统计的 block 尚未提交"));
+        }
+        let mut pinned = 0_u32;
+        let mut resources = 0_u32;
+        for (_, offset) in arena.objects_in_block(id.index(), self.granule_bytes) {
+            let control = self.field(arena.base + offset, HEADER_CONTROL)?;
+            if control & CONTROL_PINNED != 0 {
+                pinned = pinned.saturating_add(1);
+            }
+            if control & CONTROL_HAS_RESOURCE_INSTANCE != 0 {
+                resources = resources.saturating_add(1);
+            }
+        }
+        Ok((pinned, resources))
     }
 }
 
@@ -914,7 +1161,7 @@ impl HeapArena {
     }
 
     pub(crate) fn descriptor(&self) -> u64 {
-        self.descriptor
+        u64::from(self.descriptor)
     }
 
     pub(crate) fn base(&self) -> u64 {
@@ -974,14 +1221,27 @@ impl LocalHeap {
     }
 
     /// 收集一个对象的 pointer word 到 scratch。
-    fn collect_words(&mut self, address: u64, trace: &[u8]) -> Result<u32, HeapError> {
+    ///
+    /// 直接借用类型表中的 descriptor：这里不复制 descriptor，也不在每次扫描时重建 metadata。
+    fn collect_words(
+        &mut self,
+        address: u64,
+        type_index: u32,
+        types: &GcRuntimeMetadata,
+    ) -> Result<u32, HeapError> {
         let mut scratch = std::mem::take(&mut self.scratch);
         scratch.clear();
         let words = self.with_payload(address, |payload, payload_base| {
-            let scan = walk_descriptor(trace, payload, payload_base, &mut |word, word_address| {
-                scratch.push((word_address - payload_base, u64::from_le_bytes(*word)));
-                Ok(())
-            })
+            let scan = walk_descriptor(
+                type_index,
+                types,
+                payload,
+                payload_base,
+                &mut |word, word_address| {
+                    scratch.push((word_address - payload_base, u64::from_le_bytes(*word)));
+                    Ok(())
+                },
+            )
             .map_err(|error| HeapError::Invariant(error.message().to_owned()))?;
             Ok(scan.pointers)
         });
@@ -1052,6 +1312,7 @@ impl LocalHeap {
         // 转发地址写在原 header 的第二个 word：原对象不再按普通 descriptor 扫描。
         self.set_field(source_header, HEADER_CONTROL, control)?;
         self.set_field(source_header, HEADER_SIZE_WORD, moved)?;
+        self.note_relocation(object.object_start, moved)?;
         report.evacuated += 1;
         if generation != GENERATION_AGING {
             report.promoted += 1;
@@ -1069,7 +1330,14 @@ impl LocalHeap {
         age: u8,
     ) -> Result<u64, HeapError> {
         let payload = self.payload_copy(object)?;
-        let moved = self.allocate(kind, object.type_index, object.payload_bytes, 8)?;
+        let span = u32::try_from(
+            (OBJECT_HEADER_BYTES + object.payload_bytes).div_ceil(u64::from(self.block_bytes)),
+        )
+        .map_err(|_| HeapError::invalid("copy block 数溢出"))?;
+        let arena = self
+            .allocatable_arena(kind, span)
+            .ok_or(HeapError::NoCapacity)?;
+        let moved = self.allocate(arena, object.type_index, object.payload_bytes, 8)?;
         self.with_payload(moved, |target, _| {
             let source = payload
                 .get(..target.len().min(payload.len()))
@@ -1163,9 +1431,40 @@ impl LocalHeap {
         let forwarded = self.field(source_header, HEADER_CONTROL)? | CONTROL_FORWARDED;
         self.set_field(source_header, HEADER_CONTROL, forwarded)?;
         self.set_field(source_header, HEADER_SIZE_WORD, moved)?;
+        self.note_relocation(object.object_start, moved)?;
         report.evacuated += 1;
         self.evacuated_objects += 1;
         Ok(moved)
+    }
+
+    /// 记录一次对象搬迁；新旧 block 相同则不记（同块内复制不是 relocation）。
+    ///
+    /// 这里必须用**不解析转发**的查询：写转发指针之后 `resolve` 会把旧地址解析成新地址，
+    /// 于是新旧 block 永远相等，搬迁记录会静默丢失。
+    fn note_relocation(&mut self, old_payload: u64, new_payload: u64) -> Result<(), HeapError> {
+        let old_block = self.block_identity_at(old_payload)?;
+        let new_block = self.block_identity_at(new_payload)?;
+        if old_block != new_block {
+            self.relocations.push((old_block, new_block));
+        }
+        Ok(())
+    }
+
+    /// 返回一个 payload 地址所在 block 的稳定身份，不跟随转发指针。
+    fn block_identity_at(&self, address: u64) -> Result<ManagedBlockId, HeapError> {
+        let (arena_index, offset) = self.locate(address)?;
+        let header = offset.saturating_sub(OBJECT_HEADER_BYTES);
+        let index = u32::try_from(header / u64::from(self.block_bytes))
+            .map_err(|_| HeapError::invalid("block 下标超出 u32"))?;
+        let block = self.arenas[arena_index]
+            .block(index)
+            .ok_or_else(|| HeapError::invalid("地址所在 block 未提交"))?;
+        Ok(ManagedBlockId(block.record.block_id))
+    }
+
+    /// 取走本 cycle 的搬迁记录；世界在 cycle 边界用它重建 block 对计数。
+    pub(crate) fn take_relocations(&mut self) -> Vec<(ManagedBlockId, ManagedBlockId)> {
+        std::mem::take(&mut self.relocations)
     }
 
     /// 取消 pin：计数归零时清除 header 的 PINNED 位。
@@ -1206,8 +1505,7 @@ impl LocalHeap {
             let objects = self.all_objects(arena_index);
             for address in objects {
                 let object = self.object_at(address)?;
-                let trace = self.trace_for(object.type_index, types)?;
-                self.collect_words(address, &trace)?;
+                self.collect_words(address, object.type_index, types)?;
                 self.rewrite_words(address, false, report)?;
             }
         }
@@ -1291,8 +1589,7 @@ impl LocalHeap {
         types: &GcRuntimeMetadata,
     ) -> Result<Vec<(u64, u64)>, HeapError> {
         let object = self.object_at(address)?;
-        let trace = self.trace_for(object.type_index, types)?;
-        self.collect_words(address, &trace)?;
+        self.collect_words(address, object.type_index, types)?;
         Ok(std::mem::take(&mut self.scratch))
     }
 
@@ -1308,7 +1605,7 @@ impl LocalHeap {
         let descriptor = self.arenas[arena_index].descriptor;
         let offset = u32::try_from(header_offset)
             .map_err(|_| HeapError::invalid("对象 header 偏移超出 u32"))?;
-        Ok((descriptor, offset, block))
+        Ok((u64::from(descriptor), offset, block))
     }
 
     /// 按 ticket 身份在本 heap 内反查目标对象。
@@ -1321,11 +1618,7 @@ impl LocalHeap {
         header_offset: u64,
     ) -> Result<HeapObject, HeapError> {
         let block_bytes = u64::from(self.block_bytes);
-        let arena = self
-            .arenas
-            .iter()
-            .find(|arena| arena.descriptor == arena_descriptor)
-            .ok_or_else(|| HeapError::invalid("mark ticket 的目标 arena 不属于该 LocalHeap"))?;
+        let arena = self.arena_by_descriptor(arena_descriptor)?;
         let capacity = block_bytes * arena.blocks.len() as u64;
         if header_offset >= capacity {
             return Err(HeapError::invalid("mark ticket 的对象偏移越过 arena 容量"));
@@ -1376,8 +1669,7 @@ impl LocalHeap {
                     continue;
                 }
                 let object = self.object_at(address)?;
-                let trace = self.trace_for(object.type_index, types)?;
-                report.scanned_words += self.collect_words(address, &trace)?;
+                report.scanned_words += self.collect_words(address, object.type_index, types)?;
                 self.rewrite_words(address, evacuate_nursery, report)?;
             }
         }
@@ -1405,6 +1697,67 @@ impl LocalHeap {
             }
         }
         objects
+    }
+
+    /// 返回本 heap 内某个 arena descriptor 对应的 arena。
+    fn arena_by_descriptor(&self, arena_descriptor: u64) -> Result<&HeapArena, HeapError> {
+        self.arenas
+            .iter()
+            .find(|arena| u64::from(arena.descriptor) == arena_descriptor)
+            .ok_or_else(|| HeapError::invalid("arena descriptor 不属于该 LocalHeap"))
+    }
+
+    /// 返回一个 arena 已提交的 block 下标快照。
+    ///
+    /// 枚举按 `(descriptor, block)` 推进：两者在 cycle 内稳定，因此候选阶段不需要复制对象清单，
+    /// 也能在任意 block 之间暂停。
+    pub(crate) fn committed_blocks_of(&self, arena_descriptor: u64) -> Result<Vec<u32>, HeapError> {
+        Ok(self
+            .arena_by_descriptor(arena_descriptor)?
+            .committed_blocks())
+    }
+
+    /// 返回一个 block 内的全部对象：`(payload 地址, block 内 header 偏移)`。
+    ///
+    /// 对象起点来自分配时维护的 object-start 位图，因此这里不扫描 payload，也不依赖对象大小；
+    /// header 偏移与 `ticket_identity` 使用同一基准，便于候选阶段核对同一对象。
+    pub(crate) fn block_objects(
+        &self,
+        arena_descriptor: u64,
+        block: u32,
+    ) -> Result<Vec<(u64, u64)>, HeapError> {
+        let arena = self.arena_by_descriptor(arena_descriptor)?;
+        if !arena.mapped(block) {
+            return Err(HeapError::invalid("请求枚举的 block 尚未提交"));
+        }
+        let block_base = u64::from(block)
+            * u64::try_from(arena.lines_per_block()).expect("每 block 的 line 数适配 u64")
+            * 128;
+        Ok(arena
+            .objects_in_block(block, self.granule_bytes)
+            .into_iter()
+            .map(|(_, offset)| {
+                (
+                    arena.base + offset + OBJECT_HEADER_BYTES,
+                    offset - block_base,
+                )
+            })
+            .collect())
+    }
+
+    /// 查询一个对象是否在当前 mark epoch 被标记。
+    ///
+    /// mark 位图按 block 维护，`is_marked` 已经处理了 epoch 陈旧位，因此候选阶段可以据此区分
+    /// “本周期已经标记”与“上一周期的陈旧标记”。
+    pub(crate) fn marked_in_current_epoch(&self, address: u64) -> Result<bool, HeapError> {
+        let payload = self.resolve(address)?;
+        let (arena_index, offset) = self.locate(payload)?;
+        let arena = &self.arenas[arena_index];
+        let header = offset - OBJECT_HEADER_BYTES;
+        let block = u32::try_from(header / u64::from(self.block_bytes))
+            .map_err(|_| HeapError::invalid("block 下标超出 u32"))?;
+        let granule = arena.granule(header, self.granule_bytes);
+        Ok(arena.is_marked(granule, block))
     }
 
     /// 返回当前处于 aging 的对象地址。
@@ -1493,35 +1846,246 @@ impl LocalHeap {
                 if self.arenas[arena_index].is_marked(granule, block) {
                     continue;
                 }
-                let total = OBJECT_HEADER_BYTES + object.payload_bytes;
-                let arena = &mut self.arenas[arena_index];
-                let block_bytes = u64::from(self.block_bytes);
-                let first_block = header_offset / block_bytes;
-                let last_block = (header_offset + total - 1) / block_bytes;
-                for covered in first_block..=last_block {
-                    let base = covered * block_bytes;
-                    let start = header_offset.max(base);
-                    let end = (header_offset + total).min(base + block_bytes);
-                    arena.free_range(
-                        u32::try_from(covered).expect("block 下标适配 u32"),
-                        start - base,
-                        end - start,
-                    );
-                }
-                arena.clear_object_start(granule);
-                arena.objects = arena.objects.saturating_sub(1);
-                arena.live_bytes = arena.live_bytes.saturating_sub(total);
-                if object.pinned {
-                    arena.pinned = arena.pinned.saturating_sub(1);
-                    self.pins.retain(|entry| entry.address != address);
-                }
-                report.reclaimed_lines += u32::try_from(total.div_ceil(128)).expect("line 数");
-                if arena.block_live[block as usize] == 0 {
-                    report.reclaimed_blocks += 1;
-                }
+                self.reclaim_object(address, object, arena_index, block, report)?;
             }
         }
         Ok(())
+    }
+
+    /// 清扫一个 block 内未标记的对象；候选平面提交后的唯一 sweep 消费者入口。
+    ///
+    /// 返回被回收的对象数。调用方必须保证该 block 已经处于 `reclaiming`：本函数不检查状态，
+    /// 状态门禁由候选平面的 `CommitGroup` 决议给出。
+    pub(crate) fn sweep_block(
+        &mut self,
+        id: ManagedBlockId,
+        report: &mut CycleReport,
+    ) -> Result<u32, HeapError> {
+        let arena_index = self.arena_index_by_descriptor(u64::from(id.arena()))?;
+        let objects = self.block_objects(u64::from(id.arena()), id.index())?;
+        let mut reclaimed = 0_u32;
+        for (payload, _) in objects {
+            let object = self.object_at(payload)?;
+            let (_, offset) = self.locate(payload)?;
+            let header_offset = offset - OBJECT_HEADER_BYTES;
+            let granule = self.arenas[arena_index].granule(header_offset, self.granule_bytes);
+            if self.arenas[arena_index].is_marked(granule, id.index()) {
+                continue;
+            }
+            self.reclaim_object(payload, object, arena_index, id.index(), report)?;
+            reclaimed = reclaimed.saturating_add(1);
+        }
+        Ok(reclaimed)
+    }
+
+    /// 回收一个未标记对象：清 line、清 object-start 位并更新 arena 计数。
+    fn reclaim_object(
+        &mut self,
+        address: u64,
+        object: HeapObject,
+        arena_index: usize,
+        block: u32,
+        report: &mut CycleReport,
+    ) -> Result<(), HeapError> {
+        let (_, offset) = self.locate(address)?;
+        let header_offset = offset - OBJECT_HEADER_BYTES;
+        let granule = self.arenas[arena_index].granule(header_offset, self.granule_bytes);
+        let total = OBJECT_HEADER_BYTES + object.payload_bytes;
+        let arena = &mut self.arenas[arena_index];
+        let block_bytes = u64::from(self.block_bytes);
+        let first_block = header_offset / block_bytes;
+        let last_block = (header_offset + total - 1) / block_bytes;
+        for covered in first_block..=last_block {
+            let base = covered * block_bytes;
+            let start = header_offset.max(base);
+            let end = (header_offset + total).min(base + block_bytes);
+            arena.free_range(
+                u32::try_from(covered).expect("block 下标适配 u32"),
+                start - base,
+                end - start,
+            );
+        }
+        arena.clear_object_start(granule);
+        arena.objects = arena.objects.saturating_sub(1);
+        arena.live_bytes = arena.live_bytes.saturating_sub(total);
+        if object.pinned {
+            arena.pinned = arena.pinned.saturating_sub(1);
+            self.pins.retain(|entry| entry.address != address);
+        }
+        report.reclaimed_lines += u32::try_from(total.div_ceil(128)).expect("line 数");
+        if arena.block_live[block as usize] == 0 {
+            report.reclaimed_blocks += 1;
+        }
+        Ok(())
+    }
+
+    /// 把一个 block 交回 owner free structure：清空它的对象、line 与 mark 位并推进世代。
+    ///
+    /// 这是 release 的唯一实现路径：对象、线状态、object-start 位、mark 位、块内计数与块记录
+    /// 一起收敛，因此不存在只清了一半的 block。记录回到 `active`（已提交且可分配），与
+    /// `commit_block` 建立块时的取值一致：分配器按 `free_line` 复用块，`free` 只描述「已映射但
+    /// 尚未提交」的块。
+    pub(crate) fn release_block(&mut self, id: ManagedBlockId) -> Result<(), HeapError> {
+        let arena_index = self.arena_index_by_descriptor(u64::from(id.arena()))?;
+        let block_index = id.index();
+        let granule_bytes = self.granule_bytes;
+        let lines = self.arenas[arena_index].lines_per_block();
+        let block_lines = usize::try_from(block_index)
+            .ok()
+            .and_then(|index| index.checked_mul(lines))
+            .ok_or_else(|| HeapError::invalid("block 的 line 区间溢出"))?;
+        let arena = &mut self.arenas[arena_index];
+        if !arena.mapped(block_index) {
+            return Err(HeapError::invalid("释放的 block 尚未提交"));
+        }
+        let granule_bytes = usize::try_from(granule_bytes).expect("granule 字节数");
+        let per_block = (lines * 128) / granule_bytes;
+        // `block_lines` 是 line 下标而不是字节偏移：block 的起始 granule 必须由「line 起点 ×
+        // 每 line 字节数」换算，直接用 line 下标除以 granule 字节数会清到别的 block 的
+        // object-start 位，把同一 arena 里更早的存活对象抹成不可解析。
+        let block_granules = block_lines * 128 / granule_bytes;
+        let words = per_block.div_ceil(64);
+        let mark_start = block_index as usize * per_block / 64;
+        arena.line_live[block_lines..block_lines + lines].fill(LINE_FREE);
+        arena.block_live[block_index as usize] = 0;
+        for granule in block_granules..block_granules + per_block {
+            arena.clear_object_start(granule);
+        }
+        if mark_start + words <= arena.mark.len() {
+            arena.mark[mark_start..mark_start + words].fill(0);
+        }
+        let epoch = arena.mark_epoch;
+        let block = arena
+            .block_mut(block_index)
+            .ok_or_else(|| HeapError::invalid("释放的 block 未提交"))?;
+        block.free_line = 0;
+        block.mark_epoch = epoch;
+        block.bytes.fill(0);
+        let mut record = block.record;
+        record.state = 0;
+        record.generation = record
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| HeapError::invalid("block 世代溢出"))?;
+        record.incoming_leases = 0;
+        record.allocator_leases = 0;
+        record.scanner_leases = 0;
+        record.evacuation_leases = 0;
+        record.candidate_job = EDGE_NO_JOB;
+        record.mutation_version = record
+            .mutation_version
+            .checked_add(1)
+            .ok_or_else(|| HeapError::invalid("block mutation version 溢出"))?;
+        block.record = record;
+        Ok(())
+    }
+
+    /// 返回一个 block 当前占用的 line 数；`0` 表示块内没有任何对象。
+    pub(crate) fn block_live_lines(&self, id: ManagedBlockId) -> Result<u32, HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        arena
+            .block_live
+            .get(id.index() as usize)
+            .copied()
+            .ok_or_else(|| HeapError::invalid("block 下标越过 arena 容量"))
+    }
+
+    /// 返回一个 block 所属 arena 的类别；候选平面据此排除 nursery block。
+    pub(crate) fn block_arena_kind(&self, id: ManagedBlockId) -> Result<HeapArenaKind, HeapError> {
+        self.arena_by_descriptor(u64::from(id.arena()))
+            .map(|arena| arena.kind)
+    }
+
+    /// 按 descriptor 解析 arena 下标。
+    fn arena_index_by_descriptor(&self, arena_descriptor: u64) -> Result<usize, HeapError> {
+        self.arenas
+            .iter()
+            .position(|arena| u64::from(arena.descriptor) == arena_descriptor)
+            .ok_or_else(|| HeapError::invalid("arena descriptor 不属于该 LocalHeap"))
+    }
+
+    /// 从块记录上取走至多 `count` 个 incoming lease；返回实际取走的数量。
+    pub(crate) fn take_incoming_leases(
+        &mut self,
+        id: ManagedBlockId,
+        count: u64,
+    ) -> Result<u64, HeapError> {
+        let mut record = self.block_record(id)?;
+        let taken = record.incoming_leases.min(count);
+        record.incoming_leases -= taken;
+        self.update_block_record(id, record)?;
+        Ok(taken)
+    }
+
+    /// 给块记录加上 `count` 个 incoming lease。
+    pub(crate) fn add_incoming_leases(
+        &mut self,
+        id: ManagedBlockId,
+        count: u64,
+    ) -> Result<(), HeapError> {
+        let mut record = self.block_record(id)?;
+        record.incoming_leases = record
+            .incoming_leases
+            .checked_add(count)
+            .ok_or_else(|| HeapError::invalid("incoming lease 计数溢出"))?;
+        self.update_block_record(id, record)
+    }
+
+    /// 把一个 block 标为候选组的成员：状态推进到 `candidate` 并写入 `candidate_job`。
+    ///
+    /// 候选绑定**不**占用 scanner lease：`validate` 相位要求 scanner/allocator/evacuation
+    /// lease 归零才能提交，若绑定自己就占一个 scanner lease，这个 gate 永远不可能通过。候选状态
+    /// 本身已经阻止 allocator 继续往该 block 分配，因此绑定用状态表达而不是借 lease 表达。
+    pub(crate) fn mark_block_candidate(
+        &mut self,
+        id: ManagedBlockId,
+        job: u32,
+    ) -> Result<HeapBlockRecord, HeapError> {
+        let mut record = self.block_record(id)?;
+        if record.state != 0 && record.state != 1 {
+            return Err(HeapError::invalid(
+                "只有 active/candidate 的 block 能成为候选成员",
+            ));
+        }
+        record.candidate_job = job;
+        record.state = 1;
+        self.update_block_record(id, record)?;
+        Ok(record)
+    }
+
+    /// 解除一个 block 的候选绑定；未提交的成员退回 `active`。
+    pub(crate) fn unmark_block_candidate(
+        &mut self,
+        id: ManagedBlockId,
+    ) -> Result<HeapBlockRecord, HeapError> {
+        let mut record = self.block_record(id)?;
+        record.candidate_job = EDGE_NO_JOB;
+        if record.state == 1 {
+            record.state = 0;
+        }
+        self.update_block_record(id, record)?;
+        Ok(record)
+    }
+
+    /// 统计一个 block 内处于当前 mark epoch 的对象数；候选验证的标记 gate 输入。
+    pub(crate) fn block_marked_objects(&self, id: ManagedBlockId) -> Result<u32, HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        if !arena.mapped(id.index()) {
+            return Err(HeapError::invalid("统计标记的 block 尚未提交"));
+        }
+        let block_bytes = u64::from(self.block_bytes);
+        let block_base = u64::from(id.index()) * block_bytes;
+        let mut marked = 0_u32;
+        for (_, offset) in arena.objects_in_block(id.index(), self.granule_bytes) {
+            let header_offset = offset.max(block_base);
+            let granule = arena.granule(header_offset, self.granule_bytes);
+            let block = u32::try_from(header_offset / block_bytes)
+                .map_err(|_| HeapError::invalid("block 下标超出 u32"))?;
+            if arena.is_marked(granule, block) {
+                marked = marked.saturating_add(1);
+            }
+        }
+        Ok(marked)
     }
 }
 

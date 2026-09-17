@@ -1,0 +1,17 @@
+//! EdgeNode 夹具：真实源码派生的受管引用字段，用于跨 owner 边与 Old placement 回归。
+
+struct EdgeNodeTail { value: uint }
+struct EdgeNode { value: uint, next: &EdgeNodeTail }
+
+fn link(node: EdgeNode, next: &EdgeNodeTail) EdgeNode {
+    let output = node
+    output.next = next
+    output
+}
+
+fn main() {
+    let tail = EdgeNodeTail { value: 3 }
+    let head = EdgeNode { value: 1, next: &tail }
+    let linked = link(head, &tail)
+    _ = linked
+}

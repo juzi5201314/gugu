@@ -14,7 +14,7 @@ use std::mem::{align_of, offset_of, size_of};
 use super::gc_metadata_contract::GC_ARENA_BYTES;
 use super::model::{FieldKind, MessageFieldSchema, MessageSchemaV1, RawModelError};
 /// barrier 契约段的 schema 版本。
-pub(crate) const BARRIER_SCHEMA: u32 = 1;
+pub(crate) const BARRIER_SCHEMA: u32 = 2;
 
 /// card table 的粒度：每 512 heap 字节一个 dirty byte。
 pub(crate) const CARD_GRANULARITY_BYTES: u32 = 512;
@@ -24,6 +24,10 @@ pub(crate) const CARD_GRANULARITY_SHIFT: u32 = 9;
 pub(crate) const CARD_MARK_BUFFER_ENTRIES: u32 = 256;
 /// dedup 直接映射 stamp 表的项数；与 buffer 项数同值。
 pub(crate) const CARD_MARK_STAMP_ENTRIES: u32 = 256;
+/// 每个 `LogicalProcessor` 的 edge scratch 项数。
+pub(crate) const EDGE_BUFFER_ENTRIES: u32 = 512;
+/// 一条 hybrid barrier 写入最多产生的边变更数：撤销旧目标加新增新目标。
+pub(crate) const EDGE_DELTAS_PER_WRITE: u32 = 2;
 /// 一项 `CardMarkEntry` 的规范字节数。
 pub(crate) const CARD_MARK_ENTRY_BYTES: u32 = 32;
 /// 一项 `CardMarkStamp` 的规范字节数。
@@ -262,6 +266,10 @@ pub struct BarrierRuntimeContract {
     pub shade_slots_per_write: u32,
     /// 每条写入的 card-mark slot 上界。
     pub card_marks_per_write: u32,
+    /// 每条写入的 edge delta 上界：撤销旧目标加新增新目标。
+    pub edge_deltas_per_write: u32,
+    /// 每个 processor 的 edge scratch 项数；`BarrierReserve` 按 shade 额度同源预留。
+    pub edge_buffer_entries: u32,
     /// stamp 混合函数 revision。
     pub stamp_mix_revision: u32,
     /// 六步 hybrid barrier 的规范顺序。
@@ -343,6 +351,8 @@ impl BarrierRuntimeContract {
             card_mark_stamp_bytes: CARD_MARK_STAMP_BYTES,
             shade_slots_per_write: SHADE_SLOTS_PER_WRITE,
             card_marks_per_write: CARD_MARKS_PER_WRITE,
+            edge_deltas_per_write: EDGE_DELTAS_PER_WRITE,
+            edge_buffer_entries: EDGE_BUFFER_ENTRIES,
             stamp_mix_revision: CARD_MARK_STAMP_MIX_REVISION,
             hybrid_steps: HYBRID_BARRIER_STEPS
                 .iter()
@@ -398,11 +408,23 @@ impl BarrierRuntimeContract {
             || self.card_mark_stamp_bytes != CARD_MARK_STAMP_BYTES
             || self.shade_slots_per_write != SHADE_SLOTS_PER_WRITE
             || self.card_marks_per_write != CARD_MARKS_PER_WRITE
+            || self.edge_deltas_per_write != EDGE_DELTAS_PER_WRITE
+            || self.edge_buffer_entries != EDGE_BUFFER_ENTRIES
             || self.stamp_mix_revision != CARD_MARK_STAMP_MIX_REVISION
         {
             return Err(RawModelError::new(
                 "barrier 粒度、buffer/stamp 容量或 slot 上界与登记值不一致",
             ));
+        }
+        // edge scratch 的预留与 shade 额度同源：region 内每条屏障写最多贡献两个 shade slot，
+        // 也就是最多两条边变更，因此 permit 的 shade 额度同时是边 scratch 的容量证明。
+        if self.edge_deltas_per_write != self.shade_slots_per_write {
+            return Err(RawModelError::new(
+                "edge delta 上界必须与 shade slot 上界同源（每次写两项）",
+            ));
+        }
+        if self.edge_buffer_entries < self.edge_deltas_per_write {
+            return Err(RawModelError::new("edge scratch 容量小于单次写入的边上界"));
         }
         if self.card_granularity_bytes != 1 << self.card_granularity_shift {
             return Err(RawModelError::new("card 粒度与右移量不一致"));
@@ -500,6 +522,8 @@ impl BarrierRuntimeContract {
         bytes.extend_from_slice(&self.card_mark_stamp_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.shade_slots_per_write.to_le_bytes());
         bytes.extend_from_slice(&self.card_marks_per_write.to_le_bytes());
+        bytes.extend_from_slice(&self.edge_deltas_per_write.to_le_bytes());
+        bytes.extend_from_slice(&self.edge_buffer_entries.to_le_bytes());
         bytes.extend_from_slice(&self.stamp_mix_revision.to_le_bytes());
         push_names(&mut bytes, &self.hybrid_steps);
         push_names(&mut bytes, &self.flush_reasons);
@@ -536,13 +560,15 @@ impl BarrierRuntimeContract {
         let mut output = String::new();
         writeln!(
             output,
-            "barrier schema={} card={} buffer={} stamps={} shades-per-write={} cards-per-write={} mix={}",
+            "barrier schema={} card={} buffer={} stamps={} shades-per-write={} cards-per-write={} edges-per-write={} edge-buffer={} mix={}",
             self.schema,
             self.card_granularity_bytes,
             self.card_mark_buffer_entries,
             self.card_mark_stamp_entries,
             self.shade_slots_per_write,
             self.card_marks_per_write,
+            self.edge_deltas_per_write,
+            self.edge_buffer_entries,
             self.stamp_mix_revision,
         )
         .expect("String写入");
@@ -654,6 +680,8 @@ pub(crate) enum MessageFamilyTag {
     RegionTransfer,
     /// GC 工作消息：跨 owner 的 mark ticket。
     MarkTicket,
+    /// GC 工作消息：跨 block 的边增删差量。
+    EdgeDelta,
 }
 
 impl MessageFamilyTag {
@@ -664,6 +692,18 @@ impl MessageFamilyTag {
             Self::CardMark => 1,
             Self::RegionTransfer => 2,
             Self::MarkTicket => 3,
+            Self::EdgeDelta => 4,
+        }
+    }
+
+    /// 返回族名；错误信息与 dump 按它点名来源。
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::Return => "return",
+            Self::CardMark => "card-mark",
+            Self::RegionTransfer => "region-transfer",
+            Self::MarkTicket => "mark-ticket",
+            Self::EdgeDelta => "edge-delta",
         }
     }
 }

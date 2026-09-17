@@ -19,13 +19,17 @@ use super::barrier_schema::MessageFamilyTag;
 use super::model::{FieldKind, MessageFieldSchema, MessageSchemaV1, RawModelError};
 use super::pacing_schema::CREDIT_SOURCE_NAMES;
 
-/// mark 契约段的 schema 版本。
-pub(crate) const MARK_SCHEMA: u32 = 1;
+/// mark 契约段 schema。
+///
+/// 版本 3 相对版本 2 的变化：`MarkTicket` 的 `source_block` 从「arena 内下标」改为全局块身份
+/// （`descriptor * 64 + block`）。只带下标的旧编码会让接收端无法判断来源属于哪个 arena，因此
+/// 消费端必须按全局身份解析并校验来源块仍然存在。
+pub(crate) const MARK_SCHEMA: u32 = 3;
 
 /// 内建 mark profile 名。
 pub(crate) const MARK_PROFILE_NAME: &str = "mosaic-mark";
 /// mark profile 的 revision；任何参数或绑定变化都必须递增。
-pub(crate) const MARK_PROFILE_REVISION: u32 = 1;
+pub(crate) const MARK_PROFILE_REVISION: u32 = 2;
 
 /// owner credit 的 cost unit 名。
 pub(crate) const MARK_CREDIT_UNIT: &str = "mark-credit";
@@ -33,12 +37,16 @@ pub(crate) const MARK_CREDIT_UNIT: &str = "mark-credit";
 pub(crate) const MARK_MAILBOX_CONSUMERS: u32 = 1;
 /// MarkMailbox 的 shard 数量；与 owner inbox 保持一致。
 pub(crate) const MARK_MAILBOX_SHARDS: u32 = super::OWNER_INBOX_SHARDS;
-/// credit id 中 owner 字段的位宽。
-pub(crate) const MARK_CREDIT_OWNER_BITS: u32 = 8;
-/// credit id 中 counter 字段的位宽。
-pub(crate) const MARK_CREDIT_COUNTER_BITS: u32 = 24;
+/// credit id 中 slot 字段的位宽；slot 编号在池内稠密且可复用。
+pub(crate) const MARK_CREDIT_SLOT_BITS: u32 = 32;
+/// credit id 中 generation 字段的位宽；每次复用推进，使重放旧 id 必然失败。
+pub(crate) const MARK_CREDIT_GENERATION_BITS: u32 = 32;
+/// credit slot 的初始 generation；0 表示无效 id。
+pub(crate) const MARK_CREDIT_INITIAL_GENERATION: u32 = 1;
 /// `MarkTicket` 的规范字段数。
-pub(crate) const MARK_TICKET_FIELDS: u32 = 14;
+pub(crate) const MARK_TICKET_FIELDS: u32 = 15;
+/// `EdgeDelta` 的规范字段数。
+pub(crate) const EDGE_DELTA_FIELDS: u32 = 18;
 
 /// mark cycle 的状态名；顺序即状态机推进顺序。
 pub(crate) const MARK_CYCLE_STATES: [&str; 6] = [
@@ -88,6 +96,76 @@ pub(crate) fn mark_ticket_fields() -> Vec<MessageFieldSchema> {
         MessageFieldSchema::new("target.owner_id", FieldKind::OwnerId),
         MessageFieldSchema::new("target.route_key", FieldKind::RouteKey),
         MessageFieldSchema::new("target_arena", FieldKind::DescriptorIndex),
+        MessageFieldSchema::new("target_block_generation", FieldKind::Generation),
+        MessageFieldSchema::new("topology_epoch", FieldKind::Epoch),
+    ];
+    fields.sort_by(|left, right| left.name.cmp(&right.name));
+    fields
+}
+
+/// 一个 GC credit 的稳定身份：`generation(32) | slot(32)`。
+///
+/// slot 在池内稠密且可复用；每次复用推进 generation，因此重放一个已经归还的旧 id 必然
+/// 因为 generation 不匹配而被拒绝。generation 0 表示无效身份（初始值从
+/// `MARK_CREDIT_INITIAL_GENERATION` 开始）。
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct GcCreditId(u64);
+
+impl GcCreditId {
+    /// 由 slot 与 generation 组装身份。
+    pub(crate) fn new(slot: u32, generation: u32) -> Self {
+        Self((u64::from(generation) << MARK_CREDIT_SLOT_BITS) | u64::from(slot))
+    }
+
+    /// 由原始 64-bit 编码还原。
+    pub(crate) const fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+
+    /// 返回原始 64-bit 编码。
+    pub(crate) const fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// 返回 slot 编号；只保留低 32 位，这是编码本身定义的截断。
+    pub(crate) const fn slot(self) -> u32 {
+        (self.0 & 0xFFFF_FFFF) as u32
+    }
+
+    /// 返回 generation；只保留高 32 位，这是编码本身定义的截断。
+    pub(crate) const fn generation(self) -> u32 {
+        (self.0 >> MARK_CREDIT_SLOT_BITS) as u32
+    }
+
+    /// 判断身份是否有效：generation 0 不是任何 slot 的合法身份。
+    pub(crate) const fn is_valid(self) -> bool {
+        self.generation() != 0
+    }
+}
+
+/// 登记 `EdgeDelta` 的字段集合：只允许稳定 block 身份、block 对内序号、signed 差量、
+/// cycle/topology epoch、credit 与 bytes，任何地址字段都在 verifier 中被拒绝。
+pub(crate) fn edge_delta_fields() -> Vec<MessageFieldSchema> {
+    let mut fields = vec![
+        MessageFieldSchema::new("bytes", FieldKind::Bytes),
+        MessageFieldSchema::new("credit", FieldKind::Credit),
+        MessageFieldSchema::new("cycle_epoch", FieldKind::Epoch),
+        MessageFieldSchema::new("delta", FieldKind::Delta),
+        MessageFieldSchema::new("destination", FieldKind::TargetBlock),
+        MessageFieldSchema::new("destination_generation", FieldKind::Generation),
+        // destination 所在 managed arena 的 descriptor：与 block 身份同源，但每条消息都
+        // 显式携带它，使族 schema 的通用描述符要求得到满足，也便于诊断路由。
+        MessageFieldSchema::new("descriptor", FieldKind::DescriptorIndex),
+        MessageFieldSchema::new("family", FieldKind::KindTag),
+        MessageFieldSchema::new("integrity", FieldKind::Integrity),
+        MessageFieldSchema::new("sequence", FieldKind::Sequence),
+        MessageFieldSchema::new("source", FieldKind::SourceBlock),
+        MessageFieldSchema::new("source_generation", FieldKind::Generation),
+        MessageFieldSchema::new("state", FieldKind::MessageState),
+        MessageFieldSchema::new("target.domain", FieldKind::OwnerDomain),
+        MessageFieldSchema::new("target.generation", FieldKind::Generation),
+        MessageFieldSchema::new("target.owner_id", FieldKind::OwnerId),
+        MessageFieldSchema::new("target.route_key", FieldKind::RouteKey),
         MessageFieldSchema::new("topology_epoch", FieldKind::Epoch),
     ];
     fields.sort_by(|left, right| left.name.cmp(&right.name));
@@ -146,15 +224,18 @@ pub struct MarkMailboxHead {
     pub consumed: u64,
     /// 已转发的 ticket 数。
     pub forwarded: u64,
-    /// 最近一次消费的 credit 稠密编号。
-    pub last_credit: u32,
+    /// 最近一次消费的 credit 身份；`generation(32) | slot(32)`。
+    pub last_credit: u64,
     /// consumer slot 数量；固定为 1。
     pub consumer_slots: u32,
     /// 对齐填充，使头部独占一条 cache line。
-    pub padding: [u8; 16],
+    pub padding: [u8; 12],
 }
 
 /// owner credit 头部布局；每 owner 一个。
+///
+/// 共享池的容量是「同时在飞」的授权上界，owner 头部只保留分类计数：slot 的占用者身份、
+/// generation 与 cycle/topology 都由池本身保存，避免同一份状态在两处各写一遍。
 #[repr(C, align(64))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct MarkCreditHead {
@@ -162,7 +243,7 @@ pub struct MarkCreditHead {
     pub owner_descriptor: u64,
     /// 头部所属的 cycle epoch。
     pub cycle_epoch: u64,
-    /// 本 cycle 授权的 credit 上界。
+    /// 本 cycle 授权的在飞 credit 上界。
     pub granted: u64,
     /// 已 acquire 的 credit 累计数。
     pub issued: u64,
@@ -174,6 +255,72 @@ pub struct MarkCreditHead {
     pub returned: u64,
     /// 对齐填充。
     pub padding: [u8; 8],
+}
+
+/// 一条 `EdgeDelta` 消息的头部布局；与 node 车道一一对应。
+#[repr(C, align(32))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct EdgeDeltaHead {
+    /// source block 的全局稠密编号。
+    pub source_block: u32,
+    /// target block 的全局稠密编号。
+    pub target_block: u32,
+    /// source block 的 generation。
+    pub source_generation: u32,
+    /// target block 的 generation。
+    pub target_generation: u32,
+    /// 聚合到该记录的 cycle epoch。
+    pub cycle_epoch: u64,
+    /// 该 block 对内的发布序号。
+    pub sequence: u64,
+    /// signed 净差量。
+    pub delta: i64,
+    /// 该记录占用的 credit 身份。
+    pub credit: u64,
+    /// 发布时的 topology epoch。
+    pub topology_epoch: u32,
+    /// 消息状态判别值。
+    pub state: u32,
+    /// 目标 owner 的稳定编号。
+    pub target_owner: u64,
+    /// 目标 owner 的 generation。
+    pub target_owner_generation: u64,
+    /// 目标 owner 的路由键。
+    pub route_key: u64,
+    /// 本记录自身占用的字节数。
+    pub bytes: u32,
+    /// integrity checksum。
+    pub integrity: u32,
+    /// 目标 owner 的 domain 判别值。
+    pub domain: u32,
+    /// 保留位，必须为 0。
+    pub reserved: u32,
+}
+
+/// 一个 candidate job 的可恢复游标头；批间允许 mutator，因此用版本位图代替事件日志。
+#[repr(C, align(64))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CandidateCursorHead {
+    /// job 的稠密编号。
+    pub job: u32,
+    /// 当前相位判别值。
+    pub phase: u32,
+    /// 该 job 的快照 cycle epoch。
+    pub cycle_epoch: u64,
+    /// 快照时的 topology epoch。
+    pub topology_epoch: u32,
+    /// 是否已被 mutator 标脏。
+    pub dirty: u32,
+    /// 已经消费的工作量单位。
+    pub work_units: u64,
+    /// 子图中的 block 数。
+    pub block_count: u64,
+    /// 子图中的边数。
+    pub edge_count: u64,
+    /// 相位内的推进游标。
+    pub cursor: u64,
+    /// 保留位，必须为 0。
+    pub reserved: u64,
 }
 
 /// cycle 终止记录布局；每 cycle 一条，登记七个收敛条件的观测值。
@@ -235,11 +382,11 @@ pub struct MarkRuntimeContract {
     pub mailbox_consumers: u32,
     /// mailbox 的 shard 数量；必须与 owner inbox 一致。
     pub mailbox_shards: u32,
-    /// credit id 的 owner 字段位宽。
-    pub credit_owner_bits: u32,
-    /// credit id 的 counter 字段位宽。
-    pub credit_counter_bits: u32,
-    /// 本 cycle 授权的 credit 池上界。
+    /// credit id 的 slot 字段位宽。
+    pub credit_slot_bits: u32,
+    /// credit id 的 generation 字段位宽。
+    pub credit_generation_bits: u32,
+    /// 共享 credit 池同时在飞的授权上界。
     pub credit_pool: u64,
     /// cycle 状态目录。
     pub cycle_states: Vec<String>,
@@ -271,8 +418,8 @@ impl MarkRuntimeContract {
             credit_unit: MARK_CREDIT_UNIT.to_owned(),
             mailbox_consumers: MARK_MAILBOX_CONSUMERS,
             mailbox_shards: MARK_MAILBOX_SHARDS,
-            credit_owner_bits: MARK_CREDIT_OWNER_BITS,
-            credit_counter_bits: MARK_CREDIT_COUNTER_BITS,
+            credit_slot_bits: MARK_CREDIT_SLOT_BITS,
+            credit_generation_bits: MARK_CREDIT_GENERATION_BITS,
             credit_pool,
             cycle_states: names(&MARK_CYCLE_STATES),
             credit_transitions: names(&MARK_CREDIT_TRANSITIONS),
@@ -322,14 +469,14 @@ impl MarkRuntimeContract {
         self.mailbox_shards
     }
 
-    /// 返回 credit id 的 owner 位宽。
-    pub(crate) const fn credit_owner_bits(&self) -> u32 {
-        self.credit_owner_bits
+    /// 返回 credit id 的 slot 位宽。
+    pub(crate) const fn credit_slot_bits(&self) -> u32 {
+        self.credit_slot_bits
     }
 
-    /// 返回 credit id 的 counter 位宽。
-    pub(crate) const fn credit_counter_bits(&self) -> u32 {
-        self.credit_counter_bits
+    /// 返回 credit id 的 generation 位宽。
+    pub(crate) const fn credit_generation_bits(&self) -> u32 {
+        self.credit_generation_bits
     }
 
     /// 返回本 cycle 授权的 credit 池上界。
@@ -397,8 +544,8 @@ impl MarkRuntimeContract {
             || self.credit_unit != MARK_CREDIT_UNIT
             || self.mailbox_consumers != MARK_MAILBOX_CONSUMERS
             || self.mailbox_shards != MARK_MAILBOX_SHARDS
-            || self.credit_owner_bits != MARK_CREDIT_OWNER_BITS
-            || self.credit_counter_bits != MARK_CREDIT_COUNTER_BITS
+            || self.credit_slot_bits != MARK_CREDIT_SLOT_BITS
+            || self.credit_generation_bits != MARK_CREDIT_GENERATION_BITS
         {
             return Err(RawModelError::new(
                 "mark profile 参数与登记值不一致，或参数未随 revision 变化",
@@ -409,9 +556,9 @@ impl MarkRuntimeContract {
                 "MarkMailbox 必须是每 owner 单 consumer，才能配合 queue-page grace",
             ));
         }
-        if self.credit_owner_bits + self.credit_counter_bits != 32 {
+        if self.credit_slot_bits + self.credit_generation_bits != 64 {
             return Err(RawModelError::new(
-                "credit id 的 owner 与 counter 位宽必须合计 32",
+                "credit id 的 slot 与 generation 位宽必须合计 64",
             ));
         }
         if self.credit_pool == 0 {
@@ -501,8 +648,8 @@ impl MarkRuntimeContract {
         push_text(&mut bytes, &self.credit_unit);
         bytes.extend_from_slice(&self.mailbox_consumers.to_le_bytes());
         bytes.extend_from_slice(&self.mailbox_shards.to_le_bytes());
-        bytes.extend_from_slice(&self.credit_owner_bits.to_le_bytes());
-        bytes.extend_from_slice(&self.credit_counter_bits.to_le_bytes());
+        bytes.extend_from_slice(&self.credit_slot_bits.to_le_bytes());
+        bytes.extend_from_slice(&self.credit_generation_bits.to_le_bytes());
         bytes.extend_from_slice(&self.credit_pool.to_le_bytes());
         push_names(&mut bytes, &self.cycle_states);
         push_names(&mut bytes, &self.credit_transitions);
@@ -679,6 +826,15 @@ fn fixed_layouts() -> Vec<MarkRecordLayout> {
             owner_descriptor, cycle_epoch, granted, issued, in_flight, done, returned, padding,
         ),
         record!(MarkTerminationRecord; cycle_epoch, topology_epoch, state, conditions),
+        record!(EdgeDeltaHead;
+            source_block, target_block, source_generation, target_generation, cycle_epoch,
+            sequence, delta, credit, topology_epoch, state, target_owner,
+            target_owner_generation, route_key, bytes, integrity, domain, reserved,
+        ),
+        record!(CandidateCursorHead;
+            job, phase, cycle_epoch, topology_epoch, dirty, work_units, block_count,
+            edge_count, cursor, reserved,
+        ),
     ]
 }
 

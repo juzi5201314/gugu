@@ -18,9 +18,10 @@
 use std::collections::BTreeMap;
 
 use super::barrier_schema::{
-    CARD_GRANULARITY_BYTES, CARD_MARK_BUFFER_ENTRIES, CARD_MARK_STAMP_ENTRIES, card_index,
-    stamp_slot,
+    CARD_GRANULARITY_BYTES, CARD_MARK_BUFFER_ENTRIES, CARD_MARK_STAMP_ENTRIES, EDGE_BUFFER_ENTRIES,
+    EDGE_DELTAS_PER_WRITE, card_index, stamp_slot,
 };
+use super::local_heap::{BlockRef, ManagedBlockId};
 use super::slab::{OwnerToken, RawInvariant};
 
 /// hybrid barrier 的规范步骤；顺序即执行顺序。
@@ -149,20 +150,25 @@ pub(crate) struct CardMarkDraft {
 }
 
 /// mutator 侧的一次写入位置。
+///
+/// 只携带稳定 `BlockRef` 与被写 field 的 arena 内偏移：old/new 的 presence 由 `Option`
+/// 推导，跨 block 的增删由 `edge_changes` 派生，不再需要布尔“末次操作”表示。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct BarrierSite {
     /// 被写入 field 所在 arena 的 descriptor 编号。
     pub(crate) arena_descriptor: u64,
     /// 该 arena 的 generation。
     pub(crate) arena_generation: u32,
-    /// 写入地址的 arena 内字节偏移。
+    /// 写入地址的 **arena 内**字节偏移。
     pub(crate) offset: u64,
     /// 当前 cycle epoch。
     pub(crate) cycle_epoch: u64,
-    /// 旧值是否非空。
-    pub(crate) old_present: bool,
-    /// 新值是否非空。
-    pub(crate) new_present: bool,
+    /// 被写入位置的稳定 block 身份。
+    pub(crate) source: BlockRef,
+    /// 被覆盖的旧目标；null 或非 managed 值为 `None`。
+    pub(crate) old: Option<BlockRef>,
+    /// 新目标；null 为 `None`。
+    pub(crate) new: Option<BlockRef>,
     /// 新值是否指向 nursery/aging；false 时第 5 步不产生 card 键。
     pub(crate) new_in_nursery: bool,
     /// 被写入对象是否位于 old/immortal generation。
@@ -172,14 +178,47 @@ pub(crate) struct BarrierSite {
     /// 当前 coroutine stack 是否仍为 grey；没有 current coroutine 的 runtime/system 写入
     /// 一律按 grey 处理。
     pub(crate) stack_grey: bool,
-    /// 新值目标的 block 身份；用于跨 block edge summary。
-    pub(crate) new_block: Option<u32>,
-    /// 被写入位置的 block 身份。
-    pub(crate) source_block: u32,
-    /// 新值所属 owner 槽位。
-    pub(crate) new_owner: u32,
-    /// 被写入位置所属 owner 槽位。
-    pub(crate) source_owner: u32,
+}
+
+impl BarrierSite {
+    /// 把本次写入的净边变更写进定长数组，返回写入条数。
+    ///
+    /// 同一个 block 内部、以及新旧目标相同的写入都不产生边：前者是私有字段写入，后者净效果
+    /// 为零。覆盖一个跨 block 目标必须同时撤销旧边并增加新边，两个方向各自成一条记录。
+    fn edge_changes(self, out: &mut [Option<EdgeChange>; EDGE_DELTAS_PER_WRITE as usize]) -> usize {
+        let source = self.source;
+        let mut written = 0;
+        if let Some(old) = self.old
+            && old.id != source.id
+            && self.new != Some(old)
+        {
+            out[written] = Some(EdgeChange {
+                source,
+                target: old,
+                delta: -1,
+            });
+            written += 1;
+        }
+        if let Some(new) = self.new
+            && new.id != source.id
+        {
+            out[written] = Some(EdgeChange {
+                source,
+                target: new,
+                delta: 1,
+            });
+            written += 1;
+        }
+        written
+    }
+}
+
+/// 一条待合并的边变更；由 mutator 直接追加到预留 scratch，不做排序或分配。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EdgeChange {
+    pub(crate) source: BlockRef,
+    pub(crate) target: BlockRef,
+    pub(crate) delta: i64,
 }
 
 /// 一次 hybrid barrier 的结果。
@@ -195,137 +234,173 @@ pub(crate) struct HybridBarrierOutcome {
     pub(crate) card_marked: bool,
     /// 需要的 flush 原因；buffer 满时必须由调用方在 region 外冲刷。
     pub(crate) flush: Option<BarrierFlushReason>,
+    /// 因 scratch 已满而未记入的边变更；调用方 flush 后必须原样重放，不能重做字段写入。
+    pub(crate) pending_edges: [Option<EdgeChange>; EDGE_DELTAS_PER_WRITE as usize],
 }
 
-/// 一条 edge summary 记录。
+/// 一条已发布的 edge delta。
+///
+/// `delta` 是 block 对的 signed 差量：target 侧把它累加进已应用计数，因此 add/drop 逆序到达
+/// 也不会瞬间产生「零 lease 可回收」。`sequence` 在每个 block 对内从 1 开始单调递增。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct EdgeDeltaRecord {
     /// source block。
-    pub(crate) source_block: u32,
+    pub(crate) source: BlockRef,
     /// target block。
-    pub(crate) target_block: u32,
-    /// target block 的 generation。
-    pub(crate) generation: u32,
-    /// 净增或净删；`Add` 表示新增边。
-    pub(crate) add: bool,
+    pub(crate) target: BlockRef,
+    /// 该 block 对的发布序号。
+    pub(crate) sequence: u64,
+    /// 本次发布的净差量。
+    pub(crate) delta: i64,
     /// 聚合到该记录的最后一个 epoch。
     pub(crate) epoch: u64,
 }
 
-/// 跨 block edge 的聚合状态。
+/// 一个 block 对的聚合状态。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct EdgeState {
-    /// 已发布但尚未被同一或更晚 epoch 纳入的 add。
-    published_add_epoch: Option<u64>,
-    /// 尚未发布的净效果。
-    pending: Option<EdgeDeltaRecord>,
+    /// mutator 侧已生效的活跃边计数；0↔非零 的转换即 target 的 incoming lease 变化。
+    active: u64,
+    /// 已经发布出去的累计计数。
+    published: u64,
+    /// 该 block 对的发布序号；净零不消耗序号。
+    sequence: u64,
+    /// 最近一次聚合的 epoch。
+    epoch: u64,
 }
 
-/// owner-local edge summary：按 block 对聚合 `EdgeAdd`/`EdgeDrop`。
+/// owner-local edge summary：按 block 对聚合增删，并给出可发布的 signed 差量。
 ///
-/// 删除不能早于同一条已被发布的 add 纳入同一或更晚 epoch：若 add 已发布而 drop 的 epoch
-/// 更早，drop 会被提升到 add 的 epoch 再发布，因此顺序不会颠倒。
+/// 计数而不是布尔值：同一对 block 可以有多条字段边，删掉其中一条之后剩余边仍然活跃。
+/// 计数下溢或无法表示的差量都是不变量失败，不能饱和成零。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub(crate) struct EdgeSummary {
-    entries: BTreeMap<(u32, u32, u32), EdgeState>,
+    entries: BTreeMap<(BlockRef, BlockRef), EdgeState>,
 }
 
 impl EdgeSummary {
-    /// 记录一条新增边。
-    pub(crate) fn record_add(
-        &mut self,
-        source_block: u32,
-        target_block: u32,
-        generation: u32,
-        epoch: u64,
-    ) -> EdgeDeltaRecord {
-        self.record(source_block, target_block, generation, epoch, true)
-    }
-
-    /// 记录一条删除边。
-    pub(crate) fn record_drop(
-        &mut self,
-        source_block: u32,
-        target_block: u32,
-        generation: u32,
-        epoch: u64,
-    ) -> EdgeDeltaRecord {
-        self.record(source_block, target_block, generation, epoch, false)
-    }
-
-    fn record(
-        &mut self,
-        source_block: u32,
-        target_block: u32,
-        generation: u32,
-        epoch: u64,
-        add: bool,
-    ) -> EdgeDeltaRecord {
-        let key = (source_block, target_block, generation);
+    /// 合并一条边变更；返回是否改变了 target 的 incoming lease（0↔非零）。
+    pub(crate) fn apply(&mut self, change: EdgeChange) -> Result<bool, RawInvariant> {
+        let key = (change.source, change.target);
         let state = self.entries.entry(key).or_insert(EdgeState {
-            published_add_epoch: None,
-            pending: None,
+            active: 0,
+            published: 0,
+            sequence: 0,
+            epoch: 0,
         });
-        // 同一 edge 的删除不能早于其已经发布的 add 被纳入同一或更晚的 epoch。
-        let epoch = if add {
-            epoch
+        let before = state.active;
+        let active = if change.delta >= 0 {
+            let delta = u64::try_from(change.delta).expect("非负 delta 适配 u64");
+            state
+                .active
+                .checked_add(delta)
+                .ok_or_else(|| RawInvariant::new("edge 活跃计数溢出"))?
         } else {
-            epoch.max(state.published_add_epoch.unwrap_or(0))
+            let delta = u64::try_from(change.delta.unsigned_abs()).expect("delta 绝对值适配 u64");
+            state
+                .active
+                .checked_sub(delta)
+                .ok_or_else(|| RawInvariant::new("edge 活跃计数下溢"))?
         };
-        if add {
-            state.published_add_epoch = Some(epoch);
-        }
-        let record = match state.pending {
-            // 同一 epoch 内 add 与 drop 净零抵消，不发布空 delta。
-            Some(pending) if pending.epoch == epoch && pending.add != add => {
-                state.pending = None;
-                EdgeDeltaRecord {
-                    source_block,
-                    target_block,
-                    generation,
-                    add,
-                    epoch,
-                }
-            }
-            Some(mut pending) => {
-                pending.epoch = pending.epoch.max(epoch);
-                pending.add = add;
-                state.pending = Some(pending);
-                pending
-            }
-            None => {
-                let record = EdgeDeltaRecord {
-                    source_block,
-                    target_block,
-                    generation,
-                    add,
-                    epoch,
-                };
-                state.pending = Some(record);
-                record
-            }
-        };
-        record
+        state.active = active;
+        Ok((before == 0) != (active == 0))
     }
 
-    /// 取出全部待发布 delta，按 `(source, target, generation)` 稳定排序。
-    pub(crate) fn drain(&mut self) -> Vec<EdgeDeltaRecord> {
-        let mut records = Vec::with_capacity(self.entries.len());
-        for ((_, _, _), state) in self.entries.iter_mut() {
-            if let Some(record) = state.pending.take() {
-                records.push(record);
+    /// 发布全部尚未发布的净差量；净零不分配记录也不消耗序号。
+    pub(crate) fn publish(&mut self, epoch: u64) -> Result<Vec<EdgeDeltaRecord>, RawInvariant> {
+        let mut records = Vec::new();
+        for ((source, target), state) in self.entries.iter_mut() {
+            if state.active == state.published {
+                continue;
             }
+            let active = i64::try_from(state.active)
+                .map_err(|_| RawInvariant::new("edge 活跃计数无法用 i64 表示"))?;
+            let published = i64::try_from(state.published)
+                .map_err(|_| RawInvariant::new("edge 已发布计数无法用 i64 表示"))?;
+            let delta = active - published;
+            state.published = state.active;
+            state.sequence = state
+                .sequence
+                .checked_add(1)
+                .ok_or_else(|| RawInvariant::new("edge sequence 溢出"))?;
+            state.epoch = epoch;
+            records.push(EdgeDeltaRecord {
+                source: *source,
+                target: *target,
+                sequence: state.sequence,
+                delta,
+                epoch,
+            });
         }
-        records.sort_by_key(|record| (record.source_block, record.target_block, record.generation));
-        records
+        records.sort_by_key(|record| (record.source, record.target));
+        Ok(records)
+    }
+
+    /// 把一个目标 block 的全部聚合项重键到新的目标 block。
+    ///
+    /// `incoming_leases` 的定义是「非零 source 对的数量」，因此搬迁必须**重键**而不是复制：复制会
+    /// 让旧块永远背着租约、再也成不了候选，同时让新块的租约数偏高。序号与 epoch 血统随项一起迁移，
+    /// 新键不会从头开始接受已经发布过的序号。返回迁移的聚合项数量。
+    pub(crate) fn relocate_target(&mut self, old: ManagedBlockId, new: BlockRef) -> usize {
+        let keys: Vec<(BlockRef, BlockRef)> = self
+            .entries
+            .keys()
+            .filter(|(_, target)| target.id == old)
+            .copied()
+            .collect();
+        let mut moved = 0;
+        for (source, old_target) in keys {
+            let Some(state) = self.entries.remove(&(source, old_target)) else {
+                continue;
+            };
+            let entry = self.entries.entry((source, new)).or_insert(EdgeState {
+                active: 0,
+                published: 0,
+                sequence: 0,
+                epoch: state.epoch,
+            });
+            entry.active = entry.active.saturating_add(state.active);
+            entry.published = entry.published.saturating_add(state.published);
+            entry.sequence = entry.sequence.max(state.sequence);
+            entry.epoch = entry.epoch.max(state.epoch);
+            moved += 1;
+        }
+        moved
+    }
+
+    /// 返回一个 block 的 incoming lease：非零 source block 对的数量。
+    pub(crate) fn incoming_leases(&self, target: BlockRef) -> u64 {
+        self.entries
+            .iter()
+            .filter(|((_, pair_target), state)| *pair_target == target && state.active != 0)
+            .count() as u64
     }
 
     /// 待发布 delta 数量。
     pub(crate) fn pending(&self) -> usize {
         self.entries
             .values()
-            .filter(|state| state.pending.is_some())
+            .filter(|state| state.active != state.published)
             .count()
+    }
+
+    /// 仍然活跃的 block 对数量。
+    pub(crate) fn active_pairs(&self) -> usize {
+        self.entries
+            .values()
+            .filter(|state| state.active != 0)
+            .count()
+    }
+
+    /// 删除已经零计数、无待发布差量且 grace 完成的 block 对。
+    ///
+    /// 保留 `sequence` 的语义要求在这里被显式放弃：重建同一个 block 对时序号从 1 重新开始，
+    /// 旧记录由发布端的 generation 校验拒绝，因此不需要无限积累零计数键。
+    pub(crate) fn retire_zero_pairs(&mut self) -> usize {
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, state| state.active != 0 || state.active != state.published);
+        before - self.entries.len()
     }
 }
 
@@ -584,12 +659,17 @@ impl CardTable {
     }
 }
 
-/// one processor 的 barrier 账本：buffer 加它自己的 flush 统计。
+/// one processor 的 barrier 账本：card buffer、边 scratch 加它自己的 flush 统计。
+///
+/// edge scratch 是常驻预留（`EDGE_BUFFER_ENTRIES` 项），mutator 只做 `push`：不排序、不分配、
+/// 不在这里合并进有序稀疏表。合并发生在 source-owner 的 slow edge（`flush`）。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProcessorBarrier {
     buffer: CardMarkBuffer,
+    edges: Vec<EdgeChange>,
     card_marks: u64,
     card_slot_reuses: u64,
+    edge_changes: u64,
     flushes: u64,
     batches: u64,
     last_flush: Option<BarrierFlushReason>,
@@ -600,8 +680,10 @@ impl ProcessorBarrier {
     pub(crate) fn new(cycle_epoch: u64) -> Self {
         Self {
             buffer: CardMarkBuffer::new(cycle_epoch),
+            edges: Vec::with_capacity(EDGE_BUFFER_ENTRIES as usize),
             card_marks: 0,
             card_slot_reuses: 0,
+            edge_changes: 0,
             flushes: 0,
             batches: 0,
             last_flush: None,
@@ -621,6 +703,21 @@ impl ProcessorBarrier {
     /// 返回 dedup 命中（无需新 slot）的次数。
     pub(crate) const fn card_slot_reuses(&self) -> u64 {
         self.card_slot_reuses
+    }
+
+    /// 返回累计记录的边变更数。
+    pub(crate) const fn edge_changes(&self) -> u64 {
+        self.edge_changes
+    }
+
+    /// 返回边 scratch 中尚未合并的项数。
+    pub(crate) fn edge_pending(&self) -> u32 {
+        u32::try_from(self.edges.len()).expect("边 scratch 项数适配 u32")
+    }
+
+    /// 返回边 scratch 剩余的预留项数。
+    pub(crate) fn edge_slots_left(&self) -> u32 {
+        EDGE_BUFFER_ENTRIES.saturating_sub(self.edge_pending())
     }
 
     /// 返回累计 flush 次数。
@@ -643,15 +740,26 @@ impl ProcessorBarrier {
         self.buffer.advance_epoch(cycle_epoch)
     }
 
-    /// 执行一条 hybrid barrier，并把 card 键交给本地账本。
+    /// 重放因 scratch 已满而未能记入的边变更；只追加，不触碰 card 账本。
+    pub(crate) fn replay_edges(&mut self, pending: &[Option<EdgeChange>]) {
+        for change in pending.iter().flatten() {
+            self.edges.push(*change);
+            self.edge_changes += 1;
+        }
+    }
+
+    /// 取走 scratch 中的全部边变更；source-owner 在 slow edge 把它们合并进有序稀疏表。
+    pub(crate) fn take_edges(&mut self) -> Vec<EdgeChange> {
+        std::mem::take(&mut self.edges)
+    }
+
+    /// 执行一条 hybrid barrier，并把 card 键与边变更交给本地 scratch。
     ///
-    /// 第 4 步是实际 store，第 5 步才是账本发布：即使 buffer 已满导致记账失败，store 也已
-    /// 完成，调用方必须按 permit 在 region 外补容量后重试账本，不能回滚 store。
-    pub(crate) fn perform(
-        &mut self,
-        site: BarrierSite,
-        edges: &mut EdgeSummary,
-    ) -> HybridBarrierOutcome {
+    /// 第 4 步是实际 store，第 5、6 步才是账本发布：即使 buffer 或边 scratch 已满导致记账
+    /// 失败，store 也已完成，调用方必须按 permit 在 region 外补容量后重放记账，不能回滚 store，
+    /// 也不能重复记录已经生效的 card 键。
+    pub(crate) fn perform(&mut self, site: BarrierSite) -> HybridBarrierOutcome {
+        let mut pending_edges = [None; EDGE_DELTAS_PER_WRITE as usize];
         // 站点 epoch 与账本不一致：本次写入不记账，也绝不就地改写 epoch，而是把强制
         // flush 交给调用方。旧键只能经 flush→发布离开账本，不会被静默丢弃。
         if site.cycle_epoch != self.buffer.cycle_epoch() {
@@ -661,16 +769,17 @@ impl ProcessorBarrier {
                 shaded_new: false,
                 card_marked: false,
                 flush: Some(BarrierFlushReason::MinorStop),
+                pending_edges,
             };
         }
         let mut steps = Vec::with_capacity(6);
         steps.push(HybridStep::ReadOld);
-        let shaded_old = site.marking && site.old_present;
+        let shaded_old = site.marking && site.old.is_some();
         if shaded_old {
             steps.push(HybridStep::ShadeOldDeleted);
         }
         let grey = site.stack_grey;
-        let shaded_new = site.marking && grey && site.new_present;
+        let shaded_new = site.marking && grey && site.new.is_some();
         if shaded_new {
             steps.push(HybridStep::ShadeNewInserted);
         }
@@ -698,31 +807,21 @@ impl ProcessorBarrier {
                 Err(reason) => flush = Some(reason),
             }
         }
-        // 跨 owner 或跨 block 的写入进入 owner-local edge summary：source 与 target 属于
-        // 同一 owner 且同一 block 时是私有字段写入，不产生 block edge。聚合结果只有一处
-        // 定义（`EdgeSummary`），由 owner 经 `take_edge_deltas` 取走。
-        let cross_owner = site.source_owner != site.new_owner;
-        let cross_block = site
-            .new_block
-            .is_some_and(|target| target != site.source_block);
-        if (cross_owner || cross_block)
-            && let Some(target_block) = site.new_block
-        {
+        // 跨 block 的写入进入 owner-local edge summary：source 与 target 属于同一 block 时是
+        // 私有字段写入，不产生 block edge。这里只追加到预留 scratch；合并与发布都在 slow edge。
+        let mut changes = [None; EDGE_DELTAS_PER_WRITE as usize];
+        let written = site.edge_changes(&mut changes);
+        if written != 0 {
             steps.push(HybridStep::EdgeSummary);
-            if site.new_present {
-                edges.record_add(
-                    site.source_block,
-                    target_block,
-                    site.arena_generation,
-                    site.cycle_epoch,
-                );
+            if self.edge_slots_left() >= EDGE_DELTAS_PER_WRITE {
+                for change in changes.iter().flatten() {
+                    self.edges.push(*change);
+                }
+                self.edge_changes += u64::try_from(written).expect("边变更数适配 u64");
             } else {
-                edges.record_drop(
-                    site.source_block,
-                    target_block,
-                    site.arena_generation,
-                    site.cycle_epoch,
-                );
+                // 额度不足：调用方在 region 外 flush 之后原样重放这两条变更。
+                flush = Some(BarrierFlushReason::BufferFull);
+                pending_edges = changes;
             }
         }
         HybridBarrierOutcome {
@@ -731,6 +830,7 @@ impl ProcessorBarrier {
             shaded_new,
             card_marked,
             flush,
+            pending_edges,
         }
     }
 
@@ -860,7 +960,7 @@ impl BarrierPlane {
         let mut drafts = Vec::new();
         let count = self.processors.len();
         for processor in 0..count {
-            drafts.append(&mut self.flush_processor(processor, reason));
+            drafts.append(&mut self.flush_processor(processor, reason)?);
         }
         for processor in &mut self.processors {
             processor
@@ -920,19 +1020,90 @@ impl BarrierPlane {
         Ok(marked)
     }
 
-    /// 冲刷一个 processor 的账本，并按原因累计统计。
+    /// 冲刷一个 processor 的账本，把边 scratch 合并进有序稀疏表，并按原因累计统计。
+    ///
+    /// 合并是 source-owner 的 slow edge：计数下溢等不变量失败在这里暴露，而不是被静默丢弃。
     pub(crate) fn flush_processor(
         &mut self,
         processor: usize,
         reason: BarrierFlushReason,
-    ) -> Vec<CardMarkDraft> {
-        let drafts = self.processor_mut(processor).flush(reason);
+    ) -> Result<Vec<CardMarkDraft>, RawInvariant> {
+        let (drafts, changes) = {
+            let record = self.processor_mut(processor);
+            let drafts = record.flush(reason);
+            (drafts, record.take_edges())
+        };
+        for change in changes {
+            self.edges.apply(change)?;
+        }
         self.flushes += 1;
         self.flushed_by_reason[reason.index()] += 1;
         if drafts.is_empty() {
             self.empty_flushes += 1;
         }
-        drafts
+        Ok(drafts)
+    }
+
+    /// 把全部 processor 的边 scratch 合并进 source-owner 的有序稀疏表。
+    ///
+    /// cycle 边界发布差量前必须调用它：仍然停留在 scratch 里的变更尚未进入聚合表，直接发布
+    /// 会让它们跨到下个 cycle，甚至在下个 cycle 的 epoch 上被当成新边。
+    pub(crate) fn merge_edges(&mut self) -> Result<(), RawInvariant> {
+        let count = self.processors.len();
+        for processor in 0..count {
+            let changes = self.processor_mut(processor).take_edges();
+            for change in changes {
+                self.edges.apply(change)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 返回仍未合并或未发布的边变更总数：scratch 与聚合表一起统计。
+    pub(crate) fn edge_pending_items(&self) -> usize {
+        let scratch: usize = self
+            .processors
+            .iter()
+            .map(|record| record.edge_pending() as usize)
+            .sum();
+        scratch + self.edges.pending()
+    }
+
+    /// 重放一个 processor 上因额度不足而未记入的边变更。
+    pub(crate) fn replay_pending_edges(
+        &mut self,
+        processor: usize,
+        pending: &[Option<EdgeChange>],
+    ) {
+        self.processor_mut(processor).replay_edges(pending);
+    }
+
+    /// 发布全部尚未发布的净差量；net-zero 的 block 对不产生记录也不消耗序号。
+    pub(crate) fn publish_edges(
+        &mut self,
+        epoch: u64,
+    ) -> Result<Vec<EdgeDeltaRecord>, RawInvariant> {
+        self.edges.publish(epoch)
+    }
+
+    /// 把一个目标 block 的聚合项与租约重键到新的目标 block；返回迁移项数。
+    pub(crate) fn relocate_target(&mut self, old: ManagedBlockId, new: BlockRef) -> usize {
+        self.edges.relocate_target(old, new)
+    }
+
+    /// 返回一个 block 的 incoming lease：非零 source block 对的数量。
+    pub(crate) fn incoming_leases(&self, target: BlockRef) -> u64 {
+        self.edges.incoming_leases(target)
+    }
+
+    /// 返回仍活跃的 block 对数量。
+    pub(crate) fn active_pairs(&self) -> usize {
+        self.edges.active_pairs()
+    }
+
+    /// 删除已零计数、无待发布差量的 block 对。
+    pub(crate) fn retire_zero_pairs(&mut self) -> usize {
+        self.edges.retire_zero_pairs()
     }
 
     /// 返回累计 flush 次数。
@@ -977,9 +1148,9 @@ impl BarrierPlane {
 
     /// mutator 上下文：在一个 processor 上执行一条 hybrid barrier。
     ///
-    /// edge summary 与 buffer 同属本平面，调用方不需要自己持有聚合状态。站点 epoch 必须
-    /// 已经由 `advance_epoch` 推进过：这里不代调用方推进，避免在无处发布旧键的层级上丢弃
-    /// remembered-set 内容。
+    /// edge scratch 与 card buffer 同属 processor 账本，合并由 `flush_processor` 在 slow edge
+    /// 完成。站点 epoch 必须已经由 `advance_epoch` 推进过：这里不代调用方推进，避免在无处
+    /// 发布旧键的层级上丢弃 remembered-set 内容。
     pub(crate) fn perform_barrier(
         &mut self,
         processor: usize,
@@ -991,14 +1162,6 @@ impl BarrierPlane {
                 site.cycle_epoch, self.cycle_epoch
             )));
         }
-        let mut edges = std::mem::take(&mut self.edges);
-        let outcome = self.processor_mut(processor).perform(site, &mut edges);
-        self.edges = edges;
-        Ok(outcome)
-    }
-
-    /// 取出全部待发布的 edge delta。
-    pub(crate) fn drain_edges(&mut self) -> Vec<EdgeDeltaRecord> {
-        self.edges.drain()
+        Ok(self.processor_mut(processor).perform(site))
     }
 }

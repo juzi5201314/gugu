@@ -136,7 +136,7 @@ pub(super) fn gc_contract() -> RuntimeRawContractV1 {
 }
 
 /// 配置一个已接入 LocalHeap 与 mark 平面的 world。
-fn heap_world() -> RawWorld {
+pub(super) fn heap_world() -> RawWorld {
     let contract = gc_contract();
     configured_world(&contract, 7, 1, 64)
 }
@@ -159,6 +159,60 @@ fn leaf(world: &mut RawWorld, placement: ManagedPlacement) -> u64 {
     world
         .allocate_managed(0, 1, 8, placement)
         .expect("leaf 可分配")
+}
+
+/// 释放一个 block 只能清掉它自己的元数据：同一 arena 里更早的 block 必须保持完好。
+///
+/// `release_block` 曾经用 line 下标除以 granule 字节数来算 block 的起始 granule，于是释放
+/// block 1 会清掉 block 0 的 object-start 位，让存活对象变成不可解析。
+#[test]
+fn releasing_a_block_preserves_earlier_block_object_start_bits() {
+    let mut world = heap_world();
+    let first = leaf(&mut world, ManagedPlacement::Old);
+    let first_block = world
+        .managed_block_ref(0, first)
+        .expect("block 可解析")
+        .id;
+    // 继续分配直到进入下一个 block；`survivor` 始终是留在上一个 block 的最后一个对象，
+    // 它的 granule 落在 block 0 的高地址区间，正是错误换算会误清的位置。
+    let mut survivor = first;
+    let second;
+    let second_block;
+    loop {
+        let next = leaf(&mut world, ManagedPlacement::Old);
+        let block = world.managed_block_ref(0, next).expect("block 可解析").id;
+        if block != first_block {
+            second = next;
+            second_block = block;
+            break;
+        }
+        survivor = next;
+    }
+    assert_ne!(second_block, first_block, "分配必须真的换到下一个 block");
+    world
+        .heap_mut(0)
+        .expect("堆可写")
+        .release_block(second_block)
+        .expect("block 可释放");
+    assert!(
+        world.managed_object(first).is_ok(),
+        "释放其它 block 不得抹掉更早 block 的 object-start 位"
+    );
+    assert!(
+        world.managed_object(survivor).is_ok(),
+        "更早 block 的高地址对象同样必须保持可解析"
+    );
+    assert_eq!(
+        world
+            .managed_block_ref(0, survivor)
+            .expect("更早 block 的对象必须仍可解析")
+            .id,
+        first_block
+    );
+    assert!(
+        world.managed_object(second).is_err(),
+        "被释放 block 的对象必须不再可解析"
+    );
 }
 
 #[test]
@@ -373,6 +427,190 @@ fn managed_addresses_are_owner_local() {
     assert!(world.managed_counters(1).expect("计数").objects == 1);
 }
 
+/// 一直分配 leaf 直到新对象落到 `block` 之外的 block。
+fn fill_block(world: &mut RawWorld, block: u32) {
+    loop {
+        let address = leaf(world, ManagedPlacement::Old);
+        if world
+            .managed_block_ref(0, address)
+            .expect("block 身份可解析")
+            .id
+            .0
+            != block
+        {
+            return;
+        }
+    }
+}
+
+#[test]
+fn field_stores_publish_exact_cross_block_edge_deltas() {
+    let mut world = heap_world();
+    // 三个对象落在三个不同 block：类型 0 是 16 字节双指针类型，两个字段各自成一条边。
+    let first = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .expect("第一个对象可分配");
+    let first_block = world
+        .managed_block_ref(0, first)
+        .expect("block 身份可解析")
+        .id
+        .0;
+    fill_block(&mut world, first_block);
+    let second = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .expect("第二个对象可分配");
+    let second_block = world
+        .managed_block_ref(0, second)
+        .expect("block 身份可解析")
+        .id
+        .0;
+    assert_ne!(first_block, second_block, "两个对象必须落在不同 block");
+    fill_block(&mut world, second_block);
+    let third = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .expect("第三个对象可分配");
+    let third_block = world
+        .managed_block_ref(0, third)
+        .expect("block 身份可解析")
+        .id
+        .0;
+    assert_ne!(third_block, second_block);
+
+    // 同一 block 内的自引用不产生传输，也不产生边。
+    world
+        .store_managed_field(0, 0, first, 0, first)
+        .expect("同 block 写入");
+    assert!(world.publish_edge_deltas().expect("发布").is_empty());
+    let source = world.managed_block_ref(0, first).expect("block");
+    let second_ref = world.managed_block_ref(0, second).expect("block");
+    let third_ref = world.managed_block_ref(0, third).expect("block");
+    assert_eq!(world.block_incoming_leases(third_ref), 0);
+
+    // 建立 A→B 边并发布：同一对 block 只算一份 incoming lease。
+    world
+        .store_managed_field(0, 0, first, 0, second)
+        .expect("写入第二条边");
+    let published = world.publish_edge_deltas().expect("发布");
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].delta, 1);
+    assert_eq!(published[0].source, source);
+    assert_eq!(published[0].target, second_ref);
+    assert_eq!(published[0].sequence, 1);
+    assert_eq!(world.block_incoming_leases(second_ref), 1);
+
+    // 覆盖到第三个 block：撤销旧目标与新增新目标各自发布一条记录。
+    world
+        .store_managed_field(0, 0, first, 0, third)
+        .expect("改写到第三个 block");
+    let published = world.publish_edge_deltas().expect("发布");
+    assert_eq!(published.len(), 2, "撤销旧边与新增新边各一条记录");
+    assert!(
+        published
+            .iter()
+            .any(|record| record.delta == -1 && record.target == second_ref)
+    );
+    assert!(
+        published
+            .iter()
+            .any(|record| record.delta == 1 && record.target == third_ref)
+    );
+    assert_eq!(world.block_incoming_leases(second_ref), 0, "旧目标边已撤销");
+    assert_eq!(world.block_incoming_leases(third_ref), 1);
+
+    // 同一 block 对的两条字段边：删掉一条之后另一条仍然活跃。
+    world
+        .store_managed_field(0, 0, first, 8, third)
+        .expect("写入同一 block 对的第二条字段边");
+    let published = world.publish_edge_deltas().expect("发布");
+    assert_eq!(published.len(), 1, "同一 block 对聚合为一条记录");
+    assert_eq!(published[0].delta, 1);
+    assert_eq!(published[0].sequence, 2, "同一 block 对的序号单调递增");
+    assert_eq!(
+        world.block_incoming_leases(third_ref),
+        1,
+        "同一对 block 的两条字段边只算一份 incoming lease"
+    );
+
+    world
+        .store_managed_field(0, 0, first, 8, 0)
+        .expect("清空一个字段");
+    let published = world.publish_edge_deltas().expect("发布");
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].delta, -1);
+    assert_eq!(
+        world.block_incoming_leases(third_ref),
+        1,
+        "删掉一条字段边后该 block 对仍然活跃"
+    );
+
+    // 清空最后一条边：incoming lease 归零，且没有待发布差量残留。
+    world
+        .store_managed_field(0, 0, first, 0, 0)
+        .expect("清空最后一个字段");
+    let published = world.publish_edge_deltas().expect("发布");
+    assert_eq!(published.len(), 1);
+    assert_eq!(published[0].delta, -1);
+    assert_eq!(world.block_incoming_leases(third_ref), 0);
+    assert_eq!(
+        world.barrier_stats().edge_pending,
+        0,
+        "全部差量发布后不得残留 pending"
+    );
+    assert_eq!(world.barrier_stats().edge_published, 6);
+}
+
+#[test]
+fn edge_heap_ticket_identity_does_not_alias_between_owners() {
+    let mut world = RawWorld::new(71, 2, 64, BatchLimits::default()).expect("world");
+    world.configure_gc(&gc_contract()).expect("GC 契约");
+    let first = world
+        .allocate_managed(0, 1, 8, ManagedPlacement::Pinned)
+        .expect("owner 0");
+    let second = world
+        .allocate_managed(1, 1, 8, ManagedPlacement::Pinned)
+        .expect("owner 1");
+    let (descriptor, offset, _) = world.heap(0).unwrap().ticket_identity(first).unwrap();
+    assert!(
+        world
+            .heap(1)
+            .unwrap()
+            .object_at_ticket(descriptor, u64::from(offset))
+            .is_err(),
+        "另一个 owner 的同位置对象不能接受错误 arena 的 ticket"
+    );
+    assert_eq!(world.managed_object(second).unwrap().object_start, second);
+}
+
+#[test]
+fn edge_heap_allocation_reaches_second_arena() {
+    let contract =
+        LocalHeapRuntimeContract::build(LocalHeapDemand::default(), PlatformProfile::Linux)
+            .expect("契约可构建");
+    let mut heap = LocalHeap::new(&contract);
+    // descriptor 由世界级稠密表分配；这里显式给出两个不同的全局身份。
+    let first = heap.attach_arena(HeapArenaKind::Old, 1, 0x2000_0000, &contract);
+    let second = heap.attach_arena(HeapArenaKind::Old, 2, 0x2020_0000, &contract);
+    heap.commit_block(first, 0).expect("block 可提交");
+    heap.commit_block(second, 0).expect("block 可提交");
+    let payload = u64::from(GC_BLOCK_BYTES) - 16;
+    let a = heap
+        .allocate(first, 0, payload, 16)
+        .expect("首个 arena 可分配");
+    let b = heap
+        .allocate(second, 0, payload, 16)
+        .expect("第二个 arena 可分配");
+    heap.set_field(a, 0, 17).expect("字段可写");
+    heap.set_field(b, 0, 29).expect("字段可写");
+    assert_eq!(heap.field(a, 0).expect("字段可读"), 17);
+    assert_eq!(heap.field(b, 0).expect("字段可读"), 29);
+    assert_eq!(
+        heap.block_ref(a).expect("block 身份").id.arena(),
+        1,
+        "第一个对象必须仍属于第一个 arena 的全局身份"
+    );
+    assert_eq!(heap.block_ref(b).expect("block 身份").id.arena(), 2);
+}
+
 #[test]
 fn mark_bitmap_clears_only_the_marked_block() {
     // mark 位图按「一 granule 一位」组织：epoch 切换时只能清本 block 的区间。若按字节累加，
@@ -382,16 +620,14 @@ fn mark_bitmap_clears_only_the_marked_block() {
         LocalHeapRuntimeContract::build(LocalHeapDemand::default(), PlatformProfile::Linux)
             .expect("契约可构建");
     let mut heap = LocalHeap::new(&contract);
-    let arena = heap.attach_arena(HeapArenaKind::Old, 0x2000_0000, &contract);
+    let arena = heap.attach_arena(HeapArenaKind::Old, 1, 0x2000_0000, &contract);
     heap.commit_block(arena, 0).expect("block 0 可提交");
     heap.commit_block(arena, 1).expect("block 1 可提交");
     // 填满 block 0，使后续对象落到 block 1。
     let mut block0_last = 0_u64;
     let mut block1 = 0_u64;
     for _ in 0..4096 {
-        let address = heap
-            .allocate(HeapArenaKind::Old, 1, 8, 16)
-            .expect("old 对象可分配");
+        let address = heap.allocate(arena, 1, 8, 16).expect("old 对象可分配");
         if heap.block_of(address).expect("block 可解析") == 0 {
             block0_last = address;
         } else {
@@ -415,6 +651,76 @@ fn mark_bitmap_clears_only_the_marked_block() {
     heap.sweep_unmarked(&mut report).expect("sweep 可执行");
     assert!(heap.object_at(block1).is_ok(), "已标记对象必须保留");
     assert!(heap.object_at(block0_last).is_ok(), "已标记对象必须保留");
+}
+
+#[test]
+fn block_object_enumeration_and_mark_query_track_real_state() {
+    let contract =
+        LocalHeapRuntimeContract::build(LocalHeapDemand::default(), PlatformProfile::Linux)
+            .expect("契约可构建");
+    let mut heap = LocalHeap::new(&contract);
+    let arena = heap.attach_arena(HeapArenaKind::Old, 1, 0x2000_0000, &contract);
+    heap.commit_block(arena, 0).expect("block 0 可提交");
+    heap.commit_block(arena, 1).expect("block 1 可提交");
+    let descriptor = heap.arena_descriptors()[0].1;
+    assert_eq!(
+        heap.committed_blocks_of(descriptor).expect("block 快照"),
+        vec![0, 1],
+        "枚举必须给出已提交 block"
+    );
+    // 填满 block 0，让后续对象落到 block 1：枚举要按 block 边界分开。
+    let mut block1 = 0_u64;
+    for _ in 0..4096 {
+        let address = heap.allocate(arena, 1, 8, 16).expect("old 对象可分配");
+        if heap.block_of(address).expect("block 可解析") == 1 {
+            block1 = address;
+            break;
+        }
+    }
+    assert_ne!(block1, 0, "必须有对象落到第二个 block");
+    let in_block1 = heap.block_objects(descriptor, 1).expect("block 1 可枚举");
+    let (_, header_in_block) = in_block1
+        .iter()
+        .find(|(payload, _)| *payload == block1)
+        .expect("枚举必须包含落在该 block 的对象");
+    // 枚举的 block 内偏移与 ticket 身份同基准，候选阶段才能把两者对上同一对象。
+    let (_, ticket_offset, _) = heap.ticket_identity(block1).expect("ticket 身份");
+    assert_eq!(
+        *header_in_block,
+        u64::from(ticket_offset) - u64::from(GC_BLOCK_BYTES),
+        "block 内偏移必须与 ticket 身份同基准"
+    );
+    for (payload, _) in &in_block1 {
+        assert_eq!(heap.block_of(*payload).expect("block 可解析"), 1);
+    }
+    for (payload, _) in heap.block_objects(descriptor, 0).expect("block 0 可枚举") {
+        assert_eq!(heap.block_of(payload).expect("block 可解析"), 0);
+    }
+    // 未提交 block 与未知 descriptor 都必须是错误，而不是空清单。
+    assert!(
+        heap.block_objects(descriptor, 2).is_err(),
+        "未提交 block 不能被枚举"
+    );
+    assert!(
+        heap.committed_blocks_of(99).is_err(),
+        "未知 arena descriptor 必须报错"
+    );
+    // mark 查询只认当前 epoch：epoch 前进后旧位是陈旧标记。
+    heap.begin_mark_cycle();
+    assert!(
+        !heap.marked_in_current_epoch(block1).expect("可查询"),
+        "未标记对象不能报告为已标记"
+    );
+    assert!(heap.mark_object(block1).expect("可标记").is_some());
+    assert!(
+        heap.marked_in_current_epoch(block1).expect("可查询"),
+        "本 epoch 标记过的对象必须报告为已标记"
+    );
+    heap.begin_mark_cycle();
+    assert!(
+        !heap.marked_in_current_epoch(block1).expect("可查询"),
+        "epoch 前进后的陈旧位不得报告为已标记"
+    );
 }
 
 #[test]

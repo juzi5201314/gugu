@@ -280,7 +280,9 @@ slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理�
 
 每个 logical processor从全局 nursery一次取得 8 个 block组成的 256 KiB本地 span，但 bump cursor/limit始终只覆盖当前可用 line run；对象不得越过 block。run耗尽时先在本地 span的 line表推进，无需全局同步；8 个 block用完才 refill。old allocation同样从 line表选择连续空 line，不能退化为不看 Immix line的整段 bump。含 resource、需要 pin、独立 large或高对齐请求绕过 nursery。2 MiB/32 KiB/128 byte/16 byte与 8-block span的关系写入同一 `HeapLayout`常量并逐项断言。
 
-本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 1` 契约段（arena 2 MiB、block 32 KiB、line 128 byte、granule 16 byte、TLAB span 8 block、object-start/mark 各 131072 bit、`page_covering_object` 512 项、card 表 4096 byte、`ObjectHeader`/`HeapArenaMetadata`/`HeapPinEntry` 三条记录、arena/block/generation/representation 目录与 `HeapTriggerProfile`），派生规模只由 arena/block/line 参数推导；`RuntimeRawModel` schema 升到 14，`local-heap-*` 段、dump 行与需求视图进入 `ImagePlan` 与 CLI JSON，`resources/runtime/heap.gg` 提供同源 Gugu 记录并由 `local_heap_layout::verify_source` 逐字段校验布局。运行时参照实现按契约建立每 owner 的 nursery/old/resource/pinned/large arena：32 KiB block 经 extent 层按页提交（不进入 `OwnerAccounting`，因此 `runtime_committed_bytes` 口径不变），分配在 line run 内推进并记录块内碎片，nursery 走 8 block 局部 span，`gc_trace.rs` 的解释器按 Bitmap/Program 扫描 managed word 并用 granule + 页内起点向前扫描解析 interior 指针。block 选择式 major evacuation、跨 owner `SharedHeap` handle、radix page map 的镜像落地与空 block 交还 provider 分别由阶段 45–47 与 55 接手；heap 公共统计属阶段 67。
+block 身份是全局稠密的 `ManagedBlockId`（`descriptor * 64 + block`，arena 内下标只占低 6 位），`BlockRef` 在它之上再带 block generation：管理权转移不改变 payload 的 heap/arena 定位，消费端也必须按全局身份解析来源块，只带 arena 内下标的旧编码会被拒绝。arena 登记在世界级 `managed_arenas` 表里，每项记录 descriptor、heap owner、heap 内 arena 槽、extent arena id 与 arena 基址；`allocate_managed` 只在已登记且仍有空 block 的 arena 上分配，`commit_managed_block` 按调用方指定的 extent arena 提交 block，不再隐式落到「第一个 arena」。
+
+本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 2` 契约段（arena 2 MiB、block 32 KiB、line 128 byte、granule 16 byte、TLAB span 8 block、object-start/mark 各 131072 bit、`page_covering_object` 512 项、card 表 4096 byte、`ObjectHeader`/`HeapArenaMetadata`/`HeapPinEntry`/`HeapBlockRecord` 四条记录（block 记录 64 字节、align 8，含全局 `block_id`、`generation`、arena descriptor/block 下标、`manager_owner`、`incoming_leases`、`mutation_version`、三类 lease 计数、`candidate_job` 与 `state`）、arena/block/generation/representation 目录与 `HeapTriggerProfile`），派生规模只由 arena/block/line 参数推导；`RuntimeRawModel` schema 升到 17，`local-heap-*` 段、dump 行与需求视图进入 `ImagePlan` 与 CLI JSON，`resources/runtime/heap.gg` 提供同源 Gugu 记录并由 `local_heap_layout::verify_source` 逐字段校验布局。运行时参照实现按契约建立每 owner 的 nursery/old/resource/pinned/large arena：32 KiB block 经 extent 层按页提交（不进入 `OwnerAccounting`，因此 `runtime_committed_bytes` 口径不变），分配在 line run 内推进并记录块内碎片，nursery 走 8 block 局部 span，`gc_trace.rs` 的解释器按 Bitmap/Program 扫描 managed word 并用 granule + 页内起点向前扫描解析 interior 指针。block 选择式 major evacuation、跨 owner `SharedHeap` handle、radix page map 的镜像落地与空 block 交还 provider 分别由阶段 45–47 与 55 接手；heap 公共统计属阶段 67。
 
 ## trace descriptor
 
@@ -343,8 +345,37 @@ flags bit 0 为 `INITIALIZED`，其余位为 0。记录按 allocation 顺序排�
 
 `MaybeUninit[T]` 的 payload 不发出 trace 指令。只有 `assume_init` 消耗后形成的 `T` 值才按 `T` descriptor 进入 root/heap；unsafe 代码把唯一强引用藏在未初始化 payload 中不建立 GC 可达性。
 
-## value program 与 glue
+### 可恢复的解释器
 
+`runtime/gc_trace.rs` 的 `TraceCursor` 是 trace descriptor 的唯一解释器，`LocalHeap`、mark
+与候选平面共用它，不再保留递归实现：
+
+- **按工作预算推进**：每次 `step` 至多消费预算给出的工作单位，游标保存帧栈（`Body`、
+  `Words`、`Repeat`、`Switch`、`Bitmap`）与各自的位置，跨调用不借用类型表、不复制 descriptor、
+  不保存裸地址。一次性入口 `walk_descriptor` 的上界是
+  `descriptor_len × (TRACE_MAX_DEPTH + 1) + payload_words + 1024`：额度耗尽即
+  `RawInvariant`，因此损坏的 descriptor 不会把驱动变成不终止的循环或无限增长的访问列表。嵌套
+  深度超过 `TRACE_MAX_FRAMES` 同样是失败，而不是栈溢出。
+- **Bitmap 位号语义**：descriptor 头部的 `word_count` 后紧跟两张等长位图，direct 与 interior
+  的同位号位指向**同一个** payload word（interior 不额外偏移八个 word）。帧里保存的始终是
+  「当前字节尚未访问的位」，位耗尽后推进到下一字节，绝不重访同一位。
+- **`SWITCH` 的返回位置**：分支体执行完必须回到整段 case 编码之后，而不是 tag 或某个 case 的
+  中间；case 的 tag 必须严格递增。
+- **`ARENA_SLOTS` 的展开**：该指令本身不访问任何 word，只标记语义。程序执行完后，同一个预算下
+  按 32 字节 backing 头（`slot_count`、`records_offset`、`data_offset`、`capacity`）与 16 字节
+  槽记录逐个处理 initialized 槽：`value_offset` 相对 data 区，inline base 是
+  `data_offset + value_offset`，inline descriptor 的字段偏移则相对整个 backing payload。未初始
+  化槽不是 root；记录区越过 payload、未知 flags、越界或未对齐的值、缺失的 `TypeId`、含 resource
+  的类型都是 `RawInvariant`，不得当成「没有指针」跳过。
+- **对象级游标**：`ObjectTraceCursor` 组合程序部分与可选的槽展开，因此调用方只需按
+  `TraceProgress` 推进一个游标，就能得到 `(payload_base + offset, word)` 形式的精确访问序列。
+
+对象枚举沿用分配时维护的 object-start 位图：`LocalHeap::committed_blocks_of` 给出已提交
+block，`block_objects` 给出「payload 地址 + block 内 header 偏移」，`marked_in_current_epoch`
+只认当前 epoch 的标记位（本 block 尚未在本 epoch 标记过时返回 false，不能把上一轮的陈旧位当成
+当前结果）。三者都不扫描 payload，也不依赖对象大小。
+
+## value program 与 glue
 value program 用于编译器在 GIR 中展开语义复制、销毁、发布和 resource 动作。它不是 GC trace program；collector 不解释普通 copy/drop 操作。
 
 每条 value instruction 固定为：
@@ -500,6 +531,15 @@ LocalHeap 和 TurnRegion 使用 direct field barrier；SharedHeap handle field �
 `EdgeDrop`，由 owner batch 发布给 target；同一 edge 的删除不能早于其已经发布的 add 被
 纳入同一或更晚的 epoch。
 
+edge summary 是**多重计数**而不是布尔标志：同一 `(source block, target block)` 对的重复 add
+累加计数，drop 只扣减当前计数，扣到零且没有保留记录时该 block 对才从活跃边集合清退；扣减超过
+当前计数是不变量失败。一条 hybrid barrier 写入最多产生两项边变更（deletion 与 insertion），与
+每次写入最多消费的两个 shade slot 同源，因此 `edge_deltas_per_write == shade_slots_per_write`。
+热路径把边变更写进 processor owner-local 的固定 `edge scratch`（每 processor 512 项），只有
+scratch 满或需要跨 owner 合并时才走慢路径发布 `EdgeDelta`；scratch 项数与每次写入的边变更上界
+都进入 barrier 契约，`BarrierReserve` 的额度必须同时覆盖 shade slot 与 edge scratch，不能在
+`NoSafepointRegion` 内为边变更临时分配消息节点。
+
 这是 Go 风格的 Yuasa deletion 与 Dijkstra insertion 混合屏障，并附带 owner-local edge
 summary。shade 操作只入队第一次从 white 转 grey 的对象；不能递归扫描 mutator stack。
 标记关闭时步骤 2、3 由一个 runtime flag 分支跳过；generation 条件可由 TLAB/new-object
@@ -522,6 +562,8 @@ card buffer 的 256 项、dedup stamp 和 pending batch bytes 都计入 runtime 
 无法在 `POLL_BUDGET` 内完成的 aggregate copy不能因持有 runtime lock而关闭 safepoint。channel/select等 runtime原语必须先在短 region内取得带 generation的不可见 transfer reservation，在 region外完成 descriptor copy与普通 barrier，再在第二个短 region发布；reservation由 typed visitor扫描，未发布 payload不能被 receiver或 close观察。
 
 card table 每 512 heap 地址字节使用 1 byte；minor cycle 在 mutator 已停止且所有 processor buffer 已 flush、所有 `CardMarkBatch` 已由对应 arena owner 消费后，以 AcqRel swap 把 dirty card 取为 0并扫描。card table 的 owner 写入可使用 owner-local ordinary store；batch 发布以 Release，owner 消费以 Acquire，重复写 1 是幂等的。`EdgeDelta` staging 也只能在有足够 permit、已登记 owner generation 和可追踪 cycle credit 时发布；不能在 `NoSafepointRegion` 内临时分配消息节点。
+
+屏障与边缓存的实现证据：`barrier_schema.rs` 把上述缓存与预留固定成 `BARRIER_SCHEMA = 2` 契约段——每 processor 256 项 `CardMarkBuffer`（`CARD_MARK_BUFFER_ENTRIES = 256`）、每次写入 2 个 shade slot（`SHADE_SLOTS_PER_WRITE = 2`）、每 processor 512 项 edge scratch（`EDGE_BUFFER_ENTRIES = 512`，同时也是 `EdgeDemand.reserve_slots` 的预留证明）、每次写入至多 2 项边变更（`EDGE_DELTAS_PER_WRITE = 2`）、`CardMarkBatch` 的 13 个规范字段（`CARD_MARK_BATCH_FIELDS = 13`，不含 field 地址与 managed pointer）与 6 个 flush 原因（`CARD_MARK_FLUSH_REASONS`：`buffer-full`、`processor-handoff`、`foreign-bridge`、`memory-pressure`、`minor-stop`、`producer-stop-gate`）。verifier 拒绝「边变更上界不等于 shade 上界」「scratch 项数小于每次写入上界」「batch 字段集合与消息 schema 不同源」的契约；`barrier-contract-fingerprint`、`barrier-demand`、`barrier-card-granularity-bytes`、`barrier-card-mark-buffer-entries`、`barrier-card-mark-stamp-entries`、`barrier-flush-reason-count`、`barrier-card-mark-batch-fields`、`barrier-record-count` 与 `barrier-runtime` 进入 `ImagePlan`、`-Zdump-runtime` 与 CLI JSON。
 
 ## collector 使用 metadata 的阶段
 
@@ -673,7 +715,7 @@ dump 输出 `pacing`/`pacing-budget`/`pacing-cpu`/`pacing-remark`/`pacing-evacua
 `pacing-remark-outcomes`/`pacing-evacuation-outcomes`/`pacing-credit-sources`/
 `pacing-demand`/`pacing-fingerprint`，冷/热编译逐字节一致。
 
-`MarkRuntimeContract`（mark schema 1，profile `mosaic-mark` revision 1，域 `gugu-mark-runtime-v1`）
+`MarkRuntimeContract`（mark schema 3，profile `mosaic-mark` revision 2，域 `gugu-mark-runtime-v1`）
 把 mark 阶段的执行门禁固定成带版本对象：每 owner 单 consumer 的 `MarkMailbox`、`owner(8) |
 counter(24)` 的 credit id、六个 cycle 状态（`idle`/`snapshot`/`marking`/`converging`/`remark`/
 `complete`）、三个 credit 转移（`acquire`/`consume`/`return`）、六类 root snapshot 参与者
@@ -683,9 +725,14 @@ counter(24)` 的 credit id、六个 cycle 状态（`idle`/`snapshot`/`marking`/`
 要求条件来源的并集恰好覆盖九个 credit 来源（既不遗漏也不重复绑定）、`mailbox_consumers == 1`、
 `owner_bits + counter_bits == 32`、credit 池为正，并逐字段校验 `MarkMailboxHead`（64 字节 /
 align 64）、`MarkCreditHead`（64 / 64）与 `MarkTerminationRecord`（72 / 8）三条 record 布局与
-`std/runtime/mark.gg` 的 Gugu 布局一致。`MarkTicket` 的 14 个字段只含稳定 arena descriptor、
-对象偏移、source block、cycle/topology epoch、credit 与 bytes，任何 managed 地址都会被
-`verify_family` 拒绝。credit 池上界取「常驻 message node 容量 + 根槽数」：在飞的 ticket 占一个
+`std/runtime/mark.gg` 的 Gugu 布局一致。`MarkTicket` 的 15 个字段只含稳定 arena descriptor、
+对象偏移、source block 全局身份、cycle/topology epoch、credit 与 bytes，任何 managed 地址都会被
+`verify_family` 拒绝。`source_block` 是全局块身份（`descriptor * 64 + block`）而不是 arena 内
+下标：消费端据此解析来源 owner 并确认该 block 仍然提交在对应 heap 里，只带下标的编码会被拒收。
+消费一条 ticket 的顺序是「完整性 → 目标目录解析 → 对象与世代 → 来源身份 → 消费 credit」，
+因此被拒绝的 ticket 不会留下已经被扣掉的 credit，也不会把来源记到错误的 arena 上。
+
+credit 池上界取「常驻 message node 容量 + 根槽数」：在飞的 ticket 占一个
 non-moving node，根 seed 不占 node 但每个根槽每 cycle 至多一次，因此池耗尽就是契约违约。
 
 `ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `mark-contract-fingerprint`、`mark-runtime`、
@@ -697,6 +744,21 @@ non-moving node，根 seed 不占 node 但每个根槽每 cycle 至多一次，�
 的 `root_range_count`、`BarrierDemand` 的 `card_mark_sites`/`edge_summary_sites` 与
 `LocalHeapDemand` 的 `shared_sites` 推导，不新增 LIR 遍历，跨段相等性由 `RuntimeRawContractV1`
 的 verifier 强制。
+
+`EdgeRuntimeContract`（edge schema 1，profile `mosaic-edge` revision 1）固定候选回收的推进协议：
+候选 job 的 10 个相位（`discover`/`trace`/`trial`/`scc`/`validate`/`commit`/`sweep`/`release`/
+`complete`/`invalidate`，顺序即状态机推进顺序）、block 候选状态目录（`active`/`candidate`/
+`reclaiming`/`free`，与 `HeapBlockRecord.state` 的判别值同源）、默认推进 quantum 4096、
+`candidate_schema = 1`、`edge_buffer_entries = 512`（与 barrier 契约的 edge scratch 同值同源）、
+`deltas_per_write = 2` 与精确追踪执行器 revision，并逐字段校验 18 个 `EdgeDelta` 字段
+（含全局 source/destination 块身份、两个 generation 槽、delta 方向、cycle/topology epoch、
+credit 与 integrity，不含任何 managed 地址）。`EdgeDemand` 由 `BarrierDemand` 派生并与
+`MarkDemand` 交叉校验：`edge_sites` 必须等于 barrier 的 `edge_summary_sites` 与 mark 的
+`edge_delta_sites`，`reserve_slots` 取 barrier 的 `shade_slots`——三份契约不允许各自记一份站点
+计数。`edge-contract-fingerprint`、`edge-demand`、`edge-runtime`、`edge-candidate-quantum`、
+`edge-candidate-schema`、`edge-phase-count`、`edge-block-state-count` 与 `edge-delta-field-count`
+进入 `ImagePlan` 与 CLI JSON，dump 输出 `edge`/`edge-demand`/`edge-phases`/`edge-states`/
+`edge-fingerprint` 行。
 
 `runtime/pacing.rs` 的 `PacingPlane` 是契约的运行时对偶：`growth_budget` 取
 `max(min_growth_budget, last_live × target / 100)`，`allocation_debt`、`mark_debt` 与

@@ -5,7 +5,9 @@
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
 pub(crate) mod barrier_impl;
+pub(crate) mod candidate_impl;
 pub(crate) mod coroutine_impl;
+pub(crate) mod edge_impl;
 mod extent_impl;
 pub(crate) mod heap_impl;
 pub(crate) mod mark_impl;
@@ -37,6 +39,14 @@ mod barrier_tests;
 mod heap_tests;
 
 #[cfg(test)]
+#[path = "candidate_tests.rs"]
+mod candidate_tests;
+
+#[cfg(test)]
+#[path = "edge_tests.rs"]
+mod edge_tests;
+
+#[cfg(test)]
 #[path = "../pacing_tests.rs"]
 mod pacing_tests;
 
@@ -59,6 +69,7 @@ use std::sync::Arc;
 
 use super::barrier::BarrierFlushReason;
 use super::barrier_schema::MessageFamilyTag;
+use super::edge::EdgeOutcome;
 use super::extent::{ExtentId, ExtentTable, TrimReport};
 use super::inbox::{
     DrainReport, GraceOutcome, OwnerConsumer, OwnerInbox, ServiceBudget, ShardIndex,
@@ -165,18 +176,32 @@ pub(crate) struct RawWorld {
     mark: Option<super::mark::MarkPlane>,
     /// 每个 owner 的 mark worklist；元素是待标记对象的 payload 地址。
     mark_worklists: Vec<Vec<u64>>,
-    /// 已收敛的 mark cycle epoch；未收敛的 cycle 不推进它。
+    /// 世界唯一的 cycle epoch：barrier 的 card 键、mark 的 ticket 与候选的世代核对都以它为准。
+    ///
+    /// 这个计数只由 `advance_cycle_epoch` 前进一次；任何平面都不再持有自己的第二份 epoch，
+    /// 否则会出现「键属于旧 cycle 却被当成当前」或「ticket 属于已结束的 cycle」这类跨平面错配。
+    cycle_epoch: u64,
+    /// 已完成并收敛的 mark cycle 数；与 `cycle_epoch` 是两回事：一个 epoch 内可以完成多次
+    /// mark cycle（收敛后的 remark），因此它由 mark 平面自己前进。
     mark_cycle_epoch: u64,
+    /// 是否正处于一个打开的 mark cycle：incremental marking 的写屏障与分配染色只在此时开启。
+    mark_active: bool,
     /// 每个 owner 的 LocalHeap Immix arena 集合。
     local_heaps: Option<Vec<super::local_heap::LocalHeap>>,
+    /// 全局稠密 managed descriptor 表；管理权转移不改变 payload 的 heap/arena 定位。
+    managed_arenas: Vec<heap_impl::ManagedArena>,
+    /// `EdgeDelta` 的消费平面：target 侧已应用计数、乱序保留与候选 dirty 集合。
+    edges: Option<super::edge::EdgePlane>,
     /// 从镜像 section 解码出的运行时可读 GC 类型表。
     gc_types: Option<super::gc_metadata_section::GcRuntimeMetadata>,
+    /// 候选回收平面：block 弱连通组、试验删除、SCC 死亡组与恰好一次 sweep/release。
+    candidates: Option<super::candidate::CandidatePlane>,
+    /// 已校对的 `EdgeDelta` 消息与候选回收契约段；运行时按它的值推进候选额度。
+    edge_contract: Option<super::edge_schema::EdgeRuntimeContract>,
     /// 模型根槽数组；每个槽是 managed pointer 或 0。
     managed_roots: Vec<u64>,
     /// 根槽的 `(root kind, type index)` 登记。
     managed_root_kinds: Vec<(u32, u32)>,
-    /// LocalHeap cycle epoch；每次 minor/major 前进一。
-    heap_cycle_epoch: u64,
     /// LocalHeap block 对应的 extent class 编号。
     heap_block_class: u32,
 }
@@ -256,12 +281,17 @@ impl RawWorld {
             local_heap_contract: None,
             mark: None,
             mark_worklists: Vec::new(),
+            cycle_epoch: 0,
             mark_cycle_epoch: 0,
+            mark_active: false,
             local_heaps: None,
+            managed_arenas: Vec::new(),
+            edges: None,
             gc_types: None,
+            candidates: None,
+            edge_contract: None,
             managed_roots: Vec::new(),
             managed_root_kinds: Vec::new(),
-            heap_cycle_epoch: 0,
             heap_block_class: 0,
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
@@ -721,6 +751,20 @@ impl RawWorld {
                 consumed += 1;
                 continue;
             }
+            if self.pool.family_of(message_id) == MessageFamilyTag::EdgeDelta {
+                let delta = self.pool.load_edge_delta(message_id);
+                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
+                {
+                    return Err(RawInvariant::new("edge delta 投递到非目标 owner 的 inbox"));
+                }
+                // 乱序记录连同 node 与 credit 一起保留：只有被应用或已转投的记录才进入 grace。
+                let outcome = self.service_edge_delta(owner, message_id, &delta)?;
+                if outcome != EdgeOutcome::Held {
+                    self.graced_nodes.push(message_id);
+                }
+                consumed += 1;
+                continue;
+            }
             let message = self.load_return_message(message_id)?;
             if message.kind == ReturnKind::StackSpan {
                 self.service_stack_return(owner, &message)?;
@@ -948,6 +992,9 @@ impl RawWorld {
             .trim_cache(owner, 0, &mut self.provider)
             .map_err(|error| self.stack_failure(error))?;
         self.epoch = tick;
+        // managed arena 的管理权随 owner 退役转移：payload 不动，但新 manager 才是这些
+        // block 的投递目标，因此必须在 inbox 排空之前完成移交。
+        self.handover_managed_arenas(owner, target)?;
         // retire 是 processor 交接：本 owner 的 barrier 账本必须在 inbox 排空与 grace 之前
         // 冲刷完，否则 arena owner 会在 card 键落地前看到“已经排空”的假象。
         self.flush_all_barriers(owner, BarrierFlushReason::ProcessorHandoff)?;

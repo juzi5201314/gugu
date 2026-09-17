@@ -605,7 +605,8 @@ fn pad_to(buffer: &mut Vec<u8>, offset: usize) {
 /// 运行时可读的 GC 类型表；只包含收集器消费的布局、flags 与 trace descriptor。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct GcRuntimeMetadata {
-    types: Vec<GcRuntimeType>,
+    /// 稠密类型表；顺序就是 `TypeId`，跨 crate 消费者的读取入口是 `types()`。
+    pub(crate) types: Vec<GcRuntimeType>,
 }
 
 /// 单个运行时可读类型；记录顺序就是稠密 `TypeId`，section 不重复保存数字 ID 或稳定键。

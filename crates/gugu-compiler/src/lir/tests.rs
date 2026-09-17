@@ -357,6 +357,7 @@ fn resource_descriptors_are_derived_from_bodies() {
 #[test]
 fn barrier_reserve_materializes_permits() {
     use crate::frontend::gir::body::NoSafepointReason::{OwnershipPublish, RootPublish};
+    use crate::runtime::barrier_schema::EDGE_DELTAS_PER_WRITE;
 
     let compilation = compile(PUBLISH);
     let body = compilation
@@ -375,6 +376,13 @@ fn barrier_reserve_materializes_permits() {
         // 每个 publish region 只包住一条句柄 Assign：一个 store、一个写入地址。
         assert_eq!(permit.max_shades, 2);
         assert_eq!(permit.max_card_marks, 1);
+        // shade 额度同时是 edge scratch 的容量证明：每条写入最多贡献
+        // `EDGE_DELTAS_PER_WRITE` 条边变更，两者上界同源，因此不需要第二份额度字段。
+        assert_eq!(
+            EDGE_DELTAS_PER_WRITE,
+            crate::runtime::barrier_schema::SHADE_SLOTS_PER_WRITE
+        );
+        assert!(permit.max_shades >= EDGE_DELTAS_PER_WRITE);
     }
     let mut reserves = [0; 2];
     let mut barriers = [0; 2];

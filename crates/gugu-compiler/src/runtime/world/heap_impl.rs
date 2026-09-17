@@ -9,10 +9,11 @@ use super::super::extent::class_for_bytes;
 use super::super::gc_metadata_schema::GcRootKindV1;
 use super::super::gc_metadata_section::{GcRuntimeMetadata, decode_sections};
 use super::super::local_heap::{
-    CycleReport, GENERATION_OLD, HeapArenaKind, HeapCounters, HeapError, HeapObject, LocalHeap,
+    BlockRef, CycleReport, GENERATION_OLD, HeapArenaKind, HeapCounters, HeapError, HeapObject,
+    LocalHeap, ManagedBlockId,
 };
-use super::super::local_heap_schema::LocalHeapRuntimeContract;
-use super::super::slab::{MemoryDomainId, RawInvariant, SlabDescriptorId};
+use super::super::local_heap_schema::{HEAP_BLOCKS_PER_ARENA, LocalHeapRuntimeContract};
+use super::super::slab::{MemoryDomainId, OwnerToken, RawInvariant};
 use super::RawWorld;
 
 /// managed 分配位置；与 `PlacementKind` 的 managed 子集一一对应。
@@ -20,6 +21,8 @@ use super::RawWorld;
 pub(crate) enum ManagedPlacement {
     /// 当前 turn 私有的 nursery 快路径。
     Nursery,
+    /// 需要在 old region 分配的对象；old slow edge 必须真正可达。
+    Old,
     /// 需要在 old region 固定的对象。
     Pinned,
     /// resource lease 对象；不进入 nursery。
@@ -33,6 +36,7 @@ impl ManagedPlacement {
     pub(crate) const fn name(self) -> &'static str {
         match self {
             Self::Nursery => "local-heap",
+            Self::Old => "old",
             Self::Pinned => "pinned",
             Self::Resource => "resource",
             Self::SharedHeap => "shared-heap",
@@ -43,14 +47,30 @@ impl ManagedPlacement {
     const fn arena(self) -> HeapArenaKind {
         match self {
             Self::Nursery | Self::SharedHeap => HeapArenaKind::Nursery,
+            Self::Old => HeapArenaKind::Old,
             Self::Pinned => HeapArenaKind::Pinned,
             Self::Resource => HeapArenaKind::Resource,
         }
     }
 }
 
+/// 一个全局 managed arena 的登记项。
+///
+/// descriptor 由世界级稠密表分配，生命周期内不复用：card table、mark ticket 与 block 身份
+/// 都按它索引。管理权转移只更新 `manager`，payload 仍由这里的 extent arena 定位。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ManagedArena {
+    pub(crate) descriptor: u32,
+    pub(crate) heap_owner: u32,
+    pub(crate) heap_slot: usize,
+    pub(crate) extent_arena: u32,
+    pub(crate) base: u64,
+    pub(crate) kind: HeapArenaKind,
+    pub(crate) manager: OwnerToken,
+}
+
 /// 把 `HeapError` 转换成本平面的不变量错误。
-fn heap_error(error: HeapError) -> RawInvariant {
+pub(super) fn heap_error(error: HeapError) -> RawInvariant {
     error.into_invariant()
 }
 
@@ -77,10 +97,73 @@ impl RawWorld {
         self.gc_types = Some(types);
         self.managed_roots.clear();
         self.managed_root_kinds.clear();
-        self.heap_cycle_epoch = 0;
+        self.cycle_epoch = 0;
         self.heap_block_class = block_class;
         self.configure_mark(raw.mark())?;
+        self.edges = Some(super::super::edge::EdgePlane::new());
+        let edge = raw.edge();
+        self.verify_edge_contract(edge)?;
+        self.edge_contract = Some(edge.clone());
+        self.configure_candidates();
         Ok(())
+    }
+
+    /// 校验运行时实现与 edge 契约逐项一致。
+    ///
+    /// 契约自身的 `verify` 只保证契约内部自洽；这里核对的是**运行时实现**：候选相位目录、
+    /// block 状态目录、候选决议 schema 与 `job_of_block` 的保留取值。不一致必须在配置期失败，
+    /// 否则错配要等到第一个 cycle 才以「相位名对不上」或「job 编号撞车」的形式爆出来。
+    pub(crate) fn verify_edge_contract(
+        &self,
+        edge: &super::super::edge_schema::EdgeRuntimeContract,
+    ) -> Result<(), RawInvariant> {
+        use super::super::candidate_schema::{CANDIDATE_SCHEMA, CandidatePhase};
+        use super::super::local_heap_schema::HEAP_BLOCK_STATE_NAMES;
+        if edge.schema() != super::super::edge_schema::EDGE_SCHEMA {
+            return Err(RawInvariant::new("edge 契约 schema 与运行时不一致"));
+        }
+        if edge.phases.len() != CandidatePhase::ALL.len() {
+            return Err(RawInvariant::new("edge 契约的相位数量与运行时不一致"));
+        }
+        for (index, phase) in CandidatePhase::ALL.iter().enumerate() {
+            if edge.phases[index] != phase.name() {
+                return Err(RawInvariant::new("edge 契约的相位名与运行时不一致"));
+            }
+        }
+        if edge.states.len() != HEAP_BLOCK_STATE_NAMES.len() {
+            return Err(RawInvariant::new(
+                "edge 契约的 block 状态数量与运行时不一致",
+            ));
+        }
+        for (index, name) in HEAP_BLOCK_STATE_NAMES.iter().enumerate() {
+            if edge.states[index] != *name {
+                return Err(RawInvariant::new("edge 契约的 block 状态名与运行时不一致"));
+            }
+        }
+        if edge.candidate_schema() != CANDIDATE_SCHEMA {
+            return Err(RawInvariant::new("候选决议 schema 与运行时不一致"));
+        }
+        if edge.candidate_quantum() == 0 {
+            return Err(RawInvariant::new("候选 quantum 不得为零"));
+        }
+        if edge.no_job() != super::super::edge_schema::EDGE_NO_JOB {
+            return Err(RawInvariant::new("job_of_block 保留取值与运行时不一致"));
+        }
+        if edge.trace_executor_revision() == 0 {
+            return Err(RawInvariant::new("精确追踪执行器 revision 不得为零"));
+        }
+        // scratch 预留与 shade 上界的关系由契约自身的 `verify` 逐值核对：没有 shade 站点的程序
+        // 合法地拥有零预留，因此这里不再重复（重复会引入“有站点就必须有预留”的错误假设）。
+        Ok(())
+    }
+
+    /// 返回已校对的 edge 契约。未配置时失败。
+    pub(crate) fn edge_contract(
+        &self,
+    ) -> Result<&super::super::edge_schema::EdgeRuntimeContract, RawInvariant> {
+        self.edge_contract
+            .as_ref()
+            .ok_or_else(|| RawInvariant::new("edge 契约尚未配置"))
     }
 
     /// 返回 LocalHeap 是否已配置。
@@ -157,19 +240,23 @@ impl RawWorld {
         } else {
             placement.arena()
         };
-        self.ensure_heap_space(owner, kind, need, need > 1)?;
+        let arena = self.ensure_heap_space(owner, kind, need, need > 1)?;
         let align = kind_align(kind, &contract);
         let mut attempt = self
             .heap_mut(owner)?
-            .allocate(kind, type_index, payload_bytes, align);
+            .allocate(arena, type_index, payload_bytes, align);
         if kind == HeapArenaKind::Nursery && matches!(attempt, Err(HeapError::NoCapacity)) {
             // 当前 TLAB span 在分配过程中用尽：重新取 span（必要时提交新 block）后重试一次。
-            self.ensure_heap_space(owner, kind, need, false)?;
+            let arena = self.ensure_heap_space(owner, kind, need, false)?;
             attempt = self
                 .heap_mut(owner)?
-                .allocate(kind, type_index, payload_bytes, align);
+                .allocate(arena, type_index, payload_bytes, align);
         }
-        attempt.map_err(heap_error)
+        let address = attempt.map_err(heap_error)?;
+        // incremental marking 期间新对象必须进入本轮 cycle 的灰色集合：否则它在 cycle 收尾时
+        // 仍未标记，会被 sweep 当成垃圾回收。
+        self.shade_address(owner, address)?;
+        Ok(address)
     }
 
     /// 读取对象 header 描述。
@@ -189,6 +276,10 @@ impl RawWorld {
     }
 
     /// 写入对象 payload 中的 managed 字段，并执行 hybrid barrier。
+    ///
+    /// source、old 与 new 三个身份都在写入之前从真实 heap metadata 解析：source 来自被写对象
+    /// 自身，old 来自被覆盖的 word，new 来自新值。null 记为 `None`，合法 interior pointer 先
+    /// 回表到原对象。card 键用字段的 arena 内偏移，而不是 payload 字段偏移。
     pub(crate) fn store_managed_field(
         &mut self,
         owner: u32,
@@ -202,42 +293,145 @@ impl RawWorld {
             .heap(owner)?
             .field(address, offset)
             .map_err(heap_error)?;
-        let descriptor = self.heap(owner)?.arena_of(address).map_err(heap_error)?.1;
-        let source_block = self.heap(owner)?.block_of(address).map_err(heap_error)?;
-        let new_owner = if value == 0 {
-            owner
-        } else {
-            self.owner_of(value)?
-        };
-        let new_in_nursery = value != 0 && self.heap(new_owner)?.in_nursery(value);
-        let new_block = if value == 0 {
+        let source = self.heap(owner)?.block_ref(address).map_err(heap_error)?;
+        let (_, descriptor) = self.heap(owner)?.arena_of(address).map_err(heap_error)?;
+        let card_offset = self
+            .heap(owner)?
+            .field_offset(address, offset)
+            .map_err(heap_error)?;
+        let old_target = if old == 0 {
             None
         } else {
-            self.heap(new_owner)?.block_of(value).ok()
+            let old_owner = self.owner_of(old)?;
+            Some(self.managed_block_ref(old_owner, old)?)
         };
+        let new_target = if value == 0 {
+            None
+        } else {
+            let new_owner = self.owner_of(value)?;
+            Some(self.managed_block_ref(new_owner, value)?)
+        };
+        let new_in_nursery = match new_target {
+            Some(_) => {
+                let new_owner = self.owner_of(value)?;
+                self.heap(new_owner)?.in_nursery(value)
+            }
+            None => false,
+        };
+        let arena_generation = self
+            .barrier()
+            .table(descriptor)
+            .map(|table| table.arena_generation())
+            .ok_or_else(|| RawInvariant::new("managed arena 缺 card table 登记"))?;
         self.heap_mut(owner)?
             .set_field(address, offset, value)
             .map_err(heap_error)?;
         let site = BarrierSite {
             arena_descriptor: descriptor,
-            arena_generation: 0,
-            offset,
-            cycle_epoch: self.heap_cycle_epoch,
-            old_present: old != 0,
-            new_present: value != 0,
+            arena_generation,
+            offset: card_offset,
+            cycle_epoch: self.cycle_epoch,
+            source,
+            old: old_target,
+            new: new_target,
             new_in_nursery,
             owner_old: object.generation >= GENERATION_OLD,
-            marking: false,
+            marking: self.mark_active,
             stack_grey: true,
-            new_block,
-            source_block,
-            new_owner,
-            source_owner: owner,
         };
-        self.perform_barrier(processor, site).map(|_| ())
+        let outcome = self.perform_barrier(processor, site)?;
+        if outcome.shaded_old && old != 0 {
+            // Yuasa deletion：被覆盖掉的旧引用仍可能只有这一条通路，必须染灰后再失去它。
+            let old_owner = self.owner_of(old)?;
+            self.shade_address(old_owner, old)?;
+        }
+        if outcome.shaded_new && value != 0 {
+            // Dijkstra insertion：新引用指向的对象必须进入灰色集合，否则本轮 cycle 会漏掉它。
+            let new_owner = self.owner_of(value)?;
+            self.shade_address(new_owner, value)?;
+        }
+        if let Some(reason) = outcome.flush {
+            // 字段写入已经发生，这里只补记账：先 flush 再把未记入的边变更原样重放。
+            self.flush_barrier(owner, processor, reason)?;
+            self.barrier_mut()
+                .replay_pending_edges(processor, &outcome.pending_edges);
+        }
+        Ok(())
     }
 
-    /// pin 一个 managed 对象；nursery/aging 对象先提升并改写全部强引用。
+    /// 把全部「lease 归零且非空」的 managed block 登记为候选。
+    ///
+    /// incoming lease 归零本身就是候选的产生条件，因此 major cycle 不能只依赖 mutator 的 dirty
+    /// 集合：那会把「已经没有外部引用的块」留到下一次写入才被发现。这里按真实事实筛：状态为
+    /// `active`、四类 lease 全为零、非 nursery、且块内仍有对象（空块直接跳过，避免每轮重复
+    /// 建组—释放空块）。返回登记的块数。
+    pub(crate) fn seed_zero_lease_candidates(&mut self) -> Result<u64, RawInvariant> {
+        if self.candidates.is_none() {
+            return Ok(0);
+        }
+        let arenas: Vec<(u32, u32)> = self
+            .managed_arenas
+            .iter()
+            .map(|arena| (arena.descriptor, arena.heap_owner))
+            .collect();
+        let mut seeded = 0_u64;
+        for (descriptor, heap_owner) in arenas {
+            let blocks = {
+                let heap = self.heap(heap_owner)?;
+                heap.committed_blocks_of(u64::from(descriptor))
+                    .map_err(heap_error)?
+            };
+            for index in blocks {
+                let id = ManagedBlockId::new(descriptor, index)?;
+                let (record, kind, live_lines) = {
+                    let heap = self.heap(heap_owner)?;
+                    (
+                        heap.block_record(id).map_err(heap_error)?,
+                        heap.block_arena_kind(id).map_err(heap_error)?,
+                        heap.block_live_lines(id).map_err(heap_error)?,
+                    )
+                };
+                if record.state != 0
+                    || kind == HeapArenaKind::Nursery
+                    || live_lines == 0
+                    || record.incoming_leases != 0
+                    || record.allocator_leases != 0
+                    || record.scanner_leases != 0
+                    || record.evacuation_leases != 0
+                {
+                    continue;
+                }
+                // 块内仍有本 epoch 标记的对象说明它确实活着：不该进入候选，否则每轮 cycle 都会
+                // 建一个必然被 `validate` 退回的 job。零标记的块才是「本轮 sweep 会清空」的块。
+                {
+                    let heap = self.heap(heap_owner)?;
+                    if heap.block_marked_objects(id).map_err(heap_error)? != 0 {
+                        continue;
+                    }
+                }
+                if self.candidate_job_of(id)?.is_some() {
+                    continue;
+                }
+                self.note_candidate_dirty(id)?;
+                seeded = seeded.saturating_add(1);
+            }
+        }
+        Ok(seeded)
+    }
+
+    /// 把一个 managed 对象染灰：它进入所属 owner 的 mark worklist。
+    ///
+    /// 只在 mark cycle 打开时生效：没有进行中的 cycle 时不存在灰色集合，写屏障与分配都不需要
+    /// 染色（下一次 cycle 会从根与 card 重新开始）。去重由 mark pass 的标记位负责。
+    pub(super) fn shade_address(&mut self, owner: u32, address: u64) -> Result<(), RawInvariant> {
+        if !self.mark_active {
+            return Ok(());
+        }
+        let object = self.heap(owner)?.object_at(address).map_err(heap_error)?;
+        self.mark_worklists[owner as usize].push(object.object_start);
+        Ok(())
+    }
+
     pub(crate) fn pin_managed(
         &mut self,
         owner: u32,
@@ -310,8 +504,11 @@ impl RawWorld {
             .heap_mut(owner)?
             .collect_minor(&types, &mut roots, &dirty);
         self.managed_roots = roots;
-        self.heap_cycle_epoch += 1;
-        self.advance_barrier_epoch(owner, self.heap_cycle_epoch)?;
+        // cycle 边界前先按真实搬迁重建 block 对计数：旧目标 block 的入边必须随对象搬到新目标，
+        // 否则候选判定会按已经不存在的 block 做试验删除。
+        let relocations = self.heap_mut(owner)?.take_relocations();
+        self.rebuild_edges_after_relocation(relocations)?;
+        self.advance_cycle_epoch(owner)?;
         result.map_err(heap_error)
     }
 
@@ -374,35 +571,37 @@ impl RawWorld {
         Ok(cards)
     }
 
-    /// 确保目标类别的 arena 具备一次分配所需的 block；nursery 需要整个 TLAB span 连续。
+    /// 确保目标类别的 arena 具备一次分配所需的 block；返回可分配 heap arena 下标。
+    ///
+    /// nursery 需要整个 TLAB span 连续；`blocks` 只描述本次请求的容量需求，不是候选图容量上界。
     fn ensure_heap_space(
         &mut self,
         owner: u32,
         kind: HeapArenaKind,
         blocks: u32,
         large: bool,
-    ) -> Result<(), RawInvariant> {
-        self.ensure_arena(owner, kind)?;
-        let block_bytes = u64::from(self.heap_contract()?.block_bytes());
+    ) -> Result<usize, RawInvariant> {
         let span = if kind == HeapArenaKind::Nursery && !large {
             self.heap(owner)?.tlab_span_blocks()
         } else {
             blocks.max(1)
         };
-        let heap_index = self
-            .heap(owner)?
-            .arena_index(kind, 0)
-            .ok_or_else(|| RawInvariant::new("LocalHeap arena 缺失"))?;
-        let total = self.heap(owner)?.blocks_per_arena();
-        for _ in 0..total {
-            if self.heap(owner)?.has_allocatable(heap_index, span) {
-                return Ok(());
+        if let Some(slot) = self.heap(owner)?.allocatable_arena(kind, span) {
+            return Ok(slot);
+        }
+        let slot = self.register_heap_arena(owner, kind)?;
+        let block_bytes = u64::from(self.heap_contract()?.block_bytes());
+        let class = self.heap_block_class;
+        for _ in 0..HEAP_BLOCKS_PER_ARENA {
+            if self.heap(owner)?.has_allocatable(slot, span) {
+                return Ok(slot);
             }
-            let class = self.heap_block_class;
-            let offset = self.commit_managed_block(owner, class)?;
-            let block = u32::try_from(offset / block_bytes).expect("block 下标适配 u32");
+            let extent_arena = self.managed_arena(owner, slot)?.extent_arena;
+            let (_, offset) = self.commit_managed_block(owner, extent_arena, class)?;
+            let block = u32::try_from(offset / block_bytes)
+                .map_err(|_| RawInvariant::new("block 下标超出 u32"))?;
             self.heap_mut(owner)?
-                .commit_block(heap_index, block)
+                .commit_block(slot, block)
                 .map_err(heap_error)?;
         }
         Err(RawInvariant::new(
@@ -410,30 +609,85 @@ impl RawWorld {
         ))
     }
 
-    /// 确保某类别的 arena 已登记。
-    fn ensure_arena(&mut self, owner: u32, kind: HeapArenaKind) -> Result<usize, RawInvariant> {
-        if let Some(index) = self.heap(owner)?.arena_index(kind, 0) {
-            return Ok(index);
+    /// 登记一个 managed arena：分配全局稠密 descriptor、打开 extent arena 并挂到 owner heap。
+    fn register_heap_arena(
+        &mut self,
+        owner: u32,
+        kind: HeapArenaKind,
+    ) -> Result<usize, RawInvariant> {
+        if let Some(slot) = self.heap(owner)?.uncommitted_arena(kind) {
+            return Ok(slot);
         }
-        let contract = self
-            .local_heap_contract
-            .clone()
-            .ok_or_else(|| RawInvariant::new("LocalHeap 未按契约配置"))?;
-        let token = self.token(owner);
-        let arena = self.open_arena(owner, token, MemoryDomainId::MANAGED_LOCAL)?;
+        let contract = self.heap_contract()?.clone();
+        let manager = self.token(owner);
+        let extent_arena = self.open_arena(owner, manager, MemoryDomainId::MANAGED_LOCAL)?;
         let base = self
             .extents
-            .arena_base(arena)
+            .arena_base(extent_arena)
             .ok_or_else(|| RawInvariant::new("LocalHeap arena 缺少基址"))?;
-        let index = self.heap_mut(owner)?.attach_arena(kind, base, &contract);
-        let descriptor = self
-            .heap(owner)?
-            .arena(index)
-            .ok_or_else(|| RawInvariant::new("LocalHeap arena 缺失"))?
-            .descriptor();
-        let raw = u32::try_from(descriptor).map_err(|_| RawInvariant::new("arena 身份超出 u32"))?;
-        self.register_managed_arena(owner, SlabDescriptorId::from_raw(raw), 0)?;
-        Ok(index)
+        let descriptor = u32::try_from(self.managed_arenas.len() + 1)
+            .map_err(|_| RawInvariant::new("managed arena 数量超过 u32"))?;
+        let heap_slot = self
+            .heap_mut(owner)?
+            .attach_arena(kind, descriptor, base, &contract);
+        self.heap_mut(owner)?
+            .set_arena_manager(heap_slot, manager.owner_id.raw());
+        self.managed_arenas.push(ManagedArena {
+            descriptor,
+            heap_owner: owner,
+            heap_slot,
+            extent_arena,
+            base,
+            kind,
+            manager,
+        });
+        self.register_managed_arena(owner, descriptor, 0)?;
+        Ok(heap_slot)
+    }
+
+    /// 按 owner 与 heap 内下标取 managed arena 登记项。
+    pub(crate) fn managed_arena(
+        &self,
+        owner: u32,
+        heap_slot: usize,
+    ) -> Result<&ManagedArena, RawInvariant> {
+        self.managed_arenas
+            .iter()
+            .find(|arena| arena.heap_owner == owner && arena.heap_slot == heap_slot)
+            .ok_or_else(|| RawInvariant::new("managed arena 未登记"))
+    }
+
+    /// 按全局 descriptor 取 managed arena 登记项。
+    pub(crate) fn managed_arena_by_descriptor(
+        &self,
+        descriptor: u32,
+    ) -> Result<&ManagedArena, RawInvariant> {
+        self.managed_arenas
+            .iter()
+            .find(|arena| arena.descriptor == descriptor)
+            .ok_or_else(|| RawInvariant::new("managed arena descriptor 未登记"))
+    }
+
+    /// 返回全部 managed arena 登记项；mark 与 candidate 平面按 descriptor 索引它们。
+    pub(crate) fn managed_arenas(&self) -> &[ManagedArena] {
+        &self.managed_arenas
+    }
+
+    /// 解析一个 payload 地址所属的稳定 block 身份。
+    pub(crate) fn managed_block_ref(
+        &self,
+        owner: u32,
+        address: u64,
+    ) -> Result<BlockRef, RawInvariant> {
+        self.heap(owner)?.block_ref(address).map_err(heap_error)
+    }
+
+    /// 按稳定 block 身份取它的当前 generation。
+    pub(crate) fn managed_block_generation(&self, id: ManagedBlockId) -> Result<u32, RawInvariant> {
+        let arena = self.managed_arena_by_descriptor(id.arena())?;
+        self.heap(arena.heap_owner)?
+            .block_generation(id)
+            .map_err(heap_error)
     }
 }
 

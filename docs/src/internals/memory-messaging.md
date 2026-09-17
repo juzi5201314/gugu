@@ -444,6 +444,77 @@ block 的 incoming lease 归零只产生 collection candidate，不能直接回�
 必须继续完成 pending delta 验证、block 内 exact trace、内部 cycle/SCC 检测、pin/resource
 检查和 scanner/allocator/evacuation lease 检查。不得引入普通对象级 reference counting。
 
+`runtime/candidate.rs` 的 `CandidatePlane` 是上述判定的确定性状态机，与 edge 契约的
+`EdgeRuntimeContract`（`candidate_schema` 与相位目录）同源：
+
+- **十个固定相位**：`discover → trace → trial → scc → validate → commit → sweep → release
+  → complete`，以及任一早期相位失败时进入的 `invalidate`。相位目录只有一份：候选枚举按
+  `EdgeRuntimeContract.phases` 逐项取名同序，`CANDIDATE_SCHEMA` 必须等于契约登记的
+  `candidate_schema`。
+- **无规模截断的弱连通组**：发现相位按边记录线性推进，把一个 block 的 lease 空闲邻居纳入同一
+  组，不设成员上限、不抽样。每个 block 同时只属于一个 job：新候选若与某个尚未 `commit` 的 job
+  相邻，就由该 job 收养并重跑发现相位；邻接表、计数、出边、SCC 与存活状态在收养时全部清空重算，
+  因为 `internal_counts` 是饱和累加，在旧结果上重扫会重复计数。
+- **block 对试验删除**：对每个成员减去组内指向它的引用计数，得到「组外仍有几条引用」。正剩余
+  只把该成员记为存活种子，不直接判活判死。
+- **组内 SCC 与死亡组**：`scc` 相位先用可暂停迭代 Tarjan 求出组内 SCC，再在收缩图上从存活
+  种子沿定向边传播；未被传播到的 SCC 才是死亡组。同一弱连通组里已死的 SCC 不会被存活邻居连坐，
+  `commit` 只针对死亡组。
+- **验证 gate**：`validate` 对死亡组逐个成员复核世代与 `mutation_version` 是否仍是建组时
+  的值、四类 lease 是否归零、`PINNED` 位数、含 resource 实例的对象数与当前 mark epoch 的标记
+  数。任一命中即转入 `invalidate`，并给出 `CandidateVerdict::Alive` 与命中的原因和证据 block。
+- **唯一线性化点与私有决议**：`commit` 在最后一次计费后一次性发出 `CommitGroup`
+  （死亡组身份与世代）与出边减量 `DropOutgoing`，中途不产生任何动作；`CandidateVerdict` 只是
+  报告里的私有结论，平面本身不持有释放权限。
+- **出边减量的覆盖范围**：死亡组的引用必须一起减掉，包括指向组外 block 的引用，也包括指向同组
+  仍存活 SCC 的引用；两端都在死亡组内的引用不需要减量，两者一起消失。
+- **恰好一次的确认**：计划持有者的 `note_swept` 与 `note_released` 对同一个 block 只接受一次，
+  重复确认、世代不符、或发生在 `Sweep`/`Release` 之外都是 `RawInvariant`；只有全部死亡成员
+  确认 sweep 之后才会发出 `ReleaseBlock`。
+- **预算与本地失效**：每次 `advance` 消费至多 `candidate_quantum` 个工作单位，相位内部的成员
+  游标跨批保留，因此任意预算下的结论一致；建组期间被 mutator 改过的成员会让该 job 在 `commit`
+  之前整体转入 `invalidate`，失效收尾时这些成员重新回到候选 dirty 集合，不重跑就等于漏收。
+
+块记录 `HeapBlockRecord` 是 candidate 与 heap 之间的唯一事实来源：`candidate_job` 记录绑定，
+`state` 走 `active → candidate → reclaiming → free`，`incoming_leases`/`allocator_leases`/
+`scanner_leases`/`evacuation_leases` 是 gate 的输入。`ManagedBlockId` 的 arena 部分就是
+arena descriptor，世代与记录读写都必须按 descriptor 定位 arena：只按 arena 内下标查找会让
+arena ≥ 1 的 block 读到 arena 0 同号 block 的世代。
+
+`runtime/world/candidate_impl.rs` 把这些契约落到真实世界状态：
+
+- **取样**：`incoming` 取自 `EdgePlane` 的 target 侧已应用计数，lease、世代、`mutation_version`
+  取自 `HeapBlockRecord`，pin 与 resource 实例数取自 header 控制字，标记数取自 mark 位图；
+  候选平面因此不读堆，也不需要第二套统计。取样范围是已绑定 block 加 dirty 集合，缺快照即失败。
+- **绑定用状态而不是 lease**：`candidate` 状态本身已经阻止 allocator 继续往该 block 分配，因此
+  绑定只写 `state = candidate` 与 `candidate_job`。若绑定自己占一个 scanner lease，`validate`
+  要求的「四类 lease 归零」就永远不可能通过。
+- **提交路径**：解绑 → `state = reclaiming` → `sweep_block`（只清扫未标记对象，逐对象走与
+  `sweep_unmarked` 相同的回收实现）→ `note_swept`；随后 `ReleaseBlock` 调 `release_block`
+  清空对象、line、object-start 位与 mark 位、推进世代并复位全部 lease 计数，再 `note_released`。
+  两条确认都恰好一次，重复执行由平面判成不变量失败。
+- **出边减量**：`DropOutgoing` 从 `EdgePlane` 的已应用计数里扣减，扣到零且没有保留记录时清退该
+  block 对；扣减超过当前计数是不变量失败。
+- **nursery 排除**：nursery block 由 minor cycle 整体搬运与复位，不是候选对象；变更通知按 arena
+  类别把它挡在候选之外，否则可能出现「仍会被 evacuate 的 block 被释放」。
+- **epoch 单一权威**：`RawWorld::advance_cycle_epoch` 是唯一推进 cycle epoch 的入口，barrier 的
+  card 键纪元与 heap 的 cycle 纪元始终相等；仍有未 flush 的 card 键时拒绝前进。mark 的 cycle
+  计数是另一个量——一个 epoch 内可以完成多次 mark cycle（收敛后的 remark），因此它由 mark 平面
+  自己前进，不驱动世界 epoch。
+- **增量标记的染色协议**：`mark_active` 只在 `begin_mark_cycle` 到 `finish_mark_cycle` 之间为
+  真，写屏障与分配染色都只在此时开启。写屏障按平面给出的 `shaded_old`/`shaded_new` 把被覆盖的
+  旧值与写入的新值送进目标 owner 的 mark worklist（Yuasa deletion 与 Dijkstra insertion 同时
+  生效，`stack_grey` 恒为真）；`allocate_managed` 在每个新对象分配成功后也把它送入同一 worklist，
+  否则新对象会在本轮 cycle 收尾时仍未标记而被 sweep 回收。cycle 关闭后 worklist 清空，下一次
+  cycle 从根与 card 重新开始。
+- **搬迁后的边重建**：`evacuate`/`promote_pinned` 在写转发指针之后按不解析转发的查询记录
+  `(旧 block, 新 block)`，`take_relocations` 在 cycle 边界把记录交给世界。世界对每个旧 block 取
+  「接收对象最多」的目标（并列取编号最小者，保证结论与遍历顺序无关），并把三处一起重键：屏障的
+  聚合项（`incoming_leases` 的真实来源，重键而不是复制，否则旧块永远背着租约、新块租约偏高）、
+  边平面的已应用计数（含序号血统与保留的乱序记录）、以及块记录上的 `incoming_leases`。旧块与
+  新块都会收到候选 dirty 通知。逐对象的搬迁记录无法精确拆分按 block 对聚合的计数，按主目标整体
+  迁移保持了全局计数总和不变；判错方向的兜底仍是 `validate` 的标记 gate。
+
 ### Return unit 与状态迁移
 
 managed plane 的 return unit 按风险从低到高排列：

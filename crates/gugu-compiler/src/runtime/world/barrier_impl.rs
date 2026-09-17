@@ -10,11 +10,11 @@
 //!    producer stop gate 六个触发点都调用 `flush_barrier`，且 flush 只发布此前的记账。
 
 use super::super::barrier::{
-    BarrierFlushReason, BarrierPlane, BarrierSite, CardMarkDraft, EdgeDeltaRecord,
-    HybridBarrierOutcome,
+    BarrierFlushReason, BarrierPlane, BarrierSite, CardMarkDraft, HybridBarrierOutcome,
 };
 use super::super::gc_metadata_contract::GC_ARENA_BYTES;
 use super::super::inbox::ShardIndex;
+use super::super::local_heap::BlockRef;
 use super::super::message::{
     CardMarkBatch, FlushTrigger, IntegrityTag, MessageState, ProducerStaging, stage_card_mark,
 };
@@ -28,7 +28,9 @@ pub(crate) struct BarrierStats {
     pub(crate) card_marks: u64,
     /// dedup 命中次数。
     pub(crate) slot_reuses: u64,
-    /// 已发布 batch 数。
+    /// 已发布的跨 block edge delta 总数。
+    pub(crate) edge_published: u64,
+    /// 已发布的总批次（card batch 加 edge 批次）。
     pub(crate) published_batches: u64,
     /// 已消费 batch 数。
     pub(crate) consumed_batches: u64,
@@ -38,8 +40,6 @@ pub(crate) struct BarrierStats {
     pub(crate) empty_flushes: u64,
     /// 六个原因各自的 flush 次数。
     pub(crate) by_reason: [u64; 6],
-    /// 已取走的跨 block edge delta 总数。
-    pub(crate) edge_deltas: u64,
     /// edge summary 中尚未取出的 delta 数。
     pub(crate) edge_pending: u64,
 }
@@ -57,17 +57,17 @@ impl RawWorld {
 
     /// 登记一个 managed arena 的 card table；同一 descriptor 重复登记保持既有表。
     ///
-    /// arena 的物理页由 slab/extent 层提交，card table 只登记元数据；arena descriptor
-    /// 用 slab 描述符编号表示，使 batch 与 return 消息共享同一身份空间。
+    /// arena 的物理页由 extent 层提交，card table 只登记元数据；descriptor 由世界级稠密表
+    /// 分配，因此 card batch、mark ticket 与 block 身份共享同一身份空间。
     pub(crate) fn register_managed_arena(
         &mut self,
         owner: u32,
-        arena_descriptor: SlabDescriptorId,
+        arena_descriptor: u32,
         arena_generation: u32,
     ) -> Result<(), RawInvariant> {
         let token = self.token(owner);
         self.barrier.register_arena(
-            u64::from(arena_descriptor.raw()),
+            u64::from(arena_descriptor),
             token,
             arena_generation,
             GC_ARENA_BYTES,
@@ -85,6 +85,31 @@ impl RawWorld {
         site: BarrierSite,
     ) -> Result<HybridBarrierOutcome, RawInvariant> {
         self.barrier.perform_barrier(processor, site)
+    }
+
+    /// 推进一个 cycle 边界：heap、barrier 与 mark 的 epoch 由这里唯一前进。
+    ///
+    /// 三处必须始终相等，因此只有这一个入口会改 epoch：barrier 的 card 键按 cycle epoch 记账、
+    /// mark 的 ticket 带 cycle 与 topology、候选的决议按块世代核对，任何一处独立前进都会让跨平面
+    /// 的身份校验对不上真实周期。barrier 仍有未发布键时拒绝前进（由调用方先 flush 再重试）。
+    pub(crate) fn advance_cycle_epoch(&mut self, owner: u32) -> Result<u64, RawInvariant> {
+        let next = self
+            .cycle_epoch
+            .checked_add(1)
+            .ok_or_else(|| RawInvariant::new("cycle epoch 溢出"))?;
+        self.advance_barrier_epoch(owner, next)?;
+        self.cycle_epoch = next;
+        Ok(next)
+    }
+
+    /// 返回 barrier 平面记账用的 cycle epoch；它必须与 `cycle_epoch` 相等。
+    pub(crate) fn barrier_cycle_epoch(&self) -> u64 {
+        self.barrier.cycle_epoch()
+    }
+
+    /// 返回世界唯一的 cycle epoch。
+    pub(crate) fn cycle_epoch(&self) -> u64 {
+        self.cycle_epoch
     }
 
     /// 推进 barrier 平面的 cycle epoch，并把旧 cycle 的 card batch 交给 arena owner。
@@ -149,7 +174,7 @@ impl RawWorld {
         processor: usize,
         reason: BarrierFlushReason,
     ) -> Result<(u32, u64), RawInvariant> {
-        let drafts = self.barrier.flush_processor(processor, reason);
+        let drafts = self.barrier.flush_processor(processor, reason)?;
         if drafts.is_empty() {
             return Ok((0, 0));
         }
@@ -338,19 +363,16 @@ impl RawWorld {
         stats.empty_flushes = self.barrier.empty_flushes();
         stats.by_reason = self.barrier.flushed_by_reason();
         stats.edge_pending =
-            u64::try_from(self.barrier.edges().pending()).expect("pending 适配 u64");
-        stats.edge_deltas = self.edge_delta_total;
+            u64::try_from(self.barrier.edge_pending_items()).expect("pending 适配 u64");
+        stats.edge_published = self.edge_delta_total;
         stats
     }
 
-    /// 取走全局 edge summary 中已聚合的跨 block edge delta。
+    /// 返回一个 block 的 incoming lease：非零 source block 对的数量。
     ///
-    /// edge summary 是 owner-local 聚合，只发布给 target owner 的 batch；`EdgeDelta` 传输
-    /// 接手后从这里取出并发布。平面是全局唯一的，因此不带 owner 参数。
-    pub(crate) fn take_edge_deltas(&mut self) -> Vec<EdgeDeltaRecord> {
-        let deltas = self.barrier.drain_edges();
-        self.edge_delta_total += u64::try_from(deltas.len()).expect("delta 数适配 u64");
-        deltas
+    /// 它是候选判定的输入，不是对象级引用计数：同一对 block 的多个字段边只计一次。
+    pub(crate) fn block_incoming_leases(&self, target: BlockRef) -> u64 {
+        self.barrier.incoming_leases(target)
     }
 
     /// 返回 domain 归属的 owner token；card batch 只发给 raw owner。

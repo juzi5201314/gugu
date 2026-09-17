@@ -559,6 +559,12 @@ impl ExtentTable {
         })
     }
 
+    pub(crate) fn has_free_in_arena(&self, arena: u32, class: u32) -> bool {
+        self.spaces
+            .get(arena as usize)
+            .is_some_and(|space| space.find_free(class).is_some())
+    }
+
     /// 返回 owner 在给定 domain 上已发放的 extent 数量。
     pub(crate) fn live_in(&self, owner: u32, domain: MemoryDomainId) -> usize {
         self.descriptors
@@ -628,8 +634,24 @@ impl ExtentTable {
                 })
             })
             .ok_or_else(|| RawInvariant::new("owner 在目标 domain 没有满足请求的空闲 extent 块"))?;
-        let owner_index = space_index;
-        let space = &mut self.spaces[space_index as usize];
+        self.allocate_in_arena(space_index, class)
+    }
+
+    /// 从指定 arena 分裂；managed heap 必须与实际提交的地址范围保持一致。
+    pub(crate) fn allocate_in_arena(
+        &mut self,
+        arena: u32,
+        class: u32,
+    ) -> Result<ExtentId, RawInvariant> {
+        if class_bytes(class).is_none() {
+            return Err(RawInvariant::new("extent 分配引用未知 class"));
+        }
+        let owner_index = arena;
+        let space = self
+            .spaces
+            .get_mut(arena as usize)
+            .ok_or_else(|| RawInvariant::new("extent 分配引用未知 arena"))?;
+        let domain = space.domain;
         let source = space
             .find_free(class)
             .ok_or_else(|| RawInvariant::new("extent arena 没有满足请求的空闲块"))?;

@@ -51,6 +51,8 @@ pub(crate) struct PressureDrainReport {
     pub(crate) deferred_extents: u32,
     /// 取走的 edge delta 数。
     pub(crate) edge_deltas: u64,
+    /// 本 cycle 边界清退的零计数 block 对数量。
+    pub(crate) edge_retired: u64,
     /// drain 之后重算的 committed 字节。
     pub(crate) committed_after: u64,
     /// 本 cycle 真实计入滑动窗口的 GC cost unit；有界 drain 不消耗吞吐窗口，恒为 0。
@@ -71,7 +73,23 @@ pub(crate) struct PressureDrainReport {
     pub(crate) mark_tickets_consumed: u64,
     /// 本 cycle 的 mark 阶段是否收敛；未配置 mark 平面时恒为真。
     pub(crate) mark_converged: bool,
+    /// 本 cycle 新登记的零租约候选块数。
+    pub(crate) candidate_seeded: u64,
+    /// 本 cycle 候选平面真实消费的工作单位。
+    pub(crate) candidate_work_units: u64,
+    /// 候选平面累计 sweep 的块数（含之前 cycle）。
+    pub(crate) candidate_blocks_swept: u64,
+    /// 候选平面累计释放的块数（含之前 cycle）。
+    pub(crate) candidate_blocks_released: u64,
+    /// 候选平面累计判定的死亡组数（含之前 cycle）。
+    pub(crate) candidate_dead_groups: u64,
 }
+
+/// 一次 forced cycle 内推进候选决议的轮次上限。
+///
+/// 每轮只推进到「等外部确认」为止（sweep/release 的确认由消费者在轮次之间回填），因此需要若干轮
+/// 才能走完一个 job 的十个相位；上限保证 emergency 路径不会无限循环，同时也为诊断留出证据。
+const CANDIDATE_MAX_ROUNDS: u32 = 32;
 
 impl RawWorld {
     /// 返回 pacing 平面。
@@ -218,7 +236,8 @@ impl RawWorld {
         CreditSnapshot {
             barrier_buffer_keys: buffer_keys,
             card_mark_batches: self.barrier.pending_batch_bytes(),
-            edge_deltas: u64::try_from(self.barrier.edges().pending()).expect("delta 数适配 u64"),
+            edge_deltas: u64::try_from(self.barrier.edge_pending_items())
+                .expect("delta 数适配 u64"),
             pending_return_bytes: self
                 .committed_classes()
                 .pending_return_bytes
@@ -343,11 +362,27 @@ impl RawWorld {
     }
 
     /// 执行一次完整 GC cycle；`forced` 表示本 episode 的 forced full cycle。
+    ///
+    /// 失败时先取消全部进行中的 GC 工作（候选 job 退回、绑定与状态复位），再把失败接到既有诊断
+    /// 链（RT0 报告账本）上，最后把原错误返回给调用方：半完成的 job 不允许活到下一个 cycle。
     pub(crate) fn run_gc_cycle(
         &mut self,
         forced: bool,
     ) -> Result<PressureDrainReport, RawInvariant> {
-        self.pressure_drain(DrainScope::Cycle, forced)
+        match self.pressure_drain(DrainScope::Cycle, forced) {
+            Ok(report) => Ok(report),
+            Err(error) => {
+                let message = format!("GC cycle 失败: {error:?}");
+                if let Err(cancel_error) = self.cancel_gc_work(&message) {
+                    self.report_gc_failure(format!(
+                        "{message}；取消 GC 工作再次失败: {cancel_error:?}"
+                    ))?;
+                    return Err(error);
+                }
+                self.report_gc_failure(message)?;
+                Err(error)
+            }
+        }
     }
 
     /// 执行一次 episode 内的有界 owner drain：有界预算、不完成 cycle。
@@ -393,9 +428,10 @@ impl RawWorld {
         self.open_grace(&inbox);
         self.close_grace(&inbox);
         self.advance_pending_extent_trims()?;
-        // 3. 取走 owner-local edge summary：它属于 cycle credit，必须在 drain 结束前交出。
+        // 3. 发布 owner-local edge summary 中已聚合的跨 block 差量：它属于 cycle credit，
+        //    必须在 drain 结束前真实交给传输层；发布数就是实际产生的批次。
         report.edge_deltas =
-            u64::try_from(self.take_edge_deltas().len()).expect("delta 数适配 u64");
+            u64::try_from(self.publish_edge_deltas()?.len()).expect("delta 数适配 u64");
         // 4. mark 阶段：配置了 GC 平面时先跑完 mark pass，它决定 remark 的收敛门禁，并把整堆
         //    标记工作量计入 cycle cost 窗口；未收敛时 remark 只能发布 continuation。
         let mut mark_converged = true;
@@ -425,14 +461,21 @@ impl RawWorld {
                 .map_err(|message| RawInvariant::new(message.to_owned()))?;
             report.remark = remark;
             if remark == RemarkOutcome::Complete {
-                let next = self.barrier.cycle_epoch().saturating_add(1);
-                // 先推进 barrier epoch：它可能把新草稿发布成 card batch，这些批次必须在收敛
-                // 检查之前落地，否则新 credit epoch 会以「零在飞」开始却已有发布中的工作。
-                self.advance_barrier_epoch(0, next)?;
+                let next = self.cycle_epoch.saturating_add(1);
+                // 先推进 cycle epoch：barrier 的 card 键纪元由同一个入口同步前进，它可能把新草稿
+                // 发布成 card batch，这些批次必须在收敛检查之前落地，否则新 credit epoch 会以
+                // 「零在飞」开始却已有发布中的工作。
+                self.advance_cycle_epoch(0)?;
                 for owner in 0..self.owners.len() as u32 {
                     let (forwarded, consumed) = self.drain_inboxes(owner, &budget, true)?;
                     report.forwarded_messages += u64::from(forwarded);
                     report.consumed_messages += u64::from(consumed);
+                }
+                // 在飞记录已经全部落地：清退零计数且没有保留记录的 block 对，避免 pair 表单调
+                // 增长；带保留记录的键会被保留，等待缺口补齐。只配置了 pacing 的世界没有边平面，
+                // 此时没有 pair 表需要维护。
+                if self.edges.is_some() {
+                    report.edge_retired = self.edge_maintenance()?;
                 }
                 report.credits_converged = self.begin_pacing_cycle(next)?;
                 if report.credits_converged {
@@ -440,12 +483,47 @@ impl RawWorld {
                     if forced {
                         report.forced_cycles = 1;
                     }
-                    // 7. mark 阶段收敛后才宣布 cycle 完成，并对全部 owner 执行 sweep。
+                    // 7. mark 阶段收敛后才宣布 cycle 完成。候选登记在 sweep **之前**：本轮 sweep
+                    //    会把死亡对象清掉的块登记为候选，这样同一个 cycle 里就能把空块归还，
+                    //    而不是留到下一个 cycle；过滤条件是「块内没有任何本 epoch 标记的对象」，
+                    //    因此仍装着存活对象的块不会进入判定，也不会每轮空转。
                     if self.mark_configured() {
                         self.finish_mark_cycle()?;
+                        if self.candidates_configured() {
+                            report.candidate_seeded = self.seed_zero_lease_candidates()?;
+                        }
                         for owner in 0..self.owners.len() as u32 {
                             self.sweep_owner(owner)?;
                         }
+                    }
+                    // 8. 同周期决议消费：lease 归零的块必须在本次 cycle 内走完 validate/commit/
+                    //    sweep/release，否则 pressure 已经把内存压到底、候选却要等下一个 cycle 才
+                    //    真正归还 block。forced cycle 属于 emergency，用无界额度一次走完；普通
+                    //    cycle 按候选 quantum 推进，未走完的部分保留游标给下一次。
+                    if self.candidates_configured() {
+                        // 额度取自校对过的契约：候选推进的 quantum 只有一份权威值。
+                        let quantum = if forced {
+                            u32::MAX
+                        } else {
+                            self.edge_contract()?.candidate_quantum()
+                        };
+                        // 一次 advance 只能推进到「等外部确认」为止：sweep/release 的确认必须由
+                        // 消费者回填后再进入下一轮。forced cycle 属于 emergency，因此循环到没有
+                        // job 或不再产生动作为止；普通 cycle 只推一轮，余下的留给下一次。
+                        let rounds = if forced { CANDIDATE_MAX_ROUNDS } else { 1 };
+                        for _ in 0..rounds {
+                            let candidate = self.drive_candidates(quantum)?;
+                            report.candidate_work_units = report
+                                .candidate_work_units
+                                .saturating_add(u64::from(candidate.work_units));
+                            if candidate.actions.is_empty() || self.candidate_job_count()? == 0 {
+                                break;
+                            }
+                        }
+                        let stats = self.candidate_stats()?;
+                        report.candidate_blocks_swept = stats.blocks_swept;
+                        report.candidate_blocks_released = stats.blocks_released;
+                        report.candidate_dead_groups = stats.dead_groups;
                     }
                 }
             }
@@ -479,7 +557,7 @@ impl RawWorld {
         let stats = self.barrier_stats();
         GcWorkCounters {
             card_marks: stats.card_marks,
-            edge_deltas: stats.edge_deltas,
+            edge_deltas: stats.edge_published,
             published_batches: stats.published_batches,
             marks: self.mark.as_ref().map_or(0, |plane| plane.stats().marks),
         }

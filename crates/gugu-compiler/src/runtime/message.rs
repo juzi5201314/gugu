@@ -10,6 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::barrier_schema::MessageFamilyTag;
 use super::inbox::{OwnerInbox, ShardIndex};
+use super::local_heap::{BlockRef, ManagedBlockId};
+use super::mark_schema::GcCreditId;
 use super::size_class::RuntimeSizeClassId;
 use super::slab::{
     Epoch, MemoryDomainId, OwnerGeneration, OwnerId, OwnerToken, RawInvariant, RouteKey,
@@ -353,18 +355,54 @@ pub(crate) struct MarkTicket {
     pub(crate) target_arena: SlabDescriptorId,
     /// 目标对象 header 在 arena 内的字节偏移；arena 不超过 2 MiB，适配 u32。
     pub(crate) target_offset: u32,
-    /// 产生这条 mark 工作的 source block 序号。
+    /// 目标对象所属 block 的 generation；目标 owner 解析 block 后必须校验它。
+    pub(crate) target_block_generation: u32,
+    /// 产生这条 mark 工作的 source block：全局块身份（`descriptor * 64 + block`）。
+    ///
+    /// 消费端据此解析来源 owner 并确认来源块仍然存在；只带 arena 内下标的编码会被拒绝。
     pub(crate) source_block: u32,
     /// 产生这条 ticket 的 GC cycle epoch。
     pub(crate) cycle_epoch: u64,
     /// producer topology epoch；拓扑变化后旧 ticket 必须被拒绝。
     pub(crate) topology_epoch: u32,
-    /// 该 ticket 占用的 owner credit 稠密编号；consume 后由还款收口。
-    pub(crate) credit: u32,
+    /// 该 ticket 占用的共享 credit 身份；consume 后由还款收口。
+    pub(crate) credit: GcCreditId,
     /// 目标对象占用的字节数。
     pub(crate) bytes: u32,
     pub(crate) state: MessageState,
     /// 目标身份、cycle/topology epoch 与 credit 的校验信息。
+    pub(crate) integrity: IntegrityTag,
+}
+
+/// 一条跨 owner 的 GC 工作消息：把一个 block 对的边增删交给 target 的 manager。
+///
+/// 与其它 GC 消息共用同一条传输、staging 与 grace；只携带稳定 `BlockRef` 身份、block 对内
+/// 的发布序号、signed 差量与共享 credit。target 侧按序号顺序应用，未来序号必须保留原 node 与
+/// credit 等缺口补齐，因此旧/重复序号是真正的不变量失败。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EdgeDelta {
+    /// raw intrusive link；只存在于 non-moving message storage。
+    pub(crate) next: Option<u32>,
+    /// destination block 当前 manager 的稳定身份。
+    pub(crate) target: OwnerToken,
+    /// 产生这条边的 source block。
+    pub(crate) source: BlockRef,
+    /// 收到这条边的 destination block。
+    pub(crate) destination: BlockRef,
+    /// 聚合到该记录的 cycle epoch。
+    pub(crate) cycle_epoch: u64,
+    /// 发布时的 producer topology epoch。
+    pub(crate) topology_epoch: u32,
+    /// 该 block 对内的发布序号；target 必须按它顺序应用。
+    pub(crate) sequence: u64,
+    /// signed 净差量。
+    pub(crate) delta: i64,
+    /// 该记录占用的共享 credit 身份。
+    pub(crate) credit: GcCreditId,
+    /// 本记录自身占用的字节数。
+    pub(crate) bytes: u32,
+    pub(crate) state: MessageState,
+    /// 全部身份、序号、差量与 credit 的校验信息。
     pub(crate) integrity: IntegrityTag,
 }
 
@@ -465,10 +503,11 @@ impl IntegrityTag {
         hasher.update(&MessageFamilyTag::MarkTicket.raw().to_le_bytes());
         hasher.update(&ticket.target_arena.raw().to_le_bytes());
         hasher.update(&ticket.target_offset.to_le_bytes());
+        hasher.update(&ticket.target_block_generation.to_le_bytes());
         hasher.update(&ticket.source_block.to_le_bytes());
         hasher.update(&ticket.cycle_epoch.to_le_bytes());
         hasher.update(&ticket.topology_epoch.to_le_bytes());
-        hasher.update(&ticket.credit.to_le_bytes());
+        hasher.update(&ticket.credit.raw().to_le_bytes());
         hasher.update(&ticket.bytes.to_le_bytes());
         // 取字节 8..12：card 族用 0..4、region 族用 4..8，三族不共用摘要前缀。
         let digest = hasher.finalize();
@@ -478,6 +517,47 @@ impl IntegrityTag {
             digest.as_bytes()[10],
             digest.as_bytes()[11],
         ])
+    }
+
+    /// 用 per-domain secret 与 `EdgeDelta` 的全部身份字段计算校验值。
+    pub(crate) fn compute_edge_delta(secret: &[u8; 32], delta: &EdgeDelta) -> u32 {
+        let mut hasher = blake3::Hasher::new_derive_key("gugu-edge-delta-integrity-v1");
+        hasher.update(secret);
+        hasher.update(&delta.target.domain.raw().to_le_bytes());
+        hasher.update(&delta.target.owner_id.raw().to_le_bytes());
+        hasher.update(&delta.target.generation.raw().to_le_bytes());
+        hasher.update(&delta.target.route_key.raw().to_le_bytes());
+        hasher.update(&MessageFamilyTag::EdgeDelta.raw().to_le_bytes());
+        hasher.update(&delta.source.id.0.to_le_bytes());
+        hasher.update(&delta.source.generation.to_le_bytes());
+        hasher.update(&delta.destination.id.0.to_le_bytes());
+        hasher.update(&delta.destination.generation.to_le_bytes());
+        hasher.update(&delta.cycle_epoch.to_le_bytes());
+        hasher.update(&delta.topology_epoch.to_le_bytes());
+        hasher.update(&delta.sequence.to_le_bytes());
+        hasher.update(&delta.delta.to_le_bytes());
+        hasher.update(&delta.credit.raw().to_le_bytes());
+        hasher.update(&delta.bytes.to_le_bytes());
+        // 取字节 12..16：card 族用 0..4、region 族用 4..8、mark 族用 8..12，四族不共用前缀。
+        let digest = hasher.finalize();
+        u32::from_le_bytes([
+            digest.as_bytes()[12],
+            digest.as_bytes()[13],
+            digest.as_bytes()[14],
+            digest.as_bytes()[15],
+        ])
+    }
+
+    /// 校验 edge delta 的 checksum 与本记录的其他身份字段一致。
+    pub(crate) fn verify_edge_delta(
+        &self,
+        secret: &[u8; 32],
+        delta: &EdgeDelta,
+    ) -> Result<(), RawInvariant> {
+        if self.checksum != Self::compute_edge_delta(secret, delta) {
+            return Err(RawInvariant::new("edge delta integrity 校验失败"));
+        }
+        Ok(())
     }
 
     /// 校验 mark ticket 的 checksum 与本记录的其他身份字段一致。
@@ -522,6 +602,11 @@ impl IntegrityTag {
 pub(crate) struct ReturnNodeId(u32);
 
 impl ReturnNodeId {
+    /// 由编号原值构造；`ReturnNodePool` 保证编号不越界，测试与诊断复用同一解释。
+    pub(crate) const fn from_raw(raw: u32) -> Self {
+        Self(raw)
+    }
+
     /// 返回编号原值。
     pub(crate) const fn raw(self) -> u32 {
         self.0
@@ -544,9 +629,11 @@ impl ReturnNodeId {
 /// `state_kind` 为 `state(8) | kind(8) | domain(8) | family(8) | 保留`；
 /// `payload_low`/`payload_high` 为消息族专属车道（card batch 用
 /// `arena(32) | card_start(32)` 与 `arena_generation(32) | card_count(32)`；mark ticket 用
-/// `cycle_epoch(64)` 与 `credit(32) | source_block(32)`，并把 `descriptor_unit` 解释成
-/// `target_arena(32) | target_offset(32)`、`bytes_epoch` 解释成
-/// `bytes(32) | topology_epoch(32)`）；
+/// `cycle_epoch(64)` 与 `target_block_generation(32) | source_block(32)`，并把
+/// `descriptor_unit` 解释成 `target_arena(32) | target_offset(32)`、`bytes_epoch` 解释成
+/// `bytes(32) | topology_epoch(32)`、`credit` 车道解释成 `GcCreditId`；edge delta 用
+/// `source(32) | destination(32)`、`source_generation(32) | destination_generation(32)`
+/// 与 `cycle_epoch`，并把 `sequence`/`delta`/`credit` 三条车道填满）；
 /// `integrity` 保存 integrity checksum；`reuse` 保存
 /// `Free`/`InUse` 复用标记。车道不足一个 cache line 时补齐，node stride 因此是
 /// `RETURN_NODE_BYTES`。
@@ -564,6 +651,12 @@ pub(crate) struct ReturnNode {
     payload_high: AtomicU64,
     integrity: AtomicU64,
     reuse: AtomicU64,
+    /// block 对内的发布序号；只有 edge delta 族使用。
+    sequence: AtomicU64,
+    /// signed 净差量；只有 edge delta 族使用。
+    delta: AtomicU64,
+    /// credit 身份 `generation(32) | slot(32)`；mark ticket 与 edge delta 共用。
+    credit: AtomicU64,
     /// free stack 专用 link；与 message chain 的 `next` 分离，避免两种语义互相覆盖。
     free_next: AtomicU64,
 }
@@ -746,9 +839,12 @@ impl ReturnNode {
         self.payload_low
             .store(ticket.cycle_epoch, Ordering::Relaxed);
         self.payload_high.store(
-            u64::from(ticket.credit) | (u64::from(ticket.source_block) << 32),
+            u64::from(ticket.target_block_generation) | (u64::from(ticket.source_block) << 32),
             Ordering::Relaxed,
         );
+        self.sequence.store(0, Ordering::Relaxed);
+        self.delta.store(0, Ordering::Relaxed);
+        self.credit.store(ticket.credit.raw(), Ordering::Relaxed);
         self.integrity
             .store(u64::from(integrity), Ordering::Relaxed);
     }
@@ -763,6 +859,7 @@ impl ReturnNode {
         let state_kind = self.state_kind.load(Ordering::Relaxed);
         let payload_low = self.payload_low.load(Ordering::Relaxed);
         let payload_high = self.payload_high.load(Ordering::Relaxed);
+        let credit = self.credit.load(Ordering::Relaxed);
         let integrity = self.integrity.load(Ordering::Relaxed);
         let domain = MemoryDomainId::from_raw(((state_kind >> 16) & 0xFF) as u8)
             .unwrap_or(MemoryDomainId::RUNTIME_RAW);
@@ -777,10 +874,95 @@ impl ReturnNode {
             },
             target_arena: SlabDescriptorId::from_raw((descriptor_unit & 0xFFFF_FFFF) as u32),
             target_offset: (descriptor_unit >> 32) as u32,
+            target_block_generation: (payload_high & 0xFFFF_FFFF) as u32,
             source_block: (payload_high >> 32) as u32,
             cycle_epoch: payload_low,
             topology_epoch: (bytes_epoch >> 32) as u32,
-            credit: (payload_high & 0xFFFF_FFFF) as u32,
+            credit: GcCreditId::from_raw(credit),
+            bytes: (bytes_epoch & 0xFFFF_FFFF) as u32,
+            state: MessageState::from_code((state_kind & 0xFF) as u8),
+            integrity: IntegrityTag {
+                generation: SlabGeneration::from_raw(target_generation),
+                class: RuntimeSizeClassId::from_raw(0),
+                owner_id: OwnerId::from_raw(owner_id),
+                route_key: RouteKey::from_raw(route_key),
+                checksum: integrity as u32,
+            },
+        }
+    }
+
+    fn store_edge_delta(&self, delta: &EdgeDelta, integrity: u32) {
+        self.owner_id
+            .store(delta.target.owner_id.raw(), Ordering::Relaxed);
+        self.generation
+            .store(delta.target.generation.raw(), Ordering::Relaxed);
+        self.route_key
+            .store(delta.target.route_key.raw(), Ordering::Relaxed);
+        self.descriptor_unit.store(
+            u64::from(delta.source.id.0) | (u64::from(delta.destination.id.0) << 32),
+            Ordering::Relaxed,
+        );
+        self.bytes_epoch.store(
+            u64::from(delta.bytes) | (u64::from(delta.topology_epoch) << 32),
+            Ordering::Relaxed,
+        );
+        self.state_kind.store(
+            delta.state.code()
+                | (u64::from(MessageFamilyTag::EdgeDelta.raw()) << 8)
+                | (u64::from(delta.target.domain.raw()) << 16)
+                | (u64::from(MessageFamilyTag::EdgeDelta.raw()) << 24),
+            Ordering::Relaxed,
+        );
+        self.payload_low.store(delta.cycle_epoch, Ordering::Relaxed);
+        self.payload_high.store(
+            u64::from(delta.source.generation) | (u64::from(delta.destination.generation) << 32),
+            Ordering::Relaxed,
+        );
+        self.sequence.store(delta.sequence, Ordering::Relaxed);
+        self.delta.store(delta.delta as u64, Ordering::Relaxed);
+        self.credit.store(delta.credit.raw(), Ordering::Relaxed);
+        self.integrity
+            .store(u64::from(integrity), Ordering::Relaxed);
+    }
+
+    /// 从车道重建 edge delta；只有 edge delta 族才会调用。
+    fn load_edge_delta(&self) -> EdgeDelta {
+        let owner_id = self.owner_id.load(Ordering::Relaxed);
+        let target_generation = self.generation.load(Ordering::Relaxed);
+        let route_key = self.route_key.load(Ordering::Relaxed);
+        let descriptor_unit = self.descriptor_unit.load(Ordering::Relaxed);
+        let bytes_epoch = self.bytes_epoch.load(Ordering::Relaxed);
+        let state_kind = self.state_kind.load(Ordering::Relaxed);
+        let payload_low = self.payload_low.load(Ordering::Relaxed);
+        let payload_high = self.payload_high.load(Ordering::Relaxed);
+        let sequence = self.sequence.load(Ordering::Relaxed);
+        // 车道按固定位宽掩码后截断；掩码已保证目标字段无溢出。
+        let delta = self.delta.load(Ordering::Relaxed) as i64;
+        let credit = self.credit.load(Ordering::Relaxed);
+        let integrity = self.integrity.load(Ordering::Relaxed);
+        let domain = MemoryDomainId::from_raw(((state_kind >> 16) & 0xFF) as u8)
+            .unwrap_or(MemoryDomainId::RUNTIME_RAW);
+        EdgeDelta {
+            next: None,
+            target: OwnerToken {
+                domain,
+                owner_id: OwnerId::from_raw(owner_id),
+                generation: OwnerGeneration::from_raw(target_generation),
+                route_key: RouteKey::from_raw(route_key),
+            },
+            source: BlockRef {
+                id: ManagedBlockId((descriptor_unit & 0xFFFF_FFFF) as u32),
+                generation: (payload_high & 0xFFFF_FFFF) as u32,
+            },
+            destination: BlockRef {
+                id: ManagedBlockId((descriptor_unit >> 32) as u32),
+                generation: (payload_high >> 32) as u32,
+            },
+            cycle_epoch: payload_low,
+            topology_epoch: (bytes_epoch >> 32) as u32,
+            sequence,
+            delta,
+            credit: GcCreditId::from_raw(credit),
             bytes: (bytes_epoch & 0xFFFF_FFFF) as u32,
             state: MessageState::from_code((state_kind & 0xFF) as u8),
             integrity: IntegrityTag {
@@ -912,6 +1094,7 @@ impl ReturnNode {
             1 => MessageFamilyTag::CardMark,
             2 => MessageFamilyTag::RegionTransfer,
             3 => MessageFamilyTag::MarkTicket,
+            4 => MessageFamilyTag::EdgeDelta,
             _ => MessageFamilyTag::Return,
         }
     }
@@ -1094,6 +1277,18 @@ impl ReturnNodePool {
     /// 字段校验。
     pub(crate) fn load_mark_ticket(&self, id: ReturnNodeId) -> MarkTicket {
         self.nodes[id.index()].load_mark_ticket()
+    }
+
+    /// 写入一个 node 的 edge delta payload。
+    pub(crate) fn store_edge_delta(&self, id: ReturnNodeId, delta: &EdgeDelta, integrity: u32) {
+        self.nodes[id.index()].store_edge_delta(delta, integrity);
+    }
+
+    /// 读取一个 node 的 edge delta payload。
+    ///
+    /// 与其它 GC 族一样，载入不需要 class/generation 键：integrity 按记录自身的身份字段校验。
+    pub(crate) fn load_edge_delta(&self, id: ReturnNodeId) -> EdgeDelta {
+        self.nodes[id.index()].load_edge_delta()
     }
     /// 按给定 class 与 generation 读取一个 return payload。
     pub(crate) fn load(
@@ -1691,6 +1886,40 @@ pub(crate) fn stage_mark_ticket(
         pool.link(last, Some(node));
     }
     staging.stage(node, ticket.target, ticket.bytes, shard)?;
+    if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
+        && let Some(inbox) = inbox
+    {
+        outcome = Some(flush_staging(pool, inbox, staging, trigger)?);
+    }
+    Ok(outcome)
+}
+
+/// 把一个 edge delta 写入 staging chain 并发布到目标 owner 的 inbox。
+///
+/// 复用 return/card/region/mark 的 producer 路径：node 从同一个 pool 取，chain 由同一套
+/// staging 与 flush 触发器管理，因此跨 block 边差量不会绕过 producer gate 与 queue-page grace。
+pub(crate) fn stage_edge_delta(
+    pool: &ReturnNodePool,
+    inbox: Option<&OwnerInbox>,
+    staging: &mut ProducerStaging,
+    delta: &EdgeDelta,
+    shard: ShardIndex,
+    forced: Option<FlushTrigger>,
+) -> Result<Option<PublishOutcome>, RawInvariant> {
+    let mut outcome = None;
+    if staging
+        .target()
+        .is_some_and(|target| target != delta.target)
+    {
+        return Err(RawInvariant::new("staging 目标改变前必须先发布旧 chain"));
+    }
+    let node = pool.allocate()?;
+    pool.store_edge_delta(node, delta, delta.integrity.checksum);
+    pool.link(node, None);
+    if let Some(last) = staging.last() {
+        pool.link(last, Some(node));
+    }
+    staging.stage(node, delta.target, delta.bytes, shard)?;
     if let Some(trigger) = forced.or_else(|| staging.flush_trigger())
         && let Some(inbox) = inbox
     {
