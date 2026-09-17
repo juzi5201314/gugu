@@ -282,7 +282,7 @@ slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理�
 
 block 身份是全局稠密的 `ManagedBlockId`（`descriptor * 64 + block`，arena 内下标只占低 6 位），`BlockRef` 在它之上再带 block generation：管理权转移不改变 payload 的 heap/arena 定位，消费端也必须按全局身份解析来源块，只带 arena 内下标的旧编码会被拒绝。arena 登记在世界级 `managed_arenas` 表里，每项记录 descriptor、heap owner、heap 内 arena 槽、extent arena id 与 arena 基址；`allocate_managed` 只在已登记且仍有空 block 的 arena 上分配，`commit_managed_block` 按调用方指定的 extent arena 提交 block，不再隐式落到「第一个 arena」。
 
-本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 3` 契约段（版本 3 相对 2 的变化：块记录新增 `candidate_job` 绑定与 `active`/`candidate`/`reclaiming`/`free` 状态语义、lease 计数成为候选 gate 的输入、块世代在释放时推进、`ManagedBlockId` 的 arena 部分就是 arena descriptor）（arena 2 MiB、block 32 KiB、line 128 byte、granule 16 byte、TLAB span 8 block、object-start/mark 各 131072 bit、`page_covering_object` 512 项、card 表 4096 byte、`ObjectHeader`/`HeapArenaMetadata`/`HeapPinEntry`/`HeapBlockRecord` 四条记录（block 记录 64 字节、align 8，含全局 `block_id`、`generation`、arena descriptor/block 下标、`manager_owner`、`incoming_leases`、`mutation_version`、三类 lease 计数、`candidate_job` 与 `state`）、arena/block/generation/representation 目录与 `HeapTriggerProfile`），派生规模只由 arena/block/line 参数推导；`RuntimeRawModel` schema 升到 17，`local-heap-*` 段、dump 行与需求视图进入 `ImagePlan` 与 CLI JSON，`resources/runtime/heap.gg` 提供同源 Gugu 记录并由 `local_heap_layout::verify_source` 逐字段校验布局。运行时参照实现按契约建立每 owner 的 nursery/old/resource/pinned/large arena：32 KiB block 经 extent 层按页提交（不进入 `OwnerAccounting`，因此 `runtime_committed_bytes` 口径不变），分配在 line run 内推进并记录块内碎片，nursery 走 8 block 局部 span，`gc_trace.rs` 的解释器按 Bitmap/Program 扫描 managed word 并用 granule + 页内起点向前扫描解析 interior 指针。block 选择式 major evacuation、跨 owner `SharedHeap` handle、radix page map 的镜像落地与空 block 交还 provider 分别由阶段 45–47 与 55 接手；heap 公共统计属阶段 67。
+本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 3` 契约段（版本 3 相对 2 的变化：块记录新增 `candidate_job` 绑定与 `active`/`candidate`/`reclaiming`/`free` 状态语义、lease 计数成为候选 gate 的输入、块世代在释放时推进、`ManagedBlockId` 的 arena 部分就是 arena descriptor）（arena 2 MiB、block 32 KiB、line 128 byte、granule 16 byte、TLAB span 8 block、object-start/mark 各 131072 bit、`page_covering_object` 512 项、card 表 4096 byte、`ObjectHeader`/`HeapArenaMetadata`/`HeapPinEntry`/`HeapBlockRecord` 四条记录（block 记录 64 字节、align 64，含全局 `block_id`、`generation`、arena descriptor/block 下标、`manager_owner`、`incoming_leases`、`mutation_version`、三类 lease 计数、`candidate_job` 与 `state`）、arena/block/generation/representation 目录与 `HeapTriggerProfile`），派生规模只由 arena/block/line 参数推导；`RuntimeRawModel` schema 升到 17，`local-heap-*` 段、dump 行与需求视图进入 `ImagePlan` 与 CLI JSON，`resources/runtime/heap.gg` 提供同源 Gugu 记录并由 `local_heap_layout::verify_source` 逐字段校验布局。运行时参照实现按契约建立每 owner 的 nursery/old/resource/pinned/large arena：32 KiB block 经 extent 层按页提交（不进入 `OwnerAccounting`，因此 `runtime_committed_bytes` 口径不变），分配在 line run 内推进并记录块内碎片，nursery 走 8 block 局部 span，`gc_trace.rs` 的解释器按 Bitmap/Program 扫描 managed word 并用 granule + 页内起点向前扫描解析 interior 指针。block 选择式 major evacuation、跨 owner `SharedHeap` handle、radix page map 的镜像落地与空 block 交还 provider 分别由阶段 45–47 与 55 接手；heap 公共统计属阶段 67。
 
 ## trace descriptor
 
@@ -716,15 +716,16 @@ dump 输出 `pacing`/`pacing-budget`/`pacing-cpu`/`pacing-remark`/`pacing-evacua
 `pacing-demand`/`pacing-fingerprint`，冷/热编译逐字节一致。
 
 `MarkRuntimeContract`（mark schema 3，profile `mosaic-mark` revision 2，域 `gugu-mark-runtime-v1`）
-把 mark 阶段的执行门禁固定成带版本对象：每 owner 单 consumer 的 `MarkMailbox`、`owner(8) |
-counter(24)` 的 credit id、六个 cycle 状态（`idle`/`snapshot`/`marking`/`converging`/`remark`/
+把 mark 阶段的执行门禁固定成带版本对象：每 owner 单 consumer 的 `MarkMailbox`、`generation(32) |
+slot(32)` 的 credit id、六个 cycle 状态（`idle`/`snapshot`/`marking`/`converging`/`remark`/
 `complete`）、三个 credit 转移（`acquire`/`consume`/`return`）、六类 root snapshot 参与者
 （`producer-stop-epoch`/`remote-consumer`/`root-slice`/`region-registry`/`handle-access-guard`/
 `local-worklist`）、七项收敛条件（`local-worklist`/`published-batch`/`mailbox`/`barrier-buffer`/
 `producer-epoch`/`forwarding-work`/`pending-credit`）以及「条件 → credit 来源」绑定。verifier
 要求条件来源的并集恰好覆盖九个 credit 来源（既不遗漏也不重复绑定）、`mailbox_consumers == 1`、
-`owner_bits + counter_bits == 32`、credit 池为正，并逐字段校验 `MarkMailboxHead`（64 字节 /
-align 64）、`MarkCreditHead`（64 / 64）与 `MarkTerminationRecord`（72 / 8）三条 record 布局与
+`credit_slot_bits + credit_generation_bits == 64`、credit 池为正，并逐字段校验
+`MarkMailboxHead`（64 字节 / align 64）、`MarkCreditHead`（64 / 64）、`MarkTerminationRecord`
+（72 / 8）、`EdgeDeltaHead`（96 / 32）与 `CandidateCursorHead`（64 / 64）五条 record 布局与
 `std/runtime/mark.gg` 的 Gugu 布局一致。`MarkTicket` 的 15 个字段只含稳定 arena descriptor、
 对象偏移、source block 全局身份、cycle/topology epoch、credit 与 bytes，任何 managed 地址都会被
 `verify_family` 拒绝。`source_block` 是全局块身份（`descriptor * 64 + block`）而不是 arena 内
@@ -732,8 +733,9 @@ align 64）、`MarkCreditHead`（64 / 64）与 `MarkTerminationRecord`（72 / 8�
 消费一条 ticket 的顺序是「完整性 → 目标目录解析 → 对象与世代 → 来源身份 → 消费 credit」，
 因此被拒绝的 ticket 不会留下已经被扣掉的 credit，也不会把来源记到错误的 arena 上。
 
-credit 池上界取「常驻 message node 容量 + 根槽数」：在飞的 ticket 占一个
-non-moving node，根 seed 不占 node 但每个根槽每 cycle 至多一次，因此池耗尽就是契约违约。
+credit 池上界取「常驻 message node 容量 + 根槽数」：在飞的 ticket 与 edge delta 各占一个
+non-moving node（两者共用同一 node pool 与同一 credit 池），根 seed 不占 node 但每个根槽每 cycle
+至多一次，因此池耗尽就是契约违约。
 
 `ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `mark-contract-fingerprint`、`mark-runtime`、
 `mark-cycle-states`、`mark-conditions`、`mark-snapshot-participants`、`mark-credit-pool`、

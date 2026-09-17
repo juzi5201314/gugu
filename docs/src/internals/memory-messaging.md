@@ -427,9 +427,9 @@ credit 账本按来源分别登记当前在飞量，观测必须来自真实结�
 
 ### Root snapshot、mark cycle 与终止检测
 
-mark 阶段是 world 级、按 cycle 组织的固定算法，`runtime/mark.rs` 的 `MarkPlane` 是契约 `MarkRuntimeContract`（mark schema 1，profile `mosaic-mark` revision 1）的确定性对偶：
+mark 阶段是 world 级、按 cycle 组织的固定算法，`runtime/mark.rs` 的 `MarkPlane` 是契约 `MarkRuntimeContract`（mark schema 3，profile `mosaic-mark` revision 2）的确定性对偶：
 
-- **credit 生命周期**：`acquire` 为 InFlight，目标 owner `consume` 后为 Done，源 owner `settle` 归还后为 Returned。一次 cycle 内 credit id 稠密不复用，因此重复 ticket 会落在 `CreditNotInFlight` 而不是被静默丢弃；池上界是「常驻 message node 容量 + 根槽数」，耗尽即 `PoolExhausted`。
+- **credit 生命周期**：`acquire` 为 InFlight，目标 owner `consume` 后为 Done，源 owner `settle` 归还后为 Returned。credit id 是 `generation(32) | slot(32)`：slot 归还后回到 free list 并推进 generation，因此重放一个已归还的旧 id 必然因 generation 不匹配被拒（重复 ticket 落在 `CreditNotInFlight`），一次 cycle 的累计发放次数不受池容量限制；池上界是「常驻 message node 容量 + 根槽数」，在飞 ticket 与 edge delta 共用它，耗尽即 `PoolExhausted`。
 - **root snapshot gate**：进入 mark 前必须由全部 owner 登记六类参与者——producer stop epoch 已发布、远端 consumer 已在边界排空、根槽按 owner 分片登记完成、region registry 无在途移交、全部 access guard 为 0、本地 worklist 已清空登记。确认幂等（重复进入同一 cycle 只补缺项），直接重复登记同一项才是 `DuplicateConfirm`。
 - **跨 owner 标记**：owner 只在自己上下文内标记；遇到指向别的 owner 的对象时，mark pass 发布一条 `MarkTicket`——只携带目标 arena descriptor、arena 内 header 偏移、source block、cycle/topology epoch、credit 与 bytes，不含任何 managed 地址。目标 owner 用 `object_at_ticket` 在自己的 arena 内反查：descriptor 不属于本 heap、偏移越过容量或该 granule 没有 object-start 都表示 ticket 已过期，进入不变量失败。owner 已 retire 时按 `Forward` 复用同一个 credit 转发，被转发的 ticket 离开在飞集合的时刻是最终目标 consume，而不是转发本身。
 - **七个收敛条件**：`local-worklist`、`published-batch`、`mailbox`、`barrier-buffer`、`producer-epoch`、`forwarding-work`、`pending-credit` 全部为 0 才允许 remark；每个条件绑定到上面九个 credit 来源的一个子集，并集必须恰好覆盖它们。`barrier-buffer` 覆盖 `barrier-buffer`/`card-mark-batch`/`edge-delta`，`forwarding-work` 覆盖在途 region 移交与转发的 ticket，`pending-credit` 覆盖 mark credit。
