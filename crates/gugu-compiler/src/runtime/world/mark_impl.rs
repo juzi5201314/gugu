@@ -455,10 +455,7 @@ impl RawWorld {
     /// 身份是全局编码（`descriptor * 64 + block`），因此这里能同时校验 arena 是否已登记、以及
     /// 该 block 是否仍然提交在本 heap 里。只带 arena 内下标的旧编码会解析到错误的 arena，必须
     /// 在这里被拒绝，而不是让下游按错误的来源记账。
-    pub(crate) fn resolve_source_block(
-        &self,
-        source: u32,
-    ) -> Result<ManagedBlockId, RawInvariant> {
+    pub(crate) fn resolve_source_block(&self, source: u32) -> Result<ManagedBlockId, RawInvariant> {
         let id = ManagedBlockId(source);
         let owner = self
             .managed_arena_by_descriptor(id.arena())

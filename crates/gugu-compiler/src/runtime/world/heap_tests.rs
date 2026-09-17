@@ -169,10 +169,7 @@ fn leaf(world: &mut RawWorld, placement: ManagedPlacement) -> u64 {
 fn releasing_a_block_preserves_earlier_block_object_start_bits() {
     let mut world = heap_world();
     let first = leaf(&mut world, ManagedPlacement::Old);
-    let first_block = world
-        .managed_block_ref(0, first)
-        .expect("block 可解析")
-        .id;
+    let first_block = world.managed_block_ref(0, first).expect("block 可解析").id;
     // 继续分配直到进入下一个 block；`survivor` 始终是留在上一个 block 的最后一个对象，
     // 它的 granule 落在 block 0 的高地址区间，正是错误换算会误清的位置。
     let mut survivor = first;

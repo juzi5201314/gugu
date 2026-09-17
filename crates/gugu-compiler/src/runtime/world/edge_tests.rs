@@ -455,7 +455,11 @@ fn source_edge_node_fixture_drives_old_placement_edge_deltas() {
         );
         assert_eq!(plan.edge_demand().edge_sites, 6, "夹具的写入站点进入边需求");
         assert_ne!(plan.edge_contract_fingerprint(), [0_u8; 32]);
-        assert_eq!(cold.action_key(), warm.action_key(), "内容寻址 key 必须一致");
+        assert_eq!(
+            cold.action_key(),
+            warm.action_key(),
+            "内容寻址 key 必须一致"
+        );
         let types = decode_sections(plan.gc_type_section(), plan.gc_metadata_section())
             .expect("section 可解码");
         // 类型表同时登记同名占位项（size 0），这里取真正带布局的记录。

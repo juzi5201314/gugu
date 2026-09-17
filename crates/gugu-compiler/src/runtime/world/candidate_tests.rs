@@ -583,22 +583,20 @@ fn two_owner_double_cycle_with_local_invalidation_converges() {
         "同一 owner 的两个对象落在同一 block：两条环共享同一对 block"
     );
     assert_eq!(
-        world
-            .edge_applied_delta(ref_a, ref_b)
-            .expect("计数可读"),
+        world.edge_applied_delta(ref_a, ref_b).expect("计数可读"),
         2,
         "两条独立环的入边必须各自计数"
     );
     assert_eq!(
-        world
-            .edge_applied_delta(ref_b, ref_a)
-            .expect("计数可读"),
+        world.edge_applied_delta(ref_b, ref_a).expect("计数可读"),
         2,
         "反向也要各自计数"
     );
 
     // 第一轮：两个 owner 一起标记 → 候选判定 → 收尾并推进 epoch（与 `collect_major` 同序）。
-    let first_mark = world.run_mark_pass(&[0, 1]).expect("第一轮 mark pass 可执行");
+    let first_mark = world
+        .run_mark_pass(&[0, 1])
+        .expect("第一轮 mark pass 可执行");
     assert!(
         first_mark.termination.converged(),
         "第一轮标记必须收敛：{first_mark:?}"
@@ -609,9 +607,7 @@ fn two_owner_double_cycle_with_local_invalidation_converges() {
     );
     let first_candidates = drive_until_settled(&mut world);
     assert!(
-        first_candidates
-            .iter()
-            .all(|verdict| !verdict.is_dead()),
+        first_candidates.iter().all(|verdict| !verdict.is_dead()),
         "第一轮不得把活环判成死亡：{first_candidates:?}"
     );
     assert_eq!(world.mark_worklist_items(), 0, "标记后不得残留工作项");
@@ -637,9 +633,7 @@ fn two_owner_double_cycle_with_local_invalidation_converges() {
         "失效写入产生一条新的跨 owner 差量"
     );
     world.drain_all(1, &budget).expect("owner 1 可服务");
-    let invalidating = world
-        .drive_candidates(4096)
-        .expect("失效后的推进必须成功");
+    let invalidating = world.drive_candidates(4096).expect("失效后的推进必须成功");
     assert!(
         invalidating
             .verdicts
@@ -658,24 +652,22 @@ fn two_owner_double_cycle_with_local_invalidation_converges() {
         "局部失效不得触发释放"
     );
     assert_eq!(
-        world
-            .edge_applied_delta(ref_a, ref_b)
-            .expect("计数可读"),
+        world.edge_applied_delta(ref_a, ref_b).expect("计数可读"),
         3,
         "失效写入必须计入同一对 block"
     );
 
     // 第二轮：局部失效被吸收后，两个 owner 再次标记并判定，活环仍然存活且计数守恒。
-    let second_mark = world.run_mark_pass(&[0, 1]).expect("第二轮 mark pass 可执行");
+    let second_mark = world
+        .run_mark_pass(&[0, 1])
+        .expect("第二轮 mark pass 可执行");
     assert!(
         second_mark.termination.converged(),
         "第二轮标记必须收敛：{second_mark:?}"
     );
     let second_candidates = drive_until_settled(&mut world);
     assert!(
-        second_candidates
-            .iter()
-            .all(|verdict| !verdict.is_dead()),
+        second_candidates.iter().all(|verdict| !verdict.is_dead()),
         "第二轮同样不得误回收活环：{second_candidates:?}"
     );
     world.finish_mark_cycle().expect("第二轮 cycle 可收尾");
@@ -688,9 +680,7 @@ fn two_owner_double_cycle_with_local_invalidation_converges() {
         "所有 job 必须结算：{final_stats:?}"
     );
     assert_eq!(
-        world
-            .edge_applied_delta(ref_a, ref_b)
-            .expect("计数可读"),
+        world.edge_applied_delta(ref_a, ref_b).expect("计数可读"),
         3,
         "两轮 cycle 之后边计数不得凭空增减"
     );

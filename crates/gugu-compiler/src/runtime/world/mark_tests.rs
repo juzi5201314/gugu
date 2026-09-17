@@ -39,8 +39,7 @@ fn mark_ticket_source_identity_is_global_and_resolved() {
         "失败原因必须点名来源身份：{error}"
     );
     // 反向 B：身份可解析，但该 block 没有提交在本 heap 里。
-    let uncommitted =
-        ManagedBlockId::new(source_id.arena(), 63).expect("身份可构造");
+    let uncommitted = ManagedBlockId::new(source_id.arena(), 63).expect("身份可构造");
     let error = world
         .resolve_source_block(uncommitted.raw())
         .expect_err("未提交的 block 必须被拒绝");

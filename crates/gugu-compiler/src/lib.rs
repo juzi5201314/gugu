@@ -36,12 +36,11 @@ pub use runtime::{
     BarrierDemand, BarrierRuntimeContract, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
     ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
     CoroutineRecordLayout, CoroutineRuntimeContract, EdgeCandidateHarness, EdgeCandidateReport,
-    EdgeDemand, EdgeRuntimeContract, HarnessReport, IntrinsicBoundary,
-    OwnerReturnHarness, PlatformRangeDemand, RegionTransferHarness, RegionTransferReport,
-    ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource,
-    RuntimeSourceRole, SchedulerDemand, SchedulerRuntimeContract, StackMapDemand, StackPolicy,
-    SyncDemand, SyncLockHarness, SyncLockReport, SyncRuntimeContract, WaitDemand,
-    WaitRuntimeContract,
+    EdgeDemand, EdgeRuntimeContract, HarnessReport, IntrinsicBoundary, OwnerReturnHarness,
+    PlatformRangeDemand, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
+    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
+    SchedulerDemand, SchedulerRuntimeContract, StackMapDemand, StackPolicy, SyncDemand,
+    SyncLockHarness, SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -2734,13 +2733,19 @@ mod tests {
         assert_eq!(plan.edge_runtime().candidate_quantum, 4096);
         assert_eq!(plan.edge_runtime().phases.len(), 10);
         assert_eq!(plan.edge_runtime().phases[0], "discover");
-        assert_eq!(plan.edge_runtime().states, ["active", "candidate", "reclaiming", "free"]);
+        assert_eq!(
+            plan.edge_runtime().states,
+            ["active", "candidate", "reclaiming", "free"]
+        );
         // `EdgeDelta` 的规范字段集合：18 个字段，全部不带地址（schema 自带校验）。
         assert_eq!(plan.edge_runtime().edge_delta_field_count(), 18);
         // 边需求必须与 barrier/mark 的同一组站点计数一致：三份契约不允许各自记账。
         assert_eq!(plan.edge_demand().edge_sites, demand.edge_summary_sites);
         assert_eq!(plan.edge_demand().reserve_slots, demand.shade_slots);
-        assert_eq!(plan.edge_demand().edge_sites, plan.mark_demand().edge_delta_sites);
+        assert_eq!(
+            plan.edge_demand().edge_sites,
+            plan.mark_demand().edge_delta_sites
+        );
         assert!(dump.contains("edge schema="));
         assert!(dump.contains("edge-demand "));
         assert!(dump.contains("edge-phases "));

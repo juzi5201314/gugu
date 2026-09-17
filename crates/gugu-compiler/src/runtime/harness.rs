@@ -1132,9 +1132,13 @@ impl EdgeCandidateHarness {
             // 每轮用一个新 world：harness 度量的是同一条真实路径的重复执行，跨 cycle 的信用与
             // 候选状态由世界级测试覆盖，不在这里耦合进吞吐口径。
             let node_capacity = self.nodes.saturating_mul(4).max(64);
-            let mut world =
-                RawWorld::new(53 + u64::from(round), 2, node_capacity, BatchLimits::default())
-                    .expect("world 可创建");
+            let mut world = RawWorld::new(
+                53 + u64::from(round),
+                2,
+                node_capacity,
+                BatchLimits::default(),
+            )
+            .expect("world 可创建");
             world.configure_gc(contract).expect("真实契约可配置");
             let mut world_stores = 0_u64;
             // 每轮重建引用：owner 0 的每个节点指向 owner 1 的对应节点并反向指回。
@@ -1146,7 +1150,9 @@ impl EdgeCandidateHarness {
                         Ok(address) => address,
                         Err(error) => {
                             if trace {
-                                eprintln!("edge-candidates 第 {round} 轮分配 source 失败: {error:?}");
+                                eprintln!(
+                                    "edge-candidates 第 {round} 轮分配 source 失败: {error:?}"
+                                );
                             }
                             clean = false;
                             break;
@@ -1157,7 +1163,9 @@ impl EdgeCandidateHarness {
                         Ok(address) => address,
                         Err(error) => {
                             if trace {
-                                eprintln!("edge-candidates 第 {round} 轮分配 target 失败: {error:?}");
+                                eprintln!(
+                                    "edge-candidates 第 {round} 轮分配 target 失败: {error:?}"
+                                );
                             }
                             clean = false;
                             break;
@@ -1248,7 +1256,9 @@ impl EdgeCandidateHarness {
             for owner in 0..2 {
                 if let Err(error) = world.drain_all(owner, &budget) {
                     if trace {
-                        eprintln!("edge-candidates 第 {round} 轮排空 owner {owner} 失败: {error:?}");
+                        eprintln!(
+                            "edge-candidates 第 {round} 轮排空 owner {owner} 失败: {error:?}"
+                        );
                     }
                     clean = false;
                     break;
@@ -1268,7 +1278,9 @@ impl EdgeCandidateHarness {
             report.mark_tickets += mark.tickets_published;
             clean &= mark.termination.converged();
             clean &= mark.tickets_published == mark.tickets_consumed;
-            if trace && (!mark.termination.converged() || mark.tickets_published != mark.tickets_consumed)
+            if trace
+                && (!mark.termination.converged()
+                    || mark.tickets_published != mark.tickets_consumed)
             {
                 eprintln!("edge-candidates 第 {round} 轮标记未结清: {mark:?}");
             }
@@ -1276,7 +1288,9 @@ impl EdgeCandidateHarness {
             for owner in 0..2 {
                 if let Err(error) = world.drain_all(owner, &budget) {
                     if trace {
-                        eprintln!("edge-candidates 第 {round} 轮标记后排水 owner {owner} 失败: {error:?}");
+                        eprintln!(
+                            "edge-candidates 第 {round} 轮标记后排水 owner {owner} 失败: {error:?}"
+                        );
                     }
                     clean = false;
                     break;
@@ -1305,7 +1319,8 @@ impl EdgeCandidateHarness {
                 eprintln!(
                     "edge-candidates 第 {round} 轮候选动作 {} 个，挂根节点对存活: {}",
                     actions.len(),
-                    world.managed_object(sources[0]).is_ok() && world.managed_object(targets[0]).is_ok(),
+                    world.managed_object(sources[0]).is_ok()
+                        && world.managed_object(targets[0]).is_ok(),
                 );
             }
             clean &= world.mark_worklist_items() == 0;
