@@ -258,6 +258,10 @@ impl Validated {
                 match instruction.op {
                     body::Op::GcWriteBarrier { .. } => demand.bare_barriers += 1,
                     body::Op::GcWriteBarrierReserved { .. } => demand.reserved_barriers += 1,
+                    body::Op::SharedFieldBarrier { .. }
+                    | body::Op::SharedFieldBarrierReserved { .. } => {
+                        demand.shared_field_sites += 1;
+                    }
                     _ => {}
                 }
             }

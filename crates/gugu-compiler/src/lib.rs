@@ -2708,7 +2708,7 @@ mod tests {
             plan.barrier_card_granularity_bytes()
         );
         let dump = compilation.dump_runtime().expect("runtime dump");
-        assert!(dump.contains("barrier schema=2 card=512 buffer=256 stamps=256"));
+        assert!(dump.contains("barrier schema=3 card=512 buffer=256 stamps=256"));
         assert!(dump.contains("barrier-steps read-old -> shade-old-deleted -> shade-new-inserted -> store -> card-mark -> edge-summary"));
         assert!(dump.contains("barrier-flush-reasons buffer-full,processor-handoff,foreign-bridge,memory-pressure,minor-stop,producer-stop-gate"));
         assert!(dump.contains(

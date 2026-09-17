@@ -157,7 +157,7 @@ fn barrier_demand_changes_fingerprint_and_enters_contract() {
     assert!(
         drifted
             .dump()
-            .contains("barrier schema=2 card=512 buffer=256 stamps=256")
+            .contains("barrier schema=3 card=512 buffer=256 stamps=256")
     );
     assert!(drifted.dump().contains("edges-per-write=2 edge-buffer=512"));
     assert!(drifted.dump().contains("read-old -> shade-old-deleted"));
@@ -722,7 +722,7 @@ fn compile_slice_reports_barrier_contract_end_to_end() {
     assert_eq!(plan.barrier_card_mark_batch_fields(), 13);
     assert_ne!(plan.barrier_contract_fingerprint(), [0_u8; 32]);
     let dump = compilation.dump_runtime().expect("runtime dump");
-    assert!(dump.contains("barrier schema=2 card=512 buffer=256 stamps=256"));
+    assert!(dump.contains("barrier schema=3 card=512 buffer=256 stamps=256"));
     assert!(dump.contains("barrier-flush-reasons buffer-full,processor-handoff,foreign-bridge,memory-pressure,minor-stop,producer-stop-gate"));
     assert!(dump.contains(
         "runtime-message return-fields=12 card-mark-fields=13 mark-ticket-fields=15 edge-delta-fields=18 handle-forward-fields=16 card-mark-family=card-mark"

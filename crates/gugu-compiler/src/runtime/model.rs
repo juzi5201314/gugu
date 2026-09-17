@@ -930,6 +930,7 @@ impl RuntimeRawContractV1 {
             || self.mark.demand.barrier_sites != self.barrier.demand.card_mark_sites
             || self.mark.demand.edge_delta_sites != self.barrier.demand.edge_summary_sites
             || self.mark.demand.ticket_sites != self.shared_heap.demand.mark_sites
+            || self.barrier.demand.shared_field_sites != self.shared_heap.demand.barrier_sites
         {
             return Err(RawModelError::new(
                 "mark 需求与 gc metadata/barrier/SharedHeap 契约不一致",

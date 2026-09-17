@@ -14,7 +14,7 @@ use std::mem::{align_of, offset_of, size_of};
 use super::gc_metadata_contract::GC_ARENA_BYTES;
 use super::model::{FieldKind, MessageFieldSchema, MessageSchemaV1, RawModelError};
 /// barrier 契约段的 schema 版本。
-pub(crate) const BARRIER_SCHEMA: u32 = 2;
+pub(crate) const BARRIER_SCHEMA: u32 = 3;
 
 /// card table 的粒度：每 512 heap 字节一个 dirty byte。
 pub(crate) const CARD_GRANULARITY_BYTES: u32 = 512;
@@ -159,10 +159,12 @@ pub struct BarrierDemand {
     pub shade_slots: u32,
     /// permit 覆盖的 card-mark 额度总和。
     pub card_mark_slots: u32,
-    /// 可能触发 edge summary 的 managed store 站点数。
+    /// 可能触发边缘摘要的 managed store 站点数。
     pub edge_summary_sites: u32,
     /// 可能触发 barrier 账本记账的写入站点总数。
     pub card_mark_sites: u32,
+    /// 共享字段写入的屏障站点数；必须与 SharedHeap 契约的 barrier 需求相等。
+    pub shared_field_sites: u32,
 }
 
 impl BarrierDemand {
@@ -184,6 +186,7 @@ impl BarrierDemand {
         bytes.extend_from_slice(&self.card_mark_slots.to_le_bytes());
         bytes.extend_from_slice(&self.edge_summary_sites.to_le_bytes());
         bytes.extend_from_slice(&self.card_mark_sites.to_le_bytes());
+        bytes.extend_from_slice(&self.shared_field_sites.to_le_bytes());
         *blake3::Hasher::new_derive_key("gugu-barrier-demand-v1")
             .update(&bytes)
             .finalize()
@@ -598,7 +601,7 @@ impl BarrierRuntimeContract {
         }
         writeln!(
             output,
-            "barrier-demand reserved={} bare={} regions={} permits={} shades={} cards={} edge-sites={} sites={}",
+            "barrier-demand reserved={} bare={} regions={} permits={} shades={} cards={} edge-sites={} sites={} shared-field-sites={}",
             self.demand.reserved_barriers,
             self.demand.bare_barriers,
             self.demand.regions,
@@ -607,6 +610,7 @@ impl BarrierRuntimeContract {
             self.demand.card_mark_slots,
             self.demand.edge_summary_sites,
             self.demand.card_mark_sites,
+            self.demand.shared_field_sites,
         )
         .expect("String写入");
         writeln!(
