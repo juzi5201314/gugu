@@ -103,8 +103,141 @@ impl RawWorld {
         let entry =
             self.shared_registry
                 .insert(handle, payload.id, owner, bytes, block, block_offset)?;
+        // 共享 block 与 LocalHeap arena 走同一套 card table 与 edge 记账：manager 是 payload
+        // 的 owner，因此别的 owner 写进这块 payload 时卡确实会以 CardMark 消息投给它。
+        let manager = self.token(owner);
+        self.barrier_mut().register_arena(
+            u64::from(descriptor),
+            manager,
+            block.generation,
+            u64::from(super::super::gc_metadata_contract::GC_BLOCK_BYTES),
+        )?;
         debug_assert_eq!(entry.block, block);
         Ok(handle)
+    }
+
+    /// 在 access guard 内读取共享 payload 的一个 64-bit 字段。
+    pub(crate) fn load_shared_field(
+        &mut self,
+        handle: super::super::shared_heap_schema::SharedHandle,
+        offset: u32,
+    ) -> Result<u64, RawInvariant> {
+        let token = self.next_shared_access_token()?;
+        let heap = self.shared_heap_mut()?;
+        heap.begin_access(token, handle)
+            .map_err(shared_heap_error)?;
+        let access = heap.resolve_access(token).map_err(shared_heap_error)?;
+        let bytes = heap.load(access, offset, 8).map_err(shared_heap_error)?;
+        heap.end_access(token).map_err(shared_heap_error)?;
+        let raw: [u8; 8] = bytes
+            .try_into()
+            .map_err(|_| RawInvariant::new("共享字段读取字节数不是 8"))?;
+        Ok(u64::from_le_bytes(raw))
+    }
+
+    /// 在 access guard 内写入共享 payload 的一个 64-bit 字段。
+    pub(crate) fn store_shared_field_value(
+        &mut self,
+        handle: super::super::shared_heap_schema::SharedHandle,
+        offset: u32,
+        value: u64,
+    ) -> Result<(), RawInvariant> {
+        let token = self.next_shared_access_token()?;
+        let heap = self.shared_heap_mut()?;
+        heap.begin_access(token, handle)
+            .map_err(shared_heap_error)?;
+        let access = heap.resolve_access(token).map_err(shared_heap_error)?;
+        heap.store(access, offset, &value.to_le_bytes())
+            .map_err(shared_heap_error)?;
+        heap.end_access(token).map_err(shared_heap_error)?;
+        Ok(())
+    }
+
+    /// 写入一个共享 payload 的字段，并接入与本地字段同一条 hybrid barrier 记账路径。
+    ///
+    /// 顺序与 `store_managed_field` 一致：先经 guard 读旧值，再算 old/new 目标 block，再写
+    /// payload，最后执行 shade/card/edge 记账。区别只在身份来源：目标 block 是 registry 的
+    /// 世界级共享 block，因此 card 键与 edge 端点既能区分 owner，也不会与 LocalHeap 撞车。
+    pub(crate) fn store_shared_managed_field(
+        &mut self,
+        owner: u32,
+        processor: usize,
+        handle: super::super::shared_heap_schema::SharedHandle,
+        offset: u32,
+        value: u64,
+        value_owner: Option<u32>,
+    ) -> Result<(), RawInvariant> {
+        let record = *self.shared_payload_block(handle)?;
+        let descriptor = u64::from(record.block.id.arena());
+        let card_offset = u64::from(record.block_offset)
+            .checked_add(u64::from(offset))
+            .ok_or_else(|| RawInvariant::new("共享字段 card 偏移溢出"))?;
+        let old = self.load_shared_field(handle, offset)?;
+        let old_target = if old == 0 {
+            None
+        } else {
+            let old_owner = self.owner_of(old)?;
+            Some(self.managed_block_ref(old_owner, old)?)
+        };
+        let new_target = if value == 0 {
+            None
+        } else {
+            let new_owner = value_owner
+                .ok_or_else(|| RawInvariant::new("共享字段的 managed 新值缺少所属 owner"))?;
+            Some(self.managed_block_ref(new_owner, value)?)
+        };
+        let new_in_nursery = match (value, value_owner) {
+            (0, _) => false,
+            (_, Some(new_owner)) => self.heap(new_owner)?.in_nursery(value),
+            (_, None) => false,
+        };
+        let arena_generation = self
+            .barrier()
+            .table(descriptor)
+            .map(|table| table.arena_generation())
+            .ok_or_else(|| RawInvariant::new("共享 block 缺 card table 登记"))?;
+        self.store_shared_field_value(handle, offset, value)?;
+        let site = BarrierSite {
+            arena_descriptor: descriptor,
+            arena_generation,
+            offset: card_offset,
+            cycle_epoch: self.cycle_epoch,
+            source: record.block,
+            old: old_target,
+            new: new_target,
+            new_in_nursery,
+            // 共享 payload 是稳定存储：它不随 minor 搬迁，因此永远按 old generation 记账。
+            owner_old: true,
+            marking: self.mark_active,
+            stack_grey: true,
+        };
+        let outcome = self.perform_barrier(processor, site)?;
+        if outcome.shaded_old && old != 0 {
+            // Yuasa deletion：被覆盖掉的旧引用仍可能只有这一条通路，必须染灰后再失去它。
+            let old_owner = self.owner_of(old)?;
+            self.shade_address(old_owner, old)?;
+        }
+        if outcome.shaded_new && value != 0 {
+            // Dijkstra insertion：新引用指向的对象必须进入灰色集合。
+            let new_owner = self.owner_of(value)?;
+            self.shade_address(new_owner, value)?;
+        }
+        if let Some(reason) = outcome.flush {
+            // 字段写入已经发生，这里只补记账：先 flush 再把未记入的边变更原样重放。
+            self.flush_barrier(owner, processor, reason)?;
+            self.barrier_mut()
+                .replay_pending_edges(processor, &outcome.pending_edges);
+        }
+        Ok(())
+    }
+
+    /// 返回下一个共享 access token；token 在 world 生命周期内唯一。
+    fn next_shared_access_token(&mut self) -> Result<u32, RawInvariant> {
+        self.shared_access_token = self
+            .shared_access_token
+            .checked_add(1)
+            .ok_or_else(|| RawInvariant::new("shared access token 溢出"))?;
+        Ok(self.shared_access_token)
     }
 
     /// 返回一个 handle 的共享 block 登记项；handle 过期或未登记时失败。

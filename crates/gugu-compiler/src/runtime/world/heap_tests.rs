@@ -799,3 +799,64 @@ fn real_compile_sections_drive_local_heap_allocation_and_collection() {
     assert!(major.marked >= 1);
     assert!(world.managed_counters(0).expect("计数可读").objects >= 1);
 }
+
+/// 共享 payload 的字段写入必须接入与本地字段同一条 barrier 记账路径。
+#[test]
+fn shared_field_store_routes_through_barrier_plane() {
+    use crate::runtime::barrier::BarrierFlushReason;
+
+    let contract = gc_contract();
+    let mut world = configured_world(&contract, 29, 2, 64);
+    let handle = world.allocate_shared_object(1, 32).expect("共享对象可分配");
+    let block = world
+        .shared_payload_block(handle)
+        .expect("登记项可读")
+        .block;
+    // 共享 block 的 card table 必须以 payload owner 为 manager 登记：别的 owner 写它时，
+    // 卡必须以 CardMark 消息投给 payload owner，而不是写进写入者自己的表。
+    let table = world
+        .barrier()
+        .table(u64::from(block.id.arena()))
+        .expect("共享 block 的 card table 已登记");
+    assert_eq!(table.manager(), world.token(1));
+    let child = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("child 可分配");
+    world
+        .store_shared_managed_field(0, 0, handle, 8, child, Some(0))
+        .expect("共享字段可写");
+    assert_eq!(
+        world.load_shared_field(handle, 8).expect("字段可读"),
+        child,
+        "共享 payload 必须真的写入新值"
+    );
+    // 边变更先落在 processor scratch：合并进 summary 之后才成为活跃 pair。
+    world.barrier_mut().merge_edges().expect("边变更可合并");
+    assert!(
+        world.barrier().active_pairs() >= 1,
+        "共享字段写入必须记录边：共享 block → 目标 block"
+    );
+    // 写入者不是 payload owner：冲刷必须以 card batch 投给 payload owner。
+    let published = world
+        .flush_barrier(0, 0, BarrierFlushReason::ProducerStopGate)
+        .expect("冲刷可执行");
+    assert_eq!(
+        published, 1,
+        "非 owner 写入必须以 card batch 投给 payload owner"
+    );
+    // 覆盖掉旧引用：Yuasa deletion 必须记账，新值仍然生效。
+    let second = world
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .expect("第二个对象可分配");
+    world
+        .store_shared_managed_field(1, 0, handle, 8, second, Some(0))
+        .expect("覆盖写可执行");
+    assert_eq!(
+        world.load_shared_field(handle, 8).expect("字段可读"),
+        second
+    );
+    assert!(
+        world.barrier().edge_pending_items() > 0,
+        "覆盖写的新边必须进入 edge 账本"
+    );
+}

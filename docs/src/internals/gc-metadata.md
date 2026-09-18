@@ -161,6 +161,13 @@ integrity 摘要，消费端按判别值分支：local 目标入队到 owner wor
 不共用前缀），车道承载 handle table/slot、handle/forward generation、old/new payload identity、
 cycle/topology epoch 与 bytes，两条 payload identity 各占一条 64-bit 车道并原样往返。
 
+共享 payload 的字段写入与本地字段走**同一条** hybrid barrier 路径：共享 block 在分配时就以
+payload owner 为 manager 登记 card table，字段写入先经 guard 读旧值、再写 payload、最后执行
+old/new shade、card 记账与 edge summary 记账；写入者不是 payload owner 时，冲刷会以 `CardMark`
+批次投给 payload owner 而不是写进写入者自己的表。共享 payload 是稳定存储（不随 minor 搬迁），
+因此它永远按 old generation 记账；trace 中的 `SharedFieldBarrier` 与这里的记账是同一次写入的
+两个视图。
+
 `ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `shared-heap-contract-fingerprint`、`shared-heap-demand`、`shared-heap-profile`、`shared-heap-profile-revision`、
 `shared-heap-handle-tag`、`shared-heap-slot-bytes`、`shared-heap-payload-record-bytes`、
 `shared-heap-forwarding-grace-steps`、`shared-heap-state-count`、

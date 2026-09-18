@@ -178,6 +178,8 @@ pub(crate) struct RawWorld {
     shared_heap: Option<super::shared_heap::SharedHeap>,
     /// 共享 payload 的世界级 block 身份登记表；descriptor 与 LocalHeap 编号段分离。
     shared_registry: shared_heap_impl::SharedRegistry,
+    /// 世界侧共享字段访问的单调 token；每次 begin/resolve/end 用一个新的非零 token。
+    shared_access_token: u32,
     /// MarkMailbox、owner credit 与终止检测的执行平面；`configure_gc` 之后才可用。
     mark: Option<super::mark::MarkPlane>,
     /// 每个 owner 的 mark worklist；元素是待标记对象的 payload 地址。
@@ -288,6 +290,7 @@ impl RawWorld {
             shared_heap_contract: None,
             shared_heap: None,
             shared_registry: super::world::shared_heap_impl::SharedRegistry::new(),
+            shared_access_token: 0,
             mark: None,
             mark_worklists: Vec::new(),
             cycle_epoch: 0,
