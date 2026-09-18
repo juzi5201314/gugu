@@ -3,24 +3,69 @@ use std::path::Path;
 use super::lex;
 use super::parse;
 use super::token::{Token, TokenKind, Trivia, TriviaKind};
+use crate::diagnostics::Diagnostic;
 use crate::source::{SourceMap, SourceSnapshot};
+
+/// `format_source` 失败：源码级诊断或快照级错误。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum FormatError {
+    /// 词法或语法诊断；附带源码表，使调用方能按同一渲染器打印片段。
+    Diagnostic {
+        /// 首个失败诊断。
+        diagnostic: Diagnostic,
+        /// 本次格式化的源码表。
+        sources: Box<SourceMap>,
+    },
+    /// 快照或源码表构建失败：非法逻辑路径、BOM、非法 UTF-8 或路径重复。
+    Source(String),
+}
+
+impl FormatError {
+    /// 紧凑单行消息；用于 JSON 与 `json-diagnostic-short` 通道。
+    pub fn message(&self) -> String {
+        match self {
+            Self::Diagnostic { diagnostic, .. } => diagnostic.render_text(),
+            Self::Source(message) => message.clone(),
+        }
+    }
+
+    /// 人读文本：诊断渲染为多行片段块，快照错误为单行 `error: ` 消息。
+    pub fn render_human(&self, color: bool) -> String {
+        match self {
+            Self::Diagnostic {
+                diagnostic,
+                sources,
+            } => diagnostic.render_human(sources.as_ref(), color),
+            Self::Source(message) => format!("error: {message}"),
+        }
+    }
+}
+
 /// 格式化一个已通过词法和语法检查的 Gugu 源文件。
 ///
 /// 记号和注释正文均从原始源码切片，字符串、字节串与汇编不经过解释。
-pub fn format_source(path: impl AsRef<Path>, source: &str) -> Result<String, String> {
-    let snapshot = SourceSnapshot::from_str(path, source).map_err(|error| error.to_string())?;
-    let map = SourceMap::new(vec![snapshot.clone()]).map_err(|error| error.to_string())?;
+pub fn format_source(path: impl AsRef<Path>, source: &str) -> Result<String, FormatError> {
+    let snapshot = SourceSnapshot::from_str(path, source)
+        .map_err(|error| FormatError::Source(error.to_string()))?;
+    let map = SourceMap::new(vec![snapshot.clone()])
+        .map_err(|error| FormatError::Source(error.to_string()))?;
     let file = map
         .file_id(snapshot.logical_path())
         .expect("源码表已登记文件");
     let lexed = lex(&snapshot, &map, file);
     if let Some(error) = lexed.diagnostics.first() {
-        return Err(error.render_text());
+        return Err(FormatError::Diagnostic {
+            diagnostic: error.clone(),
+            sources: Box::new(map),
+        });
     }
     let mut buffer = lexed.buffer;
     let parsed = parse(snapshot.content(), &map, file, &mut buffer);
     if let Some(error) = parsed.diagnostics.first() {
-        return Err(error.render_text());
+        return Err(FormatError::Diagnostic {
+            diagnostic: error.clone(),
+            sources: Box::new(map),
+        });
     }
     Ok(render(snapshot.content(), &buffer.tokens, &buffer.trivia))
 }

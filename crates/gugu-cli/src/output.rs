@@ -143,13 +143,15 @@ pub(crate) fn print_compilation_text(
             );
         }
     }
-    for diagnostic in compilation.diagnostics().items() {
-        let rendered = diagnostic.render_text();
-        if should_color(options.color.unwrap_or_default()) {
-            eprintln!("\x1b[1;31m{rendered}\x1b[0m");
-        } else {
-            eprintln!("{rendered}");
-        }
+    let color = should_color(options.color.unwrap_or_default());
+    let blocks = compilation
+        .diagnostics()
+        .items()
+        .iter()
+        .map(|diagnostic| diagnostic.render_human(compilation.source_map(), color))
+        .collect::<Vec<_>>();
+    if !blocks.is_empty() {
+        eprintln!("{}", blocks.join("\n\n"));
     }
     if let Some(plan) = compilation.image_plan() {
         if check_only {

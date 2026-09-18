@@ -8,6 +8,7 @@ description = "Gugu compiler bootstrap and staged action graph"
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+unicode-width.workspace = true
 blake3 = "1"
 flate2 = "1"
 sha2 = "0.10"

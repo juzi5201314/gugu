@@ -14,7 +14,7 @@
 
 规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。`build`、`check`、`fmt`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
 现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已接入源码、清单、依赖、缓存、词法/AST、类型/语义检查、冻结 HIR 与 generic GIR；runtime 调度/GC、LIR、后端机器码与标准库语义仍按对应内部契约推进。
-`text` 保留人读的 action/诊断/最终结果；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
+`text` 保留人读的 action/诊断/最终结果，诊断按 `级别[代码]: 消息`、`--> 文件:行:列` 与带行号源码片段块渲染；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
 ## 源码快照与 Span
 
@@ -68,6 +68,9 @@ crates/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/action.rs               稠密 action graph 与状态迁移
     ├── src/diagnostics.rs          稳定代码、源码范围与排序
+    ├── src/diagnostics/            人读诊断渲染
+    │   ├── human.rs                片段、插入符与 ANSI 颜色的文本布局
+    │   └── human_tests.rs          渲染契约测试
     ├── src/source.rs               源码快照、Span、行首表与展开记录
     ├── src/project/                清单、workspace、target、依赖、锁图与缓存输入
     │   ├── mod.rs                  项目聚合、选择与缓存输入导出

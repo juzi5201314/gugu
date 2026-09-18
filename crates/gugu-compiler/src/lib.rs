@@ -25,7 +25,7 @@ pub use query::{
 
 pub use action::{ActionGraph, ActionKind, ActionNode, ActionStatus};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
-pub use frontend::format::format_source;
+pub use frontend::format::{FormatError, format_source};
 pub use project::{
     ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyDomain,
     DependencyInput, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,

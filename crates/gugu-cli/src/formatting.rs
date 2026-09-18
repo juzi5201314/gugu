@@ -7,7 +7,7 @@ use gugu_compiler::{Project, format_source};
 
 use crate::{
     GlobalArgs,
-    output::{OutputFormat, emit_cli_error},
+    output::{OutputFormat, emit_cli_error, should_color},
 };
 
 pub(crate) fn run(check: bool, all: bool, options: &GlobalArgs) -> i32 {
@@ -57,7 +57,12 @@ pub(crate) fn run(check: bool, all: bool, options: &GlobalArgs) -> i32 {
             let rendered = match format_source(relative, &source) {
                 Ok(rendered) => rendered,
                 Err(error) => {
-                    emit_cli_error(format, &error);
+                    if format == OutputFormat::Text {
+                        let color = should_color(options.color.unwrap_or_default());
+                        eprintln!("{}", error.render_human(color));
+                    } else {
+                        emit_cli_error(format, &error.message());
+                    }
                     return 1;
                 }
             };

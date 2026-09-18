@@ -1,3 +1,5 @@
+mod human;
+
 use std::fmt;
 
 use crate::source::{SourceError, Span};
@@ -466,7 +468,9 @@ impl Diagnostic {
         self.span.as_ref()
     }
 
-    /// 将诊断渲染为规范文本格式。
+    /// 将诊断渲染为紧凑单行文本，供机器通道与短上下文使用。
+    ///
+    /// 人读的多行片段渲染见 [`Diagnostic::render_human`]。
     pub fn render_text(&self) -> String {
         match &self.span {
             Some(span) => format!(
