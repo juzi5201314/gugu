@@ -358,35 +358,44 @@ fn decimal_digits(value: i64) -> usize {
     digits + usize::from(value < 0)
 }
 
-/// 文本路径为最后的退出行预留的字节数。
-const TEXT_TAIL_RESERVE: usize = 96;
+/// 文本报告在位置行文件名之后必须保留的字节上界：位置行结构、backtrace 行与退出行。
+const TEXT_TAIL_RESERVE: usize = 128;
+
+/// 文本报告在消息之后必须保留的字节上界：换行、位置行前缀与尾部。
+const TEXT_MESSAGE_RESERVE: usize = TEXT_TAIL_RESERVE + 8;
+
+/// emergency 报告在消息之后必须保留的字节上界：换行与退出行。
+const EMERGENCY_TAIL_RESERVE: usize = 64;
 
 /// 渲染文本报告；必须包含事件类别、reason、消息、源位置与退出类别。
+///
+/// 布局与编译诊断一致：`事件[reason]: 消息` 头行、`  --> 文件:行:列` 位置行，以及
+/// `  = ` 前缀的附注行。空间不足时先按字符边界截断消息，再收缩位置行文件名；
+/// backtrace 行与退出行始终完整。
 fn render_text(record: &ReportRecord, buffer: &mut EmergencyBuffer) {
-    buffer.push_str("runtime-report\n");
-    buffer.push_str("event: ");
     buffer.push_str(record.event.name());
-    buffer.push_str("\nclass: ");
-    buffer.push_str(record.class.name());
-    buffer.push_str("\nreason: ");
+    buffer.push_str("[");
     buffer.push_str(record.reason.name());
+    buffer.push_str("]");
     if let Some(message) = &record.message {
-        let budget = buffer.remaining().saturating_sub(TEXT_TAIL_RESERVE);
-        buffer.push_str("\nmessage: ");
+        let budget = buffer.remaining().saturating_sub(TEXT_MESSAGE_RESERVE);
+        buffer.push_str(": ");
         buffer.push_str_bounded(message, budget);
     }
+    buffer.push_str("\n");
     if let Some(location) = &record.location {
-        buffer.push_str("\nlocation: ");
-        let reserve = TEXT_TAIL_RESERVE + 24;
-        buffer.push_str_bounded(&location.file, buffer.remaining().saturating_sub(reserve));
+        buffer.push_str("  --> ");
+        let budget = buffer.remaining().saturating_sub(TEXT_TAIL_RESERVE);
+        buffer.push_str_bounded(&location.file, budget);
         buffer.push_str(":");
         buffer.push_i64(i64::from(location.line));
         buffer.push_str(":");
         buffer.push_i64(i64::from(location.column));
+        buffer.push_str("\n");
     }
-    buffer.push_str("\nbacktrace: ");
+    buffer.push_str("  = backtrace: ");
     buffer.push_i64(i64::try_from(record.frames.len()).expect("帧数适配 i64"));
-    buffer.push_str(" frames\nexit: ");
+    buffer.push_str(" frames\n  = exit: ");
     buffer.push_str(record.class.name());
     buffer.push_str(" (");
     buffer.push_i64(record.exit_code);
@@ -394,20 +403,20 @@ fn render_text(record: &ReportRecord, buffer: &mut EmergencyBuffer) {
 }
 
 /// 渲染固定纯文本 emergency report；不依赖 `GUGU_RUNTIME_DIAGNOSTICS`/`GUGU_BACKTRACE`。
+///
+/// 布局与正常文本报告一致，但不含位置行与 backtrace 行，保证配置非法时也能完整输出。
 fn render_emergency(record: &ReportRecord, buffer: &mut EmergencyBuffer) {
     buffer.push_str("gugu emergency report\n");
-    buffer.push_str("event: ");
     buffer.push_str(record.event.name());
-    buffer.push_str("\nclass: ");
-    buffer.push_str(record.class.name());
-    buffer.push_str("\nreason: ");
+    buffer.push_str("[");
     buffer.push_str(record.reason.name());
+    buffer.push_str("]");
     if let Some(message) = &record.message {
-        let budget = buffer.remaining().saturating_sub(TEXT_TAIL_RESERVE);
-        buffer.push_str("\nmessage: ");
+        let budget = buffer.remaining().saturating_sub(EMERGENCY_TAIL_RESERVE);
+        buffer.push_str(": ");
         buffer.push_str_bounded(message, budget);
     }
-    buffer.push_str("\nexit: ");
+    buffer.push_str("\n  = exit: ");
     buffer.push_str(record.class.name());
     buffer.push_str(" (");
     buffer.push_i64(record.exit_code);

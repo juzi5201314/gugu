@@ -15,8 +15,8 @@ use super::super::report::{
 };
 use super::super::slab::RawInvariant;
 use super::super::startup::{
-    BacktraceMode, EnvironmentSnapshot, StartupConfig, StartupError, needs_emergency_report,
-    parse_backtrace_var, parse_diagnostics_var,
+    BacktraceMode, DiagnosticsFormat, EnvironmentSnapshot, StartupConfig, StartupError,
+    needs_emergency_report, parse_backtrace_var, parse_diagnostics_var,
 };
 use super::super::startup_schema::{
     ExitCategory, FatalKind, LifecycleStateName, ReportEvent, ReportReason, Rt0Step,
@@ -119,11 +119,12 @@ impl Rt0Process {
         let format = if needs_emergency_report(errors) {
             RenderFormat::Emergency
         } else {
-            parse_diagnostics_var(&snapshot).map_or(RenderFormat::Emergency, render_format)
+            // 变量未设置时使用规范默认值 text；非法值已由 needs_emergency_report 排除。
+            render_format(parse_diagnostics_var(&snapshot).unwrap_or(DiagnosticsFormat::Text))
         };
         Self {
             report_format: format,
-            backtrace_mode: parse_backtrace_var(&snapshot).unwrap_or(BacktraceMode::Off),
+            backtrace_mode: parse_backtrace_var(&snapshot).unwrap_or(BacktraceMode::Triggering),
             config: None,
             snapshot,
             lifecycle,

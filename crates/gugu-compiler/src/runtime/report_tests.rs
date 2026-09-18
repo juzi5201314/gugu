@@ -90,13 +90,31 @@ fn json_escapes_control_characters_and_quotes() {
 fn text_report_contains_required_elements() {
     let mut ledger = ReportLedger::new();
     let report = emit_fatal(&mut ledger, RenderFormat::Text);
-    let text = report.text();
-    assert!(text.starts_with("runtime-report\n"));
-    assert!(text.contains("event: termination\n"));
-    assert!(text.contains("class: runtime-failure\n"));
-    assert!(text.contains("reason: out-of-memory\n"));
-    assert!(text.contains("message: GC heap limit exceeded while allocating 4096 bytes\n"));
-    assert!(text.contains("exit: runtime-failure (2)\n"));
+    assert_eq!(
+        report.text(),
+        "termination[out-of-memory]: GC heap limit exceeded while allocating 4096 bytes\n  = backtrace: 0 frames\n  = exit: runtime-failure (2)\n"
+    );
+    assert!(!report.truncated());
+}
+
+#[test]
+fn text_report_renders_panic_location() {
+    let mut ledger = ReportLedger::new();
+    ledger.emit(
+        ReportEvent::Panic,
+        ExitCategory::ProgramFailure,
+        ReportReason::UnhandledPanic,
+        Some("index out of bounds".to_owned()),
+        Some(location()),
+        Vec::new(),
+        1,
+        RenderFormat::Text,
+    );
+    let report = ledger.emitted().last().expect("已发布报告");
+    assert_eq!(
+        report.text(),
+        "panic[unhandled-panic]: index out of bounds\n  --> main.gg:3:5\n  = backtrace: 0 frames\n  = exit: program-failure (1)\n"
+    );
 }
 
 #[test]
@@ -105,8 +123,38 @@ fn both_format_writes_text_then_json() {
     let report = emit_fatal(&mut ledger, RenderFormat::Both);
     let text = report.text();
     let json_start = text.find("{\"schema\":").expect("JSON 报告存在");
-    assert!(text.starts_with("runtime-report\n"));
+    assert!(text.starts_with("termination[out-of-memory]: "));
     assert!(text[json_start..].contains("\"exit_code\":2}\n"));
+}
+
+#[test]
+fn oversized_text_message_keeps_location_and_exit_tail() {
+    let mut ledger = ReportLedger::new();
+    ledger.emit(
+        ReportEvent::Termination,
+        ExitCategory::RuntimeFailure,
+        ReportReason::OutOfMemory,
+        Some("长".repeat(8000)),
+        Some(SourceLocation {
+            file: "d/".repeat(200) + "end.gg",
+            line: 128,
+            column: 12,
+        }),
+        Vec::new(),
+        2,
+        RenderFormat::Text,
+    );
+    let report = ledger.emitted().last().expect("已发布报告");
+    assert!(report.truncated());
+    let text = report.text();
+    // 消息与文件名先后截断；位置行的行列、backtrace 行与退出行始终完整。
+    assert!(text.starts_with("termination[out-of-memory]: 长"), "{text}");
+    assert!(text.contains("\n  --> "), "{text}");
+    assert!(text.contains(":128:12\n"), "{text}");
+    assert!(
+        text.ends_with("  = backtrace: 0 frames\n  = exit: runtime-failure (2)\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -114,10 +162,12 @@ fn emergency_format_is_fixed_plain_text() {
     let mut ledger = ReportLedger::new();
     let report = emit_fatal(&mut ledger, RenderFormat::Emergency);
     let text = report.text();
-    assert!(text.starts_with("gugu emergency report\n"));
-    assert!(text.contains("reason: out-of-memory\n"));
-    assert!(text.contains("exit: runtime-failure (2)\n"));
-    assert!(!text.contains("{"));
+    assert!(
+        text.starts_with("gugu emergency report\ntermination[out-of-memory]: "),
+        "{text}"
+    );
+    assert!(text.ends_with("  = exit: runtime-failure (2)\n"), "{text}");
+    assert!(!text.contains('{'), "{text}");
 }
 
 #[test]

@@ -120,7 +120,9 @@ fn invalid_configuration_is_fatal_before_running() {
     assert!(
         reports[0]
             .text()
-            .contains("reason: invalid-configuration\n")
+            .starts_with("termination[invalid-configuration]"),
+        "{}",
+        reports[0].text()
     );
     let outcome = world.execute_termination(&budget()).expect("终止执行");
     assert_eq!(outcome.category, ExitCategory::RuntimeFailure);
@@ -232,7 +234,11 @@ fn main_error_still_waits_for_user_coroutines() {
     assert_eq!(world.rt0_state().expect("rt0"), LifecycleStateName::Waiting);
     let reports = world.rt0_reports().expect("rt0");
     assert_eq!(reports.len(), 1);
-    assert!(reports[0].text().contains("reason: main-error\n"));
+    assert!(
+        reports[0].text().starts_with("termination[main-error]"),
+        "{}",
+        reports[0].text()
+    );
     finish(&mut world, first);
     finish(&mut world, second);
     let outcome = world.execute_termination(&budget()).expect("终止执行");
@@ -258,8 +264,12 @@ fn main_panic_runs_only_main_defers_and_terminates_immediately() {
     assert!(world.run_defer(1).is_err());
     let reports = world.rt0_reports().expect("rt0");
     assert_eq!(reports.len(), 2);
-    assert!(reports[0].text().contains("event: panic\n"));
-    assert!(reports[1].text().contains("reason: unhandled-panic\n"));
+    assert!(reports[0].text().starts_with("panic[unhandled-panic]"));
+    assert!(
+        reports[1]
+            .text()
+            .starts_with("termination[unhandled-panic]")
+    );
     let outcome = world.execute_termination(&budget()).expect("终止执行");
     assert_eq!(outcome.category, ExitCategory::ProgramFailure);
     assert_eq!(outcome.code, 1);
@@ -286,7 +296,11 @@ fn fatal_during_main_unwind_escalates_to_panic_during_unwind() {
     assert_eq!(plan.exit_code(), 2);
     let reports = world.rt0_reports().expect("rt0");
     assert_eq!(reports.len(), 2);
-    assert!(reports[1].text().contains("reason: panic-during-unwind\n"));
+    assert!(
+        reports[1]
+            .text()
+            .starts_with("termination[panic-during-unwind]")
+    );
     let outcome = world.execute_termination(&budget()).expect("终止执行");
     assert_eq!(outcome.code, 2);
 }
@@ -355,8 +369,12 @@ fn detached_panic_in_waiting_downgrades_natural_exit() {
     assert_eq!(outcome.code, 1);
     let reports = world.rt0_reports().expect("rt0");
     assert_eq!(reports.len(), 2);
-    assert!(reports[0].text().contains("event: panic\n"));
-    assert!(reports[1].text().contains("reason: unhandled-panic\n"));
+    assert!(reports[0].text().starts_with("panic[unhandled-panic]"));
+    assert!(
+        reports[1]
+            .text()
+            .starts_with("termination[unhandled-panic]")
+    );
 }
 
 #[test]
