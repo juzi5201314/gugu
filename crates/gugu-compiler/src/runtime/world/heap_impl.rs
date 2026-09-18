@@ -5,7 +5,7 @@
 //! （`LOCAL_DIRECT`），根是模型根槽数组，跨 owner 引用在本路径是不变量失败。
 
 use super::super::barrier::{BarrierFlushReason, BarrierSite};
-use super::super::extent::class_for_bytes;
+use super::super::extent::{ExtentOccupancy, TrimBlocked, class_for_bytes};
 use super::super::gc_metadata_schema::GcRootKindV1;
 use super::super::gc_metadata_section::{GcRuntimeMetadata, decode_sections};
 use super::super::local_heap::{
@@ -13,9 +13,10 @@ use super::super::local_heap::{
     LocalHeap, ManagedBlockId,
 };
 use super::super::local_heap_schema::{
-    HEAP_BLOCKS_PER_ARENA, HeapBlockState, LocalHeapRuntimeContract,
+    HEAP_BLOCK_LARGE_MEMBER, HEAP_BLOCKS_PER_ARENA, HeapBlockState, LocalHeapRuntimeContract,
 };
 use super::super::slab::{MemoryDomainId, OwnerToken, RawInvariant};
+use super::PendingExtentTrim;
 use super::RawWorld;
 use super::shared_heap_impl;
 
@@ -85,20 +86,49 @@ pub(super) fn shared_heap_error(error: super::super::shared_heap::SharedHeapErro
 impl RawWorld {
     /// 分配并发布一个共享对象：payload 建立在 SharedHeap，block 身份登记在世界级 registry。
     ///
+    /// 线性化点之前失败会完整回滚：先撤销刚提交但从未发布 payload 的 extent，再把 block 表恢复
+    /// 到预留之前。
     pub(crate) fn allocate_shared_object(
         &mut self,
         owner: u32,
         bytes: u32,
     ) -> Result<super::super::shared_heap_schema::SharedHandle, RawInvariant> {
-        let (block, block_offset) = self.shared_registry.reserve(owner, bytes)?;
+        let (reservation, block, block_offset) = self.shared_registry.reserve(owner, bytes)?;
         let descriptor = block.id.arena();
+        let mut committed_pages = false;
         if self
             .shared_registry
             .block_record(descriptor)
             .is_some_and(|record| record.extent.is_none())
         {
             self.commit_shared_block_pages(owner, descriptor)?;
+            committed_pages = true;
         }
+        match self.publish_shared_payload(owner, block, block_offset, bytes) {
+            Ok(handle) => Ok(handle),
+            Err(error) => {
+                if committed_pages {
+                    self.discard_shared_block_pages(owner, descriptor)?;
+                }
+                self.shared_registry.rollback_reserve(&reservation)?;
+                Err(error)
+            }
+        }
+    }
+
+    /// 在一个已提交物理页的预留位置上发布 payload：建立共享 payload、解析 handle 并写进
+    /// registry。
+    ///
+    /// 这三步是共享对象的线性化点。`register_arena` 位于 `insert` 之后，它的失败只可能是同名
+    /// descriptor 重复登记这类不变量破损，因此不回滚，按「世界已不可用」处理。
+    fn publish_shared_payload(
+        &mut self,
+        owner: u32,
+        block: BlockRef,
+        block_offset: u32,
+        bytes: u32,
+    ) -> Result<super::super::shared_heap_schema::SharedHandle, RawInvariant> {
+        let descriptor = block.id.arena();
         let payload = self
             .shared_heap_mut()?
             .allocate_payload(owner, descriptor, block_offset, bytes)
@@ -121,23 +151,66 @@ impl RawWorld {
         Ok(handle)
     }
 
+    /// 撤销一次刚提交但从未发布过 payload 的共享 block：把 extent 交回 trim 门禁并把字节退账。
+    ///
+    /// 字节先停进 cache 再等 trim 完成：grace 窗口里物理页仍然 committed，`release` 在真正
+    /// decommit 时才把 cache 与 committed 同步扣掉。
+    pub(super) fn discard_shared_block_pages(
+        &mut self,
+        owner: u32,
+        descriptor: u32,
+    ) -> Result<(), RawInvariant> {
+        let extent = self
+            .shared_registry
+            .block_record(descriptor)
+            .and_then(|record| record.extent)
+            .ok_or_else(|| RawInvariant::new("撤销共享 block 时 extent 缺失"))?;
+        self.extents.mark_return_queued(extent)?;
+        self.managed_accounting[owner as usize].park_discarded(u64::from(
+            super::super::gc_metadata_contract::GC_BLOCK_BYTES,
+        ));
+        let occupancy = ExtentOccupancy {
+            live_slots: 0,
+            queued_slots: 0,
+            pending_returns: 0,
+        };
+        match self.poll_trim_extent(extent, occupancy)? {
+            Ok(bytes) => self.managed_accounting[owner as usize].release(bytes),
+            Err(TrimBlocked::GracePending { .. }) => {
+                self.pending_extent_trims.push(PendingExtentTrim {
+                    extent,
+                    owner_id: self.token(owner).owner_id,
+                    domain: MemoryDomainId::MANAGED_SHARED,
+                });
+            }
+            Err(blocked) => {
+                return Err(RawInvariant::new(format!(
+                    "撤销共享 block 的 extent 被门禁拒绝：{}",
+                    blocked.describe()
+                )));
+            }
+        }
+        self.shared_registry.clear_extent(descriptor)?;
+        Ok(())
+    }
+
     /// 为新的共享 block 打开 MANAGED_SHARED arena 并提交 32 KiB。
     pub(super) fn commit_shared_block_pages(
         &mut self,
         owner: u32,
         descriptor: u32,
     ) -> Result<(), RawInvariant> {
-        let manager = self.token(owner);
-        let arenas = self.extents.spaces_of(owner).to_vec();
-        let extent_arena = if let Some(existing) = arenas
-            .into_iter()
-            .find(|arena| self.extents.arena_domain(*arena) == Some(MemoryDomainId::MANAGED_SHARED))
-        {
-            existing
-        } else {
-            self.open_arena(owner, manager, MemoryDomainId::MANAGED_SHARED)?
-        };
         let class = self.heap_block_class;
+        let manager = self.token(owner);
+        // 只认「还能切出 32 KiB」的 arena：整块用尽后必须打开新 arena，否则共享对象在第一个
+        // arena 满之后就会永久提交失败。
+        let extent_arena = match self.extents.spaces_of(owner).iter().copied().find(|arena| {
+            self.extents.arena_domain(*arena) == Some(MemoryDomainId::MANAGED_SHARED)
+                && self.extents.arena_has_free(*arena, class)
+        }) {
+            Some(existing) => existing,
+            None => self.open_arena(owner, manager, MemoryDomainId::MANAGED_SHARED)?,
+        };
         let (extent, offset) = self.commit_managed_block(owner, extent_arena, class)?;
         self.shared_registry
             .attach_extent(descriptor, extent, offset)?;
@@ -575,12 +648,52 @@ impl RawWorld {
                 .allocate(arena, type_index, payload_bytes, align);
         }
         let address = attempt.map_err(heap_error)?;
-        let activated = self.heap_mut(owner)?.take_activated_cache_bytes();
-        if activated != 0 {
-            self.managed_accounting[owner as usize].take_from_cache(activated);
-        }
+        self.settle_activated_blocks(owner)?;
         self.shade_address(owner, address)?;
         Ok(address)
+    }
+
+    /// 结算本次分配激活的块：没有已提交页的块重新提交 32 KiB extent，再从 cache 扣掉激活字节。
+    ///
+    /// 块归还时把 extent 交给 trim（`detach_block_extent`），decommit 之后块没有物理页；复用这种
+    /// 块必须重新提交，否则 committed 会小于 live，`managed_ledger_invariant` 失败。
+    fn settle_activated_blocks(&mut self, owner: u32) -> Result<(), RawInvariant> {
+        let class = self.heap_block_class;
+        let activated = self.heap_mut(owner)?.take_activated_blocks();
+        let result = self.settle_activated_blocks_inner(owner, class, &activated);
+        // 缓冲区无论成败都要交回，稳态零分配。
+        self.heap_mut(owner)?.return_activated_blocks(activated);
+        result
+    }
+
+    fn settle_activated_blocks_inner(
+        &mut self,
+        owner: u32,
+        class: u32,
+        activated: &[ManagedBlockId],
+    ) -> Result<(), RawInvariant> {
+        let mut bytes = self.heap_mut(owner)?.take_activated_cache_bytes();
+        for id in activated {
+            if self
+                .heap(owner)?
+                .block_has_committed_pages(*id)
+                .map_err(heap_error)?
+            {
+                continue;
+            }
+            let extent_arena = self.managed_arena_by_descriptor(id.arena())?.extent_arena;
+            let (extent, _) = self.commit_managed_block(owner, extent_arena, class)?;
+            self.heap_mut(owner)?
+                .attach_block_extent(*id, extent)
+                .map_err(heap_error)?;
+            bytes = bytes.saturating_add(u64::from(
+                super::super::gc_metadata_contract::GC_BLOCK_BYTES,
+            ));
+        }
+        if bytes != 0 {
+            self.managed_accounting[owner as usize].take_from_cache(bytes);
+        }
+        Ok(())
     }
 
     /// 读取对象 header 描述。
@@ -720,6 +833,12 @@ impl RawWorld {
                         heap.block_live_lines(id).map_err(heap_error)?,
                     )
                 };
+                // large span 的候选身份是起始块：成员块没有 object-start 与标记，单独进入试验删除
+                // 会被判成死亡，从而在对象仍可达时发布成员块的归还。成员由起始块的
+                // `promote_empty_large_span` 与 `queue_large_mapping_if_ready` 统一处理。
+                if record.reserved & HEAP_BLOCK_LARGE_MEMBER != 0 {
+                    continue;
+                }
                 if kind == HeapArenaKind::Nursery
                     || record.incoming_leases != 0
                     || record.allocator_leases != 0
@@ -971,8 +1090,11 @@ impl RawWorld {
             .extents
             .arena_base(extent_arena)
             .ok_or_else(|| RawInvariant::new("LocalHeap arena 缺少基址"))?;
-        let descriptor = u32::try_from(self.managed_arenas.len() + 1)
-            .map_err(|_| RawInvariant::new("managed arena 数量超过 u32"))?;
+        let descriptor = self.next_managed_arena_descriptor;
+        self.next_managed_arena_descriptor = self
+            .next_managed_arena_descriptor
+            .checked_add(1)
+            .ok_or_else(|| RawInvariant::new("managed arena descriptor 溢出"))?;
         let heap_slot = self
             .heap_mut(owner)?
             .attach_arena(kind, descriptor, base, &contract);

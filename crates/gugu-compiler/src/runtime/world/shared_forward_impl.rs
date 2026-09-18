@@ -109,8 +109,9 @@ impl RawWorld {
     /// current payload。
     ///
     /// `worker` 是发布搬迁通知的 owner 槽位（staging 与 producer gate 属于它），`handle` 的
-    /// payload owner 决定通知目标。返回 `Deferred` 时没有任何状态被改动；失败都是不变量失败，
-    /// 没有「部分搬迁」的中间态：复制与 slot 切换由参照实现在一个线性化点内完成。
+    /// payload owner 决定通知目标。返回 `Deferred` 时没有任何状态被改动；线性化点（`forward`
+    /// 成功）之前失败会完整回滚：撤销刚提交的 extent，再把 block 表恢复到预留之前；线性化点
+    /// 之后失败视为世界损坏，不再尝试回滚——复制与 slot 切换已经在同一步完成。
     pub(crate) fn forward_shared_payload(
         &mut self,
         worker: u32,
@@ -138,31 +139,53 @@ impl RawWorld {
             return Ok(SharedForwardOutcome::Deferred(ForwardDeferred::Pinned));
         }
         // 3. 目标位置：与源同 owner，descriptor 由世界级分配器推进，绝不跨 owner 迁移。
+        //    线性化点之前失败必须完整回滚：撤销刚提交的 extent，再把 block 表恢复到预留之前。
         let owner = record.owner;
         let bytes = record.payload_bytes;
-        let (block, block_offset) = self.shared_registry.reserve(owner, bytes)?;
+        let (reservation, block, block_offset) = self.shared_registry.reserve(owner, bytes)?;
         let descriptor = block.id.arena();
+        let mut committed_pages = false;
         if self
             .shared_registry
             .block_record(descriptor)
             .is_some_and(|record| record.extent.is_none())
         {
             self.commit_shared_block_pages(owner, descriptor)?;
+            committed_pages = true;
         }
-        let payload = self
-            .shared_heap_mut()?
-            .allocate_payload(owner, descriptor, block_offset, bytes)
-            .map_err(shared_heap_error)?;
+        let payload =
+            match self
+                .shared_heap_mut()?
+                .allocate_payload(owner, descriptor, block_offset, bytes)
+            {
+                Ok(payload) => payload,
+                Err(error) => {
+                    if committed_pages {
+                        self.discard_shared_block_pages(owner, descriptor)?;
+                    }
+                    self.shared_registry.rollback_reserve(&reservation)?;
+                    return Err(shared_heap_error(error));
+                }
+            };
         let expected = slot
             .forward_generation
             .checked_add(1)
             .ok_or_else(|| RawInvariant::new("共享 forward generation 溢出"))?;
         let lease = self.next_shared_forward_lease()?;
         // 4. 复制与线性化：目标 payload 建立、current 切换、旧 payload 进入 grace。
-        let outcome = self
+        let outcome = match self
             .shared_heap_mut()?
             .forward(handle, payload.id, lease, expected)
-            .map_err(shared_heap_error)?;
+        {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if committed_pages {
+                    self.discard_shared_block_pages(owner, descriptor)?;
+                }
+                self.shared_registry.rollback_reserve(&reservation)?;
+                return Err(shared_heap_error(error));
+            }
+        };
         let SharedForward::Forwarded(forwarded) = outcome else {
             return Err(RawInvariant::new("共享 payload 已排除 pin，搬迁不得被推迟"));
         };
@@ -604,11 +627,8 @@ impl RawWorld {
             return Ok(0);
         }
         let target_index = self.manager_owner_index(target)?;
-        let pending = self.managed_accounting[owner as usize].pending_return_bytes();
-        if pending != 0 {
-            self.managed_accounting[owner as usize].forward_pending(pending);
-            self.managed_accounting[target_index as usize].stage_pending(pending);
-        }
+        // 账本不迁移：pending 字节属于提交物理页的 owner，消息转投与消费都会按 extent 的
+        // descriptor owner 结算，因此这里预迁移一次会在目标侧造出没有 committed 对应的字节。
         let from = self.token(owner);
         let moved = self.shared_registry.handover_owner(owner, target_index);
         let tables = self.barrier_mut().handover_manager(from, target);

@@ -21,7 +21,7 @@ pub(crate) const BLOCK_RETURN_SCHEMA: u32 = 1;
 /// 内建 block return profile 名。
 pub(crate) const BLOCK_RETURN_PROFILE_NAME: &str = "mosaic-block-return";
 /// profile revision；unit 目录、gate 目录或尺寸变化都必须递增。
-pub(crate) const BLOCK_RETURN_PROFILE_REVISION: u32 = 1;
+pub(crate) const BLOCK_RETURN_PROFILE_REVISION: u32 = 2;
 
 /// 连续空 line 短于该阈值时不发 `HeapLineRun`，由 bump 在 block 内复用。
 pub(crate) const HEAP_LINE_RUN_MIN_LINES: u32 = 8;
@@ -30,16 +30,16 @@ pub(crate) const HEAP_LINE_RUN_MIN_LINES: u32 = 8;
 pub(crate) const BLOCK_RETURN_UNITS: [&str; 4] =
     ["heap-block", "heap-line-run", "heap-arena", "large-mapping"];
 
-/// 发布前必须全部归零的门禁；顺序即登记顺序。
+/// 发布前必须全部归零的门禁；顺序即 `consume_heap_block` 核对的顺序。
 pub(crate) const BLOCK_RETURN_GATES: [&str; 8] = [
+    "incoming-lease",
     "allocator-lease",
     "scanner-lease",
     "evacuation-lease",
-    "incoming-edge",
     "pin",
     "resource",
-    "handle-access",
-    "queue-page-grace",
+    "live-lines",
+    "candidate-job",
 ];
 
 /// 从优化后 LIR 与冻结类型表推导的 block return 需求，不是运行时计数。
@@ -52,7 +52,8 @@ pub struct BlockReturnDemand {
     pub line_run_sites: u32,
     /// LocalHeap 分配点上界；每个站点至多产生一次 `HeapArena`。
     pub arena_sites: u32,
-    /// 超过单个 Immix block 的类型数；每个 large 类型至多产生一次 `LargeMapping`。
+    /// 超过单个 Immix block 的类型数与分配站点数的较小者：没有分配站点时不可能产生
+    /// `LargeMapping`，类型数多于站点数时以站点数为上界。
     pub large_sites: u32,
     /// SharedHeap 分配点上界；每个站点至多产生一次共享 `HeapBlock`。
     pub shared_block_sites: u32,
@@ -72,7 +73,7 @@ impl BlockReturnDemand {
             block_sites: local.alloc_sites,
             line_run_sites: local.alloc_sites,
             arena_sites: local.alloc_sites,
-            large_sites: local.large_types,
+            large_sites: local.large_types.min(local.alloc_sites),
             shared_block_sites: shared.alloc_sites,
             resource_block_sites: local.resource_sites,
             max_unit_bytes: GC_ARENA_BYTES,

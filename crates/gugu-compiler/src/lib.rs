@@ -33,15 +33,19 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    BarrierDemand, BarrierRuntimeContract, BlockReturnHarness, BlockReturnReport, CardMarkHarness,
-    CardMarkReport, ChannelWaitHarness, ChannelWaitReport, ContextSwitchCode, CoroutineContext,
-    CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
-    EdgeCandidateHarness, EdgeCandidateReport, EdgeDemand, EdgeRuntimeContract, HarnessReport,
-    IntrinsicBoundary, OwnerReturnHarness, PlatformRangeDemand, RegionTransferHarness,
-    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary,
-    RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand, SchedulerRuntimeContract,
-    SharedForwardHarness, SharedForwardReport, StackMapDemand, StackPolicy, SyncDemand,
-    SyncLockHarness, SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
+    BarrierDemand, BarrierRuntimeContract, BlockReturnDemand, BlockReturnHarness,
+    BlockReturnReport, BlockReturnRuntimeContract, CardMarkHarness, CardMarkReport,
+    ChannelWaitHarness, ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand,
+    CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract, EdgeCandidateHarness,
+    EdgeCandidateReport, EdgeDemand, EdgeRuntimeContract, GcMetadataDemand, GcPacingDemand,
+    GcPacingRuntimeContract, HarnessReport, HeapTriggerProfile, IntrinsicBoundary, LocalHeapDemand,
+    LocalHeapRuntimeContract, MarkDemand, MarkRuntimeContract, OwnerReturnHarness,
+    PlatformRangeDemand, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
+    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
+    SchedulerDemand, SchedulerRuntimeContract, SharedForwardHarness, SharedForwardReport,
+    SharedHeapDemand, SharedHeapRuntimeContract, StackMapDemand, StackPolicy, SyncDemand,
+    SyncLockHarness, SyncLockReport, SyncRuntimeContract, TurnRegionDemand,
+    TurnRegionRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -2924,6 +2928,33 @@ mod tests {
             compilation.runtime_raw_fingerprint(),
             windows.runtime_raw_fingerprint(),
             "raw 契约整体仍必须随目标分离"
+        );
+    }
+
+    #[test]
+    fn large_type_without_allocation_keeps_demand_bounded() {
+        // 冻结类型表里出现、却没有分配站点的大类型不得让 large 上界越过分配站点上界：
+        // 一个只有类型引用、没有任何分配的程序曾经被 E0058 拒绝。
+        let source = "#[repr(C, align(64))] struct Large { head: uint, tail: [uint; 4096] }\n\
+                      #[used] fn field(value: &Large) &uint = &value.head\n\
+                      fn main() {}\n";
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+        let plan = compilation.image_plan().expect("镜像计划");
+        let demand = plan.block_return_demand();
+        assert!(
+            demand.large_sites <= demand.block_sites,
+            "large 上界必须被分配站点上界夹住：large {} vs block {}",
+            demand.large_sites,
+            demand.block_sites
         );
     }
 

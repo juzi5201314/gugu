@@ -791,6 +791,15 @@ impl RuntimeRawContractV1 {
         &self.block_return
     }
 
+    /// 返回 owner-directed managed block return 契约段（可变）。
+    ///
+    /// 只供契约不变量测试构造「子段内部自洽、跨段却对不上」的非法状态：正常路径只经 `build`
+    /// 生成契约，不存在需要写这一段的生产代码。
+    #[cfg(test)]
+    pub(crate) fn block_return_mut(&mut self) -> &mut BlockReturnRuntimeContract {
+        &mut self.block_return
+    }
+
     /// 返回 `HandleForward` 消息字段集合。
     pub(crate) fn handle_forward_message(&self) -> &MessageSchemaV1 {
         self.shared_heap.handle_forward_fields()
@@ -957,6 +966,13 @@ impl RuntimeRawContractV1 {
         self.edge.verify(&self.barrier, &self.mark)?;
         self.shared_heap.verify()?;
         self.block_return.verify()?;
+        if self.block_return.demand()
+            != BlockReturnDemand::derive(&self.local_heap.demand(), &self.shared_heap.demand)?
+        {
+            return Err(RawModelError::new(
+                "block return 需求与 LocalHeap/SharedHeap 派生值不一致",
+            ));
+        }
         if self.block_return.block_bytes != self.local_heap.block_bytes
             || self.block_return.arena_bytes != self.local_heap.arena_bytes
             || self.block_return.line_bytes != self.local_heap.line_bytes

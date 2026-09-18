@@ -638,6 +638,43 @@ fn ledger_categories_stay_mutually_exclusive() {
 }
 
 #[test]
+fn tampered_block_return_demand_is_rejected() {
+    let mut contract = RuntimeRawContractV1::build(
+        TargetName::X86_64Linux,
+        RawPlanePolicyV1::default(),
+        RawPlaneDemand::default(),
+        RawResourceDemand::default(),
+        Rt0Demand::default(),
+        SchedulerDemand::default(),
+        WaitDemand::default(),
+        SyncDemand::default(),
+        StackMapDemand::default(),
+        GcMetadataDemand::empty(),
+        BarrierDemand::default(),
+        GcPacingDemand::default(),
+        MarkDemand::default(),
+        LocalHeapDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
+    )
+    .expect("契约可构建");
+    contract.verify().expect("契约必须自洽");
+    // 保持 block return 段内部自洽（需求等式与指纹），只让它与 LocalHeap 派生值不一致：跨段
+    // 等式必须独立拒绝这种篡改，而不是靠子段的指纹校验兜底。
+    {
+        let block_return = contract.block_return_mut();
+        block_return.demand.block_sites += 1;
+        block_return.demand.line_run_sites = block_return.demand.block_sites;
+        block_return.demand.arena_sites = block_return.demand.block_sites;
+        block_return.fingerprint = block_return.compute_fingerprint();
+    }
+    let error = contract.verify().expect_err("篡改必须被拒绝");
+    assert_eq!(
+        error.message(),
+        "block return 需求与 LocalHeap/SharedHeap 派生值不一致"
+    );
+}
+
+#[test]
 fn contract_rejects_address_fields_and_policy_drift() {
     let contract = RuntimeRawContractV1::build(
         TargetName::X86_64Linux,

@@ -124,6 +124,17 @@ pub(crate) struct ResourceShape {
     pub(crate) alignment: u32,
 }
 
+/// 已过归还线性化点、等待 queue-page grace 的 extent 及其账本归属。
+///
+/// `domain` 在入队时确定：descriptor 槽位在 trim 成功后立刻可被复用，事后再读会读到别的
+/// extent 的 domain，因此不能在完成时再判定归属。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PendingExtentTrim {
+    extent: ExtentId,
+    owner_id: OwnerId,
+    domain: MemoryDomainId,
+}
+
 /// raw plane 的可运行模型世界。
 #[derive(Debug)]
 pub(crate) struct RawWorld {
@@ -147,12 +158,12 @@ pub(crate) struct RawWorld {
     domain_owner: OwnerToken,
     /// 已完成消费但尚未过 queue-page grace 的 node；在 grace 之后才允许复用。
     graced_nodes: Vec<ReturnNodeId>,
-    /// 已过归还线性化点、正在等 queue-page grace 的 extent 及其账本 owner。
+    /// 已过归还线性化点、正在等 queue-page grace 的 extent 及其账本归属。
     ///
     /// grace 按 epoch 累积，跨多次 owner service 推进；记录在这里使等待中的 extent 不需要重新
-    /// 发布消息，也不会因为一次未走完就丢失归还。owner 与 extent 一起记录：归还完成后描述符
-    /// 槽位会被复用，届时就无法再从 extent 反查账本归属。
-    pending_extent_trims: Vec<(ExtentId, OwnerId)>,
+    /// 发布消息，也不会因为一次未走完就丢失归还。owner 与 domain 与 extent 一起记录：归还完成后
+    /// 描述符槽位会被复用，届时就无法再从 extent 反查账本归属，也不能按余额猜测 domain。
+    pending_extent_trims: Vec<PendingExtentTrim>,
     /// 每个 raw owner 的独立 managed 物理页账本；按下标与 `owners` 对齐。
     managed_accounting: Vec<ManagedAccounting>,
     /// 与 slab descriptor 平行的 ResourceCell header。
@@ -216,6 +227,12 @@ pub(crate) struct RawWorld {
     local_heaps: Option<Vec<super::local_heap::LocalHeap>>,
     /// 全局稠密 managed descriptor 表；管理权转移不改变 payload 的 heap/arena 定位。
     managed_arenas: Vec<heap_impl::ManagedArena>,
+    /// 下一个 managed arena descriptor；单调递增、永不复用。
+    ///
+    /// 摘除已归还的 arena 会从 `managed_arenas` 移除登记项，因此 descriptor 不能再由表长推导：
+    /// card table 与 block 身份都按 descriptor 索引且没有注销 API，复用编号会把旧 arena 的键
+    /// 解释成新 arena 的键。
+    next_managed_arena_descriptor: u32,
     /// `EdgeDelta` 的消费平面：target 侧已应用计数、乱序保留与候选 dirty 集合。
     edges: Option<super::edge::EdgePlane>,
     /// 从镜像 section 解码出的运行时可读 GC 类型表。
@@ -320,6 +337,7 @@ impl RawWorld {
             mark_active: false,
             local_heaps: None,
             managed_arenas: Vec::new(),
+            next_managed_arena_descriptor: 1,
             edges: None,
             gc_types: None,
             candidates: None,

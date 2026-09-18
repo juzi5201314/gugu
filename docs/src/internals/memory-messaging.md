@@ -346,6 +346,7 @@ Gugu 采用以下范围层级，替代常规路径上的共享全局 free list�
 - stack guard page 和 metadata guard page 永不作为普通 payload 返回。
 - decommit 必须在所有 allocator、scanner、forwarder lease 和 queue-page grace 完成后执行。四条门禁是：三路 lease 全部归零、extent 上没有 live/queued slot、没有在途 return 消息、grace 已走完固定步数；任一条不成立时 range 保持 committed，诊断点名未满足的条件。
 - 跨 owner 归还 extent 只发布携带 extent 编号的 `ReturnKind::Extent` 消息；归还的线性化点在 producer 侧，lease 未归零时拒绝且不改变状态，grace 未走完时消息被消费但 extent 留在 `ReturnQueued` 由后续 owner service 继续推进，因此同一 extent 不可能被归还两次。
+- managed 物理页（`ManagedLocal`/`ManagedShared`）只经 block return 路径过门禁并 trim：通用 slab extent trim 不处理它们，否则会在 payload 仍可达时 decommit。managed 页进入独立 owner 账本（`ManagedAccounting`），由 `committed_classes` 汇总进 pressure。
 - platform failure 映射为 `OutOfMemory`、`ResourceExhausted` 或 `RuntimeInvariant`；不能把 commit 失败当作空闲 range。
 - 2 MiB huge-page hint 可以作为平台 profile，但不能成为正确性或固定延迟保证。
 
@@ -476,7 +477,8 @@ block 的 incoming lease 归零只产生 collection candidate，不能直接回�
   之前整体转入 `invalidate`，失效收尾时这些成员重新回到候选 dirty 集合，不重跑就等于漏收。
 
 块记录 `HeapBlockRecord` 是 candidate 与 heap 之间的唯一事实来源：`candidate_job` 记录绑定，
-`state` 走 `active → candidate → reclaiming → free`，`incoming_leases`/`allocator_leases`/
+`state` 走 `allocating → candidate → sweeping/evacuating` 与
+`return-pending → owned-free → free`，`incoming_leases`/`allocator_leases`/
 `scanner_leases`/`evacuation_leases` 是 gate 的输入。`ManagedBlockId` 的 arena 部分就是
 arena descriptor，世代与记录读写都必须按 descriptor 定位 arena：只按 arena 内下标查找会让
 arena ≥ 1 的 block 读到 arena 0 同号 block 的世代。
@@ -489,10 +491,11 @@ arena ≥ 1 的 block 读到 arena 0 同号 block 的世代。
 - **绑定用状态而不是 lease**：`candidate` 状态本身已经阻止 allocator 继续往该 block 分配，因此
   绑定只写 `state = candidate` 与 `candidate_job`。若绑定自己占一个 scanner lease，`validate`
   要求的「四类 lease 归零」就永远不可能通过。
-- **提交路径**：解绑 → `state = reclaiming` → `sweep_block`（只清扫未标记对象，逐对象走与
-  `sweep_unmarked` 相同的回收实现）→ `note_swept`；随后 `ReleaseBlock` 调 `release_block`
-  清空对象、line、object-start 位与 mark 位、推进世代并复位全部 lease 计数，再 `note_released`。
-  两条确认都恰好一次，重复执行由平面判成不变量失败。
+- **提交路径**：解绑 → `state = sweeping` → `sweep_block`（只清扫未标记对象，逐对象走与
+  `sweep_unmarked` 相同的回收实现）→ `note_swept`。死亡组的 `ReleaseBlock` 只把归还消息发进
+  owner inbox，`release_block`（清空对象、line、object-start 位与 mark 位、推进世代并复位全部
+  lease 计数）与 extent trim 都发生在 consume 之后；extent 在归还门禁之前从块上解绑，grace
+  走完后才 decommit。两条确认都恰好一次，重复执行由平面判成不变量失败。
 - **出边减量**：`DropOutgoing` 从 `EdgePlane` 的已应用计数里扣减，扣到零且没有保留记录时清退该
   block 对；扣减超过当前计数是不变量失败。
 - **nursery 排除**：nursery block 由 minor cycle 整体搬运与复位，不是候选对象；变更通知按 arena
@@ -519,13 +522,15 @@ arena ≥ 1 的 block 读到 arena 0 同号 block 的世代。
 
 managed plane 的 return unit 按风险从低到高排列：
 
-1. `HeapBlockReturn`：完整 32 KiB block，无 live object、pin、resource、incoming edge、
-   scanner 或 allocator lease；
-2. `HeapLineRunReturn`：同一 block 内连续 free line-run，line metadata、object-start
-   bitmap、edge summary 和 scanner lease 已稳定；
-3. `HeapArenaReturn`：64 个 block 全部为空，且 arena 没有 pin、resource、forwarding、
-   handle access 或 page-covering 引用；
-4. `LargeMappingReturn`：独立 mapping 完成 root/field 或 handle 更新并清除 forwarding。
+1. `HeapBlockReturn`：完整 32 KiB block；发布前八个 gate 全部归零——incoming/allocator/
+   scanner/evacuation 四类 lease、pin、resource 实例数、块内 live line 与 `candidate_job`；
+2. `HeapLineRunReturn`：同一 block 内连续 free line-run；只恢复 bump 区间（`LINE_QUEUED`
+   还原成可分配并把游标退回 run 起点），line metadata、object-start bitmap、edge summary
+   和 scanner lease 已稳定；
+3. `HeapArenaReturn`：64 个 block 全部为空且 extents 已结清（或在本消息消费时结清），
+   消费时摘除 arena 登记；
+4. `LargeMappingReturn`：独立 mapping 完成 root/field 或 handle 更新并清除 forwarding，
+   由 span 起始块统一发布。
 
 允许的消息相关状态迁移为：
 
@@ -533,8 +538,9 @@ managed plane 的 return unit 按风险从低到高排列：
 TurnRegion: Private → Publishing → LocalPromote
 TurnRegion: Private → Publishing → RegionTransfer → Received
 TurnRegion: Private → ResetPending → Reset
-LocalHeap:  Allocating → Sweeping → ReturnPending → OwnedFree → Allocating
-LocalHeap:  Evacuating → ForwardingComplete → ReturnPending → OwnedFree
+LocalHeap:  Allocating → Candidate → Sweeping → ReturnPending → OwnedFree → Free
+LocalHeap:  Evacuating → ForwardingComplete → ReturnPending → OwnedFree → Free
+LocalHeap:  ReturnPending → OwnedFree → Free
 SharedHeap: Forwarding → Grace → Reclaimable → OwnedFree
 Free       → Allocating
 ```
@@ -905,7 +911,7 @@ benchmark 与正确性测试分离。至少测量：
 
 ## Compiler 侧契约模型与 verifier
 
-owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，当时 schema 2、当前 17）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
+owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，当时 schema 2、当前 19）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
 
 - **消息字段 schema** 为每个字段打种类标签，只允许 owner domain/id/generation/route key、descriptor index、unit index、bytes、epoch、integrity 与 link；任何地址种类在 `verify` 中被拒绝，因此“跨 owner 只发送 descriptor/index/generation/epoch/bytes/integrity”是机器检查的契约，而不是注释约定。
 - **需求视图**（`RawPlaneDemand`）由冻结前端产物推导：GIR 协程创建点数量、placement 判定的 `Resource`/`RuntimeRaw` 记录数量与 owner 数量；常驻 message node 容量由 shard 数与 batch item 上限推导为可证明下界。资源侧另由 `RawResourceDemand` 给出资源站点、acquire/release/transfer 站点、owner 数与资源种类数的统计口径；当前 `RuntimeRawContractV1` 只固化 resource ladder 与该需求视图，ResourceReleaseHarness 的 node capacity 按 total item 与 batch 上限设置，release queue 使用动态 `VecDeque`，不声称由 `RawResourceDemand` 推导 slab 或队列容量。

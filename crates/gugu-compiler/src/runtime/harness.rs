@@ -1829,6 +1829,15 @@ impl BlockReturnHarness {
         if !cycle.cycle_completed {
             return Err(RawInvariant::new("cycle 必须完成"));
         }
+        // managed return 的 consume 只把 extent 交给 grace，物理页要等 GRACE_STEPS 个 epoch 才
+        // trim；报告要求 provider committed 真的下降，因此这里按 owner service 的真实节奏推进
+        // grace。
+        let inbox = world.inbox(0);
+        for _ in 0..crate::runtime::model::GRACE_STEPS {
+            world.open_grace(&inbox);
+            world.close_grace(&inbox);
+            world.advance_pending_extent_trims()?;
+        }
         for owner in 0..self.owners {
             world.managed_ledger_invariant(owner)?;
         }

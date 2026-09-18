@@ -23,6 +23,7 @@ use super::super::size_class::RuntimeSizeClassId;
 use super::super::slab::{
     MemoryDomainId, OwnerId, OwnerToken, RawInvariant, SlabDescriptorId, SlabGeneration, SlabState,
 };
+use super::PendingExtentTrim;
 use super::RawWorld;
 use super::heap_impl::heap_error;
 use super::shared_heap_impl;
@@ -208,16 +209,27 @@ impl RawWorld {
             entry.descriptors = entry.descriptors.saturating_add(1);
         }
         // 从未发过的 extent 没有被任何描述符引用，天然满足空载门禁。
+        //
+        // managed extent 没有 slab descriptor，但它的占用由 block record 判定、归还只经
+        // `settle_managed_block_extent` 与 pending trim；交给通用 trim 会在 payload 仍可达时
+        // decommit 它的物理页。
         for descriptor in self.extents.descriptors() {
-            if descriptor.state == ExtentState::Live && !candidates.contains_key(&descriptor.id) {
-                candidates.insert(
-                    descriptor.id,
-                    TrimCandidate {
-                        extent: descriptor.id,
-                        ..TrimCandidate::default()
-                    },
-                );
+            if descriptor.state != ExtentState::Live
+                || candidates.contains_key(&descriptor.id)
+                || matches!(
+                    descriptor.domain,
+                    MemoryDomainId::MANAGED_LOCAL | MemoryDomainId::MANAGED_SHARED
+                )
+            {
+                continue;
             }
+            candidates.insert(
+                descriptor.id,
+                TrimCandidate {
+                    extent: descriptor.id,
+                    ..TrimCandidate::default()
+                },
+            );
         }
         candidates.into_values().collect()
     }
@@ -645,13 +657,18 @@ impl RawWorld {
         };
         match self.poll_trim_extent(extent, occupancy)? {
             Ok(bytes) => {
-                self.release_extent_bytes(target.owner_id, bytes)?;
+                self.release_extent_bytes(descriptor.domain, target.owner_id, bytes)?;
                 Ok(true)
             }
             // grace 未走完是等待而不是失败：ticket 已经按 epoch 记进 extent 表，extent 保持
-            // `ReturnQueued`，登记进待决队列由后续 owner service 继续推进。
+            // `ReturnQueued`，登记进待决队列由后续 owner service 继续推进。domain 必须在
+            // descriptor 还能读出时一并记录：trim 成功后槽位会被别的 extent 复用。
             Err(TrimBlocked::GracePending { .. }) => {
-                self.pending_extent_trims.push((extent, target.owner_id));
+                self.pending_extent_trims.push(PendingExtentTrim {
+                    extent,
+                    owner_id: target.owner_id,
+                    domain: descriptor.domain,
+                });
                 Ok(false)
             }
             Err(blocked) => Err(RawInvariant::new(format!(
@@ -665,14 +682,14 @@ impl RawWorld {
     ///
     /// 每条记录在 grace 走完后完成归还并从待决队列移除；仍未走完的留在队列里等下一次 service。
     /// 返回本轮真正完成的归还数量。
-    pub(super) fn advance_pending_extent_trims(&mut self) -> Result<u32, RawInvariant> {
+    pub(crate) fn advance_pending_extent_trims(&mut self) -> Result<u32, RawInvariant> {
         if self.pending_extent_trims.is_empty() {
             return Ok(0);
         }
         let pending = std::mem::take(&mut self.pending_extent_trims);
         let mut completed = 0;
-        for (extent, owner_id) in pending {
-            if self.extents.descriptor(extent).is_none() {
+        for entry in pending {
+            if self.extents.descriptor(entry.extent).is_none() {
                 // 已经被其它路径归还；归还点唯一，这里不重复处理。
                 continue;
             }
@@ -681,13 +698,13 @@ impl RawWorld {
                 queued_slots: 0,
                 pending_returns: 0,
             };
-            match self.poll_trim_extent(extent, occupancy)? {
+            match self.poll_trim_extent(entry.extent, occupancy)? {
                 Ok(bytes) => {
-                    self.release_extent_bytes(owner_id, bytes)?;
+                    self.release_extent_bytes(entry.domain, entry.owner_id, bytes)?;
                     completed += 1;
                 }
                 Err(TrimBlocked::GracePending { .. }) => {
-                    self.pending_extent_trims.push((extent, owner_id));
+                    self.pending_extent_trims.push(entry);
                 }
                 Err(blocked) => {
                     return Err(RawInvariant::new(format!(
@@ -700,18 +717,22 @@ impl RawWorld {
         Ok(completed)
     }
 
-    /// 把一个已撤销物理页的 extent 从 owner 账本里扣减。
+    /// 把一个已撤销物理页的 extent 从账本里扣减。
     ///
-    /// managed 物理页走独立 `ManagedAccounting`；raw/resource 仍走 directory 账本。
-    fn release_extent_bytes(&mut self, owner_id: OwnerId, bytes: u64) -> Result<(), RawInvariant> {
-        if let Some(index) = self
-            .owners
-            .iter()
-            .position(|owner| owner.token().owner_id == owner_id)
-            && self.managed_accounting[index].committed_bytes() >= bytes
-            && self.managed_accounting[index].owner_cache_bytes() >= bytes
-        {
-            self.managed_accounting[index].release(bytes);
+    /// managed 物理页走独立 `ManagedAccounting`（下标按页的提交 owner 解析），其余走 directory
+    /// 账本；domain 由调用者在 trim 之前读出，绝不能按余额猜测归属。
+    fn release_extent_bytes(
+        &mut self,
+        domain: MemoryDomainId,
+        owner_id: OwnerId,
+        bytes: u64,
+    ) -> Result<(), RawInvariant> {
+        if matches!(
+            domain,
+            MemoryDomainId::MANAGED_LOCAL | MemoryDomainId::MANAGED_SHARED
+        ) {
+            let index = self.managed_owner_index(owner_id)?;
+            self.managed_accounting[index as usize].release(bytes);
             return Ok(());
         }
         let accounting = self

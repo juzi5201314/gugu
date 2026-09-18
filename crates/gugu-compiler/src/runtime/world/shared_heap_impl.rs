@@ -112,6 +112,20 @@ struct OpenBlock {
     owner: u32,
 }
 
+/// 一次 block 预留的撤销凭据；只覆盖 `reserve` 自身改动的表状态。
+///
+/// 线性化点之前失败（payload 未发布）时用它把 block 表恢复到预留之前：`used_bytes` 回写、
+/// 新开的 block 弹出、上一个活动块的封口位与 `current` 复位。
+pub(crate) struct BlockReservation {
+    descriptor: u32,
+    /// 预留前的 `used_bytes`。
+    offset: u32,
+    /// 本次预留是否新开了一个 block。
+    opened: bool,
+    /// 新开之前的活动块；`opened` 为 true 时撤销要恢复它的封口位与 `current`。
+    previous: Option<OpenBlock>,
+}
+
 /// 共享 block 登记表；按 handle slot 与 descriptor 稠密索引。
 #[derive(Debug)]
 pub(crate) struct SharedRegistry {
@@ -148,13 +162,20 @@ impl SharedRegistry {
         Ok(usize::try_from(offset).expect("descriptor 偏移适配 usize"))
     }
 
-    /// 为一个新 payload 分配世界级 block 身份。
+    /// 为一个新 payload 分配世界级 block 身份，并返回撤销凭据。
     ///
     /// 同一个 owner 的 payload 依次落在同一个共享 block 的不同偏移上；block 放不下下一个
     /// payload 或 owner 变化时推进 descriptor，因此 block 身份既能区分 owner，也不会与
     /// LocalHeap arena descriptor 撞车。切换 block 时旧 block 就地封口：封口是搬迁判据的一部分，
     /// 正在填充的 block 永远不会因为「暂时没有存活 payload」被判定为空。
-    fn allocate_block(&mut self, owner: u32, bytes: u32) -> Result<(BlockRef, u32), RawInvariant> {
+    ///
+    /// 预留会改动表状态（封口、推进 descriptor、写 `used_bytes`），因此返回的凭据必须由调用者
+    /// 在线性化点之前失败时交回 `rollback_reserve`。
+    fn allocate_block(
+        &mut self,
+        owner: u32,
+        bytes: u32,
+    ) -> Result<(BlockReservation, BlockRef, u32), RawInvariant> {
         let needed = bytes.max(1);
         let fits = match self.current {
             Some(open) if open.owner == owner => {
@@ -166,8 +187,11 @@ impl SharedRegistry {
             }
             _ => false,
         };
+        let mut opened = false;
+        let mut previous = None;
         if !fits {
-            if let Some(open) = self.current {
+            previous = self.current;
+            if let Some(open) = previous {
                 let index = Self::block_index(open.block.id.arena())?;
                 self.blocks[index].sealed = true;
             }
@@ -196,6 +220,7 @@ impl SharedRegistry {
                 extent_offset: 0,
             });
             self.current = Some(OpenBlock { block, owner });
+            opened = true;
         }
         let open = self
             .current
@@ -205,7 +230,13 @@ impl SharedRegistry {
         self.blocks[index].used_bytes = offset
             .checked_add(needed)
             .ok_or_else(|| RawInvariant::new("共享 payload 偏移溢出"))?;
-        Ok((open.block, offset))
+        let reservation = BlockReservation {
+            descriptor: open.block.id.arena(),
+            offset,
+            opened,
+            previous,
+        };
+        Ok((reservation, open.block, offset))
     }
 
     /// 为一个新 payload 预留世界级 block 位置。
@@ -218,8 +249,49 @@ impl SharedRegistry {
         &mut self,
         owner: u32,
         bytes: u32,
-    ) -> Result<(BlockRef, u32), RawInvariant> {
+    ) -> Result<(BlockReservation, BlockRef, u32), RawInvariant> {
         self.allocate_block(owner, bytes)
+    }
+
+    /// 撤销一次未生效的 `reserve`：把 block 表恢复到预留之前（含解封上一个活动块）。
+    ///
+    /// 只回滚 `reserve` 自身改动的表状态；已经提交的 extent 必须由调用者先经
+    /// `discard_shared_block_pages` 结清，否则回滚会丢掉唯一引用它的 block 记录。
+    pub(crate) fn rollback_reserve(
+        &mut self,
+        reservation: &BlockReservation,
+    ) -> Result<(), RawInvariant> {
+        let index = Self::block_index(reservation.descriptor)?;
+        let record = self
+            .blocks
+            .get_mut(index)
+            .ok_or_else(|| RawInvariant::new("共享 block 记录未登记"))?;
+        record.used_bytes = reservation.offset;
+        if !reservation.opened {
+            return Ok(());
+        }
+        // 新开的 block 必然在表尾：descriptor 与下标一一对应。
+        if index + 1 != self.blocks.len() {
+            return Err(RawInvariant::new("共享 block 撤销引用非表尾 block"));
+        }
+        self.blocks.pop();
+        self.next_descriptor = self
+            .next_descriptor
+            .checked_sub(1)
+            .ok_or_else(|| RawInvariant::new("共享 block descriptor 下溢"))?;
+        match reservation.previous {
+            Some(previous) => {
+                let previous_index = Self::block_index(previous.block.id.arena())?;
+                let record = self
+                    .blocks
+                    .get_mut(previous_index)
+                    .ok_or_else(|| RawInvariant::new("共享 block 撤销丢失上一个活动块"))?;
+                record.sealed = false;
+                self.current = Some(previous);
+            }
+            None => self.current = None,
+        }
+        Ok(())
     }
 
     /// 记入一个已经预留在 block 内的 payload 字节。
@@ -428,7 +500,10 @@ impl SharedRegistry {
             .map(|entry| (entry.handle, entry))
     }
 
-    /// 按 descriptor 升序迭代某个 owner 的全部 block 记录；元素是 `(descriptor, 记录)`。
+    /// 按 descriptor 升序迭代某个 owner 名下**仍绑定 extent**的全部 block 记录；元素是
+    /// `(descriptor, 记录)`。
+    ///
+    /// 归还完成的 tombstone（`extent` 已清空）不再伪装成活动 block。
     pub(crate) fn blocks_for_owner(
         &self,
         owner: u32,
@@ -436,13 +511,26 @@ impl SharedRegistry {
         self.blocks
             .iter()
             .enumerate()
-            .filter(move |(_, record)| record.owner == owner)
+            .filter(move |(_, record)| record.owner == owner && record.extent.is_some())
             .map(|(index, record)| {
                 (
                     SHARED_DESCRIPTOR_BASE + u32::try_from(index).expect("block 下标适配 u32"),
                     record,
                 )
             })
+    }
+
+    /// 迭代全部 block 记录；元素是 `(descriptor, 记录)`。
+    ///
+    /// 与 `blocks_for_owner` 不同，这里不过滤 owner 与 extent：账本归属要按 extent 的物理
+    /// owner 解析，因此必须能看到全部记录。
+    pub(crate) fn block_records(&self) -> impl Iterator<Item = (u32, &SharedBlockRecord)> {
+        self.blocks.iter().enumerate().map(|(index, record)| {
+            (
+                SHARED_DESCRIPTOR_BASE + u32::try_from(index).expect("block 下标适配 u32"),
+                record,
+            )
+        })
     }
 
     /// 迭代全部在飞搬迁；元素是 `(handle, 记录)`，按 handle slot 升序。
@@ -478,6 +566,18 @@ impl SharedRegistry {
         Ok(())
     }
 
+    /// 解绑一个共享 block 的 extent，清除记录上的物理绑定。
+    pub(crate) fn clear_extent(&mut self, descriptor: u32) -> Result<(), RawInvariant> {
+        let index = Self::block_index(descriptor)?;
+        let record = self
+            .blocks
+            .get_mut(index)
+            .ok_or_else(|| RawInvariant::new("共享 block 记录未登记"))?;
+        record.extent = None;
+        record.extent_offset = 0;
+        Ok(())
+    }
+
     /// 从 registry 摔掉一个已归还的共享 block 记录。
     pub(crate) fn drop_block(&mut self, descriptor: u32) -> Result<(), RawInvariant> {
         let index = Self::block_index(descriptor)?;
@@ -493,12 +593,12 @@ impl SharedRegistry {
         Ok(())
     }
 
-    /// 返回已封口且不再有存活 payload 的 block 数。
+    /// 返回已封口、不再有存活 payload 且仍绑定 extent 的 block 数。
     pub(crate) fn empty_block_count(&self) -> u64 {
         u64::try_from(
             self.blocks
                 .iter()
-                .filter(|record| record.is_empty())
+                .filter(|record| record.is_empty() && record.extent.is_some())
                 .count(),
         )
         .expect("block 数适配 u64")

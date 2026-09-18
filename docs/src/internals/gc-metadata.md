@@ -44,9 +44,22 @@ object 裸地址、未登记 interior pointer 或指向可移动 field 的地址
 发送前必须发布 export summary 并确认 region 内没有 sender 仍需访问的外部 alias；如果
 语言语义要求 sender 继续使用，compiler 必须先 promote 或复制，不能发布 transfer。
 
-完整 block 默认以 `HeapBlockReturn` 批量返还 allocation owner；line-run、arena 和 large
-mapping 只有在各自的 scanner、allocator、evacuation、forwarding、handle access 和
-queue grace lease 完成后才能启用。block return、allocation debt、pending bytes 和
+完整 block 默认以 `HeapBlockReturn` 批量返还 allocation owner；四类 unit 全部经 owner inbox
+走 `ReturnPending → OwnedFree → Free`，同 owner 也发消息，exactly-once 与字节账本只认
+consume。`HeapBlockReturn` 的发布门禁是八项归零：incoming/allocator/scanner/evacuation
+四类 lease、pin 计数、resource 实例数、块内 live line 与候选绑定 `candidate_job`；任一项未
+归零都拒绝发布，因此归还不会与仍在进行的扫描、分配、疏散或 pin 竞争同一块。
+`HeapLineRunReturn` 只恢复块内 bump 区间（把 `LINE_QUEUED` 还原成可分配、并把 bump 游标
+退回 run 起点），不移动物理页，因此不入字节账本。`HeapArenaReturn` 表示整区已空：发布前
+要求 64 个 block 全部 `Free`，消费时复核状态、结清仍未归还的 extent，并摘除世界级 arena
+登记与 LocalHeap arena（块槽位与位图整体丢弃，descriptor 永不复用）。`LargeMappingReturn`
+覆盖整段连续块，由 span 起始块统一发布；成员块没有 object-start 与独立标记，候选与 dirty
+通知一律折回起始块，避免成员块被单独试验删除判死。
+
+四类 unit 的 decommit 都只发生在 allocator/scanner/forwarder 三路 lease 归零、没有 live 或
+queued slot、没有在途 return 且 queue-page grace 走完之后；extent 在归还门禁之前就从块上
+解绑，复用已 trim 的块时由分配路径重新提交物理页。managed 物理页的字节账本跟随**页的提交
+owner**，不随消息路由或管理权转移迁移。block return、allocation debt、pending bytes 和
 owner handoff 的完整协议由[内存所有权与消息通道](memory-messaging.md)独占；本章继续
 独占 Immix metadata、trace、barrier、handle representation 和 collector lease 的布局
 与阶段。
@@ -124,7 +137,7 @@ handle、compressed reference、MarkTicket、EdgeDelta 和 RegionTransfer 的 ve
 TypeId、state、lease、integrity 和 exactly-once 状态；检查失败进入 `RuntimeInvariant`，
 不能退化为普通对象扫描或 raw free。
 
-`RuntimeRawModel`（query 30）当前为 schema 18，在同一 `RuntimeRawContractV1` 中并入
+`RuntimeRawModel`（query 30）当前为 schema 19，在同一 `RuntimeRawContractV1` 中并入
 `SharedHeapRuntimeContract`（schema 1，profile `mosaic-shared-handle` revision 1）：stable
 handle 身份按高 4 位 tag `0xA`、12 位 table、24 位 generation、24 位 slot 编码，table 是逻辑
 表身份而不是宿主地址；`SharedHandleSlot` 固定 64 byte / 64 byte 对齐，登记 generation、状态、
@@ -361,7 +374,7 @@ slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理�
 
 block 身份是全局稠密的 `ManagedBlockId`（`descriptor * 64 + block`，arena 内下标只占低 6 位），`BlockRef` 在它之上再带 block generation：管理权转移不改变 payload 的 heap/arena 定位，消费端也必须按全局身份解析来源块，只带 arena 内下标的旧编码会被拒绝。arena 登记在世界级 `managed_arenas` 表里，每项记录 descriptor、heap owner、heap 内 arena 槽、extent arena id 与 arena 基址；`allocate_managed` 只在已登记且仍有空 block 的 arena 上分配，`commit_managed_block` 按调用方指定的 extent arena 提交 block，不再隐式落到「第一个 arena」。
 
-本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 3` 契约段（版本 3 相对 2 的变化：块记录新增 `candidate_job` 绑定与 `active`/`candidate`/`reclaiming`/`free` 状态语义、lease 计数成为候选 gate 的输入、块世代在释放时推进、`ManagedBlockId` 的 arena 部分就是 arena descriptor）（arena 2 MiB、block 32 KiB、line 128 byte、granule 16 byte、TLAB span 8 block、object-start/mark 各 131072 bit、`page_covering_object` 512 项、card 表 4096 byte、`ObjectHeader`/`HeapArenaMetadata`/`HeapPinEntry`/`HeapBlockRecord` 四条记录（block 记录 64 字节、align 64，含全局 `block_id`、`generation`、arena descriptor/block 下标、`manager_owner`、`incoming_leases`、`mutation_version`、三类 lease 计数、`candidate_job` 与 `state`）、arena/block/generation/representation 目录与 `HeapTriggerProfile`），派生规模只由 arena/block/line 参数推导；`RuntimeRawModel` schema 升到 17，`local-heap-*` 段、dump 行与需求视图进入 `ImagePlan` 与 CLI JSON，`resources/runtime/heap.gg` 提供同源 Gugu 记录并由 `local_heap_layout::verify_source` 逐字段校验布局。运行时参照实现按契约建立每 owner 的 nursery/old/resource/pinned/large arena：32 KiB block 经 extent 层按页提交（不进入 `OwnerAccounting`，因此 `runtime_committed_bytes` 口径不变），分配在 line run 内推进并记录块内碎片，nursery 走 8 block 局部 span，`gc_trace.rs` 的解释器按 Bitmap/Program 扫描 managed word 并用 granule + 页内起点向前扫描解析 interior 指针。block 选择式 major evacuation、跨 owner `SharedHeap` handle、radix page map 的镜像落地与空 block 交还 provider 分别由阶段 45–47 与 55 接手；heap 公共统计属阶段 67。
+本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 4` 契约段（版本 4 相对 3 的变化：块状态目录扩为 `allocating`/`candidate`/`sweeping`/`evacuating`/`return-pending`/`owned-free`/`free`，归还入队位、large span 成员与 span 起止位置进入 `reserved`，块记录成为 managed extent 与归还门禁的唯一账本；版本 3 相对 2 的变化：块记录新增 `candidate_job` 绑定与候选绑定语义、lease 计数成为候选 gate 的输入、块世代在释放时推进、`ManagedBlockId` 的 arena 部分就是 arena descriptor）（arena 2 MiB、block 32 KiB、line 128 byte、granule 16 byte、TLAB span 8 block、object-start/mark 各 131072 bit、`page_covering_object` 512 项、card 表 4096 byte、`ObjectHeader`/`HeapArenaMetadata`/`HeapPinEntry`/`HeapBlockRecord` 四条记录（block 记录 64 字节、align 64，含全局 `block_id`、`generation`、arena descriptor/block 下标、`manager_owner`、`incoming_leases`、`mutation_version`、三类 lease 计数、`candidate_job` 与 `state`）、arena/block/generation/representation 目录与 `HeapTriggerProfile`），派生规模只由 arena/block/line 参数推导；`RuntimeRawModel` schema 升到 19，`local-heap-*` 段、dump 行与需求视图进入 `ImagePlan` 与 CLI JSON，`resources/runtime/heap.gg` 提供同源 Gugu 记录并由 `local_heap_layout::verify_source` 逐字段校验布局。运行时参照实现按契约建立每 owner 的 nursery/old/resource/pinned/large arena：32 KiB block 经 extent 层按页提交（不进入 `OwnerAccounting`，因此 `runtime_committed_bytes` 口径不变），分配在 line run 内推进并记录块内碎片，nursery 走 8 block 局部 span，`gc_trace.rs` 的解释器按 Bitmap/Program 扫描 managed word 并用 granule + 页内起点向前扫描解析 interior 指针。block 选择式 major evacuation、跨 owner `SharedHeap` handle、radix page map 的镜像落地与空 block 交还 provider 分别由阶段 45–47 与 55 接手；heap 公共统计属阶段 67。
 
 ## trace descriptor
 
@@ -738,7 +751,7 @@ GC metadata verifier 还必须检查 `BarrierReserve.max_card_marks` 与 concret
 
 ## 实现接入证据 {#implementation-evidence}
 
-`RuntimeRawModel`（query 30）在该阶段升到 schema 12、当前为 schema 17，在同一 `RuntimeRawContractV1` 中并入
+`RuntimeRawModel`（query 30）在该阶段升到 schema 12、当前为 schema 19，在同一 `RuntimeRawContractV1` 中并入
 `GcMetadataRuntimeContract`：schema 2（schema 2 起 trace descriptor 带 kind 字节、value program 带两阶段动作；root/vtable/source 段主版本仍为 1）、section 主版本 1、section 魔数 `GUGUGC01`、
 arena 2 MiB / block 32 KiB / line 128 byte，与 slab/extent 参数同源。
 `GcMetadataDemand` 由冻结类型表（`TypeUniverse.records` 与 `vtables`）推导，
@@ -828,10 +841,11 @@ non-moving node（两者共用同一 node pool 与同一 credit 池），根 see
 `LocalHeapDemand` 的 `shared_sites` 推导，不新增 LIR 遍历，跨段相等性由 `RuntimeRawContractV1`
 的 verifier 强制。
 
-`EdgeRuntimeContract`（edge schema 1，profile `mosaic-edge` revision 1）固定候选回收的推进协议：
+`EdgeRuntimeContract`（edge schema 1，profile `mosaic-edge` revision 2）固定候选回收的推进协议：
 候选 job 的 10 个相位（`discover`/`trace`/`trial`/`scc`/`validate`/`commit`/`sweep`/`release`/
-`complete`/`invalidate`，顺序即状态机推进顺序）、block 候选状态目录（`active`/`candidate`/
-`reclaiming`/`free`，与 `HeapBlockRecord.state` 的判别值同源）、默认推进 quantum 4096、
+`complete`/`invalidate`，顺序即状态机推进顺序）、七个 block 候选状态（`allocating`/`candidate`/
+`sweeping`/`evacuating`/`return-pending`/`owned-free`/`free`，与 `HeapBlockRecord.state` 的
+判别值同源）、默认推进 quantum 4096、
 `candidate_schema = 1`、`edge_buffer_entries = 512`（与 barrier 契约的 edge scratch 同值同源）、
 `deltas_per_write = 2` 与精确追踪执行器 revision，并逐字段校验 18 个 `EdgeDelta` 字段
 （含全局 source/destination 块身份、两个 generation 槽、delta 方向、cycle/topology epoch、

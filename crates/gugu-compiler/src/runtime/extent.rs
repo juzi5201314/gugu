@@ -496,6 +496,18 @@ impl ExtentTable {
             .map(|space| space.domain)
     }
 
+    /// 判断某个 arena 是否还能切出一个 `class` 的 extent。
+    ///
+    /// 共享 block 的容量决策用它区分「还能在当前 arena 里提交」与「必须打开新 arena」：
+    /// 只按 domain 找 arena 会在整块用尽后无限失败。
+    pub(crate) fn arena_has_free(&self, arena: u32, class: u32) -> bool {
+        class_bytes(class).is_some()
+            && self
+                .spaces
+                .get(arena as usize)
+                .is_some_and(|space| space.find_free(class).is_some())
+    }
+
     /// 返回 owner arena 的基址。
     pub(crate) fn arena_base(&self, owner_index: u32) -> Option<u64> {
         self.spaces

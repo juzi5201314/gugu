@@ -422,6 +422,15 @@ impl ManagedAccounting {
         self.owner_cache_bytes = self.owner_cache_bytes.saturating_sub(bytes);
     }
 
+    /// 把一个不再 live、但仍然 committed 的块字节移进 cache，等待 decommit 完成时 `release`。
+    ///
+    /// 只用于「提交之后立即放弃、且没有对应 return 消息」的页：它们不经过 pending/reclaimable，
+    /// 直接进入 cache；`release` 在真正撤销物理页时把 cache 与 committed 同步扣掉，等待窗口里
+    /// `committed == pending + reclaimable + cache + live` 因此仍然成立。
+    pub(crate) fn park_discarded(&mut self, bytes: u64) {
+        self.owner_cache_bytes += bytes;
+    }
+
     /// 转发消息时把 pending 交给目标 owner 的账本。
     pub(crate) fn forward_pending(&mut self, bytes: u64) {
         self.pending_return_bytes = self.pending_return_bytes.saturating_sub(bytes);

@@ -119,12 +119,15 @@ impl RawWorld {
 
     /// 返回真实 live record 字节：committed 扣掉三类已分类字节后的残差。
     ///
-    /// 残差是账本互斥分类的最后一个成员，也是 `growth_budget` 的输入；它取自
-    /// `OwnerAccounting`，因此 `last_live_bytes` 始终是一个物理量而不是估值。
+    /// 残差是账本互斥分类的最后一个成员，也是 `growth_budget` 的输入；raw/resource 与 managed
+    /// 两份账本各自取残差、两者互斥（managed 页不进 `OwnerAccounting`），因此 `last_live_bytes`
+    /// 始终是一个物理量而不是估值。
     pub(crate) fn live_record_bytes(&self) -> u64 {
         let mut total = 0_u64;
         for owner in 0..self.owners.len() as u32 {
             total = total.saturating_add(residual_live_bytes(self.accounting(owner)));
+            total =
+                total.saturating_add(residual_managed_live_bytes(self.managed_accounting(owner)));
         }
         for owner in 0..self.resource_owners.len() as u32 {
             let token = self.resource_token(owner);
@@ -703,6 +706,19 @@ impl RawWorld {
 /// `OwnerAccounting` 的四类互斥且完备：committed 等于 pending、reclaimable、cache 与 live
 /// 之和（`RawWorld::ledger_invariant` 在运行时强制该等式），因此残差就是 live record。
 fn residual_live_bytes(accounting: &super::super::slab::OwnerAccounting) -> u64 {
+    accounting
+        .committed_bytes()
+        .saturating_sub(accounting.pending_return_bytes())
+        .saturating_sub(accounting.reclaimable_bytes())
+        .saturating_sub(accounting.owner_cache_bytes())
+}
+
+/// 返回一个 managed owner 账本中未分类的 live 页字节。
+///
+/// `ManagedAccounting` 与 `OwnerAccounting` 同构：committed 等于 pending、reclaimable、cache
+/// 与 live 之和（`RawWorld::managed_ledger_invariant` 在运行时强制该等式），因此残差就是
+/// managed live；不计入基线会让 pacing 的 live 永远漏掉整片 managed 堆。
+fn residual_managed_live_bytes(accounting: &super::super::slab::ManagedAccounting) -> u64 {
     accounting
         .committed_bytes()
         .saturating_sub(accounting.pending_return_bytes())

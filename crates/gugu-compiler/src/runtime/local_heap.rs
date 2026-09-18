@@ -218,6 +218,8 @@ pub(crate) struct HeapArena {
     allocated: u64,
     live_bytes: u64,
     pinned: u32,
+    /// 整区已空、已从分配扫描与 card 键中摘除；descriptor 在世界生命周期内不再复用。
+    retired: bool,
 }
 
 impl HeapArena {
@@ -249,6 +251,7 @@ impl HeapArena {
             allocated: 0,
             live_bytes: 0,
             pinned: 0,
+            retired: false,
         }
     }
 
@@ -262,6 +265,20 @@ impl HeapArena {
 
     fn mapped(&self, index: u32) -> bool {
         self.blocks.get(index as usize).is_some_and(Option::is_some)
+    }
+
+    /// 判断一个已提交 block 当前是否可作为分配目标。
+    ///
+    /// 只有 `Allocating` 与 `Free` 允许写入：`Candidate`/`Sweeping`/`Evacuating` 已被候选平面
+    /// 持有，`ReturnPending`/`OwnedFree` 已经交给 owner inbox，写入会破坏归还门禁与
+    /// exactly-once。
+    fn allocatable(&self, index: u32) -> bool {
+        self.block(index).is_some_and(|block| {
+            matches!(
+                HeapBlockState::from_raw(block.record.state),
+                Some(HeapBlockState::Allocating | HeapBlockState::Free)
+            ) && (block.free_line as usize) < self.lines_per_block()
+        })
     }
 
     /// 返回 line 表中的下标。
@@ -357,15 +374,14 @@ impl HeapArena {
 
     /// 返回第一个还有空闲 line 的 block。
     fn next_alloc_block(&self) -> Option<u32> {
-        (0..self.blocks.len() as u32).find(|index| {
-            self.mapped(*index)
-                && self
-                    .block(*index)
-                    .is_some_and(|block| (block.free_line as usize) < self.lines_per_block())
-        })
+        (0..self.blocks.len() as u32).find(|index| self.allocatable(*index))
     }
 
     /// 返回从 `start` 起的 `span` 个连续空 block。
+    ///
+    /// 空（`block_live == 0`）还不够：块必须处于可分配状态。`ReturnPending`/`OwnedFree` 的块
+    /// 已交给归还路径，`Candidate`/`Sweeping`/`Evacuating` 的块被候选平面持有，把它们的空
+    /// 区间交给 large 分配会绕过归还门禁。
     fn free_span(&self, span: u32) -> Option<u32> {
         if span == 0 || span > self.blocks.len() as u32 {
             return None;
@@ -373,7 +389,14 @@ impl HeapArena {
         (0..=self.blocks.len() as u32 - span).find(|start| {
             (0..span).all(|step| {
                 let index = start + step;
-                self.mapped(index) && self.block_live[index as usize] == 0
+                self.mapped(index)
+                    && self.block_live[index as usize] == 0
+                    && matches!(
+                        HeapBlockState::from_raw(
+                            self.block(index).expect("已映射块必然可读").record.state
+                        ),
+                        Some(HeapBlockState::Allocating | HeapBlockState::Free)
+                    )
             })
         })
     }
@@ -571,6 +594,8 @@ pub(crate) struct LocalHeap {
     scratch: Vec<(u64, u64)>,
     /// 本轮分配把 `Free` 块推进到 `Allocating` 的物理字节，由世界侧扣 cache。
     activated_cache_bytes: u64,
+    /// 本次分配激活的、**没有**已提交页的块；世界侧必须在分配后重新提交 32 KiB extent。
+    activated_blocks: Vec<ManagedBlockId>,
 }
 
 impl LocalHeap {
@@ -595,6 +620,7 @@ impl LocalHeap {
             tlab_refills: 0,
             scratch: Vec::with_capacity(16),
             activated_cache_bytes: 0,
+            activated_blocks: Vec::new(),
         }
     }
 
@@ -606,10 +632,11 @@ impl LocalHeap {
         self.nursery_bytes
     }
 
-    /// 返回一个 arena 的 block 数。
+    /// 返回一个 arena 的 block 数；沿用第一个未摘除 arena 的容量。
     pub(crate) fn blocks_per_arena(&self) -> u32 {
         self.arenas
-            .first()
+            .iter()
+            .find(|arena| !arena.retired)
             .map_or(0, |arena| arena.blocks.len() as u32)
     }
 
@@ -634,11 +661,10 @@ impl LocalHeap {
     pub(crate) fn allocatable_arena(&self, kind: HeapArenaKind, span: u32) -> Option<usize> {
         if kind == HeapArenaKind::Nursery && self.tlab.active {
             let arena = &self.arenas[self.tlab.arena];
-            if (self.tlab.start_block..self.tlab.end_block).any(|index| {
-                arena
-                    .block(index)
-                    .is_some_and(|block| block.free_line < self.lines_per_block)
-            }) {
+            if !arena.retired
+                && (self.tlab.start_block..self.tlab.end_block)
+                    .any(|index| arena.allocatable(index))
+            {
                 return Some(self.tlab.arena);
             }
         }
@@ -676,7 +702,7 @@ impl LocalHeap {
         self.arenas
             .iter()
             .enumerate()
-            .filter(move |(_, arena)| arena.kind == kind)
+            .filter(move |(_, arena)| arena.kind == kind && !arena.retired)
             .map(|(index, _)| index)
     }
 
@@ -699,6 +725,30 @@ impl LocalHeap {
         for block in arena.blocks.iter_mut().flatten() {
             block.record.manager_owner = owner;
         }
+    }
+
+    /// 把一个已清空、已结清 extents 的 arena 从分配扫描中摘除。
+    ///
+    /// 块槽位与位图整体丢弃，descriptor 在 world 生命周期内不再复用（世界侧的 `managed_arenas`
+    /// 登记同步移除），因此后续分配一定走新登记的新 arena，不会命中没有页的旧块。
+    pub(crate) fn retire_arena(&mut self, descriptor: u32) -> Result<(), HeapError> {
+        let index = self.arena_index_by_descriptor(u64::from(descriptor))?;
+        if self.tlab.active && self.tlab.arena == index {
+            self.tlab.active = false;
+        }
+        let arena = &mut self.arenas[index];
+        arena.retired = true;
+        for slot in arena.blocks.iter_mut() {
+            *slot = None;
+        }
+        arena.committed = 0;
+        arena.line_live.fill(LINE_FREE);
+        arena.block_live.fill(0);
+        arena.object_start.fill(0);
+        arena.mark.fill(0);
+        arena.objects = 0;
+        arena.live_bytes = 0;
+        Ok(())
     }
 
     /// 在指定 arena 中提交一个 block。
@@ -746,6 +796,7 @@ impl LocalHeap {
         } else {
             self.allocate_small(arena_index, total, align)?
         };
+        let descriptor = self.arenas[arena_index].descriptor;
         let arena = &mut self.arenas[arena_index];
         let generation = if kind == HeapArenaKind::Old {
             GENERATION_OLD
@@ -764,9 +815,18 @@ impl LocalHeap {
             .block_mut(block)
             .ok_or_else(|| HeapError::invalid("block 缺失"))?;
         if HeapBlockState::from_raw(block_ref.record.state) == Some(HeapBlockState::Free) {
-            self.activated_cache_bytes = self
-                .activated_cache_bytes
-                .saturating_add(u64::from(self.block_bytes));
+            if block_ref.extent.is_some() {
+                // 仍有已提交页：只把激活字节记进 cache 结算。
+                self.activated_cache_bytes = self
+                    .activated_cache_bytes
+                    .saturating_add(u64::from(self.block_bytes));
+            } else {
+                // 已归还并 trim 过的块没有物理页：世界侧必须重新提交 extent 再写入。
+                self.activated_blocks.push(
+                    ManagedBlockId::new(descriptor, block)
+                        .map_err(|error| HeapError::invalid(error.message()))?,
+                );
+            }
         }
         block_ref.record.state = HeapBlockState::Allocating.raw();
         block_ref.record.mutation_version = block_ref
@@ -810,12 +870,13 @@ impl LocalHeap {
         };
         for block in range {
             let arena = &mut self.arenas[arena_index];
-            let Some(slot) = arena.block_mut(block) else {
-                continue;
-            };
-            if slot.free_line >= self.lines_per_block {
+            // 只有可分配状态的块接受写入：候选/归还中的块即使还有空闲 line 也必须跳过。
+            if !arena.allocatable(block) {
                 continue;
             }
+            let slot = arena
+                .block_mut(block)
+                .expect("allocatable 覆盖已提交 block");
             slot.record.allocator_leases += 1;
             let result = arena.allocate_in_block(block, total, align, self.granule_bytes);
             arena
@@ -841,6 +902,7 @@ impl LocalHeap {
         arena_index: usize,
         total: u64,
     ) -> Result<(usize, u32, u64), HeapError> {
+        let descriptor = self.arenas[arena_index].descriptor;
         let span = u32::try_from(total.div_ceil(u64::from(self.block_bytes)))
             .map_err(|_| HeapError::invalid("大对象 block 数溢出"))?;
         let arena = &mut self.arenas[arena_index];
@@ -851,13 +913,24 @@ impl LocalHeap {
             for line in 0..lines {
                 arena.line_live[base + line as usize] = LINE_OCCUPIED;
             }
+            // span 占满整块：直接把 block 的 line 计数写成满值。`release_block` 已把计数复位
+            // 为 0，因此这里必须赋值而不是累加；`reclaim_object` 释放大对象时按覆盖 line 逐条
+            // 递减，最终回到 0，候选 seed 与 span 判空都依赖这个计数。
+            arena.block_live[usize::try_from(start + step).expect("block 下标适配宿主")] = lines;
             let block = arena
                 .block_mut(start + step)
                 .ok_or_else(|| HeapError::invalid("block 缺失"))?;
             if HeapBlockState::from_raw(block.record.state) == Some(HeapBlockState::Free) {
-                self.activated_cache_bytes = self
-                    .activated_cache_bytes
-                    .saturating_add(u64::from(self.block_bytes));
+                if block.extent.is_some() {
+                    self.activated_cache_bytes = self
+                        .activated_cache_bytes
+                        .saturating_add(u64::from(self.block_bytes));
+                } else {
+                    self.activated_blocks.push(
+                        ManagedBlockId::new(descriptor, start + step)
+                            .map_err(|error| HeapError::invalid(error.message()))?,
+                    );
+                }
             }
             block.free_line = u32::MAX;
             block.record.state = HeapBlockState::Allocating.raw();
@@ -1031,10 +1104,13 @@ impl LocalHeap {
     }
 
     /// 返回当前 cycle 的 arena 描述符快照（arena 下标, descriptor）。
+    ///
+    /// 已摘除的 arena 不再产生 card 键：它的块槽位与位图整体丢弃，descriptor 也不会复用。
     pub(crate) fn arena_descriptors(&self) -> Vec<(usize, u64)> {
         self.arenas
             .iter()
             .enumerate()
+            .filter(|(_, arena)| !arena.retired)
             .map(|(index, arena)| (index, arena.descriptor()))
             .collect()
     }
@@ -1226,6 +1302,49 @@ impl LocalHeap {
         bytes
     }
 
+    /// 取走自上次调用以来「没有已提交页」的激活块；缓冲区由调用方用
+    /// `return_activated_blocks` 交回，稳态因此不重新申请。
+    pub(crate) fn take_activated_blocks(&mut self) -> Vec<ManagedBlockId> {
+        std::mem::take(&mut self.activated_blocks)
+    }
+
+    /// 交还 `take_activated_blocks` 取走的缓冲区。
+    pub(crate) fn return_activated_blocks(&mut self, mut buffer: Vec<ManagedBlockId>) {
+        buffer.clear();
+        self.activated_blocks = buffer;
+    }
+
+    /// 返回一个已提交 block 的分配游标；测试与诊断使用。
+    pub(crate) fn block_free_line(&self, id: ManagedBlockId) -> Result<u32, HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        let block = arena
+            .block(id.index())
+            .ok_or_else(|| HeapError::invalid("block 身份不属于该 LocalHeap"))?;
+        Ok(block.free_line)
+    }
+
+    /// 返回该 block 是否仍持有已提交的物理页（extent 仍绑定）。
+    pub(crate) fn block_has_committed_pages(&self, id: ManagedBlockId) -> Result<bool, HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        Ok(arena
+            .block(id.index())
+            .is_some_and(|block| block.extent.is_some()))
+    }
+
+    /// 解绑块上的 extent：物理页已经交给 trim（或已被 trim），重用时必须重新提交。
+    pub(crate) fn detach_block_extent(&mut self, id: ManagedBlockId) -> Result<(), HeapError> {
+        let arena = self
+            .arenas
+            .iter_mut()
+            .find(|arena| u64::from(arena.descriptor) == u64::from(id.arena()))
+            .ok_or_else(|| HeapError::invalid("block 身份不属于该 LocalHeap"))?;
+        let block = arena
+            .block_mut(id.index())
+            .ok_or_else(|| HeapError::invalid("block 未提交"))?;
+        block.extent = None;
+        Ok(())
+    }
+
     /// 扫描连续 `LINE_FREE` 区间，长度 ≥ `min_lines` 的 run 记成 `(start_line, count)`。
     pub(crate) fn free_line_runs(
         &self,
@@ -1291,6 +1410,11 @@ impl LocalHeap {
                 return Err(HeapError::invalid("line-run consume 覆盖了非 queued line"));
             }
             arena.line_live[slot] = LINE_FREE;
+        }
+        // 归还的 run 现在真的可分配了：bump 游标必须能退回到 run 起点，否则这块空闲 line 在
+        // 本 block 后续分配里永远不可见（consume 时游标可能已经被推过整个 run）。
+        if let Some(block) = arena.block_mut(id.index()) {
+            block.free_line = block.free_line.min(start_line);
         }
         Ok(())
     }
@@ -1435,15 +1559,10 @@ impl HeapArena {
         self.pinned != 0
     }
 
-    /// 返回仍有空闲 line 的已提交 block 数。
+    /// 返回仍有空闲 line、且当前处于可分配状态的已提交 block 数。
     pub(crate) fn free_blocks(&self) -> u32 {
         (0..self.blocks.len() as u32)
-            .filter(|index| {
-                self.mapped(*index)
-                    && self
-                        .block(*index)
-                        .is_some_and(|block| (block.free_line as usize) < self.lines_per_block())
-            })
+            .filter(|index| self.allocatable(*index))
             .count() as u32
     }
 }
@@ -2153,14 +2272,18 @@ impl LocalHeap {
         let first_block = header_offset / block_bytes;
         let last_block = (header_offset + total - 1) / block_bytes;
         for covered in first_block..=last_block {
+            let index = u32::try_from(covered).expect("block 下标适配 u32");
+            if object.large {
+                // 大对象独占它的整个 span：`allocate_large` 把 span 内每个块的 line 全部标成
+                // 占用，释放必须按整块归还；只按对象实际覆盖的 line 递减会让尾部块里对象未覆盖
+                // 的 line 永远占用，`promote_empty_large_span` 的判空随之失败。
+                arena.free_range(index, 0, block_bytes);
+                continue;
+            }
             let base = covered * block_bytes;
             let start = header_offset.max(base);
             let end = (header_offset + total).min(base + block_bytes);
-            arena.free_range(
-                u32::try_from(covered).expect("block 下标适配 u32"),
-                start - base,
-                end - start,
-            );
+            arena.free_range(index, start - base, end - start);
         }
         arena.clear_object_start(granule);
         arena.objects = arena.objects.saturating_sub(1);
@@ -2239,7 +2362,13 @@ impl LocalHeap {
         record.scanner_leases = 0;
         record.evacuation_leases = 0;
         record.candidate_job = EDGE_NO_JOB;
-        record.reserved &= !HEAP_BLOCK_EVAC_SOURCE;
+        // 归还完成意味着该块不再是任何 large span 的成员，也没有未结清的归还消息：span 身份与
+        // large 元数据必须随物理清空一起消失，否则复用这块的 span 会把旧 span 的成员语义带进
+        // 新分配。`consume_*` 之后还会调用 `clear_return_queued`，这里是幂等清除。
+        record.reserved &= !(HEAP_BLOCK_EVAC_SOURCE
+            | HEAP_BLOCK_LARGE_MEMBER
+            | HEAP_BLOCK_LARGE_INDEX_MASK
+            | HEAP_BLOCK_RETURN_QUEUED);
         record.mutation_version = record
             .mutation_version
             .checked_add(1)

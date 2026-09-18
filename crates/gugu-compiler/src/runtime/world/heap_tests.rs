@@ -13,7 +13,7 @@ use crate::runtime::gc_metadata_schema::{
 };
 use crate::runtime::gc_metadata_section::encode_sections;
 use crate::runtime::local_heap::{
-    CycleReport, GENERATION_AGING, GENERATION_OLD, HeapArenaKind, LocalHeap,
+    CycleReport, GENERATION_AGING, GENERATION_OLD, HeapArenaKind, LocalHeap, ManagedBlockId,
 };
 use crate::runtime::local_heap_schema::{LocalHeapDemand, LocalHeapRuntimeContract};
 use crate::runtime::mark_schema::MarkDemand;
@@ -177,65 +177,28 @@ fn read_shared_field(
     value
 }
 
-/// 释放一个 block 只能清掉它自己的元数据：同一 arena 里更早的 block 必须保持完好。
-///
-/// `release_block` 曾经用 line 下标除以 granule 字节数来算 block 的起始 granule，于是释放
-/// block 1 会清掉 block 0 的 object-start 位，让存活对象变成不可解析。
 #[test]
-fn releasing_a_block_preserves_earlier_block_object_start_bits() {
-    let mut world = heap_world();
-    let first = leaf(&mut world, ManagedPlacement::Old);
-    let first_block = world.managed_block_ref(0, first).expect("block 可解析").id;
-    // 继续分配直到进入下一个 block；`survivor` 始终是留在上一个 block 的最后一个对象，
-    // 它的 granule 落在 block 0 的高地址区间，正是错误换算会误清的位置。
-    let mut survivor = first;
-    let second;
-    let second_block;
-    loop {
-        let next = leaf(&mut world, ManagedPlacement::Old);
-        let block = world.managed_block_ref(0, next).expect("block 可解析").id;
-        if block != first_block {
-            second = next;
-            second_block = block;
-            break;
-        }
-        survivor = next;
-    }
-    assert_ne!(second_block, first_block, "分配必须真的换到下一个 block");
-    let mut record = world
-        .heap(0)
-        .expect("堆可读")
-        .block_record(second_block)
-        .expect("记录可读");
-    record.state = crate::runtime::local_heap_schema::HeapBlockState::OwnedFree.raw();
-    world
-        .heap_mut(0)
-        .expect("堆可写")
-        .update_block_record(second_block, record)
-        .expect("记录可写");
-    world
-        .heap_mut(0)
-        .expect("堆可写")
-        .release_block(second_block)
-        .expect("block 可释放");
+fn queued_line_run_restore_rewinds_allocator_cursor() {
+    let contract = gc_contract();
+    let heap_contract = contract.local_heap();
+    let mut heap = LocalHeap::new(heap_contract);
+    let arena = heap.attach_arena(HeapArenaKind::Old, 1, 0, heap_contract);
+    heap.commit_block(arena, 0).expect("block 可提交");
+    let id = ManagedBlockId::new(1, 0).expect("block 身份");
+    // 先把 run 交给归还门禁：bump 只能跳过 queued 前缀，游标因此落在 run 之后。
+    heap.mark_line_run_queued(id, 0, 8)
+        .expect("line-run 可入队");
+    heap.allocate(arena, 1, 8, 8).expect("对象可分配");
     assert!(
-        world.managed_object(first).is_ok(),
-        "释放其它 block 不得抹掉更早 block 的 object-start 位"
+        heap.block_free_line(id).expect("游标可读") > 0,
+        "queued run 之后的分配必须推进游标"
     );
-    assert!(
-        world.managed_object(survivor).is_ok(),
-        "更早 block 的高地址对象同样必须保持可解析"
-    );
+    heap.restore_queued_line_run(id, 0, 8)
+        .expect("line-run 可恢复");
     assert_eq!(
-        world
-            .managed_block_ref(0, survivor)
-            .expect("更早 block 的对象必须仍可解析")
-            .id,
-        first_block
-    );
-    assert!(
-        world.managed_object(second).is_err(),
-        "被释放 block 的对象必须不再可解析"
+        heap.block_free_line(id).expect("游标可读"),
+        0,
+        "恢复的 run 必须重新进入 bump 区间，否则这段空闲 line 永远不可分配"
     );
 }
 
@@ -401,6 +364,24 @@ fn major_cycle_reclaims_unreachable_objects() {
         "未标记的 old 对象必须被回收"
     );
     assert!(world.managed_object(live).is_ok(), "可达对象必须保留");
+}
+
+#[test]
+fn managed_live_bytes_feed_pacing_baseline() {
+    let mut world = heap_world();
+    let slot = world
+        .register_managed_root(GcRootKindV1::Static, 1)
+        .expect("根槽可登记");
+    let address = world
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .expect("old 对象可分配");
+    world.set_managed_root(slot, address).expect("根可写");
+    let cycle = world.run_gc_cycle(true).expect("cycle 可执行");
+    assert!(cycle.cycle_completed, "cycle 必须完成");
+    assert!(
+        world.pacing().last_live_bytes() >= u64::from(GC_BLOCK_BYTES),
+        "managed live 必须进入 pacing 基线，而不是只剩 min_growth_budget"
+    );
 }
 
 #[test]

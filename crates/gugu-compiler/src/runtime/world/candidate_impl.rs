@@ -125,12 +125,31 @@ impl RawWorld {
     }
 
     /// 通知候选平面某个 block 已被改动。
+    ///
+    /// large span 成员块折回起始块：span 的候选与回收单位是起始块。
     pub(crate) fn note_candidate_dirty(&mut self, id: ManagedBlockId) -> Result<(), RawInvariant> {
+        let id = self.candidate_span_anchor(id)?;
         self.candidates
             .as_mut()
             .ok_or_else(|| RawInvariant::new("候选平面尚未配置"))?
             .note_dirty(id);
         Ok(())
+    }
+
+    /// 把 large span 成员块折回它的起始块；非 span 块原样返回。
+    ///
+    /// 成员块没有 object-start、也没有可读的标记位，进入候选只会被试验删除判成死亡；span 的
+    /// 回收单位是起始块，因此针对成员的 dirty 通知必须落到起始块上。
+    fn candidate_span_anchor(&self, id: ManagedBlockId) -> Result<ManagedBlockId, RawInvariant> {
+        if shared_heap_impl::is_shared_descriptor(id.arena()) {
+            return Ok(id);
+        }
+        let heap_owner = self.managed_arena_by_descriptor(id.arena())?.heap_owner;
+        let heap = self.heap(heap_owner)?;
+        match heap.large_span_covering(id).map_err(heap_error)? {
+            Some((start, _)) if start != id.index() => Ok(ManagedBlockId::new(id.arena(), start)?),
+            _ => Ok(id),
+        }
     }
 
     /// 推进候选回收：取样、推进平面、执行动作并回填确认。

@@ -144,19 +144,31 @@ impl GcMetadataWorldV1 {
 /// GC metadata demand：进入契约指纹；用于触发 `RuntimeRawModel` 重算。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GcMetadataDemand {
+    /// 冻结类型表中的类型数。
     pub type_count: u32,
+    /// 编码后的 trace 程序字节数。
     pub trace_program_bytes: u32,
+    /// 编码后的 value 程序字节数。
     pub value_program_bytes: u32,
+    /// 生成的 vtable 记录数。
     pub vtable_count: u32,
+    /// 生成的 glue 记录数。
     pub glue_count: u32,
+    /// 根区间数。
     pub root_range_count: u32,
+    /// 贡献 metadata 的源码数。
     pub source_count: u32,
+    /// GC 分配站点数。
     pub alloc_site_count: u32,
+    /// Immix arena 字节数。
     pub arena_bytes: u64,
+    /// Immix block 字节数。
     pub block_bytes: u32,
+    /// Immix line 字节数。
     pub line_bytes: u32,
     /// 编码后的 type/meta section 总字节数。
     pub type_section_bytes: u32,
+    /// 编码后的 metadata section 总字节数。
     pub metadata_section_bytes: u32,
     /// 真实 world 内容指纹；计数相同但布局/program 变化时仍失效缓存。
     pub world_fingerprint: [u8; 32],
