@@ -4,7 +4,7 @@ use crate::{
 };
 
 use super::lex::lex;
-use super::token::TokenKind;
+use super::token::{TokenKind, TriviaKind};
 
 fn lex_source(source: &str) -> (Vec<TokenKind>, Vec<DiagnosticCode>) {
     let snapshot = SourceSnapshot::from_str("lex.gg", source).expect("utf-8 fixture");
@@ -250,6 +250,87 @@ fn fixture_literals_and_attributes() {
     let source = include_str!("fixtures/attributes.gg");
     let (_, codes) = lex_source(source);
     assert!(codes.is_empty(), "{codes:?}");
+}
+
+#[test]
+fn fixture_comments_trivia_kinds() {
+    let source = include_str!("fixtures/comments.gg");
+    let snapshot = SourceSnapshot::from_str("comments.gg", source).expect("utf-8");
+    let map = SourceMap::new(vec![snapshot.clone()]).expect("unique");
+    let file = map.file_id("comments.gg").expect("registered");
+    let lexed = lex(&snapshot, &map, file);
+    assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+    let fn_tokens: Vec<_> = lexed
+        .buffer
+        .tokens
+        .iter()
+        .filter(|token| token.kind == TokenKind::KwFn)
+        .collect();
+    assert_eq!(fn_tokens.len(), 2);
+    // `//!` 是文件级文档，`///` 附着在其后的声明上。
+    let leading = lexed.buffer.leading_trivia(fn_tokens[0]);
+    assert!(
+        leading
+            .iter()
+            .any(|t| t.kind == TriviaKind::InnerDocComment)
+    );
+    assert!(leading.iter().any(|t| t.kind == TriviaKind::DocComment));
+    let zero_leading = lexed.buffer.leading_trivia(fn_tokens[1]);
+    assert!(
+        zero_leading
+            .iter()
+            .any(|t| t.kind == TriviaKind::LineComment)
+    );
+    assert!(
+        zero_leading
+            .iter()
+            .any(|t| t.kind == TriviaKind::BlockComment)
+    );
+}
+
+#[test]
+fn unicode_ident_is_invalid_token() {
+    let (_, codes) = lex_source("let α = 1");
+    assert_eq!(codes, [DiagnosticCode::LexInvalidToken]);
+}
+
+#[test]
+fn raw_single_rejects_unescaped_newline() {
+    let (_, codes) = lex_source("raw\"a\nb");
+    assert_eq!(codes, [DiagnosticCode::LexUnterminated]);
+}
+
+#[test]
+fn underscore_confines_to_digit_boundaries() {
+    let (_, codes) = lex_source("1_000_");
+    assert_eq!(codes, [DiagnosticCode::LexInvalidNumeric]);
+    let (_, codes) = lex_source("0o_7");
+    assert_eq!(codes, [DiagnosticCode::LexInvalidNumeric]);
+    let (_, codes) = lex_source("0b_1");
+    assert_eq!(codes, [DiagnosticCode::LexInvalidNumeric]);
+}
+
+#[test]
+fn second_decimal_point_is_invalid_number() {
+    let (_, codes) = lex_source("1.2.3");
+    assert_eq!(codes, [DiagnosticCode::LexInvalidNumeric]);
+    let (_, codes) = lex_source("1e5e5");
+    assert_eq!(codes, [DiagnosticCode::LexInvalidNumeric]);
+    // 范围运算与点号访问仍按原规则分词
+    assert_eq!(
+        kinds_without_eof("0.0..1.0"),
+        [TokenKind::Float, TokenKind::DotDot, TokenKind::Float]
+    );
+    assert_eq!(
+        kinds_without_eof("1.2.floor()"),
+        [
+            TokenKind::Float,
+            TokenKind::Dot,
+            TokenKind::Ident,
+            TokenKind::LParen,
+            TokenKind::RParen
+        ]
+    );
 }
 
 #[test]

@@ -22,6 +22,9 @@ impl Builder<'_> {
             self.switch_to(current_fail);
             self.emit_pattern_test(place, arm.pattern, ok, fail)?;
             self.switch_to(ok);
+            // 绑定先于守卫：守卫读取模式绑定，绑定必须已在当前块定义；
+            // 语义层（checker::flow::matching）同样以绑定先行。
+            self.bind_pattern(place, arm.pattern)?;
             if let Some(guard) = arm.guard {
                 let Some(cond) = self.emit_expr(guard)? else {
                     current_fail = fail;
@@ -35,7 +38,6 @@ impl Builder<'_> {
                 });
                 self.switch_to(taken);
             }
-            self.bind_pattern(place, arm.pattern)?;
             self.match_leaves.push((self.current, row as u32));
             if let Some(value) = self.emit_expr(arm.body)? {
                 self.copy_value(Place::local(dest), Place::local(value), self.expr_ty(id));
@@ -51,32 +53,6 @@ impl Builder<'_> {
         if self.terminated() {
             return Ok(None);
         }
-        self.set_value(id, dest);
-        Ok(Some(dest))
-    }
-
-    pub(super) fn emit_let_condition(
-        &mut self,
-        id: ExprId,
-        pattern: hir::PatternId,
-        value: ExprId,
-    ) -> Result<Option<LocalId>, Diagnostic> {
-        let Some(local) = self.emit_expr(value)? else {
-            return Ok(None);
-        };
-        let dest = self.temp(self.primitives.bool_ty);
-        let ok = self.fresh(false);
-        let fail = self.fresh(false);
-        let join = self.fresh(false);
-        self.emit_pattern_test(Place::local(local), pattern, ok, fail)?;
-        self.switch_to(ok);
-        self.bind_pattern(Place::local(local), pattern)?;
-        self.assign_bool(dest, true);
-        self.goto(join);
-        self.switch_to(fail);
-        self.assign_bool(dest, false);
-        self.goto(join);
-        self.switch_to(join);
         self.set_value(id, dest);
         Ok(Some(dest))
     }
@@ -218,6 +194,23 @@ impl Builder<'_> {
         )
     }
 
+    /// 被匹配类型是否为单变体聚合（record/newtype）：这类类型没有判别字节。
+    fn single_variant_record(&self, place: Place) -> bool {
+        let ty = self.place_ty(place);
+        let hir::Type::Named { definition, .. } = &self.module.types[ty.index()] else {
+            return false;
+        };
+        // aggregates 按 definition 排序，可二分。
+        match self
+            .module
+            .aggregates
+            .binary_search_by_key(definition, |aggregate| aggregate.definition)
+        {
+            Ok(index) => self.module.aggregates[index].variants.len() == 1,
+            Err(_) => false,
+        }
+    }
+
     fn test_construct(
         &mut self,
         place: Place,
@@ -226,6 +219,27 @@ impl Builder<'_> {
         ok: BlockId,
         fail: BlockId,
     ) -> Result<(), Diagnostic> {
+        // 单变体聚合（record/newtype）没有判别字节；直接做字段测试，
+        // 不产生 Discriminant 读取（LIR 要求 tag_bytes > 0）。
+        if self.single_variant_record(place) {
+            let downcast = self.project(place, Projection::Downcast(variant));
+            let patterns: Vec<_> = self.owner.pattern_fields
+                [fields.start as usize..fields.end as usize]
+                .iter()
+                .map(|field| field.pattern)
+                .collect();
+            return self.test_fields(
+                downcast,
+                &patterns,
+                |index, ty| Projection::Field {
+                    index,
+                    field_ty: ty,
+                    access: Access::Normal,
+                },
+                ok,
+                fail,
+            );
+        }
         let disc = self.temp(self.int_ty());
         self.assign(Place::local(disc), Rvalue::Discriminant(place));
         let payload = self.fresh(false);

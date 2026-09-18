@@ -1,0 +1,120 @@
+// 模式全形态夹具：规范《模式》一章的正例矩阵。
+// 由 parse_tests 与 semantics/tests 共同消费。
+
+struct Point { x: int, y: int }
+struct Meters(int)
+
+fn add((x, y): (int, int)) int = x + y
+
+fn size(x: int) string {
+    match x {
+        0..10 => "small"
+        10 => "ten"
+        n @ 11..100 => f"{n}"
+        _ => "big"
+    }
+}
+
+fn spans(x: int) string {
+    match x {
+        x @ 0..10 | x @ 90..100 => "edge"
+        _ => "mid"
+    }
+}
+
+fn outcome(r: Result[int, string]) string {
+    match r {
+        Ok(v) if v > 0 => "pos"
+        Ok(_) => "rest"
+        Result::Err(_) => "err"
+    }
+}
+
+fn grade(c: char) string {
+    match c {
+        'a'..'z' => "lower"
+        '\0'..'\u{10ffff}' => "code"
+        _ => "other"
+    }
+}
+
+fn destructure(t: (int, int), p: Point, m: Meters) int {
+    let (a, b) = t
+    let Point { x, y } = p
+    let Point { x: left, .. } = p
+    let Meters(n) = m
+    let (only,) = (7,)
+    _ = left
+    _ = only
+    a + b + x + y + n
+}
+
+fn arrays(xs: [int; 4]) int {
+    let [a, _, c, d] = xs
+    let [head, tail @ ..] = xs
+    a + c + d + head + tail[0]
+}
+
+fn heads(s: &[int]) int {
+    match s {
+        [] => 0
+        [a, rest @ ..] => a + rest[0]
+    }
+}
+
+fn flip(b: &bool) bool {
+    match b {
+        &true => false
+        &false => true
+    }
+}
+
+fn origin(p: Point) string {
+    match p {
+        Point { x: 0, y: 0 } => "origin"
+        Point { x, .. } => f"({x},?)"
+    }
+}
+
+fn both(a: Result[int, string], b: Result[int, string]) int {
+    if let Ok(x) = a && let Ok(y) = b && x > y {
+        x
+    } else {
+        0
+    }
+}
+
+fn fallback(r: Result[int, string]) int {
+    let Ok(v) = r else {
+        return 0
+    }
+    v
+}
+
+fn drain(o: Option[int]) int {
+    let total = 0
+    while let Some(x) = o {
+        total = total + x
+        o = None
+    }
+    total
+}
+
+fn main() {
+    _ = size(5)
+    _ = spans(95)
+    _ = outcome(Ok(1))
+    _ = grade('q')
+    _ = destructure((1, 2), Point { x: 3, y: 4 }, Meters(5))
+    _ = arrays([1, 2, 3, 4])
+    _ = drain(Some(3))
+    _ = fallback(Err("x"))
+    _ = both(Ok(1), Ok(2))
+    _ = add((2, 3))
+    let nums = [1, 2, 3, 4]
+    _ = arrays(nums)
+    _ = heads(&nums)
+    let flag = true
+    _ = flip(&flag)
+    _ = origin(Point { x: 0, y: 0 })
+}

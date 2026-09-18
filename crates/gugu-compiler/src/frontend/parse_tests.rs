@@ -161,6 +161,18 @@ fn library_without_main_parses() {
 }
 
 #[test]
+fn parses_pattern_matrix_fixture() {
+    let (dump, codes, main) = parse_source(include_str!("fixtures/patterns.gg"));
+    assert!(codes.is_empty(), "{codes:?}\n{dump}");
+    assert!(main);
+    // or-模式、@ 绑定、数组 rest 与 match 臂都必须进入 AST。
+    assert!(dump.contains("or\n"), "{dump}");
+    assert!(dump.contains("at\n"), "{dump}");
+    assert!(dump.contains("rest"), "{dump}");
+    assert!(dump.contains("match\n"), "{dump}");
+}
+
+#[test]
 fn malformed_source_never_reaches_image_plan() {
     use crate::{CompileRequest, Compiler, TargetName};
     let compilation = Compiler::new().compile(CompileRequest::single_file(

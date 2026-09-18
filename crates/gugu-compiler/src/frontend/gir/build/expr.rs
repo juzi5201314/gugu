@@ -158,9 +158,8 @@ impl Builder<'_> {
                 return self.finish_expr(id, result);
             }
             hir::ExprKind::String { parts } => self.emit_string(id, parts)?,
-            hir::ExprKind::LetCondition { pattern, value } => {
-                let result = self.emit_let_condition(id, pattern, value)?;
-                return self.finish_expr(id, result);
+            hir::ExprKind::LetCondition { .. } => {
+                unreachable!("let 条件经 emit_condition_operand 直接分支降级")
             }
         }
         self.apply_adjustments(id)?;

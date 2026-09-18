@@ -1,4 +1,5 @@
 use super::*;
+use crate::frontend::ast::BinOp;
 
 impl Builder<'_> {
     pub(super) fn emit_block(
@@ -264,6 +265,19 @@ impl Builder<'_> {
         then_value: ExprId,
         else_value: Option<ExprId>,
     ) -> Result<Option<LocalId>, Diagnostic> {
+        if self.condition_is_let_chain(condition) {
+            let then_block = self.fresh(false);
+            let else_block = self.fresh(false);
+            let join = self.fresh(false);
+            let dest = self.temp(self.expr_ty(id));
+            match self.emit_condition_operand(condition, then_block, else_block)? {
+                Some(()) => {}
+                None => return Ok(None),
+            }
+            return self.finish_if(
+                id, dest, then_block, else_block, join, then_value, else_value,
+            );
+        }
         let Some(cond) = self.emit_expr(condition)? else {
             return Ok(None);
         };
@@ -276,6 +290,22 @@ impl Builder<'_> {
             targets: vec![(1, then_block)],
             otherwise: else_block,
         });
+        self.finish_if(
+            id, dest, then_block, else_block, join, then_value, else_value,
+        )
+    }
+
+    /// 发射 then/else 分支体并在 join 合流取值。
+    fn finish_if(
+        &mut self,
+        id: ExprId,
+        dest: LocalId,
+        then_block: BlockId,
+        else_block: BlockId,
+        join: BlockId,
+        then_value: ExprId,
+        else_value: Option<ExprId>,
+    ) -> Result<Option<LocalId>, Diagnostic> {
         self.switch_to(then_block);
         if let Some(value) = self.emit_expr(then_value)? {
             self.assign_copy(Place::local(dest), value);
@@ -297,6 +327,67 @@ impl Builder<'_> {
         }
         self.set_value(id, dest);
         Ok(Some(dest))
+    }
+
+    /// 条件是否含 `let` 段：含 `let` 段的条件必须走直接分支降级，
+    /// 让模式绑定与后续读取落在同一路径上。
+    fn condition_is_let_chain(&self, condition: ExprId) -> bool {
+        match &self.owner.expressions[condition.index()].kind {
+            hir::ExprKind::LetCondition { .. } => true,
+            hir::ExprKind::Binary {
+                operation: BinOp::And,
+                left,
+                right,
+                ..
+            } => self.condition_is_let_chain(*left) || self.condition_is_let_chain(*right),
+            _ => false,
+        }
+    }
+
+    /// `let` 条件链的直接分支降级：模式绑定发生在 ok 路径的块内，失败路径
+    /// 直接指向 `fail`，不产生布尔合流块。SSA 封口要求被读变量在目标块的
+    /// 所有前驱路径上都有定义，而模式绑定只在匹配成功的路径上存在，因此
+    /// `let` 段禁止走「绑定路径与失败路径合并出布尔再统一开关」的形状。
+    /// 返回 `None` 表示条件发散（子表达式已终止当前块）。
+    fn emit_condition_operand(
+        &mut self,
+        condition: ExprId,
+        ok: BlockId,
+        fail: BlockId,
+    ) -> Result<Option<()>, Diagnostic> {
+        match self.owner.expressions[condition.index()].kind.clone() {
+            hir::ExprKind::LetCondition { pattern, value } => {
+                let Some(local) = self.emit_expr(value)? else {
+                    return Ok(None);
+                };
+                self.emit_pattern_test(Place::local(local), pattern, ok, fail)?;
+                self.switch_to(ok);
+                self.bind_pattern(Place::local(local), pattern)?;
+                Ok(Some(()))
+            }
+            hir::ExprKind::Binary {
+                operation: BinOp::And,
+                left,
+                right,
+                ..
+            } => {
+                let right_ok = self.fresh(false);
+                self.emit_condition_operand(left, right_ok, fail)?;
+                self.switch_to(right_ok);
+                self.emit_condition_operand(right, ok, fail)
+            }
+            _ => {
+                let Some(cond) = self.emit_expr(condition)? else {
+                    return Ok(None);
+                };
+                self.terminate(Terminator::SwitchInt {
+                    value: copy_of(cond),
+                    targets: vec![(1, ok)],
+                    otherwise: fail,
+                });
+                Ok(Some(()))
+            }
+        }
     }
 
     pub(super) fn emit_short_circuit(
@@ -349,15 +440,25 @@ impl Builder<'_> {
         self.goto(header);
         self.switch_to(header);
         if let Some(condition) = condition {
-            let Some(cond) = self.emit_expr(condition)? else {
-                return Ok(None);
+            let body_block = if self.condition_is_let_chain(condition) {
+                let body_block = self.fresh(false);
+                match self.emit_condition_operand(condition, body_block, exit)? {
+                    Some(()) => {}
+                    None => return Ok(None),
+                }
+                body_block
+            } else {
+                let Some(cond) = self.emit_expr(condition)? else {
+                    return Ok(None);
+                };
+                let body_block = self.fresh(false);
+                self.terminate(Terminator::SwitchInt {
+                    value: copy_of(cond),
+                    targets: vec![(1, body_block)],
+                    otherwise: exit,
+                });
+                body_block
             };
-            let body_block = self.fresh(false);
-            self.terminate(Terminator::SwitchInt {
-                value: copy_of(cond),
-                targets: vec![(1, body_block)],
-                otherwise: exit,
-            });
             self.switch_to(body_block);
         }
         self.loops.push(LoopFrame {

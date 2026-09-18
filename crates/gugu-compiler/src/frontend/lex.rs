@@ -279,6 +279,16 @@ impl<'a> Lexer<'a> {
                 self.invalid_number(start, self.pos, "下划线不能出现在数字记号末尾");
                 return;
             }
+            if self.bytes.get(self.pos) == Some(&b'.')
+                && self
+                    .bytes
+                    .get(self.pos + 1)
+                    .copied()
+                    .is_some_and(|byte| byte.is_ascii_digit())
+            {
+                self.invalid_number(start, self.pos + 1, "数字记号中不能出现两个小数点");
+                return;
+            }
             if matches!(self.bytes.get(self.pos), Some(b'e' | b'E'))
                 && !self.consume_exponent(start)
             {

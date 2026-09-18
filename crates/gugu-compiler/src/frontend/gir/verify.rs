@@ -221,7 +221,10 @@ fn walk_storage(
                 live[local.index()] = false;
             }
             StatementKind::Assign(place, _) if !live[place.local.index()] => {
-                return Err(gir_error("写入未激活 local", None));
+                return Err(gir_error(
+                    &format!("写入未激活 local {}", place.local.0),
+                    None,
+                ));
             }
             _ => {}
         }

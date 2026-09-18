@@ -192,6 +192,158 @@ fn rest_patterns_and_product_coverage_preserve_types() {
 }
 
 #[test]
+fn pattern_matrix_fixture_compiles() {
+    assert!(accepts(include_str!("../fixtures/patterns.gg")));
+}
+
+#[test]
+fn let_else_and_refutability_follow_spec() {
+    // let-else 接受可驳模式，失败分支发散
+    assert!(accepts(
+        "fn f(r: Result[int, string]) int { let Ok(v) = r else { return 0 }\n v }\nfn main() {}"
+    ));
+    // let-else 失败分支必须发散
+    let queries = crate::QueryEngine::new();
+    let errors = frontend(
+        &[(
+            "main.gg",
+            "fn f(r: Result[int, string]) int { let Ok(v) = r else { 0 }\n v }\nfn main() {}",
+        )],
+        &queries,
+    )
+    .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code() == crate::DiagnosticCode::InvalidLetElse)
+    );
+    // 不可驳模式不能用于 let-else
+    let errors = frontend(
+        &[(
+            "main.gg",
+            "fn f(p: (int, int)) int { let (a, b) = p else { return 0 }\n a }\nfn main() {}",
+        )],
+        &queries,
+    )
+    .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code() == crate::DiagnosticCode::InvalidPattern)
+    );
+    // 普通 let 拒绝可驳模式
+    let errors = frontend(
+        &[(
+            "main.gg",
+            "fn f(o: Option[int]) int { let Some(x) = o\n x }\nfn main() {}",
+        )],
+        &queries,
+    )
+    .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code() == crate::DiagnosticCode::InvalidPattern)
+    );
+    // let-else 不是 let 链
+    assert!(!accepts(
+        "fn f(a: Result[int, string], b: Result[int, string]) int { let Ok(x) = a && let Ok(y) = b else { return 0 }\n x }\nfn main() {}"
+    ));
+}
+
+#[test]
+fn struct_patterns_follow_record_shape_rules() {
+    assert!(accepts(
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, y } = p\n x + y }\nfn main() {}"
+    ));
+    assert!(accepts(
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x: a, y } = p\n a + y }\nfn main() {}"
+    ));
+    assert!(accepts(
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, .. } = p\n x }\nfn main() {}"
+    ));
+    // 省略字段必须写 ..
+    assert!(!accepts(
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x } = p\n x }\nfn main() {}"
+    ));
+    // 字段必须存在
+    assert!(!accepts(
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { z, .. } = p\n z }\nfn main() {}"
+    ));
+    // 同一字段不能出现两次
+    assert!(!accepts(
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, x } = p\n x }\nfn main() {}"
+    ));
+}
+
+#[test]
+fn struct_patterns_respect_private_fields() {
+    let queries = crate::QueryEngine::new();
+    let lib =
+        "pub struct Counter { value: int }\npub fn make(v: int) Counter = Counter { value: v }";
+    // 模块外不能点名私有字段
+    let errors = frontend(
+        &[
+            (
+                "main.gg",
+                "use lib.{Counter, make}\nfn peek(c: Counter) int { let Counter { value } = c\n value }\nfn main() { _ = peek(make(1)) }",
+            ),
+            ("lib.gg", lib),
+        ],
+        &queries,
+    )
+    .unwrap_err();
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.code() == crate::DiagnosticCode::InvalidPattern)
+    );
+    // 但可以由 .. 整体忽略
+    assert!(frontend(
+        &[
+            (
+                "main.gg",
+                "use lib.{Counter, make}\nfn peek(c: Counter) int { let Counter { .. } = c\n 0 }\nfn main() { _ = peek(make(1)) }",
+            ),
+            ("lib.gg", lib),
+        ],
+        &queries,
+    )
+    .is_ok());
+}
+
+#[test]
+fn array_or_and_range_patterns_validate_shapes() {
+    // 固定数组精确模式长度必须一致，rest 可以吃掉剩余
+    assert!(!accepts(
+        "fn f(xs: [int; 4]) int { let [a, b] = xs\n a }\nfn main() {}"
+    ));
+    assert!(accepts(
+        "fn f(xs: [int; 4]) int { let [a, b, ..] = xs\n a }\nfn main() {}"
+    ));
+    // or 两侧必须绑定同一组名字
+    assert!(!accepts(
+        "fn f(o: Option[int]) int { match o { Some(x) | Some(y) => 0, None => 1 } }\nfn main() {}"
+    ));
+    // string 字面量不进模式
+    assert!(!accepts(
+        "fn f(s: string) int { match s { \"hi\" => 0, _ => 1 } }\nfn main() {}"
+    ));
+    // 范围端点类型必须与被匹配类型相同
+    assert!(!accepts(
+        "fn f(c: char) int { match c { 0..'a' => 0, _ => 1 } }\nfn main() {}"
+    ));
+    // 下界必须小于上界
+    assert!(!accepts(
+        "fn f(v: int) int { match v { 3..2 => 0, _ => 1 } }\nfn main() {}"
+    ));
+    // 范围模式没有 ..=
+    assert!(!accepts(
+        "fn f(v: int) int { match v { 0..=10 => 0, _ => 1 } }\nfn main() {}"
+    ));
+}
+
+#[test]
 fn condition_bindings_and_loop_initialization_follow_execution() {
     assert!(accepts(
         "fn f(o: Option[int]) int { if let Some(x) = o && x > 0 { x } else { 0 } }\nfn main() {}"
