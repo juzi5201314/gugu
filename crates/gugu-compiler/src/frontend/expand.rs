@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::diagnostics::{Diagnostic, DiagnosticCode};
+use crate::diagnostics::{Diagnostic, DiagnosticCode, source_error_code};
 use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::source::{
     ExpansionId, ExpansionInput, SourceFileId, SourceMap, SourceSlot, SourceSnapshot, Span,
@@ -780,8 +780,10 @@ fn splice_one(
     *generated += 1;
     let snapshot = SourceSnapshot::from_str(std::path::Path::new(&logical), &fragment.text)
         .map_err(|error| {
+            // 生成文本的快照字节校验失败使用快照自身的代码（BOM/非法 UTF-8/超限），
+            // 只有逻辑路径注册失败才是非法逻辑路径。
             vec![Diagnostic::error(
-                DiagnosticCode::InvalidSourcePath,
+                source_error_code(&error),
                 format!("生成文本无法注册源码快照：{error}"),
                 Some(call.call.clone()),
             )]

@@ -422,7 +422,7 @@ impl Span {
         self.line
     }
 
-    /// 返回 1-based 字节列号。
+    /// 返回 1-based Unicode scalar 列号。
     pub fn column(&self) -> u32 {
         self.column
     }

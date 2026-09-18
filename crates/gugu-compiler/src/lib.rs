@@ -9,6 +9,8 @@
 mod action;
 mod backend;
 mod diagnostics;
+#[cfg(test)]
+mod diagnostics_tests;
 mod frontend;
 mod lir;
 mod project;
@@ -747,6 +749,11 @@ enum LoadInputError {
         error: std::io::Error,
     },
     Snapshot(SourceError),
+    /// target 源码树的结构违规：bootstrap 无法识别的源码树形态（例如符号链接）。
+    SourceStructure {
+        path: PathBuf,
+        message: String,
+    },
     ModuleTree {
         path: PathBuf,
         message: String,
@@ -758,6 +765,11 @@ impl LoadInputError {
         match self {
             Self::Read { path, error } => Diagnostic::source_read(path, error),
             Self::Snapshot(error) => Diagnostic::source_error(error),
+            Self::SourceStructure { path, message } => Diagnostic::error(
+                DiagnosticCode::MalformedSource,
+                message,
+                Some(Span::detached(path, 0, 0)),
+            ),
             Self::ModuleTree { path, message } => Diagnostic::error(
                 DiagnosticCode::ModuleInvalidPath,
                 message,
@@ -909,7 +921,7 @@ fn collect_source_paths(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<()
             error,
         })?;
         if kind.is_symlink() {
-            return Err(LoadInputError::ModuleTree {
+            return Err(LoadInputError::SourceStructure {
                 path: entry.path(),
                 message: "target 源码树不允许符号链接".to_owned(),
             });

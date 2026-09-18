@@ -412,7 +412,11 @@ fn frontend_output(
     }
 }
 
-fn source_map_span(
+/// 在源码表上取 span，并把 `SpanError` 映射为 `SpanOutOfBounds` 诊断。
+///
+/// 诊断契约闸门直接调用本函数验证 E0007 的归属；公开编译输入无法触达该分支，
+/// 因为现有调用点都请求已注册文件的 `(0, 0)`。
+pub(crate) fn source_map_span(
     source_map: &SourceMap,
     file: SourceFileId,
     start: usize,

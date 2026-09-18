@@ -265,6 +265,29 @@ trait 表先收集声明和 impl 头，形成关联类型后再检查方法签�
 
 语言认识的 `Index`、复合赋值、`Try`、`IntoIter` 和 `Iter` 使用同一接口表；`?` 保留 operand 的 `branch` 与目标的 `from_error` 派发，`try` 正常出口保留 `from_value` 派发。用户 `IntoIter` 的关联迭代器必须实现 `Iter`，两侧 `Item` 投影必须一致；具名泛型、APIT 与不透明返回约束共用关联义务闭包。关联常量与数组长度共用类型模型中的常量求值路径；具体值保留类型，并在特化检查中比较求值结果而不是源码拼写。
 
+### TypeCheck schema verifier 规则
+
+`CheckedSemantics::verify` 是 TypeCheck 结果的 schema verifier：首次产出（`checker::check` 返回前）与 query 缓存恢复（反序列化 payload 之后）两条路径都必须通过。任一检查失败统一映射为 `InvalidType`（`E0038`），且不进入布局与 HIR 形成。检查按下列分组进行，顺序与实现一致：
+
+1. `foreign_definitions` 与 `linkage` 必须与当前模型中的 C 声明、链接名与 used 状态逐项一致。
+2. `hidden_types` 必须与 opaque 定义一一对应：需要隐藏类型的 opaque 必须有条目，其它必须为空；条目本身必须 formed，且在该 opaque 上下文中没有未绑定类型变量。
+3. 每个 body 的定义必须落在 active item 上；`expressions` 按 `ExprId` 严格递增、下标在表达式 arena 内且类型 formed；`slots` 类型 formed；`slot_storage` 与 `slot_origins` 与槽等长，origin 区间不越过文件 EOF，storage 只允许 `ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE` 三位。
+4. `borrow_checks` 的表达式下标必须在 arena 内，base 与 target 类型必须 formed。
+5. `memory_operations` 的 expression、value、result 必须 formed，全部实参是合法表达式下标。
+6. `runtime_operations` 的 expression 下标与 ty 必须合法，实参恰好 2 个且都是合法表达式下标。
+7. `platform_operations` 的 expression 下标与 ty 必须合法，实参数等于该操作登记的 `kind.value_arguments()`。
+8. `adjustments` 的 source 与 target 必须 formed 且互异，种类必须与类型形状匹配：`Erase` 目标为 `dyn` 或函数类型、`Opaque` 目标为 opaque、`ArrayToSlice` 从数组到切片。
+9. `formatting` 的 part 必须是该表达式的 f-string 插值片段；固定计数不得超过 `i64::MAX`，槽计数必须解析到 `int`（signed、64 位）槽。
+10. `reflections` 的 expression 下标必须在 arena 内；`Is`/`Downcast`/`DowncastCopy`/`TypeId` 的目标类型必须 formed 且不是 `never` 或 `MaybeUninit`。
+11. `dispatches` 的 expression、self_ty 与 signature 必须合法且 signature 是函数类型；动态派发不得携带 callable/implementation，且 self_ty 必须是包含该 interface 的 `dyn`；静态 callable 必须解析到存在的函数定义，implementation 必须是否定标志为假的 impl；interface 的参数个数与成员下标必须合法。
+12. `captures` 的 signature 必须是函数类型，expression 节点种类必须与 function/coroutine 标志一致；依赖项必须 active；捕获槽必须在槽范围内严格递增，并分别带 `CAPTURED`（协程计划还须 `CROSS_COROUTINE`）。
+13. `variadic_calls` 的 `fixed_count` 不得超过实参数目，element 必须 formed，callee 与实参都必须是表达式表内的下标；异构包 element 必须是长度等于尾部实参数目的元组。
+14. `patterns` 的 pattern 下标必须在 arena 内、类型 formed，`bound_slots` 区间必须落在槽范围内。
+15. `local_statics` 的 statement 必须是 initializer 一致的 static 声明项，类型必须 formed。
+16. `cleanup` 的 statement 必须是 body 与函数出口标记一致的 defer，捕获槽必须在槽范围内。
+17. `runtime_checks` 的 expression 必须出现在表达式表中；除法与移位检查的类型必须是 8/16/32/64/128 位精确宽度整数。
+18. `initialization` 的定义必须 active，`const` 只对应 `Constant` 初始化域，`static` 只对应 `Process`/`Coroutine`/`OsThread`。
+
 ## HIR
 
 ### owner 与节点表示

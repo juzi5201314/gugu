@@ -218,6 +218,143 @@ impl fmt::Display for DiagnosticCode {
     }
 }
 
+impl DiagnosticCode {
+    /// 全部诊断代码，顺序与枚举声明一致（当前即 `code()` 的稳定升序）。
+    ///
+    /// 新增 variant 必须同时补本表与 [`Self::index`]；`index` 是不带通配分支的穷尽匹配，
+    /// 漏项会让 compiler crate 的测试构建直接编译失败，这是覆盖闸门的编译期半边。
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 59] = [
+        Self::SourceRead,
+        Self::MissingMain,
+        Self::MalformedSource,
+        Self::InvalidUtf8,
+        Self::SourceBom,
+        Self::InvalidSourcePath,
+        Self::SpanOutOfBounds,
+        Self::SourceTooLarge,
+        Self::LexUnterminated,
+        Self::LexUnterminatedComment,
+        Self::LexInvalidEscape,
+        Self::LexInvalidNumeric,
+        Self::LexInvalidToken,
+        Self::LexUnknownAttribute,
+        Self::LexInvalidAttributeArg,
+        Self::LexInvalidUnicodeScalar,
+        Self::LexCStringNul,
+        Self::LexInvalidByteChar,
+        Self::LexInvalidFormatSpec,
+        Self::ParseUnexpected,
+        Self::ParseExpected,
+        Self::ParseUnclosed,
+        Self::ParseInvalidPrecedence,
+        Self::ParseInvalidPlace,
+        Self::ParseInvalidSelectArm,
+        Self::ParseImplementationLimit,
+        Self::CfgInvalidPredicate,
+        Self::ModuleInvalidPath,
+        Self::ModuleNotFound,
+        Self::ModulePathCaseMismatch,
+        Self::ReservedName,
+        Self::DuplicateDefinition,
+        Self::ImportCycle,
+        Self::PrivateImport,
+        Self::ImportNotFound,
+        Self::ImportConflict,
+        Self::DefinitionHashCollision,
+        Self::InvalidType,
+        Self::RecursiveType,
+        Self::InvalidDeclaration,
+        Self::InvalidExpression,
+        Self::InvalidPattern,
+        Self::InvalidLetElse,
+        Self::InvalidMainSignature,
+        Self::ComptimeCapability,
+        Self::ComptimeBudget,
+        Self::ComptimePanic,
+        Self::ExpansionCycle,
+        Self::ExpansionLimit,
+        Self::ExpansionFragmentMismatch,
+        Self::MacroBoundaryError,
+        Self::MonoDivergence,
+        Self::MonoInstanceLimit,
+        Self::LateComptime,
+        Self::GirInvariant,
+        Self::LargeCopy,
+        Self::LirInvariant,
+        Self::RuntimeRawInvariant,
+        Self::ResourceInvariant,
+    ];
+
+    /// 返回该代码在 [`Self::ALL`] 中的稠密下标。
+    ///
+    /// 本匹配必须保持穷尽：漏掉任一 variant 都是编译错误，诊断契约表据此按下标落位。
+    #[cfg(test)]
+    pub(crate) const fn index(self) -> usize {
+        match self {
+            Self::SourceRead => 0,
+            Self::MissingMain => 1,
+            Self::MalformedSource => 2,
+            Self::InvalidUtf8 => 3,
+            Self::SourceBom => 4,
+            Self::InvalidSourcePath => 5,
+            Self::SpanOutOfBounds => 6,
+            Self::SourceTooLarge => 7,
+            Self::LexUnterminated => 8,
+            Self::LexUnterminatedComment => 9,
+            Self::LexInvalidEscape => 10,
+            Self::LexInvalidNumeric => 11,
+            Self::LexInvalidToken => 12,
+            Self::LexUnknownAttribute => 13,
+            Self::LexInvalidAttributeArg => 14,
+            Self::LexInvalidUnicodeScalar => 15,
+            Self::LexCStringNul => 16,
+            Self::LexInvalidByteChar => 17,
+            Self::LexInvalidFormatSpec => 18,
+            Self::ParseUnexpected => 19,
+            Self::ParseExpected => 20,
+            Self::ParseUnclosed => 21,
+            Self::ParseInvalidPrecedence => 22,
+            Self::ParseInvalidPlace => 23,
+            Self::ParseInvalidSelectArm => 24,
+            Self::ParseImplementationLimit => 25,
+            Self::CfgInvalidPredicate => 26,
+            Self::ModuleInvalidPath => 27,
+            Self::ModuleNotFound => 28,
+            Self::ModulePathCaseMismatch => 29,
+            Self::ReservedName => 30,
+            Self::DuplicateDefinition => 31,
+            Self::ImportCycle => 32,
+            Self::PrivateImport => 33,
+            Self::ImportNotFound => 34,
+            Self::ImportConflict => 35,
+            Self::DefinitionHashCollision => 36,
+            Self::InvalidType => 37,
+            Self::RecursiveType => 38,
+            Self::InvalidDeclaration => 39,
+            Self::InvalidExpression => 40,
+            Self::InvalidPattern => 41,
+            Self::InvalidLetElse => 42,
+            Self::InvalidMainSignature => 43,
+            Self::ComptimeCapability => 44,
+            Self::ComptimeBudget => 45,
+            Self::ComptimePanic => 46,
+            Self::ExpansionCycle => 47,
+            Self::ExpansionLimit => 48,
+            Self::ExpansionFragmentMismatch => 49,
+            Self::MacroBoundaryError => 50,
+            Self::MonoDivergence => 51,
+            Self::MonoInstanceLimit => 52,
+            Self::LateComptime => 53,
+            Self::GirInvariant => 54,
+            Self::LargeCopy => 55,
+            Self::LirInvariant => 56,
+            Self::RuntimeRawInvariant => 57,
+            Self::ResourceInvariant => 58,
+        }
+    }
+}
+
 /// 一条可排序的编译诊断。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Diagnostic {
@@ -227,6 +364,19 @@ pub struct Diagnostic {
     span: Option<Span>,
     /// 前端发射顺序；`u32::MAX` 表示未指定，排序时退回到 span。
     seq: u32,
+}
+
+/// 返回源码快照校验失败的稳定诊断代码。
+///
+/// 快照字节校验（超限、非法 UTF-8、BOM）与逻辑路径校验共用本映射：宏生成文本的
+/// 快照失败也必须落在快照自身的代码上，不能再一律归为非法逻辑路径。
+pub(crate) fn source_error_code(error: &SourceError) -> DiagnosticCode {
+    match error {
+        SourceError::TooLarge { .. } => DiagnosticCode::SourceTooLarge,
+        SourceError::InvalidUtf8 { .. } => DiagnosticCode::InvalidUtf8,
+        SourceError::Bom { .. } => DiagnosticCode::SourceBom,
+        SourceError::InvalidPath { .. } => DiagnosticCode::InvalidSourcePath,
+    }
 }
 
 impl Diagnostic {
@@ -283,27 +433,15 @@ impl Diagnostic {
 
     /// 创建源码快照校验错误诊断。
     pub(crate) fn source_error(error: &SourceError) -> Self {
-        let (code, path, message, offset) = match error {
-            SourceError::TooLarge { path } => {
-                (DiagnosticCode::SourceTooLarge, path, error.to_string(), 0)
-            }
-            SourceError::InvalidUtf8 { path, offset } => (
-                DiagnosticCode::InvalidUtf8,
-                path,
-                error.to_string(),
-                *offset as usize,
-            ),
-            SourceError::Bom { path } => (DiagnosticCode::SourceBom, path, error.to_string(), 0),
-            SourceError::InvalidPath { path } => (
-                DiagnosticCode::InvalidSourcePath,
-                path,
-                error.to_string(),
-                0,
-            ),
+        let (path, offset) = match error {
+            SourceError::TooLarge { path } => (path, 0),
+            SourceError::InvalidUtf8 { path, offset } => (path, *offset as usize),
+            SourceError::Bom { path } => (path, 0),
+            SourceError::InvalidPath { path } => (path, 0),
         };
         Self::error(
-            code,
-            message,
+            source_error_code(error),
+            error.to_string(),
             Some(Span::detached(std::path::Path::new(path), offset, offset)),
         )
     }
