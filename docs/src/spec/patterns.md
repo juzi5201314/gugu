@@ -1,5 +1,7 @@
 # 模式
 
+本章规定模式的语法、可驳与不可驳分类、匹配求值与穷尽性。模式的使用位置见[表达式](expressions.md)。
+
 模式出现在 `match`、`if let`、`while let`、`let` / `let-else`、函数与闭包参数里。匹配成功时字段与元素按[传递](passing.md)规则产生语义副本（与读 `p.x` 相同），不是自动变成 `&T`。没有 `ref` / `ref mut`。
 
 ## 可驳与不可驳
@@ -37,17 +39,19 @@ or-模式的优先级低于 `@`、构造器与字面量：`A | B` 是两臂；`x
 
 穷尽匹配，是表达式。臂写成 `模式 => 表达式` 或 `模式 if 守卫 => 表达式`。
 
-```
-let n = match r {
-    Ok(v) => v
-    Err(_) => 0
-}
-
-match x {
-    0..10 => "small"
-    10 => "ten"
-    n @ 11..100 => f"{n}"
-    _ => "big"
+```gugu
+fn demo(r: Result[int, string], x: int) {
+    let n = match r {
+        Ok(v) => v
+        Err(_) => 0
+    }
+    match x {
+        0..10 => "small"
+        10 => "ten"
+        n @ 11..100 => f"{n}"
+        _ => "big"
+    }
+    _ = n
 }
 ```
 
@@ -63,23 +67,32 @@ match x {
 
 ## `if let` / let 链 / `let-else`
 
-```
-if let Ok(v) = r {
-    use(v)
-} else {
-    fallback()
-}
+```gugu
+fn demo(
+    r: Result[int, string],
+    a: Result[int, string],
+    b: Result[int, string],
+    it: Vec[int],
+) {
+    if let Ok(v) = r {
+        _ = v
+    } else {
+        fallback()
+    }
 
-if let Ok(x) = a && let Ok(y) = b && x > y {
-    use(x, y)
-}
+    if let Ok(x) = a && let Ok(y) = b && x > y {
+        _ = x
+        _ = y
+    }
 
-while let Some(x) = it.next() {
-    use(x)
-}
+    while let Some(x) = it.next() {
+        _ = x
+    }
 
-let Ok(v) = r else {
-    return
+    let Ok(v) = r else {
+        return
+    }
+    _ = v
 }
 ```
 
@@ -92,10 +105,17 @@ let Ok(v) = r else {
 
 ## `let` 与参数
 
-```
-let (a, b) = pair
-let Point { x, y } = p
-let Meters(n) = m
+```gugu
+fn demo(pair: (int, int), p: Point, m: Meters) {
+    let (a, b) = pair
+    let Point { x, y } = p
+    let Meters(n) = m
+    _ = a
+    _ = b
+    _ = x
+    _ = y
+    _ = n
+}
 
 fn add((x, y): (int, int)) int = x + y
 ```
@@ -108,7 +128,7 @@ fn add((x, y): (int, int)) int = x + y
 
 `match`、`if let`、`while let` 和 `let-else` 的被匹配表达式只求值一次，并物化到一个不可见临时槽；所有模式检查和守卫都针对该槽。模式本身不执行用户函数，不调用 `Eq`/`Ord`，只检查判别值、字段、长度和规范允许的标量位。
 
-模式成功后，绑定按从左到右、从外到内的结构顺序建立为新槽；每个绑定取得匹配值的一份语义副本。`x @ P` 先验证 P，成功后再复制整个值给 x。模式失败时不建立任何绑定，也不保留部分 COW 封存或 resource lease；编译器必须把这些语义动作推迟到模式确认成功之后。
+模式成功后，绑定按从左到右、从外到内的结构顺序建立为新槽；每个绑定取得匹配值的一份语义副本。`x @ P` 先验证 P，成功后再复制整个值给 x。模式失败时不建立任何绑定，也不保留部分 COW 封存或资源租约；编译器必须把这些语义动作推迟到模式确认成功之后。
 
 `match` 臂按书写顺序尝试。模式成功后才求值守卫；守卫为 `false` 时该臂绑定被丢弃，继续尝试下一臂。守卫中的副作用保留，后续臂仍读取原被匹配临时值。臂体只在模式和守卫都成功时求值。
 

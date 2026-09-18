@@ -15,11 +15,11 @@ Gugu 是 AOT 编译的、健全静态类型的语言：语法刻意简单，语�
 5. **分配不增加所有权语法。** 语言值语义不暴露 stack/heap选择；需要批量寿命时显式使用 arena，需要地址稳定时显式 pin。
 6. **推断 ≠ 开世界。** 闭世界是代码全集可见；省略类型是编译器补全注解。
 7. **运行时是语言的一部分。** 可执行镜像包含满足本规范的 Gugu runtime 与 rt0，不依赖另一个宿主 VM。
-8. **性能策略不能改变语义。** 分配、屏障、换栈、safepoint和 IR lowering只在 [`internals/`](../internals/gir-lir.md)规定。
+8. **性能策略不能改变语义。** 分配、屏障、换栈、safepoint 和 IR lowering 只在 [`internals/`](../internals/gir-lir.md)规定。
 9. **必须有 `unsafe` 与 intrinsic。** 否则 GC、调度、channel 无法用本语言写。
 10. **没有对象系统。** 禁止类、继承、原型链、隐式 `this`、运行时加字段。方法是 UFCS / `impl`，默认静态分发。
 11. **闭包是一等公民。** 捕获不增加用户心智负担；捕获状态按闭包实际寿命持续有效。
-12. **高并发。** 协程、抢占、channel和多核并行不要求函数染色；具体 M:N实现见[调度器内部规范](../internals/scheduler.md)。
+12. **高并发。** 协程、抢占、channel 和多核并行不要求函数染色；具体 M:N 实现见[调度器内部规范](../internals/scheduler.md)。
 13. **系统接口：** Linux 直接 syscall；Windows 薄导入地址表（IAT，Import Address Table，挂 kernel32/ntdll）。默认不链 libc。
 
 ## 目标
@@ -34,7 +34,7 @@ Gugu 是 AOT 编译的、健全静态类型的语言：语法刻意简单，语�
 
 - 不用系统 `ld` / `link.exe` 作为发布模型。
 - 不是渐进类型，不是字节码 VM，不是 WASM guest。
-- Rust编译器、自研后端与 Gugu runtime等官方实现选型只见 [`internals/`](../internals/ast-hir.md)，不赋予程序 Rust ABI或新的语言语义。
+- Rust 编译器、自研后端与 Gugu runtime 等官方实现选型只见 [`internals/`](../internals/ast-hir.md)，不赋予程序 Rust ABI或新的语言语义。
 
 ## 示例
 
@@ -42,7 +42,7 @@ Gugu 是 AOT 编译的、健全静态类型的语言：语法刻意简单，语�
 
 `main.gg`：
 
-```
+```gugu
 use green.{bar}
 use std.io.{print, println}
 use std.io as io2
@@ -62,7 +62,7 @@ fn inc(i: int) int = i + 1
 
 `green.gg`：
 
-```
+```gugu
 pub fn bar() string = "bar"
 ```
 
@@ -74,15 +74,30 @@ UTF-8，扩展名 `.gg`。文件是模块，目录是包；规范排版见[格�
 
 ## 术语 {#terminology}
 
-`spec/` 是程序、库、工具链与外部 ABI 的唯一公开规范；`internals/` 固定官方 compiler/runtime实现。下列公开术语在后文章节直接使用：
+`spec/` 是程序、库、工具链与外部 ABI 的唯一公开规范；`internals/` 固定官方 compiler/runtime 实现。下列公开术语在后文章节直接使用；同一概念全书只使用本表的叫法，首次出现时可在括号里附英文原文：
 
 | 术语 | 含义 |
 |------|------|
+| 值 | 一次表达式求值产生的静态类型表示；按位值可复制，句柄值复制的是句柄字。 |
+| 槽 | 一个可以被绑定、引用或赋值的位置；`&x` 指向的是 `x` 的槽，而不是临时值。 |
+| place | 可被赋值、取引用或作为 `Index` 接收者的槽表达式，例如绑定、字段、解引用和下标。 |
 | lang item | 编译器按**名字**挂钩的标准库项（类型、trait、函数）。语言语义必须解析到这些定义；用户不能再声明同名项。没有挂钩的普通 `std` 类型不是 lang item。 |
 | lang trait | 作为 lang item 的 trait（如 `Print`、`Any`）。 |
 | ZST / 纯 ZST | 零大小类型：`size_of` 为 0。纯 ZST 作为值没有对象身份。见 [类型](types.md)。 |
+| 受管 | managed。由 GC 管理的存储与引用（受管存储、受管引用）；语义见[内存与对象模型](memory.md)。 |
+| 写屏障 | write barrier。受管引用写入时通知 GC 的 IR 原语；实现策略见 [GC 元数据](../internals/gc-metadata.md)。 |
+| 身份句柄 | identity handle。复制句柄字即共享同一对象的值句柄；见[值、句柄与传递](passing.md)。 |
+| 资源句柄 | resource handle。持有非内存资源、按 Adaptive Resource Leasing 约定归还的值句柄；见[标准库](standard-library.md#adaptive-resource-leasing)。 |
+| 协程 | coroutine。Gugu 的用户执行单元，M:N 映射到逻辑处理器；见[并发与调度](concurrency.md)。 |
+| 会合 | rendezvous。无缓冲 channel 上，一次 `send` 与一次 `recv` 必须配对完成。 |
+| 线性化 | 并发操作在其效果对其它操作可见的单一逻辑瞬间确定顺序。 |
+| 早期 comptime | 在源码宏闭合后、单态化闭世界冻结前完成的编译期求值；可以决定类型、布局和静态语义选择。 |
+| late comptime | 具体类型集合冻结后只读 type universe 的编译期求值；只能提供标量结果，不能改变类型、宏或可达性。 |
+| `ParsedSource` | 只能由 `std.syntax.parse_*` 在 comptime 中产生的不透明源码片段；展开后回到主前端，不是运行时值。 |
+| 源码宏展开 | 执行 `comptime source` 脚本、解析其结果并将片段插入调用点的编译阶段。 |
+| 抽象分析 | 对未知运行时值传播范围、别名、内存版本、效果和控制流事实的健全全程序分析。 |
+| 物理位置 | `std.src.file` / `line` / `column` 取到的调用表达式在源文件中的位置。 |
 | IAT | Windows PE 的导入地址表（Import Address Table）。「薄 IAT」= 只导入 ntdll/kernel32 等少量符号，不链 CRT。 |
-| 会合 | 无缓冲 channel 上，一次 `send` 与一次 `recv` 必须配对完成（rendezvous）。 |
 | 已支持目标 | 本规范当前登记并要求支持的目标：`x86_64-linux` 与 `x86_64-windows`。目标模型与 ABI 见[平台与 ABI 参考](platform-abi.md)。 |
 | runtime 状态 | `Booting`、`Running`、`Waiting` 和 `Terminating`；状态转换见[运行时与运维语义](runtime.md)。 |
 | fatal | runtime 无法安全恢复的进程级故障；不进入 `Panic`，不能被 `catch` 或 `Join.wait()` 截获。 |
@@ -119,20 +134,4 @@ lint 是既不改变程序类型也不改变运行时语义的诊断。默认 `w
 程序可以观察值、panic、fatal 报告、输出字节、退出码、`std.src` 源位置、channel/同步操作的结果、`std.runtime` 的运行时快照、`std.signal` 的已订阅事件以及外部 ABI 的结果。字段重排、寄存器分配、栈/堆选择、GC 移动、内联、检查消除和单态化都不是可观察语义，除非程序已经进入 `unsafe` 或 FFI 并违反了对应前置条件。实现选择的随机调度只受[并发与调度](concurrency.md)规定的公平和同步关系约束。
 
 所有源位置均使用物理源文件、1 基行号和 1 基 Unicode 标量列号；诊断至少指出一个主源范围。源码宏展开会额外携带 `ExpansionId`、宏调用位置、宏定义位置和生成文本偏移；没有源码宏时不存在非零展开坐标。隐式宏文本替换仍不是语言机制，只有显式 `comptime source` 能生成并展开源码。
-
-## 术语补充
-
-| 术语 | 含义 |
-|------|------|
-| 槽 | 一个可以被绑定、引用或赋值的位置；`&x` 指向的是 `x` 的槽，而不是临时值。 |
-| 值 | 一次表达式求值产生的静态类型表示；按位值可复制，句柄值复制的是句柄字。 |
-| place | 可被赋值、取引用或作为 `Index` 接收者的槽表达式，例如绑定、字段、解引用和下标。 |
-| 会合 | 无缓冲 channel 的发送和接收配对完成。 |
-| 线性化 | 并发操作在其效果对其它操作可见的单一逻辑瞬间确定顺序。 |
-| 物理位置 | `std.src.file` / `line` / `column` 取到的调用表达式在源文件中的位置。 |
-| 早期 comptime | 在源码宏闭合后、单态化闭世界冻结前完成的编译期求值；可以决定类型、布局和静态语义选择。 |
-| late comptime | 具体类型集合冻结后只读 type universe 的编译期求值；只能提供标量结果，不能改变类型、宏或可达性。 |
-| `ParsedSource` | 只能由 `std.syntax.parse_*` 在 comptime 中产生的不透明源码片段；展开后回到主前端，不是运行时值。 |
-| 源码宏展开 | 执行 `comptime source` 脚本、解析其结果并将片段插入调用点的编译阶段。 |
-| 抽象分析 | 对未知运行时值传播范围、别名、内存版本、效果和控制流事实的健全全程序分析。 |
 

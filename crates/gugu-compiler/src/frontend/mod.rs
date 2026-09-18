@@ -504,6 +504,8 @@ fn active_main(module: &ParsedModule) -> Option<ast::FnId> {
 }
 
 #[cfg(test)]
+mod docs_code_tests;
+#[cfg(test)]
 mod lex_tests;
 #[cfg(test)]
 mod parse_tests;

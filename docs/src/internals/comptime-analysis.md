@@ -230,14 +230,16 @@ AbstractState {
 例如：
 
 ```gugu
-let n = 20
-let v = make_vec()
-if v.len() > 10 {
-    for i in 0..n {
-        if i >= 2 {
-            break
+fn demo() {
+    let n = 20
+    let v = make_vec()
+    if v.len() > 10 {
+        for i in 0..n {
+            if i >= 2 {
+                break
+            }
+            v[i]
         }
-        v[i]
     }
 }
 ```

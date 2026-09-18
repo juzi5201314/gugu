@@ -1,8 +1,7 @@
 # ADR-0010：语言级 comptime 源码宏与全程序抽象分析
 
-## 状态
-
-已接受。
+- 状态：已接受
+- 日期：2026-09-02
 
 ## 背景
 
@@ -13,7 +12,7 @@ Gugu 原有的 comptime 设计只描述在编译期计算普通值，例如常�
 1. 编译期脚本可以像 procedural macro 一样生成任意合法源码片段；
 2. 编译器可以跨函数、模块和 package 分析未知运行时值，但不能把一次具体执行误当成对所有输入的证明。
 
-## 决定
+## 决策
 
 ### 源码宏
 
@@ -62,6 +61,16 @@ trait/impl 选择仍由类型系统的约束求解完成，lint 只消费分析�
 保持不变，依赖 package 不继续失效。递归 SCC 必须共同求解后再投影单函数摘要。缓存对象
 缺失、损坏或版本不兼容时从闭世界 GIR 重算，不能信任 package 自带摘要或改变程序语义。
 
+## 替代方案
+
+本节为 2026-09 文档整理时补记：列出决策时已隐含拒绝的方向，便于后续对照；非决策当时的原始记录。
+
+- **字符串直接拼接进 AST、不经 parser 闸门**：无法验证生成语法，也丢失展开链诊断；必须经过 `std.syntax.parse_*` 形成不透明 `ParsedSource`。
+- **Rust 式 proc-macro（独立编译 dylib + token stream API）**：与闭世界编译、单一 compiler identity 和确定性缓存冲突；宏脚本就是普通 comptime 代码。
+- **语法层面直接禁止递归宏**：合法的组合宏也被禁止；改用展开深度/次数/字节/节点/fuel/heap 预算限制，循环栈报告 `expansion-cycle`。
+- **抽象分析只做函数内范围分析**：丢失越界检查消除的跨函数收益；但健全性要求 unknown 保留检查，跨 package 复用以内容寻址摘要为 seam。
+- **late comptime 允许回写类型形成**：会重新打开可达性与单态化；late 求值只读冻结 type universe。
+
 ## 后果
 
 - 语言获得了不依赖 AST builder 的自由源码生成能力，字符串到代码必须经过显式 parser 闸门。
@@ -72,5 +81,9 @@ trait/impl 选择仍由类型系统的约束求解完成，lint 只消费分析�
 - 跨 package 摘要以稳定语义内容为复用 seam；实现变化只在公共摘要结果变化时继续传播。
 - 闭世界编译可以提供跨 package 分析和更激进的检查消除，但分析成本必须受预算约束；无法证明时程序保持原有运行时检查。
 - parser、展开、late 常量、摘要和优化结果都必须按稳定输入缓存，不能依赖线程完成顺序、宿主地址或 session-local ID。
+
+## 实施状态
+
+已实现：值 comptime 的 EarlyConst/LateConst 分阶段与冻结 type universe、`comptime source` 源码宏与 `std.syntax.parse_*` 闸门、展开预算与 `expansion-cycle`/`expansion-limit` 诊断、comptime capability registry、全程序抽象分析与跨 package `PublicFunctionSummaryV1` 内容寻址缓存（提交 `1146360`、`bea6eba`）。规范与实现契约分别见[编译期执行](../src/spec/comptime.md)与[comptime 与抽象分析](../src/internals/comptime-analysis.md)。
 
 相关规范：[编译期执行](../src/spec/comptime.md)、[形式语法](../src/spec/syntax.md)、[comptime 与抽象分析](../src/internals/comptime-analysis.md)、[AST 与 HIR](../src/internals/ast-hir.md)、[单态化与编译缓存](../src/internals/monomorphization-cache.md)。

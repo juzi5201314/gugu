@@ -5,11 +5,11 @@
 1. **`f(x)` 永远合法。** 产生 `x` 的语义副本；没有 move 后再用错误，也不要求 `Clone`。
 2. **`f(&x)` 是引用传递。** 引用指向绑定 `x` 的槽，callee 能改 caller 的那个槽。
 3. **身份句柄复制后共享状态。** `Vec`、channel、Join、普通 GC 句柄的副本仍指向同一对象。
-4. **COW 与资源是编译器管理的句柄。** string、ByteBuffer 副本共享密封 backing 但保持独立值语义；Bytes 只读共享；资源副本共享 ResourceCell，并由 Adaptive Resource Leasing 管理最后 release。
+4. **COW 与资源是编译器管理的句柄。** string、ByteBuffer 副本共享密封 backing 但保持独立值语义；Bytes 只读共享；资源副本共享 ResourceCell，并由 Adaptive Resource Leasing 管理最后 release（语义见[内存 · Adaptive Resource Leasing](memory.md#adaptive-resource-leasing)，标准库封装见[标准库](standard-library.md#adaptive-resource-leasing)）。
 
-要两份互不影响的普通对象图时写 `clone`。string 与 ByteBuffer 已有 COW 值语义，不需要为了防止后续修改互相影响而 clone；资源通常不实现 Clone，复制资源值只增加同一底层资源的 lease。
+要两份互不影响的普通对象图时写 `clone`。string 与 ByteBuffer 已有 COW 值语义，不需要为了防止后续修改互相影响而 clone；资源通常不实现 Clone，复制资源值只增加同一底层资源的租约。
 
-逃逸分析、拷贝消除、COW 封存与 resource lease动作的机器级融合是 [GIR/LIR](../internals/gir-lir.md)和 [GC 元数据](../internals/gc-metadata.md)的内部实现；这些只许改变机器码，不许变成用户可见的所有权门槛。
+逃逸分析、拷贝消除、COW 封存与资源租约动作的机器级融合是 [GIR/LIR](../internals/gir-lir.md) 和 [GC 元数据](../internals/gc-metadata.md)的内部实现；这些只许改变机器码，不许变成用户可见的所有权门槛。
 
 ## 与 Rust 所有权的边界
 
@@ -21,7 +21,7 @@
 | `String` 唯一拥有 backing | Gugu string 用密封式 COW 保持可复制值语义 |
 | Drop 在 owner 退出时运行 | 普通类型没有 Drop；外部资源由 Adaptive Resource Leasing 在最后 lease 结束时 release |
 
-编译器管理动作不是任意用户回调。COW seal与 resource lease管理不能由用户重载；具体 descriptor/intrinsic只在 internals定义。
+编译器管理动作不是任意用户回调。COW 封存与资源租约管理不能由用户重载；具体 descriptor/intrinsic 只在 internals 定义。
 
 ## string、身份句柄与资源句柄
 
@@ -31,49 +31,56 @@
 |------|---------------|---------------------------|----------------|
 | `string` | O(1) COW 值复制 | 不变；callee 写时分离 | 两份值各自保持值语义 |
 | `Vec[T]` / channel / Join | 复制身份句柄 | 观察到同一共享对象状态 | 任一活句柄都保持共享状态可达 |
-| File / socket / Child 等资源 | 复制同一 ResourceCell 的 lease | 观察到同一 open/closed 状态 | 最后 lease结束时一次性 release |
+| File / socket / Child 等资源 | 复制同一 ResourceCell 的租约 | 观察到同一 open/closed 状态 | 最后租约结束时一次性 release |
 | `&T` | 复制槽引用 | 双方访问同一槽 | 合法引用存活期间槽寿命延长 |
 
 string 示例：
 
-```text
+```gugu
 fn suffix(value: string) {
     value.push('!')
 }
 
-let text = "ok"
-suffix(text)
-// text 仍是 "ok"；参数 backing 可以先共享，push 时分离
+fn demo() {
+    let text = "ok"
+    suffix(text)
+    // text 仍是 "ok"；参数 backing 可以先共享，push 时分离
+}
 ```
 
 身份句柄示例：
 
-```text
+```gugu
 fn grow(values: Vec[int]) {
     values.push(1)
 }
 
-let values = Vec::new()
-grow(values)
-// values.len() == 1；双方共享同一个 Vec 身份
+fn demo() {
+    let values = Vec::new()
+    grow(values)
+    // values.len() == 1；双方共享同一个 Vec 身份
+}
 ```
 
 资源示例：
 
-```text
+```gugu
 fn inspect(file: File) {
-    // 按值检查同一资源；具体 lease优化不可观察
+    // 按值检查同一资源；具体租约优化不可观察
     read_header(file)
 }
 
-let file = File.open(path)?
-inspect(file)
-// file 仍合法；最后一个 lease 结束时自动 release
+fn demo(path: string) Result[(), IoError] {
+    let file = File.open(path)?
+    inspect(file)
+    // file 仍合法；最后一个租约结束时自动 release
+    Ok(())
+}
 ```
 
-方法调用对 `&Self` 自动取槽地址。`text.push` 因而修改当前 text槽并保持其它 string值不变；`vec.push` 修改共享 Vec身份；`file.close` 关闭共享 ResourceCell。普通函数调用不自动给用户暴露 `&` / `*` 转换。
+方法调用对 `&Self` 自动取槽地址。`text.push` 因而修改当前 text 槽并保持其它 string 值不变；`vec.push` 修改共享 Vec 身份；`file.close` 关闭共享 ResourceCell。普通函数调用不自动给用户暴露 `&` / `*` 转换。
 
-经引用访问字段或对字段取引用时，始终投影到原槽；自动解引用不产生被引用聚合的语义副本。只有把最终投影作为值传递、赋值或返回时，才对该投影的类型执行复制、COW 或 resource 动作。
+经引用访问字段或对字段取引用时，始终投影到原槽；自动解引用不产生被引用聚合的语义副本。只有把最终投影作为值传递、赋值或返回时，才对该投影的类型执行复制、COW 或资源动作。
 
 `clone()` 对普通身份句柄构造语义独立的对象图。string 的 clone 允许物理共享 sealed backing，只要后续修改保持值语义。资源若要复制底层 OS 资源，必须使用该类型明确返回 Result 的 `try_clone` 或等价领域方法，不能由 Clone 隐式执行 syscall。
 
@@ -82,11 +89,11 @@ inspect(file)
 具体类型按字段组合下列可观察规则：
 
 - **位值。** 标量、只含位的结构体、元组、数组、枚举；复制后两份值独立。
-- **身份句柄。** `Vec`、channel、Join、函数值、dyn Trait与 managed/arena引用；复制后共享同一身份状态。
-- **COW 值句柄。** string、ByteBuffer与 Bytes；复制后保持独立值语义，后续写入不能改变另一份值。
-- **资源句柄。** 包含 ResourceCell lease的类型；复制、覆盖、退出和共享必须保持一次性 release语义。
+- **身份句柄。** `Vec`、channel、Join、函数值、dyn Trait 与受管/arena 引用；复制后共享同一身份状态。
+- **COW 值句柄。** string、ByteBuffer 与 Bytes；复制后保持独立值语义，后续写入不能改变另一份值。
+- **资源句柄。** 包含 ResourceCell 租约的类型；复制、覆盖、退出和共享必须保持一次性 release 语义。
 
-用户结构体逐字段组合这些结果：string/ByteBuffer字段保持 COW值语义，Vec字段共享同一 Vec身份，resource字段参加 lease生命周期。具体管理动作及其编码只见 [GIR/LIR](../internals/gir-lir.md)与 [GC 元数据](../internals/gc-metadata.md)。
+用户结构体逐字段组合这些结果：string/ByteBuffer 字段保持 COW 值语义，Vec 字段共享同一 Vec 身份，资源字段参加租约生命周期。具体管理动作及其编码只见 [GIR/LIR](../internals/gir-lir.md) 与 [GC 元数据](../internals/gc-metadata.md)。
 
 递归类型的字段必须是句柄或 `&T`（`next: Option[&Node]`），不能把无限大的 `Node` 嵌进 `Node`。
 
@@ -105,11 +112,14 @@ inspect(file)
 
 `&x` 的语义是 **C / Go 那种槽位地址**，不是 Rust 那种「这份值的临时租约」：
 
-```
-let x = 1
-let r = &x
-x = 2
-// *r == 2，因为 r 指向 x 的槽
+```gugu
+fn demo() {
+    let x = 1
+    let r = &x
+    x = 2
+    // *r == 2，因为 r 指向 x 的槽
+    _ = r
+}
 ```
 
 `&x` 被存起来、送进 `async`、放进结构体：槽必须活得足够久 → 编译器把该绑定**装箱到 GC 堆**（或一开始就在堆上），用户看不到生命周期错误。
@@ -120,7 +130,7 @@ x = 2
 
 ## `clone`：只要深拷贝时才出现
 
-```
+```gugu
 trait Clone {
     fn clone(self: &Self) Self
 }
@@ -133,7 +143,7 @@ trait Clone {
 - 混合结构体可 `#[derive(Clone)]`：字段都 Clone 才行。
 - **任何类型不实现 Clone 也能传入 `f(x)`。**
 
-没有用户级 Copy trait。内部 `memcpy`、COW 封存、resource lease动作与跨协程发布由 [GIR/LIR](../internals/gir-lir.md)选择，不构成额外的源码规则。
+没有用户级 Copy trait。内部 `memcpy`、COW 封存、资源租约动作与跨协程发布由 [GIR/LIR](../internals/gir-lir.md)选择，不构成额外的源码规则。
 
 ## `Vec` / 切片与再分配
 
@@ -151,6 +161,6 @@ trait Clone {
 
 普通位值与身份句柄的浅拷不调用用户代码。COW seal和 resource lease动作同样不是可重载用户回调；赋值、参数传递、返回、模式绑定、聚合构造和 `dyn Any` 擦除都必须得到本章前述类型类别规定的同一结果。
 
-重新给绑定赋值时，旧 resource值的 lease先结束，再把新值写入；此前指向该槽的 `&T` 观察新值。首次写入没有旧 lease，不能释放尚未初始化的槽。结构体或 tuple 的聚合赋值按 resource 字段逐一结束旧 lease，每个 projection 独立判断是否已初始化：一个字段写入不能把兄弟字段判为已初始化，完整写入父聚合则覆盖其所有字段。projection 写入必须结束该 projection 中原有 lease，不能只因外层 local 未变就跳过 release。panic展开与正常退出都只结束相应已初始化的活跃 resource槽的 lease。含 resource 的 local 不能捕获到 managed closure environment；必须改用显式资源句柄或在 closure 外完成生命周期管理。collector物理移动对象不是语义复制，不能因此 seal COW或增加 lease。
+重新给绑定赋值时，旧资源值的租约先结束，再把新值写入；此前指向该槽的 `&T` 观察新值。首次写入没有旧租约，不能释放尚未初始化的槽。结构体或 tuple 的聚合赋值按资源字段逐一结束旧租约，每个 projection 独立判断是否已初始化：一个字段写入不能把兄弟字段判为已初始化，完整写入父聚合则覆盖其所有字段。projection 写入必须结束该 projection 中原有租约，不能只因外层 local 未变就跳过 release。panic 展开与正常退出都只结束相应已初始化的活跃资源槽的租约。含资源的 local 不能捕获到受管闭包环境；必须改用显式资源句柄或在闭包外完成生命周期管理。收集器物理移动对象不是语义复制，不能因此 seal COW 或增加租约。
 
-值物化、最后使用消除、stack放置、精确根和屏障的选择由 [GIR/LIR](../internals/gir-lir.md)、[栈图](../internals/stack-maps.md)与 [GC 元数据](../internals/gc-metadata.md)唯一规定。分析不确定时仍必须接受合法程序并选择保持本章语义的表示，不能报告生命周期、move或“需要 Clone”错误。
+值物化、最后使用消除、栈放置、精确根和屏障的选择由 [GIR/LIR](../internals/gir-lir.md)、[栈图](../internals/stack-maps.md)与 [GC 元数据](../internals/gc-metadata.md)唯一规定。分析不确定时仍必须接受合法程序并选择保持本章语义的表示，不能报告生命周期、move 或「需要 Clone」错误。

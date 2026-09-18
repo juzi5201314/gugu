@@ -21,27 +21,27 @@ Gugu 是高并发语言。并发原语是语言与 runtime 的一部分，不是
 
 ## 抢占
 
-调度保证分为可合作 managed code 与 opaque native code 两层。可合作 managed code 的每个可达 frame 都有精确 stack map/unwind metadata；compiler 通过可投毒的函数 `StackCheck`、必须挂起的 statepoint和按静态工作预算放置的 poll，保证每条无限 managed 执行路径无限次经过同步 safepoint，并限制两个 safepoint之间的 compiler cost。普通循环不承诺每个 backedge都读取 runtime状态；已知短循环可以不含 loop poll，未知或长 counted loop使用 poll-free inner chunk和 outer poll，其它循环才按计算 interval使用 countdown。只执行有效 managed code的协程即使不主动 `yield`，也不能永久阻止其它 runnable协程或 GC获得执行机会。
+调度保证分为可合作的受管代码与不透明原生代码两层。可合作受管代码的每个可达 frame 都有精确 stack map/unwind metadata；compiler 通过可投毒的函数 `StackCheck`、必须挂起的同步点和按静态工作预算放置的 poll，保证每条无限受管执行路径无限次经过同步 safepoint，并限制相邻 safepoint 之间的编译开销。普通循环不承诺每条回边都读取 runtime 状态；循环 poll 的具体放置、预算与缓存 schema 属于 compiler 实现契约，见[调度器内部规范](../internals/scheduler.md)。只执行有效受管代码的协程即使不主动 `yield`，也不能永久阻止其它 runnable 协程或 GC 获得执行机会。
 
-普通 inline `asm` 不是 safepoint。有限且可返回的 asm 片段可以在 `Running` 中执行，但它造成的延迟持续到片段返回；包含不可证明有限的内部回边、间接控制转移或外部等待的 asm 必须被 compiler 拒绝，或放入带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn`。`global_asm`、默认进入 managed context 的 `#[naked]` 和 dirty native definition 不属于可合作 managed code：从用户协程进入时必须脱离 `LogicalProcessor`，因此不会让它所属的 processor 或 GC stop 永久等待；但 dirty native work 本身可以永不返回，语言不保证该调用完成。
+普通 inline `asm` 不是 safepoint。有限且可返回的 asm 片段可以在 `Running` 中执行，但它造成的延迟持续到片段返回；包含不可证明有限的内部回边、间接控制转移或外部等待的 asm 必须被 compiler 拒绝，或放入带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn`。`global_asm`、默认进入受管上下文的 `#[naked]` 和 dirty native definition 不属于可合作受管代码：从用户协程进入时必须脱离 `LogicalProcessor`，因此不会让它所属的逻辑处理器或 GC stop 永久等待；但 dirty native work 本身可以永不返回，语言不保证该调用完成。
 
 `ForeignLeaf` 是用户承担的 unsafe契约：错误声明会占住当前 `LogicalProcessor`；若调用永久不返回，该 processor无法确认 GC stop，因而可以永久阻止进程完成 GC。这样的程序违反 unsafe契约，不在调度/GC活性保证内。无法证明 leaf时使用普通 `ForeignBridge`；它发布稳定 bridge frame并先取得有界 `BlockingBridge` 的 `BridgeCredit`，短调用可以在 attached路径保留 generation-tagged processor lease，GC、回调、退役或持续 runnable压力能够取回 lease。没有 credit时普通 bridge在不持有 processor的 `Waiting` 状态排队，不能通过每个调用创建无界 OS worker；因此未知 native work不能永久阻止其它 managed work或 stop epoch。
 
-signal/APC 只向当前 `LogicalProcessor` 发布抢占/GC请求、投毒正在运行 coroutine的 `StackCheck`并唤醒 worker；它不在任意机器 PC扫描栈、复制 coroutine stack或运行用户 defer。函数调用在被调方 prologue响应投毒，长循环在预算化 poll响应；对尚未到达同步点的执行，请求保持 pending。
+signal/APC 只向当前 `LogicalProcessor` 发布抢占/GC请求、投毒正在运行协程的 `StackCheck`并唤醒 worker；它不在任意机器 PC扫描栈、复制协程栈或运行用户 defer。函数调用在被调方 prologue响应投毒，长循环在预算化 poll响应；对尚未到达同步点的执行，请求保持 pending。
 
-`std.runtime.safepoint_poll()` 是显式同步 safepoint：fast path读取当前 processor的 poll word，必要时确认 GC stop、处理抢占并让出当前协程。它可以被安全调用，可能挂起或在恢复后继续；必须作为独立 Gugu调用出现，不能写进 inline/global asm模板或 `#[naked]` 函数。把 asm循环拆成有限片段并放回普通 Gugu循环后，compiler的预算化 loop poll已满足活性要求；库也可以在大块工作之间显式调用它，建立更早的合作边界。
+`std.runtime.safepoint_poll()` 是显式同步 safepoint：fast path读取当前逻辑处理器的 poll word，必要时确认 GC stop、处理抢占并让出当前协程。它可以被安全调用，可能挂起或在恢复后继续；必须作为独立 Gugu调用出现，不能写进 inline/global asm模板或 `#[naked]` 函数。把 asm循环拆成有限片段并放回普通 Gugu循环后，compiler的预算化 loop poll已满足活性要求；库也可以在大块工作之间显式调用它，建立更早的合作边界。
 
-CPU自旋仍然是 `Running` 计算：预算化 poll能让它被抢占，但整个 chunk都会持续占用 CPU。网络等待、channel、计时器和 `std.sync`锁竞争走 `park`，只挂起当前协程，不占住承载它的 worker/processor；这与 CPU抢占是两套机制。poll预算和机器成本表属于 compiler实现与缓存 schema，不是用户可观察的时间片或 wall-clock保证。
+CPU自旋仍然是 `Running` 计算：预算化 poll能让它被抢占，但整块工作都会持续占用 CPU。网络等待、channel、计时器和 `std.sync`锁竞争走 `park`，只挂起当前协程，不占住承载它的 worker/processor；这与 CPU抢占是两套机制。poll预算和机器成本表属于 compiler实现与缓存 schema，不是用户可观察的时间片或 wall-clock保证。
 
 ## Runnable 顺序与公平
 
-runnable coroutine没有进程级FIFO顺序。当前processor的`run_next`/local deque优先保持局部性；跨processor ready、poller/timer completion、local overflow和steal可以经过分片batch inbox或NUMA injection，因此不同producer、不同shard和不同processor之间允许重排。preferred processor只是性能hint，不建立线程亲和性或后续执行位置保证。程序不能用两个独立wake的观察顺序替代channel、atomic、Join或其它同步。
+runnable 协程没有进程级 FIFO 顺序。调度优先保持局部性：当前逻辑处理器的本地就绪工作先于跨处理器提交的工作（定时器完成、本地溢出、工作窃取等路径），因此不同提交来源、不同分片和不同逻辑处理器之间允许重排。preferred processor 只是性能 hint，不建立线程亲和性或后续执行位置保证。程序不能用两个独立 wake 的观察顺序替代 channel、原子、Join 或其它同步。
 
 一次等待被成功唤醒，必须已经取得可被调度器消费的 runnable ownership，不能只保留在无人消费的 producer 私有暂存中。提交与挂起交接之间到达的完成通知必须被保留或重新发布，不能让已经完成的等待永久睡下；这不增加跨 producer 的顺序保证。
 
-runtime提供弱公平而非wall-clock时间片：只要进程继续运行、coroutine持续保持Runnable且没有违反`ForeignLeaf`/unsafe契约，它不能被持续产生的新local或remote工作永久排除。实现必须对`run_next`连续命中设限，周期性服务remote/injection，按round-robin检查分片，并在每个detached carry清空前阻止同shard的新head越过；这些service interval、batch size和窃取策略是内部性能schema，不是可观察的纳秒或调度次数承诺。
+runtime 提供弱公平而非 wall-clock 时间片：只要进程继续运行、协程持续保持 Runnable 且没有违反 `ForeignLeaf`/unsafe 契约，它不能被持续产生的新本地或远程工作永久排除。实现必须对本地队列的连续命中设限、周期性服务远程提交，并保证跨分片的检查进度；具体的 service interval、batch size 与窃取策略是内部性能 schema，不是可观察的纳秒或调度次数承诺。
 
-显式`yield`把当前coroutine放入普通local tail，使当时已有runnable至少获得一次被选择机会；它不承诺下一个执行者、全局FIFO或迁移到其它processor。动态降低parallelism时，Retiring processor上的ready、carry和timer必须完整转移，但它们与其它processor已有工作仍只有上述弱顺序。
+显式 `yield` 把当前协程放入本地就绪队列尾部，使当时已有 runnable 至少获得一次被选择机会；它不承诺下一个执行者、全局 FIFO 或迁移到其它逻辑处理器。动态降低 parallelism 时，正在退役的逻辑处理器上尚未运行的就绪工作、携带工作与计时器必须完整转移，但它们与其它逻辑处理器已有工作仍只有上述弱顺序。
 
 ## Channel
 
@@ -56,11 +56,37 @@ runtime提供弱公平而非wall-clock时间片：只要进程继续运行、cor
 - 在 `chan` 上阻塞只停当前协程，不长期占住承载它的操作系统线程；系统调用或 `ForeignBridge` 外调阻塞时，runtime 必须让其它线程继续利用可用逻辑处理器。`ForeignLeaf` 的 unsafe 契约禁止不可界定的阻塞；`DirtyCpu` 调用即使不等待也不占用逻辑处理器，但会消耗受限的 dirty CPU 执行额度。
 - `send` 与对应的 `recv`（含 `select` 选中的那对）建立 happens-before：发送方在 `send` 之前对载荷的写入，接收方在 `recv` 返回之后看得见。
 
+channel 生产者与消费者的用法：
+
+```gugu
+fn producer(jobs: chan[int]) {
+    for i in 0..8 {
+        jobs.send(i)
+    }
+    jobs.close()
+}
+
+fn consumer(jobs: chan[int]) {
+    loop {
+        match jobs.recv() {
+            Ok(job) => print(f"got {job}")
+            Err(_) => return
+        }
+    }
+}
+
+fn demo() {
+    let jobs = chan[int](4)
+    async producer(jobs)
+    consumer(jobs)
+}
+```
+
 互斥锁、读写锁、条件变量、原子、一次性初始化位于 `std.sync`，不是关键字。`Mutex` 与 `RwLock` 不 poisoning：持锁协程 panic 时 guard 仍释放，后续调用正常获得锁，受保护数据是否满足业务不变量由调用方负责。
 
 `std.sync.OnceLock[T]` 必须存在：
 
-```
+```text
 impl OnceLock[T] {
     fn new() OnceLock[T]
     fn get(self: &Self) Option[&T]
@@ -71,7 +97,7 @@ impl OnceLock[T] {
 
 `std.sync.Lazy[T]` 必须存在：
 
-```
+```text
 impl Lazy[T] {
     fn new[F: Fn() T](f: F) Lazy[T]
     fn get(self: &Self) &T
@@ -180,9 +206,9 @@ impl Condvar {
 }
 ```
 
-Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的普通 `&T`；`snapshot()` 和 `with_read` 只产生当前值的语义副本。`with_read_ref` 的 callback 参数是[函数与闭包](functions.md#scoped-borrowed-view-callback)定义的 `ScopedRead` view，只有读取权限且不能逃逸；它在读锁保持期间直接访问内部值，不复制 T。`with_write` 保持原有写入语义，callback 参数是普通锁守卫提供的可写 `&T`。若 T 含可变身份句柄，调用者仍须保证不会绕过锁并发写其载荷。守卫由 Adaptive Resource Leasing 管理：复制守卫共享同一次加锁的 ResourceCell，最后一个 lease 结束时自动解锁；显式 `unlock` 幂等并让所有副本立即观察已解锁状态。解锁后再 `get` / `snapshot` / `with_read_ref` / `wait` 是 panic。
+Gugu 的 `&T` 可写，因此读锁不能暴露内部槽的普通 `&T`；`snapshot()` 和 `with_read` 只产生当前值的语义副本。`with_read_ref` 的 callback 参数是[函数与闭包](functions.md#scoped-borrowed-view-callback)定义的 `ScopedRead` view，只有读取权限且不能逃逸；它在读锁保持期间直接访问内部值，不复制 T。`with_write` 保持原有写入语义，callback 参数是普通锁守卫提供的可写 `&T`。若 T 含可变身份句柄，调用者仍须保证不会绕过锁并发写其载荷。守卫由 Adaptive Resource Leasing 管理：复制守卫共享同一次加锁的 ResourceCell，最后一个租约结束时自动解锁；显式 `unlock` 幂等并让所有副本立即观察已解锁状态。解锁后再 `get` / `snapshot` / `with_read_ref` / `wait` 是 panic。
 
-`Atomic::new`、`Mutex::new`、`RwLock::new`、`Condvar::new` 都是 comptime 可求值构造，可用于普通 static 初始化。标准库为 MutexGuard、RwReadGuard、RwWriteGuard 提供否定 Clone impl；这禁止复制底层加锁动作，但不改变语言按值传递时共享同一 resource lease 的规则。
+`Atomic::new`、`Mutex::new`、`RwLock::new`、`Condvar::new` 都是 comptime 可求值构造，可用于普通 static 初始化。标准库为 MutexGuard、RwReadGuard、RwWriteGuard 提供否定 Clone impl；这禁止复制底层加锁动作，但不改变语言按值传递时共享同一资源租约的规则。
 
 守卫 `get` 得到的 `&T` 只允许在对应守卫仍处于已加锁状态时用于同步访问；`unlock` 后继续通过该引用读写属于未同步访问，若与其它访问形成竞争即未定义行为。`Condvar.wait` 释放锁期间不能使用先前取得的引用，返回并重新加锁后可重新获取。锁不提供 poisoning：受保护操作 panic 时 `with_*` 释放锁，但不标记数据是否满足应用不变量。
 

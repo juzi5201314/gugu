@@ -109,7 +109,7 @@ raw link 使用 per-domain secret 和 slot address 派生的编码，decode 时�
 
 需要同步结果的 GlobalRange 或 topology 操作使用稳定 operation record、固定 tag、标量参数、stable descriptor 和 response slot。combiner 可以合并有限数量的同类请求，但不能执行用户 closure、drop glue、await 或跨 safepoint 持锁。无争用路径保持单原子 fast path，有争用路径使用 owner inbox/MCS record 和平台 wait/wake。
 
-## 影响
+## 后果
 
 ### 正面影响
 
@@ -131,8 +131,13 @@ raw link 使用 per-domain secret 和 slot address 派生的编码，decode 时�
 - owner retire、generation、credit、forwarding、queue grace 和 GC lease 的交互增加验证负担；
 - radix mode 会增加转发 hop 和 metadata；只有 profile 证明 direct mode 成为热点时才启用；
 - 论文 benchmark 的 batch、cage、slab、credit 和 size class 参数不能外推到 Gugu；所有性能结论必须来自 release workload benchmark。
+
+## 实施状态
+
+按「后续实现约束」的顺序推进中：raw slab owner return、ResourceCell release、PlatformRange/extent、debt/pacing、TurnRegion、MarkTicket/MarkMailbox、EdgeDelta/block candidate、SharedHeap handle forwarding 已以编译契约与确定性参考模型形式落地；共享字段存储已接入屏障平面并完成 SharedHeap 转发闭环（提交 `83e3894`、`6de69ff`、`abe92d9`、`f2885a6`、`f17451b`、`a043620`）。尚未实现：GC block return 全链收尾、pointer compression、credit termination、radix profile、security profile 与 typed combining。验证按本 ADR 要求使用快速、进程内、确定性的测试替身，性能测量归入 benchmark。
  
-## 排除的替代方案
+## 替代方案
+
 1. **直接链接 snmalloc 或 snmalloc-rs**：违反 Gugu 闭世界 runtime 方向，并不能处理 Mosaic managed object 移动。
 2. **用 snmalloc free list 替换 LocalHeap Immix**：丢失 object-start、mark、card、forwarding、edge summary 和 exact root 不变量。
 3. **为每个 producer/owner 建立长期队列**：内存为 `O(P²)`，与 Gugu 的动态 processor 设计冲突。

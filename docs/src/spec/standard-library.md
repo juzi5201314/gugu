@@ -191,6 +191,21 @@ string 不支持单整数 `s[i]`，避免把 byte、Unicode scalar 和用户可�
 
 `+` 返回新 string；`+=` 修改左侧 string，并可以复用其 unique backing。string 字面量可以直接引用 sealed 只读镜像数据；第一次修改时分离。
 
+COW 值语义的用法：
+
+```gugu
+fn demo() {
+    let original = "gugu"
+    let copy = original
+    let modified = copy
+    modified.push('!')
+    // original 与 copy 仍是 "gugu"；修改 sealed backing 时分离
+    _ = original
+    _ = copy
+    _ = modified
+}
+```
+
 ## 不可变 `Bytes`
 
 `std.text.Bytes` 是不可变、可复制的 byte 快照值。它保存 backing、起始 offset 和长度；复制 Bytes 只共享不可变 backing。它不提供赋值下标、可写切片或转成可写 `&[byte]` 的安全接口。
@@ -347,24 +362,24 @@ HashMap/HashSet 使用 hashbrown/SwissTable 类的 control-byte group、SIMD loo
 
 默认 FoldHash 与 SipHash 输出都不是持久格式。`std.hash.XxHash3_64` 与 `XxHash3_128` 是算法命名的稳定非密码 hash；相同 byte 输入跨进程与工具链产生相同结果。它们只用于缓存键、测试、分片和非对抗内容摘要，不用于认证、签名或密码存储。
 
-## Adaptive Resource Leasing
+## Adaptive Resource Leasing {#adaptive-resource-leasing}
 
 File、socket、Child、管道、锁守卫以及第三方 FFI 的外部资源都使用同一套自适应资源租约。资源值可以正常赋值、传参、返回和存入容器，不产生 move 错误；所有副本共享一个 `ResourceCell` 和 open/closed 状态。
 
-ResourceCell 是 raw OS handle、open/closed与 lease的一份共享逻辑身份；物理 slab、计数器和 GC交接只见 [GC 元数据](../internals/gc-metadata.md)。其发布语义从仅创建协程可达单向变为 Shared：
+ResourceCell 是 raw OS handle、open/closed 状态与租约的一份共享逻辑身份；物理 slab、计数器和 GC 交接只见 [GC 元数据](../internals/gc-metadata.md)。其发布语义从仅创建协程可达单向变为 Shared：
 
-- 新 resource最初只由创建协程可达；写入 global、channel、async捕获或其它共享图时，发布操作先建立 happens-before，之后跨协程 lease复制与 release必须线程安全。
+- 新资源最初只由创建协程可达；写入 global、channel、async 捕获或其它共享图时，发布操作先建立 happens-before，之后跨协程租约复制与 release 必须线程安全。
 - 发布是单向语义状态；实现不能因对象后来只剩一个协程使用而撤销已经建立的共享同步。
-- 参数传递、最后使用和相邻 lease动作可以由实现合并，但不能改变 open/closed状态、happens-before或 release次数；当前算法见 [GIR/LIR](../internals/gir-lir.md)。
-- 最后一个可达 lease 结束时执行受限 release。显式 `close` 可以更早把共享状态原子地切到 closed。
+- 参数传递、最后使用和相邻租约动作可以由实现合并，但不能改变 open/closed 状态、happens-before 或 release 次数；当前算法见 [GIR/LIR](../internals/gir-lir.md)。
+- 最后一个可达租约结束时执行受限 release。显式 `close` 可以更早把共享状态原子地切到 closed。
 
 所有公开资源的 `close()` 必须幂等：第一次成功关闭底层资源，之后返回成功且不重复执行 release。关闭后的其它操作返回具体错误的 `Closed` 变体。自动 release 不能报告错误；需要观察 `flush`、`commit`、`shutdown` 或 `Child.wait` 结果的程序必须显式调用相应方法。
 
 `std.io` 提供组合式 I/O trait。可能阻塞的方法只挂起当前协程，runtime 通过有界 `BlockingBridge` admission 管理操作系统线程：没有 `BridgeCredit` 时不执行系统调用，调用方在等待队列中挂起；取得额度后才进入普通 `ForeignBridge`。`ForeignLeaf` 不得承载可能阻塞的 I/O，`ForeignBridge[DirtyCpu]` 不用于标准库文件操作。
 
-含 resource字段的 managed值仍按 Adaptive Resource Leasing保持一次性 release语义；collector物理移动不是语言复制，不能因此增加 lease。资源只藏在不可达 managed容器环中时，release可以延迟到 collector发现该环；普通局部最后 lease仍按[内存与对象模型](memory.md)结束。官方 descriptor与 resource arena实现见 [GC 元数据](../internals/gc-metadata.md)。
+含资源字段的受管值仍按 Adaptive Resource Leasing 保持一次性 release 语义；收集器物理移动不是语言复制，不能因此增加租约。资源只藏在不可达受管容器环中时，release 可以延迟到收集器发现该环；普通局部最后租约仍按[内存与对象模型](memory.md#adaptive-resource-leasing)结束。官方 descriptor 与 resource arena 实现见 [GC 元数据](../internals/gc-metadata.md)。
 
-`MaybeUninit`、union、transmute、arena批量释放和原始按位复制不能绕过 resource lease语义，具体限制见[unsafe 与 intrinsic](unsafe.md)和[内存与对象模型](memory.md)。
+`MaybeUninit`、union、transmute、arena 批量释放和原始按位复制不能绕过资源租约语义，具体限制见[unsafe 与 intrinsic](unsafe.md)和[内存与对象模型](memory.md)。
 
 ## I/O
 

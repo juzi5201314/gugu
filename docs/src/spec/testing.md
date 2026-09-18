@@ -16,7 +16,7 @@
 
 ## `#[test]`
 
-```
+```gugu
 #[test]
 fn adds() {
     std.test.assert(inc(1) == 2)
@@ -47,7 +47,7 @@ fn slow() { }
 
 `std.test` 必须存在，且带 `#[track_caller]`：
 
-```
+```text
 fn assert(cond: bool)
 fn assert_eq[T: Eq + Print](left: T, right: T)
 fn assert_ne[T: Eq + Print](left: T, right: T)
@@ -69,7 +69,7 @@ fn inc(i: int) int = i + 1
 
 规则：
 
-- 信息串为空或 `gg`：当作 Gugu 源，包进一个 `#[test]` 函数体。当前模块的公开项在作用域内（与在该模块里写测试相同）。
+- 信息串为空或 `gugu`：当作 Gugu 源，包进一个 `#[test]` 函数体。当前模块的公开项在作用域内（与在该模块里写测试相同）。
 - `ignore`：不编译为测试，仍是文档。
 - `text`、`ignore` 以外的未知信息串：不编译为测试。
 - 片段里若出现 `fn main()`，则改为编译成独立测试程序（仍链同一闭世界的 `std`），跑这个 `main`；`main` 返回或 `Result` 失败规则与 `#[test]` 相同。

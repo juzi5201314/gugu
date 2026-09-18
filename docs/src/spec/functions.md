@@ -1,5 +1,7 @@
 # 函数与闭包
 
+本章规定函数与闭包：一等函数身份、具名函数与闭包的语法、类型擦除与泛型 callable、捕获语义与调用边界。参数传递规则见[值、句柄与传递](passing.md)。
+
 ## 一等函数
 
 函数与闭包是值：可传、可返回、可进字段。可调用的是：具名函数、闭包、类型 `fn(T) U`。没有「可调用对象」体系。
@@ -20,14 +22,22 @@
 
 闭包是没有名字的函数字面量，语法与具名函数同一套，只是 `fn` 后面直接跟参数表。不用 `|x|`（和按位 `|` 打架，也多一套语法）。
 
-```
-let add = fn(x: int, y: int) int = x + y
-let add = fn(x: int, y: int) int { x + y }
+```gugu
+fn demo(n: int) {
+    let i = 0
+    let add = fn(x: int, y: int) int = x + y
+    let add2 = fn(x: int, y: int) int { x + y }
 
-let inc = fn(x: int) int = x + n     // 捕获外层 n，不用写捕获列表
-let tick = fn() { i += 1 }           // 省略返回类型 = ()
+    let inc = fn(x: int) int = x + n // 捕获外层 n，不用写捕获列表
+    let tick = fn() { i += 1 } // 省略返回类型 = ()
 
-let f = fn(x) = x + 1                // 参数/返回可从上下文推断
+    let f: fn(int) int = fn(x) = x + 1 // 参数/返回可从上下文推断
+    _ = add
+    _ = add2
+    _ = inc
+    _ = tick
+    _ = f
+}
 ```
 
 解析：`fn` 后若是标识符，是具名声明；若是 `(`，是闭包表达式。具名 `fn` 不能出现在函数体里。
@@ -51,7 +61,7 @@ let f = fn(x) = x + 1                // 参数/返回可从上下文推断
 
 类型位置**没有参数名**，返回类型仍在 `()` 后面用空格：
 
-```
+```text
 fn()                            // fn() ()
 fn() !
 fn() int
@@ -59,7 +69,7 @@ fn(int) int
 fn(int, string) bool
 ```
 
-```
+```gugu
 struct Handler {
     on_click: fn()
     map: fn(int) int
@@ -67,9 +77,12 @@ struct Handler {
 
 fn apply(f: fn(int) int, x: int) int = f(x)
 
-let h = Handler {
-    on_click: fn() { }
-    map: fn(x: int) int = x + 1
+fn demo() {
+    let h = Handler {
+        on_click: fn() { }
+        map: fn(x: int) int = x + 1
+    }
+    _ = h
 }
 ```
 
@@ -81,7 +94,9 @@ let h = Handler {
 
 `fn(T) U` 擦除具体 callable 类型；使用 `F: Fn(T) U` 则让泛型参数保留闭包或具名函数的具体类型。两种写法的调用结果相同，本规范不承诺某个调用一定内联：
 
-```
+```gugu
+fn inc(x: int) int = x + 1
+
 fn map[T, U, F: Fn(T) U](xs: &[T], f: F) Vec[U] {
     let out = Vec::new()
     for x in xs {
@@ -90,8 +105,12 @@ fn map[T, U, F: Fn(T) U](xs: &[T], f: F) Vec[U] {
     out
 }
 
-map(xs, fn(x: int) int = x + 1)   // F 是这个字面量的匿名类型
-map(xs, inc)                      // F 是具名函数的具体函数项类型
+fn demo(xs: &[int]) {
+    let a = map(xs, fn(x: int) int = x + 1) // F 是这个字面量的匿名类型
+    let b = map(xs, inc) // F 是具名函数的具体函数项类型
+    _ = a
+    _ = b
+}
 ```
 
 `Fn(T) U` 是编译器内建的可调用约束，不是用户自己 impl 的普通 trait。每个闭包匿名类型、每个匹配签名的具名函数、以及类型 `fn(T) U` 都满足对应的 `Fn`。没有 Rust 那种 `Fn` / `FnMut` / `FnOnce` 三分——捕获语义已经是共享可变 + GC，一种 `Fn` 就够。
@@ -100,9 +119,9 @@ map(xs, inc)                      // F 是具名函数的具体函数项类型
 
 ## 捕获语义 {#capture-semantics}
 
-用户不写捕获列表，也不处理生命周期错误。闭包可以读写外层绑定，效果像共享同一个可变位置（绑定默认可变）。闭包活多久，被它实际使用的外层状态就活多久；互相引用、送进 `async { }`、存进结构体都合法。实现不能把捕获分析失败变成 move、borrow、Clone或生命周期错误。
+用户不写捕获列表，也不处理生命周期错误。闭包可以读写外层绑定，效果像共享同一个可变位置（绑定默认可变）。闭包活多久，被它实际使用的外层状态就活多久；互相引用、送进 `async { }`、存进结构体都合法。实现不能把捕获分析失败变成 move、borrow、Clone 或生命周期错误。
 
-环境是否拆字段、拷入只读值、留在 stack、提升 managed storage、消除原子/屏障或共享槽，都属于 [AST/HIR](../internals/ast-hir.md)与 [GIR/LIR](../internals/gir-lir.md)；这些优化必须保持上述共享位置语义。
+环境是否拆字段、拷入只读值、留在栈上、提升为受管存储、消除原子/屏障或共享槽，都属于 [AST/HIR](../internals/ast-hir.md) 与 [GIR/LIR](../internals/gir-lir.md)；这些优化必须保持上述共享位置语义。
 
 ## UFCS
 
@@ -114,9 +133,9 @@ map(xs, inc)                      // F 是具名函数的具体函数项类型
 
 ## Scoped borrowed view callback {#scoped-borrowed-view-callback}
 
-标准库的 `with_ref`、`with_read_ref` 与 `for_each_ref` 使用 compiler-owned 的 scoped view callback。它们的 callback 参数在源码层可以写作 `&T`，但 HIR 额外标记为 `ScopedRead` view，不等同于普通可写引用；实现必须在 GIR 中保留该访问模式。`ScopedRead` 只允许在 callback 动态 extent 内读取或向已登记的无逃逸 helper 传递，不能写入、存入任何外部槽、作为返回值、跨协程发布或转换为 raw pointer。需要修改值的 API必须显式声明 `ScopedWrite`，不能借用只读 view 的类型检查空缺。
+标准库的 `with_ref`、`with_read_ref` 与 `for_each_ref` 使用 compiler-owned 的 scoped view callback。它们的 callback 参数在源码层可以写作 `&T`，但 HIR 额外标记为 `ScopedRead` view，不等同于普通可写引用；实现必须在 GIR 中保留该访问模式。`ScopedRead` 只允许在 callback 动态 extent 内读取或向已登记的无逃逸 helper 传递，不能写入、存入任何外部槽、作为返回值、跨协程发布或转换为 raw pointer。需要修改值的 API 必须显式声明 `ScopedWrite`，不能借用只读 view 的类型检查空缺。
 
-scoped callback 必须是同步调用：其 body、可达的静态 callee 和 compiler intrinsic 不能 `suspend`、`await`、`yield`、进入 `select`、执行可能挂起的锁/I/O/foreign bridge 或把 view 传给无法证明 no-escape 的动态调用。callback 可以触发普通 safepoint；runtime 会通过 view token 注册临时 root/epoch并在 backing relocation 后修正 view。callback 正常返回或 panic 展开时 token 必须闭合，未闭合或逃逸是 compiler internal error，不能降级成普通 `&T`。
+scoped callback 必须是同步调用：其 body、可达的静态 callee 和 compiler intrinsic 不能 `suspend`、`await`、`yield`、进入 `select`、执行可能挂起的锁/I/O/foreign bridge 或把 view 传给无法证明 no-escape 的动态调用。callback 可以触发普通 safepoint；runtime 会通过 view token 注册临时 root/epoch并在 backing relocation 后修正 view。callback 正常返回或 panic 展开时 token 必须闭合，未闭合或逃逸是编译器内部错误，不能降级成普通 `&T`。
 
 ## 调用边界与捕获身份
 

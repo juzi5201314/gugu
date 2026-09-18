@@ -1,5 +1,7 @@
 # 词法结构
 
+本章规定 Gugu 源文件的词法结构：源编码、空白与续行、注释、属性、标识符、关键字、字面量、记号与词法诊断。短语级产生式与整体文法见[形式语法](syntax.md)，规范排版见[格式化与代码风格](format-style.md)。
+
 源文件是 UTF-8。BOM 必须被拒绝。
 
 ## 空白与换行
@@ -8,7 +10,7 @@
 
 语句之间不写分号。换行结束一条语句，除非该行在词法上未完成。行末记号属于下列集合则必须续行：二元运算符、`(`、`[`、`{`、`,`、`.`、`::`、`..`、`:`、`=`、`=>`、`?`。该规则适用于一切「换行否则结束语句」的上下文，包括 `match` 臂、`let` 右值、调用实参、数组字面量。因此下列各是一条语句：
 
-```
+```text
 let xs = [
     1, 2,
 ]
@@ -33,17 +35,35 @@ foo()?
 - `//!` 到行末：模块级文档，附着在当前文件模块上。
 - `/* ... */`：块注释，可嵌套。文档块注释不另设语法。
 
+```gugu
+//! 模块级文档。
+
+/// 加一。
+///
+/// 调用 `inc(1)` 得到 `2`。
+fn inc(i: int) int = i + 1
+
+// 普通注释，到行末。
+/* 块注释可以
+   /* 嵌套 */ 书写。 */
+fn zero() int = 0
+```
+
 文档注释必须进入 AST。
 
 ## 属性
 
-```
+```gugu
 #[inline]
-#[repr(C)]
-#[derive(Clone, Eq)]
-#[cfg(os = "linux")]
 #[must_use]
 pub fn bar() string = "bar"
+
+#[repr(C, align(8))]
+#[derive(Clone, Eq)]
+struct Point { x: int, y: int }
+
+#[cfg(all(not(test), os = "linux"))]
+fn linux_only() {}
 ```
 
 - `#[]` 附着在其后的声明或表达式上。记号是 `#` 后接 `[...]`。
@@ -197,6 +217,49 @@ lint 级别只由 `allow`、`warn`、`deny`、`forbid` 的参数列表决定。`
 
 - 数组：`[1, 2, 3]`；重复 `[x; N]`（`N` 必须 comptime）
 - 元组：`(1, "a")`；`()` 是 unit；单元素必须 `(x,)`
+
+各字面量形式在同一文件中的书写示例：
+
+```gugu
+fn literals() {
+    let decimal = 1_000_000
+    let hex = 0xFF
+    let binary = 0b1010
+    let octal = 0o755
+    let ratio = 3.14
+    let tiny = 1e-9
+    let flag = true
+    let glyph = 'A'
+    let emoji = '\u{1F600}'
+    let escaped = "hi\n"
+    let cooked = f"hello {glyph} and {decimal:08x}"
+    let raw_text = raw"plain"
+    let bytes = b"xy\x00"
+    let one = b'x'
+    let c_string = c"ok"
+    let array = [1, 2, 3]
+    let repeated = [7; 8]
+    let pair = (1, "a")
+    _ = decimal
+    _ = hex
+    _ = binary
+    _ = octal
+    _ = ratio
+    _ = tiny
+    _ = flag
+    _ = glyph
+    _ = emoji
+    _ = escaped
+    _ = cooked
+    _ = raw_text
+    _ = bytes
+    _ = one
+    _ = c_string
+    _ = array
+    _ = repeated
+    _ = pair
+}
+```
 
 ## 记号
 

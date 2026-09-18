@@ -1,10 +1,12 @@
 # 接口、实现与特化
 
+本章规定 trait、impl、运算符重载、约束、特化与否定 impl。方法与关联函数的路径解析见[函数与闭包](functions.md)，`dyn Trait` 的形成条件见[类型系统](types.md)。
+
 没有类、没有继承、没有可覆盖的槽。多态是：单态化泛型、枚举、闭包、以及显式的 `dyn Trait`。
 
 ## `trait`
 
-```
+```gugu
 trait Add[Rhs] {
     type Output
     fn add(self, rhs: Rhs) Self::Output
@@ -58,7 +60,7 @@ trait Print {
 
 ### `IntoIter` / `Iter`
 
-```
+```gugu
 trait IntoIter {
     type Item
     type Iter
@@ -77,7 +79,7 @@ trait Iter {
 
 ### `Try` {#try}
 
-```
+```gugu
 trait Try {
     type Value
     type Error
@@ -95,7 +97,7 @@ trait Try {
 
 ### `Index`
 
-```
+```gugu
 trait Index {
     type Output
     fn index(self: &Self, i: int) Output
@@ -109,25 +111,25 @@ trait Index {
 
 `Fn(T) U` 见 [函数](functions.md)，不能用户 `impl`。`Any` 见下，同样不能用户 `impl`。
 
-```
+```gugu
 trait Eq {
     fn eq(self: &Self, other: &Self) bool
 }
 
 trait Ord {
-    fn cmp(self: &Self, other: &Self) int  // <0 / 0 / >0
+    fn cmp(self: &Self, other: &Self) int // <0 / 0 / >0
 }
 ```
 
 `Hash` 把值的语义字段馈送给调用方选择的 hasher；相等值必须产生相同输入。`StableHash` 与 `StableOrd` 是没有方法的 unsafe marker trait：前者承诺该值副本的 Eq 与 Hash 可观察结果不能通过外部别名改变，后者对 Ord 作同一承诺。它们不使用 trait 继承；集合约束分别显式写成 `K: Eq + Hash + StableHash` 与 `K: Ord + StableOrd`。
 
-编译器为标量、按 byte 比较的 string/Bytes/Path 和其它内建不可变值提供 marker impl。`#[derive(StableHash)]` 要求本类型同时 derive Eq 与 Hash 且每个参与字段都实现 StableHash；`#[derive(StableOrd)]` 对称地要求 Ord 与 StableOrd。COW 字段在复制进键槽时封存 backing。含可变身份句柄或 resource 字段的类型不能安全 derive；若其 Eq/Hash/Ord 只观察不会变化的身份或其它稳定状态，作者可以显式承担 unsafe impl 契约。
+编译器为标量、按 byte 比较的 string/Bytes/Path 和其它内建不可变值提供 marker impl。`#[derive(StableHash)]` 要求本类型同时 derive Eq 与 Hash 且每个参与字段都实现 StableHash；`#[derive(StableOrd)]` 对称地要求 Ord 与 StableOrd。COW 字段在复制进键槽时封存 backing。含可变身份句柄或资源字段的类型不能安全 derive；若其 Eq/Hash/Ord 只观察不会变化的身份或其它稳定状态，作者可以显式承担 unsafe impl 契约。
 
 `==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Clone)]` / `#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Hash)]` / `#[derive(Print)]` 要求所有参与字段都实现对应 trait；稳定键 marker 的额外派生约束见上。`Ord` 必须是全序，Hash 必须与 Eq 一致。`float` 的比较是内置 IEEE，语言不提供 `Ord`、`Hash` 或稳定键 marker；用户也不能给 `float` 写固有 impl（固有 impl 只能写在该类型的定义模块）。含浮点字段不能派生 Eq、Ord、Hash 或稳定键 marker。`TypeId` 的比较由编译器按编号直接做，并提供 Eq、Ord、Hash、StableHash 与 StableOrd。数组与元组：编译器生成适用的 Clone、Eq、Ord、Hash、StableHash、StableOrd 与 Print（元素满足约束时）。`Clone` 见 [传递](passing.md)。
 
 ### `Any`
 
-```
+```gugu
 trait Any {
     fn type_of(self: &Self) TypeId
 }
@@ -137,7 +139,7 @@ trait Any {
 
 ## `impl`
 
-```
+```text
 impl Point {
     fn origin() Point = Point { x: 0, y: 0 }
     fn len(self) float = ...
@@ -172,7 +174,7 @@ impl Vec[T] {
 
 `self` 的类型可以写 `self`、`self: Point`、`self: &Point`。按值 `self` 拷贝接收者；`&Point` 按引用。句柄类型（`Vec`）的方法接 `self` 就是拷贝句柄，能 `push` 到同一块载荷。大位结构体应接 `&Self`。
 
-```
+```text
 impl Dim for [int; 4] {
     const N = 4
 }
@@ -193,7 +195,7 @@ impl Print for Foo[string] {
 
 ## 约束
 
-```
+```gugu
 fn dump[T: Print](x: T) {
     let buf = Vec::new()
     x.print(&buf)
@@ -208,7 +210,7 @@ fn dump[T: Print](x: T) {
 
 允许重叠 impl，用**最具体者获胜**：
 
-```
+```text
 impl Bar for Foo[T] { ... }
 impl Bar for Foo[string] { ... }
 ```
@@ -228,7 +230,7 @@ impl Bar for Foo[string] { ... }
 
 ## 否定 impl
 
-```
+```gugu
 impl !Clone for chan[T] {}
 impl !Clone for Join[T] {}
 ```

@@ -1,17 +1,22 @@
 # 表达式与语句
 
+本章规定表达式与语句的形式和求值规则：控制流、运算符优先级与结合、求值顺序、`defer`、`async` 与 channel 操作。各表达式的类型规则见[类型系统](types.md)，控制流中使用的模式见[模式](patterns.md)。
+
 块用 `{` `}`。条件不用括号。`if`、`match`、`try`、块都是**表达式**：有 `else` 时分支类型必须一致，或一臂是 `!`（见 [类型 · never](types.md)）；块的值是最后一条表达式。若最后一条是声明、赋值、`defer`、循环，块类型为 `()`。`return` / `break` / `continue` 是类型为 `!` 的表达式。`if` 的条件是 let 链，见下。
 `comptime source { ... }` 是编译期源码展开节点；在表达式位置生成的片段必须是一个表达式，展开后重新进入主前端。它不执行生成表达式的运行时操作，完整规则见[编译期执行](comptime.md)。
 
 控制流头部的最外层 `{` 开始其 body，因此直接在 `if`/`while` 条件、`match` 被匹配值或 `for` 迭代值中使用记录构造时，需要用括号消歧，例如 `for x in (Counter {}) { ... }`。括号、调用实参和下标等嵌套分隔范围内没有这一歧义，允许正常书写记录构造。
 
-```
-let x = if i <= 1 {
-    print(f"i = {i}")
-    i
-} else {
-    io2.eprint("err")
-    -1
+```gugu
+fn demo(i: int) {
+    let x = if i <= 1 {
+        print(f"i = {i}")
+        i
+    } else {
+        io2.eprint("err")
+        -1
+    }
+    _ = x
 }
 ```
 
@@ -29,27 +34,39 @@ let x = if i <= 1 {
 
 模式、穷尽性、or / `@` / rest / 范围见 [模式](patterns.md)。`if` / `while` 的条件是 **let 链**，不只是 `bool`。
 
-```
-let n = match r {
-    Ok(v) => v
-    Err(_) => 0
-}
+```gugu
+fn demo(
+    r: Result[int, string],
+    a: Result[int, string],
+    b: Result[int, string],
+    ready: bool,
+    opt: Option[int],
+) {
+    let n = match r {
+        Ok(v) => v
+        Err(_) => 0
+    }
 
-let n = r.match {
-    Ok(v) => v
-    Err(_) => 0
-}
+    let m = r.match {
+        Ok(v) => v
+        Err(_) => 0
+    }
 
-if let Ok(x) = a && let Ok(y) = b && x > y {
-    use(x, y)
-}
+    if let Ok(x) = a && let Ok(y) = b && x > y {
+        _ = x
+        _ = y
+    }
 
-if ready && let Some(v) = opt {
-    use(v)
-}
+    if ready && let Some(v) = opt {
+        _ = v
+    }
 
-let Ok(v) = r else {
-    return
+    let Ok(v) = r else {
+        return
+    }
+    _ = n
+    _ = m
+    _ = v
 }
 ```
 
@@ -62,10 +79,13 @@ let Ok(v) = r else {
 
 `try { ... }` 是表达式。块里的 `?` 把失败交给这个块，而不是 `return` 出函数。
 
-```
-let r = try {
-    let f = open("a")?
-    f.read_i64()?
+```gugu
+fn demo() {
+    let r = try {
+        let f = open("a")?
+        f.read_i64()?
+    }
+    _ = r
 }
 ```
 
@@ -78,7 +98,7 @@ let r = try {
 
 ## 循环
 
-```
+```text
 while cond { ... }
 
 loop { ... }
@@ -101,16 +121,18 @@ while let Some(x) = it.next() { ... }
 
 ## `defer` {#defer}
 
-```
-defer f.close()
-defer {
-    a()
-    b()
-}
-defer ret f.close()
-defer ret {
-    a()
-    b()
+```gugu
+fn demo(f: File) {
+    defer f.close()
+    defer {
+        a()
+        b()
+    }
+    defer ret f.close()
+    defer ret {
+        a()
+        b()
+    }
 }
 ```
 
@@ -161,7 +183,7 @@ defer ret {
 
 齐次变参：
 
-```
+```gugu
 fn sum(...xs: &[int]) int {
     let s = 0
     for x in xs {
@@ -170,14 +192,16 @@ fn sum(...xs: &[int]) int {
     s
 }
 
-sum(1, 2, 3)
+fn demo() int {
+    sum(1, 2, 3)
+}
 ```
 
 实参被物化为切片（可能在栈上）。变参绑定的类型是 `&[T]`。
 
 异构变参（`println("i + 1 = ", inc(i), bar())` 各参数类型不同）不能写成 `...args: &[T]`。它必须是**泛型参数包**，在调用点单态化：
 
-```
+```text
 fn println[Ts: Print...](...args: Ts)
 ```
 
@@ -191,7 +215,7 @@ fn println[Ts: Print...](...args: Ts)
 
 操作数必须实现 `Try`。出口是最内层 `try`，否则最内层函数/闭包，见 [接口 · Try](traits.md)。
 
-```
+```gugu
 fn load() Result[int, IoError] {
     let f = open("a")?
     Ok(f.read_i64()?)
@@ -202,10 +226,13 @@ fn load() Result[int, IoError] {
 
 `async` **不是** Rust/JS 那种把函数变成 Future、需要 `.await` 传染的关键字。任意普通 `fn` 里都可以 `recv` / `wait`。`async` 只表示：**把后面这块工作放到新协程上跑**。
 
-```
-async f(x)
-let h = async { inc(i) }
-let r = h.wait()
+```gugu
+fn demo(i: int) {
+    async f(i)
+    let h = async { inc(i) }
+    let r = h.wait()
+    _ = r
+}
 ```
 
 - `async` 的操作数只是**紧随其后的一次调用或一个块**。`async f(x).wait()` 解析为 `(async f(x)).wait()`，不是 `async (f(x).wait())`。
@@ -219,15 +246,17 @@ let r = h.wait()
 
 `chan[T]` 的发送/接收是编译器认识的方法，不能由用户重载：
 
-```
-ch.send(x)
-let r = ch.recv()
-ch.close()
-select {
-    ch.send(x) => ...
-    let r = ch.recv() => ...
-    let r = h.wait() => ...
-    _ => ...
+```gugu
+fn demo(ch: chan[int], h: Join[int], x: int) {
+    ch.send(x)
+    let r = ch.recv()
+    ch.close()
+    select {
+        ch.send(x) => print("sent")
+        let r = ch.recv() => print("got")
+        let r = h.wait() => print("done")
+        _ => print("default")
+    }
 }
 ```
 
@@ -238,7 +267,7 @@ select {
 - 不存在 nil channel。未初始化的 `let c: chan[int]` 不能读：与其它绑定相同，读取未初始化是编译错误，见 [声明 · let](declarations.md)。
 - 进入 `select` 时：先求值每个分支的 channel 表达式以及 `send` 的载荷，再等待。未选中的分支**不发送、不接收**；载荷表达式的副作用已经发生。
 - `select` 是表达式。所有分支（含 `_`）的体类型必须一致（`!` 可与另一臂合流），该类型即 `select` 的类型。当语句用时体为 `()`。
-- `select` 的分支只能是 channel 的 `send` / `recv`，以及 `Join` 的 `wait()`。`try_send` / `try_recv` 不进 `select`。就绪分支随机公平；`_` 是默认、不阻塞。无就绪且无默认则挂起当前协程。
+- `select` 的分支只能是 channel 的 `send` / `recv`，以及 `Join` 的 `wait()`。`try_send` / `try_recv` 不进 `select`。就绪分支随机公平，公平性与线性化语义由[并发与调度](concurrency.md)约束；`_` 是默认、不阻塞。无就绪且无默认则挂起当前协程。
 
 ## 优先级（从紧到松）
 
@@ -262,7 +291,7 @@ select {
 
 除短路逻辑外，求值顺序固定为从左到右：先求值调用目标，再依次求值实参；先求值二元运算符左操作数，再求值右操作数；先确定字段/下标的接收者，再求值下标；数组、元组、结构体和枚举的成员表达式按书写顺序求值。操作数求值完成后才执行运算、调用或构造。`&&` 在左侧为 `false` 时不求值右侧，`||` 在左侧为 `true` 时不求值右侧。
 
-赋值先求值左侧 place 的定位信息，再求值右侧表达式，最后执行一次写入；定位信息只保存语义槽或句柄，不重复求值接收者和下标。复合赋值等价于读取左值一次、求值右值一次、执行对应运算并写回一次，因此 `a[i] += f()` 不会重复计算 `a` 或 `i`。把安全引用写入 managed 值必须保持其目标可达；具体屏障见[GC 元数据](../internals/gc-metadata.md)。
+赋值先求值左侧 place 的定位信息，再求值右侧表达式，最后执行一次写入；定位信息只保存语义槽或句柄，不重复求值接收者和下标。复合赋值等价于读取左值一次、求值右值一次、执行对应运算并写回一次，因此 `a[i] += f()` 不会重复计算 `a` 或 `i`。把安全引用写入受管值必须保持其目标可达；具体屏障见[GC 元数据](../internals/gc-metadata.md)。
 
 函数调用的所有实参在进入被调用函数前完成求值。调用期间发生的 panic 不会执行尚未开始的调用体，但已经完成的实参副作用保留。trait 运算符、方法和内置运算都遵守同一顺序；静态分发、内联和检查消除不能改变顺序或可观察副作用。
 

@@ -1,5 +1,7 @@
 # 类型系统
 
+本章规定 Gugu 的类型系统：类型的书写与良构、内置标量、复合类型、泛型写法、`impl Trait`、接口对象、闭世界类型身份、布局与推断转换规则。类型的模式交互见[模式](patterns.md)，方法与调用解析见[接口、实现与特化](traits.md)。
+
 ## 原则
 
 1. 类型在编译期健全。没有 `any`，没有未检查的安全强制转换。
@@ -41,13 +43,21 @@
 
 `[]` 参数表可以混写类型参数与 `comptime` 参数，适用于 `fn`、`struct`、`enum`、`union`、`trait`、`impl`、`type`：
 
-```
+```gugu
 struct Block[T, comptime N: int] {
     data: [T; N]
 }
+```
 
+```gugu
 impl[T: Clone, comptime N: int] Clone for [T; N] {
-    fn clone(self: &Self) [T; N] { ... }
+    fn clone(self: &Self) [T; N] {
+        let out: [T; N]
+        for i in 0..N {
+            out[i] = self[i].clone()
+        }
+        out
+    }
 }
 ```
 
@@ -96,7 +106,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 ## 引用 `&T`
 
-共享写成显式 `&T`。传递规则（`f(x)` 产生语义副本、`f(&x)` 引用槽、身份/COW/resource 句柄）见[值、句柄与传递](passing.md)。
+共享写成显式 `&T`。传递规则（`f(x)` 产生语义副本、`f(&x)` 引用槽、身份/资源/COW 句柄）见[值、句柄与传递](passing.md)。
 
 - `&T` 是指向某个绑定或字段槽的引用，永不为空。拷贝 `&T` 只拷地址。
 - 绑定默认可变，通过 `&T` 可以改槽里的 `T`（没有单独的 `&mut T`）。
@@ -110,7 +120,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 `len()`、capacity、range 与修改位置都按 byte 计。string 不支持单整数 `s[i]`；读取使用 `byte_at` / `char_at` 或迭代器。`s[a..b]` 等 range 返回 O(1) COW 快照，端点必须位于 UTF-8 scalar 边界，否则 panic。`==`、顺序与 Hash 按原始 UTF-8 byte 序列工作，不隐式 normalization。
 
-`+` 返回新 string；`+=` 修改左侧而不改变其它 string值。完整固有接口、`Bytes` 快照与 COW值语义见[标准库 · 可变 COW string](standard-library.md#mutable-cow-string)；backing复用和管理动作只见 [GIR/LIR](../internals/gir-lir.md)。
+`+` 返回新 string；`+=` 修改左侧而不改变其它 string 值。完整固有接口、`Bytes` 快照与 COW 值语义见[标准库 · 可变 COW string](standard-library.md#mutable-cow-string)；backing 复用和管理动作只见 [GIR/LIR](../internals/gir-lir.md)。
 
 ## 元组、数组、切片
 
@@ -154,7 +164,7 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 
 除具名字段结构体外，允许**恰好一个字段**的元组结构体（newtype）。多字段禁止位置构造（避免和函数调用、元组变体混淆）。
 
-```
+```gugu
 struct Point {
     pub x: int
     pub y: int
@@ -190,7 +200,7 @@ enum Option[T] {
 
 类型位置写成 `fn(参数类型列表) 返回类型`，没有参数名，返回类型在 `()` 后用空格，与具名函数同一套：
 
-```
+```text
 fn(int) int
 fn(int, string) bool
 fn()                 // 即 fn() ()
@@ -200,9 +210,9 @@ fn() !
 闭包字面量（表达式）是 `fn(x: int) int { ... }`，见 [函数与闭包](functions.md)。
 
 - 每个闭包字面量有**独特匿名类型**并实现对应的 `Fn(T) U`。
-- 写成类型 `fn(T) U` 会擦除具体 callable类型；该值是句柄，拷贝后继续共享同一环境。物理调用与内部表示不构成优化保证。
+- 写成类型 `fn(T) U` 会擦除具体 callable 类型；该值是句柄，拷贝后继续共享同一环境。物理调用与内部表示不构成优化保证。
 - 具名函数与闭包都可强制成 `fn(T) U`。
-- 需要保留 callable具体类型时使用泛型约束 `F: Fn(T) U`；只有明确要擦除类型时才把参数写成 `fn(T) U`。
+- 需要保留 callable 具体类型时使用泛型约束 `F: Fn(T) U`；只有明确要擦除类型时才把参数写成 `fn(T) U`。
 - 无捕获的具体函数项或闭包可以使用零大小表示；需要环境的闭包必须保留共享环境身份。擦除成 `fn(T) U` 后始终遵守函数句柄的复制与调用规则，不能把返回 `!` 的强制推广成参数位置的类型转换。
 - 不想写出类型参数名时用 `impl Trait`，见下。
 
@@ -228,7 +238,7 @@ fn() !
 - 禁止：`extern "C"` 签名、`union` 字段、`dyn impl Print`、`impl Trait` 当 `chan`/`Vec` 的类型实参（必须先 TAIT 起名）。
 - 与 `dyn Trait` 对照：`impl` 单态、零虚表；`dyn` 擦除、胖指针。不要混。
 
-```
+```gugu
 fn twice(f: impl Fn(int) int, x: int) int = f(f(x))
 
 type Cmp = impl Fn(int, int) bool
@@ -253,7 +263,7 @@ fn make_cmp() Cmp = fn(a, b) = a < b
 
 关键字构造器（与 `size_of` 相同，不是下标）：
 
-```
+```text
 type_id[T]()          // T 已知后形成符号化 TypeId；稠密编号在 type universe 冻结后物化
 type_id_count()       // int；late comptime 常量
 ```
@@ -282,7 +292,7 @@ type_id_count()       // int；late comptime 常量
 `TypeId` 的 `==` / `!=` / 序比较由编译器按类型身份或冻结后的编号直接实现，并实现
 `Eq`、`Ord`、`Print`（打印规范类型名）。固有方法：
 
-```
+```text
 fn as_int(self) int          // 运行时为普通读取；comptime 调用属于 late comptime
 fn name(self) string         // 规范类型名；comptime TypeId 可早期求值
 ```
@@ -295,7 +305,7 @@ fn name(self) string         // 规范类型名；comptime TypeId 可早期求�
 
 `Any` 是 lang trait（编译器按名字挂钩的 trait，见 [概述 · 术语](overview.md#terminology)），**不能有泛型方法**（否则不能 `dyn`）。用户不能声明、不能手写 `impl Any`，也不能 `impl !Any` 挖掉语言生成的肯定 impl。语言自己写：
 
-```
+```text
 trait Any {
     fn type_of(self: &Self) TypeId
 }
@@ -306,13 +316,13 @@ impl !Any for MaybeUninit[T] {}
 
 其余拥有 `TypeId` 的类型由编译器生成 `impl Any`：`type_of` 就是 `type_id[Self]()`。方法名不能叫 `type_id`，那是关键字。
 
-`dyn Any` 合法。把 `x: T`（`T: Any`）强制成 `dyn Any` 会建立一个保存 T 语义副本的擦除容器：身份句柄继续共享身份，string/COW值完成相应封存，resource字段取得由容器持有的 lease。因此 `dyn Print` 再进 `dyn Any` 后，downcast只能回到 `dyn Print`，不能穿过接口对象猜到原来的 Point。
+`dyn Any` 合法。把 `x: T`（`T: Any`）强制成 `dyn Any` 会建立一个保存 T 语义副本的擦除容器：身份句柄继续共享身份，string/COW 值完成相应封存，资源字段取得由容器持有的 lease。因此 `dyn Print` 再进 `dyn Any` 后，downcast 只能回到 `dyn Print`，不能穿过接口对象猜到原来的 Point。
 
-若 x 已经是 `dyn Any`，强制只复制同一擦除句柄，不再嵌套第二层容器。纯 ZST同样可以进入 `dyn Any`，但没有可观察 payload地址或额外身份。
+若 x 已经是 `dyn Any`，强制只复制同一擦除句柄，不再嵌套第二层容器。纯 ZST 同样可以进入 `dyn Any`，但没有可观察 payload 地址或额外身份。
 
 泛型方法不能放进 `Any` trait。语言给类型 `dyn Any` 写固有 impl（不能用户重载）：
 
-```
+```text
 impl dyn Any {
     fn is[T: Any](self: &Self) bool
     fn downcast[T: Any](self: &Self) Option[&T]
@@ -320,16 +330,18 @@ impl dyn Any {
 }
 ```
 
-三者比较容器记录的 `TypeId` 与 `type_id[T]()`。相等则 `downcast` 的 `&T` 指向容器保存的 T槽，`downcast_copy` 按 T 的值语义产生副本；不等则 `None`，不 panic。只要该引用或 `dyn Any` 句柄仍存活，容器和槽就保持有效。
+三者比较容器记录的 `TypeId` 与 `type_id[T]()`。相等则 `downcast` 的 `&T` 指向容器保存的 T 槽，`downcast_copy` 按 T 的值语义产生副本；不等则 `None`，不 panic。只要该引用或 `dyn Any` 句柄仍存活，容器和槽就保持有效。
 
 恢复接口类型同样只做精确类型匹配：若容器保存的就是 `dyn Print`，可以取回 `dyn Print`；不能把保存的 `Point` 或另一个接口对象临时转换成 `dyn Print`。要接口对象，应在放入容器前显式按 `dyn Print` 擦除。
 
-```
-let a: dyn Any = Point { x: 1, y: 2 }
-if let Some(p) = a.downcast::[Point]() {
-    p.x += 1
+```gugu
+fn demo(a: dyn Any) {
+    if let Some(p) = a.downcast::[Point]() {
+        p.x += 1
+    }
+    let q: Option[&Point] = a.downcast() // 靠期望类型推断 T
+    _ = q
 }
-let q: Option[&Point] = a.downcast()   // 靠期望类型推断 T
 ```
 
 方法上的显式类型实参必须写 `::[T]`（值后面的 `[]` 是下标）。能推出来就不写。
@@ -372,7 +384,7 @@ GC 堆对象可以有用户不可见的头；`#[repr(C)]` 的 FFI 结构体默�
 
 下列语言关键字构造按各自阶段执行；`T` 与字段名必须在早期已知，`type_id_count()` 按上述 late comptime 规则求值：
 
-```
+```text
 size_of[T]()         // int，字节
 align_of[T]()        // int
 offset_of[T](field)  // int。具名字段写标识符；newtype / 元组写 `0`

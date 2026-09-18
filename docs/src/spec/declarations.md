@@ -1,5 +1,7 @@
 # 声明与模块
 
+本章规定模块树、可见性、`use` 与各项声明的形式，以及名称解析与初始化顺序。类型层面的声明规则见[类型系统](types.md)，trait 与 impl 见[接口、实现与特化](traits.md)。
+
 ## 模块
 
 一个 `.gg` 文件是一个模块，模块名是去掉 `.gg` 的文件名。
@@ -18,7 +20,7 @@
 
 ## `use`
 
-```
+```gugu
 use green
 use green.{bar}
 use std.io.{print, println}
@@ -37,16 +39,25 @@ use std.io as io2
 
 ## `let`
 
-```
-let i = 0
-let i: int = 0
-let i: int
-i = 1
+```gugu
+fn demo(pair: (int, int), p: Point, r: Result[int, string]) {
+    let i = 0
+    let i: int = 0
+    let j: int
+    j = 1
 
-let (a, b) = pair
-let Point { x, y } = p
-let Ok(v) = r else {
-    return
+    let (a, b) = pair
+    let Point { x, y } = p
+    let Ok(v) = r else {
+        return
+    }
+    _ = i
+    _ = j
+    _ = a
+    _ = b
+    _ = x
+    _ = y
+    _ = v
 }
 ```
 
@@ -60,7 +71,7 @@ let Ok(v) = r else {
 
 ## 函数
 
-```
+```text
 fn main() {
     ...
 }
@@ -94,11 +105,11 @@ fn println[Ts: Print...](...args: Ts) { ... }
 
 禁止函数按签名重载。方法上的额外类型参数写在名字后面：`fn convert[U](self) U`。
 
-`#[track_caller]`、`#[must_use]`、`#[naked]`、`#[cfg]` 和 FFI 调用属性见 [词法 · 属性](lexical.md) 与 [unsafe 与 intrinsic](unsafe.md)。用户态 `#[naked]` 函数必须是 `unsafe extern "C" fn`，体只能是一次 `asm(...)` 调用；从 managed context 调用时默认进入 `ForeignBridge[DirtyCpu]`。
+`#[track_caller]`、`#[must_use]`、`#[naked]`、`#[cfg]` 和 FFI 调用属性见 [词法 · 属性](lexical.md) 与 [unsafe 与 intrinsic](unsafe.md)。用户态 `#[naked]` 函数必须是 `unsafe extern "C" fn`，体只能是一次 `asm(...)` 调用；从受管上下文调用时默认进入 `ForeignBridge[DirtyCpu]`。
 
 ## 结构体、枚举、`const`、`type`、`static`
 
-```
+```gugu
 struct Point {
     pub x: int
     pub y: int
@@ -158,14 +169,23 @@ static COUNTER: int = 0
 
 ## 结构体与枚举的值
 
-```
-Point { x: 1, y: 2 }
-Point { x, y }              // 字段名与当前绑定同名的简写
-Result::Ok(1)
-Ok(1)                       // 预导入
-Some(p)
-None
-Shape::Rect { w: 1, h: 2 }
+```gugu
+fn demo(x: int, y: int, p: Point) {
+    let a = Point { x: 1, y: 2 }
+    let b = Point { x, y } // 字段名与当前绑定同名的简写
+    let c = Result::Ok(1)
+    let d = Ok(1) // 预导入
+    let e = Some(p)
+    let f = None
+    let g = Shape::Rect { w: 1, h: 2 }
+    _ = a
+    _ = b
+    _ = c
+    _ = d
+    _ = e
+    _ = f
+    _ = g
+}
 ```
 
 结构体字面量必须写字段名（禁止只按位置的 `Point(1, 2)`，以免和函数调用、元组式枚举变体混淆）。**单字段**元组结构体除外：`Meters(3)` 与元组变体同一形状。元组式变体用 `名字(值)`。结构体式变体用 `名字 { 字段: 值 }`。无字段结构体的值写成 `Empty {}`，也可以只写类型名 `Empty`（与 `None` 那种零元构造同一观感）。禁止 `Point { x: 1, ..p }` 这种结构体更新；要改副本就逐字段写，或 `clone` 再赋值。模式里的 `Point { x, .. }` 合法，见 [模式](patterns.md)。

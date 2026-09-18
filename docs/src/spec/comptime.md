@@ -30,7 +30,11 @@ fn repeat[T](comptime n: int, x: T) [T; n] {
 }
 
 const N: int = 4
-let xs = repeat(N, 1)
+
+fn demo() {
+    let xs = repeat(N, 1)
+    _ = xs
+}
 ```
 
 `repeat(N, 1)` 靠实参推断 `T`。要显式写类型实参时用 `repeat::[int](N, 1)`，禁止
@@ -123,7 +127,7 @@ fn generated_sum() int {
 这里的源码宏是 `let value = ...` 的初始化表达式，因此 `parse_source` 使用表达式 source
 slot。它返回 `Result[ParsedSource, SyntaxError]`；成功后初始化器自动展开为：
 
-```gugu
+```text
 let value = 1 + 2
 ```
 
@@ -258,14 +262,16 @@ unknown；unknown 不能删除运行时检查，也不能被当成 lint 错误�
 例如：
 
 ```gugu
-let n = 20
-let v = make_vec()
-if v.len() > 10 {
-    for i in 0..n {
-        if i >= 2 {
-            break
+fn demo() {
+    let n = 20
+    let v = make_vec()
+    if v.len() > 10 {
+        for i in 0..n {
+            if i >= 2 {
+                break
+            }
+            v[i]
         }
-        v[i]
     }
 }
 ```

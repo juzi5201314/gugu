@@ -4,6 +4,13 @@
 
 Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行时 `eval` 和开世界代码加载不属于本规范。实验性 JIT 只能作为同一闭世界程序的执行实现，不能扩大程序可见的函数、类型或 ABI；具体 compiler/runtime实现语言和 IR/后端结构见 [`internals/`](../internals/ast-hir.md)。
 
+```text
+gugu check main.gg
+gugu build main.gg
+```
+
+`check` 与 `build` 的完整命令行契约见[工具链与命令行](toolchain-cli.md)。
+
 ## 闭世界与全程序编译
 
 一次产生可执行文件或 C 导出库的编译必须看见全部可达的 Gugu 代码：所选 target、其解析后的 package 依赖图、标准库和用 Gugu 写的 runtime。项目工具按 `gugu.toml` 与 `gugu.lock` 选择 target 入口，底层编译器从该入口开始闭世界可达性，见[包、依赖与构建模型](packages-builds.md)与[声明与模块](declarations.md)。命令行入口与参数见[工具链与命令行](toolchain-cli.md)。
@@ -31,7 +38,19 @@ Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行�
 
 `i128` / `u128` 的语言布局在两个目标上都是 16 字节、对齐 16；`extern "C"` 的平台差异见[平台与 ABI 参考](platform-abi.md)和[类型](types.md)。
 
-按目标裁代码用 `#[cfg]`，见[词法 · cfg](lexical.md)。被裁掉的项在该次编译中不存在。
+按目标裁代码用 `#[cfg]`，见[词法 · cfg](lexical.md)。被裁掉的项在该次编译中不存在：
+
+```gugu
+#[cfg(os = "linux")]
+fn page_size() int {
+    syscall_page_size()
+}
+
+#[cfg(os = "windows")]
+fn page_size() int {
+    win32_page_size()
+}
+```
 
 ## 诊断
 
@@ -39,7 +58,17 @@ Gugu 官方工具链把程序 AOT 编译成本地镜像；字节码 VM、运行�
 
 ## 测试模式
 
-编译器必须提供测试构建（与生产镜像分开），见 [测试](testing.md)。测试构建里 `cfg(test)` 为真，并链入测试运行器而不是只调用户 `main`。
+编译器必须提供测试构建（与生产镜像分开），见 [测试](testing.md)。测试构建里 `cfg(test)` 为真，并链入测试运行器而不是只调用户 `main`：
+
+```gugu
+#[cfg(test)]
+fn helper() int = 42
+
+#[test]
+fn uses_helper() {
+    std.test.assert(helper() == 42)
+}
+```
 
 ## 不使用系统链接器
 

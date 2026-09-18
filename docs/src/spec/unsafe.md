@@ -1,5 +1,7 @@
 # unsafe 与 intrinsic
 
+本章规定 unsafe 子集的边界、原始指针、`union`、`MaybeUninit`、intrinsic、汇编与 FFI 契约。安全代码的引用与初始化前提见[内存与对象模型](memory.md)。
+
 没有 `unsafe`，GC、调度、channel 就必须用另一种语言写。`unsafe` 是语言的一部分。
 
 ## 安全子集
@@ -56,11 +58,11 @@ unsafe fn volatile_load[T](p: *T) T
 unsafe fn volatile_store[T](p: *T, v: T)
 ```
 
-`addr_of` 是接收 place 的特殊 intrinsic：只计算槽地址，不读取值，也不构造可能未对齐的 `&T`；非 place 实参是编译错误。`ptr_read` / `ptr_write` 按位访问，只允许不带 COW 或 resource 管理语义的类型；string、ResourceCell 句柄或含资源字段的类型是编译错误，必须使用普通赋值或领域 API。`ptr_read` 不把源当成已移走，`ptr_write` 不运行管理动作，二者要求自然对齐。`read_unaligned` / `write_unaligned` 只接受位类型，允许未对齐地址并逐 byte 等价复制。`volatile_*` 仍要求自然对齐，只保证该次访存不被删除、合并或移出其它 volatile 访存的顺序；volatile 不是原子操作，不建立 happens-before。悬空、范围不足、无效位模式、数据竞争或绕过受管引用更新要求仍是未定义行为。
+`addr_of` 是接收 place 的特殊 intrinsic：只计算槽地址，不读取值，也不构造可能未对齐的 `&T`；非 place 实参是编译错误。`ptr_read` / `ptr_write` 按位访问，只允许不带 COW 或资源管理语义的类型；string、ResourceCell 句柄或含资源字段的类型是编译错误，必须使用普通赋值或领域 API。`ptr_read` 不把源当成已移走，`ptr_write` 不运行管理动作，二者要求自然对齐。`read_unaligned` / `write_unaligned` 只接受位类型，允许未对齐地址并逐 byte 等价复制。`volatile_*` 仍要求自然对齐，只保证该次访存不被删除、合并或移出其它 volatile 访存的顺序；volatile 不是原子操作，不建立 happens-before。悬空、范围不足、无效位模式、数据竞争或绕过受管引用更新要求仍是未定义行为。
 
 ## `union`
 
-```
+```gugu
 union Word {
     i: int
     f: float
@@ -76,9 +78,9 @@ union Word {
 
 ## `MaybeUninit[T]`
 
-`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#terminology)），布局与 `T` 相同。带 resource 管理语义的 T 不能实例化 MaybeUninit，避免覆盖或未初始化状态绕过 lease release。其它 T 的 GC 扫描与初始化状态由编译器精确跟踪，直到 `assume_init` 前不能把未写入槽当成有效 T 使用。
+`std.mem.MaybeUninit[T]` 是 lang item（见 [概述 · 术语](overview.md#terminology)），布局与 `T` 相同。带资源管理语义的 T 不能实例化 MaybeUninit，避免覆盖或未初始化状态绕过租约 release。其它 T 的 GC 扫描与初始化状态由编译器精确跟踪，直到 `assume_init` 前不能把未写入槽当成有效 T 使用。
 
-```
+```text
 fn uninit[T]() MaybeUninit[T]
 fn new[T](v: T) MaybeUninit[T]
 fn as_ptr(self: &Self) *T
@@ -92,7 +94,7 @@ unsafe fn assume_init(self) T
 
 ## `transmute` 与 `unreachable`
 
-`std.mem.transmute[T, U](x: T) U`：按位重解释。必须在 `unsafe` 里。`size_of[T]()` 必须等于 `size_of[U]()`，否则编译错误。T 或 U 带 COW 或 resource 管理语义时也是编译错误；transmute 不能伪造、复制或漏掉管理动作。其它结果若对 U 无效（含伪造 runtime 私有状态、破坏 UTF-8 或 niche）是未定义行为。
+`std.mem.transmute[T, U](x: T) U`：按位重解释。必须在 `unsafe` 里。`size_of[T]()` 必须等于 `size_of[U]()`，否则编译错误。T 或 U 带 COW 或资源管理语义时也是编译错误；transmute 不能伪造、复制或漏掉管理动作。其它结果若对 U 无效（含伪造 runtime 私有状态、破坏 UTF-8 或 niche）是未定义行为。
 
 `std.hint.unreachable() !`：告诉编译器不可达。若运行到此处，未定义行为。必须在 `unsafe` 里调用。安全的发散用 `panic`。
 
@@ -102,7 +104,7 @@ unsafe fn assume_init(self) T
 
 | 职责 | 说明 |
 |------|------|
-| 受管分配 / 区域 | managed storage、`LocalArena` / `SyncArena` 上的未初始化内存；OS `mmap` / `VirtualAlloc` |
+| 受管分配 / 区域 | 受管存储（managed storage）、`LocalArena` / `SyncArena` 上的未初始化内存；OS `mmap` / `VirtualAlloc` |
 | 平台范围 | `std.platform` 的 reserve/commit/decommit/release、guard、wait/wake、entropy、zero 与 dump policy；契约见[标准库](standard-library.md#platform-ranges-ledger) |
 | 受管引用更新 | 手写 runtime 对 GC 引用槽的更新；当前屏障见 [GC 元数据](../internals/gc-metadata.md#write-barrier-edge-summary-remembered-set) |
 | 栈切换 | 保存目标 ABI 状态并切换执行栈；当前 context见[调度器](../internals/scheduler.md) |
@@ -143,11 +145,11 @@ asm(
 
 - 类型是 `()`。禁止在 `#[naked]` 以外靠它「返回」值而不走 `out`。
 
-`global_asm("...")` 是模块顶层声明。字符串必须 comptime。汇编进镜像，不经 Gugu 函数 prologue。它定义的符号只能通过显式 `extern "C"` 声明从 managed code 调用：未标注声明走普通 `ForeignBridge`，长时间 CPU work 使用 `#[ffi(dirty_cpu)]`，只有满足完整 leaf 契约时才能使用 `#[ffi(leaf(stack = N))]`。compiler 不解析字符串来猜符号与调用模式。
+`global_asm("...")` 是模块顶层声明。字符串必须 comptime。汇编进镜像，不经 Gugu 函数 prologue。它定义的符号只能通过显式 `extern "C"` 声明从受管代码调用：未标注声明走普通 `ForeignBridge`，长时间 CPU work 使用 `#[ffi(dirty_cpu)]`，只有满足完整 leaf 契约时才能使用 `#[ffi(leaf(stack = N))]`。compiler 不解析字符串来猜符号与调用模式。
 
-`#[naked] unsafe extern "C" fn`：compiler 不生成 prologue / epilogue 或普通帧的根与展开 metadata。函数体必须是**恰好一次** `asm(...)` 调用（可带 `clobber`）。从 managed context 调用时默认按 `ForeignBridge[DirtyCpu]` 进入；只有显式 `#[ffi(leaf(stack = N))]` 才允许直接按 leaf 调用。runtime/rt0 在不持有用户 coroutine、processor 或 GC root 状态时可以使用 compiler 内部 direct path。
+`#[naked] unsafe extern "C" fn`：compiler 不生成 prologue / epilogue 或普通帧的根与展开 metadata。函数体必须是**恰好一次** `asm(...)` 调用（可带 `clobber`）。从受管上下文调用时默认按 `ForeignBridge[DirtyCpu]` 进入；只有显式 `#[ffi(leaf(stack = N))]` 才允许直接按 leaf 调用。runtime/rt0 在不持有用户协程、processor 或 GC root 状态时可以使用 compiler 内部 direct path。
 
-带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn` 是 opaque native definition：允许内部回边、等待指令和不能生成普通 stack map 的 asm，但整个函数不能包含 Gugu managed reference、resource lease、分配、panic、suspend、Gugu 函数调用或需要 compiler safepoint 的操作；参数、返回值和局部值只能是 C ABI 可表示的 bit value/raw pointer。它从 managed context 调用时按 `ForeignBridge[DirtyCpu]` 执行，不能回调 Gugu。没有该属性的普通函数不能借助 asm 隐藏上述操作。
+带函数体的 `#[ffi(dirty_cpu)] unsafe extern "C" fn` 是 opaque native definition：允许内部回边、等待指令和不能生成普通 stack map 的 asm，但整个函数不能包含 Gugu 受管引用、资源租约、分配、panic、suspend、Gugu 函数调用或需要 compiler safepoint 的操作；参数、返回值和局部值只能是 C ABI 可表示的 bit value/raw pointer。它从受管上下文调用时按 `ForeignBridge[DirtyCpu]` 执行，不能回调 Gugu。没有该属性的普通函数不能借助 asm 隐藏上述操作。
 
 ## 链接属性
 
@@ -167,7 +169,7 @@ asm(
 
 `extern` 声明导入或导出 C ABI 函数：
 
-```
+```text
 extern "C" fn puts(s: *byte) int
 
 extern "C" {
@@ -202,7 +204,7 @@ fn read_once(fd: int, buffer: *byte, length: uint) int {
 - ABI 字符串必须是 `"C"`。其它字符串是编译错误。
 - 无函数体的 `extern` 是导入：库名与符号必须在编译配置里显式登记。编译器自己把导入写进镜像（Windows 导入地址表 IAT；Linux 动态导入表或内建桩）。禁止靠系统 `ld` 事后扫一堆 `.o` 来解析。
 - 有函数体的 `pub extern "C" fn` 是导出。可用 `#[export_name]` 改符号。
-- Linux System V AMD64，Windows Microsoft x64。C 字符串用 `*byte` 或 `c"..."`；与 `string` 显式转换。交给外部代码的 GC 对象必须 `std.mem.pin` 或先拷到非移动缓冲；native 可解引用的区域不得含 managed reference slot，pin 不递归固定 referent。完整目标映射见[平台与 ABI 参考](platform-abi.md)。
+- Linux System V AMD64，Windows Microsoft x64。C 字符串用 `*byte` 或 `c"..."`；与 `string` 显式转换。交给外部代码的 GC 对象必须 `std.mem.pin` 或先拷到非移动缓冲；native 可解引用的区域不得含受管引用槽，pin 不递归固定 referent。完整目标映射见[平台与 ABI 参考](platform-abi.md)。
 - `i128` / `u128` 在 `extern "C"` 里：Linux 按 `__int128`；Windows 禁止，见[平台与 ABI 参考](platform-abi.md)与[类型](types.md)。
 - `TypeId`、`dyn Trait`、句柄类型不能出现在 `extern "C"` 签名里。
 - `!` 可作为 `extern "C"` 的返回类型（C 的 `_Noreturn` / `noreturn`）。
@@ -213,12 +215,12 @@ fn read_once(fd: int, buffer: *byte, length: uint) int {
 C ABI 只规定参数、返回值和寄存器/栈布局，不携带是否等待、是否回调 Gugu 或是否执行很久的信息。每个导入项在 compiler 的类型检查结果中还带一个不暴露给用户类型系统的 `ForeignEffect`：
 
 - 未标注的导入是普通 `ForeignBridge`。直接调用和无法静态证明为 `ForeignLeaf`/`DirtyCpu` 的间接调用都走完整桥接；即使实现最终不阻塞，也必须切 system stack并发布精确 roots。runtime可以短暂保留一个可被 GC、回调、退役或 runnable压力打破的 processor lease，并在 native快速返回时直接恢复；这只是内部调度优化，不减弱“可能阻塞/回调”的保守效应。
-- `#[ffi(leaf(stack = N))]` 可以附着在无函数体的 `extern "C"` 导入项或 `#[naked] unsafe extern "C" fn` 上。`N` 表示 C 调用及其传递调用链在当前 coroutine stack 上额外使用的字节数；必须是非负整数常量，compiler 按目标 stack alignment 向上取整，省略时为 0。它是声明者承担的 unsafe 调度契约，不是性能提示。外部实现必须在固定可接受上界内返回，不依赖不可界定的 I/O、sleep、mutex/futex/condvar、join 或阻塞式 poll，不回调 Gugu，不调用会分配、触发 GC、park、suspend 或改变调度器状态的 runtime 接口，不跨返回保留 Gugu 地址，且不得超过 stack budget 或让异常/`setjmp`/`longjmp` 越过边界。
+- `#[ffi(leaf(stack = N))]` 可以附着在无函数体的 `extern "C"` 导入项或 `#[naked] unsafe extern "C" fn` 上。`N` 表示 C 调用及其传递调用链在当前协程栈上额外使用的字节数；必须是非负整数常量，compiler 按目标 stack alignment 向上取整，省略时为 0。它是声明者承担的 unsafe 调度契约，不是性能提示。外部实现必须在固定可接受上界内返回，不依赖不可界定的 I/O、sleep、mutex/futex/condvar、join 或阻塞式 poll，不回调 Gugu，不调用会分配、触发 GC、park、suspend 或改变调度器状态的 runtime 接口，不跨返回保留 Gugu 地址，且不得超过 stack budget 或让异常/`setjmp`/`longjmp` 越过边界。
 - `#[ffi(dirty_cpu)]` 可以附着在无函数体的 `extern "C"` 导入项、带函数体的 `unsafe extern "C" fn`，或一次直接 C 调用表达式。导入项和 native definition 的默认模式是 `ForeignBridge[DirtyCpu]`；调用点属性只覆盖该次调用。它适用于输入规模或参数决定运行时间、可能长时间占用 CPU、或 native 控制流无法提供 stack/safepoint metadata 的函数。带函数体时只能包含本章允许的 opaque native operation，且不能被调用点改成 leaf。dirty 调用不允许回调 Gugu，也不提供强制终止；调用可以无限期占用一个 dirty worker，但不能占住 `LogicalProcessor` 或成为 GC stop 的参与者。
 - `#[ffi(bridge)]` 是调用点属性，只能附着在直接导入 C 函数的表达式上；它强制当前调用使用普通 `ForeignBridge`，即使声明带有 `ffi(leaf)` 或 `ffi(dirty_cpu)`。需要保留 dirty CPU 分类时使用 `#[ffi(dirty_cpu)]`，不能把两种调用点属性同时写在同一表达式上。
 - `ffi(leaf)` 不表示纯函数，也不禁止 C 侧修改外部内存或设置 `errno`/last-error；它只表示该调用不需要释放当前 `LogicalProcessor`。函数项被单态化且保留 leaf effect 时可以保留直调；转换为普通 `fn` 值、经过无法证明 effect 的间接调用或动态分派后，一律按普通 `ForeignBridge` 处理。语言不提供调用点的“强制 leaf”属性；不确定 stack budget 时使用 `#[ffi(bridge)]`。
 
-compiler 不能检查动态库或 opaque asm 的函数体。错误的 `ffi(leaf)` 声明违反 unsafe 契约：实际等待会占住当前 processor；永久不返回会使该 processor永远不能确认 GC stop，从而永久阻止进程完成 GC；错误的 `stack = N` 还可能破坏 coroutine stack。错误的 `ffi(dirty_cpu)` native contract不会让 GC停摆，但可能永久保留 ABI frame roots/pin、耗尽 dirty CPU额度，并使调用方协程永远无法完成。保守地使用普通 bridge时，短暂 lease始终可由 runtime取回，未知 native work不会永久占住 processor；它是正确性路径。
+compiler 不能检查动态库或 opaque asm 的函数体。错误的 `ffi(leaf)` 声明违反 unsafe 契约：实际等待会占住当前 processor；永久不返回会使该 processor 永远不能确认 GC stop，从而永久阻止进程完成 GC；错误的 `stack = N` 还可能破坏协程栈。错误的 `ffi(dirty_cpu)` native contract 不会让 GC 停摆，但可能永久保留 ABI frame roots/pin、耗尽 dirty CPU 额度，并使调用方协程永远无法完成。保守地使用普通 bridge 时，短暂 lease 始终可由 runtime 取回，未知 native work 不会永久占住 processor；它是正确性路径。
 
 ### 外部线程调入
 
@@ -238,9 +240,9 @@ unsafe 不豁免数据竞争或受管引用更新契约。通过原始指针写�
 
 ## `asm` 的求值与约束
 
-普通 managed `asm` 不是 safepoint，也不能在模板内部调用会分配、阻塞、展开 panic、触发 GC 或切换协程栈的 Gugu 函数。compiler 将模板解析为有限 CFG：内部不得有回到较早指令的回边、无法解析的间接 branch/call、`ret` 或外部符号跳转；所有路径必须到达模板末尾。`syscall`、`sysenter`、`int`、`hlt`、`mwait`、`umwait`、`tpause`、repeat-prefixed string instruction 和其它目标定义的 system/wait instruction 不属于 managed asm；`pause` 本身可用，但不能位于内部循环。无法证明的控制流、`.byte` 形成的未知 opcode/跳转和上述指令是编译错误，诊断应指向拆分 asm并调用 `std.runtime.safepoint_poll()`，或把 native definition 标为 `#[ffi(dirty_cpu)]`。`memory` clobber阻止 compiler跨越该 asm重排普通内存访问，`cc` clobber声明状态标志被破坏；省略真实 clobber导致的错误结果属于未定义行为。这些有限 CFG/opcode限制不适用于 global asm、naked body或 dirty native definition。
+普通受管 `asm` 不是 safepoint，也不能在模板内部调用会分配、阻塞、展开 panic、触发 GC 或切换协程栈的 Gugu 函数。compiler 将模板解析为有限 CFG：内部不得有回到较早指令的回边、无法解析的间接 branch/call、`ret` 或外部符号跳转；所有路径必须到达模板末尾。`syscall`、`sysenter`、`int`、`hlt`、`mwait`、`umwait`、`tpause`、repeat-prefixed string instruction 和其它目标定义的 system/wait instruction 不属于受管 asm；`pause` 本身可用，但不能位于内部循环。无法证明的控制流、`.byte` 形成的未知 opcode/跳转和上述指令是编译错误，诊断应指向拆分 asm并调用 `std.runtime.safepoint_poll()`，或把 native definition 标为 `#[ffi(dirty_cpu)]`。`memory` clobber阻止 compiler跨越该 asm重排普通内存访问，`cc` clobber声明状态标志被破坏；省略真实 clobber导致的错误结果属于未定义行为。这些有限 CFG/opcode限制不适用于 global asm、naked body或 dirty native definition。
 
-`global_asm` 和 `#[naked]` 函数不拥有 compiler生成的普通根与展开 metadata，不能作为 `Running` 中的 opaque frame 停在 safepoint。`global_asm` 符号的调用模式来自显式 extern 声明；managed context 调用 naked 函数默认使用 `ForeignBridge[DirtyCpu]`。若显式声明 `ffi(leaf)`，则由声明者保证整个 native 调用链有限、无等待、无回调，并提供准确的 `stack = N`。它们若建立可被 GC 或 panic 看到的帧，必须通过目标专用 intrinsic 提供配套 runtime要求的完整 metadata，否则不得进入 managed safepoint或展开路径。
+`global_asm` 和 `#[naked]` 函数不拥有 compiler生成的普通根与展开 metadata，不能作为 `Running` 中的 opaque frame 停在 safepoint。`global_asm` 符号的调用模式来自显式 extern 声明；受管上下文调用 naked 函数默认使用 `ForeignBridge[DirtyCpu]`。若显式声明 `ffi(leaf)`，则由声明者保证整个 native 调用链有限、无等待、无回调，并提供准确的 `stack = N`。它们若建立可被 GC 或 panic 看到的帧，必须通过目标专用 intrinsic 提供配套 runtime要求的完整 metadata，否则不得进入受管 safepoint或展开路径。
 
 `std.runtime.safepoint_poll()` 不能嵌入 asm 模板；poll 点必须由 compiler 看见并拥有对应 stack map。native 循环不能通过把一个未知的 runtime call 字符串写进 asm 来伪造该 metadata。
 
@@ -248,7 +250,7 @@ unsafe 不豁免数据竞争或受管引用更新契约。通过原始指针写�
 
 `extern "C"` 参数和返回类型只允许 C ABI 可表示的整数、浮点、原始指针、`#[repr(C)]`/`#[repr(transparent)]` 聚合以及 `!` 返回；聚合的每个非 ZST 字段也必须递归满足该条件。引用、`string`、切片、函数环境、闭包、`dyn Trait`、`TypeId`、GC 句柄、`LocalArena`、`SyncArena`、channel 和 Join 不能直接出现在签名中。完整的允许/禁止集合与平台分类见[平台与 ABI 参考](platform-abi.md)。
 
-调用外部函数前，参数按普通左到右规则求值并完成 ABI 转换；返回后再构造 Gugu 值。C 返回无效 `bool`、`char`、枚举或违反 repr 的位模式时，继续把它当安全值使用是未定义行为。外部代码保留的 GC 地址必须在整个保留期间 pin；仅在调用期间临时使用则 pin 覆盖该调用即可。传入区域若含 managed reference slot，native 只能把整块内存当不解引用的 opaque token；读取、写入或复制这些 slot 都违反外部边界契约。
+调用外部函数前，参数按普通左到右规则求值并完成 ABI 转换；返回后再构造 Gugu 值。C 返回无效 `bool`、`char`、枚举或违反 repr 的位模式时，继续把它当安全值使用是未定义行为。外部代码保留的 GC 地址必须在整个保留期间 pin；仅在调用期间临时使用则 pin 覆盖该调用即可。传入区域若含受管引用槽，native 只能把整块内存当不解引用的 opaque token；读取、写入或复制这些槽都违反外部边界契约。
 
 外部异常、SEH 或 C++ 异常不得穿过 Gugu 帧，Gugu panic 也不得穿过外部帧。未在边界内转换的跨边界展开必须立即 abort 进程。
 

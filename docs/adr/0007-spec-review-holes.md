@@ -1,9 +1,9 @@
-# ADR 0007：规范审查补洞与命名
+# ADR-0007：规范审查补洞与命名
 
 - 状态：已接受
 - 日期：2026-08-30
 
-## 上下文
+## 背景
 
 通读现行 `docs/src/spec` 之后，发现计数类型自相矛盾、数组无法按长度写 impl、`static` 初始化与协程本地冲突，以及调度模型用单字母点名。一并钉死。
 
@@ -31,9 +31,23 @@
 - `main` 返回 `()` 或 `Result[(), E]`（`E: Print`）。整数变窄：debug panic，release 按目标位宽截断。
 - `panic` 只接 `string`。`std.mem.LocalArena`、`std.mem.SyncArena` 与 `std.mem.pin` 是必须存在的 lang item；不保留未区分并发模型的 `std.mem.Arena`。
 
+## 替代方案
+
+本节为 2026-09 文档整理时补记：列出决策时已隐含拒绝的方向，便于后续对照；非决策当时的原始记录。
+
+- **保留 Go 式 `G` / `M` / `P` 缩写**：与「规范与属性名写全称、不用内部单字母缩写」的可读性要求冲突。
+- **计数类型混用 `uint` / `usize` 与 `int`**：混合算术与转换负担；统一为 `int` 并由整数构造负责显式转换。
+- **协程本地存储复用 OS TLS**：见 ADR-0005；协程迁移会读错槽。
+- **固有 `impl` 允许写在任意模块**：散布的固有方法破坏闭世界 impl 一致性与最具体特化的全局部分序。
+- **保留未区分并发模型的 `std.mem.Arena`**：与 `LocalArena` / `SyncArena` 二分冲突，已删除。
+
 ## 后果
 
 - 调度章节不再依赖读者认识 Go 的字母表。
 - 数组字段上的 `#[derive(Clone)]` 与 `f"{xs}"` 有定义。
 - 协程本地的 `Vec` 每份协程真正独立，不会变成共享句柄。
 - GC stop请求的写集合按 active processor数量增长，不按 live coroutine数量增长；普通 prologue与 loop poll各保持一次 local load。runtime临界区不会与“每个 cyclic路径都有 poll”的 compiler不变量冲突。
+
+## 实施状态
+
+本 ADR 各命名与语言条款（全称术语、`#[coroutine_local]`、`int` 计数、`type_id_count()` 阶段限制、`[]` 混写参数、运行时初始化语义、固有 impl 归属、确定性测试收集、`ForeignBridge` 默认效应、`Add[string]`、`derive(Print)`、`panic` 只接 `string`、`LocalArena` / `SyncArena` / `pin` lang item）均已落入对应规范章节并在编译器实现。
