@@ -6,6 +6,7 @@
 //!
 //! arena 容量取二次幂阶梯的顶层，保证任何 class 的块都能整块落在 arena 内且按自身大小对齐。
 
+use super::super::cage::CompressionPlane;
 use super::super::extent::{
     ExtentDescriptor, ExtentId, ExtentOccupancy, ExtentState, ExtentTable, TrimBlocked, TrimReport,
 };
@@ -65,23 +66,41 @@ impl RawWorld {
     ///
     /// 只预留虚拟地址：物理页在 extent 被发放时按页提交，因此 arena 本身全部计入
     /// `range_reserved_bytes`，与 `runtime_committed_bytes` 严格互斥。
+    ///
+    /// 启用 cage profile 时 `MANAGED_LOCAL` 是唯一从 cage 切 island 的 domain：压缩引用只
+    /// 承载该 domain 的对象，`MANAGED_SHARED`/`RUNTIME_RAW`/`RESOURCE` 永不成岛，保证压缩
+    /// 引用不能绕过 handle resolve。
     pub(super) fn open_arena(
         &mut self,
         owner: u32,
         token: OwnerToken,
         domain: MemoryDomainId,
     ) -> Result<u32, RawInvariant> {
-        let range = self
-            .provider
-            .reserve_aligned(OWNER_ARENA_BYTES, OWNER_ARENA_BYTES, domain)?;
-        let base = self
-            .provider
-            .describe(range)
-            .ok_or_else(|| RawInvariant::new("arena 预留后描述缺失"))?
-            .base;
-        let index =
-            self.extents
-                .register_owner(owner, token, domain, range, base, OWNER_ARENA_BYTES)?;
+        let (range, base, range_offset) = if domain == MemoryDomainId::MANAGED_LOCAL
+            && self.compression().is_some_and(CompressionPlane::enabled)
+        {
+            let island = self.compression_mut()?.take_island(OWNER_ARENA_BYTES)?;
+            (island.range, island.base, island.offset)
+        } else {
+            let range =
+                self.provider
+                    .reserve_aligned(OWNER_ARENA_BYTES, OWNER_ARENA_BYTES, domain)?;
+            let base = self
+                .provider
+                .describe(range)
+                .ok_or_else(|| RawInvariant::new("arena 预留后描述缺失"))?
+                .base;
+            (range, base, 0)
+        };
+        let index = self.extents.register_owner(
+            owner,
+            token,
+            domain,
+            range,
+            base,
+            OWNER_ARENA_BYTES,
+            range_offset,
+        )?;
         Ok(index)
     }
 
@@ -99,7 +118,7 @@ impl RawWorld {
             .extents
             .arena_range_of(extent)
             .ok_or_else(|| RawInvariant::new("extent 缺少所属 arena"))?;
-        let offset = self.extents.offset_of_id(extent);
+        let offset = self.extents.provider_offset_of_id(extent);
         let bytes = self
             .extents
             .descriptor(extent)
@@ -138,12 +157,13 @@ impl RawWorld {
             .arena_range(arena)
             .ok_or_else(|| RawInvariant::new("managed block 的 arena range 缺失"))?;
         let offset = self.extents.offset_of_id(extent);
+        let provider_offset = self.extents.provider_offset_of_id(extent);
         let bytes = self
             .extents
             .descriptor(extent)
             .ok_or_else(|| RawInvariant::new("managed extent 缺失"))?
             .bytes;
-        self.provider.commit_pages(range, offset, bytes)?;
+        self.provider.commit_pages(range, provider_offset, bytes)?;
         self.managed_accounting[owner as usize].commit(bytes);
         Ok((extent, offset))
     }
@@ -160,7 +180,7 @@ impl RawWorld {
             .extents
             .arena_range_of(extent)
             .ok_or_else(|| RawInvariant::new("trim 的 extent 缺少所属 arena"))?;
-        let offset = self.extents.offset_of(&descriptor);
+        let offset = self.extents.provider_offset_of(&descriptor);
         self.provider
             .decommit_pages(range, offset, descriptor.bytes)?;
         self.extents.give_back(extent)?;

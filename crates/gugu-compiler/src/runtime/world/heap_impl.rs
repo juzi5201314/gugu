@@ -5,6 +5,7 @@
 //! （`LOCAL_DIRECT`），根是模型根槽数组，跨 owner 引用在本路径是不变量失败。
 
 use super::super::barrier::{BarrierFlushReason, BarrierSite};
+use super::super::cage::CompressionPlane;
 use super::super::extent::{ExtentOccupancy, TrimBlocked, class_for_bytes};
 use super::super::gc_metadata_schema::GcRootKindV1;
 use super::super::gc_metadata_section::{GcRuntimeMetadata, decode_sections};
@@ -465,6 +466,8 @@ impl RawWorld {
         self.gc_types = Some(types);
         self.managed_roots.clear();
         self.managed_root_kinds.clear();
+        // 压缩平面在根槽清空之后配置：cage 预留只影响 managed arena 的来源，关闭态不预留。
+        self.configure_compression(raw.compression())?;
         self.cycle_epoch = 0;
         self.heap_block_class = block_class;
         self.configure_mark(raw.mark())?;
@@ -899,12 +902,12 @@ impl RawWorld {
     ) -> Result<(u64, u32), RawInvariant> {
         self.ensure_heap_space(owner, HeapArenaKind::Pinned, 1, false)?;
         let types = self.types()?.clone();
-        let mut roots = std::mem::take(&mut self.managed_roots);
+        let mut roots = self.decode_root_slots()?;
         let result = self
             .heap_mut(owner)?
             .pin(address, &types, &mut roots)
             .map_err(heap_error);
-        self.managed_roots = roots;
+        self.encode_root_slots(&roots)?;
         result
     }
 
@@ -914,11 +917,19 @@ impl RawWorld {
     }
 
     /// 登记一个 managed 根槽；返回槽位下标。
+    ///
+    /// 压缩根槽的初始字为 0，但只有在 cage profile 启用时才允许登记：否则标记阶段会拿到
+    /// 一个无法解码的槽种类。
     pub(crate) fn register_managed_root(
         &mut self,
         kind: GcRootKindV1,
         type_index: u32,
     ) -> Result<u32, RawInvariant> {
+        if matches!(kind, GcRootKindV1::CompressedRef)
+            && !self.compression().is_some_and(CompressionPlane::enabled)
+        {
+            return Err(RawInvariant::new("未启用 cage profile 时不能登记压缩根"));
+        }
         let slot = u32::try_from(self.managed_roots.len())
             .map_err(|_| RawInvariant::new("根槽数量超过 u32"))?;
         self.managed_roots.push(0);
@@ -959,11 +970,11 @@ impl RawWorld {
         self.flush_remembered_set(owner)?;
         let dirty = self.drain_dirty_cards(owner)?;
         let types = self.types()?.clone();
-        let mut roots = std::mem::take(&mut self.managed_roots);
+        let mut roots = self.decode_root_slots()?;
         let result = self
             .heap_mut(owner)?
             .collect_minor(&types, &mut roots, &dirty);
-        self.managed_roots = roots;
+        self.encode_root_slots(&roots)?;
         // cycle 边界前先按真实搬迁重建 block 对计数：旧目标 block 的入边必须随对象搬到新目标，
         // 否则候选判定会按已经不存在的 block 做试验删除。
         let relocations = self.heap_mut(owner)?.take_relocations();

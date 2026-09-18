@@ -878,7 +878,7 @@ pub(crate) fn reserve_mapping(
     let range = extents
         .arena_range_of(extent)
         .ok_or_else(|| RawInvariant::new("extent 缺少所属 arena"))?;
-    let offset = extents.offset_of_id(extent);
+    let offset = extents.provider_offset_of_id(extent);
     let length = extents
         .descriptor(extent)
         .ok_or_else(|| RawInvariant::new("extent 描述缺失"))?

@@ -658,6 +658,28 @@ impl RuntimeRawContractV1 {
         Ok(self)
     }
 
+    /// 以新的 cage profile 重建压缩契约段；其余段逐字段保持，指纹与校验同步刷新。
+    ///
+    /// 只供显式开启 cage profile 的消费者（harness / bench / 后续后端）使用：默认编译路径
+    /// 保持关闭态，不带任何 cage 预留，因此不存在第二份契约装配点。
+    pub(crate) fn with_compression(
+        mut self,
+        policy: CompressionPolicyV1,
+        demand: CompressionDemand,
+    ) -> Result<Self, RawModelError> {
+        let target = TargetName::parse(&self.target_semantics)
+            .map_err(|_| RawModelError::new("runtime raw 契约的目标语义未登记"))?;
+        self.compression = CompressionRuntimeContract::build(
+            demand,
+            policy,
+            crate::target::PointerCompression::for_target(target),
+        )?;
+        self.policy.compression = policy;
+        self.fingerprint = self.compute_fingerprint();
+        self.verify()?;
+        Ok(self)
+    }
+
     /// 返回 schema 版本。
     pub(crate) const fn schema(&self) -> u32 {
         self.schema

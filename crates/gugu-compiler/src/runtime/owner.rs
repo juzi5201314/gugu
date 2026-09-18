@@ -111,7 +111,7 @@ impl DomainRangeCache {
         let range = extents
             .arena_range_of(extent)
             .ok_or_else(|| RawInvariant::new("extent 缺少所属 arena"))?;
-        let offset = extents.offset_of_id(extent);
+        let offset = extents.provider_offset_of_id(extent);
         let bytes = extents
             .descriptor(extent)
             .ok_or_else(|| RawInvariant::new("extent 描述缺失"))?
@@ -132,7 +132,7 @@ impl DomainRangeCache {
         let range = extents
             .arena_range_of(extent)
             .ok_or_else(|| RawInvariant::new("缓存 extent 缺少所属 arena"))?;
-        let offset = extents.offset_of_id(extent);
+        let offset = extents.provider_offset_of_id(extent);
         let bytes = extents
             .descriptor(extent)
             .ok_or_else(|| RawInvariant::new("缓存 extent 描述缺失"))?

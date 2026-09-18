@@ -219,10 +219,10 @@ mod trace_tests;
 
 pub use harness::{
     BlockReturnHarness, BlockReturnReport, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
-    ChannelWaitReport, EdgeCandidateHarness, EdgeCandidateReport, HarnessReport,
-    OwnerReturnHarness, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
-    ResourceReleaseReport, SharedForwardHarness, SharedForwardReport, SyncLockHarness,
-    SyncLockReport,
+    ChannelWaitReport, CompressionHarness, CompressionReport, EdgeCandidateHarness,
+    EdgeCandidateReport, HarnessReport, OwnerReturnHarness, RegionTransferHarness,
+    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, SharedForwardHarness,
+    SharedForwardReport, SyncLockHarness, SyncLockReport,
 };
 
 #[cfg(test)]

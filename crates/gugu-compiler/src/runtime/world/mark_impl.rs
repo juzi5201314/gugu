@@ -157,8 +157,9 @@ impl RawWorld {
         self.drain_all(owner, &budget)?;
         self.confirm_participant(owner, MarkParticipant::RemoteConsumer)?;
         // 3. root-slice：按 owner 分片登记根；悬空根必须在进入 mark 前暴露。
-        for slot in 0..self.managed_roots.len() {
-            let value = self.managed_roots[slot];
+        // 压缩根槽先经 checked 解码再参与 owner 解析，解码失败即 fatal，绝不跳过或猜测。
+        let roots = self.decode_root_slots()?;
+        for value in roots {
             if value != 0 {
                 self.owner_of(value)?;
             }
@@ -202,16 +203,12 @@ impl RawWorld {
 
     /// 用根槽与 remembered set seed 参与本次 cycle 的 owner worklist。
     fn seed_mark_roots(&mut self, scope: &[u32]) -> Result<u64, RawInvariant> {
-        let roots: Vec<u64> = self
-            .managed_roots
-            .iter()
-            .copied()
-            .filter(|value| *value != 0)
-            .collect();
+        // 压缩根槽必须先解码成完整地址，再按地址解析 owner；编码字不是地址，不参与解析。
+        let roots = self.decode_root_slots()?;
         let mut seeded = 0_u64;
         for owner in scope {
             let mut queue = std::mem::take(&mut self.mark_worklists[*owner as usize]);
-            for value in &roots {
+            for value in roots.iter().filter(|value| **value != 0) {
                 let target = self.owner_of(*value)?;
                 if target == *owner {
                     queue.push(*value);

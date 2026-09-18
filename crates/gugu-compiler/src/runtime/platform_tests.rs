@@ -53,6 +53,7 @@ fn extent_table(owners: u32) -> ExtentTable {
                 super::provider::RangeId(owner),
                 top * u64::from(owner),
                 top,
+                0,
             )
             .expect("arena 可登记");
     }
@@ -272,6 +273,7 @@ fn extent_table_rejects_unaligned_arena_and_unknown_class() {
                 super::provider::RangeId(0),
                 4096,
                 2 * 1024 * 1024,
+                0,
             )
             .is_err(),
         "arena 基址必须按顶层 class 对齐"
@@ -285,6 +287,7 @@ fn extent_table_rejects_unaligned_arena_and_unknown_class() {
                 super::provider::RangeId(0),
                 0,
                 4096,
+                0,
             )
             .is_err(),
         "arena 容量必须是顶层 class 的整数倍"

@@ -297,6 +297,7 @@ fn root_kind(kind: GcRootKindV1) -> u16 {
         GcRootKindV1::ForeignBridge => 2,
         GcRootKindV1::CoroutineFrame => 3,
         GcRootKindV1::HandleSlot => 4,
+        GcRootKindV1::CompressedRef => 5,
     }
 }
 

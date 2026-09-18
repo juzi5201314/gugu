@@ -6,6 +6,7 @@
 
 pub(crate) mod barrier_impl;
 pub(crate) mod block_return_impl;
+mod cage_impl;
 pub(crate) mod candidate_impl;
 pub(crate) mod coroutine_impl;
 pub(crate) mod edge_impl;
@@ -71,6 +72,10 @@ mod shared_forward_tests;
 #[cfg(test)]
 #[path = "block_return_tests.rs"]
 mod block_return_tests;
+
+#[cfg(test)]
+#[path = "cage_tests.rs"]
+mod world_cage_tests;
 
 #[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
@@ -245,6 +250,8 @@ pub(crate) struct RawWorld {
     managed_roots: Vec<u64>,
     /// 根槽的 `(root kind, type index)` 登记。
     managed_root_kinds: Vec<(u32, u32)>,
+    /// checked pointer compression 平面；`configure_gc` 之前为 `None`。
+    cages: Option<super::cage::CompressionPlane>,
     /// LocalHeap block 对应的 extent class 编号。
     heap_block_class: u32,
 }
@@ -344,6 +351,7 @@ impl RawWorld {
             edge_contract: None,
             managed_roots: Vec::new(),
             managed_root_kinds: Vec::new(),
+            cages: None,
             heap_block_class: 0,
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟

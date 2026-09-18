@@ -323,6 +323,11 @@ struct OwnerExtentSpace {
     range: RangeId,
     base: u64,
     bytes: u64,
+    /// arena 在平台 range 内的字节偏移。
+    ///
+    /// 直接预留的 arena 为 0；cage 成岛的 managed arena 是 cage 内的 island，平台调用必须把
+    /// arena 内偏移加上本偏移才能落在 range 的正确子区间上。
+    range_offset: u64,
     /// 每 class 的空闲块位图；位下标是该 class 下的块编号。
     free: Vec<Vec<u64>>,
     /// 每 class 的空闲块数量；与位图 popcount 保持一致。
@@ -336,6 +341,7 @@ impl OwnerExtentSpace {
         range: RangeId,
         base: u64,
         bytes: u64,
+        range_offset: u64,
     ) -> Result<Self, RawInvariant> {
         let largest = *EXTENT_CLASS_LADDER.last().expect("class 阶梯非空");
         if !base.is_multiple_of(largest) {
@@ -363,6 +369,7 @@ impl OwnerExtentSpace {
             range,
             base,
             bytes,
+            range_offset,
             free,
             free_counts,
         };
@@ -456,6 +463,9 @@ impl ExtentTable {
     }
 
     /// 为一个 owner 登记 extent arena；基址与容量必须按最大 class 对齐。
+    ///
+    /// `range_offset` 是 arena 在平台 range 内的偏移：直接预留的 arena 传 0，cage 成岛的
+    /// managed arena 传 island 在 cage 内的偏移，平台调用据此翻译 extent 的 arena 内偏移。
     pub(crate) fn register_owner(
         &mut self,
         owner: u32,
@@ -464,8 +474,9 @@ impl ExtentTable {
         range: RangeId,
         base: u64,
         bytes: u64,
+        range_offset: u64,
     ) -> Result<u32, RawInvariant> {
-        let space = OwnerExtentSpace::new(token, domain, range, base, bytes)?;
+        let space = OwnerExtentSpace::new(token, domain, range, base, bytes, range_offset)?;
         let index = u32::try_from(self.spaces.len()).expect("owner arena 数量适配 u32");
         self.spaces.push(space);
         while self.owner_spaces.len() <= owner as usize {
@@ -524,6 +535,27 @@ impl ExtentTable {
     pub(crate) fn offset_of_id(&self, id: ExtentId) -> u64 {
         self.descriptor(id)
             .map_or(0, |descriptor| self.offset_of(descriptor))
+    }
+
+    /// 返回 extent 在所属平台 range 内的字节偏移：arena 内偏移加 arena 的 range 偏移。
+    ///
+    /// 平台调用（commit/decommit pages）只接受 range 内偏移，因此凡是把 extent 偏移交给
+    /// provider 的地方都必须经过本函数，而不是 `offset_of`。
+    pub(crate) fn provider_offset_of(&self, descriptor: &ExtentDescriptor) -> u64 {
+        self.offset_of(descriptor) + self.spaces[descriptor.owner_index as usize].range_offset
+    }
+
+    /// 按编号返回 extent 在所属平台 range 内的字节偏移。
+    pub(crate) fn provider_offset_of_id(&self, id: ExtentId) -> u64 {
+        self.descriptor(id)
+            .map_or(0, |descriptor| self.provider_offset_of(descriptor))
+    }
+
+    /// 返回 arena 在平台 range 内的字节偏移；越界编号返回 `None`。
+    pub(crate) fn arena_range_offset(&self, owner_index: u32) -> Option<u64> {
+        self.spaces
+            .get(owner_index as usize)
+            .map(|space| space.range_offset)
     }
 
     /// 按编号返回 extent 所属 arena 的平台 range。

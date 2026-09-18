@@ -67,6 +67,9 @@ pub(crate) enum GcRootKindV1 {
     ForeignBridge,
     CoroutineFrame,
     HandleSlot,
+    /// 压缩引用根：槽内是 cage 相对压缩字，必须经 checked 解码后才参与 owner 解析与标记；
+    /// 判别值 5 与栈图 `compressed-ref` 判别值一一对应。
+    CompressedRef,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

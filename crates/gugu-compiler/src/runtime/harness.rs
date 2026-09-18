@@ -1851,3 +1851,272 @@ impl BlockReturnHarness {
         Ok(returned)
     }
 }
+
+/// checked pointer compression 的进程内可运行切片。
+///
+/// 输入是编译器对共享环境夹具的真实产物：默认（关闭）profile 下验证 full-pointer 等价，
+/// 随后以显式 cage profile 重建契约，让 managed arena 从 cage island 切出、压缩根经 checked
+/// 解码参与 root slice/mark seeding、minor 搬迁后重新编码，并逐条拒绝非法 FFI 交接。
+#[derive(Clone, Copy, Debug)]
+pub struct CompressionHarness {
+    owners: u32,
+    objects: u32,
+}
+
+/// CompressionHarness 运行报告。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompressionReport {
+    /// owner 数。
+    pub owners: u32,
+    /// 每个 owner 分配的 managed 对象数。
+    pub objects: u32,
+    /// 成功解码的压缩引用数（含吞吐测量的解码）。
+    pub decodes: u64,
+    /// 被拒绝的解码数。
+    pub rejections: u64,
+    /// 成功的 FFI 保存数。
+    pub foreign_saves: u64,
+    /// 已切出的 cage island 数。
+    pub islands: u64,
+    /// 吞吐测量每个安全点上的压缩槽数。
+    pub decode_slots: u32,
+    /// 吞吐测量中成功解码的槽数。
+    pub decode_words: u64,
+    /// 吞吐测量耗时（微秒）。
+    pub decode_micros: u64,
+    /// 不变量是否守恒。
+    pub invariants_hold: bool,
+    /// 运行耗时（微秒）。
+    pub elapsed_micros: u64,
+}
+
+/// 解码吞吐测量的压缩槽数。
+const DECODE_THROUGHPUT_SLOTS: u32 = 64;
+/// 解码吞吐测量的重复轮数；总解码数为 `DECODE_THROUGHPUT_SLOTS * DECODE_THROUGHPUT_ROUNDS`。
+const DECODE_THROUGHPUT_ROUNDS: u32 = 64;
+
+/// 在一个已配置 cage profile 的世界里测量 `scan_roots` 的压缩槽解码吞吐。
+///
+/// 栈布局是合成的（固定函数/安全点/map 与按当前 generation 编码的字数组），但 cage 是真实
+/// 预留、解码走真实 checked 路径，因此 decode/us 反映解码成本而不是位运算循环。
+fn measure_decode_throughput(world: &mut RawWorld) -> Result<(u64, u64), RawInvariant> {
+    use super::stackmap::{WalkFunction, WalkMap, WalkSafepoint, WalkWorld, scan_roots};
+
+    let descriptor = world
+        .compression()
+        .and_then(|plane| plane.descriptor(0).ok())
+        .ok_or_else(|| RawInvariant::new("吞吐测量需要已登记的 cage"))?;
+    let word = world.compression_mut()?.encode(descriptor.base + 0x40)?;
+    let functions = vec![WalkFunction {
+        code_rva: 0x1000,
+        code_size: 64,
+        frame_size: 24,
+    }];
+    let safepoints = vec![WalkSafepoint {
+        function: 0,
+        pc_offset: 8,
+        kind: 0,
+        map: 0,
+    }];
+    let maps = vec![WalkMap {
+        compressed: (0..DECODE_THROUGHPUT_SLOTS).collect(),
+        ..WalkMap::default()
+    }];
+    let words = vec![word; DECODE_THROUGHPUT_SLOTS as usize];
+    let walk = WalkWorld {
+        functions: &functions,
+        safepoints: &safepoints,
+        maps: &maps,
+        handles: &[],
+        landings: &[],
+    };
+    let mut decodes = 0_u64;
+    let start = Instant::now();
+    for _ in 0..DECODE_THROUGHPUT_ROUNDS {
+        let roots = scan_roots(&walk, 0, &words, world.compression_mut()?)
+            .map_err(|error| RawInvariant::new(error.message().to_owned()))?;
+        decodes += u64::try_from(roots.len()).expect("槽数适配 u64");
+    }
+    Ok((decodes, elapsed_micros(start)))
+}
+
+impl CompressionHarness {
+    /// 创建 harness；owner 数至少 1，对象数至少 1。
+    pub fn new(owners: u32, objects: u32) -> Self {
+        Self {
+            owners: owners.max(1),
+            objects: objects.max(1),
+        }
+    }
+
+    /// 驱动 full-pointer 对照、cage 配置、压缩根 cycle 与非法 FFI 路径。
+    pub fn run(self) -> CompressionReport {
+        let start = Instant::now();
+        let mut report = CompressionReport {
+            owners: self.owners,
+            objects: self.objects,
+            decodes: 0,
+            rejections: 0,
+            foreign_saves: 0,
+            islands: 0,
+            decode_slots: DECODE_THROUGHPUT_SLOTS,
+            decode_words: 0,
+            decode_micros: 0,
+            invariants_hold: false,
+            elapsed_micros: 0,
+        };
+        match self.drive() {
+            Ok((decodes, rejections, foreign_saves, islands, decode_words, decode_micros)) => {
+                report.decodes = decodes;
+                report.rejections = rejections;
+                report.foreign_saves = foreign_saves;
+                report.islands = islands;
+                report.decode_words = decode_words;
+                report.decode_micros = decode_micros;
+                report.invariants_hold = true;
+            }
+            Err(error) => eprintln!("compression harness 失败: {error:?}"),
+        }
+        report.elapsed_micros = elapsed_micros(start);
+        report
+    }
+
+    fn drive(self) -> Result<(u64, u64, u64, u64, u64, u64), RawInvariant> {
+        use crate::runtime::cage::ForeignPin;
+        use crate::runtime::compression_schema::{CompressionDemand, CompressionPolicyV1};
+        use crate::runtime::gc_metadata_contract::GC_ARENA_BYTES;
+        use crate::runtime::world::heap_impl::ManagedPlacement;
+        use crate::{CompileRequest, Compiler, TargetName};
+
+        // 步骤 1：真实编译的默认契约不启用 cage，关闭态世界也不得登记任何 cage。
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            SHARED_SENDER_SOURCE,
+            TargetName::X86_64Linux,
+        ));
+        let raw = compilation
+            .raw_contract()
+            .ok_or_else(|| RawInvariant::new("真实契约必须存在"))?;
+        if raw.compression().enabled() || raw.compression().cage_bytes() != 0 {
+            return Err(RawInvariant::new("默认编译不得启用 cage profile"));
+        }
+        let mut pristine = RawWorld::new(23, self.owners, 256, BatchLimits::default())?;
+        pristine.configure_gc(raw)?;
+        let cage_registered = pristine
+            .compression()
+            .is_some_and(|plane| plane.enabled() || plane.descriptor(0).is_ok());
+        if cage_registered {
+            return Err(RawInvariant::new("关闭态世界不得登记 cage"));
+        }
+        let plain = pristine.allocate_managed(0, 1, 8, ManagedPlacement::Nursery)?;
+        if pristine
+            .compression()
+            .is_some_and(|plane| plane.cage_of(plain).is_some())
+        {
+            return Err(RawInvariant::new("关闭态地址不得落在 cage 内"));
+        }
+
+        // 步骤 2：在真实契约上以显式 cage profile 重建契约；cage 容量取 4 个 arena 粒度。
+        let cage_bytes = 4 * GC_ARENA_BYTES;
+        let contract = raw
+            .clone()
+            .with_compression(
+                CompressionPolicyV1::cage(cage_bytes),
+                CompressionDemand {
+                    decode_sites: 2,
+                    compressed_root_slots: 2,
+                },
+            )
+            .map_err(|error| RawInvariant::new(error.message().to_owned()))?;
+        let mut world = RawWorld::new(29, self.owners, 256, BatchLimits::default())?;
+        world.configure_gc(&contract)?;
+
+        // 步骤 3：managed arena 必须落在 cage 内；压缩根写入编码字并参与 root slice 与 seed。
+        let mut addresses = Vec::with_capacity(self.objects as usize);
+        for _ in 0..self.objects {
+            addresses.push(world.allocate_managed(0, 1, 8, ManagedPlacement::Old)?);
+        }
+        let cage = world
+            .compression()
+            .and_then(|plane| plane.descriptor(0).ok())
+            .ok_or_else(|| RawInvariant::new("cage 必须已登记"))?;
+        for arena in world.managed_arenas() {
+            let inside = arena.base >= cage.base && arena.base - cage.base < cage.len;
+            if !inside {
+                return Err(RawInvariant::new("managed arena 基址必须落在 cage 内"));
+            }
+        }
+        if world.managed_arenas().is_empty() {
+            return Err(RawInvariant::new("必须至少登记一个 managed arena"));
+        }
+        let mut slots = Vec::with_capacity(self.objects as usize);
+        for address in &addresses {
+            slots.push(world.register_compressed_root(1, *address)?);
+        }
+        let report = world.run_mark_pass(&[0])?;
+        let stats = world
+            .compression_stats()
+            .ok_or_else(|| RawInvariant::new("压缩统计必须存在"))?;
+        if stats.decodes < u64::from(self.objects) {
+            return Err(RawInvariant::new("root slice 与 seed 必须解码每个压缩根"));
+        }
+        if report.marked < u64::from(self.objects) {
+            return Err(RawInvariant::new("压缩根必须 seed 到全部对象"));
+        }
+
+        // 步骤 4：minor 搬迁后压缩字重新编码；非法 FFI 路径逐条被拒绝。
+        let nursery = world.allocate_managed(0, 1, 8, ManagedPlacement::Nursery)?;
+        let slot = world.register_compressed_root(1, nursery)?;
+        let before = world.compressed_root_word(slot)?;
+        world.collect_minor(0)?;
+        let after = world.compressed_root_word(slot)?;
+        if after == before {
+            return Err(RawInvariant::new("搬迁后压缩根字必须重新编码"));
+        }
+        let forged = ForeignPin {
+            cage: 0,
+            offset: 0x40,
+            generation: 1,
+            sequence: 0,
+        };
+        if world.save_for_foreign(forged).is_ok() {
+            return Err(RawInvariant::new("无 pin 的 FFI 保存必须失败"));
+        }
+        let foreign = world.allocate_managed(0, 1, 8, ManagedPlacement::Old)?;
+        let pin = world.pin_for_foreign(0, foreign)?;
+        let saved = world.save_for_foreign(pin)?;
+        world.release_for_foreign(0, saved, pin)?;
+        if world.save_for_foreign(pin).is_ok() {
+            return Err(RawInvariant::new("释放后的 FFI 保存必须失败"));
+        }
+        let pin = world.pin_for_foreign(0, foreign)?;
+        let advanced = world.compression_mut()?.advance_generation(0)?;
+        if advanced == forged.generation {
+            return Err(RawInvariant::new("generation 推进必须改变当前值"));
+        }
+        if world.save_for_foreign(pin).is_ok() {
+            return Err(RawInvariant::new("过期 generation 的 FFI 保存必须失败"));
+        }
+        let stats = world
+            .compression_stats()
+            .ok_or_else(|| RawInvariant::new("压缩统计必须存在"))?;
+        if stats.foreign_saves == 0 || stats.foreign_rejections < 3 {
+            return Err(RawInvariant::new("FFI 统计必须记录成功保存与拒绝"));
+        }
+        let islands = world.compression().map_or(0, |plane| plane.island_count());
+        // 最后在真实 cage 上测解码吞吐：字按当前 generation 重新编码，走与栈扫描相同的
+        // checked 路径。
+        let (decode_words, decode_micros) = measure_decode_throughput(&mut world)?;
+        let stats = world
+            .compression_stats()
+            .ok_or_else(|| RawInvariant::new("压缩统计必须存在"))?;
+        Ok((
+            stats.decodes,
+            stats.rejections,
+            stats.foreign_saves,
+            islands,
+            decode_words,
+            decode_micros,
+        ))
+    }
+}
