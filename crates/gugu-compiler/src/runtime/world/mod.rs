@@ -14,6 +14,7 @@ pub(crate) mod mark_impl;
 pub(crate) mod pacing_impl;
 mod region_impl;
 mod resource_impl;
+pub(crate) mod shared_forward_impl;
 pub(crate) mod shared_heap_impl;
 pub(crate) mod sync_impl;
 pub(crate) mod termination_impl;
@@ -61,6 +62,10 @@ mod mark_world_tests;
 #[cfg(test)]
 #[path = "region_tests.rs"]
 mod region_tests;
+
+#[cfg(test)]
+#[path = "shared_forward_tests.rs"]
+mod shared_forward_tests;
 
 #[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
@@ -180,6 +185,12 @@ pub(crate) struct RawWorld {
     shared_registry: shared_heap_impl::SharedRegistry,
     /// 世界侧共享字段访问的单调 token；每次 begin/resolve/end 用一个新的非零 token。
     shared_access_token: u32,
+    /// 每个 active guard 的已解析身份，按 `token - 1` 稠密索引；结束时清槽。
+    shared_accesses: Vec<Option<super::shared_heap::SharedAccessToken>>,
+    /// 共享 payload 搬迁的单调 lease；每次 forward 取一个新的非零值，目标 owner 按它结清。
+    next_shared_forward_lease: u32,
+    /// 共享平面的累计计数；报告用相邻快照之差得到每次推进的真实工作量。
+    shared_totals: shared_forward_impl::SharedForwardTotals,
     /// MarkMailbox、owner credit 与终止检测的执行平面；`configure_gc` 之后才可用。
     mark: Option<super::mark::MarkPlane>,
     /// 每个 owner 的 mark worklist；元素是待标记对象的 payload 地址。
@@ -291,6 +302,9 @@ impl RawWorld {
             shared_heap: None,
             shared_registry: super::world::shared_heap_impl::SharedRegistry::new(),
             shared_access_token: 0,
+            shared_accesses: Vec::new(),
+            next_shared_forward_lease: 0,
+            shared_totals: shared_forward_impl::SharedForwardTotals::default(),
             mark: None,
             mark_worklists: Vec::new(),
             cycle_epoch: 0,
@@ -774,6 +788,20 @@ impl RawWorld {
                 if outcome != EdgeOutcome::Held {
                     self.graced_nodes.push(message_id);
                 }
+                consumed += 1;
+                continue;
+            }
+            if self.pool.family_of(message_id) == MessageFamilyTag::HandleForward {
+                let message = self.pool.load_handle_forward(message_id);
+                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
+                {
+                    return Err(RawInvariant::new(
+                        "handle forward 投递到非目标 owner 的 inbox",
+                    ));
+                }
+                // 通知本身不携带 node 之外的净差量：结清 lease 与 grace 后 node 直接进入 grace。
+                self.service_handle_forward(owner, &message)?;
+                self.graced_nodes.push(message_id);
                 consumed += 1;
                 continue;
             }

@@ -116,48 +116,117 @@ impl RawWorld {
         Ok(handle)
     }
 
-    /// 在 access guard 内读取共享 payload 的一个 64-bit 字段。
-    pub(crate) fn load_shared_field(
+    /// 建立一个覆盖多次字段访问的共享 access guard；返回非零 token。
+    ///
+    /// 一个 token 对应 LIR 的一个 `SharedAccessBegin`/`SharedAccessEnd` 区间：区间内的读写共用
+    /// 同一个已解析身份，因此 guard 结束前捕获的 payload 始终有效，搬迁不会让同一区间内的两次
+    /// 读落到不同 payload 上。token 只在 world 生命周期内单调分配，绝不复用。
+    pub(crate) fn begin_shared_access(
         &mut self,
         handle: super::super::shared_heap_schema::SharedHandle,
+    ) -> Result<u32, RawInvariant> {
+        let token = self.next_shared_access_token()?;
+        let access = {
+            let heap = self.shared_heap_mut()?;
+            heap.begin_access(token, handle)
+                .map_err(shared_heap_error)?;
+            heap.resolve_access(token).map_err(shared_heap_error)?
+        };
+        let index = usize::try_from(token - 1).expect("token 下标适配 usize");
+        if index >= self.shared_accesses.len() {
+            self.shared_accesses.resize(index + 1, None);
+        }
+        self.shared_accesses[index] = Some(access);
+        Ok(token)
+    }
+
+    /// 在 active guard 内读取共享 payload 的一个 64-bit 字段。
+    pub(crate) fn load_shared_field_with(
+        &mut self,
+        token: u32,
         offset: u32,
     ) -> Result<u64, RawInvariant> {
-        let token = self.next_shared_access_token()?;
-        let heap = self.shared_heap_mut()?;
-        heap.begin_access(token, handle)
+        let access = self.shared_access(token)?;
+        let bytes = self
+            .shared_heap_mut()?
+            .load(access, offset, 8)
             .map_err(shared_heap_error)?;
-        let access = heap.resolve_access(token).map_err(shared_heap_error)?;
-        let bytes = heap.load(access, offset, 8).map_err(shared_heap_error)?;
-        heap.end_access(token).map_err(shared_heap_error)?;
         let raw: [u8; 8] = bytes
             .try_into()
             .map_err(|_| RawInvariant::new("共享字段读取字节数不是 8"))?;
         Ok(u64::from_le_bytes(raw))
     }
 
-    /// 在 access guard 内写入共享 payload 的一个 64-bit 字段。
-    pub(crate) fn store_shared_field_value(
+    /// 在 active guard 内写入共享 payload 的一个 64-bit 字段。
+    pub(crate) fn store_shared_field_with(
         &mut self,
-        handle: super::super::shared_heap_schema::SharedHandle,
+        token: u32,
         offset: u32,
         value: u64,
     ) -> Result<(), RawInvariant> {
-        let token = self.next_shared_access_token()?;
-        let heap = self.shared_heap_mut()?;
-        heap.begin_access(token, handle)
+        let access = self.shared_access(token)?;
+        self.shared_heap_mut()?
+            .store(access, offset, &value.to_le_bytes())
+            .map(|_| ())
+            .map_err(shared_heap_error)
+    }
+
+    /// 结束 access guard 并释放 token。
+    pub(crate) fn end_shared_access(&mut self, token: u32) -> Result<(), RawInvariant> {
+        let access = self.shared_access(token)?;
+        self.shared_heap_mut()?
+            .end_access(access.token)
             .map_err(shared_heap_error)?;
-        let access = heap.resolve_access(token).map_err(shared_heap_error)?;
-        heap.store(access, offset, &value.to_le_bytes())
-            .map_err(shared_heap_error)?;
-        heap.end_access(token).map_err(shared_heap_error)?;
+        let index = usize::try_from(token - 1).expect("token 下标适配 usize");
+        self.shared_accesses[index] = None;
         Ok(())
+    }
+
+    /// 取回一个 active guard 的已解析身份；token 未建立或已结束时失败。
+    fn shared_access(
+        &self,
+        token: u32,
+    ) -> Result<super::super::shared_heap::SharedAccessToken, RawInvariant> {
+        let offset = token
+            .checked_sub(1)
+            .ok_or_else(|| RawInvariant::new("共享 access token 必须非零"))?;
+        let index = usize::try_from(offset).expect("token 下标适配 usize");
+        self.shared_accesses
+            .get(index)
+            .copied()
+            .flatten()
+            .ok_or_else(|| RawInvariant::new("共享 access token 未建立或已结束"))
+    }
+
+    /// 把一个 payload lease 提升为非移动 lease；它阻止 forwarding，直到 `unpin_shared_handle`。
+    pub(crate) fn pin_shared_handle(
+        &mut self,
+        handle: super::super::shared_heap_schema::SharedHandle,
+    ) -> Result<(), RawInvariant> {
+        self.shared_heap_mut()?
+            .pin(handle)
+            .map_err(shared_heap_error)
+    }
+
+    /// 释放一个共享 pin lease；没有未结清 lease 时失败。
+    pub(crate) fn unpin_shared_handle(
+        &mut self,
+        handle: super::super::shared_heap_schema::SharedHandle,
+    ) -> Result<(), RawInvariant> {
+        self.shared_heap_mut()?
+            .unpin(handle)
+            .map_err(shared_heap_error)
     }
 
     /// 写入一个共享 payload 的字段，并接入与本地字段同一条 hybrid barrier 记账路径。
     ///
-    /// 顺序与 `store_managed_field` 一致：先经 guard 读旧值，再算 old/new 目标 block，再写
-    /// payload，最后执行 shade/card/edge 记账。区别只在身份来源：目标 block 是 registry 的
-    /// 世界级共享 block，因此 card 键与 edge 端点既能区分 owner，也不会与 LocalHeap 撞车。
+    /// 顺序与 `store_managed_field` 一致：先读旧值，再算 old/new 目标 block，再写 payload，
+    /// 最后执行 shade/card/edge 记账。区别有两点：旧值读取与新值写入共用一个 access guard，
+    /// 因此搬迁不会让「读到的旧值」与「写入的目标」落在不同 payload 上；目标 block 是 registry
+    /// 的世界级共享 block，因此 card 键与 edge 端点既能区分 owner，也不会与 LocalHeap 撞车。
+    ///
+    /// 失败路径不结束 guard：共享平面的失败都是不变量失败，世界已经不可用，泄漏的 guard 不会
+    /// 被观察到；成功路径保证 guard 在一个函数内精确结清。
     pub(crate) fn store_shared_managed_field(
         &mut self,
         owner: u32,
@@ -172,7 +241,8 @@ impl RawWorld {
         let card_offset = u64::from(record.block_offset)
             .checked_add(u64::from(offset))
             .ok_or_else(|| RawInvariant::new("共享字段 card 偏移溢出"))?;
-        let old = self.load_shared_field(handle, offset)?;
+        let token = self.begin_shared_access(handle)?;
+        let old = self.load_shared_field_with(token, offset)?;
         let old_target = if old == 0 {
             None
         } else {
@@ -196,7 +266,8 @@ impl RawWorld {
             .table(descriptor)
             .map(|table| table.arena_generation())
             .ok_or_else(|| RawInvariant::new("共享 block 缺 card table 登记"))?;
-        self.store_shared_field_value(handle, offset, value)?;
+        self.store_shared_field_with(token, offset, value)?;
+        self.end_shared_access(token)?;
         let site = BarrierSite {
             arena_descriptor: descriptor,
             arena_generation,

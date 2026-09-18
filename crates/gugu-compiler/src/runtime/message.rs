@@ -468,7 +468,12 @@ pub(crate) struct MarkTicket {
 pub(crate) struct HandleForward {
     /// raw intrusive link；只存在于 non-moving message storage。
     pub(crate) next: Option<u32>,
-    /// 目标 owner 的稳定身份（handle 表的拥有者）。
+    /// 目标 owner 的稳定身份（payload 与 block 的 owner，也是该 block card table 的 manager）。
+    ///
+    /// 搬迁通知的投递目标与共享 block 的另外两条通道（mark ticket、card batch）同源：三者都指向
+    /// block 的 payload owner，因为只有它能在自己的消费上下文里结清 lease、推进 grace 并回收旧
+    /// payload。契约里没有第二份「handle 表 owner」身份，未来按 owner 分表时表 owner 就是 payload
+    /// owner，两种读法收敛。
     pub(crate) target: OwnerToken,
     /// stable handle 的逻辑表身份。
     pub(crate) handle_table: u32,

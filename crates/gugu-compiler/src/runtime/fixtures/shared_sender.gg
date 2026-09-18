@@ -1,0 +1,9 @@
+//! 共享环境夹具：闭包跨 channel 发送后仍被发送方使用，因此捕获环境必须落在 SharedHeap。
+
+fn main() {
+    let channel = chan[fn() int](1)
+    let value = 1
+    let closure = fn() int { return value }
+    channel.send(closure)
+    _ = closure()
+}

@@ -10,6 +10,7 @@
 //!    次动作立刻回填 `note_swept`/`note_released`，重复执行会被平面判成不变量失败。
 
 use super::RawWorld;
+use super::shared_heap_impl;
 use crate::runtime::candidate::{
     BlockPairCount, CandidateAction, CandidateInputs, CandidateProgress, CandidateReport,
     CandidateStats,
@@ -188,6 +189,9 @@ impl RawWorld {
             ids.insert(destination.id);
         }
         ids.extend(edges.dirty_blocks());
+        // 候选回收的域是 LocalHeap 的块：共享 block 没有 arena 类别与 LocalHeap 块状态，它的字节
+        // 归还由 block return 路径负责，因此不进入候选快照，也不参与试验删除与 SCC 判定。
+        ids.retain(|id| !shared_heap_impl::is_shared_descriptor(id.arena()));
         let mut snapshots = Vec::with_capacity(ids.len());
         for id in ids {
             snapshots.push(self.candidate_snapshot(id)?);

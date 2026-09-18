@@ -21,6 +21,7 @@ use super::super::message::{
 use super::super::slab::{OwnerToken, RawInvariant};
 use super::RawWorld;
 use super::heap_impl::heap_error;
+use super::shared_heap_impl;
 
 impl RawWorld {
     /// 返回边差量平面；未配置时报不变量失败。
@@ -263,10 +264,11 @@ impl RawWorld {
         Ok(())
     }
 
-    /// 管理权转移：把 `owner` 持有的全部 managed arena 的 manager 改成新 token。
+    /// 管理权转移：把 `owner` 持有的全部 managed arena 与共享 block 的 manager 改成新 token。
     ///
-    /// payload 仍留在原 heap，只有“谁能改这些 block”随之转移；因此已经在飞的 ticket 与
-    /// edge delta 会在消费时按新 manager 重新路由。
+    /// payload 仍留在原 heap/block，只有“谁能改这些 block”随之转移；因此已经在飞的 ticket、
+    /// edge delta 与 CardMark batch 会在消费时按新 manager 重新路由。共享 block 的 registry
+    /// owner 与 card table manager 必须一起改：搬迁判据与 batch 路由读的都是它们。
     pub(crate) fn handover_managed_arenas(
         &mut self,
         owner: u32,
@@ -286,7 +288,7 @@ impl RawWorld {
             self.heap_mut(heap_owner)?
                 .set_arena_manager(heap_slot, target.owner_id.raw());
         }
-        Ok(moved)
+        Ok(moved + self.handover_shared_blocks(owner, target)?)
     }
 
     /// 返回一个 block 身份当前的 manager token。
@@ -294,6 +296,9 @@ impl RawWorld {
         &self,
         block: BlockRef,
     ) -> Result<super::super::slab::OwnerToken, RawInvariant> {
+        if shared_heap_impl::is_shared_descriptor(block.id.arena()) {
+            return self.shared_block_manager(block);
+        }
         let arena = self.managed_arena_by_descriptor(block.id.arena())?;
         let generation = self.managed_block_generation(block.id)?;
         if generation != block.generation {
@@ -304,6 +309,9 @@ impl RawWorld {
 
     /// 返回一个 block 身份当前持有 payload 的 owner。
     fn block_owner(&self, block: BlockRef) -> Result<u32, RawInvariant> {
+        if shared_heap_impl::is_shared_descriptor(block.id.arena()) {
+            return self.shared_block_owner(block);
+        }
         let arena = self.managed_arena_by_descriptor(block.id.arena())?;
         let generation = self.managed_block_generation(block.id)?;
         if generation != block.generation {
@@ -340,6 +348,11 @@ impl RawWorld {
         block: ManagedBlockId,
     ) -> Result<(), RawInvariant> {
         self.edge_plane_mut()?.note_dirty(block);
+        // 共享 block 不是 LocalHeap arena 的块：它没有 arena 类别，物理归还由 block return 路径
+        // 负责，因此这里只登记边平面的 dirty，不进入 LocalHeap 的块状态与候选回收。
+        if shared_heap_impl::is_shared_descriptor(block.arena()) {
+            return Ok(());
+        }
         let heap_owner = self.managed_arena_by_descriptor(block.arena())?.heap_owner;
         let kind = self
             .heap_mut(heap_owner)?

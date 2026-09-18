@@ -586,6 +586,11 @@ impl CardTable {
         self.manager
     }
 
+    /// 改写管理该 arena 的 owner；管理权转移后 CardMark batch 必须投给新 owner。
+    pub(crate) const fn set_manager(&mut self, manager: OwnerToken) {
+        self.manager = manager;
+    }
+
     /// 返回 arena generation。
     pub(crate) const fn arena_generation(&self) -> u32 {
         self.arena_generation
@@ -907,6 +912,22 @@ impl BarrierPlane {
     /// 返回尚未被 arena owner 消费的 batch 字节。
     pub(crate) const fn pending_batch_bytes(&self) -> u64 {
         self.pending_batch_bytes
+    }
+
+    /// 管理权转移：把 manager 等于 `from` 的全部 card table 改成 `to`；返回改动的表数。
+    ///
+    /// batch 路由读的就是 `CardTable::manager`（`flush_barrier` 按它决定本地写还是跨 owner
+    /// 发布，`service_card_mark` 按它校验投递目标），因此转移必须按 manager 扫描而不是按 arena
+    /// 种类分别处理：漏掉任一类都会让 CardMark 继续投给已经退役的 owner。
+    pub(crate) fn handover_manager(&mut self, from: OwnerToken, to: OwnerToken) -> u32 {
+        let mut changed = 0_u32;
+        for table in self.tables.values_mut() {
+            if table.manager() == from {
+                table.set_manager(to);
+                changed = changed.checked_add(1).expect("card table 数适配 u32");
+            }
+        }
+        changed
     }
 
     /// 返回 arena 数量。

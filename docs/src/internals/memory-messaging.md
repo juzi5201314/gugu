@@ -396,7 +396,7 @@ queue-page grace，但消息类型严格分离：
 | `EdgeDelta` | 批量发布跨 block edge 增删 | source/target block、generation、count、epoch |
 | `CardMarkBatch` | 把 processor-local remembered-set card 标记交给 arena owner | arena descriptor、generation、card index/range、cycle epoch、bytes |
 | `RegionTransfer` | 转移私有 region descriptor | region、generation、type summary、bytes、export state |
-| `HandleForward` | 通知/审计 stable handle forwarding | handle slot/table、handle/forward generation、old/new payload identity、grace |
+| `HandleForward` | 搬迁通知与在飞 lease：目标 owner 结清 lease 并推进 grace | handle slot/table、handle/forward generation、old/new payload identity、target owner、cycle/topology epoch、bytes |
 | `HeapBlockReturn` | 返还完整空 block | arena/block descriptor、owner、generation、bytes |
 | `HeapLineRunReturn` | 返还稳定 line-run | block/line descriptor、owner、generation、bytes |
 | `HeapArenaReturn` | 返还完整空 arena | arena descriptor、owner、generation、bytes |

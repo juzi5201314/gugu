@@ -53,5 +53,9 @@ harness = false
 name = "edge_candidates"
 harness = false
 
+[[bench]]
+name = "shared_forward"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"

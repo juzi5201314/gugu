@@ -706,6 +706,25 @@ impl SharedHeap {
         self.slot_index(handle).ok().map(|index| self.slots[index])
     }
 
+    /// 返回当前 mark cycle epoch；尚未开始任何 cycle 时返回 `None`。
+    pub(crate) const fn mark_cycle(&self) -> Option<u32> {
+        if self.cycle_epoch == 0 {
+            None
+        } else {
+            Some(self.cycle_epoch)
+        }
+    }
+
+    /// 判断 handle 是否在本 mark cycle 被标记。
+    ///
+    /// 判定口径与 mark ticket 同源：`mark_epochs[slot]` 等于当前 cycle 即本 cycle 已标记。
+    /// 尚未开始任何 cycle 时不存在标记结果，返回 `false`；handle 已释放、generation 过期或
+    /// table 不匹配时失败，不按 slot 猜测对象。
+    pub(crate) fn is_marked(&self, handle: SharedHandle) -> Result<bool, SharedHeapError> {
+        let index = self.access_slot_raw(handle)?;
+        Ok(self.cycle_epoch != 0 && self.mark_epochs[index] == self.cycle_epoch)
+    }
+
     /// 判断某个 payload identity 是否仍然登记。
     pub(crate) fn payload_exists(&self, payload: SharedPayloadId) -> bool {
         self.payload_index(payload)

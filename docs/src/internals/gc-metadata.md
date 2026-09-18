@@ -168,6 +168,32 @@ old/new shade、card 记账与 edge summary 记账；写入者不是 payload own
 因此它永远按 old generation 记账；trace 中的 `SharedFieldBarrier` 与这里的记账是同一次写入的
 两个视图。
 
+共享平面的世界侧闭环与 LocalHeap sweep 同一步，都在 mark cycle 收敛并关闭之后：世界 registry
+除按 handle slot 索引的登记项外，还按 descriptor 稠密索引 block 记录，记录 bump 游标
+（`used_bytes`）、仍在使用的字节（`live_bytes`，含仍在 grace 中的旧 payload）、已真正释放的字节
+（`dead_bytes`）、存活 payload 数与是否已封口（`sealed`），切换填充 block 时就地给旧 block 封口。
+搬迁的其余步骤都在这一层：`forward_shared_payload` 先过登记项、slot 状态与 pin 门禁，用 registry
+预留目标位置并分配 payload，再让参照实现完成复制与 slot 切换，最后把旧位置记成待结清记录并发布
+`HandleForward`；`service_handle_forward` 由 payload owner 消费，在目标 token、integrity、
+topology/cycle epoch、登记项与在飞记录全部通过之后才结清 forwarding lease、推进 grace；
+`settle_shared_forwards` 负责重试同一轮未结清的记录——guard、pin 或票据仍持有旧 payload 时只把
+对象标成已交还，留给后续 cycle。sweep 的释放条件是「本 cycle 未标记 + 状态 live + 无旧 payload +
+全部 lease 归零 + 无在飞搬迁」，搬迁的判据是「已封口、有存活 payload、`dead_bytes > 0` 且
+`live_bytes <= dead_bytes`」，被 pin 的 payload 计入推迟并让该 block 本轮无法归零。`HandleForward`
+的投递目标是 payload/block owner（与 mark ticket、card batch 同源）；owner 交接时 registry owner
+与 card table manager 在同一个线性化点一起改，因此 CardMark 与 mark ticket 都跟着新 manager
+路由。block 身份解析因此按编号段分流：共享 descriptor 的 owner/manager 由 registry 回答，
+共享 block 不进入 LocalHeap 块状态与候选回收。在飞的 handle 搬迁与 region transfer 同属
+「已经离开生产者、未被目标消费」的 GC 工作，一起计入 mark 终止的 forwarding work 条件。
+
+`runtime::world::shared_forward_tests` 是这一层的确定性回归：搬迁发布通知并在目标 owner 消费后
+结清 lease 与 grace、guard 期间旧 payload 保持有效且 guard 结束后才回收、pin 推迟搬迁并让 block
+无法归零、错误目标/篡改校验/过期 handle/跳号 generation/重放全部干净拒绝且状态不变、sweep 只释放
+未标记对象、guard 或在飞搬迁推迟释放、死字节不少于活字节的 block 被搬空、管理权转移带走
+registry owner 与 card table manager、在飞搬迁阻塞 mark 终止，以及只有 LocalHeap 对象的世界零共享
+状态。`SharedForwardHarness` 与 `benches/shared_forward.rs` 用真实夹具编译产物驱动同一条路径并打印
+吞吐，不进默认测试套件。
+
 `ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `shared-heap-contract-fingerprint`、`shared-heap-demand`、`shared-heap-profile`、`shared-heap-profile-revision`、
 `shared-heap-handle-tag`、`shared-heap-slot-bytes`、`shared-heap-payload-record-bytes`、
 `shared-heap-forwarding-grace-steps`、`shared-heap-state-count`、

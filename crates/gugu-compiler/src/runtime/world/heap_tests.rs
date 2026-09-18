@@ -161,6 +161,22 @@ fn leaf(world: &mut RawWorld, placement: ManagedPlacement) -> u64 {
         .expect("leaf 可分配")
 }
 
+/// 在一个 access guard 内读取共享字段并结清 guard。
+fn read_shared_field(
+    world: &mut RawWorld,
+    handle: crate::runtime::shared_heap_schema::SharedHandle,
+    offset: u32,
+) -> u64 {
+    let token = world
+        .begin_shared_access(handle)
+        .expect("共享 guard 可建立");
+    let value = world
+        .load_shared_field_with(token, offset)
+        .expect("共享字段可读");
+    world.end_shared_access(token).expect("共享 guard 可结清");
+    value
+}
+
 /// 释放一个 block 只能清掉它自己的元数据：同一 arena 里更早的 block 必须保持完好。
 ///
 /// `release_block` 曾经用 line 下标除以 granule 字节数来算 block 的起始 granule，于是释放
@@ -826,7 +842,7 @@ fn shared_field_store_routes_through_barrier_plane() {
         .store_shared_managed_field(0, 0, handle, 8, child, Some(0))
         .expect("共享字段可写");
     assert_eq!(
-        world.load_shared_field(handle, 8).expect("字段可读"),
+        read_shared_field(&mut world, handle, 8),
         child,
         "共享 payload 必须真的写入新值"
     );
@@ -851,10 +867,7 @@ fn shared_field_store_routes_through_barrier_plane() {
     world
         .store_shared_managed_field(1, 0, handle, 8, second, Some(0))
         .expect("覆盖写可执行");
-    assert_eq!(
-        world.load_shared_field(handle, 8).expect("字段可读"),
-        second
-    );
+    assert_eq!(read_shared_field(&mut world, handle, 8), second);
     assert!(
         world.barrier().edge_pending_items() > 0,
         "覆盖写的新边必须进入 edge 账本"

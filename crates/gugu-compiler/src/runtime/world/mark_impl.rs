@@ -23,6 +23,7 @@ use super::super::message::{
 use super::super::slab::{RawInvariant, SlabDescriptorId};
 use super::RawWorld;
 use super::heap_impl::shared_heap_error;
+use super::shared_heap_impl;
 
 /// 一次 mark pass 的结果；进入 world 级 major cycle 报告与测试。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,12 +88,22 @@ impl RawWorld {
     }
 
     /// 开始一个新 mark cycle：固定身份、授权 credit、打开并确认 snapshot、seed 根。
+    ///
+    /// 授权之前必须先把在飞的 GC 工作消费掉：credit 池要求 cycle 开始时没有任何未归还的
+    /// credit，而 `EdgeDelta`（以及转投中的 ticket）正是「已经离开生产者、只能在目标 owner 的
+    /// 消费上下文里归还」的那类工作——它们可能在 cycle 边界之后才被发布（例如 pressure drain
+    /// 先发布差量、再打开 cycle）。这一步与 snapshot gate 的 `remote-consumer` 是同一件事，
+    /// 只是必须发生在授权之前，否则第一次 `begin_cycle` 就会因为未归还的差量 credit 而失败。
     pub(super) fn begin_mark_cycle(&mut self, scope: &[u32]) -> Result<u64, RawInvariant> {
         let cycle = self.mark_cycle_epoch + 1;
         let topology = self
             .directory()
             .record(self.token(0).owner_id)
             .map_or(0, |record| record.topology_epoch.raw());
+        let budget = ServiceBudget::pressure(u32::MAX, u64::MAX);
+        for owner in 0..u32::try_from(self.owners.len()).expect("owner 数适配 u32") {
+            self.drain_inboxes(owner, &budget, true)?;
+        }
         self.mark_plane_mut()?
             .begin_cycle(cycle, topology)
             .map_err(mark_error)?;
@@ -488,6 +499,17 @@ impl RawWorld {
     /// 在这里被拒绝，而不是让下游按错误的来源记账。
     pub(crate) fn resolve_source_block(&self, source: u32) -> Result<ManagedBlockId, RawInvariant> {
         let id = ManagedBlockId(source);
+        if shared_heap_impl::is_shared_descriptor(id.arena()) {
+            // 共享 block 的身份固定为 descriptor 的原点块：descriptor 未分配，或 index 非零，
+            // 都说明这个身份不对应任何已登记的共享块。
+            let registered = self
+                .shared_registry
+                .block_record(id.arena())
+                .is_some_and(|record| record.block.id == id);
+            return registered
+                .then_some(id)
+                .ok_or_else(|| RawInvariant::new("mark ticket 的来源 block 身份无法解析"));
+        }
         let owner = self
             .managed_arena_by_descriptor(id.arena())
             .map(|arena| arena.heap_owner)
@@ -511,11 +533,13 @@ impl RawWorld {
             )
             .expect("staging 数适配 u64"),
             barrier_buffer_keys: self.credit_snapshot().barrier_buffer_keys,
-            // 在途 region 移交与转发中的 ticket 都是「已经离开生产者、还没被目标消费」的 GC 工作。
+            // 在途 region 移交、转发中的 ticket 与在飞的 handle 搬迁都属于「已经离开生产者、
+            // 还没被目标消费」的 GC 工作：只要它们还在飞，mark cycle 就不允许宣布收敛。
             forwarding_work: self
                 .regions
                 .as_ref()
-                .map_or(0, |regions| regions.pending() as u64),
+                .map_or(0, |regions| regions.pending() as u64)
+                .saturating_add(self.shared_forward_pending()),
             producer_epoch_confirmed: owners,
             producer_epoch_total: owners,
         };

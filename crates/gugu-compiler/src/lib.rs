@@ -39,8 +39,9 @@ pub use runtime::{
     EdgeDemand, EdgeRuntimeContract, HarnessReport, IntrinsicBoundary, OwnerReturnHarness,
     PlatformRangeDemand, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
     ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
-    SchedulerDemand, SchedulerRuntimeContract, StackMapDemand, StackPolicy, SyncDemand,
-    SyncLockHarness, SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
+    SchedulerDemand, SchedulerRuntimeContract, SharedForwardHarness, SharedForwardReport,
+    StackMapDemand, StackPolicy, SyncDemand, SyncLockHarness, SyncLockReport, SyncRuntimeContract,
+    WaitDemand, WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,

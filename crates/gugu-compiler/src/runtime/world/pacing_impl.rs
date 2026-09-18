@@ -83,6 +83,16 @@ pub(crate) struct PressureDrainReport {
     pub(crate) candidate_blocks_released: u64,
     /// 候选平面累计判定的死亡组数（含之前 cycle）。
     pub(crate) candidate_dead_groups: u64,
+    /// 本 cycle 释放的共享对象数。
+    pub(crate) shared_released: u64,
+    /// 本 cycle 发布的共享搬迁通知数。
+    pub(crate) shared_forwarded: u64,
+    /// 本 cycle 搬迁复制的字节数。
+    pub(crate) shared_forwarded_bytes: u64,
+    /// 本 cycle 因 pin 被推迟的共享搬迁数。
+    pub(crate) shared_deferred_forwards: u64,
+    /// 本 cycle 结束时共享 block 中已封口且无存活 payload 的块数。
+    pub(crate) shared_empty_blocks: u64,
 }
 
 /// 一次 forced cycle 内推进候选决议的轮次上限。
@@ -495,6 +505,19 @@ impl RawWorld {
                         for owner in 0..self.owners.len() as u32 {
                             self.sweep_owner(owner)?;
                         }
+                        // 共享平面与 LocalHeap sweep 同一步：mark cycle 已经收敛并关闭，因此
+                        // 本 cycle 的 side mark 就是「是否可达」的权威判定。共享对象可以被任意
+                        // owner 引用，所以这里必须传全 owner scope；单 owner 的 major cycle
+                        // 不做 sweep，否则会把仍被别的 owner 引用的对象当成死亡对象。
+                        let scope = (0..self.owners.len() as u32).collect::<Vec<_>>();
+                        let shared = self.run_shared_plane(&scope)?;
+                        report.shared_released = shared.released;
+                        report.shared_forwarded = shared.forwarded;
+                        report.shared_forwarded_bytes = shared.forwarded_bytes;
+                        report.shared_deferred_forwards = shared.deferred;
+                        report.shared_empty_blocks = shared.empty_blocks;
+                        report.forwarded_messages += shared.forwarded_messages;
+                        report.consumed_messages += shared.consumed_messages;
                     }
                     // 8. 同周期决议消费：lease 归零的块必须在本次 cycle 内走完 validate/commit/
                     //    sweep/release，否则 pressure 已经把内存压到底、候选却要等下一个 cycle 才

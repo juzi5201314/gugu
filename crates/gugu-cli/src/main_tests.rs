@@ -587,4 +587,39 @@ fn build_json_reports_shared_heap_contract_keys() {
         .expect("指纹是字节数组");
     assert_eq!(fingerprint.len(), 32);
     assert!(fingerprint.iter().any(|byte| byte != &serde_json::json!(0)));
+    // 同一套契约键在只有 LocalHeap 的源码上必须报告零共享需求：共享访问的额外成本不扩散到
+    // LocalHeap 路径，否则计划里每多一个共享站点都会给纯本地程序增加运行时状态。
+    let local_only =
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
+    let compilation =
+        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+            "main.gg",
+            local_only,
+            gugu_compiler::TargetName::X86_64Linux,
+        ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    let payload = super::output::image_plan_payload(plan);
+    assert!(
+        payload["local-heap-demand"]["managed-types"]
+            .as_u64()
+            .unwrap_or(0)
+            > 0,
+        "该源码必须真的使用 LocalHeap，零共享需求才有意义"
+    );
+    let demand = payload["shared-heap-demand"]
+        .as_object()
+        .expect("共享需求是对象");
+    assert_eq!(demand.len(), 11, "需求字段集合必须与契约同源");
+    for (key, value) in demand {
+        assert_eq!(
+            value.as_u64(),
+            Some(0),
+            "{key} 在 LocalHeap-only 源码上必须为 0"
+        );
+    }
 }

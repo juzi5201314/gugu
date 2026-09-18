@@ -1228,6 +1228,44 @@ fn shared_body(compilation: &Compilation) -> Body {
         .clone()
 }
 
+/// 没有共享 placement 的源码必须零共享需求与零共享站点。
+///
+/// 这是验收项「共享访问额外成本不扩散到 LocalHeap」在 LIR 层的证据：同一份源码只要不把闭包
+/// 送出 owner，就不会出现 handle 解析、guard、字段屏障或搬迁站点，LocalHeap 路径上没有任何
+/// 共享记账。
+#[test]
+fn local_only_source_has_no_shared_heap_sites() {
+    let compilation = compile(
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }",
+    );
+    let lir = compilation.lir.as_ref().expect("已生成 LIR");
+    assert_eq!(
+        lir.shared_heap_demand(0),
+        crate::runtime::SharedHeapDemand::default(),
+        "LocalHeap-only 源码不得产生任何共享需求"
+    );
+    for body in &lir.world.bodies {
+        for instruction in &body.instructions {
+            assert!(
+                !matches!(
+                    instruction.op,
+                    Op::ResolveSharedHandle
+                        | Op::SharedAccessBegin { .. }
+                        | Op::SharedAccessEnd { .. }
+                        | Op::SharedFieldBarrier { .. }
+                        | Op::SharedFieldBarrierReserved { .. }
+                        | Op::ForwardSharedHandle
+                        | Op::GcAlloc {
+                            placement: PlacementKind::SharedHeap,
+                            ..
+                        }
+                ),
+                "LocalHeap-only 源码不得出现共享站点"
+            );
+        }
+    }
+}
+
 /// 返回每个指令与它当时所处的 guard token。
 fn guard_members(body: &Body) -> Vec<(Option<u32>, &crate::lir::body::Instruction)> {
     let mut members = Vec::new();
@@ -1248,4 +1286,6 @@ fn guard_members(body: &Body) -> Vec<(Option<u32>, &crate::lir::body::Instructio
 }
 
 /// sender 在 send 之后仍使用闭包：闭包环境必须落在 SharedHeap。
-const SHARED_SENDER: &str = "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n _ = closure()\n }";
+///
+/// 源码与 runtime harness/bench 共用同一个夹具文件，因此 LIR 需求与真实推导不会各自漂移。
+const SHARED_SENDER: &str = include_str!("../runtime/fixtures/shared_sender.gg");

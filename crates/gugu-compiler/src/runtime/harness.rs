@@ -23,11 +23,11 @@ use super::message::{
     stage_message,
 };
 use super::slab::Epoch;
-use super::slab::{OwnerToken, RawSlot};
+use super::slab::{OwnerToken, RawInvariant, RawSlot};
 use super::world::{RawWorld, ResourceShape};
 use super::{
     BATCH_MAX, OWNER_INBOX_SHARDS, RawPlaneDemand, RawPlanePolicyV1, RuntimeRawContractV1,
-    SchedulerDemand, size_class::RuntimeSizeClassId,
+    SchedulerDemand, inbox::ServiceBudget, size_class::RuntimeSizeClassId,
 };
 
 /// harness 一轮运行的结果。
@@ -1578,5 +1578,176 @@ impl RegionTransferHarness {
             elapsed_micros,
             invariants_hold: invariants,
         }
+    }
+}
+
+/// 共享环境夹具源码：harness、bench 与 LIR 回归共用同一份真实编译输入。
+const SHARED_SENDER_SOURCE: &str = include_str!("fixtures/shared_sender.gg");
+
+/// owner service 的节奏：每发布这么多条搬迁通知排空一次目标 owner。
+const DRAIN_INTERVAL: u32 = 32;
+
+/// 真实 `Compilation` 消费者的共享搬迁闭环 harness。
+///
+/// 输入是编译器对共享环境夹具的真实产物：harness 用镜像计划契约配置 `RawWorld`，逐个 handle
+/// 走完「分配 → 字段写入 → 搬迁 → 通知消费 → grace 结清」，最后跑一轮真实 cycle 观察 sweep 与
+/// block 搬迁。它不参数化契约常量，只参数化 owner 数与搬迁次数。
+#[derive(Clone, Copy, Debug)]
+pub struct SharedForwardHarness {
+    /// owner 数量；至少 2（写入方与 payload owner 分开）。
+    owners: u32,
+    /// 搬迁次数。
+    forwards: u32,
+}
+
+/// SharedForwardHarness 运行报告。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SharedForwardReport {
+    /// 请求的搬迁次数。
+    pub forwards: u64,
+    /// 累计复制的搬迁字节数。
+    pub forwarded_bytes: u64,
+    /// 累计释放的 payload 字节数。
+    pub freed_bytes: u64,
+    /// cycle 结束时已封口且无存活 payload 的共享 block 数。
+    pub empty_blocks: u64,
+    /// 运行耗时（微秒）。
+    pub elapsed_micros: u64,
+    /// 不变量是否守恒。
+    pub invariants_hold: bool,
+}
+
+impl SharedForwardHarness {
+    /// 创建 harness；owner 数至少 2，搬迁次数至少 1。
+    pub fn new(owners: u32, forwards: u32) -> Self {
+        Self {
+            owners: owners.max(2),
+            forwards: forwards.max(1),
+        }
+    }
+
+    /// 驱动全部搬迁闭环并跑一轮真实 cycle。
+    pub fn run(self) -> SharedForwardReport {
+        let start = Instant::now();
+        let mut report = SharedForwardReport {
+            forwards: u64::from(self.forwards),
+            forwarded_bytes: 0,
+            freed_bytes: 0,
+            empty_blocks: 0,
+            elapsed_micros: 0,
+            invariants_hold: false,
+        };
+        match self.drive() {
+            Ok((forwarded_bytes, freed_bytes, empty_blocks)) => {
+                report.forwarded_bytes = forwarded_bytes;
+                report.freed_bytes = freed_bytes;
+                report.empty_blocks = empty_blocks;
+                report.invariants_hold = true;
+            }
+            Err(error) => eprintln!("shared-forward harness 失败: {error:?}"),
+        }
+        report.elapsed_micros = elapsed_micros(start);
+        report
+    }
+
+    /// 返回 `(搬迁字节, 释放字节, 空 block 数)`；任何一步违反不变量都返回错误。
+    fn drive(self) -> Result<(u64, u64, u64), RawInvariant> {
+        use crate::runtime::gc_metadata_contract::GC_BLOCK_BYTES;
+        use crate::runtime::gc_metadata_section::decode_sections;
+        use crate::runtime::world::heap_impl::ManagedPlacement;
+        use crate::runtime::world::shared_forward_impl::SharedForwardOutcome;
+        use crate::{CompileRequest, Compiler, TargetName};
+
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            SHARED_SENDER_SOURCE,
+            TargetName::X86_64Linux,
+        ));
+        let plan = compilation.image_plan().expect("夹具必须编译成功");
+        let contract = compilation.raw_contract().expect("真实契约必须存在");
+        let types = decode_sections(plan.gc_type_section(), plan.gc_metadata_section())
+            .map_err(|error| RawInvariant::new(error.message().to_owned()))?;
+        let (type_index, type_size) = types
+            .types()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| (index, entry.size))
+            .next()
+            .ok_or_else(|| RawInvariant::new("夹具必须冻结至少一个 managed 类型"))?;
+        let type_index =
+            u32::try_from(type_index).map_err(|_| RawInvariant::new("类型下标超出 u32"))?;
+        let demand = plan.shared_heap_demand();
+        if demand.alloc_sites == 0 {
+            return Err(RawInvariant::new("夹具必须产生共享分配"));
+        }
+        // payload 必须能装进一个共享 block：契约上界来自冻结类型表的最大类型（含 arena metadata
+        // 这类运行时记录），按它分配会让每个 payload 独占一个 block，既不是真实负载，也把
+        // large-object 路径（物理多块 payload）提前拉进来——那条路径属于 block return 阶段。
+        let payload_bytes = u32::try_from(demand.max_payload_bytes)
+            .map_err(|_| RawInvariant::new("共享 payload 上界超出 u32"))?
+            .min(GC_BLOCK_BYTES / 8);
+        let worker = 0_u32;
+        let payload_owner = 1_u32;
+        // 在飞通知会一直占着 node 直到 owner 排空，因此容量必须容下一个 drain 周期的在飞量。
+        let nodes = self.forwards.saturating_mul(4).saturating_add(256);
+        let mut world = RawWorld::new(53, self.owners, nodes, BatchLimits::default())?;
+        world.configure_gc(contract)?;
+        let budget = ServiceBudget::pressure(u32::MAX, u64::MAX);
+        let mut consumed_total = 0_u32;
+        for index in 0..self.forwards {
+            let handle = world.allocate_shared_object(payload_owner, payload_bytes)?;
+            let child =
+                world.allocate_managed(worker, type_index, type_size, ManagedPlacement::Nursery)?;
+            world.store_shared_managed_field(worker, 0, handle, 0, child, Some(worker))?;
+            let SharedForwardOutcome::Forwarded(_) =
+                world.forward_shared_payload(worker, handle)?
+            else {
+                return Err(RawInvariant::new("无 pin 的搬迁必须成功"));
+            };
+            // owner service 是节奏点而不是每条消息一次：按固定间隔排空，与真实 runtime 的
+            // pacing 点一致，也让吞吐口径反映搬迁本身而不是 per-message 的 owner 切换。
+            let last = index + 1 == self.forwards;
+            if index % DRAIN_INTERVAL == DRAIN_INTERVAL - 1 || last {
+                let (_, consumed) = world.drain_all(payload_owner, &budget)?;
+                consumed_total = consumed_total.saturating_add(consumed);
+            }
+        }
+        if u64::from(consumed_total) < u64::from(self.forwards) {
+            return Err(RawInvariant::new("每一次搬迁通知都必须被目标 owner 消费"));
+        }
+        if world.shared_forward_pending() != 0 {
+            return Err(RawInvariant::new("返回前所有在飞搬迁都必须结清"));
+        }
+        // 一轮真实 cycle：未标记的共享对象被 sweep 释放，大部分已死的 block 被搬迁。
+        let cycle = world.run_gc_cycle(true).map_err(|error| {
+            RawInvariant::new(format!("共享平面 cycle 失败: {}", error.message()))
+        })?;
+        let totals = world.shared_forward_totals();
+        if totals.forwards != u64::from(self.forwards) {
+            return Err(RawInvariant::new("搬迁计数必须与请求一致"));
+        }
+        if world.shared_forward_pending() != 0 {
+            return Err(RawInvariant::new("cycle 结束时不得有在飞搬迁"));
+        }
+        if world.shared_registry().len() != 0 {
+            return Err(RawInvariant::new("未标记的共享对象必须在 cycle 内全部释放"));
+        }
+        // 每个对象释放一次 current payload，加上搬迁淘汰的旧 payload：正好两倍搬迁字节。
+        let expected = u64::from(payload_bytes)
+            .saturating_mul(2)
+            .saturating_mul(u64::from(self.forwards));
+        if totals.freed_bytes != expected {
+            return Err(RawInvariant::new(
+                "释放字节必须等于每个对象两次 payload 字节之和",
+            ));
+        }
+        if cycle.shared_released != u64::from(self.forwards) {
+            return Err(RawInvariant::new("cycle 必须释放全部未标记共享对象"));
+        }
+        Ok((
+            totals.forwarded_bytes,
+            totals.freed_bytes,
+            cycle.shared_empty_blocks,
+        ))
     }
 }
