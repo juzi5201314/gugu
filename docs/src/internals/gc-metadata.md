@@ -137,7 +137,17 @@ handle、compressed reference、MarkTicket、EdgeDelta 和 RegionTransfer 的 ve
 TypeId、state、lease、integrity 和 exactly-once 状态；检查失败进入 `RuntimeInvariant`，
 不能退化为普通对象扫描或 raw free。
 
-`RuntimeRawModel`（query 30）当前为 schema 19，在同一 `RuntimeRawContractV1` 中并入
+cage profile 开启时 `MANAGED_LOCAL` arena 以 island 形式从登记 cage 切出（粒度是 GC arena
+字节数），压缩引用槽保存的是 cage 相对的 `cage id | generation | offset` 编码字；根种类
+判别值 5（`compressed-ref`）与栈图判别值同源。world 在 root slice 校验、mark seeding 与
+搬迁回写三处只经同一条 checked 解码/编码路径读写它：空字解码为空引用，未登记 cage、
+过期 generation、越界 offset 或落在 canonical hole 的地址进入 `RuntimeInvariant`，回写时
+指向 cage 外对象的地址同样失败，绝不把编码字当地址使用。`MANAGED_SHARED` arena 永不成岛，
+因此压缩引用不能绕过 handle resolve；cage reservation 只增加 `range_reserved_bytes`，
+island 内 extent 提交才进入 `runtime_committed_bytes`，`compressed_ref_decodes` 与
+`compression_decode_rejections` 分别统计成功解码与拒绝。
+
+`RuntimeRawModel`（query 30）当前为 schema 20，在同一 `RuntimeRawContractV1` 中并入
 `SharedHeapRuntimeContract`（schema 1，profile `mosaic-shared-handle` revision 1）：stable
 handle 身份按高 4 位 tag `0xA`、12 位 table、24 位 generation、24 位 slot 编码，table 是逻辑
 表身份而不是宿主地址；`SharedHandleSlot` 固定 64 byte / 64 byte 对齐，登记 generation、状态、
@@ -580,6 +590,7 @@ slot成为`Dead`后，只有在stack已归还、最后一个Join/handle与runtim
 一个 GC cycle 的根来源封闭为：
 
 1. 已停协程按[栈图](stack-maps.md)给出的 stack/register root；`Foreign` 与 `DirtyWaiting` 使用保存 PC 的 `ForeignBridge` map扫描coroutine stack上的ABI bridge frame；
+   其中压缩槽（`compressed-ref`，根种类判别值 5）保存 cage 相对编码字，必须先经 checked 解码才能参与 owner 解析与标记；
 2. `RootRecord` 声明的global，以及所有已登记OS thread/TLS实例和全部live `CoroutineCold`的已初始化 coroutine-local payload；
 3. scheduler/runtime的强句柄表、`SharedHeap` handle table、`ProducerHandle.pending_node/staging`、remote/injection head、detached carry、`run_next`、LocalDeque、等待队列载荷、Join结果和resource release queue；
 4. 当前 active coroutine 的 `TurnRegion` descriptor、export summary、transfer reservation 和尚未 reset 的 region root；
@@ -751,7 +762,7 @@ GC metadata verifier 还必须检查 `BarrierReserve.max_card_marks` 与 concret
 
 ## 实现接入证据 {#implementation-evidence}
 
-`RuntimeRawModel`（query 30）在该阶段升到 schema 12、当前为 schema 19，在同一 `RuntimeRawContractV1` 中并入
+`RuntimeRawModel`（query 30）在该阶段升到 schema 12、当前为 schema 20，在同一 `RuntimeRawContractV1` 中并入
 `GcMetadataRuntimeContract`：schema 2（schema 2 起 trace descriptor 带 kind 字节、value program 带两阶段动作；root/vtable/source 段主版本仍为 1）、section 主版本 1、section 魔数 `GUGUGC01`、
 arena 2 MiB / block 32 KiB / line 128 byte，与 slab/extent 参数同源。
 `GcMetadataDemand` 由冻结类型表（`TypeUniverse.records` 与 `vtables`）推导，

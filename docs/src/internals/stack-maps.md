@@ -30,7 +30,7 @@
 | `HeapDirect` | 指向 LocalHeap 已知对象 payload 起点的强引用 | 标记对象；移动后写回新 payload 地址 |
 | `HeapInterior` | 指向 LocalHeap 对象字段、元素或切片起点 | 通过 heap span metadata 找到对象与内部偏移；移动后按偏移写回 |
 | `SharedHandle` | 指向 SharedHeap stable handle slot 的 managed 引用 | 标记 handle 当前 payload；forwarding 只切换 slot，访问必须处于 access guard |
-| `CompressedRef` | 指向登记 heap cage 内 offset 的压缩 managed 引用 | checked 解码 cage/base/offset/generation；迁移由本地更新或 handle forwarding 完成 |
+| `CompressedRef` | 指向登记 heap cage 内 offset 的压缩 managed 引用；根种类判别值 5，与 GC 根槽目录的 `compressed-ref` 同源 | 经压缩平面 checked 解码 cage id/generation/offset 与 canonical 地址；对象搬迁后按新 payload 重新编码；失败进入 `RuntimeInvariant` |
 | `StackInterior` | 指向当前协程栈范围内的 local/字段 | 不标记 heap；复制栈时加 relocation delta |
 | `NonRoot` | 原始指针、代码、metadata、整数或已死值 | 不扫描、不修改 |
 
@@ -201,9 +201,11 @@ runtime 扫描一个已停在 safepoint 的协程时：
 - `MorestackEntry`：当前函数 frame尚未建立，scratch中的 return PC是 caller PC，scratch GPR由当前 map扫描；slow path可以先处理 poll再决定是否复制 stack。
 
 `SharedHandle` 位置由 handle table 的 current payload 和 generation 解析；scanner 不把 slot
-里的 payload 当作另一个 stack root。`CompressedRef` 位置先 checked 验证 cage id、offset
-范围和 generation，再按 representation tag 标记目标；跨 cage 或 stale generation 进入
-`RuntimeInvariant`，不能当成 `HeapDirect` 猜测。
+里的 payload 当作另一个 stack root。`CompressedRef` 位置经压缩平面的单一 checked 解码路径
+解析：空字是空引用、不解码也不计数；未登记 cage、过期 generation、越界 offset 与落在
+canonical hole 的地址都进入 `RuntimeInvariant`，不能当成 `HeapDirect` 猜测。成功解码计入
+`compressed_ref_decodes`，被拒绝的解码计入 `compression_decode_rejections`。压缩字是 cage
+相对量，对象在 cage 内搬迁后由本地槽更新重新编码，因此栈复制不重定位它。
 
 每步先以 PC查 function range，再用该 function内按 offset排序的 safepoint做 binary search；找不到精确 point、frame越界或 unwind index不匹配都是 `RuntimeInvariant` fatal，不能猜测相邻 map。counted inner chunk edge与 uncounted countdown-only edge都不是 safepoint，不能把它们的 PC交给 scanner。
 
