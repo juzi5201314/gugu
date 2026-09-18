@@ -148,8 +148,20 @@ payload 与 slot 都是稠密编号，free 槽用稠密栈复用，generation �
 `resolve_payload` 只接受当前 heap 产生的 fresh identity，重复解析、过期 table/slot/generation、
 被 pin 的 forward、非递增 forward generation 与提前回收都返回不变量失败。
 
-`ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `shared-heap-contract-fingerprint`、
-`shared-heap-demand`、`shared-heap-profile`、`shared-heap-profile-revision`、
+共享对象的 block 身份由世界级 registry 分配：descriptor 从 `SHARED_DESCRIPTOR_BASE`（`1 << 24`）
+以上的独立编号段单调推进，同一 owner 的 payload 依次落在同一个共享 block 的不同偏移上，
+因此共享 block 与 LocalHeap arena 共用同一条 `descriptor * 64 + index` 编码却永不撞车。registry
+按 handle slot 稠密索引，`table` 与 `generation` 一起构成索引键；跨 owner 的 mark ticket 在写任何
+标记前先经它校验目标 owner 与是否已交还，handle 过期或 slot 未登记都直接失败。`MarkTicket`
+的目标因此分成两种形式：owner-local 用 arena descriptor + header 偏移 + block generation，
+跨 owner 共享对象用 handle table + slot + handle generation；`target-kind` 与两者一起进入
+integrity 摘要，消费端按判别值分支：local 目标入队到 owner worklist，shared 目标只调用
+`SharedHeap::mark_ticket` 并在同一分支内 `finish_mark_ticket` 结清 lease。`HandleForward` 使用
+独立的域分离摘要键 `gugu-handle-forward-integrity-v1`（取字节 12..16，与 card/region/mark 三族
+不共用前缀），车道承载 handle table/slot、handle/forward generation、old/new payload identity、
+cycle/topology epoch 与 bytes，两条 payload identity 各占一条 64-bit 车道并原样往返。
+
+`ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `shared-heap-contract-fingerprint`、`shared-heap-demand`、`shared-heap-profile`、`shared-heap-profile-revision`、
 `shared-heap-handle-tag`、`shared-heap-slot-bytes`、`shared-heap-payload-record-bytes`、
 `shared-heap-forwarding-grace-steps`、`shared-heap-state-count`、
 `shared-heap-transition-count`、`shared-heap-forward-fields` 与 `shared-heap-records`。

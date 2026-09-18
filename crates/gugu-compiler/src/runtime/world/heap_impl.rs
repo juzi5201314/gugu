@@ -15,6 +15,7 @@ use super::super::local_heap::{
 use super::super::local_heap_schema::{HEAP_BLOCKS_PER_ARENA, LocalHeapRuntimeContract};
 use super::super::slab::{MemoryDomainId, OwnerToken, RawInvariant};
 use super::RawWorld;
+use super::shared_heap_impl;
 
 /// managed 分配位置；与 `PlacementKind` 的 managed 子集一一对应。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,6 +78,49 @@ pub(super) fn heap_error(error: HeapError) -> RawInvariant {
 /// SharedHeap 参照实现失败在运行时平面上就是不变量失败：没有可恢复分支。
 pub(super) fn shared_heap_error(error: super::super::shared_heap::SharedHeapError) -> RawInvariant {
     RawInvariant::new(error.message())
+}
+
+impl RawWorld {
+    /// 分配并发布一个共享对象：payload 建立在 SharedHeap，block 身份登记在世界级 registry。
+    ///
+    /// 返回 stable handle；`block`/`offset` 由 registry 预留，因此共享 block descriptor 与
+    /// LocalHeap arena descriptor 不会重合，payload 记录里保存的也是同一个世界级身份。
+    pub(crate) fn allocate_shared_object(
+        &mut self,
+        owner: u32,
+        bytes: u32,
+    ) -> Result<super::super::shared_heap_schema::SharedHandle, RawInvariant> {
+        let (block, block_offset) = self.shared_registry.reserve(owner, bytes)?;
+        let descriptor = block.id.arena();
+        let payload = self
+            .shared_heap_mut()?
+            .allocate_payload(owner, descriptor, block_offset, bytes)
+            .map_err(shared_heap_error)?;
+        let handle = self
+            .shared_heap_mut()?
+            .resolve_payload(payload)
+            .map_err(shared_heap_error)?;
+        let entry =
+            self.shared_registry
+                .insert(handle, payload.id, owner, bytes, block, block_offset)?;
+        debug_assert_eq!(entry.block, block);
+        Ok(handle)
+    }
+
+    /// 返回一个 handle 的共享 block 登记项；handle 过期或未登记时失败。
+    pub(crate) fn shared_payload_block(
+        &self,
+        handle: super::super::shared_heap_schema::SharedHandle,
+    ) -> Result<&shared_heap_impl::SharedPayloadBlock, RawInvariant> {
+        self.shared_registry
+            .get(handle)
+            .ok_or_else(|| RawInvariant::new("共享 payload 未在世界 registry 登记"))
+    }
+
+    /// 返回共享 block 登记表的只读视图。
+    pub(crate) fn shared_registry(&self) -> &shared_heap_impl::SharedRegistry {
+        &self.shared_registry
+    }
 }
 
 impl RawWorld {

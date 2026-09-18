@@ -14,6 +14,7 @@ pub(crate) mod mark_impl;
 pub(crate) mod pacing_impl;
 mod region_impl;
 mod resource_impl;
+pub(crate) mod shared_heap_impl;
 pub(crate) mod sync_impl;
 pub(crate) mod termination_impl;
 mod wait_impl;
@@ -175,6 +176,8 @@ pub(crate) struct RawWorld {
     /// SharedHeap 契约快照与 stable handle 表；`configure_gc` 之后才可用。
     shared_heap_contract: Option<super::shared_heap_schema::SharedHeapRuntimeContract>,
     shared_heap: Option<super::shared_heap::SharedHeap>,
+    /// 共享 payload 的世界级 block 身份登记表；descriptor 与 LocalHeap 编号段分离。
+    shared_registry: shared_heap_impl::SharedRegistry,
     /// MarkMailbox、owner credit 与终止检测的执行平面；`configure_gc` 之后才可用。
     mark: Option<super::mark::MarkPlane>,
     /// 每个 owner 的 mark worklist；元素是待标记对象的 payload 地址。
@@ -284,6 +287,7 @@ impl RawWorld {
             local_heap_contract: None,
             shared_heap_contract: None,
             shared_heap: None,
+            shared_registry: super::world::shared_heap_impl::SharedRegistry::new(),
             mark: None,
             mark_worklists: Vec::new(),
             cycle_epoch: 0,

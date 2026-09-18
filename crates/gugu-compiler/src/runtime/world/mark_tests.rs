@@ -78,17 +78,21 @@ fn shared_mark_ticket_round_trips_and_settles_handle_lease() {
         .expect("源 block")
         .id
         .raw();
-    // 共享对象走真实 allocate + resolve，得到 stable handle。
-    let payload = world
-        .shared_heap_mut()
-        .expect("SharedHeap 已配置")
-        .allocate_payload(1, 3, 0, 16)
-        .expect("payload 可建立");
-    let handle = world
-        .shared_heap_mut()
-        .expect("SharedHeap 已配置")
-        .resolve_payload(payload)
-        .expect("payload 可发布");
+    // 共享对象走世界级 registry：block 身份与 LocalHeap arena descriptor 不得重叠。
+    let handle = world.allocate_shared_object(1, 16).expect("共享对象可分配");
+    let record = world.shared_payload_block(handle).expect("登记项可读");
+    assert_eq!(record.owner, 1);
+    assert!(
+        record.block.id.arena() >= super::shared_heap_impl::SHARED_DESCRIPTOR_BASE,
+        "共享 block descriptor 必须来自独立编号段"
+    );
+    assert!(
+        world
+            .managed_arenas()
+            .iter()
+            .all(|arena| arena.descriptor < super::shared_heap_impl::SHARED_DESCRIPTOR_BASE),
+        "LocalHeap arena descriptor 不得进入共享编号段"
+    );
     // credit 只能在 cycle 内 acquire：先打开 cycle，再入队共享 ticket。
     world.begin_mark_cycle(&[0, 1]).expect("mark cycle 可开始");
     let credit = world
@@ -166,8 +170,19 @@ fn shared_mark_ticket_round_trips_and_settles_handle_lease() {
         .run_mark_pass(&[0, 1])
         .expect_err("过期 handle 必须被拒绝");
     assert!(
-        error.to_string().contains("generation mismatch"),
-        "失败原因必须点名 handle 代际：{error}"
+        error.to_string().contains("registry"),
+        "失败原因必须点名共享 handle 身份来源：{error}"
+    );
+    // 世界 registry 与 SharedHeap 各自拒绝一次：把过期 handle 换成未知 slot 也一样。
+    let error = stale
+        .shared_payload_block(
+            crate::runtime::shared_heap_schema::SharedHandle::new(0, handle.slot() + 9, 1)
+                .expect("身份可构造"),
+        )
+        .expect_err("未登记的 slot 必须被拒绝");
+    assert!(
+        error.to_string().contains("未在世界 registry 登记")
+            || error.to_string().contains("registry")
     );
 }
 

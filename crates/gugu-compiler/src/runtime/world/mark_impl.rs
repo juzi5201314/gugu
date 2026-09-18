@@ -442,6 +442,16 @@ impl RawWorld {
                     handle_generation,
                 )
                 .map_err(|error| RawInvariant::new(error.message().to_owned()))?;
+                // 世界 registry 是共享 block 身份的唯一来源：ticket 必须投给 payload 的
+                // owner，且 handle 必须仍在登记表里，否则这次标记会写到别人的 block 上。
+                let record = self.shared_registry().get(handle).ok_or_else(|| {
+                    RawInvariant::new("共享 handle 未在世界 registry 登记或其 generation 已过期")
+                })?;
+                if record.owner != owner || record.returned {
+                    return Err(RawInvariant::new(
+                        "mark ticket 的 handle 不属于目标 owner 或已交还",
+                    ));
+                }
                 let heap = self
                     .shared_heap
                     .as_mut()
