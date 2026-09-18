@@ -18,6 +18,11 @@ mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
 pub(crate) mod block_return_schema;
+#[allow(
+    dead_code,
+    reason = "cage 预留、checked 解码与 FFI 交接由 world、栈图 walker 与确定性测试消费"
+)]
+mod cage;
 #[allow(dead_code, reason = "候选平面由周期汇合阶段的世界推进与确定性测试消费")]
 pub(crate) mod candidate;
 #[allow(dead_code, reason = "候选决议结构由 world 候选推进与确定性测试消费")]
@@ -182,6 +187,10 @@ mod slab;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod world;
 
+#[cfg(test)]
+mod cage_tests;
+#[cfg(test)]
+mod compression_tests;
 #[cfg(test)]
 mod edge_tests;
 #[cfg(test)]

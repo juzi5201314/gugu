@@ -1,11 +1,12 @@
 //! 栈图 walker：函数与安全点二分查找、五类根扫描、落地选择与复制输入组装。
 //!
-//! walker 只消费调用方注入的确定性布局（函数表、安全点表、map 表、handle 表、
-//! cage 表），真实机器布局由后端在分配后填充。找不到函数或安全点、帧越界、
+//! walker 只消费调用方注入的确定性布局（函数表、安全点表、map 表、handle 表）与
+//! `CompressionPlane`；真实机器布局由后端在分配后填充。找不到函数或安全点、帧越界、
 //! handle 代际过期、压缩引用越界一律返回 `RuntimeInvariant` 错误，从不猜测
 //! 相邻 map 或退回保守扫描。字级复制委托 `stack::StackImage::relocate`，本模块
 //! 只产出有序槽表与增量。
 
+use super::cage::CompressionPlane;
 use super::model::RawModelError;
 use super::stack::StackImage;
 
@@ -59,14 +60,6 @@ pub(crate) struct HandleSlot {
     pub(crate) generation: u64,
 }
 
-/// 压缩笼描述：cage 基址、长度与当前 generation。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CageDescriptor {
-    pub(crate) base: u64,
-    pub(crate) len: u64,
-    pub(crate) generation: u64,
-}
-
 /// 落地记录：`[pc_start, pc_end)` 范围内的清理链入口。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LandingRecord {
@@ -83,7 +76,6 @@ pub(crate) struct WalkWorld<'a> {
     pub(crate) safepoints: &'a [WalkSafepoint],
     pub(crate) maps: &'a [WalkMap],
     pub(crate) handles: &'a [HandleSlot],
-    pub(crate) cages: &'a [CageDescriptor],
     pub(crate) landings: &'a [LandingRecord],
 }
 
@@ -141,12 +133,14 @@ pub(crate) fn find_safepoint(
 
 /// 扫描一个安全点的五类根：按槽偏移排序返回。
 ///
-/// `words` 为已用栈范围的字数组（小端）；handle 与压缩引用的字分别经表做
-/// checked 解析，过期代际或越界一律返回错误。
+/// `words` 为已用栈范围的字数组（小端）；handle 与压缩引用的字分别经表做 checked
+/// 解析，过期代际或越界一律返回错误。压缩字经 `CompressionPlane` 的唯一解码路径解析并
+/// 计入 decode 统计；空字不解码也不计数。
 pub(crate) fn scan_roots(
     world: &WalkWorld<'_>,
     safepoint: u32,
     words: &[u64],
+    compression: &mut CompressionPlane,
 ) -> Result<Vec<ScannedRoot>, RawModelError> {
     let record = world
         .safepoints
@@ -210,26 +204,12 @@ pub(crate) fn scan_roots(
     }
     for offset in &map.compressed {
         let word = word_at(words, *offset)?;
-        if word == 0 {
-            continue;
+        if let Some(target) = compression.decode(word)? {
+            roots.push(ScannedRoot::Compressed {
+                offset: *offset,
+                target,
+            });
         }
-        let cage = (word >> 56) as u8;
-        let generation = (word >> 32) & 0xff_ffff;
-        let offset_value = word & 0xffff_ffff;
-        let descriptor = world
-            .cages
-            .get(usize::from(cage))
-            .ok_or_else(|| RawModelError::new("压缩引用 cage 未登记"))?;
-        if generation != descriptor.generation {
-            return Err(RawModelError::new("压缩引用代际过期"));
-        }
-        if offset_value >= descriptor.len {
-            return Err(RawModelError::new("压缩引用偏移越过 cage 范围"));
-        }
-        roots.push(ScannedRoot::Compressed {
-            offset: *offset,
-            target: descriptor.base + offset_value,
-        });
     }
     for offset in &map.stack {
         let word = word_at(words, *offset)?;
