@@ -157,7 +157,9 @@ HIR为每个控制流出口提供 `CleanupPlan { exit_kind, action_range, destin
 
 cleanup block的输入先保存到独立 local；正常链以 `Goto/Return` 结束，unwind链以 `ResumePanic` 结束。构造后 verifier逐出口比较 GIR action ID序列与 HIR `CleanupPlan`，差异是内部错误。返回值、deferred call环境和 resource动作的求值时点都来自 plan，不由 CFG共享改变。
 
-HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成判别值、长度和标量比较 decision DAG；共享测试只能读取已物化临时槽，leaf保存原 matrix row ID。verifier用 row ID检查守卫/臂优先级，不在本章另写一份模式语义。
+HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成判别值、长度和标量比较 decision DAG；单变体聚合（record/newtype）没有判别字节，构造器测试只做字段比较，不产生 `Discriminant` 读取。共享测试只能读取已物化临时槽，leaf保存原 matrix row ID。verifier用 row ID检查守卫/臂优先级，不在本章另写一份模式语义。模式绑定先于守卫发射：守卫读取模式绑定，绑定必须已在当前块定义。
+
+`if`/`while` 条件里的 `let` 链不经过布尔合流块：每个 `let` 段的模式测试直接把 ok 路径分支进后续段或分支体，绑定发射在 ok 路径的块内，失败路径直接指向 else/exit。SSA 封口要求被读变量在目标块的全部前驱路径上都有定义，而模式绑定只存在于匹配成功的路径上，因此「绑定路径与失败路径合并出布尔再统一开关」的形状是非法的。
 
 `ScopedViewBegin`/`ScopedViewEnd` 成对出现：view 存活区间禁止 `Suspend`/`SelectCommit`，禁止把 token 或投影逃出配对区间，每条出口恰有一次 end。`NoSafepointBegin`/`End` 只能由 `LowerConcurrency` 或登记的 runtime publish intrinsic 产生；用户表达式不得直接制造任意 region。
 
