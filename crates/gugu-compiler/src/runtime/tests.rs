@@ -7,6 +7,7 @@
 use std::collections::BTreeSet;
 
 use super::barrier_schema::BarrierDemand;
+use super::compression_schema::CompressionDemand;
 use super::extent::EXTENT_CLASS_LADDER;
 use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::{DrainStop, GraceOutcome, OwnerInbox, ServiceBudget, ShardIndex};
@@ -654,6 +655,7 @@ fn tampered_block_return_demand_is_rejected() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -705,6 +707,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -756,6 +759,7 @@ fn contract_rejects_address_fields_and_policy_drift() {
             GcPacingDemand::default(),
             MarkDemand::default(),
             LocalHeapDemand::default(),
+            CompressionDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err()
@@ -795,6 +799,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -813,13 +818,14 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
     assert_eq!(first.fingerprint(), second.fingerprint());
     assert_eq!(first.canonical_bytes(), second.canonical_bytes());
     let revised = RawPlanePolicyV1 {
-        revision: 2,
+        revision: 3,
         ..RawPlanePolicyV1::default()
     };
     let third = RuntimeRawContractV1::build(
@@ -837,6 +843,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -856,6 +863,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Windows),
     )
     .expect("契约可构建");
@@ -1559,6 +1567,7 @@ fn contract_schema_three_carries_resource_and_platform_sections() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1607,6 +1616,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1628,6 +1638,7 @@ fn resource_contract_fingerprint_tracks_demand() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -1665,6 +1676,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("栈图契约可构建");
@@ -1691,6 +1703,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             GcPacingDemand::default(),
             MarkDemand::default(),
             LocalHeapDemand::default(),
+            CompressionDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1715,6 +1728,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
             GcPacingDemand::default(),
             MarkDemand::default(),
             LocalHeapDemand::default(),
+            CompressionDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .is_err(),
@@ -1736,6 +1750,7 @@ fn stackmap_contract_tracks_demand_and_rejects_mismatch() {
         GcPacingDemand::default(),
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("空栈图契约可构建");
@@ -1777,6 +1792,7 @@ mod gc_metadata_tests {
     //! Mosaic GC metadata 契约与 boot verifier 的端到端测试。
 
     use super::super::barrier_schema::BarrierDemand;
+    use super::super::compression_schema::CompressionDemand;
     use super::super::gc_metadata_contract::{
         GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES, GcMetadataRuntimeContract,
     };
@@ -2197,6 +2213,7 @@ mod gc_metadata_tests {
                 managed_types: 3,
                 ..LocalHeapDemand::default()
             },
+            CompressionDemand::default(),
             PlatformProfile::from(TargetName::X86_64Linux),
         )
         .expect("契约可构建");

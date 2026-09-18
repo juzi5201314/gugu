@@ -6,6 +6,7 @@ use super::RawWorld;
 use super::heap_impl::ManagedPlacement;
 use crate::TargetName;
 use crate::runtime::barrier_schema::BarrierDemand;
+use crate::runtime::compression_schema::CompressionDemand;
 use crate::runtime::gc_metadata_contract::{GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES};
 use crate::runtime::gc_metadata_schema::{
     GcArenaLayoutV1, GcMetadataWorldV1, GcRootKindV1, GcRootLocationV1, GcRootRangeV1,
@@ -90,6 +91,14 @@ fn metadata_world() -> (GcMetadataWorldV1, Vec<u8>, Vec<u8>) {
 
 /// 用内建 metadata world 构造一个已验证的整体契约。
 pub(super) fn gc_contract() -> RuntimeRawContractV1 {
+    gc_contract_with(RawPlanePolicyV1::default(), CompressionDemand::default())
+}
+
+/// 用内建 metadata world 构造整体契约；policy 与压缩需求由调用方给出。
+pub(super) fn gc_contract_with(
+    policy: RawPlanePolicyV1,
+    compression_demand: CompressionDemand,
+) -> RuntimeRawContractV1 {
     let (metadata, type_section, metadata_section) = metadata_world();
     let mut gc_demand = metadata.demand();
     gc_demand.type_section_bytes = u32::try_from(type_section.len()).expect("section 长度适配 u32");
@@ -114,7 +123,7 @@ pub(super) fn gc_contract() -> RuntimeRawContractV1 {
     };
     let contract = RuntimeRawContractV1::build(
         TargetName::X86_64Linux,
-        RawPlanePolicyV1::default(),
+        policy,
         RawPlaneDemand::default(),
         RawResourceDemand::default(),
         Rt0Demand::default(),
@@ -127,6 +136,7 @@ pub(super) fn gc_contract() -> RuntimeRawContractV1 {
         GcPacingDemand::default(),
         mark_demand,
         local_heap_demand,
+        compression_demand,
         PlatformProfile::Linux,
     )
     .expect("契约可构建")

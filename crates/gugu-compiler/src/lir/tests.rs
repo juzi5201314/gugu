@@ -2,10 +2,10 @@ use super::pass::{
     self, LIR_PASS_ORDER, LirPass, constants,
     policy::{OptimizationPolicyV1, PASS_PIPELINE_REVISION, POLL_BUDGET},
     poll,
-    rewrite::Editor,
+    rewrite::{Editor, Term},
 };
 use super::{
-    body::{self, Body, Op, Provenance, Terminator, Type, ValueId, ValueType, id, range},
+    body::{self, Body, Op, Origin, Provenance, Terminator, Type, ValueId, ValueType, id, range},
     verify,
 };
 use crate::frontend::gir::placement::PlacementKind;
@@ -664,11 +664,19 @@ fn stackmap_world_covers_call_poll_suspend_and_select() {
         "入口检查必须有 MorestackEntry 记录：{kinds:?}"
     );
     // kind 分类计数与安全点总数一致；去重 map 不超过安全点数。
-    let demand = compilation
+    let (demand, compression) = compilation
         .lir
         .as_ref()
         .expect("已生成 LIR")
-        .stackmap_demand(compilation.hir.as_ref().unwrap().module());
+        .stackmap_demands(compilation.hir.as_ref().unwrap().module());
+    assert_eq!(
+        compression.decode_sites, 0,
+        "本夹具不含 DecodeCompressedRef，压缩需求必须为零"
+    );
+    assert_eq!(
+        compression.compressed_root_slots, 0,
+        "本夹具不含压缩根，压缩需求必须为零"
+    );
     assert_eq!(
         demand.call_return
             + demand.poll_resume
@@ -716,6 +724,190 @@ fn stackmap_world_covers_call_poll_suspend_and_select() {
     assert_eq!(
         cold.image_plan().expect("image-plan").stackmap_demand(),
         warm.image_plan().expect("image-plan").stackmap_demand()
+    );
+}
+
+/// 在一个 body 里插入 `DecodeCompressedRef` 并追加一个压缩槽根；没有空闲槽时返回 `None`。
+///
+/// Editor 维护 Mem 链与 uses 链；槽根是纯数据，只选空闲的 8 字节对齐偏移，避免与既有根
+/// identity 冲突。
+fn body_with_compressed_root(body: &Body) -> Option<Body> {
+    let mut editor = Editor::new(body.clone());
+    let block = editor
+        .live_blocks()
+        .into_iter()
+        .find(|block| editor.terminator_memory(*block).is_some())?;
+    let argument = editor.constant(0, Type::I64);
+    let position = editor.instruction_count(block);
+    let input = editor.terminator_memory(block)?;
+    let (_, output) = editor.insert_memory(
+        (block, position),
+        Op::DecodeCompressedRef,
+        &[argument],
+        &[(ValueType::pointer(Provenance::CompressedRef), Origin::None)],
+        input,
+    );
+    editor.set_terminator_memory(block, output);
+    let mut edited = editor.finish().ok()?;
+    let slot_index = edited.stack_slots.iter().position(|slot| {
+        (0..slot.bytes / 8).map(|step| step * 8).any(|offset| {
+            offset + 8 <= slot.bytes && !slot.roots.iter().any(|(used, _)| *used == offset)
+        })
+    })?;
+    let offset = (0..edited.stack_slots[slot_index].bytes / 8)
+        .map(|step| step * 8)
+        .find(|offset| {
+            offset + 8 <= edited.stack_slots[slot_index].bytes
+                && !edited.stack_slots[slot_index]
+                    .roots
+                    .iter()
+                    .any(|(used, _)| used == offset)
+        })?;
+    edited.stack_slots[slot_index]
+        .roots
+        .push((offset, Provenance::CompressedRef));
+    Some(edited)
+}
+
+/// 压缩需求的两个口径：解码点数与按安全点聚合的压缩根槽数。
+#[test]
+fn stackmap_demands_counts_decode_sites_and_compressed_roots() {
+    let compilation = compile(STACKMAP);
+    let module = compilation.hir.as_ref().unwrap().module();
+    let lir = compilation.lir.as_ref().expect("已生成 LIR");
+    let (pristine_stackmap, pristine_compression) = lir.stackmap_demands(module);
+    // 逐个候选 body 探测：只有 poll/suspend/select/bridge 安全点收集槽根，纯调用返回点不收集，
+    // 因此必须选一个推导后真的产生压缩根的 body。
+    let mut world = None;
+    for (index, body) in lir.world.bodies.iter().enumerate() {
+        let Some(edited) = body_with_compressed_root(body) else {
+            continue;
+        };
+        let mut candidate = (*lir.world).clone();
+        candidate.bodies[index] = edited;
+        let Ok(derived) = super::stackmap::derive(&candidate.bodies, module) else {
+            continue;
+        };
+        if derived
+            .safepoints
+            .iter()
+            .all(|point| point.roots.compressed.is_empty())
+        {
+            continue;
+        }
+        world = Some(candidate);
+        break;
+    }
+    let world = world.expect("fixture 必须有能产生压缩根槽的 body");
+    let mutated = super::Validated {
+        world: std::sync::Arc::new(world),
+    };
+    let (stackmap, compression) = mutated.stackmap_demands(module);
+    assert_eq!(
+        compression.decode_sites,
+        pristine_compression.decode_sites + 1,
+        "每条 DecodeCompressedRef 必须计为一个解码点"
+    );
+    assert_eq!(stackmap.functions, pristine_stackmap.functions);
+    assert_eq!(stackmap.safepoints, pristine_stackmap.safepoints);
+    assert_eq!(stackmap.maps, pristine_stackmap.maps);
+    // 压缩根槽按安全点聚合：同一槽根出现在多个安全点时逐点计数。
+    let derived = super::stackmap::derive(&mutated.world.bodies, module)
+        .expect("压缩槽根必须通过推导 verifier");
+    let expected = derived
+        .safepoints
+        .iter()
+        .map(|point| point.roots.compressed.len())
+        .sum::<usize>();
+    assert_eq!(
+        usize::try_from(compression.compressed_root_slots).expect("槽数适配宿主"),
+        expected,
+        "压缩根槽必须等于推导世界里逐安全点的压缩根数之和"
+    );
+    assert!(
+        expected
+            > usize::try_from(pristine_compression.compressed_root_slots).expect("槽数适配宿主"),
+        "压缩槽根必须真的进入压缩根集合"
+    );
+}
+
+/// 在挂起的 foreign 调用前插入 `DecodeCompressedRef`。
+///
+/// `pass_to_call` 为真时把调用实参换成解码结果并同步声明参数类型；为假时解码结果没有使用
+/// 者，作为对照组证明拒绝来自调用边界。
+fn foreign_call_with_decoded_argument(body: &Body, pass_to_call: bool) -> Option<Body> {
+    let mut editor = Editor::new(body.clone());
+    let (block, term) = editor.live_blocks().into_iter().find_map(|block| {
+        let term = editor.terminator(block).clone();
+        matches!(
+            &term,
+            Term::Invoke { call, arguments, .. }
+                if call.kind != crate::frontend::gir::body::CallKind::Managed
+                    && !arguments.is_empty()
+        )
+        .then_some((block, term))
+    })?;
+    let Term::Invoke {
+        call,
+        arguments,
+        results,
+        memory,
+        normal,
+        unwind,
+        safepoint,
+    } = term
+    else {
+        return None;
+    };
+    let decoded = editor.constant(0, Type::I64);
+    let input = editor.terminator_memory(block)?;
+    let (compressed, output) = editor.insert_memory(
+        (block, editor.instruction_count(block)),
+        Op::DecodeCompressedRef,
+        &[decoded],
+        &[(ValueType::pointer(Provenance::CompressedRef), Origin::None)],
+        input,
+    );
+    if pass_to_call {
+        let mut parameters = call.parameters.clone();
+        parameters[0] = ValueType::pointer(Provenance::CompressedRef);
+        let mut arguments = arguments;
+        arguments[0] = compressed[0];
+        editor.set_terminator(
+            block,
+            Term::Invoke {
+                call: body::Call { parameters, ..call },
+                arguments,
+                results,
+                memory,
+                normal,
+                unwind,
+                safepoint,
+            },
+        );
+    }
+    // 终结符重建之后再把它的 Mem 输入接到新解码结果上，避免覆写回旧链。
+    editor.set_terminator_memory(block, output);
+    editor.finish().ok()
+}
+
+/// `DecodeCompressedRef` 的结果作为非 Managed 调用参数必须被 verifier 拒绝。
+#[test]
+fn compressed_ref_as_foreign_argument_is_rejected() {
+    let compilation = compile(EFFECTS);
+    let module = compilation.hir.as_ref().unwrap().module();
+    // 对照组：同一个解码点不跨调用边界时通过，证明拒绝来自调用 ABI 规则而不是解码指令本身。
+    let control = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), false)
+        .expect("effects 夹具必须含挂起的 foreign 调用");
+    verify::verify(&control, module).expect("未跨调用边界的压缩引用解码必须通过");
+    let body = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), true)
+        .expect("effects 夹具必须含挂起的 foreign 调用");
+    let error = verify::verify(&body, module).expect_err("压缩引用不得作为 foreign 参数");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+    assert_eq!(
+        error.message(),
+        "LIR 终结符、unwind 或调用 ABI 不合法",
+        "拒绝必须来自调用 ABI 规则"
     );
 }
 

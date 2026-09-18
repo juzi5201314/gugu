@@ -386,6 +386,16 @@ fn build_json_reports_barrier_contract_keys() {
         "block-return-unit-count",
         "block-return-gate-count",
         "block-return-grace-steps",
+        "compression-contract-fingerprint",
+        "compression-demand",
+        "compression-profile",
+        "compression-profile-revision",
+        "compression-enabled",
+        "compression-cage-bytes",
+        "compression-cage-granule-bytes",
+        "compression-max-cage-bytes",
+        "compression-canonical-bits",
+        "compression-capability-supported",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
@@ -574,6 +584,16 @@ fn build_json_reports_shared_heap_contract_keys() {
         "block-return-unit-count",
         "block-return-gate-count",
         "block-return-grace-steps",
+        "compression-contract-fingerprint",
+        "compression-demand",
+        "compression-profile",
+        "compression-profile-revision",
+        "compression-enabled",
+        "compression-cage-bytes",
+        "compression-cage-granule-bytes",
+        "compression-max-cage-bytes",
+        "compression-canonical-bits",
+        "compression-capability-supported",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }

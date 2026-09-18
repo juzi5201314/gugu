@@ -87,6 +87,7 @@ impl OwnerReturnHarness {
             super::GcPacingDemand::default(),
             super::MarkDemand::default(),
             super::LocalHeapDemand::default(),
+            super::CompressionDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");
@@ -291,6 +292,7 @@ impl ResourceReleaseHarness {
             super::GcPacingDemand::default(),
             super::MarkDemand::default(),
             super::LocalHeapDemand::default(),
+            super::CompressionDemand::default(),
             super::PlatformProfile::from(super::super::TargetName::X86_64Linux),
         )
         .expect("runtime raw 契约可构建");

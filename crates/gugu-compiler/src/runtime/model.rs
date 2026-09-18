@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 
 use super::barrier_schema::{BarrierDemand, BarrierRuntimeContract, MessageFamilyTag};
 use super::block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
+use super::compression_schema::{
+    CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract,
+};
 use super::coroutine_schema::{CoroutineDemand, CoroutineRuntimeContract};
 use super::edge_schema::{EdgeDemand, EdgeRuntimeContract};
 use super::gc_metadata_contract::GcMetadataRuntimeContract;
@@ -42,9 +45,9 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 19 相对版本 18 的变化：并入 `BlockReturnRuntimeContract`（四类 managed
-/// return unit、lease/grace 门禁目录、Immix 尺寸与 `BlockReturnDemand`）。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 19;
+/// 版本 20 相对版本 19 的变化：并入 `CompressionRuntimeContract`（cage 位布局、粒度与
+/// 上限、FFI 交接规则、目标能力、`CompressionDemand`），并把 raw policy revision 升到 2。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 20;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -452,12 +455,14 @@ pub(crate) struct RawPlanePolicyV1 {
     pub(crate) queue_pad_bytes: u64,
     pub(crate) service_items: u32,
     pub(crate) service_bytes: u64,
+    /// cage profile 开关；默认关闭即 full-pointer 语义。
+    pub(crate) compression: CompressionPolicyV1,
 }
 
 impl Default for RawPlanePolicyV1 {
     fn default() -> Self {
         Self {
-            revision: 1,
+            revision: 2,
             shards: OWNER_INBOX_SHARDS,
             limits: BatchLimits::default(),
             return_node_bytes: RETURN_NODE_BYTES,
@@ -470,6 +475,7 @@ impl Default for RawPlanePolicyV1 {
             queue_pad_bytes: QUEUE_PAD_BYTES,
             service_items: BATCH_MAX,
             service_bytes: BatchLimits::default().batch_soft_bytes,
+            compression: CompressionPolicyV1::disabled(),
         }
     }
 }
@@ -529,6 +535,7 @@ pub(crate) struct RuntimeRawContractV1 {
     edge: EdgeRuntimeContract,
     shared_heap: SharedHeapRuntimeContract,
     block_return: BlockReturnRuntimeContract,
+    compression: CompressionRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -559,6 +566,7 @@ impl RuntimeRawContractV1 {
         pacing_demand: GcPacingDemand,
         mark_demand: MarkDemand,
         local_heap_demand: LocalHeapDemand,
+        compression_demand: CompressionDemand,
         profile: PlatformProfile,
     ) -> Result<Self, RawModelError> {
         let classes = RuntimeSizeClassTable::ladder(MemoryDomainId::RUNTIME_RAW)?;
@@ -590,6 +598,13 @@ impl RuntimeRawContractV1 {
             &local_heap.demand,
             &shared_heap.demand,
         )?)?;
+        // 压缩契约由显式 profile 开关与目标能力共同驱动：关闭态不预留 cage，开启态逐项核对
+        // 粒度、上限与 canonical 位宽；目标能力检查失败必须在这里，而不是在世界预留前才暴露。
+        let compression = CompressionRuntimeContract::build(
+            compression_demand,
+            policy.compression,
+            crate::target::PointerCompression::for_target(target),
+        )?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -619,6 +634,7 @@ impl RuntimeRawContractV1 {
             edge,
             shared_heap,
             block_return,
+            compression,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -800,6 +816,11 @@ impl RuntimeRawContractV1 {
         &mut self.block_return
     }
 
+    /// 返回 checked pointer compression 契约段。
+    pub(crate) fn compression(&self) -> &CompressionRuntimeContract {
+        &self.compression
+    }
+
     /// 返回 `HandleForward` 消息字段集合。
     pub(crate) fn handle_forward_message(&self) -> &MessageSchemaV1 {
         self.shared_heap.handle_forward_fields()
@@ -966,6 +987,16 @@ impl RuntimeRawContractV1 {
         self.edge.verify(&self.barrier, &self.mark)?;
         self.shared_heap.verify()?;
         self.block_return.verify()?;
+        self.compression.verify()?;
+        // 策略是 cage 段的唯一来源：子段自洽但开关/尺寸与 raw policy 对不上同样是非法状态。
+        if self.policy.compression
+            != (CompressionPolicyV1 {
+                enabled: self.compression.enabled,
+                cage_bytes: self.compression.cage_bytes,
+            })
+        {
+            return Err(RawModelError::new("压缩契约段与 raw policy 不一致"));
+        }
         if self.block_return.demand()
             != BlockReturnDemand::derive(&self.local_heap.demand(), &self.shared_heap.demand)?
         {
@@ -1079,6 +1110,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.mark.canonical_bytes());
         bytes.extend_from_slice(&self.shared_heap.canonical_bytes());
         bytes.extend_from_slice(&self.block_return.canonical_bytes());
+        bytes.extend_from_slice(&self.compression.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1313,6 +1345,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.shared_heap.dump());
         self.edge.dump_into(&mut output);
         output.push_str(&self.block_return.dump());
+        output.push_str(&self.compression.dump());
         output.push_str(&format!(
             "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} edge-delta-fields={} handle-forward-fields={} card-mark-family={}\n",
             self.message.fields.len(),
@@ -1384,6 +1417,8 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) mark_demand: MarkDemand,
     /// LocalHeap 需求视图：placement 站点、类型 footprint 与屏障站点。
     pub(crate) local_heap_demand: LocalHeapDemand,
+    /// 压缩需求视图：解码点与压缩根槽上界。
+    pub(crate) compression_demand: CompressionDemand,
     /// 已由 frontend 编码的真实 type/meta section。
     pub(crate) gc_type_section: &'a [u8],
     pub(crate) gc_metadata_section: &'a [u8],
@@ -1415,6 +1450,7 @@ pub(crate) fn run(
         inputs.pacing_demand,
         inputs.mark_demand,
         inputs.local_heap_demand,
+        inputs.compression_demand,
         inputs.gc_type_section,
         inputs.gc_metadata_section,
     ))
@@ -1458,6 +1494,7 @@ pub(crate) fn run(
                 inputs.pacing_demand,
                 inputs.mark_demand,
                 inputs.local_heap_demand,
+                inputs.compression_demand,
                 inputs.profile,
             )
             .and_then(|contract| {

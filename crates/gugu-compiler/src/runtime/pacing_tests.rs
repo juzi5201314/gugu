@@ -4,6 +4,7 @@ use super::RawWorld;
 use super::heap_impl::ManagedPlacement;
 use crate::runtime::barrier::{BarrierFlushReason, BarrierSite};
 use crate::runtime::barrier_schema::CARD_GRANULARITY_BYTES;
+use crate::runtime::compression_schema::CompressionDemand;
 use crate::runtime::gc_metadata_schema::GcRootKindV1;
 use crate::runtime::inbox::ServiceBudget;
 use crate::runtime::local_heap::{BlockRef, ManagedBlockId};
@@ -721,6 +722,7 @@ fn frame_pacing_contract_is_wired_into_the_raw_contract() {
         },
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");
@@ -752,6 +754,7 @@ fn frame_pacing_contract_is_wired_into_the_raw_contract() {
         },
         MarkDemand::default(),
         LocalHeapDemand::default(),
+        CompressionDemand::default(),
         PlatformProfile::from(TargetName::X86_64Linux),
     )
     .expect("契约可构建");

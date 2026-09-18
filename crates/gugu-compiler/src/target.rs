@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// Gugu 当前登记的目标名称。
@@ -38,6 +39,7 @@ impl TargetName {
                 pointer_width: 64,
                 rt0: Rt0Kind::LinuxSyscall,
                 cost_profile,
+                pointer_compression: PointerCompression::for_target(self),
             },
             Self::X86_64Windows => TargetDescriptor {
                 name: self,
@@ -47,6 +49,7 @@ impl TargetName {
                 pointer_width: 64,
                 rt0: Rt0Kind::WindowsThinImport,
                 cost_profile,
+                pointer_compression: PointerCompression::for_target(self),
             },
         }
     }
@@ -143,6 +146,52 @@ impl fmt::Display for Rt0Kind {
     }
 }
 
+/// 目标对 checked pointer compression 的能力声明。
+///
+/// 能力是目标属性，不随 profile 变化：`supported` 为 `false` 时任何 cage 契约都被拒绝；
+/// 上限与对齐来自目标的地址空间与 GC arena 布局，`canonical_bits` 是解码结果的合法
+/// canonical 位宽。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PointerCompression {
+    /// 目标是否支持 checked pointer compression。
+    pub supported: bool,
+    /// 单个 cage 的字节上界。
+    pub max_cage_bytes: u64,
+    /// cage 基址与尺寸必须满足的最小对齐。
+    pub min_alignment: u64,
+    /// 可用地址的 canonical 位宽；解码地址必须落在该位宽的正半区。
+    pub canonical_bits: u8,
+}
+
+impl PointerCompression {
+    /// 未登记能力：不支持任何 cage；测试用它驱动能力拒绝路径。
+    pub const fn unsupported() -> Self {
+        Self {
+            supported: false,
+            max_cage_bytes: 0,
+            min_alignment: 1,
+            canonical_bits: 0,
+        }
+    }
+
+    /// x86_64 双目标共用能力：≤4 GiB cage、2 MiB 粒度、48 位 canonical。
+    pub const fn x86_64() -> Self {
+        Self {
+            supported: true,
+            max_cage_bytes: 1 << 32,
+            min_alignment: 2 * 1024 * 1024,
+            canonical_bits: 48,
+        }
+    }
+
+    /// 按目标名返回能力。
+    pub const fn for_target(name: TargetName) -> Self {
+        match name {
+            TargetName::X86_64Linux | TargetName::X86_64Windows => Self::x86_64(),
+        }
+    }
+}
+
 /// 编译 action 使用的不可变目标描述。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TargetDescriptor {
@@ -160,6 +209,8 @@ pub struct TargetDescriptor {
     pub rt0: Rt0Kind,
     /// 后端成本基线，供内联、循环与向量化策略消费。
     pub cost_profile: BackendCostProfile,
+    /// checked pointer compression 能力。
+    pub pointer_compression: PointerCompression,
 }
 
 /// 后端成本基线：内联与向量化策略共用的校准输入。

@@ -37,7 +37,8 @@ pub use project::{
 pub use runtime::{
     BarrierDemand, BarrierRuntimeContract, BlockReturnDemand, BlockReturnHarness,
     BlockReturnReport, BlockReturnRuntimeContract, CardMarkHarness, CardMarkReport,
-    ChannelWaitHarness, ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand,
+    ChannelWaitHarness, ChannelWaitReport, CompressionDemand, CompressionPolicyV1,
+    CompressionRuntimeContract, ContextSwitchCode, CoroutineContext, CoroutineDemand,
     CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract, EdgeCandidateHarness,
     EdgeCandidateReport, EdgeDemand, EdgeRuntimeContract, GcMetadataDemand, GcPacingDemand,
     GcPacingRuntimeContract, HarnessReport, HeapTriggerProfile, IntrinsicBoundary, LocalHeapDemand,
@@ -55,8 +56,8 @@ pub use source::{
     normalize_logical_path,
 };
 pub use target::{
-    Architecture, BackendCostProfile, ObjectFormat, OperatingSystem, Rt0Kind, TargetDescriptor,
-    TargetName, TargetParseError, baseline_cost_profile,
+    Architecture, BackendCostProfile, ObjectFormat, OperatingSystem, PointerCompression, Rt0Kind,
+    TargetDescriptor, TargetName, TargetParseError, baseline_cost_profile,
 };
 
 use std::{
@@ -487,6 +488,8 @@ impl Compiler {
             ticket_sites: shared_heap_demand.mark_sites,
             edge_delta_sites: barrier_demand.edge_summary_sites,
         };
+        // 栈图与压缩引用来自同一次栈图世界推导：压缩根槽与解码点必须与同一份 LIR 对齐。
+        let (stackmap_demand, compression_demand) = lir.stackmap_demands(frontend.hir.module());
         let raw_contract = match runtime::run(
             RawModelInputs {
                 target,
@@ -497,7 +500,8 @@ impl Compiler {
                 scheduler_demand: lir.scheduler_demand(),
                 wait_demand: lir.wait_demand(),
                 sync_demand: lir.sync_demand(),
-                stackmap_demand: lir.stackmap_demand(frontend.hir.module()),
+                stackmap_demand,
+                compression_demand,
                 gc_metadata_demand: gc_demand,
                 barrier_demand,
                 pacing_demand: lir.pacing_demand(frontend.mono.universe.records.len() as u32),
@@ -1113,6 +1117,10 @@ pub struct ImagePlan {
     block_return_contract_fingerprint: [u8; 32],
     block_return_demand: crate::runtime::BlockReturnDemand,
     block_return_runtime: crate::runtime::BlockReturnRuntimeContract,
+    compression_contract_fingerprint: [u8; 32],
+    compression_demand: crate::runtime::CompressionDemand,
+    compression_runtime: crate::runtime::CompressionRuntimeContract,
+    compression_capability: PointerCompression,
     mark_contract_fingerprint: [u8; 32],
     mark_demand: crate::runtime::MarkDemand,
     mark_runtime: crate::runtime::MarkRuntimeContract,
@@ -1292,6 +1300,10 @@ impl ImagePlan {
             block_return_contract_fingerprint: plan.block_return_contract_fingerprint,
             block_return_demand: plan.block_return_demand,
             block_return_runtime: plan.block_return_runtime,
+            compression_contract_fingerprint: plan.compression_contract_fingerprint,
+            compression_demand: plan.compression_demand,
+            compression_runtime: plan.compression_runtime,
+            compression_capability: plan.compression_capability,
             mark_contract_fingerprint: plan.mark_contract_fingerprint,
             mark_demand: plan.mark_demand,
             mark_runtime: plan.mark_runtime,
@@ -1846,6 +1858,26 @@ impl ImagePlan {
     /// 返回已验证的 owner-directed managed block return 契约段。
     pub fn block_return_runtime(&self) -> &crate::runtime::BlockReturnRuntimeContract {
         &self.block_return_runtime
+    }
+
+    /// 返回压缩契约指纹。
+    pub fn compression_contract_fingerprint(&self) -> [u8; 32] {
+        self.compression_contract_fingerprint
+    }
+
+    /// 返回压缩需求视图。
+    pub fn compression_demand(&self) -> crate::runtime::CompressionDemand {
+        self.compression_demand
+    }
+
+    /// 返回已验证的 checked pointer compression 契约段。
+    pub fn compression_runtime(&self) -> &crate::runtime::CompressionRuntimeContract {
+        &self.compression_runtime
+    }
+
+    /// 返回目标对 checked pointer compression 的能力声明。
+    pub fn compression_capability(&self) -> PointerCompression {
+        self.compression_capability
     }
 
     /// 返回 mark 契约指纹。

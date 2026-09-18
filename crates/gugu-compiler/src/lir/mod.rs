@@ -446,14 +446,31 @@ impl Validated {
         demand
     }
 
-    /// 栈图需求：从优化后 LIR 推导逻辑函数、安全点、kind 分类与根字数。
+    /// 一次推导栈图世界，同时给出栈图需求与压缩引用需求。
     ///
-    /// 推导失败返回零需求，由 `RuntimeRawContractV1` 的构建路径按 `E0058`
-    /// 拒绝；调用方必须保证传入优化后且已通过 verifier 的 world。
-    pub(crate) fn stackmap_demand(&self, module: &hir::Module) -> crate::runtime::StackMapDemand {
+    /// 推导失败返回零栈图需求与只含解码点计数的压缩需求，由 `RuntimeRawContractV1` 的构建
+    /// 路径按 `E0058` 拒绝；调用方必须保证传入优化后且已通过 verifier 的 world。
+    pub(crate) fn stackmap_demands(
+        &self,
+        module: &hir::Module,
+    ) -> (
+        crate::runtime::StackMapDemand,
+        crate::runtime::CompressionDemand,
+    ) {
+        let mut compression = crate::runtime::CompressionDemand {
+            decode_sites: 0,
+            compressed_root_slots: 0,
+        };
+        for world_body in &self.world.bodies {
+            for instruction in &world_body.instructions {
+                if matches!(instruction.op, body::Op::DecodeCompressedRef) {
+                    compression.decode_sites += 1;
+                }
+            }
+        }
         let mut demand = crate::runtime::StackMapDemand::default();
         let Ok(world) = stackmap::derive(&self.world.bodies, module) else {
-            return demand;
+            return (demand, compression);
         };
         demand.functions = world.functions.len() as u32;
         demand.safepoints = world.safepoints.len() as u32;
@@ -474,7 +491,15 @@ impl Validated {
             demand.barrier_sites += function.barrier_sites;
             demand.functions_with_landing += u32::from(function.has_landing);
         }
-        demand
+        compression.compressed_root_slots = u32::try_from(
+            world
+                .safepoints
+                .iter()
+                .map(|point| point.roots.compressed.len())
+                .sum::<usize>(),
+        )
+        .expect("压缩根槽数适配 u32");
+        (demand, compression)
     }
     /// 世界内 `SafepointPoll` 数量。
     pub(crate) fn poll_count(&self) -> usize {

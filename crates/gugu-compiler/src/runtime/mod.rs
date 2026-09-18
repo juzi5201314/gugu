@@ -27,6 +27,11 @@ mod candidate_tests;
 #[allow(dead_code, reason = "等待协议的确定性参照实现")]
 mod channel;
 mod channel_layout;
+#[allow(
+    dead_code,
+    reason = "压缩契约段由 runtime raw、world、栈图 walker 与 ImagePlan 消费"
+)]
+pub(crate) mod compression_schema;
 mod context;
 #[allow(dead_code, reason = "协程布局与生命周期的确定性参照实现")]
 mod coroutine;
@@ -128,6 +133,7 @@ pub use coroutine_schema::{
 };
 
 pub use block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
+pub use compression_schema::{CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract};
 pub use edge_schema::{EdgeDemand, EdgeRuntimeContract};
 pub use gc_metadata_schema::GcMetadataDemand;
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
