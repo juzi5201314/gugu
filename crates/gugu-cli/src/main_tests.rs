@@ -379,6 +379,13 @@ fn build_json_reports_barrier_contract_keys() {
         "shared-heap-transition-count",
         "shared-heap-forward-fields",
         "shared-heap-records",
+        "block-return-contract-fingerprint",
+        "block-return-demand",
+        "block-return-profile",
+        "block-return-profile-revision",
+        "block-return-unit-count",
+        "block-return-gate-count",
+        "block-return-grace-steps",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
@@ -560,6 +567,13 @@ fn build_json_reports_shared_heap_contract_keys() {
         "shared-heap-transition-count",
         "shared-heap-forward-fields",
         "shared-heap-records",
+        "block-return-contract-fingerprint",
+        "block-return-demand",
+        "block-return-profile",
+        "block-return-profile-revision",
+        "block-return-unit-count",
+        "block-return-gate-count",
+        "block-return-grace-steps",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }

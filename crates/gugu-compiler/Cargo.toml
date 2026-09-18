@@ -57,5 +57,9 @@ harness = false
 name = "shared_forward"
 harness = false
 
+[[bench]]
+name = "block_return"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"

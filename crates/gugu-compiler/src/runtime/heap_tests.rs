@@ -80,7 +80,7 @@ fn local_heap_contract_is_deterministic_across_builds() {
 #[test]
 fn local_heap_contract_dump_reports_records_bitmaps_and_trigger() {
     let dump = contract().dump();
-    assert!(dump.contains("local-heap schema=3 arena=2097152 block=32768 line=128"));
+    assert!(dump.contains("local-heap schema=4 arena=2097152 block=32768 line=128"));
     assert!(dump.contains("tlab-span=262144 blocks=64 lines-per-block=256"));
     assert!(dump.contains("local-heap-bitmaps object-start-bits=131072 mark-bits=131072"));
     assert!(dump.contains("page-cover=512 cards=4096"));
@@ -105,7 +105,9 @@ fn local_heap_contract_dump_reports_records_bitmaps_and_trigger() {
     assert!(dump.contains(
         "local-heap-record HeapBlockRecord bytes=64 align=64 fields=block_id@0,generation@4"
     ));
-    assert!(dump.contains("local-heap-block-states active,candidate,reclaiming,free"));
+    assert!(dump.contains(
+        "local-heap-block-states allocating,candidate,sweeping,evacuating,return-pending,owned-free,free"
+    ));
     assert!(dump.contains("local-heap-trigger revision=1 minor-trigger-bytes=262144"));
     assert!(dump.contains("local-heap-fingerprint"));
 }

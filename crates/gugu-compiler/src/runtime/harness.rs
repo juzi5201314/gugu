@@ -1681,8 +1681,9 @@ impl SharedForwardHarness {
             return Err(RawInvariant::new("夹具必须产生共享分配"));
         }
         // payload 必须能装进一个共享 block：契约上界来自冻结类型表的最大类型（含 arena metadata
-        // 这类运行时记录），按它分配会让每个 payload 独占一个 block，既不是真实负载，也把
-        // large-object 路径（物理多块 payload）提前拉进来——那条路径属于 block return 阶段。
+        // 这类运行时记录），按它分配会让每个 payload 独占一个 block，既不是真实负载。
+        // large-object 路径已由 managed block return 接入；本 harness 仍限制在 GC_BLOCK_BYTES/8
+        // 以保持现有吞吐口径。
         let payload_bytes = u32::try_from(demand.max_payload_bytes)
             .map_err(|_| RawInvariant::new("共享 payload 上界超出 u32"))?
             .min(GC_BLOCK_BYTES / 8);
@@ -1749,5 +1750,93 @@ impl SharedForwardHarness {
             totals.freed_bytes,
             cycle.shared_empty_blocks,
         ))
+    }
+}
+
+/// 真实 `Compilation` 消费者的 managed block return harness。
+///
+/// 用镜像计划契约配置 world，多 owner 分配 → 标死 → cycle → drain，断言 exactly-once、
+/// 账本守恒与 provider committed 下降。large-object 路径已由本阶段接入；payload 仍限制在
+/// `GC_BLOCK_BYTES/8` 以保持现有吞吐口径。
+#[derive(Clone, Copy, Debug)]
+pub struct BlockReturnHarness {
+    owners: u32,
+    leaves: u32,
+}
+
+/// BlockReturnHarness 运行报告。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BlockReturnReport {
+    /// 分配的 leaf 数。
+    pub leaves: u64,
+    /// 本轮归还的 block 字节。
+    pub returned_bytes: u64,
+    /// 运行耗时（微秒）。
+    pub elapsed_micros: u64,
+    /// 不变量是否守恒。
+    pub invariants_hold: bool,
+}
+
+impl BlockReturnHarness {
+    /// 创建 harness；owner 数至少 2，leaf 数至少 1。
+    pub fn new(owners: u32, leaves: u32) -> Self {
+        Self {
+            owners: owners.max(2),
+            leaves: leaves.max(1),
+        }
+    }
+
+    /// 驱动分配、cycle 与 drain，并校验账本守恒。
+    pub fn run(self) -> BlockReturnReport {
+        let start = Instant::now();
+        let mut report = BlockReturnReport {
+            leaves: u64::from(self.leaves),
+            returned_bytes: 0,
+            elapsed_micros: 0,
+            invariants_hold: false,
+        };
+        match self.drive() {
+            Ok(returned_bytes) => {
+                report.returned_bytes = returned_bytes;
+                report.invariants_hold = true;
+            }
+            Err(error) => eprintln!("block-return harness 失败: {error:?}"),
+        }
+        report.elapsed_micros = elapsed_micros(start);
+        report
+    }
+
+    fn drive(self) -> Result<u64, RawInvariant> {
+        use crate::runtime::gc_metadata_contract::GC_BLOCK_BYTES;
+        use crate::runtime::world::heap_impl::ManagedPlacement;
+        use crate::{CompileRequest, Compiler, TargetName};
+
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            SHARED_SENDER_SOURCE,
+            TargetName::X86_64Linux,
+        ));
+        let contract = compilation
+            .raw_contract()
+            .ok_or_else(|| RawInvariant::new("真实契约必须存在"))?;
+        let mut world = RawWorld::new(19, self.owners, 256, BatchLimits::default())?;
+        world.configure_gc(contract)?;
+        for _ in 0..self.leaves {
+            world.allocate_managed(0, 1, 8, ManagedPlacement::Old)?;
+        }
+        let before = world.provider_stats().committed_bytes;
+        let cycle = world.run_gc_cycle(true)?;
+        if !cycle.cycle_completed {
+            return Err(RawInvariant::new("cycle 必须完成"));
+        }
+        for owner in 0..self.owners {
+            world.managed_ledger_invariant(owner)?;
+        }
+        let after = world.provider_stats().committed_bytes;
+        let returned = before.saturating_sub(after);
+        if returned < u64::from(GC_BLOCK_BYTES) {
+            return Err(RawInvariant::new("至少归还一个 managed block"));
+        }
+        Ok(returned)
     }
 }

@@ -17,6 +17,7 @@ mod barrier;
 mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
+pub(crate) mod block_return_schema;
 #[allow(dead_code, reason = "候选平面由周期汇合阶段的世界推进与确定性测试消费")]
 pub(crate) mod candidate;
 #[allow(dead_code, reason = "候选决议结构由 world 候选推进与确定性测试消费")]
@@ -126,6 +127,7 @@ pub use coroutine_schema::{
     StackPolicy,
 };
 
+pub use block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
 pub use edge_schema::{EdgeDemand, EdgeRuntimeContract};
 pub use gc_metadata_schema::GcMetadataDemand;
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
@@ -201,10 +203,11 @@ mod tests;
 mod trace_tests;
 
 pub use harness::{
-    CardMarkHarness, CardMarkReport, ChannelWaitHarness, ChannelWaitReport, EdgeCandidateHarness,
-    EdgeCandidateReport, HarnessReport, OwnerReturnHarness, RegionTransferHarness,
-    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, SharedForwardHarness,
-    SharedForwardReport, SyncLockHarness, SyncLockReport,
+    BlockReturnHarness, BlockReturnReport, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
+    ChannelWaitReport, EdgeCandidateHarness, EdgeCandidateReport, HarnessReport,
+    OwnerReturnHarness, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
+    ResourceReleaseReport, SharedForwardHarness, SharedForwardReport, SyncLockHarness,
+    SyncLockReport,
 };
 
 #[cfg(test)]

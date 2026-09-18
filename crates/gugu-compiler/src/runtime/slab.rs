@@ -356,6 +356,84 @@ impl OwnerAccounting {
     }
 }
 
+/// managed 物理页的互斥字节分类账本。
+///
+/// 字段与方法与 `OwnerAccounting` 相同，但不复用 raw/resource 实例：managed block 的
+/// commit/return/decommit 必须独立入账，再由 `committed_classes` 汇总进 pressure。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ManagedAccounting {
+    pending_return_bytes: u64,
+    reclaimable_bytes: u64,
+    owner_cache_bytes: u64,
+    committed_bytes: u64,
+}
+
+impl ManagedAccounting {
+    /// 返回待 owner 消费的字节。
+    pub(crate) const fn pending_return_bytes(&self) -> u64 {
+        self.pending_return_bytes
+    }
+
+    /// 返回已确认可复用但尚未进入 free structure 的字节。
+    pub(crate) const fn reclaimable_bytes(&self) -> u64 {
+        self.reclaimable_bytes
+    }
+
+    /// 返回 owner-local cache 中已 commit 但未被 live record 使用的字节。
+    pub(crate) const fn owner_cache_bytes(&self) -> u64 {
+        self.owner_cache_bytes
+    }
+
+    /// 返回本 owner 的 committed 字节。
+    pub(crate) const fn committed_bytes(&self) -> u64 {
+        self.committed_bytes
+    }
+
+    /// commit 新 span 时登记物理占用。
+    pub(crate) fn commit(&mut self, bytes: u64) {
+        self.committed_bytes += bytes;
+        self.owner_cache_bytes += bytes;
+    }
+
+    /// 记录进入 staging/inbox 的待消费字节。
+    pub(crate) fn stage_pending(&mut self, bytes: u64) {
+        self.pending_return_bytes += bytes;
+    }
+
+    /// 回滚尚未发布的 return：移除 staging 账本中的 pending 字节。
+    pub(crate) fn cancel_pending(&mut self, bytes: u64) {
+        self.pending_return_bytes = self.pending_return_bytes.saturating_sub(bytes);
+    }
+
+    /// owner 消费消息：pending 转为待复用。
+    pub(crate) fn consume_pending(&mut self, bytes: u64) {
+        self.pending_return_bytes = self.pending_return_bytes.saturating_sub(bytes);
+        self.reclaimable_bytes += bytes;
+    }
+
+    /// 记录进入 owner free structure：reclaimable 转为 owner-local cache。
+    pub(crate) fn park_reclaimable(&mut self, bytes: u64) {
+        self.reclaimable_bytes = self.reclaimable_bytes.saturating_sub(bytes);
+        self.owner_cache_bytes += bytes;
+    }
+
+    /// 从本地 cache 分配出去。
+    pub(crate) fn take_from_cache(&mut self, bytes: u64) {
+        self.owner_cache_bytes = self.owner_cache_bytes.saturating_sub(bytes);
+    }
+
+    /// 转发消息时把 pending 交给目标 owner 的账本。
+    pub(crate) fn forward_pending(&mut self, bytes: u64) {
+        self.pending_return_bytes = self.pending_return_bytes.saturating_sub(bytes);
+    }
+
+    /// 释放 span：从物理占用中扣除。
+    pub(crate) fn release(&mut self, bytes: u64) {
+        self.committed_bytes = self.committed_bytes.saturating_sub(bytes);
+        self.owner_cache_bytes = self.owner_cache_bytes.saturating_sub(bytes);
+    }
+}
+
 /// 一个 owner 的稳定记录；保存在 non-moving owner directory 中。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct OwnerRecord {

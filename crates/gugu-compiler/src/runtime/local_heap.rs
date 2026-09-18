@@ -16,7 +16,11 @@
 use super::edge_schema::EDGE_NO_JOB;
 use super::gc_metadata_section::GcRuntimeMetadata;
 use super::gc_trace::walk_descriptor;
-use super::local_heap_schema::{HeapBlockRecord, HeapTriggerProfile, LocalHeapRuntimeContract};
+use super::local_heap_schema::{
+    HEAP_BLOCK_EVAC_SOURCE, HEAP_BLOCK_LARGE_INDEX_MASK, HEAP_BLOCK_LARGE_INDEX_SHIFT,
+    HEAP_BLOCK_LARGE_MEMBER, HEAP_BLOCK_RETURN_QUEUED, HeapBlockRecord, HeapBlockState,
+    HeapTriggerProfile, LocalHeapRuntimeContract,
+};
 use super::slab::RawInvariant;
 
 /// 全局稠密 block 身份；arena descriptor 在世界生命周期内不复用。
@@ -127,6 +131,8 @@ pub(crate) const OBJECT_HEADER_BYTES: u64 = 16;
 
 const LINE_FREE: u8 = 0;
 const LINE_OCCUPIED: u8 = 1;
+/// 已发布 `HeapLineRun`、等待 consume 后才能再被 bump 占用。
+const LINE_QUEUED: u8 = 2;
 
 /// LocalHeap 操作失败：容量不足由调用方补容量，其余是真正的实现不变量失败。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -184,6 +190,8 @@ struct HeapBlock {
     free_line: u32,
     /// mark 位图对应的 cycle epoch。
     mark_epoch: u64,
+    /// 该 block 对应的 managed extent；未绑定时为 `None`。
+    extent: Option<super::extent::ExtentId>,
     /// block 的 payload 字节；长度恒为 block_bytes。
     bytes: Vec<u8>,
 }
@@ -282,12 +290,13 @@ impl HeapArena {
                     block_index: index,
                     manager_owner: self.manager_owner,
                     candidate_job: u32::MAX,
-                    state: 3,
+                    state: HeapBlockState::Free.raw(),
                     ..Default::default()
                 },
                 offset: u64::from(index) * u64::from(block_bytes),
                 free_line: 0,
                 mark_epoch: 0,
+                extent: None,
                 bytes: vec![0; block_bytes as usize],
             });
             self.committed += 1;
@@ -560,6 +569,8 @@ pub(crate) struct LocalHeap {
     tlab_refills: u64,
     /// 扫描对象的 pointer word 暂存区；复用避免每次扫描分配。
     scratch: Vec<(u64, u64)>,
+    /// 本轮分配把 `Free` 块推进到 `Allocating` 的物理字节，由世界侧扣 cache。
+    activated_cache_bytes: u64,
 }
 
 impl LocalHeap {
@@ -583,6 +594,7 @@ impl LocalHeap {
             relocations: Vec::new(),
             tlab_refills: 0,
             scratch: Vec::with_capacity(16),
+            activated_cache_bytes: 0,
         }
     }
 
@@ -751,7 +763,12 @@ impl LocalHeap {
         let block_ref = arena
             .block_mut(block)
             .ok_or_else(|| HeapError::invalid("block 缺失"))?;
-        block_ref.record.state = 0;
+        if HeapBlockState::from_raw(block_ref.record.state) == Some(HeapBlockState::Free) {
+            self.activated_cache_bytes = self
+                .activated_cache_bytes
+                .saturating_add(u64::from(self.block_bytes));
+        }
+        block_ref.record.state = HeapBlockState::Allocating.raw();
         block_ref.record.mutation_version = block_ref
             .record
             .mutation_version
@@ -834,12 +851,23 @@ impl LocalHeap {
             for line in 0..lines {
                 arena.line_live[base + line as usize] = LINE_OCCUPIED;
             }
-            arena.block_live[(start + step) as usize] = lines;
             let block = arena
                 .block_mut(start + step)
                 .ok_or_else(|| HeapError::invalid("block 缺失"))?;
+            if HeapBlockState::from_raw(block.record.state) == Some(HeapBlockState::Free) {
+                self.activated_cache_bytes = self
+                    .activated_cache_bytes
+                    .saturating_add(u64::from(self.block_bytes));
+            }
             block.free_line = u32::MAX;
-            block.record.state = 0;
+            block.record.state = HeapBlockState::Allocating.raw();
+            if step == 0 {
+                block.record.reserved =
+                    (span << HEAP_BLOCK_LARGE_INDEX_SHIFT) & HEAP_BLOCK_LARGE_INDEX_MASK;
+            } else {
+                block.record.reserved = HEAP_BLOCK_LARGE_MEMBER
+                    | ((start << HEAP_BLOCK_LARGE_INDEX_SHIFT) & HEAP_BLOCK_LARGE_INDEX_MASK);
+            }
         }
         Ok((
             arena_index,
@@ -1128,6 +1156,229 @@ impl LocalHeap {
         Ok(())
     }
 
+    /// 把一个已提交 block 绑定到它的 managed extent。
+    pub(crate) fn attach_block_extent(
+        &mut self,
+        id: ManagedBlockId,
+        extent: super::extent::ExtentId,
+    ) -> Result<(), HeapError> {
+        let arena = self
+            .arenas
+            .iter_mut()
+            .find(|arena| u64::from(arena.descriptor) == u64::from(id.arena()))
+            .ok_or_else(|| HeapError::invalid("block 身份不属于该 LocalHeap"))?;
+        let block = arena
+            .block_mut(id.index())
+            .ok_or_else(|| HeapError::invalid("block 未提交"))?;
+        block.extent = Some(extent);
+        Ok(())
+    }
+
+    /// 返回一个已提交 block 绑定的 managed extent。
+    pub(crate) fn block_extent(
+        &self,
+        id: ManagedBlockId,
+    ) -> Result<super::extent::ExtentId, HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        arena
+            .block(id.index())
+            .and_then(|block| block.extent)
+            .ok_or_else(|| HeapError::invalid("block 尚未绑定 managed extent"))
+    }
+
+    /// 返回本 heap 全部 arena 的 live 字节之和。
+    pub(crate) fn live_bytes(&self) -> u64 {
+        self.arenas.iter().map(|arena| arena.live_bytes).sum()
+    }
+
+    /// 返回仍占用物理页、尚未进入账本 pending 的块字节。
+    ///
+    /// Allocating / Candidate / Sweeping / Evacuating 计 live。`ReturnPending` 只有在
+    /// `HEAP_BLOCK_RETURN_QUEUED` 置位后才由 pending 账本持有；入队前仍计 live。
+    /// OwnedFree / Free 计 cache。
+    pub(crate) fn live_managed_block_bytes(&self) -> u64 {
+        let mut total = 0_u64;
+        for arena in &self.arenas {
+            for slot in arena.blocks.iter().flatten() {
+                match HeapBlockState::from_raw(slot.record.state) {
+                    Some(
+                        HeapBlockState::Allocating
+                        | HeapBlockState::Candidate
+                        | HeapBlockState::Sweeping
+                        | HeapBlockState::Evacuating,
+                    ) => total = total.saturating_add(u64::from(self.block_bytes)),
+                    Some(HeapBlockState::ReturnPending)
+                        if slot.record.reserved & HEAP_BLOCK_RETURN_QUEUED == 0 =>
+                    {
+                        total = total.saturating_add(u64::from(self.block_bytes));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        total
+    }
+
+    /// 取出并清零本轮 `Free → Allocating` 激活的 cache 字节。
+    pub(crate) fn take_activated_cache_bytes(&mut self) -> u64 {
+        let bytes = self.activated_cache_bytes;
+        self.activated_cache_bytes = 0;
+        bytes
+    }
+
+    /// 扫描连续 `LINE_FREE` 区间，长度 ≥ `min_lines` 的 run 记成 `(start_line, count)`。
+    pub(crate) fn free_line_runs(
+        &self,
+        id: ManagedBlockId,
+        min_lines: u32,
+    ) -> Result<Vec<(u32, u32)>, HeapError> {
+        let arena = self.arena_by_descriptor(u64::from(id.arena()))?;
+        let lines = arena.lines_per_block() as u32;
+        let mut runs = Vec::new();
+        let mut line = 0_u32;
+        while line < lines {
+            if arena.line_live[arena.line_index(id.index(), line)] != LINE_FREE {
+                line += 1;
+                continue;
+            }
+            let end = arena.run_end_line(id.index(), line);
+            let count = end - line;
+            if count >= min_lines {
+                runs.push((line, count));
+            }
+            line = end;
+        }
+        Ok(runs)
+    }
+
+    /// 把已发布的 line-run 标成 `LINE_QUEUED`，阻止 bump 在 consume 前再次占用。
+    pub(crate) fn mark_line_run_queued(
+        &mut self,
+        id: ManagedBlockId,
+        start_line: u32,
+        count: u32,
+    ) -> Result<(), HeapError> {
+        let arena = self
+            .arenas
+            .iter_mut()
+            .find(|arena| u64::from(arena.descriptor) == u64::from(id.arena()))
+            .ok_or_else(|| HeapError::invalid("block 身份不属于该 LocalHeap"))?;
+        for step in 0..count {
+            let slot = arena.line_index(id.index(), start_line + step);
+            if arena.line_live[slot] != LINE_FREE {
+                return Err(HeapError::invalid("line-run 覆盖了非空闲 line"));
+            }
+            arena.line_live[slot] = LINE_QUEUED;
+        }
+        Ok(())
+    }
+
+    /// consume 后把 `LINE_QUEUED` 还原成 `LINE_FREE`，bump 可以再次占用。
+    pub(crate) fn restore_queued_line_run(
+        &mut self,
+        id: ManagedBlockId,
+        start_line: u32,
+        count: u32,
+    ) -> Result<(), HeapError> {
+        let arena = self
+            .arenas
+            .iter_mut()
+            .find(|arena| u64::from(arena.descriptor) == u64::from(id.arena()))
+            .ok_or_else(|| HeapError::invalid("block 身份不属于该 LocalHeap"))?;
+        for step in 0..count {
+            let slot = arena.line_index(id.index(), start_line + step);
+            if arena.line_live[slot] != LINE_QUEUED {
+                return Err(HeapError::invalid("line-run consume 覆盖了非 queued line"));
+            }
+            arena.line_live[slot] = LINE_FREE;
+        }
+        Ok(())
+    }
+
+    /// 读取 large-object span：起始块返回 `(start, span)`，成员块返回 `None`。
+    pub(crate) fn large_span_of(
+        &self,
+        id: ManagedBlockId,
+    ) -> Result<Option<(u32, u32)>, HeapError> {
+        let record = self.block_record(id)?;
+        if record.reserved & HEAP_BLOCK_LARGE_MEMBER != 0 {
+            return Ok(None);
+        }
+        let span = (record.reserved & HEAP_BLOCK_LARGE_INDEX_MASK) >> HEAP_BLOCK_LARGE_INDEX_SHIFT;
+        if span <= 1 {
+            return Ok(None);
+        }
+        Ok(Some((id.index(), span)))
+    }
+
+    /// 返回覆盖该块的 large span 起点与长度；普通块为 `None`。
+    pub(crate) fn large_span_covering(
+        &self,
+        id: ManagedBlockId,
+    ) -> Result<Option<(u32, u32)>, HeapError> {
+        let record = self.block_record(id)?;
+        if record.reserved & HEAP_BLOCK_LARGE_MEMBER != 0 {
+            let start =
+                (record.reserved & HEAP_BLOCK_LARGE_INDEX_MASK) >> HEAP_BLOCK_LARGE_INDEX_SHIFT;
+            let start_id = ManagedBlockId::new(id.arena(), start)
+                .map_err(|error| HeapError::invalid(error.message()))?;
+            return self.large_span_of(start_id);
+        }
+        self.large_span_of(id)
+    }
+
+    /// 若该块属于 empty large span，把全部成员推进到 `ReturnPending`。
+    pub(crate) fn promote_empty_large_span(&mut self, id: ManagedBlockId) -> Result<(), HeapError> {
+        let Some((start, span)) = self.large_span_covering(id)? else {
+            return Ok(());
+        };
+        for step in 0..span {
+            let member = ManagedBlockId::new(id.arena(), start + step)
+                .map_err(|error| HeapError::invalid(error.message()))?;
+            if self.block_live_lines(member)? != 0 {
+                return Ok(());
+            }
+        }
+        for step in 0..span {
+            let member = ManagedBlockId::new(id.arena(), start + step)
+                .map_err(|error| HeapError::invalid(error.message()))?;
+            let mut record = self.block_record(member)?;
+            record.state = HeapBlockState::ReturnPending.raw();
+            self.update_block_record(member, record)?;
+        }
+        Ok(())
+    }
+
+    /// 返回已发布、尚未 consume 的 line-run 字节。
+    pub(crate) fn queued_line_bytes(&self) -> u64 {
+        let mut lines = 0_u64;
+        for arena in &self.arenas {
+            for slot in &arena.line_live {
+                if *slot == LINE_QUEUED {
+                    lines += 1;
+                }
+            }
+        }
+        lines.saturating_mul(128)
+    }
+
+    /// 标记块的归还消息已发布，重复入队会失败。
+    pub(crate) fn mark_return_queued(&mut self, id: ManagedBlockId) -> Result<(), HeapError> {
+        let mut record = self.block_record(id)?;
+        if record.reserved & HEAP_BLOCK_RETURN_QUEUED != 0 {
+            return Err(HeapError::invalid("该 block 的归还消息已经发布"));
+        }
+        record.reserved |= HEAP_BLOCK_RETURN_QUEUED;
+        self.update_block_record(id, record)
+    }
+
+    /// consume 完成后清掉归还入队位。
+    pub(crate) fn clear_return_queued(&mut self, id: ManagedBlockId) -> Result<(), HeapError> {
+        let mut record = self.block_record(id)?;
+        record.reserved &= !HEAP_BLOCK_RETURN_QUEUED;
+        self.update_block_record(id, record)
+    }
+
     /// 统计一个 block 内的 pin 与含 resource 实例的对象数：候选 gate 的直接输入。
     ///
     /// 只看 object-start 位图给出的对象起点，不扫描 payload；pin 与 resource 都是分配时写入
@@ -1313,6 +1564,12 @@ impl LocalHeap {
         self.set_field(source_header, HEADER_CONTROL, control)?;
         self.set_field(source_header, HEADER_SIZE_WORD, moved)?;
         self.note_relocation(object.object_start, moved)?;
+        let source_id = self.block_ref(object.object_start)?.id;
+        let mut source_record = self.block_record(source_id)?;
+        if HeapBlockState::from_raw(source_record.state) != Some(HeapBlockState::Candidate) {
+            source_record.state = HeapBlockState::Evacuating.raw();
+            self.update_block_record(source_id, source_record)?;
+        }
         report.evacuated += 1;
         if generation != GENERATION_AGING {
             report.promoted += 1;
@@ -1854,7 +2111,7 @@ impl LocalHeap {
 
     /// 清扫一个 block 内未标记的对象；候选平面提交后的唯一 sweep 消费者入口。
     ///
-    /// 返回被回收的对象数。调用方必须保证该 block 已经处于 `reclaiming`：本函数不检查状态，
+    /// 返回被回收的对象数。调用方必须保证该 block 已经处于 `Sweeping`：本函数不检查状态，
     /// 状态门禁由候选平面的 `CommitGroup` 决议给出。
     pub(crate) fn sweep_block(
         &mut self,
@@ -1919,12 +2176,10 @@ impl LocalHeap {
         Ok(())
     }
 
-    /// 把一个 block 交回 owner free structure：清空它的对象、line 与 mark 位并推进世代。
+    /// 把一个 block 从 `OwnedFree` 交回 `Free`：清空对象、line 与 mark 位并推进世代。
     ///
-    /// 这是 release 的唯一实现路径：对象、线状态、object-start 位、mark 位、块内计数与块记录
-    /// 一起收敛，因此不存在只清了一半的 block。记录回到 `active`（已提交且可分配），与
-    /// `commit_block` 建立块时的取值一致：分配器按 `free_line` 复用块，`free` 只描述「已映射但
-    /// 尚未提交」的块。
+    /// consume 之后、再分配之前才允许调用。物理清空推迟到这一步，因此 `ReturnPending`
+    /// 期间对象已经不可解析（sweep 已清），但 generation 仍保持到 consume。
     pub(crate) fn release_block(&mut self, id: ManagedBlockId) -> Result<(), HeapError> {
         let arena_index = self.arena_index_by_descriptor(u64::from(id.arena()))?;
         let block_index = id.index();
@@ -1937,6 +2192,18 @@ impl LocalHeap {
         let arena = &mut self.arenas[arena_index];
         if !arena.mapped(block_index) {
             return Err(HeapError::invalid("释放的 block 尚未提交"));
+        }
+        let state = HeapBlockState::from_raw(
+            arena
+                .block(block_index)
+                .ok_or_else(|| HeapError::invalid("释放的 block 未提交"))?
+                .record
+                .state,
+        );
+        if state != Some(HeapBlockState::OwnedFree) {
+            return Err(HeapError::invalid(
+                "release_block 只允许从 OwnedFree 进入 Free",
+            ));
         }
         let granule_bytes = usize::try_from(granule_bytes).expect("granule 字节数");
         let per_block = (lines * 128) / granule_bytes;
@@ -1962,7 +2229,7 @@ impl LocalHeap {
         block.mark_epoch = epoch;
         block.bytes.fill(0);
         let mut record = block.record;
-        record.state = 0;
+        record.state = HeapBlockState::Free.raw();
         record.generation = record
             .generation
             .checked_add(1)
@@ -1972,6 +2239,7 @@ impl LocalHeap {
         record.scanner_leases = 0;
         record.evacuation_leases = 0;
         record.candidate_job = EDGE_NO_JOB;
+        record.reserved &= !HEAP_BLOCK_EVAC_SOURCE;
         record.mutation_version = record
             .mutation_version
             .checked_add(1)
@@ -2036,32 +2304,49 @@ impl LocalHeap {
     /// 候选绑定**不**占用 scanner lease：`validate` 相位要求 scanner/allocator/evacuation
     /// lease 归零才能提交，若绑定自己就占一个 scanner lease，这个 gate 永远不可能通过。候选状态
     /// 本身已经阻止 allocator 继续往该 block 分配，因此绑定用状态表达而不是借 lease 表达。
+    ///
+    /// 只接受 `Allocating`/`Candidate`/`Evacuating`。来自 evacuation 的块在改写成 `Candidate`
+    /// 之前把 `HEAP_BLOCK_EVAC_SOURCE` 记在 `reserved` 最低位，供 `CommitGroup` 识别。
     pub(crate) fn mark_block_candidate(
         &mut self,
         id: ManagedBlockId,
         job: u32,
     ) -> Result<HeapBlockRecord, HeapError> {
         let mut record = self.block_record(id)?;
-        if record.state != 0 && record.state != 1 {
-            return Err(HeapError::invalid(
-                "只有 active/candidate 的 block 能成为候选成员",
-            ));
+        let state = HeapBlockState::from_raw(record.state);
+        match state {
+            Some(HeapBlockState::Allocating | HeapBlockState::Candidate) => {}
+            Some(HeapBlockState::Evacuating) => {
+                record.reserved |= HEAP_BLOCK_EVAC_SOURCE;
+            }
+            _ => {
+                return Err(HeapError::invalid(
+                    "只有 allocating/candidate/evacuating 的 block 能成为候选成员",
+                ));
+            }
         }
         record.candidate_job = job;
-        record.state = 1;
+        record.state = HeapBlockState::Candidate.raw();
         self.update_block_record(id, record)?;
         Ok(record)
     }
 
-    /// 解除一个 block 的候选绑定；未提交的成员退回 `active`。
+    /// 解除一个 block 的候选绑定。
+    ///
+    /// `Candidate` 且没有 evacuation 来源位时退回 `Allocating`；有 `HEAP_BLOCK_EVAC_SOURCE`
+    /// 时退回 `Evacuating` 并保留该位，直到 `CommitGroup` 消费。
     pub(crate) fn unmark_block_candidate(
         &mut self,
         id: ManagedBlockId,
     ) -> Result<HeapBlockRecord, HeapError> {
         let mut record = self.block_record(id)?;
         record.candidate_job = EDGE_NO_JOB;
-        if record.state == 1 {
-            record.state = 0;
+        if HeapBlockState::from_raw(record.state) == Some(HeapBlockState::Candidate) {
+            if record.reserved & HEAP_BLOCK_EVAC_SOURCE != 0 {
+                record.state = HeapBlockState::Evacuating.raw();
+            } else {
+                record.state = HeapBlockState::Allocating.raw();
+            }
         }
         self.update_block_record(id, record)?;
         Ok(record)

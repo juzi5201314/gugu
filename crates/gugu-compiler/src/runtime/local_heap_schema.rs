@@ -19,10 +19,10 @@ use super::platform::PlatformProfile;
 
 /// 本地堆契约段 schema。
 ///
-/// 版本 3 相对版本 2 的变化：块记录新增 `candidate_job` 绑定与 `active/candidate/reclaiming/free`
-/// 状态语义、lease 计数成为候选 gate 的输入、块世代在释放时推进、`ManagedBlockId` 的 arena 部分
-/// 就是 arena descriptor（世代与记录读写必须按 descriptor 定位）。
-pub(crate) const LOCAL_HEAP_SCHEMA: u32 = 3;
+/// 版本 4 相对版本 3 的变化：块状态目录改为规范迁移名
+/// `allocating/candidate/sweeping/evacuating/return-pending/owned-free/free`，
+/// 判别值由 `HeapBlockState` 固定，禁止再写裸整数。
+pub(crate) const LOCAL_HEAP_SCHEMA: u32 = 4;
 
 /// allocation granule：object-start bitmap 每一位对应一个 granule。
 pub(crate) const HEAP_GRANULE_BYTES: u32 = 16;
@@ -49,8 +49,67 @@ pub(crate) const HEAP_ARENA_STATE_NAMES: [&str; 7] = [
     "pinned",
     "evacuating",
 ];
-/// block 状态名；顺序即状态强度。
-pub(crate) const HEAP_BLOCK_STATE_NAMES: [&str; 4] = ["active", "candidate", "reclaiming", "free"];
+/// block 状态名；顺序即判别值。
+pub(crate) const HEAP_BLOCK_STATE_NAMES: [&str; 7] = [
+    "allocating",
+    "candidate",
+    "sweeping",
+    "evacuating",
+    "return-pending",
+    "owned-free",
+    "free",
+];
+/// `HeapBlockRecord.reserved` 的最低位：候选绑定前该块来自 evacuation。
+///
+/// `reserved` 此前恒为 0；本契约占用 bit0，不改记录布局。`CommitGroup` 读完必须清零。
+pub(crate) const HEAP_BLOCK_EVAC_SOURCE: u32 = 1;
+/// `reserved` bit1：该块是 large-object span 的非起始成员。
+pub(crate) const HEAP_BLOCK_LARGE_MEMBER: u32 = 1 << 1;
+/// `reserved` bit2：该块的归还消息已经发布，禁止重复入队。
+pub(crate) const HEAP_BLOCK_RETURN_QUEUED: u32 = 1 << 2;
+/// `reserved` bit8–15：起始块存 span 长度，成员块存起始 block 下标。
+pub(crate) const HEAP_BLOCK_LARGE_INDEX_SHIFT: u32 = 8;
+/// 与 `HEAP_BLOCK_LARGE_INDEX_SHIFT` 配套的 8-bit 掩码。
+pub(crate) const HEAP_BLOCK_LARGE_INDEX_MASK: u32 = 0xFF << 8;
+
+/// block 状态判别值；与 `HEAP_BLOCK_STATE_NAMES` 同序。
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum HeapBlockState {
+    Allocating = 0,
+    Candidate = 1,
+    Sweeping = 2,
+    Evacuating = 3,
+    ReturnPending = 4,
+    OwnedFree = 5,
+    Free = 6,
+}
+
+impl HeapBlockState {
+    /// 由记录里的判别值还原。
+    pub(crate) const fn from_raw(raw: u32) -> Option<Self> {
+        match raw {
+            0 => Some(Self::Allocating),
+            1 => Some(Self::Candidate),
+            2 => Some(Self::Sweeping),
+            3 => Some(Self::Evacuating),
+            4 => Some(Self::ReturnPending),
+            5 => Some(Self::OwnedFree),
+            6 => Some(Self::Free),
+            _ => None,
+        }
+    }
+
+    /// 返回判别值。
+    pub(crate) const fn raw(self) -> u32 {
+        self as u32
+    }
+
+    /// 返回登记名。
+    pub(crate) const fn name(self) -> &'static str {
+        HEAP_BLOCK_STATE_NAMES[self as usize]
+    }
+}
 /// generation 名；顺序即 object header 的编码。
 pub(crate) const HEAP_GENERATION_NAMES: [&str; 4] = ["nursery", "aging", "old", "immortal"];
 /// managed representation 名；顺序即 object header 的编码。

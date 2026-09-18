@@ -175,6 +175,7 @@ impl RawWorld {
         let mut total = 0_u64;
         for owner in 0..self.owners.len() as u32 {
             total = total.saturating_add(self.accounting(owner).committed_bytes());
+            total = total.saturating_add(self.managed_accounting(owner).committed_bytes());
         }
         for owner in 0..self.resource_owners.len() as u32 {
             let token = self.resource_token(owner);
@@ -199,6 +200,16 @@ impl RawWorld {
             classes.reclaimable_bytes = classes
                 .reclaimable_bytes
                 .saturating_add(accounting.reclaimable_bytes());
+            let managed = self.managed_accounting(owner);
+            classes.pending_return_bytes = classes
+                .pending_return_bytes
+                .saturating_add(managed.pending_return_bytes());
+            classes.owner_cache_bytes = classes
+                .owner_cache_bytes
+                .saturating_add(managed.owner_cache_bytes());
+            classes.reclaimable_bytes = classes
+                .reclaimable_bytes
+                .saturating_add(managed.reclaimable_bytes());
         }
         for owner in 0..self.resource_owners.len() as u32 {
             let token = self.resource_token(owner);
@@ -349,7 +360,7 @@ impl RawWorld {
     ///
     /// `exhaustive` 为真时循环到 inbox 为空（cycle 必须收敛）；为假时每 shard 只做一次有界
     /// service，剩余消息留给下一个节奏点，因此单次 drain 的暂停是有界的。
-    pub(super) fn drain_inboxes(
+    pub(crate) fn drain_inboxes(
         &mut self,
         owner: u32,
         budget: &ServiceBudget,
@@ -380,7 +391,12 @@ impl RawWorld {
         forced: bool,
     ) -> Result<PressureDrainReport, RawInvariant> {
         match self.pressure_drain(DrainScope::Cycle, forced) {
-            Ok(report) => Ok(report),
+            Ok(report) => {
+                for owner in 0..self.owners.len() as u32 {
+                    self.managed_ledger_invariant(owner)?;
+                }
+                Ok(report)
+            }
             Err(error) => {
                 let message = format!("GC cycle 失败: {error:?}");
                 if let Err(cancel_error) = self.cancel_gc_work(&message) {
@@ -547,6 +563,13 @@ impl RawWorld {
                         report.candidate_blocks_swept = stats.blocks_swept;
                         report.candidate_blocks_released = stats.blocks_released;
                         report.candidate_dead_groups = stats.dead_groups;
+                    }
+                    // candidate / shared plane 在第一次 inbox drain 之后才发 return：
+                    // Cycle 必须在 trim 前再排空这批消息，否则 empty block 会拖到下一次 drain。
+                    for owner in 0..self.owners.len() as u32 {
+                        let (forwarded, consumed) = self.drain_inboxes(owner, &budget, true)?;
+                        report.forwarded_messages += u64::from(forwarded);
+                        report.consumed_messages += u64::from(consumed);
                     }
                 }
             }

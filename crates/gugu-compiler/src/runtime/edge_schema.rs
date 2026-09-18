@@ -24,7 +24,7 @@ pub(crate) const EDGE_SCHEMA: u32 = 1;
 /// 内建 edge profile 名。
 pub(crate) const EDGE_PROFILE_NAME: &str = "mosaic-edge";
 /// edge profile 的 revision；任何派生值、相位目录或消息目录变化都必须递增。
-pub(crate) const EDGE_PROFILE_REVISION: u32 = 1;
+pub(crate) const EDGE_PROFILE_REVISION: u32 = 2;
 
 /// 候选推进的默认 quantum：每次 `advance_block_candidates` 至多消费的工作量单位。
 pub(crate) const EDGE_CANDIDATE_QUANTUM: u32 = 4096;

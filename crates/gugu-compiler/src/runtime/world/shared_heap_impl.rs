@@ -12,6 +12,7 @@
 //! 唯一账本：`live_bytes` 含仍在 forwarding grace 里的旧 payload，`dead_bytes` 只记已经真正
 //! 释放的字节，因此「搬迁字节不多于已释放字节」可以直接比较两个计数器。
 
+use super::super::extent::ExtentId;
 use super::super::gc_metadata_contract::GC_BLOCK_BYTES;
 use super::super::local_heap::{BlockRef, ManagedBlockId};
 use super::super::shared_heap_schema::{SharedHandle, SharedPayloadId};
@@ -91,6 +92,10 @@ pub(crate) struct SharedBlockRecord {
     pub(crate) live_payloads: u32,
     /// 该 block 是否已经不再是正在填充的 block。
     pub(crate) sealed: bool,
+    /// 该 block 对应的 MANAGED_SHARED extent。
+    pub(crate) extent: Option<ExtentId>,
+    /// extent 在 arena 内的字节偏移。
+    pub(crate) extent_offset: u64,
 }
 
 impl SharedBlockRecord {
@@ -187,6 +192,8 @@ impl SharedRegistry {
                 dead_bytes: 0,
                 live_payloads: 0,
                 sealed: false,
+                extent: None,
+                extent_offset: 0,
             });
             self.current = Some(OpenBlock { block, owner });
         }
@@ -452,6 +459,38 @@ impl SharedRegistry {
     pub(crate) fn block_record(&self, descriptor: u32) -> Option<&SharedBlockRecord> {
         let index = Self::block_index(descriptor).ok()?;
         self.blocks.get(index)
+    }
+
+    /// 把一个共享 block 绑定到它的 MANAGED_SHARED extent。
+    pub(crate) fn attach_extent(
+        &mut self,
+        descriptor: u32,
+        extent: ExtentId,
+        offset: u64,
+    ) -> Result<(), RawInvariant> {
+        let index = Self::block_index(descriptor)?;
+        let record = self
+            .blocks
+            .get_mut(index)
+            .ok_or_else(|| RawInvariant::new("共享 block 记录未登记"))?;
+        record.extent = Some(extent);
+        record.extent_offset = offset;
+        Ok(())
+    }
+
+    /// 从 registry 摔掉一个已归还的共享 block 记录。
+    pub(crate) fn drop_block(&mut self, descriptor: u32) -> Result<(), RawInvariant> {
+        let index = Self::block_index(descriptor)?;
+        let record = self
+            .blocks
+            .get_mut(index)
+            .ok_or_else(|| RawInvariant::new("共享 block 记录未登记"))?;
+        if !record.is_empty() {
+            return Err(RawInvariant::new("摔掉共享 block 时仍有存活 payload"));
+        }
+        record.extent = None;
+        record.extent_offset = 0;
+        Ok(())
     }
 
     /// 返回已封口且不再有存活 payload 的 block 数。

@@ -1,8 +1,8 @@
 //! RawWorld 上的 LocalHeap 接入：按契约配置 arena、分配与读写 managed 对象、pin 与分代 cycle。
 //!
-//! arena 的物理页仍走 extent 层：每个 32 KiB block 由 provider 提交，因此 managed heap 不进入
-//! `OwnerAccounting`，`runtime_committed_bytes` 与 `spec/runtime.md` 的口径保持不变。指针是
-//! arena 内的直接地址（`LOCAL_DIRECT`），根是模型根槽数组，跨 owner 引用在本阶段是不变量失败。
+//! arena 的物理页仍走 extent 层：每个 32 KiB block 由 provider 提交，并进入独立
+//! `ManagedAccounting`，由 `committed_classes` 汇总进 pressure。指针是 arena 内的直接地址
+//! （`LOCAL_DIRECT`），根是模型根槽数组，跨 owner 引用在本路径是不变量失败。
 
 use super::super::barrier::{BarrierFlushReason, BarrierSite};
 use super::super::extent::class_for_bytes;
@@ -12,7 +12,9 @@ use super::super::local_heap::{
     BlockRef, CycleReport, GENERATION_OLD, HeapArenaKind, HeapCounters, HeapError, HeapObject,
     LocalHeap, ManagedBlockId,
 };
-use super::super::local_heap_schema::{HEAP_BLOCKS_PER_ARENA, LocalHeapRuntimeContract};
+use super::super::local_heap_schema::{
+    HEAP_BLOCKS_PER_ARENA, HeapBlockState, LocalHeapRuntimeContract,
+};
 use super::super::slab::{MemoryDomainId, OwnerToken, RawInvariant};
 use super::RawWorld;
 use super::shared_heap_impl;
@@ -83,8 +85,6 @@ pub(super) fn shared_heap_error(error: super::super::shared_heap::SharedHeapErro
 impl RawWorld {
     /// 分配并发布一个共享对象：payload 建立在 SharedHeap，block 身份登记在世界级 registry。
     ///
-    /// 返回 stable handle；`block`/`offset` 由 registry 预留，因此共享 block descriptor 与
-    /// LocalHeap arena descriptor 不会重合，payload 记录里保存的也是同一个世界级身份。
     pub(crate) fn allocate_shared_object(
         &mut self,
         owner: u32,
@@ -92,6 +92,13 @@ impl RawWorld {
     ) -> Result<super::super::shared_heap_schema::SharedHandle, RawInvariant> {
         let (block, block_offset) = self.shared_registry.reserve(owner, bytes)?;
         let descriptor = block.id.arena();
+        if self
+            .shared_registry
+            .block_record(descriptor)
+            .is_some_and(|record| record.extent.is_none())
+        {
+            self.commit_shared_block_pages(owner, descriptor)?;
+        }
         let payload = self
             .shared_heap_mut()?
             .allocate_payload(owner, descriptor, block_offset, bytes)
@@ -103,8 +110,6 @@ impl RawWorld {
         let entry =
             self.shared_registry
                 .insert(handle, payload.id, owner, bytes, block, block_offset)?;
-        // 共享 block 与 LocalHeap arena 走同一套 card table 与 edge 记账：manager 是 payload
-        // 的 owner，因此别的 owner 写进这块 payload 时卡确实会以 CardMark 消息投给它。
         let manager = self.token(owner);
         self.barrier_mut().register_arena(
             u64::from(descriptor),
@@ -114,6 +119,32 @@ impl RawWorld {
         )?;
         debug_assert_eq!(entry.block, block);
         Ok(handle)
+    }
+
+    /// 为新的共享 block 打开 MANAGED_SHARED arena 并提交 32 KiB。
+    pub(super) fn commit_shared_block_pages(
+        &mut self,
+        owner: u32,
+        descriptor: u32,
+    ) -> Result<(), RawInvariant> {
+        let manager = self.token(owner);
+        let arenas = self.extents.spaces_of(owner).to_vec();
+        let extent_arena = if let Some(existing) = arenas
+            .into_iter()
+            .find(|arena| self.extents.arena_domain(*arena) == Some(MemoryDomainId::MANAGED_SHARED))
+        {
+            existing
+        } else {
+            self.open_arena(owner, manager, MemoryDomainId::MANAGED_SHARED)?
+        };
+        let class = self.heap_block_class;
+        let (extent, offset) = self.commit_managed_block(owner, extent_arena, class)?;
+        self.shared_registry
+            .attach_extent(descriptor, extent, offset)?;
+        self.managed_accounting[owner as usize].take_from_cache(u64::from(
+            super::super::gc_metadata_contract::GC_BLOCK_BYTES,
+        ));
+        Ok(())
     }
 
     /// 建立一个覆盖多次字段访问的共享 access guard；返回非零 token。
@@ -544,8 +575,10 @@ impl RawWorld {
                 .allocate(arena, type_index, payload_bytes, align);
         }
         let address = attempt.map_err(heap_error)?;
-        // incremental marking 期间新对象必须进入本轮 cycle 的灰色集合：否则它在 cycle 收尾时
-        // 仍未标记，会被 sweep 当成垃圾回收。
+        let activated = self.heap_mut(owner)?.take_activated_cache_bytes();
+        if activated != 0 {
+            self.managed_accounting[owner as usize].take_from_cache(activated);
+        }
         self.shade_address(owner, address)?;
         Ok(address)
     }
@@ -687,9 +720,7 @@ impl RawWorld {
                         heap.block_live_lines(id).map_err(heap_error)?,
                     )
                 };
-                if record.state != 0
-                    || kind == HeapArenaKind::Nursery
-                    || live_lines == 0
+                if kind == HeapArenaKind::Nursery
                     || record.incoming_leases != 0
                     || record.allocator_leases != 0
                     || record.scanner_leases != 0
@@ -697,9 +728,23 @@ impl RawWorld {
                 {
                     continue;
                 }
-                // 块内仍有本 epoch 标记的对象说明它确实活着：不该进入候选，否则每轮 cycle 都会
-                // 建一个必然被 `validate` 退回的 job。零标记的块才是「本轮 sweep 会清空」的块。
-                {
+                let state = HeapBlockState::from_raw(record.state);
+                match state {
+                    Some(HeapBlockState::Allocating) => {
+                        if live_lines == 0 {
+                            continue;
+                        }
+                    }
+                    Some(HeapBlockState::Evacuating) => {
+                        if live_lines != 0 {
+                            continue;
+                        }
+                    }
+                    _ => continue,
+                }
+                // Allocating 且仍有本 epoch 标记的对象说明它确实活着：不该进入候选。
+                // Evacuating 已经搬空，零标记才是归还对象。
+                if state == Some(HeapBlockState::Allocating) {
                     let heap = self.heap(heap_owner)?;
                     if heap.block_marked_objects(id).map_err(heap_error)? != 0 {
                         continue;
@@ -893,11 +938,16 @@ impl RawWorld {
                 return Ok(slot);
             }
             let extent_arena = self.managed_arena(owner, slot)?.extent_arena;
-            let (_, offset) = self.commit_managed_block(owner, extent_arena, class)?;
+            let (extent, offset) = self.commit_managed_block(owner, extent_arena, class)?;
             let block = u32::try_from(offset / block_bytes)
                 .map_err(|_| RawInvariant::new("block 下标超出 u32"))?;
             self.heap_mut(owner)?
                 .commit_block(slot, block)
+                .map_err(heap_error)?;
+            let descriptor = self.managed_arena(owner, slot)?.descriptor;
+            let id = ManagedBlockId::new(descriptor, block)?;
+            self.heap_mut(owner)?
+                .attach_block_extent(id, extent)
                 .map_err(heap_error)?;
         }
         Err(RawInvariant::new(

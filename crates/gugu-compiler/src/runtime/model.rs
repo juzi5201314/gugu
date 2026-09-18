@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::barrier_schema::{BarrierDemand, BarrierRuntimeContract, MessageFamilyTag};
+use super::block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
 use super::coroutine_schema::{CoroutineDemand, CoroutineRuntimeContract};
 use super::edge_schema::{EdgeDemand, EdgeRuntimeContract};
 use super::gc_metadata_contract::GcMetadataRuntimeContract;
@@ -41,11 +42,9 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 18 相对版本 17 的变化：并入 `SharedHeapRuntimeContract`（stable handle 身份位宽、
-/// handle slot 与 payload record 布局、slot 状态机、`HandleForward` 字段集合与
-/// `SharedHeapDemand`），并把 SharedHeap 相关需求从 `LocalHeapDemand` 移出；mark ticket 的
-/// 需求来源改为 SharedHeap 契约段。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 18;
+/// 版本 19 相对版本 18 的变化：并入 `BlockReturnRuntimeContract`（四类 managed
+/// return unit、lease/grace 门禁目录、Immix 尺寸与 `BlockReturnDemand`）。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 19;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -529,6 +528,7 @@ pub(crate) struct RuntimeRawContractV1 {
     mark: MarkRuntimeContract,
     edge: EdgeRuntimeContract,
     shared_heap: SharedHeapRuntimeContract,
+    block_return: BlockReturnRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -586,6 +586,10 @@ impl RuntimeRawContractV1 {
             &mark,
         )?;
         let shared_heap = SharedHeapRuntimeContract::build(demand.shared_heap)?;
+        let block_return = BlockReturnRuntimeContract::build(BlockReturnDemand::derive(
+            &local_heap.demand,
+            &shared_heap.demand,
+        )?)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -614,6 +618,7 @@ impl RuntimeRawContractV1 {
             mark,
             edge,
             shared_heap,
+            block_return,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -781,6 +786,11 @@ impl RuntimeRawContractV1 {
         &self.shared_heap
     }
 
+    /// 返回 owner-directed managed block return 契约段。
+    pub(crate) fn block_return(&self) -> &BlockReturnRuntimeContract {
+        &self.block_return
+    }
+
     /// 返回 `HandleForward` 消息字段集合。
     pub(crate) fn handle_forward_message(&self) -> &MessageSchemaV1 {
         self.shared_heap.handle_forward_fields()
@@ -946,6 +956,16 @@ impl RuntimeRawContractV1 {
         self.mark.verify()?;
         self.edge.verify(&self.barrier, &self.mark)?;
         self.shared_heap.verify()?;
+        self.block_return.verify()?;
+        if self.block_return.block_bytes != self.local_heap.block_bytes
+            || self.block_return.arena_bytes != self.local_heap.arena_bytes
+            || self.block_return.line_bytes != self.local_heap.line_bytes
+            || self.block_return.grace_steps != self.grace_steps
+        {
+            return Err(RawModelError::new(
+                "block return 尺寸与 LocalHeap / grace 契约不一致",
+            ));
+        }
         if self.edge.demand().edge_sites != self.barrier.demand.edge_summary_sites
             || self.edge.demand().reserve_slots != self.barrier.demand.shade_slots
         {
@@ -1042,6 +1062,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.local_heap.canonical_bytes());
         bytes.extend_from_slice(&self.mark.canonical_bytes());
         bytes.extend_from_slice(&self.shared_heap.canonical_bytes());
+        bytes.extend_from_slice(&self.block_return.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1275,6 +1296,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.mark.dump());
         output.push_str(&self.shared_heap.dump());
         self.edge.dump_into(&mut output);
+        output.push_str(&self.block_return.dump());
         output.push_str(&format!(
             "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} edge-delta-fields={} handle-forward-fields={} card-mark-family={}\n",
             self.message.fields.len(),

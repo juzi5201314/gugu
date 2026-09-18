@@ -142,6 +142,13 @@ impl RawWorld {
         let bytes = record.payload_bytes;
         let (block, block_offset) = self.shared_registry.reserve(owner, bytes)?;
         let descriptor = block.id.arena();
+        if self
+            .shared_registry
+            .block_record(descriptor)
+            .is_some_and(|record| record.extent.is_none())
+        {
+            self.commit_shared_block_pages(owner, descriptor)?;
+        }
         let payload = self
             .shared_heap_mut()?
             .allocate_payload(owner, descriptor, block_offset, bytes)
@@ -428,6 +435,7 @@ impl RawWorld {
         };
         report.released = self.release_unmarked_shared(scope)?;
         report.deferred = self.evacuate_shared_blocks(scope)?;
+        self.queue_empty_shared_blocks(scope)?;
         // 发布出的通知必须在本 cycle 内被目标 owner 消费：lease 与 grace 结清得越早，旧 payload
         // 越早可以真正回收，termination 也才不会停在 forwarding work 上。
         let budget = ServiceBudget::pressure(u32::MAX, u64::MAX);
@@ -442,6 +450,23 @@ impl RawWorld {
         report.freed_bytes = delta.freed_bytes;
         report.empty_blocks = self.shared_registry.empty_block_count();
         Ok(report)
+    }
+
+    /// 把已封口、无存活 payload、无 pin/guard/grace 的共享 block 发成 HeapBlock 归还。
+    fn queue_empty_shared_blocks(&mut self, scope: &[u32]) -> Result<(), RawInvariant> {
+        let mut empty = Vec::new();
+        for owner in scope {
+            for (descriptor, record) in self.shared_registry.blocks_for_owner(*owner) {
+                if record.is_empty() && record.extent.is_some() {
+                    empty.push(record.block.id);
+                }
+                let _ = descriptor;
+            }
+        }
+        for id in empty {
+            self.queue_heap_block_return(id)?;
+        }
+        Ok(())
     }
 
     /// 判断 scope 是否覆盖全部 owner。
@@ -579,6 +604,11 @@ impl RawWorld {
             return Ok(0);
         }
         let target_index = self.manager_owner_index(target)?;
+        let pending = self.managed_accounting[owner as usize].pending_return_bytes();
+        if pending != 0 {
+            self.managed_accounting[owner as usize].forward_pending(pending);
+            self.managed_accounting[target_index as usize].stage_pending(pending);
+        }
         let from = self.token(owner);
         let moved = self.shared_registry.handover_owner(owner, target_index);
         let tables = self.barrier_mut().handover_manager(from, target);

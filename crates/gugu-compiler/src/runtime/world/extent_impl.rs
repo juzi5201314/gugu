@@ -9,9 +9,11 @@
 use super::super::extent::{
     ExtentDescriptor, ExtentId, ExtentOccupancy, ExtentState, ExtentTable, TrimBlocked, TrimReport,
 };
+use super::super::gc_metadata_contract::{GC_BLOCK_BYTES, GC_LINE_BYTES};
 use super::super::inbox::ShardIndex;
 #[cfg(test)]
 use super::super::inbox::{DrainStop, ServiceBudget};
+use super::super::local_heap::ManagedBlockId;
 use super::super::message::{
     FlushTrigger, IntegrityTag, MessageState, ProducerStaging, ReturnKind, ReturnMessage,
     ReturnNodeId, stage_message,
@@ -22,6 +24,8 @@ use super::super::slab::{
     MemoryDomainId, OwnerId, OwnerToken, RawInvariant, SlabDescriptorId, SlabGeneration, SlabState,
 };
 use super::RawWorld;
+use super::heap_impl::heap_error;
+use super::shared_heap_impl;
 
 /// 一个 trim 候选：门禁所需的 occupancy 加 pause 预算所需的真实度量。
 ///
@@ -106,16 +110,22 @@ impl RawWorld {
 
     /// 为一个 managed heap block 提交物理页并返回它在 arena 内的偏移。
     ///
-    /// managed heap 的 32 KiB block 与 slab extent 共用同一 provider 提交路径，但不进入
-    /// `OwnerAccounting`，因此 `runtime_committed_bytes` 的口径与 `spec/runtime.md` 一致。
+    /// managed 物理页进入独立 `ManagedAccounting`，由 `committed_classes` 汇总进 pressure。
+    /// `MANAGED_LOCAL` 与 `MANAGED_SHARED` 共用本函数，不另写共享页分配器。
     pub(super) fn commit_managed_block(
         &mut self,
         owner: u32,
         arena: u32,
         class: u32,
     ) -> Result<(ExtentId, u64), RawInvariant> {
-        if self.extents.arena_domain(arena) != Some(MemoryDomainId::MANAGED_LOCAL)
-            || !self.extents.spaces_of(owner).contains(&arena)
+        let domain = self
+            .extents
+            .arena_domain(arena)
+            .ok_or_else(|| RawInvariant::new("managed block 的 arena domain 缺失"))?;
+        if !matches!(
+            domain,
+            MemoryDomainId::MANAGED_LOCAL | MemoryDomainId::MANAGED_SHARED
+        ) || !self.extents.spaces_of(owner).contains(&arena)
         {
             return Err(RawInvariant::new(
                 "managed block 的 owner/domain 与 arena 不符",
@@ -133,6 +143,7 @@ impl RawWorld {
             .ok_or_else(|| RawInvariant::new("managed extent 缺失"))?
             .bytes;
         self.provider.commit_pages(range, offset, bytes)?;
+        self.managed_accounting[owner as usize].commit(bytes);
         Ok((extent, offset))
     }
 
@@ -510,10 +521,11 @@ impl RawWorld {
         &mut self,
         message_id: ReturnNodeId,
     ) -> Result<ReturnMessage, RawInvariant> {
-        if self.pool.kind_of(message_id) == ReturnKind::StackSpan {
+        let kind = self.pool.kind_of(message_id);
+        if kind == ReturnKind::StackSpan {
             return self.load_stack_return(message_id);
         }
-        if self.pool.kind_of(message_id) == ReturnKind::Extent {
+        if kind == ReturnKind::Extent {
             let extent = ExtentId::from_raw(self.pool.descriptor_of(message_id).raw());
             let descriptor = *self
                 .extents
@@ -528,12 +540,66 @@ impl RawWorld {
                 SlabGeneration::from_raw(u64::from(descriptor.generation.raw())),
             ));
         }
+        if matches!(
+            kind,
+            ReturnKind::HeapBlock
+                | ReturnKind::HeapLineRun
+                | ReturnKind::HeapArena
+                | ReturnKind::LargeMapping
+        ) {
+            return self.load_managed_return(message_id, kind);
+        }
         let descriptor = self
             .descriptor(self.pool.descriptor_of(message_id))?
             .clone();
         Ok(self
             .pool
             .load(message_id, descriptor.class, descriptor.generation))
+    }
+
+    /// 用 HeapBlockRecord / SharedBlockRecord 的 generation 作为 managed 载入键。
+    fn load_managed_return(
+        &self,
+        message_id: ReturnNodeId,
+        kind: ReturnKind,
+    ) -> Result<ReturnMessage, RawInvariant> {
+        let descriptor = self.pool.descriptor_of(message_id);
+        let unit = self.pool.unit_of(message_id);
+        let bytes = self.pool.node_bytes(message_id);
+        let class = match kind {
+            ReturnKind::HeapBlock => u16::try_from(self.heap_block_class)
+                .map_err(|_| RawInvariant::new("heap block class 越过 integrity 车道"))?,
+            ReturnKind::HeapLineRun => u16::try_from(bytes / u64::from(GC_LINE_BYTES))
+                .map_err(|_| RawInvariant::new("line-run 字节无法还原 line count"))?,
+            ReturnKind::HeapArena => 0,
+            ReturnKind::LargeMapping => u16::try_from(bytes / u64::from(GC_BLOCK_BYTES))
+                .map_err(|_| RawInvariant::new("large mapping 字节无法还原 span"))?,
+            _ => {
+                return Err(RawInvariant::new("load_managed_return 收到非 managed kind"));
+            }
+        };
+        let generation = if kind == ReturnKind::HeapArena {
+            SlabGeneration::from_raw(1)
+        } else if shared_heap_impl::is_shared_descriptor(descriptor.raw()) {
+            let record = self
+                .shared_registry
+                .block_record(descriptor.raw())
+                .ok_or_else(|| RawInvariant::new("managed 归还引用未知共享 block"))?;
+            SlabGeneration::from_raw(u64::from(record.block.generation))
+        } else {
+            let block = if kind == ReturnKind::HeapLineRun {
+                unit >> 8
+            } else {
+                unit
+            };
+            let id = ManagedBlockId::new(descriptor.raw(), block)?;
+            let owner = self.managed_arena_by_descriptor(id.arena())?.heap_owner;
+            let record = self.heap(owner)?.block_record(id).map_err(heap_error)?;
+            SlabGeneration::from_raw(u64::from(record.generation))
+        };
+        Ok(self
+            .pool
+            .load(message_id, RuntimeSizeClassId::from_raw(class), generation))
     }
 
     /// owner 上下文：消费一条 extent 归还消息。
@@ -635,7 +701,19 @@ impl RawWorld {
     }
 
     /// 把一个已撤销物理页的 extent 从 owner 账本里扣减。
+    ///
+    /// managed 物理页走独立 `ManagedAccounting`；raw/resource 仍走 directory 账本。
     fn release_extent_bytes(&mut self, owner_id: OwnerId, bytes: u64) -> Result<(), RawInvariant> {
+        if let Some(index) = self
+            .owners
+            .iter()
+            .position(|owner| owner.token().owner_id == owner_id)
+            && self.managed_accounting[index].committed_bytes() >= bytes
+            && self.managed_accounting[index].owner_cache_bytes() >= bytes
+        {
+            self.managed_accounting[index].release(bytes);
+            return Ok(());
+        }
         let accounting = self
             .directory
             .accounting_mut(owner_id)

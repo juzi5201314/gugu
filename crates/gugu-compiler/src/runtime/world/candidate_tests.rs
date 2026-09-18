@@ -1,5 +1,5 @@
 //! 候选回收与世界状态的集成回归：从真实 LocalHeap/EdgePlane 取样，经平面决议，再由唯一消费者
-//! 执行清扫与释放。
+//! 执行清扫与发布。物理释放发生在 inbox consume 之后。
 //!
 //! 全部在进程内运行：断言的是 block 记录、对象可达性与平面统计，不是内部调用顺序。
 
@@ -11,8 +11,8 @@ use crate::runtime::candidate_schema::CandidateVerdict;
 use crate::runtime::gc_metadata_schema::GcRootKindV1;
 use crate::runtime::inbox::ServiceBudget;
 use crate::runtime::local_heap::{HeapArenaKind, ManagedBlockId};
+use crate::runtime::local_heap_schema::HeapBlockState;
 use crate::runtime::startup_schema::ReportReason;
-
 /// 在 owner 0 的 Old arena 分配一个 leaf，并返回 `(payload 地址, block 身份)`。
 fn old_leaf(world: &mut RawWorld) -> (u64, ManagedBlockId) {
     let address = world
@@ -54,20 +54,49 @@ fn candidate_cycle_frees_the_block_and_drops_its_objects() {
         .expect("堆可读")
         .block_record(block)
         .expect("记录可读");
-    assert_eq!(before.state, 0, "新块必须是 active");
+    assert_eq!(
+        before.state,
+        HeapBlockState::Allocating.raw(),
+        "新块必须是 allocating"
+    );
     let verdicts = run_candidates(&mut world, block);
     assert_eq!(
         verdicts,
         vec![CandidateVerdict::Dead(vec![(block, before.generation)])],
         "无入边、无 pin/resource/标记的块必须判定死亡"
     );
+    let pending = world
+        .heap(0)
+        .expect("堆可读")
+        .block_record(block)
+        .expect("记录可读");
+    assert_eq!(
+        pending.state,
+        HeapBlockState::ReturnPending.raw(),
+        "drive_candidates 之后块必须处于 ReturnPending"
+    );
+    assert_eq!(
+        pending.generation, before.generation,
+        "consume 前不得推进世代"
+    );
+    world
+        .drain_inboxes(0, &ServiceBudget::pressure(u32::MAX, u64::MAX), true)
+        .expect("inbox 可排空");
     let after = world
         .heap(0)
         .expect("堆可读")
         .block_record(block)
         .expect("记录可读");
-    assert_eq!(after.state, 0, "释放后必须回到「已提交且可分配」的状态");
-    assert_eq!(after.generation, before.generation + 1, "释放必须推进世代");
+    assert_eq!(
+        after.state,
+        HeapBlockState::Free.raw(),
+        "drain 之后块必须进入 Free"
+    );
+    assert_eq!(
+        after.generation,
+        before.generation + 1,
+        "consume 必须推进世代"
+    );
     assert_eq!(after.candidate_job, u32::MAX, "释放后不得残留 job 绑定");
     assert!(
         world.managed_object(address).is_err(),
@@ -88,7 +117,6 @@ fn candidate_cycle_frees_the_block_and_drops_its_objects() {
     assert_eq!(stats.blocks_released, 1);
     assert_eq!(stats.dead_groups, 1);
     assert_eq!(world.candidate_job_of(block).expect("可查询"), None);
-    // 再推进一次不得重复 sweep 或释放：平面已经没有 job，块也已经是 free。
     let again = world.drive_candidates(4096).expect("空推进成功");
     assert!(again.actions.is_empty(), "空推进不得再产生动作");
     assert_eq!(world.candidate_stats().expect("统计可读").blocks_swept, 1);
@@ -109,7 +137,11 @@ fn pinned_candidate_is_retreated_without_sweeping() {
         .expect("堆可读")
         .block_record(block)
         .expect("记录可读");
-    assert_eq!(record.state, 0, "失效后必须退回 active");
+    assert_eq!(
+        record.state,
+        HeapBlockState::Allocating.raw(),
+        "失效后必须退回 allocating"
+    );
     assert_eq!(record.candidate_job, u32::MAX, "失效后必须解绑");
     assert!(world.managed_object(address).is_ok(), "pin 对象必须存活");
     let stats = world.candidate_stats().expect("统计可读");
@@ -321,7 +353,11 @@ fn failure_cancellation_retreats_jobs_and_reports_through_rt0() {
         .expect("堆可读")
         .block_record(block)
         .expect("记录可读");
-    assert_eq!(record.state, 0, "取消后必须退回 active");
+    assert_eq!(
+        record.state,
+        HeapBlockState::Allocating.raw(),
+        "取消后必须退回 allocating"
+    );
     assert_eq!(record.candidate_job, u32::MAX);
     assert!(
         world.managed_object(address).is_ok(),

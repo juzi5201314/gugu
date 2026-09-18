@@ -188,6 +188,10 @@ pub(crate) enum ReturnKind {
     Extent,
     /// wait-node 的跨 owner 归还。
     WaitNode,
+    /// 整个 managed arena。
+    HeapArena,
+    /// 跨连续 block 的 large-object mapping。
+    LargeMapping,
 }
 
 impl ReturnKind {
@@ -201,6 +205,8 @@ impl ReturnKind {
             Self::HeapLineRun => "HeapLineRun",
             Self::Extent => "Extent",
             Self::WaitNode => "WaitNode",
+            Self::HeapArena => "HeapArena",
+            Self::LargeMapping => "LargeMapping",
         }
     }
 
@@ -213,6 +219,8 @@ impl ReturnKind {
             Self::HeapLineRun => 4,
             Self::Extent => 5,
             Self::WaitNode => 6,
+            Self::HeapArena => 7,
+            Self::LargeMapping => 8,
         }
     }
 
@@ -225,6 +233,8 @@ impl ReturnKind {
             4 => Self::HeapLineRun,
             5 => Self::Extent,
             6 => Self::WaitNode,
+            7 => Self::HeapArena,
+            8 => Self::LargeMapping,
             _ => return None,
         })
     }
@@ -1350,6 +1360,10 @@ impl ReturnNode {
         )
     }
 
+    fn unit(&self) -> u32 {
+        (self.descriptor_unit.load(Ordering::Acquire) >> 32) as u32
+    }
+
     fn kind(&self) -> ReturnKind {
         ReturnKind::from_raw(((self.state_kind.load(Ordering::Acquire) >> 8) & 0xFF) as u8)
             .unwrap_or(ReturnKind::RawSlot)
@@ -1623,6 +1637,11 @@ impl ReturnNodePool {
         self.nodes[id.index()].kind()
     }
 
+    /// 只读取 node 的 unit 编号。
+    pub(crate) fn unit_of(&self, id: ReturnNodeId) -> u32 {
+        self.nodes[id.index()].unit()
+    }
+
     /// 只读取 node 的目标 owner 编号。
     pub(crate) fn owner_id_of(&self, id: ReturnNodeId) -> OwnerId {
         self.nodes[id.index()].owner_id()
@@ -1687,6 +1706,8 @@ pub(crate) enum FlushTrigger {
     OwnerPressure,
     /// maintenance service 到期。
     Maintenance,
+    /// candidate / shared plane 在 GC cycle 内交出 empty block。
+    GcHandoff,
 }
 
 impl FlushTrigger {
@@ -1699,6 +1720,7 @@ impl FlushTrigger {
             Self::ProducerStopping => "producer-stopping",
             Self::OwnerPressure => "owner-pressure",
             Self::Maintenance => "maintenance",
+            Self::GcHandoff => "gc-handoff",
         }
     }
 }

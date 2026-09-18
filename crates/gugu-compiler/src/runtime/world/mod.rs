@@ -5,6 +5,7 @@
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
 pub(crate) mod barrier_impl;
+pub(crate) mod block_return_impl;
 pub(crate) mod candidate_impl;
 pub(crate) mod coroutine_impl;
 pub(crate) mod edge_impl;
@@ -68,6 +69,10 @@ mod region_tests;
 mod shared_forward_tests;
 
 #[cfg(test)]
+#[path = "block_return_tests.rs"]
+mod block_return_tests;
+
+#[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
 
 use std::collections::VecDeque;
@@ -91,9 +96,9 @@ use super::provider::{ProviderStats, RangeDescriptor, RangeProvider};
 use super::resource::{self, ReleaseRegistry, ReleaseTicket, ResourceCellTable};
 use super::size_class::{RuntimeSizeClassId, RuntimeSizeClassTable};
 use super::slab::{
-    Epoch, MemoryDomainId, OwnerAccounting, OwnerDirectory, OwnerId, OwnerToken, RawInvariant,
-    RawSlot, Resolution, RuntimeSeed, SlabDescriptorId, SlabGeneration, SlabState, SlabTable,
-    SlotState,
+    Epoch, ManagedAccounting, MemoryDomainId, OwnerAccounting, OwnerDirectory, OwnerId, OwnerToken,
+    RawInvariant, RawSlot, Resolution, RuntimeSeed, SlabDescriptorId, SlabGeneration, SlabState,
+    SlabTable, SlotState,
 };
 
 /// owner retire 的结果。
@@ -148,6 +153,8 @@ pub(crate) struct RawWorld {
     /// 发布消息，也不会因为一次未走完就丢失归还。owner 与 extent 一起记录：归还完成后描述符
     /// 槽位会被复用，届时就无法再从 extent 反查账本归属。
     pending_extent_trims: Vec<(ExtentId, OwnerId)>,
+    /// 每个 raw owner 的独立 managed 物理页账本；按下标与 `owners` 对齐。
+    managed_accounting: Vec<ManagedAccounting>,
     /// 与 slab descriptor 平行的 ResourceCell header。
     cells: ResourceCellTable,
     /// 统一 release 入口的 glue 与描述符目录。
@@ -279,6 +286,7 @@ impl RawWorld {
             domain_owner,
             graced_nodes: Vec::new(),
             pending_extent_trims: Vec::new(),
+            managed_accounting: vec![ManagedAccounting::default(); owners as usize],
             cells: ResourceCellTable::new(),
             registry,
             release_queue: VecDeque::new(),
@@ -386,6 +394,11 @@ impl RawWorld {
         self.directory
             .accounting(self.owners[index as usize].token().owner_id)
             .expect("owner 必须已登记")
+    }
+
+    /// 返回 owner 的 managed 物理页账本。
+    pub(crate) fn managed_accounting(&self, index: u32) -> &ManagedAccounting {
+        &self.managed_accounting[index as usize]
     }
 
     /// 返回 slab 描述符表。
@@ -816,6 +829,18 @@ impl RawWorld {
                 // 上面的载入键分支已经解析过 extent；这里只消费已经过校验的消息。
                 extent_returns += u32::from(self.service_extent_return(owner, &message)?);
                 self.graced_nodes.push(message_id);
+                continue;
+            }
+            if matches!(
+                message.kind,
+                ReturnKind::HeapBlock
+                    | ReturnKind::HeapLineRun
+                    | ReturnKind::HeapArena
+                    | ReturnKind::LargeMapping
+            ) {
+                self.service_managed_return(owner, &message)?;
+                self.graced_nodes.push(message_id);
+                consumed += 1;
                 continue;
             }
             let token = if resource { resource_token } else { raw_token };

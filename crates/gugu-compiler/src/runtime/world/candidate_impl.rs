@@ -3,11 +3,12 @@
 //! 归属边界：
 //!
 //! 1. **平面只给决议，执行在这里**：`CandidateAction` 是候选平面唯一的输出，本模块把它落成块
-//!    记录的 lease/状态迁移与 `LocalHeap` 的清扫、释放；平面拿不到堆，也没有释放权限。
+//!    记录的 lease/状态迁移与 `LocalHeap` 的清扫；`ReleaseBlock` 只发布 return 消息，物理清空
+//!    推迟到 consume。
 //! 2. **事实只有一份来源**：`incoming` 取自 `EdgePlane` 的 target 侧已应用计数，lease、世代与
 //!    mutation 版本取自 `HeapBlockRecord`，pin/resource/标记数取自 header 与 mark 位图。
-//! 3. **sweep 消费者唯一**：只有 `drive_candidates` 调用 `sweep_block` 与 `release_block`，且每
-//!    次动作立刻回填 `note_swept`/`note_released`，重复执行会被平面判成不变量失败。
+//! 3. **sweep 消费者唯一**：只有 `drive_candidates` 调用 `sweep_block`，且每次动作立刻回填
+//!    `note_swept`/`note_released`，重复执行会被平面判成不变量失败。
 
 use super::RawWorld;
 use super::shared_heap_impl;
@@ -17,6 +18,7 @@ use crate::runtime::candidate::{
 };
 use crate::runtime::candidate_schema::CandidateSnapshot;
 use crate::runtime::local_heap::{BlockRef, CycleReport, ManagedBlockId};
+use crate::runtime::local_heap_schema::{HEAP_BLOCK_EVAC_SOURCE, HeapBlockState};
 use crate::runtime::slab::RawInvariant;
 use crate::runtime::startup_schema::{ExitCategory, ReportEvent, ReportReason};
 use crate::runtime::termination::ReportSpec;
@@ -277,14 +279,43 @@ impl RawWorld {
                     if record.generation != generation {
                         return Err(RawInvariant::new("提交的 block 世代已经变化"));
                     }
-                    // 决议已确定：成员绑定解除，状态推进到 reclaiming，再由唯一消费者清扫。
+                    // 决议已确定：成员绑定解除。evacuation 来源位由 `unmark` 保留，
+                    // 随后按该位选择 Sweeping 或直接 ReturnPending。
                     heap.unmark_block_candidate(block).map_err(heap_error)?;
                     let mut record = heap.block_record(block).map_err(heap_error)?;
-                    record.state = 2;
-                    heap.update_block_record(block, record)
-                        .map_err(heap_error)?;
-                    let mut cycle = CycleReport::default();
-                    heap.sweep_block(block, &mut cycle).map_err(heap_error)?;
+                    let evac = record.reserved & HEAP_BLOCK_EVAC_SOURCE != 0;
+                    let live_lines = heap.block_live_lines(block).map_err(heap_error)?;
+                    if evac {
+                        if live_lines != 0 {
+                            return Err(RawInvariant::new(
+                                "evacuating 源块仍有 live line，不得进入 ReturnPending",
+                            ));
+                        }
+                        record.reserved &= !HEAP_BLOCK_EVAC_SOURCE;
+                        record.state = HeapBlockState::ReturnPending.raw();
+                        heap.update_block_record(block, record)
+                            .map_err(heap_error)?;
+                        heap.promote_empty_large_span(block).map_err(heap_error)?;
+                    } else {
+                        record.state = HeapBlockState::Sweeping.raw();
+                        heap.update_block_record(block, record)
+                            .map_err(heap_error)?;
+                        let mut cycle = CycleReport::default();
+                        heap.sweep_block(block, &mut cycle).map_err(heap_error)?;
+                        let live_lines = heap.block_live_lines(block).map_err(heap_error)?;
+                        let mut record = heap.block_record(block).map_err(heap_error)?;
+                        if live_lines == 0 {
+                            record.state = HeapBlockState::ReturnPending.raw();
+                            heap.update_block_record(block, record)
+                                .map_err(heap_error)?;
+                            heap.promote_empty_large_span(block).map_err(heap_error)?;
+                        } else {
+                            record.state = HeapBlockState::Allocating.raw();
+                            heap.update_block_record(block, record)
+                                .map_err(heap_error)?;
+                            self.queue_line_runs_after_sweep(block)?;
+                        }
+                    }
                     self.candidates
                         .as_mut()
                         .ok_or_else(|| RawInvariant::new("候选平面尚未配置"))?
@@ -309,7 +340,10 @@ impl RawWorld {
                 if record.generation != generation {
                     return Err(RawInvariant::new("释放的 block 世代已经变化"));
                 }
-                heap.release_block(block).map_err(heap_error)?;
+                if HeapBlockState::from_raw(record.state) != Some(HeapBlockState::ReturnPending) {
+                    return Err(RawInvariant::new("ReleaseBlock 要求块已处于 ReturnPending"));
+                }
+                self.queue_heap_block_return(block)?;
                 self.candidates
                     .as_mut()
                     .ok_or_else(|| RawInvariant::new("候选平面尚未配置"))?
@@ -319,8 +353,12 @@ impl RawWorld {
                 for block in blocks {
                     let heap = self.heap_mut_for(block)?;
                     let mut record = heap.block_record(block).map_err(heap_error)?;
-                    if record.state == 1 {
-                        record.state = 0;
+                    if HeapBlockState::from_raw(record.state) == Some(HeapBlockState::Candidate) {
+                        if record.reserved & HEAP_BLOCK_EVAC_SOURCE != 0 {
+                            record.state = HeapBlockState::Evacuating.raw();
+                        } else {
+                            record.state = HeapBlockState::Allocating.raw();
+                        }
                         heap.update_block_record(block, record)
                             .map_err(heap_error)?;
                     }

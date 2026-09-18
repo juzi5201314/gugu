@@ -202,6 +202,17 @@ fn releasing_a_block_preserves_earlier_block_object_start_bits() {
         survivor = next;
     }
     assert_ne!(second_block, first_block, "分配必须真的换到下一个 block");
+    let mut record = world
+        .heap(0)
+        .expect("堆可读")
+        .block_record(second_block)
+        .expect("记录可读");
+    record.state = crate::runtime::local_heap_schema::HeapBlockState::OwnedFree.raw();
+    world
+        .heap_mut(0)
+        .expect("堆可写")
+        .update_block_record(second_block, record)
+        .expect("记录可写");
     world
         .heap_mut(0)
         .expect("堆可写")

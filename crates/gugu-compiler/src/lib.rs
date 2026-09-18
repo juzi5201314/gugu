@@ -33,15 +33,15 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    BarrierDemand, BarrierRuntimeContract, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
-    ChannelWaitReport, ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
-    CoroutineRecordLayout, CoroutineRuntimeContract, EdgeCandidateHarness, EdgeCandidateReport,
-    EdgeDemand, EdgeRuntimeContract, HarnessReport, IntrinsicBoundary, OwnerReturnHarness,
-    PlatformRangeDemand, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
-    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
-    SchedulerDemand, SchedulerRuntimeContract, SharedForwardHarness, SharedForwardReport,
-    StackMapDemand, StackPolicy, SyncDemand, SyncLockHarness, SyncLockReport, SyncRuntimeContract,
-    WaitDemand, WaitRuntimeContract,
+    BarrierDemand, BarrierRuntimeContract, BlockReturnHarness, BlockReturnReport, CardMarkHarness,
+    CardMarkReport, ChannelWaitHarness, ChannelWaitReport, ContextSwitchCode, CoroutineContext,
+    CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
+    EdgeCandidateHarness, EdgeCandidateReport, EdgeDemand, EdgeRuntimeContract, HarnessReport,
+    IntrinsicBoundary, OwnerReturnHarness, PlatformRangeDemand, RegionTransferHarness,
+    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary,
+    RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand, SchedulerRuntimeContract,
+    SharedForwardHarness, SharedForwardReport, StackMapDemand, StackPolicy, SyncDemand,
+    SyncLockHarness, SyncLockReport, SyncRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -1094,6 +1094,9 @@ pub struct ImagePlan {
     shared_heap_contract_fingerprint: [u8; 32],
     shared_heap_demand: crate::runtime::SharedHeapDemand,
     shared_heap_runtime: crate::runtime::SharedHeapRuntimeContract,
+    block_return_contract_fingerprint: [u8; 32],
+    block_return_demand: crate::runtime::BlockReturnDemand,
+    block_return_runtime: crate::runtime::BlockReturnRuntimeContract,
     mark_contract_fingerprint: [u8; 32],
     mark_demand: crate::runtime::MarkDemand,
     mark_runtime: crate::runtime::MarkRuntimeContract,
@@ -1270,6 +1273,9 @@ impl ImagePlan {
             shared_heap_contract_fingerprint: plan.shared_heap_contract_fingerprint,
             shared_heap_demand: plan.shared_heap_demand,
             shared_heap_runtime: plan.shared_heap_runtime,
+            block_return_contract_fingerprint: plan.block_return_contract_fingerprint,
+            block_return_demand: plan.block_return_demand,
+            block_return_runtime: plan.block_return_runtime,
             mark_contract_fingerprint: plan.mark_contract_fingerprint,
             mark_demand: plan.mark_demand,
             mark_runtime: plan.mark_runtime,
@@ -1809,6 +1815,21 @@ impl ImagePlan {
     /// 返回已验证的 SharedHeap stable handle 与 forwarding grace 契约段。
     pub fn shared_heap_runtime(&self) -> &crate::runtime::SharedHeapRuntimeContract {
         &self.shared_heap_runtime
+    }
+
+    /// 返回 block return 契约指纹。
+    pub fn block_return_contract_fingerprint(&self) -> [u8; 32] {
+        self.block_return_contract_fingerprint
+    }
+
+    /// 返回 block return 需求视图。
+    pub fn block_return_demand(&self) -> crate::runtime::BlockReturnDemand {
+        self.block_return_demand
+    }
+
+    /// 返回已验证的 owner-directed managed block return 契约段。
+    pub fn block_return_runtime(&self) -> &crate::runtime::BlockReturnRuntimeContract {
+        &self.block_return_runtime
     }
 
     /// 返回 mark 契约指纹。
@@ -2747,7 +2768,8 @@ mod tests {
         );
         assert!(plan.local_heap_demand().large_types >= 1);
         assert_ne!(plan.local_heap_contract_fingerprint(), [0_u8; 32]);
-        assert!(dump.contains("local-heap schema=3 arena=2097152 block=32768 line=128"));
+        assert!(dump.contains("local-heap schema=4 arena=2097152 block=32768 line=128"));
+        assert!(dump.contains("block-return schema=1"));
         assert!(dump.contains("local-heap-bitmaps object-start-bits=131072 mark-bits=131072"));
         assert!(dump.contains("local-heap-record HeapArenaMetadata bytes=55576"));
         assert!(dump.contains("local-heap-trigger revision=1"));
@@ -2760,7 +2782,15 @@ mod tests {
         assert_eq!(plan.edge_runtime().phases[0], "discover");
         assert_eq!(
             plan.edge_runtime().states,
-            ["active", "candidate", "reclaiming", "free"]
+            [
+                "allocating",
+                "candidate",
+                "sweeping",
+                "evacuating",
+                "return-pending",
+                "owned-free",
+                "free"
+            ]
         );
         // `EdgeDelta` 的规范字段集合：18 个字段，全部不带地址（schema 自带校验）。
         assert_eq!(plan.edge_runtime().edge_delta_field_count(), 18);

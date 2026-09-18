@@ -728,12 +728,14 @@ fn compile_slice_reports_barrier_contract_end_to_end() {
         "runtime-message return-fields=12 card-mark-fields=13 mark-ticket-fields=18 edge-delta-fields=18 handle-forward-fields=16 card-mark-family=card-mark"
     ));
     assert!(dump.contains(
-        "edge schema=1 profile=mosaic-edge revision=1 quantum=4096 edge-buffer=512 deltas-per-write=2 trace-executor=2 candidate-schema=1 edge-delta-fields=18"
+        "edge schema=1 profile=mosaic-edge revision=2 quantum=4096 edge-buffer=512 deltas-per-write=2 trace-executor=2 candidate-schema=1 edge-delta-fields=18"
     ));
     assert!(dump.contains(
         "edge-phases discover,trace,trial,scc,validate,commit,sweep,release,complete,invalidate"
     ));
-    assert!(dump.contains("edge-states active,candidate,reclaiming,free"));
+    assert!(dump.contains(
+        "edge-states allocating,candidate,sweeping,evacuating,return-pending,owned-free,free"
+    ));
     assert!(dump.contains("edge-fingerprint"));
 }
 
