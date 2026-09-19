@@ -90,7 +90,7 @@ impl Checker<'_, '_> {
                 self.record_check(
                     id,
                     CheckKind::Shift {
-                        ty: left.clone(),
+                        ty: right.clone(),
                         amount: rhs,
                     },
                 );

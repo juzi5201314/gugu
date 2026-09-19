@@ -562,7 +562,14 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
         panic!("所有有风险操作都必须保留对应检查，unsafe 下标不生成边界检查");
     };
     assert_eq!(division_ty, &super::model::Ty::int());
-    assert_eq!(shift_ty, &super::model::Ty::int());
+    assert_eq!(
+        shift_ty,
+        &super::model::Ty::Int {
+            signed: false,
+            bits: 8
+        },
+        "移位检查携带移位量类型，用于判定有符号性"
+    );
     let model = super::model::Model::new(&warm.modules, &warm.names).unwrap();
     assert_eq!(model.constant_int(user_module, *divisor).unwrap(), 0);
     let operand_type = |expression| {

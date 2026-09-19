@@ -443,6 +443,7 @@ pub(crate) enum CheckKind {
         ty: TypeId,
         divisor: ExprId,
     },
+    /// `ty` 是移位量类型，用于判定有符号性。
     Shift {
         ty: TypeId,
         amount: ExprId,

@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 9;
+pub(crate) const SCHEMA_VERSION: u32 = 10;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
@@ -204,6 +204,8 @@ pub(crate) enum CheckKind {
         divisor: ExprId,
     },
     /// 拒绝负移位量，其余移位量按左操作数位宽取模。
+    ///
+    /// `ty` 是移位量类型，用于判定有符号性；左操作数位宽不参与检查。
     Shift {
         ty: Ty,
         amount: ExprId,

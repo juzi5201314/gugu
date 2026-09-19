@@ -1208,6 +1208,64 @@ fn slice_index_lowers_with_element_type() {
     );
 }
 
+#[test]
+fn unsigned_shift_amount_needs_no_width_upper_bound_check() {
+    let compilation = compile(
+        "fn shift(x: uint, n: uint) uint { return x << n }\nfn main() { _ = shift(1, 100) }",
+    );
+    let body = named(&compilation, "shift");
+    // 无符号移位量的区间下界按类型播种为非负，检查被全程序证明省略；
+    // 即使保留检查，拒绝负值也是恒真条件，不得产生宽度上限比较。
+    assert!(
+        body.instructions.iter().all(|instruction| {
+            !matches!(
+                instruction.op,
+                Op::Compare {
+                    condition: body::Condition::Lt,
+                    signed: false
+                }
+            ) || const_operand(body, body.args(&instruction.arguments)[1]) != Some(64)
+        }),
+        "无符号移位量按左操作数位宽取模，不得产生宽度上限检查"
+    );
+    // 证明省略路径按左操作数位宽取模执行：100 mod 64 = 36。
+    assert_eq!(interpret(body, &[1, 100]), vec![1 << 36]);
+    assert_eq!(interpret(body, &[3, 64]), vec![3]);
+}
+
+#[test]
+fn signed_shift_amount_checks_non_negative() {
+    let compilation =
+        compile("fn shift(x: int, n: int) int { return x << n }\nfn main() { _ = shift(1, 2) }");
+    let body = named(&compilation, "shift");
+    assert!(
+        body.instructions.iter().any(|instruction| matches!(
+            instruction.op,
+            Op::Compare {
+                condition: body::Condition::Ge,
+                signed: true
+            }
+        )),
+        "有符号移位量必须检查非负"
+    );
+    // 非负移位量通过检查后按左操作数位宽取模（100 mod 64 = 36）；
+    // 旧实现的宽度上限比较会拒绝 100，与证明路径按模执行的语义不一致。
+    assert_eq!(interpret(body, &[1, 100]), vec![1 << 36]);
+    assert_eq!(interpret(body, &[1, 63]), vec![1 << 63]);
+}
+
+/// 返回 value 直接由 `IConst` 定义时的常量。
+fn const_operand(body: &Body, value: ValueId) -> Option<u64> {
+    let body::Definition::Instruction { instruction, .. } = &body.values[value.index()].definition
+    else {
+        return None;
+    };
+    match body.instructions[instruction.index()].op {
+        Op::IConst(value) => Some(value),
+        _ => None,
+    }
+}
+
 /// 仅解释 fixture 中的整数 SSA 子集，检验循环回边与合流的可观察结果。
 fn interpret(body: &Body, arguments: &[u64]) -> Vec<u64> {
     let mut values = vec![0u64; body.values.len()];
@@ -1230,6 +1288,10 @@ fn interpret(body: &Body, arguments: &[u64]) -> Vec<u64> {
                 Op::IConst(value) => value,
                 Op::Integer(body::IntOp::Add) => args[0].wrapping_add(args[1]),
                 Op::Integer(body::IntOp::Sub) => args[0].wrapping_sub(args[1]),
+                Op::Integer(body::IntOp::Shl) => {
+                    // 语言语义：移位量按操作数位宽取模（64 位操作数 → mod 64）。
+                    args[0].wrapping_shl(u32::try_from(args[1] % 64).expect("取模结果小于 64"))
+                }
                 Op::Compare { condition, signed } => {
                     let ordering = if signed {
                         i64::from_le_bytes(args[0].to_le_bytes())

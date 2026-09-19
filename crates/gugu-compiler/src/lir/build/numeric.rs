@@ -371,21 +371,26 @@ impl Builder<'_> {
                 let zero = self.constant(0, self.machine_type(value).ty);
                 self.compare_value(Condition::Ne, false, value, zero)
             }
-            CheckOpKind::Shift { ty: value_ty } => {
-                let TypeKind::Int { bits, .. } = self.kind(value_ty.0) else {
-                    return Err(invalid("移位检查没有整型宽度"));
+            CheckOpKind::Shift { ty: amount_ty } => {
+                let signed = match self.kind(amount_ty.0) {
+                    TypeKind::Int { signed, .. } => *signed,
+                    _ => return Err(invalid("移位检查没有整型移位量")),
                 };
-                let bits = u64::from(*bits);
                 let operand = self.operand(&operands[0])?;
                 let values = self.computed_values(operand)?;
-                let limit = self.constant(bits, self.machine_type(values[0]).ty);
-                let mut valid = self.compare_value(Condition::Lt, false, values[0], limit);
-                if values.len() == 2 {
-                    let zero = self.constant(0, Type::I64);
-                    let high = self.compare_value(Condition::Eq, false, values[1], zero);
-                    valid = self.boolean(IntOp::And, valid, high);
+                if !signed {
+                    // 无符号移位量不可能为负：检查恒真，量化成常量真值。
+                    self.constant(1, Type::I8)
+                } else {
+                    // 有符号移位量必须非负；128 位量按高字符号判定。
+                    let (value, ty) = if values.len() == 2 {
+                        (values[1], Type::I64)
+                    } else {
+                        (values[0], self.machine_type(values[0]).ty)
+                    };
+                    let zero = self.constant(0, ty);
+                    self.compare_value(Condition::Ge, true, value, zero)
                 }
-                valid
             }
             CheckOpKind::Bounds { slice } => self.bounds(check, operands, *slice)?,
             CheckOpKind::UnicodeScalar => {
