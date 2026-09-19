@@ -50,6 +50,7 @@ pub use runtime::{
     StackMapDemand, StackPolicy, SyncDemand, SyncLockHarness, SyncLockReport, SyncRuntimeContract,
     TurnRegionDemand, TurnRegionRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
+pub use runtime::{ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract, SafetyProfile};
 pub use runtime::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
@@ -81,6 +82,7 @@ pub struct CompileRequest {
     input: CompileInput,
     compression: CompressionPolicyV1,
     routing: RoutingPolicyV1,
+    provenance: ProvenancePolicyV1,
 }
 
 impl CompileRequest {
@@ -91,6 +93,7 @@ impl CompileRequest {
             input: CompileInput::EmptyPackage,
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
+            provenance: ProvenancePolicyV1::release(),
         }
     }
 
@@ -108,6 +111,7 @@ impl CompileRequest {
             },
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
+            provenance: ProvenancePolicyV1::release(),
         }
     }
 
@@ -122,6 +126,7 @@ impl CompileRequest {
             },
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
+            provenance: ProvenancePolicyV1::release(),
         }
     }
 
@@ -136,6 +141,7 @@ impl CompileRequest {
             },
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
+            provenance: ProvenancePolicyV1::release(),
         }
     }
 
@@ -172,6 +178,7 @@ impl CompileRequest {
             },
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
+            provenance: ProvenancePolicyV1::release(),
         }
     }
 
@@ -189,6 +196,16 @@ impl CompileRequest {
     /// action key，供世界与确定性测试按契约配置路由平面。
     pub fn with_routing_policy(mut self, policy: RoutingPolicyV1) -> Self {
         self.routing = policy;
+        self
+    }
+
+    /// 显式设置 release 安全 profile；默认 release，即基线 provenance 检查语义。
+    ///
+    /// profile 是 runtime tuning：debug/security 只追加显式登记的额外检查，不改变编译
+    /// 语义，只随 raw policy 进入契约与 action key，供世界与确定性测试按契约配置
+    /// provenance 平面。
+    pub fn with_provenance_policy(mut self, policy: ProvenancePolicyV1) -> Self {
+        self.provenance = policy;
         self
     }
 }
@@ -341,6 +358,7 @@ impl Compiler {
             input,
             compression,
             routing,
+            provenance,
         } = request;
         let mut graph = ActionGraph::new();
         let mut diagnostics = Diagnostics::default();
@@ -534,6 +552,7 @@ impl Compiler {
                 policy: RawPlanePolicyV1 {
                     compression,
                     routing,
+                    provenance,
                     ..RawPlanePolicyV1::default()
                 },
                 demand,
@@ -1166,6 +1185,9 @@ pub struct ImagePlan {
     routing_contract_fingerprint: [u8; 32],
     routing_demand: crate::runtime::RoutingDemand,
     routing_runtime: crate::runtime::RoutingRuntimeContract,
+    provenance_contract_fingerprint: [u8; 32],
+    provenance_demand: crate::runtime::ProvenanceDemand,
+    provenance_runtime: crate::runtime::ProvenanceRuntimeContract,
     mark_contract_fingerprint: [u8; 32],
     mark_demand: crate::runtime::MarkDemand,
     mark_runtime: crate::runtime::MarkRuntimeContract,
@@ -1352,6 +1374,9 @@ impl ImagePlan {
             routing_contract_fingerprint: plan.routing_contract_fingerprint,
             routing_demand: plan.routing_demand,
             routing_runtime: plan.routing_runtime,
+            provenance_contract_fingerprint: plan.provenance_contract_fingerprint,
+            provenance_demand: plan.provenance_demand,
+            provenance_runtime: plan.provenance_runtime,
             mark_contract_fingerprint: plan.mark_contract_fingerprint,
             mark_demand: plan.mark_demand,
             mark_runtime: plan.mark_runtime,
@@ -1941,6 +1966,21 @@ impl ImagePlan {
     /// 返回已验证的 temporal radix fan-out 契约段。
     pub fn routing_runtime(&self) -> &crate::runtime::RoutingRuntimeContract {
         &self.routing_runtime
+    }
+
+    /// 返回 raw link provenance 契约指纹。
+    pub fn provenance_contract_fingerprint(&self) -> [u8; 32] {
+        self.provenance_contract_fingerprint
+    }
+
+    /// 返回 raw link provenance 需求视图。
+    pub fn provenance_demand(&self) -> crate::runtime::ProvenanceDemand {
+        self.provenance_demand
+    }
+
+    /// 返回已验证的 raw link provenance 与 release 安全 profile 契约段。
+    pub fn provenance_runtime(&self) -> &crate::runtime::ProvenanceRuntimeContract {
+        &self.provenance_runtime
     }
 
     /// 返回 mark 契约指纹。

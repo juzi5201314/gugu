@@ -89,6 +89,12 @@ mod model;
 mod pacing;
 pub(crate) mod pacing_schema;
 mod platform_schema;
+#[allow(
+    dead_code,
+    reason = "raw link provenance 与 release 安全 profile 的确定性参照实现由 world 与确定性测试消费"
+)]
+pub(crate) mod provenance;
+pub(crate) mod provenance_schema;
 pub(crate) mod region;
 pub(crate) mod region_schema;
 #[allow(
@@ -150,6 +156,9 @@ pub use gc_metadata_schema::GcMetadataDemand;
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
 pub use mark_schema::{MarkDemand, MarkRuntimeContract};
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
+pub use provenance_schema::{
+    ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract, SafetyProfile,
+};
 pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
 pub use routing_schema::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
@@ -206,6 +215,8 @@ mod heap_tests;
 mod platform_tests;
 #[cfg(test)]
 mod process_tests;
+#[cfg(test)]
+mod provenance_tests;
 #[cfg(test)]
 mod report_tests;
 #[cfg(test)]

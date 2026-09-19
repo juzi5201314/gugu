@@ -14,6 +14,7 @@ mod extent_impl;
 pub(crate) mod heap_impl;
 pub(crate) mod mark_impl;
 pub(crate) mod pacing_impl;
+pub(crate) mod provenance_impl;
 mod region_impl;
 mod resource_impl;
 pub(crate) mod routing_impl;
@@ -42,6 +43,10 @@ mod barrier_tests;
 #[cfg(test)]
 #[path = "heap_tests.rs"]
 mod heap_tests;
+
+#[cfg(test)]
+#[path = "provenance_tests.rs"]
+mod world_provenance_tests;
 
 #[cfg(test)]
 #[path = "candidate_tests.rs"]
@@ -96,12 +101,14 @@ use super::inbox::{
     DrainReport, GraceOutcome, OwnerConsumer, OwnerInbox, ServiceBudget, ShardIndex,
 };
 use super::message::{
-    BatchLimits, FlushTrigger, IntegrityTag, LinkCodec, MessageState, ProducerStaging,
-    PublishOutcome, ReturnKind, ReturnMessage, ReturnNodeId, ReturnNodePool, ReturnSlabCache,
-    RingCloseReason, StagedChain, flush_staging, stage_message,
+    BatchLimits, FlushTrigger, IntegrityTag, MessageState, ProducerStaging, PublishOutcome,
+    ReturnKind, ReturnMessage, ReturnNodeId, ReturnNodePool, ReturnSlabCache, RingCloseReason,
+    StagedChain, flush_staging, stage_message,
 };
 use super::owner::{Allocation, RawOwner};
 use super::platform::FakePlatform;
+use super::provenance::{POISON_WORD, ProvenancePlane, ReleaseRejection};
+use super::provenance_schema::SafetyProfile;
 use super::provider::{ProviderStats, RangeDescriptor, RangeProvider};
 use super::resource::{self, ReleaseRegistry, ReleaseTicket, ResourceCellTable};
 use super::size_class::{RuntimeSizeClassId, RuntimeSizeClassTable};
@@ -161,7 +168,9 @@ pub(crate) struct RawWorld {
     inboxes: Vec<Arc<OwnerInbox>>,
     consumers: Vec<OwnerConsumer>,
     pool: Arc<ReturnNodePool>,
-    link_codec: LinkCodec,
+    /// raw link provenance 与 release 安全 profile 平面；持有 per-domain secret、
+    /// 拒绝分类统计与 debug/security 的额外检查状态。
+    provenance: ProvenancePlane,
     integrity_secret: [u8; 32],
     limits: BatchLimits,
     epoch: Epoch,
@@ -280,7 +289,8 @@ impl RawWorld {
         resource::verify_header_layout()?;
         let registry = ReleaseRegistry::builtin()?;
         let integrity_secret = seed.secret();
-        let link_codec = LinkCodec::new(seed.secret());
+        let provenance =
+            ProvenancePlane::new(integrity_secret, SafetyProfile::Release, seed.next())?;
         let mut owner_list = Vec::with_capacity(owners as usize);
         let mut resource_owners = Vec::with_capacity(owners as usize);
         let mut inboxes = Vec::with_capacity(owners as usize);
@@ -310,7 +320,7 @@ impl RawWorld {
             inboxes,
             consumers,
             pool: Arc::new(ReturnNodePool::new(node_capacity)),
-            link_codec,
+            provenance,
             integrity_secret,
             limits,
             epoch: Epoch::from_raw(0),
@@ -486,7 +496,8 @@ impl RawWorld {
             .directory
             .accounting_mut(token.owner_id)
             .ok_or_else(|| RawInvariant::new("分配缺少 owner 账本"))?;
-        let codec = self.link_codec.clone();
+        let codec = self.provenance.codec_for(class.domain).clone();
+        let reuse_depth = self.provenance.next_reuse_depth();
         let provider = &mut self.provider;
         let table = &mut self.table;
         let extents = &mut self.extents;
@@ -503,7 +514,18 @@ impl RawWorld {
             accounting,
             secret_index,
             slab_epoch,
+            reuse_depth,
         )?;
+        // debug profile：分配成功后校验 freed slot 的 poison 标记未被改写并清除；
+        // 标记状态不参与 release/security 的任何判定。
+        if self.provenance.mode() == SafetyProfile::Debug {
+            let stamp = self
+                .table
+                .stamp(allocation.slot.descriptor, allocation.slot.index)?;
+            self.provenance.check_freed_slot_stamp(stamp)?;
+            self.table
+                .write_stamp(allocation.slot.descriptor, allocation.slot.index, 0)?;
+        }
         // allocation debt 在分配成功之后推进：本地 fast bump 不读全局 debt，这里只记账。
         self.pacing.observe_allocation(u64::from(class.slot_stride));
         Ok(allocation)
@@ -516,6 +538,7 @@ impl RawWorld {
         slot: RawSlot,
         bytes: u64,
     ) -> Result<(), RawInvariant> {
+        self.note_return_provenance(slot);
         let token = self.owners[owner as usize].token();
         let accounting = self
             .directory
@@ -525,6 +548,25 @@ impl RawWorld {
         self.owners[owner as usize].queue_return(slot, &mut self.table, accounting, bytes)
     }
 
+    /// provenance 记账：旧 generation 与 debug 双重返还标记在进入状态机之前按稳定分类
+    /// 记录；状态机本身仍按原语义拒绝，这里只补充分类统计，不改变任何判定结果。
+    fn note_return_provenance(&mut self, slot: RawSlot) {
+        if let Some(record) = self.table.descriptor(slot.descriptor)
+            && record.generation != slot.generation
+        {
+            self.provenance
+                .record_rejection(ReleaseRejection::StaleGeneration);
+        }
+        if self.provenance.mode() == SafetyProfile::Debug
+            && let Ok(stamp) = self.table.stamp(slot.descriptor, slot.index)
+            && stamp == POISON_WORD
+        {
+            self.provenance.note_double_return_marker();
+            self.provenance
+                .record_rejection(ReleaseRejection::DoubleReturn);
+        }
+    }
+
     /// 本地 return：当前执行者仍是 slab owner，直接把 slot 放回本地 free structure。
     pub(crate) fn local_return(
         &mut self,
@@ -532,15 +574,37 @@ impl RawWorld {
         slot: RawSlot,
         bytes: u64,
     ) -> Result<(), RawInvariant> {
+        self.note_return_provenance(slot);
         let token = self.owners[owner as usize].token();
-        let codec = self.link_codec.clone();
+        let descriptor_domain = self
+            .table
+            .descriptor(slot.descriptor)
+            .ok_or_else(|| RawInvariant::new("本地 return 引用未知 slab"))?
+            .domain;
+        let codec = self.provenance.codec_for(descriptor_domain).clone();
         let accounting = self
             .directory
             .accounting_mut(token.owner_id)
             .ok_or_else(|| RawInvariant::new("本地 return 缺少 owner 账本"))?;
         self.owners[owner as usize].begin_return(slot, &mut self.table)?;
         self.owners[owner as usize].queue_return(slot, &mut self.table, accounting, 0)?;
-        self.owners[owner as usize].consume_return(slot, &mut self.table, &codec, accounting, bytes)
+        self.owners[owner as usize].consume_return(
+            slot,
+            &mut self.table,
+            &codec,
+            accounting,
+            bytes,
+        )?;
+        self.poison_returned_slot(slot.descriptor, slot.index);
+        Ok(())
+    }
+
+    /// debug profile：返还完成后写入 poison 标记并记账；其余 profile 不写。
+    fn poison_returned_slot(&mut self, descriptor: SlabDescriptorId, index: u32) {
+        if self.provenance.mode() == SafetyProfile::Debug {
+            let _ = self.table.write_stamp(descriptor, index, POISON_WORD);
+            self.provenance.note_poison_write();
+        }
     }
 
     /// 发布转发目标：把旧 owner 置为 Draining/Forwarding，使在飞消息沿转发路径归还。
@@ -938,14 +1002,20 @@ impl RawWorld {
             }
             let token = if resource { resource_token } else { raw_token };
             if self.pool.owner_id_of(message_id) != token.owner_id {
+                self.provenance
+                    .record_rejection(ReleaseRejection::CrossOwner);
                 return Err(RawInvariant::new("消息投递到非目标 owner 的 inbox"));
             }
             if message.integrity.checksum != IntegrityTag::compute(&self.integrity_secret, &message)
             {
+                self.provenance
+                    .record_rejection(ReleaseRejection::ChainCorruption);
                 return Err(RawInvariant::new("return message integrity 校验失败"));
             }
             let descriptor = self.descriptor(message.descriptor)?.clone();
             if message.bytes != descriptor.slot_stride {
+                self.provenance
+                    .record_rejection(ReleaseRejection::CrossClass);
                 return Err(RawInvariant::new(
                     "return message 的 bytes 与 class stride 不一致",
                 ));
@@ -962,6 +1032,10 @@ impl RawWorld {
                     }
                     let state = self.table.state(message.descriptor, message.unit)?;
                     if state != SlotState::ReturnQueued {
+                        self.provenance.record_rejection(match state {
+                            SlotState::Returned => ReleaseRejection::DoubleReturn,
+                            _ => ReleaseRejection::ForgedLink,
+                        });
                         return Err(RawInvariant::new(
                             "消息指向的 slot 不处于唯一的 ReturnQueued 状态",
                         ));
@@ -979,13 +1053,15 @@ impl RawWorld {
                         .directory
                         .accounting_mut(token.owner_id)
                         .ok_or_else(|| RawInvariant::new("consume 缺少 owner 账本"))?;
-                    let codec = self.link_codec.clone();
+                    let codec = self.provenance.codec_for(descriptor.domain).clone();
                     if resource {
                         let (cell_generation, detached) = {
                             let cell = self.cells.get(message.descriptor, message.unit)?;
                             (cell.generation, cell.is_detached())
                         };
                         if cell_generation != message.integrity.generation.raw() {
+                            self.provenance
+                                .record_rejection(ReleaseRejection::StaleGeneration);
                             return Err(RawInvariant::new(
                                 "release 引用了过期 generation 的资源 cell",
                             ));
@@ -1005,6 +1081,7 @@ impl RawWorld {
                         )?;
                         self.cells
                             .finish_reclaim(message.descriptor, message.unit)?;
+                        self.poison_returned_slot(message.descriptor, message.unit);
                     } else {
                         self.owners[owner as usize].consume_return(
                             slot,
@@ -1013,6 +1090,7 @@ impl RawWorld {
                             accounting,
                             u64::from(message.bytes),
                         )?;
+                        self.poison_returned_slot(message.descriptor, message.unit);
                     }
                     consumed += 1;
                 }
@@ -1298,15 +1376,8 @@ impl RawWorld {
         Ok(())
     }
 
-    /// 校验 free 链完整性与描述符计数。
-    pub(crate) fn verify_links(&self) -> Result<(), RawInvariant> {
-        for (index, descriptor) in self.table.descriptors().iter().enumerate() {
-            if descriptor.link_usable {
-                let id =
-                    SlabDescriptorId::from_raw(u32::try_from(index).expect("描述符下标适配 u32"));
-                self.table.verify_free_chain(id, &self.link_codec)?;
-            }
-        }
-        self.table.verify()
+    /// 校验 free 链完整性与描述符计数；失败先按 provenance 稳定分类记账。
+    pub(crate) fn verify_links(&mut self) -> Result<(), RawInvariant> {
+        self.provenance.verify_full_chain(&self.table)
     }
 }

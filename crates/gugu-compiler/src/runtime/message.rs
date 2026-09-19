@@ -59,6 +59,27 @@ impl std::fmt::Display for LinkError {
     }
 }
 
+/// free 链完整性走查的失败分类；link 层错误保持原样，跨 slot 与长度问题单独登记。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ChainWalkError {
+    /// 某一跳的 encoded link 解码失败。
+    Link(LinkError),
+    /// 链跳转落在本 slab 的 slot 范围之外。
+    OutsideSpan,
+    /// 走查长度超过 span 容量，链上存在环。
+    Overflow,
+}
+
+impl std::fmt::Display for ChainWalkError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Link(error) => std::fmt::Display::fmt(error, formatter),
+            Self::OutsideSpan => formatter.write_str("free 链跳转到本 slab 之外的 slot"),
+            Self::Overflow => formatter.write_str("free 链长度超过 span 容量"),
+        }
+    }
+}
+
 /// per-domain link 编码器：用 secret 与 slot 偏移派生 mask。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LinkCodec {
@@ -93,6 +114,18 @@ impl LinkCodec {
         }
         let offset = u32::try_from(offset).map_err(|_| RawInvariant::new("偏移超出编码宽度"))?;
         let tag = self.tag(descriptor, u64::from(offset));
+        let checksum = self.checksum(u64::from(offset), tag);
+        let word = u64::from(offset) | (u64::from(tag) << 32) | (u64::from(checksum) << 48);
+        if word == NULL_LINK {
+            return Err(RawInvariant::new("link 编码与空指针冲突"));
+        }
+        Ok(word)
+    }
+
+    /// 编码一个「校验位合法但 tag 被替换」的伪造 link；只供链完整性测试构造攻击字。
+    #[cfg(test)]
+    pub(crate) fn forge_word(&self, offset: u64, tag: u16) -> Result<u64, RawInvariant> {
+        let offset = u32::try_from(offset).map_err(|_| RawInvariant::new("偏移超出编码宽度"))?;
         let checksum = self.checksum(u64::from(offset), tag);
         let word = u64::from(offset) | (u64::from(tag) << 32) | (u64::from(checksum) << 48);
         if word == NULL_LINK {

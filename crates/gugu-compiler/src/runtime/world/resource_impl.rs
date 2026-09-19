@@ -140,7 +140,12 @@ impl RawWorld {
         let Some(descriptor) = descriptor_id else {
             return Ok(None);
         };
-        let codec = self.link_codec.clone();
+        let descriptor_domain = self
+            .table
+            .descriptor(descriptor)
+            .ok_or_else(|| RawInvariant::new("dedicated descriptor 缺失"))?
+            .domain;
+        let codec = self.provenance.codec_for(descriptor_domain).clone();
         let index = self
             .table
             .pop_free(descriptor, &codec)?
@@ -192,7 +197,7 @@ impl RawWorld {
                     .directory
                     .accounting_mut(token.owner_id)
                     .ok_or_else(|| RawInvariant::new("资源分配缺少 owner 账本"))?;
-                let codec = self.link_codec.clone();
+                let codec = self.provenance.codec_for(class.domain).clone();
                 let provider = &mut self.provider;
                 let table = &mut self.table;
                 let extents = &mut self.extents;
@@ -209,6 +214,7 @@ impl RawWorld {
                     accounting,
                     secret_index,
                     slab_epoch,
+                    0,
                 )?
             }
             None => {
@@ -584,7 +590,12 @@ impl RawWorld {
             .owner;
         let owner_index = self.owner_index_of(token)?;
         let bytes = self.begin_slot_return(handle)?;
-        let codec = self.link_codec.clone();
+        let descriptor_domain = self
+            .table
+            .descriptor(handle.descriptor)
+            .map(|record| record.domain)
+            .unwrap_or(MemoryDomainId::RESOURCE);
+        let codec = self.provenance.codec_for(descriptor_domain).clone();
         let slot = self.slab_slot(handle)?;
         let accounting = self
             .directory

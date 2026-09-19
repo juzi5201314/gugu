@@ -249,10 +249,11 @@ impl RawOwner {
         accounting: &mut OwnerAccounting,
         integrity_secret: u32,
         slab_epoch: Epoch,
+        reuse_depth: u32,
     ) -> Result<Allocation, RawInvariant> {
         let stride = u64::from(class.slot_stride);
         if let Some(cursor) = self.classes[class.id.index()].span {
-            if let Some(index) = table.pop_free(cursor.descriptor, codec)? {
+            if let Some(index) = table.pop_free_detached(cursor.descriptor, codec, reuse_depth)? {
                 table.transition(
                     cursor.descriptor,
                     index,

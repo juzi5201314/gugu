@@ -44,6 +44,18 @@ impl From<LinkError> for RawInvariant {
     }
 }
 
+impl From<super::message::ChainWalkError> for RawInvariant {
+    fn from(value: super::message::ChainWalkError) -> Self {
+        match value {
+            super::message::ChainWalkError::Link(error) => Self::from(error),
+            super::message::ChainWalkError::OutsideSpan => {
+                Self::new("free 链跳转到本 slab 之外的 slot")
+            }
+            super::message::ChainWalkError::Overflow => Self::new("free 链长度超过 span 容量"),
+        }
+    }
+}
+
 impl From<ProviderError> for RawInvariant {
     fn from(value: ProviderError) -> Self {
         Self::new(format!("平台 range 请求失败：{value}"))
@@ -766,6 +778,8 @@ pub(crate) struct SlabTable {
     headers: Vec<Vec<u64>>,
     states: Vec<Vec<SlotState>>,
     explicit_free: Vec<Vec<u32>>,
+    /// debug profile 的 per-slot poison 标记；release/security 恒为 0。
+    stamps: Vec<Vec<u64>>,
 }
 
 impl SlabTable {
@@ -839,6 +853,7 @@ impl SlabTable {
         self.headers.push(vec![0; slots as usize]);
         self.states.push(vec![SlotState::Returned; slots as usize]);
         self.explicit_free.push(Vec::new());
+        self.stamps.push(vec![0; slots as usize]);
         Ok(id)
     }
 
@@ -877,11 +892,66 @@ impl SlabTable {
         Ok(())
     }
 
-    /// 从 class 的 free structure 弹出一个 slot 编号。
+    /// 读取某个 slot 的 debug poison 标记。
+    pub(crate) fn stamp(&self, id: SlabDescriptorId, index: u32) -> Result<u64, RawInvariant> {
+        self.stamps
+            .get(id.index())
+            .and_then(|stamps| stamps.get(index as usize))
+            .copied()
+            .ok_or_else(|| RawInvariant::new("slot 编号越过 span"))
+    }
+
+    /// 改写 free-list 头部字；只供链完整性测试构造被破坏或伪造的链。
+    #[cfg(test)]
+    pub(crate) fn test_write_header(
+        &mut self,
+        id: SlabDescriptorId,
+        index: u32,
+        word: u64,
+    ) -> Result<(), RawInvariant> {
+        let header = self
+            .headers
+            .get_mut(id.index())
+            .and_then(|headers| headers.get_mut(index as usize))
+            .ok_or_else(|| RawInvariant::new("slot 编号越过 span"))?;
+        *header = word;
+        Ok(())
+    }
+
+    /// 写入某个 slot 的 debug poison 标记。
+    pub(crate) fn write_stamp(
+        &mut self,
+        id: SlabDescriptorId,
+        index: u32,
+        word: u64,
+    ) -> Result<(), RawInvariant> {
+        let stamp = self
+            .stamps
+            .get_mut(id.index())
+            .and_then(|stamps| stamps.get_mut(index as usize))
+            .ok_or_else(|| RawInvariant::new("slot 编号越过 span"))?;
+        *stamp = word;
+        Ok(())
+    }
+
+    /// 从 class 的 free structure 弹出链头 slot 编号。
     pub(crate) fn pop_free(
         &mut self,
         id: SlabDescriptorId,
         codec: &LinkCodec,
+    ) -> Result<Option<u32>, RawInvariant> {
+        self.pop_free_detached(id, codec, 0)
+    }
+
+    /// 弹出 free structure 中第 `depth` 个 slot；深度越过链长时取最后一个。
+    ///
+    /// depth 为 0 时的行为与普通 LIFO pop 完全一致；security profile 用非零深度随机化
+    /// reuse order。每一跳都经过 encoded link 解码，因此被随机化的走查同时是链校验。
+    pub(crate) fn pop_free_detached(
+        &mut self,
+        id: SlabDescriptorId,
+        codec: &LinkCodec,
+        depth: u32,
     ) -> Result<Option<u32>, RawInvariant> {
         let descriptor = self
             .descriptors
@@ -890,20 +960,36 @@ impl SlabTable {
             .clone();
         let Some(word) = descriptor.free_head else {
             if !self.explicit_free[id.index()].is_empty() {
-                let index = self.explicit_free[id.index()]
-                    .pop()
-                    .ok_or_else(|| RawInvariant::new("显式 free 列表为空"))?;
+                let list = &mut self.explicit_free[id.index()];
+                let position = usize::try_from(depth.min(list.len() as u32 - 1))
+                    .expect("深度收敛到列表长度内");
+                let index = list.swap_remove(position);
                 self.descriptors[id.index()].free -= 1;
                 return Ok(Some(index));
             }
             return Ok(None);
         };
-        let index = codec.decode(&descriptor, word)?;
-        let next = codec.normalize(self.headers[id.index()][index as usize]);
-        let record = &mut self.descriptors[id.index()];
-        record.free_head = next;
-        record.free -= 1;
-        Ok(Some(index))
+        let mut previous_index: Option<u32> = None;
+        let mut current_word = word;
+        let mut walked = 0_u32;
+        loop {
+            let index = codec.decode(&descriptor, current_word)?;
+            let next_word = codec.normalize(self.headers[id.index()][index as usize]);
+            if walked == depth || next_word.is_none() {
+                match previous_index {
+                    None => self.descriptors[id.index()].free_head = next_word,
+                    Some(previous) => {
+                        self.headers[id.index()][previous as usize] =
+                            next_word.unwrap_or(LinkCodec::NULL);
+                    }
+                }
+                self.descriptors[id.index()].free -= 1;
+                return Ok(Some(index));
+            }
+            previous_index = Some(index);
+            current_word = next_word.expect("链尾已在上一分支处理");
+            walked += 1;
+        }
     }
 
     /// 把一个 slot 放回 class 的 free structure。
@@ -949,20 +1035,32 @@ impl SlabTable {
         id: SlabDescriptorId,
         codec: &LinkCodec,
     ) -> Result<u32, RawInvariant> {
+        self.verify_free_chain_checked(id, codec)
+            .map_err(RawInvariant::from)
+    }
+
+    /// 校验 free 链完整性的分类变体；失败按 `ChainWalkError` 稳定归类。
+    pub(crate) fn verify_free_chain_checked(
+        &self,
+        id: SlabDescriptorId,
+        codec: &LinkCodec,
+    ) -> Result<u32, super::message::ChainWalkError> {
         let descriptor = self
             .descriptors
             .get(id.index())
-            .ok_or_else(|| RawInvariant::new("free 链检查引用未知 slab"))?;
+            .ok_or(super::message::ChainWalkError::OutsideSpan)?;
         let mut word = descriptor.free_head;
         let mut walked = 0_u32;
         while let Some(current) = word {
-            let index = codec.decode(descriptor, current)?;
+            let index = codec
+                .decode(descriptor, current)
+                .map_err(super::message::ChainWalkError::Link)?;
             if !descriptor.contains_index(index) {
-                return Err(RawInvariant::new("free 链跳转到本 slab 之外的 slot"));
+                return Err(super::message::ChainWalkError::OutsideSpan);
             }
             walked += 1;
             if walked > descriptor.slot_count() {
-                return Err(RawInvariant::new("free 链长度超过 span 容量"));
+                return Err(super::message::ChainWalkError::Overflow);
             }
             word = codec.normalize(self.headers[id.index()][index as usize]);
         }

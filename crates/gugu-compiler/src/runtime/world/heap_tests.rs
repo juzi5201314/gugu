@@ -163,6 +163,7 @@ pub(super) fn configured_world(
     world
         .configure_routing(contract.routing())
         .expect("routing 平面可配置");
+    world.configure_provenance(contract.provenance());
     world.configure_gc(contract).expect("GC 平面可配置");
     world
 }

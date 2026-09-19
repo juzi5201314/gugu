@@ -23,6 +23,7 @@ use super::message::{BatchLimits, RETURN_NODE_ALIGN, RETURN_NODE_BYTES};
 use super::pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
 use super::platform::PlatformProfile;
 use super::platform_schema::{PlatformRangeDemand, PlatformRangeSchemaV1};
+use super::provenance_schema::{ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract};
 use super::region_schema::TurnRegionRuntimeContract;
 use super::resource::{self, RESOURCE_KINDS};
 use super::routing_schema::{RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
@@ -46,10 +47,10 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 21 相对版本 20 的变化：并入 `RoutingRuntimeContract`（路由模式目录、固定 `2^k`
-/// bucket、有限 levels、转发 hop 上限、maintenance 相位序列、`RoutingDemand`），并把 raw
-/// policy revision 升到 3。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 21;
+/// 版本 22 相对版本 21 的变化：并入 `ProvenanceRuntimeContract`（释放 provenance 检查
+/// 目录、per-domain secret 登记与管理规则、release/debug/security 安全 profile 的检查
+/// 绑定、拒绝分类、统计口径、`ProvenanceDemand`），并把 raw policy revision 升到 4。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 22;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -461,12 +462,14 @@ pub(crate) struct RawPlanePolicyV1 {
     pub(crate) compression: CompressionPolicyV1,
     /// 路由 profile 开关；默认 direct 即 owner inbox 直达语义。
     pub(crate) routing: RoutingPolicyV1,
+    /// release 安全 profile 开关；默认 release 即基线 provenance 检查语义。
+    pub(crate) provenance: ProvenancePolicyV1,
 }
 
 impl Default for RawPlanePolicyV1 {
     fn default() -> Self {
         Self {
-            revision: 3,
+            revision: 4,
             shards: OWNER_INBOX_SHARDS,
             limits: BatchLimits::default(),
             return_node_bytes: RETURN_NODE_BYTES,
@@ -481,6 +484,7 @@ impl Default for RawPlanePolicyV1 {
             service_bytes: BatchLimits::default().batch_soft_bytes,
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::direct(),
+            provenance: ProvenancePolicyV1::release(),
         }
     }
 }
@@ -542,6 +546,7 @@ pub(crate) struct RuntimeRawContractV1 {
     block_return: BlockReturnRuntimeContract,
     compression: CompressionRuntimeContract,
     routing: RoutingRuntimeContract,
+    provenance: ProvenanceRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -621,6 +626,16 @@ impl RuntimeRawContractV1 {
             ),
             policy.routing,
         )?;
+        // provenance 契约由安全 profile 驱动：release 是默认基线，debug/security 只追加
+        // 显式登记的额外检查；per-domain secret 的登记目录与 MemoryDomainId 一一对应。
+        let provenance = ProvenanceRuntimeContract::build(
+            ProvenanceDemand::derive(
+                demand.owners,
+                classes.classes().len() as u32,
+                resource_classes.classes().len() as u32,
+            ),
+            policy.provenance,
+        )?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -652,6 +667,7 @@ impl RuntimeRawContractV1 {
             block_return,
             compression,
             routing,
+            provenance,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -865,6 +881,20 @@ impl RuntimeRawContractV1 {
         &self.routing
     }
 
+    /// 返回 raw link provenance 与 release 安全 profile 契约段。
+    pub(crate) fn provenance(&self) -> &ProvenanceRuntimeContract {
+        &self.provenance
+    }
+
+    /// 返回 raw link provenance 契约段（可变）。
+    ///
+    /// 只供契约不变量测试构造「子段内部自洽、跨段却对不上」的非法状态：正常路径只经
+    /// `build` 生成契约，不存在需要写这一段的生产代码。
+    #[cfg(test)]
+    pub(crate) fn provenance_mut(&mut self) -> &mut ProvenanceRuntimeContract {
+        &mut self.provenance
+    }
+
     /// 返回 `HandleForward` 消息字段集合。
     pub(crate) fn handle_forward_message(&self) -> &MessageSchemaV1 {
         self.shared_heap.handle_forward_fields()
@@ -1055,6 +1085,24 @@ impl RuntimeRawContractV1 {
         {
             return Err(RawModelError::new("routing 需求与 raw 平面派生值不一致"));
         }
+        self.provenance.verify()?;
+        // 安全 profile 同样以 policy 为唯一来源：契约段与 raw policy 的 profile 必须一致。
+        if self.policy.provenance
+            != (ProvenancePolicyV1 {
+                profile: self.provenance.mode,
+            })
+        {
+            return Err(RawModelError::new("provenance 契约段与 raw policy 不一致"));
+        }
+        if self.provenance.demand
+            != ProvenanceDemand::derive(
+                self.demand.owners,
+                self.classes.classes().len() as u32,
+                self.resource_classes.classes().len() as u32,
+            )
+        {
+            return Err(RawModelError::new("provenance 需求与 raw 平面派生值不一致"));
+        }
         if self.block_return.demand()
             != BlockReturnDemand::derive(&self.local_heap.demand(), &self.shared_heap.demand)?
         {
@@ -1170,6 +1218,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.block_return.canonical_bytes());
         bytes.extend_from_slice(&self.compression.canonical_bytes());
         bytes.extend_from_slice(&self.routing.canonical_bytes());
+        bytes.extend_from_slice(&self.provenance.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1406,6 +1455,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.block_return.dump());
         output.push_str(&self.compression.dump());
         output.push_str(&self.routing.dump());
+        output.push_str(&self.provenance.dump());
         output.push_str(&format!(
             "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} edge-delta-fields={} handle-forward-fields={} card-mark-family={}\n",
             self.message.fields.len(),

@@ -595,6 +595,66 @@ fn build_json_reports_routing_contract_keys() {
     assert_eq!(payload["routing-runtime"]["profile"], "mosaic-routing");
 }
 
+/// provenance 契约键随镜像计划输出；默认 release profile，指纹随契约内容出现。
+#[test]
+fn build_json_reports_provenance_contract_keys() {
+    let source =
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
+    let compilation =
+        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+            "main.gg",
+            source,
+            gugu_compiler::TargetName::X86_64Linux,
+        ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    let payload = super::output::image_plan_payload(plan);
+    for key in [
+        "provenance-contract-fingerprint",
+        "provenance-demand",
+        "provenance-runtime",
+        "provenance-profile",
+        "provenance-profile-revision",
+        "provenance-mode",
+        "provenance-check-count",
+        "provenance-domain-count",
+        "provenance-rejection-category-count",
+    ] {
+        assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
+    }
+    assert_eq!(payload["provenance-profile"], "mosaic-provenance");
+    assert_eq!(payload["provenance-profile-revision"], 1);
+    assert_eq!(payload["provenance-mode"], "release");
+    assert_eq!(payload["provenance-check-count"], 14);
+    assert_eq!(payload["provenance-domain-count"], 7);
+    assert_eq!(payload["provenance-rejection-category-count"], 7);
+    let demand = &payload["provenance-demand"];
+    assert_eq!(demand["owners"], 0);
+    let active = &payload["provenance-runtime"]["active-checks"];
+    assert_eq!(
+        active
+            .as_array()
+            .expect("激活检查是数组")
+            .iter()
+            .map(|name| name.as_str().expect("检查名是字符串"))
+            .collect::<Vec<_>>(),
+        vec!["owner", "generation", "range", "alignment"]
+    );
+    let fingerprint = payload["provenance-contract-fingerprint"]
+        .as_array()
+        .expect("指纹是字节数组");
+    assert_eq!(fingerprint.len(), 32);
+    assert!(fingerprint.iter().any(|byte| byte != &serde_json::json!(0)));
+    assert_eq!(
+        payload["provenance-runtime"]["profile"],
+        "mosaic-provenance"
+    );
+}
+
 /// sender 在 send 之后仍使用闭包时必须落 SharedHeap；JSON 契约键与 dump 同源。
 #[test]
 fn build_json_reports_shared_heap_contract_keys() {
