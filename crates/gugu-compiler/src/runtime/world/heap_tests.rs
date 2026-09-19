@@ -160,6 +160,9 @@ pub(super) fn configured_world(
 ) -> RawWorld {
     let mut world =
         RawWorld::new(seed, owners, nodes, BatchLimits::default()).expect("world 可创建");
+    world
+        .configure_routing(contract.routing())
+        .expect("routing 平面可配置");
     world.configure_gc(contract).expect("GC 平面可配置");
     world
 }

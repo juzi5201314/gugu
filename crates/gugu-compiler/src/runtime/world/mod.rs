@@ -16,6 +16,7 @@ pub(crate) mod mark_impl;
 pub(crate) mod pacing_impl;
 mod region_impl;
 mod resource_impl;
+pub(crate) mod routing_impl;
 pub(crate) mod shared_forward_impl;
 pub(crate) mod shared_heap_impl;
 pub(crate) mod sync_impl;
@@ -72,6 +73,10 @@ mod shared_forward_tests;
 #[cfg(test)]
 #[path = "block_return_tests.rs"]
 mod block_return_tests;
+
+#[cfg(test)]
+#[path = "routing_tests.rs"]
+mod world_routing_tests;
 
 #[cfg(test)]
 #[path = "cage_tests.rs"]
@@ -195,6 +200,8 @@ pub(crate) struct RawWorld {
     return_stagings: Vec<ProducerStaging>,
     /// 每个 owner 的 source-slab return cache；关闭时把 ring 转成 return batch。
     return_caches: Vec<ReturnSlabCache>,
+    /// temporal radix fan-out 平面；按契约路由模式分流 return 族的发布。
+    routing: super::routing::RoutingPlane,
     /// GC debt、owner credit、pacing 与 pressure episode 的执行平面。
     pacing: super::pacing::PacingPlane,
     /// TurnRegion 私有区与 `RegionTransfer` 投递平面；按已构建的契约配置。
@@ -328,6 +335,7 @@ impl RawWorld {
             pacing: super::pacing::PacingPlane::default(),
             return_stagings: (0..owners).map(|_| ProducerStaging::new(limits)).collect(),
             return_caches: (0..owners).map(|_| ReturnSlabCache::new()).collect(),
+            routing: routing_impl::default_plane(),
             regions: None,
             local_heap_contract: None,
             shared_heap_contract: None,
@@ -546,6 +554,7 @@ impl RawWorld {
         self.directory.begin_drain(&token, tick)?;
         self.directory.begin_forward(&token, target, tick)?;
         self.epoch = tick;
+        self.observe_routing_topology()?;
         Ok(tick)
     }
 
@@ -588,6 +597,9 @@ impl RawWorld {
     /// 返回本次调用产生的发布记录：目标改变时先有一条 `TargetChanged`，随后可能有一条由
     /// item/byte 上限或显式触发产生的发布。staging 由 `RawWorld` 持有，因此未发布的字节是
     /// credit 平面可以观测、也必须可以冲刷的真实在飞量。
+    ///
+    /// radix 模式下 flush 进入 radix staging 而不是目标 inbox：batch 由 routing 平面按
+    /// 原始 target 的 route key 逐层转发；maintenance 期间发布被冻结。
     pub(crate) fn publish_message(
         &mut self,
         owner: u32,
@@ -596,6 +608,48 @@ impl RawWorld {
         forced: Option<FlushTrigger>,
     ) -> Result<Vec<PublishOutcome>, RawInvariant> {
         let mut outcomes = Vec::new();
+        if !self.routing.publish_allowed() {
+            return Err(RawInvariant::new(
+                "routing maintenance 期间不接受新的 return 发布",
+            ));
+        }
+        if self.routing.mode() == super::routing_schema::RouteMode::Radix {
+            if let Some(previous) = self.return_stagings[owner as usize].target()
+                && previous != message.target
+            {
+                let chain = self.return_stagings[owner as usize]
+                    .drain()
+                    .ok_or_else(|| RawInvariant::new("staging 记录了 target 却没有 chain"))?;
+                self.routing.enqueue(chain)?;
+                outcomes.push(PublishOutcome {
+                    items: chain.count,
+                    bytes: chain.bytes,
+                    trigger: FlushTrigger::TargetChanged,
+                });
+            }
+            stage_message(
+                &self.pool,
+                None,
+                &mut self.return_stagings[owner as usize],
+                message,
+                shard,
+                None,
+            )?;
+            if let Some(trigger) =
+                forced.or_else(|| self.return_stagings[owner as usize].flush_trigger())
+            {
+                let chain = self.return_stagings[owner as usize]
+                    .drain()
+                    .ok_or_else(|| RawInvariant::new("flush 触发时 staging 为空"))?;
+                self.routing.enqueue(chain)?;
+                outcomes.push(PublishOutcome {
+                    items: chain.count,
+                    bytes: chain.bytes,
+                    trigger,
+                });
+            }
+            return Ok(outcomes);
+        }
         if let Some(previous) = self.return_stagings[owner as usize].target()
             && previous != message.target
         {
@@ -623,10 +677,11 @@ impl RawWorld {
 
     /// 把关闭的 source-slab ring 转成一个 return batch 并发布。
     ///
-    /// ring 批次直接进入目标 owner 的 inbox，不经过 producer staging：staging 只承载单条
-    /// return/card 消息，因此这里由 owner 自己推导目标与 shard。
+    /// ring 批次在 direct 模式直接进入目标 owner 的 inbox，不经过 producer staging：
+    /// staging 只承载单条 return/card 消息，因此这里由 owner 自己推导目标与 shard。
+    /// radix 模式下批次进入 radix staging，由 routing 平面按原始 target 逐层转发。
     pub(crate) fn publish_ring(
-        &self,
+        &mut self,
         owner: u32,
         closed: &super::message::ClosedRing,
     ) -> Result<u32, RawInvariant> {
@@ -659,6 +714,10 @@ impl RawWorld {
             target: Some(target),
             shard: Some(shard),
         };
+        if self.routing.mode() == super::routing_schema::RouteMode::Radix {
+            self.routing.enqueue(chain)?;
+            return Ok(chain.count);
+        }
         let inbox = Arc::clone(&self.inboxes[owner as usize]);
         inbox.publish_batch(&chain, &self.pool)?;
         Ok(chain.count)
@@ -722,7 +781,8 @@ impl RawWorld {
     /// 把一个 owner 尚未发布的 return chain 交给目标 owner 的 inbox。
     ///
     /// credit 观测到的 `producer-staging` 字节就是这里的输入；drain/retire 前必须冲刷，
-    /// 否则「cycle 边界前 credit 收敛」会看到真实的在飞量而不是观测盲区。
+    /// 否则「cycle 边界前 credit 收敛」会看到真实的在飞量而不是观测盲区。radix 模式下
+    /// 冲刷进入 radix staging，由 routing 平面继续逐层转发。
     pub(crate) fn flush_return_staging(
         &mut self,
         owner: u32,
@@ -731,6 +791,13 @@ impl RawWorld {
         let Some(target) = self.return_stagings[owner as usize].target() else {
             return Ok(0);
         };
+        if self.routing.mode() == super::routing_schema::RouteMode::Radix {
+            let chain = self.return_stagings[owner as usize]
+                .drain()
+                .ok_or_else(|| RawInvariant::new("staging 记录了 target 却没有 chain"))?;
+            self.routing.enqueue(chain)?;
+            return Ok(chain.count);
+        }
         let inbox = self.inbox_for(&target)?;
         let outcome = flush_staging(
             &self.pool,
@@ -1083,6 +1150,9 @@ impl RawWorld {
             .trim_cache(owner, 0, &mut self.provider)
             .map_err(|error| self.stack_failure(error))?;
         self.epoch = tick;
+        // topology epoch 已前进：routing 平面记录新 epoch，在飞 radix batch 的终层解析
+        // 由此改走转发记录或 domain injection，旧 epoch 最终进入新 token/domain。
+        self.observe_routing_topology()?;
         // managed arena 的管理权随 owner 退役转移：payload 不动，但新 manager 才是这些
         // block 的投递目标，因此必须在 inbox 排空之前完成移交。
         self.handover_managed_arenas(owner, target)?;

@@ -251,12 +251,14 @@ impl RawWorld {
                 buffer_keys = buffer_keys.saturating_add(u64::from(record.buffer().len()));
             }
         }
-        // 在途 region transfer 与 owner pending return 属于同一个 credit 来源：两者都是
-        // 「已经离开生产者、还没被任何 owner 消费」的字节，因此在这里合并而不是新开来源。
+        // 在途 region transfer、radix staging 与 owner pending return 属于同一个 credit
+        // 来源：三者都是「已经离开生产者、还没被任何 owner 消费」的字节，因此在这里合并
+        // 而不是新开来源；mode 切换期间 routing staging 的字节也保持可见。
         let region_transfers = self
             .regions
             .as_ref()
             .map_or(0, super::super::region::RegionPlane::pending_bytes);
+        let routing_pending = self.routing_pending_bytes();
         CreditSnapshot {
             barrier_buffer_keys: buffer_keys,
             card_mark_batches: self.barrier.pending_batch_bytes(),
@@ -265,7 +267,8 @@ impl RawWorld {
             pending_return_bytes: self
                 .committed_classes()
                 .pending_return_bytes
-                .saturating_add(region_transfers),
+                .saturating_add(region_transfers)
+                .saturating_add(routing_pending),
             staging_bytes: self.return_staging_bytes(),
             // 四个 mark 来源由 mark 平面与 worklist 观测；未配置平面时保持 0，不猜测。
             mark_credit: self

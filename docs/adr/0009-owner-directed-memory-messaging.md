@@ -134,7 +134,7 @@ raw link 使用 per-domain secret 和 slot address 派生的编码，decode 时�
 
 ## 实施状态
 
-按「后续实现约束」的顺序推进中：raw slab owner return、ResourceCell release、PlatformRange/extent、debt/pacing、TurnRegion、MarkTicket/MarkMailbox、EdgeDelta/block candidate、SharedHeap handle forwarding 已以编译契约与确定性参考模型形式落地；共享字段存储已接入屏障平面并完成 SharedHeap 转发闭环（提交 `83e3894`、`6de69ff`、`abe92d9`、`f2885a6`、`f17451b`、`a043620`）。尚未实现：GC block return 全链收尾、pointer compression、credit termination、radix profile、security profile 与 typed combining。验证按本 ADR 要求使用快速、进程内、确定性的测试替身，性能测量归入 benchmark。
+按「后续实现约束」的顺序推进中：raw slab owner return、ResourceCell release、PlatformRange/extent、debt/pacing、TurnRegion、MarkTicket/MarkMailbox、EdgeDelta/block candidate、SharedHeap handle forwarding、GC block return 全链、pointer compression（默认关闭的 cage profile 与源级压缩 producer）、credit termination 以及 radix profile 已以编译契约与确定性参考模型形式落地；共享字段存储已接入屏障平面并完成 SharedHeap 转发闭环（提交 `83e3894`、`6de69ff`、`abe92d9`、`f2885a6`、`f17451b`、`a043620`）。radix profile 由 `RoutingRuntimeContract` 与 `RoutingPlane` 交付：默认 direct 不分配 bucket 表，radix 只在 profile 开启后拦截 return 族，hop 上限、maintenance 相位切换与旧 topology drain 均为机器检查的契约。尚未实现：security profile 与 typed combining。验证按本 ADR 要求使用快速、进程内、确定性的测试替身，性能测量归入 benchmark。
  
 ## 替代方案
 

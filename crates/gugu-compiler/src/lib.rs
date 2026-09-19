@@ -50,6 +50,7 @@ pub use runtime::{
     StackMapDemand, StackPolicy, SyncDemand, SyncLockHarness, SyncLockReport, SyncRuntimeContract,
     TurnRegionDemand, TurnRegionRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
+pub use runtime::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
     SourceMapError, SourceSlot, SourceSnapshot, SourceTableId, Span, SpanError,
@@ -79,6 +80,7 @@ pub struct CompileRequest {
     target: TargetName,
     input: CompileInput,
     compression: CompressionPolicyV1,
+    routing: RoutingPolicyV1,
 }
 
 impl CompileRequest {
@@ -88,6 +90,7 @@ impl CompileRequest {
             target,
             input: CompileInput::EmptyPackage,
             compression: CompressionPolicyV1::disabled(),
+            routing: RoutingPolicyV1::default(),
         }
     }
 
@@ -104,6 +107,7 @@ impl CompileRequest {
                 source: source.into(),
             },
             compression: CompressionPolicyV1::disabled(),
+            routing: RoutingPolicyV1::default(),
         }
     }
 
@@ -117,6 +121,7 @@ impl CompileRequest {
                 require_main: true,
             },
             compression: CompressionPolicyV1::disabled(),
+            routing: RoutingPolicyV1::default(),
         }
     }
 
@@ -130,6 +135,7 @@ impl CompileRequest {
                 require_main: false,
             },
             compression: CompressionPolicyV1::disabled(),
+            routing: RoutingPolicyV1::default(),
         }
     }
 
@@ -165,6 +171,7 @@ impl CompileRequest {
                 custom_cfg: BTreeMap::new(),
             },
             compression: CompressionPolicyV1::disabled(),
+            routing: RoutingPolicyV1::default(),
         }
     }
 
@@ -173,6 +180,15 @@ impl CompileRequest {
     /// 策略必须在 lowering 前已知：压缩需求由优化后 LIR 推导，不允许事后改契约。
     pub fn with_compression_policy(mut self, policy: CompressionPolicyV1) -> Self {
         self.compression = policy;
+        self
+    }
+
+    /// 显式设置路由 profile；默认 direct，即 owner inbox 直达语义。
+    ///
+    /// mode 是 runtime tuning profile：它不改变编译语义，只随 raw policy 进入契约与
+    /// action key，供世界与确定性测试按契约配置路由平面。
+    pub fn with_routing_policy(mut self, policy: RoutingPolicyV1) -> Self {
+        self.routing = policy;
         self
     }
 }
@@ -324,6 +340,7 @@ impl Compiler {
             target,
             input,
             compression,
+            routing,
         } = request;
         let mut graph = ActionGraph::new();
         let mut diagnostics = Diagnostics::default();
@@ -516,6 +533,7 @@ impl Compiler {
                 // lowering 前已知，这里只把它带进 raw 平面契约，不做事后修正。
                 policy: RawPlanePolicyV1 {
                     compression,
+                    routing,
                     ..RawPlanePolicyV1::default()
                 },
                 demand,
@@ -1145,6 +1163,9 @@ pub struct ImagePlan {
     compression_demand: crate::runtime::CompressionDemand,
     compression_runtime: crate::runtime::CompressionRuntimeContract,
     compression_capability: PointerCompression,
+    routing_contract_fingerprint: [u8; 32],
+    routing_demand: crate::runtime::RoutingDemand,
+    routing_runtime: crate::runtime::RoutingRuntimeContract,
     mark_contract_fingerprint: [u8; 32],
     mark_demand: crate::runtime::MarkDemand,
     mark_runtime: crate::runtime::MarkRuntimeContract,
@@ -1328,6 +1349,9 @@ impl ImagePlan {
             compression_demand: plan.compression_demand,
             compression_runtime: plan.compression_runtime,
             compression_capability: plan.compression_capability,
+            routing_contract_fingerprint: plan.routing_contract_fingerprint,
+            routing_demand: plan.routing_demand,
+            routing_runtime: plan.routing_runtime,
             mark_contract_fingerprint: plan.mark_contract_fingerprint,
             mark_demand: plan.mark_demand,
             mark_runtime: plan.mark_runtime,
@@ -1902,6 +1926,21 @@ impl ImagePlan {
     /// 返回目标对 checked pointer compression 的能力声明。
     pub fn compression_capability(&self) -> PointerCompression {
         self.compression_capability
+    }
+
+    /// 返回 routing 契约指纹。
+    pub fn routing_contract_fingerprint(&self) -> [u8; 32] {
+        self.routing_contract_fingerprint
+    }
+
+    /// 返回 routing 需求视图。
+    pub fn routing_demand(&self) -> crate::runtime::RoutingDemand {
+        self.routing_demand
+    }
+
+    /// 返回已验证的 temporal radix fan-out 契约段。
+    pub fn routing_runtime(&self) -> &crate::runtime::RoutingRuntimeContract {
+        &self.routing_runtime
     }
 
     /// 返回 mark 契约指纹。

@@ -305,6 +305,8 @@ radix staging 使用固定 `2^k` bucket；高 fan-out profile 默认 `k = 6`，�
 
 mode 是 runtime tuning profile，不是用户可观察行为。任何 profile 都必须保留 domain injection 作为 owner 不可达、owner retire 或 pressure emergency 的终点。
 
+上述契约由 `RoutingRuntimeContract`（`RuntimeRawModel` schema 21 并入）与 `RoutingPlane` 参照实现落地：常量、相位序列、统计口径与需求视图见「Compiler 侧契约模型与 verifier」中的路由契约段。
+
 ## Range、span 与大对象
 
 ### Range 层级
@@ -911,7 +913,7 @@ benchmark 与正确性测试分离。至少测量：
 
 ## Compiler 侧契约模型与 verifier
 
-owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，当时 schema 2、当前 20）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
+owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，当时 schema 2、当前 21）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
 
 - **消息字段 schema** 为每个字段打种类标签，只允许 owner domain/id/generation/route key、descriptor index、unit index、bytes、epoch、integrity 与 link；任何地址种类在 `verify` 中被拒绝，因此“跨 owner 只发送 descriptor/index/generation/epoch/bytes/integrity”是机器检查的契约，而不是注释约定。
 - **需求视图**（`RawPlaneDemand`）由冻结前端产物推导：GIR 协程创建点数量、placement 判定的 `Resource`/`RuntimeRaw` 记录数量与 owner 数量；常驻 message node 容量由 shard 数与 batch item 上限推导为可证明下界。资源侧另由 `RawResourceDemand` 给出资源站点、acquire/release/transfer 站点、owner 数与资源种类数的统计口径；当前 `RuntimeRawContractV1` 只固化 resource ladder 与该需求视图，ResourceReleaseHarness 的 node capacity 按 total item 与 batch 上限设置，release queue 使用动态 `VecDeque`，不声称由 `RawResourceDemand` 推导 slab 或队列容量。
@@ -919,6 +921,7 @@ owner 身份、slab 描述符、dense size class、消息字段、grace 步骤�
 - **发布区域 verifier**：LIR 对 `OwnershipPublish`/`RootPublish` 区域执行 raw 平面检查（允许的 op 集合、原子序配对、非可移动内部地址），违规诊断 `E0058`，不写出镜像计划。
 - **资源隔离 verifier**：LIR 对 `RegionAlloc`/`RegionPublish`/`RegionReset` 执行资源类描述符检查，resource 描述符不得进入 managed region；`RegionPublish`/`RegionReset` 只作用于 `RegionAlloc` 产生的 region 指针，其隔离由 `RegionAlloc` 闸门传递保证，违规诊断为 `E0059`（ResourceInvariant），不写出镜像计划。
 - **压缩契约段**：`CompressionRuntimeContract`（`COMPRESSION_SCHEMA = 1`，profile `mosaic-compression` revision 1）固定 cage 位布局（cage id 8 / generation 24 / offset 32，全零字为空引用，generation 从 1 起）、cage 上限 4 GiB、与 GC arena 同源的 2 MiB 粒度、FFI 交接规则目录（`resolve-then-pin`、`no-compressed-pass-through`、`save-requires-active-lease`）与六项统计名，并逐项核对目标能力（`supported`、`canonical_bits = 48`、`min_alignment`）；`CompressionPolicyV1` 默认关闭，关闭态要求 cage 字节数、解码点与压缩根槽同时为 0。`CompressionDemand` 由优化后 LIR 一次推导：`decode_sites` 是 `DecodeCompressedRef` 指令数，`compressed_root_slots` 是按安全点聚合的压缩根槽数——两者随需求进入 `RuntimeRawModel` key、契约指纹与 `ImagePlan`，`cage_bytes`、能力或需求变化必须使缓存与 action key 失效。默认编译不预留 cage。
+- **路由契约段**：`RoutingRuntimeContract`（`ROUTING_SCHEMA = 1`，profile `mosaic-routing` revision 1；`RuntimeRawModel` schema 21 并入，raw policy revision 升到 3）固定路由模式目录（`direct`/`radix`）、固定 `2^k` bucket（`RADIX_BUCKET_LOG2 = 6`）、有限 levels（`MAX_RADIX_LEVELS = 2`）、转发 hop 上限（`RADIX_HOP_LIMIT = 4`，不得小于 levels）、radix 拦截的消息族目录（return 族）、maintenance 相位目录与 direct→radix / radix→direct 两条切换序列，以及五项统计口径（`remote-return-hops` 等）。`RoutingDemand`（owner 数、return 发布站点上界）由 raw 平面需求推导并随契约进入 `RuntimeRawModel` key 与 action key；`routing-*` 键进入 `ImagePlan` 与 `-Zdump-runtime`。`RoutingPlane` 是契约的确定性对偶：direct 模式不分配 bucket 表；radix 模式按原始 target 的 route key bits 逐层 staging，每步恰好一跳并校验 hop 上限，终层经 owner directory 解析为交付、转发或 domain injection，模式切换只在 maintenance 相位序列内翻转，旧 topology 的在飞 batch 沿转发记录排空后才释放。`world/routing_impl.rs` 把发布路径接到真实世界：radix 模式下 return 族 staging flush 与 ring 关闭批次进入平面，route step 的交付/改写由 world 执行（node 内容按新终点重写、integrity 重算、旧 node 进入 grace，与 `forward_message` 语义一致），在飞字节计入 credit 快照的 pending 口径。
 
 ## 实施顺序
 

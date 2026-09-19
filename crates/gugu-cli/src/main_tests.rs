@@ -547,6 +547,54 @@ fn build_json_reports_barrier_contract_keys() {
     assert!(fingerprint.iter().any(|byte| byte != &serde_json::json!(0)));
 }
 
+/// 默认编译的 routing 契约键：direct 模式、固定 2^k bucket 与 hop 上限进入 JSON。
+#[test]
+fn build_json_reports_routing_contract_keys() {
+    let source =
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
+    let compilation =
+        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+            "main.gg",
+            source,
+            gugu_compiler::TargetName::X86_64Linux,
+        ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    let payload = super::output::image_plan_payload(plan);
+    for key in [
+        "routing-contract-fingerprint",
+        "routing-demand",
+        "routing-runtime",
+        "routing-profile",
+        "routing-profile-revision",
+        "routing-mode",
+        "routing-bucket-count",
+        "routing-max-levels",
+        "routing-hop-limit",
+    ] {
+        assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
+    }
+    assert_eq!(payload["routing-profile"], "mosaic-routing");
+    assert_eq!(payload["routing-profile-revision"], 1);
+    assert_eq!(payload["routing-mode"], "direct");
+    assert_eq!(payload["routing-bucket-count"], 64);
+    assert_eq!(payload["routing-max-levels"], 2);
+    assert_eq!(payload["routing-hop-limit"], 4);
+    let demand = &payload["routing-demand"];
+    assert_eq!(demand["owners"], 0);
+    let fingerprint = payload["routing-contract-fingerprint"]
+        .as_array()
+        .expect("指纹是字节数组");
+    assert_eq!(fingerprint.len(), 32);
+    assert!(fingerprint.iter().any(|byte| byte != &serde_json::json!(0)));
+    // routing 契约段整体进入计划；dump 的 -Zdump-runtime 段由 compiler 侧测试覆盖。
+    assert_eq!(payload["routing-runtime"]["profile"], "mosaic-routing");
+}
+
 /// sender 在 send 之后仍使用闭包时必须落 SharedHeap；JSON 契约键与 dump 同源。
 #[test]
 fn build_json_reports_shared_heap_contract_keys() {

@@ -91,6 +91,12 @@ pub(crate) mod pacing_schema;
 mod platform_schema;
 pub(crate) mod region;
 pub(crate) mod region_schema;
+#[allow(
+    dead_code,
+    reason = "temporal radix fan-out 的确定性参照实现由 world 与确定性测试消费"
+)]
+pub(crate) mod routing;
+pub(crate) mod routing_schema;
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
 mod scheduler_schema;
@@ -145,6 +151,7 @@ pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntim
 pub use mark_schema::{MarkDemand, MarkRuntimeContract};
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
 pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
+pub use routing_schema::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use shared_heap_schema::{SharedHeapDemand, SharedHeapRuntimeContract};
 pub use stackmap_schema::StackMapDemand;
@@ -201,6 +208,8 @@ mod platform_tests;
 mod process_tests;
 #[cfg(test)]
 mod report_tests;
+#[cfg(test)]
+mod routing_tests;
 #[cfg(test)]
 mod scheduler_tests;
 #[cfg(test)]
