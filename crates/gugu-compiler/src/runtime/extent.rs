@@ -437,6 +437,28 @@ impl OwnerExtentSpace {
             .sum()
     }
 }
+/// 一次 owner arena 登记所需的参数集合。
+///
+/// 将 6 个独立字段收拢为单一结构体，消除 `register_owner` 的过多数目参数；
+/// 新增或修改 arena 字段只需改本结构体与构造点，调用方签名保持稳定。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct OwnerArena {
+    /// 此 arena 归属的 owner token。
+    pub(crate) token: OwnerToken,
+    /// arena 所属 memory domain；raw 与 Resource 各自持有独立 arena。
+    pub(crate) domain: MemoryDomainId,
+    /// arena 对应的平台 range；extent 是它的子区间，commit/decommit 以页为粒度作用于它。
+    pub(crate) range: RangeId,
+    /// arena 在虚拟地址空间的基址，须按最大 class 对齐。
+    pub(crate) base: u64,
+    /// arena 容量（字节）；须为最大 class 的整数倍且非零。
+    pub(crate) bytes: u64,
+    /// arena 在平台 range 内的字节偏移。
+    ///
+    /// 直接预留的 arena 传 0；cage 成岛的 managed arena 传 island 在 cage 内的偏移，
+    /// 平台调用据此翻译 extent 的 arena 内偏移。
+    pub(crate) range_offset: u64,
+}
 
 /// 全部 owner 的 extent 描述符表与 buddy 阶梯。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -463,20 +485,19 @@ impl ExtentTable {
     }
 
     /// 为一个 owner 登记 extent arena；基址与容量必须按最大 class 对齐。
-    ///
-    /// `range_offset` 是 arena 在平台 range 内的偏移：直接预留的 arena 传 0，cage 成岛的
-    /// managed arena 传 island 在 cage 内的偏移，平台调用据此翻译 extent 的 arena 内偏移。
     pub(crate) fn register_owner(
         &mut self,
         owner: u32,
-        token: OwnerToken,
-        domain: MemoryDomainId,
-        range: RangeId,
-        base: u64,
-        bytes: u64,
-        range_offset: u64,
+        arena: OwnerArena,
     ) -> Result<u32, RawInvariant> {
-        let space = OwnerExtentSpace::new(token, domain, range, base, bytes, range_offset)?;
+        let space = OwnerExtentSpace::new(
+            arena.token,
+            arena.domain,
+            arena.range,
+            arena.base,
+            arena.bytes,
+            arena.range_offset,
+        )?;
         let index = u32::try_from(self.spaces.len()).expect("owner arena 数量适配 u32");
         self.spaces.push(space);
         while self.owner_spaces.len() <= owner as usize {

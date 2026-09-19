@@ -159,7 +159,7 @@ fn switch_selected_case_returns_after_the_whole_encoding() {
 
     let mut payload = vec![0u8; 8 * 8];
     payload[0] = 1; // tag
-    payload[1 * 8] = 0x11;
+    payload[8] = 0x11;
     payload[5 * 8] = 0x55;
     payload[7 * 8] = 0x77;
     payload[2 * 8] = 0x22;

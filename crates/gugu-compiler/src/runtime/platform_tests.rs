@@ -6,8 +6,8 @@
 
 use super::RAW_SLAB_PAGE_BYTES;
 use super::extent::{
-    EXTENT_CLASS_LADDER, ExtentLease, ExtentOccupancy, ExtentState, ExtentTable, TrimBlocked,
-    class_bytes, class_for_bytes,
+    EXTENT_CLASS_LADDER, ExtentLease, ExtentOccupancy, ExtentState, ExtentTable, OwnerArena,
+    TrimBlocked, class_bytes, class_for_bytes,
 };
 use super::inbox::{GraceOutcome, ServiceBudget};
 use super::platform::{FakePlatform, PlatformProfile};
@@ -48,12 +48,14 @@ fn extent_table(owners: u32) -> ExtentTable {
         table
             .register_owner(
                 owner,
-                extent_token(u64::from(owner) + 1),
-                MemoryDomainId::RUNTIME_RAW,
-                super::provider::RangeId(owner),
-                top * u64::from(owner),
-                top,
-                0,
+                OwnerArena {
+                    token: extent_token(u64::from(owner) + 1),
+                    domain: MemoryDomainId::RUNTIME_RAW,
+                    range: super::provider::RangeId(owner),
+                    base: top * u64::from(owner),
+                    bytes: top,
+                    range_offset: 0,
+                },
             )
             .expect("arena 可登记");
     }
@@ -268,12 +270,14 @@ fn extent_table_rejects_unaligned_arena_and_unknown_class() {
         table
             .register_owner(
                 0,
-                extent_token(1),
-                MemoryDomainId::RUNTIME_RAW,
-                super::provider::RangeId(0),
-                4096,
-                2 * 1024 * 1024,
-                0,
+                OwnerArena {
+                    token: extent_token(1),
+                    domain: MemoryDomainId::RUNTIME_RAW,
+                    range: super::provider::RangeId(0),
+                    base: 4096,
+                    bytes: 2 * 1024 * 1024,
+                    range_offset: 0,
+                },
             )
             .is_err(),
         "arena 基址必须按顶层 class 对齐"
@@ -282,12 +286,14 @@ fn extent_table_rejects_unaligned_arena_and_unknown_class() {
         table
             .register_owner(
                 0,
-                extent_token(1),
-                MemoryDomainId::RUNTIME_RAW,
-                super::provider::RangeId(0),
-                0,
-                4096,
-                0,
+                OwnerArena {
+                    token: extent_token(1),
+                    domain: MemoryDomainId::RUNTIME_RAW,
+                    range: super::provider::RangeId(0),
+                    base: 0,
+                    bytes: 4096,
+                    range_offset: 0,
+                },
             )
             .is_err(),
         "arena 容量必须是顶层 class 的整数倍"

@@ -400,10 +400,10 @@ impl Validated {
                     body::Op::ForwardSharedHandle => demand.forward_sites += 1,
                     body::Op::SharedFieldBarrier { .. }
                     | body::Op::SharedFieldBarrierReserved { .. } => demand.barrier_sites += 1,
-                    body::Op::Call(call) | body::Op::ForeignCall(call) => {
-                        if shared_pin(call, &instruction.arguments) {
-                            demand.pin_sites += 1;
-                        }
+                    body::Op::Call(call) | body::Op::ForeignCall(call)
+                        if shared_pin(call, &instruction.arguments) =>
+                    {
+                        demand.pin_sites += 1;
                     }
                     _ => {}
                 }
@@ -415,10 +415,8 @@ impl Validated {
                     }
                     | body::Terminator::TailCall {
                         call, arguments, ..
-                    } => {
-                        if shared_pin(call, arguments) {
-                            demand.pin_sites += 1;
-                        }
+                    } if shared_pin(call, arguments) => {
+                        demand.pin_sites += 1;
                     }
                     _ => {}
                 }

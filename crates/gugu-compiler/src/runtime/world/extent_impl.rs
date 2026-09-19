@@ -8,7 +8,8 @@
 
 use super::super::cage::CompressionPlane;
 use super::super::extent::{
-    ExtentDescriptor, ExtentId, ExtentOccupancy, ExtentState, ExtentTable, TrimBlocked, TrimReport,
+    ExtentDescriptor, ExtentId, ExtentOccupancy, ExtentState, ExtentTable, OwnerArena, TrimBlocked,
+    TrimReport,
 };
 use super::super::gc_metadata_contract::{GC_BLOCK_BYTES, GC_LINE_BYTES};
 use super::super::inbox::ShardIndex;
@@ -94,12 +95,14 @@ impl RawWorld {
         };
         let index = self.extents.register_owner(
             owner,
-            token,
-            domain,
-            range,
-            base,
-            OWNER_ARENA_BYTES,
-            range_offset,
+            OwnerArena {
+                token,
+                domain,
+                range,
+                base,
+                bytes: OWNER_ARENA_BYTES,
+                range_offset,
+            },
         )?;
         Ok(index)
     }

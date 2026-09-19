@@ -238,7 +238,11 @@ impl EdgeRuntimeContract {
         }
         // 预算是按 region 预留的：permit 覆盖的 shade 额度同时是该 region 的 edge scratch
         // 预留，因此只能要求它按“每条写入两项”整除，不能要求它覆盖未进入 region 的站点。
-        if self.demand.reserve_slots != 0 && self.demand.reserve_slots % self.deltas_per_write != 0
+        if self.demand.reserve_slots != 0
+            && !self
+                .demand
+                .reserve_slots
+                .is_multiple_of(self.deltas_per_write)
         {
             return Err(RawModelError::new(
                 "edge 预留槽必须是每条写入边变更数的整数倍",

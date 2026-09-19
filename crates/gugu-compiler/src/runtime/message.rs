@@ -976,7 +976,7 @@ impl ReturnNode {
             u64::from(batch.export_state)
                 | (u64::from(batch.observed) << 8)
                 | (u64::from(batch.capacity_class) << 16)
-                | (u64::from(batch.source.raw()) << 24),
+                | (batch.source.raw() << 24),
             Ordering::Relaxed,
         );
         self.integrity

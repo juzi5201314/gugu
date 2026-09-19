@@ -297,7 +297,7 @@ impl EdgePlane {
 
     /// 取走因缺口补齐而已可释放的 node 身份。
     pub(crate) fn take_released(&mut self) -> Vec<HeldRecord> {
-        self.released.drain(..).collect()
+        std::mem::take(&mut self.released)
     }
 
     /// 清退已应用计数为 0、没有保留记录的 block 对。

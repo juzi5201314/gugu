@@ -47,14 +47,13 @@ impl RawWorld {
                 "queue_heap_block_return 要求块已处于 ReturnPending",
             ));
         }
-        if kind == HeapArenaKind::Large {
-            if let Some((start, span)) = self
+        if kind == HeapArenaKind::Large
+            && let Some((start, span)) = self
                 .heap(owner)?
                 .large_span_covering(id)
                 .map_err(heap_error)?
-            {
-                return self.queue_large_mapping_if_ready(owner, manager, id.arena(), start, span);
-            }
+        {
+            return self.queue_large_mapping_if_ready(owner, manager, id.arena(), start, span);
         }
         let (pinned, resources) = self
             .heap(owner)?

@@ -1,6 +1,13 @@
 use super::*;
 use crate::frontend::ast::BinOp;
 
+/// if 表达式的三个基本块：then 分支、else 分支与合流块。
+struct IfBlocks {
+    then_block: BlockId,
+    else_block: BlockId,
+    join: BlockId,
+}
+
 impl Builder<'_> {
     pub(super) fn emit_block(
         &mut self,
@@ -266,33 +273,33 @@ impl Builder<'_> {
         else_value: Option<ExprId>,
     ) -> Result<Option<LocalId>, Diagnostic> {
         if self.condition_is_let_chain(condition) {
-            let then_block = self.fresh(false);
-            let else_block = self.fresh(false);
-            let join = self.fresh(false);
+            let blocks = IfBlocks {
+                then_block: self.fresh(false),
+                else_block: self.fresh(false),
+                join: self.fresh(false),
+            };
             let dest = self.temp(self.expr_ty(id));
-            match self.emit_condition_operand(condition, then_block, else_block)? {
+            match self.emit_condition_operand(condition, blocks.then_block, blocks.else_block)? {
                 Some(()) => {}
                 None => return Ok(None),
             }
-            return self.finish_if(
-                id, dest, then_block, else_block, join, then_value, else_value,
-            );
+            return self.finish_if(id, dest, blocks, then_value, else_value);
         }
         let Some(cond) = self.emit_expr(condition)? else {
             return Ok(None);
         };
         let dest = self.temp(self.expr_ty(id));
-        let then_block = self.fresh(false);
-        let else_block = self.fresh(false);
-        let join = self.fresh(false);
+        let blocks = IfBlocks {
+            then_block: self.fresh(false),
+            else_block: self.fresh(false),
+            join: self.fresh(false),
+        };
         self.terminate(Terminator::SwitchInt {
             value: copy_of(cond),
-            targets: vec![(1, then_block)],
-            otherwise: else_block,
+            targets: vec![(1, blocks.then_block)],
+            otherwise: blocks.else_block,
         });
-        self.finish_if(
-            id, dest, then_block, else_block, join, then_value, else_value,
-        )
+        self.finish_if(id, dest, blocks, then_value, else_value)
     }
 
     /// 发射 then/else 分支体并在 join 合流取值。
@@ -300,28 +307,26 @@ impl Builder<'_> {
         &mut self,
         id: ExprId,
         dest: LocalId,
-        then_block: BlockId,
-        else_block: BlockId,
-        join: BlockId,
+        blocks: IfBlocks,
         then_value: ExprId,
         else_value: Option<ExprId>,
     ) -> Result<Option<LocalId>, Diagnostic> {
-        self.switch_to(then_block);
+        self.switch_to(blocks.then_block);
         if let Some(value) = self.emit_expr(then_value)? {
             self.assign_copy(Place::local(dest), value);
-            self.goto(join);
+            self.goto(blocks.join);
         }
-        self.switch_to(else_block);
+        self.switch_to(blocks.else_block);
         if let Some(else_value) = else_value {
             if let Some(value) = self.emit_expr(else_value)? {
                 self.assign_copy(Place::local(dest), value);
-                self.goto(join);
+                self.goto(blocks.join);
             }
         } else {
             self.assign_unit(dest);
-            self.goto(join);
+            self.goto(blocks.join);
         }
-        self.switch_to(join);
+        self.switch_to(blocks.join);
         if self.terminated() {
             return Ok(None);
         }

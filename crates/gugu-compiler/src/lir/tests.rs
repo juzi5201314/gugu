@@ -923,7 +923,7 @@ fn compile_with_compression(source: &str) -> Compilation {
     let compilation = Compiler::new().compile(
         CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
             .with_compression_policy(CompressionPolicyV1::cage(
-                4 * u64::from(crate::runtime::gc_metadata_contract::GC_ARENA_BYTES),
+                4 * crate::runtime::gc_metadata_contract::GC_ARENA_BYTES,
             )),
     );
     assert!(
@@ -943,7 +943,7 @@ fn compression_enabled_captures_produce_encode_and_decode_sequences() {
     assert!(compression.enabled());
     assert_eq!(
         compression.cage_bytes(),
-        4 * u64::from(crate::runtime::gc_metadata_contract::GC_ARENA_BYTES)
+        4 * crate::runtime::gc_metadata_contract::GC_ARENA_BYTES
     );
     assert!(
         compression.demand().decode_sites >= 1,
@@ -1301,8 +1301,7 @@ fn permit_quota_beyond_buffer_capacity_is_rejected() {
     let mut body = publish_body(&compilation);
     let permit = body
         .barrier_permits
-        .iter_mut()
-        .next()
+        .first_mut()
         .expect("publish region 必须带 permit");
     permit.max_card_marks = CARD_MARK_BUFFER_ENTRIES + 1;
     // 必须断言具体分支：额度一致性检查也会以同一错误码拒绝，只断言错误码无法分辨。
@@ -1326,8 +1325,7 @@ fn permit_quota_at_buffer_capacity_passes_the_capacity_check() {
     let mut body = publish_body(&compilation);
     let permit = body
         .barrier_permits
-        .iter_mut()
-        .next()
+        .first_mut()
         .expect("publish region 必须带 permit");
     permit.max_card_marks = CARD_MARK_BUFFER_ENTRIES;
     super::uses::rebuild(&mut body);

@@ -1009,7 +1009,7 @@ impl CardMarkHarness {
         let expected = u64::from(self.processors) * u64::from(self.iterations);
         let invariants_hold = registered
             && card_marks == expected
-            && slot_reuses + u64::try_from(self.processors).unwrap_or(0) >= card_marks
+            && slot_reuses + u64::from(self.processors) >= card_marks
             && dirty_cards > 0
             && edge_deltas == u64::from(self.processors)
             && edge_pending_after_drain == 0;

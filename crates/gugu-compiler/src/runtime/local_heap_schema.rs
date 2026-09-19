@@ -595,10 +595,12 @@ impl LocalHeapRuntimeContract {
                 "TLAB span 必须是 arena block 数的整除因子",
             ));
         }
-        if self.object_start_bits % 8 != 0 || self.bitmap_bytes * 8 != self.object_start_bits {
+        if !self.object_start_bits.is_multiple_of(8)
+            || self.bitmap_bytes * 8 != self.object_start_bits
+        {
             return Err(RawModelError::new("bitmap 位数必须是整字节"));
         }
-        if self.card_bytes % self.blocks_per_arena != 0 {
+        if !self.card_bytes.is_multiple_of(self.blocks_per_arena) {
             return Err(RawModelError::new(
                 "arena card 表必须能按 block 均分给全部 Immix block",
             ));

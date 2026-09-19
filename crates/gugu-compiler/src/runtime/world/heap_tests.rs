@@ -121,7 +121,8 @@ pub(super) fn gc_contract_with(
         max_object_bytes,
         ..LocalHeapDemand::default()
     };
-    let contract = RuntimeRawContractV1::build(
+
+    RuntimeRawContractV1::build(
         TargetName::X86_64Linux,
         policy,
         RawPlaneDemand::default(),
@@ -141,8 +142,7 @@ pub(super) fn gc_contract_with(
     )
     .expect("契约可构建")
     .with_gc_sections(type_section, metadata_section)
-    .expect("section 可挂载");
-    contract
+    .expect("section 可挂载")
 }
 
 /// 配置一个已接入 LocalHeap 与 mark 平面的 world。
@@ -236,7 +236,7 @@ fn nursery_allocation_records_header_and_lives_in_nursery() {
     assert_eq!(object.generation, 0);
     assert_eq!(object.age, 0);
     assert!(!object.pinned);
-    assert!(world.managed_object(address).expect("可解码").large == false);
+    assert!(!world.managed_object(address).expect("可解码").large);
     let counters = world.managed_counters(0).expect("计数可读");
     assert_eq!(counters.objects, 1);
     // nursery 分配一次就提交整个 TLAB span（8 个 block）。
@@ -436,8 +436,8 @@ fn managed_addresses_are_owner_local() {
         .allocate_managed(1, 1, 8, ManagedPlacement::Nursery, false)
         .expect("owner 1 可分配");
     assert_ne!(
-        first / GC_ARENA_BYTES as u64,
-        second / GC_ARENA_BYTES as u64,
+        first / GC_ARENA_BYTES,
+        second / GC_ARENA_BYTES,
         "每个 owner 拥有独立 arena"
     );
     assert!(world.managed_object(first).is_ok());
@@ -816,7 +816,7 @@ fn real_compile_sections_drive_local_heap_allocation_and_collection() {
     assert_eq!(roots.len(), types.types().len());
     world.set_managed_root(slot, roots[0]).expect("根可写");
     let report = world.collect_minor(0).expect("真实 world 可执行 minor");
-    assert!(report.scanned_words > 0 || types.types().len() > 0);
+    assert!(report.scanned_words > 0 || !types.types().is_empty());
     let moved = world.managed_root(slot).expect("根可读");
     assert!(
         world.managed_object(moved).is_ok(),

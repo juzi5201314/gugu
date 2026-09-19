@@ -30,6 +30,21 @@ use super::RawWorld;
 use super::heap_impl::shared_heap_error;
 use super::shared_heap_impl::{SharedPayloadBlock, SharedPendingForward};
 
+/// 一次 forward 通知所需的全部 payload 身份字段；用于把 publish_handle_forward 的
+/// 多参数调用收紧到单个值，避免 clippy::too_many_arguments。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ForwardPayloadInfo {
+    /// 被搬迁的稳定 handle。
+    pub(crate) handle: SharedHandle,
+    /// 目标 slot 进入 forwarding 后对应的 forward generation。
+    pub(crate) forward_generation: u32,
+    /// 旧 payload identity（source 侧登记项里记录的 current）。
+    pub(crate) old_payload: SharedPayloadId,
+    /// 新 payload identity（刚刚在目标位置分配、并设为 current）。
+    pub(crate) new_payload: SharedPayloadId,
+    /// payload 的逻辑字节数；供目标 owner 校验与账本使用。
+    pub(crate) bytes: u32,
+}
 /// 一次 shared payload 搬迁的结果。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum SharedForwardOutcome {
@@ -206,15 +221,14 @@ impl RawWorld {
             },
         )?;
         // 6. 通知目标 owner：它才是结清 lease 与 grace 的唯一权威。
-        self.publish_handle_forward(
-            worker,
-            owner,
+        let info = ForwardPayloadInfo {
             handle,
-            expected,
-            record.payload,
-            payload.id,
+            forward_generation: expected,
+            old_payload: record.payload,
+            new_payload: payload.id,
             bytes,
-        )?;
+        };
+        self.publish_handle_forward(worker, owner, &info)?;
         self.shared_totals.forwards = self
             .shared_totals
             .forwards
@@ -236,11 +250,7 @@ impl RawWorld {
         &mut self,
         worker: u32,
         target_index: u32,
-        handle: SharedHandle,
-        forward_generation: u32,
-        old_payload: SharedPayloadId,
-        new_payload: SharedPayloadId,
-        bytes: u32,
+        info: &ForwardPayloadInfo,
     ) -> Result<(), RawInvariant> {
         let target_token = self.token(target_index);
         let plane = self.mark_plane()?;
@@ -248,15 +258,15 @@ impl RawWorld {
         let mut message = HandleForward {
             next: None,
             target: target_token,
-            handle_table: handle.table(),
-            handle_slot: handle.slot(),
-            handle_generation: handle.generation(),
-            forward_generation,
-            old_payload,
-            new_payload,
+            handle_table: info.handle.table(),
+            handle_slot: info.handle.slot(),
+            handle_generation: info.handle.generation(),
+            forward_generation: info.forward_generation,
+            old_payload: info.old_payload,
+            new_payload: info.new_payload,
             cycle_epoch,
             topology_epoch,
-            bytes,
+            bytes: info.bytes,
             state: MessageState::Staged,
             integrity: IntegrityTag {
                 generation: SlabGeneration::from_raw(target_token.generation.raw()),
@@ -335,11 +345,13 @@ impl RawWorld {
                 return self.publish_handle_forward(
                     owner,
                     target_index,
-                    handle,
-                    message.forward_generation,
-                    message.old_payload,
-                    message.new_payload,
-                    message.bytes,
+                    &ForwardPayloadInfo {
+                        handle,
+                        forward_generation: message.forward_generation,
+                        old_payload: message.old_payload,
+                        new_payload: message.new_payload,
+                        bytes: message.bytes,
+                    },
                 );
             }
             Resolution::Retired | Resolution::Unknown => {

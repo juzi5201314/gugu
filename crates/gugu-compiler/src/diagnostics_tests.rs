@@ -1172,8 +1172,7 @@ impl Runner {
                     .len()
                     + 1;
                 crate::frontend::source_map_span(&source_map, file, 0, end)
-                    .err()
-                    .expect("越界 span 必须被拒绝")
+                    .expect_err("越界 span 必须被拒绝")
             }
         }
     }

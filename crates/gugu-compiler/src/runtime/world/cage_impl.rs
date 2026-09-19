@@ -47,12 +47,12 @@ impl RawWorld {
     /// `RuntimeInvariant`，绝不把编码字当作地址使用。
     pub(super) fn decode_root_slots(&mut self) -> Result<Vec<u64>, RawInvariant> {
         let mut decoded = self.managed_roots.clone();
-        for slot in 0..decoded.len() {
+        for (slot, word) in decoded.iter_mut().enumerate() {
             if self.managed_root_kinds[slot].0 != COMPRESSED_ROOT_TAG {
                 continue;
             }
-            if let Some(address) = self.compression_mut()?.decode(decoded[slot])? {
-                decoded[slot] = address;
+            if let Some(address) = self.compression_mut()?.decode(*word)? {
+                *word = address;
             }
         }
         Ok(decoded)
@@ -66,8 +66,7 @@ impl RawWorld {
         if decoded.len() != self.managed_roots.len() {
             return Err(RawInvariant::new("根槽数量在解码与回写之间变化"));
         }
-        for slot in 0..decoded.len() {
-            let value = decoded[slot];
+        for (slot, &value) in decoded.iter().enumerate() {
             if self.managed_root_kinds[slot].0 != COMPRESSED_ROOT_TAG {
                 self.managed_roots[slot] = value;
                 continue;

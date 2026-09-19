@@ -137,6 +137,25 @@ enum RootKind {
     Bitmap,
     Program,
 }
+/// Bitmap 扫描的上下文快照；由 `step_bitmap` 消费以解构 `step_once` 的参数。
+#[derive(Clone, Copy)]
+struct BitmapContext<'a> {
+    descriptor: &'a [u8],
+    byte_index: usize,
+    bits: u32,
+    bitmap_bytes: usize,
+}
+
+/// SWITCH case 扫描的上下文快照；由 `step_switch` 消费以解构 `step_once` 的参数。
+#[derive(Clone, Copy)]
+struct SwitchContext<'a> {
+    program: &'a [u8],
+    case_pc: usize,
+    case_index: u64,
+    case_count: u64,
+    tag: u64,
+    chosen: Option<(usize, usize)>,
+}
 
 /// 可暂停的 trace 解释游标。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -285,15 +304,15 @@ impl TraceCursor {
                 byte_index,
                 bits,
                 bitmap_bytes,
-            } => self.step_bitmap(
-                descriptor,
-                byte_index,
-                bits,
-                bitmap_bytes,
-                payload,
-                payload_base,
-                visit,
-            ),
+            } => {
+                let ctx = BitmapContext {
+                    descriptor,
+                    byte_index,
+                    bits,
+                    bitmap_bytes,
+                };
+                self.step_bitmap(&ctx, payload, payload_base, visit)
+            }
             FrameState::Words {
                 next_word,
                 remaining,
@@ -369,15 +388,17 @@ impl TraceCursor {
                 tag,
                 chosen,
                 shift_words,
-            } => self.step_switch(
-                program,
-                case_pc,
-                case_index,
-                case_count,
-                tag,
-                chosen,
-                shift_words,
-            ),
+            } => {
+                let ctx = SwitchContext {
+                    program,
+                    case_pc,
+                    case_index,
+                    case_count,
+                    tag,
+                    chosen,
+                };
+                self.step_switch(&ctx, shift_words)
+            }
             FrameState::Body { pc, shift_words } => {
                 self.step_body(descriptor, program, payload, pc, shift_words)
             }
@@ -387,32 +408,30 @@ impl TraceCursor {
     /// 推进根 bitmap 的一位。
     fn step_bitmap(
         &mut self,
-        descriptor: &[u8],
-        byte_index: usize,
-        bits: u32,
-        bitmap_bytes: usize,
+        ctx: &BitmapContext<'_>,
         payload: &mut [u8],
         payload_base: u64,
         visit: &mut TraceVisitor<'_>,
     ) -> Result<StepOutcome, RawInvariant> {
-        if bits != 0 {
-            let bit = bits.trailing_zeros();
+        if ctx.bits != 0 {
+            let bit = ctx.bits.trailing_zeros();
             // 位号 0..=7 来自 direct、8..=15 来自 interior；两者都指向**同一个** payload word，
             // 因此 interior 不能额外再偏移八个 word。
-            let word =
-                u64::try_from(byte_index).expect("位图字节下标适配 u64") * 8 + u64::from(bit % 8);
+            let word = u64::try_from(ctx.byte_index).expect("位图字节下标适配 u64") * 8
+                + u64::from(bit % 8);
             visit_word(payload, payload_base, word, visit, &mut self.pointers)?;
             self.frames[0] = Some(FrameState::Bitmap {
-                byte_index,
-                bits: bits & (bits - 1),
-                bitmap_bytes,
+                byte_index: ctx.byte_index,
+                bits: ctx.bits & (ctx.bits - 1),
+                bitmap_bytes: ctx.bitmap_bytes,
             });
             return Ok(StepOutcome::Continue);
         }
-        let word_count = read_u32(descriptor, 4)?;
+        let word_count = read_u32(ctx.descriptor, 4)?;
         // 当前字节的标记位已经访问完：从**下一个**字节继续，绝不重读同一位。
-        let (next_index, next_bits) = next_bitmap_byte(descriptor, byte_index + 1, bitmap_bytes)?;
-        if next_index >= bitmap_bytes {
+        let (next_index, next_bits) =
+            next_bitmap_byte(ctx.descriptor, ctx.byte_index + 1, ctx.bitmap_bytes)?;
+        if next_index >= ctx.bitmap_bytes {
             if u64::from(self.pointers) > u64::from(word_count) {
                 return Err(RawInvariant::new("trace bitmap 扫描位数超过 word 数"));
             }
@@ -422,7 +441,7 @@ impl TraceCursor {
         self.frames[0] = Some(FrameState::Bitmap {
             byte_index: next_index,
             bits: next_bits,
-            bitmap_bytes,
+            bitmap_bytes: ctx.bitmap_bytes,
         });
         Ok(StepOutcome::Continue)
     }
@@ -430,46 +449,41 @@ impl TraceCursor {
     /// 扫描 SWITCH 的一个 case，或在其后压入所选分支。
     fn step_switch(
         &mut self,
-        program: &[u8],
-        case_pc: usize,
-        case_index: u64,
-        case_count: u64,
-        tag: u64,
-        chosen: Option<(usize, usize)>,
+        ctx: &SwitchContext<'_>,
         shift_words: u64,
     ) -> Result<StepOutcome, RawInvariant> {
-        let mut pc = case_pc;
-        if case_index < case_count {
-            let case_tag = read_u64(program, pc)?;
+        let mut pc = ctx.case_pc;
+        if ctx.case_index < ctx.case_count {
+            let case_tag = read_u64(ctx.program, pc)?;
             pc += 8;
-            let body_len = read_u32(program, pc)?;
+            let body_len = read_u32(ctx.program, pc)?;
             pc += 4;
             let body_end = pc + body_len as usize;
-            if body_end > program.len() {
+            if body_end > ctx.program.len() {
                 return Err(RawInvariant::new("trace switch case body 越界"));
             }
-            let chosen = if case_tag == tag && chosen.is_none() {
+            let chosen = if case_tag == ctx.tag && ctx.chosen.is_none() {
                 Some((pc, body_end))
             } else {
-                chosen
+                ctx.chosen
             };
             self.frames[self.depth] = Some(FrameState::Switch {
                 case_pc: body_end,
-                case_index: case_index + 1,
-                case_count,
-                tag,
+                case_index: ctx.case_index + 1,
+                case_count: ctx.case_count,
+                tag: ctx.tag,
                 chosen,
                 shift_words,
             });
             return Ok(StepOutcome::Continue);
         }
-        let default_len = read_u32(program, pc)?;
+        let default_len = read_u32(ctx.program, pc)?;
         pc += 4;
         let default_end = pc + default_len as usize;
-        if default_end > program.len() {
+        if default_end > ctx.program.len() {
             return Err(RawInvariant::new("trace switch default body 越界"));
         }
-        let (body_start, _) = chosen.unwrap_or((pc, default_end));
+        let (body_start, _) = ctx.chosen.unwrap_or((pc, default_end));
         // 选择分支后必须回到整个 SWITCH（含 default 编码）之后，否则 default body 会被当作
         // opcode 再解释一遍。
         self.frames[self.depth] = Some(FrameState::Body {
@@ -785,7 +799,7 @@ impl ArenaSlotCursor {
         if value_offset >= self.capacity {
             return Err(RawInvariant::new("arena slot 的值偏移越过 backing 容量"));
         }
-        if entry.align != 0 && value_offset % entry.align != 0 {
+        if entry.align != 0 && !value_offset.is_multiple_of(entry.align) {
             return Err(RawInvariant::new("arena slot 的值没有满足类型对齐"));
         }
         if entry.size > self.capacity - value_offset {

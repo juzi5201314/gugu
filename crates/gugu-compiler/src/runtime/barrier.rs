@@ -296,7 +296,7 @@ impl EdgeSummary {
                 .checked_add(delta)
                 .ok_or_else(|| RawInvariant::new("edge 活跃计数溢出"))?
         } else {
-            let delta = u64::try_from(change.delta.unsigned_abs()).expect("delta 绝对值适配 u64");
+            let delta = change.delta.unsigned_abs();
             state
                 .active
                 .checked_sub(delta)

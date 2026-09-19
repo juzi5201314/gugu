@@ -1654,8 +1654,7 @@ impl LocalHeap {
             let target = self.resolve(*value)?;
             let object = self.object_at(target)?;
             let new_value = if object.forwarded || (evacuate_nursery && self.in_nursery(target)) {
-                let moved = self.evacuate(*value, report)?;
-                moved
+                self.evacuate(*value, report)?
             } else {
                 *value
             };

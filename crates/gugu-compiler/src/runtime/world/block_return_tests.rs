@@ -283,7 +283,7 @@ fn checksum_and_repeat_consume_are_rejected() {
     let (_address, block) = old_leaf(&mut world);
     drive_until_pending(&mut world, block);
     drain(&mut world, 0);
-    let snapshot = world.managed_accounting(0).clone();
+    let snapshot = *world.managed_accounting(0);
     let err: Result<(), RawInvariant> = world.queue_heap_block_return(block);
     assert!(err.is_err(), "重复发布必须拒绝");
     assert_eq!(world.managed_accounting(0), &snapshot);

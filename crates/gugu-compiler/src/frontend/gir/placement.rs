@@ -269,16 +269,6 @@ fn compute(
             &flags,
             &edges,
             body_unknown,
-        );
-        collect_allocs(
-            module,
-            body_index as u32,
-            body,
-            &table,
-            &flags,
-            body_unknown,
-            &decisions.site_region,
-            &decisions.plans,
             &mut allocs,
         );
         regions.extend(decisions.plans);
@@ -341,67 +331,6 @@ fn escaping_slot(published: bool, foreign: bool, unknown: bool) -> (PlacementKin
         (PlacementKind::Pinned, proof)
     } else {
         (PlacementKind::LocalHeap, proof)
-    }
-}
-
-fn collect_allocs(
-    module: &hir::Module,
-    body: u32,
-    gir: &GirBody,
-    table: &PassingTable,
-    flags: &[u8],
-    body_unknown: bool,
-    site_region: &[Option<u32>],
-    regions: &[RegionPlan],
-    allocs: &mut Vec<AllocPlacement>,
-) {
-    for (index, statement) in gir.statements.iter().enumerate() {
-        let StatementKind::Assign(place, rvalue) = &statement.kind else {
-            continue;
-        };
-        if !is_alloc(module, rvalue) {
-            continue;
-        }
-        let class = table.class(place_ty(gir, *place));
-        let export = flags.get(place.local.index()).copied().unwrap_or(0) | class_export(class);
-        let (kind, proof) = place_alloc(class, export, body_unknown);
-        let region = site_region.get(index).copied().flatten();
-        // 出口整体移交所有权时，分配点带上 TRANSFER：dump 与契约需求据此区分「turn 结束时
-        // 整区 reset」与「移交下一个 owner」两种生命周期。
-        let export = match region {
-            Some(region) => {
-                let transfer = regions
-                    .iter()
-                    .find(|plan| plan.body == body && plan.region == region)
-                    .is_some_and(|plan| plan.exits.iter().any(|exit| exit.transfer));
-                if transfer {
-                    export | ExportFlags::TRANSFER
-                } else {
-                    export
-                }
-            }
-            None => export,
-        };
-        // 没有 region 计划时不得留下 TurnRegion：私有性成立但无法证明 turn 边界安全。
-        // channel send 读取过的值跨 owner 且保留身份，退回 SharedHeap；其余退回 LocalHeap。
-        let (kind, proof) = if kind == PlacementKind::TurnRegion && region.is_none() {
-            let kind = if export & ExportFlags::CHANNEL_SEND != 0 {
-                PlacementKind::SharedHeap
-            } else {
-                PlacementKind::LocalHeap
-            };
-            (kind, ProofStatus::Proved)
-        } else {
-            (kind, proof)
-        };
-        allocs.push(AllocPlacement {
-            body,
-            statement: index as u32,
-            kind,
-            proof,
-            export,
-            region: region.filter(|_| kind == PlacementKind::TurnRegion),
-        });
     }
 }
 
@@ -860,8 +789,6 @@ pub(crate) fn record_of(
 
 /// 一个 body 的 region 决策结果。
 struct RegionDecisions {
-    /// 语句下标 → 该站点的 region 编号；长度等于 `body.statements`。
-    site_region: Vec<Option<u32>>,
     plans: Vec<RegionPlan>,
 }
 
@@ -1051,8 +978,6 @@ fn reachable_blocks(body: &GirBody) -> Vec<bool> {
 
 /// 计算一个 body 的 region 计划与站点归属。
 ///
-/// 边界只来自直接挂起点与 body 出口：可能挂起的调用不在这里结束 region（region 对象在调用期间
-/// 仍然存活是安全的），它们改由 LIR 在“可能挂起的调用收到 region 派生实参”时发 `PromoteManaged`。
 #[expect(
     clippy::too_many_arguments,
     reason = "region 判定需要 body、分类表、导出位与传播图共同参与"
@@ -1065,12 +990,43 @@ fn region_decisions(
     flags: &[u8],
     edges: &[(u32, u32, bool)],
     body_unknown: bool,
+    allocs: &mut Vec<AllocPlacement>,
 ) -> RegionDecisions {
     let mut site_region = vec![None; body.statements.len()];
     let mut plans = Vec::new();
     let facts = RegionFacts::analyze(body);
     if facts.exits.is_empty() {
-        return RegionDecisions { site_region, plans };
+        // 无 region 出口：仍为分配点建立记录，但全部回退到 LocalHeap/SharedHeap。
+        for (index, statement) in body.statements.iter().enumerate() {
+            let StatementKind::Assign(place, rvalue) = &statement.kind else {
+                continue;
+            };
+            if !is_alloc(module, rvalue) {
+                continue;
+            }
+            let class = table.class(place_ty(body, *place));
+            let export = flags.get(place.local.index()).copied().unwrap_or(0) | class_export(class);
+            let (kind, proof) = place_alloc(class, export, body_unknown);
+            let (kind, proof) = if kind == PlacementKind::TurnRegion {
+                let kind = if export & ExportFlags::CHANNEL_SEND != 0 {
+                    PlacementKind::SharedHeap
+                } else {
+                    PlacementKind::LocalHeap
+                };
+                (kind, ProofStatus::Proved)
+            } else {
+                (kind, proof)
+            };
+            allocs.push(AllocPlacement {
+                body: body_index,
+                statement: index as u32,
+                kind,
+                proof,
+                export,
+                region: None,
+            });
+        }
+        return RegionDecisions { plans };
     }
     let liveness = Liveness::analyze(body);
     let adjacency = adjacency(body.locals.len(), edges);
@@ -1168,7 +1124,56 @@ fn region_decisions(
             exits: plan_exits,
         });
     }
-    RegionDecisions { site_region, plans }
+    // 收集所有分配点记录（TurnRegion 以外的分配在此处写入，TurnRegion 站点已写入 site_region）。
+    for (index, statement) in body.statements.iter().enumerate() {
+        let StatementKind::Assign(place, rvalue) = &statement.kind else {
+            continue;
+        };
+        if !is_alloc(module, rvalue) {
+            continue;
+        }
+        let class = table.class(place_ty(body, *place));
+        let export = flags.get(place.local.index()).copied().unwrap_or(0) | class_export(class);
+        let (kind, proof) = place_alloc(class, export, body_unknown);
+        let region = site_region[index];
+        // 出口整体移交所有权时，分配点带上 TRANSFER：dump 与契约需求据此区分「turn 结束时
+        // 整区 reset」与「移交下一个 owner」两种生命周期。
+        let export = match region {
+            Some(region) => {
+                let transfer = plans
+                    .iter()
+                    .find(|plan| plan.body == body_index && plan.region == region)
+                    .is_some_and(|plan| plan.exits.iter().any(|exit| exit.transfer));
+                if transfer {
+                    export | ExportFlags::TRANSFER
+                } else {
+                    export
+                }
+            }
+            None => export,
+        };
+        // 没有 region 计划时不得留下 TurnRegion：私有性成立但无法证明 turn 边界安全。
+        // channel send 读取过的值跨 owner 且保留身份，退回 SharedHeap；其余退回 LocalHeap。
+        let (kind, proof) = if kind == PlacementKind::TurnRegion && region.is_none() {
+            let kind = if export & ExportFlags::CHANNEL_SEND != 0 {
+                PlacementKind::SharedHeap
+            } else {
+                PlacementKind::LocalHeap
+            };
+            (kind, ProofStatus::Proved)
+        } else {
+            (kind, proof)
+        };
+        allocs.push(AllocPlacement {
+            body: body_index,
+            statement: index as u32,
+            kind,
+            proof,
+            export,
+            region: region.filter(|_| kind == PlacementKind::TurnRegion),
+        });
+    }
+    RegionDecisions { plans }
 }
 
 /// region 派生指针在 local 之间的正向传播图；by-ref 与 by-value 边都跟随。
