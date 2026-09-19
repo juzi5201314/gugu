@@ -46,7 +46,7 @@ fn managed_arena_bases_are_cage_islands() {
     assert_eq!(cage.bytes, cage_bytes);
     assert!(cage.base.is_multiple_of(GC_ARENA_BYTES));
     let address = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("nursery 对象可分配");
     let plane = world.compression().expect("压缩平面已配置");
     let (cage_id, _) = plane.cage_of(address).expect("nursery 地址落在 cage 内");
@@ -80,7 +80,7 @@ fn closed_profile_keeps_full_pointer_semantics() {
     assert!(!plane.enabled());
     assert!(plane.descriptor(0).is_err(), "关闭态不得登记 cage");
     let address = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("nursery 对象可分配");
     assert!(
         world
@@ -119,7 +119,7 @@ fn closed_profile_keeps_full_pointer_semantics() {
 fn compressed_root_participates_in_snapshot_and_seeding() {
     let mut world = cage_world(4 * GC_ARENA_BYTES);
     let object = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("nursery 对象可分配");
     let slot = world
         .register_compressed_root(1, object)
@@ -148,7 +148,7 @@ fn compressed_root_participates_in_snapshot_and_seeding() {
 fn minor_relocation_reencodes_compressed_root() {
     let mut world = cage_world(4 * GC_ARENA_BYTES);
     let object = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("nursery 对象可分配");
     let slot = world
         .register_compressed_root(1, object)
@@ -200,7 +200,7 @@ fn shared_payload_addresses_are_not_encodable() {
 fn foreign_handoff_requires_active_pin_lease() {
     let mut world = cage_world(4 * GC_ARENA_BYTES);
     let object = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
         .expect("old 对象可分配");
     let forged = ForeignPin {
         cage: 0,
@@ -273,7 +273,7 @@ fn island_count_matches_managed_arenas() {
     let mut world = configured_world(&contract, 17, 2, 64);
     for owner in 0..2 {
         world
-            .allocate_managed(owner, 1, 8, ManagedPlacement::Nursery)
+            .allocate_managed(owner, 1, 8, ManagedPlacement::Nursery, false)
             .expect("nursery 对象可分配");
     }
     let plane = world.compression().expect("平面");
@@ -294,4 +294,70 @@ fn island_count_matches_managed_arenas() {
     let stats = world.compression_stats().expect("统计存在");
     assert_eq!(stats.decodes, 0);
     assert_eq!(stats.foreign_pins, 0);
+}
+
+/// 对象头 bits 43..44 与分配参数同源：只有 cage 开启、非 large/pinned 的压缩分配写
+/// `COMPRESSED_REF`（3），其余一律 `LOCAL_DIRECT`（0）。
+///
+/// representation 编码按 `gc-metadata` 冻结：0 local-direct、1 turn-region、2 shared-handle、
+/// 3 compressed-ref；header 声明压缩的对象，GC 才会把字段当压缩字扫描。
+#[test]
+fn compressed_allocation_header_follows_request() {
+    let mut world = cage_world(4 * GC_ARENA_BYTES);
+    let compressed = world
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, true)
+        .expect("压缩分配可执行");
+    assert_eq!(
+        world
+            .managed_object(compressed)
+            .expect("对象可读")
+            .representation,
+        3,
+        "cage 开启的压缩分配必须写 COMPRESSED_REF 表示"
+    );
+    let plain = world
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
+        .expect("普通分配可执行");
+    assert_eq!(
+        world
+            .managed_object(plain)
+            .expect("对象可读")
+            .representation,
+        0,
+        "同参数不带压缩标志必须保持 LOCAL_DIRECT"
+    );
+
+    // pinned 车道与 large slow path 都在 cage 外：请求压缩也不得写压缩表示。
+    // （PINNED 头位由显式 pin 操作设置，分配时只核对 representation。）
+    let pinned = world
+        .allocate_managed(0, 1, 8, ManagedPlacement::Pinned, true)
+        .expect("pinned 分配可执行");
+    let pinned_object = world.managed_object(pinned).expect("对象可读");
+    assert_eq!(pinned_object.representation, 0, "pinned 对象使用完整地址");
+    let large = world
+        .allocate_managed(
+            0,
+            1,
+            u64::from(crate::runtime::gc_metadata_contract::GC_BLOCK_BYTES) + 64,
+            ManagedPlacement::Old,
+            true,
+        )
+        .expect("large 分配可执行");
+    let large_object = world.managed_object(large).expect("对象可读");
+    assert_eq!(large_object.representation, 0, "large 对象使用完整地址");
+    assert!(large_object.large);
+
+    // 关闭态世界即使请求压缩也保持 LOCAL_DIRECT。
+    let mut disabled = configured_world(&gc_contract(), 13, 1, 64);
+    let address = disabled
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, true)
+        .expect("关闭态分配可执行");
+    assert_eq!(
+        disabled
+            .managed_object(address)
+            .expect("对象可读")
+            .representation,
+        0,
+        "未启用 cage profile 时不得写压缩表示"
+    );
 }

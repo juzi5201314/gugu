@@ -120,8 +120,17 @@ const CONTROL_PINNED: u64 = 1 << 39;
 const CONTROL_LARGE_OBJECT: u64 = 1 << 41;
 const CONTROL_HAS_RESOURCE_INSTANCE: u64 = 1 << 42;
 const CONTROL_REPRESENTATION_SHIFT: u32 = 43;
-/// `LOCAL_DIRECT` 表示；本阶段唯一实现的 managed representation。
+/// `LOCAL_DIRECT` 表示：字段是完整地址，关闭态与 large/pinned 分配的默认值。
 const REPRESENTATION_LOCAL_DIRECT: u64 = 0;
+/// `TURN_REGION` 表示：region 对象的字段表示由 region descriptor 解释，本阶段不压缩。
+const REPRESENTATION_TURN_REGION: u64 = 1;
+/// `SHARED_HANDLE` 表示；SharedHeap 参照模型只有 `SharedPayloadRecord`，没有 control header，
+/// 因此本常量暂无落地点。
+const REPRESENTATION_SHARED_HANDLE: u64 = 2;
+/// `COMPRESSED_REF` 表示：字段按 `cage id | generation | offset` 压缩字解释。
+///
+/// 只写给 capture 槽确为压缩字的对象（压缩闭包环境）；header 与字段表示必须同源。
+const REPRESENTATION_COMPRESSED_REF: u64 = 3;
 
 const HEADER_CONTROL: u64 = 0;
 const HEADER_SIZE_WORD: u64 = 8;
@@ -178,6 +187,8 @@ pub(crate) struct HeapObject {
     pub large: bool,
     /// 是否已转发。
     pub forwarded: bool,
+    /// control bits 43..44 的 managed representation（0..3）。
+    pub representation: u8,
 }
 
 /// 一个 Immix block；payload 只为已提交的 block 分配。
@@ -776,12 +787,16 @@ impl LocalHeap {
     }
 
     /// 分配一个 managed 对象；返回 payload 地址。
+    ///
+    /// `compressed` 只在 cage 开启、placement 允许且非 large 分配时由调用方置真，此时
+    /// control 的 representation 写 `COMPRESSED_REF`，其余一律 `LOCAL_DIRECT`。
     pub(crate) fn allocate(
         &mut self,
         arena_index: usize,
         type_index: u32,
         payload_bytes: u64,
         align: u64,
+        compressed: bool,
     ) -> Result<u64, HeapError> {
         let kind = self
             .arenas
@@ -805,7 +820,11 @@ impl LocalHeap {
         };
         let control = u64::from(type_index)
             | (u64::from(generation) << CONTROL_GENERATION_SHIFT)
-            | (REPRESENTATION_LOCAL_DIRECT << CONTROL_REPRESENTATION_SHIFT)
+            | (if compressed {
+                REPRESENTATION_COMPRESSED_REF
+            } else {
+                REPRESENTATION_LOCAL_DIRECT
+            } << CONTROL_REPRESENTATION_SHIFT)
             | if kind == HeapArenaKind::Large {
                 CONTROL_LARGE_OBJECT
             } else {
@@ -1058,6 +1077,7 @@ impl LocalHeap {
             pinned: control & CONTROL_PINNED != 0,
             large: control & CONTROL_LARGE_OBJECT != 0,
             forwarded: control & CONTROL_FORWARDED != 0,
+            representation: ((control >> CONTROL_REPRESENTATION_SHIFT) & 0x3) as u8,
         })
     }
 
@@ -1713,7 +1733,16 @@ impl LocalHeap {
         let arena = self
             .allocatable_arena(kind, span)
             .ok_or(HeapError::NoCapacity)?;
-        let moved = self.allocate(arena, object.type_index, object.payload_bytes, 8)?;
+        // 搬迁后的副本必须保留源对象的字段表示：压缩环境的 capture 槽仍是压缩字，
+        // header representation 不能在搬迁中丢失。
+        let compressed = object.representation == REPRESENTATION_COMPRESSED_REF as u8;
+        let moved = self.allocate(
+            arena,
+            object.type_index,
+            object.payload_bytes,
+            8,
+            compressed,
+        )?;
         self.with_payload(moved, |target, _| {
             let source = payload
                 .get(..target.len().min(payload.len()))

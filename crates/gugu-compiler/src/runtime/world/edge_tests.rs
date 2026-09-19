@@ -21,7 +21,7 @@ fn two_owner_world() -> RawWorld {
 /// 在 `owner` 上分配一个 old generation 的双指针对象。
 fn node(world: &mut RawWorld, owner: u32) -> u64 {
     world
-        .allocate_managed(owner, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(owner, 0, 16, ManagedPlacement::Old, false)
         .expect("object 可分配")
 }
 
@@ -530,10 +530,10 @@ fn source_edge_node_fixture_drives_old_placement_edge_deltas() {
         .expect("world 可创建");
     world.configure_gc(contract).expect("真实契约可配置");
     let source_address = world
-        .allocate_managed(0, node_type, node_size, ManagedPlacement::Old)
+        .allocate_managed(0, node_type, node_size, ManagedPlacement::Old, false)
         .expect("EdgeNode 可在 old 分配");
     let target_address = world
-        .allocate_managed(1, tail_type, tail_size, ManagedPlacement::Old)
+        .allocate_managed(1, tail_type, tail_size, ManagedPlacement::Old, false)
         .expect("EdgeNodeTail 可在 old 分配");
     let _ = world.publish_edge_deltas().expect("基线可排空");
     // 跨 owner 的引用字段写入：必须经过 hybrid barrier 并产生边增量。

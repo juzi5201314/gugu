@@ -60,6 +60,8 @@ struct Builder<'a> {
     mono: &'a mono::MonoWorldV1,
     instance: &'a InstanceSummaryV1,
     owner: &'a hir::Owner,
+    /// cage profile 开关；关闭态所有 lowering 路径与历史行为逐指令一致。
+    compression: crate::runtime::CompressionPolicyV1,
     body: Body,
     blocks: Vec<PendingBlock>,
     block_map: Vec<Option<BlockId>>,
@@ -110,6 +112,7 @@ pub(crate) fn lower(
     mono: &mono::MonoWorldV1,
     target: &str,
     input_fingerprint: [u8; 32],
+    compression: crate::runtime::CompressionPolicyV1,
 ) -> Result<Body, Diagnostic> {
     concrete.verify()?;
     let instance = mono
@@ -133,6 +136,7 @@ pub(crate) fn lower(
         mono,
         instance,
         owner,
+        compression,
         body: Body {
             revision: body::REVISION,
             instance: concrete.instance,
@@ -326,15 +330,36 @@ impl Builder<'_> {
         self.shared_guards.last().copied()
     }
 
-    /// 闭包环境的表示：由 placement 的分配点表决定，`SharedHeap` 环境以 stable handle 传递。
+    /// 世界扫描：按闭包定义逐实例点查环境分配点，观察环境车道与压缩可行性。
     ///
-    /// 环境分配点就是闭包字面量所在的语句，因此按「闭包定义 → (body, statement) → 分配记录」
-    /// 唯一点查。同一闭包本体出现互相冲突的表示时必须拒绝：一个 LIR body 只有一条环境车道，
-    /// 不允许在同一个 body 里混用 handle 与 direct pointer。
-    pub(super) fn shared_environment(&self, definition: hir::DefId) -> Result<bool, Diagnostic> {
+    /// 环境分配点就是闭包字面量所在的语句，因此按「闭包定义 → (body, statement) → 分配
+    /// 记录」唯一点查。同一闭包本体出现互相冲突的表示时必须拒绝：一个闭包定义只有一条
+    /// 环境车道，不允许在同一个定义里混用 handle 与 direct pointer。
+    ///
+    /// 压缩可行性与车道观察同源：cage 开启、所有创建点都落在 LocalHeap、每个捕获源
+    /// cell 都能驻留 cage（非 pinned/shared 车道、footprint 不超过单个 block），且环境
+    /// 对象自身不超过单个 block。
+    fn environment_observation(
+        &self,
+        definition: hir::DefId,
+    ) -> Result<(Option<gir::placement::PlacementKind>, bool), Diagnostic> {
+        let Some(owner) = self
+            .module
+            .owners
+            .iter()
+            .find(|owner| owner.definition == definition)
+        else {
+            return Ok((None, false));
+        };
         let mut observed: Option<gir::placement::PlacementKind> = None;
-        for (body, gir_body) in self.world.bodies.iter().enumerate() {
-            for (statement, value) in gir_body.statements.iter().enumerate() {
+        let mut compressible = self.cage_enabled() && !owner.captures.is_empty();
+        // 环境对象自身 footprint 超过 block 时 runtime 写 LOCAL_DIRECT | LARGE_OBJECT；
+        // header 与字段表示必须同源，因此这样的环境整个定义退回 full-pointer 槽。
+        let environment_bytes = u64::try_from(owner.captures.len()).expect("捕获数量适配 u64") * 8;
+        compressible &= crate::runtime::local_heap::OBJECT_HEADER_BYTES + environment_bytes
+            <= u64::from(crate::runtime::gc_metadata_contract::GC_BLOCK_BYTES);
+        for concrete in &self.world.concrete {
+            for (statement, value) in concrete.body.statements.iter().enumerate() {
                 let gir::body::StatementKind::Assign(
                     _,
                     gir::body::Rvalue::Aggregate {
@@ -348,14 +373,15 @@ impl Builder<'_> {
                 if *closure != definition {
                     continue;
                 }
-                let body = u32::try_from(body).expect("body 下标适配 u32");
                 let statement = u32::try_from(statement).expect("语句下标适配 u32");
                 let kind = self
                     .world
                     .placement
                     .allocs
                     .iter()
-                    .find(|alloc| alloc.body == body && alloc.statement == statement)
+                    .find(|alloc| {
+                        alloc.body == concrete.generic_body && alloc.statement == statement
+                    })
                     .map_or(gir::placement::PlacementKind::LocalHeap, |alloc| alloc.kind);
                 if let Some(observed) = observed
                     && observed != kind
@@ -363,8 +389,101 @@ impl Builder<'_> {
                     return Err(invalid("同一闭包本体不能同时由 shared 与 local 环境实例化"));
                 }
                 observed = Some(kind);
+                compressible &= kind == gir::placement::PlacementKind::LocalHeap;
+                compressible &= self.capture_cells_compressible(owner);
             }
         }
+        Ok((observed, compressible))
+    }
+
+    /// 检查闭包定义的全部捕获源 cell 是否能驻留 cage。
+    ///
+    /// capture 槽保存被捕获变量的 cell 地址；cell 落在 pinned、shared 车道或 footprint
+    /// 超过单个 block（large slow path）时压缩字无法表达该地址。泛型实例之间 cell 布局
+    /// 可以不同，因此每个拥有源槽的实例都要可压缩。
+    fn capture_cells_compressible(&self, owner: &hir::Owner) -> bool {
+        let block_bytes = u64::from(crate::runtime::gc_metadata_contract::GC_BLOCK_BYTES);
+        owner.captures.iter().all(|capture| {
+            // 源槽由 capture.owner 的 body 分配 cell；placement 记录按 generic body 索引。
+            let generic_index = self
+                .world
+                .bodies
+                .iter()
+                .position(|body| body.owner == capture.owner);
+            let placement_ok = generic_index.is_some_and(|index| {
+                let Some(local) = self.world.bodies[index]
+                    .locals
+                    .iter()
+                    .position(|local| local.hir_local == Some(capture.source))
+                else {
+                    return false;
+                };
+                let placement = self
+                    .world
+                    .placement
+                    .records
+                    .iter()
+                    .find(|record| {
+                        record.body == u32::try_from(index).expect("body 下标适配 u32")
+                            && record.local == u32::try_from(local).expect("local 编号")
+                    })
+                    .map_or(gir::placement::PlacementKind::LocalHeap, |record| {
+                        record.kind
+                    });
+                matches!(
+                    placement,
+                    gir::placement::PlacementKind::Stack | gir::placement::PlacementKind::LocalHeap
+                )
+            });
+            if !placement_ok {
+                return false;
+            }
+            // footprint 按 concrete 实例的布局核对：同一源槽在不同实例里可以尺寸不同。
+            self.world
+                .concrete
+                .iter()
+                .filter(|instance| instance.body.owner == capture.owner)
+                .all(|instance| {
+                    let Some(local) = instance
+                        .body
+                        .locals
+                        .iter()
+                        .position(|local| local.hir_local == Some(capture.source))
+                    else {
+                        return false;
+                    };
+                    let Some(layout) = instance.types.get(local).and_then(|ty| ty.layout) else {
+                        return false;
+                    };
+                    crate::runtime::local_heap::OBJECT_HEADER_BYTES + layout.size <= block_bytes
+                })
+        })
+    }
+
+    pub(super) fn cage_enabled(&self) -> bool {
+        self.compression.enabled
+    }
+
+    /// 闭包环境是否以压缩字保存 capture 槽。
+    ///
+    /// 判定与 [`Self::shared_environment`] 同源：环境车道必须是 LocalHeap
+    /// （Shared、TurnRegion、Pinned 车道都不压缩），且每个创建点的捕获源 cell 都能
+    /// 驻留 cage。placement 按闭包定义单态，两侧（构造与实例）使用同一答案。
+    pub(super) fn compressed_environment(
+        &self,
+        definition: hir::DefId,
+    ) -> Result<bool, Diagnostic> {
+        let (observed, compressible) = self.environment_observation(definition)?;
+        Ok(compressible && observed == Some(gir::placement::PlacementKind::LocalHeap))
+    }
+
+    /// 闭包环境的表示：由 placement 的分配点表决定，`SharedHeap` 环境以 stable handle 传递。
+    ///
+    /// 环境分配点就是闭包字面量所在的语句，因此按「闭包定义 → (body, statement) → 分配记录」
+    /// 唯一点查。同一闭包本体出现互相冲突的表示时必须拒绝：一个 LIR body 只有一条环境车道，
+    /// 不允许在同一个 body 里混用 handle 与 direct pointer。
+    pub(super) fn shared_environment(&self, definition: hir::DefId) -> Result<bool, Diagnostic> {
+        let (observed, _) = self.environment_observation(definition)?;
         Ok(observed == Some(gir::placement::PlacementKind::SharedHeap))
     }
 

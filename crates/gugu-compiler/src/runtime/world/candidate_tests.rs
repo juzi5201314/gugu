@@ -16,7 +16,7 @@ use crate::runtime::startup_schema::ReportReason;
 /// 在 owner 0 的 Old arena 分配一个 leaf，并返回 `(payload 地址, block 身份)`。
 fn old_leaf(world: &mut RawWorld) -> (u64, ManagedBlockId) {
     let address = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
         .expect("leaf 可分配");
     let block = world
         .managed_block_ref(0, address)
@@ -182,7 +182,7 @@ fn marked_candidate_is_retreated() {
 fn nursery_blocks_never_enter_candidates() {
     let mut world = heap_world();
     let address = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("nursery 对象可分配");
     let block = world
         .managed_block_ref(0, address)
@@ -218,10 +218,10 @@ fn relocation_moves_the_incoming_edge_to_the_new_block() {
     let mut world = heap_world();
     // 源对象在 Old，目标对象在 nursery：写一条跨 block 引用并发布，得到 (源块 → 目标块) 计数。
     let source = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("源对象可分配");
     let nursery = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("nursery 对象可分配");
     let source_ref = world.managed_block_ref(0, source).expect("源 block");
     let nursery_ref = world.managed_block_ref(0, nursery).expect("目标 block");
@@ -280,13 +280,13 @@ fn incremental_marking_shades_writes_and_allocations() {
     let mut world = heap_world();
     // cycle 打开前：分配与写入都不需要染色（没有灰色集合）。
     let before = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("对象可分配");
     assert_eq!(world.mark_worklist_items(), 0, "未开始 cycle 时不得染色");
 
     // 打开一个 cycle：run_mark_pass 会开始 cycle 并 seed 根，但不会收尾。
     let root = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("根对象可分配");
     let slot = world
         .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
@@ -305,7 +305,7 @@ fn incremental_marking_shades_writes_and_allocations() {
     let pass = world.run_mark_pass(&[0]).expect("第二个 mark pass 可执行");
     assert!(pass.termination.converged());
     let fresh = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("cycle 期间可分配");
     assert!(
         world.mark_worklist_items() >= 1,
@@ -313,7 +313,7 @@ fn incremental_marking_shades_writes_and_allocations() {
     );
     // 写屏障：把一个新引用写进 Old 对象，指向的对象必须进入灰色集合。
     let target = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
         .expect("目标对象可分配");
     let baseline = world.mark_worklist_items();
     world
@@ -572,16 +572,16 @@ fn two_owner_double_cycle_with_local_invalidation_converges() {
     let mut world = super::heap_tests::configured_world(&contract, 47, 2, 64);
     // 两条互相独立的跨 owner 环：a↔b 与 c↔d，全部落在 old generation。
     let a = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("a 可分配");
     let c = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("c 可分配");
     let b = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Old, false)
         .expect("b 可分配");
     let d = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Old, false)
         .expect("d 可分配");
     world.store_managed_field(0, 0, a, 0, b).expect("a→b 可写");
     world.store_managed_field(1, 0, b, 0, a).expect("b→a 可写");

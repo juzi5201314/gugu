@@ -339,7 +339,7 @@
   - 实现 compressed cage reservation、offset/generation decode、compressed root map、FFI pin/copy 交接和 target capability 检查。
   - 验收：cage 外地址、越界 offset、错误 generation、非 canonical pointer 和非法 FFI 保存全部失败；未启用 cage 时保留等价 full-pointer 语义；统计记录 decode 次数。
   - 接入证据：`RuntimeRawModel`（query 30）升到 schema 20，并入 `CompressionRuntimeContract`（`COMPRESSION_SCHEMA = 1`，profile `mosaic-compression` revision 1，raw policy revision 2）：cage 位布局 `cage id 8 / generation 24 / offset 32`（全零字为空引用、generation 从 1 起）、cage 上限 4 GiB、与 GC arena 同源的 2 MiB 粒度与 48 位 canonical 检查；`PointerCompression` 进入 `TargetDescriptor`，两个已登记目标都声明支持。默认 `CompressionPolicyV1` 关闭，世界不预留 cage；开启时 `MANAGED_LOCAL` arena 作为 island 从 cage 切出（`ExtentTable` 用 range_offset 翻译 provider 页偏移，`MANAGED_SHARED` 与 raw/resource arena 永不成岛），压缩根以 `GcRootKindV1::CompressedRef`（判别值 5）登记，root slice、mark seeding 与搬迁回写都经 `CompressionPlane` 的单一 checked 解码/编码路径，空字不解码也不计数；FFI 交接固定 `resolve-then-pin`/`no-compressed-pass-through`/`save-requires-active-lease` 三条规则，`pin_managed` 失败会撤销已取得的不移动租约。`CompressionDemand`（`decode_sites` = LIR `DecodeCompressedRef` 计数、`compressed_root_slots` = 按安全点聚合的压缩根槽）由 `stackmap_demands` 一次推导进入契约 key；CLI `image-plan` 暴露 10 个 `compression-*` 键，`-Zdump-runtime` 输出契约头、位布局、FFI 规则目录与统计名目录。
-  - 验收证据：`runtime/cage_tests.rs`（9 条）覆盖 island 粒度/容量与 bump 不推进、解码五类拒绝与空字不计数、编码域外与越界、generation 推进/耗尽、FFI 全路径与六项统计、关闭态全部拒绝；`runtime/compression_tests.rs`（5 条）覆盖位布局/开关闭合/粒度与上限/canonical 能力拒绝、指纹随 `cage_bytes` 变化、真实编译默认关闭且冷热指纹一致；`runtime/stackmap_tests.rs` 既有五类根用例改走真实 plane 并新增 5 条负例（未登记 cage、过期 generation、越界 offset、非 canonical、关闭 profile）；`runtime/world/cage_tests.rs`（7 条）覆盖 island 基址与 range_offset 一致、压缩根参与 root slice 与 mark seeding、minor 搬迁后重新编码并指向新 payload、共享地址不可编码、FFI lease 失效路径、island 计数与 LocalHeap arena 数一致；`lir/tests.rs` 2 条锁定 `stackmap_demands` 的两个口径与压缩引用不得作为非 Managed 调用的实参。`cargo nextest run --workspace` 891 项全通过；`cargo bench -p gugu-compiler --bench compression --profile dev` 报告 `decodes=4179 rejections=0 foreign-saves=1 islands=3 invariants=true` 与 `decode/us=2.622`（64 槽 × 64 轮、1562 µs）；真实 CLI 的 JSON 与 `-Zdump-runtime` 在 Linux/Windows 目标上给出相同 `enabled=false`、`capability-supported=true`、`canonical-bits=48`，冷/热两次编译的压缩字段与 dump 行逐字相同。仍未覆盖：源级 `DecodeCompressedRef` producer 与字段级 representation 切换随后续阶段接入，真实机器码解码序列由后端阶段交付。
+  - 验收证据：`runtime/cage_tests.rs`（9 条）覆盖 island 粒度/容量与 bump 不推进、解码五类拒绝与空字不计数、编码域外与越界、generation 推进/耗尽、FFI 全路径与六项统计、关闭态全部拒绝；`runtime/compression_tests.rs`（5 条）覆盖位布局/开关闭合/粒度与上限/canonical 能力拒绝、指纹随 `cage_bytes` 变化、真实编译默认关闭且冷热指纹一致；`runtime/stackmap_tests.rs` 既有五类根用例改走真实 plane 并新增 5 条负例（未登记 cage、过期 generation、越界 offset、非 canonical、关闭 profile）；`runtime/world/cage_tests.rs`（7 条）覆盖 island 基址与 range_offset 一致、压缩根参与 root slice 与 mark seeding、minor 搬迁后重新编码并指向新 payload、共享地址不可编码、FFI lease 失效路径、island 计数与 LocalHeap arena 数一致；`lir/tests.rs` 2 条锁定 `stackmap_demands` 的两个口径与压缩引用不得作为非 Managed 调用的实参。`cargo nextest run --workspace` 891 项全通过；`cargo bench -p gugu-compiler --bench compression --profile dev` 报告 `decodes=4179 rejections=0 foreign-saves=1 islands=3 invariants=true` 与 `decode/us=2.622`（64 槽 × 64 轮、1562 µs）；真实 CLI 的 JSON 与 `-Zdump-runtime` 在 Linux/Windows 目标上给出相同 `enabled=false`、`capability-supported=true`、`canonical-bits=48`，冷/热两次编译的压缩字段与 dump 行逐字相同。仍未覆盖：源级 producer（闭包环境 capture 槽）与环境对象头 representation 已随后续提交接入——`CompileRequest::with_compression_policy` 显式开启后，LIR builder 对非 shared、LocalHeap、非 large 闭包环境产出整数域 encode 序列与 `DecodeCompressedRef`（结果 `GcHeap`），`GcAlloc` 携带 `compressed` 标志并在 runtime 写 `COMPRESSED_REF` 头；通用对象字段压缩与真实机器码解码序列仍待后续/后端阶段交付。
 
 - [ ] **阶段 49：实现 radix routing profile**（复杂度：4）
   - 依赖：阶段 30、35、47。
@@ -361,12 +361,12 @@
 - [ ] **阶段 52：实现 target descriptor、数值 lowering 与 x86 encoder**（复杂度：5）
   - 依赖：阶段 28、29、32。
   - 实现 `x86_64-linux`/`x86_64-windows` target descriptor、x86-64-v1/SSE2 指令编码、整数/浮点/NaN/shift/conversion、V128、原子/fence 和指令 verifier。
-  - 验收：未登记目标或超出 baseline 的指令不能写出；机器结果与类型规范一致；编码器不调用系统 assembler；relocation、immediate、address mode 和原子约束均有 byte-level fixture。
+  - 验收：未登记目标或超出 baseline 的指令不能写出；机器结果与类型规范一致；编码器不调用系统 assembler；relocation、immediate、address mode 和原子约束均有 byte-level fixture；`DecodeCompressedRef` 的 cage id/generation/offset/bounds/拼回指针机器码序列在此阶段消费。
 
 - [ ] **阶段 53：实现 instruction selection、内部 ABI 与 block layout**（复杂度：5）
   - 依赖：阶段 52、28。
   - 实现封闭 `X64Inst`、GIR/LIR 到机器指令选择、内部保留寄存器、参数/返回约定、hot/cold block、branch relaxation 和 mangling。
-  - 验收：`r14/r15`、栈对齐、panic/slow path 冷区、runtime fast path、owner inbox atomic 序列符合 backend 契约；内部 ABI 只在同一 CompilerIdentity 镜像内使用。
+  - 验收：`r14/r15`、栈对齐、panic/slow path 冷区、runtime fast path、owner inbox atomic 序列符合 backend 契约；内部 ABI 只在同一 CompilerIdentity 镜像内使用；`GcAlloc.compressed` 与 `DecodeCompressedRef` 站点进入指令选择与调用约定验证。
 
 - [ ] **阶段 54：实现线性扫描寄存器分配与固定 frame**（复杂度：5）
   - 依赖：阶段 53、29。

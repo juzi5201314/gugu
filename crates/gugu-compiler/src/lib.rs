@@ -78,6 +78,7 @@ use runtime::{
 pub struct CompileRequest {
     target: TargetName,
     input: CompileInput,
+    compression: CompressionPolicyV1,
 }
 
 impl CompileRequest {
@@ -86,6 +87,7 @@ impl CompileRequest {
         Self {
             target,
             input: CompileInput::EmptyPackage,
+            compression: CompressionPolicyV1::disabled(),
         }
     }
 
@@ -101,6 +103,7 @@ impl CompileRequest {
                 path: path.into(),
                 source: source.into(),
             },
+            compression: CompressionPolicyV1::disabled(),
         }
     }
 
@@ -113,6 +116,7 @@ impl CompileRequest {
                 logical_path: None,
                 require_main: true,
             },
+            compression: CompressionPolicyV1::disabled(),
         }
     }
 
@@ -125,6 +129,7 @@ impl CompileRequest {
                 logical_path: None,
                 require_main: false,
             },
+            compression: CompressionPolicyV1::disabled(),
         }
     }
 
@@ -159,7 +164,16 @@ impl CompileRequest {
                 bench: package_target.kind() == TargetKind::Bench,
                 custom_cfg: BTreeMap::new(),
             },
+            compression: CompressionPolicyV1::disabled(),
         }
+    }
+
+    /// 显式设置 cage profile 开关；默认关闭，即 full-pointer 语义。
+    ///
+    /// 策略必须在 lowering 前已知：压缩需求由优化后 LIR 推导，不允许事后改契约。
+    pub fn with_compression_policy(mut self, policy: CompressionPolicyV1) -> Self {
+        self.compression = policy;
+        self
     }
 }
 
@@ -306,7 +320,11 @@ impl Compiler {
 
     /// 执行一次确定性的 bootstrap action graph。
     pub fn compile(&self, request: CompileRequest) -> Compilation {
-        let CompileRequest { target, input } = request;
+        let CompileRequest {
+            target,
+            input,
+            compression,
+        } = request;
         let mut graph = ActionGraph::new();
         let mut diagnostics = Diagnostics::default();
         let descriptor = target.descriptor();
@@ -369,6 +387,7 @@ impl Compiler {
             &frontend.gir,
             &frontend.mono,
             target,
+            compression,
             &self.queries,
             &source_map,
         ) {
@@ -493,7 +512,12 @@ impl Compiler {
         let raw_contract = match runtime::run(
             RawModelInputs {
                 target,
-                policy: RawPlanePolicyV1::default(),
+                // cage profile 是编译期策略：demand 由优化后 LIR 推导，policy 必须在
+                // lowering 前已知，这里只把它带进 raw 平面契约，不做事后修正。
+                policy: RawPlanePolicyV1 {
+                    compression,
+                    ..RawPlanePolicyV1::default()
+                },
                 demand,
                 resource_demand,
                 rt0_demand,

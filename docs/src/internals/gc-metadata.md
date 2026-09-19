@@ -108,7 +108,10 @@ compression profile 可以将连续不超过 4 GiB 的 managed heap cage 表示�
 并以 cage id、generation 和 offset 形成内部引用编码。cage base、长度、对齐、offset
 加法和 generation 校验全部 checked；large、pinned、foreign、跨 cage 对象使用完整地址
 或 stable handle。compressed reference 不能进入 raw plane，也不能绕过 FFI 的 resolve、
-pin 和 native address 生命周期。
+pin 和 native address 生命周期。同一引用类型的值可指向压缩对象也可指向 cage 外对象，
+因此类型驱动的压缩表示不健全：引用值的 provenance、ABI 车道与栈根声明始终按完整地址
+声明，压缩只发生在被 header 标记为 `COMPRESSED_REF` 的对象内存字节里（当前即压缩闭包
+环境的 capture 槽）。
 
 ### GC 工作消息与终止信用
 
@@ -320,7 +323,12 @@ payload_size_or_forward: AtomicU64
 `TURN_REGION` 对象的 region descriptor、generation、export summary 和 reset lease 位于
 动态 metadata，不在 header 复制；`SHARED_HANDLE` 对象的 stable slot 是语言身份的内部
 权威，`COMPRESSED_REF` 只能在已登记 cage profile 中使用。representation 不影响
-`TypeRecord` 的逻辑 trace/value program。
+`TypeRecord` 的逻辑 trace/value program，但 header representation 决定字段字的解释：
+collector 按 header 选择把字段读成完整地址还是 checked 压缩字，因此 header 与字段
+表示必须同源。cage 开启时只有压缩闭包环境（capture 槽确为压缩字的 LocalHeap 分配）
+写 `COMPRESSED_REF`；其余 LocalHeap 对象——包括 large、pinned 与其它非压缩分配——
+仍然写 `LOCAL_DIRECT`，TurnRegion 对象继续写 `TURN_REGION` 并按 region 私有语义
+解释字段。`COMPRESSED_REF` 对象在 LocalHeap 搬迁中必须保留同一表示。
 
 对象存活 mark 的权威按 representation 分层：LocalHeap 使用 arena side mark bitmap 和 arena mark epoch，TurnRegion 私有对象在 export/reset verifier 中以 region root/lease 状态判定，SharedHeap 使用 handle side mark 和 cycle epoch。任何层次都不在 header 复制第二个 mark bit；collector 的 test-and-mark 原子更新对应 side metadata。
 

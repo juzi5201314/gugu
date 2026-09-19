@@ -184,6 +184,10 @@ impl Builder<'_> {
         }
         if let Some(environment) = self.environment {
             let shared = self.shared_environment(self.owner.definition)?;
+            // 压缩判定与构造侧（capture_environment）使用同一世界扫描：构造侧 encode 过的
+            // 槽在实例侧必须按压缩字读出。压缩字是 pointer(Raw)，解码结果是普通 GcHeap
+            // 引用，可以直接进入 Capture storage 与后续读写。
+            let compressed = !shared && self.compressed_environment(self.owner.definition)?;
             let mut offset = 0u64;
             let mut loaded = Vec::with_capacity(self.owner.captures.len());
             // 共享环境只开一个 guard 覆盖全部捕获读取：同一个 handle 的多次解析不该产生多个
@@ -215,7 +219,17 @@ impl Builder<'_> {
                     continue;
                 }
                 let address = self.offset(environment, offset);
-                let address = self.load(address, ValueType::pointer(Provenance::GcHeap), 8, false);
+                let address = if compressed {
+                    let word = self.load(address, ValueType::pointer(Provenance::Raw), 8, false);
+                    self.emit_one(
+                        Op::DecodeCompressedRef,
+                        &[word],
+                        ValueType::pointer(Provenance::GcHeap),
+                        Origin::Derived(word),
+                    )
+                } else {
+                    self.load(address, ValueType::pointer(Provenance::GcHeap), 8, false)
+                };
                 self.storage[local] = Storage::Capture { address };
                 offset += 8;
             }

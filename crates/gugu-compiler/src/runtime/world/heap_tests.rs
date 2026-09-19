@@ -167,7 +167,7 @@ pub(super) fn configured_world(
 /// 分配一个 leaf（8 字节，无指针）并返回 payload 地址。
 fn leaf(world: &mut RawWorld, placement: ManagedPlacement) -> u64 {
     world
-        .allocate_managed(0, 1, 8, placement)
+        .allocate_managed(0, 1, 8, placement, false)
         .expect("leaf 可分配")
 }
 
@@ -198,7 +198,7 @@ fn queued_line_run_restore_rewinds_allocator_cursor() {
     // 先把 run 交给归还门禁：bump 只能跳过 queued 前缀，游标因此落在 run 之后。
     heap.mark_line_run_queued(id, 0, 8)
         .expect("line-run 可入队");
-    heap.allocate(arena, 1, 8, 8).expect("对象可分配");
+    heap.allocate(arena, 1, 8, 8, false).expect("对象可分配");
     assert!(
         heap.block_free_line(id).expect("游标可读") > 0,
         "queued run 之后的分配必须推进游标"
@@ -269,10 +269,10 @@ fn tlab_refills_after_the_span_is_exhausted() {
 fn placement_routes_to_the_matching_arena() {
     let mut world = heap_world();
     let pinned = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Pinned)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Pinned, false)
         .expect("pinned 可分配");
     let resource = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Resource)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Resource, false)
         .expect("resource 可分配");
     assert_eq!(
         world.managed_object(pinned).expect("对象").generation,
@@ -287,7 +287,7 @@ fn placement_routes_to_the_matching_arena() {
     );
     assert!(
         world
-            .allocate_managed(0, 1, 8, ManagedPlacement::SharedHeap)
+            .allocate_managed(0, 1, 8, ManagedPlacement::SharedHeap, false)
             .is_err(),
         "SharedHeap placement 必须拒绝"
     );
@@ -297,7 +297,7 @@ fn placement_routes_to_the_matching_arena() {
 fn managed_field_store_loads_and_marks_cards() {
     let mut world = heap_world();
     let holder = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Pinned)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Pinned, false)
         .expect("holder 可分配");
     let child = leaf(&mut world, ManagedPlacement::Nursery);
     world
@@ -360,7 +360,7 @@ fn major_cycle_reclaims_unreachable_objects() {
     world.collect_minor(0).expect("minor 可执行");
     let live = world.managed_root(slot).expect("根可读");
     let dead = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Pinned)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Pinned, false)
         .expect("old 对象可分配");
     let before = world.managed_counters(0).expect("计数可读");
     let report = world.collect_major(0).expect("major 可执行");
@@ -383,7 +383,7 @@ fn managed_live_bytes_feed_pacing_baseline() {
         .register_managed_root(GcRootKindV1::Static, 1)
         .expect("根槽可登记");
     let address = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
         .expect("old 对象可分配");
     world.set_managed_root(slot, address).expect("根可写");
     let cycle = world.run_gc_cycle(true).expect("cycle 可执行");
@@ -426,10 +426,10 @@ fn managed_addresses_are_owner_local() {
     let contract = gc_contract();
     let mut world = configured_world(&contract, 11, 2, 64);
     let first = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("owner 0 可分配");
     let second = world
-        .allocate_managed(1, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(1, 1, 8, ManagedPlacement::Nursery, false)
         .expect("owner 1 可分配");
     assert_ne!(
         first / GC_ARENA_BYTES as u64,
@@ -463,7 +463,7 @@ fn field_stores_publish_exact_cross_block_edge_deltas() {
     let mut world = heap_world();
     // 三个对象落在三个不同 block：类型 0 是 16 字节双指针类型，两个字段各自成一条边。
     let first = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("第一个对象可分配");
     let first_block = world
         .managed_block_ref(0, first)
@@ -472,7 +472,7 @@ fn field_stores_publish_exact_cross_block_edge_deltas() {
         .0;
     fill_block(&mut world, first_block);
     let second = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("第二个对象可分配");
     let second_block = world
         .managed_block_ref(0, second)
@@ -482,7 +482,7 @@ fn field_stores_publish_exact_cross_block_edge_deltas() {
     assert_ne!(first_block, second_block, "两个对象必须落在不同 block");
     fill_block(&mut world, second_block);
     let third = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("第三个对象可分配");
     let third_block = world
         .managed_block_ref(0, third)
@@ -579,10 +579,10 @@ fn edge_heap_ticket_identity_does_not_alias_between_owners() {
     let mut world = RawWorld::new(71, 2, 64, BatchLimits::default()).expect("world");
     world.configure_gc(&gc_contract()).expect("GC 契约");
     let first = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Pinned)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Pinned, false)
         .expect("owner 0");
     let second = world
-        .allocate_managed(1, 1, 8, ManagedPlacement::Pinned)
+        .allocate_managed(1, 1, 8, ManagedPlacement::Pinned, false)
         .expect("owner 1");
     let (descriptor, offset, _) = world.heap(0).unwrap().ticket_identity(first).unwrap();
     assert!(
@@ -609,10 +609,10 @@ fn edge_heap_allocation_reaches_second_arena() {
     heap.commit_block(second, 0).expect("block 可提交");
     let payload = u64::from(GC_BLOCK_BYTES) - 16;
     let a = heap
-        .allocate(first, 0, payload, 16)
+        .allocate(first, 0, payload, 16, false)
         .expect("首个 arena 可分配");
     let b = heap
-        .allocate(second, 0, payload, 16)
+        .allocate(second, 0, payload, 16, false)
         .expect("第二个 arena 可分配");
     heap.set_field(a, 0, 17).expect("字段可写");
     heap.set_field(b, 0, 29).expect("字段可写");
@@ -642,7 +642,9 @@ fn mark_bitmap_clears_only_the_marked_block() {
     let mut block0_last = 0_u64;
     let mut block1 = 0_u64;
     for _ in 0..4096 {
-        let address = heap.allocate(arena, 1, 8, 16).expect("old 对象可分配");
+        let address = heap
+            .allocate(arena, 1, 8, 16, false)
+            .expect("old 对象可分配");
         if heap.block_of(address).expect("block 可解析") == 0 {
             block0_last = address;
         } else {
@@ -686,7 +688,9 @@ fn block_object_enumeration_and_mark_query_track_real_state() {
     // 填满 block 0，让后续对象落到 block 1：枚举要按 block 边界分开。
     let mut block1 = 0_u64;
     for _ in 0..4096 {
-        let address = heap.allocate(arena, 1, 8, 16).expect("old 对象可分配");
+        let address = heap
+            .allocate(arena, 1, 8, 16, false)
+            .expect("old 对象可分配");
         if heap.block_of(address).expect("block 可解析") == 1 {
             block1 = address;
             break;
@@ -743,7 +747,7 @@ fn large_object_spans_whole_blocks() {
     let mut world = heap_world();
     let big = GC_BLOCK_BYTES as u64 + 64;
     let address = world
-        .allocate_managed(0, 0, big, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, big, ManagedPlacement::Nursery, false)
         .expect("大对象可分配");
     let object = world.managed_object(address).expect("对象可解码");
     assert_eq!(object.payload_bytes, big);
@@ -755,7 +759,7 @@ fn large_object_spans_whole_blocks() {
 fn interior_pointer_resolves_within_the_page() {
     let mut world = heap_world();
     let node = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("node 可分配");
     let interior = node + 8;
     let object = world.managed_object(interior).expect("interior 可回表");
@@ -800,6 +804,7 @@ fn real_compile_sections_drive_local_heap_allocation_and_collection() {
                 u32::try_from(index).expect("类型下标适配 u32"),
                 entry.size,
                 ManagedPlacement::Nursery,
+                false,
             )
             .expect("真实类型可分配");
         roots.push(address);
@@ -838,7 +843,7 @@ fn shared_field_store_routes_through_barrier_plane() {
         .expect("共享 block 的 card table 已登记");
     assert_eq!(table.manager(), world.token(1));
     let child = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("child 可分配");
     world
         .store_shared_managed_field(0, 0, handle, 8, child, Some(0))
@@ -864,7 +869,7 @@ fn shared_field_store_routes_through_barrier_plane() {
     );
     // 覆盖掉旧引用：Yuasa deletion 必须记账，新值仍然生效。
     let second = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("第二个对象可分配");
     world
         .store_shared_managed_field(1, 0, handle, 8, second, Some(0))

@@ -46,7 +46,7 @@ fn mark_and_run_shared_plane(world: &mut RawWorld, marked: &[SharedHandle]) -> S
     }
     // 来源身份必须是可解析的全局 block 身份：用 owner 0 上真实分配的 LocalHeap 对象所在 block。
     let holder = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("holder 可分配");
     let source_block = world
         .managed_block_ref(0, holder)
@@ -129,7 +129,7 @@ fn forward_publishes_handle_forward_and_settles_grace_in_cycle() {
     let mut world = configured_world(&contract, 31, 2, 64);
     let handle = world.allocate_shared_object(1, 32).expect("共享对象可分配");
     let child = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery, false)
         .expect("child 可分配");
     world
         .store_shared_managed_field(1, 0, handle, 8, child, Some(1))
@@ -228,7 +228,7 @@ fn guard_keeps_old_payload_alive_until_end() {
     let mut world = configured_world(&contract, 37, 2, 64);
     let handle = world.allocate_shared_object(1, 32).expect("共享对象可分配");
     let child = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery, false)
         .expect("child 可分配");
     world
         .store_shared_managed_field(1, 0, handle, 8, child, Some(1))
@@ -589,7 +589,7 @@ fn handover_moves_shared_block_manager_and_registry_owner() {
     let descriptor = u64::from(block.id.arena());
     let manager = world.token(1);
     let child = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery, false)
         .expect("child 可分配");
     // owner 0 退役到 owner 1：管理权随之转移。
     world.retire(0, manager, &budget()).expect("owner 可退役");
@@ -677,10 +677,10 @@ fn local_heavy_world_stays_free_of_shared_state() {
     let contract = gc_contract();
     let mut world = configured_world(&contract, 71, 2, 64);
     let holder = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("holder 可分配");
     let child = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Old, false)
         .expect("child 可分配");
     let slot = world
         .register_managed_root(GcRootKindV1::CoroutineFrame, 0)

@@ -1147,32 +1147,38 @@ impl EdgeCandidateHarness {
             let mut sources = Vec::with_capacity(self.nodes as usize);
             let mut targets = Vec::with_capacity(self.nodes as usize);
             for _ in 0..self.nodes {
-                let source =
-                    match world.allocate_managed(0, node_type, node_size, ManagedPlacement::Old) {
-                        Ok(address) => address,
-                        Err(error) => {
-                            if trace {
-                                eprintln!(
-                                    "edge-candidates 第 {round} 轮分配 source 失败: {error:?}"
-                                );
-                            }
-                            clean = false;
-                            break;
+                let source = match world.allocate_managed(
+                    0,
+                    node_type,
+                    node_size,
+                    ManagedPlacement::Old,
+                    false,
+                ) {
+                    Ok(address) => address,
+                    Err(error) => {
+                        if trace {
+                            eprintln!("edge-candidates 第 {round} 轮分配 source 失败: {error:?}");
                         }
-                    };
-                let target =
-                    match world.allocate_managed(1, tail_type, tail_size, ManagedPlacement::Old) {
-                        Ok(address) => address,
-                        Err(error) => {
-                            if trace {
-                                eprintln!(
-                                    "edge-candidates 第 {round} 轮分配 target 失败: {error:?}"
-                                );
-                            }
-                            clean = false;
-                            break;
+                        clean = false;
+                        break;
+                    }
+                };
+                let target = match world.allocate_managed(
+                    1,
+                    tail_type,
+                    tail_size,
+                    ManagedPlacement::Old,
+                    false,
+                ) {
+                    Ok(address) => address,
+                    Err(error) => {
+                        if trace {
+                            eprintln!("edge-candidates 第 {round} 轮分配 target 失败: {error:?}");
                         }
-                    };
+                        clean = false;
+                        break;
+                    }
+                };
                 if let Err(error) = world.store_managed_field(0, 0, source, 8, target) {
                     if trace {
                         eprintln!("edge-candidates 第 {round} 轮正向写入失败: {error:?}");
@@ -1699,8 +1705,13 @@ impl SharedForwardHarness {
         let mut consumed_total = 0_u32;
         for index in 0..self.forwards {
             let handle = world.allocate_shared_object(payload_owner, payload_bytes)?;
-            let child =
-                world.allocate_managed(worker, type_index, type_size, ManagedPlacement::Nursery)?;
+            let child = world.allocate_managed(
+                worker,
+                type_index,
+                type_size,
+                ManagedPlacement::Nursery,
+                false,
+            )?;
             world.store_shared_managed_field(worker, 0, handle, 0, child, Some(worker))?;
             let SharedForwardOutcome::Forwarded(_) =
                 world.forward_shared_payload(worker, handle)?
@@ -1824,7 +1835,7 @@ impl BlockReturnHarness {
         let mut world = RawWorld::new(19, self.owners, 256, BatchLimits::default())?;
         world.configure_gc(contract)?;
         for _ in 0..self.leaves {
-            world.allocate_managed(0, 1, 8, ManagedPlacement::Old)?;
+            world.allocate_managed(0, 1, 8, ManagedPlacement::Old, false)?;
         }
         let before = world.provider_stats().committed_bytes;
         let cycle = world.run_gc_cycle(true)?;
@@ -2008,7 +2019,7 @@ impl CompressionHarness {
         if cage_registered {
             return Err(RawInvariant::new("关闭态世界不得登记 cage"));
         }
-        let plain = pristine.allocate_managed(0, 1, 8, ManagedPlacement::Nursery)?;
+        let plain = pristine.allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)?;
         if pristine
             .compression()
             .is_some_and(|plane| plane.cage_of(plain).is_some())
@@ -2034,7 +2045,7 @@ impl CompressionHarness {
         // 步骤 3：managed arena 必须落在 cage 内；压缩根写入编码字并参与 root slice 与 seed。
         let mut addresses = Vec::with_capacity(self.objects as usize);
         for _ in 0..self.objects {
-            addresses.push(world.allocate_managed(0, 1, 8, ManagedPlacement::Old)?);
+            addresses.push(world.allocate_managed(0, 1, 8, ManagedPlacement::Old, false)?);
         }
         let cage = world
             .compression()
@@ -2065,7 +2076,7 @@ impl CompressionHarness {
         }
 
         // 步骤 4：minor 搬迁后压缩字重新编码；非法 FFI 路径逐条被拒绝。
-        let nursery = world.allocate_managed(0, 1, 8, ManagedPlacement::Nursery)?;
+        let nursery = world.allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)?;
         let slot = world.register_compressed_root(1, nursery)?;
         let before = world.compressed_root_word(slot)?;
         world.collect_minor(0)?;
@@ -2082,7 +2093,7 @@ impl CompressionHarness {
         if world.save_for_foreign(forged).is_ok() {
             return Err(RawInvariant::new("无 pin 的 FFI 保存必须失败"));
         }
-        let foreign = world.allocate_managed(0, 1, 8, ManagedPlacement::Old)?;
+        let foreign = world.allocate_managed(0, 1, 8, ManagedPlacement::Old, false)?;
         let pin = world.pin_for_foreign(0, foreign)?;
         let saved = world.save_for_foreign(pin)?;
         world.release_for_foreign(0, saved, pin)?;

@@ -296,7 +296,7 @@ LIR 指令按封闭类别组织：
 - 已解析汇编：`InlineAsm` 只保存前端验证过的封闭汇编计划、输入输出约束与 effect；不接受待解析模板文本。
 - 诊断插桩：`CoverageCounter`。
 
-### 内存 owner lowering
+### 内存 owner lowering {#memory-owner-lowering}
 
 `EscapeAndPlacement` 的 managed placement、`RuntimeRaw`、`Resource` 和 `Foreign` 分类还决定 storage domain、size class、owner policy、representation tag、是否可在 local fast path 完成以及 return kind。`Managed::TurnRegion` 只有在闭世界摘要证明当前 coroutine turn 私有、无外部 alias、无 ResourceCell lease 且不需要 FFI 地址时才能选择；analysis 为 `unknown` 时必须选择 LocalHeap 或 SharedHeap 等能够保留原语义的路径。compiler 只为 `Managed` 产生 GC/region operation，不产生用户级 free；raw/resource 的回收由 runtime operation 和稳定 descriptor 完成。
 
@@ -305,6 +305,8 @@ LIR 指令按封闭类别组织：
 `Managed::SharedHeap` 的实际 lowering 固定为 `GcAlloc { placement: SharedHeap }` 紧跟唯一一次 `ResolveSharedHandle`：fresh `GcHeap` 值没有别的 use，解析结果是可发布、可跨 owner 传递的 stable handle，它保存在 Heap storage 里而不是当作地址。字段访问由同一 lowering helper 包住 `SharedAccessBegin`、全部 `PtrOffset`/`Load`/`Store` 与 `SharedAccessEnd`：guard 内的派生地址保持 `Ptr/SharedHandle` provenance，managed 字段写入产生绑定同一 token 的 `SharedFieldBarrier`，聚合读取在 End 之前物化到栈副本，`Deref`、引用字段穿透与 managed 聚合整块复制在 shared payload 上被拒绝而不是退化成 direct pointer。Placement 为 `SharedHeap` 的闭包环境按值捕获（每个捕获按 ABI 车道顺序占用连续 8-byte 槽），capture 来源是 direct pointer 时在 lowering 阶段拒绝；闭包本体与调用点的 environment lane 都由 placement 分配点表决定，同一闭包本体不得同时由 shared 与 local 环境实例化。`lir::shared_heap_demand()` 在同一遍扫描里推导分配/解析/guard/forward/屏障站点与 payload 上界，`alloc_sites == resolve_sites == handle_slots`、`access_begin_sites == access_end_sites`、`payload_copy_sites == forward_sites` 由 `SharedHeapDemand::verify` 强制。
 
 LocalHeap 的本地 direct store 使用 hybrid barrier；跨 owner/block store 还生成 owner-local edge summary 和 `EdgeDeltaBatch`。`MarkTicketBatch`、`EdgeDeltaBatch`、`RegionPublish`、`ForwardSharedHandle` 的消息只能携带 stable descriptor、handle/index、generation、epoch、credit 和 integrity，verifier 必须拒绝 managed pointer payload。
+
+cage profile 开启时，非 shared、LocalHeap 且非 large 的闭包环境以压缩字保存 capture 槽。压缩判定与共享判定使用同一次世界扫描并按闭包定义单态：所有创建点的环境分配必须落在 LocalHeap（TurnRegion、Pinned、Shared 车道都不压缩），每个捕获源 cell 必须能驻留 cage（placement 为 Stack/LocalHeap 且 footprint 不超过单个 block，泛型实例逐实例核对），环境对象自身 footprint 也不超过单个 block；任一条件不满足时整个闭包定义退回 full-pointer 槽。构造侧没有 `EncodeCompressedRef` op：压缩字由现有整数域 op 拼出（`PointerToInt` → `And offset` / `Or generation<<32` → 空指针经 `Compare`+`Select` 归零 → `IntToPointer`），结果是 `pointer(Raw)` 值而不是 GC 根；cage id 恒 0，generation 取 `CAGE_GENERATION_MIN`，写槽后显式发 `GcWriteBarrier`（自动屏障只看 value provenance，Raw 字不触发），`GcAlloc` 同时携带 `compressed` 标志与对象头表示同源。实例侧对每个槽 `Load(pointer(Raw))` 后立刻 `DecodeCompressedRef`，结果 provenance 是 `GcHeap`——解码值是普通引用，可进入 Capture storage、赋给 local 或参与合流，不需要对 `PtrOffset`、cast 或 merge 的任何放宽。其余对象字段与全部引用值（寄存器、栈槽、ABI、栈根声明）保持全指针；`compressed_root_slots` 在本口径下恒为 0。机器码解码序列（抽 cage id、generation 校验、offset、bounds、拼回指针）由后端 `Legalize`/`SelectInstructions` 展开。
 
 `RuntimeRaw` 的 local pop/bump 可以留在无 safepoint 的短序列；refill、remote return publish、GC assist、mark mailbox drain、credit termination、handle resolve、radix forwarding、range coalescing 和 platform call 必须落到带正确 stack map/effect 的 slow edge。raw message 只携带 stable descriptor 或 handle，不能借此把 managed payload 当作 raw slot。
 

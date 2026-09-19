@@ -13,10 +13,10 @@ fn mark_ticket_source_identity_is_global_and_resolved() {
     let contract = gc_contract();
     let mut world = configured_world(&contract, 13, 2, 64);
     let holder = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Old, false)
         .expect("holder 可分配");
     let child = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Old)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Old, false)
         .expect("child 可分配");
     let source_id = world.managed_block_ref(0, holder).expect("源 block").id;
     // 正向：真实存在的 block 身份必须解析回同一个身份。
@@ -71,7 +71,7 @@ fn shared_mark_ticket_round_trips_and_settles_handle_lease() {
     let mut world = configured_world(&contract, 23, 2, 64);
     // 来源身份必须是可解析的全局 block 身份：用 owner 0 上真实分配的对象所在 block。
     let holder = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("holder 可分配");
     let source_block = world
         .managed_block_ref(0, holder)
@@ -137,7 +137,7 @@ fn shared_mark_ticket_round_trips_and_settles_handle_lease() {
     // 换一个新的 world：上一个 cycle 的 credit 已经消费，未归还的 credit 不允许开新 cycle。
     let mut stale = configured_world(&contract, 23, 2, 64);
     let stale_source = stale
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("holder 可分配");
     let stale_block = stale
         .managed_block_ref(0, stale_source)
@@ -195,10 +195,10 @@ fn mark_pass_traces_cross_owner_tickets_and_records_credit_trace() {
         .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
         .expect("根槽可登记");
     let holder = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("holder 可分配");
     let child = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery, false)
         .expect("child 可分配");
     world.set_managed_root(slot, holder).expect("根可写");
     world
@@ -243,10 +243,10 @@ fn cyclic_owner_local_graph_terminates_without_tickets() {
         .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
         .expect("根槽可登记");
     let first = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("对象可分配");
     let second = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("对象可分配");
     world.set_managed_root(slot, first).expect("根可写");
     world
@@ -284,10 +284,10 @@ fn mark_pass_refuses_completion_while_a_mailbox_is_occupied() {
         .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
         .expect("根槽可登记");
     let holder = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("holder 可分配");
     let child = world
-        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(1, 0, 16, ManagedPlacement::Nursery, false)
         .expect("child 可分配");
     world.set_managed_root(slot, holder).expect("根可写");
     world

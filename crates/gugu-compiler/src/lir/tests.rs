@@ -744,7 +744,8 @@ fn body_with_compressed_root(body: &Body) -> Option<Body> {
         (block, position),
         Op::DecodeCompressedRef,
         &[argument],
-        &[(ValueType::pointer(Provenance::CompressedRef), Origin::None)],
+        // 真实 lowering 的解码结果是普通 GcHeap 引用；`CompressedRef` 只作为类型保留。
+        &[(ValueType::pointer(Provenance::GcHeap), Origin::None)],
         input,
     );
     editor.set_terminator_memory(block, output);
@@ -865,7 +866,9 @@ fn foreign_call_with_decoded_argument(body: &Body, pass_to_call: bool) -> Option
         (block, editor.instruction_count(block)),
         Op::DecodeCompressedRef,
         &[decoded],
-        &[(ValueType::pointer(Provenance::CompressedRef), Origin::None)],
+        // 解码结果与真实 lowering 一致是 GcHeap；实参声明改写为 `CompressedRef` 时，
+        // 拒绝仍然落在非 Managed 调用的 managed-provenance 边界上。
+        &[(ValueType::pointer(Provenance::GcHeap), Origin::None)],
         input,
     );
     if pass_to_call {
@@ -908,6 +911,247 @@ fn compressed_ref_as_foreign_argument_is_rejected() {
         error.message(),
         "LIR 终结符、unwind 或调用 ABI 不合法",
         "拒绝必须来自调用 ABI 规则"
+    );
+}
+
+/// cage profile 开启的捕获闭包源码：闭包逃逸出创建帧，环境按 LocalHeap 分配
+/// （turn 私有的 region 环境本阶段不压缩，因此夹具必须让环境落 stable storage）。
+const COMPRESSED_CAPTURE: &str = "fn make() fn() int {\n let value = 1\n return fn() int { return value }\n}\nfn main() {\n let closure = make()\n _ = closure()\n}";
+
+fn compile_with_compression(source: &str) -> Compilation {
+    use crate::runtime::compression_schema::CompressionPolicyV1;
+    let compilation = Compiler::new().compile(
+        CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
+            .with_compression_policy(CompressionPolicyV1::cage(
+                4 * u64::from(crate::runtime::gc_metadata_contract::GC_ARENA_BYTES),
+            )),
+    );
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    compilation
+}
+
+/// cage 开启的捕获闭包：构造侧 encode、实例侧 decode、非零解码点与冷热一致指纹。
+#[test]
+fn compression_enabled_captures_produce_encode_and_decode_sequences() {
+    let compilation = compile_with_compression(COMPRESSED_CAPTURE);
+    let raw = compilation.raw_contract().expect("真实契约必须存在");
+    let compression = raw.compression();
+    assert!(compression.enabled());
+    assert_eq!(
+        compression.cage_bytes(),
+        4 * u64::from(crate::runtime::gc_metadata_contract::GC_ARENA_BYTES)
+    );
+    assert!(
+        compression.demand().decode_sites >= 1,
+        "压缩环境的 capture 槽必须产出解码点"
+    );
+    assert_eq!(
+        compression.demand().compressed_root_slots,
+        0,
+        "引用值与栈根声明保持全指针，压缩根槽本阶段为 0"
+    );
+    // image-plan 与 dump 的解码点口径与 LIR 指令数一致。
+    assert_eq!(
+        compilation
+            .image_plan()
+            .expect("镜像计划")
+            .compression_demand()
+            .decode_sites,
+        compression.demand().decode_sites
+    );
+    assert!(
+        compilation
+            .dump_runtime()
+            .expect("契约 dump")
+            .contains(&format!(
+                "decodes-sites={}",
+                compression.demand().decode_sites
+            )),
+        "dump 必须携带同一解码点计数"
+    );
+
+    let lir = compilation.lir.as_ref().expect("已生成 LIR");
+    let mut decode_sites = 0;
+    for body in &lir.world.bodies {
+        for instruction in &body.instructions {
+            let Op::DecodeCompressedRef = &instruction.op else {
+                continue;
+            };
+            decode_sites += 1;
+            // 实例侧序列：Load(pointer(Raw)) → DecodeCompressedRef，结果是 GcHeap 引用。
+            let word = body.args(&instruction.arguments)[0];
+            let body::Definition::Instruction {
+                instruction: load, ..
+            } = body.values[word.index()].definition
+            else {
+                panic!("压缩字必须来自指令");
+            };
+            let load = &body.instructions[load.index()];
+            assert!(matches!(load.op, Op::Load(_)), "压缩字必须由槽 load 读出");
+            let result = &body.values[range(&instruction.results).start];
+            assert_eq!(
+                result.kind,
+                ValueType::pointer(Provenance::GcHeap),
+                "解码结果必须是普通 GcHeap 引用"
+            );
+        }
+    }
+    assert_eq!(
+        usize::try_from(compression.demand().decode_sites).expect("解码点适配宿主"),
+        decode_sites
+    );
+
+    // 构造侧：环境分配带 compressed 标志，PointerToInt → 整数域 → IntToPointer 的 encode
+    // 序列与显式写屏障同 body 出现。
+    let mut encode_bodies = 0;
+    for body in &lir.world.bodies {
+        let has_compressed_alloc = body.instructions.iter().any(|instruction| {
+            matches!(
+                instruction.op,
+                Op::GcAlloc {
+                    compressed: true,
+                    ..
+                }
+            )
+        });
+        let has_encode = body.instructions.iter().any(|instruction| {
+            matches!(instruction.op, Op::Convert(body::Conversion::IntToPointer))
+        });
+        let has_barrier = body
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, Op::GcWriteBarrier { .. }));
+        if has_compressed_alloc {
+            assert!(
+                has_encode && has_barrier,
+                "压缩环境构造必须同时有 encode 序列与显式写屏障"
+            );
+            encode_bodies += 1;
+        }
+    }
+    assert_eq!(encode_bodies, 1, "夹具只有 main 构造一个压缩环境");
+
+    // 冷/热编译指纹一致：压缩输入进入 LIR 输入身份但不破坏确定性。
+    let warm = compile_with_compression(COMPRESSED_CAPTURE);
+    assert_eq!(
+        warm.lir_fingerprint(),
+        compilation.lir_fingerprint(),
+        "同一压缩输入必须给出同一 LIR 内容身份"
+    );
+}
+
+/// 关闭态同一源码：零解码点、无 encode/decode 序列，分配不带压缩标志。
+#[test]
+fn compression_disabled_captures_keep_full_pointer_slots() {
+    let compilation = compile(COMPRESSED_CAPTURE);
+    let raw = compilation.raw_contract().expect("真实契约必须存在");
+    assert!(!raw.compression().enabled());
+    assert_eq!(raw.compression().demand().decode_sites, 0);
+    assert_eq!(raw.compression().demand().compressed_root_slots, 0);
+    let lir = compilation.lir.as_ref().expect("已生成 LIR");
+    for body in &lir.world.bodies {
+        for instruction in &body.instructions {
+            assert!(
+                !matches!(instruction.op, Op::DecodeCompressedRef),
+                "关闭态不得出现解码点"
+            );
+            assert!(
+                !matches!(
+                    instruction.op,
+                    Op::Convert(body::Conversion::PointerToInt)
+                        | Op::Convert(body::Conversion::IntToPointer)
+                ),
+                "关闭态不得出现 encode 序列"
+            );
+            assert!(
+                !matches!(
+                    instruction.op,
+                    Op::GcAlloc {
+                        compressed: true,
+                        ..
+                    }
+                ),
+                "关闭态分配不得带压缩标志"
+            );
+        }
+    }
+}
+
+/// cage 开启时 Shared 环境不被压缩：仍是 SharedHandle 车道，无 encode/decode 序列。
+#[test]
+fn shared_environment_stays_uncompressed_with_cage_enabled() {
+    let compilation = compile_with_compression(SHARED_SENDER);
+    let raw = compilation.raw_contract().expect("真实契约必须存在");
+    assert!(raw.compression().enabled());
+    assert_eq!(
+        raw.compression().demand().decode_sites,
+        0,
+        "Shared 环境按值捕获，不得产生解码点"
+    );
+    let lir = compilation.lir.as_ref().expect("已生成 LIR");
+    for body in &lir.world.bodies {
+        for instruction in &body.instructions {
+            assert!(
+                !matches!(instruction.op, Op::DecodeCompressedRef),
+                "Shared 环境不得解码压缩字"
+            );
+            assert!(
+                !matches!(
+                    instruction.op,
+                    Op::GcAlloc {
+                        compressed: true,
+                        ..
+                    }
+                ),
+                "Shared 环境分配不得带压缩标志"
+            );
+        }
+    }
+    // 共享车道本身不受影响：fresh payload 紧跟解析，环境值保持 handle provenance。
+    let shared = shared_body(&compilation);
+    assert!(
+        shared
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction.op, Op::ResolveSharedHandle)),
+        "Shared 环境仍走 handle 解析"
+    );
+}
+
+/// 开启路径上的真实 lowering 同样拒绝压缩引用跨非 Managed 调用边界。
+#[test]
+fn compressed_ref_as_foreign_argument_is_rejected_with_cage_enabled() {
+    let compilation = compile_with_compression(EFFECTS);
+    let module = compilation.hir.as_ref().unwrap().module();
+    let body = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), true)
+        .expect("effects 夹具必须含挂起的 foreign 调用");
+    let error = verify::verify(&body, module).expect_err("压缩引用不得作为 foreign 参数");
+    assert_eq!(error.code(), DiagnosticCode::LirInvariant);
+    assert_eq!(
+        error.message(),
+        "LIR 终结符、unwind 或调用 ABI 不合法",
+        "拒绝必须来自调用 ABI 规则"
+    );
+}
+
+/// 契约闭合：开启 profile 但没有解码点的空程序仍然合法。
+///
+/// 反方向（关闭却有解码点）由 `stackmap_demands_counts_decode_sites_and_compressed_roots`
+/// 的递增口径与 `unsupported_capability_and_stray_decode_sites_are_rejected` 的契约拒绝共同闭合。
+#[test]
+fn enabled_compression_without_decode_sites_is_accepted() {
+    let compilation = compile_with_compression("fn main() { let value = 1 _ = value }");
+    let raw = compilation.raw_contract().expect("真实契约必须存在");
+    assert!(raw.compression().enabled());
+    assert_eq!(raw.compression().demand().decode_sites, 0);
+    assert_eq!(
+        raw.compression().demand().compressed_root_slots,
+        0,
+        "无捕获闭包时压缩根槽保持 0"
     );
 }
 

@@ -439,6 +439,8 @@ pub(crate) enum Op {
         descriptor: [u8; 32],
         align: u32,
         placement: PlacementKind,
+        /// 分配对象的 capture 槽是否存压缩字；与对象头 `COMPRESSED_REF` 表示同源。
+        compressed: bool,
     },
     /// 从当前 body 的私有 region 编号做一次 bump 分配。
     ///

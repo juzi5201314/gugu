@@ -932,7 +932,7 @@ owner 身份、slab 描述符、dense size class、消息字段、grace 步骤�
 8. 将 `MarkTicket`、`MarkMailbox`、owner credit 和 `EdgeDelta` 接入现有 batch/gate/grace substrate，完成跨 owner mark 与 block candidate verifier。
 9. 建立 `SharedHeap` stable handle、access guard、forwarding grace 和 generation verifier，保留 LocalHeap direct evacuation。
 10. 接入 managed `HeapBlockReturn`、line-run、arena 和 large mapping return；所有 return 必须等待 handle/lease/grace 条件。
-11. 在明确的 heap cage profile 中加入 checked pointer compression；再以真实 workload 评估 decode、cache 和 FFI 成本。第 11 步的契约段、cage 预留与 island 化 managed arena、checked 解码/编码、压缩根 map、FFI pin/copy 闸门与六项统计已由 `mosaic-compression` 落地（默认关闭，full-pointer 语义等价）；源级 `DecodeCompressedRef` producer、字段级 representation 切换与真实机器码解码序列仍待后端阶段。
+11. 在明确的 heap cage profile 中加入 checked pointer compression；再以真实 workload 评估 decode、cache 和 FFI 成本。第 11 步的契约段、cage 预留与 island 化 managed arena、checked 解码/编码、压缩根 map、FFI pin/copy 闸门与六项统计已由 `mosaic-compression` 落地（默认关闭，full-pointer 语义等价）；源级 producer 已接入：`CompileRequest` 显式开启 cage profile 后，LIR builder 把非 shared、LocalHeap、非 large 闭包环境的 capture 槽降为压缩字（构造侧整数域 encode + 显式 `GcWriteBarrier`，实例侧 `DecodeCompressedRef` 且结果为 `GcHeap`），环境对象头随之写 `COMPRESSED_REF` 表示（见[内存 owner lowering](gir-lir.md#memory-owner-lowering)）；通用对象字段压缩待跨体表示一致性分析（方法接收者等 opaque base 无法静态判定字段表示），真实机器码解码序列仍待后端 `Legalize`/`SelectInstructions`。
 12. 完成 per-owner root slice、credit termination、MosaicBaseline/MosaicConcurrent stop 边界和 security profile。
 13. 最后加入 typed combining，用于 GlobalRange 和 topology 冷路径，不回流到 allocation/return/GC mark 热路径。
 

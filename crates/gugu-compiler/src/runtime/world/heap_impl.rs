@@ -2,7 +2,8 @@
 //!
 //! arena 的物理页仍走 extent 层：每个 32 KiB block 由 provider 提交，并进入独立
 //! `ManagedAccounting`，由 `committed_classes` 汇总进 pressure。指针是 arena 内的直接地址
-//! （`LOCAL_DIRECT`），根是模型根槽数组，跨 owner 引用在本路径是不变量失败。
+//! （`LOCAL_DIRECT`），根是模型根槽数组，跨 owner 引用在本路径是不变量失败。关闭态所有
+//! 分配都是 `LOCAL_DIRECT`；cage 开启时压缩闭包环境的分配写 `COMPRESSED_REF` 头。
 
 use super::super::barrier::{BarrierFlushReason, BarrierSite};
 use super::super::cage::CompressionPlane;
@@ -610,12 +611,17 @@ impl RawWorld {
     }
 
     /// 分配一个 managed 对象。
+    ///
+    /// `compressed` 请求把对象头写成 `COMPRESSED_REF`：只在 cage 开启、placement 允许
+    /// （Nursery/Old）且 footprint 不超过单个 block 时生效，与字段压缩表示同源；其余
+    /// 分配一律 `LOCAL_DIRECT`。
     pub(crate) fn allocate_managed(
         &mut self,
         owner: u32,
         type_index: u32,
         payload_bytes: u64,
         placement: ManagedPlacement,
+        compressed: bool,
     ) -> Result<u64, RawInvariant> {
         if placement == ManagedPlacement::SharedHeap {
             return Err(RawInvariant::new(
@@ -638,17 +644,23 @@ impl RawWorld {
         } else {
             placement.arena()
         };
+        // header 与字段表示同源：cage 外对象（large、pinned、resource）与 cage 关闭时
+        // 都不能声明压缩表示，否则 GC 会把完整地址字段当压缩字扫描。
+        let compressed = compressed
+            && need <= 1
+            && matches!(placement, ManagedPlacement::Nursery | ManagedPlacement::Old)
+            && self.compression().is_some_and(|plane| plane.enabled());
         let arena = self.ensure_heap_space(owner, kind, need, need > 1)?;
         let align = kind_align(kind, &contract);
-        let mut attempt = self
-            .heap_mut(owner)?
-            .allocate(arena, type_index, payload_bytes, align);
+        let mut attempt =
+            self.heap_mut(owner)?
+                .allocate(arena, type_index, payload_bytes, align, compressed);
         if kind == HeapArenaKind::Nursery && matches!(attempt, Err(HeapError::NoCapacity)) {
             // 当前 TLAB span 在分配过程中用尽：重新取 span（必要时提交新 block）后重试一次。
             let arena = self.ensure_heap_space(owner, kind, need, false)?;
-            attempt = self
-                .heap_mut(owner)?
-                .allocate(arena, type_index, payload_bytes, align);
+            attempt =
+                self.heap_mut(owner)?
+                    .allocate(arena, type_index, payload_bytes, align, compressed);
         }
         let address = attempt.map_err(heap_error)?;
         self.settle_activated_blocks(owner)?;

@@ -3,8 +3,8 @@ use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::frontend::gir::body::{Access as GirAccess, LocalId, Place, Projection};
 use crate::frontend::gir::placement::PlacementKind;
 use crate::lir::body::{
-    Access, AliasClass, Conversion, InstId, IntOp, Op, Origin, Provenance, RuntimeCall, Symbol,
-    Type, ValueId, ValueType, id,
+    Access, AliasClass, Condition, Conversion, InstId, IntOp, Op, Origin, Provenance, RuntimeCall,
+    Symbol, Type, ValueId, ValueType, id,
 };
 use crate::lir::invalid_resource;
 
@@ -348,13 +348,14 @@ impl Builder<'_> {
                 .align,
         )
         .map_err(|_| invalid("分配对齐越界"))?;
-        self.allocate_descriptor(descriptor, align, bytes, placement, region)
+        self.allocate_descriptor(descriptor, align, bytes, placement, region, false)
     }
 
     /// 按稳定 descriptor 与对齐做一次 managed 分配。
     ///
     /// 闭包环境没有对应的语言类型，只能用它自己的稳定 descriptor；`region` 为 `Some` 时走
-    /// `RegionAlloc`，否则按 placement 走 `GcAlloc`。
+    /// `RegionAlloc`，否则按 placement 走 `GcAlloc`。`compressed` 只对 LocalHeap 的闭包环境
+    /// 为真：runtime 据此写 `COMPRESSED_REF` 对象头，GC 按头把 capture 槽当压缩字扫描。
     pub(super) fn allocate_descriptor(
         &mut self,
         descriptor: [u8; 32],
@@ -362,6 +363,7 @@ impl Builder<'_> {
         bytes: u64,
         placement: PlacementKind,
         region: Option<u32>,
+        compressed: bool,
     ) -> Result<ValueId, Diagnostic> {
         let bytes_value = self.constant(bytes, Type::I64);
         let allocation = self.next_allocation;
@@ -376,6 +378,7 @@ impl Builder<'_> {
                 descriptor,
                 align,
                 placement,
+                compressed,
             },
         };
         let pointer = self.emit_one(
@@ -397,6 +400,85 @@ impl Builder<'_> {
         let zero = self.constant(0, Type::I8);
         self.emit(Op::Memset { bytes }, &[pointer, zero], &[]);
         Ok(pointer)
+    }
+
+    /// 把完整指针编码成 cage 压缩字：`offset | generation << 32`，空指针归零。
+    ///
+    /// 只用现有整数域 op，不新增 `EncodeCompressedRef`：压缩字是 `pointer(Raw)` 值，不是
+    /// GC 根。cage id 恒 0（真实编译只预留一个 cage），位移折进 generation 常量；generation
+    /// 取 `CAGE_GENERATION_MIN`，与镜像启动值相同。抽 cage id / 校验 / bounds 的机器码序列
+    /// 由后端 `Legalize`/`SelectInstructions` 展开。
+    pub(super) fn encode_compressed_word(&mut self, pointer: ValueId) -> ValueId {
+        use crate::runtime::compression_schema::{
+            CAGE_GENERATION_MIN, CAGE_GENERATION_SHIFT, CAGE_OFFSET_MASK,
+        };
+        let bits = self.emit_one(
+            Op::Convert(Conversion::PointerToInt),
+            &[pointer],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        let mask = self.constant(CAGE_OFFSET_MASK, Type::I64);
+        let offset = self.emit_one(
+            Op::Integer(IntOp::And),
+            &[bits, mask],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        let generation = self.constant(
+            u64::from(CAGE_GENERATION_MIN) << CAGE_GENERATION_SHIFT,
+            Type::I64,
+        );
+        let word = self.emit_one(
+            Op::Integer(IntOp::Or),
+            &[offset, generation],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        // 空引用存 CAGE_NULL_WORD：完整指针为 0 时把 word64 归零后再转指针。
+        let zero = self.constant(0, Type::I64);
+        let is_null = self.emit_one(
+            Op::Compare {
+                condition: Condition::Eq,
+                signed: false,
+            },
+            &[bits, zero],
+            ValueType::scalar(Type::I8),
+            Origin::None,
+        );
+        let word = self.emit_one(
+            Op::Select,
+            &[is_null, zero, word],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        self.emit_one(
+            Op::Convert(Conversion::IntToPointer),
+            &[word],
+            ValueType::pointer(Provenance::Raw),
+            Origin::None,
+        )
+    }
+
+    /// 把压缩字写入环境 capture 槽并显式登记写屏障。
+    ///
+    /// 槽内容按对象头表示是压缩引用，但压缩字本身是 `pointer(Raw)`，`store()` 的自动屏障
+    /// 只看 value provenance 不会触发，因此这里按 hybrid barrier 的形状手写一次：
+    /// 先读旧值再 Store，屏障操作数与 store 的目标/新值严格一致。
+    pub(super) fn store_compressed_slot(&mut self, slot: ValueId, word: ValueId) {
+        let old = self.load(slot, ValueType::pointer(Provenance::Raw), 8, false);
+        let store = InstId(id(self.body.instructions.len()));
+        let alias = self.alias(slot);
+        self.emit(
+            Op::Store(Access {
+                alias,
+                align: 8,
+                volatile: false,
+            }),
+            &[slot, word],
+            &[],
+        );
+        self.emit(Op::GcWriteBarrier { store }, &[slot, old, word], &[]);
     }
 
     pub(super) fn descriptor(&mut self, ty: u32) -> ValueId {

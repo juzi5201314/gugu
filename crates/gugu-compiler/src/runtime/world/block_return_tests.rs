@@ -15,7 +15,7 @@ use crate::runtime::slab::RawInvariant;
 
 fn old_leaf(world: &mut RawWorld) -> (u64, ManagedBlockId) {
     let address = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
         .expect("leaf 可分配");
     let block = world
         .managed_block_ref(0, address)
@@ -188,7 +188,7 @@ fn pin_rejects_heap_block_publish() {
 fn nursery_block_never_queues_heap_block() {
     let mut world = heap_world();
     let address = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Nursery, false)
         .expect("nursery 对象可分配");
     let block = world
         .managed_block_ref(0, address)
@@ -206,7 +206,7 @@ fn cross_owner_return_lands_on_manager_ledger() {
     let mut world = configured_world(&contract, 11, 2, 64);
     let (address, block) = {
         let address = world
-            .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+            .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
             .expect("leaf 可分配");
         let block = world
             .managed_block_ref(0, address)
@@ -227,7 +227,7 @@ fn forwarding_token_forwards_managed_return() {
     let mut world = configured_world(&contract, 13, 2, 64);
     let (_address, block) = {
         let address = world
-            .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+            .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
             .expect("leaf 可分配");
         let block = world
             .managed_block_ref(0, address)
@@ -324,7 +324,7 @@ fn large_mapping_returns_as_one_unit() {
     let mut world = heap_world();
     let big = u64::from(GC_BLOCK_BYTES) + 64;
     let address = world
-        .allocate_managed(0, 0, big, ManagedPlacement::Old)
+        .allocate_managed(0, 0, big, ManagedPlacement::Old, false)
         .expect("大对象可分配");
     let start = world
         .managed_block_ref(0, address)
@@ -349,7 +349,7 @@ fn large_mapping_returns_as_one_unit() {
 fn resource_arena_never_queues_heap_arena() {
     let mut world = heap_world();
     let address = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Resource)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Resource, false)
         .expect("resource 对象可分配");
     let block = world
         .managed_block_ref(0, address)
@@ -375,7 +375,7 @@ fn line_run_queues_on_partial_sweep() {
     let mut world = heap_world();
     let (live, block) = old_leaf(&mut world);
     let extra = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
         .expect("第二对象可分配");
     let extra_block = world
         .managed_block_ref(0, extra)
@@ -409,7 +409,7 @@ fn line_run_queues_on_partial_sweep() {
 /// 分配直到出现两个不同的 block；返回它们，块内对象全部未标记。
 fn fill_two_blocks(world: &mut RawWorld) -> (ManagedBlockId, ManagedBlockId) {
     let first = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
         .expect("leaf 可分配");
     let first_block = world
         .managed_block_ref(0, first)
@@ -417,7 +417,7 @@ fn fill_two_blocks(world: &mut RawWorld) -> (ManagedBlockId, ManagedBlockId) {
         .id;
     loop {
         let next = world
-            .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+            .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
             .expect("leaf 可分配");
         let block = world
             .managed_block_ref(0, next)
@@ -438,7 +438,7 @@ fn fill_two_blocks(world: &mut RawWorld) -> (ManagedBlockId, ManagedBlockId) {
 fn releasing_a_block_preserves_earlier_block_object_start_bits() {
     let mut world = heap_world();
     let first = world
-        .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+        .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
         .expect("leaf 可分配");
     let first_block = world
         .managed_block_ref(0, first)
@@ -449,7 +449,7 @@ fn releasing_a_block_preserves_earlier_block_object_start_bits() {
     let mut survivor = first;
     let (second, second_block) = loop {
         let next = world
-            .allocate_managed(0, 1, 8, ManagedPlacement::Old)
+            .allocate_managed(0, 1, 8, ManagedPlacement::Old, false)
             .expect("leaf 可分配");
         let block = world
             .managed_block_ref(0, next)
@@ -550,7 +550,7 @@ fn large_span_members_stay_out_of_candidates() {
     let mut world = heap_world();
     let big = u64::from(GC_BLOCK_BYTES) + 64;
     let address = world
-        .allocate_managed(0, 1, big, ManagedPlacement::Old)
+        .allocate_managed(0, 1, big, ManagedPlacement::Old, false)
         .expect("大对象可分配");
     let start = world
         .managed_block_ref(0, address)
@@ -574,7 +574,7 @@ fn large_span_members_stay_out_of_candidates() {
         "存活大对象不得被成员块的试验删除判死"
     );
     let second = world
-        .allocate_managed(0, 1, big, ManagedPlacement::Old)
+        .allocate_managed(0, 1, big, ManagedPlacement::Old, false)
         .expect("第二个大对象可分配");
     let second_start = world
         .managed_block_ref(0, second)
@@ -626,7 +626,7 @@ fn arena_return_retires_the_arena() {
     // 每个大对象占 2 个 block，32 个恰好填满一个 64-block arena。
     for _ in 0..32 {
         world
-            .allocate_managed(0, 1, big, ManagedPlacement::Old)
+            .allocate_managed(0, 1, big, ManagedPlacement::Old, false)
             .expect("大对象可分配");
     }
     let descriptor = world.managed_arenas()[0].descriptor;
@@ -649,7 +649,7 @@ fn arena_return_retires_the_arena() {
     world.managed_ledger_invariant(0).expect("摘除后账本守恒");
     // 后续分配必须走新登记的新 arena，且不会命中没有页的旧块。
     let address = world
-        .allocate_managed(0, 1, big, ManagedPlacement::Old)
+        .allocate_managed(0, 1, big, ManagedPlacement::Old, false)
         .expect("新 arena 可分配");
     assert!(world.managed_object(address).is_ok());
     world

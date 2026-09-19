@@ -560,6 +560,7 @@ impl Builder<'_> {
                 descriptor,
                 align,
                 placement,
+                compressed: false,
             },
             &[bytes],
             ValueType::pointer(Provenance::GcHeap),
@@ -645,6 +646,8 @@ impl Builder<'_> {
         }
         let (placement, region) = self.environment_placement();
         let shared = placement == PlacementKind::SharedHeap;
+        // 压缩判定与世界扫描同源：TurnRegion / Shared 环境不压缩，capture 槽保持全指针。
+        let compressed = !shared && self.compressed_environment(definition)?;
         let mut captures = Vec::with_capacity(owner.captures.len());
         let mut shared_values = Vec::with_capacity(owner.captures.len());
         let mut shared_bytes = 0u64;
@@ -714,7 +717,8 @@ impl Builder<'_> {
             descriptor,
             bytes,
             // 共享环境按值保存数据与 handle，不含 LocalHeap 的 managed 根；环境自身的移动由
-            // stable handle 与 forwarding grace 负责，因此这里不登记 root。
+            // stable handle 与 forwarding grace 负责，因此这里不登记 root。压缩环境的槽是
+            // 压缩字，root 按压缩引用种类登记；其余环境保存 direct cell 地址。
             roots: if shared {
                 Vec::new()
             } else {
@@ -724,7 +728,11 @@ impl Builder<'_> {
                     .map(|(index, value)| {
                         (
                             u64::try_from(index).expect("捕获编号") * 8,
-                            self.machine_type(*value).provenance.expect("捕获槽为指针"),
+                            if compressed {
+                                Provenance::CompressedRef
+                            } else {
+                                self.machine_type(*value).provenance.expect("捕获槽为指针")
+                            },
                         )
                     })
                     .collect()
@@ -733,11 +741,17 @@ impl Builder<'_> {
         // 闭包环境是唯一存活的 managed 分配点：placement 已证明它属于当前 turn 的私有
         // region 时走 `RegionAlloc`，否则按证明结果选择 stable storage。
         if !shared {
-            let environment = self.allocate_descriptor(descriptor, 8, bytes, placement, region)?;
+            let environment =
+                self.allocate_descriptor(descriptor, 8, bytes, placement, region, compressed)?;
             for (index, pointer) in captures.into_iter().enumerate() {
                 let destination =
                     self.offset(environment, u64::try_from(index).expect("捕获编号") * 8);
-                self.store(destination, pointer, 8, false);
+                if compressed {
+                    let word = self.encode_compressed_word(pointer);
+                    self.store_compressed_slot(destination, word);
+                } else {
+                    self.store(destination, pointer, 8, false);
+                }
             }
             return Ok(environment);
         }
@@ -745,7 +759,8 @@ impl Builder<'_> {
         for (local_id, _) in &shared_values {
             values.push(self.read_place(g::Place::local(*local_id))?);
         }
-        let environment = self.allocate_descriptor(descriptor, 8, bytes, placement, region)?;
+        let environment =
+            self.allocate_descriptor(descriptor, 8, bytes, placement, region, false)?;
         self.begin_shared(environment);
         let mut offset = 0u64;
         for ((_, ty), computed) in shared_values.iter().zip(values) {

@@ -18,7 +18,7 @@ CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline
 
 LIR 后端严格按以下顺序运行：
 
-1. `Legalize`：把剩余高层 operation 变成 baseline 可表达序列；
+1. `Legalize`：把剩余高层 operation 变成 baseline 可表达序列；`DecodeCompressedRef` 由此展成 cage id 抽取、generation 校验、offset/bounds 检查与基址拼回的完整机器码序列（LIR 层只产出该 op 本身，见[内存 owner lowering](gir-lir.md#memory-owner-lowering)）；
 2. `SelectInstructions`：选择 x86_64 opcode、address mode 和 fixed-register constraint；
 3. `ScheduleBlocks`：固定 block layout、fallthrough 和冷路径；
 4. `BuildLiveIntervals`：计算物理 register class、liveness 和 call/safepoint constraint；

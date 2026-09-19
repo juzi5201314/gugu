@@ -16,7 +16,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub(crate) const SCHEMA: u32 = 3;
+pub(crate) const SCHEMA: u32 = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -565,6 +565,7 @@ pub(crate) fn build(
     gir: &gir::GirWorldV1,
     mono: &mono::MonoWorldV1,
     target: crate::TargetName,
+    compression: crate::runtime::CompressionPolicyV1,
     queries: &QueryEngine,
     sources: &crate::SourceMap,
 ) -> Result<Validated, Vec<Diagnostic>> {
@@ -577,6 +578,9 @@ pub(crate) fn build(
     hash.update(&mono.universe.fingerprint);
     hash.update(&mono.late.fingerprint);
     hash.update(target.as_bytes());
+    // cage profile 参与 LIR 输入身份：开启与关闭产生不同的 lowering 与解码点集合。
+    hash.update(&[u8::from(compression.enabled)]);
+    hash.update(&compression.cage_bytes.to_le_bytes());
     let fingerprint = *hash.finalize().as_bytes();
     let mut bodies = Vec::with_capacity(gir.concrete.len());
     for concrete in &gir.concrete {
@@ -607,12 +611,20 @@ pub(crate) fn build(
                 QueryKey::new(QueryKind::EvaluateLateComptime, 1, mono.graph_fingerprint),
                 mono.late.fingerprint,
             );
-            let body = build::lower(concrete, hir.module(), gir, mono, &target, fingerprint)
-                .and_then(|body| {
-                    verify::verify_structure(&body, hir.module())?;
-                    Ok(body)
-                })
-                .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
+            let body = build::lower(
+                concrete,
+                hir.module(),
+                gir,
+                mono,
+                &target,
+                fingerprint,
+                compression,
+            )
+            .and_then(|body| {
+                verify::verify_structure(&body, hir.module())?;
+                Ok(body)
+            })
+            .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
             Ok((
                 serde_json::to_vec(&body).expect("LIR body 可序列化"),
                 Vec::new(),

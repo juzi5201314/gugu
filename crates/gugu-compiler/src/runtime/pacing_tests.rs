@@ -1073,14 +1073,14 @@ fn pressure_cycle_runs_mark_pass_and_sweeps_when_gc_is_configured() {
         .register_managed_root(GcRootKindV1::CoroutineFrame, 0)
         .expect("根槽可登记");
     let nursery = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Nursery, false)
         .expect("对象可分配");
     world.set_managed_root(slot, nursery).expect("根可写");
     // minor 把根对象搬进 old generation，sweep 才可能回收它所在 arena 的未标记对象。
     world.collect_minor(0).expect("minor 可执行");
     let live = world.managed_root(slot).expect("根可读");
     let dead = world
-        .allocate_managed(0, 0, 16, ManagedPlacement::Pinned)
+        .allocate_managed(0, 0, 16, ManagedPlacement::Pinned, false)
         .expect("old 对象可分配");
     let report = world.run_gc_cycle(false).expect("cycle 可执行");
     assert_eq!(report.remark, RemarkOutcome::Complete);

@@ -136,11 +136,14 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && r == [Type::Ptr]
                     && results[0].provenance == Some(Provenance::SharedHandle)
             }
+            // 解码结果是普通 GcHeap 引用：可以进入 Capture storage、赋给 local 或参与合流，
+            // 不需要对 PtrOffset / cast / merge 的任何放宽。真实 lowering 只产出 GcHeap
+            // 结果；`CompressedRef` 作为类型保留给契约机制与手工插入测试。
             Op::DecodeCompressedRef => {
                 a.len() == 1
                     && matches!(a[0], Type::Ptr | Type::I32 | Type::I64)
                     && r == [Type::Ptr]
-                    && results[0].provenance == Some(Provenance::CompressedRef)
+                    && results[0].provenance == Some(Provenance::GcHeap)
             }
             Op::SharedAccessBegin { .. } => a == [Type::Ptr] && r.is_empty(),
             Op::SharedAccessEnd { .. } | Op::ScopedViewEnd { .. } => a.is_empty() && r.is_empty(),
