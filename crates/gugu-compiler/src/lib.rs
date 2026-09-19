@@ -37,19 +37,21 @@ pub use project::{
 pub use runtime::{
     BarrierDemand, BarrierRuntimeContract, BlockReturnDemand, BlockReturnHarness,
     BlockReturnReport, BlockReturnRuntimeContract, CardMarkHarness, CardMarkReport,
-    ChannelWaitHarness, ChannelWaitReport, CompressionDemand, CompressionHarness,
-    CompressionPolicyV1, CompressionReport, CompressionRuntimeContract, ContextSwitchCode,
-    CoroutineContext, CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout,
-    CoroutineRuntimeContract, EdgeCandidateHarness, EdgeCandidateReport, EdgeDemand,
-    EdgeRuntimeContract, GcMetadataDemand, GcPacingDemand, GcPacingRuntimeContract, HarnessReport,
-    HeapTriggerProfile, IntrinsicBoundary, LocalHeapDemand, LocalHeapRuntimeContract, MarkDemand,
-    MarkRuntimeContract, OwnerReturnHarness, PlatformRangeDemand, RegionTransferHarness,
-    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary,
-    RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand, SchedulerRuntimeContract,
-    SharedForwardHarness, SharedForwardReport, SharedHeapDemand, SharedHeapRuntimeContract,
-    StackMapDemand, StackPolicy, SyncDemand, SyncLockHarness, SyncLockReport, SyncRuntimeContract,
-    TurnRegionDemand, TurnRegionRuntimeContract, WaitDemand, WaitRuntimeContract,
+    ChannelWaitHarness, ChannelWaitReport, ColdPathHarness, ColdPathReport, CompressionDemand,
+    CompressionHarness, CompressionPolicyV1, CompressionReport, CompressionRuntimeContract,
+    ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
+    CoroutineRecordLayout, CoroutineRuntimeContract, EdgeCandidateHarness, EdgeCandidateReport,
+    EdgeDemand, EdgeRuntimeContract, GcMetadataDemand, GcPacingDemand, GcPacingRuntimeContract,
+    HarnessReport, HeapTriggerProfile, IntrinsicBoundary, LocalHeapDemand,
+    LocalHeapRuntimeContract, MarkDemand, MarkRuntimeContract, OwnerReturnHarness,
+    PlatformRangeDemand, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
+    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
+    SchedulerDemand, SchedulerRuntimeContract, SharedForwardHarness, SharedForwardReport,
+    SharedHeapDemand, SharedHeapRuntimeContract, StackMapDemand, StackPolicy, SyncDemand,
+    SyncLockHarness, SyncLockReport, SyncRuntimeContract, TurnRegionDemand,
+    TurnRegionRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
+pub use runtime::{CombiningDemand, CombiningMode, CombiningPolicyV1, CombiningRuntimeContract};
 pub use runtime::{ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract, SafetyProfile};
 pub use runtime::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
 pub use source::{
@@ -83,6 +85,7 @@ pub struct CompileRequest {
     compression: CompressionPolicyV1,
     routing: RoutingPolicyV1,
     provenance: ProvenancePolicyV1,
+    combining: CombiningPolicyV1,
 }
 
 impl CompileRequest {
@@ -94,6 +97,7 @@ impl CompileRequest {
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
+            combining: CombiningPolicyV1::direct(),
         }
     }
 
@@ -112,6 +116,7 @@ impl CompileRequest {
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
+            combining: CombiningPolicyV1::direct(),
         }
     }
 
@@ -127,6 +132,7 @@ impl CompileRequest {
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
+            combining: CombiningPolicyV1::direct(),
         }
     }
 
@@ -142,6 +148,7 @@ impl CompileRequest {
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
+            combining: CombiningPolicyV1::direct(),
         }
     }
 
@@ -179,6 +186,7 @@ impl CompileRequest {
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
+            combining: CombiningPolicyV1::direct(),
         }
     }
 
@@ -206,6 +214,16 @@ impl CompileRequest {
     /// provenance 平面。
     pub fn with_provenance_policy(mut self, policy: ProvenancePolicyV1) -> Self {
         self.provenance = policy;
+        self
+    }
+
+    /// 显式设置 combining profile；默认 direct，即冷操作在请求者上下文直接执行。
+    ///
+    /// mode 是 runtime tuning profile：combined 只在显式开启后把同一批冷操作记录进
+    /// 非移动 operation record 池并按轮次合并执行，不改变编译语义，只随 raw policy
+    /// 进入契约与 action key，供世界、bench 与确定性测试按契约配置 combining 平面。
+    pub fn with_combining_policy(mut self, policy: CombiningPolicyV1) -> Self {
+        self.combining = policy;
         self
     }
 }
@@ -359,6 +377,7 @@ impl Compiler {
             compression,
             routing,
             provenance,
+            combining,
         } = request;
         let mut graph = ActionGraph::new();
         let mut diagnostics = Diagnostics::default();
@@ -553,6 +572,7 @@ impl Compiler {
                     compression,
                     routing,
                     provenance,
+                    combining,
                     ..RawPlanePolicyV1::default()
                 },
                 demand,
@@ -1188,6 +1208,9 @@ pub struct ImagePlan {
     provenance_contract_fingerprint: [u8; 32],
     provenance_demand: crate::runtime::ProvenanceDemand,
     provenance_runtime: crate::runtime::ProvenanceRuntimeContract,
+    combining_contract_fingerprint: [u8; 32],
+    combining_demand: crate::runtime::CombiningDemand,
+    combining_runtime: crate::runtime::CombiningRuntimeContract,
     mark_contract_fingerprint: [u8; 32],
     mark_demand: crate::runtime::MarkDemand,
     mark_runtime: crate::runtime::MarkRuntimeContract,
@@ -1377,6 +1400,9 @@ impl ImagePlan {
             provenance_contract_fingerprint: plan.provenance_contract_fingerprint,
             provenance_demand: plan.provenance_demand,
             provenance_runtime: plan.provenance_runtime,
+            combining_contract_fingerprint: plan.combining_contract_fingerprint,
+            combining_demand: plan.combining_demand,
+            combining_runtime: plan.combining_runtime,
             mark_contract_fingerprint: plan.mark_contract_fingerprint,
             mark_demand: plan.mark_demand,
             mark_runtime: plan.mark_runtime,
@@ -1981,6 +2007,21 @@ impl ImagePlan {
     /// 返回已验证的 raw link provenance 与 release 安全 profile 契约段。
     pub fn provenance_runtime(&self) -> &crate::runtime::ProvenanceRuntimeContract {
         &self.provenance_runtime
+    }
+
+    /// 返回 typed combining 契约指纹。
+    pub fn combining_contract_fingerprint(&self) -> [u8; 32] {
+        self.combining_contract_fingerprint
+    }
+
+    /// 返回 typed combining 需求视图。
+    pub fn combining_demand(&self) -> crate::runtime::CombiningDemand {
+        self.combining_demand
+    }
+
+    /// 返回已验证的 typed combining 冷操作契约段。
+    pub fn combining_runtime(&self) -> &crate::runtime::CombiningRuntimeContract {
+        &self.combining_runtime
     }
 
     /// 返回 mark 契约指纹。

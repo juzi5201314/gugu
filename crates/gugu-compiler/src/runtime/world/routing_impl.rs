@@ -229,8 +229,13 @@ impl RawWorld {
     }
 
     /// 记录 owner directory 的 topology epoch 变化；retire 路径在 epoch 前进后调用。
+    ///
+    /// 目录 epoch 前进意味着 owner 集合或 owner 状态刚发生变化，因此这里同时请求一次
+    /// topology 索引重建：combined 模式下这次重建成一条 typed cold operation，direct
+    /// 模式直接在请求者上下文执行。
     pub(crate) fn observe_routing_topology(&mut self) -> Result<(), RawInvariant> {
-        self.routing.observe_topology(self.directory.epoch())
+        self.routing.observe_topology(self.directory.epoch())?;
+        self.request_topology_rebuild()
     }
 }
 

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::barrier_schema::{BarrierDemand, BarrierRuntimeContract, MessageFamilyTag};
 use super::block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
+use super::combining_schema::{CombiningDemand, CombiningPolicyV1, CombiningRuntimeContract};
 use super::compression_schema::{
     CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract,
 };
@@ -47,10 +48,10 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 22 相对版本 21 的变化：并入 `ProvenanceRuntimeContract`（释放 provenance 检查
-/// 目录、per-domain secret 登记与管理规则、release/debug/security 安全 profile 的检查
-/// 绑定、拒绝分类、统计口径、`ProvenanceDemand`），并把 raw policy revision 升到 4。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 22;
+/// 版本 23 相对版本 22 的变化：并入 `CombiningRuntimeContract`（冷操作 tag 目录、允许与
+/// 禁止用途、operation record 字段集合、生命周期状态与迁移、同步路径目录、合并与轮次
+/// 预算、非移动记录池上界、`CombiningDemand`），并把 raw policy revision 升到 5。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 23;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -155,6 +156,12 @@ pub(crate) enum FieldKind {
     Delta,
     /// shared payload 的逻辑身份；与地址类字段严格分离。
     PayloadIdentity,
+    /// typed combining 的同类合并键。
+    MergeKey,
+    /// typed combining 的标量参数。
+    Scalar,
+    /// typed combining 的 response slot。
+    ResponseSlot,
 }
 
 impl FieldKind {
@@ -189,6 +196,9 @@ impl FieldKind {
             Self::Sequence => "sequence",
             Self::Delta => "delta",
             Self::PayloadIdentity => "payload-identity",
+            Self::MergeKey => "merge-key",
+            Self::Scalar => "scalar",
+            Self::ResponseSlot => "response-slot",
         }
     }
 
@@ -464,12 +474,14 @@ pub(crate) struct RawPlanePolicyV1 {
     pub(crate) routing: RoutingPolicyV1,
     /// release 安全 profile 开关；默认 release 即基线 provenance 检查语义。
     pub(crate) provenance: ProvenancePolicyV1,
+    /// combining profile 开关；默认 direct 即冷操作不进记录池。
+    pub(crate) combining: CombiningPolicyV1,
 }
 
 impl Default for RawPlanePolicyV1 {
     fn default() -> Self {
         Self {
-            revision: 4,
+            revision: 5,
             shards: OWNER_INBOX_SHARDS,
             limits: BatchLimits::default(),
             return_node_bytes: RETURN_NODE_BYTES,
@@ -485,6 +497,7 @@ impl Default for RawPlanePolicyV1 {
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::direct(),
             provenance: ProvenancePolicyV1::release(),
+            combining: CombiningPolicyV1::direct(),
         }
     }
 }
@@ -547,6 +560,7 @@ pub(crate) struct RuntimeRawContractV1 {
     compression: CompressionRuntimeContract,
     routing: RoutingRuntimeContract,
     provenance: ProvenanceRuntimeContract,
+    combining: CombiningRuntimeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -636,6 +650,10 @@ impl RuntimeRawContractV1 {
             ),
             policy.provenance,
         )?;
+        // combining 契约由 tag 目录与记录池需求驱动：direct 是默认且不创建记录，combined
+        // 只在 profile 开启后把四条冷路径记录进非移动池；需求推导集中在 `combining_demand`。
+        let combining =
+            CombiningRuntimeContract::build(combining_demand(&demand), policy.combining)?;
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -668,6 +686,7 @@ impl RuntimeRawContractV1 {
             compression,
             routing,
             provenance,
+            combining,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -895,6 +914,11 @@ impl RuntimeRawContractV1 {
         &mut self.provenance
     }
 
+    /// 返回 typed combining 冷操作契约段。
+    pub(crate) fn combining(&self) -> &CombiningRuntimeContract {
+        &self.combining
+    }
+
     /// 返回 `HandleForward` 消息字段集合。
     pub(crate) fn handle_forward_message(&self) -> &MessageSchemaV1 {
         self.shared_heap.handle_forward_fields()
@@ -1103,6 +1127,14 @@ impl RuntimeRawContractV1 {
         {
             return Err(RawModelError::new("provenance 需求与 raw 平面派生值不一致"));
         }
+        self.combining.verify()?;
+        // combining 模式同样以 policy 为唯一来源：契约段与 raw policy 的模式必须一致。
+        if self.policy.combining.mode != self.combining.mode {
+            return Err(RawModelError::new("combining 契约段与 raw policy 不一致"));
+        }
+        if self.combining.demand != combining_demand(&self.demand) {
+            return Err(RawModelError::new("combining 需求与 raw 平面派生值不一致"));
+        }
         if self.block_return.demand()
             != BlockReturnDemand::derive(&self.local_heap.demand(), &self.shared_heap.demand)?
         {
@@ -1219,6 +1251,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.compression.canonical_bytes());
         bytes.extend_from_slice(&self.routing.canonical_bytes());
         bytes.extend_from_slice(&self.provenance.canonical_bytes());
+        bytes.extend_from_slice(&self.combining.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1456,6 +1489,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.compression.dump());
         output.push_str(&self.routing.dump());
         output.push_str(&self.provenance.dump());
+        output.push_str(&self.combining.dump());
         output.push_str(&format!(
             "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} edge-delta-fields={} handle-forward-fields={} card-mark-family={}\n",
             self.message.fields.len(),
@@ -1485,6 +1519,18 @@ fn platform_range_demand(demand: &RawPlaneDemand) -> PlatformRangeDemand {
         demand.coroutine_sites,
         demand.resource_sites,
         demand.runtime_raw_sites,
+    )
+}
+
+/// 由 plane 需求视图推导 combining 记录池需求下界。
+///
+/// 规则集中在 `CombiningDemand::derive`；契约只做交叉校验，不重复定义推导。
+fn combining_demand(demand: &RawPlaneDemand) -> CombiningDemand {
+    CombiningDemand::derive(
+        demand.owners,
+        demand.runtime_raw_sites,
+        demand.resource_sites,
+        u32::try_from(super::extent::EXTENT_CLASS_LADDER.len()).expect("extent class 数量适配 u32"),
     )
 }
 

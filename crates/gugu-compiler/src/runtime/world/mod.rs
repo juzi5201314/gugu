@@ -8,6 +8,7 @@ pub(crate) mod barrier_impl;
 pub(crate) mod block_return_impl;
 mod cage_impl;
 pub(crate) mod candidate_impl;
+pub(crate) mod combining_impl;
 pub(crate) mod coroutine_impl;
 pub(crate) mod edge_impl;
 mod extent_impl;
@@ -86,6 +87,10 @@ mod world_routing_tests;
 #[cfg(test)]
 #[path = "cage_tests.rs"]
 mod world_cage_tests;
+
+#[cfg(test)]
+#[path = "combining_tests.rs"]
+mod world_combining_tests;
 
 #[cfg(test)]
 pub(crate) use extent_impl::OWNER_ARENA_BYTES;
@@ -211,6 +216,12 @@ pub(crate) struct RawWorld {
     return_caches: Vec<ReturnSlabCache>,
     /// temporal radix fan-out 平面；按契约路由模式分流 return 族的发布。
     routing: super::routing::RoutingPlane,
+    /// typed combining 平面；冷路径按契约模式逐条执行或记录进非移动池。
+    combining: super::combining::CombiningPlane,
+    /// 每个 combiner 槽位的平台 wait 字；direct 模式不登记，combined 模式配置时建立。
+    combining_words: Vec<super::provider::WaitWordId>,
+    /// owner token → combiner 槽位与 extent 归还目标的稠密索引。
+    topology: combining_impl::TopologyIndex,
     /// GC debt、owner credit、pacing 与 pressure episode 的执行平面。
     pacing: super::pacing::PacingPlane,
     /// TurnRegion 私有区与 `RegionTransfer` 投递平面；按已构建的契约配置。
@@ -346,6 +357,9 @@ impl RawWorld {
             return_stagings: (0..owners).map(|_| ProducerStaging::new(limits)).collect(),
             return_caches: (0..owners).map(|_| ReturnSlabCache::new()).collect(),
             routing: routing_impl::default_plane(),
+            combining: combining_impl::default_plane(owners.saturating_mul(2).saturating_add(1)),
+            combining_words: Vec::new(),
+            topology: combining_impl::TopologyIndex::new(),
             regions: None,
             local_heap_contract: None,
             shared_heap_contract: None,
@@ -380,6 +394,9 @@ impl RawWorld {
             let resource_token = world.resource_owners[owner as usize].token();
             world.open_arena(owner, resource_token, MemoryDomainId::RESOURCE)?;
         }
+        // owner 集合在 `new` 里就固定下来，索引因此必须在返回可用的世界之前建成：
+        // `owner_slot`、`extent_owner_index` 与 combiner 槽位解析都只查这张表。
+        world.rebuild_topology_inline();
         Ok(world)
     }
 
@@ -1112,6 +1129,10 @@ impl RawWorld {
         if forwarded > 0 {
             inbox.record_forward(shard, u64::from(forwarded));
         }
+        // owner 上下文顺带推进本 owner 的两条 combiner 队列（raw 与 resource）：争用时挂链
+        // 的冷操作不会在请求者上下文执行，必须由 owner 的 service 点收尾。空队列与已打开
+        // 的轮次都不开轮，因此这里是一次 O(1) 字段读取。
+        self.drain_owner_combining(owner)?;
         let _ = consumed;
         Ok(DrainReport {
             items: snapshot.nodes().len() as u32,
@@ -1130,7 +1151,13 @@ impl RawWorld {
     ) -> Result<(u32, u32), RawInvariant> {
         // drain 之后 owner 不再跑代码，本 owner 的 card 键必须已经离开 processor 账本。
         self.flush_all_barriers(owner, BarrierFlushReason::ProducerStopGate)?;
-        self.drain_inboxes(owner, budget, true)
+        let drained = self.drain_inboxes(owner, budget, true)?;
+        // owner 停止前把本 owner 两条 combiner 队列与 domain 队列上的挂链冷操作结清：
+        // 之后不会再有 owner 上下文来推进它们，遗留记录只能等超时。
+        self.drain_owner_combining(owner)?;
+        let domain_slot = self.combiner_queue_count() - 1;
+        self.drain_combining(domain_slot)?;
+        Ok(drained)
     }
 
     fn forward_message(
@@ -1161,16 +1188,27 @@ impl RawWorld {
     }
 
     /// 把 owner token 映射到 inbox 槽位；raw owner 与 resource owner 各占一个槽位。
+    ///
+    /// 槽位由 `topology` 稠密索引给出，并在这里用列表里登记的 token 复核一次：索引与
+    /// owner 集合只要有一次没有同步，查询就按未登记处理，而不是把消息投给错误的 owner。
     pub(super) fn owner_slot(&self, token: &OwnerToken) -> Result<usize, RawInvariant> {
-        self.owners
-            .iter()
-            .position(|owner| &owner.token() == token)
-            .or_else(|| {
-                self.resource_owners
-                    .iter()
-                    .position(|owner| &owner.token() == token)
-            })
-            .ok_or_else(|| RawInvariant::new("目标 owner 没有登记的 inbox 槽位"))
+        let index = self
+            .topology
+            .slot(token)
+            .ok_or_else(|| RawInvariant::new("目标 owner 没有登记的 inbox 槽位"))?;
+        let owners = if token.domain == MemoryDomainId::RESOURCE {
+            &self.resource_owners
+        } else {
+            &self.owners
+        };
+        let registered = usize::try_from(index)
+            .ok()
+            .and_then(|index| owners.get(index))
+            .map(|owner| owner.token());
+        if registered.as_ref() != Some(token) {
+            return Err(RawInvariant::new("目标 owner 没有登记的 inbox 槽位"));
+        }
+        usize::try_from(index).map_err(|_| RawInvariant::new("owner 槽位编号越过 usize"))
     }
 
     pub(super) fn inbox_for(&self, token: &OwnerToken) -> Result<Arc<OwnerInbox>, RawInvariant> {

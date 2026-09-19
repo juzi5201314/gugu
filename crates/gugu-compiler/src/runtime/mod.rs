@@ -34,6 +34,18 @@ mod channel;
 mod channel_layout;
 #[allow(
     dead_code,
+    reason = "typed combining 参照实现由确定性测试与 bench 消费"
+)]
+mod combining;
+#[allow(
+    dead_code,
+    reason = "typed combining 契约段由 runtime raw、ImagePlan 与 CLI 消费"
+)]
+pub(crate) mod combining_schema;
+#[cfg(test)]
+mod combining_tests;
+#[allow(
+    dead_code,
     reason = "压缩契约段由 runtime raw、world、栈图 walker 与 ImagePlan 消费"
 )]
 pub(crate) mod compression_schema;
@@ -142,6 +154,9 @@ mod wait;
 mod wait_schema;
 
 pub use barrier_schema::{BarrierDemand, BarrierRuntimeContract};
+pub use combining_schema::{
+    CombiningDemand, CombiningMode, CombiningPolicyV1, CombiningRuntimeContract,
+};
 pub use context::ContextSwitchCode;
 pub use coroutine::CoroutineContext;
 pub use coroutine_schema::{
@@ -239,10 +254,10 @@ mod trace_tests;
 
 pub use harness::{
     BlockReturnHarness, BlockReturnReport, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
-    ChannelWaitReport, CompressionHarness, CompressionReport, EdgeCandidateHarness,
-    EdgeCandidateReport, HarnessReport, OwnerReturnHarness, RegionTransferHarness,
-    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, SharedForwardHarness,
-    SharedForwardReport, SyncLockHarness, SyncLockReport,
+    ChannelWaitReport, ColdPathHarness, ColdPathReport, CompressionHarness, CompressionReport,
+    EdgeCandidateHarness, EdgeCandidateReport, HarnessReport, OwnerReturnHarness,
+    RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport,
+    SharedForwardHarness, SharedForwardReport, SyncLockHarness, SyncLockReport,
 };
 
 #[cfg(test)]

@@ -655,6 +655,53 @@ fn build_json_reports_provenance_contract_keys() {
     );
 }
 
+/// combining 契约键随镜像计划输出；默认 direct mode，指纹随契约内容出现。
+#[test]
+fn build_json_reports_combining_contract_keys() {
+    let source = "fn main() {\n}\n";
+    let compilation =
+        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+            "main.gg",
+            source,
+            gugu_compiler::TargetName::X86_64Linux,
+        ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    let payload = super::output::image_plan_payload(plan);
+    for key in [
+        "combining-contract-fingerprint",
+        "combining-demand",
+        "combining-runtime",
+        "combining-profile",
+        "combining-profile-revision",
+        "combining-mode",
+        "combining-operation-tag-count",
+        "combining-merge-limit",
+        "combining-round-item-budget",
+        "combining-round-byte-budget",
+    ] {
+        assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
+    }
+    assert_eq!(payload["combining-profile"], "mosaic-combining");
+    assert_eq!(payload["combining-profile-revision"], 1);
+    assert_eq!(payload["combining-mode"], "direct");
+    assert_eq!(payload["combining-operation-tag-count"], 4);
+    assert_eq!(payload["combining-merge-limit"], 4);
+    assert_eq!(payload["combining-round-item-budget"], 8);
+    assert_eq!(payload["combining-round-byte-budget"], 1 << 20);
+    assert_eq!(payload["combining-demand"]["owners"], 0);
+    let fingerprint = payload["combining-contract-fingerprint"]
+        .as_array()
+        .expect("指纹是字节数组");
+    assert_eq!(fingerprint.len(), 32);
+    assert!(fingerprint.iter().any(|byte| byte != &serde_json::json!(0)));
+    assert_eq!(payload["combining-runtime"]["profile"], "mosaic-combining");
+}
+
 /// sender 在 send 之后仍使用闭包时必须落 SharedHeap；JSON 契约键与 dump 同源。
 #[test]
 fn build_json_reports_shared_heap_contract_keys() {

@@ -825,7 +825,7 @@ fn contract_fingerprint_is_deterministic_and_policy_sensitive() {
     assert_eq!(first.fingerprint(), second.fingerprint());
     assert_eq!(first.canonical_bytes(), second.canonical_bytes());
     let revised = RawPlanePolicyV1 {
-        revision: 5,
+        revision: RawPlanePolicyV1::default().revision.wrapping_add(1),
         ..RawPlanePolicyV1::default()
     };
     let third = RuntimeRawContractV1::build(

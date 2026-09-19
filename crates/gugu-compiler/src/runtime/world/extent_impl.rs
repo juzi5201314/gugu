@@ -27,6 +27,7 @@ use super::super::slab::{
 };
 use super::PendingExtentTrim;
 use super::RawWorld;
+use super::combining_impl::OperationRequest;
 use super::heap_impl::heap_error;
 use super::shared_heap_impl;
 
@@ -173,21 +174,48 @@ impl RawWorld {
 
     /// 归还一个 extent：先撤销它的物理页，再合并回 buddy 阶梯。
     ///
-    /// 调用者必须先通过 `poll_trim` 的四条门禁；这里只执行平台侧动作。
-    pub(super) fn trim_extent(&mut self, extent: ExtentId) -> Result<u64, RawInvariant> {
+    /// 两条动作是两条独立的 typed cold operation：`platform-trim` 只撤销页，
+    /// `extent-coalesce` 只做 buddy 合并。调用者必须先通过 `poll_trim` 的四条门禁；
+    /// 这里返回的是被撤销的物理字节数，两次操作都必须真正 applied，否则范围操作会被
+    /// 静默跳过——那正是 combining 契约禁止的结果。
+    pub(super) fn apply_extent_trim(&mut self, extent: ExtentId) -> Result<u64, RawInvariant> {
         let descriptor = *self
             .extents
             .descriptor(extent)
             .ok_or_else(|| RawInvariant::new("trim 引用未知 extent"))?;
-        let range = self
-            .extents
-            .arena_range_of(extent)
-            .ok_or_else(|| RawInvariant::new("trim 的 extent 缺少所属 arena"))?;
-        let offset = self.extents.provider_offset_of(&descriptor);
-        self.provider
-            .decommit_pages(range, offset, descriptor.bytes)?;
-        self.extents.give_back(extent)?;
-        Ok(descriptor.bytes)
+        let owner_index = self.trim_owner_index(&descriptor)?;
+        let trimmed = self.request_combining(OperationRequest::platform_trim(
+            extent,
+            descriptor.class,
+            owner_index,
+            descriptor.bytes,
+        ))?;
+        let bytes = trimmed
+            .applied_bytes()
+            .ok_or_else(|| RawInvariant::new("platform-trim 未执行"))?;
+        let coalesced = self.request_combining(OperationRequest::extent_coalesce(
+            extent,
+            descriptor.class,
+            owner_index,
+            bytes,
+        ))?;
+        if coalesced.applied_bytes().is_none() {
+            return Err(RawInvariant::new("extent-coalesce 未执行"));
+        }
+        Ok(bytes)
+    }
+
+    /// 对一个 extent 执行四重门禁；门禁本身不触碰任何范围动作。
+    pub(super) fn gate_extent_trim(
+        &mut self,
+        extent: ExtentId,
+        occupancy: ExtentOccupancy,
+    ) -> Result<Result<(), TrimBlocked>, RawInvariant> {
+        let epoch = self.epoch;
+        match self.extents.poll_trim(extent, epoch, occupancy) {
+            Ok(()) => Ok(Ok(())),
+            Err(blocked) => Ok(Err(blocked)),
+        }
     }
 
     /// 尝试对一个 extent 执行 trim：四条门禁全部满足才撤销物理页。
@@ -199,11 +227,10 @@ impl RawWorld {
         extent: ExtentId,
         occupancy: ExtentOccupancy,
     ) -> Result<Result<u64, TrimBlocked>, RawInvariant> {
-        let epoch = self.epoch;
-        if let Err(blocked) = self.extents.poll_trim(extent, epoch, occupancy) {
+        if let Err(blocked) = self.gate_extent_trim(extent, occupancy)? {
             return Ok(Err(blocked));
         }
-        self.trim_extent(extent).map(Ok)
+        self.apply_extent_trim(extent).map(Ok)
     }
 
     /// pressure trim：把全部空闲且无 pending return 的 Live extent 交回 buddy 阶梯。
@@ -257,8 +284,22 @@ impl RawWorld {
         candidates.into_values().collect()
     }
 
+    /// pressure trim 的对外入口：候选集与动作是同一条路径的一次调用。
+    ///
+    /// `reclaim`（owner retire 的按 token 过滤版）与 GC pacing（带 pause 预算的批次版）
+    /// 各自需要候选或分批，因此它们仍直接用 `trim_candidates`/`trim_extents`；harness 与
+    /// bench 只关心「这一轮能回收什么」，用这个入口即可，不必知道候选规则。
+    pub(crate) fn pressure_trim(&mut self) -> Result<TrimReport, RawInvariant> {
+        let candidates = self.trim_candidates();
+        self.trim_extents(&candidates)
+    }
+
     /// 对候选 extent 逐个执行四重门禁；未过门禁的保持 committed 并被计入 `blocked`，
     /// 由后续 drain 继续推进，而不是“看起来空闲”就撤销物理页。
+    ///
+    /// 通过门禁的 extent 分两批走冷路径：整批平台页撤销，再整批 buddy 合并。这样同类
+    /// 请求（同 class 的 trim、同 arena 的 coalesce）才会被 combiner 合并，而逐个 extent
+    /// 地往返两次执行不会拿到任何合并机会。
     ///
     /// 通过门禁的 extent 同时让名下全部空载 descriptor 离开 committed 口径：物理页与账本
     /// 必须同一步回落，否则分类之和会持续虚报已撤销的 extent。
@@ -267,16 +308,86 @@ impl RawWorld {
         candidates: &[TrimCandidate],
     ) -> Result<TrimReport, RawInvariant> {
         let mut report = TrimReport::default();
+        let mut passed: Vec<TrimCandidate> = Vec::with_capacity(candidates.len());
         for candidate in candidates {
-            match self.poll_trim_extent(candidate.extent, candidate.occupancy)? {
-                Ok(_) => {
-                    self.release_extent_descriptors(candidate.extent)?;
-                    report.trimmed += 1;
-                }
-                Err(blocked) => report.blocked.push((candidate.extent, blocked)),
+            if let Err(blocked) = self.gate_extent_trim(candidate.extent, candidate.occupancy)? {
+                report.blocked.push((candidate.extent, blocked));
+                continue;
             }
+            passed.push(*candidate);
+        }
+        if passed.is_empty() {
+            return Ok(report);
+        }
+        let trims = self.trim_requests(&passed)?;
+        let trim_outcomes = self.request_combining_batch(trims)?;
+        let coalesces = self.coalesce_requests(&passed)?;
+        let coalesce_outcomes = self.request_combining_batch(coalesces)?;
+        for (index, candidate) in passed.iter().enumerate() {
+            if trim_outcomes[index].applied_bytes().is_none()
+                || coalesce_outcomes[index].applied_bytes().is_none()
+            {
+                return Err(RawInvariant::new("extent trim 的冷操作未执行"));
+            }
+            self.release_extent_descriptors(candidate.extent)?;
+            report.trimmed += 1;
         }
         Ok(report)
+    }
+
+    /// 把整批 trim 候选转成 `platform-trim` 请求。
+    fn trim_requests(
+        &self,
+        candidates: &[TrimCandidate],
+    ) -> Result<Vec<OperationRequest>, RawInvariant> {
+        let mut requests = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let descriptor = *self
+                .extents
+                .descriptor(candidate.extent)
+                .ok_or_else(|| RawInvariant::new("trim 引用未知 extent"))?;
+            let owner_index = self.trim_owner_index(&descriptor)?;
+            requests.push(OperationRequest::platform_trim(
+                candidate.extent,
+                descriptor.class,
+                owner_index,
+                descriptor.bytes,
+            ));
+        }
+        Ok(requests)
+    }
+
+    /// 把整批 trim 候选转成 `extent-coalesce` 请求。
+    fn coalesce_requests(
+        &self,
+        candidates: &[TrimCandidate],
+    ) -> Result<Vec<OperationRequest>, RawInvariant> {
+        let mut requests = Vec::with_capacity(candidates.len());
+        for candidate in candidates {
+            let descriptor = *self
+                .extents
+                .descriptor(candidate.extent)
+                .ok_or_else(|| RawInvariant::new("trim 引用未知 extent"))?;
+            let owner_index = self.trim_owner_index(&descriptor)?;
+            requests.push(OperationRequest::extent_coalesce(
+                candidate.extent,
+                descriptor.class,
+                owner_index,
+                descriptor.bytes,
+            ));
+        }
+        Ok(requests)
+    }
+
+    /// 返回 extent 所属 arena 的 owner 下标，供冷操作的 combiner 分组使用。
+    ///
+    /// 与 `extent_owner_index` 的区别：managed extent 的 arena 同样由 raw owner 持有
+    /// （`open_arena` 传入的就是该 owner 的 token），它们的 trim 也必须落在该 owner 的
+    /// combiner 队列上，因此这里不做「只有 raw/resource 才能归还」的 domain 限制；
+    /// 那个限制属于 extent 归还消息的路径。
+    fn trim_owner_index(&self, descriptor: &ExtentDescriptor) -> Result<u32, RawInvariant> {
+        let index = self.owner_slot(&descriptor.owner)?;
+        u32::try_from(index).map_err(|_| RawInvariant::new("extent 所属 owner 下标越过 u32"))
     }
 
     /// 让一个已撤销物理页的 extent 名下全部 descriptor 离开 committed 口径。
@@ -368,23 +479,23 @@ impl RawWorld {
     /// arena 按 domain 归属：`RUNTIME_RAW` arena 属于 raw owner，`RESOURCE` arena 属于 resource
     /// owner。descriptor 保存的是 owner token 而不是下标，因为 token 的 `owner_id` 是全局目录
     /// 编号，两个 domain 的 owner 共享同一编号空间；按下标解读会把归还投给错误的 owner。
+    /// 下标由 `topology` 索引给出，未知 token 与 domain 不符仍然是同一条错误。
     pub(super) fn extent_owner_index(
         &self,
         descriptor: &ExtentDescriptor,
     ) -> Result<usize, RawInvariant> {
-        let owners = match descriptor.domain {
-            MemoryDomainId::RUNTIME_RAW => &self.owners,
-            MemoryDomainId::RESOURCE => &self.resource_owners,
+        match descriptor.domain {
+            MemoryDomainId::RUNTIME_RAW | MemoryDomainId::RESOURCE => {}
             other => {
                 return Err(RawInvariant::new(format!(
                     "{} domain 没有 owner arena，不能发布 extent 归还",
                     other.name()
                 )));
             }
-        };
-        owners
-            .iter()
-            .position(|owner| owner.token() == descriptor.owner)
+        }
+        self.topology
+            .slot(&descriptor.owner)
+            .and_then(|index| usize::try_from(index).ok())
             .ok_or_else(|| RawInvariant::new("extent 归还引用未登记的 owner arena"))
     }
 

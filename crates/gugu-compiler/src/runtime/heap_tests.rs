@@ -203,8 +203,11 @@ fn local_heap_contract_rejects_tampered_record_and_directory() {
 
 #[test]
 fn local_heap_trigger_profile_rejects_impossible_ages() {
-    let mut trigger = HeapTriggerProfile::default();
-    trigger.tenure_age = 0;
+    // 逐项推翻默认值：先把 tenure_age 收到 0，再逐步越过其余上界。
+    let mut trigger = HeapTriggerProfile {
+        tenure_age: 0,
+        ..HeapTriggerProfile::default()
+    };
     assert!(trigger.verify(GC_ARENA_BYTES).is_err());
     trigger.tenure_age = 3;
     trigger.max_age = 2;

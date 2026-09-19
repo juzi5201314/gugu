@@ -1951,6 +1951,259 @@ fn measure_decode_throughput(world: &mut RawWorld) -> Result<(u64, u64), RawInva
     Ok((decodes, elapsed_micros(start)))
 }
 
+/// typed combining 冷路径与 topology/range 慢路径的进程内可运行切片。
+///
+/// 输入是编译器对共享环境夹具的真实产物：harness 用镜像计划契约以 combined 模式配置
+/// combining 平面，给每个 owner 发放固定数量的 RUNTIME_RAW extent，推进 grace 后跑一次
+/// pressure trim（平台页撤销 + buddy 合并各一批），再跑一段热路径循环（分配 + 本地返还 +
+/// owner drain）证明热路径一次都没有进入平面。只断言不变量并打印吞吐；确定性正确性由
+/// 平面级与世界级单测承担。不进 `nextest`。
+#[derive(Clone, Copy, Debug)]
+pub struct ColdPathHarness {
+    owners: u32,
+    extents_per_owner: u32,
+}
+
+/// ColdPathHarness 运行报告。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ColdPathReport {
+    /// 进入记录池的冷操作请求数。
+    pub requests: u64,
+    /// 无争用 fast path 认领次数。
+    pub fast_path_claims: u64,
+    /// 争用挂链次数。
+    pub parked: u64,
+    /// 因为合并省下的执行次数。
+    pub merged: u64,
+    /// handler 执行次数。
+    pub executions: u64,
+    /// 打开的 combiner 轮次数。
+    pub rounds: u64,
+    /// 记录池补充次数。
+    pub refills: u64,
+    /// 完成的 extent 数。
+    pub trimmed_extents: u64,
+    /// 撤销的物理字节数。
+    pub trimmed_bytes: u64,
+    /// 热路径循环期间进入平面的操作数；必须为 0。
+    pub hot_path_entries: u64,
+    /// 不变量是否守恒。
+    pub invariants_hold: bool,
+    /// 运行耗时（微秒）。
+    pub elapsed_micros: u64,
+}
+
+impl ColdPathHarness {
+    /// 创建 harness；owner 数至少 1，每 owner 的 extent 数至少 8（保证能观察到合并）。
+    pub fn new(owners: u32, extents_per_owner: u32) -> Self {
+        Self {
+            owners: owners.max(1),
+            extents_per_owner: extents_per_owner.max(8),
+        }
+    }
+
+    /// 驱动冷路径与热路径，并校验计数守恒。
+    pub fn run(self) -> ColdPathReport {
+        let start = Instant::now();
+        let mut report = ColdPathReport {
+            requests: 0,
+            fast_path_claims: 0,
+            parked: 0,
+            merged: 0,
+            executions: 0,
+            rounds: 0,
+            refills: 0,
+            trimmed_extents: 0,
+            trimmed_bytes: 0,
+            hot_path_entries: 0,
+            invariants_hold: false,
+            elapsed_micros: 0,
+        };
+        match self.drive() {
+            Ok(fields) => {
+                (
+                    report.requests,
+                    report.fast_path_claims,
+                    report.parked,
+                    report.merged,
+                    report.executions,
+                    report.rounds,
+                    report.refills,
+                    report.trimmed_extents,
+                    report.trimmed_bytes,
+                    report.hot_path_entries,
+                ) = fields;
+                report.invariants_hold = true;
+            }
+            Err(error) => eprintln!("cold-combining harness 失败: {error:?}"),
+        }
+        report.elapsed_micros = elapsed_micros(start);
+        report
+    }
+
+    #[expect(
+        clippy::type_complexity,
+        reason = "报告字段多，一次性返回比十元组包装类型更直接"
+    )]
+    fn drive(self) -> Result<(u64, u64, u64, u64, u64, u64, u64, u64, u64, u64), RawInvariant> {
+        use crate::runtime::combining_schema::CombiningPolicyV1;
+        use crate::{CompileRequest, Compiler, TargetName};
+
+        let compilation = Compiler::new().compile(
+            CompileRequest::single_file("main.gg", SHARED_SENDER_SOURCE, TargetName::X86_64Linux)
+                .with_combining_policy(CombiningPolicyV1::combined()),
+        );
+        let contract = compilation
+            .raw_contract()
+            .ok_or_else(|| RawInvariant::new("真实契约必须存在"))?;
+        let mut world = RawWorld::new(23, self.owners, 256, BatchLimits::default())?;
+        world
+            .configure_combining(contract.combining())
+            .map_err(|error| RawInvariant::new(error.message().to_owned()))?;
+
+        // 冷路径：先把每个 owner 的 span 逐个填满（slot 保持 live，bump 游标因此会推进到
+        // 下一个 span），再全部本地返还——于是每个 span 都恰好是一整条 occupancy 归零的候选
+        // extent。若边分配边返还，free list 会立刻复用同一个 slot，span 游标永远不动。
+        // raw arena 是 2 MiB，容纳的 span 数因此有上界；arena 用尽时按实际填出的 span 数收手，
+        // 报告里的 trimmed-extents 就是真实候选数。
+        let class = RuntimeSizeClassId::from_raw(6);
+        let stride = world
+            .classes()
+            .get(class)
+            .ok_or_else(|| RawInvariant::new("最大 class 必须已登记"))?
+            .slot_stride;
+        let span_slots = u32::try_from(crate::runtime::RAW_SLAB_PAGE_BYTES / u64::from(stride))
+            .map_err(|_| RawInvariant::new("每 extent 的 slot 数越过 u32"))?;
+        let mut candidates = 0_u64;
+        for owner in 0..self.owners {
+            let before = world.extents().live_count();
+            let mut slots = Vec::new();
+            let mut filled = 0_u32;
+            'spans: while filled < self.extents_per_owner {
+                for _ in 0..span_slots {
+                    match world.allocate(owner, class) {
+                        Ok(allocation) => slots.push(allocation.slot),
+                        Err(error) => {
+                            if filled == 0 {
+                                return Err(error);
+                            }
+                            break 'spans;
+                        }
+                    }
+                }
+                filled += 1;
+            }
+            for slot in slots {
+                world.local_return(owner, slot, u64::from(stride))?;
+            }
+            let achieved = u64::try_from(world.extents().live_count().saturating_sub(before))
+                .map_err(|_| RawInvariant::new("候选 extent 数越过 u64"))?;
+            if achieved == 0 {
+                return Err(RawInvariant::new("每个 owner 至少产出一个候选 extent"));
+            }
+            candidates += achieved;
+        }
+        let committed_before = world.provider_stats().committed_bytes;
+        let candidates_before = u64::try_from(world.extents().live_count())
+            .map_err(|_| RawInvariant::new("候选 extent 数越过 u64"))?;
+        if candidates_before != candidates {
+            return Err(RawInvariant::new(format!(
+                "发放的 extent 数 {candidates} 与候选数 {candidates_before} 不一致"
+            )));
+        }
+        let (trimmed, blocked) = drive_pressure_trims(&mut world)?;
+        let after = world.combining_stats();
+        let committed_after = world.provider_stats().committed_bytes;
+        if trimmed + blocked != candidates {
+            return Err(RawInvariant::new("trim 结果必须覆盖全部候选 extent"));
+        }
+        if trimmed != candidates {
+            return Err(RawInvariant::new("全部 extent 都必须通过 grace 门禁"));
+        }
+
+        // 热路径：分配、本地返还与 owner drain 一次都不进入平面。
+        let hot_before = stats_array(world.combining_stats());
+        let mut hot_entries = 0_u64;
+        for owner in 0..self.owners {
+            for _ in 0..hot_iterations(self.extents_per_owner) {
+                let allocation = world.allocate(owner, class)?;
+                world.local_return(owner, allocation.slot, u64::from(stride))?;
+            }
+            world.drain_all(owner, &ServiceBudget::pressure(u32::MAX, u64::MAX))?;
+        }
+        let hot_after = stats_array(world.combining_stats());
+        for (before, after) in hot_before.iter().zip(hot_after.iter()) {
+            hot_entries += after.saturating_sub(*before);
+        }
+        if hot_entries != 0 {
+            return Err(RawInvariant::new("热路径不得进入 combining 平面"));
+        }
+        if world.combining_pending_records() != 0 {
+            return Err(RawInvariant::new("冷路径结束后不得留存在飞记录"));
+        }
+        // 算术不变量：每条请求要么被执行、要么被合并进一次执行。
+        if after.executions + after.merged_requests != after.requests {
+            return Err(RawInvariant::new(
+                "executions + merged 必须等于进入记录池的请求数",
+            ));
+        }
+        Ok((
+            after.requests,
+            after.fast_path_claims,
+            after.contended_parkings,
+            after.merged_requests,
+            after.executions,
+            after.rounds,
+            after.refills,
+            trimmed,
+            committed_before.saturating_sub(committed_after),
+            hot_entries,
+        ))
+    }
+}
+
+/// 热路径迭代次数：与 extent 数同量级，保证分配/返还路径被真实执行。
+fn hot_iterations(extents_per_owner: u32) -> u32 {
+    extents_per_owner.saturating_mul(8).max(32)
+}
+
+/// 九项统计的规范顺序。
+fn stats_array(stats: super::combining::CombiningStats) -> [u64; 9] {
+    [
+        stats.requests,
+        stats.fast_path_claims,
+        stats.contended_parkings,
+        stats.merged_requests,
+        stats.rounds,
+        stats.executions,
+        stats.cancellations,
+        stats.timeouts,
+        stats.refills,
+    ]
+}
+
+/// 推进 grace 直到全部候选 extent 通过门禁；返回（累计完成数, 最后剩余的阻塞数）。
+///
+/// grace 按真实节奏推进：每个 epoch 由 owner 的 open/close grace 发布，因此 harness 与
+/// 生产路径共用同一条 grace 计步，而不是自己捏造 epoch。已完成的 extent 会离开候选集，
+/// 因此这里累加每次调用完成的 extent 数，并用最后一次调用剩余的阻塞数与初始候选数闭合。
+fn drive_pressure_trims(world: &mut RawWorld) -> Result<(u64, u64), RawInvariant> {
+    let mut trimmed = 0_u64;
+    let mut blocked = 0_u64;
+    let inbox = world.inbox(0);
+    for _ in 0..=crate::runtime::model::GRACE_STEPS {
+        let report = world.pressure_trim()?;
+        trimmed += u64::from(report.trimmed);
+        blocked = u64::from(report.blocked_count());
+        if blocked == 0 {
+            break;
+        }
+        world.open_grace(&inbox);
+        world.close_grace(&inbox);
+    }
+    Ok((trimmed, blocked))
+}
+
 impl CompressionHarness {
     /// 创建 harness；owner 数至少 1，对象数至少 1。
     pub fn new(owners: u32, objects: u32) -> Self {

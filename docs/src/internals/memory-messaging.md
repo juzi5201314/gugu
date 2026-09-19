@@ -820,6 +820,19 @@ snmalloc 的 combining lock 只作为冷路径 adapter，不作为本章的默�
 - 执行任意 Gugu closure、drop glue 或需要当前 coroutine stack 的函数；
 - 用一个 combining lock 保护所有 domain 的共享 free list。
 
+### 落地
+
+`CombiningRuntimeContract`（`COMBINING_SCHEMA = 1`，profile `mosaic-combining` revision 1；`RuntimeRawModel` schema 23 并入，raw policy revision 升到 5）与 `CombiningPlane` 是本节契约与参照实现的两半：
+
+- 记录池是 non-moving metadata：chunk 只在补充时整块 push，chunk 内记录永不移动，句柄是「chunk/slot/generation」，回收槽位只推进 generation；每个 chunk 尾部预留一个槽位给 `global-range-refill`，因此「普通槽位用尽」不会把补充记录池这条唯一的出路一起卡住；
+- 每个 combiner（每个 owner token 一条队列，domain owner 独占最后一条）只有一条 FIFO MCS 记录链，链指针是记录自身的 `mcs_next`；无争用时请求直接占用单原子 claim 字（fast path），有争用时挂到链尾并记录为 parked；
+- combiner 一轮最多认领 `ROUND_ITEM_BUDGET = 8` 条记录、`ROUND_BYTE_BUDGET = 1 MiB` 请求字节（本轮第一条记录无论多大都会被认领，因此不会出现无法推进的轮次），连续同类 `(tag, merge_key)` 记录按 `MERGE_LIMIT = 4` 合并进一次执行；
+- 取消只允许发生在认领之前：记录留在链上，由下一轮摘除并回收，因此链永远不会指向被复用的槽位；在链上等待到 `TIMEOUT_ROUNDS = 8` 轮的记录以 `timed-out` 收尾并摘链；
+- response 只在记录完成时发布（Release/Acquire 语义），请求者读取之后回收槽位；未发布、已取消与已超时三种结果对范围操作都是不变量失败，而不是被静默跳过；
+- 平台 wait/wake 由 `PlatformRange` 的 wait 字承担：挂链记录在自己的上下文登记等待，一轮结束时按本轮发布 response 的记录数唤醒。
+
+四个 tag 对应世界里四条真实冷路径：`platform-trim` 撤销 extent 的物理页、`extent-coalesce` 把 extent 合回 buddy 阶梯、`topology-rebuild` 重建 owner 目录的稠密索引、`global-range-refill` 补充 operation record 池。bulk trim 因此分两批提交（整批页撤销、再整批合并），同类请求才会落进同一次执行。热路径的口径是机器检查的：分配、本地返还、远程归还与 owner drain 只做 O(1) 的空队列检查，`cold_combining` bench 断言热路径循环前后九项 `combining-*` 计数完全不变。
+
 ## 现有标准库和 arena 的适配
 
 - `LocalArena` 继续是单 owner bump arena；reset 的引用失效和生命周期语义不改变，不为每个对象发送 remote return。
@@ -888,6 +901,7 @@ cycle、batch size、credit、hop 和 duration，不记录 managed payload 地�
 - `f(x)`、`f(&x)`、identity handle、COW、ResourceCell 和 FFI pin 的语义在所有 placement 下保持一致；
 - owner credit 的产生、传播、归还和终止检测；
 - compressed reference 的 cage/base/offset/generation checked 验证和跨 cage fallback；
+- typed combining 的契约目录与漂移拒绝、fast path 单原子认领、争用挂链与下一轮认领、有限同类合并、轮次条目/字节预算、取消与超时规则、response 恰好一次、槽位 generation、记录池非移动补充与资源耗尽，以及 direct/combined 两个世界在 trim、coalescing 与 topology 查询上的逐项等价；
 
 
 测试替身不能削弱 fixture、取消 generation、跳过 grace 或把 managed pointer 改成整数来绕过 verifier。
@@ -910,12 +924,13 @@ benchmark 与正确性测试分离。至少测量：
 - SharedHeap handle resolve/forward 次数、access guard 保留时长、forwarding grace bytes 与 stale handle；
 - pointer compression 对 payload footprint、扫描带宽、decode cycles、cache miss 和 FFI 交接的影响；
 - block candidate 的 lease 命中率、SCC fallback、HeapBlockReturn 延迟与 RSS；
+- typed combining 的 fast path claim 与争用轮次比、合并省下的执行数、park/wake 次数、记录池补充次数与 topology 重建路径（`cold_combining` bench 断言 `executions + merged == requests`、`trimmed + blocked == candidates` 与热路径计数为零）；
 
 必须在 release 构建中比较 cycles/instructions 与 wall time；没有 profile 数据时不得宣称某个 batch threshold、radix level 或 cache size 更快。
 
 ## Compiler 侧契约模型与 verifier
 
-owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，当时 schema 2、当前 22）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
+owner 身份、slab 描述符、dense size class、消息字段、grace 步骤与账本分类由 compiler 持有的契约对象固定：`RuntimeRawModel`（query 30，当时 schema 2、当前 23）产出 `RuntimeRawContractV1`，内容包含目标语义、调优 profile、规范 class 阶梯（raw 记录与 64-byte header 的 ResourceCell slab class 阶梯）、消息字段 schema、ResourceCell 状态位与迁移表、release 描述符 schema、File/socket/process/lock/FFI 资源种类目录与唯一 release 入口、queue-page grace 步骤、账本互斥分类与需求视图，经 verifier 后进入 `ActionInputs` 与 `ImagePlan`。
 
 - **消息字段 schema** 为每个字段打种类标签，只允许 owner domain/id/generation/route key、descriptor index、unit index、bytes、epoch、integrity 与 link；任何地址种类在 `verify` 中被拒绝，因此“跨 owner 只发送 descriptor/index/generation/epoch/bytes/integrity”是机器检查的契约，而不是注释约定。
 - **需求视图**（`RawPlaneDemand`）由冻结前端产物推导：GIR 协程创建点数量、placement 判定的 `Resource`/`RuntimeRaw` 记录数量与 owner 数量；常驻 message node 容量由 shard 数与 batch item 上限推导为可证明下界。资源侧另由 `RawResourceDemand` 给出资源站点、acquire/release/transfer 站点、owner 数与资源种类数的统计口径；当前 `RuntimeRawContractV1` 只固化 resource ladder 与该需求视图，ResourceReleaseHarness 的 node capacity 按 total item 与 batch 上限设置，release queue 使用动态 `VecDeque`，不声称由 `RawResourceDemand` 推导 slab 或队列容量。
@@ -925,6 +940,7 @@ owner 身份、slab 描述符、dense size class、消息字段、grace 步骤�
 - **压缩契约段**：`CompressionRuntimeContract`（`COMPRESSION_SCHEMA = 1`，profile `mosaic-compression` revision 1）固定 cage 位布局（cage id 8 / generation 24 / offset 32，全零字为空引用，generation 从 1 起）、cage 上限 4 GiB、与 GC arena 同源的 2 MiB 粒度、FFI 交接规则目录（`resolve-then-pin`、`no-compressed-pass-through`、`save-requires-active-lease`）与六项统计名，并逐项核对目标能力（`supported`、`canonical_bits = 48`、`min_alignment`）；`CompressionPolicyV1` 默认关闭，关闭态要求 cage 字节数、解码点与压缩根槽同时为 0。`CompressionDemand` 由优化后 LIR 一次推导：`decode_sites` 是 `DecodeCompressedRef` 指令数，`compressed_root_slots` 是按安全点聚合的压缩根槽数——两者随需求进入 `RuntimeRawModel` key、契约指纹与 `ImagePlan`，`cage_bytes`、能力或需求变化必须使缓存与 action key 失效。默认编译不预留 cage。
 - **路由契约段**：`RoutingRuntimeContract`（`ROUTING_SCHEMA = 1`，profile `mosaic-routing` revision 1；`RuntimeRawModel` schema 21 并入，raw policy revision 升到 3）固定路由模式目录（`direct`/`radix`）、固定 `2^k` bucket（`RADIX_BUCKET_LOG2 = 6`）、有限 levels（`MAX_RADIX_LEVELS = 2`）、转发 hop 上限（`RADIX_HOP_LIMIT = 4`，不得小于 levels）、radix 拦截的消息族目录（return 族）、maintenance 相位目录与 direct→radix / radix→direct 两条切换序列，以及五项统计口径（`remote-return-hops` 等）。`RoutingDemand`（owner 数、return 发布站点上界）由 raw 平面需求推导并随契约进入 `RuntimeRawModel` key 与 action key；`routing-*` 键进入 `ImagePlan` 与 `-Zdump-runtime`。`RoutingPlane` 是契约的确定性对偶：direct 模式不分配 bucket 表；radix 模式按原始 target 的 route key bits 逐层 staging，每步恰好一跳并校验 hop 上限，终层经 owner directory 解析为交付、转发或 domain injection，模式切换只在 maintenance 相位序列内翻转，旧 topology 的在飞 batch 沿转发记录排空后才释放。`world/routing_impl.rs` 把发布路径接到真实世界：radix 模式下 return 族 staging flush 与 ring 关闭批次进入平面，route step 的交付/改写由 world 执行（node 内容按新终点重写、integrity 重算、旧 node 进入 grace，与 `forward_message` 语义一致），在飞字节计入 credit 快照的 pending 口径。
 - **provenance 契约段**：`ProvenanceRuntimeContract`（`PROVENANCE_SCHEMA = 1`，profile `mosaic-provenance` revision 1；`RuntimeRawModel` schema 22 并入，raw policy revision 升到 4）固定释放 provenance 检查目录（前八项 `canonical`/`alignment`/`range`/`class`/`owner`/`generation`/`link`/`state`，后六项是 debug/security 追加的机制检查 `poison`/`double-return-marker`/`full-chain`/`random-reuse`/`guard-region`/`checked-copy`）、per-domain secret 登记目录（与 `MemoryDomainId::ALL` 一致）与管理规则（`per-domain-derivation`/`non-zero-secret`/`non-moving-metadata-only`/`init-failure-fatal`）、release 基线检查集合（`owner`/`generation`/`range`/`alignment`）与 profile 激活序列（release 只保留基线；debug 追加 poison、双重释放标记与全链 verifier；security 追加随机复用、guard region 与 checked copy）、七类释放拒绝分类与六项统计口径。`ProvenanceDemand`（owner 数、class 数）由 raw 平面需求与两份 class ladder 推导并交叉校验；安全 profile 以 policy 为唯一来源，profile 变化使契约指纹与 action key 失效。`ProvenancePlane` 是契约的确定性对偶：per-domain secret 经派生键 `gugu-provenance-domain-secret-v1` 从 world secret 推导且互异非零，每个 domain 持有独立 `LinkCodec`，跨 domain 的 encoded link 在 checksum/tag 层被拒；`world/provenance_impl.rs` 把释放路径接到真实世界——释放拒绝在既有检查点按七类稳定记账（`RawWorld::queue_return`/`local_return` 的 generation 与双返还标记、`service` 的 integrity/owner/bytes/状态/cell generation 检查、`verify_full_chain` 的链走查分类），debug 的 poison 写入与清除挂在返还与分配的真实路径上，security 的复用深度由平面内的独立 seed 决定、`checked_copy` 校验权限/越界/guard region 后才拷贝；`provenance-*` 键进入 `ImagePlan`、CLI JSON 与 `-Zdump-runtime`。
+- **combining 契约段**：`CombiningRuntimeContract`（`COMBINING_SCHEMA = 1`，profile `mosaic-combining` revision 1；`RuntimeRawModel` schema 23 并入，raw policy revision 升到 5）固定冷操作 tag 目录（`global-range-refill`/`extent-coalesce`/`topology-rebuild`/`platform-trim`）、允许用途（与 tag 目录逐项相同，verifier 强制）与十项禁止用途（TLAB allocation、raw local pop、普通 remote return、channel/select/park-wake 线性化、任意 closure、drop glue、coroutine stack call 与共享 free-list guard）、operation record 的十个字段（`tag`/`state`/`generation`/`owner-domain`/`owner-id`/`merge-key`/`descriptor`/`scalar`/`bytes`/`response-slot`，全部为标量或 stable id，任一地址种类都被 `verify` 拒绝）、状态目录（`free`/`published`/`claimed`/`completed`/`cancelled`）与七条迁移（`publish`/`claim`/`cancel-before-claim`/`timeout`/`apply`/`recycle`；`recycle` 同时服务 completed 与 cancelled 两个源状态）、单条 fast path（`compare-exchange-claim-word`）、两条争用路径（`mcs-record`/`owner-inbox`）与平台 wait/wake 接缝、九项统计口径，以及合并上限 4、轮次预算（8 条 / 1 MiB）、超时轮数 8、记录规范槽 64 B、chunk 16 槽（尾部 1 槽预留给 refill）与 256 chunk 上界。`CombiningDemand` 由 raw 平面需求推导（每条 owner 队列一个轮次预算加一份 refill 预留，再折算 chunk 数），verifier 拒绝与此公式不符的需求；`combining-*` 键进入 `ImagePlan`、CLI JSON 与 `-Zdump-runtime`。`CombiningPlane` 是契约的确定性对偶：direct 模式不创建记录、combined 模式按 chunk 整块补充非移动记录池，无争用请求占用单原子 claim 字、争用请求挂到 owner 的 MCS 链尾，再由固定上界的轮次按 FIFO 认领并按同类合并执行。
 
 ## 实施顺序
 
@@ -940,7 +956,7 @@ owner 身份、slab 描述符、dense size class、消息字段、grace 步骤�
 10. 接入 managed `HeapBlockReturn`、line-run、arena 和 large mapping return；所有 return 必须等待 handle/lease/grace 条件。
 11. 在明确的 heap cage profile 中加入 checked pointer compression；再以真实 workload 评估 decode、cache 和 FFI 成本。第 11 步的契约段、cage 预留与 island 化 managed arena、checked 解码/编码、压缩根 map、FFI pin/copy 闸门与六项统计已由 `mosaic-compression` 落地（默认关闭，full-pointer 语义等价）；源级 producer 已接入：`CompileRequest` 显式开启 cage profile 后，LIR builder 把非 shared、LocalHeap、非 large 闭包环境的 capture 槽降为压缩字（构造侧整数域 encode + 显式 `GcWriteBarrier`，实例侧 `DecodeCompressedRef` 且结果为 `GcHeap`），环境对象头随之写 `COMPRESSED_REF` 表示（见[内存 owner lowering](gir-lir.md#memory-owner-lowering)）；通用对象字段压缩待跨体表示一致性分析（方法接收者等 opaque base 无法静态判定字段表示），真实机器码解码序列仍待后端 `Legalize`/`SelectInstructions`。
 12. 完成 per-owner root slice、credit termination、MosaicBaseline/MosaicConcurrent stop 边界和 security profile。
-13. 最后加入 typed combining，用于 GlobalRange 和 topology 冷路径，不回流到 allocation/return/GC mark 热路径。
+13. 最后加入 typed combining，用于 GlobalRange 和 topology 冷路径，不回流到 allocation/return/GC mark 热路径。第 13 步已由 `mosaic-combining` 落地：契约段（`RuntimeRawModel` schema 23）、四条 typed cold operation（平台 trim、extent coalescing、topology 目录重建与 operation 记录池 refill）、direct/combined 双模式的世界接线与「热路径九项计数守恒」口径见本节 combining 契约段与下文验证契约中的 typed combining 条目。
 
 第 1--4 步由 compiler 侧契约模型与确定性参照实现落地：`OwnerRecord`/`OwnerToken`/`SlabDescriptor`/`ReturnMessage` 的 schema、generation/state verifier、raw owner-local cache、owner inbox adapter 与 `ReturnSlabCache` 都已接入 `RuntimeRawModel` 并覆盖 MPSC 交错、远程批量、generation 转发、owner retire、链完整性与账本互斥分类；ResourceCell 的 class 阶梯、64-byte header、lease/close 状态机与统一 release 入口同样进入 `RuntimeRawContractV1`（schema 2），覆盖 exactly-once cleanup、generation 匹配与 queue grace。第 5 步由 PlatformRange/Extent/Ledger 契约段与 extent 阶梯兑现，第 6 步由 `GcPacingRuntimeContract` 与 `PacingPlane` 兑现（见[GC 元数据](gc-metadata.md#gc-pacing--relocation-pause-budget)）。Gugu runtime 侧的等价实现随 rt0 与协程控制块的落地复用同一 schema（见[运行时](../spec/runtime.md#rt0-and-startup)与[调度器](scheduler.md)）。第 7 步的 `MarkMailbox`/`MarkTicket` 消费、root snapshot 与终止检测已按同一 credit 平面落地：`MarkRuntimeContract` 固定 mailbox/credit 目录、七项收敛条件与来源绑定，`MarkPlane` 是确定性对偶，`world/mark_impl.rs` 把 root snapshot、跨 owner ticket 与 mark pass 接到真实 arena，mark 未收敛时 `remark` 只发布 continuation。
 

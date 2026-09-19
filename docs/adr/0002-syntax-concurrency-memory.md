@@ -48,4 +48,4 @@ ADR-0001 确定了「静态语义、闭世界、runtime 属于语言」之后，
 
 ## 实施状态
 
-表面语法与类型系统（含特化、模式、插值、参数包、`defer`）已在编译器前端完整实现；并发与调度以语言契约加确定性参考模型落地；内存模型中 `TurnRegion`、owner-local `LocalHeap`、`SharedHeap` 稳定句柄、MarkTicket/EdgeDelta 消息与写屏障平面已实现到共享字段存储路由与转发闭环（提交 `cb1e703`…`a043620`）。checked pointer compression、credit termination、radix/security profile 与 typed combining 按 ADR-0009 的实现顺序尚未完成。
+表面语法与类型系统（含特化、模式、插值、参数包、`defer`）已在编译器前端完整实现；并发与调度以语言契约加确定性参考模型落地；内存模型中 `TurnRegion`、owner-local `LocalHeap`、`SharedHeap` 稳定句柄、MarkTicket/EdgeDelta 消息与写屏障平面已实现到共享字段存储路由与转发闭环（提交 `cb1e703`…`a043620`）。checked pointer compression、credit termination 与 radix/security profile 按 ADR-0009 的实现顺序尚未完成。
