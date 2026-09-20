@@ -36,8 +36,12 @@ impl Validated {
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
         self.world.fingerprint
     }
-    pub(crate) fn bodies(&self) -> usize {
+    pub(crate) fn body_count(&self) -> usize {
         self.world.bodies.len()
+    }
+    /// 按实例稳定键升序的 body 列表。
+    pub(crate) fn bodies(&self) -> &[body::Body] {
+        &self.world.bodies
     }
     pub(crate) fn blocks(&self) -> usize {
         self.world.bodies.iter().map(|body| body.blocks.len()).sum()
@@ -567,7 +571,9 @@ pub(crate) fn build(
     queries: &QueryEngine,
     sources: &crate::SourceMap,
 ) -> Result<Validated, Vec<Diagnostic>> {
-    let profile = target.descriptor().cost_profile;
+    let descriptor = target.descriptor();
+    let profile = descriptor.cost_profile;
+    let baseline = descriptor.cpu_baseline;
     let target = target.to_string();
     let mut hash = blake3::Hasher::new_derive_key("gugu-lir-input-v1");
     hash.update(&hir.fingerprint());
@@ -641,7 +647,7 @@ pub(crate) fn build(
         verify::verify_structure(&body, hir.module()).map_err(|error| vec![error])?;
         bodies.push(body);
     }
-    pass::optimize_world(&mut bodies, hir.module(), &profile)?;
+    pass::optimize_world(&mut bodies, hir.module(), &profile, baseline)?;
     for body in &bodies {
         verify::verify(body, hir.module()).map_err(|error| vec![error])?;
     }

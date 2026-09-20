@@ -101,11 +101,10 @@ impl Op {
     /// 成本表本体；只读取内联汇编模板与上下文。
     pub(crate) fn poll_cost_with(&self, assembly: &[Assembly]) -> u32 {
         match self {
+            // 机器 lowering 域内的 op 取机器 form 权重的饱和和（`x64::lower::poll_cost`）：
+            // 权重与后端实现单一来源，改 form 表即改 poll 模型。
             Self::IConst(_)
             | Self::FConst(_)
-            | Self::SymbolAddr(_)
-            | Self::StackAddr(_)
-            | Self::PtrOffset
             | Self::Integer(_)
             | Self::Float(_)
             | Self::Compare { .. }
@@ -113,6 +112,11 @@ impl Op {
             | Self::Vector(_)
             | Self::Select
             | Self::TrapIf
+            | Self::Atomic { .. }
+            | Self::DecodeCompressedRef => crate::backend::x64::lower::poll_cost(self),
+            Self::SymbolAddr(_)
+            | Self::StackAddr(_)
+            | Self::PtrOffset
             | Self::ScopedViewBegin { .. }
             | Self::ScopedViewEnd { .. }
             | Self::SharedAccessBegin { .. }
@@ -124,13 +128,6 @@ impl Op {
             | Self::StackCheck => 1,
             Self::Load(_) | Self::Store(_) => 4,
             Self::Memcpy { .. } | Self::Memmove { .. } | Self::Memset { .. } => 8,
-            Self::Atomic { op, .. } => {
-                if *op == super::body::AtomicOp::Fence {
-                    16
-                } else {
-                    8
-                }
-            }
             Self::BarrierReserve(_)
             | Self::GcWriteBarrier { .. }
             | Self::GcWriteBarrierReserved { .. }
@@ -146,7 +143,6 @@ impl Op {
             | Self::EdgeDeltaBatch
             | Self::ResolveSharedHandle
             | Self::ForwardSharedHandle
-            | Self::DecodeCompressedRef
             | Self::CoroutineSwitch
             | Self::Park
             | Self::Ready => 16,

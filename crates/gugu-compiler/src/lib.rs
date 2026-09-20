@@ -18,12 +18,18 @@ mod query;
 mod runtime;
 mod source;
 mod target;
+#[cfg(test)]
+mod target_tests;
 pub use query::{
     DependencyFingerprint, ObjectCache, ObjectError, ObjectKey, QueryContext, QueryEngine,
     QueryError, QueryKey, QueryKind, QueryResult, QueryState,
 };
 
 pub use action::{ActionGraph, ActionKind, ActionNode, ActionStatus};
+pub use backend::x64::harness::{
+    X64Case, X64Code, X64DecodeFixture, X64Harness, X64HarnessError, X64HarnessReport,
+    X64MemorySlot, X64Register, X64RelocationView,
+};
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use frontend::format::{FormatError, format_source};
 pub use project::{
@@ -60,8 +66,9 @@ pub use source::{
     normalize_logical_path,
 };
 pub use target::{
-    Architecture, BackendCostProfile, ObjectFormat, OperatingSystem, PointerCompression, Rt0Kind,
-    TargetDescriptor, TargetName, TargetParseError, baseline_cost_profile,
+    Architecture, BackendCostProfile, CpuBaseline, CpuFeature, ObjectFormat, OperatingSystem,
+    PointerCompression, Rt0Kind, TargetDescriptor, TargetName, TargetParseError,
+    baseline_cost_profile,
 };
 
 use std::{
@@ -267,6 +274,7 @@ pub struct Compilation {
     gir_stats: frontend::gir::pass::GirPassStats,
     lir: Option<lir::Validated>,
     raw_contract: Option<RuntimeRawContractV1>,
+    x64: Option<backend::x64::codegen::X64World>,
     action_key: Option<project::ActionKey>,
 }
 
@@ -335,6 +343,18 @@ impl Compilation {
             .map(RuntimeRawContractV1::fingerprint)
     }
 
+    /// 返回机器码片段的稳定 dump；没有可执行入口或片段生成失败时为 `None`。
+    pub fn dump_x64(&self) -> Option<String> {
+        self.x64.as_ref().map(backend::x64::codegen::X64World::dump)
+    }
+
+    /// 返回机器码片段世界指纹。
+    pub fn x64_fingerprint(&self) -> Option<[u8; 32]> {
+        self.x64
+            .as_ref()
+            .map(backend::x64::codegen::X64World::fingerprint)
+    }
+
     /// 返回已验证的契约对象本身；供确定性测试与 `EdgeCandidateHarness` 用真实契约配置 world。
     pub(crate) fn raw_contract(&self) -> Option<&RuntimeRawContractV1> {
         self.raw_contract.as_ref()
@@ -348,6 +368,7 @@ impl Compilation {
                 DiagnosticCode::LirInvariant
                     | DiagnosticCode::RuntimeRawInvariant
                     | DiagnosticCode::ResourceInvariant
+                    | DiagnosticCode::BackendInvariant
             )
         }) {
             101
@@ -401,6 +422,7 @@ impl Compiler {
                     gir_stats: Default::default(),
                     lir: None,
                     raw_contract: None,
+                    x64: None,
                     action_key: None,
                 };
             }
@@ -428,6 +450,7 @@ impl Compiler {
                     gir_stats: Default::default(),
                     lir: None,
                     raw_contract: None,
+                    x64: None,
                     action_key: None,
                 };
             }
@@ -463,6 +486,7 @@ impl Compiler {
                     gir_stats: frontend.gir_stats,
                     lir: None,
                     raw_contract: None,
+                    x64: None,
                     action_key: None,
                 };
             }
@@ -488,6 +512,7 @@ impl Compiler {
                     gir_stats: frontend.gir_stats,
                     lir: Some(lir),
                     raw_contract: None,
+                    x64: None,
                     action_key: None,
                 };
             }
@@ -617,30 +642,19 @@ impl Compiler {
                     gir_stats: frontend.gir_stats,
                     lir: Some(lir),
                     raw_contract: None,
+                    x64: None,
                     action_key: None,
                 };
             }
         };
-        let action_key = Some(compilation_action_key(
-            target,
-            &source_map,
-            &frontend,
-            &lir,
-            &raw_contract,
-            loaded
-                .plan
-                .as_ref()
-                .map(|plan| (plan.require_main, &plan.cfg)),
-        ));
-
-        let hir = frontend.hir;
-        let gir = frontend.gir;
-        let gir_blocks = gir
+        let gir_blocks = frontend
+            .gir
             .bodies
             .iter()
             .map(|body| body.blocks.len())
             .sum::<usize>();
-        let gir_stmts = gir
+        let gir_stmts = frontend
+            .gir
             .bodies
             .iter()
             .map(|body| body.statements.len())
@@ -649,24 +663,86 @@ impl Compiler {
             ActionKind::BuildIr,
             format!(
                 "{} 个定义，{} 个已冻结 HIR owner，{} 个 GIR body / {} 个 block / {} 条语句，{} 个 LIR body / {} 条指令 / {} 个 Mem effect",
-                hir.module().definitions.len(),
-                hir.module().owners.len(),
-                gir.bodies.len(),
+                frontend.hir.module().definitions.len(),
+                frontend.hir.module().owners.len(),
+                frontend.gir.bodies.len(),
                 gir_blocks,
                 gir_stmts,
-                lir.bodies(), lir.instructions(), lir.memory_operations()
+                lir.body_count(), lir.instructions(), lir.memory_operations()
             ),
         );
 
-        let Some(backend_plan) = backend::plan(
+        // 机器码片段：只有可执行入口才产出；统计供给 PlanBackend 的镜像计划。
+        let x64 = if frontend.hir.module().entry.is_some() {
+            match backend::x64::codegen::build(&lir, target, &self.queries, &source_map) {
+                Ok(world) => {
+                    graph.complete(
+                        ActionKind::Codegen,
+                        format!(
+                            "{} 个实例，{} 个机器站点，{} 字节，{} 个重定位",
+                            world.fragment_count(),
+                            world.site_count(),
+                            world.encoded_bytes(),
+                            world.relocation_count()
+                        ),
+                    );
+                    Some(world)
+                }
+                Err(errors) => {
+                    for error in errors {
+                        diagnostics.push(error);
+                    }
+                    graph.fail(ActionKind::Codegen, "机器片段生成失败");
+                    graph.skip_after(ActionKind::Codegen, "机器片段无效");
+                    diagnostics.sort();
+                    return Compilation {
+                        graph,
+                        diagnostics,
+                        source_map,
+                        image_plan: None,
+                        hir: Some(frontend.hir),
+                        gir: Some(frontend.gir),
+                        gir_stats: frontend.gir_stats,
+                        lir: Some(lir),
+                        raw_contract: Some(raw_contract),
+                        x64: None,
+                        action_key: None,
+                    };
+                }
+            }
+        } else {
+            graph.complete(ActionKind::Codegen, "没有可执行入口");
+            None
+        };
+
+        let action_key = Some(compilation_action_key(
             target,
-            &hir,
-            &frontend.mono,
-            &gir,
+            &source_map,
+            &frontend,
             &lir,
             &raw_contract,
-            frontend.analysis.runtime_checks_elided_count,
-        ) else {
+            x64.as_ref(),
+            loaded
+                .plan
+                .as_ref()
+                .map(|plan| (plan.require_main, &plan.cfg)),
+        ));
+
+        let hir = frontend.hir;
+        let gir = frontend.gir;
+
+        let Some(backend_plan) = x64.as_ref().and_then(|x64| {
+            backend::plan(
+                target,
+                &hir,
+                &frontend.mono,
+                &gir,
+                &lir,
+                &raw_contract,
+                x64,
+                frontend.analysis.runtime_checks_elided_count,
+            )
+        }) else {
             graph.complete(ActionKind::PlanBackend, "没有可执行入口");
             graph.skip_after(ActionKind::PlanBackend, "没有可执行入口");
             diagnostics.sort();
@@ -679,7 +755,8 @@ impl Compiler {
                 gir: Some(gir),
                 gir_stats: frontend.gir_stats,
                 lir: Some(lir),
-                raw_contract: None,
+                raw_contract: Some(raw_contract),
+                x64,
                 action_key,
             };
         };
@@ -713,6 +790,7 @@ impl Compiler {
             gir_stats: frontend.gir_stats,
             lir: Some(lir),
             raw_contract: Some(raw_contract),
+            x64,
             action_key,
         }
     }
@@ -733,6 +811,7 @@ fn compilation_action_key(
     frontend: &frontend::FrontendOutput,
     lir: &lir::Validated,
     raw_contract: &RuntimeRawContractV1,
+    x64: Option<&backend::x64::codegen::X64World>,
     plan: Option<(bool, &frontend::cfg::CfgContext)>,
 ) -> project::ActionKey {
     const EMPTY_PLAN: (bool, Option<&frontend::cfg::CfgContext>) = (true, None);
@@ -773,6 +852,11 @@ fn compilation_action_key(
     inputs.set_generic_gir(frontend.gir.fingerprint);
     inputs.set_lir(lir.fingerprint());
     inputs.set_runtime_raw(raw_contract.fingerprint());
+    inputs.set_target_descriptor(target.descriptor().digest());
+    if let Some(x64) = x64 {
+        inputs.set_backend_encoder(x64.encoder_fingerprint());
+        inputs.set_backend_fragments(x64.fingerprint());
+    }
     inputs.set_query_registry(crate::query::registry_fingerprint());
     let mut policy = frontend::gir::pass::policy_bytes();
     policy.extend_from_slice(&lir::optimization_policy_bytes());
@@ -1283,6 +1367,20 @@ pub struct ImagePlan {
     placement_fingerprint: [u8; 32],
     rt0: Rt0Boundary,
     semantic_fingerprint: [u8; 32],
+    target_descriptor_digest: [u8; 32],
+    target_page_size: u32,
+    target_cpu_baseline: CpuBaseline,
+    import_policy_revision: u32,
+    x64_encoder_fingerprint: [u8; 32],
+    x64_form_count: u32,
+    x64_lowering_revision: u32,
+    x64_site_count: u32,
+    x64_instruction_count: u32,
+    x64_encoded_bytes: u32,
+    x64_relocation_count: u32,
+    x64_cold_edge_count: u32,
+    x64_decode_sequence_bytes: u32,
+    x64_fragment_fingerprint: [u8; 32],
 }
 
 impl ImagePlan {
@@ -1475,6 +1573,20 @@ impl ImagePlan {
             placement_fingerprint: plan.placement_fingerprint,
             rt0: attachment.rt0,
             semantic_fingerprint: plan.semantic_fingerprint,
+            target_descriptor_digest: plan.target_descriptor_digest,
+            target_page_size: plan.target_page_size,
+            target_cpu_baseline: plan.target_cpu_baseline,
+            import_policy_revision: plan.import_policy_revision,
+            x64_encoder_fingerprint: plan.x64_encoder_fingerprint,
+            x64_form_count: plan.x64_form_count,
+            x64_lowering_revision: plan.x64_lowering_revision,
+            x64_site_count: plan.x64_site_count,
+            x64_instruction_count: plan.x64_instruction_count,
+            x64_encoded_bytes: plan.x64_encoded_bytes,
+            x64_relocation_count: plan.x64_relocation_count,
+            x64_cold_edge_count: plan.x64_cold_edge_count,
+            x64_decode_sequence_bytes: plan.x64_decode_sequence_bytes,
+            x64_fragment_fingerprint: plan.x64_fragment_fingerprint,
         }
     }
 
@@ -1536,6 +1648,76 @@ impl ImagePlan {
     /// 返回内存账本的分类数量。
     pub fn ledger_category_count(&self) -> u32 {
         self.ledger_category_count
+    }
+
+    /// 返回目标描述符指纹。
+    pub fn target_descriptor_digest(&self) -> [u8; 32] {
+        self.target_descriptor_digest
+    }
+
+    /// 返回目标页大小。
+    pub fn target_page_size(&self) -> u32 {
+        self.target_page_size
+    }
+
+    /// 返回目标 CPU 基线。
+    pub fn target_cpu_baseline(&self) -> CpuBaseline {
+        self.target_cpu_baseline
+    }
+
+    /// 返回导入策略 revision。
+    pub fn import_policy_revision(&self) -> u32 {
+        self.import_policy_revision
+    }
+
+    /// 返回 x64 encoder 契约指纹。
+    pub fn x64_encoder_fingerprint(&self) -> [u8; 32] {
+        self.x64_encoder_fingerprint
+    }
+
+    /// 返回 form 目录长度。
+    pub fn x64_form_count(&self) -> u32 {
+        self.x64_form_count
+    }
+
+    /// 返回 lowering 规则 revision。
+    pub fn x64_lowering_revision(&self) -> u32 {
+        self.x64_lowering_revision
+    }
+
+    /// 返回 lowered 站点总数。
+    pub fn x64_site_count(&self) -> u32 {
+        self.x64_site_count
+    }
+
+    /// 返回站点机器指令总数。
+    pub fn x64_instruction_count(&self) -> u32 {
+        self.x64_instruction_count
+    }
+
+    /// 返回片段字节总数。
+    pub fn x64_encoded_bytes(&self) -> u32 {
+        self.x64_encoded_bytes
+    }
+
+    /// 返回重定位总数。
+    pub fn x64_relocation_count(&self) -> u32 {
+        self.x64_relocation_count
+    }
+
+    /// 返回冷边站点数。
+    pub fn x64_cold_edge_count(&self) -> u32 {
+        self.x64_cold_edge_count
+    }
+
+    /// 返回压缩引用解码序列字节数。
+    pub fn x64_decode_sequence_bytes(&self) -> u32 {
+        self.x64_decode_sequence_bytes
+    }
+
+    /// 返回机器码片段世界指纹。
+    pub fn x64_fragment_fingerprint(&self) -> [u8; 32] {
+        self.x64_fragment_fingerprint
     }
 
     /// 返回 rt0 启动序列的步骤数量。
@@ -2340,8 +2522,13 @@ mod tests {
         assert_eq!(plan.entry(), "main");
         assert_eq!(plan.rt0(), super::Rt0Boundary::LinuxSyscall);
         assert_eq!(
-            compilation.action_graph().nodes()[7].status(),
-            ActionStatus::Skipped
+            compilation
+                .action_graph()
+                .nodes()
+                .iter()
+                .find(|node| node.kind() == ActionKind::EmitImage)
+                .map(|node| node.status()),
+            Some(ActionStatus::Skipped)
         );
     }
 

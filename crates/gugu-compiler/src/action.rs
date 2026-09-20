@@ -11,6 +11,8 @@ pub enum ActionKind {
     Frontend,
     /// 构造 bootstrap IR。
     BuildIr,
+    /// 生成每个实例的机器码片段。
+    Codegen,
     /// 规划目标后端输入。
     PlanBackend,
     /// 附加 Gugu runtime 源资源。
@@ -28,6 +30,7 @@ impl fmt::Display for ActionKind {
             Self::LoadSources => "load-sources",
             Self::Frontend => "frontend",
             Self::BuildIr => "build-ir",
+            Self::Codegen => "codegen",
             Self::PlanBackend => "plan-backend",
             Self::AttachRuntime => "attach-runtime",
             Self::ValidateImage => "validate-image",
@@ -106,6 +109,7 @@ impl ActionGraph {
             ActionKind::LoadSources,
             ActionKind::Frontend,
             ActionKind::BuildIr,
+            ActionKind::Codegen,
             ActionKind::PlanBackend,
             ActionKind::AttachRuntime,
             ActionKind::ValidateImage,

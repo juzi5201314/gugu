@@ -1052,6 +1052,10 @@ const CASES: &[Case] = &[
         DiagnosticCode::ResourceInvariant,
         "资源域 verifier 只在编译器自身不一致时失败；直接构造断言保留在 lir/tests.rs",
     ),
+    unreachable(
+        DiagnosticCode::BackendInvariant,
+        "机器片段与 encoder 契约 verifier 只在编译器自身不一致时失败；直接构造断言保留在 backend/x64/tests.rs",
+    ),
 ];
 
 /// 闸门运行器：整表复用一个 compiler 与 query 引擎。

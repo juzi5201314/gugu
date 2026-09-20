@@ -157,12 +157,14 @@ crates/
 
 ## 目标描述与 rt0 边界
 
-`TargetName` 只接受规范登记的 `x86_64-linux` 和 `x86_64-windows`。每个目标由不可变 `TargetDescriptor` 提供架构、操作系统、对象格式、指针宽度和 rt0 类型：
+`TargetName` 只接受规范登记的 `x86_64-linux` 和 `x86_64-windows`。每个目标由不可变 `TargetDescriptor` 提供架构、操作系统、对象格式、指针宽度、rt0 类型、页大小与 CPU 基线：
 
-| 目标 | 对象格式 | 指针宽度 | rt0 边界 |
-|---|---|---:|---|
-| `x86_64-linux` | ELF64 | 64 | Linux syscall |
-| `x86_64-windows` | PE32+ | 64 | Windows 薄 IAT |
+| 目标 | 对象格式 | 指针宽度 | rt0 边界 | 页大小 | CPU 基线 |
+|---|---|---:|---|---:|---|
+| `x86_64-linux` | ELF64 | 64 | Linux syscall | 4096 | `x86_64-v1` |
+| `x86_64-windows` | PE32+ | 64 | Windows 薄 IAT | 4096 | `x86_64-v1` |
+
+descriptor 还固定 `linux_interpreter`（Linux 为 `/lib64/ld-linux-x86-64.so.2`，Windows 为 `None`）、`sysroot_digest`（域 `gugu-target-sysroot-v1`，绑定目标名、解释器、登记导入库顺序与 `import_policy_revision`）、`import_policy_revision`、`runtime_tuning_profile_digest`（取 `RUNTIME_TUNING_PROFILE.digest()`）与 `backend_cost_profile_digest`（取 `BackendCostProfile::digest()`）。`TargetDescriptor::digest()` 以域 `gugu-target-descriptor-v1` 覆盖全部字段（含 pointer compression 能力），descriptor 整体进入 compiler identity 与 action key。
 
 rt0 不是普通 Gugu 函数。Linux 入口和 Windows 薄导入路径由后端与平台 runtime 负责；`RuntimeResources` 只把这项边界附加到 image plan，不实现宿主启动、分配、调度或报告逻辑。这样可以使目标描述进入编译结果，同时保持公开的 rt0 启动契约由 [`运行时规范`](../spec/runtime.md#rt0-and-startup) 和 [`平台 ABI`](../spec/platform-abi.md#entry-relocation-tls)唯一规定。
 
@@ -279,6 +281,8 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 `RuntimeRawModel` schema 22 在同一缓存对象上并入 `ProvenanceRuntimeContract`（`PROVENANCE_SCHEMA = 1`，profile `mosaic-provenance` revision 1），并把 raw policy revision 升到 4：释放 provenance 检查目录（`canonical`/`alignment`/`range`/`class`/`owner`/`generation`/`link`/`state` 加上 debug/security 追加的 `poison`/`double-return-marker`/`full-chain`/`random-reuse`/`guard-region`/`checked-copy`）、per-domain secret 登记目录与管理规则、release 基线检查集合与 profile 激活序列（release 只保留 owner/generation/range/alignment 基线，debug 追加 poison、双重释放标记与全链 verifier，security 追加随机复用、guard region 与 checked copy）、七类释放拒绝分类与六项统计口径；`provenance-demand` 由 raw 平面需求的 owner 数与两份 class ladder 推导。默认 release，即基线 provenance 检查语义；`ProvenancePlane` 的 per-domain secret 由 world secret 经派生键推导、每个 domain 持有独立 `LinkCodec`，释放拒绝在真实释放路径上按类记账，debug/security 的额外检查只改变记账与复用顺序、不改变 managed trace 语义。`provenance-*` 键进入 `ImagePlan` 与 `-Zdump-runtime`，`CompileRequest::with_provenance_policy` 显式选择 profile 并随 raw policy 进入契约与 action key。
 
 `RuntimeRawModel` schema 23 在同一缓存对象上并入 `CombiningRuntimeContract`（`COMBINING_SCHEMA = 1`，profile `mosaic-combining` revision 1），并把 raw policy revision 升到 5：冷操作 tag 目录（`global-range-refill`/`extent-coalesce`/`topology-rebuild`/`platform-trim`）、与 tag 目录逐项相同的允许用途、十项禁止用途（含 TLAB allocation、raw local pop、普通 remote return、channel/select/park-wake 线性化与任意 closure/drop glue）、operation record 的十个标量字段、状态目录与七条迁移、单条 fast path 与两条争用路径、九项统计口径，以及合并上限、轮次条目/字节预算、超时轮数、记录规范槽、chunk 槽位数（尾部 1 槽预留给 refill）与 chunk 上界；`combining-demand` 由 raw 平面需求的 owner 数与分配站点数推导。默认 direct，即冷操作在请求者上下文逐条执行同一份 handler；combined 模式把请求记录进非移动池，无争用走单原子 claim 字、争用挂到 owner 的 MCS 链尾，由固定上界的轮次按 FIFO 认领并按同类合并执行。`combining-*` 键进入 `ImagePlan` 与 `-Zdump-runtime`，`CompileRequest::with_combining_policy` 显式开启 combined。
+
+`RuntimeRawModel` schema 24 把压缩契约升到 `COMPRESSION_SCHEMA = 2`、profile `mosaic-compression` revision 2：契约新增 cage 控制记录的字段表（`generation`/`cage_id`/`base`/`len`/`canonical_headroom`/`decodes`/`rejections` 的名字、字节偏移、宽度、记录字节数、对齐）与 `CAGE_CANONICAL_LIMIT`，两者与 runtime 侧 `CageControlRecord` 同源，机器解码序列按同一张表读取记录，`DecodeCompressedRef` 夹具与 `CompressionPlane` 的 checked 解码逐字对照；同一 schema 还让调度契约段与 `RUNTIME_TUNING_PROFILE` 逐字段核对（本地容量、远端 shard 数、batch 上限、service interval/batch、queue padding、cache line），段内自洽但 profile 对不上同样是非法状态。
 
 内部契约也沿同一边界扩展：[`AST/HIR`](ast-hir.md) 消费 frontend 产物，[`GIR/LIR`](gir-lir.md) 消费冻结 HIR，[`后端`](backend.md) 负责从合法 LIR 到 machine code，[`调度器`](scheduler.md) 和 [`GC 元数据`](gc-metadata.md) 负责 runtime 语义。不得为这些后续模块建立平行的占位语义路径。
 

@@ -296,6 +296,13 @@ LIR 指令按封闭类别组织：
 - 已解析汇编：`InlineAsm` 只保存前端验证过的封闭汇编计划、输入输出约束与 effect；不接受待解析模板文本。
 - 诊断插桩：`CoverageCounter`。
 
+向量与带进位操作的语义固定如下，`x86_64-v1` 基线实现必须给出同一结果：
+
+- `VCompare` 是有序比较：任一操作数是 NaN 时 `Eq`/`Lt`/`Le`/`Gt`/`Ge` 的 lane 全为 0、`Ne` 的 lane 全为 1。SSE 的 `cmpps`/`cmppd` 谓词必须取「无序为假」的形式，`Ge`/`Gt` 用交换操作数的 `LE`/`LT` 谓词实现，不能使用 `NLT`/`NLE` 的「无序为真」谓词；
+- `VReduceAdd` 是 64 位有符号求和：每个 lane 先按 lane 宽度符号扩展到 64 位，再以 64 位环绕相加。32 位 lane 的 4 项和最多 34 位，实现必须 64 位累加，不能用 32 位累加后再扩宽；
+- `VExtractLane`/`VInsertLane` 只改动目标 lane：插入保留其它 lane 的原有位，插入值按 lane 宽度截断；
+- `AddCarry`/`SubBorrow` 的第三操作数是 0/1 值的进位输入：`sum = left + right + carry_in (mod 2^64)`，进位出是两次加法（减法）进位（借位）的或。第二段必须用 `add`/`sub`，不能用 `adc`/`sbb`，后者会把上一段的 CF 再加一次。
+
 ### 内存 owner lowering {#memory-owner-lowering}
 
 `EscapeAndPlacement` 的 managed placement、`RuntimeRaw`、`Resource` 和 `Foreign` 分类还决定 storage domain、size class、owner policy、representation tag、是否可在 local fast path 完成以及 return kind。`Managed::TurnRegion` 只有在闭世界摘要证明当前 coroutine turn 私有、无外部 alias、无 ResourceCell lease 且不需要 FFI 地址时才能选择；analysis 为 `unknown` 时必须选择 LocalHeap 或 SharedHeap 等能够保留原语义的路径。compiler 只为 `Managed` 产生 GC/region operation，不产生用户级 free；raw/resource 的回收由 runtime operation 和稳定 descriptor 完成。
@@ -339,7 +346,11 @@ LIR 构造后按下列顺序运行：
 
 任何 pass 都不得删除一个仍可能触发调度或 GC 的 safepoint，不得把 GC provenance 降为 `Raw` 以逃避栈图，也不得把 panic 条件变成未定义行为。浮点优化不使用 reassociation、`NaN` 假设、flush-to-zero 或 fast-math。
 
-`LowerTargetAbi` 与 `LegalizeX86_64` 当前是校验 pass：它们断言调用/返回 ABI 形态（`by_value`/`sret` 参数编号、`ForeignCall` mode、`TailCall` 资格）与「无 i128/聚合普通 value、无无编码操作、`V128` lane 合法且无 pointer provenance、原子约束成立」，不写回新语义；后端指令选择阶段在同一位置替换为真正的 ABI lowering 与机器合法化。
+`LowerTargetAbi` 当前是校验 pass：它断言调用/返回 ABI 形态（`by_value`/`sret` 参数编号、`ForeignCall` mode、`TailCall` 资格）与「无 i128/聚合普通 value、无无编码操作、`V128` lane 合法且无 pointer provenance、原子约束成立」，不写回新语义；后端指令选择阶段在同一位置替换为真正的 ABI lowering。
+
+`LegalizeX86_64` 已按 `x86_64-v1` 实现真正的机器合法化：它把 `IConst`/`FConst`/`Integer`/`Float`/`Compare`/`Convert`/`Vector`/`Select`/`TrapIf`/`Atomic`/`Fence`/`DecodeCompressedRef` 展开成后端指令表内的物理寄存器序列，逐条过 instruction verifier，并把结果整体交给编码器；目标没有基线序列的 operation（如 SSE2 之外的 `V128` 排序比较、浮点 `VReduceAdd`）是编译错误而不是回退路径。该 pass 只在 descriptor 的 CPU 基线下运行，序列、约束与 clobber 集合进入 codegen fragment。
+
+机器合法化后这些 operation 的 `poll_cost` 取实际机器形式的权重和，而不是 LIR opcode 的抽象权重：`x64::lower::poll_cost` 是唯一来源，`Select`、`TrapIf`、`DecodeCompressedRef` 的展开长度直接反映在路径预算里，权重口径 revision 与 LIR/cache schema 同步递增。
 
 `CanonicalizeLoops` 只把可证明有限 trip count、单 latch、固定非零 step和可比较终点的 natural loop标为 counted loop。任何 loop pass都不得把 backedge引入 `NoSafepointRegion`、复制 region marker或把 operation移入/移出 region。`LoopVersioningAndUnswitching` 与 `LoopVectorizationAndUnrolling` 在 compiler budget poll尚不存在时完成其它会改变循环 trip count、CFG cycle、vector factor或 unroll factor的变换；只有依赖、alias、panic/effect顺序与整数/浮点语义都证明等价时才能变换，浮点归约不能为向量化重关联。vectorizer使用目标 cost model拒绝保守 legalized单次迭代可能超过 `POLL_BUDGET` 的 factor组合。
 

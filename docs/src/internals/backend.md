@@ -10,7 +10,7 @@
 
 ## 目标描述符与数值 lowering
 
-当前后端只实现平台注册表中的`x86_64-linux`和`x86_64-windows`。每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest, backend_cost_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；backend cost profile固定寄存器保留、inline code-size与spill上限。release镜像只编入该profile选中的一种deque，不生成运行时mode分支。
+当前后端只实现平台注册表中的`x86_64-linux`和`x86_64-windows`。每个toolchain安装携带不可变`TargetDescriptor { name, object_format, page_size, cpu_baseline, linux_interpreter, sysroot_digest, import_policy_revision, runtime_tuning_profile_digest, backend_cost_profile_digest }`；目标运行时路径与宿主sysroot分离，descriptor整体进入compiler identity和action key，backend不探测宿主PATH。runtime tuning profile至少固定`LocalDequeMode`、remote/injection shard数和queue padding；backend cost profile固定寄存器保留、inline code-size与spill上限。release镜像只编入该profile选中的一种deque，不生成运行时mode分支。`runtime_tuning_profile_digest`取`RUNTIME_TUNING_PROFILE.digest()`（域`gugu-runtime-tuning-profile-v1`），`RuntimeRawContractV1::verify`交叉校验调度段与profile的容量、分片、batch、service节奏与填充字段。
 
 CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。
 
@@ -309,6 +309,19 @@ encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcod
 - 确认 writable section不可执行、stack不可执行、metadata只读且 strip保留；
 - 对相同 image plan重放编码并比较 bytes，禁止时间戳、随机 GUID和目录顺序进入输出。
 
+### 指令表与编码契约
+
+`x86_64-v1` 的编码器只认自己那张封闭指令表，不接收 opcode 文本、不调用系统 assembler。表项按 `(助记符, 操作数形状, 第一操作数访问语义)` 唯一确定，操作数按**编码位置**排列（ModRM 的 r/m 在前、ModRM.reg 在后，立即数/`rel32` 最后），同形状反方向的两个 form（如 `mov r/m64, r64` 的 `0x89` 与 `mov r64, r/m64` 的 `0x8B`）只能靠访问语义区分。表维护以下不变量，且由 `encoder_contract` 与表审计测试共同强制：
+
+- 每个 form 声明 `lock_allowed`、`OperandSize66`/`RepF3`/`RepF2` 前缀、REX.W、固定 ModRM 与立即数字段宽度；未登记的形式在 verifier 阶段被拒绝，不会退化到 MMX 或更宽的扩展指令；
+- SSE2 整型向量的形式必须带 `66` 前缀——缺前缀会编码成 MMX 寄存器的形式，只在执行期暴露；
+- 固定 ModRM 只出现在无操作数形式上（`0F AE /5`、`/6`、`/7` 的 `lfence`/`mfence`/`sfence`），有操作数时 ModRM 由操作数派生；
+- 超出 baseline 的形式（`pshufb`、`pmulld`、`pextrd`、`pinsrd`、VEX `vaddps`）登记在表内并携带特性标记，只在 descriptor 允许该特性时才可选；`x86_64-v1` 下它们计入 `beyond_baseline_forms` 而不被选中；
+- `lock` 只允许出现在声明了 `lock_allowed` 的形式上，且必须落在内存目标；前缀顺序固定为 `lock`、段/操作数前缀、REX、opcode。
+
+编码契约（`ENCODER_SCHEMA = 1`、`ENCODER_REVISION = 1`、`LOWERING_REVISION = 1`）把表、形状不变量与 lowering 版本一起冻结：`EncoderContract::verify` 校验每个 form 的形状、助记符、特性名与 baseline 归属，`fingerprint` 取域 `gugu-x64-encoder-v1` 下对规范化字节的哈希（域 `gugu-x64-encoder-catalog-v1` 单独标记目录），任何表改动都会改变指纹并进入 action key。`LegalizeX86_64` 产出的序列连同约束、clobber、冷边与 encoded bytes 组成 codegen fragment（`CODEGEN_SCHEMA = 1`，键域 `gugu-x64-fragment-key-v1`，世界指纹域 `gugu-x64-fragments-v1`），逐站点记录指令、字节区间、重定位、约束和 clobber，并在验证时重算站点序、字节区间、重定位范围与片段指纹。
+
+
 ### Cost calibration profile
 
 每个 `TargetDescriptor` 关联版本化 `BackendCostProfile`，至少包含 `{ baseline_digest, inline_hot_bytes, inline_cold_bytes, max_spill_slots, max_spill_bytes_per_call, max_reload_stores, code_size_budget, regression_percent, vector_lowering }`。当前两个目标共用 `baseline_cost_profile()`：`baseline_digest` 由域 `gugu-backend-cost-baseline-v1` 对 `x86_64-v1` 哈希得到，`inline_hot_bytes = 256`、`inline_cold_bytes = 128`、`code_size_budget = 4096`、`max_spill_slots = 64`、`max_spill_bytes_per_call = 512`、`max_reload_stores = 256`、`regression_percent = 5`，且 `vector_lowering = false`。`vector_lowering = false` 表示该目标尚未提供校准的向量 lowering：`LoopVectorizationAndUnrolling` 此时只做 unroll 与 scalar remainder，不得生成任何 `V128`；只有后端提供 `vector_lowering = true` 的已校准 profile 后，vectorizer 才允许生成 vector main loop。profile固定当前 `r14/r15/r11` 保留寄存器决定，不允许后端在单个函数上临时释放 runtime register或以不同寄存器集逃避成本记录；换寄存器集必须产生新的 compiler/runtime schema和独立 profile。
@@ -322,6 +335,12 @@ profile发布前必须在固定 calibration corpus 上重复生成代码：空/�
 ### 机器成本验证
 
 固定LIR fixture和C对照fixture覆盖整数/floating边界、聚合ABI、register压力、spill、critical edge、branch relaxation、i128、atomic、panic unwind、stack growth、GC safepoint、no-safepoint marker零编码、ELF relocation和PE unwind/import。机器码fixture还必须逐指令断言普通prologue只有一次`[r14 + stack_check]`load与共享容量/poll冷分支，budget poll只有一次`[r15 + poll_flags]`load，并且两者没有lifecycle/global epoch访问；BatchInbox每个publish batch只有producer-local active/seen store、一次queue-control load、普通link写、head `lock cmpxchg`和可选empty-transition通知，consumer只有Acquire exchange与普通link读；所选LocalDeque mode的机器序列与profile一致。真实执行smoke test分别直接启动Linux ELF和Windows目标环境中的PE；只比较反汇编文本不能证明镜像可运行。
+
+### 编码执行验收
+
+除逐字节 fixture 外，x86_64 后端还有一条在真实宿主 VM 上执行编码产物的验收路径：`X64Harness` 用与生产同源的 lowering、verifier 和编码器为每条 lowering 规则构造确定性用例（输入寄存器、期望寄存器/内存结果、冷边是否触发、原子与向量 lane 覆盖），`cargo bench --bench x64_encoding` 把用例片段映射为可写→可执行页在宿主上真跑，逐例比较寄存器、内存槽与冷边计数，失败以非零退出码结束。同一条路径还核对三件事：解码序列在真实控制记录上的 `decodes`/`rejections` 与 `CompressionPlane` 的 checked 解码逐个吻合；编码器生成的上下文切换片段与 runtime 的 `ContextSwitchCode::fixed()` 逐字节相同（含 restore offset）；harness 自检（用例数、契约 form 数与 baseline 之外的形式数）成立。
+
+宿主 VM 与裸适配器只存在于 `benches/support/vm.rs`，compiler 与 runtime 仍保持 `forbid(unsafe_code)`。这条路径的作用不是替代 fixture，而是在真实机器上暴露只有执行才可见的错误：SSE2 形式缺 `66` 前缀落到 MMX、固定 ModRM 未写出、`adc`/`sbb` 重复计入上一段 CF、向量比较误用「无序为真」谓词、插入掩码移位量错、32 位归约丢位，都是先由它发现再修在归属层的。
 
 ## 参考实现资料
 

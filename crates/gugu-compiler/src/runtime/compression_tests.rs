@@ -62,7 +62,7 @@ fn real_compilation_defaults_to_disabled_compression() {
     );
     assert!(
         compression.dump().starts_with(
-            "compression schema=1 profile=mosaic-compression revision=1 enabled=false"
+            "compression schema=2 profile=mosaic-compression revision=2 enabled=false"
         ),
         "dump 头必须固定 profile 与开关：{}",
         compression.dump()

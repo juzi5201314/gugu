@@ -1,3 +1,5 @@
+pub(crate) mod x64;
+
 use crate::{
     frontend::gir::GirWorldV1, frontend::hir::Validated, frontend::mono::MonoWorldV1,
     target::TargetName,
@@ -169,6 +171,34 @@ pub(crate) struct BackendPlan {
     pub(crate) platform_contract_fingerprint: [u8; 32],
     pub(crate) platform_demand: super::runtime::PlatformRangeDemand,
     pub(crate) ledger_category_count: u32,
+    /// 目标描述符指纹。
+    pub(crate) target_descriptor_digest: [u8; 32],
+    /// 目标页大小。
+    pub(crate) target_page_size: u32,
+    /// 目标 CPU 基线。
+    pub(crate) target_cpu_baseline: crate::target::CpuBaseline,
+    /// 导入策略 revision。
+    pub(crate) import_policy_revision: u32,
+    /// encoder 契约指纹。
+    pub(crate) x64_encoder_fingerprint: [u8; 32],
+    /// form 目录长度。
+    pub(crate) x64_form_count: u32,
+    /// lowering 规则 revision。
+    pub(crate) x64_lowering_revision: u32,
+    /// lowered 站点总数。
+    pub(crate) x64_site_count: u32,
+    /// 站点机器指令总数。
+    pub(crate) x64_instruction_count: u32,
+    /// 片段字节总数。
+    pub(crate) x64_encoded_bytes: u32,
+    /// 重定位总数。
+    pub(crate) x64_relocation_count: u32,
+    /// 冷边站点数。
+    pub(crate) x64_cold_edge_count: u32,
+    /// 压缩引用解码序列字节数。
+    pub(crate) x64_decode_sequence_bytes: u32,
+    /// 片段世界指纹。
+    pub(crate) x64_fragment_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -178,8 +208,10 @@ pub(crate) fn plan(
     gir: &GirWorldV1,
     lir: &crate::lir::Validated,
     raw: &crate::runtime::RuntimeRawContractV1,
+    x64: &crate::backend::x64::codegen::X64World,
     runtime_checks_elided_count: u32,
 ) -> Option<BackendPlan> {
+    let descriptor = target.descriptor();
     let module = hir.module();
     let entry = module.entry?;
     let placement = gir.placement.counts();
@@ -209,7 +241,7 @@ pub(crate) fn plan(
         local_heap_count: placement.local_heap,
         shared_heap_count: placement.shared_heap,
         placement_fingerprint: gir.placement.fingerprint,
-        lir_body_count: u32::try_from(lir.bodies()).expect("LIR body 数量适配 u32"),
+        lir_body_count: u32::try_from(lir.body_count()).expect("LIR body 数量适配 u32"),
         lir_block_count: u32::try_from(lir.blocks()).expect("LIR block 数量适配 u32"),
         lir_instruction_count: u32::try_from(lir.instructions()).expect("LIR 指令数量适配 u32"),
         lir_memory_operation_count: u32::try_from(lir.memory_operations())
@@ -357,5 +389,19 @@ pub(crate) fn plan(
             .as_bytes(),
         platform_demand: *raw.platform_demand(),
         ledger_category_count: raw.ledger_categories().len() as u32,
+        target_descriptor_digest: descriptor.digest(),
+        target_page_size: descriptor.page_size,
+        target_cpu_baseline: descriptor.cpu_baseline,
+        import_policy_revision: crate::target::IMPORT_POLICY_REVISION,
+        x64_encoder_fingerprint: x64.encoder_fingerprint(),
+        x64_form_count: u32::try_from(x64.contract.forms.len()).expect("form 数量适配 u32"),
+        x64_lowering_revision: x64.contract.lowering_revision,
+        x64_site_count: x64.site_count(),
+        x64_instruction_count: x64.instruction_count(),
+        x64_encoded_bytes: x64.encoded_bytes(),
+        x64_relocation_count: x64.relocation_count(),
+        x64_cold_edge_count: x64.cold_edge_count(),
+        x64_decode_sequence_bytes: x64.decode_sequence_bytes(),
+        x64_fragment_fingerprint: x64.fingerprint(),
     })
 }

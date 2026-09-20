@@ -11,16 +11,17 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::Write as _;
 
+use super::cage_control::{CAGE_CANONICAL_LIMIT, CAGE_CONTROL_FIELDS, CageControlRecord};
 use super::model::RawModelError;
 use crate::target::PointerCompression;
 
 /// 压缩契约段 schema。
-pub(crate) const COMPRESSION_SCHEMA: u32 = 1;
+pub(crate) const COMPRESSION_SCHEMA: u32 = 2;
 
 /// 内建 compression profile 名。
 pub(crate) const COMPRESSION_PROFILE_NAME: &str = "mosaic-compression";
-/// profile revision；位布局、粒度、FFI 规则或统计口径变化都必须递增。
-pub(crate) const COMPRESSION_PROFILE_REVISION: u32 = 1;
+/// profile revision；位布局、粒度、FFI 规则、控制记录或统计口径变化都必须递增。
+pub(crate) const COMPRESSION_PROFILE_REVISION: u32 = 2;
 
 /// 压缩字里的 cage id 位数。
 pub(crate) const CAGE_ID_BITS: u32 = 8;
@@ -115,6 +116,18 @@ impl CompressionDemand {
     }
 }
 
+/// cage 控制记录的一个字段：名、字节偏移与宽度。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct CageControlField {
+    /// 字段名。
+    pub name: String,
+    /// 字节偏移。
+    pub offset: u32,
+    /// 字节宽度。
+    pub size: u32,
+}
+
 /// 已验证的压缩 runtime 契约；版本变化使 RuntimeRawModel 与 action key 失效。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -155,6 +168,12 @@ pub struct CompressionRuntimeContract {
     pub generation_max: u32,
     /// 压缩根的种类名。
     pub compressed_root_kind: String,
+    /// cage 控制记录字段表；机器解码序列按它读取记录。
+    pub cage_control_fields: Vec<CageControlField>,
+    /// cage 控制记录字节数。
+    pub cage_control_bytes: u32,
+    /// cage 控制记录对齐。
+    pub cage_control_align: u32,
     /// FFI 交接规则目录。
     pub ffi_rules: Vec<String>,
     /// 统计口径目录。
@@ -193,6 +212,16 @@ impl CompressionRuntimeContract {
             generation_min: CAGE_GENERATION_MIN,
             generation_max: (1 << CAGE_GENERATION_BITS) - 1,
             compressed_root_kind: CAGE_COMPRESSED_ROOT_KIND.to_owned(),
+            cage_control_fields: CAGE_CONTROL_FIELDS
+                .iter()
+                .map(|(name, offset, size)| CageControlField {
+                    name: (*name).to_owned(),
+                    offset: *offset,
+                    size: *size,
+                })
+                .collect(),
+            cage_control_bytes: CageControlRecord::byte_len(),
+            cage_control_align: CageControlRecord::byte_align(),
             ffi_rules: CAGE_FFI_RULES
                 .iter()
                 .map(|rule| (*rule).to_owned())
@@ -337,6 +366,34 @@ impl CompressionRuntimeContract {
         if self.compressed_root_kind != CAGE_COMPRESSED_ROOT_KIND {
             return Err(RawModelError::new("压缩根种类名与登记值不一致"));
         }
+        if self.cage_control_fields.len() != CAGE_CONTROL_FIELDS.len()
+            || self
+                .cage_control_fields
+                .iter()
+                .zip(CAGE_CONTROL_FIELDS.iter())
+                .any(|(field, (name, offset, size))| {
+                    field.name != *name || field.offset != *offset || field.size != *size
+                })
+        {
+            return Err(RawModelError::new("cage 控制记录字段表与登记值不一致"));
+        }
+        if usize::try_from(self.cage_control_bytes).ok()
+            != Some(std::mem::size_of::<CageControlRecord>())
+            || usize::try_from(self.cage_control_align).ok()
+                != Some(std::mem::align_of::<CageControlRecord>())
+        {
+            return Err(RawModelError::new(
+                "cage 控制记录尺寸或对齐与 Rust 布局不一致",
+            ));
+        }
+        // 机器解码序列按 `CAGE_CANONICAL_LIMIT`（48 位正半区上界）判定 canonical；目标声明的
+        // canonical 位宽必须与它同源。未登记压缩能力的目标不参与该检查。
+        if self.capability.supported {
+            let bits = u32::from(self.capability.canonical_bits);
+            if bits == 0 || bits > 64 || CAGE_CANONICAL_LIMIT.trailing_zeros() + 1 != bits {
+                return Err(RawModelError::new("目标 canonical 位宽与 cage 编码不一致"));
+            }
+        }
         if self.ffi_rules.len() != CAGE_FFI_RULES.len()
             || self
                 .ffi_rules
@@ -371,9 +428,6 @@ impl CompressionRuntimeContract {
         } else {
             if !self.capability.supported {
                 return Err(RawModelError::new("目标不支持 checked pointer compression"));
-            }
-            if self.capability.canonical_bits != 48 {
-                return Err(RawModelError::new("目标 canonical 位宽与 cage 编码不一致"));
             }
             if self.cage_bytes == 0 || !self.cage_bytes.is_multiple_of(self.cage_granule_bytes) {
                 return Err(RawModelError::new("cage 字节数必须是 arena 粒度的整数倍"));
@@ -442,6 +496,17 @@ impl CompressionRuntimeContract {
         );
         let _ = writeln!(out, "compression-ffi-rules {}", self.ffi_rules.join(","));
         let _ = writeln!(out, "compression-statistics {}", self.statistics.join(","));
+        let _ = writeln!(
+            out,
+            "compression-cage-control bytes={} align={} fields={}",
+            self.cage_control_bytes,
+            self.cage_control_align,
+            self.cage_control_fields
+                .iter()
+                .map(|field| format!("{}@{}:{}", field.name, field.offset, field.size))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
         out
     }
 }

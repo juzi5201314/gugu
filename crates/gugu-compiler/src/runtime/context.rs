@@ -21,15 +21,18 @@ pub struct ContextSwitchCode {
 impl ContextSwitchCode {
     pub(crate) fn fixed() -> Self {
         let offset = |value| u8::try_from(value).expect("context的6个机器字均在disp8内");
-        let rsp = offset(offset_of!(CoroutineContext, rsp));
         let rip = offset(offset_of!(CoroutineContext, rip));
         let rbx = offset(offset_of!(CoroutineContext, rbx));
         let rbp = offset(offset_of!(CoroutineContext, rbp));
         let r12 = offset(offset_of!(CoroutineContext, r12));
         let r13 = offset(offset_of!(CoroutineContext, r13));
-        let mut bytes = Vec::with_capacity(80);
-        // lea rax,[rsp+8]；mov [rdi+rsp],rax；取调用者return PC。
-        bytes.extend_from_slice(&[0x48, 0x8d, 0x44, 0x24, 8, 0x48, 0x89, 0x47, rsp]);
+        // `rsp` 是 context 首字段：`[rdi]`/`[rsi]` 形式不带位移字节，与 x64 编码器的
+        // 「零位移省略」策略一致，因此这片段可与编码器产物逐字节比对。
+        let rsp = offset(offset_of!(CoroutineContext, rsp));
+        debug_assert_eq!(rsp, 0, "rsp 字段在 context 首位，零位移因此可以省略");
+        let mut bytes = Vec::with_capacity(64);
+        // lea rax,[rsp+8]；mov [rdi],rax；取调用者return PC。
+        bytes.extend_from_slice(&[0x48, 0x8d, 0x44, 0x24, 8, 0x48, 0x89, 0x07]);
         bytes.extend_from_slice(&[0x48, 0x8b, 0x04, 0x24, 0x48, 0x89, 0x47, rip]);
         bytes.extend_from_slice(&[0x48, 0x89, 0x5f, rbx, 0x48, 0x89, 0x6f, rbp]);
         bytes.extend_from_slice(&[0x4c, 0x89, 0x67, r12, 0x4c, 0x89, 0x6f, r13]);
@@ -38,7 +41,7 @@ impl ContextSwitchCode {
         bytes.extend_from_slice(&[0x49, 0x89, 0xd6, 0x49, 0x89, 0xcf]);
         bytes.extend_from_slice(&[0x48, 0x8b, 0x5e, rbx, 0x48, 0x8b, 0x6e, rbp]);
         bytes.extend_from_slice(&[0x4c, 0x8b, 0x66, r12, 0x4c, 0x8b, 0x6e, r13]);
-        bytes.extend_from_slice(&[0x48, 0x8b, 0x66, rsp, 0xff, 0x66, rip]);
+        bytes.extend_from_slice(&[0x48, 0x8b, 0x26, 0xff, 0x66, rip]);
         Self {
             revision: 1,
             restore_offset,

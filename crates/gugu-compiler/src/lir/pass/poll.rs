@@ -743,7 +743,10 @@ fn loop_cycle_cost(editor: &Editor, natural: &LoopInfo, info: &CalleeInfo) -> u3
         })
 }
 
-/// 进入循环前的成本：preheader 所在 block 的累计成本（不含循环体，避免回边饱和）。
+/// 进入循环前的成本：preheader 的输入成本加上 preheader 自身的指令成本。
+///
+/// 度量的是「进入循环头时的累计成本」。strip mining 后内层循环的 preheader 变成新外层 header，
+/// 该值恰好等于原 preheader 的输出成本；少算这部分会让内层被判为非豁免而被再次插点。
 fn entry_cost(editor: &Editor, natural: &LoopInfo, info: &CalleeInfo) -> u32 {
     let Some(preheader) = editor
         .predecessors(natural.header)
@@ -753,11 +756,20 @@ fn entry_cost(editor: &Editor, natural: &LoopInfo, info: &CalleeInfo) -> u32 {
     else {
         return 0;
     };
-    editor_costs(editor, info)
+    let incoming = editor_costs(editor, info)
         .0
         .get(preheader.from.index())
         .copied()
-        .unwrap_or(0)
+        .unwrap_or(0);
+    let cost = block_flow(
+        (0..editor.instruction_count(preheader.from))
+            .filter(|index| !editor.instruction((preheader.from, *index)).removed)
+            .map(|index| &editor.instruction((preheader.from, index)).op),
+        &editor.assembly,
+        info,
+        incoming,
+    );
+    cost
 }
 
 /// 进入循环前的成本 + 全部迭代成本的保守上界。
@@ -918,10 +930,21 @@ fn strip_mine(
     if cycle == 0 || cycle > POLL_BUDGET {
         return Ok(false);
     }
-    // 内层 strip 后多出 chunk 边界比较与分支，预留该成本与进入循环前的成本。
-    let entry = entry_cost(editor, natural, info);
+    // 内层 strip 后多出 chunk 边界比较与分支，预留该比较的真实成本（机器 form 权重上界）：
+    // 预留不足会让内层循环的总成本越过预算，从而被 clean-cycle 判定再次插点。
+    let boundary = Op::Compare {
+        condition: Condition::Lt,
+        signed: counted.signed,
+    }
+    .poll_cost_with(&editor.assembly);
+    // 外层 header 自身还要执行 `iv + stride` 与边界比较；strip 后内层循环的 preheader 就是它，
+    // 因此这两条指令的成本也属于内层的入口成本（否则内层总成本会越过预算并被再次插点）。
+    let stride_cost = Op::Integer(IntOp::Add).poll_cost_with(&editor.assembly);
+    let entry = entry_cost(editor, natural, info)
+        .saturating_add(stride_cost)
+        .saturating_add(boundary);
     let available = POLL_BUDGET.saturating_sub(entry);
-    let chunk = u64::from(available / cycle.saturating_add(2).max(1));
+    let chunk = u64::from(available / cycle.saturating_add(boundary).max(1));
     if chunk < 2 {
         return Ok(false);
     }

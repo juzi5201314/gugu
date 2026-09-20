@@ -301,6 +301,7 @@ fn dump_internal_flags_parse_and_require_internal_gate() {
         "-Zdump-gir",
         "-Zdump-lir",
         "-Zdump-runtime",
+        "-Zdump-x64",
     ])
     .expect("内部选项可解析");
     assert_eq!(
@@ -308,7 +309,8 @@ fn dump_internal_flags_parse_and_require_internal_gate() {
         vec![
             "dump-gir".to_owned(),
             "dump-lir".to_owned(),
-            "dump-runtime".to_owned()
+            "dump-runtime".to_owned(),
+            "dump-x64".to_owned()
         ]
     );
     assert!(
@@ -811,4 +813,60 @@ fn build_json_reports_shared_heap_contract_keys() {
             "{key} 在 LocalHeap-only 源码上必须为 0"
         );
     }
+}
+
+/// 机器片段：镜像计划字段、`-Zdump-x64` 文本与指纹在镜像计划与片段世界之间一致。
+#[test]
+fn build_json_reports_x64_fragment_keys() {
+    let source = "fn main() {\n let index = 33\n let total = index * 7\n _ = total / 3\n }";
+    let compilation =
+        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+            "main.gg",
+            source,
+            gugu_compiler::TargetName::X86_64Linux,
+        ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    let payload = super::output::image_plan_payload(plan);
+    for key in [
+        "target-descriptor-digest",
+        "target-page-size",
+        "target-cpu-baseline",
+        "import-policy-revision",
+        "x64-encoder-fingerprint",
+        "x64-form-count",
+        "x64-lowering-revision",
+        "x64-site-count",
+        "x64-instruction-count",
+        "x64-encoded-bytes",
+        "x64-relocation-count",
+        "x64-cold-edge-count",
+        "x64-decode-sequence-bytes",
+        "x64-fragment-fingerprint",
+    ] {
+        assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
+    }
+    assert_eq!(payload["target-cpu-baseline"], "x86_64-v1");
+    assert!(payload["x64-form-count"].as_u64().unwrap_or(0) > 300);
+    assert!(payload["x64-site-count"].as_u64().unwrap_or(0) > 0);
+    assert!(payload["x64-encoded-bytes"].as_u64().unwrap_or(0) > 0);
+    assert_eq!(
+        payload["x64-fragment-fingerprint"],
+        serde_json::json!(plan.x64_fragment_fingerprint())
+    );
+    assert_eq!(
+        payload["x64-encoder-fingerprint"],
+        serde_json::json!(plan.x64_encoder_fingerprint())
+    );
+    let dump = compilation.dump_x64().expect("片段 dump");
+    assert_eq!(dump, compilation.dump_x64().expect("片段 dump 必须稳定"));
+    assert!(dump.contains("x64 schema=1 target=x86_64-linux"), "{dump}");
+    // 源码含乘法与除法：dump 必须出现真实助记符。
+    assert!(dump.contains("imul"), "{dump}");
+    assert!(dump.contains("idiv"), "{dump}");
+    assert!(dump.contains("cqo"), "{dump}");
 }

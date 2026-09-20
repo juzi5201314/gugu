@@ -23,6 +23,7 @@ pub(crate) mod block_return_schema;
     reason = "cage 预留、checked 解码与 FFI 交接由 world、栈图 walker 与确定性测试消费"
 )]
 mod cage;
+pub(crate) mod cage_control;
 #[allow(dead_code, reason = "候选平面由周期汇合阶段的世界推进与确定性测试消费")]
 pub(crate) mod candidate;
 #[allow(dead_code, reason = "候选决议结构由 world 候选推进与确定性测试消费")]
@@ -117,7 +118,7 @@ pub(crate) mod routing;
 pub(crate) mod routing_schema;
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
-mod scheduler_schema;
+pub(crate) mod scheduler_schema;
 #[allow(dead_code, reason = "等待协议的确定性参照实现")]
 mod select;
 #[allow(
@@ -251,6 +252,8 @@ mod tests;
 #[cfg(test)]
 #[path = "trace_tests.rs"]
 mod trace_tests;
+
+pub(crate) use harness::DecodeReferenceFixture;
 
 pub use harness::{
     BlockReturnHarness, BlockReturnReport, CardMarkHarness, CardMarkReport, ChannelWaitHarness,

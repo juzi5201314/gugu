@@ -20,6 +20,7 @@ pub(crate) mod versioning;
 use super::body::Body;
 use super::invalid;
 use crate::frontend::hir;
+use crate::target::CpuBaseline;
 use crate::{BackendCostProfile, Diagnostic, DiagnosticCode};
 use rewrite::Editor;
 
@@ -97,6 +98,7 @@ fn run_pass(
     pass: LirPass,
     editor: &mut Editor,
     profile: &BackendCostProfile,
+    baseline: CpuBaseline,
 ) -> Result<bool, Diagnostic> {
     match pass {
         LirPass::VerifySsaAndMemory => Ok(false),
@@ -112,7 +114,7 @@ fn run_pass(
         LirPass::LoopVectorizationAndUnrolling => vectorize::run(editor, profile),
         LirPass::LowerAllocationAndBarrierFastPaths => barriers::run(editor),
         LirPass::LowerTargetAbi => abi::lower_target_abi(editor),
-        LirPass::LegalizeX86_64 => abi::legalize_x86_64(editor),
+        LirPass::LegalizeX86_64 => abi::legalize_x86_64(editor, baseline),
         LirPass::ClassifyPollFreeLeafAndPlaceBudgetedPolls | LirPass::LowerPollFastPaths => {
             Err(invalid("poll pass 必须在 world 级运行"))
         }
@@ -125,6 +127,7 @@ pub(crate) fn optimize_world(
     bodies: &mut Vec<Body>,
     module: &hir::Module,
     profile: &BackendCostProfile,
+    baseline: CpuBaseline,
 ) -> Result<(), Vec<Diagnostic>> {
     let mut optimized = Vec::with_capacity(bodies.len());
     for body in bodies.drain(..) {
@@ -137,7 +140,7 @@ pub(crate) fn optimize_world(
                 continue;
             }
             let mut editor = Editor::new(current);
-            let _changed = run_pass(*pass, &mut editor, profile)
+            let _changed = run_pass(*pass, &mut editor, profile, baseline)
                 .map_err(|error| vec![pack(pass.name(), error)])?;
             current = editor
                 .finish()

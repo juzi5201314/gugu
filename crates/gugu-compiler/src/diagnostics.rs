@@ -151,6 +151,8 @@ pub enum DiagnosticCode {
     RuntimeRawInvariant,
     /// 资源值越过资源域边界进入 managed region 分配。
     ResourceInvariant,
+    /// 机器片段、编码器契约或 instruction verifier 不满足内部不变量。
+    BackendInvariant,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -215,6 +217,7 @@ impl fmt::Display for DiagnosticCode {
             Self::LirInvariant => "E0057",
             Self::RuntimeRawInvariant => "E0058",
             Self::ResourceInvariant => "E0059",
+            Self::BackendInvariant => "E0060",
         };
         formatter.write_str(code)
     }
@@ -226,7 +229,7 @@ impl DiagnosticCode {
     /// 新增 variant 必须同时补本表与 [`Self::index`]；`index` 是不带通配分支的穷尽匹配，
     /// 漏项会让 compiler crate 的测试构建直接编译失败，这是覆盖闸门的编译期半边。
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 59] = [
+    pub(crate) const ALL: [Self; 60] = [
         Self::SourceRead,
         Self::MissingMain,
         Self::MalformedSource,
@@ -286,6 +289,7 @@ impl DiagnosticCode {
         Self::LirInvariant,
         Self::RuntimeRawInvariant,
         Self::ResourceInvariant,
+        Self::BackendInvariant,
     ];
 
     /// 返回该代码在 [`Self::ALL`] 中的稠密下标。
@@ -353,6 +357,7 @@ impl DiagnosticCode {
             Self::LirInvariant => 56,
             Self::RuntimeRawInvariant => 57,
             Self::ResourceInvariant => 58,
+            Self::BackendInvariant => 59,
         }
     }
 }

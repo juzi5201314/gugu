@@ -508,6 +508,7 @@ fn pipeline_preserves_observable_effects() {
         &mut bodies,
         compilation.hir.as_ref().unwrap().module(),
         &crate::target::baseline_cost_profile(),
+        crate::target::CpuBaseline::X86_64V1,
     )
     .expect("固定管线必须通过每个 pass 后的结构 verifier");
     assert_eq!(effect_signature(&bodies[0]), before);

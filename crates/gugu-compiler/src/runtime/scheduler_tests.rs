@@ -223,6 +223,39 @@ fn scheduler_constants_match_contract() {
 }
 
 #[test]
+fn tuning_profile_selects_the_compiled_deque() {
+    use super::scheduler::SelectedDeque;
+    use super::scheduler_schema::{LocalDequeMode, RUNTIME_TUNING_PROFILE};
+
+    let selected = std::any::type_name::<SelectedDeque>();
+    let mode = match RUNTIME_TUNING_PROFILE.deque_mode {
+        LocalDequeMode::Classic64 => "Classic64Deque",
+        LocalDequeMode::Packed55 => "Packed55Deque",
+    };
+    assert!(
+        selected.ends_with(mode),
+        "profile 选择的 deque 必须与实际编译进镜像的类型一致：profile={mode} selected={selected}"
+    );
+}
+
+#[test]
+fn tuning_profile_digest_is_field_sensitive() {
+    use super::scheduler_schema::RUNTIME_TUNING_PROFILE;
+
+    let baseline = RUNTIME_TUNING_PROFILE.digest();
+    let mut changed = RUNTIME_TUNING_PROFILE;
+    changed.service_interval = 62;
+    assert_ne!(changed.digest(), baseline);
+    changed = RUNTIME_TUNING_PROFILE;
+    changed.cache_line_bytes *= 2;
+    assert_ne!(changed.digest(), baseline);
+    changed = RUNTIME_TUNING_PROFILE;
+    changed.revision += 1;
+    assert_ne!(changed.digest(), baseline);
+    assert_eq!(RUNTIME_TUNING_PROFILE.digest(), baseline);
+}
+
+#[test]
 fn scheduler_contract_rejects_drift() {
     let contract =
         SchedulerRuntimeContract::build(SchedulerDemand::default()).expect("调度契约可构建");

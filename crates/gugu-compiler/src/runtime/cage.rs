@@ -363,6 +363,15 @@ impl CompressionPlane {
         self.stats
     }
 
+    /// 返回第一个已预留 cage 的描述；未预留时为 `None`。
+    pub(crate) fn cage_descriptor(&self) -> Option<CageDescriptor> {
+        self.cages.first().map(|cage| CageDescriptor {
+            base: cage.base,
+            len: cage.len,
+            generation: cage.generation,
+        })
+    }
+
     /// 返回成功解码次数。
     pub(crate) fn decode_count(&self) -> u64 {
         self.stats.decodes

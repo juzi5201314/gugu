@@ -399,7 +399,10 @@ fn validate_internal_flags(options: &GlobalArgs, internal: bool) -> Result<(), S
         if !internal {
             return Err(format!("内部选项 `-Z{flag}` 未启用"));
         }
-        if !matches!(flag.as_str(), "dump-gir" | "dump-lir" | "dump-runtime") {
+        if !matches!(
+            flag.as_str(),
+            "dump-gir" | "dump-lir" | "dump-runtime" | "dump-x64"
+        ) {
             return Err(format!("未知内部选项 `-Z{flag}`"));
         }
     }

@@ -109,6 +109,10 @@ fn wants_dump_runtime(options: &GlobalArgs) -> bool {
     options.z.iter().any(|flag| flag == "dump-runtime")
 }
 
+fn wants_dump_x64(options: &GlobalArgs) -> bool {
+    options.z.iter().any(|flag| flag == "dump-x64")
+}
+
 pub(crate) fn print_compilation_text(
     compilation: &Compilation,
     check_only: bool,
@@ -127,6 +131,11 @@ pub(crate) fn print_compilation_text(
     }
     if wants_dump_runtime(options)
         && let Some(dump) = compilation.dump_runtime()
+    {
+        print!("{dump}");
+    }
+    if wants_dump_x64(options)
+        && let Some(dump) = compilation.dump_x64()
     {
         print!("{dump}");
     }
@@ -163,6 +172,12 @@ pub(crate) fn print_compilation_text(
                 plan.entry()
             );
         }
+        println!(
+            "x64: {} sites, {} bytes, {} relocations",
+            plan.x64_site_count(),
+            plan.x64_encoded_bytes(),
+            plan.x64_relocation_count()
+        );
     } else if compilation.diagnostics().has_errors() {
         println!("{} failed", if check_only { "check" } else { "build" });
     } else if options.quiet {
@@ -219,6 +234,17 @@ pub(crate) fn print_compilation_json(
             json!({
                 "text": dump,
                 "fingerprint": compilation.runtime_raw_fingerprint(),
+            }),
+        );
+    }
+    if wants_dump_x64(options)
+        && let Some(dump) = compilation.dump_x64()
+    {
+        emit_event(
+            "x64-dump",
+            json!({
+                "text": dump,
+                "fingerprint": compilation.x64_fingerprint(),
             }),
         );
     }
@@ -460,7 +486,21 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
             "entry-present": plan.rt0_entry_present(),
             "main-returns-result": plan.rt0_main_returns_result(),
         }),
-        "rt0": plan.rt0().to_string()
+        "rt0": plan.rt0().to_string(),
+        "target-descriptor-digest": plan.target_descriptor_digest(),
+        "target-page-size": plan.target_page_size(),
+        "target-cpu-baseline": plan.target_cpu_baseline().name(),
+        "import-policy-revision": plan.import_policy_revision(),
+        "x64-encoder-fingerprint": plan.x64_encoder_fingerprint(),
+        "x64-form-count": plan.x64_form_count(),
+        "x64-lowering-revision": plan.x64_lowering_revision(),
+        "x64-site-count": plan.x64_site_count(),
+        "x64-instruction-count": plan.x64_instruction_count(),
+        "x64-encoded-bytes": plan.x64_encoded_bytes(),
+        "x64-relocation-count": plan.x64_relocation_count(),
+        "x64-cold-edge-count": plan.x64_cold_edge_count(),
+        "x64-decode-sequence-bytes": plan.x64_decode_sequence_bytes(),
+        "x64-fragment-fingerprint": plan.x64_fragment_fingerprint(),
     })
 }
 

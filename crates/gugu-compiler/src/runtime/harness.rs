@@ -16,19 +16,27 @@ use std::{
     time::Instant,
 };
 
+use super::cage::{CompressionPlane, is_canonical};
+use super::cage_control::{CAGE_CANONICAL_LIMIT, CageControlRecord};
+use super::compression_schema::{
+    CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract,
+};
+use super::gc_metadata_contract::GC_ARENA_BYTES;
 use super::inbox::ShardIndex;
 use super::local_heap::{BlockRef, ManagedBlockId};
 use super::message::{
     BatchLimits, FlushTrigger, MessageState, ProducerStaging, ReturnKind, ReturnMessage,
     stage_message,
 };
-use super::slab::Epoch;
+use super::platform::{FakePlatform, PlatformProfile};
+use super::slab::{Epoch, RuntimeSeed};
 use super::slab::{OwnerToken, RawInvariant, RawSlot};
 use super::world::{RawWorld, ResourceShape};
 use super::{
     BATCH_MAX, OWNER_INBOX_SHARDS, RawPlaneDemand, RawPlanePolicyV1, RuntimeRawContractV1,
     SchedulerDemand, inbox::ServiceBudget, size_class::RuntimeSizeClassId,
 };
+use crate::PointerCompression;
 
 /// harness 一轮运行的结果。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1899,6 +1907,87 @@ pub struct CompressionReport {
     pub invariants_hold: bool,
     /// 运行耗时（微秒）。
     pub elapsed_micros: u64,
+}
+
+/// 压缩引用解码的参照夹具：控制记录初值、压缩字与参照解码结果。
+///
+/// 供 x64 机器解码序列在宿主上执行时对照：控制记录与压缩字来自真实 cage 预留，
+/// 期望值是 `CompressionPlane` 的 checked 解码结果，因此机器序列的语义责任在参照实现一侧。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DecodeReferenceFixture {
+    /// 控制记录初值；`base` 字段是 cage 基址。
+    pub(crate) control: Vec<u8>,
+    /// 压缩字与期望解码结果：`None` 表示空字。
+    pub(crate) words: Vec<(u64, Option<u64>)>,
+    /// 全部压缩字执行完后的 `decodes` 期望值。
+    pub(crate) decodes: u64,
+    /// 全部压缩字执行完后的 `rejections` 期望值。
+    pub(crate) rejections: u64,
+}
+
+impl DecodeReferenceFixture {
+    /// 用靠近 canonical 上界的 cage 建立夹具：合法 offset 与越过 canonical 的 offset 都存在。
+    pub(crate) fn new() -> Result<Self, RawInvariant> {
+        let contract = CompressionRuntimeContract::build(
+            CompressionDemand {
+                decode_sites: 1,
+                compressed_root_slots: 1,
+            },
+            CompressionPolicyV1::cage(4 * GC_ARENA_BYTES),
+            PointerCompression::x86_64(),
+        )
+        .map_err(|error| RawInvariant::new(error.message()))?;
+        let base = CAGE_CANONICAL_LIMIT - GC_ARENA_BYTES;
+        let mut platform = FakePlatform::with_capacity(
+            PlatformProfile::Linux,
+            base,
+            contract.cage_bytes(),
+            RuntimeSeed::new(0x52),
+        );
+        let mut plane = CompressionPlane::new(&contract);
+        plane.reserve(&mut platform)?;
+        let record = CageControlRecord::from_plane(&plane)?;
+        let descriptor = plane
+            .cage_descriptor()
+            .ok_or_else(|| RawInvariant::new("预留后缺少 cage 描述"))?;
+        let shift_id = u32::try_from(contract.cage_id_shift()).expect("偏移适配 u32");
+        let shift_generation =
+            u32::try_from(contract.cage_generation_shift()).expect("偏移适配 u32");
+        let pack = |id: u64, generation: u64, offset: u64| -> u64 {
+            (id << shift_id) | (generation << shift_generation) | offset
+        };
+        let generation = u64::from(descriptor.generation);
+        let headroom = CAGE_CANONICAL_LIMIT - descriptor.base;
+        let candidates = [
+            pack(0, generation, 0x40),
+            contract.null_word(),
+            pack(1, generation, 0x40),
+            pack(0, generation + 1, 0x40),
+            pack(0, generation, descriptor.len),
+            pack(0, generation, headroom),
+        ];
+        let mut words = Vec::with_capacity(candidates.len());
+        for word in candidates {
+            // 拒绝路径返回错误并计数；夹具只关心「是否解出地址」，计数另行核对。
+            let decoded = match plane.decode(word) {
+                Ok(address) => address,
+                Err(_) => None,
+            };
+            if let Some(address) = decoded
+                && !is_canonical(address, contract.canonical_bits())
+            {
+                return Err(RawInvariant::new("参照解码给出了非 canonical 地址"));
+            }
+            words.push((word, decoded));
+        }
+        let stats = plane.stats();
+        Ok(Self {
+            control: record.to_bytes(),
+            words,
+            decodes: stats.decodes,
+            rejections: stats.rejections,
+        })
+    }
 }
 
 /// 解码吞吐测量的压缩槽数。
