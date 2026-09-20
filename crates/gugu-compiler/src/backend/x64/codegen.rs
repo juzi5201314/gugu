@@ -145,6 +145,8 @@ pub(crate) struct X64World {
     pub(crate) contract: EncoderContract,
     /// 片段，按实例稳定键升序（LIR world 已强制该顺序）。
     pub(crate) fragments: Vec<FragmentPayload>,
+    /// 入口函数 mangled 符号：`RootCategoryV1::Entry` 实例对应的片段。
+    pub(crate) entry_symbol: String,
     pub(crate) fingerprint: [u8; 32],
 }
 
@@ -249,12 +251,9 @@ impl X64World {
             .sum()
     }
 
-    /// 入口函数 mangled 符号；无片段时为空。
+    /// 入口函数 mangled 符号：`RootCategoryV1::Entry` 实例对应的片段。
     pub(crate) fn entry_symbol(&self) -> &str {
-        self.fragments
-            .first()
-            .map(|fragment| fragment.symbol.as_str())
-            .unwrap_or("")
+        &self.entry_symbol
     }
 
     /// 内存里的机器片段数。
@@ -316,6 +315,7 @@ impl X64World {
         out
     }
 }
+/// 构建机器片段世界；`entry` 是 `MonoRoots` 里 `RootCategoryV1::Entry` 类别实例的键。
 pub(crate) fn build(
     lir: &lir::Validated,
     universe: &TypeUniverse,
@@ -323,6 +323,7 @@ pub(crate) fn build(
     target: TargetName,
     queries: &QueryEngine,
     sources: &SourceMap,
+    entry: &[u8; 32],
 ) -> Result<X64World, Vec<Diagnostic>> {
     let contract = EncoderContract::build(target.descriptor().cpu_baseline);
     contract
@@ -331,6 +332,7 @@ pub(crate) fn build(
     let encoder = contract.fingerprint();
     let lir_fingerprint = lir.fingerprint();
     let mut fragments = Vec::with_capacity(lir.bodies().len());
+    let mut entry_symbol = None;
     for body in lir.bodies() {
         let key = QueryKey::new(
             QueryKind::CodegenFragment,
@@ -378,13 +380,19 @@ pub(crate) fn build(
                 .map_err(|_| vec![invalid("缓存机器片段不是合法 schema")])?,
         };
         validate_fragment(&fragment, body, target, encoder, lir_fingerprint)?;
+        if body.instance == *entry {
+            entry_symbol = Some(fragment.symbol.clone());
+        }
         fragments.push(fragment);
     }
+    // 入口实例必然有 LIR body（它是闭世界根之一）；缺失说明入口没有走到选指。
+    let entry_symbol = entry_symbol.ok_or_else(|| vec![invalid("入口实例没有机器片段")])?;
     let mut world = X64World {
         schema: CODEGEN_SCHEMA,
         target,
         contract,
         fragments,
+        entry_symbol,
         fingerprint: [0; 32],
     };
     world.fingerprint = world_fingerprint(&world);

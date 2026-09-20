@@ -60,6 +60,8 @@ pub use runtime::{
 pub use runtime::{CombiningDemand, CombiningMode, CombiningPolicyV1, CombiningRuntimeContract};
 pub use runtime::{ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract, SafetyProfile};
 pub use runtime::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
+
+use frontend::mono::roots::RootCategoryV1;
 pub use source::{
     ExpansionId, ExpansionInput, ExpansionRecord, LineColumn, SourceError, SourceFileId, SourceMap,
     SourceMapError, SourceSlot, SourceSnapshot, SourceTableId, Span, SpanError,
@@ -673,15 +675,33 @@ impl Compiler {
         );
 
         // 机器码片段：只有可执行入口才产出；统计供给 PlanBackend 的镜像计划。
+        let entry_instance = frontend
+            .mono
+            .root_categories
+            .iter()
+            .position(|category| *category == RootCategoryV1::Entry)
+            .and_then(|index| frontend.mono.roots.get(index).copied());
         let x64 = if frontend.hir.module().entry.is_some() {
-            match backend::x64::codegen::build(
-                &lir,
-                &frontend.mono.universe,
-                &raw_contract,
-                target,
-                &self.queries,
-                &source_map,
-            ) {
+            let outcome = entry_instance
+                .ok_or_else(|| {
+                    vec![Diagnostic::error(
+                        DiagnosticCode::BackendInvariant,
+                        "可执行入口没有对应的 mono 根",
+                        None,
+                    )]
+                })
+                .and_then(|entry| {
+                    backend::x64::codegen::build(
+                        &lir,
+                        &frontend.mono.universe,
+                        &raw_contract,
+                        target,
+                        &self.queries,
+                        &source_map,
+                        &entry,
+                    )
+                });
+            match outcome {
                 Ok(world) => {
                     graph.complete(
                         ActionKind::Codegen,
@@ -2563,6 +2583,18 @@ mod tests {
         let plan = compilation.image_plan().expect("simple main has a plan");
         assert_eq!(plan.entry(), "main");
         assert_eq!(plan.rt0(), super::Rt0Boundary::LinuxSyscall);
+        // 入口符号必须是 `main` 自己的片段：片段顺序按实例键升序，runtime helper 会排在前
+        // 面，所以这里比对 LIR dump 里 `fn main instance=<hex>` 的实例键。
+        let lir = compilation.dump_lir().expect("入口有 LIR");
+        let entry_symbol = plan.x64_entry_symbol();
+        let instance = entry_symbol
+            .strip_prefix("__gugu_fn_")
+            .expect("入口符号是内部 fn mangling");
+        assert_eq!(instance.len(), 64, "{entry_symbol}");
+        assert!(
+            lir.contains(&format!("fn main instance={instance}")),
+            "入口符号没有指向 main 片段：{entry_symbol}"
+        );
         assert_eq!(
             compilation
                 .action_graph()
