@@ -82,11 +82,12 @@ pub(crate) enum ColdEdgeKind {
     Trap,
 }
 
-/// 冷边携带种类与来源位置。
+/// 冷边携带种类、来源位置与站点编号；同一函数内站点编号唯一。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ColdEdge {
     pub(crate) kind: ColdEdgeKind,
     pub(crate) source: SourceInfo,
+    pub(crate) site: u32,
 }
 
 /// 指令操作数。

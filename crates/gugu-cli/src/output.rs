@@ -501,6 +501,11 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
         "x64-cold-edge-count": plan.x64_cold_edge_count(),
         "x64-decode-sequence-bytes": plan.x64_decode_sequence_bytes(),
         "x64-fragment-fingerprint": plan.x64_fragment_fingerprint(),
+        "x64-rel8-count": plan.x64_rel8_count(),
+        "x64-hot-block-count": plan.x64_hot_block_count(),
+        "x64-cold-block-count": plan.x64_cold_block_count(),
+        "x64-entry-symbol": plan.x64_entry_symbol(),
+        "scheduler-poll-flags-offset": plan.scheduler_poll_flags_offset(),
     })
 }
 

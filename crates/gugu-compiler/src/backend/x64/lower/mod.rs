@@ -12,7 +12,12 @@
 //! - lowering 内部的临时寄存器是固定的物理 scratch（`r11`、`rax`/`rcx`/`rdx`、`xmm15`），
 //!   全部登记进 [`Lowered::clobbers`]；LIR 值对应的虚拟寄存器直接透传。
 
+pub(crate) mod alloc;
+pub(crate) mod asm;
 pub(crate) mod atomic;
+pub(crate) mod call;
+pub(crate) mod ctrl;
+pub(crate) mod memory;
 pub(crate) mod numeric;
 #[cfg(test)]
 mod tests;
@@ -21,7 +26,10 @@ pub(crate) mod vector;
 use std::fmt;
 
 use crate::frontend::gir::body::SourceInfo;
-use crate::lir::body::{Lane, Op, Type, ValueType};
+use crate::frontend::late::universe::TypeUniverse;
+use crate::lir::body::{Body, Lane, Op, Type, ValueType};
+use crate::runtime::RuntimeRawContractV1;
+use crate::target::TargetName;
 
 use super::inst::{
     ColdEdge, ColdEdgeKind, Inst, LabelDefinition, LabelId, Mem, Operand, RelocKind, RelocTarget,
@@ -56,6 +64,29 @@ pub(crate) enum LoweringError {
     InvalidOperands,
 }
 
+/// 需要宇宙/契约的站点 lowering 上下文；探针与 legalize 可不带。
+#[derive(Clone, Copy)]
+pub(crate) struct LowerCtx<'a> {
+    pub target: TargetName,
+    pub body: Option<&'a Body>,
+    pub universe: Option<&'a TypeUniverse>,
+    pub raw: Option<&'a RuntimeRawContractV1>,
+    pub site: u32,
+}
+
+impl LowerCtx<'static> {
+    /// 探针/legalize：只走不依赖宇宙的序列。
+    pub(crate) fn probe(target: TargetName) -> Self {
+        Self {
+            target,
+            body: None,
+            universe: None,
+            raw: None,
+            site: 0,
+        }
+    }
+}
+
 impl fmt::Display for LoweringError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -69,21 +100,59 @@ impl fmt::Display for LoweringError {
 
 impl std::error::Error for LoweringError {}
 
-/// 返回本阶段拥有 lowering 的 op 名；其余返回 `None`。
-pub(crate) fn domain(op: &Op) -> Option<&'static str> {
+/// 返回封闭 LIR opcode 的稳定域名；穷尽 match，未知组合编译期失败。
+pub(crate) fn domain(op: &Op) -> &'static str {
     match op {
-        Op::IConst(_) => Some("IConst"),
-        Op::FConst(_) => Some("FConst"),
-        Op::Integer(_) => Some("Integer"),
-        Op::Float(_) => Some("Float"),
-        Op::Compare { .. } => Some("Compare"),
-        Op::Convert(_) => Some("Convert"),
-        Op::Vector(_) => Some("Vector"),
-        Op::Select => Some("Select"),
-        Op::TrapIf => Some("TrapIf"),
-        Op::Atomic { .. } => Some("Atomic"),
-        Op::DecodeCompressedRef => Some("DecodeCompressedRef"),
-        _ => None,
+        Op::IConst(_) => "IConst",
+        Op::FConst(_) => "FConst",
+        Op::SymbolAddr(_) => "SymbolAddr",
+        Op::StackAddr(_) => "StackAddr",
+        Op::PtrOffset => "PtrOffset",
+        Op::Integer(_) => "Integer",
+        Op::Float(_) => "Float",
+        Op::Compare { .. } => "Compare",
+        Op::Convert(_) => "Convert",
+        Op::Vector(_) => "Vector",
+        Op::Select => "Select",
+        Op::TrapIf => "TrapIf",
+        Op::Load(_) => "Load",
+        Op::Store(_) => "Store",
+        Op::Memcpy { .. } => "Memcpy",
+        Op::Memmove { .. } => "Memmove",
+        Op::Memset { .. } => "Memset",
+        Op::Atomic { .. } => "Atomic",
+        Op::GcAlloc { .. } => "GcAlloc",
+        Op::RegionAlloc { .. } => "RegionAlloc",
+        Op::PlatformCall(_) => "PlatformCall",
+        Op::RegionPublish { .. } => "RegionPublish",
+        Op::RegionReset { .. } => "RegionReset",
+        Op::PromoteManaged { .. } => "PromoteManaged",
+        Op::RegionTransfer { .. } => "RegionTransfer",
+        Op::MarkTicketBatch => "MarkTicketBatch",
+        Op::EdgeDeltaBatch => "EdgeDeltaBatch",
+        Op::ResolveSharedHandle => "ResolveSharedHandle",
+        Op::SharedAccessBegin { .. } => "SharedAccessBegin",
+        Op::SharedAccessEnd { .. } => "SharedAccessEnd",
+        Op::SharedFieldBarrier { .. } => "SharedFieldBarrier",
+        Op::SharedFieldBarrierReserved { .. } => "SharedFieldBarrierReserved",
+        Op::ForwardSharedHandle => "ForwardSharedHandle",
+        Op::DecodeCompressedRef => "DecodeCompressedRef",
+        Op::BarrierReserve(_) => "BarrierReserve",
+        Op::GcWriteBarrier { .. } => "GcWriteBarrier",
+        Op::GcWriteBarrierReserved { .. } => "GcWriteBarrierReserved",
+        Op::ScopedViewBegin { .. } => "ScopedViewBegin",
+        Op::ScopedViewEnd { .. } => "ScopedViewEnd",
+        Op::SafepointPoll { .. } => "SafepointPoll",
+        Op::StackCheck => "StackCheck",
+        Op::NoSafepointBegin(_) => "NoSafepointBegin",
+        Op::NoSafepointEnd(_) => "NoSafepointEnd",
+        Op::CoroutineSwitch => "CoroutineSwitch",
+        Op::Park => "Park",
+        Op::Ready => "Ready",
+        Op::Call(_) => "Call",
+        Op::ForeignCall(_) => "ForeignCall",
+        Op::InlineAsm(_) => "InlineAsm",
+        Op::CoverageCounter(_) => "CoverageCounter",
     }
 }
 
@@ -93,6 +162,23 @@ pub(crate) fn lower(
     operands: &[SiteValue],
     results: &[SiteValue],
     source: &SourceInfo,
+) -> Result<Lowered, LoweringError> {
+    lower_with(
+        op,
+        operands,
+        results,
+        source,
+        LowerCtx::probe(TargetName::X86_64Linux),
+    )
+}
+
+/// 带宇宙/契约的站点 lowering。
+pub(crate) fn lower_with(
+    op: &Op,
+    operands: &[SiteValue],
+    results: &[SiteValue],
+    source: &SourceInfo,
+    ctx: LowerCtx<'_>,
 ) -> Result<Lowered, LoweringError> {
     let mut builder = Builder::new();
     match op {
@@ -105,14 +191,46 @@ pub(crate) fn lower(
         | Op::Select => numeric::lower(op, operands, results, &mut builder)?,
         Op::Vector(_) => vector::lower(op, operands, results, &mut builder)?,
         Op::TrapIf | Op::Atomic { .. } | Op::DecodeCompressedRef => {
-            atomic::lower(op, operands, results, source, &mut builder)?;
+            atomic::lower(op, operands, results, source, &mut builder, ctx.site)?;
         }
-        _ => {
-            return Err(LoweringError::Unsupported {
-                op: domain(op).unwrap_or("unknown"),
-                detail: "该指令不属于本阶段的 lowering 域",
-            });
+        Op::SymbolAddr(_)
+        | Op::StackAddr(_)
+        | Op::PtrOffset
+        | Op::Load(_)
+        | Op::Store(_)
+        | Op::Memcpy { .. }
+        | Op::Memmove { .. }
+        | Op::Memset { .. }
+        | Op::CoverageCounter(_) => memory::lower(op, operands, results, &mut builder)?,
+        Op::GcAlloc { .. } | Op::RegionAlloc { .. } | Op::SafepointPoll { .. } | Op::StackCheck => {
+            alloc::lower(op, operands, results, source, ctx, &mut builder)?
         }
+        Op::PlatformCall(_)
+        | Op::RegionPublish { .. }
+        | Op::RegionReset { .. }
+        | Op::PromoteManaged { .. }
+        | Op::RegionTransfer { .. }
+        | Op::MarkTicketBatch
+        | Op::EdgeDeltaBatch
+        | Op::ResolveSharedHandle
+        | Op::SharedAccessBegin { .. }
+        | Op::SharedAccessEnd { .. }
+        | Op::SharedFieldBarrier { .. }
+        | Op::SharedFieldBarrierReserved { .. }
+        | Op::ForwardSharedHandle
+        | Op::BarrierReserve(_)
+        | Op::GcWriteBarrier { .. }
+        | Op::GcWriteBarrierReserved { .. }
+        | Op::ScopedViewBegin { .. }
+        | Op::ScopedViewEnd { .. }
+        | Op::NoSafepointBegin(_)
+        | Op::NoSafepointEnd(_)
+        | Op::Park
+        | Op::Ready
+        | Op::Call(_)
+        | Op::ForeignCall(_) => call::lower(op, operands, results, ctx, &mut builder)?,
+        Op::CoroutineSwitch => ctrl::coroutine_switch(&mut builder)?,
+        Op::InlineAsm(_) => asm::lower(op, operands, results, ctx, &mut builder)?,
     }
     Ok(builder.finish())
 }
@@ -306,6 +424,11 @@ impl Builder {
         }
     }
 
+    /// 追加一条已解析 form 的指令。
+    pub(crate) fn push_inst(&mut self, inst: Inst) {
+        self.sequence.instructions.push(inst);
+    }
+
     /// 追加一条指令；`first` 用于区分同形不同方向的编码（如 `mov` 的 89/8B）。
     pub(crate) fn emit(
         &mut self,
@@ -351,6 +474,13 @@ impl Builder {
     pub(crate) fn define(&mut self, label: LabelId) {
         let at = u32::try_from(self.sequence.instructions.len()).expect("站点指令数适配 u32");
         self.sequence.labels.push(LabelDefinition { label, at });
+    }
+
+    pub(crate) fn has_label(&self, label: LabelId) -> bool {
+        self.sequence
+            .labels
+            .iter()
+            .any(|definition| definition.label == label)
     }
 
     /// 登记一个被破坏的 GPR。
@@ -410,11 +540,12 @@ pub(crate) fn mem_base(base: Reg, disp: i32) -> Operand {
 }
 
 /// 操作数构造：冷边分支目标。
-pub(crate) fn cold_branch(kind: ColdEdgeKind, source: &SourceInfo) -> Operand {
+pub(crate) fn cold_branch(kind: ColdEdgeKind, source: &SourceInfo, site: u32) -> Operand {
     Operand::Reloc(
         RelocTarget::Cold(ColdEdge {
             kind,
             source: source.clone(),
+            site,
         }),
         RelocKind::PcRel32,
     )

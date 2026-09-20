@@ -29,11 +29,12 @@ pub(super) fn lower(
     results: &[SiteValue],
     source: &SourceInfo,
     builder: &mut Builder,
+    site: u32,
 ) -> Result<(), LoweringError> {
     match op {
-        Op::TrapIf => trap_if(operands, source, builder),
+        Op::TrapIf => trap_if(operands, source, builder, site),
         Op::Atomic { op, ordering, .. } => atomic(*op, *ordering, operands, results, builder),
-        Op::DecodeCompressedRef => decode_compressed_ref(operands, results, source, builder),
+        Op::DecodeCompressedRef => decode_compressed_ref(operands, results, source, builder, site),
         _ => Err(LoweringError::InvalidOperands),
     }
 }
@@ -42,6 +43,7 @@ fn trap_if(
     operands: &[SiteValue],
     source: &SourceInfo,
     builder: &mut Builder,
+    site: u32,
 ) -> Result<(), LoweringError> {
     let [condition] = operands else {
         return Err(LoweringError::InvalidOperands);
@@ -56,7 +58,7 @@ fn trap_if(
         "jne",
         REL32,
         Access::Read,
-        vec![cold_branch(ColdEdgeKind::Trap, source)],
+        vec![cold_branch(ColdEdgeKind::Trap, source, site)],
     );
     Ok(())
 }
@@ -298,6 +300,7 @@ fn decode_compressed_ref(
     results: &[SiteValue],
     source: &SourceInfo,
     builder: &mut Builder,
+    site: u32,
 ) -> Result<(), LoweringError> {
     let [word] = operands else {
         return Err(LoweringError::InvalidOperands);
@@ -419,7 +422,11 @@ fn decode_compressed_ref(
         "jmp",
         REL32,
         Access::Read,
-        vec![cold_branch(ColdEdgeKind::CompressionDecodeRejected, source)],
+        vec![cold_branch(
+            ColdEdgeKind::CompressionDecodeRejected,
+            source,
+            site,
+        )],
     );
     builder.define(null);
     builder.emit(

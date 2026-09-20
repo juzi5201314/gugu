@@ -887,7 +887,11 @@ fn poll_cost_is_positive_for_every_domain_op() {
         Op::Vector(VectorOp::Splat),
     ];
     for op in ops {
-        assert!(lowering::domain(&op).is_some(), "{op:?} 属于 lowering 域");
+        assert_eq!(
+            lowering::domain(&op).is_empty(),
+            false,
+            "{op:?} 属于 lowering 域"
+        );
         assert!(lowering::poll_cost(&op) >= 1, "{op:?} 的成本至少 1");
     }
     assert_eq!(
@@ -896,8 +900,8 @@ fn poll_cost_is_positive_for_every_domain_op() {
             align: 8,
             volatile: false,
         })),
-        None,
-        "本阶段不拥有访存 lowering"
+        "Load",
+        "访存已进入 lowering 域"
     );
     // 最贵的探针组合：浮点比较要补 parity 分支。
     assert!(
@@ -910,7 +914,7 @@ fn poll_cost_is_positive_for_every_domain_op() {
     assert!(lowering::poll_cost(&Op::DecodeCompressedRef) >= 20);
 }
 
-/// 非法操作数组合与不支持的 op 必须报错而不是产出错误序列。
+/// 非法操作数组合必须报错而不是产出错误序列。
 #[test]
 fn invalid_operands_and_foreign_ops_are_rejected() {
     let lowered = lowering::lower(
@@ -920,7 +924,7 @@ fn invalid_operands_and_foreign_ops_are_rejected() {
         &source(),
     );
     assert_eq!(lowered, Err(LoweringError::InvalidOperands));
-    let foreign = lowering::lower(
+    let load = lowering::lower(
         &Op::Load(crate::lir::body::Access {
             alias: crate::lir::body::AliasClass::Heap,
             align: 8,
@@ -930,7 +934,7 @@ fn invalid_operands_and_foreign_ops_are_rejected() {
         &results(&[Type::I64]),
         &source(),
     );
-    assert!(matches!(foreign, Err(LoweringError::Unsupported { .. })));
+    assert!(load.is_ok(), "Load 必须有机器序列");
     // 结果数量不匹配。
     let arity = lowering::lower(
         &Op::Integer(IntOp::Add),

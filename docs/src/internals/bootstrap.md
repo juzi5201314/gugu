@@ -209,7 +209,7 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 
 同一 Frontend action 内消费 `TokenBuffer`，用递归下降构造稠密 `u32` AST arena（声明、泛型、类型、块、表达式、模式、`async`/`select`/`try`/`defer`、`comptime source`、FFI 与 asm）。`()`/`[]` 增加分隔符深度，内部换行只作空白；`{` 单独跟踪花括号深度，块内换行可以结束语句、字段或臂。比较与 `..` 不结合，主诊断带 `Note` 次诊断。解析诊断 `E0020`–`E0026` 使 Frontend 失败，不得把错误占位交给 IR 或 image plan。可执行入口是 AST 中名为 `main`、无参数且带块体或 `=` 体的 `fn`。节点身份不是指针；结构 dump 按 arena 下标，不受线程完成顺序影响。
 
-同一 Frontend action 继续做声明/表达式/模式/trait/unsafe 检查、布局校验和 `LowerHir` query。`BuildIr` 登记真实定义与冻结 owner；`Compilation::succeeded` 必须拥有 `Validated`，后端计划只接受此凭据。冷计算和缓存恢复都经过冻结 verifier，失败没有 image plan。旧 `ReturnUnit` IR 已移除；当前没有生成目标机器码，`emit-image` 仍跳过。完整交接表见 [AST 与 HIR](ast-hir.md)。
+同一 Frontend action 继续做声明/表达式/模式/trait/unsafe 检查、布局校验和 `LowerHir` query。`BuildIr` 登记真实定义与冻结 owner；`Compilation::succeeded` 必须拥有 `Validated`，后端计划只接受此凭据。冷计算和缓存恢复都经过冻结 verifier，失败没有 image plan。旧 `ReturnUnit` IR 已移除；`BuildX64` 已对每个 LIR body 做 instruction selection、block layout 与直接编码，产出带 mangled 符号的函数级片段；`emit-image` 仍跳过 ELF/PE 写出。完整交接表见 [AST 与 HIR](ast-hir.md)。
 
 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
@@ -283,6 +283,8 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 `RuntimeRawModel` schema 23 在同一缓存对象上并入 `CombiningRuntimeContract`（`COMBINING_SCHEMA = 1`，profile `mosaic-combining` revision 1），并把 raw policy revision 升到 5：冷操作 tag 目录（`global-range-refill`/`extent-coalesce`/`topology-rebuild`/`platform-trim`）、与 tag 目录逐项相同的允许用途、十项禁止用途（含 TLAB allocation、raw local pop、普通 remote return、channel/select/park-wake 线性化与任意 closure/drop glue）、operation record 的十个标量字段、状态目录与七条迁移、单条 fast path 与两条争用路径、九项统计口径，以及合并上限、轮次条目/字节预算、超时轮数、记录规范槽、chunk 槽位数（尾部 1 槽预留给 refill）与 chunk 上界；`combining-demand` 由 raw 平面需求的 owner 数与分配站点数推导。默认 direct，即冷操作在请求者上下文逐条执行同一份 handler；combined 模式把请求记录进非移动池，无争用走单原子 claim 字、争用挂到 owner 的 MCS 链尾，由固定上界的轮次按 FIFO 认领并按同类合并执行。`combining-*` 键进入 `ImagePlan` 与 `-Zdump-runtime`，`CompileRequest::with_combining_policy` 显式开启 combined。
 
 `RuntimeRawModel` schema 24 把压缩契约升到 `COMPRESSION_SCHEMA = 2`、profile `mosaic-compression` revision 2：契约新增 cage 控制记录的字段表（`generation`/`cage_id`/`base`/`len`/`canonical_headroom`/`decodes`/`rejections` 的名字、字节偏移、宽度、记录字节数、对齐）与 `CAGE_CANONICAL_LIMIT`，两者与 runtime 侧 `CageControlRecord` 同源，机器解码序列按同一张表读取记录，`DecodeCompressedRef` 夹具与 `CompressionPlane` 的 checked 解码逐字对照；同一 schema 还让调度契约段与 `RUNTIME_TUNING_PROFILE` 逐字段核对（本地容量、远端 shard 数、batch 上限、service interval/batch、queue padding、cache line），段内自洽但 profile 对不上同样是非法状态。
+
+`RuntimeRawModel` schema 25 把 `SchedulerRuntimeContract` 升到 schema 2，并入 `LogicalProcessorPrefix` 的 poll/ownership/TLAB/TurnRegion 偏移：`poll_flags_offset = 0`、`tlab_cursor_offset = 3520`、`turn_region_cursor_offset = 3536`。偏移只来自 `processor.rs` 的 `offset_of!`，backend 的 TLAB/TurnRegion bump、SafepointPoll 与 StackCheck 热路只消费契约字段；`-Zdump-runtime` 增加 `scheduler-layout poll-flags=… tlab-cursor=… turn-region-cursor=…` 行。
 
 内部契约也沿同一边界扩展：[`AST/HIR`](ast-hir.md) 消费 frontend 产物，[`GIR/LIR`](gir-lir.md) 消费冻结 HIR，[`后端`](backend.md) 负责从合法 LIR 到 machine code，[`调度器`](scheduler.md) 和 [`GC 元数据`](gc-metadata.md) 负责 runtime 语义。不得为这些后续模块建立平行的占位语义路径。
 

@@ -79,9 +79,7 @@ pub(crate) fn legalize_x86_64(
                     return Err(invalid("V128 不允许携带指针 provenance"));
                 }
             }
-            let Some(op) = lower::domain(&instruction.op) else {
-                continue;
-            };
+            let op = lower::domain(&instruction.op);
             if let Op::Vector(vector) = &instruction.op
                 && let Some(lane) = vector_lane(editor, &instruction.results)
                 && !lower::supports_vector(*vector, lane)

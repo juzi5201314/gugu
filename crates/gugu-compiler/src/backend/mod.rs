@@ -199,6 +199,16 @@ pub(crate) struct BackendPlan {
     pub(crate) x64_decode_sequence_bytes: u32,
     /// 片段世界指纹。
     pub(crate) x64_fragment_fingerprint: [u8; 32],
+    /// 收缩后的 rel8 条数。
+    pub(crate) x64_rel8_count: u32,
+    /// 热块数。
+    pub(crate) x64_hot_block_count: u32,
+    /// 冷块数。
+    pub(crate) x64_cold_block_count: u32,
+    /// 入口 mangled 符号。
+    pub(crate) x64_entry_symbol: String,
+    /// `[r15 + poll_flags]` 偏移。
+    pub(crate) scheduler_poll_flags_offset: u32,
 }
 
 pub(crate) fn plan(
@@ -403,5 +413,10 @@ pub(crate) fn plan(
         x64_cold_edge_count: x64.cold_edge_count(),
         x64_decode_sequence_bytes: x64.decode_sequence_bytes(),
         x64_fragment_fingerprint: x64.fingerprint(),
+        x64_rel8_count: x64.rel8_count(),
+        x64_hot_block_count: x64.hot_block_count(),
+        x64_cold_block_count: x64.cold_block_count(),
+        x64_entry_symbol: x64.entry_symbol().to_owned(),
+        scheduler_poll_flags_offset: raw.scheduler().poll_flags_offset(),
     })
 }

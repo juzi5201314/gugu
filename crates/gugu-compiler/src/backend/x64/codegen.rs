@@ -19,26 +19,29 @@ use serde::{Deserialize, Serialize};
 use crate::Diagnostic;
 use crate::SourceMap;
 use crate::diagnostics::DiagnosticCode;
+use crate::frontend::late::universe::TypeUniverse;
 use crate::frontend::mono::keys::hash_domain;
 use crate::frontend::semantics::query::{restore_errors, store_errors};
 use crate::lir;
 use crate::lir::body::Body;
 use crate::query::{QueryEngine, QueryKey, QueryKind};
+use crate::runtime::{RAW_MODEL_SCHEMA, RuntimeRawContractV1};
 use crate::target::TargetName;
 
-use super::contract::EncoderContract;
+use super::contract::{self, EncoderContract};
 use super::encode::assemble;
 use super::inst::{
     ColdEdge, ColdEdgeKind, Operand, RegisterConstraint, RelocKind, RelocTarget, Relocation,
     Sequence,
 };
-use super::lower::{self, SiteValue};
+use super::lower::Lowered;
 use super::reg::Reg;
+use super::select;
 use super::table;
 use super::verify;
 
 /// 片段 payload schema 版本。
-pub(crate) const CODEGEN_SCHEMA: u32 = 1;
+pub(crate) const CODEGEN_SCHEMA: u32 = 2;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -91,7 +94,23 @@ pub(crate) struct FragmentPayload {
     pub(crate) lir_fingerprint: [u8; 32],
     /// 生成时刻的 encoder 契约指纹。
     pub(crate) encoder_fingerprint: [u8; 32],
-    /// 站点，按 `(block, instruction)` 升序。
+    /// 内部 mangled 符号。
+    pub(crate) symbol: String,
+    /// 收缩后的 rel8 条数。
+    pub(crate) rel8_count: u32,
+    /// 热块数。
+    pub(crate) hot_block_count: u32,
+    /// 冷块数。
+    pub(crate) cold_block_count: u32,
+    /// 整数参数槽数。
+    pub(crate) abi_integer_args: u32,
+    /// 浮点参数槽数。
+    pub(crate) abi_float_args: u32,
+    /// 栈参数 piece 数。
+    pub(crate) abi_stack_slots: u32,
+    /// 隐藏 sret。
+    pub(crate) sret: bool,
+    /// 站点，按 `(block, instruction)` 升序，terminator 紧随块内指令。
     pub(crate) sites: Vec<SitePayload>,
     /// 片段字节。
     pub(crate) bytes: Vec<u8>,
@@ -201,6 +220,38 @@ impl X64World {
         )
     }
 
+    /// 全部片段收缩后的 rel8 条数。
+    pub(crate) fn rel8_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.rel8_count)
+            .sum()
+    }
+
+    /// 全部片段热块数。
+    pub(crate) fn hot_block_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.hot_block_count)
+            .sum()
+    }
+
+    /// 全部片段冷块数。
+    pub(crate) fn cold_block_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.cold_block_count)
+            .sum()
+    }
+
+    /// 入口函数 mangled 符号；无片段时为空。
+    pub(crate) fn entry_symbol(&self) -> &str {
+        self.fragments
+            .first()
+            .map(|fragment| fragment.symbol.as_str())
+            .unwrap_or("")
+    }
+
     /// 内存里的机器片段数。
     pub(crate) fn fragment_count(&self) -> u32 {
         to_u32(self.fragments.len())
@@ -229,8 +280,12 @@ impl X64World {
         for fragment in &self.fragments {
             let _ = writeln!(
                 out,
-                "x64-fragment {} bytes={} sites={} relocations={} fingerprint={}",
+                "x64-fragment {} symbol={} rel8={} hot={} cold={} bytes={} sites={} relocations={} fingerprint={}",
                 hex_lower(fragment.instance),
+                fragment.symbol,
+                fragment.rel8_count,
+                fragment.hot_block_count,
+                fragment.cold_block_count,
                 fragment.bytes.len(),
                 fragment.sites.len(),
                 fragment.relocations.len(),
@@ -255,12 +310,10 @@ impl X64World {
         out
     }
 }
-
-/// 构建全部实例的机器码片段世界。
-///
-/// 失败进入 `E0060`；无入口的程序不由本函数处理（调用方在 BuildIr 之后判断）。
 pub(crate) fn build(
     lir: &lir::Validated,
+    universe: &TypeUniverse,
+    raw: &RuntimeRawContractV1,
     target: TargetName,
     queries: &QueryEngine,
     sources: &SourceMap,
@@ -276,7 +329,7 @@ pub(crate) fn build(
         let key = QueryKey::new(
             QueryKind::CodegenFragment,
             CODEGEN_SCHEMA,
-            fragment_key(lir_fingerprint, body, target, encoder),
+            fragment_key(lir_fingerprint, body, target, encoder, raw, universe),
         );
         let mut fresh = None;
         let computed = queries.compute(key, |context| {
@@ -290,8 +343,24 @@ pub(crate) fn build(
                 QueryKey::new(QueryKind::BuildLir, lir::SCHEMA, lir_fingerprint),
                 lir_fingerprint,
             );
-            let fragment = assemble_fragment(body, target, encoder, lir_fingerprint, &contract)
-                .map_err(|errors| store_errors(&errors))?;
+            context.record_dependency(
+                QueryKey::new(
+                    QueryKind::RuntimeRawModel,
+                    RAW_MODEL_SCHEMA,
+                    &raw.fingerprint(),
+                ),
+                raw.fingerprint(),
+            );
+            let fragment = assemble_fragment(
+                body,
+                universe,
+                raw,
+                target,
+                encoder,
+                lir_fingerprint,
+                &contract,
+            )
+            .map_err(|errors| store_errors(&errors))?;
             let bytes = serde_json::to_vec(&fragment).expect("机器片段可序列化");
             fresh = Some(fragment);
             Ok((bytes, Vec::new()))
@@ -322,13 +391,19 @@ fn fragment_key(
     body: &Body,
     target: TargetName,
     encoder: [u8; 32],
+    raw: &RuntimeRawContractV1,
+    universe: &TypeUniverse,
 ) -> [u8; 32] {
-    let mut canonical = Vec::with_capacity(32 * 4 + 16);
+    let mut canonical = Vec::with_capacity(32 * 8 + 16);
     canonical.extend_from_slice(&lir_fingerprint);
     canonical.extend_from_slice(&body.instance);
     canonical.extend_from_slice(&body.fingerprint());
     canonical.extend_from_slice(target.name().as_bytes());
     canonical.extend_from_slice(&encoder);
+    canonical.extend_from_slice(&raw.scheduler().fingerprint());
+    canonical.extend_from_slice(&raw.coroutine().fingerprint());
+    canonical.extend_from_slice(&universe.fingerprint);
+    canonical.extend_from_slice(&contract::LOWERING_REVISION.to_le_bytes());
     hash_domain(FRAGMENT_KEY_DOMAIN, &canonical)
 }
 
@@ -344,105 +419,167 @@ fn world_fingerprint(world: &X64World) -> [u8; 32] {
     *hasher.finalize().as_bytes()
 }
 
-/// 按 `(block, instruction)` 顺序 lower 出片段。
+/// select → layout → encode 整函数片段。
 fn assemble_fragment(
     body: &Body,
+    universe: &TypeUniverse,
+    raw: &RuntimeRawContractV1,
     target: TargetName,
     encoder: [u8; 32],
     lir_fingerprint: [u8; 32],
     contract: &EncoderContract,
 ) -> Result<FragmentPayload, Vec<Diagnostic>> {
-    let mut bytes = Vec::new();
-    let mut relocations: Vec<Relocation> = Vec::new();
+    let selected = select::select_body(body, universe, raw, target)
+        .map_err(|error| vec![invalid(&format!("{} 的指令选择失败：{error}", body.name))])?;
+    verify::verify_function_sequence(&selected.sequence, contract.baseline)
+        .map_err(|error| vec![invalid(&format!("{} 的选指序列非法：{error}", body.name))])?;
+    let assembled = assemble(&selected.sequence)
+        .map_err(|error| vec![invalid(&format!("{} 的片段编码失败：{error}", body.name))])?;
     let mut sites = Vec::new();
-    for (block, block_data) in body.blocks.iter().enumerate() {
-        for index in block_data.instructions.clone() {
-            let instruction =
-                &body.instructions[usize::try_from(index).expect("指令编号适配 usize")];
-            let Some(op) = lower::domain(&instruction.op) else {
-                continue;
-            };
-            let operands = values(body, body.args(&instruction.arguments));
-            let results = result_values(body, &instruction.results);
-            let lowered = lower::lower(&instruction.op, &operands, &results, &instruction.source)
-                .map_err(|error| {
-                vec![invalid(&format!(
-                    "{} 的 {op} 没有机器序列：{error}",
-                    body.name
-                ))]
-            })?;
-            verify::verify_sequence(&lowered.sequence, contract.baseline).map_err(|error| {
-                vec![invalid(&format!("{} 的 {op} 序列非法：{error}", body.name))]
-            })?;
-            let assembled = assemble(&lowered.sequence).map_err(|error| {
-                vec![invalid(&format!(
-                    "{} 的 {op} 片段编码失败：{error}",
-                    body.name
-                ))]
-            })?;
-            let start = to_u32(bytes.len());
-            let relocation_start = to_u32(relocations.len());
-            let line = site_line(&lowered.sequence);
-            bytes.extend_from_slice(&assembled.bytes);
-            for relocation in &assembled.relocations {
-                relocations.push(Relocation {
-                    offset: relocation
-                        .offset
-                        .checked_add(start)
-                        .expect("重定位偏移适配 u32"),
-                    ..relocation.clone()
-                });
-            }
-            let constraints = assembled
-                .constraints
-                .iter()
-                .map(|constraint| RegisterConstraint {
-                    offset: constraint
-                        .offset
-                        .checked_add(start)
-                        .expect("约束偏移适配 u32"),
-                    ..*constraint
-                })
-                .collect();
-            let cold_edges = lowered
-                .sequence
-                .instructions
-                .iter()
-                .flat_map(|inst| inst.operands.iter())
-                .filter_map(|operand| match operand {
-                    Operand::Reloc(RelocTarget::Cold(edge), _) => Some(edge.clone()),
-                    _ => None,
-                })
-                .collect();
-            sites.push(SitePayload {
-                block: to_u32(block),
-                instruction: index,
-                op: op.to_owned(),
-                operands: ids(body.args(&instruction.arguments)),
-                results: result_ids(&instruction.results),
-                line,
-                bytes: (start, to_u32(bytes.len())),
-                relocations: (relocation_start, to_u32(relocations.len())),
-                instructions: to_u32(assembled.instruction_offsets.len()),
-                constraints,
-                cold_edges,
-                clobbers: (lowered.clobbers.gpr, lowered.clobbers.xmm),
-            });
+    let mut inst_cursor = 0_usize;
+    for block in &selected.blocks {
+        for site in &block.sites {
+            sites.push(site_payload(
+                body,
+                block.id.0,
+                site.instruction,
+                site.op,
+                &site.lowered,
+                &assembled,
+                &mut inst_cursor,
+            ));
         }
+        let term_index = body.blocks[block.id.index()].instructions.end;
+        sites.push(site_payload(
+            body,
+            block.id.0,
+            term_index,
+            terminator_name(&body.blocks[block.id.index()].terminator),
+            &block.terminator,
+            &assembled,
+            &mut inst_cursor,
+        ));
     }
+    fill_relocation_ranges(&mut sites, &assembled.relocations);
     let mut fragment = FragmentPayload {
         schema: CODEGEN_SCHEMA,
         target: target.name().to_owned(),
         instance: body.instance,
         lir_fingerprint,
         encoder_fingerprint: encoder,
+        symbol: selected.symbol,
+        rel8_count: selected.rel8_count,
+        hot_block_count: to_u32(
+            selected
+                .layout
+                .blocks
+                .iter()
+                .filter(|block| block.hot)
+                .count(),
+        ),
+        cold_block_count: to_u32(
+            selected
+                .layout
+                .blocks
+                .iter()
+                .filter(|block| !block.hot)
+                .count(),
+        ),
+        abi_integer_args: selected.abi.integer_args,
+        abi_float_args: selected.abi.float_args,
+        abi_stack_slots: selected.abi.stack_slots,
+        sret: selected.abi.sret,
         sites,
-        bytes,
-        relocations,
+        bytes: assembled.bytes,
+        relocations: assembled.relocations,
         fingerprint: [0; 32],
     };
     fragment.fingerprint = fragment.compute_fingerprint();
     Ok(fragment)
+}
+
+fn terminator_name(terminator: &lir::body::Terminator) -> &'static str {
+    match terminator {
+        lir::body::Terminator::Jump(_) => "Jump",
+        lir::body::Terminator::Branch { .. } => "Branch",
+        lir::body::Terminator::Switch { .. } => "Switch",
+        lir::body::Terminator::Invoke { .. } => "Invoke",
+        lir::body::Terminator::Return { .. } => "Return",
+        lir::body::Terminator::ResumePanic { .. } => "ResumePanic",
+        lir::body::Terminator::TailCall { .. } => "TailCall",
+        lir::body::Terminator::Trap { .. } => "Trap",
+        lir::body::Terminator::Unreachable { .. } => "Unreachable",
+    }
+}
+
+fn site_payload(
+    body: &Body,
+    block: u32,
+    instruction: u32,
+    op: &str,
+    lowered: &Lowered,
+    assembled: &super::inst::Assembled,
+    inst_cursor: &mut usize,
+) -> SitePayload {
+    let start_off = assembled
+        .instruction_offsets
+        .get(*inst_cursor)
+        .map(|(_, offset)| *offset)
+        .unwrap_or_else(|| to_u32(assembled.bytes.len()));
+    let count = lowered.sequence.instructions.len();
+    *inst_cursor = inst_cursor.saturating_add(count);
+    let end_off = assembled
+        .instruction_offsets
+        .get(*inst_cursor)
+        .map(|(_, offset)| *offset)
+        .unwrap_or_else(|| to_u32(assembled.bytes.len()));
+    let inst = body
+        .instructions
+        .get(usize::try_from(instruction).expect("指令编号适配 usize"));
+    let operands = inst
+        .map(|inst| ids(body.args(&inst.arguments)))
+        .unwrap_or_default();
+    let results = inst
+        .map(|inst| result_ids(&inst.results))
+        .unwrap_or_default();
+    let cold_edges = lowered
+        .sequence
+        .instructions
+        .iter()
+        .flat_map(|inst| inst.operands.iter())
+        .filter_map(|operand| match operand {
+            Operand::Reloc(RelocTarget::Cold(edge), _) => Some(edge.clone()),
+            _ => None,
+        })
+        .collect();
+    SitePayload {
+        block,
+        instruction,
+        op: op.to_owned(),
+        operands,
+        results,
+        line: site_line(&lowered.sequence),
+        bytes: (start_off, end_off),
+        relocations: (0, 0),
+        instructions: to_u32(count),
+        constraints: Vec::new(),
+        cold_edges,
+        clobbers: (lowered.clobbers.gpr, lowered.clobbers.xmm),
+    }
+}
+
+fn fill_relocation_ranges(sites: &mut [SitePayload], relocations: &[Relocation]) {
+    let mut index = 0_usize;
+    for site in sites {
+        let start = index;
+        while index < relocations.len()
+            && relocations[index].offset >= site.bytes.0
+            && relocations[index].offset < site.bytes.1
+        {
+            index += 1;
+        }
+        site.relocations = (to_u32(start), to_u32(index));
+    }
 }
 
 /// 校验片段与当前输入、站点结构与指纹自洽。
@@ -505,39 +642,18 @@ fn validate_fragment(
     Ok(())
 }
 
-/// 按 `(block, instruction)` 顺序列出需要在片段里出现的指令。
+/// 按热/冷布局顺序列出指令站点，每个 terminator 额外一条。
 fn expected_sites(body: &Body) -> Vec<(u32, u32)> {
+    let layout = super::layout::schedule(body);
     let mut expected = Vec::new();
-    for (block, block_data) in body.blocks.iter().enumerate() {
-        for index in block_data.instructions.clone() {
-            let instruction =
-                &body.instructions[usize::try_from(index).expect("指令编号适配 usize")];
-            if lower::domain(&instruction.op).is_some() {
-                expected.push((to_u32(block), index));
-            }
+    for block in &layout.blocks {
+        let data = &body.blocks[block.id.index()];
+        for index in data.instructions.clone() {
+            expected.push((block.id.0, index));
         }
+        expected.push((block.id.0, data.instructions.end));
     }
     expected
-}
-
-/// 取值的站点表示：虚拟寄存器编号 = 值编号。
-fn values(body: &Body, args: &[lir::body::ValueId]) -> Vec<SiteValue> {
-    args.iter()
-        .map(|value| SiteValue {
-            ty: body.values[value.index()].kind,
-            reg: Reg::Virtual(value.0),
-        })
-        .collect()
-}
-
-/// 结果的站点表示：`Instruction::results` 是 `body.values` 的下标范围。
-fn result_values(body: &Body, results: &Range<u32>) -> Vec<SiteValue> {
-    lir::body::range(results)
-        .map(|index| SiteValue {
-            ty: body.values[index].kind,
-            reg: Reg::Virtual(to_u32(index)),
-        })
-        .collect()
 }
 
 /// 取值编号列表。

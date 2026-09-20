@@ -43,7 +43,7 @@ impl Register {
                     0
                 })
     }
-    pub(super) fn parse(name: &str) -> Option<Self> {
+    pub(crate) fn parse(name: &str) -> Option<Self> {
         if let Some(index) = name
             .strip_prefix("xmm")
             .and_then(|index| index.parse::<u8>().ok())

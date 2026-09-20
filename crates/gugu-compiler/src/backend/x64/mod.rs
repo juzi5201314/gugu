@@ -3,15 +3,21 @@
 //! 表是单一事实来源：编码器只写表内形式，verifier 按目标 `cpu_baseline` 拒绝超出
 //! 可接受面的形式；lowering 与 codegen 在后续模块接入。
 
+pub(crate) mod abi;
 pub(crate) mod codegen;
 pub(crate) mod contract;
 pub(crate) mod encode;
 pub(crate) mod harness;
 mod harness_cases;
 pub(crate) mod inst;
+pub(crate) mod layout;
 pub(crate) mod lower;
+pub(crate) mod mangle;
 pub(crate) mod reg;
 mod rows;
+pub(crate) mod select;
+#[cfg(test)]
+mod select_tests;
 pub(crate) mod table;
 #[cfg(test)]
 mod tests;

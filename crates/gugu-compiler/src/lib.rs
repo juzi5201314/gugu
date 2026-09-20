@@ -674,7 +674,14 @@ impl Compiler {
 
         // 机器码片段：只有可执行入口才产出；统计供给 PlanBackend 的镜像计划。
         let x64 = if frontend.hir.module().entry.is_some() {
-            match backend::x64::codegen::build(&lir, target, &self.queries, &source_map) {
+            match backend::x64::codegen::build(
+                &lir,
+                &frontend.mono.universe,
+                &raw_contract,
+                target,
+                &self.queries,
+                &source_map,
+            ) {
                 Ok(world) => {
                     graph.complete(
                         ActionKind::Codegen,
@@ -1381,6 +1388,11 @@ pub struct ImagePlan {
     x64_cold_edge_count: u32,
     x64_decode_sequence_bytes: u32,
     x64_fragment_fingerprint: [u8; 32],
+    x64_rel8_count: u32,
+    x64_hot_block_count: u32,
+    x64_cold_block_count: u32,
+    x64_entry_symbol: String,
+    scheduler_poll_flags_offset: u32,
 }
 
 impl ImagePlan {
@@ -1587,6 +1599,11 @@ impl ImagePlan {
             x64_cold_edge_count: plan.x64_cold_edge_count,
             x64_decode_sequence_bytes: plan.x64_decode_sequence_bytes,
             x64_fragment_fingerprint: plan.x64_fragment_fingerprint,
+            x64_rel8_count: plan.x64_rel8_count,
+            x64_hot_block_count: plan.x64_hot_block_count,
+            x64_cold_block_count: plan.x64_cold_block_count,
+            x64_entry_symbol: plan.x64_entry_symbol,
+            scheduler_poll_flags_offset: plan.scheduler_poll_flags_offset,
         }
     }
 
@@ -1718,6 +1735,31 @@ impl ImagePlan {
     /// 返回机器码片段世界指纹。
     pub fn x64_fragment_fingerprint(&self) -> [u8; 32] {
         self.x64_fragment_fingerprint
+    }
+
+    /// 返回收缩后的 rel8 条数。
+    pub fn x64_rel8_count(&self) -> u32 {
+        self.x64_rel8_count
+    }
+
+    /// 返回热块数。
+    pub fn x64_hot_block_count(&self) -> u32 {
+        self.x64_hot_block_count
+    }
+
+    /// 返回冷块数。
+    pub fn x64_cold_block_count(&self) -> u32 {
+        self.x64_cold_block_count
+    }
+
+    /// 返回入口 mangled 符号。
+    pub fn x64_entry_symbol(&self) -> &str {
+        &self.x64_entry_symbol
+    }
+
+    /// 返回 `[r15 + poll_flags]` 偏移。
+    pub fn scheduler_poll_flags_offset(&self) -> u32 {
+        self.scheduler_poll_flags_offset
     }
 
     /// 返回 rt0 启动序列的步骤数量。

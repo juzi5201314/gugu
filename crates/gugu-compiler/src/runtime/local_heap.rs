@@ -110,27 +110,27 @@ pub(crate) const GENERATION_OLD: u8 = 2;
 pub(crate) const GENERATION_IMMORTAL: u8 = 3;
 
 /// `control` 的字段掩码与位移。
-const CONTROL_TYPE_MASK: u64 = 0xffff_ffff;
+pub(crate) const CONTROL_TYPE_MASK: u64 = 0xffff_ffff;
 const CONTROL_AGE_SHIFT: u32 = 32;
 const CONTROL_AGE_MASK: u64 = 0xf << CONTROL_AGE_SHIFT;
-const CONTROL_GENERATION_SHIFT: u32 = 36;
+pub(crate) const CONTROL_GENERATION_SHIFT: u32 = 36;
 const CONTROL_GENERATION_MASK: u64 = 0x3 << CONTROL_GENERATION_SHIFT;
 const CONTROL_FORWARDED: u64 = 1 << 38;
 const CONTROL_PINNED: u64 = 1 << 39;
 const CONTROL_LARGE_OBJECT: u64 = 1 << 41;
 const CONTROL_HAS_RESOURCE_INSTANCE: u64 = 1 << 42;
-const CONTROL_REPRESENTATION_SHIFT: u32 = 43;
+pub(crate) const CONTROL_REPRESENTATION_SHIFT: u32 = 43;
 /// `LOCAL_DIRECT` 表示：字段是完整地址，关闭态与 large/pinned 分配的默认值。
-const REPRESENTATION_LOCAL_DIRECT: u64 = 0;
-/// `TURN_REGION` 表示：region 对象的字段表示由 region descriptor 解释，本阶段不压缩。
-const REPRESENTATION_TURN_REGION: u64 = 1;
+pub(crate) const REPRESENTATION_LOCAL_DIRECT: u64 = 0;
+/// `TURN_REGION` 表示：region 对象的字段表示由 region descriptor 解释。
+pub(crate) const REPRESENTATION_TURN_REGION: u64 = 1;
 /// `SHARED_HANDLE` 表示；SharedHeap 参照模型只有 `SharedPayloadRecord`，没有 control header，
 /// 因此本常量暂无落地点。
-const REPRESENTATION_SHARED_HANDLE: u64 = 2;
+pub(crate) const REPRESENTATION_SHARED_HANDLE: u64 = 2;
 /// `COMPRESSED_REF` 表示：字段按 `cage id | generation | offset` 压缩字解释。
 ///
 /// 只写给 capture 槽确为压缩字的对象（压缩闭包环境）；header 与字段表示必须同源。
-const REPRESENTATION_COMPRESSED_REF: u64 = 3;
+pub(crate) const REPRESENTATION_COMPRESSED_REF: u64 = 3;
 
 const HEADER_CONTROL: u64 = 0;
 const HEADER_SIZE_WORD: u64 = 8;

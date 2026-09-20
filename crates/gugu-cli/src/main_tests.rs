@@ -818,7 +818,7 @@ fn build_json_reports_shared_heap_contract_keys() {
 /// 机器片段：镜像计划字段、`-Zdump-x64` 文本与指纹在镜像计划与片段世界之间一致。
 #[test]
 fn build_json_reports_x64_fragment_keys() {
-    let source = "fn main() {\n let index = 33\n let total = index * 7\n _ = total / 3\n }";
+    let source = "fn main() {\n let index = 33\n let total = index * 7\n if total > 10 { _ = total / 3 }\n }";
     let compilation =
         gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
             "main.gg",
@@ -847,6 +847,11 @@ fn build_json_reports_x64_fragment_keys() {
         "x64-cold-edge-count",
         "x64-decode-sequence-bytes",
         "x64-fragment-fingerprint",
+        "x64-rel8-count",
+        "x64-hot-block-count",
+        "x64-cold-block-count",
+        "x64-entry-symbol",
+        "scheduler-poll-flags-offset",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
@@ -854,6 +859,12 @@ fn build_json_reports_x64_fragment_keys() {
     assert!(payload["x64-form-count"].as_u64().unwrap_or(0) > 300);
     assert!(payload["x64-site-count"].as_u64().unwrap_or(0) > 0);
     assert!(payload["x64-encoded-bytes"].as_u64().unwrap_or(0) > 0);
+    let symbol = payload["x64-entry-symbol"].as_str().unwrap_or("");
+    assert!(
+        symbol.starts_with("__gugu_fn_") && symbol.len() == 10 + 64,
+        "入口符号必须是 __gugu_fn_ + 64 hex：{symbol}"
+    );
+    assert_eq!(payload["scheduler-poll-flags-offset"], 0);
     assert_eq!(
         payload["x64-fragment-fingerprint"],
         serde_json::json!(plan.x64_fragment_fingerprint())
@@ -864,9 +875,14 @@ fn build_json_reports_x64_fragment_keys() {
     );
     let dump = compilation.dump_x64().expect("片段 dump");
     assert_eq!(dump, compilation.dump_x64().expect("片段 dump 必须稳定"));
-    assert!(dump.contains("x64 schema=1 target=x86_64-linux"), "{dump}");
-    // 源码含乘法与除法：dump 必须出现真实助记符。
+    assert!(dump.contains("x64 schema=2 target=x86_64-linux"), "{dump}");
+    assert!(dump.contains("symbol=__gugu_fn_"), "{dump}");
+    // 源码含乘法、除法与条件：dump 必须出现真实助记符。
     assert!(dump.contains("imul"), "{dump}");
     assert!(dump.contains("idiv"), "{dump}");
     assert!(dump.contains("cqo"), "{dump}");
+    assert!(
+        dump.contains("jmp") || dump.contains("jne") || dump.contains("je"),
+        "{dump}"
+    );
 }
