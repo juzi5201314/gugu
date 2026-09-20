@@ -102,6 +102,7 @@ mod model;
 mod pacing;
 pub(crate) mod pacing_schema;
 mod platform_schema;
+pub(crate) mod processor;
 #[allow(
     dead_code,
     reason = "raw link provenance 与 release 安全 profile 的确定性参照实现由 world 与确定性测试消费"
@@ -116,6 +117,7 @@ pub(crate) mod region_schema;
 )]
 pub(crate) mod routing;
 pub(crate) mod routing_schema;
+
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
 pub(crate) mod scheduler_schema;
@@ -268,7 +270,8 @@ pub use extent::EXTENT_CLASS_LADDER;
 pub use platform_schema::{PlatformOp, PlatformRangeDemand};
 
 pub(crate) use model::{
-    RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, RuntimeRawContractV1, run,
+    RAW_MODEL_SCHEMA, RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand,
+    RuntimeRawContractV1, run,
 };
 pub use platform::PlatformProfile;
 pub(crate) use startup_schema::Rt0Demand;

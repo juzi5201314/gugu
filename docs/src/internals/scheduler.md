@@ -162,7 +162,7 @@ ProcessorOwnership {
 }
 ```
 
-`LogicalProcessor` 按 `poll`、`ownership`、local deque的 thief-visible head、owner tail、remote heads、stack cache、TLAB/barrier和其它冷字段的顺序布局。构建时必须断言两个控制块的 `size_of == align_of == 64`，且 `offset_of!(LogicalProcessor, poll)` 与 `offset_of!(LogicalProcessor, ownership)` 都是64的倍数并相差至少64；backend使用同一 runtime layout query取得 `[r15 + poll_flags_offset]`，禁止手写重复 offset。`PollControl` 只与同一次 preempt/GC handshake相关的低频写共享 line；scheduler state、owner、current coroutine、run timestamp、queue、stack cache、TLAB和 monitor字段不能落入该 line。
+`LogicalProcessor` 按 `poll`、`ownership`、local deque的 thief-visible head、owner tail、slots、remote heads、stack cache、TLAB 和 TurnRegion 的顺序布局。`processor::LogicalProcessorPrefix` 是这份热前缀的布局神谕：`poll` 在 0、`ownership` 在 64、`local_head` 在 128、`local_tail` 在 256、`slots` 在 384（256 个指针）、`remote` 在 2432（8×128）、`stack_cache` 在 3456、`tlab` 在 3520、`turn_region` 在 3536。构建时必须断言两个控制块的 `size_of == align_of == 64`，且 `offset_of!(LogicalProcessorPrefix, poll)` 与 `offset_of!(LogicalProcessorPrefix, ownership)` 都是64的倍数并相差至少64。`SchedulerRuntimeContract` schema 2 发布 `poll_flags_offset`（0）、`ownership_offset`（64）、`tlab_cursor_offset`（3520）、`tlab_limit_offset`（3528）、`turn_region_cursor_offset`（3536）与 `turn_region_limit_offset`（3544）；backend 只消费契约里的 `offset_of!` 结果，禁止手写第二份数字。写屏障 `CardMarkBuffer` 不进入此前缀。`PollControl` 只与同一次 preempt/GC handshake相关的低频写共享 line；scheduler state、owner、current coroutine、run timestamp、queue、stack cache、TLAB和 monitor字段不能落入该 line。
 
 ### batch inbox 与 injection
 

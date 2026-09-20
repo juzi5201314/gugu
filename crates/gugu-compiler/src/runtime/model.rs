@@ -48,10 +48,10 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 23 相对版本 22 的变化：并入 `CombiningRuntimeContract`（冷操作 tag 目录、允许与
-/// 禁止用途、operation record 字段集合、生命周期状态与迁移、同步路径目录、合并与轮次
-/// 预算、非移动记录池上界、`CombiningDemand`），并把 raw policy revision 升到 5。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 24;
+/// 版本 25 相对版本 24 的变化：并入 `LogicalProcessorPrefix` 的 poll/ownership/TLAB/
+/// TurnRegion 布局偏移，并把 `SchedulerRuntimeContract` 升到 schema 2。backend 只消费
+/// 契约里的 `offset_of!` 结果，禁止手写第二份数字。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 25;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -1066,7 +1066,8 @@ impl RuntimeRawContractV1 {
             return Err(RawModelError::new("协程需求与LIR需求视图不一致"));
         }
         self.scheduler.verify()?;
-        // 调度段的字段必须与登记的调优 profile 同源：段内自洽但 profile 对不上同样是非法状态。
+        // 调度段的字段必须与登记的调优 profile 和 processor 前缀同源：段内自洽但
+        // profile/偏移对不上同样是非法状态。
         let tuning = &crate::runtime::scheduler_schema::RUNTIME_TUNING_PROFILE;
         if self.scheduler.local_capacity != tuning.local_capacity
             || self.scheduler.remote_shards != tuning.remote_shards
@@ -1075,8 +1076,18 @@ impl RuntimeRawContractV1 {
             || self.scheduler.service_batch != tuning.service_batch
             || self.scheduler.queue_pad_bytes != tuning.queue_pad_bytes
             || self.scheduler.cache_line_bytes != tuning.cache_line_bytes
+            || self.scheduler.poll_flags_offset != crate::runtime::processor::poll_flags_offset()
+            || self.scheduler.ownership_offset != crate::runtime::processor::ownership_offset()
+            || self.scheduler.tlab_cursor_offset != crate::runtime::processor::tlab_cursor_offset()
+            || self.scheduler.tlab_limit_offset != crate::runtime::processor::tlab_limit_offset()
+            || self.scheduler.turn_region_cursor_offset
+                != crate::runtime::processor::turn_region_cursor_offset()
+            || self.scheduler.turn_region_limit_offset
+                != crate::runtime::processor::turn_region_limit_offset()
         {
-            return Err(RawModelError::new("调度契约与登记调优 profile 不一致"));
+            return Err(RawModelError::new(
+                "调度契约与登记调优 profile 或 processor 前缀偏移不一致",
+            ));
         }
         self.wait.verify()?;
         self.sync.verify()?;

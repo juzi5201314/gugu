@@ -218,7 +218,7 @@ fn scheduler_constants_match_contract() {
     assert_eq!(SCHED_BATCH_MAX, 128);
     assert_eq!(SCHED_SERVICE_INTERVAL, 61);
     assert_eq!(SCHED_SERVICE_BATCH, 128);
-    assert_eq!(SCHEDULER_SCHEMA, 1);
+    assert_eq!(SCHEDULER_SCHEMA, 2);
     verify_constants().expect("调度常量交叉一致");
 }
 
@@ -265,10 +265,24 @@ fn scheduler_contract_rejects_drift() {
     assert_eq!(contract.batch_max(), 128);
     assert_eq!(contract.service_interval(), 61);
     assert_eq!(contract.service_batch(), 128);
+    assert_eq!(contract.poll_flags_offset(), 0);
+    assert_eq!(contract.ownership_offset(), 64);
+    assert_eq!(contract.tlab_cursor_offset(), 3520);
+    assert_eq!(contract.tlab_limit_offset(), 3528);
+    assert_eq!(contract.turn_region_cursor_offset(), 3536);
+    assert_eq!(contract.turn_region_limit_offset(), 3544);
     assert_ne!(contract.fingerprint(), [0_u8; 32]);
-    assert!(contract.dump().contains("scheduler schema=1"));
+    assert!(contract.dump().contains("scheduler schema=2"));
+    assert!(
+        contract
+            .dump()
+            .contains("scheduler-layout poll-flags=0 tlab-cursor=3520 turn-region-cursor=3536")
+    );
     let mut drifted = contract.clone();
     drifted.local_capacity = 255;
+    assert!(drifted.verify().is_err());
+    drifted = contract.clone();
+    drifted.tlab_cursor_offset = 0;
     assert!(drifted.verify().is_err());
 }
 
