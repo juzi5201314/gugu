@@ -438,9 +438,13 @@ impl HeapArena {
                 continue;
             }
             let cursor = block_base + u64::from(free_line) * 128;
+            // 语言对齐承诺属于 payload：header 必须落在 `payload - HEADER`，因此按 payload 求
+            // 对齐再回退 header 宽度。granule 下界保证 header 仍是 granule 的整数倍，object-start
+            // 位图才能由 header 偏移反查。
             let align = align.max(u64::from(granule_bytes));
-            let header =
-                align_up(cursor, align).ok_or_else(|| HeapError::invalid("对象对齐溢出"))?;
+            let payload = align_up(cursor + OBJECT_HEADER_BYTES, align)
+                .ok_or_else(|| HeapError::invalid("对象对齐溢出"))?;
+            let header = payload - OBJECT_HEADER_BYTES;
             let run_end = block_base + u64::from(self.run_end_line(block_index, free_line)) * 128;
             if header + total <= run_end {
                 let first = (header - block_base) / 128;
