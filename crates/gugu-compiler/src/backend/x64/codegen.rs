@@ -41,7 +41,10 @@ use super::table;
 use super::verify;
 
 /// 片段 payload schema 版本。
-pub(crate) const CODEGEN_SCHEMA: u32 = 2;
+///
+/// 版本 3 相对版本 2 的变化：片段 payload 携带重定位引用的内部符号名集合，镜像规划据此做
+/// 内部符号冲突检查，不再从重定位现场二次猜测符号文本。
+pub(crate) const CODEGEN_SCHEMA: u32 = 3;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -96,6 +99,8 @@ pub(crate) struct FragmentPayload {
     pub(crate) encoder_fingerprint: [u8; 32],
     /// 内部 mangled 符号。
     pub(crate) symbol: String,
+    /// 重定位引用的内部符号名，按文本升序去重。
+    pub(crate) symbols: Vec<String>,
     /// 收缩后的 rel8 条数。
     pub(crate) rel8_count: u32,
     /// 热块数。
@@ -280,9 +285,10 @@ impl X64World {
         for fragment in &self.fragments {
             let _ = writeln!(
                 out,
-                "x64-fragment {} symbol={} rel8={} hot={} cold={} bytes={} sites={} relocations={} fingerprint={}",
+                "x64-fragment {} symbol={} symbols={} rel8={} hot={} cold={} bytes={} sites={} relocations={} fingerprint={}",
                 hex_lower(fragment.instance),
                 fragment.symbol,
+                fragment.symbols.len(),
                 fragment.rel8_count,
                 fragment.hot_block_count,
                 fragment.cold_block_count,
@@ -468,6 +474,7 @@ fn assemble_fragment(
         lir_fingerprint,
         encoder_fingerprint: encoder,
         symbol: selected.symbol,
+        symbols: reference_symbols(&assembled.relocations),
         rel8_count: selected.rel8_count,
         hot_block_count: to_u32(
             selected
@@ -510,6 +517,38 @@ fn terminator_name(terminator: &lir::body::Terminator) -> &'static str {
         lir::body::Terminator::Trap { .. } => "Trap",
         lir::body::Terminator::Unreachable { .. } => "Unreachable",
     }
+}
+
+/// 片段引用的内部符号名：按 mangled 文本升序去重。镜像规划按这份集合检查内部符号冲突，
+/// 不必再从重定位现场二次推导符号文本。
+fn reference_symbols(relocations: &[Relocation]) -> Vec<String> {
+    let mut symbols: Vec<String> = relocations
+        .iter()
+        .filter_map(|relocation| match &relocation.target {
+            RelocTarget::Lir(symbol) => Some(super::mangle::mangle_symbol(symbol)),
+            RelocTarget::Cold(_) | RelocTarget::CageControl => None,
+        })
+        .collect();
+    symbols.sort_unstable();
+    symbols.dedup();
+    symbols
+}
+
+/// 内部符号形状：`__gugu_<kind>_<64 lowercase hex>`；C 名不加该前缀，不参与检查。
+fn internal_symbol_shape(text: &str) -> bool {
+    let Some(rest) = text.strip_prefix("__gugu_") else {
+        return false;
+    };
+    let Some((kind, hex)) = rest.rsplit_once('_') else {
+        return false;
+    };
+    matches!(
+        kind,
+        "fn" | "static" | "vtable" | "glue" | "runtime" | "const" | "veneer"
+    ) && hex.len() == 64
+        && hex
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn site_payload(
@@ -638,6 +677,17 @@ fn validate_fragment(
         .all(|pair| pair[0].offset <= pair[1].offset)
     {
         return Err(vec![invalid("机器片段重定位没有按字段偏移升序")]);
+    }
+    if fragment.symbols != reference_symbols(&fragment.relocations) {
+        return Err(vec![invalid("机器片段符号集合与重定位不一致")]);
+    }
+    if fragment
+        .symbols
+        .iter()
+        .filter(|symbol| symbol.starts_with("__gugu_"))
+        .any(|symbol| !internal_symbol_shape(symbol))
+    {
+        return Err(vec![invalid("机器片段内部符号不是 __gugu_<kind>_<64 hex>")]);
     }
     Ok(())
 }

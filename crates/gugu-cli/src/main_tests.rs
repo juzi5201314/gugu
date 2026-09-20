@@ -875,7 +875,7 @@ fn build_json_reports_x64_fragment_keys() {
     );
     let dump = compilation.dump_x64().expect("片段 dump");
     assert_eq!(dump, compilation.dump_x64().expect("片段 dump 必须稳定"));
-    assert!(dump.contains("x64 schema=2 target=x86_64-linux"), "{dump}");
+    assert!(dump.contains("x64 schema=3 target=x86_64-linux"), "{dump}");
     assert!(dump.contains("symbol=__gugu_fn_"), "{dump}");
     // 源码含乘法、除法与条件：dump 必须出现真实助记符。
     assert!(dump.contains("imul"), "{dump}");

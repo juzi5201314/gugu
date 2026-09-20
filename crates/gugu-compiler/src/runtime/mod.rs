@@ -162,6 +162,7 @@ pub use combining_schema::{
 };
 pub use context::ContextSwitchCode;
 pub use coroutine::CoroutineContext;
+pub(crate) use coroutine_schema::stack_check_offset;
 pub use coroutine_schema::{
     CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
     StackPolicy,

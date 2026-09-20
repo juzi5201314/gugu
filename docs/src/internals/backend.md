@@ -67,10 +67,13 @@ rax, rbx, rcx, rdx, rdi, rsi, r8, r9, r10
 - integer、bool、char、pointer、reference、handle、code/metadata pointer 使用整数槽；
 - `f32`/`f64` 使用浮点槽；
 - fat pointer 拆成两个整数槽；
-- 不超过 16 字节的普通 aggregate 按 8 字节 piece 拆分；piece 只含一个浮点 scalar 时用浮点槽，否则用整数槽；
-- 大于 16 字节、含 resource/COW 特殊传递动作或无法自然拆分的 aggregate 由 caller 传地址；
+- 不超过 16 字节的普通 aggregate 在 LIR 之前就拆成标量 lane，因此 backend 只见到这些 lane；`by_value` 登记的 aggregate 参数（footprint 超过 16 字节、COW 或 resource）一律由 caller 传地址并只占一个整数槽；
 - ZST 不占寄存器或 stack slot；
-- 返回需要超过两个 piece 时，caller 把隐藏 return pointer 放在第一个整数参数槽，显式整数参数整体后移。
+- 返回需要超过两个 piece 时，caller 把隐藏 return pointer 放在第一个整数参数槽，显式整数参数整体后移；该指针就是 `signature.sret` 对应的第一个 entry 参数本身，不额外追加隐藏参数，callee 侧 `results` 同时为空。
+
+三类目标参数不占普通参数槽且必须由分类阶段显式定位：隐藏 sret 指针复用参数 0 的位置、间接调用的目标（`Provenance::Code` 参数）只用作 `call`/`jmp` 的操作数、动态派发的 vtable 取自 `Provenance::Metadata` lane；接收者不是胖指针 lane 而是指向胖对的指针时，vtable 在该指针的 `+8`（`dyn` 值布局 `data@0`、`vtable@8`），此时借用 `r11` 读取并登记 clobber。
+
+整数和浮点 bank 分别前进；某一 aggregate 的任意 piece 无法放入对应寄存器时，该 aggregate 的所有 piece 都放到 stack，避免半寄存器半内存。stack 参数按参数顺序放入 8 字节 slot（`V128` 占 16 字节），并满足自身更高对齐；caller 固定 outgoing 区承载。C ABI 侧 Linux 仍按 SysV 的独立 bank 前进，Windows 的 Microsoft x64 则让整数与浮点**按参数位置共用**同一组槽：位置 0..3 对应 `rcx/rdx/r8/r9` 与 `xmm0..xmm3`，例如 `(i64, f64)` 是 `rcx` + `xmm1`；位置越界的参数从 32 字节 shadow space 之后开始。
 
 内部 ABI 的间接 aggregate 不是借用 caller 原 place。通常 caller 先按 value descriptor在 outgoing 区物化完整语义副本并把地址传入；该存储在调用期间归 callee参数 local所有，callee可以修改并必须在正常/panic出口执行相应 drop/resource cleanup，caller返回后不再 drop同一副本。若 `EscapeAndPlacement` 已证明参数地址越过调用，caller改为物化独立 managed box，callee cleanup只结束参数绑定，box内 value由 GC/resource descriptor管理。trivial bit-copy 类型也不能因地址分析猜测而把可变参数别名到原值。
 
@@ -133,6 +136,7 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 
 - `Managed::TurnRegion` 只在当前 coroutine turn 私有、无外部 alias、无 ResourceCell lease 且不需要 FFI 地址时从 `[r15 + turn_region_cursor]` 做 checked bump；region export/publish、promote、transfer 和 reset 全部落到可 safepoint slow edge；
 - `Managed::LocalHeap` 仅在 descriptor不含 `HAS_RESOURCE`、请求不 large/pinned、高对齐且 footprint不跨 Immix block时走 processor-local TLAB/连续空 line run；checked计算 16 byte header、对齐 padding和 payload，成功时推进 cursor并初始化 representation header。run不足调用 `gc_refill_line`，span用尽才访问 owner/domain range；其它请求调用 `gc_alloc_slow`；
+- TLAB/TurnRegion 的 bump 先按 payload 地址对齐：`payload = align_up(cursor + 16, max(align, granule))`、`header = payload - 16`，与 runtime 参照实现的 `allocate` 逐字节一致（高对齐 padding 落在 header 之前）。地址加法必须用置标志位的 `add`（不能用不改 flags 的 `lea`）以便用进位检测环绕，推进后再与 span limit 比较；非规范对齐或超出 imm32 的算术走 `gc_alloc_slow`，不另立经验常量；
 - `Managed::SharedHeap` 走 stable handle allocation/resolution；`SharedAccessBegin/End`、generation check、forwarding grace 和 handle table 更新必须位于带 stack map 的 slow edge，不能污染 LocalHeap direct-pointer fast path；
 - `Managed::Pinned`、large、foreign 和 resource 请求走各自 non-moving/cleanup 路径；`RuntimeRaw` 仍使用 owner-local slab/span pop/bump。所有路径的 offset、size、align、generation 和 representation tag 使用 checked arithmetic，溢出进入 `OutOfMemory` 或 `RuntimeInvariant`，不静默截断。
 
@@ -158,7 +162,7 @@ Batch publish的CAS retry是合法cyclic runtime CFG，不得包在`NoSafepointR
 
 先以 entry 的 reverse postorder布局 hot block；panic、unwind、allocation/barrier slow path 和没有 hot predecessor 的 block放在冷区。条件分支优先让静态概率较高边 fallthrough：错误/越界为冷，循环 backedge为热，未知分支保持 GIR successor 顺序。
 
-首次按 rel32 编码，计算最终 offset 后把范围适合且不会因自身缩短使其它分支失效的分支改为 rel8。按 code offset 顺序迭代，直到一轮无变化；分支只能从长变短，保证终止和确定性。外部/跨 fragment 目标保持 rel32 relocation 或 veneer。
+首次按 rel32 编码，计算最终 offset 后把范围适合且不会因自身缩短使其它分支失效的分支改为 rel8。判定位移必须用**缩短后**的指令终点：`jmp` 短跳少 3 字节、`jcc` 少 4 字节，前向跳的终点前移会让 `target - end` 变大，按旧终点收下的边界分支会在下一轮编码中越界。其它分支的收缩只会让位移向合法区间移动（前向跳变小、反向跳绝对值变小），因此按 code offset 顺序迭代到一轮无变化即可收敛；分支只能从长变短，保证终止和确定性。统计量 `rel8` 是最终短跳 form 的条数，不按收缩次数累加。外部/跨 fragment 目标保持 rel32 relocation 或 veneer。
 
 ## 线性扫描寄存器分配
 
@@ -184,7 +188,9 @@ stack spill slot 按 `(size, align, root_class)` 分组复用，只有 live rang
 
 ### parallel copy
 
-block 参数、call argument 和 return shuffle先构造成并行 copy图。无环边按目标空闲顺序执行；cycle 使用 `r11`（GPR）或一个为该函数预留的 16 字节 stack scratch（XMM/内存）打断。scratch 不进入 stack map，且在 safepoint 前 copy 必须全部完成。
+block 参数、call argument 和 return shuffle先构造成并行 copy图。选指阶段先把块参数拷贝摊平成串行 move 序列：优先发射目标不再作为任何剩余拷贝源的边，只剩环时把环上一条边的目标值先存进同类型的**临时虚拟寄存器**、把仍读该目标的源改指临时寄存器，再发射那条边。块参数拷贝属于**边**：`Branch` 只在被选中的那条路径上执行拷贝，需要拷贝的 taken 边经 trampoline 进入，两个后继不会共用同一段拷贝。`Invoke` 只为 normal 边发射拷贝，unwind 边的参数由展开器和 stack map 恢复。
+
+寄存器分配阶段的物理并行 copy 按同一规则再消除一次：无环边按目标空闲顺序执行；cycle 使用 `r11`（GPR）或一个为该函数预留的 16 字节 stack scratch（XMM/内存）打断。scratch 不进入 stack map，且在 safepoint 前 copy 必须全部完成。
 
 ## frame layout
 
@@ -319,7 +325,7 @@ encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcod
 - 超出 baseline 的形式（`pshufb`、`pmulld`、`pextrd`、`pinsrd`、VEX `vaddps`）登记在表内并携带特性标记，只在 descriptor 允许该特性时才可选；`x86_64-v1` 下它们计入 `beyond_baseline_forms` 而不被选中；
 - `lock` 只允许出现在声明了 `lock_allowed` 的形式上，且必须落在内存目标；前缀顺序固定为 `lock`、段/操作数前缀、REX、opcode。
 
-编码契约（`ENCODER_SCHEMA = 1`、`ENCODER_REVISION = 2`、`LOWERING_REVISION = 2`）把表、形状不变量与 lowering 版本一起冻结：`EncoderContract::verify` 校验每个 form 的形状、助记符、特性名与 baseline 归属，`fingerprint` 取域 `gugu-x64-encoder-v1` 下对规范化字节的哈希（域 `gugu-x64-encoder-catalog-v1` 单独标记目录），任何表改动都会改变指纹并进入 action key。`Rel8` 是独立操作数种类，覆盖 `jmp`/`jcc` 的 17 个短跳 form；`assemble` 按 form 声明的字段宽度（1 或 4 字节）回填局部标签，超出 rel8 的距离是编码错误。`SelectInstructions` 对封闭 LIR opcode 穷尽 lowering：函数级序列先按 rel32 编码，再按 code offset 只许长变短地收缩为 rel8；外部符号、冷边与 `call` 保持 rel32 reloc。内部符号文本为 `__gugu_<kind>_<64 lowercase hex>`，C import/export 不加该前缀。`LegalizeX86_64` 与函数级选指产出的序列连同约束、clobber、冷边、mangled 符号、热/冷块计数与 encoded bytes 组成 codegen fragment（`CODEGEN_SCHEMA = 2`，键域 `gugu-x64-fragment-key-v1`，世界指纹域 `gugu-x64-fragments-v1`），query key 还并入 scheduler/coroutine 契约指纹、`TypeUniverse` 指纹与 `LOWERING_REVISION`；逐站点记录指令、字节区间、重定位、约束和 clobber，并在验证时重算站点序、字节区间、重定位范围与片段指纹。镜像计划与 CLI JSON 暴露 `x64-rel8-count`、`x64-hot-block-count`、`x64-cold-block-count`、`x64-entry-symbol` 与 `scheduler-poll-flags-offset`。
+编码契约（`ENCODER_SCHEMA = 1`、`ENCODER_REVISION = 2`、`LOWERING_REVISION = 2`）把表、形状不变量与 lowering 版本一起冻结：`EncoderContract::verify` 校验每个 form 的形状、助记符、特性名与 baseline 归属，`fingerprint` 取域 `gugu-x64-encoder-v1` 下对规范化字节的哈希（域 `gugu-x64-encoder-catalog-v1` 单独标记目录），任何表改动都会改变指纹并进入 action key。`Rel8` 是独立操作数种类，覆盖 `jmp`/`jcc` 的 17 个短跳 form；`assemble` 按 form 声明的字段宽度（1 或 4 字节）回填局部标签，超出 rel8 的距离是编码错误。`SelectInstructions` 对封闭 LIR opcode 穷尽 lowering：函数级序列先按 rel32 编码，再按 code offset 只许长变短地收缩为 rel8；外部符号、冷边与 `call` 保持 rel32 reloc。内部符号文本为 `__gugu_<kind>_<64 lowercase hex>`（kind 为 `fn`、`static`、`vtable`、`glue`、`runtime`、`const` 或 `veneer`），C import/export 不加该前缀；符号 key 与 mangled 文本同源，不把已 mangled 的字符串再哈希一次。`LegalizeX86_64` 与函数级选指产出的序列连同约束、clobber、冷边、mangled 符号、**重定位引用的符号名集合**、热/冷块计数与 encoded bytes 组成 codegen fragment（`CODEGEN_SCHEMA = 3`，键域 `gugu-x64-fragment-key-v1`，世界指纹域 `gugu-x64-fragments-v1`）；fragment 校验会重算该集合，并对带 `__gugu_` 前缀的符号强制上述形状，供镜像规划做内部符号冲突检查。query key 还并入 scheduler/coroutine 契约指纹、`TypeUniverse` 指纹与 `LOWERING_REVISION`；逐站点记录指令、字节区间、重定位、约束和 clobber，并在验证时重算站点序、字节区间、重定位范围与片段指纹。镜像计划与 CLI JSON 暴露 `x64-rel8-count`、`x64-hot-block-count`、`x64-cold-block-count`、`x64-entry-symbol` 与 `scheduler-poll-flags-offset`。
 
 
 ### Cost calibration profile

@@ -29,8 +29,8 @@ fn main() {
         std::process::exit(1);
     }
     let dump = compilation.dump_x64().expect("dump");
-    if !dump.contains("x64 schema=2") {
-        eprintln!("dump schema 不是 2");
+    if !dump.contains("x64 schema=3") {
+        eprintln!("dump schema 不是 3");
         std::process::exit(1);
     }
     println!(

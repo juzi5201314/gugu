@@ -1,17 +1,21 @@
 //! 全函数 instruction selection：块参数拷贝、站点 lowering、终结符与布局。
+//!
+//! 标签编号空间是函数级的：块标签占 `0..block_count`，站点局部标签与终结符局部标签随后
+//! 按布局顺序连续分配。终结符的 trampoline 因此可以带标签，而 `stitch` 只需要把终结符
+//! 序列原样追加，不必重写它的跳转目标（块标签不能被平移）。
 
 use crate::frontend::late::universe::TypeUniverse;
-use crate::lir::body::{BlockId, Body, Op, Terminator, ValueId};
+use crate::lir::body::{BlockId, Body, EdgeId, Terminator, ValueId};
 use crate::runtime::RuntimeRawContractV1;
 use crate::target::TargetName;
 
 use super::abi::{self, AbiLayout};
-use super::inst::{Operand, Sequence};
+use super::copies::{self, Temps};
+use super::inst::{LabelDefinition, Operand, Sequence};
 use super::layout::{self, BlockLayout};
 use super::lower::{self, Builder, LowerCtx, Lowered, LoweringError, SiteValue};
 use super::mangle;
-use super::reg::{Clobbers, Gpr, Reg, Xmm};
-use super::table::{Access, OperandKind};
+use super::reg::{Clobbers, Reg};
 
 /// 一个已选择的块。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +25,10 @@ pub(crate) struct SelectedBlock {
     pub order: u32,
     pub sites: Vec<SelectedSite>,
     pub terminator: Lowered,
+    /// 终结符局部标签的起始编号。
+    pub terminator_label_base: u32,
+    /// 下一个可用标签编号（终结符已分配的局部标签区间终点）。
+    pub terminator_label_end: u32,
 }
 
 /// 一个 LIR 指令站点。
@@ -50,7 +58,7 @@ pub(crate) fn select_body(
     raw: &RuntimeRawContractV1,
     target: TargetName,
 ) -> Result<SelectedFunction, LoweringError> {
-    let abi = abi::classify_signature(&body.signature, universe)?;
+    let abi = abi::classify_signature(&body.signature)?;
     let layout = layout::schedule(body);
     let mut ctx = LowerCtx {
         target,
@@ -59,7 +67,8 @@ pub(crate) fn select_body(
         raw: Some(raw),
         site: 0,
     };
-    let mut next_temp = u32::try_from(body.values.len()).expect("值编号适配 u32");
+    let mut temps = Temps::new(u32::try_from(body.values.len()).expect("值编号适配 u32"));
+    let mut next_label = block_label_count(&layout);
     let mut selected = Vec::with_capacity(layout.blocks.len());
     let mut clobbers = Clobbers::NONE;
     for block in &layout.blocks {
@@ -85,17 +94,15 @@ pub(crate) fn select_body(
                 },
             })?;
             clobbers = clobbers.union(lowered.clobbers);
-            let inst_index = body.instructions[index].source.location.start;
-            let _ = inst_index;
             sites.push(SelectedSite {
                 instruction: crate::lir::body::id(index),
                 op: lower::domain(&instruction.op),
                 lowered,
             });
         }
-        let mut term_builder = Builder::new();
-        let copies = copy_block_params(body, &data.terminator, &mut next_temp, &mut term_builder)?;
-        clobbers = clobbers.union(copies);
+        for site in &sites {
+            next_label = next_label.saturating_add(label_usage(&site.lowered.sequence));
+        }
         let invert = match &data.terminator {
             Terminator::Branch { yes, no, .. } => layout::branch_order(body, &layout, *yes, *no).2,
             _ => false,
@@ -106,24 +113,35 @@ pub(crate) fn select_body(
                 let fall = if invert { *yes } else { *no };
                 !layout::jump_falls_through(body, &layout, block.id, fall)
             }
+            Terminator::Invoke { normal, .. } => {
+                !layout::jump_falls_through(body, &layout, block.id, *normal)
+            }
             _ => true,
         };
+        let terminator_label_base = next_label;
+        let mut term_builder = Builder::with_labels(terminator_label_base);
+        let mut edge_copies = |edge: EdgeId| copies::edge_copies(body, edge, &mut temps);
         lower::ctrl::terminator(
             body,
+            block.id,
             &data.terminator,
             |ids| site_values(body, ids),
             target,
-            universe,
             &mut term_builder,
             emit_jump,
             invert,
             |id| super::inst::LabelId(id.0),
-            block.id,
+            &mut edge_copies,
         )
-        .map_err(|_| LoweringError::Unsupported {
+        .map_err(|error| LoweringError::Unsupported {
             op: "Terminator",
-            detail: "终结符 lowering 失败",
+            detail: match error {
+                LoweringError::Unsupported { detail, .. } => detail,
+                LoweringError::InvalidOperands => "终结符操作数不符合语义",
+            },
         })?;
+        next_label = term_builder.labels_used();
+        let terminator_label_end = next_label;
         let terminator = term_builder.finish();
         clobbers = clobbers.union(terminator.clobbers);
         selected.push(SelectedBlock {
@@ -132,6 +150,8 @@ pub(crate) fn select_body(
             order: block.order,
             sites,
             terminator,
+            terminator_label_base,
+            terminator_label_end,
         });
     }
     let mut sequence = Sequence::new();
@@ -148,21 +168,54 @@ pub(crate) fn select_body(
     })
 }
 
+/// 块标签占用的编号区间：`0..block_count`。
+fn block_label_count(layout: &BlockLayout) -> u32 {
+    layout
+        .blocks
+        .iter()
+        .map(|block| block.id.0 + 1)
+        .max()
+        .unwrap_or(0)
+}
+
+/// 一段序列用到的局部标签数；与 [`append_local`] 的编号推进同源。
+fn label_usage(sequence: &Sequence) -> u32 {
+    let mut used = 0;
+    for inst in &sequence.instructions {
+        for operand in &inst.operands {
+            if let Operand::Label(label) = operand {
+                used = used.max(label.0 + 1);
+            }
+        }
+    }
+    for definition in &sequence.labels {
+        used = used.max(definition.label.0 + 1);
+    }
+    used
+}
+
 fn stitch(blocks: &[SelectedBlock], sequence: &mut Sequence) {
     let block_base = blocks.iter().map(|block| block.id.0 + 1).max().unwrap_or(0);
     let mut local_shift = block_base;
     for block in blocks {
         let at = u32::try_from(sequence.instructions.len()).expect("指令数适配 u32");
-        sequence.labels.push(super::inst::LabelDefinition {
+        sequence.labels.push(LabelDefinition {
             label: super::inst::LabelId(block.id.0),
             at,
         });
         for site in &block.sites {
             append_local(sequence, &site.lowered.sequence, &mut local_shift);
         }
+        // 终结符标签已在选指阶段按同一编号空间分配；块标签不能被平移，因此这里只做追加。
+        // 区间终点来自选指阶段：终结符里的块标签引用不能参与局部标签计数。
+        debug_assert_eq!(local_shift, block.terminator_label_base);
         for inst in &block.terminator.sequence.instructions {
             sequence.instructions.push(inst.clone());
         }
+        sequence
+            .labels
+            .extend(block.terminator.sequence.labels.iter().cloned());
+        local_shift = block.terminator_label_end;
     }
 }
 
@@ -182,12 +235,12 @@ fn append_local(dest: &mut Sequence, src: &Sequence, local_shift: &mut u32) {
     }
     for definition in &src.labels {
         used = used.max(definition.label.0 + 1);
-        dest.labels.push(super::inst::LabelDefinition {
+        dest.labels.push(LabelDefinition {
             label: super::inst::LabelId(definition.label.0 + shift),
             at: definition.at + base,
         });
     }
-    *local_shift = shift + used;
+    *local_shift = shift.saturating_add(used);
 }
 
 fn site_values(body: &Body, args: &[ValueId]) -> Vec<SiteValue> {
@@ -206,110 +259,4 @@ fn result_values(body: &Body, results: &std::ops::Range<u32>) -> Vec<SiteValue> 
             reg: Reg::Virtual(crate::lir::body::id(index)),
         })
         .collect()
-}
-
-fn copy_block_params(
-    body: &Body,
-    terminator: &Terminator,
-    next_temp: &mut u32,
-    builder: &mut Builder,
-) -> Result<Clobbers, LoweringError> {
-    let edges: Vec<_> = match terminator {
-        Terminator::Jump(edge) => vec![*edge],
-        Terminator::Branch { yes, no, .. } => vec![*yes, *no],
-        Terminator::Switch {
-            cases, otherwise, ..
-        } => {
-            let mut edges: Vec<_> = body.switch_cases[crate::lir::body::range(cases)]
-                .iter()
-                .map(|(_, edge)| *edge)
-                .collect();
-            edges.push(*otherwise);
-            edges
-        }
-        Terminator::Invoke { normal, .. } => vec![*normal],
-        _ => Vec::new(),
-    };
-    for edge_id in edges {
-        let edge = &body.edges[edge_id.index()];
-        let args = body.args(&edge.arguments);
-        let params = body.params(edge.to);
-        emit_copies(body, args, params, next_temp, builder)?;
-    }
-    Ok(Clobbers::NONE)
-}
-
-fn emit_copies(
-    body: &Body,
-    args: &[ValueId],
-    params: &[crate::lir::body::Parameter],
-    next_temp: &mut u32,
-    builder: &mut Builder,
-) -> Result<(), LoweringError> {
-    if args.len() != params.len() {
-        return Ok(());
-    }
-    let pairs: Vec<(Reg, Reg, crate::lir::body::Type)> = args
-        .iter()
-        .zip(params)
-        .map(|(src, param)| {
-            (
-                Reg::Virtual(src.0),
-                Reg::Virtual(param.value.0),
-                body.values[src.index()].kind.ty,
-            )
-        })
-        .filter(|(src, dest, _)| src != dest)
-        .collect();
-    let dests: Vec<Reg> = pairs.iter().map(|(_, dest, _)| *dest).collect();
-    for (src, dest, ty) in &pairs {
-        if dests.contains(src) {
-            let temp = Reg::Virtual(*next_temp);
-            *next_temp = next_temp.saturating_add(1);
-            emit_move(builder, *src, temp, *ty)?;
-            emit_move(builder, temp, *dest, *ty)?;
-        } else {
-            emit_move(builder, *src, *dest, *ty)?;
-        }
-    }
-    let _ = (
-        Gpr::Rax,
-        Xmm::Xmm0,
-        OperandKind::Rm64,
-        Access::Write,
-        Op::Select,
-    );
-    Ok(())
-}
-
-fn emit_move(
-    builder: &mut Builder,
-    src: Reg,
-    dest: Reg,
-    ty: crate::lir::body::Type,
-) -> Result<(), LoweringError> {
-    if src == dest {
-        return Ok(());
-    }
-    match ty {
-        crate::lir::body::Type::F32
-        | crate::lir::body::Type::F64
-        | crate::lir::body::Type::V128(_) => {
-            builder.emit(
-                "movaps",
-                &[OperandKind::XmmRm, OperandKind::Xmm],
-                Access::Write,
-                vec![super::lower::reg(dest), super::lower::reg(src)],
-            );
-        }
-        _ => {
-            builder.emit(
-                "mov",
-                super::lower::move_kinds(64),
-                Access::Write,
-                vec![super::lower::reg(dest), super::lower::reg(src)],
-            );
-        }
-    }
-    Ok(())
 }

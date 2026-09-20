@@ -36,14 +36,30 @@ pub(crate) fn mangle_runtime(name: &str) -> String {
     )
 }
 
-/// `RuntimeCall` 判别名的稳定哈希。
-pub(crate) fn mangle_runtime_call(call: RuntimeCall) -> String {
-    mangle_runtime(runtime_call_name(call))
+/// runtime glue 的完整 `Symbol`：key 与 mangled 名同源，symbol 去重不依赖二次哈希。
+pub(crate) fn runtime_symbol(name: &str) -> Symbol {
+    Symbol::External {
+        key: hash_domain("gugu-runtime-symbol-v1", name.as_bytes()),
+        name: mangle_runtime(name),
+    }
+}
+
+/// `RuntimeCall` 的 runtime `Symbol`。
+pub(crate) fn runtime_call_symbol(call: RuntimeCall) -> Symbol {
+    runtime_symbol(runtime_call_name(call))
 }
 
 /// 编译器生成体（宽整除/memcpy 等）的稳定名哈希。
 pub(crate) fn mangle_glue(name: &str) -> String {
     mangle("glue", &hash_domain("gugu-glue-symbol-v1", name.as_bytes()))
+}
+
+/// 编译器生成体的完整 `Symbol`；key 与 mangled 名同源。
+pub(crate) fn glue_symbol(name: &str) -> Symbol {
+    Symbol::External {
+        key: hash_domain("gugu-glue-symbol-v1", name.as_bytes()),
+        name: mangle_glue(name),
+    }
 }
 
 fn mangle_vtable(interface: [u8; 32], concrete: [u8; 32]) -> String {

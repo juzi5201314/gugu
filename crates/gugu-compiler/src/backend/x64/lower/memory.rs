@@ -188,37 +188,24 @@ fn memory_call(
     builder.clobber_gpr(crate::backend::x64::reg::Gpr::Rax);
     builder.clobber_gpr(crate::backend::x64::reg::Gpr::Rbx);
     builder.clobber_gpr(crate::backend::x64::reg::Gpr::Rcx);
-    let name = mangle::mangle_glue(name);
-    let symbol = Symbol::External {
-        key: crate::frontend::mono::keys::hash_domain("gugu-runtime-symbol-v1", name.as_bytes()),
-        name,
-    };
     builder.emit(
         "call",
         REL32,
         Access::Read,
-        vec![Operand::Reloc(RelocTarget::Lir(symbol), RelocKind::PcRel32)],
+        vec![Operand::Reloc(
+            RelocTarget::Lir(mangle::glue_symbol(name)),
+            RelocKind::PcRel32,
+        )],
     );
     Ok(())
 }
 
 fn coverage(index: u32, builder: &mut Builder) -> Result<(), LoweringError> {
-    let symbol = Symbol::Data(index);
-    let name = mangle::mangle_symbol(&symbol);
     builder.emit(
         "inc",
         RM32,
         Access::ReadWrite,
-        vec![Operand::Rip(
-            RelocTarget::Lir(Symbol::External {
-                key: crate::frontend::mono::keys::hash_domain(
-                    "gugu-const-data-v1",
-                    &index.to_le_bytes(),
-                ),
-                name,
-            }),
-            0,
-        )],
+        vec![Operand::Rip(RelocTarget::Lir(Symbol::Data(index)), 0)],
     );
     Ok(())
 }

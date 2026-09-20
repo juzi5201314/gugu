@@ -1,19 +1,23 @@
 //! 调用、runtime glue 与 effect-fence 空序列。
+//!
+//! 调用 lowering 分三步：按分类结果把实参搬进 ABI 槽（寄存器与 caller outgoing 区栈
+//! piece 都要落位）、发射目标（直接符号、间接寄存器或 vtable 槽）、最后把返回值搬回虚拟
+//! 寄存器。间接调用的目标是分类阶段定位的 `Provenance::Code` 参数，动态派发目标是
+//! `Provenance::Metadata` 参数指向的 vtable，都不占用普通参数槽。
 
-use crate::backend::x64::abi::{self, AbiLayout, AbiSlot};
+use crate::backend::x64::abi::{self, AbiLayout, AbiSlot, Dispatch};
 use crate::backend::x64::inst::{Operand, RelocKind, RelocTarget};
 use crate::backend::x64::mangle;
-use crate::backend::x64::reg::{Gpr, Reg, Xmm};
+use crate::backend::x64::reg::{Gpr, Reg};
 use crate::backend::x64::table::{Access, OperandKind};
-use crate::frontend::late::universe::TypeUniverse;
-use crate::lir::body::{Call, CallTarget, Op, RuntimeCall, Symbol};
-use crate::runtime::PlatformOp;
+use crate::lir::body::{Call, CallTarget, Op, Symbol, ValueType};
 
-use super::{Builder, LowerCtx, LoweringError, SiteValue, move_kinds, reg};
+use super::{Builder, LowerCtx, LoweringError, SiteValue, mem_base, move_kinds, reg, value_move};
 
 const REL32: &[OperandKind] = &[OperandKind::Rel32];
 const RM64: &[OperandKind] = &[OperandKind::Rm64];
-const XMMRM_XMM: &[OperandKind] = &[OperandKind::XmmRm, OperandKind::Xmm];
+/// 一个 vtable 槽的字节宽度。
+const VTABLE_SLOT_BYTES: u32 = 8;
 
 pub(super) fn lower(
     op: &Op,
@@ -47,94 +51,221 @@ pub(super) fn lower(
         }
         Op::Park => runtime_named(builder, "sched_park"),
         Op::Ready => runtime_named(builder, "sched_ready"),
-        Op::Call(call) => emit_call(call, operands, results, ctx, builder, false),
-        Op::ForeignCall(call) => emit_call(call, operands, results, ctx, builder, true),
+        Op::Call(call) => emit_call(call, operands, results, ctx, builder),
+        Op::ForeignCall(call) => emit_call(call, operands, results, ctx, builder),
         _ => Err(LoweringError::InvalidOperands),
     }
 }
 
 fn runtime_named(builder: &mut Builder, name: &str) -> Result<(), LoweringError> {
-    let symbol = Symbol::External {
-        key: crate::frontend::mono::keys::hash_domain("gugu-runtime-symbol-v1", name.as_bytes()),
-        name: mangle::mangle_runtime(name),
-    };
-    builder.emit(
-        "call",
-        REL32,
-        Access::Read,
-        vec![Operand::Reloc(RelocTarget::Lir(symbol), RelocKind::PcRel32)],
-    );
-    Ok(())
+    emit_symbol_call(builder, mangle::runtime_symbol(name))
 }
 
+/// 站点调用 lowering：分类 → 实参落位 → 目标 → 返回值回收。
 fn emit_call(
     call: &Call,
     operands: &[SiteValue],
     results: &[SiteValue],
     ctx: LowerCtx<'_>,
     builder: &mut Builder,
-    foreign: bool,
 ) -> Result<(), LoweringError> {
-    let empty = TypeUniverse::default();
-    let universe = ctx.universe.unwrap_or(&empty);
-    let layout = abi::classify_call(call, ctx.target, universe)?;
+    let layout = abi::classify_call(call, ctx.target)?;
     shuffle_arguments(operands, &layout, builder)?;
+    emit_target(call, &layout, operands, builder)?;
+    collect_results(results, &layout, builder)?;
+    Ok(())
+}
+
+/// 发射调用目标；`Invoke`/`TailCall` 共用同一目标选择规则。
+pub(super) fn emit_target(
+    call: &Call,
+    layout: &AbiLayout,
+    operands: &[SiteValue],
+    builder: &mut Builder,
+) -> Result<(), LoweringError> {
     match &call.target {
-        CallTarget::Instance(key) => call_symbol(builder, Symbol::Instance(*key), foreign)?,
-        CallTarget::External { key, name } => call_symbol(
+        CallTarget::Instance(key) => emit_symbol_call(builder, Symbol::Instance(*key)),
+        CallTarget::External { key, name } => emit_symbol_call(
             builder,
             Symbol::External {
                 key: *key,
                 name: name.clone(),
             },
-            true,
-        )?,
+        ),
         CallTarget::Runtime(runtime) => {
-            let name = mangle::mangle_runtime_call(*runtime);
-            call_symbol(
-                builder,
-                Symbol::External {
-                    key: crate::frontend::mono::keys::hash_domain(
-                        "gugu-runtime-symbol-v1",
-                        name.as_bytes(),
-                    ),
-                    name,
-                },
-                false,
-            )?;
+            emit_symbol_call(builder, mangle::runtime_call_symbol(*runtime))
         }
         CallTarget::Indirect => {
-            let callee = operands.last().ok_or(LoweringError::InvalidOperands)?;
-            builder.emit("call", RM64, Access::Read, vec![reg(callee.reg)]);
+            let callee = target_value(operands, layout.callee)?;
+            builder.emit("call", RM64, Access::Read, vec![reg(callee)]);
+            Ok(())
         }
-        CallTarget::Vtable { slot } => {
-            let receiver = operands.first().ok_or(LoweringError::InvalidOperands)?;
+        CallTarget::Vtable { slot } => emit_dispatch(
+            builder,
+            "call",
+            operands,
+            layout.dispatch,
+            vtable_disp(*slot)?,
+        ),
+    }
+}
+
+/// 发射 `jmp` 形式的目标；`TailCall` 复用同一目标选择。
+pub(super) fn emit_jump_target(
+    call: &Call,
+    layout: &AbiLayout,
+    operands: &[SiteValue],
+    builder: &mut Builder,
+) -> Result<(), LoweringError> {
+    match &call.target {
+        CallTarget::Instance(key) => emit_symbol_jump(builder, Symbol::Instance(*key)),
+        CallTarget::External { key, name } => emit_symbol_jump(
+            builder,
+            Symbol::External {
+                key: *key,
+                name: name.clone(),
+            },
+        ),
+        CallTarget::Runtime(runtime) => {
+            emit_symbol_jump(builder, mangle::runtime_call_symbol(*runtime))
+        }
+        CallTarget::Indirect => {
+            let callee = target_value(operands, layout.callee)?;
+            builder.emit("jmp", RM64, Access::Read, vec![reg(callee)]);
+            Ok(())
+        }
+        CallTarget::Vtable { slot } => emit_dispatch(
+            builder,
+            "jmp",
+            operands,
+            layout.dispatch,
+            vtable_disp(*slot)?,
+        ),
+    }
+}
+
+/// 按派发形态取 vtable 再进入槽：胖指针 lane 直接用它，胖对指针先取 `+8` 处的 vtable。
+fn emit_dispatch(
+    builder: &mut Builder,
+    mnemonic: &'static str,
+    operands: &[SiteValue],
+    dispatch: Option<Dispatch>,
+    slot: i32,
+) -> Result<(), LoweringError> {
+    let dispatch = dispatch.ok_or(LoweringError::InvalidOperands)?;
+    let index = match dispatch {
+        Dispatch::Lane(index) | Dispatch::Pairs(index) => index,
+    };
+    let receiver = operand_reg(operands, Some(index))?;
+    let vtable = match dispatch {
+        Dispatch::Lane(_) => receiver,
+        Dispatch::Pairs(_) => {
+            // 借用后端 scratch r11 承载 vtable，避免占用参数寄存器。
             builder.clobber_gpr(Gpr::R11);
-            let disp = i32::try_from(*slot)
-                .ok()
-                .and_then(|slot| slot.checked_mul(8))
-                .ok_or(LoweringError::InvalidOperands)?;
             builder.emit(
                 "mov",
                 move_kinds(64),
                 Access::Read,
-                vec![super::mem_base(receiver.reg, 0), reg(Reg::Gpr(Gpr::R11))],
+                vec![mem_base(receiver, VTABLE_OFFSET), reg(Reg::Gpr(Gpr::R11))],
             );
-            builder.emit(
-                "call",
-                RM64,
-                Access::Read,
-                vec![super::mem_base(Reg::Gpr(Gpr::R11), disp)],
-            );
+            Reg::Gpr(Gpr::R11)
         }
-    }
-    collect_results(results, &layout, builder)?;
-    let _ = RuntimeCall::Yield;
-    let _ = PlatformOp::Commit;
+    };
+    builder.emit(mnemonic, RM64, Access::Read, vec![mem_base(vtable, slot)]);
     Ok(())
 }
 
-fn call_symbol(builder: &mut Builder, symbol: Symbol, _foreign: bool) -> Result<(), LoweringError> {
+/// vtable 指针在 `dyn` 胖对里的字节偏移。
+const VTABLE_OFFSET: i32 = 8;
+
+/// 目标参数寄存器；缺失或下标越界都是内部不变量失败。
+fn target_value(operands: &[SiteValue], index: Option<u32>) -> Result<Reg, LoweringError> {
+    operand_reg(operands, index)
+}
+
+fn operand_reg(operands: &[SiteValue], index: Option<u32>) -> Result<Reg, LoweringError> {
+    let index = usize::try_from(index.ok_or(LoweringError::InvalidOperands)?)
+        .map_err(|_| LoweringError::InvalidOperands)?;
+    operands
+        .get(index)
+        .map(|value| value.reg)
+        .ok_or(LoweringError::InvalidOperands)
+}
+
+/// vtable 槽的字节偏移。
+fn vtable_disp(slot: u32) -> Result<i32, LoweringError> {
+    slot.checked_mul(VTABLE_SLOT_BYTES)
+        .and_then(|bytes| i32::try_from(bytes).ok())
+        .ok_or(LoweringError::InvalidOperands)
+}
+
+/// 实参落位：寄存器槽直接搬，栈 piece 写进 caller outgoing 区。
+pub(super) fn shuffle_arguments(
+    operands: &[SiteValue],
+    layout: &AbiLayout,
+    builder: &mut Builder,
+) -> Result<(), LoweringError> {
+    for value in &layout.arguments {
+        let Some(slot) = value.slot else {
+            continue;
+        };
+        let index = usize::try_from(value.index).expect("参数下标适配 usize");
+        let Some(source) = operands.get(index) else {
+            continue;
+        };
+        move_to_slot(builder, source.reg, slot, value.ty)?;
+    }
+    Ok(())
+}
+
+/// 返回值回收：寄存器槽搬回虚拟寄存器。
+pub(super) fn collect_results(
+    results: &[SiteValue],
+    layout: &AbiLayout,
+    builder: &mut Builder,
+) -> Result<(), LoweringError> {
+    for value in &layout.results {
+        let Some(slot) = value.slot else {
+            continue;
+        };
+        let index = usize::try_from(value.index).expect("返回下标适配 usize");
+        let Some(dest) = results.get(index) else {
+            continue;
+        };
+        move_from_slot(builder, slot, dest.reg, value.ty)?;
+    }
+    Ok(())
+}
+
+/// 把一个值搬进 ABI 槽。
+pub(super) fn move_to_slot(
+    builder: &mut Builder,
+    src: Reg,
+    slot: AbiSlot,
+    ty: ValueType,
+) -> Result<(), LoweringError> {
+    match slot {
+        AbiSlot::Integer(gpr) => value_move(builder, src, Reg::Gpr(gpr), ty.ty),
+        AbiSlot::Float(xmm) => value_move(builder, src, Reg::Xmm(xmm), ty.ty),
+        AbiSlot::Stack { offset } => super::store_stack(builder, src, offset, ty.ty),
+    }
+}
+
+/// 把 ABI 槽里的值搬回虚拟寄存器。
+pub(super) fn move_from_slot(
+    builder: &mut Builder,
+    slot: AbiSlot,
+    dest: Reg,
+    ty: ValueType,
+) -> Result<(), LoweringError> {
+    match slot {
+        AbiSlot::Integer(gpr) => value_move(builder, Reg::Gpr(gpr), dest, ty.ty),
+        AbiSlot::Float(xmm) => value_move(builder, Reg::Xmm(xmm), dest, ty.ty),
+        AbiSlot::Stack { offset } => super::load_stack(builder, offset, dest, ty.ty),
+    }
+}
+
+fn emit_symbol_call(builder: &mut Builder, symbol: Symbol) -> Result<(), LoweringError> {
     builder.emit(
         "call",
         REL32,
@@ -144,82 +275,12 @@ fn call_symbol(builder: &mut Builder, symbol: Symbol, _foreign: bool) -> Result<
     Ok(())
 }
 
-fn shuffle_arguments(
-    operands: &[SiteValue],
-    layout: &AbiLayout,
-    builder: &mut Builder,
-) -> Result<(), LoweringError> {
-    for value in &layout.arguments {
-        if value.index == u32::MAX {
-            continue;
-        }
-        let index = usize::try_from(value.index).expect("参数下标适配 usize");
-        let Some(src) = operands.get(index) else {
-            continue;
-        };
-        let Some(slot) = value.slots.first() else {
-            continue;
-        };
-        match slot {
-            AbiSlot::Integer(gpr) => emit_gpr_move(builder, src.reg, *gpr)?,
-            AbiSlot::Float(xmm) => emit_xmm_move(builder, src.reg, *xmm)?,
-            AbiSlot::Stack { .. } => {}
-        }
-    }
-    Ok(())
-}
-
-fn collect_results(
-    results: &[SiteValue],
-    layout: &AbiLayout,
-    builder: &mut Builder,
-) -> Result<(), LoweringError> {
-    for (index, value) in layout.results.iter().enumerate() {
-        let Some(dest) = results.get(index) else {
-            continue;
-        };
-        let Some(slot) = value.slots.first() else {
-            continue;
-        };
-        match slot {
-            AbiSlot::Integer(gpr) => emit_gpr_reg(builder, Reg::Gpr(*gpr), dest.reg)?,
-            AbiSlot::Float(xmm) => emit_xmm_reg(builder, Reg::Xmm(*xmm), dest.reg)?,
-            AbiSlot::Stack { .. } => {}
-        }
-    }
-    Ok(())
-}
-
-fn emit_gpr_move(builder: &mut Builder, src: Reg, dest: Gpr) -> Result<(), LoweringError> {
-    emit_gpr_reg(builder, src, Reg::Gpr(dest))
-}
-
-fn emit_gpr_reg(builder: &mut Builder, src: Reg, dest: Reg) -> Result<(), LoweringError> {
-    if src == dest {
-        return Ok(());
-    }
+fn emit_symbol_jump(builder: &mut Builder, symbol: Symbol) -> Result<(), LoweringError> {
     builder.emit(
-        "mov",
-        move_kinds(64),
-        Access::Write,
-        vec![reg(dest), reg(src)],
-    );
-    Ok(())
-}
-
-fn emit_xmm_move(builder: &mut Builder, src: Reg, dest: Xmm) -> Result<(), LoweringError> {
-    emit_xmm_reg(builder, src, Reg::Xmm(dest))
-}
-
-fn emit_xmm_reg(builder: &mut Builder, src: Reg, dest: Reg) -> Result<(), LoweringError> {
-    if src == dest {
-        return Ok(());
-    }
-    builder.emit(
-        "movaps",
-        XMMRM_XMM,
-        Access::Write,
-        vec![reg(dest), reg(src)],
+        "jmp",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(RelocTarget::Lir(symbol), RelocKind::PcRel32)],
     );
     Ok(())
 }

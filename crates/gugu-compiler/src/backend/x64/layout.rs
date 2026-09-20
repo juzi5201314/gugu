@@ -93,8 +93,11 @@ pub(crate) fn jump_falls_through(
 }
 
 /// 先 rel32，只许长变短；外部/冷 stub/`call` 保持 rel32 reloc。
+///
+/// 位移必须按**缩短后**的指令终点判定：`jmp` 短跳少 3 字节、`jcc` 少 4 字节，前向跳的终点
+/// 前移会让 `target - end` 变大，按旧终点收下的边界分支会在下一轮编码时越界。收缩只会让
+/// 其它分支的位移向合法区间移动，因此按 code offset 迭代到不动点后必然收敛。
 pub(crate) fn relax(sequence: &mut Sequence) -> Result<u32, LoweringError> {
-    let mut rel8_count = 0_u32;
     loop {
         let assembled = assemble(sequence).map_err(|_| LoweringError::InvalidOperands)?;
         let mut changed = false;
@@ -105,28 +108,43 @@ pub(crate) fn relax(sequence: &mut Sequence) -> Result<u32, LoweringError> {
                 continue;
             };
             let form = table::form(inst.form);
-            let inst_end = start
-                .checked_add(assembled_len(&assembled, index))
-                .ok_or(LoweringError::InvalidOperands)?;
-            let target =
-                assembled.labels[usize::try_from(rel32.label.0).expect("标签编号适配 usize")];
-            let dist = i64::from(target) - i64::from(inst_end);
-            if i8::try_from(dist).is_err() {
-                continue;
-            }
             let Some(rel8) = matching_rel8(form) else {
                 continue;
             };
+            let shrunk_len = assembled_len(&assembled, index)
+                .saturating_sub(REL32_FIELD_BYTES)
+                .saturating_add(REL8_FIELD_BYTES);
+            let target =
+                assembled.labels[usize::try_from(rel32.label.0).expect("标签编号适配 usize")];
+            let dist = i64::from(target) - (i64::from(*start) + i64::from(shrunk_len));
+            if i8::try_from(dist).is_err() {
+                continue;
+            }
             inst.form = rel8;
             changed = true;
-            rel8_count = rel8_count.saturating_add(1);
         }
         if !changed {
             break;
         }
     }
-    Ok(rel8_count)
+    Ok(count_rel8(sequence))
 }
+
+/// 序列里最终的短跳条数。
+fn count_rel8(sequence: &Sequence) -> u32 {
+    sequence
+        .instructions
+        .iter()
+        .filter(|inst| table::form(inst.form).operands == [OperandKind::Rel8])
+        .count()
+        .try_into()
+        .expect("短跳条数适配 u32")
+}
+
+/// rel32 字段宽度。
+const REL32_FIELD_BYTES: u32 = 4;
+/// rel8 字段宽度。
+const REL8_FIELD_BYTES: u32 = 1;
 
 struct LocalRel32 {
     label: crate::backend::x64::inst::LabelId,

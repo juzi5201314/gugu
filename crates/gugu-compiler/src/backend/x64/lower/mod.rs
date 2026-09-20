@@ -410,11 +410,22 @@ pub(crate) struct Builder {
 
 impl Builder {
     pub(crate) fn new() -> Self {
+        Self::with_labels(0)
+    }
+
+    /// 终结符的局部标签从 `base` 起分配；站点与终结符共用同一编号空间，`stitch` 才能
+    /// 只按编号衔接而不重写跳转目标。
+    pub(crate) fn with_labels(base: u32) -> Self {
         Self {
             sequence: Sequence::new(),
             clobbers: Clobbers::NONE,
-            next_label: 0,
+            next_label: base,
         }
+    }
+
+    /// 已分配到的下一个标签编号；调用方用它给后续序列留出区间。
+    pub(crate) fn labels_used(&self) -> u32 {
+        self.next_label
     }
 
     pub(crate) fn finish(self) -> Lowered {
@@ -507,6 +518,96 @@ fn find_form(mnemonic: &'static str, kinds: &'static [OperandKind], first: Acces
         })
         .unwrap_or_else(|| panic!("表内缺少 {mnemonic} 的 {kinds:?} 形式（首操作数 {first:?}）"));
     FormId(u16::try_from(index).expect("form 数量适配 u16"))
+}
+
+/// 值搬运：XMM 承载的宽度用 `movaps`，其余用维持零扩展的 `mov`。
+pub(crate) fn value_move(
+    builder: &mut Builder,
+    src: Reg,
+    dest: Reg,
+    ty: Type,
+) -> Result<(), LoweringError> {
+    if src == dest {
+        return Ok(());
+    }
+    match ty {
+        Type::F32 | Type::F64 | Type::V128(_) => {
+            builder.emit(
+                "movaps",
+                &[OperandKind::XmmRm, OperandKind::Xmm],
+                Access::Write,
+                vec![reg(dest), reg(src)],
+            );
+        }
+        _ => {
+            builder.emit(
+                "mov",
+                move_kinds(64),
+                Access::Write,
+                vec![reg(dest), reg(src)],
+            );
+        }
+    }
+    Ok(())
+}
+
+/// outgoing 区的一个栈 piece 宽度：至少 8 字节，按 8 字节向上取整。
+pub(crate) fn stack_piece_bytes(ty: Type) -> u32 {
+    u32::try_from(ty.bytes().unwrap_or(8).max(8).next_multiple_of(8)).expect("piece 宽度适配 u32")
+}
+
+/// 把值写进 caller outgoing 区的栈 piece。
+pub(crate) fn store_stack(
+    builder: &mut Builder,
+    src: Reg,
+    offset: u32,
+    ty: Type,
+) -> Result<(), LoweringError> {
+    let disp = i32::try_from(offset).expect("outgoing 偏移适配 i32");
+    let place = mem_base(gpr(Gpr::Rsp), disp);
+    match ty {
+        Type::F32 | Type::F64 => builder.emit(
+            "movsd",
+            &[OperandKind::XmmRm, OperandKind::Xmm][..],
+            Access::Write,
+            vec![place, reg(src)],
+        ),
+        Type::V128(_) => builder.emit(
+            "movups",
+            &[OperandKind::XmmRm, OperandKind::Xmm][..],
+            Access::Write,
+            vec![place, reg(src)],
+        ),
+        _ => builder.emit("mov", move_kinds(64), Access::Write, vec![place, reg(src)]),
+    };
+    Ok(())
+}
+
+/// 从 caller outgoing 区的栈 piece 读回值。
+pub(crate) fn load_stack(
+    builder: &mut Builder,
+    offset: u32,
+    dest: Reg,
+    ty: Type,
+) -> Result<(), LoweringError> {
+    let disp = i32::try_from(offset).expect("outgoing 偏移适配 i32");
+    let place = mem_base(gpr(Gpr::Rsp), disp);
+    match ty {
+        Type::F32 | Type::F64 => builder.emit(
+            "movsd",
+            &[OperandKind::XmmRm, OperandKind::Xmm][..],
+            Access::Read,
+            vec![place, reg(dest)],
+        ),
+        Type::V128(_) => builder.emit(
+            "movups",
+            &[OperandKind::XmmRm, OperandKind::Xmm][..],
+            Access::Read,
+            vec![place, reg(dest)],
+        ),
+        _ => builder.emit("mov", move_kinds(64), Access::Read, vec![place, reg(dest)]),
+    };
+    Ok(())
 }
 
 /// 操作数构造：寄存器。

@@ -117,14 +117,16 @@ pub struct CoroutineRuntimeContract {
     pub demand: CoroutineDemand,
 }
 
+/// 从`CoroutineHot`基址读取`stack_check`的绝对偏移；backend热路与契约共用这一处来源。
+pub(crate) const fn stack_check_offset() -> u32 {
+    (offset_of!(CoroutineSlot, stack) + offset_of!(StackDescriptor, stack_check)) as u32
+}
+
 impl CoroutineRuntimeContract {
     pub(crate) fn build(demand: CoroutineDemand) -> Result<Self, RawModelError> {
         let result = Self {
             schema: 1,
-            stack_check_offset: u32::try_from(
-                offset_of!(CoroutineSlot, stack) + offset_of!(StackDescriptor, stack_check),
-            )
-            .expect("固定偏移"),
+            stack_check_offset: stack_check_offset(),
             records: fixed_layouts(),
             stack: StackPolicy::fixed(),
             context: ContextSwitchCode::fixed(),

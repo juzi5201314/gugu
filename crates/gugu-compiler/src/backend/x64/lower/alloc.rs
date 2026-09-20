@@ -7,21 +7,22 @@ use crate::backend::x64::table::{Access, OperandKind};
 use crate::frontend::gir::body::SourceInfo;
 use crate::frontend::gir::passing::PassingClass;
 use crate::frontend::gir::placement::PlacementKind;
-use crate::lir::body::{Op, Symbol};
+use crate::lir::body::Op;
 use crate::runtime::gc_metadata_contract::GC_BLOCK_BYTES;
 use crate::runtime::local_heap::{
     CONTROL_GENERATION_SHIFT, CONTROL_REPRESENTATION_SHIFT, GENERATION_NURSERY,
     OBJECT_HEADER_BYTES, REPRESENTATION_COMPRESSED_REF, REPRESENTATION_LOCAL_DIRECT,
     REPRESENTATION_TURN_REGION,
 };
+use crate::runtime::local_heap_schema::HEAP_GRANULE_BYTES;
 use crate::runtime::processor::{
-    tlab_cursor_offset, tlab_limit_offset, turn_region_cursor_offset, turn_region_limit_offset,
+    poll_flags_offset, tlab_cursor_offset, tlab_limit_offset, turn_region_cursor_offset,
+    turn_region_limit_offset,
 };
 
 use super::{Builder, LowerCtx, LoweringError, SiteValue, gpr, imm, mem_base, move_kinds, reg};
 
 const REL32: &[OperandKind] = &[OperandKind::Rel32];
-const MEM_R64: &[OperandKind] = &[OperandKind::Mem, OperandKind::R64];
 const RM64_R64: &[OperandKind] = &[OperandKind::Rm64, OperandKind::R64];
 const R32_IMM32: &[OperandKind] = &[OperandKind::R32, OperandKind::Imm32];
 
@@ -158,65 +159,69 @@ fn bump(
     let Some(type_id) = universe.type_id(&descriptor) else {
         return slow_alloc(dest, compressed, builder, slow);
     };
-    let pad = padding(
-        OBJECT_HEADER_BYTES
-            .checked_add(payload)
-            .ok_or(LoweringError::InvalidOperands)?,
-        align,
-    );
-    let step = OBJECT_HEADER_BYTES
-        .checked_add(payload)
-        .and_then(|bytes| bytes.checked_add(pad))
-        .ok_or(LoweringError::InvalidOperands)?;
-    let step = i32::try_from(step).map_err(|_| LoweringError::InvalidOperands)?;
-    let (cursor_off, limit_off) = if turn_region {
-        (
-            i32::try_from(turn_region_cursor_offset()).expect("偏移适配 i32"),
-            i32::try_from(turn_region_limit_offset()).expect("偏移适配 i32"),
-        )
-    } else {
-        (
-            i32::try_from(tlab_cursor_offset()).expect("偏移适配 i32"),
-            i32::try_from(tlab_limit_offset()).expect("偏移适配 i32"),
-        )
+    // payload 对齐属于语言承诺；header 落在 `payload - HEADER`。granule 下界让 header 仍是
+    // granule 的整数倍，object-start 位图与 runtime 的 `resolve` 才能按同一规则反查。
+    let align = u64::from(align).max(u64::from(HEAP_GRANULE_BYTES));
+    // 非规范对齐或超出 imm32 的算术走 runtime slow path，不另写经验常量。
+    let (Ok(adjust), Ok(mask), Ok(payload)) = (
+        i32::try_from(OBJECT_HEADER_BYTES + align - 1),
+        i32::try_from(-(align as i64)),
+        i32::try_from(payload),
+    ) else {
+        return slow_alloc(dest, compressed, builder, slow);
     };
+    let (cursor_off, limit_off) = tlab_offsets(ctx, turn_region);
     let r11 = gpr(Gpr::R11);
     let r15 = gpr(Gpr::R15);
     builder.clobber_gpr(Gpr::R11);
+    builder.clobber_gpr(Gpr::Rax);
     builder.emit(
         "mov",
         move_kinds(64),
         Access::Read,
         vec![mem_base(r15, cursor_off), reg(r11)],
     );
+    // `add` 才会为 `jc` 留下真实的进位：`lea` 不改 flags，无法检测地址环绕。
     builder.emit(
-        "lea",
-        MEM_R64,
-        Access::Address,
-        vec![mem_base(r11, step), reg(r11)],
+        "add",
+        &[OperandKind::Rm64, OperandKind::Imm32],
+        Access::ReadWrite,
+        vec![reg(r11), imm(u64::from(adjust as u32))],
     );
     let overflow = builder.label();
     let done = builder.label();
     builder.emit("jb", REL32, Access::Read, vec![Operand::Label(overflow)]);
     builder.emit(
-        "cmp",
-        RM64_R64,
-        Access::Read,
-        vec![mem_base(r15, limit_off), reg(r11)],
+        "and",
+        &[OperandKind::Rm64, OperandKind::Imm32],
+        Access::ReadWrite,
+        vec![reg(r11), imm(mask as u64)],
     );
-    builder.emit("jb", REL32, Access::Read, vec![Operand::Label(overflow)]);
     builder.emit(
         "mov",
         move_kinds(64),
         Access::Write,
-        vec![mem_base(r15, cursor_off), reg(r11)],
+        vec![reg(gpr(Gpr::Rax)), reg(r11)],
     );
-    // cursor 已前进；header 写在旧 cursor = r11 - step。
     builder.emit(
-        "lea",
-        MEM_R64,
-        Access::Address,
-        vec![mem_base(r11, -step), reg(r11)],
+        "add",
+        &[OperandKind::Rm64, OperandKind::Imm32],
+        Access::ReadWrite,
+        vec![reg(gpr(Gpr::Rax)), imm(payload as u64)],
+    );
+    builder.emit("jb", REL32, Access::Read, vec![Operand::Label(overflow)]);
+    builder.emit(
+        "cmp",
+        &[OperandKind::Rm64, OperandKind::R64],
+        Access::Read,
+        vec![mem_base(r15, limit_off), reg(gpr(Gpr::Rax))],
+    );
+    builder.emit("ja", REL32, Access::Read, vec![Operand::Label(overflow)]);
+    builder.emit(
+        "mov",
+        move_kinds(64),
+        Access::Write,
+        vec![mem_base(r15, cursor_off), reg(gpr(Gpr::Rax))],
     );
     let repr = if turn_region {
         REPRESENTATION_TURN_REGION
@@ -229,32 +234,37 @@ fn bump(
         | (u64::from(GENERATION_NURSERY) << CONTROL_GENERATION_SHIFT)
         | (repr << CONTROL_REPRESENTATION_SHIFT);
     emit_imm64(builder, Gpr::Rax, control);
-    builder.clobber_gpr(Gpr::Rax);
     builder.emit(
         "mov",
         move_kinds(64),
         Access::Write,
-        vec![mem_base(r11, 0), reg(gpr(Gpr::Rax))],
+        vec![
+            mem_base(
+                r11,
+                -i32::try_from(OBJECT_HEADER_BYTES).expect("header 适配 i32"),
+            ),
+            reg(gpr(Gpr::Rax)),
+        ],
     );
-    emit_imm64(builder, Gpr::Rax, payload);
+    emit_imm64(builder, Gpr::Rax, payload as u64);
     builder.emit(
         "mov",
         move_kinds(64),
         Access::Write,
-        vec![mem_base(r11, 8), reg(gpr(Gpr::Rax))],
+        vec![
+            mem_base(
+                r11,
+                -i32::try_from(OBJECT_HEADER_BYTES / 2).expect("header 半宽适配 i32"),
+            ),
+            reg(gpr(Gpr::Rax)),
+        ],
     );
     if let Some(dest) = dest {
         builder.emit(
-            "lea",
-            MEM_R64,
-            Access::Address,
-            vec![
-                mem_base(
-                    r11,
-                    i32::try_from(OBJECT_HEADER_BYTES).expect("header 适配 i32"),
-                ),
-                reg(dest),
-            ],
+            "mov",
+            move_kinds(64),
+            Access::Write,
+            vec![reg(dest), reg(r11)],
         );
     }
     builder.emit("jmp", REL32, Access::Read, vec![Operand::Label(done)]);
@@ -280,15 +290,14 @@ fn slow_alloc(
     builder.clobber_gpr(Gpr::Rbx);
     builder.clobber_gpr(Gpr::Rcx);
     builder.clobber_gpr(Gpr::Rdx);
-    let symbol = Symbol::External {
-        key: crate::frontend::mono::keys::hash_domain("gugu-runtime-symbol-v1", name.as_bytes()),
-        name: mangle::mangle_runtime(name),
-    };
     builder.emit(
         "call",
         REL32,
         Access::Read,
-        vec![Operand::Reloc(RelocTarget::Lir(symbol), RelocKind::PcRel32)],
+        vec![Operand::Reloc(
+            RelocTarget::Lir(mangle::runtime_symbol(name)),
+            RelocKind::PcRel32,
+        )],
     );
     if let Some(dest) = dest {
         if dest != gpr(Gpr::Rax) {
@@ -303,12 +312,31 @@ fn slow_alloc(
     Ok(())
 }
 
+/// TLAB/TurnRegion 的 cursor/limit 偏移：镜像内取契约字段，探针退回同一布局神谕。
+fn tlab_offsets(ctx: LowerCtx<'_>, turn_region: bool) -> (i32, i32) {
+    let (cursor, limit) = match (ctx.raw, turn_region) {
+        (Some(raw), true) => (
+            raw.scheduler().turn_region_cursor_offset(),
+            raw.scheduler().turn_region_limit_offset(),
+        ),
+        (Some(raw), false) => (
+            raw.scheduler().tlab_cursor_offset(),
+            raw.scheduler().tlab_limit_offset(),
+        ),
+        (None, true) => (turn_region_cursor_offset(), turn_region_limit_offset()),
+        (None, false) => (tlab_cursor_offset(), tlab_limit_offset()),
+    };
+    (
+        i32::try_from(cursor).expect("TLAB cursor 偏移适配 i32"),
+        i32::try_from(limit).expect("TLAB limit 偏移适配 i32"),
+    )
+}
+
 fn safepoint_poll(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), LoweringError> {
-    let offset = ctx
+    let raw = ctx
         .raw
-        .map(|raw| raw.scheduler().poll_flags_offset())
-        .unwrap_or(0);
-    let offset = i32::try_from(offset).expect("poll_flags 偏移适配 i32");
+        .map_or_else(poll_flags_offset, |raw| raw.scheduler().poll_flags_offset());
+    let offset = i32::try_from(raw).expect("poll_flags 偏移适配 i32");
     builder.clobber_gpr(Gpr::Rax);
     builder.emit(
         "mov",
@@ -322,9 +350,10 @@ fn safepoint_poll(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), Loweri
         Access::Read,
         vec![reg(gpr(Gpr::Rax)), reg(gpr(Gpr::Rax))],
     );
+    // 快路是无 pending poll 时的直落路径，慢路只由条件分支进入。
     let cold = builder.label();
-    let done = builder.label();
     builder.emit("jne", REL32, Access::Read, vec![Operand::Label(cold)]);
+    let done = builder.label();
     builder.emit("jmp", REL32, Access::Read, vec![Operand::Label(done)]);
     builder.define(cold);
     runtime_call(builder, "safepoint_slow")?;
@@ -333,17 +362,18 @@ fn safepoint_poll(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), Loweri
 }
 
 fn stack_check(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), LoweringError> {
-    let offset = ctx
+    let raw = ctx
         .raw
-        .map(|raw| raw.coroutine().stack_check_offset)
-        .unwrap_or(64);
-    let offset = i32::try_from(offset).expect("stack_check 偏移适配 i32");
+        .map_or_else(crate::runtime::stack_check_offset, |raw| {
+            raw.coroutine().stack_check_offset
+        });
+    let offset = i32::try_from(raw).expect("stack_check 偏移适配 i32");
     builder.clobber_gpr(Gpr::R11);
     builder.emit(
-        "lea",
-        MEM_R64,
-        Access::Address,
-        vec![mem_base(gpr(Gpr::Rsp), 0), reg(gpr(Gpr::R11))],
+        "mov",
+        move_kinds(64),
+        Access::Write,
+        vec![reg(gpr(Gpr::R11)), reg(gpr(Gpr::Rsp))],
     );
     builder.emit(
         "cmp",
@@ -351,9 +381,10 @@ fn stack_check(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), LoweringE
         Access::Read,
         vec![mem_base(gpr(Gpr::R14), offset), reg(gpr(Gpr::R11))],
     );
+    // candidate < stack_check 走冷路：容量不足与 poison 由同一次比较捕获。
     let cold = builder.label();
-    let done = builder.label();
     builder.emit("ja", REL32, Access::Read, vec![Operand::Label(cold)]);
+    let done = builder.label();
     builder.emit("jmp", REL32, Access::Read, vec![Operand::Label(done)]);
     builder.define(cold);
     runtime_call(builder, "morestack_or_poll")?;
@@ -362,15 +393,14 @@ fn stack_check(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), LoweringE
 }
 
 fn runtime_call(builder: &mut Builder, name: &str) -> Result<(), LoweringError> {
-    let symbol = Symbol::External {
-        key: crate::frontend::mono::keys::hash_domain("gugu-runtime-symbol-v1", name.as_bytes()),
-        name: mangle::mangle_runtime(name),
-    };
     builder.emit(
         "call",
         REL32,
         Access::Read,
-        vec![Operand::Reloc(RelocTarget::Lir(symbol), RelocKind::PcRel32)],
+        vec![Operand::Reloc(
+            RelocTarget::Lir(mangle::runtime_symbol(name)),
+            RelocKind::PcRel32,
+        )],
     );
     Ok(())
 }
@@ -391,9 +421,4 @@ fn emit_imm64(builder: &mut Builder, dest: Gpr, value: u64) {
             vec![reg(gpr(dest)), imm(value)],
         );
     }
-}
-
-fn padding(bytes: u64, align: u32) -> u64 {
-    let align = u64::from(align.max(8));
-    bytes.wrapping_neg() & (align - 1)
 }
