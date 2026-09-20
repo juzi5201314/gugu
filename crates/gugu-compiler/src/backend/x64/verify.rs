@@ -136,6 +136,22 @@ pub(crate) fn verify_sequence(
     Ok(sequence_clobbers(sequence))
 }
 
+/// 函数级序列：逐指令、标签、冷边；不检查跨站点的虚拟寄存器先写后读。
+///
+/// 活入参数和前序站点的结果会在后续站点被读，也会在块参数拷贝中再次写入同一
+/// Virtual；那是函数级数据流，不是单站点 lowering 错误。
+pub(crate) fn verify_function_sequence(
+    sequence: &Sequence,
+    baseline: CpuBaseline,
+) -> Result<Clobbers, VerifyError> {
+    for inst in &sequence.instructions {
+        verify_inst(inst, baseline)?;
+    }
+    verify_labels(sequence)?;
+    verify_cold_edges(sequence)?;
+    Ok(sequence_clobbers(sequence))
+}
+
 /// 每个被引用的标签都有定义；定义编号唯一且从 0 起连续。
 ///
 /// 同一标签可以被多条分支引用（合并点由多条边汇入），编码器按指令各自回填。
@@ -294,14 +310,17 @@ fn operand_matches(kind: OperandKind, operand: &Operand) -> bool {
             operand,
             Operand::Reg(Reg::Xmm(_) | Reg::Virtual(_)) | Operand::Mem(_)
         ),
-        OperandKind::Mem => matches!(operand, Operand::Mem(_)),
+        OperandKind::Mem => matches!(operand, Operand::Mem(_) | Operand::Rip(..)),
         OperandKind::Imm8 | OperandKind::Imm16 | OperandKind::Imm32 | OperandKind::Imm64 => {
             matches!(operand, Operand::Imm(_))
         }
         OperandKind::Rel32 => matches!(
             operand,
-            Operand::Label(_) | Operand::Reloc(RelocTarget::Cold(_), RelocKind::PcRel32)
+            Operand::Label(_)
+                | Operand::Reloc(RelocTarget::Cold(_), RelocKind::PcRel32)
+                | Operand::Reloc(RelocTarget::Lir(_), RelocKind::PcRel32)
         ),
+        OperandKind::Rel8 => matches!(operand, Operand::Label(_)),
         OperandKind::Cl => matches!(operand, Operand::Reg(Reg::Gpr(Gpr::Rcx))),
     }
 }

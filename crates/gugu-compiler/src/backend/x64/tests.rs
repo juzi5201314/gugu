@@ -505,6 +505,7 @@ fn branches_resolve_labels_and_cold_edges() {
             },
             scope: crate::frontend::gir::body::ScopeId(0),
         },
+        site: 0,
     };
     let cold = inst(
         "jne",
@@ -525,6 +526,83 @@ fn branches_resolve_labels_and_cold_edges() {
     assert!(
         verify_sequence(&sequence(vec![cold.clone(), cold]), CpuBaseline::X86_64V1).is_err(),
         "同一条冷边最多被引用一次"
+    );
+}
+
+#[test]
+fn rel8_branches_encode_and_reject_out_of_range() {
+    // jmp rel8 前向标签：eb + 距离 5（跨过一条 5 字节 mov）。
+    let jump = inst(
+        "jmp",
+        &[OperandKind::Rel8],
+        vec![Operand::Label(LabelId(0))],
+    );
+    let mov = inst(
+        "mov",
+        &[OperandKind::R32, OperandKind::Imm32],
+        vec![reg(Gpr::Rax), Operand::Imm(1)],
+    );
+    let program = Sequence {
+        instructions: vec![jump, mov],
+        labels: vec![LabelDefinition {
+            label: LabelId(0),
+            at: 2,
+        }],
+    };
+    let assembled = assemble(&program).expect("rel8 分支可解析");
+    assert_eq!(assembled.bytes, [0xEB, 5, 0xB8, 1, 0, 0, 0]);
+    assert!(assembled.relocations.is_empty());
+
+    // je rel8：74 + 距离 0（落到下一条指令）。
+    let je = inst("je", &[OperandKind::Rel8], vec![Operand::Label(LabelId(0))]);
+    let fallthrough = Sequence {
+        instructions: vec![je],
+        labels: vec![LabelDefinition {
+            label: LabelId(0),
+            at: 1,
+        }],
+    };
+    let assembled = assemble(&fallthrough).expect("je rel8 可解析");
+    assert_eq!(assembled.bytes, [0x74, 0]);
+
+    // 远标签保持 rel32；rel8 字段装不下则编码失败。
+    let far = Sequence {
+        instructions: (0..130)
+            .map(|_| inst("nop", &[], Vec::new()))
+            .chain(std::iter::once(inst(
+                "jmp",
+                &[OperandKind::Rel8],
+                vec![Operand::Label(LabelId(0))],
+            )))
+            .collect(),
+        labels: vec![LabelDefinition {
+            label: LabelId(0),
+            at: 0,
+        }],
+    };
+    assert!(assemble(&far).is_err(), "rel8 装不下的后向距离必须失败");
+
+    let edge = super::inst::ColdEdge {
+        kind: super::inst::ColdEdgeKind::Trap,
+        source: crate::frontend::gir::body::SourceInfo {
+            location: crate::frontend::hir::Location {
+                source: 0,
+                start: 0,
+                end: 0,
+                expansion: 0,
+            },
+            scope: crate::frontend::gir::body::ScopeId(0),
+        },
+        site: 1,
+    };
+    let cold_rel8 = inst(
+        "jne",
+        &[OperandKind::Rel8],
+        vec![Operand::Reloc(RelocTarget::Cold(edge), RelocKind::PcRel32)],
+    );
+    assert!(
+        verify_sequence(&sequence(vec![cold_rel8]), CpuBaseline::X86_64V1).is_err(),
+        "冷边只允许 Rel32+PcRel32"
     );
 }
 
@@ -801,7 +879,7 @@ fn encoder_contract_rejects_tampered_catalog() {
 #[test]
 fn sse2_integer_forms_carry_operand_size_prefix() {
     /// 非 SSE2 整型的 `p` 助记符：`pause` 用 F3，字/半字洗牌各用 F2/F3。
-    const EXCEPTIONS: &[&str] = &["pause", "pshuflw", "pshufhw"];
+    const EXCEPTIONS: &[&str] = &["pause", "pshuflw", "pshufhw", "push", "pop"];
     for form in table::FORMS {
         if !form.mnemonic.starts_with('p') || EXCEPTIONS.contains(&form.mnemonic) {
             continue;

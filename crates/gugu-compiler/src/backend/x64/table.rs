@@ -58,6 +58,8 @@ pub(crate) enum OperandKind {
     Imm64,
     /// 分支目标（PC 相对 32 位）。
     Rel32,
+    /// 分支目标（PC 相对 8 位）。
+    Rel8,
     /// 固定使用 `cl` 的移位量操作数。
     Cl,
 }
@@ -82,6 +84,7 @@ impl OperandKind {
             Self::Imm32 => "imm32",
             Self::Imm64 => "imm64",
             Self::Rel32 => "rel32",
+            Self::Rel8 => "rel8",
             Self::Cl => "cl",
         }
     }

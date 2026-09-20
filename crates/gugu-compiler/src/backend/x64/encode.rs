@@ -1,8 +1,8 @@
 //! x86_64 编码器：把 form 与操作数序列写成机器字节、重定位与寄存器约束。
 //!
 //! 单一 layout 同时驱动长度计算与写入；`assemble` 在写入后复核每条指令的实际长度，
-//! 长度不符即报错（release 也不依赖 `debug_assert`）。局部标签按 rel32 编码并在序列内
-//! 回填；指向符号与冷边的操作数产生重定位记录。
+//! 长度不符即报错（release 也不依赖 `debug_assert`）。局部标签按 form 声明的 rel32/rel8
+//! 字段宽度编码并在序列内回填；指向符号与冷边的操作数产生重定位记录。
 
 use std::fmt;
 
@@ -109,18 +109,30 @@ pub(crate) fn assemble(sequence: &Sequence) -> Result<Assembled, EncodeError> {
                 addend: relocation.addend,
             });
         }
-        if let Some((offset, label)) = item.label {
+        if let Some((offset, label, field_len)) = item.label {
             let index =
                 usize::try_from(label.0).map_err(|_| EncodeError::new("标签编号超出宿主范围"))?;
             let target = label_offsets[index].expect("编号连续已校验");
             let next = start
                 .checked_add(offset)
-                .and_then(|value| value.checked_add(4))
+                .and_then(|value| value.checked_add(u32::from(field_len)))
                 .ok_or_else(|| EncodeError::new("分支修正位置溢出"))?;
             let value = i64::from(target) - i64::from(next);
-            let value = i32::try_from(value).map_err(|_| EncodeError::new("分支距离超出 rel32"))?;
             let at = usize::try_from(start + offset).expect("序列字节数在 u32 内");
-            bytes[at..at + 4].copy_from_slice(&value.to_le_bytes());
+            let width = usize::from(field_len);
+            match field_len {
+                1 => {
+                    let value =
+                        i8::try_from(value).map_err(|_| EncodeError::new("分支距离超出 rel8"))?;
+                    bytes[at] = value.to_le_bytes()[0];
+                }
+                4 => {
+                    let value =
+                        i32::try_from(value).map_err(|_| EncodeError::new("分支距离超出 rel32"))?;
+                    bytes[at..at + width].copy_from_slice(&value.to_le_bytes());
+                }
+                _ => return Err(EncodeError::new("分支字段宽度必须是 1 或 4")),
+            }
         }
         for (offset, register) in &item.constraint {
             constraints.push(RegisterConstraint {
@@ -220,8 +232,8 @@ struct Encoded {
     imm_len: u8,
     /// 以指令起点为基准的字段偏移。
     relocation: Option<RelocField>,
-    /// rel32 分支的标签；offset 相对指令起点。
-    label: Option<(u32, LabelId)>,
+    /// 局部标签回填：相对指令起点的字段偏移、标签、字段宽度。
+    label: Option<(u32, LabelId, u8)>,
     /// 物理分配约束；offset 相对指令起点。
     constraint: Vec<(u32, Reg)>,
 }
@@ -291,7 +303,8 @@ fn build(inst: &Inst) -> Result<Encoded, EncodeError> {
             | OperandKind::Imm16
             | OperandKind::Imm32
             | OperandKind::Imm64
-            | OperandKind::Rel32 => {
+            | OperandKind::Rel32
+            | OperandKind::Rel8 => {
                 if immediate.replace((*kind, operand)).is_some() {
                     return Err(EncodeError::new("form 声明了多个立即数操作数"));
                 }
@@ -425,10 +438,11 @@ fn build(inst: &Inst) -> Result<Encoded, EncodeError> {
                 });
             }
             Operand::Label(id) => {
-                if kind != OperandKind::Rel32 {
-                    return Err(EncodeError::new("标签只能出现在 rel32 分支位置"));
+                if !matches!(kind, OperandKind::Rel32 | OperandKind::Rel8) {
+                    return Err(EncodeError::new("标签只能出现在 rel32/rel8 分支位置"));
                 }
-                imm_len = 4;
+                let (_, len) = immediate_width(kind)?;
+                imm_len = len;
                 label = Some(*id);
             }
             _ => return Err(EncodeError::new("立即数位置不是立即数、重定位或标签")),
@@ -501,7 +515,7 @@ fn build(inst: &Inst) -> Result<Encoded, EncodeError> {
     }
     let label = label.map(|label| {
         let offset = head + u32::from(disp_len);
-        (offset, label)
+        (offset, label, imm_len)
     });
     // 字节约束的偏移：字节寄存器只出现在 ModRM 的 r/m 或 reg 字段，偏移即 ModRM 字节。
     let modrm_offset = head - u32::from(sib.is_some()) - 1;
@@ -536,6 +550,7 @@ fn immediate_width(kind: OperandKind) -> Result<(ImmKind, u8), EncodeError> {
         OperandKind::Imm32 => Ok((ImmKind::Id, 4)),
         OperandKind::Imm64 => Ok((ImmKind::Io, 8)),
         OperandKind::Rel32 => Ok((ImmKind::None, 4)),
+        OperandKind::Rel8 => Ok((ImmKind::None, 1)),
         _ => Err(EncodeError::new("操作数不是立即数位置")),
     }
 }

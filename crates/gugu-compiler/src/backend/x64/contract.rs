@@ -19,9 +19,9 @@ use super::table;
 /// 编码器契约 schema 版本。
 pub(crate) const ENCODER_SCHEMA: u32 = 1;
 /// 描述符表与编码规则 revision。
-pub(crate) const ENCODER_REVISION: u32 = 1;
+pub(crate) const ENCODER_REVISION: u32 = 2;
 /// lowering 规则 revision。
-pub(crate) const LOWERING_REVISION: u32 = 1;
+pub(crate) const LOWERING_REVISION: u32 = 2;
 
 /// 契约指纹域。
 const ENCODER_DOMAIN: &str = "gugu-x64-encoder-v1";
