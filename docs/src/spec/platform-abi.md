@@ -287,10 +287,11 @@ C 导入符号默认使用 `extern` 声明名；`#[link_name = "..."]` 可指定
 | 零初始化数据 | `.bss` | `.bss` |
 | 展开描述 | `.eh_frame` | `.pdata` / `.xdata` |
 | Gugu 栈图 | `.gugu.stackmap` | `.gugustk` |
+| 源码位置 | `.gugu.src` | `.gugusrc` |
 | Gugu 类型与镜像元数据 | `.gugu.types` / `.gugu.meta` | `.gugutyp` / `.ggmeta` |
 | 外部导入 | 动态导入表（仅显式 FFI） | `.idata` |
 
-PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]` 指定的节必须在目标格式上可表示，且不能覆盖 runtime、栈图、类型表、导入表或展开表的保留节；非法节名、权限组合和对齐要求都是编译错误。`--strip` 不能删除运行时必需的栈图、展开信息或 GC 元数据，详见[工具链与命令行](toolchain-cli.md)。
+PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]` 指定的节必须在目标格式上可表示，且不能覆盖 runtime、栈图、类型表、导入表或展开表的保留节；非法节名、权限组合和对齐要求都是编译错误。`--strip` 不能删除运行时必需的栈图、展开信息、源码位置或 GC 元数据，详见[工具链与命令行](toolchain-cli.md)。
 
 ### 可执行镜像形式 {#executable-image-forms}
 

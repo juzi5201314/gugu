@@ -1439,6 +1439,19 @@ pub struct ImagePlan {
     x64_allocated_values: u32,
     coroutine_stack_check_offset: u32,
     scheduler_poll_flags_offset: u32,
+    x64_stackmap_name: String,
+    x64_unwind_name: String,
+    x64_source_name: String,
+    x64_stackmap_section: Vec<u8>,
+    x64_unwind_section: Vec<u8>,
+    x64_source_section: Vec<u8>,
+    x64_stackmap_functions: u32,
+    x64_stackmap_safepoints: u32,
+    x64_stackmap_maps: u32,
+    x64_unwind_functions: u32,
+    x64_landing_count: u32,
+    x64_source_records: u32,
+    x64_metadata_fingerprint: [u8; 32],
 }
 
 impl ImagePlan {
@@ -1662,6 +1675,19 @@ impl ImagePlan {
             x64_allocated_values: plan.x64_allocated_values,
             coroutine_stack_check_offset: plan.coroutine_stack_check_offset,
             scheduler_poll_flags_offset: plan.scheduler_poll_flags_offset,
+            x64_stackmap_name: plan.x64_stackmap_name,
+            x64_unwind_name: plan.x64_unwind_name,
+            x64_source_name: plan.x64_source_name,
+            x64_stackmap_section: plan.x64_stackmap_section,
+            x64_unwind_section: plan.x64_unwind_section,
+            x64_source_section: plan.x64_source_section,
+            x64_stackmap_functions: plan.x64_stackmap_functions,
+            x64_stackmap_safepoints: plan.x64_stackmap_safepoints,
+            x64_stackmap_maps: plan.x64_stackmap_maps,
+            x64_unwind_functions: plan.x64_unwind_functions,
+            x64_landing_count: plan.x64_landing_count,
+            x64_source_records: plan.x64_source_records,
+            x64_metadata_fingerprint: plan.x64_metadata_fingerprint,
         }
     }
 
@@ -1878,6 +1904,71 @@ impl ImagePlan {
     /// 返回 `[r15 + poll_flags]` 偏移。
     pub fn scheduler_poll_flags_offset(&self) -> u32 {
         self.scheduler_poll_flags_offset
+    }
+
+    /// 返回栈图 section 名。
+    pub fn x64_stackmap_name(&self) -> &str {
+        &self.x64_stackmap_name
+    }
+
+    /// 返回展开 section 名。
+    pub fn x64_unwind_name(&self) -> &str {
+        &self.x64_unwind_name
+    }
+
+    /// 返回源码位置 section 名。
+    pub fn x64_source_name(&self) -> &str {
+        &self.x64_source_name
+    }
+
+    /// 返回栈图 section 字节。
+    pub fn x64_stackmap_section(&self) -> &[u8] {
+        &self.x64_stackmap_section
+    }
+
+    /// 返回展开 section 字节。
+    pub fn x64_unwind_section(&self) -> &[u8] {
+        &self.x64_unwind_section
+    }
+
+    /// 返回源码位置 section 字节。
+    pub fn x64_source_section(&self) -> &[u8] {
+        &self.x64_source_section
+    }
+
+    /// 返回进入栈图表的函数数。
+    pub fn x64_stackmap_functions(&self) -> u32 {
+        self.x64_stackmap_functions
+    }
+
+    /// 返回栈图安全点数。
+    pub fn x64_stackmap_safepoints(&self) -> u32 {
+        self.x64_stackmap_safepoints
+    }
+
+    /// 返回去重后的 map 数。
+    pub fn x64_stackmap_maps(&self) -> u32 {
+        self.x64_stackmap_maps
+    }
+
+    /// 返回展开表中的函数数。
+    pub fn x64_unwind_functions(&self) -> u32 {
+        self.x64_unwind_functions
+    }
+
+    /// 返回落地记录数。
+    pub fn x64_landing_count(&self) -> u32 {
+        self.x64_landing_count
+    }
+
+    /// 返回源码位置记录数。
+    pub fn x64_source_records(&self) -> u32 {
+        self.x64_source_records
+    }
+
+    /// 返回栈图、展开与源码记录的内容指纹。
+    pub fn x64_metadata_fingerprint(&self) -> [u8; 32] {
+        self.x64_metadata_fingerprint
     }
 
     /// 返回 rt0 启动序列的步骤数量。

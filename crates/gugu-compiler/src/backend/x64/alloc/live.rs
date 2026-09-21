@@ -201,6 +201,7 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
             visit_site(
                 body,
                 site.kind,
+                site.spill_pointers,
                 &site.lowered,
                 index,
                 order,
@@ -219,6 +220,7 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
         visit_site(
             body,
             SiteKind::Normal,
+            super::super::select::terminator_spills(&body.blocks[block.id.index()].terminator),
             &block.terminator,
             index,
             order,
@@ -280,6 +282,7 @@ fn collect_values(body: &Body) -> Vec<ValueLive> {
 fn visit_site(
     body: &Body,
     kind: SiteKind,
+    spill_pointers: bool,
     lowered: &Lowered,
     site: u32,
     block: u32,
@@ -309,7 +312,7 @@ fn visit_site(
             instructions: entry.instructions.clone(),
             mask: Clobbers::NONE,
             clobber: Clobbers::NONE,
-            pointer_spill: bridge,
+            pointer_spill: spill_pointers,
             fixed_physical: false,
         };
         match &entry.pairs {

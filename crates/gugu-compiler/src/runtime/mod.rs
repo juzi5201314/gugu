@@ -181,6 +181,10 @@ pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
 pub use routing_schema::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use shared_heap_schema::{SharedHeapDemand, SharedHeapRuntimeContract};
+pub(crate) use stackmap::{LandingRecord as StackLanding, consume_metadata};
+pub(crate) use stackmap_codec::{
+    CodeLayout, DecodedSection, SafepointLayout, decode_tables, encode as encode_stackmap,
+};
 pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};
 pub use wait_schema::{WaitDemand, WaitRuntimeContract};

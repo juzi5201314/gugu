@@ -43,9 +43,8 @@ use super::verify;
 
 /// 片段 payload schema 版本。
 ///
-/// 版本 3 相对版本 2 的变化：片段 payload 携带重定位引用的内部符号名集合，镜像规划据此做
-/// 内部符号冲突检查，不再从重定位现场二次猜测符号文本。
-pub(crate) const CODEGEN_SCHEMA: u32 = 4;
+/// 版本 5 在每个站点记录调用返回 PC 与 morestack 返回 PC，供分配后的栈图按指令边界回填。
+pub(crate) const CODEGEN_SCHEMA: u32 = 5;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -84,6 +83,10 @@ pub(crate) struct SitePayload {
     pub(crate) clobbers: (u32, u32),
     /// 该站点的点位下标范围。
     pub(crate) points: (u32, u32),
+    /// 站点内最后一条 `call` 的下一条指令偏移；落在片段末尾时为空。
+    pub(crate) call_return_pc: Option<u32>,
+    /// `morestack_or_poll` 返回后的指令偏移。
+    pub(crate) morestack_pc: Option<u32>,
 }
 
 /// frame 布局：prologue/epilogue 与 stack map 的公共输入。
@@ -418,6 +421,8 @@ pub(crate) struct X64World {
     pub(crate) fragments: Vec<FragmentPayload>,
     /// 入口函数 mangled 符号：`RootCategoryV1::Entry` 实例对应的片段。
     pub(crate) entry_symbol: String,
+    /// 分配并编码之后的栈图、展开记录与源码记录。
+    pub(crate) metadata: super::metadata::MachineMetadata,
     pub(crate) fingerprint: [u8; 32],
 }
 
@@ -654,6 +659,21 @@ impl X64World {
             hex_lower(self.contract.fingerprint()),
             hex_lower(self.fingerprint)
         );
+        let metadata = &self.metadata;
+        let _ = writeln!(
+            out,
+            "x64-metadata stackmap={} unwind={} source={} functions={} safepoints={} maps={} unwind-functions={} landings={} sources={} fingerprint={}",
+            metadata.stackmap_name,
+            metadata.unwind_name,
+            metadata.source_name,
+            metadata.function_count,
+            metadata.safepoint_count,
+            metadata.map_count,
+            metadata.unwind_function_count,
+            metadata.landing_count,
+            metadata.source_record_count,
+            hex_lower(metadata.fingerprint)
+        );
         out.push_str(&self.contract.dump());
         for fragment in &self.fragments {
             let _ = writeln!(
@@ -799,12 +819,14 @@ pub(crate) fn build(
     }
     // 入口实例必然有 LIR body（它是闭世界根之一）；缺失说明入口没有走到选指。
     let entry_symbol = entry_symbol.ok_or_else(|| vec![invalid("入口实例没有机器片段")])?;
+    let metadata = super::metadata::build(lir, &fragments, sources, target, raw)?;
     let mut world = X64World {
         schema: CODEGEN_SCHEMA,
         target,
         contract,
         fragments,
         entry_symbol,
+        metadata,
         fingerprint: [0; 32],
     };
     world.fingerprint = world_fingerprint(&world);
@@ -831,6 +853,7 @@ fn fragment_key(
     canonical.extend_from_slice(&universe.fingerprint);
     canonical.extend_from_slice(&contract::LOWERING_REVISION.to_le_bytes());
     canonical.extend_from_slice(&contract::ALLOCATION_REVISION.to_le_bytes());
+    canonical.extend_from_slice(&contract::METADATA_REVISION.to_le_bytes());
     hash_domain(FRAGMENT_KEY_DOMAIN, &canonical)
 }
 
@@ -843,6 +866,7 @@ fn world_fingerprint(world: &X64World) -> [u8; 32] {
         hasher.update(&fragment.instance);
         hasher.update(&fragment.fingerprint);
     }
+    hasher.update(&world.metadata.fingerprint);
     *hasher.finalize().as_bytes()
 }
 
@@ -1008,11 +1032,13 @@ fn site_payload(
     assembled: &super::inst::Assembled,
     inst_cursor: &mut usize,
 ) -> SitePayload {
+    let code_len = to_u32(assembled.bytes.len());
+    let (call_return_pc, morestack_pc) = call_pcs(lowered, assembled, *inst_cursor, code_len);
     let start_off = assembled
         .instruction_offsets
         .get(*inst_cursor)
         .map(|(_, offset)| *offset)
-        .unwrap_or_else(|| to_u32(assembled.bytes.len()));
+        .unwrap_or(code_len);
     let count = lowered.sequence.instructions.len();
     *inst_cursor = inst_cursor.saturating_add(count);
     let end_off = assembled
@@ -1056,7 +1082,45 @@ fn site_payload(
         cold_edges,
         clobbers: (lowered.clobbers.gpr, lowered.clobbers.xmm),
         points,
+        call_return_pc,
+        morestack_pc,
     }
+}
+
+/// 站点内调用的返回 PC。`morestack_or_poll` 单独记下，供入口检查使用。
+fn call_pcs(
+    lowered: &Lowered,
+    assembled: &super::inst::Assembled,
+    inst_cursor: usize,
+    code_len: u32,
+) -> (Option<u32>, Option<u32>) {
+    let morestack = super::mangle::runtime_symbol("morestack_or_poll");
+    let mut call_return = None;
+    let mut morestack_pc = None;
+    for (offset, instruction) in lowered.sequence.instructions.iter().enumerate() {
+        if table::form(instruction.form).mnemonic != "call" {
+            continue;
+        }
+        let next_index = inst_cursor + offset + 1;
+        let next = assembled
+            .instruction_offsets
+            .get(next_index)
+            .map(|(_, byte)| *byte)
+            .unwrap_or(code_len);
+        if next >= code_len {
+            continue;
+        }
+        call_return = Some(next);
+        let targets_morestack = instruction.operands.iter().any(|operand| match operand {
+            Operand::Reloc(RelocTarget::Lir(symbol), _)
+            | Operand::Rip(RelocTarget::Lir(symbol), _) => symbol == &morestack,
+            _ => false,
+        });
+        if targets_morestack {
+            morestack_pc = Some(next);
+        }
+    }
+    (call_return, morestack_pc)
 }
 
 fn fill_relocation_ranges(sites: &mut [SitePayload], relocations: &[Relocation]) {
@@ -1329,5 +1393,9 @@ fn short(bytes: &[u8; 32]) -> String {
 }
 
 fn invalid(message: &str) -> Diagnostic {
+    invalid_metadata(message)
+}
+
+pub(crate) fn invalid_metadata(message: &str) -> Diagnostic {
     Diagnostic::error(DiagnosticCode::BackendInvariant, message, None)
 }

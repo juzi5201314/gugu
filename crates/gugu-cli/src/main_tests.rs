@@ -862,6 +862,19 @@ fn build_json_reports_x64_fragment_keys() {
         "x64-peak-live-gpr",
         "x64-peak-live-xmm",
         "x64-allocated-values",
+        "x64-stackmap-section",
+        "x64-unwind-section",
+        "x64-source-section",
+        "x64-stackmap-bytes",
+        "x64-unwind-bytes",
+        "x64-source-bytes",
+        "x64-stackmap-functions",
+        "x64-stackmap-safepoints",
+        "x64-stackmap-maps",
+        "x64-unwind-functions",
+        "x64-landing-count",
+        "x64-source-records",
+        "x64-metadata-fingerprint",
         "coroutine-stack-check-offset",
         "scheduler-poll-flags-offset",
     ] {
@@ -887,7 +900,7 @@ fn build_json_reports_x64_fragment_keys() {
     );
     let dump = compilation.dump_x64().expect("片段 dump");
     assert_eq!(dump, compilation.dump_x64().expect("片段 dump 必须稳定"));
-    assert!(dump.contains("x64 schema=4 target=x86_64-linux"), "{dump}");
+    assert!(dump.contains("x64 schema=5 target=x86_64-linux"), "{dump}");
     assert!(dump.contains("symbol=__gugu_fn_"), "{dump}");
     // 源码含乘法、除法与条件：dump 必须出现真实助记符。
     assert!(dump.contains("imul"), "{dump}");

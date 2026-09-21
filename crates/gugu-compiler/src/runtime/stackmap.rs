@@ -185,6 +185,10 @@ pub(crate) fn scan_roots(
     }
     for offset in &map.handle {
         let word = word_at(words, *offset)?;
+        // 全零字是空引用：不查表、不计数。槽 0 不能表示活动 handle。
+        if word == 0 {
+            continue;
+        }
         let slot = usize::try_from(word).map_err(|_| RawModelError::new("handle 槽编号越界"))?;
         let handle = world
             .handles
@@ -192,10 +196,6 @@ pub(crate) fn scan_roots(
             .ok_or_else(|| RawModelError::new("handle 槽越界"))?;
         if handle.generation == 0 {
             return Err(RawModelError::new("过期 handle 代际不得解析"));
-        }
-        // 空 handle 字（槽 0 且 payload 为 0）容忍跳过：与 direct 空值规则一致。
-        if word == 0 {
-            continue;
         }
         roots.push(ScannedRoot::Handle {
             offset: *offset,
@@ -277,6 +277,154 @@ pub(crate) fn copy_input(roots: &[ScannedRoot], used: usize) -> Result<StackImag
         stack_roots: offsets,
         stack_registers: 0,
     })
+}
+
+/// runtime 消费机器栈图与落地链后的计数。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ConsumeReport {
+    pub(crate) functions: u32,
+    pub(crate) safepoints: u32,
+    pub(crate) maps: u32,
+    pub(crate) landings: u32,
+    pub(crate) scanned_roots: u32,
+    pub(crate) copied_slots: u32,
+}
+
+/// 用 walker 消费已编码的栈图与落地记录。
+///
+/// 每个函数与安全点都必须精确命中；落地链按 `pc_start` 选择；根扫描与栈复制
+/// 走同一套五类槽表。找不到记录或范围重叠是契约错误，不能猜相邻 map。
+pub(crate) fn consume_metadata(
+    section: &[u8],
+    landings: &[LandingRecord],
+    compression: &super::compression_schema::CompressionRuntimeContract,
+) -> Result<ConsumeReport, RawModelError> {
+    let decoded = super::stackmap_codec::decode_tables(section)?;
+    let functions: Vec<WalkFunction> = decoded
+        .functions
+        .iter()
+        .map(|function| WalkFunction {
+            code_rva: function.code_rva,
+            code_size: function.code_size,
+            frame_size: function.frame_size,
+        })
+        .collect();
+    let safepoints = walk_safepoints(&decoded)?;
+    let maps: Vec<WalkMap> = decoded
+        .maps
+        .iter()
+        .map(|map| WalkMap {
+            direct: map.slots[0].clone(),
+            interior: map.slots[1].clone(),
+            handle: map.slots[2].clone(),
+            compressed: map.slots[3].clone(),
+            stack: map.slots[4].clone(),
+        })
+        .collect();
+    let world = WalkWorld {
+        functions: &functions,
+        safepoints: &safepoints,
+        maps: &maps,
+        handles: &[],
+        landings,
+    };
+    let mut scanned = 0_u32;
+    let mut copied = 0_u32;
+    let mut plane = super::cage::CompressionPlane::new(compression);
+    for (index, function) in functions.iter().enumerate() {
+        if function.code_size == 0 {
+            continue;
+        }
+        let found = find_function(&world, function.code_rva)?;
+        if found != index as u32 {
+            return Err(RawModelError::new("函数表二分查找没有命中自身"));
+        }
+    }
+    for (index, point) in safepoints.iter().enumerate() {
+        let function = &functions[point.function as usize];
+        let pc = function
+            .code_rva
+            .checked_add(u64::from(point.pc_offset))
+            .ok_or_else(|| RawModelError::new("安全点绝对地址溢出"))?;
+        if find_function(&world, pc)? != point.function {
+            return Err(RawModelError::new("安全点地址没有落在所属函数"));
+        }
+        if find_safepoint(&world, point.function, point.pc_offset)? != index as u32 {
+            return Err(RawModelError::new("安全点二分查找没有命中自身"));
+        }
+        let map = &maps[point.map as usize];
+        let words = zero_words(map);
+        let roots = scan_roots(&world, index as u32, &words, &mut plane)?;
+        scanned = scanned.saturating_add(roots.len() as u32);
+        if decoded.safepoints[index].flags & 1 != 0 {
+            let image = copy_input(&roots, words.len() * 8)?;
+            copied = copied.saturating_add(image.stack_roots.len() as u32);
+        }
+        if matches!(point.kind, 0 | 2 | 3)
+            && decoded.maps[point.map as usize]
+                .registers
+                .iter()
+                .any(|mask| *mask != 0)
+        {
+            return Err(RawModelError::new(
+                "调用、挂起或 bridge 点不得保留用户寄存器根",
+            ));
+        }
+    }
+    for landing in landings {
+        let selected = select_landing(&world, landing.pc_start)?;
+        if selected.landing_pc != landing.landing_pc || selected.cleanup != landing.cleanup {
+            return Err(RawModelError::new("落地链选择与记录不一致"));
+        }
+    }
+    Ok(ConsumeReport {
+        functions: functions.len() as u32,
+        safepoints: safepoints.len() as u32,
+        maps: maps.len() as u32,
+        landings: landings.len() as u32,
+        scanned_roots: scanned,
+        copied_slots: copied,
+    })
+}
+
+fn walk_safepoints(
+    decoded: &super::stackmap_codec::DecodedSection,
+) -> Result<Vec<WalkSafepoint>, RawModelError> {
+    let mut safepoints = Vec::with_capacity(decoded.safepoints.len());
+    for (index, function) in decoded.functions.iter().enumerate() {
+        let start = function.safepoint_start as usize;
+        let end = start + function.safepoint_count as usize;
+        if end > decoded.safepoints.len() {
+            return Err(RawModelError::new("函数安全点范围越界"));
+        }
+        for point in &decoded.safepoints[start..end] {
+            safepoints.push(WalkSafepoint {
+                function: index as u32,
+                pc_offset: point.pc_offset,
+                kind: point.kind,
+                map: point.map_index,
+            });
+        }
+    }
+    if safepoints.len() != decoded.safepoints.len() {
+        return Err(RawModelError::new("安全点没有全部落入函数范围"));
+    }
+    Ok(safepoints)
+}
+
+fn zero_words(map: &WalkMap) -> Vec<u64> {
+    let max = map
+        .direct
+        .iter()
+        .chain(&map.interior)
+        .chain(&map.handle)
+        .chain(&map.compressed)
+        .chain(&map.stack)
+        .copied()
+        .max()
+        .map(|slot| slot.saturating_add(1))
+        .unwrap_or(0);
+    vec![0; max as usize]
 }
 
 /// 校验 bridge 记录的帧范围：`frame_offset + frame_size` 必须落在已用栈范围内。

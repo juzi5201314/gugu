@@ -38,6 +38,10 @@ pub(crate) struct SelectedSite {
     pub op: &'static str,
     /// 分配阶段的站点分类；决定点位 mask 与 pointer spill 规则。
     pub kind: SiteKind,
+    /// 跨该站点活跃的 managed/stack 指针必须落 frame slot。
+    ///
+    /// `CallReturn`、挂起 select、suspend 与 bridge 的栈图不允许用户寄存器根。
+    pub spill_pointers: bool,
     pub lowered: Lowered,
 }
 
@@ -52,6 +56,52 @@ pub(crate) enum SiteKind {
     Bridge,
     /// 入口 `StackCheck` 标记站点：prologue 由 frame 阶段完全合成。
     Prologue,
+}
+
+/// 该操作的栈图记录是否禁止用户寄存器根。
+pub(crate) fn spills_pointers(op: &crate::lir::body::Op) -> bool {
+    use crate::lir::body::{Op, SafepointKind};
+    let kind = match op {
+        Op::Call(call) | Op::ForeignCall(call) => return call_spills(call),
+        _ => op.safepoint_kind(),
+    };
+    matches!(
+        kind,
+        Some(
+            SafepointKind::CallReturn
+                | SafepointKind::Suspend
+                | SafepointKind::ForeignBridge
+                | SafepointKind::DirtyCpuBridge
+                | SafepointKind::Select
+        )
+    )
+}
+
+/// 调用是否建立禁止寄存器根的栈图记录。
+fn call_spills(call: &crate::lir::body::Call) -> bool {
+    use crate::frontend::gir::body::CallKind;
+    use crate::lir::body::SafepointKind;
+    if call.poll_free_leaf || matches!(call.kind, CallKind::ForeignLeaf { .. }) {
+        return false;
+    }
+    matches!(
+        call.safepoint_kind(),
+        Some(
+            SafepointKind::CallReturn
+                | SafepointKind::Suspend
+                | SafepointKind::ForeignBridge
+                | SafepointKind::DirtyCpuBridge
+                | SafepointKind::Select
+        )
+    )
+}
+
+/// 终结符是否强制指针落栈。
+pub(crate) fn terminator_spills(terminator: &crate::lir::body::Terminator) -> bool {
+    match terminator {
+        crate::lir::body::Terminator::Invoke { call, .. } => call_spills(call),
+        _ => false,
+    }
 }
 
 impl SiteKind {
@@ -135,6 +185,7 @@ pub(crate) fn select_body(
                 instruction: crate::lir::body::id(index),
                 op: lower::domain(&instruction.op),
                 kind: SiteKind::of(&instruction.op),
+                spill_pointers: spills_pointers(&instruction.op),
                 lowered,
             });
         }

@@ -17,6 +17,9 @@ pub(crate) mod inst;
 pub(crate) mod layout;
 pub(crate) mod lower;
 pub(crate) mod mangle;
+pub(crate) mod metadata;
+#[cfg(test)]
+mod metadata_tests;
 pub(crate) mod reg;
 mod rows;
 pub(crate) mod select;
@@ -25,4 +28,5 @@ mod select_tests;
 pub(crate) mod table;
 #[cfg(test)]
 mod tests;
+pub(crate) mod unwind;
 pub(crate) mod verify;

@@ -1,16 +1,16 @@
 //! LIR 逻辑栈图：函数、安全点与五类根集合的确定性推导。
 //!
-//! 本模块只产出后端尚未就绪前的逻辑世界：函数记录、安全点记录（规范 kind
-//! 编号 0..4）、五类逻辑根集合与落地摘要。真实 `code_rva`、`pc_offset`、
-//! `frame_size` 与寄存器掩码由后端在分配后填充并复用同一 verifier；本模块的
-//! 掩码一律按零规则断言，不伪造分配结果。
+//! 本模块产出函数记录、安全点记录（规范 kind 编号 0..4）、五类逻辑根集合与落地
+//! 摘要。真实 `code_rva`、`pc_offset`、`frame_size` 与寄存器掩码由后端在分配后
+//! 填充；本模块的掩码一律按零规则断言，不伪造分配结果。
 //!
 //! 安全点映射以 `effects.rs` 的 `safepoint_kind` 分类为准：
 //!
 //! - 入口 `StackCheck` → `MorestackEntry(4)`，`slot_count` 为 0，寄存器映射源自
 //!   ABI 参数表；
 //! - 直接或间接 Managed 调用点（含 `Allocation` 种类）→ `CallReturn(0)`，覆盖传出
-//!   受管或栈参数字与按值聚合副本展开，sret 排除；
+//!   受管或栈参数字；按值聚合副本只展开本帧副本槽上已有 provenance 的根字，位字不登记，
+//!   sret 排除；
 //! - `poll_free_leaf` 调用点与 `ForeignLeaf` 无记录；
 //! - `Suspend`（切换、park、yield、channel、Join、阻塞平台调用、无 default 的
 //!   select）→ `SuspendResume(2)`，全零掩码；
@@ -32,7 +32,7 @@ use crate::frontend::hir;
 use serde::{Deserialize, Serialize};
 
 /// 逻辑栈图世界的 schema 版本；推导规则变化必须递增。
-pub(crate) const STACKMAP_SCHEMA: u32 = 1;
+pub(crate) const STACKMAP_SCHEMA: u32 = 3;
 
 /// 规范 safepoint kind 编号：与栈图契约的 kind 数值一一对应。
 pub(crate) const KIND_CALL_RETURN: u8 = 0;
@@ -125,6 +125,10 @@ pub(crate) struct LogicalSafepoint {
     pub(crate) dirty: bool,
     /// body 内的指令位置（确定性排序用，不进入契约编码）。
     pub(crate) position: u32,
+    /// 安全点所在块；与机器站点的 `block` 对齐，不进入契约编码。
+    pub(crate) block: u32,
+    /// 安全点所在指令；终结符使用块指令范围的终点，不进入契约编码。
+    pub(crate) instruction: u32,
     pub(crate) roots: LogicalRoots,
 }
 
@@ -264,6 +268,26 @@ pub(crate) fn derive(
     Ok(world)
 }
 
+/// 单个 body 的逻辑安全点，带块与指令锚点。
+///
+/// 调用方已经持有通过结构校验的 LIR；这里不再重复整世界校验。
+pub(crate) fn anchors(body: &Body) -> Result<Vec<LogicalSafepoint>, crate::Diagnostic> {
+    let mut function = LogicalFunction {
+        instance: body.instance,
+        name: body.name.clone(),
+        entry_stack_check: body.poll_summary.entry_stack_check,
+        has_alloc_slow: false,
+        has_landing: body.edges.iter().any(|edge| edge.unwind),
+        alloc_sites: 0,
+        barrier_sites: 0,
+        safepoint_start: 0,
+        safepoint_count: 0,
+    };
+    let mut derived = derive_body(body, &mut function)?;
+    derived.sort_by_key(|safepoint| (safepoint.position, safepoint.instruction));
+    Ok(derived)
+}
+
 fn derive_body(
     body: &Body,
     function: &mut LogicalFunction,
@@ -291,6 +315,8 @@ fn derive_body(
                 flags: 0b010,
                 dirty: false,
                 position: position_of(body, body.entry, Some(super::body::InstId(id(index)))),
+                block: body.entry.0,
+                instruction: id(index),
                 roots,
             });
             break;
@@ -313,8 +339,8 @@ fn derive_body(
             let Some(point) = instruction.safepoint else {
                 continue;
             };
-            let kind = body.safepoints[point.index()].kind;
-            // 纯分配与屏障只计数，不产生独立记录。
+            let mut kind = body.safepoints[point.index()].kind;
+            // 纯分配与屏障只计数。调用上的 Allocation 仍要 CallReturn：被调函数可能在建帧前进入 morestack。
             if matches!(kind, SafepointKind::Allocation | SafepointKind::Barrier) {
                 if matches!(kind, SafepointKind::Allocation) {
                     function.has_alloc_slow = true;
@@ -322,7 +348,16 @@ fn derive_body(
                 } else {
                     function.barrier_sites += 1;
                 }
-                continue;
+                let leaf = match &instruction.op {
+                    super::body::Op::Call(call) | super::body::Op::ForeignCall(call) => {
+                        call.poll_free_leaf || matches!(call.kind, CallKind::ForeignLeaf { .. })
+                    }
+                    _ => true,
+                };
+                if leaf {
+                    continue;
+                }
+                kind = SafepointKind::CallReturn;
             }
             let Some(mapped) = map_instruction(body, block_id, index, kind, &region_members)?
             else {
@@ -331,13 +366,20 @@ fn derive_body(
             safepoints.push(mapped);
         }
         if let super::body::Terminator::Invoke {
-            call, safepoint, ..
+            call,
+            safepoint,
+            arguments,
+            ..
         } = &block.terminator
         {
             let Some(point) = safepoint else {
+                // 叶调用没有安全点记录；unwind 边仍由落地链单独登记。
+                if call.poll_free_leaf || matches!(call.kind, CallKind::ForeignLeaf { .. }) {
+                    continue;
+                }
                 return Err(invalid("可能 unwind 的调用缺少安全点记录"));
             };
-            let kind = body.safepoints[point.index()].kind;
+            let mut kind = body.safepoints[point.index()].kind;
             if matches!(kind, SafepointKind::Allocation | SafepointKind::Barrier) {
                 if matches!(kind, SafepointKind::Allocation) {
                     function.has_alloc_slow = true;
@@ -345,9 +387,13 @@ fn derive_body(
                 } else {
                     function.barrier_sites += 1;
                 }
-                continue;
+                if kind != SafepointKind::Allocation {
+                    continue;
+                }
+                kind = SafepointKind::CallReturn;
             }
-            let Some(mapped) = map_invoke(body, block_id, call, kind)? else {
+            let args = &body.operands[range(arguments)];
+            let Some(mapped) = map_invoke(body, block_id, call, kind, args)? else {
                 continue;
             };
             safepoints.push(mapped);
@@ -376,6 +422,8 @@ fn map_instruction(
                 flags: 0b011,
                 dirty: false,
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
+                block: block.0,
+                instruction: id(index),
                 roots: collect_live(body, block, index)?,
             };
             safepoint.roots.sort();
@@ -387,6 +435,8 @@ fn map_instruction(
                 flags: 0b011,
                 dirty: false,
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
+                block: block.0,
+                instruction: id(index),
                 roots: collect_live(body, block, index)?,
             };
             safepoint.roots.sort();
@@ -411,18 +461,31 @@ fn map_instruction(
                 flags: 0b011,
                 dirty: false,
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
+                block: block.0,
+                instruction: id(index),
                 roots: collect_live(body, block, index)?,
             };
             safepoint.roots.sort();
             Ok(Some(safepoint))
         }
         SafepointKind::CallReturn => {
+            let roots = match &instruction.op {
+                super::body::Op::Call(_) | super::body::Op::ForeignCall(_) => {
+                    collect_call(body, block, index)?
+                }
+                super::body::Op::PlatformCall(_)
+                | super::body::Op::ResolveSharedHandle
+                | super::body::Op::ForwardSharedHandle => collect_live(body, block, index)?,
+                _ => return Err(invalid("CallReturn 记录缺少调用操作")),
+            };
             let mut safepoint = LogicalSafepoint {
                 kind: KIND_CALL_RETURN,
                 flags: 0b011,
                 dirty: false,
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
-                roots: collect_call(body, block, index)?,
+                block: block.0,
+                instruction: id(index),
+                roots,
             };
             safepoint.roots.sort();
             Ok(Some(safepoint))
@@ -433,6 +496,8 @@ fn map_instruction(
                 flags: 0b011,
                 dirty: matches!(kind, SafepointKind::DirtyCpuBridge),
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
+                block: block.0,
+                instruction: id(index),
                 roots: collect_live(body, block, index)?,
             };
             if safepoint.dirty {
@@ -450,6 +515,7 @@ fn map_invoke(
     block: super::body::BlockId,
     call: &super::body::Call,
     kind: SafepointKind,
+    arguments: &[ValueId],
 ) -> Result<Option<LogicalSafepoint>, crate::Diagnostic> {
     // `poll_free_leaf` 与 `ForeignLeaf` 不建立记录。
     if call.poll_free_leaf || matches!(call.kind, CallKind::ForeignLeaf { .. }) {
@@ -470,7 +536,9 @@ fn map_invoke(
         flags,
         dirty,
         position: position_of(body, block, None),
-        roots: collect_invoke(body, call)?,
+        block: block.0,
+        instruction: body.blocks[block.index()].instructions.end,
+        roots: collect_invoke(body, call, arguments)?,
     };
     safepoint.roots.sort();
     Ok(Some(safepoint))
@@ -525,13 +593,15 @@ fn collect_call(
     if call.poll_free_leaf || matches!(call.kind, CallKind::ForeignLeaf { .. }) {
         return Err(invalid("叶调用不得建立调用返回记录"));
     }
-    collect_invoke(body, call)
+    let arguments = &body.operands[range(&body.instructions[index].arguments)];
+    collect_invoke(body, call, arguments)
 }
 
 /// 收集终结符或指令调用的传出根。
 fn collect_invoke(
     body: &Body,
     call: &super::body::Call,
+    arguments: &[ValueId],
 ) -> Result<LogicalRoots, crate::Diagnostic> {
     let mut roots = LogicalRoots::default();
     let sret_parameter = call.sret.map(|(index, _, _)| index);
@@ -550,7 +620,7 @@ fn collect_invoke(
             },
         );
     }
-    // 按值聚合副本由 `by_value` 登记：副本的每个 8 字节字都是独立根字。
+    // 按值聚合副本只展开本帧栈槽上已有 provenance 的根字。位字不是根。
     for (parameter, _, bytes) in &call.by_value {
         if Some(*parameter) == sret_parameter {
             continue;
@@ -558,22 +628,62 @@ fn collect_invoke(
         if *bytes == 0 || *bytes > MAX_ROOT_OFFSET {
             return Err(invalid("按值聚合副本字节数越界"));
         }
-        let words = bytes.div_ceil(8);
-        for word in 0..words {
-            roots.push(
-                ROOT_DIRECT,
-                LogicalRoot::Slot {
-                    slot: u32::MAX,
-                    offset: u64::from(*parameter) << 32 | word,
-                },
-            );
-        }
-    }
-    // 实参值本身按槽根回查，保证栈来源的副本字不遗漏。
-    for slot in 0..body.stack_slots.len() {
-        let _ = slot;
+        push_copy_roots(body, arguments, *parameter, *bytes, &mut roots)?;
     }
     Ok(roots)
+}
+
+/// 把按值副本槽里、落在副本字节范围内的 provenance 根登记到调用点。
+///
+/// 地址不属于本帧栈槽时，字根由持有副本的外层帧登记，这里不伪造直接根。
+fn push_copy_roots(
+    body: &Body,
+    arguments: &[ValueId],
+    parameter: u32,
+    bytes: u64,
+    roots: &mut LogicalRoots,
+) -> Result<(), crate::Diagnostic> {
+    let Some(address) = arguments.get(parameter as usize).copied() else {
+        return Err(invalid("按值聚合副本缺少地址"));
+    };
+    let Some(slot) = copy_slot(body, address) else {
+        return Ok(());
+    };
+    let data = body
+        .stack_slots
+        .get(slot as usize)
+        .ok_or_else(|| invalid("按值聚合副本槽越界"))?;
+    for (offset, provenance) in &data.roots {
+        if *offset >= bytes || offset.checked_add(8).is_none_or(|end| end > bytes) {
+            continue;
+        }
+        if !offset.is_multiple_of(8) {
+            return Err(invalid("栈槽根偏移未对齐到机器字"));
+        }
+        let Some(kind) = provenance.root_kind() else {
+            continue;
+        };
+        roots.push(
+            kind,
+            LogicalRoot::Slot {
+                slot,
+                offset: *offset,
+            },
+        );
+    }
+    Ok(())
+}
+
+fn copy_slot(body: &Body, value: ValueId) -> Option<u32> {
+    let mut current = value;
+    for _ in 0..8 {
+        match body.values.get(current.index())?.origin {
+            super::body::Origin::Stack(slot) => return Some(slot.0),
+            super::body::Origin::Derived(inner) => current = inner,
+            _ => return None,
+        }
+    }
+    None
 }
 
 fn collect_operands(

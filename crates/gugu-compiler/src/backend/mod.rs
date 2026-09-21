@@ -233,6 +233,32 @@ pub(crate) struct BackendPlan {
     pub(crate) coroutine_stack_check_offset: u32,
     /// `[r15 + poll_flags]` 偏移。
     pub(crate) scheduler_poll_flags_offset: u32,
+    /// 栈图 section 名。
+    pub(crate) x64_stackmap_name: String,
+    /// 展开 section 名。
+    pub(crate) x64_unwind_name: String,
+    /// 源码位置 section 名。
+    pub(crate) x64_source_name: String,
+    /// 栈图 section 字节。
+    pub(crate) x64_stackmap_section: Vec<u8>,
+    /// 展开 section 字节。
+    pub(crate) x64_unwind_section: Vec<u8>,
+    /// 源码位置 section 字节。
+    pub(crate) x64_source_section: Vec<u8>,
+    /// 进入栈图表的函数数。
+    pub(crate) x64_stackmap_functions: u32,
+    /// 栈图安全点数。
+    pub(crate) x64_stackmap_safepoints: u32,
+    /// 去重后的 map 数。
+    pub(crate) x64_stackmap_maps: u32,
+    /// 展开表中的函数数。
+    pub(crate) x64_unwind_functions: u32,
+    /// 落地记录数。
+    pub(crate) x64_landing_count: u32,
+    /// 源码位置记录数。
+    pub(crate) x64_source_records: u32,
+    /// 三节内容指纹。
+    pub(crate) x64_metadata_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -454,5 +480,18 @@ pub(crate) fn plan(
         x64_allocated_values: x64.allocated_values(),
         coroutine_stack_check_offset: raw.coroutine().stack_check_offset,
         scheduler_poll_flags_offset: raw.scheduler().poll_flags_offset(),
+        x64_stackmap_name: x64.metadata.stackmap_name.clone(),
+        x64_unwind_name: x64.metadata.unwind_name.clone(),
+        x64_source_name: x64.metadata.source_name.clone(),
+        x64_stackmap_section: x64.metadata.stackmap_section.clone(),
+        x64_unwind_section: x64.metadata.unwind_section.clone(),
+        x64_source_section: x64.metadata.source_section.clone(),
+        x64_stackmap_functions: x64.metadata.function_count,
+        x64_stackmap_safepoints: x64.metadata.safepoint_count,
+        x64_stackmap_maps: x64.metadata.map_count,
+        x64_unwind_functions: x64.metadata.unwind_function_count,
+        x64_landing_count: x64.metadata.landing_count,
+        x64_source_records: x64.metadata.source_record_count,
+        x64_metadata_fingerprint: x64.metadata.fingerprint,
     })
 }
