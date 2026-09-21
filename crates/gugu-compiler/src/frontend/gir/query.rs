@@ -71,7 +71,7 @@ fn compute_body(
     let result = queries
         .compute(key, |context| {
             context.record_dependency(
-                QueryKey::new(QueryKind::LowerHir, 6, module.input_fingerprint),
+                QueryKey::new(QueryKind::LowerHir, 7, module.input_fingerprint),
                 hir.fingerprint(),
             );
             match build::lower(module, owner) {

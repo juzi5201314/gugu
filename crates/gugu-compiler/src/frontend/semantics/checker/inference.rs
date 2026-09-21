@@ -304,5 +304,6 @@ impl Checker<'_, '_> {
             }
         }
         self.runtime_checks = checks;
+        self.finish_format_traits();
     }
 }

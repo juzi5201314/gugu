@@ -285,3 +285,107 @@ fn generic_iteration_retains_the_into_iter_item_equality() {
         "struct Counter {}\nimpl Iter for Counter { type Item = int\n fn next(self: &Self) Option[int] = None }\nimpl IntoIter for Counter { type Item = int\n type Iter = Counter\n fn into_iter(self) Counter = self }\nfn consume[T: IntoIter](iterable: T) { for item in iterable { let value: T::Item = item\n _ = value } }\nfn main() { consume(Counter {}) }"
     ));
 }
+
+#[test]
+fn core_prelude_traits_apply_conditionally() {
+    assert!(accepts(
+        "fn show[T: Print + Debug + Eq + Hash + Default](value: T) {}\nfn main() { show(1)\n show(true)\n show((1, true))\n show([1, 2])\n show(Some(1))\n let text = f\"{1}\"\n let hex = f\"{1:x}\"\n _ = text\n _ = hex }"
+    ));
+    assert!(accepts(
+        "fn step(value: Option[int]) Option[int] { let n = value?\n Some(n + 1) }\nfn main() { _ = step(Some(1)) }"
+    ));
+    assert!(accepts(
+        "fn show[T: Print + Debug + Eq + Hash](value: T) {}\nfn main() { let value: Result[int, string] = Ok(1)\n show(value) }"
+    ));
+    assert!(accepts(
+        "struct Bare {}\nfn take[T: Default](value: T) {}\nfn main() { take(Some(Bare {})) }"
+    ));
+    assert!(!accepts(
+        "struct Bare {}\nfn take[T: Default](value: T) {}\nfn main() { take(Bare {}) }"
+    ));
+    assert!(accepts(
+        "struct Probe { text: string }\nimpl Error for Probe { fn message(self: &Self) string = self.text\n fn source(self: &Self) Option[&dyn Error] { let missing: Option[&dyn Error] = None\n missing } }\nimpl Print for Probe { fn print(self: &Self, out: &Formatter) {} }\nimpl Debug for Probe { fn debug(self: &Self, out: &Formatter) {} }\nfn main() { let probe = Probe { text: \"x\" }\n _ = probe.message() }"
+    ));
+    assert!(!accepts(
+        "fn show[T: Default](value: T) {}\nfn main() { let value: Result[int, string] = Ok(1)\n show(value) }"
+    ));
+    assert!(!accepts(
+        "fn hash[T: Hash](value: T) {}\nfn main() { hash(1.0) }"
+    ));
+    assert!(!accepts(
+        "fn eq[T: Eq](value: T) {}\nfn main() { eq(Some(1.0)) }"
+    ));
+    assert!(!accepts(
+        "fn main() { let text = f\"{true:x}\"\n _ = text }"
+    ));
+    assert!(!accepts(
+        "impl Print for int { fn print(self: &Self, out: &Formatter) {} }\nfn main() {}"
+    ));
+}
+
+#[test]
+fn unused_must_use_is_a_lint_and_public_std_modules_are_importable() {
+    use crate::{CompileRequest, Compiler, DiagnosticCode, Severity, TargetName};
+    let compile = |source: &str| {
+        Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ))
+    };
+    let has = |source: &str, code: DiagnosticCode| {
+        compile(source)
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic.code() == code)
+    };
+    let warned = compile("fn main() { Some(1); }");
+    assert!(warned.is_success());
+    assert!(warned.diagnostics().items().iter().any(|diagnostic| {
+        diagnostic.code() == DiagnosticCode::UnusedMustUse
+            && diagnostic.severity() == Severity::Warning
+    }));
+    let kept = compile("fn main() { _ = Some(1)\n let x = Some(1)\n _ = x }");
+    assert!(kept.is_success());
+    assert!(
+        kept.diagnostics()
+            .items()
+            .iter()
+            .all(|diagnostic| diagnostic.code() != DiagnosticCode::UnusedMustUse)
+    );
+    let denied = compile("#![deny(unused_must_use)]\nfn main() { Some(1); }");
+    assert!(!denied.is_success());
+    assert!(denied.image_plan().is_none());
+    let allowed = compile("#![allow(unused_must_use)]\nfn main() { Some(1); }");
+    assert!(allowed.is_success());
+    assert!(!has(
+        "#![allow(unused_must_use)]\nfn main() { Some(1); }",
+        DiagnosticCode::UnusedMustUse
+    ));
+    assert!(has(
+        "#[must_use]\nfn answer() int = 1\nfn main() { answer(); }",
+        DiagnosticCode::UnusedMustUse
+    ));
+    assert!(has(
+        "#[must_use]\nstruct Token {}\nfn main() { Token {}; }",
+        DiagnosticCode::UnusedMustUse
+    ));
+    let imported = compile("use std.option\nfn main() {}");
+    assert!(
+        imported.is_success(),
+        "{:?}",
+        imported.diagnostics().items()
+    );
+    assert!(
+        imported
+            .source_map()
+            .snapshots()
+            .iter()
+            .any(|snapshot| snapshot.logical_path() == "std/option.gg")
+    );
+    assert!(has(
+        "use std.runtime.platform.{install}\nfn main() { _ = install() }",
+        DiagnosticCode::ReservedName
+    ));
+}

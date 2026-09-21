@@ -20,6 +20,7 @@ mod generics;
 mod inference;
 mod memory;
 mod methods;
+pub(super) mod must_use;
 mod opaque;
 mod operations;
 mod platform;
@@ -100,6 +101,9 @@ struct Checker<'m, 'a> {
     current_function: Option<FnId>,
     assembly: Vec<super::assembly::AssemblyPlan>,
     borrow_checks: Vec<super::borrow::BorrowCheck>,
+    slot_reads: Vec<bool>,
+    must_use_sites: Vec<super::output::MustUseSite>,
+    format_traits: Vec<(ExprId, String, String, Span)>,
 }
 
 pub(super) fn check(
@@ -152,6 +156,7 @@ pub(super) fn check(
             if let ItemKind::Function(function) = item.kind {
                 checker.finish_native_checks(function);
             }
+            checker.finish_must_use();
             let expressions = checker.expressions;
             let mut slots = Vec::with_capacity(checker.slots.len());
             let mut slot_storage = Vec::with_capacity(checker.slots.len());
@@ -190,6 +195,7 @@ pub(super) fn check(
                 foreign_calls: checker.foreign_calls,
                 assembly: checker.assembly,
                 borrow_checks: checker.borrow_checks,
+                must_use: checker.must_use_sites,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
@@ -291,6 +297,9 @@ impl<'m, 'a> Checker<'m, 'a> {
             current_function: None,
             assembly: Vec::new(),
             borrow_checks: Vec::new(),
+            slot_reads: Vec::new(),
+            must_use_sites: Vec::new(),
+            format_traits: Vec::new(),
         }
     }
     fn arena(&self) -> &'a AstArena {
@@ -599,7 +608,10 @@ impl<'m, 'a> Checker<'m, 'a> {
             }
             parameters.push(ty.clone());
             if let Some(pat) = param.pat {
+                let span = param.span.clone();
+                let before = self.slots.len();
                 self.bind(pat, &ty, true, Some(false));
+                self.note_unbound_must_use(before, &ty, &span);
             }
             if let Some(name) = param.variadic_name {
                 self.slot(name, ty, true, &param.span);
@@ -664,6 +676,7 @@ impl<'m, 'a> Checker<'m, 'a> {
         self.state.callables.resize_with(id + 1, Vec::new);
         self.initialize(id, initialized);
         self.state.names.insert(name, id);
+        self.slot_reads.push(false);
     }
     fn initialize(&mut self, slot: usize, value: bool) {
         if value {
@@ -723,6 +736,9 @@ impl<'m, 'a> Checker<'m, 'a> {
     fn local(&mut self, name: Symbol, read: bool, span: &Span) -> Option<Ty> {
         let id = *self.state.names.get(&name)?;
         let read = read && !matches!(self.resolve(&self.slots[id].ty), Ty::MaybeUninit(_));
+        if read {
+            self.slot_reads[id] = true;
+        }
         let captured = self.capture_slot(id, read);
         if read
             && !captured

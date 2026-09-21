@@ -1,0 +1,21 @@
+struct Counter {}
+
+impl Iter for Counter {
+    type Item = int
+    fn next(self: &Self) Option[int] = None
+}
+
+impl IntoIter for Counter {
+    type Item = int
+    type Iter = Counter
+    fn into_iter(self) Counter = self
+}
+
+fn walk() int {
+    let counter = Counter {}
+    let found = 0
+    for value in counter {
+        found = found + value
+    }
+    found
+}

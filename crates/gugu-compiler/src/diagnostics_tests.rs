@@ -1056,6 +1056,36 @@ const CASES: &[Case] = &[
         DiagnosticCode::BackendInvariant,
         "机器片段与 encoder 契约 verifier 只在编译器自身不一致时失败；直接构造断言保留在 backend/x64/tests.rs",
     ),
+    // E0061 warn：丢掉 Option/Result 默认告警，不阻止镜像。
+    warning_row(
+        DiagnosticCode::UnusedMustUse,
+        Input::Source {
+            path: "src/main.gg",
+            text: "fn main() { Some(1); }",
+        },
+        (1, 13),
+        "src/main.gg",
+        0,
+        "必须使用",
+    ),
+    silent_row(
+        DiagnosticCode::UnusedMustUse,
+        Input::Source {
+            path: "src/main.gg",
+            text: "#![allow(unused_must_use)]\nfn main() { Some(1); }",
+        },
+    ),
+    error_row(
+        DiagnosticCode::UnusedMustUse,
+        Input::Source {
+            path: "src/main.gg",
+            text: "#![deny(unused_must_use)]\nfn main() { Some(1); }",
+        },
+        (2, 13),
+        "src/main.gg",
+        0,
+        "必须使用",
+    ),
 ];
 
 /// 闸门运行器：整表复用一个 compiler 与 query 引擎。

@@ -1,0 +1,11 @@
+fn take(value: Option[int]) int {
+    match value {
+        Some(n) => n
+        None => 0
+    }
+}
+
+fn step(value: Option[int]) Option[int] {
+    let n = value?
+    Some(n + 1)
+}

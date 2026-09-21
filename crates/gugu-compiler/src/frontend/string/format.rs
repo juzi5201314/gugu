@@ -55,6 +55,22 @@ impl<C> Default for FormatSpec<C> {
         }
     }
 }
+impl FormatKind {
+    /// 格式码对应的语言 trait 与方法名。
+    pub(crate) const fn trait_method(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Print => ("Print", "print"),
+            Self::Debug => ("Debug", "debug"),
+            Self::Binary => ("Binary", "binary"),
+            Self::Octal => ("Octal", "octal"),
+            Self::LowerHex => ("LowerHex", "lower_hex"),
+            Self::UpperHex => ("UpperHex", "upper_hex"),
+            Self::LowerExponent => ("LowerExp", "lower_exp"),
+            Self::UpperExponent => ("UpperExp", "upper_exp"),
+        }
+    }
+}
+
 impl<C> FormatSpec<C> {
     pub(crate) fn try_map<D, E>(
         self,

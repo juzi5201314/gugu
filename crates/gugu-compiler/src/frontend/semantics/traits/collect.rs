@@ -573,6 +573,71 @@ impl Model<'_> {
                 "Item".into(),
             ),
         ));
+        self.core_library_interfaces();
+    }
+    fn core_library_interfaces(&mut self) {
+        let self_ty = Ty::Param("Self".into());
+        let receiver = Ty::Ref(Box::new(self_ty.clone()));
+        let formatter = Ty::Ref(Box::new(Ty::Formatter));
+        for (name, method) in [
+            ("Print", "print"),
+            ("Debug", "debug"),
+            ("Binary", "binary"),
+            ("Octal", "octal"),
+            ("LowerHex", "lower_hex"),
+            ("UpperHex", "upper_hex"),
+            ("LowerExp", "lower_exp"),
+            ("UpperExp", "upper_exp"),
+        ] {
+            self.add_language_interface(
+                name,
+                Vec::new(),
+                vec![(
+                    method,
+                    method_kind(vec![receiver.clone(), formatter.clone()], Ty::Unit),
+                )],
+                false,
+            );
+        }
+        self.add_language_interface(
+            "Hash",
+            Vec::new(),
+            vec![(
+                "hash",
+                method_kind(
+                    vec![receiver.clone(), Ty::Ref(Box::new(Ty::Hasher))],
+                    Ty::Unit,
+                ),
+            )],
+            false,
+        );
+        self.add_language_interface(
+            "Default",
+            Vec::new(),
+            vec![(
+                "default",
+                MemberKind::Method {
+                    signature: Ty::Function(Vec::new(), Box::new(self_ty)),
+                    receiver: false,
+                    default: false,
+                },
+            )],
+            false,
+        );
+        let id = self.traits.interfaces.len();
+        let source = Ty::Option(Box::new(Ty::Ref(Box::new(Ty::Dyn(vec![TraitRef {
+            id,
+            arguments: Vec::new(),
+        }])))));
+        self.add_language_interface(
+            "Error",
+            Vec::new(),
+            vec![
+                ("message", method_kind(vec![receiver.clone()], Ty::String)),
+                ("source", method_kind(vec![receiver], source)),
+            ],
+            false,
+        );
     }
     fn add_language_interface(
         &mut self,

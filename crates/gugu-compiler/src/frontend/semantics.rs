@@ -16,6 +16,7 @@ mod patterns;
 pub(crate) mod query;
 mod safety;
 pub(crate) mod traits;
+pub(crate) use checker::must_use::lints as must_use_lints;
 pub(crate) use hir::identity::Identities;
 pub(crate) use model::{CallableId, DefRef, Model, Ty, substitute};
 pub(crate) use output::{CheckedBody, CheckedSemantics, MemoryOperation};

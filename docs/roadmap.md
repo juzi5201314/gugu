@@ -413,10 +413,12 @@
 
 ## 六、标准库与公开运行时 API
 
-- [ ] **阶段 59：实现核心 prelude、Option/Result 与错误模型**（复杂度：3）
+- [x] **阶段 59：实现核心 prelude、Option/Result 与错误模型**（复杂度：3）
   - 依赖：阶段 12、17、27。
   - 实现 `std.option`、`std.result`、`std.error`、`std.cmp`、`std.ops`、`std.iter`、`Print/Debug/Clone/Eq/Ord/Hash/Default` 基础实现和 `must_use`。
   - 验收：数组/元组/Option/Result 的派生与条件 trait 实现符合规范；`?`、Try、错误链、Print 与格式化可用于 compiler/runtime 自举；丢弃 Result/Option 触发 lint 而非类型错误。
+  - 接入证据：语言接口表登记 `Print`/`Debug`/`Binary`/`Octal`/`LowerHex`/`UpperHex`/`LowerExp`/`UpperExp`（`fn METHOD(self: &Self, out: &Formatter)`）、`Hash`（`fn hash(self: &Self, hasher: &Hasher)`）、`Default`（关联函数 `fn default() Self`）和 `Error`（`message` → `string`，`source` → `Option[&dyn Error]`）。`Formatter` 与 `Hasher` 是预导入的 8 字节位类型，类型键 29 和 30，不是 GC 根；写入方法留到 `std.fmt` / `std.hash`。条件实现由编译器给出，不是用户 `#[derive]`：标量、数组、元组和 `Option`/`Result` 在元素满足时实现 `Print`/`Debug`；`Hash` 同样但不含浮点；`Default` 覆盖 unit/bool/int/char/string，`Option` 总是 `None`（不要求 `T: Default`），数组和元组在元素满足时实现，`Result` 不实现。进制格式只给整数，科学计数只给浮点。`Error` 允许用户 impl，覆盖编译器实现会被拒绝。`#[derive]` 仍只是词法属性。f-string 在推断结束后检查对应格式 trait，缺失是类型错误；lowering 仍走既有格式化 intrinsic，不执行 trait 方法体。`Default::default` 与 `Print` 没有方法体 lowering。内建 `std.option`、`std.result`、`std.error`、`std.cmp`、`std.ops`、`std.iter` 随每次编译类型检查，并且是包 API；`std.prelude` 与 `std.runtime.*` 仍私有。`Option` 的 `?` 失败构造 `None`，不投影空变体；`Result` 的 `?` 失败构造 `Err`。`unused_must_use`（`E0061`）是 lint：`Option`/`Result`、`#[must_use]` 类型和直接调用的 `#[must_use]` 函数在语句位置或未读已初始化绑定上告警；`_ = expr` 不告警；`allow` 静默，`deny`/`forbid` 失败且不产出镜像。`CheckedSemantics` schema 11，`LowerHir` query 7。owner 内合成的恐慌字符串只使用该 owner 的 HIR 已经引用的 `string`，具体 GIR 不为模块里其它单元的 `string` 另造冻结键。
+  - 验收证据：`core_prelude_traits_apply_conditionally` 覆盖条件 `Print`/`Debug`/`Eq`/`Hash`/`Default`、`f"{1}"` / `f"{1:x}"`、`Option` 的 `?`、用户 `Error`/`Print`/`Debug`、`Result` 不是 `Default`、浮点不是 `Hash`、`Option[float]` 不是 `Eq`，以及拒绝覆盖 `int` 的 `Print`。`unused_must_use_is_a_lint_and_public_std_modules_are_importable` 覆盖告警仍成功、`_ =` 不告警、deny 无镜像、allow 静默、`#[must_use]` 函数与类型，以及 `use std.option` 成功、`use std.runtime.platform.{install}` 仍是保留名。`diagnostics_tests` 的 `unused_must_use` 行列与编译器一致。不声称用户 `#[derive]` 会生成 impl，也不实现 `Formatter`/`Hasher` 的写入方法或 `Print`/`Default` 的方法体。`cargo nextest run --workspace` 1047 项全通过。
 
 - [ ] **阶段 60：实现 string、Bytes、ByteBuffer 与 Unicode**（复杂度：4）
   - 依赖：阶段 27、59。

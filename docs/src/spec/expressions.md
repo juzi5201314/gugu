@@ -209,7 +209,7 @@ fn println[Ts: Print...](...args: Ts)
 
 ## 字符串插值
 
-只有 `f"..."` 插值。`{expr}` 必须实现 `Print`。插值把内容写进内部 `Vec[byte]` 再做成 `string`，见 [接口 · Print](traits.md)。普通 `"..."` 不含插值。没有 `{x:02}` 格式后缀。
+只有 `f"..."` 插值。默认 `{expr}` 必须实现 `Print`；带格式码时改为对应的 `Debug`、进制或指数 trait，见[标准库 · 静态格式化](standard-library.md#static-formatting)。缺少适用实现是类型错误。插值把内容写进内部 `Vec[byte]` 再做成 `string`，见 [接口 · Print](traits.md)。普通 `"..."` 不含插值。
 
 ## `?`
 

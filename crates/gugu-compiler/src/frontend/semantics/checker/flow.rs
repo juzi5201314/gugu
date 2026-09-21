@@ -176,7 +176,12 @@ impl Checker<'_, '_> {
                 }
                 let origins =
                     init.map_or_else(Vec::new, |initializer| self.value_callables(initializer));
+                let before = self.slots.len();
                 self.bind(pat, &value, init.is_some(), Some(else_block.is_some()));
+                if let Some(initializer) = init {
+                    let span = self.arena().exprs[initializer.0 as usize].span.clone();
+                    self.note_unbound_must_use(before, &value, &span);
+                }
                 if let PatKind::Ident(name) = self.arena().pats[pat.0 as usize].kind
                     && let Some(&slot) = self.state.names.get(&name)
                 {
@@ -250,8 +255,9 @@ impl Checker<'_, '_> {
             }
             StmtKind::Expr { expr, .. } => {
                 let outer = self.discarded_expression.replace(expr);
-                self.expression(expr, None);
+                let ty = self.expression(expr, None);
                 self.discarded_expression = outer;
+                self.note_discarded_must_use(expr, &ty);
             }
             StmtKind::Defer { body, ret } => self.register_defer(id, body, ret),
             StmtKind::Yield => {

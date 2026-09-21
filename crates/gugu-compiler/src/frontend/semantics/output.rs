@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 10;
+pub(crate) const SCHEMA_VERSION: u32 = 11;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {
@@ -43,6 +43,15 @@ pub(crate) struct CheckedBody {
     pub(crate) foreign_calls: Vec<super::foreign::ForeignCall>,
     pub(crate) assembly: Vec<super::assembly::AssemblyPlan>,
     pub(crate) borrow_checks: Vec<super::borrow::BorrowCheck>,
+    pub(crate) must_use: Vec<MustUseSite>,
+}
+
+/// 丢掉必须使用的值的源码范围。诊断在 lint 级别解析之后才发射。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MustUseSite {
+    pub(crate) start: u32,
+    pub(crate) end: u32,
+    pub(crate) expansion: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

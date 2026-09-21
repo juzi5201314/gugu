@@ -12,12 +12,14 @@ impl Checker<'_, '_> {
             let FStringPart::Interp { expr, spec, span } = part else {
                 continue;
             };
-            self.expression(*expr, None);
             let spec = spec.map_or_else(FormatSpec::default, |spec| {
                 // FormatSpec token 保留起始冒号；语法解析只消费冒号后的说明。
                 parse_format(&self.model.name(self.module, spec)[1..])
                     .expect("格式说明已经通过词法检查")
             });
+            let ty = self.expression(*expr, None);
+            let (name, method) = spec.kind.trait_method();
+            self.require_format_trait(*expr, &ty, name, method, span);
             if let Ok(spec) = spec.try_map(|count| self.formatting_count(count, span)) {
                 debug_assert!(
                     offset < u32::MAX as usize && parts.start.checked_add(offset as u32).is_some()
@@ -28,6 +30,48 @@ impl Checker<'_, '_> {
                     spec,
                 });
             }
+        }
+    }
+
+    fn require_format_trait(
+        &mut self,
+        expr: ExprId,
+        ty: &Ty,
+        name: &str,
+        method: &str,
+        span: &Span,
+    ) {
+        if matches!(self.resolve(ty), Ty::Error | Ty::Never) {
+            return;
+        }
+        self.format_traits
+            .push((expr, name.to_owned(), method.to_owned(), span.clone()));
+    }
+
+    pub(super) fn finish_format_traits(&mut self) {
+        for (expr, name, method, span) in std::mem::take(&mut self.format_traits) {
+            let Some(stored) = self
+                .expressions
+                .iter()
+                .rev()
+                .find(|(id, _)| *id == expr)
+                .map(|(_, ty)| ty.clone())
+            else {
+                continue;
+            };
+            let ty = self.resolve(&stored);
+            if matches!(ty, Ty::Error | Ty::Never) {
+                continue;
+            }
+            if matches!(ty, Ty::Var(_)) {
+                self.error(
+                    DiagnosticCode::InvalidType,
+                    "格式化表达式的类型未能收敛",
+                    span,
+                );
+                continue;
+            }
+            self.language_method(expr, &ty, &name, Vec::new(), &method, &span);
         }
     }
 

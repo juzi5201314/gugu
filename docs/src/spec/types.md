@@ -362,12 +362,14 @@ fn demo(a: dyn Any) {
 | `TryRecvErr` | `enum TryRecvErr { Empty, Closed }`。`try_recv` 的 `Err`。 |
 | `Panic` | 预导入 lang item。标准库结构体字段为 `message: string`、`location: Location`（`Location` 在 `std.src`），定义见 [运行时](runtime.md)。标准库结构体尚未接入时，编译器仍形成该名义类型：8 字节身份句柄，与 `Join` 同一表示车道；用户不能再定义同名类型。`#[must_use]` 不适用：它是数据，不是「未处理的结果」。 |
 | `TypeId` | 闭世界稠密类型编号。见上。预导入。 |
+| `Formatter` | 格式 trait 的写入目标。预导入。文本、padding 与结构化写入方法随 `std.fmt` 提供。 |
+| `Hasher` | `Hash` 接收语义字段的目标。预导入。载荷方法随 `std.hash` 提供。 |
 | `MaybeUninit[T]` | 可能未初始化的 `T`。布局与 `T` 相同，GC **不**把其中的引用当活根，直到 `assume_init`。见 [unsafe](unsafe.md)。 |
 | `!` | never，见上。不是预导入名字，是记号。 |
 
 `for i in 0..n` 走语言提供的 `Range` 的 `IntoIter`，不是用户写的 impl。
 
-`Result[T, E]` 与 `Option[T]` 带 `#[must_use]`：丢掉未使用的值是 lint `unused_must_use`。`Join[T]` **不**带：丢掉即分离。`Option` / `Result` 在元素满足约束时必须实现 `Clone`、`Eq`、`Print`；元素都 `Ord` 时实现 `Ord`。
+`Result[T, E]` 与 `Option[T]` 带 `#[must_use]`：丢掉未使用的值是 lint `unused_must_use`。`Join[T]` **不**带：丢掉即分离。`Option` / `Result` 在元素满足约束时必须实现 `Clone`、`Eq`、`Print`、`Debug` 与 `Hash`；元素都 `Ord` 时实现 `Ord`。`Option` 实现 `Default`（值为 `None`），`Result` 不实现 `Default`。
 
 ## 布局与 `size_of`
 

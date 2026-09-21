@@ -143,6 +143,7 @@ fn classify_size(
         hir::Type::Never | hir::Type::Unit => (PassingClass::BITS, Some(0)),
         hir::Type::Bool => (PassingClass::BITS, Some(1)),
         hir::Type::Char | hir::Type::TypeId => (PassingClass::BITS, Some(4)),
+        hir::Type::Formatter | hir::Type::Hasher => (PassingClass::BITS, Some(8)),
         hir::Type::Int { bits, .. } | hir::Type::Float(bits) => {
             (PassingClass::BITS, Some(u64::from(*bits) / 8))
         }

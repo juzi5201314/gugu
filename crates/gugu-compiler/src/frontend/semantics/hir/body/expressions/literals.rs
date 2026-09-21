@@ -83,10 +83,11 @@ impl BodyBuilder<'_, '_, '_, '_> {
                         .spec
                         .clone()
                         .try_map(|count| self.format_count(count, span))?;
+                    let (interface, member) = plan.spec.kind.trait_method();
                     hir::StringPart::Value {
                         expression,
                         format,
-                        dispatch: self.selected_dispatch(*expr, Some("Print"), None)?,
+                        dispatch: self.selected_dispatch(*expr, Some(interface), Some(member))?,
                     }
                 }
             });

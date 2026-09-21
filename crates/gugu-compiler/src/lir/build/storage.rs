@@ -303,6 +303,7 @@ impl Builder<'_> {
             } => Some(Vec::new()),
             TypeKind::Bool => one(ValueType::scalar(Type::I8)),
             TypeKind::Char | TypeKind::TypeId => one(ValueType::scalar(Type::I32)),
+            TypeKind::Formatter | TypeKind::Hasher => one(ValueType::scalar(Type::I64)),
             TypeKind::Int { bits: 128, .. } => Some(vec![
                 (0, ValueType::scalar(Type::I64)),
                 (8, ValueType::scalar(Type::I64)),

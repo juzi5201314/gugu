@@ -356,27 +356,12 @@ fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
     let queries = crate::QueryEngine::new();
     let output = compile(&[("main.gg", source)], &queries);
     let module = output.hir.module();
-    let keys = module
-        .owners
-        .iter()
-        .enumerate()
-        .map(|(index, owner)| super::solver::SccMember {
-            mono_key: output
-                .mono
-                .instances
-                .iter()
-                .find(|instance| {
-                    instance
-                        .mono_key
-                        .starts_with(&module.definitions[owner.definition.index()].key)
-                })
-                .expect("测试函数的实例已闭合")
-                .mono_key
-                .clone(),
-            owner: super::callgraph::callable_key_at(module, index),
-            calls: Vec::new(),
-        })
-        .collect::<Vec<_>>();
+    // 未从入口到达的标准库函数有 HIR owner，但不是闭世界实例。
+    let keys = closed_members(module, &output.mono.instances);
+    assert!(
+        indexed_owner_is_closed(module, &keys),
+        "测试函数的实例已闭合"
+    );
     let policy = AnalysisPolicyV1 {
         max_block_iterations: 1,
         ..AnalysisPolicyV1::default()
@@ -393,6 +378,50 @@ fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
         "预算耗尽不得产生新的 Proved：{:?}",
         scc.proofs
     );
+}
+
+fn closed_members(
+    module: &crate::frontend::hir::Module,
+    instances: &[crate::frontend::mono::collect::InstanceSummaryV1],
+) -> Vec<super::solver::SccMember> {
+    module
+        .owners
+        .iter()
+        .enumerate()
+        .filter_map(|(index, owner)| {
+            let mono_key = instances
+                .iter()
+                .find(|instance| {
+                    instance
+                        .mono_key
+                        .starts_with(&module.definitions[owner.definition.index()].key)
+                })?
+                .mono_key
+                .clone();
+            Some(super::solver::SccMember {
+                mono_key,
+                owner: super::callgraph::callable_key_at(module, index),
+                calls: Vec::new(),
+            })
+        })
+        .collect()
+}
+
+fn indexed_owner_is_closed(
+    module: &crate::frontend::hir::Module,
+    keys: &[super::solver::SccMember],
+) -> bool {
+    use crate::frontend::hir::CheckKind;
+    module.owners.iter().enumerate().any(|(index, owner)| {
+        let checks_index = owner
+            .checks
+            .iter()
+            .any(|check| matches!(check.kind, CheckKind::Bounds { slice: false }));
+        checks_index
+            && keys
+                .iter()
+                .any(|member| member.owner == super::callgraph::callable_key_at(module, index))
+    })
 }
 
 #[test]

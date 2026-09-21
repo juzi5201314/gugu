@@ -1,0 +1,4 @@
+fn step(value: Result[int, string]) Result[int, string] {
+    let n = value?
+    Ok(n + 1)
+}

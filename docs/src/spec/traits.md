@@ -121,11 +121,25 @@ trait Ord {
 }
 ```
 
-`Hash` 把值的语义字段馈送给调用方选择的 hasher；相等值必须产生相同输入。`StableHash` 与 `StableOrd` 是没有方法的 unsafe marker trait：前者承诺该值副本的 Eq 与 Hash 可观察结果不能通过外部别名改变，后者对 Ord 作同一承诺。它们不使用 trait 继承；集合约束分别显式写成 `K: Eq + Hash + StableHash` 与 `K: Ord + StableOrd`。
+`Hash` 把值的语义字段馈送给调用方选择的 hasher；相等值必须产生相同输入。`Hasher` 与 `Formatter` 都是预导入的语言类型，写入方法随 `std.hash` 与 `std.fmt` 提供。
+
+```text
+trait Hash {
+    fn hash(self: &Self, hasher: &Hasher)
+}
+
+trait Default {
+    fn default() Self
+}
+```
+
+`Default` 是无接收者的关联函数。`Option[T]` 的 `default` 是 `None`，不要求 `T: Default`。`Result` 没有 `Default`。标量 `()`、`bool`、整数、`char`、`string` 有 `Default`；数组与元组在每个元素都有 `Default` 时有 `Default`。`Print` 与 `Debug` 覆盖 `()`、`bool`、整数、浮点、`char`、`string`、`TypeId`，以及元素满足同一 trait 的 `Option`、`Result`、数组和元组。`Hash` 覆盖除浮点以外的同一组标量，并在元素满足 `Hash` 时覆盖 `Option`、`Result`、数组和元组。`Binary`、`Octal`、`LowerHex`、`UpperHex` 只覆盖整数；`LowerExp` 与 `UpperExp` 只覆盖浮点。`Error` 由具体错误类型自行实现，编译器不提供覆盖用户 impl 的内建实现。
+
+`StableHash` 与 `StableOrd` 是没有方法的 unsafe marker trait：前者承诺该值副本的 Eq 与 Hash 可观察结果不能通过外部别名改变，后者对 Ord 作同一承诺。它们不使用 trait 继承；集合约束分别显式写成 `K: Eq + Hash + StableHash` 与 `K: Ord + StableOrd`。
 
 编译器为标量、按 byte 比较的 string/Bytes/Path 和其它内建不可变值提供 marker impl。`#[derive(StableHash)]` 要求本类型同时 derive Eq 与 Hash 且每个参与字段都实现 StableHash；`#[derive(StableOrd)]` 对称地要求 Ord 与 StableOrd。COW 字段在复制进键槽时封存 backing。含可变身份句柄或资源字段的类型不能安全 derive；若其 Eq/Hash/Ord 只观察不会变化的身份或其它稳定状态，作者可以显式承担 unsafe impl 契约。
 
-`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Clone)]` / `#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Hash)]` / `#[derive(Print)]` 要求所有参与字段都实现对应 trait；稳定键 marker 的额外派生约束见上。`Ord` 必须是全序，Hash 必须与 Eq 一致。`float` 的比较是内置 IEEE，语言不提供 `Ord`、`Hash` 或稳定键 marker；用户也不能给 `float` 写固有 impl（固有 impl 只能写在该类型的定义模块）。含浮点字段不能派生 Eq、Ord、Hash 或稳定键 marker。`TypeId` 的比较由编译器按编号直接做，并提供 Eq、Ord、Hash、StableHash 与 StableOrd。数组与元组：编译器生成适用的 Clone、Eq、Ord、Hash、StableHash、StableOrd 与 Print（元素满足约束时）。`Clone` 见 [传递](passing.md)。
+`==` `!=` 对用户类型走 `Eq`；`<` 等走 `Ord`。`#[derive(Clone)]` / `#[derive(Eq)]` / `#[derive(Ord)]` / `#[derive(Hash)]` / `#[derive(Print)]` 要求所有参与字段都实现对应 trait；稳定键 marker 的额外派生约束见上。`Ord` 必须是全序，Hash 必须与 Eq 一致。`float` 的比较是内置 IEEE，语言不提供 `Ord`、`Hash` 或稳定键 marker；用户也不能给 `float` 写固有 impl（固有 impl 只能写在该类型的定义模块）。含浮点字段不能派生 Eq、Ord、Hash 或稳定键 marker。`TypeId` 的比较由编译器按编号直接做，并提供 Eq、Ord、Hash、StableHash 与 StableOrd。数组与元组：编译器生成适用的 Clone、Eq、Ord、Hash、StableHash、StableOrd、Print 与 Debug（元素满足约束时）；元素都有 `Default` 时也生成 `Default`。`Clone` 见 [传递](passing.md)。
 
 ### `Any`
 

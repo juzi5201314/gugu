@@ -82,6 +82,8 @@ impl Builder<'_, '_> {
             Ty::TrySendErr => hir::Type::TrySendErr,
             Ty::TryRecvErr => hir::Type::TryRecvErr,
             Ty::Panic => hir::Type::Panic,
+            Ty::Formatter => hir::Type::Formatter,
+            Ty::Hasher => hir::Type::Hasher,
             Ty::MaybeUninit(inner) => hir::Type::MaybeUninit(self.type_id(inner, owner)?),
         };
         let id = if let Some(&id) = self.type_intern.get(&formed) {
