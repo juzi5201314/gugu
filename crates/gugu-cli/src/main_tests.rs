@@ -874,6 +874,14 @@ fn build_json_reports_x64_fragment_keys() {
         "x64-metadata-fingerprint",
         "coroutine-stack-check-offset",
         "scheduler-poll-flags-offset",
+        "elf-schema",
+        "elf-type",
+        "elf-entry",
+        "elf-byte-count",
+        "elf-load-segments",
+        "elf-relative-relocs",
+        "elf-interp",
+        "elf-fingerprint",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }

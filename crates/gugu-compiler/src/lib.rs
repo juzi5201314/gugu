@@ -769,7 +769,7 @@ impl Compiler {
             None
         };
 
-        let action_key = Some(compilation_action_key(
+        let mut inputs = compilation_inputs(
             target,
             &source_map,
             &frontend,
@@ -780,7 +780,8 @@ impl Compiler {
                 .plan
                 .as_ref()
                 .map(|plan| (plan.require_main, &plan.cfg)),
-        ));
+        );
+        let mut action_key = Some(inputs.key());
 
         let hir = frontend.hir;
         let gir = frontend.gir;
@@ -830,9 +831,22 @@ impl Compiler {
             ),
         );
         graph.complete(ActionKind::ValidateImage, "image plan 校验通过");
-        graph.skip_after(ActionKind::ValidateImage, "仅保留内存计划，未写出镜像");
-
-        let image_plan = Some(ImagePlan::new(backend_plan, attachment, &raw_contract));
+        let world = x64.as_ref().expect("可执行入口产生机器片段");
+        let emitted = emit_executable(
+            target,
+            &mut graph,
+            &mut diagnostics,
+            world,
+            &lir,
+            &raw_contract,
+        );
+        let image_plan = emitted.map(|image| {
+            if target == TargetName::X86_64Linux {
+                inputs.set_elf_image(image.fingerprint);
+                action_key = Some(inputs.key());
+            }
+            ImagePlan::new(backend_plan, attachment, &raw_contract, image)
+        });
         diagnostics.sort();
         Compilation {
             graph,
@@ -858,8 +872,45 @@ fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMet
     demand
 }
 
+/// Linux 写出 ELF64；其它目标保留内存计划，ELF 字段留空。失败时不留下部分镜像。
+fn emit_executable(
+    target: TargetName,
+    graph: &mut ActionGraph,
+    diagnostics: &mut Diagnostics,
+    world: &backend::x64::codegen::X64World,
+    lir: &lir::Validated,
+    raw: &RuntimeRawContractV1,
+) -> Option<backend::x64::elf::ElfImage> {
+    if target != TargetName::X86_64Linux {
+        graph.skip_after(ActionKind::ValidateImage, "仅保留内存计划，未写出镜像");
+        return Some(backend::x64::elf::ElfImage::absent());
+    }
+    let boot = backend::x64::elf::BootOffsets::from_contract(raw);
+    match backend::x64::elf::link_world(
+        world,
+        lir.bodies(),
+        target.descriptor().linux_interpreter,
+        boot,
+    ) {
+        Ok(image) => {
+            graph.complete(ActionKind::EmitImage, "ELF64 static PIE");
+            Some(image)
+        }
+        Err(error) => {
+            let message = error.message().to_owned();
+            diagnostics.push(Diagnostic::error(
+                DiagnosticCode::BackendInvariant,
+                message.clone(),
+                None,
+            ));
+            graph.fail(ActionKind::EmitImage, message);
+            None
+        }
+    }
+}
+
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。
-fn compilation_action_key(
+fn compilation_inputs(
     target: TargetName,
     source_map: &SourceMap,
     frontend: &frontend::FrontendOutput,
@@ -867,7 +918,7 @@ fn compilation_action_key(
     raw_contract: &RuntimeRawContractV1,
     x64: Option<&backend::x64::codegen::X64World>,
     plan: Option<(bool, &frontend::cfg::CfgContext)>,
-) -> project::ActionKey {
+) -> project::ActionInputs {
     const EMPTY_PLAN: (bool, Option<&frontend::cfg::CfgContext>) = (true, None);
     let (require_main, cfg) = plan
         .map(|(require_main, cfg)| (require_main, Some(cfg)))
@@ -918,7 +969,7 @@ fn compilation_action_key(
     for (key, digest) in &frontend.mono.public_summaries {
         inputs.add_public_summary(key.clone(), digest);
     }
-    inputs.key()
+    inputs
 }
 
 #[derive(Clone, Debug)]
@@ -1462,6 +1513,15 @@ pub struct ImagePlan {
     x64_metadata_fingerprint: [u8; 32],
     coroutine_stack_check_offset: u32,
     scheduler_poll_flags_offset: u32,
+    elf_schema: u32,
+    elf_type: u32,
+    elf_entry: u64,
+    elf_byte_count: u32,
+    elf_load_segments: u32,
+    elf_relative_relocs: u32,
+    elf_interp: String,
+    elf_fingerprint: [u8; 32],
+    elf_image: Vec<u8>,
 }
 
 impl ImagePlan {
@@ -1469,6 +1529,7 @@ impl ImagePlan {
         plan: BackendPlan,
         attachment: runtime::RuntimeAttachment,
         raw: &RuntimeRawContractV1,
+        elf: backend::x64::elf::ElfImage,
     ) -> Self {
         let gc_type_section_fingerprint =
             frontend::mono::keys::hash_domain("gugu-gc-type-section-v1", &plan.gc_type_section);
@@ -1695,6 +1756,15 @@ impl ImagePlan {
             x64_metadata_fingerprint: plan.x64_metadata_fingerprint,
             coroutine_stack_check_offset: plan.coroutine_stack_check_offset,
             scheduler_poll_flags_offset: plan.scheduler_poll_flags_offset,
+            elf_schema: elf.schema,
+            elf_type: elf.elf_type,
+            elf_entry: elf.entry,
+            elf_byte_count: u32::try_from(elf.bytes.len()).expect("ELF 字节数适配 u32"),
+            elf_load_segments: elf.load_segments,
+            elf_relative_relocs: elf.relative_relocs,
+            elf_interp: elf.interp,
+            elf_fingerprint: elf.fingerprint,
+            elf_image: elf.bytes,
         }
     }
 
@@ -1961,6 +2031,51 @@ impl ImagePlan {
     /// 返回 `[r15 + poll_flags]` 偏移。
     pub fn scheduler_poll_flags_offset(&self) -> u32 {
         self.scheduler_poll_flags_offset
+    }
+
+    /// 返回 ELF writer schema；未写出时为 0。
+    pub fn elf_schema(&self) -> u32 {
+        self.elf_schema
+    }
+
+    /// 返回 ELF 类型；Linux static PIE 为 `ET_DYN`。
+    pub fn elf_type(&self) -> u32 {
+        self.elf_type
+    }
+
+    /// 返回 `_start` 虚址；未写出时为 0。
+    pub fn elf_entry(&self) -> u64 {
+        self.elf_entry
+    }
+
+    /// 返回镜像字节数。
+    pub fn elf_byte_count(&self) -> u32 {
+        self.elf_byte_count
+    }
+
+    /// 返回 `PT_LOAD` 段数。
+    pub fn elf_load_segments(&self) -> u32 {
+        self.elf_load_segments
+    }
+
+    /// 返回 writer 自己的相对重定位条数。
+    pub fn elf_relative_relocs(&self) -> u32 {
+        self.elf_relative_relocs
+    }
+
+    /// 返回 `PT_INTERP` 路径；无动态导入时为空。
+    pub fn elf_interp(&self) -> &str {
+        &self.elf_interp
+    }
+
+    /// 返回 ELF 镜像指纹。
+    pub fn elf_fingerprint(&self) -> [u8; 32] {
+        self.elf_fingerprint
+    }
+
+    /// 返回 ELF 镜像字节；Windows 尚未写出时为空。
+    pub fn elf_image(&self) -> &[u8] {
+        &self.elf_image
     }
 
     /// 返回 rt0 启动序列的步骤数量。
@@ -2783,8 +2898,32 @@ mod tests {
                 .iter()
                 .find(|node| node.kind() == ActionKind::EmitImage)
                 .map(|node| node.status()),
-            Some(ActionStatus::Skipped)
+            Some(ActionStatus::Complete)
         );
+        let image = plan.elf_image();
+        assert!(image.starts_with(&[0x7f, b'E', b'L', b'F']));
+        assert_eq!(u16::from_le_bytes([image[16], image[17]]), 3);
+        assert_eq!(plan.elf_schema(), 1);
+        assert_eq!(plan.elf_load_segments(), 4);
+        assert_eq!(plan.elf_relative_relocs(), 1);
+        assert!(plan.elf_interp().is_empty());
+        assert_eq!(plan.elf_byte_count() as usize, image.len());
+        assert!(plan.elf_entry() >= 0x1000);
+        let phnum = u16::from_le_bytes([image[56], image[57]]) as usize;
+        let mut interp = false;
+        for index in 0..phnum {
+            let at = 64 + index * 56;
+            let kind = u32::from_le_bytes(image[at..at + 4].try_into().expect("phdr kind"));
+            if kind == 3 {
+                interp = true;
+            }
+            if kind == 0x6474_e551 {
+                let flags =
+                    u32::from_le_bytes(image[at + 4..at + 8].try_into().expect("phdr flags"));
+                assert_eq!(flags & 1, 0, "栈不可执行");
+            }
+        }
+        assert!(!interp, "无动态导入时不写 PT_INTERP");
     }
 
     #[test]
@@ -3076,6 +3215,19 @@ mod tests {
         ));
         assert_eq!(linux.exit_code(), 0);
         assert_eq!(windows.exit_code(), 0);
+        assert!(linux.image_plan().expect("linux plan").elf_byte_count() > 0);
+        let windows_plan = windows.image_plan().expect("windows plan");
+        assert_eq!(windows_plan.elf_byte_count(), 0);
+        assert_eq!(windows_plan.elf_schema(), 0);
+        assert_eq!(
+            windows
+                .action_graph()
+                .nodes()
+                .iter()
+                .find(|node| node.kind() == ActionKind::EmitImage)
+                .map(|node| node.status()),
+            Some(ActionStatus::Skipped)
+        );
         assert_ne!(
             linux.runtime_raw_fingerprint(),
             windows.runtime_raw_fingerprint(),

@@ -10,6 +10,7 @@ mod alloc_tests;
 pub(crate) mod codegen;
 pub(crate) mod contract;
 pub(crate) mod copies;
+pub(crate) mod elf;
 pub(crate) mod encode;
 pub(crate) mod harness;
 mod harness_cases;

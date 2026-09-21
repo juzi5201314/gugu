@@ -528,6 +528,14 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
         "x64-metadata-fingerprint": plan.x64_metadata_fingerprint(),
         "coroutine-stack-check-offset": plan.coroutine_stack_check_offset(),
         "scheduler-poll-flags-offset": plan.scheduler_poll_flags_offset(),
+        "elf-schema": plan.elf_schema(),
+        "elf-type": plan.elf_type(),
+        "elf-entry": plan.elf_entry(),
+        "elf-byte-count": plan.elf_byte_count(),
+        "elf-load-segments": plan.elf_load_segments(),
+        "elf-relative-relocs": plan.elf_relative_relocs(),
+        "elf-interp": plan.elf_interp(),
+        "elf-fingerprint": plan.elf_fingerprint(),
     })
 }
 

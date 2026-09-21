@@ -28,6 +28,11 @@ pub(crate) fn mangle_symbol(symbol: &Symbol) -> String {
     }
 }
 
+/// 镜像内常量按字节内容寻址。函数内序号不是全程序身份。
+pub(crate) fn mangle_const_bytes(bytes: &[u8]) -> String {
+    mangle("const", &hash_domain("gugu-const-bytes-v1", bytes))
+}
+
 /// runtime glue：`__gugu_runtime_<name>` 的稳定哈希。
 pub(crate) fn mangle_runtime(name: &str) -> String {
     mangle(

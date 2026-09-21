@@ -82,5 +82,9 @@ harness = false
 name = "x64_frame"
 harness = false
 
+[[bench]]
+name = "elf_pie"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"

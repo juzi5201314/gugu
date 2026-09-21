@@ -6,7 +6,7 @@
 
 官方 compiler 以 Rust 实现 bootstrap：单一 `gugu` 入口、目标描述、确定性诊断、前端、稠密 IR、后端 image plan 和 Gugu runtime 源资源登记。它可以检查空 package、内存中的单文件入口和文件系统单文件入口，并为合法的 `fn main() { ... }` 生成端到端 action graph。
 
-`ImagePlan` 是 compiler 内存中的验证结果，不是 ELF、PE、静态库或共享库。`emit-image` action 保持 `skipped`，因此成功检查不会写出伪造的目标镜像；任一前置 action 失败时，所有后续 action 都会被跳过，结果中不会留下镜像计划。machine encoder、镜像 writer 和 rt0 写出分别由[后端](backend.md)与[运行时](../spec/runtime.md#rt0-and-startup)契约规定，当前尚未物化。
+`ImagePlan` 是 compiler 内存中的验证结果。Linux 的 `emit-image` 在校验通过后写出 ELF64 static PIE，并把镜像字节、schema 与指纹挂在同一计划上；Windows 的 `emit-image` 仍为 `skipped`，计划里的 ELF 字段保持空。任一前置 action 失败时，所有后续 action 都会被跳过，结果中不会留下镜像计划。写出失败同样不留下部分镜像。machine encoder、镜像 writer 和 rt0 的契约见[后端](backend.md)与[运行时](../spec/runtime.md#rt0-and-startup)。
 
 ## CLI 入口与输出
 
@@ -194,7 +194,7 @@ validate-image
 emit-image
 ```
 
-节点状态只有 `pending`、`complete`、`skipped` 和 `failed`。成功路径的 `validate-image` 只验证内存计划；`emit-image` 为 `skipped`。失败路径从第一个失败节点开始把下游节点标为 `skipped`，编排器不执行降级编译、不调用外部 assembler/linker，也不写出部分产物。
+节点状态只有 `pending`、`complete`、`skipped` 和 `failed`。成功路径的 `validate-image` 验证内存计划。Linux 的 `emit-image` 为 `complete` 并附带 ELF64；Windows 的 `emit-image` 为 `skipped`。失败路径从第一个失败节点开始把下游节点标为 `skipped`，编排器不执行降级编译、不调用外部 assembler/linker，也不写出部分产物。
 
 输入形态如下：
 
@@ -209,7 +209,7 @@ Frontend action 对每个源码快照运行词法分析：生成带精确 span �
 
 同一 Frontend action 内消费 `TokenBuffer`，用递归下降构造稠密 `u32` AST arena（声明、泛型、类型、块、表达式、模式、`async`/`select`/`try`/`defer`、`comptime source`、FFI 与 asm）。`()`/`[]` 增加分隔符深度，内部换行只作空白；`{` 单独跟踪花括号深度，块内换行可以结束语句、字段或臂。比较与 `..` 不结合，主诊断带 `Note` 次诊断。解析诊断 `E0020`–`E0026` 使 Frontend 失败，不得把错误占位交给 IR 或 image plan。可执行入口是 AST 中名为 `main`、无参数且带块体或 `=` 体的 `fn`。节点身份不是指针；结构 dump 按 arena 下标，不受线程完成顺序影响。
 
-同一 Frontend action 继续做声明/表达式/模式/trait/unsafe 检查、布局校验和 `LowerHir` query。`BuildIr` 登记真实定义与冻结 owner；`Compilation::succeeded` 必须拥有 `Validated`，后端计划只接受此凭据。冷计算和缓存恢复都经过冻结 verifier，失败没有 image plan。旧 `ReturnUnit` IR 已移除；`BuildX64` 已对每个 LIR body 做 instruction selection、block layout 与直接编码，产出带 mangled 符号的函数级片段；`emit-image` 仍跳过 ELF/PE 写出。完整交接表见 [AST 与 HIR](ast-hir.md)。
+同一 Frontend action 继续做声明/表达式/模式/trait/unsafe 检查、布局校验和 `LowerHir` query。`BuildIr` 登记真实定义与冻结 owner；`Compilation::succeeded` 必须拥有 `Validated`，后端计划只接受此凭据。冷计算和缓存恢复都经过冻结 verifier，失败没有 image plan。旧 `ReturnUnit` IR 已移除；`BuildX64` 已对每个 LIR body 做 instruction selection、block layout 与直接编码，产出带 mangled 符号的函数级片段；Linux 的 `emit-image` 把这些片段与运行时入口收成 ELF64 static PIE，Windows 仍跳过 PE 写出。完整交接表见 [AST 与 HIR](ast-hir.md)。
 
 `BuildIr` 同时报告 generic GIR：body / block / 语句数量。`ImagePlan` 含 `gir-body-count`、`gir-block-count`、`gir-statement-count` 与 `gir-fingerprint`。这些字段只说明已验证的 generic 操作树，不代表 monomorphic GIR 或机器码已经写出。
 
