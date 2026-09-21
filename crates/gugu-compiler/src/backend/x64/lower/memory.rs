@@ -109,6 +109,11 @@ fn load(
     let [result] = results else {
         return Err(LoweringError::InvalidOperands);
     };
+    let place = mem_base(address.reg, 0);
+    if let Some((mnemonic, kinds)) = float_access(result.ty.ty) {
+        builder.emit(mnemonic, kinds, Access::Read, vec![place, reg(result.reg)]);
+        return Ok(());
+    }
     let bits = access_bits(result.ty.ty)?;
     let kinds = match bits {
         8 => &[OperandKind::Rm8, OperandKind::R8][..],
@@ -120,20 +125,34 @@ fn load(
         "mov",
         kinds,
         Access::Read,
-        vec![mem_base(address.reg, 0), reg(result.reg)],
+        vec![place, reg(result.reg)],
     );
     Ok(())
+}
+
+/// 浮点与向量存取用的 mnemonic 与操作数形状；整数与指针返回 `None`。
+///
+/// `F32` 必须用 `movss`（4 字节）而不是 64 位整数 `mov`：地址指向 4 字节字段，多写会覆盖
+/// 相邻字段，寄存器 bank 也必须是 XMM。
+fn float_access(ty: Type) -> Option<(&'static str, &'static [OperandKind])> {
+    match ty {
+        Type::F32 => Some(("movss", &[OperandKind::XmmRm, OperandKind::Xmm])),
+        Type::F64 => Some(("movsd", &[OperandKind::XmmRm, OperandKind::Xmm])),
+        Type::V128(_) => Some(("movups", &[OperandKind::XmmRm, OperandKind::Xmm])),
+        _ => None,
+    }
 }
 
 fn store(operands: &[SiteValue], builder: &mut Builder) -> Result<(), LoweringError> {
     let [address, value] = operands else {
         return Err(LoweringError::InvalidOperands);
     };
-    let bits = access_bits(value.ty.ty).or_else(|_| match value.ty.ty {
-        Type::F32 => Ok(32),
-        Type::F64 | Type::Ptr => Ok(64),
-        _ => Err(LoweringError::InvalidOperands),
-    })?;
+    let place = mem_base(address.reg, 0);
+    if let Some((mnemonic, kinds)) = float_access(value.ty.ty) {
+        builder.emit(mnemonic, kinds, Access::Write, vec![place, reg(value.reg)]);
+        return Ok(());
+    }
+    let bits = access_bits(value.ty.ty)?;
     let kinds = match bits {
         8 => &[OperandKind::Rm8, OperandKind::R8][..],
         16 => &[OperandKind::Rm16, OperandKind::R16][..],
@@ -144,7 +163,7 @@ fn store(operands: &[SiteValue], builder: &mut Builder) -> Result<(), LoweringEr
         "mov",
         kinds,
         Access::Write,
-        vec![mem_base(address.reg, 0), reg(value.reg)],
+        vec![place, reg(value.reg)],
     );
     Ok(())
 }
