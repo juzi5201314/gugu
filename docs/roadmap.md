@@ -390,10 +390,12 @@
   - 接入证据：分配与编码之后 `backend/x64/metadata.rs` 按符号序、16 字节对齐给出逻辑 `code_rva`，并写出 Linux `.gugu.stackmap`/`.eh_frame`/`.gugu.src` 与 Windows `.gugustk`/`.xdata`/`.gugusrc`。栈图复用 `stackmap_codec::encode`（`GUGUSM01`），map 按完整 record bytes 字典序去重；无安全点的叶函数不进栈图表，展开表按同一顺序收录全部函数，`unwind_index` 是该全表序号。`STACKMAP_SCHEMA = 3`：非叶托管调用（含原先的 Allocation 种类）产出 `CallReturn`，按值聚合副本只展开本帧副本槽上已有 provenance 的根字，位字不登记；`PollFreeLeaf`/`ForeignLeaf` 不建安全点记录，unwind 边仍进入落地链。`CODEGEN_SCHEMA = 5` 在站点记录 `call_return_pc`（最后一条 `call` 的下一条指令）与 `morestack_pc`（`morestack_or_poll` 返回后的第一字节）；`ALLOCATION_REVISION = 2` 使 CallReturn、Suspend、ForeignBridge、Select 与 Invoke 的受管指针强制落栈，Poll 除外；`METADATA_REVISION = 1` 进入 fragment key。源码记录使用 32 字节 PC 范围布局，魔数 `GUGUSRC1`，不改写 `.gugu.meta`。展开容器魔数 `GUGUUN01`，Linux 尾部带 CIE/FDE/LSDA，Windows 尾部带 `RUNTIME_FUNCTION` 与 `UNWIND_INFO`。写出前解码并做函数/安全点二分、空根扫描和按函数分开的落地链选择；`--strip` 必须留下这三节。`ImagePlan` 与 CLI JSON 暴露节名、字节、计数和 metadata 指纹。镜像节的 ELF/PE 物理布局仍由后续阶段写出。
   - 验收证据：`backend/x64/metadata_tests.rs` 覆盖 Linux/Windows 节名与魔数、函数 RVA 不重叠、函数内安全点 PC 严格递增、kind 0/2/3 的寄存器掩码为 0、kind 0/1/4 均出现、两次编译指纹一致、runtime walker 消费计数与 strip 保留；`runtime/stackmap_tests.rs` 断言全零 handle 字不查表；`diagnostics_tests` 的 `large_copy` 仍只是 `E0056`。`cargo nextest run --workspace` 1024 项全通过。
 
-- [ ] **阶段 56：实现 ELF64 static PIE 与 Linux rt0 写出**（复杂度：5）
+- [x] **阶段 56：实现 ELF64 static PIE 与 Linux rt0 写出**（复杂度：5）
   - 依赖：阶段 52–55、阶段 33。
   - 实现逻辑节到 ELF segment、无 libc static PIE、`AT_PHDR` load bias、自重定位、RELRO、显式动态 FFI 的 PT_INTERP/GOT/PLT、归档抽取和 Linux syscall stub。
   - 验收：无动态导入的镜像不依赖系统 linker/loader 语义；未知/越界/重复 relocation、非法节权限和入口错误在写出前失败；hello、panic、GC、channel 程序能在 Linux 启动并退出。
+  - 接入证据：`backend/x64/elf.rs` 在 `PlanBackend` 里把已编码片段、栈图、展开、源码记录和 GC 节收成 Linux `ET_DYN`。无动态导入时不写 `PT_INTERP`，程序头是 `PT_PHDR`、三个 `PT_LOAD` 与 `PT_GNU_RELRO`；文件偏移等于虚址。`bias = AT_PHDR - phdr_vaddr`（`phdr_vaddr` 为 64）。运行时只回填 `(slot, addend)` 相对重定位，`PcRel32`/`Rva32` 在写出前修完。重复槽、未知种类、超出 i32 的 PC 相对、可写可执行段和缺失入口在写出前失败。显式导入才加解释器、`.dynstr`/`DT_NEEDED`/`DT_NULL` 和 `jmp [rip+GOT]`。非空 SysV ar 按未解析 C 符号名抽取；编译路径不携带归档。未解析的 `morestack_or_poll` 接到 `ret`，其余未解析符号接到 `exit`。`r14` 指向 128 字节 `0xFF` 栈界限，`r15` 指向 4096 字节 `0xFF` 处理器前缀，使 TLAB 进位失败后进入 `exit` stub。Windows 计划的 Linux 镜像为空。`ImagePlan` 与 CLI JSON 暴露 `linux-image-kind`、字节数、入口、相对重定位数、`PT_LOAD` 数、解释器与指纹。栈图 `code_rva` 仍相对片段区。
+  - 验收证据：`elf_tests` 覆盖无解释器 static PIE、bias 0 回填、重复槽与越界 PC、动态解释器与 `DT_NEEDED`、归档抽取，以及编译出的 `fn main() {}` 两次指纹一致且含三节魔数。`windows_metadata_uses_pe_section_names` 断言 Linux 镜像为空。`cargo bench -p gugu-compiler --bench linux_pie --profile dev` 在真实内核上加载镜像：hello 以 0 退出，panic、channel 与闭包分配以进程退出码结束而不是信号。后三者目前落到未解析运行时 `exit` stub，不表示 panic/GC/channel 的语言语义已经在镜像内完成。`cargo nextest run --workspace` 1031 项全通过。
 
 - [ ] **阶段 57：实现 PE32+、Windows rt0 与导入导出**（复杂度：5）
   - 依赖：阶段 52–55、阶段 33。

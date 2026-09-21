@@ -529,6 +529,13 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
         "x64-landing-count": plan.x64_landing_count(),
         "x64-source-records": plan.x64_source_records(),
         "x64-metadata-fingerprint": plan.x64_metadata_fingerprint(),
+        "linux-image-kind": plan.linux_image_kind(),
+        "linux-image-bytes": plan.linux_image().len(),
+        "linux-entry-vaddr": plan.linux_entry_vaddr(),
+        "linux-relative-relocs": plan.linux_relative_relocs(),
+        "linux-load-segments": plan.linux_load_segments(),
+        "linux-interpreter": plan.linux_interpreter(),
+        "linux-image-fingerprint": plan.linux_image_fingerprint(),
         "coroutine-stack-check-offset": plan.coroutine_stack_check_offset(),
         "scheduler-poll-flags-offset": plan.scheduler_poll_flags_offset(),
     })

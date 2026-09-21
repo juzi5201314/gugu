@@ -317,9 +317,11 @@ fragment relocation 封闭为：
 
 ### Linux ELF64
 
-[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出 Linux external image profile。static PIE路径的内部 rt0在读取待重定位 global前由 `AT_PHDR` 与首个 `PT_LOAD.p_vaddr` 计算 load bias，只解释 writer生成的 relative relocation，checked写入 `load_bias + addend`并封闭 RELRO；未知 relocation、越界 target或重复执行进入 `RuntimeInvariant` fatal。
+[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出 Linux external image profile。static PIE路径的内部 rt0在读取待重定位 global前由 `AT_PHDR` 与链接期 program header 虚址计算 load bias：`bias = AT_PHDR - phdr_vaddr`。首个 `PT_LOAD` 的 `p_vaddr` 与 `p_offset` 都是 0，`phdr_vaddr` 等于 `e_phoff`（64）。rt0 只解释 writer 生成的 relative relocation，checked 写入 `bias + addend` 并 `mprotect` 封闭 RELRO；未知 relocation、越界 target、重复槽或入口缺失在写出前失败。
 
-writer把平台登记的逻辑节装入 4096-byte对齐的 RX、R和 RW segment；需要自重定位的 target只落在初始可写 `.data.rel.ro`，完成后转只读。dynamic FFI路径只消费 `TargetDescriptor` 的 interpreter/sysroot/SONAME并生成对应 dynamic tables，不能搜索宿主路径。static archive member按未解析 C symbol精确抽取。
+镜像固定为 `ET_DYN`、页大小 4096。无动态导入时程序头是 `PT_PHDR`、三个 `PT_LOAD`（RX 含文件头与 rt0、R 为只读逻辑节、RW 为 `.data.rel.ro`）和 `PT_GNU_RELRO`，不写 `PT_INTERP`。RX 前缀依次是 `_start`、8 个 `u64` 的参数块、`ud2` 冷陷阱、48 字节 cage 控制、`write`/`mmap` syscall stub，以及 `ret` / `exit` 兜底。用户片段按符号名排序、16 字节对齐接在前缀之后；栈图里的 `code_rva` 仍相对该片段区，绝对虚址是片段区基址加 `code_rva`。只读节装入下一页，含 `.gugu.stackmap`、`.eh_frame`、`.gugu.src`、`.gugu.types`、`.gugu.meta` 和 4096 字节的处理器前缀。RW 页前 128 字节为 `0xFF` 栈界限，随后是 16 字节一组的 `(slot, addend)`；文件偏移等于虚址。`PcRel32` 与 `Rva32` 在写出前修完，`Abs64` 进入这张表。未解析的 `morestack_or_poll` 接到 `ret` stub，其余未解析的 `__gugu_*` 与未带归档的 C 符号接到 `exit` stub。编译请求目前不携带归档字节；非空 SysV ar 按未解析 C 符号名精确抽取成员，时间戳、uid、gid 为 0。
+
+显式动态导入才写 `PT_INTERP` 与 `PT_DYNAMIC`。解释器路径来自 `TargetDescriptor`，不搜索宿主 PATH。`.dynstr` 收纳 SONAME，`.dynamic` 含 `DT_STRTAB`、`DT_STRSZ`、每个 SONAME 一条 `DT_NEEDED` 和 `DT_NULL`。每个导入符号在 RX 有一条 `jmp [rip+GOT]`，GOT 槽位于栈界限之后、相对重定位表之前，初值指向 `exit` stub 并作为 relative relocation。机器 rt0 只做重定位、`mprotect`、调用入口和 `exit`；它不解析启动环境变量，也不发布生命周期状态。`r14` 指向这 128 字节，栈检查因此放行。`r15` 指向只读节里单独的 4096 字节 `0xFF` 处理器前缀：TLAB/TurnRegion 的 cursor 读出来是全 1，进位检查失败后进入 `exit` stub，不会把空指针写成堆。语言级 panic、GC 与 channel 的运行时例程仍由后续阶段替换这些 stub。
 
 `staticlib` 写确定性 SysV ar archive，member timestamp/uid/gid 为 0、mode固定，成员按 symbol key排序；`cdylib` 写 ET_DYN、只导出显式 C symbol并包含自有闭世界 runtime/metadata。
 

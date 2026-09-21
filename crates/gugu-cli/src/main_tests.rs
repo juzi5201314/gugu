@@ -875,6 +875,13 @@ fn build_json_reports_x64_fragment_keys() {
         "x64-landing-count",
         "x64-source-records",
         "x64-metadata-fingerprint",
+        "linux-image-kind",
+        "linux-image-bytes",
+        "linux-entry-vaddr",
+        "linux-relative-relocs",
+        "linux-load-segments",
+        "linux-interpreter",
+        "linux-image-fingerprint",
         "coroutine-stack-check-offset",
         "scheduler-poll-flags-offset",
     ] {
@@ -889,6 +896,10 @@ fn build_json_reports_x64_fragment_keys() {
         symbol.starts_with("__gugu_fn_") && symbol.len() == 10 + 64,
         "入口符号必须是 __gugu_fn_ + 64 hex：{symbol}"
     );
+    assert_eq!(payload["linux-image-kind"], "static-pie");
+    assert_eq!(payload["linux-interpreter"], "");
+    assert_eq!(payload["linux-load-segments"], 3);
+    assert!(payload["linux-image-bytes"].as_u64().unwrap_or(0) > 64);
     assert_eq!(payload["scheduler-poll-flags-offset"], 0);
     assert_eq!(
         payload["x64-fragment-fingerprint"],

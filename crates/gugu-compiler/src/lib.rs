@@ -772,34 +772,62 @@ impl Compiler {
         let hir = frontend.hir;
         let gir = frontend.gir;
 
-        let Some(backend_plan) = x64.as_ref().and_then(|x64| {
-            backend::plan(
+        let backend_plan = match x64.as_ref() {
+            None => Ok(None),
+            Some(world) => backend::plan(
                 target,
                 &hir,
                 &frontend.mono,
                 &gir,
                 &lir,
                 &raw_contract,
-                x64,
+                world,
                 frontend.analysis.runtime_checks_elided_count,
-            )
-        }) else {
-            graph.complete(ActionKind::PlanBackend, "没有可执行入口");
-            graph.skip_after(ActionKind::PlanBackend, "没有可执行入口");
-            diagnostics.sort();
-            return Compilation {
-                graph,
-                diagnostics,
-                source_map,
-                image_plan: None,
-                hir: Some(hir),
-                gir: Some(gir),
-                gir_stats: frontend.gir_stats,
-                lir: Some(lir),
-                raw_contract: Some(raw_contract),
-                x64,
-                action_key,
-            };
+            ),
+        };
+        let backend_plan = match backend_plan {
+            Ok(Some(plan)) => plan,
+            Ok(None) => {
+                graph.complete(ActionKind::PlanBackend, "没有可执行入口");
+                graph.skip_after(ActionKind::PlanBackend, "没有可执行入口");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(hir),
+                    gir: Some(gir),
+                    gir_stats: frontend.gir_stats,
+                    lir: Some(lir),
+                    raw_contract: Some(raw_contract),
+                    x64,
+                    action_key,
+                };
+            }
+            Err(message) => {
+                diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::BackendInvariant,
+                    message,
+                    None,
+                ));
+                graph.fail(ActionKind::PlanBackend, "Linux 镜像写出失败");
+                graph.skip_after(ActionKind::PlanBackend, "Linux 镜像无效");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(hir),
+                    gir: Some(gir),
+                    gir_stats: frontend.gir_stats,
+                    lir: Some(lir),
+                    raw_contract: Some(raw_contract),
+                    x64,
+                    action_key,
+                };
+            }
         };
         graph.complete(ActionKind::PlanBackend, "内存 image plan");
 
@@ -1452,6 +1480,13 @@ pub struct ImagePlan {
     x64_landing_count: u32,
     x64_source_records: u32,
     x64_metadata_fingerprint: [u8; 32],
+    linux_image: Vec<u8>,
+    linux_image_kind: String,
+    linux_entry_vaddr: u64,
+    linux_relative_relocs: u32,
+    linux_load_segments: u32,
+    linux_interpreter: String,
+    linux_image_fingerprint: [u8; 32],
 }
 
 impl ImagePlan {
@@ -1688,6 +1723,13 @@ impl ImagePlan {
             x64_landing_count: plan.x64_landing_count,
             x64_source_records: plan.x64_source_records,
             x64_metadata_fingerprint: plan.x64_metadata_fingerprint,
+            linux_image: plan.linux_image,
+            linux_image_kind: plan.linux_image_kind,
+            linux_entry_vaddr: plan.linux_entry_vaddr,
+            linux_relative_relocs: plan.linux_relative_relocs,
+            linux_load_segments: plan.linux_load_segments,
+            linux_interpreter: plan.linux_interpreter,
+            linux_image_fingerprint: plan.linux_image_fingerprint,
         }
     }
 
@@ -1969,6 +2011,41 @@ impl ImagePlan {
     /// 返回栈图、展开与源码记录的内容指纹。
     pub fn x64_metadata_fingerprint(&self) -> [u8; 32] {
         self.x64_metadata_fingerprint
+    }
+
+    /// 返回 Linux ELF 镜像字节。Windows 目标为空。
+    pub fn linux_image(&self) -> &[u8] {
+        &self.linux_image
+    }
+
+    /// 返回 `static-pie`、`dynamic-pie`，或 Windows 上的空串。
+    pub fn linux_image_kind(&self) -> &str {
+        &self.linux_image_kind
+    }
+
+    /// 返回 ELF `e_entry`。
+    pub fn linux_entry_vaddr(&self) -> u64 {
+        self.linux_entry_vaddr
+    }
+
+    /// 返回运行时相对重定位条数。
+    pub fn linux_relative_relocs(&self) -> u32 {
+        self.linux_relative_relocs
+    }
+
+    /// 返回 `PT_LOAD` 数量。
+    pub fn linux_load_segments(&self) -> u32 {
+        self.linux_load_segments
+    }
+
+    /// 返回 `PT_INTERP` 路径。无动态导入时为空。
+    pub fn linux_interpreter(&self) -> &str {
+        &self.linux_interpreter
+    }
+
+    /// 返回 Linux 镜像字节指纹。
+    pub fn linux_image_fingerprint(&self) -> [u8; 32] {
+        self.linux_image_fingerprint
     }
 
     /// 返回 rt0 启动序列的步骤数量。

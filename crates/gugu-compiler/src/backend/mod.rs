@@ -259,6 +259,20 @@ pub(crate) struct BackendPlan {
     pub(crate) x64_source_records: u32,
     /// 三节内容指纹。
     pub(crate) x64_metadata_fingerprint: [u8; 32],
+    /// Linux ELF 镜像字节。Windows 为空。
+    pub(crate) linux_image: Vec<u8>,
+    /// `static-pie`、`dynamic-pie`，Windows 为空。
+    pub(crate) linux_image_kind: String,
+    /// ELF `e_entry`。
+    pub(crate) linux_entry_vaddr: u64,
+    /// 运行时相对重定位条数。
+    pub(crate) linux_relative_relocs: u32,
+    /// `PT_LOAD` 数量。
+    pub(crate) linux_load_segments: u32,
+    /// `PT_INTERP` 路径。无动态导入时为空。
+    pub(crate) linux_interpreter: String,
+    /// 镜像字节指纹。
+    pub(crate) linux_image_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -270,12 +284,22 @@ pub(crate) fn plan(
     raw: &crate::runtime::RuntimeRawContractV1,
     x64: &crate::backend::x64::codegen::X64World,
     runtime_checks_elided_count: u32,
-) -> Option<BackendPlan> {
+) -> Result<Option<BackendPlan>, String> {
     let descriptor = target.descriptor();
     let module = hir.module();
-    let entry = module.entry?;
+    let Some(entry) = module.entry else {
+        return Ok(None);
+    };
+    let linux = match target {
+        TargetName::X86_64Linux => x64::elf::link_world(
+            x64,
+            &raw.gc_metadata().type_section,
+            &raw.gc_metadata().metadata_section,
+        )?,
+        TargetName::X86_64Windows => x64::elf::LinuxImage::absent(),
+    };
     let placement = gir.placement.counts();
-    Some(BackendPlan {
+    Ok(Some(BackendPlan {
         target,
         entry: module.definitions[entry.index()].name.clone(),
         function_count: mono.instances.len() as u32,
@@ -493,5 +517,12 @@ pub(crate) fn plan(
         x64_landing_count: x64.metadata.landing_count,
         x64_source_records: x64.metadata.source_record_count,
         x64_metadata_fingerprint: x64.metadata.fingerprint,
-    })
+        linux_image: linux.bytes,
+        linux_image_kind: linux.kind,
+        linux_entry_vaddr: linux.entry,
+        linux_relative_relocs: linux.reloc_count,
+        linux_load_segments: linux.load_count,
+        linux_interpreter: linux.interpreter,
+        linux_image_fingerprint: linux.fingerprint,
+    }))
 }

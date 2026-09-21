@@ -103,4 +103,6 @@ fn windows_metadata_uses_pe_section_names() {
     assert!(plan.x64_stackmap_section().starts_with(b"GUGUSM01"));
     assert!(plan.x64_unwind_section().starts_with(b"GUGUUN01"));
     runtime::decode_tables(plan.x64_stackmap_section()).expect("Windows 栈图可解码");
+    assert_eq!(plan.linux_image_kind(), "");
+    assert!(plan.linux_image().is_empty());
 }
