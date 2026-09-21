@@ -582,6 +582,7 @@ pub(crate) fn version_text_lines() -> Vec<String> {
     vec![
         format!("gugu {version} (commit {commit} {commit_date})"),
         format!("host: {host}"),
+        format!("unicode: {}", gugu_compiler::UNICODE_VERSION),
         "llvm: not-used".to_owned(),
     ]
 }
@@ -601,6 +602,7 @@ fn print_version(format: OutputFormat) {
                 "commit": commit,
                 "commit-date": commit_date,
                 "host": host,
+                "unicode": gugu_compiler::UNICODE_VERSION,
                 "llvm": "not-used"
             })
         ),

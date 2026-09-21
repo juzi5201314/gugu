@@ -55,11 +55,12 @@ fn global_from_values(mut raw: GlobalArgs, config: ConfigValues) -> Result<Globa
 #[test]
 fn version_text_output_includes_commit_host_and_llvm() {
     let lines = super::version_text_lines();
-    assert_eq!(lines.len(), 3);
+    assert_eq!(lines.len(), 4);
     assert!(lines[0].starts_with("gugu "));
     assert!(lines[0].contains("(commit "));
     assert!(lines[1].starts_with("host: "));
-    assert_eq!(lines[2], "llvm: not-used");
+    assert_eq!(lines[2], "unicode: 17.0.0");
+    assert_eq!(lines[3], "llvm: not-used");
 }
 
 #[test]

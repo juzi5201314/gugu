@@ -1,0 +1,8 @@
+struct ByteBuffer {}
+
+fn share_buffer() {
+    let value = ByteBuffer {}
+    let copy = value
+    _ = value
+    _ = copy
+}

@@ -117,6 +117,13 @@ pub(crate) mod region_schema;
 )]
 pub(crate) mod routing;
 pub(crate) mod routing_schema;
+#[allow(
+    dead_code,
+    reason = "UTF-8/UTF-16 与 COW 参照模型由确定性测试消费，版本常量进入工具链身份"
+)]
+pub(crate) mod text;
+#[cfg(test)]
+mod text_tests;
 
 pub(crate) mod cstring;
 #[allow(dead_code, reason = "外调交接的确定性参照实现由契约与测试消费")]
@@ -317,6 +324,8 @@ const STD_ERROR_SOURCE: &str = include_str!("../../resources/std/error.gg");
 const STD_CMP_SOURCE: &str = include_str!("../../resources/std/cmp.gg");
 const STD_OPS_SOURCE: &str = include_str!("../../resources/std/ops.gg");
 const STD_ITER_SOURCE: &str = include_str!("../../resources/std/iter.gg");
+const STD_TEXT_SOURCE: &str = include_str!("../../resources/std/text.gg");
+const STD_IO_SOURCE: &str = include_str!("../../resources/std/io.gg");
 const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
 const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
 const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
@@ -448,6 +457,16 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/iter.gg",
                     source: STD_ITER_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/text.gg",
+                    source: STD_TEXT_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/io.gg",
+                    source: STD_IO_SOURCE,
                     role: RuntimeSourceRole::StandardLibrary,
                 },
                 RuntimeSource {

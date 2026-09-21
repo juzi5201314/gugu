@@ -45,7 +45,7 @@ session-local 的 `DefId`、`TyId`、arena ID、指针、线程编号和绝对 w
 
 `CompilerIdentity` 是下列字段的规范编码摘要：
 
-- 编译器源码 revision 和工作树状态标志；
+- 编译器源码 revision、工作树状态标志与 Unicode 数据版本（`unicode`，当前 17.0.0）；
 - AST、HIR、GIR、LIR、cache、stack-map、GC metadata 与后端 schema 版本；
 - comptime capability registry 摘要、evaluator/验证器 revision、late comptime schema；
 - abstract analysis semantics revision、`PublicSummaryPolicyV1` revision 与公共摘要 schema；

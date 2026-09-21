@@ -897,6 +897,18 @@ fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMet
     demand
 }
 
+/// 编译器构建身份。`unicode-` 后缀是 Unicode 数据版本。
+pub(crate) fn compiler_identity() -> String {
+    format!(
+        "gugu-compiler-{} unicode-{}",
+        env!("CARGO_PKG_VERSION"),
+        UNICODE_VERSION
+    )
+}
+
+/// 工具链携带的 Unicode 数据版本。编码、大小写、规范化与切分使用同一版本。
+pub const UNICODE_VERSION: &str = runtime::text::UNICODE_VERSION;
+
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。
 fn compilation_action_key(
     target: TargetName,
@@ -920,7 +932,7 @@ fn compilation_action_key(
         }
     };
     let mut inputs = ActionInputs::new(
-        format!("gugu-compiler-{}", env!("CARGO_PKG_VERSION")),
+        compiler_identity(),
         target.to_string(),
         target.to_string(),
         if require_main { "bin" } else { "lib" },
