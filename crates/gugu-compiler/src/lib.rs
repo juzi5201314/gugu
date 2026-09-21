@@ -811,8 +811,8 @@ impl Compiler {
                     message,
                     None,
                 ));
-                graph.fail(ActionKind::PlanBackend, "Linux 镜像写出失败");
-                graph.skip_after(ActionKind::PlanBackend, "Linux 镜像无效");
+                graph.fail(ActionKind::PlanBackend, "镜像写出失败");
+                graph.skip_after(ActionKind::PlanBackend, "镜像无效");
                 diagnostics.sort();
                 return Compilation {
                     graph,
@@ -1487,6 +1487,12 @@ pub struct ImagePlan {
     linux_load_segments: u32,
     linux_interpreter: String,
     linux_image_fingerprint: [u8; 32],
+    windows_image: Vec<u8>,
+    windows_image_kind: String,
+    windows_entry_rva: u32,
+    windows_reloc_count: u32,
+    windows_import_dlls: u32,
+    windows_image_fingerprint: [u8; 32],
 }
 
 impl ImagePlan {
@@ -1730,6 +1736,12 @@ impl ImagePlan {
             linux_load_segments: plan.linux_load_segments,
             linux_interpreter: plan.linux_interpreter,
             linux_image_fingerprint: plan.linux_image_fingerprint,
+            windows_image: plan.windows_image,
+            windows_image_kind: plan.windows_image_kind,
+            windows_entry_rva: plan.windows_entry_rva,
+            windows_reloc_count: plan.windows_reloc_count,
+            windows_import_dlls: plan.windows_import_dlls,
+            windows_image_fingerprint: plan.windows_image_fingerprint,
         }
     }
 
@@ -2046,6 +2058,36 @@ impl ImagePlan {
     /// 返回 Linux 镜像字节指纹。
     pub fn linux_image_fingerprint(&self) -> [u8; 32] {
         self.linux_image_fingerprint
+    }
+
+    /// 返回 Windows PE 镜像字节。Linux 目标为空。
+    pub fn windows_image(&self) -> &[u8] {
+        &self.windows_image
+    }
+
+    /// 返回 `exe`、`cdylib`，或 Linux 上的空串。
+    pub fn windows_image_kind(&self) -> &str {
+        &self.windows_image_kind
+    }
+
+    /// 返回 PE `AddressOfEntryPoint`。
+    pub fn windows_entry_rva(&self) -> u32 {
+        self.windows_entry_rva
+    }
+
+    /// 返回 DIR64 重定位条数。
+    pub fn windows_reloc_count(&self) -> u32 {
+        self.windows_reloc_count
+    }
+
+    /// 返回导入的 DLL 数量。
+    pub fn windows_import_dlls(&self) -> u32 {
+        self.windows_import_dlls
+    }
+
+    /// 返回 Windows 镜像字节指纹。
+    pub fn windows_image_fingerprint(&self) -> [u8; 32] {
+        self.windows_image_fingerprint
     }
 
     /// 返回 rt0 启动序列的步骤数量。

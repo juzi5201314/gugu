@@ -273,6 +273,18 @@ pub(crate) struct BackendPlan {
     pub(crate) linux_interpreter: String,
     /// 镜像字节指纹。
     pub(crate) linux_image_fingerprint: [u8; 32],
+    /// Windows PE 镜像字节。Linux 为空。
+    pub(crate) windows_image: Vec<u8>,
+    /// `exe`、`cdylib`，Linux 为空。
+    pub(crate) windows_image_kind: String,
+    /// PE `AddressOfEntryPoint`。
+    pub(crate) windows_entry_rva: u32,
+    /// DIR64 重定位条数。
+    pub(crate) windows_reloc_count: u32,
+    /// 导入的 DLL 数量。
+    pub(crate) windows_import_dlls: u32,
+    /// PE 镜像字节指纹。
+    pub(crate) windows_image_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -290,13 +302,23 @@ pub(crate) fn plan(
     let Some(entry) = module.entry else {
         return Ok(None);
     };
-    let linux = match target {
-        TargetName::X86_64Linux => x64::elf::link_world(
-            x64,
-            &raw.gc_metadata().type_section,
-            &raw.gc_metadata().metadata_section,
-        )?,
-        TargetName::X86_64Windows => x64::elf::LinuxImage::absent(),
+    let (linux, windows) = match target {
+        TargetName::X86_64Linux => (
+            x64::elf::link_world(
+                x64,
+                &raw.gc_metadata().type_section,
+                &raw.gc_metadata().metadata_section,
+            )?,
+            x64::pe::PeImage::absent(),
+        ),
+        TargetName::X86_64Windows => (
+            x64::elf::LinuxImage::absent(),
+            x64::pe::link_world(
+                x64,
+                &raw.gc_metadata().type_section,
+                &raw.gc_metadata().metadata_section,
+            )?,
+        ),
     };
     let placement = gir.placement.counts();
     Ok(Some(BackendPlan {
@@ -524,5 +546,11 @@ pub(crate) fn plan(
         linux_load_segments: linux.load_count,
         linux_interpreter: linux.interpreter,
         linux_image_fingerprint: linux.fingerprint,
+        windows_image: windows.bytes,
+        windows_image_kind: windows.kind,
+        windows_entry_rva: windows.entry_rva,
+        windows_reloc_count: windows.reloc_count,
+        windows_import_dlls: windows.import_dlls,
+        windows_image_fingerprint: windows.fingerprint,
     }))
 }

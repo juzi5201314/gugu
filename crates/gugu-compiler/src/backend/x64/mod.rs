@@ -23,6 +23,9 @@ pub(crate) mod mangle;
 pub(crate) mod metadata;
 #[cfg(test)]
 mod metadata_tests;
+pub(crate) mod pe;
+#[cfg(test)]
+mod pe_tests;
 pub(crate) mod reg;
 mod rows;
 pub(crate) mod select;

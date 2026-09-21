@@ -536,6 +536,12 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
         "linux-load-segments": plan.linux_load_segments(),
         "linux-interpreter": plan.linux_interpreter(),
         "linux-image-fingerprint": plan.linux_image_fingerprint(),
+        "windows-image-kind": plan.windows_image_kind(),
+        "windows-image-bytes": plan.windows_image().len(),
+        "windows-entry-rva": plan.windows_entry_rva(),
+        "windows-reloc-count": plan.windows_reloc_count(),
+        "windows-import-dlls": plan.windows_import_dlls(),
+        "windows-image-fingerprint": plan.windows_image_fingerprint(),
         "coroutine-stack-check-offset": plan.coroutine_stack_check_offset(),
         "scheduler-poll-flags-offset": plan.scheduler_poll_flags_offset(),
     })

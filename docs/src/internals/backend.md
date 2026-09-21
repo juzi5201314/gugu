@@ -327,9 +327,9 @@ fragment relocation 封闭为：
 
 ### Windows PE32+
 
-PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。section按逻辑节映射，绝对 VA全部进入 base-relocation table。
+PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。`DllCharacteristics` 固定带 dynamic base、high-entropy VA 和 NX。逻辑节按登记名各写一节，名字长于 8 字节则写出失败。用户片段仍按符号名排序、16 字节对齐接在 rt0 之后；栈图 `code_rva` 相对该片段区，`.pdata` 里的 `RUNTIME_FUNCTION` 再加上片段区 RVA。`.xdata` 保留完整 `GUGUUN01` 容器，其平台尾里的 `UNWIND_INFO` 偏移改写成镜像 RVA。
 
-IAT只消费 `TargetDescriptor` 和构建元数据登记的 DLL/symbol并稳定排序；export table只含显式 C export。`staticlib` 写确定性 COFF archive，`cdylib` 写 PE DLL；不需要 `.lib`导入库作为最终写出的中间步骤。
+绝对地址写成 preferred VA 并进入 `IMAGE_REL_BASED_DIR64`；`PcRel32` 与 `Rva32` 在写出前修完，不进重定位表。重复槽、未知种类、超出 i32 的 PC 相对、可写可执行节和缺失入口在写出前失败。导入表只含按名字排序的 `kernel32.dll`（`ExitProcess`、`SetConsoleCtrlHandler`）和 `ntdll.dll`（`NtTerminateProcess`），不搜索宿主、不写 `msvcrt`。IAT 初值是 hint/name 的 RVA。rt0 第一条指令是 `sub rsp, 0x28`，随后用 RIP 相对地址安装只调用 `NtTerminateProcess` 的 console handler，再调用入口，最后 `ExitProcess(0)`。`r14` 指向 128 字节 `0xFF`，`r15` 指向 4096 字节 `0xFF`。未解析的 `morestack_or_poll` 接到 `ret`，其余未解析符号接到 `mov ecx, 1` 后调用 `ExitProcess` 的 abort stub。export directory 只含显式 C export；当前编译路径没有登记导出时该目录为空。`staticlib` 使用与 SysV ar 相同的确定性 COFF archive（时间戳、uid、gid 为 0）；`cdylib` 置 `IMAGE_FILE_DLL`。不生成 `.lib` 导入库。
 
 ## 直接编码与验证
 

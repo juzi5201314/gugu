@@ -882,6 +882,12 @@ fn build_json_reports_x64_fragment_keys() {
         "linux-load-segments",
         "linux-interpreter",
         "linux-image-fingerprint",
+        "windows-image-kind",
+        "windows-image-bytes",
+        "windows-entry-rva",
+        "windows-reloc-count",
+        "windows-import-dlls",
+        "windows-image-fingerprint",
         "coroutine-stack-check-offset",
         "scheduler-poll-flags-offset",
     ] {
@@ -897,6 +903,8 @@ fn build_json_reports_x64_fragment_keys() {
         "入口符号必须是 __gugu_fn_ + 64 hex：{symbol}"
     );
     assert_eq!(payload["linux-image-kind"], "static-pie");
+    assert_eq!(payload["windows-image-kind"], "");
+    assert_eq!(payload["windows-image-bytes"], 0);
     assert_eq!(payload["linux-interpreter"], "");
     assert_eq!(payload["linux-load-segments"], 3);
     assert!(payload["linux-image-bytes"].as_u64().unwrap_or(0) > 64);

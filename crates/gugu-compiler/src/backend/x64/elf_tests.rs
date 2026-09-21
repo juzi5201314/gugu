@@ -240,6 +240,8 @@ fn compiled_main_is_static_pie_without_interpreter() {
     );
     let plan = compilation.image_plan().expect("镜像计划");
     assert_eq!(plan.linux_image_kind(), "static-pie");
+    assert_eq!(plan.windows_image_kind(), "");
+    assert!(plan.windows_image().is_empty());
     assert!(plan.linux_interpreter().is_empty());
     assert_eq!(plan.linux_load_segments(), 3);
     let bytes = plan.linux_image();

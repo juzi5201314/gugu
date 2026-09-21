@@ -319,7 +319,7 @@ Linux syscall 桩必须遵循内核规定的寄存器和错误返回约定，并
 
 ### Windows
 
-rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；默认启动依赖限于薄的 `ntdll` / `kernel32` 接口，不链接 CRT。禁止硬编码 syscall 号、扫描进程导出表或在运行时隐式加载未登记 DLL。
+rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；默认启动依赖限于薄的 `ntdll` / `kernel32` 接口，不链接 CRT。禁止硬编码 syscall 号、扫描进程导出表或在运行时隐式加载未登记 DLL。镜像写出前修完 PC 相对重定位；绝对地址只进入 `IMAGE_REL_BASED_DIR64`，不在 rt0 里扫描 syscall 号。调用前必须留出 32 字节 shadow space。
 
 用户额外导入的 DLL、库名和符号必须在构建配置中登记。导入表由 Gugu 编译器直接写出；缺失导出、名称冲突、导入库未登记和不匹配的调用约定都是编译错误。
 
