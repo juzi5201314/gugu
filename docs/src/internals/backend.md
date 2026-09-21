@@ -206,7 +206,7 @@ jmp taken
 
 stitch 阶段把站点序列按累积位移重写标签：块标签编号在 `0..block_count`，站点内标签平移后在终结符编号空间之前；终结符自己的标签编号已是函数级，但**定义位置必须按终结符在函数序列里的起点重定基**，否则 trampoline 标签会指到函数开头。
 
-寄存器分配阶段按同一批 pairs 重发整段拷贝（渲染结果被整体丢弃）：每组的物化把 rematerializable 的源按原 lowering 重建到该点位空闲且不在 mask 内的寄存器；拷贝按目标空闲顺序执行，内存到内存经 `r11` 搬机器字（16 字节值搬两个字），环用 `r11`（GPR 目标）或 frame 里预留的 **16 字节 copy scratch**（XMM/内存目标）打断。scratch 只在需要时预留，不进入 stack map，且在 safepoint 前 copy 必须全部完成。逐组统计 `copy_moves` 与 `copy_cycles` 进入 payload 的 `stats`。
+寄存器分配阶段按同一批 pairs 重发整段拷贝（渲染结果被整体丢弃）：每组的物化把 rematerializable 的源按原 lowering 重建，优先直接重建进本组拷贝的目标寄存器（要求它不被同组其它拷贝读、也未被先前重建占用），否则取该点位空闲且不在 mask 内的池内寄存器，最后才用既不是本组源、也不在 mask 内的 `r11`；拷贝按目标空闲顺序执行，内存到内存经 `r11` 搬机器字（16 字节值搬两个字），环用 `r11`（GPR 目标）或 frame 里预留的 **16 字节 copy scratch**（XMM/内存目标）打断，`r11` 已被本组重建占用时改走 copy scratch。同一条指令里为重建或重载挑出的多个 scratch 互斥，指令结束即释放。scratch 只在需要时预留，不进入 stack map，且在 safepoint 前 copy 必须全部完成。逐组统计 `copy_moves` 与 `copy_cycles` 进入 payload 的 `stats`。
 
 ## frame layout
 

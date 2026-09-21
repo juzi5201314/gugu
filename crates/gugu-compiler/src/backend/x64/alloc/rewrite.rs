@@ -15,8 +15,9 @@
 //!   `IConst`/`FConst`/`SymbolAddr`/`StackAddr` 的 lowering 重新物化进 scratch；
 //! - `StackAddr` 的 `Mem { base: Virtual(FRAME_SLOT_BASE + slot) }` → `[rsp + local_offset]`。
 //!
-//! scratch 取自该点位「未被活跃值占用、不在点位 mask 内、不是本组源/目标」的偏好序首个
-//! 寄存器（GPR 先试 `r11`）；空闲寄存器不足按内部不变量失败，绝不产出错误机器码。
+//! scratch 取自该点位「未被活跃值占用、不在点位 mask 内、不是本组源/目标、也不是本指令
+//! 已经挑走」的偏好序首个寄存器（GPR 先试 `r11`）；空闲寄存器不足按内部不变量失败，
+//! 绝不产出错误机器码。同一条指令里的多个 scratch 互斥，指令结束即释放。
 
 use std::cell::Cell;
 use std::ops::Range;
@@ -383,6 +384,7 @@ fn rewrite_instruction(
     }) {
         return Ok(());
     }
+    let mut reserved = Clobbers::NONE;
     for (position, operand) in inst.operands.iter().enumerate() {
         let kind = form.operands[position];
         let access = form.access[position];
@@ -408,7 +410,8 @@ fn rewrite_instruction(
                             operands.push(lower::mem_base(Reg::Gpr(Gpr::Rsp), disp(offset)?));
                         } else {
                             let scratch =
-                                emit.choose_scratch(point, value.class, kind, &Clobbers::NONE)?;
+                                emit.choose_scratch(point, value.class, kind, &reserved)?;
+                            reserve_scratch(&mut reserved, scratch);
                             emit.emit_load_place(builder, offset, scratch, value.class);
                             emit.count_reloads(1);
                             operands.push(Operand::Reg(reg_of(scratch)?));
@@ -418,8 +421,8 @@ fn rewrite_instruction(
                         }
                     }
                     Placement::Rematerialize => {
-                        let scratch =
-                            emit.choose_scratch(point, value.class, kind, &Clobbers::NONE)?;
+                        let scratch = emit.choose_scratch(point, value.class, kind, &reserved)?;
+                        reserve_scratch(&mut reserved, scratch);
                         emit.rematerialize(builder, *id, scratch)?;
                         operands.push(Operand::Reg(reg_of(scratch)?));
                     }
@@ -429,7 +432,7 @@ fn rewrite_instruction(
                 }
             }
             Operand::Mem(mem) => {
-                operands.push(rewrite_memory(emit, builder, mem, point)?);
+                operands.push(rewrite_memory(emit, builder, mem, point, &mut reserved)?);
             }
             other => operands.push(other.clone()),
         }
@@ -477,6 +480,7 @@ fn rewrite_memory(
     builder: &mut Builder,
     mem: &Mem,
     point: u32,
+    reserved: &mut Clobbers,
 ) -> Result<Operand, AllocError> {
     let mut disp = mem.disp;
     let base = match mem.base {
@@ -494,7 +498,7 @@ fn rewrite_memory(
             .map_err(|_| AllocError::new("局部槽位移超出 i32"))?;
             Some(Reg::Gpr(Gpr::Rsp))
         }
-        Some(Reg::Virtual(id)) => Some(value_register(emit, builder, id, point)?),
+        Some(Reg::Virtual(id)) => Some(value_register(emit, builder, id, point, reserved)?),
         Some(other) => Some(other),
         None => None,
     };
@@ -502,7 +506,7 @@ fn rewrite_memory(
         Some(Reg::Virtual(id)) if id >= FRAME_SLOT_BASE => {
             return Err(AllocError::new("frame 占位基址不能作为索引"));
         }
-        Some(Reg::Virtual(id)) => Some(value_register(emit, builder, id, point)?),
+        Some(Reg::Virtual(id)) => Some(value_register(emit, builder, id, point, reserved)?),
         Some(other) => Some(other),
         None => None,
     };
@@ -520,6 +524,7 @@ fn value_register(
     builder: &mut Builder,
     id: u32,
     point: u32,
+    reserved: &mut Clobbers,
 ) -> Result<Reg, AllocError> {
     let value = emit
         .values
@@ -530,15 +535,15 @@ fn value_register(
         Placement::Location(Location::Xmm(_)) => Err(AllocError::new("地址计算不能用 XMM 值")),
         Placement::Location(Location::Slot(slot)) => {
             let offset = emit.frame.spill_offset(slot)?;
-            let scratch =
-                emit.choose_scratch(point, RegClass::Gpr, OperandKind::Mem, &Clobbers::NONE)?;
+            let scratch = emit.choose_scratch(point, RegClass::Gpr, OperandKind::Mem, reserved)?;
+            reserve_scratch(reserved, scratch);
             emit.emit_load_place(builder, offset, scratch, RegClass::Gpr);
             emit.count_reloads(1);
             reg_of(scratch)
         }
         Placement::Rematerialize => {
-            let scratch =
-                emit.choose_scratch(point, value.class, OperandKind::Mem, &Clobbers::NONE)?;
+            let scratch = emit.choose_scratch(point, value.class, OperandKind::Mem, reserved)?;
+            reserve_scratch(reserved, scratch);
             emit.rematerialize(builder, id, scratch)?;
             reg_of(scratch)
         }
@@ -934,6 +939,15 @@ impl Emit<'_> {
         }
         occupied
     }
+}
+
+/// 本指令已经挑走的 scratch，后续操作数不能再拿。
+fn reserve_scratch(reserved: &mut Clobbers, scratch: Loc) {
+    *reserved = reserved.union(match scratch {
+        Loc::Gpr(gpr) => Clobbers::gpr(gpr),
+        Loc::Xmm(xmm) => Clobbers::xmm(xmm),
+        Loc::Slot(_) | Loc::Scratch => Clobbers::NONE,
+    });
 }
 
 /// 接受内存操作数的种类。

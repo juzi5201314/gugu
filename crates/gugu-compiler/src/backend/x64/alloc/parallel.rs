@@ -150,7 +150,11 @@ impl Request {
                     let point =
                         points.points.start + u32::try_from(offset).expect("点位偏移适配 u32");
                     let free = point_free(live, values, point);
-                    let (moves, materializations) = group_moves(pairs, values, free)?;
+                    let mask = live
+                        .points
+                        .get(point as usize)
+                        .map_or(Clobbers::NONE, |point| point.mask);
+                    let (moves, materializations) = group_moves(pairs, values, free, mask)?;
                     groups.push(PendingGroup {
                         site: site_index,
                         point,
@@ -251,15 +255,19 @@ fn group_moves(
     pairs: &[super::super::copies::Copy],
     values: &[ValueAllocation],
     free: Clobbers,
+    mask: Clobbers,
 ) -> Result<GroupMoves, AllocError> {
     let mut moves = Vec::with_capacity(pairs.len());
     let mut materializations: Vec<(u32, Loc)> = Vec::new();
     let mut touched = Clobbers::NONE;
+    let mut claimed = Clobbers::NONE;
+    let mut sources = Clobbers::NONE;
     let mut sides: Vec<(Side, Loc, Type)> = Vec::with_capacity(pairs.len());
     for pair in pairs {
         let (src, dst) = (side(pair.src, values)?, side(pair.dest, values)?);
         if let Side::Loc(location) = src {
             touched = touched.union(bits_of(location));
+            sources = sources.union(bits_of(location));
         }
         if let Side::Loc(location) = dst {
             touched = touched.union(bits_of(location));
@@ -278,7 +286,12 @@ fn group_moves(
         let src = match src {
             Side::Loc(location) => location,
             Side::Rebuild { value, class } => {
-                let dest = pick_rebuild(class, free, touched)?;
+                // 目标不是别的拷贝的源时，直接重建进去，自拷贝随后会被丢掉。
+                let dest = rebuild_dest(class, dst, sources, claimed)
+                    .or_else(|| pick_rebuild(class, free, touched))
+                    .or_else(|| r11_rebuild(class, sources, touched, mask))
+                    .ok_or_else(|| AllocError::new("并行拷贝组里没有可用的常量重建 scratch"))?;
+                claimed = claimed.union(bits_of(dest));
                 touched = touched.union(bits_of(dest));
                 materializations.push((value, dest));
                 dest
@@ -289,21 +302,46 @@ fn group_moves(
     Ok((moves, materializations))
 }
 
+/// 目标寄存器可以承接重建：它不会被同组其它拷贝再读。
+fn rebuild_dest(class: RegClass, dst: Loc, sources: Clobbers, used: Clobbers) -> Option<Loc> {
+    match (class, dst) {
+        (RegClass::Gpr, Loc::Gpr(gpr))
+            if sources.gpr & gpr.bit() == 0 && used.gpr & gpr.bit() == 0 =>
+        {
+            Some(Loc::Gpr(gpr))
+        }
+        (RegClass::Xmm, Loc::Xmm(xmm))
+            if sources.xmm & xmm.bit() == 0 && used.xmm & xmm.bit() == 0 =>
+        {
+            Some(Loc::Xmm(xmm))
+        }
+        _ => None,
+    }
+}
+
+/// 池里没有空位时用 `r11`。它不在分配池里，且不能已经是本组的源或点位 mask。
+fn r11_rebuild(class: RegClass, sources: Clobbers, used: Clobbers, mask: Clobbers) -> Option<Loc> {
+    if class != RegClass::Gpr {
+        return None;
+    }
+    let bit = Gpr::R11.bit();
+    (sources.gpr & bit == 0 && used.gpr & bit == 0 && mask.gpr & bit == 0)
+        .then_some(Loc::Gpr(Gpr::R11))
+}
+
 /// 物化 scratch：按 bank 偏好序取第一个既空闲、又不在本组任何源/目标里的寄存器。
-fn pick_rebuild(class: RegClass, free: Clobbers, touched: Clobbers) -> Result<Loc, AllocError> {
+fn pick_rebuild(class: RegClass, free: Clobbers, touched: Clobbers) -> Option<Loc> {
     match class {
         RegClass::Gpr => super::scan::GPR_POOL
             .iter()
             .copied()
             .find(|gpr| free.gpr & gpr.bit() != 0 && touched.gpr & gpr.bit() == 0)
-            .map(Loc::Gpr)
-            .ok_or_else(|| AllocError::new("并行拷贝组里没有可用的常量重建 scratch")),
+            .map(Loc::Gpr),
         RegClass::Xmm => super::scan::XMM_POOL
             .iter()
             .copied()
             .find(|xmm| free.xmm & xmm.bit() != 0 && touched.xmm & xmm.bit() == 0)
-            .map(Loc::Xmm)
-            .ok_or_else(|| AllocError::new("并行拷贝组里没有可用的常量重建 scratch")),
+            .map(Loc::Xmm),
     }
 }
 
@@ -454,6 +492,19 @@ fn resolve_group(
         let saved = pending[0].dst;
         cycles += 1;
         match saved {
+            Loc::Gpr(_) if pending.iter().any(|mov| mov.src == Loc::Gpr(Gpr::R11)) => {
+                // 重建已经把常量放在 `r11` 里，环打断改走 frame scratch。
+                uses_scratch = true;
+                if scratch.is_none() {
+                    return Ok((emitted, cycles, true));
+                }
+                save_to_scratch(&mut emitted, saved, pending[0].ty);
+                for mov in &mut pending {
+                    if mov.src == saved {
+                        mov.src = Loc::Scratch;
+                    }
+                }
+            }
             Loc::Gpr(_) => {
                 let holder = Loc::Gpr(Gpr::R11);
                 emitted.push(EmittedMove::Move {

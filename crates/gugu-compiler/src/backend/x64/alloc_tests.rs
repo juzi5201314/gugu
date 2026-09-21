@@ -170,3 +170,32 @@ fn addressed_local_survives_a_call() {
         .any(|fragment| fragment.frame.frame_size > 0);
     assert!(entry, "至少一个片段必须有非空 frame");
 }
+
+/// 字段偏移同时重建基址和常量索引。聚合初始化会调用 memmove glue，执行 bench 接不住，
+/// 这里直接看机器序列：两条 scratch 不能是同一个寄存器。
+const FIELD_OFFSET: &str = "#[repr(C, align(8))]
+struct Pair { a: int, b: int }
+
+fn main() {
+    let pair = Pair { a: 20, b: 22 }
+    _ = pair.b
+}
+";
+
+#[test]
+fn field_offset_reloads_base_and_index_into_different_scratches() {
+    let compilation = compile(FIELD_OFFSET);
+    let dump = compilation.dump_x64().expect("机器码转储");
+    let offset = dump
+        .lines()
+        .find(|line| line.contains("PtrOffset [") && line.matches("lea ").count() >= 2)
+        .unwrap_or_else(|| panic!("必须有带重建的字段偏移：{dump}"));
+    assert!(
+        !offset.contains("[r11 + r11]"),
+        "基址和索引不能共用 scratch：{offset}"
+    );
+    assert!(
+        offset.contains("lea [r11 + "),
+        "基址应先重建进 r11，索引用另一个寄存器：{offset}"
+    );
+}
