@@ -890,6 +890,10 @@ fn build_json_reports_x64_fragment_keys() {
         "pe-relocs",
         "pe-fingerprint",
         "pe-staticlib-bytes",
+        "bridge-schema",
+        "bridge-max-blocking",
+        "bridge-dirty-slots",
+        "bridge-fingerprint",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }
@@ -903,6 +907,13 @@ fn build_json_reports_x64_fragment_keys() {
         "入口符号必须是 __gugu_fn_ + 64 hex：{symbol}"
     );
     assert_eq!(payload["scheduler-poll-flags-offset"], 0);
+    assert_eq!(payload["bridge-schema"], 1);
+    assert_eq!(payload["bridge-max-blocking"], 8);
+    assert_eq!(payload["bridge-dirty-slots"], 1);
+    assert_eq!(
+        payload["bridge-fingerprint"],
+        serde_json::json!(plan.bridge_fingerprint())
+    );
     assert_eq!(
         payload["x64-fragment-fingerprint"],
         serde_json::json!(plan.x64_fragment_fingerprint())

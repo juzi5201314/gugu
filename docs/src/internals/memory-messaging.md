@@ -761,6 +761,8 @@ Linux x86_64 和 Windows 是首批 adapter。Gugu 没有 libc 依赖时，平台
 - `GuardedCopy`/checked copy 只用于 ForeignBridge 的长度和权限校验，不替代 managed object 的 trace；
 - DirtyCpu、阻塞系统调用和平台 decommit 不进入 `NoSafepointRegion`。
 
+`BridgeContract`（`BRIDGE_SCHEMA = 1`，域 `gugu-bridge-v1`）随 `RuntimeRawModel` schema 26 进入同一缓存对象。阻塞额度是 8，dirty 槽是 1，两者不随目标变化。参照状态机按调用发放序号：普通 bridge 取得额度后保留可取回的 processor lease 并登记桥帧根；dirty 立即释放 processor、占用唯一 dirty 槽并登记桥帧根；leaf 留在当前 processor 上，不建桥帧根，也不允许回调。额度用尽或已有同类等待者时，新调用进入等待且不计入 native。额度归还后只由 `resume_waiter` 让队首进入 native，新调用不能插到等待者前面。普通 bridge 与 dirty 在结束前必须捕获 `errno` 与 last-error；leaf 留在同一线程上，结束时不强制捕获。未 pin 的指针不能交出。opaque native 的栈图与展开扫描都是 false。`register_external` 之后触碰协程或 GC metadata 失败。镜像计划与 CLI JSON 暴露 `bridge-schema`、`bridge-max-blocking`、`bridge-dirty-slots` 与 `bridge-fingerprint`；指纹经 raw 契约进入 action key。
+
 ## Provenance、free-list 完整性与安全 profile
 
 ### Raw provenance

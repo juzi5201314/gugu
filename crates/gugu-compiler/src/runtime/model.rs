@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::barrier_schema::{BarrierDemand, BarrierRuntimeContract, MessageFamilyTag};
 use super::block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
+use super::bridge::BridgeContract;
 use super::combining_schema::{CombiningDemand, CombiningPolicyV1, CombiningRuntimeContract};
 use super::compression_schema::{
     CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract,
@@ -48,10 +49,9 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 25 相对版本 24 的变化：并入 `LogicalProcessorPrefix` 的 poll/ownership/TLAB/
-/// TurnRegion 布局偏移，并把 `SchedulerRuntimeContract` 升到 schema 2。backend 只消费
-/// 契约里的 `offset_of!` 结果，禁止手写第二份数字。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 25;
+/// 版本 26 相对版本 25 的变化：并入固定的 `BridgeContract`。额度、dirty 槽与指纹不随
+/// 目标变化；backend 与镜像计划只消费这一份契约，禁止再写一套 admission 常量。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 26;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -561,6 +561,7 @@ pub(crate) struct RuntimeRawContractV1 {
     routing: RoutingRuntimeContract,
     provenance: ProvenanceRuntimeContract,
     combining: CombiningRuntimeContract,
+    bridge: BridgeContract,
     demand: RawPlaneDemand,
     resource_demand: RawResourceDemand,
     grace_steps: u32,
@@ -654,6 +655,7 @@ impl RuntimeRawContractV1 {
         // 只在 profile 开启后把四条冷路径记录进非移动池；需求推导集中在 `combining_demand`。
         let combining =
             CombiningRuntimeContract::build(combining_demand(&demand), policy.combining)?;
+        let bridge = BridgeContract::fixed();
         let mut contract = Self {
             schema: RAW_MODEL_SCHEMA,
             target_semantics: target.to_string(),
@@ -687,6 +689,7 @@ impl RuntimeRawContractV1 {
             routing,
             provenance,
             combining,
+            bridge,
             demand,
             resource_demand,
             grace_steps: GRACE_STEPS,
@@ -917,6 +920,11 @@ impl RuntimeRawContractV1 {
     /// 返回 typed combining 冷操作契约段。
     pub(crate) fn combining(&self) -> &CombiningRuntimeContract {
         &self.combining
+    }
+
+    /// 返回外部调用桥接契约段。
+    pub(crate) fn bridge(&self) -> &BridgeContract {
+        &self.bridge
     }
 
     /// 返回 `HandleForward` 消息字段集合。
@@ -1158,6 +1166,7 @@ impl RuntimeRawContractV1 {
         if self.combining.demand != combining_demand(&self.demand) {
             return Err(RawModelError::new("combining 需求与 raw 平面派生值不一致"));
         }
+        self.bridge.verify()?;
         if self.block_return.demand()
             != BlockReturnDemand::derive(&self.local_heap.demand(), &self.shared_heap.demand)?
         {
@@ -1275,6 +1284,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.routing.canonical_bytes());
         bytes.extend_from_slice(&self.provenance.canonical_bytes());
         bytes.extend_from_slice(&self.combining.canonical_bytes());
+        bytes.extend_from_slice(&self.bridge.canonical_bytes());
         bytes.extend_from_slice(&self.resource_demand.resource_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.acquire_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_demand.release_sites.to_le_bytes());
@@ -1513,6 +1523,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.routing.dump());
         output.push_str(&self.provenance.dump());
         output.push_str(&self.combining.dump());
+        output.push_str(&self.bridge.dump());
         output.push_str(&format!(
             "runtime-message return-fields={} card-mark-fields={} mark-ticket-fields={} edge-delta-fields={} handle-forward-fields={} card-mark-family={}\n",
             self.message.fields.len(),

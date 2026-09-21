@@ -20,6 +20,11 @@ pub(crate) mod barrier_schema;
 pub(crate) mod block_return_schema;
 #[allow(
     dead_code,
+    reason = "桥接状态机由确定性测试回放；契约段由 runtime raw、ImagePlan 与 CLI 消费"
+)]
+pub(crate) mod bridge;
+#[allow(
+    dead_code,
     reason = "cage 预留、checked 解码与 FFI 交接由 world、栈图 walker 与确定性测试消费"
 )]
 mod cage;

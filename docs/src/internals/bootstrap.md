@@ -286,6 +286,8 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 
 `RuntimeRawModel` schema 25 把 `SchedulerRuntimeContract` 升到 schema 2，并入 `LogicalProcessorPrefix` 的 poll/ownership/TLAB/TurnRegion 偏移：`poll_flags_offset = 0`、`tlab_cursor_offset = 3520`、`turn_region_cursor_offset = 3536`。偏移只来自 `processor.rs` 的 `offset_of!`，backend 的 TLAB/TurnRegion bump、SafepointPoll 与 StackCheck 热路只消费契约字段；`-Zdump-runtime` 增加 `scheduler-layout poll-flags=… tlab-cursor=… turn-region-cursor=…` 行。
 
+`RuntimeRawModel` schema 26 在同一缓存对象上并入固定的 `BridgeContract`（`BRIDGE_SCHEMA = 1`，域 `gugu-bridge-v1`）：阻塞额度 8、dirty 槽 1、三种模式名。段内常量与指纹不随目标变化，因此 Linux 与 Windows 的 `bridge-fingerprint` 相同，而整份 raw 指纹仍因目标语义不同。`-Zdump-runtime` 增加 `bridge schema=… blocking=… dirty=… fingerprint=…` 行。状态机本身不进入镜像，也不创建操作系统线程。
+
 内部契约也沿同一边界扩展：[`AST/HIR`](ast-hir.md) 消费 frontend 产物，[`GIR/LIR`](gir-lir.md) 消费冻结 HIR，[`后端`](backend.md) 负责从合法 LIR 到 machine code，[`调度器`](scheduler.md) 和 [`GC 元数据`](gc-metadata.md) 负责 runtime 语义。不得为这些后续模块建立平行的占位语义路径。
 
 ## 验收契约

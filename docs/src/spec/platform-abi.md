@@ -259,7 +259,7 @@ Windows C ABI 不提供与本章兼容的 `__int128` 参数或返回规则，因
 
 C ABI 的寄存器、栈槽、布局和符号规则与 runtime 的调度效应正交。compiler 在 lowering metadata 中保留普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`，但不能把该模式编码成 C ABI 可观察的额外参数或返回值。
 
-未标注导入和 effect未知的间接调用使用普通 `ForeignBridge`：跨到 C代码前，runtime必须使用该目标可识别的连续 system stack和合法栈边界，保存 Gugu context并登记精确根；调用先经过有界 `BlockingBridge` admission并取得 `BridgeCredit`，runtime可以在 native快速返回期间保留可被 retake的 processor lease，GC、回调、退役或持续 runnable压力可以打破 lease并把 processor交给其它 managed work。没有 credit时调用方不能执行 native code，只能在不持有 processor的 admission waiter中挂起。是否直接恢复或重新入队完全属于 runtime内部，C代码不能观察 processor身份或依赖其不变。
+未标注导入和 effect未知的间接调用使用普通 `ForeignBridge`：跨到 C代码前，runtime必须使用该目标可识别的连续 system stack和合法栈边界，保存 Gugu context并登记精确根；调用先经过有界 `BlockingBridge` admission并取得 `BridgeCredit`，runtime可以在 native快速返回期间保留可被 retake的 processor lease，GC、回调、退役或持续 runnable压力可以打破 lease并把 processor交给其它 managed work。没有 credit时调用方不能执行 native code，只能在不持有 processor的 admission waiter中挂起。是否直接恢复或重新入队完全属于 runtime内部，C代码不能观察 processor身份或依赖其不变。阻塞 poller 系统调用走同一套 admission：没有额度时不执行系统调用。Linux 的 `errno` 与 Windows 的 last-error 都在协程重新入队前记入本次调用结果。等待中的调用没有 native 栈，不能被记入栈图。
 
 `#[ffi(dirty_cpu)]` 导入或 native definition、相应调用点，以及 managed `#[naked]` 使用 `ForeignBridge[DirtyCpu]`：持久 bridge state定位 coroutine stack上的 ABI frame和精确 roots，调用释放 `LogicalProcessor`，native stack不进入 Gugu stack map，且 native body不能回调 Gugu。`global_asm` 符号的模式来自显式 extern 声明；dirty CPU额度和等待状态属于 runtime 内部，不进入 C ABI。
 

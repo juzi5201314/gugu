@@ -718,6 +718,9 @@ fn contract_rejects_address_fields_and_policy_drift() {
     assert_eq!(contract.grace_steps(), super::model::GRACE_STEPS);
     assert_eq!(contract.ledger_categories().len(), 5);
     assert_eq!(contract.schema(), super::model::RAW_MODEL_SCHEMA);
+    assert_eq!(contract.bridge().schema(), super::bridge::BRIDGE_SCHEMA);
+    assert_eq!(contract.bridge().max_blocking(), 8);
+    assert!(contract.dump().contains("bridge schema=1"));
     assert_eq!(contract.platform().profile(), "linux");
     assert_eq!(contract.platform().op_count(), 13);
     assert_eq!(

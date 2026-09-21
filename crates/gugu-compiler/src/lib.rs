@@ -1567,6 +1567,10 @@ pub struct ImagePlan {
     pe_fingerprint: [u8; 32],
     pe_image: Vec<u8>,
     pe_staticlib: Vec<u8>,
+    bridge_schema: u32,
+    bridge_max_blocking: u32,
+    bridge_dirty_slots: u32,
+    bridge_fingerprint: [u8; 32],
 }
 
 impl ImagePlan {
@@ -1820,6 +1824,10 @@ impl ImagePlan {
             pe_fingerprint: pe.fingerprint,
             pe_image: pe.bytes,
             pe_staticlib: pe.archive,
+            bridge_schema: raw.bridge().schema(),
+            bridge_max_blocking: raw.bridge().max_blocking(),
+            bridge_dirty_slots: raw.bridge().dirty_slots(),
+            bridge_fingerprint: raw.bridge().fingerprint(),
         }
     }
 
@@ -2176,6 +2184,26 @@ impl ImagePlan {
     /// 返回同一份代码节的 COFF 静态库；非 Windows 写出时为空。
     pub fn pe_staticlib(&self) -> &[u8] {
         &self.pe_staticlib
+    }
+
+    /// 返回桥接契约 schema。
+    pub fn bridge_schema(&self) -> u32 {
+        self.bridge_schema
+    }
+
+    /// 返回普通 bridge 的阻塞 worker 上限。
+    pub fn bridge_max_blocking(&self) -> u32 {
+        self.bridge_max_blocking
+    }
+
+    /// 返回 dirty 调用槽数。
+    pub fn bridge_dirty_slots(&self) -> u32 {
+        self.bridge_dirty_slots
+    }
+
+    /// 返回桥接契约指纹。两个目标使用同一份固定契约。
+    pub fn bridge_fingerprint(&self) -> [u8; 32] {
+        self.bridge_fingerprint
     }
 
     /// 返回 rt0 启动序列的步骤数量。
@@ -3321,6 +3349,15 @@ mod tests {
         assert_eq!(windows_plan.elf_schema(), 0);
         assert!(windows_plan.pe_byte_count() > 0);
         assert_eq!(windows_plan.pe_schema(), 1);
+        let linux_plan = linux.image_plan().expect("linux plan");
+        assert_eq!(linux_plan.bridge_schema(), 1);
+        assert_eq!(linux_plan.bridge_max_blocking(), 8);
+        assert_eq!(linux_plan.bridge_dirty_slots(), 1);
+        assert_eq!(windows_plan.bridge_schema(), 1);
+        assert_eq!(
+            linux_plan.bridge_fingerprint(),
+            windows_plan.bridge_fingerprint()
+        );
         assert_eq!(
             windows
                 .action_graph()

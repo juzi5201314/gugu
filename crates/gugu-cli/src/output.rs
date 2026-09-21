@@ -544,6 +544,10 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
         "pe-relocs": plan.pe_relocs(),
         "pe-fingerprint": plan.pe_fingerprint(),
         "pe-staticlib-bytes": plan.pe_staticlib().len(),
+        "bridge-schema": plan.bridge_schema(),
+        "bridge-max-blocking": plan.bridge_max_blocking(),
+        "bridge-dirty-slots": plan.bridge_dirty_slots(),
+        "bridge-fingerprint": plan.bridge_fingerprint(),
     })
 }
 
