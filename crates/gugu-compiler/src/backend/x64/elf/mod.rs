@@ -1,7 +1,7 @@
 //! Linux ELF64 static PIE。无动态导入时不写 `PT_INTERP`，rt0 自行完成相对重定位与 RELRO。
 
 mod archive;
-mod asm;
+pub(crate) mod asm;
 mod entries;
 mod link;
 mod runtime;
@@ -21,7 +21,9 @@ pub(crate) const ELF_DOMAIN: &str = "gugu-elf64-pie-v1";
 /// `ET_DYN`。
 pub(crate) const ET_DYN: u32 = 3;
 
-use link::{LinkCode, LinkReloc, LinkRequest, link};
+pub(crate) use archive::write_archive;
+pub(crate) use link::{LinkCode, LinkReloc, LinkRelocKind};
+use link::{LinkRequest, link};
 
 /// 启动代码读取的控制块偏移。`map_base` 紧跟契约里的栈检查槽，供扩栈知道保留映射下界。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -109,25 +111,7 @@ pub(crate) fn link_world(
     interpreter: Option<&str>,
     boot: BootOffsets,
 ) -> Result<ElfImage, ElfError> {
-    let owners = bodies_by_instance(bodies)?;
-    let mut codes = Vec::new();
-    for fragment in &world.fragments {
-        let owner = owners
-            .get(&fragment.instance)
-            .copied()
-            .ok_or_else(|| ElfError::new("片段缺少常量池"))?;
-        let mut relocs = Vec::new();
-        for reloc in &fragment.relocations {
-            relocs.push(const_reloc(owner, reloc)?);
-        }
-        codes.push(LinkCode {
-            symbol: fragment.symbol.clone(),
-            bytes: fragment.bytes.clone(),
-            included: fragment.metadata.included,
-            relocs,
-        });
-    }
-    let consts = image_blobs(world, bodies)?;
+    let (codes, consts) = prepare(world, bodies)?;
     let sections = [
         (
             world.metadata.section_name.as_str(),
@@ -150,6 +134,32 @@ pub(crate) fn link_world(
 
 #[cfg(test)]
 mod tests;
+
+/// 收集用户片段与内容寻址常量，供 ELF 与 PE 共用。
+pub(crate) fn prepare(
+    world: &X64World,
+    bodies: &[Body],
+) -> Result<(Vec<LinkCode>, Vec<(String, Vec<u8>, u32)>), ElfError> {
+    let owners = bodies_by_instance(bodies)?;
+    let mut codes = Vec::new();
+    for fragment in &world.fragments {
+        let owner = owners
+            .get(&fragment.instance)
+            .copied()
+            .ok_or_else(|| ElfError::new("片段缺少常量池"))?;
+        let mut relocs = Vec::new();
+        for reloc in &fragment.relocations {
+            relocs.push(const_reloc(owner, reloc)?);
+        }
+        codes.push(LinkCode {
+            symbol: fragment.symbol.clone(),
+            bytes: fragment.bytes.clone(),
+            included: fragment.metadata.included,
+            relocs,
+        });
+    }
+    Ok((codes, image_blobs(world, bodies)?))
+}
 
 /// 常量字节按序号折叠。类型描述符、类型号、vtable 与类型节基址在本写出里是
 /// 8 字节对齐的只读占位；`channel_new` 只接收描述符地址。

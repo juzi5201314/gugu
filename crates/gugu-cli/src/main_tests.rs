@@ -882,6 +882,14 @@ fn build_json_reports_x64_fragment_keys() {
         "elf-relative-relocs",
         "elf-interp",
         "elf-fingerprint",
+        "pe-schema",
+        "pe-entry",
+        "pe-byte-count",
+        "pe-sections",
+        "pe-imports",
+        "pe-relocs",
+        "pe-fingerprint",
+        "pe-staticlib-bytes",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
     }

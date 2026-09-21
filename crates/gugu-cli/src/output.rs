@@ -536,6 +536,14 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
         "elf-relative-relocs": plan.elf_relative_relocs(),
         "elf-interp": plan.elf_interp(),
         "elf-fingerprint": plan.elf_fingerprint(),
+        "pe-schema": plan.pe_schema(),
+        "pe-entry": plan.pe_entry(),
+        "pe-byte-count": plan.pe_byte_count(),
+        "pe-sections": plan.pe_sections(),
+        "pe-imports": plan.pe_imports(),
+        "pe-relocs": plan.pe_relocs(),
+        "pe-fingerprint": plan.pe_fingerprint(),
+        "pe-staticlib-bytes": plan.pe_staticlib().len(),
     })
 }
 

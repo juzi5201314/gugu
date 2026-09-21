@@ -11,7 +11,7 @@ const HEADER: usize = 60;
     dead_code,
     reason = "staticlib 写出与抽取测试往返；可执行链接只抽取成员"
 )]
-pub(super) fn write_archive(members: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
+pub(crate) fn write_archive(members: &BTreeMap<String, Vec<u8>>) -> Vec<u8> {
     let mut out = Vec::from(MAGIC);
     for (name, bytes) in members {
         let mut header = [b' '; HEADER];

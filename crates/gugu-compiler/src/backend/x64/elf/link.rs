@@ -26,23 +26,23 @@ const SHF_ALLOC: u64 = 2;
 const SHF_EXEC: u64 = 4;
 
 #[derive(Clone, Debug)]
-pub(super) struct LinkCode {
-    pub(super) symbol: String,
-    pub(super) bytes: Vec<u8>,
-    pub(super) included: bool,
-    pub(super) relocs: Vec<LinkReloc>,
+pub(crate) struct LinkCode {
+    pub(crate) symbol: String,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) included: bool,
+    pub(crate) relocs: Vec<LinkReloc>,
 }
 
 #[derive(Clone, Debug)]
-pub(super) struct LinkReloc {
-    pub(super) offset: u32,
-    pub(super) kind: LinkRelocKind,
-    pub(super) target: String,
-    pub(super) addend: i64,
+pub(crate) struct LinkReloc {
+    pub(crate) offset: u32,
+    pub(crate) kind: LinkRelocKind,
+    pub(crate) target: String,
+    pub(crate) addend: i64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum LinkRelocKind {
+pub(crate) enum LinkRelocKind {
     PcRel32,
     Abs64,
     Rva32,

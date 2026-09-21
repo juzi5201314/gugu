@@ -27,6 +27,7 @@ pub struct ActionInputs {
     backend_encoder: [u8; 32],
     backend_fragments: [u8; 32],
     elf_image: [u8; 32],
+    pe_image: [u8; 32],
     query_registry: [u8; 32],
     optimization_policy: Vec<u8>,
     public_summaries: BTreeMap<String, [u8; 32]>,
@@ -184,6 +185,11 @@ impl ActionInputs {
         self.elf_image = fingerprint;
     }
 
+    /// 设置已写出 PE 镜像的指纹；未写出时保持全零。
+    pub fn set_pe_image(&mut self, fingerprint: [u8; 32]) {
+        self.pe_image = fingerprint;
+    }
+
     /// 设置 query registry 的登记指纹；新增 query kind 时旧 action record 因此失效。
     pub fn set_query_registry(&mut self, fingerprint: [u8; 32]) {
         self.query_registry = fingerprint;
@@ -221,6 +227,7 @@ impl ActionInputs {
         encode_bytes(&mut canonical, &self.backend_encoder);
         encode_bytes(&mut canonical, &self.backend_fragments);
         encode_bytes(&mut canonical, &self.elf_image);
+        encode_bytes(&mut canonical, &self.pe_image);
         encode_bytes(&mut canonical, &self.query_registry);
         encode_bytes(&mut canonical, &self.optimization_policy);
         encode_digest_map(&mut canonical, &self.public_summaries);

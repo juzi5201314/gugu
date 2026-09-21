@@ -22,6 +22,7 @@ pub(crate) mod metadata;
 pub(crate) mod metadata_section;
 #[cfg(test)]
 mod metadata_tests;
+pub(crate) mod pe;
 pub(crate) mod reg;
 mod rows;
 pub(crate) mod select;

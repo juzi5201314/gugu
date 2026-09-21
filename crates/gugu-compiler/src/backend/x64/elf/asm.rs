@@ -1,6 +1,6 @@
 //! 固定宽度的 x86_64 字节助手。只服务 rt0 与 runtime 入口，不替代指令表编码器。
 
-pub(super) struct Asm {
+pub(crate) struct Asm {
     bytes: Vec<u8>,
     labels: Vec<Option<usize>>,
     patches: Vec<Patch>,
@@ -13,7 +13,7 @@ struct Patch {
 }
 
 impl Asm {
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             bytes: Vec::new(),
             labels: Vec::new(),
@@ -21,17 +21,21 @@ impl Asm {
         }
     }
 
-    pub(super) fn label(&mut self) -> u32 {
+    pub(crate) fn offset(&self) -> usize {
+        self.bytes.len()
+    }
+
+    pub(crate) fn label(&mut self) -> u32 {
         let id = u32::try_from(self.labels.len()).expect("标签数量");
         self.labels.push(None);
         id
     }
 
-    pub(super) fn bind(&mut self, label: u32) {
+    pub(crate) fn bind(&mut self, label: u32) {
         self.labels[label as usize] = Some(self.bytes.len());
     }
 
-    pub(super) fn finish(mut self) -> Vec<u8> {
+    pub(crate) fn finish(mut self) -> Vec<u8> {
         for patch in &self.patches {
             let target = self.labels[patch.label as usize].expect("标签已绑定");
             let disp = i32::try_from(target as i64 - patch.next as i64).expect("短距离跳转");
@@ -40,84 +44,84 @@ impl Asm {
         self.bytes
     }
 
-    pub(super) fn emit(&mut self, bytes: &[u8]) {
+    pub(crate) fn emit(&mut self, bytes: &[u8]) {
         self.bytes.extend_from_slice(bytes);
     }
 
-    pub(super) fn ret(&mut self) {
+    pub(crate) fn ret(&mut self) {
         self.emit(&[0xc3]);
     }
 
-    pub(super) fn syscall(&mut self) {
+    pub(crate) fn syscall(&mut self) {
         self.emit(&[0x0f, 0x05]);
     }
 
-    pub(super) fn ud2(&mut self) {
+    pub(crate) fn ud2(&mut self) {
         self.emit(&[0x0f, 0x0b]);
     }
 
-    pub(super) fn mfence(&mut self) {
+    pub(crate) fn mfence(&mut self) {
         self.emit(&[0x0f, 0xae, 0xf0]);
     }
 
-    pub(super) fn push(&mut self, reg: u8) {
+    pub(crate) fn push(&mut self, reg: u8) {
         self.rex_b(reg, false);
         self.emit(&[0x50 + low(reg)]);
     }
 
-    pub(super) fn pop(&mut self, reg: u8) {
+    pub(crate) fn pop(&mut self, reg: u8) {
         self.rex_b(reg, false);
         self.emit(&[0x58 + low(reg)]);
     }
 
-    pub(super) fn xor_self32(&mut self, reg: u8) {
+    pub(crate) fn xor_self32(&mut self, reg: u8) {
         self.rex_rb(reg, reg, false);
         self.emit(&[0x31, modrm(3, reg, reg)]);
     }
 
-    pub(super) fn mov_imm32(&mut self, reg: u8, value: u32) {
+    pub(crate) fn mov_imm32(&mut self, reg: u8, value: u32) {
         self.rex_b(reg, false);
         self.emit(&[0xb8 + low(reg)]);
         self.emit(&value.to_le_bytes());
     }
 
-    pub(super) fn mov_imm64(&mut self, reg: u8, value: u64) {
+    pub(crate) fn mov_imm64(&mut self, reg: u8, value: u64) {
         self.rex_b(reg, true);
         self.emit(&[0xb8 + low(reg)]);
         self.emit(&value.to_le_bytes());
     }
 
-    pub(super) fn mov_load(&mut self, dest: u8, base: u8, disp: i32) {
+    pub(crate) fn mov_load(&mut self, dest: u8, base: u8, disp: i32) {
         self.mem(0x8b, dest, base, disp);
     }
 
-    pub(super) fn mov_store(&mut self, base: u8, disp: i32, src: u8) {
+    pub(crate) fn mov_store(&mut self, base: u8, disp: i32, src: u8) {
         self.mem(0x89, src, base, disp);
     }
 
-    pub(super) fn mov_store32(&mut self, base: u8, disp: i32, src: u8) {
+    pub(crate) fn mov_store32(&mut self, base: u8, disp: i32, src: u8) {
         self.rex_rb(src, base, false);
         self.emit(&[0x89]);
         self.mem_tail(src, base, disp);
     }
 
-    pub(super) fn mov_reg(&mut self, dest: u8, src: u8) {
+    pub(crate) fn mov_reg(&mut self, dest: u8, src: u8) {
         self.rex_rb(src, dest, true);
         self.emit(&[0x89, modrm(3, src, dest)]);
     }
 
-    pub(super) fn div_r64(&mut self, reg: u8) {
+    pub(crate) fn div_r64(&mut self, reg: u8) {
         self.rex_b(reg, true);
         self.emit(&[0xf7, modrm(3, 6, reg)]);
     }
 
-    pub(super) fn movzx8(&mut self, dest: u8, base: u8, disp: i32) {
+    pub(crate) fn movzx8(&mut self, dest: u8, base: u8, disp: i32) {
         self.rex_rb(dest, base, false);
         self.emit(&[0x0f, 0xb6]);
         self.mem_tail(dest, base, disp);
     }
 
-    pub(super) fn lea_disp(&mut self, dest: u8, base: u8, index: u8, scale: u8, disp: i32) {
+    pub(crate) fn lea_disp(&mut self, dest: u8, base: u8, index: u8, scale: u8, disp: i32) {
         self.rex_index(dest, base, index, true);
         self.emit(&[0x8d]);
         self.emit(&[modrm_mod(2, dest, 4)]);
@@ -125,7 +129,7 @@ impl Asm {
         self.emit(&disp.to_le_bytes());
     }
 
-    pub(super) fn lea_rip(&mut self, dest: u8, origin: u64, target: u64) {
+    pub(crate) fn lea_rip(&mut self, dest: u8, origin: u64, target: u64) {
         let next = origin + self.bytes.len() as u64 + 7;
         let disp = i32::try_from(target as i64 - next as i64).expect("RIP 相对距离");
         self.rex_b(dest, true);
@@ -133,128 +137,128 @@ impl Asm {
         self.emit(&disp.to_le_bytes());
     }
 
-    pub(super) fn call_vaddr(&mut self, origin: u64, target: u64) {
+    pub(crate) fn call_vaddr(&mut self, origin: u64, target: u64) {
         let next = origin + self.bytes.len() as u64 + 5;
         let disp = i32::try_from(target as i64 - next as i64).expect("调用距离");
         self.emit(&[0xe8]);
         self.emit(&disp.to_le_bytes());
     }
 
-    pub(super) fn add_imm32(&mut self, reg: u8, value: i32) {
+    pub(crate) fn add_imm32(&mut self, reg: u8, value: i32) {
         self.alu_imm(0, reg, value);
     }
 
-    pub(super) fn sub_imm32(&mut self, reg: u8, value: i32) {
+    pub(crate) fn sub_imm32(&mut self, reg: u8, value: i32) {
         self.alu_imm(5, reg, value);
     }
 
-    pub(super) fn cmp_imm32(&mut self, reg: u8, value: i32) {
+    pub(crate) fn cmp_imm32(&mut self, reg: u8, value: i32) {
         self.alu_imm(7, reg, value);
     }
 
-    pub(super) fn cmp_mem(&mut self, reg: u8, base: u8, disp: i32) {
+    pub(crate) fn cmp_mem(&mut self, reg: u8, base: u8, disp: i32) {
         self.mem(0x3b, reg, base, disp);
     }
 
-    pub(super) fn test_self(&mut self, reg: u8) {
+    pub(crate) fn test_self(&mut self, reg: u8) {
         self.rex_rb(reg, reg, true);
         self.emit(&[0x85, modrm(3, reg, reg)]);
     }
 
-    pub(super) fn inc_mem64(&mut self, base: u8, disp: i32) {
+    pub(crate) fn inc_mem64(&mut self, base: u8, disp: i32) {
         self.mem(0xff, 0, base, disp);
     }
 
-    pub(super) fn dec_mem64(&mut self, base: u8, disp: i32) {
+    pub(crate) fn dec_mem64(&mut self, base: u8, disp: i32) {
         self.mem(0xff, 1, base, disp);
     }
 
-    pub(super) fn dec_reg(&mut self, reg: u8) {
+    pub(crate) fn dec_reg(&mut self, reg: u8) {
         self.rex_b(reg, true);
         self.emit(&[0xff, modrm(3, 1, reg)]);
     }
 
-    pub(super) fn jmp(&mut self, label: u32) {
+    pub(crate) fn jmp(&mut self, label: u32) {
         self.jump(0xe9, None, label);
     }
 
-    pub(super) fn je(&mut self, label: u32) {
+    pub(crate) fn je(&mut self, label: u32) {
         self.jump(0x0f, Some(0x84), label);
     }
 
-    pub(super) fn jne(&mut self, label: u32) {
+    pub(crate) fn jne(&mut self, label: u32) {
         self.jump(0x0f, Some(0x85), label);
     }
 
-    pub(super) fn jae(&mut self, label: u32) {
+    pub(crate) fn jae(&mut self, label: u32) {
         self.jump(0x0f, Some(0x83), label);
     }
 
-    pub(super) fn jb(&mut self, label: u32) {
+    pub(crate) fn jb(&mut self, label: u32) {
         self.jump(0x0f, Some(0x82), label);
     }
 
-    pub(super) fn ja(&mut self, label: u32) {
+    pub(crate) fn ja(&mut self, label: u32) {
         self.jump(0x0f, Some(0x87), label);
     }
 
-    pub(super) fn jle(&mut self, label: u32) {
+    pub(crate) fn jle(&mut self, label: u32) {
         self.jump(0x0f, Some(0x8e), label);
     }
 
-    pub(super) fn add_reg(&mut self, dest: u8, src: u8) {
+    pub(crate) fn add_reg(&mut self, dest: u8, src: u8) {
         self.rex_rb(src, dest, true);
         self.emit(&[0x01, modrm(3, src, dest)]);
     }
 
-    pub(super) fn cmp_reg(&mut self, left: u8, right: u8) {
+    pub(crate) fn cmp_reg(&mut self, left: u8, right: u8) {
         self.rex_rb(right, left, true);
         self.emit(&[0x39, modrm(3, right, left)]);
     }
 
-    pub(super) fn store_bl(&mut self) {
+    pub(crate) fn store_bl(&mut self) {
         self.emit(&[0x88, 0x18]);
     }
 
-    pub(super) fn copy_byte(&mut self) {
+    pub(crate) fn copy_byte(&mut self) {
         self.emit(&[0x8a, 0x13, 0x88, 0x10]);
     }
 
-    pub(super) fn shl1(&mut self, reg: u8) {
+    pub(crate) fn shl1(&mut self, reg: u8) {
         self.rex_b(reg, true);
         self.emit(&[0xd1, modrm(3, 4, reg)]);
     }
 
-    pub(super) fn rcl1(&mut self, reg: u8) {
+    pub(crate) fn rcl1(&mut self, reg: u8) {
         self.rex_b(reg, true);
         self.emit(&[0xd1, modrm(3, 2, reg)]);
     }
 
-    pub(super) fn and_imm32(&mut self, reg: u8, value: i32) {
+    pub(crate) fn and_imm32(&mut self, reg: u8, value: i32) {
         self.alu_imm(4, reg, value);
     }
 
-    pub(super) fn and_reg(&mut self, dest: u8, src: u8) {
+    pub(crate) fn and_reg(&mut self, dest: u8, src: u8) {
         self.rex_rb(src, dest, true);
         self.emit(&[0x21, modrm(3, src, dest)]);
     }
 
-    pub(super) fn or_imm8(&mut self, reg: u8, value: u8) {
+    pub(crate) fn or_imm8(&mut self, reg: u8, value: u8) {
         self.rex_b(reg, true);
         self.emit(&[0x83, modrm(3, 1, reg), value]);
     }
 
-    pub(super) fn sub_reg(&mut self, dest: u8, src: u8) {
+    pub(crate) fn sub_reg(&mut self, dest: u8, src: u8) {
         self.rex_rb(src, dest, true);
         self.emit(&[0x29, modrm(3, src, dest)]);
     }
 
-    pub(super) fn sbb_reg(&mut self, dest: u8, src: u8) {
+    pub(crate) fn sbb_reg(&mut self, dest: u8, src: u8) {
         self.rex_rb(src, dest, true);
         self.emit(&[0x19, modrm(3, src, dest)]);
     }
 
-    pub(super) fn call_reg(&mut self, reg: u8) {
+    pub(crate) fn call_reg(&mut self, reg: u8) {
         self.rex_b(reg, false);
         self.emit(&[0xff, modrm(3, 2, reg)]);
     }

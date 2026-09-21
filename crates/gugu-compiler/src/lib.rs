@@ -840,12 +840,15 @@ impl Compiler {
             &lir,
             &raw_contract,
         );
-        let image_plan = emitted.map(|image| {
-            if target == TargetName::X86_64Linux {
-                inputs.set_elf_image(image.fingerprint);
-                action_key = Some(inputs.key());
+        let image_plan = emitted.map(|(elf, pe)| {
+            if elf.schema != 0 {
+                inputs.set_elf_image(elf.fingerprint);
             }
-            ImagePlan::new(backend_plan, attachment, &raw_contract, image)
+            if pe.schema != 0 {
+                inputs.set_pe_image(pe.fingerprint);
+            }
+            action_key = Some(inputs.key());
+            ImagePlan::new(backend_plan, attachment, &raw_contract, elf, pe)
         });
         diagnostics.sort();
         Compilation {
@@ -872,7 +875,7 @@ fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMet
     demand
 }
 
-/// Linux 写出 ELF64；其它目标保留内存计划，ELF 字段留空。失败时不留下部分镜像。
+/// Linux 写出 ELF64，Windows 写出 PE32+。失败时不留下部分镜像。
 fn emit_executable(
     target: TargetName,
     graph: &mut ActionGraph,
@@ -880,33 +883,66 @@ fn emit_executable(
     world: &backend::x64::codegen::X64World,
     lir: &lir::Validated,
     raw: &RuntimeRawContractV1,
-) -> Option<backend::x64::elf::ElfImage> {
-    if target != TargetName::X86_64Linux {
-        graph.skip_after(ActionKind::ValidateImage, "仅保留内存计划，未写出镜像");
-        return Some(backend::x64::elf::ElfImage::absent());
-    }
+) -> Option<(backend::x64::elf::ElfImage, backend::x64::pe::PeImage)> {
     let boot = backend::x64::elf::BootOffsets::from_contract(raw);
-    match backend::x64::elf::link_world(
-        world,
-        lir.bodies(),
-        target.descriptor().linux_interpreter,
-        boot,
-    ) {
+    match target {
+        TargetName::X86_64Linux => emit_elf(
+            graph,
+            diagnostics,
+            world,
+            lir,
+            target.descriptor().linux_interpreter,
+            boot,
+        ),
+        TargetName::X86_64Windows => emit_pe(graph, diagnostics, world, lir, boot),
+    }
+}
+
+fn emit_elf(
+    graph: &mut ActionGraph,
+    diagnostics: &mut Diagnostics,
+    world: &backend::x64::codegen::X64World,
+    lir: &lir::Validated,
+    interpreter: Option<&str>,
+    boot: backend::x64::elf::BootOffsets,
+) -> Option<(backend::x64::elf::ElfImage, backend::x64::pe::PeImage)> {
+    match backend::x64::elf::link_world(world, lir.bodies(), interpreter, boot) {
         Ok(image) => {
             graph.complete(ActionKind::EmitImage, "ELF64 static PIE");
-            Some(image)
+            Some((image, backend::x64::pe::PeImage::absent()))
         }
-        Err(error) => {
-            let message = error.message().to_owned();
-            diagnostics.push(Diagnostic::error(
-                DiagnosticCode::BackendInvariant,
-                message.clone(),
-                None,
-            ));
-            graph.fail(ActionKind::EmitImage, message);
-            None
-        }
+        Err(error) => fail_image(graph, diagnostics, error.message()),
     }
+}
+
+fn emit_pe(
+    graph: &mut ActionGraph,
+    diagnostics: &mut Diagnostics,
+    world: &backend::x64::codegen::X64World,
+    lir: &lir::Validated,
+    boot: backend::x64::elf::BootOffsets,
+) -> Option<(backend::x64::elf::ElfImage, backend::x64::pe::PeImage)> {
+    match backend::x64::pe::link_world(world, lir.bodies(), boot) {
+        Ok(image) => {
+            graph.complete(ActionKind::EmitImage, "PE32+");
+            Some((backend::x64::elf::ElfImage::absent(), image))
+        }
+        Err(error) => fail_image(graph, diagnostics, error.message()),
+    }
+}
+
+fn fail_image(
+    graph: &mut ActionGraph,
+    diagnostics: &mut Diagnostics,
+    message: &str,
+) -> Option<(backend::x64::elf::ElfImage, backend::x64::pe::PeImage)> {
+    diagnostics.push(Diagnostic::error(
+        DiagnosticCode::BackendInvariant,
+        message.to_owned(),
+        None,
+    ));
+    graph.fail(ActionKind::EmitImage, message);
+    None
 }
 
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。
@@ -1522,6 +1558,15 @@ pub struct ImagePlan {
     elf_interp: String,
     elf_fingerprint: [u8; 32],
     elf_image: Vec<u8>,
+    pe_schema: u32,
+    pe_entry: u64,
+    pe_byte_count: u32,
+    pe_sections: u32,
+    pe_imports: u32,
+    pe_relocs: u32,
+    pe_fingerprint: [u8; 32],
+    pe_image: Vec<u8>,
+    pe_staticlib: Vec<u8>,
 }
 
 impl ImagePlan {
@@ -1530,6 +1575,7 @@ impl ImagePlan {
         attachment: runtime::RuntimeAttachment,
         raw: &RuntimeRawContractV1,
         elf: backend::x64::elf::ElfImage,
+        pe: backend::x64::pe::PeImage,
     ) -> Self {
         let gc_type_section_fingerprint =
             frontend::mono::keys::hash_domain("gugu-gc-type-section-v1", &plan.gc_type_section);
@@ -1765,6 +1811,15 @@ impl ImagePlan {
             elf_interp: elf.interp,
             elf_fingerprint: elf.fingerprint,
             elf_image: elf.bytes,
+            pe_schema: pe.schema,
+            pe_entry: pe.entry,
+            pe_byte_count: u32::try_from(pe.bytes.len()).expect("PE 字节数适配 u32"),
+            pe_sections: pe.sections,
+            pe_imports: pe.imports,
+            pe_relocs: pe.relocs,
+            pe_fingerprint: pe.fingerprint,
+            pe_image: pe.bytes,
+            pe_staticlib: pe.archive,
         }
     }
 
@@ -2073,9 +2128,54 @@ impl ImagePlan {
         self.elf_fingerprint
     }
 
-    /// 返回 ELF 镜像字节；Windows 尚未写出时为空。
+    /// 返回 ELF 镜像字节；非 Linux 写出时为空。
     pub fn elf_image(&self) -> &[u8] {
         &self.elf_image
+    }
+
+    /// 返回 PE writer schema；未写出时为 0。
+    pub fn pe_schema(&self) -> u32 {
+        self.pe_schema
+    }
+
+    /// 返回 `_start` 的 RVA；未写出时为 0。
+    pub fn pe_entry(&self) -> u64 {
+        self.pe_entry
+    }
+
+    /// 返回 PE 镜像字节数。
+    pub fn pe_byte_count(&self) -> u32 {
+        self.pe_byte_count
+    }
+
+    /// 返回 PE 节数量。
+    pub fn pe_sections(&self) -> u32 {
+        self.pe_sections
+    }
+
+    /// 返回 IAT 导入符号数量。
+    pub fn pe_imports(&self) -> u32 {
+        self.pe_imports
+    }
+
+    /// 返回 DIR64 基址重定位数量；合法的填充块不计入。
+    pub fn pe_relocs(&self) -> u32 {
+        self.pe_relocs
+    }
+
+    /// 返回 PE 镜像指纹。
+    pub fn pe_fingerprint(&self) -> [u8; 32] {
+        self.pe_fingerprint
+    }
+
+    /// 返回 PE 镜像字节；非 Windows 写出时为空。
+    pub fn pe_image(&self) -> &[u8] {
+        &self.pe_image
+    }
+
+    /// 返回同一份代码节的 COFF 静态库；非 Windows 写出时为空。
+    pub fn pe_staticlib(&self) -> &[u8] {
+        &self.pe_staticlib
     }
 
     /// 返回 rt0 启动序列的步骤数量。
@@ -3219,6 +3319,8 @@ mod tests {
         let windows_plan = windows.image_plan().expect("windows plan");
         assert_eq!(windows_plan.elf_byte_count(), 0);
         assert_eq!(windows_plan.elf_schema(), 0);
+        assert!(windows_plan.pe_byte_count() > 0);
+        assert_eq!(windows_plan.pe_schema(), 1);
         assert_eq!(
             windows
                 .action_graph()
@@ -3226,7 +3328,7 @@ mod tests {
                 .iter()
                 .find(|node| node.kind() == ActionKind::EmitImage)
                 .map(|node| node.status()),
-            Some(ActionStatus::Skipped)
+            Some(ActionStatus::Complete)
         );
         assert_ne!(
             linux.runtime_raw_fingerprint(),
