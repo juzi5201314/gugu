@@ -10,9 +10,11 @@ use crate::backend::x64::inst::{Operand, RelocKind, RelocTarget};
 use crate::backend::x64::mangle;
 use crate::backend::x64::reg::{Gpr, Reg};
 use crate::backend::x64::table::{Access, OperandKind};
-use crate::lir::body::{Call, CallTarget, Op, Symbol, ValueType};
+use crate::lir::body::{Call, CallTarget, Op, Symbol};
 
-use super::{Builder, LowerCtx, LoweringError, SiteValue, mem_base, move_kinds, reg, value_move};
+use super::{
+    Builder, Copy, LowerCtx, LoweringError, SiteValue, mem_base, move_kinds, reg, value_move,
+};
 
 const REL32: &[OperandKind] = &[OperandKind::Rel32];
 const RM64: &[OperandKind] = &[OperandKind::Rm64];
@@ -200,11 +202,16 @@ fn vtable_disp(slot: u32) -> Result<i32, LoweringError> {
 }
 
 /// 实参落位：寄存器槽直接搬，栈 piece 写进 caller outgoing 区。
+///
+/// 寄存器落位按声明顺序渲染，同时登记为并行拷贝组；outgoing 栈 piece 不参与寄存器并行
+/// 语义，出现时收束当前组后直接发射。
 pub(super) fn shuffle_arguments(
     operands: &[SiteValue],
     layout: &AbiLayout,
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
+    let mut pending: Vec<Copy> = Vec::new();
+    let mut start = builder.instruction_count();
     for value in &layout.arguments {
         let Some(slot) = value.slot else {
             continue;
@@ -213,9 +220,41 @@ pub(super) fn shuffle_arguments(
         let Some(source) = operands.get(index) else {
             continue;
         };
-        move_to_slot(builder, source.reg, slot, value.ty)?;
+        match slot {
+            AbiSlot::Integer(gpr) => {
+                pending.push(Copy {
+                    src: source.reg,
+                    dest: Reg::Gpr(gpr),
+                    ty: value.ty.ty,
+                });
+                value_move(builder, source.reg, Reg::Gpr(gpr), value.ty.ty)?;
+            }
+            AbiSlot::Float(xmm) => {
+                pending.push(Copy {
+                    src: source.reg,
+                    dest: Reg::Xmm(xmm),
+                    ty: value.ty.ty,
+                });
+                value_move(builder, source.reg, Reg::Xmm(xmm), value.ty.ty)?;
+            }
+            AbiSlot::Stack { offset } => {
+                flush_group(builder, &mut pending, &mut start);
+                super::store_stack(builder, source.reg, offset, value.ty.ty)?;
+            }
+        }
     }
+    flush_group(builder, &mut pending, &mut start);
     Ok(())
+}
+
+/// 收束当前寄存器渲染段为并行拷贝组。
+pub(super) fn flush_group(builder: &mut Builder, pending: &mut Vec<Copy>, start: &mut u32) {
+    if pending.is_empty() {
+        return;
+    }
+    let end = builder.instruction_count();
+    builder.record_group_span(std::mem::take(pending), *start..end);
+    *start = end;
 }
 
 /// 返回值回收：寄存器槽搬回虚拟寄存器。
@@ -224,6 +263,8 @@ pub(super) fn collect_results(
     layout: &AbiLayout,
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
+    let mut pending: Vec<Copy> = Vec::new();
+    let mut start = builder.instruction_count();
     for value in &layout.results {
         let Some(slot) = value.slot else {
             continue;
@@ -232,37 +273,31 @@ pub(super) fn collect_results(
         let Some(dest) = results.get(index) else {
             continue;
         };
-        move_from_slot(builder, slot, dest.reg, value.ty)?;
+        match slot {
+            AbiSlot::Integer(gpr) => {
+                pending.push(Copy {
+                    src: Reg::Gpr(gpr),
+                    dest: dest.reg,
+                    ty: value.ty.ty,
+                });
+                value_move(builder, Reg::Gpr(gpr), dest.reg, value.ty.ty)?;
+            }
+            AbiSlot::Float(xmm) => {
+                pending.push(Copy {
+                    src: Reg::Xmm(xmm),
+                    dest: dest.reg,
+                    ty: value.ty.ty,
+                });
+                value_move(builder, Reg::Xmm(xmm), dest.reg, value.ty.ty)?;
+            }
+            AbiSlot::Stack { offset } => {
+                flush_group(builder, &mut pending, &mut start);
+                super::load_stack(builder, offset, dest.reg, value.ty.ty)?;
+            }
+        }
     }
+    flush_group(builder, &mut pending, &mut start);
     Ok(())
-}
-
-/// 把一个值搬进 ABI 槽。
-pub(super) fn move_to_slot(
-    builder: &mut Builder,
-    src: Reg,
-    slot: AbiSlot,
-    ty: ValueType,
-) -> Result<(), LoweringError> {
-    match slot {
-        AbiSlot::Integer(gpr) => value_move(builder, src, Reg::Gpr(gpr), ty.ty),
-        AbiSlot::Float(xmm) => value_move(builder, src, Reg::Xmm(xmm), ty.ty),
-        AbiSlot::Stack { offset } => super::store_stack(builder, src, offset, ty.ty),
-    }
-}
-
-/// 把 ABI 槽里的值搬回虚拟寄存器。
-pub(super) fn move_from_slot(
-    builder: &mut Builder,
-    slot: AbiSlot,
-    dest: Reg,
-    ty: ValueType,
-) -> Result<(), LoweringError> {
-    match slot {
-        AbiSlot::Integer(gpr) => value_move(builder, Reg::Gpr(gpr), dest, ty.ty),
-        AbiSlot::Float(xmm) => value_move(builder, Reg::Xmm(xmm), dest, ty.ty),
-        AbiSlot::Stack { offset } => super::load_stack(builder, offset, dest, ty.ty),
-    }
 }
 
 fn emit_symbol_call(builder: &mut Builder, symbol: Symbol) -> Result<(), LoweringError> {

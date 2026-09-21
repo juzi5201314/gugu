@@ -28,6 +28,7 @@ use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::runtime::{RAW_MODEL_SCHEMA, RuntimeRawContractV1};
 use crate::target::TargetName;
 
+use super::alloc;
 use super::contract::{self, EncoderContract};
 use super::encode::assemble;
 use super::inst::{
@@ -44,7 +45,7 @@ use super::verify;
 ///
 /// 版本 3 相对版本 2 的变化：片段 payload 携带重定位引用的内部符号名集合，镜像规划据此做
 /// 内部符号冲突检查，不再从重定位现场二次猜测符号文本。
-pub(crate) const CODEGEN_SCHEMA: u32 = 3;
+pub(crate) const CODEGEN_SCHEMA: u32 = 4;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -81,6 +82,158 @@ pub(crate) struct SitePayload {
     pub(crate) cold_edges: Vec<ColdEdge>,
     /// 被破坏的物理寄存器位图 `(gpr, xmm)`。
     pub(crate) clobbers: (u32, u32),
+    /// 该站点的点位下标范围。
+    pub(crate) points: (u32, u32),
+}
+
+/// frame 布局：prologue/epilogue 与 stack map 的公共输入。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct FramePayload {
+    /// 函数完成的 prologue 之后的 `rsp` 位移。
+    pub(crate) frame_size: u32,
+    /// outgoing、locals、spill、scratch 与 save slot 组成的负载字节数。
+    pub(crate) payload_bytes: u32,
+    /// 调用者的 outgoing 区字节数。
+    pub(crate) outgoing_bytes: u32,
+    /// 栈检查与动态 alloca 检查使用的上限。
+    pub(crate) required_frame: u32,
+    /// 直接 leaf 调用声明预留的最大额外栈。
+    pub(crate) max_leaf_reserve: u32,
+    /// 局部槽 `(与 body.stack_slots 同序)`：`(offset, bytes, align)`。
+    pub(crate) locals: Vec<(u32, u32, u32)>,
+    /// spill slot：`(offset, size, align, root-class)`。
+    pub(crate) spill_slots: Vec<(u32, u32, u32, u8)>,
+    /// 16 字节 copy scratch 的偏移；未预留为 `None`。
+    pub(crate) scratch_offset: Option<u32>,
+    /// 实际保存的 callee-saved GPR 编码，按 `rbp,r12,r13` 顺序。
+    pub(crate) save_offsets: Vec<(u8, u32)>,
+    /// 是否发射入口容量检查。
+    pub(crate) checked: bool,
+}
+
+impl FramePayload {
+    fn of(allocated: &alloc::Allocated) -> Self {
+        let frame = &allocated.frame;
+        Self {
+            frame_size: frame.frame_size,
+            payload_bytes: frame.payload_bytes,
+            outgoing_bytes: frame.outgoing_bytes,
+            required_frame: frame.required_frame,
+            max_leaf_reserve: frame.max_leaf_reserve,
+            locals: frame
+                .locals
+                .iter()
+                .map(|local| (local.offset, local.bytes, local.align))
+                .collect(),
+            spill_slots: frame.spill_slots.clone(),
+            scratch_offset: frame.scratch_offset(),
+            save_offsets: frame.save_offsets.clone(),
+            checked: frame.checked(),
+        }
+    }
+}
+
+/// 一个点位的 payload：stack map 的 PC 区间归属。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct PointPayload {
+    /// 片段 sites 下标。
+    pub(crate) site: u32,
+    /// 点位种类：0 Normal / 1 Call / 2 Bridge / 3 Prologue。
+    pub(crate) kind: u8,
+    pub(crate) use_slot: u32,
+    pub(crate) def_slot: u32,
+    /// 跨该点位存活的值必须回避的 GPR 位图。
+    pub(crate) clobber_gpr: u32,
+    /// 跨该点位存活的值必须回避的 XMM 位图。
+    pub(crate) clobber_xmm: u32,
+    /// managed/stack 指针必须落 frame slot。
+    pub(crate) pointer_spill: bool,
+}
+
+/// 一个值的分配结果。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct ValuePayload {
+    /// 值编号。
+    pub(crate) value: u32,
+    /// 0 GPR / 1 XMM。
+    pub(crate) class: u8,
+    /// 0 非指针 / 1 heap pointer / 2 stack pointer。
+    pub(crate) root: u8,
+    /// 区间 `(start, end)`；已死的值为 `(0, 0)`。
+    pub(crate) range: (u32, u32),
+    /// `(start, end, location)`：`>= 0` 是物理寄存器（GPR 0..15、XMM 16..31），
+    /// `< 0` 时 `!(location)` 是 spill slot 下标；空列表表示可重建或已死。
+    pub(crate) segments: Vec<(u32, u32, i64)>,
+}
+
+impl ValuePayload {
+    fn of(value: &alloc::ValueAllocation) -> Self {
+        let segments = match value.placement {
+            alloc::Placement::Location(location) => {
+                vec![(value.range.0, value.range.1, location_code(location))]
+            }
+            alloc::Placement::Rematerialize | alloc::Placement::Dead => Vec::new(),
+        };
+        Self {
+            value: value.value,
+            class: value.class.code(),
+            root: value.root.code(),
+            range: if value.is_live() { value.range } else { (0, 0) },
+            segments,
+        }
+    }
+}
+
+/// 位置的 payload 编码。
+fn location_code(location: alloc::Location) -> i64 {
+    match location {
+        alloc::Location::Gpr(gpr) => i64::from(gpr.code()),
+        alloc::Location::Xmm(xmm) => 16 + i64::from(xmm.code()),
+        alloc::Location::Slot(slot) => -i64::from(slot) - 1,
+    }
+}
+
+/// 分配统计。
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) struct StatsPayload {
+    pub(crate) peak_live_gpr: u32,
+    pub(crate) peak_live_xmm: u32,
+    pub(crate) spill_slot_count: u32,
+    pub(crate) spill_bytes: u32,
+    pub(crate) spill_stores: u32,
+    pub(crate) reloads: u32,
+    pub(crate) rematerializations: u32,
+    pub(crate) copy_moves: u32,
+    pub(crate) copy_cycles: u32,
+    pub(crate) call_sites: u32,
+    pub(crate) safepoint_spills: u32,
+    pub(crate) allocated_values: u32,
+    pub(crate) frame_size_max: u32,
+}
+
+impl StatsPayload {
+    fn of(allocated: &alloc::Allocated) -> Self {
+        let stats = &allocated.stats;
+        Self {
+            peak_live_gpr: stats.peak_live_gpr,
+            peak_live_xmm: stats.peak_live_xmm,
+            spill_slot_count: stats.spill_slot_count,
+            spill_bytes: stats.spill_bytes,
+            spill_stores: stats.spill_stores,
+            reloads: stats.reloads,
+            rematerializations: stats.rematerializations,
+            copy_moves: stats.copy_moves,
+            copy_cycles: stats.copy_cycles,
+            call_sites: stats.call_sites,
+            safepoint_spills: stats.safepoint_spills,
+            allocated_values: stats.allocated_values,
+            frame_size_max: stats.frame_size_max,
+        }
+    }
 }
 
 /// 一个 LIR 实例的机器码片段。
@@ -115,6 +268,14 @@ pub(crate) struct FragmentPayload {
     pub(crate) abi_stack_slots: u32,
     /// 隐藏 sret。
     pub(crate) sret: bool,
+    /// frame 布局。
+    pub(crate) frame: FramePayload,
+    /// 点位，按函数布局顺序。
+    pub(crate) points: Vec<PointPayload>,
+    /// 逐值分配结果，按值编号升序。
+    pub(crate) values: Vec<ValuePayload>,
+    /// 分配统计。
+    pub(crate) stats: StatsPayload,
     /// 站点，按 `(block, instruction)` 升序，terminator 紧随块内指令。
     pub(crate) sites: Vec<SitePayload>,
     /// 片段字节。
@@ -134,6 +295,116 @@ impl FragmentPayload {
             FRAGMENT_DOMAIN,
             &serde_json::to_vec(&canonical).expect("机器片段可序列化"),
         )
+    }
+}
+
+/// 需要宿主修正的一条重定位。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct X64FragmentRelocation {
+    /// 字段在片段字节内的偏移。
+    pub offset: u32,
+    /// `pc-rel32` / `abs64` / `rva32`。
+    pub kind: &'static str,
+    /// 目标：内部符号名、`cage-control` 或 `cold:<站点>`。
+    pub target: String,
+    /// 目标内加数。
+    pub addend: i64,
+}
+
+/// 片段的 frame 布局视图。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct X64FragmentFrame {
+    /// 函数完成的 prologue 之后的 `rsp` 位移。
+    pub frame_size: u32,
+    /// 负载字节数：outgoing、locals、spill、scratch 与 save slot。
+    pub payload_bytes: u32,
+    /// 调用者 outgoing 区字节数。
+    pub outgoing_bytes: u32,
+    /// 栈检查与动态 alloca 检查使用的上限。
+    pub required_frame: u32,
+    /// 16 字节 copy scratch 的偏移；未预留为 `None`。
+    pub scratch_offset: Option<u32>,
+    /// 溢出槽数量。
+    pub spill_slot_count: u32,
+    /// 保存的 callee-saved GPR 数量。
+    pub saved_gpr_count: u32,
+    /// 是否发射入口容量检查。
+    pub checked: bool,
+    /// `[r14 + 该偏移]` 是协程栈上限；`checked` 为假时无意义。
+    pub stack_check_offset: u32,
+}
+
+/// 一个编译产物的公开视图：宿主据此映射、修正重定位并执行。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct X64Fragment {
+    /// 内部 mangled 符号。
+    pub symbol: String,
+    /// 机器字节。
+    pub bytes: Vec<u8>,
+    /// 需要宿主修正的重定位。
+    pub relocations: Vec<X64FragmentRelocation>,
+    /// frame 布局。
+    pub frame: X64FragmentFrame,
+}
+
+impl X64Fragment {
+    /// 从内部 payload 生成公开视图。
+    fn of(fragment: &FragmentPayload, stack_check_offset: u32) -> Self {
+        let relocations = fragment
+            .relocations
+            .iter()
+            .map(|relocation| X64FragmentRelocation {
+                offset: relocation.offset,
+                kind: match relocation.kind {
+                    RelocKind::PcRel32 => "pc-rel32",
+                    RelocKind::Abs64 => "abs64",
+                    RelocKind::Rva32 => "rva32",
+                },
+                target: match &relocation.target {
+                    RelocTarget::Lir(symbol) => super::mangle::mangle_symbol(symbol),
+                    RelocTarget::CageControl => "cage-control".to_owned(),
+                    RelocTarget::Cold(edge) => format!("cold:{}", edge.site),
+                },
+                addend: relocation.addend,
+            })
+            .collect();
+        let frame = &fragment.frame;
+        Self {
+            symbol: fragment.symbol.clone(),
+            bytes: fragment.bytes.clone(),
+            relocations,
+            frame: X64FragmentFrame {
+                frame_size: frame.frame_size,
+                payload_bytes: frame.payload_bytes,
+                outgoing_bytes: frame.outgoing_bytes,
+                required_frame: frame.required_frame,
+                scratch_offset: frame.scratch_offset,
+                spill_slot_count: u32::try_from(frame.spill_slots.len())
+                    .expect("溢出槽数量适配 u32"),
+                saved_gpr_count: u32::try_from(frame.save_offsets.len())
+                    .expect("保存寄存器数量适配 u32"),
+                checked: frame.checked,
+                stack_check_offset,
+            },
+        }
+    }
+}
+
+/// 全部片段的公开视图，按内部稳定键升序。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct X64Fragments {
+    /// 入口函数符号。
+    pub entry_symbol: String,
+    /// 片段列表。
+    pub fragments: Vec<X64Fragment>,
+}
+
+impl X64Fragments {
+    /// 按符号查找片段。
+    pub fn find(&self, symbol: &str) -> Option<&X64Fragment> {
+        self.fragments
+            .iter()
+            .find(|fragment| fragment.symbol == symbol)
     }
 }
 
@@ -256,9 +527,112 @@ impl X64World {
         &self.entry_symbol
     }
 
+    /// 全部片段里最大的 `frame_size`。
+    pub(crate) fn frame_size_max(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.frame.frame_size)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// 全部片段峰值活跃 GPR 数的最大值。
+    pub(crate) fn peak_live_gpr(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.stats.peak_live_gpr)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// 全部片段峰值活跃 XMM 数的最大值。
+    pub(crate) fn peak_live_xmm(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.stats.peak_live_xmm)
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// 全部片段的溢出重载次数之和。
+    pub(crate) fn reload_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.stats.reloads)
+            .sum()
+    }
+
+    /// 全部片段的溢出写回次数之和。
+    pub(crate) fn spill_store_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.stats.spill_stores)
+            .sum()
+    }
+
+    /// 全部片段的并行拷贝移动总数。
+    pub(crate) fn copy_move_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.stats.copy_moves)
+            .sum()
+    }
+
+    /// 全部片段破环次数之和。
+    pub(crate) fn copy_cycle_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.stats.copy_cycles)
+            .sum()
+    }
+
+    /// 全部片段分配器处理的值总数。
+    pub(crate) fn allocated_values(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.stats.allocated_values)
+            .sum()
+    }
+
+    /// 全部片段的溢出槽总数。
+    pub(crate) fn spill_slot_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.frame.spill_slots.len() as u32)
+            .sum()
+    }
+
+    /// 全部片段的溢出区字节数。
+    pub(crate) fn spill_bytes(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.stats.spill_bytes)
+            .sum()
+    }
+
+    /// 全部片段保存的 callee-saved GPR 总数。
+    pub(crate) fn saved_gpr_count(&self) -> u32 {
+        self.fragments
+            .iter()
+            .map(|fragment| fragment.frame.save_offsets.len() as u32)
+            .sum()
+    }
+
     /// 内存里的机器片段数。
     pub(crate) fn fragment_count(&self) -> u32 {
         to_u32(self.fragments.len())
+    }
+
+    /// 全部片段的公开视图。
+    pub(crate) fn view(&self, stack_check_offset: u32) -> X64Fragments {
+        X64Fragments {
+            entry_symbol: self.entry_symbol.clone(),
+            fragments: self
+                .fragments
+                .iter()
+                .map(|fragment| X64Fragment::of(fragment, stack_check_offset))
+                .collect(),
+        }
     }
 
     /// 返回人类可读的世界 dump：摘要、逐片段与逐站点三行式。
@@ -299,7 +673,7 @@ impl X64World {
             for site in &fragment.sites {
                 let _ = writeln!(
                     out,
-                    "x64-site {} {}.{} {} [{}] bytes={}..{} relocations={}..{}",
+                    "x64-site {} {}.{} {} [{}] bytes={}..{} relocations={}..{} points={}..{}",
                     hex_lower(fragment.instance),
                     site.block,
                     site.instruction,
@@ -308,9 +682,47 @@ impl X64World {
                     site.bytes.0,
                     site.bytes.1,
                     site.relocations.0,
-                    site.relocations.1
+                    site.relocations.1,
+                    site.points.0,
+                    site.points.1
                 );
             }
+            let frame = &fragment.frame;
+            let _ = writeln!(
+                out,
+                "x64-frame {} size={} payload={} outgoing={} required={} leaf={} locals={} spills={} scratch={} saves={} checked={}",
+                hex_lower(fragment.instance),
+                frame.frame_size,
+                frame.payload_bytes,
+                frame.outgoing_bytes,
+                frame.required_frame,
+                frame.max_leaf_reserve,
+                frame.locals.len(),
+                frame.spill_slots.len(),
+                frame
+                    .scratch_offset
+                    .map_or_else(|| "none".to_owned(), |offset| offset.to_string()),
+                frame.save_offsets.len(),
+                frame.checked
+            );
+            let stats = &fragment.stats;
+            let _ = writeln!(
+                out,
+                "x64-stats {} peak-gpr={} peak-xmm={} spill-slots={} spill-bytes={} spill-stores={} reloads={} rematerializations={} copy-moves={} copy-cycles={} call-sites={} safepoint-spills={} values={}",
+                hex_lower(fragment.instance),
+                stats.peak_live_gpr,
+                stats.peak_live_xmm,
+                stats.spill_slot_count,
+                stats.spill_bytes,
+                stats.spill_stores,
+                stats.reloads,
+                stats.rematerializations,
+                stats.copy_moves,
+                stats.copy_cycles,
+                stats.call_sites,
+                stats.safepoint_spills,
+                stats.allocated_values
+            );
         }
         out
     }
@@ -355,7 +767,7 @@ pub(crate) fn build(
                 QueryKey::new(
                     QueryKind::RuntimeRawModel,
                     RAW_MODEL_SCHEMA,
-                    &raw.fingerprint(),
+                    raw.fingerprint(),
                 ),
                 raw.fingerprint(),
             );
@@ -418,6 +830,7 @@ fn fragment_key(
     canonical.extend_from_slice(&raw.coroutine().fingerprint());
     canonical.extend_from_slice(&universe.fingerprint);
     canonical.extend_from_slice(&contract::LOWERING_REVISION.to_le_bytes());
+    canonical.extend_from_slice(&contract::ALLOCATION_REVISION.to_le_bytes());
     hash_domain(FRAGMENT_KEY_DOMAIN, &canonical)
 }
 
@@ -447,11 +860,13 @@ fn assemble_fragment(
         .map_err(|error| vec![invalid(&format!("{} 的指令选择失败：{error}", body.name))])?;
     verify::verify_function_sequence(&selected.sequence, contract.baseline)
         .map_err(|error| vec![invalid(&format!("{} 的选指序列非法：{error}", body.name))])?;
-    let assembled = assemble(&selected.sequence)
+    let allocated = alloc::allocate(body, selected, target, raw)?;
+    let assembled = assemble(&allocated.sequence)
         .map_err(|error| vec![invalid(&format!("{} 的片段编码失败：{error}", body.name))])?;
     let mut sites = Vec::new();
     let mut inst_cursor = 0_usize;
-    for block in &selected.blocks {
+    let mut site_ordinal = 0_usize;
+    for block in &allocated.blocks {
         for site in &block.sites {
             sites.push(site_payload(
                 body,
@@ -459,9 +874,11 @@ fn assemble_fragment(
                 site.instruction,
                 site.op,
                 &site.lowered,
+                allocated.sites.get(site_ordinal),
                 &assembled,
                 &mut inst_cursor,
             ));
+            site_ordinal += 1;
         }
         let term_index = body.blocks[block.id.index()].instructions.end;
         sites.push(site_payload(
@@ -470,9 +887,11 @@ fn assemble_fragment(
             term_index,
             terminator_name(&body.blocks[block.id.index()].terminator),
             &block.terminator,
+            allocated.sites.get(site_ordinal),
             &assembled,
             &mut inst_cursor,
         ));
+        site_ordinal += 1;
     }
     fill_relocation_ranges(&mut sites, &assembled.relocations);
     let mut fragment = FragmentPayload {
@@ -481,11 +900,11 @@ fn assemble_fragment(
         instance: body.instance,
         lir_fingerprint,
         encoder_fingerprint: encoder,
-        symbol: selected.symbol,
+        symbol: allocated.symbol.clone(),
         symbols: reference_symbols(&assembled.relocations),
-        rel8_count: selected.rel8_count,
+        rel8_count: allocated.rel8_count,
         hot_block_count: to_u32(
-            selected
+            allocated
                 .layout
                 .blocks
                 .iter()
@@ -493,17 +912,33 @@ fn assemble_fragment(
                 .count(),
         ),
         cold_block_count: to_u32(
-            selected
+            allocated
                 .layout
                 .blocks
                 .iter()
                 .filter(|block| !block.hot)
                 .count(),
         ),
-        abi_integer_args: selected.abi.integer_args,
-        abi_float_args: selected.abi.float_args,
-        abi_stack_slots: selected.abi.stack_slots,
-        sret: selected.abi.sret,
+        abi_integer_args: allocated.abi.integer_args,
+        abi_float_args: allocated.abi.float_args,
+        abi_stack_slots: allocated.abi.stack_slots,
+        sret: allocated.abi.sret,
+        frame: FramePayload::of(&allocated),
+        points: allocated
+            .points
+            .iter()
+            .map(|point| PointPayload {
+                site: point.site,
+                kind: point.kind.code(),
+                use_slot: point.use_slot,
+                def_slot: point.def_slot,
+                clobber_gpr: point.mask.gpr,
+                clobber_xmm: point.mask.xmm,
+                pointer_spill: point.pointer_spill,
+            })
+            .collect(),
+        values: allocated.values.iter().map(ValuePayload::of).collect(),
+        stats: StatsPayload::of(&allocated),
         sites,
         bytes: assembled.bytes,
         relocations: assembled.relocations,
@@ -559,12 +994,17 @@ fn internal_symbol_shape(text: &str) -> bool {
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "站点 payload 需要来源、位置、点位与已编码字节四类输入"
+)]
 fn site_payload(
     body: &Body,
     block: u32,
     instruction: u32,
     op: &str,
     lowered: &Lowered,
+    points: Option<&alloc::SitePoints>,
     assembled: &super::inst::Assembled,
     inst_cursor: &mut usize,
 ) -> SitePayload {
@@ -599,6 +1039,9 @@ fn site_payload(
             _ => None,
         })
         .collect();
+    let points = points
+        .map(|points| (points.points.start, points.points.end))
+        .unwrap_or((0, 0));
     SitePayload {
         block,
         instruction,
@@ -612,6 +1055,7 @@ fn site_payload(
         constraints: Vec::new(),
         cold_edges,
         clobbers: (lowered.clobbers.gpr, lowered.clobbers.xmm),
+        points,
     }
 }
 

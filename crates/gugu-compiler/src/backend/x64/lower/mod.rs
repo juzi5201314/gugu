@@ -11,6 +11,10 @@
 //!   lowering 不隐式破坏输入。
 //! - lowering 内部的临时寄存器是固定的物理 scratch（`r11`、`rax`/`rcx`/`rdx`、`xmm15`），
 //!   全部登记进 [`Lowered::clobbers`]；LIR 值对应的虚拟寄存器直接透传。
+//! - 需要「所有读先于所有写」的成组搬运走 [`Builder::record_group`]：站点里渲染一份虚拟层
+//!   可编码序列，同一批 pairs 交给分配阶段用物理位置重发。
+//! - `StackCheck`、`BarrierReserve`、`NoSafepointBegin`/`End` 是标记，不产出指令：prologue
+//!   由 frame 阶段按 [`super::alloc`] 的 `FrameLayout` 合成。
 
 pub(crate) mod alloc;
 pub(crate) mod asm;
@@ -45,12 +49,16 @@ pub(crate) struct SiteValue {
     pub(crate) reg: Reg,
 }
 
-/// lowering 结果：机器序列与破坏的物理寄存器集合。
+/// lowering 结果：机器序列、破坏的物理寄存器集合与登记的并行拷贝组。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Lowered {
     pub(crate) sequence: Sequence,
     pub(crate) clobbers: Clobbers,
+    /// 站点序列内的并行拷贝组；分配阶段按组重发，渲染结果被整体替换。
+    pub(crate) copy_groups: Vec<CopyGroup>,
 }
+
+pub(crate) use super::copies::{Copy, CopyGroup};
 
 /// lowering 失败。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -401,11 +409,12 @@ pub(crate) fn probe_source() -> SourceInfo {
     }
 }
 
-/// lowering 序列构造器：指令、标签定义与 clobber 登记。
+/// lowering 序列构造器：指令、标签定义、clobber 与并行拷贝组登记。
 pub(crate) struct Builder {
     sequence: Sequence,
     clobbers: Clobbers,
     next_label: u32,
+    copy_groups: Vec<CopyGroup>,
 }
 
 impl Builder {
@@ -420,6 +429,7 @@ impl Builder {
             sequence: Sequence::new(),
             clobbers: Clobbers::NONE,
             next_label: base,
+            copy_groups: Vec::new(),
         }
     }
 
@@ -432,7 +442,49 @@ impl Builder {
         Lowered {
             sequence: self.sequence,
             clobbers: self.clobbers,
+            copy_groups: self.copy_groups,
         }
+    }
+
+    /// 记录一段物理并行拷贝：`emit` 在站点序列里渲染虚拟层结果，`pairs` 是并行语义的
+    /// 原始配对（物理寄存器一侧不产生活跃事件）。
+    pub(crate) fn record_group(
+        &mut self,
+        pairs: &[Copy],
+        emit: impl FnOnce(&mut Builder) -> Result<(), LoweringError>,
+    ) -> Result<(), LoweringError> {
+        let start = self.instruction_count();
+        emit(self)?;
+        let end = self.instruction_count();
+        self.record_group_span(pairs.to_vec(), start..end);
+        Ok(())
+    }
+
+    /// 记录**已经发射完**的一段并行拷贝：`instructions` 是被整体替换的渲染指令范围。
+    ///
+    /// 实参落位会按声明顺序交替出现寄存器 move 与 outgoing 栈 piece，此时调用方在切换
+    /// 目标种类处收束当前组，用本方法登记已发射的连续寄存器渲染段。
+    pub(crate) fn record_group_span(
+        &mut self,
+        pairs: Vec<Copy>,
+        instructions: std::ops::Range<u32>,
+    ) {
+        debug_assert!(instructions.start <= instructions.end);
+        self.copy_groups.push(CopyGroup {
+            instructions,
+            pairs,
+        });
+    }
+
+    /// 站点序列当前的机器指令数。
+    pub(crate) fn instruction_count(&self) -> u32 {
+        u32::try_from(self.sequence.instructions.len()).expect("站点指令数适配 u32")
+    }
+
+    /// 追加一段已构造的序列（含标签定义）；标签编号由调用方保证不冲突。
+    pub(crate) fn extend(&mut self, sequence: Sequence) {
+        self.sequence.instructions.extend(sequence.instructions);
+        self.sequence.labels.extend(sequence.labels);
     }
 
     /// 追加一条已解析 form 的指令。

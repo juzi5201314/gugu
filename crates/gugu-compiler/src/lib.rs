@@ -26,6 +26,9 @@ pub use query::{
 };
 
 pub use action::{ActionGraph, ActionKind, ActionNode, ActionStatus};
+pub use backend::x64::codegen::{
+    X64Fragment, X64FragmentFrame, X64FragmentRelocation, X64Fragments,
+};
 pub use backend::x64::harness::{
     X64Case, X64Code, X64DecodeFixture, X64Harness, X64HarnessError, X64HarnessReport,
     X64MemorySlot, X64Register, X64RelocationView,
@@ -355,6 +358,17 @@ impl Compilation {
         self.x64
             .as_ref()
             .map(backend::x64::codegen::X64World::fingerprint)
+    }
+
+    /// 返回全部机器码片段的公开视图；没有可执行入口或片段生成失败时为 `None`。
+    pub fn x64_fragments(&self) -> Option<X64Fragments> {
+        let stack_check_offset = self
+            .raw_contract
+            .as_ref()
+            .map(|contract| contract.coroutine().stack_check_offset)?;
+        self.x64
+            .as_ref()
+            .map(|world| world.view(stack_check_offset))
     }
 
     /// 返回已验证的契约对象本身；供确定性测试与 `EdgeCandidateHarness` 用真实契约配置 world。
@@ -1412,6 +1426,18 @@ pub struct ImagePlan {
     x64_hot_block_count: u32,
     x64_cold_block_count: u32,
     x64_entry_symbol: String,
+    x64_frame_size_max: u32,
+    x64_spill_slot_count: u32,
+    x64_spill_bytes: u32,
+    x64_saved_gpr_count: u32,
+    x64_reload_count: u32,
+    x64_spill_store_count: u32,
+    x64_copy_move_count: u32,
+    x64_copy_cycle_count: u32,
+    x64_peak_live_gpr: u32,
+    x64_peak_live_xmm: u32,
+    x64_allocated_values: u32,
+    coroutine_stack_check_offset: u32,
     scheduler_poll_flags_offset: u32,
 }
 
@@ -1623,6 +1649,18 @@ impl ImagePlan {
             x64_hot_block_count: plan.x64_hot_block_count,
             x64_cold_block_count: plan.x64_cold_block_count,
             x64_entry_symbol: plan.x64_entry_symbol,
+            x64_frame_size_max: plan.x64_frame_size_max,
+            x64_spill_slot_count: plan.x64_spill_slot_count,
+            x64_spill_bytes: plan.x64_spill_bytes,
+            x64_saved_gpr_count: plan.x64_saved_gpr_count,
+            x64_reload_count: plan.x64_reload_count,
+            x64_spill_store_count: plan.x64_spill_store_count,
+            x64_copy_move_count: plan.x64_copy_move_count,
+            x64_copy_cycle_count: plan.x64_copy_cycle_count,
+            x64_peak_live_gpr: plan.x64_peak_live_gpr,
+            x64_peak_live_xmm: plan.x64_peak_live_xmm,
+            x64_allocated_values: plan.x64_allocated_values,
+            coroutine_stack_check_offset: plan.coroutine_stack_check_offset,
             scheduler_poll_flags_offset: plan.scheduler_poll_flags_offset,
         }
     }
@@ -1775,6 +1813,66 @@ impl ImagePlan {
     /// 返回入口 mangled 符号。
     pub fn x64_entry_symbol(&self) -> &str {
         &self.x64_entry_symbol
+    }
+
+    /// 返回分配后的最大栈帧字节数。
+    pub fn x64_frame_size_max(&self) -> u32 {
+        self.x64_frame_size_max
+    }
+
+    /// 返回溢出槽总数。
+    pub fn x64_spill_slot_count(&self) -> u32 {
+        self.x64_spill_slot_count
+    }
+
+    /// 返回溢出区字节数。
+    pub fn x64_spill_bytes(&self) -> u32 {
+        self.x64_spill_bytes
+    }
+
+    /// 返回保存的 callee-saved GPR 数。
+    pub fn x64_saved_gpr_count(&self) -> u32 {
+        self.x64_saved_gpr_count
+    }
+
+    /// 返回溢出重载次数。
+    pub fn x64_reload_count(&self) -> u32 {
+        self.x64_reload_count
+    }
+
+    /// 返回溢出写回次数。
+    pub fn x64_spill_store_count(&self) -> u32 {
+        self.x64_spill_store_count
+    }
+
+    /// 返回并行拷贝移动总数。
+    pub fn x64_copy_move_count(&self) -> u32 {
+        self.x64_copy_move_count
+    }
+
+    /// 返回并行拷贝破环次数。
+    pub fn x64_copy_cycle_count(&self) -> u32 {
+        self.x64_copy_cycle_count
+    }
+
+    /// 返回峰值活跃 GPR 数。
+    pub fn x64_peak_live_gpr(&self) -> u32 {
+        self.x64_peak_live_gpr
+    }
+
+    /// 返回峰值活跃 XMM 数。
+    pub fn x64_peak_live_xmm(&self) -> u32 {
+        self.x64_peak_live_xmm
+    }
+
+    /// 返回分配器处理的值总数。
+    pub fn x64_allocated_values(&self) -> u32 {
+        self.x64_allocated_values
+    }
+
+    /// 返回协程栈检查偏移。
+    pub fn coroutine_stack_check_offset(&self) -> u32 {
+        self.coroutine_stack_check_offset
     }
 
     /// 返回 `[r15 + poll_flags]` 偏移。

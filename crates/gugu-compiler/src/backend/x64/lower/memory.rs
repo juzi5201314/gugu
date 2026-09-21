@@ -2,11 +2,11 @@
 
 use crate::backend::x64::inst::{Mem, Operand, RelocKind, RelocTarget, Scale};
 use crate::backend::x64::mangle;
-use crate::backend::x64::reg::Reg;
+use crate::backend::x64::reg::{Gpr, Reg};
 use crate::backend::x64::table::{Access, OperandKind};
 use crate::lir::body::{Op, Symbol, Type};
 
-use super::{Builder, LoweringError, SiteValue, access_bits, imm, mem_base, move_kinds, reg};
+use super::{Builder, Copy, LoweringError, SiteValue, access_bits, imm, mem_base, move_kinds, reg};
 
 const MEM_R64: &[OperandKind] = &[OperandKind::Mem, OperandKind::R64];
 const REL32: &[OperandKind] = &[OperandKind::Rel32];
@@ -60,12 +60,20 @@ fn stack_addr(
     let [result] = results else {
         return Err(LoweringError::InvalidOperands);
     };
-    // 阶段 54 把 Virtual(slot) 换成真实 frame slot；本阶段编码器对虚拟基址已有占位。
+    // 占位基址落在 frame 局部槽空间（`FRAME_SLOT_BASE` 之上）；分配阶段按 frame layout
+    // 改写成 `[rsp + local_offset(slot)] + disp`。
+    debug_assert!(slot.0 < crate::backend::x64::reg::FRAME_SLOT_BASE);
     builder.emit(
         "lea",
         MEM_R64,
         Access::Address,
-        vec![mem_base(Reg::Virtual(slot.0), 0), reg(result.reg)],
+        vec![
+            mem_base(
+                Reg::Virtual(slot.0 + crate::backend::x64::reg::FRAME_SLOT_BASE),
+                0,
+            ),
+            reg(result.reg),
+        ],
     );
     Ok(())
 }
@@ -121,12 +129,7 @@ fn load(
         32 => &[OperandKind::Rm32, OperandKind::R32][..],
         _ => &[OperandKind::Rm64, OperandKind::R64][..],
     };
-    builder.emit(
-        "mov",
-        kinds,
-        Access::Read,
-        vec![place, reg(result.reg)],
-    );
+    builder.emit("mov", kinds, Access::Read, vec![place, reg(result.reg)]);
     Ok(())
 }
 
@@ -159,12 +162,7 @@ fn store(operands: &[SiteValue], builder: &mut Builder) -> Result<(), LoweringEr
         32 => &[OperandKind::Rm32, OperandKind::R32][..],
         _ => &[OperandKind::Rm64, OperandKind::R64][..],
     };
-    builder.emit(
-        "mov",
-        kinds,
-        Access::Write,
-        vec![place, reg(value.reg)],
-    );
+    builder.emit("mov", kinds, Access::Write, vec![place, reg(value.reg)]);
     Ok(())
 }
 
@@ -175,38 +173,33 @@ fn memory_call(
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
     let dest = operands.first().ok_or(LoweringError::InvalidOperands)?;
-    emit_move(
-        builder,
-        dest.reg,
-        Reg::Gpr(crate::backend::x64::reg::Gpr::Rax),
-    )?;
-    if name != "memset" {
-        let src = operands.get(1).ok_or(LoweringError::InvalidOperands)?;
-        emit_move(
-            builder,
-            src.reg,
-            Reg::Gpr(crate::backend::x64::reg::Gpr::Rbx),
-        )?;
-    } else {
-        let value = operands.get(1).ok_or(LoweringError::InvalidOperands)?;
-        emit_move(
-            builder,
-            value.reg,
-            Reg::Gpr(crate::backend::x64::reg::Gpr::Rbx),
-        )?;
-    }
+    let second = operands.get(1).ok_or(LoweringError::InvalidOperands)?;
+    // 实参落位是并行的：目标全是物理寄存器，无环，但必须作为一组重发。
+    let pairs = [
+        Copy {
+            src: dest.reg,
+            dest: Reg::Gpr(Gpr::Rax),
+            ty: Type::Ptr,
+        },
+        Copy {
+            src: second.reg,
+            dest: Reg::Gpr(Gpr::Rbx),
+            ty: Type::Ptr,
+        },
+    ];
+    builder.record_group(&pairs, |builder| {
+        emit_move(builder, dest.reg, Reg::Gpr(Gpr::Rax))?;
+        emit_move(builder, second.reg, Reg::Gpr(Gpr::Rbx))
+    })?;
     builder.emit(
         "mov",
         &[OperandKind::R64, OperandKind::Imm32],
         Access::Write,
-        vec![
-            reg(Reg::Gpr(crate::backend::x64::reg::Gpr::Rcx)),
-            imm(bytes),
-        ],
+        vec![reg(Reg::Gpr(Gpr::Rcx)), imm(bytes)],
     );
-    builder.clobber_gpr(crate::backend::x64::reg::Gpr::Rax);
-    builder.clobber_gpr(crate::backend::x64::reg::Gpr::Rbx);
-    builder.clobber_gpr(crate::backend::x64::reg::Gpr::Rcx);
+    builder.clobber_gpr(Gpr::Rax);
+    builder.clobber_gpr(Gpr::Rbx);
+    builder.clobber_gpr(Gpr::Rcx);
     builder.emit(
         "call",
         REL32,

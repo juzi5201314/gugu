@@ -207,6 +207,30 @@ pub(crate) struct BackendPlan {
     pub(crate) x64_cold_block_count: u32,
     /// 入口 mangled 符号。
     pub(crate) x64_entry_symbol: String,
+    /// 分配后的最大栈帧字节数。
+    pub(crate) x64_frame_size_max: u32,
+    /// 溢出槽总数。
+    pub(crate) x64_spill_slot_count: u32,
+    /// 溢出区字节数。
+    pub(crate) x64_spill_bytes: u32,
+    /// 保存的 callee-saved GPR 数。
+    pub(crate) x64_saved_gpr_count: u32,
+    /// 溢出重载次数。
+    pub(crate) x64_reload_count: u32,
+    /// 溢出写回次数。
+    pub(crate) x64_spill_store_count: u32,
+    /// 并行拷贝移动总数。
+    pub(crate) x64_copy_move_count: u32,
+    /// 并行拷贝破环次数。
+    pub(crate) x64_copy_cycle_count: u32,
+    /// 峰值活跃 GPR 数。
+    pub(crate) x64_peak_live_gpr: u32,
+    /// 峰值活跃 XMM 数。
+    pub(crate) x64_peak_live_xmm: u32,
+    /// 分配器处理的值总数。
+    pub(crate) x64_allocated_values: u32,
+    /// 协程栈检查偏移。
+    pub(crate) coroutine_stack_check_offset: u32,
     /// `[r15 + poll_flags]` 偏移。
     pub(crate) scheduler_poll_flags_offset: u32,
 }
@@ -417,6 +441,18 @@ pub(crate) fn plan(
         x64_hot_block_count: x64.hot_block_count(),
         x64_cold_block_count: x64.cold_block_count(),
         x64_entry_symbol: x64.entry_symbol().to_owned(),
+        x64_frame_size_max: x64.frame_size_max(),
+        x64_spill_slot_count: x64.spill_slot_count(),
+        x64_spill_bytes: x64.spill_bytes(),
+        x64_saved_gpr_count: x64.saved_gpr_count(),
+        x64_reload_count: x64.reload_count(),
+        x64_spill_store_count: x64.spill_store_count(),
+        x64_copy_move_count: x64.copy_move_count(),
+        x64_copy_cycle_count: x64.copy_cycle_count(),
+        x64_peak_live_gpr: x64.peak_live_gpr(),
+        x64_peak_live_xmm: x64.peak_live_xmm(),
+        x64_allocated_values: x64.allocated_values(),
+        coroutine_stack_check_offset: raw.coroutine().stack_check_offset,
         scheduler_poll_flags_offset: raw.scheduler().poll_flags_offset(),
     })
 }

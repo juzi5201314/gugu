@@ -49,8 +49,11 @@ pub(super) fn coroutine_switch(builder: &mut Builder) -> Result<(), LoweringErro
 /// 一条边的块参数拷贝。
 pub(crate) type Copies = Vec<crate::backend::x64::copies::Copy>;
 
-/// 终结符序列。`copies(edge)` 只为该边生成拷贝，放置位置由这里按路径决定。
-#[allow(clippy::too_many_arguments)]
+/// 终结符序列。`copies(edge)` 只为该边生成并行 pairs，放置位置由这里按路径决定。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "终结符 lowering 需要 CFG、目标、builder、布局提示与拷贝回调五类输入"
+)]
 pub(crate) fn terminator(
     body: &Body,
     block: BlockId,
@@ -60,12 +63,13 @@ pub(crate) fn terminator(
     builder: &mut Builder,
     emit_jump: bool,
     invert_branch: bool,
+    temps: &mut crate::backend::x64::copies::Temps,
     block_label: impl Fn(BlockId) -> LabelId,
     copies: &mut dyn FnMut(EdgeId) -> Result<Copies, LoweringError>,
 ) -> Result<(), LoweringError> {
     match terminator {
         Terminator::Jump(edge) => {
-            place(builder, copies(*edge)?)?;
+            place(builder, copies(*edge)?, temps)?;
             if emit_jump {
                 emit_to(builder, "jmp", block_label(body.edges[edge.index()].to))?;
             }
@@ -95,7 +99,7 @@ pub(crate) fn terminator(
             if taken_copies.is_empty() {
                 // 快路：taken 边不需要拷贝，条件分支直接指向目标块。
                 emit_to(builder, mnemonic, block_label(body.edges[taken.index()].to))?;
-                place(builder, fall_copies)?;
+                place(builder, fall_copies, temps)?;
                 if emit_jump {
                     emit_to(builder, "jmp", block_label(body.edges[fall.index()].to))?;
                 }
@@ -103,11 +107,11 @@ pub(crate) fn terminator(
             }
             let trampoline = builder.label();
             emit_to(builder, mnemonic, trampoline)?;
-            place(builder, fall_copies)?;
+            place(builder, fall_copies, temps)?;
             // trampoline 夹在中间，fall 路径必须显式跳开。
             emit_to(builder, "jmp", block_label(body.edges[fall.index()].to))?;
             builder.define(trampoline);
-            place(builder, taken_copies)?;
+            place(builder, taken_copies, temps)?;
             emit_to(builder, "jmp", block_label(body.edges[taken.index()].to))
         }
         Terminator::Switch {
@@ -136,6 +140,10 @@ pub(crate) fn terminator(
                     trampolines.push((trampoline, *edge, edge_copies));
                 }
             }
+            // 默认路径只由「所有 case 都不匹配」的直落路径进入：它的参数拷贝必须落在
+            // 这里，trampoline 跟在默认跳转之后。
+            let otherwise_copies = copies(*otherwise)?;
+            place(builder, otherwise_copies, temps)?;
             // trampoline 跟在默认路径之后，默认跳转必须总是显式发射。
             emit_to(
                 builder,
@@ -144,7 +152,7 @@ pub(crate) fn terminator(
             )?;
             for (trampoline, edge, edge_copies) in trampolines {
                 builder.define(trampoline);
-                place(builder, edge_copies)?;
+                place(builder, edge_copies, temps)?;
                 emit_to(builder, "jmp", block_label(body.edges[edge.index()].to))?;
             }
             Ok(())
@@ -159,7 +167,7 @@ pub(crate) fn terminator(
             let args = values(body.args(arguments));
             let dests = result_values(body, results);
             emit_managed_or_foreign(call, &args, &dests, target, builder)?;
-            place(builder, copies(*normal)?)?;
+            place(builder, copies(*normal)?, temps)?;
             if emit_jump {
                 emit_to(builder, "jmp", block_label(body.edges[normal.index()].to))?;
             }
@@ -206,12 +214,25 @@ pub(crate) fn terminator(
     }
 }
 
-/// 把一条边的块参数拷贝追加进当前路径。
-fn place(builder: &mut Builder, copies: Copies) -> Result<(), LoweringError> {
-    for copy in copies {
-        value_move(builder, copy.src, copy.dest, copy.ty)?;
+/// 把一条边的并行 pairs 摊平渲染进当前路径，并把原始 pairs 登记成拷贝组。
+///
+/// 渲染结果里可能出现临时虚拟寄存器（环的打断），分配阶段按 pairs 用物理位置重发时会
+/// 丢弃整段渲染，因此临时编号不进入活区间。
+fn place(
+    builder: &mut Builder,
+    pairs: Copies,
+    temps: &mut crate::backend::x64::copies::Temps,
+) -> Result<(), LoweringError> {
+    if pairs.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let scheduled = crate::backend::x64::copies::schedule(&pairs, temps)?;
+    builder.record_group(&pairs, |builder| {
+        for copy in &scheduled {
+            value_move(builder, copy.src, copy.dest, copy.ty)?;
+        }
+        Ok(())
+    })
 }
 
 fn result_values(body: &Body, results: &std::ops::Range<u32>) -> Vec<SiteValue> {
@@ -245,11 +266,14 @@ fn emit_managed_or_foreign(
     call::collect_results(results, &layout, builder)
 }
 
+/// 返回值落位：寄存器槽按声明顺序渲染并登记为并行拷贝组，栈 piece 直接发射。
 fn move_returns(
     returned: &[SiteValue],
     layout: &abi::AbiLayout,
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
+    let mut pending: Vec<super::Copy> = Vec::new();
+    let mut start = builder.instruction_count();
     for value in &layout.results {
         let Some(slot) = value.slot else {
             continue;
@@ -258,7 +282,29 @@ fn move_returns(
         let Some(source) = returned.get(index) else {
             continue;
         };
-        call::move_to_slot(builder, source.reg, slot, value.ty)?;
+        match slot {
+            abi::AbiSlot::Integer(gpr) => {
+                pending.push(super::Copy {
+                    src: source.reg,
+                    dest: Reg::Gpr(gpr),
+                    ty: value.ty.ty,
+                });
+                value_move(builder, source.reg, Reg::Gpr(gpr), value.ty.ty)?;
+            }
+            abi::AbiSlot::Float(xmm) => {
+                pending.push(super::Copy {
+                    src: source.reg,
+                    dest: Reg::Xmm(xmm),
+                    ty: value.ty.ty,
+                });
+                value_move(builder, source.reg, Reg::Xmm(xmm), value.ty.ty)?;
+            }
+            abi::AbiSlot::Stack { offset } => {
+                call::flush_group(builder, &mut pending, &mut start);
+                super::store_stack(builder, source.reg, offset, value.ty.ty)?;
+            }
+        }
     }
+    call::flush_group(builder, &mut pending, &mut start);
     Ok(())
 }

@@ -851,6 +851,18 @@ fn build_json_reports_x64_fragment_keys() {
         "x64-hot-block-count",
         "x64-cold-block-count",
         "x64-entry-symbol",
+        "x64-frame-size-max",
+        "x64-spill-slot-count",
+        "x64-spill-bytes",
+        "x64-saved-gpr-count",
+        "x64-reload-count",
+        "x64-spill-store-count",
+        "x64-copy-move-count",
+        "x64-copy-cycle-count",
+        "x64-peak-live-gpr",
+        "x64-peak-live-xmm",
+        "x64-allocated-values",
+        "coroutine-stack-check-offset",
         "scheduler-poll-flags-offset",
     ] {
         assert!(payload.get(key).is_some(), "JSON 缺少 {key}");
@@ -875,7 +887,7 @@ fn build_json_reports_x64_fragment_keys() {
     );
     let dump = compilation.dump_x64().expect("片段 dump");
     assert_eq!(dump, compilation.dump_x64().expect("片段 dump 必须稳定"));
-    assert!(dump.contains("x64 schema=3 target=x86_64-linux"), "{dump}");
+    assert!(dump.contains("x64 schema=4 target=x86_64-linux"), "{dump}");
     assert!(dump.contains("symbol=__gugu_fn_"), "{dump}");
     // 源码含乘法、除法与条件：dump 必须出现真实助记符。
     assert!(dump.contains("imul"), "{dump}");
@@ -884,5 +896,21 @@ fn build_json_reports_x64_fragment_keys() {
     assert!(
         dump.contains("jmp") || dump.contains("jne") || dump.contains("je"),
         "{dump}"
+    );
+    // 分配后必须给出 frame 布局与统计，且站点带点位范围。
+    assert!(dump.contains("x64-frame "), "{dump}");
+    assert!(dump.contains(" checked=true"), "{dump}");
+    assert!(dump.contains("x64-stats "), "{dump}");
+    assert!(dump.contains("points="), "{dump}");
+    assert_eq!(payload["x64-frame-size-max"], plan.x64_frame_size_max());
+    assert_eq!(payload["x64-allocated-values"], plan.x64_allocated_values());
+    assert_eq!(payload["x64-peak-live-gpr"], plan.x64_peak_live_gpr());
+    assert_eq!(
+        payload["coroutine-stack-check-offset"],
+        plan.coroutine_stack_check_offset()
+    );
+    assert!(
+        plan.x64_allocated_values() > 0,
+        "入口函数必须把虚拟值落成物理位置"
     );
 }

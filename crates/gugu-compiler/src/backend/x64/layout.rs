@@ -291,7 +291,7 @@ fn visit(body: &Body, id: BlockId, seen: &mut [bool], post: &mut Vec<BlockId>) {
     post.push(id);
 }
 
-fn successors(body: &Body, id: BlockId) -> Vec<BlockId> {
+pub(crate) fn successors(body: &Body, id: BlockId) -> Vec<BlockId> {
     let terminator = &body.blocks[id.index()].terminator;
     match terminator {
         Terminator::Jump(edge) => vec![body.edges[edge.index()].to],

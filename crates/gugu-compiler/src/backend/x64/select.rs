@@ -36,7 +36,39 @@ pub(crate) struct SelectedBlock {
 pub(crate) struct SelectedSite {
     pub instruction: u32,
     pub op: &'static str,
+    /// 分配阶段的站点分类；决定点位 mask 与 pointer spill 规则。
+    pub kind: SiteKind,
     pub lowered: Lowered,
+}
+
+/// 站点在分配阶段的分类：由 LIR op 的规范 safepoint 种类推出，不另建第二张分类表。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SiteKind {
+    /// 普通站点：mask 只看指令的物理寄存器写。
+    Normal,
+    /// 含调用或其它 caller-saved 破坏点（call return、分配、poll、屏障、select）。
+    Call,
+    /// 挂起或 bridge 站点：跨点活跃的 managed/stack 指针必须落 frame slot。
+    Bridge,
+    /// 入口 `StackCheck` 标记站点：prologue 由 frame 阶段完全合成。
+    Prologue,
+}
+
+impl SiteKind {
+    /// 由 LIR 指令的 safepoint 种类推出站点分类。
+    fn of(op: &crate::lir::body::Op) -> Self {
+        use crate::lir::body::SafepointKind;
+        match op.safepoint_kind() {
+            Some(SafepointKind::StackCheck) => Self::Prologue,
+            Some(
+                SafepointKind::Suspend
+                | SafepointKind::ForeignBridge
+                | SafepointKind::DirtyCpuBridge,
+            ) => Self::Bridge,
+            Some(_) => Self::Call,
+            None => Self::Normal,
+        }
+    }
 }
 
 /// 已选择的函数。
@@ -58,6 +90,11 @@ pub(crate) fn select_body(
     raw: &RuntimeRawContractV1,
     target: TargetName,
 ) -> Result<SelectedFunction, LoweringError> {
+    // 值编号与 lowering 临时编号共享同一上界：`StackAddr` 的 frame 占位基址从
+    // `FRAME_SLOT_BASE` 起，两个空间不能重叠。
+    debug_assert!(
+        u32::try_from(body.values.len()).expect("值编号适配 u32") < super::reg::FRAME_SLOT_BASE
+    );
     let abi = abi::classify_signature(&body.signature)?;
     let layout = layout::schedule(body);
     let mut ctx = LowerCtx {
@@ -97,6 +134,7 @@ pub(crate) fn select_body(
             sites.push(SelectedSite {
                 instruction: crate::lir::body::id(index),
                 op: lower::domain(&instruction.op),
+                kind: SiteKind::of(&instruction.op),
                 lowered,
             });
         }
@@ -120,7 +158,7 @@ pub(crate) fn select_body(
         };
         let terminator_label_base = next_label;
         let mut term_builder = Builder::with_labels(terminator_label_base);
-        let mut edge_copies = |edge: EdgeId| copies::edge_copies(body, edge, &mut temps);
+        let mut edge_copies = |edge: EdgeId| copies::edge_copies(body, edge);
         lower::ctrl::terminator(
             body,
             block.id,
@@ -130,6 +168,7 @@ pub(crate) fn select_body(
             &mut term_builder,
             emit_jump,
             invert,
+            &mut temps,
             |id| super::inst::LabelId(id.0),
             &mut edge_copies,
         )
@@ -194,7 +233,12 @@ fn label_usage(sequence: &Sequence) -> u32 {
     used
 }
 
-fn stitch(blocks: &[SelectedBlock], sequence: &mut Sequence) {
+/// 重拼函数级序列：块标签原样定义，站点序列按累积位移重写标签，终结符标签已属函数级
+/// 编号空间，只做追加。
+///
+/// 分配阶段改写每个站点的序列后必须用同一函数重拼：追加顺序与指令数不变，块标签与
+/// 终结符标签的编号记账因此保持成立。
+pub(crate) fn stitch_blocks(blocks: &[SelectedBlock], sequence: &mut Sequence) {
     let block_base = blocks.iter().map(|block| block.id.0 + 1).max().unwrap_or(0);
     let mut local_shift = block_base;
     for block in blocks {
@@ -209,14 +253,30 @@ fn stitch(blocks: &[SelectedBlock], sequence: &mut Sequence) {
         // 终结符标签已在选指阶段按同一编号空间分配；块标签不能被平移，因此这里只做追加。
         // 区间终点来自选指阶段：终结符里的块标签引用不能参与局部标签计数。
         debug_assert_eq!(local_shift, block.terminator_label_base);
+        let terminator_at = u32::try_from(sequence.instructions.len()).expect("指令数适配 u32");
         for inst in &block.terminator.sequence.instructions {
             sequence.instructions.push(inst.clone());
         }
+        // 终结符里的站内标签（跳板标签）定义在终结符序列内部，位置必须重定基到函数序列。
         sequence
             .labels
-            .extend(block.terminator.sequence.labels.iter().cloned());
+            .extend(
+                block
+                    .terminator
+                    .sequence
+                    .labels
+                    .iter()
+                    .map(|definition| LabelDefinition {
+                        label: definition.label,
+                        at: definition.at.saturating_add(terminator_at),
+                    }),
+            );
         local_shift = block.terminator_label_end;
     }
+}
+
+fn stitch(blocks: &[SelectedBlock], sequence: &mut Sequence) {
+    stitch_blocks(blocks, sequence);
 }
 
 fn append_local(dest: &mut Sequence, src: &Sequence, local_shift: &mut u32) {

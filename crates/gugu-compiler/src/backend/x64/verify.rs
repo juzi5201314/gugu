@@ -2,6 +2,7 @@
 //! 违反寄存器纪律的序列。
 
 use std::fmt;
+use std::ops::Range;
 
 use super::encode::sequence_clobbers;
 use super::inst::{Inst, LabelId, Operand, RelocKind, RelocTarget, Scale, Sequence};
@@ -39,6 +40,15 @@ impl std::error::Error for VerifyError {}
 
 /// 校验单条指令：形状、baseline、lock、内存操作数与保留寄存器。
 pub(crate) fn verify_inst(inst: &Inst, baseline: CpuBaseline) -> Result<(), VerifyError> {
+    verify_inst_with(inst, baseline, false)
+}
+
+/// 校验单条指令；`abi_region` 允许写 `rsp`（prologue/epilogue 建立与释放 frame）。
+pub(crate) fn verify_inst_with(
+    inst: &Inst,
+    baseline: CpuBaseline,
+    abi_region: bool,
+) -> Result<(), VerifyError> {
     let Some(form) = table::try_form(inst.form) else {
         return Err(VerifyError::new("form 编号越界"));
     };
@@ -57,10 +67,10 @@ pub(crate) fn verify_inst(inst: &Inst, baseline: CpuBaseline) -> Result<(), Veri
             baseline.name()
         )));
     }
-    for (kind, operand) in form.operands.iter().zip(&inst.operands) {
+    for (position, (kind, operand)) in form.operands.iter().zip(&inst.operands).enumerate() {
         if !operand_matches(*kind, operand) {
             return Err(VerifyError::new(format!(
-                "{} 的操作数形状与表不一致",
+                "{} 的操作数形状与表不一致：第 {position} 个操作数是 {operand:?}，槽位要求 {kind:?}",
                 form.mnemonic
             )));
         }
@@ -102,6 +112,7 @@ pub(crate) fn verify_inst(inst: &Inst, baseline: CpuBaseline) -> Result<(), Veri
         };
         if matches!(access, Access::Write | Access::ReadWrite)
             && matches!(gpr, Gpr::Rsp | Gpr::R14 | Gpr::R15)
+            && !(abi_region && *gpr == Gpr::Rsp)
         {
             return Err(VerifyError::new(format!(
                 "普通序列不得写内部 ABI 保留寄存器 {}",
@@ -150,6 +161,45 @@ pub(crate) fn verify_function_sequence(
     verify_labels(sequence)?;
     verify_cold_edges(sequence)?;
     Ok(sequence_clobbers(sequence))
+}
+
+/// 分配后的函数序列：残留虚拟寄存器、`rsp` 与保留寄存器纪律，加上全部函数级规则。
+///
+/// `rsp` 只允许在 `abi_regions`（prologue 与各 epilogue）内被写；`r14`/`r15` 任何位置都
+/// 不得被写；`Reg::Virtual` 不得出现在任何操作数（含 `Mem` 的 base/index）里——这三条
+/// 合起来就是「无动态 alloca + 固定 frame + 虚拟寄存器全部落地」的机器级证明。
+pub(crate) fn verify_allocated_sequence(
+    sequence: &Sequence,
+    baseline: CpuBaseline,
+    abi_regions: &[Range<u32>],
+) -> Result<(), VerifyError> {
+    for (index, inst) in sequence.instructions.iter().enumerate() {
+        let position = u32::try_from(index).expect("指令下标适配 u32");
+        let abi = abi_regions.iter().any(|region| region.contains(&position));
+        verify_inst_with(inst, baseline, abi)?;
+        for operand in &inst.operands {
+            match operand {
+                Operand::Reg(Reg::Virtual(id)) => {
+                    return Err(VerifyError::new(format!(
+                        "分配后序列仍残留虚拟寄存器 v{id}"
+                    )));
+                }
+                Operand::Mem(mem) => {
+                    for reg in [mem.base, mem.index].into_iter().flatten() {
+                        if let Reg::Virtual(id) = reg {
+                            return Err(VerifyError::new(format!(
+                                "分配后内存操作数仍残留虚拟寄存器 v{id}"
+                            )));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    verify_labels(sequence)?;
+    verify_cold_edges(sequence)?;
+    Ok(())
 }
 
 /// 每个被引用的标签都有定义；定义编号唯一且从 0 起连续。

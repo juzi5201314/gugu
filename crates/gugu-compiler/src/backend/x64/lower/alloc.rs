@@ -23,7 +23,6 @@ use crate::runtime::processor::{
 use super::{Builder, LowerCtx, LoweringError, SiteValue, gpr, imm, mem_base, move_kinds, reg};
 
 const REL32: &[OperandKind] = &[OperandKind::Rel32];
-const RM64_R64: &[OperandKind] = &[OperandKind::Rm64, OperandKind::R64];
 const R32_IMM32: &[OperandKind] = &[OperandKind::R32, OperandKind::Imm32];
 
 pub(super) fn lower(
@@ -53,7 +52,17 @@ pub(super) fn lower(
             descriptor, align, ..
         } => region_alloc(*descriptor, *align, results, ctx, builder),
         Op::SafepointPoll { .. } => safepoint_poll(ctx, builder),
-        Op::StackCheck => stack_check(ctx, builder),
+        // `StackCheck` 是标记：prologue 完全由 frame 阶段按 `FrameLayout` 合成，选指阶段
+        // 不产出任何指令。这里只登记站点原有的两个标签 id（`check` 与 `cold`）：`select`
+        // 阶段按 `label_usage` 记账终结符的标签基址，分配阶段复用同一对 id 重写 prologue
+        // 时编号必须与记账一致（标签定义本身编码为零字节）。
+        Op::StackCheck => {
+            let check = builder.label();
+            let cold = builder.label();
+            builder.define(check);
+            builder.define(cold);
+            Ok(())
+        }
         _ => {
             let _ = (operands, source);
             Err(LoweringError::InvalidOperands)
@@ -357,37 +366,6 @@ fn safepoint_poll(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), Loweri
     builder.emit("jmp", REL32, Access::Read, vec![Operand::Label(done)]);
     builder.define(cold);
     runtime_call(builder, "safepoint_slow")?;
-    builder.define(done);
-    Ok(())
-}
-
-fn stack_check(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), LoweringError> {
-    let raw = ctx
-        .raw
-        .map_or_else(crate::runtime::stack_check_offset, |raw| {
-            raw.coroutine().stack_check_offset
-        });
-    let offset = i32::try_from(raw).expect("stack_check 偏移适配 i32");
-    builder.clobber_gpr(Gpr::R11);
-    builder.emit(
-        "mov",
-        move_kinds(64),
-        Access::Write,
-        vec![reg(gpr(Gpr::R11)), reg(gpr(Gpr::Rsp))],
-    );
-    builder.emit(
-        "cmp",
-        RM64_R64,
-        Access::Read,
-        vec![mem_base(gpr(Gpr::R14), offset), reg(gpr(Gpr::R11))],
-    );
-    // candidate < stack_check 走冷路：容量不足与 poison 由同一次比较捕获。
-    let cold = builder.label();
-    builder.emit("ja", REL32, Access::Read, vec![Operand::Label(cold)]);
-    let done = builder.label();
-    builder.emit("jmp", REL32, Access::Read, vec![Operand::Label(done)]);
-    builder.define(cold);
-    runtime_call(builder, "morestack_or_poll")?;
     builder.define(done);
     Ok(())
 }

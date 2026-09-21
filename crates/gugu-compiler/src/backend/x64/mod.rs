@@ -4,6 +4,9 @@
 //! 可接受面的形式；lowering 与 codegen 在后续模块接入。
 
 pub(crate) mod abi;
+pub(crate) mod alloc;
+#[cfg(test)]
+mod alloc_tests;
 pub(crate) mod codegen;
 pub(crate) mod contract;
 pub(crate) mod copies;

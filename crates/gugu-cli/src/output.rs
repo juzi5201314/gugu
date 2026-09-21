@@ -505,6 +505,18 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
         "x64-hot-block-count": plan.x64_hot_block_count(),
         "x64-cold-block-count": plan.x64_cold_block_count(),
         "x64-entry-symbol": plan.x64_entry_symbol(),
+        "x64-frame-size-max": plan.x64_frame_size_max(),
+        "x64-spill-slot-count": plan.x64_spill_slot_count(),
+        "x64-spill-bytes": plan.x64_spill_bytes(),
+        "x64-saved-gpr-count": plan.x64_saved_gpr_count(),
+        "x64-reload-count": plan.x64_reload_count(),
+        "x64-spill-store-count": plan.x64_spill_store_count(),
+        "x64-copy-move-count": plan.x64_copy_move_count(),
+        "x64-copy-cycle-count": plan.x64_copy_cycle_count(),
+        "x64-peak-live-gpr": plan.x64_peak_live_gpr(),
+        "x64-peak-live-xmm": plan.x64_peak_live_xmm(),
+        "x64-allocated-values": plan.x64_allocated_values(),
+        "coroutine-stack-check-offset": plan.coroutine_stack_check_offset(),
         "scheduler-poll-flags-offset": plan.scheduler_poll_flags_offset(),
     })
 }

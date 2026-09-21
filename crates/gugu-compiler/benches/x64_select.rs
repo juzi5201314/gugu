@@ -29,16 +29,27 @@ fn main() {
         std::process::exit(1);
     }
     let dump = compilation.dump_x64().expect("dump");
-    if !dump.contains("x64 schema=3") {
-        eprintln!("dump schema 不是 3");
+    if !dump.contains("x64 schema=4") {
+        eprintln!("dump schema 不是 4");
+        std::process::exit(1);
+    }
+    if !dump.contains("x64-frame ") || !dump.contains("x64-stats ") {
+        eprintln!("dump 缺少 frame 或 stats 段");
+        std::process::exit(1);
+    }
+    if plan.x64_allocated_values() == 0 {
+        eprintln!("分配器没有处理任何虚拟值");
         std::process::exit(1);
     }
     println!(
-        "x64_select bytes={} rel8={} hot={} cold={} symbol={}",
+        "x64_select bytes={} rel8={} hot={} cold={} frame={} slots={} values={} symbol={}",
         plan.x64_encoded_bytes(),
         plan.x64_rel8_count(),
         plan.x64_hot_block_count(),
         plan.x64_cold_block_count(),
+        plan.x64_frame_size_max(),
+        plan.x64_spill_slot_count(),
+        plan.x64_allocated_values(),
         symbol
     );
 }

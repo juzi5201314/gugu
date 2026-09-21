@@ -17,11 +17,14 @@ use crate::target::{CpuBaseline, CpuFeature};
 use super::table;
 
 /// 编码器契约 schema 版本。
-pub(crate) const ENCODER_SCHEMA: u32 = 1;
+pub(crate) const ENCODER_SCHEMA: u32 = 2;
 /// 描述符表与编码规则 revision。
 pub(crate) const ENCODER_REVISION: u32 = 2;
 /// lowering 规则 revision。
-pub(crate) const LOWERING_REVISION: u32 = 2;
+/// 阶段 54 起：`StackCheck` 降级为标记、`StackAddr` 用 frame 占位基址、成组搬运走拷贝组。
+pub(crate) const LOWERING_REVISION: u32 = 3;
+/// 寄存器分配与 frame 规则 revision：候选过滤、spill 权重、frame 布局顺序与 prologue 形状。
+pub(crate) const ALLOCATION_REVISION: u32 = 1;
 
 /// 契约指纹域。
 const ENCODER_DOMAIN: &str = "gugu-x64-encoder-v1";
