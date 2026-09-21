@@ -29,7 +29,7 @@ fn main() {
         std::process::exit(1);
     }
     let dump = compilation.dump_x64().expect("dump");
-    if !dump.contains("x64 schema=4") {
+    if !dump.contains("x64 schema=5") {
         eprintln!("dump schema 不是 4");
         std::process::exit(1);
     }

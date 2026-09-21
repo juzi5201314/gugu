@@ -229,6 +229,26 @@ pub(crate) struct BackendPlan {
     pub(crate) x64_peak_live_xmm: u32,
     /// 分配器处理的值总数。
     pub(crate) x64_allocated_values: u32,
+    /// 机器元数据 schema。
+    pub(crate) x64_metadata_schema: u32,
+    /// 目标栈图节名。
+    pub(crate) x64_stackmap_section: String,
+    /// 栈图节字节数。
+    pub(crate) x64_stackmap_bytes: u32,
+    /// 进入栈图表的函数数。
+    pub(crate) x64_stackmap_functions: u32,
+    /// 物理安全点数。
+    pub(crate) x64_stackmap_safepoints: u32,
+    /// 去重后的 map 数。
+    pub(crate) x64_stackmap_maps: u32,
+    /// 展开表函数数。
+    pub(crate) x64_unwind_functions: u32,
+    /// landing 数。
+    pub(crate) x64_unwind_landings: u32,
+    /// 源码记录数。
+    pub(crate) x64_source_records: u32,
+    /// 元数据三节指纹。
+    pub(crate) x64_metadata_fingerprint: [u8; 32],
     /// 协程栈检查偏移。
     pub(crate) coroutine_stack_check_offset: u32,
     /// `[r15 + poll_flags]` 偏移。
@@ -452,6 +472,16 @@ pub(crate) fn plan(
         x64_peak_live_gpr: x64.peak_live_gpr(),
         x64_peak_live_xmm: x64.peak_live_xmm(),
         x64_allocated_values: x64.allocated_values(),
+        x64_metadata_schema: x64.metadata.schema,
+        x64_stackmap_section: x64.metadata.section_name.clone(),
+        x64_stackmap_bytes: u32::try_from(x64.metadata.stackmap.len()).expect("栈图节长度适配 u32"),
+        x64_stackmap_functions: x64.metadata.functions,
+        x64_stackmap_safepoints: x64.metadata.safepoints,
+        x64_stackmap_maps: x64.metadata.maps,
+        x64_unwind_functions: x64.metadata.functions,
+        x64_unwind_landings: x64.metadata.landings,
+        x64_source_records: x64.metadata.source_records,
+        x64_metadata_fingerprint: x64.metadata.fingerprint,
         coroutine_stack_check_offset: raw.coroutine().stack_check_offset,
         scheduler_poll_flags_offset: raw.scheduler().poll_flags_offset(),
     })

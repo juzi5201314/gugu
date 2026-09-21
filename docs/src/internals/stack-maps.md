@@ -102,6 +102,8 @@ stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layou
 7. 对相同 root set 做全局去重；
 8. 指令编码完成后填入最终 `pc_offset`。
 
+x86_64 后端在分配与编码之后执行第 3、5、6、8 步，并把每个片段的物理根图交给世界装配。第 7 步由栈图编码器按完整 map 记录字节的字典序去重。进入栈图表的函数按 mangled 符号排序、16 字节对齐拼接；`unwind_index` 就是该表序号。零 frame 且没有 safepoint 与 landing 的叶省略。可重物化的栈地址没有物理槽，不记成 `StackInterior`。统一展开表与源码记录的字节布局见[后端](backend.md#unified-metadata-bytes)。
+
 一个位置在同一 map 的五类 bitmap/mask 中最多出现一次。重叠 spill、超出 frame、未对齐 managed slot、丢失 provenance 或一个 value 同时有两个未协调的权威位置都是后端错误。
 
 分配阶段为上述查询发布三样东西：`FrameLayout`（`frame_size`、`payload_bytes`、逐局部对象的 `local_offset`、spill slot 的 `offset/size/root`、16 字节 copy scratch 偏移与 callee-saved save 偏移）、点位表（每个点位的 `site`、`kind`、`block`、指令区间与 mask）以及逐值结果（`Gpr`/`Xmm`/`Slot`/rematerializable）。stack map 生成只消费这些结果，不重新推导位置。spill slot 统一是 8 或 16 字节、按 root class 分开、偏移都从 frame base 起算，因此第 5 步的 slot index 就是 `offset / 8`。

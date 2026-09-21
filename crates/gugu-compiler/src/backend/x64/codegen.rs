@@ -45,7 +45,7 @@ use super::verify;
 ///
 /// 版本 3 相对版本 2 的变化：片段 payload 携带重定位引用的内部符号名集合，镜像规划据此做
 /// 内部符号冲突检查，不再从重定位现场二次猜测符号文本。
-pub(crate) const CODEGEN_SCHEMA: u32 = 4;
+pub(crate) const CODEGEN_SCHEMA: u32 = 5;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -282,6 +282,8 @@ pub(crate) struct FragmentPayload {
     pub(crate) bytes: Vec<u8>,
     /// 重定位，按 `(站点, 字段偏移)` 升序。
     pub(crate) relocations: Vec<Relocation>,
+    /// 分配并编码之后的栈图、landing 与源码记录。
+    pub(crate) metadata: super::metadata::FunctionMetadata,
     /// payload 指纹。
     pub(crate) fingerprint: [u8; 32],
 }
@@ -418,6 +420,8 @@ pub(crate) struct X64World {
     pub(crate) fragments: Vec<FragmentPayload>,
     /// 入口函数 mangled 符号：`RootCategoryV1::Entry` 实例对应的片段。
     pub(crate) entry_symbol: String,
+    /// 栈图节、统一展开表与源码记录。
+    pub(crate) metadata: super::metadata_section::ImageMetadata,
     pub(crate) fingerprint: [u8; 32],
 }
 
@@ -654,6 +658,19 @@ impl X64World {
             hex_lower(self.contract.fingerprint()),
             hex_lower(self.fingerprint)
         );
+        let metadata = &self.metadata;
+        let _ = writeln!(
+            out,
+            "x64-metadata schema={} section={} functions={} safepoints={} maps={} landings={} sources={} fingerprint={}",
+            metadata.schema,
+            metadata.section_name,
+            metadata.functions,
+            metadata.safepoints,
+            metadata.maps,
+            metadata.landings,
+            metadata.source_records,
+            hex_lower(metadata.fingerprint)
+        );
         out.push_str(&self.contract.dump());
         for fragment in &self.fragments {
             let _ = writeln!(
@@ -735,6 +752,7 @@ pub(crate) fn build(
     target: TargetName,
     queries: &QueryEngine,
     sources: &SourceMap,
+    hir_sources: &[crate::frontend::hir::Source],
     entry: &[u8; 32],
 ) -> Result<X64World, Vec<Diagnostic>> {
     let contract = EncoderContract::build(target.descriptor().cpu_baseline);
@@ -779,6 +797,8 @@ pub(crate) fn build(
                 encoder,
                 lir_fingerprint,
                 &contract,
+                sources,
+                hir_sources,
             )
             .map_err(|errors| store_errors(&errors))?;
             let bytes = serde_json::to_vec(&fragment).expect("机器片段可序列化");
@@ -799,12 +819,15 @@ pub(crate) fn build(
     }
     // 入口实例必然有 LIR body（它是闭世界根之一）；缺失说明入口没有走到选指。
     let entry_symbol = entry_symbol.ok_or_else(|| vec![invalid("入口实例没有机器片段")])?;
+    let metadata = super::metadata_section::assemble(&fragments, target)
+        .map_err(|error| vec![invalid(&format!("栈图与展开表生成失败：{error}"))])?;
     let mut world = X64World {
         schema: CODEGEN_SCHEMA,
         target,
         contract,
         fragments,
         entry_symbol,
+        metadata,
         fingerprint: [0; 32],
     };
     world.fingerprint = world_fingerprint(&world);
@@ -831,6 +854,7 @@ fn fragment_key(
     canonical.extend_from_slice(&universe.fingerprint);
     canonical.extend_from_slice(&contract::LOWERING_REVISION.to_le_bytes());
     canonical.extend_from_slice(&contract::ALLOCATION_REVISION.to_le_bytes());
+    canonical.extend_from_slice(&super::metadata::METADATA_SCHEMA.to_le_bytes());
     hash_domain(FRAGMENT_KEY_DOMAIN, &canonical)
 }
 
@@ -843,6 +867,7 @@ fn world_fingerprint(world: &X64World) -> [u8; 32] {
         hasher.update(&fragment.instance);
         hasher.update(&fragment.fingerprint);
     }
+    hasher.update(&world.metadata.fingerprint);
     *hasher.finalize().as_bytes()
 }
 
@@ -855,6 +880,8 @@ fn assemble_fragment(
     encoder: [u8; 32],
     lir_fingerprint: [u8; 32],
     contract: &EncoderContract,
+    sources: &SourceMap,
+    hir_sources: &[crate::frontend::hir::Source],
 ) -> Result<FragmentPayload, Vec<Diagnostic>> {
     let selected = select::select_body(body, universe, raw, target)
         .map_err(|error| vec![invalid(&format!("{} 的指令选择失败：{error}", body.name))])?;
@@ -894,6 +921,9 @@ fn assemble_fragment(
         site_ordinal += 1;
     }
     fill_relocation_ranges(&mut sites, &assembled.relocations);
+    let metadata =
+        super::metadata::build(body, &allocated, &assembled, target, sources, hir_sources)
+            .map_err(|error| vec![invalid(&format!("{} 的栈图生成失败：{error}", body.name))])?;
     let mut fragment = FragmentPayload {
         schema: CODEGEN_SCHEMA,
         target: target.name().to_owned(),
@@ -942,6 +972,7 @@ fn assemble_fragment(
         sites,
         bytes: assembled.bytes,
         relocations: assembled.relocations,
+        metadata,
         fingerprint: [0; 32],
     };
     fragment.fingerprint = fragment.compute_fingerprint();
@@ -1133,6 +1164,13 @@ fn validate_fragment(
     if fragment.symbols != reference_symbols(&fragment.relocations) {
         return Err(vec![invalid("机器片段符号集合与重定位不一致")]);
     }
+    if fragment.metadata.schema != super::metadata::METADATA_SCHEMA
+        || fragment.metadata.code_size != to_u32(fragment.bytes.len())
+    {
+        return Err(vec![invalid("机器片段元数据没有绑定当前代码长度")]);
+    }
+    super::metadata::verify(&fragment.metadata)
+        .map_err(|error| vec![invalid(&format!("机器片段元数据非法：{error}"))])?;
     if fragment
         .symbols
         .iter()

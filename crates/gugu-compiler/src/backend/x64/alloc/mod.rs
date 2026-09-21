@@ -24,7 +24,7 @@ mod scan;
 mod slots;
 
 pub(crate) use frame::FrameLayout;
-pub(crate) use live::{LiveInfo, Point, SitePoints, ValueLive};
+pub(crate) use live::{LiveInfo, Point, PointKind, SitePoints, ValueLive};
 
 use std::fmt;
 use std::ops::Range;

@@ -118,6 +118,7 @@ pub(crate) mod region_schema;
 pub(crate) mod routing;
 pub(crate) mod routing_schema;
 
+pub(crate) mod frame_walk;
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
 pub(crate) mod scheduler_schema;
@@ -144,7 +145,7 @@ mod stack_arena;
 )]
 mod stackmap;
 #[allow(dead_code, reason = "栈图 section 编解码由确定性测试消费")]
-mod stackmap_codec;
+pub(crate) mod stackmap_codec;
 pub mod stackmap_schema;
 mod startup_kinds;
 mod startup_schema;

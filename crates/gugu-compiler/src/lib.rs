@@ -360,6 +360,15 @@ impl Compilation {
             .map(backend::x64::codegen::X64World::fingerprint)
     }
 
+    /// 返回栈图节、统一展开表与源码记录；没有可执行入口时为 `None`。
+    #[allow(
+        dead_code,
+        reason = "确定性测试通过它读取已经写入镜像计划的栈图、展开表与源码记录字节"
+    )]
+    pub(crate) fn x64_metadata(&self) -> Option<&backend::x64::metadata_section::ImageMetadata> {
+        self.x64.as_ref().map(|world| &world.metadata)
+    }
+
     /// 返回全部机器码片段的公开视图；没有可执行入口或片段生成失败时为 `None`。
     pub fn x64_fragments(&self) -> Option<X64Fragments> {
         let stack_check_offset = self
@@ -712,6 +721,7 @@ impl Compiler {
                         target,
                         &self.queries,
                         &source_map,
+                        &frontend.hir.module().sources,
                         &entry,
                     )
                 });
@@ -720,11 +730,14 @@ impl Compiler {
                     graph.complete(
                         ActionKind::Codegen,
                         format!(
-                            "{} 个实例，{} 个机器站点，{} 字节，{} 个重定位",
+                            "{} 个实例，{} 个机器站点，{} 字节，{} 个重定位，{} 个栈图函数，{} 个安全点，{} 条 landing",
                             world.fragment_count(),
                             world.site_count(),
                             world.encoded_bytes(),
-                            world.relocation_count()
+                            world.relocation_count(),
+                            world.metadata.functions,
+                            world.metadata.safepoints,
+                            world.metadata.landings
                         ),
                     );
                     Some(world)
@@ -1437,6 +1450,16 @@ pub struct ImagePlan {
     x64_peak_live_gpr: u32,
     x64_peak_live_xmm: u32,
     x64_allocated_values: u32,
+    x64_metadata_schema: u32,
+    x64_stackmap_section: String,
+    x64_stackmap_bytes: u32,
+    x64_stackmap_functions: u32,
+    x64_stackmap_safepoints: u32,
+    x64_stackmap_maps: u32,
+    x64_unwind_functions: u32,
+    x64_unwind_landings: u32,
+    x64_source_records: u32,
+    x64_metadata_fingerprint: [u8; 32],
     coroutine_stack_check_offset: u32,
     scheduler_poll_flags_offset: u32,
 }
@@ -1660,6 +1683,16 @@ impl ImagePlan {
             x64_peak_live_gpr: plan.x64_peak_live_gpr,
             x64_peak_live_xmm: plan.x64_peak_live_xmm,
             x64_allocated_values: plan.x64_allocated_values,
+            x64_metadata_schema: plan.x64_metadata_schema,
+            x64_stackmap_section: plan.x64_stackmap_section,
+            x64_stackmap_bytes: plan.x64_stackmap_bytes,
+            x64_stackmap_functions: plan.x64_stackmap_functions,
+            x64_stackmap_safepoints: plan.x64_stackmap_safepoints,
+            x64_stackmap_maps: plan.x64_stackmap_maps,
+            x64_unwind_functions: plan.x64_unwind_functions,
+            x64_unwind_landings: plan.x64_unwind_landings,
+            x64_source_records: plan.x64_source_records,
+            x64_metadata_fingerprint: plan.x64_metadata_fingerprint,
             coroutine_stack_check_offset: plan.coroutine_stack_check_offset,
             scheduler_poll_flags_offset: plan.scheduler_poll_flags_offset,
         }
@@ -1868,6 +1901,56 @@ impl ImagePlan {
     /// 返回分配器处理的值总数。
     pub fn x64_allocated_values(&self) -> u32 {
         self.x64_allocated_values
+    }
+
+    /// 返回机器元数据 schema。
+    pub fn x64_metadata_schema(&self) -> u32 {
+        self.x64_metadata_schema
+    }
+
+    /// 返回目标栈图节名。
+    pub fn x64_stackmap_section(&self) -> &str {
+        &self.x64_stackmap_section
+    }
+
+    /// 返回栈图节字节数。
+    pub fn x64_stackmap_bytes(&self) -> u32 {
+        self.x64_stackmap_bytes
+    }
+
+    /// 返回进入栈图表的函数数。
+    pub fn x64_stackmap_functions(&self) -> u32 {
+        self.x64_stackmap_functions
+    }
+
+    /// 返回物理安全点数。
+    pub fn x64_stackmap_safepoints(&self) -> u32 {
+        self.x64_stackmap_safepoints
+    }
+
+    /// 返回去重后的 map 数。
+    pub fn x64_stackmap_maps(&self) -> u32 {
+        self.x64_stackmap_maps
+    }
+
+    /// 返回展开表函数数。
+    pub fn x64_unwind_functions(&self) -> u32 {
+        self.x64_unwind_functions
+    }
+
+    /// 返回 landing 数。
+    pub fn x64_unwind_landings(&self) -> u32 {
+        self.x64_unwind_landings
+    }
+
+    /// 返回源码记录数。
+    pub fn x64_source_records(&self) -> u32 {
+        self.x64_source_records
+    }
+
+    /// 返回元数据三节指纹。
+    pub fn x64_metadata_fingerprint(&self) -> [u8; 32] {
+        self.x64_metadata_fingerprint
     }
 
     /// 返回协程栈检查偏移。

@@ -1,8 +1,7 @@
 //! 栈图 section 编解码：header、function、safepoint 与 root map 四表。
 //!
-//! 编码器接受逻辑世界与调用方注入的机器布局（`code_rva`、`code_size`、
-//! `frame_size`、`unwind_index`）；生产契约在后端就绪前不调用编码器写契约，
-//! 编码器由单测与后端联合验证复用，函数签名即跨阶段接口。decoder 拒收
+//! 编码器接受调用方注入的机器布局（`code_rva`、`code_size`、`frame_size`、
+//! `unwind_index`）。后端在分配与编码之后用它写出栈图节；decoder 拒收
 //! version 1 记录，全部对齐、padding、表不重叠与位图互斥检查都在解码时执行。
 
 use super::model::RawModelError;
