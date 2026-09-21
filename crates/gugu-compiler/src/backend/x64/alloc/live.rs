@@ -126,6 +126,14 @@ impl ValueLive {
     }
 }
 
+/// 值区间是否覆盖点位下标 `point`。区间端点是 slot（`use_slot = 2p`），不能拿下标直接比。
+pub(crate) fn range_covers_point(range: (u32, u32), point: u32) -> bool {
+    debug_assert!(point <= u32::MAX / 2, "点位下标必须能换成 slot");
+    let use_slot = point * 2;
+    let def_slot = use_slot + 1;
+    use_slot <= range.1 && def_slot >= range.0
+}
+
 /// 全部点位、站点索引与值属性。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LiveInfo {

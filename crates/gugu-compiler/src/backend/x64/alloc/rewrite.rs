@@ -923,7 +923,7 @@ impl Emit<'_> {
     fn occupied(&self, point: u32) -> Clobbers {
         let mut occupied = Clobbers::NONE;
         for value in self.values {
-            if !value.is_live() || value.range.0 > point || value.range.1 < point {
+            if !value.is_live() || !super::live::range_covers_point(value.range, point) {
                 continue;
             }
             match value.location() {

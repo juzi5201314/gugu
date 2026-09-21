@@ -221,7 +221,7 @@ fn point_free(live: &LiveInfo, values: &[ValueAllocation], point: u32) -> Clobbe
         .map_or(Clobbers::NONE, |point| point.mask);
     let mut occupied = Clobbers::NONE;
     for value in values {
-        if !value.is_live() || value.range.0 > point || value.range.1 < point {
+        if !value.is_live() || !live::range_covers_point(value.range, point) {
             continue;
         }
         match value.location() {

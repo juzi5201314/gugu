@@ -22,7 +22,7 @@ LIR 后端严格按以下顺序运行：
 2. `SelectInstructions`：选择 x86_64 opcode、address mode 和 fixed-register constraint；
 3. `ScheduleBlocks`：固定 block layout、fallthrough 和冷路径；
 4. `BuildLiveIntervals`：计算物理 register class、liveness 和 call/safepoint constraint；
-5. `AllocateRegisters`：全局线性扫描、interval split 和 spill；
+5. `AllocateRegisters`：全局线性扫描、单条保守区间和 spill；
 6. `ResolveParallelCopies`：消除 block 参数、call/return shuffle；
 7. `LayoutFrame`：分配 outgoing、local、spill、save slot 并生成 prologue/epilogue；
 8. `BuildStackMapsAndUnwind`：在最终位置构造根、frame 和 landing metadata；
