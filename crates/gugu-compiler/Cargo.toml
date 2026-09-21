@@ -78,5 +78,9 @@ harness = false
 name = "x64_select"
 harness = false
 
+[[bench]]
+name = "x64_frame"
+harness = false
+
 [dev-dependencies]
 tempfile = "3"
