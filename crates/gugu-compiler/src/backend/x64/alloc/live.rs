@@ -28,12 +28,12 @@
 //! `live_out` 出口的最大 slot。块级活跃把「活跃但无触碰」的区域（穿越的 mid block、循环
 //! 回边）折进区间，循环参数因此覆盖整个循环。
 //!
-//! 分配单位是**值本身**，不按 clobber 点切段：点位边界上的过渡 move 只在「该边界位于
+//!   分配单位是**值本身**，不按 clobber 点切段：点位边界上的过渡 move 只在「该边界位于
 //! def 到 use 的每条路径上」时才正确，而块内冷路径的 `jmp`（`GcAlloc` 的快/慢两条路径、
 //! `SafepointPoll` 把 `call` 放在冷路）、多定义（块参数由多条入边定义）与跨越布局顺序的
 //! 回边都会破坏这个前提。统一位置换来可证明的正确性：插入的 move 只有「定义处写位置」与
-//! 「使用处读位置」两种，都只依赖当前路径。跨 call（或挂起、bridge）活跃的值因此整段占用
-//! 内部 callee-saved 寄存器或 frame slot，这也正是保留寄存器池 `rbp/r12/r13` 的用途。
+//! 「使用处读位置」两种，都只依赖当前路径。非指针跨 call 仍优先 `rbp/r12/r13`；
+//! `CallReturn`、分配、挂起与 bridge 上的 managed/stack 指针整段落槽。
 
 use std::ops::Range;
 
@@ -45,7 +45,33 @@ use super::super::reg::{Clobbers, FRAME_SLOT_BASE, Gpr, Reg};
 use super::super::select::{SelectedFunction, SiteKind};
 use super::super::table::{self, Access, OperandKind};
 use super::{AllocError, Hint, RegClass, RootClass};
-use crate::lir::body::{BlockId, Body, Definition, Op};
+use crate::lir::body::{BlockId, Body, Definition, Op, SafepointKind, Terminator};
+use crate::target::TargetName;
+
+/// 调用点 outgoing 区里的一个指针字。偏移相对 outgoing 区起点，供栈图扫描栈上副本。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct OutgoingRoot {
+    /// 实参值编号。
+    pub(crate) value: u32,
+    /// [`RootClass`] 判别值。
+    pub(crate) root: u8,
+    /// 相对 outgoing 区起点的字节偏移。
+    pub(crate) offset: u32,
+}
+
+/// `CallReturn`、分配、挂起与 bridge 禁止用户寄存器根；`Poll` 可以留在寄存器里。
+pub(crate) fn spills_pointers(kind: Option<SafepointKind>) -> bool {
+    matches!(
+        kind,
+        Some(
+            SafepointKind::CallReturn
+                | SafepointKind::Allocation
+                | SafepointKind::Suspend
+                | SafepointKind::ForeignBridge
+                | SafepointKind::DirtyCpuBridge
+        )
+    )
+}
 
 /// 点位种类；判别值与 payload 一致（0 Normal / 1 Call / 2 Bridge / 3 Prologue）。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,10 +111,12 @@ pub(crate) struct Point {
     pub(crate) mask: Clobbers,
     /// 该点位写掉的物理寄存器子集；call/bridge 点位并上 caller-saved。
     pub(crate) clobber: Clobbers,
-    /// managed/stack 指针跨该点位必须落 frame slot（挂起与 bridge 点）。
+    /// managed/stack 指针跨该点位必须落 frame slot。
     pub(crate) pointer_spill: bool,
     /// 点位含固定物理寄存器操作数或破坏物理寄存器；spill 权重取 4。
     pub(crate) fixed_physical: bool,
+    /// 该调用点 outgoing 区中的指针字；非调用点为空。
+    pub(crate) outgoing_roots: Vec<OutgoingRoot>,
 }
 
 /// 一个站点的点位区间。
@@ -206,9 +234,12 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
         for site in &block.sites {
             let index = u32::try_from(sites.len()).expect("站点数适配 u32");
             let first = u32::try_from(points.len()).expect("点位数适配 u32");
+            let instruction = &body.instructions
+                [usize::try_from(site.instruction).expect("站点指令编号适配 usize")];
             visit_site(
                 body,
                 site.kind,
+                spills_pointers(instruction.op.safepoint_kind()),
                 &site.lowered,
                 index,
                 order,
@@ -227,6 +258,7 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
         visit_site(
             body,
             SiteKind::Normal,
+            terminator_spills(&body.blocks[lir].terminator),
             &block.terminator,
             index,
             order,
@@ -280,6 +312,15 @@ fn collect_values(body: &Body) -> Vec<ValueLive> {
         .collect()
 }
 
+fn terminator_spills(terminator: &Terminator) -> bool {
+    match terminator {
+        Terminator::Invoke { call, .. } | Terminator::TailCall { call, .. } => {
+            spills_pointers(call.safepoint_kind())
+        }
+        _ => false,
+    }
+}
+
 /// 遍历一个站点，产出点位并登记活跃事件。
 #[expect(
     clippy::too_many_arguments,
@@ -288,6 +329,7 @@ fn collect_values(body: &Body) -> Vec<ValueLive> {
 fn visit_site(
     body: &Body,
     kind: SiteKind,
+    spills_pointers: bool,
     lowered: &Lowered,
     site: u32,
     block: u32,
@@ -317,8 +359,9 @@ fn visit_site(
             instructions: entry.instructions.clone(),
             mask: Clobbers::NONE,
             clobber: Clobbers::NONE,
-            pointer_spill: bridge,
+            pointer_spill: spills_pointers,
             fixed_physical: false,
+            outgoing_roots: Vec::new(),
         };
         match &entry.pairs {
             Some(pairs) => {
@@ -810,4 +853,113 @@ fn conservative_cycles(predecessors: &[Vec<usize>], depth: &mut [u32]) {
             depth[block] = 1;
         }
     }
+}
+
+/// 把调用点 outgoing 区里的指针字记到对应的 `call` 点位上。
+pub(crate) fn note_outgoing_roots(
+    body: &Body,
+    selected: &SelectedFunction,
+    target: TargetName,
+    live: &mut LiveInfo,
+) -> Result<(), AllocError> {
+    let mut site_index = 0_usize;
+    for block in &selected.blocks {
+        let lir = &body.blocks[block.id.index()];
+        for site in &block.sites {
+            let instruction = &body.instructions
+                [usize::try_from(site.instruction).expect("站点指令编号适配 usize")];
+            if let Op::Call(call) | Op::ForeignCall(call) = &instruction.op {
+                attach_outgoing(
+                    body,
+                    call,
+                    body.args(&instruction.arguments),
+                    target,
+                    &site.lowered,
+                    site_index,
+                    live,
+                )?;
+            }
+            site_index += 1;
+        }
+        match &lir.terminator {
+            Terminator::Invoke {
+                call, arguments, ..
+            }
+            | Terminator::TailCall {
+                call, arguments, ..
+            } => {
+                attach_outgoing(
+                    body,
+                    call,
+                    body.args(arguments),
+                    target,
+                    &block.terminator,
+                    site_index,
+                    live,
+                )?;
+            }
+            _ => {}
+        }
+        site_index += 1;
+    }
+    Ok(())
+}
+
+fn attach_outgoing(
+    body: &Body,
+    call: &crate::lir::body::Call,
+    args: &[crate::lir::body::ValueId],
+    target: TargetName,
+    lowered: &Lowered,
+    site_index: usize,
+    live: &mut LiveInfo,
+) -> Result<(), AllocError> {
+    if !spills_pointers(call.safepoint_kind()) {
+        return Ok(());
+    }
+    let layout = super::super::abi::classify_call(call, target)
+        .map_err(|_| AllocError::new("调用 ABI 分类失败"))?;
+    let mut roots = Vec::new();
+    for argument in &layout.arguments {
+        let Some(super::super::abi::AbiSlot::Stack { offset }) = argument.slot else {
+            continue;
+        };
+        let Some(value) = args.get(usize::try_from(argument.index).expect("参数下标适配 usize"))
+        else {
+            continue;
+        };
+        let root = RootClass::of(body.values[value.index()].kind.provenance);
+        if !root.must_spill() {
+            continue;
+        }
+        roots.push(OutgoingRoot {
+            value: value.0,
+            root: root.code(),
+            offset,
+        });
+    }
+    if roots.is_empty() {
+        return Ok(());
+    }
+    let range = live
+        .sites
+        .get(site_index)
+        .ok_or_else(|| AllocError::new("outgoing 根缺少站点"))?
+        .points
+        .clone();
+    let call_at = range.into_iter().find(|&index| {
+        let point = &live.points[index as usize];
+        let start = usize::try_from(point.instructions.start).expect("指令下标适配 usize");
+        point.instructions.end == point.instructions.start.saturating_add(1)
+            && lowered
+                .sequence
+                .instructions
+                .get(start)
+                .is_some_and(|inst| table::form(inst.form).mnemonic == "call")
+    });
+    let Some(index) = call_at else {
+        return Err(AllocError::new("指针栈参数没有落到 call 点位"));
+    };
+    live.points[index as usize].outgoing_roots = roots;
+    Ok(())
 }

@@ -45,7 +45,7 @@ use super::verify;
 ///
 /// 版本 3 相对版本 2 的变化：片段 payload 携带重定位引用的内部符号名集合，镜像规划据此做
 /// 内部符号冲突检查，不再从重定位现场二次猜测符号文本。
-pub(crate) const CODEGEN_SCHEMA: u32 = 4;
+pub(crate) const CODEGEN_SCHEMA: u32 = 5;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -150,6 +150,8 @@ pub(crate) struct PointPayload {
     pub(crate) clobber_xmm: u32,
     /// managed/stack 指针必须落 frame slot。
     pub(crate) pointer_spill: bool,
+    /// 调用点 outgoing 区中的指针字 `(value, root, offset)`。
+    pub(crate) outgoing_roots: Vec<(u32, u8, u32)>,
 }
 
 /// 一个值的分配结果。
@@ -723,6 +725,34 @@ impl X64World {
                 stats.safepoint_spills,
                 stats.allocated_values
             );
+            for value in &fragment.values {
+                if value.root == 0 {
+                    continue;
+                }
+                let place = value.segments.first().map_or("none", |(_, _, location)| {
+                    if *location < 0 { "slot" } else { "reg" }
+                });
+                let _ = writeln!(
+                    out,
+                    "x64-root {} v={} root={} place={}",
+                    hex_lower(fragment.instance),
+                    value.value,
+                    value.root,
+                    place
+                );
+            }
+            let outgoing = fragment
+                .points
+                .iter()
+                .map(|point| point.outgoing_roots.len())
+                .sum::<usize>();
+            if outgoing > 0 {
+                let _ = writeln!(
+                    out,
+                    "x64-outgoing {} n={outgoing}",
+                    hex_lower(fragment.instance)
+                );
+            }
         }
         out
     }
@@ -935,6 +965,11 @@ fn assemble_fragment(
                 clobber_gpr: point.mask.gpr,
                 clobber_xmm: point.mask.xmm,
                 pointer_spill: point.pointer_spill,
+                outgoing_roots: point
+                    .outgoing_roots
+                    .iter()
+                    .map(|root| (root.value, root.root, root.offset))
+                    .collect(),
             })
             .collect(),
         values: allocated.values.iter().map(ValuePayload::of).collect(),

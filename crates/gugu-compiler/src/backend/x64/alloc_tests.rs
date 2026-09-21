@@ -151,6 +151,22 @@ fn allocation_is_deterministic() {
     assert_eq!(first.dump_x64(), second.dump_x64());
 }
 
+/// 第十个参数是栈上的指针，调用点必须记下 outgoing 指针字。
+const STACK_POINTER_ARG: &str = "#[repr(C, align(8))]
+struct Pair { a: int, b: int }
+
+fn take(
+    a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int, p: &Pair
+) int {
+    p.a + i
+}
+
+fn main() {
+    let pair = Pair { a: 4, b: 5 }
+    _ = take(1, 2, 3, 4, 5, 6, 7, 8, 9, &pair)
+}
+";
+
 #[test]
 fn addressed_local_survives_a_call() {
     let compilation = compile(ADDRESSED);
@@ -169,6 +185,15 @@ fn addressed_local_survives_a_call() {
         .iter()
         .any(|fragment| fragment.frame.frame_size > 0);
     assert!(entry, "至少一个片段必须有非空 frame");
+    let dump = compilation.dump_x64().expect("机器码转储");
+    assert!(
+        dump.contains("root=2"),
+        "取址局部的指针必须记成栈指针根：{dump}"
+    );
+    assert!(
+        dump.contains("locals=1") || dump.contains("locals=2"),
+        "取址局部必须落在 frame 里：{dump}"
+    );
 }
 
 /// 字段偏移同时重建基址和常量索引。聚合初始化会调用 memmove glue，执行 bench 接不住，
@@ -197,5 +222,15 @@ fn field_offset_reloads_base_and_index_into_different_scratches() {
     assert!(
         offset.contains("lea [r11 + "),
         "基址应先重建进 r11，索引用另一个寄存器：{offset}"
+    );
+}
+
+#[test]
+fn stack_pointer_argument_is_an_outgoing_root() {
+    let compilation = compile(STACK_POINTER_ARG);
+    let dump = compilation.dump_x64().expect("机器码转储");
+    assert!(
+        dump.contains("x64-outgoing "),
+        "栈上的指针实参必须记到调用点：{dump}"
     );
 }

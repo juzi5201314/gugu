@@ -11,8 +11,8 @@
 //! - 跨 call（或挂起、bridge）活跃的 GPR 偏好序是 `rbp,r12,r13` 再接通用序。
 //! - `Rm8`/`R8` 操作数位置的值只能落在 `is_byte_encodable()` 的寄存器；spill 到内存
 //!   不受此限。
-//! - 区间覆盖挂起点或 bridge 点时，managed/stack 指针**必须**落 spill slot：这些点位上
-//!   runtime 要按 stack map 枚举根，指针不能只活在寄存器里。
+//! - 区间覆盖 `CallReturn`、分配、挂起或 bridge 点时，managed/stack 指针**必须**落 spill slot：
+//!   这些点位的栈图没有用户寄存器根。`Poll` 点可以继续把指针留在寄存器里。
 //!
 //! # 扫描
 //!

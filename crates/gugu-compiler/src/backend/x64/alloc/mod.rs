@@ -259,7 +259,8 @@ fn run(
     raw: &RuntimeRawContractV1,
 ) -> Result<Allocated, AllocError> {
     let symbol = selected.symbol.clone();
-    let live = live::analyze(body, &selected)?;
+    let mut live = live::analyze(body, &selected)?;
+    live::note_outgoing_roots(body, &selected, target, &mut live)?;
     let scanned = scan::scan(&live)?;
     let mut values = scanned.values;
     let mut slots = slots::assign(&mut values);
