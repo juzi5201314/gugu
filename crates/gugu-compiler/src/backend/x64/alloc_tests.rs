@@ -110,6 +110,15 @@ fn allocated_frames_keep_payload_inside_frame() {
             frame.required_frame,
             frame.frame_size
         );
+        assert_eq!(
+            frame.entry_required_frame,
+            frame.required_frame + 8,
+            "{}: entry_required_frame 必须是 required_frame 加返回地址",
+            fragment.symbol
+        );
+        if frame.frame_size > 0 {
+            assert!(frame.checked, "{}: 有帧就必须做栈检查", fragment.symbol);
+        }
         checked += u32::from(frame.checked);
         spilling += u32::from(frame.spill_slot_count > 0);
     }
@@ -150,6 +159,19 @@ fn allocation_is_deterministic() {
     assert_eq!(left.x64_copy_cycle_count(), right.x64_copy_cycle_count());
     assert_eq!(first.dump_x64(), second.dump_x64());
 }
+
+/// 直线、无调用，但活值多到要用 `rbp`：叶分类会删掉栈检查，分配后必须补回来。
+const WIDE_LEAF: &str = "fn wide(
+    a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int
+) int {
+    let extra = a + 1
+    extra + b + c + d + e + f + g + h + i
+}
+
+fn main() {
+    _ = wide(1, 2, 3, 4, 5, 6, 7, 8, 9)
+}
+";
 
 /// 第十个参数是栈上的指针，调用点必须记下 outgoing 指针字。
 const STACK_POINTER_ARG: &str = "#[repr(C, align(8))]
@@ -222,6 +244,22 @@ fn field_offset_reloads_base_and_index_into_different_scratches() {
     assert!(
         offset.contains("lea [r11 + "),
         "基址应先重建进 r11，索引用另一个寄存器：{offset}"
+    );
+}
+
+#[test]
+fn wide_leaf_regains_stack_check() {
+    let compilation = compile(WIDE_LEAF);
+    let dump = compilation.dump_x64().expect("机器码转储");
+    let mut checked_leaves = 0_u32;
+    for piece in dump.split("x64-fragment ").skip(1) {
+        if piece.contains(" cmp ") && piece.contains(" jg ") && piece.contains(" sub ") {
+            checked_leaves += 1;
+        }
+    }
+    assert!(
+        checked_leaves >= 2,
+        "入口和多活值叶都必须有 cmp/jg/sub：{dump}"
     );
 }
 

@@ -241,13 +241,13 @@ check:  lea   r11, [rsp - required_frame]      ; 超出 disp32 时 mov r11, rsp;
         mov   [rsp + save_offset], <callee-saved>
 ```
 
-冷路径放在最前是因为 `check` 与 `cold` 两个标签是站点内编号 0/1：站点序列重写后标签记账仍必须从 0 起连续，跳板式的两段布局会让编号出现空洞。`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最高值，checked加法溢出直接进入 `StackOverflow` fatal。大 immediate使用 `mov r11, rsp; sub r11, materialized_required_frame`；`r11`是内部 ABI保留 scratch，不承载参数或 root。candidate计算采用机器字 wrapping语义，随后固定为一次 `cmp r11, qword ptr [r14 + stack_check_offset]`与一个 signed 冷分支 `jg cold`（`acquire(limit) > candidate` 时进冷路径）。官方 stack reservation处于低半 canonical address：正常 candidate与 `stack_low`都是非负 `isize`；容量计算发生地址下溢时 candidate解释为负值；`POLL_SENTINEL = isize::MAX as usize…
+冷路径放在最前是因为 `check` 与 `cold` 两个标签是站点内编号 0/1：站点序列重写后标签记账仍必须从 0 起连续，跳板式的两段布局会让编号出现空洞。`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最高值，checked加法溢出直接进入 `StackOverflow` fatal。大 immediate使用 `mov r11, rsp; sub r11, materialized_required_frame`；`r11`是内部 ABI保留 scratch，不承载参数或 root。candidate计算采用机器字 wrapping语义，随后固定为一次 `cmp qword ptr [r14 + stack_check_offset], r11`与一个 signed 冷分支 `jg cold`（`acquire(limit) > candidate` 时进冷路径）。官方 stack reservation处于低半 canonical address：正常 candidate与 `stack_low`都是非负 `isize`；容量计算发生地址下溢时 candidate解释为负值；`POLL_SENTINEL = isize::MAX as usize…
 
-**`PollFreeLeaf` 的例外**：分类为 `PollFreeLeaf` 的函数省略栈检查，但**不**省略 frame。只要它仍然需要 frame（有溢出槽或 save slot）而 frame payload 非 0，就照常发 `sub rsp, frame_size` 与 save slot 装载——这些写落在 `rsp` 之下，省掉 `sub` 就会写到调用者的活跃栈上。只有 `frame_size == 0` 的 `PollFreeLeaf` 才完全没有 prologue。该函数真正的情形由选指阶段的 `StackCheck` 标记站点决定：标记站点存在则按上面的形状合成 prologue，不存在但有 frame 则把 frame setup 前插到入口块首个序列之前。
+**`PollFreeLeaf`**：LIR 分类发生在分配之前，看不到溢出槽和 callee-saved 保存槽。`frame_size > 0` 时无论入口还有没有 `StackCheck` 站点，都按上面的形状补发栈检查，再 `sub rsp` 与保存——这些写落在 `rsp` 之下，省掉 `sub` 会写到调用者的活跃栈上，省掉比较则会减过栈底。只有 `frame_size == 0` 才完全没有 prologue。没有预留标签的叶使用函数里让出的连续标签号，前插到入口块首个序列之前。
 
 taken edge尚未建立 callee frame。`morestack_or_poll` 只通过 `r14`把 return PC、九个整数参数寄存器和八个浮点参数寄存器写入 coroutine控制块的固定 scratch；该过程不读取或写入 candidate以下的 user stack。随后切到 worker system stack，acquire读取 processor flags：先完成 GC stop，再处理可接受的 preempt；coroutine被重新调度后仍从同一 `MorestackEntry`恢复。全部 poll动作完成后才读取最新 `stack_low`，容量仍不足时增长，最后装载已经由 GC/stack copy修正的 scratch并重新进入原 prologue。因而 poll-first次序不依赖剩余 user-stack空间，并且增长不会漏掉已经发布的 stop请求。
 
-每个可作为 `async` body入口的 code descriptor还发布 `entry_required_frame`，值覆盖入口 `required_frame`、ABI entry record和进入首个 checked prologue前的固定字节。runtime据此选择初始 stack class；该值使用与 frame layout相同的 checked计算并进入 backend/runtime schema，禁止另写经验常量。
+每个函数的 frame 都发布 `entry_required_frame = required_frame + 8`。8 是调用方已经压上、又不计入 `frame_size` 的返回地址。runtime 用入口函数的这个值选择初始 stack class；计算与 frame layout 相同，checked 加法，不另写经验常量。
 
 ### 分配产物与验证 {#allocation-artifacts}
 
@@ -255,7 +255,7 @@ taken edge尚未建立 callee frame。`morestack_or_poll` 只通过 `r14`把 ret
 
 改写后的序列必须通过 `verify_allocated_sequence`：所有操作数（含 `Mem` 的 base/index）都是物理寄存器或内存，出现任何 `Reg::Virtual` 都是内部错误；`r14`/`r15` 不被写；`rsp` 只在 prologue/epilogue 所在的 ABI 区间里被修改。`StackAddr` 的 frame 占位基址（`Reg::Virtual(FRAME_SLOT_BASE + slot)`）在改写时全部换算成 `[rsp + local_offset]`，改写后不允许残留占位编号。
 
-片段 payload（`CODEGEN_SCHEMA = 5`）新增 `frame`、`points`、`values`、`stats` 四段与站点级 `points` 范围：`frame` 给出 `frame_size`/`payload_bytes`/`outgoing_bytes`/`required_frame`/`max_leaf_reserve`/`locals`/`spill_slots`/`scratch_offset`/`save_offsets`/`checked`；点位另带 `outgoing_roots`；`stats` 给出 `peak_live_gpr`、`peak_live_xmm`、`spill_slot_count`、`spill_bytes`、`spill_stores`、`reloads`、`rematerializations`、`copy_moves`、`copy_cycles`、`call_sites`、`safepoint_spills`、`allocated_values`、`frame_size_max`，其中 `frame_size_max` 必须等于该片段 `frame.frame_size`，`points` 段数必须等于站点 `points` 范围之和。这些计数就是 [Cost calibration profile](#cost-calibration-profile) 里 `CostRecord` 的 spill/reload 字段来源，因此必须取 branch relaxation 与 frame layout 之后的结果，不能用分配前估计代替。分配规则 revision 由 `ALLOCATION_REVISION = 2` 表达并进入 fragment key：规则变化会改变 query key，不会静默复用旧片段。
+片段 payload（`CODEGEN_SCHEMA = 5`）新增 `frame`、`points`、`values`、`stats` 四段与站点级 `points` 范围：`frame` 给出 `frame_size`/`payload_bytes`/`outgoing_bytes`/`required_frame`/`entry_required_frame`/`max_leaf_reserve`/`locals`/`spill_slots`/`scratch_offset`/`save_offsets`/`checked`；点位另带 `outgoing_roots`；`stats` 给出 `peak_live_gpr`、`peak_live_xmm`、`spill_slot_count`、`spill_bytes`、`spill_stores`、`reloads`、`rematerializations`、`copy_moves`、`copy_cycles`、`call_sites`、`safepoint_spills`、`allocated_values`、`frame_size_max`，其中 `frame_size_max` 必须等于该片段 `frame.frame_size`，`points` 段数必须等于站点 `points` 范围之和。这些计数就是 [Cost calibration profile](#cost-calibration-profile) 里 `CostRecord` 的 spill/reload 字段来源，因此必须取 branch relaxation 与 frame layout 之后的结果，不能用分配前估计代替。分配规则 revision 由 `ALLOCATION_REVISION = 2` 表达并进入 fragment key：规则变化会改变 query key，不会静默复用旧片段。
 
 宿主执行验收：`Compilation::x64_fragments()` 暴露逐片段的机器字节、重定位、frame 视图，`cargo bench --bench x64_frame` 把片段按符号顺序映射为可执行页、解析内部 relocation、用 `ret` stub 兜住运行时入口，然后在真实 CPU 上按内部 ABI 调用入口片段并核对结果。它覆盖默认测试套件覆盖不到的部分：spill 槽读写、prologue/epilogue 的 `rsp` 调整、callee-saved 保存、栈参数传递与并行拷贝破环。指针值重定位到栈地址的场景需要 runtime allocator 才能构造参数，因此不在该 bench 的范围内。
 
@@ -265,7 +265,7 @@ epilogue从固定 slot恢复 callee-saved、`add rsp, frame_size`、`ret`。prol
 
 `TailCall` 在 frame仍存在时完成寄存器并行 copy，随后按 epilogue规则恢复 callee-saved并释放 frame，最后 `jmp` callee；调用者原 return address保持在 `rsp`顶端。eligibility已保证没有 stack argument/sret/root/cleanup；tail target若无 checked entry，形成的 backedge必须已由 poll budget pass覆盖。
 
-只有 LIR `PollSummary` 分类为 `PollFreeLeaf` 的函数完全省略 prologue：frame payload为0、无 call/循环/safepoint/unwind且 legalized cost不超过64。取函数地址时生成带 `StackCheck` 的 checked thunk。内部 ABI不使用 SysV red zone，以保持 Linux/Windows frame和异步 signal边界一致。
+只有分配后 `frame_size == 0` 的 `PollFreeLeaf` 完全省略 prologue：无 call、无循环、无 safepoint/unwind且 legalized cost不超过64。分配后又长出帧的叶补发栈检查。取函数地址时生成带 `StackCheck` 的 checked thunk。内部 ABI不使用 SysV red zone，以保持 Linux/Windows frame和异步 signal边界一致。
 
 ## stack map、panic 与 unwind
 

@@ -98,6 +98,8 @@ pub(crate) struct FramePayload {
     pub(crate) outgoing_bytes: u32,
     /// 栈检查与动态 alloca 检查使用的上限。
     pub(crate) required_frame: u32,
+    /// `required_frame` 加上入口返回地址。协程按这个数选初始栈。
+    pub(crate) entry_required_frame: u32,
     /// 直接 leaf 调用声明预留的最大额外栈。
     pub(crate) max_leaf_reserve: u32,
     /// 局部槽 `(与 body.stack_slots 同序)`：`(offset, bytes, align)`。
@@ -120,6 +122,7 @@ impl FramePayload {
             payload_bytes: frame.payload_bytes,
             outgoing_bytes: frame.outgoing_bytes,
             required_frame: frame.required_frame,
+            entry_required_frame: frame.entry_required_frame,
             max_leaf_reserve: frame.max_leaf_reserve,
             locals: frame
                 .locals
@@ -324,6 +327,8 @@ pub struct X64FragmentFrame {
     pub outgoing_bytes: u32,
     /// 栈检查与动态 alloca 检查使用的上限。
     pub required_frame: u32,
+    /// `required_frame` 加上入口返回地址。
+    pub entry_required_frame: u32,
     /// 16 字节 copy scratch 的偏移；未预留为 `None`。
     pub scratch_offset: Option<u32>,
     /// 溢出槽数量。
@@ -380,6 +385,7 @@ impl X64Fragment {
                 payload_bytes: frame.payload_bytes,
                 outgoing_bytes: frame.outgoing_bytes,
                 required_frame: frame.required_frame,
+                entry_required_frame: frame.entry_required_frame,
                 scratch_offset: frame.scratch_offset,
                 spill_slot_count: u32::try_from(frame.spill_slots.len())
                     .expect("溢出槽数量适配 u32"),
@@ -692,12 +698,13 @@ impl X64World {
             let frame = &fragment.frame;
             let _ = writeln!(
                 out,
-                "x64-frame {} size={} payload={} outgoing={} required={} leaf={} locals={} spills={} scratch={} saves={} checked={}",
+                "x64-frame {} size={} payload={} outgoing={} required={} entry={} leaf={} locals={} spills={} scratch={} saves={} checked={}",
                 hex_lower(fragment.instance),
                 frame.frame_size,
                 frame.payload_bytes,
                 frame.outgoing_bytes,
                 frame.required_frame,
+                frame.entry_required_frame,
                 frame.max_leaf_reserve,
                 frame.locals.len(),
                 frame.spill_slots.len(),

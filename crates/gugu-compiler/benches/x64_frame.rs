@@ -52,6 +52,10 @@ struct Scenario {
     calls: bool,
     /// 是否要求产生溢出。
     spills: bool,
+    /// 整份源码；设置后不再套用模板。
+    source: Option<&'static str>,
+    /// 与 `source` 配套的期望捕获值。
+    answer: Option<i64>,
 }
 
 fn main() {
@@ -66,24 +70,40 @@ fn main() {
             body: "spare(7) * 3",
             calls: false,
             spills: false,
+            source: None,
+            answer: None,
         },
         Scenario {
             name: "loop",
             body: "sum",
             calls: false,
             spills: false,
+            source: None,
+            answer: None,
         },
         Scenario {
             name: "spill",
             body: "total",
             calls: true,
             spills: true,
+            source: None,
+            answer: None,
         },
         Scenario {
             name: "call",
             body: "spare(total) + mix(1, 2, 3, 4, 5, 6)",
             calls: true,
             spills: true,
+            source: None,
+            answer: None,
+        },
+        Scenario {
+            name: "wide",
+            body: "",
+            calls: false,
+            spills: false,
+            source: Some(WIDE_SOURCE),
+            answer: Some(46),
         },
     ];
     let only = std::env::var("X64_FRAME_ONLY")
@@ -111,11 +131,10 @@ fn main() {
 
 /// 编译、映射并执行一个场景。
 fn run(scenario: &Scenario, target: TargetName) -> Result<(), String> {
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        program(scenario),
-        target,
-    ));
+    let generated = program(scenario);
+    let source = scenario.source.unwrap_or(generated.as_str());
+    let compilation =
+        Compiler::new().compile(CompileRequest::single_file("main.gg", source, target));
     if !compilation.is_success() {
         return Err(format!("{:?}", compilation.diagnostics().items()));
     }
@@ -208,7 +227,7 @@ fn run(scenario: &Scenario, target: TargetName) -> Result<(), String> {
     if stubbed != 0 {
         return Err(format!("执行进入了未知目标 stub 共 {stubbed} 次"));
     }
-    let expected = reference(scenario);
+    let expected = scenario.answer.unwrap_or_else(|| reference(scenario));
     if captured != expected as u64 {
         return Err(format!(
             "report 捕获 {captured}，期望 {expected}（stub 命中 {stubbed}）"
@@ -216,6 +235,20 @@ fn run(scenario: &Scenario, target: TargetName) -> Result<(), String> {
     }
     Ok(())
 }
+
+/// 九个参数再加一个中间值，叶分类删不掉后来长出的帧，入口必须做栈检查。
+const WIDE_SOURCE: &str = r#"#[ffi(leaf(stack = 0))]
+extern "C" fn report(value: int)
+
+fn wide(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int, i: int) int {
+    let extra = a + 1
+    extra + b + c + d + e + f + g + h + i
+}
+
+fn main() {
+    report(wide(1, 2, 3, 4, 5, 6, 7, 8, 9))
+}
+"#;
 
 /// 场景程序：`report` 是宿主捕获用的外部 C 函数，其余都是受管代码。
 fn program(scenario: &Scenario) -> String {

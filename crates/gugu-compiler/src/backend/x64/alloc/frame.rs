@@ -23,23 +23,21 @@
 //! # prologue
 //!
 //! ```text
-//! check: lea  r11, [rsp - required_frame]      ; 位移超出 i32 时 mov r11, imm64 + add r11, rsp
-//!        cmp  [r14 + stack_check_offset], r11   ; 内存在前 + signed jg：容量不足与 poison 同一次比较捕获
-//!        jg   cold
-//!        sub  rsp, frame_size                  ; frame_size > 0 时
-//!        mov  [rsp + off], rbp/r12/r13         ; 仅实际使用的 save slot
-//!        <入口参数并行拷贝组>
-//!        <栈参数逐个 mov v, [rsp + frame_size + 8 + offset]>
-//!        jmp  done
-//! cold:  call morestack_or_poll
-//!        jmp  check                            ; 恢复/扩容后重试原 StackCheck
-//! done:
+//!         jmp   check
+//! cold:   call  morestack_or_poll
+//!         jmp   check
+//! check:  lea   r11, [rsp - required_frame]    ; 位移超出 i32 时 mov r11, imm64 + add r11, rsp
+//!         cmp   [r14 + stack_check_offset], r11
+//!         jg    cold
+//!         sub   rsp, frame_size                ; frame_size > 0 时
+//!         mov   [rsp + off], rbp/r12/r13       ; 仅实际使用的 save slot
 //! ```
 //!
 //! 冷路必须回到 `check` 重试：`morestack_or_poll` 可能更换栈后再恢复同一协程，候选地址与
 //! `stack_low` 都已变化，不能从旧 candidate 直接建立 frame，也不能跳过 frame 建立。
-//! 没有入口 `StackCheck` 站点（`PollFreeLeaf`）的函数不发射容量检查；`frame_size > 0` 时
-//! 仍要发射 `sub rsp` 与保存，否则 spill slot 会落进 caller 的 frame。
+//! `frame_size > 0` 时一定发射这次比较，即使 LIR 已把 `PollFreeLeaf` 的 `StackCheck` 删掉——
+//! 分类发生在分配之前，看不到溢出槽和 callee-saved 保存槽。只有 `frame_size == 0` 的叶才
+//! 完全没有 prologue。
 
 use super::super::abi::{self, AbiLayout, AbiSlot};
 use super::super::inst::{Operand, RelocKind, RelocTarget};
@@ -69,6 +67,9 @@ const WIN_SHADOW_BYTES: u32 = 32;
 /// 16 字节 copy scratch 的字节数。
 pub(crate) const SCRATCH_BYTES: u32 = 16;
 
+/// 调用方压入、不计入 `frame_size` 的返回地址。协程初始栈必须把它和 `required_frame` 一起算上。
+pub(crate) const RETURN_ADDRESS_BYTES: u32 = 8;
+
 /// 栈上的一个局部槽。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct LocalSlot {
@@ -84,6 +85,8 @@ pub(crate) struct FrameLayout {
     pub(crate) payload_bytes: u32,
     pub(crate) outgoing_bytes: u32,
     pub(crate) required_frame: u32,
+    /// `required_frame` 加上入口返回地址。协程按这个数选初始栈。
+    pub(crate) entry_required_frame: u32,
     pub(crate) max_leaf_reserve: u32,
     /// 与 `body.stack_slots` 同序的局部槽偏移。
     pub(crate) locals: Vec<LocalSlot>,
@@ -235,7 +238,11 @@ pub(crate) fn layout(
     let required_frame = frame_size
         .checked_add(max_leaf_reserve)
         .ok_or_else(|| AllocError::new("required frame 溢出"))?;
-    let checked = checked_entry(selected);
+    let entry_required_frame = required_frame
+        .checked_add(RETURN_ADDRESS_BYTES)
+        .ok_or_else(|| AllocError::new("entry required frame 溢出"))?;
+    // 分配之后才知道溢出槽和保存槽。有帧就必须检查，不能沿用分配前删掉的叶标记。
+    let checked = checked_entry(selected) || frame_size > 0;
     let spill_offsets = slots.slots.iter().map(|slot| slot.offset).collect();
     let spill_slots = slots
         .slots
@@ -247,6 +254,7 @@ pub(crate) fn layout(
         payload_bytes,
         outgoing_bytes: outgoing,
         required_frame,
+        entry_required_frame,
         max_leaf_reserve,
         locals,
         scratch: scratch_offset,

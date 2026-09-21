@@ -101,6 +101,24 @@ pub(crate) fn rewrite(
         traffic: Cell::new(SpillTraffic::default()),
     };
     let mut blocks = selected.blocks.clone();
+    let entry_order = blocks
+        .iter()
+        .position(|block| block.id == body.entry)
+        .ok_or_else(|| AllocError::new("入口块不在布局里"))?;
+    let synthetic_check = frame.checked
+        && !blocks.iter().any(|block| {
+            block
+                .sites
+                .iter()
+                .any(|site| site.kind == SiteKind::Prologue)
+        });
+    // 没有 `StackCheck` 站点时，先在标签空间里让出两个号给合成 prologue。
+    let prologue_at = if synthetic_check {
+        Some(reserve_prologue_labels(&mut blocks, entry_order)?)
+    } else {
+        None
+    };
+    let entry_has_sites = !blocks[entry_order].sites.is_empty();
     let mut regions: Vec<(u32, Range<u32>)> = Vec::new();
     let mut site_index = 0_u32;
     for (order, block) in blocks.iter_mut().enumerate() {
@@ -115,7 +133,7 @@ pub(crate) fn rewrite(
             let prepend = resolution
                 .prologue()
                 .is_some_and(|group| group.site == PREPEND_SITE)
-                && order == 0
+                && order == entry_order
                 && index == 0;
             let sequence = &mut block.sites[index].lowered;
             let region = rewrite_sequence(
@@ -128,6 +146,7 @@ pub(crate) fn rewrite(
                 false,
                 stack_arguments,
                 stack_check_offset,
+                0,
             )?;
             if let Some(range) = region {
                 regions.push((site_index, range));
@@ -141,8 +160,13 @@ pub(crate) fn rewrite(
         let prepend = resolution
             .prologue()
             .is_some_and(|group| group.site == PREPEND_SITE)
-            && order == 0
+            && order == entry_order
             && site_count == 0;
+        let label_base = if prepend && !entry_has_sites {
+            prologue_at.unwrap_or(0)
+        } else {
+            0
+        };
         let sequence = &mut block.terminator;
         let region = rewrite_sequence(
             &emit,
@@ -154,6 +178,7 @@ pub(crate) fn rewrite(
             terminator,
             stack_arguments,
             stack_check_offset,
+            label_base,
         )?;
         if let Some(range) = region {
             regions.push((site_index, range));
@@ -174,6 +199,91 @@ pub(crate) fn rewrite(
         abi_regions,
         traffic: emit.traffic.get(),
     })
+}
+
+/// 为没有 `StackCheck` 站点的有帧函数让出两个 prologue 标签。
+///
+/// 编码器要求标签从 0 起连续。站点局部标签会在 `stitch` 时平移，所以有站点时把入口块
+/// 首个站点的局部标签让出 0/1，并把其后的绝对标签整体加 2。入口块没有站点时，prologue
+/// 直接占用绝对编号 `at`/`at+1`，终结符原有标签后移，`terminator_label_base` 保持不动
+/// （`stitch` 不把终结符标签算进站点用量）。
+fn reserve_prologue_labels(blocks: &mut [SelectedBlock], entry: usize) -> Result<u32, AllocError> {
+    const EXTRA: u32 = 2;
+    let block_base = blocks.iter().map(|block| block.id.0 + 1).max().unwrap_or(0);
+    let at = if entry == 0 {
+        block_base
+    } else {
+        blocks[entry - 1].terminator_label_end
+    };
+    let entry_has_sites = !blocks[entry].sites.is_empty();
+    if entry_has_sites {
+        shift_local_labels(&mut blocks[entry].sites[0].lowered.sequence, EXTRA)?;
+    }
+    for (index, block) in blocks.iter_mut().enumerate() {
+        if index < entry {
+            continue;
+        }
+        bump_absolute_labels(&mut block.terminator.sequence, at, EXTRA)?;
+        if entry_has_sites || index != entry {
+            block.terminator_label_base = block
+                .terminator_label_base
+                .checked_add(EXTRA)
+                .ok_or_else(|| AllocError::new("标签编号溢出"))?;
+        }
+        block.terminator_label_end = block
+            .terminator_label_end
+            .checked_add(EXTRA)
+            .ok_or_else(|| AllocError::new("标签编号溢出"))?;
+    }
+    Ok(at)
+}
+
+/// 站点局部标签整体后移，给合成 prologue 留出 0/1。
+fn shift_local_labels(sequence: &mut Sequence, extra: u32) -> Result<(), AllocError> {
+    for instruction in &mut sequence.instructions {
+        for operand in &mut instruction.operands {
+            if let Operand::Label(label) = operand {
+                label.0 = label
+                    .0
+                    .checked_add(extra)
+                    .ok_or_else(|| AllocError::new("标签编号溢出"))?;
+            }
+        }
+    }
+    for definition in &mut sequence.labels {
+        definition.label.0 = definition
+            .label
+            .0
+            .checked_add(extra)
+            .ok_or_else(|| AllocError::new("标签编号溢出"))?;
+    }
+    Ok(())
+}
+
+/// 绝对标签编号 `>= at` 的定义和引用后移。块标签编号更小，保持不动。
+fn bump_absolute_labels(sequence: &mut Sequence, at: u32, extra: u32) -> Result<(), AllocError> {
+    for instruction in &mut sequence.instructions {
+        for operand in &mut instruction.operands {
+            if let Operand::Label(label) = operand
+                && label.0 >= at
+            {
+                label.0 = label
+                    .0
+                    .checked_add(extra)
+                    .ok_or_else(|| AllocError::new("标签编号溢出"))?;
+            }
+        }
+    }
+    for definition in &mut sequence.labels {
+        if definition.label.0 >= at {
+            definition.label.0 = definition
+                .label
+                .0
+                .checked_add(extra)
+                .ok_or_else(|| AllocError::new("标签编号溢出"))?;
+        }
+    }
+    Ok(())
 }
 
 /// 可作 scratch 的 GPR：`r11` 加通用池减去未保存的 callee-saved。
@@ -214,10 +324,11 @@ fn rewrite_sequence(
     epilogue: bool,
     stack_arguments: &[(u32, u32, Type)],
     stack_check_offset: u32,
+    label_base: u32,
 ) -> Result<Option<Range<u32>>, AllocError> {
     let entries = live::site_plan(lowered)?;
     let original_labels = lowered.sequence.labels.clone();
-    let mut builder = Builder::new();
+    let mut builder = Builder::with_labels(label_base);
     let mut region = None;
     if prepend || kind == SiteKind::Prologue {
         let start = builder.instruction_count();
