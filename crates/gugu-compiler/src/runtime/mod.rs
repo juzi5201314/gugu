@@ -118,6 +118,12 @@ pub(crate) mod region_schema;
 pub(crate) mod routing;
 pub(crate) mod routing_schema;
 
+pub(crate) mod cstring;
+#[allow(dead_code, reason = "外调交接的确定性参照实现由契约与测试消费")]
+mod foreign;
+pub(crate) mod foreign_schema;
+#[cfg(test)]
+mod foreign_tests;
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
 pub(crate) mod scheduler_schema;
@@ -170,6 +176,7 @@ pub use coroutine_schema::{
 pub use block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
 pub use compression_schema::{CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract};
 pub use edge_schema::{EdgeDemand, EdgeRuntimeContract};
+pub use foreign_schema::{ForeignDemand, ForeignRuntimeContract};
 pub use gc_metadata_schema::GcMetadataDemand;
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
 pub use mark_schema::{MarkDemand, MarkRuntimeContract};

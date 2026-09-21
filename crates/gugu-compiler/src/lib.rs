@@ -560,6 +560,7 @@ impl Compiler {
             message_nodes: 0,
             turn_region: lir.turn_region_demand(),
             shared_heap: shared_heap_demand,
+            foreign: foreign_demand(&lir, &frontend.gir),
         };
         let rt0_demand = {
             let module = frontend.hir.module();
@@ -863,6 +864,29 @@ impl Compiler {
             action_key,
         }
     }
+}
+
+/// 外调需求：LIR 的调用模式加上 GIR 里的 asm / global_asm 站点。
+fn foreign_demand(lir: &lir::Validated, gir: &frontend::gir::GirWorldV1) -> runtime::ForeignDemand {
+    let mut demand = lir.foreign_demand();
+    for body in &gir.bodies {
+        if body.kind == frontend::gir::body::BodyKind::GlobalAsm {
+            demand.global_asm += 1;
+        }
+        for statement in &body.statements {
+            if let frontend::gir::body::StatementKind::Assign(
+                _,
+                frontend::gir::body::Rvalue::Intrinsic {
+                    op: frontend::gir::body::IntrinsicOp::Asm(_),
+                    ..
+                },
+            ) = statement.kind
+            {
+                demand.asm += 1;
+            }
+        }
+    }
+    demand
 }
 
 /// 将真实 GC metadata bundle 的 section 大小写入 runtime demand。
@@ -1300,6 +1324,12 @@ pub struct ImagePlan {
     scheduler_service_batch: u32,
     scheduler_contract_fingerprint: [u8; 32],
     scheduler_runtime: SchedulerRuntimeContract,
+    foreign_max_blocking_workers: u32,
+    foreign_ordinary_sites: u32,
+    foreign_dirty_sites: u32,
+    foreign_leaf_sites: u32,
+    foreign_contract_fingerprint: [u8; 32],
+    foreign_runtime: crate::runtime::ForeignRuntimeContract,
     wait_inline_select_cases: u32,
     wait_scratch_class_count: u32,
     wait_node_class_count: u32,
@@ -1549,6 +1579,12 @@ impl ImagePlan {
             scheduler_service_batch: plan.scheduler_service_batch,
             scheduler_contract_fingerprint: plan.scheduler_contract_fingerprint,
             scheduler_runtime: plan.scheduler_runtime,
+            foreign_max_blocking_workers: plan.foreign_max_blocking_workers,
+            foreign_ordinary_sites: plan.foreign_ordinary_sites,
+            foreign_dirty_sites: plan.foreign_dirty_sites,
+            foreign_leaf_sites: plan.foreign_leaf_sites,
+            foreign_contract_fingerprint: plan.foreign_contract_fingerprint,
+            foreign_runtime: plan.foreign_runtime,
             wait_inline_select_cases: plan.wait_inline_select_cases,
             wait_scratch_class_count: plan.wait_scratch_class_count,
             wait_node_class_count: plan.wait_node_class_count,
@@ -2307,6 +2343,30 @@ impl ImagePlan {
     /// 返回调度契约段。
     pub fn scheduler_runtime(&self) -> &SchedulerRuntimeContract {
         &self.scheduler_runtime
+    }
+    /// 返回普通 blocking worker 上限。
+    pub fn foreign_max_blocking_workers(&self) -> u32 {
+        self.foreign_max_blocking_workers
+    }
+    /// 返回普通 `ForeignBridge` 调用点数量。
+    pub fn foreign_ordinary_sites(&self) -> u32 {
+        self.foreign_ordinary_sites
+    }
+    /// 返回 dirty CPU 调用点数量。
+    pub fn foreign_dirty_sites(&self) -> u32 {
+        self.foreign_dirty_sites
+    }
+    /// 返回 `ForeignLeaf` 调用点数量。
+    pub fn foreign_leaf_sites(&self) -> u32 {
+        self.foreign_leaf_sites
+    }
+    /// 返回外调契约指纹。
+    pub fn foreign_contract_fingerprint(&self) -> [u8; 32] {
+        self.foreign_contract_fingerprint
+    }
+    /// 返回外调契约段。
+    pub fn foreign_runtime(&self) -> &crate::runtime::ForeignRuntimeContract {
+        &self.foreign_runtime
     }
     /// 返回内联 select case 上限。
     pub fn wait_inline_select_cases(&self) -> u32 {

@@ -287,9 +287,9 @@ impl Builder<'_> {
                 });
             }
             ConstValue::CString(bytes) => {
-                let mut bytes = bytes.clone();
-                bytes.push(0);
-                vec![self.data(bytes, Provenance::Raw)]
+                crate::runtime::cstring::require_terminated(bytes)
+                    .map_err(|error| invalid(error.message()))?;
+                vec![self.data(bytes.clone(), Provenance::Raw)]
             }
             ConstValue::Aggregate(values) => {
                 let address = self.temporary(ty)?;

@@ -46,8 +46,9 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 self.compiler.model.name(self.module, text),
             )),
             ast::LitKind::CString { text } => {
-                let mut bytes = string::decode_bytes(self.compiler.model.name(self.module, text));
-                bytes.push(0);
+                let payload = string::decode_bytes(self.compiler.model.name(self.module, text));
+                let bytes = crate::runtime::cstring::terminate(&payload)
+                    .map_err(|error| self.error(error.message()))?;
                 hir::Literal::CString(bytes)
             }
         })

@@ -193,6 +193,35 @@ impl Validated {
             suspend_points: coroutine.suspend_points,
         }
     }
+
+    /// 外调需求：按调用点的 `CallKind` 计数，不从符号名猜测模式。
+    pub(crate) fn foreign_demand(&self) -> crate::runtime::ForeignDemand {
+        let mut demand = crate::runtime::ForeignDemand::default();
+        let bump = |demand: &mut crate::runtime::ForeignDemand, call: &body::Call| {
+            use crate::frontend::gir::body::CallKind;
+            match call.kind {
+                CallKind::ForeignBridge => demand.ordinary += 1,
+                CallKind::ForeignBridgeDirtyCpu => demand.dirty += 1,
+                CallKind::ForeignLeaf { .. } => demand.leaf += 1,
+                CallKind::Managed => {}
+            }
+        };
+        for world_body in &self.world.bodies {
+            for instruction in &world_body.instructions {
+                if let body::Op::Call(call) | body::Op::ForeignCall(call) = &instruction.op {
+                    bump(&mut demand, call);
+                }
+            }
+            for block in &world_body.blocks {
+                if let body::Terminator::Invoke { call, .. }
+                | body::Terminator::TailCall { call, .. } = &block.terminator
+                {
+                    bump(&mut demand, call);
+                }
+            }
+        }
+        demand
+    }
     /// 等待源需求：从优化后 LIR 统计 channel / Join / select 调用与 Select safepoint。
     pub(crate) fn wait_demand(&self) -> crate::runtime::WaitDemand {
         let mut demand = crate::runtime::WaitDemand::default();

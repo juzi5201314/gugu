@@ -113,6 +113,7 @@ impl CoroutineHot {
                 | (CoroutineState::Runnable, CoroutineState::Running)
                 | (CoroutineState::Running, CoroutineState::Runnable)
                 | (CoroutineState::Running, CoroutineState::Parking)
+                | (CoroutineState::Running, CoroutineState::Waiting)
                 | (CoroutineState::Running, CoroutineState::Foreign)
                 | (CoroutineState::Running, CoroutineState::DirtyWaiting)
                 | (CoroutineState::Running, CoroutineState::Dead)
@@ -301,6 +302,78 @@ pub(crate) struct ForeignBridgeState {
     dirty_link: u64,
     bridge_credit: u64,
     error_state: u64,
+}
+
+impl ForeignBridgeState {
+    pub(crate) const ORDINARY: u64 = 1;
+    pub(crate) const DIRTY: u64 = 2;
+
+    pub(crate) fn publish(
+        &mut self,
+        mode: u64,
+        call_stub: u64,
+        frame_offset: u64,
+        frame_size: u64,
+        lease_word: u64,
+        credit: u64,
+    ) -> Result<(), RawInvariant> {
+        if self.mode != 0 {
+            return Err(RawInvariant::new("ForeignBridge 记录已经发布"));
+        }
+        if mode != Self::ORDINARY && mode != Self::DIRTY {
+            return Err(RawInvariant::new("ForeignBridge 模式未登记"));
+        }
+        self.mode = mode;
+        self.call_stub = call_stub;
+        self.frame_offset = frame_offset;
+        self.frame_size = frame_size;
+        self.lease_word = lease_word;
+        self.bridge_credit = credit;
+        self.error_state = 0;
+        Ok(())
+    }
+
+    pub(crate) const fn mode(&self) -> u64 {
+        self.mode
+    }
+
+    pub(crate) const fn error_state(&self) -> u64 {
+        self.error_state
+    }
+
+    pub(crate) const fn credit(&self) -> u64 {
+        self.bridge_credit
+    }
+
+    pub(crate) fn set_credit(&mut self, credit: u64) -> Result<(), RawInvariant> {
+        if self.bridge_credit != 0 || credit == 0 {
+            return Err(RawInvariant::new("BridgeCredit 不能重复发放"));
+        }
+        self.bridge_credit = credit;
+        Ok(())
+    }
+
+    pub(crate) fn set_lease(&mut self, lease: u64) {
+        self.lease_word = lease;
+    }
+
+    pub(crate) fn capture_error(&mut self, errno: u64) {
+        self.error_state = errno;
+    }
+
+    /// 额度最多归还一次。
+    pub(crate) fn take_credit(&mut self) -> Result<u64, RawInvariant> {
+        if self.bridge_credit == 0 {
+            return Err(RawInvariant::new("BridgeCredit 不能归还两次"));
+        }
+        let credit = self.bridge_credit;
+        self.bridge_credit = 0;
+        Ok(credit)
+    }
+
+    pub(crate) fn clear(&mut self) {
+        *self = Self::default();
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

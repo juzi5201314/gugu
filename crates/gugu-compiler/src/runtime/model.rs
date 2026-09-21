@@ -15,6 +15,7 @@ use super::compression_schema::{
 };
 use super::coroutine_schema::{CoroutineDemand, CoroutineRuntimeContract};
 use super::edge_schema::{EdgeDemand, EdgeRuntimeContract};
+use super::foreign_schema::{ForeignDemand, ForeignRuntimeContract};
 use super::gc_metadata_contract::GcMetadataRuntimeContract;
 use super::gc_metadata_schema::GcMetadataDemand;
 use super::inbox::ServiceBudget;
@@ -48,10 +49,9 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 25 相对版本 24 的变化：并入 `LogicalProcessorPrefix` 的 poll/ownership/TLAB/
-/// TurnRegion 布局偏移，并把 `SchedulerRuntimeContract` 升到 schema 2。backend 只消费
-/// 契约里的 `offset_of!` 结果，禁止手写第二份数字。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 25;
+/// 版本 26 相对版本 25 的变化：并入外调交接契约。BlockingBridge 上限、waiter 字节、
+/// dirty target 公式和 poller 分流只来自 `foreign_schema`，禁止再写一套数字。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 26;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -528,6 +528,8 @@ pub(crate) struct RawPlaneDemand {
     pub(crate) turn_region: super::region_schema::TurnRegionDemand,
     /// SharedHeap 需求视图；由优化后 LIR 的 handle 指令与 placement 推导。
     pub(crate) shared_heap: SharedHeapDemand,
+    /// 外调与汇编站点；由优化后 LIR 的 `CallKind` 与 GIR 的 asm 声明推导。
+    pub(crate) foreign: ForeignDemand,
 }
 
 /// runtime raw 平面的契约对象。
@@ -545,6 +547,7 @@ pub(crate) struct RuntimeRawContractV1 {
     rt0: Rt0SchemaV1,
     coroutine: CoroutineRuntimeContract,
     scheduler: SchedulerRuntimeContract,
+    foreign: ForeignRuntimeContract,
     wait: WaitRuntimeContract,
     sync: SyncRuntimeContract,
     stackmap: StackMapRuntimeContract,
@@ -671,6 +674,7 @@ impl RuntimeRawContractV1 {
                 suspend_points: demand.suspend_points,
             })?,
             scheduler: SchedulerRuntimeContract::build(scheduler_demand)?,
+            foreign: ForeignRuntimeContract::build(demand.foreign)?,
             wait: WaitRuntimeContract::build(wait_demand, profile)?,
             sync,
             stackmap,
@@ -838,6 +842,11 @@ impl RuntimeRawContractV1 {
     /// 返回调度契约段。
     pub(crate) fn scheduler(&self) -> &SchedulerRuntimeContract {
         &self.scheduler
+    }
+
+    /// 返回外调交接契约段。
+    pub(crate) fn foreign(&self) -> &ForeignRuntimeContract {
+        &self.foreign
     }
 
     /// 返回等待契约段。
@@ -1066,6 +1075,10 @@ impl RuntimeRawContractV1 {
             return Err(RawModelError::new("协程需求与LIR需求视图不一致"));
         }
         self.scheduler.verify()?;
+        self.foreign.verify()?;
+        if self.foreign.demand != self.demand.foreign {
+            return Err(RawModelError::new("外调需求与 LIR 需求视图不一致"));
+        }
         // 调度段的字段必须与登记的调优 profile 和 processor 前缀同源：段内自洽但
         // profile/偏移对不上同样是非法状态。
         let tuning = &crate::runtime::scheduler_schema::RUNTIME_TUNING_PROFILE;
@@ -1260,6 +1273,7 @@ impl RuntimeRawContractV1 {
         bytes.extend_from_slice(&self.rt0.canonical_bytes());
         bytes.extend_from_slice(&self.coroutine.canonical_bytes());
         bytes.extend_from_slice(&self.scheduler.canonical_bytes());
+        bytes.extend_from_slice(&self.foreign.canonical_bytes());
         bytes.extend_from_slice(&self.wait.canonical_bytes());
         bytes.extend_from_slice(&self.sync.canonical_bytes());
         bytes.extend_from_slice(&self.stackmap.canonical_bytes());
@@ -1490,6 +1504,7 @@ impl RuntimeRawContractV1 {
         output.push_str(&self.rt0.dump());
         output.push_str(&self.coroutine.dump());
         output.push_str(&self.scheduler.dump());
+        output.push_str(&self.foreign.dump());
         output.push_str(&self.wait.dump());
         output.push_str(&format!(
             "sync schema={} profile={} primitives={} total-ops={} fingerprint={}\n",
