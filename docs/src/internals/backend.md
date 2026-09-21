@@ -168,29 +168,45 @@ Batch publish的CAS retry是合法cyclic runtime CFG，不得包在`NoSafepointR
 
 ### interval
 
-block 按最终 layout 编号，每条 instruction 获得间隔为 2 的 position；奇数 position 留给 split/spill。liveness 按 CFG fixed point 求得，block 参数/edge copy 在 predecessor 末端建 use。interval 由有序不相交 range 和 use position 组成。
+block 按最终 layout 编号，每条 instruction 获得间隔为 2 的 position：`use_slot = 2p`、`def_slot = 2p + 1`，相邻 instruction 之间留出定义与使用分开的缝隙。一个**点位**（point）是分配与 stack map 共用的最小单位，携带 `(site, kind, block, instructions, mask, clobber, pointer_spill, fixed_physical)`：`kind` 取 `Normal`/`Call`/`Bridge`/`Prologue`，由 LIR op 的规范 safepoint 种类推出；`mask` 是该点位会写或会读的物理寄存器集合，加上 form 自带 clobber，Call 点位再加全部 caller-saved GPR（`rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10`）与全部 XMM，Bridge 点位在 Call 之上再加 pointer spill 标记。读也必须进 mask：ABI 返回寄存器（`rax`、`rbx`、`rdx`、`xmm0`、`xmm1`）在返回值搬运点只是被**读**，若只按写建 mask，转换或 scratch 仍可能覆写它们。
 
-spill weight 使用 `u64` 饱和累加：普通 use 1，fixed-register use 4，loop depth `d` 乘 `min(10^d, 1_000_000)`，safepoint 后立即使用再乘 2。rematerializable 常量/symbol address 的 spill cost 为 0，但每次重建仍计入 code-size 成本。
+liveness 按 CFG fixed point 求得，block 参数与 edge copy 在 predecessor 末端建 use；某个值的 interval 是**单条保守区间**：`start` 取 `live_in` 首点与所有读点最小值，`end` 取 `live_out` 末点与所有写点最大值。这与"在每个 clobber 点把区间切开、边界插转换 move"的经典做法不同：块内存在 `Switch` trampoline、`GcAlloc` 快慢路这类**同一 block 内的条件跳转**，块参数还可能由多条边定义并跨 backedge 使用，边界 move 无法保证在所有路径上恰好执行一次；统一按值给一个位置、溢出值在使用处读回、定义处写回，可证明地对任意 CFG 成立，代价是牺牲了分裂带来的更细粒度着色。
+
+spill weight 使用 `u64` 饱和累加：普通 use 1，含 fixed-register 或 Call/Bridge 点位的 use 4，紧跟在同 block 内 Call/Bridge 点之后的 use 再乘 2，loop depth `d` 乘 `min(10^d, 1_000_000)`（支配树回边识别自然循环，非可归约环退回 SCC 计数并按深度 1 处理）。定义是 `IConst`/`FConst`/`SymbolAddr`/`StackAddr` 的值为 rematerializable，weight 为 0；当它本来会被溢出时改为"无位置"：定义站点整段丢弃，每个使用处按原 lowering 重新物化一次。
 
 ### 分配规则
 
-GPR 和 XMM 独立分配。值跨 call 活跃时 GPR 首选 `rbp,r12,r13`；不跨 call 时首选顺序为：
+GPR 和 XMM 独立分配。可用 GPR 池是 `rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10, rbp, r12, r13`——`rsp`、`r14`、`r15` 与内部 ABI 保留的 scratch `r11` 不参与；XMM 池是 `xmm0..xmm15`。值跨 Call/Bridge 点位活跃时优先 `rbp, r12, r13`（callee-saved，被调者会保存），其余情况按上表顺序；空闲寄存器不足时，只把**根类要求必须落栈**的值（managed heap 指针、stack 指针）或跨 bridge 的指针直接判为 spill slot，不让它们挤占其它值的寄存器。
 
-```text
-rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10, rbp, r12, r13
-```
+候选寄存器必须同时满足三条：不在该值覆盖范围内任一点位的 `mask` 里、当前没有别的活跃值占用、通过宽度检查（8 位操作数的值只能放在能编码 `r/m8` 的寄存器上，溢出槽不受限）。选择用确定性的候选序，不使用随机或哈希顺序。
 
-XMM 顺序为 `xmm0..xmm15`，承载 `F32`、`F64` 和 non-root `V128`；内部调用与 taken poll slow edge全部 clobber。fixed instruction constraint 先占用要求寄存器并在前后 split冲突 interval；跨这些位置活跃的向量值进入16字节 spill slot，不能进入 stack map。
+没有可用候选时，在当前 interval 与占用冲突的候选中选择 `spill_weight / remaining_length` 最低者 spill；比例用 `u128` 交叉乘法比较，不使用宿主浮点。相等时 spill 稳定 value ID 较大者。**分类与占用都按点位推进**：候选检查使用该值覆盖范围内全部点位 mask 的并集，因此一次放置对整条区间成立。
 
-allocator 维护按结束 position 排序的 active/inactive 集。没有空闲 register 时，在当前 interval 与占用候选中选择 `spill_weight / remaining_length` 最低者 spill；比例用 `u128` 交叉乘法比较，不使用宿主浮点。相等时 spill 稳定 value ID 较大者。interval 在下一 use、call、safepoint和 fixed constraint 前后 split，不能在 instruction 中间 split。
+被 spill 的值没有寄存器位置：读取它的操作数在指令前插入一次载入（`mov`/`movsd`/`movups`，目标取该点位空闲的 scratch），宽度够的操作数（`Rm8/16/32/64`、`XmmRm`）直接换成 `[rsp + slot_offset]`；只接受寄存器的操作数（和 `Mem` 的 base/index）先载入 scratch。写它的站点按宽度落地：`Rm64`/`XmmRm` 直接写内存；窄宽度或仅寄存器形式先写 scratch，再在该站点内该值最后一次写入之后补一次写回（值在此后仍活跃才发射）。槽内保持**零扩展规范形**，所以窄写必须先把槽读进 scratch 做字节合并，32/64 位写则直接覆盖整个寄存器。
 
-stack spill slot 按 `(size, align, root_class)` 分组复用，只有 live range不重叠才可共用。root class为 heap pointer、stack pointer或 non-pointer；不同 root class不共用 slot，使 stack map和栈复制验证不依赖某时刻残留位。`V128` slot固定 size/align均为16并属于 non-pointer。slot分配按 interval起点/ValueId排序，选择最低 offset可用槽。
+stack spill slot 按 `(size, root_class)` 分组复用：heap 指针、stack 指针与 non-pointer/XMM 分开，只有 live range 不重叠才可共用。`V128` slot 固定 size/align 均为 16 并属于 non-pointer。slot 分配按 `(start, value)` 排序，在每个分组内选择 offset 最低的可用槽，因此偏移是确定性的。
 
 ### parallel copy
 
-block 参数、call argument 和 return shuffle先构造成并行 copy图。选指阶段先把块参数拷贝摊平成串行 move 序列：优先发射目标不再作为任何剩余拷贝源的边，只剩环时把环上一条边的目标值先存进同类型的**临时虚拟寄存器**、把仍读该目标的源改指临时寄存器，再发射那条边。块参数拷贝属于**边**：`Branch` 只在被选中的那条路径上执行拷贝，需要拷贝的 taken 边经 trampoline 进入，两个后继不会共用同一段拷贝。`Invoke` 只为 normal 边发射拷贝，unwind 边的参数由展开器和 stack map 恢复。
+block 参数、call argument 和 return shuffle先构造成并行 copy图。选指阶段先把块参数拷贝摊平成串行 move 序列：优先发射目标不再作为任何剩余拷贝源的边，只剩环时把环上一条边的目标值先存进同类型的**临时虚拟寄存器**、把仍读该目标的源改指临时寄存器，再发射那条边；渲染结果必须自洽（harness 与站点文本断言读它），但临时虚拟寄存器不进入分配。
 
-寄存器分配阶段的物理并行 copy 按同一规则再消除一次：无环边按目标空闲顺序执行；cycle 使用 `r11`（GPR）或一个为该函数预留的 16 字节 stack scratch（XMM/内存）打断。scratch 不进入 stack map，且在 safepoint 前 copy 必须全部完成。
+块参数拷贝属于**边**：`Branch` 只在被选中的那条路径上执行拷贝，需要拷贝的 taken 边经 trampoline 进入，两个后继不会共用同一段拷贝。形状固定为
+
+```text
+<test>
+jcc L_taken            ; taken 边需要拷贝时才进 trampoline
+<fall 边拷贝>
+jmp fall
+L_taken:
+<taken 边拷贝>
+jmp taken
+```
+
+`Switch` 的每个 case 各自独立：需要拷贝的 case 走自己的 trampoline，**默认（otherwise）边的拷贝落在"所有 case 都不匹配"的直落路径上**，随后才是 `jmp otherwise` 与 trampoline 段；漏掉默认边拷贝会让默认后继直接读到未初始化的槽。`Invoke` 只为 normal 边发射拷贝，unwind 边的参数由展开器和 stack map 恢复。
+
+stitch 阶段把站点序列按累积位移重写标签：块标签编号在 `0..block_count`，站点内标签平移后在终结符编号空间之前；终结符自己的标签编号已是函数级，但**定义位置必须按终结符在函数序列里的起点重定基**，否则 trampoline 标签会指到函数开头。
+
+寄存器分配阶段按同一批 pairs 重发整段拷贝（渲染结果被整体丢弃）：每组的物化把 rematerializable 的源按原 lowering 重建到该点位空闲且不在 mask 内的寄存器；拷贝按目标空闲顺序执行，内存到内存经 `r11` 搬机器字（16 字节值搬两个字），环用 `r11`（GPR 目标）或 frame 里预留的 **16 字节 copy scratch**（XMM/内存目标）打断。scratch 只在需要时预留，不进入 stack map，且在 safepoint 前 copy 必须全部完成。逐组统计 `copy_moves` 与 `copy_cycles` 进入 payload 的 `stats`。
 
 ## frame layout
 
@@ -212,21 +228,36 @@ outgoing area大小是函数所有 callsite 所需最大值，因而 body 中 `r
 frame_size = align_up(payload_size + 8, 16) - 8
 ```
 
-有调用或 mandatory statepoint的函数至少得到8字节且 `frame_size % 16 == 8`。只有 entry `StackCheck`、没有 frame payload/call/safepoint的函数可以保持 `frame_size = 0`，但仍执行 poisoned guard比较；除 `PollFreeLeaf` 外，prologue在任何 `rsp` 修改前执行：
+有调用或 mandatory statepoint的函数至少得到8字节且 `frame_size % 16 == 8`。只有 entry `StackCheck`、没有 frame payload/call/safepoint的函数可以保持 `frame_size = 0`，但仍执行 poisoned guard比较。带 `StackCheck` 的函数，prologue 在任何 `rsp` 修改前执行，且形状固定为一个入口跳转、一个冷路径与一个检查点：
 
 ```text
-candidate = rsp - required_frame       // 使用保留 scratch r11
-if signed(candidate) < signed(acquire([r14 + stack_check_offset])):
-    morestack_or_poll(required_frame)
-rsp = rsp - frame_size
-store used callee-saved registers to fixed slots
+        jmp   check
+cold:   call  morestack_or_poll        ; 冷路径只由检查点条件进入
+        jmp   check
+check:  lea   r11, [rsp - required_frame]      ; 超出 disp32 时 mov r11, rsp; sub r11, imm64
+        cmp   qword ptr [r14 + stack_check_offset], r11
+        jg    cold
+        sub   rsp, frame_size                  ; 检查通过后才是 frame 装载
+        mov   [rsp + save_offset], <callee-saved>
 ```
 
-`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最高值，checked加法溢出直接进入 `StackOverflow` fatal。常见 signed-disp32范围使用 `lea r11, [rsp - required_frame]`，大 immediate使用 `mov r11, rsp; sub r11, materialized_required_frame`；`r11`是内部 ABI保留 scratch，不承载参数或 root。candidate计算采用机器字 wrapping语义，随后固定为一次 `cmp r11, qword ptr [r14 + stack_check_offset]`与一个 signed-less冷分支 `jl`。官方 stack reservation处于低半 canonical address：正常 candidate与 `stack_low`都是非负 `isize`；容量计算发生地址下溢时 candidate解释为负值；`POLL_SENTINEL = isize::MAX as usize`又高于全部真实 candidate，所以容量不足与 poll/GC poison都由同一 load/branch捕获。prologue不读取 `poll_flags`、requested epoch、global epoch或 lifecycle，也不在每个 leaf call前重复检查。
+冷路径放在最前是因为 `check` 与 `cold` 两个标签是站点内编号 0/1：站点序列重写后标签记账仍必须从 0 起连续，跳板式的两段布局会让编号出现空洞。`required_frame = frame_size + max_leaf_reserve`；`max_leaf_reserve` 是本函数所有 direct `ForeignLeaf` call的声明预算最高值，checked加法溢出直接进入 `StackOverflow` fatal。大 immediate使用 `mov r11, rsp; sub r11, materialized_required_frame`；`r11`是内部 ABI保留 scratch，不承载参数或 root。candidate计算采用机器字 wrapping语义，随后固定为一次 `cmp r11, qword ptr [r14 + stack_check_offset]`与一个 signed 冷分支 `jg cold`（`acquire(limit) > candidate` 时进冷路径）。官方 stack reservation处于低半 canonical address：正常 candidate与 `stack_low`都是非负 `isize`；容量计算发生地址下溢时 candidate解释为负值；`POLL_SENTINEL = isize::MAX as usize…
+
+**`PollFreeLeaf` 的例外**：分类为 `PollFreeLeaf` 的函数省略栈检查，但**不**省略 frame。只要它仍然需要 frame（有溢出槽或 save slot）而 frame payload 非 0，就照常发 `sub rsp, frame_size` 与 save slot 装载——这些写落在 `rsp` 之下，省掉 `sub` 就会写到调用者的活跃栈上。只有 `frame_size == 0` 的 `PollFreeLeaf` 才完全没有 prologue。该函数真正的情形由选指阶段的 `StackCheck` 标记站点决定：标记站点存在则按上面的形状合成 prologue，不存在但有 frame 则把 frame setup 前插到入口块首个序列之前。
 
 taken edge尚未建立 callee frame。`morestack_or_poll` 只通过 `r14`把 return PC、九个整数参数寄存器和八个浮点参数寄存器写入 coroutine控制块的固定 scratch；该过程不读取或写入 candidate以下的 user stack。随后切到 worker system stack，acquire读取 processor flags：先完成 GC stop，再处理可接受的 preempt；coroutine被重新调度后仍从同一 `MorestackEntry`恢复。全部 poll动作完成后才读取最新 `stack_low`，容量仍不足时增长，最后装载已经由 GC/stack copy修正的 scratch并重新进入原 prologue。因而 poll-first次序不依赖剩余 user-stack空间，并且增长不会漏掉已经发布的 stop请求。
 
 每个可作为 `async` body入口的 code descriptor还发布 `entry_required_frame`，值覆盖入口 `required_frame`、ABI entry record和进入首个 checked prologue前的固定字节。runtime据此选择初始 stack class；该值使用与 frame layout相同的 checked计算并进入 backend/runtime schema，禁止另写经验常量。
+
+### 分配产物与验证 {#allocation-artifacts}
+
+`AllocateRegisters` → `ResolveParallelCopies` → `LayoutFrame` 由一个 `allocate` 调用完成，顺序是：点位与 liveness、线性扫描、spill slot 复用、一次不带偏移的并行拷贝**探针**（只为判定是否需要 16 字节 copy scratch）、frame layout、带真实 scratch 偏移的最终解析、序列改写、重拼与 branch relaxation、校验。产物 `Allocated` 携带 block 级序列、函数级 `sequence` 与 `rel8_count`、`frame`、点位表 `points`、逐站点 `sites`、逐值 `values`、`stats`，以及 `abi_regions`。
+
+改写后的序列必须通过 `verify_allocated_sequence`：所有操作数（含 `Mem` 的 base/index）都是物理寄存器或内存，出现任何 `Reg::Virtual` 都是内部错误；`r14`/`r15` 不被写；`rsp` 只在 prologue/epilogue 所在的 ABI 区间里被修改。`StackAddr` 的 frame 占位基址（`Reg::Virtual(FRAME_SLOT_BASE + slot)`）在改写时全部换算成 `[rsp + local_offset]`，改写后不允许残留占位编号。
+
+片段 payload（`CODEGEN_SCHEMA = 4`）新增 `frame`、`points`、`values`、`stats` 四段与站点级 `points` 范围：`frame` 给出 `frame_size`/`payload_bytes`/`outgoing_bytes`/`required_frame`/`max_leaf_reserve`/`locals`/`spill_slots`/`scratch_offset`/`save_offsets`/`checked`；`stats` 给出 `peak_live_gpr`、`peak_live_xmm`、`spill_slot_count`、`spill_bytes`、`spill_stores`、`reloads`、`rematerializations`、`copy_moves`、`copy_cycles`、`call_sites`、`safepoint_spills`、`allocated_values`、`frame_size_max`，其中 `frame_size_max` 必须等于该片段 `frame.frame_size`，`points` 段数必须等于站点 `points` 范围之和。这些计数就是 [Cost calibration profile](#cost-calibration-profile) 里 `CostRecord` 的 spill/reload 字段来源，因此必须取 branch relaxation 与 frame layout 之后的结果，不能用分配前估计代替。分配规则 revision 由 `ALLOCATION_REVISION = 1` 表达并进入 fragment key：规则变化会改变 query key，不会静默复用旧片段。
+
+宿主执行验收：`Compilation::x64_fragments()` 暴露逐片段的机器字节、重定位、frame 视图，`cargo bench --bench x64_frame` 把片段按符号顺序映射为可执行页、解析内部 relocation、用 `ret` stub 兜住运行时入口，然后在真实 CPU 上按内部 ABI 调用入口片段并核对结果。它覆盖默认测试套件覆盖不到的部分：spill 槽读写、prologue/epilogue 的 `rsp` 调整、callee-saved 保存、栈参数传递与并行拷贝破环。指针值重定位到栈地址的场景需要 runtime allocator 才能构造参数，因此不在该 bench 的范围内。
 
 `frame_size` 必须小于等于 `u32::MAX`；更大的单函数 frame在代码生成前报 `implementation-limit`，不能依赖更高 runtime stack max截断。单函数最终 code size同样必须小于等于 `u32::MAX`，以满足 stack-map、unwind和 source record的相对 offset表示。
 
@@ -325,10 +356,10 @@ encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcod
 - 超出 baseline 的形式（`pshufb`、`pmulld`、`pextrd`、`pinsrd`、VEX `vaddps`）登记在表内并携带特性标记，只在 descriptor 允许该特性时才可选；`x86_64-v1` 下它们计入 `beyond_baseline_forms` 而不被选中；
 - `lock` 只允许出现在声明了 `lock_allowed` 的形式上，且必须落在内存目标；前缀顺序固定为 `lock`、段/操作数前缀、REX、opcode。
 
-编码契约（`ENCODER_SCHEMA = 1`、`ENCODER_REVISION = 2`、`LOWERING_REVISION = 2`）把表、形状不变量与 lowering 版本一起冻结：`EncoderContract::verify` 校验每个 form 的形状、助记符、特性名与 baseline 归属，`fingerprint` 取域 `gugu-x64-encoder-v1` 下对规范化字节的哈希（域 `gugu-x64-encoder-catalog-v1` 单独标记目录），任何表改动都会改变指纹并进入 action key。`Rel8` 是独立操作数种类，覆盖 `jmp`/`jcc` 的 17 个短跳 form；`assemble` 按 form 声明的字段宽度（1 或 4 字节）回填局部标签，超出 rel8 的距离是编码错误。`SelectInstructions` 对封闭 LIR opcode 穷尽 lowering：函数级序列先按 rel32 编码，再按 code offset 只许长变短地收缩为 rel8；外部符号、冷边与 `call` 保持 rel32 reloc。内部符号文本为 `__gugu_<kind>_<64 lowercase hex>`（kind 为 `fn`、`static`、`vtable`、`glue`、`runtime`、`const` 或 `veneer`），C import/export 不加该前缀；符号 key 与 mangled 文本同源，不把已 mangled 的字符串再哈希一次。`LegalizeX86_64` 与函数级选指产出的序列连同约束、clobber、冷边、mangled 符号、**重定位引用的符号名集合**、热/冷块计数与 encoded bytes 组成 codegen fragment（`CODEGEN_SCHEMA = 3`，键域 `gugu-x64-fragment-key-v1`，世界指纹域 `gugu-x64-fragments-v1`）；fragment 校验会重算该集合，并对带 `__gugu_` 前缀的符号强制上述形状，供镜像规划做内部符号冲突检查。query key 还并入 scheduler/coroutine 契约指纹、`TypeUniverse` 指纹与 `LOWERING_REVISION`；逐站点记录指令、字节区间、重定位、约束和 clobber，并在验证时重算站点序、字节区间、重定位范围与片段指纹。镜像计划与 CLI JSON 暴露 `x64-rel8-count`、`x64-hot-block-count`、`x64-cold-block-count`、`x64-entry-symbol` 与 `scheduler-poll-flags-offset`；`x64-entry-symbol` 是 `MonoRoots` 里 `RootCategoryV1::Entry` 实例的那个片段，不能按片段顺序推断（片段按实例键升序，runtime helper 会排在入口前面）。
+编码契约（`ENCODER_SCHEMA = 2`、`ENCODER_REVISION = 2`、`LOWERING_REVISION = 3`、`ALLOCATION_REVISION = 1`）把表、形状不变量与 lowering/分配规则版本一起冻结：`EncoderContract::verify` 校验每个 form 的形状、助记符、特性名与 baseline 归属，`fingerprint` 取域 `gugu-x64-encoder-v1` 下对规范化字节的哈希（域 `gugu-x64-encoder-catalog-v1` 单独标记目录），任何表改动都会改变指纹并进入 action key，分配规则 revision 与 lowering revision 一并进入 fragment key。`Rel8` 是独立操作数种类，覆盖 `jmp`/`jcc` 的 17 个短跳 form；`assemble` 按 form 声明的字段宽度（1 或 4 字节）回填局部标签，超出 rel8 的距离是编码错误。`SelectInstructions` 对封闭 LIR opcode 穷尽 lowering：函数级序列先按 rel32 编码，再按 code offset 只许长变短地收缩为 rel8；外部符号、冷边与 `call` 保持 rel32 reloc。内部符号文本为 `__gugu_<kind>_<64 lowercase hex>`（kind 为 `fn`、`static`、`vtable`、`glue`、`runtime`、`const` 或 `veneer`），C import/export 不加该前缀；符号 key 与 mangled 文本同源，不把已 mangled 的字符串再哈希一次。`LegalizeX86_64` 与函数级选指产出的序列连同约束、clobber、冷边、mangled 符号、**重定位引用的符号名集合**、热/冷块计数、encoded bytes 与[分配产物](#allocation-artifacts)组成 codegen fragment（`CODEGEN_SCHEMA = 4`，键域 `gugu-x64-fragment-key-v1`，世界指纹域 `gugu-x64-fragments-v1`）；fragment 校验会重算该集合，并对带 `__gugu_` 前缀的符号强制上述形状，供镜像规划做内部符号冲突检查。query key 还并入 scheduler/coroutine 契约指纹、`TypeUniverse` 指纹、`LOWERING_REVISION` 与 `ALLOCATION_REVISION`；逐站点记录指令、字节区间、重定位、约束、clobber 与点位范围，并在验证时重算站点序、字节区间、重定位范围、frame 一致性（`stats.frame_size_max == frame.frame_size`、点位段数与站点一致）与片段指纹。镜像计划与 CLI JSON 暴露 `x64-rel8-count`、`x64-hot-block-count`、`x64-cold-block-count`、`x64-entry-symbol`、`x64-frame-size-max`、`x64-spill-slot-count`、`x64-spill-bytes`、`x64-saved-gpr-count`、`x64-reload-count`、`x64-spill-store-count`、`x64-copy-move-count`、`x64-copy-cycle-count`、`x64-peak-live-gpr`、`x64-peak-live-xmm`、`x64-allocated-values`、`coroutine-stack-check-offset` 与 `scheduler-poll-flags-offset`；`x64-entry-symbol` 是 `MonoRoots` 里 `RootCategoryV1::Entry` 实例的那个片段，不能按片段顺序推断（片段按实例键升序，runtime helper 会排在入口前面）。
 
 
-### Cost calibration profile
+### Cost calibration profile {#cost-calibration-profile}
 
 每个 `TargetDescriptor` 关联版本化 `BackendCostProfile`，至少包含 `{ baseline_digest, inline_hot_bytes, inline_cold_bytes, max_spill_slots, max_spill_bytes_per_call, max_reload_stores, code_size_budget, regression_percent, vector_lowering }`。当前两个目标共用 `baseline_cost_profile()`：`baseline_digest` 由域 `gugu-backend-cost-baseline-v1` 对 `x86_64-v1` 哈希得到，`inline_hot_bytes = 256`、`inline_cold_bytes = 128`、`code_size_budget = 4096`、`max_spill_slots = 64`、`max_spill_bytes_per_call = 512`、`max_reload_stores = 256`、`regression_percent = 5`，且 `vector_lowering = false`。`vector_lowering = false` 表示该目标尚未提供校准的向量 lowering：`LoopVectorizationAndUnrolling` 此时只做 unroll 与 scalar remainder，不得生成任何 `V128`；只有后端提供 `vector_lowering = true` 的已校准 profile 后，vectorizer 才允许生成 vector main loop。profile固定当前 `r14/r15/r11` 保留寄存器决定，不允许后端在单个函数上临时释放 runtime register或以不同寄存器集逃避成本记录；换寄存器集必须产生新的 compiler/runtime schema和独立 profile。
 

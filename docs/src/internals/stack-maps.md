@@ -104,6 +104,10 @@ stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layou
 
 一个位置在同一 map 的五类 bitmap/mask 中最多出现一次。重叠 spill、超出 frame、未对齐 managed slot、丢失 provenance 或一个 value 同时有两个未协调的权威位置都是后端错误。
 
+分配阶段为上述查询发布三样东西：`FrameLayout`（`frame_size`、`payload_bytes`、逐局部对象的 `local_offset`、spill slot 的 `offset/size/root`、16 字节 copy scratch 偏移与 callee-saved save 偏移）、点位表（每个点位的 `site`、`kind`、`block`、指令区间与 mask）以及逐值结果（`Gpr`/`Xmm`/`Slot`/rematerializable）。stack map 生成只消费这些结果，不重新推导位置。spill slot 统一是 8 或 16 字节、按 root class 分开、偏移都从 frame base 起算，因此第 5 步的 slot index 就是 `offset / 8`。
+
+需要从 frame 里取地址的局部对象在选指阶段写成占位基址 `Reg::Virtual(FRAME_SLOT_BASE + slot)`（`FRAME_SLOT_BASE = 1 << 30`）：占位编号空间高于值编号与 lowering 临时编号，`select` 会断言值数量低于该上界。写回 store/load 的占位在分配阶段全部换算成 `[rsp + local_offset]`，验证阶段拒绝任何残留的 `Reg::Virtual`，所以 stack map 不会看到占位寄存器。
+
 GC 活跃性按语义值而不是 Rust/源级 lexical scope 计算。已经 `StorageDead` 或被 `MoveInternal` 消耗的位置不得保留为根；尚未初始化和 `MaybeUninit` payload 不得加入。保留无谓死根会延长对象寿命，因此也属于 verifier 错误，不是允许的保守实现。
 
 ## 二进制 section
