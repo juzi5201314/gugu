@@ -198,7 +198,8 @@ fn collect_item(
     let name = item
         .name
         .map(|symbol| module.tokens.intern.get_str(symbol).to_owned());
-    if module_binding && name.as_deref().is_some_and(is_reserved_name) {
+    // 预导入名保留给 `std` 自己的定义：内建源单元可以声明它们，用户源码不能。
+    if module_binding && !module.builtin && name.as_deref().is_some_and(is_reserved_name) {
         diagnostics.push(Diagnostic::error(
             DiagnosticCode::ReservedName,
             format!("声明名 `{}` 是保留的预导入名称", name.as_deref().unwrap()),

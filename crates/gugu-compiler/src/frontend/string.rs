@@ -1,5 +1,8 @@
 mod format;
-pub(super) use format::{FormatSpec, ParsedCount, format_spec_error, parse_format};
+pub(crate) use format::{
+    Alignment, FormatKind, FormatSpec, ParsedCount, Sign, ValueClass, flag_conflict,
+    format_spec_error, parse_format,
+};
 
 use crate::diagnostics::DiagnosticCode;
 

@@ -103,7 +103,7 @@ struct Checker<'m, 'a> {
     borrow_checks: Vec<super::borrow::BorrowCheck>,
     slot_reads: Vec<bool>,
     must_use_sites: Vec<super::output::MustUseSite>,
-    format_traits: Vec<(ExprId, String, String, Span)>,
+    format_traits: Vec<formatting::PendingFormat>,
 }
 
 pub(super) fn check(

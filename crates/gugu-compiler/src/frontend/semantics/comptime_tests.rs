@@ -42,6 +42,70 @@ fn early_const_query_evaluates_items_and_repeat_counts() {
 }
 
 #[test]
+fn comptime_fstrings_apply_static_format_codes() {
+    let source = "const HEX: string = f\"{255:#06x}\"\nconst BIN: string = f\"{5:b}\"\n\
+        const FLT: string = f\"{1.5:+.2}\"\nconst EXP: string = f\"{1234.5:.1e}\"\n\
+        const AB: string = \"ab\"\nconst PAD: string = f\"{AB:>4}\"\n\
+        const ARR: [int; 2] = [1, 2]\nconst DBG: string = f\"{ARR:?}\"\n\
+        const TUP: (int, bool) = (1, true)\nconst PRETTY: string = f\"{TUP:#?}\"\n\
+        const CUT: string = f\"{AB:.1}\"\n\
+        fn width(n: int) string = f\"{7:n$}\"\nconst DYN: string = width(3)\nfn main() {}";
+    let output = frontend(&[("main.gg", source)], &QueryEngine::new()).expect("格式码在编译期求值");
+    let values: Vec<_> = output
+        .semantics
+        .early_constants
+        .constants
+        .iter()
+        .filter(|entry| entry.key.expr == u32::MAX)
+        .map(|entry| entry.value.clone())
+        .collect();
+    use comptime::eval::ConstantValue;
+    for expected in [
+        "0x00ff",
+        "101",
+        "+1.50",
+        "1.2e3",
+        "  ab",
+        "[1, 2]",
+        "(\n    1,\n    true,\n)",
+        "a",
+        "  7",
+    ] {
+        assert!(
+            values.contains(&ConstantValue::String(expected.to_owned())),
+            "缺少 {expected:?}：{values:?}"
+        );
+    }
+}
+
+#[test]
+fn comptime_format_faults_are_diagnostics() {
+    // 负的动态计数是 comptime panic。
+    let codes = diagnostics_of(
+        "fn width(n: int) string = f\"{7:n$}\"\nconst S: string = width(-1)\nfn main() {}",
+    );
+    assert!(codes.contains(&DiagnosticCode::ComptimePanic));
+    // 标志与值不兼容在求值时就失败，不等待类型检查。
+    let codes = diagnostics_of("const S: string = f\"{true:+}\"\nfn main() {}");
+    assert!(
+        codes.contains(&DiagnosticCode::InvalidExpression)
+            || codes.contains(&DiagnosticCode::InvalidType)
+    );
+    // 类型检查器对运行时 f-string 应用同一套兼容规则。
+    assert!(!accepts("fn main() { let s = f\"{true:+}\"\n _ = s }"));
+    assert!(!accepts("fn main() { let s = f\"{1:.2}\"\n _ = s }"));
+    assert!(!accepts(
+        "fn main() { let t = \"x\"\n let s = f\"{t:#}\"\n _ = s }"
+    ));
+    assert!(!accepts("fn main() { let s = f\"{1.5:#}\"\n _ = s }"));
+    assert!(accepts("fn main() { let s = f\"{1.5:+08.2}\"\n _ = s }"));
+    assert!(accepts(
+        "fn main() { let t = \"abc\"\n let s = f\"{t:.2}\"\n _ = s }"
+    ));
+    assert!(accepts("fn main() { let s = f\"{255:#x}\"\n _ = s }"));
+}
+
+#[test]
 fn unregistered_std_call_fails_before_evaluation() {
     let codes = diagnostics_of("const X: int = std.io.println(\"x\")\nfn main() {}");
     assert!(codes.contains(&DiagnosticCode::ComptimeCapability));

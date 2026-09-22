@@ -344,6 +344,9 @@ fn tuple_class(
 }
 
 pub(crate) fn lang_item(module: &hir::Module, definition: hir::DefId) -> Option<PassingClass> {
+    if collection_item(module, definition) {
+        return Some(PassingClass::IDENTITY);
+    }
     let name = module.definitions.get(definition.index())?.name.as_str();
     Some(match name {
         "Vec" => PassingClass::IDENTITY,
@@ -351,6 +354,25 @@ pub(crate) fn lang_item(module: &hir::Module, definition: hir::DefId) -> Option<
         "ResourceCell" => PassingClass::RESOURCE,
         _ => return None,
     })
+}
+
+/// `std.collections` 的共享身份 Map/Set；复制只复制句柄，`with_ref` / `for_each_ref` 产生 view。
+pub(crate) fn collection_item(module: &hir::Module, definition: hir::DefId) -> bool {
+    module
+        .definitions
+        .get(definition.index())
+        .is_some_and(|definition| {
+            matches!(
+                definition.name.as_str(),
+                "HashMap"
+                    | "HashSet"
+                    | "SecureHashMap"
+                    | "SecureHashSet"
+                    | "BTreeMap"
+                    | "BTreeSet"
+                    | "SmallMap"
+            )
+        })
 }
 
 pub(crate) fn aggregate_of(

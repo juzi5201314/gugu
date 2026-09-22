@@ -21,7 +21,7 @@ pub(crate) mod mono;
 mod names;
 mod parse;
 pub(crate) mod semantics;
-mod string;
+pub(crate) mod string;
 mod token;
 mod types;
 

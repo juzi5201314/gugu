@@ -103,6 +103,26 @@ impl Builder<'_, '_> {
         Ok(())
     }
 
+    /// 声明在源码中的范围；用于取外围 impl / trait 作用域的类型参数。
+    fn origin_span(&self, origin: Origin) -> Option<crate::Span> {
+        match origin {
+            Origin::Named(index) => {
+                let definition = self.identities.named_items[index]?;
+                Some(
+                    self.model.modules[definition.module].arena.items[definition.item.0 as usize]
+                        .span
+                        .clone(),
+                )
+            }
+            Origin::Closure(function) => Some(
+                self.model.modules[function.module].arena.fns[function.function as usize]
+                    .span
+                    .clone(),
+            ),
+            _ => None,
+        }
+    }
+
     fn generic_range(&self, origin: Origin) -> Option<(usize, ast::AstRange<ast::GenericParam>)> {
         let (module, item) = match origin {
             Origin::Named(index) => {
@@ -226,7 +246,13 @@ impl Builder<'_, '_> {
         let Some((module, generics)) = self.generic_range(origin) else {
             return Ok(());
         };
-        let parameters = self.model.generic_parameters(module, generics);
+        let mut parameters = self.model.generic_parameters(module, generics);
+        // 方法自己的约束可以引用外围 impl / trait 的类型参数与 `Self`。
+        if let Some(span) = self.origin_span(origin) {
+            for (name, ty) in self.model.parameters_at(module, &span) {
+                parameters.entry(name).or_insert(ty);
+            }
+        }
         let obligations = self
             .model
             .generic_obligations(module, generics, &parameters)?;

@@ -1,0 +1,46 @@
+pub struct HashMap[K, V] {}
+pub struct HashSet[T] {}
+pub struct SecureHashMap[K, V] {}
+pub struct SecureHashSet[T] {}
+pub struct BTreeMap[K, V] {}
+pub struct BTreeSet[T] {}
+
+impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
+    pub fn get(self: &Self, key: &K) Option[V] {
+        _ = key
+        None
+    }
+    pub fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R] {
+        _ = key
+        _ = f
+        None
+    }
+    pub fn for_each_ref[F: Fn(&K, &V)](self: &Self, f: F) {
+        _ = f
+    }
+}
+
+impl[K: Ord + StableOrd, V] BTreeMap[K, V] {
+    pub fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R] {
+        _ = key
+        _ = f
+        None
+    }
+    pub fn for_each_ref[F: Fn(&K, &V)](self: &Self, f: F) {
+        _ = f
+    }
+}
+
+fn peek(map: HashMap[int, int]) Option[int] {
+    let key = 1
+    map.with_ref(&key, fn(value: &int) int = 0)
+}
+
+fn walk(map: BTreeMap[int, int]) {
+    map.for_each_ref(fn(key: &int, value: &int) {})
+}
+
+fn share(map: HashMap[int, int]) {
+    let alias = map
+    _ = alias
+}

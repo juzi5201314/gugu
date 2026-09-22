@@ -35,6 +35,13 @@ mod channel;
 mod channel_layout;
 #[allow(
     dead_code,
+    reason = "Map/Set 参照模型由确定性测试消费，尚未降成 Gugu 可调用的集合实现"
+)]
+pub(crate) mod collections;
+#[cfg(test)]
+mod collections_tests;
+#[allow(
+    dead_code,
     reason = "typed combining 参照实现由确定性测试与 bench 消费"
 )]
 mod combining;
@@ -59,6 +66,13 @@ pub(crate) mod edge;
 pub(crate) mod edge_schema;
 #[allow(
     dead_code,
+    reason = "Formatter 写入方法由 comptime 静态格式化与确定性测试消费，尚未降成 Gugu 可调用的 intrinsic"
+)]
+pub(crate) mod fmt;
+#[cfg(test)]
+mod fmt_tests;
+#[allow(
+    dead_code,
     reason = "GC metadata 契约段由 runtime raw 与 ImagePlan 消费"
 )]
 pub(crate) mod gc_metadata_contract;
@@ -70,6 +84,13 @@ pub(crate) mod gc_metadata_section;
 )]
 pub(crate) mod gc_trace;
 mod harness;
+#[allow(
+    dead_code,
+    reason = "哈希族与稳定键参照模型由集合模型与确定性测试消费，尚未降成 Gugu 可调用的 intrinsic"
+)]
+pub(crate) mod hash;
+#[cfg(test)]
+mod hash_tests;
 #[allow(
     dead_code,
     reason = "LocalHeap Immix/TLAB/分代参照实现由 world 与确定性测试消费"
@@ -326,6 +347,9 @@ const STD_OPS_SOURCE: &str = include_str!("../../resources/std/ops.gg");
 const STD_ITER_SOURCE: &str = include_str!("../../resources/std/iter.gg");
 const STD_TEXT_SOURCE: &str = include_str!("../../resources/std/text.gg");
 const STD_IO_SOURCE: &str = include_str!("../../resources/std/io.gg");
+const STD_FMT_SOURCE: &str = include_str!("../../resources/std/fmt.gg");
+const STD_HASH_SOURCE: &str = include_str!("../../resources/std/hash.gg");
+const STD_COLLECTIONS_SOURCE: &str = include_str!("../../resources/std/collections.gg");
 const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
 const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
 const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
@@ -467,6 +491,21 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/io.gg",
                     source: STD_IO_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/fmt.gg",
+                    source: STD_FMT_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/hash.gg",
+                    source: STD_HASH_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/collections.gg",
+                    source: STD_COLLECTIONS_SOURCE,
                     role: RuntimeSourceRole::StandardLibrary,
                 },
                 RuntimeSource {

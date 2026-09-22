@@ -116,6 +116,12 @@ impl Builder<'_> {
         callee: &Callee,
         args: &[Operand],
     ) -> Result<Option<LocalId>, Diagnostic> {
+        if let Some(mode) = collection_view(self.module, callee) {
+            // 标准集合的 `with_ref` / `for_each_ref`：整个调用在接收者的 view 动态 extent 内。
+            let source = operand_place(self, args.first());
+            let dest = self.emit_view_call(id, source, mode, callee.clone(), args.to_vec())?;
+            return Ok(Some(dest));
+        }
         let Some(name) = lang_name(self.module, callee) else {
             return Ok(None);
         };
@@ -134,38 +140,67 @@ impl Builder<'_> {
         name: &str,
         args: &[Operand],
     ) -> Result<LocalId, Diagnostic> {
-        let source = match args.first() {
-            Some(Operand::Copy(place) | Operand::MoveInternal(place)) => *place,
-            _ => Place::local(self.temp(self.primitives.unit)),
-        };
-        let token = self.temp(self.primitives.unit);
+        let source = operand_place(self, args.first());
         let mode = if name.ends_with("with_ref") {
             ViewMode::ScopedWrite
         } else {
             ViewMode::ScopedRead
         };
+        let Some(callback) = args.get(1).cloned() else {
+            let token = self.temp(self.primitives.unit);
+            self.push_stmt(StatementKind::ScopedViewBegin {
+                source,
+                mode,
+                token,
+            });
+            let dest = self.temp(self.expr_ty(id));
+            self.assign_unit(dest);
+            self.push_stmt(StatementKind::ScopedViewEnd { token });
+            self.set_value(id, dest);
+            return Ok(dest);
+        };
+        self.emit_view_call(
+            id,
+            source,
+            mode,
+            Callee::Value(callback),
+            vec![Operand::Copy(source)],
+        )
+    }
+
+    /// 在 `source` 的 scoped view 内执行一次调用；token 在正常返回与 panic 展开两条路径都闭合。
+    fn emit_view_call(
+        &mut self,
+        id: ExprId,
+        source: Place,
+        mode: ViewMode,
+        callee: Callee,
+        args: Vec<Operand>,
+    ) -> Result<LocalId, Diagnostic> {
+        let token = self.temp(self.primitives.unit);
         self.push_stmt(StatementKind::ScopedViewBegin {
             source,
             mode,
             token,
         });
         let dest = self.temp(self.expr_ty(id));
-        if let Some(callback) = args.get(1).cloned() {
-            let normal = self.fresh(false);
-            let unwind = self.intern_plan(self.current_unwind(id), CleanupChain::Unwind)?;
-            self.terminate(Terminator::Call {
-                callee: Callee::Value(callback),
-                args: vec![Operand::Copy(source)],
-                destination: Place::local(dest),
-                normal,
-                unwind: Some(unwind),
-                call_kind: CallKind::Managed,
-                site: crate::frontend::mono::instantiate::CallSite::Expression(id.0),
-            });
-            self.switch_to(normal);
-        } else {
-            self.assign_unit(dest);
-        }
+        let normal = self.fresh(false);
+        let unwind = self.intern_plan(self.current_unwind(id), CleanupChain::Unwind)?;
+        // 展开路径先闭合 view，再进入外围 cleanup 链。
+        let landing = self.fresh(true);
+        self.terminate(Terminator::Call {
+            callee,
+            args,
+            destination: Place::local(dest),
+            normal,
+            unwind: Some(landing),
+            call_kind: CallKind::Managed,
+            site: crate::frontend::mono::instantiate::CallSite::Expression(id.0),
+        });
+        self.switch_to(landing);
+        self.push_stmt(StatementKind::ScopedViewEnd { token });
+        self.terminate(Terminator::Goto { target: unwind });
+        self.switch_to(normal);
         self.push_stmt(StatementKind::ScopedViewEnd { token });
         self.set_value(id, dest);
         Ok(dest)
@@ -254,6 +289,39 @@ impl Builder<'_> {
             }
         }
     }
+}
+
+fn operand_place(builder: &mut Builder<'_>, operand: Option<&Operand>) -> Place {
+    match operand {
+        Some(Operand::Copy(place) | Operand::MoveInternal(place)) => *place,
+        _ => Place::local(builder.temp(builder.primitives.unit)),
+    }
+}
+
+/// 标准集合上 `with_ref` / `for_each_ref` 的派发；接收者类型必须是登记的共享身份集合。
+fn collection_view(module: &hir::Module, callee: &Callee) -> Option<ViewMode> {
+    let Callee::Dispatch(index) = callee else {
+        return None;
+    };
+    let dispatch = module
+        .owners
+        .iter()
+        .find_map(|owner| owner.dispatches.get(*index as usize))?;
+    let function = dispatch.function?;
+    if !matches!(
+        module.definitions[function.index()].name.as_str(),
+        "with_ref" | "for_each_ref"
+    ) {
+        return None;
+    }
+    let mut ty = dispatch.self_ty;
+    while let Some(hir::Type::Ref(inner)) = module.types.get(ty.index()) {
+        ty = *inner;
+    }
+    let Some(hir::Type::Named { definition, .. }) = module.types.get(ty.index()) else {
+        return None;
+    };
+    super::super::passing::collection_item(module, *definition).then_some(ViewMode::ScopedRead)
 }
 
 fn lang_name(module: &hir::Module, callee: &Callee) -> Option<String> {
