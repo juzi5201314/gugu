@@ -36,6 +36,8 @@ pub struct ForeignDemand {
     pub asm: u32,
     /// 模块级 `global_asm` 声明。
     pub global_asm: u32,
+    /// 阻塞 I/O 原语站点。每条同时计入 `ordinary`。
+    pub blocking_io: u32,
 }
 
 /// 已验证的外调 runtime 契约。
@@ -94,6 +96,9 @@ impl ForeignRuntimeContract {
                 "BlockingBridge 队列容量不是 waiter 字节的整数倍",
             ));
         }
+        if self.demand.blocking_io > self.demand.ordinary {
+            return Err(RawModelError::new("阻塞 I/O 站点超过普通 bridge 站点"));
+        }
         Ok(())
     }
 
@@ -123,12 +128,13 @@ impl ForeignRuntimeContract {
         .expect("String写入");
         writeln!(
             output,
-            "foreign-demand ordinary={} dirty={} leaf={} asm={} global-asm={}",
+            "foreign-demand ordinary={} dirty={} leaf={} asm={} global-asm={} blocking-io={}",
             self.demand.ordinary,
             self.demand.dirty,
             self.demand.leaf,
             self.demand.asm,
             self.demand.global_asm,
+            self.demand.blocking_io,
         )
         .expect("String写入");
         output

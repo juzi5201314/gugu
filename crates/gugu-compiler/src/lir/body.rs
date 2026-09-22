@@ -373,6 +373,11 @@ pub(crate) enum RuntimeCall {
         signed: bool,
         remainder: bool,
     },
+    /// 阻塞 I/O 原语。`op`：0 read、1 write、2 seek、3 fill。
+    BlockingIo {
+        op: u8,
+        cancel: bool,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

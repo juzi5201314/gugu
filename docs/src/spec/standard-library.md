@@ -426,9 +426,75 @@ enum SeekFrom {
 }
 ```
 
-`Read.read` 成功返回写入 destination 的 byte 数；返回 0 表示 EOF，不能用 EOF error 同时返回部分数据。`read_buffer` 向 ByteBuffer 末尾直接追加至多 limit byte，负 limit panic，并允许实现写入 unique spare capacity；返回 0 同样表示 EOF。`Write.write` 可以成功写入短于 source 的前缀，返回 0 且 source 非空是 WriteZero。标准库在这些 primitive 上提供 read_exact、write_all、copy、read_to_end（返回 Bytes）、read_to_string 和 buffered reader/writer。
+```text
+enum Error {
+    NotFound
+    PermissionDenied
+    AlreadyExists
+    InvalidInput
+    InvalidData
+    UnexpectedEof
+    WriteZero
+    Interrupted
+    TimedOut
+    Cancelled
+    Closed
+    BrokenPipe
+    NotConnected
+    ConnectionReset
+    ConnectionRefused
+    ConnectionAborted
+    AddrInUse
+    AddrNotAvailable
+    NotADirectory
+    IsADirectory
+    DirectoryNotEmpty
+    CrossesDevices
+    NotSeekable
+    InvalidState
+    MessageTooLarge
+    Unsupported
+    StorageFull
+    ReadOnlyFilesystem
+    FileTooLarge
+    QuotaExceeded
+    Other { code: int, source: Option[Error] }
+}
+fn Error.message(self: &Self) string
+fn Error.source(self: &Self) Option[&dyn Error]
+fn Error.kind(self: &Self) Error
+fn Error.with_source(self: &Self, cause: Error) Error
+```
 
-`read_exact` 在填满 destination 前遇到 EOF 返回 `UnexpectedEof`；`write_all` 在全部写完前出现 0 返回 `WriteZero`。已经传输的 byte 不因后续错误回滚。取消发生在操作线性化完成前时返回 `Cancelled`；已经提交给对端或文件系统的 byte 仍然生效。
+`Other` 是唯一带载荷的变体；`source` 只接受同一 `std.io.Error`，不是 `&dyn Error`。`kind()` 剥掉全部 `Other.source`，返回无嵌套来源的变体；`Other` 的 `kind()` 仍是 `Other { code, source: None }`。`message()` 只给人读，按变体名固定，不把 `code` 或来源文本拼进去。`source()` 只有 `Other` 且其 `source` 为 `Some` 时返回 `Some(&dyn Error)`，其余返回 `None`。`with_source` 不修改原值：结果是 `Other { code: self.kind 的稳定编号, source: Some(cause) }`。稳定编号按上面枚举顺序从 0 开始，`Other` 是 30。错误链必须无环：`with_source` 若发现 `cause` 的链已经包含与 `self.kind()` 相同的编号，或链深超过 8，返回 `InvalidInput` 而不是构造环；这个失败本身不再包来源。
+
+组合函数是 `std.io` 的自由函数，不是 trait 默认方法：
+
+```text
+fn read_exact[R: Read](reader: &R, destination: &[byte]) Result[(), Error]
+fn write_all[W: Write](writer: &W, source: Bytes) Result[(), Error]
+fn copy[R: Read, W: Write](reader: &R, writer: &W) Result[uint, Error]
+fn read_to_end[R: Read](reader: &R) Result[Bytes, Error]
+fn read_to_string[R: Read](reader: &R) Result[string, Error]
+fn fill_buffer[R: Read](reader: &R, limit: int) Result[Bytes, Error]
+fn write_buffer[W: Write](writer: &W, source: &ByteBuffer) Result[int, Error]
+```
+
+`read_exact` 循环 `read`，直到 destination 被填满。中途 `Ok(0)` 返回 `UnexpectedEof`；其它 `Err` 原样返回。已写入 destination 的前缀保留。`write_all` 循环 `write`，每次只把尚未写出的后缀再交给 `write`。`source` 非空且返回 `Ok(0)` 时返回 `WriteZero`；空 `source` 直接成功且不调用 `write`。`copy` 使用 8192 字节内部缓冲，返回成功写出的累计字节。读到 `Ok(0)` 正常结束；写到 `Ok(0)` 且仍有待写字节时返回 `WriteZero`。`read_to_end` 以 8192 为块调用 `read_buffer`，直到 `Ok(0)`，返回 `ByteBuffer.freeze()`。`read_to_string` 调用 `read_to_end` 后做严格 UTF-8 解码。非法序列返回 `InvalidData`，不使用 `with_source`；已读字节不回滚，但失败结果不返回部分 string。`fill_buffer` 把 `read_buffer` 的结果 `freeze` 成 `Bytes`。`limit < 0` panic，`limit == 0` 返回空 `Bytes` 且不调用 `read_buffer`。`write_buffer` 把 `ByteBuffer.freeze()` 交给一次 `write`，因此一次调用只写一个前缀。
+
+`BufRead` 的默认适配也是自由函数，不改 trait 本体：
+
+```text
+fn buffered[R: Read](reader: &R, capacity: int) Result[Buffered[R], Error]
+struct Buffered[R: Read]
+fn Buffered.fill(self: &Self) Result[Bytes, Error]
+fn Buffered.consume(self: &Self, count: int)
+fn Buffered.read(self: &Self, destination: &[byte]) Result[int, Error]
+```
+
+`capacity < 0` 返回 `InvalidInput`；`capacity == 0` 合法，`fill` 每次直接向内部空缓冲读 0 字节并返回空 `Bytes`。`consume` 的 `count < 0` 或大于当前缓冲长度时 panic。`Buffered.read` 先消耗已有缓冲，缓冲空时 `fill`；底层 `Ok(0)` 才向调用方返回 0。
+
+`Read.read` 成功返回写入 destination 的 byte 数；返回 0 表示 EOF，不能用 EOF error 同时返回部分数据。`read_buffer` 向 ByteBuffer 末尾直接追加至多 limit byte，负 limit panic，并允许实现写入 unique spare capacity；返回 0 同样表示 EOF。`Write.write` 可以成功写入短于 source 的前缀，返回 0 且 source 非空是 WriteZero。已经传输的 byte 不因后续错误回滚。取消发生在操作线性化完成前时返回 `Cancelled`；已经提交给对端或文件系统的 byte 仍然生效。
 
 File、TcpStream、进程 pipe 和内存缓冲实现适用 trait。`print` / `println` 在格式化后写 stdout；它们不改变 `Print`/格式 trait 为纯文本构建能力的事实。
 
@@ -454,23 +520,53 @@ fn check(self: &CancelToken) Result[(), Cancelled]
 
 ## 路径
 
-`std.path.OsString` 与 `Path` 是不可变、无损的跨平台值。Linux 保留任意非 NUL byte；Windows 保留合法 UTF-16。Path 的连接、替换文件名、父路径和扩展名操作返回新 Path，不修改原值。
+`std.path.OsString` 与 `Path` 是不可变、无损的跨平台值。Linux 保留任意非 NUL byte；Windows 保留合法 UTF-16。Path 的连接、替换文件名、父路径和扩展名操作返回新 Path，不修改原值。任何函数都只做字符串变换，不读取目录、不解析 `.` / `..`、不 canonicalize、不碰 symlink。
 
 ```text
-struct OsString
-struct Path
+fn OsString.from_string(value: string) Result[OsString, Error]
+fn OsString.from_bytes(value: Bytes) OsString
+fn OsString.from_units(value: &[u16]) Result[OsString, Error]
+fn OsString.to_bytes(self: &Self) Bytes
+fn OsString.to_units(self: &Self) Vec[u16]
+fn OsString.to_string(self: &Self) Result[string, UnicodeError]
+fn OsString.to_string_lossy(self: &Self) string
+fn OsString.len(self: &Self) int
+fn OsString.is_empty(self: &Self) bool
 
 fn Path.from_string(value: string) Path
+fn Path.from_os(value: OsString) Path
+fn Path.as_os(self: &Self) OsString
 fn Path.to_string(self: &Self) Result[string, UnicodeError]
 fn Path.to_string_lossy(self: &Self) string
 fn Path.join(self: &Self, child: Path) Path
 fn Path.parent(self: &Self) Option[Path]
 fn Path.file_name(self: &Self) Option[OsString]
 fn Path.extension(self: &Self) Option[OsString]
+fn Path.with_file_name(self: &Self, name: OsString) Path
+fn Path.with_extension(self: &Self, extension: OsString) Path
+fn Path.file_stem(self: &Self) Option[OsString]
+fn Path.components(self: &Self) Vec[OsString]
 fn Path.is_absolute(self: &Self) bool
+fn Path.is_relative(self: &Self) bool
+
+struct UnicodeError { offset: int }
+fn UnicodeError.message(self: &Self) string
+fn UnicodeError.source(self: &Self) Option[&dyn Error]
 ```
 
-有效 string 在两个目标上都能无损构造 Path。非 Unicode 路径的 `to_string` 返回错误；日志和 UI 可以显式使用 `to_string_lossy`。路径相等与 hash 按目标平台的原生 code-unit 序列工作，不隐式 canonicalize、解析 symlink 或访问文件系统。
+`UnicodeError` 属于 `std.path`，不是 `std.text`。`offset` 是原生 code unit 序号。`message()` 固定为 `"invalid unicode"`，`source()` 固定 `None`。`OsString.from_string` 与 `from_units` 的失败使用 `std.io.Error`。
+
+Linux 原生序列是字节，分隔符是 `0x2F`。`from_bytes` 原样保存，包括非法 UTF-8；`from_string` 拒绝含 `0x00` 的 string，返回 `InvalidInput`，否则无损。`from_units` 在 Linux 不可用，返回 `Unsupported`。`to_string` 只接受合法 UTF-8，失败 `offset` 是字节序号。
+
+Windows 原生序列是 UTF-16 code unit，分隔符是 `0x005C` 与 `0x002F`。`from_string` 按 UTF-16 编码且拒绝输入中的 U+0000。`from_units` 拒绝 lone surrogate 与 U+0000，失败 `offset` 是 code unit 序号。`from_bytes` 在 Windows 先按严格 UTF-8 解码，失败返回 `UnicodeError` 而不是 `io.Error`。`to_string` 拒绝 lone surrogate。
+
+`is_absolute`：Linux 以 `/` 开头；Windows 以盘符加冒号加分隔符（`C:\`、`C:/`）或两个分隔符开头。其余都是 relative。`join`：`child` 为 absolute 时返回 `child` 的副本；否则父路径为空直接返回 child，父路径已以分隔符结尾时直接拼接，否则插入一个原生分隔符（Linux `/`，Windows `\`）。
+
+`components` 按分隔符切分，保留空组件，不删除 `.` 或 `..`。`parent` 去掉最后一个组件及其前导分隔符；结果为空或原路径没有分隔符时返回 `None`。根路径（Linux `/`，Windows `C:\` 或 `\\server`）的 parent 是 `None`。`file_name` 是最后一个非空组件；没有时 `None`。`extension` 是最后一个组件里最后一个 `.` 之后的部分，且点不能是组件首字符；无点、点在首字符或点在末尾都返回 `None`。`file_stem` 是去掉该扩展名及点后的部分。
+
+`with_file_name` 替换最后一个非空组件，没有组件时等价于 `join`。`with_extension` 替换最后一个组件的扩展名；空 `extension` 去掉点与扩展名；原组件没有扩展名时追加点与新扩展名。
+
+相等、`Ord` 与 hash 使用原生 code unit 序列。Linux 区分大小写与斜杠；Windows 分隔符比较前都规范化为 `\`，盘符与路径体按 UTF-16 code unit 做不区分大小写比较，不调用文件系统。有效 string 在两个目标上都能无损构造 Path。非 Unicode 路径的 `to_string` 返回错误；日志和 UI 可以显式使用 `to_string_lossy`。
 
 ## 文件系统
 

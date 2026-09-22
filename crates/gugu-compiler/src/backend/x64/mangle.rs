@@ -123,5 +123,6 @@ fn runtime_call_name(call: RuntimeCall) -> &'static str {
         RuntimeCall::DeferEnvironment => "defer_environment",
         RuntimeCall::DeferPop => "defer_pop",
         RuntimeCall::WideDiv { .. } => "wide_div",
+        RuntimeCall::BlockingIo { .. } => "blocking_io",
     }
 }

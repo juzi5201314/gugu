@@ -420,7 +420,7 @@ impl ForeignWorld {
         frame_offset: u64,
         frame_size: u64,
     ) -> Result<AdmitOutcome, RawInvariant> {
-        if self.active_blocking >= MAX_BLOCKING_WORKERS {
+        if stub == 0 || self.active_blocking >= MAX_BLOCKING_WORKERS {
             return self.enqueue_waiter(handle, stub, frame_offset, frame_size);
         }
         self.enter_ordinary(handle, false, stub, frame_offset, frame_size)?;

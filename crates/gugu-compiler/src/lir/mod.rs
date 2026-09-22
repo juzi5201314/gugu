@@ -205,6 +205,10 @@ impl Validated {
                 CallKind::ForeignLeaf { .. } => demand.leaf += 1,
                 CallKind::Managed => {}
             }
+            if let body::CallTarget::Runtime(body::RuntimeCall::BlockingIo { .. }) = call.target {
+                demand.ordinary += 1;
+                demand.blocking_io += 1;
+            }
         };
         for world_body in &self.world.bodies {
             for instruction in &world_body.instructions {
@@ -218,6 +222,22 @@ impl Validated {
                 {
                     bump(&mut demand, call);
                 }
+            }
+        }
+        demand
+    }
+    #[cfg(test)]
+    pub(crate) fn demand_with_blocking(&self, body: &body::Body) -> crate::runtime::ForeignDemand {
+        let mut demand = self.foreign_demand();
+        for instruction in &body.instructions {
+            if let body::Op::Call(call) | body::Op::ForeignCall(call) = &instruction.op
+                && matches!(
+                    call.target,
+                    body::CallTarget::Runtime(body::RuntimeCall::BlockingIo { .. })
+                )
+            {
+                demand.ordinary += 1;
+                demand.blocking_io += 1;
             }
         }
         demand

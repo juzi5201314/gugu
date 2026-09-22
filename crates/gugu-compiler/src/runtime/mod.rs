@@ -18,6 +18,8 @@ mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
 pub(crate) mod block_return_schema;
+#[cfg(test)]
+mod blocking_io_tests;
 #[allow(
     dead_code,
     reason = "cage 预留、checked 解码与 FFI 交接由 world、栈图 walker 与确定性测试消费"
@@ -93,6 +95,13 @@ pub(crate) mod hash;
 mod hash_tests;
 #[allow(
     dead_code,
+    reason = "I/O 组合函数与阻塞等待由确定性测试消费，尚未降成 Gugu 可调用实现"
+)]
+pub(crate) mod io;
+#[cfg(test)]
+mod io_tests;
+#[allow(
+    dead_code,
     reason = "LocalHeap Immix/TLAB/分代参照实现由 world 与确定性测试消费"
 )]
 pub(crate) mod local_heap;
@@ -122,6 +131,13 @@ mod model;
 #[allow(dead_code, reason = "pacing 诊断面由 runtime dump 与确定性测试消费")]
 mod pacing;
 pub(crate) mod pacing_schema;
+#[allow(
+    dead_code,
+    reason = "无损 Path 参照模型由确定性测试消费，尚未降成 Gugu 可调用实现"
+)]
+pub(crate) mod path;
+#[cfg(test)]
+mod path_tests;
 mod platform_schema;
 pub(crate) mod processor;
 #[allow(
@@ -347,6 +363,7 @@ const STD_OPS_SOURCE: &str = include_str!("../../resources/std/ops.gg");
 const STD_ITER_SOURCE: &str = include_str!("../../resources/std/iter.gg");
 const STD_TEXT_SOURCE: &str = include_str!("../../resources/std/text.gg");
 const STD_IO_SOURCE: &str = include_str!("../../resources/std/io.gg");
+const STD_PATH_SOURCE: &str = include_str!("../../resources/std/path.gg");
 const STD_FMT_SOURCE: &str = include_str!("../../resources/std/fmt.gg");
 const STD_HASH_SOURCE: &str = include_str!("../../resources/std/hash.gg");
 const STD_COLLECTIONS_SOURCE: &str = include_str!("../../resources/std/collections.gg");
@@ -491,6 +508,11 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/io.gg",
                     source: STD_IO_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/path.gg",
+                    source: STD_PATH_SOURCE,
                     role: RuntimeSourceRole::StandardLibrary,
                 },
                 RuntimeSource {

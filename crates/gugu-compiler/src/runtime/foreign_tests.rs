@@ -213,3 +213,30 @@ fn compiled_foreign_sites_enter_the_runtime_contract() {
         plan.foreign_contract_fingerprint()
     );
 }
+
+#[test]
+fn blocking_io_waits_for_credit_and_regular_files_do_not_enter_poller() {
+    let mut world = ForeignWorld::new(2).expect("世界");
+    let waiting = world.spawn_running().expect("等待者");
+    assert_eq!(
+        world
+            .admit(waiting, BridgeMode::Ordinary, &[], 0, 0, 0)
+            .expect("无额度"),
+        AdmitOutcome::Waiting
+    );
+    assert_eq!(
+        world.lifecycle(waiting).expect("等待"),
+        CoroutineState::Waiting
+    );
+    let ready = world.spawn_running().expect("就绪者");
+    assert!(matches!(
+        world
+            .admit(ready, BridgeMode::Ordinary, &[], 1, 0, 8)
+            .expect("有额度"),
+        AdmitOutcome::Attached { .. }
+    ));
+    let error = world
+        .submit(PollerFamily::Linux, IoClass::RegularFile, 7)
+        .expect_err("普通文件");
+    assert!(error.to_string().contains("BlockingBridge"));
+}

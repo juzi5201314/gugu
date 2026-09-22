@@ -49,9 +49,9 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 26 相对版本 25 的变化：并入外调交接契约。BlockingBridge 上限、waiter 字节、
-/// dirty target 公式和 poller 分流只来自 `foreign_schema`，禁止再写一套数字。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 26;
+/// 版本 27 相对版本 26 的变化：并入阻塞 I/O 站点计数。计数来自 `foreign_schema`，
+/// 不另写一套上限。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 27;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;

@@ -310,6 +310,7 @@ pub(crate) fn image_plan_payload(plan: &gugu_compiler::ImagePlan) -> Value {
         "foreign-ordinary-sites": plan.foreign_ordinary_sites(),
         "foreign-dirty-sites": plan.foreign_dirty_sites(),
         "foreign-leaf-sites": plan.foreign_leaf_sites(),
+        "blocking-io-sites": plan.blocking_io_sites(),
         "foreign-contract-fingerprint": plan.foreign_contract_fingerprint(),
         "foreign-runtime": plan.foreign_runtime(),
         "wait-inline-select-cases": plan.wait_inline_select_cases(),

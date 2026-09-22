@@ -229,6 +229,7 @@ impl RuntimeCall {
             | Self::SelectCommit {
                 has_default: false, ..
             } => (false, true, true, true),
+            Self::BlockingIo { .. } => (false, true, false, true),
             Self::Spawn => (false, true, true, true),
             Self::ChannelNew
             | Self::DynamicErase

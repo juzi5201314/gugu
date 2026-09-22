@@ -1,4 +1,144 @@
 struct ByteBuffer {}
+struct CancelToken {}
+struct Bytes {}
+
+pub trait Read {
+    fn read(self: &Self, destination: &[byte]) Result[int, Error]
+    fn read_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[int, Error]
+    fn read_buffer(self: &Self, destination: &ByteBuffer, limit: int) Result[int, Error]
+    fn read_buffer_cancel(self: &Self, destination: &ByteBuffer, limit: int, cancel: &CancelToken) Result[int, Error]
+}
+
+pub trait Write {
+    fn write(self: &Self, source: Bytes) Result[int, Error]
+    fn write_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[int, Error]
+}
+
+pub trait Seek {
+    fn seek(self: &Self, from: SeekFrom) Result[uint, Error]
+}
+
+pub trait BufRead {
+    fn fill(self: &Self) Result[Bytes, Error]
+    fn consume(self: &Self, count: int)
+}
+
+pub enum SeekFrom {
+    Start(uint),
+    End(int),
+    Current(int),
+}
+
+pub enum Error {
+    NotFound,
+    PermissionDenied,
+    AlreadyExists,
+    InvalidInput,
+    InvalidData,
+    UnexpectedEof,
+    WriteZero,
+    Interrupted,
+    TimedOut,
+    Cancelled,
+    Closed,
+    BrokenPipe,
+    NotConnected,
+    ConnectionReset,
+    ConnectionRefused,
+    ConnectionAborted,
+    AddrInUse,
+    AddrNotAvailable,
+    NotADirectory,
+    IsADirectory,
+    DirectoryNotEmpty,
+    CrossesDevices,
+    NotSeekable,
+    InvalidState,
+    MessageTooLarge,
+    Unsupported,
+    StorageFull,
+    ReadOnlyFilesystem,
+    FileTooLarge,
+    QuotaExceeded,
+    Other,
+}
+
+impl Error for Error {
+    fn message(self: &Self) string = "io"
+    fn source(self: &Self) Option[&dyn Error] = None
+}
+
+impl Print for Error {
+    fn print(self: &Self, out: &Formatter) {}
+}
+
+impl Debug for Error {
+    fn debug(self: &Self, out: &Formatter) {}
+}
+
+pub fn kind(value: &Error) Error {
+    _ = value
+    Error::InvalidInput
+}
+
+pub fn with_source(value: &Error, cause: Error) Error {
+    _ = value
+    _ = cause
+    Error::InvalidInput
+}
+
+pub fn read_exact[R: Read](reader: &R, destination: &[byte]) Result[(), Error] {
+    let read = reader.read(destination)?
+    if read == 0 { Err(Error::UnexpectedEof) } else { Ok(()) }
+}
+
+pub fn write_all[W: Write](writer: &W, source: Bytes) Result[(), Error] {
+    let written = writer.write(source)?
+    if written == 0 { Err(Error::WriteZero) } else { Ok(()) }
+}
+
+pub fn copy[R: Read, W: Write](reader: &R, writer: &W) Result[uint, Error] {
+    _ = reader
+    _ = writer
+    Ok(0)
+}
+
+pub fn read_to_end[R: Read](reader: &R) Result[Bytes, Error] {
+    _ = reader
+    Ok(Bytes {})
+}
+
+pub fn read_to_string[R: Read](reader: &R) Result[string, Error] {
+    _ = reader
+    Err(Error::InvalidData)
+}
+
+pub fn fill_buffer[R: Read](reader: &R, limit: int) Result[Bytes, Error] {
+    _ = reader
+    _ = limit
+    Ok(Bytes {})
+}
+
+pub fn write_buffer[W: Write](writer: &W, source: &ByteBuffer) Result[int, Error] {
+    _ = source
+    writer.write(Bytes {})
+}
+
+pub struct Buffered[R] {}
+
+pub fn buffered[R: Read](reader: &R, capacity: int) Result[Buffered[R], Error] {
+    _ = reader
+    if capacity < 0 { Err(Error::InvalidInput) } else { Ok(Buffered {}) }
+}
+
+impl[R: Read] Buffered[R] {
+    pub fn fill(self: &Self) Result[Bytes, Error] = Ok(Bytes {})
+    pub fn consume(self: &Self, count: int) { _ = count }
+    pub fn read(self: &Self, destination: &[byte]) Result[int, Error] {
+        _ = destination
+        Ok(0)
+    }
+}
 
 fn share_buffer() {
     let value = ByteBuffer {}

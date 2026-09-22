@@ -169,6 +169,12 @@ impl CowBytes {
         self.bytes.push(byte);
     }
 
+    /// 向 unique spare 追加。sealed 时先分离到新 backing。
+    pub(crate) fn extend_from_slice(&mut self, bytes: &[u8]) {
+        self.detach();
+        self.bytes.extend_from_slice(bytes);
+    }
+
     /// 返回前 `length` 个字节的快照，缓冲换绑到剩余区间并保持 sealed。
     pub(crate) fn split_to(&mut self, length: isize) -> Result<Self, TextFault> {
         if length < 0 {

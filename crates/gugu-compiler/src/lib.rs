@@ -1340,6 +1340,7 @@ pub struct ImagePlan {
     foreign_ordinary_sites: u32,
     foreign_dirty_sites: u32,
     foreign_leaf_sites: u32,
+    blocking_io_sites: u32,
     foreign_contract_fingerprint: [u8; 32],
     foreign_runtime: crate::runtime::ForeignRuntimeContract,
     wait_inline_select_cases: u32,
@@ -1595,6 +1596,7 @@ impl ImagePlan {
             foreign_ordinary_sites: plan.foreign_ordinary_sites,
             foreign_dirty_sites: plan.foreign_dirty_sites,
             foreign_leaf_sites: plan.foreign_leaf_sites,
+            blocking_io_sites: plan.blocking_io_sites,
             foreign_contract_fingerprint: plan.foreign_contract_fingerprint,
             foreign_runtime: plan.foreign_runtime,
             wait_inline_select_cases: plan.wait_inline_select_cases,
@@ -2371,6 +2373,10 @@ impl ImagePlan {
     /// 返回 `ForeignLeaf` 调用点数量。
     pub fn foreign_leaf_sites(&self) -> u32 {
         self.foreign_leaf_sites
+    }
+    /// 返回阻塞 I/O 原语站点数。
+    pub fn blocking_io_sites(&self) -> u32 {
+        self.blocking_io_sites
     }
     /// 返回外调契约指纹。
     pub fn foreign_contract_fingerprint(&self) -> [u8; 32] {

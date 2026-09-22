@@ -1,0 +1,74 @@
+struct Bytes {}
+enum Error { InvalidInput, Unsupported }
+pub struct OsString {}
+pub struct Path {}
+
+pub struct UnicodeError {
+    offset: int,
+}
+
+impl Error for UnicodeError {
+    fn message(self: &Self) string = "invalid unicode"
+    fn source(self: &Self) Option[&dyn Error] = None
+}
+
+impl Print for UnicodeError {
+    fn print(self: &Self, out: &Formatter) {}
+}
+
+impl Debug for UnicodeError {
+    fn debug(self: &Self, out: &Formatter) {}
+}
+
+pub fn from_string(value: string) Result[OsString, Error] {
+    _ = value
+    Err(Error::InvalidInput)
+}
+
+pub fn from_bytes(value: Bytes) OsString {
+    _ = value
+    OsString {}
+}
+
+pub fn from_units(value: &[u16]) Result[OsString, Error] {
+    _ = value
+    Err(Error::Unsupported)
+}
+
+impl OsString {
+    pub fn to_bytes(self: &Self) Bytes = Bytes {}
+    pub fn to_units(self: &Self) [u16; 0] = []
+    pub fn to_string(self: &Self) Result[string, UnicodeError] = Err(UnicodeError { offset: 0 })
+    pub fn to_string_lossy(self: &Self) string = "invalid unicode"
+    pub fn len(self: &Self) int = 0
+    pub fn is_empty(self: &Self) bool = true
+}
+
+impl Path {
+    pub fn from_os(value: OsString) Path {
+        _ = value
+        Path {}
+    }
+    pub fn as_os(self: &Self) OsString = OsString {}
+    pub fn to_string(self: &Self) Result[string, UnicodeError] = Err(UnicodeError { offset: 0 })
+    pub fn to_string_lossy(self: &Self) string = "invalid unicode"
+    pub fn join(self: &Self, child: Path) Path {
+        _ = child
+        Path {}
+    }
+    pub fn parent(self: &Self) Option[Path] = None
+    pub fn file_name(self: &Self) Option[OsString] = None
+    pub fn extension(self: &Self) Option[OsString] = None
+    pub fn with_file_name(self: &Self, name: OsString) Path {
+        _ = name
+        Path {}
+    }
+    pub fn with_extension(self: &Self, extension: OsString) Path {
+        _ = extension
+        Path {}
+    }
+    pub fn file_stem(self: &Self) Option[OsString] = None
+    pub fn components(self: &Self) [OsString; 0] = []
+    pub fn is_absolute(self: &Self) bool = false
+    pub fn is_relative(self: &Self) bool = true
+}

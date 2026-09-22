@@ -116,7 +116,9 @@ impl Builder<'_> {
         callee: &Callee,
         args: &[Operand],
     ) -> Result<Option<LocalId>, Diagnostic> {
-        if let Some(mode) = collection_view(self.module, callee) {
+        if let Callee::Dispatch(index) = callee
+            && let Some(mode) = self.collection_view(*index)
+        {
             // 标准集合的 `with_ref` / `for_each_ref`：整个调用在接收者的 view 动态 extent 内。
             let source = operand_place(self, args.first());
             let dest = self.emit_view_call(id, source, mode, callee.clone(), args.to_vec())?;
@@ -132,6 +134,26 @@ impl Builder<'_> {
             return self.emit_scoped_view(id, name.as_str(), args).map(Some);
         }
         Ok(None)
+    }
+
+    fn collection_view(&self, index: u32) -> Option<ViewMode> {
+        let dispatch = self.owner.dispatches.get(index as usize)?;
+        let function = dispatch.function?;
+        if !matches!(
+            self.module.definitions[function.index()].name.as_str(),
+            "with_ref" | "for_each_ref"
+        ) {
+            return None;
+        }
+        let mut ty = dispatch.self_ty;
+        while let Some(hir::Type::Ref(inner)) = self.module.types.get(ty.index()) {
+            ty = *inner;
+        }
+        let hir::Type::Named { definition, .. } = self.module.types.get(ty.index())? else {
+            return None;
+        };
+        super::super::passing::collection_item(self.module, *definition)
+            .then_some(ViewMode::ScopedRead)
     }
 
     fn emit_scoped_view(
@@ -296,32 +318,6 @@ fn operand_place(builder: &mut Builder<'_>, operand: Option<&Operand>) -> Place 
         Some(Operand::Copy(place) | Operand::MoveInternal(place)) => *place,
         _ => Place::local(builder.temp(builder.primitives.unit)),
     }
-}
-
-/// 标准集合上 `with_ref` / `for_each_ref` 的派发；接收者类型必须是登记的共享身份集合。
-fn collection_view(module: &hir::Module, callee: &Callee) -> Option<ViewMode> {
-    let Callee::Dispatch(index) = callee else {
-        return None;
-    };
-    let dispatch = module
-        .owners
-        .iter()
-        .find_map(|owner| owner.dispatches.get(*index as usize))?;
-    let function = dispatch.function?;
-    if !matches!(
-        module.definitions[function.index()].name.as_str(),
-        "with_ref" | "for_each_ref"
-    ) {
-        return None;
-    }
-    let mut ty = dispatch.self_ty;
-    while let Some(hir::Type::Ref(inner)) = module.types.get(ty.index()) {
-        ty = *inner;
-    }
-    let Some(hir::Type::Named { definition, .. }) = module.types.get(ty.index()) else {
-        return None;
-    };
-    super::super::passing::collection_item(module, *definition).then_some(ViewMode::ScopedRead)
 }
 
 fn lang_name(module: &hir::Module, callee: &Callee) -> Option<String> {
