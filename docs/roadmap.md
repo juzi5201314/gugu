@@ -249,28 +249,28 @@
   - 实现 `CoroutineHot/Cold/Slot` 固定布局、可复制 stack arena、size class、上下界 guard、x86_64 context 保存/恢复、stack growth/retire 和完成记录。
   - 验收：`CoroutineSlot` 及 cache-line layout 满足 backend 断言；栈增长不超过逻辑上限；完成 coroutine 的 result/panic 先转移到 cold control，再安全归还旧 stack。
   - 接入证据：`RuntimeRawModel`（query 30，schema 5）内嵌 `CoroutineRuntimeContract` schema 1，固定 `CoroutineHot`/`StackDescriptor` 各 64 B、`CoroutineSlot` 128 B、`CoroutineCold` 512 B、context 48 B、morestack scratch 208 B；Rust 构建时断言与内建 `std/runtime/coroutine.gg` 的冻结 HIR/具体 GIR 布局逐字段交叉校验。栈采用 256 MiB payload arena、128 个 2 MiB span、首尾各 4 KiB guard、512 B 起的稠密二次幂 class、连续 span extent 与超过半 arena 的独立 reservation；亚页 slot 共用宿主页，首次切入才 commit，七类 owner cache 执行 64/32 KiB 迟滞，空页合并回收且不改变内部 protection。rt0 的 main/子协程使用同一控制表与 arena；增长执行逻辑上限与精确 StackInterior 重定位，收缩使用四个独立 GC 观察窗；完成先向 cold 发布 result/panic 与 barrier，再在 system-stack 交接点摘除旧 context/root，归还 stack 后 release 发布 Dead。跨 owner 完成沿既有 `StackSpan` inbox/integrity/forwarding 路径归还，Join 不保留 stack，最后 Join 在完成前消失也能回收控制块。
-  - 验收证据：布局、栈策略、62-byte x86_64 switch/restore-only 片段及优化后 LIR 需求进入契约 fingerprint、action key、CLI `image-plan` 与 `-Zdump-runtime`；source fixture 的 Linux `build`、Windows `check` 均报告 2 个创建点、10 个入口检查、2 个 suspend，缺失或损坏的布局/片段被 verifier 拒绝。`cargo bench -p gugu-compiler --bench coroutine_context --profile dev` 在真实宿主 VM 上执行编译计划中的实际片段，验证独立栈往返、保存寄存器、processor 重建、单向 finish 及释放旧栈后结果 42 仍存活。519 项工作区测试全部通过，fmt/build 零 warning，mdBook 构建通过。接入同时修复裸属性被误读为 lint 参数，以及 GIR 字段/借用投影提前复制聚合的问题（`BuildGenericGir` schema 4）；全部原有 fixture 保留，证明回归按被测输入的源位置收集，移除固定内建函数数量的偶然断言。M:N 调度、完整机器栈图与最终镜像写出仍由对应后续阶段交付。
+  - 验收证据：布局、栈策略、62-byte x86_64 switch/restore-only 片段及优化后 LIR 需求进入契约 fingerprint、action key、CLI `image-plan` 与 `-Zdump-runtime`；source fixture 的 Linux `build`、Windows `check` 均报告 2 个创建点、10 个入口检查、2 个 suspend，缺失或损坏的布局/片段被 verifier 拒绝。`cargo bench -p gugu-compiler --bench coroutine_context --profile dev` 在真实宿主 VM 上执行编译计划中的实际片段，验证独立栈往返、保存寄存器、processor 重建、单向 finish 及释放旧栈后结果 42 仍存活。519 项工作区测试全部通过，fmt/build 零 warning，mdBook 构建通过。接入同时修复裸属性被误读为 lint 参数，以及 GIR 字段/借用投影提前复制聚合的问题（`BuildGenericGir` schema 4）；全部原有 fixture 保留，证明回归按被测输入的源位置收集，移除固定内建函数数量的偶然断言。镜像内的 main 协程、`morestack_or_poll` 与栈增长由阶段 61a 交付；本阶段只交付布局、换栈片段与参照模型。
 
 - [x] **阶段 35：实现 M:N scheduler 基础路径**（复杂度：5）
   - 依赖：阶段 34、30。
   - 实现 LogicalProcessor/WorkerThread、固定 256 LocalDeque、remote batch/injection、run_next、park/unpark、work stealing、weak fairness、producer gate 与动态 processor topology 骨架。
   - 验收：runnable 无额外 FIFO 保证但不被持续新工作永久饿死；无 `P × P` mailbox；park 的 queue recheck/work sequence 不丢唤醒；processor retire 能转移全部本地状态。
   - 接入证据：`RuntimeRawModel`（query 30，schema 6）内嵌 `SchedulerRuntimeContract` schema 1：本地队列 256、remote 分片 8、batch 上限 128、service 间隔 61、service 批量 128；`SchedulerDemand` 由优化后 LIR 统计创建点、`RuntimeCall::Yield` 与 suspend，并与协程需求对齐（`yield_sites <= suspend_points`）。契约指纹以派生键 `gugu-scheduler-runtime-v1` 进入 action key。`ImagePlan`/`-Zdump-runtime`/CLI JSON 报告 `scheduler-local-capacity`、`scheduler-remote-shard-count`、`scheduler-batch-max-items`、`scheduler-service-interval`、`scheduler-service-batch`、`scheduler-contract-fingerprint` 与 `scheduler-runtime`。参照模型覆盖 Classic64/Packed55 双变体 deque、`run_next` 限幅 1、overflow 认领最旧 batch、全通道唯一 `ready_publish`、park 的 queue recheck、steal 取半上取整、processor retire 有序转移本地状态、dirty CPU 配额与 managed bound；禁止 `P × P` mailbox 与稀疏 processor `HashMap`。
-  - 验收证据：`scheduler_tests` 覆盖常量与契约漂移、双 deque 语义、Packed55 `RESETTING`、run_next、overflow、Waiting/Parking 唤醒、yield 入本地尾、park 不丢唤醒、steal、retire、dirty 配额与 lifecycle generation。`cargo bench -p gugu-compiler --bench scheduler_runqueue` 以真实多 worker smoke 队列与账本，确定性正确性由单测承担。timer/poller/GC-stop 完整状态机与镜像内调度执行仍由后续阶段写出，复用同一 schema。
+  - 验收证据：`scheduler_tests` 覆盖常量与契约漂移、双 deque 语义、Packed55 `RESETTING`、run_next、overflow、Waiting/Parking 唤醒、yield 入本地尾、park 不丢唤醒、steal、retire、dirty 配额与 lifecycle generation。`cargo bench -p gugu-compiler --bench scheduler_runqueue` 以真实多 worker smoke 队列与账本，确定性正确性由单测承担。镜像内调度执行由阶段 61b 交付，复用同一 schema；timer/poller/GC-stop 完整状态机分别由阶段 67 与阶段 61c 交付。
 
 - [x] **阶段 36：实现 channel、Join、select 与等待源**（复杂度：5）
   - 依赖：阶段 35、阶段 16、31。
   - 实现有/无缓冲 channel、send/recv/try/close 线性化、Join 完成记录、WaitSourceId、select scratch、默认分支、随机公平和等待队列。
   - 验收：close 竞态、收尽缓冲、重复 wait、分离子协程、无缓冲会合和 select 单次求值/单次提交严格符合规范；等待只挂起协程，不占用 OS thread。
   - 接入证据：前端将 `recv()`/`wait()` 定为 `Result[T, ChanClosed]`/`Result[T, Panic]`，并形成编译器已知的 `ChanClosed`/`TrySendErr`/`TryRecvErr`/`Panic` 名义类型；`try_send`/`try_recv` 不可重载、不带 `SUSPEND`，经 HIR builtin → GIR `IntrinsicOp`（不是 Suspend）→ LIR `RuntimeCall::ChannelTrySend/ChannelTryRecv`。`chan[T](n)` 的 comptime 负容量与 `select` 内 `try_*` 在 Frontend 失败且没有镜像计划。`RuntimeRawModel` 升到 schema 7，并入 `WaitRuntimeContract` schema 1：等待源种类 channel/join/never、wait-node 字段（协程句柄、generation、case、stack-high-relative 偏移，禁止裸栈指针）、FIFO 队列、`INLINE_SELECT_CASES = 8`、scratch class `1,2,4,…,1024` words、wait-node raw class 64/128 B、`SelectTxn` 相位 Building/Armed 与 winner UNSET/DEFAULT/case。`WaitDemand` 由优化后 LIR 统计 channel/Join/select/never 与 `SafepointKind::Select`；指纹键 `gugu-wait-runtime-v1` 进入 action key。内建 `std/runtime/channel.gg` 的 `ChannelControl`/`WaitNode`/`SelectTxn`/`SelectScratchCache` 与 machine 布局交叉校验；`CoroutineCold.select_scratch` 的 4 个 `u64` 解释为 `SelectTxn` 描述符，8-word 内联区是 processor-local scratch cache 的 0 号 class。跨 owner 归还 `ReturnKind::WaitNode`。参照模型挂在 `RawWorld`：`WaitSourceId` 单调不复用，缓冲环与无缓冲会合，close 不丢已线性化缓冲，Join 完成 Release 发布后再 Dead，select ≤8 同时 `try_lock` 与失败/>8 的逐源扫描，never `select {}` 挂 never wait，大 payload 两阶段 reservation，唤醒只经 `ready_publish`。`ImagePlan`/CLI JSON/`-Zdump-runtime` 报告 `wait-inline-select-cases`、`wait-scratch-class-count`、`wait-node-class-count`、`wait-contract-fingerprint`、`wait-demand` 与 `wait-runtime`。
-  - 验收证据：`wait_tests` 覆盖 close 与 send 两种线性化顺序、收尽后 Closed、重复 wait、分离 Join 不取消、无缓冲会合、`try_*` Full/Empty/Closed、ready 时 default 不获选、try_lock 回退、>8 扫描、Building 期 winner CAS、loser 注销、never select、wait generation 只 ready 一次、WaitNode 跨 owner exactly-once 归还，以及含 `chan`/`select`/`wait` 的源切片改变 demand/指纹、comptime 负容量与非法 `try_send` 进 select 使 Frontend 失败且 `image-plan` 为 null；Linux 与 Windows 目标冷/热编译 action key 与 dump 一致。`cargo bench -p gugu-compiler --bench channel_wait` 以多 producer ping-pong 与 select 提交验证 exactly-once 与账本守恒。工作区 547 项测试全部通过，fmt/build 零 warning，mdBook 构建通过。镜像内真正的 channel/select 执行路径仍待后续写出，复用同一 schema。
+  - 验收证据：`wait_tests` 覆盖 close 与 send 两种线性化顺序、收尽后 Closed、重复 wait、分离 Join 不取消、无缓冲会合、`try_*` Full/Empty/Closed、ready 时 default 不获选、try_lock 回退、>8 扫描、Building 期 winner CAS、loser 注销、never select、wait generation 只 ready 一次、WaitNode 跨 owner exactly-once 归还，以及含 `chan`/`select`/`wait` 的源切片改变 demand/指纹、comptime 负容量与非法 `try_send` 进 select 使 Frontend 失败且 `image-plan` 为 null；Linux 与 Windows 目标冷/热编译 action key 与 dump 一致。`cargo bench -p gugu-compiler --bench channel_wait` 以多 producer ping-pong 与 select 提交验证 exactly-once 与账本守恒。工作区 547 项测试全部通过，fmt/build 零 warning，mdBook 构建通过。镜像内 channel/Join/select 执行由阶段 61b 交付，复用同一 schema。
 
 - [x] **阶段 37：实现 std.sync 原子、锁、OnceLock、Lazy 与取消**（复杂度：4）
   - 依赖：阶段 35、36。
   - 实现 Ordering、Atomic 合法类型、Mutex/RwLock/Condvar、非 poisoning guard、OnceLock/Lazy 的 Ready/Failed、CancelSource/CancelToken、取消与阻塞操作的接缝。
   - 验收：Acquire/Release/SeqCst 语义由状态机测试验证；初始化 panic 永久 Failed；锁 guard 释放不依赖用户 drop；取消幂等、协作、不会隐式 kill 子进程或取消 Join 子协程。
   - 接入证据：`RuntimeRawModel` 升至 schema 8，并入 `SyncRuntimeContract` schema 1：包含 5 种内存序名称（Relaxed/Acquire/Release/AcqRel/SeqCst）、12 种原子合法标量类型目录（`bool`, `int8`, `int16`, `int32`, `int64`, `int`, `uint8`, `uint16`, `uint32`, `uint64`, `uint`, `ptr` 与 raw 指针）、Once 状态枚举（Uninit/Initializing/Ready/Failed）、Cancel 状态枚举（Active/Cancelled）、Mutex 状态枚举（Unlocked/Locked/Contended），以及 5 类 64-byte/64-byte 对齐控制结构（`MutexControl`、`RwLockControl`、`CondvarControl`、`OnceControl`、`CancelControl`）。`SyncDemand` 由优化后 LIR 统计原子操作、互斥锁、读写锁、条件变量、OnceLock、Lazy 与取消操作；指纹派生键 `gugu-sync-runtime-v1` 进入 action key。内建 `std/runtime/sync.gg` 经冻结 HIR/具体 GIR 与 machine 布局交叉校验。参照模型挂在 `RawWorld`：`AtomicStateMachine` 验证 Relaxed/Release/Acquire/SeqCst 与 CAS 序降级校验；`Mutex` 与 `RwLock` 锁争用只挂起协程，guard 经由 Adaptive Resource Leasing 在协程完成或 panic 展开时自动解锁（non-poisoning）；`Condvar` 原子释放锁挂起并在唤醒后重获锁；`OnceLock`/`Lazy` 初始化异常永久 Failed 且不可 reset；`CancelSource`/`CancelToken` 幂等协作，在 `channel_recv_cancel` 中安全注销不丢消息，在 `join_wait_cancel` 中仅取消当前等待者且绝不 kill 子协程。`ImagePlan`/CLI JSON/`-Zdump-runtime` 输出 `sync-contract-fingerprint`、`sync-demand`、`sync-primitive-count` 与 `sync-runtime`。
-  - 验收证据：`sync_tests` 覆盖内存序编码与 CAS 失败序非法拒绝、合法与非法原子标量类型、Release-Acquire 视图同步与 SeqCst 全局序、Mutex 争用与持锁协程完成/panic 时租约自动解锁不 poisoning、RwLock 多读单写与展开自动释放、Condvar 原子 wait 与 notify_one/notify_all 唤醒、OnceLock 正常 Ready 与闭包 panic 永久 Failed 拒绝重试、`CancelSource` 幂等取消与 token 检查、channel 取消接缝与 Join 取消接缝验证（子协程绝未被 kill 且正常完成）、以及契约 demand 变更敏感度与 CLI 报告。`cargo bench -p gugu-compiler --bench sync_lock` 以真实多工作线程争用验证原子状态机、互斥锁与账本守恒。工作区 555 项测试全部通过，fmt/build 零 warning，mdBook 构建通过。镜像内真正的同步原语执行由后续阶段交付，复用同一 schema。
+  - 验收证据：`sync_tests` 覆盖内存序编码与 CAS 失败序非法拒绝、合法与非法原子标量类型、Release-Acquire 视图同步与 SeqCst 全局序、Mutex 争用与持锁协程完成/panic 时租约自动解锁不 poisoning、RwLock 多读单写与展开自动释放、Condvar 原子 wait 与 notify_one/notify_all 唤醒、OnceLock 正常 Ready 与闭包 panic 永久 Failed 拒绝重试、`CancelSource` 幂等取消与 token 检查、channel 取消接缝与 Join 取消接缝验证（子协程绝未被 kill 且正常完成）、以及契约 demand 变更敏感度与 CLI 报告。`cargo bench -p gugu-compiler --bench sync_lock` 以真实多工作线程争用验证原子状态机、互斥锁与账本守恒。工作区 555 项测试全部通过，fmt/build 零 warning，mdBook 构建通过。镜像内同步原语执行由阶段 61b 交付，复用同一 schema。
 
 - [x] **阶段 38：实现 stack map、unwind 与可复制栈扫描**（复杂度：5）
   - 依赖：阶段 28、34、35。
@@ -395,7 +395,7 @@
   - 实现逻辑节到 ELF segment、无 libc static PIE、`AT_PHDR` load bias、自重定位、RELRO、显式动态 FFI 的 PT_INTERP/GOT/PLT、归档抽取和 Linux syscall stub。
   - 验收：无动态导入的镜像不依赖系统 linker/loader 语义；未知/越界/重复 relocation、非法节权限和入口错误在写出前失败；hello、panic、GC、channel 程序能在 Linux 启动并退出。
   - 接入证据：`backend/x64/elf.rs` 在 `PlanBackend` 里把已编码片段、栈图、展开、源码记录和 GC 节收成 Linux `ET_DYN`。无动态导入时不写 `PT_INTERP`，程序头是 `PT_PHDR`、三个 `PT_LOAD` 与 `PT_GNU_RELRO`；文件偏移等于虚址。`bias = AT_PHDR - phdr_vaddr`（`phdr_vaddr` 为 64）。运行时只回填 `(slot, addend)` 相对重定位，`PcRel32`/`Rva32` 在写出前修完。重复槽、未知种类、超出 i32 的 PC 相对、可写可执行段和缺失入口在写出前失败。显式导入才加解释器、`.dynstr`/`DT_NEEDED`/`DT_NULL` 和 `jmp [rip+GOT]`。非空 SysV ar 按未解析 C 符号名抽取；编译路径不携带归档。未解析的 `morestack_or_poll` 接到 `ret`，其余未解析符号接到 `exit`。`r14` 指向 128 字节 `0xFF` 栈界限，`r15` 指向 4096 字节 `0xFF` 处理器前缀，使 TLAB 进位失败后进入 `exit` stub。Windows 计划的 Linux 镜像为空。`ImagePlan` 与 CLI JSON 暴露 `linux-image-kind`、字节数、入口、相对重定位数、`PT_LOAD` 数、解释器与指纹。栈图 `code_rva` 仍相对片段区。
-  - 验收证据：`elf_tests` 覆盖无解释器 static PIE、bias 0 回填、重复槽与越界 PC、动态解释器与 `DT_NEEDED`、归档抽取，以及编译出的 `fn main() {}` 两次指纹一致且含三节魔数。`windows_metadata_uses_pe_section_names` 断言 Linux 镜像为空。`cargo bench -p gugu-compiler --bench linux_pie --profile dev` 在真实内核上加载镜像：hello 以 0 退出，panic、channel 与闭包分配以进程退出码结束而不是信号。后三者目前落到未解析运行时 `exit` stub，不表示 panic/GC/channel 的语言语义已经在镜像内完成。`cargo nextest run --workspace` 1031 项全通过。
+  - 验收证据：`elf_tests` 覆盖无解释器 static PIE、bias 0 回填、重复槽与越界 PC、动态解释器与 `DT_NEEDED`、归档抽取，以及编译出的 `fn main() {}` 两次指纹一致且含三节魔数。`windows_metadata_uses_pe_section_names` 断言 Linux 镜像为空。`cargo bench -p gugu-compiler --bench linux_pie --profile dev` 在真实内核上加载镜像：hello 以 0 退出，panic、channel 与闭包分配以进程退出码结束而不是信号。后三者目前落到未解析运行时 `exit` stub，不表示 panic/GC/channel 的语言语义已经在镜像内完成；这些符号由阶段 61a–61d 接成镜像内 Gugu runtime。`cargo nextest run --workspace` 1031 项全通过。
 
 - [x] **阶段 57：实现 PE32+、Windows rt0 与导入导出**（复杂度：5）
   - 依赖：阶段 52–55、阶段 33。
@@ -434,10 +434,33 @@
   - 接入证据：`runtime/fmt.rs` 是 `std.fmt` 的参照模型：`Formatter` 提供 `write_str` / `write_char`、`pad`（文本，precision 按标量截断，默认左对齐）、`pad_integral`（符号、`#` 前缀、零填充，默认右对齐）与 `debug_tuple` / `debug_list` / `debug_map` / `debug_struct`（`#` 时四空格逐行缩进），内建实现覆盖整数（进制格式按 64 位补码）、浮点（precision、`e`/`E`、非有限值不零填充）、bool、char、string。标志兼容规则只有一份（`string::flag_conflict`）：符号与 `0` 只给整数/浮点，precision 只给浮点与 `Print` string，`#` 只给 Debug 与进制；类型检查器在推断收敛后按 `&T` 同 `T` 的类型分类报 `InvalidType`。comptime evaluator 不再拒绝格式码：`name$` 取当前词法帧 int 绑定，负计数是 `ComptimePanic`，值按同一规则渲染成常量 string；`EVALUATOR_REVISION` 提升到 4。`runtime/hash.rs` 固定 `Hasher` 语义馈送（定宽标量、长度前缀文本/字节）与三类哈希族：默认 FoldHash-fast（进程熵 seed）、SecureHashMap 的 SipHash 1-3（CSPRNG key）、稳定 XXH3-64/128（空输入 `2D06800538D394C2` / `99AA06D3014798D86001C324468D497F`）；`StableKey` / `StableOrdKey` 只给标量、String、字节与其元组/数组。`runtime/collections.rs` 固定 Map/Set：共享身份句柄、`get`/`update`/Entry 只传语义副本、`with_ref` / `for_each_ref` 期间任一别名的写入是 `WriteDuringView`、`iter()` O(1) 封存且首次修改先分离、HashMap 类按键 hash 排列实现序、BTreeMap 类按键全序、SmallMap 内联阶段按插入序线性查找且溢出后与同族 HashMap 相同。新增内建源单元 `std/fmt.gg`、`std/hash.gg`、`std/collections.gg`（`pub struct HashMap/HashSet/SecureHashMap/SecureHashSet/BTreeMap/BTreeSet` 与 `Eq + Hash + StableHash` / `Ord + StableOrd` 的 impl 头）；内建源单元可以声明预导入名，用户仍是 `E0031`。HIR obligation 现在按完整作用域形成，方法约束 `F: Fn(&V) R` 可以引用外围 impl 参数。GIR 把集合类型登记为 `IDENTITY` passing class，`with_ref` / `for_each_ref` 派发在调用点包进 `ScopedViewBegin ScopedRead` / `ScopedViewEnd`，unwind 边经只做 `ScopedViewEnd` 的 landing 块闭合，LIR verifier 的出口 guard 规则因此成立。`SmallMap[K, V, comptime N]` 的 comptime 值参数尚未进入类型形成，所以没有 Gugu 声明；三组参照模型都还没有降成 Gugu 可调用的实现，`std/collections.gg` 的方法体是类型检查桩。
   - 验收证据：`fmt_tests` 覆盖符号/`#`/零填充/进制/对齐、浮点 precision 与科学计数与 `inf`/`NaN`、文本截断与转义、结构化 debug 的紧凑与 `#?` 形态、负动态计数。`comptime_fstrings_apply_static_format_codes` 断言 `f"{255:#06x}"`、`f"{5:b}"`、`f"{1.5:+.2}"`、`f"{1234.5:.1e}"`、`>4` 对齐、数组 `?`、元组 `#?`、string 截断与用户函数里的 `n$` 都在编译期求成常量；`comptime_format_faults_are_diagnostics` 覆盖负计数 `ComptimePanic`、`{true:+}`、`{1:.2}`、string `#`、浮点 `#` 被拒与合法组合被接受。`hash_tests` 覆盖前缀无关馈送、XXH3 已知答案与持久性、默认/安全族随熵变化且互不相同、稳定键相等值同 hash、string 按字节而非规范等价。`collections_tests` 覆盖共享句柄与语义副本、Entry、view 内写入 panic 与 view 后恢复、快照封存与分离、有序表键序 vs 哈希表随 seed 变化的实现序、SmallMap 内联/溢出、Set；`collection_views_and_handle_copies_lower_in_generic_gir` 断言 `peek` / `walk` 含 `ScopedViewBegin ScopedRead` 与两处 `ScopedViewEnd`、`share` 是句柄 `copy` 而非 `cow_snapshot`；`std_collections_are_importable_and_require_stable_keys` 断言 `use std.collections.{HashMap, BTreeMap}` 可调用 `with_ref` / `for_each_ref`、缺 `StableHash` 的键没有方法、`unsafe impl StableHash` 后可用、用户声明 `HashMap` 仍失败。`cargo nextest run --workspace` 1078 项全通过。
 
-- [ ] **阶段 62：实现 std.io 基础、读写 trait 与 Path**（复杂度：4）
+
+- [ ] **阶段 61a：把 rt0 后半段与栈增长落成镜像内 Gugu runtime**（复杂度：3）
+  - 依赖：阶段 33、34、38、55、56、57。
+  - 用已登记的协程布局与换栈片段实现镜像内 rt0 后半段：建立 main 协程、接入 context switch、实现 `morestack_or_poll` 与栈增长；panic 走栈图 landing，不再进入 `exit` stub。
+  - 验收：hello 与会 panic 的程序由镜像内 runtime 完成启动、换栈和退出；缺 map 或栈上限失败仍是不可捕获 fatal。本阶段结束时删除 Rust 参照模型里「跑 main」的执行体，只保留 schema 与布局交叉校验。
+
+- [ ] **阶段 61b：把调度、等待与同步落成镜像内 Gugu runtime**（复杂度：3）
+  - 依赖：阶段 35–37、58、61a。
+  - 把 M:N 队列、park/unpark、steal、yield、channel/Join/select 与同步原语写成 `runtime/*.gg`；`RuntimeCall` 解析到这些符号，等待只挂起协程。
+  - 验收：spawn、yield、channel close 竞态、select 单次提交和锁争用在 Linux 镜像内符合既有契约；同一输入不再依赖 Rust 调度执行体。本阶段结束时删除 `scheduler`、`channel`、`select`、`wait`、`sync` 的 Rust 执行体。
+
+- [ ] **阶段 61c：把 LocalHeap 与标记回收落成镜像内 Gugu runtime**（复杂度：3）
+  - 依赖：阶段 39–45、61a。
+  - 实现 `gc_alloc_slow`、`gc_refill_line`、TLAB、minor/major、hybrid barrier、mark ticket 与 GC-stop；闭包分配在镜像内分配、存活并被回收。
+  - 验收：对象不跨 block，移动后的 exact root 与 interior pointer 在镜像内被修正；raw memory 不被保守扫描。本阶段结束时删除 `local_heap`、`mark`、`barrier`、`pacing`、`region` 的 Rust 执行体。
+
+- [ ] **阶段 61d：闭合共享堆、压缩引用与 owner 回收**（复杂度：3）
+  - 依赖：阶段 46–51、58、61b、61c。
+  - 把 SharedHeap、forwarding grace、pointer compression、owner-directed return、radix routing 与 typed combining 落成同一镜像内的 Gugu runtime；FFI bridge 接到这份 runtime。
+  - 验收：同一输入下镜像行为与阶段 46–51 的参照测试一致；算法只保留 Gugu 一份，Rust 侧只留 schema、布局交叉校验和非法状态拒绝。阶段 01 禁止的第二套语义等价 runtime 到此消失。
+
+- [x] **阶段 62：实现 std.io 基础、读写 trait 与 Path**（复杂度：4）
   - 依赖：阶段 31、37、58–60。
   - 实现 Read/Write/Seek/BufRead、read_exact/write_all/copy/read_to_end/read_to_string、I/O Error、ByteBuffer 接口、OsString/Path、取消和 timeout 接缝。
   - 验收：短读/短写/EOF/WriteZero、取消和错误链语义稳定；Path 不隐式访问文件系统、不丢失非 Unicode 字节；阻塞操作只挂起协程。
+  - 接入证据：`runtime/io.rs` 是 `std.io` 的确定性参照模型：错误用密集编号加可选来源下标，`read_exact` 中途 `Ok(0)` 返回 `UnexpectedEof` 并保留已写前缀，`write_all` 对空输入不调用 `write`、对非空 `Ok(0)` 返回 `WriteZero`，`copy` 使用 8192 字节缓冲并累计短写，`read_to_string` 在 EOF 后做严格 UTF-8 解码。`IoWait` 的判定顺序固定为关闭、取消、timeout、无额度、就绪；`admit_blocking` 无额度进入等待队列，有额度后进入普通 `ForeignBridge`。`runtime/path.rs` 是 `std.path` 的确定性参照模型：Linux 保存原始字节，Windows 保存合法 UTF-16，变换返回新值，不读目录、不解析 `.` / `..`。LIR `RuntimeCall::BlockingIo` 固定 `op` 0..3 与 `cancel`，同时计入普通 bridge 与 `blocking_io` 站点。内建 `std/io.gg` 与 `std/path.gg` 提供 trait、错误、组合函数和 Path 的类型面；方法体仍是类型检查桩，阻塞原语还没有从 Gugu 源码的 `read` / `write` / `seek` / `fill` 自动降成 `BlockingIo`。
+  - 验收证据：`io_tests` 覆盖短读后的 `Ok(0)`、`read_exact` 前缀、`WriteZero`、空输入跳过、短写累计、非法 UTF-8、错误链与负 limit。`path_tests` 覆盖 Linux 原始字节与 lossy、Windows lone surrogate、分隔符与大小写、NUL 与绝对/相对判定。`blocking_io_tests` 覆盖站点双重计数、`use std.io` / `use std.path` 冷热编译一致，以及用户声明 `Path` 仍是保留名。`use std.io` 的镜像计划 `blocking_io_sites` 为 0：桩不产生阻塞站点。镜像内真正挂起协程由阶段 61d 交付；本阶段不把参照模型说成可从 Gugu 源码调用的实现。
 
 - [ ] **阶段 63：实现 std.fs 与目录迭代**（复杂度：4）
   - 依赖：阶段 31、32、58、62。
@@ -450,7 +473,7 @@
   - 验收：IPv6 `[addr]:port`、ASCII DNS、NUL/非 ASCII/非法端口、IPv6 bind mode、backlog 和 Unix path 边界均有固定测试；不创建第二层 DNS cache。
 
 - [ ] **阶段 65：实现 std.net transport、TCP/UDP 与 Unix socket**（复杂度：4）
-  - 依赖：阶段 64、35–37、62。
+  - 依赖：阶段 64、61d、62。
   - 实现 TcpStream、UDP datagram、recv_from/recv_packet、方向并发、截断规则、timeout/cancel、local/peer addr、UnixStream/UnixListener/UnixDatagram 的目标条件。
   - 验收：每个 datagram 恰消费一次，destination 不足明确 truncated，短写/MessageTooLarge/Closed/NotConnected 不被伪装；poller 与 BlockingBridge 选择遵守 runtime 规则。
 
@@ -460,7 +483,7 @@
   - 验收：Command 不经过 shell，ShellCommand 显式按目标 shell；stdout/stderr 并行排空；wait/close/detach 语义、环境快照、NUL/大小写规则和子进程资源回收符合规范。
 
 - [ ] **阶段 67：实现 std.time、std.runtime 与 std.signal facade**（复杂度：4）
-  - 依赖：阶段 33、35–37、41、58、66。
+  - 依赖：阶段 33、41、58、61d、66。
   - 实现 Instant/SystemTime/Duration/sleep/timeout、runtime stats/GC target/parallelism/trace facade、Linux/Windows signal subscription、合并计数、dropped 和关闭语义。
   - 验收：单调时钟与墙钟边界、超时只取消当前操作、signal handler 不运行用户代码；所有 setter 在 Terminating 返回正确错误；RuntimeStats 字段与内部账本一致。
 
@@ -472,7 +495,7 @@
 ## 七、测试、构建任务、生态与工具闭环
 
 - [ ] **阶段 69：实现测试/文档测试/benchmark harness**（复杂度：5）
-  - 依赖：阶段 20、25、36、59、67。
+  - 依赖：阶段 20、25、59、61d、67。
   - 实现 `cfg(test/bench)`、`#[test]`、`should_panic(eq)`, `ignore`、稳定测试身份、并行用户协程、panic 捕获、doctest 围栏、`#[bench]`/Bencher/black_box。
   - 验收：测试收集顺序确定、执行可并行、报告按身份排序；测试后代协程归属正确；失败不终止其它测试；ignored/零匹配成功；bench 不缓存历史测量。
 
@@ -504,7 +527,7 @@
 ## 八、生产级验证与文档交付
 
 - [ ] **阶段 75：完成双目标 ABI 与镜像一致性套件**（复杂度：5）
-  - 依赖：阶段 19、52–58、63–68、74。
+  - 依赖：阶段 19、52–58、61d、63–68、74。
   - 建立 Linux/Windows 的 C 对照程序、repr(C)/transparent/packed/union/enum、SysV/MS x64 参数返回、sret、i128、TLS、导入导出、ELF/PE section/relocation fixture。
   - 验收：覆盖 0/1/2/16/17-byte aggregate 边界、shadow space、栈对齐、panic abort、外部线程接入、pin/bridge/leaf/dirty 和 strip 后 metadata；所有 fixture 使用确定性替身，不修改输入规避失败。
 
@@ -514,7 +537,7 @@
   - 验收：同一 CompilerIdentity 与输入产生语义等价且可重现的结果；任何不可信 cache/registry/metadata 输入都先验证再分配/执行；诊断、trace、package 和镜像不含 token、私钥、宿主绝对路径或 managed 裸地址。
 
 - [ ] **阶段 77：完成发布 workload 性能与延迟门禁**（复杂度：5）
-  - 依赖：阶段 35、40–51、56–68、75、76。
+  - 依赖：阶段 56–68、61d、75、76。
   - 建立 release generated-code、百万 coroutine、channel/select、I/O、FFI、COW/collection、GC pressure、symmetric/asymmetric owner return 和双目标端到端 workload；记录吞吐、RSS、GC pause、remark/evacuation、remote hop、cache hit 与 tail latency。
   - 验收：性能参数只由真实 workload、确定性 model 和 release 镜像数据调整；确认 direct mode、MosaicThroughput、MosaicLowLatency、radix/security profile 的代价；不得用针对单一 benchmark 的特殊路径宣称生产级性能。
 
@@ -538,6 +561,7 @@
     -> runtime raw/stack/scheduler
     -> GC/barrier/owner messaging
     -> x86_64 backend/ELF/PE/FFI
+    -> 镜像内 Gugu runtime（61a–61d）
     -> std/test/build/publish/CLI
     -> 双目标验证/安全/性能/教程参考/发布门禁
 ```
@@ -552,7 +576,7 @@
 | AST/名称/类型 | parser、cfg、定义表 | HIR、comptime、GIR | `Validated` 严格冻结 |
 | comptime/宏 | HIR、capability registry | 前端重入、可达性、缓存 | 展开后重新走前端 |
 | GIR/LIR | Validated HIR、布局 | verifier、backend、stack map | 每阶段 verifier 通过 |
-| runtime/GC | rt0、range、scheduler | lowering、镜像 metadata | 启动与生命周期 smoke |
+| runtime/GC | rt0、range、scheduler | lowering、镜像 metadata、阶段 61a–61d | 启动与生命周期 smoke；镜像内执行不再依赖 Rust runtime |
 | 标准库 | intrinsic、ABI | compiler 自举、用户 API | compiler/runtime 自举 |
 | backend/image | LIR、target descriptor | CLI emit/run、cache | 双目标镜像 smoke |
 | CLI/生态 | action graph、cache、权限 | 命令、registry、报告 | 命令矩阵与失败路径 |

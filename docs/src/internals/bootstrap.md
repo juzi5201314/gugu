@@ -263,12 +263,12 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 | `functions` | frontend parser、capture、async、HIR/GIR | 捕获、async 与 HIR 已落地 |
 | `traits` | trait solver、impl selection | 选择、特化与 dyn/Any 前端已落地 |
 | `passing` | value/resource lowering | GIR 已按类别展开浅拷、COW seal 与 resource lease；`large_copy` 已接入诊断 |
-| `memory` | placement、resource runtime、GC、region registry | 已记录 TurnRegion/LocalHeap/SharedHeap 选择与 region 门禁、promote、transfer 路径；真实 GC 搬迁仍未物化 |
-| `concurrency` | scheduler、channel、sync runtime | 调度基础路径与 channel/Join/select 等待协议参照模型已接入；镜像内执行仍待后续写出 |
+| `memory` | placement、resource runtime、GC、region registry | 已记录 TurnRegion/LocalHeap/SharedHeap 选择与 region 门禁、promote、transfer 路径；真实 GC 搬迁由阶段 61c–61d 落成镜像内 Gugu runtime |
+| `concurrency` | scheduler、channel、sync runtime | 调度基础路径与 channel/Join/select 等待协议参照模型已接入；镜像内执行由阶段 61a–61d 落成 Gugu runtime |
 | `comptime` | evaluator、source expansion、analysis | EarlyConst、源码宏与 generic GIR 上的抽象分析已接入前端管线 |
 | `unsafe` | safety checker、FFI/asm backend | 前端安全检查已落地；外部桥接执行与机器编码未落地 |
 | `platform-abi` | `target`、x86 backend、image writer | 已建立两个目标 descriptor |
-| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界；raw 平面契约、资源租约、owner-directed return 与 rt0 启动/终止/报告契约及参照实现已落地 |
+| `runtime` | Gugu runtime、rt0、报告路径 | 已建立资源与 rt0 边界；raw 平面契约、资源租约、owner-directed return 与 rt0 启动/终止/报告契约及参照实现已落地；镜像内执行由阶段 61a–61d 交付 |
 | `standard-library` | `runtime` Gugu 源树与 std modules | 已建立源树登记 |
 | `testing` | test collector、harness、CLI | 未实现 |
 
