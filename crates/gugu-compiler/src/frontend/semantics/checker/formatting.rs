@@ -1,6 +1,26 @@
 use super::super::output::{FormattingCount, FormattingPart};
 use super::*;
-use crate::frontend::string::{FormatSpec, ParsedCount, parse_format};
+use crate::frontend::string::{FormatSpec, ParsedCount, ValueClass, flag_conflict, parse_format};
+
+/// 等待推断收敛后再检查的格式化插值。
+pub(super) struct PendingFormat {
+    expr: ExprId,
+    name: String,
+    method: String,
+    flags: FormatSpec<()>,
+    span: Span,
+}
+
+/// 收敛后的类型在标志兼容规则里的分类；`&string` 与 `string` 同类。
+fn value_class(ty: &Ty) -> ValueClass {
+    match ty {
+        Ty::Int { .. } => ValueClass::Int,
+        Ty::Float(_) => ValueClass::Float,
+        Ty::String => ValueClass::Str,
+        Ty::Ref(inner) => value_class(inner),
+        _ => ValueClass::Other,
+    }
+}
 
 impl Checker<'_, '_> {
     pub(super) fn formatted_parts(&mut self, parts: AstRange<FStringPart>) {
@@ -19,7 +39,7 @@ impl Checker<'_, '_> {
             });
             let ty = self.expression(*expr, None);
             let (name, method) = spec.kind.trait_method();
-            self.require_format_trait(*expr, &ty, name, method, span);
+            self.require_format_trait(*expr, &ty, name, method, spec.flags(), span);
             if let Ok(spec) = spec.try_map(|count| self.formatting_count(count, span)) {
                 debug_assert!(
                     offset < u32::MAX as usize && parts.start.checked_add(offset as u32).is_some()
@@ -39,22 +59,29 @@ impl Checker<'_, '_> {
         ty: &Ty,
         name: &str,
         method: &str,
+        flags: FormatSpec<()>,
         span: &Span,
     ) {
         if matches!(self.resolve(ty), Ty::Error | Ty::Never) {
             return;
         }
-        self.format_traits
-            .push((expr, name.to_owned(), method.to_owned(), span.clone()));
+        self.format_traits.push(PendingFormat {
+            expr,
+            name: name.to_owned(),
+            method: method.to_owned(),
+            flags,
+            span: span.clone(),
+        });
     }
 
+    /// 推断结束后检查格式 trait，并按收敛后的类型检查标志兼容性。
     pub(super) fn finish_format_traits(&mut self) {
-        for (expr, name, method, span) in std::mem::take(&mut self.format_traits) {
+        for pending in std::mem::take(&mut self.format_traits) {
             let Some(stored) = self
                 .expressions
                 .iter()
                 .rev()
-                .find(|(id, _)| *id == expr)
+                .find(|(id, _)| *id == pending.expr)
                 .map(|(_, ty)| ty.clone())
             else {
                 continue;
@@ -67,11 +94,21 @@ impl Checker<'_, '_> {
                 self.error(
                     DiagnosticCode::InvalidType,
                     "格式化表达式的类型未能收敛",
-                    span,
+                    pending.span,
                 );
                 continue;
             }
-            self.language_method(expr, &ty, &name, Vec::new(), &method, &span);
+            if let Some(conflict) = flag_conflict(&pending.flags, value_class(&ty)) {
+                self.error(DiagnosticCode::InvalidType, conflict, pending.span.clone());
+            }
+            self.language_method(
+                pending.expr,
+                &ty,
+                &pending.name,
+                Vec::new(),
+                &pending.method,
+                &pending.span,
+            );
         }
     }
 

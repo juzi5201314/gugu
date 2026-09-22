@@ -11,10 +11,13 @@ toml.workspace = true
 unicode-width.workspace = true
 blake3 = "1"
 flate2 = "1"
+foldhash = "0.2"
 sha2 = "0.10"
+siphasher = "1.0"
 tar = "0.4"
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.3"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 [[bench]]
 name = "owner_return"

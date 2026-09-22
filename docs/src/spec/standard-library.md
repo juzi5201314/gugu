@@ -60,7 +60,7 @@ Error Default Hash StableHash StableOrd Print Debug Formatter Hasher
 Read Write HashMap HashSet Path Duration
 ```
 
-`Seek`、`BufRead`、`File`、socket、进程类型、其它集合和其它标准库项必须显式 `use`。Prelude 是封闭兼容面；标准库新增公开类型不会自动进入 Prelude。
+`Seek`、`BufRead`、`File`、socket、进程类型、其它集合和其它标准库项必须显式 `use`。Prelude 是封闭兼容面；标准库新增公开类型不会自动进入 Prelude。预导入名保留给 `std` 自己的定义：只有工具链随 compiler 注入的内建源单元可以声明它们（例如 `std.collections` 声明 `HashMap` 与 `HashSet`），用户源码声明同名项仍是 `E0031`。
 
 ## 错误模型
 
@@ -301,7 +301,15 @@ trait UpperExp  { fn upper_exp(self: &Self, out: &Formatter) }
 
 格式说明采用 Rust 风格静态子集：fill/alignment、sign、alternate `#`、zero padding、width、precision 和 type code。width 与 precision 可以是编译期整数字面量，或用 `name$` 引用当前作用域中类型为 `int` 的绑定；负动态值是运行时 panic。格式能力不存在、标志与类型不兼容、未知格式码或格式说明未闭合都是编译错误。
 
-`std.fmt.Formatter` 只写入当前构建中的 string，不执行 I/O。格式 trait 实现可以调用 Formatter 的文本、char、padding 和结构化 debug 方法，但不能读取或改变已解析的格式说明。f-string 构建失败只可能是 panic（例如内存耗尽），不返回领域错误。
+标志与类型的兼容规则在推断收敛后按被格式化表达式的类型判定（`&T` 与 `T` 同类）：
+
+- sign（`+`、`-`、空格）与 zero padding `0` 只适用于整数和浮点；
+- precision 只适用于浮点（小数位数），以及 `Print` 格式下的 string（按 Unicode 标量截断）；
+- `#` 只适用于 `Debug`（逐行缩进的结构化输出）与 `Binary` / `Octal` / `LowerHex` / `UpperHex`（`0b` / `0o` / `0x` 前缀）。
+
+内建实现的输出固定为：整数 `Print` / `Debug` 是十进制并保留负号，进制格式按 64 位补码写出且不带负号；浮点 `Print` 不带 precision 时是最短往返表示，`Debug` 总是带小数部分，`e` / `E` 是尾数 1 位整数的科学计数，`NaN` / `inf` / `-inf` 不做 zero padding；bool 写 `true` / `false`；char 与 string 的 `Debug` 加引号并转义，string 的 `Debug` 不受 precision 截断。数值默认右对齐，文本默认左对齐；zero padding 在符号与 `#` 前缀之后补零。数组用 `[a, b]`、元组用 `(a, b)`、`Option` / `Result` 用 `Some(..)` / `Ok(..)` / `Err(..)` 的结构化 debug 形状。
+
+`std.fmt.Formatter` 只写入当前构建中的 string，不执行 I/O。格式 trait 实现可以调用 Formatter 的文本（`write_str` / `write_char`）、padding（`pad` 用于文本、`pad_integral` 用于带符号与前缀的数字）和结构化 debug（`debug_tuple` / `debug_list` / `debug_map` / `debug_struct`）方法，但不能读取或改变已解析的格式说明；`#` 是否生效由这些方法自行体现。f-string 构建失败只可能是 panic（例如内存耗尽或负的动态计数），不返回领域错误。comptime 域中的 f-string 使用同一套解析、兼容规则与内建实现，见[comptime capability registry](#comptime-capability-registry)。
 
 ## 集合与 Hash {#collections-and-hash}
 
@@ -344,7 +352,7 @@ impl[K: Ord + StableOrd, V] BTreeMap[K, V] {
 }
 ```
 
-SecureHashMap、SmallMap 与 HashMap 使用同一组 value 访问操作和约束。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间按实现当前顺序逐项调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中结构性修改同一 map；结构写入必须等待 view 结束。callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
+SecureHashMap、SmallMap 与 HashMap 使用同一组 value 访问操作和约束。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间按实现当前顺序逐项调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中修改同一 map：通过任一别名发出的 `insert`、`remove`、`update` 与 Entry 写入都必须等待 view 结束，在 view 内写入是 panic。整个 `with_ref` / `for_each_ref` 调用位于接收者的 view 动态 extent 内；callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
 
 `update` 只在键存在时调用一次 `f`，把当前 value 的语义副本交给它，再以返回值替换槽；存在时返回 true。Entry 的 `and_modify`、`or_insert` 和 `or_insert_with` 同样只传入或返回语义副本，不产生集合内部引用。Set 的元素约束与对应 Map 的键约束相同。
 

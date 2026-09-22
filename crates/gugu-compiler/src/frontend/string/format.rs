@@ -55,6 +55,45 @@ impl<C> Default for FormatSpec<C> {
         }
     }
 }
+/// 被格式化值在标志兼容规则里的分类。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ValueClass {
+    Int,
+    Float,
+    Str,
+    Other,
+}
+
+/// 标志与值类型不兼容时返回诊断文本；兼容返回 `None`。
+///
+/// 符号与零填充只给整数和浮点；精度只给浮点，以及 `Print` 下按标量截断的 string；
+/// `#` 只对 `Debug` 与进制格式有意义。
+pub(crate) fn flag_conflict<C>(spec: &FormatSpec<C>, class: ValueClass) -> Option<&'static str> {
+    let numeric = matches!(class, ValueClass::Int | ValueClass::Float);
+    if (spec.sign.is_some() || spec.zero) && !numeric {
+        return Some("符号与零填充标志只适用于整数和浮点");
+    }
+    if spec.precision.is_some()
+        && !(class == ValueClass::Float
+            || (class == ValueClass::Str && spec.kind == FormatKind::Print))
+    {
+        return Some("精度只适用于浮点和 Print 格式的 string");
+    }
+    if spec.alternate
+        && !matches!(
+            spec.kind,
+            FormatKind::Debug
+                | FormatKind::Binary
+                | FormatKind::Octal
+                | FormatKind::LowerHex
+                | FormatKind::UpperHex
+        )
+    {
+        return Some("`#` 只适用于 Debug 与进制格式");
+    }
+    None
+}
+
 impl FormatKind {
     /// 格式码对应的语言 trait 与方法名。
     pub(crate) const fn trait_method(self) -> (&'static str, &'static str) {
@@ -72,6 +111,20 @@ impl FormatKind {
 }
 
 impl<C> FormatSpec<C> {
+    /// 去掉计数值、只保留标志与格式码的说明；用于兼容检查。
+    pub(crate) fn flags(&self) -> FormatSpec<()> {
+        FormatSpec {
+            fill: self.fill,
+            alignment: self.alignment,
+            sign: self.sign,
+            alternate: self.alternate,
+            zero: self.zero,
+            width: self.width.as_ref().map(|_| ()),
+            precision: self.precision.as_ref().map(|_| ()),
+            kind: self.kind,
+        }
+    }
+
     pub(crate) fn try_map<D, E>(
         self,
         mut map: impl FnMut(C) -> Result<D, E>,

@@ -1,0 +1,9 @@
+struct Probe {
+    value: int,
+}
+
+impl Print for Probe {
+    fn print(self: &Self, out: &Formatter) {}
+}
+
+fn render(probe: Probe, width: int) string = f"{probe}:{probe.value:>width$}:{probe.value:#x}"

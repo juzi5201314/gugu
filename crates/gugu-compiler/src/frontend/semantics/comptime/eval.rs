@@ -980,16 +980,14 @@ impl Model<'_> {
                     output.push_str(text);
                 }
                 FStringPart::Interp { expr, spec, .. } => {
-                    if spec.is_some() {
-                        return Err(self.fail(module, expr, "comptime f-string 不支持格式码"));
-                    }
                     let value = self.value(module, expr, state)?;
                     if matches!(value, ConstantValue::ParsedSource(_)) {
                         return Err(self.fail(module, expr, "f-string 不能插值 ParsedSource"));
                     }
-                    let text = match value {
-                        ConstantValue::String(text) => text,
-                        value => display_value(&value),
+                    let text = match (spec, value) {
+                        (Some(spec), value) => self.formatted(module, expr, spec, &value, state)?,
+                        (None, ConstantValue::String(text)) => text,
+                        (None, value) => display_value(&value),
                     };
                     state.alloc(u64::try_from(text.len()).expect("插值长度可编码"), &span)?;
                     output.push_str(&text);
@@ -997,6 +995,46 @@ impl Model<'_> {
             }
         }
         Ok(ConstantValue::String(output))
+    }
+
+    /// 带格式码的插值：说明在编译期解析，`name$` 计数引用当前作用域的 int 绑定，
+    /// 负计数是 comptime panic，标志或格式码与值不兼容是编译错误。
+    fn formatted(
+        &self,
+        module: usize,
+        expr: ExprId,
+        spec: crate::frontend::intern::Symbol,
+        value: &ConstantValue,
+        state: &mut EvalState,
+    ) -> EvalResult<String> {
+        // FormatSpec token 保留起始冒号；语法解析只消费冒号后的说明。
+        let parsed = string::parse_format(&self.name(module, spec)[1..])
+            .map_err(|message| self.fail(module, expr, message))?;
+        let span = self.modules[module].arena.exprs[expr.0 as usize]
+            .span
+            .clone();
+        let out_of_range = || self.fail(module, expr, "格式宽度或精度超出 int 范围");
+        let counted = parsed.try_map(|count| -> EvalResult<i64> {
+            match count {
+                string::ParsedCount::Fixed(value) => {
+                    i64::try_from(value).map_err(|_| out_of_range())
+                }
+                string::ParsedCount::Name(name) => match state.lookup(name, &span)? {
+                    Some(ConstantValue::Int(value)) => {
+                        i64::try_from(value).map_err(|_| out_of_range())
+                    }
+                    _ => Err(self.fail(module, expr, "格式计数必须引用当前作用域的 int 绑定")),
+                },
+            }
+        })?;
+        let resolved = crate::runtime::fmt::resolve_counts(counted).map_err(|_| {
+            Diagnostic::error(
+                DiagnosticCode::ComptimePanic,
+                "编译期求值 panic：格式宽度或精度为负",
+                Some(span.clone()),
+            )
+        })?;
+        super::format::render(value, &resolved).map_err(|message| self.fail(module, expr, message))
     }
 
     fn module_const(

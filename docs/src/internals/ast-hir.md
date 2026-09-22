@@ -309,7 +309,7 @@ HirOwner {
 
 HIR 表达式按确定性的父先子后顺序分配 owner-local `ExprId`；关联变长子项使用连续索引池。父子关系、词法作用域和控制流目标都使用 owner-local 稠密 ID。跨 owner 的定义引用使用 `DefId`；捕获来源必须同时保存父 owner 的 `DefId` 和它的 `LocalId`，不能单独保存另一 owner 的局部编号。
 
-模块级 HIR 另存定义签名、泛型参数、where 约束、字段/变体、trait 项和 impl 头。函数体不会内嵌到调用者 HIR，内联只在单态化 GIR 上发生。
+模块级 HIR 另存定义签名、泛型参数、where 约束、字段/变体、trait 项和 impl 头。函数体不会内嵌到调用者 HIR，内联只在单态化 GIR 上发生。定义的 obligation 按声明所在的完整类型参数作用域形成：方法自己的 trait 约束与 `Fn` 可调用约束可以引用外围 impl / trait 的类型参数和 `Self`（例如 `fn with_ref[R, F: Fn(&V) R]` 里的 `V`），同名时方法参数覆盖外围参数。
 
 ### 名称解析结果
 

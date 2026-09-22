@@ -1,0 +1,12 @@
+pub struct Key {
+    id: int,
+    name: string,
+}
+
+impl Hash for Key {
+    fn hash(self: &Self, hasher: &Hasher) {}
+}
+
+pub fn digest[T: Hash + StableHash](value: T) {
+    _ = value
+}

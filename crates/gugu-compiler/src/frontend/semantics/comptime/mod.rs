@@ -5,6 +5,7 @@
 //! 表中缺失的位置回退到带 fuel 的惰性求值路径。
 
 pub(crate) mod eval;
+mod format;
 mod phase;
 pub(crate) mod registry;
 

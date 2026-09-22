@@ -59,10 +59,17 @@ ConstEvalState {
 溢出语义，但只允许规范规定的确定性子集。禁止的操作在执行点产生带展开链或调用链的
 编译错误，不得伪造空值继续下游。
 
-早期与源码宏 evaluator 的 revision 为 **3**。函数及常量初始化各自隔离词法帧，
+早期与源码宏 evaluator 的 revision 为 **4**。函数及常量初始化各自隔离词法帧，
 复用统一字面量解码；控制流出口通过结构化结果逐层传播，不使用可被父表达式覆盖的
 可变退出标志。确定性 heap 账本为聚合/装箱槽固定计 64 字节，并递归累计其动态负载；
 复制、repeat、拼接与插值均在分配或增长前记账。
+
+带格式码的 f-string 插值在 evaluator 内按[标准库 · 静态格式化](../spec/standard-library.md#static-formatting)
+渲染：格式说明用与类型检查器相同的解析器解析，`name$` 计数取当前词法帧里的 `int`
+绑定，负计数是 comptime panic；标志与值分类的兼容检查复用同一套规则，随后交给
+runtime 的 `std.fmt` 参照模型（`Formatter` 的 padding / integral / 结构化 debug 写入）
+写出文本。只有标量、string、Ok/Err 形状、固定数组和元组有内建格式 trait 实现；其它
+常量在编译期格式化是 `InvalidExpression`。不带格式码的插值仍按 `Print` 写出。
 
 ### capability registry
 
