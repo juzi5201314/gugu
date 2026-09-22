@@ -62,6 +62,8 @@ pub(crate) enum Type {
     TrySendErr,
     TryRecvErr,
     Panic,
+    Formatter,
+    Hasher,
     MaybeUninit(TypeId),
 }
 

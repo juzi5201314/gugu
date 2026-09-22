@@ -1,8 +1,8 @@
 //! 栈图 section 编解码：header、function、safepoint 与 root map 四表。
 //!
-//! 编码器接受逻辑世界与调用方注入的机器布局（`code_rva`、`code_size`、
-//! `frame_size`、`unwind_index`）；生产契约在后端就绪前不调用编码器写契约，
-//! 编码器由单测与后端联合验证复用，函数签名即跨阶段接口。decoder 拒收
+//! 编码器接受调用方注入的机器布局（`code_rva`、`code_size`、`frame_size`、
+//! `unwind_index`）。后端在寄存器分配与编码之后调用它写出 section，单测复用同一
+//! 函数。decoder 拒收
 //! version 1 记录，全部对齐、padding、表不重叠与位图互斥检查都在解码时执行。
 
 use super::model::RawModelError;
@@ -549,4 +549,124 @@ fn map_record(layout: &SafepointLayout) -> Vec<u8> {
 
 fn align_up(value: u64, align: u64) -> u64 {
     value.div_ceil(align) * align
+}
+
+/// 解码后的函数记录。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DecodedFunction {
+    pub(crate) code_rva: u64,
+    pub(crate) code_size: u32,
+    pub(crate) frame_size: u32,
+    pub(crate) safepoint_start: u32,
+    pub(crate) safepoint_count: u32,
+    pub(crate) unwind_index: u32,
+    pub(crate) flags: u16,
+}
+
+/// 解码后的安全点。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DecodedSafepoint {
+    pub(crate) pc_offset: u32,
+    pub(crate) map_index: u32,
+    pub(crate) kind: u8,
+    pub(crate) flags: u8,
+}
+
+/// 解码后的根图：五类槽下标与寄存器掩码。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DecodedMap {
+    pub(crate) slots: [Vec<u32>; 5],
+    pub(crate) registers: [u16; 5],
+}
+
+/// 解码后的栈图 section。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DecodedSection {
+    pub(crate) functions: Vec<DecodedFunction>,
+    pub(crate) safepoints: Vec<DecodedSafepoint>,
+    pub(crate) maps: Vec<DecodedMap>,
+}
+
+/// 解码完整 section，供 walker 消费最终机器布局。
+pub(crate) fn decode_tables(bytes: &[u8]) -> Result<DecodedSection, RawModelError> {
+    decode(bytes)?;
+    let function_count = u32::from_le_bytes(bytes[12..16].try_into().expect("计数字段"));
+    let safepoint_count = u32::from_le_bytes(bytes[16..20].try_into().expect("计数字段"));
+    let map_count = u32::from_le_bytes(bytes[20..24].try_into().expect("计数字段"));
+    let functions_offset = u64::from_le_bytes(bytes[32..40].try_into().expect("偏移字段")) as usize;
+    let safepoints_offset =
+        u64::from_le_bytes(bytes[40..48].try_into().expect("偏移字段")) as usize;
+    let map_index_offset = u64::from_le_bytes(bytes[48..56].try_into().expect("偏移字段")) as usize;
+    let mut functions = Vec::with_capacity(function_count as usize);
+    for index in 0..function_count as usize {
+        let base = functions_offset + index * FUNCTION_BYTES;
+        functions.push(DecodedFunction {
+            code_rva: u64::from_le_bytes(bytes[base..base + 8].try_into().expect("函数字段")),
+            code_size: u32::from_le_bytes(bytes[base + 8..base + 12].try_into().expect("函数字段")),
+            frame_size: u32::from_le_bytes(
+                bytes[base + 12..base + 16].try_into().expect("函数字段"),
+            ),
+            safepoint_start: u32::from_le_bytes(
+                bytes[base + 16..base + 20].try_into().expect("函数字段"),
+            ),
+            safepoint_count: u32::from_le_bytes(
+                bytes[base + 20..base + 24].try_into().expect("函数字段"),
+            ),
+            unwind_index: u32::from_le_bytes(
+                bytes[base + 24..base + 28].try_into().expect("函数字段"),
+            ),
+            flags: u16::from_le_bytes(bytes[base + 28..base + 30].try_into().expect("函数字段")),
+        });
+    }
+    let mut safepoints = Vec::with_capacity(safepoint_count as usize);
+    for index in 0..safepoint_count as usize {
+        let base = safepoints_offset + index * SAFEPOINT_BYTES;
+        safepoints.push(DecodedSafepoint {
+            pc_offset: u32::from_le_bytes(bytes[base..base + 4].try_into().expect("安全点字段")),
+            map_index: u32::from_le_bytes(
+                bytes[base + 4..base + 8].try_into().expect("安全点字段"),
+            ),
+            kind: bytes[base + 8],
+            flags: bytes[base + 9],
+        });
+    }
+    let mut maps = Vec::with_capacity(map_count as usize);
+    for index in 0..map_count as usize {
+        let base = map_index_offset + index * 8;
+        let start =
+            u64::from_le_bytes(bytes[base..base + 8].try_into().expect("索引字段")) as usize;
+        let end =
+            u64::from_le_bytes(bytes[base + 8..base + 16].try_into().expect("索引字段")) as usize;
+        maps.push(decode_map(&bytes[start..end])?);
+    }
+    Ok(DecodedSection {
+        functions,
+        safepoints,
+        maps,
+    })
+}
+
+fn decode_map(record: &[u8]) -> Result<DecodedMap, RawModelError> {
+    let slot_count = u32::from_le_bytes(record[0..4].try_into().expect("槽字段"));
+    let mut registers = [0_u16; 5];
+    for (index, mask) in registers.iter_mut().enumerate() {
+        let start = 4 + index * 2;
+        *mask = u16::from_le_bytes(record[start..start + 2].try_into().expect("掩码字段"));
+    }
+    let bytes = slot_count.div_ceil(8) as usize;
+    let mut slots: [Vec<u32>; 5] = std::array::from_fn(|_| Vec::new());
+    let mut cursor = 16_usize;
+    for class in &mut slots {
+        for byte_index in 0..bytes {
+            let byte = record[cursor + byte_index];
+            for bit in 0..8 {
+                let slot = byte_index * 8 + bit;
+                if slot < slot_count as usize && byte & (1 << bit) != 0 {
+                    class.push(slot as u32);
+                }
+            }
+        }
+        cursor += bytes;
+    }
+    Ok(DecodedMap { slots, registers })
 }

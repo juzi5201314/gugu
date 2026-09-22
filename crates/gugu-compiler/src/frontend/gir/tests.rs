@@ -300,7 +300,8 @@ fn string_copy_seals_and_chan_shares_identity() {
         compilation.diagnostics().items()
     );
     let dump = compilation.dump_gir().expect("string GIR");
-    assert!(dump.contains("cow_snapshot"), "{dump}");
+    let string_main = body_named(&dump, "main", "String");
+    assert!(string_main.contains("cow_snapshot"), "{string_main}");
     let chan = "fn take(c: chan[int]) { _ = c }\nfn main() { let c: chan[int] = chan[int](1)\n take(c)\n _ = c }";
     let compilation = Compiler::new().compile(CompileRequest::single_file(
         "main.gg",
@@ -313,8 +314,15 @@ fn string_copy_seals_and_chan_shares_identity() {
         compilation.diagnostics().items()
     );
     let dump = compilation.dump_gir().expect("chan GIR");
-    assert!(!dump.contains("cow_snapshot"), "{dump}");
-    assert!(dump.contains("ValueAction Copy"), "{dump}");
+    let chan_main = body_named(&dump, "main", "Chan(");
+    assert!(!chan_main.contains("cow_snapshot"), "{chan_main}");
+    assert!(chan_main.contains("ValueAction Copy"), "{chan_main}");
+}
+
+fn body_named<'a>(dump: &'a str, owner: &str, marker: &str) -> &'a str {
+    dump.split("body owner=")
+        .find(|body| body.starts_with(owner) && body.contains(marker))
+        .unwrap_or_else(|| panic!("缺少 {owner} body（{marker}）"))
 }
 
 #[derive(Debug, Eq, PartialEq)]

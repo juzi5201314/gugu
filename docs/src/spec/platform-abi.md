@@ -287,14 +287,15 @@ C 导入符号默认使用 `extern` 声明名；`#[link_name = "..."]` 可指定
 | 零初始化数据 | `.bss` | `.bss` |
 | 展开描述 | `.eh_frame` | `.pdata` / `.xdata` |
 | Gugu 栈图 | `.gugu.stackmap` | `.gugustk` |
+| 源码位置 | `.gugu.src` | `.gugusrc` |
 | Gugu 类型与镜像元数据 | `.gugu.types` / `.gugu.meta` | `.gugutyp` / `.ggmeta` |
 | 外部导入 | 动态导入表（仅显式 FFI） | `.idata` |
 
-PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]` 指定的节必须在目标格式上可表示，且不能覆盖 runtime、栈图、类型表、导入表或展开表的保留节；非法节名、权限组合和对齐要求都是编译错误。`--strip` 不能删除运行时必需的栈图、展开信息或 GC 元数据，详见[工具链与命令行](toolchain-cli.md)。
+PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]` 指定的节必须在目标格式上可表示，且不能覆盖 runtime、栈图、类型表、导入表或展开表的保留节；非法节名、权限组合和对齐要求都是编译错误。`--strip` 不能删除运行时必需的栈图、展开信息、源码位置或 GC 元数据，详见[工具链与命令行](toolchain-cli.md)。
 
 ### 可执行镜像形式 {#executable-image-forms}
 
-没有动态 FFI 导入的 Linux executable必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0完成镜像自身允许的 relative relocation并支持加载基址随机化；不能退化成依赖 libc/系统 linker的启动路径。显式登记动态 `.so` 后才可以加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT和对应 relocation，解释器与 sysroot必须来自选中的 target/toolchain描述而不是宿主 PATH探测。
+没有动态 FFI 导入的 Linux executable必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0完成镜像自身允许的 relative relocation并支持加载基址随机化；不能退化成依赖 libc/系统 linker的启动路径。运行时只应用 relative relocation，并把加载偏移加到 addend 上；PC 相对位移与 RVA 在镜像写出前修完。显式登记动态 `.so` 后才可以加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT和对应 relocation，解释器与 sysroot必须来自选中的 target/toolchain描述而不是宿主 PATH探测。
 
 Windows executable和 `cdylib` 使用 PE32+，包含合法 base-relocation table并设置 ASLR、high-entropy ASLR和 NX兼容标志；默认不导入 CRT。preferred image base、file/section排列和 padding是当前 writer实现细节，外部代码只能依赖本章登记的导入导出、逻辑节、入口、TLS和展开面。
 
@@ -318,7 +319,7 @@ Linux syscall 桩必须遵循内核规定的寄存器和错误返回约定，并
 
 ### Windows
 
-rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；默认启动依赖限于薄的 `ntdll` / `kernel32` 接口，不链接 CRT。禁止硬编码 syscall 号、扫描进程导出表或在运行时隐式加载未登记 DLL。
+rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；默认启动依赖限于薄的 `ntdll` / `kernel32` 接口，不链接 CRT。禁止硬编码 syscall 号、扫描进程导出表或在运行时隐式加载未登记 DLL。镜像写出前修完 PC 相对重定位；绝对地址只进入 `IMAGE_REL_BASED_DIR64`，不在 rt0 里扫描 syscall 号。调用前必须留出 32 字节 shadow space。
 
 用户额外导入的 DLL、库名和符号必须在构建配置中登记。导入表由 Gugu 编译器直接写出；缺失导出、名称冲突、导入库未登记和不匹配的调用约定都是编译错误。
 

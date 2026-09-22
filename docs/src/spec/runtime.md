@@ -57,7 +57,7 @@ ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault 
 
 `parallelism` 的初始值来自 `GUGU_RUNTIME_PROCS`。`std.runtime.set_parallelism(n)` 要求 `n > 0`，成功时发布新目标并返回旧值。增加目标允许 runtime 按需增加并行执行能力；降低目标不中断正在执行的协程、系统调用或外部函数。调用返回表示新目标已经发布，不表示底层 OS 线程数量已经立即收敛。超过宿主 CPU 数量的值合法，但不产生吞吐量保证。
 
-runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和普通 `ForeignBridge`，但统一受 `BlockingBridge` 的 `max_blocking_workers`、worker system stack、BridgeCredit 和 waiter memory cap约束，不能按调用无界创建线程。DirtyCpu 与 managed worker共享 CPU预算：`parallelism > 1` 时至少给 managed scheduler保留一个执行槽；`parallelism = 1` 时允许一个 managed worker和一个 dirty worker由 OS时间片复用。超出 dirty target 的调用在不持有 processor 的状态下排队；降低并行度不强杀已运行 work，因此 active 数量可以暂时高于新 target，且在自然排空前不接纳新 dirty call。
+runtime 可以使用多于 `parallelism` 的 OS 线程处理阻塞系统调用和普通 `ForeignBridge`，但统一受 `BlockingBridge` 的 `max_blocking_workers`、worker system stack、BridgeCredit 和 waiter memory cap约束，不能按调用无界创建线程。这些上限、dirty target 公式以及 poller 与 BlockingBridge 的分流是编译期 runtime 契约的一部分；改变它们会使契约指纹失效。源程序不能观察具体的 worker 数量或 retake 的墙钟时刻。DirtyCpu 与 managed worker共享 CPU预算：`parallelism > 1` 时至少给 managed scheduler保留一个执行槽；`parallelism = 1` 时允许一个 managed worker和一个 dirty worker由 OS时间片复用。超出 dirty target 的调用在不持有 processor 的状态下排队；降低并行度不强杀已运行 work，因此 active 数量可以暂时高于新 target，且在自然排空前不接纳新 dirty call。
 
 外部调用期间函数仍在原 OS thread或 dirty worker上执行。普通 `ForeignBridge` 若未失去原 processor lease可以直接恢复；lease已被取回或 dirty调用完成时，经 idle processor或普通 runnable调度恢复。程序不能观察两条路径的差异。普通 bridge的外部代码回调须遵守[平台与 ABI参考](platform-abi.md)的线程进入和回调边界；`ForeignBridge[DirtyCpu]` 与 `ForeignLeaf` 禁止回调。普通 bridge的 admission credit、waiting和worker cap只影响 runtime内部调度，不改变 C ABI结果。
 

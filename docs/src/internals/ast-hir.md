@@ -233,7 +233,7 @@ parser 必须满足：
 
 `frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
-版本化结果为 `CheckedSemantics`（schema 9），它在 TypeCheck query 中序列化，包含：
+版本化结果为 `CheckedSemantics`（schema 11），它在 TypeCheck query 中序列化，包含：
 
 - 每个 active 定义的已类型化表达式表、连续局部槽和模式绑定槽区间；表达式按 arena ID 排序、去重，数值变量必须完成收敛。
 - 每个局部槽的规范名称和声明字节范围；闭包捕获及清理路径的重检查可以据此指向同一个源码绑定，HIR 不把语义检查遍历中临时分配的槽编号当作持久绑定身份。
@@ -253,7 +253,8 @@ parser 必须满足：
 - `BorrowCheck` 保存被借用槽的基类型、完整字段/数组投影及目标类型；类型收敛后由统一聚合布局检查最终自然对齐，显式取引用与方法自动借用共用此检查。动态下标只保留步长条件，不重复执行下标表达式。
 - `ForeignDefinition` 与 `ForeignCall` 保存 C 声明身份、naked/imported 标志和按调用点优先级形成的 bridge/dirty/leaf 效应。`Linkage` 独立保存函数、static 与全局汇编的符号名、节和 used 状态；两张声明表在缓存命中时对照当前模型验证。
 - `AssemblyPlan` 保存求值后的模板、寄存器宽度/方向、输入与输出位置、clobber 位图及 managed/naked/dirty/global 上下文。managed 模板的有限控制流和所有出口的栈增量在前端验证；寄存器值大小由布局检查，机器编码仍属于后端。
-- `FormattingPart` 保存闭集格式码、填充/对齐/标志以及固定计数或已解析的 `int` 局部槽；动态 width/precision 经过读取、初始化和捕获检查，不把 `name$` 文本留给后端解析。
+- `FormattingPart` 保存闭集格式码、填充/对齐/标志以及固定计数或已解析的 `int` 局部槽；动态 width/precision 经过读取、初始化和捕获检查，不把 `name$` 文本留给后端解析。插值表达式按格式码记录对应语言 trait 的派发。
+- `must_use` 保存丢掉 `Option`、`Result` 或 `#[must_use]` 类型/函数的源码范围。诊断在 lint 级别解析后才发射：默认警告，`deny`/`forbid` 才变成错误。`Formatter` 与 `Hasher` 是 8 字节位语言类型，稳定类型键分别为 29 与 30，不是 GC 根；写入方法不在这张类型表里。
 
 局部槽的存储需求编码为三个位：`ADDRESS_TAKEN`、`CAPTURED`、`CROSS_COROUTINE`。这些位与捕获表一起交给 HIR/GIR 的存储选择；捕获或跨协程槽不能仅因创建它的词法块结束而销毁。分析记录 callable 值在求值时引用的槽，遮蔽或后续函数值赋值不能重新绑定已经形成的闭包环境。
 
@@ -333,7 +334,7 @@ HIR 保留对诊断有价值的 `if`、`match`、循环、`try`、`async`、`sel
 | 方法调用 | 已固定目标与接收者调整的 `Call` |
 | 用户类型下标 | 带已选择 `Index::index` / `index_set` 派发的 `Index` |
 | `for pattern in value` | 保留单次迭代源、模式和 body 的 `For`，携带 `into_iter` / `next` 派发 |
-| `expr?` | `HirTryExit { operand, branch_slot, from_error_slot, target }`；槽位与结果规则只引用 [`Try` 规范](../spec/traits.md#try) |
+| `expr?` | `HirTryExit { operand, branch_slot, from_error_slot, target }`；槽位与结果规则只引用 [`Try` 规范](../spec/traits.md#try)。内建 `Option` 的失败出口构造 `None`，不投影空变体；内建 `Result` 的失败出口构造 `Err`。 |
 | 字符串插值 | 按源码顺序保存解码文本、类型化值和结构化 FormatSpec；动态计数是 int 读取节点 |
 | `if let`、`while let`、let 链 | 共享被匹配临时槽的条件/模式节点 |
 | 参数位置 `impl Trait` | 独立隐式类型参数 |

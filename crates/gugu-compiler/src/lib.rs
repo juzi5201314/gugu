@@ -560,6 +560,7 @@ impl Compiler {
             message_nodes: 0,
             turn_region: lir.turn_region_demand(),
             shared_heap: shared_heap_demand,
+            foreign: foreign_demand(&lir, &frontend.gir),
         };
         let rt0_demand = {
             let module = frontend.hir.module();
@@ -772,34 +773,62 @@ impl Compiler {
         let hir = frontend.hir;
         let gir = frontend.gir;
 
-        let Some(backend_plan) = x64.as_ref().and_then(|x64| {
-            backend::plan(
+        let backend_plan = match x64.as_ref() {
+            None => Ok(None),
+            Some(world) => backend::plan(
                 target,
                 &hir,
                 &frontend.mono,
                 &gir,
                 &lir,
                 &raw_contract,
-                x64,
+                world,
                 frontend.analysis.runtime_checks_elided_count,
-            )
-        }) else {
-            graph.complete(ActionKind::PlanBackend, "没有可执行入口");
-            graph.skip_after(ActionKind::PlanBackend, "没有可执行入口");
-            diagnostics.sort();
-            return Compilation {
-                graph,
-                diagnostics,
-                source_map,
-                image_plan: None,
-                hir: Some(hir),
-                gir: Some(gir),
-                gir_stats: frontend.gir_stats,
-                lir: Some(lir),
-                raw_contract: Some(raw_contract),
-                x64,
-                action_key,
-            };
+            ),
+        };
+        let backend_plan = match backend_plan {
+            Ok(Some(plan)) => plan,
+            Ok(None) => {
+                graph.complete(ActionKind::PlanBackend, "没有可执行入口");
+                graph.skip_after(ActionKind::PlanBackend, "没有可执行入口");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(hir),
+                    gir: Some(gir),
+                    gir_stats: frontend.gir_stats,
+                    lir: Some(lir),
+                    raw_contract: Some(raw_contract),
+                    x64,
+                    action_key,
+                };
+            }
+            Err(message) => {
+                diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::BackendInvariant,
+                    message,
+                    None,
+                ));
+                graph.fail(ActionKind::PlanBackend, "镜像写出失败");
+                graph.skip_after(ActionKind::PlanBackend, "镜像无效");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(hir),
+                    gir: Some(gir),
+                    gir_stats: frontend.gir_stats,
+                    lir: Some(lir),
+                    raw_contract: Some(raw_contract),
+                    x64,
+                    action_key,
+                };
+            }
         };
         graph.complete(ActionKind::PlanBackend, "内存 image plan");
 
@@ -837,6 +866,29 @@ impl Compiler {
     }
 }
 
+/// 外调需求：LIR 的调用模式加上 GIR 里的 asm / global_asm 站点。
+fn foreign_demand(lir: &lir::Validated, gir: &frontend::gir::GirWorldV1) -> runtime::ForeignDemand {
+    let mut demand = lir.foreign_demand();
+    for body in &gir.bodies {
+        if body.kind == frontend::gir::body::BodyKind::GlobalAsm {
+            demand.global_asm += 1;
+        }
+        for statement in &body.statements {
+            if let frontend::gir::body::StatementKind::Assign(
+                _,
+                frontend::gir::body::Rvalue::Intrinsic {
+                    op: frontend::gir::body::IntrinsicOp::Asm(_),
+                    ..
+                },
+            ) = statement.kind
+            {
+                demand.asm += 1;
+            }
+        }
+    }
+    demand
+}
+
 /// 将真实 GC metadata bundle 的 section 大小写入 runtime demand。
 fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMetadataDemand {
     let mut demand = bundle.world.demand();
@@ -844,6 +896,18 @@ fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMet
     demand.metadata_section_bytes = bundle.metadata_section.len() as u32;
     demand
 }
+
+/// 编译器构建身份。`unicode-` 后缀是 Unicode 数据版本。
+pub(crate) fn compiler_identity() -> String {
+    format!(
+        "gugu-compiler-{} unicode-{}",
+        env!("CARGO_PKG_VERSION"),
+        UNICODE_VERSION
+    )
+}
+
+/// 工具链携带的 Unicode 数据版本。编码、大小写、规范化与切分使用同一版本。
+pub const UNICODE_VERSION: &str = runtime::text::UNICODE_VERSION;
 
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。
 fn compilation_action_key(
@@ -868,7 +932,7 @@ fn compilation_action_key(
         }
     };
     let mut inputs = ActionInputs::new(
-        format!("gugu-compiler-{}", env!("CARGO_PKG_VERSION")),
+        compiler_identity(),
         target.to_string(),
         target.to_string(),
         if require_main { "bin" } else { "lib" },
@@ -1272,6 +1336,12 @@ pub struct ImagePlan {
     scheduler_service_batch: u32,
     scheduler_contract_fingerprint: [u8; 32],
     scheduler_runtime: SchedulerRuntimeContract,
+    foreign_max_blocking_workers: u32,
+    foreign_ordinary_sites: u32,
+    foreign_dirty_sites: u32,
+    foreign_leaf_sites: u32,
+    foreign_contract_fingerprint: [u8; 32],
+    foreign_runtime: crate::runtime::ForeignRuntimeContract,
     wait_inline_select_cases: u32,
     wait_scratch_class_count: u32,
     wait_node_class_count: u32,
@@ -1439,6 +1509,32 @@ pub struct ImagePlan {
     x64_allocated_values: u32,
     coroutine_stack_check_offset: u32,
     scheduler_poll_flags_offset: u32,
+    x64_stackmap_name: String,
+    x64_unwind_name: String,
+    x64_source_name: String,
+    x64_stackmap_section: Vec<u8>,
+    x64_unwind_section: Vec<u8>,
+    x64_source_section: Vec<u8>,
+    x64_stackmap_functions: u32,
+    x64_stackmap_safepoints: u32,
+    x64_stackmap_maps: u32,
+    x64_unwind_functions: u32,
+    x64_landing_count: u32,
+    x64_source_records: u32,
+    x64_metadata_fingerprint: [u8; 32],
+    linux_image: Vec<u8>,
+    linux_image_kind: String,
+    linux_entry_vaddr: u64,
+    linux_relative_relocs: u32,
+    linux_load_segments: u32,
+    linux_interpreter: String,
+    linux_image_fingerprint: [u8; 32],
+    windows_image: Vec<u8>,
+    windows_image_kind: String,
+    windows_entry_rva: u32,
+    windows_reloc_count: u32,
+    windows_import_dlls: u32,
+    windows_image_fingerprint: [u8; 32],
 }
 
 impl ImagePlan {
@@ -1495,6 +1591,12 @@ impl ImagePlan {
             scheduler_service_batch: plan.scheduler_service_batch,
             scheduler_contract_fingerprint: plan.scheduler_contract_fingerprint,
             scheduler_runtime: plan.scheduler_runtime,
+            foreign_max_blocking_workers: plan.foreign_max_blocking_workers,
+            foreign_ordinary_sites: plan.foreign_ordinary_sites,
+            foreign_dirty_sites: plan.foreign_dirty_sites,
+            foreign_leaf_sites: plan.foreign_leaf_sites,
+            foreign_contract_fingerprint: plan.foreign_contract_fingerprint,
+            foreign_runtime: plan.foreign_runtime,
             wait_inline_select_cases: plan.wait_inline_select_cases,
             wait_scratch_class_count: plan.wait_scratch_class_count,
             wait_node_class_count: plan.wait_node_class_count,
@@ -1662,6 +1764,32 @@ impl ImagePlan {
             x64_allocated_values: plan.x64_allocated_values,
             coroutine_stack_check_offset: plan.coroutine_stack_check_offset,
             scheduler_poll_flags_offset: plan.scheduler_poll_flags_offset,
+            x64_stackmap_name: plan.x64_stackmap_name,
+            x64_unwind_name: plan.x64_unwind_name,
+            x64_source_name: plan.x64_source_name,
+            x64_stackmap_section: plan.x64_stackmap_section,
+            x64_unwind_section: plan.x64_unwind_section,
+            x64_source_section: plan.x64_source_section,
+            x64_stackmap_functions: plan.x64_stackmap_functions,
+            x64_stackmap_safepoints: plan.x64_stackmap_safepoints,
+            x64_stackmap_maps: plan.x64_stackmap_maps,
+            x64_unwind_functions: plan.x64_unwind_functions,
+            x64_landing_count: plan.x64_landing_count,
+            x64_source_records: plan.x64_source_records,
+            x64_metadata_fingerprint: plan.x64_metadata_fingerprint,
+            linux_image: plan.linux_image,
+            linux_image_kind: plan.linux_image_kind,
+            linux_entry_vaddr: plan.linux_entry_vaddr,
+            linux_relative_relocs: plan.linux_relative_relocs,
+            linux_load_segments: plan.linux_load_segments,
+            linux_interpreter: plan.linux_interpreter,
+            linux_image_fingerprint: plan.linux_image_fingerprint,
+            windows_image: plan.windows_image,
+            windows_image_kind: plan.windows_image_kind,
+            windows_entry_rva: plan.windows_entry_rva,
+            windows_reloc_count: plan.windows_reloc_count,
+            windows_import_dlls: plan.windows_import_dlls,
+            windows_image_fingerprint: plan.windows_image_fingerprint,
         }
     }
 
@@ -1878,6 +2006,136 @@ impl ImagePlan {
     /// 返回 `[r15 + poll_flags]` 偏移。
     pub fn scheduler_poll_flags_offset(&self) -> u32 {
         self.scheduler_poll_flags_offset
+    }
+
+    /// 返回栈图 section 名。
+    pub fn x64_stackmap_name(&self) -> &str {
+        &self.x64_stackmap_name
+    }
+
+    /// 返回展开 section 名。
+    pub fn x64_unwind_name(&self) -> &str {
+        &self.x64_unwind_name
+    }
+
+    /// 返回源码位置 section 名。
+    pub fn x64_source_name(&self) -> &str {
+        &self.x64_source_name
+    }
+
+    /// 返回栈图 section 字节。
+    pub fn x64_stackmap_section(&self) -> &[u8] {
+        &self.x64_stackmap_section
+    }
+
+    /// 返回展开 section 字节。
+    pub fn x64_unwind_section(&self) -> &[u8] {
+        &self.x64_unwind_section
+    }
+
+    /// 返回源码位置 section 字节。
+    pub fn x64_source_section(&self) -> &[u8] {
+        &self.x64_source_section
+    }
+
+    /// 返回进入栈图表的函数数。
+    pub fn x64_stackmap_functions(&self) -> u32 {
+        self.x64_stackmap_functions
+    }
+
+    /// 返回栈图安全点数。
+    pub fn x64_stackmap_safepoints(&self) -> u32 {
+        self.x64_stackmap_safepoints
+    }
+
+    /// 返回去重后的 map 数。
+    pub fn x64_stackmap_maps(&self) -> u32 {
+        self.x64_stackmap_maps
+    }
+
+    /// 返回展开表中的函数数。
+    pub fn x64_unwind_functions(&self) -> u32 {
+        self.x64_unwind_functions
+    }
+
+    /// 返回落地记录数。
+    pub fn x64_landing_count(&self) -> u32 {
+        self.x64_landing_count
+    }
+
+    /// 返回源码位置记录数。
+    pub fn x64_source_records(&self) -> u32 {
+        self.x64_source_records
+    }
+
+    /// 返回栈图、展开与源码记录的内容指纹。
+    pub fn x64_metadata_fingerprint(&self) -> [u8; 32] {
+        self.x64_metadata_fingerprint
+    }
+
+    /// 返回 Linux ELF 镜像字节。Windows 目标为空。
+    pub fn linux_image(&self) -> &[u8] {
+        &self.linux_image
+    }
+
+    /// 返回 `static-pie`、`dynamic-pie`，或 Windows 上的空串。
+    pub fn linux_image_kind(&self) -> &str {
+        &self.linux_image_kind
+    }
+
+    /// 返回 ELF `e_entry`。
+    pub fn linux_entry_vaddr(&self) -> u64 {
+        self.linux_entry_vaddr
+    }
+
+    /// 返回运行时相对重定位条数。
+    pub fn linux_relative_relocs(&self) -> u32 {
+        self.linux_relative_relocs
+    }
+
+    /// 返回 `PT_LOAD` 数量。
+    pub fn linux_load_segments(&self) -> u32 {
+        self.linux_load_segments
+    }
+
+    /// 返回 `PT_INTERP` 路径。无动态导入时为空。
+    pub fn linux_interpreter(&self) -> &str {
+        &self.linux_interpreter
+    }
+
+    /// 返回 Linux 镜像字节指纹。
+    pub fn linux_image_fingerprint(&self) -> [u8; 32] {
+        self.linux_image_fingerprint
+    }
+
+    /// 返回 Windows PE 镜像字节。Linux 目标为空。
+    pub fn windows_image(&self) -> &[u8] {
+        &self.windows_image
+    }
+
+    /// 返回 `exe`、`cdylib`，或 Linux 上的空串。
+    pub fn windows_image_kind(&self) -> &str {
+        &self.windows_image_kind
+    }
+
+    /// 返回 PE `AddressOfEntryPoint`。
+    pub fn windows_entry_rva(&self) -> u32 {
+        self.windows_entry_rva
+    }
+
+    /// 返回 DIR64 重定位条数。
+    pub fn windows_reloc_count(&self) -> u32 {
+        self.windows_reloc_count
+    }
+
+    /// 返回导入的 DLL 数量。
+    pub fn windows_import_dlls(&self) -> u32 {
+        self.windows_import_dlls
+    }
+
+    /// 返回 Windows 镜像字节指纹。
+    pub fn windows_image_fingerprint(&self) -> [u8; 32] {
+        self.windows_image_fingerprint
     }
 
     /// 返回 rt0 启动序列的步骤数量。
@@ -2097,6 +2355,30 @@ impl ImagePlan {
     /// 返回调度契约段。
     pub fn scheduler_runtime(&self) -> &SchedulerRuntimeContract {
         &self.scheduler_runtime
+    }
+    /// 返回普通 blocking worker 上限。
+    pub fn foreign_max_blocking_workers(&self) -> u32 {
+        self.foreign_max_blocking_workers
+    }
+    /// 返回普通 `ForeignBridge` 调用点数量。
+    pub fn foreign_ordinary_sites(&self) -> u32 {
+        self.foreign_ordinary_sites
+    }
+    /// 返回 dirty CPU 调用点数量。
+    pub fn foreign_dirty_sites(&self) -> u32 {
+        self.foreign_dirty_sites
+    }
+    /// 返回 `ForeignLeaf` 调用点数量。
+    pub fn foreign_leaf_sites(&self) -> u32 {
+        self.foreign_leaf_sites
+    }
+    /// 返回外调契约指纹。
+    pub fn foreign_contract_fingerprint(&self) -> [u8; 32] {
+        self.foreign_contract_fingerprint
+    }
+    /// 返回外调契约段。
+    pub fn foreign_runtime(&self) -> &crate::runtime::ForeignRuntimeContract {
+        &self.foreign_runtime
     }
     /// 返回内联 select case 上限。
     pub fn wait_inline_select_cases(&self) -> u32 {

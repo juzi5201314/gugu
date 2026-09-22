@@ -336,6 +336,14 @@ fn walker_scans_five_root_kinds() {
         scan_roots(&world, 0, &stale, &mut plane).is_err(),
         "handle 槽 1 代际为 0 必须拒绝"
     );
+    let empty_handle = vec![0x1111, 0x2222_0001, 0, 0, 0x5555];
+    let skipped = scan_roots(&world, 0, &empty_handle, &mut plane).expect("空 handle 字跳过");
+    assert!(
+        !skipped
+            .iter()
+            .any(|root| matches!(root, super::stackmap::ScannedRoot::Handle { .. })),
+        "全零 handle 字不得查表"
+    );
     // 空压缩字不解码也不计数。
     assert_eq!(
         scan_compressed_slot(0, &mut plane).expect("空值跳过").len(),

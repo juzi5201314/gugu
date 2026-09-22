@@ -194,6 +194,9 @@ impl Model<'_> {
                 Ty::Never | Ty::MaybeUninit(_) | Ty::Var(_) | Ty::Error | Ty::Param(_)
             );
         }
+        if let Some(satisfied) = self.builtin_core_trait(ty, interface, name) {
+            return satisfied;
+        }
         if matches!(name, "Clone" | "Eq" | "Ord" | "StableOrd" | "StableHash") {
             return match ty {
                 Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String | Ty::TypeId => true,
@@ -251,6 +254,53 @@ impl Model<'_> {
             ),
             Ty::String => matches!(name, "Add" | "AddAssign"),
             _ => false,
+        }
+    }
+    fn builtin_core_trait(&self, ty: &Ty, interface: &TraitRef, name: &str) -> Option<bool> {
+        let algebraic = |model: &Self| match ty {
+            Ty::Array(element, _) | Ty::Option(element) => {
+                Some(model.builtin_trait(element, interface))
+            }
+            Ty::Tuple(elements) => Some(
+                elements
+                    .iter()
+                    .all(|element| model.builtin_trait(element, interface)),
+            ),
+            Ty::Result(value, error) => {
+                Some(model.builtin_trait(value, interface) && model.builtin_trait(error, interface))
+            }
+            _ => None,
+        };
+        match name {
+            "Print" | "Debug" => {
+                if core_scalar(ty, true) {
+                    return Some(true);
+                }
+                algebraic(self)
+            }
+            "Hash" => {
+                if matches!(ty, Ty::Float(_)) {
+                    return Some(false);
+                }
+                if core_scalar(ty, false) {
+                    return Some(true);
+                }
+                algebraic(self)
+            }
+            "Default" => Some(match ty {
+                Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String | Ty::Option(_) => {
+                    true
+                }
+                Ty::Array(element, _) => self.builtin_trait(element, interface),
+                Ty::Tuple(elements) => elements
+                    .iter()
+                    .all(|element| self.builtin_trait(element, interface)),
+                _ => false,
+            }),
+            "Binary" | "Octal" | "LowerHex" | "UpperHex" => Some(matches!(ty, Ty::Int { .. })),
+            "LowerExp" | "UpperExp" => Some(matches!(ty, Ty::Float(_))),
+            "Error" => Some(false),
+            _ => None,
         }
     }
     pub(crate) fn normalize(&self, ty: &Ty, assumptions: &[Obligation]) -> Result<Ty, Diagnostic> {
@@ -590,4 +640,11 @@ impl Model<'_> {
             unsafety: self.member_is_unsafe(member),
         })
     }
+}
+
+fn core_scalar(ty: &Ty, float: bool) -> bool {
+    matches!(
+        ty,
+        Ty::Unit | Ty::Bool | Ty::Int { .. } | Ty::Char | Ty::String | Ty::TypeId
+    ) || (float && matches!(ty, Ty::Float(_)))
 }

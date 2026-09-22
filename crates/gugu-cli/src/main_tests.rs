@@ -55,11 +55,12 @@ fn global_from_values(mut raw: GlobalArgs, config: ConfigValues) -> Result<Globa
 #[test]
 fn version_text_output_includes_commit_host_and_llvm() {
     let lines = super::version_text_lines();
-    assert_eq!(lines.len(), 3);
+    assert_eq!(lines.len(), 4);
     assert!(lines[0].starts_with("gugu "));
     assert!(lines[0].contains("(commit "));
     assert!(lines[1].starts_with("host: "));
-    assert_eq!(lines[2], "llvm: not-used");
+    assert_eq!(lines[2], "unicode: 17.0.0");
+    assert_eq!(lines[3], "llvm: not-used");
 }
 
 #[test]
@@ -862,6 +863,32 @@ fn build_json_reports_x64_fragment_keys() {
         "x64-peak-live-gpr",
         "x64-peak-live-xmm",
         "x64-allocated-values",
+        "x64-stackmap-section",
+        "x64-unwind-section",
+        "x64-source-section",
+        "x64-stackmap-bytes",
+        "x64-unwind-bytes",
+        "x64-source-bytes",
+        "x64-stackmap-functions",
+        "x64-stackmap-safepoints",
+        "x64-stackmap-maps",
+        "x64-unwind-functions",
+        "x64-landing-count",
+        "x64-source-records",
+        "x64-metadata-fingerprint",
+        "linux-image-kind",
+        "linux-image-bytes",
+        "linux-entry-vaddr",
+        "linux-relative-relocs",
+        "linux-load-segments",
+        "linux-interpreter",
+        "linux-image-fingerprint",
+        "windows-image-kind",
+        "windows-image-bytes",
+        "windows-entry-rva",
+        "windows-reloc-count",
+        "windows-import-dlls",
+        "windows-image-fingerprint",
         "coroutine-stack-check-offset",
         "scheduler-poll-flags-offset",
     ] {
@@ -876,6 +903,12 @@ fn build_json_reports_x64_fragment_keys() {
         symbol.starts_with("__gugu_fn_") && symbol.len() == 10 + 64,
         "入口符号必须是 __gugu_fn_ + 64 hex：{symbol}"
     );
+    assert_eq!(payload["linux-image-kind"], "static-pie");
+    assert_eq!(payload["windows-image-kind"], "");
+    assert_eq!(payload["windows-image-bytes"], 0);
+    assert_eq!(payload["linux-interpreter"], "");
+    assert_eq!(payload["linux-load-segments"], 3);
+    assert!(payload["linux-image-bytes"].as_u64().unwrap_or(0) > 64);
     assert_eq!(payload["scheduler-poll-flags-offset"], 0);
     assert_eq!(
         payload["x64-fragment-fingerprint"],

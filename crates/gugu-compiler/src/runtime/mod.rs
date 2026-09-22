@@ -117,7 +117,20 @@ pub(crate) mod region_schema;
 )]
 pub(crate) mod routing;
 pub(crate) mod routing_schema;
+#[allow(
+    dead_code,
+    reason = "UTF-8/UTF-16 与 COW 参照模型由确定性测试消费，版本常量进入工具链身份"
+)]
+pub(crate) mod text;
+#[cfg(test)]
+mod text_tests;
 
+pub(crate) mod cstring;
+#[allow(dead_code, reason = "外调交接的确定性参照实现由契约与测试消费")]
+mod foreign;
+pub(crate) mod foreign_schema;
+#[cfg(test)]
+mod foreign_tests;
 #[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
 mod scheduler;
 pub(crate) mod scheduler_schema;
@@ -170,6 +183,7 @@ pub use coroutine_schema::{
 pub use block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
 pub use compression_schema::{CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract};
 pub use edge_schema::{EdgeDemand, EdgeRuntimeContract};
+pub use foreign_schema::{ForeignDemand, ForeignRuntimeContract};
 pub use gc_metadata_schema::GcMetadataDemand;
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
 pub use mark_schema::{MarkDemand, MarkRuntimeContract};
@@ -181,6 +195,10 @@ pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
 pub use routing_schema::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use shared_heap_schema::{SharedHeapDemand, SharedHeapRuntimeContract};
+pub(crate) use stackmap::{LandingRecord as StackLanding, consume_metadata};
+pub(crate) use stackmap_codec::{
+    CodeLayout, DecodedSection, SafepointLayout, decode_tables, encode as encode_stackmap,
+};
 pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};
 pub use wait_schema::{WaitDemand, WaitRuntimeContract};
@@ -300,6 +318,14 @@ pub(crate) const RETURN_SLAB_CACHE_WAYS: u32 = 2;
 pub(crate) const TARGET_CACHE_ENTRIES: u32 = 4;
 
 const STD_PRELUDE_SOURCE: &str = include_str!("../../resources/std/prelude.gg");
+const STD_OPTION_SOURCE: &str = include_str!("../../resources/std/option.gg");
+const STD_RESULT_SOURCE: &str = include_str!("../../resources/std/result.gg");
+const STD_ERROR_SOURCE: &str = include_str!("../../resources/std/error.gg");
+const STD_CMP_SOURCE: &str = include_str!("../../resources/std/cmp.gg");
+const STD_OPS_SOURCE: &str = include_str!("../../resources/std/ops.gg");
+const STD_ITER_SOURCE: &str = include_str!("../../resources/std/iter.gg");
+const STD_TEXT_SOURCE: &str = include_str!("../../resources/std/text.gg");
+const STD_IO_SOURCE: &str = include_str!("../../resources/std/io.gg");
 const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
 const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
 const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
@@ -401,6 +427,46 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/prelude.gg",
                     source: STD_PRELUDE_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/option.gg",
+                    source: STD_OPTION_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/result.gg",
+                    source: STD_RESULT_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/error.gg",
+                    source: STD_ERROR_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/cmp.gg",
+                    source: STD_CMP_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/ops.gg",
+                    source: STD_OPS_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/iter.gg",
+                    source: STD_ITER_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/text.gg",
+                    source: STD_TEXT_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
+                    logical_path: "std/io.gg",
+                    source: STD_IO_SOURCE,
                     role: RuntimeSourceRole::StandardLibrary,
                 },
                 RuntimeSource {

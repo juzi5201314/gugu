@@ -284,7 +284,7 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 
 `RuntimeRawModel` schema 24 把压缩契约升到 `COMPRESSION_SCHEMA = 2`、profile `mosaic-compression` revision 2：契约新增 cage 控制记录的字段表（`generation`/`cage_id`/`base`/`len`/`canonical_headroom`/`decodes`/`rejections` 的名字、字节偏移、宽度、记录字节数、对齐）与 `CAGE_CANONICAL_LIMIT`，两者与 runtime 侧 `CageControlRecord` 同源，机器解码序列按同一张表读取记录，`DecodeCompressedRef` 夹具与 `CompressionPlane` 的 checked 解码逐字对照；同一 schema 还让调度契约段与 `RUNTIME_TUNING_PROFILE` 逐字段核对（本地容量、远端 shard 数、batch 上限、service interval/batch、queue padding、cache line），段内自洽但 profile 对不上同样是非法状态。
 
-`RuntimeRawModel` schema 25 把 `SchedulerRuntimeContract` 升到 schema 2，并入 `LogicalProcessorPrefix` 的 poll/ownership/TLAB/TurnRegion 偏移：`poll_flags_offset = 0`、`tlab_cursor_offset = 3520`、`turn_region_cursor_offset = 3536`。偏移只来自 `processor.rs` 的 `offset_of!`，backend 的 TLAB/TurnRegion bump、SafepointPoll 与 StackCheck 热路只消费契约字段；`-Zdump-runtime` 增加 `scheduler-layout poll-flags=… tlab-cursor=… turn-region-cursor=…` 行。
+`RuntimeRawModel` schema 26 并入外调交接契约：普通 blocking worker 上限、waiter 字节、队列上限、service 预算、worker stack 与 20µs 逻辑宽限只来自 `foreign_schema`。schema 25 把 `SchedulerRuntimeContract` 升到 schema 2，并入 `LogicalProcessorPrefix` 的 poll/ownership/TLAB/TurnRegion 偏移：`poll_flags_offset = 0`、`tlab_cursor_offset = 3520`、`turn_region_cursor_offset = 3536`。偏移只来自 `processor.rs` 的 `offset_of!`，backend 的 TLAB/TurnRegion bump、SafepointPoll 与 StackCheck 热路只消费契约字段；`-Zdump-runtime` 增加 `scheduler-layout poll-flags=… tlab-cursor=… turn-region-cursor=…` 行。
 
 内部契约也沿同一边界扩展：[`AST/HIR`](ast-hir.md) 消费 frontend 产物，[`GIR/LIR`](gir-lir.md) 消费冻结 HIR，[`后端`](backend.md) 负责从合法 LIR 到 machine code，[`调度器`](scheduler.md) 和 [`GC 元数据`](gc-metadata.md) 负责 runtime 语义。不得为这些后续模块建立平行的占位语义路径。
 

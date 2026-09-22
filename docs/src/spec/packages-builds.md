@@ -234,7 +234,7 @@ Gugu 没有 dev/release/test/bench profile，没有自定义 profile，也没有
 
 test 与 bench 是正交 target/harness 模式，不是 profile。实现还可以提供 race、coverage 等插桩，但它们不能成为源码 cfg 或改变用户 API。源码只能观察 `cfg(test)` 和 `cfg(bench)`；test/bench 与任何插桩选择都进入编译缓存 key。
 
-`--strip` 是布尔参数，只对已经生成的最终 ELF/PE/静态库执行镜像后处理；它删除调试节、非导出符号和其它不可观察元数据，不触发重新解析、类型检查、单态化或 codegen。C 导出、展开信息、GC 栈图、`std.src` 和 panic 位置等语言可观察或运行时必需数据不能删除。strip 前后共享同一编译缓存，只产生两个末端镜像 action。
+`--strip` 是布尔参数，只对已经生成的最终 ELF/PE/静态库执行镜像后处理；它删除调试节、非导出符号和其它不可观察元数据，不触发重新解析、类型检查、单态化或 codegen。C 导出、展开信息、GC 栈图、源码位置节（`.gugu.src` / `.gugusrc`）、`std.src` 和 panic 位置等语言可观察或运行时必需数据不能删除。strip 前后共享同一编译缓存，只产生两个末端镜像 action。
 
 运行时整数语义不因构建命令改变：加、减、乘、整数负号、有符号左移和显式整数变窄都按目标位宽二进制补码环绕或截断。除零仍 panic；`MIN / -1` 结果为 `MIN`，余数为 0。负移位量 panic；非负移位量先按位宽取模。comptime 溢出仍是编译错误。
 

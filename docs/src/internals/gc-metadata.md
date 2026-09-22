@@ -576,7 +576,7 @@ column:         u32
 flags:          u32
 ```
 
-function index与 stack-map function table相同，PC 为 function-relative 半开范围。path 是 package-relative逻辑 UTF-8路径，不含 workspace绝对路径；line/column 从 1开始。`source_strings_len` 不得超过 `u32::MAX`，每个 `path_offset/path_len` 都相对 source string pool并经 checked range验证。flags bit 0 `PANIC_SITE`、bit 1 `SYNTHETIC`，其余为 0。records 按 function index、pc_start、pc_end和路径 bytes排序，范围可以因内联 attribution嵌套；查找选择覆盖 PC 的最短范围，再按记录序打破相等。source string pool按 bytes去重排序，`.gugu.meta` 与运行时 panic/backtrace所需记录不得被 `--strip` 删除。
+function index与 stack-map function table相同，PC 为 function-relative 半开范围。path 是 package-relative逻辑 UTF-8路径，不含 workspace绝对路径；line/column 从 1开始。`source_strings_len` 不得超过 `u32::MAX`，每个 `path_offset/path_len` 都相对 source string pool并经 checked range验证。flags bit 0 `PANIC_SITE`、bit 1 `SYNTHETIC`，其余为 0。records 按 function index、pc_start、pc_end和路径 bytes排序，范围可以因内联 attribution嵌套；查找选择覆盖 PC 的最短范围，再按记录序打破相等。source string pool按 bytes去重排序。这组 PC 记录由代码生成写入源码位置节（Linux `.gugu.src`，Windows `.gugusrc`），魔数 `GUGUSRC1`；`.gugu.meta` 继续保存类型、根与 vtable 的来源条目。两处记录都不得被 `--strip` 删除。
 
 ## scheduler non-moving slab 与 queue-page grace
 

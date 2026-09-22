@@ -200,7 +200,9 @@ impl Module {
             | Type::ChanClosed
             | Type::TrySendErr
             | Type::TryRecvErr
-            | Type::Panic => true,
+            | Type::Panic
+            | Type::Formatter
+            | Type::Hasher => true,
             Type::Int { bits, .. } => matches!(bits, 8 | 16 | 32 | 64 | 128),
             Type::Float(bits) => matches!(bits, 32 | 64),
             Type::Ref(ty)

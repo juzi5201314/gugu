@@ -7,6 +7,8 @@ use super::token::{Token, TokenBuffer, TokenKind};
 use crate::Span;
 /// `large_copy` 在闭集表中的下标。
 pub(crate) const LARGE_COPY: usize = 0;
+/// `unused_must_use` 在闭集表中的下标。
+pub(crate) const UNUSED_MUST_USE: usize = 1;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LintLevel {

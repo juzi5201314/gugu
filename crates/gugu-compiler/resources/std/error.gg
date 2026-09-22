@@ -1,0 +1,19 @@
+struct ProbeError {
+    text: string,
+}
+
+impl Error for ProbeError {
+    fn message(self: &Self) string = self.text
+    fn source(self: &Self) Option[&dyn Error] {
+        let missing: Option[&dyn Error] = None
+        missing
+    }
+}
+
+impl Print for ProbeError {
+    fn print(self: &Self, out: &Formatter) {}
+}
+
+impl Debug for ProbeError {
+    fn debug(self: &Self, out: &Formatter) {}
+}

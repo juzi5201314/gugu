@@ -77,8 +77,8 @@ pub(crate) struct ParsedModule {
     pub(crate) configured: cfg::ConfiguredAst,
     /// 该模块来自 compiler 内建的源树登记，而不是用户源码。
     ///
-    /// 内建 `std` 模块是 `std` 的私有实现：用户源码不能声明 `std` 根，非 `std` 模块也不能
-    /// 导入它们；只有 `std` 内部的模块之间可以互相引用。
+    /// `std.option` 等公开标准库模块是 package API。`std.prelude`、`std.runtime.*` 与
+    /// `runtime.*` 仍是私有实现：用户源码不能声明 `std` 根，也不能导入这些私有模块。
     pub(crate) builtin: bool,
 }
 
@@ -224,8 +224,12 @@ fn check_sources(
     let (semantics, types, registry, hir, analysis_world, mono_world, gir_world, gir_stats) =
         semantics::check(&modules, &names, source_map, cfg, entry_function, queries)
             .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
-    let lints = gir::large_copy_lints(&modules, &gir_world, source_map)
+    let mut lints = semantics::must_use_lints(&modules, &semantics, source_map)
         .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+    lints.extend(
+        gir::large_copy_lints(&modules, &gir_world, source_map)
+            .map_err(|errors| expand::reanchor_errors(errors, source_map))?,
+    );
     Ok(frontend_output(
         entry,
         source_map,

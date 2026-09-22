@@ -10,6 +10,9 @@ mod alloc_tests;
 pub(crate) mod codegen;
 pub(crate) mod contract;
 pub(crate) mod copies;
+pub(crate) mod elf;
+#[cfg(test)]
+mod elf_tests;
 pub(crate) mod encode;
 pub(crate) mod harness;
 mod harness_cases;
@@ -17,6 +20,12 @@ pub(crate) mod inst;
 pub(crate) mod layout;
 pub(crate) mod lower;
 pub(crate) mod mangle;
+pub(crate) mod metadata;
+#[cfg(test)]
+mod metadata_tests;
+pub(crate) mod pe;
+#[cfg(test)]
+mod pe_tests;
 pub(crate) mod reg;
 mod rows;
 pub(crate) mod select;
@@ -25,4 +34,5 @@ mod select_tests;
 pub(crate) mod table;
 #[cfg(test)]
 mod tests;
+pub(crate) mod unwind;
 pub(crate) mod verify;

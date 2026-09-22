@@ -56,8 +56,8 @@ huge_page_hint(range)
 除[声明与模块](declarations.md)已有的语言基座外，所有模块固定预导入下列名字：
 
 ```text
-Error Default Hash StableHash StableOrd Print Debug Read Write
-HashMap HashSet Path Duration
+Error Default Hash StableHash StableOrd Print Debug Formatter Hasher
+Read Write HashMap HashSet Path Duration
 ```
 
 `Seek`、`BufRead`、`File`、socket、进程类型、其它集合和其它标准库项必须显式 `use`。Prelude 是封闭兼容面；标准库新增公开类型不会自动进入 Prelude。

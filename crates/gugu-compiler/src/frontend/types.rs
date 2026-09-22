@@ -197,6 +197,7 @@ impl Layouts<'_, '_> {
             Ty::Unit | Ty::Never => Layout { size: 0, align: 1 },
             Ty::Bool => Layout { size: 1, align: 1 },
             Ty::Char | Ty::TypeId => Layout { size: 4, align: 4 },
+            Ty::Formatter | Ty::Hasher => word,
             Ty::Int { bits, .. } | Ty::Float(bits) => Layout {
                 size: u64::from(*bits) / 8,
                 align: u64::from(*bits) / 8,

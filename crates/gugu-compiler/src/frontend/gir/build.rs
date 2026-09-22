@@ -637,12 +637,22 @@ impl<'a> Builder<'a> {
     }
 
     fn string_ty(&self) -> TypeId {
-        self.module
+        // 恐慌字面量只能使用本 owner 已经出现的 string。标准库里的 string
+        // 不在这个实例的冻结类型表中，具体 GIR 不能另造一个键。
+        let Some(string) = self
+            .module
             .types
             .iter()
             .position(|ty| matches!(ty, hir::Type::String))
-            .map(|index| TypeId(index as u32))
-            .unwrap_or(self.primitives.unit)
+        else {
+            return self.primitives.unit;
+        };
+        let string = TypeId(string as u32);
+        if owner_mentions(self.owner, string) {
+            string
+        } else {
+            self.primitives.unit
+        }
     }
 
     fn int_ty(&self) -> TypeId {
@@ -760,6 +770,18 @@ fn collect_binds(owner: &hir::Owner, pattern: hir::PatternId, out: &mut Vec<hir:
     if let hir::PatternKind::At { pattern, .. } = &owner.patterns[pattern.index()].kind {
         collect_binds(owner, *pattern, out);
     }
+}
+
+fn owner_mentions(owner: &hir::Owner, ty: TypeId) -> bool {
+    owner.locals.iter().any(|local| local.ty == ty)
+        || owner.expression_types.iter().any(|item| *item == ty)
+        || owner.expression_inputs.iter().any(|item| *item == ty)
+        || owner.expressions.iter().any(|expression| {
+            matches!(
+                &expression.kind,
+                hir::ExprKind::Intrinsic { types, .. } if types.contains(&ty)
+            )
+        })
 }
 
 fn expr_range(owner: &hir::Owner, range: &Range<u32>) -> Vec<ExprId> {

@@ -53,6 +53,12 @@ pub(crate) struct BackendPlan {
     pub(crate) scheduler_service_batch: u32,
     pub(crate) scheduler_contract_fingerprint: [u8; 32],
     pub(crate) scheduler_runtime: crate::runtime::SchedulerRuntimeContract,
+    pub(crate) foreign_max_blocking_workers: u32,
+    pub(crate) foreign_ordinary_sites: u32,
+    pub(crate) foreign_dirty_sites: u32,
+    pub(crate) foreign_leaf_sites: u32,
+    pub(crate) foreign_contract_fingerprint: [u8; 32],
+    pub(crate) foreign_runtime: crate::runtime::ForeignRuntimeContract,
     pub(crate) wait_inline_select_cases: u32,
     pub(crate) wait_scratch_class_count: u32,
     pub(crate) wait_node_class_count: u32,
@@ -233,6 +239,58 @@ pub(crate) struct BackendPlan {
     pub(crate) coroutine_stack_check_offset: u32,
     /// `[r15 + poll_flags]` 偏移。
     pub(crate) scheduler_poll_flags_offset: u32,
+    /// 栈图 section 名。
+    pub(crate) x64_stackmap_name: String,
+    /// 展开 section 名。
+    pub(crate) x64_unwind_name: String,
+    /// 源码位置 section 名。
+    pub(crate) x64_source_name: String,
+    /// 栈图 section 字节。
+    pub(crate) x64_stackmap_section: Vec<u8>,
+    /// 展开 section 字节。
+    pub(crate) x64_unwind_section: Vec<u8>,
+    /// 源码位置 section 字节。
+    pub(crate) x64_source_section: Vec<u8>,
+    /// 进入栈图表的函数数。
+    pub(crate) x64_stackmap_functions: u32,
+    /// 栈图安全点数。
+    pub(crate) x64_stackmap_safepoints: u32,
+    /// 去重后的 map 数。
+    pub(crate) x64_stackmap_maps: u32,
+    /// 展开表中的函数数。
+    pub(crate) x64_unwind_functions: u32,
+    /// 落地记录数。
+    pub(crate) x64_landing_count: u32,
+    /// 源码位置记录数。
+    pub(crate) x64_source_records: u32,
+    /// 三节内容指纹。
+    pub(crate) x64_metadata_fingerprint: [u8; 32],
+    /// Linux ELF 镜像字节。Windows 为空。
+    pub(crate) linux_image: Vec<u8>,
+    /// `static-pie`、`dynamic-pie`，Windows 为空。
+    pub(crate) linux_image_kind: String,
+    /// ELF `e_entry`。
+    pub(crate) linux_entry_vaddr: u64,
+    /// 运行时相对重定位条数。
+    pub(crate) linux_relative_relocs: u32,
+    /// `PT_LOAD` 数量。
+    pub(crate) linux_load_segments: u32,
+    /// `PT_INTERP` 路径。无动态导入时为空。
+    pub(crate) linux_interpreter: String,
+    /// 镜像字节指纹。
+    pub(crate) linux_image_fingerprint: [u8; 32],
+    /// Windows PE 镜像字节。Linux 为空。
+    pub(crate) windows_image: Vec<u8>,
+    /// `exe`、`cdylib`，Linux 为空。
+    pub(crate) windows_image_kind: String,
+    /// PE `AddressOfEntryPoint`。
+    pub(crate) windows_entry_rva: u32,
+    /// DIR64 重定位条数。
+    pub(crate) windows_reloc_count: u32,
+    /// 导入的 DLL 数量。
+    pub(crate) windows_import_dlls: u32,
+    /// PE 镜像字节指纹。
+    pub(crate) windows_image_fingerprint: [u8; 32],
 }
 
 pub(crate) fn plan(
@@ -244,12 +302,32 @@ pub(crate) fn plan(
     raw: &crate::runtime::RuntimeRawContractV1,
     x64: &crate::backend::x64::codegen::X64World,
     runtime_checks_elided_count: u32,
-) -> Option<BackendPlan> {
+) -> Result<Option<BackendPlan>, String> {
     let descriptor = target.descriptor();
     let module = hir.module();
-    let entry = module.entry?;
+    let Some(entry) = module.entry else {
+        return Ok(None);
+    };
+    let (linux, windows) = match target {
+        TargetName::X86_64Linux => (
+            x64::elf::link_world(
+                x64,
+                &raw.gc_metadata().type_section,
+                &raw.gc_metadata().metadata_section,
+            )?,
+            x64::pe::PeImage::absent(),
+        ),
+        TargetName::X86_64Windows => (
+            x64::elf::LinuxImage::absent(),
+            x64::pe::link_world(
+                x64,
+                &raw.gc_metadata().type_section,
+                &raw.gc_metadata().metadata_section,
+            )?,
+        ),
+    };
     let placement = gir.placement.counts();
-    Some(BackendPlan {
+    Ok(Some(BackendPlan {
         target,
         entry: module.definitions[entry.index()].name.clone(),
         function_count: mono.instances.len() as u32,
@@ -302,6 +380,12 @@ pub(crate) fn plan(
         scheduler_service_batch: raw.scheduler().service_batch(),
         scheduler_contract_fingerprint: raw.scheduler().fingerprint(),
         scheduler_runtime: raw.scheduler().clone(),
+        foreign_max_blocking_workers: raw.foreign().max_blocking_workers,
+        foreign_ordinary_sites: raw.foreign().demand.ordinary,
+        foreign_dirty_sites: raw.foreign().demand.dirty,
+        foreign_leaf_sites: raw.foreign().demand.leaf,
+        foreign_contract_fingerprint: raw.foreign().fingerprint(),
+        foreign_runtime: raw.foreign().clone(),
         wait_inline_select_cases: raw.wait().inline_select_cases(),
         wait_scratch_class_count: raw.wait().scratch_class_count(),
         wait_node_class_count: raw.wait().wait_node_class_count(),
@@ -454,5 +538,31 @@ pub(crate) fn plan(
         x64_allocated_values: x64.allocated_values(),
         coroutine_stack_check_offset: raw.coroutine().stack_check_offset,
         scheduler_poll_flags_offset: raw.scheduler().poll_flags_offset(),
-    })
+        x64_stackmap_name: x64.metadata.stackmap_name.clone(),
+        x64_unwind_name: x64.metadata.unwind_name.clone(),
+        x64_source_name: x64.metadata.source_name.clone(),
+        x64_stackmap_section: x64.metadata.stackmap_section.clone(),
+        x64_unwind_section: x64.metadata.unwind_section.clone(),
+        x64_source_section: x64.metadata.source_section.clone(),
+        x64_stackmap_functions: x64.metadata.function_count,
+        x64_stackmap_safepoints: x64.metadata.safepoint_count,
+        x64_stackmap_maps: x64.metadata.map_count,
+        x64_unwind_functions: x64.metadata.unwind_function_count,
+        x64_landing_count: x64.metadata.landing_count,
+        x64_source_records: x64.metadata.source_record_count,
+        x64_metadata_fingerprint: x64.metadata.fingerprint,
+        linux_image: linux.bytes,
+        linux_image_kind: linux.kind,
+        linux_entry_vaddr: linux.entry,
+        linux_relative_relocs: linux.reloc_count,
+        linux_load_segments: linux.load_count,
+        linux_interpreter: linux.interpreter,
+        linux_image_fingerprint: linux.fingerprint,
+        windows_image: windows.bytes,
+        windows_image_kind: windows.kind,
+        windows_entry_rva: windows.entry_rva,
+        windows_reloc_count: windows.reloc_count,
+        windows_import_dlls: windows.import_dlls,
+        windows_image_fingerprint: windows.fingerprint,
+    }))
 }

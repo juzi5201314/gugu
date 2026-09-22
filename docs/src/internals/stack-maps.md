@@ -59,7 +59,7 @@ vtable、cage id 和 code pointer 是 `NonRoot`。`#[repr(packed)]` 不能含 ma
 | 3 | `ForeignBridge` | Gugu 与 C/runtime bridge 完成寄存器保存后的 label |
 | 4 | `MorestackEntry` | prologue建 frame前进入 `morestack_or_poll` 的 slow-path label |
 
-普通/dirty `ForeignBridge`、park/suspend、runtime lock acquire的 contention edge和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record。counted inner chunk edge与 uncounted countdown-only edge没有 map，只有实际读取 poll word后的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。`NoSafepointRegion` 内没有 map或 resume PC，begin前/end后的实际 poll仍使用 `PollResume`。
+普通/dirty `ForeignBridge`、park/suspend、runtime lock acquire的 contention edge和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record，即使它们带 unwind 边。这些叶调用的落地链仍从 unwind 边生成，不依赖 safepoint 记录。counted inner chunk edge与 uncounted countdown-only edge没有 map，只有实际读取 poll word后的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。`NoSafepointRegion` 内没有 map或 resume PC，begin前/end后的实际 poll仍使用 `PollResume`。
 
 LIR 侧的映射补充：无 default 的 `select` 经挂起路径提交，走 `SuspendResume`；有 default 的非挂起 `select` 走 `CallReturn`。纯分配操作（`GcAlloc` 等）与屏障操作不产生独立记录，只进入函数级分配与屏障站点计数，供后端在填充机器布局时核对。`DecodeCompressedRef` 为纯解码，不建立记录；`ResolveSharedHandle` 与 `ForwardSharedHandle` 调用走 `CallReturn`。
 
@@ -90,9 +90,9 @@ stack map 的通用寄存器编号固定为：
 
 ## 构造流程
 
-stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layout 后生成：
+stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layout 后生成。逻辑推导的 schema 是 `STACKMAP_SCHEMA = 3`：托管调用上的分配种类仍产出 `CallReturn`，按值副本只展开已有 provenance 的根字。
 
-1. 从 safepoint 的 LIR 活跃集取得所有 `Ptr` value；`CallReturn` 另加入 outgoing 参数及其 aggregate 副本 descriptor 展开的全部 root word；
+1. 从 safepoint 的 LIR 活跃集取得所有 `Ptr` value；`CallReturn` 另加入 outgoing 参数，以及本帧按值聚合副本槽上已有 provenance 的 root word。没有 provenance 的位字是 `NonRoot`，不进入 bitmap；副本地址不属于本帧栈槽时，字根由持有副本的外层帧登记；
 2. 按 provenance 和 representation 分类为 `HeapDirect`、`HeapInterior`、`SharedHandle`、`CompressedRef`、`StackInterior` 或 `NonRoot`；
 
 3. 查询分配结果得到物理寄存器或 frame slot；
@@ -100,7 +100,7 @@ stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layou
 5. 把 stack slot 转成从 frame base 起的 8 字节 slot index；
 6. 从函数 ABI 参数分类独立生成 `MorestackEntry` register map，不能从尚未建立的 frame 活跃集推断；
 7. 对相同 root set 做全局去重；
-8. 指令编码完成后填入最终 `pc_offset`。
+8. 指令编码完成后填入最终 `pc_offset`。调用返回点取该站点最后一条 `call` 的下一条指令，入口检查取 `morestack_or_poll` 返回后的第一字节。编码后的 section 字节进入镜像计划；`--strip` 必须保留 [平台 ABI](../spec/platform-abi.md) 登记的栈图、展开与源码位置节。
 
 一个位置在同一 map 的五类 bitmap/mask 中最多出现一次。重叠 spill、超出 frame、未对齐 managed slot、丢失 provenance 或一个 value 同时有两个未协调的权威位置都是后端错误。
 
@@ -205,7 +205,7 @@ runtime 扫描一个已停在 safepoint 的协程时：
 - `MorestackEntry`：当前函数 frame尚未建立，scratch中的 return PC是 caller PC，scratch GPR由当前 map扫描；slow path可以先处理 poll再决定是否复制 stack。
 
 `SharedHandle` 位置由 handle table 的 current payload 和 generation 解析；scanner 不把 slot
-里的 payload 当作另一个 stack root。`CompressedRef` 位置经压缩平面的单一 checked 解码路径
+里的 payload 当作另一个 stack root。全零字是空引用，不查表也不计数；槽编号 0 不能表示活动 handle。`CompressedRef` 位置经压缩平面的单一 checked 解码路径
 解析：空字是空引用、不解码也不计数；未登记 cage、过期 generation、越界 offset 与落在
 canonical hole 的地址都进入 `RuntimeInvariant`，不能当成 `HeapDirect` 猜测。成功解码计入
 `compressed_ref_decodes`，被拒绝的解码计入 `compression_decode_rejections`。压缩字是 cage

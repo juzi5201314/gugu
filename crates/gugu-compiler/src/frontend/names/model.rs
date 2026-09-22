@@ -164,5 +164,7 @@ pub(super) fn is_reserved_name(name: &str) -> bool {
             | "HashSet"
             | "Path"
             | "Duration"
+            | "Formatter"
+            | "Hasher"
     )
 }

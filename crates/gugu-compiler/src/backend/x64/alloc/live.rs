@@ -33,7 +33,8 @@
 //! `SafepointPoll` 把 `call` 放在冷路）、多定义（块参数由多条入边定义）与跨越布局顺序的
 //! 回边都会破坏这个前提。统一位置换来可证明的正确性：插入的 move 只有「定义处写位置」与
 //! 「使用处读位置」两种，都只依赖当前路径。非指针跨 call 仍优先 `rbp/r12/r13`；
-//! `CallReturn`、分配、挂起与 bridge 上的 managed/stack 指针整段落槽。
+//! `CallReturn`、会分配的调用、挂起 `Select`、挂起与 bridge 上的 managed/stack 指针整段落槽，
+//! `PollFreeLeaf` 与 `ForeignLeaf` 不落槽。
 
 use std::ops::Range;
 
@@ -42,10 +43,10 @@ use super::super::inst::{Inst, Operand};
 use super::super::layout;
 use super::super::lower::Lowered;
 use super::super::reg::{Clobbers, FRAME_SLOT_BASE, Gpr, Reg};
-use super::super::select::{SelectedFunction, SiteKind};
+use super::super::select::{self, SelectedFunction, SiteKind};
 use super::super::table::{self, Access, OperandKind};
 use super::{AllocError, Hint, RegClass, RootClass};
-use crate::lir::body::{BlockId, Body, Definition, Op, SafepointKind, Terminator};
+use crate::lir::body::{BlockId, Body, Definition, Op, Terminator};
 use crate::target::TargetName;
 
 /// 调用点 outgoing 区里的一个指针字。偏移相对 outgoing 区起点，供栈图扫描栈上副本。
@@ -57,20 +58,6 @@ pub(crate) struct OutgoingRoot {
     pub(crate) root: u8,
     /// 相对 outgoing 区起点的字节偏移。
     pub(crate) offset: u32,
-}
-
-/// `CallReturn`、分配、挂起与 bridge 禁止用户寄存器根；`Poll` 可以留在寄存器里。
-pub(crate) fn spills_pointers(kind: Option<SafepointKind>) -> bool {
-    matches!(
-        kind,
-        Some(
-            SafepointKind::CallReturn
-                | SafepointKind::Allocation
-                | SafepointKind::Suspend
-                | SafepointKind::ForeignBridge
-                | SafepointKind::DirtyCpuBridge
-        )
-    )
 }
 
 /// 点位种类；判别值与 payload 一致（0 Normal / 1 Call / 2 Bridge / 3 Prologue）。
@@ -234,12 +221,10 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
         for site in &block.sites {
             let index = u32::try_from(sites.len()).expect("站点数适配 u32");
             let first = u32::try_from(points.len()).expect("点位数适配 u32");
-            let instruction = &body.instructions
-                [usize::try_from(site.instruction).expect("站点指令编号适配 usize")];
             visit_site(
                 body,
                 site.kind,
-                spills_pointers(instruction.op.safepoint_kind()),
+                site.spill_pointers,
                 &site.lowered,
                 index,
                 order,
@@ -258,7 +243,7 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
         visit_site(
             body,
             SiteKind::Normal,
-            terminator_spills(&body.blocks[lir].terminator),
+            select::terminator_spills(&body.blocks[lir].terminator),
             &block.terminator,
             index,
             order,
@@ -312,15 +297,6 @@ fn collect_values(body: &Body) -> Vec<ValueLive> {
         .collect()
 }
 
-fn terminator_spills(terminator: &Terminator) -> bool {
-    match terminator {
-        Terminator::Invoke { call, .. } | Terminator::TailCall { call, .. } => {
-            spills_pointers(call.safepoint_kind())
-        }
-        _ => false,
-    }
-}
-
 /// 遍历一个站点，产出点位并登记活跃事件。
 #[expect(
     clippy::too_many_arguments,
@@ -329,7 +305,7 @@ fn terminator_spills(terminator: &Terminator) -> bool {
 fn visit_site(
     body: &Body,
     kind: SiteKind,
-    spills_pointers: bool,
+    spill_pointers: bool,
     lowered: &Lowered,
     site: u32,
     block: u32,
@@ -359,7 +335,7 @@ fn visit_site(
             instructions: entry.instructions.clone(),
             mask: Clobbers::NONE,
             clobber: Clobbers::NONE,
-            pointer_spill: spills_pointers,
+            pointer_spill: spill_pointers,
             fixed_physical: false,
             outgoing_roots: Vec::new(),
         };
@@ -914,7 +890,7 @@ fn attach_outgoing(
     site_index: usize,
     live: &mut LiveInfo,
 ) -> Result<(), AllocError> {
-    if !spills_pointers(call.safepoint_kind()) {
+    if !select::call_spills(call) {
         return Ok(());
     }
     let layout = super::super::abi::classify_call(call, target)

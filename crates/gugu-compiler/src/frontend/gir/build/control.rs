@@ -782,21 +782,42 @@ impl Builder<'_> {
                 None,
             )
         })?;
-        let error_place = self.project(Place::local(source), Projection::Downcast(1));
-        let error_place = self.project(
-            error_place,
-            Projection::Field {
-                index: 0,
-                field_ty: error_ty,
-                access: Access::Normal,
-            },
+        // Option 的 None 没有载荷；错误值是 ()，不能去投影不存在的字段。
+        let option = matches!(
+            self.module
+                .types
+                .get(self.locals[source.index()].ty.index()),
+            Some(hir::Type::Option(_))
         );
         let error = self.temp(error_ty);
-        self.copy_value(Place::local(error), error_place, error_ty);
+        if option {
+            self.assign_unit(error);
+        } else {
+            let error_place = self.project(Place::local(source), Projection::Downcast(1));
+            let error_place = self.project(
+                error_place,
+                Projection::Field {
+                    index: 0,
+                    field_ty: error_ty,
+                    access: Access::Normal,
+                },
+            );
+            self.copy_value(Place::local(error), error_place, error_ty);
+        }
         let outgoing = match from_error {
             Some(dispatch) => {
                 let argument = self.dispatch_receiver(dispatch, error, None);
                 self.call_dispatch(id, dispatch, vec![argument])?
+            }
+            None if option => self.enum_variant(self.exit_value_ty(target), 1, Vec::new()),
+            None if matches!(
+                self.module
+                    .types
+                    .get(self.locals[source.index()].ty.index()),
+                Some(hir::Type::Result(_, _))
+            ) =>
+            {
+                self.enum_variant(self.exit_value_ty(target), 1, vec![copy_of(error)])
             }
             None => error,
         };
@@ -836,6 +857,38 @@ impl Builder<'_> {
         let dest = self.temp(self.expr_ty(id));
         self.set_value(id, dest);
         Ok(None)
+    }
+
+    fn exit_value_ty(&self, target: hir::ExitTarget) -> TypeId {
+        let slot = match target {
+            hir::ExitTarget::Return => Some(self.return_local),
+            hir::ExitTarget::Try(scope) => self
+                .tries
+                .iter()
+                .rev()
+                .find(|frame| frame.scope == scope)
+                .and_then(|frame| frame.value),
+            hir::ExitTarget::Break(scope) => self
+                .loops
+                .iter()
+                .rev()
+                .find(|frame| frame.scope == scope)
+                .and_then(|frame| frame.value),
+            hir::ExitTarget::Continue(_) => None,
+        };
+        slot.map_or(self.primitives.unit, |local| self.locals[local.index()].ty)
+    }
+
+    fn enum_variant(&mut self, ty: TypeId, variant: u32, operands: Vec<Operand>) -> LocalId {
+        let dest = self.temp(ty);
+        self.assign(
+            Place::local(dest),
+            Rvalue::Aggregate {
+                kind: AggregateKind::Adt { ty, variant },
+                operands,
+            },
+        );
+        dest
     }
 
     fn emit_exit_value(

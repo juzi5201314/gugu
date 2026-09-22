@@ -45,7 +45,7 @@ session-local 的 `DefId`、`TyId`、arena ID、指针、线程编号和绝对 w
 
 `CompilerIdentity` 是下列字段的规范编码摘要：
 
-- 编译器源码 revision 和工作树状态标志；
+- 编译器源码 revision、工作树状态标志与 Unicode 数据版本（`unicode`，当前 17.0.0）；
 - AST、HIR、GIR、LIR、cache、stack-map、GC metadata 与后端 schema 版本；
 - comptime capability registry 摘要、evaluator/验证器 revision、late comptime schema；
 - abstract analysis semantics revision、`PublicSummaryPolicyV1` revision 与公共摘要 schema；
@@ -284,7 +284,9 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
 它的编码包含被引用函数的 `StableDefKey`、调用 ABI、类型实参与签名。它不使用该函数的
 `MonoKey` 或 `Definition.key` 本身，因此 `Ty::Callable` 与任何其它 `Ty` 共用同一条
 `type_key` 编码路径；冻结类型表、具体 GIR 类型表与 LIR 符号地址必须引用同一个
-`StableTypeKey`，不允许任何阶段对同一 `Ty` 走第二条成键规则。
+`StableTypeKey`，不允许任何阶段对同一 `Ty` 走第二条成键规则。owner 内合成的恐慌
+字符串常量只使用该 owner 的 HIR 已经引用的 `string`；模块里其它单元引入的 `string`
+不在这个实例的冻结类型表中，具体 GIR 不为它另造键。
 
 `MonoKey` 的规范字段为：
 

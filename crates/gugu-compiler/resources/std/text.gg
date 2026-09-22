@@ -1,0 +1,8 @@
+struct Bytes {}
+
+fn share_bytes() {
+    let value = Bytes {}
+    let copy = value
+    _ = value
+    _ = copy
+}

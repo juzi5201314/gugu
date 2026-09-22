@@ -21,7 +21,10 @@ pub(crate) enum Ty {
     Never,
     Unit,
     Bool,
-    Int { signed: bool, bits: u16 },
+    Int {
+        signed: bool,
+        bits: u16,
+    },
     Float(u16),
     Char,
     String,
@@ -40,6 +43,10 @@ pub(crate) enum Ty {
     TypeId,
     Option(Box<Ty>),
     Result(Box<Ty>, Box<Ty>),
+    /// 格式 trait 的写入目标。载荷方法随 `std.fmt` 提供。
+    Formatter,
+    /// `Hash` 接收语义字段的目标。载荷方法随 `std.hash` 提供。
+    Hasher,
     Range,
     Chan(Box<Ty>),
     Join(Box<Ty>),
@@ -123,6 +130,8 @@ impl Ty {
                 signed: false,
                 bits: 128,
             },
+            "Formatter" => Self::Formatter,
+            "Hasher" => Self::Hasher,
             "Range" => Self::Range,
             "ChanClosed" => Self::ChanClosed,
             "TrySendErr" => Self::TrySendErr,
@@ -269,6 +278,8 @@ impl<'a> Model<'a> {
                 self.describe(ty),
                 self.traits.interfaces[interface.id].name
             ),
+            Ty::Formatter => "Formatter".into(),
+            Ty::Hasher => "Hasher".into(),
             Ty::Range => "Range".into(),
             Ty::Option(t) => format!("Option[{}]", self.describe(t)),
             Ty::Result(t, e) => format!("Result[{}, {}]", self.describe(t), self.describe(e)),

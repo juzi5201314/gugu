@@ -668,6 +668,14 @@ fn path_text(module: &ParsedModule, path_id: super::ast::PathId) -> Vec<String> 
     clippy::too_many_arguments,
     reason = "模块解析需要精确/折叠表、内建集合与导入者上下文"
 )]
+fn private_builtin_module(path: &str) -> bool {
+    path == "std.prelude"
+        || path == "std.runtime"
+        || path.starts_with("std.runtime.")
+        || path == "runtime"
+        || path.starts_with("runtime.")
+}
+
 fn classify_module(
     path: &[String],
     external_packages: &BTreeSet<String>,
@@ -679,12 +687,12 @@ fn classify_module(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<ModuleTarget> {
     let joined = path.join(".");
-    // 内建的 `std` 模块是 `std` 的私有实现：它们优先匹配为本地模块，未登记的 `std.*`
-    // 路径仍然按依赖别名处理。
+    // 公开的 `std.option` 等模块是 package API。`std.prelude`、`std.runtime.*` 与
+    // `runtime.*` 仍是私有实现。未登记的 `std.*` 路径仍然按依赖别名处理。
     if let Some(&module) = exact.get(joined.as_str())
         && builtin.contains(&joined)
     {
-        if !importer.starts_with("std.") && importer != "std" {
+        if private_builtin_module(&joined) && !importer.starts_with("std.") && importer != "std" {
             diagnostics.push(Diagnostic::error(
                 DiagnosticCode::ReservedName,
                 format!("`{joined}` 是 std 的私有实现模块，不是 package API"),
