@@ -288,3 +288,40 @@ impl SchedulerRuntimeContract {
         output
     }
 }
+
+/// 脏配额：`parallelism = 1` 时 target 为 1，否则为 `parallelism - 1`。
+pub(crate) const fn dirty_target(parallelism: u64) -> u64 {
+    if parallelism <= 1 { 1 } else { parallelism - 1 }
+}
+
+/// managed worker 绑定上限：`max(1, p - min(dirty_active, p - 1))`。
+#[cfg(test)]
+pub(crate) fn managed_bound(parallelism: u64, dirty_active: u64) -> u64 {
+    if parallelism <= 1 {
+        return 1;
+    }
+    let held = if dirty_active < parallelism - 1 {
+        dirty_active
+    } else {
+        parallelism - 1
+    };
+    let bound = parallelism - held;
+    if bound < 1 { 1 } else { bound }
+}
+
+/// 调度常量与 inbox/batch 契约一致。
+#[cfg(test)]
+pub(crate) fn verify_constants() -> Result<(), RawModelError> {
+    if SCHED_LOCAL_CAPACITY != 256
+        || SCHED_REMOTE_SHARDS != super::OWNER_INBOX_SHARDS
+        || SCHED_BATCH_MAX != super::BATCH_MAX
+        || SCHED_SERVICE_INTERVAL != 61
+        || SCHED_SERVICE_BATCH != 128
+        || SCHED_REMOTE_SHARDS != 8
+        || super::BATCH_MAX != 128
+        || SCHED_SERVICE_BATCH != 128
+    {
+        return Err(RawModelError::new("调度常量与契约不一致"));
+    }
+    Ok(())
+}

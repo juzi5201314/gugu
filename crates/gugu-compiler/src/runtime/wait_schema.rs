@@ -10,10 +10,68 @@ use std::fmt::Write;
 use std::mem::{align_of, offset_of, size_of};
 
 use super::RAW_CLASS_LADDER;
-use super::channel::ChannelControl;
 use super::model::RawModelError;
 use super::platform::PlatformProfile;
-use super::wait::{SelectScratchCache, SelectTxn, WaitNode};
+
+/// channel 控制块；128 字节，与 `std/runtime/channel.gg` 的 `ChannelControl` 对齐。
+#[derive(Clone, Copy, Debug)]
+#[repr(C, align(64))]
+pub(crate) struct ChannelControl {
+    pub(crate) source_id: u64,
+    pub(crate) generation: u64,
+    pub(crate) capacity: u64,
+    pub(crate) closed: u64,
+    pub(crate) head: u64,
+    pub(crate) tail: u64,
+    pub(crate) len: u64,
+    pub(crate) send_q_head: u64,
+    pub(crate) recv_q_head: u64,
+    pub(crate) reservation_generation: u64,
+    pub(crate) ring_index: u64,
+    pub(crate) ring_generation: u64,
+    pub(crate) padding: [u8; 32],
+}
+
+/// `CoroutineCold.select_scratch` 的 32 字节描述符。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub(crate) struct SelectTxn {
+    pub(crate) phase_winner: u64,
+    pub(crate) case_count: u64,
+    pub(crate) scratch_handle: u64,
+    pub(crate) wait_block: u64,
+}
+
+/// processor-local scratch cache 的 0 号 class。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C, align(64))]
+pub(crate) struct SelectScratchCache {
+    pub(crate) inline_words: [u64; 8],
+}
+
+/// wait-node：只保存句柄、generation、case 和下标偏移。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[repr(C, align(64))]
+pub(crate) struct WaitNode {
+    pub(crate) coroutine_index: u64,
+    pub(crate) coroutine_generation: u64,
+    pub(crate) wait_generation: u64,
+    pub(crate) case_index: u64,
+    pub(crate) payload_offset: u64,
+    pub(crate) result_offset: u64,
+    pub(crate) next: u64,
+    pub(crate) flags: u64,
+}
+
+const _: () = {
+    assert!(size_of::<ChannelControl>() == 128);
+    assert!(align_of::<ChannelControl>() == 64);
+    assert!(size_of::<SelectTxn>() == 32);
+    assert!(size_of::<SelectScratchCache>() == 64);
+    assert!(align_of::<SelectScratchCache>() == 64);
+    assert!(size_of::<WaitNode>() == 64);
+    assert!(align_of::<WaitNode>() == 64);
+};
 
 /// `case_count <= 8` 时走同时 `try_lock` 路径。
 pub(crate) const INLINE_SELECT_CASES: u32 = 8;

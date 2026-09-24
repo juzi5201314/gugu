@@ -123,13 +123,34 @@ fn load(
         return Ok(());
     }
     let bits = access_bits(result.ty.ty)?;
-    let kinds = match bits {
-        8 => &[OperandKind::Rm8, OperandKind::R8][..],
-        16 => &[OperandKind::Rm16, OperandKind::R16][..],
-        32 => &[OperandKind::Rm32, OperandKind::R32][..],
-        _ => &[OperandKind::Rm64, OperandKind::R64][..],
-    };
-    builder.emit("mov", kinds, Access::Read, vec![place, reg(result.reg)]);
+    // `I8`/`I16` 在寄存器里必须零扩展到 64 位。`mov r8` 只改低 8 位，高位垃圾会让
+    // 随后的整字比较错过全部判别臂。`movzx` 到 32 位同时把 63..32 清零。
+    match bits {
+        8 => {
+            builder.emit(
+                "movzx",
+                &[OperandKind::Rm8, OperandKind::R32],
+                Access::Read,
+                vec![place, reg(result.reg)],
+            );
+        }
+        16 => {
+            builder.emit(
+                "movzx",
+                &[OperandKind::Rm16, OperandKind::R32],
+                Access::Read,
+                vec![place, reg(result.reg)],
+            );
+        }
+        _ => {
+            let kinds = if bits == 32 {
+                &[OperandKind::Rm32, OperandKind::R32][..]
+            } else {
+                &[OperandKind::Rm64, OperandKind::R64][..]
+            };
+            builder.emit("mov", kinds, Access::Read, vec![place, reg(result.reg)]);
+        }
+    }
     Ok(())
 }
 

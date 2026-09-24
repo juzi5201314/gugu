@@ -168,11 +168,12 @@ impl Builder<'_> {
             let Some(local) = self.emit_expr(receiver)? else {
                 return Ok((callee, args));
             };
-            let local = self.dereference(local, dereferences);
-            args.push(match parameters.first().copied() {
-                Some(parameter) => self.dispatch_argument(parameter, local, Some(receiver)),
-                None => self.pass_arg(receiver, local),
-            });
+            args.push(self.receiver_operand(
+                receiver,
+                local,
+                dereferences,
+                parameters.first().copied(),
+            ));
         }
         let offset = usize::from(receiver.is_some());
         // 变参尾按元素/包展开，最后一个签名参数是打包类型，不参与逐参借用。
@@ -255,6 +256,43 @@ impl Builder<'_> {
             Some(hir::Type::Function { parameters, .. }) => parameters.clone(),
             _ => Vec::new(),
         }
+    }
+
+    /// 方法接收者：按派发记录的解引用次数投影原槽，再按首参决定借用或复制。
+    ///
+    /// 引用形参必须借用投影后的 place。先把聚合复制进临时槽再借用，会让 `lock`
+    /// 作用在副本上。值形参仍走复制。
+    fn receiver_operand(
+        &mut self,
+        expression: ExprId,
+        local: LocalId,
+        dereferences: u32,
+        parameter: Option<TypeId>,
+    ) -> Operand {
+        if !parameter.is_some_and(|ty| self.ref_type(ty)) {
+            let local = self.dereference(local, dereferences);
+            return match parameter {
+                Some(parameter) => self.dispatch_argument(parameter, local, Some(expression)),
+                None => self.pass_arg(expression, local),
+            };
+        }
+        let mut place = self.expression_places[expression.index()].unwrap_or(Place::local(local));
+        for _ in 0..dereferences {
+            place = self.project(place, Projection::Deref);
+        }
+        if self.ref_type(self.place_ty(place)) {
+            let ty = self.place_ty(place);
+            let dest = self.temp(ty);
+            self.copy_value(Place::local(dest), place, ty);
+            return Operand::MoveInternal(Place::local(dest));
+        }
+        let dest = self.temp(parameter.expect("引用形参"));
+        self.assign(Place::local(dest), Rvalue::Ref(place));
+        Operand::MoveInternal(Place::local(dest))
+    }
+
+    fn ref_type(&self, ty: TypeId) -> bool {
+        matches!(self.module.types.get(ty.index()), Some(hir::Type::Ref(_)))
     }
 
     /// 派发实参：签名参数为 `&T` 而实参不是引用时按语言规则自动借用。

@@ -36,18 +36,6 @@ name = "morestack_entry"
 harness = false
 
 [[bench]]
-name = "scheduler_runqueue"
-harness = false
-
-[[bench]]
-name = "channel_wait"
-harness = false
-
-[[bench]]
-name = "sync_lock"
-harness = false
-
-[[bench]]
 name = "stackmap_walk"
 harness = false
 

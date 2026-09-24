@@ -38,6 +38,8 @@ pub(crate) mod rt0_params {
     pub(crate) const INITIAL_SLOT: usize = 11;
     /// runtime 状态区 VA（可写保留区，零初始化），首部是 `MorestackMailbox`。
     pub(crate) const RUNTIME_STATE: usize = 12;
+    /// 子协程入口片段 `coroutine_enter` 的链接期地址。
+    pub(crate) const COROUTINE_ENTER: usize = 13;
 }
 
 /// 初始协程槽保留字节数；两个 writer 共用同一份预约。

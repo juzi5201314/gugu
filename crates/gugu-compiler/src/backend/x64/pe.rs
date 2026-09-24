@@ -569,6 +569,9 @@ fn fill_entry(
     words[rt0_params::PAYLOAD_LEN] = Rt0Payload::bytes();
     words[rt0_params::INITIAL_SLOT] = defined["__gugu_initial_slot"];
     words[rt0_params::RUNTIME_STATE] = defined["__gugu_runtime_state"];
+    words[rt0_params::COROUTINE_ENTER] = defined
+        .get(&mangle::mangle_runtime("coroutine_enter"))
+        .map_or(0, |offset| text_rva + offset);
     // `defined` 里 `.text` 符号是节内偏移，`.data` 保留区是 RVA。
     let params =
         usize::try_from(defined["__gugu_rt0_params"]).map_err(|_| "参数块超出 .text".to_owned())?;

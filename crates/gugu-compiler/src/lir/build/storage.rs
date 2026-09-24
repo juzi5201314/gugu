@@ -330,9 +330,9 @@ impl Builder<'_> {
                     Provenance::GcHeap
                 },
             )),
-            TypeKind::Channel(_) | TypeKind::Join(_) | TypeKind::Panic => {
-                one(ValueType::pointer(Provenance::GcHeap))
-            }
+            // 通道与 Join 是 runtime 表索引，不是可扫描的堆指针。
+            TypeKind::Channel(_) | TypeKind::Join(_) => one(ValueType::scalar(Type::I64)),
+            TypeKind::Panic => one(ValueType::pointer(Provenance::GcHeap)),
             TypeKind::MaybeUninit(_) => None,
             _ => None,
         }
@@ -404,11 +404,9 @@ impl Builder<'_> {
                     Provenance::GcHeap
                 },
             )),
-            TypeKind::Channel(_)
-            | TypeKind::Join(_)
-            | TypeKind::Panic
-            | TypeKind::String
-            | TypeKind::Dynamic => roots.push((base, Provenance::GcHeap)),
+            TypeKind::Panic | TypeKind::String | TypeKind::Dynamic => {
+                roots.push((base, Provenance::GcHeap))
+            }
             TypeKind::Function { .. } => roots.push((base + 8, Provenance::GcHeap)),
             TypeKind::Array { element, count } => {
                 let size = self.layout(*element).layout.expect("元素布局").size;

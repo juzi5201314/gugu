@@ -32,8 +32,6 @@ pub(crate) mod candidate;
 pub(crate) mod candidate_schema;
 #[cfg(test)]
 mod candidate_tests;
-#[allow(dead_code, reason = "等待协议的确定性参照实现")]
-mod channel;
 mod channel_layout;
 #[allow(
     dead_code,
@@ -173,11 +171,7 @@ mod foreign;
 pub(crate) mod foreign_schema;
 #[cfg(test)]
 mod foreign_tests;
-#[allow(dead_code, reason = "调度基础路径的确定性参照实现")]
-mod scheduler;
 pub(crate) mod scheduler_schema;
-#[allow(dead_code, reason = "等待协议的确定性参照实现")]
-mod select;
 #[allow(
     dead_code,
     reason = "stable handle 与 forwarding grace 的确定性参照实现"
@@ -203,12 +197,8 @@ mod stackmap_codec;
 pub mod stackmap_schema;
 mod startup_kinds;
 mod startup_schema;
-#[allow(dead_code, reason = "同步协议的确定性参照实现")]
-pub mod sync;
 pub(crate) mod sync_layout;
 pub mod sync_schema;
-#[allow(dead_code, reason = "等待协议的确定性参照实现")]
-mod wait;
 mod wait_schema;
 
 pub use barrier_schema::{BarrierDemand, BarrierRuntimeContract};
@@ -320,11 +310,11 @@ mod trace_tests;
 pub(crate) use harness::DecodeReferenceFixture;
 
 pub use harness::{
-    BlockReturnHarness, BlockReturnReport, CardMarkHarness, CardMarkReport, ChannelWaitHarness,
-    ChannelWaitReport, ColdPathHarness, ColdPathReport, CompressionHarness, CompressionReport,
-    EdgeCandidateHarness, EdgeCandidateReport, HarnessReport, OwnerReturnHarness,
-    RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport,
-    SharedForwardHarness, SharedForwardReport, SyncLockHarness, SyncLockReport,
+    BlockReturnHarness, BlockReturnReport, CardMarkHarness, CardMarkReport, ColdPathHarness,
+    ColdPathReport, CompressionHarness, CompressionReport, EdgeCandidateHarness,
+    EdgeCandidateReport, HarnessReport, OwnerReturnHarness, RegionTransferHarness,
+    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, SharedForwardHarness,
+    SharedForwardReport,
 };
 
 #[cfg(test)]
@@ -374,10 +364,12 @@ const STD_PATH_SOURCE: &str = include_str!("../../resources/std/path.gg");
 const STD_FMT_SOURCE: &str = include_str!("../../resources/std/fmt.gg");
 const STD_HASH_SOURCE: &str = include_str!("../../resources/std/hash.gg");
 const STD_COLLECTIONS_SOURCE: &str = include_str!("../../resources/std/collections.gg");
+const STD_SYNC_SOURCE: &str = include_str!("../../resources/std/sync.gg");
 const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
 const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
 const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
 const RUNTIME_CHANNEL_SOURCE: &str = include_str!("../../resources/runtime/channel.gg");
+const RUNTIME_SCHEDULER_SOURCE: &str = include_str!("../../resources/runtime/scheduler.gg");
 const RUNTIME_SYNC_SOURCE: &str = include_str!("../../resources/runtime/sync.gg");
 const RUNTIME_BARRIER_SOURCE: &str = include_str!("../../resources/runtime/barrier.gg");
 const RUNTIME_HEAP_SOURCE: &str = include_str!("../../resources/runtime/heap.gg");
@@ -624,6 +616,76 @@ const GLUE_DEFS: &[GlueDef] = &[
         glue: "platform_release",
         def: GlueDefKind::Fragment,
     },
+    GlueDef {
+        glue: "spawn",
+        def: GlueDefKind::Item {
+            source: "std/runtime/scheduler.gg",
+            item: "spawn",
+        },
+    },
+    GlueDef {
+        glue: "yield",
+        def: GlueDefKind::Item {
+            source: "std/runtime/scheduler.gg",
+            item: "yield_now",
+        },
+    },
+    GlueDef {
+        glue: "channel_new",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "channel_new",
+        },
+    },
+    GlueDef {
+        glue: "channel_close",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "channel_close",
+        },
+    },
+    GlueDef {
+        glue: "channel_send",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "channel_send",
+        },
+    },
+    GlueDef {
+        glue: "channel_receive",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "channel_receive",
+        },
+    },
+    GlueDef {
+        glue: "channel_try_send",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "channel_try_send",
+        },
+    },
+    GlueDef {
+        glue: "channel_try_recv",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "channel_try_recv",
+        },
+    },
+    GlueDef {
+        glue: "join_wait",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "join_wait",
+        },
+    },
+    GlueDef {
+        glue: "select_commit",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "select_commit",
+        },
+    },
 ];
 
 impl RuntimeResources {
@@ -719,6 +781,11 @@ impl RuntimeResources {
                     role: RuntimeSourceRole::StandardLibrary,
                 },
                 RuntimeSource {
+                    logical_path: "std/sync.gg",
+                    source: STD_SYNC_SOURCE,
+                    role: RuntimeSourceRole::StandardLibrary,
+                },
+                RuntimeSource {
                     logical_path: "std/runtime/core.gg",
                     source: RUNTIME_CORE_SOURCE,
                     role: RuntimeSourceRole::Runtime,
@@ -736,6 +803,11 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/runtime/channel.gg",
                     source: RUNTIME_CHANNEL_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/scheduler.gg",
+                    source: RUNTIME_SCHEDULER_SOURCE,
                     role: RuntimeSourceRole::Runtime,
                 },
                 RuntimeSource {

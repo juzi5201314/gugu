@@ -74,7 +74,7 @@ GirLocal {
 - `Downcast(VariantId)`；
 - `OpaqueCast(TyId)`。
 
-投影序列存入 body 级连续 pool，`Place` 只保存 base 和 range。一个 place 中所有会执行用户代码或 panic 的下标表达式必须先求值到 local；投影本身不能隐藏调用。
+投影序列存入 body 级连续 pool，`Place` 只保存 base 和 range。一个 place 中所有会执行用户代码或 panic 的下标表达式必须先求值到 local；投影本身不能隐藏调用。方法接收者按派发记录的解引用次数在原槽上追加 `Deref`，引用形参再对这个投影做 `Ref`；不能先复制被引用聚合再借用副本。
 
 `Operand` 固定为 `Copy(Place)`、`MoveInternal(Place)`、`Constant(ConstId)`、
 `LateConstRef(LateConstKey)` 和 `Function(MonoCandidate)`。`MoveInternal` 只表示编译器已经

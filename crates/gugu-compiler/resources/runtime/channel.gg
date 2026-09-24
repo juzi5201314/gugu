@@ -1,3 +1,5 @@
+use std.runtime.scheduler.{park_current, ready_hot}
+
 /* 等待源控制块的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
  * wait-node 只保存协程句柄、generation、case 和下标偏移，禁止裸栈指针。
  * CoroutineCold.select_scratch 的 4 个 uint 解释为 SelectTxn 描述符；8-word 内联
@@ -50,4 +52,326 @@ pub struct ChannelControl {
 #[used]
 pub fn wait_records(control: &ChannelControl, node: &WaitNode, txn: &SelectTxn, cache: &SelectScratchCache) uint {
     control.source_id + node.wait_generation + txn.case_count + cache.inline_words[0]
+}
+
+fn word(address: uint) uint {
+    unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) }
+}
+
+fn store_word(address: uint, value: uint) {
+    unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) }
+}
+
+fn byte_store(address: uint, value: byte) {
+    unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](address), value) }
+}
+
+fn current_hot() uint {
+    unsafe { std.runtime.current_slot() }
+}
+
+fn as_uint(value: *()) uint {
+    unsafe { std.mem.transmute[*(), uint](value) }
+}
+
+fn as_ptr(value: uint) *() {
+    unsafe { std.mem.transmute[uint, *()](value) }
+}
+
+fn die() {
+    unsafe { std.runtime.process_exit(2) }
+}
+
+fn proc_of(hot: uint) uint = word(hot + 16)
+
+fn heap_alloc(processor: uint, bytes: uint) uint {
+    let cursor = word(processor + 4048)
+    let aligned = cursor / 64 * 64
+    let start = if aligned == cursor { cursor } else { aligned + 64 }
+    store_word(processor + 4048, start + bytes)
+    start
+}
+
+fn value_size(desc: uint) uint {
+    if desc == 0 { return 0 }
+    word(desc)
+}
+
+fn copy_bytes(dst: uint, src: uint, size: uint) {
+    let index: uint = 0
+    while index + 8 <= size {
+        store_word(dst + index, word(src + index))
+        index = index + 8
+    }
+    while index < size {
+        unsafe {
+            let value = std.ptr.ptr_read[byte](std.mem.transmute[uint, *byte](src + index))
+            byte_store(dst + index, value)
+        }
+        index = index + 1
+    }
+}
+
+fn alloc_node(processor: uint, hot: uint, payload: uint, result: uint, case: uint) uint {
+    let node = heap_alloc(processor, 64)
+    store_word(node, hot)
+    store_word(node + 8, 1)
+    store_word(node + 16, 1)
+    store_word(node + 24, case)
+    store_word(node + 32, payload)
+    store_word(node + 40, result)
+    store_word(node + 48, 0)
+    store_word(node + 56, 0)
+    node
+}
+
+fn push_queue(head: uint, node: uint) {
+    if word(head) == 0 {
+        store_word(head, node)
+        return
+    }
+    let cursor = word(head)
+    while word(cursor + 48) != 0 { cursor = word(cursor + 48) }
+    store_word(cursor + 48, node)
+}
+
+fn pop_queue(head: uint) uint {
+    let node = word(head)
+    if node == 0 { return 0 }
+    store_word(head, word(node + 48))
+    node
+}
+
+fn wake_node(node: uint) {
+    if node == 0 { return }
+    let hot = word(node)
+    store_word(hot + 40, word(node + 24))
+    ready_hot(hot)
+}
+
+/// 容量与元素描述符决定环。句柄是控制块地址。
+#[used]
+pub fn channel_new(capacity: int, desc: *()) uint {
+    unsafe {
+        let processor = proc_of(current_hot())
+        if capacity < 0 { die() }
+        let control = heap_alloc(processor, 128)
+        let index: uint = 0
+        while index < 128 {
+            store_word(control + index, 0)
+            index = index + 8
+        }
+        let size = value_size(as_uint(desc))
+        store_word(control + 16, uint(capacity))
+        store_word(control + 72, size)
+        if capacity > 0 && size != 0 {
+            store_word(control + 80, heap_alloc(processor, uint(capacity) * size))
+        }
+        control
+    }
+}
+
+#[used]
+pub fn channel_close(handle: uint) {
+    if word(handle + 24) != 0 { die() }
+    store_word(handle + 24, 1)
+    wake_node(pop_queue(handle + 56))
+    wake_node(pop_queue(handle + 64))
+}
+
+fn deliver(control: uint, src: uint, dst: uint) {
+    copy_bytes(dst, src, word(control + 72))
+}
+
+fn try_rendezvous_send(control: uint, payload: uint) byte {
+    let node = pop_queue(control + 64)
+    if node == 0 { return 0 }
+    deliver(control, payload, word(node + 40))
+    wake_node(node)
+    1
+}
+
+fn enqueue_value(control: uint, payload: uint) byte {
+    let capacity = word(control + 16)
+    let len = word(control + 48)
+    if len >= capacity { return 0 }
+    let size = word(control + 72)
+    let tail = word(control + 40)
+    if size != 0 { copy_bytes(word(control + 80) + (tail % capacity) * size, payload, size) }
+    store_word(control + 40, tail + 1)
+    store_word(control + 48, len + 1)
+    wake_node(pop_queue(control + 64))
+    1
+}
+
+fn park_on(control: uint, queue: uint, payload: uint, result: uint) {
+    let hot = current_hot()
+    let node = alloc_node(proc_of(hot), hot, payload, result, 0)
+    push_queue(queue, node)
+    park_current()
+}
+
+#[used]
+pub fn channel_send(handle: uint, payload: *(), desc: *()) byte {
+    _ = desc
+    let src = as_uint(payload)
+    if word(handle + 24) != 0 { return 0 }
+    if word(handle + 16) == 0 {
+        if try_rendezvous_send(handle, src) == 1 { return 1 }
+        park_on(handle, handle + 56, src, 0)
+        return 1
+    }
+    if enqueue_value(handle, src) == 1 { return 1 }
+    park_on(handle, handle + 56, src, 0)
+    1
+}
+
+fn dequeue_value(control: uint, dst: uint) byte {
+    if word(control + 48) == 0 { return 0 }
+    let size = word(control + 72)
+    let head = word(control + 32)
+    let capacity = word(control + 16)
+    if size != 0 && dst != 0 { copy_bytes(dst, word(control + 80) + (head % capacity) * size, size) }
+    store_word(control + 32, head + 1)
+    store_word(control + 48, word(control + 48) - 1)
+    wake_node(pop_queue(control + 56))
+    1
+}
+
+fn recv_closed(dst: uint) {
+    if dst != 0 { byte_store(dst, 1) }
+}
+
+#[used]
+pub fn channel_receive(handle: uint, payload: *(), desc: *()) byte {
+    _ = desc
+    let dst = as_uint(payload)
+    if word(handle + 16) == 0 {
+        let node = pop_queue(handle + 56)
+        if node != 0 {
+            deliver(handle, word(node + 32), dst)
+            wake_node(node)
+            return 1
+        }
+        if word(handle + 24) != 0 { return 0 }
+        park_on(handle, handle + 64, 0, dst)
+        return 1
+    }
+    if dequeue_value(handle, dst) == 1 { return 1 }
+    if word(handle + 24) != 0 { return 0 }
+    park_on(handle, handle + 64, 0, dst)
+    1
+}
+
+#[used]
+pub fn channel_try_send(handle: uint, payload: *(), desc: *()) byte {
+    _ = desc
+    if word(handle + 24) != 0 { return 2 }
+    let src = as_uint(payload)
+    if word(handle + 16) == 0 {
+        if try_rendezvous_send(handle, src) == 1 { return 1 }
+        return 0
+    }
+    if enqueue_value(handle, src) == 1 { return 1 }
+    0
+}
+
+#[used]
+pub fn channel_try_recv(handle: uint, payload: *(), desc: *()) byte {
+    _ = desc
+    let dst = as_uint(payload)
+    if word(handle + 16) == 0 {
+        let node = pop_queue(handle + 56)
+        if node != 0 {
+            deliver(handle, word(node + 32), dst)
+            wake_node(node)
+            return 1
+        }
+        if word(handle + 24) != 0 { return 2 }
+        return 0
+    }
+    if dequeue_value(handle, dst) == 1 { return 1 }
+    if word(handle + 24) != 0 { return 2 }
+    0
+}
+
+#[used]
+pub fn join_wait(handle: uint, out: *(), desc: *()) byte {
+    _ = desc
+    let cold = word(handle + 48)
+    let dst = as_uint(out)
+    if word(cold + 360) == 1 {
+        if dst != 0 { store_word(dst, word(cold + 368)) }
+        return 1
+    }
+    store_word(cold + 384, current_hot())
+    park_current()
+    if dst != 0 { store_word(dst, word(cold + 368)) }
+    1
+}
+
+fn record(base: uint, index: uint) uint = base + index * 64
+
+fn commit_case(base: uint, index: uint) byte {
+    let at = record(base, index)
+    let op = word(at)
+    let handle = word(at + 8)
+    if op == 0 {
+        if word(handle + 24) != 0 { return 2 }
+        if channel_try_send(handle, as_ptr(word(at + 16)), as_ptr(0)) == 1 { return 1 }
+        return 0
+    }
+    if op == 2 {
+        let cold = word(handle + 48)
+        if word(cold + 360) == 1 {
+            let result = word(at + 32)
+            if result != 0 { store_word(result + word(at + 48), word(cold + 368)) }
+            return 1
+        }
+        return 0
+    }
+    let status = channel_try_recv(handle, as_ptr(word(at + 32) + word(at + 48)), as_ptr(0))
+    if status == 1 {
+        let result = word(at + 32)
+        if result != 0 { byte_store(result, 0) }
+        return 1
+    }
+    if status == 2 {
+        let result = word(at + 32)
+        if result != 0 { byte_store(result, 1) }
+        return 1
+    }
+    0
+}
+
+#[used]
+pub fn select_commit(records: *(), count: uint, has_default: byte) (uint, uint) {
+    let base = as_uint(records)
+    if count == 0 && has_default == 0 {
+        park_current()
+        return (0, 0)
+    }
+    let index: uint = 0
+    while index < count {
+        let status = commit_case(base, index)
+        if status == 2 { return (index, 3) }
+        if status == 1 { return (index, 0) }
+        index = index + 1
+    }
+    if has_default != 0 { return (1000000, 0) }
+    let cursor: uint = 0
+    while cursor < count {
+        let at = record(base, cursor)
+        let op = word(at)
+        let handle = word(at + 8)
+        let queue = if op == 0 { handle + 56 } else { handle + 64 }
+        if op == 2 { store_word(word(handle + 48) + 384, current_hot()) }
+        else {
+            let node = alloc_node(proc_of(current_hot()), current_hot(), word(at + 16), word(at + 32) + word(at + 48), cursor)
+            push_queue(queue, node)
+        }
+        cursor = cursor + 1
+    }
+    park_current()
+    (word(current_hot() + 40), 0)
 }

@@ -853,10 +853,22 @@ fn stackmap_demands_counts_decode_sites_and_compressed_roots() {
         {
             continue;
         }
+        let probed = super::Validated {
+            world: std::sync::Arc::new(candidate.clone()),
+        };
+        let (stackmap, _) = probed.stackmap_demands(module);
+        // 镜像 runtime 的 body 也可能有安全点。只接受不新增函数、安全点或 map 的候选，
+        // 这样压缩根是加进既有 map，而不是给一个原先没有 map 的 body 新开一张。
+        if stackmap.functions != pristine_stackmap.functions
+            || stackmap.safepoints != pristine_stackmap.safepoints
+            || stackmap.maps != pristine_stackmap.maps
+        {
+            continue;
+        }
         world = Some(candidate);
         break;
     }
-    let world = world.expect("fixture 必须有能产生压缩根槽的 body");
+    let world = world.expect("fixture 必须有能产生压缩根槽且不新增 map 的 body");
     let mutated = super::Validated {
         world: std::sync::Arc::new(world),
     };

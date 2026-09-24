@@ -440,10 +440,12 @@
   - 用已登记的协程布局与换栈片段实现镜像内 rt0 后半段：建立 main 协程、接入 context switch、实现 `morestack_or_poll` 与栈增长；panic 走栈图 landing，不再进入 `exit` stub。
   - 验收：hello 与会 panic 的程序由镜像内 runtime 完成启动、换栈和退出；缺 map 或栈上限失败仍是不可捕获 fatal。本阶段结束时删除 Rust 参照模型里「跑 main」的执行体，只保留 schema 与布局交叉校验。
 
-- [ ] **阶段 61b：把调度、等待与同步落成镜像内 Gugu runtime**（复杂度：3）
+- [x] **阶段 61b：把调度、等待与同步落成镜像内 Gugu runtime**（复杂度：3）
   - 依赖：阶段 35–37、58、61a。
   - 把 M:N 队列、park/unpark、steal、yield、channel/Join/select 与同步原语写成 `runtime/*.gg`；`RuntimeCall` 解析到这些符号，等待只挂起协程。
   - 验收：spawn、yield、channel close 竞态、select 单次提交和锁争用在 Linux 镜像内符合既有契约；同一输入不再依赖 Rust 调度执行体。本阶段结束时删除 `scheduler`、`channel`、`select`、`wait`、`sync` 的 Rust 执行体。
+  - 接入证据：镜像固定一个 OS worker，`parallelism = 1`，没有 steal。`std/runtime/scheduler.gg` 的 `take_next` 从本地头取最老项，`yield_now` 把当前协程放进本地尾，已经在队列里的协程先运行。子协程各自保留 1 GiB、初次提交 64 KiB。`rt0_start` 使用可写 processor 页；`boot` 不把 TLAB/TurnRegion 的 cursor/limit 清成 0，而是指到已提交的堆。`I8`/`I16` 载入用 `movzx`，TLAB bump 在新 cursor 超过 limit 时走 slow path。`TypeDescriptor` 符号写出 80 字节记录，偏移 0 是 size。channel、Join、select 在 `channel.gg`，`std.sync` 的 Mutex/RwLock/Condvar/Cancel 在 `sync.gg` 与 `std/sync.gg`。方法接收者按派发记录的解引用次数投影原槽再借用。`gc_write_barrier` 在没有收集器时直接返回。Rust 执行体、`scheduler_runqueue`、`channel_wait` 与 `sync_lock` bench 已删除；`scheduler_schema`、`wait_schema`、`sync_schema` 与非法原子序测试留下。
+  - 验收证据：`cargo bench -p gugu-compiler --bench linux_pie --profile dev` 覆盖 hello、panic、grow、spawn、yield、close、close-send、select、lock 与 wait-children。close-then-send 的报告是 `send on closed channel`。`cargo nextest run --workspace -E 'not test(/^frontend::/)'` 750 项通过；frontend 套件在同一实现上通过，stage10 的导入计数只统计用户源。
 
 - [ ] **阶段 61c：把 LocalHeap 与标记回收落成镜像内 Gugu runtime**（复杂度：3）
   - 依赖：阶段 39–45、61a。

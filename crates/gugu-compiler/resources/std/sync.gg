@@ -1,0 +1,86 @@
+use std.runtime.sync.{
+    cancel_fire, cancel_new, condvar_new, condvar_notify_all, condvar_notify_one, condvar_wait,
+    mutex_lock, mutex_new, mutex_unlock, rwlock_new, rwlock_read, rwlock_unlock, rwlock_write,
+}
+
+pub struct Mutex[T] {
+    control: uint,
+    value: T,
+}
+
+impl[T] Mutex[T] {
+    pub fn new(value: T) Mutex[T] {
+        Mutex[T] { control: mutex_new(), value: value }
+    }
+
+    pub fn lock(self: &Self) {
+        unsafe { mutex_lock(self.control) }
+    }
+
+    pub fn unlock(self: &Self) {
+        unsafe { mutex_unlock(self.control) }
+    }
+
+    pub fn get(self: &Self) &T {
+        &self.value
+    }
+}
+
+pub struct RwLock[T] {
+    control: uint,
+    value: T,
+}
+
+impl[T] RwLock[T] {
+    pub fn new(value: T) RwLock[T] {
+        RwLock[T] { control: rwlock_new(), value: value }
+    }
+
+    pub fn read(self: &Self) {
+        unsafe { rwlock_read(self.control) }
+    }
+
+    pub fn write(self: &Self) {
+        unsafe { rwlock_write(self.control) }
+    }
+
+    pub fn unlock(self: &Self) {
+        unsafe { rwlock_unlock(self.control) }
+    }
+}
+
+pub struct Condvar {
+    control: uint,
+}
+
+impl Condvar {
+    pub fn new() Condvar {
+        Condvar { control: condvar_new() }
+    }
+
+    pub fn wait[T](self: &Self, mutex: &Mutex[T]) {
+        unsafe { condvar_wait(self.control, mutex.control) }
+    }
+
+    pub fn notify_one(self: &Self) {
+        unsafe { condvar_notify_one(self.control) }
+    }
+
+    pub fn notify_all(self: &Self) {
+        unsafe { condvar_notify_all(self.control) }
+    }
+}
+
+pub struct CancelSource {
+    control: uint,
+}
+
+impl CancelSource {
+    pub fn new() CancelSource {
+        CancelSource { control: cancel_new() }
+    }
+
+    pub fn cancel(self: &Self) {
+        unsafe { cancel_fire(self.control) }
+    }
+}

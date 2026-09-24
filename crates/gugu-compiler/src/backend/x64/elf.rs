@@ -987,6 +987,11 @@ fn write_params(
     words[rt0_params::PAYLOAD_LEN] = entry::Rt0Payload::bytes();
     words[rt0_params::INITIAL_SLOT] = defined["__gugu_initial_slot"];
     words[rt0_params::RUNTIME_STATE] = defined["__gugu_runtime_state"];
+    words[rt0_params::COROUTINE_ENTER] = resolve_target(
+        &mangle::mangle_runtime("coroutine_enter"),
+        defined,
+        &request.bound_glues,
+    )?;
     for (index, word) in words.iter().enumerate() {
         put_u64(file, params + index * 8, *word)?;
     }

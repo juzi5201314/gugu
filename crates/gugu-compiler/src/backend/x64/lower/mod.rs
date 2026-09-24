@@ -6,7 +6,8 @@
 //!   bit 63..16 = 0；`I32`：bit 63..32 = 0）；`I64` 是完整 64 位补码；`bool` 是 0/1；
 //!   `F32`/`F64` 在 XMM 低 lane；`Ptr` 是 64 位地址。
 //! - 由不变量直接得到：`ZeroExtend` 恒为一次 `mov`；窄宽度算术结果保持规范形（8/16 位
-//!   ALU 写只改低位，输入的高位零保持不动）。
+//!   ALU 写只改低位，输入的高位零保持不动）。`I8`/`I16` 的内存 `Load` 用 `movzx`
+//!   建立这个规范形，不能用只改低位的 `mov`。
 //! - 两地址形式一律先 `mov dst, lhs` 再 `op dst, rhs`（分配阶段做 copy coalescing），
 //!   lowering 不隐式破坏输入。
 //! - lowering 内部的临时寄存器是固定的物理 scratch（`r11`、`rax`/`rcx`/`rdx`、`xmm15`），

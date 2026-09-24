@@ -240,77 +240,16 @@ impl Builder<'_> {
                 self.runtime_result(call, args, ty)
             }
             g::IntrinsicOp::ChanNew | g::IntrinsicOp::ChanClose => {
-                let target = if matches!(op, g::IntrinsicOp::ChanNew) {
-                    RuntimeCall::ChannelNew
-                } else {
-                    RuntimeCall::ChannelClose
-                };
-                let mut args = Vec::new();
-                for operand in operands {
-                    let value = self.operand(operand)?;
-                    args.extend(self.computed_values(value)?);
-                }
-                args.push(self.descriptor(ty));
-                self.runtime_result(target, args, ty)
+                self.channel_ctor(op, operands, ty)
             }
             g::IntrinsicOp::ChanTrySend | g::IntrinsicOp::ChanTryRecv => {
-                let target = if matches!(op, g::IntrinsicOp::ChanTrySend) {
-                    RuntimeCall::ChannelTrySend
-                } else {
-                    RuntimeCall::ChannelTryRecv
-                };
-                let mut args = Vec::new();
-                for operand in operands {
-                    let value = self.operand(operand)?;
-                    args.extend(self.computed_values(value)?);
-                }
-                args.push(self.descriptor(ty));
-                self.runtime_result(target, args, ty)
+                self.channel_try(op, operands, ty)
             }
             g::IntrinsicOp::Spawn(g::SpawnTarget::Body(definition)) => {
                 self.closure(*definition, ty, true)
             }
             g::IntrinsicOp::Spawn(g::SpawnTarget::Callee(callee)) => {
-                let mut args = Vec::new();
-                let target = match callee {
-                    g::Callee::Value(operand) => {
-                        let value = self.operand(operand)?;
-                        let source = value.ty();
-                        if let TypeKind::FunctionItem { definition, .. } = self.kind(source) {
-                            Some(self.function_key(*definition, source)?)
-                        } else {
-                            args.extend(self.computed_values(value)?);
-                            None
-                        }
-                    }
-                    g::Callee::Dispatch(dispatch) => {
-                        let function = self.owner.dispatches
-                            [usize::try_from(*dispatch).expect("dispatch 编号")]
-                        .function
-                        .ok_or_else(|| invalid("spawn dispatch 缺少函数"))?;
-                        let instance = self
-                            .instance
-                            .functions
-                            .iter()
-                            .find(|callee| callee.definition == function.0)
-                            .ok_or_else(|| invalid("spawn 函数没有闭合实例"))?;
-                        Some(instance.instance)
-                    }
-                    _ => return Err(invalid("spawn 目标必须有明确代码身份")),
-                };
-                if let Some(target) = target {
-                    args.push(self.emit_one(
-                        Op::SymbolAddr(Symbol::Instance(target)),
-                        &[],
-                        ValueType::pointer(Provenance::Code),
-                        Origin::Symbol,
-                    ));
-                }
-                for operand in operands.iter().skip(1) {
-                    let value = self.operand(operand)?;
-                    args.extend(self.computed_values(value)?);
-                }
-                self.runtime_result(RuntimeCall::Spawn, args, ty)
+                self.spawn_callee(callee, operands, ty)
             }
             g::IntrinsicOp::Format { parts } => {
                 let metadata = serde_json::to_vec(&self.owner.string_parts[range(parts)])
@@ -601,7 +540,264 @@ impl Builder<'_> {
             ValueType::pointer(Provenance::Code),
             Origin::Symbol,
         );
-        self.runtime_result(RuntimeCall::Spawn, vec![code, environment], ty)
+        let owner = self
+            .module
+            .owners
+            .iter()
+            .find(|owner| owner.definition == definition)
+            .ok_or_else(|| invalid("协程没有冻结 owner"))?;
+        let mut lanes = Vec::new();
+        if !owner.captures.is_empty() {
+            lanes.push(environment);
+        }
+        self.spawn_call(code, &lanes, ty)
+    }
+
+    fn channel_ctor(
+        &mut self,
+        op: &g::IntrinsicOp,
+        operands: &[g::Operand],
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        if matches!(op, g::IntrinsicOp::ChanClose) {
+            let handle =
+                self.operand(operands.first().ok_or_else(|| invalid("close 缺少通道"))?)?;
+            let handle = self.uint_bits(handle)?;
+            self.runtime(RuntimeCall::ChannelClose, &[handle], &[])?;
+            return Ok(Computed::Values {
+                ty,
+                values: Vec::new(),
+            });
+        }
+        let element = match self.kind(ty) {
+            TypeKind::Channel(element) => *element,
+            _ => return Err(invalid("channel 构造的结果不是 chan")),
+        };
+        let capacity = self.operand(operands.first().ok_or_else(|| invalid("chan 缺少容量"))?)?;
+        let capacity = self.uint_bits(capacity)?;
+        let desc = self.descriptor(element);
+        let desc = self.raw_pointer(desc);
+        let handle = self.runtime(
+            RuntimeCall::ChannelNew,
+            &[capacity, desc],
+            &[ValueType::scalar(Type::I64)],
+        )?;
+        Ok(Computed::Values { ty, values: handle })
+    }
+
+    fn channel_try(
+        &mut self,
+        op: &g::IntrinsicOp,
+        operands: &[g::Operand],
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        let send = matches!(op, g::IntrinsicOp::ChanTrySend);
+        let target = if send {
+            RuntimeCall::ChannelTrySend
+        } else {
+            RuntimeCall::ChannelTryRecv
+        };
+        let handle = operands.first().ok_or_else(|| invalid("try 缺少通道"))?;
+        let payload_ty = if send { None } else { self.ok_payload(ty)? };
+        let payload = match payload_ty {
+            Some(inner)
+                if self
+                    .layout(inner)
+                    .layout
+                    .is_some_and(|layout| layout.size != 0) =>
+            {
+                Some(self.temporary(inner)?)
+            }
+            _ => None,
+        };
+        let status = if send {
+            self.channel_transfer(target, handle, operands.get(1), None)?
+        } else {
+            let handle_value = self.operand(handle)?;
+            let handle_bits = self.uint_bits(handle_value)?;
+            let pointer = if let Some(address) = payload {
+                self.raw_pointer(address)
+            } else {
+                let zero = self.constant(0, Type::I64);
+                self.int_to_raw(zero)
+            };
+            let desc = if let Some(inner) = payload_ty {
+                let desc = self.descriptor(inner);
+                self.raw_pointer(desc)
+            } else {
+                let zero = self.constant(0, Type::I64);
+                self.int_to_raw(zero)
+            };
+            self.runtime(
+                target,
+                &[handle_bits, pointer, desc],
+                &[ValueType::scalar(Type::I8)],
+            )?[0]
+        };
+        let address = self.finish_try(ty, payload_ty, payload, status, send)?;
+        Ok(Computed::Address { ty, address })
+    }
+
+    /// `try_*` 的三态：1 成功，0 Full/Empty，2 Closed。
+    fn finish_try(
+        &mut self,
+        ty: u32,
+        payload_ty: Option<u32>,
+        payload: Option<ValueId>,
+        status: ValueId,
+        send: bool,
+    ) -> Result<ValueId, Diagnostic> {
+        let address = self.temporary(ty)?;
+        self.zero_object(address, ty)?;
+        let success = self.constant(1, Type::I8);
+        let ok = self.compare_value(crate::lir::body::Condition::Eq, false, status, success);
+        let closed_code = self.constant(2, Type::I8);
+        let closed =
+            self.compare_value(crate::lir::body::Condition::Eq, false, status, closed_code);
+        let ok_tag = self.constant(0, Type::I8);
+        let err_tag = self.constant(1, Type::I8);
+        let tag = self.emit_one(
+            Op::Select,
+            &[ok, ok_tag, err_tag],
+            ValueType::scalar(Type::I8),
+            Origin::None,
+        );
+        self.store(address, tag, 1, false);
+        if !send {
+            if let (Some(payload), Some(payload_ty)) = (payload, payload_ty) {
+                let offset = self
+                    .fields(ty, 0, 1)
+                    .ok()
+                    .and_then(|fields| fields.first().copied())
+                    .map(|(offset, _)| offset)
+                    .unwrap_or(0);
+                let destination = self.offset(address, offset);
+                self.copy_memory(destination, payload, payload_ty)?;
+            }
+        }
+        let err_at = self
+            .fields(ty, 1, 1)
+            .ok()
+            .and_then(|fields| fields.first().copied())
+            .map(|(offset, _)| offset)
+            .unwrap_or(1);
+        let closed_tag = self.constant(1, Type::I8);
+        let empty_tag = self.constant(0, Type::I8);
+        let inner = self.emit_one(
+            Op::Select,
+            &[closed, closed_tag, empty_tag],
+            ValueType::scalar(Type::I8),
+            Origin::None,
+        );
+        let err_slot = self.offset(address, err_at);
+        self.store(err_slot, inner, 1, false);
+        Ok(address)
+    }
+
+    fn spawn_callee(
+        &mut self,
+        callee: &g::Callee,
+        operands: &[g::Operand],
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        let instance = match callee {
+            g::Callee::Value(operand) => {
+                let value = self.operand(operand)?;
+                let source = value.ty();
+                let TypeKind::FunctionItem { definition, .. } = self.kind(source) else {
+                    return Err(invalid("spawn 目标必须有明确代码身份"));
+                };
+                self.function_key(*definition, source)?
+            }
+            g::Callee::Dispatch(dispatch) => {
+                let function = self.owner.dispatches
+                    [usize::try_from(*dispatch).expect("dispatch 编号")]
+                .function
+                .ok_or_else(|| invalid("spawn dispatch 缺少函数"))?;
+                self.instance
+                    .functions
+                    .iter()
+                    .find(|callee| callee.definition == function.0)
+                    .ok_or_else(|| invalid("spawn 函数没有闭合实例"))?
+                    .instance
+            }
+            _ => return Err(invalid("spawn 目标必须有明确代码身份")),
+        };
+        let code = self.emit_one(
+            Op::SymbolAddr(Symbol::Instance(instance)),
+            &[],
+            ValueType::pointer(Provenance::Code),
+            Origin::Symbol,
+        );
+        let mut lanes = Vec::new();
+        for operand in operands.iter().skip(1) {
+            let value = self.operand(operand)?;
+            lanes.extend(self.computed_values(value)?);
+        }
+        self.spawn_call(code, &lanes, ty)
+    }
+
+    /// `spawn(code, env)`：把内部 ABI 车道放进 9 个整数槽和 8 个浮点槽。
+    fn spawn_call(
+        &mut self,
+        code: ValueId,
+        lanes: &[ValueId],
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        let blob = self.temporary_bytes(SPAWN_ENV_BYTES, 16, [0; 32], Vec::new())?;
+        let zero = self.constant(0, Type::I64);
+        for index in 0..(SPAWN_ENV_BYTES / 8) {
+            let slot = self.offset(blob, index * 8);
+            self.store(slot, zero, 8, false);
+        }
+        let mut gpr = 0u64;
+        let mut xmm = 0u64;
+        for lane in lanes {
+            let kind = self.machine_type(*lane);
+            if matches!(kind.ty, Type::F32 | Type::F64) {
+                if xmm >= 8 {
+                    return Err(invalid("spawn 浮点参数超过 8 个"));
+                }
+                let bits = if kind.ty == Type::F64 {
+                    *lane
+                } else {
+                    self.emit_one(
+                        Op::Convert(Conversion::FloatResize),
+                        &[*lane],
+                        ValueType::scalar(Type::F64),
+                        Origin::None,
+                    )
+                };
+                let slot = self.offset(blob, 72 + xmm * 16);
+                self.store(slot, bits, 8, false);
+                xmm += 1;
+            } else {
+                if gpr >= 9 {
+                    return Err(invalid("spawn 整数参数超过 9 个"));
+                }
+                let bits = if kind.ty == Type::Ptr {
+                    self.emit_one(
+                        Op::Convert(Conversion::PointerToInt),
+                        &[*lane],
+                        ValueType::scalar(Type::I64),
+                        Origin::None,
+                    )
+                } else {
+                    *lane
+                };
+                let slot = self.offset(blob, gpr * 8);
+                self.store(slot, bits, 8, false);
+                gpr += 1;
+            }
+        }
+        let code = self.raw_pointer(code);
+        let blob = self.raw_pointer(blob);
+        let handle = self.runtime(
+            RuntimeCall::Spawn,
+            &[code, blob],
+            &[ValueType::scalar(Type::I64)],
+        )?;
+        Ok(Computed::Values { ty, values: handle })
     }
 
     /// 闭包环境的 placement：由 `EscapeAndPlacement` 的分配点表按当前语句点查。
@@ -878,3 +1074,6 @@ impl Builder<'_> {
         })
     }
 }
+
+/// spawn 环境：9 个整数槽加 8 个 16 字节浮点槽，补齐到 16 字节对齐。
+const SPAWN_ENV_BYTES: u64 = 208;

@@ -21,9 +21,7 @@ mod resource_impl;
 pub(crate) mod routing_impl;
 pub(crate) mod shared_forward_impl;
 pub(crate) mod shared_heap_impl;
-pub(crate) mod sync_impl;
 pub(crate) mod termination_impl;
-mod wait_impl;
 
 #[cfg(test)]
 #[path = "../coroutine_tests.rs"]
@@ -202,10 +200,6 @@ pub(crate) struct RawWorld {
     stacks: super::stack_arena::StackAllocator,
     coroutine_storage: Vec<Option<coroutine_impl::CoroutineStorage>>,
     completion_barriers: Vec<(super::coroutine::CoroutineHandle, u64, u64)>,
-    scheduler: super::scheduler::SchedulerWorld,
-    wait: super::wait::WaitPlane,
-    channels: super::channel::ChannelTable,
-    sync: super::sync::SyncPlane,
     /// hybrid write barrier 的 processor 账本、arena card table 与 edge summary。
     barrier: super::barrier::BarrierPlane,
     /// 已经由 owner 取走的跨 block edge delta 总数。
@@ -316,9 +310,6 @@ impl RawWorld {
             inboxes.push(Arc::new(OwnerInbox::new(super::OWNER_INBOX_SHARDS)));
             consumers.push(OwnerConsumer::new(super::OWNER_INBOX_SHARDS));
         }
-        let scheduler =
-            super::scheduler::SchedulerWorld::new(u64::from(owners.max(1)), seed.next())?;
-        let wait = super::wait::WaitPlane::new()?;
         let mut world = Self {
             classes,
             resource_classes,
@@ -347,10 +338,6 @@ impl RawWorld {
             stacks: super::stack_arena::StackAllocator::default(),
             coroutine_storage: Vec::new(),
             completion_barriers: Vec::new(),
-            scheduler,
-            wait,
-            channels: super::channel::ChannelTable::new(),
-            sync: super::sync::SyncPlane::new(),
             barrier: super::barrier::BarrierPlane::new(0),
             edge_delta_total: 0,
             pacing: super::pacing::PacingPlane::default(),

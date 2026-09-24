@@ -2,8 +2,8 @@ use super::values::Computed;
 use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::frontend::{gir::body as g, mono};
 use crate::lir::body::{
-    BlockId, Call, CallTarget, Condition, Definition, IntOp, Memory, Op, Origin, Provenance,
-    RuntimeCall, Safepoint, SafepointId, Terminator, Type, ValueId, ValueType, id,
+    BlockId, Call, CallTarget, Condition, Conversion, Definition, IntOp, Memory, Op, Origin,
+    Provenance, RuntimeCall, Safepoint, SafepointId, Terminator, Type, ValueId, ValueType, id,
 };
 
 impl Builder<'_> {
@@ -496,56 +496,245 @@ impl Builder<'_> {
         resume: g::BlockId,
         cancelled: Option<g::BlockId>,
     ) -> Result<(), Diagnostic> {
-        let (target, operands) = match reason {
-            g::SuspendReason::ChanSend { channel, value } => {
-                (RuntimeCall::ChannelSend, vec![channel, value])
+        match reason {
+            g::SuspendReason::Yield => {
+                self.runtime(RuntimeCall::Yield, &[], &[])?;
+                self.jump(self.target(resume));
             }
-            g::SuspendReason::ChanRecv { channel } => (RuntimeCall::ChannelReceive, vec![channel]),
-            g::SuspendReason::JoinWait { join } => (RuntimeCall::JoinWait, vec![join]),
-            g::SuspendReason::Yield => (RuntimeCall::Yield, Vec::new()),
-        };
-        let mut args = Vec::new();
-        for operand in operands {
-            let value = self.operand(operand)?;
-            args.extend(self.computed_values(value)?);
-        }
-        let result_ty = destination.map(|place| self.local_ty(place.local));
-        let output = result_ty
-            .filter(|ty| self.indirect_abi(*ty))
-            .map(|ty| self.temporary(ty))
-            .transpose()?;
-        if let Some(output) = output {
-            args.insert(0, output);
-        }
-        let result_kinds: Vec<_> = if cancelled.is_some() {
-            vec![ValueType::scalar(Type::I8)]
-        } else if let Some(ty) = result_ty.filter(|_| output.is_none()) {
-            self.abi_lanes(ty)
-                .into_iter()
-                .map(|(_, _, kind)| kind)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let values = self.runtime(target, &args, &result_kinds)?;
-        if let (Some(destination), Some(ty)) = (destination, result_ty) {
-            self.write_place(
-                destination,
-                output.map_or(
-                    Computed::Values {
-                        ty,
-                        values: values.clone(),
-                    },
-                    |address| Computed::Address { ty, address },
-                ),
-            )?;
-        }
-        if let Some(cancelled) = cancelled {
-            self.branch(values[0], self.target(resume), self.target(cancelled));
-        } else {
-            self.jump(self.target(resume));
+            g::SuspendReason::ChanSend { channel, value } => {
+                let status =
+                    self.channel_transfer(RuntimeCall::ChannelSend, channel, Some(value), None)?;
+                let resume_block = self.target(resume);
+                let cancel = self.target(cancelled.ok_or_else(|| invalid("send 缺少关闭路径"))?);
+                self.branch(status, resume_block, cancel);
+            }
+            g::SuspendReason::ChanRecv { channel } => {
+                let place = destination.ok_or_else(|| invalid("recv 缺少结果槽"))?;
+                self.channel_result(RuntimeCall::ChannelReceive, channel, place)?;
+                self.jump(self.target(resume));
+            }
+            g::SuspendReason::JoinWait { join } => {
+                let place = destination.ok_or_else(|| invalid("wait 缺少结果槽"))?;
+                self.channel_result(RuntimeCall::JoinWait, join, place)?;
+                self.jump(self.target(resume));
+            }
         }
         Ok(())
+    }
+
+    /// `channel_send` / `try_*` 的固定车道：句柄、载荷地址、类型描述符，返回 `byte` 状态。
+    ///
+    /// 状态 1 表示成功，0 表示 Full/Empty 或取消，2 表示 Closed。
+    pub(super) fn channel_transfer(
+        &mut self,
+        target: RuntimeCall,
+        handle: &g::Operand,
+        payload: Option<&g::Operand>,
+        out: Option<ValueId>,
+    ) -> Result<ValueId, Diagnostic> {
+        let handle_value = self.operand(handle)?;
+        let handle = self.uint_bits(handle_value)?;
+        let (pointer, desc) = if let Some(payload) = payload {
+            let value = self.operand(payload)?;
+            let ty = value.ty();
+            let address = self.computed_address(value)?;
+            let pointer = self.raw_pointer(address);
+            let desc = self.descriptor(ty);
+            (pointer, self.raw_pointer(desc))
+        } else if let Some(out) = out {
+            let pointer = self.raw_pointer(out);
+            let zero = self.constant(0, Type::I64);
+            (pointer, self.int_to_raw(zero))
+        } else {
+            let zero = self.constant(0, Type::I64);
+            let null = self.int_to_raw(zero);
+            (null, null)
+        };
+        let status = self.runtime(
+            target,
+            &[handle, pointer, desc],
+            &[ValueType::scalar(Type::I8)],
+        )?;
+        Ok(status[0])
+    }
+
+    /// 接收或 `Join.wait`：runtime 把成功载荷写入临时槽，编译器再装成 `Result`。
+    fn channel_result(
+        &mut self,
+        target: RuntimeCall,
+        handle: &g::Operand,
+        place: g::Place,
+    ) -> Result<(), Diagnostic> {
+        let result_ty = self.local_ty(place.local);
+        let payload_ty = self.ok_payload(result_ty)?;
+        let payload = match payload_ty {
+            Some(ty)
+                if self
+                    .layout(ty)
+                    .layout
+                    .is_some_and(|layout| layout.size != 0) =>
+            {
+                Some(self.temporary(ty)?)
+            }
+            _ => None,
+        };
+        let handle_value = self.operand(handle)?;
+        let handle_bits = self.uint_bits(handle_value)?;
+        let pointer = if let Some(address) = payload {
+            self.raw_pointer(address)
+        } else {
+            let zero = self.constant(0, Type::I64);
+            self.int_to_raw(zero)
+        };
+        let desc = if let Some(ty) = payload_ty {
+            let desc = self.descriptor(ty);
+            self.raw_pointer(desc)
+        } else {
+            let zero = self.constant(0, Type::I64);
+            self.int_to_raw(zero)
+        };
+        let status = self.runtime(
+            target,
+            &[handle_bits, pointer, desc],
+            &[ValueType::scalar(Type::I8)],
+        )?;
+        let address = self.materialize_status(result_ty, payload_ty, payload, status[0])?;
+        self.write_place(
+            place,
+            Computed::Address {
+                ty: result_ty,
+                address,
+            },
+        )?;
+        Ok(())
+    }
+
+    /// `Result` 的 Ok 变体载荷；Ok 没有字段时返回 `None`。
+    pub(super) fn ok_payload(&self, result_ty: u32) -> Result<Option<u32>, Diagnostic> {
+        let TypeKind::Aggregate { variants, .. } = self.kind(result_ty) else {
+            return Ok(Some(result_ty));
+        };
+        Ok(variants
+            .first()
+            .and_then(|fields| fields.first())
+            .map(|field| field.ty))
+    }
+
+    /// 状态非 0 装 Ok，0 装 Err。
+    pub(super) fn materialize_status(
+        &mut self,
+        result_ty: u32,
+        payload_ty: Option<u32>,
+        payload: Option<ValueId>,
+        status: ValueId,
+    ) -> Result<ValueId, Diagnostic> {
+        let address = self.temporary(result_ty)?;
+        self.zero_object(address, result_ty)?;
+        let failure = self.constant(0, Type::I8);
+        let ok = self.compare_value(Condition::Ne, false, status, failure);
+        let tag_bytes = match self.kind(result_ty) {
+            TypeKind::Aggregate { tag_bytes, .. } if *tag_bytes != 0 => Some(*tag_bytes),
+            _ => None,
+        };
+        if let Some(tag_bytes) = tag_bytes {
+            let width = super::storage::integer_type(u16::from(tag_bytes) * 8);
+            let ok_tag = self.constant(0, width);
+            let err_tag = self.constant(1, width);
+            let tag = self.emit_one(
+                Op::Select,
+                &[ok, ok_tag, err_tag],
+                ValueType::scalar(width),
+                Origin::None,
+            );
+            self.store(address, tag, u32::from(tag_bytes), false);
+        }
+        if let (Some(payload), Some(payload_ty)) = (payload, payload_ty) {
+            let fields = self.fields(result_ty, 0, 1)?;
+            let (offset, _) = fields
+                .first()
+                .copied()
+                .ok_or_else(|| invalid("Result 缺少 Ok 载荷"))?;
+            let destination = self.offset(address, offset);
+            self.copy_memory(destination, payload, payload_ty)?;
+        }
+        Ok(address)
+    }
+
+    /// 把结果对象清零，避免判别字的高位残留导致 match 落入不可达陷阱。
+    pub(super) fn zero_object(&mut self, address: ValueId, ty: u32) -> Result<(), Diagnostic> {
+        let size = self
+            .layout(ty)
+            .layout
+            .ok_or_else(|| invalid("结果缺少布局"))?
+            .size;
+        let zero = self.constant(0, Type::I64);
+        let mut offset = 0u64;
+        while offset + 8 <= size {
+            let slot = self.offset(address, offset);
+            self.store(slot, zero, 8, false);
+            offset += 8;
+        }
+        if offset < size {
+            let slot = self.offset(address, offset);
+            let narrow = self.constant(0, Type::I8);
+            self.store(slot, narrow, 1, false);
+        }
+        Ok(())
+    }
+
+    /// 指针降成裸指针，整数先变成裸指针。glue 形参统一是 `*()`。
+    pub(super) fn raw_pointer(&mut self, value: ValueId) -> ValueId {
+        let kind = self.machine_type(value);
+        if kind.provenance == Some(Provenance::Raw) && kind.ty == Type::Ptr {
+            return value;
+        }
+        if kind.ty == Type::Ptr {
+            return self.emit_one(
+                Op::Convert(Conversion::PointerCast),
+                &[value],
+                ValueType::pointer(Provenance::Raw),
+                Origin::Derived(value),
+            );
+        }
+        self.int_to_raw(value)
+    }
+
+    pub(super) fn int_to_raw(&mut self, value: ValueId) -> ValueId {
+        self.emit_one(
+            Op::Convert(Conversion::IntToPointer),
+            &[value],
+            ValueType::pointer(Provenance::Raw),
+            Origin::None,
+        )
+    }
+
+    fn pointer_bits(&mut self, pointer: ValueId) -> ValueId {
+        if self.machine_type(pointer).ty == Type::Ptr {
+            self.emit_one(
+                Op::Convert(Conversion::PointerToInt),
+                &[pointer],
+                ValueType::scalar(Type::I64),
+                Origin::None,
+            )
+        } else {
+            pointer
+        }
+    }
+
+    /// 通道/Join 句柄或指针收成 `uint` 车道。
+    pub(super) fn uint_bits(&mut self, value: Computed) -> Result<ValueId, Diagnostic> {
+        let mut values = self.computed_values(value)?;
+        let bits = values.pop().ok_or_else(|| invalid("句柄没有机器车道"))?;
+        if self.machine_type(bits).ty == Type::Ptr {
+            Ok(self.emit_one(
+                Op::Convert(Conversion::PointerToInt),
+                &[bits],
+                ValueType::scalar(Type::I64),
+                Origin::None,
+            ))
+        } else {
+            Ok(bits)
+        }
     }
 
     fn select(
@@ -556,35 +745,30 @@ impl Builder<'_> {
         suspend: Option<g::BlockId>,
         cancelled: Option<g::BlockId>,
     ) -> Result<(), Diagnostic> {
-        let mut args = Vec::new();
-        for case in &self.gir.select_cases[crate::lir::body::range(&cases)] {
-            let (tag, handle, value) = match &case.operation {
-                g::SelectOperation::Send { channel, value } => (0, channel, Some(value)),
-                g::SelectOperation::Recv { channel } => (1, channel, None),
-                g::SelectOperation::Wait { join } => (2, join, None),
-            };
-            args.push(self.constant(tag, Type::I8));
-            let handle = self.operand(handle)?;
-            args.extend(self.computed_values(handle)?);
-            if let Some(value) = value {
-                let value = self.operand(value)?;
-                let ty = value.ty();
-                args.push(self.computed_address(value)?);
-                args.push(self.descriptor(ty));
+        let count = cases.end - cases.start;
+        let records = if count == 0 {
+            let zero = self.constant(0, Type::I64);
+            self.int_to_raw(zero)
+        } else {
+            let bytes = u64::from(count) * SELECT_RECORD_BYTES;
+            let base = self.temporary_bytes(bytes, 8, [0; 32], Vec::new())?;
+            for (slot, case) in self.gir.select_cases[crate::lir::body::range(&cases)]
+                .iter()
+                .enumerate()
+            {
+                self.store_select_record(base, slot, case)?;
             }
-            if let Some(destination) = case.destination {
-                let (pointer, ty) = self.address(destination)?;
-                args.push(pointer);
-                args.push(self.descriptor(ty));
-            }
-        }
+            self.raw_pointer(base)
+        };
+        let has_default = self.constant(u64::from(suspend.is_none()), Type::I8);
+        let count_value = self.constant(u64::from(count), Type::I64);
         let values = self.runtime(
             RuntimeCall::SelectCommit {
-                cases: cases.end - cases.start,
+                cases: count,
                 has_default: suspend.is_none(),
             },
-            &args,
-            &[ValueType::scalar(Type::I64), ValueType::scalar(Type::I8)],
+            &[records, count_value, has_default],
+            &[ValueType::scalar(Type::I64), ValueType::scalar(Type::I64)],
         )?;
         self.write_place(
             g::Place::local(index),
@@ -609,4 +793,72 @@ impl Builder<'_> {
         });
         Ok(())
     }
+
+    /// 一条 select case 占 8 个机器字：操作、句柄、载荷、载荷描述符、结果对象、元素描述符、字段偏移、关闭标记。
+    fn store_select_record(
+        &mut self,
+        base: ValueId,
+        slot: usize,
+        case: &g::SelectCase,
+    ) -> Result<(), Diagnostic> {
+        let origin = u64::try_from(slot).expect("select 下标") * SELECT_RECORD_BYTES;
+        let (op, handle, payload) = match &case.operation {
+            g::SelectOperation::Send { channel, value } => (0, channel, Some(value.clone())),
+            g::SelectOperation::Recv { channel } => (1, channel, None),
+            g::SelectOperation::Wait { join } => (2, join, None),
+        };
+        let op_word = self.constant(op, Type::I64);
+        self.store_record_word(base, origin, op_word);
+        let handle_value = self.operand(handle)?;
+        let handle_bits = self.uint_bits(handle_value)?;
+        self.store_record_word(base, origin + 8, handle_bits);
+        if let Some(payload) = payload {
+            let value = self.operand(&payload)?;
+            let ty = value.ty();
+            let address = self.computed_address(value)?;
+            let address_bits = self.pointer_bits(address);
+            self.store_record_word(base, origin + 16, address_bits);
+            let desc = self.descriptor(ty);
+            let desc_bits = self.pointer_bits(desc);
+            self.store_record_word(base, origin + 24, desc_bits);
+        } else {
+            let zero = self.constant(0, Type::I64);
+            self.store_record_word(base, origin + 16, zero);
+            let zero = self.constant(0, Type::I64);
+            self.store_record_word(base, origin + 24, zero);
+        }
+        if let Some(destination) = case.destination {
+            let (pointer, ty) = self.address(destination)?;
+            let element = self.ok_payload(ty)?.unwrap_or(ty);
+            let field = self
+                .fields(ty, 0, 1)
+                .ok()
+                .and_then(|fields| fields.first().copied())
+                .map(|(offset, _)| offset)
+                .unwrap_or(0);
+            let result_bits = self.pointer_bits(pointer);
+            self.store_record_word(base, origin + 32, result_bits);
+            let desc = self.descriptor(element);
+            let desc_bits = self.pointer_bits(desc);
+            self.store_record_word(base, origin + 40, desc_bits);
+            let field_word = self.constant(field, Type::I64);
+            self.store_record_word(base, origin + 48, field_word);
+            let closed = self.constant(u64::from(op == 1), Type::I64);
+            self.store_record_word(base, origin + 56, closed);
+        } else {
+            for word in [32, 40, 48, 56] {
+                let zero = self.constant(0, Type::I64);
+                self.store_record_word(base, origin + word, zero);
+            }
+        }
+        Ok(())
+    }
+
+    fn store_record_word(&mut self, base: ValueId, offset: u64, value: ValueId) {
+        let slot = self.offset(base, offset);
+        self.store(slot, value, 8, false);
+    }
 }
+
+/// select case 记录的字节数：8 个 `uint`。
+const SELECT_RECORD_BYTES: u64 = 64;

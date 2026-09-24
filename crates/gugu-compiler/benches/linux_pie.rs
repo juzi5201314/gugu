@@ -24,6 +24,55 @@ fn main() {
             "",
             "",
         ),
+        (
+            "spawn",
+            "fn child() int { 42 }\nfn main() {\n let handle = async child()\n match handle.wait() {\n Ok(value) => { if value != 42 { panic(\"spawn\") } _ = value }\n Err(_) => panic(\"join\")\n }\n}\n",
+            0,
+            "",
+            "",
+        ),
+        (
+            "yield",
+            "fn child(ch: chan[int]) { ch.send(1)\n yield\n ch.send(2)\n }\nfn main() {\n let ch = chan[int](0)\n let handle = async child(ch)\n match ch.recv() {\n Ok(value) => { if value != 1 { panic(\"yield\") } _ = value }\n Err(_) => panic(\"closed\")\n }\n match ch.recv() {\n Ok(value) => { if value != 2 { panic(\"yield2\") } _ = value }\n Err(_) => panic(\"closed2\")\n }\n _ = handle.wait()\n}\n",
+            0,
+            "",
+            "",
+        ),
+        (
+            "close",
+            "fn main() {\n let ch = chan[int](1)\n ch.send(7)\n ch.close()\n match ch.recv() {\n Ok(value) => { if value != 7 { panic(\"lost\") } _ = value }\n Err(_) => panic(\"early\")\n }\n match ch.recv() {\n Ok(_) => panic(\"extra\")\n Err(_) => { _ = 0 }\n }\n}\n",
+            0,
+            "",
+            "",
+        ),
+        (
+            "close-send",
+            "fn main() {\n let ch = chan[int](1)\n ch.close()\n ch.send(1)\n}\n",
+            1,
+            "",
+            "{\"schema\":\"gugu-runtime-report-v1\",\"event\":\"panic\",\"class\":\"program-failure\",\"reason\":\"unhandled-panic\",\"message\":\"send on closed channel\",\"location\":{\"file\":\"main.gg\",\"line\":4,\"column\":2},\"backtrace\":[],\"exit_code\":1}\n{\"schema\":\"gugu-runtime-report-v1\",\"event\":\"termination\",\"class\":\"program-failure\",\"reason\":\"unhandled-panic\",\"message\":null,\"location\":null,\"backtrace\":[],\"exit_code\":1}\n",
+        ),
+        (
+            "select",
+            "fn main() {\n let first = chan[int](1)\n let second = chan[int](1)\n first.send(1)\n second.send(2)\n select {\n let value = first.recv() => { _ = value }\n let value = second.recv() => { panic(\"second\") }\n }\n match second.recv() {\n Ok(value) => { if value != 2 { panic(\"select\") } }\n Err(_) => panic(\"empty\")\n }\n}\n",
+            0,
+            "",
+            "",
+        ),
+        (
+            "lock",
+            "use std.sync.{Mutex}\nfn child(gate: &Mutex[int], ch: chan[int]) {\n gate.lock()\n ch.send(1)\n gate.unlock()\n}\nfn main() {\n let gate = Mutex[int]::new(0)\n let ch = chan[int](0)\n gate.lock()\n let handle = async child(&gate, ch)\n yield\n gate.unlock()\n match ch.recv() {\n Ok(value) => { if value != 1 { panic(\"lock\") } _ = value }\n Err(_) => panic(\"closed\")\n }\n _ = handle.wait()\n}\n",
+            0,
+            "",
+            "",
+        ),
+        (
+            "wait-children",
+            "fn child() { let n = 0\n while n < 10 { n = n + 1 }\n }\nfn main() {\n let handle = async child()\n _ = handle\n}\n",
+            0,
+            "",
+            "",
+        ),
     ];
     for (name, source, code, stdout, stderr) in programs {
         if std::env::var("GUGU_PIE_CASE").is_ok_and(|filter| filter != name) {

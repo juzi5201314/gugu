@@ -1,3 +1,5 @@
+use std.runtime.scheduler.{park_current, ready_hot}
+
 /* 同步控制块的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
  * Mutex / RwLock / Condvar / OnceLock / Cancel 均对齐至 64 字节（cache line）。
  */
@@ -44,6 +46,181 @@ pub struct CancelControl {
     pub token_count: uint,
     pub padding: [byte; 32],
 }
+
+fn word(address: uint) uint {
+    unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) }
+}
+
+fn store_word(address: uint, value: uint) {
+    unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) }
+}
+
+fn alloc_cell() uint {
+    unsafe {
+        let hot = std.runtime.current_slot()
+        let processor = word(hot + 16)
+        let cursor = word(processor + 4048)
+        let aligned = cursor / 64 * 64
+        let start = if aligned == cursor { cursor } else { aligned + 64 }
+        store_word(processor + 4048, start + 64)
+        let index: uint = 0
+        while index < 64 {
+            store_word(start + index, 0)
+            index = index + 8
+        }
+        start
+    }
+}
+
+fn push_waiter(head: uint, hot: uint) {
+    store_word(hot + 40, word(head))
+    store_word(head, hot)
+}
+
+fn pop_waiter(head: uint) uint {
+    let hot = word(head)
+    if hot == 0 { return 0 }
+    store_word(head, word(hot + 40))
+    hot
+}
+
+#[used]
+pub fn mutex_new() uint = alloc_cell()
+
+#[used]
+pub fn mutex_lock(cell: uint) {
+    if word(cell) == 0 {
+        store_word(cell, 1)
+        return
+    }
+    push_waiter(cell + 16, unsafe { std.runtime.current_slot() })
+    park_current()
+}
+
+#[used]
+pub fn mutex_unlock(cell: uint) {
+    let waiter = pop_waiter(cell + 16)
+    if waiter == 0 {
+        store_word(cell, 0)
+        return
+    }
+    store_word(cell, 1)
+    ready_hot(waiter)
+}
+
+#[used]
+pub fn rwlock_new() uint = alloc_cell()
+
+#[used]
+pub fn rwlock_read(cell: uint) {
+    if word(cell + 16) == 0 && word(cell) != 2 {
+        store_word(cell, 1)
+        store_word(cell + 32, word(cell + 32) + 1)
+        return
+    }
+    push_waiter(cell + 16, unsafe { std.runtime.current_slot() })
+    park_current()
+}
+
+#[used]
+pub fn rwlock_write(cell: uint) {
+    if word(cell) == 0 {
+        store_word(cell, 2)
+        return
+    }
+    push_waiter(cell + 24, unsafe { std.runtime.current_slot() })
+    park_current()
+}
+
+#[used]
+pub fn rwlock_unlock(cell: uint) {
+    if word(cell) == 1 && word(cell + 32) > 1 {
+        store_word(cell + 32, word(cell + 32) - 1)
+        return
+    }
+    store_word(cell, 0)
+    store_word(cell + 32, 0)
+    let waiter = pop_waiter(cell + 16)
+    if waiter != 0 { ready_hot(waiter) }
+}
+
+#[used]
+pub fn once_new() uint = alloc_cell()
+
+#[used]
+pub fn once_begin(cell: uint) byte {
+    if word(cell) == 2 || word(cell) == 3 { return 0 }
+    if word(cell) == 1 {
+        push_waiter(cell + 16, unsafe { std.runtime.current_slot() })
+        park_current()
+        return 0
+    }
+    store_word(cell, 1)
+    1
+}
+
+#[used]
+pub fn once_ready(cell: uint) {
+    store_word(cell, 2)
+    let waiter = pop_waiter(cell + 16)
+    while waiter != 0 {
+        let next = word(waiter + 40)
+        ready_hot(waiter)
+        waiter = next
+    }
+}
+
+#[used]
+pub fn once_fail(cell: uint) {
+    store_word(cell, 3)
+    once_ready(cell)
+    store_word(cell, 3)
+}
+
+#[used]
+pub fn condvar_new() uint = alloc_cell()
+
+#[used]
+pub fn condvar_wait(cond: uint, mutex: uint) {
+    mutex_unlock(mutex)
+    push_waiter(cond + 16, unsafe { std.runtime.current_slot() })
+    park_current()
+    mutex_lock(mutex)
+}
+
+#[used]
+pub fn condvar_notify_one(cond: uint) {
+    let waiter = pop_waiter(cond + 16)
+    if waiter != 0 { ready_hot(waiter) }
+}
+
+#[used]
+pub fn condvar_notify_all(cond: uint) {
+    let waiter = pop_waiter(cond + 16)
+    while waiter != 0 {
+        let next = word(waiter + 40)
+        ready_hot(waiter)
+        waiter = next
+    }
+}
+
+#[used]
+pub fn cancel_new() uint = alloc_cell()
+
+#[used]
+pub fn cancel_fire(cell: uint) {
+    if word(cell) != 0 { return }
+    store_word(cell, 1)
+    let waiter = pop_waiter(cell + 16)
+    while waiter != 0 {
+        let next = word(waiter + 40)
+        ready_hot(waiter)
+        waiter = next
+    }
+}
+
+#[used]
+pub fn cancel_is_set(cell: uint) byte = if word(cell) == 0 { 0 } else { 1 }
 
 /// 非空 package 必经布局交叉校验。
 #[used]

@@ -935,6 +935,30 @@ fn invalid_operands_and_foreign_ops_are_rejected() {
         &source(),
     );
     assert!(load.is_ok(), "Load 必须有机器序列");
+    let narrow = checked(
+        &Op::Load(crate::lir::body::Access {
+            alias: crate::lir::body::AliasClass::Heap,
+            align: 1,
+            volatile: false,
+        }),
+        &[Type::Ptr],
+        &[Type::I8],
+    );
+    assert_eq!(
+        mnemonics(&narrow),
+        ["movzx"],
+        "I8 载入必须零扩展，不能只改低 8 位"
+    );
+    let half = checked(
+        &Op::Load(crate::lir::body::Access {
+            alias: crate::lir::body::AliasClass::Heap,
+            align: 2,
+            volatile: false,
+        }),
+        &[Type::Ptr],
+        &[Type::I16],
+    );
+    assert_eq!(mnemonics(&half), ["movzx"], "I16 载入必须零扩展");
     // 结果数量不匹配。
     let arity = lowering::lower(
         &Op::Integer(IntOp::Add),

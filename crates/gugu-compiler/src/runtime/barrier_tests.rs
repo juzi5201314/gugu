@@ -741,7 +741,7 @@ fn compile_slice_reports_barrier_contract_end_to_end() {
 
 #[test]
 fn publish_region_slice_exposes_permit_quotas_in_the_contract() {
-    let source = "use std.runtime.{ownership_publish, root_publish}\nfn main() {\n let first: chan[int] = chan[int](0)\n let publish = fn() {\n  let a: chan[int] = chan[int](0)\n  ownership_publish(first, a)\n }\n publish()\n _ = first\n}";
+    let source = "use std.runtime.{ownership_publish, root_publish}\nfn main() {\n let keep = 1\n let first = fn() { _ = keep }\n let publish = fn() {\n  let a = first\n  ownership_publish(first, a)\n }\n publish()\n _ = first\n}";
     let compilation = Compiler::new().compile(CompileRequest::single_file(
         "main.gg",
         source,
@@ -758,10 +758,10 @@ fn publish_region_slice_exposes_permit_quotas_in_the_contract() {
         .expect("runtime 契约")
         .barrier()
         .demand();
-    // publish 闭包本身有 3 条 region 外的 managed store，region 内只有 1 条已预留的写入。
+    // 闭包句柄是 GcHeap。region 内 1 条已预留写入；region 外还有构造和复制闭包的 managed store。
     assert_eq!(demand.reserved_barriers, 1);
-    assert_eq!(demand.bare_barriers, 3);
-    assert_eq!(demand.barrier_sites(), 4);
+    assert_eq!(demand.bare_barriers, 5);
+    assert_eq!(demand.barrier_sites(), 6);
     assert_eq!(demand.regions, 1);
     assert_eq!(demand.permits, 1);
     // 每个 publish region 只包住一条句柄 Assign：2 个 shade slot、1 个 card-mark slot。

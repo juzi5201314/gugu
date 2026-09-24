@@ -1,0 +1,252 @@
+/* 单 OS worker 上的 Classic64 本地队列。
+ *
+ * processor 页由 rt0 清零。128/256 是 head/tail，384 起是 256 个槽，3552 是 run_next，
+ * 3568 是 overflow carry，4032 是存活数，4048/4056 是堆游标，4072 是子协程入口，4080 是状态区。
+ * 热记录的 +16 是 processor，+48 是 cold 地址。等待只改协程状态并切回系统栈。
+ */
+
+fn word(address: uint) uint {
+    unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) }
+}
+
+fn store_word(address: uint, value: uint) {
+    unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) }
+}
+
+fn fail() {
+    unsafe { std.runtime.process_exit(2) }
+}
+
+fn proc_of(hot: uint) uint = word(hot + 16)
+
+fn state_of(processor: uint) uint = word(processor + 4080)
+
+fn heap_alloc(processor: uint, bytes: uint) uint {
+    let cursor = word(processor + 4048)
+    let aligned = cursor / 64 * 64
+    let start = if aligned == cursor { cursor } else { aligned + 64 }
+    if start + bytes > word(processor + 4056) { fail() }
+    store_word(processor + 4048, start + bytes)
+    start
+}
+
+fn commit_stack(base: uint, bytes: uint) {
+    unsafe {
+        let range = StackRange { base: base, bytes: bytes }
+        if std.platform.commit(std.mem.transmute[*StackRange, uint](std.ptr.addr_of(range))) != 0 { fail() }
+    }
+}
+
+#[repr(C)]
+struct StackRange { base: uint, bytes: uint }
+
+fn zero_range(processor: uint, start: uint, end: uint) {
+    let index = start
+    while index < end {
+        store_word(processor + index, 0)
+        index = index + 8
+    }
+}
+
+fn map_span(bytes: uint) uint {
+    unsafe {
+        let base = std.platform.reserve_aligned(bytes, uint(4096))
+        if base == 0 { fail() }
+        commit_stack(base, bytes)
+        base
+    }
+}
+
+/// 清零队列，保留并初始化 TLAB/TurnRegion。main 槽算作第一个存活协程。
+///
+/// 3520..3552 是编译器 bump 的 cursor/limit。清成 0 会让快路径把对象头写到空地址。
+pub fn boot(processor: uint, state: uint, slot: uint, cold: uint, enter: uint) {
+    unsafe {
+        zero_range(processor, 64, 3520)
+        zero_range(processor, 3552, 4096)
+        let heap = map_span(1048576)
+        let tlab = map_span(1048576)
+        let turn = map_span(1048576)
+        store_word(processor + 3520, tlab)
+        store_word(processor + 3528, tlab + 1048576)
+        store_word(processor + 3536, turn)
+        store_word(processor + 3544, turn + 1048576)
+        store_word(processor + 4032, 1)
+        store_word(processor + 4048, heap)
+        store_word(processor + 4056, heap + 1048576)
+        store_word(processor + 4072, enter)
+        store_word(processor + 4080, state)
+        store_word(slot + 16, processor)
+        store_word(slot + 48, cold)
+        store_word(slot, 1)
+    }
+}
+
+fn enqueue(processor: uint, hot: uint) {
+    let head = word(processor + 128)
+    let tail = word(processor + 256)
+    if tail - head >= 256 { overflow(processor) }
+    let tail = word(processor + 256)
+    store_word(processor + 384 + (tail % 256) * 8, hot)
+    store_word(processor + 256, tail + 1)
+}
+
+fn overflow(processor: uint) {
+    let moved: uint = 0
+    while moved < 128 && word(processor + 256) != word(processor + 128) {
+        let head = word(processor + 128)
+        let hot = word(processor + 384 + (head % 256) * 8)
+        store_word(processor + 128, head + 1)
+        store_word(hot + 8, word(processor + 3568))
+        store_word(processor + 3568, hot)
+        moved = moved + 1
+    }
+}
+
+/// 先取 run_next，再取本地头（yield 放在尾部，已有 runnable 先被选中），最后取 overflow carry。
+pub fn take_next(processor: uint) uint {
+    let next = word(processor + 3552)
+    if next != 0 {
+        store_word(processor + 3552, 0)
+        return next
+    }
+    let head = word(processor + 128)
+    let tail = word(processor + 256)
+    if tail != head {
+        let hot = word(processor + 384 + (head % 256) * 8)
+        store_word(processor + 128, head + 1)
+        return hot
+    }
+    let carry = word(processor + 3568)
+    if carry == 0 { return 0 }
+    store_word(processor + 3568, word(carry + 8))
+    carry
+}
+
+pub fn ready_hot(hot: uint) {
+    let processor = proc_of(hot)
+    store_word(hot, 6)
+    let current = word(processor + 3552)
+    if current == 0 {
+        store_word(processor + 3552, hot)
+    } else {
+        enqueue(processor, current)
+        store_word(processor + 3552, hot)
+    }
+}
+
+fn switch_out(hot: uint) {
+    unsafe {
+        let processor = proc_of(hot)
+        let state = state_of(processor)
+        let cold = word(hot + 48)
+        std.runtime.context_switch(
+            std.mem.transmute[uint, *()](cold + 8),
+            std.mem.transmute[uint, *()](state + 40),
+            std.mem.transmute[uint, *()](hot),
+            std.mem.transmute[uint, *()](processor),
+        )
+    }
+}
+
+/// 显式让出：放到本地尾，不占用 run_next。
+#[used]
+pub fn yield_now() {
+    unsafe {
+        let hot = std.runtime.current_slot()
+        let processor = proc_of(hot)
+        store_word(hot, 6)
+        enqueue(processor, hot)
+        store_word(state_of(processor) + 688, 1)
+        switch_out(hot)
+    }
+}
+
+pub fn park_current() {
+    unsafe {
+        let hot = std.runtime.current_slot()
+        store_word(hot, 8)
+        store_word(state_of(proc_of(hot)) + 688, 1)
+        switch_out(hot)
+    }
+}
+
+fn prepare_child(processor: uint, code: uint, env: uint) uint {
+    unsafe {
+        let reserve: uint = 1073741824
+        let capacity: uint = 65536
+        let stack_base = std.platform.reserve_aligned(reserve, uint(4096))
+        if stack_base == 0 { fail() }
+        let stack_high = stack_base + reserve
+        commit_stack(stack_high - capacity, capacity)
+        let slot = heap_alloc(processor, 128)
+        let cold = heap_alloc(processor, 512)
+        let index: uint = 0
+        while index < 512 {
+            store_word(cold + index, 0)
+            index = index + 8
+        }
+        store_word(slot + 16, processor)
+        store_word(slot + 48, cold)
+        store_word(slot + 64, stack_high - capacity + 512)
+        store_word(slot + 72, stack_high - capacity)
+        store_word(slot + 80, stack_high)
+        store_word(slot + 88, capacity)
+        let stack_top = stack_high / 16 * 16
+        let frame = stack_top - 16
+        store_word(frame, code)
+        store_word(frame + 8, env)
+        store_word(cold + 8, frame)
+        store_word(cold + 16, word(processor + 4072))
+        store_word(slot, 6)
+        slot
+    }
+}
+
+/// 创建子协程并放入本地尾。句柄是热记录地址。
+#[used]
+pub fn spawn(code: *(), env: *()) uint {
+    unsafe {
+        let parent = std.runtime.current_slot()
+        let processor = proc_of(parent)
+        let child = prepare_child(processor, std.mem.transmute[*(), uint](code), std.mem.transmute[*(), uint](env))
+        store_word(processor + 4032, word(processor + 4032) + 1)
+        enqueue(processor, child)
+        child
+    }
+}
+
+/// 协程返回：发布结果、唤醒 Join，并减少存活数。
+pub fn finish_hot(hot: uint, value: uint, second: uint) {
+    let cold = word(hot + 48)
+    store_word(cold + 360, 1)
+    store_word(cold + 368, value)
+    store_word(cold + 376, second)
+    let joiner = word(cold + 384)
+    if joiner != 0 { ready_hot(joiner) }
+    store_word(hot, 16)
+    let processor = proc_of(hot)
+    let live = word(processor + 4032)
+    if live != 0 { store_word(processor + 4032, live - 1) }
+}
+
+pub fn live_count(processor: uint) uint = word(processor + 4032)
+
+/// 恢复一个已就绪协程。没有可运行协程时返回 0。
+pub fn resume_ready(state: uint) uint {
+    unsafe {
+        let processor = word(state + 96)
+        let hot = take_next(processor)
+        if hot == 0 { return 0 }
+        store_word(hot, 1)
+        store_word(state, hot)
+        store_word(state + 32, word(hot + 48))
+        store_word(state + 96, processor)
+        std.runtime.context_restore(
+            std.mem.transmute[uint, *()](word(hot + 48) + 8),
+            std.mem.transmute[uint, *()](hot),
+            std.mem.transmute[uint, *()](processor),
+        )
+        1
+    }
+}

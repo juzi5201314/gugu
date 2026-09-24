@@ -970,8 +970,43 @@ pub(crate) fn build(
         constants: constants.blobs(),
         fingerprint: [0; 32],
     };
+    world
+        .constants
+        .extend(type_descriptor_blobs(&world.fragments, universe)?);
     world.fingerprint = world_fingerprint(&world);
     Ok(world)
+}
+
+/// 为每个被引用的 `TypeDescriptor` 写出一条类型记录。
+///
+/// `lea` 的目标必须是已定义符号。未定义时链接器把它收成 `stub_exit`，
+/// 运行时会把退出指令的字节当成值尺寸。记录尺寸与 `.gugu.types` 的单条
+/// record 相同，偏移 0 是 `size`，偏移 8 是 `align`。trace 与 value 程序
+/// 仍只放在 `.gugu.types`。
+fn type_descriptor_blobs(
+    fragments: &[FragmentPayload],
+    universe: &TypeUniverse,
+) -> Result<Vec<(String, Vec<u8>)>, Vec<Diagnostic>> {
+    let mut keys = std::collections::BTreeSet::<[u8; 32]>::new();
+    for fragment in fragments {
+        for relocation in &fragment.relocations {
+            if let RelocTarget::Lir(lir::body::Symbol::TypeDescriptor(key)) = &relocation.target {
+                keys.insert(*key);
+            }
+        }
+    }
+    let mut blobs = Vec::with_capacity(keys.len());
+    for key in keys {
+        let record = universe.record(&key).map_err(|error| vec![error])?;
+        let (size, align) = record.layout.unwrap_or((0, 1));
+        let align = u32::try_from(align).map_err(|_| vec![invalid("类型对齐超过 u32")])?;
+        let mut bytes = vec![0_u8; crate::runtime::gc_metadata_section::TYPE_RECORD_BYTES];
+        bytes[0..8].copy_from_slice(&size.to_le_bytes());
+        bytes[8..12].copy_from_slice(&align.to_le_bytes());
+        let name = super::mangle::mangle_symbol(&lir::body::Symbol::TypeDescriptor(key));
+        blobs.push((name, bytes));
+    }
+    Ok(blobs)
 }
 
 /// 单个实例的片段 query key。

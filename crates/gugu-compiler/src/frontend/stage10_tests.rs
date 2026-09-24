@@ -53,24 +53,36 @@ fn analyze_with_cfg(
 ///
 /// 内建平台源单元与用户源码进入同一张定义表，按逻辑路径排除内建单元即可只针对用户源码断言，
 /// 也避免把内建单元的定义个数写死成常量。
-fn user_definitions(output: &super::FrontendOutput) -> usize {
-    let resources = crate::runtime::RuntimeResources::builtin();
-    let builtin: Vec<&str> = resources
+fn builtin_paths() -> Vec<String> {
+    crate::runtime::RuntimeResources::builtin()
         .sources()
         .iter()
-        .map(|source| source.logical_path())
-        .collect();
+        .map(|source| source.logical_path().to_owned())
+        .collect()
+}
+
+fn is_user_path(path: &std::path::Path, builtin: &[String]) -> bool {
+    path.to_str()
+        .is_none_or(|path| !builtin.iter().any(|item| item == path))
+}
+
+fn user_definitions(output: &super::FrontendOutput) -> usize {
+    let builtin = builtin_paths();
     output
         .names
         .definitions
         .iter()
-        .filter(|definition| {
-            definition
-                .span
-                .path()
-                .to_str()
-                .is_none_or(|path| !builtin.contains(&path))
-        })
+        .filter(|definition| is_user_path(definition.span.path(), &builtin))
+        .count()
+}
+
+fn user_imports(output: &super::FrontendOutput) -> usize {
+    let builtin = builtin_paths();
+    output
+        .names
+        .imports
+        .iter()
+        .filter(|import| is_user_path(import.span.path(), &builtin))
         .count()
 }
 
@@ -113,8 +125,8 @@ fn cfg_selects_exactly_one_target_and_feature_definition() {
 
     assert_eq!(user_definitions(&linux), 2);
     assert_eq!(user_definitions(&windows), 2);
-    assert_eq!(linux.names.imports.len(), 1);
-    assert_eq!(windows.names.imports.len(), 1);
+    assert_eq!(user_imports(&linux), 1);
+    assert_eq!(user_imports(&windows), 1);
 }
 
 #[test]
@@ -225,7 +237,7 @@ fn main() {
     .expect("cfg 只删除完整序列成员");
 
     assert_eq!(user_definitions(&configured), 10);
-    assert_eq!(configured.names.imports.len(), 1);
+    assert_eq!(user_imports(&configured), 1);
 }
 
 #[test]
@@ -314,7 +326,7 @@ fn imports_resolve_reexports_and_enforce_visibility() {
         false,
     )
     .expect("public re-export resolves");
-    assert_eq!(reexport.names.imports.len(), 2);
+    assert_eq!(user_imports(&reexport), 2);
 
     let private = analyze(
         &[

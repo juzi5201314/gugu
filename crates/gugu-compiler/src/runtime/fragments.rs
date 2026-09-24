@@ -39,6 +39,8 @@ const R64_IMM32: &[OperandKind] = &[OperandKind::R64, OperandKind::Imm32];
 const R32_IMM32: &[OperandKind] = &[OperandKind::R32, OperandKind::Imm32];
 const RM32_R32: &[OperandKind] = &[OperandKind::Rm32, OperandKind::R32];
 const XMMRM_XMM: &[OperandKind] = &[OperandKind::XmmRm, OperandKind::Xmm];
+/// 调度返回原因，写在 runtime 状态区邮箱之后的空闲字。0 是 morestack，1 是主动让出，2 是协程返回。
+const SCHEDULE_REASON: i32 = 688;
 
 /// 片段内的一个入口符号。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -511,16 +513,19 @@ impl MainReturnCode {
             vec![mailbox_operand(&mut planned, processor), reg(gpr(Gpr::Rcx))],
         );
         builder.emit(
-            "xor",
-            RM32_R32,
-            Access::ReadWrite,
-            vec![reg(gpr(Gpr::Rdx)), reg(gpr(Gpr::Rdx))],
+            "mov",
+            R32_IMM32,
+            Access::Write,
+            vec![reg(gpr(Gpr::Rdx)), imm(2)],
         );
         builder.emit(
             "mov",
             RM64_R64,
             Access::Write,
-            vec![mailbox_operand(&mut planned, hot), reg(gpr(Gpr::Rdx))],
+            vec![
+                mailbox_operand(&mut planned, SCHEDULE_REASON),
+                reg(gpr(Gpr::Rdx)),
+            ],
         );
         planned.push(("context_restore", 0));
         builder.emit(
@@ -1470,6 +1475,145 @@ fn panic_resume_fragment() -> FragmentBlob {
     }
 }
 
+/// 子协程入口：从栈上的 `(code, env)` 装入内部 ABI 参数，调用用户函数，再切回系统栈。
+fn coroutine_enter_fragment() -> FragmentBlob {
+    let mut builder = Builder::new();
+    let mut planned: Vec<(&'static str, i32)> = Vec::new();
+    let integer = [
+        (Gpr::Rbx, 8),
+        (Gpr::Rcx, 16),
+        (Gpr::Rdx, 24),
+        (Gpr::Rdi, 32),
+        (Gpr::Rsi, 40),
+        (Gpr::R8, 48),
+        (Gpr::R9, 56),
+        (Gpr::R10, 64),
+    ];
+    // `[rsp]` 的零位移编码会多写出一字节；先把 rsp 放到 r11 再间接读取。
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![reg(gpr(Gpr::Rsp)), reg(gpr(Gpr::R11))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R11), 0), reg(gpr(Gpr::R11))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::Rsp), 8), reg(gpr(Gpr::Rax))],
+    );
+    for (register, offset) in integer {
+        builder.emit(
+            "mov",
+            RM64_R64,
+            Access::Read,
+            vec![mem_base(gpr(Gpr::Rax), offset), reg(gpr(register))],
+        );
+    }
+    for index in 0..8 {
+        let offset = 72 + 16 * index;
+        builder.emit(
+            "movups",
+            XMMRM_XMM,
+            Access::Read,
+            vec![
+                mem_base(gpr(Gpr::Rax), offset),
+                xmm(crate::backend::x64::abi::INTERNAL_FLOAT[index as usize]),
+            ],
+        );
+    }
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::Rax), 0), reg(gpr(Gpr::Rax))],
+    );
+    builder.emit("call", RM64, Access::Read, vec![reg(gpr(Gpr::R11))]);
+    let return_value = field_offset(offset_of!(MorestackMailbox, return_value));
+    let candidate = field_offset(offset_of!(MorestackMailbox, candidate));
+    let system_context = field_offset(offset_of!(MorestackMailbox, system_context));
+    let hot = field_offset(offset_of!(MorestackMailbox, hot));
+    let processor = field_offset(offset_of!(MorestackMailbox, processor));
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![
+            mailbox_operand(&mut planned, return_value),
+            reg(gpr(Gpr::Rax)),
+        ],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![mailbox_operand(&mut planned, candidate), reg(gpr(Gpr::Rbx))],
+    );
+    builder.emit(
+        "mov",
+        R32_IMM32,
+        Access::Write,
+        vec![reg(gpr(Gpr::Rdx)), imm(2)],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![
+            mailbox_operand(&mut planned, SCHEDULE_REASON),
+            reg(gpr(Gpr::Rdx)),
+        ],
+    );
+    builder.emit(
+        "lea",
+        MEM_R64,
+        Access::Address,
+        vec![
+            mailbox_operand(&mut planned, system_context),
+            reg(gpr(Gpr::Rax)),
+        ],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mailbox_operand(&mut planned, hot), reg(gpr(Gpr::Rbx))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mailbox_operand(&mut planned, processor), reg(gpr(Gpr::Rcx))],
+    );
+    planned.push(("context_restore", 0));
+    builder.emit(
+        "jmp",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(
+            RelocTarget::Lir(glue_symbol("context_restore")),
+            RelocKind::PcRel32,
+        )],
+    );
+    let encoded = finish(builder);
+    FragmentBlob {
+        alignment: FRAGMENT_ALIGNMENT,
+        domain: FragmentDomain::Runtime,
+        bytes: encoded.bytes,
+        entries: vec![FragmentEntry {
+            glue: "coroutine_enter",
+            offset: 0,
+        }],
+        relocations: relocations_of(&patch_list(&encoded.relocations, &planned)),
+    }
+}
+
 /// 目标平台的全部登记片段；一个 blob 可带多个入口（context 片段）。
 pub(crate) fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
     let context = ContextSwitchCode::fixed();
@@ -1545,6 +1689,18 @@ pub(crate) fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
             relocations: report.relocations,
         },
     ];
+    blobs.push(coroutine_enter_fragment());
+    // 引用存储在调用前已经完成。这一阶段没有收集器，屏障只需要返回。
+    blobs.push(FragmentBlob {
+        alignment: FRAGMENT_ALIGNMENT,
+        domain: FragmentDomain::Runtime,
+        bytes: vec![0xc3],
+        entries: vec![FragmentEntry {
+            glue: "gc_write_barrier",
+            offset: 0,
+        }],
+        relocations: Vec::new(),
+    });
     blobs.push(panic_entry_fragment());
     blobs.push(panic_resume_fragment());
     for op in [

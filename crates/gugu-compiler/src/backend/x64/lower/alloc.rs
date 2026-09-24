@@ -225,7 +225,9 @@ fn bump(
         Access::Read,
         vec![mem_base(r15, limit_off), reg(gpr(Gpr::Rax))],
     );
-    builder.emit("ja", REL32, Access::Read, vec![Operand::Label(overflow)]);
+    // `cmp limit, new_cursor; jb`：new_cursor 超过 span 才进 slow path。
+    // `ja` 会在仍有空间时离开快路径，并在 cursor 为 0 时把对象头写到空地址。
+    builder.emit("jb", REL32, Access::Read, vec![Operand::Label(overflow)]);
     builder.emit(
         "mov",
         move_kinds(64),

@@ -5,6 +5,8 @@
 //! `build`/`verify`/`canonical_bytes`/`fingerprint`/`dump` 闭环。
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use std::collections::BTreeMap;
 use std::mem::{align_of, offset_of, size_of};
 
 use super::model::RawModelError;
@@ -477,4 +479,201 @@ fn fixed_layouts() -> Vec<SyncRecordLayout> {
             ],
         },
     ]
+}
+
+const _: () = {
+    assert!(ORDERING_RELAXED == 0);
+    assert!(ORDERING_ACQUIRE == 1);
+    assert!(ORDERING_RELEASE == 2);
+    assert!(ORDERING_ACQ_REL == 3);
+    assert!(ORDERING_SEQ_CST == 4);
+    assert!(ONCE_UNINIT == 0);
+    assert!(ONCE_INITIALIZING == 1);
+    assert!(ONCE_READY == 2);
+    assert!(ONCE_FAILED == 3);
+    assert!(CANCEL_ACTIVE == 0);
+    assert!(CANCEL_CANCELLED == 1);
+    assert!(MUTEX_UNLOCKED == 0);
+    assert!(MUTEX_LOCKED == 1);
+    assert!(MUTEX_CONTENDED == 2);
+};
+
+/// 内存序。非法编码在 `from_u32` 拒绝。
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum MemoryOrdering {
+    Relaxed = 0,
+    Acquire = 1,
+    Release = 2,
+    AcqRel = 3,
+    SeqCst = 4,
+}
+
+#[cfg(test)]
+impl MemoryOrdering {
+    pub(crate) fn from_u32(val: u32) -> Result<Self, RawModelError> {
+        match val {
+            ORDERING_RELAXED => Ok(Self::Relaxed),
+            ORDERING_ACQUIRE => Ok(Self::Acquire),
+            ORDERING_RELEASE => Ok(Self::Release),
+            ORDERING_ACQ_REL => Ok(Self::AcqRel),
+            ORDERING_SEQ_CST => Ok(Self::SeqCst),
+            _ => Err(RawModelError::new("未知内存序编码")),
+        }
+    }
+}
+
+/// 合法 Atomic 标量。浮点、字符串和记录类型不是原子标量。
+#[cfg(test)]
+pub(crate) fn is_legal_atomic_type(ty_name: &str) -> bool {
+    matches!(
+        ty_name,
+        "bool"
+            | "int8"
+            | "int16"
+            | "int32"
+            | "int64"
+            | "int"
+            | "uint8"
+            | "uint16"
+            | "uint32"
+            | "uint64"
+            | "uint"
+            | "ptr"
+            | "*raw"
+            | "*byte"
+    )
+}
+
+/// 原子内存序状态机：拒绝非法序，并记录 Release/Acquire 与 SeqCst 观察。
+#[cfg(test)]
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AtomicStateMachine {
+    pub(crate) value: u64,
+    pub(crate) release_epoch: u64,
+    pub(crate) seq_cst_seq: u64,
+    pub(crate) global_clock: u64,
+    pub(crate) coroutine_views: BTreeMap<u64, u64>,
+}
+
+#[cfg(test)]
+impl AtomicStateMachine {
+    pub(crate) fn new(initial: u64) -> Self {
+        Self {
+            value: initial,
+            release_epoch: 0,
+            seq_cst_seq: 0,
+            global_clock: 1,
+            coroutine_views: BTreeMap::new(),
+        }
+    }
+
+    pub(crate) fn load(
+        &mut self,
+        coroutine: u64,
+        order: MemoryOrdering,
+    ) -> Result<u64, RawModelError> {
+        if matches!(order, MemoryOrdering::Release | MemoryOrdering::AcqRel) {
+            return Err(RawModelError::new("load 不接受 Release 或 AcqRel 内存序"));
+        }
+        if matches!(order, MemoryOrdering::Acquire | MemoryOrdering::SeqCst) {
+            let view = self.coroutine_views.entry(coroutine).or_insert(0);
+            *view = (*view).max(self.release_epoch);
+        }
+        if order == MemoryOrdering::SeqCst {
+            self.seq_cst_seq += 1;
+        }
+        Ok(self.value)
+    }
+
+    pub(crate) fn store(
+        &mut self,
+        coroutine: u64,
+        val: u64,
+        order: MemoryOrdering,
+    ) -> Result<(), RawModelError> {
+        if matches!(order, MemoryOrdering::Acquire | MemoryOrdering::AcqRel) {
+            return Err(RawModelError::new("store 不接受 Acquire 或 AcqRel 内存序"));
+        }
+        self.value = val;
+        self.global_clock += 1;
+        if matches!(order, MemoryOrdering::Release | MemoryOrdering::SeqCst) {
+            self.release_epoch = self.global_clock;
+            self.coroutine_views.insert(coroutine, self.release_epoch);
+        }
+        if order == MemoryOrdering::SeqCst {
+            self.seq_cst_seq += 1;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn compare_exchange(
+        &mut self,
+        coroutine: u64,
+        expected: u64,
+        desired: u64,
+        success: MemoryOrdering,
+        failure: MemoryOrdering,
+    ) -> Result<Result<(), u64>, RawModelError> {
+        if matches!(failure, MemoryOrdering::Release | MemoryOrdering::AcqRel) {
+            return Err(RawModelError::new(
+                "compare_exchange 失败序不能是 Release 或 AcqRel",
+            ));
+        }
+        let allowed = match failure {
+            MemoryOrdering::Relaxed => true,
+            MemoryOrdering::Acquire => matches!(
+                success,
+                MemoryOrdering::Acquire | MemoryOrdering::AcqRel | MemoryOrdering::SeqCst
+            ),
+            MemoryOrdering::SeqCst => success == MemoryOrdering::SeqCst,
+            MemoryOrdering::Release | MemoryOrdering::AcqRel => false,
+        };
+        if !allowed {
+            return Err(RawModelError::new("compare_exchange 失败序不能强于成功序"));
+        }
+        if self.value == expected {
+            self.value = desired;
+            self.global_clock += 1;
+            if matches!(
+                success,
+                MemoryOrdering::Release | MemoryOrdering::AcqRel | MemoryOrdering::SeqCst
+            ) {
+                self.release_epoch = self.global_clock;
+                self.coroutine_views.insert(coroutine, self.release_epoch);
+            }
+            if matches!(
+                success,
+                MemoryOrdering::Acquire | MemoryOrdering::AcqRel | MemoryOrdering::SeqCst
+            ) {
+                let view = self.coroutine_views.entry(coroutine).or_insert(0);
+                *view = (*view).max(self.release_epoch);
+            }
+            if success == MemoryOrdering::SeqCst {
+                self.seq_cst_seq += 1;
+            }
+            Ok(Ok(()))
+        } else {
+            let actual = self.value;
+            if matches!(failure, MemoryOrdering::Acquire | MemoryOrdering::SeqCst) {
+                let view = self.coroutine_views.entry(coroutine).or_insert(0);
+                *view = (*view).max(self.release_epoch);
+            }
+            if failure == MemoryOrdering::SeqCst {
+                self.seq_cst_seq += 1;
+            }
+            Ok(Err(actual))
+        }
+    }
+
+    pub(crate) fn fence(&mut self, order: MemoryOrdering) -> Result<(), RawModelError> {
+        if order == MemoryOrdering::Relaxed {
+            return Err(RawModelError::new("fence 不接受 Relaxed 内存序"));
+        }
+        self.global_clock += 1;
+        if order == MemoryOrdering::SeqCst {
+            self.seq_cst_seq += 1;
+        }
+        Ok(())
+    }
 }

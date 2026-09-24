@@ -12,7 +12,7 @@ use super::foreign_schema::{
     BLOCKING_QUEUE_CAP_BYTES, BLOCKING_SERVICE_BUDGET, BLOCKING_WAITER_BYTES, MAX_BLOCKING_WORKERS,
     RETAKE_GRACE_US,
 };
-use super::scheduler::dirty_target;
+use super::scheduler_schema::dirty_target;
 use super::slab::RawInvariant;
 
 /// 交给 native 之前必须 pin 的受管根。

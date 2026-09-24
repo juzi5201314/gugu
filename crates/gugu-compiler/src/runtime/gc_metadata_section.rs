@@ -26,7 +26,8 @@ pub(crate) fn encode_sections(
 }
 
 const TYPE_HEADER_BYTES: usize = 88;
-const TYPE_RECORD_BYTES: usize = 80;
+/// 单条 type record 的字节数。镜像里的 `TypeDescriptor` 符号使用同一尺寸。
+pub(crate) const TYPE_RECORD_BYTES: usize = 80;
 const META_HEADER_BYTES: usize = 88;
 const ROOT_RECORD_BYTES: usize = 32;
 const SOURCE_RECORD_BYTES: usize = 48;

@@ -1,3 +1,5 @@
+use std.runtime.scheduler.{boot, finish_hot, live_count, resume_ready}
+
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
  * 本单元承载 rt0 后半段：机器 rt0 只做自重定位、只读收尾与一次跳转；启动校验、runtime 状态
@@ -88,7 +90,13 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         store_word(state + 0, slot)
         store_word(state + 32, cold)
         store_word(state + 88, 0)
-        store_word(state + 96, block.processor + bias)
+        let processor_page = std.platform.reserve_aligned(uint(4096), uint(4096))
+        if processor_page == 0 { fatal_runtime() }
+        let processor_range = StackRangeDescriptor { base: processor_page, bytes: 4096 }
+        if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(processor_range))) != 0 {
+            fatal_runtime()
+        }
+        store_word(state + 96, processor_page)
         store_word(state + 104, 0)
         store_word(state + 112, block.payload_va + bias)
         store_word(state + 120, address_bias)
@@ -100,16 +108,36 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         store_word(cold + 8, stack_top - 8)
         store_word(cold + 16, payload.main_entry + address_bias)
         store_word(stack_top - 8, payload.main_return + address_bias)
+        let processor_addr = word(state + 96)
+        boot(processor_addr, state, slot, cold, block.reserved_13 + bias)
         let system_context = std.mem.transmute[uint, *()](state + 40)
         let main_context = std.mem.transmute[uint, *()](cold + 8)
         let hot = std.mem.transmute[uint, *()](slot)
-        let processor = std.mem.transmute[uint, *()](block.processor + bias)
+        let processor = std.mem.transmute[uint, *()](processor_addr)
         std.runtime.context_switch(system_context, main_context, hot, processor)
-        while word(state) != 0 {
-            let active_state = morestack_handle(payload.stackmap + address_bias, payload.stackmap_len, payload.fragment_base + address_bias, state, stack_base)
-            resume_main(active_state)
+        let running: uint = 1
+        while running == 1 {
+            let reason = word(state + 688)
+            store_word(state + 688, 0)
+            if reason == 0 {
+                _ = morestack_handle(payload.stackmap + address_bias, payload.stackmap_len, payload.fragment_base + address_bias, state, stack_base)
+                resume_main(state)
+            }
+            if reason == 2 {
+                finish_hot(word(state), word(state + 88), word(state + 16))
+                if live_count(processor_addr) == 0 { running = 0 }
+                if live_count(processor_addr) != 0 {
+                    if resume_ready(state) == 0 { fatal_runtime() }
+                    _ = 0
+                }
+                _ = 0
+            }
+            if reason == 1 {
+                if resume_ready(state) == 0 { fatal_runtime() }
+                _ = 0
+            }
+            _ = reason
         }
-
         0
     }
 }
@@ -204,13 +232,14 @@ unsafe fn morestack_handle(section: uint, length: uint, fragment_base: uint, sta
         let slot = word(state)
         let cold = word(state + 32)
         let return_pc = word(cold + 64)
-        if slot == 0 || cold != state + 128 { fatal_runtime() }
+        if slot == 0 || cold == 0 { fatal_runtime() }
         checked_safepoint(section, length, fragment_base, return_pc, byte(4))
         let high = word(slot + 80)
         let old = word(slot + 88)
         let rsp = word(state + 8)
         let required = word(state + 24)
-        if old < 65536 || old > 1073741824 || high != stack_base + uint(1073741824) || rsp > high || rsp < high - old || required > uint(1073741824) - (high - rsp) - 512 {
+        _ = stack_base
+        if old < 65536 || old > 1073741824 || high < uint(1073741824) || rsp > high || rsp < high - old || required > uint(1073741824) - (high - rsp) - 512 {
             fatal_stack()
         }
         let needed = high - rsp + required + 512

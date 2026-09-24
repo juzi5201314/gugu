@@ -8,6 +8,10 @@
 
 除平台 rt0、context switch、signal/exception stub和必须的 machine intrinsic外，官方 scheduler/runtime主体使用 Gugu实现；不得维护一份 Rust语义等价runtime作为正常执行路径。
 
+## 镜像内单 worker {#image-worker}
+
+当前 Linux 镜像固定一个 OS worker。`rt0_start` 分配一页可写 processor，`boot` 清零队列，并把 TLAB 与 TurnRegion 的 cursor/limit 指到各自已提交的 1 MiB 堆。`parallelism = 1`，没有 steal、`clone` 或 futex。`take_next` 先取 `run_next`，再从本地头取出最老的项，最后取 overflow carry；`yield` 把当前协程放进本地尾，已经在队列里的协程先被选中。子协程各自保留 1 GiB、初次提交 64 KiB。等待只改协程状态并切回系统栈。channel、Join、select 与 `std.sync` 的方法体在镜像内 Gugu 源里执行。`gc_write_barrier` 直接返回；收集器仍属于后续阶段。
+
 runtime源码需要在锁所有权或 root publication的常数临界区暂缓 safepoint时，只能使用 compiler内部的 [`NoSafepointRegion`](gir-lir.md#no-safepoint-region)；它不是用户 attribute，也不允许建立另一套不受 poll预算约束的 runtime路径。
 
 ## 内存返回接缝
@@ -181,7 +185,7 @@ head.compare_exchange_weak(old, first, Release, Relaxed)
 
 CAS失败只用返回的实际 head重写 `last.run_link_next`并重试。成功后 batch整体可见；producer清空 staging，但不逐节点清 `BATCH_PUBLISHING`。旧 head只作为不透明 pointer值写入 producer独占的 last node，producer不得解引用它。control slab page地址稳定且 consumer只用 atomic exchange摘取整链，因此普通 publish不进入 generic epoch、hazard-pointer或全局 refcount协议。
 
-Rust 参照模型通过 `flush_schedule_staging` 消费同一 staging：返回成功前整链必须进入 active target 的 remote carry；退役目标在当前单 NUMA 模型中改投首个 active processor 的 injection carry。目标、shard 和通知序号在 drain 前验证；失败保留 staging/pending ownership 并向调用方返回错误，不能吞掉 stage 失败。空 carry 首次发布递增 work_seq 并唤醒 idle worker，非空追加不重复通知。排空后复用 producer 的空缓冲，不逐次分配或逐节点清认领位。
+多 worker 的 remote carry、steal 与 injection 仍按上面的发布规则保留为契约。当前镜像只有一个 OS worker，这些路径不在 `std/runtime/scheduler.gg` 里执行，Rust 侧也不再保留 `flush_schedule_staging`。
 
 target processor owner以 `head.swap(null, Acquire)`取得某 shard当时的完整链，并把它保存到该 shard的 typed detached carry；remote head不能混用逐节点 pop或基于旧 head的 consumer CAS。owner每次 service最多转移128项，先从batch首节点读取并验证`run_batch_len`，遍历时先保存`next`；节点真正写入local deque时才把`run_link_next`与`run_batch_len`普通清零，仍需carry或重新发布的batch必须保留原边界。detached carry未清空前不再次摘该 shard的新 head；8个 shard按 round-robin服务，因此持续生产的单一 shard不能永久排除其它 shard。newest-to-oldest遍历依次 push local tail，owner再从 tail pop，batch内实际执行恢复 oldest-to-newest；不额外反转链表。
 
@@ -518,15 +522,12 @@ SharedHeap forwarding；scheduler 保留至少一个 worker 处理 poller、time
 
 ## std.sync 同步原语与取消接缝
 
-`std.sync` 原语（Mutex、RwLock、Condvar、OnceLock、Lazy 与 CancelSource/CancelToken）在调度器层提供确定性的挂起、唤醒与生命周期管理：
+`std.sync` 原语（Mutex、RwLock、Condvar、OnceLock、Lazy 与 CancelSource/CancelToken）由镜像内 `std/runtime/sync.gg` 挂起和唤醒：
 
-1. **锁与条件变量挂起**：锁争用（`MutexLockOutcome::Contended`）与条件变量等待（`Condvar.wait`）只将协程挂入 `Waiting` 状态，不占用底层 OS 线程。唤醒通过 `ready_publish` 走标准调度入口，保持局部性与弱公平；
-2. **Non-poisoning 与租约自动解锁**：锁守卫由 `Adaptive Resource Leasing` 管理。当持锁协程执行结束（`finish_coroutine_on_system`）或 panic 展开时，`release_coroutine_locks` 通过租约掉落自动触发解锁，并将锁弱公平交接给下一个等待者。锁状态绝不进入 poisoned，后续协程获取锁始终正常返回；
-3. **OnceLock / Lazy 状态机**：维护 `Uninit` -> `Initializing` -> `Ready` / `Failed` 单向状态机。并发调用中只有一个协程取得初始化执行权（`ExecuteInitializer`），其余协程排队等待。闭包 panic 或异常展开时转入永久 `Failed`，唤醒全部等待者且后续 `get`/`get_or_init` 永久报错，绝不自动重试或提供 reset；
-4. **取消与阻塞操作接缝**：取消是显式、协作且幂等的。
-   - 在 channel 接收接缝（`channel_recv_cancel`）中，若 token 已取消，操作直接返回 `Cancelled`；未收到消息前被取消时安全注销等待节点，不破坏通道环状缓冲，已线性化的消息不丢失；
-   - 在 Join 等待接缝（`join_wait_cancel`）中，取消只注销当前等待者的 wait-node 并返回 `Cancelled`，绝不级联取消、打断或隐式 kill 被等待的目标子协程，目标协程继续正常执行直至完成；
-   - 在子进程等待接缝（`Child.wait_cancel`）中，取消只取消等待者并返回 `Cancelled`，绝不 kill 子进程。
+1. **锁与条件变量挂起**：锁争用与 `Condvar.wait` 只把当前协程标成等待并 `park_current`，不占用另一条 OS 线程。唤醒调用 `ready_hot`；
+2. **Non-poisoning**：持锁协程 panic 时不把锁标成 poisoned。当前镜像的解锁由用户调用 `unlock`；完成路径不再走 Rust `release_coroutine_locks`；
+3. **Once**：`once_begin` 在未初始化时把状态写成正在初始化并返回成功；已经在初始化的协程排队。`once_ready` 写成完成并唤醒等待者。`once_fail` 写成失败并唤醒等待者，失败后不再重新开始；
+4. **取消**：`cancel_fire` 幂等。它把状态写成已取消并唤醒登记在该单元上的等待者，不杀死其它协程。channel 与 Join 的取消接缝不在这一阶段的镜像路径里。
 
 ## 动态并行度
 
