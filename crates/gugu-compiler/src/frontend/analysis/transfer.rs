@@ -14,16 +14,8 @@ pub(crate) fn copy_local(
     local: LocalId,
 ) {
     state.set_range(ValueKey::Expr(id), state.range(ValueKey::Local(local)));
-    state.relate(Relation {
-        left: ValueKey::Expr(id),
-        right: ValueKey::Local(local),
-        offset: 0,
-    });
-    state.relate(Relation {
-        left: ValueKey::Local(local),
-        right: ValueKey::Expr(id),
-        offset: 0,
-    });
+    state.relate(Relation::new(ValueKey::Expr(id), ValueKey::Local(local), 0));
+    state.relate(Relation::new(ValueKey::Local(local), ValueKey::Expr(id), 0));
     seed_array_len(module, owner, state, id);
     let len = state.range(ValueKey::LocalLen(local));
     state.set_range(ValueKey::ExprLen(id), len);
@@ -86,20 +78,20 @@ fn assume_compare(state: &mut AbstractState, op: BinOp, left: ExprId, right: Exp
         BinOp::Lt => {
             lhs.hi = lhs.hi.min(rhs.hi.saturating_sub(1));
             rhs.lo = rhs.lo.max(lhs.lo.saturating_add(1));
-            state.relate(Relation {
-                left: ValueKey::Expr(left),
-                right: ValueKey::Expr(right),
-                offset: -1,
-            });
+            state.relate(Relation::new(
+                ValueKey::Expr(left),
+                ValueKey::Expr(right),
+                -1,
+            ));
         }
         BinOp::Le => {
             lhs.hi = lhs.hi.min(rhs.hi);
             rhs.lo = rhs.lo.max(lhs.lo);
-            state.relate(Relation {
-                left: ValueKey::Expr(left),
-                right: ValueKey::Expr(right),
-                offset: 0,
-            });
+            state.relate(Relation::new(
+                ValueKey::Expr(left),
+                ValueKey::Expr(right),
+                0,
+            ));
         }
         BinOp::Gt => assume_compare(state, BinOp::Lt, right, left, true),
         BinOp::Ge => assume_compare(state, BinOp::Le, right, left, true),
@@ -129,19 +121,24 @@ fn negate(op: BinOp) -> BinOp {
 }
 
 fn propagate_len(state: &mut AbstractState, expr: ExprId, interval: Interval) {
-    for relation in state.relations.clone() {
-        if relation.offset != 0 {
+    // 循环只写区间字段；把 relations 借出来避免整表克隆。
+    let relations = std::mem::take(&mut state.relations);
+    for relation in &relations {
+        if relation.offset() != 0 {
             continue;
         }
-        if relation.left == ValueKey::Expr(expr) {
-            let current = state.range(relation.right);
-            state.set_range(relation.right, current.meet(interval));
+        if relation.left() == ValueKey::Expr(expr).packed() {
+            let other = ValueKey::unpack(relation.right());
+            let current = state.range(other);
+            state.set_range(other, current.meet(interval));
         }
-        if relation.right == ValueKey::Expr(expr) {
-            let current = state.range(relation.left);
-            state.set_range(relation.left, current.meet(interval));
+        if relation.right() == ValueKey::Expr(expr).packed() {
+            let other = ValueKey::unpack(relation.left());
+            let current = state.range(other);
+            state.set_range(other, current.meet(interval));
         }
     }
+    state.relations = relations;
 }
 
 fn apply_len(
@@ -155,16 +152,8 @@ fn apply_len(
     let key = len_key(owner, receiver);
     seed_array_len(module, owner, state, receiver);
     state.set_range(ValueKey::Expr(id), state.range(key));
-    state.relate(Relation {
-        left: ValueKey::Expr(id),
-        right: key,
-        offset: 0,
-    });
-    state.relate(Relation {
-        left: key,
-        right: ValueKey::Expr(id),
-        offset: 0,
-    });
+    state.relate(Relation::new(ValueKey::Expr(id), key, 0));
+    state.relate(Relation::new(key, ValueKey::Expr(id), 0));
 }
 
 pub(crate) fn apply_site(
@@ -249,19 +238,24 @@ pub(crate) fn refine_compare(
 }
 
 fn meet_related(state: &mut AbstractState, key: ValueKey, interval: Interval) {
-    for relation in state.relations.clone() {
-        if relation.offset != 0 {
+    // 循环只写区间字段；把 relations 借出来避免整表克隆。
+    let relations = std::mem::take(&mut state.relations);
+    for relation in &relations {
+        if relation.offset() != 0 {
             continue;
         }
-        if relation.left == key {
-            let current = state.range(relation.right);
-            state.set_range(relation.right, current.meet(interval));
+        if relation.left() == key.packed() {
+            let other = ValueKey::unpack(relation.right());
+            let current = state.range(other);
+            state.set_range(other, current.meet(interval));
         }
-        if relation.right == key {
-            let current = state.range(relation.left);
-            state.set_range(relation.left, current.meet(interval));
+        if relation.right() == key.packed() {
+            let other = ValueKey::unpack(relation.left());
+            let current = state.range(other);
+            state.set_range(other, current.meet(interval));
         }
     }
+    state.relations = relations;
 }
 
 fn apply_call(
@@ -336,16 +330,8 @@ fn apply_return_relations(
         seed_array_len(module, owner, state, argument);
         let key = len_key(owner, argument);
         state.set_range(ValueKey::Expr(id), state.range(key));
-        state.relate(Relation {
-            left: ValueKey::Expr(id),
-            right: key,
-            offset: 0,
-        });
-        state.relate(Relation {
-            left: key,
-            right: ValueKey::Expr(id),
-            offset: 0,
-        });
+        state.relate(Relation::new(ValueKey::Expr(id), key, 0));
+        state.relate(Relation::new(key, ValueKey::Expr(id), 0));
     }
 }
 

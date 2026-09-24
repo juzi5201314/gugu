@@ -130,11 +130,37 @@ fn binary(left: Interval, right: Interval, op: fn(i128, i128) -> Option<i128>) -
 }
 
 /// `left <= right + offset`。
+///
+/// 两个键以 `ValueKey::packed` 的 u64 形式存储：汇合求交与 `relate` 的有序插入是
+/// 抽象解释最热路径，派生 `Ord` 由此退化为至多三次基本整数比较，不再经过枚举
+/// 判别的嵌套比较调用（O0 测试 profile 下每层调用都直接计入墙钟）。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) struct Relation {
-    pub left: ValueKey,
-    pub right: ValueKey,
-    pub offset: i128,
+    left: u64,
+    right: u64,
+    offset: i128,
+}
+
+impl Relation {
+    pub(crate) fn new(left: ValueKey, right: ValueKey, offset: i128) -> Self {
+        Self {
+            left: left.packed(),
+            right: right.packed(),
+            offset,
+        }
+    }
+
+    pub(crate) fn left(self) -> u64 {
+        self.left
+    }
+
+    pub(crate) fn right(self) -> u64 {
+        self.right
+    }
+
+    pub(crate) fn offset(self) -> i128 {
+        self.offset
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -143,6 +169,37 @@ pub(crate) enum ValueKey {
     Expr(ExprId),
     LocalLen(LocalId),
     ExprLen(ExprId),
+}
+
+impl ValueKey {
+    /// 打包序键：变体序号占第 32 位、u32 下标占低 32 位，整数比较即全序。
+    /// 变体序号与声明序（Local < Expr < LocalLen < ExprLen）一致；`Relation`
+    /// 以此存储，打包成本只在构造时付一次。
+    pub(crate) fn packed(self) -> u64 {
+        match self {
+            Self::Local(id) => u64::from(id.0),
+            Self::Expr(id) => (1 << 32) | u64::from(id.0),
+            Self::LocalLen(id) => (2 << 32) | u64::from(id.0),
+            Self::ExprLen(id) => (3 << 32) | u64::from(id.0),
+        }
+    }
+
+    /// `packed` 的逆：高位变体序号译回变体，下标取低 32 位。
+    pub(crate) fn unpack(packed: u64) -> Self {
+        let index = (packed & 0xffff_ffff) as u32;
+        match packed >> 32 {
+            0 => Self::Local(LocalId(index)),
+            1 => Self::Expr(ExprId(index)),
+            2 => Self::LocalLen(LocalId(index)),
+            _ => Self::ExprLen(ExprId(index)),
+        }
+    }
+}
+
+/// 打包键是否引用 `local`（Local 或 LocalLen 两种变体，见 `ValueKey::packed`）。
+fn refers_local(packed: u64, local: LocalId) -> bool {
+    let variant = packed >> 32;
+    (variant == 0 || variant == 2) && (packed & 0xffff_ffff) as u32 == local.0
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -195,7 +252,7 @@ pub(crate) struct AbstractState {
     pub local_version: Vec<u32>,
     pub heap_version: u32,
     pub foreign_version: u32,
-    /// 始终按 `Relation` 顺序排列且不重复，供汇合时做二分成员检查。
+    /// 始终按 `Relation` 顺序排列且不重复，供汇合时做单遍归并求交。
     pub relations: Vec<Relation>,
     pub effects: EffectFacts,
 }
@@ -258,6 +315,12 @@ impl AbstractState {
     }
 
     pub fn join(&mut self, other: &Self) -> bool {
+        self.join_common(other, false)
+    }
+
+    /// `relations_done` 表示调用方已完成与 `other` 的关系求交（widen 路径），
+    /// 跳过第二次求交；此时 `self.relations` 必为 `other.relations` 的子集。
+    fn join_common(&mut self, other: &Self, relations_done: bool) -> bool {
         if !other.reachable {
             return false;
         }
@@ -291,11 +354,9 @@ impl AbstractState {
             self.foreign_version = other.foreign_version;
             changed = true;
         }
-        debug_assert!(other.relations.is_sorted());
-        let before = self.relations.len();
-        self.relations
-            .retain(|relation| other.relations.binary_search(relation).is_ok());
-        changed |= self.relations.len() != before;
+        if !relations_done {
+            changed |= intersect_relations(&mut self.relations, &other.relations);
+        }
         let before_effects = self.effects;
         self.effects.join(other.effects);
         changed |= self.effects != before_effects;
@@ -315,12 +376,9 @@ impl AbstractState {
         changed |= widen_intervals(&mut self.expr_range, &other.expr_range);
         changed |= widen_intervals(&mut self.local_len, &other.local_len);
         changed |= widen_intervals(&mut self.expr_len, &other.expr_len);
-        debug_assert!(other.relations.is_sorted());
-        let before = self.relations.len();
-        self.relations
-            .retain(|relation| other.relations.binary_search(relation).is_ok());
-        changed |= self.relations.len() != before;
-        changed |= self.join(other);
+        // widen 语义上必然先收缩关系集；求交一次即可，join_common 里跳过重复求交。
+        changed |= intersect_relations(&mut self.relations, &other.relations);
+        changed |= self.join_common(other, true);
         changed
     }
 
@@ -333,7 +391,7 @@ impl AbstractState {
         self.local_version[index] = u32::MAX;
         self.local_len[index] = Interval::UNKNOWN;
         self.relations.retain(|relation| {
-            relation.left.local() != Some(local) && relation.right.local() != Some(local)
+            !refers_local(relation.left(), local) && !refers_local(relation.right(), local)
         });
     }
 
@@ -369,15 +427,6 @@ impl AbstractState {
     }
 }
 
-impl ValueKey {
-    fn local(self) -> Option<LocalId> {
-        match self {
-            Self::Local(id) | Self::LocalLen(id) => Some(id),
-            Self::Expr(_) | Self::ExprLen(_) => None,
-        }
-    }
-}
-
 fn join_intervals(slots: &mut [Interval], other: &[Interval]) -> bool {
     let mut changed = false;
     for (slot, &next) in slots.iter_mut().zip(other) {
@@ -400,6 +449,31 @@ fn widen_intervals(slots: &mut [Interval], other: &[Interval]) -> bool {
         }
     }
     changed
+}
+
+/// 两边均按 `Relation` 序排列且不重复；就地把 `left` 收缩为与 `right` 的有序交集，
+/// 返回是否删除过元素。
+///
+/// 单遍双指针归并：右指针单调推进，比较次数 O(n+m) 且顺序访存，替代逐元素
+/// `binary_search` 的 O(n·log m)；汇合求交是整个抽象解释最热的操作。
+fn intersect_relations(left: &mut Vec<Relation>, right: &[Relation]) -> bool {
+    debug_assert!(left.is_sorted());
+    debug_assert!(right.is_sorted());
+    let mut write = 0;
+    let mut other = 0;
+    for read in 0..left.len() {
+        let relation = left[read];
+        while other < right.len() && right[other] < relation {
+            other += 1;
+        }
+        if other < right.len() && right[other] == relation {
+            left[write] = relation;
+            write += 1;
+        }
+    }
+    let removed = left.len() - write;
+    left.truncate(write);
+    removed != 0
 }
 
 fn join_versions(slots: &mut [u32], other: &[u32]) -> bool {

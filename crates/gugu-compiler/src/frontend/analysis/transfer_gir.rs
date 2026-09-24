@@ -309,16 +309,8 @@ fn sync_len_relation(
     for (index, mapped) in body.expression_locals.iter().enumerate() {
         if *mapped == Some(place.local) {
             let expr = ValueKey::Expr(ExprId(index as u32));
-            state.relate(Relation {
-                left: expr,
-                right: key,
-                offset: 0,
-            });
-            state.relate(Relation {
-                left: key,
-                right: expr,
-                offset: 0,
-            });
+            state.relate(Relation::new(expr, key, 0));
+            state.relate(Relation::new(key, expr, 0));
         }
     }
 }
@@ -353,26 +345,26 @@ pub(crate) fn sync_resolved(module: &Module, owner: &Owner, state: &mut Abstract
             ValueKey::ExprLen(expr),
             state.range(ValueKey::LocalLen(local)),
         );
-        state.relate(Relation {
-            left: ValueKey::Expr(expr),
-            right: ValueKey::Local(local),
-            offset: 0,
-        });
-        state.relate(Relation {
-            left: ValueKey::Local(local),
-            right: ValueKey::Expr(expr),
-            offset: 0,
-        });
-        state.relate(Relation {
-            left: ValueKey::ExprLen(expr),
-            right: ValueKey::LocalLen(local),
-            offset: 0,
-        });
-        state.relate(Relation {
-            left: ValueKey::LocalLen(local),
-            right: ValueKey::ExprLen(expr),
-            offset: 0,
-        });
+        state.relate(Relation::new(
+            ValueKey::Expr(expr),
+            ValueKey::Local(local),
+            0,
+        ));
+        state.relate(Relation::new(
+            ValueKey::Local(local),
+            ValueKey::Expr(expr),
+            0,
+        ));
+        state.relate(Relation::new(
+            ValueKey::ExprLen(expr),
+            ValueKey::LocalLen(local),
+            0,
+        ));
+        state.relate(Relation::new(
+            ValueKey::LocalLen(local),
+            ValueKey::ExprLen(expr),
+            0,
+        ));
     }
 }
 
