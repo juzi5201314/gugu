@@ -1,6 +1,11 @@
 //! 实例 SCC 按凝聚图顺序完成；函数 query 只投影已完成结果，不递归请求半初始化摘要。
+//!
+//! 三层 payload 共用 `encode.rs` 的二进制规范编码：SCC 层编码一次实例记录，
+//! 函数层 payload 直接取记录内的摘要字节区间（零拷贝切片），world 层复制记录
+//! 字节并只重编 proof 表。session 内新鲜路径持有类型化对象，不做解码往返。
 
 use super::callgraph;
+use super::encode;
 use super::policy::AnalysisPolicyV1;
 use super::solver::{self, SccMember};
 use super::types::{AnalysisWorldV1, FunctionSummary, SccSummaryV1, WORLD_SCHEMA_VERSION};
@@ -11,8 +16,8 @@ use crate::frontend::hir::Module;
 use crate::frontend::mono::{MonoWorldV1, digest_of};
 use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
 
-const SCC_SCHEMA: u32 = 4;
-const FUNCTION_SCHEMA: u32 = 4;
+const SCC_SCHEMA: u32 = 5;
+const FUNCTION_SCHEMA: u32 = 5;
 
 struct InstancePlan {
     members: Vec<SccMember>,
@@ -75,9 +80,10 @@ pub(crate) fn run_world(
             let plan = plan_instances(module, mono)
                 .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
             let mut completed = vec![None; plan.members.len()];
+            let mut summaries = Vec::with_capacity(plan.sccs.len());
             let mut parts = Vec::with_capacity(plan.sccs.len());
             for component in &plan.sccs {
-                let (part, dependency) = scc_summary(
+                let (summary, encoded, dependency) = scc_summary(
                     module,
                     gir,
                     &plan.members,
@@ -88,10 +94,15 @@ pub(crate) fn run_world(
                     queries,
                 )?;
                 context.record_dependency(dependency.key().clone(), dependency.fingerprint());
-                for (&index, record) in component.iter().zip(&part.instances) {
+                for (local, (&index, record)) in
+                    component.iter().zip(&summary.instances).enumerate()
+                {
+                    let summary_range = encoded.records[local].1.clone();
                     let (summary, function_dependency) = function_summary(
                         &record.mono_key,
                         &record.summary,
+                        summary_range,
+                        &encoded.payload,
                         &dependency,
                         input_fingerprint,
                         queries,
@@ -102,10 +113,11 @@ pub(crate) fn run_world(
                     );
                     completed[index] = Some((summary, function_dependency));
                 }
-                parts.push(part);
+                summaries.push(summary);
+                parts.push(encoded);
             }
-            let world = solver::world_from_sccs(parts, input_fingerprint);
-            let bytes = serde_json::to_vec(&world).expect("分析 world 可序列化");
+            let world = solver::world_from_sccs(summaries, input_fingerprint);
+            let bytes = encode::encode_world(&world, &parts);
             fresh = Some(world);
             Ok((bytes, Vec::new()))
         })
@@ -113,7 +125,7 @@ pub(crate) fn run_world(
     let dependency = DependencyFingerprint::new(key, result.fingerprint());
     let world = match fresh {
         Some(world) => world,
-        None => serde_json::from_slice(result.payload())
+        None => encode::decode_world(&result.payload_shared())
             .map_err(|_| vec![invalid("WholeProgramAnalysis 缓存 schema 不合法")])?,
     };
     if world.schema != WORLD_SCHEMA_VERSION || world.input_fingerprint != input_fingerprint {
@@ -203,7 +215,7 @@ fn scc_summary(
     policy: AnalysisPolicyV1,
     completed: &[Option<(FunctionSummary, DependencyFingerprint)>],
     queries: &QueryEngine,
-) -> Result<(SccSummaryV1, DependencyFingerprint), crate::query::QueryError> {
+) -> Result<(SccSummaryV1, encode::EncodedScc, DependencyFingerprint), crate::query::QueryError> {
     let mut bytes = input.to_vec();
     bytes.extend_from_slice(
         &u64::try_from(component.len())
@@ -231,13 +243,14 @@ fn scc_summary(
                 .0
                 .clone()
         });
-        let bytes = serde_json::to_vec(&summary).expect("SCC 摘要可序列化");
-        fresh = Some(summary);
-        Ok((bytes, Vec::new()))
+        let encoded = encode::encode_scc(&summary);
+        let payload = encoded.payload.clone();
+        fresh = Some((summary, encoded));
+        Ok((payload, Vec::new()))
     })?;
-    let summary: SccSummaryV1 = match fresh {
-        Some(summary) => summary,
-        None => serde_json::from_slice(result.payload())
+    let (summary, encoded) = match fresh {
+        Some(pair) => pair,
+        None => encode::decode_scc(&result.payload_shared())
             .map_err(|_| crate::query::QueryError::Failed("SCC 摘要 schema 不合法".into()))?,
     };
     if summary.instances.len() != component.len()
@@ -253,6 +266,7 @@ fn scc_summary(
     }
     Ok((
         summary,
+        encoded,
         DependencyFingerprint::new(key, result.fingerprint()),
     ))
 }
@@ -260,6 +274,8 @@ fn scc_summary(
 fn function_summary(
     mono_key: &[u8],
     summary: &FunctionSummary,
+    summary_range: std::ops::Range<u32>,
+    scc_payload: &bytes::Bytes,
     scc: &DependencyFingerprint,
     input: [u8; 32],
     queries: &QueryEngine,
@@ -267,15 +283,24 @@ fn function_summary(
     let mut bytes = input.to_vec();
     bytes.extend_from_slice(mono_key);
     let key = QueryKey::new(QueryKind::FunctionAnalysisSummary, FUNCTION_SCHEMA, bytes);
+    let mut fresh = None;
     let result = queries.compute(key.clone(), |context| {
         context.record_dependency(scc.key().clone(), scc.fingerprint());
+        fresh = Some(summary.clone());
+        // 函数 payload 直接共享 SCC payload 的摘要区间，不再重编码。
         Ok((
-            serde_json::to_vec(summary).expect("函数摘要可序列化"),
+            scc_payload.slice(
+                usize::try_from(summary_range.start).expect("区间起点适配宿主")
+                    ..usize::try_from(summary_range.end).expect("区间终点适配宿主"),
+            ),
             Vec::new(),
         ))
     })?;
-    let summary = serde_json::from_slice(result.payload())
-        .map_err(|_| crate::query::QueryError::Failed("函数摘要 schema 不合法".into()))?;
+    let summary = match fresh {
+        Some(summary) => summary,
+        None => encode::decode_function_summary(&mut encode::Decoder::new(result.payload()))
+            .map_err(|_| crate::query::QueryError::Failed("函数摘要 schema 不合法".into()))?,
+    };
     Ok((
         summary,
         DependencyFingerprint::new(key, result.fingerprint()),

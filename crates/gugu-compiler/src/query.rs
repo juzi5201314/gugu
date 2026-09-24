@@ -1,5 +1,6 @@
 //! demand-driven query 状态机与编译中间对象缓存。
 
+use bytes::Bytes;
 use std::{
     collections::BTreeMap,
     fmt,
@@ -258,16 +259,19 @@ pub enum QueryState {
 /// 成功 query 的不可变结果。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct QueryResult {
-    payload: Arc<[u8]>,
+    payload: Bytes,
     result_fingerprint: [u8; 32],
     dependencies: Arc<[DependencyFingerprint]>,
 }
 
 impl QueryResult {
     /// 用规范成功结果、排序诊断和直接依赖构造结果。
+    ///
+    /// payload 经 `Into<Bytes>` 接收：`Vec<u8>` 被原地收编不拷贝，`Bytes` 句柄
+    /// 直接共享，使分层 query 能对上游 payload 做零拷贝切片。
     pub fn new(
         key: &QueryKey,
-        payload: impl Into<Vec<u8>>,
+        payload: impl Into<Bytes>,
         diagnostics: impl AsRef<[u8]>,
         mut dependencies: Vec<DependencyFingerprint>,
     ) -> Self {
@@ -289,7 +293,7 @@ impl QueryResult {
         encode_bytes(&mut canonical, &payload);
         encode_bytes(&mut canonical, diagnostics.as_ref());
         Self {
-            payload: Arc::from(payload),
+            payload,
             result_fingerprint: hash_domain("gugu-query-result-v1", &canonical),
             dependencies: Arc::from(dependencies),
         }
@@ -298,6 +302,11 @@ impl QueryResult {
     /// 返回序列化结果。
     pub fn payload(&self) -> &[u8] {
         &self.payload
+    }
+
+    /// 返回共享 payload 句柄：引用计数克隆，可对其做零拷贝 `slice`。
+    pub fn payload_shared(&self) -> Bytes {
+        self.payload.clone()
     }
 
     /// 返回结果指纹。
@@ -391,9 +400,10 @@ impl QueryEngine {
     }
 
     /// 只计算一次同一 query，其他请求者等待并复用相同不可变结果。
-    pub fn compute<F>(&self, key: QueryKey, compute: F) -> Result<QueryResult, QueryError>
+    pub fn compute<F, P>(&self, key: QueryKey, compute: F) -> Result<QueryResult, QueryError>
     where
-        F: FnOnce(&mut QueryContext) -> Result<(Vec<u8>, Vec<u8>), QueryError>,
+        F: FnOnce(&mut QueryContext) -> Result<(P, Vec<u8>), QueryError>,
+        P: Into<Bytes>,
     {
         let cell = {
             let mut cells = self.cells.lock().expect("query registry lock poisoned");
@@ -779,7 +789,7 @@ mod tests {
         });
         barrier.wait();
         let result = engine
-            .compute(key.clone(), |_| {
+            .compute(key.clone(), |_| -> Result<(Vec<u8>, Vec<u8>), QueryError> {
                 Err(QueryError::Failed("重复执行".to_owned()))
             })
             .expect("等待同一 query 的结果");
@@ -815,7 +825,7 @@ mod tests {
     fn failed_query_is_not_persisted_as_success() {
         let engine = QueryEngine::new();
         let key = QueryKey::new(QueryKind::Parse, 1, b"src/main.gg");
-        let failure = engine.compute(key.clone(), |_| {
+        let failure = engine.compute(key.clone(), |_| -> Result<(Vec<u8>, Vec<u8>), QueryError> {
             Err(QueryError::Failed("解析失败".to_owned()))
         });
         assert_eq!(failure, Err(QueryError::Failed("解析失败".to_owned())));

@@ -351,10 +351,17 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 管线顺序为 `LowerHir`（schema **5**，只构造、校验并冻结）→ `BuildGenericGir` →
 `mono::close` → `late::run` → `gir::attach_fragments` → `WholeProgramAnalysis` →
 `EscapeAndPlacement` → `PublicFunctionSummary`。分析输入使用放置前的 generic GIR 指纹。
-`WholeProgramAnalysis`（query schema **5**）输入指纹含冻结 HIR
+`WholeProgramAnalysis`（query schema **6**）输入指纹含冻结 HIR
 指纹、generic GIR 指纹、late/mono 图指纹与策略字节；其内再嵌套 `AnalysisSccSummary`
-（27，schema **4**）与 `FunctionAnalysisSummary`（23，schema **4**）。身份键为 `MonoKey`
+（27，schema **5**）与 `FunctionAnalysisSummary`（23，schema **5**）。身份键为 `MonoKey`
 （见[单态化与编译缓存](monomorphization-cache.md#mono-closure-public-digest)）。
+
+三层 query 的 payload 使用同一套二进制规范编码：小端、长度前缀、枚举判别字节，
+同一输入编码出的字节恒等。SCC 层编码一次实例记录并记录每条记录的字节区间；
+函数层 payload 直接取记录内的摘要区间（`Bytes::slice` 零拷贝共享），不再重编码；
+world 层按全局 mono_key 序复制各 SCC 的记录字节，只重新编码 proof 表（proof 的
+排序与冲突降级是全局语义）。session 内新鲜路径持有类型化对象，不做编码往返；
+缓存命中路径先按 schema 解码，再校验 `input_fingerprint` 与成员一致性。
 SCC 按实例图的凝聚顺序求解，每个实例具有独立固定点状态；解释器共享 owner 的 generic
 GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir` 仍从 HIR 收集调用边，
 不从 GIR 重解析。运算符、迭代、try、格式化与局部 static 初始化器的调用效果均进入分析。

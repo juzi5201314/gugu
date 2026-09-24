@@ -6,7 +6,7 @@
 use crate::frontend::hir::{CheckKind, ExprId};
 use serde::{Deserialize, Serialize};
 
-pub(crate) const WORLD_SCHEMA_VERSION: u32 = 5;
+pub(crate) const WORLD_SCHEMA_VERSION: u32 = 6;
 
 /// 检查的证明状态：`Proved` 表示 HIR 局部事实可证安全，`Disproved` 表示 HIR 局部
 /// 事实可证必然失败，`Unknown` 表示局部事实不足、必须保留检查。

@@ -5,6 +5,7 @@
 mod access;
 pub(crate) mod callgraph;
 mod domain;
+mod encode;
 mod interpret;
 pub(crate) mod policy;
 mod prove;
