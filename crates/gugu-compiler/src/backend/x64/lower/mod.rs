@@ -28,7 +28,9 @@ pub(crate) mod numeric;
 mod tests;
 pub(crate) mod vector;
 
+use std::collections::HashMap;
 use std::fmt;
+use std::sync::OnceLock;
 
 use crate::frontend::gir::body::SourceInfo;
 use crate::frontend::late::universe::TypeUniverse;
@@ -562,17 +564,34 @@ impl Builder {
     }
 }
 
+/// 形式查找索引：键为（助记符、操作数形状、首操作数访问语义），值是表中首个
+/// 命中形式的下标，与线性 `position` 的取最小下标语义一致。无操作数形式
+/// （`cqo` 等）没有访问语义可比，键的第三段为 `None`。`FORMS` 是编译期常量，
+/// 索引在首次编码时懒构建一次，此后每次 `emit` 都是一次哈希查找，不再从表头
+/// 线性扫描。
+type FormIndex = HashMap<(&'static str, &'static [OperandKind], Option<Access>), FormId>;
+
+fn form_index() -> &'static FormIndex {
+    static INDEX: OnceLock<FormIndex> = OnceLock::new();
+    INDEX.get_or_init(|| {
+        let mut index: FormIndex = HashMap::with_capacity(table::FORMS.len());
+        for (position, form) in table::FORMS.iter().enumerate() {
+            let key = (form.mnemonic, form.operands, form.access.first().copied());
+            index
+                .entry(key)
+                .or_insert_with(|| FormId(u16::try_from(position).expect("form 数量适配 u16")));
+        }
+        index
+    })
+}
+
 fn find_form(mnemonic: &'static str, kinds: &'static [OperandKind], first: Access) -> FormId {
-    let index = table::FORMS
-        .iter()
-        .position(|form| {
-            form.mnemonic == mnemonic
-                && form.operands == kinds
-                // 无操作数形式（`cqo` 等）没有访问表可比；其余用首操作数区分同形不同方向。
-                && (kinds.is_empty() || form.access.first() == Some(&first))
-        })
-        .unwrap_or_else(|| panic!("表内缺少 {mnemonic} 的 {kinds:?} 形式（首操作数 {first:?}）"));
-    FormId(u16::try_from(index).expect("form 数量适配 u16"))
+    // 无操作数形式（`cqo` 等）没有访问表可比；其余用首操作数区分同形不同方向。
+    let lookup_first = (kinds.len() != 0).then_some(first);
+    match form_index().get(&(mnemonic, kinds, lookup_first)) {
+        Some(form) => *form,
+        None => panic!("表内缺少 {mnemonic} 的 {kinds:?} 形式（首操作数 {first:?}）"),
+    }
 }
 
 /// 值搬运：XMM 承载的宽度用 `movaps`，其余用维持零扩展的 `mov`。

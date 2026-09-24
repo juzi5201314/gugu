@@ -24,7 +24,7 @@ impl FormId {
 }
 
 /// 操作数形状；编码器与 verifier 按此校验操作数实例。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum OperandKind {
     /// 8 位寄存器或内存。
     Rm8,
@@ -91,7 +91,7 @@ impl OperandKind {
 }
 
 /// 操作数访问语义；与 `Form::operands` 逐位置对应。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum Access {
     /// 只读。
     Read,
