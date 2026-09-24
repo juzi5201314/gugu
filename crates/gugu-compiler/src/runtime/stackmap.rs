@@ -101,34 +101,28 @@ pub(crate) fn find_function(world: &WalkWorld<'_>, pc: u64) -> Result<u32, RawMo
     Err(RawModelError::new("程序计数器不在任何函数代码区"))
 }
 
-/// 在函数的安全点范围内二分查找精确匹配 `pc_offset` 的记录。
+/// 在按 `(function, pc_offset)` 规范序排列的安全点表中二分查找精确匹配的记录。
+///
+/// 全表规范序是 `WalkWorld` 的构造契约：编码路径由 `stackmap_codec::encode`
+/// 排序并校验，`walk_safepoints` 构表时有 debug 断言。查找直接对全表做复合键
+/// 二分——先定位函数区间，再在区间内精确匹配 `pc_offset`，不做过滤或重排。
 pub(crate) fn find_safepoint(
     world: &WalkWorld<'_>,
     function: u32,
     pc_offset: u32,
 ) -> Result<u32, RawModelError> {
-    let mut candidates: Vec<(u32, &WalkSafepoint)> = world
+    let start = world
         .safepoints
-        .iter()
-        .enumerate()
-        .filter(|(_, safepoint)| safepoint.function == function)
-        .map(|(index, safepoint)| (index as u32, safepoint))
-        .collect();
-    candidates.sort_by_key(|(_, safepoint)| safepoint.pc_offset);
-    let mut low = 0usize;
-    let mut high = candidates.len();
-    while low < high {
-        let middle = low + (high - low) / 2;
-        let offset = candidates[middle].1.pc_offset;
-        if pc_offset < offset {
-            high = middle;
-        } else if pc_offset > offset {
-            low = middle + 1;
-        } else {
-            return Ok(candidates[middle].0);
-        }
+        .partition_point(|safepoint| safepoint.function < function);
+    let end = world
+        .safepoints
+        .partition_point(|safepoint| safepoint.function <= function);
+    let range = &world.safepoints[start..end];
+    let index = range.partition_point(|safepoint| safepoint.pc_offset < pc_offset);
+    match range.get(index) {
+        Some(safepoint) if safepoint.pc_offset == pc_offset => Ok((start + index) as u32),
+        _ => Err(RawModelError::new("安全点偏移没有精确匹配的记录")),
     }
-    Err(RawModelError::new("安全点偏移没有精确匹配的记录"))
 }
 
 /// 扫描一个安全点的五类根：按槽偏移排序返回。
@@ -409,6 +403,11 @@ fn walk_safepoints(
     if safepoints.len() != decoded.safepoints.len() {
         return Err(RawModelError::new("安全点没有全部落入函数范围"));
     }
+    // `find_safepoint` 依赖全表按 `(function, pc_offset)` 规范序；编码器已排序并
+    // 校验同一函数内严格递增，此处复核整表不变量。
+    debug_assert!(
+        safepoints.is_sorted_by_key(|safepoint| (safepoint.function, safepoint.pc_offset))
+    );
     Ok(safepoints)
 }
 
