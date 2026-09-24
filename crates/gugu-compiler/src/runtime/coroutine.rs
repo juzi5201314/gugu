@@ -457,6 +457,31 @@ pub(crate) struct CoroutineCold {
     pub(crate) gc_scan_epoch: AtomicU64,
 }
 
+/// morestack 入口片段与镜像 runtime 交接的固定邮箱；位于 runtime 状态区首部。
+///
+/// 片段写入 `hot`/`entry_rsp`/`candidate`/`required` 后切到 `system_context`；系统侧的镜像
+/// runtime 用 `required` 决策新栈，修正 `cold` 与 `system_context` 后再恢复协程。布局由
+/// `CoroutineRuntimeContract.records` 交给 `coroutine_layout` 与 Gugu 侧结构逐字段交叉校验。
+#[repr(C, align(8))]
+pub(crate) struct MorestackMailbox {
+    /// 片段入口的 `r14`（`CoroutineSlot*`，与 `CoroutineHot*` 同址）。
+    pub(crate) hot: u64,
+    /// 片段入口 `rsp`。
+    pub(crate) entry_rsp: u64,
+    /// 片段入口候选低水位 `r11`。
+    pub(crate) candidate: u64,
+    /// `entry_rsp + 8 - candidate`，由片段算出，是栈决策的实参。
+    pub(crate) required: u64,
+    /// 当前协程 `CoroutineCold*`；runtime 绑定协程时发布，片段只读。
+    pub(crate) cold: u64,
+    /// 当前 worker 的系统上下文；rt0 切入协程前保存，片段以它为恢复目标。
+    pub(crate) system_context: CoroutineContext,
+    /// main 协程返回时由返回哨兵记录的退出值。
+    pub(crate) return_value: u64,
+    /// 当前 worker 的 `LogicalProcessor*`；返回哨兵恢复上下文时用它重建 `r15`。
+    pub(crate) processor: u64,
+}
+
 const _: () = {
     assert!(size_of::<CoroutineHot>() == 64 && align_of::<CoroutineHot>() == 64);
     assert!(size_of::<StackDescriptor>() == 64 && align_of::<StackDescriptor>() == 64);
@@ -465,6 +490,10 @@ const _: () = {
     assert!(size_of::<CoroutineContext>() == 48);
     assert!(size_of::<MorestackScratch>() == 208);
     assert!(size_of::<CoroutineCold>() == 512 && align_of::<CoroutineCold>() == 64);
+    assert!(size_of::<MorestackMailbox>() == 104 && align_of::<MorestackMailbox>() == 8);
+    assert!(std::mem::offset_of!(MorestackMailbox, system_context) == 40);
+    assert!(std::mem::offset_of!(MorestackMailbox, return_value) == 88);
+    assert!(std::mem::offset_of!(MorestackMailbox, processor) == 96);
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

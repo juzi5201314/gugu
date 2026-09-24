@@ -7,6 +7,8 @@
 use super::codegen::{FragmentPayload, X64World};
 use super::inst::{RelocKind, RelocTarget};
 use super::mangle;
+use crate::runtime::entry;
+use crate::runtime::fragments;
 use std::collections::{BTreeMap, BTreeSet};
 
 const IMAGE_BASE: u64 = 0x0000_0001_4000_0000;
@@ -19,8 +21,23 @@ const DATA_CHARS: u32 = 0xC000_0040;
 const RELOC_CHARS: u32 = 0x4200_0040;
 
 const IMPORTS: &[(&str, &[&str])] = &[
-    ("kernel32.dll", &["ExitProcess", "SetConsoleCtrlHandler"]),
-    ("ntdll.dll", &["NtTerminateProcess"]),
+    (
+        "kernel32.dll",
+        &[
+            "ExitProcess",
+            "SetConsoleCtrlHandler",
+            "GetStdHandle",
+            "WriteFile",
+        ],
+    ),
+    (
+        "ntdll.dll",
+        &[
+            "NtTerminateProcess",
+            "NtAllocateVirtualMemory",
+            "NtFreeVirtualMemory",
+        ],
+    ),
 ];
 
 /// 写出的 Windows 镜像。Linux 调用方使用 [`PeImage::absent`]。
@@ -53,6 +70,8 @@ pub(crate) struct ObjectSymbol {
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,
     pub(crate) relocs: Vec<ObjectReloc>,
+    /// 同一字节串上的别名入口：名字与相对该符号起点的偏移。
+    pub(crate) aliases: Vec<(String, u32)>,
 }
 
 /// 一条尚未解析的重定位。
@@ -80,7 +99,11 @@ pub(crate) struct PeRequest {
     pub(crate) entry: String,
     pub(crate) symbols: Vec<ObjectSymbol>,
     pub(crate) readonly: Vec<(String, Vec<u8>)>,
+    /// 常量数据块 `(符号名, 字节)`：进 `.rdata` 并按符号登记，不作为节名（节名限 8 字节）。
+    pub(crate) constants: Vec<(String, Vec<u8>)>,
     pub(crate) dll: bool,
+    /// 已绑定 glue 的 mangled 符号名；这些名字缺失定义时按 `E0062` 语义失败。
+    pub(crate) bound_glues: std::collections::BTreeSet<String>,
 }
 
 struct Section {
@@ -93,7 +116,7 @@ struct Section {
 
 struct RipSite {
     at: usize,
-    target: &'static str,
+    target: String,
 }
 
 /// 链接一个已编码片段世界。
@@ -101,6 +124,9 @@ pub(crate) fn link_world(world: &X64World, types: &[u8], meta: &[u8]) -> Result<
     let mut symbols = Vec::new();
     for fragment in &world.fragments {
         symbols.push(symbol_from_fragment(fragment)?);
+    }
+    for blob in fragments::registered_fragments(world.target) {
+        symbols.push(symbol_from_machine_fragment(&blob)?);
     }
     let readonly = vec![
         (
@@ -122,7 +148,9 @@ pub(crate) fn link_world(world: &X64World, types: &[u8], meta: &[u8]) -> Result<
         entry: world.entry_symbol.clone(),
         symbols,
         readonly,
+        constants: world.constants.clone(),
         dll: false,
+        bound_glues: world.glues().bound_symbols(),
     })
 }
 
@@ -144,6 +172,40 @@ fn symbol_from_fragment(fragment: &FragmentPayload) -> Result<ObjectSymbol, Stri
         name: fragment.symbol.clone(),
         bytes: fragment.bytes.clone(),
         relocs,
+        aliases: match mangle::mangle_instance(&fragment.instance) {
+            instance if instance != fragment.symbol => vec![(instance, 0)],
+            _ => Vec::new(),
+        },
+    })
+}
+
+/// 登记机器片段作为一个代码符号；入口名与别名指向同一字节串。
+fn symbol_from_machine_fragment(blob: &fragments::FragmentBlob) -> Result<ObjectSymbol, String> {
+    let (first, rest) = blob
+        .entries
+        .split_first()
+        .ok_or_else(|| "登记片段缺少入口符号".to_owned())?;
+    let mut relocs = Vec::new();
+    for reloc in &blob.relocations {
+        if reloc.kind != RelocKind::PcRel32 {
+            return Err(format!("登记片段 `{}` 只允许 PC 相对修补点", first.glue));
+        }
+        relocs.push(ObjectReloc {
+            offset: reloc.offset,
+            kind: RelocKindCode::PcRel32,
+            target: reloc_name(&reloc.target),
+            addend: reloc.addend,
+        });
+    }
+    let aliases = rest
+        .iter()
+        .map(|entry| (blob.domain.mangle(entry.glue), entry.offset))
+        .collect();
+    Ok(ObjectSymbol {
+        name: blob.domain.mangle(first.glue),
+        bytes: blob.bytes.clone(),
+        relocs,
+        aliases,
     })
 }
 
@@ -157,8 +219,24 @@ fn reloc_name(target: &RelocTarget) -> String {
 
 /// 把代码和逻辑节收成 PE32+。
 pub(crate) fn link(request: &PeRequest) -> Result<PeImage, String> {
+    link_inner(request).map(|(image, _)| image)
+}
+
+/// 与 [`link`] 相同，但一并返回符号 RVA 目录；测试据此断言参数块与保留区契约。
+#[cfg(test)]
+pub(crate) fn link_with_layout(
+    request: &PeRequest,
+) -> Result<(PeImage, BTreeMap<String, u64>), String> {
+    link_inner(request)
+}
+
+fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), String> {
     archive_ready()?;
-    let (mut text, mut defined, sites) = assemble_prefix()?;
+    let (mut text, mut defined, sites) = assemble_prefix(
+        request
+            .bound_glues
+            .contains(&mangle::mangle_runtime("rt0_start")),
+    )?;
     let fragment_off = place_fragments(request, &mut text, &mut defined)?;
     if !defined.contains_key(&request.entry) {
         return Err(format!("入口符号 {} 不存在", request.entry));
@@ -168,7 +246,19 @@ pub(crate) fn link(request: &PeRequest) -> Result<PeImage, String> {
     let mut rdata_at = BTreeMap::new();
     let import_at = append_imports(&mut rdata)?;
     append_standins(&mut rdata, &mut rdata_at)?;
-    let data = iat_template();
+    // 常量数据块：追加到 `.rdata` 并按符号登记（符号名不受节名 8 字节限制）。
+    let mut const_at = Vec::with_capacity(request.constants.len());
+    for (name, bytes) in &request.constants {
+        let offset = align_up(
+            u64::try_from(rdata.len()).map_err(|_| "常量偏移溢出".to_owned())?,
+            16,
+        )?;
+        let offset = usize::try_from(offset).map_err(|_| "常量偏移超出宿主".to_owned())?;
+        rdata.resize(offset, 0);
+        rdata.extend_from_slice(bytes);
+        const_at.push((name.clone(), offset as u64));
+    }
+    let (data, reserved) = data_with_reserved(iat_template())?;
     let mut sections = Vec::new();
     sections.push(section(".text", text, TEXT_CHARS));
     sections.append(&mut named);
@@ -180,7 +270,21 @@ pub(crate) fn link(request: &PeRequest) -> Result<PeImage, String> {
     let text_rva = rva_of(&sections, ".text")?;
     let rdata_rva = rva_of(&sections, ".rdata")?;
     let data_rva = rva_of(&sections, ".data")?;
+    for (name, offset) in &const_at {
+        defined.insert(name.clone(), rdata_rva + offset);
+        rdata_at.insert(name.clone(), *offset);
+    }
+    // 保留可写区在 `.data` 内，紧随 IAT；地址按 RVA 登记，供参数块与重定位使用。
+    defined.insert("__gugu_initial_slot".to_owned(), data_rva + reserved.slot);
+    defined.insert("__gugu_runtime_state".to_owned(), data_rva + reserved.state);
+    // mailbox 是 runtime 状态区首部的别名：morestack 与返回哨兵片段都按这个符号打补丁。
+    defined.insert(
+        mangle::mangle_runtime("morestack_mailbox"),
+        data_rva + reserved.state,
+    );
+    defined.insert("__gugu_rt0_payload".to_owned(), data_rva + reserved.payload);
     let fragment_rva = text_rva + fragment_off;
+    defined.insert("__gugu_fragments_base".to_owned(), fragment_rva);
     fill_imports(&mut sections, rdata_rva, data_rva, import_at)?;
     patch_rip(
         &mut sections,
@@ -191,7 +295,7 @@ pub(crate) fn link(request: &PeRequest) -> Result<PeImage, String> {
         &rdata_at,
         &sites,
     )?;
-    let abs64 = patch_fragments(request, &mut sections, text_rva, &defined)?;
+    let abs64 = patch_fragments(request, &mut sections, text_rva, data_rva, &defined)?;
     fill_pdata(&mut sections, fragment_rva)?;
     let reloc = reloc_bytes(&abs64)?;
     if let Some(section) = sections.iter_mut().find(|item| item.name == ".reloc") {
@@ -199,8 +303,18 @@ pub(crate) fn link(request: &PeRequest) -> Result<PeImage, String> {
     }
     assign_rvas(&mut sections)?;
     let text_rva = rva_of(&sections, ".text")?;
+    let rdata_rva = rva_of(&sections, ".rdata")?;
+    let data_rva = rva_of(&sections, ".data")?;
+    fill_entry(
+        &mut sections,
+        request,
+        &defined,
+        &rdata_at,
+        rdata_rva,
+        data_rva,
+    )?;
     let bytes = write_image(request, &sections, import_at)?;
-    Ok(PeImage {
+    let image = PeImage {
         bytes: bytes.clone(),
         kind: if request.dll {
             "cdylib".to_owned()
@@ -211,7 +325,8 @@ pub(crate) fn link(request: &PeRequest) -> Result<PeImage, String> {
         reloc_count: u32::try_from(abs64.len()).unwrap_or(u32::MAX),
         import_dlls: IMPORTS.len() as u32,
         fingerprint: fingerprint(&bytes),
-    })
+    };
+    Ok((image, defined))
 }
 
 fn section(name: &str, bytes: Vec<u8>, characteristics: u32) -> Section {
@@ -224,13 +339,16 @@ fn section(name: &str, bytes: Vec<u8>, characteristics: u32) -> Section {
     }
 }
 
-fn assemble_prefix() -> Result<(Vec<u8>, BTreeMap<String, u64>, Vec<RipSite>), String> {
+fn assemble_prefix(
+    runtime_entry: bool,
+) -> Result<(Vec<u8>, BTreeMap<String, u64>, Vec<RipSite>), String> {
     let mut text = Vec::new();
     let mut defined = BTreeMap::new();
     let mut sites = Vec::new();
     defined.insert("_start".to_owned(), 0);
+    defined.insert("__gugu_image_base".to_owned(), 0);
     text.extend_from_slice(&[0x48, 0x83, 0xec, 0x28]);
-    sites.push(rip(&mut text, &[0x4c, 0x8d, 0x35], "__gugu_stack_limit"));
+    sites.push(rip(&mut text, &[0x4c, 0x8d, 0x35], "__gugu_initial_slot"));
     sites.push(rip(&mut text, &[0x4c, 0x8d, 0x3d], "__gugu_processor"));
     sites.push(rip(&mut text, &[0x48, 0x8d, 0x0d], "__gugu_handler"));
     text.extend_from_slice(&[0xba, 0x01, 0x00, 0x00, 0x00]);
@@ -239,8 +357,19 @@ fn assemble_prefix() -> Result<(Vec<u8>, BTreeMap<String, u64>, Vec<RipSite>), S
         &[0xff, 0x15],
         "__gugu_iat_SetConsoleCtrlHandler",
     ));
-    sites.push(rip(&mut text, &[0x48, 0x8d, 0x05], "__gugu_user_entry"));
-    text.extend_from_slice(&[0xff, 0xd0, 0x31, 0xc9]);
+    if runtime_entry {
+        sites.push(rip(&mut text, &[0x48, 0x8d, 0x05], "__gugu_rt0_params"));
+        sites.push(rip(&mut text, &[0x48, 0x8d, 0x1d], "__gugu_image_base"));
+        sites.push(rip(
+            &mut text,
+            &[0xe8],
+            &mangle::mangle_runtime("rt0_start"),
+        ));
+        text.extend_from_slice(&[0x48, 0x89, 0xc1]); // 返回值 -> ExitProcess 参数 rcx。
+    } else {
+        sites.push(rip(&mut text, &[0x48, 0x8d, 0x05], "__gugu_user_entry"));
+        text.extend_from_slice(&[0xff, 0xd0, 0x31, 0xc9]);
+    }
     sites.push(rip(&mut text, &[0xff, 0x15], "__gugu_iat_ExitProcess"));
     text.push(0xcc);
     let handler = text.len() as u64;
@@ -259,6 +388,11 @@ fn assemble_prefix() -> Result<(Vec<u8>, BTreeMap<String, u64>, Vec<RipSite>), S
     text.extend_from_slice(&[0x0f, 0x0b]);
     defined.insert("__gugu_cage_control".to_owned(), text.len() as u64);
     text.extend(std::iter::repeat_n(0, 48));
+    defined.insert("__gugu_rt0_params".to_owned(), text.len() as u64);
+    text.extend(std::iter::repeat_n(
+        0,
+        usize::try_from(crate::runtime::entry::rt0_params::BYTES).expect("参数块字节数"),
+    ));
     defined.insert("__gugu_stub_ret".to_owned(), text.len() as u64);
     text.push(0xc3);
     defined.insert("__gugu_stub_abort".to_owned(), text.len() as u64);
@@ -268,11 +402,14 @@ fn assemble_prefix() -> Result<(Vec<u8>, BTreeMap<String, u64>, Vec<RipSite>), S
     Ok((text, defined, sites))
 }
 
-fn rip(text: &mut Vec<u8>, opcode: &[u8], target: &'static str) -> RipSite {
+fn rip(text: &mut Vec<u8>, opcode: &[u8], target: &str) -> RipSite {
     text.extend_from_slice(opcode);
     let at = text.len();
-    text.extend_from_slice(&[0, 0, 0, 0]);
-    RipSite { at, target }
+    text.extend_from_slice(&[0; 4]);
+    RipSite {
+        at,
+        target: target.to_owned(),
+    }
 }
 
 fn place_fragments(
@@ -293,6 +430,17 @@ fn place_fragments(
             return Err(format!("符号 {} 重复定义", symbol.name));
         }
         defined.insert(symbol.name.clone(), fragment_off + rva_cursor);
+        for (alias, offset) in &symbol.aliases {
+            if defined
+                .insert(
+                    alias.clone(),
+                    fragment_off + rva_cursor + u64::from(*offset),
+                )
+                .is_some()
+            {
+                return Err(format!("符号 {alias} 重复定义"));
+            }
+        }
         let span = (symbol.bytes.len() as u64).max(1);
         rva_cursor = rva_cursor.saturating_add(span);
     }
@@ -358,6 +506,111 @@ fn iat_template() -> Vec<u8> {
     bytes
 }
 
+/// 保留可写区在 `.data` 内的偏移。
+struct ReservedData {
+    slot: u64,
+    state: u64,
+    payload: u64,
+}
+
+/// `.data` 内容：IAT 之后是按 64/8 对齐的保留可写区（初始槽、runtime 状态区、启动载荷），全部零初始化。
+fn data_with_reserved(iat: Vec<u8>) -> Result<(Vec<u8>, ReservedData), String> {
+    let slot = align_up(iat.len() as u64, 64)?;
+    let state = align_up(slot + entry::INITIAL_SLOT_BYTES, 64)?;
+    let payload = align_up(state + entry::RUNTIME_STATE_BYTES, 8)?;
+    let end = payload + entry::Rt0Payload::bytes();
+    let mut data = iat;
+    data.resize(
+        usize::try_from(end).map_err(|_| "保留区超出镜像".to_owned())?,
+        0,
+    );
+    Ok((
+        data,
+        ReservedData {
+            slot,
+            state,
+            payload,
+        },
+    ))
+}
+
+/// 写 rt0 参数块与启动载荷。
+///
+/// PE 不自举重定位表、也没有 mprotect 收尾，对应的 word 保持 0；参数块与保留区里的地址都是
+/// RVA，入口 stub 把加载基址写进载荷的 bias 字段后，runtime 用它折算运行时地址。
+fn fill_entry(
+    sections: &mut [Section],
+    request: &PeRequest,
+    defined: &BTreeMap<String, u64>,
+    rdata_at: &BTreeMap<String, u64>,
+    rdata_rva: u64,
+    data_rva: u64,
+) -> Result<(), String> {
+    use crate::runtime::entry::Rt0Payload;
+    use crate::runtime::entry::rt0_params;
+    let rdata = |name: &str| -> Result<u64, String> {
+        rdata_at
+            .get(name)
+            .map(|offset| rdata_rva + offset)
+            .ok_or_else(|| format!("缺少 .rdata 符号 {name}"))
+    };
+    let text_rva = rva_of(sections, ".text")?;
+    let rt0_start = mangle::mangle_runtime("rt0_start");
+    let mut words = [0_u64; rt0_params::WORDS];
+    words[rt0_params::ENTRY] = defined[&request.entry];
+    words[rt0_params::BOOT_R14] = defined["__gugu_initial_slot"];
+    words[rt0_params::PROCESSOR] = rdata("__gugu_processor")?;
+    words[rt0_params::RT0_START] = defined
+        .get(&rt0_start)
+        .copied()
+        .filter(|_| request.bound_glues.contains(&rt0_start))
+        .unwrap_or(0);
+    words[rt0_params::PAYLOAD_VA] = defined["__gugu_rt0_payload"];
+    words[rt0_params::PAYLOAD_LEN] = Rt0Payload::bytes();
+    words[rt0_params::INITIAL_SLOT] = defined["__gugu_initial_slot"];
+    words[rt0_params::RUNTIME_STATE] = defined["__gugu_runtime_state"];
+    // `defined` 里 `.text` 符号是节内偏移，`.data` 保留区是 RVA。
+    let params =
+        usize::try_from(defined["__gugu_rt0_params"]).map_err(|_| "参数块超出 .text".to_owned())?;
+    let payload = usize::try_from(defined["__gugu_rt0_payload"] - data_rva)
+        .map_err(|_| "载荷超出 .data".to_owned())?;
+    let text = section_bytes(sections, ".text")?;
+    for (index, word) in words.iter().enumerate() {
+        put_u64_at(text, params + index * 8, *word)?;
+    }
+    let stackmap_rva = rva_of(sections, ".gugustk")?;
+    let stackmap_len = u64::try_from(section_bytes(sections, ".gugustk")?.len())
+        .map_err(|_| "栈图长度溢出".to_owned())?;
+    let (unwind_rva, unwind_len) = sections
+        .iter()
+        .find(|section| section.name == ".xdata")
+        .map(|section| {
+            (
+                section.rva,
+                u64::try_from(section.bytes.len()).expect("展开长度"),
+            )
+        })
+        .unwrap_or((0, 0));
+    let data = section_bytes(sections, ".data")?;
+    put_u64_at(data, payload, Rt0Payload::REVISION)?;
+    put_u64_at(data, payload + 8, words[rt0_params::ENTRY])?;
+    put_u64_at(data, payload + 16, words[rt0_params::INITIAL_SLOT])?;
+    put_u64_at(data, payload + 24, words[rt0_params::RUNTIME_STATE])?;
+    put_u64_at(
+        data,
+        payload + 40,
+        defined
+            .get(&mangle::mangle_runtime("main_return"))
+            .map_or(words[rt0_params::ENTRY], |offset| text_rva + offset),
+    )?;
+    put_u64_at(data, payload + 48, stackmap_rva)?;
+    put_u64_at(data, payload + 56, defined["__gugu_fragments_base"])?;
+    put_u64_at(data, payload + 64, stackmap_len)?;
+    put_u64_at(data, payload + 72, unwind_rva)?;
+    put_u64_at(data, payload + 80, unwind_len)?;
+    Ok(())
+}
+
 fn assign_rvas(sections: &mut [Section]) -> Result<(), String> {
     let header = header_size(sections.len())?;
     let mut rva = align_up(header, SECTION_ALIGN)?;
@@ -396,12 +649,15 @@ fn patch_rip(
 ) -> Result<(), String> {
     let text = section_bytes(sections, ".text")?;
     for site in sites {
-        let target = if let Some(offset) = rdata_at.get(site.target) {
+        let target = if let Some(offset) = rdata_at.get(site.target.as_str()) {
             rdata_rva + offset
-        } else if let Some(offset) = iat_offset(site.target) {
+        } else if let Some(offset) = iat_offset(site.target.as_str()) {
             data_rva + offset
-        } else if let Some(offset) = defined.get(site.target) {
-            text_rva + offset
+        } else if let Some(offset) = defined.get(site.target.as_str()) {
+            match site.target.as_str() {
+                "__gugu_initial_slot" | "__gugu_image_base" => *offset,
+                _ => text_rva + offset,
+            }
         } else {
             return Err(format!("RIP 目标 {} 不存在", site.target));
         };
@@ -454,10 +710,10 @@ fn fill_imports(
         rdata[import_at..end].copy_from_slice(&region);
     }
     let data = section_bytes(sections, ".data")?;
-    if data.len() != iat.len() {
+    if data.len() < iat.len() {
         return Err("IAT 长度不一致".to_owned());
     }
-    data.copy_from_slice(&iat);
+    data[..iat.len()].copy_from_slice(&iat);
     Ok(())
 }
 
@@ -534,11 +790,24 @@ fn patch_fragments(
     request: &PeRequest,
     sections: &mut [Section],
     text_rva: u64,
+    data_rva: u64,
     defined: &BTreeMap<String, u64>,
 ) -> Result<Vec<u64>, String> {
     let mut seen = BTreeSet::new();
     let mut abs64 = Vec::new();
     let text = section_bytes(sections, ".text")?;
+    let mailbox = mangle::mangle_runtime("morestack_mailbox");
+    let data_symbols: BTreeSet<&str> = request
+        .constants
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain([
+            "__gugu_initial_slot",
+            "__gugu_runtime_state",
+            "__gugu_rt0_payload",
+            mailbox.as_str(),
+        ])
+        .collect();
     for symbol in &request.symbols {
         let base = *defined
             .get(&symbol.name)
@@ -564,8 +833,16 @@ fn patch_fragments(
             if !seen.insert(slot) {
                 return Err(format!("重定位槽 {slot:#x} 重复"));
             }
-            let target = resolve_target(&reloc.target, defined)?;
-            let target_rva = text_rva + target;
+            let target_rva = if let Some(offset) = iat_offset(&reloc.target) {
+                data_rva + offset
+            } else {
+                let target = resolve_target(&reloc.target, defined, &request.bound_glues)?;
+                if data_symbols.contains(reloc.target.as_str()) {
+                    target
+                } else {
+                    text_rva + target
+                }
+            };
             let at = usize::try_from(slot).map_err(|_| "重定位槽越界".to_owned())?;
             match reloc.kind {
                 RelocKindCode::PcRel32 => {
@@ -591,12 +868,16 @@ fn patch_fragments(
     Ok(abs64)
 }
 
-fn resolve_target(name: &str, defined: &BTreeMap<String, u64>) -> Result<u64, String> {
+fn resolve_target(
+    name: &str,
+    defined: &BTreeMap<String, u64>,
+    bound: &std::collections::BTreeSet<String>,
+) -> Result<u64, String> {
     if let Some(offset) = defined.get(name) {
         return Ok(*offset);
     }
-    if name == mangle::mangle_runtime("morestack_or_poll") {
-        return Ok(defined["__gugu_stub_ret"]);
+    if bound.contains(name) {
+        return Err(format!("runtime glue {name} 绑定在镜像内没有定义"));
     }
     Ok(defined["__gugu_stub_abort"])
 }

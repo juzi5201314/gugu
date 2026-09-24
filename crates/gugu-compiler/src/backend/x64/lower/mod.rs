@@ -132,6 +132,7 @@ pub(crate) fn domain(op: &Op) -> &'static str {
         Op::GcAlloc { .. } => "GcAlloc",
         Op::RegionAlloc { .. } => "RegionAlloc",
         Op::PlatformCall(_) => "PlatformCall",
+        Op::RuntimeMachineCall(_) => "RuntimeMachineCall",
         Op::RegionPublish { .. } => "RegionPublish",
         Op::RegionReset { .. } => "RegionReset",
         Op::PromoteManaged { .. } => "PromoteManaged",
@@ -214,6 +215,7 @@ pub(crate) fn lower_with(
             alloc::lower(op, operands, results, source, ctx, &mut builder)?
         }
         Op::PlatformCall(_)
+        | Op::RuntimeMachineCall(_)
         | Op::RegionPublish { .. }
         | Op::RegionReset { .. }
         | Op::PromoteManaged { .. }

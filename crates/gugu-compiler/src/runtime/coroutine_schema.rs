@@ -6,8 +6,11 @@ use std::mem::offset_of;
 
 use super::context::ContextSwitchCode;
 use super::coroutine::{
-    CoroutineCold, CoroutineContext, CoroutineHot, CoroutineSlot, MorestackScratch, StackDescriptor,
+    CoroutineCold, CoroutineContext, CoroutineHot, CoroutineSlot, MorestackMailbox,
+    MorestackScratch, StackDescriptor,
 };
+use super::entry::{Rt0Params, Rt0Payload};
+use super::fragments::{MainReturnCode, MorestackEntryCode};
 use super::model::RawModelError;
 use super::stack::{
     STACK_ARENA_BYTES, STACK_CACHE_CLASSES, STACK_CACHE_LIMIT, STACK_CACHE_LOW, STACK_CLASSES,
@@ -113,6 +116,10 @@ pub struct CoroutineRuntimeContract {
     pub stack: StackPolicy,
     /// x86_64换栈实际代码。
     pub context: ContextSwitchCode,
+    /// x86_64 morestack 入口片段与续点。
+    pub morestack: MorestackEntryCode,
+    /// x86_64 main 返回哨兵片段。
+    pub main_return: MainReturnCode,
     /// 上游LIR需求。
     pub demand: CoroutineDemand,
 }
@@ -122,14 +129,18 @@ pub(crate) const fn stack_check_offset() -> u32 {
     (offset_of!(CoroutineSlot, stack) + offset_of!(StackDescriptor, stack_check)) as u32
 }
 
+/// morestack mailbox 的字段偏移由 `MorestackMailbox` 结构唯一持有；片段按机器级消费者引用
+/// 同一份 `offset_of!`。
 impl CoroutineRuntimeContract {
     pub(crate) fn build(demand: CoroutineDemand) -> Result<Self, RawModelError> {
         let result = Self {
-            schema: 1,
+            schema: 2,
             stack_check_offset: stack_check_offset(),
             records: fixed_layouts(),
             stack: StackPolicy::fixed(),
             context: ContextSwitchCode::fixed(),
+            morestack: MorestackEntryCode::fixed(),
+            main_return: MainReturnCode::fixed(),
             demand,
         };
         result.verify()?;
@@ -137,14 +148,16 @@ impl CoroutineRuntimeContract {
     }
 
     pub(crate) fn verify(&self) -> Result<(), RawModelError> {
-        if self.schema != 1
+        if self.schema != 2
             || self.stack_check_offset != 64
             || self.records != fixed_layouts()
             || self.stack != StackPolicy::fixed()
             || self.context != ContextSwitchCode::fixed()
+            || self.morestack != MorestackEntryCode::fixed()
+            || self.main_return != MainReturnCode::fixed()
         {
             return Err(RawModelError::new(
-                "协程布局、栈策略或context代码与runtime/backend schema不匹配",
+                "协程布局、栈策略、context 代码或 morestack 片段与 runtime/backend schema 不匹配",
             ));
         }
         Ok(())
@@ -166,11 +179,14 @@ impl CoroutineRuntimeContract {
         let mut output = String::new();
         writeln!(
             output,
-            "coroutine schema={} stack-check-offset={} context-bytes={} restore-offset={}",
+            "coroutine schema={} stack-check-offset={} context-bytes={} restore-offset={} morestack-bytes={} morestack-revision={} morestack-resume={}",
             self.schema,
             self.stack_check_offset,
             self.context.bytes.len(),
-            self.context.restore_offset
+            self.context.restore_offset,
+            self.morestack.bytes.len(),
+            self.morestack.revision,
+            self.morestack.resume_offset
         )
         .expect("String写入");
         for record in &self.records {
@@ -218,5 +234,8 @@ fn fixed_layouts() -> Vec<CoroutineRecordLayout> {
         record!(CoroutineContext; rsp, rip, rbx, rbp, r12, r13),
         record!(MorestackScratch; return_pc, gpr, xmm),
         record!(CoroutineCold; id, context, morestack_scratch, wait_record, foreign_bridge, join_state, coroutine_locals, panic_state, select_rng, select_scratch, gc_scan_epoch),
+        record!(MorestackMailbox; hot, entry_rsp, candidate, required, cold, system_context, return_value, processor),
+        record!(Rt0Payload; revision, main_entry, initial_slot, runtime_state, bias, main_return, stackmap, fragment_base, stackmap_len, unwind, unwind_len),
+        record!(Rt0Params; bias_baseline, reloc_table, reloc_count, protect_va, protect_len, entry, boot_r14, processor, rt0_start, payload_va, payload_len, initial_slot, runtime_state, reserved_13, reserved_14, reserved_15),
     ]
 }

@@ -194,7 +194,19 @@ pub(crate) fn terminator(
             call::emit_jump_target(call, &layout, &args, builder)?;
             Ok(())
         }
-        Terminator::ResumePanic { .. } | Terminator::Trap { .. } => {
+        Terminator::ResumePanic { .. } => {
+            builder.emit(
+                "jmp",
+                REL32,
+                Access::Read,
+                vec![Operand::Reloc(
+                    RelocTarget::Lir(mangle::runtime_symbol("panic_resume")),
+                    RelocKind::PcRel32,
+                )],
+            );
+            Ok(())
+        }
+        Terminator::Trap { .. } => {
             builder.emit(
                 "jmp",
                 REL32,

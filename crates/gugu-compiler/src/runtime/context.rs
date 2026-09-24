@@ -31,19 +31,34 @@ impl ContextSwitchCode {
         let rsp = offset(offset_of!(CoroutineContext, rsp));
         debug_assert_eq!(rsp, 0, "rsp 字段在 context 首位，零位移因此可以省略");
         let mut bytes = Vec::with_capacity(64);
+        // LIR 按内部 ABI 传参（rax=save, rbx=restore, rcx=hot, rdx=processor），片段内部沿用
+        // 既有约定（rdi=save, rsi=restore, rdx=hot, rcx=processor）：入口先换位。
+        bytes.extend_from_slice(&[0x48, 0x89, 0xc7]);
+        bytes.extend_from_slice(&[0x48, 0x89, 0xde]);
+        bytes.extend_from_slice(&[0x49, 0x89, 0xc8, 0x48, 0x89, 0xd1, 0x4c, 0x89, 0xc2]);
         // lea rax,[rsp+8]；mov [rdi],rax；取调用者return PC。
         bytes.extend_from_slice(&[0x48, 0x8d, 0x44, 0x24, 8, 0x48, 0x89, 0x07]);
         bytes.extend_from_slice(&[0x48, 0x8b, 0x04, 0x24, 0x48, 0x89, 0x47, rip]);
         bytes.extend_from_slice(&[0x48, 0x89, 0x5f, rbx, 0x48, 0x89, 0x6f, rbp]);
         bytes.extend_from_slice(&[0x4c, 0x89, 0x67, r12, 0x4c, 0x89, 0x6f, r13]);
-        let restore_offset = u32::try_from(bytes.len()).expect("固定片段长度适配u32");
+        let restore_body_offset = bytes.len();
         // mov r14,rdx；mov r15,rcx。两目标共用Gugu内部ABI，而非宿主C ABI。
         bytes.extend_from_slice(&[0x49, 0x89, 0xd6, 0x49, 0x89, 0xcf]);
         bytes.extend_from_slice(&[0x48, 0x8b, 0x5e, rbx, 0x48, 0x8b, 0x6e, rbp]);
         bytes.extend_from_slice(&[0x4c, 0x8b, 0x66, r12, 0x4c, 0x8b, 0x6e, r13]);
         bytes.extend_from_slice(&[0x48, 0x8b, 0x26, 0xff, 0x66, rip]);
+        // context_switch 保存上下文后直接落入恢复体；独立 context_restore 入口使用
+        // 相同的内部 ABI（rax=restore、rbx=hot、rcx=processor），先搬入共享恢复体的寄存器。
+        let restore_offset = u32::try_from(bytes.len()).expect("固定片段长度适配u32");
+        bytes.extend_from_slice(&[0x48, 0x89, 0xc6, 0x48, 0x89, 0xda, 0xeb]);
+        let jump = i8::try_from(
+            isize::try_from(restore_body_offset).expect("固定片段长度适配isize")
+                - isize::try_from(bytes.len() + 1).expect("固定片段长度适配isize"),
+        )
+        .expect("恢复体位于短跳范围");
+        bytes.extend_from_slice(&jump.to_ne_bytes());
         Self {
-            revision: 1,
+            revision: 2,
             restore_offset,
             bytes,
         }

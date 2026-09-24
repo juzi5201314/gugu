@@ -134,6 +134,7 @@ impl<'m, 'a> Builder<'m, 'a> {
         let unit = self.intern_type(hir::Type::Unit)?;
         self.intern_type(hir::Type::Never)?;
         self.intern_type(hir::Type::Bool)?;
+        self.intern_type(hir::Type::String)?;
         self.intern_type(hir::Type::Ptr(unit))?;
         Ok(())
     }

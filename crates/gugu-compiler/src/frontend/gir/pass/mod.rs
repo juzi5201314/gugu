@@ -437,8 +437,13 @@ fn remap_terminator(
             site: *site,
         },
         Terminator::Return => Terminator::Return,
-        Terminator::Panic { payload, unwind } => Terminator::Panic {
+        Terminator::Panic {
+            payload,
+            location,
+            unwind,
+        } => Terminator::Panic {
             payload: payload.clone(),
+            location: location.clone(),
             unwind: remap_block(block_map, *unwind)?,
         },
         Terminator::ResumePanic => Terminator::ResumePanic,
@@ -490,6 +495,10 @@ pub(crate) fn statement_defined(statement: &Statement) -> Option<LocalId> {
             destination: Some(place),
             ..
         } if place.is_local() => Some(place.local),
+        StatementKind::RuntimeMachineCall {
+            destination: Some(place),
+            ..
+        } if place.is_local() => Some(place.local),
         _ => None,
     }
 }
@@ -515,6 +524,18 @@ pub(crate) fn statement_reads(statement: &Statement, out: &mut BTreeSet<LocalId>
             out.insert(place.local);
         }
         StatementKind::PlatformCall {
+            operands,
+            destination,
+            ..
+        } => {
+            for operand in operands {
+                operand_reads(operand, out);
+            }
+            if let Some(destination) = destination {
+                out.insert(destination.local);
+            }
+        }
+        StatementKind::RuntimeMachineCall {
             operands,
             destination,
             ..

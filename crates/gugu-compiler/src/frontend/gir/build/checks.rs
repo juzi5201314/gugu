@@ -45,7 +45,12 @@ impl Builder<'_> {
         self.switch_to(fail);
         let payload = self.panic_string("runtime check failed");
         let unwind = self.intern_plan(self.current_unwind(id), CleanupChain::Unwind)?;
-        self.terminate(Terminator::Panic { payload, unwind });
+        let location = self.owner.expressions[id.index()].location.clone();
+        self.terminate(Terminator::Panic {
+            payload,
+            location,
+            unwind,
+        });
         self.switch_to(ok);
         Ok(())
     }

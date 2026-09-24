@@ -8,7 +8,12 @@ use crate::lir::body::{Body, RuntimeCall, Symbol};
 
 /// 内部函数符号：`__gugu_fn_` + `body.instance` 的 64 hex。
 pub(crate) fn mangle_function(body: &Body) -> String {
-    mangle("fn", &body.instance)
+    mangle_instance(&body.instance)
+}
+
+/// 同一函数实例的规范符号；runtime 绑定改变导出名时仍须保留内部直接调用地址。
+pub(crate) fn mangle_instance(instance: &[u8; 32]) -> String {
+    mangle("fn", instance)
 }
 
 /// 内部符号：按 LIR `Symbol` 种类编码。
@@ -85,7 +90,12 @@ fn data_key(index: u32) -> [u8; 32] {
     hash_domain("gugu-const-data-v1", &index.to_le_bytes())
 }
 
-fn runtime_call_name(call: RuntimeCall) -> &'static str {
+/// 常量数据块的镜像符号名。下标是**全局**数据池下标（见 `codegen::DataPool`）。
+pub(crate) fn const_symbol(index: u32) -> String {
+    mangle("const", &data_key(index))
+}
+
+pub(crate) fn runtime_call_name(call: RuntimeCall) -> &'static str {
     match call {
         RuntimeCall::ValueCopy => "value_copy",
         RuntimeCall::ValuePublish => "value_publish",

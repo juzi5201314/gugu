@@ -134,3 +134,26 @@ pub fn stack_bounds(slot: &CoroutineSlot) (uint, uint) = (slot.stack.stack_low, 
 /// context只在release发布后由acquire接手者读取。
 #[used]
 pub fn saved_context(cold: &CoroutineCold) &CoroutineContext = &cold.context
+
+/* morestack 入口片段与镜像 runtime 交接的固定邮箱；位于 runtime 状态区首部，偏移由 compiler
+ * 契约逐字段交叉校验。片段写入 hot/entry_rsp/candidate/required 后切到 system_context；系统侧
+ * runtime 用 required 决策新栈，修正 cold 与 system_context 之后再恢复协程。
+ */
+
+#[repr(C, align(8))]
+pub struct MorestackMailbox {
+    pub hot: uint,
+    pub entry_rsp: uint,
+    pub candidate: uint,
+    pub required: uint,
+    pub cold: uint,
+    pub system_context: CoroutineContext,
+    pub return_value: uint,
+    pub processor: uint,
+}
+
+/// 非空 package 必经布局交叉校验。
+#[used]
+pub fn morestack_records(mailbox: &MorestackMailbox) uint {
+    mailbox.hot + mailbox.entry_rsp + mailbox.candidate + mailbox.required + mailbox.cold + mailbox.system_context.rsp + mailbox.return_value + mailbox.processor
+}

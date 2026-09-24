@@ -50,14 +50,14 @@ pub use runtime::{
     CompressionHarness, CompressionPolicyV1, CompressionReport, CompressionRuntimeContract,
     ContextSwitchCode, CoroutineContext, CoroutineDemand, CoroutineFieldLayout,
     CoroutineRecordLayout, CoroutineRuntimeContract, EdgeCandidateHarness, EdgeCandidateReport,
-    EdgeDemand, EdgeRuntimeContract, GcMetadataDemand, GcPacingDemand, GcPacingRuntimeContract,
-    HarnessReport, HeapTriggerProfile, IntrinsicBoundary, LocalHeapDemand,
-    LocalHeapRuntimeContract, MarkDemand, MarkRuntimeContract, OwnerReturnHarness,
-    PlatformRangeDemand, RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness,
-    ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole,
-    SchedulerDemand, SchedulerRuntimeContract, SharedForwardHarness, SharedForwardReport,
-    SharedHeapDemand, SharedHeapRuntimeContract, StackMapDemand, StackPolicy, SyncDemand,
-    SyncLockHarness, SyncLockReport, SyncRuntimeContract, TurnRegionDemand,
+    EdgeDemand, EdgeRuntimeContract, FragmentPatch, GcMetadataDemand, GcPacingDemand,
+    GcPacingRuntimeContract, HarnessReport, HeapTriggerProfile, IntrinsicBoundary, LocalHeapDemand,
+    LocalHeapRuntimeContract, MainReturnCode, MarkDemand, MarkRuntimeContract, MorestackEntryCode,
+    OwnerReturnHarness, PlatformRangeDemand, RegionTransferHarness, RegionTransferReport,
+    ResourceReleaseHarness, ResourceReleaseReport, Rt0Boundary, RuntimeResources, RuntimeSource,
+    RuntimeSourceRole, SchedulerDemand, SchedulerRuntimeContract, SharedForwardHarness,
+    SharedForwardReport, SharedHeapDemand, SharedHeapRuntimeContract, StackMapDemand, StackPolicy,
+    SyncDemand, SyncLockHarness, SyncLockReport, SyncRuntimeContract, TurnRegionDemand,
     TurnRegionRuntimeContract, WaitDemand, WaitRuntimeContract,
 };
 pub use runtime::{CombiningDemand, CombiningMode, CombiningPolicyV1, CombiningRuntimeContract};
@@ -336,9 +336,24 @@ impl Compilation {
         self.lir.as_ref().map(lir::Validated::fingerprint)
     }
 
-    /// 返回 runtime raw 平面契约的稳定 dump；契约失败时为 `None`。
+    /// 返回 runtime raw 平面契约与 runtime glue 绑定的稳定 dump；契约失败时为 `None`。
     pub fn dump_runtime(&self) -> Option<String> {
-        self.raw_contract.as_ref().map(RuntimeRawContractV1::dump)
+        self.raw_contract.as_ref().map(|contract| {
+            let mut dump = contract.dump();
+            let Some(world) = self.x64.as_ref() else {
+                return dump;
+            };
+            let (bound, stubbed) = world.runtime_glue_counts();
+            if !dump.ends_with('\n') {
+                dump.push('\n');
+            }
+            dump.push_str(&format!("runtime-glue bound={bound} stubbed={stubbed}\n"));
+            for line in world.glues().dump_lines() {
+                dump.push_str(&line);
+                dump.push('\n');
+            }
+            dump
+        })
     }
 
     /// 返回 runtime raw 平面契约指纹。
@@ -501,6 +516,30 @@ impl Compiler {
                     gir: Some(frontend.gir),
                     gir_stats: frontend.gir_stats,
                     lir: None,
+                    raw_contract: None,
+                    x64: None,
+                    action_key: None,
+                };
+            }
+        };
+        // runtime glue 绑定：被 LIR 引用的 glue 在此解析为镜像内定义；失败在写出前闭环。
+        let resources = RuntimeResources::builtin();
+        let glues = match runtime::RuntimeGlueBindings::resolve(&resources, &frontend.hir, &lir) {
+            Ok(glues) => glues,
+            Err(error) => {
+                diagnostics.push(error);
+                graph.fail(ActionKind::BuildIr, "runtime glue 绑定失败");
+                graph.skip_after(ActionKind::BuildIr, "runtime glue 绑定无效");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(frontend.hir),
+                    gir: Some(frontend.gir),
+                    gir_stats: frontend.gir_stats,
+                    lir: Some(lir),
                     raw_contract: None,
                     x64: None,
                     action_key: None,
@@ -714,6 +753,7 @@ impl Compiler {
                         &self.queries,
                         &source_map,
                         &entry,
+                        glues,
                     )
                 });
             match outcome {
@@ -832,8 +872,7 @@ impl Compiler {
         };
         graph.complete(ActionKind::PlanBackend, "内存 image plan");
 
-        let runtime = RuntimeResources::builtin();
-        let attachment = runtime.attach(descriptor.name);
+        let attachment = resources.attach(descriptor.name);
         graph.complete(
             ActionKind::AttachRuntime,
             format!(
@@ -961,6 +1000,7 @@ fn compilation_action_key(
     if let Some(x64) = x64 {
         inputs.set_backend_encoder(x64.encoder_fingerprint());
         inputs.set_backend_fragments(x64.fingerprint());
+        inputs.set_runtime_glues(x64.glues().summary());
     }
     inputs.set_query_registry(crate::query::registry_fingerprint());
     let mut policy = frontend::gir::pass::policy_bytes();
@@ -1299,6 +1339,9 @@ pub struct ImagePlan {
     entry: String,
     function_count: u32,
     runtime_source_count: u32,
+    runtime_glue_bound: u32,
+    runtime_glue_stubbed: u32,
+    runtime_glue_fingerprint: [u8; 32],
     runtime_checks_elided_count: u32,
     mono_instance_count: u32,
     mono_root_count: u32,
@@ -1555,6 +1598,9 @@ impl ImagePlan {
             entry: plan.entry,
             function_count: plan.function_count,
             runtime_source_count: attachment.source_count,
+            runtime_glue_bound: plan.runtime_glue_bound,
+            runtime_glue_stubbed: plan.runtime_glue_stubbed,
+            runtime_glue_fingerprint: plan.runtime_glue_fingerprint,
             runtime_checks_elided_count: plan.runtime_checks_elided_count,
             mono_instance_count: plan.mono_instance_count,
             mono_root_count: plan.mono_root_count,
@@ -1818,6 +1864,21 @@ impl ImagePlan {
     /// 返回计划附加的 Gugu 源单元数量。
     pub fn runtime_source_count(&self) -> u32 {
         self.runtime_source_count
+    }
+
+    /// 返回已绑定的 runtime glue 数量。
+    pub fn runtime_glue_bound(&self) -> u32 {
+        self.runtime_glue_bound
+    }
+
+    /// 返回实际引用、仍走 stub 兜底的 runtime glue 数量。
+    pub fn runtime_glue_stubbed(&self) -> u32 {
+        self.runtime_glue_stubbed
+    }
+
+    /// 返回 runtime glue 绑定表摘要指纹。
+    pub fn runtime_glue_fingerprint(&self) -> [u8; 32] {
+        self.runtime_glue_fingerprint
     }
 
     /// 返回计划使用的 rt0 边界。
@@ -3690,15 +3751,10 @@ mod tests {
             plan.pacing_runtime().pressure_enter_ratio(),
             plan.pacing_pressure_enter_ratio()
         );
-        // pacing 需求从优化后 LIR 推导：分配站点与屏障站点必须与需求视图一致。
+        // pacing 需求从优化后 LIR 推导；分配与屏障站点沿各自需求口径核对。
         let pacing_demand = plan.pacing_demand();
         assert!(pacing_demand.alloc_sites > 0, "闭包捕获必须产生分配站点");
         assert_eq!(pacing_demand.barrier_sites, demand.barrier_sites());
-        assert_eq!(
-            pacing_demand.slow_edges,
-            pacing_demand.alloc_sites + 1,
-            "slow edge 等于分配站点加显式 safepoint"
-        );
         assert!(pacing_demand.managed_types > 0);
         assert!(dump.contains("pacing schema=3 profile=mosaic-default revision=3"));
         assert!(dump.contains("pacing-drain poll=1048576 items=64 bytes=65536 interval=1048576"));

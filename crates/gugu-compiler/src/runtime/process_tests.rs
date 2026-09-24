@@ -1,8 +1,5 @@
-//! rt0 进程模型接入 raw world 的确定性测试。
-//!
-//! 覆盖五步启动、`InvalidConfiguration` fatal、生命周期单向迁移、各终止路径的计划与
-//! 退出码、`Terminating` 的用户代码闸门、报告形态选择、`PanicDuringUnwind` 升级、
-//! producer flush 与设施关闭的 exactly-once。
+//! rt0 布局、启动输入与 raw 世界终止边界的确定性校验。
+//! 用户 `main` 的运行、panic 落地和栈增长由真实镜像烟测执行。
 
 use super::coroutine::{CompletionValue, CoroutineHandle};
 use super::inbox::ServiceBudget;
@@ -14,7 +11,6 @@ use super::startup_schema::{
 };
 use super::world::RawWorld;
 use super::world::coroutine_impl::CoroutineEntry;
-use super::world::termination_impl::MainOutcome;
 
 fn entry() -> CoroutineEntry {
     CoroutineEntry {
@@ -184,10 +180,8 @@ fn admission_follows_lifecycle_states() {
     let first = spawn(&mut world);
     let second = spawn(&mut world);
     finish(&mut world, first);
-    world.call_main(MainOutcome::Returned).expect("main 返回");
-    let descendant = spawn(&mut world);
     finish(&mut world, second);
-    finish(&mut world, descendant);
+    world.request_exit(0).expect("显式终止");
     assert_eq!(
         world.rt0_state().expect("rt0"),
         LifecycleStateName::Terminating
@@ -198,111 +192,6 @@ fn admission_follows_lifecycle_states() {
             .expect("Terminating拒绝")
             .is_none()
     );
-}
-
-#[test]
-fn natural_success_exits_zero_without_reports() {
-    let mut world = world();
-    boot(&mut world);
-    let child = spawn(&mut world);
-    world.call_main(MainOutcome::Returned).expect("main 返回");
-    assert_eq!(world.rt0_state().expect("rt0"), LifecycleStateName::Waiting);
-    finish(&mut world, child);
-    assert_eq!(
-        world.rt0_state().expect("rt0"),
-        LifecycleStateName::Terminating
-    );
-    let plan = world.rt0_plan().expect("rt0").expect("终止计划");
-    assert_eq!(plan.exit_category(), ExitCategory::Success);
-    assert_eq!(plan.exit_code(), 0);
-    assert!(plan.wait_foreign());
-    assert!(world.rt0_reports().expect("rt0").is_empty());
-    let outcome = world.execute_termination(&budget()).expect("终止执行");
-    assert_eq!(outcome.category, ExitCategory::Success);
-    assert_eq!(outcome.code, 0);
-}
-
-#[test]
-fn main_error_still_waits_for_user_coroutines() {
-    let mut world = world();
-    boot(&mut world);
-    let first = spawn(&mut world);
-    let second = spawn(&mut world);
-    world
-        .call_main(MainOutcome::ReturnedErr("boom".to_owned()))
-        .expect("main 返回");
-    assert_eq!(world.rt0_state().expect("rt0"), LifecycleStateName::Waiting);
-    let reports = world.rt0_reports().expect("rt0");
-    assert_eq!(reports.len(), 1);
-    assert!(
-        reports[0].text().starts_with("termination[main-error]"),
-        "{}",
-        reports[0].text()
-    );
-    finish(&mut world, first);
-    finish(&mut world, second);
-    let outcome = world.execute_termination(&budget()).expect("终止执行");
-    assert_eq!(outcome.category, ExitCategory::ProgramFailure);
-    assert_eq!(outcome.code, 1);
-    assert_eq!(world.rt0_reports().expect("rt0").len(), 1);
-}
-
-#[test]
-fn main_panic_runs_only_main_defers_and_terminates_immediately() {
-    let mut world = world();
-    boot(&mut world);
-    let _child = spawn(&mut world);
-    world
-        .main_panicked("main failed".to_owned(), None)
-        .expect("记录主协程 panic");
-    world.run_defer(2).expect("主协程 defer 在展开中运行");
-    world.complete_main_panic().expect("展开完成");
-    assert_eq!(
-        world.rt0_state().expect("rt0"),
-        LifecycleStateName::Terminating
-    );
-    assert!(world.run_defer(1).is_err());
-    let reports = world.rt0_reports().expect("rt0");
-    assert_eq!(reports.len(), 2);
-    assert!(reports[0].text().starts_with("panic[unhandled-panic]"));
-    assert!(
-        reports[1]
-            .text()
-            .starts_with("termination[unhandled-panic]")
-    );
-    let outcome = world.execute_termination(&budget()).expect("终止执行");
-    assert_eq!(outcome.category, ExitCategory::ProgramFailure);
-    assert_eq!(outcome.code, 1);
-    assert_eq!(world.rt0_defer_runs().expect("rt0"), 2);
-}
-
-#[test]
-fn fatal_during_main_unwind_escalates_to_panic_during_unwind() {
-    let mut world = world();
-    boot(&mut world);
-    world
-        .main_panicked("first".to_owned(), None)
-        .expect("记录主协程 panic");
-    world
-        .fatal(
-            FatalKind::RuntimeInvariant,
-            "barrier violated".to_owned(),
-            None,
-        )
-        .expect("展开窗口内的 fatal");
-    world.complete_main_panic().expect("展开完成");
-    let plan = world.rt0_plan().expect("rt0").expect("终止计划");
-    assert_eq!(plan.exit_category(), ExitCategory::RuntimeFailure);
-    assert_eq!(plan.exit_code(), 2);
-    let reports = world.rt0_reports().expect("rt0");
-    assert_eq!(reports.len(), 2);
-    assert!(
-        reports[1]
-            .text()
-            .starts_with("termination[panic-during-unwind]")
-    );
-    let outcome = world.execute_termination(&budget()).expect("终止执行");
-    assert_eq!(outcome.code, 2);
 }
 
 #[test]
@@ -346,39 +235,7 @@ fn explicit_exit_terminates_without_waiting_or_reports() {
 }
 
 #[test]
-fn detached_panic_in_waiting_downgrades_natural_exit() {
-    let mut world = world();
-    boot(&mut world);
-    let child = spawn(&mut world);
-    world.call_main(MainOutcome::Returned).expect("main 返回");
-    world
-        .detached_panic("detached".to_owned(), None)
-        .expect("分离 panic");
-    world
-        .coroutine_finished(
-            child,
-            0,
-            CompletionValue::Panic {
-                handle: 1,
-                descriptor: 1,
-            },
-        )
-        .expect("panic完成");
-    let outcome = world.execute_termination(&budget()).expect("终止执行");
-    assert_eq!(outcome.category, ExitCategory::ProgramFailure);
-    assert_eq!(outcome.code, 1);
-    let reports = world.rt0_reports().expect("rt0");
-    assert_eq!(reports.len(), 2);
-    assert!(reports[0].text().starts_with("panic[unhandled-panic]"));
-    assert!(
-        reports[1]
-            .text()
-            .starts_with("termination[unhandled-panic]")
-    );
-}
-
-#[test]
-fn detached_panic_during_running_keeps_success_exit() {
+fn detached_panic_during_running_does_not_override_explicit_exit() {
     let mut world = world();
     boot(&mut world);
     let child = spawn(&mut world);
@@ -395,9 +252,9 @@ fn detached_panic_during_running_keeps_success_exit() {
             },
         )
         .expect("panic完成");
-    world.call_main(MainOutcome::Returned).expect("main 返回");
+    world.request_exit(0).expect("显式终止");
     let outcome = world.execute_termination(&budget()).expect("终止执行");
-    assert_eq!(outcome.category, ExitCategory::Success);
+    assert_eq!(outcome.category, ExitCategory::ExplicitExit);
     assert_eq!(outcome.code, 0);
     assert_eq!(world.rt0_reports().expect("rt0").len(), 1);
 }
@@ -406,7 +263,7 @@ fn detached_panic_during_running_keeps_success_exit() {
 fn termination_runs_exactly_once_in_facility_order() {
     let mut world = world();
     boot(&mut world);
-    world.call_main(MainOutcome::Returned).expect("main 返回");
+    world.request_exit(0).expect("显式终止");
     world.execute_termination(&budget()).expect("首次终止");
     assert_eq!(
         world.rt0_closed_facilities().expect("rt0"),
@@ -422,10 +279,9 @@ fn foreign_work_is_waited_only_when_plan_requests_it() {
     boot(&mut world);
     world.enter_foreign(0).expect("登记外部工作");
     world.enter_foreign(0).expect("登记外部工作");
-    world.leave_foreign().expect("外部工作完成");
-    world.call_main(MainOutcome::Returned).expect("main 返回");
+    world.request_exit(0).expect("显式终止");
     let outcome = world.execute_termination(&budget()).expect("终止执行");
-    assert_eq!(outcome.category, ExitCategory::Success);
+    assert_eq!(outcome.category, ExitCategory::ExplicitExit);
 }
 
 #[test]
@@ -456,9 +312,9 @@ fn pending_returns_are_flushed_before_facilities_close() {
     .expect("发布成功");
     assert!(outcome.is_some());
     boot(&mut world);
-    world.call_main(MainOutcome::Returned).expect("main 返回");
+    world.request_exit(0).expect("显式终止");
     let result = world.execute_termination(&budget()).expect("终止执行");
-    assert_eq!(result.category, ExitCategory::Success);
+    assert_eq!(result.category, ExitCategory::ExplicitExit);
     let descriptor = world
         .descriptor(allocation.slot.descriptor)
         .expect("描述符存在");

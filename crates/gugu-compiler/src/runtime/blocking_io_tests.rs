@@ -1,20 +1,6 @@
 use crate::frontend::gir::body::CallKind;
-use crate::lir::body::{CallTarget, Op, RuntimeCall};
+use crate::lir::body::{CallTarget, RuntimeCall};
 use crate::{CompileRequest, Compiler, DiagnosticCode, TargetName};
-
-fn demand(source: &str) -> crate::runtime::ForeignDemand {
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
-    assert!(
-        compilation.is_success(),
-        "{:?}",
-        compilation.diagnostics().items()
-    );
-    compilation.lir.as_ref().expect("LIR").foreign_demand()
-}
 
 #[test]
 fn direct_blocking_call_counts_as_ordinary_and_blocking() {

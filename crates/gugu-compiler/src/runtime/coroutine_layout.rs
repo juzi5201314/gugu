@@ -11,7 +11,10 @@ use crate::frontend::{
 };
 use std::collections::BTreeSet;
 
-const SOURCE: &str = "std/runtime/coroutine.gg";
+/// runtime 角色的全部源路径：控制块可以落在任一 runtime 单元（入口单元与协程单元分开）。
+fn runtime_paths() -> BTreeSet<&'static str> {
+    super::RuntimeResources::builtin().runtime_paths().collect()
+}
 
 pub(super) fn verify_source(
     contract: &CoroutineRuntimeContract,
@@ -63,8 +66,15 @@ pub(super) fn verify_source(
 }
 
 fn in_source(definition: &hir::Definition, module: &hir::Module) -> bool {
-    definition.location.as_ref().is_some_and(|location| {
-        module.sources[usize::try_from(location.source).expect("source下标")].path == SOURCE
+    runtime_paths().contains(source_path(definition, module))
+}
+
+/// 定义所在的逻辑源路径。
+fn source_path<'a>(definition: &hir::Definition, module: &'a hir::Module) -> &'a str {
+    definition.location.as_ref().map_or("", |location| {
+        module.sources[usize::try_from(location.source).expect("source下标")]
+            .path
+            .as_str()
     })
 }
 

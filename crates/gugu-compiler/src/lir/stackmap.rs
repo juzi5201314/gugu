@@ -474,6 +474,7 @@ fn map_instruction(
                     collect_call(body, block, index)?
                 }
                 super::body::Op::PlatformCall(_)
+                | super::body::Op::RuntimeMachineCall(_)
                 | super::body::Op::ResolveSharedHandle
                 | super::body::Op::ForwardSharedHandle => collect_live(body, block, index)?,
                 _ => return Err(invalid("CallReturn 记录缺少调用操作")),

@@ -16,7 +16,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub(crate) const SCHEMA: u32 = 4;
+pub(crate) const SCHEMA: u32 = 5;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -672,6 +672,7 @@ pub(crate) fn build(
                 &target,
                 fingerprint,
                 compression,
+                sources,
             )
             .and_then(|body| {
                 verify::verify_structure(&body, hir.module())?;

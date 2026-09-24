@@ -364,6 +364,7 @@ pub(crate) enum RuntimeCall {
     /// 字符串拼接：参数为两组 `(data, len)`，返回新的 `(data, len)`。
     Concat,
     Utf8Boundary,
+    /// panic 调用在编译期解析为稳定源码 descriptor，ABI 为 payload lanes、path/len、line、column。
     Panic,
     DeferPush,
     DeferAction,
@@ -458,6 +459,8 @@ pub(crate) enum Op {
     },
     /// 平台范围原语；没有机器编码，由 backend 在 runtime 契约中登记。
     PlatformCall(crate::runtime::PlatformOp),
+    /// runtime 机器原语；没有机器编码，由 backend 绑定登记的机器片段或 Gugu 实现。
+    RuntimeMachineCall(crate::runtime::RuntimeMachineOp),
     /// 结束 region 的私有阶段并登记 export summary；`export` 为 0 表示 summary 闭合。
     RegionPublish {
         region: u32,

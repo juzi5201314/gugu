@@ -654,6 +654,7 @@ fn insert_poll(editor: &mut Editor, block: BlockId, interval: u32) -> Result<(),
 fn insert_polls(editor: &mut Editor, info: &CalleeInfo) -> Result<(), Diagnostic> {
     // 已被 strip mining 的内层 header 由外层 poll 覆盖，不再单独插点。
     let mut stripped: BTreeSet<BlockId> = BTreeSet::new();
+    let mut last = String::new();
     for _ in 0..256 {
         let loops = loops::analyze(editor);
         let exempt: BTreeSet<BlockId> = loops
@@ -688,6 +689,7 @@ fn insert_polls(editor: &mut Editor, info: &CalleeInfo) -> Result<(), Diagnostic
             let cost = loop_cycle_cost(editor, natural, info);
             let interval = (POLL_BUDGET / cost.max(1)).max(1);
             let latch = natural.latches[0];
+            last = format!("loop latch {}", latch.0);
             insert_poll(editor, latch, interval)?;
             handled = true;
             break;
@@ -696,16 +698,21 @@ fn insert_polls(editor: &mut Editor, info: &CalleeInfo) -> Result<(), Diagnostic
             continue;
         }
         if let Some(block) = editor_clean_cycle(editor, info, &exempt) {
+            last = format!("clean cycle block {}", block.0);
             insert_poll(editor, block, 1)?;
             continue;
         }
         if let Some(block) = overflow_block(editor, info, &exempt) {
+            last = format!("overflow block {}", block.0);
             insert_poll(editor, block, 1)?;
             continue;
         }
         return Ok(());
     }
-    Err(invalid("poll 插入未在有限轮内收敛"))
+    Err(invalid(&format!(
+        "{}: poll 插入未在有限轮内收敛（{last}）",
+        editor.name
+    )))
 }
 
 /// 循环内是否已有切断点（含显式 poll 与 statepoint）。
@@ -876,9 +883,12 @@ fn overflow_block(
     let bounded = bounded_back_edges(editor, info);
     let order = editor.reverse_postorder();
     let mut in_cost: BTreeMap<BlockId, u32> = BTreeMap::new();
+    let mut out_cost: BTreeMap<BlockId, u32> = BTreeMap::new();
     in_cost.insert(editor.entry(), 0);
+    let mut rounds = 0;
     loop {
         let mut changed = false;
+        let mut advancing = BTreeSet::new();
         for block in &order {
             let current = block_flow(
                 (0..editor.instruction_count(*block))
@@ -888,6 +898,7 @@ fn overflow_block(
                 info,
                 in_cost.get(block).copied().unwrap_or(0),
             );
+            out_cost.insert(*block, current);
             for successor in editor.successors(*block) {
                 if bounded.contains(&(*block, successor)) {
                     continue;
@@ -895,7 +906,16 @@ fn overflow_block(
                 if in_cost.get(&successor).copied().unwrap_or(0) < current {
                     in_cost.insert(successor, current);
                     changed = true;
+                    advancing.insert(successor);
                 }
+            }
+        }
+        rounds += 1;
+        // 无回边的最长路径至多经过每个块一次。超过该轮数仍增加说明存在
+        // 正成本环，其 poll-free 成本无界，直接提升到预算溢出态。
+        if rounds > order.len() {
+            for block in advancing {
+                in_cost.insert(block, POLL_BUDGET + 1);
             }
         }
         if !changed {
@@ -904,7 +924,7 @@ fn overflow_block(
     }
     order.into_iter().find(|block| {
         !exempt.contains(block)
-            && in_cost.get(block).copied().unwrap_or(0) > POLL_BUDGET
+            && out_cost.get(block).copied().unwrap_or(0) > POLL_BUDGET
             && !(0..editor.instruction_count(*block)).any(|index| {
                 matches!(
                     editor.instruction((*block, index)).op,

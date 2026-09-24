@@ -198,6 +198,7 @@ fn forbidden(op: &Op) -> Option<&'static str> {
         Op::Memcpy { .. } | Op::Memmove { .. } | Op::Memset { .. } => Some("批量内存操作"),
         Op::Call(_) | Op::ForeignCall(_) => Some("调用或外部桥接"),
         Op::PlatformCall(_) => Some("平台范围调用"),
+        Op::RuntimeMachineCall(_) => Some("runtime 机器调用"),
         Op::InlineAsm(_) => Some("内联汇编"),
         Op::TrapIf => Some("陷阱分支"),
         Op::Park | Op::CoroutineSwitch | Op::Ready => Some("调度操作"),

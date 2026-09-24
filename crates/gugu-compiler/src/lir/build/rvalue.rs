@@ -148,6 +148,43 @@ impl Builder<'_> {
                     )?;
                 }
             }
+            StatementKind::RuntimeMachineCall {
+                op,
+                operands,
+                destination,
+            } => {
+                let mut arguments = Vec::with_capacity(operands.len());
+                for operand in operands {
+                    let computed = self.operand(operand)?;
+                    arguments.extend(self.computed_values(computed)?);
+                }
+                // 机器原语的结果形状固定：`current_slot`/`report_write` 返回机器字，其余无结果。
+                let results: Vec<ValueType> = match destination {
+                    Some(place) => self
+                        .abi_lanes(self.local_ty(place.local))
+                        .into_iter()
+                        .map(|(_, _, kind)| kind)
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let values = self.emit(
+                    Op::RuntimeMachineCall(*op),
+                    &arguments,
+                    &results
+                        .iter()
+                        .map(|kind| (*kind, Origin::None))
+                        .collect::<Vec<_>>(),
+                );
+                if let Some(place) = destination {
+                    self.write_place(
+                        *place,
+                        Computed::Values {
+                            ty: self.local_ty(place.local),
+                            values,
+                        },
+                    )?;
+                }
+            }
             StatementKind::SafepointPoll(_) => {
                 self.emit(
                     Op::SafepointPoll {

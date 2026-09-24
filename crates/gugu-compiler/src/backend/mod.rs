@@ -176,6 +176,12 @@ pub(crate) struct BackendPlan {
     pub(crate) platform_op_count: u32,
     pub(crate) platform_range_class_count: u32,
     pub(crate) platform_contract_fingerprint: [u8; 32],
+    /// 已绑定的 runtime glue 数量。
+    pub(crate) runtime_glue_bound: u32,
+    /// 实际引用、仍走 stub 兜底的 runtime glue 数量。
+    pub(crate) runtime_glue_stubbed: u32,
+    /// runtime glue 绑定表摘要指纹。
+    pub(crate) runtime_glue_fingerprint: [u8; 32],
     pub(crate) platform_demand: super::runtime::PlatformRangeDemand,
     pub(crate) ledger_category_count: u32,
     /// 目标描述符指纹。
@@ -328,6 +334,7 @@ pub(crate) fn plan(
         ),
     };
     let placement = gir.placement.counts();
+    let (runtime_glue_bound, runtime_glue_stubbed) = x64.runtime_glue_counts();
     Ok(Some(BackendPlan {
         target,
         entry: module.definitions[entry.index()].name.clone(),
@@ -508,6 +515,9 @@ pub(crate) fn plan(
             .finalize()
             .as_bytes(),
         platform_demand: *raw.platform_demand(),
+        runtime_glue_bound,
+        runtime_glue_stubbed,
+        runtime_glue_fingerprint: x64.glues().fingerprint(),
         ledger_category_count: raw.ledger_categories().len() as u32,
         target_descriptor_digest: descriptor.digest(),
         target_page_size: descriptor.page_size,

@@ -1,9 +1,9 @@
 use super::coroutine::CoroutineState;
 use super::foreign::{AdmitOutcome, ForeignWorld, IoClass, PollerFamily};
 use super::io::{
-    Cursor, INVALID_DATA, INVALID_INPUT, IoError, IoErrors, IoWait, IoWaitResult, OTHER, ReadBytes,
-    Scripted, SeekFrom, UNEXPECTED_EOF, WRITE_ZERO, WriteBytes, admit_blocking, copy, fill_buffer,
-    read_buffer, read_exact, read_to_string, write_all, write_buffer,
+    Cursor, INVALID_DATA, INVALID_INPUT, IoError, IoErrors, IoWait, IoWaitResult, ReadBytes,
+    Scripted, SeekFrom, UNEXPECTED_EOF, WRITE_ZERO, admit_blocking, copy, fill_buffer, read_buffer,
+    read_exact, read_to_string, write_all, write_buffer,
 };
 use super::text::{CowBytes, TextFault};
 

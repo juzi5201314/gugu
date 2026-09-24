@@ -96,9 +96,4 @@ impl BootSequence {
         self.steps.push(Rt0Step::PublishRunning);
         Ok(Ok(config))
     }
-
-    /// 第五步：调用编译器已解析的 `main` 入口前记录。
-    pub(crate) fn call_main(&mut self) {
-        self.steps.push(Rt0Step::CallMain);
-    }
 }

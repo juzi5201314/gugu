@@ -108,11 +108,13 @@ pub(crate) fn primitive_types(module: &hir::Module) -> Result<Primitives, Diagno
     let unit = find_type(module, &hir::Type::Unit, "Unit")?;
     let never = find_type(module, &hir::Type::Never, "Never")?;
     let bool_ty = find_type(module, &hir::Type::Bool, "Bool")?;
+    let string = find_type(module, &hir::Type::String, "String")?;
     let ptr_unit = find_type(module, &hir::Type::Ptr(unit), "Ptr(Unit)")?;
     Ok(Primitives {
         unit,
         never,
         bool_ty,
+        string,
         ptr_unit,
     })
 }
@@ -131,6 +133,7 @@ pub(crate) struct Primitives {
     pub(crate) unit: TypeId,
     pub(crate) never: TypeId,
     pub(crate) bool_ty: TypeId,
+    pub(crate) string: TypeId,
     pub(crate) ptr_unit: TypeId,
 }
 

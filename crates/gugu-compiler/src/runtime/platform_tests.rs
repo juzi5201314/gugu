@@ -924,7 +924,7 @@ fn main() {\n\
 fn platform_intrinsic_outside_unsafe_is_rejected_before_ir() {
     // 没有 `unsafe` 块时必须在 checker 层拒绝，而不是留给 LIR。
     let compilation =
-        compile_platform_source("use std.platform.{commit}\nfn main() {\n    commit(1)\n}\n");
+        compile_platform_source("use std.platform.{commit}\nfn main() {\n    _ = commit(1)\n}\n");
     assert!(!compilation.is_success());
     assert_eq!(
         diagnostics_of(&compilation),
@@ -946,7 +946,7 @@ fn platform_intrinsic_argument_shape_is_checked() {
             "需要 1 个值实参",
         ),
         (
-            "use std.platform.{commit}\nfn main() {\n    let x: int = 1\n    unsafe { commit(x) }\n}\n",
+            "use std.platform.{commit}\nfn main() {\n    let x: int = 1\n    unsafe { _ = commit(x) }\n}\n",
             "必须是整数或布尔标量",
         ),
     ] {

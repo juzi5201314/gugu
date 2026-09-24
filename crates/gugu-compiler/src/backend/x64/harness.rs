@@ -16,7 +16,9 @@ use std::mem::offset_of;
 
 use super::contract::EncoderContract;
 use super::encode::assemble;
-use super::inst::{Inst, Mem, Operand, RelocKind, RelocTarget, Scale, Sequence};
+use super::inst::{
+    Inst, LabelDefinition, LabelId, Mem, Operand, RelocKind, RelocTarget, Scale, Sequence,
+};
 use super::lower::{self, SiteValue};
 use super::reg::{Gpr, Reg};
 use super::table::{self, Access, OperandKind};
@@ -471,6 +473,23 @@ fn switch_fragment() -> Result<(X64Code, u32, bool), X64HarnessError> {
     let r12 = disp(offset_of!(CoroutineContext, r12))?;
     let r13 = disp(offset_of!(CoroutineContext, r13))?;
     let mut save = Sequence::new();
+    // LIR 按内部 ABI 传参（rax=save, rbx=restore, rcx=hot, rdx=processor），片段内部沿用
+    // rdi/rsi/rdx/rcx 约定：入口先换位，用 r8 交换 hot 与 processor。
+    for (destination, source) in [
+        (Reg::Gpr(Gpr::Rdi), Reg::Gpr(Gpr::Rax)),
+        (Reg::Gpr(Gpr::Rsi), Reg::Gpr(Gpr::Rbx)),
+        (Reg::Gpr(Gpr::R8), Reg::Gpr(Gpr::Rcx)),
+        (Reg::Gpr(Gpr::Rcx), Reg::Gpr(Gpr::Rdx)),
+        (Reg::Gpr(Gpr::Rdx), Reg::Gpr(Gpr::R8)),
+    ] {
+        push(
+            &mut save,
+            "mov",
+            &[OperandKind::Rm64, OperandKind::R64],
+            Access::Write,
+            vec![register(destination), register(source)],
+        )?;
+    }
     // lea rax, [rsp + 8]；mov [rdi + rsp_off], rax：保存调用者 return PC。
     push(
         &mut save,
@@ -515,15 +534,15 @@ fn switch_fragment() -> Result<(X64Code, u32, bool), X64HarnessError> {
             ],
         )?;
     }
-    let saved = assemble(&save).map_err(|error| X64HarnessError::Encoding {
-        case: "switch-save".to_owned(),
-        detail: error.to_string(),
-    })?;
-    let restore_offset =
-        u32::try_from(saved.bytes.len()).map_err(|_| X64HarnessError::MissingForm {
-            mnemonic: "switch restore offset".to_owned(),
+    let restore_body =
+        u32::try_from(save.instructions.len()).map_err(|_| X64HarnessError::MissingForm {
+            mnemonic: "switch restore instruction".to_owned(),
         })?;
     let mut sequence = save;
+    sequence.labels.push(LabelDefinition {
+        label: LabelId(0),
+        at: restore_body,
+    });
     // mov r14, rdx；mov r15, rcx：内部调用约定的固定寄存器（r/m 位置是目标）。
     for (source, target) in [(Gpr::Rdx, Gpr::R14), (Gpr::Rcx, Gpr::R15)] {
         push(
@@ -558,6 +577,30 @@ fn switch_fragment() -> Result<(X64Code, u32, bool), X64HarnessError> {
         &[OperandKind::Rm64],
         Access::Read,
         vec![memory(Reg::Gpr(Gpr::Rsi), rip)],
+    )?;
+    let body = assemble(&sequence).map_err(|error| X64HarnessError::Encoding {
+        case: "switch restore body".to_owned(),
+        detail: error.to_string(),
+    })?;
+    let restore_offset =
+        u32::try_from(body.bytes.len()).map_err(|_| X64HarnessError::MissingForm {
+            mnemonic: "switch restore offset".to_owned(),
+        })?;
+    for (destination, source) in [(Gpr::Rsi, Gpr::Rax), (Gpr::Rdx, Gpr::Rbx)] {
+        push(
+            &mut sequence,
+            "mov",
+            &[OperandKind::Rm64, OperandKind::R64],
+            Access::Write,
+            vec![register(Reg::Gpr(destination)), register(Reg::Gpr(source))],
+        )?;
+    }
+    push(
+        &mut sequence,
+        "jmp",
+        &[OperandKind::Rel8],
+        Access::Read,
+        vec![Operand::Label(LabelId(0))],
     )?;
     let assembled = assemble(&sequence).map_err(|error| X64HarnessError::Encoding {
         case: "switch".to_owned(),

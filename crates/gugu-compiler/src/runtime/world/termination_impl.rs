@@ -1,7 +1,7 @@
 //! rt0 进程模型在 owner-directed 世界中的接入。
 //!
-//! 世界构造等价于 rt0 的「建立运行环境」步骤；`boot` 固定环境快照并解析启动配置，
-//! `call_main`/`request_exit`/`fatal` 驱动单向状态迁移，`execute_termination` 按
+//! 世界构造只验证启动状态与 raw 资源的收尾契约；用户 `main` 由镜像内 Gugu runtime 执行。
+//! `request_exit`/`fatal` 驱动单向状态迁移，`execute_termination` 按
 //! 「producer flush → 越过最新 epoch → 按 `wait_foreign` 等待 → 固定顺序关闭设施 →
 //! 报告冲刷到 `report_epoch`」收尾并恰好一次。报告只经 emergency buffer 渲染；
 //! `Terminating` 中不运行用户 defer、不接纳新协程、不再发布用户失败事件。
@@ -25,15 +25,6 @@ use super::super::startup_schema::{
 use super::super::termination::{self, PlanWithReports, ReportSpec, TerminationPlan};
 use super::RawWorld;
 use super::coroutine_impl::CoroutineEntry;
-
-/// `main` 入口的结局；panic 由 `main_panicked`/`complete_main_panic` 单独建模。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum MainOutcome {
-    /// 返回 `()`。
-    Returned,
-    /// 返回 `Err(e)`；`e` 按 `Print` 规则由程序自行渲染，不属于 runtime report。
-    ReturnedErr(String),
-}
 
 /// 终止执行结果：交给宿主的退出类别与码。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -62,12 +53,7 @@ pub(super) struct Rt0Process {
     alive_user_coroutines: u32,
     spawned_user_coroutines: u32,
     defer_runs: u32,
-    main_called: bool,
     main_coroutine: Option<CoroutineHandle>,
-    main_error: Option<String>,
-    detached_panic: bool,
-    termination_emitted: bool,
-    pending_panic: Option<PlanWithReports>,
     plan: Option<TerminationPlan>,
     facilities_closed: usize,
     foreign_work: u32,
@@ -94,12 +80,7 @@ impl Rt0Process {
             alive_user_coroutines: 0,
             spawned_user_coroutines: 0,
             defer_runs: 0,
-            main_called: false,
             main_coroutine: None,
-            main_error: None,
-            detached_panic: false,
-            termination_emitted: false,
-            pending_panic: None,
             plan: None,
             facilities_closed: 0,
             foreign_work: 0,
@@ -133,12 +114,7 @@ impl Rt0Process {
             alive_user_coroutines: 0,
             spawned_user_coroutines: 0,
             defer_runs: 0,
-            main_called: false,
             main_coroutine: None,
-            main_error: None,
-            detached_panic: false,
-            termination_emitted: false,
-            pending_panic: None,
             plan: None,
             facilities_closed: 0,
             foreign_work: 0,
@@ -179,7 +155,6 @@ impl Rt0Process {
             }
             None => with_reports.plan.set_report_epoch(self.ledger.next_epoch()),
         }
-        self.termination_emitted = true;
         self.plan = Some(with_reports.plan);
         Ok(())
     }
@@ -310,7 +285,7 @@ impl RawWorld {
         Ok(self.rt0_ref()?.facilities_closed)
     }
 
-    /// 运行用户 defer；`Terminating` 中拒绝，主协程 panic 展开窗口内允许。
+    /// 检查用户 defer 执行边界；`Terminating` 中拒绝。
     pub(crate) fn run_defer(&mut self, count: u32) -> Result<(), RawInvariant> {
         let rt0 = self.rt0_mut()?;
         if !rt0.lifecycle.user_code_allowed() {
@@ -338,7 +313,7 @@ impl RawWorld {
         Ok(Some(handle))
     }
 
-    /// 一个用户协程自然结束；`Waiting` 中最后一个结束后进入自然退出。
+    /// 用户协程结束时归还资源；镜像内 main 的退出由 Gugu runtime 驱动。
     pub(crate) fn coroutine_finished(
         &mut self,
         handle: CoroutineHandle,
@@ -355,125 +330,10 @@ impl RawWorld {
         self.finish_coroutine_on_system(&ticket, owner)?;
         let rt0 = self.rt0_mut()?;
         rt0.alive_user_coroutines -= 1;
-        if rt0.lifecycle.state() != LifecycleStateName::Waiting || rt0.alive_user_coroutines != 0 {
-            return Ok(());
-        }
-        rt0.lifecycle
-            .transition(LifecycleStateName::Terminating, "termination-started")
-            .map_err(RawInvariant::new)?;
-        let with_reports = match (&rt0.main_error, rt0.detached_panic) {
-            (Some(_), _) => termination::natural_failure_quiet(ReportReason::MainError),
-            (None, true) => termination::natural_failure(ReportReason::UnhandledPanic, None),
-            (None, false) => termination::natural_success(),
-        };
-        rt0.enter_termination(with_reports)
-            .map_err(RawInvariant::new)
-    }
-
-    /// `main` 正常返回：仍有存活协程时进入 `Waiting`，否则直接自然收尾。
-    pub(crate) fn call_main(&mut self, outcome: MainOutcome) -> Result<(), RawInvariant> {
-        let rt0 = self.rt0_ref()?;
-        if rt0.main_called {
-            return Err(RawInvariant::new("main 只能调用一次"));
-        }
-        if rt0.lifecycle.state() != LifecycleStateName::Running {
-            return Err(RawInvariant::new("main 只能在 Running 中调用"));
-        }
-        self.finish_main_stack(CompletionValue::Bits(u64::from(matches!(
-            outcome,
-            MainOutcome::ReturnedErr(_)
-        ))))?;
-        let rt0 = self.rt0_mut()?;
-        rt0.main_called = true;
-        rt0.boot.call_main();
-        match outcome {
-            MainOutcome::Returned => {}
-            MainOutcome::ReturnedErr(message) => {
-                let spec = ReportSpec {
-                    event: ReportEvent::Termination,
-                    class: ExitCategory::ProgramFailure,
-                    reason: ReportReason::MainError,
-                    message: Some(message.clone()),
-                    location: None,
-                    exit_code: 1,
-                };
-                rt0.main_error = Some(message);
-                rt0.emit(spec);
-            }
-        }
-        if rt0.alive_user_coroutines > 0 {
-            rt0.lifecycle
-                .transition(LifecycleStateName::Waiting, "main-returned")
-                .map_err(RawInvariant::new)?;
-            return Ok(());
-        }
-        let with_reports = if rt0.main_error.is_some() {
-            termination::natural_failure_quiet(ReportReason::MainError)
-        } else {
-            termination::natural_success()
-        };
-        rt0.lifecycle
-            .transition(LifecycleStateName::Terminating, "natural-exit")
-            .map_err(RawInvariant::new)?;
-        rt0.enter_termination(with_reports)
-            .map_err(RawInvariant::new)
-    }
-
-    /// 主协程 panic：记录 panic 事件并开始展开；defer 运行后调用 `complete_main_panic`。
-    pub(crate) fn main_panicked(
-        &mut self,
-        message: String,
-        location: Option<SourceLocation>,
-    ) -> Result<(), RawInvariant> {
-        let rt0 = self.rt0_mut()?;
-        if rt0.main_called {
-            return Err(RawInvariant::new("main 只能结束一次"));
-        }
-        if rt0.lifecycle.state() != LifecycleStateName::Running {
-            return Err(RawInvariant::new("main 只能在 Running 中 panic"));
-        }
-        rt0.main_called = true;
-        rt0.boot.call_main();
-        let with_reports = termination::main_panic(message, location);
-        if let Some(spec) = with_reports.panic_event.clone() {
-            rt0.emit(spec);
-        }
-        rt0.pending_panic = Some(with_reports);
         Ok(())
     }
 
-    /// 主协程展开完成：立即进入 `Terminating`，其它协程不展开、不运行剩余 defer。
-    pub(crate) fn complete_main_panic(&mut self) -> Result<(), RawInvariant> {
-        let pending = self
-            .rt0_mut()?
-            .pending_panic
-            .take()
-            .ok_or_else(|| RawInvariant::new("没有待完成的主协程 panic"))?;
-        let panic_handle = self.rt0_ref()?.ledger.next_epoch().max(1);
-        self.finish_main_stack(CompletionValue::Panic {
-            handle: panic_handle,
-            descriptor: 1,
-        })?;
-        let rt0 = self.rt0_mut()?;
-        if rt0.lifecycle.state() != LifecycleStateName::Running {
-            return Err(RawInvariant::new("主协程 panic 只能在 Running 中完成展开"));
-        }
-        rt0.lifecycle
-            .transition(LifecycleStateName::Terminating, "termination-started")
-            .map_err(RawInvariant::new)?;
-        rt0.enter_termination(pending).map_err(RawInvariant::new)
-    }
-
-    fn finish_main_stack(&mut self, value: CompletionValue) -> Result<(), RawInvariant> {
-        let main = self
-            .rt0_ref()?
-            .main_coroutine
-            .ok_or_else(|| RawInvariant::new("main缺少控制块"))?;
-        let ticket = self.stage_coroutine_finish(main, value)?;
-        self.finish_coroutine_on_system(&ticket, 0)
-    }
-
-    /// 分离协程 panic：发布一份未处理 panic 报告；`Waiting` 中改变自然退出类别。
+    /// 分离协程 panic 发布未处理报告；最终退出由镜像内 runtime 决定。
     pub(crate) fn detached_panic(
         &mut self,
         message: String,
@@ -483,10 +343,6 @@ impl RawWorld {
         if !rt0.lifecycle.user_code_allowed() {
             rt0.suppressed_failures += 1;
             return Ok(());
-        }
-        let waiting = rt0.lifecycle.state() == LifecycleStateName::Waiting;
-        if waiting {
-            rt0.detached_panic = true;
         }
         let spec = ReportSpec {
             event: ReportEvent::Panic,
@@ -515,10 +371,8 @@ impl RawWorld {
             .map_err(RawInvariant::new)
     }
 
-    /// fatal：不能被 `catch`、`Join.wait` 或用户 defer 截获。
-    ///
-    /// 主协程 panic 展开窗口内的 fatal 升级为 `PanicDuringUnwind`；已经处于
-    /// `Terminating` 的后续 fatal 被抑制计数，不重复发布报告。
+    /// fatal 不能被 `catch`、`Join.wait` 或用户 defer 截获；已经进入终止状态的
+    /// 后续 fatal 只累计抑制次数，不重复发布报告。
     pub(crate) fn fatal(
         &mut self,
         kind: FatalKind,
@@ -526,19 +380,6 @@ impl RawWorld {
         location: Option<SourceLocation>,
     ) -> Result<(), RawInvariant> {
         let rt0 = self.rt0_mut()?;
-        if let Some(pending) = &mut rt0.pending_panic {
-            if pending
-                .termination
-                .as_ref()
-                .is_some_and(|spec| spec.reason == ReportReason::PanicDuringUnwind)
-            {
-                rt0.suppressed_failures += 1;
-                return Ok(());
-            }
-            let escalated = termination::fatal(FatalKind::PanicDuringUnwind, message, location);
-            *pending = escalated;
-            return Ok(());
-        }
         if rt0.plan.is_some() {
             rt0.suppressed_failures += 1;
             return Ok(());

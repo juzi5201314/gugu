@@ -10,6 +10,7 @@ fn symbol(name: &str, bytes: Vec<u8>, relocs: Vec<ObjectReloc>) -> ObjectSymbol 
         name: name.to_owned(),
         bytes,
         relocs,
+        aliases: Vec::new(),
     }
 }
 
@@ -17,13 +18,20 @@ fn request(entry: &str, symbols: Vec<ObjectSymbol>) -> LinkRequest {
     LinkRequest {
         entry: entry.to_owned(),
         symbols,
-        readonly: vec![Blob {
-            name: ".gugu.stackmap".to_owned(),
-            bytes: b"GUGUSM01".to_vec(),
-        }],
+        readonly: vec![
+            Blob {
+                name: ".gugu.stackmap".to_owned(),
+                bytes: b"GUGUSM01".to_vec(),
+            },
+            Blob {
+                name: ".eh_frame".to_owned(),
+                bytes: b"GUGUUN01".to_vec(),
+            },
+        ],
         imports: Vec::new(),
         interpreter: None,
         archive: Vec::new(),
+        bound_glues: BTreeSet::new(),
     }
 }
 
@@ -90,6 +98,29 @@ fn static_pie_has_no_interpreter_and_keeps_metadata() {
 }
 
 #[test]
+fn boot_processor_poll_control_starts_clear() {
+    use crate::runtime::entry::rt0_params;
+
+    let image = link(&request(
+        "main",
+        vec![symbol("main", vec![0xc3], Vec::new())],
+    ))
+    .expect("static PIE 可写出");
+    let params = usize::try_from(image.entry + super::elf::rt0_len()).expect("参数块地址");
+    let processor = usize::try_from(u64::from_le_bytes(
+        image.bytes[params + rt0_params::PROCESSOR * 8..params + (rt0_params::PROCESSOR + 1) * 8]
+            .try_into()
+            .unwrap(),
+    ))
+    .expect("processor 地址");
+    assert_eq!(&image.bytes[processor..processor + 64], &[0; 64]);
+    assert_eq!(
+        &image.bytes[processor + 64..processor + 4096],
+        &[0xff; 4032]
+    );
+}
+
+#[test]
 fn relative_reloc_uses_load_bias() {
     let mut bytes = vec![0_u8; 16];
     bytes.extend_from_slice(&0_u64.to_le_bytes());
@@ -97,6 +128,63 @@ fn relative_reloc_uses_load_bias() {
     apply_relative(&mut bytes, 16, 1, 0x1000).expect("回填");
     let value = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
     assert_eq!(value, 0x1040);
+}
+
+#[test]
+fn rt0_param_block_carries_runtime_entry_and_reserved_regions() {
+    use crate::runtime::entry::{Rt0Payload, rt0_params};
+    let image = link(&request(
+        "main",
+        vec![symbol("main", vec![0xc3], Vec::new())],
+    ))
+    .expect("static PIE 可写出");
+    let params = usize::try_from(image.entry).expect("入口地址") + super::elf::rt0_len() as usize;
+    let word = |index: usize| {
+        let at = params + index * 8;
+        u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("参数块 word"))
+    };
+    assert_eq!(rt0_params::WORDS, 16);
+    assert_eq!(
+        word(rt0_params::RT0_START),
+        0,
+        "未绑定 rt0_start 时留 0 走过渡路径"
+    );
+    let payload = usize::try_from(word(rt0_params::PAYLOAD_VA)).expect("载荷地址");
+    assert_eq!(word(rt0_params::PAYLOAD_LEN), Rt0Payload::bytes());
+    let payload_word = |offset: usize| {
+        let at = payload + offset;
+        u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("载荷 word"))
+    };
+    assert_eq!(payload_word(0), Rt0Payload::REVISION, "载荷版本");
+    assert_eq!(
+        payload_word(8),
+        word(rt0_params::ENTRY),
+        "载荷的 main 入口与参数块一致"
+    );
+    assert_eq!(payload_word(16), word(rt0_params::INITIAL_SLOT));
+    assert_eq!(payload_word(24), word(rt0_params::RUNTIME_STATE));
+    assert_eq!(payload_word(32), 0, "加载偏移写回槽在载荷内且初值为 0");
+    let slot = word(rt0_params::INITIAL_SLOT);
+    let state = word(rt0_params::RUNTIME_STATE);
+    assert_eq!(slot % 64, 0, "初始协程槽按 64 对齐");
+    assert_eq!(state % 8, 0, "runtime 状态区按 8 对齐");
+    assert_eq!(slot % 4096, 0, "保留区独占页，rt0 的页粒度收尾不能覆盖它");
+    let protect_end = word(rt0_params::PROTECT_VA) + word(rt0_params::PROTECT_LEN);
+    assert!(
+        slot >= protect_end,
+        "保留可写区必须在 rt0 收尾的只读范围之外：slot={slot} protect_end={protect_end}"
+    );
+    let table = usize::try_from(word(rt0_params::RELOC_TABLE)).expect("重定位表地址");
+    let count = usize::try_from(word(rt0_params::RELOC_COUNT)).expect("重定位条数");
+    let payload_end = u64::try_from(payload).expect("载荷地址") + Rt0Payload::bytes();
+    let in_payload = (0..count)
+        .filter(|index| {
+            let at = table + index * 16;
+            let target = u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("重定位槽"));
+            (u64::try_from(payload).expect("载荷地址")..payload_end).contains(&target)
+        })
+        .count();
+    assert_eq!(in_payload, 7, "载荷七个地址字段都登记为相对重定位");
 }
 
 #[test]
@@ -223,6 +311,29 @@ fn archive_member_resolves_an_unresolved_c_symbol() {
     assert!(link(&missing).is_err(), "归档缺少被引用的 C 符号时必须失败");
     missing.archive = pack_archive(&[("write", &[0xc3])]);
     assert!(link(&missing).is_ok(), "归档成员应接入同一链接");
+}
+
+/// panic 消息字面量必须真的进镜像：`Symbol::Data` 的全局下标是符号名唯一来源，
+/// 缺少全局数据池时字面量会指向别处（实测读到的是代码字节）。
+#[test]
+fn panic_message_constant_reaches_the_image() {
+    let source = "fn main() { panic(\"boom\") }";
+    let compilation = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    let bytes = plan.linux_image();
+    assert!(
+        bytes.windows(4).any(|window| window == b"boom"),
+        "常量数据未进镜像"
+    );
 }
 
 #[test]

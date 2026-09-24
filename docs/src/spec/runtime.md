@@ -29,6 +29,8 @@
 
 ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault handler的内部次序分别由[后端](../internals/backend.md)、[GC 元数据](../internals/gc-metadata.md)和[调度器](../internals/scheduler.md)规定，不构成额外的用户启动钩子。
 
+镜像 runtime 的 `current_slot()` machine intrinsic 返回当前协程控制块句柄；x86_64 上该句柄来自固定保留的 `r14` 并通过内部返回寄存器 `rax` 交付。它不分配内存、不切换上下文，也不改变协程状态。
+
 `main` 之前必须达到普通代码可以安全分配、启动 `async`、访问 `std.env` 和进入 panic 边界的状态。rt0 不能调用用户定义的 `static` 初始化函数、`defer` 或普通协程；这些机制在 runtime 进入 `Running` 后才有效。
 
 启动配置解析失败属于 `InvalidConfiguration` fatal，不能以 `Panic`、`Result` 或 `main` 的错误值交给用户处理；此时 runtime 只输出报告并终止。若诊断配置本身非法，必须使用不依赖该配置的固定纯文本 emergency report。
@@ -134,7 +136,7 @@ struct Panic {
 }
 ```
 
-`Panic.location` 是原始 panic 调用点，不是 `catch`、`Join.wait` 或报告点。被 `catch` 或 `Join.wait` 处理的 panic 不自动产生 runtime 报告；报告格式见下文。
+`Panic.location` 是原始 panic 调用点，不是 `catch`、`Join.wait` 或报告点。被 `catch` 或 `Join.wait` 处理的 panic 不自动产生 runtime 报告；未处理 panic 的 JSON `location` 使用调用点源码逻辑路径及 1-based 行列，路径与消息按 JSON 字符串规则转义。编译器生成的检查失败和关闭 channel 的 send 取消使用运行时约定的字符串消息，并报告其对应表达式位置。
 
 ## fatal 与资源耗尽 {#fatal-resource-exhaustion}
 
@@ -163,7 +165,7 @@ allocation debt 只影响自动 collection 的节奏；memory limit 触发的 dr
 
 ## 诊断、回溯与报告
 
-runtime 报告只写 stderr，不写 stdout，不调用用户格式化 trait、异步 I/O 或普通分配器。默认 `GUGU_RUNTIME_DIAGNOSTICS=text` 输出人类可读报告；`json` 输出稳定的逐行 JSON；`both` 依次输出文本报告和 JSON 报告。报告覆盖 fatal、`main` 返回 `Err` 和未处理 panic。`main` 的 `Err(e)` 自身仍按 `Print` 规则先渲染为程序错误文本；该文本不属于 runtime report。
+runtime 报告只写 stderr，不写 stdout，不调用用户格式化 trait、异步 I/O 或普通分配器。镜像内 panic 位置格式化使用固定栈缓冲区，不依赖普通值重复初始化或其 runtime 分配路径。默认 `GUGU_RUNTIME_DIAGNOSTICS=text` 输出人类可读报告；`json` 输出稳定的逐行 JSON；`both` 依次输出文本报告和 JSON 报告。报告覆盖 fatal、`main` 返回 `Err` 和未处理 panic。`main` 的 `Err(e)` 自身仍按 `Print` 规则先渲染为程序错误文本；该文本不属于 runtime report。
 
 `GUGU_BACKTRACE` 的含义：
 

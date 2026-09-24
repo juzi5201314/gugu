@@ -155,6 +155,8 @@ pub enum DiagnosticCode {
     BackendInvariant,
     /// 丢掉了带 `#[must_use]` 的 `Option`、`Result`、类型或函数返回值。
     UnusedMustUse,
+    /// runtime glue 绑定缺失或签名不匹配。
+    RuntimeGlueBinding,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -221,6 +223,7 @@ impl fmt::Display for DiagnosticCode {
             Self::ResourceInvariant => "E0059",
             Self::BackendInvariant => "E0060",
             Self::UnusedMustUse => "E0061",
+            Self::RuntimeGlueBinding => "E0062",
         };
         formatter.write_str(code)
     }
@@ -232,7 +235,7 @@ impl DiagnosticCode {
     /// 新增 variant 必须同时补本表与 [`Self::index`]；`index` 是不带通配分支的穷尽匹配，
     /// 漏项会让 compiler crate 的测试构建直接编译失败，这是覆盖闸门的编译期半边。
     #[cfg(test)]
-    pub(crate) const ALL: [Self; 61] = [
+    pub(crate) const ALL: [Self; 62] = [
         Self::SourceRead,
         Self::MissingMain,
         Self::MalformedSource,
@@ -294,6 +297,7 @@ impl DiagnosticCode {
         Self::ResourceInvariant,
         Self::BackendInvariant,
         Self::UnusedMustUse,
+        Self::RuntimeGlueBinding,
     ];
 
     /// 返回该代码在 [`Self::ALL`] 中的稠密下标。
@@ -363,6 +367,7 @@ impl DiagnosticCode {
             Self::ResourceInvariant => 58,
             Self::BackendInvariant => 59,
             Self::UnusedMustUse => 60,
+            Self::RuntimeGlueBinding => 61,
         }
     }
 }

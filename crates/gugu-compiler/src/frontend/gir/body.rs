@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 /// GIR schema revision（见 gir-lir.md「共同表示规则」）。
-pub(crate) const GIR_REVISION: u32 = 3;
+pub(crate) const GIR_REVISION: u32 = 4;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -543,6 +543,12 @@ pub(crate) enum StatementKind {
         operands: Vec<Operand>,
         destination: Option<Place>,
     },
+    /// runtime 机器原语；实参与结果都已定型，glue 绑定由 ABI 校验与镜像写出阶段检查。
+    RuntimeMachineCall {
+        op: crate::runtime::RuntimeMachineOp,
+        operands: Vec<Operand>,
+        destination: Option<Place>,
+    },
     SafepointPoll(SafepointId),
     StackCheck,
     NoSafepointBegin(NoSafepointRegionId),
@@ -643,6 +649,7 @@ pub(crate) enum Terminator {
     Return,
     Panic {
         payload: Operand,
+        location: hir::Location,
         unwind: BlockId,
     },
     ResumePanic,

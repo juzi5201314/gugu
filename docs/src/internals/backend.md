@@ -247,7 +247,11 @@ check:  lea   r11, [rsp - required_frame]      ; 超出 disp32 时 mov r11, rsp;
 
 taken edge尚未建立 callee frame。`morestack_or_poll` 只通过 `r14`把 return PC、九个整数参数寄存器和八个浮点参数寄存器写入 coroutine控制块的固定 scratch；该过程不读取或写入 candidate以下的 user stack。随后切到 worker system stack，acquire读取 processor flags：先完成 GC stop，再处理可接受的 preempt；coroutine被重新调度后仍从同一 `MorestackEntry`恢复。全部 poll动作完成后才读取最新 `stack_low`，容量仍不足时增长，最后装载已经由 GC/stack copy修正的 scratch并重新进入原 prologue。因而 poll-first次序不依赖剩余 user-stack空间，并且增长不会漏掉已经发布的 stop请求。
 
-每个函数的 frame 都发布 `entry_required_frame = required_frame + 8`。8 是调用方已经压上、又不计入 `frame_size` 的返回地址。runtime 用入口函数的这个值选择初始 stack class；计算与 frame layout 相同，checked 加法，不另写经验常量。
+每个函数的 frame 都发布 `entry_required_frame = required_frame + 8`。8 是调用方已经压上、又不计入 `frame_size` 的返回地址。可复制栈的 runtime 用这个值选择初始 stack class；镜像内主协程先提交 64 KiB，不够时由首次 `MorestackEntry` 按这个需求增长，不能绕过入口检查。计算与 frame layout 相同，checked 加法，不另写经验常量。
+
+镜像内主协程先保留低半 canonical 地址空间的逻辑栈窗口，只提交靠近高地址端的页；`morestack_or_poll` 在尚未建立目标 frame 时保存参数和返回 PC，切回 system stack 查验精确 `MorestackEntry` 栈图，再向低地址连续提交页面并更新同一个 `CoroutineSlot.stack_check`。窗口内已使用的栈地址不移动，故本路径无需复制帧或修正 `StackInterior`；其它可复制栈仍按[栈图](stack-maps.md#coroutine-stack-replication)规定处理。请求超过逻辑上限必须在提交之前进入不可捕获的栈溢出 fatal，栈图缺失、损坏或平台提交失败也不能回到用户 frame。
+
+Linux 用不可访问的匿名映射取得虚址窗口，再对末端页调用 `mprotect` 提交；Windows 用 `NtAllocateVirtualMemory(MEM_RESERVE, PAGE_NOACCESS)` 的 in/out 基址和尺寸取得窗口，再用 `MEM_COMMIT` 提交。两边的失败结果都在镜像 runtime 提升为不可恢复的运行时故障；Windows 入口必须传栈上描述符的地址，不能把内部 ABI 的 `bytes` 机器字当作指针。
 
 ### 分配产物与验证 {#allocation-artifacts}
 

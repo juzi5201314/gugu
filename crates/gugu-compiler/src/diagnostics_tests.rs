@@ -1086,6 +1086,10 @@ const CASES: &[Case] = &[
         0,
         "必须使用",
     ),
+    unreachable(
+        DiagnosticCode::RuntimeGlueBinding,
+        "runtime glue 绑定只在编译器自身的登记表与 runtime 源不一致（缺失、重复、多个实例或 ABI 形状不匹配）时失败；合成绑定表的直接断言保留在 runtime/glue 测试",
+    ),
 ];
 
 /// 闸门运行器：整表复用一个 compiler 与 query 引擎。

@@ -55,6 +55,11 @@ impl Checker<'_, '_> {
             if let Some(result) = self.runtime_call(callee, path, type_args, &args, expected) {
                 return result;
             }
+            if let Some(result) =
+                self.runtime_machine_call(callee, path, type_args, &args, expected)
+            {
+                return result;
+            }
             if let Some(result) = self.platform_call(callee, path, type_args, &args, expected) {
                 return result;
             }

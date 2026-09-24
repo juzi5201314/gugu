@@ -386,6 +386,7 @@ fn forbidden(op: &Op, mode: Mode) -> bool {
                         | Op::RegionTransfer { .. }
                         | Op::ForwardSharedHandle
                         | Op::PlatformCall(_)
+                        | Op::RuntimeMachineCall(_)
                 )
         }
     }

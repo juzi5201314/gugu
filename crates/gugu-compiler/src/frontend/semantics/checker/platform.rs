@@ -127,7 +127,7 @@ impl Checker<'_, '_> {
     ///
     /// 与原始指针解引用、union 字段访问共用 `E0041`：它们都是「不安全操作必须处于
     /// `unsafe` 块中」这一条规则的实例。
-    fn require_unsafe(&mut self, span: &Span, what: &str) {
+    pub(super) fn require_unsafe(&mut self, span: &Span, what: &str) {
         if self.unsafe_depth == 0 {
             self.error(
                 DiagnosticCode::InvalidExpression,

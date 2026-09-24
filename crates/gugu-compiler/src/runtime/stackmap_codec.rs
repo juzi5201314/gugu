@@ -412,9 +412,6 @@ fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
     }
     // 五个位图互斥。
     let lanes = words.div_ceil(8).max(1);
-    if lanes > 8 {
-        return Err(RawModelError::new("槽位图超过固定 lane 上界"));
-    }
     for lane in 0..lanes {
         let mut merged = 0u64;
         for bitmap in &layout.slots {
@@ -449,24 +446,19 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
     }
     let slot_count = u32::from_le_bytes(record[0..4].try_into().expect("槽字段"));
     let words = slot_count.div_ceil(8) as usize;
-    let lanes = words.div_ceil(8).max(1);
-    if lanes > 8 {
-        return Err(RawModelError::new("map 记录槽位图超过固定 lane 上界"));
+    // 先检查记录长度，避免损坏的 slot_count 驱动越界读取或不受限分配。
+    let bitmap_bytes = words
+        .checked_mul(5)
+        .and_then(|bytes| bytes.checked_add(16))
+        .ok_or_else(|| RawModelError::new("map 记录槽数量溢出"))?;
+    if bitmap_bytes > record.len() {
+        return Err(RawModelError::new("map 记录位图越界"));
     }
-    // 头 16 字节后是五组位图，每组 `ceil(slot_count/8)` 字节，再补齐到 4 字节。
     let mut cursor = 16usize;
-    let mut bitmaps = [[0u64; 8]; 5];
+    let mut bitmaps: [&[u8]; 5] = [&[]; 5];
     for class in &mut bitmaps {
-        let bytes = words;
-        if record.len() < cursor + bytes {
-            return Err(RawModelError::new("map 记录位图越界"));
-        }
-        for (lane, chunk) in record[cursor..cursor + bytes].chunks(8).enumerate() {
-            let mut word = [0u8; 8];
-            word[..chunk.len()].copy_from_slice(chunk);
-            class[lane] = u64::from_le_bytes(word);
-        }
-        cursor += bytes;
+        *class = &record[cursor..cursor + words];
+        cursor += words;
     }
     while !cursor.is_multiple_of(4) {
         if record.get(cursor).copied().unwrap_or(1) != 0 {
@@ -477,22 +469,23 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
     if cursor != record.len() {
         return Err(RawModelError::new("map 记录存在多余字节"));
     }
-    // 尾 bit 清零与互斥：位图按字节覆盖 `slot_count` 个槽位。
-    let excess_bits = lanes * 64 - words * 8;
-    if excess_bits > 0
-        && bitmaps
+    // 五个位图逐字节检查，帧大小只受函数 frame_size 限制，不存在固定 lane 上界。
+    if slot_count % 8 != 0 {
+        let mask = u8::MAX << (slot_count % 8);
+        if bitmaps
             .iter()
-            .any(|class| class[lanes - 1] >> (64 - excess_bits) != 0)
-    {
-        return Err(RawModelError::new("槽位图尾 bit 必须为 0"));
+            .any(|class| class.last().is_some_and(|last| last & mask != 0))
+        {
+            return Err(RawModelError::new("槽位图尾 bit 必须为 0"));
+        }
     }
-    for lane in 0..lanes {
-        let mut merged = 0u64;
+    for offset in 0..words {
+        let mut merged = 0u8;
         for class in &bitmaps {
-            if merged & class[lane] != 0 {
+            if merged & class[offset] != 0 {
                 return Err(RawModelError::new("五类槽位图不互斥"));
             }
-            merged |= class[lane];
+            merged |= class[offset];
         }
     }
     // 记录头包含五类完整掩码；最后两个字节为规范保留字段。

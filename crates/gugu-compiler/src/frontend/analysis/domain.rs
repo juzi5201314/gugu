@@ -195,6 +195,7 @@ pub(crate) struct AbstractState {
     pub local_version: Vec<u32>,
     pub heap_version: u32,
     pub foreign_version: u32,
+    /// 始终按 `Relation` 顺序排列且不重复，供汇合时做二分成员检查。
     pub relations: Vec<Relation>,
     pub effects: EffectFacts,
 }
@@ -290,9 +291,10 @@ impl AbstractState {
             self.foreign_version = other.foreign_version;
             changed = true;
         }
+        debug_assert!(other.relations.is_sorted());
         let before = self.relations.len();
         self.relations
-            .retain(|relation| other.relations.contains(relation));
+            .retain(|relation| other.relations.binary_search(relation).is_ok());
         changed |= self.relations.len() != before;
         let before_effects = self.effects;
         self.effects.join(other.effects);
@@ -313,9 +315,10 @@ impl AbstractState {
         changed |= widen_intervals(&mut self.expr_range, &other.expr_range);
         changed |= widen_intervals(&mut self.local_len, &other.local_len);
         changed |= widen_intervals(&mut self.expr_len, &other.expr_len);
+        debug_assert!(other.relations.is_sorted());
         let before = self.relations.len();
         self.relations
-            .retain(|relation| other.relations.contains(relation));
+            .retain(|relation| other.relations.binary_search(relation).is_ok());
         changed |= self.relations.len() != before;
         changed |= self.join(other);
         changed
@@ -356,11 +359,13 @@ impl AbstractState {
     }
 
     pub fn relate(&mut self, relation: Relation) {
-        if !self.reachable || self.relations.contains(&relation) {
+        if !self.reachable {
             return;
         }
-        self.relations.push(relation);
-        self.relations.sort_unstable();
+        match self.relations.binary_search(&relation) {
+            Ok(_) => {}
+            Err(index) => self.relations.insert(index, relation),
+        }
     }
 }
 

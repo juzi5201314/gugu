@@ -457,6 +457,37 @@ fn layout_and_context_corruption_are_rejected_before_backend_consumption() {
     let mut bad = contract.clone();
     bad.context.bytes[0] ^= 1;
     assert!(bad.verify().is_err());
+    let mut bad = contract.clone();
+    bad.morestack.bytes[0] ^= 1;
+    assert!(bad.verify().is_err(), "改片段字节必须被拒");
+    let mut bad = contract.clone();
+    bad.morestack.bytes.pop();
+    assert!(bad.verify().is_err(), "截断片段必须被拒");
+    let mut bad = contract.clone();
+    bad.morestack.resume_offset += 1;
+    assert!(bad.verify().is_err(), "改续点偏移必须被拒");
+    let mut bad = contract.clone();
+    bad.morestack.revision += 1;
+    assert!(bad.verify().is_err(), "改片段版本必须被拒");
+    let mut bad = contract.clone();
+    bad.morestack.patches[0].field += 1;
+    assert!(bad.verify().is_err(), "改修补点必须被拒");
+    let mut bad = contract.clone();
+    bad.morestack.patches[0].glue = "context_restore".to_owned();
+    assert!(bad.verify().is_err(), "改修补目标必须被拒");
+    let mut bad = contract.clone();
+    bad.records[6].bytes += 8;
+    assert!(bad.verify().is_err(), "改 mailbox 记录字节数必须被拒");
+    let mut bad = contract.clone();
+    bad.records[6].fields[5].offset += 8;
+    assert!(bad.verify().is_err(), "改 mailbox 字段偏移必须被拒");
+    let mut changed = contract.clone();
+    changed.morestack.bytes[0] ^= 1;
+    assert_ne!(
+        changed.fingerprint(),
+        contract.fingerprint(),
+        "指纹必须覆盖 morestack 片段"
+    );
     let mut changed = contract.clone();
     changed.demand.creation_sites = 1;
     assert_ne!(changed.fingerprint(), contract.fingerprint());

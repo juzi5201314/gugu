@@ -5,10 +5,14 @@
 //! PC 相对与 RVA 在写出前修完。需要自重定位的槽落在 `.data.rel.ro`，由 rt0
 //! `mprotect` 成只读。
 
+use crate::runtime::entry;
+use crate::runtime::fragments;
+
 use super::codegen::{FragmentPayload, X64World};
 use super::inst::{RelocKind, RelocTarget};
 use super::mangle;
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::offset_of;
 
 #[path = "elf_codec.rs"]
 mod codec;
@@ -43,6 +47,9 @@ pub(crate) fn link_world(
     for fragment in &world.fragments {
         symbols.push(symbol_from_fragment(fragment)?);
     }
+    for blob in fragments::registered_fragments(world.target) {
+        symbols.push(symbol_from_machine_fragment(&blob)?);
+    }
     let mut readonly = vec![
         Blob {
             name: world.metadata.stackmap_name.clone(),
@@ -66,6 +73,10 @@ pub(crate) fn link_world(
         },
     ];
     readonly.retain(|blob| !blob.bytes.is_empty() || blob.name.starts_with(".gugu"));
+    readonly.extend(world.constants.iter().map(|(name, bytes)| Blob {
+        name: name.clone(),
+        bytes: bytes.clone(),
+    }));
     link(&LinkRequest {
         entry: world.entry_symbol.clone(),
         symbols,
@@ -73,6 +84,7 @@ pub(crate) fn link_world(
         imports: Vec::new(),
         interpreter: None,
         archive: Vec::new(),
+        bound_glues: world.glues().bound_symbols(),
     })
 }
 
@@ -94,6 +106,40 @@ fn symbol_from_fragment(fragment: &FragmentPayload) -> Result<ObjectSymbol, Stri
         name: fragment.symbol.clone(),
         bytes: fragment.bytes.clone(),
         relocs,
+        aliases: match mangle::mangle_instance(&fragment.instance) {
+            instance if instance != fragment.symbol => vec![(instance, 0)],
+            _ => Vec::new(),
+        },
+    })
+}
+
+/// 登记机器片段作为一个代码符号；入口名与别名指向同一字节串。
+fn symbol_from_machine_fragment(blob: &fragments::FragmentBlob) -> Result<ObjectSymbol, String> {
+    let (first, rest) = blob
+        .entries
+        .split_first()
+        .ok_or_else(|| "登记片段缺少入口符号".to_owned())?;
+    let mut relocs = Vec::new();
+    for reloc in &blob.relocations {
+        if reloc.kind != RelocKind::PcRel32 {
+            return Err(format!("登记片段 `{}` 只允许 PC 相对修补点", first.glue));
+        }
+        relocs.push(ObjectReloc {
+            offset: reloc.offset,
+            kind: RelocKindCode::PcRel32,
+            target: reloc_name(&reloc.target),
+            addend: reloc.addend,
+        });
+    }
+    let aliases = rest
+        .iter()
+        .map(|entry| (blob.domain.mangle(entry.glue), entry.offset))
+        .collect();
+    Ok(ObjectSymbol {
+        name: blob.domain.mangle(first.glue),
+        bytes: blob.bytes.clone(),
+        relocs,
+        aliases,
     })
 }
 
@@ -118,6 +164,8 @@ pub(crate) struct ObjectSymbol {
     pub(crate) name: String,
     pub(crate) bytes: Vec<u8>,
     pub(crate) relocs: Vec<ObjectReloc>,
+    /// 同一字节串上的别名入口：名字与相对该符号起点的偏移。
+    pub(crate) aliases: Vec<(String, u32)>,
 }
 
 /// 一条尚未解析的重定位。
@@ -149,6 +197,8 @@ pub(crate) struct LinkRequest {
     pub(crate) interpreter: Option<String>,
     /// 非空时按未解析的 C 符号名抽取 SysV ar 成员。
     pub(crate) archive: Vec<u8>,
+    /// 已绑定 glue 的 mangled 符号名；这些名字缺失定义时按 `E0062` 语义失败，不再兜底。
+    pub(crate) bound_glues: BTreeSet<String>,
 }
 
 /// 写出的 Linux 镜像。
@@ -183,9 +233,11 @@ impl LinuxImage {
 pub(crate) fn link(request: &LinkRequest) -> Result<LinuxImage, String> {
     let mut request = request.clone();
     codec::absorb_archive(&mut request)?;
+    let mut processor = vec![0xff; 4096];
+    processor[..64].fill(0);
     request.readonly.push(Blob {
         name: "__gugu_processor".to_owned(),
-        bytes: vec![0xff; 4096],
+        bytes: processor,
     });
     if request.imports.is_empty() {
         link_static(&request)
@@ -246,7 +298,10 @@ fn finish(
     let reloc_va = reloc_table_va(limit_va, request)?;
     let relro_end = reloc_va + relocs.len() as u64 * 16;
     let rw_va = align_down(limit_va, PAGE);
-    let rw_end = align_up(relro_end, PAGE)?;
+    let rw_end = align_up(
+        defined["__gugu_rt0_payload"] + entry::Rt0Payload::bytes(),
+        PAGE,
+    )?;
     let image = assemble(
         request,
         &defined,
@@ -255,6 +310,7 @@ fn finish(
         &relocs,
         rw_va,
         rw_end,
+        relro_end,
     )?;
     let mut out = LinuxImage {
         bytes: image,
@@ -288,7 +344,12 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     let mut cursor = text_off;
     let mut map = BTreeMap::new();
     cursor = place(&mut map, "_start", cursor, rt0_code_len())?;
-    cursor = place(&mut map, "__gugu_rt0_params", cursor, 64)?;
+    cursor = place(
+        &mut map,
+        "__gugu_rt0_params",
+        cursor,
+        entry::rt0_params::BYTES,
+    )?;
     cursor = place(&mut map, "__gugu_cold_trap", cursor, 2)?;
     cursor = place(&mut map, "__gugu_cage_control", cursor, 48)?;
     cursor = place(&mut map, "__gugu_syscall_write", cursor, 8)?;
@@ -320,6 +381,17 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
             return Err(format!("符号 {} 重复定义", symbol.name));
         }
         map.insert(symbol.name.clone(), fragment_base + rva_cursor);
+        for (alias, offset) in &symbol.aliases {
+            if map
+                .insert(
+                    alias.clone(),
+                    fragment_base + rva_cursor + u64::from(*offset),
+                )
+                .is_some()
+            {
+                return Err(format!("符号 {alias} 重复定义"));
+            }
+        }
         let span = (symbol.bytes.len() as u64).max(1);
         rva_cursor = rva_cursor.saturating_add(span);
     }
@@ -333,9 +405,42 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     }
     let rw_va = align_up(ro_cursor, PAGE)?;
     map.insert("__gugu_stack_limit".to_owned(), rw_va);
+    // 保留可写区紧接重定位表之后并独占页：rt0 只把只读区收尾，保留区保持可写。
+    let mut reserved = align_up(
+        reloc_table_va(rw_va, request)? + reloc_count(request)? * 16,
+        PAGE,
+    )?;
+    map.insert("__gugu_initial_slot".to_owned(), reserved);
+    reserved = align_up(reserved + SLOT_BYTES, 64)?;
+    map.insert("__gugu_runtime_state".to_owned(), reserved);
+    // mailbox 是 runtime 状态区首部的别名：morestack 与返回哨兵片段都按这个符号打补丁。
+    map.insert(mangle::mangle_runtime("morestack_mailbox"), reserved);
+    reserved = align_up(reserved + STATE_BYTES, 8)?;
+    map.insert("__gugu_rt0_payload".to_owned(), reserved);
+    map.insert("__gugu_fragments_base".to_owned(), fragment_base);
     let _ = text_off;
     Ok(map)
 }
+
+/// 初始协程槽保留字节数：`CoroutineSlot` 与对齐余量。
+const SLOT_BYTES: u64 = entry::INITIAL_SLOT_BYTES;
+/// runtime 状态区保留字节数：首部是 `MorestackMailbox`。
+const STATE_BYTES: u64 = entry::RUNTIME_STATE_BYTES;
+
+/// 相对重定位条数：符号里的 `Abs64` 加上每个导入的 GOT 槽，再加启动载荷的地址字段。
+fn reloc_count(request: &LinkRequest) -> Result<u64, String> {
+    let abs = request
+        .symbols
+        .iter()
+        .flat_map(|symbol| &symbol.relocs)
+        .filter(|reloc| reloc.kind == RelocKindCode::Abs64)
+        .count();
+    u64::try_from(abs + request.imports.len() + PAYLOAD_RELOCS)
+        .map_err(|_| "重定位条数溢出".to_owned())
+}
+
+/// 启动载荷中需重定位的地址：入口、槽、状态、哨兵、栈图、展开表与函数基址。
+const PAYLOAD_RELOCS: usize = 7;
 
 fn place(map: &mut BTreeMap<String, u64>, name: &str, at: u64, len: u64) -> Result<u64, String> {
     map.insert(name.to_owned(), at);
@@ -344,6 +449,11 @@ fn place(map: &mut BTreeMap<String, u64>, name: &str, at: u64, len: u64) -> Resu
 
 fn rt0_code_len() -> u64 {
     codec::rt0_bytes(0).len() as u64
+}
+
+/// rt0 机器码长度：参数块紧随其后，测试与放置共用同一来源。
+pub(crate) fn rt0_len() -> u64 {
+    rt0_code_len()
 }
 
 fn resolve_relocs(request: &LinkRequest, defined: &BTreeMap<String, u64>) -> Result<(), String> {
@@ -355,7 +465,7 @@ fn resolve_relocs(request: &LinkRequest, defined: &BTreeMap<String, u64>) -> Res
         for reloc in &symbol.relocs {
             let slot = base + u64::from(reloc.offset);
             claim_slot(&mut seen, slot)?;
-            let target = resolve_target(&reloc.target, defined)?;
+            let target = resolve_target(&reloc.target, defined, &request.bound_glues)?;
             match reloc.kind {
                 RelocKindCode::PcRel32 => {
                     let _ = pc_rel32(slot, target, reloc.addend)?;
@@ -370,15 +480,16 @@ fn resolve_relocs(request: &LinkRequest, defined: &BTreeMap<String, u64>) -> Res
     Ok(())
 }
 
-fn resolve_target(name: &str, defined: &BTreeMap<String, u64>) -> Result<u64, String> {
+fn resolve_target(
+    name: &str,
+    defined: &BTreeMap<String, u64>,
+    bound: &BTreeSet<String>,
+) -> Result<u64, String> {
     if let Some(va) = defined.get(name) {
         return Ok(*va);
     }
-    if name == mangle::mangle_runtime("morestack_or_poll") {
-        return Ok(defined["__gugu_stub_ret"]);
-    }
-    if name.starts_with("__gugu_") {
-        return Ok(defined["__gugu_stub_exit"]);
+    if bound.contains(name) {
+        return Err(format!("runtime glue {name} 绑定在镜像内没有定义"));
     }
     Ok(defined["__gugu_stub_exit"])
 }
@@ -425,7 +536,7 @@ fn relative_relocs(
                 continue;
             }
             let slot = base + u64::from(reloc.offset);
-            let target = resolve_target(&reloc.target, defined)?;
+            let target = resolve_target(&reloc.target, defined, &request.bound_glues)?;
             let addend = u64::try_from(
                 i64::try_from(target)
                     .unwrap_or(0)
@@ -440,6 +551,43 @@ fn relative_relocs(
     for index in 0..request.imports.len() {
         relocs.push((limit + 128 + index as u64 * 8, stub));
     }
+    // 启动载荷的地址字段：写出链接期值，rt0 按同一批对补上加载偏移。
+    let payload = defined["__gugu_rt0_payload"];
+    let entry = defined[&request.entry];
+    let slot = defined["__gugu_initial_slot"];
+    let state = defined["__gugu_runtime_state"];
+    relocs.push((
+        payload + u64::try_from(offset_of!(entry::Rt0Payload, main_entry)).expect("字段偏移"),
+        entry,
+    ));
+    relocs.push((
+        payload + u64::try_from(offset_of!(entry::Rt0Payload, initial_slot)).expect("字段偏移"),
+        slot,
+    ));
+    relocs.push((
+        payload + u64::try_from(offset_of!(entry::Rt0Payload, runtime_state)).expect("字段偏移"),
+        state,
+    ));
+    relocs.push((
+        payload + u64::try_from(offset_of!(entry::Rt0Payload, main_return)).expect("字段偏移"),
+        resolve_target(
+            &mangle::mangle_runtime("main_return"),
+            defined,
+            &request.bound_glues,
+        )?,
+    ));
+    relocs.push((
+        payload + u64::try_from(offset_of!(entry::Rt0Payload, stackmap)).expect("字段偏移"),
+        defined[".gugu.stackmap"],
+    ));
+    relocs.push((
+        payload + u64::try_from(offset_of!(entry::Rt0Payload, fragment_base)).expect("字段偏移"),
+        defined["__gugu_fragments_base"],
+    ));
+    relocs.push((
+        payload + u64::try_from(offset_of!(entry::Rt0Payload, unwind)).expect("字段偏移"),
+        defined[".eh_frame"],
+    ));
     relocs.sort_by_key(|item| item.0);
     Ok(relocs)
 }
@@ -464,6 +612,7 @@ fn assemble(
     relocs: &[(u64, u64)],
     rw_va: u64,
     rw_end: u64,
+    protect_end: u64,
 ) -> Result<Vec<u8>, String> {
     let start = defined["_start"];
     let text_end = text_end(request, defined)?;
@@ -484,7 +633,8 @@ fn assemble(
     write_readonly(&mut file, request, defined)?;
     codec::patch_dynamic(&mut file, defined)?;
     write_relro(&mut file, request, defined, relocs)?;
-    write_params(&mut file, defined, request, relocs, rw_va, rw_end)?;
+    write_payload(&mut file, defined, request)?;
+    write_params(&mut file, defined, request, relocs, rw_va, protect_end)?;
     reject_writable_executable(false, true)?;
     Ok(file)
 }
@@ -501,12 +651,14 @@ fn dynamic_span(request: &LinkRequest, defined: &BTreeMap<String, u64>) -> Optio
 }
 
 fn text_end(request: &LinkRequest, defined: &BTreeMap<String, u64>) -> Result<u64, String> {
+    let limit = defined["__gugu_stack_limit"];
     let mut end = defined["_start"];
     for (name, va) in defined {
         if request.readonly.iter().any(|blob| blob.name == *name) {
             continue;
         }
-        if *name == "__gugu_stack_limit" {
+        // 栈界之后的符号全在可写区（含保留区与重定位表），不属于文本段。
+        if *va >= limit {
             continue;
         }
         let len = symbol_len(request, name);
@@ -520,8 +672,8 @@ fn symbol_len(request: &LinkRequest, name: &str) -> u64 {
         return (symbol.bytes.len() as u64).max(1);
     }
     match name {
-        "_start" => rt0_code_len(),
-        "__gugu_rt0_params" => 64,
+        "_start" => rt0_len(),
+        "__gugu_rt0_params" => entry::rt0_params::BYTES,
         "__gugu_cold_trap" => 2,
         "__gugu_cage_control" => 48,
         "__gugu_syscall_write" | "__gugu_syscall_mmap" | "__gugu_stub_exit" => 8,
@@ -713,7 +865,7 @@ fn write_text(
             if reloc.offset as usize + width > symbol.bytes.len() {
                 return Err(format!("重定位超出符号 {}", symbol.name));
             }
-            apply_link_reloc(file, va, reloc, defined)?;
+            apply_link_reloc(file, va, reloc, defined, &request.bound_glues)?;
         }
     }
     Ok(())
@@ -742,9 +894,10 @@ fn apply_link_reloc(
     base: usize,
     reloc: &ObjectReloc,
     defined: &BTreeMap<String, u64>,
+    bound: &BTreeSet<String>,
 ) -> Result<(), String> {
     let slot = base + reloc.offset as usize;
-    let target = resolve_target(&reloc.target, defined)?;
+    let target = resolve_target(&reloc.target, defined, bound)?;
     match reloc.kind {
         RelocKindCode::PcRel32 => {
             let disp = pc_rel32(slot as u64, target, reloc.addend)?;
@@ -813,24 +966,114 @@ fn write_params(
     request: &LinkRequest,
     relocs: &[(u64, u64)],
     rw_va: u64,
-    rw_end: u64,
+    protect_end: u64,
 ) -> Result<(), String> {
+    use entry::rt0_params;
     let entry = *defined
         .get(&request.entry)
         .ok_or_else(|| format!("入口符号 {} 不存在", request.entry))?;
     let params = defined["__gugu_rt0_params"] as usize;
-    let words = [
-        64_u64,
-        reloc_table_va(defined["__gugu_stack_limit"], request)?,
-        relocs.len() as u64,
-        rw_va,
-        rw_end - rw_va,
-        entry,
-        defined["__gugu_stack_limit"],
-        defined["__gugu_processor"],
-    ];
+    let mut words = [0_u64; rt0_params::WORDS];
+    words[rt0_params::BIAS_BASELINE] = 64;
+    words[rt0_params::RELOC_TABLE] = reloc_table_va(defined["__gugu_stack_limit"], request)?;
+    words[rt0_params::RELOC_COUNT] = relocs.len() as u64;
+    words[rt0_params::PROTECT_VA] = rw_va;
+    words[rt0_params::PROTECT_LEN] = protect_end - rw_va;
+    words[rt0_params::ENTRY] = entry;
+    words[rt0_params::BOOT_R14] = defined["__gugu_initial_slot"];
+    words[rt0_params::PROCESSOR] = defined["__gugu_processor"];
+    words[rt0_params::RT0_START] = rt0_start(defined, request);
+    words[rt0_params::PAYLOAD_VA] = defined["__gugu_rt0_payload"];
+    words[rt0_params::PAYLOAD_LEN] = entry::Rt0Payload::bytes();
+    words[rt0_params::INITIAL_SLOT] = defined["__gugu_initial_slot"];
+    words[rt0_params::RUNTIME_STATE] = defined["__gugu_runtime_state"];
     for (index, word) in words.iter().enumerate() {
         put_u64(file, params + index * 8, *word)?;
+    }
+    Ok(())
+}
+
+/// 镜像 runtime 入口；未登记的独立链接测试仍使用直调入口。
+fn rt0_start(defined: &BTreeMap<String, u64>, request: &LinkRequest) -> u64 {
+    let name = mangle::mangle_runtime("rt0_start");
+    defined
+        .get(&name)
+        .copied()
+        .filter(|_| request.bound_glues.contains(&name))
+        .unwrap_or(0)
+}
+
+/// 启动载荷：地址字段写成链接期值，由 `relative_relocs` 登记的同名对在 rt0 里补上加载偏移。
+fn write_payload(
+    file: &mut [u8],
+    defined: &BTreeMap<String, u64>,
+    request: &LinkRequest,
+) -> Result<(), String> {
+    let payload = usize::try_from(defined["__gugu_rt0_payload"])
+        .map_err(|_| "载荷地址超出宿主".to_owned())?;
+    let entry = *defined
+        .get(&request.entry)
+        .ok_or_else(|| format!("入口符号 {} 不存在", request.entry))?;
+    let fields = [
+        (
+            offset_of!(entry::Rt0Payload, revision),
+            entry::Rt0Payload::REVISION,
+        ),
+        (offset_of!(entry::Rt0Payload, main_entry), entry),
+        (
+            offset_of!(entry::Rt0Payload, initial_slot),
+            defined["__gugu_initial_slot"],
+        ),
+        (
+            offset_of!(entry::Rt0Payload, runtime_state),
+            defined["__gugu_runtime_state"],
+        ),
+        (
+            offset_of!(entry::Rt0Payload, main_return),
+            resolve_target(
+                &mangle::mangle_runtime("main_return"),
+                defined,
+                &request.bound_glues,
+            )?,
+        ),
+        (
+            offset_of!(entry::Rt0Payload, stackmap),
+            defined[".gugu.stackmap"],
+        ),
+        (
+            offset_of!(entry::Rt0Payload, fragment_base),
+            defined["__gugu_fragments_base"],
+        ),
+        (
+            offset_of!(entry::Rt0Payload, stackmap_len),
+            u64::try_from(
+                request
+                    .readonly
+                    .iter()
+                    .find(|blob| blob.name == ".gugu.stackmap")
+                    .ok_or_else(|| "启动载荷缺少栈图节".to_owned())?
+                    .bytes
+                    .len(),
+            )
+            .map_err(|_| "栈图节长度溢出".to_owned())?,
+        ),
+        (offset_of!(entry::Rt0Payload, unwind), defined[".eh_frame"]),
+        (
+            offset_of!(entry::Rt0Payload, unwind_len),
+            u64::try_from(
+                request
+                    .readonly
+                    .iter()
+                    .find(|blob| blob.name == ".eh_frame")
+                    .ok_or_else(|| "启动载荷缺少展开节".to_owned())?
+                    .bytes
+                    .len(),
+            )
+            .map_err(|_| "展开节长度溢出".to_owned())?,
+        ),
+    ];
+    for (offset, value) in fields {
+        put_u64(file, payload + offset, value)?;
     }
     Ok(())
 }

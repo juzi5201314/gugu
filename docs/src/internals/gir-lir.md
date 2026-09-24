@@ -24,7 +24,7 @@ GIR 和 LIR 分别以一个函数、闭包、初始化器或编译器生成 glue
 - `signature`：规范化参数、返回类型和 effect；
 - `source_scopes`：可恢复到 HIR span 的内联作用域树；
 - `flags`：是否可 panic、可 suspend、可分配、含 unsafe 或属于 runtime glue；
-- `revision`：IR schema版本，当前 GIR 为 3、LIR 为 2，concrete GIR schema 为 1。
+- `revision`：IR schema版本，当前 GIR 为 4、LIR 为 5，concrete GIR schema 为 1。
 
 成功产物不允许错误类型、未解析定义、未物化的早期 comptime 值或悬空 arena ID。GIR 可以保存已经验证的 `LateConstRef`，但它必须指向当前闭世界成功的 late 结果表，不表示延迟执行用户代码；进入 LIR 前必须物化为标量常量或明确的类型 metadata relocation。每个改写 pass 必须在调试构建中运行局部 verifier；跨阶段边界必须运行完整 verifier。
 
@@ -142,12 +142,14 @@ terminator 固定为：
 - `SwitchInt { value, targets, otherwise }`；
 - `Call { callee, args, destination, normal, unwind, call_kind }`；
 - `Return`；
-- `Panic { payload, unwind }`；
+- `Panic { payload, location, unwind }`；
 - `ResumePanic`、`Abort`、`Unreachable`；
 - `Suspend { reason, resume, cancelled, safepoint }`；
 - `SelectCommit { cases, ready, suspend, safepoint }`。
 
-`Call` 另存 `site`（HIR 表达式、dispatch 或初始化器编号）与 `call_kind`。`Call.unwind` 对可能 panic 的调用必须指向 cleanup block；证明 `nounwind` 的调用使用 `None`。外部 C 调用的 `call_kind` 明确为普通 `ForeignBridge`、`ForeignBridge[DirtyCpu]` 或 `ForeignLeaf`，其 C ABI 转换不能由普通调用优化删除；前两者携带 runtime 交接，dirty mode还携带额度 admission。
+`Panic.location` 固定为原始 panic 表达式位置，包括编译器生成的检查失败与 channel send 取消；它不从 block source 推断。LIR lowering 使用 `SourceMap` 将该位置转为只读常量路径、1-based 行号和列号，通过 `RuntimeCall::Panic` 的显式 ABI lanes 传入镜像 runtime；常量内不含指针，因此复用普通 `Symbol::Data` relocation。`BuildGenericGir` 当前 schema 为 6，GIR revision 为 4，LIR build schema 为 5。
+
+编译器生成的 panic payload 固定为 `string`，即使源码 owner 没有显式引用该类型。HIR primitive type table 必须包含 `string`，具体 GIR 在该 owner 中为消息字面量物化对应类型和布局；不能把缺失的 owner-local 引用降为 `unit`，因为那会使 `RuntimeCall::Panic` 缺少消息 ABI lanes，并破坏 runtime glue 签名校验。冻结类型宇宙对含 panic 检查、panic 效果或 suspend 操作的 owner 登记相同类型键。
 
 `Suspend` 保存 stable resume/cancelled successor和该点活跃 local，不在 GIR重新决定取消值或协程寿命。`cancelled` 只出现在 `ChanSend` 以及含 send 的 `SelectCommit`：该边指向固定 payload「send on closed channel」的 `Panic` block，其它 suspend 理由不得发明取消值。`SelectCommit` 只引用 HIR已经固定的一次求值临时槽、case index和提交 operation。机器 context与等待记录由后端/调度器建立。
 
@@ -165,7 +167,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 ### generic GIR 构造
 
-`BuildGenericGir`（query 11，当前 schema 5，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#development-interface)）。差异诊断为 `E0055`。
+`BuildGenericGir`（query 11，当前 schema 6，输入域 `gugu-build-generic-gir-v1`）在冻结 HIR 上为每个 owner 构造一份 generic body，经结构/前驱/`StorageLive`/`StorageDead`/cleanup 序列/cancelled/scoped view/`NoSafepoint` verifier 后写入 `GirWorldV1`。`FrontendOutput`、`BuildIr`、`ImagePlan` 与 `ActionInputs` 消费该 world；`-Zdump-gir` 打印稳定文本 dump（见[工具链 CLI](../spec/toolchain-cli.md#development-interface)）。差异诊断为 `E0055`。
 
 构造器把 HIR `CleanupPlan` intern 成共享 cleanup block：相同 `(chain, action 序列)` 复用入口。`defer ret` 的 `Flag` 出口以 `Assign`+`SwitchInt` 守卫，`Chain` 出口以 `DeferChainPush`/`Pop`/`Action`/`Env` 消费。隐式返回走 `Owner.return_plan` 再 `Return`。`LocalId(0)` 是返回槽，参数按 HIR 绑定顺序，其余为用户 local 与临时值。
 

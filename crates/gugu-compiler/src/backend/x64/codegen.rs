@@ -25,7 +25,7 @@ use crate::frontend::semantics::query::{restore_errors, store_errors};
 use crate::lir;
 use crate::lir::body::Body;
 use crate::query::{QueryEngine, QueryKey, QueryKind};
-use crate::runtime::{RAW_MODEL_SCHEMA, RuntimeRawContractV1};
+use crate::runtime::{RAW_MODEL_SCHEMA, RuntimeGlueBindings, RuntimeRawContractV1};
 use crate::target::TargetName;
 
 use super::alloc;
@@ -431,6 +431,10 @@ pub(crate) struct X64World {
     pub(crate) entry_symbol: String,
     /// 分配并编码之后的栈图、展开记录与源码记录。
     pub(crate) metadata: super::metadata::MachineMetadata,
+    /// runtime glue 绑定表：绑定实例的符号名与登记片段名在镜像里唯一确定。
+    pub(crate) glues: RuntimeGlueBindings,
+    /// 全局常量数据块：`(符号名, 字节)`，按全局下标升序，供 writer 放进只读区。
+    pub(crate) constants: Vec<(String, Vec<u8>)>,
     pub(crate) fingerprint: [u8; 32],
 }
 
@@ -443,6 +447,30 @@ impl X64World {
     /// encoder 契约指纹。
     pub(crate) fn encoder_fingerprint(&self) -> [u8; 32] {
         self.contract.fingerprint()
+    }
+
+    /// runtime glue 绑定表。
+    pub(crate) fn glues(&self) -> &RuntimeGlueBindings {
+        &self.glues
+    }
+
+    /// 引用到的 runtime glue 符号统计：绑定数与仍走 stub 兜底的数量。
+    ///
+    /// 绑定数是绑定表全量条目；兜底数按片段 relocation 实际引用到的 `__gugu_runtime_*`
+    /// 符号去重统计，不把未引用条目算进来。
+    pub(crate) fn runtime_glue_counts(&self) -> (u32, u32) {
+        let mut stubbed = std::collections::BTreeSet::new();
+        for fragment in &self.fragments {
+            for symbol in &fragment.symbols {
+                if symbol.starts_with("__gugu_runtime_") && !self.glues.is_bound_symbol(symbol) {
+                    stubbed.insert(symbol.as_str());
+                }
+            }
+        }
+        (
+            self.glues.bound(),
+            u32::try_from(stubbed.len()).expect("stub 符号数适配 u32"),
+        )
     }
 
     /// lowered 站点总数。
@@ -785,6 +813,76 @@ impl X64World {
     }
 }
 /// 构建机器片段世界；`entry` 是 `MonoRoots` 里 `RootCategoryV1::Entry` 类别实例的键。
+/// 常量数据池：把各 body 的局部数据块重新编号为**全局**下标并按内容去重。
+///
+/// `Symbol::Data` 的镜像符号名只由全局下标决定（`mangle::const_symbol`），所以下标必须全局唯一；
+/// 而 `Body.data` 是每个 body 各自的局部表。组装 world 时统一重编号，并把被引用的字节登记成只读
+/// blob（名字即 `const_symbol(全局下标)`）交给 writer 放进 `defined`。
+///
+/// 去重键取内容哈希：数据块是常量字节串，按内容寻址既能去重又不比逐字节比较，且与下标分配顺序
+/// 解耦（同一内容在任意 body 里都落到同一下标）。
+#[derive(Default)]
+struct DataPool {
+    /// 内容哈希 → 全局下标。
+    interned: std::collections::HashMap<[u8; 32], u32>,
+    /// 全局下标 → 字节。
+    entries: Vec<Vec<u8>>,
+}
+
+impl DataPool {
+    /// 吸收一个 body 的局部数据表，并把该 body 片段里的 `Symbol::Data` 重写为全局下标。
+    fn absorb(
+        &mut self,
+        body: &Body,
+        fragment: &mut FragmentPayload,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if body.data.is_empty() {
+            return Ok(());
+        }
+        let mut rewrite = Vec::with_capacity(body.data.len());
+        for data in &body.data {
+            let key = hash_domain(CONST_DATA_DOMAIN, &data.bytes);
+            let global = match self.interned.get(&key) {
+                Some(global) => *global,
+                None => {
+                    let global = u32::try_from(self.entries.len())
+                        .map_err(|_| vec![invalid("常量数据数量溢出")])?;
+                    self.interned.insert(key, global);
+                    self.entries.push(data.bytes.clone());
+                    global
+                }
+            };
+            rewrite.push(global);
+        }
+        for relocation in &mut fragment.relocations {
+            let RelocTarget::Lir(crate::lir::body::Symbol::Data(local)) = &relocation.target else {
+                continue;
+            };
+            let local = usize::try_from(*local)
+                .ok()
+                .and_then(|local| rewrite.get(local).copied())
+                .ok_or_else(|| vec![invalid("常量数据下标越界")])?;
+            relocation.target = RelocTarget::Lir(crate::lir::body::Symbol::Data(local));
+        }
+        Ok(())
+    }
+
+    /// 全局数据池的镜像 blob 清单，按全局下标升序。
+    fn blobs(&self) -> Vec<(String, Vec<u8>)> {
+        self.entries
+            .iter()
+            .enumerate()
+            .map(|(index, bytes)| {
+                let index = u32::try_from(index).expect("常量数据下标适配 u32");
+                (super::mangle::const_symbol(index), bytes.clone())
+            })
+            .collect()
+    }
+}
+
+/// 常量数据去重域；与 `mangle::data_key` 的输入（下标）不同，两者不会互相碰撞。
+const CONST_DATA_DOMAIN: &str = "gugu-const-data-v1";
+
 pub(crate) fn build(
     lir: &lir::Validated,
     universe: &TypeUniverse,
@@ -793,6 +891,7 @@ pub(crate) fn build(
     queries: &QueryEngine,
     sources: &SourceMap,
     entry: &[u8; 32],
+    glues: RuntimeGlueBindings,
 ) -> Result<X64World, Vec<Diagnostic>> {
     let contract = EncoderContract::build(target.descriptor().cpu_baseline);
     contract
@@ -801,6 +900,7 @@ pub(crate) fn build(
     let encoder = contract.fingerprint();
     let lir_fingerprint = lir.fingerprint();
     let mut fragments = Vec::with_capacity(lir.bodies().len());
+    let mut constants = DataPool::default();
     let mut entry_symbol = None;
     for body in lir.bodies() {
         let key = QueryKey::new(
@@ -836,6 +936,7 @@ pub(crate) fn build(
                 encoder,
                 lir_fingerprint,
                 &contract,
+                &glues,
             )
             .map_err(|errors| store_errors(&errors))?;
             let bytes = serde_json::to_vec(&fragment).expect("机器片段可序列化");
@@ -843,12 +944,13 @@ pub(crate) fn build(
             Ok((bytes, Vec::new()))
         });
         let computed = computed.map_err(|error| restore_errors(error, sources))?;
-        let fragment = match fresh {
+        let mut fragment = match fresh {
             Some(fragment) => fragment,
             None => serde_json::from_slice(computed.payload())
                 .map_err(|_| vec![invalid("缓存机器片段不是合法 schema")])?,
         };
         validate_fragment(&fragment, body, target, encoder, lir_fingerprint)?;
+        constants.absorb(body, &mut fragment)?;
         if body.instance == *entry {
             entry_symbol = Some(fragment.symbol.clone());
         }
@@ -864,6 +966,8 @@ pub(crate) fn build(
         fragments,
         entry_symbol,
         metadata,
+        glues,
+        constants: constants.blobs(),
         fingerprint: [0; 32],
     };
     world.fingerprint = world_fingerprint(&world);
@@ -894,15 +998,28 @@ fn fragment_key(
     hash_domain(FRAGMENT_KEY_DOMAIN, &canonical)
 }
 
+/// 绑定实例的函数体符号改为 runtime glue 名；其余维持实例 mangling。
+fn fragment_symbol(body: &Body, allocated: &str, glues: &RuntimeGlueBindings) -> String {
+    match glues.glue_of_instance(&body.instance) {
+        Some(glue) => super::mangle::mangle_runtime(glue),
+        None => allocated.to_owned(),
+    }
+}
+
 fn world_fingerprint(world: &X64World) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_derive_key(WORLD_DOMAIN);
     hasher.update(&world.schema.to_le_bytes());
     hasher.update(world.target.name().as_bytes());
+    for (name, bytes) in &world.constants {
+        hasher.update(name.as_bytes());
+        hasher.update(bytes);
+    }
     hasher.update(&world.contract.fingerprint());
     for fragment in &world.fragments {
         hasher.update(&fragment.instance);
         hasher.update(&fragment.fingerprint);
     }
+    hasher.update(&world.glues.fingerprint());
     hasher.update(&world.metadata.fingerprint);
     *hasher.finalize().as_bytes()
 }
@@ -916,6 +1033,7 @@ fn assemble_fragment(
     encoder: [u8; 32],
     lir_fingerprint: [u8; 32],
     contract: &EncoderContract,
+    glues: &RuntimeGlueBindings,
 ) -> Result<FragmentPayload, Vec<Diagnostic>> {
     let selected = select::select_body(body, universe, raw, target)
         .map_err(|error| vec![invalid(&format!("{} 的指令选择失败：{error}", body.name))])?;
@@ -961,7 +1079,7 @@ fn assemble_fragment(
         instance: body.instance,
         lir_fingerprint,
         encoder_fingerprint: encoder,
-        symbol: allocated.symbol.clone(),
+        symbol: fragment_symbol(body, &allocated.symbol, glues),
         symbols: reference_symbols(&assembled.relocations),
         rel8_count: allocated.rel8_count,
         hot_block_count: to_u32(

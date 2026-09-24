@@ -18,6 +18,7 @@ mod foreign;
 mod formatting;
 mod generics;
 mod inference;
+mod machine;
 mod memory;
 mod methods;
 pub(super) mod must_use;
@@ -96,6 +97,7 @@ struct Checker<'m, 'a> {
     memory_operations: Vec<super::output::MemoryOperation>,
     runtime_operations: Vec<super::output::RuntimeOperation>,
     platform_operations: Vec<super::output::PlatformOperation>,
+    runtime_machine_operations: Vec<super::output::RuntimeMachineOperation>,
     foreign_calls: Vec<super::foreign::ForeignCall>,
     call_site: Option<ExprId>,
     current_function: Option<FnId>,
@@ -192,6 +194,7 @@ pub(super) fn check(
                 memory_operations: checker.memory_operations,
                 runtime_operations: checker.runtime_operations,
                 platform_operations: checker.platform_operations,
+                runtime_machine_operations: checker.runtime_machine_operations,
                 foreign_calls: checker.foreign_calls,
                 assembly: checker.assembly,
                 borrow_checks: checker.borrow_checks,
@@ -292,6 +295,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             memory_operations: Vec::new(),
             runtime_operations: Vec::new(),
             platform_operations: Vec::new(),
+            runtime_machine_operations: Vec::new(),
             foreign_calls: Vec::new(),
             call_site: None,
             current_function: None,

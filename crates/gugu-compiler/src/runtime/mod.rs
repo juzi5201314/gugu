@@ -66,6 +66,9 @@ mod coroutine_layout;
 mod coroutine_schema;
 pub(crate) mod edge;
 pub(crate) mod edge_schema;
+
+/// rt0 与镜像 runtime 的启动边界：参数块 word 目录与启动载荷布局。
+pub(crate) mod entry;
 #[allow(
     dead_code,
     reason = "Formatter 写入方法由 comptime 静态格式化与确定性测试消费，尚未降成 Gugu 可调用的 intrinsic"
@@ -73,6 +76,7 @@ pub(crate) mod edge_schema;
 pub(crate) mod fmt;
 #[cfg(test)]
 mod fmt_tests;
+pub(crate) mod fragments;
 #[allow(
     dead_code,
     reason = "GC metadata 契约段由 runtime raw 与 ImagePlan 消费"
@@ -85,6 +89,7 @@ pub(crate) mod gc_metadata_section;
     reason = "trace descriptor 解释器由 LocalHeap 与 world 消费"
 )]
 pub(crate) mod gc_trace;
+mod glue;
 mod harness;
 #[allow(
     dead_code,
@@ -216,12 +221,14 @@ pub use coroutine_schema::{
     CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
     StackPolicy,
 };
+pub use fragments::{FragmentPatch, MainReturnCode, MorestackEntryCode};
 
 pub use block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
 pub use compression_schema::{CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract};
 pub use edge_schema::{EdgeDemand, EdgeRuntimeContract};
 pub use foreign_schema::{ForeignDemand, ForeignRuntimeContract};
 pub use gc_metadata_schema::GcMetadataDemand;
+pub(crate) use glue::RuntimeGlueBindings;
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
 pub use mark_schema::{MarkDemand, MarkRuntimeContract};
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
@@ -453,6 +460,187 @@ impl From<Rt0Kind> for Rt0Boundary {
     }
 }
 
+/// runtime 机器 intrinsic 的固定操作集合；glue 名与 `mangle::mangle_runtime` 的输入一一对应，
+/// 登记机器片段按同一名字放置符号，`backend` 以 `runtime_named(name)` 生成调用。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum RuntimeMachineOp {
+    ContextSwitch,
+    ContextRestore,
+    CurrentSlot,
+    ProcessExit,
+    ReportWrite,
+}
+
+impl RuntimeMachineOp {
+    /// glue 名（`mangle::mangle_runtime` 的输入）；诊断与 dump 也使用它。
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::ContextSwitch => "context_switch",
+            Self::ContextRestore => "context_restore",
+            Self::CurrentSlot => "current_slot",
+            Self::ProcessExit => "process_exit",
+            Self::ReportWrite => "report_write",
+        }
+    }
+}
+
+impl std::fmt::Display for RuntimeMachineOp {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
+/// 一个 runtime glue 的镜像内定义。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GlueDef {
+    /// `mangle::mangle_runtime` 的输入名。
+    pub(crate) glue: &'static str,
+    pub(crate) def: GlueDefKind,
+}
+
+/// glue 定义的两种来源。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GlueDefKind {
+    /// Gugu 源项定义：绑定该源文件内 `item` 指定的非泛型 `fn`；`item` 与 `glue` 同名时
+    /// 也显式写出，绑定关系不依赖重命名推断。
+    Item {
+        source: &'static str,
+        item: &'static str,
+    },
+    /// 镜像 writer 放置的登记机器片段（`runtime/fragments.rs`）。
+    Fragment,
+}
+
+/// 本变更登记的 runtime glue 绑定表；后续阶段只增不改语义。
+///
+/// glue 名与 `RuntimeCall` 目录、`RuntimeMachineOp` 目录及平台原语的 `platform_<name>`
+/// 命名一致，绑定表因此是「镜像里哪些 runtime 入口由 Gugu 实现或登记片段接管」的唯一清单。
+const GLUE_DEFS: &[GlueDef] = &[
+    GlueDef {
+        glue: "rt0_start",
+        def: GlueDefKind::Item {
+            source: "std/runtime/core.gg",
+            item: "rt0_start",
+        },
+    },
+    GlueDef {
+        glue: "panic",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "panic_dispatch",
+        def: GlueDefKind::Item {
+            source: "std/runtime/core.gg",
+            item: "panic_dispatch",
+        },
+    },
+    GlueDef {
+        glue: "panic_unwind",
+        def: GlueDefKind::Item {
+            source: "std/runtime/core.gg",
+            item: "panic_unwind",
+        },
+    },
+    GlueDef {
+        glue: "panic_resume",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "defer_push",
+        def: GlueDefKind::Item {
+            source: "std/runtime/core.gg",
+            item: "defer_push",
+        },
+    },
+    GlueDef {
+        glue: "defer_action",
+        def: GlueDefKind::Item {
+            source: "std/runtime/core.gg",
+            item: "defer_action",
+        },
+    },
+    GlueDef {
+        glue: "defer_environment",
+        def: GlueDefKind::Item {
+            source: "std/runtime/core.gg",
+            item: "defer_environment",
+        },
+    },
+    GlueDef {
+        glue: "defer_pop",
+        def: GlueDefKind::Item {
+            source: "std/runtime/core.gg",
+            item: "defer_pop",
+        },
+    },
+    GlueDef {
+        glue: "morestack_handle",
+        def: GlueDefKind::Item {
+            source: "std/runtime/core.gg",
+            item: "morestack_handle",
+        },
+    },
+    GlueDef {
+        glue: "morestack_or_poll",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "context_switch",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "context_restore",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "current_slot",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "process_exit",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "main_return",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "report_write",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "platform_reserve_aligned",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "platform_commit",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "platform_decommit",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "platform_release",
+        def: GlueDefKind::Fragment,
+    },
+];
+
+impl RuntimeResources {
+    /// 返回本变更登记的 runtime glue 绑定表。
+    pub(crate) fn glue_defs(&self) -> &'static [GlueDef] {
+        GLUE_DEFS
+    }
+
+    /// runtime 角色源文件的逻辑路径；控制块布局交叉校验按这个集合判定归属。
+    pub(crate) fn runtime_paths(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.sources
+            .iter()
+            .filter(|source| source.role() == RuntimeSourceRole::Runtime)
+            .map(RuntimeSource::logical_path)
+    }
+}
+
 /// compiler 使用的 Gugu 标准库/runtime 源树登记表。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeResources {
@@ -531,7 +719,7 @@ impl RuntimeResources {
                     role: RuntimeSourceRole::StandardLibrary,
                 },
                 RuntimeSource {
-                    logical_path: "runtime/core.gg",
+                    logical_path: "std/runtime/core.gg",
                     source: RUNTIME_CORE_SOURCE,
                     role: RuntimeSourceRole::Runtime,
                 },

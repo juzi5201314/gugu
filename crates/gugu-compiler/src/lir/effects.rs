@@ -29,6 +29,7 @@ impl Op {
             | Self::GcAlloc { .. }
             | Self::RegionAlloc { .. }
             | Self::PlatformCall(_)
+            | Self::RuntimeMachineCall(_)
             | Self::RegionPublish { .. }
             | Self::RegionReset { .. }
             | Self::PromoteManaged { .. }
@@ -88,6 +89,9 @@ impl Op {
             } else {
                 SafepointKind::CallReturn
             }),
+            // runtime 机器原语在登记片段内部完成换栈/阻塞/退出，不进入协程挂起协议；统一按
+            // 普通调用返回点记录 live roots。
+            Self::RuntimeMachineCall(_) => Some(SafepointKind::CallReturn),
             Self::Call(call) | Self::ForeignCall(call) => call.safepoint_kind(),
             Self::ResolveSharedHandle | Self::ForwardSharedHandle => {
                 Some(SafepointKind::CallReturn)
@@ -148,7 +152,7 @@ impl Op {
             | Self::Ready => 16,
             // 平台范围调用进入 syscall/CRT 边界，按最贵的普通 runtime 操作计价；`wait` 会睡眠，
             // 因此它本身就是 poll 切断点。
-            Self::PlatformCall(_) => POLL_BUDGET,
+            Self::PlatformCall(_) | Self::RuntimeMachineCall(_) => POLL_BUDGET,
             Self::Call(call) | Self::ForeignCall(call) => match call.kind {
                 CallKind::ForeignLeaf { .. } => POLL_BUDGET,
                 _ => 5,

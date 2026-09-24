@@ -1,1 +1,382 @@
-/* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。 */
+/* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
+ *
+ * 本单元承载 rt0 后半段：机器 rt0 只做自重定位、只读收尾与一次跳转；启动校验、runtime 状态
+ * 发布、main 协程进入与退出码判定都在这里。参数块 word 是链接期 VA，必须加 rt0 传入的 bias；
+ * 启动载荷里的地址已由 rt0 施加重定位，可以直接当运行时地址使用。
+ *
+ * 本单元不引用 `std.runtime.coroutine` 的控制块类型：`std` 私有实现模块不对外导入，而控制块
+ * 的形状由契约（`CoroutineRuntimeContract.records`）与机器片段的固定偏移共同固定，这里按
+ * 契约偏移直接读写状态区与栈区。
+ */
+
+/// rt0 参数块的 Gugu 视图；word 顺序与 compiler 的 `runtime::entry::rt0_params` 逐项对应。
+#[repr(C, align(8))]
+pub struct Rt0Params {
+    pub bias_baseline: uint,
+    pub reloc_table: uint,
+    pub reloc_count: uint,
+    pub protect_va: uint,
+    pub protect_len: uint,
+    pub entry: uint,
+    pub boot_r14: uint,
+    pub processor: uint,
+    pub rt0_start: uint,
+    pub payload_va: uint,
+    pub payload_len: uint,
+    pub initial_slot: uint,
+    pub runtime_state: uint,
+    pub reserved_13: uint,
+    pub reserved_14: uint,
+    pub reserved_15: uint,
+}
+
+/// 启动载荷的 Gugu 视图；地址在 Linux 已重定位，Windows 按 bias 加到 RVA。
+#[repr(C, align(8))]
+pub struct Rt0Payload {
+    pub revision: uint,
+    pub main_entry: uint,
+    pub initial_slot: uint,
+    pub runtime_state: uint,
+    pub bias: uint,
+    pub main_return: uint,
+    pub stackmap: uint,
+    pub fragment_base: uint,
+    pub stackmap_len: uint,
+    pub unwind: uint,
+    pub unwind_len: uint,
+}
+
+/// `MorestackMailbox` 的字段偏移（`hot`/`system_context`/`return_value`/`processor` =
+/// 0/40/88/96）与 `CoroutineContext` 的 `rsp`/`rip` = 0/8，全部来自机器契约；runtime 源内不
+/// 声明模块级常量（linkage 记录只登记 static）。
+///
+/// 按 uint 地址写入一个字；调用者保证地址落在已发布的可写保留区内。
+unsafe fn store_word(address: uint, value: uint) {
+    unsafe {
+        std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value)
+    }
+}
+
+/// 机器 rt0 自重定位后进入此函数；用户 main 始终在独立协程栈上运行。
+#[used]
+pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
+    unsafe {
+        #[allow(large_copy)]
+        let block = std.ptr.ptr_read[Rt0Params](params)
+        #[allow(large_copy)]
+        let payload = std.ptr.ptr_read[Rt0Payload](std.mem.transmute[uint, *Rt0Payload](block.payload_va + bias))
+        let address_bias = if block.reloc_count == 0 { bias } else { 0 }
+        let slot = payload.initial_slot + address_bias
+        let state = payload.runtime_state + address_bias
+        if payload.revision != 3 || slot != block.initial_slot + bias || state != block.runtime_state + bias || payload.stackmap_len < 72 || payload.unwind_len < 48 {
+            fatal_runtime()
+        }
+        // 唯一 main 协程预留 1 GiB 虚址，初始只提交 64 KiB；增长在同一虚址内提交新页，
+        // 因此活跃 StackInterior 指针无需搬迁，且未触及的页始终不可访问。
+        let reserve: uint = 1073741824
+        let capacity: uint = 65536
+        let stack_base = std.platform.reserve_aligned(reserve, uint(4096))
+        if stack_base == 0 || stack_base > uint(140737488355327) || stack_base > uint(140737488355327) - reserve {
+            fatal_runtime()
+        }
+        let stack_high = stack_base + reserve
+        let initial = StackRangeDescriptor { base: stack_high - capacity, bytes: capacity }
+        if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(initial))) != 0 {
+            fatal_runtime()
+        }
+        let cold = state + 128
+        store_word(state + 0, slot)
+        store_word(state + 32, cold)
+        store_word(state + 88, 0)
+        store_word(state + 96, block.processor + bias)
+        store_word(state + 104, 0)
+        store_word(state + 112, block.payload_va + bias)
+        store_word(state + 120, address_bias)
+        store_word(slot + 64, stack_high - capacity + 512)
+        store_word(slot + 72, stack_high - capacity)
+        store_word(slot + 80, stack_high)
+        store_word(slot + 88, capacity)
+        let stack_top = stack_high / 16 * 16
+        store_word(cold + 8, stack_top - 8)
+        store_word(cold + 16, payload.main_entry + address_bias)
+        store_word(stack_top - 8, payload.main_return + address_bias)
+        let system_context = std.mem.transmute[uint, *()](state + 40)
+        let main_context = std.mem.transmute[uint, *()](cold + 8)
+        let hot = std.mem.transmute[uint, *()](slot)
+        let processor = std.mem.transmute[uint, *()](block.processor + bias)
+        std.runtime.context_switch(system_context, main_context, hot, processor)
+        while word(state) != 0 {
+            let active_state = morestack_handle(payload.stackmap + address_bias, payload.stackmap_len, payload.fragment_base + address_bias, state, stack_base)
+            resume_main(active_state)
+        }
+
+        0
+    }
+}
+unsafe fn resume_main(state: uint) {
+    unsafe {
+        let main_context = word(state + 32) + 8
+        let main_slot = word(state)
+        let processor = word(state + 96)
+        std.runtime.context_restore(
+            std.mem.transmute[uint, *()](main_context),
+            std.mem.transmute[uint, *()](main_slot),
+            std.mem.transmute[uint, *()](processor),
+        )
+    }
+}
+
+#[repr(C)]
+struct StackRangeDescriptor { base: uint, bytes: uint }
+
+unsafe fn word(address: uint) uint {
+    unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) }
+}
+
+unsafe fn word32(address: uint) uint {
+    unsafe { uint(std.ptr.read_unaligned[u32](std.mem.transmute[uint, *u32](address))) & uint(4294967295) }
+}
+
+unsafe fn word16(address: uint) uint {
+    unsafe { uint(std.ptr.read_unaligned[u16](std.mem.transmute[uint, *u16](address))) & uint(65535) }
+}
+
+unsafe fn byte_at(address: uint) byte {
+    unsafe { std.ptr.ptr_read[byte](std.mem.transmute[uint, *byte](address)) }
+}
+
+unsafe fn fatal_runtime() {
+    unsafe {
+        let report = c"runtime fatal: invalid stack map or allocation\n"
+        _ = std.runtime.report_write(2, report, 47)
+        std.runtime.process_exit(2)
+    }
+}
+
+unsafe fn fatal_stack() {
+    unsafe {
+        let report = c"runtime fatal: stack overflow\n"
+        _ = std.runtime.report_write(2, report, 30)
+        std.runtime.process_exit(2)
+    }
+}
+
+/// 运行期只消费编译器验证过的封闭元数据；任何缺失或越界都属于 fatal，不转用户 panic。
+unsafe fn checked_safepoint(section: uint, length: uint, fragment_base: uint, return_pc: uint, kind: byte) {
+    unsafe {
+        if length < 72 || return_pc < fragment_base || word(section) != uint(0x31304d5355475547) || word32(section + 8) != uint(0x01080002) {
+            fatal_runtime()
+        }
+        let functions = word32(section + 12)
+        let safepoints = word32(section + 16)
+        let func_at = word(section + 32)
+        let point_at = word(section + 40)
+        if uint(functions) > length / 32 || uint(safepoints) > length / 12 || func_at > length - uint(functions) * 32 || point_at > length - uint(safepoints) * 12 {
+            fatal_runtime()
+        }
+        let pc = return_pc - fragment_base
+        let found = false
+        let index: uint = 0
+        while index < uint(functions) {
+            let record = section + func_at + index * 32
+            let start = word(record)
+            let size = uint(word32(record + 8))
+            if pc >= start && pc - start < size {
+                let first = uint(word32(record + 16))
+                let count = uint(word32(record + 20))
+                if first > uint(safepoints) || count > uint(safepoints) - first { fatal_runtime() }
+                let item: uint = first
+                while item < first + count {
+                    let point = section + point_at + item * 12
+                    if uint(word32(point)) == pc - start && byte_at(point + 8) == kind { found = true }
+                    item = item + 1
+                }
+            }
+            index = index + 1
+        }
+        if !found { fatal_runtime() }
+    }
+}
+
+/// 查验精确 MorestackEntry map 后扩大 main 协程已提交的栈区。
+unsafe fn morestack_handle(section: uint, length: uint, fragment_base: uint, state: uint, stack_base: uint) uint {
+    unsafe {
+        let slot = word(state)
+        let cold = word(state + 32)
+        let return_pc = word(cold + 64)
+        if slot == 0 || cold != state + 128 { fatal_runtime() }
+        checked_safepoint(section, length, fragment_base, return_pc, byte(4))
+        let high = word(slot + 80)
+        let old = word(slot + 88)
+        let rsp = word(state + 8)
+        let required = word(state + 24)
+        if old < 65536 || old > 1073741824 || high != stack_base + uint(1073741824) || rsp > high || rsp < high - old || required > uint(1073741824) - (high - rsp) - 512 {
+            fatal_stack()
+        }
+        let needed = high - rsp + required + 512
+        let next = old
+        while next < needed {
+            if next >= uint(1073741824) { fatal_stack() }
+            next = next * 2
+        }
+        if next == old { fatal_runtime() }
+        let addition = StackRangeDescriptor { base: high - next, bytes: next - old }
+        if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(addition))) != 0 { fatal_runtime() }
+        store_word(slot + 64, high - next + 512)
+        store_word(slot + 72, high - next)
+        store_word(slot + 88, next)
+        state
+    }
+}
+
+/// 原始字节指针的字节偏移：Gugu 不提供指针算术，统一经机器字换算。
+unsafe fn offset_byte(base: *byte, delta: uint) *byte {
+    unsafe { std.mem.transmute[uint, *byte](std.mem.transmute[*byte, uint](base) + delta) }
+}
+
+/// 按 JSON 字符串规则写出字节，并转义引号、反斜杠和控制字符。
+unsafe fn write_json_string(value: *byte, len: uint) {
+    unsafe {
+        let quote = [92, 34]
+        let slash = [92, 92]
+        let unicode = [92, 117, 48, 48]
+        let hex: [byte; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102]
+        let index: uint = 0
+        while index < len {
+            let byte = std.ptr.ptr_read[byte](offset_byte(value, index))
+            if byte == 34 {
+                _ = std.runtime.report_write(2, std.ptr.addr_of(quote[0]), 2)
+            } else if byte == 92 {
+                _ = std.runtime.report_write(2, std.ptr.addr_of(slash[0]), 2)
+            } else if byte < 32 {
+                let high = int(uint(byte) / uint(16))
+                let low = int(uint(byte) % uint(16))
+                _ = std.runtime.report_write(2, std.ptr.addr_of(unicode[0]), 4)
+                _ = std.runtime.report_write(2, std.ptr.addr_of(hex[high]), 1)
+                _ = std.runtime.report_write(2, std.ptr.addr_of(hex[low]), 1)
+            } else {
+                _ = std.runtime.report_write(2, offset_byte(value, index), 1)
+            }
+            index = index + 1
+        }
+    }
+}
+
+/// 按固定栈缓冲区写出无符号十进制数，不触发 runtime 分配。
+unsafe fn write_uint(value: uint) {
+    unsafe {
+        let digits: [byte; 10] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57]
+        let buffer: [byte; 20] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        let cursor: int = 20
+        let remaining: uint = value
+        while remaining != 0 || cursor == 20 {
+            cursor = cursor - 1
+            buffer[cursor] = digits[int(remaining % uint(10))]
+            remaining = remaining / uint(10)
+        }
+        _ = std.runtime.report_write(2, std.ptr.addr_of(buffer[cursor]), uint(20 - cursor))
+    }
+}
+
+/// 写两行 `gugu-runtime-report-v1`：panic 记录包含消息与原始位置，随后写 termination 记录。
+unsafe fn write_panic_report(message: *byte, len: uint, path: *byte, path_len: uint, line: uint, column: uint) {
+    unsafe {
+        let head = c"{\"schema\":\"gugu-runtime-report-v1\",\"event\":\"panic\",\"class\":\"program-failure\",\"reason\":\"unhandled-panic\",\"message\":\""
+        let middle = c"\",\"location\":{\"file\":\""
+        let line_key = c"\",\"line\":"
+        let column_key = c",\"column\":"
+        let tail = c"},\"backtrace\":[],\"exit_code\":1}"
+        let termination = c"{\"schema\":\"gugu-runtime-report-v1\",\"event\":\"termination\",\"class\":\"program-failure\",\"reason\":\"unhandled-panic\",\"message\":null,\"location\":null,\"backtrace\":[],\"exit_code\":1}"
+        let newline = c"\n"
+        _ = std.runtime.report_write(2, head, 115)
+        write_json_string(message, len)
+        _ = std.runtime.report_write(2, middle, 22)
+        write_json_string(path, path_len)
+        _ = std.runtime.report_write(2, line_key, 9)
+        write_uint(line)
+        _ = std.runtime.report_write(2, column_key, 10)
+        write_uint(column)
+        _ = std.runtime.report_write(2, tail, 31)
+        _ = std.runtime.report_write(2, newline, 1)
+        _ = std.runtime.report_write(2, termination, 170)
+        _ = std.runtime.report_write(2, newline, 1)
+    }
+}
+
+unsafe fn panic_landing(unwind: uint, length: uint, fragment_base: uint, return_pc: uint) uint {
+    unsafe {
+        if length < 48 || return_pc <= fragment_base || word(unwind) != uint(0x31304e5555475547) || word16(unwind + 8) != uint(1) || word(unwind + 36) != length { fatal_runtime() }
+        let functions = uint(word32(unwind + 12))
+        let landings = uint(word32(unwind + 16))
+        let start = word(unwind + 20)
+        let platform = word(unwind + 28)
+        if start < 48 || start > platform || platform > length || functions > (platform - start) / 32 || landings > (platform - start - functions * 32) / 16 { fatal_runtime() }
+        let site = return_pc - fragment_base - 1
+        let index: uint = 0
+        while index < functions {
+            let record = unwind + start + index * 32
+            let first_pc = word(record)
+            let code_size = uint(word32(record + 8))
+            if site >= first_pc && site - first_pc < code_size {
+                let first = uint(word32(record + 18))
+                let count = uint(word16(record + 22))
+                if first > landings || count > landings - first { fatal_runtime() }
+                let entry: uint = first
+                while entry < first + count {
+                    let landing = unwind + start + functions * 32 + entry * 16
+                    let lo = uint(word32(landing))
+                    let hi = uint(word32(landing + 4))
+                    let target = uint(word32(landing + 8))
+                    if site - first_pc >= lo && site - first_pc < hi {
+                        if target >= code_size || hi > code_size { fatal_runtime() }
+                        return fragment_base + first_pc + target
+                    }
+                    entry = entry + 1
+                }
+                fatal_runtime()
+            }
+            index = index + 1
+        }
+        fatal_runtime()
+        0
+    }
+}
+
+/// 只在预检过的安全点存下原始 panic 参数；清理完成后由 ResumePanic 报告。
+#[used]
+pub fn panic_dispatch(message: *byte, len: uint, path: *byte, path_len: uint, line: uint, column: uint, pc: uint, state: uint) uint {
+    unsafe {
+        if word(state + 104) != 0 { fatal_runtime() }
+        let payload = word(state + 112)
+        let bias = word(state + 120)
+        let section = word(payload + 48) + bias
+        let base = word(payload + 56) + bias
+        checked_safepoint(section, word(payload + 64), base, pc, byte(0))
+        let landing = panic_landing(word(payload + 72) + bias, word(payload + 80), base, pc)
+        store_word(state + 640, std.mem.transmute[*byte, uint](message))
+        store_word(state + 648, len)
+        store_word(state + 656, std.mem.transmute[*byte, uint](path))
+        store_word(state + 664, path_len)
+        store_word(state + 672, line)
+        store_word(state + 680, column)
+        store_word(state + 104, 1)
+        landing
+    }
+}
+
+/// 未捕获的 panic 由镜像 runtime 报告并结束，不允许从报告路径返回用户代码。
+#[used]
+pub fn panic_unwind(message: *byte, len: uint, path: *byte, path_len: uint, line: uint, column: uint) uint {
+    unsafe {
+        write_panic_report(message, len, path, path_len, line, column)
+        std.runtime.process_exit(1)
+        0
+    }
+}
+
+
+/// 非空 package 必经布局交叉校验。
+#[used]
+pub fn rt0_records(params: &Rt0Params, payload: &Rt0Payload) uint {
+    params.rt0_start + params.payload_va + params.initial_slot + payload.main_entry + payload.bias + payload.main_return
+}

@@ -343,7 +343,8 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 当前 compiler 在 **冻结后的 generic GIR body** 上运行分析：每个 callable owner 使用
 `BuildGenericGir` 已验证的显式 CFG，在程序点传播 `AbstractState`（可达、区间、稀疏差约束、
 初始化、别名类、memory version、效果）。抽象槽仍按 HIR local/表达式编号索引，GIR 临时值
-经 `expression_locals` 与 `hir_local` 映射。循环 header 回边 widening，固定点后以重新合并
+经 `expression_locals` 与 `hir_local` 映射。关系事实按 `Relation` 的规范序在 `Vec` 中保持有序且不重复；
+新增和合流成员检查使用二分查找，禁止在线性 `contains` 上退化。循环 header 回边 widening，固定点后以重新合并
 全部前驱的同步迭代执行 narrowing；每轮保持健全后固定点，精度迭代受同一块预算约束。
 
 管线顺序为 `LowerHir`（schema **5**，只构造、校验并冻结）→ `BuildGenericGir` →

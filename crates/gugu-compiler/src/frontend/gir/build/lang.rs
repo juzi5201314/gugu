@@ -313,6 +313,54 @@ impl Builder<'_> {
     }
 }
 
+/// 把 runtime 机器原语降级为 `StatementKind::RuntimeMachineCall`。
+///
+/// 实参按源码顺序求值并保留为 operands；返回值按 `types` 中的结果类型建立临时位置（只有
+/// `current_slot`/`report_write` 返回机器字）。机器原语一律禁止进入 `NoSafepointRegion`。
+impl Builder<'_> {
+    pub(super) fn emit_runtime_machine_call(
+        &mut self,
+        id: ExprId,
+        op: crate::runtime::RuntimeMachineOp,
+        arguments: Range<u32>,
+        types: Vec<TypeId>,
+    ) -> Result<Option<LocalId>, Diagnostic> {
+        let mut operands = Vec::new();
+        for argument in expr_range(self.owner, &arguments) {
+            let Some(local) = self.emit_expr(argument)? else {
+                return Ok(None);
+            };
+            operands.push(copy_of(local));
+        }
+        self.emit_check_ops(id)?;
+        let destination = match types.first() {
+            Some(&ty) if !matches!(self.module.types[ty.index()], hir::Type::Unit) => {
+                let dest = self.temp(ty);
+                Some(Place::local(dest))
+            }
+            _ => None,
+        };
+        self.push_stmt(StatementKind::RuntimeMachineCall {
+            op,
+            operands,
+            destination,
+        });
+        match destination {
+            Some(place) => {
+                let dest = place.local;
+                self.set_value(id, dest);
+                Ok(Some(dest))
+            }
+            None => {
+                let dest = self.temp(self.expr_ty(id));
+                self.assign_unit(dest);
+                self.set_value(id, dest);
+                Ok(Some(dest))
+            }
+        }
+    }
+}
+
 fn operand_place(builder: &mut Builder<'_>, operand: Option<&Operand>) -> Place {
     match operand {
         Some(Operand::Copy(place) | Operand::MoveInternal(place)) => *place,

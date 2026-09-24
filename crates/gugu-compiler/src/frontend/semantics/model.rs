@@ -14,6 +14,7 @@ pub(super) use super::comptime::eval::ConstantValue;
 pub(crate) use lang::MemoryIntrinsic;
 pub(crate) use lang::PlatformIntrinsic;
 pub(crate) use lang::RuntimeIntrinsic;
+pub(crate) use lang::RuntimeMachineIntrinsic;
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Ty {
     Error,

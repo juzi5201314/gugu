@@ -1,6 +1,6 @@
 use super::*;
 use crate::frontend::semantics::{
-    model::{MemoryIntrinsic, PlatformIntrinsic},
+    model::{MemoryIntrinsic, PlatformIntrinsic, RuntimeMachineIntrinsic},
     output::ReflectionKind,
 };
 
@@ -17,6 +17,18 @@ fn platform_effects(kind: PlatformIntrinsic) -> u32 {
         bits |= hir::Effects::WRITE;
     } else {
         bits |= hir::Effects::READ;
+    }
+    hir::Effects::new(bits).0
+}
+
+/// runtime 机器原语在 HIR 的效果集合。
+///
+/// 每个原语都跨越 runtime 机器边界，必然带 `UNSAFE` 与 `FOREIGN`；`report_write` 写文件描述符，
+/// 额外带 `WRITE`。它们都在登记片段内部完成控制转移与阻塞，不进入挂起协议，因此不带 `SUSPEND`。
+fn runtime_machine_effects(kind: RuntimeMachineIntrinsic) -> u32 {
+    let mut bits = hir::Effects::UNSAFE | hir::Effects::FOREIGN;
+    if matches!(kind, RuntimeMachineIntrinsic::ReportWrite) {
+        bits |= hir::Effects::WRITE;
     }
     hir::Effects::new(bits).0
 }
@@ -142,6 +154,30 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     field: None,
                 },
                 platform_effects(operation.kind),
+            ));
+        }
+        if let Some(operation) = self
+            .facts
+            .body
+            .runtime_machine_operations
+            .iter()
+            .find(|operation| operation.expression == callee)
+        {
+            // runtime 机器原语的实参已经由 checker 定型；这里只按顺序降级，保持求值顺序。
+            let mut arguments = Vec::with_capacity(operation.arguments.len());
+            for &argument in &operation.arguments {
+                arguments.push(self.expression(argument)?);
+            }
+            let types = vec![self.type_id(&operation.ty)?];
+            self.expression_map[usize::try_from(callee.0).expect("表达式下标")] = Some(id);
+            return Ok((
+                hir::ExprKind::Intrinsic {
+                    operation: hir::Builtin::RuntimeMachine(operation.kind),
+                    arguments: self.expression_list(arguments)?,
+                    types,
+                    field: None,
+                },
+                runtime_machine_effects(operation.kind),
             ));
         }
         if let Some(reflection) = self

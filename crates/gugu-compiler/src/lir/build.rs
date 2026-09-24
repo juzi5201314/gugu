@@ -56,6 +56,7 @@ struct Builder<'a> {
     concrete: &'a ConcreteBody,
     gir: &'a GirBody,
     module: &'a hir::Module,
+    sources: &'a crate::SourceMap,
     world: &'a gir::GirWorldV1,
     mono: &'a mono::MonoWorldV1,
     instance: &'a InstanceSummaryV1,
@@ -113,6 +114,7 @@ pub(crate) fn lower(
     target: &str,
     input_fingerprint: [u8; 32],
     compression: crate::runtime::CompressionPolicyV1,
+    sources: &crate::SourceMap,
 ) -> Result<Body, Diagnostic> {
     concrete.verify()?;
     let instance = mono
@@ -132,6 +134,7 @@ pub(crate) fn lower(
         concrete,
         gir: &concrete.body,
         module,
+        sources,
         world,
         mono,
         instance,

@@ -33,6 +33,21 @@ pub(crate) fn collect(
         ids.extend(owner.expression_types.iter().copied());
         ids.extend(owner.expression_inputs.iter().copied());
         ids.extend(owner.locals.iter().map(|local| local.ty));
+        if !owner.checks.is_empty()
+            || owner.expressions.iter().any(|expression| {
+                expression.effects.0 & (hir::Effects::PANIC | hir::Effects::SUSPEND) != 0
+            })
+        {
+            let string = context
+                .module
+                .types
+                .iter()
+                .position(|ty| matches!(ty, hir::Type::String))
+                .expect("HIR 基础类型表包含 String");
+            ids.insert(hir::TypeId(
+                u32::try_from(string).expect("类型编号不超过 u32"),
+            ));
+        }
         for expression in &owner.expressions {
             if let hir::ExprKind::Intrinsic { types, .. } = &expression.kind {
                 ids.extend(types);

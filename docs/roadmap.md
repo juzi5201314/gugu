@@ -435,7 +435,7 @@
   - 验收证据：`fmt_tests` 覆盖符号/`#`/零填充/进制/对齐、浮点 precision 与科学计数与 `inf`/`NaN`、文本截断与转义、结构化 debug 的紧凑与 `#?` 形态、负动态计数。`comptime_fstrings_apply_static_format_codes` 断言 `f"{255:#06x}"`、`f"{5:b}"`、`f"{1.5:+.2}"`、`f"{1234.5:.1e}"`、`>4` 对齐、数组 `?`、元组 `#?`、string 截断与用户函数里的 `n$` 都在编译期求成常量；`comptime_format_faults_are_diagnostics` 覆盖负计数 `ComptimePanic`、`{true:+}`、`{1:.2}`、string `#`、浮点 `#` 被拒与合法组合被接受。`hash_tests` 覆盖前缀无关馈送、XXH3 已知答案与持久性、默认/安全族随熵变化且互不相同、稳定键相等值同 hash、string 按字节而非规范等价。`collections_tests` 覆盖共享句柄与语义副本、Entry、view 内写入 panic 与 view 后恢复、快照封存与分离、有序表键序 vs 哈希表随 seed 变化的实现序、SmallMap 内联/溢出、Set；`collection_views_and_handle_copies_lower_in_generic_gir` 断言 `peek` / `walk` 含 `ScopedViewBegin ScopedRead` 与两处 `ScopedViewEnd`、`share` 是句柄 `copy` 而非 `cow_snapshot`；`std_collections_are_importable_and_require_stable_keys` 断言 `use std.collections.{HashMap, BTreeMap}` 可调用 `with_ref` / `for_each_ref`、缺 `StableHash` 的键没有方法、`unsafe impl StableHash` 后可用、用户声明 `HashMap` 仍失败。`cargo nextest run --workspace` 1078 项全通过。
 
 
-- [ ] **阶段 61a：把 rt0 后半段与栈增长落成镜像内 Gugu runtime**（复杂度：3）
+- [x] **阶段 61a：把 rt0 后半段与栈增长落成镜像内 Gugu runtime**（复杂度：3）
   - 依赖：阶段 33、34、38、55、56、57。
   - 用已登记的协程布局与换栈片段实现镜像内 rt0 后半段：建立 main 协程、接入 context switch、实现 `morestack_or_poll` 与栈增长；panic 走栈图 landing，不再进入 `exit` stub。
   - 验收：hello 与会 panic 的程序由镜像内 runtime 完成启动、换栈和退出；缺 map 或栈上限失败仍是不可捕获 fatal。本阶段结束时删除 Rust 参照模型里「跑 main」的执行体，只保留 schema 与布局交叉校验。

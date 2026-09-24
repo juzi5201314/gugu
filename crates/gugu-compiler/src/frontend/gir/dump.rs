@@ -149,6 +149,23 @@ fn statement_text(module: &hir::Module, body: &GirBody, statement: &Statement) -
                 .unwrap_or_default();
             format!("PlatformCall {op}({}){destination}", arguments.join(", "))
         }
+        StatementKind::RuntimeMachineCall {
+            op,
+            operands,
+            destination,
+        } => {
+            let arguments: Vec<String> = operands
+                .iter()
+                .map(|operand| operand_text(module, body, operand))
+                .collect();
+            let destination = destination
+                .map(|place| format!(" -> {}", place_text(module, body, place)))
+                .unwrap_or_default();
+            format!(
+                "RuntimeMachineCall {op}({}){destination}",
+                arguments.join(", ")
+            )
+        }
         StatementKind::SafepointPoll(id) => format!("SafepointPoll({})", id.0),
         StatementKind::Nop => "Nop".to_owned(),
         StatementKind::ValueAction {

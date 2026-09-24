@@ -117,7 +117,7 @@ Running -> Dead
 
 ### context
 
-x86_64 `CoroutineContext` 保存 `rsp`、resume `rip`、`rbx`、`rbp`、`r12` 和 `r13`。`r14` 固定重建为当前 `Coroutine*`，`r15` 在绑定后重建为当前 `LogicalProcessor*`。普通 suspend/call safepoint 已按[栈图](stack-maps.md)spill 用户 pointer，XMM 和 caller-saved register 不属于持久 context。
+x86_64 `CoroutineContext` 保存 `rsp`、resume `rip`、`rbx`、`rbp`、`r12` 和 `r13`。`r14` 固定重建为当前 `Coroutine*`，`r15` 在绑定后重建为当前 `LogicalProcessor*`。`std.runtime.current_slot()` 的无参 machine intrinsic 以 `rax` 返回该 `r14` 句柄，不分配或切换上下文；runtime 源码用它访问当前协程槽。普通 suspend/call safepoint 已按[栈图](stack-maps.md)spill 用户 pointer，XMM 和 caller-saved register 不属于持久 context。
 
 抢占 poll 若要扫描寄存器，slow path 先保存栈图编号中的全部通用寄存器；恢复前再装载。context 的发布使用 release，接手 worker acquire 后才能读取 stack bounds、resume PC 和保存寄存器。
 
@@ -162,7 +162,7 @@ ProcessorOwnership {
 }
 ```
 
-`LogicalProcessor` 按 `poll`、`ownership`、local deque的 thief-visible head、owner tail、slots、remote heads、stack cache、TLAB 和 TurnRegion 的顺序布局。`processor::LogicalProcessorPrefix` 是这份热前缀的布局神谕：`poll` 在 0、`ownership` 在 64、`local_head` 在 128、`local_tail` 在 256、`slots` 在 384（256 个指针）、`remote` 在 2432（8×128）、`stack_cache` 在 3456、`tlab` 在 3520、`turn_region` 在 3536。构建时必须断言两个控制块的 `size_of == align_of == 64`，且 `offset_of!(LogicalProcessorPrefix, poll)` 与 `offset_of!(LogicalProcessorPrefix, ownership)` 都是64的倍数并相差至少64。`SchedulerRuntimeContract` schema 2 发布 `poll_flags_offset`（0）、`ownership_offset`（64）、`tlab_cursor_offset`（3520）、`tlab_limit_offset`（3528）、`turn_region_cursor_offset`（3536）与 `turn_region_limit_offset`（3544）；backend 只消费契约里的 `offset_of!` 结果，禁止手写第二份数字。写屏障 `CardMarkBuffer` 不进入此前缀。`PollControl` 只与同一次 preempt/GC handshake相关的低频写共享 line；scheduler state、owner、current coroutine、run timestamp、queue、stack cache、TLAB和 monitor字段不能落入该 line。
+`LogicalProcessor` 按 `poll`、`ownership`、local deque的 thief-visible head、owner tail、slots、remote heads、stack cache、TLAB 和 TurnRegion 的顺序布局。`processor::LogicalProcessorPrefix` 是这份热前缀的布局神谕：`poll` 在 0、`ownership` 在 64、`local_head` 在 128、`local_tail` 在 256、`slots` 在 384（256 个指针）、`remote` 在 2432（8×128）、`stack_cache` 在 3456、`tlab` 在 3520、`turn_region` 在 3536。静态镜像的 processor 首条 64-byte cache line 在启动时全零，保证 `poll_flags`、`requested_gc_epoch` 和 `ack_gc_epoch` 初始为 0；其余尚未构造的 processor 前缀保持 poison 值，不能在启动路径被读取。构建时必须断言两个控制块的 `size_of == align_of == 64`，且 `offset_of!(LogicalProcessorPrefix, poll)` 与 `offset_of!(LogicalProcessorPrefix, ownership)` 都是64的倍数并相差至少64。`SchedulerRuntimeContract` schema 2 发布 `poll_flags_offset`（0）、`ownership_offset`（64）、`tlab_cursor_offset`（3520）、`tlab_limit_offset`（3528）、`turn_region_cursor_offset`（3536）与 `turn_region_limit_offset`（3544）；backend 只消费契约里的 `offset_of!` 结果，禁止手写第二份数字。写屏障 `CardMarkBuffer` 不进入此前缀。`PollControl` 只与同一次 preempt/GC handshake相关的低频写共享 line；scheduler state、owner、current coroutine、run timestamp、queue、stack cache、TLAB和 monitor字段不能落入该 line。
 
 ### batch inbox 与 injection
 

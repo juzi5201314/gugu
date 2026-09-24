@@ -59,6 +59,71 @@ impl RuntimeIntrinsic {
     }
 }
 
+/// runtime 机器 intrinsic：镜像内 Gugu runtime 与登记机器片段之间的固定机器边界。
+///
+/// 与 publish 原语同一 `std.runtime.` 命名空间，但形状完全不同：每个操作的实参与结果都由
+/// 登记机器片段的固定内部边界决定，操作名即 runtime glue 名（`mangle::mangle_runtime` 的
+/// 输入）。按规范路径识别，导入别名和再导出保留同一身份，也不能取地址。全部调用都必须在
+/// `unsafe` 块内：寄存器边界、栈布局与控制转移的前置条件由调用方维护，编译器不能证明它们。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum RuntimeMachineIntrinsic {
+    ContextSwitch,
+    ContextRestore,
+    CurrentSlot,
+    ProcessExit,
+    ReportWrite,
+}
+
+impl RuntimeMachineIntrinsic {
+    /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
+    pub(crate) const ALL: [Self; 5] = [
+        Self::ContextSwitch,
+        Self::ContextRestore,
+        Self::CurrentSlot,
+        Self::ProcessExit,
+        Self::ReportWrite,
+    ];
+
+    /// 按规范路径识别 runtime 机器原语；导入别名与再导出保留同一身份。
+    pub(in super::super) fn from_path(path: &str) -> Option<Self> {
+        let name = path.strip_prefix("std.runtime.")?;
+        Self::ALL.into_iter().find(|kind| kind.name() == name)
+    }
+
+    /// 操作名（即 runtime glue 名）；诊断与 dump 使用它。
+    pub(crate) const fn name(self) -> &'static str {
+        match self {
+            Self::ContextSwitch => "context_switch",
+            Self::ContextRestore => "context_restore",
+            Self::CurrentSlot => "current_slot",
+            Self::ProcessExit => "process_exit",
+            Self::ReportWrite => "report_write",
+        }
+    }
+
+    /// 返回该原语的值实参数量。
+    pub(crate) const fn value_arguments(self) -> usize {
+        match self {
+            Self::ContextSwitch => 4,
+            Self::ContextRestore => 3,
+            Self::CurrentSlot => 0,
+            Self::ProcessExit => 1,
+            Self::ReportWrite => 3,
+        }
+    }
+
+    /// 判断该原语的返回类型是否是机器字 `uint`；其余不返回值。
+    pub(crate) const fn yields_word(self) -> bool {
+        matches!(self, Self::CurrentSlot | Self::ReportWrite)
+    }
+}
+
+impl std::fmt::Display for RuntimeMachineIntrinsic {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.name())
+    }
+}
+
 /// 平台范围原语的固定操作集合；与 `PlatformRangeSchemaV1` 的操作目录一一对应。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum PlatformIntrinsic {
@@ -139,14 +204,13 @@ impl PlatformIntrinsic {
         }
     }
 
-    /// 判断该原语的返回类型是否是平台 range 编号。
+    /// 需要向 runtime 返回的机器字：reserve 返回基址、commit 返回平台状态，wake 返回计数。
     pub(crate) const fn yields_range(self) -> bool {
         matches!(self, Self::ReserveAligned)
     }
 
-    /// 判断该原语的返回类型是否是唤醒的等待者数量。
     pub(crate) const fn yields_count(self) -> bool {
-        matches!(self, Self::Wake)
+        matches!(self, Self::Commit | Self::Wake)
     }
 
     /// 判断该原语的返回类型是否是 `bool`。

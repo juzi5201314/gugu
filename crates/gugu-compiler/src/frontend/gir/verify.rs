@@ -405,6 +405,12 @@ fn walk_regions(
             StatementKind::PlatformCall { .. } if !open.is_empty() => {
                 return Err(gir_error("NoSafepointRegion 内不能调用平台范围原语", None));
             }
+            StatementKind::RuntimeMachineCall { .. } if !open.is_empty() => {
+                return Err(gir_error(
+                    "NoSafepointRegion 内不能调用 runtime 机器原语",
+                    None,
+                ));
+            }
             StatementKind::NoSafepointBegin(id) => {
                 if id.index() >= body.no_safepoint_regions.len() {
                     return Err(gir_error("NoSafepointRegion 越界", None));

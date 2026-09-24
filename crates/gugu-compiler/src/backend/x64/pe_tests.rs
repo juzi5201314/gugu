@@ -1,6 +1,6 @@
 use super::pe::{
     ObjectReloc, ObjectSymbol, PeRequest, RelocKindCode, extract_coff_archive, link,
-    pack_coff_archive, reject_writable_executable,
+    link_with_layout, pack_coff_archive, reject_writable_executable,
 };
 use crate::{CompileRequest, Compiler, TargetName};
 
@@ -9,6 +9,7 @@ fn symbol(name: &str, bytes: Vec<u8>, relocs: Vec<ObjectReloc>) -> ObjectSymbol 
         name: name.to_owned(),
         bytes,
         relocs,
+        aliases: Vec::new(),
     }
 }
 
@@ -17,7 +18,9 @@ fn request(entry: &str, symbols: Vec<ObjectSymbol>) -> PeRequest {
         entry: entry.to_owned(),
         symbols,
         readonly: vec![(".gugustk".to_owned(), b"GUGUSM01".to_vec())],
+        constants: Vec::new(),
         dll: false,
+        bound_glues: std::collections::BTreeSet::new(),
     }
 }
 
@@ -124,6 +127,84 @@ fn file_offset(bytes: &[u8], rva: u32) -> usize {
         }
     }
     panic!("RVA {rva:#x} 不在任何节内");
+}
+
+/// PE 节表里覆盖该 RVA 的节是否可写（`IMAGE_SCN_MEM_WRITE`）。
+fn writable_section(bytes: &[u8], rva: u64) -> bool {
+    let lfanew =
+        usize::try_from(u32::from_le_bytes(bytes[0x3c..0x40].try_into().unwrap())).unwrap();
+    let count = usize::from(u16::from_le_bytes(
+        bytes[lfanew + 6..lfanew + 8].try_into().unwrap(),
+    ));
+    let optional = usize::from(u16::from_le_bytes(
+        bytes[lfanew + 20..lfanew + 22].try_into().unwrap(),
+    ));
+    let table = lfanew + 24 + optional;
+    (0..count).any(|index| {
+        let at = table + index * 40;
+        let size = u64::from(u32::from_le_bytes(
+            bytes[at + 8..at + 12].try_into().unwrap(),
+        ));
+        let va = u64::from(u32::from_le_bytes(
+            bytes[at + 12..at + 16].try_into().unwrap(),
+        ));
+        let flags = u32::from_le_bytes(bytes[at + 36..at + 40].try_into().unwrap());
+        (va..va + size.max(1)).contains(&rva) && flags & 0x8000_0000 != 0
+    })
+}
+
+/// 参数块与保留可写区契约：与 ELF 侧共用同一份 `rt0_params`/`Rt0Payload`；PE 没有自举重定位，
+/// 参数与载荷里的地址都是 RVA，加载基址由入口 stub 写进载荷的 bias 字段。
+#[test]
+fn runtime_entry_keeps_param_block_and_writable_reserved_region() {
+    use crate::runtime::entry::{Rt0Payload, rt0_params};
+    let (image, defined) = link_with_layout(&request(
+        "main",
+        vec![symbol("main", vec![0xc3], Vec::new())],
+    ))
+    .expect("exe 可写出");
+    // `defined` 里 `.text` 符号是节内偏移；`.text` 的 RVA 就是入口 RVA。
+    let params = u64::from(image.entry_rva) + defined["__gugu_rt0_params"];
+    let word = |index: usize| {
+        let at = file_offset(
+            &image.bytes,
+            u32::try_from(params + index as u64 * 8).expect("参数块 RVA"),
+        );
+        u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("参数块 word"))
+    };
+    assert_eq!(rt0_params::WORDS, 16);
+    assert_eq!(
+        word(rt0_params::RT0_START),
+        0,
+        "未绑定 rt0_start 时留 0 走过渡路径"
+    );
+    assert_eq!(word(rt0_params::ENTRY), defined["main"]);
+    let payload = word(rt0_params::PAYLOAD_VA);
+    assert_eq!(payload, defined["__gugu_rt0_payload"]);
+    assert_eq!(word(rt0_params::PAYLOAD_LEN), Rt0Payload::bytes());
+    let slot = word(rt0_params::INITIAL_SLOT);
+    let state = word(rt0_params::RUNTIME_STATE);
+    assert_eq!(slot, defined["__gugu_initial_slot"]);
+    assert_eq!(state, defined["__gugu_runtime_state"]);
+    assert_eq!(slot % 64, 0, "初始协程槽按 64 对齐");
+    assert_eq!(state % 8, 0, "runtime 状态区按 8 对齐");
+    let payload_at = file_offset(&image.bytes, u32::try_from(payload).expect("载荷 RVA"));
+    let payload_word = |offset: usize| {
+        u64::from_le_bytes(
+            image.bytes[payload_at + offset..payload_at + offset + 8]
+                .try_into()
+                .expect("载荷 word"),
+        )
+    };
+    assert_eq!(payload_word(0), Rt0Payload::REVISION, "载荷版本");
+    assert_eq!(payload_word(8), defined["main"], "载荷的 main 入口");
+    assert_eq!(payload_word(16), slot);
+    assert_eq!(payload_word(24), state);
+    assert_eq!(payload_word(32), 0, "加载基址由入口 stub 写回");
+    assert!(
+        writable_section(&image.bytes, payload),
+        "保留区必须落在可写节：runtime 要在其中发布 mailbox 与初始槽"
+    );
 }
 
 #[test]

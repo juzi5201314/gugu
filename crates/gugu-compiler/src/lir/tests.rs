@@ -118,6 +118,62 @@ fn resource_body(compilation: &Compilation) -> Body {
 }
 
 #[test]
+fn panic_invoke_carries_original_source_location() {
+    let compilation = compile("fn main() {\n    panic(\"boom\")\n}");
+    let body = named(&compilation, "main");
+    let panic = body
+        .blocks
+        .iter()
+        .find_map(|block| {
+            let Terminator::Invoke {
+                call, arguments, ..
+            } = &block.terminator
+            else {
+                return None;
+            };
+            matches!(
+                call.target,
+                body::CallTarget::Runtime(body::RuntimeCall::Panic)
+            )
+            .then_some((call, body.args(arguments)))
+        })
+        .expect("panic 必须调用 runtime glue");
+    let (call, arguments) = panic;
+    assert_eq!(call.parameters.len(), 6);
+    assert_eq!(call.results, [ValueType::scalar(Type::I64)]);
+    assert!(body.data.iter().any(|data| data.bytes == b"main.gg"));
+    let constants: Vec<_> = arguments[3..]
+        .iter()
+        .filter_map(|value| {
+            let body::Definition::Instruction { instruction, .. } =
+                body.values[value.index()].definition
+            else {
+                return None;
+            };
+            match body.instructions[instruction.index()].op {
+                Op::IConst(value) => Some(value),
+                _ => None,
+            }
+        })
+        .collect();
+    assert_eq!(constants, [7, 2, 5]);
+}
+
+#[test]
+fn panic_integer_report_buffer_avoids_value_repeat_runtime_call() {
+    let compilation = compile("fn main() {\n    panic(\"boom\")\n}");
+    let body = named(&compilation, "write_uint");
+    assert!(!body.instructions.iter().any(|instruction| matches!(
+        &instruction.op,
+        Op::Call(call)
+            if matches!(
+                call.target,
+                body::CallTarget::Runtime(body::RuntimeCall::ValueRepeat)
+            )
+    )));
+}
+
+#[test]
 fn block_parameters_preserve_branch_and_loop_values() {
     let compilation = compile(SSA);
     let body = named(&compilation, "choose");
@@ -1786,3 +1842,32 @@ fn guard_members(body: &Body) -> Vec<(Option<u32>, &crate::lir::body::Instructio
 ///
 /// 源码与 runtime harness/bench 共用同一个夹具文件，因此 LIR 需求与真实推导不会各自漂移。
 const SHARED_SENDER: &str = include_str!("../runtime/fixtures/shared_sender.gg");
+
+#[test]
+fn runtime_machine_calls_enter_lir_with_glue_shape() {
+    let compilation = compile(
+        "fn main() { unsafe { let code: uint = 0\n std.runtime.process_exit(code)\n _ = std.runtime.current_slot() } }",
+    );
+    let body = named(&compilation, "main");
+    assert!(body.instructions.iter().any(|instruction| matches!(
+        instruction.op,
+        Op::RuntimeMachineCall(crate::runtime::RuntimeMachineOp::ProcessExit)
+    )));
+    assert!(body.instructions.iter().any(|instruction| matches!(
+        instruction.op,
+        Op::RuntimeMachineCall(crate::runtime::RuntimeMachineOp::CurrentSlot)
+    )));
+
+    let compilation = compile(
+        "use std.ptr\nfn main() { let value: uint = 0\n unsafe { let p = ptr.addr_of(value)\n std.runtime.context_switch(p, p, p, p)\n std.runtime.context_restore(p, p, p) } }",
+    );
+    let body = named(&compilation, "main");
+    assert!(body.instructions.iter().any(|instruction| matches!(
+        instruction.op,
+        Op::RuntimeMachineCall(crate::runtime::RuntimeMachineOp::ContextSwitch)
+    )));
+    assert!(body.instructions.iter().any(|instruction| matches!(
+        instruction.op,
+        Op::RuntimeMachineCall(crate::runtime::RuntimeMachineOp::ContextRestore)
+    )));
+}

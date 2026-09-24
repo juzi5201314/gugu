@@ -34,33 +34,84 @@ pub(super) fn lower(
         | Op::ScopedViewEnd { .. }
         | Op::NoSafepointBegin(_)
         | Op::NoSafepointEnd(_) => Ok(()),
-        Op::PlatformCall(op) => runtime_named(builder, &format!("platform_{}", op.name())),
-        Op::RegionPublish { .. } => runtime_named(builder, "gc_region_publish"),
-        Op::RegionReset { .. } => runtime_named(builder, "gc_region_reset"),
-        Op::PromoteManaged { .. } => runtime_named(builder, "gc_region_promote"),
-        Op::RegionTransfer { .. } => runtime_named(builder, "gc_region_transfer"),
-        Op::MarkTicketBatch => runtime_named(builder, "gc_mark_ticket_batch"),
-        Op::EdgeDeltaBatch => runtime_named(builder, "gc_edge_delta_batch"),
-        Op::ResolveSharedHandle => runtime_named(builder, "gc_resolve_shared_handle"),
-        Op::SharedAccessBegin { .. } => runtime_named(builder, "gc_shared_access_begin"),
-        Op::SharedAccessEnd { .. } => runtime_named(builder, "gc_shared_access_end"),
+        Op::PlatformCall(op) => runtime_named(
+            operands,
+            results,
+            builder,
+            &format!("platform_{}", op.name()),
+        ),
+        Op::RuntimeMachineCall(op) => runtime_named(operands, results, builder, op.name()),
+        Op::RegionPublish { .. } => runtime_named(operands, results, builder, "gc_region_publish"),
+        Op::RegionReset { .. } => runtime_named(operands, results, builder, "gc_region_reset"),
+        Op::PromoteManaged { .. } => runtime_named(operands, results, builder, "gc_region_promote"),
+        Op::RegionTransfer { .. } => {
+            runtime_named(operands, results, builder, "gc_region_transfer")
+        }
+        Op::MarkTicketBatch => runtime_named(operands, results, builder, "gc_mark_ticket_batch"),
+        Op::EdgeDeltaBatch => runtime_named(operands, results, builder, "gc_edge_delta_batch"),
+        Op::ResolveSharedHandle => {
+            runtime_named(operands, results, builder, "gc_resolve_shared_handle")
+        }
+        Op::SharedAccessBegin { .. } => {
+            runtime_named(operands, results, builder, "gc_shared_access_begin")
+        }
+        Op::SharedAccessEnd { .. } => {
+            runtime_named(operands, results, builder, "gc_shared_access_end")
+        }
         Op::SharedFieldBarrier { .. } | Op::SharedFieldBarrierReserved { .. } => {
-            runtime_named(builder, "gc_shared_field_barrier")
+            runtime_named(operands, results, builder, "gc_shared_field_barrier")
         }
-        Op::ForwardSharedHandle => runtime_named(builder, "gc_forward_shared_handle"),
+        Op::ForwardSharedHandle => {
+            runtime_named(operands, results, builder, "gc_forward_shared_handle")
+        }
         Op::GcWriteBarrier { .. } | Op::GcWriteBarrierReserved { .. } => {
-            runtime_named(builder, "gc_write_barrier")
+            runtime_named(operands, results, builder, "gc_write_barrier")
         }
-        Op::Park => runtime_named(builder, "sched_park"),
-        Op::Ready => runtime_named(builder, "sched_ready"),
+        Op::Park => runtime_named(operands, results, builder, "sched_park"),
+        Op::Ready => runtime_named(operands, results, builder, "sched_ready"),
         Op::Call(call) => emit_call(call, operands, results, ctx, builder),
         Op::ForeignCall(call) => emit_call(call, operands, results, ctx, builder),
         _ => Err(LoweringError::InvalidOperands),
     }
 }
 
-fn runtime_named(builder: &mut Builder, name: &str) -> Result<(), LoweringError> {
-    emit_symbol_call(builder, mangle::runtime_symbol(name))
+/// op 形式的 runtime/glue 调用：这些 op 不走 `Call` 的 ABI 落位，必须在发出调用前按内部 ABI 的
+/// 实参寄存器顺序（`INTERNAL_INTEGER`）把操作数搬进参数寄存器；否则被调片段只拿到碰巧落在首个
+/// 参数寄存器里的那个操作数，其余参数保持调用点的残留值。
+fn runtime_named(
+    operands: &[SiteValue],
+    results: &[SiteValue],
+    builder: &mut Builder,
+    name: &str,
+) -> Result<(), LoweringError> {
+    if operands.len() > abi::INTERNAL_INTEGER.len() {
+        return Err(LoweringError::InvalidOperands);
+    }
+    let pairs: Vec<Copy> = operands
+        .iter()
+        .enumerate()
+        .map(|(index, operand)| Copy {
+            src: operand.reg,
+            dest: Reg::Gpr(abi::INTERNAL_INTEGER[index]),
+            ty: operand.ty.ty,
+        })
+        .collect();
+    builder.record_group(&pairs, |builder| {
+        for (index, operand) in operands.iter().enumerate() {
+            value_move(
+                builder,
+                operand.reg,
+                Reg::Gpr(abi::INTERNAL_INTEGER[index]),
+                operand.ty.ty,
+            )?;
+        }
+        Ok(())
+    })?;
+    emit_symbol_call(builder, mangle::runtime_symbol(name))?;
+    for (result, register) in results.iter().zip([Gpr::Rax, Gpr::Rbx]) {
+        value_move(builder, Reg::Gpr(register), result.reg, result.ty.ty)?;
+    }
+    Ok(())
 }
 
 /// 站点调用 lowering：分类 → 实参落位 → 目标 → 返回值回收。

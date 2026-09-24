@@ -19,7 +19,7 @@ use super::table;
 /// 编码器契约 schema 版本。
 pub(crate) const ENCODER_SCHEMA: u32 = 2;
 /// 描述符表与编码规则 revision。
-pub(crate) const ENCODER_REVISION: u32 = 2;
+pub(crate) const ENCODER_REVISION: u32 = 3;
 /// lowering 规则 revision。
 /// 阶段 54 起：`StackCheck` 降级为标记、`StackAddr` 用 frame 占位基址、成组搬运走拷贝组。
 pub(crate) const LOWERING_REVISION: u32 = 3;

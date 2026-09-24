@@ -2,8 +2,8 @@ use super::values::Computed;
 use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::frontend::{gir::body as g, mono};
 use crate::lir::body::{
-    BlockId, Call, CallTarget, Condition, Definition, IntOp, Memory, Op, Origin, RuntimeCall,
-    Safepoint, SafepointId, Terminator, Type, ValueId, ValueType, id,
+    BlockId, Call, CallTarget, Condition, Definition, IntOp, Memory, Op, Origin, Provenance,
+    RuntimeCall, Safepoint, SafepointId, Terminator, Type, ValueId, ValueType, id,
 };
 
 impl Builder<'_> {
@@ -150,14 +150,46 @@ impl Builder<'_> {
                     *site,
                 )?;
             }
-            g::Terminator::Panic { payload, unwind } => {
+            g::Terminator::Panic {
+                payload,
+                location,
+                unwind,
+            } => {
                 let payload = self.operand(payload)?;
-                let args = self.computed_values(payload)?;
+                let mut args = self.explicit_abi_values(payload)?;
+                if let Some(message) = args.first().copied()
+                    && self
+                        .machine_type(message)
+                        .provenance
+                        .is_some_and(Provenance::managed)
+                {
+                    args[0] = self.emit_one(
+                        Op::Convert(crate::lir::body::Conversion::PointerCast),
+                        &[message],
+                        ValueType::pointer(Provenance::Raw),
+                        Origin::Derived(message),
+                    );
+                }
+                let source = self
+                    .sources
+                    .snapshot(crate::SourceFileId::new(location.source))
+                    .ok_or_else(|| invalid("panic 源位置引用未知源码快照"))?;
+                let position = source
+                    .line_column(usize::try_from(location.start).expect("源码偏移适配宿主"))
+                    .map_err(|_| invalid("panic 源位置不在源码快照边界内"))?;
+                let path = self.data(source.logical_path().as_bytes().to_vec(), Provenance::Raw);
+                args.push(path);
+                args.push(self.constant(
+                    u64::try_from(source.logical_path().len()).expect("源码路径长度适配 u64"),
+                    Type::I64,
+                ));
+                args.push(self.constant(u64::from(position.line), Type::I64));
+                args.push(self.constant(u64::from(position.column), Type::I64));
                 let call = Call {
                     target: CallTarget::Runtime(RuntimeCall::Panic),
                     kind: g::CallKind::Managed,
                     parameters: args.iter().map(|value| self.machine_type(*value)).collect(),
-                    results: Vec::new(),
+                    results: vec![ValueType::scalar(Type::I64)],
                     may_unwind: true,
                     may_suspend: false,
                     may_allocate: false,

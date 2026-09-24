@@ -226,7 +226,7 @@ fn dump_is_deterministic() {
     let first = dump_world(hir.module(), &gir, GirPassStats::default());
     let second = dump_world(hir.module(), &gir, GirPassStats::default());
     assert_eq!(first, second);
-    assert!(first.contains("gir-revision 3"));
+    assert!(first.contains("gir-revision 4"));
     assert!(first.contains("body owner=main"));
     assert!(first.contains("placement schema"));
 }
@@ -663,7 +663,7 @@ fn fixtures_lower_and_verify() {
             verify(hir.module(), body).unwrap();
         }
         let dump = dump_world(hir.module(), &gir, GirPassStats::default());
-        assert!(dump.contains("gir-revision 3"));
+        assert!(dump.contains("gir-revision 4"));
         assert!(dump.contains("exit plan="));
     }
 }
@@ -1007,4 +1007,29 @@ fn captured_local_is_aliased_while_inner_environment_stays_private() {
             .any(|alloc| alloc.body == index && alloc.region.is_some()),
         "内层环境仍必须独占一个 region"
     );
+}
+
+#[test]
+fn runtime_machine_calls_lower_to_machine_statements() {
+    let source = "fn main() { unsafe { let code: uint = 0\n std.runtime.process_exit(code)\n _ = std.runtime.current_slot() } }";
+    let (hir, gir) = compile_gir(source);
+    let body = entry_body(&hir, &gir);
+    verify(hir.module(), body).unwrap();
+    assert!(body.statements.iter().any(|statement| matches!(
+        &statement.kind,
+        StatementKind::RuntimeMachineCall {
+            op: crate::runtime::RuntimeMachineOp::ProcessExit,
+            ..
+        }
+    )));
+    assert!(body.statements.iter().any(|statement| matches!(
+        &statement.kind,
+        StatementKind::RuntimeMachineCall {
+            op: crate::runtime::RuntimeMachineOp::CurrentSlot,
+            ..
+        }
+    )));
+    let dump = dump_world(hir.module(), &gir, GirPassStats::default());
+    assert!(dump.contains("RuntimeMachineCall process_exit"));
+    assert!(dump.contains("RuntimeMachineCall current_slot"));
 }

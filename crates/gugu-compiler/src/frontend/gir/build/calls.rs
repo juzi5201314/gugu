@@ -431,6 +431,9 @@ impl Builder<'_> {
         if let hir::Builtin::Platform(kind) = operation {
             return self.emit_platform_call(id, platform_op(kind), arguments, types);
         }
+        if let hir::Builtin::RuntimeMachine(kind) = operation {
+            return self.emit_runtime_machine_call(id, runtime_machine_op(kind), arguments, types);
+        }
         match operation {
             hir::Builtin::ChanSend => return self.emit_chan_send(id, arguments),
             hir::Builtin::ChanRecv => return self.emit_chan_recv(id, arguments),
@@ -612,7 +615,12 @@ impl Builder<'_> {
             self.panic_string("panic")
         };
         let unwind = self.intern_plan(self.current_unwind(id), CleanupChain::Unwind)?;
-        self.terminate(Terminator::Panic { payload, unwind });
+        let location = self.owner.expressions[id.index()].location.clone();
+        self.terminate(Terminator::Panic {
+            payload,
+            location,
+            unwind,
+        });
         Ok(None)
     }
 }
@@ -637,6 +645,21 @@ fn platform_op(
         Source::SetDumpPolicy => Target::SetDumpPolicy,
         Source::LowMemoryHint => Target::LowMemoryHint,
         Source::HugePageHint => Target::HugePageHint,
+    }
+}
+
+/// 把语义层的 runtime 机器原语映射到契约操作；两者的枚举一一对应，映射是全覆盖的。
+fn runtime_machine_op(
+    kind: crate::frontend::semantics::model::RuntimeMachineIntrinsic,
+) -> crate::runtime::RuntimeMachineOp {
+    use crate::frontend::semantics::model::RuntimeMachineIntrinsic as Source;
+    use crate::runtime::RuntimeMachineOp as Target;
+    match kind {
+        Source::ContextSwitch => Target::ContextSwitch,
+        Source::ContextRestore => Target::ContextRestore,
+        Source::CurrentSlot => Target::CurrentSlot,
+        Source::ProcessExit => Target::ProcessExit,
+        Source::ReportWrite => Target::ReportWrite,
     }
 }
 

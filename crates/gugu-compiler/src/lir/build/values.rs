@@ -57,6 +57,20 @@ impl Builder<'_> {
         }
     }
 
+    /// 把值按声明 ABI 展开成实参 lane：与 [`Self::computed_values`] 相同，但不做间接 ABI 折叠。
+    ///
+    /// runtime 终结符（panic）的 payload 是**值语义**的实参列表，必须逐 lane 出现在调用形状里；
+    /// 折叠成「聚合体指针」会让被调 glue 只拿到一个指针，其余形参读到调用点的残留值。
+    pub(super) fn explicit_abi_values(
+        &mut self,
+        computed: Computed,
+    ) -> Result<Vec<ValueId>, Diagnostic> {
+        match computed {
+            Computed::Values { values, .. } => Ok(values),
+            Computed::Address { address, ty } => self.load_abi(address, ty),
+        }
+    }
+
     pub(super) fn computed_address(&mut self, computed: Computed) -> Result<ValueId, Diagnostic> {
         match computed {
             Computed::Address { address, .. } => Ok(address),
