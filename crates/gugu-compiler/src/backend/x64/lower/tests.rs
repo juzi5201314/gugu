@@ -703,6 +703,9 @@ fn vector_lanes_match_supports_vector() {
                 (false, Err(LoweringError::InvalidOperands)) => {
                     panic!("{vector_op:?}/{lane:?} 的测试类型组合必须合法");
                 }
+                (false, Err(LoweringError::UnregisteredGlue { glue })) => {
+                    panic!("{vector_op:?}/{lane:?} 意外发出未登记 glue `{glue}`");
+                }
                 (true, Err(error)) => {
                     panic!("{vector_op:?}/{lane:?} 声明支持却 lower 失败：{error}");
                 }
@@ -846,26 +849,6 @@ fn atomic_rmw_shape_and_missing_sequences() {
         store.clobbers.contains_gpr(Gpr::R11),
         "值先搬到 r11 再 xchg，r11 必须登记为 clobber"
     );
-
-    for op in [AtomicOp::And, AtomicOp::Or, AtomicOp::Xor] {
-        let atomic = Op::Atomic {
-            op,
-            ordering: MemoryOrdering::SeqCst,
-            failure: None,
-            align: 8,
-        };
-        let lowered = lowering::lower(
-            &atomic,
-            &operands(&[Type::Ptr, Type::I64]),
-            &results(&[Type::I64]),
-            &source(),
-        );
-        assert!(
-            matches!(lowered, Err(LoweringError::Unsupported { .. })),
-            "{op:?} 没有单指令 fetch 形式"
-        );
-        assert_eq!(lowering::poll_cost(&atomic), 1);
-    }
 }
 
 /// 域内 op 的 poll 成本是机器 form 权重之和，且至少 1。
@@ -985,4 +968,16 @@ fn invalid_operands_and_foreign_ops_are_rejected() {
         "解码序列只用 PcRel32 重定位"
     );
     assert_eq!(kinds.len(), 8, "七个字段 + 一条冷边");
+}
+
+#[test]
+fn runtime_glue_gate_accepts_declared_and_rejects_unknown_names() {
+    assert!(crate::runtime::glue_is_declared("gc_alloc_slow"));
+    assert!(crate::runtime::glue_is_declared("value_repeat"));
+    assert_eq!(
+        lowering::ensure_runtime_glue("not_a_runtime_entry"),
+        Err(LoweringError::UnregisteredGlue {
+            glue: "not_a_runtime_entry".to_owned(),
+        })
+    );
 }

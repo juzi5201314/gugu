@@ -20,6 +20,83 @@ pub(crate) struct CompareFact {
     pub right: Operand,
 }
 
+/// GIR local 是 `body.locals` 的稠密下标；反向表达式表按原 ExprId 顺序分组。
+/// 每个表达式至多映射一个 local，因此平坦表大小不超过表达式总数。
+pub(crate) struct IndexedBody<'a> {
+    body: &'a GirBody,
+    offsets: Vec<usize>,
+    expressions: Vec<ExprId>,
+    resolved: Vec<(ExprId, hir::LocalId)>,
+    relations: Vec<Relation>,
+}
+
+impl<'a> IndexedBody<'a> {
+    pub(crate) fn new(body: &'a GirBody, owner: &Owner) -> Self {
+        let mut offsets = vec![0; body.locals.len() + 1];
+        for local in body.expression_locals.iter().flatten() {
+            debug_assert!(local.index() < body.locals.len());
+            offsets[local.index() + 1] += 1;
+        }
+        for index in 1..offsets.len() {
+            offsets[index] += offsets[index - 1];
+        }
+        let mut positions = offsets[..body.locals.len()].to_vec();
+        let mut expressions = vec![ExprId(0); offsets[body.locals.len()]];
+        for (index, local) in body.expression_locals.iter().enumerate() {
+            if let Some(local) = local {
+                expressions[positions[local.index()]] =
+                    ExprId(u32::try_from(index).expect("表达式编号已由 HIR 验证"));
+                positions[local.index()] += 1;
+            }
+        }
+        let resolved: Vec<_> = owner
+            .expressions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, expression)| {
+                if let hir::ExprKind::Resolved(hir::Res::Local(local)) = expression.kind {
+                    Some((
+                        ExprId(u32::try_from(index).expect("表达式编号已由 HIR 验证")),
+                        local,
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        let mut relations = Vec::with_capacity(resolved.len() * 4);
+        for &(expr, local) in &resolved {
+            for (left, right) in [
+                (ValueKey::Expr(expr), ValueKey::Local(local)),
+                (ValueKey::ExprLen(expr), ValueKey::LocalLen(local)),
+            ] {
+                relations.push(Relation::new(left, right, 0));
+                relations.push(Relation::new(right, left, 0));
+            }
+        }
+        relations.sort_unstable();
+        Self {
+            body,
+            offsets,
+            expressions,
+            resolved,
+            relations,
+        }
+    }
+
+    fn expressions(&self, local: LocalId) -> &[ExprId] {
+        &self.expressions[self.offsets[local.index()]..self.offsets[local.index() + 1]]
+    }
+}
+
+impl std::ops::Deref for IndexedBody<'_> {
+    type Target = GirBody;
+
+    fn deref(&self) -> &Self::Target {
+        self.body
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "抽象解释逐语句需要 module/owner/body/state/passing/callees 同时在场"
@@ -27,18 +104,18 @@ pub(crate) struct CompareFact {
 pub(crate) fn execute_statement(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     state: &mut AbstractState,
     kind: &StatementKind,
     passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
     compare: &mut Option<CompareFact>,
 ) {
-    sync_resolved(module, owner, state);
+    sync_resolved(module, owner, body, state);
     match kind {
         StatementKind::Assign(place, rvalue) => {
             assign(module, owner, body, state, *place, rvalue, callees, compare);
-            sync_resolved(module, owner, state);
+            sync_resolved(module, owner, body, state);
         }
         StatementKind::Atomic { .. } | StatementKind::Volatile { .. } => state.bump_foreign(),
         StatementKind::ValueAction { descriptor, .. } => {
@@ -63,15 +140,15 @@ pub(crate) fn execute_statement(
 pub(crate) fn successor_states(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
-    state: &mut AbstractState,
+    body: &IndexedBody<'_>,
+    mut state: AbstractState,
     terminator: &Terminator,
     compare: Option<&CompareFact>,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> Vec<(BlockId, AbstractState)> {
-    sync_resolved(module, owner, state);
+    sync_resolved(module, owner, body, &mut state);
     match terminator {
-        Terminator::Goto { target } => vec![(*target, state.clone())],
+        Terminator::Goto { target } => vec![(*target, state)],
         Terminator::SwitchInt {
             value,
             targets,
@@ -96,7 +173,7 @@ pub(crate) fn successor_states(
         ),
         Terminator::Panic { unwind, .. } => {
             state.effects.panic = true;
-            vec![(*unwind, state.clone())]
+            vec![(*unwind, state)]
         }
         Terminator::Suspend {
             resume, cancelled, ..
@@ -121,7 +198,7 @@ pub(crate) fn successor_states(
 fn assign(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     state: &mut AbstractState,
     place: Place,
     rvalue: &Rvalue,
@@ -147,7 +224,7 @@ fn assign(
 fn eval_rvalue(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     state: &mut AbstractState,
     rvalue: &Rvalue,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
@@ -220,7 +297,7 @@ fn intrinsic_effects(state: &mut AbstractState, op: &IntrinsicOp) -> Interval {
 fn write_place(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     state: &mut AbstractState,
     place: Place,
     interval: Interval,
@@ -247,19 +324,16 @@ fn write_place(
         seed_local_array_len(module, owner, state, hir);
     }
     // 只发布值区间。HIR 效果是类型检查上界，Call 等操作由 apply_site 的实例摘要取代。
-    for (index, mapped) in body.expression_locals.iter().enumerate() {
-        if *mapped == Some(place.local) {
-            let expr = ExprId(index as u32);
-            let range = transfer::integer_range(module, owner, expr, interval);
-            state.set_range(ValueKey::Expr(expr), range);
-        }
+    for &expr in body.expressions(place.local) {
+        let range = transfer::integer_range(module, owner, expr, interval);
+        state.set_range(ValueKey::Expr(expr), range);
     }
 }
 
 fn sync_copy(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     state: &mut AbstractState,
     place: Place,
     rvalue: &Rvalue,
@@ -282,16 +356,14 @@ fn sync_copy(
             state.range(ValueKey::LocalLen(src_hir)),
         );
     }
-    for (index, mapped) in body.expression_locals.iter().enumerate() {
-        if *mapped == Some(place.local) {
-            transfer::copy_local(module, owner, state, ExprId(index as u32), src_hir);
-        }
+    for &expr in body.expressions(place.local) {
+        transfer::copy_local(module, owner, state, expr, src_hir);
     }
 }
 
 fn sync_len_relation(
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     state: &mut AbstractState,
     place: Place,
     rvalue: &Rvalue,
@@ -306,19 +378,17 @@ fn sync_len_relation(
     } else {
         return;
     };
-    for (index, mapped) in body.expression_locals.iter().enumerate() {
-        if *mapped == Some(place.local) {
-            let expr = ValueKey::Expr(ExprId(index as u32));
-            state.relate(Relation::new(expr, key, 0));
-            state.relate(Relation::new(key, expr, 0));
-        }
+    for &expr in body.expressions(place.local) {
+        let expr = ValueKey::Expr(expr);
+        state.relate(Relation::new(expr, key, 0));
+        state.relate(Relation::new(key, expr, 0));
     }
 }
 
 fn eval_len(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     state: &mut AbstractState,
     place: Place,
 ) -> Interval {
@@ -332,12 +402,16 @@ fn eval_len(
     place_len(body, state, place)
 }
 
-pub(crate) fn sync_resolved(module: &Module, owner: &Owner, state: &mut AbstractState) {
-    for (index, expression) in owner.expressions.iter().enumerate() {
-        let hir::ExprKind::Resolved(hir::Res::Local(local)) = expression.kind else {
-            continue;
-        };
-        let expr = ExprId(index as u32);
+pub(crate) fn sync_resolved(
+    module: &Module,
+    owner: &Owner,
+    body: &IndexedBody<'_>,
+    state: &mut AbstractState,
+) {
+    if !state.reachable {
+        return;
+    }
+    for &(expr, local) in &body.resolved {
         let range =
             transfer::integer_range(module, owner, expr, state.range(ValueKey::Local(local)));
         state.set_range(ValueKey::Expr(expr), range);
@@ -345,27 +419,8 @@ pub(crate) fn sync_resolved(module: &Module, owner: &Owner, state: &mut Abstract
             ValueKey::ExprLen(expr),
             state.range(ValueKey::LocalLen(local)),
         );
-        state.relate(Relation::new(
-            ValueKey::Expr(expr),
-            ValueKey::Local(local),
-            0,
-        ));
-        state.relate(Relation::new(
-            ValueKey::Local(local),
-            ValueKey::Expr(expr),
-            0,
-        ));
-        state.relate(Relation::new(
-            ValueKey::ExprLen(expr),
-            ValueKey::LocalLen(local),
-            0,
-        ));
-        state.relate(Relation::new(
-            ValueKey::LocalLen(local),
-            ValueKey::ExprLen(expr),
-            0,
-        ));
     }
+    state.relate_sorted(&body.relations);
 }
 
 fn seed_local_array_len(
@@ -386,7 +441,7 @@ fn seed_local_array_len(
     }
 }
 
-fn operand_range(body: &GirBody, state: &AbstractState, operand: &Operand) -> Interval {
+fn operand_range(body: &IndexedBody<'_>, state: &AbstractState, operand: &Operand) -> Interval {
     match operand {
         Operand::Copy(place) | Operand::MoveInternal(place) => place_range(body, state, *place),
         Operand::Constant(id) => const_range(&body.constants[id.index()].value),
@@ -394,7 +449,7 @@ fn operand_range(body: &GirBody, state: &AbstractState, operand: &Operand) -> In
     }
 }
 
-fn place_range(body: &GirBody, state: &AbstractState, place: Place) -> Interval {
+fn place_range(body: &IndexedBody<'_>, state: &AbstractState, place: Place) -> Interval {
     if !place.is_local() {
         return Interval::UNKNOWN;
     }
@@ -406,7 +461,7 @@ fn place_range(body: &GirBody, state: &AbstractState, place: Place) -> Interval 
         .unwrap_or(Interval::UNKNOWN)
 }
 
-fn place_len(body: &GirBody, state: &AbstractState, place: Place) -> Interval {
+fn place_len(body: &IndexedBody<'_>, state: &AbstractState, place: Place) -> Interval {
     if let Some(hir) = body.locals[place.local.index()].hir_local {
         return state.range(ValueKey::LocalLen(hir));
     }
@@ -415,11 +470,8 @@ fn place_len(body: &GirBody, state: &AbstractState, place: Place) -> Interval {
         .unwrap_or(Interval::UNKNOWN)
 }
 
-fn mapped_expr(body: &GirBody, local: LocalId) -> Option<ExprId> {
-    body.expression_locals
-        .iter()
-        .enumerate()
-        .find_map(|(index, mapped)| (*mapped == Some(local)).then_some(ExprId(index as u32)))
+fn mapped_expr(body: &IndexedBody<'_>, local: LocalId) -> Option<ExprId> {
+    body.expressions(local).first().copied()
 }
 
 fn const_range(value: &ConstValue) -> Interval {
@@ -432,7 +484,7 @@ fn const_range(value: &ConstValue) -> Interval {
     }
 }
 
-fn invalidate_place(body: &GirBody, state: &mut AbstractState, place: Place) {
+fn invalidate_place(body: &IndexedBody<'_>, state: &mut AbstractState, place: Place) {
     if let Some(hir) = body.locals[place.local.index()].hir_local {
         state.bump_local(hir);
     } else {
@@ -441,9 +493,9 @@ fn invalidate_place(body: &GirBody, state: &mut AbstractState, place: Place) {
 }
 
 fn switch_edges(
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     owner: &Owner,
-    state: &AbstractState,
+    mut state: AbstractState,
     value: &Operand,
     targets: &[(u128, BlockId)],
     otherwise: BlockId,
@@ -455,19 +507,18 @@ fn switch_edges(
         assume_switch(body, owner, &mut next, value, Some(imm), compare);
         edges.push((block, next));
     }
-    let mut next = state.clone();
     let fallback = match targets {
         [(1, _)] => Some(0),
         [(0, _)] => Some(1),
         _ => None,
     };
-    assume_switch(body, owner, &mut next, value, fallback, compare);
-    edges.push((otherwise, next));
+    assume_switch(body, owner, &mut state, value, fallback, compare);
+    edges.push((otherwise, state));
     edges
 }
 
 fn assume_switch(
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     owner: &Owner,
     state: &mut AbstractState,
     value: &Operand,
@@ -493,7 +544,7 @@ fn assume_switch(
     refine_switch_range(body, state, value, taken);
 }
 
-fn assume_fact(body: &GirBody, state: &mut AbstractState, fact: &CompareFact, truth: bool) {
+fn assume_fact(body: &IndexedBody<'_>, state: &mut AbstractState, fact: &CompareFact, truth: bool) {
     let left = operand_key(body, &fact.left);
     let right = operand_key(body, &fact.right);
     transfer::refine_compare(
@@ -508,7 +559,7 @@ fn assume_fact(body: &GirBody, state: &mut AbstractState, fact: &CompareFact, tr
 }
 
 fn refine_switch_range(
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     state: &mut AbstractState,
     value: &Operand,
     taken: Option<u128>,
@@ -521,7 +572,7 @@ fn refine_switch_range(
     }
 }
 
-fn operand_expr(body: &GirBody, operand: &Operand) -> Option<ExprId> {
+fn operand_expr(body: &IndexedBody<'_>, operand: &Operand) -> Option<ExprId> {
     operand_local(operand).and_then(|local| mapped_expr(body, local))
 }
 
@@ -534,7 +585,7 @@ fn operand_local(operand: &Operand) -> Option<LocalId> {
     }
 }
 
-fn operand_key(body: &GirBody, operand: &Operand) -> Option<ValueKey> {
+fn operand_key(body: &IndexedBody<'_>, operand: &Operand) -> Option<ValueKey> {
     let local = operand_local(operand)?;
     if let Some(hir) = body.locals[local.index()].hir_local {
         return Some(ValueKey::Local(hir));
@@ -549,67 +600,60 @@ fn operand_key(body: &GirBody, operand: &Operand) -> Option<ValueKey> {
 fn call_edges(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
-    state: &mut AbstractState,
+    body: &IndexedBody<'_>,
+    mut state: AbstractState,
     site: CallSite,
     destination: Place,
     normal: BlockId,
     unwind: Option<BlockId>,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> Vec<(BlockId, AbstractState)> {
-    transfer::apply_site(module, owner, state, site, callees);
-    sync_resolved(module, owner, state);
+    transfer::apply_site(module, owner, &mut state, site, callees);
+    sync_resolved(module, owner, body, &mut state);
     if destination.is_local()
         && let CallSite::Expression(id) = site
     {
-        write_place(
-            module,
-            owner,
-            body,
-            state,
-            destination,
-            state.range(ValueKey::Expr(hir::ExprId(id))),
-        );
+        let range = state.range(ValueKey::Expr(hir::ExprId(id)));
+        write_place(module, owner, body, &mut state, destination, range);
     }
-    let mut edges = vec![(normal, state.clone())];
-    if let Some(unwind) = unwind
-        && state.effects.panic
-    {
-        edges.push((unwind, state.clone()));
+    match unwind {
+        Some(unwind) if state.effects.panic => vec![(normal, state.clone()), (unwind, state)],
+        _ => vec![(normal, state)],
     }
-    edges
 }
 
 fn suspend_edges(
-    state: &mut AbstractState,
+    mut state: AbstractState,
     resume: BlockId,
     cancelled: Option<BlockId>,
 ) -> Vec<(BlockId, AbstractState)> {
     state.effects.suspend = true;
     state.bump_heap();
-    let mut edges = vec![(resume, state.clone())];
-    if let Some(cancelled) = cancelled {
-        edges.push((cancelled, state.clone()));
+    match cancelled {
+        Some(cancelled) => vec![(resume, state.clone()), (cancelled, state)],
+        None => vec![(resume, state)],
     }
-    edges
 }
 
 fn select_edges(
-    state: &mut AbstractState,
+    mut state: AbstractState,
     ready: BlockId,
     suspend: Option<BlockId>,
     cancelled: Option<BlockId>,
 ) -> Vec<(BlockId, AbstractState)> {
     state.effects.suspend = true;
     state.bump_heap();
-    let mut edges = vec![(ready, state.clone())];
-    if let Some(suspend) = suspend {
-        edges.push((suspend, state.clone()));
+    match (suspend, cancelled) {
+        (Some(suspend), Some(cancelled)) => {
+            vec![
+                (ready, state.clone()),
+                (suspend, state.clone()),
+                (cancelled, state),
+            ]
+        }
+        (Some(next), None) | (None, Some(next)) => vec![(ready, state.clone()), (next, state)],
+        (None, None) => vec![(ready, state)],
     }
-    if let Some(cancelled) = cancelled {
-        edges.push((cancelled, state.clone()));
-    }
-    edges
 }
 
 fn compare_bin(op: CompareOp) -> BinOp {

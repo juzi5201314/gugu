@@ -8,7 +8,7 @@ pub(crate) const POLL_BUDGET: u32 = 4096;
 /// 允许被分类为 poll-free 叶调用的最大成本。
 pub(crate) const POLL_FREE_LEAF_MAX_COST: u32 = 64;
 /// LIR 固定管线顺序的 revision。
-pub(crate) const PASS_PIPELINE_REVISION: u32 = 1;
+pub(crate) const PASS_PIPELINE_REVISION: u32 = 2;
 /// poll 成本表的 revision；权重来自 x64 form 表（`x64::lower::poll_cost` 的指令权重和），
 /// 因此随 backend schema 变化。
 pub(crate) const POLL_COST_REVISION: u32 = 2;

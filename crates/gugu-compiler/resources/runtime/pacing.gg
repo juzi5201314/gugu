@@ -1,0 +1,72 @@
+/* 整数 pacing 状态机：debt 只按完成工作偿还，压力 episode 用 85/70 hysteresis，
+ * 每个 episode 只允许一次 forced cycle。
+ */
+
+use std.runtime.heap.{heap_store_word, heap_word}
+
+pub const PACING_STATE_BYTES: uint = 128
+pub const PACING_DEBT_OFFSET: uint = 0
+pub const PACING_CREDIT_OFFSET: uint = 8
+pub const PACING_PRESSURE_OFFSET: uint = 16
+pub const PACING_FORCED_OFFSET: uint = 24
+pub const PACING_EPISODE_OFFSET: uint = 32
+pub const PACING_ENTER_RATIO: uint = 85
+pub const PACING_CLEAR_RATIO: uint = 70
+pub const PACING_QUANTUM: uint = 65536
+
+pub fn pacing_new() uint {
+    let state = unsafe { std.platform.reserve_aligned(PACING_STATE_BYTES, uint(4096)) }
+    if state == 0 { unsafe { std.runtime.process_exit(2) } }
+    let extent = PacingExtent { base: state, bytes: PACING_STATE_BYTES }
+    if unsafe { std.platform.commit(std.mem.transmute[*PacingExtent, uint](std.ptr.addr_of(extent))) } != 0 {
+        unsafe { std.runtime.process_exit(2) }
+    }
+    let at = state
+    while at < state + PACING_STATE_BYTES {
+        heap_store_word(at, 0)
+        at = at + 8
+    }
+    state
+}
+
+#[repr(C)]
+struct PacingExtent { base: uint, bytes: uint }
+
+pub fn pacing_charge(state: uint, bytes: uint) {
+    heap_store_word(state + PACING_DEBT_OFFSET, heap_word(state + PACING_DEBT_OFFSET) + bytes)
+}
+
+pub fn pacing_complete(state: uint, bytes: uint) {
+    let debt = heap_word(state + PACING_DEBT_OFFSET)
+    let remaining = if bytes >= debt { uint(0) } else { debt - bytes }
+    heap_store_word(state + PACING_DEBT_OFFSET, remaining)
+    heap_store_word(state + PACING_CREDIT_OFFSET, heap_word(state + PACING_CREDIT_OFFSET) + bytes)
+}
+
+pub fn pacing_pressure(state: uint, used: uint, limit: uint) uint {
+    if limit == 0 { return 0 }
+    let ratio = used * 100 / limit
+    let pressure = heap_word(state + PACING_PRESSURE_OFFSET)
+    if pressure == 0 && ratio >= PACING_ENTER_RATIO {
+        heap_store_word(state + PACING_PRESSURE_OFFSET, 1)
+        heap_store_word(state + PACING_FORCED_OFFSET, 0)
+        heap_store_word(state + PACING_EPISODE_OFFSET, heap_word(state + PACING_EPISODE_OFFSET) + 1)
+    } else {
+        if pressure != 0 && ratio <= PACING_CLEAR_RATIO {
+            heap_store_word(state + PACING_PRESSURE_OFFSET, 0)
+        } else {
+            let _ = 0
+        }
+    }
+    heap_word(state + PACING_PRESSURE_OFFSET)
+}
+
+pub fn pacing_force_once(state: uint) uint {
+    if heap_word(state + PACING_PRESSURE_OFFSET) == 0 { return 1 }
+    if heap_word(state + PACING_FORCED_OFFSET) != 0 { return 2 }
+    heap_store_word(state + PACING_FORCED_OFFSET, 1)
+    0
+}
+
+pub fn pacing_debt(state: uint) uint = heap_word(state + PACING_DEBT_OFFSET)
+pub fn pacing_episode(state: uint) uint = heap_word(state + PACING_EPISODE_OFFSET)

@@ -3,6 +3,10 @@ name = "gugu-cli"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+# 与 `gugu-compiler` 同名开关：默认关闭，重负载 CLI 用例只在显式开启时编入。
+slow-tests = []
+
 [[bin]]
 name = "gugu"
 path = "src/main.rs"

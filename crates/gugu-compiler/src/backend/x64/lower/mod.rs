@@ -73,6 +73,8 @@ pub(crate) enum LoweringError {
     },
     /// 操作数或结果的数量、种类与 op 的语义不符。
     InvalidOperands,
+    /// 发出的 runtime 符号没有镜像定义，也没有显式迁移缺口声明。
+    UnregisteredGlue { glue: String },
 }
 
 /// 需要宇宙/契约的站点 lowering 上下文；探针与 legalize 可不带。
@@ -105,11 +107,28 @@ impl fmt::Display for LoweringError {
                 write!(formatter, "{op} 没有基线机器序列：{detail}")
             }
             Self::InvalidOperands => formatter.write_str("lowering 的操作数不符合 op 语义"),
+            Self::UnregisteredGlue { glue } => {
+                write!(
+                    formatter,
+                    "runtime glue `{glue}` 未登记，禁止发出退出桩调用"
+                )
+            }
         }
     }
 }
 
 impl std::error::Error for LoweringError {}
+
+/// 在 runtime 符号真正发射前阻断未登记入口，避免链接器把它解析到退出桩。
+pub(crate) fn ensure_runtime_glue(name: &str) -> Result<(), LoweringError> {
+    if crate::runtime::glue_is_declared(name) {
+        Ok(())
+    } else {
+        Err(LoweringError::UnregisteredGlue {
+            glue: name.to_owned(),
+        })
+    }
+}
 
 /// 返回封闭 LIR opcode 的稳定域名；穷尽 match，未知组合编译期失败。
 pub(crate) fn domain(op: &Op) -> &'static str {
@@ -159,8 +178,6 @@ pub(crate) fn domain(op: &Op) -> &'static str {
         Op::NoSafepointBegin(_) => "NoSafepointBegin",
         Op::NoSafepointEnd(_) => "NoSafepointEnd",
         Op::CoroutineSwitch => "CoroutineSwitch",
-        Op::Park => "Park",
-        Op::Ready => "Ready",
         Op::Call(_) => "Call",
         Op::ForeignCall(_) => "ForeignCall",
         Op::InlineAsm(_) => "InlineAsm",
@@ -217,12 +234,12 @@ pub(crate) fn lower_with(
         Op::GcAlloc { .. } | Op::RegionAlloc { .. } | Op::SafepointPoll { .. } | Op::StackCheck => {
             alloc::lower(op, operands, results, source, ctx, &mut builder)?
         }
-        Op::PlatformCall(_)
-        | Op::RuntimeMachineCall(_)
-        | Op::RegionPublish { .. }
+        Op::RegionPublish { .. }
         | Op::RegionReset { .. }
         | Op::PromoteManaged { .. }
-        | Op::RegionTransfer { .. }
+        | Op::RegionTransfer { .. } => alloc::region_end(op, &mut builder)?,
+        Op::PlatformCall(_)
+        | Op::RuntimeMachineCall(_)
         | Op::MarkTicketBatch
         | Op::EdgeDeltaBatch
         | Op::ResolveSharedHandle
@@ -238,8 +255,6 @@ pub(crate) fn lower_with(
         | Op::ScopedViewEnd { .. }
         | Op::NoSafepointBegin(_)
         | Op::NoSafepointEnd(_)
-        | Op::Park
-        | Op::Ready
         | Op::Call(_)
         | Op::ForeignCall(_) => call::lower(op, operands, results, ctx, &mut builder)?,
         Op::CoroutineSwitch => ctrl::coroutine_switch(&mut builder)?,
@@ -374,15 +389,15 @@ fn probe_types(op: &Op) -> Option<(Vec<Type>, Vec<Type>)> {
             crate::lir::body::AtomicOp::Store => (vec![Type::Ptr, Type::I64], vec![]),
             crate::lir::body::AtomicOp::Exchange
             | crate::lir::body::AtomicOp::Add
-            | crate::lir::body::AtomicOp::Sub => (vec![Type::Ptr, Type::I64], vec![Type::I64]),
+            | crate::lir::body::AtomicOp::Sub
+            | crate::lir::body::AtomicOp::And
+            | crate::lir::body::AtomicOp::Or => (vec![Type::Ptr, Type::I64], vec![Type::I64]),
             crate::lir::body::AtomicOp::CompareExchange => (
                 vec![Type::Ptr, Type::I64, Type::I64],
                 vec![Type::I64, Type::I8],
             ),
             crate::lir::body::AtomicOp::Fence => (vec![], vec![]),
-            crate::lir::body::AtomicOp::And
-            | crate::lir::body::AtomicOp::Or
-            | crate::lir::body::AtomicOp::Xor => return None,
+            crate::lir::body::AtomicOp::Xor => return None,
         },
         Op::DecodeCompressedRef => (vec![Type::I64], vec![Type::Ptr]),
         _ => return None,
@@ -568,13 +583,21 @@ impl Builder {
 /// 命中形式的下标，与线性 `position` 的取最小下标语义一致。无操作数形式
 /// （`cqo` 等）没有访问语义可比，键的第三段为 `None`。`FORMS` 是编译期常量，
 /// 索引在首次编码时懒构建一次，此后每次 `emit` 都是一次哈希查找，不再从表头
-/// 线性扫描。
-type FormIndex = HashMap<(&'static str, &'static [OperandKind], Option<Access>), FormId>;
+/// 线性扫描。键只来自固定 FORMS 和编译器内置序列，采用已有 foldhash 避免 SipHash 开销；
+/// 不迭代哈希表产生输出，首个匹配 FormId 与规范表序保持一致。
+type FormIndex = HashMap<
+    (&'static str, &'static [OperandKind], Option<Access>),
+    FormId,
+    foldhash::fast::FixedState,
+>;
 
 fn form_index() -> &'static FormIndex {
     static INDEX: OnceLock<FormIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
-        let mut index: FormIndex = HashMap::with_capacity(table::FORMS.len());
+        let mut index = FormIndex::with_capacity_and_hasher(
+            table::FORMS.len(),
+            foldhash::fast::FixedState::with_seed(0),
+        );
         for (position, form) in table::FORMS.iter().enumerate() {
             let key = (form.mnemonic, form.operands, form.access.first().copied());
             index

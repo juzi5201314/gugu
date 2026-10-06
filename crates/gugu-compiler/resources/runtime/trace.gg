@@ -1,0 +1,609 @@
+/* trace descriptor 的唯一解释内核：按 Bitmap 或 Program 表示扫描对象的 managed pointer word。
+ *
+ * 递归执行改为最多 `TRACE_MAX_FRAMES` 个显式帧的可暂停游标，因此巨大的 descriptor 也不能绕过
+ * 工作预算。REPEAT/REPEAT_FIELD 的 base 与 stride 以 8 字节 word 计；SWITCH 的 tag 以 payload
+ * 字节计，选择分支后必须回到整个 SWITCH（含 default 编码）之后；`ARENA_SLOTS` 不携带自己的扫描
+ * 位，由调用方按 backing 的 initialized 位图展开，这里只标记该语义。
+ *
+ * 游标只保存状态，不跨调用借用类型表、也不复制 descriptor：descriptor 与 payload 的地址每次
+ * 推进都由调用方重新给出，符合「跨批不保存裸地址」的契约。
+ */
+
+use std.runtime.heap.{heap_byte, heap_fail, heap_store_word, heap_word, PROCESSOR_TRACE_CURSOR_OFFSET}
+
+/// 与验证器共用的最大嵌套深度。
+pub const TRACE_MAX_DEPTH: uint = 32
+/// 根帧加 `TRACE_MAX_DEPTH` 层嵌套。
+pub const TRACE_MAX_FRAMES: uint = 33
+
+/// descriptor 表示种类。
+pub const TRACE_KIND_NONE: uint = 0
+pub const TRACE_KIND_BITMAP: uint = 1
+pub const TRACE_KIND_PROGRAM: uint = 2
+
+/// program opcode。
+pub const TRACE_OP_END: uint = 0
+pub const TRACE_OP_DIRECT: uint = 1
+pub const TRACE_OP_INTERIOR: uint = 2
+pub const TRACE_OP_REPEAT: uint = 3
+pub const TRACE_OP_REPEAT_FIELD: uint = 4
+pub const TRACE_OP_SWITCH: uint = 5
+pub const TRACE_OP_ARENA_SLOTS: uint = 6
+
+/// 帧种类。
+const FRAME_EMPTY: uint = 0
+const FRAME_BITMAP: uint = 1
+const FRAME_BODY: uint = 2
+const FRAME_WORDS: uint = 3
+const FRAME_REPEAT: uint = 4
+const FRAME_SWITCH: uint = 5
+
+/// 单步结果：还要继续、整个 descriptor 完成、或产生一次指针访问。
+const STEP_CONTINUE: uint = 0
+const STEP_COMPLETE: uint = 1
+const STEP_VISIT: uint = 2
+
+/// 游标推进状态。
+pub const TRACE_VISIT: uint = 0
+pub const TRACE_PENDING: uint = 1
+pub const TRACE_COMPLETE: uint = 2
+
+/// 「没有」哨兵：与任何真实下标都不相等。
+const TRACE_NONE: uint = 4294967295
+
+/// 游标页布局：64 字节头 + 33 个 64 字节帧，放得进一页 raw 页。
+pub const TRACE_HEADER_BYTES: uint = 64
+pub const TRACE_FRAME_BYTES: uint = 64
+pub const TRACE_SCRATCH_BYTES: uint = 4096
+/// 帧区之后的 scratch 字：解码结果经此传递，避免多层多值返回。
+pub const TRACE_SCRATCH_OFFSET: uint = TRACE_HEADER_BYTES + TRACE_MAX_FRAMES * TRACE_FRAME_BYTES
+/// bitmap 查找结果 `(字节下标, 剩余位)`。
+pub const TRACE_BITMAP_OFFSET: uint = TRACE_SCRATCH_OFFSET + 16
+/// 最近一次访问的 word 下标。
+pub const TRACE_WORD_OFFSET: uint = TRACE_SCRATCH_OFFSET + 32
+
+const CURSOR_DEPTH: uint = 0
+const CURSOR_ROOT: uint = 8
+const CURSOR_POINTERS: uint = 16
+const CURSOR_ARENA_SLOTS: uint = 24
+const CURSOR_COMPLETE: uint = 32
+const CURSOR_BUDGET: uint = 40
+const CURSOR_SPENT: uint = 48
+/// 最近一次访问的 opcode（`TRACE_OP_DIRECT` / `TRACE_OP_INTERIOR`）。
+///
+/// 消费方必须按它区分「字段里存的是 payload 指针」还是「payload+delta 的内部指针」：
+/// 后者搬完后要按原 delta 回写，不能当直接指针处理。
+const CURSOR_LAST_OP: uint = 56
+
+const FRAME_KIND: uint = 0
+const FRAME_A: uint = 8
+const FRAME_B: uint = 16
+const FRAME_C: uint = 24
+const FRAME_D: uint = 32
+const FRAME_E: uint = 40
+const FRAME_F: uint = 48
+const FRAME_G: uint = 56
+
+/// 保留范围描述；与 `std.platform.commit` 的入参一致。
+#[repr(C)]
+struct TraceExtent { base: uint, bytes: uint }
+
+/// 保留游标页；`boot` 在屏障状态页之后调用。
+pub fn trace_init(processor: uint) {
+    unsafe {
+        let base = std.platform.reserve_aligned(TRACE_SCRATCH_BYTES, uint(4096))
+        if base == 0 { heap_fail() }
+        let extent = TraceExtent { base, bytes: TRACE_SCRATCH_BYTES }
+        if std.platform.commit(std.mem.transmute[*TraceExtent, uint](std.ptr.addr_of(extent))) != 0 {
+            heap_fail()
+        }
+        let at = base
+        let end = base + TRACE_SCRATCH_BYTES
+        while at < end {
+            heap_store_word(at, 0)
+            at = at + 8
+        }
+        heap_store_word(processor + PROCESSOR_TRACE_CURSOR_OFFSET, base)
+    }
+}
+
+/// 本 processor 的游标页地址。
+pub fn trace_cursor(processor: uint) uint {
+    let cursor = heap_word(processor + PROCESSOR_TRACE_CURSOR_OFFSET)
+    if cursor == 0 { heap_fail() }
+    cursor
+}
+
+/// 复位游标并给定额度；每个 descriptor 开始扫描前调用一次。
+pub fn trace_begin(cursor: uint, budget: uint) {
+    heap_store_word(cursor + CURSOR_DEPTH, 0)
+    heap_store_word(cursor + CURSOR_ROOT, TRACE_KIND_NONE)
+    heap_store_word(cursor + CURSOR_POINTERS, 0)
+    heap_store_word(cursor + CURSOR_ARENA_SLOTS, 0)
+    heap_store_word(cursor + CURSOR_COMPLETE, 0)
+    heap_store_word(cursor + CURSOR_BUDGET, budget)
+    heap_store_word(cursor + CURSOR_SPENT, 0)
+    heap_store_word(cursor + CURSOR_LAST_OP, TRACE_OP_END)
+    let index: uint = 0
+    while index < TRACE_MAX_FRAMES {
+        heap_store_word(trace_frame(cursor, index) + FRAME_KIND, FRAME_EMPTY)
+        index = index + 1
+    }
+}
+
+/// 已访问的 managed pointer word 数。
+pub fn trace_pointers(cursor: uint) uint = heap_word(cursor + CURSOR_POINTERS)
+
+/// descriptor 是否含 `ARENA_SLOTS`。
+pub fn trace_arena_slots(cursor: uint) uint = heap_word(cursor + CURSOR_ARENA_SLOTS)
+
+/// 已消费的工作单位。
+pub fn trace_spent(cursor: uint) uint = heap_word(cursor + CURSOR_SPENT)
+
+/// 该游标是否已扫完。
+pub fn trace_complete(cursor: uint) uint = heap_word(cursor + CURSOR_COMPLETE)
+
+/// 第 index 个帧的地址。
+fn trace_frame(cursor: uint, index: uint) uint {
+    cursor + TRACE_HEADER_BYTES + index * TRACE_FRAME_BYTES
+}
+
+/// 写一个帧的全部字段。
+fn trace_set_frame(cursor: uint, index: uint, kind: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint, g: uint) {
+    let frame = trace_frame(cursor, index)
+    heap_store_word(frame + FRAME_KIND, kind)
+    heap_store_word(frame + FRAME_A, a)
+    heap_store_word(frame + FRAME_B, b)
+    heap_store_word(frame + FRAME_C, c)
+    heap_store_word(frame + FRAME_D, d)
+    heap_store_word(frame + FRAME_E, e)
+    heap_store_word(frame + FRAME_F, f)
+    heap_store_word(frame + FRAME_G, g)
+}
+
+/// 压入一个子帧；超过 `TRACE_MAX_FRAMES` 是真实损坏。
+fn trace_push(cursor: uint, kind: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint, g: uint) {
+    let depth = heap_word(cursor + CURSOR_DEPTH) + uint(1)
+    if depth >= TRACE_MAX_FRAMES { heap_fail() }
+    heap_store_word(cursor + CURSOR_DEPTH, depth)
+    trace_set_frame(cursor, depth, kind, a, b, c, d, e, f, g)
+}
+
+/// 读取 descriptor 里的一个 u32 LE。
+fn trace_u32(base: uint, offset: uint, len: uint) uint {
+    if offset + 4 > len { heap_fail() }
+    uint(heap_byte(base + offset)) | uint(heap_byte(base + offset + 1)) << 8 | uint(heap_byte(base + offset + 2)) << 16 | uint(heap_byte(base + offset + 3)) << 24
+}
+
+/// 读取 descriptor 里的一个 u64 LE。
+fn trace_u64(base: uint, offset: uint, len: uint) uint {
+    if offset + 8 > len { heap_fail() }
+    let value: uint = 0
+    let index: uint = 0
+    while index < 8 {
+        value = value | uint(heap_byte(base + offset + index)) << (index * 8)
+        index = index + 1
+    }
+    value
+}
+
+/// 按 width 从 payload 的小端字段读取计数或判别值；宽度只允许 1、2、4、8。
+fn trace_field(payload: uint, payload_len: uint, offset: uint, width: uint) uint {
+    if width != 1 && width != 2 && width != 4 && width != 8 { heap_fail() }
+    if offset + width > payload_len { heap_fail() }
+    let value: uint = 0
+    let index: uint = 0
+    while index < width {
+        value = value | uint(heap_byte(payload + offset + index)) << (index * 8)
+        index = index + 1
+    }
+    value
+}
+
+/// 解码一个 ULEB128，返回 (值, 新下标)。规则与 schema 的 decoder 一致：拒绝截断、数值溢出、
+/// 非 canonical（多余的高位零组）与超过 5 字节的编码。
+fn trace_uleb(base: uint, len: uint, index: uint) (uint, uint) {
+    let value: uint = 0
+    let shift: uint = 0
+    let cursor = index
+    let done: uint = 0
+    while done == 0 {
+        if cursor >= len { heap_fail() }
+        let byte = uint(heap_byte(base + cursor))
+        cursor = cursor + 1
+        let payload = byte & uint(127)
+        if shift == 63 && payload > 1 { heap_fail() }
+        value = value | payload << shift
+        if byte & uint(128) == 0 {
+            if shift != 0 && payload == 0 { heap_fail() }
+            done = 1
+        } else {
+            shift = shift + 7
+            if shift >= 70 { heap_fail() }
+            _ = 0
+        }
+    }
+    (value, cursor)
+}
+
+/// program 视图：非 program 表示返回 (0, 0)。
+fn trace_program(descriptor: uint, descriptor_len: uint) (uint, uint) {
+    if descriptor_len < 1 { heap_fail() }
+    if uint(heap_byte(descriptor)) != TRACE_KIND_PROGRAM { return (0, 0) }
+    let length = trace_u32(descriptor, 1, descriptor_len)
+    if 5 + length > descriptor_len { heap_fail() }
+    (descriptor + 5, length)
+}
+
+/// 从 `start` 起查找下一个含标记位的位图字节，返回 (字节下标, 剩余位)。
+///
+/// direct 与 interior 的同位号位指向同一个 payload word，因此把两者合成同一份「剩余位」。
+fn trace_next_bitmap_byte(descriptor: uint, descriptor_len: uint, start: uint, bitmap_bytes: uint) (uint, uint) {
+    if 8 + bitmap_bytes * 2 > descriptor_len { heap_fail() }
+    let direct = descriptor + 8
+    let interior = direct + bitmap_bytes
+    let index = start
+    while index < bitmap_bytes {
+        let bits = uint(heap_byte(direct + index)) | uint(heap_byte(interior + index)) << 8
+        if bits != 0 { return (index, bits) }
+        index = index + 1
+    }
+    (bitmap_bytes, 0)
+}
+
+/// 最低置位的位号。
+fn trace_trailing_zeros(value: uint) uint {
+    let index: uint = 0
+    while index < 64 {
+        if value >> index & uint(1) != 0 { return index }
+        index = index + 1
+    }
+    64
+}
+
+/// 初始化根帧；返回 0 表示还要继续推进，1 表示整个 descriptor 已经完成。
+pub fn trace_open(cursor: uint, descriptor: uint, descriptor_len: uint) uint {
+    if descriptor_len < 1 { heap_fail() }
+    let kind = uint(heap_byte(descriptor))
+    if kind == TRACE_KIND_NONE {
+        heap_store_word(cursor + CURSOR_ROOT, TRACE_KIND_NONE)
+        heap_store_word(cursor + CURSOR_COMPLETE, 1)
+        return 1
+    }
+    if kind == TRACE_KIND_BITMAP {
+        let words = trace_u32(descriptor, 4, descriptor_len)
+        let bitmap_bytes = (words + 7) / 8
+        if 8 + bitmap_bytes * 2 > descriptor_len { heap_fail() }
+        heap_store_word(cursor + CURSOR_ROOT, TRACE_KIND_BITMAP)
+        let (byte_index, bits) = trace_next_bitmap_byte(descriptor, descriptor_len, 0, bitmap_bytes)
+        if byte_index >= bitmap_bytes {
+            heap_store_word(cursor + CURSOR_COMPLETE, 1)
+            return 1
+        }
+        trace_set_frame(cursor, 0, FRAME_BITMAP, byte_index, bits, bitmap_bytes, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+        return 0
+    }
+    if kind == TRACE_KIND_PROGRAM {
+        let (program, length) = trace_program(descriptor, descriptor_len)
+        if length == 0 { heap_fail() }
+        let _ = program
+        heap_store_word(cursor + CURSOR_ROOT, TRACE_KIND_PROGRAM)
+        trace_set_frame(cursor, 0, FRAME_BODY, 0, 0, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+        return 0
+    }
+    heap_fail()
+    0
+}
+
+/// 推进游标直到产生一次指针访问、扫完、或额度耗尽，返回状态；访问的 word 由
+/// `trace_last_word` 读取。
+///
+/// 额度在每个工作单位上前扣：`TRACE_PENDING` 时游标状态已经保存，调用方必须用同一游标继续，
+/// 绝不从头重扫。
+pub fn trace_advance(cursor: uint, descriptor: uint, descriptor_len: uint, payload: uint, payload_len: uint) uint {
+    let result = TRACE_COMPLETE
+    if heap_word(cursor + CURSOR_COMPLETE) == 0 {
+        let running: uint = 1
+        result = TRACE_PENDING
+        while running == 1 {
+            if heap_word(cursor + CURSOR_BUDGET) == 0 {
+                running = 0
+            } else {
+                heap_store_word(cursor + CURSOR_BUDGET, heap_word(cursor + CURSOR_BUDGET) - uint(1))
+                heap_store_word(cursor + CURSOR_SPENT, heap_word(cursor + CURSOR_SPENT) + uint(1))
+                let step = trace_step_once(cursor, descriptor, descriptor_len, payload, payload_len)
+                if step == STEP_COMPLETE {
+                    result = TRACE_COMPLETE
+                    running = 0
+                }
+                if step == STEP_VISIT {
+                    result = TRACE_VISIT
+                    running = 0
+                }
+                _ = 0
+            }
+        }
+    }
+    result
+}
+
+/// 只补工作额度，不触碰游标状态：调用方在收到 `TRACE_PENDING` 后用同一游标续跑。
+pub fn trace_grant(cursor: uint, budget: uint) {
+    heap_store_word(cursor + CURSOR_BUDGET, budget)
+}
+
+/// 最近一次访问的 word 下标；只有 `trace_advance` 返回 `TRACE_VISIT` 时有意义。
+pub fn trace_last_word(cursor: uint) uint = heap_word(cursor + TRACE_WORD_OFFSET)
+
+/// 最近一次访问的 opcode；与 `trace_last_word` 同一有效期。
+///
+/// 调用方据此决定回写方式：DIRECT 写新 payload，INTERIOR 写「新 payload + 原 delta」。
+pub fn trace_last_op(cursor: uint) uint = heap_word(cursor + CURSOR_LAST_OP)
+
+/// 推进一个工作单位；访问产生的 word 写进 `TRACE_WORD_OFFSET`。
+fn trace_step_once(cursor: uint, descriptor: uint, descriptor_len: uint, payload: uint, payload_len: uint) uint {
+    let depth = heap_word(cursor + CURSOR_DEPTH)
+    let kind = heap_word(trace_frame(cursor, depth) + FRAME_KIND)
+    if kind == FRAME_BITMAP {
+        return trace_step_bitmap(cursor, descriptor, descriptor_len, payload, payload_len, depth)
+    }
+    if kind == FRAME_BODY {
+        return trace_step_body(cursor, descriptor, descriptor_len, payload, payload_len, depth)
+    }
+    if kind == FRAME_WORDS {
+        return trace_step_words(cursor, payload_len, depth)
+    }
+    if kind == FRAME_REPEAT {
+        return trace_step_repeat(cursor, depth)
+    }
+    if kind == FRAME_SWITCH {
+        return trace_step_switch(cursor, descriptor, descriptor_len, depth)
+    }
+    heap_fail()
+    STEP_CONTINUE
+}
+
+/// 根 bitmap 的一位：位号 0..=7 来自 direct、8..=15 来自 interior，都指向同一个 payload word。
+fn trace_step_bitmap(cursor: uint, descriptor: uint, descriptor_len: uint, payload: uint, payload_len: uint, depth: uint) uint {
+    let _ = payload
+    let frame = trace_frame(cursor, depth)
+    let byte_index = heap_word(frame + FRAME_A)
+    let bits = heap_word(frame + FRAME_B)
+    let bitmap_bytes = heap_word(frame + FRAME_C)
+    if bits != 0 {
+        let bit = trace_trailing_zeros(bits)
+        let word = byte_index * 8 + bit % 8
+        // 位号 0..=7 落在 direct 半区、8..=15 落在 interior 半区（见 `trace_next_bitmap_byte` 的合并）。
+        let op = if bit < 8 { TRACE_OP_DIRECT } else { TRACE_OP_INTERIOR }
+        trace_visit_word(cursor, payload_len, word, op)
+        trace_set_frame(cursor, depth, FRAME_BITMAP, byte_index, bits & (bits - uint(1)), bitmap_bytes, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+        return STEP_VISIT
+    }
+    let words = trace_u32(descriptor, 4, descriptor_len)
+    trace_next_bitmap_into(cursor, descriptor, descriptor_len, byte_index + uint(1), bitmap_bytes)
+    let next_index = heap_word(cursor + TRACE_BITMAP_OFFSET)
+    let next_bits = heap_word(cursor + TRACE_BITMAP_OFFSET + 8)
+    if next_index >= bitmap_bytes {
+        if trace_pointers(cursor) > words { heap_fail() }
+        heap_store_word(cursor + CURSOR_COMPLETE, 1)
+        return STEP_COMPLETE
+    }
+    trace_set_frame(cursor, depth, FRAME_BITMAP, next_index, next_bits, bitmap_bytes, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+    STEP_CONTINUE
+}
+
+/// 连续 word 区间：每个单位访问一个 word，区间走完后回到 `resume`。
+fn trace_step_words(cursor: uint, payload_len: uint, depth: uint) uint {
+    let frame = trace_frame(cursor, depth)
+    let next_word = heap_word(frame + FRAME_A)
+    let remaining = heap_word(frame + FRAME_B)
+    let shift = heap_word(frame + FRAME_C)
+    let resume = heap_word(frame + FRAME_D)
+    // FRAME_E 携带该区间的 opcode：DIRECT 区间回写新 payload，INTERIOR 区间回写「新 payload+delta」。
+    let op = heap_word(frame + FRAME_E)
+    if remaining == 0 {
+        trace_set_frame(cursor, depth, FRAME_BODY, resume, shift, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+        return STEP_CONTINUE
+    }
+    let word = next_word + shift
+    trace_visit_word(cursor, payload_len, word, op)
+    let left = remaining - uint(1)
+    if left == 0 {
+        trace_set_frame(cursor, depth, FRAME_BODY, resume, shift, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+    } else {
+        trace_set_frame(cursor, depth, FRAME_WORDS, next_word + uint(1), left, shift, resume, op, TRACE_NONE, TRACE_NONE)
+    }
+    STEP_VISIT
+}
+
+/// REPEAT/REPEAT_FIELD：每步压入一项 body，走完后回到 body 之后。
+fn trace_step_repeat(cursor: uint, depth: uint) uint {
+    let frame = trace_frame(cursor, depth)
+    let item = heap_word(frame + FRAME_A)
+    let count = heap_word(frame + FRAME_B)
+    let base = heap_word(frame + FRAME_C)
+    let stride = heap_word(frame + FRAME_D)
+    let body_start = heap_word(frame + FRAME_E)
+    let body_end = heap_word(frame + FRAME_F)
+    let shift = heap_word(frame + FRAME_G)
+    if item >= count {
+        trace_set_frame(cursor, depth, FRAME_BODY, body_end, shift, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+        return STEP_CONTINUE
+    }
+    trace_set_frame(cursor, depth, FRAME_REPEAT, item + uint(1), count, base, stride, body_start, body_end, shift)
+    trace_push(cursor, FRAME_BODY, body_start, base + item * stride + shift, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+    STEP_CONTINUE
+}
+
+/// SWITCH：逐个扫描 case 记录，扫完后压入所选分支（或 default），并回到 default 之后。
+fn trace_step_switch(cursor: uint, descriptor: uint, descriptor_len: uint, depth: uint) uint {
+    let program = trace_program_of(descriptor, descriptor_len)
+    let program_len = trace_program_length(descriptor, descriptor_len)
+    let frame = trace_frame(cursor, depth)
+    let case_pc = heap_word(frame + FRAME_A)
+    let case_index = heap_word(frame + FRAME_B)
+    let case_count = heap_word(frame + FRAME_C)
+    let tag = heap_word(frame + FRAME_D)
+    let chosen = heap_word(frame + FRAME_E)
+    let shift = heap_word(frame + FRAME_G)
+    let pc = case_pc
+    if case_index < case_count {
+        if pc + 12 > program_len { heap_fail() }
+        let case_tag = trace_u64(program, pc, program_len)
+        let body_len = trace_u32(program, pc + 8, program_len)
+        let body_start = pc + 12
+        let body_end = body_start + body_len
+        if body_end > program_len { heap_fail() }
+        let pick = case_tag == tag && chosen == TRACE_NONE
+        let picked = if pick { body_start } else { chosen }
+        trace_set_frame(cursor, depth, FRAME_SWITCH, body_end, case_index + uint(1), case_count, tag, picked, TRACE_NONE, shift)
+        return STEP_CONTINUE
+    }
+    if pc + 4 > program_len { heap_fail() }
+    let default_len = trace_u32(program, pc, program_len)
+    let default_start = pc + 4
+    let default_end = default_start + default_len
+    if default_end > program_len { heap_fail() }
+    let missing = chosen == TRACE_NONE
+    let body_start = if missing { default_start } else { chosen }
+    trace_set_frame(cursor, depth, FRAME_BODY, default_end, shift, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+    trace_push(cursor, FRAME_BODY, body_start, shift, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+    STEP_CONTINUE
+}
+
+/// 执行一个 opcode。
+fn trace_step_body(cursor: uint, descriptor: uint, descriptor_len: uint, payload: uint, payload_len: uint, depth: uint) uint {
+    let program = trace_program_of(descriptor, descriptor_len)
+    let program_len = trace_program_length(descriptor, descriptor_len)
+    let frame = trace_frame(cursor, depth)
+    let pc = heap_word(frame + FRAME_A)
+    let shift = heap_word(frame + FRAME_B)
+    if pc >= program_len { heap_fail() }
+    let op = uint(heap_byte(program + pc))
+    let index = pc + uint(1)
+    if op == TRACE_OP_END {
+        if depth == 0 {
+            if index != program_len { heap_fail() }
+            heap_store_word(cursor + CURSOR_COMPLETE, 1)
+            return STEP_COMPLETE
+        }
+        heap_store_word(cursor + CURSOR_DEPTH, depth - uint(1))
+        return STEP_CONTINUE
+    }
+    if op == TRACE_OP_DIRECT || op == TRACE_OP_INTERIOR {
+        trace_uleb_into(cursor, program, program_len, index)
+        let direct_base = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+        let after_base = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+        trace_uleb_into(cursor, program, program_len, after_base)
+        let direct_count = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+        let after_count = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+        trace_set_frame(cursor, depth, FRAME_WORDS, direct_base, direct_count, shift, after_count, op, TRACE_NONE, TRACE_NONE)
+        return STEP_CONTINUE
+    }
+    if op == TRACE_OP_REPEAT || op == TRACE_OP_REPEAT_FIELD {
+        return trace_open_repeat(cursor, program, program_len, payload, payload_len, depth, index, shift, op)
+    }
+    if op == TRACE_OP_SWITCH {
+        trace_uleb_into(cursor, program, program_len, index)
+        let tag_offset = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+        let after_tag = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+        trace_uleb_into(cursor, program, program_len, after_tag)
+        let width = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+        let after_width = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+        trace_uleb_into(cursor, program, program_len, after_width)
+        let case_count = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+        let after_count = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+        let tag = trace_field(payload, payload_len, tag_offset, width)
+        trace_set_frame(cursor, depth, FRAME_SWITCH, after_count, 0, case_count, tag, TRACE_NONE, TRACE_NONE, shift)
+        return STEP_CONTINUE
+    }
+    if op == TRACE_OP_ARENA_SLOTS {
+        heap_store_word(cursor + CURSOR_ARENA_SLOTS, 1)
+        trace_set_frame(cursor, depth, FRAME_BODY, index, shift, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE, TRACE_NONE)
+        return STEP_CONTINUE
+    }
+    heap_fail()
+    STEP_CONTINUE
+}
+
+/// REPEAT 与 REPEAT_FIELD：解码操作数后进入重复帧。
+fn trace_open_repeat(cursor: uint, program: uint, program_len: uint, payload: uint, payload_len: uint, depth: uint, index: uint, shift: uint, op: uint) uint {
+    trace_uleb_into(cursor, program, program_len, index)
+    let base = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+    let after_base = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+    if op == TRACE_OP_REPEAT_FIELD {
+        return trace_open_repeat_field(cursor, program, program_len, payload, payload_len, depth, after_base, base, shift)
+    }
+    trace_uleb_into(cursor, program, program_len, after_base)
+    let count = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+    let after_count = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+    trace_uleb_into(cursor, program, program_len, after_count)
+    let stride = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+    let after = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+    trace_enter_repeat(cursor, program, program_len, depth, base, count, stride, after, shift)
+    STEP_CONTINUE
+}
+
+/// REPEAT_FIELD：count 从 payload 字段读（宽度只允许 1、2、4、8）。
+fn trace_open_repeat_field(cursor: uint, program: uint, program_len: uint, payload: uint, payload_len: uint, depth: uint, index: uint, base: uint, shift: uint) uint {
+    trace_uleb_into(cursor, program, program_len, index)
+    let count_offset = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+    let after_offset = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+    trace_uleb_into(cursor, program, program_len, after_offset)
+    let width = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+    let after_width = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+    let count = trace_field(payload, payload_len, count_offset, width)
+    trace_uleb_into(cursor, program, program_len, after_width)
+    let stride = heap_word(cursor + TRACE_SCRATCH_OFFSET)
+    let after = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
+    trace_enter_repeat(cursor, program, program_len, depth, base, count, stride, after, shift)
+    STEP_CONTINUE
+}
+
+/// 解码一个 ULEB，把 (值, 新下标) 写进游标 scratch；调用方从那里读。
+fn trace_uleb_into(cursor: uint, program: uint, program_len: uint, index: uint) {
+    let (value, next) = trace_uleb(program, program_len, index)
+    heap_store_word(cursor + TRACE_SCRATCH_OFFSET, value)
+    heap_store_word(cursor + TRACE_SCRATCH_OFFSET + 8, next)
+}
+
+/// 查找下一个含标记位的位图字节，把 (字节下标, 剩余位) 写进游标 scratch。
+fn trace_next_bitmap_into(cursor: uint, descriptor: uint, descriptor_len: uint, start: uint, bitmap_bytes: uint) {
+    let (byte_index, bits) = trace_next_bitmap_byte(descriptor, descriptor_len, start, bitmap_bytes)
+    heap_store_word(cursor + TRACE_BITMAP_OFFSET, byte_index)
+    heap_store_word(cursor + TRACE_BITMAP_OFFSET + 8, bits)
+}
+
+/// program 起点；非 program 表示返回 0。
+fn trace_program_of(descriptor: uint, descriptor_len: uint) uint {
+    if descriptor_len < 1 { heap_fail() }
+    if uint(heap_byte(descriptor)) != TRACE_KIND_PROGRAM { return uint(0) }
+    descriptor + 5
+}
+
+/// program 长度；非 program 表示返回 0。
+fn trace_program_length(descriptor: uint, descriptor_len: uint) uint {
+    if descriptor_len < 1 { heap_fail() }
+    if uint(heap_byte(descriptor)) != TRACE_KIND_PROGRAM { return uint(0) }
+    let length = trace_u32(descriptor, 1, descriptor_len)
+    if 5 + length > descriptor_len { heap_fail() }
+    length
+}
+
+/// 进入重复帧：`after` 处是 body 长度与 body 起点。
+fn trace_enter_repeat(cursor: uint, program: uint, program_len: uint, depth: uint, base: uint, count: uint, stride: uint, after: uint, shift: uint) {
+    if after + 4 > program_len { heap_fail() }
+    let body_len = trace_u32(program, after, program_len)
+    let body_start = after + 4
+    let body_end = body_start + body_len
+    if body_end > program_len { heap_fail() }
+    trace_set_frame(cursor, depth, FRAME_REPEAT, 0, count, base, stride, body_start, body_end, shift)
+}
+
+/// 访问一个 payload word：记下下标与 opcode 并累加计数；越界是真实损坏。
+fn trace_visit_word(cursor: uint, payload_len: uint, word: uint, op: uint) {
+    if word * 8 + 8 > payload_len { heap_fail() }
+    heap_store_word(cursor + TRACE_WORD_OFFSET, word)
+    heap_store_word(cursor + CURSOR_LAST_OP, op)
+    heap_store_word(cursor + CURSOR_POINTERS, trace_pointers(cursor) + uint(1))
+}

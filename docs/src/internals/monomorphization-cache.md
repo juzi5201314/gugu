@@ -243,6 +243,10 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
   并把未见 callee 入队；递归调用复用相同实例节点只形成图边。ancestry 预算按
   链上不同 key 256 / 同一 definition 严格增长重复 128 报 `E0052`；实例总数
   达 `u32::MAX` 报 `E0053`。`MonoId` 在闭合后按 key 摘要排序分配。
+  具体 GIR 构造预先计算一次实例摘要列，再二分定位 fragment；late 结果验证同样使用
+  摘要顺序查找，未知实例仍拒绝。新鲜 HIR 由 `Validated::freeze` 统一执行完整 verifier，
+  不在调用方重复验证同一对象。具体 GIR 构造及每轮 pass 完整验证结构并计算一次指纹；
+  已有对象和缓存对象的 `verify` 仍重新计算指纹并比对，不信任序列化中的指纹字段。
 - 实例边以 HIR owner 为边界，覆盖全部 dispatch 位点（普通/协程调用、运算符与
   `for`/`try`/下标协议派发）、擦除前的函数值、闭包、协程 body、局部 static
   初始化器、类型反射及 dyn 擦除的 vtable 根。不同具体类型实现同一接口时，

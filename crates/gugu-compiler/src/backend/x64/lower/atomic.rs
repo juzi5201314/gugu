@@ -77,9 +77,10 @@ fn atomic(
         AtomicOp::Add | AtomicOp::Sub => atomic_add_sub(op, operands, results, builder),
         AtomicOp::CompareExchange => atomic_compare_exchange(operands, results, builder),
         AtomicOp::Fence => atomic_fence(ordering, builder),
-        AtomicOp::And | AtomicOp::Or | AtomicOp::Xor => Err(LoweringError::Unsupported {
+        AtomicOp::And | AtomicOp::Or => atomic_bitwise(op, operands, results, builder),
+        AtomicOp::Xor => Err(LoweringError::Unsupported {
             op: "Atomic",
-            detail: "缺少单指令 fetch 形式，CAS 重试环等出现真实生产者再引入",
+            detail: "尚无 fetch_xor 生产者",
         }),
     }
 }
@@ -261,6 +262,83 @@ fn atomic_compare_exchange(
         Access::Read,
         vec![reg(ok.reg), reg(ok.reg)],
     );
+    Ok(())
+}
+
+/// fetch 位运算返回线性化时的旧值；失败的 cmpxchg 已把新旧值写回 rax，重试不丢并发更新。
+fn atomic_bitwise(
+    op: AtomicOp,
+    operands: &[SiteValue],
+    results: &[SiteValue],
+    builder: &mut Builder,
+) -> Result<(), LoweringError> {
+    let [address, mask] = operands else {
+        return Err(LoweringError::InvalidOperands);
+    };
+    let [old] = results else {
+        return Err(LoweringError::InvalidOperands);
+    };
+    let bits = access_bits(scalar_type(old)?)?;
+    builder.clobber_gpr(Gpr::Rax);
+    builder.clobber_gpr(Gpr::R11);
+    builder.clobber_gpr(Gpr::Rcx);
+    builder.clobber_gpr(Gpr::Rdx);
+    // CAS 循环中的物理 scratch 会跨指令存活，地址与 mask 必须先通过并行拷贝落位，
+    // 不能让逐指令 spill 重载占用 rax/r11 并覆盖期望值或候选值。
+    let inputs = [
+        super::Copy {
+            src: address.reg,
+            dest: gpr(Gpr::Rdx),
+            ty: address.ty.ty,
+        },
+        super::Copy {
+            src: mask.reg,
+            dest: gpr(Gpr::Rcx),
+            ty: mask.ty.ty,
+        },
+    ];
+    builder.record_group(&inputs, |builder| {
+        for copy in &inputs {
+            super::value_move(builder, copy.src, copy.dest, copy.ty)?;
+        }
+        Ok(())
+    })?;
+    builder.emit(
+        "mov",
+        wide_kinds(bits),
+        Access::Read,
+        vec![super::mem_base(gpr(Gpr::Rdx), 0), reg(gpr(Gpr::Rax))],
+    );
+    let retry = builder.label();
+    builder.define(retry);
+    builder.emit(
+        "mov",
+        move_kinds(bits),
+        Access::Write,
+        vec![reg(gpr(Gpr::R11)), reg(gpr(Gpr::Rax))],
+    );
+    let operation = if op == AtomicOp::And { "and" } else { "or" };
+    builder.emit(
+        operation,
+        wide_kinds(bits),
+        Access::ReadWrite,
+        vec![reg(gpr(Gpr::R11)), reg(gpr(Gpr::Rcx))],
+    );
+    builder.emit_locked(
+        "cmpxchg",
+        wide_kinds(bits),
+        Access::ReadWrite,
+        vec![super::mem_base(gpr(Gpr::Rdx), 0), reg(gpr(Gpr::R11))],
+    );
+    builder.emit("jne", REL32, Access::Read, vec![Operand::Label(retry)]);
+    let output = super::Copy {
+        src: gpr(Gpr::Rax),
+        dest: old.reg,
+        ty: old.ty.ty,
+    };
+    builder.record_group(&[output], |builder| {
+        super::value_move(builder, output.src, output.dest, output.ty)
+    })?;
     Ok(())
 }
 

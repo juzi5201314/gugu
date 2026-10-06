@@ -77,6 +77,10 @@ raw plane 的记录可以使用 intrusive link，但 link 只存在于 non-movin
 | `PlatformRange` | virtual range、commit/decommit 和 guard page | 平台 adapter 管理 |
 | `Foreign` | 外部系统或 FFI 所有的缓冲区 | foreign owner 或 bridge 规则管理 |
 
+GC 工作消息的生产、消费和 credit 结算由镜像 coordinator 执行；宿主 world 仅保留 raw/resource
+消息的 owner inbox 与平台 extent 账本。`MarkTicket`、`EdgeDelta`、`RegionTransfer`、
+`HandleForward` 和四类 block return 的算法实现不得在 Rust world 复制一份语义等价路径。
+
 `MemoryDomain` 用编译期固定的 dense domain id 表示。domain id 是路由和统计键，不作为用户数据，也不通过字符串查找。
 
 ### OwnerRecord 与 OwnerToken

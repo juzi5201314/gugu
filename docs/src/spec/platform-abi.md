@@ -297,6 +297,8 @@ PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]`
 
 没有动态 FFI 导入的 Linux executable必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0完成镜像自身允许的 relative relocation并支持加载基址随机化；不能退化成依赖 libc/系统 linker的启动路径。运行时只应用 relative relocation，并把加载偏移加到 addend 上；PC 相对位移与 RVA 在镜像写出前修完。显式登记动态 `.so` 后才可以加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT和对应 relocation，解释器与 sysroot必须来自选中的 target/toolchain描述而不是宿主 PATH探测。
 
+启动载荷（`Rt0Payload`，`REVISION = 4`，128 字节）里的镜像内地址字段全部参与这批 relative relocation：`main_entry`、`initial_slot`、`runtime_state`、`main_return`、`stackmap`、`fragment_base`、`unwind`，以及 `gc_types`（类型段）与 `gc_meta`（GC metadata blob）。两段不存在时对应字段保持 0，且**不得**登记重定位——否则运行期会把加载基址当成有效地址。`boot_environment` 是 rt0 运行期捕获的 native 环境块地址，写明为「不叠加加载偏移」的字段：Linux 直接保存初始栈的 `envp`，Windows 保存 `GetEnvironmentStringsW` 返回的 UTF-16 块；runtime 完成启动配置读取后释放 Windows 副本。该字段不参加 image relocation，不能把它当作镜像内地址。对应的长度字段 `gc_types_len`、`gc_meta_len` 与 `stackmap_len`、`unwind_len` 一样是镜像字节数，不参与重定位。
+
 Windows executable和 `cdylib` 使用 PE32+，包含合法 base-relocation table并设置 ASLR、high-entropy ASLR和 NX兼容标志；默认不导入 CRT。preferred image base、file/section排列和 padding是当前 writer实现细节，外部代码只能依赖本章登记的导入导出、逻辑节、入口、TLS和展开面。
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。

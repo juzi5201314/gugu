@@ -1,0 +1,121 @@
+use std.runtime.gc_probes.{allocation_probe, atomic_probes, barrier_probe, block_return_probe, candidate_probe, compressed_probe, corrupt_probe, edge_probe, large_mapping_probe, major_probe, mark_ticket_probe, minor_probe, move_probe, oom_probe, pacing_probe, pressure_probe, raw_not_root_probe, refill_probe, region_probe, root_map_probe, select_probe, shared_capture_probe, static_probe, trace_probe, probe_all}
+
+fn report(text: *byte, bytes: uint) {
+    unsafe { _ = std.runtime.report_write(1, text, bytes) }
+}
+
+#[cfg(runtime_gc_case = "all")]
+fn selected_case() uint = probe_all()
+#[cfg(runtime_gc_case = "gc-alloc")]
+fn selected_case() uint = allocation_probe()
+#[cfg(runtime_gc_case = "gc-refill")]
+fn selected_case() uint = refill_probe()
+#[cfg(runtime_gc_case = "gc-minor")]
+fn selected_case() uint = minor_probe()
+#[cfg(runtime_gc_case = "gc-interior")]
+fn selected_case() uint = move_probe()
+#[cfg(runtime_gc_case = "gc-root-map")]
+fn selected_case() uint = root_map_probe()
+#[cfg(runtime_gc_case = "gc-raw-not-root")]
+fn selected_case() uint = raw_not_root_probe()
+#[cfg(runtime_gc_case = "gc-static")]
+fn selected_case() uint = static_probe()
+#[cfg(runtime_gc_case = "gc-dynamic-roots")]
+fn selected_case() uint = select_probe()
+#[cfg(runtime_gc_case = "gc-shared-capture")]
+fn selected_case() uint = shared_capture_probe()
+#[cfg(runtime_gc_case = "gc-barrier")]
+fn selected_case() uint = barrier_probe()
+#[cfg(runtime_gc_case = "gc-stop-flush")]
+fn selected_case() uint = barrier_probe()
+#[cfg(runtime_gc_case = "gc-major")]
+fn selected_case() uint = major_probe()
+#[cfg(runtime_gc_case = "gc-mark-ticket")]
+fn selected_case() uint = mark_ticket_probe()
+#[cfg(runtime_gc_case = "gc-trace")]
+fn selected_case() uint = trace_probe()
+#[cfg(runtime_gc_case = "gc-region")]
+fn selected_case() uint = region_probe()
+#[cfg(runtime_gc_case = "gc-candidate")]
+fn selected_case() uint = candidate_probe()
+#[cfg(runtime_gc_case = "gc-block-return")]
+fn selected_case() uint = block_return_probe()
+#[cfg(runtime_gc_case = "gc-compressed")]
+fn selected_case() uint = compressed_probe()
+#[cfg(runtime_gc_case = "gc-pacing")]
+fn selected_case() uint = pacing_probe()
+#[cfg(runtime_gc_case = "gc-pressure")]
+fn selected_case() uint = pressure_probe()
+#[cfg(runtime_gc_case = "gc-oom")]
+fn selected_case() uint = oom_probe()
+#[cfg(runtime_gc_case = "gc-corrupt")]
+fn selected_case() uint = corrupt_probe()
+#[cfg(runtime_gc_case = "gc-atomics")]
+fn selected_case() uint = atomic_probes()
+#[cfg(runtime_gc_case = "gc-move")]
+fn selected_case() uint = move_probe()
+#[cfg(runtime_gc_case = "gc-select")]
+fn selected_case() uint = select_probe()
+#[cfg(runtime_gc_case = "gc-large")]
+fn selected_case() uint = large_mapping_probe()
+
+#[cfg(runtime_gc_case = "all")]
+fn report_case() { report(c"gc:gc-atomics:ok\ngc:gc-root-map:ok\n", uint(35)) }
+#[cfg(runtime_gc_case = "gc-alloc")]
+fn report_case() { report(c"gc:gc-alloc:ok\n", uint(15)) }
+#[cfg(runtime_gc_case = "gc-refill")]
+fn report_case() { report(c"gc:gc-refill:ok\n", uint(16)) }
+#[cfg(runtime_gc_case = "gc-minor")]
+fn report_case() { report(c"gc:gc-minor:ok\n", uint(15)) }
+#[cfg(runtime_gc_case = "gc-interior")]
+fn report_case() { report(c"gc:gc-interior:ok\n", uint(18)) }
+#[cfg(runtime_gc_case = "gc-root-map")]
+fn report_case() { report(c"gc:gc-root-map:ok\n", uint(18)) }
+#[cfg(runtime_gc_case = "gc-raw-not-root")]
+fn report_case() { report(c"gc:gc-raw-not-root:ok\n", uint(22)) }
+#[cfg(runtime_gc_case = "gc-static")]
+fn report_case() { report(c"gc:gc-static:ok\n", uint(16)) }
+#[cfg(runtime_gc_case = "gc-dynamic-roots")]
+fn report_case() { report(c"gc:gc-dynamic-roots:ok\n", uint(23)) }
+#[cfg(runtime_gc_case = "gc-shared-capture")]
+fn report_case() { report(c"gc:gc-shared-capture:ok\n", uint(24)) }
+#[cfg(runtime_gc_case = "gc-barrier")]
+fn report_case() { report(c"gc:gc-barrier:ok\n", uint(17)) }
+#[cfg(runtime_gc_case = "gc-stop-flush")]
+fn report_case() { report(c"gc:gc-stop-flush:ok\n", uint(20)) }
+#[cfg(runtime_gc_case = "gc-major")]
+fn report_case() { report(c"gc:gc-major:ok\n", uint(15)) }
+#[cfg(runtime_gc_case = "gc-mark-ticket")]
+fn report_case() { report(c"gc:gc-mark-ticket:ok\n", uint(21)) }
+#[cfg(runtime_gc_case = "gc-trace")]
+fn report_case() { report(c"gc:gc-trace:ok\n", uint(15)) }
+#[cfg(runtime_gc_case = "gc-region")]
+fn report_case() { report(c"gc:gc-region:ok\n", uint(16)) }
+#[cfg(runtime_gc_case = "gc-candidate")]
+fn report_case() { report(c"gc:gc-candidate:ok\n", uint(19)) }
+#[cfg(runtime_gc_case = "gc-block-return")]
+fn report_case() { report(c"gc:gc-block-return:ok\n", uint(22)) }
+#[cfg(runtime_gc_case = "gc-compressed")]
+fn report_case() { report(c"gc:gc-compressed:ok\n", uint(20)) }
+#[cfg(runtime_gc_case = "gc-pacing")]
+fn report_case() { report(c"gc:gc-pacing:ok\n", uint(16)) }
+#[cfg(runtime_gc_case = "gc-pressure")]
+fn report_case() { report(c"gc:gc-pressure:ok\n", uint(18)) }
+#[cfg(runtime_gc_case = "gc-oom")]
+fn report_case() { report(c"gc:gc-oom:ok\n", uint(13)) }
+#[cfg(runtime_gc_case = "gc-corrupt")]
+fn report_case() { report(c"gc:gc-corrupt:ok\n", uint(17)) }
+#[cfg(runtime_gc_case = "gc-atomics")]
+fn report_case() { report(c"gc:gc-atomics:ok\n", uint(17)) }
+#[cfg(runtime_gc_case = "gc-move")]
+fn report_case() { report(c"gc:gc-move:ok\n", uint(14)) }
+#[cfg(runtime_gc_case = "gc-select")]
+fn report_case() { report(c"gc:gc-select:ok\n", uint(16)) }
+#[cfg(runtime_gc_case = "gc-large")]
+fn report_case() { report(c"gc:gc-large:ok\n", uint(15)) }
+
+fn main() {
+    let failure = selected_case()
+    if failure != 0 { unsafe { std.runtime.process_exit(failure) } }
+    report_case()
+}

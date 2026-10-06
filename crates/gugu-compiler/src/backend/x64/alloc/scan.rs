@@ -129,7 +129,13 @@ pub(crate) fn scan(live: &LiveInfo) -> Result<Scanned, AllocError> {
                 if victim == index {
                     break;
                 }
-                spill(&mut values, victim, &mut gpr_owner, &mut xmm_owner);
+                spill(
+                    &mut values,
+                    victim,
+                    live.values[victim].rematerializable,
+                    &mut gpr_owner,
+                    &mut xmm_owner,
+                );
                 assigned = pick(
                     Candidate {
                         class: value.class,
@@ -213,7 +219,9 @@ fn blocked_masks(live: &LiveInfo) -> Vec<Blocked> {
         .iter()
         .map(|value| {
             let mut mask = Clobbers::NONE;
-            let mut forced_slot = false;
+            // 逻辑根集已经点名该值必须落槽（`live.rs::anchor_coverage` 按栈图契约补齐），
+            // 这条判定优先于按凸区间推导的 `pointer_spill`。
+            let mut forced_slot = value.forced;
             if !value.is_live() {
                 return Blocked { mask, forced_slot };
             }
@@ -408,6 +416,7 @@ fn density_less(left: (u64, u128), right: (u64, u128)) -> bool {
 fn spill(
     values: &mut [ValueAllocation],
     index: usize,
+    rematerializable: bool,
     gpr_owner: &mut [Option<usize>; 16],
     xmm_owner: &mut [Option<usize>; 16],
 ) {
@@ -416,5 +425,12 @@ fn spill(
         Some(Location::Xmm(xmm)) => xmm_owner[xmm.code() as usize] = None,
         Some(Location::Slot(_)) | None => {}
     }
-    values[index].placement = Placement::Location(Location::Slot(u32::MAX));
+    // 可重物化值被淘汰时仍然保持 `Rematerialize`：这类值没有溢出存储，若在淘汰时改判为
+    // `Location(Slot)` 就会得到「读取从未写过的槽」，与定义站点的丢弃规则（`rewrite_instruction`
+    // 只对 `Placement::Rematerialize` 丢弃定义）自相矛盾。
+    values[index].placement = if rematerializable {
+        Placement::Rematerialize
+    } else {
+        Placement::Location(Location::Slot(u32::MAX))
+    };
 }

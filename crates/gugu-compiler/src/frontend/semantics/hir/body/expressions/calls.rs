@@ -26,6 +26,14 @@ fn platform_effects(kind: PlatformIntrinsic) -> u32 {
 /// 每个原语都跨越 runtime 机器边界，必然带 `UNSAFE` 与 `FOREIGN`；`report_write` 写文件描述符，
 /// 额外带 `WRITE`。它们都在登记片段内部完成控制转移与阻塞，不进入挂起协议，因此不带 `SUSPEND`。
 fn runtime_machine_effects(kind: RuntimeMachineIntrinsic) -> u32 {
+    if kind.is_atomic() {
+        let access = match kind {
+            RuntimeMachineIntrinsic::AtomicLoadAcquire => hir::Effects::READ,
+            RuntimeMachineIntrinsic::AtomicStoreRelease => hir::Effects::WRITE,
+            _ => hir::Effects::READ | hir::Effects::WRITE,
+        };
+        return hir::Effects::new(hir::Effects::UNSAFE | access).0;
+    }
     let mut bits = hir::Effects::UNSAFE | hir::Effects::FOREIGN;
     if matches!(kind, RuntimeMachineIntrinsic::ReportWrite) {
         bits |= hir::Effects::WRITE;

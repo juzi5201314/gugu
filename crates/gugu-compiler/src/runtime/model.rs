@@ -18,6 +18,7 @@ use super::edge_schema::{EdgeDemand, EdgeRuntimeContract};
 use super::foreign_schema::{ForeignDemand, ForeignRuntimeContract};
 use super::gc_metadata_contract::GcMetadataRuntimeContract;
 use super::gc_metadata_schema::GcMetadataDemand;
+#[cfg(test)]
 use super::inbox::ServiceBudget;
 use super::ledger::LedgerSchemaV1;
 use super::local_heap_schema::{LocalHeapDemand, LocalHeapRuntimeContract};
@@ -49,9 +50,9 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 27 相对版本 26 的变化：并入阻塞 I/O 站点计数。计数来自 `foreign_schema`，
-/// 不另写一套上限。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 27;
+/// 版本 28 相对版本 27 的变化：LocalHeap 契约纳入 LargeMapping 记录区、固定大映射页粒度，
+/// 并把 page-cover/object-start/mark 的运行期消费者接入分配与屏障路径。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 28;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -501,9 +502,8 @@ impl Default for RawPlanePolicyV1 {
         }
     }
 }
-
+#[cfg(test)]
 impl RawPlanePolicyV1 {
-    /// 返回正常 service 预算。
     pub(crate) const fn service_budget(&self) -> ServiceBudget {
         ServiceBudget::new(self.service_items, self.service_bytes)
     }
@@ -709,28 +709,6 @@ impl RuntimeRawContractV1 {
         self.gc_metadata = self
             .gc_metadata
             .with_sections(type_section, metadata_section)?;
-        self.fingerprint = self.compute_fingerprint();
-        self.verify()?;
-        Ok(self)
-    }
-
-    /// 以新的 cage profile 重建压缩契约段；其余段逐字段保持，指纹与校验同步刷新。
-    ///
-    /// 只供显式开启 cage profile 的消费者（harness / bench / 后续后端）使用：默认编译路径
-    /// 保持关闭态，不带任何 cage 预留，因此不存在第二份契约装配点。
-    pub(crate) fn with_compression(
-        mut self,
-        policy: CompressionPolicyV1,
-        demand: CompressionDemand,
-    ) -> Result<Self, RawModelError> {
-        let target = TargetName::parse(&self.target_semantics)
-            .map_err(|_| RawModelError::new("runtime raw 契约的目标语义未登记"))?;
-        self.compression = CompressionRuntimeContract::build(
-            demand,
-            policy,
-            crate::target::PointerCompression::for_target(target),
-        )?;
-        self.policy.compression = policy;
         self.fingerprint = self.compute_fingerprint();
         self.verify()?;
         Ok(self)

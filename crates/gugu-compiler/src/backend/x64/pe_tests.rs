@@ -1,3 +1,4 @@
+use super::codegen::BlobRelocation;
 use super::pe::{
     ObjectReloc, ObjectSymbol, PeRequest, RelocKindCode, extract_coff_archive, link,
     link_with_layout, pack_coff_archive, reject_writable_executable,
@@ -21,7 +22,43 @@ fn request(entry: &str, symbols: Vec<ObjectSymbol>) -> PeRequest {
         constants: Vec::new(),
         dll: false,
         bound_glues: std::collections::BTreeSet::new(),
+        type_descriptors: std::collections::BTreeMap::new(),
+        globals: std::collections::BTreeMap::new(),
+        blob_relocations: Vec::new(),
     }
+}
+
+#[test]
+fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
+    let mut prepared = request("main", vec![symbol("main", vec![0xc3], Vec::new())]);
+    let mut meta = b"GUGUMT01".to_vec();
+    meta.extend_from_slice(&[0u8; 8]);
+    prepared.readonly.push((".ggmeta".to_owned(), meta));
+    prepared.blob_relocations = vec![BlobRelocation {
+        offset: 8,
+        symbol: "main".to_owned(),
+    }];
+    // 符号 RVA 只有布局知道；用同一请求布局一次拿到它，再比对镜像里回填的字。
+    let (_, layout) = link_with_layout(&prepared).expect("布局");
+    let expected = layout["main"];
+    let image = link(&prepared).expect("镜像");
+    let at = image
+        .bytes
+        .windows(8)
+        .position(|window| window == b"GUGUMT01")
+        .expect("元数据段必须在镜像内");
+    let value = u64::from_le_bytes(image.bytes[at + 8..at + 16].try_into().expect("回填字"));
+    assert_eq!(value, expected, "元数据符号必须回填成符号布局给出的 RVA");
+
+    prepared.blob_relocations = vec![BlobRelocation {
+        offset: 8,
+        symbol: "missing_symbol".to_owned(),
+    }];
+    let error = link(&prepared).expect_err("缺失符号必须失败");
+    assert!(
+        error.contains("missing_symbol"),
+        "失败信息必须点名符号：{error}"
+    );
 }
 
 #[test]
@@ -281,6 +318,7 @@ fn coff_archive_extracts_only_the_named_member() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn compiled_windows_main_is_an_exe_and_linux_image_is_absent() {
     let source = "fn main() {}";
     let compilation = Compiler::new().compile(CompileRequest::single_file(

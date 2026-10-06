@@ -1,12 +1,17 @@
 use super::values::Computed;
-use super::{Builder, Diagnostic, TypeKind, invalid};
+use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::frontend::gir::placement::PlacementKind;
-use crate::frontend::{gir::body as g, hir, mono};
+use crate::frontend::{gir::body as g, hir};
 use crate::lir::body::{
     Conversion, IntOp, Op, Origin, Provenance, RuntimeCall, Symbol, Type, ValueId, ValueType, id,
     range,
 };
 use crate::lir::invalid_resource;
+use crate::runtime::{
+    COROUTINE_PACK_ALIGN, COROUTINE_PACK_BYTES, COROUTINE_PACK_FLOAT_LANES,
+    COROUTINE_PACK_INTEGER_LANES, COROUTINE_PACK_TRACE_NONE, coroutine_pack_float_offset,
+    coroutine_pack_integer_offset, coroutine_pack_trace_code, coroutine_pack_trace_shift,
+};
 
 impl Builder<'_> {
     pub(super) fn intrinsic(
@@ -44,12 +49,8 @@ impl Builder<'_> {
             }
             g::IntrinsicOp::TypeId => {
                 if let Some(input) = types.first() {
-                    let value = self.emit_one(
-                        Op::SymbolAddr(Symbol::TypeId(self.layout(input.0).key)),
-                        &[],
-                        ValueType::scalar(Type::I32),
-                        Origin::None,
-                    );
+                    let key = self.layout(input.0).key;
+                    let value = self.type_id_value(&key)?;
                     Ok(Computed::Values {
                         ty,
                         values: vec![value],
@@ -121,26 +122,42 @@ impl Builder<'_> {
                 }
             }
             g::IntrinsicOp::StaticRef(definition) => {
-                let declaration = &self.module.definitions[definition.index()];
-                let thread_local = self.module.initialization.iter().any(|init| {
-                    init.definition == *definition
-                        && matches!(
-                            init.domain,
-                            hir::StorageDomain::Coroutine | hir::StorageDomain::OsThread
-                        )
-                });
-                let pointer = self.emit_one(
-                    Op::SymbolAddr(Symbol::Global {
-                        key: declaration.key,
-                        thread_local,
-                    }),
+                // 局部类型已被具体化改写为地址类型；块尺寸必须取声明的值类型（`types[0]`），
+                // 否则每个静态都会得到「一个指针宽」的块。
+                let declared = *types
+                    .first()
+                    .ok_or_else(|| invalid("静态引用缺少声明的值类型"))?;
+                let symbol = self.static_block(*definition, declared.0)?;
+                if self.has_managed_fields(declared.0) {
+                    return Err(invalid("managed 静态值的发布路径尚未接线"));
+                }
+                let block = self.emit_one(
+                    Op::SymbolAddr(symbol),
                     &[],
                     ValueType::pointer(Provenance::Foreign),
                     Origin::Symbol,
                 );
+                // 块的第一个字是 initialized flags，值槽紧跟其后。
                 Ok(Computed::Values {
                     ty,
-                    values: vec![pointer],
+                    values: vec![self.offset(block, 8)],
+                })
+            }
+            g::IntrinsicOp::StaticInitialized(definition) => {
+                let declared = *types
+                    .first()
+                    .ok_or_else(|| invalid("静态初始化位读取缺少声明的值类型"))?;
+                let symbol = self.static_block(*definition, declared.0)?;
+                let block = self.emit_one(
+                    Op::SymbolAddr(symbol),
+                    &[],
+                    ValueType::pointer(Provenance::Foreign),
+                    Origin::Symbol,
+                );
+                // 位字是块首的 8 字节；读点守卫据此决定是否先跑初始化器。
+                Ok(Computed::Values {
+                    ty,
+                    values: vec![self.load(block, ValueType::scalar(Type::I64), 8, false)],
                 })
             }
             g::IntrinsicOp::PtrRead | g::IntrinsicOp::ReadUnaligned => {
@@ -304,6 +321,34 @@ impl Builder<'_> {
                 self.runtime_result(target, args, ty)
             }
         }
+    }
+
+    /// 静态块的规范符：块尺寸取声明的值类型（具体编号）。
+    ///
+    /// `StaticRef`、`StaticInitialized` 与初始化器发布必须生成同一个符号：尺寸出现分歧时
+    /// 链接期只能猜。线程/协程局部项按初始化域标记；块本身始终是可写数据。
+    pub(super) fn static_block(
+        &self,
+        definition: hir::DefId,
+        value_ty: u32,
+    ) -> Result<Symbol, Diagnostic> {
+        let declaration = &self.module.definitions[definition.index()];
+        let layout = self
+            .layout(value_ty)
+            .layout
+            .ok_or_else(|| invalid("static 缺少具体布局"))?;
+        let thread_local = self.module.initialization.iter().any(|init| {
+            init.definition == definition
+                && matches!(
+                    init.domain,
+                    hir::StorageDomain::Coroutine | hir::StorageDomain::OsThread
+                )
+        });
+        Ok(Symbol::Global {
+            key: declaration.key,
+            thread_local,
+            bytes: layout.size,
+        })
     }
 
     pub(super) fn runtime_result(
@@ -550,7 +595,8 @@ impl Builder<'_> {
         if !owner.captures.is_empty() {
             lanes.push(environment);
         }
-        self.spawn_call(code, &lanes, ty)
+        let result_kind = self.spawn_result_kind(ty)?;
+        self.spawn_call(code, &lanes, ty, result_kind)
     }
 
     fn channel_ctor(
@@ -734,29 +780,63 @@ impl Builder<'_> {
             let value = self.operand(operand)?;
             lanes.extend(self.computed_values(value)?);
         }
-        self.spawn_call(code, &lanes, ty)
+        // 子协程结果字在 ABI 上是一个字：结果类型含根车道时它指向带描述符的载荷对象，因此
+        // 当结果类型含根车道时，结束后的结果字必须按该车道的根种类登记，供 Join 取走前扫描。
+        let result_kind = self.spawn_result_kind(ty)?;
+        self.spawn_call(code, &lanes, ty, result_kind)
     }
 
-    /// `spawn(code, env)`：把内部 ABI 车道放进 9 个整数槽和 8 个浮点槽。
+    /// spawn 结果字里根的 lane map 编码；结果类型不含根车道时为 0。
+    ///
+    /// 复用帧存储的同一套分类（`Builder::roots`）：结果字是载荷对象的引用，取该类型的第一个根
+    /// 车道种类即可（Direct 的判别值是 0，所以这里必须用 lane map 编码 `n + 1` 才不会与
+    /// 「不含根」混淆），载荷对象内部形状由它自带的描述符决定。
+    fn spawn_result_kind(&self, ty: u32) -> Result<u64, Diagnostic> {
+        // 协程句柄的具体类型直接给出结果载荷类型；其它形态退回按 Result 形聚合体拆解。
+        let payload = match self.kind(ty) {
+            TypeKind::Join(payload) => *payload,
+            _ => match self.ok_payload(ty)? {
+                Some(payload) => payload,
+                None => return Ok(0),
+            },
+        };
+        Ok(self
+            .roots(payload)
+            .first()
+            .and_then(|(_, provenance)| provenance.root_kind())
+            .map_or(0, coroutine_pack_trace_code))
+    }
+
+    /// `spawn(code, env, trace, result_kind)`：把内部 ABI 车道放进 9 个整数槽和 8 个浮点槽。
     fn spawn_call(
         &mut self,
         code: ValueId,
         lanes: &[ValueId],
         ty: u32,
+        result_kind: u64,
     ) -> Result<Computed, Diagnostic> {
-        let blob = self.temporary_bytes(SPAWN_ENV_BYTES, 16, [0; 32], Vec::new())?;
+        let blob = self.temporary_bytes(
+            u64::try_from(COROUTINE_PACK_BYTES).expect("参数包字节数"),
+            u64::try_from(COROUTINE_PACK_ALIGN).expect("参数包对齐"),
+            [0; 32],
+            Vec::new(),
+        )?;
         let zero = self.constant(0, Type::I64);
-        for index in 0..(SPAWN_ENV_BYTES / 8) {
-            let slot = self.offset(blob, index * 8);
+        for index in 0..(COROUTINE_PACK_BYTES / 8) {
+            let slot = self.offset(
+                blob,
+                u64::try_from(coroutine_pack_integer_offset(index)).expect("车道偏移"),
+            );
             self.store(slot, zero, 8, false);
         }
-        let mut gpr = 0u64;
-        let mut xmm = 0u64;
+        let mut gpr = 0usize;
+        let mut xmm = 0usize;
+        let mut trace = COROUTINE_PACK_TRACE_NONE;
         for lane in lanes {
             let kind = self.machine_type(*lane);
             if matches!(kind.ty, Type::F32 | Type::F64) {
-                if xmm >= 8 {
-                    return Err(invalid("spawn 浮点参数超过 8 个"));
+                if xmm >= COROUTINE_PACK_FLOAT_LANES {
+                    return Err(invalid("spawn 浮点参数超过参数包浮点车道数"));
                 }
                 let bits = if kind.ty == Type::F64 {
                     *lane
@@ -768,12 +848,16 @@ impl Builder<'_> {
                         Origin::None,
                     )
                 };
-                let slot = self.offset(blob, 72 + xmm * 16);
+                let slot = self.offset(
+                    blob,
+                    u64::try_from(coroutine_pack_float_offset(xmm)).expect("车道偏移"),
+                );
                 self.store(slot, bits, 8, false);
+                trace |= self.lane_trace(&kind, COROUTINE_PACK_INTEGER_LANES + xmm);
                 xmm += 1;
             } else {
-                if gpr >= 9 {
-                    return Err(invalid("spawn 整数参数超过 9 个"));
+                if gpr >= COROUTINE_PACK_INTEGER_LANES {
+                    return Err(invalid("spawn 整数参数超过参数包车道数"));
                 }
                 let bits = if kind.ty == Type::Ptr {
                     self.emit_one(
@@ -785,19 +869,33 @@ impl Builder<'_> {
                 } else {
                     *lane
                 };
-                let slot = self.offset(blob, gpr * 8);
+                let slot = self.offset(
+                    blob,
+                    u64::try_from(coroutine_pack_integer_offset(gpr)).expect("车道偏移"),
+                );
                 self.store(slot, bits, 8, false);
+                trace |= self.lane_trace(&kind, gpr);
                 gpr += 1;
             }
         }
         let code = self.raw_pointer(code);
         let blob = self.raw_pointer(blob);
+        let trace = self.constant(trace, Type::I64);
+        let result_kind = self.constant(result_kind, Type::I64);
         let handle = self.runtime(
             RuntimeCall::Spawn,
-            &[code, blob],
+            &[code, blob, trace, result_kind],
             &[ValueType::scalar(Type::I64)],
         )?;
         Ok(Computed::Values { ty, values: handle })
+    }
+
+    /// 参数包一个车道的 lane map 位：只有受管值才置位，种类沿用 `Provenance::root_kind`。
+    fn lane_trace(&self, kind: &ValueType, lane: usize) -> u64 {
+        let Some(root_kind) = kind.provenance.and_then(|it| it.root_kind()) else {
+            return COROUTINE_PACK_TRACE_NONE;
+        };
+        coroutine_pack_trace_code(root_kind) << coroutine_pack_trace_shift(lane)
     }
 
     /// 闭包环境的 placement：由 `EscapeAndPlacement` 的分配点表按当前语句点查。
@@ -844,9 +942,15 @@ impl Builder<'_> {
         let shared = placement == PlacementKind::SharedHeap;
         // 压缩判定与世界扫描同源：TurnRegion / Shared 环境不压缩，capture 槽保持全指针。
         let compressed = !shared && self.compressed_environment(definition)?;
-        let mut captures = Vec::with_capacity(owner.captures.len());
-        let mut shared_values = Vec::with_capacity(owner.captures.len());
-        let mut shared_bytes = 0u64;
+        let representation = if shared {
+            crate::frontend::mono::storage::StorageRepresentation::SharedHandle
+        } else if compressed {
+            crate::frontend::mono::storage::StorageRepresentation::Compressed
+        } else {
+            crate::frontend::mono::storage::StorageRepresentation::Direct
+        };
+        let mut slots = Vec::with_capacity(owner.captures.len());
+        let mut keys = Vec::with_capacity(owner.captures.len());
         for capture in &owner.captures {
             let local = if capture.owner == self.owner.definition {
                 capture.source
@@ -871,54 +975,31 @@ impl Builder<'_> {
                     "Resource 值不能捕获到 managed closure environment",
                 ));
             }
-            if shared {
-                // 共享环境按值捕获：direct pointer 会跟着 payload 跨 owner，因此只允许标量、
-                // 聚合数据与 stable handle；指针车道一律在 lowering 阶段拒绝。
-                if self.abi_lanes(ty).iter().any(|(_, _, kind)| {
-                    matches!(
-                        kind.provenance,
-                        Some(
-                            Provenance::GcHeap
-                                | Provenance::GcInterior
-                                | Provenance::Stack
-                                | Provenance::Raw
-                                | Provenance::CompressedRef
-                                | Provenance::Code
-                                | Provenance::Metadata
-                                | Provenance::Foreign
-                        )
-                    )
-                }) {
-                    return Err(invalid(
-                        "共享闭包环境不能按值捕获 direct pointer，只能捕获标量或 stable handle",
-                    ));
-                }
-                shared_bytes +=
-                    u64::try_from(self.abi_lanes(ty).len()).expect("车道数适配 u64") * 8;
-                shared_values.push((local_id, ty));
-            } else {
-                captures.push(self.address(g::Place::local(local_id))?.0);
-            }
+            keys.push(self.layout(ty).key);
+            slots.push(self.capture_slot(local_id, ty, shared, placement)?);
         }
-        let bytes = if shared {
-            shared_bytes
-        } else {
-            u64::try_from(captures.len()).expect("捕获数量适配 u64") * 8
-        };
-        let descriptor = mono::keys::hash_domain(
-            "gugu-capture-environment-v1",
-            &self.module.definitions[definition.index()].key,
+        // descriptor 是冻结类型表里的真实记录：环境类型在实例闭合期间按同一份规范字节登记，
+        // 这里只按键查表，不再自造哈希。
+        let shape = crate::frontend::mono::storage::environment_shape(
+            self.module.definitions[definition.index()].key,
+            &keys,
+            representation,
         );
+        let descriptor = shape.key();
+        if self.mono.universe.type_id(&descriptor).is_none() {
+            return Err(invalid("闭包环境类型不在冻结类型表"));
+        }
+        let bytes = u64::try_from(keys.len()).expect("捕获数量适配 u64") * 8;
         self.body.environments.push(crate::lir::body::Environment {
             descriptor,
             bytes,
-            // 共享环境按值保存数据与 handle，不含 LocalHeap 的 managed 根；环境自身的移动由
-            // stable handle 与 forwarding grace 负责，因此这里不登记 root。压缩环境的槽是
-            // 压缩字，root 按压缩引用种类登记；其余环境保存 direct cell 地址。
+            // 共享环境的槽是 stable handle，环境自身的移动由 handle 与 forwarding grace 负责，
+            // 这里不登记 LocalHeap 的 managed 根；压缩环境的槽是压缩字，按压缩引用种类登记；
+            // 其余环境保存 direct cell 地址。
             roots: if shared {
                 Vec::new()
             } else {
-                captures
+                slots
                     .iter()
                     .enumerate()
                     .map(|(index, value)| {
@@ -934,45 +1015,82 @@ impl Builder<'_> {
                     .collect()
             },
         });
-        // 闭包环境是唯一存活的 managed 分配点：placement 已证明它属于当前 turn 的私有
-        // region 时走 `RegionAlloc`，否则按证明结果选择 stable storage。
-        if !shared {
-            let environment =
-                self.allocate_descriptor(descriptor, 8, bytes, placement, region, compressed)?;
-            for (index, pointer) in captures.into_iter().enumerate() {
-                let destination =
-                    self.offset(environment, u64::try_from(index).expect("捕获编号") * 8);
-                if compressed {
-                    let word = self.encode_compressed_word(pointer);
-                    self.store_compressed_slot(destination, word);
+        let environment =
+            self.allocate_descriptor(descriptor, 8, bytes, placement, region, compressed)?;
+        if shared {
+            self.begin_shared(environment);
+        }
+        for (index, slot) in slots.into_iter().enumerate() {
+            let destination = self.offset(environment, u64::try_from(index).expect("捕获编号") * 8);
+            if compressed && !shared {
+                let word = self.encode_compressed_word(slot);
+                self.store_compressed_slot(destination, word);
+            } else {
+                self.store(destination, slot, 8, false);
+            }
+        }
+        if shared {
+            self.end_shared()?;
+        }
+        Ok(environment)
+    }
+
+    /// 一个捕获在环境槽里的值：direct/compressed 环境存 cell 地址，shared 环境存 stable handle。
+    ///
+    /// 共享环境的每一个捕获都必须指向**同一个提升后的 cell**：父函数与全部闭包都通过它读写，
+    /// 因此源槽还不是 SharedHeap cell 时在这里就地提升（分配 cell、写入当前值、把父函数后续
+    /// 访问改到 cell 上）。非共享环境只保存 cell 地址，因此源槽必须是 managed storage，不能是
+    /// 当前 frame 的栈地址。
+    fn capture_slot(
+        &mut self,
+        local: g::LocalId,
+        ty: u32,
+        shared: bool,
+        placement: PlacementKind,
+    ) -> Result<ValueId, Diagnostic> {
+        if shared {
+            return self.promote_capture_cell(local, ty);
+        }
+        match self.storage[local.index()] {
+            Storage::Heap { variable, .. } => self.read(variable),
+            Storage::Stack { .. } => {
+                if placement == PlacementKind::Stack {
+                    Ok(self.address(g::Place::local(local))?.0)
                 } else {
-                    self.store(destination, pointer, 8, false);
+                    Err(invalid(
+                        "逃逸闭包环境不能保存当前 frame 的栈地址：捕获槽必须物化到 managed storage",
+                    ))
                 }
             }
-            return Ok(environment);
+            Storage::Capture { address } => Ok(address),
+            Storage::Values(_) => Err(invalid("捕获槽没有可寻址存储")),
         }
-        let mut values = Vec::with_capacity(shared_values.len());
-        for (local_id, _) in &shared_values {
-            values.push(self.read_place(g::Place::local(*local_id))?);
+    }
+
+    /// 把捕获槽提升为 SharedHeap cell，返回它的 stable handle。
+    fn promote_capture_cell(&mut self, local: g::LocalId, ty: u32) -> Result<ValueId, Diagnostic> {
+        if let Storage::Heap {
+            variable,
+            placement: PlacementKind::SharedHeap,
+        } = self.storage[local.index()]
+        {
+            return self.read(variable);
         }
-        let environment =
-            self.allocate_descriptor(descriptor, 8, bytes, placement, region, false)?;
-        self.begin_shared(environment);
-        let mut offset = 0u64;
-        for ((_, ty), computed) in shared_values.iter().zip(values) {
-            let lanes = self.computed_values(computed)?;
-            debug_assert_eq!(lanes.len(), self.abi_lanes(*ty).len());
-            for (index, value) in lanes.into_iter().enumerate() {
-                let destination = self.offset(
-                    environment,
-                    offset + u64::try_from(index).expect("车道编号") * 8,
-                );
-                self.store(destination, value, 8, false);
-            }
-            offset += u64::try_from(self.abi_lanes(*ty).len()).expect("车道数适配 u64") * 8;
-        }
-        self.end_shared()?;
-        Ok(environment)
+        let layout = self
+            .layout(ty)
+            .layout
+            .ok_or_else(|| invalid("共享捕获缺少布局"))?;
+        let variable = self.shared_promotions[local.index()]
+            .ok_or_else(|| invalid("共享捕获源槽缺少提升变量"))?;
+        let value = self.read_place(g::Place::local(local))?;
+        let handle = self.allocate(ty, layout.size.max(8), PlacementKind::SharedHeap, None)?;
+        self.define(variable, handle);
+        self.storage[local.index()] = Storage::Heap {
+            variable,
+            placement: PlacementKind::SharedHeap,
+        };
+        self.write_shared_place(g::Place::local(local), value)?;
+        Ok(handle)
     }
 
     pub(super) fn erase_function(
@@ -992,7 +1110,10 @@ impl Builder<'_> {
         let (definition, capturing) = (*definition, *capturing);
         let key = self.function_key(definition, source_ty)?;
         let code = self.emit_one(
-            Op::SymbolAddr(Symbol::Instance(key)),
+            Op::SymbolAddr(Symbol::FunctionAdapter {
+                target: key,
+                has_environment: capturing,
+            }),
             &[],
             ValueType::pointer(Provenance::Code),
             Origin::Symbol,
@@ -1074,6 +1195,3 @@ impl Builder<'_> {
         })
     }
 }
-
-/// spawn 环境：9 个整数槽加 8 个 16 字节浮点槽，补齐到 16 字节对齐。
-const SPAWN_ENV_BYTES: u64 = 208;

@@ -343,10 +343,19 @@ body 计算摘要，允许跨模块和跨 package 复用。工作流程为：
 当前 compiler 在 **冻结后的 generic GIR body** 上运行分析：每个 callable owner 使用
 `BuildGenericGir` 已验证的显式 CFG，在程序点传播 `AbstractState`（可达、区间、稀疏差约束、
 初始化、别名类、memory version、效果）。抽象槽仍按 HIR local/表达式编号索引，GIR 临时值
-经 `expression_locals` 与 `hir_local` 映射。关系事实按 `Relation` 的规范序在 `Vec` 中保持有序且不重复，
-键以打包 u64 存储使比较退化为整数比较；新增仍走二分插入，合流求交使用单遍双指针归并、
-就地收缩，禁止在线性 `contains` 上退化。循环 header 回边 widening，固定点后以重新合并
+经 `expression_locals` 与 `hir_local` 映射。每个分析体一次构建 GIR local 到 ExprId 的稠密反向索引，
+保留原表达式顺序；已解析 local 的双向值与长度关系预先排序，逐程序点用线性就地并集补齐，
+不再为每条语句扫描所有表达式或逐项二分插入同一组关系。其它新增事实仍走二分插入。
+关系事实按 `Relation` 的规范序在 `Vec` 中保持有序且不重复，键以打包 u64 存储；合流求交
+使用单遍双指针归并、就地收缩。循环 header 回边 widening，固定点后以重新合并
 全部前驱的同步迭代执行 narrowing；每轮保持健全后固定点，精度迭代受同一块预算约束。
+SCC 内按原成员顺序与轮次预算迭代，保存每个成员在当前 callee 摘要下的完整分析结果；
+只有某个内部 callee 的摘要实际改变时，才使其直接 caller 的结果失效，递归自调用同样处理。
+不变的输入复用摘要与证明，最终证明阶段仍使用最终摘要对应的结果；预算耗尽切换到保守摘要时
+也执行相同失效规则。复用不改变 join、widening、诊断或预算耗尽的判定。
+前向迭代用按块编号索引的 dirty 表跳过入状态未改变的块，仍按原块顺序扫描并保持
+原轮次预算；合流改变目标状态时标记该块。同步 narrowing 仍在每轮合并全部前驱，
+不使用前向迭代的跳过规则。后继传播把状态所有权交给最后一条边，只有其它分支需要复制。
 
 管线顺序为 `LowerHir`（schema **5**，只构造、校验并冻结）→ `BuildGenericGir` →
 `mono::close` → `late::run` → `gir::attach_fragments` → `WholeProgramAnalysis` →

@@ -61,7 +61,7 @@ vtable、cage id 和 code pointer 是 `NonRoot`。`#[repr(packed)]` 不能含 ma
 
 普通/dirty `ForeignBridge`、park/suspend、runtime lock acquire的 contention edge和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record，即使它们带 unwind 边。这些叶调用的落地链仍从 unwind 边生成，不依赖 safepoint 记录。counted inner chunk edge与 uncounted countdown-only edge没有 map，只有实际读取 poll word后的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。`NoSafepointRegion` 内没有 map或 resume PC，begin前/end后的实际 poll仍使用 `PollResume`。
 
-LIR 侧的映射补充：无 default 的 `select` 经挂起路径提交，走 `SuspendResume`；有 default 的非挂起 `select` 走 `CallReturn`。纯分配操作（`GcAlloc` 等）与屏障操作不产生独立记录，只进入函数级分配与屏障站点计数，供后端在填充机器布局时核对。`DecodeCompressedRef` 为纯解码，不建立记录；`ResolveSharedHandle` 与 `ForwardSharedHandle` 调用走 `CallReturn`。
+LIR 侧的映射补充：无 default 的 `select` 经挂起路径提交，走 `SuspendResume`；有 default 的非挂起 `select` 走 `CallReturn`。分配操作（`GcAlloc`/`RegionAlloc`/`PromoteManaged`）进入函数级分配站点计数，并在所在指令上留下强制 `CallReturn` 记录：bump 快路径本身不回收，但同一站点发射的 slow call 可以启动回收，返回 PC 必须能按本帧 map 扫描根；**裸**屏障（`GcWriteBarrier`/`SharedFieldBarrier`，无 permit）在 lowering 里落成 runtime 调用，slow path 会 shade，必须留下 `CallReturn` 记录并同时计入屏障站点计数；带 permit 的预留屏障只在对应的 `NoSafepointRegion` 内出现、由 `BarrierReserve` 额度保证不进入 slow path，与不产出指令的 `BarrierReserve` 标记一样只计数。`DecodeCompressedRef` 为纯解码，不建立记录；`ResolveSharedHandle` 与 `ForwardSharedHandle` 调用走 `CallReturn`。
 
 `MorestackEntry` 的固定 scratch发布发生在任何 GC/preempt处理之前，且不写 candidate以下地址；因此 slow path即使同时由容量不足和 poison触发，也能先停机或调度出去。恢复后必须以 GC/stack copy已经修正的 scratch和最新 `stack_low`重试原 `StackCheck`，不能从旧 candidate直接建立 frame。
 
@@ -90,25 +90,41 @@ stack map 的通用寄存器编号固定为：
 
 ## 构造流程
 
-stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layout 后生成。逻辑推导的 schema 是 `STACKMAP_SCHEMA = 3`：托管调用上的分配种类仍产出 `CallReturn`，按值副本只展开已有 provenance 的根字。
+stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layout 后生成。逻辑推导的 schema 是 `STACKMAP_SCHEMA = 7`：托管调用上的分配种类仍产出 `CallReturn`，按值副本只展开已有 provenance 的根字；裸屏障调用与其它 mandatory statepoint 一样产出 `CallReturn`（v3 只计数、不产记录）；v5 起调用点还登记本帧活跃的槽根字；v6 起分配 op（`GcAlloc`/`RegionAlloc`/`PromoteManaged`）的返回 PC 也是强制 `CallReturn`——同一站点发射的 slow call 可以启动回收，回收要在该返回 PC 上按本帧 map 扫描根；v7 起根集合改由 SSA 逆向活跃集（`LiveValues`）枚举，跨点存活但既不是本条指令操作数、也不在 LIR 栈槽的受管值同样登记 `Value` 根。
 
-1. 从 safepoint 的 LIR 活跃集取得所有 `Ptr` value；`CallReturn` 另加入 outgoing 参数，以及本帧按值聚合副本槽上已有 provenance 的 root word。没有 provenance 的位字是 `NonRoot`，不进入 bitmap；副本地址不属于本帧栈槽时，字根由持有副本的外层帧登记；
-2. 按 provenance 和 representation 分类为 `HeapDirect`、`HeapInterior`、`SharedHandle`、`CompressedRef`、`StackInterior` 或 `NonRoot`；
-
-3. 查询分配结果得到物理寄存器或 frame slot；
-4. 对需要 spill 的 safepoint插入 spill/reload，再重新计算局部活跃与 PC；
-5. 把 stack slot 转成从 frame base 起的 8 字节 slot index；
-6. 从函数 ABI 参数分类独立生成 `MorestackEntry` register map，不能从尚未建立的 frame 活跃集推断；
-7. 对相同 root set 做全局去重；
-8. 指令编码完成后填入最终 `pc_offset`。调用返回点取该站点最后一条 `call` 的下一条指令，入口检查取 `morestack_or_poll` 返回后的第一字节。编码后的 section 字节进入镜像计划；`--strip` 必须保留 [平台 ABI](../spec/platform-abi.md) 登记的栈图、展开与源码位置节。
+1. 从 safepoint 的跨点活跃集（`LiveValues`，SSA 逆向、may 语义）取得所有 `Ptr` value，并入本条指令自己的操作数与 LIR 栈槽根字；`CallReturn` 另加入 outgoing 参数，以及本帧按值聚合副本槽上已有 provenance 的 root word。活跃集沿边把后继块参数替换为对应实参（参数是被持有的接收入口，值在实参一侧），并扣除位于该点位的定义——安全点在该指令执行期间触发，该指令的结果尚未写入。块内由指令定义的值不构成 live-in（SSA 下同块定义必然支配同块使用），否则定义点之前的前驱会凭空多出根。**块参数不受这两条扣除影响**：它是块的输入，在块入口处就已可用，且只有留在 live-in 里才能被边实参替换；把它当成「本块产生的定义」一并扣掉，会让替换永不触发，于是跨块携带的受管值——未取地址的切片恰好退化成一条块参数链——在前驱块里凭空消失，安全点上不再登记根。没有 provenance 的位字是 `NonRoot`，不进入 bitmap；副本地址不属于本帧栈槽时，字根由持有副本的外层帧登记；
+2. `CallReturn` 还必须登记本帧在该点仍活跃的槽根字：被调方执行期间调用方帧仍按调用返回 PC 的 map 扫描，而借出地址的槽（`let view = &value`）没有活跃值、只有活跃地址，槽根表是它唯一的登记来源。未写入的根字由逐根初始化字节在下游门控，因此登记本身不会引入假根；
+3. 按 provenance 和 representation 分类为 `HeapDirect`、`HeapInterior`、`SharedHandle`、`CompressedRef`、`StackInterior` 或 `NonRoot`；
+4. 查询分配结果得到物理寄存器或 frame slot；
+5. 对需要 spill 的 safepoint插入 spill/reload，再重新计算局部活跃与 PC；
+6. 把 stack slot 转成从 frame base 起的 8 字节 slot index；
+7. 从函数 ABI 参数分类独立生成 `MorestackEntry` register map，不能从尚未建立的 frame 活跃集推断；
+8. 对相同 root set 做全局去重；
+9. 指令编码完成后填入最终 `pc_offset`。调用返回点取该站点最后一条 `call` 的下一条指令，入口检查取 `morestack_or_poll` 返回后的第一字节。编码后的 section 字节进入镜像计划；`--strip` 必须保留 [平台 ABI](../spec/platform-abi.md) 登记的栈图、展开与源码位置节。
 
 一个位置在同一 map 的五类 bitmap/mask 中最多出现一次。重叠 spill、超出 frame、未对齐 managed slot、丢失 provenance 或一个 value 同时有两个未协调的权威位置都是后端错误。
 
 分配阶段为上述查询发布三样东西：`FrameLayout`（`frame_size`、`payload_bytes`、逐局部对象的 `local_offset`、spill slot 的 `offset/size/root`、16 字节 copy scratch 偏移与 callee-saved save 偏移）、点位表（每个点位的 `site`、`kind`、`block`、指令区间与 mask）以及逐值结果（`Gpr`/`Xmm`/`Slot`/rematerializable）。stack map 生成只消费这些结果，不重新推导位置。spill slot 统一是 8 或 16 字节、按 root class 分开、偏移都从 frame base 起算，因此第 5 步的 slot index 就是 `offset / 8`。
 
+分配阶段的**强制落槽**判定以 LIR 逻辑根集为权威，不另立一套活跃性口径：出现在禁止寄存器根的安全点（`CallReturn`/`Suspend`/`ForeignBridge`）根集里的值，其活跃区间必须覆盖该点位并强制落 frame slot。分配器自己用「触碰点 + 块边界」造的是凸区间，它够不到「最后一次触碰之后、但仍处于逻辑活跃集里」的点（单块无后继、活跃性只在块级可见等情形）；若以该凸区间为准，值会留在寄存器，或虽已落槽却被后端按「区间不覆盖该点」判死而丢掉根，对象被搬走而引用不更新。这里补齐区间时，点位区间按**点位下标**换算（`use_slot = 下标 * 2`），且同一 LIR 指令可能降级成多个站点、需取并集。
+
 需要从 frame 里取地址的局部对象在选指阶段写成占位基址 `Reg::Virtual(FRAME_SLOT_BASE + slot)`（`FRAME_SLOT_BASE = 1 << 30`）：占位编号空间高于值编号与 lowering 临时编号，`select` 会断言值数量低于该上界。写回 store/load 的占位在分配阶段全部换算成 `[rsp + local_offset]`，验证阶段拒绝任何残留的 `Reg::Virtual`，所以 stack map 不会看到占位寄存器。
 
 GC 活跃性按语义值而不是 Rust/源级 lexical scope 计算。已经 `StorageDead` 或被 `MoveInternal` 消耗的位置不得保留为根；尚未初始化和 `MaybeUninit` payload 不得加入。保留无谓死根会延长对象寿命，因此也属于 verifier 错误，不是允许的保守实现。
+
+### 逐根初始化事件 {#root-init-events}
+
+LIR 为每个栈槽维护逐根字段的初始化事件流 `RootInit { slot, position, bit, initialized }`，`bit` 是 `slot.roots` 的下标：`slot.roots` 是**多变体聚合的并集超集**（同一偏移只在部分变体里是指针），位图把它收窄成「该字在当前值里已经写成指针」。
+
+- 置位：写入完整覆盖该根字的 8 字节。构造点已知变体，**只有自身携带根的字段才置位**——标量字段即使覆盖了并集条目所在的偏移也不置位，因此构造 `Scalar(int, int)` 变体不会把 `Callable(fn() int)` 变体在 `payload + 8` 的指针字当成已初始化；
+- 整值写入但来源变体不可知时（从别的槽、参数或返回值复制整值），按覆盖范围保守置位全部并集条目。这类动态多变体副本要收窄到实际变体需要类型 trace，属于后续集成变更；
+- 复位：`StorageLive`（建立新值）与 `StorageDead`（结束占用）清空该槽全部位，旧值的位不得被新值继承；
+- 位置顺序是语义的一部分：`Reset` 之后必须有新的 `Set`，该根字才能被当成指针，所以重写 pass 必须用同一份锚点映射精确定位每个事件，不能丢弃或钳位到块尾；
+- 消费者只追踪置位的根字；未置位的并集条目表示该字在当前值里是标量或尚未写入。
+
+帧内位图已接线：`FrameLayout::init_bases` 为每个带根字的栈槽在 frame 内分配**每根一字节**的区域（`base + bit`），`alloc/rewrite.rs` 在每个站点代码之前按块内位置游标发射 `mov byte [rsp + offset], 1/0`。选一字节一根而不是位图字，是因为置位与复位都不需要读改写、不占用 scratch 寄存器；站点游标保证这些写入落在那次读取位图的安全点之前，块尾把剩余事件全部刷新。每帧位图与普通值存储分开，未初始化 payload 不会被读到。
+
+静态完整初始化证明已落地：`lir/root_init.rs::InitSlots` 以 **must** 语义求块级不动点（汇合点取前驱交集），`fully_initialized(block, position, slot)` 只在该点沿所有路径都写全该槽根字时为真——它是 `mask = 0`（无需读帧内位图的判定依据）、不是过滤器：未证明已初始化**不得**据此丢根。帧内位图与证明当前由回归测试与真实镜像行为覆盖，站点条目（消费方）随后续集成变更接入。
 
 ## 二进制 section
 
@@ -120,7 +136,7 @@ Linux 放入 `.gugu.stackmap`，Windows 放入 `.gugustk`。section 内所有整
 
 ```text
 magic:              [u8; 8] = "GUGUSM01"
-version:            u16 = 2
+version:            u16 = 4
 pointer_size:       u8 = 8
 endian:             u8 = 1
 function_count:     u32
@@ -152,7 +168,7 @@ flags:              u16
 reserved:           u16 = 0
 ```
 
-function table 按 `code_rva` 严格递增，code range 不重叠。`safepoint_start/count` 指向全局 safepoint table 的连续范围。flags 位固定为：bit 0 `RUNTIME_BRIDGE`，bit 1 `PANIC_LANDING_PAD`，bit 2 `HAS_STACK_INTERIOR`；其他位为 0。`unwind_index` 指向[后端](backend.md)生成的统一 unwind function record。
+function table 按 `code_rva` 严格递增，code range 不重叠。`code_rva` 相对片段区基址，且必须与[镜像 writer](backend.md) 的放置同源：片段世界的函数体与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐，glue Item 实例与机器片段共用 `__gugu_runtime_*` 前缀因而必然交错。只排片段世界的算法会让排在机器片段之后的函数拿到偏小的 `code_rva`，运行期 `PC → 函数` 查找落到错误区间；展开表（`.eh_frame`/`.xdata`）用同一组 `code_rva`。`safepoint_start/count` 指向全局 safepoint table 的连续范围。flags 位固定为：bit 0 `RUNTIME_BRIDGE`，bit 1 `PANIC_LANDING_PAD`，bit 2 `HAS_STACK_INTERIOR`；其他位为 0。`unwind_index` 指向[后端](backend.md)生成的统一 unwind function record。
 
 ### safepoint record
 
@@ -186,11 +202,28 @@ shared_handle_slots:    ceil(slot_count / 8) bytes
 compressed_ref_slots:   ceil(slot_count / 8) bytes
 stack_slots:            ceil(slot_count / 8) bytes
 zero_padding_to_4_bytes
+typed_count:            u32
+typed_roots:            typed_count × 12 bytes
 ```
+
+每个逐根初始化条目 12 字节：
+
+```text
+word:       u32   帧内机器字下标，与固定位图同一坐标
+root_kind:  u32   五类根之一（0=Direct、1=Interior、2=Handle、3=Compressed、4=StackInterior）
+init_byte:  u32   帧内逐根初始化字节的字节偏移；非零表示该字已成写指针
+```
+
+条目按 `word` 严格递增（重复或乱序一律拒绝），且 `word` 不得同时出现在任一固定位图里。`root_kind` 越界一律拒绝。没有条目的记录写 `typed_count = 0`。
 
 bitmap 的 bit `i` 对应 `[frame_base + i * 8]`，最低有效 bit 先写。超出 `slot_count` 的尾 bit 必须为 0。`slot_count * 8` 不得超过所属函数 `frame_size`。五个位图互斥，五个 register mask 也互斥；bit 15 必须为 0。
 
-map 去重基于完整 record bytes；map table 按 record bytes 字典序分配 `map_index`，不能按发现时序分配。version 2 的 `SharedHandle` 和 `CompressedRef` 位置仍是 managed root；decoder 必须拒绝 version 1 记录，避免把新表示误读为旧 bitmap。
+逐根初始化字节位于槽位图范围**之外**的帧内区域（每个根字一字节，由 `FrameLayout::init_bases` 分配），因此按 `slot_count` 合成帧的消费者必须先按 `frame_size` 开表再扫描：`slot_count * 8` 不是帧的上界，`frame_size` 才是。
+
+门控根只对**栈驻留**的并集值存在：SSA 常驻的并集值走 `Value` 根，不经过栈槽、也没有初始化字节。判定由 `lir/root_init.rs::InitSlots`（must 语义块级不动点）给出，`mask = 0` 之外的根一律写成条目。
+
+map 去重基于完整 record bytes；map table 按 record bytes 字典序分配 `map_index`，不能按发现时序分配。version 2 的 `SharedHandle` 和 `CompressedRef` 位置仍是 managed root；decoder 必须拒绝 version 1（`SharedHandle`/`CompressedRef` 表示不同）、version 2（缺少裸屏障调用的 `CallReturn` record）与 version 3（map record 没有逐根初始化尾字段）记录，避免把旧 world 当当前 world 使用。
+
 ## stack walk
 
 runtime 扫描一个已停在 safepoint 的协程时：
@@ -247,8 +280,10 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 编译器在写镜像前必须同时验证机器码与 stack map：
 
 - 每个要求 safepoint 的 call/poll/suspend 和每个可增长 frame 的 morestack entry 都有 exact record；
+- 裸屏障调用点必须有 `CallReturn` record，且根集非空；预留屏障与 `BarrierReserve` 标记在 `NoSafepointRegion` 内不得留下 record；
 - 每个 map 与最终活跃/分配位置逐项一致，CallReturn map 覆盖 outgoing managed/stack 参数；
 - `CallReturn`/`SuspendResume`/`ForeignBridge` 点没有用户 register root；`PollResume` 与 `MorestackEntry` 只使用各自声明的 register/scratch roots；
+- 根完备性：`CallReturn`/`SuspendResume`/`ForeignBridge` 点上，分配器为**跨点存活**的受管值准备的 frame slot 必须出现在该点的根位图或逐根条目里（`metadata.rs::verify_live_pointers_are_rooted`）。这些点位按寄存分配规则不允许保留用户寄存器根，跨点受管值必然落 frame slot；逻辑根集合漏登记时物理层不会有任何报错，收集器只是扫不到仍被持有的对象，因此漏登记必须是编译期错误而不是运行期现象；“跨点存活”的判定是分配区间同时覆盖点位前与点位后，该点位自身定义（例如调用结果）不算；
 - direct callee的 `PollSummary.entry_stack_check` 与 caller是否生成 `CallReturn` map一致；`PollFreeLeaf`/`ForeignLeaf` 不得伪造 map；
 - 普通 bridge的 `lease_word` 固定保存该 invocation原始 attached `Foreign(g)`；当前 lifecycle只能是该 exact word、带 scan lock的竞争态或同 generation的 detached Foreign。dirty mode设置 `DIRTY_CPU_BRIDGE` flag：active Foreign必须带 `FOREIGN_DETACHED`，DirtyWaiting保持同 generation且不能带该 bit。所有模式的 `ForeignBridgeState.frame_offset + frame_size` checked落在已用 stack范围；
 - frame size、return address、ABI bridge frame和 outgoing区符合后端 frame layout；

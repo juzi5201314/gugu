@@ -22,7 +22,7 @@
 use std::cell::Cell;
 use std::ops::Range;
 
-use super::super::inst::{Inst, LabelDefinition, LabelId, Mem, Operand, Sequence};
+use super::super::inst::{Inst, LabelDefinition, LabelId, Mem, Operand, Scale, Sequence};
 use super::super::layout;
 use super::super::lower::{self, Builder, LowerCtx, LoweringError, SiteValue};
 use super::super::reg::{Clobbers, FRAME_SLOT_BASE, Gpr, Reg};
@@ -120,10 +120,20 @@ pub(crate) fn rewrite(
     };
     let entry_has_sites = !blocks[entry_order].sites.is_empty();
     let mut regions: Vec<(u32, Range<u32>)> = Vec::new();
+    let mut init_events: Vec<Vec<(u32, u32, u32, bool)>> = vec![Vec::new(); body.blocks.len()];
+    for root in &body.root_inits {
+        if let Some(block) = init_events.get_mut(root.block.index()) {
+            block.push((root.position, root.slot.0, root.bit, root.initialized));
+        }
+    }
+    for block in &mut init_events {
+        block.sort_by_key(|(position, slot, bit, _)| (*position, *slot, *bit));
+    }
     let mut site_index = 0_u32;
     for (order, block) in blocks.iter_mut().enumerate() {
         let site_count = block.sites.len();
         let terminator = terminator_kind(body, block);
+        let mut init_cursor = 0_usize;
         for index in 0..site_count {
             let points = live
                 .sites
@@ -135,7 +145,14 @@ pub(crate) fn rewrite(
                 .is_some_and(|group| group.site == PREPEND_SITE)
                 && order == entry_order
                 && index == 0;
+            let position = block.sites[index].instruction;
             let sequence = &mut block.sites[index].lowered;
+            let stores = drain_init_stores(
+                &init_events[block.id.index()],
+                &frame.init_bases,
+                &mut init_cursor,
+                position,
+            );
             let region = rewrite_sequence(
                 &emit,
                 sequence,
@@ -147,6 +164,7 @@ pub(crate) fn rewrite(
                 stack_arguments,
                 stack_check_offset,
                 0,
+                &stores,
             )?;
             if let Some(range) = region {
                 regions.push((site_index, range));
@@ -168,6 +186,12 @@ pub(crate) fn rewrite(
             0
         };
         let sequence = &mut block.terminator;
+        let stores = drain_init_stores(
+            &init_events[block.id.index()],
+            &frame.init_bases,
+            &mut init_cursor,
+            u32::MAX,
+        );
         let region = rewrite_sequence(
             &emit,
             sequence,
@@ -179,6 +203,7 @@ pub(crate) fn rewrite(
             stack_arguments,
             stack_check_offset,
             label_base,
+            &stores,
         )?;
         if let Some(range) = region {
             regions.push((site_index, range));
@@ -309,6 +334,77 @@ fn terminator_kind(body: &Body, block: &SelectedBlock) -> bool {
     )
 }
 
+/// 取出截至 `upto` 位置的全部逐根初始化事件，翻译成帧内字节写入。
+///
+/// `events` 按块内位置排序，`cursor` 在块内单调前进；返回 `(帧内偏移, 置位)`。没有根字的槽
+/// 被跳过（verifier 已保证事件只指向带根字的槽，这里跳过只是防御性省略）。
+fn drain_init_stores(
+    events: &[(u32, u32, u32, bool)],
+    bases: &[Option<u32>],
+    cursor: &mut usize,
+    upto: u32,
+) -> Vec<(u32, bool)> {
+    let mut stores = Vec::new();
+    while let Some((position, slot, bit, initialized)) = events.get(*cursor) {
+        if *position > upto {
+            break;
+        }
+        *cursor += 1;
+        if let Some(base) = bases.get(*slot as usize).copied().flatten() {
+            stores.push((base + *bit, *initialized));
+        }
+    }
+    stores
+}
+
+/// 发射逐根初始化字节的写入：`mov byte [rsp + offset], 1/0`。
+///
+/// 每个根字独占一个字节，所以置位与复位都不需要读改写，也不占用 scratch 寄存器；调用点保证
+/// 这些写入落在下一次读取该位图的安全点之前。
+fn emit_init_stores(builder: &mut Builder, stores: &[(u32, bool)]) {
+    for (offset, initialized) in stores {
+        let disp = i32::try_from(*offset).expect("帧内偏移适配 i32");
+        builder.emit(
+            "mov",
+            &[OperandKind::Rm8, OperandKind::Imm8],
+            Access::Write,
+            vec![
+                Operand::Mem(Mem {
+                    base: Some(Reg::Gpr(Gpr::Rsp)),
+                    index: None,
+                    scale: Scale::One,
+                    disp,
+                }),
+                Operand::Imm(u64::from(*initialized)),
+            ],
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_init_stores;
+
+    /// 逐根初始化写入按位置单调取出：`upto` 之后的事件留到下一次，无根字的槽不产生写入。
+    #[test]
+    fn drain_stops_at_position_and_skips_root_free_slots() {
+        let events = [(3, 0, 0, false), (5, 1, 1, true), (7, 2, 0, true)];
+        let bases = [Some(16), Some(20), None];
+        let mut cursor = 0;
+        assert_eq!(
+            drain_init_stores(&events, &bases, &mut cursor, 4),
+            [(16, false)],
+            "只取出位置不超过 upto 的事件"
+        );
+        assert_eq!(
+            drain_init_stores(&events, &bases, &mut cursor, u32::MAX),
+            [(21, true)],
+            "无根字的槽不产生写入"
+        );
+        assert_eq!(cursor, events.len(), "游标走到末尾");
+    }
+}
+
 /// 改写一个序列；返回 prologue/epilogue 在该序列内的指令区间。
 #[expect(
     clippy::too_many_arguments,
@@ -325,6 +421,7 @@ fn rewrite_sequence(
     stack_arguments: &[(u32, u32, Type)],
     stack_check_offset: u32,
     label_base: u32,
+    init_stores: &[(u32, bool)],
 ) -> Result<Option<Range<u32>>, AllocError> {
     let entries = live::site_plan(lowered)?;
     let original_labels = lowered.sequence.labels.clone();
@@ -340,6 +437,8 @@ fn rewrite_sequence(
             stack_check_offset,
         )?;
         region = Some(start..builder.instruction_count());
+        // 逐根初始化写入必须落在 prologue 之后：`[rsp + offset]` 这时才指向本帧。
+        emit_init_stores(&mut builder, init_stores);
         if kind == SiteKind::Prologue {
             // 复用站点原有的两个站内标签 id（`check` 与 `cold`）：标记 lowering 只登记
             // 这两个编号，`select` 的标签记账与这里重写后的编号必须一致。
@@ -357,6 +456,8 @@ fn rewrite_sequence(
     }
     let mut labels = original_labels;
     let mut pending = pending_stores(emit, lowered, &entries, &points)?;
+    // 站点代码之前刷新逐根初始化写入：该站点若是安全点，位图必须已经反映此前的事件。
+    emit_init_stores(&mut builder, init_stores);
     for (offset, entry) in entries.iter().enumerate() {
         define_labels(&mut builder, &mut labels, entry.instructions.start)?;
         let point = points.start + u32::try_from(offset).expect("点位偏移适配 u32");
@@ -374,7 +475,9 @@ fn rewrite_sequence(
                     frame::emit_epilogue(&mut builder, emit.frame)?;
                     region = Some(start..builder.instruction_count());
                 }
-                rewrite_instruction(emit, &mut builder, &inst, point, &mut pending)?;
+                rewrite_instruction(emit, &mut builder, &inst, point, &mut pending).map_err(
+                    |error| AllocError::new(format!("点位 {point} 的 {inst:?}：{error}")),
+                )?;
             }
         }
     }
@@ -586,6 +689,7 @@ fn is_self_move(form: &table::Form, operands: &[Operand]) -> bool {
 }
 
 /// 内存操作数：`StackAddr` 占位基址换成 frame 偏移，虚拟 base/index 换寄存器（必要时载入）。
+/// 内存操作数：可重物化的栈地址与索引常量直接折叠，避免在高寄存器压力点额外抢 scratch。
 fn rewrite_memory(
     emit: &Emit<'_>,
     builder: &mut Builder,
@@ -593,7 +697,7 @@ fn rewrite_memory(
     point: u32,
     reserved: &mut Clobbers,
 ) -> Result<Operand, AllocError> {
-    let mut disp = mem.disp;
+    let mut disp = i64::from(mem.disp);
     let base = match mem.base {
         Some(Reg::Virtual(id)) if id >= FRAME_SLOT_BASE => {
             let slot = usize::try_from(id - FRAME_SLOT_BASE).expect("frame 槽下标适配 usize");
@@ -601,15 +705,24 @@ fn rewrite_memory(
                 .frame
                 .local(slot)
                 .ok_or_else(|| AllocError::new(format!("frame 局部槽 {slot} 不存在")))?;
-            disp = i32::try_from(
-                i64::from(local.offset)
-                    .checked_add(i64::from(mem.disp))
-                    .ok_or_else(|| AllocError::new("局部槽位移溢出"))?,
-            )
-            .map_err(|_| AllocError::new("局部槽位移超出 i32"))?;
+            disp = disp
+                .checked_add(i64::from(local.offset))
+                .ok_or_else(|| AllocError::new("局部槽位移溢出"))?;
             Some(Reg::Gpr(Gpr::Rsp))
         }
-        Some(Reg::Virtual(id)) => Some(value_register(emit, builder, id, point, reserved)?),
+        Some(Reg::Virtual(id)) => match rematerialized_op(emit, id) {
+            Some(Op::StackAddr(slot)) => {
+                let local = emit
+                    .frame
+                    .local(slot.index())
+                    .ok_or_else(|| AllocError::new("重建栈地址引用未登记的局部槽"))?;
+                disp = disp
+                    .checked_add(i64::from(local.offset))
+                    .ok_or_else(|| AllocError::new("栈地址位移溢出"))?;
+                Some(Reg::Gpr(Gpr::Rsp))
+            }
+            _ => Some(value_register(emit, builder, id, point, reserved)?),
+        },
         Some(other) => Some(other),
         None => None,
     };
@@ -617,16 +730,39 @@ fn rewrite_memory(
         Some(Reg::Virtual(id)) if id >= FRAME_SLOT_BASE => {
             return Err(AllocError::new("frame 占位基址不能作为索引"));
         }
-        Some(Reg::Virtual(id)) => Some(value_register(emit, builder, id, point, reserved)?),
+        Some(Reg::Virtual(id)) => match rematerialized_op(emit, id) {
+            Some(Op::IConst(value)) => {
+                let scaled = i128::from(*value) << mem.scale.shift();
+                let displacement = i128::from(disp) + scaled;
+                disp = i64::try_from(displacement)
+                    .map_err(|_| AllocError::new("索引常量折叠后位移溢出"))?;
+                None
+            }
+            _ => Some(value_register(emit, builder, id, point, reserved)?),
+        },
         Some(other) => Some(other),
         None => None,
     };
+    let disp = i32::try_from(disp).map_err(|_| AllocError::new("内存操作数位移超出 i32"))?;
     Ok(Operand::Mem(Mem {
         base,
         index,
         scale: mem.scale,
         disp,
     }))
+}
+
+/// 返回可由使用点重物化的无副作用定义。
+fn rematerialized_op<'a>(emit: &'a Emit<'_>, value: u32) -> Option<&'a Op> {
+    if emit.values.get(value as usize)?.placement != Placement::Rematerialize {
+        return None;
+    }
+    let Definition::Instruction { instruction, .. } =
+        emit.body.values.get(value as usize)?.definition
+    else {
+        return None;
+    };
+    Some(&emit.body.instructions[instruction.index()].op)
 }
 
 /// 虚拟寄存器 → 物理寄存器；spilled 值先载入 scratch。
@@ -1020,7 +1156,10 @@ impl Emit<'_> {
                     })
                     .map(Loc::Gpr)
                     .ok_or_else(|| {
-                        AllocError::new("指令需要 scratch 寄存器，但该点位没有空闲寄存器")
+                        AllocError::new(format!(
+                            "指令需要 scratch 寄存器，但该点位没有空闲寄存器（pool={:#06x} mask={:#06x} occupied={:#06x} forbidden={:#06x}）",
+                            self.scratch_gpr.gpr, mask.gpr, occupied.gpr, forbidden.gpr,
+                        ))
                     })
             }
             RegClass::Xmm => super::scan::XMM_POOL

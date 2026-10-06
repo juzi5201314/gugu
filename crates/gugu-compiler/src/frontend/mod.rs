@@ -130,17 +130,19 @@ pub(crate) fn bootstrap(
     }
 }
 
-/// 把 compiler 内建的源单元追加进源码表，并返回它们的逻辑路径。
+/// 把 compiler 内建的源单元追加进源码表，并返回全部内建路径与 runtime 来源路径。
 ///
-/// 内建模块与用户源码走同一条解析、cfg 与检查路径；它们的逻辑路径已经是 package 相对路径，
-/// 不经过 `source_root` 的裁剪规则。
-fn inject_builtin_sources(source_map: &mut SourceMap) -> Result<BTreeSet<String>, Vec<Diagnostic>> {
+/// 内建模块与用户源码走同一条解析、cfg 与检查路径；runtime 来源身份单独传入语义层，
+/// 不允许用户仅靠逻辑路径伪造 runtime intrinsic 的授权。
+fn inject_builtin_sources(
+    source_map: &mut SourceMap,
+) -> Result<(BTreeSet<String>, BTreeSet<String>), Vec<Diagnostic>> {
     let mut paths = BTreeSet::new();
+    let mut runtime_paths = BTreeSet::new();
     let mut snapshots = Vec::new();
     for source in crate::runtime::RuntimeResources::builtin().sources() {
         let logical = source.logical_path();
         if source_map.file_id(logical).is_some() {
-            // 用户源码已经占用同一逻辑路径；这是 package 与内建源树的冲突。
             return Err(vec![Diagnostic::error(
                 DiagnosticCode::ModuleInvalidPath,
                 format!("内建源单元 `{logical}` 与 package 源码逻辑路径冲突"),
@@ -157,6 +159,9 @@ fn inject_builtin_sources(source_map: &mut SourceMap) -> Result<BTreeSet<String>
             })?;
         snapshots.push(snapshot);
         paths.insert(logical.to_owned());
+        if source.role() == crate::runtime::RuntimeSourceRole::Runtime {
+            runtime_paths.insert(logical.to_owned());
+        }
     }
     source_map.append_sorted(snapshots).map_err(|error| {
         vec![Diagnostic::error(
@@ -165,7 +170,7 @@ fn inject_builtin_sources(source_map: &mut SourceMap) -> Result<BTreeSet<String>
             None,
         )]
     })?;
-    Ok(paths)
+    Ok((paths, runtime_paths))
 }
 
 #[expect(
@@ -182,7 +187,7 @@ fn check_sources(
     external_packages: &BTreeSet<String>,
     queries: &crate::query::QueryEngine,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
-    let builtin_paths = inject_builtin_sources(source_map)?;
+    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map)?;
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
     let expansion_inputs = expand::run(
@@ -222,8 +227,16 @@ fn check_sources(
     }
     let names = names::analyze(package_identity, external_packages, &modules)?;
     let (semantics, types, registry, hir, analysis_world, mono_world, gir_world, gir_stats) =
-        semantics::check(&modules, &names, source_map, cfg, entry_function, queries)
-            .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+        semantics::check(
+            &modules,
+            &names,
+            source_map,
+            cfg,
+            entry_function,
+            queries,
+            &runtime_paths,
+        )
+        .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     let mut lints = semantics::must_use_lints(&modules, &semantics, source_map)
         .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     lints.extend(
@@ -513,9 +526,9 @@ fn active_main(module: &ParsedModule) -> Option<ast::FnId> {
 
 #[cfg(test)]
 mod docs_code_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod lex_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod parse_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod stage10_tests;

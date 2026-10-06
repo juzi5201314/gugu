@@ -1,0 +1,683 @@
+/* 镜像内回收协调层：coordinator 记录、收集器专用搬运分配器与 minor cycle。
+ *
+ * 语义与 compiler 侧 `runtime/local_heap.rs::collect_minor` 同源：flush remembered set →
+ * 精确定位根 → 把 nursery 存活对象搬到 old → 遍历新副本的受管字段并回写引用 → 对搬运前
+ * 既已 aging 的对象加龄 → 重置 nursery。Rust 侧实现随后由本文件取代，因此这里不保留任何
+ * 平行算法。
+ *
+ * 根只来自栈图与 typed 动态根登记：collector 不扫描 raw 区、不猜相邻 map、绝不把整数当
+ * 指针。找不到 map、根记录自相矛盾、nursery 越界都是 RuntimeInvariant，不是可恢复错误。
+ *
+ * 搬运分配器与 mutator 的 TLAB 完全分开：collector 有自己的 cursor/limit 与目标 arena，
+ * 因此一次 GC 不会改变 mutator 的分配游标，也不会把半构造对象发布给 mutator。
+ */
+
+use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_bytes, gc_config_granule_bytes, gc_config_line_bytes, gc_config_object_header_bytes, gc_config_tenure_age, GC_REQUEST_ALLOC, GC_REQUEST_KIND_OFFSET, GC_REQUEST_MAJOR, GC_REQUEST_PRESSURE}
+use std.runtime.heap.{copy_bytes, heap_arena_create, heap_arena_of, heap_block_set_state, heap_block_state_word, heap_byte, heap_clear_block_cards, heap_clear_block_object_starts, heap_clear_object_start, heap_clear_page_cover, heap_fail, heap_mark_begin_arena, heap_mark_bit, heap_mark_end, heap_mark_object_start, heap_mark_page_cover, heap_mark_test_and_set, heap_metadata, heap_object_start, heap_open_block, heap_open_block_meta, heap_open_free_block_meta, heap_resolve_object, heap_set_line_state, heap_store_byte, heap_store_word, heap_store_word32, heap_word, heap_word32, header_control, header_type_index, ARENA_ALLOC_CURSOR_OFFSET, ARENA_LINE_LIVE_OFFSET, ARENA_NO_BLOCK, ARENA_OBJECT_START_OFFSET, BLOCK_RECORD_BYTES, BLOCK_STATE_ALLOCATING, BLOCK_STATE_FREE, CONTROL_AGE_MASK, CONTROL_AGE_SHIFT, CONTROL_FORWARDED, GENERATION_AGING, GENERATION_OLD, LARGE_MAPPING_TABLE_BYTES, LINE_FREE, LINE_OCCUPIED, REPRESENTATION_LOCAL_DIRECT}
+use std.runtime.roots.{gc_initiator_frame, gc_type_trace, gc_type_trace_length, gc_types_section, gc_visit_dynamic_roots, gc_walk_roots, ROOT_KIND_COMPRESSED, ROOT_KIND_DIRECT, ROOT_KIND_HANDLE, ROOT_KIND_INTERIOR, ROOT_KIND_STACK_INTERIOR, ROOT_RECORD_BYTES, ROOT_SCAN_HEADER_BYTES, SAFEPOINT_KIND_CALL_RETURN}
+use std.runtime.scheduler.{heap_alloc}
+use std.runtime.trace.{trace_advance, trace_begin, trace_cursor, trace_grant, trace_last_op, trace_last_word, trace_open, TRACE_COMPLETE, TRACE_OP_INTERIOR, TRACE_PENDING, TRACE_VISIT}
+
+/// runtime 状态区内 coordinator 指针的槽位；与 `entry.rs` 的 `RUNTIME_STATE_COORDINATOR` 同源。
+pub const GC_COORDINATOR_STATE_OFFSET: uint = 696
+
+/// coordinator 页布局。整页从处理器 bump 区取得，生命周期与进程相同，收集器期间不被移动。
+pub const COORDINATOR_MODE_OFFSET: uint = 0
+pub const COORDINATOR_EPOCH_OFFSET: uint = 8
+pub const COORDINATOR_ENTRY_RSP_OFFSET: uint = 16
+pub const COORDINATOR_SAVED_RSP_OFFSET: uint = 24
+pub const COORDINATOR_SYSTEM_TOP_OFFSET: uint = 32
+/// collector 专用 system-stack 描述符：`CoroutineSlot` 形状（hot 64 字节 + stack descriptor 64 字节）。
+pub const COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET: uint = 128
+/// `gc_enter` 保存并在 dispatcher 返回后恢复的 mutator r14。
+pub const COORDINATOR_SAVED_R14_OFFSET: uint = 136
+/// `CoroutineSlot` 布局偏移：hot 内的 state/current_processor 与 stack descriptor 四个关键字段。
+pub const SYSTEM_SLOT_HOT_STATE_OFFSET: uint = 0
+pub const SYSTEM_SLOT_HOT_PROCESSOR_OFFSET: uint = 16
+pub const SYSTEM_SLOT_STACK_BYTES: uint = 128
+pub const SYSTEM_SLOT_STACK_CHECK_OFFSET: uint = 64
+pub const SYSTEM_SLOT_STACK_LOW_OFFSET: uint = 72
+pub const SYSTEM_SLOT_STACK_HIGH_OFFSET: uint = 80
+pub const SYSTEM_SLOT_STACK_CAPACITY_OFFSET: uint = 88
+/// system stack 底部预留：低到这里才需要 morestack，`GcImageConfig` 的遍历深度远小于它。
+pub const GC_SYSTEM_STACK_RESERVE: uint = 8192
+pub const COORDINATOR_NURSERY_OFFSET: uint = 40
+pub const COORDINATOR_OLD_OFFSET: uint = 48
+pub const COORDINATOR_EVAC_CURSOR_OFFSET: uint = 56
+pub const COORDINATOR_EVAC_LIMIT_OFFSET: uint = 64
+pub const COORDINATOR_WORKLIST_COUNT_OFFSET: uint = 72
+pub const COORDINATOR_MINOR_CYCLES_OFFSET: uint = 80
+pub const COORDINATOR_EVACUATED_OFFSET: uint = 88
+pub const COORDINATOR_RECLAIMED_OFFSET: uint = 96
+/// 根快照缓冲区：栈图缓冲区、动态根缓冲区与合并后的收集器输入各自一片。
+pub const COORDINATOR_STACK_ROOTS_OFFSET: uint = 104
+pub const COORDINATOR_DYNAMIC_ROOTS_OFFSET: uint = 112
+pub const COORDINATOR_COMBINED_ROOTS_OFFSET: uint = 120
+/// 单条根记录字节数的别名；合并时按它整份搬运。
+pub const GC_ROOT_RECORD_BYTES: uint = ROOT_RECORD_BYTES
+pub const GC_ROOT_BUFFER_BYTES: uint = 16384
+/// 一片缓冲区能容纳的根记录数：去掉扫描头部后按记录尺寸整除。
+pub const GC_ROOT_RECORDS: uint = (GC_ROOT_BUFFER_BYTES - ROOT_SCAN_HEADER_BYTES) / GC_ROOT_RECORD_BYTES
+/// 工作列表位于 coordinator 页内：`[1024, 4096)` 可容纳 384 个对象地址。
+pub const COORDINATOR_WORKLIST_BYTES: uint = 1024
+pub const GC_WORKLIST_CAPACITY: uint = 384
+pub const GC_COORDINATOR_PAGE_BYTES: uint = 4096
+
+/// 收集器模式值：0 是 mutator，1 是 collector。恢复前必须回到 0。
+pub const GC_MODE_MUTATOR: uint = 0
+pub const GC_MODE_COLLECTOR: uint = 1
+pub const COORDINATOR_MAJOR_CYCLES_OFFSET: uint = 144
+
+/// side metadata 里需要随 nursery 一起重置的范围：object-start 到 line 表末尾。
+/// 头部 24 字节（state/generation/mark_epoch/alloc_cursor/pin_count）与 mark_epoch 不在其中。
+const ARENA_CLEAR_FROM: uint = ARENA_OBJECT_START_OFFSET
+const ARENA_CLEAR_TO: uint = ARENA_LINE_LIVE_OFFSET + 16384
+/// 一次 trace 扫描授予的工作额度：超过这个量说明游标并没有推进。
+const GC_TRACE_GRANTS: uint = 8192
+
+fn coordinator_config() uint = unsafe { std.runtime.gc_config() }
+
+/// coordinator 页指针。
+///
+/// 它由 `gc_boot` 在启动时**唯一建立**，运行期只读——状态区槽在 rt0 之前不保证为零，
+/// 因此这里绝不能把「槽非零」当作「已建立」：那会把陈旧垃圾当页面指针，后续写入落到
+/// 未映射地址。槽为空只可能是启动序列被绕过，按 RuntimeInvariant fatal。
+pub fn gc_coordinator(processor: uint) uint {
+    let state = heap_word(processor + 4080)
+    let page = heap_word(state + GC_COORDINATOR_STATE_OFFSET)
+    if page == 0 { heap_fail() } else { let _ = 0 }
+    if page < uint(65536) || page > uint(140737488355328) { heap_fail() } else { let _ = 0 }
+    page
+}
+
+fn coordinator_create(processor: uint, state: uint) uint {
+    let page = heap_alloc(processor, GC_COORDINATOR_PAGE_BYTES)
+    let at = page
+    let end = page + GC_COORDINATOR_PAGE_BYTES
+    while at < end {
+        heap_store_word(at, 0)
+        at = at + 8
+    }
+    heap_store_word(page + COORDINATOR_MODE_OFFSET, GC_MODE_MUTATOR)
+    let buffers = heap_alloc(processor, GC_ROOT_BUFFER_BYTES * 3)
+    heap_store_word(page + COORDINATOR_STACK_ROOTS_OFFSET, buffers)
+    heap_store_word(page + COORDINATOR_DYNAMIC_ROOTS_OFFSET, buffers + GC_ROOT_BUFFER_BYTES)
+    heap_store_word(page + COORDINATOR_COMBINED_ROOTS_OFFSET, buffers + GC_ROOT_BUFFER_BYTES * 2)
+    // 发布必须在全部字段写完之后：读取方只看到「已发布」或「未发布」两种状态。
+    heap_store_word(state + GC_COORDINATOR_STATE_OFFSET, page)
+    page
+}
+
+/// 目标（old）arena：首次需要时建立，尺寸与 nursery 同一份几何契约。
+fn coordinator_old(coordinator: uint) uint {
+    let existing = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
+    let created = if existing != 0 { existing } else { coordinator_create_old(coordinator) }
+    created
+}
+
+fn coordinator_create_old(coordinator: uint) uint {
+    let config = coordinator_config()
+    let arena_bytes = gc_config_arena_bytes(config)
+    let block_bytes = gc_config_block_bytes(config)
+    let blocks = arena_bytes / block_bytes
+    let arena = heap_arena_create(arena_bytes, blocks * BLOCK_RECORD_BYTES + LARGE_MAPPING_TABLE_BYTES)
+    heap_store_word(coordinator + COORDINATOR_OLD_OFFSET, arena)
+    arena
+}
+
+/// 对象是否位于当前 nursery：arena 基址相同即视为 nursery（nursery 是纯分配区，不保存 old 对象）。
+fn coordinator_in_nursery(coordinator: uint, address: uint, arena_bytes: uint) uint {
+    let inside = address != 0 && heap_arena_of(address, arena_bytes) == heap_word(coordinator + COORDINATOR_NURSERY_OFFSET)
+    if inside { 1 } else { 0 }
+}
+
+/// 把一条根值解析成搬迁后的地址：null 保持 0，old 目标原样返回，已转发对象读回转发地址。
+fn coordinator_evacuate(coordinator: uint, value: uint) uint {
+    let moved = value
+    if value != 0 {
+        let config = coordinator_config()
+        let arena_bytes = gc_config_arena_bytes(config)
+        let header = gc_config_object_header_bytes(config)
+        if value < header { heap_fail() } else { let _ = 0 }
+        let inside = coordinator_in_nursery(coordinator, value, arena_bytes)
+        if inside == 1 {
+            let control = heap_word(value - header)
+            if control & CONTROL_FORWARDED != 0 {
+                moved = heap_word(value - header + 8)
+            } else {
+                moved = coordinator_copy(coordinator, value, control, config)
+            }
+        } else {
+            let _ = 0
+        }
+    } else {
+        let _ = 0
+    }
+    moved
+}
+
+fn coordinator_push(coordinator: uint, address: uint) {
+    let count = heap_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET)
+    if count >= GC_WORKLIST_CAPACITY { heap_fail() }
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_BYTES + count * 8, address)
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, count + 1)
+}
+
+fn coordinator_worklist_entry(coordinator: uint, index: uint) uint =
+    heap_word(coordinator + COORDINATOR_WORKLIST_BYTES + index * 8)
+
+/// 在 collector 的目标 arena 上按下一个未打开块重新开始一段连续范围。
+fn coordinator_open_range(coordinator: uint, bytes: uint, align: uint) uint {
+    let config = coordinator_config()
+    let arena_bytes = gc_config_arena_bytes(config)
+    let block_bytes = gc_config_block_bytes(config)
+    let line_bytes = gc_config_line_bytes(config)
+    let header = gc_config_object_header_bytes(config)
+    let old = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
+    let meta = heap_metadata(old, arena_bytes)
+    let blocks = arena_bytes / block_bytes
+    let block: uint = 0
+    while block < blocks && heap_block_state_word(old, arena_bytes, block_bytes, block) != BLOCK_STATE_FREE {
+        block = block + 1
+    }
+    if block >= blocks { heap_fail() } else { let _ = 0 }
+    heap_open_free_block_meta(old, block, arena_bytes, block_bytes, line_bytes)
+    let base = old + block * block_bytes
+    let limit = base + block_bytes
+    let aligned = (base + header + align - uint(1)) / align * align
+    if aligned + bytes > limit { heap_fail() }
+    heap_store_word(coordinator + COORDINATOR_EVAC_CURSOR_OFFSET, aligned + bytes)
+    heap_store_word(coordinator + COORDINATOR_EVAC_LIMIT_OFFSET, limit)
+    aligned
+}
+
+/// 收集器分配：先复用当前范围，不足再开新块；返回对齐后的 payload 地址。
+/// 头、零初始化与 object-start/page-cover 账本与分配快路同一份契约，因此副本对 mutator 完全合法。
+fn coordinator_allocate(coordinator: uint, bytes: uint, align: uint, kind: uint, generation: uint, age: uint) uint {
+    let config = coordinator_config()
+    let arena_bytes = gc_config_arena_bytes(config)
+    let granule = gc_config_granule_bytes(config)
+    let header = gc_config_object_header_bytes(config)
+    let actual_align = if align > granule { align } else { granule }
+    let cursor = heap_word(coordinator + COORDINATOR_EVAC_CURSOR_OFFSET)
+    let limit = heap_word(coordinator + COORDINATOR_EVAC_LIMIT_OFFSET)
+    let aligned = (cursor + header + actual_align - uint(1)) / actual_align * actual_align
+    let result = if cursor != 0 && aligned + bytes <= limit {
+        heap_store_word(coordinator + COORDINATOR_EVAC_CURSOR_OFFSET, aligned + bytes)
+        aligned
+    } else {
+        coordinator_open_range(coordinator, bytes, actual_align)
+    }
+    heap_store_word(result - header, header_control(kind, generation, age, REPRESENTATION_LOCAL_DIRECT))
+    heap_store_word(result - header + 8, bytes)
+    let words = bytes / 8
+    let index: uint = 0
+    while index < words {
+        heap_store_word(result + index * 8, 0)
+        index = index + 1
+    }
+    let tail = bytes % 8
+    let tail_index: uint = 0
+    while tail_index < tail {
+        heap_store_byte(result + words * 8 + tail_index, 0)
+        tail_index = tail_index + 1
+    }
+    let arena = heap_arena_of(result, arena_bytes)
+    let offset = result - arena - header
+    heap_mark_object_start(arena, arena_bytes, offset, granule)
+    heap_mark_page_cover(arena, arena_bytes, offset, header + bytes, granule)
+    result
+}
+
+/// 复制一个 nursery 对象到 old：保留真实 payload 尺寸与字段表示，按代龄决定 generation，
+/// 在原 header 发布唯一转发目标，并把副本登记进待扫描工作列表。
+fn coordinator_copy(coordinator: uint, source: uint, control: uint, config: uint) uint {
+    let header = gc_config_object_header_bytes(config)
+    let granule = gc_config_granule_bytes(config)
+    let tenure = gc_config_tenure_age(config)
+    let bytes = heap_word(source - header + 8)
+    // 对象字节数必须落在块内：超过 block_bytes 的分配走大对象路径，nursery 里不可能出现。
+    // 该字段是根或字段指向了非对象（陈旧指针）时的第一道判别，按契约 fatal 而不是按字节数搬运。
+    let block_bytes = gc_config_block_bytes(config)
+    if bytes == 0 || bytes > block_bytes { heap_fail() } else { let _ = 0 }
+    let kind = header_type_index(control)
+    let age = ((control & CONTROL_AGE_MASK) >> CONTROL_AGE_SHIFT) + uint(1)
+    let generation = if age >= tenure { GENERATION_OLD } else { GENERATION_AGING }
+    let destination = coordinator_allocate(coordinator, bytes, granule, kind, generation, age)
+    copy_bytes(destination, source, bytes)
+    heap_store_word(source - header, control | CONTROL_FORWARDED)
+    heap_store_word(source - header + 8, destination)
+    heap_store_word(coordinator + COORDINATOR_EVACUATED_OFFSET, heap_word(coordinator + COORDINATOR_EVACUATED_OFFSET) + 1)
+    coordinator_push(coordinator, destination)
+    destination
+}
+
+/// 扫描一个已搬迁对象：按类型记录的 trace descriptor 精确枚举受管字段并回写新引用。
+/// 未登记类型、descriptor 与 payload 长度矛盾、额度不收敛都是 RuntimeInvariant。
+fn coordinator_scan(coordinator: uint, processor: uint, address: uint) {
+    let config = coordinator_config()
+    let header = gc_config_object_header_bytes(config)
+    let control = heap_word(address - header)
+    let kind = header_type_index(control)
+    let bytes = heap_word(address - header + 8)
+    let section = gc_types_section()
+    let descriptor = gc_type_trace(section, kind)
+    let descriptor_len = gc_type_trace_length(section, kind)
+    let cursor = trace_cursor(processor)
+    let arena_bytes = gc_config_arena_bytes(config)
+    let granule = gc_config_granule_bytes(config)
+    trace_begin(cursor, uint(64))
+    if trace_open(cursor, descriptor, descriptor_len) == 0 {
+        let looping: uint = 1
+        let grants: uint = 0
+        while looping == 1 {
+            let status = trace_advance(cursor, descriptor, descriptor_len, address, bytes)
+            if status == TRACE_VISIT {
+                let field = address + trace_last_word(cursor) * 8
+                let value = heap_word(field)
+                // 字段必须按 opcode 回写，不能一律当 direct：INTERIOR 字段里存的是
+                // `payload + delta`，直接拿它去搬运会把对象中段的字节当成 header。
+                let moved = if trace_last_op(cursor) == TRACE_OP_INTERIOR {
+                    let located = heap_resolve_object(value, heap_word(coordinator + COORDINATOR_NURSERY_OFFSET), arena_bytes, granule, header)
+                    if located.2 == 0 {
+                        // 指向不搬动存储（静态、栈、large mapping）的内部指针不需要修正。
+                        value
+                    } else {
+                        coordinator_evacuate(coordinator, located.2) + located.3
+                    }
+                } else {
+                    coordinator_evacuate(coordinator, value)
+                }
+                if moved != value {
+                    heap_store_word(field, moved)
+                } else {
+                    let _ = 0
+                }
+            } else {
+                let _ = 0
+            }
+            if status == TRACE_COMPLETE {
+                looping = 0
+            } else {
+                if status == TRACE_PENDING {
+                    grants = grants + 1
+                    if grants > GC_TRACE_GRANTS { heap_fail() }
+                    trace_grant(cursor, uint(64))
+                } else {
+                    let _ = 0
+                }
+            }
+        }
+    } else {
+        let _ = 0
+    }
+}
+
+/// 用工作列表推进到固定点：新副本里的字段可能继续指向 nursery，必须逐个解析。
+fn coordinator_drain(coordinator: uint, processor: uint) {
+    let index: uint = 0
+    while index < heap_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET) {
+        coordinator_scan(coordinator, processor, coordinator_worklist_entry(coordinator, index))
+        index = index + 1
+    }
+}
+
+/// 重置 nursery：逐块清除对象账本，只有块记录状态回到 FREE 后才可再次提交。
+fn coordinator_reset_nursery(processor: uint, coordinator: uint) uint {
+    let config = coordinator_config()
+    let arena_bytes = gc_config_arena_bytes(config)
+    let block_bytes = gc_config_block_bytes(config)
+    let line_bytes = gc_config_line_bytes(config)
+    let nursery = heap_word(coordinator + COORDINATOR_NURSERY_OFFSET)
+    let meta = heap_metadata(nursery, arena_bytes)
+    let recorded = heap_word32(meta + ARENA_ALLOC_CURSOR_OFFSET)
+    let committed = if recorded == ARENA_NO_BLOCK { uint(0) } else { recorded }
+    let block_count = arena_bytes / block_bytes
+    let block: uint = 0
+    let granule = gc_config_granule_bytes(config)
+    let card = gc_config_card_bytes(config)
+    while block < block_count {
+        let state = heap_block_state_word(nursery, arena_bytes, block_bytes, block)
+        if state != BLOCK_STATE_FREE {
+            let lines = block_bytes / line_bytes
+            let line: uint = 0
+            while line < lines {
+                heap_set_line_state(nursery, arena_bytes, block_bytes, line_bytes, block * lines + line, LINE_FREE)
+                line = line + 1
+            }
+            heap_clear_block_object_starts(nursery, arena_bytes, block_bytes, block, granule, card)
+            heap_block_set_state(nursery, arena_bytes, block_bytes, block, BLOCK_STATE_FREE)
+        }
+        block = block + 1
+    }
+    heap_store_word32(meta + ARENA_ALLOC_CURSOR_OFFSET, ARENA_NO_BLOCK)
+    heap_open_block(processor, nursery, 0, arena_bytes, block_bytes, line_bytes)
+    committed * block_bytes
+}
+
+/// minor cycle：根 → 搬运 → 字段修正 → 重置 nursery。
+///
+/// `roots` 是 `gc_walk_roots`/`gc_visit_dynamic_roots` 写出的同一份根记录缓冲区，
+/// `capacity` 是记录条数上限。返回 0 表示周期完成；非 0 是固定失败码，探针据此定位。
+/// 返回值不掩饰不变量错误：任何损坏都以 fatal 结束，不走可恢复路径。
+pub fn gc_collect_minor(processor: uint, roots: uint, capacity: uint) uint {
+    let config = coordinator_config()
+    let arena_bytes = gc_config_arena_bytes(config)
+    let coordinator = gc_coordinator(processor)
+    let tlab = heap_word(processor + 3520)
+    if tlab == 0 { heap_fail() }
+    let nursery = heap_arena_of(tlab, arena_bytes)
+    heap_store_word(coordinator + COORDINATOR_NURSERY_OFFSET, nursery)
+    heap_store_word(coordinator + COORDINATOR_EVAC_CURSOR_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_EVAC_LIMIT_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_EVACUATED_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_COLLECTOR)
+    let _ = coordinator_old(coordinator)
+    let written = heap_word(roots + 8)
+    if written > capacity { heap_fail() }
+    let index: uint = 0
+    let granule = gc_config_granule_bytes(config)
+    let header = gc_config_object_header_bytes(config)
+    while index < written {
+        let record = roots + ROOT_SCAN_HEADER_BYTES + index * ROOT_RECORD_BYTES
+        let field = heap_word(record)
+        let kind = heap_word(record + 8)
+        let value = heap_word(record + 16)
+        let moved: uint = 0
+        if kind == ROOT_KIND_DIRECT {
+            moved = coordinator_evacuate(coordinator, value)
+        } else {
+            if kind == ROOT_KIND_INTERIOR || kind == ROOT_KIND_STACK_INTERIOR {
+                let nursery = heap_word(coordinator + COORDINATOR_NURSERY_OFFSET)
+                let located = if nursery == 0 { (uint(0), uint(0), uint(0), uint(0)) } else { heap_resolve_object(value, nursery, arena_bytes, granule, header) }
+                if located.2 == 0 { moved = value } else { moved = coordinator_evacuate(coordinator, located.2) + located.3 }
+            } else {
+                if kind == ROOT_KIND_HANDLE { moved = value } else {
+                    if kind == ROOT_KIND_COMPRESSED { moved = coordinator_evacuate(coordinator, value) } else { heap_fail() }
+                }
+            }
+        }
+        if moved != value { heap_store_word(field, moved) } else { let _ = 0 }
+        heap_store_word(record + 16, moved)
+        index = index + 1
+    }
+    coordinator_drain(coordinator, processor)
+    let reclaimed = coordinator_reset_nursery(processor, coordinator)
+    heap_store_word(coordinator + COORDINATOR_RECLAIMED_OFFSET, reclaimed)
+    heap_store_word(coordinator + COORDINATOR_MINOR_CYCLES_OFFSET, heap_word(coordinator + COORDINATOR_MINOR_CYCLES_OFFSET) + 1)
+    heap_store_word(coordinator + COORDINATOR_EPOCH_OFFSET, heap_word(coordinator + COORDINATOR_EPOCH_OFFSET) + 1)
+    heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_MUTATOR)
+    0
+}
+
+/// coordinator 计数读取口；探针与后续 pacing 从这里观测真实完成的工作。
+pub fn gc_minor_cycles(processor: uint) uint = heap_word(gc_coordinator(processor) + COORDINATOR_MINOR_CYCLES_OFFSET)
+pub fn gc_evacuated_objects(processor: uint) uint = heap_word(gc_coordinator(processor) + COORDINATOR_EVACUATED_OFFSET)
+pub fn gc_reclaimed_bytes(processor: uint) uint = heap_word(gc_coordinator(processor) + COORDINATOR_RECLAIMED_OFFSET)
+pub fn gc_major_cycles(processor: uint) uint = heap_word(gc_coordinator(processor) + COORDINATOR_MAJOR_CYCLES_OFFSET)
+
+
+pub const GC_MAJOR_REQUEST_KIND: uint = 2
+pub const GC_MARK_TICKET_BYTES: uint = 32
+pub const GC_MAJOR_MAX_WORK: uint = 384
+
+fn coordinator_mark_object(coordinator: uint, address: uint) {
+    let config = coordinator_config()
+    let arena = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
+    let located = heap_resolve_object(address, arena, gc_config_arena_bytes(config), gc_config_granule_bytes(config), gc_config_object_header_bytes(config))
+    if located.2 != 0 {
+        let marked = heap_mark_test_and_set(located.2, arena, gc_config_arena_bytes(config), gc_config_granule_bytes(config), gc_config_object_header_bytes(config))
+        if marked != 0 { coordinator_push(coordinator, located.2) } else { let _ = 0 }
+    } else { let _ = 0 }
+}
+
+fn coordinator_major_scan(coordinator: uint, processor: uint, address: uint) {
+    let config = coordinator_config()
+    let header = gc_config_object_header_bytes(config)
+    let control = heap_word(address - header)
+    let kind = header_type_index(control)
+    let section = gc_types_section()
+    let descriptor = gc_type_trace(section, kind)
+    let descriptor_len = gc_type_trace_length(section, kind)
+    let bytes = heap_word(address - header + 8)
+    let cursor = trace_cursor(processor)
+    trace_begin(cursor, uint(64))
+    if trace_open(cursor, descriptor, descriptor_len) == 0 {
+        let running: uint = 1
+        let grants: uint = 0
+        while running == 1 {
+            let status = trace_advance(cursor, descriptor, descriptor_len, address, bytes)
+            if status == TRACE_VISIT {
+                let field = address + trace_last_word(cursor) * 8
+                let value = heap_word(field)
+                coordinator_mark_object(coordinator, value)
+            } else {
+                if status == TRACE_PENDING {
+                    grants = grants + 1
+                    if grants > GC_TRACE_GRANTS { heap_fail() }
+                    trace_grant(cursor, uint(64))
+                } else {
+                    if status == TRACE_COMPLETE { running = 0 } else { heap_fail() }
+                }
+            }
+        }
+    } else { let _ = 0 }
+}
+
+fn coordinator_major_drain(coordinator: uint, processor: uint) {
+    let index: uint = 0
+    while index < heap_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET) {
+        coordinator_major_scan(coordinator, processor, coordinator_worklist_entry(coordinator, index))
+        index = index + 1
+    }
+}
+
+fn coordinator_sweep_major(coordinator: uint) uint {
+    let config = coordinator_config()
+    let arena = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
+    let arena_bytes = gc_config_arena_bytes(config)
+    let block_bytes = gc_config_block_bytes(config)
+    let line_bytes = gc_config_line_bytes(config)
+    let granule = gc_config_granule_bytes(config)
+    let header = gc_config_object_header_bytes(config)
+    let card = gc_config_card_bytes(config)
+    let blocks = arena_bytes / block_bytes
+    let granules_per_block = block_bytes / granule
+    let lines_per_block = block_bytes / line_bytes
+    heap_clear_page_cover(arena, arena_bytes)
+    let reclaimed: uint = 0
+    let block: uint = 0
+    while block < blocks {
+        let state = heap_block_state_word(arena, arena_bytes, block_bytes, block)
+        if state != BLOCK_STATE_FREE {
+            let line: uint = 0
+            while line < lines_per_block {
+                heap_set_line_state(arena, arena_bytes, block_bytes, line_bytes, block * lines_per_block + line, LINE_FREE)
+                line = line + 1
+            }
+            let first = block * granules_per_block
+            let end = first + granules_per_block
+            let granule_index = first
+            let live_objects: uint = 0
+            while granule_index < end {
+                let offset = granule_index * granule
+                let object_header = arena + offset
+                if heap_object_start(arena, arena_bytes, object_header, granule) != 0 {
+                    let payload = object_header + header
+                    let bytes = heap_word(object_header + 8)
+                    if bytes == 0 || offset + header + bytes > (block + 1) * block_bytes { heap_fail() }
+                    if heap_mark_bit(payload, arena, arena_bytes, granule, header) != 0 {
+                        heap_mark_page_cover(arena, arena_bytes, offset, header + bytes, granule)
+                        let first_line = offset / line_bytes
+                        let last_line = (offset + header + bytes - 1) / line_bytes
+                        let covered = first_line
+                        while covered <= last_line {
+                            heap_set_line_state(arena, arena_bytes, block_bytes, line_bytes, covered, LINE_OCCUPIED)
+                            covered = covered + 1
+                        }
+                        live_objects = live_objects + 1
+                    } else {
+                        heap_clear_object_start(arena, arena_bytes, object_header, granule)
+                        reclaimed = reclaimed + header + bytes
+                    }
+                } else { let _ = 0 }
+                granule_index = granule_index + 1
+            }
+            heap_clear_block_cards(arena, arena_bytes, block_bytes, card, block)
+            if live_objects == 0 {
+                heap_block_set_state(arena, arena_bytes, block_bytes, block, BLOCK_STATE_FREE)
+                reclaimed = reclaimed + block_bytes
+            } else {
+                heap_block_set_state(arena, arena_bytes, block_bytes, block, BLOCK_STATE_ALLOCATING)
+            }
+        } else { let _ = 0 }
+        block = block + 1
+    }
+    reclaimed
+}
+
+pub fn gc_collect_major(processor: uint, roots: uint, capacity: uint) uint {
+    let config = coordinator_config()
+    let arena_bytes = gc_config_arena_bytes(config)
+    let coordinator = gc_coordinator(processor)
+    let arena = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
+    let written = heap_word(roots + 8)
+    if arena == 0 || written > capacity { heap_fail() }
+    heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_COLLECTOR)
+    let _ = heap_mark_begin_arena(processor, arena, arena_bytes)
+    let index: uint = 0
+    while index < written {
+        let record = roots + ROOT_SCAN_HEADER_BYTES + index * ROOT_RECORD_BYTES
+        let value = heap_word(record + 16)
+        let kind = heap_word(record + 8)
+        if kind == ROOT_KIND_DIRECT || kind == ROOT_KIND_INTERIOR || kind == ROOT_KIND_STACK_INTERIOR {
+            coordinator_mark_object(coordinator, value)
+        } else {
+            if kind == ROOT_KIND_HANDLE { let _ = 0 } else { heap_fail() }
+        }
+        index = index + 1
+    }
+    coordinator_major_drain(coordinator, processor)
+    let reclaimed = coordinator_sweep_major(coordinator)
+    heap_mark_end(processor)
+    heap_store_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET, heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1)
+    heap_store_word(coordinator + COORDINATOR_RECLAIMED_OFFSET, reclaimed)
+    heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_MUTATOR)
+    0
+}
+
+/// 根快照合并：把栈图根与 typed 动态根写进收集器的唯一输入。
+///
+/// 两片缓冲各自按 `roots.gg` 的扫描头布局写出；合并时按记录整份搬运并重算 `written`。
+/// `GC_ROOT_RECORDS` 是硬上界，超出即契约错误，不静默截断。
+fn gc_merge_roots(combined: uint, stack: uint, dynamic: uint) uint {
+    let stack_written = heap_word(stack + 8)
+    let dynamic_written = heap_word(dynamic + 8)
+    let total = stack_written + dynamic_written
+    if total > GC_ROOT_RECORDS { heap_fail() } else { let _ = 0 }
+    let index: uint = 0
+    while index < stack_written {
+        let source = stack + ROOT_SCAN_HEADER_BYTES + index * GC_ROOT_RECORD_BYTES
+        let target = combined + ROOT_SCAN_HEADER_BYTES + index * GC_ROOT_RECORD_BYTES
+        let offset: uint = 0
+        while offset < GC_ROOT_RECORD_BYTES {
+            heap_store_word(target + offset, heap_word(source + offset))
+            offset = offset + 8
+        }
+        index = index + 1
+    }
+    let moved: uint = 0
+    while moved < dynamic_written {
+        let source = dynamic + ROOT_SCAN_HEADER_BYTES + moved * GC_ROOT_RECORD_BYTES
+        let target = combined + ROOT_SCAN_HEADER_BYTES + (stack_written + moved) * GC_ROOT_RECORD_BYTES
+        let offset: uint = 0
+        while offset < GC_ROOT_RECORD_BYTES {
+            heap_store_word(target + offset, heap_word(source + offset))
+            offset = offset + 8
+        }
+        moved = moved + 1
+    }
+    heap_store_word(combined, total)
+    heap_store_word(combined + 8, total)
+    total
+}
+
+/// GC dispatcher：在 runtime 专用 system stack 上取根并推进一个回收周期。
+///
+/// `request` 指向当前线程的非移动控制记录（首字是 kind），`entry_rsp` 是 `gc_enter` 片段
+/// 发布的 runtime 入口帧 RSP。发起者帧由栈图函数表逐帧上移定位，绝不猜相邻 map。允许停点
+/// 的请求（分配/压力）走完整根快照；其余请求只回报状态，不发起回收。
+///
+/// 返回值是周期状态（0 正常）；任何损坏都以 fatal 结束，不走可恢复路径。
+#[used]
+pub fn gc_dispatch(request: uint, entry_rsp: uint) uint {
+    let processor = heap_word(unsafe { std.runtime.current_slot() } + 16)
+    let coordinator = gc_coordinator(processor)
+    let kind = heap_word(request + GC_REQUEST_KIND_OFFSET)
+    let status: uint = 0
+    if kind == GC_REQUEST_ALLOC || kind == GC_REQUEST_PRESSURE || kind == GC_REQUEST_MAJOR {
+        let located = gc_initiator_frame(entry_rsp)
+        let frame = located.0
+        let pc = located.1
+        if frame == 0 || pc == 0 { heap_fail() } else { let _ = 0 }
+        let stack = heap_word(coordinator + COORDINATOR_STACK_ROOTS_OFFSET)
+        heap_store_word(stack, 0)
+        heap_store_word(stack + 8, 0)
+        let needed = gc_walk_roots(stack, GC_ROOT_RECORDS, frame, pc, SAFEPOINT_KIND_CALL_RETURN, 0, 0)
+        if needed > GC_ROOT_RECORDS { heap_fail() } else { let _ = 0 }
+        let dynamic = heap_word(coordinator + COORDINATOR_DYNAMIC_ROOTS_OFFSET)
+        let combined = heap_word(coordinator + COORDINATOR_COMBINED_ROOTS_OFFSET)
+        heap_store_word(dynamic, 0)
+        heap_store_word(dynamic + 8, 0)
+        let visited = gc_visit_dynamic_roots(processor, dynamic, GC_ROOT_RECORDS)
+        if visited > GC_ROOT_RECORDS { heap_fail() } else { let _ = 0 }
+        let total = gc_merge_roots(combined, stack, dynamic)
+        status = gc_collect_minor(processor, combined, GC_ROOT_RECORDS)
+        if status == 0 && (kind == GC_REQUEST_PRESSURE || kind == GC_REQUEST_MAJOR) {
+            status = gc_collect_major(processor, combined, GC_ROOT_RECORDS)
+        }
+        if total == 0 { let _ = 0 } else { let _ = total }
+    } else {
+        let _ = 0
+    }
+    status
+}
+
+/// 收集器专用 system stack 字节数：固定深度遍历（trace 用显式帧、标记用迭代游标）足够。
+pub const GC_SYSTEM_STACK_BYTES: uint = 65536
+
+#[repr(C)]
+struct GcExtent { base: uint, bytes: uint }
+
+/// 建立收集器专用 system stack：一次对齐 reserve + 提交，把栈顶写进 coordinator。
+///
+/// 收集器在 system stack 上运行，因此它的帧深度不受协程栈上限约束；同一份映射全程复用，
+/// 不逐周期重新映射。栈顶按 16 字节对齐，使 `call gc_dispatch` 后的 ABI 对齐成立。
+pub fn gc_boot(processor: uint) {
+    // 启动序列里 coordinator 还没发布，因此这里由 gc_boot 唯一建立它；
+    // 之后所有读取都走 `gc_coordinator` 的「已发布」断言。
+    let coordinator = coordinator_create(processor, heap_word(processor + 4080))
+    unsafe {
+        let base = std.platform.reserve_aligned(GC_SYSTEM_STACK_BYTES, uint(4096))
+        if base == 0 { heap_fail() } else { let _ = 0 }
+        let range = GcExtent { base: base, bytes: GC_SYSTEM_STACK_BYTES }
+        if std.platform.commit(std.mem.transmute[*GcExtent, uint](std.ptr.addr_of(range))) != 0 { heap_fail() } else { let _ = 0 }
+        heap_store_word(coordinator + COORDINATOR_SYSTEM_TOP_OFFSET, (base + GC_SYSTEM_STACK_BYTES) / 16 * 16)
+        // collector 专用栈描述符：system 模式下 r14 指向它，因此收集器自身的栈检查不会去
+        // 读 mutator 协程的 stack_check（那会让 system stack 地址看起来越界）。
+        let slot = heap_alloc(processor, SYSTEM_SLOT_STACK_BYTES)
+        let cleared: uint = 0
+        while cleared < SYSTEM_SLOT_STACK_BYTES {
+            heap_store_word(slot + cleared, 0)
+            cleared = cleared + 8
+        }
+        heap_store_word(slot + SYSTEM_SLOT_HOT_STATE_OFFSET, 1)
+        heap_store_word(slot + SYSTEM_SLOT_HOT_PROCESSOR_OFFSET, processor)
+        heap_store_word(slot + SYSTEM_SLOT_STACK_CHECK_OFFSET, base + GC_SYSTEM_STACK_RESERVE)
+        heap_store_word(slot + SYSTEM_SLOT_STACK_LOW_OFFSET, base)
+        heap_store_word(slot + SYSTEM_SLOT_STACK_HIGH_OFFSET, base + GC_SYSTEM_STACK_BYTES)
+        heap_store_word(slot + SYSTEM_SLOT_STACK_CAPACITY_OFFSET, GC_SYSTEM_STACK_BYTES)
+        heap_store_word(coordinator + COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET, slot)
+    }
+}

@@ -19,10 +19,9 @@ use super::platform::PlatformProfile;
 
 /// 本地堆契约段 schema。
 ///
-/// 版本 4 相对版本 3 的变化：块状态目录改为规范迁移名
-/// `allocating/candidate/sweeping/evacuating/return-pending/owned-free/free`，
-/// 判别值由 `HeapBlockState` 固定，禁止再写裸整数。
-pub(crate) const LOCAL_HEAP_SCHEMA: u32 = 4;
+/// 版本 5 相对版本 4 的变化：新增独立 `LargeMappingRecord` 表、固定大映射页粒度与 arena-side
+/// range 记录，并把 page-cover/object-start/mark 的运行期消费者接入分配与屏障路径。
+pub(crate) const LOCAL_HEAP_SCHEMA: u32 = 5;
 
 /// allocation granule：object-start bitmap 每一位对应一个 granule。
 pub(crate) const HEAP_GRANULE_BYTES: u32 = 16;
@@ -177,6 +176,19 @@ pub(crate) struct HeapBlockRecord {
 }
 
 const _: () = assert!(std::mem::size_of::<HeapBlockRecord>() == 64);
+
+/// 独立大对象映射的 arena 侧登记；记录只保存 range identity 与生命周期状态，不保存 managed 指针。
+#[repr(C, align(8))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct LargeMappingRecord {
+    pub base: u64,
+    pub payload: u64,
+    pub bytes: u64,
+    pub generation: u32,
+    pub state: u32,
+}
+
+const _: () = assert!(std::mem::size_of::<LargeMappingRecord>() == 32);
 /// 一条运行时记录的完整布局；由 `heap.gg` 逐字段交叉校验。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -200,7 +212,7 @@ const fn field(name: &'static str, offset: u32, bytes: u32) -> (&'static str, u3
 }
 
 /// heap header、arena、pin 与 block 的字段表。
-const HEAP_RECORD_SPECS: [HeapRecordSpec; 4] = [
+const HEAP_RECORD_SPECS: [HeapRecordSpec; 5] = [
     HeapRecordSpec {
         name: "ObjectHeader",
         bytes: HEAP_OBJECT_HEADER_BYTES,
@@ -257,6 +269,18 @@ const HEAP_RECORD_SPECS: [HeapRecordSpec; 4] = [
             field("candidate_job", 52, 4),
             field("state", 56, 4),
             field("reserved", 60, 4),
+        ],
+    },
+    HeapRecordSpec {
+        name: "LargeMappingRecord",
+        bytes: 32,
+        alignment: 8,
+        fields: &[
+            field("base", 0, 8),
+            field("payload", 8, 8),
+            field("bytes", 16, 8),
+            field("generation", 24, 4),
+            field("state", 28, 4),
         ],
     },
 ];

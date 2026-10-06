@@ -184,7 +184,9 @@ pub(crate) fn run(
         round += 1;
         // 阶段 A：冻结输入，在同一语义模型上求值本轮全部宏脚本。
         let names = names::analyze(package_identity, external_packages, modules)?;
-        let model = semantics::model::Model::new(modules, &names)?;
+        // 展开阶段只做路径与宏解析，不构造 checker：GC 控制原语的授权集合在这里不被消费。
+        let model =
+            semantics::model::Model::new(modules, &names, &std::collections::BTreeSet::new())?;
         let mut round_hash = blake3::Hasher::new_derive_key("gugu-expand-round-input-v1");
         for source in sources.snapshots() {
             round_hash.update(

@@ -4,7 +4,7 @@
 //! Mem 链连续、block 参数规范排序与 use 链不变量，随后由驱动运行结构 verifier。
 use super::super::body::{
     Block, BlockId, Body, Call, Definition, Edge, EdgeId, InstId, Instruction, Lifetime, Memory,
-    Op, Origin, Parameter, PermitId, PollSummary, Safepoint, SafepointId, SafepointKind,
+    Op, Origin, Parameter, PermitId, PollSummary, RootInit, Safepoint, SafepointId, SafepointKind,
     Terminator, Value, ValueId, ValueType, id, range,
 };
 use super::super::invalid;
@@ -159,6 +159,7 @@ pub(crate) struct Editor {
     pub(crate) signature: super::super::body::Signature,
     pub(crate) stack_slots: Vec<super::super::body::StackSlot>,
     pub(crate) lifetimes: Vec<super::super::body::Lifetime>,
+    pub(crate) root_inits: Vec<super::super::body::RootInit>,
     pub(crate) barrier_permits: Vec<super::super::body::BarrierPermit>,
     pub(crate) no_safepoint_regions: Vec<NoSafepointReason>,
     pub(crate) source_scopes: Vec<SourceScope>,
@@ -255,6 +256,7 @@ impl Editor {
             signature: body.signature,
             stack_slots: body.stack_slots,
             lifetimes: body.lifetimes,
+            root_inits: body.root_inits,
             barrier_permits: body.barrier_permits,
             no_safepoint_regions: body.no_safepoint_regions,
             source_scopes: body.source_scopes,
@@ -515,7 +517,7 @@ impl Editor {
         value
     }
 
-    /// 在入口 block 末尾物化一个常量；常量与 block 状态无关，支配本 block 全部使用。
+    /// 暂存常量到入口末尾以保持 pass 内的 InstRef 稳定；finish 在重建 arena 前将其置于入口头部。
     pub(crate) fn constant(&mut self, value: u64, ty: super::super::body::Type) -> ValueId {
         self.emit(
             self.entry,
@@ -936,6 +938,7 @@ impl Editor {
             signature,
             stack_slots,
             lifetimes,
+            root_inits,
             barrier_permits,
             no_safepoint_regions,
             source_scopes,
@@ -945,6 +948,30 @@ impl Editor {
             input_fingerprint,
             poll_summary,
         } = self;
+
+        // pass 可以在遍历期间创建入口常量，但不能使已有 InstRef 失效。直到重建时才把新建的
+        // 无依赖常量移到入口 StackCheck 之后，让机器执行顺序也满足 SSA 支配。StackCheck
+        // 承载 prologue 和入参搬运，任何常量装载都不能在它之前覆盖 ABI 入参寄存器。
+        // 原指令的 origin 不变，寿命与初始化事件仍由原始锚点映射，不跟随临时数组下标。
+        let entry_block = blocks[entry.index()]
+            .as_mut()
+            .ok_or_else(|| invalid("入口 block 被删除"))?;
+        let constants: Vec<_> = entry_block
+            .insts
+            .extract_if(.., |instruction| {
+                instruction.origin.is_none()
+                    && !instruction.removed
+                    && matches!(instruction.op, Op::IConst(_) | Op::FConst(_))
+            })
+            .collect();
+        let start = entry_block
+            .insts
+            .iter()
+            .position(|instruction| {
+                !instruction.removed && matches!(instruction.op, Op::StackCheck)
+            })
+            .map_or(0, |index| index + 1);
+        entry_block.insts.splice(start..start, constants);
 
         let mut block_map = vec![None; blocks.len()];
         let mut live_blocks = Vec::with_capacity(blocks.len());
@@ -1179,12 +1206,23 @@ impl Editor {
             out_predecessors.extend(predecessors[index].iter().copied());
             block.predecessors = start..id(out_predecessors.len());
         }
-        let mut out_lifetimes: Vec<Lifetime> = Vec::new();
-        for lifetime in lifetimes {
-            let Some(origins) = block_origins.get(lifetime.block.index()) else {
-                continue;
-            };
-            let position = usize::try_from(lifetime.position).unwrap_or(usize::MAX);
+        // 把原 body 的 `(block, position)` 锚点映射到重写后的位置。
+        //
+        // 位置顺序是锚点语义的一部分：栈槽寿命与逐根初始化事件都按位置重放，`Reset` 之后的
+        // `Set` 一旦被重排就会把未初始化的字段当成已初始化。因此这里必须给出精确定位：原指令
+        // 仍在时映射到它；被删除或被合并且同一位置无存活指令时，锚定到该位置之前最后一个仍
+        // 存活的原指令之后；整个块被合并时返回 `None`，由调用方丢弃该锚点。
+        fn map_anchor(
+            block: BlockId,
+            position: u32,
+            block_origins: &[Vec<Option<InstId>>],
+            inst_map: &[Option<InstId>],
+            out_inst_blocks: &[BlockId],
+            block_map: &[Option<BlockId>],
+            out_blocks: &[Block],
+        ) -> Option<(BlockId, u32)> {
+            let origins = block_origins.get(block.index())?;
+            let position = usize::try_from(position).unwrap_or(usize::MAX);
             let mut mapped = None;
             for origin in origins.iter().skip(position).flatten() {
                 if let Some(new_inst) = inst_map[origin.index()] {
@@ -1201,7 +1239,6 @@ impl Editor {
                     )
                 }
                 None => {
-                    // 该 block 可能已被合并：锚定到最后一个仍存活的原指令之后。
                     let mut previous = None;
                     for origin in origins[..position.min(origins.len())]
                         .iter()
@@ -1222,20 +1259,54 @@ impl Editor {
                             )
                         }
                         None => {
-                            let Some(new_block) = block_map[lifetime.block.index()] else {
-                                continue;
-                            };
+                            let new_block = block_map[block.index()]?;
                             let instructions = out_blocks[new_block.index()].instructions.clone();
                             (new_block, instructions.end - instructions.start)
                         }
                     }
                 }
             };
+            Some((new_block, new_position))
+        }
+        let mut out_lifetimes: Vec<Lifetime> = Vec::new();
+        for lifetime in lifetimes {
+            let Some((block, position)) = map_anchor(
+                lifetime.block,
+                lifetime.position,
+                &block_origins,
+                &inst_map,
+                &out_inst_blocks,
+                &block_map,
+                &out_blocks,
+            ) else {
+                continue;
+            };
             out_lifetimes.push(Lifetime {
                 slot: lifetime.slot,
-                block: new_block,
-                position: new_position,
+                block,
+                position,
                 live: lifetime.live,
+            });
+        }
+        let mut out_root_inits: Vec<RootInit> = Vec::new();
+        for root in root_inits {
+            let Some((block, position)) = map_anchor(
+                root.block,
+                root.position,
+                &block_origins,
+                &inst_map,
+                &out_inst_blocks,
+                &block_map,
+                &out_blocks,
+            ) else {
+                continue;
+            };
+            out_root_inits.push(RootInit {
+                slot: root.slot,
+                block,
+                position,
+                bit: root.bit,
+                initialized: root.initialized,
             });
         }
         let mut body = Body {
@@ -1255,6 +1326,7 @@ impl Editor {
             switch_cases: out_switch_cases,
             stack_slots,
             lifetimes: out_lifetimes,
+            root_inits: out_root_inits,
             safepoints: out_safepoints,
             barrier_permits,
             no_safepoint_regions,

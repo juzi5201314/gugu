@@ -6,16 +6,13 @@
 //!
 //! arena 容量取二次幂阶梯的顶层，保证任何 class 的块都能整块落在 arena 内且按自身大小对齐。
 
-use super::super::cage::CompressionPlane;
 use super::super::extent::{
     ExtentDescriptor, ExtentId, ExtentOccupancy, ExtentState, ExtentTable, OwnerArena, TrimBlocked,
     TrimReport,
 };
-use super::super::gc_metadata_contract::{GC_BLOCK_BYTES, GC_LINE_BYTES};
 use super::super::inbox::ShardIndex;
 #[cfg(test)]
 use super::super::inbox::{DrainStop, ServiceBudget};
-use super::super::local_heap::ManagedBlockId;
 use super::super::message::{
     FlushTrigger, IntegrityTag, MessageState, ProducerStaging, ReturnKind, ReturnMessage,
     ReturnNodeId, stage_message,
@@ -28,8 +25,6 @@ use super::super::slab::{
 use super::PendingExtentTrim;
 use super::RawWorld;
 use super::combining_impl::OperationRequest;
-use super::heap_impl::heap_error;
-use super::shared_heap_impl;
 
 /// 一个 trim 候选：门禁所需的 occupancy 加 pause 预算所需的真实度量。
 ///
@@ -64,37 +59,22 @@ impl Default for TrimCandidate {
 pub(crate) const OWNER_ARENA_BYTES: u64 = 2 * 1024 * 1024;
 
 impl RawWorld {
-    /// 为一个 owner 的某个 domain 建立 arena，并登记 extent 阶梯。
-    ///
-    /// 只预留虚拟地址：物理页在 extent 被发放时按页提交，因此 arena 本身全部计入
-    /// `range_reserved_bytes`，与 `runtime_committed_bytes` 严格互斥。
-    ///
-    /// 启用 cage profile 时 `MANAGED_LOCAL` 是唯一从 cage 切 island 的 domain：压缩引用只
-    /// 承载该 domain 的对象，`MANAGED_SHARED`/`RUNTIME_RAW`/`RESOURCE` 永不成岛，保证压缩
-    /// 引用不能绕过 handle resolve。
+    /// 为 owner 的 raw/resource domain 建立 arena，并登记 extent 阶梯。
     pub(super) fn open_arena(
         &mut self,
         owner: u32,
         token: OwnerToken,
         domain: MemoryDomainId,
     ) -> Result<u32, RawInvariant> {
-        let (range, base, range_offset) = if domain == MemoryDomainId::MANAGED_LOCAL
-            && self.compression().is_some_and(CompressionPlane::enabled)
-        {
-            let island = self.compression_mut()?.take_island(OWNER_ARENA_BYTES)?;
-            (island.range, island.base, island.offset)
-        } else {
-            let range =
-                self.provider
-                    .reserve_aligned(OWNER_ARENA_BYTES, OWNER_ARENA_BYTES, domain)?;
-            let base = self
-                .provider
-                .describe(range)
-                .ok_or_else(|| RawInvariant::new("arena 预留后描述缺失"))?
-                .base;
-            (range, base, 0)
-        };
-        let index = self.extents.register_owner(
+        let range = self
+            .provider
+            .reserve_aligned(OWNER_ARENA_BYTES, OWNER_ARENA_BYTES, domain)?;
+        let base = self
+            .provider
+            .describe(range)
+            .ok_or_else(|| RawInvariant::new("arena 预留后描述缺失"))?
+            .base;
+        self.extents.register_owner(
             owner,
             OwnerArena {
                 token,
@@ -102,10 +82,9 @@ impl RawWorld {
                 range,
                 base,
                 bytes: OWNER_ARENA_BYTES,
-                range_offset,
+                range_offset: 0,
             },
-        )?;
-        Ok(index)
+        )
     }
 
     /// 从 owner 的 arena 取得一个 extent 并提交它的页。
@@ -130,46 +109,6 @@ impl RawWorld {
             .bytes;
         self.provider.commit_pages(range, offset, bytes)?;
         Ok(extent)
-    }
-
-    /// 为一个 managed heap block 提交物理页并返回它在 arena 内的偏移。
-    ///
-    /// managed 物理页进入独立 `ManagedAccounting`，由 `committed_classes` 汇总进 pressure。
-    /// `MANAGED_LOCAL` 与 `MANAGED_SHARED` 共用本函数，不另写共享页分配器。
-    pub(super) fn commit_managed_block(
-        &mut self,
-        owner: u32,
-        arena: u32,
-        class: u32,
-    ) -> Result<(ExtentId, u64), RawInvariant> {
-        let domain = self
-            .extents
-            .arena_domain(arena)
-            .ok_or_else(|| RawInvariant::new("managed block 的 arena domain 缺失"))?;
-        if !matches!(
-            domain,
-            MemoryDomainId::MANAGED_LOCAL | MemoryDomainId::MANAGED_SHARED
-        ) || !self.extents.spaces_of(owner).contains(&arena)
-        {
-            return Err(RawInvariant::new(
-                "managed block 的 owner/domain 与 arena 不符",
-            ));
-        }
-        let extent = self.extents.allocate_in_arena(arena, class)?;
-        let range = self
-            .extents
-            .arena_range(arena)
-            .ok_or_else(|| RawInvariant::new("managed block 的 arena range 缺失"))?;
-        let offset = self.extents.offset_of_id(extent);
-        let provider_offset = self.extents.provider_offset_of_id(extent);
-        let bytes = self
-            .extents
-            .descriptor(extent)
-            .ok_or_else(|| RawInvariant::new("managed extent 缺失"))?
-            .bytes;
-        self.provider.commit_pages(range, provider_offset, bytes)?;
-        self.managed_accounting[owner as usize].commit(bytes);
-        Ok((extent, offset))
     }
 
     /// 归还一个 extent：先撤销它的物理页，再合并回 buddy 阶梯。
@@ -663,6 +602,7 @@ impl RawWorld {
     /// 载入键来自消息引用的对象：slab 消息用 slab 描述符的 class 与 generation，extent 消息用
     /// extent 阶梯的 class 与 generation。integrity checksum 覆盖这对载入键，因此引用已过期
     /// 对象的投递必然校验失败，而不是被当成另一条合法消息。
+    /// 按 extent/slab descriptor 的 class 与 generation 载入 raw/resource return。
     pub(super) fn load_return_message(
         &mut self,
         message_id: ReturnNodeId,
@@ -677,23 +617,13 @@ impl RawWorld {
                 .extents
                 .descriptor(extent)
                 .ok_or_else(|| RawInvariant::new("extent 归还引用未知 extent"))?;
-            let Ok(class) = u16::try_from(descriptor.class) else {
-                return Err(RawInvariant::new("extent class 编号越过 integrity 车道"));
-            };
+            let class = u16::try_from(descriptor.class)
+                .map_err(|_| RawInvariant::new("extent class 编号越过 integrity 车道"))?;
             return Ok(self.pool.load(
                 message_id,
                 RuntimeSizeClassId::from_raw(class),
                 SlabGeneration::from_raw(u64::from(descriptor.generation.raw())),
             ));
-        }
-        if matches!(
-            kind,
-            ReturnKind::HeapBlock
-                | ReturnKind::HeapLineRun
-                | ReturnKind::HeapArena
-                | ReturnKind::LargeMapping
-        ) {
-            return self.load_managed_return(message_id, kind);
         }
         let descriptor = self
             .descriptor(self.pool.descriptor_of(message_id))?
@@ -701,51 +631,6 @@ impl RawWorld {
         Ok(self
             .pool
             .load(message_id, descriptor.class, descriptor.generation))
-    }
-
-    /// 用 HeapBlockRecord / SharedBlockRecord 的 generation 作为 managed 载入键。
-    fn load_managed_return(
-        &self,
-        message_id: ReturnNodeId,
-        kind: ReturnKind,
-    ) -> Result<ReturnMessage, RawInvariant> {
-        let descriptor = self.pool.descriptor_of(message_id);
-        let unit = self.pool.unit_of(message_id);
-        let bytes = self.pool.node_bytes(message_id);
-        let class = match kind {
-            ReturnKind::HeapBlock => u16::try_from(self.heap_block_class)
-                .map_err(|_| RawInvariant::new("heap block class 越过 integrity 车道"))?,
-            ReturnKind::HeapLineRun => u16::try_from(bytes / u64::from(GC_LINE_BYTES))
-                .map_err(|_| RawInvariant::new("line-run 字节无法还原 line count"))?,
-            ReturnKind::HeapArena => 0,
-            ReturnKind::LargeMapping => u16::try_from(bytes / u64::from(GC_BLOCK_BYTES))
-                .map_err(|_| RawInvariant::new("large mapping 字节无法还原 span"))?,
-            _ => {
-                return Err(RawInvariant::new("load_managed_return 收到非 managed kind"));
-            }
-        };
-        let generation = if kind == ReturnKind::HeapArena {
-            SlabGeneration::from_raw(1)
-        } else if shared_heap_impl::is_shared_descriptor(descriptor.raw()) {
-            let record = self
-                .shared_registry
-                .block_record(descriptor.raw())
-                .ok_or_else(|| RawInvariant::new("managed 归还引用未知共享 block"))?;
-            SlabGeneration::from_raw(u64::from(record.block.generation))
-        } else {
-            let block = if kind == ReturnKind::HeapLineRun {
-                unit >> 8
-            } else {
-                unit
-            };
-            let id = ManagedBlockId::new(descriptor.raw(), block)?;
-            let owner = self.managed_arena_by_descriptor(id.arena())?.heap_owner;
-            let record = self.heap(owner)?.block_record(id).map_err(heap_error)?;
-            SlabGeneration::from_raw(u64::from(record.generation))
-        };
-        Ok(self
-            .pool
-            .load(message_id, RuntimeSizeClassId::from_raw(class), generation))
     }
 
     /// owner 上下文：消费一条 extent 归还消息。
@@ -851,24 +736,13 @@ impl RawWorld {
         Ok(completed)
     }
 
-    /// 把一个已撤销物理页的 extent 从账本里扣减。
-    ///
-    /// managed 物理页走独立 `ManagedAccounting`（下标按页的提交 owner 解析），其余走 directory
-    /// 账本；domain 由调用者在 trim 之前读出，绝不能按余额猜测归属。
+    /// 把一个已撤销物理页的 raw/resource extent 从账本里扣减。
     fn release_extent_bytes(
         &mut self,
-        domain: MemoryDomainId,
+        _domain: MemoryDomainId,
         owner_id: OwnerId,
         bytes: u64,
     ) -> Result<(), RawInvariant> {
-        if matches!(
-            domain,
-            MemoryDomainId::MANAGED_LOCAL | MemoryDomainId::MANAGED_SHARED
-        ) {
-            let index = self.managed_owner_index(owner_id)?;
-            self.managed_accounting[index as usize].release(bytes);
-            return Ok(());
-        }
         let accounting = self
             .directory
             .accounting_mut(owner_id)

@@ -7,8 +7,9 @@ use crate::runtime::barrier::{
 };
 use crate::runtime::barrier_schema::{
     BARRIER_SCHEMA, BarrierDemand, BarrierRuntimeContract, CARD_GRANULARITY_BYTES,
-    CARD_MARK_BUFFER_ENTRIES, CARD_MARK_STAMP_ENTRIES, EDGE_BUFFER_ENTRIES, EDGE_DELTAS_PER_WRITE,
-    GC_ARENA_CARDS, HYBRID_BARRIER_STEPS, MessageFamilyTag, arena_card, card_index, stamp_slot,
+    CARD_MARK_BUFFER_ENTRIES, CARD_MARK_STAMP_ENTRIES, CardMarkBufferHead, EDGE_BUFFER_ENTRIES,
+    EDGE_DELTAS_PER_WRITE, GC_ARENA_CARDS, HYBRID_BARRIER_STEPS, MessageFamilyTag, arena_card,
+    card_index, stamp_slot,
 };
 use crate::runtime::gc_metadata_contract::{GC_ARENA_BYTES, GcMetadataRuntimeContract};
 use crate::runtime::gc_metadata_schema::GcMetadataDemand;
@@ -78,6 +79,36 @@ fn edge_site(
         marking: true,
         stack_grey: true,
     }
+}
+
+/// barrier.gg 的状态页常量必须与 schema 容量和 Rust 记录尺寸一致。
+///
+/// 布局错位会把 card 条目与 stamp 槽写到彼此身上：运行期不会报错，只会丢卡片键或把 stamps
+/// 当 entries 读，最终表现成 remembered set 漏扫。
+#[test]
+fn barrier_source_mirrors_the_state_page_layout() {
+    let contract = BarrierRuntimeContract::build(BarrierDemand::default()).expect("契约可构建");
+    let header = u64::try_from(std::mem::size_of::<CardMarkBufferHead>()).expect("头长度适配 u64");
+    let entry_bytes = u64::from(contract.card_mark_entry_bytes);
+    let stamp_bytes = u64::from(contract.card_mark_stamp_bytes);
+    let entries = u64::from(contract.card_mark_buffer_entries);
+    let stamps = u64::from(contract.card_mark_stamp_entries);
+    let source = crate::runtime::RUNTIME_BARRIER_SOURCE;
+    let constant = |name: &str| crate::runtime::tests::source_uint_constant(source, name);
+    assert_eq!(constant("BARRIER_HEADER_BYTES"), header);
+    assert_eq!(constant("BARRIER_ENTRY_BYTES"), entry_bytes);
+    assert_eq!(constant("BARRIER_STAMP_BYTES"), stamp_bytes);
+    assert_eq!(constant("BARRIER_ENTRIES_OFFSET"), header);
+    let stamps_offset = header + entries * entry_bytes;
+    assert_eq!(constant("BARRIER_STAMPS_OFFSET"), stamps_offset);
+    assert!(
+        constant("BARRIER_SCRATCH_BYTES") >= stamps_offset + stamps * stamp_bytes,
+        "屏障状态页放不下 schema 规定的条目与 stamp 槽"
+    );
+    assert!(
+        constant("BARRIER_FLUSHES_OFFSET") + 8 <= header,
+        "flush 计数必须落在头部保留区内"
+    );
 }
 
 #[test]

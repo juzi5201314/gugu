@@ -188,6 +188,11 @@ pub(crate) fn apply_site(
         }
         CallSite::Dispatch(dispatch) => apply_dispatch(owner, state, dispatch, callees),
         CallSite::Initializer(statement) => apply_initializer(state, statement, callees),
+        CallSite::StaticInit(definition) => apply_summary(
+            state,
+            &callees(CallSite::StaticInit(definition))
+                .unwrap_or_else(FunctionSummary::conservative),
+        ),
     }
 }
 

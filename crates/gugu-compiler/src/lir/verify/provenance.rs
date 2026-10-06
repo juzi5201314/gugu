@@ -129,7 +129,18 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
                         [index + 1..usize::try_from(block.instructions.end).expect("指令范围")]
                         .iter()
                         .find(|instruction| instruction.memory.is_some());
-                    if !barrier.is_some_and(|barrier| matches!(&barrier.op, Op::GcWriteBarrier { store } | Op::GcWriteBarrierReserved { store, .. } if store.index() == index)) {
+                    // 本地 heap 字段写入由 hybrid barrier 记账；共享 payload 的字段写入由
+                    // guard 绑定的 `SharedFieldBarrier` 记账（它同时满足 `shared_access` 的
+                    // guard/token 规则，因此这里只要求「紧随的实际屏障覆盖同一条 store」）。
+                    let paired = barrier.is_some_and(|barrier| match &barrier.op {
+                        Op::GcWriteBarrier { store } | Op::GcWriteBarrierReserved { store, .. } => {
+                            store.index() == index
+                        }
+                        Op::SharedFieldBarrier { store, .. }
+                        | Op::SharedFieldBarrierReserved { store, .. } => store.index() == index,
+                        _ => false,
+                    });
+                    if !paired {
                         return Err(invalid("heap managed 引用 store 缺少紧随的写屏障"));
                     }
                 }
@@ -304,8 +315,10 @@ fn lifetimes(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
                     | Op::SharedAccessBegin { .. }
             );
             if reads_address {
+                let instruction_index =
+                    usize::try_from(block.instructions.start + position).expect("指令下标");
                 for &argument in args {
-                    live_pointer(body, argument, &live)?;
+                    live_pointer(body, instruction_index, argument, &live)?;
                 }
             }
             if let Op::Call(call) | Op::ForeignCall(call) = &instruction.op {
@@ -329,7 +342,7 @@ fn lifetimes(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
                 arguments, call, ..
             } => {
                 for &argument in body.args(arguments) {
-                    live_pointer(body, argument, &live)?;
+                    live_pointer(body, usize::MAX, argument, &live)?;
                 }
                 escaping_call(body, call, body.args(arguments))?;
             }
@@ -339,15 +352,32 @@ fn lifetimes(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-fn live_pointer(body: &Body, value: ValueId, live: &[bool]) -> Result<(), Diagnostic> {
-    if stack_origins(body, value)
+fn live_pointer(
+    body: &Body,
+    index: usize,
+    value: ValueId,
+    live: &[bool],
+) -> Result<(), Diagnostic> {
+    let dead: Vec<u32> = stack_origins(body, value)
         .iter()
-        .any(|slot| !live[slot.index()])
-    {
-        Err(invalid("内存访问使用已结束寿命的栈槽引用"))
-    } else {
-        Ok(())
+        .filter(|slot| !live[slot.index()])
+        .map(|slot| u32::try_from(slot.index()).expect("槽下标适配 u32"))
+        .collect();
+    if dead.is_empty() {
+        return Ok(());
     }
+    let at = if index == usize::MAX {
+        "terminator".to_owned()
+    } else {
+        format!("{:?}", body.instructions[index].op)
+    };
+    Err(invalid(&format!(
+        "内存访问使用已结束寿命的栈槽引用（{}；值 #{}；位置 {}；死亡槽 {:?}）",
+        body.name,
+        value.index(),
+        at,
+        dead
+    )))
 }
 fn escaping_call(
     body: &Body,

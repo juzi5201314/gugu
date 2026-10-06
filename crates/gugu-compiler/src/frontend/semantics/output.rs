@@ -7,7 +7,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode};
 
-pub(crate) const SCHEMA_VERSION: u32 = 11;
+pub(crate) const SCHEMA_VERSION: u32 = 12;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CheckedSemantics {

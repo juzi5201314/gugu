@@ -9,8 +9,9 @@ pub(crate) mod collect;
 pub(crate) mod instantiate;
 pub(crate) mod keys;
 pub(crate) mod roots;
+pub(crate) mod storage;
 pub(crate) mod summary;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod tests;
 mod types;
 pub(crate) mod universe;

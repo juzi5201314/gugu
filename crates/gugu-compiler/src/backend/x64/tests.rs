@@ -307,7 +307,7 @@ fn symbol_relocations_use_declared_field_widths() {
         }]
     );
     // mov r32, imm32 承载 4 字节 RVA 重定位。
-    let rva = RelocTarget::Lir(Symbol::TypeId([3; 32]));
+    let rva = RelocTarget::Lir(Symbol::TypeDescriptor([3; 32]));
     let instruction = inst(
         "mov",
         &[OperandKind::R32, OperandKind::Imm32],
@@ -936,4 +936,178 @@ fn harness_cases_and_switch_fragment_are_consistent() {
         harness.decode().control_fields.len(),
         crate::runtime::cage_control::CAGE_CONTROL_FIELDS.len()
     );
+}
+
+/// 逐根初始化条目只在「静态证明不了该根字已写成指针」时出现；完整初始化的根不得产出条目。
+///
+/// 正向门控根需要**栈驻留**的并集值在安全点上存活：SSA 常驻的并集值走 `Value` 根，不经过
+/// 栈槽、也没有初始化字节。小型夹具里编译器保持并集值为 SSA，所以这里锁住可观测的一半
+/// （完整初始化 → 零条目），正向机制由三处聚焦断言覆盖：`init_proof_marks_only_fully_written_slots`
+/// （判定谓词）、`typed_roots_round_trip_and_reject_conflicts`（编码）、
+/// `walker_honors_typed_root_init_bytes`（消费）。
+/// 编译源码并统计栈图根：`(typed, bitmap, registers, points, conflicts)`。
+/// `conflicts` 统计同一个字同时出现在固定位图与逐根初始化条目里的次数——两者互斥是契约。
+fn describe_stackmap_roots(source: &str) -> (usize, usize, usize, usize, usize) {
+    let compilation = crate::Compiler::new().compile(crate::CompileRequest::single_file(
+        "main.gg",
+        source,
+        crate::TargetName::X86_64Linux,
+    ));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let section = compilation.stackmap_section_bytes().expect("栈图 section");
+    let decoded = crate::runtime::decode_tables(section).expect("解码栈图 section");
+    let mut typed = 0_usize;
+    let mut bitmap = 0_usize;
+    let mut registers = 0_usize;
+    let mut conflicts = 0_usize;
+    for point in &decoded.safepoints {
+        let map = &decoded.maps[point.map_index as usize];
+        typed += map.typed.len();
+        bitmap += map.slots.iter().map(Vec::len).sum::<usize>();
+        registers += map.registers.iter().filter(|mask| **mask != 0).count();
+        for entry in &map.typed {
+            conflicts += map
+                .slots
+                .iter()
+                .flatten()
+                .filter(|word| **word == entry.word)
+                .count();
+        }
+    }
+    (
+        typed,
+        bitmap,
+        registers,
+        decoded.safepoints.len(),
+        conflicts,
+    )
+}
+
+#[test]
+#[ignore = "slow full compilation"]
+fn gated_union_roots_are_encoded_as_typed_entries() {
+    let describe = describe_stackmap_roots;
+    // 正例：按值传入的并集参数在被调方**分配**时仍活着，标量变体没有写过根字，因此只能进
+    // 逐根初始化条目；这条断言在门控缺失时会立刻失败（根字会被当成指针扫描）。
+    let (typed, bitmap, registers, points, conflicts) = describe(
+        "enum Slot { Scalar(int, int), Callable(fn() int) }\nfn consume(slot: Slot) fn() int {\n let captured = 1\n return fn() int { return captured }\n}\nfn main() {\n let value = Slot::Scalar(7, 8)\n _ = consume(value)\n}",
+    );
+    assert!(
+        points > 0 && typed + bitmap + registers > 0,
+        "按值并集参数在分配点必须留下根：typed={typed} bitmap={bitmap} registers={registers} points={points}"
+    );
+    assert!(
+        typed > 0,
+        "未被证明初始化的并集根字必须写成逐根初始化条目：typed={typed} bitmap={bitmap} registers={registers} points={points}"
+    );
+    assert_eq!(
+        conflicts, 0,
+        "同一个字不得同时出现在固定根位图与逐根初始化条目：typed={typed} bitmap={bitmap} points={points}"
+    );
+    let (typed, bitmap, _, points, conflicts) = describe(
+        "struct Pair { a: &int, b: &int }\nfn touch(pointer: &Pair) int { return 1 }\nfn main() {\n let x = 1\n let y = 2\n let pair = Pair { a: &x, b: &y }\n let view = &pair\n _ = touch(view)\n}",
+    );
+    assert!(
+        bitmap > 0,
+        "已完整初始化的根必须留在固定位图上：typed={typed} bitmap={bitmap} points={points}"
+    );
+    assert_eq!(
+        conflicts, 0,
+        "同一个字不得同时出现在固定根位图与逐根初始化条目：bitmap={bitmap} points={points}"
+    );
+}
+
+/// 并集根字的落点契约：
+/// - 标量变体的整值复制**不得新增固定根**（标量字被当指针扫描就是假根），只能走逐根初始化条目；
+/// - sret 返回的携带根变体必须在调用方留下固定根（否则闭包在返回后无人覆盖）。
+///
+/// 这个测试做多次真实编译，单次耗时60秒以上；移出默认套件。
+#[test]
+#[ignore = "integration test with multiple compilations, run with --ignored"]
+fn union_root_words_follow_the_written_variant() {
+    let declaration = "enum Slot { Scalar(int, int), Callable(fn() int) }\n";
+    let callee = "fn consume(slot: Slot) fn() int {\n let captured = 1\n return fn() int { return captured }\n}\n";
+    let plain = describe_stackmap_roots(&format!(
+        "{declaration}{callee}fn main() {{\n let value = Slot::Scalar(7, 8)\n _ = consume(value)\n}}"
+    ));
+    let copied = describe_stackmap_roots(&format!(
+        "{declaration}{callee}fn main() {{\n let value = Slot::Scalar(7, 8)\n let copy = value\n _ = consume(copy)\n}}"
+    ));
+    assert_eq!(
+        copied.1, plain.1,
+        "标量变体的整值复制不得新增固定根：copied={copied:?} plain={plain:?}"
+    );
+    assert!(
+        copied.0 > plain.0,
+        "复制的标量变体根字必须走逐根初始化条目：copied={copied:?} plain={plain:?}"
+    );
+    let direct = describe_stackmap_roots(&format!(
+        "{declaration}{callee}fn main() {{\n let value = Slot::Callable(fn() int {{ return 1 }})\n _ = consume(value)\n}}"
+    ));
+    let sret = describe_stackmap_roots(&format!(
+        "{declaration}{callee}fn build() Slot {{\n return Slot::Callable(fn() int {{ return 1 }})\n}}\nfn main() {{\n let value = build()\n _ = consume(value)\n}}"
+    ));
+    assert!(
+        sret.1 > direct.1,
+        "sret 返回的携带根变体必须在调用方留下固定根：direct={direct:?} sret={sret:?}"
+    );
+}
+
+/// 站点的调用返回 PC 必须升序去重且落在站点字节范围内。
+///
+/// 记录**全部**返回 PC 是为「同一 LIR 点发射多条收集 slow call」准备的：旧实现只保留最后一条，
+/// 先返回的那条会在栈图里找不到登记。当前 lowering 每个站点最多发射一条 call（异步、select、
+/// 通道、大聚合四种形态实测均为单 call），所以多 call 覆盖断言要等步骤 3 的分配 ABI 引入
+/// `gc_refill_line` 之后才有观测对象；这里先锁住今天已经成立且会被这条改动影响的编码不变式。
+///
+/// 这个测试做4次真实编译，单次耗时60秒以上；移出默认套件。
+#[test]
+#[ignore = "integration test with 4 compilations, run with --ignored"]
+fn sites_record_every_call_return_pc() {
+    let programs = [
+        "fn make() int {\n let cell: chan[int] = chan[int](1)\n _ = cell\n return 1\n}\nfn main() {\n _ = make()\n yield\n}",
+        "fn work(value: int) int { return value + 1 }\nfn main() {\n let task = async work(1)\n match task.wait() {\n  Ok(value) => { _ = value }\n  Err(_) => { _ = 0 }\n }\n}",
+        "fn main() {\n let first: chan[int] = chan[int](1)\n let second: chan[int] = chan[int](1)\n select {\n  first.send(1) => { _ = 1 }\n  let got = second.recv() => { _ = got\n _ = 0 }\n }\n}",
+        "struct Big { values: [uint; 64] }\nfn main() {\n let first = Big { values: [0; 64] }\n let second = first\n _ = second\n}",
+    ];
+    let mut sites = 0_usize;
+    for source in programs {
+        let compilation = crate::Compiler::new().compile(crate::CompileRequest::single_file(
+            "main.gg",
+            source,
+            crate::TargetName::X86_64Linux,
+        ));
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+        let world = compilation.x64_world().expect("片段世界");
+        for fragment in &world.fragments {
+            for site in &fragment.sites {
+                sites += 1;
+                assert!(
+                    site.call_return_pcs
+                        .windows(2)
+                        .all(|pair| pair[0] < pair[1]),
+                    "{} 的返回 PC 必须严格升序去重：{:?}",
+                    fragment.symbol,
+                    site.call_return_pcs
+                );
+                for pc in &site.call_return_pcs {
+                    assert!(
+                        *pc > site.bytes.0 && *pc <= site.bytes.1,
+                        "{} 的返回 PC {pc} 必须落在站点字节范围 {:?} 内",
+                        fragment.symbol,
+                        site.bytes
+                    );
+                }
+            }
+        }
+    }
+    assert!(sites > 0, "夹具必须产生机器站点");
 }

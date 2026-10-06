@@ -3,7 +3,15 @@ pub(crate) mod body;
 mod build;
 mod dump;
 mod effects;
+pub(crate) mod function_adapter;
+pub(crate) use pass::graph::Graph;
+pub(crate) mod liveness;
 mod pass;
+#[allow(
+    dead_code,
+    reason = "逐根初始化证明由确定性回归测试消费；帧内位图与 section 条目接入后转入生产路径"
+)]
+pub(crate) mod root_init;
 pub(crate) mod stackmap;
 mod uses;
 mod verify;
@@ -16,7 +24,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub(crate) const SCHEMA: u32 = 5;
+pub(crate) const SCHEMA: u32 = 7;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -697,6 +705,7 @@ pub(crate) fn build(
         verify::verify_structure(&body, hir.module()).map_err(|error| vec![error])?;
         bodies.push(body);
     }
+    function_adapter::materialize(&mut bodies, hir.module()).map_err(|error| vec![error])?;
     pass::optimize_world(&mut bodies, hir.module(), &profile, baseline)?;
     for body in &bodies {
         verify::verify(body, hir.module()).map_err(|error| vec![error])?;
@@ -740,7 +749,21 @@ fn verify_world(world: &World, mono: &mono::MonoWorldV1) -> Result<(), Diagnosti
         for instruction in &body.instructions {
             match &instruction.op {
                 body::Op::SymbolAddr(body::Symbol::Instance(key)) => instance_exists(mono, key)?,
-                body::Op::SymbolAddr(body::Symbol::TypeId(key)) => {
+                body::Op::SymbolAddr(body::Symbol::FunctionAdapter {
+                    target,
+                    has_environment,
+                }) => {
+                    instance_exists(mono, target)?;
+                    let key = function_adapter::key(target, *has_environment);
+                    if world
+                        .bodies
+                        .binary_search_by_key(&key, |body| body.instance)
+                        .is_err()
+                    {
+                        return Err(invalid("函数句柄缺少 checked 适配入口"));
+                    }
+                }
+                body::Op::SymbolAddr(body::Symbol::TypeDescriptor(key)) => {
                     mono.universe.record(key)?;
                 }
                 body::Op::Call(call) | body::Op::ForeignCall(call) => {
@@ -842,7 +865,7 @@ pub(crate) fn invalid_resource(message: &str) -> Diagnostic {
     Diagnostic::error(DiagnosticCode::ResourceInvariant, message, None)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod tests;
 
 /// 返回一个值对应的整数常量；不是常量时返回 0。

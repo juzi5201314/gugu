@@ -60,6 +60,18 @@ fn runtime_machine_intrinsics_accept_fixed_shapes() {
     ));
 }
 
+/// GC 控制原语按注入来源授权：普通源码即使写 `unsafe` 也不能调用，而既有机器原语的契约
+/// （按规范路径识别）保持不变。
+#[test]
+fn gc_control_intrinsics_require_runtime_source_identity() {
+    assert!(!accepts(
+        "fn main() { unsafe { _ = std.runtime.gc_config() } }"
+    ));
+    assert!(accepts(
+        "fn main() { unsafe { _ = std.runtime.current_slot() } }"
+    ));
+}
+
 #[test]
 fn runtime_machine_intrinsics_require_unsafe_and_fixed_shapes() {
     // 非 unsafe 调用被拒。
@@ -84,4 +96,40 @@ fn runtime_machine_intrinsics_require_unsafe_and_fixed_shapes() {
     assert!(!accepts(
         "fn main() { unsafe { _ = std.runtime.current_slot::[uint]() } }"
     ));
+}
+
+#[test]
+fn gc_atomic_authorization_rejects_aliases_and_counterfeit_runtime_paths() {
+    for path in ["main.gg", "std/runtime/counterfeit.gg"] {
+        for call in [
+            "std.runtime.atomic_load_acquire(p)",
+            "std.runtime.atomic_store_release[uint](p, uint(1))",
+            "std.runtime.atomic_fetch_or_acq_rel(p, uint(1))",
+            "and_mask(p, uint(1))",
+        ] {
+            let source = format!(
+                "use std.runtime.{{atomic_fetch_and_acq_rel as and_mask}}\nfn main() {{ let value: uint = 0\n unsafe {{ let p = std.ptr.addr_of(value)\n _ = {call} }} }}"
+            );
+            let compilation = crate::Compiler::new().compile(crate::CompileRequest::single_file(
+                path,
+                &source,
+                crate::TargetName::X86_64Linux,
+            ));
+            if path.starts_with("std/runtime/") {
+                assert!(
+                    compilation.diagnostics().items().iter().any(|diagnostic| {
+                        diagnostic.code() == crate::DiagnosticCode::ReservedName
+                    }),
+                    "{path}: {call}: {:?}",
+                    compilation.diagnostics().items()
+                );
+            } else {
+                assert!(
+                    !compilation.is_success(),
+                    "用户入口意外获得 runtime 原子权限：{call}"
+                );
+            }
+            assert!(compilation.image_plan().is_none());
+        }
+    }
 }

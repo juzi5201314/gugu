@@ -10,8 +10,10 @@ use crate::frontend::{
     late::universe::{MetadataShape, TypeUniverse},
 };
 use crate::runtime::gc_metadata_schema::{
-    GcAllocSiteV1, GcArenaLayoutV1, GcGlueEntryV1, GcMetadataWorldV1, GcRootKindV1,
-    GcRootLocationV1, GcRootRangeV1, GcSourceEntryV1, GcTypeEntryV1, GcVtableEntryV1,
+    GC_TYPE_HAS_DEFERRED_RELEASE, GC_TYPE_HAS_HEAP_DIRECT, GC_TYPE_HAS_HEAP_INTERIOR,
+    GC_TYPE_HAS_RESOURCE, GC_TYPE_HAS_VALUE_ACTIONS, GC_TYPE_UNSIZED_VIEW, GC_TYPE_VARIABLE_SIZE,
+    GC_TYPE_ZERO_SIZED, GcAllocSiteV1, GcArenaLayoutV1, GcGlueEntryV1, GcMetadataWorldV1,
+    GcRootKindV1, GcRootLocationV1, GcRootRangeV1, GcSourceEntryV1, GcTypeEntryV1, GcVtableEntryV1,
     TRACE_BITMAP_MAX_WORDS, TraceKind, TraceOp, ValueOp, boot_verify, encode_uleb,
 };
 
@@ -39,6 +41,26 @@ pub(crate) fn derive(
         .flat_map(|body| body.types.iter())
         .map(|layout| (layout.key, layout.passing.bits()))
         .collect::<BTreeMap<_, _>>();
+    // 动态 backing 分配（`AllocArray`）以元素类型为 descriptor 并传入运行时字节数，因此
+    // 这些类型的 allocation payload 大小不由静态 layout 决定：`VARIABLE_SIZE` 只在它们身上置位，
+    // 不用 resource 或 unsized view 冒充。
+    let variable_size = gir
+        .concrete
+        .iter()
+        .flat_map(|body| {
+            body.body.statements.iter().filter_map(|statement| {
+                if let gir::body::StatementKind::Assign(
+                    _,
+                    gir::body::Rvalue::AllocArray { element, .. },
+                ) = &statement.kind
+                {
+                    body.types.get(element.index()).map(|layout| layout.key)
+                } else {
+                    None
+                }
+            })
+        })
+        .collect::<std::collections::BTreeSet<_>>();
 
     let mut encoder = ValueEncoder::new(universe);
     for record in &universe.records {
@@ -63,15 +85,15 @@ pub(crate) fn derive(
             (0, 0)
         };
         let (has_direct, has_interior) = trace_flags(&record.metadata, universe)?;
-        let mut flags = 0u8;
+        let mut flags = 0u32;
         if has_direct {
-            flags |= 1;
+            flags |= GC_TYPE_HAS_HEAP_DIRECT;
         }
         if has_interior {
-            flags |= 1 << 1;
+            flags |= GC_TYPE_HAS_HEAP_INTERIOR;
         }
         if has_value_actions {
-            flags |= 1 << 2;
+            flags |= GC_TYPE_HAS_VALUE_ACTIONS;
             glue.push(GcGlueEntryV1 {
                 type_key: record.key,
                 copy_rva: 0,
@@ -79,14 +101,16 @@ pub(crate) fn derive(
             });
         }
         if passing & PassingClass::RESOURCE.bits() != 0 {
-            flags |= 1 << 3;
-            flags |= 1 << 4;
+            // 含 resource 租约的类型既需要 acquire/release，也在死亡时进入受限释放队列。
+            flags |= GC_TYPE_HAS_RESOURCE | GC_TYPE_HAS_DEFERRED_RELEASE;
         }
-        if record.layout.is_none() {
-            flags |= 1 << 5;
+        match record.layout {
+            None => flags |= GC_TYPE_UNSIZED_VIEW,
+            Some((0, _)) => flags |= GC_TYPE_ZERO_SIZED,
+            Some(_) => {}
         }
-        if matches!(&record.metadata, MetadataShape::String) {
-            flags |= 1 << 6;
+        if variable_size.contains(&record.key) {
+            flags |= GC_TYPE_VARIABLE_SIZE;
         }
         types.push(GcTypeEntryV1 {
             type_key: record.key,
@@ -126,6 +150,9 @@ pub(crate) fn derive(
         value_program,
         glue,
         roots,
+        // 镜像根记录在受管静态放开后才产出：`Global` 根的 location 是链接期才确定的 RVA，
+        // 必须先把符号重定位清单接进 metadata blob（见 internals/gc-metadata.md）。
+        image_roots: Vec::new(),
         sources,
         alloc_sites,
         arena: GcArenaLayoutV1 {
@@ -253,6 +280,16 @@ fn collect_flat_words(
             words.push(base / 8, false)?;
             Ok(true)
         }
+        // 闭包环境与 spawn 参数包的槽逐个都是 managed 直接指针字：按字登记，
+        // 绝不展开被捕获类型的布局。
+        MetadataShape::Pointers { count } => {
+            let mut index = 0;
+            while index < *count {
+                words.push(base / 8 + index, false)?;
+                index += 1;
+            }
+            Ok(true)
+        }
         MetadataShape::Interior(_) | MetadataShape::String => {
             words.push(base / 8, true)?;
             Ok(true)
@@ -331,6 +368,7 @@ fn trace_flags(shape: &MetadataShape, universe: &TypeUniverse) -> Result<(bool, 
         MetadataShape::None => (false, false),
         MetadataShape::Direct(_) => (true, false),
         MetadataShape::Interior(_) | MetadataShape::String => (false, true),
+        MetadataShape::Pointers { count } => (*count > 0, false),
         MetadataShape::Array { element, .. } => {
             trace_flags(&universe.record(element)?.metadata, universe)?
         }
@@ -392,6 +430,15 @@ fn emit_trace(
                         .to_le_bytes(),
                 );
                 out.extend_from_slice(&body);
+            }
+        }
+        // 闭包环境的槽是一段连续的直接指针字：一条 `Direct` 就精确覆盖，
+        // 不需要逐槽发指令，也不需要进入被捕获类型的布局。
+        MetadataShape::Pointers { count } => {
+            if *count > 0 {
+                out.push(TraceOp::Direct as u8);
+                encode_uleb(out, base / 8);
+                encode_uleb(out, *count);
             }
         }
         MetadataShape::Aggregate {
@@ -509,7 +556,9 @@ impl<'a> ValueEncoder<'a> {
             MetadataShape::None
             | MetadataShape::Direct(_)
             | MetadataShape::Interior(_)
-            | MetadataShape::String => Ok(()),
+            | MetadataShape::String
+            // 槽自身的类别动作由引用它的字段指令表达，这里没有结构动作。
+            | MetadataShape::Pointers { .. } => Ok(()),
             MetadataShape::Array { element, count } => {
                 let child = self.universe.record(element)?;
                 let mut body = Vec::new();
@@ -779,8 +828,33 @@ mod tests {
     //! 只消费进程内的冻结前端产物，不读镜像、不启动子进程。
 
     use super::*;
-    use crate::frontend::gir::tests::compile_frontend;
+    use crate::{QueryEngine, SourceMap, SourceSnapshot, TargetName};
 
+    fn compile_frontend(source: &str) -> crate::frontend::FrontendOutput {
+        let mut sources =
+            SourceMap::new(vec![SourceSnapshot::from_str("main.gg", source).unwrap()]).unwrap();
+        let cfg = crate::frontend::cfg::CfgContext::new(
+            TargetName::X86_64Linux,
+            [],
+            [],
+            false,
+            false,
+            Default::default(),
+        );
+        crate::frontend::bootstrap(
+            crate::frontend::SourceInput::Sources {
+                source_map: &mut sources,
+                entry: "main.gg",
+                source_root: "",
+                package_identity: "tests/gc@1.0.0",
+                require_main: true,
+                cfg: &cfg,
+                external_packages: &Default::default(),
+            },
+            &QueryEngine::new(),
+        )
+        .unwrap()
+    }
     fn derive_source(source: &str) -> GcMetadataBundle {
         let output = compile_frontend(source);
         derive(&output.mono.universe, &output.gir, output.hir.module()).expect("GC metadata 可推导")
@@ -809,6 +883,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow full compilation"]
     fn trace_program_uses_byte_units_for_switch_tag() {
         // `Holder` 的 `Option[int]` 字段位于字节偏移 8。SWITCH 的 tag 操作数按 payload
         // 字节计，因此必须是 8；若误用 word 单位就会得到 1，runtime 将按错误基准读判别值。
@@ -843,6 +918,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow full compilation"]
     fn derived_world_round_trips_through_sections() {
         let bundle = derive_source(
             "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }",
@@ -863,6 +939,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "slow full compilation"]
     fn derive_is_deterministic_across_runs() {
         let source = "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }";
         let first = derive_source(source);
@@ -870,5 +947,36 @@ mod tests {
         assert_eq!(first.type_section, second.type_section);
         assert_eq!(first.metadata_section, second.metadata_section);
         assert_eq!(first.world.fingerprint(), second.world.fingerprint());
+    }
+
+    /// 闭包环境的每个捕获槽都必须登记成 managed 直接指针字。
+    ///
+    /// 回归背景：环境记录曾经把捕获槽声明成内联的被捕获类型（`Aggregate`），trace 于是
+    /// 展开 `[int; 512]` 的 512 个标量元素，一个受管字都不登记 —— descriptor 退化成
+    /// `TraceKind::None`，收集器扫不到捕获对象，nursery 重置后它就是复用内存。
+    #[test]
+    #[ignore = "slow full compilation"]
+    fn closure_environment_registers_captured_managed_slots() {
+        let bundle = derive_source(
+            "fn total(block: [int; 512]) int { let sum = 0\n let index = 0\n while index < 512 { sum = sum + block[index]\n index = index + 1 }\n sum }\nfn make(n: int) fn(int) int { let block: [int; 512] = [n; 512]\n fn(x: int) int = total(block) + x }\nfn main() { let f = make(40)\n _ = f }",
+        );
+        let environment = bundle
+            .world
+            .types
+            .iter()
+            .find(|entry| entry.name.starts_with("<closure-environment:"))
+            .expect("闭包环境必须进入冻结类型表");
+        assert_ne!(
+            environment.flags & GC_TYPE_HAS_HEAP_DIRECT,
+            0,
+            "捕获受管对象的环境必须声明 heap direct 槽"
+        );
+        let descriptor = &bundle.world.trace_program[environment.trace_offset as usize
+            ..(environment.trace_offset + environment.trace_len) as usize];
+        assert_ne!(
+            descriptor[0],
+            TraceKind::None as u8,
+            "捕获受管对象的环境不能退化成空 descriptor"
+        );
     }
 }

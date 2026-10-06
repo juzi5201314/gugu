@@ -20,7 +20,10 @@ use crate::runtime::processor::{
     turn_region_limit_offset,
 };
 
-use super::{Builder, LowerCtx, LoweringError, SiteValue, gpr, imm, mem_base, move_kinds, reg};
+use super::{
+    Builder, LowerCtx, LoweringError, SiteValue, ensure_runtime_glue, gpr, imm, mem_base,
+    move_kinds, reg,
+};
 
 const REL32: &[OperandKind] = &[OperandKind::Rel32];
 const R32_IMM32: &[OperandKind] = &[OperandKind::R32, OperandKind::Imm32];
@@ -44,13 +47,14 @@ pub(super) fn lower(
             *align,
             *placement,
             *compressed,
+            operands,
             results,
             ctx,
             builder,
         ),
         Op::RegionAlloc {
             descriptor, align, ..
-        } => region_alloc(*descriptor, *align, results, ctx, builder),
+        } => region_alloc(*descriptor, *align, operands, results, ctx, builder),
         Op::SafepointPoll { .. } => safepoint_poll(ctx, builder),
         // `StackCheck` 是标记：prologue 完全由 frame 阶段按 `FrameLayout` 合成，选指阶段
         // 不产出任何指令。这里只登记站点原有的两个标签 id（`check` 与 `cold`）：`select`
@@ -75,18 +79,21 @@ fn gc_alloc(
     align: u32,
     placement: PlacementKind,
     compressed: bool,
+    operands: &[SiteValue],
     results: &[SiteValue],
     ctx: LowerCtx<'_>,
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
     let dest = results.first().map(|value| value.reg);
+    let bytes = bytes_operand(operands)?;
     if placement == PlacementKind::TurnRegion {
         return bump(
             dest,
             descriptor,
             align,
-            false,
-            true,
+            placement,
+            compressed,
+            bytes,
             ctx,
             builder,
             "gc_region_slow",
@@ -97,34 +104,57 @@ fn gc_alloc(
             dest,
             descriptor,
             align,
+            placement,
             compressed,
-            false,
+            bytes,
             ctx,
             builder,
             "gc_alloc_slow",
         );
     }
-    slow_alloc(dest, compressed, builder, "gc_alloc_slow")
+    slow_alloc(
+        dest,
+        descriptor,
+        align,
+        placement,
+        compressed,
+        bytes,
+        ctx,
+        builder,
+        "gc_alloc_slow",
+    )
 }
 
 fn region_alloc(
     descriptor: [u8; 32],
     align: u32,
+    operands: &[SiteValue],
     results: &[SiteValue],
     ctx: LowerCtx<'_>,
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
     let dest = results.first().map(|value| value.reg);
+    let bytes = bytes_operand(operands)?;
     bump(
         dest,
         descriptor,
         align,
+        PlacementKind::TurnRegion,
         false,
-        true,
+        bytes,
         ctx,
         builder,
         "gc_region_slow",
     )
+}
+
+/// 取 LIR 的 bytes 操作数：它是**唯一**合法的 payload 尺寸来源；运行期算出的尺寸（变长数组）
+/// 与常量尺寸走同一寄存器通道，不拿 descriptor 的静态布局覆盖运行期请求。
+fn bytes_operand(operands: &[SiteValue]) -> Result<SiteValue, LoweringError> {
+    operands
+        .first()
+        .copied()
+        .ok_or(LoweringError::InvalidOperands)
 }
 
 fn fast_path_eligible(descriptor: [u8; 32], align: u32, ctx: LowerCtx<'_>) -> bool {
@@ -150,40 +180,62 @@ fn bump(
     dest: Option<Reg>,
     descriptor: [u8; 32],
     align: u32,
+    placement: PlacementKind,
     compressed: bool,
-    turn_region: bool,
+    bytes: SiteValue,
     ctx: LowerCtx<'_>,
     builder: &mut Builder,
     slow: &str,
 ) -> Result<(), LoweringError> {
+    let turn_region = placement == PlacementKind::TurnRegion;
     let Some(universe) = ctx.universe else {
-        return slow_alloc(dest, compressed, builder, slow);
-    };
-    let Ok(record) = universe.record(&descriptor) else {
-        return slow_alloc(dest, compressed, builder, slow);
-    };
-    let Some((payload, _)) = record.layout else {
-        return slow_alloc(dest, compressed, builder, slow);
+        return slow_alloc(
+            dest, descriptor, align, placement, compressed, bytes, ctx, builder, slow,
+        );
     };
     let Some(type_id) = universe.type_id(&descriptor) else {
-        return slow_alloc(dest, compressed, builder, slow);
+        return slow_alloc(
+            dest, descriptor, align, placement, compressed, bytes, ctx, builder, slow,
+        );
     };
     // payload 对齐属于语言承诺；header 落在 `payload - HEADER`。granule 下界让 header 仍是
     // granule 的整数倍，object-start 位图与 runtime 的 `resolve` 才能按同一规则反查。
-    let align = u64::from(align).max(u64::from(HEAP_GRANULE_BYTES));
+    let granular = u64::from(align).max(u64::from(HEAP_GRANULE_BYTES));
     // 非规范对齐或超出 imm32 的算术走 runtime slow path，不另写经验常量。
-    let (Ok(adjust), Ok(mask), Ok(payload)) = (
-        i32::try_from(OBJECT_HEADER_BYTES + align - 1),
-        i32::try_from(-(align as i64)),
-        i32::try_from(payload),
+    let (Ok(adjust), Ok(mask), Ok(block_limit)) = (
+        i32::try_from(OBJECT_HEADER_BYTES + granular - 1),
+        i32::try_from(-(granular as i64)),
+        i32::try_from(u64::from(GC_BLOCK_BYTES) + 1 - u64::from(OBJECT_HEADER_BYTES) - granular),
     ) else {
-        return slow_alloc(dest, compressed, builder, slow);
+        return slow_alloc(
+            dest, descriptor, align, placement, compressed, bytes, ctx, builder, slow,
+        );
     };
     let (cursor_off, limit_off) = tlab_offsets(ctx, turn_region);
     let r11 = gpr(Gpr::R11);
     let r15 = gpr(Gpr::R15);
+    let size = gpr(Gpr::R10);
+    builder.clobber_gpr(Gpr::R10);
     builder.clobber_gpr(Gpr::R11);
     builder.clobber_gpr(Gpr::Rax);
+    // payload 尺寸来自 LIR 的 bytes 操作数：先搬到专用 scratch，后面的算术与对象头写入都
+    // 以它为准，运行期算出的尺寸不会退化成 descriptor 的静态布局大小。
+    builder.emit(
+        "mov",
+        move_kinds(64),
+        Access::Read,
+        vec![reg(bytes.reg), reg(size)],
+    );
+    // 普通对象不得跨块：`header + align-1 + bytes` 必须仍在同一 block 内，越界走 slow path。
+    builder.emit(
+        "cmp",
+        &[OperandKind::Rm64, OperandKind::Imm32],
+        Access::Read,
+        vec![reg(size), imm(u64::from(block_limit as u32))],
+    );
+    let overflow = builder.label();
+    let done = builder.label();
+    builder.emit("ja", REL32, Access::Read, vec![Operand::Label(overflow)]);
     builder.emit(
         "mov",
         move_kinds(64),
@@ -197,8 +249,6 @@ fn bump(
         Access::ReadWrite,
         vec![reg(r11), imm(u64::from(adjust as u32))],
     );
-    let overflow = builder.label();
-    let done = builder.label();
     builder.emit("jb", REL32, Access::Read, vec![Operand::Label(overflow)]);
     builder.emit(
         "and",
@@ -214,9 +264,9 @@ fn bump(
     );
     builder.emit(
         "add",
-        &[OperandKind::Rm64, OperandKind::Imm32],
+        &[OperandKind::Rm64, OperandKind::R64],
         Access::ReadWrite,
-        vec![reg(gpr(Gpr::Rax)), imm(payload as u64)],
+        vec![reg(gpr(Gpr::Rax)), reg(size)],
     );
     builder.emit("jb", REL32, Access::Read, vec![Operand::Label(overflow)]);
     builder.emit(
@@ -257,7 +307,6 @@ fn bump(
             reg(gpr(Gpr::Rax)),
         ],
     );
-    emit_imm64(builder, Gpr::Rax, payload as u64);
     builder.emit(
         "mov",
         move_kinds(64),
@@ -267,7 +316,7 @@ fn bump(
                 r11,
                 -i32::try_from(OBJECT_HEADER_BYTES / 2).expect("header 半宽适配 i32"),
             ),
-            reg(gpr(Gpr::Rax)),
+            reg(size),
         ],
     );
     if let Some(dest) = dest {
@@ -280,23 +329,57 @@ fn bump(
     }
     builder.emit("jmp", REL32, Access::Read, vec![Operand::Label(done)]);
     builder.define(overflow);
-    slow_alloc(dest, compressed, builder, slow)?;
+    slow_alloc(
+        dest, descriptor, align, placement, compressed, bytes, ctx, builder, slow,
+    )?;
     builder.define(done);
     Ok(())
 }
 
+/// 分配 slow path：按固定 ABI 传参并调用 runtime 入口。
+///
+/// `rax` = type_id、`rbx` = payload_bytes、`rcx` = align、`rdx` = flags（bit0 压缩、bits1..2
+/// placement 编码），`rax` 返回 payload。bytes 先搬进 `rbx`，避免随后写 `rax`/`rcx`/`rdx` 的
+/// 立即数覆盖仍要读的操作数寄存器。descriptor 未登记或没有 type_id 是编译期诊断，不放行。
 fn slow_alloc(
     dest: Option<Reg>,
+    descriptor: [u8; 32],
+    align: u32,
+    placement: PlacementKind,
     compressed: bool,
+    bytes: SiteValue,
+    ctx: LowerCtx<'_>,
     builder: &mut Builder,
     name: &str,
 ) -> Result<(), LoweringError> {
+    ensure_runtime_glue(name)?;
+    let type_id = match ctx.universe {
+        // 探针/legalize 没有冻结宇宙，序列只供结构检查、不参与镜像：用 0 占位。
+        None => 0,
+        // 真实编译里 descriptor 未登记是内部错误，不放行到镜像。
+        Some(universe) => universe
+            .type_id(&descriptor)
+            .ok_or(LoweringError::Unsupported {
+                op: "GcAlloc",
+                detail: "分配 descriptor 未在冻结宇宙中登记",
+            })?,
+    };
+    let Some(code) = placement_code(placement) else {
+        return Err(LoweringError::Unsupported {
+            op: "GcAlloc",
+            detail: "placement 不适用分配 ABI",
+        });
+    };
+    let flags = u64::from(compressed) | (code << 1);
     builder.emit(
         "mov",
-        R32_IMM32,
+        move_kinds(64),
         Access::Write,
-        vec![reg(gpr(Gpr::Rdx)), imm(u64::from(compressed))],
+        vec![reg(gpr(Gpr::Rbx)), reg(bytes.reg)],
     );
+    emit_imm64(builder, Gpr::Rax, u64::from(type_id));
+    emit_imm64(builder, Gpr::Rcx, u64::from(align));
+    emit_imm64(builder, Gpr::Rdx, flags);
     builder.clobber_gpr(Gpr::Rax);
     builder.clobber_gpr(Gpr::Rbx);
     builder.clobber_gpr(Gpr::Rcx);
@@ -321,6 +404,57 @@ fn slow_alloc(
         }
     }
     Ok(())
+}
+
+/// region 生命周期入口的 lowering：`region` 编号是计划的区域身份，`export` 是 `publish`
+/// 声明的导出位集合（`region_schema` 的 export summary）。
+///
+/// 与分配族同源：实参是**lowering 合成的立即数**而非操作数（四个 op 的 LIR 形状是空参数空
+/// 结果），先落 `rax`（`publish` 再把 export 落 `rbx`），再按 `INTERNAL_INTEGER` 顺序发调用。
+/// 入口结果为空，调用后不做结果搬运。区域身份必须在代码里存活，否则 `publish` 的 declared
+/// 恒为 0、`reset` 的 summary 判据永远为真——那是明令禁止的假释放。
+pub(super) fn region_end(op: &Op, builder: &mut Builder) -> Result<(), LoweringError> {
+    let (name, region, export) = match op {
+        Op::RegionPublish { region, export } => ("gc_region_publish", *region, Some(*export)),
+        Op::RegionReset { region } => ("gc_region_reset", *region, None),
+        Op::PromoteManaged { region } => ("gc_region_promote", *region, None),
+        Op::RegionTransfer { region } => ("gc_region_transfer", *region, None),
+        _ => {
+            return Err(LoweringError::Unsupported {
+                op: "RegionEnd",
+                detail: "非 region 生命周期 op 不得走 region 入口 ABI",
+            });
+        }
+    };
+    ensure_runtime_glue(name)?;
+    emit_imm64(builder, Gpr::Rax, u64::from(region));
+    builder.clobber_gpr(Gpr::Rax);
+    if let Some(export) = export {
+        emit_imm64(builder, Gpr::Rbx, u64::from(export));
+        builder.clobber_gpr(Gpr::Rbx);
+    }
+    builder.emit(
+        "call",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(
+            RelocTarget::Lir(mangle::runtime_symbol(name)),
+            RelocKind::PcRel32,
+        )],
+    );
+    Ok(())
+}
+
+/// `flags` bits1..2 的 placement 编码；与对象头位布局分开。非分配 placement 返回 `None`，
+/// 它们不得经分配 ABI 进入运行期。
+fn placement_code(placement: PlacementKind) -> Option<u64> {
+    match placement {
+        PlacementKind::TurnRegion => Some(0),
+        PlacementKind::LocalHeap => Some(1),
+        PlacementKind::SharedHeap => Some(2),
+        PlacementKind::Resource => Some(3),
+        _ => None,
+    }
 }
 
 /// TLAB/TurnRegion 的 cursor/limit 偏移：镜像内取契约字段，探针退回同一布局神谕。
@@ -373,6 +507,7 @@ fn safepoint_poll(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), Loweri
 }
 
 fn runtime_call(builder: &mut Builder, name: &str) -> Result<(), LoweringError> {
+    ensure_runtime_glue(name)?;
     builder.emit(
         "call",
         REL32,

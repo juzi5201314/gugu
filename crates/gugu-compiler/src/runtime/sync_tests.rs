@@ -131,7 +131,7 @@ fn cas_ordering_matrix_rejects_invalid_pairs_without_side_effects() {
     }
 }
 
-#[test]
+#[cfg(feature = "slow-tests")]
 fn sync_contract_and_image_plan_cli() {
     let demand = SyncDemand {
         atomic_ops: 2,

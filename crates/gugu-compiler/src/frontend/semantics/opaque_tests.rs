@@ -155,7 +155,12 @@ fn any_plans_preserve_exact_payload_across_cached_queries() {
     let cold = frontend(&[("main.gg", source)], &queries).unwrap();
     let warm = frontend(&[("main.gg", source)], &queries).unwrap();
     assert_eq!(cold.semantics, warm.semantics);
-    let model = Model::new(&warm.modules, &warm.names).unwrap();
+    let model = Model::new(
+        &warm.modules,
+        &warm.names,
+        &std::collections::BTreeSet::new(),
+    )
+    .unwrap();
     let main = warm
         .semantics
         .bodies

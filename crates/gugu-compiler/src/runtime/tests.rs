@@ -1799,6 +1799,9 @@ mod gc_metadata_tests {
         GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES, GcMetadataRuntimeContract,
     };
     use super::super::gc_metadata_schema::{
+        GC_IMAGE_ROOT_LAZY_SLOT, GcImageRootKindV1, GcImageRootRecordV1,
+    };
+    use super::super::gc_metadata_schema::{
         GcArenaLayoutV1, GcMetadataDemand, GcMetadataWorldV1, GcRootKindV1, GcRootLocationV1,
         GcRootRangeV1, GcTypeEntryV1, TraceKind, TraceOp, ValueOp, boot_verify, encode_uleb,
     };
@@ -1842,6 +1845,8 @@ mod gc_metadata_tests {
                 type_range: (0, 1),
                 word_range: (0, 1),
             }],
+            // 镜像根由链接期重定位填入 RVA，本测试只覆盖 Rust 侧登记范围。
+            image_roots: Vec::new(),
             sources: Vec::new(),
             alloc_sites: Vec::new(),
             arena: GcArenaLayoutV1 {
@@ -1857,6 +1862,99 @@ mod gc_metadata_tests {
     fn boot_verify_accepts_minimal_world() {
         let world = minimal_world();
         boot_verify(&world).expect("最小 world 必须自洽");
+    }
+
+    /// 镜像根记录：合法单值接受，越界/标志/步长/排序/惰性各自拒绝。
+    #[test]
+    fn image_roots_are_validated_and_rejected_individually() {
+        let root = |location: u64, kind: GcImageRootKindV1, flags: u16, count: u64, stride: u64| {
+            GcImageRootRecordV1 {
+                location,
+                type_id: 0,
+                kind,
+                flags,
+                count,
+                stride,
+            }
+        };
+        let with = |roots: Vec<GcImageRootRecordV1>| {
+            let mut world = minimal_world();
+            world.image_roots = roots;
+            world
+        };
+        // 合法：全局惰性槽单值，location 是 RVA。
+        boot_verify(&with(vec![root(
+            0x1000,
+            GcImageRootKindV1::Global,
+            GC_IMAGE_ROOT_LAZY_SLOT,
+            1,
+            0,
+        )]))
+        .expect("合法镜像根必须通过");
+        // 合法：两块相邻不重叠。
+        boot_verify(&with(vec![
+            root(0x1000, GcImageRootKindV1::Global, 0, 1, 0),
+            root(0x1008, GcImageRootKindV1::Global, 0, 1, 0),
+        ]))
+        .expect("相邻镜像根必须通过");
+
+        assert!(
+            boot_verify(&with(vec![root(
+                0,
+                GcImageRootKindV1::Global,
+                GC_IMAGE_ROOT_LAZY_SLOT,
+                0,
+                0
+            )]))
+            .is_err(),
+            "count 为 0 必须拒绝"
+        );
+        assert!(
+            boot_verify(&with(vec![root(
+                0,
+                GcImageRootKindV1::Global,
+                0b1000,
+                1,
+                0
+            )]))
+            .is_err(),
+            "未定义 flags 位必须拒绝"
+        );
+        assert!(
+            boot_verify(&with(vec![root(0, GcImageRootKindV1::Global, 0, 2, 4)])).is_err(),
+            "数组 stride 小于类型大小必须拒绝"
+        );
+        assert!(
+            boot_verify(&with(vec![root(
+                0,
+                GcImageRootKindV1::OsThreadLocalTemplate,
+                0,
+                1,
+                0
+            )]))
+            .is_err(),
+            "线程局部模板未标记惰性必须拒绝"
+        );
+        assert!(
+            boot_verify(&with(vec![
+                root(0x1008, GcImageRootKindV1::Global, 0, 1, 0),
+                root(0x1000, GcImageRootKindV1::Global, 0, 1, 0),
+            ]))
+            .is_err(),
+            "未按 location 排序必须拒绝"
+        );
+        assert!(
+            boot_verify(&with(vec![
+                root(0x1000, GcImageRootKindV1::Global, 0, 2, 8),
+                root(0x1008, GcImageRootKindV1::Global, 0, 1, 0),
+            ]))
+            .is_err(),
+            "同实例范围重叠必须拒绝"
+        );
+        // 记录引用的 type_id 必须落在冻结类型表内。
+        let mut world = with(vec![root(0, GcImageRootKindV1::Global, 0, 1, 0)]);
+        world.image_roots[0].type_id = 7;
+        assert!(boot_verify(&world).is_err(), "type_id 越界必须拒绝");
     }
 
     /// 构造 Program 表示：`kind, u32 program_len, program`。
@@ -2232,4 +2330,222 @@ mod gc_metadata_tests {
         let error = RawModelError::new("演示消息");
         assert_eq!(error.to_string(), "演示消息");
     }
+}
+
+/// 解析 Gugu 常量字面量：十进制或 `0x` 前缀十六进制。
+pub(super) fn parse_uint_literal(text: &str) -> Option<u64> {
+    let text = text.trim();
+    match text.strip_prefix("0x") {
+        Some(hex) => u64::from_str_radix(hex, 16).ok(),
+        None => text.parse().ok(),
+    }
+}
+
+/// 从 Gugu 源里读取 `NAME: uint = N` 形式的无符号常量（允许 `const`/`pub const` 前缀）。
+///
+/// 前缀必须整词匹配：名字后面紧跟 `: uint = `，因此 `NAME_EXTRA` 这类更长标识符不会误命中。
+pub(super) fn source_uint_constant(source: &str, name: &str) -> u64 {
+    let prefixes = [
+        format!("pub const {name}: uint = "),
+        format!("const {name}: uint = "),
+        format!("{name}: uint = "),
+    ];
+    let literal = source
+        .lines()
+        .find_map(|line| {
+            let trimmed = line.trim();
+            prefixes
+                .iter()
+                .find_map(|prefix| trimmed.strip_prefix(prefix.as_str()))
+        })
+        .unwrap_or_else(|| panic!("Gugu 源缺少常量 {name}"));
+    parse_uint_literal(literal)
+        .unwrap_or_else(|| panic!("{name} 不是可解析的无符号字面量：{literal}"))
+}
+
+/// 子协程参数包契约：`.gg` 镜像常量与包内偏移必须与 `coroutine_layout.rs` 一致。
+///
+/// 入口片段、LIR 发包点与调度器复制点共用同一份偏移；漂移会让子协程读到错位的车道，
+/// 机器码层面不会有人报错，只有行为会静默错位。
+#[test]
+fn coroutine_pack_layout_matches_the_scheduler_mirror() {
+    use super::coroutine_layout as pack;
+    assert_eq!(
+        source_uint_constant(super::RUNTIME_SCHEDULER_SOURCE, "COROUTINE_PACK_BYTES"),
+        u64::try_from(pack::COROUTINE_PACK_BYTES).expect("字节数适配 u64"),
+    );
+    assert_eq!(
+        pack::COROUTINE_PACK_BYTES % pack::COROUTINE_PACK_ALIGN,
+        0,
+        "包长必须按参数包对齐整除，复制点才能整包搬运"
+    );
+    assert_eq!(
+        pack::coroutine_pack_integer_offset(pack::COROUTINE_PACK_INTEGER_LANES - 1)
+            + pack::COROUTINE_PACK_INTEGER_STRIDE,
+        pack::COROUTINE_PACK_FLOAT_OFFSET,
+        "整数车道区必须紧贴浮点车道区，不允许空洞或重叠"
+    );
+    assert!(
+        pack::coroutine_pack_float_offset(pack::COROUTINE_PACK_FLOAT_LANES)
+            <= pack::COROUTINE_PACK_BYTES,
+        "浮点车道必须全部落在包内"
+    );
+    assert_eq!(pack::COROUTINE_PACK_BYTES % 8, 0, "整包必须可按字复制");
+}
+
+/// 参数包 lane map：`.gg` 镜像常量与编码必须与 `coroutine_layout.rs` 一致。
+///
+/// lane map 是参数包的 trace 描述，编译器按车道分类把它写进动态根记录；位宽或车道数漂移都会
+/// 让收集器按错的偏移取根，而机器码层面不会有人报错。
+#[test]
+fn coroutine_pack_lane_map_matches_the_scheduler_mirror() {
+    use super::coroutine_layout as pack;
+    let source = super::RUNTIME_SCHEDULER_SOURCE;
+    assert_eq!(
+        source_uint_constant(source, "COROUTINE_PACK_LANES"),
+        u64::try_from(pack::COROUTINE_PACK_LANES).expect("车道数")
+    );
+    assert_eq!(
+        source_uint_constant(source, "COROUTINE_PACK_TRACE_BITS"),
+        u64::try_from(pack::COROUTINE_PACK_TRACE_BITS).expect("位宽")
+    );
+    assert_eq!(
+        source_uint_constant(source, "COROUTINE_PACK_TRACE_NONE"),
+        pack::COROUTINE_PACK_TRACE_NONE
+    );
+    assert_eq!(
+        pack::COROUTINE_PACK_LANES,
+        pack::COROUTINE_PACK_INTEGER_LANES + pack::COROUTINE_PACK_FLOAT_LANES
+    );
+    // 访客按 lane map 反查车道偏移，因此两段的起点与步长也是跨语言契约。
+    assert_eq!(
+        source_uint_constant(source, "COROUTINE_PACK_INTEGER_LANES"),
+        u64::try_from(pack::COROUTINE_PACK_INTEGER_LANES).expect("整数车道数")
+    );
+    assert_eq!(
+        source_uint_constant(source, "COROUTINE_PACK_FLOAT_OFFSET"),
+        u64::try_from(pack::COROUTINE_PACK_FLOAT_OFFSET).expect("浮点段起点")
+    );
+    assert_eq!(
+        source_uint_constant(source, "COROUTINE_PACK_FLOAT_STRIDE"),
+        u64::try_from(pack::COROUTINE_PACK_FLOAT_STRIDE).expect("浮点车道步长")
+    );
+    assert_eq!(
+        pack::coroutine_pack_integer_offset(0),
+        0,
+        "整数段从包起始处开始"
+    );
+    assert!(
+        pack::COROUTINE_PACK_LANES * pack::COROUTINE_PACK_TRACE_BITS <= 64,
+        "lane map 必须落在一个机器字内"
+    );
+    // 编码：最后一个车道的最高位不能越过字宽，且非根车道不占用任何位。
+    assert_eq!(pack::coroutine_pack_trace_shift(0), 0);
+    assert_eq!(
+        pack::coroutine_pack_trace_shift(pack::COROUTINE_PACK_LANES - 1)
+            + pack::COROUTINE_PACK_TRACE_BITS,
+        pack::COROUTINE_PACK_LANES * pack::COROUTINE_PACK_TRACE_BITS
+    );
+    assert_eq!(pack::COROUTINE_PACK_TRACE_NONE, 0);
+    assert_eq!(pack::coroutine_pack_trace_code(0), 1);
+}
+
+/// 动态根登记表契约：`.gg` 侧常量、处理器槽位与 Rust 侧记录布局必须逐项一致。
+///
+/// 表由镜像 runtime 建立与读写，Rust 侧记录布局是同一份契约的唯一定义；偏移漂移会让收集器
+/// 读到别的字段，而机器码层面不会有人报错。
+#[test]
+fn dynamic_root_registry_matches_the_scheduler_mirror() {
+    use super::dynamic_roots_schema as registry;
+    let source = super::RUNTIME_SCHEDULER_SOURCE;
+    let mirror = |name: &str| source_uint_constant(source, name);
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_TABLE_HEADER_BYTES"),
+        u64::try_from(registry::DYNAMIC_ROOT_TABLE_HEADER_BYTES).expect("表头字节数")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_RECORD_BYTES"),
+        u64::try_from(registry::DYNAMIC_ROOT_RECORD_BYTES).expect("记录字节数")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_CAPACITY"),
+        u64::try_from(registry::DYNAMIC_ROOT_CAPACITY).expect("容量")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_SLOT_OFFSET"),
+        u64::try_from(registry::DYNAMIC_ROOT_SLOT_OFFSET).expect("slot 偏移")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_DESCRIPTOR_OFFSET"),
+        u64::try_from(registry::DYNAMIC_ROOT_DESCRIPTOR_OFFSET).expect("descriptor 偏移")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_COUNT_OFFSET"),
+        u64::try_from(registry::DYNAMIC_ROOT_COUNT_OFFSET).expect("count 偏移")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_KIND_OFFSET"),
+        u64::try_from(registry::DYNAMIC_ROOT_KIND_OFFSET).expect("kind 偏移")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_FLAGS_OFFSET"),
+        u64::try_from(registry::DYNAMIC_ROOT_FLAGS_OFFSET).expect("flags 偏移")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_TABLE_COUNT_OFFSET"),
+        u64::try_from(registry::DYNAMIC_ROOT_TABLE_COUNT_OFFSET).expect("表头 count 偏移")
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_FLAG_INITIALIZED"),
+        registry::DYNAMIC_ROOT_FLAG_INITIALIZED
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD"),
+        registry::DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_KIND_RESULT"),
+        registry::DYNAMIC_ROOT_KIND_RESULT
+    );
+    assert_eq!(
+        mirror("DYNAMIC_ROOT_KIND_CHANNEL_SLOT"),
+        registry::DYNAMIC_ROOT_KIND_CHANNEL_SLOT
+    );
+    assert_eq!(
+        mirror("PROCESSOR_DYNAMIC_ROOTS_OFFSET"),
+        u64::try_from(super::processor::PROCESSOR_DYNAMIC_ROOTS_OFFSET).expect("处理器槽位"),
+        "镜像侧表地址槽位必须与 processor 布局神谕一致"
+    );
+    assert_eq!(
+        mirror("COROUTINE_COLD_PAYLOAD_STATE_OFFSET"),
+        u64::try_from(std::mem::offset_of!(
+            super::coroutine::CoroutineCold,
+            payload_state
+        ))
+        .expect("冷记录状态字偏移"),
+        "镜像侧载荷状态字偏移必须与 CoroutineCold 布局一致"
+    );
+    assert_eq!(
+        mirror("COROUTINE_COLD_SPAWN_PUBLISHED_BIT"),
+        1,
+        "spawn 参数包发布位必须与 Rust 侧的状态字语义一致"
+    );
+    assert_eq!(mirror("COROUTINE_COLD_RESULT_PUBLISHED_BIT"), 2);
+    assert_eq!(mirror("COROUTINE_COLD_RESULT_KIND_SHIFT"), 3);
+    assert_eq!(mirror("COROUTINE_COLD_RESULT_KIND_MASK"), 7);
+    assert_eq!(
+        mirror("COROUTINE_COLD_RESULT_OFFSET"),
+        368,
+        "结果槽偏移必须与 finish_hot/take_result 读写的位置一致"
+    );
+    assert_eq!(
+        mirror("COROUTINE_COLD_RESULT_BYTES"),
+        16,
+        "结果区上界必须覆盖 finish_hot 携带的两个机器字"
+    );
+    assert_eq!(
+        registry::DYNAMIC_ROOT_TABLE_BYTES,
+        registry::DYNAMIC_ROOT_TABLE_HEADER_BYTES
+            + registry::DYNAMIC_ROOT_CAPACITY * registry::DYNAMIC_ROOT_RECORD_BYTES
+    );
 }

@@ -14,8 +14,9 @@ use super::model::RawModelError;
 
 /// 栈图契约段的 schema 版本。
 pub(crate) const STACKMAP_SCHEMA: u32 = 1;
-/// 栈图 section 的主版本；decoder 拒收 version 1 记录。
-pub(crate) const STACKMAP_SECTION_VERSION: u16 = 2;
+/// 栈图 section 的主版本；decoder 拒收 v1（handle 与压缩引用表示变化）、v2（屏障
+/// runtime 调用缺少安全点记录）与 v3（map 记录没有逐根初始化条目）记录。
+pub(crate) const STACKMAP_SECTION_VERSION: u16 = 4;
 /// 栈图 section 魔数。
 pub(crate) const STACKMAP_MAGIC: &[u8; 8] = b"GUGUSM01";
 /// 栈图 section 指针宽度（字节）。

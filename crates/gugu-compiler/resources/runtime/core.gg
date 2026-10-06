@@ -1,4 +1,6 @@
 use std.runtime.scheduler.{boot, finish_hot, live_count, resume_ready}
+use std.runtime.gc.{gc_config_check}
+use std.runtime.collect.{gc_boot}
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
@@ -46,6 +48,132 @@ pub struct Rt0Payload {
     pub stackmap_len: uint,
     pub unwind: uint,
     pub unwind_len: uint,
+    pub gc_types: uint,
+    pub gc_types_len: uint,
+    pub gc_meta: uint,
+    pub gc_meta_len: uint,
+    pub boot_environment: uint,
+}
+
+#[repr(C)]
+struct GcStartupConfig {
+    pub gc_target: uint,
+    pub memory_limit: uint,
+    pub flags: uint,
+    pub environment: uint,
+}
+
+const GC_TARGET_OFF: uint = 1
+const MEMORY_LIMIT_OFF: uint = 2
+
+/// 固定记录入口供 rt0/coordinator 消费；字段不持有托管指针。
+#[used]
+pub fn gc_startup_record(config: &GcStartupConfig) uint {
+    config.gc_target + config.memory_limit + config.flags + config.environment
+}
+
+unsafe fn fatal_configuration() {
+    unsafe {
+        let report = c"runtime fatal: invalid GC configuration\n"
+        _ = std.runtime.report_write(2, report, 40)
+        std.runtime.process_exit(2)
+    }
+}
+
+unsafe fn startup_decimal(value: uint, bytes: bool, allow_off: bool) uint { unsafe {
+    if value == 0 { fatal_configuration() }
+    if allow_off && byte_at(value) == byte(111) && byte_at(value + 1) == byte(102) && byte_at(value + 2) == byte(102) && byte_at(value + 3) == byte(0) {
+        return 0
+    }
+    let cursor = value
+    let result: uint = 0
+    let max_value = ~uint(0)
+    let digits: uint = 0
+    let done = false
+    while done == false {
+        let current = byte_at(cursor)
+        if current >= byte(48) && current <= byte(57) {
+            let digit = uint(current - byte(48))
+            if result > (max_value - digit) / uint(10) { fatal_configuration() }
+            result = result * uint(10) + digit
+            digits = digits + 1
+            cursor = cursor + 1
+        } else {
+            done = true
+        }
+    }
+    if digits == 0 { fatal_configuration() }
+    if bytes {
+        let multiplier: uint = 1
+        let suffix = cursor
+        if byte_at(suffix) == byte(0) {
+            cursor = suffix
+        } else {
+            if byte_at(suffix) == byte(66) {
+                cursor = suffix + 1
+            } else {
+                if byte_at(suffix + 1) != byte(105) || byte_at(suffix + 2) != byte(66) { fatal_configuration() }
+                if byte_at(suffix) == byte(75) { multiplier = uint(1024) }
+                if byte_at(suffix) == byte(77) { multiplier = uint(1048576) }
+                if byte_at(suffix) == byte(71) { multiplier = uint(1073741824) }
+                if byte_at(suffix) == byte(84) { multiplier = uint(1099511627776) }
+                if multiplier == uint(1) { fatal_configuration() }
+                cursor = suffix + 3
+            }
+        }
+        if byte_at(cursor) != byte(0) || result == 0 || result > max_value / multiplier { fatal_configuration() }
+        return result * multiplier
+    }
+    if byte_at(cursor) != byte(0) { fatal_configuration() }
+    result
+    }
+}
+
+unsafe fn is_gc_target_key(entry: uint) bool {
+    unsafe { word(entry) == uint(0x4e55525f55554747) && word(entry + 8) == uint(0x5f43475f454d4954) && word(entry + 16) == uint(0x003d544547524154) }
+}
+
+unsafe fn is_memory_limit_key(entry: uint) bool {
+    unsafe { word(entry) == uint(0x4e55525f55554747) && word(entry + 8) == uint(0x4d454d5f454d4954) && word(entry + 16) == uint(0x494d494c5f59524f) && word(entry + 24) == uint(0x3d54) }
+}
+
+unsafe fn parse_startup_environment(environment: uint, destination: uint) { unsafe {
+    let tagged = environment & uint(1)
+    let environment = environment & ~uint(1)
+    if tagged != 0 {
+        store_word(destination + 0, 100)
+        store_word(destination + 8, 0)
+        store_word(destination + 16, 0)
+        store_word(destination + 24, environment)
+        return
+    }
+    let target: uint = 100
+    let memory_limit: uint = 0
+    let flags: uint = 0
+    let cursor = environment
+    while cursor != 0 {
+        let entry = word(cursor)
+        if entry == 0 {
+            cursor = 0
+        } else {
+            if is_gc_target_key(entry) {
+                let value = startup_decimal(entry + 23, false, true)
+                target = value
+                if value == 0 { flags = flags | GC_TARGET_OFF } else { let _ = 0 }
+            }
+            if is_memory_limit_key(entry) {
+                let value = startup_decimal(entry + 26, true, true)
+                memory_limit = value
+                if value == 0 { flags = flags | MEMORY_LIMIT_OFF } else { let _ = 0 }
+            }
+            cursor = cursor + 8
+        }
+    }
+    store_word(destination + 0, target)
+    store_word(destination + 8, memory_limit)
+    store_word(destination + 16, flags)
+    store_word(destination + 24, environment)
+    }
 }
 
 /// `MorestackMailbox` 的字段偏移（`hot`/`system_context`/`return_value`/`processor` =
@@ -70,9 +198,23 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         let address_bias = if block.reloc_count == 0 { bias } else { 0 }
         let slot = payload.initial_slot + address_bias
         let state = payload.runtime_state + address_bias
-        if payload.revision != 3 || slot != block.initial_slot + bias || state != block.runtime_state + bias || payload.stackmap_len < 72 || payload.unwind_len < 48 {
+        if payload.revision != 4 || slot != block.initial_slot + bias || state != block.runtime_state + bias || payload.stackmap_len < 72 || payload.unwind_len < 48 {
             fatal_runtime()
         }
+        // GC 配置记录：镜像里的记录必须与 runtime 视图一致（版本与字节长度）。
+        // 记录地址来自编译器生成的只读片段；读取与比对在 gc.gg 内完成。
+        if gc_config_check(std.runtime.gc_config()) != 0 {
+            fatal_runtime()
+        }
+        let startup_page = std.platform.reserve_aligned(uint(4096), uint(4096))
+        if startup_page == 0 { fatal_configuration() }
+        let startup_range = StackRangeDescriptor { base: startup_page, bytes: 4096 }
+        if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(startup_range))) != 0 {
+            fatal_configuration()
+        }
+        parse_startup_environment(payload.boot_environment, startup_page)
+        store_word(block.payload_va + bias + 120, payload.boot_environment & ~uint(1))
+        store_word(state + 696, startup_page)
         // 唯一 main 协程预留 1 GiB 虚址，初始只提交 64 KiB；增长在同一虚址内提交新页，
         // 因此活跃 StackInterior 指针无需搬迁，且未触及的页始终不可访问。
         let reserve: uint = 1073741824
@@ -110,6 +252,8 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         store_word(stack_top - 8, payload.main_return + address_bias)
         let processor_addr = word(state + 96)
         boot(processor_addr, state, slot, cold, block.reserved_13 + bias)
+        // 收集器专用 system stack 必须在任何分配前建立：`gc_enter` 会在第一次压力时切到它。
+        gc_boot(processor_addr)
         let system_context = std.mem.transmute[uint, *()](state + 40)
         let main_context = std.mem.transmute[uint, *()](cold + 8)
         let hot = std.mem.transmute[uint, *()](slot)
@@ -192,7 +336,7 @@ unsafe fn fatal_stack() {
 /// 运行期只消费编译器验证过的封闭元数据；任何缺失或越界都属于 fatal，不转用户 panic。
 unsafe fn checked_safepoint(section: uint, length: uint, fragment_base: uint, return_pc: uint, kind: byte) {
     unsafe {
-        if length < 72 || return_pc < fragment_base || word(section) != uint(0x31304d5355475547) || word32(section + 8) != uint(0x01080002) {
+        if length < 72 || return_pc < fragment_base || word(section) != uint(0x31304d5355475547) || word32(section + 8) != uint(0x01080004) {
             fatal_runtime()
         }
         let functions = word32(section + 12)

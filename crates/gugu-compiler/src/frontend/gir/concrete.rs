@@ -116,10 +116,20 @@ impl ConcreteBody {
     }
 
     pub(crate) fn verify(&self) -> Result<(), Diagnostic> {
-        if self.schema != SCHEMA
-            || self.body.generic_params != 0
-            || self.fingerprint != self.fingerprint()
-        {
+        if self.fingerprint != self.fingerprint() {
+            return Err(invalid("具体 GIR 的 schema、实例替换或指纹不合法"));
+        }
+        self.verify_structure()
+    }
+
+    /// 新鲜构造或 pass 修改后的对象仍完整校验结构，只计算一次规范指纹。
+    pub(crate) fn refresh_fingerprint(&mut self) -> Result<(), Diagnostic> {
+        self.fingerprint = self.fingerprint();
+        self.verify_structure()
+    }
+
+    fn verify_structure(&self) -> Result<(), Diagnostic> {
+        if self.schema != SCHEMA || self.body.generic_params != 0 {
             return Err(invalid("具体 GIR 的 schema、实例替换或指纹不合法"));
         }
         for local in &self.body.locals {
@@ -177,14 +187,18 @@ pub(crate) fn build(
     mono: &MonoWorldV1,
 ) -> Result<Vec<ConcreteBody>, Vec<Diagnostic>> {
     let mut bodies = Vec::with_capacity(world.fragments.len());
+    // 闭合实例按摘要排序，位置即 MonoId；只计算一次摘要，避免逐 fragment 重复哈希。
+    let digests: Vec<_> = mono
+        .instances
+        .iter()
+        .map(|instance| crate::frontend::mono::digest_of(&instance.mono_key))
+        .collect();
+    debug_assert!(digests.windows(2).all(|pair| pair[0] < pair[1]));
     for fragment in &world.fragments {
-        let instance = mono
-            .instances
-            .iter()
-            .find(|instance| {
-                crate::frontend::mono::digest_of(&instance.mono_key) == fragment.digest
-            })
-            .ok_or_else(|| vec![invalid("GIR fragment 不在闭合实例图中")])?;
+        let instance_index = digests
+            .binary_search(&fragment.digest)
+            .map_err(|_| vec![invalid("GIR fragment 不在闭合实例图中")])?;
+        let instance = &mono.instances[instance_index];
         let body = build_body(context, world, mono, instance, fragment.body)
             .map_err(|error| vec![error])?;
         bodies.push(body);
@@ -216,8 +230,7 @@ fn build_body(
         calls,
         fingerprint: [0; 32],
     };
-    concrete.fingerprint = concrete.fingerprint();
-    concrete.verify()?;
+    concrete.refresh_fingerprint()?;
     Ok(concrete)
 }
 

@@ -15,6 +15,10 @@
 
 use super::context::ContextSwitchCode;
 use super::coroutine::{CoroutineCold, MorestackMailbox, MorestackScratch};
+use super::coroutine_layout::{
+    COROUTINE_PACK_FLOAT_LANES, coroutine_pack_float_offset, coroutine_pack_integer_offset,
+};
+use super::processor;
 use crate::backend::x64::encode;
 use crate::backend::x64::inst::{Operand, RelocKind, RelocTarget, Relocation};
 use crate::backend::x64::lower::{Builder, gpr, imm, mem_base, reg, xmm};
@@ -37,10 +41,13 @@ const RM64_R64: &[OperandKind] = &[OperandKind::Rm64, OperandKind::R64];
 const RM64_IMM32: &[OperandKind] = &[OperandKind::Rm64, OperandKind::Imm32];
 const R64_IMM32: &[OperandKind] = &[OperandKind::R64, OperandKind::Imm32];
 const R32_IMM32: &[OperandKind] = &[OperandKind::R32, OperandKind::Imm32];
+const RM32_IMM8: &[OperandKind] = &[OperandKind::Rm32, OperandKind::Imm8];
 const RM32_R32: &[OperandKind] = &[OperandKind::Rm32, OperandKind::R32];
 const XMMRM_XMM: &[OperandKind] = &[OperandKind::XmmRm, OperandKind::Xmm];
 /// 调度返回原因，写在 runtime 状态区邮箱之后的空闲字。0 是 morestack，1 是主动让出，2 是协程返回。
-const SCHEDULE_REASON: i32 = 688;
+///
+/// 偏移来自 `entry::state` 的唯一契约，片段与镜像 runtime 共用同一份；这里只做窄化。
+const SCHEDULE_REASON: i32 = super::entry::state::REASON as i32;
 
 /// 片段内的一个入口符号。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1401,6 +1408,172 @@ fn panic_entry_fragment() -> FragmentBlob {
         relocations: encoded.relocations,
     }
 }
+/// PollResume 的同步慢路只消费 PREEMPT 位，保留 GC_STOP 交给 collector；它不分配、不切换栈。
+fn safepoint_slow_fragment() -> FragmentBlob {
+    let mut builder = Builder::new();
+    let offset = i32::try_from(processor::poll_flags_offset()).expect("poll flags 偏移适配 i32");
+    let poll = mem_base(gpr(Gpr::R15), offset);
+    builder.emit(
+        "mov",
+        RM32_R32,
+        Access::Read,
+        vec![poll.clone(), reg(gpr(Gpr::Rax))],
+    );
+    builder.emit(
+        "and",
+        RM32_IMM8,
+        Access::ReadWrite,
+        vec![reg(gpr(Gpr::Rax)), imm(2)],
+    );
+    builder.emit(
+        "mov",
+        RM32_R32,
+        Access::Write,
+        vec![poll, reg(gpr(Gpr::Rax))],
+    );
+    builder.emit("ret", &[], Access::Read, Vec::new());
+    let encoded = finish(builder);
+    FragmentBlob {
+        alignment: FRAGMENT_ALIGNMENT,
+        domain: FragmentDomain::Runtime,
+        bytes: encoded.bytes,
+        entries: vec![FragmentEntry {
+            glue: "safepoint_slow",
+            offset: 0,
+        }],
+        relocations: encoded.relocations,
+    }
+}
+
+/// GC 入口：发布发起者 RSP、切到 runtime 专用 system stack、调用 dispatcher 后恢复。
+///
+/// 收集器必须在与协程栈分离的边界上运行：它在 system stack 上执行，因此自身帧既不会触达
+/// mutator 的栈上限，也不会被发起者的根扫描当成 mutator 帧。`rax` 是请求指针、`rbx` 是发起者
+/// RSP，两者都是登记片段 ABI 的一部分。
+fn gc_enter_fragment() -> FragmentBlob {
+    let mut builder = Builder::new();
+    let state = i32::try_from(processor::PROCESSOR_STATE_OFFSET).expect("状态区偏移适配 i32");
+    let coordinator =
+        i32::try_from(super::entry::state::COORDINATOR).expect("coordinator 槽偏移适配 i32");
+    let entry_rsp = super::collect_layout::COORDINATOR_ENTRY_RSP_OFFSET;
+    let saved_rsp = super::collect_layout::COORDINATOR_SAVED_RSP_OFFSET;
+    let system_top = super::collect_layout::COORDINATOR_SYSTEM_TOP_OFFSET;
+    // r11 = coordinator（processor 在 r15）。
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R15), state), reg(gpr(Gpr::R11))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R11), coordinator), reg(gpr(Gpr::R11))],
+    );
+    // system 模式下 r14 指向 collector 自己的栈描述符：否则收集器在 system stack 上执行时，
+    // 栈检查仍拿 mutator 协程的 stack_check 比较，会误报 StackOverflow。
+    let system_descriptor = super::collect_layout::COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET;
+    let saved_r14 = super::collect_layout::COORDINATOR_SAVED_R14_OFFSET;
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![mem_base(gpr(Gpr::R11), saved_r14), reg(gpr(Gpr::R14))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![
+            mem_base(gpr(Gpr::R11), system_descriptor),
+            reg(gpr(Gpr::R14)),
+        ],
+    );
+    // 发布发起者 RSP，再切到 system stack；`rbx` 把同一个 RSP 交给 dispatcher。
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![mem_base(gpr(Gpr::R11), entry_rsp), reg(gpr(Gpr::Rsp))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![mem_base(gpr(Gpr::R11), saved_rsp), reg(gpr(Gpr::Rsp))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R11), system_top), reg(gpr(Gpr::Rsp))],
+    );
+    // Gugu 函数调用 ABI 是 rdi/rsi；机器原语的 rax 车道在这里换成 dispatcher 的第一实参。
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![reg(gpr(Gpr::Rdi)), reg(gpr(Gpr::Rax))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R11), entry_rsp), reg(gpr(Gpr::Rsi))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R11), entry_rsp), reg(gpr(Gpr::Rbx))],
+    );
+    builder.emit(
+        "call",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(
+            RelocTarget::Lir(glue_symbol("gc_dispatch")),
+            RelocKind::PcRel32,
+        )],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R15), state), reg(gpr(Gpr::R11))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R11), coordinator), reg(gpr(Gpr::R11))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R11), saved_r14), reg(gpr(Gpr::R14))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R11), saved_rsp), reg(gpr(Gpr::Rsp))],
+    );
+    builder.emit("ret", &[], Access::Read, Vec::new());
+    let encoded = finish(builder);
+    FragmentBlob {
+        alignment: FRAGMENT_ALIGNMENT,
+        domain: FragmentDomain::Runtime,
+        bytes: encoded.bytes,
+        entries: vec![FragmentEntry {
+            glue: "gc_enter",
+            offset: 0,
+        }],
+        relocations: encoded.relocations,
+    }
+}
 
 /// landing 的 `ResumePanic` 终结符跳到这里：从状态区恢复原报告参数，退出路径不返回。
 fn panic_resume_fragment() -> FragmentBlob {
@@ -1479,15 +1652,17 @@ fn panic_resume_fragment() -> FragmentBlob {
 fn coroutine_enter_fragment() -> FragmentBlob {
     let mut builder = Builder::new();
     let mut planned: Vec<(&'static str, i32)> = Vec::new();
+    // 整数车道：lane0 落在 Rax（入口先把它当包指针，随后换成车道值），lane1..lane8 依次装入
+    // 其余内部整数寄存器；偏移全部来自参数包布局契约。
     let integer = [
-        (Gpr::Rbx, 8),
-        (Gpr::Rcx, 16),
-        (Gpr::Rdx, 24),
-        (Gpr::Rdi, 32),
-        (Gpr::Rsi, 40),
-        (Gpr::R8, 48),
-        (Gpr::R9, 56),
-        (Gpr::R10, 64),
+        Gpr::Rbx,
+        Gpr::Rcx,
+        Gpr::Rdx,
+        Gpr::Rdi,
+        Gpr::Rsi,
+        Gpr::R8,
+        Gpr::R9,
+        Gpr::R10,
     ];
     // `[rsp]` 的零位移编码会多写出一字节；先把 rsp 放到 r11 再间接读取。
     builder.emit(
@@ -1508,23 +1683,24 @@ fn coroutine_enter_fragment() -> FragmentBlob {
         Access::Read,
         vec![mem_base(gpr(Gpr::Rsp), 8), reg(gpr(Gpr::Rax))],
     );
-    for (register, offset) in integer {
+    for (lane, register) in integer.iter().enumerate() {
+        let offset = i32::try_from(coroutine_pack_integer_offset(lane + 1)).expect("车道偏移");
         builder.emit(
             "mov",
             RM64_R64,
             Access::Read,
-            vec![mem_base(gpr(Gpr::Rax), offset), reg(gpr(register))],
+            vec![mem_base(gpr(Gpr::Rax), offset), reg(gpr(*register))],
         );
     }
-    for index in 0..8 {
-        let offset = 72 + 16 * index;
+    for index in 0..COROUTINE_PACK_FLOAT_LANES {
+        let offset = i32::try_from(coroutine_pack_float_offset(index)).expect("车道偏移");
         builder.emit(
             "movups",
             XMMRM_XMM,
             Access::Read,
             vec![
                 mem_base(gpr(Gpr::Rax), offset),
-                xmm(crate::backend::x64::abi::INTERNAL_FLOAT[index as usize]),
+                xmm(crate::backend::x64::abi::INTERNAL_FLOAT[index]),
             ],
         );
     }
@@ -1614,6 +1790,17 @@ fn coroutine_enter_fragment() -> FragmentBlob {
     }
 }
 
+/// 已有机器片段实现、因而登记为 runtime glue 的平台范围原语。
+///
+/// 其余平台操作（guard/Unprotect/Wait/Wake/Entropy/Zero/SetDumpPolicy/两个 hint）在镜像里还
+/// 没有执行体，属于后续步骤；发射门禁必须拒绝它们，绝不静默落桩。
+pub(crate) const PLATFORM_OPS_WITH_CODE: [PlatformOp; 4] = [
+    PlatformOp::ReserveAligned,
+    PlatformOp::Commit,
+    PlatformOp::Decommit,
+    PlatformOp::Release,
+];
+
 /// 目标平台的全部登记片段；一个 blob 可带多个入口（context 片段）。
 pub(crate) fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
     let context = ContextSwitchCode::fixed();
@@ -1644,6 +1831,16 @@ pub(crate) fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
             bytes: current_slot_bytes(),
             entries: vec![FragmentEntry {
                 glue: "current_slot",
+                offset: 0,
+            }],
+            relocations: Vec::new(),
+        },
+        FragmentBlob {
+            alignment: FRAGMENT_ALIGNMENT,
+            domain: FragmentDomain::Runtime,
+            bytes: safepoint_slow_fragment().bytes,
+            entries: vec![FragmentEntry {
+                glue: "safepoint_slow",
                 offset: 0,
             }],
             relocations: Vec::new(),
@@ -1689,26 +1886,41 @@ pub(crate) fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
             relocations: report.relocations,
         },
     ];
+    blobs.push(gc_enter_fragment());
     blobs.push(coroutine_enter_fragment());
-    // 引用存储在调用前已经完成。这一阶段没有收集器，屏障只需要返回。
+    blobs.push(panic_entry_fragment());
+    blobs.push(panic_resume_fragment());
+    // GC 配置记录：数据片段承载编译器生成的只读 `GcImageConfig`，其地址由同名 glue 符号
+    // 暴露；访问器片段用 PC 相对 `lea` 把它取进 rax 返回（机器片段只允许 PC 相对修补点）。
     blobs.push(FragmentBlob {
-        alignment: FRAGMENT_ALIGNMENT,
+        alignment: 8,
         domain: FragmentDomain::Runtime,
-        bytes: vec![0xc3],
+        bytes: crate::runtime::GcImageConfig::build().canonical_bytes(),
         entries: vec![FragmentEntry {
-            glue: "gc_write_barrier",
+            glue: "gc_config_record",
             offset: 0,
         }],
         relocations: Vec::new(),
     });
-    blobs.push(panic_entry_fragment());
-    blobs.push(panic_resume_fragment());
-    for op in [
-        PlatformOp::ReserveAligned,
-        PlatformOp::Commit,
-        PlatformOp::Decommit,
-        PlatformOp::Release,
-    ] {
+    let mut accessor = vec![0x48, 0x8D, 0x05];
+    accessor.extend_from_slice(&[0_u8; 4]);
+    accessor.push(0xC3);
+    blobs.push(FragmentBlob {
+        alignment: FRAGMENT_ALIGNMENT,
+        domain: FragmentDomain::Runtime,
+        bytes: accessor,
+        entries: vec![FragmentEntry {
+            glue: "gc_config",
+            offset: 0,
+        }],
+        relocations: vec![Relocation {
+            offset: 3,
+            kind: RelocKind::PcRel32,
+            target: RelocTarget::Lir(glue_symbol("gc_config_record")),
+            addend: 0,
+        }],
+    });
+    for op in PLATFORM_OPS_WITH_CODE {
         let encoded = PlatformRangeCode::fixed(op, target);
         blobs.push(FragmentBlob {
             alignment: FRAGMENT_ALIGNMENT,
@@ -1765,5 +1977,33 @@ mod tests {
             })
             .expect("current_slot 片段已登记");
         assert_eq!(fragment.bytes, [0x4c, 0x89, 0xf0, 0xc3]);
+    }
+
+    use crate::runtime::fragments::RelocKind;
+
+    /// GC 配置由数据片段承载、访问器片段用 PC 相对 `lea` 取它的地址：记录字节与
+    /// `GcImageConfig::canonical_bytes` 同源，访问器只有一个 PC 相对修补点。
+    #[test]
+    fn gc_config_fragments_carry_the_record_and_its_address() {
+        let target = crate::TargetName::X86_64Linux;
+        let blobs = registered_fragments(target);
+        let by_glue = |glue: &str| {
+            blobs
+                .iter()
+                .find(|blob| blob.entries.iter().any(|entry| entry.glue == glue))
+                .expect("glue 片段已登记")
+        };
+        let config = crate::runtime::GcImageConfig::build();
+        let record = by_glue("gc_config_record");
+        assert_eq!(record.bytes, config.canonical_bytes());
+        assert_eq!(
+            u64::try_from(record.bytes.len()).expect("记录长度适配 u64"),
+            config.byte_len
+        );
+        let accessor = by_glue("gc_config");
+        assert_eq!(accessor.bytes, [0x48, 0x8D, 0x05, 0, 0, 0, 0, 0xC3]);
+        assert_eq!(accessor.relocations.len(), 1);
+        assert_eq!(accessor.relocations[0].offset, 3);
+        assert_eq!(accessor.relocations[0].kind, RelocKind::PcRel32);
     }
 }

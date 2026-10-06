@@ -7,9 +7,12 @@ use std::collections::BTreeSet;
 
 use crate::SourceMap;
 use crate::diagnostics::Diagnostic;
-use crate::lir::body::{Body, Terminator};
+use crate::lir::Graph;
+use crate::lir::body::{BlockId, Body, Terminator, Type, id};
+use crate::lir::liveness::LiveValues;
+use crate::lir::root_init::InitSlots;
 use crate::lir::stackmap::{self, LogicalRoot, LogicalSafepoint};
-use crate::runtime::{self, CodeLayout, SafepointLayout, StackLanding};
+use crate::runtime::{self, CodeLayout, SafepointLayout, StackLanding, TypedRoot};
 use crate::source::SourceFileId;
 use crate::target::TargetName;
 
@@ -56,7 +59,7 @@ pub(crate) fn build(
     if lir.bodies().len() != fragments.len() {
         return Err(vec![invalid("机器片段数量与 LIR 函数不一致")]);
     }
-    let rvas = assign_rvas(fragments);
+    let rvas = assign_rvas(fragments, target)?;
     let mut prepared = Vec::with_capacity(fragments.len());
     for (index, body) in lir.bodies().iter().enumerate() {
         let fragment = &fragments[index];
@@ -174,18 +177,51 @@ fn unwind_name(target: TargetName) -> &'static str {
     }
 }
 
-fn assign_rvas(fragments: &[FragmentPayload]) -> Vec<u64> {
-    let mut order: Vec<usize> = (0..fragments.len()).collect();
-    order.sort_by(|left, right| fragments[*left].symbol.cmp(&fragments[*right].symbol));
-    let mut rvas = vec![0; fragments.len()];
-    let mut cursor = 0_u64;
-    for index in order {
-        cursor = cursor.div_ceil(16) * 16;
-        rvas[index] = cursor;
-        let span = (fragments[index].bytes.len() as u64).max(1);
-        cursor = cursor.saturating_add(span);
+/// 代码布局：栈图与展开表的 `code_rva` 必须与镜像链接器放置的地址同源。
+///
+/// 链接器把片段世界的函数体与 `runtime::fragments::registered_fragments` 的登记机器片段放在
+/// 同一次「按符号名排序、16 字节对齐」的放置里。glue Item 实例与机器片段共用
+/// `__gugu_runtime_*` 前缀，任何只排片段世界的算法都会让排在机器片段之后的函数体拿到偏小
+/// 的 `code_rva`，运行期 PC → 函数查找会落到错误区间。因此这里复用同一份机器片段清单并按
+/// 链接器规则排序；函数体符号与机器片段符号重名与链接期一样是硬错误。
+fn assign_rvas(
+    fragments: &[FragmentPayload],
+    target: TargetName,
+) -> Result<Vec<u64>, Vec<Diagnostic>> {
+    let mut layout: Vec<(String, u64, Option<usize>)> = Vec::with_capacity(fragments.len() + 8);
+    for (index, fragment) in fragments.iter().enumerate() {
+        layout.push((
+            fragment.symbol.clone(),
+            (fragment.bytes.len() as u64).max(1),
+            Some(index),
+        ));
     }
-    rvas
+    for blob in crate::runtime::fragments::registered_fragments(target) {
+        let Some(first) = blob.entries.first() else {
+            return Err(vec![invalid("登记机器片段缺少入口符号")]);
+        };
+        layout.push((
+            blob.domain.mangle(first.glue),
+            (blob.bytes.len() as u64).max(1),
+            None,
+        ));
+    }
+    layout.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in layout.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(vec![invalid(&format!("代码符号 {} 重复定义", pair[0].0))]);
+        }
+    }
+    let mut rvas = vec![0_u64; fragments.len()];
+    let mut cursor = 0_u64;
+    for (_, span, body) in &layout {
+        cursor = cursor.div_ceil(16) * 16;
+        if let Some(index) = body {
+            rvas[*index] = cursor;
+        }
+        cursor = cursor.saturating_add(*span);
+    }
+    Ok(rvas)
 }
 
 fn machine_safepoints(
@@ -197,15 +233,21 @@ fn machine_safepoints(
     let mut layouts = Vec::new();
     let boundaries = boundaries(fragment);
     let code_size = u32::try_from(fragment.bytes.len()).expect("代码长度适配 u32");
+    // 逐根初始化证明按 body 求一次：判定哪些根字在安全点上还没有写成指针，从而必须留给
+    // 帧内初始化字节在运行期门控。
+    let graph = Graph::new(body).map_err(|error| vec![error])?;
+    let init = InitSlots::new(body, &graph);
+    let live = LiveValues::new(body, &graph);
     for anchor in anchors {
-        let pc = safepoint_pc(fragment, anchor)?;
-        if pc >= code_size || !boundaries.contains(&pc) {
-            return Err(vec![invalid(&format!(
-                "{} 的安全点 PC 不在指令边界",
-                body.name
-            ))]);
+        for pc in safepoint_pcs(fragment, anchor)? {
+            if pc >= code_size || !boundaries.contains(&pc) {
+                return Err(vec![invalid(&format!(
+                    "{} 的安全点 PC 不在指令边界",
+                    body.name
+                ))]);
+            }
+            layouts.push(layout_of(body, fragment, target, anchor, pc, &init, &live)?);
         }
-        layouts.push(layout_of(body, fragment, target, anchor, pc)?);
     }
     layouts.sort_by_key(|layout| layout.pc_offset);
     if layouts
@@ -217,23 +259,31 @@ fn machine_safepoints(
     Ok(layouts)
 }
 
-fn safepoint_pc(
+/// 锚点对应的全部物理 PC。
+///
+/// 普通安全点取该站点所有 `call` 的返回点：同一 LIR 点可以发射多条收集 slow call，每条返回
+/// PC 都要落进同一语义 map，只登记最后一条会让先返回的那条找不到登记。
+fn safepoint_pcs(
     fragment: &FragmentPayload,
     anchor: &LogicalSafepoint,
-) -> Result<u32, Vec<Diagnostic>> {
+) -> Result<Vec<u32>, Vec<Diagnostic>> {
     if anchor.kind == stackmap::KIND_MORESTACK_ENTRY {
         return fragment
             .sites
             .iter()
             .find_map(|site| site.morestack_pc)
+            .map(|pc| vec![pc])
             .ok_or_else(|| vec![invalid("入口检查没有 morestack 返回点")]);
     }
-    fragment
+    let site = fragment
         .sites
         .iter()
         .find(|site| site.block == anchor.block && site.instruction == anchor.instruction)
-        .and_then(|site| site.call_return_pc)
-        .ok_or_else(|| vec![invalid("安全点没有调用返回 PC")])
+        .ok_or_else(|| vec![invalid("安全点没有机器站点")])?;
+    if site.call_return_pcs.is_empty() {
+        return Err(vec![invalid("安全点没有调用返回 PC")]);
+    }
+    Ok(site.call_return_pcs.clone())
 }
 
 fn layout_of(
@@ -242,6 +292,8 @@ fn layout_of(
     target: TargetName,
     anchor: &LogicalSafepoint,
     pc: u32,
+    init: &InitSlots,
+    live: &LiveValues,
 ) -> Result<SafepointLayout, Vec<Diagnostic>> {
     let slot_count = if anchor.kind == stackmap::KIND_MORESTACK_ENTRY {
         0
@@ -250,6 +302,7 @@ fn layout_of(
     };
     let mut slots = empty_bitmaps(slot_count);
     let mut registers = [0_u16; 5];
+    let mut typed = Vec::new();
     place_roots(
         body,
         fragment,
@@ -257,10 +310,17 @@ fn layout_of(
         anchor,
         &mut slots,
         &mut registers,
+        &mut typed,
+        init,
         slot_count,
     )?;
+    // 条目按五类根分组收集，落地前按帧内字下标排序；重复字由编码校验拒绝。
+    typed.sort_by_key(|root| root.word);
     if matches!(anchor.kind, 0 | 2 | 3) && registers.iter().any(|mask| *mask != 0) {
         return Err(vec![invalid("调用、挂起或 bridge 点保留了用户寄存器根")]);
+    }
+    if matches!(anchor.kind, 0 | 2 | 3) {
+        verify_live_pointers_are_rooted(body, fragment, anchor, live, &slots, &typed)?;
     }
     Ok(SafepointLayout {
         pc_offset: pc,
@@ -270,9 +330,87 @@ fn layout_of(
         scan_allowed: anchor.flags & 2 != 0,
         slots,
         registers,
+        typed,
         function: 0,
         slot_count,
     })
+}
+
+/// 调用、挂起与 bridge 点（kind 0/2/3）的根完备性门禁。
+///
+/// 这些点位没有用户寄存器根，跨点存活的受管值按分配器规则必须落在 frame slot
+/// （见 `alloc/scan.rs` 的 spill 规则）。因此只要一个值跨过点位存活，它在 frame 上的那个槽
+/// 就必须出现在本点的根位图或逐根条目里。
+///
+/// 判定用 LIR 的跨点活跃集本身：物理层的分配区间是各块 `live_in`/`live_out` 边界的凸包，
+/// 会被跨越块边界的值撑到实际死亡的点位上，拿它当判据会误报（例如数值由本指令自身的展开
+/// 定义、而安全点落在该展开更靠后的点位）。逻辑根集合漏登记时物理层不会有任何报错：
+/// 收集器只是扫不到仍被持有的对象，等到真正回收才表现为悬垂指针或重复回收。这里把漏登记
+/// 变成编译期错误。
+fn verify_live_pointers_are_rooted(
+    body: &Body,
+    fragment: &FragmentPayload,
+    anchor: &LogicalSafepoint,
+    live: &LiveValues,
+    slots: &[Vec<u64>; 5],
+    typed: &[TypedRoot],
+) -> Result<(), Vec<Diagnostic>> {
+    let Some(block) = body.blocks.get(anchor.block as usize) else {
+        return Err(vec![invalid("根完备性检查引用越界块")]);
+    };
+    let Some(position) = anchor.instruction.checked_sub(block.instructions.start) else {
+        return Err(vec![invalid("根完备性检查的安全点不在所属块指令范围")]);
+    };
+    if position > block.instructions.end - block.instructions.start {
+        return Err(vec![invalid("根完备性检查的安全点越过所属块指令范围")]);
+    }
+    let live = live.after(BlockId(anchor.block), position);
+    for (index, value) in body.values.iter().enumerate() {
+        if !live.is_live(index) || value.kind.ty != Type::Ptr {
+            continue;
+        }
+        let Some(kind) = value.kind.provenance.and_then(|it| it.root_kind()) else {
+            continue;
+        };
+        let Some(found) = fragment.values.iter().find(|item| item.value == id(index)) else {
+            continue;
+        };
+        let Some(&(_, _, code)) = found.segments.first() else {
+            // 可重建的值（常量、栈地址）不占 frame 槽。
+            continue;
+        };
+        if code >= 0 {
+            return Err(vec![invalid(&format!(
+                "跨点受管的 v{index} 停在工作集寄存器而不是 frame slot（root={} range={:?} def={:?}）",
+                found.root, found.range, value.definition
+            ))]);
+        }
+        let spill = u32::try_from(!code).expect("溢出槽编号适配 u32");
+        let Some(offset) = fragment
+            .frame
+            .spill_slots
+            .get(spill as usize)
+            .map(|it| it.0)
+        else {
+            return Err(vec![invalid("溢出槽没有 frame 偏移")]);
+        };
+        let word = offset / 8;
+        let class = usize::try_from(kind).expect("根种类适配宿主");
+        let masked = slots.get(class).is_some_and(|bits| {
+            bits.get((word / 64) as usize)
+                .is_some_and(|bits| bits >> (word % 64) & 1 == 1)
+        });
+        let listed = typed
+            .iter()
+            .any(|root| root.word == word && root.root_kind == kind);
+        if !masked && !listed {
+            return Err(vec![invalid(&format!(
+                "跨点存活的受管指针 v{index} 没有根登记：收集器会漏扫该 frame 槽（root={} kind={kind} range={:?} word={word}）",
+                found.root, found.range
+            ))]);
+        }
+    }
+    Ok(())
 }
 
 fn place_roots(
@@ -282,6 +420,8 @@ fn place_roots(
     anchor: &LogicalSafepoint,
     slots: &mut [Vec<u64>; 5],
     registers: &mut [u16; 5],
+    typed: &mut Vec<TypedRoot>,
+    init: &InitSlots,
     slot_count: u32,
 ) -> Result<(), Vec<Diagnostic>> {
     let groups = [
@@ -294,7 +434,8 @@ fn place_roots(
     for (class, roots) in groups.iter().enumerate() {
         for root in *roots {
             place_root(
-                body, fragment, target, anchor, class, root, slots, registers, slot_count,
+                body, fragment, target, anchor, class, root, slots, registers, typed, init,
+                slot_count,
             )?;
         }
     }
@@ -310,6 +451,8 @@ fn place_root(
     root: &LogicalRoot,
     slots: &mut [Vec<u64>; 5],
     registers: &mut [u16; 5],
+    typed: &mut Vec<TypedRoot>,
+    init: &InitSlots,
     slot_count: u32,
 ) -> Result<(), Vec<Diagnostic>> {
     match root {
@@ -319,9 +462,9 @@ fn place_root(
         LogicalRoot::Slot { slot, offset } if *slot == u32::MAX => {
             place_by_value(body, target, anchor, class, *offset, slots, slot_count)
         }
-        LogicalRoot::Slot { slot, offset } => {
-            place_slot(fragment, class, *slot, *offset, slots, slot_count)
-        }
+        LogicalRoot::Slot { slot, offset } => place_slot(
+            body, fragment, anchor, class, *slot, *offset, slots, typed, init, slot_count,
+        ),
         LogicalRoot::Value { value, .. } => place_value(
             fragment, anchor, class, *value, slots, registers, slot_count,
         ),
@@ -390,11 +533,15 @@ fn place_by_value(
 }
 
 fn place_slot(
+    body: &Body,
     fragment: &FragmentPayload,
+    anchor: &LogicalSafepoint,
     class: usize,
     slot: u32,
     offset: u64,
     slots: &mut [Vec<u64>; 5],
+    typed: &mut Vec<TypedRoot>,
+    init: &InitSlots,
     slot_count: u32,
 ) -> Result<(), Vec<Diagnostic>> {
     let local = fragment
@@ -409,7 +556,33 @@ fn place_slot(
     if byte % 8 != 0 {
         return Err(vec![invalid("栈槽根没有对齐到机器字")]);
     }
-    set_slot(slots, class, byte / 8, slot_count)
+    let word = byte / 8;
+    let bit = body.stack_slots[slot as usize]
+        .roots
+        .iter()
+        .position(|(root, _)| *root == offset)
+        .ok_or_else(|| vec![invalid("栈槽根不在槽 root 表里")])?;
+    // 该根字可能在别的变体里是标量：静态证明不了"已写成指针"时不做固定根，改由帧内初始化
+    // 字节在运行期门控——证明已成立才直接登记进位图。
+    let block = crate::lir::body::BlockId(id(anchor.block as usize));
+    if !init.is_initialized(block, anchor.position, slot as usize, bit) {
+        let base = fragment
+            .frame
+            .init_bases
+            .get(slot as usize)
+            .copied()
+            .flatten()
+            .ok_or_else(|| vec![invalid("栈槽根缺少帧内逐根初始化字节")])?;
+        typed.push(TypedRoot {
+            word,
+            root_kind: u32::try_from(class).expect("根类别适配 u32"),
+            init_byte: base
+                .checked_add(u32::try_from(bit).expect("根下标适配 u32"))
+                .ok_or_else(|| vec![invalid("帧内逐根初始化字节偏移溢出")])?,
+        });
+        return Ok(());
+    }
+    set_slot(slots, class, word, slot_count)
 }
 
 fn place_value(
@@ -453,6 +626,21 @@ fn place_value(
     set_slot(slots, class, offset / 8, slot_count)
 }
 
+fn call_of<'a>(body: &'a Body, anchor: &LogicalSafepoint) -> Option<&'a crate::lir::body::Call> {
+    let block = body.blocks.get(anchor.block as usize)?;
+    if anchor.instruction == block.instructions.end {
+        return match &block.terminator {
+            Terminator::Invoke { call, .. } => Some(call),
+            _ => None,
+        };
+    }
+    match &body.instructions.get(anchor.instruction as usize)?.op {
+        crate::lir::body::Op::Call(call) | crate::lir::body::Op::ForeignCall(call) => Some(call),
+        _ => None,
+    }
+}
+
+/// 安全点对应的 `use_slot`：用于判断值根占用的槽区间是否覆盖该点。
 fn safepoint_slot(fragment: &FragmentPayload, anchor: &LogicalSafepoint) -> Option<u32> {
     let site = fragment
         .sites
@@ -473,21 +661,6 @@ fn covers_slot(range: (u32, u32), use_slot: u32) -> bool {
     let def_slot = use_slot.saturating_add(1);
     use_slot <= range.1 && def_slot >= range.0
 }
-
-fn call_of<'a>(body: &'a Body, anchor: &LogicalSafepoint) -> Option<&'a crate::lir::body::Call> {
-    let block = body.blocks.get(anchor.block as usize)?;
-    if anchor.instruction == block.instructions.end {
-        return match &block.terminator {
-            Terminator::Invoke { call, .. } => Some(call),
-            _ => None,
-        };
-    }
-    match &body.instructions.get(anchor.instruction as usize)?.op {
-        crate::lir::body::Op::Call(call) | crate::lir::body::Op::ForeignCall(call) => Some(call),
-        _ => None,
-    }
-}
-
 fn landings_of(body: &Body, fragment: &FragmentPayload) -> Result<Vec<Landing>, Vec<Diagnostic>> {
     let mut landings = Vec::new();
     for (index, block) in body.blocks.iter().enumerate() {
@@ -503,7 +676,7 @@ fn landings_of(body: &Body, fragment: &FragmentPayload) -> Result<Vec<Landing>, 
             .iter()
             .find(|site| site.block == index as u32 && site.instruction == block.instructions.end)
             .ok_or_else(|| vec![invalid("调用终结符没有机器站点")])?;
-        let pc_end = site.call_return_pc.unwrap_or(site.bytes.1);
+        let pc_end = site.call_return_pcs.last().copied().unwrap_or(site.bytes.1);
         if pc_end <= site.bytes.0 {
             return Err(vec![invalid("落地范围为空")]);
         }
@@ -784,12 +957,10 @@ fn boundaries(fragment: &FragmentPayload) -> BTreeSet<u32> {
     for site in &fragment.sites {
         set.insert(site.bytes.0);
         set.insert(site.bytes.1);
-        if let Some(pc) = site.call_return_pc {
-            set.insert(pc);
-        }
         if let Some(pc) = site.morestack_pc {
             set.insert(pc);
         }
+        set.extend(site.call_return_pcs.iter().copied());
     }
     set
 }

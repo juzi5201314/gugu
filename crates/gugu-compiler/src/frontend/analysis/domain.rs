@@ -425,6 +425,46 @@ impl AbstractState {
             Err(index) => self.relations.insert(index, relation),
         }
     }
+
+    /// 输入已排序且不重复；先计缺项，再从尾部就地归并，避免逐项二分与搬移。
+    pub fn relate_sorted(&mut self, additions: &[Relation]) {
+        if !self.reachable || additions.is_empty() {
+            return;
+        }
+        debug_assert!(additions.windows(2).all(|pair| pair[0] < pair[1]));
+        let mut original = 0;
+        let mut missing = 0;
+        for relation in additions {
+            while original < self.relations.len() && self.relations[original] < *relation {
+                original += 1;
+            }
+            missing += usize::from(
+                original == self.relations.len() || self.relations[original] != *relation,
+            );
+        }
+        if missing == 0 {
+            return;
+        }
+        original = self.relations.len();
+        let mut added = additions.len();
+        let mut write = original + missing;
+        self.relations.resize(write, additions[0]);
+        while added != 0 {
+            let relation = additions[added - 1];
+            write -= 1;
+            if original != 0 && self.relations[original - 1] > relation {
+                original -= 1;
+                self.relations[write] = self.relations[original];
+            } else {
+                if original != 0 && self.relations[original - 1] == relation {
+                    original -= 1;
+                }
+                added -= 1;
+                self.relations[write] = relation;
+            }
+        }
+        debug_assert_eq!(write, original);
+    }
 }
 
 fn join_intervals(slots: &mut [Interval], other: &[Interval]) -> bool {
@@ -485,4 +525,54 @@ fn join_versions(slots: &mut [u32], other: &[u32]) -> bool {
         }
     }
     changed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sorted_union_matches_individual_relations_for_all_small_sets() {
+        let relations = [
+            Relation::new(ValueKey::Local(LocalId(0)), ValueKey::Expr(ExprId(0)), -1),
+            Relation::new(ValueKey::Local(LocalId(0)), ValueKey::Expr(ExprId(0)), 0),
+            Relation::new(ValueKey::Expr(ExprId(0)), ValueKey::Local(LocalId(0)), 0),
+            Relation::new(
+                ValueKey::ExprLen(ExprId(0)),
+                ValueKey::LocalLen(LocalId(0)),
+                0,
+            ),
+        ];
+        for left in 0_u8..16 {
+            for right in 0_u8..16 {
+                let mut state = AbstractState::entry(1, 1, 0);
+                for (index, &relation) in relations.iter().enumerate() {
+                    if left & (1 << index) != 0 {
+                        state.relate(relation);
+                    }
+                }
+                let additions: Vec<_> = relations
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, &relation)| {
+                        (right & (1 << index) != 0).then_some(relation)
+                    })
+                    .collect();
+                let mut expected = state.clone();
+                for &relation in &additions {
+                    expected.relate(relation);
+                }
+                state.relate_sorted(&additions);
+                assert_eq!(state, expected, "集合 {left:b} 与 {right:b}");
+                state.relate_sorted(&additions);
+                assert_eq!(state, expected, "重复并集必须幂等");
+            }
+        }
+        let mut unreachable = AbstractState::bottom(1, 1);
+        unreachable.relate_sorted(&relations);
+        assert!(
+            unreachable.relations.is_empty(),
+            "不可达状态不得获得关系事实"
+        );
+    }
 }

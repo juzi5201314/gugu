@@ -1,13 +1,17 @@
 use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
-use crate::frontend::gir::body::{LocalId, LocalKind, Place, Projection, Rvalue, StatementKind};
+use crate::frontend::gir::body::{
+    AggregateKind, LocalId, LocalKind, MonoCandidate, Place, Projection, Rvalue, StatementKind,
+};
 use crate::frontend::gir::placement::{ExportFlags, PlacementKind};
 use crate::frontend::hir;
 use crate::lir::body::{
-    Lifetime, Op, Origin, Provenance, SlotId, StackSlot, Type, ValueId, ValueType, id,
+    Lifetime, Op, Origin, Provenance, RootInit, SlotId, StackSlot, Type, ValueId, ValueType, id,
 };
 
 impl Builder<'_> {
     pub(super) fn prepare_storage(&mut self) -> Result<(), Diagnostic> {
+        let shared_captures = self.shared_capture_targets()?;
+        let promotions = self.shared_capture_sources()?;
         let mut addressed: Vec<_> = self
             .gir
             .locals
@@ -52,6 +56,21 @@ impl Builder<'_> {
         for (index, local) in self.gir.locals.iter().enumerate() {
             let ty = local.ty.0;
             let lanes = self.scalar_lanes(ty);
+            // 共享环境的捕获在实例侧由 stable handle 承载：handle 变量必须在建 block 前登记，
+            // 因此这里直接把这些 local 的 storage 定为 SharedHeap 的 Handle。
+            if shared_captures.contains(&index) {
+                let variable =
+                    self.variable(id(index), 0, ValueType::pointer(Provenance::SharedHandle));
+                self.storage.push(Storage::Heap {
+                    variable,
+                    placement: PlacementKind::SharedHeap,
+                });
+                continue;
+            }
+            if promotions.contains(&index) {
+                self.shared_promotions[index] =
+                    Some(self.variable(id(index), 0, ValueType::pointer(Provenance::SharedHandle)));
+            }
             if !addressed[index]
                 && let Some(lanes) = lanes
             {
@@ -189,12 +208,6 @@ impl Builder<'_> {
             // 引用，可以直接进入 Capture storage 与后续读写。
             let compressed = !shared && self.compressed_environment(self.owner.definition)?;
             let mut offset = 0u64;
-            let mut loaded = Vec::with_capacity(self.owner.captures.len());
-            // 共享环境只开一个 guard 覆盖全部捕获读取：同一个 handle 的多次解析不该产生多个
-            // guard；读出的值先留在 SSA，guard 结束后再写进各自的栈副本。
-            if shared {
-                self.begin_shared(environment);
-            }
             for capture in &self.owner.captures {
                 let local = self
                     .gir
@@ -202,20 +215,22 @@ impl Builder<'_> {
                     .iter()
                     .position(|local| local.hir_local == Some(capture.local))
                     .ok_or_else(|| invalid("capture 没有具体 local"))?;
-                let ty = self.local_ty(LocalId(id(local)));
                 if shared {
-                    // 共享环境按值捕获：每个捕获按 ABI 车道顺序占用连续 8-byte 槽，读出时先复制
-                    // 到栈副本，再把副本地址当作 capture storage，因此 guard 内不会留下地址。
-                    let mut values = Vec::new();
-                    for (index, kind) in self.abi_lanes(ty).into_iter().enumerate() {
-                        let source = self.offset(
-                            environment,
-                            offset + u64::try_from(index).expect("车道编号") * 8,
-                        );
-                        values.push(self.load(source, kind.2, 8, false));
-                    }
-                    offset += u64::try_from(values.len()).expect("车道数适配 u64") * 8;
-                    loaded.push((local, ty, values));
+                    // 共享环境每槽一个 stable handle：handle 变量在 `prepare_storage` 已经登记
+                    // （建 block 之后不能再新增变量），这里只绑定它。之后的读写都经 access guard
+                    // 解析到同一个 cell，因此父函数与全部闭包看到的是同一个值。
+                    let variable = match self.storage[local] {
+                        Storage::Heap {
+                            variable,
+                            placement: PlacementKind::SharedHeap,
+                        } => variable,
+                        _ => return Err(invalid("共享捕获槽缺少 handle 变量")),
+                    };
+                    let slot = self.offset(environment, offset);
+                    let handle =
+                        self.load(slot, ValueType::pointer(Provenance::SharedHandle), 8, false);
+                    self.define(variable, handle);
+                    offset += 8;
                     continue;
                 }
                 let address = self.offset(environment, offset);
@@ -232,14 +247,6 @@ impl Builder<'_> {
                 };
                 self.storage[local] = Storage::Capture { address };
                 offset += 8;
-            }
-            if shared {
-                self.end_shared()?;
-                for (local, ty, values) in loaded {
-                    let temporary = self.temporary(ty)?;
-                    self.store_abi(temporary, ty, &values)?;
-                    self.storage[local] = Storage::Capture { address: temporary };
-                }
             }
         }
         Ok(())
@@ -272,6 +279,12 @@ impl Builder<'_> {
             } else {
                 self.store_abi(destination, ty, &arguments)?;
             }
+            // 入口实参是构造完成的整值：写入整槽的根字都是活的。
+            if let Storage::Stack { slot, .. } = self.storage[local.index()]
+                && let Some(layout) = self.layout(ty).layout
+            {
+                self.root_init_cover(slot, 0, layout.size);
+            }
         }
         Ok(())
     }
@@ -290,6 +303,41 @@ impl Builder<'_> {
             block: self.current,
             position: id(self.blocks[self.current.index()].instructions.len()),
             live,
+        });
+        // 建立新值或结束占用都清空该槽的逐根初始化位：新值的根字尚未写入，旧值的位不能继承。
+        self.root_init_reset(slot);
+    }
+
+    /// 逐根初始化位复位：把该槽 root 表的全部位写成未初始化。
+    fn root_init_reset(&mut self, slot: SlotId) {
+        let count = self.body.stack_slots[slot.index()].roots.len();
+        for index in 0..count {
+            self.root_init(slot, u32::try_from(index).expect("根下标适配 u32"), false);
+        }
+    }
+
+    /// 逐根初始化位置位：写入覆盖 `[offset, offset + bytes)` 时置位被完整覆盖的根字。
+    ///
+    /// 调用点目前只处理**整值**写入，因此置位的是覆盖范围内全部根字；对多变体聚合这是并集
+    /// 超集（保守方向）：位图只证明"该根字被完整写入过"，按变体收窄到具体字段的置位在构造点
+    /// 另行给出。
+    pub(super) fn root_init_cover(&mut self, slot: SlotId, offset: u64, bytes: u64) {
+        let roots = self.body.stack_slots[slot.index()].roots.clone();
+        let end = offset.saturating_add(bytes);
+        for (index, (root, _)) in roots.iter().enumerate() {
+            if *root >= offset && root.saturating_add(8) <= end {
+                self.root_init(slot, u32::try_from(index).expect("根下标适配 u32"), true);
+            }
+        }
+    }
+
+    fn root_init(&mut self, slot: SlotId, bit: u32, initialized: bool) {
+        self.body.root_inits.push(RootInit {
+            slot,
+            block: self.current,
+            position: id(self.blocks[self.current.index()].instructions.len()),
+            bit,
+            initialized,
         });
     }
 
@@ -430,6 +478,80 @@ impl Builder<'_> {
 fn mark_address(addressed: &mut [bool], projections: &[Projection], place: Place) {
     if !matches!(projections.first(), Some(Projection::Deref)) {
         addressed[place.local.index()] = true;
+    }
+}
+
+impl Builder<'_> {
+    /// 实例侧（闭包本体）由共享环境稳定 handle 承载的捕获槽 local 下标。
+    ///
+    /// 表示判定与构造侧共用 `shared_environment`，两侧不会出现一个按 handle、一个按 direct
+    /// pointer 的裂脑。
+    fn shared_capture_targets(&self) -> Result<std::collections::BTreeSet<usize>, Diagnostic> {
+        let mut targets = std::collections::BTreeSet::new();
+        if self.owner.captures.is_empty() || !self.shared_environment(self.owner.definition)? {
+            return Ok(targets);
+        }
+        for capture in &self.owner.captures {
+            if let Some(local) = self
+                .gir
+                .locals
+                .iter()
+                .position(|local| local.hir_local == Some(capture.local))
+            {
+                targets.insert(local);
+            }
+        }
+        Ok(targets)
+    }
+
+    /// 本 body 创建的闭包中，被共享环境捕获的源槽 local 下标。
+    ///
+    /// 这些源槽在闭包构造点被提升成 SharedHeap cell（父函数与全部闭包共享同一个 cell），
+    /// 提升用的 handle 变量在这里预先登记。
+    fn shared_capture_sources(&self) -> Result<std::collections::BTreeSet<usize>, Diagnostic> {
+        let mut sources = std::collections::BTreeSet::new();
+        for statement in &self.gir.statements {
+            let definition = match &statement.kind {
+                StatementKind::Assign(
+                    _,
+                    Rvalue::Aggregate {
+                        kind:
+                            AggregateKind::Closure(definition) | AggregateKind::Coroutine(definition),
+                        ..
+                    },
+                )
+                | StatementKind::Assign(
+                    _,
+                    Rvalue::FunctionValue(MonoCandidate { definition, .. }),
+                ) => *definition,
+                _ => continue,
+            };
+            if !self.shared_environment(definition)? {
+                continue;
+            }
+            let Some(owner) = self
+                .module
+                .owners
+                .iter()
+                .find(|owner| owner.definition == definition)
+            else {
+                continue;
+            };
+            for capture in &owner.captures {
+                if capture.owner != self.owner.definition {
+                    continue;
+                }
+                if let Some(local) = self
+                    .gir
+                    .locals
+                    .iter()
+                    .position(|local| local.hir_local == Some(capture.source))
+                {
+                    sources.insert(local);
+                }
+            }
+        }
+        Ok(sources)
     }
 }
 

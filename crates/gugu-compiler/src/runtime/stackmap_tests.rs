@@ -18,6 +18,34 @@ use super::stackmap::{
 use super::stackmap_codec::{CodeLayout, SafepointLayout, decode, encode};
 use crate::target::PointerCompression;
 
+/// 镜像内 runtime 逐字读取 section header 的前 12 字节，并在版本不符时 `fatal` 退出；
+/// 这里把 Gugu 源码里的字面量与 Rust 契约常量对起来，防止版本漂移只在真实镜像上爆炸。
+#[test]
+fn runtime_source_uses_the_current_section_header() {
+    use super::stackmap_schema::{
+        STACKMAP_ENDIAN, STACKMAP_MAGIC, STACKMAP_POINTER_SIZE, STACKMAP_SECTION_VERSION,
+    };
+
+    let magic = u64::from_le_bytes(*STACKMAP_MAGIC);
+    let header = u32::from_le_bytes([
+        u8::try_from(STACKMAP_SECTION_VERSION).expect("版本适配 u8"),
+        0,
+        STACKMAP_POINTER_SIZE,
+        STACKMAP_ENDIAN,
+    ]);
+    let source = super::RUNTIME_CORE_SOURCE;
+    let magic_literal = format!("uint(0x{magic:016x})");
+    let header_literal = format!("uint(0x{header:08x})");
+    assert!(
+        source.contains(&magic_literal),
+        "runtime 源码必须校验当前魔数 {magic_literal}"
+    );
+    assert!(
+        source.contains(&header_literal),
+        "runtime 源码必须校验当前版本字 {header_literal}"
+    );
+}
+
 fn function(code_rva: u64, code_size: u32) -> CodeLayout {
     CodeLayout {
         code_rva,
@@ -53,6 +81,7 @@ fn layout(
             scan_allowed: true,
             slots,
             registers: [0; 5],
+            typed: Vec::new(),
             function,
             slot_count,
         },
@@ -102,15 +131,138 @@ fn codec_preserves_fifth_register_root() {
     );
 }
 
+/// 逐根初始化条目：往返保真；与固定位图重复、根种类越界、字下标乱序都必须拒绝。
 #[test]
-fn codec_rejects_version_one_and_unsorted_maps() {
+fn typed_roots_round_trip_and_reject_conflicts() {
+    use super::stackmap_codec::TypedRoot;
+
+    let functions = vec![function(0x1000, 64)];
+    let mut point = layout(0, 16, 0, 64, 0b001);
+    point.1.typed.push(TypedRoot {
+        word: 3,
+        root_kind: 0,
+        init_byte: 8,
+    });
+    let bytes = encode(&functions, std::slice::from_ref(&point)).expect("编码逐根初始化条目");
+    let section = super::stackmap_codec::decode_tables(&bytes).expect("解码 section");
+    assert_eq!(
+        section.maps[0].typed,
+        [TypedRoot {
+            word: 3,
+            root_kind: 0,
+            init_byte: 8
+        }],
+        "条目必须往返保真"
+    );
+
+    // slot 0 已登记在 direct 位图里：同一字不得又出现在条目中。
+    let mut conflict = layout(0, 16, 0, 64, 0b001);
+    conflict.1.typed.push(TypedRoot {
+        word: 0,
+        root_kind: 0,
+        init_byte: 0,
+    });
+    assert!(
+        encode(&functions, std::slice::from_ref(&conflict)).is_err(),
+        "与固定位图重复登记必须拒绝"
+    );
+
+    let mut kind = layout(0, 16, 0, 64, 0b001);
+    kind.1.typed.push(TypedRoot {
+        word: 3,
+        root_kind: 5,
+        init_byte: 0,
+    });
+    assert!(
+        encode(&functions, std::slice::from_ref(&kind)).is_err(),
+        "根种类越界必须拒绝"
+    );
+
+    let mut unsorted = layout(0, 16, 0, 64, 0b001);
+    unsorted.1.typed.push(TypedRoot {
+        word: 4,
+        root_kind: 0,
+        init_byte: 0,
+    });
+    unsorted.1.typed.push(TypedRoot {
+        word: 2,
+        root_kind: 0,
+        init_byte: 1,
+    });
+    assert!(
+        encode(&functions, std::slice::from_ref(&unsorted)).is_err(),
+        "字下标乱序必须拒绝"
+    );
+}
+
+/// 门控根：初始化字节为 0 时该字不参与扫描，置 1 后才成为对应类的根。
+#[test]
+fn walker_honors_typed_root_init_bytes() {
+    use super::stackmap::ScannedRoot;
+    use super::stackmap_codec::TypedRoot;
+
+    let mut plane = reserved_plane(4 * GC_ARENA_BYTES);
+    let functions = vec![WalkFunction {
+        code_rva: 0x1000,
+        code_size: 64,
+        frame_size: 24,
+    }];
+    let safepoints = vec![WalkSafepoint {
+        function: 0,
+        pc_offset: 8,
+        kind: 0,
+        map: 0,
+    }];
+    let maps = vec![WalkMap {
+        direct: Vec::new(),
+        interior: Vec::new(),
+        handle: Vec::new(),
+        compressed: Vec::new(),
+        stack: Vec::new(),
+        typed: vec![TypedRoot {
+            word: 1,
+            root_kind: 0,
+            init_byte: 16,
+        }],
+    }];
+    let world = WalkWorld {
+        functions: &functions,
+        safepoints: &safepoints,
+        maps: &maps,
+        handles: &[],
+        landings: &[],
+    };
+    // 帧内字 1 是候选根；初始化字节 16 为 0（帧内字 2 的低字节）时不扫描。
+    let mut words = vec![0_u64; 3];
+    words[1] = 0x1234;
+    assert!(
+        scan_roots(&world, 0, &words, &mut plane)
+            .expect("扫描")
+            .is_empty(),
+        "初始化字节为 0 的门控字不得参与扫描"
+    );
+    // 字节 16 落在帧内字 2 的最低字节。
+    words[2] = 1;
+    assert_eq!(
+        scan_roots(&world, 0, &words, &mut plane).expect("扫描"),
+        [ScannedRoot::Direct(1)],
+        "初始化字节非零时门控字成为该类的根"
+    );
+}
+
+#[test]
+fn codec_rejects_historical_section_versions() {
     let functions = vec![function(0x1000, 64)];
     let safepoints = vec![layout(0, 8, 0, 64, 0b001)];
     let mut bytes = encode(&functions, &safepoints).expect("编码合成布局");
-    // version 1 必须拒收。
-    bytes[8] = 1;
-    bytes[9] = 0;
-    assert!(decode(&bytes).is_err(), "decoder 必须拒收 version 1");
+    // v1（handle 与压缩引用表示已变化）与 v2（屏障 runtime 调用没有安全点记录）都必须拒收。
+    for version in 1_u16..=2 {
+        bytes[8..10].copy_from_slice(&version.to_le_bytes());
+        assert!(
+            decode(&bytes).is_err(),
+            "decoder 必须拒收 version {version}"
+        );
+    }
 }
 
 #[test]
@@ -246,6 +398,7 @@ fn scan_compressed_slot(
         handle: vec![2],
         compressed: vec![3],
         stack: vec![4],
+        typed: Vec::new(),
     }];
     let handles = vec![
         HandleSlot {
@@ -309,6 +462,7 @@ fn walker_scans_five_root_kinds() {
         handle: vec![2],
         compressed: vec![3],
         stack: vec![4],
+        typed: Vec::new(),
     }];
     let handles = vec![
         HandleSlot {

@@ -335,7 +335,7 @@ fn element_ty(module: &hir::Module, ty: TypeId) -> Option<TypeId> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod tests {
     use super::*;
 

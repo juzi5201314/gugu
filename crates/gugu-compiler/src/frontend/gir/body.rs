@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 /// GIR schema revision（见 gir-lir.md「共同表示规则」）。
-pub(crate) const GIR_REVISION: u32 = 4;
+pub(crate) const GIR_REVISION: u32 = 5;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -401,6 +401,10 @@ pub(crate) enum IntrinsicOp {
     ChanTryRecv,
     /// `static`/`local static` 存储引用；`Deref` 后形成 place。
     StaticRef(DefId),
+    /// `static` 值槽的 initialized 字（块首 8 字节）；operands 为空，结果为整数值。
+    ///
+    /// 读点守卫据此判断值是否已发布：0 表示需要先调用初始化器，非 0 表示值槽已完整。
+    StaticInitialized(DefId),
     /// 启动 `async` 协程；operands 为 callee/接收者/实参或协程环境。
     Spawn(SpawnTarget),
     /// 动态范围子切片：operands = [base, start, end]。
@@ -488,6 +492,8 @@ pub(crate) enum AtomicOp {
     Load,
     Store,
     Rmw,
+    FetchOr,
+    FetchAnd,
     CompareExchange,
     Fence,
 }
@@ -580,6 +586,10 @@ pub(crate) enum Callee {
     Dynamic(u32),
     /// 编译器内建操作（HIR builtin 调用目标）。
     Builtin(hir::Builtin),
+    /// 静态初始化器：按定义绑定唯一实例，调用位点用 `CallSite::Initializer`/`StaticInit` 登记。
+    ///
+    /// 初始化器没有实参，也不捕获环境；守卫在值槽未发布时调用它，返回后位字已 release 置位。
+    StaticInit(hir::DefId),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

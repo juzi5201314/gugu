@@ -137,10 +137,28 @@ volatile 每次生成一次精确宽度访问，不能合并、删除或移动�
 - `Managed::TurnRegion` 只在当前 coroutine turn 私有、无外部 alias、无 ResourceCell lease 且不需要 FFI 地址时从 `[r15 + turn_region_cursor]` 做 checked bump；region export/publish、promote、transfer 和 reset 全部落到可 safepoint slow edge；
 - `Managed::LocalHeap` 仅在 descriptor不含 `HAS_RESOURCE`、请求不 large/pinned、高对齐且 footprint不跨 Immix block时走 processor-local TLAB/连续空 line run；checked计算 16 byte header、对齐 padding和 payload，成功时推进 cursor并初始化 representation header。run不足调用 `gc_refill_line`，span用尽才访问 owner/domain range；其它请求调用 `gc_alloc_slow`；
 - TLAB/TurnRegion 的 bump 先按 payload 地址对齐：`payload = align_up(cursor + 16, max(align, granule))`、`header = payload - 16`，与 runtime 参照实现的 `allocate` 逐字节一致（高对齐 padding 落在 header 之前）。地址加法必须用置标志位的 `add`（不能用不改 flags 的 `lea`）以便用进位检测环绕，推进后再与 span limit 比较：`cmp limit, new_cursor` 之后 `jb` 表示 new_cursor 超过 limit，进入 slow path。非规范对齐或超出 imm32 的算术走 `gc_alloc_slow`，不另立经验常量；
+- **payload 尺寸只取 LIR 的 bytes 操作数**：它是 `GcAlloc`/`RegionAlloc` 的第一个操作数，先搬进 scratch 寄存器（并声明其破坏），bump 的推进量与对象头的 payload 字段都写这个值。运行期算出的尺寸（变长数组的 `length * element_size`）与常量尺寸走同一寄存器通道，任何情况下都不拿 descriptor 的静态布局尺寸覆盖运行期请求；
+- 普通对象不得跨 Immix block 的约束按**运行期**判断：`cmp bytes, block - header - max(align, granule) + 1` 之后 `ja` 进 slow path。静态判断对变长分配没有意义，因此不作为准入条件；
+- slow path 的 ABI 固定为 `rax` = type_id、`rbx` = payload_bytes、`rcx` = align、`rdx` = flags，`rax` 返回 payload；`r14`/`r15` 保持。`flags` bit0 为 compressed，bits1..2 是 placement 编码（TurnRegion=0、LocalHeap=1、SharedHeap=2、Resource=3），与对象头位布局分开。bytes 必须**先**搬进 `rbx`，之后的立即数装载不得在 bytes 仍要读时覆盖它的原寄存器。descriptor 未登记、不适用分配 ABI 的 placement 都是编译期诊断，不放行到镜像；
 - `Managed::SharedHeap` 走 stable handle allocation/resolution；`SharedAccessBegin/End`、generation check、forwarding grace 和 handle table 更新必须位于带 stack map 的 slow edge，不能污染 LocalHeap direct-pointer fast path；
 - `Managed::Pinned`、large、foreign 和 resource 请求走各自 non-moving/cleanup 路径；`RuntimeRaw` 仍使用 owner-local slab/span pop/bump。所有路径的 offset、size、align、generation 和 representation tag 使用 checked arithmetic，溢出进入 `OutOfMemory` 或 `RuntimeInvariant`，不静默截断。
 
+函数值的 `code` 指向独立 checked 适配入口。LIR `Symbol::FunctionAdapter` 记录目标实例及其是否捕获环境；world 在固定 pass 前为每个实际取址的目标生成一次适配 body。适配入口接收 sret（若有）、environment、用户参数，去掉无捕获目标不需要的 environment，再用原目标签名 `Invoke` 并传播正常结果与 unwind。它经过普通 poll、寄存器分配、stack map 与机器码管线，不在所有普通函数上增加隐藏参数，也不改变 runtime glue ABI。
+
 allocation fast path不能读取 owner lookup、radix route、global gc epoch、SharedHeap handle table、mark mailbox 或 memory limit；这些只能在 refill/slow path处理。`TurnRegion` 和 LocalHeap TLAB 的普通 bump 同样不执行全局原子。镜像内 `gc_write_barrier` 直接返回：引用存储在调用前已经写入，这一阶段没有收集器去消费卡表。
+
+### runtime glue 发射门禁 {#runtime-glue-emission-gate}
+
+runtime 符号只能在 lowering 的真实发声点发射，并必须先通过 compiler 持有的 glue 目录查询。检查覆盖：
+
+- `PlatformCall`、`RuntimeMachineCall` 以及隐含 runtime op 的专用 lowering；
+- 普通 `Call`/`ForeignCall` 的 `CallTarget::Runtime`，包括 `Invoke` 与 `TailCall`；
+- `GcAlloc`/`RegionAlloc` 的 slow ABI、region 生命周期入口和 safepoint slow edge。
+
+由 lowering 内联的 `wide_div`、`concat`、`format` 等目录名字不会凭名字触发检查。真正发射的名字若不在 `GLUE_DEFS`，也不在带注释的迁移缺口清单 `PENDING_GLUE_IMPL`，立即产生 `LoweringError::UnregisteredGlue`，禁止生成 relocation；后端不能把缺失符号交给 ELF/PE writer 的退出桩兜底。`PENDING_GLUE_IMPL` 只是迁移期间的显式缺口记录，不是 runtime 实现证明；对应消费者接管后必须从清单移除并登记真实 `Item` 或 `Fragment`。
+
+`SafepointPoll` 的 cold edge 只调用登记的 `safepoint_slow` fragment：它在 `r15 + poll_flags_offset` 上保留 `GC_STOP` 位、清除已消费的 `PREEMPT` 位并 `ret`，不分配、不切换栈、不伪装成普通 Gugu 函数。`RuntimeMachineIntrinsic` 的四个定宽原子入口则直接落到既有 `Atomic` lowering；其 fetch-and/or CAS 循环在高寄存器压力点预留地址与候选值，必要的索引常量和栈地址先折叠成内存位移，不能因 scratch 不足退化为错误宽度或 runtime 调用。
+`GcWriteBarrierReserved` 使用独立的 `gc_write_barrier_reserved` glue 入口；它与普通入口共享同一 `(pointer, old, new)` ABI 和 card 写入顺序，但不允许在屏障函数内重新申请额度。该入口只有 `BarrierReserve` 建立的 permit 才可达；当前镜像实现已完成有界 card 记账，shade 与 edge-summary 消费者仍由后续 mark/trace 单元接管，不能把 card 置位本身当作完整回收证明。
 
 ### prologue 与 stack check
 
@@ -323,7 +341,7 @@ fragment relocation 封闭为：
 
 [平台 ABI](../spec/platform-abi.md#executable-image-forms)给出 Linux external image profile。static PIE路径的内部 rt0在读取待重定位 global前由 `AT_PHDR` 与链接期 program header 虚址计算 load bias：`bias = AT_PHDR - phdr_vaddr`。首个 `PT_LOAD` 的 `p_vaddr` 与 `p_offset` 都是 0，`phdr_vaddr` 等于 `e_phoff`（64）。rt0 只解释 writer 生成的 relative relocation，checked 写入 `bias + addend` 并 `mprotect` 封闭 RELRO；未知 relocation、越界 target、重复槽或入口缺失在写出前失败。
 
-镜像固定为 `ET_DYN`、页大小 4096。无动态导入时程序头是 `PT_PHDR`、三个 `PT_LOAD`（RX 含文件头与 rt0、R 为只读逻辑节、RW 为 `.data.rel.ro`）和 `PT_GNU_RELRO`，不写 `PT_INTERP`。RX 前缀依次是 `_start`、8 个 `u64` 的参数块、`ud2` 冷陷阱、48 字节 cage 控制、`write`/`mmap` syscall stub，以及 `ret` / `exit` 兜底。用户片段按符号名排序、16 字节对齐接在前缀之后；栈图里的 `code_rva` 仍相对该片段区，绝对虚址是片段区基址加 `code_rva`。只读节装入下一页，含 `.gugu.stackmap`、`.eh_frame`、`.gugu.src`、`.gugu.types`、`.gugu.meta` 和 4096 字节的处理器前缀。RW 页前 128 字节为 `0xFF` 栈界限，随后是 16 字节一组的 `(slot, addend)`；文件偏移等于虚址。`PcRel32` 与 `Rva32` 在写出前修完，`Abs64` 进入这张表。未解析的 `morestack_or_poll` 接到 `ret` stub，其余未解析的 `__gugu_*` 与未带归档的 C 符号接到 `exit` stub。编译请求目前不携带归档字节；非空 SysV ar 按未解析 C 符号名精确抽取成员，时间戳、uid、gid 为 0。
+镜像固定为 `ET_DYN`、页大小 4096。无动态导入时程序头是 `PT_PHDR`、三个 `PT_LOAD`（RX 含文件头与 rt0、R 为只读逻辑节、RW 为 `.data.rel.ro`）和 `PT_GNU_RELRO`，不写 `PT_INTERP`。RX 前缀依次是 `_start`、8 个 `u64` 的参数块、`ud2` 冷陷阱、48 字节 cage 控制、`write`/`mmap` syscall stub，以及 `ret` / `exit` 兜底。用户片段与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐接在前缀之后（栈图与展开表的 `code_rva` 由同一次排序得出：glue Item 实例与机器片段共用 `__gugu_runtime_*` 前缀因而交错，只排片段世界会给排在机器片段之后的函数算出偏小的偏移）；栈图里的 `code_rva` 仍相对该片段区，绝对虚址是片段区基址加 `code_rva`。只读节装入下一页，含 `.gugu.stackmap`、`.eh_frame`、`.gugu.src`、`.gugu.types`、`.gugu.meta` 和 4096 字节的处理器前缀。RW 页前 128 字节为 `0xFF` 栈界限，随后是 16 字节一组的 `(slot, addend)`；文件偏移等于虚址。`PcRel32` 与 `Rva32` 在写出前修完，`Abs64` 进入这张表。未解析的 `morestack_or_poll` 接到 `ret` stub，其余未解析的 `__gugu_*` 与未带归档的 C 符号接到 `exit` stub。编译请求目前不携带归档字节；非空 SysV ar 按未解析 C 符号名精确抽取成员，时间戳、uid、gid 为 0。
 
 显式动态导入才写 `PT_INTERP` 与 `PT_DYNAMIC`。解释器路径来自 `TargetDescriptor`，不搜索宿主 PATH。`.dynstr` 收纳 SONAME，`.dynamic` 含 `DT_STRTAB`、`DT_STRSZ`、每个 SONAME 一条 `DT_NEEDED` 和 `DT_NULL`。每个导入符号在 RX 有一条 `jmp [rip+GOT]`，GOT 槽位于栈界限之后、相对重定位表之前，初值指向 `exit` stub 并作为 relative relocation。机器 rt0 只做重定位、`mprotect`、调用入口和 `exit`；它不解析启动环境变量，也不发布生命周期状态。`r14` 指向这 128 字节，栈检查因此放行。镜像 runtime 的 `rt0_start` 另外分配一页可写 processor 作为 `r15`：`boot` 清零队列，把 TLAB 与 TurnRegion 的 cursor/limit 指到已提交的堆，不把这两对字清成 0。只读节里的 `0xFF` 处理器前缀只作为未进入镜像 runtime 时的兜底。语言级 panic、GC 与 channel 的运行时例程由镜像内 Gugu runtime 实现。
 
@@ -331,7 +349,7 @@ fragment relocation 封闭为：
 
 ### Windows PE32+
 
-PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。`DllCharacteristics` 固定带 dynamic base、high-entropy VA 和 NX。逻辑节按登记名各写一节，名字长于 8 字节则写出失败。用户片段仍按符号名排序、16 字节对齐接在 rt0 之后；栈图 `code_rva` 相对该片段区，`.pdata` 里的 `RUNTIME_FUNCTION` 再加上片段区 RVA。`.xdata` 保留完整 `GUGUUN01` 容器，其平台尾里的 `UNWIND_INFO` 偏移改写成镜像 RVA。
+PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。`DllCharacteristics` 固定带 dynamic base、high-entropy VA 和 NX。逻辑节按登记名各写一节，名字长于 8 字节则写出失败。用户片段仍与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐接在 rt0 之后（栈图 `code_rva` 与 `.pdata` 都取自这次排序，两者必须与放置同源）；栈图 `code_rva` 相对该片段区，`.pdata` 里的 `RUNTIME_FUNCTION` 再加上片段区 RVA。`.xdata` 保留完整 `GUGUUN01` 容器，其平台尾里的 `UNWIND_INFO` 偏移改写成镜像 RVA。
 
 绝对地址写成 preferred VA 并进入 `IMAGE_REL_BASED_DIR64`；`PcRel32` 与 `Rva32` 在写出前修完，不进重定位表。重复槽、未知种类、超出 i32 的 PC 相对、可写可执行节和缺失入口在写出前失败。导入表只含按名字排序的 `kernel32.dll`（`ExitProcess`、`SetConsoleCtrlHandler`）和 `ntdll.dll`（`NtTerminateProcess`），不搜索宿主、不写 `msvcrt`。IAT 初值是 hint/name 的 RVA。rt0 第一条指令是 `sub rsp, 0x28`，随后用 RIP 相对地址安装只调用 `NtTerminateProcess` 的 console handler，再调用入口，最后 `ExitProcess(0)`。`r14` 指向 128 字节 `0xFF`，`r15` 指向 4096 字节 `0xFF`。未解析的 `morestack_or_poll` 接到 `ret`，其余未解析符号接到 `mov ecx, 1` 后调用 `ExitProcess` 的 abort stub。export directory 只含显式 C export；当前编译路径没有登记导出时该目录为空。`staticlib` 使用与 SysV ar 相同的确定性 COFF archive（时间戳、uid、gid 为 0）；`cdylib` 置 `IMAGE_FILE_DLL`。不生成 `.lib` 导入库。
 
@@ -361,6 +379,10 @@ encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcod
 - 固定 ModRM 只出现在无操作数形式上（`0F AE /5`、`/6`、`/7` 的 `lfence`/`mfence`/`sfence`），有操作数时 ModRM 由操作数派生；
 - 超出 baseline 的形式（`pshufb`、`pmulld`、`pextrd`、`pinsrd`、VEX `vaddps`）登记在表内并携带特性标记，只在 descriptor 允许该特性时才可选；`x86_64-v1` 下它们计入 `beyond_baseline_forms` 而不被选中；
 - `lock` 只允许出现在声明了 `lock_allowed` 的形式上，且必须落在内存目标；前缀顺序固定为 `lock`、段/操作数前缀、REX、opcode。
+
+lowering 的指令形式索引只包含固定 `FORMS`，查询键由编译器内置序列生成，采用已有
+foldhash 固定种子状态，避免每次 emit 使用 SipHash。索引保留表中首个匹配 FormId，
+不遍历哈希表生成代码；规范表序、指令字节、契约指纹和用户 asm 的验证规则保持不变。
 
 编码契约（`ENCODER_SCHEMA = 2`、`ENCODER_REVISION = 2`、`LOWERING_REVISION = 4`、`ALLOCATION_REVISION = 2`、`METADATA_REVISION = 1`）把表、形状不变量与 lowering/分配规则版本一起冻结：`EncoderContract::verify` 校验每个 form 的形状、助记符、特性名与 baseline 归属，`fingerprint` 取域 `gugu-x64-encoder-v1` 下对规范化字节的哈希（域 `gugu-x64-encoder-catalog-v1` 单独标记目录），任何表改动都会改变指纹并进入 action key，分配规则 revision 与 lowering revision 一并进入 fragment key。`Rel8` 是独立操作数种类，覆盖 `jmp`/`jcc` 的 17 个短跳 form；`assemble` 按 form 声明的字段宽度（1 或 4 字节）回填局部标签，超出 rel8 的距离是编码错误。`SelectInstructions` 对封闭 LIR opcode 穷尽 lowering：函数级序列先按 rel32 编码，再按 code offset 只许长变短地收缩为 rel8；外部符号、冷边与 `call` 保持 rel32 reloc。内部符号文本为 `__gugu_<kind>_<64 lowercase hex>`（kind 为 `fn`、`static`、`vtable`、`glue`、`runtime`、`const` 或 `veneer`），C import/export 不加该前缀；符号 key 与 mangled 文本同源，不把已 mangled 的字符串再哈希一次。`LegalizeX86_64` 与函数级选指产出的序列连同约束、clobber、冷边、mangled 符号、**重定位引用的符号名集合**、热/冷块计数、encoded bytes 与[分配产物](#allocation-artifacts)组成 codegen fragment（`CODEGEN_SCHEMA = 5`，键域 `gugu-x64-fragment-key-v1`，世界指纹域 `gugu-x64-fragments-v1`，元数据指纹域 `gugu-x64-metadata-v1`）；fragment 校验会重算该集合，并对带 `__gugu_` 前缀的符号强制上述形状，供镜像规划做内部符号冲突检查。query key 还并入 scheduler/coroutine 契约指纹、`TypeUniverse` 指纹、`LOWERING_REVISION`、`ALLOCATION_REVISION` 与 `METADATA_REVISION`；逐站点记录指令、字节区间、重定位、约束、clobber 与点位范围，并在验证时重算站点序、字节区间、重定位范围、frame 一致性（`stats.frame_size_max == frame.frame_size`、点位段数与站点一致）与片段指纹。镜像计划与 CLI JSON 暴露 `x64-rel8-count`、`x64-hot-block-count`、`x64-cold-block-count`、`x64-entry-symbol`、`x64-frame-size-max`、`x64-spill-slot-count`、`x64-spill-bytes`、`x64-saved-gpr-count`、`x64-reload-count`、`x64-spill-store-count`、`x64-copy-move-count`、`x64-copy-cycle-count`、`x64-peak-live-gpr`、`x64-peak-live-xmm`、`x64-allocated-values`、`coroutine-stack-check-offset` 与 `scheduler-poll-flags-offset`；`x64-entry-symbol` 是 `MonoRoots` 里 `RootCategoryV1::Entry` 实例的那个片段，不能按片段顺序推断（片段按实例键升序，runtime helper 会排在入口前面）。
 

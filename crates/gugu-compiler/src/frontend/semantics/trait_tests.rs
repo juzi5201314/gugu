@@ -229,7 +229,12 @@ fn specialization_dispatch_survives_cached_frontend_results() {
         else {
             panic!("示例方法返回常量表达式")
         };
-        let model = super::model::Model::new(&checked.modules, &checked.names).unwrap();
+        let model = super::model::Model::new(
+            &checked.modules,
+            &checked.names,
+            &std::collections::BTreeSet::new(),
+        )
+        .unwrap();
         assert_eq!(model.constant_int(callable.module, body).unwrap(), 2);
     }
 }

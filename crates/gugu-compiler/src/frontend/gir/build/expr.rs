@@ -186,7 +186,16 @@ impl Builder<'_> {
     fn emit_resolved(&mut self, id: ExprId, res: hir::Res) -> Result<(), Diagnostic> {
         match res {
             hir::Res::Local(local) => {
-                self.set_place(id, Place::local(self.hir_to_gir[local.index()]));
+                // 局部 static 的绑定槽是存储别名：读点直接落到静态存储，避免读到地址。
+                match self.static_bindings.get(&local.index()).copied() {
+                    Some(definition) => {
+                        let place = self.static_place(id, definition)?;
+                        self.set_place(id, place);
+                    }
+                    None => {
+                        self.set_place(id, Place::local(self.hir_to_gir[local.index()]));
+                    }
+                }
             }
             hir::Res::Def(definition) => self.emit_definition(id, definition)?,
             hir::Res::Primitive(ty) => {
@@ -210,13 +219,7 @@ impl Builder<'_> {
             kind,
             hir::DefinitionKind::Static | hir::DefinitionKind::LocalStatic
         ) {
-            let local = self.intrinsic_temp(
-                IntrinsicOp::StaticRef(definition),
-                Vec::new(),
-                Vec::new(),
-                self.expr_ty(id),
-            );
-            let place = self.project(Place::local(local), Projection::Deref);
+            let place = self.static_place(id, definition)?;
             self.set_place(id, place);
             return Ok(());
         }

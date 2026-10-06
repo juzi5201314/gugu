@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Diagnostic;
 use crate::SourceMap;
+use crate::backend::x64::mangle;
 use crate::diagnostics::DiagnosticCode;
 use crate::frontend::late::universe::TypeUniverse;
 use crate::frontend::mono::keys::hash_domain;
@@ -43,8 +44,10 @@ use super::verify;
 
 /// 片段 payload schema 版本。
 ///
-/// 版本 5 在每个站点记录调用返回 PC 与 morestack 返回 PC，供分配后的栈图按指令边界回填。
-pub(crate) const CODEGEN_SCHEMA: u32 = 5;
+/// 版本 5 在每个站点记录调用返回 PC 与 morestack 返回 PC，供分配后的栈图按指令边界回填；
+/// 版本 6 把「最后一条 call 的返回点」改成「站点内全部 call 的返回点」，让同一 LIR 点上
+/// 的多条收集 slow call 各自命中同一语义 map，而不是只有最后一条被登记。
+pub(crate) const CODEGEN_SCHEMA: u32 = 7;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -83,8 +86,11 @@ pub(crate) struct SitePayload {
     pub(crate) clobbers: (u32, u32),
     /// 该站点的点位下标范围。
     pub(crate) points: (u32, u32),
-    /// 站点内最后一条 `call` 的下一条指令偏移；落在片段末尾时为空。
-    pub(crate) call_return_pc: Option<u32>,
+    /// 站点内每条 `call` 的下一条指令偏移，升序去重；落在片段末尾的调用不入列。
+    ///
+    /// 同一 LIR 点可能有多个收集 slow call（也就有多个返回 PC），它们都必须指向同一语义 map，
+    /// 因此这里保留全部返回点，而不是只记最后一条。
+    pub(crate) call_return_pcs: Vec<u32>,
     /// `morestack_or_poll` 返回后的指令偏移。
     pub(crate) morestack_pc: Option<u32>,
 }
@@ -107,6 +113,8 @@ pub(crate) struct FramePayload {
     pub(crate) max_leaf_reserve: u32,
     /// 局部槽 `(与 body.stack_slots 同序)`：`(offset, bytes, align)`。
     pub(crate) locals: Vec<(u32, u32, u32)>,
+    /// 逐根初始化字节基址，与 `locals` 同序；没有根字的槽为 `None`。
+    pub(crate) init_bases: Vec<Option<u32>>,
     /// spill slot：`(offset, size, align, root-class)`。
     pub(crate) spill_slots: Vec<(u32, u32, u32, u8)>,
     /// 16 字节 copy scratch 的偏移；未预留为 `None`。
@@ -132,6 +140,7 @@ impl FramePayload {
                 .iter()
                 .map(|local| (local.offset, local.bytes, local.align))
                 .collect(),
+            init_bases: frame.init_bases.clone(),
             spill_slots: frame.spill_slots.clone(),
             scratch_offset: frame.scratch_offset(),
             save_offsets: frame.save_offsets.clone(),
@@ -419,6 +428,18 @@ impl X64Fragments {
     }
 }
 
+/// 元数据 blob 内的链接期重定位：把符号的链接地址写进 blob 的指定字节偏移。
+///
+/// 根记录的 `location` 是镜像内真实地址，只有布局后才知道；编译器产出的是稳定符号名，
+/// 由 writer 在 `defined_layout`/`assign_rvas` 之后回填，action key 因此不含运行地址。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BlobRelocation {
+    /// blob 内字节偏移，必须 8 字节对齐且留足 8 字节。
+    pub(crate) offset: u64,
+    /// 已登记符号名（与代码重定位同一命名空间）。
+    pub(crate) symbol: String,
+}
+
 /// 全部实例的机器码片段世界。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct X64World {
@@ -435,6 +456,18 @@ pub(crate) struct X64World {
     pub(crate) glues: RuntimeGlueBindings,
     /// 全局常量数据块：`(符号名, 字节)`，按全局下标升序，供 writer 放进只读区。
     pub(crate) constants: Vec<(String, Vec<u8>)>,
+    /// 静态存储块：`(mangled 符号, 块字节数)`，按符号名升序。
+    ///
+    /// 每块布局是 `[initialized 字 8 字节][值槽]`，符号地址指向块首；`StaticRef` 返回值槽
+    /// 地址，读点守卫读块首位字。这里只登记尺寸，镜像里的字节由 writer 预留并在链接期清零。
+    pub(crate) globals: Vec<(String, u64)>,
+    /// 元数据 blob 内待回填的符号地址，按 blob 内偏移升序。
+    pub(crate) blob_relocations: Vec<BlobRelocation>,
+    /// 类型描述符符号 → type section 内偏移，按符号名升序。
+    ///
+    /// `Symbol::TypeDescriptor(key)` 直接落在真实 `.gugu.types`/`.gugutyp` 记录上，不再为
+    /// 每个类型复制一份只写 size/align 的 blob：记录只存在一处，运行期读到的就是冻结表。
+    pub(crate) type_descriptors: Vec<(String, u64)>,
     pub(crate) fingerprint: [u8; 32],
 }
 
@@ -471,6 +504,57 @@ impl X64World {
             self.glues.bound(),
             u32::try_from(stubbed.len()).expect("stub 符号数适配 u32"),
         )
+    }
+
+    /// 引用了未绑定 runtime glue 的片段清单：片段序号、该片段的全部符号、其中会解析到
+    /// `__gugu_stub_exit` 的符号。
+    ///
+    /// 关闭退出桩需要按**来源**定位这些引用：绑定表只能证明已登记入口有真实定义，片段自带的
+    /// 修补点若引用了没登记的入口，镜像仍会静默走到兜底退出。这里给出片段自己的符号集合，
+    /// 用它就能把引用人（哪个片段）与目标符号对上。
+    pub(crate) fn stubbed_glue_sites(&self) -> Vec<String> {
+        let mut sites = Vec::new();
+        for (index, fragment) in self.fragments.iter().enumerate() {
+            let stubbed: Vec<&str> = fragment
+                .symbols
+                .iter()
+                .filter(|symbol| {
+                    symbol.starts_with("__gugu_runtime_") && !self.glues.is_bound_symbol(symbol)
+                })
+                .map(String::as_str)
+                .collect();
+            if stubbed.is_empty() {
+                continue;
+            }
+            sites.push(format!(
+                "fragment#{index} symbols=[{}] stubbed=[{}]",
+                fragment.symbols.join(","),
+                stubbed.join(",")
+            ));
+        }
+        sites
+    }
+
+    /// 闭世界 glue 目录里「被引用但没有真实定义」的入口名。
+    ///
+    /// 符号是哈希，无法直接对上入口；这里用同一份声明目录反查哈希，把未闭合的入口按名字
+    /// 报出来。返回 `(入口名, 被引用, 已绑定)`，供 `dump_runtime` 打印状态行。
+    pub(crate) fn glue_status(&self) -> Vec<(&'static str, bool, bool)> {
+        let referenced: std::collections::BTreeSet<&str> = self
+            .fragments
+            .iter()
+            .flat_map(|fragment| fragment.symbols.iter().map(String::as_str))
+            .collect();
+        crate::runtime::declared_glue_names()
+            .map(|name| {
+                let symbol = mangle::mangle_runtime(name);
+                (
+                    name,
+                    referenced.contains(symbol.as_str()),
+                    self.glues.is_bound_symbol(&symbol),
+                )
+            })
+            .collect()
     }
 
     /// lowered 站点总数。
@@ -959,6 +1043,8 @@ pub(crate) fn build(
     // 入口实例必然有 LIR body（它是闭世界根之一）；缺失说明入口没有走到选指。
     let entry_symbol = entry_symbol.ok_or_else(|| vec![invalid("入口实例没有机器片段")])?;
     let metadata = super::metadata::build(lir, &fragments, sources, target, raw)?;
+    let type_descriptors = type_descriptor_offsets(&fragments, universe)?;
+    let globals = global_blocks(&fragments)?;
     let mut world = X64World {
         schema: CODEGEN_SCHEMA,
         target,
@@ -968,25 +1054,51 @@ pub(crate) fn build(
         metadata,
         glues,
         constants: constants.blobs(),
+        globals,
+        // 根记录生产者接入后，这里填入 `(记录 location 偏移, 静态块符号)`；当前无受管静态，
+        // 列表为空但仍进入指纹与 writer 路径，避免之后新增第二种回填机制。
+        blob_relocations: Vec::new(),
+        type_descriptors,
         fingerprint: [0; 32],
     };
-    world
-        .constants
-        .extend(type_descriptor_blobs(&world.fragments, universe)?);
     world.fingerprint = world_fingerprint(&world);
     Ok(world)
 }
 
-/// 为每个被引用的 `TypeDescriptor` 写出一条类型记录。
+/// 为每个被引用的静态存储求出镜像内块尺寸（`initialized` 字 + 值槽）。
 ///
-/// `lea` 的目标必须是已定义符号。未定义时链接器把它收成 `stub_exit`，
-/// 运行时会把退出指令的字节当成值尺寸。记录尺寸与 `.gugu.types` 的单条
-/// record 相同，偏移 0 是 `size`，偏移 8 是 `align`。trace 与 value 程序
-/// 仍只放在 `.gugu.types`。
-fn type_descriptor_blobs(
+/// 尺寸来自符号自身：`StaticRef`、`StaticInitialized` 与初始化器发布都构造同一个符号，
+/// 因此同一符号只可能有一种尺寸；出现分歧说明三处之一用了不同的声明类型，直接失败。
+fn global_blocks(fragments: &[FragmentPayload]) -> Result<Vec<(String, u64)>, Vec<Diagnostic>> {
+    let mut blocks = std::collections::BTreeMap::<String, u64>::new();
+    for fragment in fragments {
+        for relocation in &fragment.relocations {
+            let RelocTarget::Lir(symbol @ lir::body::Symbol::Global { bytes, .. }) =
+                &relocation.target
+            else {
+                continue;
+            };
+            let name = super::mangle::mangle_symbol(symbol);
+            let block = 8 + bytes;
+            match blocks.insert(name.clone(), block) {
+                Some(previous) if previous != block => {
+                    return Err(vec![invalid("同一个静态符号出现两种块尺寸")]);
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(blocks.into_iter().collect())
+}
+
+/// 为每个被引用的 `TypeDescriptor` 求出 type section 内的真实记录偏移。
+///
+/// 记录尺寸与 `.gugu.types` 的单条 record 相同；符号地址由 writer 加到 type section
+/// 起点上。trace 与 value program 同样只放在该 section，不存在第二份描述符副本。
+fn type_descriptor_offsets(
     fragments: &[FragmentPayload],
     universe: &TypeUniverse,
-) -> Result<Vec<(String, Vec<u8>)>, Vec<Diagnostic>> {
+) -> Result<Vec<(String, u64)>, Vec<Diagnostic>> {
     let mut keys = std::collections::BTreeSet::<[u8; 32]>::new();
     for fragment in fragments {
         for relocation in &fragment.relocations {
@@ -995,18 +1107,18 @@ fn type_descriptor_blobs(
             }
         }
     }
-    let mut blobs = Vec::with_capacity(keys.len());
+    let mut offsets = Vec::with_capacity(keys.len());
     for key in keys {
-        let record = universe.record(&key).map_err(|error| vec![error])?;
-        let (size, align) = record.layout.unwrap_or((0, 1));
-        let align = u32::try_from(align).map_err(|_| vec![invalid("类型对齐超过 u32")])?;
-        let mut bytes = vec![0_u8; crate::runtime::gc_metadata_section::TYPE_RECORD_BYTES];
-        bytes[0..8].copy_from_slice(&size.to_le_bytes());
-        bytes[8..12].copy_from_slice(&align.to_le_bytes());
+        let type_id = universe
+            .type_id(&key)
+            .ok_or_else(|| vec![invalid("类型描述符不在冻结类型表")])?;
         let name = super::mangle::mangle_symbol(&lir::body::Symbol::TypeDescriptor(key));
-        blobs.push((name, bytes));
+        offsets.push((
+            name,
+            crate::runtime::gc_metadata_section::descriptor_offset(type_id),
+        ));
     }
-    Ok(blobs)
+    Ok(offsets)
 }
 
 /// 单个实例的片段 query key。
@@ -1048,6 +1160,18 @@ fn world_fingerprint(world: &X64World) -> [u8; 32] {
     for (name, bytes) in &world.constants {
         hasher.update(name.as_bytes());
         hasher.update(bytes);
+    }
+    for (name, offset) in &world.type_descriptors {
+        hasher.update(name.as_bytes());
+        hasher.update(&offset.to_le_bytes());
+    }
+    for (name, bytes) in &world.globals {
+        hasher.update(name.as_bytes());
+        hasher.update(&bytes.to_le_bytes());
+    }
+    for relocation in &world.blob_relocations {
+        hasher.update(&relocation.offset.to_le_bytes());
+        hasher.update(relocation.symbol.as_bytes());
     }
     hasher.update(&world.contract.fingerprint());
     for fragment in &world.fragments {
@@ -1228,7 +1352,7 @@ fn site_payload(
     inst_cursor: &mut usize,
 ) -> SitePayload {
     let code_len = to_u32(assembled.bytes.len());
-    let (call_return_pc, morestack_pc) = call_pcs(lowered, assembled, *inst_cursor, code_len);
+    let (call_return_pcs, morestack_pc) = call_pcs(lowered, assembled, *inst_cursor, code_len);
     let start_off = assembled
         .instruction_offsets
         .get(*inst_cursor)
@@ -1277,20 +1401,20 @@ fn site_payload(
         cold_edges,
         clobbers: (lowered.clobbers.gpr, lowered.clobbers.xmm),
         points,
-        call_return_pc,
+        call_return_pcs,
         morestack_pc,
     }
 }
 
-/// 站点内调用的返回 PC。`morestack_or_poll` 单独记下，供入口检查使用。
+/// 站点内调用的返回 PC 集合。`morestack_or_poll` 单独记下，供入口检查使用。
 fn call_pcs(
     lowered: &Lowered,
     assembled: &super::inst::Assembled,
     inst_cursor: usize,
     code_len: u32,
-) -> (Option<u32>, Option<u32>) {
+) -> (Vec<u32>, Option<u32>) {
     let morestack = super::mangle::runtime_symbol("morestack_or_poll");
-    let mut call_return = None;
+    let mut call_returns = Vec::new();
     let mut morestack_pc = None;
     for (offset, instruction) in lowered.sequence.instructions.iter().enumerate() {
         if table::form(instruction.form).mnemonic != "call" {
@@ -1305,7 +1429,9 @@ fn call_pcs(
         if next >= code_len {
             continue;
         }
-        call_return = Some(next);
+        if call_returns.last() != Some(&next) {
+            call_returns.push(next);
+        }
         let targets_morestack = instruction.operands.iter().any(|operand| match operand {
             Operand::Reloc(RelocTarget::Lir(symbol), _)
             | Operand::Rip(RelocTarget::Lir(symbol), _) => symbol == &morestack,
@@ -1315,7 +1441,7 @@ fn call_pcs(
             morestack_pc = Some(next);
         }
     }
-    (call_return, morestack_pc)
+    (call_returns, morestack_pc)
 }
 
 fn fill_relocation_ranges(sites: &mut [SitePayload], relocations: &[Relocation]) {
@@ -1541,6 +1667,9 @@ fn render_symbol(out: &mut String, symbol: &lir::body::Symbol) {
         lir::body::Symbol::Instance(key) => {
             let _ = write!(out, "instance:{}", short(key));
         }
+        lir::body::Symbol::FunctionAdapter { target, .. } => {
+            let _ = write!(out, "function-adapter:{}", short(target));
+        }
         lir::body::Symbol::External { name, .. } => {
             let _ = write!(out, "extern:{name}");
         }
@@ -1553,9 +1682,6 @@ fn render_symbol(out: &mut String, symbol: &lir::body::Symbol) {
         }
         lir::body::Symbol::TypeDescriptor(key) => {
             let _ = write!(out, "type-descriptor:{}", short(key));
-        }
-        lir::body::Symbol::TypeId(key) => {
-            let _ = write!(out, "type-id:{}", short(key));
         }
         lir::body::Symbol::TypeRecords => out.push_str("type-records"),
         lir::body::Symbol::TypeNames => out.push_str("type-names"),

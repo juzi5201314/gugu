@@ -4,14 +4,17 @@
 //! `kernel32.dll` 与 `ntdll.dll`。绝对地址进入 `IMAGE_REL_BASED_DIR64`；
 //! PC 相对在写出前修完。rt0 在调用前留出 32 字节 shadow space。
 
-use super::codegen::{FragmentPayload, X64World};
+use super::codegen::{BlobRelocation, FragmentPayload, X64World};
 use super::inst::{RelocKind, RelocTarget};
 use super::mangle;
 use crate::runtime::entry;
 use crate::runtime::fragments;
 use std::collections::{BTreeMap, BTreeSet};
+use std::mem::offset_of;
 
 const IMAGE_BASE: u64 = 0x0000_0001_4000_0000;
+/// 类型描述符记录的宿主 section；`Symbol::TypeDescriptor` 的地址由它派生。
+const TYPE_SECTION_NAME: &str = ".gugutyp";
 const SECTION_ALIGN: u64 = 4096;
 const FILE_ALIGN: u64 = 512;
 const DIR64: u16 = 10 << 12;
@@ -28,6 +31,8 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "SetConsoleCtrlHandler",
             "GetStdHandle",
             "WriteFile",
+            "GetEnvironmentStringsW",
+            "FreeEnvironmentStringsW",
         ],
     ),
     (
@@ -104,6 +109,12 @@ pub(crate) struct PeRequest {
     pub(crate) dll: bool,
     /// 已绑定 glue 的 mangled 符号名；这些名字缺失定义时按 `E0062` 语义失败。
     pub(crate) bound_glues: std::collections::BTreeSet<String>,
+    /// 类型描述符符号 → `.gugutyp` 内偏移；这些符号的地址由 type section 派生。
+    pub(crate) type_descriptors: std::collections::BTreeMap<String, u64>,
+    /// 静态存储块：符号名 → 块字节数（`initialized` 字 + 值槽），按符号名升序。
+    pub(crate) globals: std::collections::BTreeMap<String, u64>,
+    /// `.ggmeta` 内待回填的符号 RVA：`(blob 内偏移, 符号名)`，按偏移升序。
+    pub(crate) blob_relocations: Vec<BlobRelocation>,
 }
 
 struct Section {
@@ -151,6 +162,9 @@ pub(crate) fn link_world(world: &X64World, types: &[u8], meta: &[u8]) -> Result<
         constants: world.constants.clone(),
         dll: false,
         bound_glues: world.glues().bound_symbols(),
+        type_descriptors: world.type_descriptors.iter().cloned().collect(),
+        globals: world.globals.iter().cloned().collect(),
+        blob_relocations: world.blob_relocations.clone(),
     })
 }
 
@@ -258,7 +272,7 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         rdata.extend_from_slice(bytes);
         const_at.push((name.clone(), offset as u64));
     }
-    let (data, reserved) = data_with_reserved(iat_template())?;
+    let (data, reserved) = data_with_reserved(iat_template(), &request.globals)?;
     let mut sections = Vec::new();
     sections.push(section(".text", text, TEXT_CHARS));
     sections.append(&mut named);
@@ -283,8 +297,15 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         data_rva + reserved.state,
     );
     defined.insert("__gugu_rt0_payload".to_owned(), data_rva + reserved.payload);
+    // 静态块与 ELF 同构：符号地址指向块首，值槽在 +8。
+    for (name, offset) in &reserved.blocks {
+        if defined.insert(name.clone(), data_rva + offset).is_some() {
+            return Err(format!("静态块 {name} 与已有符号重名"));
+        }
+    }
     let fragment_rva = text_rva + fragment_off;
     defined.insert("__gugu_fragments_base".to_owned(), fragment_rva);
+    apply_blob_relocations(request, &mut sections, &defined)?;
     fill_imports(&mut sections, rdata_rva, data_rva, import_at)?;
     patch_rip(
         &mut sections,
@@ -360,11 +381,38 @@ fn assemble_prefix(
     if runtime_entry {
         sites.push(rip(&mut text, &[0x48, 0x8d, 0x05], "__gugu_rt0_params"));
         sites.push(rip(&mut text, &[0x48, 0x8d, 0x1d], "__gugu_image_base"));
+        // Windows rt0 没有可移植的 envp 参数；通过 Kernel32 获取 UTF-16 环境块，写入
+        // native boot_environment，runtime 入口返回后立即释放副本。
+        text.extend_from_slice(&[0x48, 0x89, 0xc6]);
+        sites.push(rip(
+            &mut text,
+            &[0xff, 0x15],
+            "__gugu_iat_GetEnvironmentStringsW",
+        ));
+        text.extend_from_slice(&[0x49, 0x89, 0xc4]);
+        text.extend_from_slice(&[0x48, 0x8b, 0x56, 0x48, 0x48, 0x01, 0xda]);
+        text.extend_from_slice(&[0x49, 0x83, 0xcc, 0x01]);
+        text.extend_from_slice(&[0x4c, 0x89, 0xa2, 0x78, 0x00, 0x00, 0x00]);
+        text.extend_from_slice(&[0x48, 0x89, 0xf0]);
         sites.push(rip(
             &mut text,
             &[0xe8],
             &mangle::mangle_runtime("rt0_start"),
         ));
+        text.extend_from_slice(&[0x49, 0x89, 0xc5]);
+        text.extend_from_slice(&[0x4d, 0x85, 0xe4]);
+        let free_branch = text.len();
+        text.extend_from_slice(&[0x74, 0x00]);
+        text.extend_from_slice(&[0x4c, 0x89, 0xe1]);
+        sites.push(rip(
+            &mut text,
+            &[0xff, 0x15],
+            "__gugu_iat_FreeEnvironmentStringsW",
+        ));
+        let free_target = text.len();
+        text[free_branch + 1] =
+            u8::try_from(free_target - (free_branch + 2)).expect("环境释放跳转适配");
+        text.extend_from_slice(&[0x4c, 0x89, 0xe8]);
         text.extend_from_slice(&[0x48, 0x89, 0xc1]); // 返回值 -> ExitProcess 参数 rcx。
     } else {
         sites.push(rip(&mut text, &[0x48, 0x8d, 0x05], "__gugu_user_entry"));
@@ -511,14 +559,58 @@ struct ReservedData {
     slot: u64,
     state: u64,
     payload: u64,
+    /// 静态块名 → `.data` 内偏移，与 ELF 的保留区放置同构。
+    blocks: std::collections::BTreeMap<String, u64>,
 }
 
-/// `.data` 内容：IAT 之后是按 64/8 对齐的保留可写区（初始槽、runtime 状态区、启动载荷），全部零初始化。
-fn data_with_reserved(iat: Vec<u8>) -> Result<(Vec<u8>, ReservedData), String> {
+/// 把 `.ggmeta` 内的符号引用回填成 RVA；PE 的镜像内地址就是 RVA，不再叠加加载基址。
+fn apply_blob_relocations(
+    request: &PeRequest,
+    sections: &mut [Section],
+    defined: &std::collections::BTreeMap<String, u64>,
+) -> Result<(), String> {
+    if request.blob_relocations.is_empty() {
+        return Ok(());
+    }
+    let metadata = sections
+        .iter_mut()
+        .find(|section| section.name == ".ggmeta")
+        .ok_or_else(|| "元数据重定位缺少 .ggmeta 段".to_owned())?;
+    for relocation in &request.blob_relocations {
+        if !relocation.offset.is_multiple_of(8) {
+            return Err("元数据重定位偏移未对齐到 8 字节".to_owned());
+        }
+        let at = usize::try_from(relocation.offset).map_err(|_| "元数据偏移超出宿主")?;
+        let slot = metadata
+            .bytes
+            .get_mut(at..at + 8)
+            .ok_or_else(|| "元数据重定位偏移越过 blob".to_owned())?;
+        let address = *defined
+            .get(&relocation.symbol)
+            .ok_or_else(|| format!("元数据重定位符号 {} 没有地址", relocation.symbol))?;
+        slot.copy_from_slice(&address.to_le_bytes());
+    }
+    Ok(())
+}
+
+/// `.data` 内容：IAT 之后是按 64/8 对齐的保留可写区（初始槽、runtime 状态区、启动载荷、静态块），
+/// 全部零初始化。
+fn data_with_reserved(
+    iat: Vec<u8>,
+    globals: &std::collections::BTreeMap<String, u64>,
+) -> Result<(Vec<u8>, ReservedData), String> {
     let slot = align_up(iat.len() as u64, 64)?;
     let state = align_up(slot + entry::INITIAL_SLOT_BYTES, 64)?;
     let payload = align_up(state + entry::RUNTIME_STATE_BYTES, 8)?;
-    let end = payload + entry::Rt0Payload::bytes();
+    let mut end = payload + entry::Rt0Payload::bytes();
+    let mut blocks = std::collections::BTreeMap::new();
+    for (name, bytes) in globals {
+        end = align_up(end, 16)?;
+        blocks.insert(name.clone(), end);
+        end = end
+            .checked_add(*bytes)
+            .ok_or_else(|| "静态块偏移溢出".to_owned())?;
+    }
     let mut data = iat;
     data.resize(
         usize::try_from(end).map_err(|_| "保留区超出镜像".to_owned())?,
@@ -530,6 +622,7 @@ fn data_with_reserved(iat: Vec<u8>) -> Result<(Vec<u8>, ReservedData), String> {
             slot,
             state,
             payload,
+            blocks,
         },
     ))
 }
@@ -594,23 +687,63 @@ fn fill_entry(
             )
         })
         .unwrap_or((0, 0));
+    // 载荷字段全部按 Rust 布局派生，PE 侧不再维护独立偏移常数。类型段与 metadata 段在只含
+    // 代码的镜像里可能不存在，此时地址与长度按 0 发布。
+    let types_rva = sections
+        .iter()
+        .find(|section| section.name == ".gugutyp")
+        .map_or(0, |section| section.rva);
+    let types_len = sections
+        .iter()
+        .find(|section| section.name == ".gugutyp")
+        .map_or(Ok(0), |section| {
+            u64::try_from(section.bytes.len()).map_err(|_| "类型段长度溢出".to_owned())
+        })?;
+    let meta_rva = sections
+        .iter()
+        .find(|section| section.name == ".ggmeta")
+        .map_or(0, |section| section.rva);
+    let meta_len = sections
+        .iter()
+        .find(|section| section.name == ".ggmeta")
+        .map_or(Ok(0), |section| {
+            u64::try_from(section.bytes.len()).map_err(|_| "GC metadata 段长度溢出".to_owned())
+        })?;
     let data = section_bytes(sections, ".data")?;
-    put_u64_at(data, payload, Rt0Payload::REVISION)?;
-    put_u64_at(data, payload + 8, words[rt0_params::ENTRY])?;
-    put_u64_at(data, payload + 16, words[rt0_params::INITIAL_SLOT])?;
-    put_u64_at(data, payload + 24, words[rt0_params::RUNTIME_STATE])?;
-    put_u64_at(
-        data,
-        payload + 40,
-        defined
-            .get(&mangle::mangle_runtime("main_return"))
-            .map_or(words[rt0_params::ENTRY], |offset| text_rva + offset),
-    )?;
-    put_u64_at(data, payload + 48, stackmap_rva)?;
-    put_u64_at(data, payload + 56, defined["__gugu_fragments_base"])?;
-    put_u64_at(data, payload + 64, stackmap_len)?;
-    put_u64_at(data, payload + 72, unwind_rva)?;
-    put_u64_at(data, payload + 80, unwind_len)?;
+    let fields = [
+        (offset_of!(Rt0Payload, revision), Rt0Payload::REVISION),
+        (offset_of!(Rt0Payload, main_entry), words[rt0_params::ENTRY]),
+        (
+            offset_of!(Rt0Payload, initial_slot),
+            words[rt0_params::INITIAL_SLOT],
+        ),
+        (
+            offset_of!(Rt0Payload, runtime_state),
+            words[rt0_params::RUNTIME_STATE],
+        ),
+        (
+            offset_of!(Rt0Payload, main_return),
+            defined
+                .get(&mangle::mangle_runtime("main_return"))
+                .map_or(words[rt0_params::ENTRY], |offset| text_rva + offset),
+        ),
+        (offset_of!(Rt0Payload, stackmap), stackmap_rva),
+        (
+            offset_of!(Rt0Payload, fragment_base),
+            defined["__gugu_fragments_base"],
+        ),
+        (offset_of!(Rt0Payload, stackmap_len), stackmap_len),
+        (offset_of!(Rt0Payload, unwind), unwind_rva),
+        (offset_of!(Rt0Payload, unwind_len), unwind_len),
+        (offset_of!(Rt0Payload, gc_types), types_rva),
+        (offset_of!(Rt0Payload, gc_types_len), types_len),
+        (offset_of!(Rt0Payload, gc_meta), meta_rva),
+        (offset_of!(Rt0Payload, gc_meta_len), meta_len),
+        // `boot_environment` 由 rt0 运行期写入，镜像内保持 0。
+    ];
+    for (offset, value) in fields {
+        put_u64_at(data, payload + offset, value)?;
+    }
     Ok(())
 }
 
@@ -798,6 +931,12 @@ fn patch_fragments(
 ) -> Result<Vec<u64>, String> {
     let mut seen = BTreeSet::new();
     let mut abs64 = Vec::new();
+    // 类型描述符落在真实 `.gugutyp` 记录上：地址是 section RVA 加记录偏移，属于数据而非文本。
+    let type_section_rva = if request.type_descriptors.is_empty() {
+        0
+    } else {
+        rva_of(sections, TYPE_SECTION_NAME)?
+    };
     let text = section_bytes(sections, ".text")?;
     let mailbox = mangle::mangle_runtime("morestack_mailbox");
     let data_symbols: BTreeSet<&str> = request
@@ -838,6 +977,8 @@ fn patch_fragments(
             }
             let target_rva = if let Some(offset) = iat_offset(&reloc.target) {
                 data_rva + offset
+            } else if let Some(offset) = request.type_descriptors.get(reloc.target.as_str()) {
+                type_section_rva + offset
             } else {
                 let target = resolve_target(&reloc.target, defined, &request.bound_glues)?;
                 if data_symbols.contains(reloc.target.as_str()) {

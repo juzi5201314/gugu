@@ -4,12 +4,14 @@
 
 use super::barrier_schema::CARD_GRANULARITY_BYTES;
 use super::gc_metadata_contract::{GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES};
+use super::local_heap::HEADER_ENCODING_MIRROR;
 use super::local_heap_schema::{
     HEAP_BLOCKS_PER_ARENA, HEAP_GRANULE_BYTES, HEAP_LINES_PER_BLOCK, HEAP_OBJECT_HEADER_BYTES,
     HEAP_TLAB_SPAN_BLOCKS, HeapTriggerProfile, LOCAL_HEAP_SCHEMA, LocalHeapDemand,
     LocalHeapRuntimeContract,
 };
 use super::platform::PlatformProfile;
+use super::tests::parse_uint_literal;
 use crate::TargetName;
 
 fn contract() -> LocalHeapRuntimeContract {
@@ -40,7 +42,9 @@ fn local_heap_contract_derives_immix_sizes_from_the_gc_arena() {
     assert_eq!(contract.page_cover_entries, 512);
     assert_eq!(contract.card_bytes, 4096);
     assert_eq!(contract.card_bytes % contract.blocks_per_arena, 0);
-    assert_eq!(contract.record_field_count(), 30);
+    // 记录规格 5 条：ObjectHeader 2 + HeapArenaMetadata 11 + HeapPinEntry 4 + HeapBlockRecord 13
+    // + LargeMappingRecord 5 = 35 个字段；数字变化必须同时改这里与 `HEAP_RECORD_SPECS`。
+    assert_eq!(contract.record_field_count(), 35);
     // arena 内每 granule 一位，且 page-cover 覆盖整 arena。
     assert_eq!(
         u64::from(contract.object_start_bits) * u64::from(HEAP_GRANULE_BYTES),
@@ -80,7 +84,7 @@ fn local_heap_contract_is_deterministic_across_builds() {
 #[test]
 fn local_heap_contract_dump_reports_records_bitmaps_and_trigger() {
     let dump = contract().dump();
-    assert!(dump.contains("local-heap schema=4 arena=2097152 block=32768 line=128"));
+    assert!(dump.contains("local-heap schema=5 arena=2097152 block=32768 line=128"));
     assert!(dump.contains("tlab-span=262144 blocks=64 lines-per-block=256"));
     assert!(dump.contains("local-heap-bitmaps object-start-bits=131072 mark-bits=131072"));
     assert!(dump.contains("page-cover=512 cards=4096"));
@@ -265,4 +269,232 @@ fn local_heap_contract_uses_the_platform_page_size() {
             "page-cover 粒度必须跟随平台页大小"
         );
     }
+}
+
+/// `heap.gg` 的对象头编码必须与 compiler 侧定义逐项一致。
+///
+/// 两处并存期间任何位级漂移都会让 Gugu 分配器/收集器写出的 `control` 字被 Rust 侧误读
+/// （反向亦然）：类型下标、generation、representation 的错位既会漏扫根，也会把标量当指针。
+/// 因此这些常量不允许各自漂移，只能逐项相等。
+#[test]
+fn heap_source_mirrors_the_object_header_encoding() {
+    for (name, expected) in HEADER_ENCODING_MIRROR {
+        let prefix = format!("pub const {name}: uint = ");
+        let literal = super::RUNTIME_HEAP_SOURCE
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(&prefix))
+            .unwrap_or_else(|| panic!("heap.gg 缺少常量 {name}"));
+        let parsed = parse_uint_literal(literal)
+            .unwrap_or_else(|| panic!("heap.gg 的 {name} 不是可解析的无符号字面量：{literal}"));
+        assert_eq!(
+            parsed, expected,
+            "heap.gg 的 {name} 与 compiler 常量不一致（结果会是对象头误读）"
+        );
+    }
+    // 位域必须互不重叠：相邻字段的掩码错位会让写方与读方各自解释同一批位。
+    let field = |name: &str| {
+        HEADER_ENCODING_MIRROR
+            .iter()
+            .find(|(field, _)| *field == name)
+            .unwrap_or_else(|| panic!("表里有 {name}"))
+            .1
+    };
+    let age = field("CONTROL_AGE_MASK");
+    let generation = field("CONTROL_GENERATION_MASK");
+    assert_eq!(age & generation, 0, "age 与 generation 位域不得重叠");
+}
+
+/// processor 页的机器侧槽位必须与 `processor.rs` 的固定偏移一致。
+///
+/// 屏障状态页指针、栈扫描 epoch 与 arena 基址都按这些常量读写：错位会写到相邻字段上，
+/// 运行期不会报错，只会读到无效地址或让 grey 判断反转成丢根。
+#[test]
+fn heap_source_mirrors_the_processor_slots() {
+    let expected = [
+        (
+            "PROCESSOR_EDGE_SCRATCH_OFFSET",
+            super::processor::PROCESSOR_EDGE_SCRATCH_OFFSET,
+        ),
+        (
+            "PROCESSOR_BARRIER_SCRATCH_OFFSET",
+            super::processor::PROCESSOR_BARRIER_SCRATCH_OFFSET,
+        ),
+        (
+            "PROCESSOR_STACK_EPOCH_OFFSET",
+            super::processor::PROCESSOR_STACK_EPOCH_OFFSET,
+        ),
+        (
+            "PROCESSOR_ARENA_OFFSET",
+            super::processor::PROCESSOR_ARENA_OFFSET,
+        ),
+        (
+            "PROCESSOR_MARK_ACTIVE_OFFSET",
+            super::processor::PROCESSOR_MARK_ACTIVE_OFFSET,
+        ),
+        (
+            "PROCESSOR_TRACE_CURSOR_OFFSET",
+            super::processor::PROCESSOR_TRACE_CURSOR_OFFSET,
+        ),
+    ];
+    for (name, want) in expected {
+        assert_eq!(
+            heap_source_constant(name),
+            u64::try_from(want).expect("槽位偏移适配 u64"),
+            "heap.gg 的 {name} 与 processor 布局不一致"
+        );
+    }
+    // edge staging 页必须放得下 schema 容量规定的记录区。
+    let contract = super::barrier_schema::BarrierRuntimeContract::build(Default::default())
+        .expect("屏障契约可构建");
+    let records = u64::from(contract.edge_buffer_entries)
+        * heap_source_constant("EDGE_RECORD_BYTES")
+        + heap_source_constant("EDGE_RECORDS_OFFSET");
+    assert!(
+        heap_source_constant("EDGE_SCRATCH_BYTES") >= records,
+        "edge staging 页容不下 schema 规定的记录数"
+    );
+}
+
+/// 读取 `heap.gg` 里的无符号常量。
+fn heap_source_constant(name: &str) -> u64 {
+    super::tests::source_uint_constant(super::RUNTIME_HEAP_SOURCE, name)
+}
+
+/// arena 侧元数据布局必须与 schema 几何推出的值逐项一致。
+///
+/// 分配器按这些常量写 object_start / block_live / line_live，偏移或尺寸漂移会让账本落到
+/// 别的字段上，而运行期不会报任何错——收集器只会看到一批宣称空闲或已死的数据。
+#[test]
+fn heap_source_mirrors_the_arena_side_metadata_layout() {
+    let contract = LocalHeapRuntimeContract::build(
+        LocalHeapDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
+    )
+    .expect("契约可构建");
+    let blocks = u64::from(contract.blocks_per_arena);
+    let lines = u64::from(super::local_heap_schema::HEAP_LINES_PER_BLOCK);
+    // 状态头 24 字节：state/generation 各 4、mark_epoch 8、alloc_cursor/pin_count 各 4。
+    let side = 24
+        + 2 * u64::from(contract.bitmap_bytes)
+        + u64::from(contract.page_cover_entries) * 4
+        + u64::from(contract.card_bytes)
+        + blocks * 4
+        + blocks * lines;
+    let expected = [
+        ("ARENA_SIDE_METADATA_BYTES", side),
+        ("ARENA_STATE_OFFSET", 0),
+        ("ARENA_GENERATION_OFFSET", 4),
+        ("ARENA_MARK_EPOCH_OFFSET", 8),
+        ("ARENA_MARK_WORDS", u64::from(contract.bitmap_bytes) / 8),
+        (
+            "BLOCK_RECORD_BYTES",
+            std::mem::size_of::<super::local_heap_schema::HeapBlockRecord>() as u64,
+        ),
+        ("ARENA_MARK_OFFSET", 24 + u64::from(contract.bitmap_bytes)),
+        (
+            "ARENA_PAGE_COVER_OFFSET",
+            24 + 2 * u64::from(contract.bitmap_bytes),
+        ),
+        ("ARENA_OBJECT_START_OFFSET", 24),
+        // 区域顺序：状态头 24 / object_start / mark / page_cover / cards / block_live / line_live。
+        (
+            "ARENA_CARDS_OFFSET",
+            side - u64::from(contract.card_bytes) - blocks * 4 - blocks * lines,
+        ),
+        (
+            "ARENA_BLOCK_LIVE_OFFSET",
+            side - blocks * lines - blocks * 4,
+        ),
+        ("ARENA_LINE_LIVE_OFFSET", side - blocks * lines),
+        ("ARENA_NO_BLOCK", u64::from(u32::MAX)),
+        ("BLOCK_STATE_ALLOCATING", 0),
+    ];
+    for (name, want) in expected {
+        assert_eq!(
+            heap_source_constant(name),
+            want,
+            "heap.gg 的 {name} 与 schema 几何推出的值不一致"
+        );
+    }
+    // 头 16 字节是对象布局的前提：payload 地址减 16 是 control 字。
+    assert_eq!(super::local_heap_schema::HEAP_OBJECT_HEADER_BYTES, 16);
+}
+
+/// 大对象登记表必须位于块记录之后，且映射粒度与平台页相同；偏移错误会把首次大对象写入
+/// block record 或把跨页范围交给未提交的尾部。
+#[test]
+fn heap_source_mirrors_large_mapping_layout() {
+    use super::local_heap_schema::LargeMappingRecord;
+
+    let profile = PlatformProfile::from(TargetName::X86_64Linux);
+    assert_eq!(
+        heap_source_constant("LARGE_MAPPING_RECORD_BYTES"),
+        u64::try_from(std::mem::size_of::<LargeMappingRecord>()).expect("记录大小适配")
+    );
+    assert_eq!(
+        heap_source_constant("LARGE_MAPPING_TABLE_BYTES"),
+        heap_source_constant("LARGE_MAPPING_RECORD_BYTES")
+            * heap_source_constant("LARGE_MAPPING_CAPACITY")
+    );
+    assert_eq!(
+        heap_source_constant("LARGE_MAPPING_PAGE_BYTES"),
+        u64::from(profile.constants().page_bytes)
+    );
+    assert!(heap_source_constant("LARGE_MAPPING_CAPACITY") > 0);
+}
+
+/// TurnRegion 的机器侧常量必须与 `region_schema` 的状态机逐项一致。
+///
+/// 状态判别值与导出位集合是判据而不是别名：漂移会把「summary 闭合才允许 reset」变成永远
+/// 放行，从而静默复用仍有外部引用的区域空间。
+#[test]
+fn heap_source_mirrors_the_turn_region_state_machine() {
+    use super::region_schema::{
+        REGION_CAPACITY_CLASSES, REGION_EXPORT_ALL, REGION_EXPORT_BITS, REGION_MAX_ACTIVE,
+        REGION_OBJECT_LIMIT, REGION_STATE_NAMES, REGION_TRANSFER_LEASE_LIMIT,
+    };
+    let contract = LocalHeapRuntimeContract::build(
+        LocalHeapDemand::default(),
+        PlatformProfile::from(TargetName::X86_64Linux),
+    )
+    .expect("契约可构建");
+    assert_eq!(
+        heap_source_constant("REGION_OBJECT_LIMIT"),
+        u64::from(REGION_OBJECT_LIMIT)
+    );
+    assert_eq!(
+        heap_source_constant("REGION_MAX_ACTIVE"),
+        u64::from(REGION_MAX_ACTIVE)
+    );
+    assert_eq!(
+        heap_source_constant("REGION_TRANSFER_LEASE_LIMIT"),
+        u64::from(REGION_TRANSFER_LEASE_LIMIT)
+    );
+    assert_eq!(
+        heap_source_constant("REGION_EXPORT_ALL"),
+        u64::from(REGION_EXPORT_ALL)
+    );
+    assert_eq!(
+        u64::from(REGION_EXPORT_ALL),
+        (1 << REGION_EXPORT_BITS.len()) - 1,
+        "export 掩码必须恰好覆盖全部导出位"
+    );
+    // 区域容量上界就是块字节数：越界请求由分配慢路显式拒绝，专属 LargeMapping 另立路径。
+    assert_eq!(
+        u64::from(*REGION_CAPACITY_CLASSES.last().expect("容量阶梯非空")),
+        u64::from(contract.block_bytes)
+    );
+    for (index, name) in REGION_STATE_NAMES.iter().enumerate() {
+        let constant = format!("REGION_STATE_{}", name.replace('-', "_").to_uppercase());
+        assert_eq!(
+            heap_source_constant(&constant),
+            u64::try_from(index).expect("状态下标适配 u64"),
+            "heap.gg 的 {constant} 与 region_schema 的状态序号不一致"
+        );
+    }
+    // 计划编号哨兵必须落在 u32 之外：它是「还没有 publish 认领」的标记，不能与真实计划撞号。
+    assert_eq!(
+        heap_source_constant("REGION_PLAN_UNCLAIMED"),
+        u64::from(u32::MAX)
+    );
 }

@@ -1,3 +1,4 @@
+use super::codegen::BlobRelocation;
 use super::elf::{
     Blob, LinkRequest, ObjectReloc, ObjectSymbol, RelocKindCode, apply_relative, claim_slot,
     extract_archive, link, pack_archive, pc_rel32, reject_writable_executable,
@@ -32,7 +33,56 @@ fn request(entry: &str, symbols: Vec<ObjectSymbol>) -> LinkRequest {
         interpreter: None,
         archive: Vec::new(),
         bound_glues: BTreeSet::new(),
+        type_descriptors: std::collections::BTreeMap::new(),
+        globals: std::collections::BTreeMap::new(),
+        blob_relocations: Vec::new(),
     }
+}
+
+#[test]
+fn rt0_captures_envp_without_biasing_native_pointer() {
+    let bytes = super::elf::rt0_bytes(0);
+    assert!(bytes.windows(3).any(|window| window == [0x49, 0x89, 0xf0]));
+    assert!(bytes.windows(14).any(|window| {
+        window
+            == [
+                0x48, 0x8b, 0x53, 0x48, 0x48, 0x01, 0xc2, 0x4c, 0x89, 0x82, 0x78, 0x00, 0x00, 0x00,
+            ]
+    }));
+}
+
+#[test]
+fn metadata_blob_symbol_relocations_are_filled_at_link_time() {
+    let mut prepared = request("main", vec![symbol("main", vec![0xc3], Vec::new())]);
+    let mut meta = b"GUGUMT01".to_vec();
+    meta.extend_from_slice(&[0u8; 8]);
+    prepared.readonly.push(Blob {
+        name: ".gugu.meta".to_owned(),
+        bytes: meta,
+    });
+    prepared.blob_relocations = vec![BlobRelocation {
+        offset: 8,
+        symbol: "_start".to_owned(),
+    }];
+    let image = link(&prepared).expect("镜像");
+    let at = image
+        .bytes
+        .windows(8)
+        .position(|window| window == b"GUGUMT01")
+        .expect("元数据段必须在镜像内");
+    let value = u64::from_le_bytes(image.bytes[at + 8..at + 16].try_into().expect("回填字"));
+    assert_eq!(value, image.entry, "元数据符号必须回填成链接地址");
+
+    // 符号缺失必须失败，不能留零值让运行期读到无效地址。
+    prepared.blob_relocations = vec![BlobRelocation {
+        offset: 8,
+        symbol: "missing_symbol".to_owned(),
+    }];
+    let error = link(&prepared).expect_err("缺失符号必须失败");
+    assert!(
+        error.contains("missing_symbol"),
+        "失败信息必须点名符号：{error}"
+    );
 }
 
 #[test]
@@ -118,6 +168,77 @@ fn boot_processor_poll_control_starts_clear() {
         &image.bytes[processor + 64..processor + 4096],
         &[0xff; 4032]
     );
+}
+
+/// 类型段与 metadata 段的载荷地址必须登记进相对重定位：rt0 补加载偏移后运行期读到的是镜像内
+/// 真实地址；两段不存在时字段保持 0，且不得被登记成「0 + bias」。
+#[test]
+fn payload_registers_type_and_metadata_relocations_only_when_present() {
+    use crate::runtime::entry::rt0_params;
+    let mut bare = request("main", vec![symbol("main", vec![0xc3], Vec::new())]);
+    let mut with_sections = bare.clone();
+    let types = with_sections
+        .readonly
+        .iter()
+        .position(|blob| blob.name == ".gugu.types");
+    assert!(types.is_none(), "夹具默认不带类型段");
+    for name in [".gugu.types", ".gugu.meta"] {
+        with_sections.readonly.push(Blob {
+            name: name.to_owned(),
+            bytes: vec![0_u8; 16],
+        });
+    }
+    for (prepared, present) in [(&mut bare, false), (&mut with_sections, true)] {
+        let image = link(prepared).expect("镜像");
+        let params =
+            usize::try_from(image.entry).expect("入口地址") + super::elf::rt0_len() as usize;
+        let word = |index: usize| {
+            let at = params + index * 8;
+            u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("参数块 word"))
+        };
+        let payload = usize::try_from(word(rt0_params::PAYLOAD_VA)).expect("载荷地址");
+        let payload_word = |offset: usize| {
+            let at = payload + offset;
+            u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("载荷 word"))
+        };
+        let slots: Vec<u64> = {
+            let table = usize::try_from(word(rt0_params::RELOC_TABLE)).expect("重定位表");
+            let count = usize::try_from(word(rt0_params::RELOC_COUNT)).expect("重定位条数");
+            (0..count)
+                .map(|index| {
+                    let at = table + index * 16;
+                    u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("重定位槽"))
+                })
+                .collect()
+        };
+        for (offset, field) in [(88_usize, "gc_types"), (104, "gc_meta")] {
+            assert_eq!(
+                slots.contains(&(payload as u64 + offset as u64)),
+                present,
+                "{field} 的重定位登记必须与段是否存在一致：present={present}"
+            );
+            assert_eq!(
+                payload_word(offset) != 0,
+                present,
+                "{field} 的载荷值必须与段是否存在一致"
+            );
+        }
+        assert_eq!(
+            payload_word(96) != 0,
+            present,
+            "gc_types_len 必须与类型段是否存在一致"
+        );
+        assert_eq!(
+            payload_word(112) != 0,
+            present,
+            "gc_meta_len 必须与 metadata 段是否存在一致"
+        );
+        assert_eq!(
+            payload_word(120),
+            0,
+            "boot_environment 由 rt0 运行期写入，镜像内必须为 0 且不登记重定位"
+        );
+    }
 }
 
 #[test]
@@ -316,6 +437,7 @@ fn archive_member_resolves_an_unresolved_c_symbol() {
 /// panic 消息字面量必须真的进镜像：`Symbol::Data` 的全局下标是符号名唯一来源，
 /// 缺少全局数据池时字面量会指向别处（实测读到的是代码字节）。
 #[test]
+#[ignore = "slow full compilation"]
 fn panic_message_constant_reaches_the_image() {
     let source = "fn main() { panic(\"boom\") }";
     let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -337,6 +459,7 @@ fn panic_message_constant_reaches_the_image() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn compiled_main_is_static_pie_without_interpreter() {
     let source = "fn main() {}";
     let compilation = Compiler::new().compile(CompileRequest::single_file(

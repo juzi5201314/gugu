@@ -1,3 +1,5 @@
+use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_bytes, gc_config_granule_bytes, gc_config_large_align_limit, gc_config_line_bytes, gc_config_object_header_bytes, GC_REQUEST_ALLOC, PROCESSOR_GC_REQUEST_OFFSET}
+
 /* LocalHeap 的 Immix arena side metadata、object header 与 pin side table 的 Gugu 定义；
  * 与 compiler runtime layout query 逐字段交叉校验。
  * 每项只保存 arena 序号、generation、bitmap 位置与计数，
@@ -52,8 +54,96 @@ pub struct HeapBlockRecord {
 
 /// 非空 package 必经布局交叉校验。
 #[used]
-pub fn heap_records(header: &ObjectHeader, arena: &HeapArenaMetadata, pin: &HeapPinEntry, block: &HeapBlockRecord) u32 {
-    arena.state + arena.pin_count + pin.count + arena.generation + pin.arena + block.state + block.generation
+pub fn heap_records(
+    header: &ObjectHeader,
+    arena: &HeapArenaMetadata,
+    pin: &HeapPinEntry,
+    block: &HeapBlockRecord,
+    large: &LargeMappingRecord,
+) u32 {
+    arena.state + arena.pin_count + pin.count + block.state + block.generation + large.state + large.generation
+}
+
+/* 对象头布局与 `control` 字编码：分配器写、收集器与屏障读的唯一契约。
+ *
+ * 迁移期与 compiler 侧 `runtime/local_heap.rs` 的常量并存，由 Rust 测试逐项交叉校验；
+ * 切割完成后由本文件持有权威，那边只剩镜像检查。
+ */
+
+/// 对象头字节数。
+pub const OBJECT_HEADER_BYTES: uint = 16
+/// 头内偏移：第 0 字是 `control`，第 1 字是 payload 尺寸或 forwarding 目标。
+pub const HEADER_CONTROL_OFFSET: uint = 0
+pub const HEADER_SIZE_OFFSET: uint = 8
+
+/// `control` 位域：0..31 类型下标、32..35 age、36..37 generation、43..44 representation。
+pub const CONTROL_TYPE_MASK: uint = 0xffffffff
+pub const CONTROL_AGE_SHIFT: uint = 32
+pub const CONTROL_AGE_MASK: uint = 0xf00000000
+pub const CONTROL_GENERATION_SHIFT: uint = 36
+pub const CONTROL_GENERATION_MASK: uint = 0x3000000000
+pub const CONTROL_REPRESENTATION_SHIFT: uint = 43
+
+/// `control` 位标志。
+pub const CONTROL_FORWARDED: uint = 0x4000000000
+pub const CONTROL_PINNED: uint = 0x8000000000
+pub const CONTROL_LARGE_OBJECT: uint = 0x20000000000
+pub const CONTROL_HAS_RESOURCE_INSTANCE: uint = 0x40000000000
+
+/// generation 编码（`control` 的 36..37 位）。
+pub const GENERATION_NURSERY: uint = 0
+pub const GENERATION_AGING: uint = 1
+pub const GENERATION_OLD: uint = 2
+pub const GENERATION_IMMORTAL: uint = 3
+
+/// representation 编码（`control` 的 43..44 位）。
+pub const REPRESENTATION_LOCAL_DIRECT: uint = 0
+pub const REPRESENTATION_TURN_REGION: uint = 1
+pub const REPRESENTATION_SHARED_HANDLE: uint = 2
+pub const REPRESENTATION_COMPRESSED_REF: uint = 3
+
+/// line 占用状态：`LINE_QUEUED` 表示已发布 `HeapLineRun`，consume 前不得再被 bump 占用。
+pub const LINE_FREE: uint = 0
+pub const LINE_OCCUPIED: uint = 1
+pub const LINE_QUEUED: uint = 2
+
+/// block 状态判别值；与 `HeapBlockState` 的迁移目录同序。
+pub const BLOCK_STATE_ALLOCATING: uint = 0
+pub const BLOCK_STATE_CANDIDATE: uint = 1
+pub const BLOCK_STATE_SWEEPING: uint = 2
+pub const BLOCK_STATE_EVACUATING: uint = 3
+pub const BLOCK_STATE_RETURN_PENDING: uint = 4
+pub const BLOCK_STATE_OWNED_FREE: uint = 5
+pub const BLOCK_STATE_FREE: uint = 6
+
+/// `control` 字的唯一构造入口：分配器写完 header 与 payload 尺寸后立即发布地址。
+///
+/// 单行表达式：Gugu 解析器不接受以二元运算符开头的续行。
+pub fn header_control(type_index: uint, generation: uint, age: uint, representation: uint) uint {
+    type_index & CONTROL_TYPE_MASK | generation << CONTROL_GENERATION_SHIFT | age << CONTROL_AGE_SHIFT | representation << CONTROL_REPRESENTATION_SHIFT
+}
+
+/// 读取 header 的 generation 字段。
+pub fn header_generation(control: uint) uint {
+    (control & CONTROL_GENERATION_MASK) >> CONTROL_GENERATION_SHIFT
+}
+
+/// 读取 header 的类型下标。
+pub fn header_type_index(control: uint) uint {
+    control & CONTROL_TYPE_MASK
+}
+
+/// 非空 package 必经布局交叉校验：编码常量与对象头偏移一起进入编译单元。
+#[used]
+pub fn heap_header_records(header: &ObjectHeader, type_index: uint, generation: uint, age: uint) uint {
+    let control = header_control(type_index, generation, age, REPRESENTATION_LOCAL_DIRECT)
+    let fields = CONTROL_AGE_MASK | CONTROL_GENERATION_MASK | CONTROL_TYPE_MASK
+    let flags = CONTROL_FORWARDED | CONTROL_PINNED | CONTROL_LARGE_OBJECT | CONTROL_HAS_RESOURCE_INSTANCE
+    let lines = LINE_FREE + LINE_OCCUPIED + LINE_QUEUED
+    let generations = GENERATION_NURSERY + GENERATION_AGING + GENERATION_OLD + GENERATION_IMMORTAL
+    let representations = REPRESENTATION_LOCAL_DIRECT + REPRESENTATION_TURN_REGION + REPRESENTATION_SHARED_HANDLE + REPRESENTATION_COMPRESSED_REF
+    let offsets = HEADER_CONTROL_OFFSET + HEADER_SIZE_OFFSET + OBJECT_HEADER_BYTES
+    header.control & control & fields & flags + lines + generations + representations + offsets + header_generation(control) + header_type_index(control)
 }
 
 /* SharedHeap 的稳定身份槽与 payload 记录；与 compiler runtime layout query 逐字段交叉校验。
@@ -95,4 +185,1125 @@ pub struct SharedPayloadRecord {
 #[used]
 pub fn shared_heap_records(slot: &SharedHandleSlot, payload: &SharedPayloadRecord) u32 {
     slot.state + slot.access_guards + slot.pin_leases + payload.state + payload.bytes + slot.owner_id + payload.generation
+}
+
+/* ---------- 分配器：真实 arena、块账本、LargeMapping、refill 与 gc_alloc_slow ---------- */
+
+/// LargeMapping 记录位于 arena side metadata 之后的独立记录区，不参加普通 block candidate。
+#[repr(C, align(8))]
+pub struct LargeMappingRecord {
+    pub base: uint,
+    pub payload: uint,
+    pub bytes: uint,
+    pub generation: u32,
+    pub state: u32,
+}
+
+/// arena 侧元数据字段偏移；由 HeapArenaMetadata 的字段序固定。
+pub const ARENA_STATE_OFFSET: uint = 0
+pub const ARENA_GENERATION_OFFSET: uint = 4
+/// arena 的标记轮次：0 表示没有活跃标记周期，非 0 时写屏障执行 shade 与 edge 步骤。
+pub const ARENA_MARK_EPOCH_OFFSET: uint = 8
+pub const ARENA_ALLOC_CURSOR_OFFSET: uint = 16
+pub const ARENA_MARK_OFFSET: uint = 16408
+pub const ARENA_OBJECT_START_OFFSET: uint = 24
+pub const ARENA_PAGE_COVER_OFFSET: uint = 32792
+pub const ARENA_CARDS_OFFSET: uint = 34840
+pub const ARENA_BLOCK_LIVE_OFFSET: uint = 38936
+pub const ARENA_LINE_LIVE_OFFSET: uint = 39192
+pub const ARENA_NO_BLOCK: uint = 4294967295
+pub const ARENA_SIDE_METADATA_BYTES: uint = 55576
+pub const BLOCK_RECORD_BYTES: uint = 64
+pub const LARGE_MAPPING_RECORD_BYTES: uint = 32
+pub const LARGE_MAPPING_CAPACITY: uint = 64
+pub const ARENA_BLOCK_RECORDS_OFFSET: uint = ARENA_SIDE_METADATA_BYTES
+pub const BLOCK_RECORD_STATE_OFFSET: uint = 56
+pub const BLOCK_RECORD_RESERVED_OFFSET: uint = 60
+pub const BLOCK_RECORD_COMMITTED: uint = 1
+pub const LARGE_MAPPING_TABLE_BYTES: uint = 2048
+pub const LARGE_MAPPING_STATE_FREE: uint = 0
+pub const LARGE_MAPPING_STATE_ACTIVE: uint = 1
+pub const LARGE_MAPPING_PAGE_BYTES: uint = 4096
+pub const PROCESSOR_EDGE_SCRATCH_OFFSET: uint = 3560
+pub const EDGE_SCRATCH_BYTES: uint = 20480
+pub const EDGE_BUFFER_CAPACITY: uint = 512
+pub const EDGE_RECORD_BYTES: uint = 32
+pub const EDGE_RECORDS_OFFSET: uint = 64
+/// processor 页中 barrier 状态页指针的固定偏移：card buffer、stamp 表与额度账本都在那一页。
+pub const PROCESSOR_BARRIER_SCRATCH_OFFSET: uint = 3576
+/// 当前 coroutine 栈被标记周期扫描时的 epoch；与 arena 的 mark_epoch 不等即表示栈仍为 grey。
+pub const PROCESSOR_STACK_EPOCH_OFFSET: uint = 3584
+/// 本切片单 arena 的基址槽；arena registry 接管后换成稳定 descriptor 查询。
+pub const PROCESSOR_ARENA_OFFSET: uint = 3592
+/// 标记周期是否开启（1 = 开启）。epoch 保持单调，本标志单独表达「当前有活跃标记周期」。
+pub const PROCESSOR_MARK_ACTIVE_OFFSET: uint = 3600
+/// trace 游标页指针：descriptor 解释的可暂停状态都在那一页。
+pub const PROCESSOR_TRACE_CURSOR_OFFSET: uint = 3608
+/// mark 位图的机器字数（16 KiB / 8）；`ARENA_MARK_OFFSET` 到 `ARENA_PAGE_COVER_OFFSET` 之间。
+pub const ARENA_MARK_WORDS: uint = 2048
+/// 页提交范围描述；与 `std.platform.commit` 的入参一致。
+#[repr(C)]
+struct HeapExtent { base: uint, bytes: uint }
+
+pub fn heap_word(address: uint) uint {
+    unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) }
+}
+
+pub fn heap_store_word(address: uint, value: uint) {
+    unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) }
+}
+
+pub fn heap_word32(address: uint) uint {
+    unsafe { uint(std.ptr.read_unaligned[u32](std.mem.transmute[uint, *u32](address))) & uint(4294967295) }
+}
+pub fn heap_byte(address: uint) byte {
+    unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](address)) }
+}
+/// 32 位字段写入：读改写所在机器字，不动邻居字段。侧元数据由单 worker 独占，无需原子。
+pub fn heap_store_word32(address: uint, value: uint) {
+    let slot = address / 8 * 8
+    let shift = address % 8 * 8
+    let mask = uint(4294967295) << shift
+    heap_store_word(slot, heap_word(slot) & ~mask | (value & uint(4294967295)) << shift)
+}
+
+/// 字节字段写入：同上，只改目标字节。
+pub fn heap_store_byte(address: uint, value: uint) {
+    let slot = address / 8 * 8
+    let shift = address % 8 * 8
+    let mask = uint(255) << shift
+    heap_store_word(slot, heap_word(slot) & ~mask | (value & uint(255)) << shift)
+}
+
+/// 分配器不变量破坏与空间耗尽：不可捕获的运行期致命退出。
+pub fn heap_fail() {
+    unsafe { std.runtime.process_exit(2) }
+}
+
+/// 从任意地址反推所在块的基址。
+fn heap_block_of(address: uint, block_bytes: uint) uint {
+    address / block_bytes * block_bytes
+}
+
+/// 从任意地址反推所在 arena 的基址：数据段本身按 arena 字节数对齐。
+pub fn heap_arena_of(address: uint, arena_bytes: uint) uint {
+    address / arena_bytes * arena_bytes
+}
+
+/// 侧元数据基址：紧随 arena 数据段。
+pub fn heap_metadata(arena: uint, arena_bytes: uint) uint {
+    arena + arena_bytes
+}
+
+fn heap_large_table(meta: uint, arena_bytes: uint, block_bytes: uint) uint {
+    meta + ARENA_SIDE_METADATA_BYTES + arena_bytes / block_bytes * BLOCK_RECORD_BYTES
+}
+
+fn heap_large_record(meta: uint, arena_bytes: uint, block_bytes: uint, slot: uint) uint {
+    heap_large_table(meta, arena_bytes, block_bytes) + slot * LARGE_MAPPING_RECORD_BYTES
+}
+
+fn heap_large_find_free(meta: uint, arena_bytes: uint, block_bytes: uint) uint {
+    let slot: uint = 0
+    while slot < LARGE_MAPPING_CAPACITY {
+        if heap_word32(heap_large_record(meta, arena_bytes, block_bytes, slot) + 28) == LARGE_MAPPING_STATE_FREE {
+            return slot
+        }
+        slot = slot + 1
+    }
+    LARGE_MAPPING_CAPACITY
+}
+
+/// 只允许按 arena 几何反推基址；arena 字节数必须是非零二的幂。
+fn heap_arena_base(address: uint, arena_bytes: uint) uint {
+    if arena_bytes == 0 || arena_bytes & (arena_bytes - uint(1)) != 0 { heap_fail() }
+    address & ~(arena_bytes - uint(1))
+}
+
+/// 解析当前 arena 记录的 large mapping；返回 payload 起点，未知地址返回 0。
+pub fn heap_large_resolve(processor: uint, address: uint, arena_bytes: uint) uint {
+    unsafe {
+        if processor == 0 || address == 0 { return 0 }
+        let cursor = heap_word(processor + 3520)
+        if cursor == 0 { return 0 }
+        let config = std.runtime.gc_config()
+        let block_bytes = gc_config_block_bytes(config)
+        let meta = heap_metadata(heap_arena_base(cursor, arena_bytes), arena_bytes)
+        let slot: uint = 0
+        while slot < LARGE_MAPPING_CAPACITY {
+            let record = heap_large_record(meta, arena_bytes, block_bytes, slot)
+            if heap_word32(record + 28) == LARGE_MAPPING_STATE_ACTIVE {
+                let payload = heap_word(record + 8)
+                let bytes = heap_word(record + 16)
+                let inside = address >= payload && address - payload < bytes
+                if inside { return payload } else { let _ = 0 }
+            }
+            slot = slot + 1
+        }
+        0
+    }
+}
+
+fn heap_large_allocate(
+    processor: uint,
+    arena_bytes: uint,
+    header: uint,
+    bytes: uint,
+    align: uint,
+    kind: uint,
+    large_align_limit: uint,
+) uint {
+    unsafe {
+        let config = std.runtime.gc_config()
+        let block_bytes = gc_config_block_bytes(config)
+        let cursor = heap_word(processor + 3520)
+        if cursor == 0 { heap_fail() }
+        let arena = heap_arena_base(cursor, arena_bytes)
+        let meta = heap_metadata(arena, arena_bytes)
+        let slot = heap_large_find_free(meta, arena_bytes, block_bytes)
+        if slot >= LARGE_MAPPING_CAPACITY { heap_fail() }
+        let mapping_align = if align > LARGE_MAPPING_PAGE_BYTES { align } else { LARGE_MAPPING_PAGE_BYTES }
+        let requested = header + mapping_align - uint(1) + bytes
+        let total = (requested + LARGE_MAPPING_PAGE_BYTES - uint(1)) / LARGE_MAPPING_PAGE_BYTES * LARGE_MAPPING_PAGE_BYTES
+        let base = std.platform.reserve_aligned(total, mapping_align)
+        if base == 0 { heap_fail() }
+        let extent = HeapExtent { base, bytes: total }
+        if std.platform.commit(std.mem.transmute[*HeapExtent, uint](std.ptr.addr_of(extent))) != 0 { heap_fail() }
+        let payload = (base + header + mapping_align - uint(1)) / mapping_align * mapping_align
+        let control = header_control(kind, GENERATION_NURSERY, uint(0), REPRESENTATION_LOCAL_DIRECT) | CONTROL_LARGE_OBJECT
+        heap_store_word(payload - uint(16), control)
+        heap_store_word(payload - uint(8), bytes)
+        let words = bytes / 8
+        let word_index: uint = 0
+        while word_index < words {
+            heap_store_word(payload + word_index * 8, 0)
+            word_index = word_index + 1
+        }
+        let tail = bytes % 8
+        let tail_index: uint = 0
+        while tail_index < tail {
+            heap_store_byte(payload + words * 8 + tail_index, 0)
+            tail_index = tail_index + 1
+        }
+        let record = heap_large_record(meta, arena_bytes, block_bytes, slot)
+        heap_store_word(record, base)
+        heap_store_word(record + 8, payload)
+        heap_store_word(record + 16, bytes)
+        heap_store_word32(record + 24, uint(1))
+        heap_store_word32(record + 28, LARGE_MAPPING_STATE_ACTIVE)
+        let _ = large_align_limit
+        payload
+    }
+}
+
+
+/// 载荷字节数：类型描述符（`TypeRecord`）的首字就是 payload size；描述符缺失时没有载荷。
+#[used]
+pub fn value_size(descriptor: uint) uint {
+    if descriptor == 0 { return 0 }
+    heap_word(descriptor)
+}
+
+/// 按字节复制一段载荷：整字走机器字读写，余数逐个字节处理。
+#[used]
+pub fn copy_bytes(destination: uint, source: uint, bytes: uint) {
+    let index: uint = 0
+    while index + 8 <= bytes {
+        heap_store_word(destination + index, heap_word(source + index))
+        index = index + 8
+    }
+    while index < bytes {
+        heap_store_byte(destination + index, uint(heap_byte(source + index)))
+        index = index + 1
+    }
+}
+
+/// Repeat 的 destination 已由 compiler 分配；从 destination header 读取总 payload，按 count 复制源值。
+/// descriptor 当前只作 ABI 身份校验载荷，逐字段 value program 在后续 value 生命周期单元接管。
+#[used]
+pub fn value_repeat(destination: *(), source: *(), count: uint, descriptor: *()) {
+    unsafe {
+        let dst = std.mem.transmute[*(), uint](destination)
+        let src = std.mem.transmute[*(), uint](source)
+        let _ = descriptor
+        if dst == 0 || src == 0 || count == 0 { heap_fail() }
+        let metadata = std.mem.transmute[*(), uint](descriptor)
+        let total = heap_word(metadata)
+        if total == 0 || total % count != 0 { heap_fail() }
+        let element = total / count
+        let item: uint = 0
+        while item < count {
+            let target = dst + item * element
+            let words = element / 8
+            let word: uint = 0
+            while word < words {
+                heap_store_word(target + word * 8, heap_word(src + word * 8))
+                word = word + 1
+            }
+            let tail = element % 8
+            let byte: uint = 0
+            while byte < tail {
+                heap_store_byte(target + words * 8 + byte, uint(heap_byte(src + words * 8 + byte)))
+                byte = byte + 1
+            }
+            item = item + 1
+        }
+    }
+}
+
+/// 建立第一个 arena：一次按 arena 字节数对齐的 reserve 覆盖数据段、侧元数据与块记录。
+///
+/// 侧元数据紧随数据段，所以块地址可以直接反推 arena 与元数据基址，不需要额外登记槽位。
+pub fn heap_arena_create(arena_bytes: uint, records_bytes: uint) uint {
+    unsafe {
+        let total = arena_bytes + ARENA_SIDE_METADATA_BYTES + records_bytes
+        let arena = std.platform.reserve_aligned(total, arena_bytes)
+        if arena == 0 { heap_fail() }
+        let meta = heap_metadata(arena, arena_bytes)
+        let side = HeapExtent { base: meta, bytes: ARENA_SIDE_METADATA_BYTES + records_bytes }
+        if std.platform.commit(std.mem.transmute[*HeapExtent, uint](std.ptr.addr_of(side))) != 0 { heap_fail() }
+        let at = meta
+        let end = meta + ARENA_SIDE_METADATA_BYTES + records_bytes
+        while at < end {
+            heap_store_word(at, 0)
+            at = at + 8
+        }
+        let no_block = ARENA_NO_BLOCK
+        heap_store_word32(meta + ARENA_ALLOC_CURSOR_OFFSET, no_block)
+        let block_bytes = gc_config_block_bytes(unsafe { std.runtime.gc_config() })
+        let block_count = arena_bytes / block_bytes
+        let block = 0
+        while block < block_count {
+            let record = meta + ARENA_BLOCK_RECORDS_OFFSET + block * BLOCK_RECORD_BYTES
+            heap_store_word32(record, block)
+            heap_store_word32(record + 4, 0)
+            heap_store_word32(record + 12, block)
+            heap_store_word32(record + BLOCK_RECORD_STATE_OFFSET, BLOCK_STATE_FREE)
+            heap_store_word32(record + BLOCK_RECORD_RESERVED_OFFSET, 0)
+            block = block + 1
+        }
+        arena
+    }
+}
+
+/// 打开一个块：提交 extent、记账 line 与块存活数，并把 TLAB 的 cursor/limit 指向该块。
+///
+/// line 一律记 OCCUPIED、block_live 记满块 line 数：快路只推进 cursor 不回写账本，因此
+/// 「整块归分配器持有」是不依赖快路配合也保持真实的粒度；逐 line 精度随收集器接管账本时细化。
+pub fn heap_open_block(processor: uint, arena: uint, block: uint, arena_bytes: uint, block_bytes: uint, line_bytes: uint) {
+    heap_open_block_meta(arena, block, arena_bytes, block_bytes, line_bytes)
+    heap_store_word(processor + 3520, arena + block * block_bytes)
+    heap_store_word(processor + 3528, arena + block * block_bytes + block_bytes)
+}
+
+/// 只做元数据与 extent 记账，不碰 TLAB：收集器搬运对象时不能改变 mutator 的分配游标。
+///
+/// `ARENA_ALLOC_CURSOR` 推进到 `block + 1`，因此下次打开的是下一个块——分配侧与收集器共享
+/// 同一份块顺序，不会把两个块的 extent 重复提交。
+fn heap_block_record(meta: uint, arena_bytes: uint, block_bytes: uint, block: uint) uint {
+    let _ = arena_bytes
+    let _ = block_bytes
+    meta + ARENA_BLOCK_RECORDS_OFFSET + block * BLOCK_RECORD_BYTES
+}
+
+fn heap_block_state(meta: uint, arena_bytes: uint, block_bytes: uint, block: uint) uint {
+    heap_word32(heap_block_record(meta, arena_bytes, block_bytes, block) + BLOCK_RECORD_STATE_OFFSET)
+}
+
+pub fn heap_block_generation(arena: uint, arena_bytes: uint, block_bytes: uint, block: uint) uint {
+    heap_word32(heap_block_record(heap_metadata(arena, arena_bytes), arena_bytes, block_bytes, block) + 4)
+}
+
+pub fn heap_block_state_word(arena: uint, arena_bytes: uint, block_bytes: uint, block: uint) uint {
+    heap_block_state(heap_metadata(arena, arena_bytes), arena_bytes, block_bytes, block)
+}
+
+pub fn heap_block_live_lines(arena: uint, arena_bytes: uint, block_bytes: uint, line_bytes: uint, block: uint) uint {
+    let _ = line_bytes
+    heap_word32(heap_metadata(arena, arena_bytes) + ARENA_BLOCK_LIVE_OFFSET + block * 4)
+}
+
+pub fn heap_block_set_state(arena: uint, arena_bytes: uint, block_bytes: uint, block: uint, state: uint) {
+    let record = heap_block_record(heap_metadata(arena, arena_bytes), arena_bytes, block_bytes, block)
+    heap_store_word32(record + BLOCK_RECORD_STATE_OFFSET, state)
+}
+
+fn heap_open_block_meta_inner(arena: uint, block: uint, arena_bytes: uint, block_bytes: uint, line_bytes: uint, free_lines: uint) {
+    unsafe {
+        let meta = heap_metadata(arena, arena_bytes)
+        let record = heap_block_record(meta, arena_bytes, block_bytes, block)
+        if heap_word32(record + BLOCK_RECORD_STATE_OFFSET) != BLOCK_STATE_FREE { heap_fail() } else { let _ = 0 }
+        let reserved = heap_word32(record + BLOCK_RECORD_RESERVED_OFFSET)
+        if reserved & BLOCK_RECORD_COMMITTED == 0 {
+            let base = arena + block * block_bytes
+            let extent = HeapExtent { base: base, bytes: block_bytes }
+            let commit_status = std.platform.commit(std.mem.transmute[*HeapExtent, uint](std.ptr.addr_of(extent)))
+            if commit_status != 0 { heap_fail() } else { let _ = 0 }
+        }
+        let generation = heap_word32(record + 4)
+        if generation == uint(4294967295) { heap_fail() } else { let _ = 0 }
+        heap_store_word32(record + 4, generation + 1)
+        heap_store_word32(record + BLOCK_RECORD_RESERVED_OFFSET, BLOCK_RECORD_COMMITTED)
+        heap_store_word32(record + BLOCK_RECORD_STATE_OFFSET, BLOCK_STATE_ALLOCATING)
+        let lines = block_bytes / line_bytes
+        let line_live = meta + ARENA_LINE_LIVE_OFFSET + block * lines
+        let initial = if free_lines == 0 { LINE_OCCUPIED } else { LINE_FREE }
+        let index: uint = 0
+        while index < lines {
+            heap_store_byte(line_live + index, initial)
+            index = index + 1
+        }
+        let live_lines = if free_lines == 0 { lines } else { uint(0) }
+        heap_store_word32(meta + ARENA_BLOCK_LIVE_OFFSET + block * 4, live_lines)
+        let granule_bytes = gc_config_granule_bytes(unsafe { std.runtime.gc_config() })
+        let granules = block_bytes / granule_bytes
+        let first_granule = block * granules
+        let word_index: uint = 0
+        while word_index < granules / 64 {
+            heap_store_word(meta + ARENA_OBJECT_START_OFFSET + (first_granule / 64 + word_index) * 8, 0)
+            heap_store_word(meta + ARENA_MARK_OFFSET + (first_granule / 64 + word_index) * 8, 0)
+            word_index = word_index + 1
+        }
+        let first_page = block * block_bytes / LARGE_MAPPING_PAGE_BYTES
+        let pages = block_bytes / LARGE_MAPPING_PAGE_BYTES
+        let page = 0
+        while page < pages {
+            heap_store_word32(meta + ARENA_PAGE_COVER_OFFSET + (first_page + page) * 4, uint(4294967295))
+            page = page + 1
+        }
+        let cards = block_bytes / gc_config_card_bytes(unsafe { std.runtime.gc_config() })
+        let card = 0
+        while card < cards {
+            heap_store_byte(meta + ARENA_CARDS_OFFSET + block * cards + card, 0)
+            card = card + 1
+        }
+        let previous = heap_word32(meta + ARENA_ALLOC_CURSOR_OFFSET)
+        let next = if previous == ARENA_NO_BLOCK || previous < block + 1 { block + 1 } else { previous }
+        heap_store_word32(meta + ARENA_ALLOC_CURSOR_OFFSET, next)
+    }
+}
+
+pub fn heap_open_block_meta(arena: uint, block: uint, arena_bytes: uint, block_bytes: uint, line_bytes: uint) {
+    heap_open_block_meta_inner(arena, block, arena_bytes, block_bytes, line_bytes, uint(0))
+}
+
+pub fn heap_open_free_block_meta(arena: uint, block: uint, arena_bytes: uint, block_bytes: uint, line_bytes: uint) {
+    heap_open_block_meta_inner(arena, block, arena_bytes, block_bytes, line_bytes, uint(1))
+}
+
+/// object_start 位图置位：位标志着对象 payload 的起始粒度。
+pub fn heap_mark_object_start(arena: uint, arena_bytes: uint, offset: uint, granule_bytes: uint) {
+    let meta = heap_metadata(arena, arena_bytes)
+    let granule = offset / granule_bytes
+    let slot = meta + ARENA_OBJECT_START_OFFSET + granule / 64 * 8
+    heap_store_word(slot, heap_word(slot) | uint(1) << (granule % 64))
+}
+
+/// 把覆盖对象 header/payload 的每个宿主页映射到对象起始 granule，供 interior resolve 回溯。
+pub fn heap_mark_page_cover(arena: uint, arena_bytes: uint, offset: uint, bytes: uint, granule_bytes: uint) {
+    if bytes == 0 { return }
+    let first_page = offset / LARGE_MAPPING_PAGE_BYTES
+    let last_page = (offset + bytes - uint(1)) / LARGE_MAPPING_PAGE_BYTES
+    let object_granule = offset / granule_bytes
+    let meta = heap_metadata(arena, arena_bytes)
+    // 账本口径：`page_covering_object[p]` 记录**落在第 p 页上的某个对象**的 arena 内起始 granule，
+    // 没有则为 `u32::MAX`。同一页被多个对象共享时后写的会覆盖前一个，因此读侧不能只靠它：
+    // `heap_owner_payload` 先用 object-start 位图在页内（必要时跨页）回溯，找不到才回退到本表，
+    // 并且必须再校验「起点 <= 本地址 < 起点+size」才接受，避免拿到同页另一个对象。
+    let page: uint = first_page
+    // 单出口：越界页由循环条件拦下，不在循环体内 `return`。
+    // 循环体内的 `return` 属于本仓库已知的运行期源码缺陷家族（mid-function return 配合复合地址
+    // 算术会被截断），一旦提前退出，后续页就保持 `ARENA_PAGE_COVER_OFFSET` 的初值
+    // `u32::MAX`，跨页对象的 interior 地址就再也解析不到对象起点。
+    let limit = arena_bytes / LARGE_MAPPING_PAGE_BYTES
+    while page <= last_page && page < limit {
+        heap_store_word32(meta + ARENA_PAGE_COVER_OFFSET + page * 4, object_granule)
+        page = page + 1
+    }
+}
+/// 根据 payload 地址设置 mark bitmap；bitmap 只记录对象所在 granule，不保存地址。
+pub fn heap_mark_payload(address: uint, arena_bytes: uint, granule_bytes: uint, header_bytes: uint) {
+    if address == 0 { return }
+    let arena = heap_arena_of(address, arena_bytes)
+    if address < arena || address - arena >= arena_bytes { return }
+    let meta = heap_metadata(arena, arena_bytes)
+    if address - arena < header_bytes { return }
+    let granule = (address - arena - header_bytes) / granule_bytes
+    let slot = meta + ARENA_MARK_OFFSET + granule / 64 * 8
+    heap_store_word(slot, heap_word(slot) | uint(1) << (granule % 64))
+}
+
+/// 原子语义由 stop-the-world coordinator 保证；返回 1 表示本周期首次置位。
+pub fn heap_mark_test_and_set(address: uint, arena: uint, arena_bytes: uint, granule_bytes: uint, header_bytes: uint) uint {
+    if address < arena + header_bytes || address - arena >= arena_bytes { return 0 }
+    let granule = (address - arena - header_bytes) / granule_bytes
+    let slot = heap_metadata(arena, arena_bytes) + ARENA_MARK_OFFSET + granule / 64 * 8
+    let mask = uint(1) << (granule % 64)
+    let bits = heap_word(slot)
+    if bits & mask != 0 { return 0 }
+    heap_store_word(slot, bits | mask)
+    1
+}
+
+pub fn heap_mark_bit(address: uint, arena: uint, arena_bytes: uint, granule_bytes: uint, header_bytes: uint) uint {
+    if address < arena + header_bytes || address - arena >= arena_bytes { return 0 }
+    let granule = (address - arena - header_bytes) / granule_bytes
+    let slot = heap_metadata(arena, arena_bytes) + ARENA_MARK_OFFSET + granule / 64 * 8
+    if heap_word(slot) & (uint(1) << (granule % 64)) != 0 { 1 } else { 0 }
+}
+
+pub fn heap_clear_object_start(arena: uint, arena_bytes: uint, header_address: uint, granule_bytes: uint) {
+    if header_address < arena || header_address - arena >= arena_bytes { return }
+    let granule = (header_address - arena) / granule_bytes
+    let slot = heap_metadata(arena, arena_bytes) + ARENA_OBJECT_START_OFFSET + granule / 64 * 8
+    let bits = heap_word(slot)
+    let mask = uint(1) << (granule % 64)
+    if bits & mask != 0 { heap_store_word(slot, bits - mask) } else { let _ = 0 }
+}
+
+pub fn heap_mark_clear(arena: uint, arena_bytes: uint) {
+    let meta = heap_metadata(arena, arena_bytes)
+    let index: uint = 0
+    while index < ARENA_MARK_WORDS {
+        heap_store_word(meta + ARENA_MARK_OFFSET + index * 8, 0)
+        index = index + 1
+    }
+}
+
+pub fn heap_clear_page_cover(arena: uint, arena_bytes: uint) {
+    let meta = heap_metadata(arena, arena_bytes)
+    let pages = arena_bytes / LARGE_MAPPING_PAGE_BYTES
+    let page: uint = 0
+    while page < pages {
+        heap_store_word32(meta + ARENA_PAGE_COVER_OFFSET + page * 4, uint(4294967295))
+        page = page + 1
+    }
+}
+
+pub fn heap_object_start(arena: uint, arena_bytes: uint, header_address: uint, granule_bytes: uint) uint {
+    if header_address < arena || header_address - arena >= arena_bytes { return 0 }
+    let granule = (header_address - arena) / granule_bytes
+    let slot = heap_metadata(arena, arena_bytes) + ARENA_OBJECT_START_OFFSET + granule / 64 * 8
+    if heap_word(slot) & (uint(1) << (granule % 64)) != 0 { 1 } else { 0 }
+}
+
+pub fn heap_clear_block_object_starts(arena: uint, arena_bytes: uint, block_bytes: uint, block: uint, granule_bytes: uint, card_bytes: uint) {
+    let meta = heap_metadata(arena, arena_bytes)
+    let granules = block_bytes / granule_bytes
+    let first_granule = block * granules
+    let word: uint = 0
+    while word < granules / 64 {
+        heap_store_word(meta + ARENA_OBJECT_START_OFFSET + (first_granule / 64 + word) * 8, 0)
+        heap_store_word(meta + ARENA_MARK_OFFSET + (first_granule / 64 + word) * 8, 0)
+        word = word + 1
+    }
+    let first_page = block * block_bytes / LARGE_MAPPING_PAGE_BYTES
+    let pages = block_bytes / LARGE_MAPPING_PAGE_BYTES
+    let page: uint = 0
+    while page < pages {
+        heap_store_word32(meta + ARENA_PAGE_COVER_OFFSET + (first_page + page) * 4, uint(4294967295))
+        page = page + 1
+    }
+    let first_card = block * block_bytes / card_bytes
+    let cards = block_bytes / card_bytes
+    let card: uint = 0
+    while card < cards {
+        heap_store_byte(meta + ARENA_CARDS_OFFSET + first_card + card, 0)
+        card = card + 1
+    }
+}
+
+pub fn heap_clear_block_cards(arena: uint, arena_bytes: uint, block_bytes: uint, card_bytes: uint, block: uint) {
+    let meta = heap_metadata(arena, arena_bytes)
+    let first = block * block_bytes / card_bytes
+    let count = block_bytes / card_bytes
+    let card: uint = 0
+    while card < count {
+        heap_store_byte(meta + ARENA_CARDS_OFFSET + first + card, 0)
+        card = card + 1
+    }
+}
+
+pub fn heap_set_line_state(arena: uint, arena_bytes: uint, block_bytes: uint, line_bytes: uint, line: uint, state: uint) {
+    let lines_per_block = block_bytes / line_bytes
+    let block = line / lines_per_block
+    let within = line % lines_per_block
+    let meta = heap_metadata(arena, arena_bytes)
+    let address = meta + ARENA_LINE_LIVE_OFFSET + block * lines_per_block + within
+    let old = heap_byte(address)
+    if old == byte(LINE_FREE) && state != LINE_FREE {
+        heap_store_word32(meta + ARENA_BLOCK_LIVE_OFFSET + block * 4, heap_word32(meta + ARENA_BLOCK_LIVE_OFFSET + block * 4) + 1)
+    } else {
+        if old != byte(LINE_FREE) && state == LINE_FREE {
+            heap_store_word32(meta + ARENA_BLOCK_LIVE_OFFSET + block * 4, heap_word32(meta + ARENA_BLOCK_LIVE_OFFSET + block * 4) - 1)
+        } else {
+            let _ = 0
+        }
+    }
+    heap_store_byte(address, state)
+}
+
+pub fn heap_mark_begin_arena(processor: uint, arena: uint, arena_bytes: uint) uint {
+    if arena == 0 { heap_fail() }
+    let meta = heap_metadata(arena, arena_bytes)
+    let previous = heap_word32(meta + ARENA_MARK_EPOCH_OFFSET)
+    let epoch = if previous == uint(4294967295) { uint(1) } else { previous + 1 }
+    heap_mark_clear(arena, arena_bytes)
+    heap_store_word32(meta + ARENA_MARK_EPOCH_OFFSET, epoch)
+    heap_store_word(processor + PROCESSOR_MARK_ACTIVE_OFFSET, uint(1))
+    epoch
+}
+
+pub fn heap_shade_target(target: uint, arena_bytes: uint, granule_bytes: uint, header_bytes: uint) {
+    if target == 0 || target < header_bytes { return }
+    let control = heap_word(target - header_bytes)
+    if control & CONTROL_LARGE_OBJECT != uint(0) { return }
+    heap_mark_payload(target, arena_bytes, granule_bytes, header_bytes)
+}
+
+/// 本切片单 arena 的基址；`heap_boot` 写入，屏障与收集器从这里解析卡片归属。
+pub fn heap_local_arena(processor: uint) uint {
+    heap_word(processor + PROCESSOR_ARENA_OFFSET)
+}
+
+/// 当前 arena 的标记轮次；0 表示没有活跃的标记周期。
+pub fn heap_mark_epoch(processor: uint) uint {
+    let address = unsafe { std.runtime.gc_config() }
+    let arena = heap_local_arena(processor)
+    if arena == 0 { return uint(0) }
+    heap_word32(heap_metadata(arena, gc_config_arena_bytes(address)) + ARENA_MARK_EPOCH_OFFSET)
+}
+
+/// 开启一轮标记：推进 arena 的 mark_epoch 并清空 mark 位图，返回本轮标识。
+///
+/// epoch 0 保留给「没有活跃标记周期」，因此每次开始至少加一；调用方在周期收敛后必须
+/// 调用 `heap_mark_end` 关闭，否则后续写入会持续做 shade 与 edge 记账。
+pub fn heap_mark_begin(processor: uint) uint {
+    let address = unsafe { std.runtime.gc_config() }
+    let arena = heap_local_arena(processor)
+    if arena == 0 { heap_fail() }
+    let meta = heap_metadata(arena, gc_config_arena_bytes(address))
+    let epoch = heap_word32(meta + ARENA_MARK_EPOCH_OFFSET) + uint(1)
+    let index: uint = 0
+    while index < ARENA_MARK_WORDS {
+        heap_store_word(meta + ARENA_MARK_OFFSET + index * 8, uint(0))
+        index = index + 1
+    }
+    heap_store_word32(meta + ARENA_MARK_EPOCH_OFFSET, epoch)
+    heap_store_word(processor + PROCESSOR_MARK_ACTIVE_OFFSET, uint(1))
+    epoch
+}
+
+/// 关闭当前标记周期：清掉活跃标志，epoch 保持单调（旧 shade 不会与新周期混淆）。
+pub fn heap_mark_end(processor: uint) {
+    heap_store_word(processor + PROCESSOR_MARK_ACTIVE_OFFSET, uint(0))
+}
+
+/// 当前是否处于标记周期；屏障据此决定是否执行 shade 与 edge 记账。
+pub fn heap_mark_active(processor: uint) byte {
+    if heap_word(processor + PROCESSOR_MARK_ACTIVE_OFFSET) != 0 { return 1 }
+    0
+}
+
+/// 记录「当前 coroutine 的栈已在本轮 epoch 扫描过」；此后它不再是 grey 栈。
+pub fn heap_stack_scanned(processor: uint, epoch: uint) {
+    heap_store_word(processor + PROCESSOR_STACK_EPOCH_OFFSET, epoch)
+}
+
+/// 当前栈在本轮是否仍为 grey（未被扫描或从未记录）。grey 栈上的新写入需要 insertion shade。
+pub fn heap_stack_grey(processor: uint, epoch: uint) byte {
+    if heap_word(processor + PROCESSOR_STACK_EPOCH_OFFSET) != epoch { return 1 }
+    0
+}
+
+/// 从字段地址回溯所在对象的 payload 起点；无法证明落在某个对象内时返回 0。
+///
+/// 顺序按 `gc-metadata.md` 的 interior resolve：先在字段所在 4 KiB 页的 object-start 位图里
+/// 向前找最近的起点并用 header 的 payload size 校验；本页没有起点时再看 page_cover（跨页
+/// 对象）。不采用「只在本页向前扫」的近似，也不接受 padding 或已释放地址。
+///
+/// `arena` 必须由调用方给出：side metadata 就紧跟在 arena 数据段之后，把任意地址按
+/// `arena_bytes` 向下对齐再当 arena 用会读到未映射地址。不属于该 arena 的地址一律返回 0。
+pub fn heap_owner_payload(field: uint, arena: uint, arena_bytes: uint, granule_bytes: uint, header_bytes: uint) uint {
+    if field < header_bytes { return 0 }
+    if field < arena || field - arena >= arena_bytes { return 0 }
+    let meta = heap_metadata(arena, arena_bytes)
+    // 账本口径：bitmap 的 granule 下标是 `payload - arena - header`（与 `heap_mark_payload`
+    // 一致），因此 header 基址是 `arena + granule * granule_bytes`，payload 起点再加一个 header。
+    let offset = field - arena - header_bytes
+    let page = offset / LARGE_MAPPING_PAGE_BYTES
+    let granules_per_page = LARGE_MAPPING_PAGE_BYTES / granule_bytes
+    let page_first = page * granules_per_page
+    let cursor = offset / granule_bytes
+    let start = heap_scan_object_start(meta, cursor, page_first)
+    if start != uint(4294967295) {
+        let start_bytes = start * granule_bytes
+        let size = heap_word(arena + start_bytes + HEADER_SIZE_OFFSET)
+        if start_bytes <= offset && offset < start_bytes + size { return arena + start_bytes + header_bytes }
+        _ = 0
+    }
+    let cover = heap_word32(meta + ARENA_PAGE_COVER_OFFSET + page * 4)
+    if cover == uint(4294967295) { return 0 }
+    let cover_bytes = cover * granule_bytes
+    let covered_size = heap_word(arena + cover_bytes + HEADER_SIZE_OFFSET)
+    if cover_bytes <= offset && offset < cover_bytes + covered_size { return arena + cover_bytes + header_bytes }
+    0
+}
+
+/// 精确对象定位：返回 `(arena, generation, payload 起点, delta)`。
+///
+/// `arena` 已由调用方从地址确定；`offset` 是相对 arena 的字节偏移。顺序按计划步骤 6.4：
+/// 先用 object-start 位图与 page cover 跨页回溯 payload，再验证 `payload <= address < payload+size`；
+/// 不属于该 arena 或找不到覆盖对象时返回全 0。
+///
+/// 普通对象不跨 block；跨 block 的成员走 LargeMapping，由 `heap_large_resolve` 在收集器里
+/// 单独解析（那里只知道对象起点，不保留 delta）。
+pub fn heap_resolve_object(address: uint, arena: uint, arena_bytes: uint, granule_bytes: uint, header_bytes: uint) (uint, uint, uint, uint) {
+    let payload = heap_owner_payload(address, arena, arena_bytes, granule_bytes, header_bytes)
+    if payload == 0 { return (uint(0), uint(0), uint(0), uint(0)) }
+    let control = heap_word(payload - header_bytes)
+    (arena, header_generation(control), payload, address - payload)
+}
+
+/// 在 `first..=from` 的 granule 范围内向前找最近的 object-start 位；返回 granule 或 `u32::MAX`。
+fn heap_scan_object_start(meta: uint, from: uint, first: uint) uint {
+    let cursor = from
+    while cursor >= first {
+        let bits = heap_word(meta + ARENA_OBJECT_START_OFFSET + cursor / 64 * 8)
+        let mask = uint(1) << (cursor % 64)
+        if bits & mask != uint(0) { return cursor }
+        if cursor == first { return uint(4294967295) }
+        cursor = cursor - 1
+    }
+    uint(4294967295)
+}
+/// 取一个新的块并把可分配范围交给 TLAB；arena 内已无空闲块时返回 0。
+///
+/// 慢路只在快路失败后进入，此时当前块的 cursor 必然已经推进过，因此由 cursor-1 反推所在
+/// arena 不会落到下一个 arena 的边界上。
+fn heap_refill(processor: uint, arena_bytes: uint, block_bytes: uint, line_bytes: uint) uint {
+    unsafe {
+        let cursor = heap_word(processor + 3520)
+        let probe = if cursor == 0 { uint(0) } else { cursor - uint(1) }
+        let arena = heap_arena_of(probe, arena_bytes)
+        let meta = heap_metadata(arena, arena_bytes)
+        let blocks = arena_bytes / block_bytes
+        let recorded = heap_word32(meta + ARENA_ALLOC_CURSOR_OFFSET)
+        let block = if recorded == ARENA_NO_BLOCK { uint(0) } else { recorded }
+        if block >= blocks { return uint(0) }
+        heap_open_block(processor, arena, block, arena_bytes, block_bytes, line_bytes)
+        uint(1)
+    }
+}
+
+/// 返回当前 TLAB 可容纳请求的对齐起点；当前范围不足时只 refill 一次并回写新的 TLAB。
+/// 返回 0 表示没有可提交的 block 或请求仍无法放入 block，调用方必须走既有 fatal 边界。
+fn gc_refill_line(kind_id: uint, payload_bytes: uint, align: uint, flags: uint) uint {
+    unsafe {
+        let address = std.runtime.gc_config()
+        let arena_bytes = gc_config_arena_bytes(address)
+        let block_bytes = gc_config_block_bytes(address)
+        let line_bytes = gc_config_line_bytes(address)
+        let granule_bytes = gc_config_granule_bytes(address)
+        let header = gc_config_object_header_bytes(address)
+        let actual_align = if align > granule_bytes { align } else { granule_bytes }
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let base = heap_word(processor + 3520)
+        let limit = heap_word(processor + 3528)
+        let aligned = (base + header + actual_align - uint(1)) / actual_align * actual_align
+        // 单出口：运行期源码里的中途 `return` 会与复合地址算术一起触发已知代码生成缺陷，
+        // 返回非对齐/截断值（此处表现为 TLAB 地址退化成 1，随后的对象头写入落到 -15）。
+        let room = base != 0 && limit != 0 && aligned <= limit && payload_bytes <= limit - aligned
+        if room {
+            aligned
+        } else {
+            if heap_refill(processor, arena_bytes, block_bytes, line_bytes) == 0 {
+                uint(0)
+            } else {
+                let refreshed_base = heap_word(processor + 3520)
+                let refreshed_limit = heap_word(processor + 3528)
+                let refreshed = (refreshed_base + header + actual_align - uint(1)) / actual_align * actual_align
+                if refreshed > refreshed_limit || payload_bytes > refreshed_limit - refreshed { uint(0) } else { refreshed }
+            }
+        }
+    }
+}
+
+/// 为单 worker 预留固定 edge staging；barrier 热路只递增 count，不在写入时 reserve。
+fn heap_edge_scratch_init(processor: uint) {
+    unsafe {
+        let base = std.platform.reserve_aligned(EDGE_SCRATCH_BYTES, LARGE_MAPPING_PAGE_BYTES)
+        if base == 0 { heap_fail() }
+        let extent = HeapExtent { base, bytes: EDGE_SCRATCH_BYTES }
+        if std.platform.commit(std.mem.transmute[*HeapExtent, uint](std.ptr.addr_of(extent))) != 0 {
+            heap_fail()
+        }
+        heap_store_word(processor + PROCESSOR_EDGE_SCRATCH_OFFSET, base)
+        heap_store_word(base, 0)
+        heap_store_word(base + 8, 0)
+        heap_store_word(base + 16, 0)
+    }
+}
+
+/// 启动分配器：建立第一个 arena、开放首块，把 TLAB 的 cursor/limit 指向它。
+#[used]
+pub fn heap_boot(processor: uint) {
+    unsafe {
+        let address = std.runtime.gc_config()
+        let arena_bytes = gc_config_arena_bytes(address)
+        let block_bytes = gc_config_block_bytes(address)
+        let line_bytes = gc_config_line_bytes(address)
+        let granule_bytes = gc_config_granule_bytes(address)
+        let object_header_bytes = gc_config_object_header_bytes(address)
+        if arena_bytes == 0 || block_bytes == 0 || line_bytes == 0 || granule_bytes == 0 || object_header_bytes == 0 { heap_fail() }
+        let blocks = arena_bytes / block_bytes
+        let arena = heap_arena_create(arena_bytes, blocks * BLOCK_RECORD_BYTES + LARGE_MAPPING_TABLE_BYTES)
+        heap_open_block(processor, arena, uint(0), arena_bytes, block_bytes, line_bytes)
+        heap_store_word(processor + PROCESSOR_ARENA_OFFSET, arena)
+        heap_edge_scratch_init(processor)
+    }
+}
+
+/// 分配慢路：refill 之后在块内完成对齐、header、payload 清零与运行期账本，返回 payload 地址。
+///
+/// 契约来自编译器快路：入参 (kind, bytes, granular, bits)，bits bit0 是压缩位、
+/// bits1..2 是 placement（TurnRegion=0、LocalHeap=1、SharedHeap=2、Resource=3），返回 payload 于 rax。
+/// 越块容量或超出对齐上限进入独立 LargeMapping；零 payload 直接返回 0，普通对象写入
+/// object-start/page-cover/mark/card 账本，供后续 trace 与 collector 消费。
+#[used]
+pub fn gc_alloc_slow(kind: uint, bytes: uint, granular: uint, bits: uint) uint {
+    unsafe {
+        if bytes == 0 { return 0 }
+        let compressed = bits & uint(1)
+        let placement = bits >> 1 & uint(3)
+        if compressed != 0 || placement != uint(1) { heap_fail() }
+        let address = std.runtime.gc_config()
+        let arena_bytes = gc_config_arena_bytes(address)
+        let block_bytes = gc_config_block_bytes(address)
+        let granule_bytes = gc_config_granule_bytes(address)
+        let large_align_limit = gc_config_large_align_limit(address)
+        let header = gc_config_object_header_bytes(address)
+        let align = if granular > granule_bytes { granular } else { granule_bytes }
+        let total_required = header + align - uint(1) + bytes
+        if total_required > block_bytes || align > large_align_limit {
+            let processor = heap_word(std.runtime.current_slot() + 16)
+            return heap_large_allocate(
+                processor,
+                arena_bytes,
+                header,
+                bytes,
+                align,
+                kind,
+                large_align_limit,
+            )
+        }
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        // arena 开不出新块时发布一次分配压力请求：`gc_enter` 在 system stack 上取根并
+        // 推进一个回收周期，返回后 TLAB 已指向重置后的 nursery，重试同一个请求即可。
+        let requested = gc_refill_line(kind, bytes, granular, bits)
+        let aligned = if requested == 0 {
+            heap_store_word32(processor + PROCESSOR_GC_REQUEST_OFFSET, GC_REQUEST_ALLOC)
+            let status = unsafe { std.runtime.gc_enter(processor + PROCESSOR_GC_REQUEST_OFFSET) }
+            if status != 0 { heap_fail() } else { let _ = 0 }
+            gc_refill_line(kind, bytes, granular, bits)
+        } else {
+            requested
+        }
+        if aligned == 0 { heap_fail() }
+        let nursery = GENERATION_NURSERY
+        let direct = REPRESENTATION_LOCAL_DIRECT
+        heap_store_word(aligned - uint(16), header_control(kind, nursery, uint(0), direct))
+        heap_store_word(aligned - uint(8), bytes)
+        let words = bytes / 8
+        let index: uint = 0
+        while index < words {
+            heap_store_word(aligned + index * 8, 0)
+            index = index + 1
+        }
+        let tail = bytes % 8
+        let tail_at = aligned + words * 8
+        let tail_index: uint = 0
+        while tail_index < tail {
+            heap_store_byte(tail_at + tail_index, 0)
+            tail_index = tail_index + 1
+        }
+        heap_store_word(processor + 3520, aligned + bytes)
+        let arena = heap_arena_of(aligned, arena_bytes)
+        // object-start/mark/page-cover 账本一律以 **arena 相对偏移**为下标（与 `heap_mark_payload`
+        // 的 `address - arena - header` 口径一致）；这里曾误用 block 相对偏移，导致账本写到了别的页。
+        let header_offset = aligned - arena - header
+        heap_mark_object_start(arena, arena_bytes, header_offset, granule_bytes)
+        heap_mark_page_cover(arena, arena_bytes, header_offset, header + bytes, granule_bytes)
+        aligned
+    }
+}
+
+/// 搬迁一个 LocalHeap 对象并在旧 header 发布 forwarding；调用方负责把返回值写回根或字段。
+/// 这是 collector 的单对象复制原语，不执行用户代码，也不把 LargeMapping 当普通 block 复制。
+pub fn gc_move_one(root: uint) uint {
+    unsafe {
+        if root == 0 { return 0 }
+        let config = std.runtime.gc_config()
+        let header = gc_config_object_header_bytes(config)
+        let granule = gc_config_granule_bytes(config)
+        if header == 0 || granule == 0 || root < header { heap_fail() }
+        let control = heap_word(root - header)
+        if control & CONTROL_LARGE_OBJECT != uint(0) { return root }
+        if control & CONTROL_FORWARDED != uint(0) { return heap_word(root - header + 8) }
+        let bytes = heap_word(root - header + 8)
+        let kind = header_type_index(control)
+        let moved = gc_alloc_slow(kind, bytes, granule, uint(2))
+        if moved == 0 { heap_fail() }
+        let words = bytes / 8
+        let index: uint = 0
+        while index < words {
+            heap_store_word(moved + index * 8, heap_word(root + index * 8))
+            index = index + 1
+        }
+        let tail = bytes % 8
+        let tail_index: uint = 0
+        while tail_index < tail {
+            heap_store_byte(moved + words * 8 + tail_index, uint(heap_byte(root + words * 8 + tail_index)))
+            tail_index = tail_index + 1
+        }
+        heap_store_word(root - header, control | CONTROL_FORWARDED)
+        heap_store_word(root - header + 8, moved)
+        moved
+    }
+}
+
+// ── TurnRegion：owner-local 区域（`region_schema.rs` 的机器侧镜像）──
+//
+// 机器模型：每个 processor 同时只有一个活跃区域，`processor+3536/+3544` 是它的 cursor/limit，
+// 因此 **limit 就是该区域的容量**，快路径只在其上推进 cursor。区域数据段独立于 arena（不进
+// arena 侧 object_start/mark 位图），控制块紧随数据段之后，地址由 payload 地址反推，不新增
+// 处理器槽位。`used` 一律由 cursor 差算出——快路径不回写账本，只有 cursor 是权威。
+pub const REGION_OBJECT_LIMIT: uint = 64
+pub const REGION_MAX_ACTIVE: uint = 64
+pub const REGION_TRANSFER_LEASE_LIMIT: uint = 1
+pub const REGION_EXPORT_ALL: uint = 31
+pub const REGION_CONTROL_BYTES: uint = 128
+/// 计划编号哨兵：区域已建立但还没有 `publish` 声明它属于哪个 region plan。
+pub const REGION_PLAN_UNCLAIMED: uint = 4294967295
+pub const REGION_STATE_PRIVATE: uint = 0
+pub const REGION_STATE_PUBLISHING: uint = 1
+pub const REGION_STATE_RESET_PENDING: uint = 2
+pub const REGION_STATE_RESET: uint = 3
+pub const REGION_STATE_LOCAL_PROMOTE: uint = 4
+pub const REGION_STATE_REGION_TRANSFER: uint = 5
+pub const REGION_STATE_RECEIVED: uint = 6
+pub const REGION_PLAN_OFFSET: uint = 0
+pub const REGION_GENERATION_OFFSET: uint = 4
+pub const REGION_STATE_OFFSET: uint = 8
+pub const REGION_DECLARED_OFFSET: uint = 12
+pub const REGION_OBSERVED_OFFSET: uint = 16
+pub const REGION_LEASE_OFFSET: uint = 20
+pub const REGION_CAPACITY_OFFSET: uint = 24
+pub const REGION_OBJECTS_OFFSET: uint = 40
+pub const REGION_RESETS_OFFSET: uint = 48
+pub const REGION_PROMOTIONS_OFFSET: uint = 56
+pub const REGION_TRANSFERS_OFFSET: uint = 64
+pub const REGION_RESET_BYTES_OFFSET: uint = 72
+pub const REGION_PROMOTED_BYTES_OFFSET: uint = 80
+pub const REGION_TRANSFER_BYTES_OFFSET: uint = 88
+pub const REGION_COUNTER_BYTES: uint = 96
+
+/// 从任意 payload 地址反推区域数据段基址：数据段按区域字节数对齐。
+fn heap_region_extent_of(address: uint, region_bytes: uint) uint {
+    address / region_bytes * region_bytes
+}
+
+/// 区域控制块地址。cursor 已经推进过，用 cursor-1 反推不会落到下一个区域边界上。
+fn heap_region_control(processor: uint, region_bytes: uint) uint {
+    let cursor = heap_word(processor + 3536)
+    let probe = if cursor == 0 { uint(0) } else { cursor - uint(1) }
+    heap_region_extent_of(probe, region_bytes) + region_bytes
+}
+
+/// 当前区域的 generation；还没有活跃区域时返回 0（首次 open 得到 1，编号不复用）。
+fn heap_region_generation(processor: uint, region_bytes: uint) uint {
+    let cursor = heap_word(processor + 3536)
+    if cursor == 0 { return uint(0) }
+    heap_word32(heap_region_control(processor, region_bytes) + REGION_GENERATION_OFFSET)
+}
+
+/// 已用字节：直接由 cursor 与数据段基址的差算出（快路径只推进 cursor）。
+fn heap_region_used(processor: uint, region_bytes: uint) uint {
+    let cursor = heap_word(processor + 3536)
+    let extent = heap_region_extent_of(cursor - uint(1), region_bytes)
+    cursor - extent
+}
+
+/// 打开一个新区域：数据段按区域字节数对齐 reserve（控制块紧随其后），清零控制块，把
+/// cursor/limit 指向它。generation 从上一个区域前进且不复用。
+fn heap_region_activate(processor: uint, region_bytes: uint) {
+    unsafe {
+        let generation = heap_region_generation(processor, region_bytes) + uint(1)
+        let total = region_bytes + REGION_CONTROL_BYTES
+        let extent = std.platform.reserve_aligned(total, region_bytes)
+        if extent == 0 { heap_fail() }
+        let control = extent + region_bytes
+        let side = HeapExtent { base: control, bytes: REGION_CONTROL_BYTES }
+        if std.platform.commit(std.mem.transmute[*HeapExtent, uint](std.ptr.addr_of(side))) != 0 { heap_fail() }
+        let at = control
+        let end = control + REGION_CONTROL_BYTES
+        while at < end {
+            heap_store_word(at, 0)
+            at = at + 8
+        }
+        heap_store_word32(control + REGION_GENERATION_OFFSET, generation)
+        heap_store_word32(control + REGION_PLAN_OFFSET, REGION_PLAN_UNCLAIMED)
+        heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_PRIVATE)
+        heap_store_word(control + REGION_CAPACITY_OFFSET, region_bytes)
+        heap_store_word(processor + 3536, extent)
+        heap_store_word(processor + 3544, extent + region_bytes)
+    }
+}
+
+/// 把当前区域交给 owner 之外的生命周期处置（promote/transfer）：把 limit 收到 cursor，
+/// 后续分配必须开新区域。**绝不回退 cursor** —— 已分配对象仍然有效、字节仍计入 owner。
+fn heap_region_retire(processor: uint) {
+    let cursor = heap_word(processor + 3536)
+    heap_store_word(processor + 3544, cursor)
+}
+
+/// 生命周期入口的公共前置：取配置、processor、控制块，并校验计划编号与状态。
+fn heap_region_check(processor: uint, region_bytes: uint, plan: uint, state: uint) uint {
+    let control = heap_region_control(processor, region_bytes)
+    if heap_word32(control + REGION_STATE_OFFSET) != state { heap_fail() }
+    if heap_word32(control + REGION_PLAN_OFFSET) != plan & uint(4294967295) { heap_fail() }
+    control
+}
+
+/// TurnRegion 的分配慢路：与 `gc_alloc_slow` 同一四参 ABI，placement 位必须是 0。
+///
+/// 快路径失败（容量类上界或 cursor 越过 limit）时开启新区域：旧区域的字节仍计入 owner 且
+/// 内存保持 committed，绝不把 cursor 拉回去假装释放；区域回收与归还闭环属 pacing 单元。
+#[used]
+pub fn gc_region_slow(kind: uint, bytes: uint, granular: uint, bits: uint) uint {
+    unsafe {
+        let config = std.runtime.gc_config()
+        let region_bytes = gc_config_block_bytes(config)
+        let object_header = gc_config_object_header_bytes(config)
+        if bits & uint(6) != 0 { heap_fail() }
+        if bytes + object_header > region_bytes { heap_fail() }
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let align = if granular < uint(16) { uint(16) } else { granular }
+        let cursor = heap_word(processor + 3536)
+        let limit = heap_word(processor + 3544)
+        if cursor == 0 || cursor + bytes + object_header > limit {
+            heap_region_activate(processor, region_bytes)
+        }
+        let base = heap_word(processor + 3536)
+        let end = heap_word(processor + 3544)
+        let aligned = (base + object_header + align - uint(1)) / align * align
+        if aligned + bytes > end { heap_fail() }
+        let nursery = GENERATION_NURSERY
+        let turn = REPRESENTATION_TURN_REGION
+        heap_store_word(aligned - uint(16), header_control(kind, nursery, uint(0), turn))
+        heap_store_word(aligned - uint(8), bytes)
+        let words = bytes / 8
+        let index: uint = 0
+        while index < words {
+            heap_store_word(aligned + index * 8, 0)
+            index = index + 1
+        }
+        let tail = bytes % 8
+        let tail_at = aligned + words * 8
+        let tail_index: uint = 0
+        while tail_index < tail {
+            heap_store_byte(tail_at + tail_index, 0)
+            tail_index = tail_index + 1
+        }
+        let control = heap_region_control(processor, region_bytes)
+        heap_store_word(control + REGION_OBJECTS_OFFSET, heap_word(control + REGION_OBJECTS_OFFSET) + uint(1))
+        heap_store_word(processor + 3536, aligned + bytes)
+        aligned
+    }
+}
+
+/// 区域发布：登记计划编号与声明的导出位集合。`publish` 是第一个携带计划身份的入口，
+/// 因此它认领开放后被分配过的区域；重复发布（状态不是 private/received）是内部错误。
+#[used]
+pub fn gc_region_publish(plan: uint, export: uint) {
+    unsafe {
+        if export > REGION_EXPORT_ALL { heap_fail() }
+        let config = std.runtime.gc_config()
+        let region_bytes = gc_config_block_bytes(config)
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let control = heap_region_control(processor, region_bytes)
+        let state = heap_word32(control + REGION_STATE_OFFSET)
+        if state != REGION_STATE_PRIVATE && state != REGION_STATE_RECEIVED { heap_fail() }
+        let recorded = heap_word32(control + REGION_PLAN_OFFSET)
+        if recorded != REGION_PLAN_UNCLAIMED && recorded != plan & uint(4294967295) { heap_fail() }
+        heap_store_word32(control + REGION_PLAN_OFFSET, plan & uint(4294967295))
+        heap_store_word32(control + REGION_DECLARED_OFFSET, export & uint(4294967295))
+        heap_store_word32(control + REGION_OBSERVED_OFFSET, uint(0))
+        heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_PUBLISHING)
+    }
+}
+
+/// 区域复位：只有 `state==publishing`、`transfer_lease==0` 且 export summary 闭合才允许。
+/// 三条判据任一不满足都是内部错误——编译器只在 summary 闭合时发这条指令，否则必须发
+/// promote；静默清 cursor 会把仍有外部引用的对象当空闲空间复用。
+#[used]
+pub fn gc_region_reset(plan: uint) {
+    unsafe {
+        let config = std.runtime.gc_config()
+        let region_bytes = gc_config_block_bytes(config)
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let control = heap_region_check(processor, region_bytes, plan, REGION_STATE_PUBLISHING)
+        if heap_word32(control + REGION_LEASE_OFFSET) != 0 { heap_fail() }
+        let summary = heap_word32(control + REGION_DECLARED_OFFSET) | heap_word32(control + REGION_OBSERVED_OFFSET)
+        if summary & REGION_EXPORT_ALL != 0 { heap_fail() }
+        let used = heap_region_used(processor, region_bytes)
+        heap_store_word(control + REGION_RESET_BYTES_OFFSET, heap_word(control + REGION_RESET_BYTES_OFFSET) + used)
+        heap_store_word(control + REGION_RESETS_OFFSET, heap_word(control + REGION_RESETS_OFFSET) + uint(1))
+        heap_store_word(control + REGION_OBJECTS_OFFSET, 0)
+        let generation = heap_word32(control + REGION_GENERATION_OFFSET) + uint(1)
+        heap_store_word32(control + REGION_GENERATION_OFFSET, generation)
+        heap_store_word32(control + REGION_PLAN_OFFSET, REGION_PLAN_UNCLAIMED)
+        heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_PRIVATE)
+        let extent = control - region_bytes
+        heap_store_word(processor + 3536, extent)
+        heap_store_word(processor + 3544, extent + region_bytes)
+    }
+}
+
+/// 区域提升：有任一导出位时区域字节转入 owner 本地堆记账，地址稳定、不搬对象；区域退役，
+/// 后续分配必须开新区域。
+#[used]
+pub fn gc_region_promote(plan: uint) {
+    unsafe {
+        let config = std.runtime.gc_config()
+        let region_bytes = gc_config_block_bytes(config)
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let control = heap_region_check(processor, region_bytes, plan, REGION_STATE_PUBLISHING)
+        let used = heap_region_used(processor, region_bytes)
+        heap_store_word(control + REGION_PROMOTED_BYTES_OFFSET, heap_word(control + REGION_PROMOTED_BYTES_OFFSET) + used)
+        heap_store_word(control + REGION_PROMOTIONS_OFFSET, heap_word(control + REGION_PROMOTIONS_OFFSET) + uint(1))
+        heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_LOCAL_PROMOTE)
+        heap_region_retire(processor)
+    }
+}
+
+/// 区域转移：占用一次 transfer lease 并退役区域，ownership 交给接收方唯一结清；失败保留
+/// 发送方 ownership（因此这里只在状态与租约都合法时前进）。消息发布、接收侧预留与结清
+/// 需要目标身份与 epoch，编译器当前的 op 只携带计划编号，那条路径属消息单元。
+#[used]
+pub fn gc_region_transfer(plan: uint) {
+    unsafe {
+        let config = std.runtime.gc_config()
+        let region_bytes = gc_config_block_bytes(config)
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let control = heap_region_check(processor, region_bytes, plan, REGION_STATE_PUBLISHING)
+        let lease = heap_word32(control + REGION_LEASE_OFFSET)
+        if lease >= REGION_TRANSFER_LEASE_LIMIT { heap_fail() }
+        let used = heap_region_used(processor, region_bytes)
+        heap_store_word32(control + REGION_LEASE_OFFSET, lease + uint(1))
+        heap_store_word(control + REGION_TRANSFER_BYTES_OFFSET, heap_word(control + REGION_TRANSFER_BYTES_OFFSET) + used)
+        heap_store_word(control + REGION_TRANSFERS_OFFSET, heap_word(control + REGION_TRANSFERS_OFFSET) + uint(1))
+        heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_REGION_TRANSFER)
+        heap_region_retire(processor)
+    }
 }

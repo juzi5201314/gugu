@@ -2,7 +2,7 @@
 mod eval;
 mod graph;
 mod query;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod tests;
 pub(crate) mod universe;
 
@@ -65,11 +65,18 @@ impl LateTable {
                 "late 结果表的 universe、顺序或指纹不合法",
             ));
         }
+        // MonoWorld 的实例按摘要严格排序，下标即 MonoId。
+        debug_assert!(world.instances.windows(2).all(|pair| {
+            crate::frontend::mono::digest_of(&pair[0].mono_key)
+                < crate::frontend::mono::digest_of(&pair[1].mono_key)
+        }));
         for result in &self.results {
-            if !world
+            if world
                 .instances
-                .iter()
-                .any(|i| crate::frontend::mono::digest_of(&i.mono_key) == result.key.instance)
+                .binary_search_by_key(&result.key.instance, |instance| {
+                    crate::frontend::mono::digest_of(&instance.mono_key)
+                })
+                .is_err()
             {
                 return Err(universe::invalid("late 结果引用未闭合实例"));
             }

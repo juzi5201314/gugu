@@ -51,6 +51,8 @@ pub(crate) struct WalkMap {
     pub(crate) handle: Vec<u32>,
     pub(crate) compressed: Vec<u32>,
     pub(crate) stack: Vec<u32>,
+    /// 由帧内初始化字节门控的根。
+    pub(crate) typed: Vec<crate::runtime::stackmap_codec::TypedRoot>,
 }
 
 /// handle 表项：slot 的当前 payload 与 generation。
@@ -125,6 +127,15 @@ pub(crate) fn find_safepoint(
     }
 }
 
+/// 读取帧内逐根初始化字节；偏移必须落在帧范围内。
+fn byte_at(words: &[u64], offset: u32) -> Result<u8, RawModelError> {
+    let index = usize::try_from(offset).map_err(|_| RawModelError::new("初始化字节偏移越界"))?;
+    let word = words
+        .get(index / 8)
+        .ok_or_else(|| RawModelError::new("初始化字节超出帧范围"))?;
+    Ok((word >> (8 * (index % 8))) as u8)
+}
+
 /// 扫描一个安全点的五类根：按槽偏移排序返回。
 ///
 /// `words` 为已用栈范围的字数组（小端）；handle 与压缩引用的字分别经表做 checked
@@ -154,19 +165,35 @@ pub(crate) fn scan_roots(
         .chain(&map.compressed)
         .chain(&map.stack)
     {
-        if !seen.insert(offset) {
+        if !seen.insert(*offset) {
             return Err(RawModelError::new("同一槽在两类位图中重复出现"));
         }
     }
+    // 逐根初始化条目：只有帧内初始化字节非零时该字才参与扫描——并集条目在别的变体里可能是
+    // 标量，不得当作指针。字节与固定位图互斥由编码校验保证，这里按读取顺序复验一次。
+    let mut gated: [Vec<u32>; 5] = std::array::from_fn(|_| Vec::new());
+    for entry in &map.typed {
+        if !seen.insert(entry.word) {
+            return Err(RawModelError::new("同一槽在两类位图中重复出现"));
+        }
+        if byte_at(words, entry.init_byte)? == 0 {
+            continue;
+        }
+        let class = usize::try_from(entry.root_kind)
+            .ok()
+            .filter(|class| *class < gated.len())
+            .ok_or_else(|| RawModelError::new("逐根初始化条目根种类越界"))?;
+        gated[class].push(entry.word);
+    }
     let mut roots = Vec::new();
-    for offset in &map.direct {
+    for offset in map.direct.iter().chain(&gated[0]) {
         let word = word_at(words, *offset)?;
         if word == 0 {
             continue;
         }
         roots.push(ScannedRoot::Direct(*offset));
     }
-    for offset in &map.interior {
+    for offset in map.interior.iter().chain(&gated[1]) {
         let word = word_at(words, *offset)?;
         if word == 0 {
             continue;
@@ -177,7 +204,7 @@ pub(crate) fn scan_roots(
             delta: (word & 0xffff_ffff) as u32,
         });
     }
-    for offset in &map.handle {
+    for offset in map.handle.iter().chain(&gated[2]) {
         let word = word_at(words, *offset)?;
         // 全零字是空引用：不查表、不计数。槽 0 不能表示活动 handle。
         if word == 0 {
@@ -196,7 +223,7 @@ pub(crate) fn scan_roots(
             payload: handle.payload,
         });
     }
-    for offset in &map.compressed {
+    for offset in map.compressed.iter().chain(&gated[3]) {
         let word = word_at(words, *offset)?;
         if let Some(target) = compression.decode(word)? {
             roots.push(ScannedRoot::Compressed {
@@ -205,7 +232,7 @@ pub(crate) fn scan_roots(
             });
         }
     }
-    for offset in &map.stack {
+    for offset in map.stack.iter().chain(&gated[4]) {
         let word = word_at(words, *offset)?;
         if word == 0 {
             continue;
@@ -313,6 +340,7 @@ pub(crate) fn consume_metadata(
             handle: map.slots[2].clone(),
             compressed: map.slots[3].clone(),
             stack: map.slots[4].clone(),
+            typed: map.typed.clone(),
         })
         .collect();
     let world = WalkWorld {
@@ -346,8 +374,10 @@ pub(crate) fn consume_metadata(
         if find_safepoint(&world, point.function, point.pc_offset)? != index as u32 {
             return Err(RawModelError::new("安全点二分查找没有命中自身"));
         }
-        let map = &maps[point.map as usize];
-        let words = zero_words(map);
+        // 合成帧必须覆盖整帧：逐根初始化字节位于槽位图范围之外，按 map 的 slot 数开表会
+        // 把它们判成越界。
+        let words =
+            vec![0_u64; usize::try_from(function.frame_size / 8).expect("帧字数适配 usize")];
         let roots = scan_roots(&world, index as u32, &words, &mut plane)?;
         scanned = scanned.saturating_add(roots.len() as u32);
         if decoded.safepoints[index].flags & 1 != 0 {

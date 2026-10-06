@@ -70,6 +70,21 @@ pub(crate) fn collect(
     for ty in entry.bindings.values() {
         collector.visit(&concrete(context, ty)?)?;
     }
+    // 闭包环境与 spawn 参数包是真实分配出去的 managed 对象：它们的 descriptor 必须在冻结前
+    // 进入同一张类型表，LIR 之后只按同一份键查表，不再自造 descriptor。
+    for record in super::storage::collect(context, entry)? {
+        if collector
+            .records
+            .insert(record.key, record.clone())
+            .is_some()
+        {
+            return Err(Diagnostic::error(
+                crate::DiagnosticCode::MonoDivergence,
+                "存储类型与已有类型键冲突",
+                None,
+            ));
+        }
+    }
     Ok((collector.records.into_values().collect(), bindings))
 }
 

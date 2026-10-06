@@ -465,7 +465,7 @@ fn classify_parameter(index: u32, ty: ValueType, by_address: bool, slots: &mut S
     }
 }
 
-fn is_float(ty: ValueType) -> bool {
+pub(crate) fn is_float(ty: ValueType) -> bool {
     matches!(ty.ty, Type::F32 | Type::F64 | Type::V128(_))
 }
 

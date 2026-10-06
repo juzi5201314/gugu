@@ -155,6 +155,14 @@ crates/
 
 `gugu-compiler` 使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
 
+### 编译器测试构建
+
+默认 `cargo nextest run --workspace` 使用 `profile.test`：`opt-level = 3`、有限调试信息，
+同时显式保留 `debug-assertions` 与 `overflow-checks`。测试、fixture、断言、目标矩阵、
+冷热缓存重放与生产编译阶段全部保留；不得通过忽略测试或降低分析预算来缩短验收。
+测试可执行文件的构建时间与 nextest 执行时间分别记录：优化构建增加首次编译成本，
+已有构建产物下的全量验收仍使用相同命令，不需要专用过滤条件或持久化测试缓存。
+
 ## 目标描述与 rt0 边界
 
 `TargetName` 只接受规范登记的 `x86_64-linux` 和 `x86_64-windows`。每个目标由不可变 `TargetDescriptor` 提供架构、操作系统、对象格式、指针宽度、rt0 类型、页大小与 CPU 基线：

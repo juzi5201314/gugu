@@ -128,6 +128,8 @@ pub(crate) struct ValueLive {
     pub(crate) start: u32,
     /// 区间终点。
     pub(crate) end: u32,
+    /// 该值出现在「禁止寄存器根」安全点的逻辑根集里：区间必须覆盖该点，且必须落 frame slot。
+    pub(crate) forced: bool,
     /// `u64` 饱和累加的 spill 权重。
     pub(crate) weight: u64,
     /// 拷贝提示，按 `(组起点, pair 序号)` 排列。
@@ -211,6 +213,8 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
     let mut values = collect_values(body);
     let mut points = Vec::new();
     let mut sites: Vec<SitePoints> = Vec::new();
+    // 每个站点对应的布局序块、LIR 指令与点位区间：用于把逻辑根集映射回点位。
+    let mut site_slots: Vec<(u32, u32, u32, u32)> = Vec::new();
     let words = value_count.div_ceil(64);
     let mut uses = vec![vec![0_u64; words]; body.blocks.len()];
     let mut defs = vec![vec![0_u64; words]; body.blocks.len()];
@@ -237,6 +241,12 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
                 site: index,
                 points: first..u32::try_from(points.len()).expect("点位数适配 u32"),
             });
+            site_slots.push((
+                u32::try_from(lir).expect("块号适配 u32"),
+                site.instruction,
+                first,
+                u32::try_from(points.len()).expect("点位数适配 u32"),
+            ));
         }
         let index = u32::try_from(sites.len()).expect("站点数适配 u32");
         let first = u32::try_from(points.len()).expect("点位数适配 u32");
@@ -252,15 +262,54 @@ pub(crate) fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveIn
             &mut uses[lir],
             &mut defs[lir],
         )?;
+        let last = u32::try_from(points.len()).expect("点位数适配 u32");
+        // 边实参拷贝由 `copies::edge_copies` 在分配阶段直接从 LIR 生成，其源值不出现在任何已
+        // 降级序列里。这里按出边实参补记使用点：否则这些值的活跃区间只覆盖定义点，它们的物理
+        // 寄存器与溢出槽都会被后续值复用，φ/返回搬运随即读到别人的值。
+        if last > first {
+            let point = points.last().expect("站点至少一个点位");
+            for edge in terminator_edges(body, &body.blocks[lir].terminator) {
+                if body.edges[edge.index()].unwind {
+                    // unwind 边的实参只在异常路径上有意义，把它们当作正常路径的使用会让
+                    // 未定义于该路径的值被判为活跃。异常路径的活跃性由 `visit_site` 覆盖。
+                    continue;
+                }
+                for argument in body.args(&body.edges[edge.index()].arguments) {
+                    // 跨块实参同样必须算作使用点：φ/返回搬运由 `copies::edge_copies` 在分配之后
+                    // 直接从边实参生成，若不登记，跨块携带的值区间会在定义点之后被判死，寄存器
+                    // 与溢出槽随即被复用，分派/搬运就会读到别人的值。`Mem` 是记忆化令牌，没有
+                    // 寄存器或槽位，不作为普通使用登记。
+                    if body.values[argument.index()].kind.ty == crate::lir::body::Type::Mem {
+                        continue;
+                    }
+                    event(
+                        body,
+                        &mut values,
+                        &mut uses[lir],
+                        &mut defs[lir],
+                        Reg::Virtual(argument.0),
+                        Event::Use,
+                        point,
+                    )?;
+                }
+            }
+        }
         sites.push(SitePoints {
             site: index,
-            points: first..u32::try_from(points.len()).expect("点位数适配 u32"),
+            points: first..last,
         });
+        site_slots.push((
+            u32::try_from(lir).expect("块号适配 u32"),
+            body.blocks[lir].instructions.end,
+            first,
+            last,
+        ));
     }
 
     let liveness = liveness(body, &uses, &defs);
     let bounds = block_bounds(&points, body.blocks.len());
     intervals(&bounds, &mut values, &liveness);
+    anchor_coverage(body, &site_slots, &mut values)?;
     let depths = loop_depths(body);
     weights(&points, &depths, &mut values);
     Ok(LiveInfo {
@@ -288,6 +337,7 @@ fn collect_values(body: &Body) -> Vec<ValueLive> {
                 byte_operand: false,
                 rematerializable,
                 uses: Vec::new(),
+                forced: false,
                 start: u32::MAX,
                 end: 0,
                 weight: 0,
@@ -626,6 +676,65 @@ fn liveness(body: &Body, uses: &[Vec<u64>], defs: &[Vec<u64>]) -> Liveness {
     Liveness { live_in, live_out }
 }
 
+/// 按 LIR 逻辑根集补齐区间与强制落槽。
+///
+/// 分配器用「触碰点 + 块边界」造凸区间：值在最后一次触碰之后、但仍处于逻辑活跃集里的点
+/// （单块无后继、或活跃性只在块级可见）拿不到覆盖。于是 `forced_slot` 不置位，值留在寄存器；
+/// 或者区间不覆盖该点，后端 `covers_slot` 判它已死而把根丢掉——对象被搬走而引用不更新。
+///
+/// 逻辑根集本身就是「槽根 + 本指令操作数 + 跨点活跃值」三源的并集，是栈图契约的权威来源；
+/// 这里直接以它为准：出现在禁止寄存器根的安全点根集里的值，区间必须覆盖该点且必须落 frame slot。
+fn anchor_coverage(
+    body: &Body,
+    site_slots: &[(u32, u32, u32, u32)],
+    values: &mut [ValueLive],
+) -> Result<(), AllocError> {
+    let anchors = crate::lir::stackmap::anchors(body)
+        .map_err(|_| AllocError::new("逻辑栈图推导失败，无法对齐分配器区间"))?;
+    for anchor in &anchors {
+        // `PollResume` 允许寄存器根；`MorestackEntry` 描述 ABI 输入，不参与本对齐。
+        if !matches!(anchor.kind, 0 | 2 | 3) {
+            continue;
+        }
+        // 点位区间是**点位下标**（`use_slot = 下标 * 2`），不是 `use_slot` 本身；
+        // 同一 LIR 指令可能降级成多个站点，取它们的并集。
+        let (mut first, mut last) = (u32::MAX, 0_u32);
+        for (order, instruction, start, stop) in site_slots {
+            if *order == anchor.block && *instruction == anchor.instruction {
+                first = first.min(*start);
+                last = last.max(*stop);
+            }
+        }
+        if last == 0 {
+            continue;
+        }
+        let cover_first = first.saturating_mul(2);
+        let cover_last = last.saturating_sub(1).saturating_mul(2);
+        for lane in [
+            &anchor.roots.direct,
+            &anchor.roots.interior,
+            &anchor.roots.handle,
+            &anchor.roots.compressed,
+            &anchor.roots.stack,
+        ] {
+            for root in lane.iter() {
+                let crate::lir::stackmap::LogicalRoot::Value { value, .. } = root else {
+                    continue;
+                };
+                let Some(slot) = values.get_mut(*value as usize) else {
+                    continue;
+                };
+                if !slot.is_live() {
+                    continue;
+                }
+                slot.start = slot.start.min(cover_first);
+                slot.end = slot.end.max(cover_last);
+                slot.forced = true;
+            }
+        }
+    }
+    Ok(())
+}
 fn union_into(dst: &mut [u64], src: &[u64]) {
     for (left, right) in dst.iter_mut().zip(src) {
         *left |= *right;
@@ -667,6 +776,31 @@ fn bit(bits: &[u64], index: usize) -> bool {
 struct BlockBounds {
     first_use: u32,
     last_def: u32,
+}
+
+/// 终结符的全部出边；与 `layout::successors` 覆盖同一组边，但保留边本身。
+fn terminator_edges(body: &Body, terminator: &Terminator) -> Vec<crate::lir::body::EdgeId> {
+    match terminator {
+        Terminator::Jump(edge) => vec![*edge],
+        Terminator::Branch { yes, no, .. } => vec![*yes, *no],
+        Terminator::Switch {
+            cases, otherwise, ..
+        } => {
+            let mut edges: Vec<crate::lir::body::EdgeId> = body.switch_cases
+                [crate::lir::body::range(cases)]
+            .iter()
+            .map(|(_, edge)| *edge)
+            .collect();
+            edges.push(*otherwise);
+            edges
+        }
+        Terminator::Invoke { normal, unwind, .. } => vec![*normal, *unwind],
+        Terminator::Return { .. }
+        | Terminator::ResumePanic { .. }
+        | Terminator::TailCall { .. }
+        | Terminator::Trap { .. }
+        | Terminator::Unreachable { .. } => Vec::new(),
+    }
 }
 
 /// 布局序块 → slot 边界；空块（无点位）不参与区间扩展。

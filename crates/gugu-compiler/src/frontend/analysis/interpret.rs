@@ -3,7 +3,7 @@
 use super::domain::{AbstractState, Interval, ValueKey};
 use super::policy::AnalysisPolicyV1;
 use super::transfer;
-use super::transfer_gir::{self, CompareFact};
+use super::transfer_gir::{self, CompareFact, IndexedBody};
 use super::types::{FunctionSummary, ProofFact, ProofStatus, ReturnRelation, RuntimeCheckKey};
 use crate::frontend::gir::GirWorldV1;
 use crate::frontend::gir::body::{BlockId, GirBody, Rvalue, StatementKind, Terminator};
@@ -26,6 +26,8 @@ pub(crate) fn analyze_owner(
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> BodyResult {
     let passing = PassingTable::new(module);
+    let indexed = IndexedBody::new(body, owner);
+    let body = &indexed;
     let locals = owner.locals.len();
     let exprs = owner.expressions.len();
     let params = owner.parameters.len();
@@ -111,18 +113,22 @@ fn seed_param_lens(module: &Module, owner: &Owner, state: &mut AbstractState) {
 fn iterate(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     inbound: &mut [AbstractState],
     rounds: u32,
     passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> bool {
+    // 块编号是稠密下标；只有入状态改变后，原传播结果才可能改变。
+    let mut dirty = vec![false; body.blocks.len()];
+    dirty[body.entry.index()] = true;
     for _ in 0..rounds {
         let mut changed = false;
         for index in 0..body.blocks.len() {
-            if !inbound[index].reachable && index != body.entry.index() {
+            if !dirty[index] || (!inbound[index].reachable && index != body.entry.index()) {
                 continue;
             }
+            dirty[index] = false;
             let mut state = inbound[index].clone();
             let compare = execute_block(
                 module,
@@ -143,6 +149,7 @@ fn iterate(
                 compare.as_ref(),
                 callees,
                 false,
+                Some(&mut dirty),
             );
         }
         if !changed {
@@ -155,7 +162,7 @@ fn iterate(
 fn narrow(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     inbound: &mut Vec<AbstractState>,
     rounds: u32,
     passing: &PassingTable,
@@ -185,6 +192,7 @@ fn narrow(
                 compare.as_ref(),
                 callees,
                 true,
+                None,
             );
         }
         if next == *inbound {
@@ -197,7 +205,7 @@ fn narrow(
 fn execute_block(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     id: BlockId,
     state: &mut AbstractState,
     passing: &PassingTable,
@@ -229,19 +237,20 @@ fn execute_block(
 fn propagate(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     inbound: &mut [AbstractState],
     id: BlockId,
-    mut state: AbstractState,
+    state: AbstractState,
     compare: Option<&CompareFact>,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
     narrowing: bool,
+    mut dirty: Option<&mut [bool]>,
 ) -> bool {
     let edges = transfer_gir::successor_states(
         module,
         owner,
         body,
-        &mut state,
+        state,
         &body.blocks[id.index()].terminator,
         compare,
         callees,
@@ -249,7 +258,12 @@ fn propagate(
     let mut changed = false;
     for (target, next) in edges {
         let backedge = target.0 <= id.0 && !narrowing;
-        changed |= join_into(inbound, target, &next, backedge);
+        if join_into(inbound, target, &next, backedge) {
+            changed = true;
+            if let Some(dirty) = dirty.as_deref_mut() {
+                dirty[target.index()] = true;
+            }
+        }
     }
     changed
 }
@@ -271,7 +285,7 @@ fn collect_proofs(
     module: &Module,
     owner: &Owner,
     owner_index: u32,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     inbound: &[AbstractState],
     passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
@@ -285,7 +299,7 @@ fn collect_proofs(
             &body.statements[block.statements.start as usize..block.statements.end as usize]
         {
             if let StatementKind::Assign(_, Rvalue::CheckedOp { check, .. }) = &statement.kind {
-                transfer_gir::sync_resolved(module, owner, &mut state);
+                transfer_gir::sync_resolved(module, owner, body, &mut state);
                 let check = &owner.checks[usize::try_from(*check).expect("检查编号适配宿主")];
                 proofs.push(ProofFact {
                     key: RuntimeCheckKey {
@@ -314,7 +328,7 @@ fn collect_proofs(
 fn summarize(
     module: &Module,
     owner: &Owner,
-    body: &GirBody,
+    body: &IndexedBody<'_>,
     inbound: &[AbstractState],
     passing: &PassingTable,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,

@@ -133,7 +133,12 @@ fn budget_exhaustion_is_deterministic() {
         &QueryEngine::new(),
     )
     .expect("基线编译成功");
-    let mut model = Model::new(&output.modules, &output.names).unwrap();
+    let mut model = Model::new(
+        &output.modules,
+        &output.names,
+        &std::collections::BTreeSet::new(),
+    )
+    .unwrap();
     model.set_eval_profile(comptime::eval::EvalProfile {
         fuel: 1,
         heap_bytes: 1 << 20,
@@ -250,7 +255,12 @@ fn comptime_heap_accounts_for_aggregate_payloads() {
         &[("main.gg", "const A: [string; 4] = [\"abcdefgh\"; 4]\nconst B: string = (\"abcd\" + \"efgh\") + \"ijkl\"\nfn main() {}")],
         &QueryEngine::new(),
     ).expect("普通预算下聚合可求值");
-    let mut model = Model::new(&output.modules, &output.names).unwrap();
+    let mut model = Model::new(
+        &output.modules,
+        &output.names,
+        &std::collections::BTreeSet::new(),
+    )
+    .unwrap();
     model.set_eval_profile(comptime::eval::EvalProfile {
         fuel: 1000,
         heap_bytes: 16,

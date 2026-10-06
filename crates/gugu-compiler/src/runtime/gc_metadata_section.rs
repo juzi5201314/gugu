@@ -9,7 +9,7 @@
 
 use super::gc_metadata_contract::GC_METADATA_TYPE_SECTION_VERSION;
 use super::gc_metadata_schema::{
-    GcMetadataWorldV1, GcRootKindV1, GcRootLocationV1, GcSourceEntryV1, boot_verify,
+    GC_TYPE_FLAG_MASK, GC_TYPE_HAS_VALUE_ACTIONS, GcMetadataWorldV1, GcSourceEntryV1, boot_verify,
     trace_descriptor_len, value_program_len,
 };
 use super::model::RawModelError;
@@ -28,6 +28,14 @@ pub(crate) fn encode_sections(
 const TYPE_HEADER_BYTES: usize = 88;
 /// 单条 type record 的字节数。镜像里的 `TypeDescriptor` 符号使用同一尺寸。
 pub(crate) const TYPE_RECORD_BYTES: usize = 80;
+
+/// 稠密 `TypeId` 的记录在 type section 内的字节偏移。
+///
+/// `Symbol::TypeDescriptor` 的真实地址就是 type section 起点加这个偏移；两个 writer 与
+/// 运行时代码不使用独立 descriptor blob，记录本身就是描述符。
+pub(crate) const fn descriptor_offset(type_id: u32) -> u64 {
+    TYPE_HEADER_BYTES as u64 + type_id as u64 * TYPE_RECORD_BYTES as u64
+}
 const META_HEADER_BYTES: usize = 88;
 const ROOT_RECORD_BYTES: usize = 32;
 const SOURCE_RECORD_BYTES: usize = 48;
@@ -104,7 +112,7 @@ fn encode_type_section(world: &GcMetadataWorldV1) -> Result<Vec<u8>, RawModelErr
         let align = u32::try_from(align).map_err(|_| RawModelError::new("type align 超过 u32"))?;
         record[0..8].copy_from_slice(&size.to_le_bytes());
         record[8..12].copy_from_slice(&align.to_le_bytes());
-        record[12..16].copy_from_slice(&u32::from(entry.flags).to_le_bytes());
+        record[12..16].copy_from_slice(&entry.flags.to_le_bytes());
         let name = entry.name.as_bytes();
         let offset = *name_offsets.get(name).expect("name 已登记");
         let name_len =
@@ -149,7 +157,7 @@ fn encode_metadata_section(world: &GcMetadataWorldV1) -> Result<Vec<u8>, RawMode
         string_pool.extend_from_slice(path.as_bytes());
     }
     let root_offset = align_up_u64(META_HEADER_BYTES as u64, 8)?;
-    let root_bytes = u64::try_from(world.roots.len())
+    let root_bytes = u64::try_from(world.image_roots.len())
         .map_err(|_| RawModelError::new("root 数量溢出"))?
         .checked_mul(ROOT_RECORD_BYTES as u64)
         .ok_or_else(|| RawModelError::new("root records 长度溢出"))?;
@@ -212,10 +220,10 @@ fn encode_metadata_section(world: &GcMetadataWorldV1) -> Result<Vec<u8>, RawMode
         .map_err(|_| RawModelError::new("metadata section 超过宿主地址空间"))?;
     let mut out = vec![0u8; META_HEADER_BYTES];
     out[0..8].copy_from_slice(b"GUGUMT01");
-    out[8..10].copy_from_slice(&1u16.to_le_bytes());
+    out[8..10].copy_from_slice(&2u16.to_le_bytes());
     out[10] = 8;
     out[11] = 1;
-    put_u32(&mut out, 12, world.roots.len() as u32)?;
+    put_u32(&mut out, 12, world.image_roots.len() as u32)?;
     put_u32(&mut out, 16, world.vtables.len() as u32)?;
     put_u32(&mut out, 20, world.sources.len() as u32)?;
     put_u32(&mut out, 24, 0)?;
@@ -228,18 +236,14 @@ fn encode_metadata_section(world: &GcMetadataWorldV1) -> Result<Vec<u8>, RawMode
     put_u64(&mut out, 72, string_pool.len() as u64);
     put_u64(&mut out, 80, section_len);
     pad_to(&mut out, root_offset as usize);
-    for root in &world.roots {
+    for root in &world.image_roots {
         let mut record = vec![0u8; ROOT_RECORD_BYTES];
-        let location = match &root.location {
-            GcRootLocationV1::Aggregate { offset_bytes } => *offset_bytes,
-            GcRootLocationV1::Vtable { vtable_index } => u64::from(*vtable_index),
-        };
-        record[0..8].copy_from_slice(&location.to_le_bytes());
-        record[8..12].copy_from_slice(&root.type_range.0.to_le_bytes());
-        record[12..14].copy_from_slice(&root_kind(root.kind.clone()).to_le_bytes());
-        record[16..24]
-            .copy_from_slice(&u64::from(root.word_range.1 - root.word_range.0).to_le_bytes());
-        record[24..32].copy_from_slice(&8u64.to_le_bytes());
+        record[0..8].copy_from_slice(&root.location.to_le_bytes());
+        record[8..12].copy_from_slice(&root.type_id.to_le_bytes());
+        record[12..14].copy_from_slice(&root.kind.code().to_le_bytes());
+        record[14..16].copy_from_slice(&root.flags.to_le_bytes());
+        record[16..24].copy_from_slice(&root.count.to_le_bytes());
+        record[24..32].copy_from_slice(&root.stride.to_le_bytes());
         out.extend_from_slice(&record);
     }
     pad_to(&mut out, vtable_index_offset as usize);
@@ -289,17 +293,6 @@ fn encode_source_record(
     record[40..48].copy_from_slice(&source.byte_offset.to_le_bytes());
     out.extend_from_slice(&record);
     Ok(())
-}
-
-fn root_kind(kind: GcRootKindV1) -> u16 {
-    match kind {
-        GcRootKindV1::Static => 0,
-        GcRootKindV1::LocalStatic => 1,
-        GcRootKindV1::ForeignBridge => 2,
-        GcRootKindV1::CoroutineFrame => 3,
-        GcRootKindV1::HandleSlot => 4,
-        GcRootKindV1::CompressedRef => 5,
-    }
 }
 
 pub(crate) fn verify_sections(
@@ -400,8 +393,8 @@ pub(crate) fn verify_sections(
         {
             return Err(RawModelError::new("type name record 范围非法"));
         }
-        if flags & !0xff != 0
-            || ((flags & (1 << 2)) != 0) != (record_value_len != 0)
+        if flags & !GC_TYPE_FLAG_MASK != 0
+            || ((flags & GC_TYPE_HAS_VALUE_ACTIONS) != 0) != (record_value_len != 0)
             || (record_value_len == 0 && record_value_offset != 0)
         {
             return Err(RawModelError::new(
@@ -441,7 +434,7 @@ fn verify_metadata_section(section: &[u8]) -> Result<(), RawModelError> {
     if section.len() < META_HEADER_BYTES || &section[0..8] != b"GUGUMT01" {
         return Err(RawModelError::new("metadata section header 非法"));
     }
-    if u16::from_le_bytes(section[8..10].try_into().expect("metadata version")) != 1
+    if u16::from_le_bytes(section[8..10].try_into().expect("metadata version")) != 2
         || section[10] != 8
         || section[11] != 1
     {
@@ -620,8 +613,8 @@ pub(crate) struct GcRuntimeType {
     pub size: u64,
     /// payload 对齐字节数。
     pub align: u64,
-    /// `GcTypeEntryV1.flags` 的低八位。
-    pub flags: u8,
+    /// `GcTypeEntryV1.flags` 的九位类型旗标。
+    pub flags: u32,
     /// 原始 trace descriptor 字节（含 kind 字节与负载）。
     pub trace: Vec<u8>,
 }
@@ -709,7 +702,7 @@ pub(crate) fn decode_sections(
                 .to_owned(),
             size,
             align: u64::from(align),
-            flags: u8::try_from(flags).map_err(|_| RawModelError::new("type flags 越界"))?,
+            flags,
             trace: descriptor.to_vec(),
         });
     }

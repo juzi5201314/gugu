@@ -109,6 +109,37 @@ pub(crate) struct LogicalProcessorPrefix {
     pub turn_region: TurnRegionCursor,
 }
 
+/// processor 页中 edge staging scratch 指针的固定偏移；位于 TurnRegion 后的保留区。
+pub(crate) const PROCESSOR_EDGE_SCRATCH_OFFSET: usize = 3560;
+/// processor 页字节数；页尾槽位全部落在这一页内。
+pub(crate) const PROCESSOR_PAGE_BYTES: usize = 4096;
+/// 抢占时优先恢复的协程槽（`run_next`）。
+pub(crate) const PROCESSOR_RUN_NEXT_OFFSET: usize = 3552;
+/// 队列溢出链头。
+pub(crate) const PROCESSOR_OVERFLOW_CARRY_OFFSET: usize = 3568;
+/// 屏障状态页指针：card buffer、stamp 表与额度账本都在独立 raw 页上。
+pub(crate) const PROCESSOR_BARRIER_SCRATCH_OFFSET: usize = 3576;
+/// 当前 coroutine 栈被标记周期扫描时的 epoch；与 arena 的 mark_epoch 不等即仍为 grey。
+pub(crate) const PROCESSOR_STACK_EPOCH_OFFSET: usize = 3584;
+/// 本切片单 arena 的基址槽；arena registry 接管后换成稳定 descriptor 查询。
+pub(crate) const PROCESSOR_ARENA_OFFSET: usize = 3592;
+/// 标记周期是否开启；epoch 单调推进，本标志单独表达「当前有活跃标记周期」。
+pub(crate) const PROCESSOR_MARK_ACTIVE_OFFSET: usize = 3600;
+/// trace 游标页指针：descriptor 解释的可暂停状态都在独立 raw 页上。
+pub(crate) const PROCESSOR_TRACE_CURSOR_OFFSET: usize = 3608;
+/// GC 请求记录：分配侧向收集器发起请求的非移动控制记录（首字是 kind）。
+pub(crate) const PROCESSOR_GC_REQUEST_OFFSET: usize = 3616;
+/// 存活协程数。
+pub(crate) const PROCESSOR_LIVE_COUNT_OFFSET: usize = 4032;
+/// 子协程入口片段地址（`prepare_child` 写入子上下文 rip）。
+pub(crate) const PROCESSOR_CHILD_ENTER_OFFSET: usize = 4072;
+/// runtime 状态区指针；`rt0_start` 写入、镜像 runtime 全程读取。
+pub(crate) const PROCESSOR_STATE_OFFSET: usize = 4080;
+/// 堆游标/上界：bump 分配器只在这里记账，不与 arena 记账混用。
+pub(crate) const PROCESSOR_HEAP_CURSOR_OFFSET: usize = 4048;
+pub(crate) const PROCESSOR_HEAP_LIMIT_OFFSET: usize = 4056;
+/// typed 动态根登记表地址：`boot` 建立，收集器与探针从这里进入，不扫整片 raw 区。
+pub(crate) const PROCESSOR_DYNAMIC_ROOTS_OFFSET: usize = 4064;
 const _: () = {
     assert!(size_of::<PollControl>() == 64);
     assert!(align_of::<PollControl>() == 64);
@@ -133,9 +164,32 @@ const _: () = {
     assert!(offset_of!(TlabCursor, cursor) == 0);
     assert!(offset_of!(TlabCursor, limit) == 8);
     assert!(offset_of!(LogicalProcessorPrefix, turn_region) == 3536);
+    assert!(
+        offset_of!(LogicalProcessorPrefix, turn_region) + size_of::<TurnRegionCursor>()
+            <= PROCESSOR_EDGE_SCRATCH_OFFSET
+    );
     assert!(offset_of!(TurnRegionCursor, cursor) == 0);
     assert!(offset_of!(TurnRegionCursor, limit) == 8);
     assert!(offset_of!(PollControl, poll_flags) == 0);
+    // 前缀之后的固定槽位：run_next → edge scratch 指针 → overflow carry → 屏障状态 → 栈 epoch
+    // → arena 基址 → 堆记账 → 子入口 → 状态区。
+    assert!(PROCESSOR_RUN_NEXT_OFFSET == offset_of!(LogicalProcessorPrefix, turn_region) + 16);
+    assert!(PROCESSOR_EDGE_SCRATCH_OFFSET == PROCESSOR_RUN_NEXT_OFFSET + 8);
+    assert!(PROCESSOR_OVERFLOW_CARRY_OFFSET == PROCESSOR_EDGE_SCRATCH_OFFSET + 8);
+    assert!(PROCESSOR_BARRIER_SCRATCH_OFFSET == PROCESSOR_OVERFLOW_CARRY_OFFSET + 8);
+    assert!(PROCESSOR_STACK_EPOCH_OFFSET == PROCESSOR_BARRIER_SCRATCH_OFFSET + 8);
+    assert!(PROCESSOR_ARENA_OFFSET == PROCESSOR_STACK_EPOCH_OFFSET + 8);
+    assert!(PROCESSOR_MARK_ACTIVE_OFFSET == PROCESSOR_ARENA_OFFSET + 8);
+    assert!(PROCESSOR_TRACE_CURSOR_OFFSET == PROCESSOR_MARK_ACTIVE_OFFSET + 8);
+    assert!(PROCESSOR_GC_REQUEST_OFFSET == PROCESSOR_TRACE_CURSOR_OFFSET + 8);
+    assert!(PROCESSOR_LIVE_COUNT_OFFSET > PROCESSOR_GC_REQUEST_OFFSET);
+    assert!(PROCESSOR_LIVE_COUNT_OFFSET > PROCESSOR_OVERFLOW_CARRY_OFFSET);
+    assert!(PROCESSOR_HEAP_CURSOR_OFFSET == PROCESSOR_LIVE_COUNT_OFFSET + 16);
+    assert!(PROCESSOR_HEAP_LIMIT_OFFSET == PROCESSOR_HEAP_CURSOR_OFFSET + 8);
+    assert!(PROCESSOR_DYNAMIC_ROOTS_OFFSET == PROCESSOR_HEAP_LIMIT_OFFSET + 8);
+    assert!(PROCESSOR_CHILD_ENTER_OFFSET == PROCESSOR_DYNAMIC_ROOTS_OFFSET + 8);
+    assert!(PROCESSOR_STATE_OFFSET == PROCESSOR_CHILD_ENTER_OFFSET + 8);
+    assert!(PROCESSOR_STATE_OFFSET + 8 <= PROCESSOR_PAGE_BYTES);
 };
 
 /// 从 `LogicalProcessor*` 到 `poll_flags` 的字节偏移。

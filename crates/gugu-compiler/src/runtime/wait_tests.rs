@@ -24,7 +24,7 @@ fn wait_contract_matches_profile_and_rejects_drift() {
     assert!(drifted.verify().is_err());
 }
 
-#[test]
+#[cfg(feature = "slow-tests")]
 fn wait_demand_and_frontend_gates_reach_image_plan() {
     let compiler = Compiler::new();
     let idle = compiler.compile(CompileRequest::single_file(

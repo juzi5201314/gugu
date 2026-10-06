@@ -4,7 +4,7 @@
 //! `entry == destination == 返回块`、语句只含 storage 标记与纯标量赋值」的 callee。
 //! 参数、投影、跨体作用域与 cleanup 区域的复制属于后端阶段的内联器；这里保持调用。
 use super::super::body::{
-    BlockId, CallKind, CleanupChain, GirBody, LocalId, Operand, Place, Rvalue, Statement,
+    BlockId, CallKind, Callee, CleanupChain, GirBody, LocalId, Operand, Place, Rvalue, Statement,
     StatementKind, Terminator, ValueActionKind,
 };
 use super::{Editor, Outcome};
@@ -25,6 +25,7 @@ pub(crate) fn run(
     let mut inlined = 0;
     for block in editor.live_blocks() {
         let Terminator::Call {
+            callee,
             args,
             destination,
             normal,
@@ -36,6 +37,11 @@ pub(crate) fn run(
             continue;
         };
         if call_kind != CallKind::Managed || !args.is_empty() {
+            continue;
+        }
+        // 静态初始化器的发布动作（写值槽 + release 置位）挂在它自己的 Return 降级上，
+        // 内联只搬语句、不搬发布，会把初始化静默变成空操作。这类合成调用必须保留成真实调用。
+        if matches!(callee, Callee::StaticInit(_)) {
             continue;
         }
         let Some(call) = calls.iter().find(|call| call.site == site) else {

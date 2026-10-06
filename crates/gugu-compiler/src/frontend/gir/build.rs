@@ -97,6 +97,11 @@ struct Builder<'a> {
     large_copies: Vec<LargeCopySite>,
     passing: PassingTable,
     return_block: BlockId,
+    /// 局部 `static` 的绑定槽（HIR 局部下标）→ 静态定义。
+    ///
+    /// 绑定槽只保存存储地址（供闭包捕获），本 owner 内的读点必须落到静态存储上：否则读到的
+    /// 是地址本身，而写入只改本地副本，跨调用不可见。
+    static_bindings: BTreeMap<usize, hir::DefId>,
 }
 
 impl<'a> Builder<'a> {
@@ -144,6 +149,7 @@ impl<'a> Builder<'a> {
             large_copies: Vec::new(),
             passing: PassingTable::new(module),
             return_block: BlockId(0),
+            static_bindings: BTreeMap::new(),
         };
         for (index, scope) in builder.source_scopes.iter_mut().enumerate() {
             scope.hir_scope = hir::ScopeId(index as u32);
@@ -622,6 +628,69 @@ impl<'a> Builder<'a> {
             },
         );
         local
+    }
+
+    /// 静态存储的读点 place：先过守卫，再取值槽地址并解引用。
+    ///
+    /// 模块 `static` 与局部 `static` 的读点共用同一路径，因此两者的写入都落在静态存储上。
+    fn static_place(&mut self, id: ExprId, definition: hir::DefId) -> Result<Place, Diagnostic> {
+        let ty = self.expr_ty(id);
+        let unwind = self.current_unwind(id);
+        self.emit_static_guard(
+            definition,
+            crate::frontend::mono::instantiate::CallSite::StaticInit(definition.0),
+            ty,
+            unwind,
+        )?;
+        let address =
+            self.intrinsic_temp(IntrinsicOp::StaticRef(definition), Vec::new(), vec![ty], ty);
+        Ok(self.project(Place::local(address), Projection::Deref))
+    }
+
+    /// 静态存储的惰性初始化守卫。
+    ///
+    /// 位字未发布时先调用初始化器：它在自己的 local 中构造完整值、把值写进值槽，最后 release
+    /// 置位；守卫本身只读块首位字，从不读值槽。`StaticRef` 由调用方在守卫之后发射，所以没有
+    /// 任何值跨越调用边，半构造内容不会被读到。
+    fn emit_static_guard(
+        &mut self,
+        definition: hir::DefId,
+        site: crate::frontend::mono::instantiate::CallSite,
+        result_ty: TypeId,
+        unwind: u32,
+    ) -> Result<(), Diagnostic> {
+        let flags = self.intrinsic_temp(
+            IntrinsicOp::StaticInitialized(definition),
+            Vec::new(),
+            vec![result_ty],
+            self.int_ty(),
+        );
+        let initialize = self.fresh(false);
+        let after_call = self.fresh(false);
+        let read = self.fresh(false);
+        self.terminate(Terminator::SwitchInt {
+            value: copy_of(flags),
+            targets: vec![(0, initialize)],
+            otherwise: read,
+        });
+        self.switch_to(initialize);
+        let unwind = self.intern_plan(unwind, CleanupChain::Unwind)?;
+        let destination = self.temp(result_ty);
+        // 调用的 normal 边要传结果参数，因此单独占一个块再跳进读点；
+        // 否则 read 会同时被「带参调用边」和「无参分支边」指向，实参数量对不上。
+        self.terminate(Terminator::Call {
+            callee: Callee::StaticInit(definition),
+            args: Vec::new(),
+            destination: Place::local(destination),
+            normal: after_call,
+            unwind: Some(unwind),
+            call_kind: CallKind::Managed,
+            site,
+        });
+        self.switch_to(after_call);
+        self.terminate(Terminator::Goto { target: read });
+        self.switch_to(read);
+        Ok(())
     }
 
     fn unwind_of(&self, scope: hir::ScopeId) -> u32 {

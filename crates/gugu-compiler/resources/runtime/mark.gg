@@ -4,6 +4,8 @@
  * 禁止出现 managed pointer、field 地址或栈指针。
  */
 
+use std.runtime.heap.{heap_store_word, heap_word}
+
 #[repr(C, align(64))]
 pub struct MarkMailboxHead {
     pub owner_descriptor: uint,
@@ -84,3 +86,61 @@ pub fn mark_records(
     let total = mailbox.consumed + mailbox.forwarded + credit.in_flight + credit.granted
     total + termination.cycle_epoch + edge.sequence + cursor.work_units
 }
+
+#[repr(C)]
+struct MarkExtent { base: uint, bytes: uint }
+
+pub const MARK_TICKET_STATE_BYTES: uint = 4096
+pub const MARK_TICKET_RECORD_BYTES: uint = 32
+pub const MARK_TICKET_CAPACITY: uint = 96
+pub const MARK_TICKET_COUNT_OFFSET: uint = 0
+pub const MARK_TICKET_CONSUMED_OFFSET: uint = 8
+pub const MARK_TICKET_CYCLE_OFFSET: uint = 16
+pub const MARK_TICKET_RECORDS_OFFSET: uint = 64
+
+pub fn mark_ticket_new(cycle: uint) uint {
+    let state = unsafe { std.platform.reserve_aligned(MARK_TICKET_STATE_BYTES, uint(4096)) }
+    if state == 0 { unsafe { std.runtime.process_exit(2) } }
+    let extent = MarkExtent { base: state, bytes: MARK_TICKET_STATE_BYTES }
+    if unsafe { std.platform.commit(std.mem.transmute[*MarkExtent, uint](std.ptr.addr_of(extent))) } != 0 {
+        unsafe { std.runtime.process_exit(2) }
+    }
+    let at = state
+    while at < state + MARK_TICKET_STATE_BYTES {
+        heap_store_word(at, 0)
+        at = at + 8
+    }
+    heap_store_word(state + MARK_TICKET_CYCLE_OFFSET, cycle)
+    state
+}
+
+pub fn mark_ticket_issue(state: uint, owner: uint) uint {
+    if state == 0 { return 0 }
+    let count = heap_word(state + MARK_TICKET_COUNT_OFFSET)
+    if count >= MARK_TICKET_CAPACITY { return 0 }
+    let ticket = state + MARK_TICKET_RECORDS_OFFSET + count * MARK_TICKET_RECORD_BYTES
+    heap_store_word(ticket, owner)
+    heap_store_word(ticket + 8, count)
+    heap_store_word(ticket + 16, 0)
+    heap_store_word(ticket + 24, heap_word(state + MARK_TICKET_CYCLE_OFFSET))
+    heap_store_word(state + MARK_TICKET_COUNT_OFFSET, count + 1)
+    ticket
+}
+
+pub fn mark_ticket_consume(state: uint, ticket: uint) uint {
+    if state == 0 || ticket < state + MARK_TICKET_RECORDS_OFFSET { return 1 }
+    if heap_word(ticket + 24) != heap_word(state + MARK_TICKET_CYCLE_OFFSET) { return 2 }
+    if heap_word(ticket + 16) != 0 { return 3 }
+    heap_store_word(ticket + 16, 1)
+    heap_store_word(state + MARK_TICKET_CONSUMED_OFFSET, heap_word(state + MARK_TICKET_CONSUMED_OFFSET) + 1)
+    0
+}
+
+pub fn mark_ticket_return(state: uint, ticket: uint) uint {
+    if state == 0 || ticket < state + MARK_TICKET_RECORDS_OFFSET { return 1 }
+    if heap_word(ticket + 16) != 1 { return 2 }
+    heap_store_word(ticket + 16, 2)
+    0
+}
+
+pub fn mark_ticket_consumed(state: uint) uint = heap_word(state + MARK_TICKET_CONSUMED_OFFSET)

@@ -162,18 +162,33 @@ fn structure(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
         }
         let parameters = body.params(edge.to);
         let arguments = body.args(&edge.arguments);
-        if parameters.len() != arguments.len()
-            || parameters
-                .iter()
-                .zip(arguments)
-                .any(|(parameter, argument)| {
-                    !compatible(
-                        body.values[parameter.value.index()].kind,
-                        body.values[argument.index()].kind,
-                    )
-                })
+        if parameters.len() != arguments.len() {
+            return Err(invalid(&format!(
+                "边 {index}（block{} → block{}）实参数量不符：参数 {} 个，实参 {} 个",
+                edge.from.index(),
+                edge.to.index(),
+                parameters.len(),
+                arguments.len()
+            )));
+        }
+        if let Some((position, (parameter, argument))) = parameters
+            .iter()
+            .zip(arguments)
+            .enumerate()
+            .find(|(_, pair)| {
+                !compatible(
+                    body.values[pair.0.value.index()].kind,
+                    body.values[pair.1.index()].kind,
+                )
+            })
         {
-            return Err(invalid("block 实参数量、类型或 provenance 不匹配"));
+            return Err(invalid(&format!(
+                "边 {index}（block{} → block{}）第 {position} 个实参不符：参数 {:?}，实参 {:?}",
+                edge.from.index(),
+                edge.to.index(),
+                body.values[parameter.value.index()].kind,
+                body.values[argument.index()].kind,
+            )));
         }
         let predecessors = &body.predecessors[range(&body.blocks[edge.to.index()].predecessors)];
         if predecessors
@@ -217,6 +232,17 @@ fn structure(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
                     - body.blocks[lifetime.block.index()].instructions.start
         {
             return Err(invalid("栈槽寿命记录越界"));
+        }
+    }
+    for root in &body.root_inits {
+        let valid = body.blocks.get(root.block.index()).is_some_and(|block| {
+            root.slot.index() < body.stack_slots.len()
+                && usize::try_from(root.bit)
+                    .is_ok_and(|bit| bit < body.stack_slots[root.slot.index()].roots.len())
+                && root.position <= block.instructions.end - block.instructions.start
+        });
+        if !valid {
+            return Err(invalid("逐根初始化记录越界"));
         }
     }
     for slot in &body.stack_slots {
@@ -422,7 +448,7 @@ fn dominates_use(body: &Body, graph: &Graph, value: ValueId, site: UseSite) -> b
             graph.dominates(block, use_block)
                 && match site {
                     UseSite::Instruction(use_instruction) if block == use_block => {
-                        instruction.0 < use_instruction.0 || block_independent(body, instruction)
+                        instruction.0 < use_instruction.0
                     }
                     _ => true,
                 }
@@ -440,16 +466,6 @@ fn dominates_use(body: &Body, graph: &Graph, value: ValueId, site: UseSite) -> b
             matches!(site, UseSite::Edge(edge) if edge == normal || result == results.end - results.start && edge == unwind)
         }
     }
-}
-
-fn block_independent(body: &Body, instruction: InstId) -> bool {
-    let instruction = &body.instructions[instruction.index()];
-    matches!(
-        instruction.op,
-        super::body::Op::IConst(_) | super::body::Op::FConst(_)
-    ) && instruction.arguments.is_empty()
-        && instruction.memory.is_none()
-        && instruction.safepoint.is_none()
 }
 
 fn memory(body: &Body) -> Result<(), Diagnostic> {

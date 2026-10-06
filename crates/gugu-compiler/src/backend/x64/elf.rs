@@ -8,7 +8,7 @@
 use crate::runtime::entry;
 use crate::runtime::fragments;
 
-use super::codegen::{FragmentPayload, X64World};
+use super::codegen::{BlobRelocation, FragmentPayload, X64World};
 use super::inst::{RelocKind, RelocTarget};
 use super::mangle;
 use std::collections::{BTreeMap, BTreeSet};
@@ -18,9 +18,12 @@ use std::mem::offset_of;
 mod codec;
 
 #[cfg(test)]
-pub(crate) use codec::{extract_archive, pack_archive};
+pub(crate) use codec::{extract_archive, pack_archive, rt0_bytes};
 
 const PAGE: u64 = 4096;
+/// 类型描述符记录的宿主 section；`Symbol::TypeDescriptor` 的地址由它派生。
+const TYPE_SECTION_NAME: &str = ".gugu.types";
+const GC_METADATA_NAME: &str = ".gugu.meta";
 const ET_DYN: u16 = 3;
 const EM_X86_64: u16 = 62;
 const PT_LOAD: u32 = 1;
@@ -85,6 +88,9 @@ pub(crate) fn link_world(
         interpreter: None,
         archive: Vec::new(),
         bound_glues: world.glues().bound_symbols(),
+        type_descriptors: world.type_descriptors.iter().cloned().collect(),
+        globals: world.globals.iter().cloned().collect(),
+        blob_relocations: world.blob_relocations.clone(),
     })
 }
 
@@ -199,6 +205,12 @@ pub(crate) struct LinkRequest {
     pub(crate) archive: Vec<u8>,
     /// 已绑定 glue 的 mangled 符号名；这些名字缺失定义时按 `E0062` 语义失败，不再兜底。
     pub(crate) bound_glues: BTreeSet<String>,
+    /// 类型描述符符号 → `.gugu.types` 内偏移；这些符号的地址由 type section 派生。
+    pub(crate) type_descriptors: BTreeMap<String, u64>,
+    /// 静态存储块：符号名 → 块字节数（`initialized` 字 + 值槽），按符号名升序。
+    pub(crate) globals: BTreeMap<String, u64>,
+    /// `.gugu.meta` 内待回填的符号地址：`(blob 内偏移, 符号名)`，按偏移升序。
+    pub(crate) blob_relocations: Vec<BlobRelocation>,
 }
 
 /// 写出的 Linux 镜像。
@@ -240,22 +252,54 @@ pub(crate) fn link(request: &LinkRequest) -> Result<LinuxImage, String> {
         bytes: processor,
     });
     if request.imports.is_empty() {
-        link_static(&request)
+        link_static(&mut request)
     } else {
         let interpreter = request
             .interpreter
             .clone()
             .ok_or_else(|| "动态导入缺少解释器路径".to_owned())?;
-        link_dynamic(&request, &interpreter)
+        link_dynamic(&mut request, &interpreter)
     }
 }
 
-fn link_static(request: &LinkRequest) -> Result<LinuxImage, String> {
+/// 把元数据 blob 内的符号引用回填成链接地址。
+///
+/// 布局完成后才能解析符号；偏移必须 8 字节对齐且落在 blob 内。缺失符号按 `E0062` 语义失败，
+/// 不留零值让运行期读到无效地址。
+fn apply_blob_relocations(
+    request: &mut LinkRequest,
+    defined: &BTreeMap<String, u64>,
+) -> Result<(), String> {
+    if request.blob_relocations.is_empty() {
+        return Ok(());
+    }
+    let metadata = request
+        .readonly
+        .iter_mut()
+        .find(|blob| blob.name == ".gugu.meta")
+        .ok_or_else(|| "元数据重定位缺少 .gugu.meta 段".to_owned())?;
+    for relocation in &request.blob_relocations {
+        if !relocation.offset.is_multiple_of(8) {
+            return Err("元数据重定位偏移未对齐到 8 字节".to_owned());
+        }
+        let at = usize::try_from(relocation.offset).map_err(|_| "元数据偏移超出宿主")?;
+        let slot = metadata
+            .bytes
+            .get_mut(at..at + 8)
+            .ok_or_else(|| "元数据重定位偏移越过 blob".to_owned())?;
+        let address = *defined
+            .get(&relocation.symbol)
+            .ok_or_else(|| format!("元数据重定位符号 {} 没有地址", relocation.symbol))?;
+        slot.copy_from_slice(&address.to_le_bytes());
+    }
+    Ok(())
+}
+
+fn link_static(request: &mut LinkRequest) -> Result<LinuxImage, String> {
     finish(request, None, "static-pie")
 }
 
-fn link_dynamic(request: &LinkRequest, interpreter: &str) -> Result<LinuxImage, String> {
-    let mut request = request.clone();
+fn link_dynamic(request: &mut LinkRequest, interpreter: &str) -> Result<LinuxImage, String> {
     let mut path = interpreter.as_bytes().to_vec();
     path.push(0);
     request.readonly.insert(
@@ -265,7 +309,7 @@ fn link_dynamic(request: &LinkRequest, interpreter: &str) -> Result<LinuxImage, 
             bytes: path,
         },
     );
-    let (dynstr, dynamic) = codec::dynamic_blobs(&request);
+    let (dynstr, dynamic) = codec::dynamic_blobs(request);
     request.readonly.push(Blob {
         name: ".dynstr".to_owned(),
         bytes: dynstr,
@@ -274,11 +318,11 @@ fn link_dynamic(request: &LinkRequest, interpreter: &str) -> Result<LinuxImage, 
         name: ".dynamic".to_owned(),
         bytes: dynamic,
     });
-    finish(&request, Some(interpreter.to_owned()), "dynamic-pie")
+    finish(request, Some(interpreter.to_owned()), "dynamic-pie")
 }
 
 fn finish(
-    request: &LinkRequest,
+    request: &mut LinkRequest,
     interpreter: Option<String>,
     kind: &str,
 ) -> Result<LinuxImage, String> {
@@ -298,10 +342,17 @@ fn finish(
     let reloc_va = reloc_table_va(limit_va, request)?;
     let relro_end = reloc_va + relocs.len() as u64 * 16;
     let rw_va = align_down(limit_va, PAGE);
-    let rw_end = align_up(
-        defined["__gugu_rt0_payload"] + entry::Rt0Payload::bytes(),
-        PAGE,
-    )?;
+    // 静态块排在启动载荷之后，可写区必须覆盖到最后一个块，否则它们落在映射之外。
+    let payload_end = defined["__gugu_rt0_payload"] + entry::Rt0Payload::bytes();
+    let mut rw_end = payload_end;
+    for (name, bytes) in &request.globals {
+        let address = defined
+            .get(name)
+            .ok_or_else(|| format!("静态块 {name} 没有地址"))?;
+        rw_end = rw_end.max(address.saturating_add(*bytes));
+    }
+    let rw_end = align_up(rw_end, PAGE)?;
+    apply_blob_relocations(request, &defined)?;
     let image = assemble(
         request,
         &defined,
@@ -417,6 +468,18 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     map.insert(mangle::mangle_runtime("morestack_mailbox"), reserved);
     reserved = align_up(reserved + STATE_BYTES, 8)?;
     map.insert("__gugu_rt0_payload".to_owned(), reserved);
+    reserved = align_up(reserved + entry::Rt0Payload::bytes(), 16)?;
+    // 静态块放在载荷之后：符号本身是可写数据，值槽必须能被 release 写入。
+    for (name, bytes) in &request.globals {
+        if map.contains_key(name) {
+            return Err(format!("静态块 {name} 与已有符号重名"));
+        }
+        reserved = align_up(reserved, 16)?;
+        map.insert(name.clone(), reserved);
+        reserved = reserved
+            .checked_add(*bytes)
+            .ok_or_else(|| "静态块地址溢出".to_owned())?;
+    }
     map.insert("__gugu_fragments_base".to_owned(), fragment_base);
     let _ = text_off;
     Ok(map)
@@ -465,7 +528,7 @@ fn resolve_relocs(request: &LinkRequest, defined: &BTreeMap<String, u64>) -> Res
         for reloc in &symbol.relocs {
             let slot = base + u64::from(reloc.offset);
             claim_slot(&mut seen, slot)?;
-            let target = resolve_target(&reloc.target, defined, &request.bound_glues)?;
+            let target = resolve_target(&reloc.target, defined, request)?;
             match reloc.kind {
                 RelocKindCode::PcRel32 => {
                     let _ = pc_rel32(slot, target, reloc.addend)?;
@@ -483,18 +546,24 @@ fn resolve_relocs(request: &LinkRequest, defined: &BTreeMap<String, u64>) -> Res
 fn resolve_target(
     name: &str,
     defined: &BTreeMap<String, u64>,
-    bound: &BTreeSet<String>,
+    request: &LinkRequest,
 ) -> Result<u64, String> {
     if let Some(va) = defined.get(name) {
         return Ok(*va);
     }
-    if bound.contains(name) {
+    // 类型描述符落在真实 type section 的记录上；section 缺席说明 metadata 没有写出。
+    if let Some(offset) = request.type_descriptors.get(name) {
+        let base = defined
+            .get(TYPE_SECTION_NAME)
+            .ok_or_else(|| format!("类型描述符 {name} 缺少 type section"))?;
+        return Ok(base + offset);
+    }
+    if request.bound_glues.contains(name) {
         return Err(format!("runtime glue {name} 绑定在镜像内没有定义"));
     }
     Ok(defined["__gugu_stub_exit"])
 }
 
-/// 同一槽不能被两条重定位同时写入。
 pub(crate) fn claim_slot(seen: &mut BTreeSet<u64>, slot: u64) -> Result<(), String> {
     if !seen.insert(slot) {
         return Err(format!("重定位槽 {slot:#x} 重复"));
@@ -536,7 +605,7 @@ fn relative_relocs(
                 continue;
             }
             let slot = base + u64::from(reloc.offset);
-            let target = resolve_target(&reloc.target, defined, &request.bound_glues)?;
+            let target = resolve_target(&reloc.target, defined, request)?;
             let addend = u64::try_from(
                 i64::try_from(target)
                     .unwrap_or(0)
@@ -570,11 +639,7 @@ fn relative_relocs(
     ));
     relocs.push((
         payload + u64::try_from(offset_of!(entry::Rt0Payload, main_return)).expect("字段偏移"),
-        resolve_target(
-            &mangle::mangle_runtime("main_return"),
-            defined,
-            &request.bound_glues,
-        )?,
+        resolve_target(&mangle::mangle_runtime("main_return"), defined, request)?,
     ));
     relocs.push((
         payload + u64::try_from(offset_of!(entry::Rt0Payload, stackmap)).expect("字段偏移"),
@@ -588,6 +653,20 @@ fn relative_relocs(
         payload + u64::try_from(offset_of!(entry::Rt0Payload, unwind)).expect("字段偏移"),
         defined[".eh_frame"],
     ));
+    // 类型段与 metadata blob 的地址同样由 rt0 补加载偏移；段不存在时字段是 0，不能登记成
+    // 「0 + bias」——那会指向加载基址而不是空。
+    if let Some(types) = defined.get(TYPE_SECTION_NAME).copied() {
+        relocs.push((
+            payload + u64::try_from(offset_of!(entry::Rt0Payload, gc_types)).expect("字段偏移"),
+            types,
+        ));
+    }
+    if let Some(meta) = defined.get(GC_METADATA_NAME).copied() {
+        relocs.push((
+            payload + u64::try_from(offset_of!(entry::Rt0Payload, gc_meta)).expect("字段偏移"),
+            meta,
+        ));
+    }
     relocs.sort_by_key(|item| item.0);
     Ok(relocs)
 }
@@ -865,7 +944,7 @@ fn write_text(
             if reloc.offset as usize + width > symbol.bytes.len() {
                 return Err(format!("重定位超出符号 {}", symbol.name));
             }
-            apply_link_reloc(file, va, reloc, defined, &request.bound_glues)?;
+            apply_link_reloc(file, va, reloc, defined, request)?;
         }
     }
     Ok(())
@@ -894,10 +973,10 @@ fn apply_link_reloc(
     base: usize,
     reloc: &ObjectReloc,
     defined: &BTreeMap<String, u64>,
-    bound: &BTreeSet<String>,
+    request: &LinkRequest,
 ) -> Result<(), String> {
     let slot = base + reloc.offset as usize;
-    let target = resolve_target(&reloc.target, defined, bound)?;
+    let target = resolve_target(&reloc.target, defined, request)?;
     match reloc.kind {
         RelocKindCode::PcRel32 => {
             let disp = pc_rel32(slot as u64, target, reloc.addend)?;
@@ -987,11 +1066,8 @@ fn write_params(
     words[rt0_params::PAYLOAD_LEN] = entry::Rt0Payload::bytes();
     words[rt0_params::INITIAL_SLOT] = defined["__gugu_initial_slot"];
     words[rt0_params::RUNTIME_STATE] = defined["__gugu_runtime_state"];
-    words[rt0_params::COROUTINE_ENTER] = resolve_target(
-        &mangle::mangle_runtime("coroutine_enter"),
-        defined,
-        &request.bound_glues,
-    )?;
+    words[rt0_params::COROUTINE_ENTER] =
+        resolve_target(&mangle::mangle_runtime("coroutine_enter"), defined, request)?;
     for (index, word) in words.iter().enumerate() {
         put_u64(file, params + index * 8, *word)?;
     }
@@ -1035,11 +1111,7 @@ fn write_payload(
         ),
         (
             offset_of!(entry::Rt0Payload, main_return),
-            resolve_target(
-                &mangle::mangle_runtime("main_return"),
-                defined,
-                &request.bound_glues,
-            )?,
+            resolve_target(&mangle::mangle_runtime("main_return"), defined, request)?,
         ),
         (
             offset_of!(entry::Rt0Payload, stackmap),
@@ -1075,6 +1147,34 @@ fn write_payload(
                     .len(),
             )
             .map_err(|_| "展开节长度溢出".to_owned())?,
+        ),
+        (
+            offset_of!(entry::Rt0Payload, gc_types),
+            defined.get(TYPE_SECTION_NAME).copied().unwrap_or(0),
+        ),
+        (
+            offset_of!(entry::Rt0Payload, gc_types_len),
+            request
+                .readonly
+                .iter()
+                .find(|blob| blob.name == TYPE_SECTION_NAME)
+                .map_or(Ok(0), |blob| {
+                    u64::try_from(blob.bytes.len()).map_err(|_| "类型节长度溢出".to_owned())
+                })?,
+        ),
+        (
+            offset_of!(entry::Rt0Payload, gc_meta),
+            defined.get(GC_METADATA_NAME).copied().unwrap_or(0),
+        ),
+        (
+            offset_of!(entry::Rt0Payload, gc_meta_len),
+            request
+                .readonly
+                .iter()
+                .find(|blob| blob.name == GC_METADATA_NAME)
+                .map_or(Ok(0), |blob| {
+                    u64::try_from(blob.bytes.len()).map_err(|_| "GC metadata 节长度溢出".to_owned())
+                })?,
         ),
     ];
     for (offset, value) in fields {

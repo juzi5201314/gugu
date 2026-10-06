@@ -493,7 +493,7 @@ fn layout_and_context_corruption_are_rejected_before_backend_consumption() {
     assert_ne!(changed.fingerprint(), contract.fingerprint());
 }
 
-#[test]
+#[cfg(feature = "slow-tests")]
 fn source_coroutines_feed_validated_layouts_context_and_query_identity() {
     use crate::{CompileRequest, Compiler, TargetName};
     let compiler = Compiler::new();

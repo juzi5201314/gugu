@@ -90,6 +90,10 @@ pub(crate) struct FrameLayout {
     pub(crate) max_leaf_reserve: u32,
     /// 与 `body.stack_slots` 同序的局部槽偏移。
     pub(crate) locals: Vec<LocalSlot>,
+    /// 与 `body.stack_slots` 同序的逐根初始化字节基址：每个根字一个字节（1 = 已写成指针，
+    /// 0 = 标量、未写入或被复位）。没有根字的槽为 `None`；第 `bit` 个根字的地址是
+    /// `base + bit`。运行时按站点条目读取这些字节，决定并集条目是否参与扫描。
+    pub(crate) init_bases: Vec<Option<u32>>,
     pub(crate) scratch: Option<u32>,
     /// 实际保存的 callee-saved GPR，按 `rbp,r12,r13` 顺序。
     pub(crate) saved: Vec<Gpr>,
@@ -133,6 +137,92 @@ impl FrameLayout {
     /// 是否发射栈检查。
     pub(crate) const fn checked(&self) -> bool {
         self.checked
+    }
+}
+
+/// 校验 frame 各区域互不重叠且都落在 `payload_bytes` 内：outgoing、局部槽、逐根初始化字节、
+/// spill slot、copy scratch 与 save slot。布局按顺序累加这些区域，这条不变量是「每个消费者
+/// 都必须读布局给出的偏移，而不是自己再算一遍」的守卫。
+fn frame_regions_are_disjoint(
+    body: &Body,
+    locals: &[LocalSlot],
+    init_bases: &[Option<u32>],
+    spill: &[(u32, u32)],
+    save_offsets: &[(u8, u32)],
+    scratch: Option<u32>,
+    outgoing: u32,
+    payload_bytes: u32,
+) -> bool {
+    let mut regions: Vec<(u32, u32)> = Vec::new();
+    if outgoing > 0 {
+        regions.push((0, outgoing));
+    }
+    for local in locals {
+        if local.bytes > 0 {
+            regions.push((local.offset, local.offset.saturating_add(local.bytes)));
+        }
+    }
+    for (index, base) in init_bases.iter().enumerate() {
+        let Some(base) = *base else {
+            continue;
+        };
+        let words = body.stack_slots.get(index).map_or(0, |slot| {
+            u32::try_from(slot.roots.len()).unwrap_or(u32::MAX)
+        });
+        regions.push((base, base.saturating_add(words)));
+    }
+    for (at, size) in spill {
+        regions.push((*at, at.saturating_add(*size)));
+    }
+    if let Some(at) = scratch {
+        regions.push((at, at.saturating_add(SCRATCH_BYTES)));
+    }
+    for (_, at) in save_offsets {
+        regions.push((*at, at.saturating_add(8)));
+    }
+    regions.sort_unstable();
+    let mut end = 0_u32;
+    for (start, stop) in regions {
+        if start < end || stop > payload_bytes {
+            return false;
+        }
+        end = stop;
+    }
+    true
+}
+
+/// 为每个带根字的栈槽分配逐根初始化字节：每个根字一字节，紧跟在局部槽之后、spill slot 之前。
+///
+/// 进参数 `roots` 与 `body.stack_slots` 同序，元素是该槽的根字数量。返回与之一一对应的基址；
+/// 没有根字的槽为 `None`。`offset` 前进已分配字节数。
+fn assign_init_bytes(roots: &[usize], offset: &mut u32) -> Result<Vec<Option<u32>>, AllocError> {
+    let mut bases = Vec::with_capacity(roots.len());
+    for count in roots {
+        if *count == 0 {
+            bases.push(None);
+            continue;
+        }
+        let bytes =
+            u32::try_from(*count).map_err(|_| AllocError::new("逐根初始化字节数超出 u32"))?;
+        bases.push(Some(*offset));
+        *offset = offset
+            .checked_add(bytes)
+            .ok_or_else(|| AllocError::new("frame 负载溢出"))?;
+    }
+    Ok(bases)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assign_init_bytes;
+
+    /// 逐根初始化字节按根字数分配，紧邻局部槽之后；没有根字的槽不占 frame。
+    #[test]
+    fn init_bytes_are_allocated_per_root_word() {
+        let mut offset = 32_u32;
+        let bases = assign_init_bytes(&[0, 2, 0, 1], &mut offset).expect("布局");
+        assert_eq!(bases, [None, Some(32), None, Some(34)]);
+        assert_eq!(offset, 35, "字节数等于根字总数");
     }
 }
 
@@ -183,6 +273,14 @@ pub(crate) fn layout(
             .checked_add(bytes)
             .ok_or_else(|| AllocError::new("frame 负载溢出"))?;
     }
+    let init_bases = assign_init_bytes(
+        &body
+            .stack_slots
+            .iter()
+            .map(|slot| slot.roots.len())
+            .collect::<Vec<_>>(),
+        &mut offset,
+    )?;
     for root in [
         RootClass::HeapPointer,
         RootClass::StackPointer,
@@ -219,6 +317,23 @@ pub(crate) fn layout(
             .ok_or_else(|| AllocError::new("frame 负载溢出"))?;
     }
     let payload_bytes = offset;
+    debug_assert!(
+        frame_regions_are_disjoint(
+            body,
+            &locals,
+            &init_bases,
+            &slots
+                .slots
+                .iter()
+                .map(|slot| (slot.offset, slot.size))
+                .collect::<Vec<_>>(),
+            &save_offsets,
+            scratch_offset,
+            outgoing,
+            payload_bytes,
+        ),
+        "frame 各区域必须互不重叠且完整落在 payload 内"
+    );
     let frame_size = if has_call || payload_bytes != 0 {
         let padded = align_up(
             payload_bytes
@@ -257,6 +372,7 @@ pub(crate) fn layout(
         entry_required_frame,
         max_leaf_reserve,
         locals,
+        init_bases,
         scratch: scratch_offset,
         saved,
         save_offsets,

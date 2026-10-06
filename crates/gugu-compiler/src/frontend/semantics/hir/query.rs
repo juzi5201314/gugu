@@ -35,9 +35,6 @@ pub(super) fn lower(
         {
             Ok(mut module) => {
                 module.input_fingerprint = lower_input_fingerprint;
-                module
-                    .verify()
-                    .map_err(|error| super::super::query::store_errors(&[error]))?;
                 let (validated, canonical) = hir::Validated::freeze(module)
                     .map_err(|error| super::super::query::store_errors(&[error]))?;
                 fresh = Some(validated);

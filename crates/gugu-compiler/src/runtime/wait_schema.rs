@@ -29,7 +29,11 @@ pub(crate) struct ChannelControl {
     pub(crate) reservation_generation: u64,
     pub(crate) ring_index: u64,
     pub(crate) ring_generation: u64,
-    pub(crate) padding: [u8; 32],
+    /// 创建该通道的处理器：环载荷作为动态根登记在该处理器的表里。
+    pub(crate) owner_processor: u64,
+    /// 元素类型的受管车道表地址；0 表示元素不含根。
+    pub(crate) element_roots: u64,
+    pub(crate) padding: [u8; 16],
 }
 
 /// `CoroutineCold.select_scratch` 的 32 字节描述符。
@@ -407,7 +411,7 @@ fn fixed_layouts() -> Vec<WaitRecordLayout> {
         };
     }
     vec![
-        record!(ChannelControl; source_id, generation, capacity, closed, head, tail, len, send_q_head, recv_q_head, reservation_generation, ring_index, ring_generation, padding),
+        record!(ChannelControl; source_id, generation, capacity, closed, head, tail, len, send_q_head, recv_q_head, reservation_generation, ring_index, ring_generation, owner_processor, element_roots, padding),
         record!(WaitNode; coroutine_index, coroutine_generation, wait_generation, case_index, payload_offset, result_offset, next, flags),
         record!(SelectTxn; phase_winner, case_count, scratch_handle, wait_block),
         record!(SelectScratchCache; inline_words),

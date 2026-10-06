@@ -109,11 +109,10 @@ pub(crate) fn run(
             concrete.body = editor
                 .finish()
                 .map_err(|error| vec![pack(pass.name(), error)])?;
-            concrete.fingerprint = concrete.fingerprint();
             super::verify(module, &concrete.body)
                 .map_err(|error| vec![pack(pass.name(), error)])?;
             concrete
-                .verify()
+                .refresh_fingerprint()
                 .map_err(|error| vec![pack(pass.name(), error)])?;
         }
         stats.passes += 1;

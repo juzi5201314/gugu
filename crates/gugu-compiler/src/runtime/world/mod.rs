@@ -4,101 +4,25 @@
 //! free structure 与账本只由 owner 上下文读写。跨 owner 的归还先经过 exactly-once 的
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
-pub(crate) mod barrier_impl;
-pub(crate) mod block_return_impl;
-mod cage_impl;
-pub(crate) mod candidate_impl;
 pub(crate) mod combining_impl;
 pub(crate) mod coroutine_impl;
-pub(crate) mod edge_impl;
 mod extent_impl;
-pub(crate) mod heap_impl;
-pub(crate) mod mark_impl;
-pub(crate) mod pacing_impl;
-pub(crate) mod provenance_impl;
-mod region_impl;
 mod resource_impl;
 pub(crate) mod routing_impl;
-pub(crate) mod shared_forward_impl;
-pub(crate) mod shared_heap_impl;
-pub(crate) mod termination_impl;
-
 #[cfg(test)]
-#[path = "../coroutine_tests.rs"]
-mod coroutine_tests;
-
-#[cfg(test)]
-#[path = "../wait_tests.rs"]
-mod wait_tests;
-
-#[cfg(test)]
+#[allow(unused_imports)]
 #[path = "../sync_tests.rs"]
 mod sync_tests;
-
+pub(crate) mod termination_impl;
 #[cfg(test)]
-#[path = "../barrier_tests.rs"]
-mod barrier_tests;
-
-#[cfg(test)]
-#[path = "heap_tests.rs"]
-mod heap_tests;
-
-#[cfg(test)]
-#[path = "provenance_tests.rs"]
-mod world_provenance_tests;
-
-#[cfg(test)]
-#[path = "candidate_tests.rs"]
-mod candidate_tests;
-
-#[cfg(test)]
-#[path = "edge_tests.rs"]
-mod edge_tests;
-
-#[cfg(test)]
-#[path = "../pacing_tests.rs"]
-mod pacing_tests;
-
-#[cfg(test)]
-#[path = "../mark_tests.rs"]
-mod mark_tests;
-
-#[cfg(test)]
-#[path = "mark_tests.rs"]
-mod mark_world_tests;
-#[cfg(test)]
-#[path = "region_tests.rs"]
-mod region_tests;
-
-#[cfg(test)]
-#[path = "shared_forward_tests.rs"]
-mod shared_forward_tests;
-
-#[cfg(test)]
-#[path = "block_return_tests.rs"]
-mod block_return_tests;
-
-#[cfg(test)]
-#[path = "routing_tests.rs"]
-mod world_routing_tests;
-
-#[cfg(test)]
-#[path = "cage_tests.rs"]
-mod world_cage_tests;
-
-#[cfg(test)]
-#[path = "combining_tests.rs"]
-mod world_combining_tests;
-
-#[cfg(test)]
-pub(crate) use extent_impl::OWNER_ARENA_BYTES;
+#[allow(unused_imports)]
+#[path = "../wait_tests.rs"]
+mod wait_tests;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use super::barrier::BarrierFlushReason;
 use super::barrier_schema::MessageFamilyTag;
-use super::edge::EdgeOutcome;
 use super::extent::{ExtentId, ExtentTable, TrimReport};
 use super::inbox::{
     DrainReport, GraceOutcome, OwnerConsumer, OwnerInbox, ServiceBudget, ShardIndex,
@@ -116,9 +40,9 @@ use super::provider::{ProviderStats, RangeDescriptor, RangeProvider};
 use super::resource::{self, ReleaseRegistry, ReleaseTicket, ResourceCellTable};
 use super::size_class::{RuntimeSizeClassId, RuntimeSizeClassTable};
 use super::slab::{
-    Epoch, ManagedAccounting, MemoryDomainId, OwnerAccounting, OwnerDirectory, OwnerId, OwnerToken,
-    RawInvariant, RawSlot, Resolution, RuntimeSeed, SlabDescriptorId, SlabGeneration, SlabState,
-    SlabTable, SlotState,
+    Epoch, MemoryDomainId, OwnerAccounting, OwnerDirectory, OwnerId, OwnerToken, RawInvariant,
+    RawSlot, Resolution, RuntimeSeed, SlabDescriptorId, SlabGeneration, SlabState, SlabTable,
+    SlotState,
 };
 
 /// owner retire 的结果。
@@ -186,8 +110,6 @@ pub(crate) struct RawWorld {
     /// 发布消息，也不会因为一次未走完就丢失归还。owner 与 domain 与 extent 一起记录：归还完成后
     /// 描述符槽位会被复用，届时就无法再从 extent 反查账本归属，也不能按余额猜测 domain。
     pending_extent_trims: Vec<PendingExtentTrim>,
-    /// 每个 raw owner 的独立 managed 物理页账本；按下标与 `owners` 对齐。
-    managed_accounting: Vec<ManagedAccounting>,
     /// 与 slab descriptor 平行的 ResourceCell header。
     cells: ResourceCellTable,
     /// 统一 release 入口的 glue 与描述符目录。
@@ -200,10 +122,6 @@ pub(crate) struct RawWorld {
     stacks: super::stack_arena::StackAllocator,
     coroutine_storage: Vec<Option<coroutine_impl::CoroutineStorage>>,
     completion_barriers: Vec<(super::coroutine::CoroutineHandle, u64, u64)>,
-    /// hybrid write barrier 的 processor 账本、arena card table 与 edge summary。
-    barrier: super::barrier::BarrierPlane,
-    /// 已经由 owner 取走的跨 block edge delta 总数。
-    edge_delta_total: u64,
     /// 每个 owner 的 return producer staging；未发布的链必须在 drain/retire 前交出。
     return_stagings: Vec<ProducerStaging>,
     /// 每个 owner 的 source-slab return cache；关闭时把 ring 转成 return batch。
@@ -216,65 +134,6 @@ pub(crate) struct RawWorld {
     combining_words: Vec<super::provider::WaitWordId>,
     /// owner token → combiner 槽位与 extent 归还目标的稠密索引。
     topology: combining_impl::TopologyIndex,
-    /// GC debt、owner credit、pacing 与 pressure episode 的执行平面。
-    pacing: super::pacing::PacingPlane,
-    /// TurnRegion 私有区与 `RegionTransfer` 投递平面；按已构建的契约配置。
-    regions: Option<super::region::RegionPlane>,
-    /// LocalHeap 契约快照；`configure_gc` 之后才可用。
-    local_heap_contract: Option<super::local_heap_schema::LocalHeapRuntimeContract>,
-    /// SharedHeap 契约快照与 stable handle 表；`configure_gc` 之后才可用。
-    shared_heap_contract: Option<super::shared_heap_schema::SharedHeapRuntimeContract>,
-    shared_heap: Option<super::shared_heap::SharedHeap>,
-    /// 共享 payload 的世界级 block 身份登记表；descriptor 与 LocalHeap 编号段分离。
-    shared_registry: shared_heap_impl::SharedRegistry,
-    /// 世界侧共享字段访问的单调 token；每次 begin/resolve/end 用一个新的非零 token。
-    shared_access_token: u32,
-    /// 每个 active guard 的已解析身份，按 `token - 1` 稠密索引；结束时清槽。
-    shared_accesses: Vec<Option<super::shared_heap::SharedAccessToken>>,
-    /// 共享 payload 搬迁的单调 lease；每次 forward 取一个新的非零值，目标 owner 按它结清。
-    next_shared_forward_lease: u32,
-    /// 共享平面的累计计数；报告用相邻快照之差得到每次推进的真实工作量。
-    shared_totals: shared_forward_impl::SharedForwardTotals,
-    /// MarkMailbox、owner credit 与终止检测的执行平面；`configure_gc` 之后才可用。
-    mark: Option<super::mark::MarkPlane>,
-    /// 每个 owner 的 mark worklist；元素是待标记对象的 payload 地址。
-    mark_worklists: Vec<Vec<u64>>,
-    /// 世界唯一的 cycle epoch：barrier 的 card 键、mark 的 ticket 与候选的世代核对都以它为准。
-    ///
-    /// 这个计数只由 `advance_cycle_epoch` 前进一次；任何平面都不再持有自己的第二份 epoch，
-    /// 否则会出现「键属于旧 cycle 却被当成当前」或「ticket 属于已结束的 cycle」这类跨平面错配。
-    cycle_epoch: u64,
-    /// 已完成并收敛的 mark cycle 数；与 `cycle_epoch` 是两回事：一个 epoch 内可以完成多次
-    /// mark cycle（收敛后的 remark），因此它由 mark 平面自己前进。
-    mark_cycle_epoch: u64,
-    /// 是否正处于一个打开的 mark cycle：incremental marking 的写屏障与分配染色只在此时开启。
-    mark_active: bool,
-    /// 每个 owner 的 LocalHeap Immix arena 集合。
-    local_heaps: Option<Vec<super::local_heap::LocalHeap>>,
-    /// 全局稠密 managed descriptor 表；管理权转移不改变 payload 的 heap/arena 定位。
-    managed_arenas: Vec<heap_impl::ManagedArena>,
-    /// 下一个 managed arena descriptor；单调递增、永不复用。
-    ///
-    /// 摘除已归还的 arena 会从 `managed_arenas` 移除登记项，因此 descriptor 不能再由表长推导：
-    /// card table 与 block 身份都按 descriptor 索引且没有注销 API，复用编号会把旧 arena 的键
-    /// 解释成新 arena 的键。
-    next_managed_arena_descriptor: u32,
-    /// `EdgeDelta` 的消费平面：target 侧已应用计数、乱序保留与候选 dirty 集合。
-    edges: Option<super::edge::EdgePlane>,
-    /// 从镜像 section 解码出的运行时可读 GC 类型表。
-    gc_types: Option<super::gc_metadata_section::GcRuntimeMetadata>,
-    /// 候选回收平面：block 弱连通组、试验删除、SCC 死亡组与恰好一次 sweep/release。
-    candidates: Option<super::candidate::CandidatePlane>,
-    /// 已校对的 `EdgeDelta` 消息与候选回收契约段；运行时按它的值推进候选额度。
-    edge_contract: Option<super::edge_schema::EdgeRuntimeContract>,
-    /// 模型根槽数组；每个槽是 managed pointer 或 0。
-    managed_roots: Vec<u64>,
-    /// 根槽的 `(root kind, type index)` 登记。
-    managed_root_kinds: Vec<(u32, u32)>,
-    /// checked pointer compression 平面；`configure_gc` 之前为 `None`。
-    cages: Option<super::cage::CompressionPlane>,
-    /// LocalHeap block 对应的 extent class 编号。
-    heap_block_class: u32,
 }
 
 impl RawWorld {
@@ -329,7 +188,6 @@ impl RawWorld {
             domain_owner,
             graced_nodes: Vec::new(),
             pending_extent_trims: Vec::new(),
-            managed_accounting: vec![ManagedAccounting::default(); owners as usize],
             cells: ResourceCellTable::new(),
             registry,
             release_queue: VecDeque::new(),
@@ -338,40 +196,12 @@ impl RawWorld {
             stacks: super::stack_arena::StackAllocator::default(),
             coroutine_storage: Vec::new(),
             completion_barriers: Vec::new(),
-            barrier: super::barrier::BarrierPlane::new(0),
-            edge_delta_total: 0,
-            pacing: super::pacing::PacingPlane::default(),
             return_stagings: (0..owners).map(|_| ProducerStaging::new(limits)).collect(),
             return_caches: (0..owners).map(|_| ReturnSlabCache::new()).collect(),
             routing: routing_impl::default_plane(),
             combining: combining_impl::default_plane(owners.saturating_mul(2).saturating_add(1)),
             combining_words: Vec::new(),
             topology: combining_impl::TopologyIndex::new(),
-            regions: None,
-            local_heap_contract: None,
-            shared_heap_contract: None,
-            shared_heap: None,
-            shared_registry: super::world::shared_heap_impl::SharedRegistry::new(),
-            shared_access_token: 0,
-            shared_accesses: Vec::new(),
-            next_shared_forward_lease: 0,
-            shared_totals: shared_forward_impl::SharedForwardTotals::default(),
-            mark: None,
-            mark_worklists: Vec::new(),
-            cycle_epoch: 0,
-            mark_cycle_epoch: 0,
-            mark_active: false,
-            local_heaps: None,
-            managed_arenas: Vec::new(),
-            next_managed_arena_descriptor: 1,
-            edges: None,
-            gc_types: None,
-            candidates: None,
-            edge_contract: None,
-            managed_roots: Vec::new(),
-            managed_root_kinds: Vec::new(),
-            cages: None,
-            heap_block_class: 0,
         };
         // 每个 owner 在 raw 与 Resource 两个 domain 上各持有自己的 arena；arena 只预留虚拟
         // 地址，物理页在 extent 被发放时按页提交。
@@ -445,9 +275,6 @@ impl RawWorld {
     }
 
     /// 返回 owner 的 managed 物理页账本。
-    pub(crate) fn managed_accounting(&self, index: u32) -> &ManagedAccounting {
-        &self.managed_accounting[index as usize]
-    }
 
     /// 返回 slab 描述符表。
     pub(crate) const fn table(&self) -> &SlabTable {
@@ -493,7 +320,6 @@ impl RawWorld {
             .classes
             .get(class)
             .ok_or_else(|| RawInvariant::new("分配引用未知 class"))?;
-        self.pacing_slow_edge(owner, u64::from(class.slot_stride))?;
         let token = self.owners[owner as usize].token();
         let secret_index = u32::from(class.id.raw());
         let accounting = self
@@ -531,7 +357,6 @@ impl RawWorld {
                 .write_stamp(allocation.slot.descriptor, allocation.slot.index, 0)?;
         }
         // allocation debt 在分配成功之后推进：本地 fast bump 不读全局 debt，这里只记账。
-        self.pacing.observe_allocation(u64::from(class.slot_stride));
         Ok(allocation)
     }
 
@@ -820,11 +645,7 @@ impl RawWorld {
         Ok(message)
     }
 
-    /// consumer 侧 same-slab 聚合：关闭本 owner 的 return cache 并发布。
-    ///
-    /// cache 与 staging 都由 `RawWorld` 持有，因此这里关闭的是 owner 真实的 cache；
-    /// `GcHandoff`/`PressureDrain` 顺带把本 owner 的 barrier 账本带出，避免 card 键跟着
-    /// ring 一起消失。
+    /// consumer 侧关闭 owner-local return cache；GC card/mark flush 由镜像 coordinator 负责。
     pub(crate) fn close_cache(
         &mut self,
         owner: u32,
@@ -832,14 +653,6 @@ impl RawWorld {
     ) -> Result<u32, RawInvariant> {
         let closed = self.return_caches[owner as usize].close_all(reason);
         let mut published = 0;
-        let barrier_reason = match reason {
-            RingCloseReason::GcHandoff => Some(BarrierFlushReason::MinorStop),
-            RingCloseReason::PressureDrain => Some(BarrierFlushReason::MemoryPressure),
-            _ => None,
-        };
-        if let Some(barrier_reason) = barrier_reason {
-            published += self.flush_all_barriers(owner, barrier_reason)?;
-        }
         for ring in &closed {
             published += self.publish_ring(owner, ring)?;
         }
@@ -915,69 +728,18 @@ impl RawWorld {
         extent_returns += self.advance_pending_extent_trims()?;
         for node in snapshot.nodes() {
             let message_id = *node;
-            // 消息族决定车道解释：card batch 只带 arena/card 序号，不进入 return 路径。
-            if self.pool.family_of(message_id) == MessageFamilyTag::RegionTransfer {
-                let batch = self.pool.load_region_transfer(message_id);
-                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
-                {
-                    return Err(RawInvariant::new(
-                        "region transfer 投递到非目标 owner 的 inbox",
-                    ));
-                }
-                self.service_region_transfer(owner, &batch)?;
-                self.graced_nodes.push(message_id);
-                consumed += 1;
-                continue;
-            }
-            if self.pool.family_of(message_id) == MessageFamilyTag::CardMark {
-                let batch = self.pool.load_card_mark(message_id);
-                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
-                {
-                    return Err(RawInvariant::new("card batch 投递到非目标 owner 的 inbox"));
-                }
-                self.service_card_mark(owner, &batch)?;
-                self.graced_nodes.push(message_id);
-                consumed += 1;
-                continue;
-            }
-            if self.pool.family_of(message_id) == MessageFamilyTag::MarkTicket {
-                let ticket = self.pool.load_mark_ticket(message_id);
-                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
-                {
-                    return Err(RawInvariant::new("mark ticket 投递到非目标 owner 的 inbox"));
-                }
-                self.service_mark_ticket(owner, &ticket)?;
-                self.graced_nodes.push(message_id);
-                consumed += 1;
-                continue;
-            }
-            if self.pool.family_of(message_id) == MessageFamilyTag::EdgeDelta {
-                let delta = self.pool.load_edge_delta(message_id);
-                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
-                {
-                    return Err(RawInvariant::new("edge delta 投递到非目标 owner 的 inbox"));
-                }
-                // 乱序记录连同 node 与 credit 一起保留：只有被应用或已转投的记录才进入 grace。
-                let outcome = self.service_edge_delta(owner, message_id, &delta)?;
-                if outcome != EdgeOutcome::Held {
-                    self.graced_nodes.push(message_id);
-                }
-                consumed += 1;
-                continue;
-            }
-            if self.pool.family_of(message_id) == MessageFamilyTag::HandleForward {
-                let message = self.pool.load_handle_forward(message_id);
-                if self.pool.owner_id_of(message_id) != self.owners[owner as usize].token().owner_id
-                {
-                    return Err(RawInvariant::new(
-                        "handle forward 投递到非目标 owner 的 inbox",
-                    ));
-                }
-                // 通知本身不携带 node 之外的净差量：结清 lease 与 grace 后 node 直接进入 grace。
-                self.service_handle_forward(owner, &message)?;
-                self.graced_nodes.push(message_id);
-                consumed += 1;
-                continue;
+            let family = self.pool.family_of(message_id);
+            if matches!(
+                family,
+                MessageFamilyTag::RegionTransfer
+                    | MessageFamilyTag::CardMark
+                    | MessageFamilyTag::MarkTicket
+                    | MessageFamilyTag::EdgeDelta
+                    | MessageFamilyTag::HandleForward
+            ) {
+                return Err(RawInvariant::new(
+                    "GC 消息必须由镜像 runtime coordinator 消费",
+                ));
             }
             let message = self.load_return_message(message_id)?;
             if message.kind == ReturnKind::StackSpan {
@@ -990,18 +752,6 @@ impl RawWorld {
                 // 上面的载入键分支已经解析过 extent；这里只消费已经过校验的消息。
                 extent_returns += u32::from(self.service_extent_return(owner, &message)?);
                 self.graced_nodes.push(message_id);
-                continue;
-            }
-            if matches!(
-                message.kind,
-                ReturnKind::HeapBlock
-                    | ReturnKind::HeapLineRun
-                    | ReturnKind::HeapArena
-                    | ReturnKind::LargeMapping
-            ) {
-                self.service_managed_return(owner, &message)?;
-                self.graced_nodes.push(message_id);
-                consumed += 1;
                 continue;
             }
             let token = if resource { resource_token } else { raw_token };
@@ -1130,21 +880,25 @@ impl RawWorld {
         })
     }
 
-    /// 排空全部 shard，直到队列为空或只剩不可见链。
+    /// 排空全部 raw/resource shard；GC 消息不在宿主 world 执行。
     pub(crate) fn drain_all(
         &mut self,
         owner: u32,
         budget: &ServiceBudget,
     ) -> Result<(u32, u32), RawInvariant> {
-        // drain 之后 owner 不再跑代码，本 owner 的 card 键必须已经离开 processor 账本。
-        self.flush_all_barriers(owner, BarrierFlushReason::ProducerStopGate)?;
-        let drained = self.drain_inboxes(owner, budget, true)?;
-        // owner 停止前把本 owner 两条 combiner 队列与 domain 队列上的挂链冷操作结清：
-        // 之后不会再有 owner 上下文来推进它们，遗留记录只能等超时。
+        self.drain_owner_combining(owner)?;
+        let mut forwarded = 0_u32;
+        let mut consumed = 0_u32;
+        for index in 0..super::OWNER_INBOX_SHARDS {
+            let shard = ShardIndex::from_raw(index).expect("shard 编号合法");
+            let report = self.service(owner, shard, budget)?;
+            forwarded += report.forwarded;
+            consumed += report.items.saturating_sub(report.forwarded);
+        }
         self.drain_owner_combining(owner)?;
         let domain_slot = self.combiner_queue_count() - 1;
         self.drain_combining(domain_slot)?;
-        Ok(drained)
+        Ok((forwarded, consumed))
     }
 
     fn forward_message(
@@ -1256,12 +1010,6 @@ impl RawWorld {
         // topology epoch 已前进：routing 平面记录新 epoch，在飞 radix batch 的终层解析
         // 由此改走转发记录或 domain injection，旧 epoch 最终进入新 token/domain。
         self.observe_routing_topology()?;
-        // managed arena 的管理权随 owner 退役转移：payload 不动，但新 manager 才是这些
-        // block 的投递目标，因此必须在 inbox 排空之前完成移交。
-        self.handover_managed_arenas(owner, target)?;
-        // retire 是 processor 交接：本 owner 的 barrier 账本必须在 inbox 排空与 grace 之前
-        // 冲刷完，否则 arena owner 会在 card 键落地前看到“已经排空”的假象。
-        self.flush_all_barriers(owner, BarrierFlushReason::ProcessorHandoff)?;
         let (forwarded, consumed) = self.drain_all(owner, budget)?;
         self.open_grace(&inbox);
         let grace = Self::grace_outcome(&inbox);

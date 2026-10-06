@@ -266,6 +266,131 @@ fn missing_dispatch_or_callee_lane_is_rejected() {
     assert!(abi::classify_call(&no_code, TargetName::X86_64Linux).is_err());
 }
 
+/// slow 分配 ABI 必须**先**把 bytes 搬进 `rbx`：bytes 与 `rax`/`rcx`/`rdx` 重叠时不得先被
+/// 后续立即数装载覆盖，否则参数在循环拷贝后损坏。
+#[test]
+fn allocation_slow_abi_moves_bytes_before_immediates() {
+    let (key, universe) = universe_with_record(7, 32, 8);
+    for source in [Gpr::Rax, Gpr::Rbx, Gpr::Rcx, Gpr::Rdx] {
+        let lowered = lower::lower_with(
+            &Op::GcAlloc {
+                descriptor: key,
+                // 对齐超过快路径上限，强制走 slow ABI。
+                align: 512,
+                placement: PlacementKind::LocalHeap,
+                compressed: false,
+            },
+            &[SiteValue {
+                ty: ValueType::scalar(crate::lir::body::Type::I64),
+                reg: Reg::Gpr(source),
+            }],
+            &[SiteValue {
+                ty: ValueType::pointer(Provenance::GcHeap),
+                reg: Reg::Virtual(0),
+            }],
+            &lower::probe_source(),
+            LowerCtx {
+                target: TargetName::X86_64Linux,
+                body: None,
+                universe: Some(&universe),
+                raw: None,
+                site: 0,
+            },
+        )
+        .expect("slow 路径可 lower");
+        let instructions = &lowered.sequence.instructions;
+        let first = &instructions[0];
+        assert_eq!(
+            table::form(first.form).mnemonic,
+            "mov",
+            "slow ABI 的第一条指令必须是 bytes → rbx：{source:?}"
+        );
+        assert_eq!(
+            first.operands,
+            [
+                Operand::Reg(Reg::Gpr(Gpr::Rbx)),
+                Operand::Reg(Reg::Gpr(source))
+            ],
+            "bytes 必须先搬到 rbx：{source:?}"
+        );
+        // 四个参数车道随后各装一次：type_id=rax、align=rcx、flags=rdx（bytes 已在 rbx）。
+        for lane in [Gpr::Rax, Gpr::Rcx, Gpr::Rdx] {
+            assert!(
+                instructions
+                    .iter()
+                    .any(|inst| inst.operands.first() == Some(&Operand::Reg(Reg::Gpr(lane)))),
+                "slow ABI 必须装载 {lane:?}"
+            );
+        }
+    }
+}
+
+/// 分配 bump 的机器级契约：尺寸只走操作数寄存器、跨块是**运行期**检查、对齐上限决定快慢路径。
+#[test]
+fn allocation_bump_enforces_runtime_block_bound_from_operand() {
+    let (key, universe) = universe_with_record(7, 32, 8);
+    let lowered = |align: u32| {
+        lower::lower_with(
+            &Op::GcAlloc {
+                descriptor: key,
+                align,
+                placement: PlacementKind::LocalHeap,
+                compressed: false,
+            },
+            &[SiteValue {
+                ty: ValueType::scalar(crate::lir::body::Type::I64),
+                reg: Reg::Virtual(1),
+            }],
+            &[SiteValue {
+                ty: ValueType::pointer(Provenance::GcHeap),
+                reg: Reg::Virtual(0),
+            }],
+            &lower::probe_source(),
+            LowerCtx {
+                target: TargetName::X86_64Linux,
+                body: None,
+                universe: Some(&universe),
+                raw: None,
+                site: 0,
+            },
+        )
+        .expect("可 lower")
+    };
+    for align in [16_u32, 256] {
+        let sequence = &lowered(align).sequence;
+        let names: Vec<&'static str> = sequence
+            .instructions
+            .iter()
+            .map(|inst| table::form(inst.form).mnemonic)
+            .collect();
+        assert!(
+            names.contains(&"ja"),
+            "align {align} 必须做运行期跨块检查：{names:?}"
+        );
+        // 推进 payload 的那条 add 必须吃寄存器：descriptor 的静态尺寸已被操作数取代。
+        let size_add = sequence
+            .instructions
+            .iter()
+            .rev()
+            .find(|inst| table::form(inst.form).mnemonic == "add")
+            .expect("推进 add");
+        assert!(
+            matches!(size_add.operands.last(), Some(Operand::Reg(_))),
+            "payload 推进必须来自操作数寄存器：{size_add:?}"
+        );
+    }
+    // align 超过 256 时快路径不合格：直接进 slow ABI，第一条指令是 bytes → rbx。
+    let sequence = &lowered(4096).sequence;
+    assert_eq!(table::form(sequence.instructions[0].form).mnemonic, "mov");
+    assert!(
+        !sequence
+            .instructions
+            .iter()
+            .any(|inst| table::form(inst.form).mnemonic == "ja"),
+        "高对齐不得走 bump 快路径"
+    );
+}
+
 #[test]
 fn allocation_bump_checks_carry_with_add() {
     // 溢出检测必须落在置标志位的 `add` 上：`lea` 不改 CF，后面的条件分支读不到真实进位。
@@ -277,7 +402,10 @@ fn allocation_bump_checks_carry_with_add() {
             placement: PlacementKind::LocalHeap,
             compressed: false,
         },
-        &[],
+        &[SiteValue {
+            ty: ValueType::scalar(crate::lir::body::Type::I64),
+            reg: Reg::Virtual(1),
+        }],
         &[SiteValue {
             ty: ValueType::pointer(Provenance::GcHeap),
             reg: Reg::Virtual(0),

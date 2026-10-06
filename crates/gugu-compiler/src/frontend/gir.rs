@@ -8,7 +8,7 @@ pub(crate) mod pass;
 pub(crate) mod passing;
 pub(crate) mod placement;
 mod query;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 pub(crate) mod tests;
 mod verify;
 

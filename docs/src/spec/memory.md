@@ -12,6 +12,8 @@
 
 `static` 项具有进程寿命；`#[coroutine_local] static` 每个协程一份，`#[os_thread_local] static` 每个操作系统线程一份。只要这些槽按语言规则仍存活，它们直接或间接引用的受管值就不能被回收。
 
+`static` 的初始化是惰性的：初始化器在声明所在域首次被求值时执行，其值只有在构造完成后才对读者可见；构造期间发生 panic 时该槽保持未初始化，读者不会观察到半构造内容。初始化完成后对静态槽的读都返回同一存储的值，写入对所有读者可见，而不是每个读者各持一份副本。
+
 `MaybeUninit[T]` 在 `assume_init` 前不使其字节中碰巧出现的地址成为活引用。`union` 只允许位类型，重叠字段不产生多个受管根。
 
 ## `TypeId` 与 `dyn Any`
@@ -31,8 +33,18 @@
 收集器可以移动受管对象。每次 safepoint、等待、恢复和跨线程共享后，所有安全引用仍必须指向原语义对象；安全代码不能通过地址观察移动。`pin` 覆盖的对象在回调期间不得移动，raw pointer 只受 [unsafe](unsafe.md) 的显式规则保护。
 
 用户安全代码不调用 `free`，也不能观察收集器内部阶段、空间分区、根编码、屏障或回收线程。内存申请无法满足时按[运行时](runtime.md#fatal-resource-exhaustion)进入 `OutOfMemory` fatal；GC 不运行任意用户 finalizer。
+LocalHeap 的运行时布局版本在引入独立大映射记录后递增；镜像与编译器必须拒绝不匹配的 `local_heap_schema`，不能把旧版 side metadata 当作新版解释。
+
+实现可以把超过普通分配单元容量或需要更高对齐的受管对象放入独立的 non-moving range；这不改变对象的可达性、初始化、`pin` 或 OOM 语义。该 range 不是用户可观察的地址稳定承诺：只有规范明确的 `pin`/FFI 生命周期才允许依赖地址有效性，普通安全引用仍由收集器按其内部表示维护。
 
 本章不规定收集器算法、heap 参数、root 编码或写屏障实现。官方 compiler/runtime 的当前契约见 [GC 元数据](../internals/gc-metadata.md)与[栈图](../internals/stack-maps.md)；替代实现可以不同，但必须满足本节全部可观察约束。
+
+LocalHeap 的 collector 阶段不属于用户可观察 API：minor 可以复制 nursery 对象并更新全部安全根，
+major 必须以精确 trace 的 root/object-start/mark 结果决定存活；raw pointer 不会因为数值碰巧落在
+对象 payload 内而成为 root。`static`、dynamic root、闭包捕获、interior root 和 compressed root
+按各自登记的 root kind 处理；非法 root kind、过期 generation、越界 compressed offset、损坏
+descriptor 或重复 return ticket 都进入 `RuntimeInvariant`/`OutOfMemory` 对应 fatal 路径，不得
+静默按普通 direct pointer 处理。
 
 runtime 可以在不改变语言语义的前提下，为地址稳定的 control、stack、resource 和 GC range descriptor 使用 owner-directed return message。该机制不产生用户级 `free`，不使受管地址稳定，不承诺 processor affinity 或回收时刻，也不能让安全代码观察 raw slab、route key 或 batch 延迟。
 

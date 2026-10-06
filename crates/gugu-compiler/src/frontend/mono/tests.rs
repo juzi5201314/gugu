@@ -429,18 +429,23 @@ fn async_and_local_static_bodies_are_reachable_instances() {
         .iter()
         .find(|instance| instance.kind == super::keys::MonoKind::Async)
         .expect("协程 body 必须进入实例图");
-    let initializer = output
-        .mono
-        .instances
-        .iter()
-        .find(|instance| instance.kind == super::keys::MonoKind::StaticInit)
-        .expect("局部 static 初始化器必须进入实例图");
     let init = output
         .mono
         .instances
         .iter()
         .find(|instance| instance.symbol == "init")
         .unwrap();
+    // 运行时源里的 `pub const` 同样产生 static/const 初始化实例，因此按「调用夹具里 init 的
+    // 那一个」精确挑出局部 static 初始化器，而不是取第一个 StaticInit。
+    let initializer = output
+        .mono
+        .instances
+        .iter()
+        .find(|instance| {
+            instance.kind == super::keys::MonoKind::StaticInit
+                && instance.callees == vec![digest_of(&init.mono_key)]
+        })
+        .expect("局部 static 初始化器必须进入实例图");
     assert!(task.callees.contains(&digest_of(&initializer.mono_key)));
     assert_eq!(initializer.callees, vec![digest_of(&init.mono_key)]);
 }

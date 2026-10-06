@@ -470,7 +470,10 @@ impl Builder<'_> {
             return self.emit_platform_call(id, platform_op(kind), arguments, types);
         }
         if let hir::Builtin::RuntimeMachine(kind) = operation {
-            return self.emit_runtime_machine_call(id, runtime_machine_op(kind), arguments, types);
+            if let Some(op) = runtime_machine_op(kind) {
+                return self.emit_runtime_machine_call(id, op, arguments, types);
+            }
+            return self.emit_runtime_atomic_call(id, kind, arguments);
         }
         match operation {
             hir::Builtin::ChanSend => return self.emit_chan_send(id, arguments),
@@ -480,6 +483,18 @@ impl Builder<'_> {
             }
             hir::Builtin::JoinWait => return self.emit_join_wait(id, arguments),
             _ => {}
+        }
+        if matches!(operation, hir::Builtin::Memory(MemoryIntrinsic::AddrOf)) {
+            // `addr_of` 的实参是位点：必须保留投射链并直接取该位点的地址。
+            // 其余内存原语的实参是值，先物化成临时量再取值没有语义问题；
+            // 但位点一旦物化，取到的就是副本的地址——写穿失效、地址也不再是对象本体。
+            let mut operands = Vec::new();
+            for argument in expr_range(self.owner, &arguments) {
+                let place = self.emit_place(argument)?;
+                operands.push(Operand::Copy(place));
+            }
+            self.emit_check_ops(id)?;
+            return self.emit_memory(id, MemoryIntrinsic::AddrOf, operands);
         }
         let mut operands = Vec::new();
         for argument in expr_range(self.owner, &arguments) {
@@ -689,16 +704,22 @@ fn platform_op(
 /// 把语义层的 runtime 机器原语映射到契约操作；两者的枚举一一对应，映射是全覆盖的。
 fn runtime_machine_op(
     kind: crate::frontend::semantics::model::RuntimeMachineIntrinsic,
-) -> crate::runtime::RuntimeMachineOp {
+) -> Option<crate::runtime::RuntimeMachineOp> {
     use crate::frontend::semantics::model::RuntimeMachineIntrinsic as Source;
     use crate::runtime::RuntimeMachineOp as Target;
-    match kind {
+    Some(match kind {
         Source::ContextSwitch => Target::ContextSwitch,
         Source::ContextRestore => Target::ContextRestore,
         Source::CurrentSlot => Target::CurrentSlot,
         Source::ProcessExit => Target::ProcessExit,
         Source::ReportWrite => Target::ReportWrite,
-    }
+        Source::GcConfig => Target::GcConfig,
+        Source::GcEnter => Target::GcEnter,
+        Source::AtomicLoadAcquire
+        | Source::AtomicStoreRelease
+        | Source::AtomicFetchOrAcqRel
+        | Source::AtomicFetchAndAcqRel => return None,
+    })
 }
 
 fn intrinsic(op: IntrinsicOp, operands: Vec<Operand>, types: Vec<TypeId>) -> Rvalue {

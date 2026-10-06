@@ -1,0 +1,744 @@
+/* 镜像内栈图 walker：按编译期冻结的 section 精确枚举帧内根。
+ *
+ * section 由编译器写出并已通过 `stackmap_codec` 校验，运行期只消费这一份封闭元数据：
+ * 函数表按 `code_rva` 严格递增、安全点按 `(function, pc_offset)` 规范序、map 记录尾部带
+ * 逐根初始化条目。找不到函数或安全点、帧越界、初始化字节越界一律走 RuntimeInvariant
+ * fatal（退出 2），既不猜相邻 map，也不退回保守扫描。
+ *
+ * 帧链契约来自同一份机器规范：`return address` 固定在 `[frame_base + frame_size]`，
+ * caller frame = `frame_base + frame_size + 8`。首帧由调用方给出精确 `(frame, pc, kind)`：
+ * 停驻协程传保存上下文里的 rsp/rip（kind 取 `call-return`），已停点的活动协程传发起者
+ * frame 的 rsp/rip。
+ *
+ * 逐根初始化条目按帧内初始化字节门控：并集条目在别的变体里可能是标量，字节为零就不能
+ * 当指针。handle 解析与压缩引用解码属于 shared/compression 单元，walker 只发布原始字与
+ * 类别，绝不在本单元里把 handle 槽号当地址解释。
+ *
+ * 输出缓冲区的头四个字是 `needed`/`written`/`frames`/`stop`，随后是 8 个帧轨迹槽，记录从
+ * `ROOT_SCAN_HEADER_BYTES` 起连续排列。容量不足时只截断写入、不静默丢根：`needed > capacity`
+ * 由调用方判定为契约错误。
+ */
+use std.runtime.scheduler.{dynamic_root_capacity, dynamic_root_count, dynamic_root_record, COROUTINE_PACK_FLOAT_OFFSET, COROUTINE_PACK_FLOAT_STRIDE, COROUTINE_PACK_INTEGER_LANES, COROUTINE_PACK_LANES, COROUTINE_PACK_TRACE_BITS, COROUTINE_PACK_TRACE_NONE, DYNAMIC_ROOT_COUNT_OFFSET, DYNAMIC_ROOT_DESCRIPTOR_OFFSET, DYNAMIC_ROOT_FLAG_INITIALIZED, DYNAMIC_ROOT_FLAGS_OFFSET, DYNAMIC_ROOT_KIND_CHANNEL_SLOT, DYNAMIC_ROOT_KIND_OFFSET, DYNAMIC_ROOT_KIND_RESULT, DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD, DYNAMIC_ROOT_SLOT_OFFSET}
+
+#[repr(C, align(8))]
+pub struct GcRootRecord {
+    /// 根字地址：帧内地址，或调用方提供的 GPR 文件槽地址。
+    pub address: uint,
+    /// 根类别，取 `ROOT_KIND_*`。
+    pub kind: uint,
+    /// 扫描到的原始字；handle 是槽号、压缩引用是编码，由消费单元 checked 解析。
+    pub value: uint,
+    /// 保留字段，保持记录 8 字节对齐与 32 字节尺寸。
+    pub reserved: uint,
+}
+
+#[repr(C, align(8))]
+pub struct GcRootScan {
+    /// 覆盖帧链需要的根记录数。
+    pub needed: uint,
+    /// 实际写入调用方缓冲区的记录数。
+    pub written: uint,
+    /// 遍历到的帧数。
+    pub frames: uint,
+    /// 帧链结束处的代码段偏移；返回地址低于代码基址时为 0。
+    pub stop: uint,
+}
+
+/// 五类根的固定顺序，与 compiler 侧 `ROOT_KIND_NAMES` 一一对应。
+pub const ROOT_KIND_DIRECT: uint = 0
+pub const ROOT_KIND_INTERIOR: uint = 1
+pub const ROOT_KIND_HANDLE: uint = 2
+pub const ROOT_KIND_COMPRESSED: uint = 3
+pub const ROOT_KIND_STACK_INTERIOR: uint = 4
+
+/// 安全点类别的固定编号，与 compiler 侧 `SAFEPOINT_KIND_NAMES` 一一对应。
+pub const SAFEPOINT_KIND_CALL_RETURN: uint = 0
+pub const SAFEPOINT_KIND_POLL_RESUME: uint = 1
+pub const SAFEPOINT_KIND_SUSPEND_RESUME: uint = 2
+pub const SAFEPOINT_KIND_FOREIGN_BRIDGE: uint = 3
+pub const SAFEPOINT_KIND_MORESTACK_ENTRY: uint = 4
+
+/// section 魔数 `GUGUSM01` 的小端字。
+pub const ROOT_SECTION_MAGIC: uint = 0x31304d5355475547
+/// section 头部的第二字：版本 4、指针宽度 8、小端 1，按小端打包成一个 u32。
+pub const ROOT_SECTION_VERSION_WORD: uint = 0x01080004
+/// section 头字节数。
+pub const ROOT_SECTION_HEADER_BYTES: uint = 72
+/// 函数记录字节数。
+pub const ROOT_FUNCTION_BYTES: uint = 32
+/// 安全点记录字节数。
+pub const ROOT_SAFEPOINT_BYTES: uint = 12
+/// map 索引表每项字节数。
+pub const ROOT_MAP_INDEX_BYTES: uint = 8
+/// 逐根初始化条目字节数。
+pub const ROOT_TYPED_ENTRY_BYTES: uint = 12
+/// 根记录字节数。
+pub const ROOT_RECORD_BYTES: uint = 32
+/// 扫描输出缓冲区的头字节数：`needed`/`written`/`frames`/`stop` + 8 个帧轨迹槽。
+pub const ROOT_SCAN_HEADER_BYTES: uint = 96
+/// 帧轨迹槽数：每帧记录一个代码段偏移，便于失败时定位帧链。
+pub const ROOT_SCAN_TRACE_SLOTS: uint = 8
+/// map 记录的固定头：槽数 4 + 五个寄存器掩码 10 + 保留 2。
+pub const ROOT_MAP_HEAD_BYTES: uint = 16
+/// 每次 fatal 只报告一行同长度文本：前缀 26 + 站点标签 17 + 换行 1。
+pub const ROOT_FAIL_BYTES: uint = 44
+/// 没有匹配记录时的哨兵；函数下标与 map 下标都是 u32。
+pub const ROOT_NO_ENTRY: uint = 4294967295
+/// 保存的通用寄存器文件槽数（bit0..14 对应 rax..r15，bit15 保留）。
+pub const ROOT_GPR_LANES: uint = 16
+/// 保存的通用寄存器文件字节数。
+pub const ROOT_GPR_BYTES: uint = 128
+
+/// `Rt0Payload` 内 `stackmap`/`fragment_base`/`stackmap_len` 字段偏移与 runtime 状态区
+/// 内 payload 地址/加载偏移槽偏移；由 Rust 侧 `entry.rs` 与 rt0 写入唯一持有。
+pub const ROOT_PAYLOAD_STACKMAP_OFFSET: uint = 48
+pub const ROOT_PAYLOAD_BASE_OFFSET: uint = 56
+pub const ROOT_PAYLOAD_LENGTH_OFFSET: uint = 64
+/// `Rt0Payload.gc_types`/`gc_types_len`/`gc_meta` 的字段偏移；由 `entry.rs` 的 `Rt0Payload`
+/// 与 `backend/x64/{elf,pe}.rs` 的写入端唯一持有，这里只按同一份契约读取。
+pub const ROOT_PAYLOAD_GC_TYPES_OFFSET: uint = 88
+pub const ROOT_PAYLOAD_GC_TYPES_LEN_OFFSET: uint = 96
+pub const ROOT_PAYLOAD_GC_META_OFFSET: uint = 104
+pub const ROOT_PAYLOAD_GC_META_LEN_OFFSET: uint = 112
+/// 类型 section 头内字段偏移：记录表偏移、trace program 偏移与长度。
+pub const ROOT_TYPES_RECORDS_OFFSET_FIELD: uint = 24
+pub const ROOT_TYPES_TRACE_OFFSET_FIELD: uint = 32
+pub const ROOT_TYPES_TRACE_LEN_FIELD: uint = 40
+/// 单个类型记录字节数；与 `gc_metadata_section::TYPE_RECORD_BYTES` 同源。
+pub const ROOT_TYPE_RECORD_BYTES: uint = 80
+/// 类型记录内字段偏移：size、flags、trace 偏移与长度。
+pub const ROOT_TYPE_SIZE_OFFSET: uint = 0
+pub const ROOT_TYPE_FLAGS_OFFSET: uint = 12
+pub const ROOT_TYPE_TRACE_OFFSET: uint = 24
+pub const ROOT_TYPE_TRACE_LEN_OFFSET: uint = 28
+pub const ROOT_STATE_PAYLOAD_OFFSET: uint = 112
+pub const ROOT_STATE_BIAS_OFFSET: uint = 120
+pub const ROOT_STATE_SLOT_OFFSET: uint = 0
+pub const ROOT_HOT_PROCESSOR_OFFSET: uint = 16
+pub const ROOT_PROCESSOR_STATE_OFFSET: uint = 4080
+
+/// 非空 package 必经布局交叉校验。
+#[used]
+pub fn roots_records(record: &GcRootRecord, scan: &GcRootScan) uint {
+    record.address + record.kind + record.value + record.reserved + scan.needed + scan.written
+}
+
+fn roots_word(address: uint) uint {
+    unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) }
+}
+
+fn roots_word32(address: uint) uint {
+    unsafe { uint(std.ptr.read_unaligned[u32](std.mem.transmute[uint, *u32](address))) & uint(4294967295) }
+}
+
+fn roots_word16(address: uint) uint {
+    unsafe { uint(std.ptr.read_unaligned[u16](std.mem.transmute[uint, *u16](address))) & uint(65535) }
+}
+
+fn roots_byte(address: uint) uint {
+    unsafe { uint(std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](address))) & uint(255) }
+}
+
+fn roots_store_word(address: uint, value: uint) {
+    unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) }
+}
+
+/// 契约损坏不可捕获：沿用 RuntimeInvariant 的 fatal 类别，不伪装成用户 panic。
+///
+/// 报告按站点区分（同长度便于共用长度常量）：镜像里只留下致命类别与站点，不带任何
+/// 可恢复语义。站点编号即函数里 `roots_fail(N, ...)` 的实参；同一次 fatal 先写一行
+/// `rs <site> <a> <b> <c>` 数值行，用于定位是哪个 frame/偏移触发的——fatal 路径不分配，
+/// 数值行写在栈上的固定缓冲区里。
+///
+/// 96 字节缓冲的物化就是这里唯一的大拷贝，而且只在 fatal 路径发生：`#[allow(large_copy)]`
+/// 记录它是刻意的，不是漏改的按值传递。
+#[allow(large_copy)]
+fn roots_fail(site: uint, a: uint, b: uint, c: uint, d: uint, e: uint) {
+    unsafe {
+        let digits: [byte; 96] = [0; 96]
+        let begin = std.mem.transmute[*byte, uint](std.ptr.addr_of(digits[0]))
+        let cursor = begin
+        cursor = roots_write(cursor, uint(114))
+        cursor = roots_write(cursor, uint(115))
+        cursor = roots_write(cursor, uint(32))
+        cursor = roots_digits(cursor, site)
+        cursor = roots_digits(cursor, a)
+        cursor = roots_digits(cursor, b)
+        cursor = roots_digits(cursor, c)
+        cursor = roots_digits(cursor, d)
+        cursor = roots_digits(cursor, e)
+        cursor = roots_write(cursor, uint(10))
+        _ = std.runtime.report_write(2, std.mem.transmute[uint, *byte](begin), cursor - begin)
+        if site == 1 {
+            let report = c"runtime fatal: root scan: section header   \n"
+            _ = std.runtime.report_write(2, report, ROOT_FAIL_BYTES)
+        } else {
+            if site == 2 {
+                let report = c"runtime fatal: root scan: code base        \n"
+                _ = std.runtime.report_write(2, report, ROOT_FAIL_BYTES)
+            } else {
+                if site == 3 {
+                    let report = c"runtime fatal: root scan: safepoint        \n"
+                    _ = std.runtime.report_write(2, report, ROOT_FAIL_BYTES)
+                } else {
+                    if site == 4 {
+                        let report = c"runtime fatal: root scan: map bounds       \n"
+                        _ = std.runtime.report_write(2, report, ROOT_FAIL_BYTES)
+                    } else {
+                        if site == 5 {
+                            let report = c"runtime fatal: root scan: frame size       \n"
+                            _ = std.runtime.report_write(2, report, ROOT_FAIL_BYTES)
+                        } else {
+                            if site == 6 {
+                                let report = c"runtime fatal: root scan: slot range       \n"
+                                _ = std.runtime.report_write(2, report, ROOT_FAIL_BYTES)
+                            } else {
+                                if site == 7 {
+                                    let report = c"runtime fatal: root scan: register lane    \n"
+                                    _ = std.runtime.report_write(2, report, ROOT_FAIL_BYTES)
+                                } else {
+                                    let report = c"runtime fatal: root scan: typed entry      \n"
+                                    _ = std.runtime.report_write(2, report, ROOT_FAIL_BYTES)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        std.runtime.process_exit(2)
+    }
+}
+
+/// 写一个字节到诊断游标，返回新游标。
+fn roots_write(cursor: uint, value: uint) uint {
+    unsafe {
+        std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](cursor), byte(value & uint(255)))
+        cursor + 1
+    }
+}
+
+/// 以十进制写一个数并前置空格，返回新游标。
+fn roots_digits(cursor: uint, value: uint) uint {
+    let start = roots_write(cursor, uint(32))
+    if value == 0 { return roots_write(start, uint(48)) }
+    let digits: [byte; 20] = [0; 20]
+    let base = unsafe { std.mem.transmute[*byte, uint](std.ptr.addr_of(digits[0])) }
+    let count: uint = 0
+    let rest = value
+    while rest > 0 {
+        unsafe {
+            std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](base + count), byte(rest % uint(10) + uint(48)))
+        }
+        rest = rest / uint(10)
+        count = count + 1
+    }
+    let at = start
+    let index = count
+    while index > 0 {
+        index = index - 1
+        unsafe {
+            let digit = std.ptr.ptr_read[byte](std.mem.transmute[uint, *byte](base + index))
+            at = roots_write(at, uint(digit))
+        }
+    }
+    at
+}
+
+/// 当前处理器页：hot +16 是 processor，processor +4080 是 runtime 状态区。
+fn roots_state() uint {
+    unsafe {
+        let hot = std.runtime.current_slot()
+        roots_word(roots_word(hot + ROOT_HOT_PROCESSOR_OFFSET) + ROOT_PROCESSOR_STATE_OFFSET)
+    }
+}
+
+/// 栈图 section 的绝对地址；`state +112/120` 由 rt0 发布 payload 地址与加载偏移。
+fn roots_section() uint {
+    let state = roots_state()
+    roots_word(roots_word(state + ROOT_STATE_PAYLOAD_OFFSET) + ROOT_PAYLOAD_STACKMAP_OFFSET) + roots_word(state + ROOT_STATE_BIAS_OFFSET)
+}
+
+/// 栈图 section 字节数。
+fn roots_length() uint {
+    let state = roots_state()
+    roots_word(roots_word(state + ROOT_STATE_PAYLOAD_OFFSET) + ROOT_PAYLOAD_LENGTH_OFFSET)
+}
+
+/// 代码段基址：函数记录的 `code_rva` 是相对它的偏移。
+fn roots_base() uint {
+    let state = roots_state()
+    roots_word(roots_word(state + ROOT_STATE_PAYLOAD_OFFSET) + ROOT_PAYLOAD_BASE_OFFSET) + roots_word(state + ROOT_STATE_BIAS_OFFSET)
+}
+
+fn roots_verify(section: uint, length: uint) {
+    if section == 0 || length < ROOT_SECTION_HEADER_BYTES { roots_fail(uint(1), section, length, 0, 0, 0) }
+    if roots_word(section) != ROOT_SECTION_MAGIC { roots_fail(uint(1), section, length, 1, 0, 0) }
+    if roots_word32(section + 8) != ROOT_SECTION_VERSION_WORD { roots_fail(uint(1), section, length, 2, 0, 0) }
+}
+
+fn roots_function_count(section: uint) uint = roots_word32(section + 12)
+fn roots_safepoint_count(section: uint) uint = roots_word32(section + 16)
+fn roots_functions(section: uint) uint = section + roots_word(section + 32)
+fn roots_safepoints(section: uint) uint = section + roots_word(section + 40)
+fn roots_map_index(section: uint) uint = section + roots_word(section + 48)
+
+/// 二分查找包含 `code_offset`（相对代码段基址）的函数记录下标；没有匹配返回 `ROOT_NO_ENTRY`。
+///
+/// 函数表按 `code_rva` 严格递增且代码区不重叠；命中区间必然唯一，因此这是精确查找而不是
+/// 近似定位。找不到记录表示已走到帧链顶端（入口哨兵不在函数表里）。
+fn roots_find_function(section: uint, code_offset: uint) uint {
+    let table = roots_functions(section)
+    let count = roots_function_count(section)
+    let low: uint = 0
+    let high = count
+    let found = ROOT_NO_ENTRY
+    while low < high && found == ROOT_NO_ENTRY {
+        let middle = (low + high) / 2
+        let record = table + middle * ROOT_FUNCTION_BYTES
+        let start = roots_word(record)
+        if code_offset < start {
+            high = middle
+        } else {
+            if code_offset - start < roots_word32(record + 8) {
+                found = middle
+            } else {
+                low = middle + 1
+            }
+        }
+    }
+    found
+}
+
+/// 函数记录内 `code_rva` 字段：函数内偏移与代码段偏移的换算基准。
+fn roots_function_rva(section: uint, function: uint) uint =
+    roots_word(roots_functions(section) + function * ROOT_FUNCTION_BYTES)
+
+/// 在函数的连续安全点区间里精确匹配 `(offset, kind)`；同一 pc 允许存在多个类别。
+///
+/// `offset` 是**函数内**偏移（`pc - code_rva`）：section 里安全点记录的 `pc_offset` 就是这个
+/// 坐标系，与函数表的 `code_rva`（相对代码段基址）不同，混用会永远找不到记录。
+fn roots_find_safepoint(section: uint, function: uint, offset: uint, kind: uint) uint {
+    let record = roots_functions(section) + function * ROOT_FUNCTION_BYTES
+    let first = roots_word32(record + 16)
+    let count = roots_word32(record + 20)
+    let total = roots_safepoint_count(section)
+    if first > total || count > total - first { roots_fail(uint(3), first, count, total, 0, 0) }
+    let points = roots_safepoints(section)
+    let low: uint = 0
+    let high = count
+    while low < high {
+        let middle = (low + high) / 2
+        if roots_word32(points + (first + middle) * ROOT_SAFEPOINT_BYTES) < offset {
+            low = middle + 1
+        } else {
+            high = middle
+        }
+    }
+    let found = ROOT_NO_ENTRY
+    while low < count && found == ROOT_NO_ENTRY {
+        let point = points + (first + low) * ROOT_SAFEPOINT_BYTES
+        if roots_word32(point) != offset {
+            low = count
+        } else {
+            if roots_byte(point + 8) == kind { found = first + low }
+            low = low + 1
+        }
+    }
+    found
+}
+
+/// map 记录在 section 内的起始偏移。
+fn roots_map_at(section: uint, index: uint) uint = roots_word(roots_map_index(section) + index * ROOT_MAP_INDEX_BYTES)
+
+/// map 记录在 section 内的结束偏移。
+fn roots_map_end(section: uint, index: uint) uint = roots_word(roots_map_index(section) + (index + 1) * ROOT_MAP_INDEX_BYTES)
+
+/// 调用返回点上的安全点：普通/分配返回记为 `call-return`，能挂起的调用返回记为 `suspend-resume`。
+///
+/// 帧链上每一帧的 PC 都是「调用返回点」——父帧正是在调用子帧时挂起的；一条调用只产生一个
+/// 锚点，因此按这两类精确匹配仍是唯一命中，不是近似定位。顺序固定，便于诊断复现。
+fn roots_find_return_safepoint(section: uint, function: uint, offset: uint) uint {
+    let found = roots_find_safepoint(section, function, offset, SAFEPOINT_KIND_CALL_RETURN)
+    if found != ROOT_NO_ENTRY { return found }
+    roots_find_safepoint(section, function, offset, SAFEPOINT_KIND_SUSPEND_RESUME)
+}
+
+/// 写入一条根记录：零字是空引用，不计数也不写入。
+///
+/// 输出头三个字是扫描元数据：`needed`、`written`、`frames`（遍历到的帧数）。计数在记录落盘后
+/// 更新，截断时只丢记录、不丢 `needed`，调用方据此判定容量不足。
+fn roots_emit(out: uint, capacity: uint, address: uint, kind: uint, value: uint) {
+    if value == 0 { return }
+    let needed = roots_word(out) + 1
+    roots_store_word(out, needed)
+    let written = roots_word(out + 8)
+    if written < capacity {
+        let slot = out + ROOT_SCAN_HEADER_BYTES + written * ROOT_RECORD_BYTES
+        roots_store_word(slot, address)
+        roots_store_word(slot + 8, kind)
+        roots_store_word(slot + 16, value)
+        roots_store_word(slot + 24, 0)
+        roots_store_word(out + 8, written + 1)
+    }
+}
+
+/// 一个 map 记录的固定位图根：按 (类别, 槽下标) 固定顺序发布。
+fn roots_emit_words(out: uint, capacity: uint, frame: uint, map: uint, frame_size: uint) {
+    let slot_count = roots_word32(map)
+    if slot_count * 8 > frame_size { roots_fail(uint(5), slot_count, frame_size, 0, 0, 0) }
+    let words = (slot_count + 7) / 8
+    let class: uint = 0
+    while class < 5 {
+        let lane = map + ROOT_MAP_HEAD_BYTES + class * words
+        let index: uint = 0
+        while index < words {
+            let bits = roots_byte(lane + index)
+            let bit: uint = 0
+            while bit < 8 {
+                if bits & (uint(1) << bit) != uint(0) {
+                    let slot = index * 8 + bit
+                    if slot >= slot_count { roots_fail(uint(6), slot, slot_count, class, 0, 0) }
+                    roots_emit(out, capacity, frame + slot * 8, class, roots_word(frame + slot * 8))
+                }
+                bit = bit + 1
+            }
+            index = index + 1
+        }
+        class = class + 1
+    }
+}
+
+/// 一个 map 记录的寄存器根：类别掩码的每一位都是该类别的一个根字。
+///
+/// 掩码要求寄存器保存文件里对应的槽有效；缺失有效槽是契约错误，不允许静默漏掉一个根。
+fn roots_emit_registers(out: uint, capacity: uint, map: uint, gpr: uint, gpr_valid: uint) {
+    let class: uint = 0
+    while class < 5 {
+        let mask = roots_word16(map + 4 + class * 2)
+        let bit: uint = 0
+        while bit < ROOT_GPR_LANES {
+            if mask & (uint(1) << bit) != uint(0) {
+                if gpr_valid & (uint(1) << bit) == uint(0) { roots_fail(uint(7), bit, class, gpr_valid, 0, 0) }
+                roots_emit(out, capacity, gpr + bit * 8, class, roots_word(gpr + bit * 8))
+            }
+            bit = bit + 1
+        }
+        class = class + 1
+    }
+}
+
+/// 一个 map 记录的逐根初始化条目：帧内初始化字节非零时该字才是该类别的根。
+fn roots_emit_typed(out: uint, capacity: uint, frame: uint, map: uint, frame_size: uint) {
+    let slot_count = roots_word32(map)
+    let words = (slot_count + 7) / 8
+    let tail = ROOT_MAP_HEAD_BYTES + 5 * words
+    let aligned = (tail + 3) / 4 * 4
+    let count = roots_word32(map + aligned)
+    // 逐条推进游标：把「基址 + 常量 + 下标乘步长」的复合地址表达式移出循环体，
+    // 循环里只保留一次指针自增，避免多局部量同时存活造成的溢出槽恢复错误。
+    let cursor = map + aligned + 4
+    let left = count
+    while left > 0 {
+        let slot = roots_word32(cursor)
+        let class = roots_word32(cursor + 4)
+        let init_byte = roots_word32(cursor + 8)
+        if class >= 5 || slot >= slot_count || init_byte >= frame_size { roots_fail(uint(8), slot, class, init_byte, 0, 0) }
+        if roots_byte(frame + init_byte) != 0 {
+            roots_emit(out, capacity, frame + slot * 8, class, roots_word(frame + slot * 8))
+        }
+        cursor = cursor + ROOT_TYPED_ENTRY_BYTES
+        left = left - 1
+    }
+}
+
+/// 栈图 section 的只读视图；collector 与探针按同一份来源取代码基址与长度。
+pub fn gc_roots_section() uint = roots_section()
+
+/// 代码段基址：函数记录的 `code_rva` 相对它。
+pub fn gc_roots_base() uint = roots_base()
+
+/// 栈图 section 字节数。
+pub fn gc_roots_length() uint = roots_length()
+
+/// `pc` 所在函数记录下标；没有匹配返回 `ROOT_NO_ENTRY`。
+pub fn gc_root_function(pc: uint) uint {
+    let base = roots_base()
+    if pc < base { return ROOT_NO_ENTRY }
+    roots_find_function(roots_section(), pc - base)
+}
+
+/// `(pc, kind)` 对应的 map 记录地址；没有精确匹配返回 `ROOT_NO_ENTRY`。
+///
+/// 这是查询式入口：不匹配只报 `ROOT_NO_ENTRY`，供 collector 判定某帧是否可扫描；
+/// 真正消费 root 的 `gc_walk_roots` 仍然对任何不一致走 fatal。
+pub fn gc_root_map(pc: uint, kind: uint) uint {
+    let section = roots_section()
+    let base = roots_base()
+    if pc < base { return ROOT_NO_ENTRY }
+    let function = roots_find_function(section, pc - base)
+    if function == ROOT_NO_ENTRY { return ROOT_NO_ENTRY }
+    let offset = pc - base - roots_function_rva(section, function)
+    let safepoint = roots_find_safepoint(section, function, offset, kind)
+    if safepoint == ROOT_NO_ENTRY { return ROOT_NO_ENTRY }
+    let map_index = roots_word32(roots_safepoints(section) + safepoint * ROOT_SAFEPOINT_BYTES + 4)
+    section + roots_map_at(section, map_index)
+}
+
+
+/// 枚举从 `(frame, pc, kind)` 出发的整条帧链根，返回需要的记录数。
+///
+/// `out` 是调用方的记录缓冲区，头两个字写 `needed`/`written`（调用前清零），记录从
+/// `ROOT_SCAN_HEADER_BYTES` 起；`capacity` 是记录条数上限。`gpr` 是保存的通用寄存器文件
+/// （`gpr_valid` 标出其中有效的槽位），寄存器根写回同一份文件，恢复时即可装上修正值。
+/// 帧链在返回地址不属于任何函数记录时结束（入口哨兵是独立片段，不在函数表里）。
+pub fn gc_walk_roots(
+    out: uint,
+    capacity: uint,
+    frame: uint,
+    pc: uint,
+    kind: uint,
+    gpr: uint,
+    gpr_valid: uint,
+) uint {
+    let section = roots_section()
+    roots_verify(section, roots_length())
+    let base = roots_base()
+    if pc < base { roots_fail(uint(2), pc, base, 0, 0, 0) }
+    let cursor = frame
+    let class = kind
+    let at = pc - base
+    let running = true
+    let start_frame = true
+    let frames: uint = 0
+    // 帧链结束时的代码段偏移：返回地址不属于任何函数记录时写入该偏移，低于代码基址时写 0。
+    let stop: uint = 0
+    while running {
+        let function = roots_find_function(section, at)
+        if function == ROOT_NO_ENTRY {
+            stop = at
+            running = false
+        } else {
+            if frames < ROOT_SCAN_TRACE_SLOTS {
+                roots_store_word(out + 32 + frames * 8, at)
+            }
+            frames = frames + 1
+            let record = roots_functions(section) + function * ROOT_FUNCTION_BYTES
+            let frame_size = roots_word32(record + 12)
+            let start = roots_word(record)
+            let offset = at - start
+            // 首帧的类别由调用方给出（停驻点知道自己是挂起还是分配返回），后续帧按调用返回点规则。
+            let safepoint = if start_frame {
+                roots_find_safepoint(section, function, offset, class)
+            } else {
+                roots_find_return_safepoint(section, function, offset)
+            }
+            if safepoint == ROOT_NO_ENTRY {
+                roots_fail(uint(3), at, function, roots_word32(record + 16), roots_word32(record + 20), offset)
+            }
+            let map_index = roots_word32(roots_safepoints(section) + safepoint * ROOT_SAFEPOINT_BYTES + 4)
+            let map_start = roots_map_at(section, map_index)
+            let map_end = roots_map_end(section, map_index)
+            if map_end < map_start || map_end - map_start < ROOT_MAP_HEAD_BYTES { roots_fail(uint(4), map_start, map_end, map_index, 0, 0) }
+            let map = section + map_start
+            roots_emit_words(out, capacity, cursor, map, frame_size)
+            roots_emit_registers(out, capacity, map, gpr, gpr_valid)
+            roots_emit_typed(out, capacity, cursor, map, frame_size)
+            let ra = roots_word(cursor + frame_size)
+            if ra < base {
+                running = false
+            } else {
+                cursor = cursor + frame_size + 8
+                at = ra - base
+                start_frame = false
+            }
+        }
+    }
+    roots_store_word(out + 16, frames)
+    roots_store_word(out + 24, stop)
+    roots_word(out)
+}
+
+/// 参数包车道在包内的字节偏移：9 个整数车道按 8 字节连续排布，其后浮点车道按 16 字节。
+fn roots_pack_lane_offset(lane: uint) uint {
+    if lane < COROUTINE_PACK_INTEGER_LANES { return lane * 8 }
+    (lane - COROUTINE_PACK_INTEGER_LANES) * COROUTINE_PACK_FLOAT_STRIDE + COROUTINE_PACK_FLOAT_OFFSET
+}
+
+/// 遍历处理器的 typed 动态根登记表，把每条载荷的受管车道写进 `out`。
+///
+/// 载荷描述按类别解释，都是 lane map 语义（每个车道 3 位，0 = 非根，n+1 = 栈图根种类判别值 n）：
+/// spawn 参数包的车道按包内固定布局排布，结果载荷只有一个车道、就是结果槽本身，channel 环槽的
+/// 描述是元素类型的受管车道表（表首字为条数，其后每条是 `(偏移, 编码)`）。因此这里按车道精确
+/// 取根，不做任何保守扫描；未知类别、未初始化载荷、越过车道数的 `count`、结果载荷里非 0 的
+/// 车道号都是 RuntimeInvariant fatal，绝不跳过。返回需要的根数（写满时只截断记录、不丢 `needed`）。
+pub fn gc_visit_dynamic_roots(processor: uint, out: uint, capacity: uint) uint {
+    // 登记表是**稀疏**的：发布填第一个空槽、结清把该槽清零。因此不能按 `0..count`
+    // 迭代：那既会把空洞当成记录（身份字为 0、kind 也为 0 恰好等于 SPAWN_PAYLOAD，
+    // 随后因 flags=0 报错），又会漏掉位于 `count` 之后的存活记录。必须扫全表、
+    // 按身份字跳过空槽，并用已发布条数交叉核对扫到的条数。
+    let expected = dynamic_root_count(processor)
+    let entries = dynamic_root_capacity(processor)
+    let visited: uint = 0
+    let index: uint = 0
+    while index < entries {
+        let record = dynamic_root_record(processor, index)
+        if record == 0 { roots_fail(uint(9), index, entries, 0, 0, 0) }
+        if roots_word(record) == 0 {
+            let _ = 0
+        } else {
+        let kind = roots_word(record + DYNAMIC_ROOT_KIND_OFFSET)
+        if kind != DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD && kind != DYNAMIC_ROOT_KIND_RESULT && kind != DYNAMIC_ROOT_KIND_CHANNEL_SLOT {
+            roots_fail(uint(10), index, kind, 0, 0, 0)
+        }
+        let flags = roots_word(record + DYNAMIC_ROOT_FLAGS_OFFSET)
+        let slot = roots_word(record + DYNAMIC_ROOT_SLOT_OFFSET)
+        if flags & DYNAMIC_ROOT_FLAG_INITIALIZED == 0 { roots_fail(uint(11), index, flags, slot, 0, 0) }
+        let map = roots_word(record + DYNAMIC_ROOT_DESCRIPTOR_OFFSET)
+        if kind == DYNAMIC_ROOT_KIND_CHANNEL_SLOT {
+            roots_visit_table(out, capacity, slot, map)
+        } else {
+            let lanes = roots_word(record + DYNAMIC_ROOT_COUNT_OFFSET)
+            if lanes > COROUTINE_PACK_LANES { roots_fail(uint(12), lanes, COROUTINE_PACK_LANES, slot, 0, 0) }
+            let lane: uint = 0
+            while lane < lanes {
+                let code = (map >> (lane * COROUTINE_PACK_TRACE_BITS)) & uint(7)
+                if code != COROUTINE_PACK_TRACE_NONE {
+                    let address = if kind == DYNAMIC_ROOT_KIND_RESULT {
+                        if lane != 0 { roots_fail(uint(13), lane, kind, slot, 0, 0) }
+                        slot
+                    } else {
+                        slot + roots_pack_lane_offset(lane)
+                    }
+                    roots_emit(out, capacity, address, code - 1, roots_word(address))
+                }
+                lane = lane + 1
+            }
+        }
+            visited = visited + 1
+        }
+        index = index + 1
+    }
+    if visited != expected { roots_fail(uint(17), visited, expected, entries, 0, 0) }
+    roots_word(out)
+}
+
+/// 按元素类型的受管车道表枚举一条内联载荷：表首字是条数，其后每条是 `(偏移, 编码)`。
+///
+/// 表只保证字节对齐（静态数据），读取一律走非对齐访问；游标每次只前进一条，避免在循环里
+/// 用「基址 + 下标 × 步长」的复合地址算术。
+fn roots_visit_table(out: uint, capacity: uint, slot: uint, table: uint) {
+    if table == 0 {
+        roots_fail(uint(14), slot, table, 0, 0, 0)
+    }
+    let count = roots_word(table)
+    // 内联载荷的根车道数有硬上界（一个类型的受管字段不可能超过 8 个）：越界说明描述符不是表。
+    if count == 0 || count > uint(8) {
+        roots_fail(uint(15), count, slot, table, 0, 0)
+    }
+    let cursor = table + 8
+    let index: uint = 0
+    while index < count {
+        let offset = roots_word(cursor)
+        let code = roots_word(cursor + 8)
+        if code == 0 || code > uint(5) || offset >= uint(4096) {
+            roots_fail(uint(16), index, code, offset, table, 0)
+        }
+        let address = slot + offset
+        roots_emit(out, capacity, address, code - 1, roots_word(address))
+        cursor = cursor + 16
+        index = index + 1
+    }
+}
+
+/// 类型 section 的绝对地址；`state +112` 是 rt0 发布的 payload 地址，加载偏移另行相加。
+pub fn gc_types_section() uint {
+    let state = roots_state()
+    roots_word(roots_word(state + ROOT_STATE_PAYLOAD_OFFSET) + ROOT_PAYLOAD_GC_TYPES_OFFSET) + roots_word(state + ROOT_STATE_BIAS_OFFSET)
+}
+
+/// 类型 section 字节数；0 表示镜像没有写出该节。
+pub fn gc_types_length() uint {
+    let state = roots_state()
+    roots_word(roots_word(state + ROOT_STATE_PAYLOAD_OFFSET) + ROOT_PAYLOAD_GC_TYPES_LEN_OFFSET)
+}
+
+/// 第 `type_index` 个类型记录的绝对地址；调用方负责保证下标在表内。
+pub fn gc_type_record(section: uint, type_index: uint) uint =
+    section + roots_word(section + ROOT_TYPES_RECORDS_OFFSET_FIELD) + type_index * ROOT_TYPE_RECORD_BYTES
+
+/// 类型记录的 trace descriptor 绝对地址（记录内偏移相对 trace program 起点）。
+pub fn gc_type_trace(section: uint, type_index: uint) uint {
+    let record = gc_type_record(section, type_index)
+    section + roots_word(section + ROOT_TYPES_TRACE_OFFSET_FIELD) + roots_word32(record + ROOT_TYPE_TRACE_OFFSET)
+}
+
+/// 类型记录里 trace descriptor 的字节长度。
+pub fn gc_type_trace_length(section: uint, type_index: uint) uint =
+    roots_word32(gc_type_record(section, type_index) + ROOT_TYPE_TRACE_LEN_OFFSET)
+
+/// 包含 `pc` 的函数的局部帧尺寸；`pc` 不在任何函数记录内时返回 0。
+///
+/// 帧链的口径与 `gc_walk_roots` 一致：`frame` 是进入函数后、分配完局部量时的 RSP，
+/// 返回地址位于 `frame + frame_size`。runtime 入口帧没有安全点 map，因此收集器需要先
+/// 用本函数跳过它们，才能定位到发起者的精确 `(frame, pc)`。
+pub fn gc_function_frame_size(pc: uint) uint {
+    // 单一出口：runtime 源的早退路径会错用返回值寄存器，因此结果只经一个尾部表达式返回。
+    let base = roots_base()
+    let section = roots_section()
+    let result: uint = 0
+    if pc < base {
+        result = 0
+    } else {
+        let function = roots_find_function(section, pc - base)
+        if function == ROOT_NO_ENTRY {
+            result = 0
+        } else {
+            result = roots_word32(roots_functions(section) + function * ROOT_FUNCTION_BYTES + 12)
+        }
+    }
+    result
+}
+/// 从 runtime 入口帧的 RSP 出发，跳过 runtime 侧帧后定位发起者帧。
+///
+/// 帧链口径与 `gc_walk_roots` 完全一致：一个函数的返回地址槽在 `frame + frame_size`，
+/// 因此调用者的帧基址就是返回地址槽再加 8。`entry_rsp` 是 `gc_enter` 片段保存的入口帧 RSP，
+/// 它指向 `call gc_enter` 压入的返回地址，所以入口函数的帧基址是 `entry_rsp + 8`。
+///
+/// runtime 侧函数（分配盒、hind 盒）没有安全点 map，因此不能按帧链直接扫描；这里逐帧上移
+/// 直到落在第一个真的拥有该类别 map 的帧——那个帧就是发起回收的 mutator 帧。找过
+/// `ROOT_INITIATOR_FRAME_LIMIT` 层仍未命中说明调用点形状不符合契约，返回 `(0, 0)` 由调用方
+/// 按 RuntimeInvariant fatal 处理。
+pub const ROOT_INITIATOR_FRAME_LIMIT: uint = 8
+
+pub fn gc_initiator_frame(entry_rsp: uint) (uint, uint) {
+    // `entry_rsp` 指向 `call gc_enter` 压入的返回地址，因此入口函数的帧基址是 `entry_rsp + 8`。
+    // 入口函数（分配盒）自己也可能在调用点上有 map，因此必须先上移一层再判定：只
+    // 停在「真的拥有该类别安全点的那个 mutator 帧」上。
+    //
+    // 循环体只有单一出口：命中后靠 `done` 跳出，`return` 必须在循环之后。
+    let frame = entry_rsp + 8
+    let at = roots_word(entry_rsp)
+    let found_frame: uint = 0
+    let found_pc: uint = 0
+    let steps: uint = 0
+    let done: uint = 0
+    while steps < ROOT_INITIATOR_FRAME_LIMIT && done == 0 {
+        let frame_size = gc_function_frame_size(at)
+        if frame_size == 0 {
+            done = 1
+        } else {
+            let caller_ra = roots_word(frame + frame_size)
+            frame = frame + frame_size + 8
+            at = caller_ra
+            if gc_root_map(at, SAFEPOINT_KIND_CALL_RETURN) != ROOT_NO_ENTRY {
+                found_frame = frame
+                found_pc = at
+                done = 1
+            } else {
+                steps = steps + 1
+            }
+        }
+    }
+    (found_frame, found_pc)
+}

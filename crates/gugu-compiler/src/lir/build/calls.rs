@@ -2,11 +2,58 @@ use super::values::Computed;
 use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::frontend::{gir::body as g, mono};
 use crate::lir::body::{
-    BlockId, Call, CallTarget, Condition, Conversion, Definition, IntOp, Memory, Op, Origin,
-    Provenance, RuntimeCall, Safepoint, SafepointId, Terminator, Type, ValueId, ValueType, id,
+    AtomicOp, BlockId, Call, CallTarget, Condition, Conversion, Definition, IntOp, Memory, Op,
+    Origin, Provenance, RuntimeCall, Safepoint, SafepointId, Terminator, Type, ValueId, ValueType,
+    id,
 };
 
 impl Builder<'_> {
+    /// 初始化器把结果发布进静态块：先写值槽，再 release 置 initialized flags。
+    ///
+    /// 值槽地址就是 `StaticRef` 返回的地址（块首 +8），位字是块首本身。收集器只在位字已发布
+    /// 时扫描值槽，因此绝不会读到半初始化的内容；初始化器自己构造完整值再发布，中途 panic
+    /// 时位字保持 0。聚合结果按字节从自己的地址复制，多车道标量按车道依次落槽。
+    pub(super) fn publish_static(&mut self, value: Computed) -> Result<(), Diagnostic> {
+        let definition = crate::frontend::hir::DefId(self.instance.definition);
+        // 初始化器正文的签名结果就是静态值类型，且已经过具体化改写。
+        let value_ty = self.gir.signature.result.0;
+        let symbol = self.static_block(definition, value_ty)?;
+        let layout = self
+            .layout(value_ty)
+            .layout
+            .ok_or_else(|| invalid("静态初始化器缺少结果布局"))?;
+        let block = self.emit_one(
+            Op::SymbolAddr(symbol),
+            &[],
+            ValueType::pointer(Provenance::Foreign),
+            Origin::Symbol,
+        );
+        let slot = self.offset(block, 8);
+        if layout.size != 0 {
+            if let Computed::Address { address, .. } = value {
+                self.emit(Op::Memcpy { bytes: layout.size }, &[slot, address], &[]);
+            } else {
+                for (index, lane) in self.computed_values(value)?.into_iter().enumerate() {
+                    let destination =
+                        self.offset(slot, u64::try_from(index).expect("车道编号") * 8);
+                    self.store(destination, lane, 8, false);
+                }
+            }
+        }
+        let published = self.constant(1, Type::I64);
+        self.emit(
+            Op::Atomic {
+                op: AtomicOp::Store,
+                ordering: g::MemoryOrdering::Release,
+                failure: None,
+                align: 8,
+            },
+            &[block, published],
+            &[],
+        );
+        Ok(())
+    }
+
     pub(super) fn runtime(
         &mut self,
         target: RuntimeCall,
@@ -102,6 +149,9 @@ impl Builder<'_> {
             }
             g::Terminator::Return => {
                 let value = self.read_place(g::Place::local(g::LocalId(0)))?;
+                if self.instance.kind == crate::frontend::mono::keys::MonoKind::StaticInit {
+                    self.publish_static(value.clone())?;
+                }
                 let values = if let Some(sret) = self.sret {
                     let source = self.computed_address(value)?;
                     self.copy_memory(sret, source, self.gir.signature.result.0)?;
@@ -423,6 +473,19 @@ impl Builder<'_> {
             }
             g::Callee::Dispatch(_) => Err(invalid("静态派发没有绑定具体实例")),
             g::Callee::Builtin(_) => Err(invalid("builtin 必须在 GIR 中展开为封闭操作")),
+            g::Callee::StaticInit(definition) => {
+                // 每个静态定义只有一个初始化器实例；读点守卫的 site 通常已命中，
+                // 这里按定义唯一绑定，用于 site 未登记的内部读点。
+                let mut candidates = self
+                    .instance
+                    .functions
+                    .iter()
+                    .filter(|callee| callee.definition == definition.0);
+                match (candidates.next(), candidates.next()) {
+                    (Some(binding), None) => Ok(CallTarget::Instance(binding.instance)),
+                    _ => Err(invalid("静态初始化器不能唯一绑定实例")),
+                }
+            }
         }
     }
 
@@ -539,8 +602,9 @@ impl Builder<'_> {
             let ty = value.ty();
             let address = self.computed_address(value)?;
             let pointer = self.raw_pointer(address);
-            let desc = self.descriptor(ty);
-            (pointer, self.raw_pointer(desc))
+            // 发送描述符是载荷类型的受管车道表：环槽登记与固定访客都按它取根。
+            let desc = self.payload_root_table(ty);
+            (pointer, desc)
         } else if let Some(out) = out {
             let pointer = self.raw_pointer(out);
             let zero = self.constant(0, Type::I64);
@@ -818,7 +882,8 @@ impl Builder<'_> {
             let address = self.computed_address(value)?;
             let address_bits = self.pointer_bits(address);
             self.store_record_word(base, origin + 16, address_bits);
-            let desc = self.descriptor(ty);
+            // 发送载荷的描述符是受管车道表：select 提交路径按它登记环槽。
+            let desc = self.payload_root_table(ty);
             let desc_bits = self.pointer_bits(desc);
             self.store_record_word(base, origin + 24, desc_bits);
         } else {

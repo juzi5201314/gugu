@@ -3,6 +3,13 @@
  * 禁止出现 managed pointer、field 地址或栈指针。
  */
 
+use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_bytes, gc_config_card_entries, gc_config_edge_entries, gc_config_granule_bytes, gc_config_object_header_bytes, gc_config_stamp_entries}
+use std.runtime.heap.{heap_arena_of, heap_fail, heap_mark_active, heap_mark_epoch, heap_metadata, heap_owner_payload, heap_shade_target, heap_stack_grey, heap_store_byte, heap_store_word, heap_store_word32, heap_word, heap_word32, header_generation, ARENA_CARDS_OFFSET, ARENA_GENERATION_OFFSET, EDGE_RECORDS_OFFSET, EDGE_RECORD_BYTES, GENERATION_AGING, GENERATION_OLD, PROCESSOR_BARRIER_SCRATCH_OFFSET, PROCESSOR_EDGE_SCRATCH_OFFSET}
+
+/// 屏障状态页保留范围的描述；与 `std.platform.commit` 的入参一致。
+#[repr(C)]
+struct BarrierExtent { base: uint, bytes: uint }
+
 #[repr(C, align(16))]
 pub struct CardMarkEntry {
     pub arena_descriptor: uint,
@@ -49,4 +56,220 @@ pub fn card_mark_records(
     table: &CardTableDescriptor,
 ) u32 {
     buffer.len + table.dirty + entry.card_index + stamp.entry
+}
+
+/* barrier 状态页布局：头部 64 字节与 `CardMarkBufferHead` 逐字段一致，其后是定长 card 条目
+ * 数组与直接映射 stamp 表。所有内容都是稳定身份（arena 基址、generation、card 序号、epoch）：
+ * 不保存 managed pointer、field 地址或栈指针。
+ */
+pub const BARRIER_HEADER_BYTES: uint = 64
+pub const BARRIER_ENTRY_BYTES: uint = 32
+pub const BARRIER_ENTRIES_OFFSET: uint = 64
+pub const BARRIER_STAMPS_OFFSET: uint = 8256
+pub const BARRIER_STAMP_BYTES: uint = 32
+pub const BARRIER_FLUSHES_OFFSET: uint = 48
+pub const BARRIER_SCRATCH_BYTES: uint = 20480
+/// stamp 槽为空时写进 `cycle_epoch` 的哨兵：真实 epoch 至少为 1。
+pub const BARRIER_STAMP_EMPTY: uint = 0
+
+/// 建立 barrier 状态页：card buffer、stamp 表与 edge staging 都在独立 raw 页上，不进 processor 页。
+pub fn barrier_init(processor: uint) {
+    unsafe {
+        let base = std.platform.reserve_aligned(BARRIER_SCRATCH_BYTES, uint(4096))
+        if base == 0 { heap_fail() }
+        let extent = BarrierExtent { base, bytes: BARRIER_SCRATCH_BYTES }
+        if std.platform.commit(std.mem.transmute[*BarrierExtent, uint](std.ptr.addr_of(extent))) != 0 {
+            heap_fail()
+        }
+        let at = base
+        let end = base + BARRIER_SCRATCH_BYTES
+        while at < end {
+            heap_store_word(at, 0)
+            at = at + 8
+        }
+        heap_store_word(processor + PROCESSOR_BARRIER_SCRATCH_OFFSET, base)
+    }
+}
+
+/// barrier 状态页首地址；未初始化（0）是编译期配置错误之外的不变量破坏。
+pub fn barrier_state(processor: uint) uint {
+    let state = heap_word(processor + PROCESSOR_BARRIER_SCRATCH_OFFSET)
+    if state == 0 { heap_fail() }
+    state
+}
+
+/// 把 card buffer 里的 distinct 卡片键写进各 arena 的 card table 并清空缓冲与 stamp。
+///
+/// owner 独占自己的 card table，因此这里是无同步的有界写入；重复置位幂等。
+pub fn gc_barrier_flush(processor: uint) {
+    let state = barrier_state(processor)
+    let config = unsafe { std.runtime.gc_config() }
+    let arena_bytes = gc_config_arena_bytes(config)
+    let length = heap_word(state)
+    let index: uint = 0
+    while index < length {
+        let entry = state + BARRIER_ENTRIES_OFFSET + index * BARRIER_ENTRY_BYTES
+        let arena = heap_word(entry)
+        let card = heap_word32(entry + 12)
+        heap_store_byte(heap_metadata(arena, arena_bytes) + ARENA_CARDS_OFFSET + card, 1)
+        index = index + 1
+    }
+    heap_store_word(state, 0)
+    heap_store_word(state + BARRIER_FLUSHES_OFFSET, heap_word(state + BARRIER_FLUSHES_OFFSET) + 1)
+    let stamp_capacity = gc_config_stamp_entries(config)
+    let stamp: uint = 0
+    while stamp < stamp_capacity {
+        heap_store_word(state + BARRIER_STAMPS_OFFSET + stamp * BARRIER_STAMP_BYTES + 16, BARRIER_STAMP_EMPTY)
+        stamp = stamp + 1
+    }
+}
+
+/// 登记一个 distinct 卡片键；命中 stamp 时只累加 marks，不重复入 buffer。
+fn barrier_card_append(processor: uint, arena: uint, generation: uint, card: uint, epoch: uint) {
+    let config = unsafe { std.runtime.gc_config() }
+    let state = barrier_state(processor)
+    let capacity = gc_config_card_entries(config)
+    let stamp_capacity = gc_config_stamp_entries(config)
+    if capacity == 0 || stamp_capacity == 0 { heap_fail() }
+    let key = arena | card
+    let stamp = state + BARRIER_STAMPS_OFFSET + (key % stamp_capacity) * BARRIER_STAMP_BYTES
+    if heap_word(stamp) == key && heap_word32(stamp + 12) == generation && heap_word(stamp + 16) == epoch {
+        let index = heap_word32(stamp + 8)
+        if index >= capacity { heap_fail() }
+        let entry = state + BARRIER_ENTRIES_OFFSET + index * BARRIER_ENTRY_BYTES
+        if heap_word(entry) != arena || heap_word32(entry + 12) != card { heap_fail() }
+        heap_store_word(entry + 24, heap_word(entry + 24) + 1)
+        return
+    }
+    let length = heap_word(state)
+    if length >= capacity {
+        gc_barrier_flush(processor)
+    }
+    let slot = heap_word(state)
+    if slot >= capacity { heap_fail() }
+    let entry = state + BARRIER_ENTRIES_OFFSET + slot * BARRIER_ENTRY_BYTES
+    heap_store_word(entry, arena)
+    heap_store_word32(entry + 8, generation)
+    heap_store_word32(entry + 12, card)
+    heap_store_word(entry + 16, epoch)
+    heap_store_word(entry + 24, 1)
+    heap_store_word(state, slot + 1)
+    // stamp 冲突只淘汰索引：旧键已经在其 buffer 条目里，不会因此丢失。
+    let stamp = state + BARRIER_STAMPS_OFFSET + (key % stamp_capacity) * BARRIER_STAMP_BYTES
+    heap_store_word(stamp, key)
+    heap_store_word32(stamp + 8, slot)
+    heap_store_word32(stamp + 12, generation)
+    heap_store_word(stamp + 16, epoch)
+}
+
+/// 追加一条 edge delta；满载时置 overflow 账本，绝不静默丢边。
+fn barrier_edge_append(processor: uint, source_block: uint, target_block: uint, kind: uint) {
+    let config = unsafe { std.runtime.gc_config() }
+    let capacity = gc_config_edge_entries(config)
+    let scratch = heap_word(processor + PROCESSOR_EDGE_SCRATCH_OFFSET)
+    if scratch == 0 || capacity == 0 { heap_fail() }
+    let count = heap_word(scratch)
+    if count >= capacity {
+        heap_store_word(scratch + 8, 1)
+        return
+    }
+    let record = scratch + EDGE_RECORDS_OFFSET + count * EDGE_RECORD_BYTES
+    heap_store_word(record, source_block)
+    heap_store_word(record + 8, target_block)
+    heap_store_word(record + 16, kind)
+    heap_store_word(record + 24, count)
+    heap_store_word(scratch, count + 1)
+}
+
+/// 六步 hybrid barrier：read-old（实参）→ shade-old → shade-new → store（配对指令）→ card → edge。
+///
+/// shade 只在标记期发生，card 只在 old→new 代际写入，edge 只在标记期且跨 block 时记账：
+/// 条件全部来自 `barrier.rs::BarrierSite` 的权威语义，不做保守超集——无活跃周期时写记忆集
+/// 只会让下一轮扫描多看，而漏置位会丢根，因此两边的条件必须一致。
+fn barrier_write(pointer: uint, old: uint, value: uint) {
+    let config = unsafe { std.runtime.gc_config() }
+    let arena_bytes = gc_config_arena_bytes(config)
+    let card_bytes = gc_config_card_bytes(config)
+    let block_bytes = gc_config_block_bytes(config)
+    let granule_bytes = gc_config_granule_bytes(config)
+    let header_bytes = gc_config_object_header_bytes(config)
+    if arena_bytes == 0 || card_bytes == 0 || block_bytes == 0 || granule_bytes == 0 || header_bytes == 0 || pointer == 0 {
+        heap_fail()
+    }
+    let processor = unsafe { heap_word(std.runtime.current_slot() + 16) }
+    let arena = heap_arena_of(pointer, arena_bytes)
+    let epoch = heap_mark_epoch(processor)
+    let marking = heap_mark_active(processor) != 0
+    if marking {
+        if old != 0 { heap_shade_target(old, arena_bytes, granule_bytes, header_bytes) } else { let _ = 0 }
+        if value != 0 && heap_stack_grey(processor, epoch) != 0 {
+            heap_shade_target(value, arena_bytes, granule_bytes, header_bytes)
+        } else {
+            let _ = 0
+        }
+    } else {
+        let _ = 0
+    }
+    // barrier 的入参是受管对象的字段地址，它所属的 arena 由该地址本身确定。
+    let owner = heap_owner_payload(pointer, heap_arena_of(pointer, arena_bytes), arena_bytes, granule_bytes, header_bytes)
+    if marking && owner == 0 { heap_fail() }
+    if owner != 0 && value != 0 {
+        let owner_generation = header_generation(heap_word(owner - header_bytes))
+        let new_generation = header_generation(heap_word(value - header_bytes))
+        if owner_generation >= GENERATION_OLD && new_generation <= GENERATION_AGING {
+            let card = (pointer - arena) / card_bytes
+            barrier_card_append(processor, arena, heap_word32(heap_metadata(arena, arena_bytes) + ARENA_GENERATION_OFFSET), card, epoch)
+        } else {
+            let _ = 0
+        }
+    } else {
+        let _ = 0
+    }
+    if marking && owner != 0 {
+        let source_block = owner / block_bytes
+        if old != 0 && old != value && old / block_bytes != source_block {
+            barrier_edge_append(processor, source_block, old / block_bytes, uint(0))
+        } else {
+            let _ = 0
+        }
+        if value != 0 && value / block_bytes != source_block {
+            barrier_edge_append(processor, source_block, value / block_bytes, uint(1))
+        } else {
+            let _ = 0
+        }
+    } else {
+        let _ = 0
+    }
+}
+
+/// 未预留屏障：容量不足时由 barrier 自己 flush 已经登记的卡片键。
+#[used]
+pub fn gc_write_barrier(pointer: uint, old: uint, value: uint) {
+    barrier_write(pointer, old, value)
+}
+
+/// 已通过 `BarrierReserve` 的屏障：步骤与普通屏障完全相同，不再扩容。
+#[used]
+pub fn gc_write_barrier_reserved(pointer: uint, old: uint, value: uint) {
+    barrier_write(pointer, old, value)
+}
+
+/// 屏障预留：为 region 内的写补齐 card 额度；`max_card_marks` 是这一 region 的 distinct 上界。
+///
+/// 本切片每次写至多一个 card 键，因此预留即「当前容量能容纳 max_card_marks 个新键」；不足时
+/// 先 flush 再判断，仍然不足就是编译期额度与实际消费不一致的不变量错误。
+#[used]
+pub fn gc_barrier_reserve(max_shades: uint, max_card_marks: uint) {
+    let _ = max_shades
+    let config = unsafe { std.runtime.gc_config() }
+    let processor = unsafe { heap_word(std.runtime.current_slot() + 16) }
+    let state = barrier_state(processor)
+    let capacity = gc_config_card_entries(config)
+    let length = heap_word(state)
+    if length + max_card_marks > capacity {
+        gc_barrier_flush(processor)
+        if heap_word(state) + max_card_marks > capacity { heap_fail() }
+        _ = 0
+    }
+    _ = max_shades
 }

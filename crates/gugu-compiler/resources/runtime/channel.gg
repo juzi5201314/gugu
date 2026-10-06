@@ -1,4 +1,5 @@
-use std.runtime.scheduler.{park_current, ready_hot}
+use std.runtime.heap.{copy_bytes, value_size}
+use std.runtime.scheduler.{dynamic_root_publish, dynamic_root_retire, park_current, ready_hot, take_result, DYNAMIC_ROOT_KIND_CHANNEL_SLOT}
 
 /* 等待源控制块的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
  * wait-node 只保存协程句柄、generation、case 和下标偏移，禁止裸栈指针。
@@ -45,13 +46,17 @@ pub struct ChannelControl {
     pub reservation_generation: uint,
     pub ring_index: uint,
     pub ring_generation: uint,
-    pub padding: [byte; 32],
+    /// 创建该通道的处理器：环载荷作为动态根登记在该处理器的表里。
+    pub owner_processor: uint,
+    /// 元素类型的受管车道表地址；0 表示元素不含根。
+    pub element_roots: uint,
+    pub padding: [byte; 16],
 }
 
 /// 非空 package 必经布局交叉校验。
 #[used]
 pub fn wait_records(control: &ChannelControl, node: &WaitNode, txn: &SelectTxn, cache: &SelectScratchCache) uint {
-    control.source_id + node.wait_generation + txn.case_count + cache.inline_words[0]
+    control.owner_processor + control.element_roots + control.source_id + node.wait_generation + txn.case_count + cache.inline_words[0]
 }
 
 fn word(address: uint) uint {
@@ -90,26 +95,6 @@ fn heap_alloc(processor: uint, bytes: uint) uint {
     let start = if aligned == cursor { cursor } else { aligned + 64 }
     store_word(processor + 4048, start + bytes)
     start
-}
-
-fn value_size(desc: uint) uint {
-    if desc == 0 { return 0 }
-    word(desc)
-}
-
-fn copy_bytes(dst: uint, src: uint, size: uint) {
-    let index: uint = 0
-    while index + 8 <= size {
-        store_word(dst + index, word(src + index))
-        index = index + 8
-    }
-    while index < size {
-        unsafe {
-            let value = std.ptr.ptr_read[byte](std.mem.transmute[uint, *byte](src + index))
-            byte_store(dst + index, value)
-        }
-        index = index + 1
-    }
 }
 
 fn alloc_node(processor: uint, hot: uint, payload: uint, result: uint, case: uint) uint {
@@ -164,6 +149,7 @@ pub fn channel_new(capacity: int, desc: *()) uint {
         let size = value_size(as_uint(desc))
         store_word(control + 16, uint(capacity))
         store_word(control + 72, size)
+        store_word(control + 96, processor)
         if capacity > 0 && size != 0 {
             store_word(control + 80, heap_alloc(processor, uint(capacity) * size))
         }
@@ -191,13 +177,35 @@ fn try_rendezvous_send(control: uint, payload: uint) byte {
     1
 }
 
-fn enqueue_value(control: uint, payload: uint) byte {
+/// 环载荷登记：把元素类型的受管车道表记进控制块并登记这条环槽。
+///
+/// 元素类型不含根时表为 0，不做任何登记；表只能有一个来源，后续 send 给出不同表即契约不一致。
+fn register_ring_slot(control: uint, slot: uint, desc: uint) {
+    if desc == 0 { return }
+    let known = word(control + 104)
+    if known != 0 && known != desc { die() }
+    store_word(control + 104, desc)
+    let count = unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](desc)) }
+    dynamic_root_publish(word(control + 96), slot, slot, desc, count, DYNAMIC_ROOT_KIND_CHANNEL_SLOT)
+}
+
+/// 环槽出队：载荷已经复制走或即将复制走，登记必须同步结清。
+fn retire_ring_slot(control: uint, slot: uint) {
+    if word(control + 104) == 0 { return }
+    dynamic_root_retire(word(control + 96), slot)
+}
+
+fn enqueue_value(control: uint, payload: uint, desc: uint) byte {
     let capacity = word(control + 16)
     let len = word(control + 48)
     if len >= capacity { return 0 }
     let size = word(control + 72)
     let tail = word(control + 40)
-    if size != 0 { copy_bytes(word(control + 80) + (tail % capacity) * size, payload, size) }
+    if size != 0 {
+        let slot = word(control + 80) + (tail % capacity) * size
+        copy_bytes(slot, payload, size)
+        register_ring_slot(control, slot, desc)
+    }
     store_word(control + 40, tail + 1)
     store_word(control + 48, len + 1)
     wake_node(pop_queue(control + 64))
@@ -213,15 +221,15 @@ fn park_on(control: uint, queue: uint, payload: uint, result: uint) {
 
 #[used]
 pub fn channel_send(handle: uint, payload: *(), desc: *()) byte {
-    _ = desc
     let src = as_uint(payload)
+    let roots = as_uint(desc)
     if word(handle + 24) != 0 { return 0 }
     if word(handle + 16) == 0 {
         if try_rendezvous_send(handle, src) == 1 { return 1 }
         park_on(handle, handle + 56, src, 0)
         return 1
     }
-    if enqueue_value(handle, src) == 1 { return 1 }
+    if enqueue_value(handle, src, roots) == 1 { return 1 }
     park_on(handle, handle + 56, src, 0)
     1
 }
@@ -231,7 +239,11 @@ fn dequeue_value(control: uint, dst: uint) byte {
     let size = word(control + 72)
     let head = word(control + 32)
     let capacity = word(control + 16)
-    if size != 0 && dst != 0 { copy_bytes(dst, word(control + 80) + (head % capacity) * size, size) }
+    if size != 0 {
+        let slot = word(control + 80) + (head % capacity) * size
+        if dst != 0 { copy_bytes(dst, slot, size) }
+        retire_ring_slot(control, slot)
+    }
     store_word(control + 32, head + 1)
     store_word(control + 48, word(control + 48) - 1)
     wake_node(pop_queue(control + 56))
@@ -265,14 +277,13 @@ pub fn channel_receive(handle: uint, payload: *(), desc: *()) byte {
 
 #[used]
 pub fn channel_try_send(handle: uint, payload: *(), desc: *()) byte {
-    _ = desc
     if word(handle + 24) != 0 { return 2 }
     let src = as_uint(payload)
     if word(handle + 16) == 0 {
         if try_rendezvous_send(handle, src) == 1 { return 1 }
         return 0
     }
-    if enqueue_value(handle, src) == 1 { return 1 }
+    if enqueue_value(handle, src, as_uint(desc)) == 1 { return 1 }
     0
 }
 
@@ -297,16 +308,16 @@ pub fn channel_try_recv(handle: uint, payload: *(), desc: *()) byte {
 
 #[used]
 pub fn join_wait(handle: uint, out: *(), desc: *()) byte {
-    _ = desc
     let cold = word(handle + 48)
     let dst = as_uint(out)
+    let descriptor = as_uint(desc)
     if word(cold + 360) == 1 {
-        if dst != 0 { store_word(dst, word(cold + 368)) }
+        take_result(handle, dst, descriptor)
         return 1
     }
     store_word(cold + 384, current_hot())
     park_current()
-    if dst != 0 { store_word(dst, word(cold + 368)) }
+    take_result(handle, dst, descriptor)
     1
 }
 
@@ -325,7 +336,7 @@ fn commit_case(base: uint, index: uint) byte {
         let cold = word(handle + 48)
         if word(cold + 360) == 1 {
             let result = word(at + 32)
-            if result != 0 { store_word(result + word(at + 48), word(cold + 368)) }
+            take_result(handle, result + word(at + 48), word(at + 40))
             return 1
         }
         return 0

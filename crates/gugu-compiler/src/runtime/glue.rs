@@ -6,13 +6,76 @@
 //! 前失败（`E0062`），不再静默兜底到 stub；未被引用的条目留给后续阶段补齐定义。
 
 use super::{GlueDef, GlueDefKind, RuntimeResources};
-use crate::backend::x64::mangle;
+use crate::backend::x64::{abi, mangle};
 use crate::frontend::hir;
 use crate::frontend::mono::keys::hash_domain;
 use crate::lir;
-use crate::lir::body::{CallTarget, Op, Terminator};
+use crate::lir::body::{CallTarget, Op, Terminator, Value, ValueType};
 use crate::{Diagnostic, DiagnosticCode};
 use std::collections::BTreeMap;
+use std::ops::Range;
+
+/// op 形式隐含调用的 glue 目录：这些 op 没有 `Call` 节点，lowering 时才发出对 runtime 的
+/// 调用。引用判定、glue 闭合检查与 lowering 必须共用这一份目录，否则某个 op 的入口缺失会
+/// 绕过 E0062 直达镜像。返回 `None` 表示该 op 不隐含 runtime 调用（`Call`/`ForeignCall` 走
+/// 各自的调用点判定；`PlatformCall`/`RuntimeMachineCall` 的 glue 名来自 op 自身）。
+pub(crate) fn implied_glue(op: &Op) -> Option<&'static str> {
+    Some(match op {
+        Op::RegionPublish { .. } => "gc_region_publish",
+        Op::RegionReset { .. } => "gc_region_reset",
+        Op::PromoteManaged { .. } => "gc_region_promote",
+        Op::RegionTransfer { .. } => "gc_region_transfer",
+        Op::MarkTicketBatch => "gc_mark_ticket_batch",
+        Op::EdgeDeltaBatch => "gc_edge_delta_batch",
+        Op::ResolveSharedHandle => "gc_resolve_shared_handle",
+        Op::SharedAccessBegin { .. } => "gc_shared_access_begin",
+        Op::SharedAccessEnd { .. } => "gc_shared_access_end",
+        Op::SharedFieldBarrier { .. } | Op::SharedFieldBarrierReserved { .. } => {
+            "gc_shared_field_barrier"
+        }
+        Op::ForwardSharedHandle => "gc_forward_shared_handle",
+        Op::GcWriteBarrierReserved { .. } => "gc_write_barrier_reserved",
+        Op::GcWriteBarrier { .. } => "gc_write_barrier",
+        Op::GcAlloc { placement, .. } => match placement {
+            crate::frontend::gir::placement::PlacementKind::TurnRegion => "gc_region_slow",
+            _ => "gc_alloc_slow",
+        },
+        Op::RegionAlloc { .. } => "gc_region_slow",
+        // 机器原语同样是对 runtime 的直接调用：它们的入口名由 op 自身决定。
+        Op::RuntimeMachineCall(machine) => machine.name(),
+        _ => return None,
+    })
+}
+
+/// 分配 ABI 的传出车道数：`rax/rbx/rcx/rdx` 四参、结果在 `rax`。
+///
+/// 与 `backend/x64/lower/alloc.rs::slow_alloc` 的寄存器落位是同一契约，由
+/// `allocation_slow_abi_moves_bytes_before_immediates` 在 machine 级钉住。
+pub(crate) const ALLOCATION_ABI_LANES: usize = 4;
+
+/// region 生命周期入口的车道数：`publish` 收计划编号与 export 声明两参，其余三个只收计划编号；
+/// 结果都为空。与 `backend/x64/lower/alloc.rs::region_end` 的寄存器落位是同一契约。
+pub(crate) const REGION_END_LANES_PUBLISH: usize = 2;
+pub(crate) const REGION_END_LANES_SIMPLE: usize = 1;
+
+/// 该 op 的隐含调用由 lowering 合成传出参数时所应满足的 ABI 形状：`(参数车道数, 结果车道数)`。
+///
+/// 分配族（`GcAlloc`/`RegionAlloc`）由 `slow_alloc` 合成四整数参 + 单整数结果：bytes 取自
+/// 操作数，type_id/align/flags 是立即数。region 生命周期入口（`RegionPublish` 的 plan 与
+/// export、其余三个的 plan）由 `region_end` 合成立即数实参、结果为空。这些 op 的操作数车道数
+/// 与 ABI 车道数无关，逐条车道比对不成立，只能校验形状。
+///
+/// 返回 `None` 的 op 走 `runtime_named`：操作数即 ABI 车道，逐条比对成立。
+pub(crate) fn implied_glue_synthesized_shape(op: &Op) -> Option<(usize, usize)> {
+    match op {
+        Op::GcAlloc { .. } | Op::RegionAlloc { .. } => Some((ALLOCATION_ABI_LANES, 1)),
+        Op::RegionPublish { .. } => Some((REGION_END_LANES_PUBLISH, 0)),
+        Op::RegionReset { .. } | Op::PromoteManaged { .. } | Op::RegionTransfer { .. } => {
+            Some((REGION_END_LANES_SIMPLE, 0))
+        }
+        _ => None,
+    }
+}
 
 /// glue 的最终定义目标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -77,7 +140,99 @@ impl RuntimeGlueBindings {
         };
         let bindings = bindings.sealed();
         bindings.verify_abi(lir)?;
+        bindings.verify_closure(lir)?;
         Ok(bindings)
+    }
+
+    /// 尚未提供 Gugu 执行体的 GC 算法入口；由计划步骤 6–8 交付。
+    ///
+    /// 计划第 3.6 条只允许「相邻条目尚未实现的入口」走编译期拒绝；这些条目属于本切片后续
+    /// 步骤，因此闭合检查对它们放行，其余任何被可达代码引用却无定义的入口都必须阻断。清单
+    /// 清空即代表本切片的 GC 执行体全部就位。
+    const PENDING_GLUE_IMPL: &'static [&'static str] = &[
+        // 擦除句柄构造（闭包/`dyn` 值的动态擦除）：`mangle.rs:113` 有名字、
+        // `lir/build/rvalue.rs:423-439` 发 `[destination, source, descriptor, target]` 四参调用，
+        // 但 Rust 与 Gugu runtime 都没有实现。此前静默解析到 `__gugu_stub_exit`（含闭包的程序
+        // 运行期 exit 56），属动态值单元而不是 LocalHeap/回收迁移面。
+        "dynamic_erase",
+        // COW 快照需要镜像侧 value/resource 发布语义，仍由步骤 5 接管。
+        "cow_snapshot",
+        // 以下动态值、resource 与调度入口属于步骤 5 的镜像生命周期实现；它们先以显式缺口
+        // 记录，任何实际发射点仍会经过 lowering 门禁而不会静默生成未知符号。
+        "value_copy",
+        "value_publish",
+        "value_drop",
+        "value_forget",
+        "value_transfer",
+        "resource_acquire",
+        "resource_release",
+        "resource_transfer",
+        "resource_finalize",
+        "pin",
+        "unpin",
+        "type_is",
+        "downcast",
+        "downcast_copy",
+        "gc_mark_ticket_batch",
+        "gc_edge_delta_batch",
+        "gc_resolve_shared_handle",
+        "gc_shared_access_begin",
+        "gc_shared_access_end",
+        "gc_shared_field_barrier",
+        "gc_forward_shared_handle",
+        // 平台范围原语只实现了 reserve/commit/decommit/release 四个（`fragments.rs` 的
+        // `PLATFORM_OPS_WITH_CODE`）：guard 页、显式清零、字上等待/唤醒与 entropy 属步骤 6 的
+        // arena 与步骤 8 的并发协议，两个 hint 是可选能力。缺口在此登记，绝不静默落桩。
+        "platform_protect_guard",
+        "platform_unprotect",
+        "platform_wait",
+        "platform_wake",
+        "platform_entropy",
+        "platform_zero",
+        "platform_set_dump_policy",
+        "platform_low_memory_hint",
+        "platform_huge_page_hint",
+    ];
+    /// 为 lowering 提供「已登记或已明确声明缺口」的 glue 名字集合。
+    pub(super) fn pending_glue_names() -> &'static [&'static str] {
+        RuntimeGlueBindings::PENDING_GLUE_IMPL
+    }
+
+    /// 闭合检查：可达代码引用到的每个 glue 入口都必须有真实定义。
+    ///
+    /// 缺口在此以 `E0062` 阻断并让镜像动作失败，而不是留到 ELF/PE 把符号兜底成
+    /// `__gugu_stub_exit`；未被可达代码引用的入口不强制实例化（计划第 3.6 条）。
+    fn verify_closure(&self, lir: &lir::Validated) -> Result<(), Diagnostic> {
+        let defined =
+            |glue: &str| self.map.contains_key(glue) || Self::PENDING_GLUE_IMPL.contains(&glue);
+        for body in lir.bodies() {
+            for instruction in &body.instructions {
+                if let Some(glue) = implied_glue(&instruction.op)
+                    && !defined(glue)
+                {
+                    return Err(binding_error(format!(
+                        "runtime glue `{glue}` 被 `{}` 引用但没有任何定义",
+                        body.name
+                    )));
+                }
+            }
+            for block in &body.blocks {
+                let Terminator::Invoke { call, .. } = &block.terminator else {
+                    continue;
+                };
+                let CallTarget::Runtime(runtime) = &call.target else {
+                    continue;
+                };
+                let glue = mangle::runtime_call_name(*runtime);
+                if !defined(glue) {
+                    return Err(binding_error(format!(
+                        "runtime glue `{glue}` 被 `{}` 的 invoke 引用但没有任何定义",
+                        body.name
+                    )));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// 绑定表指纹；glue 名与目标实例的规范编码。
@@ -160,11 +315,45 @@ impl RuntimeGlueBindings {
                         })
                     }))
                 {
-                    if parameters != &body.signature.parameters
-                        || results != &body.signature.results
+                    if !runtime_abi_types_match(parameters, &body.signature.parameters)
+                        || !runtime_abi_types_match(results, &body.signature.results)
                     {
                         return Err(binding_error(format!(
-                            "runtime glue `{glue}` 在 `{}` 的调用点 ABI 形状与绑定函数不一致",
+                            "runtime glue `{glue}` 在 `{}` 的调用点 ABI 形状与绑定函数不一致：call={parameters:?}/{results:?} bound={:?}/{:?}",
+                            site.name, body.signature.parameters, body.signature.results
+                        )));
+                    }
+                }
+                // op 形式的隐含调用没有 `Call` 节点：lowering 在 `runtime_named` 里按
+                // `INTERNAL_INTEGER` 顺序落位，因此车道数必须与签名逐一对应，且两侧都不得出现
+                // 浮点车道（整数寄存器车道装不下 SSE 值）。车道漂移在写出镜像前失败。
+                for (index, instruction) in site.instructions.iter().enumerate() {
+                    if implied_glue(&instruction.op) != Some(*glue) {
+                        continue;
+                    }
+                    let arguments = lanes(&site.values, &instruction.arguments);
+                    let results = lanes(&site.values, &instruction.results);
+                    // 分配族与 region 生命周期入口的传出参数由 lowering 合成（分配族：bytes 取自
+                    // 操作数，type/align/flags 是立即数；region：plan/export 是立即数），操作数车道
+                    // 不等于 ABI 车道；这类 op 只校验 ABI 形状本身。
+                    let matches = if let Some((params, results)) =
+                        implied_glue_synthesized_shape(&instruction.op)
+                    {
+                        body.signature.parameters.len() == params
+                            && body
+                                .signature
+                                .parameters
+                                .iter()
+                                .all(|ty| !abi::is_float(*ty))
+                            && body.signature.results.len() == results
+                            && body.signature.results.iter().all(|ty| !abi::is_float(*ty))
+                    } else {
+                        lanes_are_integer(arguments, &body.signature.parameters)
+                            && lanes_are_integer(results, &body.signature.results)
+                    };
+                    if !matches {
+                        return Err(binding_error(format!(
+                            "runtime glue `{glue}` 在 `{}` 第 {index} 条指令的隐含调用车道形状与绑定函数不一致",
                             site.name
                         )));
                     }
@@ -208,6 +397,16 @@ impl RuntimeGlueBindings {
         }
         bytes
     }
+}
+
+/// runtime glue 的机器 ABI 只携带指针宽度；Stack/GcHeap/Metadata/Raw provenance 在边界处
+/// 不改变寄存器或栈车道，不能把来源标签误当成不同的物理签名。
+fn runtime_abi_types_match(actual: &[ValueType], expected: &[ValueType]) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            actual == expected
+                || (actual.ty == expected.ty && actual.ty == crate::lir::body::Type::Ptr)
+        })
 }
 
 /// 解析内建源里唯一的非泛型 `fn` 定义与唯一实例；定义缺席返回 `None`。
@@ -262,19 +461,20 @@ fn resolve_item(
     }
 }
 
-/// 最终 LIR 中是否存在引用该 glue 的调用点。
+/// 最终 LIR 中是否存在引用该 glue 的调用点或隐含调用 op。
 fn referenced(lir: &lir::Validated, glue: &str) -> bool {
     lir.bodies().iter().any(|body| {
         body.instructions.iter().any(|instruction| {
-            matches!(
-                &instruction.op,
-                Op::Call(call) | Op::ForeignCall(call)
-                    if matches!(
-                        &call.target,
-                        CallTarget::Runtime(runtime)
-                            if mangle::runtime_call_name(*runtime) == glue
-                    )
-            )
+            implied_glue(&instruction.op) == Some(glue)
+                || matches!(
+                    &instruction.op,
+                    Op::Call(call) | Op::ForeignCall(call)
+                        if matches!(
+                            &call.target,
+                            CallTarget::Runtime(runtime)
+                                if mangle::runtime_call_name(*runtime) == glue
+                        )
+                )
         }) || body.blocks.iter().any(|block| {
             matches!(
                 &block.terminator,
@@ -293,6 +493,21 @@ fn binding_error(message: impl Into<String>) -> Diagnostic {
     Diagnostic::error(DiagnosticCode::RuntimeGlueBinding, message, None)
 }
 
+/// 指令实参/结果的值区间切片；LIR 结构校验已保证区间落在值表之内，越界按空车道处理以免
+/// 把结构错误伪装成车道匹配。
+fn lanes<'a>(operands: &'a [Value], range: &Range<u32>) -> &'a [Value] {
+    let start = usize::try_from(range.start).unwrap_or(usize::MAX);
+    let end = usize::try_from(range.end).unwrap_or(usize::MAX);
+    operands.get(start..end).unwrap_or(&[])
+}
+
+/// op 形式的隐含调用只走整数车道：车道数与签名一致，且两侧都不得出现浮点车道。
+fn lanes_are_integer(values: &[Value], expected: &[ValueType]) -> bool {
+    values.len() == expected.len()
+        && values.iter().all(|value| !abi::is_float(value.kind))
+        && expected.iter().all(|ty| !abi::is_float(*ty))
+}
+
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
@@ -301,4 +516,53 @@ fn hex(bytes: &[u8]) -> String {
         out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lir::body::{Definition, Origin, Type, id};
+
+    fn value(ty: Type) -> Value {
+        Value {
+            definition: Definition::Parameter {
+                block: crate::lir::body::BlockId(id(0)),
+                index: 0,
+            },
+            kind: ValueType::scalar(ty),
+            origin: Origin::None,
+            uses: 0..0,
+        }
+    }
+
+    /// op 形式的隐含调用只走整数车道：车道数必须与签名一致，任一侧出现浮点车道都拒绝
+    /// （`runtime_named` 按 `INTERNAL_INTEGER` 落位，整数寄存器装不下 SSE 值）。
+    #[test]
+    fn implied_lanes_require_integer_lanes_of_matching_arity() {
+        let ints = [value(Type::I64), value(Type::Ptr)];
+        let floats = [value(Type::F64)];
+        let expected = [ValueType::scalar(Type::I64), ValueType::scalar(Type::Ptr)];
+        assert!(lanes_are_integer(&ints, &expected), "同宽整数车道必须通过");
+        assert!(
+            !lanes_are_integer(&ints[..1], &expected),
+            "车道数不足必须拒绝"
+        );
+        assert!(
+            !lanes_are_integer(&floats, &[ValueType::scalar(Type::I64)]),
+            "实参浮点车道必须拒绝"
+        );
+        assert!(
+            !lanes_are_integer(&ints[..1], &[ValueType::scalar(Type::F64)]),
+            "签名浮点车道必须拒绝"
+        );
+    }
+
+    /// 值区间越界按空车道处理，不把结构错误伪装成车道匹配。
+    #[test]
+    fn lane_slices_stop_at_the_value_table_end() {
+        let values = [value(Type::I64)];
+        assert_eq!(lanes(&values, &(0..1)).len(), 1);
+        assert_eq!(lanes(&values, &(0..4)).len(), 0, "越界必须退化为空车道");
+        assert_eq!(lanes(&values, &(2..3)).len(), 0);
+    }
 }

@@ -8,17 +8,12 @@
 
 use crate::target::{Rt0Kind, TargetName};
 
-#[allow(
-    dead_code,
-    reason = "屏障协议与 edge summary 的确定性参照实现，由 harness、契约与测试消费"
-)]
-mod barrier;
 #[allow(dead_code, reason = "屏障布局交叉校验由 RuntimeRawModel 消费")]
 mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
 pub(crate) mod block_return_schema;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod blocking_io_tests;
 #[allow(
     dead_code,
@@ -26,19 +21,16 @@ mod blocking_io_tests;
 )]
 mod cage;
 pub(crate) mod cage_control;
-#[allow(dead_code, reason = "候选平面由周期汇合阶段的世界推进与确定性测试消费")]
-pub(crate) mod candidate;
-#[allow(dead_code, reason = "候选决议结构由 world 候选推进与确定性测试消费")]
+#[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
 pub(crate) mod candidate_schema;
-#[cfg(test)]
-mod candidate_tests;
 mod channel_layout;
+mod collect_layout;
 #[allow(
     dead_code,
     reason = "Map/Set 参照模型由确定性测试消费，尚未降成 Gugu 可调用的集合实现"
 )]
 pub(crate) mod collections;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod collections_tests;
 #[allow(
     dead_code,
@@ -62,9 +54,13 @@ mod context;
 mod coroutine;
 mod coroutine_layout;
 mod coroutine_schema;
-pub(crate) mod edge;
+#[allow(
+    dead_code,
+    reason = "动态根登记契约由镜像 runtime、探针与后续收集器共同消费"
+)]
+pub(crate) mod dynamic_roots_schema;
+#[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
 pub(crate) mod edge_schema;
-
 /// rt0 与镜像 runtime 的启动边界：参数块 word 目录与启动载荷布局。
 pub(crate) mod entry;
 #[allow(
@@ -75,18 +71,10 @@ pub(crate) mod fmt;
 #[cfg(test)]
 mod fmt_tests;
 pub(crate) mod fragments;
-#[allow(
-    dead_code,
-    reason = "GC metadata 契约段由 runtime raw 与 ImagePlan 消费"
-)]
+pub(crate) mod gc_config;
 pub(crate) mod gc_metadata_contract;
 pub(crate) mod gc_metadata_schema;
 pub(crate) mod gc_metadata_section;
-#[allow(
-    dead_code,
-    reason = "trace descriptor 解释器由 LocalHeap 与 world 消费"
-)]
-pub(crate) mod gc_trace;
 mod glue;
 mod harness;
 #[allow(
@@ -103,37 +91,24 @@ mod hash_tests;
 pub(crate) mod io;
 #[cfg(test)]
 mod io_tests;
-#[allow(
-    dead_code,
-    reason = "LocalHeap Immix/TLAB/分代参照实现由 world 与确定性测试消费"
-)]
+/// managed block 身份与 object header 编码；分配和回收算法在镜像 runtime 中。
+#[allow(dead_code, reason = "LocalHeap 执行体已下沉，宿主仅保留稳定编码类型")]
 pub(crate) mod local_heap;
-#[allow(
-    dead_code,
-    reason = "LocalHeap record 布局交叉校验由 RuntimeRawModel 消费"
-)]
 mod local_heap_layout;
 #[allow(
     dead_code,
     reason = "LocalHeap 契约段由 runtime raw、world 与 ImagePlan 消费"
 )]
 pub(crate) mod local_heap_schema;
-#[allow(
-    dead_code,
-    reason = "MarkMailbox 与 owner credit 参照实现由 world 与确定性测试消费"
-)]
-mod mark;
-#[allow(dead_code, reason = "mark record 布局交叉校验由 RuntimeRawModel 消费")]
-mod mark_layout;
-#[allow(dead_code, reason = "mark 契约段由 runtime raw、世界与 ImagePlan 消费")]
+pub(crate) mod mark_layout;
+#[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
 pub(crate) mod mark_schema;
 mod model;
+#[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
+pub(crate) mod pacing_schema;
 /// 结局/状态名字目录、credit 诊断访问器与 `PacingPlane::dump` 构成 pacing 诊断面，
 /// 唯一消费入口是 runtime dump 与确定性测试套件；真正无人消费的项（分类名目录、
 /// 未使用的重导出）已经删除，这里只为仍被 dump 引用的诊断面开例外。
-#[allow(dead_code, reason = "pacing 诊断面由 runtime dump 与确定性测试消费")]
-mod pacing;
-pub(crate) mod pacing_schema;
 #[allow(
     dead_code,
     reason = "无损 Path 参照模型由确定性测试消费，尚未降成 Gugu 可调用实现"
@@ -149,7 +124,7 @@ pub(crate) mod processor;
 )]
 pub(crate) mod provenance;
 pub(crate) mod provenance_schema;
-pub(crate) mod region;
+#[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
 pub(crate) mod region_schema;
 #[allow(
     dead_code,
@@ -162,14 +137,14 @@ pub(crate) mod routing_schema;
     reason = "UTF-8/UTF-16 与 COW 参照模型由确定性测试消费，版本常量进入工具链身份"
 )]
 pub(crate) mod text;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod text_tests;
 
 pub(crate) mod cstring;
 #[allow(dead_code, reason = "外调交接的确定性参照实现由契约与测试消费")]
 mod foreign;
 pub(crate) mod foreign_schema;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod foreign_tests;
 pub(crate) mod scheduler_schema;
 #[allow(
@@ -215,10 +190,16 @@ pub use fragments::{FragmentPatch, MainReturnCode, MorestackEntryCode};
 
 pub use block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
 pub use compression_schema::{CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract};
+pub(crate) use coroutine_layout::{
+    COROUTINE_PACK_ALIGN, COROUTINE_PACK_BYTES, COROUTINE_PACK_FLOAT_LANES,
+    COROUTINE_PACK_INTEGER_LANES, COROUTINE_PACK_TRACE_NONE, coroutine_pack_float_offset,
+    coroutine_pack_integer_offset, coroutine_pack_trace_code, coroutine_pack_trace_shift,
+};
 pub use edge_schema::{EdgeDemand, EdgeRuntimeContract};
 pub use foreign_schema::{ForeignDemand, ForeignRuntimeContract};
+pub(crate) use gc_config::GcImageConfig;
 pub use gc_metadata_schema::GcMetadataDemand;
-pub(crate) use glue::RuntimeGlueBindings;
+pub(crate) use glue::{RuntimeGlueBindings, implied_glue};
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
 pub use mark_schema::{MarkDemand, MarkRuntimeContract};
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
@@ -231,7 +212,8 @@ pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use shared_heap_schema::{SharedHeapDemand, SharedHeapRuntimeContract};
 pub(crate) use stackmap::{LandingRecord as StackLanding, consume_metadata};
 pub(crate) use stackmap_codec::{
-    CodeLayout, DecodedSection, SafepointLayout, decode_tables, encode as encode_stackmap,
+    CodeLayout, DecodedSection, SafepointLayout, TypedRoot, decode_tables,
+    encode as encode_stackmap,
 };
 pub use stackmap_schema::StackMapDemand;
 pub use sync_schema::{SyncDemand, SyncRuntimeContract};
@@ -273,49 +255,21 @@ mod slab;
 #[allow(dead_code, reason = "raw plane 参照实现由确定性测试与 bench 消费")]
 mod world;
 
-#[cfg(test)]
-mod cage_tests;
-#[cfg(test)]
-mod compression_tests;
-#[cfg(test)]
-mod edge_tests;
-#[cfg(test)]
-mod heap_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod platform_tests;
 #[cfg(test)]
 mod process_tests;
 #[cfg(test)]
-mod provenance_tests;
-#[cfg(test)]
 mod report_tests;
 #[cfg(test)]
-mod routing_tests;
-#[cfg(test)]
 mod scheduler_tests;
-#[cfg(test)]
-mod shared_heap_tests;
 #[cfg(test)]
 mod stackmap_tests;
 #[cfg(test)]
 mod startup_tests;
 #[cfg(test)]
 mod termination_tests;
-#[cfg(test)]
-mod tests;
-#[cfg(test)]
-#[path = "trace_tests.rs"]
-mod trace_tests;
-
 pub(crate) use harness::DecodeReferenceFixture;
-
-pub use harness::{
-    BlockReturnHarness, BlockReturnReport, CardMarkHarness, CardMarkReport, ColdPathHarness,
-    ColdPathReport, CompressionHarness, CompressionReport, EdgeCandidateHarness,
-    EdgeCandidateReport, HarnessReport, OwnerReturnHarness, RegionTransferHarness,
-    RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport, SharedForwardHarness,
-    SharedForwardReport,
-};
 
 #[cfg(test)]
 pub use extent::EXTENT_CLASS_LADDER;
@@ -372,8 +326,22 @@ const RUNTIME_CHANNEL_SOURCE: &str = include_str!("../../resources/runtime/chann
 const RUNTIME_SCHEDULER_SOURCE: &str = include_str!("../../resources/runtime/scheduler.gg");
 const RUNTIME_SYNC_SOURCE: &str = include_str!("../../resources/runtime/sync.gg");
 const RUNTIME_BARRIER_SOURCE: &str = include_str!("../../resources/runtime/barrier.gg");
+const RUNTIME_TRACE_SOURCE: &str = include_str!("../../resources/runtime/trace.gg");
 const RUNTIME_HEAP_SOURCE: &str = include_str!("../../resources/runtime/heap.gg");
 const RUNTIME_MARK_SOURCE: &str = include_str!("../../resources/runtime/mark.gg");
+const RUNTIME_GC_SOURCE: &str = include_str!("../../resources/runtime/gc.gg");
+const RUNTIME_ROOTS_SOURCE: &str = include_str!("../../resources/runtime/roots.gg");
+const RUNTIME_COLLECT_SOURCE: &str = include_str!("../../resources/runtime/collect.gg");
+const RUNTIME_REGION_SOURCE: &str = include_str!("../../resources/runtime/region.gg");
+const RUNTIME_EDGE_SOURCE: &str = include_str!("../../resources/runtime/edge.gg");
+const RUNTIME_CANDIDATE_SOURCE: &str = include_str!("../../resources/runtime/candidate.gg");
+const RUNTIME_PACING_SOURCE: &str = include_str!("../../resources/runtime/pacing.gg");
+const RUNTIME_RETURN_SOURCE: &str = include_str!("../../resources/runtime/block_return.gg");
+#[cfg(feature = "runtime-gc-probes")]
+const RUNTIME_GC_PROBES_SOURCE: &str = include_str!("../../resources/runtime/gc_probes.gg");
+#[cfg(feature = "runtime-gc-probes")]
+const RUNTIME_GC_FIXTURE_SOURCE: &str =
+    include_str!("../../resources/runtime/fixtures/gc_image.gg");
 
 /// 登记的 runtime 源文件角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -461,6 +429,11 @@ pub enum RuntimeMachineOp {
     CurrentSlot,
     ProcessExit,
     ReportWrite,
+    /// GC 控制原语：只由 runtime 注入源调用（checker 按注入身份授权）。
+    GcConfig,
+    /// GC 入口：只由 runtime 注入源调用；保存发起者上下文、切 system stack、
+    /// 调用 dispatcher 后恢复，返回值是 dispatcher 的状态字。
+    GcEnter,
 }
 
 impl RuntimeMachineOp {
@@ -472,6 +445,8 @@ impl RuntimeMachineOp {
             Self::CurrentSlot => "current_slot",
             Self::ProcessExit => "process_exit",
             Self::ReportWrite => "report_write",
+            Self::GcConfig => "gc_config",
+            Self::GcEnter => "gc_enter",
         }
     }
 }
@@ -574,6 +549,10 @@ const GLUE_DEFS: &[GlueDef] = &[
     },
     GlueDef {
         glue: "morestack_or_poll",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "safepoint_slow",
         def: GlueDefKind::Fragment,
     },
     GlueDef {
@@ -686,7 +665,109 @@ const GLUE_DEFS: &[GlueDef] = &[
             item: "select_commit",
         },
     },
+    GlueDef {
+        glue: "gc_config",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "gc_enter",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "gc_dispatch",
+        def: GlueDefKind::Item {
+            source: "std/runtime/collect.gg",
+            item: "gc_dispatch",
+        },
+    },
+    GlueDef {
+        glue: "gc_config_record",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "gc_alloc_slow",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_alloc_slow",
+        },
+    },
+    GlueDef {
+        glue: "gc_write_barrier",
+        def: GlueDefKind::Item {
+            source: "std/runtime/barrier.gg",
+            item: "gc_write_barrier",
+        },
+    },
+    GlueDef {
+        glue: "gc_write_barrier_reserved",
+        def: GlueDefKind::Item {
+            source: "std/runtime/barrier.gg",
+            item: "gc_write_barrier_reserved",
+        },
+    },
+    GlueDef {
+        glue: "value_repeat",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "value_repeat",
+        },
+    },
+    GlueDef {
+        glue: "gc_region_slow",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_region_slow",
+        },
+    },
+    GlueDef {
+        glue: "gc_region_publish",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_region_publish",
+        },
+    },
+    GlueDef {
+        glue: "gc_region_reset",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_region_reset",
+        },
+    },
+    GlueDef {
+        glue: "gc_region_promote",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_region_promote",
+        },
+    },
+    GlueDef {
+        glue: "gc_region_transfer",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_region_transfer",
+        },
+    },
 ];
+/// 判断 runtime glue 是否已经登记定义，或是否被显式列为当前迁移切片的缺口。
+///
+/// lowering 只在真正发出 runtime 符号调用时调用本查询；由 lowering 内联的 runtime 内建不会
+/// 经过这里，因此不会因为名字存在于 `RuntimeCall` 目录而误报。
+pub(crate) fn glue_is_declared(name: &str) -> bool {
+    GLUE_DEFS.iter().any(|definition| definition.glue == name)
+        || glue::RuntimeGlueBindings::pending_glue_names().contains(&name)
+}
+
+/// 闭世界 glue 目录里的全部入口名：真实定义与显式缺口记录的并集。
+///
+/// 诊断按名字反查符号哈希时必须遍历同一份闭世界目录，否则「引用但未实现」的入口会退化成
+/// 一堆无法辨认的哈希。
+pub(crate) fn declared_glue_names() -> impl Iterator<Item = &'static str> {
+    GLUE_DEFS.iter().map(|definition| definition.glue).chain(
+        glue::RuntimeGlueBindings::pending_glue_names()
+            .iter()
+            .copied(),
+    )
+}
 
 impl RuntimeResources {
     /// 返回本变更登记的 runtime glue 绑定表。
@@ -821,6 +902,11 @@ impl RuntimeResources {
                     role: RuntimeSourceRole::Runtime,
                 },
                 RuntimeSource {
+                    logical_path: "std/runtime/trace.gg",
+                    source: RUNTIME_TRACE_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
                     logical_path: "std/runtime/heap.gg",
                     source: RUNTIME_HEAP_SOURCE,
                     role: RuntimeSourceRole::Runtime,
@@ -828,6 +914,58 @@ impl RuntimeResources {
                 RuntimeSource {
                     logical_path: "std/runtime/mark.gg",
                     source: RUNTIME_MARK_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/gc.gg",
+                    source: RUNTIME_GC_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/roots.gg",
+                    source: RUNTIME_ROOTS_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/collect.gg",
+                    source: RUNTIME_COLLECT_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/region.gg",
+                    source: RUNTIME_REGION_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/edge.gg",
+                    source: RUNTIME_EDGE_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/candidate.gg",
+                    source: RUNTIME_CANDIDATE_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/pacing.gg",
+                    source: RUNTIME_PACING_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                RuntimeSource {
+                    logical_path: "std/runtime/block_return.gg",
+                    source: RUNTIME_RETURN_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                #[cfg(feature = "runtime-gc-probes")]
+                RuntimeSource {
+                    logical_path: "std/runtime/gc_probes.gg",
+                    source: RUNTIME_GC_PROBES_SOURCE,
+                    role: RuntimeSourceRole::Runtime,
+                },
+                #[cfg(feature = "runtime-gc-probes")]
+                RuntimeSource {
+                    logical_path: "std/runtime/fixtures/gc_image.gg",
+                    source: RUNTIME_GC_FIXTURE_SOURCE,
                     role: RuntimeSourceRole::Runtime,
                 },
             ],

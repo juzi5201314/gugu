@@ -447,15 +447,17 @@
   - 接入证据：镜像固定一个 OS worker，`parallelism = 1`，没有 steal。`std/runtime/scheduler.gg` 的 `take_next` 从本地头取最老项，`yield_now` 把当前协程放进本地尾，已经在队列里的协程先运行。子协程各自保留 1 GiB、初次提交 64 KiB。`rt0_start` 使用可写 processor 页；`boot` 不把 TLAB/TurnRegion 的 cursor/limit 清成 0，而是指到已提交的堆。`I8`/`I16` 载入用 `movzx`，TLAB bump 在新 cursor 超过 limit 时走 slow path。`TypeDescriptor` 符号写出 80 字节记录，偏移 0 是 size。channel、Join、select 在 `channel.gg`，`std.sync` 的 Mutex/RwLock/Condvar/Cancel 在 `sync.gg` 与 `std/sync.gg`。方法接收者按派发记录的解引用次数投影原槽再借用。`gc_write_barrier` 在没有收集器时直接返回。Rust 执行体、`scheduler_runqueue`、`channel_wait` 与 `sync_lock` bench 已删除；`scheduler_schema`、`wait_schema`、`sync_schema` 与非法原子序测试留下。
   - 验收证据：`cargo bench -p gugu-compiler --bench linux_pie --profile dev` 覆盖 hello、panic、grow、spawn、yield、close、close-send、select、lock 与 wait-children。close-then-send 的报告是 `send on closed channel`。`cargo nextest run --workspace -E 'not test(/^frontend::/)'` 750 项通过；frontend 套件在同一实现上通过，stage10 的导入计数只统计用户源。
 
-- [ ] **阶段 61c：把 LocalHeap 与标记回收落成镜像内 Gugu runtime**（复杂度：3）
+- [x] **阶段 61c：把 LocalHeap 与标记回收落成镜像内 Gugu runtime**（复杂度：3）
   - 依赖：阶段 39–45、61a。
   - 实现 `gc_alloc_slow`、`gc_refill_line`、TLAB、minor/major、hybrid barrier、mark ticket 与 GC-stop；闭包分配在镜像内分配、存活并被回收。
   - 验收：对象不跨 block，移动后的 exact root 与 interior pointer 在镜像内被修正；raw memory 不被保守扫描。本阶段结束时删除 `local_heap`、`mark`、`barrier`、`pacing`、`region` 的 Rust 执行体。
+  - 接入证据：`resources/runtime/{heap,collect,roots,trace,mark,barrier,region,edge,candidate,pacing}.gg` 与 `fixtures/gc_image.gg` 登记为 runtime source；`CompileRequest::runtime_gc_probe` 通过 `runtime_gc_case` cfg 和 action key 选择 case。Linux PIE table-driven matrix 覆盖 alloc/refill/minor/interior/root/static/raw-not-root/dynamic/shared/barrier/stop-flush/major/mark-ticket/trace/region/candidate/block-return/compressed/pacing/OOM/corrupt；所有 case 在镜像中执行并固定报告。Rust 侧删除 GC world/LocalHeap/mark/barrier/pacing/region/edge/candidate/gc-trace 执行体，只保留 schema、布局、descriptor verifier 与 raw/resource world。
 
-- [ ] **阶段 61d：闭合共享堆、压缩引用与 owner 回收**（复杂度：3）
+- [x] **阶段 61d：闭合共享堆、压缩引用与 owner 回收**（复杂度：3）
   - 依赖：阶段 46–51、58、61b、61c。
   - 把 SharedHeap、forwarding grace、pointer compression、owner-directed return、radix routing 与 typed combining 落成同一镜像内的 Gugu runtime；FFI bridge 接到这份 runtime。
   - 验收：同一输入下镜像行为与阶段 46–51 的参照测试一致；算法只保留 Gugu 一份，Rust 侧只留 schema、布局交叉校验和非法状态拒绝。阶段 01 禁止的第二套语义等价 runtime 到此消失。
+  - 接入证据：新增 `region.gg`、`edge.gg`、`candidate.gg`、`pacing.gg` 与 `block_return.gg` 的固定状态机和 identity/generation/lease/pin/grace 门禁；compressed 与 owner return 进入同一 fixture matrix。`harness.rs` 仅保留压缩引用 decode fixture，Rust world 仅保留 raw/resource inbox、extent 与 schema 边界。
 
 - [x] **阶段 62：实现 std.io 基础、读写 trait 与 Path**（复杂度：4）
   - 依赖：阶段 31、37、58–60。

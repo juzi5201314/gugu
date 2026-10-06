@@ -4,6 +4,13 @@ version = "0.1.0"
 edition = "2024"
 description = "Gugu compiler bootstrap and staged action graph"
 
+[features]
+runtime-gc-probes = []
+# 重负载/端到端用例的显式开关：默认关闭，保证 `cargo nextest run --workspace` 全是快速正确性
+# 测试；需要时用 `--features slow-tests` 跑。所有 `#[cfg(all(test, feature = "slow-tests"))]`
+# 模块都依赖它被声明，否则这些用例永远编不进测试目标。
+slow-tests = []
+
 [dependencies]
 bytes.workspace = true
 serde.workspace = true

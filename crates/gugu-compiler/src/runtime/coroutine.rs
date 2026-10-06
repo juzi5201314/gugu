@@ -455,6 +455,10 @@ pub(crate) struct CoroutineCold {
     pub(crate) select_rng: [u64; 4],
     pub(crate) select_scratch: [u64; 4],
     pub(crate) gc_scan_epoch: AtomicU64,
+    /// 载荷发布状态字：位 0 = spawn 参数包已发布，位 1 = 结果字含根车道，位 2 = 结果载荷已发布。
+    /// spawn 在入队前发布、结束时就地结清；结果在结束时发布、被 Join/select 取走时结清。
+    /// 未发布过载荷的协程（bootstrap/main）三位置零，不允许也无从结清。
+    pub(crate) payload_state: AtomicU64,
 }
 
 /// morestack 入口片段与镜像 runtime 交接的固定邮箱；位于 runtime 状态区首部。
@@ -490,6 +494,7 @@ const _: () = {
     assert!(size_of::<CoroutineContext>() == 48);
     assert!(size_of::<MorestackScratch>() == 208);
     assert!(size_of::<CoroutineCold>() == 512 && align_of::<CoroutineCold>() == 64);
+    assert!(std::mem::offset_of!(CoroutineCold, payload_state) == 504);
     assert!(size_of::<MorestackMailbox>() == 104 && align_of::<MorestackMailbox>() == 8);
     assert!(std::mem::offset_of!(MorestackMailbox, system_context) == 40);
     assert!(std::mem::offset_of!(MorestackMailbox, return_value) == 88);

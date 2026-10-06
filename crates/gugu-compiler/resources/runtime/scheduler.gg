@@ -1,7 +1,13 @@
+use std.runtime.barrier.{barrier_init}
+use std.runtime.heap.{copy_bytes, heap_boot, value_size}
+use std.runtime.trace.{trace_init}
+
 /* 单 OS worker 上的 Classic64 本地队列。
  *
  * processor 页由 rt0 清零。128/256 是 head/tail，384 起是 256 个槽，3552 是 run_next，
- * 3568 是 overflow carry，4032 是存活数，4048/4056 是堆游标，4072 是子协程入口，4080 是状态区。
+ * 3560 是 edge staging 指针，3568 是 overflow carry，3576 是 barrier 状态页指针，
+ * 3584 是栈扫描 epoch，3592 是 arena 基址，4032 是存活数，4048/4056 是堆游标，
+ * 4072 是子协程入口，4080 是状态区。
  * 热记录的 +16 是 processor，+48 是 cold 地址。等待只改协程状态并切回系统栈。
  */
 
@@ -17,11 +23,142 @@ fn fail() {
     unsafe { std.runtime.process_exit(2) }
 }
 
+/// 子协程参数包字节数：与 `coroutine_layout.rs` 的机器契约一致（Rust 侧镜像测试钉死）。
+///
+/// 入口片段、LIR 发包点、调度器复制点共用同一份偏移；原始分配按 64 字节对齐，满足包内 XMM
+/// 车道 16 字节装载的要求。
+pub const COROUTINE_PACK_BYTES: uint = 208
+
+/// 参数包 lane map：与 `coroutine_layout.rs` 同一编码（3 位/车道，0 = 非根，n+1 = 根种类 n）。
+pub const COROUTINE_PACK_LANES: uint = 17
+pub const COROUTINE_PACK_TRACE_BITS: uint = 3
+pub const COROUTINE_PACK_TRACE_NONE: uint = 0
+/// 车道布局：9 个整数车道按 8 字节连续排布，其后 8 个浮点车道按 16 字节排布。
+pub const COROUTINE_PACK_INTEGER_LANES: uint = 9
+pub const COROUTINE_PACK_FLOAT_OFFSET: uint = 72
+pub const COROUTINE_PACK_FLOAT_STRIDE: uint = 16
+
+/// typed 动态根登记表：表头 + 固定容量记录。所有常量与 `dynamic_roots_schema.rs` 逐项一致。
+///
+/// 发布与结清都以稳定身份（热记录地址）为单位；表地址写在处理器槽 4064。`descriptor` 为 0
+/// 只表示该类别尚未接线描述符，不表示「载荷无根」。
+pub const DYNAMIC_ROOT_TABLE_HEADER_BYTES: uint = 16
+pub const DYNAMIC_ROOT_RECORD_BYTES: uint = 48
+pub const DYNAMIC_ROOT_CAPACITY: uint = 256
+pub const DYNAMIC_ROOT_SLOT_OFFSET: uint = 8
+pub const DYNAMIC_ROOT_DESCRIPTOR_OFFSET: uint = 16
+pub const DYNAMIC_ROOT_COUNT_OFFSET: uint = 24
+pub const DYNAMIC_ROOT_KIND_OFFSET: uint = 32
+pub const DYNAMIC_ROOT_FLAGS_OFFSET: uint = 40
+pub const DYNAMIC_ROOT_TABLE_COUNT_OFFSET: uint = 8
+pub const DYNAMIC_ROOT_FLAG_INITIALIZED: uint = 1
+pub const DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD: uint = 0
+pub const DYNAMIC_ROOT_KIND_RESULT: uint = 1
+/// channel 环槽：载荷槽是环内那条槽本身，描述是元素类型的受管车道表地址。
+pub const DYNAMIC_ROOT_KIND_CHANNEL_SLOT: uint = 2
+/// 处理器页里动态根表地址的槽位；与 `PROCESSOR_DYNAMIC_ROOTS_OFFSET` 一致。
+pub const PROCESSOR_DYNAMIC_ROOTS_OFFSET: uint = 4064
+/// 冷记录的载荷发布状态字（与 Rust 侧 `CoroutineCold` 同偏移同语义）。
+///
+/// 载荷的生死互不重叠，因此一个状态字足够表达：位 0 = spawn 参数包已发布（入队前发布、结束时
+/// 就地结清），位 1 = 结果载荷已发布（结束时发布、被 Join/select 取走时结清），位 3 起 3 位是
+/// 结果根的栈图根种类判别值（0 = 结果字不含根，非 0 时结束时必须发布结果登记）。位必须按顺序
+/// 推进：没有发布过结果的协程不允许结清结果，重复结清是不变量错误。
+pub const COROUTINE_COLD_PAYLOAD_STATE_OFFSET: uint = 504
+/// 位 0：spawn 参数包已发布，结束时必须结清。
+pub const COROUTINE_COLD_SPAWN_PUBLISHED_BIT: uint = 1
+/// 位 1：结果载荷已发布，被 Join 或 select 取走时必须结清。
+pub const COROUTINE_COLD_RESULT_PUBLISHED_BIT: uint = 2
+/// 结果根种类位段：位 3 起 3 位，lane map 编码（0 = 结果字不含根，n+1 = 栈图根种类判别值 n，
+/// 即 Direct=1、Interior=2、Handle=3、Compressed=4、StackInterior=5）。
+pub const COROUTINE_COLD_RESULT_KIND_SHIFT: uint = 3
+pub const COROUTINE_COLD_RESULT_KIND_MASK: uint = 7
+/// 冷记录里结果字槽的偏移；结束写、Join 取，`take_result` 是该字的唯读取入口。
+pub const COROUTINE_COLD_RESULT_OFFSET: uint = 368
+/// 结果区的字节数：子协程返回 ABI 只携带两个机器字，结果槽的上界就是它。
+///
+/// 超过该上界的载荷需要子侧装箱（结果字退化成指向带描述符载荷对象的引用），属显式迁移缺口；
+/// `take_result` 遇到越界只按 fatal 处理，不静默截断。
+pub const COROUTINE_COLD_RESULT_BYTES: uint = 16
+
 fn proc_of(hot: uint) uint = word(hot + 16)
+
+/// 动态根登记表首地址；处理器由调用方给出，不做「当前协程」猜测。
+fn dynamic_root_table(processor: uint) uint = word(processor + PROCESSOR_DYNAMIC_ROOTS_OFFSET)
+
+/// 第 index 条记录地址；越界返回 0。
+fn dynamic_root_entry(table: uint, index: uint) uint {
+    if index >= word(table) { return 0 }
+    table + DYNAMIC_ROOT_TABLE_HEADER_BYTES + index * DYNAMIC_ROOT_RECORD_BYTES
+}
+
+/// 发布一条动态根：身份必须唯一、载荷槽必须非空、条数至少 1。
+///
+/// 表满与重复身份都是不变量错误：已发布的载荷绝不能被静默丢弃，调用方只能在复制完成后、入队
+/// 或发布之前调用。
+pub fn dynamic_root_publish(processor: uint, identity: uint, slot: uint, descriptor: uint, count: uint, kind: uint) {
+    if identity == 0 || slot == 0 || count == 0 { fail() }
+    unsafe {
+        let table = dynamic_root_table(processor)
+        let capacity = word(table)
+        let free: uint = 0
+        let index: uint = 0
+        while index < capacity {
+            let entry = dynamic_root_entry(table, index)
+            if word(entry) == identity { fail() }
+            if free == 0 && word(entry) == 0 { free = entry }
+            index = index + 1
+        }
+        if free == 0 { fail() }
+        store_word(free, identity)
+        store_word(free + DYNAMIC_ROOT_SLOT_OFFSET, slot)
+        store_word(free + DYNAMIC_ROOT_DESCRIPTOR_OFFSET, descriptor)
+        store_word(free + DYNAMIC_ROOT_COUNT_OFFSET, count)
+        store_word(free + DYNAMIC_ROOT_KIND_OFFSET, kind)
+        store_word(free + DYNAMIC_ROOT_FLAGS_OFFSET, DYNAMIC_ROOT_FLAG_INITIALIZED)
+        store_word(table + DYNAMIC_ROOT_TABLE_COUNT_OFFSET, word(table + DYNAMIC_ROOT_TABLE_COUNT_OFFSET) + 1)
+    }
+}
+
+/// 结清一条动态根：身份必须存在，重复结清是不变量错误。
+pub fn dynamic_root_retire(processor: uint, identity: uint) {
+    if identity == 0 { fail() }
+    unsafe {
+        let table = dynamic_root_table(processor)
+        let capacity = word(table)
+        let index: uint = 0
+        while index < capacity {
+            let entry = dynamic_root_entry(table, index)
+            if word(entry) == identity {
+                let cleared: uint = 0
+                while cleared < DYNAMIC_ROOT_RECORD_BYTES {
+                    store_word(entry + cleared, 0)
+                    cleared = cleared + 8
+                }
+                store_word(table + DYNAMIC_ROOT_TABLE_COUNT_OFFSET, word(table + DYNAMIC_ROOT_TABLE_COUNT_OFFSET) - 1)
+                return
+            }
+            index = index + 1
+        }
+        fail()
+    }
+}
+
+/// 当前已发布的动态根条数；收集器与探针从这里进入。
+pub fn dynamic_root_count(processor: uint) uint = word(dynamic_root_table(processor) + DYNAMIC_ROOT_TABLE_COUNT_OFFSET)
+
+/// 动态根表的固定容量（表首字）。
+///
+/// 表是**稀疏**的：发布填第一个空槽、结清把该槽清零，所以存活记录并不集中在 `0..count`。
+/// 遍历方必须扫全表并按身份字跳过空槽，不能按 `0..count` 取下标。
+pub fn dynamic_root_capacity(processor: uint) uint = word(dynamic_root_table(processor))
+
+/// 第 index 条动态根记录地址；越界返回 0。字段偏移见同名前缀常量。
+pub fn dynamic_root_record(processor: uint, index: uint) uint = dynamic_root_entry(dynamic_root_table(processor), index)
 
 fn state_of(processor: uint) uint = word(processor + 4080)
 
-fn heap_alloc(processor: uint, bytes: uint) uint {
+pub fn heap_alloc(processor: uint, bytes: uint) uint {
     let cursor = word(processor + 4048)
     let aligned = cursor / 64 * 64
     let start = if aligned == cursor { cursor } else { aligned + 64 }
@@ -65,15 +202,21 @@ pub fn boot(processor: uint, state: uint, slot: uint, cold: uint, enter: uint) {
         zero_range(processor, 64, 3520)
         zero_range(processor, 3552, 4096)
         let heap = map_span(1048576)
-        let tlab = map_span(1048576)
-        let turn = map_span(1048576)
-        store_word(processor + 3520, tlab)
-        store_word(processor + 3528, tlab + 1048576)
-        store_word(processor + 3536, turn)
-        store_word(processor + 3544, turn + 1048576)
+        // TLAB 不再是裸映射：由分配器建立真实 arena 并把 cursor/limit 指向首块的可分配范围。
+        // TurnRegion 也不再是裸映射：cursor/limit 留 0，首次区域分配由 `gc_region_slow` 建立
+        // 真实区域（容量取自配置的块字节数），快路径在 limit==0 时必然走慢路，不会写到空地址。
+        heap_boot(processor)
+        barrier_init(processor)
+        trace_init(processor)
+        store_word(processor + 3536, 0)
+        store_word(processor + 3544, 0)
         store_word(processor + 4032, 1)
         store_word(processor + 4048, heap)
         store_word(processor + 4056, heap + 1048576)
+        let roots = heap_alloc(processor, DYNAMIC_ROOT_TABLE_HEADER_BYTES + DYNAMIC_ROOT_CAPACITY * DYNAMIC_ROOT_RECORD_BYTES)
+        store_word(roots, DYNAMIC_ROOT_CAPACITY)
+        store_word(roots + DYNAMIC_ROOT_TABLE_COUNT_OFFSET, 0)
+        store_word(processor + PROCESSOR_DYNAMIC_ROOTS_OFFSET, roots)
         store_word(processor + 4072, enter)
         store_word(processor + 4080, state)
         store_word(slot + 16, processor)
@@ -171,7 +314,7 @@ pub fn park_current() {
     }
 }
 
-fn prepare_child(processor: uint, code: uint, env: uint) uint {
+fn prepare_child(processor: uint, code: uint, env: uint, trace: uint, result_kind: uint) uint {
     unsafe {
         let reserve: uint = 1073741824
         let capacity: uint = 65536
@@ -186,6 +329,19 @@ fn prepare_child(processor: uint, code: uint, env: uint) uint {
             store_word(cold + index, 0)
             index = index + 8
         }
+        // 参数包必须复制到子协程自持的原始内存并在入队前完成：父帧在 spawn 返回后即可被复用，
+        // 子协程稍后运行时再读父帧就是悬垂读（复制源与目标在交接期间都可定位）。
+        let pack = heap_alloc(processor, COROUTINE_PACK_BYTES)
+        let copied: uint = 0
+        while copied < COROUTINE_PACK_BYTES {
+            store_word(pack + copied, word(env + copied))
+            copied = copied + 8
+        }
+        // 复制完成后、入队之前登记：子协程自持的包是它全部入参的唯一真相。
+        // spawn 参数包的 trace 描述就是 lane map：3 位一个车道，0 非根，n+1 是根种类 n。
+        dynamic_root_publish(processor, slot, pack, trace, COROUTINE_PACK_LANES, DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD)
+        let payload_state = COROUTINE_COLD_SPAWN_PUBLISHED_BIT | (result_kind << COROUTINE_COLD_RESULT_KIND_SHIFT)
+        store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, payload_state)
         store_word(slot + 16, processor)
         store_word(slot + 48, cold)
         store_word(slot + 64, stack_high - capacity + 512)
@@ -195,7 +351,7 @@ fn prepare_child(processor: uint, code: uint, env: uint) uint {
         let stack_top = stack_high / 16 * 16
         let frame = stack_top - 16
         store_word(frame, code)
-        store_word(frame + 8, env)
+        store_word(frame + 8, pack)
         store_word(cold + 8, frame)
         store_word(cold + 16, word(processor + 4072))
         store_word(slot, 6)
@@ -205,29 +361,60 @@ fn prepare_child(processor: uint, code: uint, env: uint) uint {
 
 /// 创建子协程并放入本地尾。句柄是热记录地址。
 #[used]
-pub fn spawn(code: *(), env: *()) uint {
+pub fn spawn(code: *(), env: *(), trace: uint, result_kind: uint) uint {
     unsafe {
         let parent = std.runtime.current_slot()
         let processor = proc_of(parent)
-        let child = prepare_child(processor, std.mem.transmute[*(), uint](code), std.mem.transmute[*(), uint](env))
+        let child = prepare_child(processor, std.mem.transmute[*(), uint](code), std.mem.transmute[*(), uint](env), trace, result_kind)
         store_word(processor + 4032, word(processor + 4032) + 1)
         enqueue(processor, child)
         child
     }
 }
 
-/// 协程返回：发布结果、唤醒 Join，并减少存活数。
+/// 协程返回：结清自己的动态根登记、发布结果、唤醒 Join，并减少存活数。
 pub fn finish_hot(hot: uint, value: uint, second: uint) {
     let cold = word(hot + 48)
+    let processor = proc_of(hot)
+    let state = word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET)
+    if state & COROUTINE_COLD_SPAWN_PUBLISHED_BIT != 0 {
+        dynamic_root_retire(processor, hot)
+    }
+    // 受管结果字在 Join 取走之前只存在于冷记录里，必须按编译期给出的根种类登记：lane map 的
+    // 车道 0 指向结果槽本身，载荷对象由自带描述符描述。标量结果不登记。
+    let kind = (state >> COROUTINE_COLD_RESULT_KIND_SHIFT) & COROUTINE_COLD_RESULT_KIND_MASK
+    if kind != 0 {
+        dynamic_root_publish(processor, hot, cold + COROUTINE_COLD_RESULT_OFFSET, kind, 1, DYNAMIC_ROOT_KIND_RESULT)
+        store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, (state & COROUTINE_COLD_SPAWN_PUBLISHED_BIT) | kind << COROUTINE_COLD_RESULT_KIND_SHIFT | COROUTINE_COLD_RESULT_PUBLISHED_BIT)
+    } else {
+        store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, state & COROUTINE_COLD_SPAWN_PUBLISHED_BIT)
+    }
     store_word(cold + 360, 1)
     store_word(cold + 368, value)
     store_word(cold + 376, second)
     let joiner = word(cold + 384)
     if joiner != 0 { ready_hot(joiner) }
     store_word(hot, 16)
-    let processor = proc_of(hot)
     let live = word(processor + 4032)
     if live != 0 { store_word(processor + 4032, live - 1) }
+}
+
+/// 取走一个已结束协程的结果：先结清结果载荷登记，再把结果值复制进 `dst`（0 表示丢弃）。
+///
+/// 结果按元素描述符（`TypeRecord`，首字是 payload size）整份复制，而不是只搬一个机器字：两字
+/// 载荷（例如带捕获的闭包）必须两字都送达，否则调用侧读到的是未初始化车道。标量结果从不发布
+/// 载荷，因此取走时无事可做；发布过的结果只结清一次，位在结清时清零。
+pub fn take_result(hot: uint, dst: uint, descriptor: uint) {
+    let cold = word(hot + 48)
+    let state = word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET)
+    if state & COROUTINE_COLD_RESULT_PUBLISHED_BIT != 0 {
+        dynamic_root_retire(proc_of(hot), hot)
+        store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, state & ~COROUTINE_COLD_RESULT_PUBLISHED_BIT)
+    }
+    if dst == 0 { return }
+    let bytes = value_size(descriptor)
+    if bytes > COROUTINE_COLD_RESULT_BYTES { fail() }
+    copy_bytes(dst, cold + COROUTINE_COLD_RESULT_OFFSET, bytes)
 }
 
 pub fn live_count(processor: uint) uint = word(processor + 4032)

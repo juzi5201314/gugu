@@ -31,6 +31,20 @@ ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault 
 
 镜像 runtime 的 `current_slot()` machine intrinsic 返回当前协程控制块句柄；x86_64 上该句柄来自固定保留的 `r14` 并通过内部返回寄存器 `rax` 交付。它不分配内存、不切换上下文，也不改变协程状态。
 
+`gc_config()` machine intrinsic 返回编译器生成的只读 `GcImageConfig` 记录的地址。记录由 compiler 生成并随镜像一起写出，字段全部是 64 位无符号整数、按固定顺序连续排列，取值只来自已验证的 schema 与 profile：`revision`、`byte_len`、四个 schema 号、三个 profile revision、arena/block/line/granule/object-header 尺寸、TLAB span、nursery 触发量与年龄、对齐上限、card/stamp/edge 容量、每写预算、mark shard 数、pacing 预算与压力阈值。`byte_len` 由记录布局派生，runtime 在启动期用 `revision` 与 `byte_len` 校验自己读到的记录与 compiler 写出的记录一致，不一致按 `RuntimeInvariant` fatal 结束。该原语不分配内存、不切换上下文，也不改变 GC 状态。LocalHeap 的 schema 变化会同时拒绝旧的 arena side metadata；超过 block 或配置对齐上限的对象使用页粒度 LargeMapping，不回退到普通 block。
+
+GC 控制类 machine intrinsic（`gc_config()` 及后续 GC 协调入口）只接受由 runtime 资源以 runtime 角色注入的源身份：授权依据是源单元被注入时的角色，不是模块名或路径前缀，因此普通用户源码即使写 `unsafe` 也不能调用。其余 machine intrinsic 保持既有契约（按规范路径识别）。
+
+同一来源门禁也约束四个私有原子原语：`atomic_load_acquire[T](*T) T`、`atomic_store_release[T](*T, T)`、`atomic_fetch_or_acq_rel[T](*T, T) T` 与 `atomic_fetch_and_acq_rel[T](*T, T) T`。`T` 仅允许 `byte`、`u32`、`uint`，可省略并由地址类型推导；显式类型必须与指针指向的类型一致。地址必须自然对齐、指向存活且已初始化的可访问字段，这些前置条件由 `unsafe` 调用方承担。fetch 返回该次更新线性化时的旧值，而不是新值。访问严格限于 T 的宽度，不得为了修改 byte 标志而覆盖相邻字段。内存序由名字固定，调用者不能传入可变 order；这些原语不分配、不切栈，也不形成 GC 停点。
+
+镜像是闭世界构建：compiler 发出的每一个 runtime glue 符号都必须来自登记的 runtime 定义；迁移期间尚未接管的入口只能出现在 compiler 的显式缺口清单中，并不得作为运行期能力或镜像正确性证明。未知入口在 lowering 阶段即拒绝，不能由 ELF/PE writer 解析为退出桩，也不能由用户源码提供同名替代实现。该内部门禁不扩大 `std.runtime` 的公开调用面；它只保证 compiler、镜像 runtime 与 metadata 使用同一份入口目录。
+写屏障有普通和已预留两种入口。预留入口只可由 compiler 在已验证 permit 后发出，二者都必须保持 `read-old → shade → store → card-mark` 的可观察顺序和固定三参 ABI；预留入口不得在 store 之后临时扩容或停点。当前镜像已落地普通对象的 mark shade、page-cover/card 记账和 processor 固定 edge staging（512 条、满载设 overflow，不静默丢边）；owner-local consume、flush、credit 结算与 edge/candidate 消费仍属于回收阶段。
+GC coordinator 在镜像 runtime 内维护单一 cycle 状态：root snapshot、minor evacuation、major
+mark/trace/sweep、barrier flush、MarkTicket/EdgeDelta consume、pacing debt 与 block return
+必须按固定状态转移完成。compiler 不执行这些算法；它只生成 config、root map、trace program 和
+source-role 受限的 runtime glue。`gc_alloc_slow`、`gc_refill_line`、`gc_move_one` 与 collector
+入口失败时沿统一 fatal 路径报告，不能返回伪地址、跳过 forwarding 或把 raw bytes 当 root。
+
 `main` 之前必须达到普通代码可以安全分配、启动 `async`、访问 `std.env` 和进入 panic 边界的状态。rt0 不能调用用户定义的 `static` 初始化函数、`defer` 或普通协程；这些机制在 runtime 进入 `Running` 后才有效。
 
 启动配置解析失败属于 `InvalidConfiguration` fatal，不能以 `Panic`、`Result` 或 `main` 的错误值交给用户处理；此时 runtime 只输出报告并终止。若诊断配置本身非法，必须使用不依赖该配置的固定纯文本 emergency report。

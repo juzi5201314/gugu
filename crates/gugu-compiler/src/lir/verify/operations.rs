@@ -187,8 +187,6 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
             Op::SafepointPoll { .. }
             | Op::StackCheck
             | Op::CoroutineSwitch
-            | Op::Park
-            | Op::Ready
             | Op::CoverageCounter(_) => a.is_empty() && r.is_empty(),
             Op::NoSafepointBegin(region) | Op::NoSafepointEnd(region) => {
                 a.is_empty()
@@ -348,8 +346,7 @@ fn symbol_valid(symbol: &Symbol, args: &[ValueType], results: &[ValueType], body
         return false;
     }
     match symbol {
-        Symbol::TypeId(_) => results[0] == ValueType::scalar(Type::I32),
-        Symbol::Instance(_) | Symbol::External { .. } => {
+        Symbol::Instance(_) | Symbol::FunctionAdapter { .. } | Symbol::External { .. } => {
             results[0] == ValueType::pointer(Provenance::Code)
         }
         Symbol::TypeDescriptor(_) | Symbol::Vtable { .. } => {
@@ -669,6 +666,12 @@ fn runtime_machine_call_valid(
                 && pointer(&args[1])
                 && word(&args[2])
                 && word(&results[0])
+        }
+        // 无实参，返回编译器生成的只读 `GcImageConfig` 地址（机器字）。
+        Kind::GcConfig => args.is_empty() && results.len() == 1 && word(&results[0]),
+        // 单个请求指针实参；返回 dispatcher 的状态字。
+        Kind::GcEnter => {
+            args.len() == 1 && results.len() == 1 && word(&args[0]) && word(&results[0])
         }
     }
 }

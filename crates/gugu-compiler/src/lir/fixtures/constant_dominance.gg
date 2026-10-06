@@ -1,0 +1,2 @@
+fn scale(value: int) int = value * 2 + value * 4 + value * 8
+fn main() { _ = scale(17) }

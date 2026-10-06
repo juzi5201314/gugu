@@ -171,6 +171,8 @@ pub(crate) struct Nominal {
 }
 pub(crate) struct Model<'a> {
     pub(crate) modules: &'a [ParsedModule],
+    /// 由 `RuntimeResources` 以 `Runtime` 角色注入的模块下标；GC 控制原语的授权依据。
+    pub(crate) runtime_sources: std::collections::BTreeSet<usize>,
     pub(crate) nominal: Vec<Nominal>,
     pub(crate) traits: super::traits::Traits,
     pub(super) opaques: super::opaque::Opaques,
@@ -298,12 +300,32 @@ impl<'a> Model<'a> {
             item,
         })
     }
+    /// 该模块是否来自 runtime 注入源；GC 控制原语的授权依据，不从模块名推断。
+    pub(crate) fn is_runtime_source(&self, module: usize) -> bool {
+        self.runtime_sources.contains(&module)
+    }
+
     pub(crate) fn new(
         modules: &'a [ParsedModule],
         names: &'a NameResolution,
+        runtime_paths: &std::collections::BTreeSet<String>,
     ) -> Result<Self, Vec<Diagnostic>> {
+        let runtime_sources: std::collections::BTreeSet<usize> = modules
+            .iter()
+            .enumerate()
+            .filter(|(_, module)| {
+                // 注入侧登记的是源文件名（`std/runtime/core.gg`），模块身份可能是点号形式
+                // （`std.runtime.core`）：统一去 `.gg` 后缀并把分隔符归一到点号再比较。
+                let key = |path: &str| path.strip_suffix(".gg").unwrap_or(path).replace('/', ".");
+                runtime_paths
+                    .iter()
+                    .any(|path| key(path) == key(&module.path))
+            })
+            .map(|(index, _)| index)
+            .collect();
         let mut model = Self {
             modules,
+            runtime_sources,
             nominal: Vec::new(),
             names,
             eval_profile: super::comptime::eval::EvalProfile::default(),

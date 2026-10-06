@@ -47,6 +47,47 @@ pub(crate) const INITIAL_SLOT_BYTES: u64 = 128;
 /// 状态区首部是 104 字节邮箱，后接 512 字节冷记录与 64 字节 panic 记录。
 pub(crate) const RUNTIME_STATE_BYTES: u64 = 704;
 
+/// runtime 状态区各槽偏移；rt0、调度器、片段、镜像 runtime 与 collector 共用这一份契约。
+///
+/// 首部是 `MorestackMailbox`（0..104），随后是 payload/加载偏移/主协程冷记录，尾部两槽
+/// 分别是调度返回原因与 GC coordinator 指针。所有偏移都写进 `const` 断言，镜像侧的同名常量
+/// 由 `roots_tests`/`heap_tests` 的源文本断言钉住。
+pub(crate) mod state {
+    use super::RUNTIME_STATE_BYTES;
+
+    /// `MorestackMailbox` 起点（也是状态区起点）。
+    pub(crate) const MAILBOX: u64 = 0;
+    /// payload 地址槽：rt0 写入 `block.payload_va + bias`。
+    pub(crate) const PAYLOAD: u64 = 112;
+    /// 加载偏移槽：rt0 写入地址修正量。
+    pub(crate) const BIAS: u64 = 120;
+    /// 主协程冷记录。
+    pub(crate) const COLD: u64 = 128;
+    /// panic 记录起点：message/len/path/path_len/line/column 六个字。
+    pub(crate) const PANIC_MESSAGE: u64 = 640;
+    /// 调度器返回原因：0 morestack、1 主动让出、2 协程返回。
+    pub(crate) const REASON: u64 = 688;
+    /// GC coordinator 指针；与 panic 区、原因槽都不重叠。
+    pub(crate) const COORDINATOR: u64 = 696;
+    /// 状态区字节数。
+    pub(crate) const BYTES: u64 = RUNTIME_STATE_BYTES;
+}
+
+const _: () = {
+    // 邮箱之后是 payload/bias 两个空闲字，冷记录必须落在它们之后。
+    assert!(state::MAILBOX == 0);
+    assert!(
+        state::MAILBOX + size_of::<super::coroutine::MorestackMailbox>() as u64 <= state::PAYLOAD
+    );
+    assert!(state::PAYLOAD + 8 == state::BIAS);
+    assert!(state::BIAS + 8 <= state::COLD);
+    // 冷记录之后是 panic 六字记录，原因槽与 coordinator 各自独占一个字。
+    assert!(state::COLD + 512 == state::PANIC_MESSAGE);
+    assert!(state::PANIC_MESSAGE + 48 <= state::REASON);
+    assert!(state::REASON + 8 == state::COORDINATOR);
+    assert!(state::COORDINATOR + 8 == state::BYTES);
+};
+
 /// rt0 交给镜像 runtime 的启动载荷；rt0 在其中写回加载偏移，其余字段由 writer 预置为链接期值。
 #[repr(C, align(8))]
 pub(crate) struct Rt0Payload {
@@ -72,17 +113,38 @@ pub(crate) struct Rt0Payload {
     pub(crate) unwind: u64,
     /// 统一展开节字节数。
     pub(crate) unwind_len: u64,
+    /// 类型段地址；Linux 已由 rt0 重定位，PE 是 `.gugutyp` RVA。
+    pub(crate) gc_types: u64,
+    /// 类型段字节数。
+    pub(crate) gc_types_len: u64,
+    /// GC metadata blob 地址；Linux 已由 rt0 重定位，PE 是 `.ggmeta` RVA。
+    pub(crate) gc_meta: u64,
+    /// GC metadata blob 字节数。
+    pub(crate) gc_meta_len: u64,
+    /// rt0 动态捕获的 native 环境块地址；不做 image bias，镜像内保持 0。
+    pub(crate) boot_environment: u64,
 }
 
 impl Rt0Payload {
     /// 当前载荷版本；布局变化必须递增。
-    pub(crate) const REVISION: u64 = 3;
+    pub(crate) const REVISION: u64 = 4;
 
     /// 载荷字节数。
     pub(crate) fn bytes() -> u64 {
         u64::try_from(size_of::<Self>()).expect("载荷适配u64")
     }
 }
+
+/// rt0 发布的启动期 GC 配置；字段只含 raw 数值与 native 环境块地址。
+#[repr(C, align(8))]
+pub(crate) struct GcStartupConfig {
+    pub(crate) gc_target: u64,
+    pub(crate) memory_limit: u64,
+    pub(crate) flags: u64,
+    pub(crate) environment: u64,
+}
+
+const _: () = assert!(size_of::<GcStartupConfig>() == 32);
 
 /// rt0 参数块的 Rust 视图；word 顺序即 `rt0_params` 的常量目录，Gugu 侧 `runtime/core.gg`
 /// 的 `Rt0Params` 逐项交叉校验。
@@ -131,7 +193,7 @@ const _: () = {
 };
 
 const _: () = {
-    assert!(size_of::<Rt0Payload>() == 88 && align_of::<Rt0Payload>() == 8);
+    assert!(size_of::<Rt0Payload>() == 128 && align_of::<Rt0Payload>() == 8);
     assert!(offset_of!(Rt0Payload, main_entry) == 8);
     assert!(offset_of!(Rt0Payload, initial_slot) == 16);
     assert!(offset_of!(Rt0Payload, runtime_state) == 24);
@@ -142,4 +204,9 @@ const _: () = {
     assert!(offset_of!(Rt0Payload, stackmap_len) == 64);
     assert!(offset_of!(Rt0Payload, unwind) == 72);
     assert!(offset_of!(Rt0Payload, unwind_len) == 80);
+    assert!(offset_of!(Rt0Payload, gc_types) == 88);
+    assert!(offset_of!(Rt0Payload, gc_types_len) == 96);
+    assert!(offset_of!(Rt0Payload, gc_meta) == 104);
+    assert!(offset_of!(Rt0Payload, gc_meta_len) == 112);
+    assert!(offset_of!(Rt0Payload, boot_environment) == 120);
 };

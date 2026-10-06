@@ -17,6 +17,15 @@ pub(crate) enum MetadataShape {
         tag: Option<(u64, u8)>,
         variants: Vec<Vec<(StableTypeKey, u64)>>,
     },
+    /// payload 从字 0 起连续 `count` 个 managed 直接指针字。
+    ///
+    /// 闭包环境与 spawn 参数包的槽保存的是 cell 地址（或 stable handle），**不是**内联的
+    /// 被捕获类型。因此它们不能声明成 `Aggregate`：那会把「指向 cell 的指针字」当成
+    /// 「内联的 `T`」，从而递归展开 `T` 的布局——捕获 `[int; 512]` 时展开出 512 个标量、
+    /// 一个指针字都不登记，捕获的受管对象会在 nursery 重置后丢失。
+    Pointers {
+        count: u64,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

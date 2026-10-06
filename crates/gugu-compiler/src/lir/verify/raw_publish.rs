@@ -201,7 +201,7 @@ fn forbidden(op: &Op) -> Option<&'static str> {
         Op::RuntimeMachineCall(_) => Some("runtime 机器调用"),
         Op::InlineAsm(_) => Some("内联汇编"),
         Op::TrapIf => Some("陷阱分支"),
-        Op::Park | Op::CoroutineSwitch | Op::Ready => Some("调度操作"),
+        Op::CoroutineSwitch => Some("调度操作"),
         Op::StackCheck | Op::SafepointPoll { .. } => Some("safepoint 轮询"),
         Op::Vector(_) => Some("向量操作"),
         _ => Some("未登记的 raw 平面操作"),

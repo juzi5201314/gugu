@@ -490,6 +490,27 @@ impl Builder<'_> {
         )
     }
 
+    /// 内联载荷类型的受管车道表：`[条数][(偏移, lane map 编码) × 条数]`，无根时返回 0。
+    ///
+    /// 通道环里存的是任意类型的内联字节，车道偏移由类型决定，因此发送侧把这张表交给运行期：
+    /// 环槽登记用它作为描述，固定访客按它逐条取根。表只保证字节对齐，读取方一律非对齐访问。
+    pub(super) fn payload_root_table(&mut self, ty: u32) -> ValueId {
+        let roots = self.roots(ty);
+        if roots.is_empty() {
+            let zero = self.constant(0, Type::I64);
+            return self.int_to_raw(zero);
+        }
+        let mut bytes = Vec::with_capacity((roots.len() + 1) * 16);
+        bytes.extend_from_slice(&u64::try_from(roots.len()).expect("车道数").to_le_bytes());
+        for (offset, provenance) in &roots {
+            bytes.extend_from_slice(&offset.to_le_bytes());
+            let kind = provenance.root_kind().expect("根车道必有判别值");
+            bytes.extend_from_slice(&crate::runtime::coroutine_pack_trace_code(kind).to_le_bytes());
+        }
+        let table = self.data(bytes, Provenance::Metadata);
+        self.raw_pointer(table)
+    }
+
     pub(super) fn copy_memory(
         &mut self,
         destination: ValueId,
@@ -601,7 +622,17 @@ impl Builder<'_> {
         match value {
             Computed::Address { address, .. } => self.copy_memory(destination, address, ty),
             Computed::Values { values, .. } => self.store_abi(destination, ty, &values),
+        }?;
+        // 整值写入栈槽：写入范围内被完整覆盖的根字都记成已初始化。字段写入的槽内偏移在
+        // `address` 内部累积、此处不可得，所以只处理无投影写入；按变体逐字段置位的更精确版本
+        // 在构造点。
+        if self.gir.projections_of(place).is_empty()
+            && let Storage::Stack { slot, .. } = self.storage[place.local.index()]
+            && let Some(layout) = self.layout(ty).layout
+        {
+            self.root_init_cover(slot, 0, layout.size);
         }
+        Ok(())
     }
 
     /// 在 access guard 内读取一个 shared place。
@@ -655,7 +686,11 @@ impl Builder<'_> {
     }
 
     /// 在 access guard 内写入一个 shared place；字段屏障由 `store` 绑定同一个 token。
-    fn write_shared_place(&mut self, place: Place, value: Computed) -> Result<(), Diagnostic> {
+    pub(super) fn write_shared_place(
+        &mut self,
+        place: Place,
+        value: Computed,
+    ) -> Result<(), Diagnostic> {
         let handle = self.shared_handle(place.local)?;
         self.begin_shared(handle);
         let (destination, ty) = self.shared_address(place)?;

@@ -6,7 +6,7 @@ use crate::frontend::gir::placement::PlacementKind;
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, ops::Range};
 
-pub(crate) const REVISION: u32 = 5;
+pub(crate) const REVISION: u32 = 8;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -306,6 +306,11 @@ pub(crate) enum AtomicOp {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) enum Symbol {
     Instance([u8; 32]),
+    /// 擦除函数句柄专用的 checked 入口；目标 body 保留原直接调用 ABI。
+    FunctionAdapter {
+        target: [u8; 32],
+        has_environment: bool,
+    },
     External {
         key: [u8; 32],
         name: String,
@@ -313,9 +318,11 @@ pub(crate) enum Symbol {
     Global {
         key: [u8; 32],
         thread_local: bool,
+        /// 静态块里的值槽字节数；块本身是「flags 位字 8 byte + 值槽」，
+        /// 符号地址是**块首**，值槽在 `+8`。
+        bytes: u64,
     },
     TypeDescriptor([u8; 32]),
-    TypeId([u8; 32]),
     /// type section 的 `TypeRecord` 数组基址；记录按稠密 `TypeId` 顺序、固定 80 字节。
     TypeRecords,
     /// type section 的 name pool 基址；`TypeRecord.name_offset/len` 相对它。
@@ -522,8 +529,6 @@ pub(crate) enum Op {
     NoSafepointBegin(u32),
     NoSafepointEnd(u32),
     CoroutineSwitch,
-    Park,
-    Ready,
     Call(Call),
     ForeignCall(Call),
     InlineAsm(u32),
@@ -606,12 +611,30 @@ pub(crate) struct StackSlot {
     pub(crate) roots: Vec<(u64, Provenance)>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Lifetime {
     pub(crate) slot: SlotId,
     pub(crate) block: BlockId,
     pub(crate) position: u32,
     pub(crate) live: bool,
+}
+
+/// 逐根字段的初始化事件：`bit` 是所属栈槽 root 表的下标。
+///
+/// `slot.roots` 是多变体聚合的**并集超集**：某个字只在部分变体里是指针。位图把并集收窄成
+/// 「该字在当前值里已经写成指针」：消费者只追踪置位的根字，因此 `Reset` 之后未被重新置位的
+/// 标量字不会被当作指针。
+///
+/// 置位：写入完整覆盖该根字的 8 字节。复位：`StorageLive` 建立新值、`StorageDead` 结束占用
+/// 时清空该槽全部位。位置顺序是语义的一部分，重写 pass 必须用 `map_anchor` 精确定位，
+/// 不能丢弃或钳位事件。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RootInit {
+    pub(crate) slot: SlotId,
+    pub(crate) block: BlockId,
+    pub(crate) position: u32,
+    pub(crate) bit: u32,
+    pub(crate) initialized: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -693,6 +716,7 @@ pub(crate) struct Body {
     pub(crate) switch_cases: Vec<(u64, EdgeId)>,
     pub(crate) stack_slots: Vec<StackSlot>,
     pub(crate) lifetimes: Vec<Lifetime>,
+    pub(crate) root_inits: Vec<RootInit>,
     pub(crate) safepoints: Vec<Safepoint>,
     pub(crate) barrier_permits: Vec<BarrierPermit>,
     pub(crate) no_safepoint_regions: Vec<NoSafepointReason>,

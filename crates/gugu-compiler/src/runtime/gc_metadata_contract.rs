@@ -11,12 +11,13 @@ use std::fmt::Write;
 use super::gc_metadata_schema::GcMetadataDemand;
 use super::model::RawModelError;
 
-/// GC metadata 契约段 schema 版本。
-pub(crate) const GC_METADATA_SCHEMA: u32 = 2;
-/// GC metadata section 主版本（root/vtable/source 段，未随 trace 编码变化）。
-pub(crate) const GC_METADATA_SECTION_VERSION: u16 = 1;
-/// type section 主版本；schema 2 起 trace descriptor 带 kind 字节、value program 带两阶段动作。
-pub(crate) const GC_METADATA_TYPE_SECTION_VERSION: u16 = 2;
+/// GC metadata 契约段 schema 版本；版本 3 起 root 段是镜像根记录（四类真实位置 + flags）。
+pub(crate) const GC_METADATA_SCHEMA: u32 = 3;
+/// GC metadata section 主版本；版本 2 起 root 段编码镜像根记录。
+pub(crate) const GC_METADATA_SECTION_VERSION: u16 = 2;
+/// type section 主版本；版本 3 起 `flags` 使用 `gc-metadata.md` 的九位类型旗标表，
+/// 且 `TypeDescriptor` 符号直接落在记录上（`records_offset + type_id * 80`）。
+pub(crate) const GC_METADATA_TYPE_SECTION_VERSION: u16 = 3;
 /// GC metadata section 魔数。
 pub(crate) const GC_METADATA_MAGIC: &[u8; 8] = b"GUGUGC01";
 
@@ -26,18 +27,19 @@ pub(crate) const GC_ARENA_BYTES: u64 = 2 * 1024 * 1024;
 pub(crate) const GC_BLOCK_BYTES: u32 = 32 * 1024;
 pub(crate) const GC_LINE_BYTES: u32 = 128;
 
-/// 栈图 flags 位：bit 0 `HAS_HEAP_DIRECT`、bit 1 `HAS_HEAP_INTERIOR`、
-/// bit 2 `HAS_VALUE_ACTIONS`、bit 3 `HAS_RESOURCE`、
-/// bit 4 `HAS_DEFERRED_RELEASE`、bit 5 `UNSIZED_VIEW`、
-/// bit 6 `VARIABLE_SIZE`、bit 7 `PIN_SENSITIVE`（预留）。
-pub(crate) const GC_TYPE_FLAG_NAMES: [&str; 8] = [
+/// 类型旗标位：bit 0 `HAS_HEAP_DIRECT`、bit 1 `HAS_HEAP_INTERIOR`、
+/// bit 2 `HAS_VALUE_ACTIONS`、bit 3 `HAS_RESOURCE`、bit 4 `VARIABLE_SIZE`、
+/// bit 5 `ZERO_SIZED`、bit 6 `UNSIZED_VIEW`、bit 7 `HAS_DEFERRED_RELEASE`、
+/// bit 8 `PIN_SENSITIVE`；顺序即 `gc-metadata.md` 的九位类型旗标表。
+pub(crate) const GC_TYPE_FLAG_NAMES: [&str; 9] = [
     "has-heap-direct",
     "has-heap-interior",
     "has-value-actions",
     "has-resource",
-    "has-deferred-release",
-    "unsized-view",
     "variable-size",
+    "zero-sized",
+    "unsized-view",
+    "has-deferred-release",
     "pin-sensitive",
 ];
 

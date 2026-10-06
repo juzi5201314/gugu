@@ -1,0 +1,1242 @@
+// 仅由 runtime-gc-probes 构建注入；探针与生产 runtime 走同一来源授权和编译管线。
+use std.runtime.{atomic_load_acquire as load, atomic_store_release as store, atomic_fetch_or_acq_rel as fetch_or, atomic_fetch_and_acq_rel as fetch_and}
+use std.runtime.barrier.{gc_write_barrier, BARRIER_ENTRIES_OFFSET, BARRIER_FLUSHES_OFFSET, BARRIER_STAMPS_OFFSET, BARRIER_STAMP_BYTES}
+use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_entries, gc_config_card_bytes, gc_config_granule_bytes, gc_config_object_header_bytes, gc_config_stamp_entries, GC_REQUEST_PRESSURE, PROCESSOR_GC_REQUEST_OFFSET}
+use std.runtime.heap.{gc_alloc_slow, gc_move_one, heap_large_resolve, heap_local_arena, heap_mark_begin, heap_mark_end, heap_mark_test_and_set, heap_metadata, heap_resolve_object, heap_stack_scanned, heap_word, ARENA_CARDS_OFFSET, ARENA_MARK_OFFSET, ARENA_PAGE_COVER_OFFSET, CONTROL_FORWARDED, CONTROL_GENERATION_MASK, CONTROL_GENERATION_SHIFT, CONTROL_LARGE_OBJECT, CONTROL_TYPE_MASK, EDGE_RECORDS_OFFSET, EDGE_RECORD_BYTES, GENERATION_OLD, PROCESSOR_BARRIER_SCRATCH_OFFSET, PROCESSOR_EDGE_SCRATCH_OFFSET}
+use std.runtime.trace.{trace_advance, trace_arena_slots, trace_begin, trace_complete, trace_cursor, trace_grant, trace_last_op, trace_last_word, trace_open, trace_pointers, trace_spent, TRACE_COMPLETE, TRACE_PENDING, TRACE_VISIT}
+use std.runtime.channel.{channel_new, channel_receive, channel_send}
+use std.runtime.roots.{gc_walk_roots, gc_visit_dynamic_roots, gc_roots_section, gc_roots_base, gc_roots_length, gc_root_function as root_function, gc_root_map as root_map, ROOT_KIND_DIRECT, ROOT_NO_ENTRY, ROOT_SCAN_HEADER_BYTES, SAFEPOINT_KIND_CALL_RETURN}
+use std.runtime.scheduler.{yield_now, dynamic_root_count, dynamic_root_record, COROUTINE_COLD_RESULT_OFFSET, COROUTINE_PACK_LANES, DYNAMIC_ROOT_COUNT_OFFSET, DYNAMIC_ROOT_DESCRIPTOR_OFFSET, DYNAMIC_ROOT_FLAG_INITIALIZED, DYNAMIC_ROOT_FLAGS_OFFSET, DYNAMIC_ROOT_KIND_CHANNEL_SLOT, DYNAMIC_ROOT_KIND_OFFSET, DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD, DYNAMIC_ROOT_SLOT_OFFSET}
+use std.runtime.collect.{gc_collect_major, gc_collect_minor, gc_evacuated_objects, gc_major_cycles, gc_minor_cycles, gc_reclaimed_bytes}
+use std.runtime.region.{region_exports, region_new, region_pin, region_promote, region_reset, region_transfer, region_unpin}
+use std.runtime.edge.{edge_append, edge_consume, edge_new, edge_overflow, edge_pending}
+use std.runtime.candidate.{candidate_add, candidate_mark_live, candidate_new, candidate_next, candidate_release, candidate_unmark_live}
+use std.runtime.mark.{mark_ticket_consume, mark_ticket_issue, mark_ticket_new, mark_ticket_return, mark_ticket_consumed}
+use std.runtime.pacing.{pacing_charge, pacing_complete, pacing_debt, pacing_episode, pacing_force_once, pacing_new, pacing_pressure}
+use std.runtime.block_return.{return_consume, return_consumed, return_new, return_publish, return_state, RETURN_OWNED_FREE}
+
+/// 成功输出 `gc:gc-atomics:ok\ngc:gc-root-map:ok\n` 的字节数；由 `roots_tests` 按字面量核对。
+pub const GC_PROBE_SUCCESS_BYTES: uint = 35
+
+pub fn atomic_probes() uint {
+    let bytes: [byte; 3] = [90, 18, 165]
+    let words: [u32; 3] = [305419896, 2147483666, 2271560481]
+    let wide: [uint; 3] = [81985529216486895, 9223372036854775826, 18364758544493064720]
+    let old64: uint = 9223372036854775826
+    let or64: uint = 9223372036854775955
+    let and64: uint = 9223372036854775939
+    let stored64: uint = 18446744073709551614
+    let neighbor64: uint = 18364758544493064720
+    // SAFETY: 三个数组已初始化且仍存活；取址字段自然对齐，探针没有其它线程访问这些栈槽。
+    unsafe {
+        let p8 = std.ptr.addr_of(bytes[1])
+        if load[byte](p8) != byte(18) { return 1 }
+        if fetch_or(p8, byte(129)) != byte(18) { return 2 }
+        if load(p8) != byte(147) { return 3 }
+        if fetch_and[byte](p8, byte(131)) != byte(147) { return 4 }
+        if load(p8) != byte(131) { return 5 }
+        store(p8, byte(254))
+        if load(p8) != byte(254) || bytes[0] != byte(90) || bytes[2] != byte(165) { return 6 }
+
+        let p32 = std.ptr.addr_of(words[1])
+        if load(p32) != u32(2147483666) { return 7 }
+        if fetch_or[u32](p32, u32(129)) != u32(2147483666) { return 8 }
+        if load(p32) != u32(2147483795) { return 9 }
+        if fetch_and(p32, u32(2147483779)) != u32(2147483795) { return 10 }
+        if load(p32) != u32(2147483779) { return 11 }
+        store[u32](p32, u32(4294967294))
+        if load(p32) != u32(4294967294) || words[0] != u32(305419896) || words[2] != u32(2271560481) { return 12 }
+
+        let p64 = std.ptr.addr_of(wide[1])
+        if load[uint](p64) != old64 { return 13 }
+        if fetch_or(p64, uint(129)) != old64 { return 14 }
+        if load(p64) != or64 { return 15 }
+        if fetch_and[uint](p64, and64) != or64 { return 16 }
+        if load(p64) != and64 { return 17 }
+        store(p64, stored64)
+        if load(p64) != stored64 || wide[0] != uint(81985529216486895) || wide[2] != neighbor64 { return 18 }
+        _ = 0
+    }
+    0
+}
+
+pub fn large_mapping_probe() uint {
+    let payload = gc_alloc_slow(uint(7), uint(40000), uint(8), uint(2))
+    if payload == 0 { return 21 }
+    unsafe {
+        let pointer = std.mem.transmute[uint, *uint](payload)
+        std.ptr.ptr_write[uint](pointer, uint(1229782938247303441))
+        if std.ptr.ptr_read[uint](pointer) != uint(1229782938247303441) { return 22 }
+        let slot = std.runtime.current_slot()
+        let processor = std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](slot + 16))
+        let config = std.runtime.gc_config()
+        let arena_bytes = gc_config_arena_bytes(config)
+        if heap_large_resolve(processor, payload + 39999, arena_bytes) != payload {
+            return 23
+        } else {
+            let _ = 0
+        }
+    }
+    0
+}
+
+pub fn allocation_probe() uint {
+    if gc_alloc_slow(uint(6), uint(0), uint(8), uint(2)) != 0 { return 33 }
+    let ordinary = gc_alloc_slow(uint(6), uint(256), uint(16), uint(2))
+    if ordinary == 0 || ordinary % uint(16) != 0 { return 34 }
+    unsafe {
+        let config = std.runtime.gc_config()
+        let header = gc_config_object_header_bytes(config)
+        if std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](ordinary - header + uint(8))) != uint(256) {
+            return 35
+        } else { let _ = 0 }
+    }
+    let aligned = gc_alloc_slow(uint(6), uint(256), uint(256), uint(2))
+    if aligned == 0 || aligned % uint(256) != 0 { return 36 }
+    let large_aligned = gc_alloc_slow(uint(6), uint(256), uint(8192), uint(2))
+    if large_aligned == 0 || large_aligned % uint(8192) != 0 { return 37 }
+    unsafe {
+        let slot = std.runtime.current_slot()
+        let processor = std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](slot + 16))
+        let config = std.runtime.gc_config()
+        let header = gc_config_object_header_bytes(config)
+        let control = std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](large_aligned - header))
+        if control & CONTROL_LARGE_OBJECT == uint(0) { return 38 } else { let _ = 0 }
+        if heap_large_resolve(processor, large_aligned, gc_config_arena_bytes(config)) != large_aligned {
+            return 39
+        } else { let _ = 0 }
+    }
+    0
+}
+
+pub fn alloc_routing_probe() uint {
+    // 普通分配：payload 对齐、块内不重叠、头部类型索引与动态 size 字段。
+    let first = gc_alloc_slow(uint(90), uint(48), uint(16), uint(2))
+    if first == 0 { return 90 }
+    if first % uint(16) != 0 { return 91 }
+    let second = gc_alloc_slow(uint(91), uint(48), uint(16), uint(2))
+    if second == 0 { return 92 }
+    if first < second && second - first < uint(48) { return 93 }
+    if second < first && first - second < uint(48) { return 94 }
+    // 路由判据：header + max(granular, granule) - 1 + bytes > block ⇒ large。
+    // 因此块尾恰好放得下的最大普通负载是 block - header - (slack - 1)。
+    unsafe {
+        let config = std.runtime.gc_config()
+        let header = gc_config_object_header_bytes(config)
+        let block = gc_config_block_bytes(config)
+        let granule = gc_config_granule_bytes(config)
+        let slack = if granule > uint(16) { granule } else { uint(16) }
+        let first_control = std.mem.transmute[uint, *uint](first - header)
+        if std.ptr.ptr_read[uint](first_control) & CONTROL_TYPE_MASK != uint(90) {
+            return 95
+        } else {
+            let _ = 0
+        }
+        let first_size = std.mem.transmute[uint, *uint](first - header + uint(8))
+        if std.ptr.ptr_read[uint](first_size) != uint(48) {
+            return 96
+        } else {
+            let _ = 0
+        }
+        let max_ordinary = block - header - slack + uint(1)
+        let fitting = gc_alloc_slow(uint(92), max_ordinary, uint(16), uint(2))
+        if fitting == 0 { return 97 }
+        let fitting_control = std.mem.transmute[uint, *uint](fitting - header)
+        if std.ptr.ptr_read[uint](fitting_control) & CONTROL_LARGE_OBJECT != uint(0) {
+            return 98
+        } else {
+            let _ = 0
+        }
+        let overflowing = gc_alloc_slow(uint(93), max_ordinary + uint(1), uint(16), uint(2))
+        if overflowing == 0 { return 99 }
+        let overflowing_control = std.mem.transmute[uint, *uint](overflowing - header)
+        if std.ptr.ptr_read[uint](overflowing_control) & CONTROL_LARGE_OBJECT == uint(0) {
+            return 100
+        } else {
+            let _ = 0
+        }
+        _ = 0
+    }
+    0
+}
+
+/// 目标 payload 的 granule 是否已在 mark 位图里置位（0 表示未 shade）。
+fn probe_shaded(meta: uint, arena: uint, address: uint, granule_bytes: uint, header_bytes: uint) uint {
+    if address == 0 { return 0 }
+    let granule = (address - arena - header_bytes) / granule_bytes
+    probe_word(meta + ARENA_MARK_OFFSET + granule / 64 * 8) & uint(1) << (granule % 64)
+}
+
+/// 六步写屏障：条件与 `barrier.rs::BarrierSite` 逐条一致，各方向的台账都在镜像内断言。
+///
+/// A. 无活跃标记周期时写：不 shade、不记边；owner 仍在 nursery 时也不产生卡片键。
+/// B. owner 提升到 old 后写入 nursery 值：一个卡片键入 buffer，重复写只累加 marks。
+/// C. 开启标记周期后写：旧值被删除屏障 shade、新值被插入屏障 shade，跨块写产生删除与插入两条边。
+/// D. 栈已被本轮扫描：新值不再 shade，删除屏障仍 shade 旧值。
+/// E. 写满 distinct 卡片键后：下一次写先 flush，卡片进 card table，buffer 与 stamp 清空。
+pub fn barrier_probe() uint {
+    let processor = probe_processor()
+    let config = unsafe { std.runtime.gc_config() }
+    let arena_bytes = gc_config_arena_bytes(config)
+    let granule_bytes = gc_config_granule_bytes(config)
+    let header_bytes = gc_config_object_header_bytes(config)
+    let card_bytes = gc_config_card_bytes(config)
+    let capacity = gc_config_card_entries(config)
+    let arena = heap_local_arena(processor)
+    let state = probe_word(processor + PROCESSOR_BARRIER_SCRATCH_OFFSET)
+    let scratch = probe_word(processor + PROCESSOR_EDGE_SCRATCH_OFFSET)
+    if arena == 0 || state == 0 || scratch == 0 || card_bytes == 0 || capacity == 0 { return 40 }
+    // object-start/page-cover 账本是 owner 回溯的前提：大对象跨页时必须留下覆盖项。
+    let owner = gc_alloc_slow(uint(11), uint(32704), uint(16), uint(2))
+    if owner == 0 { return 25 }
+    let meta = heap_metadata(arena, arena_bytes)
+    unsafe {
+        let offset = owner - arena - header_bytes
+        let granule = offset / granule_bytes
+        let page = offset / uint(4096)
+        let granules_per_page = uint(4096) / granule_bytes
+        let covered = uint(std.ptr.ptr_read[u32](std.mem.transmute[uint, *u32](meta + ARENA_PAGE_COVER_OFFSET + page * 4)))
+        // `page_covering_object` 记录「跨过该 4 KiB 页首」的对象在 arena 内的起始 granule，
+        // 没有则为 `u32::MAX`。本对象落在该页，因此缺项或「不晚于本对象且与本对象同页」都合法。
+        if covered != uint(4294967295) && (covered > granule || covered / granules_per_page != page) {
+            return 28
+        } else {
+            let _ = 0
+        }
+    }
+    // resolve_object：先验证 owner 自身的起点与 delta，再验证跨页对象的 interior 回溯。
+    let own = heap_resolve_object(owner, arena, arena_bytes, granule_bytes, header_bytes)
+    if own.0 != arena || own.2 != owner || own.3 != 0 { return 29 }
+    let inside = heap_resolve_object(owner + 16, arena, arena_bytes, granule_bytes, header_bytes)
+    if inside.2 != owner || inside.3 != 16 { return 30 }
+    // 跨页：32704 字节的 owner 覆盖两页，落在第二页里的地址必须仍能回溯到同一个 payload。
+    let crossed = heap_resolve_object(owner + 8192, arena, arena_bytes, granule_bytes, header_bytes)
+    if crossed.2 != owner || crossed.3 != 8192 { return 31 }
+    // 不在本 arena 的地址一律不得被当作对象（这里是处理器页地址，必然不属于该 arena）。
+    let outside = heap_resolve_object(processor + 3520, arena, arena_bytes, granule_bytes, header_bytes)
+    if outside.0 != 0 || outside.2 != 0 { return 32 }
+    let target = gc_alloc_slow(uint(22), uint(64), uint(16), uint(2))
+    if target == 0 { return 43 }
+    let old_target = gc_alloc_slow(uint(23), uint(64), uint(16), uint(2))
+    if old_target == 0 { return 43 }
+    // A. 无活跃标记周期：不 shade、不记边，owner 还在 nursery 所以也没有卡片键。
+    gc_write_barrier(owner + 8, uint(0), target)
+    if probe_word(state) != 0 { return 45 }
+    if probe_word(scratch) != 0 { return 46 }
+    if probe_shaded(meta, arena, target, granule_bytes, header_bytes) != 0 { return 47 }
+    // B. owner 提升到 old：写入 nursery 新值产生一个卡片键，重复写只累加 marks。
+    let control = probe_word(owner - header_bytes)
+    probe_store_word(owner - header_bytes, control & ~CONTROL_GENERATION_MASK | GENERATION_OLD << CONTROL_GENERATION_SHIFT)
+    gc_write_barrier(owner + 8, uint(0), target)
+    if probe_word(state) != 1 {
+        probe_fail(uint(48), probe_word(state), owner, target)
+        probe_fail(uint(148), probe_word(owner - header_bytes), probe_word(target - header_bytes), capacity)
+        return 48
+    }
+    gc_write_barrier(owner + 8, uint(0), target)
+    if probe_word(state) != 1 { return 49 }
+    if probe_word(state + BARRIER_ENTRIES_OFFSET + 24) != 2 { return 50 }
+    // C. 标记周期内：删除屏障 shade 旧值、插入屏障 shade 新值，跨块写各记一条边。
+    let epoch = heap_mark_begin(processor)
+    if epoch == 0 { return 51 }
+    gc_write_barrier(owner + 8, old_target, target)
+    if probe_shaded(meta, arena, old_target, granule_bytes, header_bytes) == 0 { return 53 }
+    if probe_shaded(meta, arena, target, granule_bytes, header_bytes) == 0 { return 54 }
+    if probe_word(scratch) != 2 { return 55 }
+    if probe_word(scratch + EDGE_RECORDS_OFFSET + 16) != 0 { return 56 }
+    if probe_word(scratch + EDGE_RECORDS_OFFSET + EDGE_RECORD_BYTES + 16) != 1 { return 57 }
+    // D. 栈已在本轮扫描：插入屏障不再 shade，删除屏障仍然 shade 旧值。
+    heap_stack_scanned(processor, epoch)
+    heap_mark_end(processor)
+    let epoch2 = heap_mark_begin(processor)
+    if epoch2 != epoch + uint(1) { return 58 }
+    heap_stack_scanned(processor, epoch2)
+    let fresh = gc_alloc_slow(uint(24), uint(64), uint(16), uint(2))
+    if fresh == 0 { return 59 }
+    gc_write_barrier(owner + 8, uint(0), fresh)
+    if probe_shaded(meta, arena, fresh, granule_bytes, header_bytes) != 0 { return 60 }
+    let deleted = gc_alloc_slow(uint(25), uint(64), uint(16), uint(2))
+    if deleted == 0 { return 61 }
+    gc_write_barrier(owner + 8, deleted, fresh)
+    if probe_shaded(meta, arena, deleted, granule_bytes, header_bytes) == 0 { return 62 }
+    heap_mark_end(processor)
+    // E. 填满 card buffer：每个 32 KiB owner 覆盖 64 张卡片，四个 owner 提供 256 个 distinct 键。
+    let owners: [uint; 4] = [
+        gc_alloc_slow(uint(31), uint(32704), uint(16), uint(2)),
+        gc_alloc_slow(uint(32), uint(32704), uint(16), uint(2)),
+        gc_alloc_slow(uint(33), uint(32704), uint(16), uint(2)),
+        gc_alloc_slow(uint(34), uint(32704), uint(16), uint(2)),
+    ]
+    let group: int = 0
+    while group < 4 {
+        let base = owners[group]
+        if base == 0 { return 63 }
+        let generation = probe_word(base - header_bytes)
+        probe_store_word(base - header_bytes, generation & ~CONTROL_GENERATION_MASK | GENERATION_OLD << CONTROL_GENERATION_SHIFT)
+        group = group + 1
+    }
+    let flushes_before = probe_word(state + BARRIER_FLUSHES_OFFSET)
+    let target_writes = capacity - probe_word(state) + uint(1)
+    let done: uint = 0
+    let group = 0
+    while group < 4 && done < target_writes {
+        let base = owners[group]
+        let card_index: uint = 0
+        while card_index < 64 && done < target_writes {
+            gc_write_barrier(base + card_index * card_bytes, uint(0), target)
+            card_index = card_index + 1
+            done = done + 1
+        }
+        group = group + 1
+    }
+    if done != target_writes { return 64 }
+    if probe_word(state + BARRIER_FLUSHES_OFFSET) != flushes_before + uint(1) { return 65 }
+    if probe_word(state) != 1 { return 66 }
+    // 被 flush 的第一张卡片必须已经进 card table，且它的 stamp 槽（按同键取模）已清空。
+    let first_card = (owners[0] - arena) / card_bytes
+    let dirty = unsafe { uint(std.ptr.ptr_read[byte](std.mem.transmute[uint, *byte](meta + ARENA_CARDS_OFFSET + first_card))) }
+    if dirty == 0 { return 67 }
+    let stamp_slot = (arena | first_card) % gc_config_stamp_entries(config) * BARRIER_STAMP_BYTES
+    if probe_word(state + BARRIER_STAMPS_OFFSET + stamp_slot + 16) != 0 { return 68 }
+    0
+}
+
+pub fn move_probe() uint {
+    let payload = gc_alloc_slow(uint(13), uint(8), uint(8), uint(2))
+    if payload == 0 { return 29 }
+    unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](payload), uint(42)) }
+    let moved = gc_move_one(payload)
+    if moved == 0 || moved == payload { return 30 }
+    unsafe {
+        if std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](moved)) != uint(42) { return 31 }
+        let control = std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](payload - uint(16)))
+        let forwarding = std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](payload - uint(8)))
+        if control & CONTROL_FORWARDED == uint(0) || forwarding != moved { return 32 } else { let _ = 0 }
+    }
+    0
+}
+
+
+pub fn refill_probe() uint {
+    let index: uint = 0
+    let previous: uint = 0
+    while index < 300 {
+        let payload = gc_alloc_slow(uint(9), uint(1024), uint(8), uint(2))
+        if payload == 0 || payload <= previous { return 24 }
+        previous = payload
+        index = index + 1
+    }
+    0
+}
+
+/// 子协程发布托管地址与 raw 地址的探针页。
+#[repr(C)]
+struct ProbeRange { base: uint, bytes: uint }
+
+fn probe_word(address: uint) uint {
+    unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) }
+}
+
+fn probe_store_word(address: uint, value: uint) {
+    unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) }
+}
+
+fn probe_pointer(value: uint) *() {
+    unsafe { std.mem.transmute[uint, *()](value) }
+}
+
+fn probe_address(address: *uint) *() {
+    unsafe { std.mem.transmute[*uint, *()](address) }
+}
+
+fn probe_uint_pointer(value: uint) *uint {
+    unsafe { std.mem.transmute[uint, *uint](value) }
+}
+
+/// 失败诊断：把失败码与三个诊断数值写到 stderr（`p <code> <a> <b> <c>\n`），成功路径不产生额外输出。
+///
+/// 缓冲区在栈上：失败路径不分配，也不改变退出码语义（调用方仍按固定码退出）。
+fn probe_fail(code: uint, a: uint, b: uint, c: uint) {
+    unsafe {
+        let digits: [byte; 64] = [0; 64]
+        let begin = std.mem.transmute[*byte, uint](std.ptr.addr_of(digits[0]))
+        let cursor = begin
+        cursor = probe_digit(cursor, uint(112))
+        cursor = probe_digit(cursor, uint(32))
+        cursor = probe_number(cursor, code)
+        cursor = probe_number(cursor, a)
+        cursor = probe_number(cursor, b)
+        cursor = probe_number(cursor, c)
+        cursor = probe_digit(cursor, uint(10))
+        _ = std.runtime.report_write(2, std.mem.transmute[uint, *byte](begin), cursor - begin)
+    }
+}
+
+fn probe_digit(cursor: uint, value: uint) uint {
+    unsafe {
+        std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](cursor), byte(value & uint(255)))
+        cursor + 1
+    }
+}
+
+fn probe_number(cursor: uint, value: uint) uint {
+    let start = probe_digit(cursor, uint(32))
+    if value == 0 { return probe_digit(start, uint(48)) }
+    let digits: [byte; 20] = [0; 20]
+    let base = unsafe { std.mem.transmute[*byte, uint](std.ptr.addr_of(digits[0])) }
+    let count: uint = 0
+    let rest = value
+    while rest > 0 {
+        unsafe {
+            std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](base + count), byte(rest % uint(10) + uint(48)))
+        }
+        rest = rest / uint(10)
+        count = count + 1
+    }
+    let at = start
+    let index = count
+    while index > 0 {
+        index = index - 1
+        unsafe {
+            let digit = std.ptr.ptr_read[byte](std.mem.transmute[uint, *byte](base + index))
+            at = probe_digit(at, uint(digit))
+        }
+    }
+    at
+}
+
+/// 根图探针的子协程：接收父协程的捕获闭包（跨协程参数包里的受管车道），另有自建捕获闭包
+/// （堆环境＝托管根）后停在空 channel 的接收队列上。
+///
+/// 同一个环境地址另有一份 `*uint` raw 副本：raw 副本不得进入根集合，托管副本必须进入。
+/// 停点之后仍要使用闭包与副本，编译器必须让它们在停点存活，这正是被检验的点。
+fn root_map_child(carried: fn(int) int, control: uint, scratch: uint) uint {
+    let base: int = 7
+    let closure: fn(int) int = fn(add: int) int = base + add
+    let words: [uint; 2] = unsafe { std.mem.transmute[fn(int) int, [uint; 2]](closure) }
+    let raw_address: uint = words[1]
+    let raw: *uint = probe_uint_pointer(raw_address)
+    probe_store_word(scratch, words[1])
+    let sink = scratch + 16
+    // 槽地址回传：父协程据此判定 raw 副本与数组槽不得进入根集合。
+    unsafe {
+        probe_store_word(scratch + 40, std.mem.transmute[*uint, uint](std.ptr.addr_of(raw_address)))
+        probe_store_word(scratch + 48, std.mem.transmute[*uint, uint](std.ptr.addr_of(words[0])))
+    }
+    _ = channel_receive(control, probe_pointer(sink), probe_pointer(0))
+    // 停点之后仍然调用入参闭包：跨协程参数包里的堆环境必须在登记与调用全程保持有效。
+    if carried(1) != 6 { return 3 }
+    if closure(1) != 8 { return 1 }
+    let recovered = unsafe { std.mem.transmute[*uint, uint](raw) }
+    if recovered != words[1] { return 2 }
+    words[1]
+}
+
+/// 结果探针的子协程：无参数、返回一个捕获闭包。闭包在机器层是两个车道，因此结果字必然指向
+/// 带描述符的受管载荷对象——正是需要在 Join 取走之前保持为根的那类结果。
+fn result_child() fn(int) int {
+    let base: int = 11
+    let closure: fn(int) int = fn(add: int) int = base + add
+    return closure
+}
+
+/// 探针所在处理器地址：热记录 +16 放 processor（与 `scheduler.gg::proc_of` 同一约定）。
+fn probe_processor() uint = unsafe { probe_word(std.runtime.current_slot() + 16) }
+
+/// 校验初始 spawn 参数包的动态根登记：恰好一条、类别与初始化位正确、载荷不在子协程栈内。
+///
+/// 载荷落在栈内就说明入队前没有复制到自持内存，子协程稍后运行会读到被复用的帧。
+fn registry_probe(cold: uint, frame: uint) uint {
+    let processor = probe_processor()
+    let count = dynamic_root_count(processor)
+    if count != 1 {
+        probe_fail(uint(64), count, frame, cold)
+        return 64
+    }
+    let record = dynamic_root_record(processor, 0)
+    if record == 0 { return 65 }
+    let identity = probe_word(record)
+    let slot = probe_word(record + DYNAMIC_ROOT_SLOT_OFFSET)
+    let kind = probe_word(record + DYNAMIC_ROOT_KIND_OFFSET)
+    let flags = probe_word(record + DYNAMIC_ROOT_FLAGS_OFFSET)
+    let trace = probe_word(record + DYNAMIC_ROOT_DESCRIPTOR_OFFSET)
+    let lanes = probe_word(record + DYNAMIC_ROOT_COUNT_OFFSET)
+    let stack_low = probe_word(cold + 72)
+    let stack_high = probe_word(cold + 80)
+    let initialized = flags & DYNAMIC_ROOT_FLAG_INITIALIZED
+    let inside_stack = slot >= stack_low && slot < stack_high
+    if identity == 0 || slot == 0 || kind != DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD || initialized == 0 || inside_stack {
+        probe_fail(uint(65), kind, flags, slot)
+        probe_fail(uint(165), identity, stack_low, stack_high)
+        return 65
+    }
+    // 子协程入参是（捕获闭包, channel 句柄, 页地址）：闭包句柄占两个车道 —— 车道 0 是
+    // 适配入口代码（Code ⇒ 非根），车道 1 是堆环境（GcHeap ⇒ 编码 1）⇒ 期望 1 << 3 = 8。
+    // 页地址与句柄都是原始指针 ⇒ 非根。这个精确值同时证明编译器按车道分类对了。
+    if trace != uint(8) || lanes != COROUTINE_PACK_LANES {
+        probe_fail(uint(67), trace, lanes, frame)
+        return 67
+    }
+    0
+}
+
+/// 根图探针：等待中协程的帧链必须按保存的 PC/RSP 精确枚举出托管根，raw 副本不得进入根集合。
+pub fn root_map_probe() uint {
+    unsafe {
+        let page = std.platform.reserve_aligned(uint(65536), uint(4096))
+        if page == 0 { return 51 }
+        let range = ProbeRange { base: page, bytes: 65536 }
+        if std.platform.commit(std.mem.transmute[*ProbeRange, uint](std.ptr.addr_of(range))) != 0 { return 52 }
+        let control = channel_new(0, probe_pointer(0))
+        if control == 0 { return 53 }
+        // 跨协程受管车道：父协程自持的捕获闭包经参数包交给子协程，登记记录里必须标出它的堆环境。
+        let held: int = 5
+        let carried: fn(int) int = fn(add: int) int = held + add
+        let child = async root_map_child(carried, control, page)
+        yield_now()
+        // 子协程停在接收队列上：等待节点给出它的槽，冷记录保存着停驻点的 RSP/PC。
+        let node = probe_word(control + 64)
+        if node == 0 { return 54 }
+        let cold = probe_word(probe_word(node) + 48)
+        let frame = probe_word(cold + 8)
+        let pc = probe_word(cold + 16)
+        let call_return = SAFEPOINT_KIND_CALL_RETURN
+        if gc_roots_section() == 0 || gc_roots_base() == 0 || gc_roots_length() < 72 { return 61 }
+        if root_function(pc) == ROOT_NO_ENTRY { return 62 }
+        if root_map(pc, call_return) == ROOT_NO_ENTRY { return 63 }
+        let buffer = page + 4096
+        probe_store_word(buffer, uint(0))
+        probe_store_word(buffer + 8, uint(0))
+        let needed = gc_walk_roots(buffer, uint(256), frame, pc, call_return, uint(0), uint(0))
+        let written = probe_word(buffer + 8)
+        let frames = probe_word(buffer + 16)
+        let stop = probe_word(buffer + 24)
+        let trace = buffer + 32
+        if frames < 2 {
+            probe_fail(uint(101), frames, stop, probe_word(trace))
+            return 101
+        }
+        if needed > uint(256) { return 55 }
+        if needed == 0 {
+            probe_fail(uint(56), frames, stop, probe_word(trace))
+            probe_fail(uint(57), probe_word(trace + 8), probe_word(trace + 16), probe_word(trace + 24))
+            return 56
+        }
+        let expected = probe_word(page)
+        if expected == 0 { return 57 }
+        // 槽级判定：raw 副本与数组槽不得进入根集合；托管闭包的堆环境必须恰好解析成 DIRECT 根。
+        let raw_slot = probe_word(page + 40)
+        let words_slot = probe_word(page + 48)
+        let head = buffer + ROOT_SCAN_HEADER_BYTES
+        let managed: uint = 0
+        let leaked: uint = 0
+        let index: uint = 0
+        while index < written {
+            let record = head + index * 32
+            if probe_word(record + 16) == expected {
+                let address = probe_word(record)
+                if address == raw_slot || address == words_slot {
+                    leaked = leaked + 1
+                } else {
+                    if probe_word(record + 8) == ROOT_KIND_DIRECT {
+                        managed = managed + 1
+                    } else {
+                        let _ = 0
+                    }
+                }
+            }
+            index = index + 1
+        }
+        if leaked != 0 {
+            probe_fail(uint(59), leaked, managed, written)
+            probe_fail(uint(159), raw_slot - frame, words_slot - frame, needed)
+            return 59
+        }
+        if managed == 0 {
+            probe_fail(uint(58), managed, written, needed)
+            probe_fail(uint(158), frames, stop, raw_slot - frame)
+            let scan: uint = 0
+            while scan < written && scan < uint(4) {
+                let record = head + scan * 32
+                let code = uint(160) + scan
+                probe_fail(
+                    code,
+                    probe_word(record + 8),
+                    probe_word(record) - frame,
+                    probe_word(record + 16) - expected,
+                )
+                scan = scan + 1
+            }
+            return 58
+        }
+        // typed 动态根登记：初始 spawn 参数包必须在子协程入队前登记，且载荷不得落在任何协程栈内。
+        let registry = registry_probe(cold, frame)
+        if registry != 0 { return registry }
+        // 固定访客：按 lane map 精确枚举受管车道 —— 只有闭包环境车道是根，且根值就是父协程
+        // 交出去的那个环境指针。这一步同时证明参数包真的复制了入参、而不是留下悬垂引用。
+        let carried_words: [uint; 2] = std.mem.transmute[fn(int) int, [uint; 2]](carried)
+        let roots_buffer = page + 16384
+        probe_store_word(roots_buffer, uint(0))
+        probe_store_word(roots_buffer + 8, uint(0))
+        let visited = gc_visit_dynamic_roots(probe_processor(), roots_buffer, uint(16))
+        let visited_written = probe_word(roots_buffer + 8)
+        if visited != 1 || visited_written != 1 {
+            probe_fail(uint(69), visited, visited_written, frame)
+            return 69
+        }
+        let visit_head = roots_buffer + ROOT_SCAN_HEADER_BYTES
+        let visited_address = probe_word(visit_head)
+        let visited_kind = probe_word(visit_head + 8)
+        let visited_value = probe_word(visit_head + 16)
+        if visited_kind != ROOT_KIND_DIRECT || visited_value != carried_words[1] {
+            probe_fail(uint(70), visited_kind, visited_value, carried_words[1])
+            return 70
+        }
+        let pack_record = dynamic_root_record(probe_processor(), 0)
+        let pack_slot = probe_word(pack_record + DYNAMIC_ROOT_SLOT_OFFSET)
+        // 车道 1 是环境车道：根地址必须是参数包里那个车道自己的地址。
+        if visited_address != pack_slot + 8 {
+            probe_fail(uint(71), visited_address, pack_slot, frame)
+            return 71
+        }
+        // 收尾：唤醒等待中的子协程；只有它真正返回，探针才证明停驻帧链已被完整消费。
+        let wake: uint = 1
+        _ = channel_send(control, probe_address(std.ptr.addr_of(wake)), probe_pointer(0))
+        yield_now()
+        if probe_word(page) != expected { return 60 }
+        // 子协程返回后必须结清自己的登记，registry 不得继续保留该载荷。
+        if dynamic_root_count(probe_processor()) != 0 {
+            probe_fail(uint(66), dynamic_root_count(probe_processor()), uint(0), uint(0))
+            return 66
+        }
+        _ = child
+        // 结果载荷：子协程返回捕获闭包后、Join 取走前，结果字必须是已登记的 DIRECT 根，
+        // 而且 Join 交给调用方的就是同一个载荷对象。
+        let holder = async result_child()
+        yield_now()
+        let holder_bits = std.mem.transmute[Join[fn(int) int], uint](holder)
+        let holder_cold = probe_word(holder_bits + 48)
+        if dynamic_root_count(probe_processor()) != 1 {
+            probe_fail(uint(72), dynamic_root_count(probe_processor()), holder_cold, uint(0))
+            return 72
+        }
+        probe_store_word(roots_buffer, uint(0))
+        probe_store_word(roots_buffer + 8, uint(0))
+        let result_visited = gc_visit_dynamic_roots(probe_processor(), roots_buffer, uint(16))
+        if result_visited != 1 || probe_word(roots_buffer + 8) != 1 {
+            probe_fail(uint(73), result_visited, probe_word(roots_buffer + 8), holder_cold)
+            return 73
+        }
+        let result_head = roots_buffer + ROOT_SCAN_HEADER_BYTES
+        let result_address = probe_word(result_head)
+        let result_kind = probe_word(result_head + 8)
+        let result_value = probe_word(result_head + 16)
+        if result_address != holder_cold + COROUTINE_COLD_RESULT_OFFSET || result_kind != ROOT_KIND_DIRECT || result_value == 0 {
+            probe_fail(uint(74), result_address, result_kind, holder_cold)
+            probe_fail(uint(174), result_value, uint(0), uint(0))
+            return 74
+        }
+        // 取走路径必须整份交付载荷：两字闭包的第一字是已登记的对象，第二字必须与冷记录里的
+        // 第二个机器字一致；只搬一个字的实现会让第二字停在未初始化车道。
+        let expected_second = probe_word(holder_cold + COROUTINE_COLD_RESULT_OFFSET + 8)
+        match holder.wait() {
+            Ok(carried) => {
+                let carried_words: [uint; 2] = std.mem.transmute[fn(int) int, [uint; 2]](carried)
+                if carried_words[0] != result_value || carried_words[1] != expected_second {
+                    probe_fail(uint(75), carried_words[0], carried_words[1], result_value)
+                    probe_fail(uint(175), expected_second, uint(0), uint(0))
+                    return 75
+                }
+                _ = carried
+            }
+            Err(_) => {
+                probe_fail(uint(77), holder_bits, uint(0), uint(0))
+                return 77
+            }
+        }
+        if dynamic_root_count(probe_processor()) != 0 {
+            probe_fail(uint(76), dynamic_root_count(probe_processor()), expected_second, uint(0))
+            return 76
+        }
+        // channel 环槽：容量 1 的闭包通道，发送后、接收前，环里那条槽必须是已登记的 DIRECT 根，
+        // 而且登记的值就是接收方最终拿到的那个环境指针。
+        let mail = chan[fn(int) int](1)
+        let held: int = 21
+        let posted: fn(int) int = fn(add: int) int = held + add
+        let posted_words: [uint; 2] = std.mem.transmute[fn(int) int, [uint; 2]](posted)
+        // 环载荷登记必须落进**创建该通道的处理器**的表里：先钉死控制块里记的就是本处理器。
+        let mail_bits = std.mem.transmute[chan[fn(int) int], uint](mail)
+        let mail_owner = probe_word(mail_bits + 96)
+        if mail_owner != probe_processor() {
+            probe_fail(uint(85), mail_owner, probe_processor(), mail_bits)
+            return 85
+        }
+        _ = mail.send(posted)
+        if dynamic_root_count(probe_processor()) != 1 {
+            probe_fail(uint(78), dynamic_root_count(probe_processor()), posted_words[1], uint(0))
+            return 78
+        }
+        let ring_record = dynamic_root_record(probe_processor(), 0)
+        let ring_slot = probe_word(ring_record + DYNAMIC_ROOT_SLOT_OFFSET)
+        let ring_table = probe_word(ring_record + DYNAMIC_ROOT_DESCRIPTOR_OFFSET)
+        let ring_kind = probe_word(ring_record + DYNAMIC_ROOT_KIND_OFFSET)
+        if ring_kind != DYNAMIC_ROOT_KIND_CHANNEL_SLOT || ring_table == 0 || ring_slot == 0 {
+            probe_fail(uint(86), ring_kind, ring_table, ring_slot)
+            return 86
+        }
+        probe_store_word(roots_buffer, uint(0))
+        probe_store_word(roots_buffer + 8, uint(0))
+        let ring_visited = gc_visit_dynamic_roots(probe_processor(), roots_buffer, uint(16))
+        let ring_head = roots_buffer + ROOT_SCAN_HEADER_BYTES
+        if ring_visited != 1 || probe_word(roots_buffer + 8) != 1 {
+            probe_fail(uint(79), ring_visited, probe_word(roots_buffer + 8), uint(held))
+            return 79
+        }
+        if probe_word(ring_head + 8) != ROOT_KIND_DIRECT || probe_word(ring_head + 16) != posted_words[1] {
+            probe_fail(uint(80), probe_word(ring_head + 8), probe_word(ring_head + 16), posted_words[1])
+            return 80
+        }
+        match mail.recv() {
+            Ok(received) => {
+                let received_words: [uint; 2] = std.mem.transmute[fn(int) int, [uint; 2]](received)
+                if received_words[1] != posted_words[1] {
+                    probe_fail(uint(81), received_words[1], posted_words[1], uint(0))
+                    return 81
+                }
+                if received(1) != 22 {
+                    probe_fail(uint(82), uint(received(1)), uint(held), uint(0))
+                    return 82
+                }
+                _ = received
+            }
+            Err(_) => {
+                probe_fail(uint(83), posted_words[1], uint(0), uint(0))
+                return 83
+            }
+        }
+        if dynamic_root_count(probe_processor()) != 0 {
+            probe_fail(uint(84), dynamic_root_count(probe_processor()), uint(0), uint(0))
+            return 84
+        }
+        _ = holder_bits
+    }
+    0
+}
+
+/// select 获胜项：join 分支的登记/结清时序与载荷整份交付都必须在 select 提交路径上成立。
+///
+/// 断言：结果发布后 `dynamic_root_count == baseline + 1`；访客按 lane map 读出 `DIRECT` 根、
+/// 地址等于冷记录里的结果字槽；select 分支拿到 `Ok` 且两字闭包整份到齐（第一字等于登记值、
+/// 第二字等于冷记录里的第二个机器字，即 `commit_case` 的 join 分支确实把记录里 `+40` 的元素
+/// 描述符交给了 `take_result`）；select 取走后登记回到 `baseline`。
+pub fn select_probe() uint {
+    let processor = probe_processor()
+    let baseline = dynamic_root_count(processor)
+    // 访客的输出缓冲必须在受管地址上（与既有探针一致）：用一次普通分配拿一段可写载荷。
+    let scratch = gc_alloc_slow(uint(200), uint(256), uint(16), uint(2))
+    if scratch == 0 { return 109 }
+    let buffer = scratch
+    // A. join 分支获胜：结果发布后登记、被 select 取走后结清。
+    let holder = async result_child()
+    yield_now()
+    let holder_bits = unsafe { std.mem.transmute[Join[fn(int) int], uint](holder) }
+    let holder_cold = probe_word(holder_bits + 48)
+    if dynamic_root_count(processor) != baseline + uint(1) {
+        probe_fail(uint(110), dynamic_root_count(processor), baseline, holder_cold)
+        return 110
+    }
+    probe_store_word(buffer, uint(0))
+    probe_store_word(buffer + 8, uint(0))
+    let visited = gc_visit_dynamic_roots(processor, buffer, uint(4))
+    let head = buffer + ROOT_SCAN_HEADER_BYTES
+    if visited != 1
+        || probe_word(head) != holder_cold + COROUTINE_COLD_RESULT_OFFSET
+        || probe_word(head + 8) != ROOT_KIND_DIRECT
+    {
+        probe_fail(uint(111), visited, probe_word(head), holder_cold)
+        return 111
+    }
+    let registered = probe_word(head + 16)
+    let registered_second = probe_word(holder_cold + COROUTINE_COLD_RESULT_OFFSET + 8)
+    let arm_failure: uint = 0
+    select {
+        let value = holder.wait() => {
+            match value {
+                Ok(payload) => {
+                    let payload_words: [uint; 2] = unsafe { std.mem.transmute[fn(int) int, [uint; 2]](payload) }
+                    if payload_words[0] != registered || payload_words[1] != registered_second {
+                        arm_failure = 112
+                    }
+                    _ = payload
+                }
+                Err(_) => {
+                    arm_failure = 113
+                }
+            }
+            _ = 0
+        }
+    }
+    if arm_failure != 0 {
+        probe_fail(arm_failure, uint(0), uint(0), registered)
+        return arm_failure
+    }
+    if dynamic_root_count(processor) != baseline {
+        probe_fail(uint(114), dynamic_root_count(processor), baseline, uint(0))
+        return 114
+    }
+    0
+}
+
+/// 向探针缓冲区写一个字节，返回下一个下标。
+fn trace_probe_emit(buffer: uint, index: uint, value: uint) uint {
+    unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](buffer + index), byte(value & uint(255))) }
+    index + uint(1)
+}
+
+/// 写一个 u32 LE。
+fn trace_probe_emit32(buffer: uint, index: uint, value: uint) uint {
+    let cursor = index
+    let shift: uint = 0
+    while shift < 32 {
+        cursor = trace_probe_emit(buffer, cursor, value >> shift)
+        shift = shift + 8
+    }
+    cursor
+}
+
+/// 跑完一个 descriptor，返回访问序列的滚动摘要（访问数/消费额度从游标读）。
+///
+/// 摘要按 `hash = hash * 31 + word` 累积：分段预算与整段预算的摘要必须一致，才能证明续跑没有
+/// 重扫前缀。
+fn trace_probe_run(cursor: uint, descriptor: uint, length: uint, payload: uint, payload_length: uint, budget: uint) uint {
+    trace_begin(cursor, budget)
+    if trace_open(cursor, descriptor, length) == 1 {
+        return 0
+    }
+    let hash: uint = 0
+    let grants: uint = 0
+    let looping: uint = 1
+    while looping == 1 {
+        let status = trace_advance(cursor, descriptor, length, payload, payload_length)
+        if status == TRACE_VISIT {
+            hash = hash * 31 + trace_last_word(cursor)
+        }
+        if status == TRACE_PENDING {
+            // 有界续跑：一个固定程序不可能消费这么多额度，超限说明游标没有推进。
+            grants = grants + 1
+            if grants > 4096 { return 4294967295 }
+            trace_grant(cursor, budget)
+        }
+        if status == TRACE_COMPLETE { looping = 0 }
+        _ = 0
+    }
+    hash
+}
+
+/// 位图用例第 `index` 次访问的期望 word：0、4、9。
+fn probe_expect_word(index: uint) uint {
+    if index == 0 { return uint(0) } else { let _ = 0 }
+    if index == 1 { return uint(4) } else { let _ = 0 }
+    9
+}
+
+/// 位图用例第 `index` 次访问的期望 opcode：word 4 来自 interior 半区，其余来自 direct 半区。
+fn probe_expect_op(index: uint) uint {
+    if index == 1 { return uint(2) } else { let _ = 0 }
+    1
+}
+/// 逐次访问的 (word, opcode) 校验：位图 direct 半区的位给 DIRECT、interior 半区给 INTERIOR。
+///
+/// 位图把两张图的同位合并成一个 16 位字（低 8 位 direct、高 8 位 interior），所以只按位号
+/// 无法区分来源；opcode 若恒为 DIRECT，收集器会把 interior 字段当直接指针搬运。
+fn trace_bitmap_opcode_probe(cursor: uint, descriptor: uint, length: uint, payload: uint, payload_length: uint) uint {
+    trace_begin(cursor, uint(256))
+    if trace_open(cursor, descriptor, length) == 1 { return 1 }
+    let seen: uint = 0
+    let failure: uint = 0
+    let looping: uint = 1
+    while looping == 1 {
+        let status = trace_advance(cursor, descriptor, length, payload, payload_length)
+        if status == TRACE_VISIT {
+            let word = trace_last_word(cursor)
+            let op = trace_last_op(cursor)
+            // 期望序列：word 0 DIRECT(1)、word 4 INTERIOR(2)、word 9 DIRECT(1)。
+            // 期望值用查表法得到，避免嵌套分支赋值（运行期源码的已知缺陷面）。
+            let expected_word = probe_expect_word(seen)
+            let expected_op = probe_expect_op(seen)
+            if failure == 0 { failure = if word != expected_word { 2 + seen } else { if op != expected_op { 5 + seen } else { 0 } } } else { let _ = 0 }
+            seen = seen + 1
+        } else {
+            let _ = 0
+        }
+        if status == TRACE_COMPLETE { looping = 0 } else { let _ = 0 }
+        if status == TRACE_PENDING { return 5 } else { let _ = 0 }
+    }
+    if failure != 0 { return failure } else { let _ = 0 }
+    if seen != 3 { return 6 } else { let _ = 0 }
+    0
+}
+
+/// trace 解释器：固定 descriptor 上的访问序列、预算分段与终止/标记语义。
+///
+/// A. bitmap：direct 位 0/9 与 interior 位 4 ⇒ 访问 word 0、4、9（两图同号位指向同一 word）。
+/// B. program：DIRECT(1,2) + REPEAT(base=4,count=2,stride=3,[DIRECT(0,1)]) + SWITCH(tag=payload[0])
+///    ⇒ 访问 word 1、2、4、7、8。
+/// C. 预算每次只给一个单位 ⇒ 访问序列摘要与 B 完全相同，证明续跑不重扫前缀。
+/// D. ARENA_SLOTS 只标记语义、不产生访问。
+/// E. REPEAT_FIELD 从 payload 字段（宽度 1）读元素数 ⇒ 访问数随字段变化。
+pub fn trace_probe() uint {
+    let processor = probe_processor()
+    let cursor = trace_cursor(processor)
+    let descriptor = gc_alloc_slow(uint(61), uint(64), uint(16), uint(2))
+    let payload = gc_alloc_slow(uint(62), uint(128), uint(16), uint(2))
+    if descriptor == 0 || payload == 0 { return 76 }
+    let descriptor_address = descriptor
+    let payload_address = payload
+    let payload_length = uint(128)
+    // A. bitmap：20 个 pointer word ⇒ 每张位图 3 字节；头部是 kind(1) + 3 字节 padding + u32 字数。
+    let index: uint = 0
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit32(descriptor_address, index, uint(20))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(2))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(descriptor_address, index, uint(16))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    let length_a = trace_probe_emit(descriptor_address, index, uint(0))
+    let hash_a = trace_probe_run(cursor, descriptor_address, length_a, payload_address, payload_length, uint(256))
+    if trace_pointers(cursor) != 3 || hash_a != 133 || trace_complete(cursor) != 1 {
+        probe_fail(uint(70), trace_pointers(cursor), hash_a, trace_spent(cursor))
+        return 70
+    }
+    // A2. 同一张位图的访问必须带出各自的 opcode（direct 半区 vs interior 半区）。
+    let opcode_failure = trace_bitmap_opcode_probe(cursor, descriptor_address, length_a, payload_address, payload_length)
+    if opcode_failure != 0 {
+        probe_fail(uint(71), opcode_failure, length_a, 0)
+        return 71
+    }
+    // B. program：嵌套 REPEAT 与 SWITCH。
+    index = 0
+    index = trace_probe_emit(descriptor_address, index, uint(2))
+    index = trace_probe_emit32(descriptor_address, index, uint(40))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(2))
+    index = trace_probe_emit(descriptor_address, index, uint(3))
+    index = trace_probe_emit(descriptor_address, index, uint(4))
+    index = trace_probe_emit(descriptor_address, index, uint(2))
+    index = trace_probe_emit(descriptor_address, index, uint(3))
+    index = trace_probe_emit32(descriptor_address, index, uint(4))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(descriptor_address, index, uint(5))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    // case 记录：u64 tag（小端 5）+ u32 body 长度 + body；body 自带 END。
+    index = trace_probe_emit(descriptor_address, index, uint(5))
+    let tag_shift: uint = 0
+    while tag_shift < 56 {
+        index = trace_probe_emit(descriptor_address, index, uint(0))
+        tag_shift = tag_shift + 8
+    }
+    index = trace_probe_emit32(descriptor_address, index, uint(4))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(8))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit32(descriptor_address, index, uint(0))
+    let length_b = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(payload_address, uint(0), uint(5))
+    let hash_b = trace_probe_run(cursor, descriptor_address, length_b, payload_address, payload_length, uint(256))
+    let spent_b = trace_spent(cursor)
+    if trace_pointers(cursor) != 12 || hash_b != 27159491573629160 || trace_complete(cursor) != 1 {
+        probe_fail(uint(71), trace_pointers(cursor), hash_b, length_b)
+        return 71
+    }
+    // C. 每次只给一个单位：同一个 program 的访问序列与总工作量必须与 B 完全一致，
+    //    证明续跑从保存的游标继续、既不重扫前缀也不多消费工作单位。
+    let hash_c = trace_probe_run(cursor, descriptor_address, length_b, payload_address, payload_length, uint(1))
+    if trace_pointers(cursor) != 12 || hash_c != hash_b || trace_complete(cursor) != 1 {
+        probe_fail(uint(72), trace_pointers(cursor), hash_c, hash_b)
+        return 72
+    }
+    if trace_spent(cursor) != spent_b {
+        probe_fail(uint(73), trace_spent(cursor), spent_b, uint(0))
+        return 73
+    }
+    // D. ARENA_SLOTS：只标记语义。
+    index = 0
+    index = trace_probe_emit(descriptor_address, index, uint(2))
+    index = trace_probe_emit32(descriptor_address, index, uint(2))
+    index = trace_probe_emit(descriptor_address, index, uint(6))
+    let length_d = trace_probe_emit(descriptor_address, index, uint(0))
+    let hash_d = trace_probe_run(cursor, descriptor_address, length_d, payload_address, payload_length, uint(256))
+    if trace_pointers(cursor) != 0 || hash_d != 0 || trace_arena_slots(cursor) != 1 {
+        probe_fail(uint(74), trace_pointers(cursor), hash_d, trace_spent(cursor))
+        return 74
+    }
+    // E. REPEAT_FIELD：元素数从 payload 字段读（宽度 1）。
+    unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](payload_address + uint(8)), byte(3)) }
+    index = 0
+    index = trace_probe_emit(descriptor_address, index, uint(2))
+    index = trace_probe_emit32(descriptor_address, index, uint(14))
+    index = trace_probe_emit(descriptor_address, index, uint(4))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(descriptor_address, index, uint(8))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit32(descriptor_address, index, uint(4))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    index = trace_probe_emit(descriptor_address, index, uint(1))
+    index = trace_probe_emit(descriptor_address, index, uint(0))
+    let length_e = trace_probe_emit(descriptor_address, index, uint(0))
+    let hash_e = trace_probe_run(cursor, descriptor_address, length_e, payload_address, payload_length, uint(256))
+    if trace_pointers(cursor) != 3 || hash_e != 33 {
+        probe_fail(uint(75), trace_pointers(cursor), hash_e, length_e)
+        return 75
+    }
+    0
+}
+pub fn region_probe() uint {
+    let region = region_new(uint(1), uint(1), uint(4096))
+    if region_reset(region) != 0 { return 141 }
+    region_pin(region)
+    if region_reset(region) != 2 { return 142 }
+    if region_unpin(region) != 0 { return 143 }
+    if region_promote(region) != 0 || region_exports(region) == 0 { return 144 }
+    if region_reset(region) != 2 { return 145 }
+    if region_transfer(region, uint(2), uint(2)) != 0 { return 146 }
+    if region_transfer(region, uint(3), uint(3)) == 0 { return 147 }
+    0
+}
+
+pub fn edge_probe() uint {
+    let state = edge_new(uint(7))
+    if edge_append(state, uint(1), uint(2), uint(0), int(1)) != 0 { return 151 }
+    if edge_append(state, uint(1), uint(3), uint(0), int(1)) == 0 { return 152 }
+    if edge_pending(state) != 1 || edge_overflow(state) != 0 { return 153 }
+    if edge_consume(state, uint(0)) != 0 { return 154 }
+    if edge_consume(state, uint(0)) == 0 { return 155 }
+    0
+}
+
+pub fn candidate_probe() uint {
+    let state = candidate_new(uint(9))
+    if candidate_add(state, uint(4), uint(3), uint(0), uint(0), uint(0)) != 0 { return 161 }
+    if candidate_mark_live(state, uint(0)) != 0 { return 162 }
+    if candidate_release(state, uint(0)) == 0 { return 163 }
+    if candidate_unmark_live(state, uint(0)) != 0 { return 165 }
+    if candidate_next(state) == 0 { return 164 }
+    if candidate_release(state, uint(0)) != 0 { return 166 }
+    0
+}
+
+pub fn mark_ticket_probe() uint {
+    let state = mark_ticket_new(uint(11))
+    let first = mark_ticket_issue(state, uint(1))
+    let second = mark_ticket_issue(state, uint(2))
+    if first == 0 || second == 0 || first == second { return 171 }
+    if mark_ticket_consume(state, first) != 0 { return 172 }
+    if mark_ticket_consume(state, first) == 0 { return 173 }
+    if mark_ticket_return(state, first) != 0 { return 174 }
+    if mark_ticket_return(state, first) == 0 { return 175 }
+    if mark_ticket_consumed(state) != 1 { return 176 }
+    0
+}
+
+pub fn pacing_probe() uint {
+    let state = pacing_new()
+    pacing_charge(state, uint(100))
+    pacing_complete(state, uint(64))
+    if pacing_debt(state) != 36 { return 181 }
+    if pacing_pressure(state, uint(85), uint(100)) == 0 { return 182 }
+    if pacing_force_once(state) != 0 || pacing_force_once(state) == 0 { return 183 }
+    if pacing_pressure(state, uint(70), uint(100)) != 0 { return 184 }
+    if pacing_episode(state) != 1 { return 185 }
+    0
+}
+
+pub fn block_return_probe() uint {
+    let state = return_new(uint(4))
+    if return_publish(state, uint(1), uint(3), uint(0), uint(0), uint(4)) != 0 { return 191 }
+    if return_consume(state, uint(1), uint(3), uint(3)) == 0 { return 192 }
+    if return_consume(state, uint(1), uint(3), uint(4)) != 0 { return 193 }
+    if return_state(state, uint(1)) != RETURN_OWNED_FREE { return 194 }
+    if return_consume(state, uint(1), uint(3), uint(4)) == 0 { return 195 }
+    if return_consumed(state) != 1 { return 196 }
+    0
+}
+
+fn probe_root_state() uint {
+    let state = gc_alloc_slow(uint(201), uint(4096), uint(16), uint(2))
+    probe_store_word(state, uint(0))
+    probe_store_word(state + 8, uint(0))
+    state
+}
+
+pub fn major_probe() uint {
+    let processor = probe_processor()
+    let request = processor + PROCESSOR_GC_REQUEST_OFFSET
+    probe_store_word(request, GC_REQUEST_PRESSURE)
+    let before = gc_major_cycles(processor)
+    let status = unsafe { std.runtime.gc_enter(request) }
+    if status != 0 { return 201 }
+    if gc_major_cycles(processor) <= before { return 202 }
+    0
+}
+
+pub fn compressed_probe() uint {
+    let processor = probe_processor()
+    let before = gc_minor_cycles(processor)
+    let sentinel = probe_reader(80)
+    let value = sentinel(3)
+    let request = processor + PROCESSOR_GC_REQUEST_OFFSET
+    probe_store_word(request, GC_REQUEST_PRESSURE)
+    if unsafe { std.runtime.gc_enter(request) } != 0 { return 211 }
+    if gc_minor_cycles(processor) <= before { return 212 }
+    if sentinel(3) != value { return 213 }
+    0
+}
+
+pub fn corrupt_probe() uint {
+    let trace = trace_cursor(probe_processor())
+    trace_begin(trace, uint(0))
+    if trace_spent(trace) != 0 { return 221 }
+    0
+}
+
+pub fn oom_probe() uint {
+    let state = probe_root_state()
+    probe_store_word(state + 8, uint(1025))
+    if probe_word(state + 8) != uint(1025) { return 231 }
+    let _ = gc_reclaimed_bytes(probe_processor())
+    0
+}
+pub fn raw_not_root_probe() uint {
+    let buffer = gc_alloc_slow(uint(241), uint(256), uint(16), uint(2))
+    probe_store_word(buffer, uint(0))
+    probe_store_word(buffer + 8, uint(1))
+    let record = buffer + ROOT_SCAN_HEADER_BYTES
+    probe_store_word(record, uint(0))
+    probe_store_word(record + 8, ROOT_NO_ENTRY)
+    probe_store_word(record + 16, uint(0))
+    if probe_word(record + 8) != ROOT_NO_ENTRY { return 241 }
+    if probe_word(record + 16) != 0 { return 242 }
+    0
+}
+
+pub fn static_probe() uint {
+    if gc_roots_section() == 0 || gc_roots_base() == 0 { return 251 }
+    if gc_roots_length() < uint(72) { return 252 }
+    0
+}
+
+pub fn shared_capture_probe() uint {
+    let processor = probe_processor()
+    let baseline = dynamic_root_count(processor)
+    let result = select_probe()
+    if dynamic_root_count(processor) != baseline { return 261 }
+    result
+}
+
+pub fn minor_probe() uint {
+    let processor = probe_processor()
+    let cycles_before = gc_minor_cycles(processor)
+    let sentinel = probe_reader(40)
+    let before: [uint; 2] = unsafe { std.mem.transmute[fn(int) int, [uint; 2]](sentinel) }
+    if sentinel(2) != 40 * 512 + 2 { return 130 }
+    let index = 0
+    while index < 600 {
+        let churn = probe_reader(index)
+        if churn(1) != index * 512 + 1 { return 131 }
+        _ = churn
+        index = index + 1
+    }
+    if gc_minor_cycles(processor) <= cycles_before { return 132 }
+    if gc_reclaimed_bytes(processor) == 0 { return 133 }
+    if sentinel(2) != 40 * 512 + 2 { return 134 }
+    let after: [uint; 2] = unsafe { std.mem.transmute[fn(int) int, [uint; 2]](sentinel) }
+    if after[1] == before[1] { return 135 }
+    0
+}
+
+/// 走**真实 mutator 路径**的镜像内回收探针：靠真实分配压力触发 `gc_enter`，
+/// 而不是直接调用 `gc_collect_minor`。
+///
+/// 这样探针与生产路径同源：根快照来自完整帧链（`gc_initiator_frame` + `gc_walk_roots`），
+/// 收集器在 system stack 上运行，`gc_enter` 负责保存/恢复上下文。直接调用
+/// `gc_collect_minor` 会从 mutator 帧里重置 nursery，破坏该帧的延续，因此不采用。
+///
+/// 断言链：周期计数确实增长（真的发生了回收）→ 回收字节非零 → 循环前建立的哨兵闭包
+/// 在 600 次分配（远超 2 MiB arena）之后仍能读出它捕获的数组。
+pub fn pressure_probe() uint {
+    let processor = probe_processor()
+    let cycles_before = gc_minor_cycles(processor)
+    let sentinel = probe_reader(40)
+    if sentinel(2) != 40 * 512 + 2 { return 130 }
+    let index = 0
+    while index < 600 {
+        let churn = probe_reader(index)
+        if churn(1) != index * 512 + 1 { return 131 }
+        _ = churn
+        index = index + 1
+    }
+    if gc_minor_cycles(processor) <= cycles_before { return 132 }
+    if gc_reclaimed_bytes(processor) == 0 { return 133 }
+    // 预 GC 可达对象必须被搬走并回写：这是环境 descriptor 按受管指针字登记的端到端证据。
+    if sentinel(2) != 40 * 512 + 2 { return 134 }
+    0
+}
+
+/// 对捕获的数组求和：512 项循环不可常量折叠，因此数组不会被优化掉，
+/// 每次调用真实占用 4 KiB nursery，600 次就超过 2 MiB arena 从而触发回收。
+fn probe_total(block: [int; 512]) int {
+    let sum = 0
+    let index = 0
+    while index < 512 {
+        sum = sum + block[index]
+        index = index + 1
+    }
+    sum
+}
+
+/// 捕获一个 512 项 int 数组的闭包：数组必须物化到 managed storage 才能活过父 frame。
+fn probe_reader(n: int) fn(int) int {
+    let payload: [int; 512] = [n; 512]
+    fn(index: int) int = probe_total(payload) + index
+}
+
+
+pub fn probe_all() uint {
+    let atomic_failure = atomic_probes()
+    if atomic_failure != 0 { return atomic_failure }
+    let allocation_failure = allocation_probe()
+    if allocation_failure != 0 { return allocation_failure }
+    let routing_failure = alloc_routing_probe()
+    if routing_failure != 0 { return routing_failure }
+    let barrier_failure = barrier_probe()
+    if barrier_failure != 0 { return barrier_failure }
+    let move_failure = move_probe()
+    if move_failure != 0 { return move_failure }
+    let refill_failure = refill_probe()
+    if refill_failure != 0 { return refill_failure }
+    let large_failure = large_mapping_probe()
+    if large_failure != 0 { return large_failure }
+    let root_failure = root_map_probe()
+    if root_failure != 0 { return root_failure }
+    let select_failure = select_probe()
+    if select_failure != 0 { return select_failure }
+    let trace_failure = trace_probe()
+    if trace_failure != 0 { return trace_failure }
+    let minor_failure = minor_probe()
+    if minor_failure != 0 { return minor_failure }
+    pressure_probe()
+}
+

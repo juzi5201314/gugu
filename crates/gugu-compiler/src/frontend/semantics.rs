@@ -21,19 +21,19 @@ pub(crate) use hir::identity::Identities;
 pub(crate) use model::{CallableId, DefRef, Model, Ty, substitute};
 pub(crate) use output::{CheckedBody, CheckedSemantics, MemoryOperation};
 pub(crate) use traits::TraitRef;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod callable_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod comptime_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod opaque_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod runtime_tests;
 #[cfg(test)]
 mod tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod trait_tests;
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 mod unsafe_tests;
 
 use super::{ParsedModule, names::NameResolution};
@@ -58,8 +58,9 @@ pub(crate) fn check(
     cfg: &super::cfg::CfgContext,
     entry: Option<model::CallableId>,
     queries: &crate::query::QueryEngine,
+    runtime_paths: &std::collections::BTreeSet<String>,
 ) -> Result<CheckedFrontend, Vec<Diagnostic>> {
-    let model = model::Model::new(modules, names)?;
+    let model = model::Model::new(modules, names, runtime_paths)?;
     let (early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries)?;
     let registry_identity = early.registry_identity();
     let (checked, dependency) =

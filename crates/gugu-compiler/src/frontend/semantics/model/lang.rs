@@ -72,16 +72,31 @@ pub(crate) enum RuntimeMachineIntrinsic {
     CurrentSlot,
     ProcessExit,
     ReportWrite,
+    /// GC 控制原语：除规范路径外还要求调用方来自 runtime 注入源。
+    GcConfig,
+    /// GC 入口：只由 runtime 注入源调用；保存发起者上下文、切 system stack、
+    /// 调用 dispatcher 后再恢复，返回值是 dispatcher 的状态字。
+    GcEnter,
+    AtomicLoadAcquire,
+    AtomicStoreRelease,
+    AtomicFetchOrAcqRel,
+    AtomicFetchAndAcqRel,
 }
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub(crate) const ALL: [Self; 5] = [
+    pub(crate) const ALL: [Self; 11] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
         Self::ProcessExit,
         Self::ReportWrite,
+        Self::GcConfig,
+        Self::GcEnter,
+        Self::AtomicLoadAcquire,
+        Self::AtomicStoreRelease,
+        Self::AtomicFetchOrAcqRel,
+        Self::AtomicFetchAndAcqRel,
     ];
 
     /// 按规范路径识别 runtime 机器原语；导入别名与再导出保留同一身份。
@@ -98,6 +113,12 @@ impl RuntimeMachineIntrinsic {
             Self::CurrentSlot => "current_slot",
             Self::ProcessExit => "process_exit",
             Self::ReportWrite => "report_write",
+            Self::GcConfig => "gc_config",
+            Self::GcEnter => "gc_enter",
+            Self::AtomicLoadAcquire => "atomic_load_acquire",
+            Self::AtomicStoreRelease => "atomic_store_release",
+            Self::AtomicFetchOrAcqRel => "atomic_fetch_or_acq_rel",
+            Self::AtomicFetchAndAcqRel => "atomic_fetch_and_acq_rel",
         }
     }
 
@@ -109,12 +130,38 @@ impl RuntimeMachineIntrinsic {
             Self::CurrentSlot => 0,
             Self::ProcessExit => 1,
             Self::ReportWrite => 3,
+            Self::GcConfig => 0,
+            Self::GcEnter => 1,
+            Self::AtomicLoadAcquire => 1,
+            Self::AtomicStoreRelease | Self::AtomicFetchOrAcqRel | Self::AtomicFetchAndAcqRel => 2,
         }
     }
 
     /// 判断该原语的返回类型是否是机器字 `uint`；其余不返回值。
     pub(crate) const fn yields_word(self) -> bool {
-        matches!(self, Self::CurrentSlot | Self::ReportWrite)
+        matches!(
+            self,
+            Self::CurrentSlot | Self::ReportWrite | Self::GcConfig | Self::GcEnter
+        )
+    }
+
+    /// 该原语是否只接受由 `RuntimeResources` 以 `Runtime` 角色注入的源身份。
+    ///
+    /// GC 控制原语按注入身份授权，而不只是规范路径：普通源码即使写 `unsafe` 也不能调用；
+    /// 其余机器原语保持既有契约（按规范路径识别）。
+    pub(crate) const fn requires_runtime_source(self) -> bool {
+        matches!(self, Self::GcConfig | Self::GcEnter) || self.is_atomic()
+    }
+
+    /// 这四个原语直接降到 Atomic，不生成 runtime 调用或 safepoint。
+    pub(crate) const fn is_atomic(self) -> bool {
+        matches!(
+            self,
+            Self::AtomicLoadAcquire
+                | Self::AtomicStoreRelease
+                | Self::AtomicFetchOrAcqRel
+                | Self::AtomicFetchAndAcqRel
+        )
     }
 }
 

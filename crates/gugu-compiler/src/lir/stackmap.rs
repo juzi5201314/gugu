@@ -18,21 +18,36 @@
 //! - `ForeignBridge` 与 `DirtyCpuBridge` → `ForeignBridge(3)`（dirty 置 bit3），
 //!   全零掩码；
 //! - `SafepointPoll` → `PollResume(1)`，全零掩码；
-//! - 纯分配操作与屏障操作无独立记录，只进入函数级 `alloc_sites` 与
-//!   `barrier_sites` 计数，供后端核对 `entry_stack_check` 与调用点记录；
+//! - 纯分配操作无独立记录，只进入函数级 `alloc_sites` 计数，供后端核对
+//!   `entry_stack_check` 与调用点记录；**裸**屏障（`GcWriteBarrier` /
+//!   `SharedFieldBarrier`，无 permit）在 lowering 里落成 runtime 调用，slow path 会
+//!   shade，因此**必须**留下 `CallReturn(0)` 记录，同时仍然计数进 `barrier_sites`；
+//!   带 permit 的预留屏障由 `BarrierReserve` 额度保证不进入 slow path、且只出现在
+//!   no-safepoint region 内，与不产出指令的 `BarrierReserve` 标记一样只计数；
 //! - `ResolveSharedHandle` 与 `ForwardSharedHandle` 调用 → `CallReturn(0)`；
 //!   `DecodeCompressedRef` 为纯解码，无记录。
 
 use super::body::{
     Body, CallTarget, Provenance, RuntimeCall, SafepointKind, Type, ValueId, id, range,
 };
+use super::liveness::{LiveSet, LiveSlots, LiveValues};
+use super::pass::graph::Graph;
 use super::{invalid, verify};
 use crate::frontend::gir::body::CallKind;
 use crate::frontend::hir;
 use serde::{Deserialize, Serialize};
 
 /// 逻辑栈图世界的 schema 版本；推导规则变化必须递增。
-pub(crate) const STACKMAP_SCHEMA: u32 = 3;
+///
+/// 4：裸屏障（无 permit）的 runtime 调用成为强制 `CallReturn` 记录（v3 只计数、不产记录），
+/// 预留屏障仍只计数。
+/// 5：`CallReturn` 额外登记本帧在该点仍活跃的槽根字——被调方执行期间调用方帧仍按该 map
+/// 扫描，借出地址的槽（`&value`）没有活跃值、只有活跃地址，槽根表是它唯一的登记来源。
+/// 6：分配 op（`GcAlloc`/`RegionAlloc`/`PromoteManaged`）的返回 PC 成为强制 `CallReturn`
+/// 记录——同一站点发射的 slow call 可以启动回收，必须能在该返回 PC 上按本帧 map 扫根。
+/// 7：根枚举改为 SSA 逆向活跃（`LiveValues`）：跨点存活但并非本指令操作数、也不在 LIR
+/// 栈槽的受管值同样登记 `Value` 根——分配器把它们强制落 spill slot，而槽的分类只能来自这里。
+pub(crate) const STACKMAP_SCHEMA: u32 = 7;
 
 /// 规范 safepoint kind 编号：与栈图契约的 kind 数值一一对应。
 pub(crate) const KIND_CALL_RETURN: u8 = 0;
@@ -294,6 +309,9 @@ fn derive_body(
 ) -> Result<Vec<LogicalSafepoint>, crate::Diagnostic> {
     let mut safepoints = Vec::new();
     let region_members = region_membership(body);
+    let graph = Graph::new(body)?;
+    let live = LiveSlots::new(body, &graph);
+    let values = LiveValues::new(body, &graph);
     // 入口 `StackCheck` → `MorestackEntry`：寄存器映射源自 ABI 参数表。
     for index in range(&body.blocks[body.entry.index()].instructions) {
         if matches!(body.instructions[index].op, super::body::Op::StackCheck) {
@@ -352,14 +370,15 @@ fn derive_body(
                     super::body::Op::Call(call) | super::body::Op::ForeignCall(call) => {
                         call.poll_free_leaf || matches!(call.kind, CallKind::ForeignLeaf { .. })
                     }
-                    _ => true,
+                    op => !barrier_slow_path(op) && !allocation_slow_path(op),
                 };
                 if leaf {
                     continue;
                 }
                 kind = SafepointKind::CallReturn;
             }
-            let Some(mapped) = map_instruction(body, block_id, index, kind, &region_members)?
+            let Some(mapped) =
+                map_instruction(body, block_id, index, kind, &region_members, &live, &values)?
             else {
                 continue;
             };
@@ -393,13 +412,39 @@ fn derive_body(
                 kind = SafepointKind::CallReturn;
             }
             let args = &body.operands[range(arguments)];
-            let Some(mapped) = map_invoke(body, block_id, call, kind, args)? else {
+            let Some(mapped) = map_invoke(body, block_id, call, kind, args, &live, &values)? else {
                 continue;
             };
             safepoints.push(mapped);
         }
     }
     Ok(safepoints)
+}
+
+/// 屏障 op 是否可能进入 slow path（因此返回 PC 必须是强制安全点）。
+///
+/// 裸屏障没有 permit：额度不足时 slow path 会 shade，返回 PC 必须能找到根。带 permit 的
+/// `*Reserved` 变体由 `BarrierReserve` 预留的额度保证不进入 slow path，并且只出现在
+/// no-safepoint region 内，因此不留记录；不产出指令的 `BarrierReserve` 标记同上。
+fn barrier_slow_path(op: &super::body::Op) -> bool {
+    matches!(
+        op,
+        super::body::Op::GcWriteBarrier { .. } | super::body::Op::SharedFieldBarrier { .. }
+    )
+}
+
+/// 分配 op 的慢路径是否可能启动回收。
+///
+/// bump 快路径本身不回收，但同一站点发射的 slow call 会：额度不足时分配器可以启动一次
+/// 回收，并在该返回 PC 上按本帧的 map 扫描根。因此分配的返回 PC 同样是强制安全点
+/// （计划第 2.4 条），与裸屏障同理。
+fn allocation_slow_path(op: &super::body::Op) -> bool {
+    matches!(
+        op,
+        super::body::Op::GcAlloc { .. }
+            | super::body::Op::RegionAlloc { .. }
+            | super::body::Op::PromoteManaged { .. }
+    )
 }
 
 /// 把一条指令级安全点映射为逻辑记录；返回 `None` 表示该点无记录。
@@ -409,8 +454,11 @@ fn map_instruction(
     index: usize,
     kind: SafepointKind,
     region_members: &[bool],
+    live: &LiveSlots,
+    values: &LiveValues,
 ) -> Result<Option<LogicalSafepoint>, crate::Diagnostic> {
     let instruction = &body.instructions[index];
+    let after = values.after(block, local_position(body, block, index));
     match kind {
         SafepointKind::StackCheck => Ok(None),
         SafepointKind::Poll => {
@@ -424,7 +472,7 @@ fn map_instruction(
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
                 block: block.0,
                 instruction: id(index),
-                roots: collect_live(body, block, index)?,
+                roots: collect_live(body, block, index, live, &after)?,
             };
             safepoint.roots.sort();
             Ok(Some(safepoint))
@@ -437,7 +485,7 @@ fn map_instruction(
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
                 block: block.0,
                 instruction: id(index),
-                roots: collect_live(body, block, index)?,
+                roots: collect_live(body, block, index, live, &after)?,
             };
             safepoint.roots.sort();
             Ok(Some(safepoint))
@@ -463,7 +511,7 @@ fn map_instruction(
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
                 block: block.0,
                 instruction: id(index),
-                roots: collect_live(body, block, index)?,
+                roots: collect_live(body, block, index, live, &after)?,
             };
             safepoint.roots.sort();
             Ok(Some(safepoint))
@@ -471,12 +519,17 @@ fn map_instruction(
         SafepointKind::CallReturn => {
             let roots = match &instruction.op {
                 super::body::Op::Call(_) | super::body::Op::ForeignCall(_) => {
-                    collect_call(body, block, index)?
+                    collect_call(body, block, index, live, &after)?
                 }
                 super::body::Op::PlatformCall(_)
                 | super::body::Op::RuntimeMachineCall(_)
                 | super::body::Op::ResolveSharedHandle
-                | super::body::Op::ForwardSharedHandle => collect_live(body, block, index)?,
+                | super::body::Op::ForwardSharedHandle => {
+                    collect_live(body, block, index, live, &after)?
+                }
+                op if barrier_slow_path(op) || allocation_slow_path(op) => {
+                    collect_live(body, block, index, live, &after)?
+                }
                 _ => return Err(invalid("CallReturn 记录缺少调用操作")),
             };
             let mut safepoint = LogicalSafepoint {
@@ -499,7 +552,7 @@ fn map_instruction(
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
                 block: block.0,
                 instruction: id(index),
-                roots: collect_live(body, block, index)?,
+                roots: collect_live(body, block, index, live, &after)?,
             };
             if safepoint.dirty {
                 safepoint.flags |= 0b1000;
@@ -517,11 +570,15 @@ fn map_invoke(
     call: &super::body::Call,
     kind: SafepointKind,
     arguments: &[ValueId],
+    live: &LiveSlots,
+    values: &LiveValues,
 ) -> Result<Option<LogicalSafepoint>, crate::Diagnostic> {
     // `poll_free_leaf` 与 `ForeignLeaf` 不建立记录。
     if call.poll_free_leaf || matches!(call.kind, CallKind::ForeignLeaf { .. }) {
         return Ok(None);
     }
+    let instructions = &body.blocks[block.index()].instructions;
+    let local_end = instructions.end - instructions.start;
     let (kind_number, flags, dirty) = match kind {
         SafepointKind::CallReturn | SafepointKind::Allocation => (KIND_CALL_RETURN, 0b011, false),
         SafepointKind::Suspend | SafepointKind::Select => (KIND_SUSPEND_RESUME, 0b011, false),
@@ -539,23 +596,58 @@ fn map_invoke(
         position: position_of(body, block, None),
         block: block.0,
         instruction: body.blocks[block.index()].instructions.end,
-        roots: collect_invoke(body, call, arguments)?,
+        roots: collect_invoke(
+            body,
+            call,
+            arguments,
+            &live.at(block, local_end),
+            &values.after(block, local_end),
+        )?,
     };
     safepoint.roots.sort();
     Ok(Some(safepoint))
 }
 
-/// 收集挂起与 poll 点的跨点活跃根：当前实现以栈槽根表与指令值根为来源。
+/// 块内相对位置：与 `LiveSlots` 事件、`LiveValues` 使用事件共用同一坐标。
+fn local_position(body: &Body, block: super::body::BlockId, index: usize) -> u32 {
+    id(index) - body.blocks[block.index()].instructions.start
+}
+
+/// 收集挂起与 poll 点的跨点活跃根：栈槽根表、指令操作数值根与跨点活跃值根三类来源。
 ///
 /// 跨挂起点活跃的用户受管或栈指针在 lowering 时已物化到栈槽；槽根表是其权威
-/// 登记。值根补充指令操作数中的活跃受管值，保证枚举完备。
+/// 登记。值根覆盖指令操作数与跨点存活但本指令并不使用的受管值：分配器把跨调用、
+/// 分配、挂起与 bridge 点位的受管指针强制落 spill slot，而槽的分类只能由值根提供。
 fn collect_live(
     body: &Body,
     block: super::body::BlockId,
     index: usize,
+    live: &LiveSlots,
+    after: &LiveSet,
 ) -> Result<LogicalRoots, crate::Diagnostic> {
     let mut roots = LogicalRoots::default();
+    let alive = live.at(block, local_position(body, block, index));
+    push_live_slot_roots(body, &alive, &mut roots)?;
+    collect_operands(body, index, &mut roots)?;
+    push_live_value_roots(body, after, &mut roots)?;
+    Ok(roots)
+}
+
+/// 登记该点仍活跃的槽根字。
+///
+/// 调用点同样需要这份登记：被调方执行期间调用方帧仍在栈上、仍会被收集器按调用返回 PC 的
+/// map 扫描，而借出地址的槽（`&value`）在调用点没有对应的活跃值，只有槽根表能覆盖它。
+/// 尚未写入的根字由逐根初始化字节在下游门控，登记本身不会引入假根。
+fn push_live_slot_roots(
+    body: &Body,
+    alive: &LiveSet,
+    roots: &mut LogicalRoots,
+) -> Result<(), crate::Diagnostic> {
     for (slot_index, slot) in body.stack_slots.iter().enumerate() {
+        // 只登记该点仍活跃的槽：死槽里的指针不是根，登记它会让对象被无谓保留。
+        if !alive.is_live(slot_index) {
+            continue;
+        }
         for (offset, provenance) in &slot.roots {
             let Some(kind) = provenance.root_kind() else {
                 continue;
@@ -575,8 +667,7 @@ fn collect_live(
             );
         }
     }
-    collect_operands(body, block, index, &mut roots)?;
-    Ok(roots)
+    Ok(())
 }
 
 /// 收集调用点的传出根：调用实参中的受管或栈指针字与按值聚合副本展开。
@@ -584,8 +675,10 @@ fn collect_live(
 /// sret 目标是调用方未初始化字节，不得加入根集合。
 fn collect_call(
     body: &Body,
-    _block: super::body::BlockId,
+    block: super::body::BlockId,
     index: usize,
+    live: &LiveSlots,
+    after: &LiveSet,
 ) -> Result<LogicalRoots, crate::Diagnostic> {
     let instruction = &body.instructions[index];
     let (super::body::Op::Call(call) | super::body::Op::ForeignCall(call)) = &instruction.op else {
@@ -595,7 +688,8 @@ fn collect_call(
         return Err(invalid("叶调用不得建立调用返回记录"));
     }
     let arguments = &body.operands[range(&body.instructions[index].arguments)];
-    collect_invoke(body, call, arguments)
+    let alive = live.at(block, local_position(body, block, index));
+    collect_invoke(body, call, arguments, &alive, after)
 }
 
 /// 收集终结符或指令调用的传出根。
@@ -603,6 +697,8 @@ fn collect_invoke(
     body: &Body,
     call: &super::body::Call,
     arguments: &[ValueId],
+    alive: &LiveSet,
+    after: &LiveSet,
 ) -> Result<LogicalRoots, crate::Diagnostic> {
     let mut roots = LogicalRoots::default();
     let sret_parameter = call.sret.map(|(index, _, _)| index);
@@ -621,6 +717,11 @@ fn collect_invoke(
             },
         );
     }
+    // 调用返回期间调用方帧仍会被扫描：调用点的 map 必须包含本帧活跃的槽根字，
+    // 否则借出地址的槽（没有活跃值、只有活跃地址）在被调方执行期间完全没有根覆盖。
+    push_live_slot_roots(body, alive, &mut roots)?;
+    // 跨调用仍存活的受管值同样必须在场：被调方可能分配并触发回收。
+    push_live_value_roots(body, after, &mut roots)?;
     // 按值聚合副本只展开本帧栈槽上已有 provenance 的根字。位字不是根。
     for (parameter, _, bytes) in &call.by_value {
         if Some(*parameter) == sret_parameter {
@@ -629,7 +730,7 @@ fn collect_invoke(
         if *bytes == 0 || *bytes > MAX_ROOT_OFFSET {
             return Err(invalid("按值聚合副本字节数越界"));
         }
-        push_copy_roots(body, arguments, *parameter, *bytes, &mut roots)?;
+        push_copy_roots(body, arguments, *parameter, *bytes, alive, &mut roots)?;
     }
     Ok(roots)
 }
@@ -642,6 +743,7 @@ fn push_copy_roots(
     arguments: &[ValueId],
     parameter: u32,
     bytes: u64,
+    alive: &LiveSet,
     roots: &mut LogicalRoots,
 ) -> Result<(), crate::Diagnostic> {
     let Some(address) = arguments.get(parameter as usize).copied() else {
@@ -650,6 +752,10 @@ fn push_copy_roots(
     let Some(slot) = copy_slot(body, address) else {
         return Ok(());
     };
+    // 副本槽已死时其中的字不是根：副本的作用域结束后收集器不必再更新它。
+    if !alive.is_live(slot as usize) {
+        return Ok(());
+    }
     let data = body
         .stack_slots
         .get(slot as usize)
@@ -689,7 +795,6 @@ fn copy_slot(body: &Body, value: ValueId) -> Option<u32> {
 
 fn collect_operands(
     body: &Body,
-    block: super::body::BlockId,
     index: usize,
     roots: &mut LogicalRoots,
 ) -> Result<(), crate::Diagnostic> {
@@ -697,16 +802,25 @@ fn collect_operands(
     for value in body.args(&instruction.arguments) {
         push_value(body, *value, roots)?;
     }
-    // 同 block 内该点之前定义的活跃受管值一并登记，保证跨点活跃不遗漏。
-    let start = body.blocks[block.index()].instructions.start;
-    for at in start..id(index) {
-        let at = usize::try_from(at).expect("指令编号适配宿主");
-        if at >= body.instructions.len() {
-            break;
+    Ok(())
+}
+
+/// 登记跨点存活但本指令不使用的受管指针值根。
+///
+/// 这类值在物理层的落点由分配器决定：跨调用、分配、挂起与 bridge 点位的受管指针必须
+/// 落 spill slot，而该槽是否被扫描只能来自这里登记的逻辑值根（`place_roots` 逐根解析
+/// 出它在该点的物理位置）。只登记跨点**之后**仍活跃的值：安全点执行期间的结果尚未写入，
+/// 把点位自身的定义登记成根会伪造根。
+fn push_live_value_roots(
+    body: &Body,
+    live: &LiveSet,
+    roots: &mut LogicalRoots,
+) -> Result<(), crate::Diagnostic> {
+    for (index, _) in body.values.iter().enumerate() {
+        if !live.is_live(index) {
+            continue;
         }
-        for value in body.values[range(&body.instructions[at].results)].iter() {
-            let _ = value;
-        }
+        push_value(body, ValueId(id(index)), roots)?;
     }
     Ok(())
 }

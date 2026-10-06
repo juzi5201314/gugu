@@ -1,0 +1,76 @@
+/* SCC candidate 的有界游标。候选只有在 edge 已收敛、pin/lease 为零且 live 标记撤回后才可释放。 */
+
+use std.runtime.heap.{heap_store_word, heap_word}
+
+pub const CANDIDATE_STATE_BYTES: uint = 1024
+pub const CANDIDATE_CAPACITY: uint = 64
+pub const CANDIDATE_RECORD_BYTES: uint = 32
+pub const CANDIDATE_COUNT_OFFSET: uint = 0
+pub const CANDIDATE_CYCLE_OFFSET: uint = 8
+pub const CANDIDATE_CURSOR_OFFSET: uint = 16
+pub const CANDIDATE_RECORDS_OFFSET: uint = 64
+
+pub const CANDIDATE_PENDING: uint = 0
+pub const CANDIDATE_LIVE: uint = 1
+pub const CANDIDATE_RELEASED: uint = 2
+
+pub fn candidate_new(cycle: uint) uint {
+    let state = unsafe { std.platform.reserve_aligned(CANDIDATE_STATE_BYTES, uint(4096)) }
+    if state == 0 { unsafe { std.runtime.process_exit(2) } }
+    let bytes = CandidateExtent { base: state, bytes: CANDIDATE_STATE_BYTES }
+    if unsafe { std.platform.commit(std.mem.transmute[*CandidateExtent, uint](std.ptr.addr_of(bytes))) } != 0 {
+        unsafe { std.runtime.process_exit(2) }
+    }
+    let at = state
+    while at < state + CANDIDATE_STATE_BYTES {
+        heap_store_word(at, 0)
+        at = at + 8
+    }
+    heap_store_word(state + CANDIDATE_CYCLE_OFFSET, cycle)
+    state
+}
+
+#[repr(C)]
+struct CandidateExtent { base: uint, bytes: uint }
+
+pub fn candidate_add(state: uint, block: uint, generation: uint, edge_count: uint, pins: uint, leases: uint) uint {
+    if state == 0 || heap_word(state + CANDIDATE_COUNT_OFFSET) >= CANDIDATE_CAPACITY { return 1 }
+    let count = heap_word(state + CANDIDATE_COUNT_OFFSET)
+    let record = state + CANDIDATE_RECORDS_OFFSET + count * CANDIDATE_RECORD_BYTES
+    heap_store_word(record, block)
+    heap_store_word(record + 8, generation)
+    heap_store_word(record + 16, edge_count)
+    heap_store_word(record + 24, pins | leases << 32)
+    heap_store_word(state + CANDIDATE_COUNT_OFFSET, count + 1)
+    0
+}
+
+pub fn candidate_mark_live(state: uint, index: uint) uint {
+    if state == 0 || index >= heap_word(state + CANDIDATE_COUNT_OFFSET) { return 1 }
+    heap_store_word(state + CANDIDATE_RECORDS_OFFSET + index * CANDIDATE_RECORD_BYTES + 16, CANDIDATE_LIVE)
+    0
+}
+
+pub fn candidate_release(state: uint, index: uint) uint {
+    if state == 0 || index >= heap_word(state + CANDIDATE_COUNT_OFFSET) { return 1 }
+    let record = state + CANDIDATE_RECORDS_OFFSET + index * CANDIDATE_RECORD_BYTES
+    let edges = heap_word(record + 16)
+    let pin_leases = heap_word(record + 24)
+    if edges != 0 || pin_leases != 0 { return 2 }
+    heap_store_word(record + 16, CANDIDATE_RELEASED)
+    0
+}
+
+pub fn candidate_unmark_live(state: uint, index: uint) uint {
+    if state == 0 || index >= heap_word(state + CANDIDATE_COUNT_OFFSET) { return 1 }
+    heap_store_word(state + CANDIDATE_RECORDS_OFFSET + index * CANDIDATE_RECORD_BYTES + 16, 0)
+    0
+}
+
+pub fn candidate_next(state: uint) uint {
+    if state == 0 { return 0 }
+    let cursor = heap_word(state + CANDIDATE_CURSOR_OFFSET)
+    if cursor >= heap_word(state + CANDIDATE_COUNT_OFFSET) { return 0 }
+    heap_store_word(state + CANDIDATE_CURSOR_OFFSET, cursor + 1)
+    state + CANDIDATE_RECORDS_OFFSET + cursor * CANDIDATE_RECORD_BYTES
+}

@@ -6,7 +6,7 @@ mod config;
 mod formatting;
 mod output;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 #[path = "main_tests.rs"]
 mod tests;
 

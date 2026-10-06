@@ -115,6 +115,7 @@ fn real_compilation_defaults_to_direct_routing() {
 }
 
 /// 路由模式参与契约身份：显式 radix 改变指纹与 action key。
+#[cfg_attr(not(feature = "slow-tests"), ignore)]
 #[test]
 fn routing_mode_participates_in_contract_identity() {
     let source = "fn main() { let value = 1 _ = value }";

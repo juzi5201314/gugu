@@ -10,7 +10,7 @@ use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) const INSTANCE_SCHEMA: u32 = 5;
+pub(crate) const INSTANCE_SCHEMA: u32 = 6;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -18,6 +18,11 @@ pub(crate) enum CallSite {
     Expression(u32),
     Dispatch(u32),
     Initializer(u32),
+    /// 模块级 `static`/`const` 的读点守卫调用：编号是定义下标。
+    ///
+    /// 模块静态的初始化器实例不依赖任何 owner 语句，按定义唯一绑定；读点守卫用这个 site
+    /// 解析实例，与局部 static 的 `Initializer(语句)` 分开，避免把定义级调用伪装成语句级。
+    StaticInit(u32),
 }
 
 /// Ty 与 DefId 只存在于当前输入快照的 query 工作载荷，不参与稳定编码。
@@ -299,17 +304,21 @@ fn collect_owner(
     for (index, statement) in owner.statements.iter().enumerate() {
         if let hir::StatementKind::Static { definition, .. } = statement.kind {
             let arguments = nested_arguments(context, definition, &entry.bindings);
-            add_callee(
-                context,
-                interner,
-                definition,
-                &arguments,
-                entry.key.const_arguments.clone(),
-                Some(CallSite::Initializer(
-                    u32::try_from(index).expect("StmtId 不超过 u32"),
-                )),
-                edges,
-            )?;
+            // 两个 site 指向同一个初始化器实例：语句 site 给声明点的守卫，定义 site 给其它读点。
+            for site in [
+                CallSite::Initializer(u32::try_from(index).expect("StmtId 不超过 u32")),
+                CallSite::StaticInit(definition.0),
+            ] {
+                add_callee(
+                    context,
+                    interner,
+                    definition,
+                    &arguments,
+                    entry.key.const_arguments.clone(),
+                    Some(site),
+                    edges,
+                )?;
+            }
         }
     }
     Ok(())
@@ -522,7 +531,15 @@ fn collect_expression(
                 hir::DefinitionKind::Constant | hir::DefinitionKind::Static
             ) =>
         {
-            add_callee(context, interner, *definition, &[], Vec::new(), None, edges)?;
+            add_callee(
+                context,
+                interner,
+                *definition,
+                &[],
+                Vec::new(),
+                Some(CallSite::StaticInit(definition.0)),
+                edges,
+            )?;
         }
         hir::ExprKind::Intrinsic {
             operation, types, ..

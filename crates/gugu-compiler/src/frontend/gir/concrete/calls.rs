@@ -43,12 +43,15 @@ pub(super) fn bind(
             let signature = layouts.context.module.definitions[index(instance.definition)]
                 .signature
                 .ok_or_else(|| invalid("调用目标缺少函数签名"))?;
-            (
-                layouts
-                    .context
-                    .type_at(signature, &instance.substitutions)?,
-                None,
-            )
+            let ty = layouts
+                .context
+                .type_at(signature, &instance.substitutions)?;
+            // 静态初始化器不是函数定义：它的正文是静态值的构造式，调用形状就是「无参、返回该值」。
+            let ty = match callee {
+                Callee::StaticInit(_) => Ty::Function(Vec::new(), Box::new(ty)),
+                _ => ty,
+            };
+            (ty, None)
         } else if let Callee::Dispatch(dispatch) | Callee::Dynamic(dispatch) = callee {
             let owner = layouts
                 .context

@@ -1,0 +1,178 @@
+/* 镜像内 GC 协调层的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
+ * 本模块只保存编译器生成的只读配置记录视图与启动期校验，不参与分配快路：
+ * 分配、屏障与回收算法分别落在 heap.gg / barrier.gg / mark.gg。
+ * 记录里只出现版本、schema 号、几何尺寸与预算计数，禁止出现 managed pointer 或地址。
+ */
+
+#[repr(C, align(8))]
+pub struct GcImageConfig {
+    pub revision: uint,
+    pub byte_len: uint,
+    pub local_heap_schema: uint,
+    pub barrier_schema: uint,
+    pub mark_schema: uint,
+    pub pacing_schema: uint,
+    pub trigger_revision: uint,
+    pub mark_profile_revision: uint,
+    pub pacing_profile_revision: uint,
+    pub arena_bytes: uint,
+    pub block_bytes: uint,
+    pub line_bytes: uint,
+    pub granule_bytes: uint,
+    pub object_header_bytes: uint,
+    pub tlab_span_blocks: uint,
+    pub minor_trigger_bytes: uint,
+    pub tenure_age: uint,
+    pub max_age: uint,
+    pub large_align_limit: uint,
+    pub card_bytes: uint,
+    pub card_entries: uint,
+    pub stamp_entries: uint,
+    pub edge_entries: uint,
+    pub shade_slots_per_write: uint,
+    pub card_marks_per_write: uint,
+    pub edge_deltas_per_write: uint,
+    pub mark_mailbox_shards: uint,
+    pub min_growth_budget: uint,
+    pub assist_threshold: uint,
+    pub assist_quantum: uint,
+    pub mark_cost_per_byte: uint,
+    pub gc_cpu_fraction: uint,
+    pub gc_cpu_window_cost: uint,
+    pub remark_cost_budget: uint,
+    pub evacuation_pause_bytes: uint,
+    pub evacuation_pause_roots: uint,
+    pub evacuation_pause_fields: uint,
+    pub pressure_poll_bytes: uint,
+    pub owner_drain_items: uint,
+    pub owner_drain_bytes: uint,
+    pub owner_drain_interval_bytes: uint,
+    pub pressure_enter_ratio: uint,
+    pub pressure_clear_ratio: uint,
+}
+
+/// 启动期校验：只读记录的 `byte_len` 字段（偏移 8），比对编译器写出的记录长度。
+/// 不整体读入记录，避免在启动路径上制造活跃大值；字段偏移由 compiler 侧 `words()` 顺序保证。
+/// 返回 0 表示与预期一致，非 0 是启动期 fatal 的输入。
+#[used]
+pub fn gc_config_check(word: uint) uint {
+    unsafe {
+        let length = std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](word + 8))
+        let revision = std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](word))
+        if revision != 1 || length != 344 {
+            return 1
+        }
+        0
+    }
+}
+
+/// 镜像配置里分配器需要的字段偏移：由 `GcImageConfig` 的字段序决定（第 n 个字段在 n*8）。
+/// 与结构体字段序的对应关系由 heap_tests 的字段序测试逐项校验。
+pub const GC_CONFIG_ARENA_BYTES_OFFSET: uint = 72
+pub const GC_CONFIG_BLOCK_BYTES_OFFSET: uint = 80
+pub const GC_CONFIG_LINE_BYTES_OFFSET: uint = 88
+pub const GC_CONFIG_GRANULE_BYTES_OFFSET: uint = 96
+pub const GC_CONFIG_OBJECT_HEADER_BYTES_OFFSET: uint = 104
+pub const GC_CONFIG_CARD_BYTES_OFFSET: uint = 152
+pub const GC_CONFIG_CARD_ENTRIES_OFFSET: uint = 160
+pub const GC_CONFIG_STAMP_ENTRIES_OFFSET: uint = 168
+pub const GC_CONFIG_EDGE_ENTRIES_OFFSET: uint = 176
+pub const GC_CONFIG_SHADE_SLOTS_PER_WRITE_OFFSET: uint = 184
+pub const GC_CONFIG_CARD_MARKS_PER_WRITE_OFFSET: uint = 192
+pub const GC_CONFIG_EDGE_DELTAS_PER_WRITE_OFFSET: uint = 200
+pub const GC_CONFIG_LARGE_ALIGN_LIMIT_OFFSET: uint = 144
+pub const GC_CONFIG_TLAB_SPAN_BLOCKS_OFFSET: uint = 112
+pub const GC_CONFIG_MINOR_TRIGGER_BYTES_OFFSET: uint = 120
+pub const GC_CONFIG_TENURE_AGE_OFFSET: uint = 128
+pub const GC_CONFIG_MAX_AGE_OFFSET: uint = 136
+
+/// 读取镜像配置记录的一个机器字；地址来自 `std.runtime.gc_config()`。
+pub fn gc_config_word(address: uint, offset: uint) uint {
+    unsafe { std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](address + offset)) }
+}
+
+/// 分配器的 arena 几何：以标量暴露给其它 runtime 源，避免跨源传递配置 record。
+pub fn gc_config_arena_bytes(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_ARENA_BYTES_OFFSET)
+}
+
+pub fn gc_config_block_bytes(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_BLOCK_BYTES_OFFSET)
+}
+
+pub fn gc_config_line_bytes(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_LINE_BYTES_OFFSET)
+}
+
+pub fn gc_config_granule_bytes(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_GRANULE_BYTES_OFFSET)
+}
+
+pub fn gc_config_object_header_bytes(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_OBJECT_HEADER_BYTES_OFFSET)
+}
+
+pub fn gc_config_large_align_limit(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_LARGE_ALIGN_LIMIT_OFFSET)
+}
+
+/// TLAB span 的块数：收集器据此决定一次 minor 后重新开放的块范围。
+pub fn gc_config_tlab_span_blocks(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_TLAB_SPAN_BLOCKS_OFFSET)
+}
+
+/// nursery 触发字节数：分配方在同一块内累计达到它才需要进入回收。
+pub fn gc_config_minor_trigger_bytes(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_MINOR_TRIGGER_BYTES_OFFSET)
+}
+
+/// 晋升到 old 的年龄阈值。
+pub fn gc_config_tenure_age(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_TENURE_AGE_OFFSET)
+}
+
+/// 对象年龄上限。
+pub fn gc_config_max_age(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_MAX_AGE_OFFSET)
+}
+
+/// 处理器页里 GC 请求记录的槽位；与 `processor.rs` 的 `PROCESSOR_GC_REQUEST_OFFSET` 一致。
+pub const PROCESSOR_GC_REQUEST_OFFSET: uint = 3616
+/// 请求记录首字的 kind 字段：0 分配、1 poll、2 major、3 promote、4 pressure。
+pub const GC_REQUEST_KIND_OFFSET: uint = 0
+pub const GC_REQUEST_ALLOC: uint = 0
+pub const GC_REQUEST_MAJOR: uint = 2
+pub const GC_REQUEST_PRESSURE: uint = 4
+pub fn gc_config_card_bytes(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_CARD_BYTES_OFFSET)
+}
+
+/// card buffer 容量：一次 flush 前的 distinct 卡片上界。
+pub fn gc_config_card_entries(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_CARD_ENTRIES_OFFSET)
+}
+
+/// 直接映射 stamp 表的容量；冲突只淘汰索引，不丢已登记键。
+pub fn gc_config_stamp_entries(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_STAMP_ENTRIES_OFFSET)
+}
+
+/// edge staging 容量：跨 block 的删除/插入记录在这里等待标记期消费。
+pub fn gc_config_edge_entries(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_EDGE_ENTRIES_OFFSET)
+}
+
+/// 每次屏障写的 shade 上界（删除 + 插入）。
+pub fn gc_config_shade_slots_per_write(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_SHADE_SLOTS_PER_WRITE_OFFSET)
+}
+
+/// 每次屏障写的 card 键上界。
+pub fn gc_config_card_marks_per_write(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_CARD_MARKS_PER_WRITE_OFFSET)
+}
+
+/// 每次屏障写的 edge delta 上界。
+pub fn gc_config_edge_deltas_per_write(address: uint) uint {
+    gc_config_word(address, GC_CONFIG_EDGE_DELTAS_PER_WRITE_OFFSET)
+}

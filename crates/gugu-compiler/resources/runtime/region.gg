@@ -1,0 +1,104 @@
+/* LocalHeap 私有 region 的所有权、导出与一次性 transfer。所有记录位于 raw 页，
+ * 不把 region 控制状态伪装成 managed 对象，也不在 reset 前忽略 export/pin/lease 门禁。
+ */
+
+use std.runtime.heap.{heap_fail, heap_store_word, heap_word}
+
+#[repr(C)]
+struct RegionExtent { base: uint, bytes: uint }
+
+pub const REGION_OWNER_OFFSET: uint = 0
+pub const REGION_GENERATION_OFFSET: uint = 8
+pub const REGION_EXPORT_OFFSET: uint = 16
+pub const REGION_PIN_OFFSET: uint = 24
+pub const REGION_LEASE_OFFSET: uint = 32
+pub const REGION_STATE_OFFSET: uint = 40
+pub const REGION_TRANSFER_EPOCH_OFFSET: uint = 48
+pub const REGION_BYTES_OFFSET: uint = 56
+pub const REGION_STATE_OPEN: uint = 0
+pub const REGION_STATE_RESET: uint = 1
+pub const REGION_STATE_TRANSFERRED: uint = 2
+pub const REGION_PAGE_BYTES: uint = 4096
+
+fn region_zero(base: uint, bytes: uint) {
+    let at = base
+    while at < base + bytes {
+        heap_store_word(at, 0)
+        at = at + 8
+    }
+}
+
+pub fn region_new(owner: uint, generation: uint, bytes: uint) uint {
+    let size = if bytes < REGION_PAGE_BYTES { REGION_PAGE_BYTES } else { bytes }
+    let base = unsafe { std.platform.reserve_aligned(size, REGION_PAGE_BYTES) }
+    if base == 0 { heap_fail() }
+    let extent = RegionExtent { base: base, bytes: size }
+    if unsafe { std.platform.commit(std.mem.transmute[*RegionExtent, uint](std.ptr.addr_of(extent))) } != 0 {
+        heap_fail()
+    }
+    region_zero(base, size)
+    heap_store_word(base + REGION_OWNER_OFFSET, owner)
+    heap_store_word(base + REGION_GENERATION_OFFSET, generation)
+    heap_store_word(base + REGION_BYTES_OFFSET, size)
+    base
+}
+
+pub fn region_export(region: uint) {
+    if region == 0 { heap_fail() }
+    heap_store_word(region + REGION_EXPORT_OFFSET, heap_word(region + REGION_EXPORT_OFFSET) + 1)
+}
+
+pub fn region_pin(region: uint) {
+    if region == 0 { heap_fail() }
+    heap_store_word(region + REGION_PIN_OFFSET, heap_word(region + REGION_PIN_OFFSET) + 1)
+}
+
+pub fn region_unpin(region: uint) uint {
+    let count = heap_word(region + REGION_PIN_OFFSET)
+    if count == 0 { return 1 }
+    heap_store_word(region + REGION_PIN_OFFSET, count - 1)
+    0
+}
+
+pub fn region_lease(region: uint) {
+    if region == 0 { heap_fail() }
+    heap_store_word(region + REGION_LEASE_OFFSET, heap_word(region + REGION_LEASE_OFFSET) + 1)
+}
+
+pub fn region_release_lease(region: uint) uint {
+    let count = heap_word(region + REGION_LEASE_OFFSET)
+    if count == 0 { return 1 }
+    heap_store_word(region + REGION_LEASE_OFFSET, count - 1)
+    0
+}
+
+pub fn region_reset(region: uint) uint {
+    if region == 0 { return 1 }
+    if heap_word(region + REGION_EXPORT_OFFSET) != 0 || heap_word(region + REGION_PIN_OFFSET) != 0 || heap_word(region + REGION_LEASE_OFFSET) != 0 {
+        return 2
+    }
+    if heap_word(region + REGION_STATE_OFFSET) == REGION_STATE_TRANSFERRED { return 3 }
+    heap_store_word(region + REGION_STATE_OFFSET, REGION_STATE_RESET)
+    heap_store_word(region + REGION_GENERATION_OFFSET, heap_word(region + REGION_GENERATION_OFFSET) + 1)
+    heap_store_word(region + REGION_TRANSFER_EPOCH_OFFSET, heap_word(region + REGION_TRANSFER_EPOCH_OFFSET) + 1)
+    0
+}
+
+pub fn region_promote(region: uint) uint {
+    if region == 0 || heap_word(region + REGION_STATE_OFFSET) == REGION_STATE_TRANSFERRED { return 1 }
+    heap_store_word(region + REGION_EXPORT_OFFSET, heap_word(region + REGION_EXPORT_OFFSET) + 1)
+    0
+}
+
+pub fn region_transfer(region: uint, owner: uint, generation: uint) uint {
+    if region == 0 || heap_word(region + REGION_STATE_OFFSET) == REGION_STATE_TRANSFERRED { return 1 }
+    if heap_word(region + REGION_PIN_OFFSET) != 0 || heap_word(region + REGION_LEASE_OFFSET) != 0 { return 2 }
+    heap_store_word(region + REGION_OWNER_OFFSET, owner)
+    heap_store_word(region + REGION_GENERATION_OFFSET, generation)
+    heap_store_word(region + REGION_STATE_OFFSET, REGION_STATE_TRANSFERRED)
+    heap_store_word(region + REGION_TRANSFER_EPOCH_OFFSET, heap_word(region + REGION_TRANSFER_EPOCH_OFFSET) + 1)
+    0
+}
+
+pub fn region_generation(region: uint) uint = heap_word(region + REGION_GENERATION_OFFSET)
+pub fn region_exports(region: uint) uint = heap_word(region + REGION_EXPORT_OFFSET)

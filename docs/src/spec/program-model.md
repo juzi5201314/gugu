@@ -25,6 +25,10 @@ gugu build main.gg
 
 可达性收集、单态化、源码宏展开、抽象分析、布局、栈图与管理动作的内部顺序见[单态化与编译缓存](../internals/monomorphization-cache.md)、[comptime 与抽象分析](../internals/comptime-analysis.md)、[GIR/LIR](../internals/gir-lir.md)和[GC 元数据](../internals/gc-metadata.md)，不在本章重复定义。
 
+编译器可以复用同一分析输入的不可变索引和已验证中间结果，或合并重复的内部计算；
+这些优化不得改变可达集合、诊断、类型与布局身份，或让尚未证明安全的运行时检查被省略。
+测试构建也遵守同一语义，不得用跳过生产阶段必需的校验来代替等价的编译优化。
+
 ## 支持目标
 
 本版本钉死必须支持的两个目标；目标名、目标键、数据模型和平台 ABI 的完整登记见[平台与 ABI 参考](platform-abi.md)：

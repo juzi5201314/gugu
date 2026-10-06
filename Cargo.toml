@@ -9,3 +9,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.9"
 unicode-width = "0.2"
+
+[profile.test]
+# 测试只验证正确性，不需要 O3；O3 让 528 个测试编译暴增至 400s+
+opt-level = 0
+debug = 1
+debug-assertions = true
+overflow-checks = true

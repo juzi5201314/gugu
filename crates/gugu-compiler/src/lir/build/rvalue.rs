@@ -230,13 +230,18 @@ impl Builder<'_> {
                     GirAtomic::Load => AtomicOp::Load,
                     GirAtomic::Store => AtomicOp::Store,
                     GirAtomic::Rmw => AtomicOp::Exchange,
+                    GirAtomic::FetchOr => AtomicOp::Or,
+                    GirAtomic::FetchAnd => AtomicOp::And,
                     GirAtomic::CompareExchange => AtomicOp::CompareExchange,
                     GirAtomic::Fence => AtomicOp::Fence,
                 };
-                let align = results
-                    .first()
-                    .and_then(|(kind, _)| kind.ty.bytes())
-                    .unwrap_or(8);
+                let width = if *op == GirAtomic::Store {
+                    args.get(1)
+                        .map(|value| self.body.values[value.index()].kind)
+                } else {
+                    results.first().map(|(kind, _)| *kind)
+                };
+                let align = width.and_then(|kind| kind.ty.bytes()).unwrap_or(1);
                 let values = self.emit(
                     Op::Atomic {
                         op: operation,
@@ -423,6 +428,10 @@ impl Builder<'_> {
             Rvalue::DynErase { operand, .. } => {
                 let value = self.operand(operand)?;
                 let source_ty = value.ty();
+                // 函数擦除保留实例代码身份与已有环境，不能交给只收到类型描述符的 dyn 装箱入口。
+                if matches!(self.kind(ty), TypeKind::Function { .. }) {
+                    return self.erase_function(value, source_ty, ty);
+                }
                 let source = self.computed_address(value)?;
                 let destination = self.temporary(ty)?;
                 let descriptor = self.descriptor(source_ty);
@@ -509,6 +518,15 @@ impl Builder<'_> {
             let value = self.operand(operand)?;
             let pointer = self.offset(address, offset);
             self.store_computed(pointer, field_ty, value)?;
+            // 构造点已知变体：只有自身携带根的字段才置位。同一偏移在别的变体里是标量时不会被
+            // 标成指针——这正是 `slot.roots` 并集超集需要被逐根位图收窄的地方。
+            let carries = !self.roots(field_ty).is_empty();
+            if carries
+                && let Some(slot) = self.value_slot(address)
+                && let Some(layout) = self.layout(field_ty).layout
+            {
+                self.root_init_cover(slot, offset, layout.size);
+            }
         }
         Ok(())
     }

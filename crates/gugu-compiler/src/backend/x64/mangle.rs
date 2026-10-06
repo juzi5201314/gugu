@@ -20,9 +20,13 @@ pub(crate) fn mangle_instance(instance: &[u8; 32]) -> String {
 pub(crate) fn mangle_symbol(symbol: &Symbol) -> String {
     match symbol {
         Symbol::Instance(key) => mangle("fn", key),
+        Symbol::FunctionAdapter {
+            target,
+            has_environment,
+        } => mangle_instance(&crate::lir::function_adapter::key(target, *has_environment)),
         Symbol::External { name, .. } => name.clone(),
         Symbol::Global { key, .. } => mangle("static", key),
-        Symbol::TypeDescriptor(key) | Symbol::TypeId(key) => mangle("const", key),
+        Symbol::TypeDescriptor(key) => mangle("const", key),
         Symbol::TypeRecords => mangle("const", &hash_domain("gugu-type-records-v1", b"records")),
         Symbol::TypeNames => mangle("const", &hash_domain("gugu-type-names-v1", b"names")),
         Symbol::Vtable {

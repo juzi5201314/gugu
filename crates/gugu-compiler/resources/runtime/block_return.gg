@@ -1,0 +1,81 @@
+/* owner-directed block return ledger。四类 unit 共用 identity/generation/epoch 门禁，
+ * pin、lease 与 grace 任一未清零都不能进入 decommit。
+ */
+
+use std.runtime.heap.{heap_store_word, heap_word}
+
+pub const RETURN_STATE_BYTES: uint = 4096
+pub const RETURN_UNIT_BYTES: uint = 64
+pub const RETURN_CAPACITY: uint = 48
+pub const RETURN_COUNT_OFFSET: uint = 0
+pub const RETURN_CONSUMED_OFFSET: uint = 8
+pub const RETURN_GRACE_OFFSET: uint = 16
+pub const RETURN_RECORDS_OFFSET: uint = 64
+pub const RETURN_PENDING: uint = 0
+pub const RETURN_OWNED_FREE: uint = 1
+pub const RETURN_RELEASED: uint = 2
+
+#[repr(C)]
+struct ReturnExtent { base: uint, bytes: uint }
+
+pub fn return_new(epoch: uint) uint {
+    let state = unsafe { std.platform.reserve_aligned(RETURN_STATE_BYTES, uint(4096)) }
+    if state == 0 { unsafe { std.runtime.process_exit(2) } }
+    let extent = ReturnExtent { base: state, bytes: RETURN_STATE_BYTES }
+    if unsafe { std.platform.commit(std.mem.transmute[*ReturnExtent, uint](std.ptr.addr_of(extent))) } != 0 {
+        unsafe { std.runtime.process_exit(2) }
+    }
+    let at = state
+    while at < state + RETURN_STATE_BYTES {
+        heap_store_word(at, 0)
+        at = at + 8
+    }
+    heap_store_word(state + RETURN_GRACE_OFFSET, epoch)
+    state
+}
+
+pub fn return_publish(state: uint, unit: uint, generation: uint, pins: uint, leases: uint, grace: uint) uint {
+    if state == 0 || heap_word(state + RETURN_COUNT_OFFSET) >= RETURN_CAPACITY { return 1 }
+    let count = heap_word(state + RETURN_COUNT_OFFSET)
+    let record = state + RETURN_RECORDS_OFFSET + count * RETURN_UNIT_BYTES
+    heap_store_word(record, unit)
+    heap_store_word(record + 8, generation)
+    heap_store_word(record + 16, pins)
+    heap_store_word(record + 24, leases)
+    heap_store_word(record + 32, grace)
+    heap_store_word(record + 40, RETURN_PENDING)
+    heap_store_word(state + RETURN_COUNT_OFFSET, count + 1)
+    0
+}
+
+pub fn return_consume(state: uint, unit: uint, generation: uint, epoch: uint) uint {
+    if state == 0 { return 1 }
+    let count = heap_word(state + RETURN_COUNT_OFFSET)
+    let index: uint = 0
+    while index < count {
+        let record = state + RETURN_RECORDS_OFFSET + index * RETURN_UNIT_BYTES
+        if heap_word(record) == unit && heap_word(record + 8) == generation {
+            if heap_word(record + 40) != RETURN_PENDING { return 3 }
+            if heap_word(record + 16) != 0 || heap_word(record + 24) != 0 { return 4 }
+            if epoch < heap_word(record + 32) { return 5 }
+            heap_store_word(record + 40, RETURN_OWNED_FREE)
+            heap_store_word(state + RETURN_CONSUMED_OFFSET, heap_word(state + RETURN_CONSUMED_OFFSET) + 1)
+            return 0
+        }
+        index = index + 1
+    }
+    2
+}
+
+pub fn return_state(state: uint, unit: uint) uint {
+    let count = heap_word(state + RETURN_COUNT_OFFSET)
+    let index: uint = 0
+    while index < count {
+        let record = state + RETURN_RECORDS_OFFSET + index * RETURN_UNIT_BYTES
+        if heap_word(record) == unit { return heap_word(record + 40) }
+        index = index + 1
+    }
+    RETURN_RELEASED
+}
+
+pub fn return_consumed(state: uint) uint = heap_word(state + RETURN_CONSUMED_OFFSET)

@@ -27,27 +27,38 @@ pub(crate) fn analyze_scc(
     callees: &dyn Fn(usize) -> FunctionSummary,
 ) -> SccSummaryV1 {
     let mut summaries = vec![FunctionSummary::default(); component.len()];
+    let dependents = summary_dependents(members, component);
+    let mut results: Vec<Option<interpret::BodyResult>> = std::iter::repeat_with(|| None)
+        .take(component.len())
+        .collect();
     let mut budget_exhausted = false;
     let mut converged = false;
     for iteration in 0..policy.max_scc_iterations {
         let mut changed = false;
         for (position, &index) in component.iter().enumerate() {
-            let result = analyze_member(
-                module,
-                gir,
-                &members[index],
-                component,
-                &summaries,
-                policy,
-                callees,
-            );
+            let result = results[position].get_or_insert_with(|| {
+                analyze_member(
+                    module,
+                    gir,
+                    &members[index],
+                    component,
+                    &summaries,
+                    policy,
+                    callees,
+                )
+            });
             budget_exhausted |= result.budget_exhausted;
-            let mut next = result.summary;
+            let mut next = result.summary.clone();
             if iteration != 0 {
                 next.join_with(&summaries[position]);
             }
-            changed |= next != summaries[position];
-            summaries[position] = next;
+            if next != summaries[position] {
+                changed = true;
+                summaries[position] = next;
+                for &caller in &dependents[position] {
+                    results[caller] = None;
+                }
+            }
         }
         if !changed {
             converged = true;
@@ -59,12 +70,22 @@ pub(crate) fn analyze_scc(
     }
     budget_exhausted |= !converged;
     if budget_exhausted {
-        summaries.fill(FunctionSummary::conservative());
+        let conservative = FunctionSummary::conservative();
+        for (position, summary) in summaries.iter_mut().enumerate() {
+            if *summary != conservative {
+                *summary = conservative.clone();
+                for &caller in &dependents[position] {
+                    results[caller] = None;
+                }
+            }
+        }
     }
     let mut proofs = Vec::new();
-    for &index in component {
+    for (position, &index) in component.iter().enumerate() {
         let member = &members[index];
-        let result = analyze_member(module, gir, member, component, &summaries, policy, callees);
+        let result = results[position].take().unwrap_or_else(|| {
+            analyze_member(module, gir, member, component, &summaries, policy, callees)
+        });
         for (expression, kind, status) in result.proofs {
             proofs.push(ProofFact {
                 key: RuntimeCheckKey {
@@ -94,6 +115,23 @@ pub(crate) fn analyze_scc(
         proofs,
         budget_exhausted,
     }
+}
+
+fn summary_dependents(members: &[SccMember], component: &[usize]) -> Vec<Vec<usize>> {
+    // SCC 成员位置是连续下标；外部摘要在本轮求解期间固定，不需要失效传播。
+    debug_assert!(component.windows(2).all(|pair| pair[0] < pair[1]));
+    let mut dependents = vec![Vec::new(); component.len()];
+    for (caller, &index) in component.iter().enumerate() {
+        for &(_, target) in &members[index].calls {
+            if let Ok(callee) = component.binary_search(&target) {
+                dependents[callee].push(caller);
+            }
+        }
+    }
+    for callers in &mut dependents {
+        callers.dedup();
+    }
+    dependents
 }
 
 fn analyze_member(

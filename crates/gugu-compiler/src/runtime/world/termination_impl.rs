@@ -186,9 +186,6 @@ impl RawWorld {
         match config {
             Ok(config) => {
                 self.rt0 = Some(Rt0Process::new(snapshot, config, lifecycle, boot));
-                // 启动配置里的 growth target 与 soft limit 必须立刻进入 pacing 平面，
-                // 否则 limit 触发、forced cycle 与 OOM 规则都不生效。
-                self.apply_startup_pacing()?;
                 let main = self.create_coroutine(0, main_entry, config.stack_max())?;
                 self.enter_coroutine(main)?;
                 self.rt0_mut()?.main_coroutine = Some(main);
@@ -391,15 +388,8 @@ impl RawWorld {
             .map_err(RawInvariant::new)
     }
 
-    /// 登记一项外部工作；`wait_foreign` 为真时终止要等待它完成。
-    ///
-    /// 进入 `ForeignBridge` 是第三个 barrier 触发点：本 processor 的 card 键必须在穿透
-    /// native 边界之前离开账本，否则 native 侧可能长时间不再回到 Gugu 代码。
-    pub(crate) fn enter_foreign(&mut self, owner: u32) -> Result<(), RawInvariant> {
-        self.flush_all_barriers(
-            owner,
-            super::super::barrier::BarrierFlushReason::ForeignBridge,
-        )?;
+    /// 登记外部工作；GC stop/flush 由镜像 runtime 的 coordinator 完成。
+    pub(crate) fn enter_foreign(&mut self, _owner: u32) -> Result<(), RawInvariant> {
         let rt0 = self.rt0_mut()?;
         rt0.foreign_work += 1;
         Ok(())

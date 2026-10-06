@@ -24,7 +24,7 @@ GIR 和 LIR 分别以一个函数、闭包、初始化器或编译器生成 glue
 - `signature`：规范化参数、返回类型和 effect；
 - `source_scopes`：可恢复到 HIR span 的内联作用域树；
 - `flags`：是否可 panic、可 suspend、可分配、含 unsafe 或属于 runtime glue；
-- `revision`：IR schema版本，当前 GIR 为 4、LIR 为 5，concrete GIR schema 为 1。
+- `revision`：IR schema版本，当前 GIR 为 4、LIR 为 6，concrete GIR schema 为 1。
 
 成功产物不允许错误类型、未解析定义、未物化的早期 comptime 值或悬空 arena ID。GIR 可以保存已经验证的 `LateConstRef`，但它必须指向当前闭世界成功的 late 结果表，不表示延迟执行用户代码；进入 LIR 前必须物化为标量常量或明确的类型 metadata relocation。每个改写 pass 必须在调试构建中运行局部 verifier；跨阶段边界必须运行完整 verifier。
 
@@ -74,7 +74,7 @@ GirLocal {
 - `Downcast(VariantId)`；
 - `OpaqueCast(TyId)`。
 
-投影序列存入 body 级连续 pool，`Place` 只保存 base 和 range。一个 place 中所有会执行用户代码或 panic 的下标表达式必须先求值到 local；投影本身不能隐藏调用。方法接收者按派发记录的解引用次数在原槽上追加 `Deref`，引用形参再对这个投影做 `Ref`；不能先复制被引用聚合再借用副本。
+投影序列存入 body 级连续 pool，`Place` 只保存 base 和 range。一个 place 中所有会执行用户代码或 panic 的下标表达式必须先求值到 local；投影本身不能隐藏调用。方法接收者按派发记录的解引用次数在原槽上追加 `Deref`，引用形参再对这个投影做 `Ref`；不能先复制被引用聚合再借用副本。`std.ptr.addr_of` 的实参是位点：降成 `RawAddress` 时必须保留该位点的投射链，不能像按值实参那样先求值成临时量再取址——那样拿到的是副本的地址，写穿与对象内偏移都不再成立。
 
 `Operand` 固定为 `Copy(Place)`、`MoveInternal(Place)`、`Constant(ConstId)`、
 `LateConstRef(LateConstKey)` 和 `Function(MonoCandidate)`。`MoveInternal` 只表示编译器已经
@@ -147,7 +147,7 @@ terminator 固定为：
 - `Suspend { reason, resume, cancelled, safepoint }`；
 - `SelectCommit { cases, ready, suspend, safepoint }`。
 
-`Panic.location` 固定为原始 panic 表达式位置，包括编译器生成的检查失败与 channel send 取消；它不从 block source 推断。LIR lowering 使用 `SourceMap` 将该位置转为只读常量路径、1-based 行号和列号，通过 `RuntimeCall::Panic` 的显式 ABI lanes 传入镜像 runtime；常量内不含指针，因此复用普通 `Symbol::Data` relocation。`BuildGenericGir` 当前 schema 为 6，GIR revision 为 4，LIR build schema 为 5。
+`Panic.location` 固定为原始 panic 表达式位置，包括编译器生成的检查失败与 channel send 取消；它不从 block source 推断。LIR lowering 使用 `SourceMap` 将该位置转为只读常量路径、1-based 行号和列号，通过 `RuntimeCall::Panic` 的显式 ABI lanes 传入镜像 runtime；常量内不含指针，因此复用普通 `Symbol::Data` relocation。`BuildGenericGir` 当前 schema 为 6，GIR revision 为 4，LIR build schema 为 6。
 
 编译器生成的 panic payload 固定为 `string`，即使源码 owner 没有显式引用该类型。HIR primitive type table 必须包含 `string`，具体 GIR 在该 owner 中为消息字面量物化对应类型和布局；不能把缺失的 owner-local 引用降为 `unit`，因为那会使 `RuntimeCall::Panic` 缺少消息 ABI lanes，并破坏 runtime glue 签名校验。冻结类型宇宙对含 panic 检查、panic 效果或 suspend 操作的 owner 登记相同类型键。
 
@@ -265,6 +265,8 @@ LirBody {
 `BarrierPermitData { region: NoSafepointRegionId, max_shades: u32, max_card_marks: u32 }` 是稠密的 compile-time证明：`BarrierReserve { permit }` 在 region外保证 processor barrier buffer至少剩余 `max_shades` 个 shade slot与 `max_card_marks` 个 distinct card 键额度，匹配的 `GcWriteBarrierReserved { permit }` 只消费该额度。结构 verifier 按 region 窗口重算静态消费上界并要求 permit 额度与之一致：每处 `GcWriteBarrier | GcWriteBarrierReserved` 消费两个 shade slot，每处首次出现的不同写入地址消费一个 card-mark slot。permit不进入 SSA value、register allocation、stack map或机器 ABI。
 
 `ValueData` 保存一个定义位置、一个 `LirType` 和 GC provenance。使用链在构造后生成紧凑的 offset/count 表；优化 pass 更新定义/操作数后统一重建，不维护每个 value 的堆分配链表。
+
+常量同样必须在机器执行顺序上先定义后使用；不能因其无副作用而豁免块内支配检查。优化 pass 在入口暂存的新常量由 `Editor::finish` 统一移到入口 `StackCheck` 之后、其它计算之前，既保持 pass 内 `InstRef` 稳定，也避免覆盖尚未落位的 ABI 入参。原指令身份保持不变，槽寿命与逐根初始化事件按原始锚点重映射。固定优化策略的 pipeline revision 为 2，旧策略缓存不得复用。
 
 ### 类型与 provenance
 

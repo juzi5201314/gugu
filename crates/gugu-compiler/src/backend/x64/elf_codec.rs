@@ -3,15 +3,18 @@
 use super::{DT_NEEDED, DT_NULL, DT_STRSZ, DT_STRTAB, LinkRequest, ObjectSymbol, put_u64};
 use std::collections::BTreeMap;
 
-/// rt0：从 auxv 取 `AT_PHDR`，加上参数块里的链接期 phdr 虚址得到 bias，
-/// 再按 `.data.rel.ro` 的相对重定位表回填，封闭 RELRO，调用入口并 `exit`。
-pub(super) fn rt0_bytes(params_disp: i32) -> Vec<u8> {
+/// rt0：从初始栈定位 envp，再从 auxv 取 `AT_PHDR`，加上参数块里的链接期 phdr 虚址得到 bias，
+/// 按 `.data.rel.ro` 的相对重定位表回填，封闭 RELRO，调用入口并 `exit`。envp 写入载荷的
+/// `boot_environment` 字段时保持 native 地址，不参与 image bias。
+pub(crate) fn rt0_bytes(params_disp: i32) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&[0x48, 0x8d, 0x1d]);
     out.extend_from_slice(&params_disp.to_le_bytes());
     out.extend_from_slice(&[0x48, 0x89, 0xe6]);
     out.extend_from_slice(&[0x48, 0x8b, 0x0e]);
     out.extend_from_slice(&[0x48, 0x8d, 0x74, 0xce, 0x10]);
+    // envp 由 rt0 保存在 r8；这是 native 启动栈地址，不参与 image bias。
+    out.extend_from_slice(&[0x49, 0x89, 0xf0]);
     let env = out.len();
     out.extend_from_slice(&[
         0x48, 0x8b, 0x06, 0x48, 0x83, 0xc6, 0x08, 0x48, 0x85, 0xc0, 0x75,
@@ -43,6 +46,10 @@ pub(super) fn rt0_bytes(params_disp: i32) -> Vec<u8> {
     out.push(loop_back as u8);
     let skip = out.len() as i32 - (skip_at as i32 + 1);
     out[skip_at] = skip as u8;
+    // 把启动时捕获的 envp 写入载荷 boot_environment（字段偏移 120）。
+    out.extend_from_slice(&[
+        0x48, 0x8b, 0x53, 0x48, 0x48, 0x01, 0xc2, 0x4c, 0x89, 0x82, 0x78, 0x00, 0x00, 0x00,
+    ]);
     out.extend_from_slice(&[
         0x4c, 0x8b, 0x73, 0x30, 0x49, 0x01, 0xc6, 0x4c, 0x8b, 0x7b, 0x38, 0x49, 0x01, 0xc7,
     ]);

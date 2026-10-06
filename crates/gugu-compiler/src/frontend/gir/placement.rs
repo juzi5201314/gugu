@@ -562,6 +562,8 @@ fn seed_call(callee: &Callee, args: &[Operand], kind: CallKind, flags: &mut [u8]
             Callee::Value(_) | Callee::Dynamic(_) => ExportFlags::UNKNOWN,
             Callee::Builtin(_) => 0,
             Callee::Dispatch(_) => 0,
+            // 静态初始化器没有实参；它只写自己的静态块，不把调用者状态带出去。
+            Callee::StaticInit(_) => 0,
         },
     };
     for arg in args {

@@ -31,6 +31,15 @@ impl Checker<'_, '_> {
             .model
             .external_path(self.module, &self.model.path(self.module, path))?;
         let kind = RuntimeMachineIntrinsic::from_path(&path)?;
+        let span = &self.arena().exprs[usize::try_from(callee.0).expect("表达式下标")].span;
+        if kind.requires_runtime_source() && !self.model.is_runtime_source(self.module) {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                format!("GC 控制原语 `{kind}` 只能由 runtime 注入源调用"),
+                span.clone(),
+            );
+            return Some(Ty::Error);
+        }
         let type_args = if type_args.len != 0 {
             type_args
         } else {
@@ -41,6 +50,9 @@ impl Checker<'_, '_> {
                 .map_or(AstRange::empty(), |segment| segment.args)
         };
         let span = &self.arena().exprs[usize::try_from(callee.0).expect("表达式下标")].span;
+        if kind.is_atomic() {
+            return Some(self.runtime_atomic_call(callee, kind, type_args, args, expected));
+        }
         if type_args.len != 0 {
             self.error(
                 DiagnosticCode::InvalidExpression,
@@ -105,6 +117,81 @@ impl Checker<'_, '_> {
                 arguments: args.to_vec(),
             });
         Some(ty)
+    }
+
+    fn runtime_atomic_call(
+        &mut self,
+        callee: ExprId,
+        kind: RuntimeMachineIntrinsic,
+        type_args: AstRange<GenericArg>,
+        args: &[ExprId],
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let span = self.arena().exprs[callee.0 as usize].span.clone();
+        self.require_unsafe(&span, "runtime 原子原语");
+        if type_args.len > 1 || args.len() != kind.value_arguments() {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "runtime 原子原语只接受一个可省略的类型实参及固定数量的值实参",
+                span,
+            );
+            return Ty::Error;
+        }
+        let pointer = self.expression(args[0], None);
+        let Ty::Ptr(value) = self.normalized(&pointer) else {
+            self.error(DiagnosticCode::InvalidType, "原子地址必须是原始指针", span);
+            return Ty::Error;
+        };
+        if let Some(&argument) = type_args.as_slice(&self.arena().generic_args).first() {
+            match self.model.form_argument(self.module, argument) {
+                Ok(explicit) => {
+                    self.unify(&value, &explicit, &span);
+                }
+                Err(error) => {
+                    self.errors.push(error);
+                    return Ty::Error;
+                }
+            }
+        }
+        let value = self.normalized(&value);
+        if !matches!(
+            value,
+            Ty::Int {
+                signed: false,
+                bits: 8 | 32 | 64
+            }
+        ) {
+            self.error(
+                DiagnosticCode::InvalidType,
+                "runtime 原子原语的 T 只能是 byte、u32 或 uint",
+                span,
+            );
+            return Ty::Error;
+        }
+        if let Some(&argument) = args.get(1) {
+            let operand = self.expression(argument, Some(&value));
+            self.unify(&operand, &value, &span);
+        }
+        let ty = if kind == RuntimeMachineIntrinsic::AtomicStoreRelease {
+            Ty::Unit
+        } else {
+            value
+        };
+        if let Some(expected) = expected {
+            self.unify(&ty, expected, &span);
+        }
+        self.require_value_captures(callee);
+        for &argument in args {
+            self.require_value_captures(argument);
+        }
+        self.runtime_machine_operations
+            .push(RuntimeMachineOperation {
+                expression: callee,
+                kind,
+                ty: ty.clone(),
+                arguments: args.to_vec(),
+            });
+        ty
     }
 
     /// 返回原语的返回类型：`current_slot`/`report_write` 返回机器字 `uint`，其余不返回值。

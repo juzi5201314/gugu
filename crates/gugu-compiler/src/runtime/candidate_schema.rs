@@ -144,26 +144,6 @@ pub(crate) enum CandidateAliveReason {
     OpenComponent,
 }
 
-/// 渲染一条候选进度记录：字段与位宽都来自上面的布局登记值。
-///
-/// dump 只对真实存在的 cursor 调用，因此每一行都对应一个活的 job。
-pub(crate) fn render_cursor_row(progress: &super::candidate::CandidateProgress) -> String {
-    let values = [
-        ("job", u64::from(progress.job)),
-        ("phase", progress.phase as u64),
-        ("blocks", u64::from(progress.blocks)),
-        ("pending_edges", u64::from(progress.pending_edges)),
-        ("work_units", progress.work_units),
-    ];
-    let mut rendered = String::new();
-    for ((name, width), (value_name, value)) in CANDIDATE_CURSOR_LAYOUT.iter().zip(values) {
-        debug_assert_eq!(*name, value_name, "游标布局与渲染取值必须同名同序");
-        rendered.push_str(&format!("{name}={value}/{width}bit "));
-    }
-    rendered.push_str(&format!("unit={CANDIDATE_WORK_UNIT}"));
-    rendered
-}
-
 /// 候选决议：私有结构，只有持有 sweep lease 的唯一消费者能按它执行释放。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum CandidateVerdict {

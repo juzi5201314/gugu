@@ -95,6 +95,15 @@ impl Builder<'_> {
         )
     }
 
+    /// 值若物化在栈槽上则返回该槽；`Origin::Stack` 之外的来源（寄存器、常量、堆地址）返回
+    /// `None`。逐根初始化事件只对栈槽有意义。
+    pub(super) fn value_slot(&self, value: ValueId) -> Option<SlotId> {
+        match self.body.values[value.index()].origin {
+            Origin::Stack(slot) => Some(slot),
+            _ => None,
+        }
+    }
+
     /// 按字节数物化栈临时；用于打包聚合等布局不等于单个语言类型的情况。
     pub(super) fn temporary_bytes(
         &mut self,
@@ -276,12 +285,7 @@ impl Builder<'_> {
                 };
                 vec![self.emit_one(Op::FConst(bits), &[], ValueType::scalar(kind), Origin::None)]
             }
-            ConstValue::Type(key) => vec![self.emit_one(
-                Op::SymbolAddr(Symbol::TypeId(*key)),
-                &[],
-                ValueType::scalar(Type::I32),
-                Origin::None,
-            )],
+            ConstValue::Type(key) => vec![self.type_id_value(key)?],
             ConstValue::String(text) => {
                 let pointer = self.data(text.as_bytes().to_vec(), Provenance::GcHeap);
                 let length = self.constant(

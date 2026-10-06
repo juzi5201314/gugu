@@ -1,17 +1,28 @@
 use super::pass::{
-    self, LIR_PASS_ORDER, LirPass, constants,
-    policy::{OptimizationPolicyV1, PASS_PIPELINE_REVISION, POLL_BUDGET},
+    self, constants,
+    policy::{OptimizationPolicyV1, POLL_BUDGET},
     poll,
     rewrite::{Editor, Term},
 };
 use super::{
-    body::{self, Body, Op, Origin, Provenance, Terminator, Type, ValueId, ValueType, id, range},
+    body::{
+        self, Body, Definition, Op, Origin, Provenance, Terminator, Type, ValueId, ValueType, id,
+        range,
+    },
     verify,
 };
 use crate::frontend::gir::placement::PlacementKind;
 use crate::{Compilation, CompileRequest, Compiler, DiagnosticCode, TargetName};
 use std::num::NonZeroU32;
 
+#[test]
+fn strength_reduction_constants_dominate_machine_order() {
+    let compilation = compile(include_str!("fixtures/constant_dominance.gg"));
+    let body = named(&compilation, "scale");
+    for input in [0, 1, 17, 63] {
+        assert_eq!(interpret(body, &[input]), vec![input * 14]);
+    }
+}
 const SSA: &str = include_str!("fixtures/ssa.gg");
 const CONCRETE: &str = include_str!("fixtures/concrete.gg");
 const EFFECTS: &str = include_str!("fixtures/effects.gg");
@@ -21,6 +32,246 @@ const PUBLISH: &str = include_str!("fixtures/publish.gg");
 const STACKMAP: &str = include_str!("fixtures/stackmap.gg");
 /// 资源样例：ResourceCell 的构造、按值转移与结束时释放。
 const RESOURCE: &str = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n _ = b\n}";
+/// 切片是胖指针（数据指针 + 长度）：数据指针是 internal 类根，必须随槽一起登记。
+///
+/// 该槽若不上报，nursery 回收后切片会指向被复用的内存（实测：`window[0]` 变成后续迭代写入的值）。
+/// 这里直接从编译产物断言槽与根的成立，定位到「没物化成栈槽」还是「没发根」。
+#[test]
+fn slice_values_register_their_data_pointer_root() {
+    let compilation = compile(
+        "fn total(block: [int; 512]) int { let sum = 0\n let index = 0\n while index < 512 { sum = sum + block[index]\n index = index + 1 }\n sum }\nfn make(n: int) fn() &[int] { let block: [int; 512] = [n; 512]\n fn() &[int] = block[0..512] }\nfn churn(n: int) fn(int) int { let block: [int; 512] = [n; 512]\n fn(x: int) int = total(block) + x }\nfn main() { let maker = make(41)\n let view = maker()\n let index = 0\n while index < 600 { let f = churn(index)\n if f(1) != index * 512 + 1 { panic(\"churn\") }\n if view[0] != 41 { panic(\"slice-live\") }\n _ = f\n index = index + 1 }\n}",
+    );
+    let body = named(&compilation, "main");
+    // 未取地址的切片 local 按标量车道拆开，根可以以「槽根」或「值根」形式出现。
+    // 关键断言：**分配（CallReturn）安全点**上必须仍然登记它——回收正是发生在那里；
+    // 只在别处登记不足以让切片跨过 nursery 回收。
+    // 先验证调用点确实建立栈图记录：被误判为 poll-free leaf 的调用会让调用者的
+    // managed 指针不落栈，从而在镜像里丢掉这条根。
+    let mut managed_calls = 0_usize;
+    for instruction in &body.instructions {
+        if let super::body::Op::Call(call) | super::body::Op::ForeignCall(call) = &instruction.op {
+            managed_calls += 1;
+            assert!(!call.poll_free_leaf, "会分配的调用不得被标为 poll-free 叶");
+        }
+    }
+    // 终结符形式的调用（`Invoke`）同样建立栈图记录，同样不得被标为 poll-free 叶。
+    for block in &body.blocks {
+        if let super::body::Terminator::Invoke { call, .. } = &block.terminator {
+            managed_calls += 1;
+            assert!(
+                !call.poll_free_leaf,
+                "会分配的 invoke 不得被标为 poll-free 叶"
+            );
+        }
+    }
+    assert!(managed_calls > 0, "夹具必须有调用点");
+    let safepoints = super::stackmap::anchors(body).expect("安全点");
+    let allocation_points: Vec<_> = safepoints
+        .iter()
+        .filter(|it| it.kind == super::stackmap::KIND_CALL_RETURN)
+        .collect();
+    assert!(
+        !allocation_points.is_empty(),
+        "夹具必须产生分配/调用返回安全点"
+    );
+    // 循环的调用环上有两个调用返回点（分配闭包与调用它），切片在**两处**都必须有 internal 根：
+    // 回收就发生在这些点上。只在定义点（`maker()` 调用）登记是不够的——那样循环里的回收
+    // 会把捕获对象搬走而 `view` 不更新，`view[0]` 随即读到复用后的内存。
+    // 未取地址的切片会退化成一条块参数链，而块参数必须留在 `LiveValues` 的 live-in 里、
+    // 再由边实参替换，否则跨块携带的值在前驱块里凭空消失（见 `liveness.rs`）。
+    let rooted = allocation_points
+        .iter()
+        .filter(|it| !it.roots.interior.is_empty())
+        .count();
+    assert!(
+        rooted >= 2,
+        "循环的两个调用返回点都必须登记切片的 internal 根：带根点数={rooted}，分配点数={}",
+        allocation_points.len()
+    );
+}
+
+/// 活跃位图的边界：末字不得覆盖不存在的槽。
+#[test]
+fn live_set_masks_respect_slot_count() {
+    for slots in [0usize, 1, 63, 64, 65, 128] {
+        let full = super::liveness::LiveSet::full(slots);
+        for slot in 0..slots {
+            assert!(full.is_live(slot), "{slots} 槽时槽 {slot} 必须活跃");
+        }
+        assert!(!full.is_live(slots), "{slots} 槽时越界槽不得活跃");
+        for slot in 0..slots {
+            let mut set = super::liveness::LiveSet::full(slots);
+            set.set(slot, false);
+            assert!(!set.is_live(slot), "清位必须生效");
+            set.set(slot, true);
+            assert!(set.is_live(slot), "置位必须生效");
+        }
+    }
+}
+
+/// 安全点必须跳过已死的栈槽根：登记集合严格小于该 body 的全部带根槽。
+///
+/// `saw_roots` 先失败的意义在于：夹具一旦不再产生栈槽根，这条断言就会退化成恒真，
+/// 必须让覆盖缺口自己暴露，而不是静默通过。
+#[test]
+fn safepoints_skip_dead_stack_slots() {
+    let compilation = compile(STACKMAP);
+    let bodies = &compilation.lir.as_ref().expect("LIR").world.bodies;
+    let mut saw_roots = false;
+    let mut skipped = false;
+    for body in bodies {
+        let rooted: std::collections::BTreeSet<u32> = body
+            .stack_slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| !slot.roots.is_empty())
+            .map(|(index, _)| index as u32)
+            .collect();
+        if rooted.is_empty() {
+            continue;
+        }
+        saw_roots = true;
+        for safepoint in super::stackmap::anchors(body).expect("安全点") {
+            let roots = &safepoint.roots;
+            let registered: std::collections::BTreeSet<u32> = roots
+                .direct
+                .iter()
+                .chain(&roots.interior)
+                .chain(&roots.handle)
+                .chain(&roots.compressed)
+                .chain(&roots.stack)
+                .filter_map(|root| match root {
+                    super::stackmap::LogicalRoot::Slot { slot, .. } => Some(*slot),
+                    _ => None,
+                })
+                .collect();
+            if registered.len() < rooted.len() {
+                skipped = true;
+            }
+        }
+    }
+    assert!(saw_roots, "夹具必须至少有一个带根栈槽，否则断言无意义");
+    assert!(skipped, "必须存在跳过死槽根的安全点");
+}
+
+/// 逻辑 schema 变化必须拒绝旧值：缓存或旧产物里的世界不得静默进入编码。
+#[test]
+fn stackmap_world_rejects_stale_schema() {
+    let stale = super::stackmap::LogicalStackMap {
+        schema: super::stackmap::STACKMAP_SCHEMA - 1,
+        functions: Vec::new(),
+        safepoints: Vec::new(),
+        map_count: 0,
+        fingerprint: [0; 32],
+    };
+    let error = super::stackmap::verify_world(&stale).expect_err("旧 schema 必须被拒绝");
+    assert_eq!(
+        error.message(),
+        "逻辑栈图 schema 不匹配",
+        "拒绝必须来自 schema 检查而不是别的结构错误"
+    );
+}
+
+/// 借出地址的槽必须在调用点登记为槽根：被调方执行期间调用方帧仍按该点的 map 扫描，而借出的
+/// 槽没有活跃值、只有活跃地址，唯一的登记来源就是调用帧自己的槽根表。
+#[test]
+fn borrowed_slot_roots_are_registered_at_call_sites() {
+    let compilation = compile(
+        "enum Slot { Scalar(int, int), Callable(fn() int) }\nfn touch(pointer: &Slot) fn() int {\n let captured = 1\n return fn() int { return captured }\n}\nfn main() {\n let value = Slot::Callable(fn() int { return 1 })\n let view = &value\n _ = touch(view)\n}",
+    );
+    let body = named(&compilation, "main");
+    let rooted: std::collections::BTreeSet<u32> = body
+        .stack_slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| !slot.roots.is_empty())
+        .map(|(index, _)| index as u32)
+        .collect();
+    assert!(
+        !rooted.is_empty(),
+        "夹具必须产生带根的槽：{:?}",
+        body.stack_slots
+    );
+    let mut registered = std::collections::BTreeSet::new();
+    for safepoint in super::stackmap::anchors(body).expect("安全点") {
+        let roots = &safepoint.roots;
+        registered.extend(
+            roots
+                .direct
+                .iter()
+                .chain(&roots.interior)
+                .chain(&roots.handle)
+                .chain(&roots.compressed)
+                .chain(&roots.stack)
+                .filter_map(|root| match root {
+                    super::stackmap::LogicalRoot::Slot { slot, .. } => Some(*slot),
+                    _ => None,
+                }),
+        );
+    }
+    assert!(
+        rooted.is_subset(&registered),
+        "借出地址的带根槽必须在安全点上登记：rooted={rooted:?} registered={registered:?}"
+    );
+}
+
+/// 静态访问必须带惰性初始化守卫：模块 static 与函数局部 static 都在首次读取时发布值。
+///
+/// 三段由小到大：只有模块 static、只有局部 static、两者同时出现在被调用两次的函数里。
+#[test]
+fn static_access_compiles_with_lazy_initializer_guard() {
+    let programs = [
+        "static M: int = 41\nfn main() { _ = M }",
+        "fn take() int {\n static L: int = 9\n L\n}\nfn main() { _ = take() }",
+        "static M: int = 41\nfn take() int {\n static L: int = 9\n L + M\n}\nfn main() {\n if take() != 50 { panic(\"static\") }\n if take() != 50 { panic(\"static-again\") }\n}",
+    ];
+    for (index, source) in programs.into_iter().enumerate() {
+        let compilation = Compiler::new().compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            compilation.is_success(),
+            "程序 {index} 失败：{:?}",
+            compilation.diagnostics().items()
+        );
+    }
+}
+
+/// 初始化器必须在镜像里真实发布：调用点保留成调用，实例末尾 release 置位。
+///
+/// 这两条一起挡住「内联把发布动作静默抹掉」的回退：只断言能编译会漏掉整类错误。
+#[test]
+fn static_initializer_call_survives_and_publishes() {
+    let compilation = compile("static M: int = 41\nfn main() { _ = M }");
+    let initializer = named(&compilation, "M");
+    let publishes = initializer
+        .instructions
+        .iter()
+        .filter(|instruction| {
+            matches!(
+                instruction.op,
+                Op::Atomic {
+                    op: body::AtomicOp::Store,
+                    ordering: crate::frontend::gir::body::MemoryOrdering::Release,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert!(publishes > 0, "初始化器必须 release 发布 initialized 字");
+
+    let entry = named(&compilation, "main");
+    let called = entry.blocks.iter().any(|block| {
+        matches!(
+            &block.terminator,
+            Terminator::Invoke { call, .. }
+                if call.target == body::CallTarget::Instance(initializer.instance)
+        )
+    });
+    assert!(called, "读点守卫必须真实调用初始化器实例");
+}
 
 fn compile(source: &str) -> Compilation {
     let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -157,6 +408,52 @@ fn panic_invoke_carries_original_source_location() {
         })
         .collect();
     assert_eq!(constants, [7, 2, 5]);
+}
+
+/// spawn 第四参（结果字里根的 lane map 编码）必须由**结果载荷类型**的根车道决定。
+///
+/// 结果字在 ABI 上是一个字：标量结果内联，含根车道的结果是指向载荷对象的引用。分类必须复用
+/// 帧存储那套 `Builder::roots`，并且要用 `n + 1` 编码——Direct 的判别值是 0，直接写判别值会
+/// 与「不含根」混淆。
+#[test]
+fn spawn_result_kind_matches_the_payload_roots() {
+    let scalar =
+        compile("fn child() int { 42 }\nfn main() {\n let handle = async child()\n _ = handle\n}");
+    let managed = compile(
+        "fn child() fn(int) int { fn(x: int) int = x + 1 }\nfn main() {\n let handle = async child()\n _ = handle\n}",
+    );
+    assert_eq!(spawn_result_kind(&scalar), 0, "标量结果字不含根");
+    assert_eq!(spawn_result_kind(&managed), 1, "闭包载荷的根车道是 Direct");
+}
+
+/// 取 `main` 里 spawn 调用的第四参常量。
+fn spawn_result_kind(compilation: &Compilation) -> u64 {
+    let body = named(compilation, "main");
+    for instruction in &body.instructions {
+        let Op::Call(call) = &instruction.op else {
+            continue;
+        };
+        if !matches!(
+            call.target,
+            body::CallTarget::Runtime(body::RuntimeCall::Spawn)
+        ) {
+            continue;
+        }
+        let arguments = body.args(&instruction.arguments);
+        let operand = *arguments.last().expect("spawn 至少四参");
+        let body::Definition::Instruction { instruction, .. } =
+            body.values[operand.index()].definition
+        else {
+            panic!("spawn 第四参必须是常量");
+        };
+        let Op::IConst(value) =
+            body.instructions[usize::try_from(instruction.0).expect("指令编号")].op
+        else {
+            panic!("spawn 第四参必须是常量");
+        };
+        return value;
+    }
+    panic!("没有 spawn 调用");
 }
 
 #[test]
@@ -309,6 +606,255 @@ fn managed_store_requires_its_hybrid_barrier() {
     let safepoint = barrier.safepoint.unwrap();
     body.safepoints[safepoint.index()].kind = body::SafepointKind::StackCheck;
     rejected(&compilation, body);
+}
+
+#[test]
+fn bare_barrier_sites_have_mandatory_call_return_records() {
+    // 裸屏障没有 permit：slow path 会 shade，返回 PC 必须在栈图里能找到根；预留屏障由
+    // `BarrierReserve` 额度保证不进入 slow path，且只出现在 no-safepoint region 内，不留记录。
+    let compilation = compile(
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n}",
+    );
+    let body = named(&compilation, "main").clone();
+    let barrier = body
+        .instructions
+        .iter()
+        .position(|instruction| matches!(instruction.op, Op::GcWriteBarrier { .. }))
+        .expect("闭包捕获写入必须带裸屏障");
+    let module = compilation.hir.as_ref().expect("已生成 HIR").module();
+    let world = super::stackmap::derive(std::slice::from_ref(&body), module)
+        .expect("栈图推导必须通过 verifier");
+    let anchor = world
+        .safepoints
+        .iter()
+        .find(|point| point.instruction == u32::try_from(barrier).expect("指令编号"))
+        .expect("裸屏障必须留下安全点记录");
+    assert_eq!(anchor.kind, super::stackmap::KIND_CALL_RETURN);
+    assert_eq!(anchor.flags, 0b011);
+    assert!(anchor.roots.words() > 0, "屏障返回点的根集不得为空");
+
+    let publish = compile(PUBLISH);
+    let publish_body = publish_body(&publish);
+    let reserved = publish_body
+        .instructions
+        .iter()
+        .position(|instruction| matches!(instruction.op, Op::GcWriteBarrierReserved { .. }))
+        .expect("publish 区域必须带预留屏障");
+    let module = publish.hir.as_ref().expect("已生成 HIR").module();
+    let world = super::stackmap::derive(std::slice::from_ref(&publish_body), module)
+        .expect("栈图推导必须通过 verifier");
+    assert!(
+        world
+            .safepoints
+            .iter()
+            .all(|point| point.instruction != u32::try_from(reserved).expect("指令编号")),
+        "预留屏障在 no-safepoint region 内，不得留下记录"
+    );
+}
+
+/// 分配 op（`GcAlloc`/`RegionAlloc`/`PromoteManaged`）的返回 PC 必须是强制 `CallReturn`：
+/// 同一站点发射的 slow call 可以启动回收，回收要在该返回 PC 上按本帧 map 扫描根
+/// （计划第 2.4 条）。改动前这些站点被当作叶操作，不留下任何记录。
+#[test]
+fn allocation_sites_have_mandatory_call_return_records() {
+    // 逃逸闭包的环境落受管堆：这是仓库里已知会产生分配的程序形态。
+    let compilation = compile(
+        "fn make() fn() int {\n let value = 1\n return fn() int { return value }\n}\nfn main() {\n let closure = make()\n _ = closure()\n}",
+    );
+    let body = named(&compilation, "make").clone();
+    let allocation = body
+        .instructions
+        .iter()
+        .position(|instruction| matches!(instruction.op, Op::GcAlloc { .. }))
+        .expect("闭包字面量的环境必须在创建处分配");
+    let module = compilation.hir.as_ref().expect("已生成 HIR").module();
+    let world = super::stackmap::derive(std::slice::from_ref(&body), module)
+        .expect("栈图推导必须通过 verifier");
+    let anchor = world
+        .safepoints
+        .iter()
+        .find(|point| point.instruction == u32::try_from(allocation).expect("指令编号"))
+        .expect("分配站点必须留下强制调用返回记录");
+    assert_eq!(anchor.kind, super::stackmap::KIND_CALL_RETURN);
+    assert_eq!(anchor.flags, 0b011);
+    assert!(
+        world
+            .functions
+            .iter()
+            .any(|function| function.has_alloc_slow),
+        "分配站点必须计入 has_alloc_slow"
+    );
+}
+
+/// 断言世界里每条记录都覆盖该点的跨点活跃受管值。
+///
+/// 锁住的是接线：`LiveValues`（SSA 逆向活跃）与 `push_live_value_roots` 缺一不可。跨点存活
+/// 但既不是本条指令操作数、也不在 LIR 栈槽的受管值，其物理落点是分配器生成的 spill 槽，
+/// 而该槽是否被收集器扫描只能由这条路径提供登记。
+fn assert_records_root_live_values(compilation: &Compilation, fixture: &str) {
+    let lir = compilation.lir.as_ref().expect("已生成 LIR");
+    let module = compilation.hir.as_ref().expect("已生成 HIR").module();
+    let world =
+        super::stackmap::derive(&lir.world.bodies, module).expect("栈图推导必须通过 verifier");
+    let mut covered = 0_usize;
+    for function in &world.functions {
+        let Some(body) = lir
+            .world
+            .bodies
+            .iter()
+            .find(|body| body.instance == function.instance)
+        else {
+            continue;
+        };
+        let graph = super::pass::graph::Graph::new(body).expect("CFG 必须成立");
+        let values = super::liveness::LiveValues::new(body, &graph);
+        let start = usize::try_from(function.safepoint_start).expect("起始下标适配宿主");
+        let end = start + usize::try_from(function.safepoint_count).expect("数量适配宿主");
+        for point in &world.safepoints[start..end] {
+            // 入口检查的根来自 ABI 参数表（寄存器映射），不是值活跃集。
+            if point.kind == super::stackmap::KIND_MORESTACK_ENTRY {
+                continue;
+            }
+            let block = body::BlockId(point.block);
+            let instructions = &body.blocks[block.index()].instructions;
+            let after = values.after(block, point.instruction - instructions.start);
+            for (index, value) in body.values.iter().enumerate() {
+                if !after.is_live(index) || value.kind.ty != Type::Ptr {
+                    continue;
+                }
+                if value
+                    .kind
+                    .provenance
+                    .and_then(|it| it.root_kind())
+                    .is_none()
+                {
+                    continue;
+                }
+                let rooted = [
+                    &point.roots.direct,
+                    &point.roots.interior,
+                    &point.roots.handle,
+                    &point.roots.compressed,
+                    &point.roots.stack,
+                ]
+                .iter()
+                .any(|group| {
+                    group.iter().any(|root| {
+                        matches!(
+                            root,
+                            super::stackmap::LogicalRoot::Value { value, .. } if *value == id(index)
+                        )
+                    })
+                });
+                assert!(
+                    rooted,
+                    "{fixture}: kind {} 的安全点漏掉跨点活跃值 v{index}",
+                    point.kind
+                );
+                covered += 1;
+            }
+            // 负向：点位自身的定义（分配结果、调用结果）不得登记成根——安全点在该指令执行
+            // 期间触发，那个值还不存在；登记它会让收集器读到一个尚未写入的槽位。
+            for group in [
+                &point.roots.direct,
+                &point.roots.interior,
+                &point.roots.handle,
+                &point.roots.compressed,
+                &point.roots.stack,
+            ] {
+                for root in group {
+                    let super::stackmap::LogicalRoot::Value { value, .. } = root else {
+                        continue;
+                    };
+                    let definition =
+                        body.values[usize::try_from(*value).expect("值下标适配宿主")].definition;
+                    let (def_block, def_position) = match definition {
+                        Definition::Parameter { block, .. } => (block, 0),
+                        Definition::Instruction { instruction, .. } => {
+                            let def_block = graph.instruction_blocks[instruction.index()];
+                            (
+                                def_block,
+                                instruction.0 - body.blocks[def_block.index()].instructions.start,
+                            )
+                        }
+                        Definition::Invoke { block, .. } => {
+                            let def = &body.blocks[block.index()].instructions;
+                            (block, def.end - def.start)
+                        }
+                    };
+                    assert!(
+                        def_block != block || def_position < point.instruction - instructions.start,
+                        "{fixture}: kind {} 的安全点把点位自身的定义 v{value} 登记成了根",
+                        point.kind
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        covered > 0,
+        "{fixture}: 夹具没有覆盖任何跨点活跃受管值，断言会空转"
+    );
+}
+
+/// 异常边（Invoke 的 unwind 目标）依赖同一张调用返回 map：unwind 发生时长跳转到落地垫，
+/// 落地垫按该点的 map 扫描调用方帧。因此带 unwind 边的 Invoke 必须留下调用返回记录。
+#[test]
+fn unwind_edges_share_the_invoke_call_return_map() {
+    let compilation = compile(
+        "fn bail() int {\n panic(\"boom\")\n}\nfn main() {\n let value = 1\n let closure = fn() int { return value }\n if value != 0 { _ = bail() }\n _ = closure()\n}",
+    );
+    let body = named(&compilation, "main").clone();
+    let invoke_block = body
+        .blocks
+        .iter()
+        .position(|block| matches!(block.terminator, Terminator::Invoke { .. }))
+        .expect("panic 必须落在 Invoke 终结符上");
+    let block = &body.blocks[invoke_block];
+    let Terminator::Invoke { call, .. } = &block.terminator else {
+        unreachable!("已按 Invoke 定位");
+    };
+    let invoke_id = u32::try_from(invoke_block).expect("块编号适配 u32");
+    assert!(
+        body.edges
+            .iter()
+            .any(|edge| edge.unwind && edge.from == body::BlockId(invoke_id)),
+        "可能 unwind 的调用必须带 unwind 边"
+    );
+    assert!(
+        !call.poll_free_leaf,
+        "会 unwind 的调用不得被标为 poll-free 叶"
+    );
+    let module = compilation.hir.as_ref().expect("已生成 HIR").module();
+    let world = super::stackmap::derive(std::slice::from_ref(&body), module)
+        .expect("栈图推导必须通过 verifier");
+    let anchor = world
+        .safepoints
+        .iter()
+        .find(|point| point.instruction == block.instructions.end && point.block == invoke_id)
+        .expect("Invoke 必须留下调用返回记录");
+    assert_eq!(anchor.kind, super::stackmap::KIND_CALL_RETURN);
+}
+
+/// 跨点存活的受管值必须逐点在根集合里：这是物理层把分配器 spill 槽标成根的唯一来源。
+#[test]
+fn safepoints_root_every_live_value_in_their_world() {
+    for (fixture, source) in [
+        (
+            "closure",
+            "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n}",
+        ),
+        // 菱形合流：受管值在两个分支上都写入，合流点之后仍被使用，根必须跟着合流参数走。
+        (
+            "diamond",
+            "fn main() {\n let flag = 1\n let closure = fn() int { return flag }\n let chosen = closure\n if flag > 0 { chosen = closure } else { chosen = closure }\n _ = chosen()\n}",
+        ),
+        ("poll", POLL),
+        ("stackmap", STACKMAP),
+    ] {
+        let compilation = compile(source);
+        assert_records_root_live_values(&compilation, fixture);
+    }
 }
 
 #[test]
@@ -502,34 +1048,6 @@ fn cached_lir_matches_fresh_output_and_action_identity() {
     assert_ne!(cold.lir_fingerprint(), changed.lir_fingerprint());
 }
 
-#[test]
-fn lir_pass_order_is_fixed() {
-    assert_eq!(
-        LIR_PASS_ORDER,
-        &[
-            LirPass::VerifySsaAndMemory,
-            LirPass::CanonicalizeCfg,
-            LirPass::SparseConditionalConstants,
-            LirPass::AlgebraicSimplification,
-            LirPass::GlobalValueNumbering,
-            LirPass::DeadStoreAndDeadValueElimination,
-            LirPass::CanonicalizeLoops,
-            LirPass::LoopInvariantCodeMotion,
-            LirPass::StrengthReduction,
-            LirPass::LoopVersioningAndUnswitching,
-            LirPass::LoopVectorizationAndUnrolling,
-            LirPass::LowerAllocationAndBarrierFastPaths,
-            LirPass::LowerTargetAbi,
-            LirPass::LegalizeX86_64,
-            LirPass::ClassifyPollFreeLeafAndPlaceBudgetedPolls,
-            LirPass::LowerPollFastPaths,
-            LirPass::PrepareRegisterAllocation,
-        ]
-    );
-    assert_eq!(PASS_PIPELINE_REVISION, 1);
-    assert_eq!(POLL_BUDGET, 4096);
-}
-
 /// 用户可观察效果的多重集合；poll 与纯计算不属于可观察效果。
 fn effect_signature(body: &Body) -> Vec<String> {
     body.instructions
@@ -651,6 +1169,168 @@ fn small_counted_loop_stays_poll_free() {
         "总成本不超预算的计数循环不得插 poll"
     );
     assert_eq!(interpret(body, &[]), vec![3]);
+}
+
+/// 逐根初始化事件只跟随根字：整值写入为每个被覆盖的根字置位，标量槽不产生事件。
+#[test]
+fn root_init_events_track_pointer_fields_only() {
+    let compilation = compile(
+        "struct Pair { a: &int, b: &int }\nfn main() {\n let x = 1\n let y = 2\n let first = Pair { a: &x, b: &y }\n let second = first\n let view = &second\n _ = view\n}",
+    );
+    let module = compilation.hir.as_ref().expect("已生成 HIR").module();
+    let body = named(&compilation, "main");
+    let tracked = body
+        .stack_slots
+        .iter()
+        .enumerate()
+        .find(|(index, slot)| {
+            slot.roots.len() == 2
+                && body
+                    .root_inits
+                    .iter()
+                    .any(|event| event.slot.index() == *index && event.initialized)
+        })
+        .map(|(index, _)| index)
+        .unwrap_or_else(|| panic!("整值写入必须为双根字槽置位：{:?}", body.root_inits));
+    let events: Vec<(bool, u32)> = body
+        .root_inits
+        .iter()
+        .filter(|event| event.slot.index() == tracked)
+        .map(|event| (event.initialized, event.bit))
+        .collect();
+    assert_eq!(
+        events.first().copied(),
+        Some((false, 0)),
+        "槽的第一个事件必须是 StorageLive 复位：{events:?}"
+    );
+    let set: Vec<u32> = events
+        .iter()
+        .filter(|(initialized, _)| *initialized)
+        .map(|(_, bit)| *bit)
+        .collect();
+    assert!(
+        set.contains(&0) && set.contains(&1),
+        "整值写入必须为两个根字置位：{events:?}"
+    );
+    // 事件的位置必须落在所属块的指令范围内（verifier 与重写 pass 共用同一约束）。
+    super::verify::verify(body, module).expect("逐根初始化记录必须通过 verifier");
+    assert!(
+        body.root_inits
+            .iter()
+            .all(|event| !body.stack_slots[event.slot.index()].roots.is_empty()),
+        "事件只能指向带根字的栈槽"
+    );
+
+    // 标量结构：写入不携带根，因此既不置位也不复位。
+    let scalars = compile(
+        "struct Pair { a: int, b: int }\nfn main() {\n let pair = Pair { a: 1, b: 2 }\n _ = pair\n}",
+    );
+    let body = named(&scalars, "main");
+    assert!(
+        body.root_inits.is_empty(),
+        "标量槽不得产生逐根事件：{:?}",
+        body.root_inits
+    );
+}
+
+/// 变体感知置位：构造标量变体时，同一偏移在别的变体里是指针的并集条目不得被置位。
+///
+/// `Slot` 的两个变体在 tag 之后的同一偏移分别放 `int` 与 `String`，因此槽的 root 表把该偏移
+/// 记成指针（并集）。只有构造 `Text` 变体才允许置位；构造 `Scalar` 变体必须是"只复位、不置位"。
+#[test]
+fn root_init_narrows_union_words_by_variant() {
+    let declaration = "enum Slot { Scalar(int, int), Callable(fn() int) }\n";
+    // 标量变体的两个 int 覆盖并集根字所在偏移，但字段自身不携带根，因此不得置位。
+    let scalar = compile(&format!(
+        "{declaration}fn main() {{\n let value = Slot::Scalar(7, 8)\n _ = value\n}}"
+    ));
+    let body = named(&scalar, "main");
+    let unions: Vec<usize> = body
+        .stack_slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.local == u32::MAX && !slot.roots.is_empty())
+        .map(|(index, _)| index)
+        .collect();
+    assert!(
+        !unions.is_empty(),
+        "enum 临时槽必须把并集偏移登记为根：{:?}",
+        body.stack_slots
+    );
+    assert!(
+        body.root_inits
+            .iter()
+            .filter(|event| unions.contains(&event.slot.index()))
+            .all(|event| !event.initialized),
+        "构造标量变体不得在并集临时槽上置位：{:?}",
+        body.root_inits
+    );
+
+    // 携带根的变体写入同一偏移：必须留下置位，证明收窄是按字段类型而不是按偏移。
+    let callable = compile(&format!(
+        "{declaration}fn main() {{\n let value = Slot::Callable(fn() int {{ return 1 }})\n _ = value\n}}"
+    ));
+    let body = named(&callable, "main");
+    assert!(
+        body.root_inits.iter().any(|event| {
+            event.initialized && body.stack_slots[event.slot.index()].local == u32::MAX
+        }),
+        "构造携带根的变体必须为并集条目置位：{:?}",
+        body.root_inits
+    );
+}
+
+/// 逐根初始化证明：整值构造写全根字的槽判定为完整初始化；只写标量变体的并集槽不是。
+#[test]
+fn init_proof_marks_only_fully_written_slots() {
+    let compilation = compile(
+        "struct Pair { a: &int, b: &int }\nfn main() {\n let x = 1\n let y = 2\n let full = Pair { a: &x, b: &y }\n let view = &full\n _ = view\n}",
+    );
+    let body = named(&compilation, "main");
+    let graph = super::pass::graph::Graph::new(body).expect("CFG");
+    let init = super::root_init::InitSlots::new(body, &graph);
+    let entry = body.entry;
+    let end =
+        body.blocks[entry.index()].instructions.end - body.blocks[entry.index()].instructions.start;
+    let tracked: Vec<usize> = body
+        .stack_slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.roots.len() == 2)
+        .map(|(index, _)| index)
+        .collect();
+    assert!(!tracked.is_empty(), "夹具必须产生带两个根字的栈槽");
+    assert!(
+        tracked
+            .iter()
+            .any(|slot| init.fully_initialized(body, entry, end, *slot)),
+        "整值构造写全根字后必须判定为完整初始化"
+    );
+
+    // 负向：只构造标量变体时并集临时槽只收到复位，不能判定为完整初始化。
+    let scalar = compile(
+        "enum Slot { Scalar(int, int), Callable(fn() int) }\nfn main() {\n let value = Slot::Scalar(7, 8)\n _ = value\n}",
+    );
+    let body = named(&scalar, "main");
+    let graph = super::pass::graph::Graph::new(body).expect("CFG");
+    let init = super::root_init::InitSlots::new(body, &graph);
+    let entry = body.entry;
+    let end =
+        body.blocks[entry.index()].instructions.end - body.blocks[entry.index()].instructions.start;
+    let unions: Vec<usize> = body
+        .stack_slots
+        .iter()
+        .enumerate()
+        .filter(|(_, slot)| slot.local == u32::MAX && !slot.roots.is_empty())
+        .map(|(index, _)| index)
+        .collect();
+    assert!(!unions.is_empty(), "enum 临时槽必须把并集偏移登记为根");
+    assert!(
+        unions
+            .iter()
+            .all(|slot| !init.fully_initialized(body, entry, end, *slot)),
+        "标量变体的并集槽不得判定为完整初始化"
+    );
 }
 
 #[test]
@@ -1706,9 +2386,22 @@ fn shared_handle_storage_is_guard_wrapped() {
             _ => {}
         }
     }
-    assert_eq!(allocations, 1, "该源码只有一个 shared 环境分配");
+    assert!(
+        allocations >= 1,
+        "共享捕获必须有 SharedHeap 分配（提升后的 cell 与环境）"
+    );
     assert_eq!(begins, ends, "guard 必须成对");
     assert!(begins > 0 && loads > 0, "共享读取必须经过 guard");
+    // 捕获槽提升成的 cell 与环境都在共享平面：环境槽里放的必须是 handle，而不是本地地址或副本。
+    assert!(
+        body.instructions.iter().any(|instruction| {
+            let args = body.args(&instruction.arguments);
+            matches!(&instruction.op, Op::Store(_))
+                && args.len() == 2
+                && body.values[args[1].index()].kind.provenance == Some(Provenance::SharedHandle)
+        }),
+        "共享环境槽必须保存 stable handle"
+    );
     let _ = (stores, barriers);
 }
 

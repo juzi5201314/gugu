@@ -2,8 +2,8 @@
 //!
 //! 编码器接受调用方注入的机器布局（`code_rva`、`code_size`、`frame_size`、
 //! `unwind_index`）。后端在寄存器分配与编码之后调用它写出 section，单测复用同一
-//! 函数。decoder 拒收
-//! version 1 记录，全部对齐、padding、表不重叠与位图互斥检查都在解码时执行。
+//! 函数。decoder 拒收全部历史版本（v1 的 handle 与压缩引用表示、v2 的屏障调用记录
+//! 集合都已变化），全部对齐、padding、表不重叠与位图互斥检查都在解码时执行。
 
 use super::model::RawModelError;
 use super::stackmap_schema::{
@@ -32,6 +32,23 @@ pub(crate) struct CodeLayout {
     pub(crate) has_stack_interior: bool,
 }
 
+/// 逐根初始化门控的根：该字是否参与扫描由帧内初始化字节决定。
+///
+/// `slot.roots` 是并集超集，同一字在某些变体里是标量。位图条目不登记这类根，改由本条的
+/// `init_byte` 在运行期判定：字节非零才把 `word`（帧内机器字下标，与固定位图同一坐标）
+/// 当成 `root_kind` 类根。`word` 不得同时出现在固定位图里，由编码校验保证。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct TypedRoot {
+    pub(crate) word: u32,
+    /// 五类根之一：0=Direct、1=Interior、2=Handle、3=Compressed、4=StackInterior。
+    pub(crate) root_kind: u32,
+    /// 帧内逐根初始化字节的字节偏移；非零表示该字已写成指针。
+    pub(crate) init_byte: u32,
+}
+
+/// 逐根初始化条目的固定编码宽度。
+pub(crate) const TYPED_ROOT_BYTES: usize = 12;
+
 /// 一个安全点的机器位置与根位图输入。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct SafepointLayout {
@@ -44,6 +61,8 @@ pub(crate) struct SafepointLayout {
     pub(crate) slots: [Vec<u64>; 5],
     /// 五类寄存器掩码；bit15 必须为 0，普通函数保留位必须为 0。
     pub(crate) registers: [u16; 5],
+    /// 由帧内初始化字节门控的根；这些字不得同时出现在 `slots` 位图里。
+    pub(crate) typed: Vec<TypedRoot>,
     /// 该安全点所属函数的布局下标。
     pub(crate) function: u32,
     /// slot 总数。
@@ -218,13 +237,14 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
         return Err(RawModelError::new("栈图 section 魔数不匹配"));
     }
     let version = u16::from_le_bytes(bytes[8..10].try_into().expect("版本字段"));
-    if version == 1 {
-        return Err(RawModelError::new(
-            "拒绝 version 1 记录：handle 与压缩引用表示已变化",
-        ));
-    }
     if version != STACKMAP_SECTION_VERSION {
-        return Err(RawModelError::new("栈图 section 版本不匹配"));
+        // 历史版本一律拒收，不保留双解码路径：v1 的 handle 与压缩引用表示不同，v2 的屏障
+        // runtime 调用没有安全点记录。
+        return Err(RawModelError::new(match version {
+            1 => "拒绝 version 1 记录：handle 与压缩引用表示已变化",
+            2 => "拒绝 version 2 记录：屏障 runtime 调用缺少安全点记录",
+            _ => "栈图 section 版本不匹配",
+        }));
     }
     if bytes[10] != STACKMAP_POINTER_SIZE || bytes[11] != STACKMAP_ENDIAN {
         return Err(RawModelError::new("栈图 section 指针宽度或字节序不匹配"));
@@ -388,6 +408,9 @@ fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
             return Err(RawModelError::new("寄存器掩码 bit15 必须为 0"));
         }
     }
+    // 记录字节的全部结构约束（位图互斥、尾 bit、逐根初始化条目排序与去重）在编码侧
+    // 复用同一份校验，避免编码器产出自己解不出的 section。
+    verify_map_record(&map_record(layout))?;
     // 普通函数的保留位（r14、r15）必须为 0；bridge 的专用根表不在此处编码。
     for (class, mask) in layout.registers.iter().enumerate() {
         let _ = class;
@@ -466,8 +489,37 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
         }
         cursor += 1;
     }
-    if cursor != record.len() {
-        return Err(RawModelError::new("map 记录存在多余字节"));
+    // 尾部是逐根初始化条目：计数 + 固定 12 字节条目，按帧内字下标严格递增，且不得与固定
+    // 位图重复登记同一个字。
+    let header = record
+        .get(cursor..cursor + 4)
+        .ok_or_else(|| RawModelError::new("map 记录缺少逐根初始化计数"))?;
+    let typed = u32::from_le_bytes(header.try_into().expect("计数字段")) as usize;
+    let start = cursor + 4;
+    let expected = typed
+        .checked_mul(TYPED_ROOT_BYTES)
+        .and_then(|bytes| start.checked_add(bytes))
+        .ok_or_else(|| RawModelError::new("map 记录逐根初始化条目溢出"))?;
+    if expected != record.len() {
+        return Err(RawModelError::new("map 记录逐根初始化条目长度不符"));
+    }
+    let mut previous: Option<u32> = None;
+    for index in 0..typed {
+        let at = start + index * TYPED_ROOT_BYTES;
+        let word = u32::from_le_bytes(record[at..at + 4].try_into().expect("条目字段"));
+        let kind = u32::from_le_bytes(record[at + 4..at + 8].try_into().expect("条目字段"));
+        if kind > 4 {
+            return Err(RawModelError::new("逐根初始化条目根种类越界"));
+        }
+        if previous.is_some_and(|previous| previous >= word) {
+            return Err(RawModelError::new("逐根初始化条目必须按字下标严格递增"));
+        }
+        previous = Some(word);
+        let byte = (word / 8) as usize;
+        let bit = 1_u8 << (word % 8);
+        if byte < words && bitmaps.iter().any(|class| class[byte] & bit != 0) {
+            return Err(RawModelError::new("逐根初始化条目与固定位图重复"));
+        }
     }
     // 五个位图逐字节检查，帧大小只受函数 frame_size 限制，不存在固定 lane 上界。
     if slot_count % 8 != 0 {
@@ -537,6 +589,18 @@ fn map_record(layout: &SafepointLayout) -> Vec<u8> {
     while output.len() % 4 != 0 {
         output.push(0);
     }
+    // 尾部追加逐根初始化条目：先计数，再固定 12 字节条目。条目按帧内字下标严格递增，
+    // 与固定位图互斥（校验在 `verify_map_record` 执行）。
+    output.extend_from_slice(
+        &u32::try_from(layout.typed.len())
+            .expect("逐根初始化条目数适配 u32")
+            .to_le_bytes(),
+    );
+    for root in &layout.typed {
+        output.extend_from_slice(&root.word.to_le_bytes());
+        output.extend_from_slice(&root.root_kind.to_le_bytes());
+        output.extend_from_slice(&root.init_byte.to_le_bytes());
+    }
     output
 }
 
@@ -570,6 +634,8 @@ pub(crate) struct DecodedSafepoint {
 pub(crate) struct DecodedMap {
     pub(crate) slots: [Vec<u32>; 5],
     pub(crate) registers: [u16; 5],
+    /// 由帧内初始化字节门控的根，按字下标递增。
+    pub(crate) typed: Vec<TypedRoot>,
 }
 
 /// 解码后的栈图 section。
@@ -661,5 +727,22 @@ fn decode_map(record: &[u8]) -> Result<DecodedMap, RawModelError> {
         }
         cursor += bytes;
     }
-    Ok(DecodedMap { slots, registers })
+    while !cursor.is_multiple_of(4) {
+        cursor += 1;
+    }
+    let count = u32::from_le_bytes(record[cursor..cursor + 4].try_into().expect("计数字段"));
+    let mut typed = Vec::with_capacity(count as usize);
+    for index in 0..count as usize {
+        let at = cursor + 4 + index * TYPED_ROOT_BYTES;
+        typed.push(TypedRoot {
+            word: u32::from_le_bytes(record[at..at + 4].try_into().expect("条目字段")),
+            root_kind: u32::from_le_bytes(record[at + 4..at + 8].try_into().expect("条目字段")),
+            init_byte: u32::from_le_bytes(record[at + 8..at + 12].try_into().expect("条目字段")),
+        });
+    }
+    Ok(DecodedMap {
+        slots,
+        registers,
+        typed,
+    })
 }

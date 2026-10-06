@@ -92,6 +92,35 @@ identity handle；编译器声明的位来自 `RegionPublish` 的操作数，运
 成为唯一 runtime owner；transfer message 未消费前，region bytes 属于 pending pressure，不能
 reset 或复用，两侧 owner 账本在接收方采纳后才一起移动。
 
+### LocalHeap arena 与 LargeMapping {#localheap-large-mapping}
+
+LocalHeap 的数据段按 `arena_bytes` 对齐；当前记录布局的 side metadata 为 55,576 字节，随后是每个 block 64 字节的 `HeapBlockRecord`，最后是独立的 `LargeMappingRecord` 表。表容量固定为 64，每条记录 32 字节：`base:u64`、`payload:u64`、`bytes:u64`、`generation:u32` 和 `state:u32`。这些字段是 range identity、payload identity 与生命周期账本，不是可跨 safepoint 保存的用户引用；表不参加普通 block 的 object-start、mark 或 line-live 位图。
+
+请求的 `header + align - 1 + payload_bytes` 超过单个 Immix block，或 `align` 超过配置的 `large_align_limit` 时，分配器进入 LargeMapping slow path。它以平台页为最小粒度向上取整总范围，按 `max(align, page_bytes)` reserve 并 commit 整段，在 payload 前写入统一的 16 字节 object header、清零 payload，再以 release 顺序将记录状态置为 `ACTIVE`。`payload = align_up(base + header, mapping_align)`；header 的 `payload_size_or_forward` 保存实际 payload 字节数，不能以 block size 或类型静态 size 替代运行时请求。空间或记录槽不足走既有 runtime fatal，不截断、回退到普通 block 或返回伪造地址。
+普通 block slow path 通过 `gc_refill_line(kind, payload_bytes, align, flags)` 取得已对齐 run 起点：先检查当前 TLAB 的 `cursor/limit`，只有请求放不下时才提交并打开下一个 block，同时回写 processor 的 TLAB。返回 0 只表示没有可用 block 或请求不能容纳；`gc_alloc_slow` 不得把它解释成可继续写入的伪地址。
+
+镜像当前还提供 `gc_move_one(root)` 这一受限复制原语：读取真实 header 的 type/size，按请求字节数复制 payload，先在新对象完成初始化，再以 forwarding 标志和新 payload 地址发布旧 header；重复命中直接返回既有 forwarding。LargeMapping 不伪装成普通 block 搬迁，调用方必须走其独立 range 生命周期。该原语只负责一个对象的复制与 forwarding 发布，root/field 的回写和 cycle 级 work/credit 仍由 collector 协议负责。
+当前解析入口从 processor 的 TLAB cursor 反推当前 arena，按稳定槽序扫描 `ACTIVE` 记录；只有 `payload <= address < payload + bytes` 的地址解析为该 mapping 的 payload，其它地址返回空。大对象不能通过普通 block candidate 或 line return 单独释放；后续归还必须继续使用 `LargeMappingReturn` 的 span/generation/exactly-once 门禁。页提交 owner 仍记入物理 committed ledger，mapping 表本身位于 arena side metadata 的已提交记录区。
+
+### 镜像执行边界与 block 账本 {#image-execution-boundary-block-ledger}
+
+LocalHeap 的分配、minor evacuation、major exact mark/sweep、trace cursor、barrier scratch、
+MarkTicket、EdgeDelta、candidate、pacing 与四类 block return 均由 `std/runtime/*.gg` 执行。
+compiler 侧只保留 `local_heap_schema`、header 编码、metadata section、descriptor verifier 与
+负向契约检查；不存在与镜像算法并行的 Rust world/LocalHeap 执行体。arena side metadata 在
+固定 side 区后追加 `HeapBlockRecord`：record 保存 block identity、generation、commit 状态和
+当前 state；打开 block 只允许 `Free -> Allocating`，minor reset 只有在 scanner/allocator/
+forwarder lease、pin、resource 与 candidate 全部清零后才可回到 `Free`。major sweep 逐 object
+检查 object-start 与 mark bitmap，再重建 line-live、page-cover、card 与 block state；活对象
+不因 block 扫描顺序改变，未标记对象只在 forwarding/candidate 门禁闭合后清除。
+
+Gugu image 的 coordinator 以固定 worklist 和 owner credit 追踪标记收敛：根、barrier、
+MarkTicket 与 EdgeDelta 各自增加可追踪 credit，消费完成后归还；只有 worklist、已发布 batch、
+mailbox、barrier scratch、producer epoch、forwarding work 与 pending credit 同时归零才结束
+cycle。`gc_image.gg` 通过 action key 的 `runtime_gc_case` 选择 Linux PIE 探针；探针输出不是
+算法后门，而是对每条状态转移、错误边界和成功输出的固定观察面。
+屏障在 processor 页的 `+3560` 保存固定 scratch 地址；scratch 头部为 `count:u64`、`overflow:u64`、`publish_epoch:u64`，`+64` 起为 512 条 32 字节记录（source block、target block、kind、sequence）。ordinary/reserved 两个入口都复用同一追加路径，满载只置 overflow 而不覆盖旧记录；flush/credit owner 尚未接入前，overflow 会阻止把该 scratch 误报为已清空。
+
 `SharedHeap` 使用 stable handle table。handle 是逻辑 object identity，不是用户可观察的
 整数；其内部键至少包含 table/cage 标识、slot 或 object id 和 generation。slot 保存
 当前 payload descriptor、TypeId、generation、access-guard 状态和 forwarding lease。对象
@@ -278,7 +307,7 @@ Linux 使用 `.gugu.types`，Windows 使用 `.gugutyp`。header 字段顺序为�
 
 ```text
 magic:                [u8; 8] = "GUGUTY01"
-version:              u16 = 2
+version:              u16 = 3
 pointer_size:         u8 = 8
 endian:               u8 = 1
 type_count:           u32
@@ -296,7 +325,98 @@ section_len:          u64
 
 所有 pool offset 8 字节对齐、位于 section 内且不重叠。record、program 和 name 按内容稳定排序后布局，但 `TypeRecord` 本身仍按 `TypeId` 顺序。所有 padding 为 0。
 
-type section 的版本 2 把记录固定为 80 byte：`size u64`、`align u32`、`flags u32`、`name_offset/name_len u32`、`trace_offset/trace_len u32`、`value_offset/value_len u32`、`copy/drop/publish_glue_rva u64` 与两个保留字，记录里不再存放稳定键，记录顺序即 `TypeId`。本表的编码是规范性定义：encoder 只负责产出能被本表解码且语义等价的字节，不要求与表逐字节一致；`trace_kind` 与 type flag 的一致性由 verifier 交叉校验。
+type section 的版本 3 把记录固定为 80 byte：`size u64`、`align u32`、`flags u32`（九位类型旗标，见上表）、`name_offset/name_len u32`、`trace_offset/trace_len u32`、`value_offset/value_len u32`、`copy/drop/publish_glue_rva u64` 与两个保留字，记录里不再存放稳定键，记录顺序即 `TypeId`。本表的编码是规范性定义：encoder 只负责产出能被本表解码且语义等价的字节，不要求与表逐字节一致；`trace_kind` 与 type flag 的一致性由 verifier 交叉校验。
+
+`Symbol::TypeDescriptor(key)` 与 `type section` 是同一条记录：符号地址等于 section 起点加 `records_offset` 再加 `type_id * 80`，记录本身就是描述符。编译器不再为每个类型另写一份只含 `size`/`align` 的副本，运行期按该地址读到的字节与 verifier 校验过的记录逐字节相同。`TypeId` 是真空编号（`spec/types.md`）：`type_id[T]()` 在 LIR 期就物化为 `u32` 常量，`as_int()` 之后可作数组下标，不依赖任何链接期地址。
+
+### compiler-storage 类型
+
+闭包环境与 spawn 参数包不是语言类型，但它们是真实分配出去的 managed 对象，因此有 `TypeId`：
+在实例闭合期间，编译器为每个「具名定义 + 具体捕获类型列表」生成存储类型记录，与其它具体类型
+一起排序编号并冻结；LIR 之后只按同一份键查表，不再自造 descriptor。规范字节沿用 GBC1 风格、
+经 `gugu-mono-v1` 域摘要（与语言类型同域），字段为：
+
+```text
+u16 tag            = 0x8000（与语言类型 tag 空间不重叠）
+u8  role           = 1 闭包环境 / 2 spawn 参数包
+u8  representation = 0 direct / 1 compressed / 2 shared-handle
+u64 target_len; [u8] target     角色目标稳定身份（定义稳定键）
+u64 size
+u64 align
+u64 field_count
+[u64 offset, u8[32] key] * field_count   按 offset 升序
+```
+
+闭包环境的槽宽恒为 8 byte：direct 保存 capture cell 地址、compressed 保存 cage 压缩字、
+shared-handle 保存 stable handle。direct 与 compressed 两种表示的每个槽都是一个 managed
+**直接指针字**，因此它们的 trace metadata 是「从字 0 起连续 `field_count` 个受管直接指针」
+（`Pointers { count }`，发出一条覆盖全部槽的 `Direct`），**不得**声明成内联的被捕获类型：
+那会让 trace 递归展开该类型的布局，捕获 `[int; 512]` 时展开出 512 个标量、一个受管字都不
+登记，descriptor 退化成 `TraceKind::None`，收集器扫不到捕获对象，nursery 重置后它就是复用
+内存。shared-handle 表示的槽是身份而不是地址，按「无 direct managed pointer」登记，扫描由
+descriptor 驱动的 handle visitor 负责。因此同一闭包的不同具体实例只要有不同捕获类型，就得到不同
+`TypeId`；捕获类型与表示策略一起进入身份，不允许仅按 `DefId` 复用。capture cell 与 async 结果
+不另发记录：它们的 payload 就是被捕获类型 / async 结果类型本身，逃逸与 placement 已经把它们
+物化成该类型的 managed box，为同一布局再发一条 descriptor 只会在类型表里制造第二个身份。
+
+spawn 参数包是原始 ABI 车道缓冲（9 个整数车道 + 8 个 16 byte 浮点车道，车道区 200 byte，加 8
+byte 保留共 208 byte、16 byte 对齐），managed 车道由子协程入口的 `MorestackEntry` 栈图描述，
+因此包里不登记字段。布局只允许在 `runtime/coroutine_layout.rs` 的 `COROUTINE_PACK_*` 常量里定义：
+入口片段、LIR 发包点与调度器复制点都从这同一份常量取偏移，`runtime/tests.rs` 的镜像断言把它与
+`std/runtime/scheduler.gg` 的 `COROUTINE_PACK_BYTES` 钉在一起。
+
+**复制先于入队。** LIR 只把包做成调用方帧上的临时区，调度器在子协程入队前把整包复制到子协程
+自持的原始内存，初始帧只携带 `(code, 包副本地址)`：`spawn` 返回后调用方帧即可被复用，子协程
+第一次运行往往发生在更晚的 park 之后，读父帧就是悬垂读。复制源与目标在交接期间都可定位，包
+的 managed 车道由 typed 根登记负责（`gc:<case>` 探针与 `spawn-reuse` 用例覆盖这条边界）。
+
+## typed 动态根登记 {#typed-dynamic-root-registry}
+
+跨栈存活的值（spawn 参数包、协程结果、channel 槽与等待载荷、select 获胜项、Join 结果、
+active TurnRegion、消息、pin 记录）不能靠扫描 scheduler 的整片 raw 区找出来。登记表给出
+稳定入口：`[容量, 已发布条数][固定容量记录]`，处理器页只有一个槽位指向表首
+（`PROCESSOR_DYNAMIC_ROOTS_OFFSET`）。一条记录是 `identity / slot / descriptor / count /
+kind / flags` 六个字：`identity` 是发布者的稳定身份（热记录地址，raw 控制地址本身不是根），
+`slot` 是发布者自持、不可移动的真实载荷槽，`descriptor` 是**按类别解释**的载荷描述，`count`
+是载荷内的车道/元素数，`flags` 位 0 表示载荷已完整初始化。
+
+spawn 参数包的描述就是 **lane map**：每个车道 3 位，`0` 表示不是根，`n + 1` 表示栈图根种类
+判别值 `n`（0=Direct、1=Interior、2=Handle、3=Compressed、4=StackInterior），车道顺序为整数
+车道 0..8（步长 8）再接浮点车道（起点 72、步长 16）。编译器在发包点按机器值的 provenance
+分类（`coroutine_pack_trace_code`），把 map 作为 `spawn(code, env, trace, result_kind)` 的第三参
+交进调度器，第四参是**结果字**里根的 lane map 编码（结果类型不含根车道时为 0）。调度器在
+**入队之前**把参数包复制进子协程自持的原始内存、登记参数包记录，并把结果种类记进冷记录的
+载荷状态字：包的复制品才是子协程入参的唯一真相，帧里不会再引用父协程的临时缓冲。
+
+结果载荷的死亡窗口是「结束到被取走」：子协程结束时结果值只存在于冷记录里，标量结果内联，
+含根车道的结果按机器车道内联在结果槽里（`CoroutineCold::result` 起的 16 字节，正是子协程返回
+ABI 携带的两个机器字），根的 lane map 记在载荷状态字里。`finish_hot` 先按状态字就地结清 spawn
+参数包登记，再按结果种类发布结果登记（`DYNAMIC_ROOT_KIND_RESULT`，`count` 为 1，车道 0 就是
+结果槽本身）；`take_result` 是结果字的唯一读取入口，Join 与 select 都经它取走结果并结清登记，
+因此「发布→结清」严格一次。取走时按元素描述符（`TypeRecord`，首字是 payload size）把结果区
+整份复制进目标槽，而不是只搬一个机器字：两字载荷（例如带捕获的闭包）必须两字都送达。描述符
+size 超过结果区上界时直接 fatal——更大的结果载荷需要子侧装箱，属于尚未接管的迁移缺口。
+载荷状态字（`CoroutineCold::payload_state`，偏移 504）位 0 是参数包
+发布位、位 1 是结果发布位、位 3 起 3 位是结果根的 lane map 编码；未发布过载荷的协程
+（bootstrap/main）三处为零，不允许也无从结清。
+
+固定访客 `gc_visit_dynamic_roots`（`roots.gg`）按 `kind` 解释描述，把载荷里的受管车道逐条写成
+标准根记录（`address / kind / value`）：spawn 载荷逐车道读 lane map，只对非零编码的车道取值，
+车道地址由包基址加车道偏移算出；结果载荷只有一个车道，地址就是结果槽本身。未知类别、未初始化
+载荷、越过车道数的 `count`、结果载荷里非 0 的车道号都直接 fatal——访客宁可失败也不保守扫描。
+产出的根记录与帧扫描共用同一缓冲区契约（`needed`/`written` 头与 32 字节记录），因此标记阶段
+可以无缝串接栈根与动态根。
+
+发布与结清都以身份为单位，并要求**恰好一次**：身份重复、表满、结清不存在的身份都是不变量
+错误，直接 fatal——已发布的载荷绝不能被静默丢弃或重复结清。同一协程的两种载荷在时间上不重叠
+（参数包死于结束、结果生于结束），因此可以复用同一个身份：`finish_hot` 先结清参数包、再发布
+结果，`take_result` 结清结果，顺序由载荷状态字保证。
+
+第一版只接线 spawn 参数包（`DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD`）与结果字（`DYNAMIC_ROOT_KIND_RESULT`）；
+其余类别（channel 已占用槽/等待载荷、select 获胜项、active TurnRegion、消息、pin 记录）的判别值
+在该类别的生产者落地时按同一枚举追加，届时各自定义自己的描述形态，并在访客里给出对应解释。
+表布局与 `.gg` 侧常量由 `runtime/tests.rs` 的镜像断言钉死，记录布局由 `dynamic_roots_schema.rs`
+的 const 断言钉死。
 
 ## heap object header
 
@@ -392,7 +512,7 @@ slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理�
 
 block 身份是全局稠密的 `ManagedBlockId`（`descriptor * 64 + block`，arena 内下标只占低 6 位），`BlockRef` 在它之上再带 block generation：管理权转移不改变 payload 的 heap/arena 定位，消费端也必须按全局身份解析来源块，只带 arena 内下标的旧编码会被拒绝。arena 登记在世界级 `managed_arenas` 表里，每项记录 descriptor、heap owner、heap 内 arena 槽、extent arena id 与 arena 基址；`allocate_managed` 只在已登记且仍有空 block 的 arena 上分配，`commit_managed_block` 按调用方指定的 extent arena 提交 block，不再隐式落到「第一个 arena」。
 
-本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 4` 契约段（版本 4 相对 3 的变化：块状态目录扩为 `allocating`/`candidate`/`sweeping`/`evacuating`/`return-pending`/`owned-free`/`free`，归还入队位、large span 成员与 span 起止位置进入 `reserved`，块记录成为 managed extent 与归还门禁的唯一账本；版本 3 相对 2 的变化：块记录新增 `candidate_job` 绑定与候选绑定语义、lease 计数成为候选 gate 的输入、块世代在释放时推进、`ManagedBlockId` 的 arena 部分就是 arena descriptor）（arena 2 MiB、block 32 KiB、line 128 byte、granule 16 byte、TLAB span 8 block、object-start/mark 各 131072 bit、`page_covering_object` 512 项、card 表 4096 byte、`ObjectHeader`/`HeapArenaMetadata`/`HeapPinEntry`/`HeapBlockRecord` 四条记录（block 记录 64 字节、align 64，含全局 `block_id`、`generation`、arena descriptor/block 下标、`manager_owner`、`incoming_leases`、`mutation_version`、三类 lease 计数、`candidate_job` 与 `state`）、arena/block/generation/representation 目录与 `HeapTriggerProfile`），派生规模只由 arena/block/line 参数推导；`RuntimeRawModel` schema 升到 19，`local-heap-*` 段、dump 行与需求视图进入 `ImagePlan` 与 CLI JSON，`resources/runtime/heap.gg` 提供同源 Gugu 记录并由 `local_heap_layout::verify_source` 逐字段校验布局。运行时参照实现按契约建立每 owner 的 nursery/old/resource/pinned/large arena：32 KiB block 经 extent 层按页提交（不进入 `OwnerAccounting`，因此 `runtime_committed_bytes` 口径不变），分配在 line run 内推进并记录块内碎片，nursery 走 8 block 局部 span，`gc_trace.rs` 的解释器按 Bitmap/Program 扫描 managed word 并用 granule + 页内起点向前扫描解析 interior 指针。block 选择式 major evacuation、跨 owner `SharedHeap` handle、radix page map 的镜像落地与空 block 交还 provider 分别由阶段 45–47 与 55 接手；heap 公共统计属阶段 67。
+本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 5` 契约段（版本 5 相对 4 的变化：新增独立 `LargeMappingRecord` 表、固定大映射页粒度，并把 page-cover/object-start/mark 的运行期消费者接入分配与屏障路径；版本 4 相对 3 的变化：块状态目录扩为 `allocating`/`candidate`/`sweeping`/`evacuating`/`return-pending`/`owned-free`/`free`，归还入队位、large span 成员与 span 起止位置进入 `reserved`，块记录成为 managed extent 与归还门禁的唯一账本；版本 3 相对 2 的变化：块记录新增 `candidate_job` 绑定与候选绑定语义，lease 计数成为候选、扫描、迁移和 allocator 之间的共同门禁）。构造时继续以 arena/block/line/granule 常量推导 bitmaps、page-cover、card 与 side metadata 字节数，并由 source-layout verifier 逐字段拒绝漂移。
 
 ## trace descriptor
 
@@ -507,13 +627,15 @@ value program 用于编译器在 GIR 中展开语义复制、销毁、发布和 
 
 不可达且仍含最后 resource lease 的对象进入受限 release queue 并保持到 descriptor 已执行；队列只运行 compiler/runtime 生成的 resource drop glue，不执行任意用户析构或 finalizer，不允许复活、分配、panic 或等待。同一对象最多排队一次，release 完成后才可回收。
 
+value glue 的符号也受后端的真实发射门禁约束：只有 lowering 实际发出 `CallTarget::Runtime` 或专用 value op 的入口才检查，不会因为 `RuntimeCall` 枚举中存在一个由 lowering 内联的名字而误报。未接管的 `value_*`、COW、resource、pin 和动态擦除入口必须留在显式迁移缺口清单；它们不是定义，不能被 bench 当作镜像运行期证明。实现接管时，入口必须绑定到 `GLUE_DEFS` 的 Gugu `Item`/machine `Fragment`，并同步移除缺口记录。
+
 ## 镜像根、vtable 与源码 metadata
 
 Linux `.gugu.meta` / Windows `.ggmeta` 保存根、动态分派和运行时源码位置 metadata。header 固定为：
 
 ```text
 magic:                   [u8; 8] = "GUGUMT01"
-version:                 u16 = 1
+version:                 u16 = 2
 pointer_size:            u8 = 8
 endian:                  u8 = 1
 root_count:              u32
@@ -544,6 +666,39 @@ stride:          u64
 kind 为 0 global、1 OS-thread-local template、2 coroutine-local template、3 runtime static root slot。kind 0/3 的 `location` 是 image RVA，kind 1 是 module TLS block byte offset，kind 2 是 coroutine-local layout byte offset。count 至少为 1；单值 stride 为 0，数组 stride 必须不小于类型大小。flags bit 0 为 `READ_ONLY_AFTER_INIT`，bit 1 为 `LAZY_SLOT`，其他位为 0；kind 1/2 必须设置 lazy，runtime 只在对应 thread/coroutine initialized bitmap 的 bit 已发布后扫描。records 按 kind、location、TypeId 排序且同一实例内存范围不重叠。
 
 非零/非纯常量 global 初始化必须设置 `LAZY_SLOT`：初始化器先在自己 GIR local中构造完整值，release写 global并最后设置 initialized bit；失败/panic时 bit保持 0并清理 local。GC只扫描 bit已设置的 global，因而不会读取半初始化 managed字段。纯静态常量可以在镜像加载时视为已初始化。
+
+### 静态块与初始化器发布协议
+
+每个 `Symbol::Global { key, thread_local, bytes }` 对应一块镜像内静态存储，布局固定为
+「`initialized` 位字 8 byte + 值槽 `bytes` byte」，符号地址是**块首**；取静态地址的指令
+（`StaticRef`）返回的是**值槽**地址，即块首加 8。块尺寸只由定义的声明类型决定，
+`StaticRef`、`StaticInitialized` 与初始化器发布三处必须给出同一个符号：尺寸分歧在编译期失败。
+位置由 writer 决定：非局部项落在可写数据区（Linux 保留区 / Windows `.data`），线程/协程局部项
+落在对应 TLS 模板（TLS 存储与模板块放置仍待接线）。
+
+初始化器（`MonoKind::StaticInit` 实例）在返回前发布结果：聚合结果按字节从自己的地址复制进
+值槽，多车道标量按车道依次落槽，最后用 release 语义写位字。因此
+
+- 位字只在值完整后可见，读者要么看到旧的 0（随后走初始化路径），要么看到完整值；
+- 初始化器 panic 时位字保持 0，值槽可能含半构造内容，收集器不会扫描它；
+- 值槽只在位字发布后才被 `RootRecord`（`LAZY_SLOT`）纳入扫描。
+
+读点守卫由 GIR 在静态引用处合成：`StaticInitialized` 读块首位字，为 0 时以 `CallSite::StaticInit`
+（局部 static 的声明点用 `CallSite::Initializer`）调用初始化器，再经 `StaticRef` 取得值槽地址。
+守卫的调用边先落到独立块再跳进读点，避免「带结果参数的调用边」与「无分支参数的普通边」指向同一块。
+初始化器实例**不可被 GIR 内联**：它的发布动作挂在自身 `Return` 降级上，内联只搬语句会让初始化
+静默变成空操作。
+
+局部 `static` 的绑定槽只保存存储地址（供闭包捕获），本 owner 内的读写都经同一存储 place，
+因此写入跨调用可见。受管值类型（值槽含受管指针）的静态仍被拒绝，待 `RootRecord` 与 `LAZY_SLOT`
+扫描接线后再放开。
+
+尚未接线：TLS 局部项的模板块放置与运行期扫描，以及受管静态值的根记录生产者。
+
+根记录的 `location` 是镜像内真实地址，布局后才知道：编译器只产出稳定符号名，写入
+`BlobRelocation { offset, symbol }` 清单（blob 内字节偏移 + 已登记符号），由两个 writer 在
+`defined_layout`/`assign_rvas` 之后回填 8 字节地址；符号缺失或偏移越界/未对齐一律链接失败，
+不留零值让运行期读到无效地址。action key 只含符号名与偏移，因此不含运行地址。
 
 vtable 是 variable record，由 `vtable_count + 1` 个 `u64` index 定界：
 
@@ -676,6 +831,24 @@ card table 每 512 heap 地址字节使用 1 byte；minor cycle 在 mutator 已�
 
 屏障与边缓存的实现证据：`barrier_schema.rs` 把上述缓存与预留固定成 `BARRIER_SCHEMA = 2` 契约段——每 processor 256 项 `CardMarkBuffer`（`CARD_MARK_BUFFER_ENTRIES = 256`）、每次写入 2 个 shade slot（`SHADE_SLOTS_PER_WRITE = 2`）、每 processor 512 项 edge scratch（`EDGE_BUFFER_ENTRIES = 512`，同时也是 `EdgeDemand.reserve_slots` 的预留证明）、每次写入至多 2 项边变更（`EDGE_DELTAS_PER_WRITE = 2`）、`CardMarkBatch` 的 13 个规范字段（`CARD_MARK_BATCH_FIELDS = 13`，不含 field 地址与 managed pointer）与 6 个 flush 原因（`CARD_MARK_FLUSH_REASONS`：`buffer-full`、`processor-handoff`、`foreign-bridge`、`memory-pressure`、`minor-stop`、`producer-stop-gate`）。verifier 拒绝「边变更上界不等于 shade 上界」「scratch 项数小于每次写入上界」「batch 字段集合与消息 schema 不同源」的契约；`barrier-contract-fingerprint`、`barrier-demand`、`barrier-card-granularity-bytes`、`barrier-card-mark-buffer-entries`、`barrier-card-mark-stamp-entries`、`barrier-flush-reason-count`、`barrier-card-mark-batch-fields`、`barrier-record-count` 与 `barrier-runtime` 进入 `ImagePlan`、`-Zdump-runtime` 与 CLI JSON。
 
+### 镜像侧的六步执行体
+
+`barrier.gg` 在独立 raw 页上实现完整六步（read-old → shade-old → shade-new → store → card-mark →
+edge-summary）。页面布局是 64 字节 `CardMarkBufferHead` 头、256 条 32 字节 `CardMarkEntry` 与 256 条
+32 字节直接映射 `CardMarkStamp`；processor 页 `+3576` 保存该页地址，`+3584` 是栈扫描 epoch，
+`+3592` 是 arena 基址，`+3600` 是标记活跃标志。read-old 由编译器在配对 `Load` 完成，store 仍由
+配对 `Store` 执行（把两者合成单一物理发布组是后续单元）。
+
+shade 只在标记周期开启时发生：`mark_epoch` 单调推进，周期开始时清空 arena 的 mark 位图，活跃
+标志单独表达「当前有标记周期」，因此旧周期的 shade 不会与新周期混淆。删除屏障对非空旧值 shade，
+插入屏障只在新值非空且当前栈仍为 grey（栈扫描 epoch 与 `mark_epoch` 不等）时 shade。card 键只在
+owner 位于 old/immortal 且新值落在 nursery/aging 时登记，append 命中 stamp 只累加 `marks`，冲突
+只淘汰 stamp 索引而不丢已登记键；buffer 满时先把已有键 flush 到各 arena 的 card table（owner-local
+写，幂等）并清空 stamp，再落新键。跨 block 的删除（旧目标与本对象不同 block 且不等于新值）与插入
+各记一条 32 字节 edge delta，满载只置 overflow 账本。`gc_barrier_reserve(max_shades, max_card_marks)`
+提供同一页上的额度预留；六原因中除 `buffer-full` 之外的五个由 cycle 调用同一个 `gc_barrier_flush`
+入口。
+
 ## collector 使用 metadata 的阶段
 
 minor cycle 对仍位于 LocalHeap nursery 的对象停止 mutator，复制可移动对象并更新根/字段；
@@ -771,7 +944,7 @@ GC metadata verifier 还必须检查 `BarrierReserve.max_card_marks` 与 concret
 ## 实现接入证据 {#implementation-evidence}
 
 `RuntimeRawModel`（query 30）在该阶段升到 schema 12、当前为 schema 23，在同一 `RuntimeRawContractV1` 中并入
-`GcMetadataRuntimeContract`：schema 2（schema 2 起 trace descriptor 带 kind 字节、value program 带两阶段动作；root/vtable/source 段主版本仍为 1）、section 主版本 1、section 魔数 `GUGUGC01`、
+`GcMetadataRuntimeContract`：schema 3（schema 2 起 trace descriptor 带 kind 字节、value program 带两阶段动作；schema 3 起 root 段是镜像根记录，四类真实位置加 `READ_ONLY_AFTER_INIT`/`LAZY_SLOT` 标志）、section 主版本 2、section 魔数 `GUGUGC01`、
 arena 2 MiB / block 32 KiB / line 128 byte，与 slab/extent 参数同源。
 `GcMetadataDemand` 由冻结类型表（`TypeUniverse.records` 与 `vtables`）推导，
 类型数/vtable 数/trace 与 value program 字节数/根范围计数进入契约 fingerprint，

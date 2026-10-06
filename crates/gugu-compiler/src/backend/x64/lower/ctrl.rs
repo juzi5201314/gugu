@@ -25,12 +25,13 @@ use crate::lir::body::{BlockId, Body, EdgeId, Terminator, ValueId};
 use crate::target::TargetName;
 
 use super::call;
-use super::{Builder, LoweringError, SiteValue, imm, reg, value_move};
+use super::{Builder, LoweringError, SiteValue, ensure_runtime_glue, imm, reg, value_move};
 
 const REL32: &[OperandKind] = &[OperandKind::Rel32];
 
 /// 复用与 `ContextSwitchCode::fixed()` 同源的 62-byte 片段。
 pub(super) fn coroutine_switch(builder: &mut Builder) -> Result<(), LoweringError> {
+    ensure_runtime_glue("coroutine_switch")?;
     // rdi=保存位置，rsi=恢复位置，rdx=CoroutineHot*，rcx=LogicalProcessor*。
     // 片段本身写 r14/r15，属于 runtime ABI，不走普通序列的保留寄存器检查；
     // 选指站点用 call 进入同一符号，避免在普通函数体里直接写 r14/r15。
@@ -195,6 +196,7 @@ pub(crate) fn terminator(
             Ok(())
         }
         Terminator::ResumePanic { .. } => {
+            ensure_runtime_glue("panic_resume")?;
             builder.emit(
                 "jmp",
                 REL32,

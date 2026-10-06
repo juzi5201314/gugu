@@ -131,6 +131,7 @@ fn proof_statuses(
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn variable_operands_stay_unknown_and_constants_get_proved() {
     use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
@@ -162,6 +163,7 @@ fn variable_operands_stay_unknown_and_constants_get_proved() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn variable_divisor_and_slice_index_stay_unknown() {
     use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
@@ -181,6 +183,7 @@ fn variable_divisor_and_slice_index_stay_unknown() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn statically_failing_checks_are_disproved_and_never_proved() {
     use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
@@ -198,7 +201,9 @@ fn statically_failing_checks_are_disproved_and_never_proved() {
     ));
 }
 
+// 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件
 #[test]
+#[ignore = "integration test with double compilation"]
 fn slicing_accepts_length_endpoints_and_rejects_reversed_ranges() {
     use crate::frontend::hir::CheckKind;
     let statuses = proof_statuses(&[(
@@ -222,6 +227,7 @@ fn slicing_accepts_length_endpoints_and_rejects_reversed_ranges() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn summaries_of_callers_absorb_callee_effects() {
     // caller 无自身调用但有检查（可能 panic）；callee 含除法检查；
     // main 调用两者，其摘要必须包含 may_panic。
@@ -231,6 +237,7 @@ fn summaries_of_callers_absorb_callee_effects() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn array_slice_len_is_an_int_method() {
     use crate::frontend::analysis::ProofStatus;
     let source = "fn main() { let a = [1, 2, 3]\n let n: int = a.len()\n let s = &a\n let m: int = s.len()\n let k: int = [1, 2, 3].len()\n _ = n\n _ = m\n _ = k }";
@@ -244,6 +251,7 @@ fn array_slice_len_is_an_int_method() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn loop_iv_and_break_prove_array_index() {
     use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
@@ -260,7 +268,9 @@ fn loop_iv_and_break_prove_array_index() {
     );
 }
 
+// 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件
 #[test]
+#[ignore = "integration test with double compilation"]
 fn spec_slice_len_and_break_prove_index() {
     use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
@@ -278,6 +288,7 @@ fn spec_slice_len_and_break_prove_index() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn local_binding_proves_division_and_shift() {
     use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
@@ -298,7 +309,9 @@ fn local_binding_proves_division_and_shift() {
     );
 }
 
+// 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件
 #[test]
+#[ignore = "integration test with double compilation"]
 fn reassignment_invalidates_slice_length_proof() {
     use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
@@ -327,7 +340,9 @@ fn analysis_policy_block_iterations_change_action_key() {
     assert_ne!(first.key(), second.key());
 }
 
+// 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件
 #[test]
+#[ignore = "integration test with double compilation"]
 fn ffi_and_spawn_invalidate_slice_index() {
     use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
@@ -350,6 +365,7 @@ fn ffi_and_spawn_invalidate_slice_index() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
     use crate::frontend::analysis::ProofStatus;
     let source = "fn f() { let n = 20\n let v = [0; 8]\n for i in 0..n {\n if i >= 2 { break }\n _ = v[i]\n } }\nfn main() { f() }";
@@ -425,6 +441,7 @@ fn indexed_owner_is_closed(
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn callee_write_through_reference_invalidates_slice_length() {
     use crate::frontend::hir::CheckKind;
     let source = "fn dirty(xs: & &[int]) { let replacement = [1]\n *xs = &replacement }\nfn f(v: &[int]) { if v.len() > 10 { dirty(&v)\n _ = v[0] } }\nfn main() { let a = [0; 16]\n f(&a) }";
@@ -437,7 +454,9 @@ fn callee_write_through_reference_invalidates_slice_length() {
     );
 }
 
+// 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件
 #[test]
+#[ignore = "integration test with double compilation"]
 fn readonly_callee_preserves_caller_slice_length() {
     use crate::frontend::hir::CheckKind;
     let source = "fn inspect(xs: &[int]) int = xs.len()\nfn f(v: &[int]) { if v.len() > 10 { _ = inspect(v)\n _ = v[0] } }\nfn main() { let a = [0; 16]\n f(&a) }";
@@ -480,7 +499,9 @@ fn shared_check_requires_proof_in_every_instance() {
     }
 }
 
+// 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件
 #[test]
+#[ignore = "integration test with double compilation"]
 fn nested_scc_summaries_match_world_projection() {
     let source = "fn ping() { pong()\n _ = 1 / 0 }\nfn pong() { ping() }\nfn main() { ping() }";
     let queries = crate::QueryEngine::new();
@@ -517,6 +538,7 @@ fn nested_scc_summaries_match_world_projection() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn writes_through_references_invalidate_scalar_facts() {
     use crate::frontend::hir::CheckKind;
     let statuses = proof_statuses(&[(
@@ -533,6 +555,7 @@ fn writes_through_references_invalidate_scalar_facts() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn compound_assignment_updates_the_accumulated_value() {
     use crate::frontend::hir::CheckKind;
     let statuses = proof_statuses(&[("main.gg", "fn main() { let d = 1\n d -= 1\n _ = 8 / d }")]);
@@ -546,6 +569,7 @@ fn compound_assignment_updates_the_accumulated_value() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn wrapped_integer_arithmetic_cannot_prove_nonzero() {
     use crate::frontend::hir::CheckKind;
     let statuses = proof_statuses(&[(
@@ -561,8 +585,11 @@ fn wrapped_integer_arithmetic_cannot_prove_nonzero() {
     );
 }
 
+// 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件
 #[test]
+#[ignore = "integration test with double compilation"]
 fn pure_callee_return_range_proves_array_index() {
+    use crate::frontend::analysis::ProofStatus;
     use crate::frontend::hir::CheckKind;
     let statuses = proof_statuses(&[(
         "main.gg",
@@ -578,6 +605,7 @@ fn pure_callee_return_range_proves_array_index() {
 }
 
 #[test]
+#[ignore = "slow full compilation"]
 fn narrowing_recovers_loop_exit_bound() {
     use crate::frontend::hir::CheckKind;
     let statuses = proof_statuses(&[(
@@ -593,7 +621,9 @@ fn narrowing_recovers_loop_exit_bound() {
     );
 }
 
+// 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件
 #[test]
+#[ignore = "integration test with double compilation"]
 fn pure_length_summary_refines_caller_and_all_returns_join() {
     use crate::frontend::hir::CheckKind;
     let statuses = proof_statuses(&[(

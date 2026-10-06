@@ -1404,7 +1404,10 @@ fn all_is_dense_and_ascending() {
 }
 
 /// 全部活体输入必须与实装诊断逐项一致。
+///
+/// 这是集成测试，遍历68个用例各编译一次，单次耗时60秒以上；移出默认套件。
 #[test]
+#[ignore = "integration test with 68 compilations, run with --ignored"]
 fn cases_match_the_compiler() {
     let runner = Runner::new();
     let drift = CASES

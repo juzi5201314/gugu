@@ -175,11 +175,17 @@ pub(crate) fn select_body(
                 &instruction.source,
                 ctx,
             )
-            .map_err(|error| LoweringError::Unsupported {
-                op: lower::domain(&instruction.op),
-                detail: match error {
-                    LoweringError::Unsupported { detail, .. } => detail,
-                    LoweringError::InvalidOperands => "操作数不符合 op 语义",
+            .map_err(|error| match error {
+                LoweringError::UnregisteredGlue { glue } => {
+                    LoweringError::UnregisteredGlue { glue }
+                }
+                LoweringError::Unsupported { detail, .. } => LoweringError::Unsupported {
+                    op: lower::domain(&instruction.op),
+                    detail,
+                },
+                LoweringError::InvalidOperands => LoweringError::Unsupported {
+                    op: lower::domain(&instruction.op),
+                    detail: "操作数不符合 op 语义",
                 },
             })?;
             clobbers = clobbers.union(lowered.clobbers);
@@ -225,11 +231,15 @@ pub(crate) fn select_body(
             |id| super::inst::LabelId(id.0),
             &mut edge_copies,
         )
-        .map_err(|error| LoweringError::Unsupported {
-            op: "Terminator",
-            detail: match error {
-                LoweringError::Unsupported { detail, .. } => detail,
-                LoweringError::InvalidOperands => "终结符操作数不符合语义",
+        .map_err(|error| match error {
+            LoweringError::UnregisteredGlue { glue } => LoweringError::UnregisteredGlue { glue },
+            LoweringError::Unsupported { detail, .. } => LoweringError::Unsupported {
+                op: "Terminator",
+                detail,
+            },
+            LoweringError::InvalidOperands => LoweringError::Unsupported {
+                op: "Terminator",
+                detail: "终结符操作数不符合语义",
             },
         })?;
         next_label = term_builder.labels_used();

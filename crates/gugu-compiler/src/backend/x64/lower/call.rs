@@ -13,7 +13,8 @@ use crate::backend::x64::table::{Access, OperandKind};
 use crate::lir::body::{Call, CallTarget, Op, Symbol};
 
 use super::{
-    Builder, Copy, LowerCtx, LoweringError, SiteValue, mem_base, move_kinds, reg, value_move,
+    Builder, Copy, LowerCtx, LoweringError, SiteValue, ensure_runtime_glue, mem_base, move_kinds,
+    reg, value_move,
 };
 
 const REL32: &[OperandKind] = &[OperandKind::Rel32];
@@ -41,34 +42,13 @@ pub(super) fn lower(
             &format!("platform_{}", op.name()),
         ),
         Op::RuntimeMachineCall(op) => runtime_named(operands, results, builder, op.name()),
-        Op::RegionPublish { .. } => runtime_named(operands, results, builder, "gc_region_publish"),
-        Op::RegionReset { .. } => runtime_named(operands, results, builder, "gc_region_reset"),
-        Op::PromoteManaged { .. } => runtime_named(operands, results, builder, "gc_region_promote"),
-        Op::RegionTransfer { .. } => {
-            runtime_named(operands, results, builder, "gc_region_transfer")
+        // 分配 op 由 `lower/alloc.rs` 走专用四车道 ABI；这里显式拒绝，避免落到下面的目录分支。
+        Op::GcAlloc { .. } | Op::RegionAlloc { .. } => Err(LoweringError::InvalidOperands),
+        // 其余 runtime 入口全部来自同一份目录，名字不再在 lowering 里重复一遍。
+        op if crate::runtime::implied_glue(op).is_some() => {
+            let glue = crate::runtime::implied_glue(op).expect("目录已判定存在");
+            runtime_named(operands, results, builder, glue)
         }
-        Op::MarkTicketBatch => runtime_named(operands, results, builder, "gc_mark_ticket_batch"),
-        Op::EdgeDeltaBatch => runtime_named(operands, results, builder, "gc_edge_delta_batch"),
-        Op::ResolveSharedHandle => {
-            runtime_named(operands, results, builder, "gc_resolve_shared_handle")
-        }
-        Op::SharedAccessBegin { .. } => {
-            runtime_named(operands, results, builder, "gc_shared_access_begin")
-        }
-        Op::SharedAccessEnd { .. } => {
-            runtime_named(operands, results, builder, "gc_shared_access_end")
-        }
-        Op::SharedFieldBarrier { .. } | Op::SharedFieldBarrierReserved { .. } => {
-            runtime_named(operands, results, builder, "gc_shared_field_barrier")
-        }
-        Op::ForwardSharedHandle => {
-            runtime_named(operands, results, builder, "gc_forward_shared_handle")
-        }
-        Op::GcWriteBarrier { .. } | Op::GcWriteBarrierReserved { .. } => {
-            runtime_named(operands, results, builder, "gc_write_barrier")
-        }
-        Op::Park => runtime_named(operands, results, builder, "sched_park"),
-        Op::Ready => runtime_named(operands, results, builder, "sched_ready"),
         Op::Call(call) => emit_call(call, operands, results, ctx, builder),
         Op::ForeignCall(call) => emit_call(call, operands, results, ctx, builder),
         _ => Err(LoweringError::InvalidOperands),
@@ -84,6 +64,7 @@ fn runtime_named(
     builder: &mut Builder,
     name: &str,
 ) -> Result<(), LoweringError> {
+    ensure_runtime_glue(name)?;
     if operands.len() > abi::INTERNAL_INTEGER.len() {
         return Err(LoweringError::InvalidOperands);
     }
@@ -146,6 +127,8 @@ pub(super) fn emit_target(
             },
         ),
         CallTarget::Runtime(runtime) => {
+            let name = mangle::runtime_call_name(*runtime);
+            ensure_runtime_glue(name)?;
             emit_symbol_call(builder, mangle::runtime_call_symbol(*runtime))
         }
         CallTarget::Indirect => {
@@ -180,6 +163,8 @@ pub(super) fn emit_jump_target(
             },
         ),
         CallTarget::Runtime(runtime) => {
+            let name = mangle::runtime_call_name(*runtime);
+            ensure_runtime_glue(name)?;
             emit_symbol_jump(builder, mangle::runtime_call_symbol(*runtime))
         }
         CallTarget::Indirect => {

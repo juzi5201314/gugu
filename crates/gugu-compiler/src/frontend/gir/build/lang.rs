@@ -359,6 +359,46 @@ impl Builder<'_> {
             }
         }
     }
+
+    /// 保持源码求值顺序，地址类型和结果宽度由 checker 确定；Atomic 不经过机器 glue 调用。
+    pub(super) fn emit_runtime_atomic_call(
+        &mut self,
+        id: ExprId,
+        kind: crate::frontend::semantics::model::RuntimeMachineIntrinsic,
+        arguments: Range<u32>,
+    ) -> Result<Option<LocalId>, Diagnostic> {
+        use crate::frontend::semantics::model::RuntimeMachineIntrinsic as Source;
+        let (op, ordering) = match kind {
+            Source::AtomicLoadAcquire => (AtomicOp::Load, MemoryOrdering::Acquire),
+            Source::AtomicStoreRelease => (AtomicOp::Store, MemoryOrdering::Release),
+            Source::AtomicFetchOrAcqRel => (AtomicOp::FetchOr, MemoryOrdering::AcqRel),
+            Source::AtomicFetchAndAcqRel => (AtomicOp::FetchAnd, MemoryOrdering::AcqRel),
+            _ => return Err(gir_error("非原子原语进入 Atomic lowering", None)),
+        };
+        let mut values = Vec::with_capacity(kind.value_arguments());
+        for argument in expr_range(self.owner, &arguments) {
+            let Some(local) = self.emit_expr(argument)? else {
+                return Ok(None);
+            };
+            values.push(copy_of(local));
+        }
+        self.emit_check_ops(id)?;
+        let pointer = values.remove(0);
+        let result = self.temp(self.expr_ty(id));
+        let store = kind == Source::AtomicStoreRelease;
+        self.push_stmt(StatementKind::Atomic {
+            op,
+            ordering,
+            pointer: Some(pointer),
+            operands: values,
+            destination: (!store).then_some(Place::local(result)),
+        });
+        if store {
+            self.assign_unit(result);
+        }
+        self.set_value(id, result);
+        Ok(Some(result))
+    }
 }
 
 fn operand_place(builder: &mut Builder<'_>, operand: Option<&Operand>) -> Place {

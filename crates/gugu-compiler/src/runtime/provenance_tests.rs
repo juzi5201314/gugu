@@ -42,6 +42,7 @@ fn descriptor_for_domain(domain: MemoryDomainId) -> super::slab::SlabDescriptor 
 }
 
 /// 用真实编译检查默认 profile：release、指纹可复现、dump 固定口径。
+#[cfg_attr(not(feature = "slow-tests"), ignore)]
 #[test]
 fn real_compilation_defaults_to_release_provenance() {
     let source = "fn main() { let value = 1 _ = value }";

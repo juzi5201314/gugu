@@ -14,6 +14,7 @@ use super::body::{
 };
 use super::invalid;
 use crate::Diagnostic;
+use crate::frontend::late::universe::MetadataShape;
 use crate::frontend::{gir, hir, mono};
 use gir::body::{GirBody, SourceInfo};
 use gir::concrete::{ConcreteBody, TypeKind, TypeLayout};
@@ -81,6 +82,11 @@ struct Builder<'a> {
     region_ends: Vec<Vec<RegionEnd>>,
     /// 单调递增的 shared access token；每个 body 内唯一且非零。
     next_shared_token: u32,
+    /// 共享环境捕获源槽的提升 handle 变量；按 GIR local 索引。
+    ///
+    /// 提升发生在闭包构造点，而变量必须建 block 之前登记，因此这里在 `prepare_storage`
+    /// 就为「被共享环境捕获的源槽」备好 handle 变量。
+    shared_promotions: Vec<Option<u32>>,
     /// 当前打开的 shared access guard 栈；栈顶是最近一次 `SharedAccessBegin` 的 token。
     ///
     /// 共享 place 的字段访问必须在这个 guard 内发生：`address`/`read_place`/`write_place`
@@ -162,6 +168,7 @@ pub(crate) fn lower(
             switch_cases: Vec::new(),
             stack_slots: Vec::new(),
             lifetimes: Vec::new(),
+            root_inits: Vec::new(),
             safepoints: Vec::new(),
             barrier_permits: Vec::new(),
             no_safepoint_regions: concrete.body.no_safepoint_regions.clone(),
@@ -188,6 +195,7 @@ pub(crate) fn lower(
         statement: 0,
         region_ends: region_ends(world, concrete.generic_body, concrete.body.blocks.len()),
         next_shared_token: 0,
+        shared_promotions: vec![None; concrete.body.locals.len()],
         shared_guards: Vec::new(),
     };
     builder.prepare_storage()?;
@@ -282,6 +290,38 @@ impl Builder<'_> {
 
     fn layout(&self, ty: u32) -> &TypeLayout {
         &self.concrete.types[usize::try_from(ty).expect("类型编号适配宿主")]
+    }
+
+    /// 类型是否有 GC 可见字段：只有完全没有受管指针的值才允许按字节写进静态槽。
+    ///
+    /// 递归下钻 metadata 的子类型，函数指针/raw 指针这类没有受管字段的类型不算受管；
+    /// 深度超限或键不在冻结表时保守按受管处理。
+    pub(super) fn has_managed_fields(&self, ty: u32) -> bool {
+        let key = self.layout(ty).key;
+        self.metadata_is_managed(&key, 0)
+    }
+
+    fn metadata_is_managed(&self, key: &[u8; 32], depth: usize) -> bool {
+        if depth > 16 {
+            return true;
+        }
+        // 冻结表是 GC 元数据的唯一来源：表里没有记录的类型没有被追踪的指针，按位复制即
+        // 完整语义（函数指针、raw 指针都属此类）。
+        let Ok(record) = self.mono.universe.record(key) else {
+            return false;
+        };
+        match &record.metadata {
+            MetadataShape::None => false,
+            // 引用/切片视图本身就是 GC 可见指针，与 pointee 有无字段无关。
+            MetadataShape::String | MetadataShape::Direct(_) | MetadataShape::Interior(_) => true,
+            // 每个槽都是一个 managed 直接指针字。
+            MetadataShape::Pointers { count } => *count > 0,
+            MetadataShape::Array { element, .. } => self.metadata_is_managed(element, depth + 1),
+            MetadataShape::Aggregate { variants, .. } => variants
+                .iter()
+                .flatten()
+                .any(|(child, _)| self.metadata_is_managed(child, depth + 1)),
+        }
     }
 
     /// 判断一个 local 的 storage 是否是 SharedHeap stable handle。
@@ -602,6 +642,19 @@ impl Builder<'_> {
 
     fn constant(&mut self, value: u64, ty: Type) -> ValueId {
         self.emit_one(Op::IConst(value), &[], ValueType::scalar(ty), Origin::None)
+    }
+
+    /// 把符号化 `TypeId` 物化为冻结类型表里的稠密编号。
+    ///
+    /// 类型身份是 `0..type_id_count()` 的稠密编号（见 `spec/types.md`），不是地址也不是哈希：
+    /// 这里在 LIR 期就写成 `u32` 常量，函数体里不再出现需要链接期解析的类型身份符号。
+    pub(super) fn type_id_value(&mut self, key: &[u8; 32]) -> Result<ValueId, Diagnostic> {
+        let type_id = self
+            .mono
+            .universe
+            .type_id(key)
+            .ok_or_else(|| invalid("TypeId 引用了冻结类型表以外的类型"))?;
+        Ok(self.constant(u64::from(type_id), Type::I32))
     }
 
     fn fresh(&mut self, source: SourceInfo, cleanup: bool) -> BlockId {

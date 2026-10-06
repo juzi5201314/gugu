@@ -235,7 +235,7 @@ fn fixed_layouts() -> Vec<CoroutineRecordLayout> {
         record!(MorestackScratch; return_pc, gpr, xmm),
         record!(CoroutineCold; id, context, morestack_scratch, wait_record, foreign_bridge, join_state, coroutine_locals, panic_state, select_rng, select_scratch, gc_scan_epoch),
         record!(MorestackMailbox; hot, entry_rsp, candidate, required, cold, system_context, return_value, processor),
-        record!(Rt0Payload; revision, main_entry, initial_slot, runtime_state, bias, main_return, stackmap, fragment_base, stackmap_len, unwind, unwind_len),
+        record!(Rt0Payload; revision, main_entry, initial_slot, runtime_state, bias, main_return, stackmap, fragment_base, stackmap_len, unwind, unwind_len, gc_types, gc_types_len, gc_meta, gc_meta_len, boot_environment),
         record!(Rt0Params; bias_baseline, reloc_table, reloc_count, protect_va, protect_len, entry, boot_r14, processor, rt0_start, payload_va, payload_len, initial_slot, runtime_state, reserved_13, reserved_14, reserved_15),
     ]
 }

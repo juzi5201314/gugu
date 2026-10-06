@@ -12,6 +12,35 @@ use super::gc_metadata_contract::{GC_ARENA_BYTES, GC_BLOCK_BYTES, GC_LINE_BYTES}
 use super::model::RawModelError;
 use serde::{Deserialize, Serialize};
 
+/// bit 0 `HAS_HEAP_DIRECT`：trace 含 `DIRECT`。
+pub(crate) const GC_TYPE_HAS_HEAP_DIRECT: u32 = 1 << 0;
+/// bit 1 `HAS_HEAP_INTERIOR`：trace 含 `INTERIOR`。
+pub(crate) const GC_TYPE_HAS_HEAP_INTERIOR: u32 = 1 << 1;
+/// bit 2 `HAS_VALUE_ACTIONS`：值复制/销毁不是纯位拷贝。
+pub(crate) const GC_TYPE_HAS_VALUE_ACTIONS: u32 = 1 << 2;
+/// bit 3 `HAS_RESOURCE`：含 `ResourceCell` 字段，需 acquire/release。
+pub(crate) const GC_TYPE_HAS_RESOURCE: u32 = 1 << 3;
+/// bit 4 `VARIABLE_SIZE`：allocation payload 大小运行时决定。
+pub(crate) const GC_TYPE_VARIABLE_SIZE: u32 = 1 << 4;
+/// bit 5 `ZERO_SIZED`：`size == 0`。
+pub(crate) const GC_TYPE_ZERO_SIZED: u32 = 1 << 5;
+/// bit 6 `UNSIZED_VIEW`：类型只能作为引用/dyn/slice view 的 pointee metadata。
+pub(crate) const GC_TYPE_UNSIZED_VIEW: u32 = 1 << 6;
+/// bit 7 `HAS_DEFERRED_RELEASE`：对象死亡时需进入受限 resource release 队列。
+pub(crate) const GC_TYPE_HAS_DEFERRED_RELEASE: u32 = 1 << 7;
+/// bit 8 `PIN_SENSITIVE`：对象 pin/unpin 需要类型专用 glue。
+pub(crate) const GC_TYPE_PIN_SENSITIVE: u32 = 1 << 8;
+/// 已定义位之外必须为 0；`gc-metadata.md` 的九位类型旗标表是唯一权威。
+pub(crate) const GC_TYPE_FLAG_MASK: u32 = GC_TYPE_HAS_HEAP_DIRECT
+    | GC_TYPE_HAS_HEAP_INTERIOR
+    | GC_TYPE_HAS_VALUE_ACTIONS
+    | GC_TYPE_HAS_RESOURCE
+    | GC_TYPE_VARIABLE_SIZE
+    | GC_TYPE_ZERO_SIZED
+    | GC_TYPE_UNSIZED_VIEW
+    | GC_TYPE_HAS_DEFERRED_RELEASE
+    | GC_TYPE_PIN_SENSITIVE;
+
 /// 类型表的副本；字段索引引用 `TypeUniverse.records`，所有引用都必须可解析。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct GcTypeEntryV1 {
@@ -24,15 +53,8 @@ pub(crate) struct GcTypeEntryV1 {
     pub layout: Option<(u64, u64)>,
     /// 子类型稳定键；trace program 使用 child_index 引用。
     pub children: Vec<[u8; 32]>,
-    /// bit 0 `HAS_HEAP_DIRECT`：trace 含 `DIRECT`。
-    /// bit 1 `HAS_HEAP_INTERIOR`：trace 含 `INTERIOR`。
-    /// bit 2 `HAS_VALUE_ACTIONS`：值复制/销毁不是纯位拷贝。
-    /// bit 3 `HAS_RESOURCE`：含 `ResourceCell` 字段，需 acquire/release。
-    /// bit 4 `HAS_DEFERRED_RELEASE`：对象死亡需进入 release 队列。
-    /// bit 5 `UNSIZED_VIEW`：layout 为 None（Slice view）。
-    /// bit 6 `VARIABLE_SIZE`：动态 backing 类型。
-    /// bit 7 `PIN_SENSITIVE`：禁止移位（预留，当前为 0）。
-    pub flags: u8,
+    /// 九位类型旗标，掩码见 `GC_TYPE_FLAG_MASK`。
+    pub flags: u32,
     /// trace descriptor 在 `GcMetadataSection::Trace` 内的字节偏移。
     pub trace_offset: u32,
     /// value program 在 `GcMetadataSection::Value` 内的字节偏移；无动作时为 0。
@@ -78,6 +100,58 @@ pub(crate) enum GcRootLocationV1 {
     Aggregate { offset_bytes: u64 },
     /// `type_range` 指向冻结类型表；运行时按 vtable 解引用。
     Vtable { vtable_index: u32 },
+}
+
+/// 镜像根记录的 kind：`.gugu.meta` 的 `RootRecord.kind`，四个判别值对应实际存储位置。
+///
+/// 与 [`GcRootKindV1`] 分开：后者是 Rust runtime `register_managed_root` 的内部登记种类
+/// （判别值 5 还被 cage 压缩引用 tag 复用），随 Rust 执行体一起退场；镜像根种类是编译器与
+/// 镜像内收集器共享的稳定契约，不能跟着 Rust 侧编号漂移。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
+pub(crate) enum GcImageRootKindV1 {
+    /// 镜像内静态块：`location` 是块首 RVA。
+    Global,
+    /// OS 线程局部模板：`location` 是 module TLS block 字节偏移。
+    OsThreadLocalTemplate,
+    /// 协程局部模板：`location` 是 coroutine-local layout 字节偏移。
+    CoroutineLocalTemplate,
+    /// 运行期静态根槽：`location` 是槽 RVA。
+    RuntimeStaticRootSlot,
+}
+
+impl GcImageRootKindV1 {
+    /// 线格式判别值。
+    pub(crate) const fn code(self) -> u16 {
+        match self {
+            Self::Global => 0,
+            Self::OsThreadLocalTemplate => 1,
+            Self::CoroutineLocalTemplate => 2,
+            Self::RuntimeStaticRootSlot => 3,
+        }
+    }
+}
+
+/// `RootRecord.flags` 位 0：初始化完成后只读，收集器不因它移动该槽。
+pub(crate) const GC_IMAGE_ROOT_READ_ONLY_AFTER_INIT: u16 = 1;
+/// `RootRecord.flags` 位 1：惰性槽，位字未发布前不得扫描。
+pub(crate) const GC_IMAGE_ROOT_LAZY_SLOT: u16 = 2;
+/// 全部已定义位。
+pub(crate) const GC_IMAGE_ROOT_FLAG_MASK: u16 =
+    GC_IMAGE_ROOT_READ_ONLY_AFTER_INIT | GC_IMAGE_ROOT_LAZY_SLOT;
+
+/// 镜像根记录：`.gugu.meta` 的 `RootRecord`，固定 32 字节。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct GcImageRootRecordV1 {
+    /// 按 kind 解释的位置：RVA 或对应模板/布局内字节偏移。
+    pub location: u64,
+    /// 根值类型在冻结类型表内的稠密编号。
+    pub type_id: u32,
+    pub kind: GcImageRootKindV1,
+    pub flags: u16,
+    /// 元素数，至少 1。
+    pub count: u64,
+    /// 单值为 0；数组必须不小于类型大小。
+    pub stride: u64,
 }
 
 /// Glue 入口：某个类型专属的复制/释放 thunk；链接阶段尚未分配 RVA 时为 0。
@@ -128,6 +202,8 @@ pub(crate) struct GcMetadataWorldV1 {
     pub glue: Vec<GcGlueEntryV1>,
     /// 5: root section。
     pub roots: Vec<GcRootRangeV1>,
+    /// 5': 镜像根记录（`.gugu.meta` 的 `RootRecord`），按 kind、location、type_id 排序。
+    pub image_roots: Vec<GcImageRootRecordV1>,
     /// 6: source section。
     pub sources: Vec<GcSourceEntryV1>,
     /// 7: alloc section。
@@ -139,9 +215,8 @@ pub(crate) struct GcMetadataWorldV1 {
 }
 
 impl GcMetadataWorldV1 {
-    /// schema 2：trace descriptor 增加 kind 字节与 Bitmap/Program 双表示，value program 改为
-    /// 正向/逆向两阶段动作指令。
-    pub(crate) const SCHEMA: u32 = 2;
+    /// schema 3：root section 改为镜像根记录（四类真实位置 + flags），与 Rust 侧登记范围分开。
+    pub(crate) const SCHEMA: u32 = 3;
 }
 
 /// GC metadata demand：进入契约指纹；用于触发 `RuntimeRawModel` 重算。
@@ -178,7 +253,7 @@ pub struct GcMetadataDemand {
 }
 
 impl GcMetadataDemand {
-    /// 返回空需求。
+    #[cfg(test)]
     pub(crate) const fn empty() -> Self {
         Self {
             type_count: 0,
@@ -337,6 +412,7 @@ pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError
             || !world.glue.is_empty()
             || !world.vtables.is_empty()
             || !world.roots.is_empty()
+            || !world.image_roots.is_empty()
             || !world.sources.is_empty()
             || !world.alloc_sites.is_empty()
         {
@@ -352,6 +428,7 @@ pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError
         || world.value_program.len() > u32::MAX as usize
         || world.glue.len() > u32::MAX as usize
         || world.roots.len() > u32::MAX as usize
+        || world.image_roots.len() > u32::MAX as usize
         || world.sources.len() > u32::MAX as usize
         || world.alloc_sites.len() > u32::MAX as usize
     {
@@ -373,10 +450,20 @@ pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError
         if entry.canonical.len() < 2 {
             return Err(RawModelError::new("类型 canonical 字节长度不足"));
         }
-        if entry.layout.is_none() != (entry.flags & 0b10_0000 != 0) {
+        if entry.flags & !GC_TYPE_FLAG_MASK != 0 {
+            return Err(RawModelError::new("类型 flags 设置了未定义位"));
+        }
+        if entry.layout.is_none() != (entry.flags & GC_TYPE_UNSIZED_VIEW != 0) {
             return Err(RawModelError::new("unsized flag 与 layout 不一致"));
         }
-        if (entry.flags & 0b1_0000 != 0) && (entry.flags & 0b1000 == 0) {
+        if entry.layout.is_some_and(|(size, _)| size == 0)
+            != (entry.flags & GC_TYPE_ZERO_SIZED != 0)
+        {
+            return Err(RawModelError::new("zero sized flag 与 layout 不一致"));
+        }
+        if (entry.flags & GC_TYPE_HAS_DEFERRED_RELEASE != 0)
+            && (entry.flags & GC_TYPE_HAS_RESOURCE == 0)
+        {
             return Err(RawModelError::new(
                 "deferred release flag 缺少 resource flag",
             ));
@@ -384,9 +471,6 @@ pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError
         if let Some((size, align)) = entry.layout {
             if !align.is_power_of_two() || size % align != 0 {
                 return Err(RawModelError::new("类型 layout 非法"));
-            }
-            if (entry.flags & 0b10_0000) != 0 {
-                return Err(RawModelError::new("unsized 类型不能携带 layout"));
             }
         }
         for key in &entry.children {
@@ -433,8 +517,74 @@ pub(crate) fn boot_verify(world: &GcMetadataWorldV1) -> Result<(), RawModelError
         last_type_end = last_type_end.max(root.type_range.1);
         last_word_end = root.word_range.1;
     }
+    verify_image_roots(world)?;
     verify_pools(world)?;
     verify_arena(world)
+}
+
+/// 镜像根记录：种类/标志/计数/步长自洽，按 kind、location、type_id 排序且范围不重叠。
+///
+/// 排序键与文档一致：同一实例内的多条记录必须相邻，收集器才能按实例分组扫描。
+fn verify_image_roots(world: &GcMetadataWorldV1) -> Result<(), RawModelError> {
+    let mut previous: Option<(u16, u64, u32)> = None;
+    let mut covered_end: std::collections::BTreeMap<u16, u64> = std::collections::BTreeMap::new();
+    for root in &world.image_roots {
+        if root.count == 0 {
+            return Err(RawModelError::new("镜像根 count 至少为 1"));
+        }
+        if root.flags & !GC_IMAGE_ROOT_FLAG_MASK != 0 {
+            return Err(RawModelError::new("镜像根 flags 设置了未定义位"));
+        }
+        if root.type_id as usize >= world.types.len() {
+            return Err(RawModelError::new("镜像根 type_id 越界"));
+        }
+        let (size, _) = world.types[root.type_id as usize]
+            .layout
+            .ok_or_else(|| RawModelError::new("镜像根类型缺少布局"))?;
+        if root.count == 1 {
+            if root.stride != 0 {
+                return Err(RawModelError::new("镜像根单值必须 stride 为 0"));
+            }
+        } else if root.stride < size {
+            return Err(RawModelError::new("镜像根数组 stride 小于类型大小"));
+        }
+        // 线程/协程局部模板只在对应 initialized bitmap 发布后才扫描。
+        if matches!(
+            root.kind,
+            GcImageRootKindV1::OsThreadLocalTemplate | GcImageRootKindV1::CoroutineLocalTemplate
+        ) && root.flags & GC_IMAGE_ROOT_LAZY_SLOT == 0
+        {
+            return Err(RawModelError::new("线程/协程局部模板必须标记惰性槽"));
+        }
+        let stride = if root.count == 1 { size } else { root.stride };
+        let end = root
+            .location
+            .checked_add(
+                stride
+                    .checked_mul(root.count)
+                    .ok_or_else(|| RawModelError::new("镜像根范围溢出"))?,
+            )
+            .ok_or_else(|| RawModelError::new("镜像根范围溢出"))?;
+        // 记录已按 kind/location 升序：同一 kind 内按 location 扫一遍即可判定范围重叠，
+        // 不同 location 的两条记录同样不能相交。
+        match covered_end.get_mut(&root.kind.code()) {
+            Some(previous_end) => {
+                if root.location < *previous_end {
+                    return Err(RawModelError::new("镜像根范围重叠"));
+                }
+                *previous_end = end;
+            }
+            None => {
+                covered_end.insert(root.kind.code(), end);
+            }
+        }
+        let order = (root.kind.code(), root.location, root.type_id);
+        if previous.is_some_and(|previous| previous >= order) {
+            return Err(RawModelError::new("镜像根未按 kind/location/type_id 排序"));
+        }
+        previous = Some(order);
+    }
+    Ok(())
 }
 
 /// 校验 trace/value pool 被各 entry 的 descriptor/program 从 0 起紧密覆盖，并执行跨字段检查。
@@ -470,7 +620,9 @@ fn verify_pools(world: &GcMetadataWorldV1) -> Result<(), RawModelError> {
         }
         let (has_direct, has_interior) =
             trace_descriptor_presence(&world.trace_program, entry.trace_offset)?;
-        if (entry.flags & 1 != 0) != has_direct || (entry.flags & 0b10 != 0) != has_interior {
+        if (entry.flags & GC_TYPE_HAS_HEAP_DIRECT != 0) != has_direct
+            || (entry.flags & GC_TYPE_HAS_HEAP_INTERIOR != 0) != has_interior
+        {
             return Err(RawModelError::new(
                 "类型 pointer flags 与 trace descriptor 不一致",
             ));
@@ -478,7 +630,7 @@ fn verify_pools(world: &GcMetadataWorldV1) -> Result<(), RawModelError> {
         trace_cursor = offset
             .checked_add(length)
             .ok_or_else(|| RawModelError::new("trace pool 范围溢出"))?;
-        if entry.flags & 0b100 != 0 {
+        if entry.flags & GC_TYPE_HAS_VALUE_ACTIONS != 0 {
             if entry.value_len == 0 {
                 return Err(RawModelError::new(
                     "HAS_VALUE_ACTIONS entry 缺少 value program",

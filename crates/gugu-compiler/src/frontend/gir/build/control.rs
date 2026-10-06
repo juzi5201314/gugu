@@ -62,7 +62,7 @@ impl Builder<'_> {
             hir::StatementKind::Expression(value) => self.emit_expr(value).map(|_| ()),
             hir::StatementKind::Defer(action) => self.emit_defer(action),
             hir::StatementKind::Static { local, definition } => {
-                self.emit_local_static(local, definition)
+                self.emit_local_static(id, local, definition)
             }
             hir::StatementKind::Yield => self.emit_yield(),
         }
@@ -248,15 +248,27 @@ impl Builder<'_> {
 
     fn emit_local_static(
         &mut self,
+        statement: hir::StmtId,
         local: hir::LocalId,
         definition: hir::DefId,
     ) -> Result<(), Diagnostic> {
+        let slot_ty = self.owner.locals[local.index()].ty;
+        self.static_bindings.insert(local.index(), definition);
+        let unwind = self.unwind_of(self.owner.statements[statement.index()].scope);
+        self.emit_static_guard(
+            definition,
+            crate::frontend::mono::instantiate::CallSite::Initializer(
+                u32::try_from(statement.index()).expect("语句编号适配 u32"),
+            ),
+            slot_ty,
+            unwind,
+        )?;
         let dest = self.hir_to_gir[local.index()];
         let ptr = self.intrinsic_temp(
             IntrinsicOp::StaticRef(definition),
             Vec::new(),
-            Vec::new(),
-            self.owner.locals[local.index()].ty,
+            vec![slot_ty],
+            slot_ty,
         );
         self.assign(
             Place::local(dest),

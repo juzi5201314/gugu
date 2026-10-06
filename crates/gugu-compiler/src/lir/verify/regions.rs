@@ -297,9 +297,7 @@ pub(super) fn verify(body: &Body, graph: &Graph, mode: Mode) -> Result<Layout, D
                 Op::Call(call) | Op::ForeignCall(call) => {
                     view_call(body, &state, call, body.args(&instruction.arguments))?
                 }
-                Op::Park | Op::CoroutineSwitch
-                    if !state.views.is_empty() || !state.shared.is_empty() =>
-                {
+                Op::CoroutineSwitch if !state.views.is_empty() || !state.shared.is_empty() => {
                     return Err(invalid("borrowed view 或 shared access guard 跨 suspend"));
                 }
                 _ => {}

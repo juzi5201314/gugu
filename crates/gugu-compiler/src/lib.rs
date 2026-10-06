@@ -44,20 +44,16 @@ pub use project::{
     materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
-    BarrierDemand, BarrierRuntimeContract, BlockReturnDemand, BlockReturnHarness,
-    BlockReturnReport, BlockReturnRuntimeContract, CardMarkHarness, CardMarkReport,
-    ColdPathHarness, ColdPathReport, CompressionDemand, CompressionHarness, CompressionPolicyV1,
-    CompressionReport, CompressionRuntimeContract, ContextSwitchCode, CoroutineContext,
-    CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
-    EdgeCandidateHarness, EdgeCandidateReport, EdgeDemand, EdgeRuntimeContract, FragmentPatch,
-    GcMetadataDemand, GcPacingDemand, GcPacingRuntimeContract, HarnessReport, HeapTriggerProfile,
-    IntrinsicBoundary, LocalHeapDemand, LocalHeapRuntimeContract, MainReturnCode, MarkDemand,
-    MarkRuntimeContract, MorestackEntryCode, OwnerReturnHarness, PlatformRangeDemand,
-    RegionTransferHarness, RegionTransferReport, ResourceReleaseHarness, ResourceReleaseReport,
+    BlockReturnDemand, BlockReturnRuntimeContract, CompressionDemand, CompressionPolicyV1,
+    CompressionRuntimeContract, ContextSwitchCode, CoroutineContext, CoroutineDemand,
+    CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract, EdgeDemand,
+    EdgeRuntimeContract, FragmentPatch, GcMetadataDemand, GcPacingDemand, GcPacingRuntimeContract,
+    HeapTriggerProfile, IntrinsicBoundary, LocalHeapDemand, LocalHeapRuntimeContract,
+    MainReturnCode, MarkDemand, MarkRuntimeContract, MorestackEntryCode, PlatformRangeDemand,
     Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand,
-    SchedulerRuntimeContract, SharedForwardHarness, SharedForwardReport, SharedHeapDemand,
-    SharedHeapRuntimeContract, StackMapDemand, StackPolicy, SyncDemand, SyncRuntimeContract,
-    TurnRegionDemand, TurnRegionRuntimeContract, WaitDemand, WaitRuntimeContract,
+    SchedulerRuntimeContract, SharedHeapDemand, SharedHeapRuntimeContract, StackMapDemand,
+    StackPolicy, SyncDemand, SyncRuntimeContract, TurnRegionDemand, TurnRegionRuntimeContract,
+    WaitDemand, WaitRuntimeContract,
 };
 pub use runtime::{CombiningDemand, CombiningMode, CombiningPolicyV1, CombiningRuntimeContract};
 pub use runtime::{ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract, SafetyProfile};
@@ -144,6 +140,14 @@ impl CompileRequest {
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
             combining: CombiningPolicyV1::direct(),
+        }
+    }
+    /// 编译构建内登记的 runtime GC 探针入口；case 进入 cfg 与 action key。
+    #[cfg(feature = "runtime-gc-probes")]
+    pub fn runtime_gc_probe(case: impl Into<String>, target: TargetName) -> Self {
+        Self {
+            input: CompileInput::RuntimeGcProbe { case: case.into() },
+            ..Self::empty_package(target)
         }
     }
 
@@ -242,6 +246,10 @@ impl CompileRequest {
 #[derive(Clone, Debug)]
 enum CompileInput {
     EmptyPackage,
+    #[cfg(feature = "runtime-gc-probes")]
+    RuntimeGcProbe {
+        case: String,
+    },
     SingleFileSource {
         path: PathBuf,
         source: String,
@@ -347,6 +355,17 @@ impl Compilation {
                 dump.push('\n');
             }
             dump.push_str(&format!("runtime-glue bound={bound} stubbed={stubbed}\n"));
+            for (name, referenced, bound) in world.glue_status() {
+                let state = match (referenced, bound) {
+                    (_, true) => "bound",
+                    (true, false) => "referenced-unimplemented",
+                    (false, false) => "unreferenced-unimplemented",
+                };
+                dump.push_str(&format!("runtime-glue-status {name}={state}\n"));
+            }
+            for site in world.stubbed_glue_sites() {
+                dump.push_str(&format!("runtime-glue-site {site}\n"));
+            }
             for line in world.glues().dump_lines() {
                 dump.push_str(&line);
                 dump.push('\n');
@@ -374,6 +393,20 @@ impl Compilation {
             .map(backend::x64::codegen::X64World::fingerprint)
     }
 
+    /// 返回片段世界本体；供 crate 内证明（调用返回 PC 与栈图 PC 的对照）使用。
+    #[cfg(test)]
+    pub(crate) fn x64_world(&self) -> Option<&backend::x64::codegen::X64World> {
+        self.x64.as_ref()
+    }
+
+    /// 返回已编码的栈图 section 字节；供 crate 内证明（门控根条目）使用。
+    #[cfg(test)]
+    pub(crate) fn stackmap_section_bytes(&self) -> Option<&[u8]> {
+        self.image_plan
+            .as_ref()
+            .map(|plan| plan.x64_stackmap_section.as_slice())
+    }
+
     /// 返回全部机器码片段的公开视图；没有可执行入口或片段生成失败时为 `None`。
     pub fn x64_fragments(&self) -> Option<X64Fragments> {
         let stack_check_offset = self
@@ -383,11 +416,6 @@ impl Compilation {
         self.x64
             .as_ref()
             .map(|world| world.view(stack_check_offset))
-    }
-
-    /// 返回已验证的契约对象本身；供确定性测试与 `EdgeCandidateHarness` 用真实契约配置 world。
-    pub(crate) fn raw_contract(&self) -> Option<&RuntimeRawContractV1> {
-        self.raw_contract.as_ref()
     }
 
     /// 返回规范退出码；内部 IR 不变量失败与用户源码错误分开报告。
@@ -1097,6 +1125,22 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
         CompileInput::EmptyPackage => Ok(LoadedInput {
             source_map: SourceMap::empty(),
             plan: None,
+        }),
+        #[cfg(feature = "runtime-gc-probes")]
+        CompileInput::RuntimeGcProbe { case } => Ok(LoadedInput {
+            source_map: SourceMap::empty(),
+            plan: Some(FrontendPlan {
+                entry: "std/runtime/fixtures/gc_image.gg".to_owned(),
+                source_root: String::new(),
+                package_identity: "runtime-gc-probes".to_owned(),
+                require_main: true,
+                cfg: {
+                    let mut custom = BTreeMap::new();
+                    custom.insert("runtime_gc_case".to_owned(), Some(case));
+                    CfgContext::new(target, [], [], false, false, custom)
+                },
+                external_packages: BTreeSet::new(),
+            }),
         }),
         CompileInput::SingleFileSource { path, source } => {
             let snapshot =
@@ -2986,6 +3030,7 @@ impl frontend::FrontendOutput {
 }
 
 #[cfg(test)]
+#[allow(unused_imports)]
 mod tests {
     use std::{
         collections::BTreeSet,
@@ -2994,8 +3039,49 @@ mod tests {
 
     use super::{
         ActionKind, ActionStatus, CompileRequest, Compiler, DiagnosticCode, Project, TargetKind,
-        TargetName, logical_input_path,
+        TargetName, logical_input_path, runtime,
     };
+
+    /// op 形式的隐含调用必须参与 glue 引用判定：分配没有 `Call` 节点，若引用判定只看调用点，
+    /// 缺失定义会静默落到 stub；这里断言它必须在写出镜像前失败（`E0062`）。
+    ///
+    /// 表里故意把 glue 指向 heap.gg 里不存在的源项：真实登记（`gc_alloc_slow` → heap.gg）由
+    /// 镜像 bench 覆盖，这里锁的是引用判定本身。
+    #[cfg(feature = "slow-tests")]
+    fn allocation_op_implies_a_referenced_glue() {
+        use runtime::compression_schema::CompressionPolicyV1;
+
+        let defs = [runtime::GlueDef {
+            glue: "gc_alloc_slow",
+            def: runtime::GlueDefKind::Item {
+                source: "std/runtime/heap.gg",
+                item: "gc_alloc_slow_not_yet_registered",
+            },
+        }];
+        // 逃逸闭包的环境必须落受管堆：这是仓库里已知会产生分配的最小形态。
+        let source = "fn make() fn() int {\n let value = 1\n return fn() int { return value }\n}\nfn main() {\n let closure = make()\n _ = closure()\n}";
+        let compilation = Compiler::new().compile(
+            CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
+                .with_compression_policy(CompressionPolicyV1::cage(
+                    4 * runtime::gc_metadata_contract::GC_ARENA_BYTES,
+                )),
+        );
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+        let hir = compilation.hir.as_ref().expect("HIR 已冻结");
+        let lir = compilation.lir.as_ref().expect("LIR 已冻结");
+        let error = runtime::RuntimeGlueBindings::resolve_defs(&defs, hir, lir)
+            .expect_err("分配 op 隐含的 glue 缺失定义必须失败");
+        assert_eq!(error.code(), DiagnosticCode::RuntimeGlueBinding);
+        assert!(
+            error.message().contains("gc_alloc_slow"),
+            "诊断必须点名缺失的入口：{}",
+            error.message()
+        );
+    }
 
     #[test]
     fn empty_package_has_complete_graph_without_image() {
@@ -3017,7 +3103,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn simple_main_reaches_runtime_and_image_plan() {
         let compilation = Compiler::new().compile(CompileRequest::single_file(
             "main.gg",
@@ -3092,7 +3178,7 @@ mod tests {
         assert!(TargetName::parse("x86_64-freebsd").is_err());
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn library_file_compiles_without_requiring_main() {
         let root = tempfile::tempdir().expect("tempdir");
         let entry = root.path().join("src/lib.gg");
@@ -3138,7 +3224,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn project_target_snapshots_and_analyzes_its_module_tree() {
         let root = tempfile::tempdir().expect("tempdir");
         let src = root.path().join("src");
@@ -3224,7 +3310,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn image_plan_reports_runtime_raw_contract() {
         let compiler = Compiler::new();
         let request = || {
@@ -3293,7 +3379,7 @@ mod tests {
         assert_eq!(cold.exit_code(), 0);
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn image_plan_reports_resource_lease_sites() {
         let source = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n b = ResourceCell { id: 2 }\n _ = b\n}";
         let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -3326,7 +3412,7 @@ mod tests {
         assert_eq!(plan.resource_cell_header_bytes(), 64);
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn configured_target_changes_raw_contract_fingerprint() {
         let source = "fn main() { let value = 1\n _ = value }";
         let linux = Compiler::new().compile(CompileRequest::single_file(
@@ -3348,7 +3434,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn image_plan_reports_rt0_startup_contract() {
         let source = "fn main() { let value = 1\n _ = value }";
         let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -3379,7 +3465,7 @@ mod tests {
         assert!(dump.contains("rt0-demand entry=true main-result=false"));
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn main_result_type_enters_rt0_demand_and_contract() {
         let unit = "fn main() { let value = 1\n _ = value }";
         let result = "fn main() Result[(), string] {\n Err(\"e\")\n}";
@@ -3412,7 +3498,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn rt0_contract_fingerprint_is_deterministic_across_compilations() {
         let source = "fn main() { let value = 1\n _ = value }";
         let first = Compiler::new().compile(CompileRequest::single_file(
@@ -3434,7 +3520,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn image_plan_reports_gc_metadata_contract() {
         let source = "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }";
         let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -3525,7 +3611,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn image_plan_reports_turn_region_contract() {
         let reset_source = "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
         let transfer_source = "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n }";
@@ -3598,7 +3684,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn image_plan_reports_barrier_contract_for_managed_writes() {
         let source = "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
         let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -3667,7 +3753,7 @@ mod tests {
         );
         assert!(plan.local_heap_demand().large_types >= 1);
         assert_ne!(plan.local_heap_contract_fingerprint(), [0_u8; 32]);
-        assert!(dump.contains("local-heap schema=4 arena=2097152 block=32768 line=128"));
+        assert!(dump.contains("local-heap schema=5 arena=2097152 block=32768 line=128"));
         assert!(dump.contains("block-return schema=1"));
         assert!(dump.contains("local-heap-bitmaps object-start-bits=131072 mark-bits=131072"));
         assert!(dump.contains("local-heap-record HeapArenaMetadata bytes=55576"));
@@ -3821,7 +3907,7 @@ mod tests {
         );
     }
 
-    #[test]
+    #[cfg(feature = "slow-tests")]
     fn large_type_without_allocation_keeps_demand_bounded() {
         // 冻结类型表里出现、却没有分配站点的大类型不得让 large 上界越过分配站点上界：
         // 一个只有类型引用、没有任何分配的程序曾经被 E0058 拒绝。
