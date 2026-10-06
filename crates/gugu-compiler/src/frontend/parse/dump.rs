@@ -4,6 +4,7 @@ use super::super::ast::{
 };
 use super::super::intern::SymbolInterner;
 
+#[cfg(test)]
 pub(crate) fn dump_ast(file: &AstFile, arena: &AstArena, intern: &SymbolInterner) -> String {
     let mut out = String::with_capacity(512);
     out.push_str("file\n");

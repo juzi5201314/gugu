@@ -254,6 +254,7 @@ pub struct GcMetadataDemand {
 
 impl GcMetadataDemand {
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) const fn empty() -> Self {
         Self {
             type_count: 0,
