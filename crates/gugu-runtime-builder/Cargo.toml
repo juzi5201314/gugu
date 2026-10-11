@@ -1,0 +1,11 @@
+[package]
+name = "gugu-runtime-builder"
+version = "0.1.0"
+edition = "2024"
+description = "Build-time Gugu runtime artifact source table"
+
+[features]
+runtime-gc-probes = []
+
+[dependencies]
+gugu-compiler-core = { path = "../gugu-compiler-core" }

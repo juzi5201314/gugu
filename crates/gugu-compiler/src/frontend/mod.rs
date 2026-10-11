@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
 use crate::{
+    TargetName,
     diagnostics::{Diagnostic, DiagnosticCode},
     source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span},
 };
@@ -27,10 +28,10 @@ mod types;
 
 use ast::{AstArena, AstFile, ItemKind};
 pub(crate) use lex::lex;
-#[cfg(not(test))]
 pub(crate) use parse::parse;
 #[cfg(test)]
-pub(crate) use parse::{dump_ast, has_main_fn, parent_before_child, parse};
+#[allow(unused_imports, reason = "parse helper 仅由部分测试目标共享")]
+pub(crate) use parse::{dump_ast, has_main_fn, parent_before_child};
 pub(crate) use token::TokenBuffer;
 
 pub(crate) enum SourceInput<'a> {
@@ -130,18 +131,19 @@ pub(crate) fn bootstrap(
     }
 }
 
-/// 把 compiler 内建的源单元追加进源码表，并返回全部内建路径与 runtime 来源路径。
+/// 把 build-time artifact 的 source blob 适配为本次 session 的 frontend 输入。
 ///
-/// 内建模块与用户源码走同一条解析、cfg 与检查路径；runtime 来源身份单独传入语义层，
-/// 不允许用户仅靠逻辑路径伪造 runtime intrinsic 的授权。
+/// source table 的唯一权威是嵌入 artifact；compiler 不再通过 runtime 模块的 `include_str!`
+/// 持有第二份源码表。
 fn inject_builtin_sources(
     source_map: &mut SourceMap,
+    target: TargetName,
 ) -> Result<(BTreeSet<String>, BTreeSet<String>), Vec<Diagnostic>> {
     let mut paths = BTreeSet::new();
     let mut runtime_paths = BTreeSet::new();
     let mut snapshots = Vec::new();
-    for source in crate::runtime::RuntimeResources::builtin().sources() {
-        let logical = source.logical_path();
+    for source in crate::runtime::RuntimeResources::for_target(target).source_blobs(target) {
+        let logical = source.logical_path.as_str();
         if source_map.file_id(logical).is_some() {
             return Err(vec![Diagnostic::error(
                 DiagnosticCode::ModuleInvalidPath,
@@ -150,7 +152,7 @@ fn inject_builtin_sources(
             )]);
         }
         let snapshot =
-            SourceSnapshot::from_bytes(logical, source.source().as_bytes()).map_err(|error| {
+            SourceSnapshot::from_bytes(logical, source.source.as_bytes()).map_err(|error| {
                 vec![Diagnostic::error(
                     DiagnosticCode::ModuleInvalidPath,
                     error.to_string(),
@@ -159,7 +161,7 @@ fn inject_builtin_sources(
             })?;
         snapshots.push(snapshot);
         paths.insert(logical.to_owned());
-        if source.role() == crate::runtime::RuntimeSourceRole::Runtime {
+        if source.role == gugu_compiler_core::RuntimeSourceRole::Runtime {
             runtime_paths.insert(logical.to_owned());
         }
     }
@@ -187,7 +189,7 @@ fn check_sources(
     external_packages: &BTreeSet<String>,
     queries: &crate::query::QueryEngine,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
-    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map)?;
+    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, cfg.target())?;
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
     let expansion_inputs = expand::run(

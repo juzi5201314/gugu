@@ -148,6 +148,7 @@ pub(crate) struct Linkage {
     pub(crate) import_name: Option<String>,
     pub(crate) section: Option<String>,
     pub(crate) used: bool,
+    pub(crate) root_kind: super::semantics::linkage::RootLinkageKind,
     pub(crate) foreign: Option<super::semantics::foreign::ForeignEffect>,
     pub(crate) naked: bool,
 }

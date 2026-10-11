@@ -45,12 +45,11 @@ pub use project::{
 };
 pub use runtime::{
     BlockReturnDemand, BlockReturnRuntimeContract, CompressionDemand, CompressionPolicyV1,
-    CompressionRuntimeContract, ContextSwitchCode, CoroutineContext, CoroutineDemand,
-    CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract, EdgeDemand,
-    EdgeRuntimeContract, FragmentPatch, GcMetadataDemand, GcPacingDemand, GcPacingRuntimeContract,
-    HeapTriggerProfile, IntrinsicBoundary, LocalHeapDemand, LocalHeapRuntimeContract,
-    MainReturnCode, MarkDemand, MarkRuntimeContract, MorestackEntryCode, PlatformRangeDemand,
-    Rt0Boundary, RuntimeResources, RuntimeSource, RuntimeSourceRole, SchedulerDemand,
+    CompressionRuntimeContract, ContextSwitchCode, CoroutineContext, CoroutineFieldLayout,
+    CoroutineRecordLayout, CoroutineRuntimeContract, EdgeDemand, EdgeRuntimeContract,
+    FragmentPatch, GcMetadataDemand, GcPacingDemand, GcPacingRuntimeContract, HeapTriggerProfile,
+    IntrinsicBoundary, LocalHeapDemand, LocalHeapRuntimeContract, MainReturnCode, MarkDemand,
+    MarkRuntimeContract, MorestackEntryCode, PlatformRangeDemand, Rt0Boundary, SchedulerDemand,
     SchedulerRuntimeContract, SharedHeapDemand, SharedHeapRuntimeContract, StackMapDemand,
     StackPolicy, SyncDemand, SyncRuntimeContract, TurnRegionDemand, TurnRegionRuntimeContract,
     WaitDemand, WaitRuntimeContract,
@@ -58,6 +57,12 @@ pub use runtime::{
 pub use runtime::{CombiningDemand, CombiningMode, CombiningPolicyV1, CombiningRuntimeContract};
 pub use runtime::{ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract, SafetyProfile};
 pub use runtime::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
+pub use runtime::{
+    RuntimeArtifactError, RuntimeArtifactManifestV1, RuntimeArtifactPayloadV1, RuntimeArtifactV1,
+    RuntimeArtifacts, RuntimeContractRecordV1, RuntimeFunctionArtifactV1, RuntimeGenericTemplateV1,
+    RuntimeModuleInterfaceV1, RuntimeResources, RuntimeSource, RuntimeSourceRecordV1,
+    RuntimeSourceRole,
+};
 
 use frontend::mono::roots::RootCategoryV1;
 pub use source::{
@@ -374,7 +379,10 @@ impl Compilation {
         })
     }
 
-    /// 返回 runtime raw 平面契约指纹。
+    /// 返回 runtime raw 平面契约；供 compiler 内部契约测试与诊断使用。
+    pub fn raw_contract(&self) -> Option<&RuntimeRawContractV1> {
+        self.raw_contract.as_ref()
+    }
     pub fn runtime_raw_fingerprint(&self) -> Option<[u8; 32]> {
         self.raw_contract
             .as_ref()
@@ -436,16 +444,32 @@ impl Compilation {
     }
 }
 
-/// 编译器入口。
+/// compiler 入口与 session-local query/runtime artifact store。
 #[derive(Clone, Debug, Default)]
 pub struct Compiler {
     queries: std::sync::Arc<query::QueryEngine>,
+    runtime_artifacts: RuntimeArtifacts,
 }
 
 impl Compiler {
     /// 创建 bootstrap compiler。
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 注入经过 build-time 校验的 runtime artifact 视图。
+    pub fn with_runtime_artifacts(mut self, artifacts: RuntimeArtifacts) -> Self {
+        self.runtime_artifacts = artifacts;
+        self
+    }
+
+    /// 返回当前目标的嵌入 runtime artifact。
+    fn artifact_for_target(
+        &self,
+        target: TargetName,
+    ) -> Result<&'static RuntimeArtifactV1, RuntimeArtifactError> {
+        let _ = self.runtime_artifacts;
+        RuntimeArtifacts::for_target(target)
     }
 
     /// 执行一次确定性的 bootstrap action graph。
@@ -462,6 +486,29 @@ impl Compiler {
         let mut diagnostics = Diagnostics::default();
         let descriptor = target.descriptor();
         graph.complete(ActionKind::ResolveTarget, target.to_string());
+        if let Err(error) = self.artifact_for_target(target) {
+            diagnostics.push(Diagnostic::error(
+                DiagnosticCode::BackendInvariant,
+                format!("runtime artifact 无效：{error}"),
+                None,
+            ));
+            graph.fail(ActionKind::ResolveTarget, "runtime artifact 校验失败");
+            graph.skip_after(ActionKind::ResolveTarget, "runtime artifact 不可用");
+            diagnostics.sort();
+            return Compilation {
+                graph,
+                diagnostics,
+                source_map: SourceMap::empty(),
+                image_plan: None,
+                hir: None,
+                gir: None,
+                gir_stats: Default::default(),
+                lir: None,
+                raw_contract: None,
+                x64: None,
+                action_key: None,
+            };
+        }
 
         let mut loaded = match load_input(input, target) {
             Ok(loaded) => loaded,
@@ -550,7 +597,70 @@ impl Compiler {
             }
         };
         // runtime glue 绑定：被 LIR 引用的 glue 在此解析为镜像内定义；失败在写出前闭环。
-        let resources = RuntimeResources::builtin();
+        let resources = RuntimeResources::for_target(target);
+        let artifact = match self.artifact_for_target(target) {
+            Ok(artifact) => artifact,
+            Err(error) => {
+                diagnostics.push(Diagnostic::error(
+                    DiagnosticCode::BackendInvariant,
+                    format!("runtime artifact 无效：{error}"),
+                    None,
+                ));
+                graph.fail(ActionKind::BuildIr, "runtime artifact 校验失败");
+                graph.skip_after(ActionKind::BuildIr, "runtime artifact 不可用");
+                diagnostics.sort();
+                return Compilation {
+                    graph,
+                    diagnostics,
+                    source_map,
+                    image_plan: None,
+                    hir: Some(frontend.hir),
+                    gir: Some(frontend.gir),
+                    gir_stats: frontend.gir_stats,
+                    lir: Some(lir),
+                    raw_contract: None,
+                    x64: None,
+                    action_key: None,
+                };
+            }
+        };
+        if artifact.manifest.sources.len() != resources.sources().len()
+            || artifact
+                .manifest
+                .sources
+                .iter()
+                .zip(resources.sources())
+                .any(|(record, view)| {
+                    record.logical_path != view.logical_path()
+                        || record.content_digest != view.content_digest()
+                })
+        {
+            diagnostics.push(Diagnostic::error(
+                DiagnosticCode::BackendInvariant,
+                "runtime artifact source manifest 与资源视图不一致",
+                None,
+            ));
+            graph.fail(
+                ActionKind::AttachRuntime,
+                "runtime artifact manifest 不一致",
+            );
+            graph.skip_after(ActionKind::AttachRuntime, "runtime artifact 不一致");
+            diagnostics.sort();
+            return Compilation {
+                graph,
+                diagnostics,
+                source_map,
+                image_plan: None,
+                hir: Some(frontend.hir),
+                gir: Some(frontend.gir),
+                gir_stats: frontend.gir_stats,
+                lir: Some(lir),
+                raw_contract: None,
+                x64: None,
+                action_key: None,
+            };
+        }
+        debug_assert_eq!(artifact.manifest.sources.len(), resources.sources().len());
         let glues = match runtime::RuntimeGlueBindings::resolve(&resources, &frontend.hir, &lir) {
             Ok(glues) => glues,
             Err(error) => {
@@ -966,9 +1076,11 @@ fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMet
 /// 编译器构建身份。`unicode-` 后缀是 Unicode 数据版本。
 pub(crate) fn compiler_identity() -> String {
     format!(
-        "gugu-compiler-{} unicode-{}",
+        "gugu-compiler-{} unicode-{} runtime-artifact-schema-{} core-revision-{}",
         env!("CARGO_PKG_VERSION"),
-        UNICODE_VERSION
+        UNICODE_VERSION,
+        gugu_compiler_core::ARTIFACT_SCHEMA,
+        gugu_compiler_core::GBC_SCHEMA,
     )
 }
 
@@ -1023,6 +1135,9 @@ fn compilation_action_key(
     inputs.set_generic_gir(frontend.gir.fingerprint);
     inputs.set_lir(lir.fingerprint());
     inputs.set_runtime_raw(raw_contract.fingerprint());
+    if let Ok(digest) = RuntimeArtifacts::manifest_digest(target) {
+        inputs.set_runtime_artifact(digest);
+    }
     inputs.set_target_descriptor(target.descriptor().digest());
     if let Some(x64) = x64 {
         inputs.set_backend_encoder(x64.encoder_fingerprint());
@@ -3047,6 +3162,7 @@ mod tests {
     ///
     /// 表里故意把 glue 指向 heap.gg 里不存在的源项：真实登记（`gc_alloc_slow` → heap.gg）由
     /// 镜像 bench 覆盖，这里锁的是引用判定本身。
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn allocation_op_implies_a_referenced_glue() {
         use runtime::compression_schema::CompressionPolicyV1;
@@ -3088,7 +3204,11 @@ mod tests {
         let compilation =
             Compiler::new().compile(CompileRequest::empty_package(TargetName::X86_64Linux));
 
-        assert!(compilation.is_success());
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
         assert!(compilation.image_plan().is_none());
         assert!(
             compilation
@@ -3103,6 +3223,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn simple_main_reaches_runtime_and_image_plan() {
         let compilation = Compiler::new().compile(CompileRequest::single_file(
@@ -3111,7 +3232,11 @@ mod tests {
             TargetName::X86_64Linux,
         ));
 
-        assert!(compilation.is_success());
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
         let plan = compilation.image_plan().expect("simple main has a plan");
         assert_eq!(plan.entry(), "main");
         assert_eq!(plan.rt0(), super::Rt0Boundary::LinuxSyscall);
@@ -3178,6 +3303,7 @@ mod tests {
         assert!(TargetName::parse("x86_64-freebsd").is_err());
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn library_file_compiles_without_requiring_main() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -3224,6 +3350,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn project_target_snapshots_and_analyzes_its_module_tree() {
         let root = tempfile::tempdir().expect("tempdir");
@@ -3310,6 +3437,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_runtime_raw_contract() {
         let compiler = Compiler::new();
@@ -3379,6 +3507,7 @@ mod tests {
         assert_eq!(cold.exit_code(), 0);
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_resource_lease_sites() {
         let source = "struct ResourceCell { id: uint }\nfn main() {\n let a = ResourceCell { id: 1 }\n let b = a\n b = ResourceCell { id: 2 }\n _ = b\n}";
@@ -3412,6 +3541,7 @@ mod tests {
         assert_eq!(plan.resource_cell_header_bytes(), 64);
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn configured_target_changes_raw_contract_fingerprint() {
         let source = "fn main() { let value = 1\n _ = value }";
@@ -3434,6 +3564,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_rt0_startup_contract() {
         let source = "fn main() { let value = 1\n _ = value }";
@@ -3465,6 +3596,7 @@ mod tests {
         assert!(dump.contains("rt0-demand entry=true main-result=false"));
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn main_result_type_enters_rt0_demand_and_contract() {
         let unit = "fn main() { let value = 1\n _ = value }";
@@ -3498,6 +3630,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn rt0_contract_fingerprint_is_deterministic_across_compilations() {
         let source = "fn main() { let value = 1\n _ = value }";
@@ -3520,6 +3653,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_gc_metadata_contract() {
         let source = "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }";
@@ -3611,6 +3745,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_turn_region_contract() {
         let reset_source = "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
@@ -3684,6 +3819,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_barrier_contract_for_managed_writes() {
         let source = "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
@@ -3907,6 +4043,7 @@ mod tests {
         );
     }
 
+    #[test]
     #[cfg(feature = "slow-tests")]
     fn large_type_without_allocation_keeps_demand_bounded() {
         // 冻结类型表里出现、却没有分配站点的大类型不得让 large 上界越过分配站点上界：

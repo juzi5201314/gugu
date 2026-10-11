@@ -12,8 +12,11 @@ use crate::frontend::{
 use std::collections::BTreeSet;
 
 /// runtime 角色的全部源路径：控制块可以落在任一 runtime 单元（入口单元与协程单元分开）。
-fn runtime_paths() -> BTreeSet<&'static str> {
-    super::RuntimeResources::builtin().runtime_paths().collect()
+fn runtime_paths() -> BTreeSet<String> {
+    super::RuntimeResources::builtin()
+        .runtime_paths()
+        .map(str::to_owned)
+        .collect()
 }
 
 pub(super) fn verify_source(

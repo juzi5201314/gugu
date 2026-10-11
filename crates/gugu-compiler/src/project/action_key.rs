@@ -23,6 +23,7 @@ pub struct ActionInputs {
     generic_gir: [u8; 32],
     lir: [u8; 32],
     runtime_raw: [u8; 32],
+    runtime_artifact: [u8; 32],
     target_descriptor: [u8; 32],
     backend_encoder: [u8; 32],
     backend_fragments: [u8; 32],
@@ -164,6 +165,11 @@ impl ActionInputs {
         self.runtime_raw = fingerprint;
     }
 
+    /// 设置嵌入 runtime artifact manifest 摘要。
+    pub fn set_runtime_artifact(&mut self, fingerprint: [u8; 32]) {
+        self.runtime_artifact = fingerprint;
+    }
+
     /// 设置目标描述符指纹。
     pub fn set_target_descriptor(&mut self, fingerprint: [u8; 32]) {
         self.target_descriptor = fingerprint;
@@ -217,6 +223,7 @@ impl ActionInputs {
         encode_bytes(&mut canonical, &self.generic_gir);
         encode_bytes(&mut canonical, &self.lir);
         encode_bytes(&mut canonical, &self.runtime_raw);
+        encode_bytes(&mut canonical, &self.runtime_artifact);
         encode_bytes(&mut canonical, &self.target_descriptor);
         encode_bytes(&mut canonical, &self.backend_encoder);
         encode_bytes(&mut canonical, &self.backend_fragments);

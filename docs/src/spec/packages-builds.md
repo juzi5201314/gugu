@@ -326,7 +326,9 @@ Linux 默认使用 `$XDG_CACHE_HOME/gugu`（未设置时 `~/.cache/gugu`）、`$
 vendor 根包含严格的 `.gugu-vendor.toml` 映射；每个 registry/Git package 使用由 package identity 派生的 `pkg-<key>` 目录，并记录 source、锁定 registry checksum 和内容摘要。读取 vendor 时 package 集合、目录集合、source、每个文件和整体摘要都必须与锁图一致，path package 仍从本地目录读取。输入准备在 codegen 前完成，cache 与 vendor 不会静默互相回退。
 
 实现中的 `ActionInputs` 按规范固定编码全部影响输出的输入，集合/映射按编码键排序，使用 `gugu-action-v1` BLAKE3 派生 `ActionKey`；缓存命中只改变输入来源，不改变 key 或依赖输入字节。`TargetView` 物化到 workspace target 视图，并拒绝绝对路径与目录穿越。
+实现中的 `ActionInputs` 按规范固定编码全部影响输出的输入，集合/映射按编码键排序，使用 `gugu-action-v1` BLAKE3 派生 `ActionKey`；其中必须包含 target descriptor、embedded runtime artifact manifest、runtime contract/analysis/codegen/encoder revision、compression/routing/provenance/combining policy 与 feature set。缓存命中只改变输入来源，不改变 key 或依赖输入字节。`TargetView` 物化到 workspace target 视图，并拒绝绝对路径与目录穿越。
 
+内建 runtime/std 只允许在 compiler build-time 生成并嵌入 target 专属 `GUGURT01` artifact；用户编译不重新读取内建源，也不提供 artifact 缺失时的源码 fallback。artifact 的 magic/schema/length/digest/target/source manifest 或 revision 校验失败必须报告 compiler/backend invariant，不能产出镜像。
 
 workspace `target/` 只呈现用户产物、build.gg 生成物和可读日志，不是唯一缓存来源：
 

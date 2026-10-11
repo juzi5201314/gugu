@@ -1,3 +1,4 @@
+#![allow(dead_code, reason = "slow-tests feature 关闭时保留测试 helper")]
 use super::body::*;
 use super::pass::{GIR_PASS_ORDER, GirPass, GirPassStats};
 use super::*;

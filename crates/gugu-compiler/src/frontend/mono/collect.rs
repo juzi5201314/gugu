@@ -96,8 +96,46 @@ pub(crate) fn input_fingerprint(context: &MonoContext<'_>) -> [u8; 32] {
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&context.module.input_fingerprint);
     bytes.extend_from_slice(context.target.to_string().as_bytes());
+
     bytes.push(u8::from(context.harness));
     hash_domain("gugu-mono-close-input-v1", &bytes)
+}
+
+/// 从 build-time artifact 按 stable MonoKey 选择当前闭包需要的 runtime function。
+pub(crate) fn reachable_runtime_functions(
+    artifact: &crate::RuntimeArtifactV1,
+    world: &MonoWorldV1,
+) -> Result<Vec<crate::RuntimeFunctionArtifactV1>, Vec<Diagnostic>> {
+    let reachable = world
+        .instances
+        .iter()
+        .filter_map(|instance| instance.mono_key.get(..32))
+        .collect::<BTreeSet<_>>();
+    let mut selected = artifact
+        .payload
+        .functions
+        .iter()
+        .filter(|function| {
+            let digest = crate::frontend::mono::keys::hash_domain(
+                "gugu-runtime-mono-key-v1",
+                function.stable_mono_key.as_bytes(),
+            );
+            reachable.contains(digest.as_slice())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    selected.sort_by(|left, right| left.stable_mono_key.cmp(&right.stable_mono_key));
+    if selected
+        .windows(2)
+        .any(|pair| pair[0].stable_mono_key == pair[1].stable_mono_key)
+    {
+        return Err(vec![crate::Diagnostic::error(
+            crate::DiagnosticCode::BackendInvariant,
+            "runtime artifact 含重复 stable MonoKey",
+            None,
+        )]);
+    }
+    Ok(selected)
 }
 
 /// 空 package 的空实例图。

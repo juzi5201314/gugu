@@ -290,12 +290,23 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
     // 函数表按 `code_rva` 严格递增，code range 不重叠。
     let mut previous_rva = None;
     let mut previous_end = 0u64;
+    let mut previous_safepoint_end = 0_u32;
     for index in 0..function_count {
         let base = (functions_offset as usize) + index as usize * FUNCTION_BYTES;
         let rva = u64::from_le_bytes(bytes[base..base + 8].try_into().expect("函数字段"));
         let size = u32::from_le_bytes(bytes[base + 8..base + 12].try_into().expect("函数字段"));
         let frame = u32::from_le_bytes(bytes[base + 12..base + 16].try_into().expect("函数字段"));
+        let safepoint_start =
+            u32::from_le_bytes(bytes[base + 16..base + 20].try_into().expect("函数字段"));
+        let safepoint_count_for_function =
+            u32::from_le_bytes(bytes[base + 20..base + 24].try_into().expect("函数字段"));
+        let safepoint_end = safepoint_start
+            .checked_add(safepoint_count_for_function)
+            .ok_or_else(|| RawModelError::new("函数安全点范围溢出"))?;
         let flags = u16::from_le_bytes(bytes[base + 28..base + 30].try_into().expect("函数字段"));
+        if safepoint_start < previous_safepoint_end || safepoint_end > safepoint_count {
+            return Err(RawModelError::new("函数安全点范围没有连续覆盖安全点表"));
+        }
         if u16::from_le_bytes(bytes[base + 30..base + 32].try_into().expect("保留字段")) != 0
             || flags & !0b111 != 0
         {
@@ -314,10 +325,15 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
         previous_end = rva
             .checked_add(u64::from(size))
             .ok_or_else(|| RawModelError::new("函数代码范围溢出"))?;
+        previous_safepoint_end = safepoint_end;
     }
-    // 安全点表：同一函数内按 offset 严格递增，offset 小于 code_size。
+    // 安全点表按函数范围连续编码；保持单调游标，避免每个安全点从函数 0 重新扫描。
     let mut previous_function = u32::MAX;
     let mut previous_offset = u32::MAX;
+    let mut function_index = 0_u32;
+    let mut current_function_start = 0_u32;
+    let mut current_function_end = 0_u32;
+    let mut current_code_size = 0_u32;
     for index in 0..safepoint_count {
         let base = (safepoints_offset as usize) + index as usize * SAFEPOINT_BYTES;
         let pc = u32::from_le_bytes(bytes[base..base + 4].try_into().expect("安全点字段"));
@@ -339,14 +355,50 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
         if flags & 0b1000 != 0 && kind != 3 {
             return Err(RawModelError::new("dirty 标志只能与 kind 3 同时出现"));
         }
-        // 所属函数由全局序推导：函数记录的 safepoint 范围连续。
-        let (function, code_size) = function_of(bytes, functions_offset, function_count, index)?;
+        loop {
+            if function_index >= function_count {
+                return Err(RawModelError::new("安全点没有所属函数范围"));
+            }
+            if index >= current_function_start && index < current_function_end {
+                break;
+            }
+            if index < current_function_start {
+                return Err(RawModelError::new("安全点表函数范围非单调"));
+            }
+            let function_base = (functions_offset as usize)
+                + usize::try_from(function_index).expect("函数下标适配宿主") * FUNCTION_BYTES;
+            current_function_start = u32::from_le_bytes(
+                bytes[function_base + 16..function_base + 20]
+                    .try_into()
+                    .expect("函数字段"),
+            );
+            let count = u32::from_le_bytes(
+                bytes[function_base + 20..function_base + 24]
+                    .try_into()
+                    .expect("函数字段"),
+            );
+            current_function_end = current_function_start
+                .checked_add(count)
+                .ok_or_else(|| RawModelError::new("函数安全点范围溢出"))?;
+            current_code_size = u32::from_le_bytes(
+                bytes[function_base + 8..function_base + 12]
+                    .try_into()
+                    .expect("函数字段"),
+            );
+            if index < current_function_start {
+                return Err(RawModelError::new("安全点没有所属函数范围"));
+            }
+            if index >= current_function_end {
+                function_index = function_index.saturating_add(1);
+            }
+        }
+        let function = function_index;
         if function != previous_function {
             previous_function = function;
         } else if pc <= previous_offset {
             return Err(RawModelError::new("同一函数的安全点没有按偏移严格递增"));
         }
-        if pc >= code_size {
+        if pc >= current_code_size {
             return Err(RawModelError::new("安全点偏移越过函数代码"));
         }
         previous_offset = pc;
@@ -373,27 +425,6 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<(u32, u32, u32), RawModelError> {
         return Err(RawModelError::new("map 索引末项不是数据末端"));
     }
     Ok((function_count, safepoint_count, map_count))
-}
-
-fn function_of(
-    bytes: &[u8],
-    functions_offset: u64,
-    function_count: u32,
-    safepoint: u32,
-) -> Result<(u32, u32), RawModelError> {
-    let mut cursor = 0u32;
-    for index in 0..function_count {
-        let base = (functions_offset as usize) + index as usize * FUNCTION_BYTES;
-        let start = u32::from_le_bytes(bytes[base + 16..base + 20].try_into().expect("函数字段"));
-        let count = u32::from_le_bytes(bytes[base + 20..base + 24].try_into().expect("函数字段"));
-        let size = u32::from_le_bytes(bytes[base + 8..base + 12].try_into().expect("函数字段"));
-        if safepoint >= start && safepoint < start + count {
-            return Ok((index, size));
-        }
-        cursor += count;
-    }
-    let _ = cursor;
-    Err(RawModelError::new("安全点没有所属函数范围"))
 }
 
 fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {

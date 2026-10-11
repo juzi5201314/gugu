@@ -2,13 +2,12 @@
 name = "gugu-compiler"
 version = "0.1.0"
 edition = "2024"
+autobenches = false
 description = "Gugu compiler bootstrap and staged action graph"
 
 [features]
-runtime-gc-probes = []
-# 重负载/端到端用例的显式开关：默认关闭，保证 `cargo nextest run --workspace` 全是快速正确性
-# 测试；需要时用 `--features slow-tests` 跑。所有 `#[cfg(all(test, feature = "slow-tests"))]`
-# 模块都依赖它被声明，否则这些用例永远编不进测试目标。
+runtime-gc-probes = ["gugu-runtime-builder/runtime-gc-probes"]
+# 重负载/端到端用例的显式开关：默认关闭，避免默认套件编译和执行完整编译 fixture。
 slow-tests = []
 
 [dependencies]
@@ -27,13 +26,11 @@ unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
-[[bench]]
-name = "owner_return"
-harness = false
+gugu-compiler-core = { path = "../gugu-compiler-core" }
 
-[[bench]]
-name = "resource_release"
-harness = false
+[build-dependencies]
+gugu-compiler-core = { path = "../gugu-compiler-core" }
+gugu-runtime-builder = { path = "../gugu-runtime-builder" }
 
 [[bench]]
 name = "coroutine_context"
@@ -48,34 +45,6 @@ name = "stackmap_walk"
 harness = false
 
 [[bench]]
-name = "region_transfer"
-harness = false
-
-[[bench]]
-name = "barrier_card_mark"
-harness = false
-
-[[bench]]
-name = "edge_candidates"
-harness = false
-
-[[bench]]
-name = "shared_forward"
-harness = false
-
-[[bench]]
-name = "block_return"
-harness = false
-
-[[bench]]
-name = "compression"
-harness = false
-
-[[bench]]
-name = "cold_combining"
-harness = false
-
-[[bench]]
 name = "x64_encoding"
 harness = false
 
@@ -85,10 +54,6 @@ harness = false
 
 [[bench]]
 name = "x64_frame"
-harness = false
-
-[[bench]]
-name = "linux_pie"
 harness = false
 
 [dev-dependencies]

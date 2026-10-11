@@ -27,6 +27,12 @@ BLAKE3-256(domain || 0x00 || canonical_bytes)
 
 域标签固定包括 `gugu-input-v1`、`gugu-query-key-v1`、`gugu-query-result-v1`、`gugu-mono-v1`、`gugu-analysis-summary-v1`、`gugu-object-v1` 和 `gugu-action-v1`。不同域的相同 payload 不能得到可互换身份。
 
+## GUGURT01 runtime artifact
+
+runtime/std 源只在 compiler build-time 进入 `gugu-runtime-builder`，生成 target 专属 `GUGURT01` 容器。容器包含长度前缀 manifest、JSON payload 与 `BLAKE3-256("gugu-runtime-artifact-v1" || 0x00 || payload)`；manifest 的 target descriptor、source content digest、compiler identity、schema/revision、analysis policy 和 target feature digest 是 cache/action 身份的一部分。向量按 stable key 排序，不能存 session-local `DefId`、`ExprId`、`TypeId`、owner index 或最终地址。
+
+artifact payload 的 contract record、generic template 与 function artifact 分层：record 只参与 runtime contract/layout 验证，generic template 在用户 demand 下专门化，function fragment 按 stable `MonoKey` 与 reachable closure 复用。`ObjectCache` 读取 artifact 时必须同时验证 magic、schema、长度、payload digest、manifest 与 target；任一失败是 cache miss 或 compiler invariant，禁止把损坏 bytes 当成命中，也禁止运行时源码 fallback。
+
 规范编码 `GBC1` 使用：
 
 - 小端无符号固定宽度整数；

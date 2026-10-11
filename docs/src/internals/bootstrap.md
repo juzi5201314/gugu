@@ -14,6 +14,14 @@
 
 规范表中的 `new`、`init`、`build`、`check`、`run`、`test`、`bench`、`fmt`、`doc`、`clean`、`add`、`remove`、`update`、`tree`、`vendor`、`package`、`publish`、`yank`、`login`、`cache`、`explain`、`version` 和 `help` 均已登记。`build`、`check`、`fmt`、`version` 和 `help` 接入真实 action；其它已登记命令返回统一 `cli-error`，不会调用 compiler。
 现状基线是 [`gugu-cli`](../../../crates/gugu-cli/src/main.rs)：compiler 已接入源码、清单、依赖、缓存、词法/AST、类型/语义检查、冻结 HIR 与 generic GIR；runtime 调度/GC、LIR、后端机器码与标准库语义仍按对应内部契约推进。
+
+### Build-time runtime artifact
+
+compiler 构建阶段由 `gugu-runtime-builder` 唯一读取内建 `std/` 与 `runtime/` Gugu 源，按目标分别生成 `GUGURT01` artifact；`gugu-compiler` 只嵌入并校验 `x86_64-linux` 与 `x86_64-windows` 两份 bytes，不在用户编译中重新 lex/parse/type-check runtime 源，也没有运行时源码 fallback。artifact manifest 覆盖 target descriptor、源路径与内容摘要、compiler/artifact/schema revision、analysis policy 与 target feature 摘要。
+
+artifact 中的 runtime item 分为 contract record、generic template 与可重定位 function fragment。record 只提供布局/ABI/schema 证据，不生成 executable root；`ExecutableUsed`、entry、静态初始化与实际 compiler-generated glue 才进入当前用户 action 的 root。用户编译以 stable `MonoKey` 计算 runtime 可达闭包，只注入可达摘要、IR 与片段；本次 session 重新分配 dense ID，不能把 artifact 的局部 ID 或最终地址作为身份。
+
+最终 image assembly 仍统一验证 target、encoder/raw/LIR fingerprint、符号、relocation、frame、stackmap、unwind、source metadata、section 范围和重复符号，并在合并时重写连续 function index。artifact manifest digest 与当前 demand digest 同时进入 runtime contract 和 action key；损坏、截断、schema/digest/target 不匹配均报告 compiler/backend invariant，绝不静默回退到源码编译。
 `text` 保留人读的 action/诊断/最终结果，诊断按 `级别[代码]: 消息`、`--> 文件:行:列` 与带行号源码片段块渲染；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
 ## 源码快照与 Span

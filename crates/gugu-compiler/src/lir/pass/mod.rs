@@ -139,14 +139,16 @@ pub(crate) fn optimize_world(
             ) {
                 continue;
             }
-            let mut editor = Editor::new(current);
-            let _changed = run_pass(*pass, &mut editor, profile, baseline)
+            let mut editor = Editor::new(current.clone());
+            let changed = run_pass(*pass, &mut editor, profile, baseline)
                 .map_err(|error| vec![pack(pass.name(), error)])?;
-            current = editor
-                .finish()
-                .map_err(|error| vec![pack(pass.name(), error)])?;
-            super::verify::verify_structure(&current, module)
-                .map_err(|error| vec![pack(pass.name(), error)])?;
+            if changed {
+                current = editor
+                    .finish()
+                    .map_err(|error| vec![pack(pass.name(), error)])?;
+                super::verify::verify_structure(&current, module)
+                    .map_err(|error| vec![pack(pass.name(), error)])?;
+            }
         }
         optimized.push(current);
     }

@@ -1,6 +1,12 @@
 # GIR 与 LIR
 
 本章规定 Gugu 的两个中间表示：GIR 是完成类型检查后的、目标无关且显式控制流的语义 IR；LIR 是完成具体布局和 ABI lowering 后、面向目标机器的 SSA IR。两者是编译器内部契约，不是序列化给第三方工具的稳定格式。
+## stable fragment 复用与 changed-only pass
+
+runtime function artifact 以 stable `MonoKey` 保存可重定位 GIR/LIR/x64 fragment、relocation、frame、stackmap/unwind/source metadata、constant/global 和 glue 绑定。用户编译只吸收 reachable stable symbols；runtime-to-user relocation 必须由当前用户 LIR 生成，最终 image assembly 统一分配地址与 section，并以 stable symbol 到 merged function index 的映射重写 metadata。
+
+GIR/LIR pass driver 消费现有 `Outcome::changed`/changed 标志：未变化时保留 body、fingerprint 和 payload，不重复 `Editor::finish`、完整 verifier 或 fingerprint；变化时在 pass 边界执行 verifier 和 fingerprint，最终 world verifier 仍保留。GVN key 使用固定字段顺序的稳定二进制编码，不能依赖 JSON 或局部 ID 的偶然顺序。
+
 
 完整管线固定为：
 

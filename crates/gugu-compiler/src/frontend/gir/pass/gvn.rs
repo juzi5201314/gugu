@@ -229,7 +229,7 @@ fn cse(editor: &mut Editor) -> bool {
                 defined_in_block.insert(place.local);
                 continue;
             }
-            let key = serde_json::to_vec(rvalue).expect("GIR rvalue 可序列化");
+            let key = rvalue_key(rvalue);
             match seen.get(&key).copied() {
                 Some(existing) if !defined_in_block.contains(&existing) => {
                     editor.set_statement(
@@ -249,6 +249,168 @@ fn cse(editor: &mut Editor) -> bool {
         }
     }
     changed
+}
+
+fn rvalue_key(rvalue: &Rvalue) -> Vec<u8> {
+    let mut key = Vec::new();
+    match rvalue {
+        Rvalue::Use(operand) => {
+            key.push(0);
+            operand_key(&mut key, operand);
+        }
+        Rvalue::UnaryOp { op, operand } => {
+            key.extend_from_slice(&[1, unary_tag(*op)]);
+            operand_key(&mut key, operand);
+        }
+        Rvalue::BinaryOp { op, left, right } => {
+            key.extend_from_slice(&[2, binary_tag(*op)]);
+            operand_key(&mut key, left);
+            operand_key(&mut key, right);
+        }
+        Rvalue::Compare { op, left, right } => {
+            key.extend_from_slice(&[3, compare_tag(*op)]);
+            operand_key(&mut key, left);
+            operand_key(&mut key, right);
+        }
+        Rvalue::Repeat { operand, count } => {
+            key.push(4);
+            operand_key(&mut key, operand);
+            key.extend_from_slice(&count.to_le_bytes());
+        }
+        Rvalue::Discriminant(place) => place_key(&mut key, 5, *place),
+        Rvalue::Len(place) => place_key(&mut key, 6, *place),
+        Rvalue::Ref(place) => place_key(&mut key, 7, *place),
+        Rvalue::RawAddress(place) => place_key(&mut key, 8, *place),
+        Rvalue::Cast { kind, operand, ty } => {
+            key.extend_from_slice(&[9, cast_tag(*kind)]);
+            operand_key(&mut key, operand);
+            key.extend_from_slice(&ty.0.to_le_bytes());
+        }
+        Rvalue::FunctionValue(candidate) => {
+            key.push(10);
+            key.extend_from_slice(&candidate.definition.0.to_le_bytes());
+            key.extend_from_slice(&candidate.signature.0.to_le_bytes());
+        }
+        Rvalue::DynErase { operand, ty } => {
+            key.push(11);
+            operand_key(&mut key, operand);
+            key.extend_from_slice(&ty.0.to_le_bytes());
+        }
+        Rvalue::Aggregate { kind, operands } => {
+            key.push(12);
+            aggregate_key(&mut key, kind);
+            for operand in operands {
+                operand_key(&mut key, operand);
+            }
+        }
+        Rvalue::StackSlotAddress(local) => {
+            key.push(13);
+            key.extend_from_slice(&local.0.to_le_bytes());
+        }
+        _ => unreachable!("GVN key 只接受 pure_rvalue"),
+    }
+    key
+}
+
+fn aggregate_key(key: &mut Vec<u8>, kind: &super::super::body::AggregateKind) {
+    match kind {
+        super::super::body::AggregateKind::Tuple => key.push(0),
+        super::super::body::AggregateKind::Array(ty) => {
+            key.push(1);
+            key.extend_from_slice(&ty.0.to_le_bytes());
+        }
+        super::super::body::AggregateKind::Adt { ty, variant } => {
+            key.push(2);
+            key.extend_from_slice(&ty.0.to_le_bytes());
+            key.extend_from_slice(&variant.to_le_bytes());
+        }
+        super::super::body::AggregateKind::Union { ty, field } => {
+            key.push(3);
+            key.extend_from_slice(&ty.0.to_le_bytes());
+            key.extend_from_slice(&field.to_le_bytes());
+        }
+        super::super::body::AggregateKind::Range => key.push(4),
+        super::super::body::AggregateKind::Closure(definition)
+        | super::super::body::AggregateKind::Coroutine(definition) => {
+            key.push(5);
+            key.extend_from_slice(&definition.0.to_le_bytes());
+        }
+    }
+}
+
+fn operand_key(key: &mut Vec<u8>, operand: &Operand) {
+    match operand {
+        Operand::Copy(place) => place_key(key, 0, *place),
+        Operand::MoveInternal(place) => place_key(key, 1, *place),
+        Operand::Constant(constant) => {
+            key.push(2);
+            key.extend_from_slice(&constant.0.to_le_bytes());
+        }
+        Operand::LateConstRef { expression } => {
+            key.push(3);
+            key.extend_from_slice(&expression.to_le_bytes());
+        }
+        Operand::Function(candidate) => {
+            key.push(4);
+            key.extend_from_slice(&candidate.definition.0.to_le_bytes());
+            key.extend_from_slice(&candidate.signature.0.to_le_bytes());
+        }
+    }
+}
+
+fn place_key(key: &mut Vec<u8>, tag: u8, place: super::super::body::Place) {
+    key.push(tag);
+    key.extend_from_slice(&place.local.0.to_le_bytes());
+    key.extend_from_slice(&place.projections.0.to_le_bytes());
+    key.extend_from_slice(&place.projections.1.to_le_bytes());
+}
+
+fn unary_tag(op: super::super::body::UnaryOp) -> u8 {
+    match op {
+        super::super::body::UnaryOp::Neg => 0,
+        super::super::body::UnaryOp::Not => 1,
+    }
+}
+
+fn binary_tag(op: super::super::body::BinaryOp) -> u8 {
+    match op {
+        super::super::body::BinaryOp::Add => 0,
+        super::super::body::BinaryOp::Sub => 1,
+        super::super::body::BinaryOp::Mul => 2,
+        super::super::body::BinaryOp::Div => 3,
+        super::super::body::BinaryOp::Rem => 4,
+        super::super::body::BinaryOp::BitAnd => 5,
+        super::super::body::BinaryOp::BitOr => 6,
+        super::super::body::BinaryOp::BitXor => 7,
+        super::super::body::BinaryOp::Shl => 8,
+        super::super::body::BinaryOp::Shr => 9,
+    }
+}
+
+fn compare_tag(op: super::super::body::CompareOp) -> u8 {
+    match op {
+        super::super::body::CompareOp::Eq => 0,
+        super::super::body::CompareOp::Ne => 1,
+        super::super::body::CompareOp::Lt => 2,
+        super::super::body::CompareOp::Le => 3,
+        super::super::body::CompareOp::Gt => 4,
+        super::super::body::CompareOp::Ge => 5,
+    }
+}
+
+fn cast_tag(kind: super::super::body::CastKind) -> u8 {
+    match kind {
+        super::super::body::CastKind::Scalar => 0,
+        super::super::body::CastKind::Pointer => 1,
+        super::super::body::CastKind::Transmute => 2,
+        super::super::body::CastKind::NeverTo => 3,
+        super::super::body::CastKind::ArrayToSlice => 4,
+        super::super::body::CastKind::Opaque => 5,
+        super::super::body::CastKind::Instantiate => 6,
+        super::super::body::CastKind::FunctionErase => 7,
+        super::super::body::CastKind::AssumeInit => 8,
+        super::super::body::CastKind::MaybeUninit => 9,
+    }
 }
 
 fn pure_rvalue(rvalue: &Rvalue) -> bool {

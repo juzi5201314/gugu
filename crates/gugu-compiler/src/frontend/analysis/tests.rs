@@ -25,6 +25,21 @@ fn macro_budget_change_action_key() {
 }
 
 #[test]
+fn runtime_artifact_and_target_descriptor_change_action_key() {
+    use crate::project::ActionInputs;
+    let mut first = ActionInputs::new(b"compiler", "host", "x86_64-linux", "bin");
+    first.set_runtime_artifact([1; 32]);
+    first.set_target_descriptor([2; 32]);
+    let mut second = ActionInputs::new(b"compiler", "host", "x86_64-linux", "bin");
+    second.set_runtime_artifact([3; 32]);
+    second.set_target_descriptor([2; 32]);
+    assert_ne!(first.key(), second.key());
+    second.set_runtime_artifact([1; 32]);
+    second.set_target_descriptor([4; 32]);
+    assert_ne!(first.key(), second.key());
+}
+
+#[test]
 fn empty_world_schema_is_stable() {
     let world = crate::frontend::analysis::empty_world();
     assert_eq!(world.schema, WORLD_SCHEMA_VERSION);

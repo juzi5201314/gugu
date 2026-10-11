@@ -9,6 +9,12 @@
 use crate::target::{Rt0Kind, TargetName};
 
 #[allow(dead_code, reason = "屏障布局交叉校验由 RuntimeRawModel 消费")]
+pub mod artifact;
+pub use artifact::{
+    RuntimeArtifactError, RuntimeArtifactManifestV1, RuntimeArtifactPayloadV1, RuntimeArtifactV1,
+    RuntimeArtifacts, RuntimeContractRecordV1, RuntimeFunctionArtifactV1, RuntimeGenericTemplateV1,
+    RuntimeModuleInterfaceV1, RuntimeSourceRecordV1,
+};
 mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
@@ -305,45 +311,38 @@ pub(crate) const RETURN_SLAB_CACHE_WAYS: u32 = 2;
 /// direct mode 下的 temporal target cache 项数。
 pub(crate) const TARGET_CACHE_ENTRIES: u32 = 4;
 
-const STD_PRELUDE_SOURCE: &str = include_str!("../../resources/std/prelude.gg");
-const STD_OPTION_SOURCE: &str = include_str!("../../resources/std/option.gg");
-const STD_RESULT_SOURCE: &str = include_str!("../../resources/std/result.gg");
-const STD_ERROR_SOURCE: &str = include_str!("../../resources/std/error.gg");
-const STD_CMP_SOURCE: &str = include_str!("../../resources/std/cmp.gg");
-const STD_OPS_SOURCE: &str = include_str!("../../resources/std/ops.gg");
-const STD_ITER_SOURCE: &str = include_str!("../../resources/std/iter.gg");
-const STD_TEXT_SOURCE: &str = include_str!("../../resources/std/text.gg");
-const STD_IO_SOURCE: &str = include_str!("../../resources/std/io.gg");
-const STD_PATH_SOURCE: &str = include_str!("../../resources/std/path.gg");
-const STD_FMT_SOURCE: &str = include_str!("../../resources/std/fmt.gg");
-const STD_HASH_SOURCE: &str = include_str!("../../resources/std/hash.gg");
-const STD_COLLECTIONS_SOURCE: &str = include_str!("../../resources/std/collections.gg");
-const STD_SYNC_SOURCE: &str = include_str!("../../resources/std/sync.gg");
+#[cfg(test)]
+#[allow(dead_code, reason = "测试目标按模块条件读取 runtime source mirror")]
 const RUNTIME_CORE_SOURCE: &str = include_str!("../../resources/runtime/core.gg");
-const RUNTIME_PLATFORM_SOURCE: &str = include_str!("../../resources/runtime/platform.gg");
-const RUNTIME_COROUTINE_SOURCE: &str = include_str!("../../resources/runtime/coroutine.gg");
-const RUNTIME_CHANNEL_SOURCE: &str = include_str!("../../resources/runtime/channel.gg");
-const RUNTIME_SCHEDULER_SOURCE: &str = include_str!("../../resources/runtime/scheduler.gg");
-const RUNTIME_SYNC_SOURCE: &str = include_str!("../../resources/runtime/sync.gg");
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "layout mirror tests 读取 build-time runtime source"
+)]
 const RUNTIME_BARRIER_SOURCE: &str = include_str!("../../resources/runtime/barrier.gg");
-const RUNTIME_TRACE_SOURCE: &str = include_str!("../../resources/runtime/trace.gg");
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "layout mirror tests 读取 build-time runtime source"
+)]
 const RUNTIME_HEAP_SOURCE: &str = include_str!("../../resources/runtime/heap.gg");
-const RUNTIME_MARK_SOURCE: &str = include_str!("../../resources/runtime/mark.gg");
-const RUNTIME_GC_SOURCE: &str = include_str!("../../resources/runtime/gc.gg");
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "layout mirror tests 读取 build-time runtime source"
+)]
 const RUNTIME_ROOTS_SOURCE: &str = include_str!("../../resources/runtime/roots.gg");
-const RUNTIME_COLLECT_SOURCE: &str = include_str!("../../resources/runtime/collect.gg");
-const RUNTIME_REGION_SOURCE: &str = include_str!("../../resources/runtime/region.gg");
-const RUNTIME_EDGE_SOURCE: &str = include_str!("../../resources/runtime/edge.gg");
-const RUNTIME_CANDIDATE_SOURCE: &str = include_str!("../../resources/runtime/candidate.gg");
-const RUNTIME_PACING_SOURCE: &str = include_str!("../../resources/runtime/pacing.gg");
-const RUNTIME_RETURN_SOURCE: &str = include_str!("../../resources/runtime/block_return.gg");
-#[cfg(feature = "runtime-gc-probes")]
+#[cfg(test)]
+#[expect(dead_code, reason = "slow GC tests 读取 build-time runtime source")]
 const RUNTIME_GC_PROBES_SOURCE: &str = include_str!("../../resources/runtime/gc_probes.gg");
-#[cfg(feature = "runtime-gc-probes")]
-const RUNTIME_GC_FIXTURE_SOURCE: &str =
-    include_str!("../../resources/runtime/fixtures/gc_image.gg");
+#[cfg(test)]
+#[expect(
+    dead_code,
+    reason = "layout mirror tests 读取 build-time runtime source"
+)]
+const RUNTIME_SCHEDULER_SOURCE: &str = include_str!("../../resources/runtime/scheduler.gg");
 
-/// 登记的 runtime 源文件角色。
+/// artifact manifest 中的 runtime source 角色。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeSourceRole {
     /// Gugu 标准库源文件。
@@ -352,23 +351,23 @@ pub enum RuntimeSourceRole {
     Runtime,
 }
 
-/// 一个嵌入 compiler 的 Gugu 源文件单元。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// artifact manifest 中的 source view；不携带源码文本。
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeSource {
-    logical_path: &'static str,
-    source: &'static str,
+    logical_path: String,
+    content_digest: [u8; 32],
     role: RuntimeSourceRole,
 }
 
 impl RuntimeSource {
     /// 返回 package 内的规范逻辑路径。
-    pub fn logical_path(&self) -> &'static str {
-        self.logical_path
+    pub fn logical_path(&self) -> &str {
+        &self.logical_path
     }
 
-    /// 返回源文件内容。
-    pub fn source(&self) -> &'static str {
-        self.source
+    /// 返回 source 内容摘要。
+    pub fn content_digest(&self) -> [u8; 32] {
+        self.content_digest
     }
 
     /// 返回源文件角色。
@@ -769,225 +768,91 @@ pub(crate) fn declared_glue_names() -> impl Iterator<Item = &'static str> {
     )
 }
 
+/// compiler 携带的 runtime contract、intrinsic 与 artifact source manifest view。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeResources {
+    sources: Vec<RuntimeSource>,
+    intrinsics: &'static [IntrinsicBoundary],
+}
+
+const INTRINSICS: &[IntrinsicBoundary] = &[
+    IntrinsicBoundary::Atomic,
+    IntrinsicBoundary::MemoryMapping,
+    IntrinsicBoundary::StackSwitch,
+    IntrinsicBoundary::SafepointPoll,
+    IntrinsicBoundary::GcWriteBarrier,
+    IntrinsicBoundary::ForeignBridge,
+];
+
+fn source_views(
+    artifact: Result<&'static RuntimeArtifactV1, RuntimeArtifactError>,
+) -> Vec<RuntimeSource> {
+    artifact
+        .expect("嵌入 runtime artifact 已在 build.rs 校验")
+        .manifest
+        .sources
+        .iter()
+        .map(|source| RuntimeSource {
+            logical_path: source.logical_path.clone(),
+            content_digest: source.content_digest,
+            role: match source.role {
+                gugu_compiler_core::RuntimeSourceRole::StandardLibrary => {
+                    RuntimeSourceRole::StandardLibrary
+                }
+                gugu_compiler_core::RuntimeSourceRole::Runtime => RuntimeSourceRole::Runtime,
+            },
+        })
+        .collect()
+}
+
 impl RuntimeResources {
     /// 返回本变更登记的 runtime glue 绑定表。
     pub(crate) fn glue_defs(&self) -> &'static [GlueDef] {
         GLUE_DEFS
     }
 
-    /// runtime 角色源文件的逻辑路径；控制块布局交叉校验按这个集合判定归属。
-    pub(crate) fn runtime_paths(&self) -> impl Iterator<Item = &'static str> + '_ {
+    /// runtime 角色源文件的逻辑路径。
+    pub(crate) fn runtime_paths(&self) -> impl Iterator<Item = &str> + '_ {
         self.sources
             .iter()
             .filter(|source| source.role() == RuntimeSourceRole::Runtime)
             .map(RuntimeSource::logical_path)
     }
-}
 
-/// compiler 使用的 Gugu 标准库/runtime 源树登记表。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct RuntimeResources {
-    sources: &'static [RuntimeSource],
-    intrinsics: &'static [IntrinsicBoundary],
-}
-
-impl RuntimeResources {
-    /// 返回当前 compiler 构建携带的源树登记。
-    pub fn builtin() -> Self {
+    /// 返回目标 artifact 的 source manifest view，不携带源码文本。
+    pub fn for_target(target: TargetName) -> Self {
+        let artifact = RuntimeArtifacts::for_target(target).expect("嵌入 artifact 已验证");
         Self {
-            sources: &[
-                RuntimeSource {
-                    logical_path: "std/prelude.gg",
-                    source: STD_PRELUDE_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/option.gg",
-                    source: STD_OPTION_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/result.gg",
-                    source: STD_RESULT_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/error.gg",
-                    source: STD_ERROR_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/cmp.gg",
-                    source: STD_CMP_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/ops.gg",
-                    source: STD_OPS_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/iter.gg",
-                    source: STD_ITER_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/text.gg",
-                    source: STD_TEXT_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/io.gg",
-                    source: STD_IO_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/path.gg",
-                    source: STD_PATH_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/fmt.gg",
-                    source: STD_FMT_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/hash.gg",
-                    source: STD_HASH_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/collections.gg",
-                    source: STD_COLLECTIONS_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/sync.gg",
-                    source: STD_SYNC_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/core.gg",
-                    source: RUNTIME_CORE_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/platform.gg",
-                    source: RUNTIME_PLATFORM_SOURCE,
-                    role: RuntimeSourceRole::StandardLibrary,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/coroutine.gg",
-                    source: RUNTIME_COROUTINE_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/channel.gg",
-                    source: RUNTIME_CHANNEL_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/scheduler.gg",
-                    source: RUNTIME_SCHEDULER_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/sync.gg",
-                    source: RUNTIME_SYNC_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/barrier.gg",
-                    source: RUNTIME_BARRIER_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/trace.gg",
-                    source: RUNTIME_TRACE_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/heap.gg",
-                    source: RUNTIME_HEAP_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/mark.gg",
-                    source: RUNTIME_MARK_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/gc.gg",
-                    source: RUNTIME_GC_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/roots.gg",
-                    source: RUNTIME_ROOTS_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/collect.gg",
-                    source: RUNTIME_COLLECT_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/region.gg",
-                    source: RUNTIME_REGION_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/edge.gg",
-                    source: RUNTIME_EDGE_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/candidate.gg",
-                    source: RUNTIME_CANDIDATE_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/pacing.gg",
-                    source: RUNTIME_PACING_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                RuntimeSource {
-                    logical_path: "std/runtime/block_return.gg",
-                    source: RUNTIME_RETURN_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                #[cfg(feature = "runtime-gc-probes")]
-                RuntimeSource {
-                    logical_path: "std/runtime/gc_probes.gg",
-                    source: RUNTIME_GC_PROBES_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-                #[cfg(feature = "runtime-gc-probes")]
-                RuntimeSource {
-                    logical_path: "std/runtime/fixtures/gc_image.gg",
-                    source: RUNTIME_GC_FIXTURE_SOURCE,
-                    role: RuntimeSourceRole::Runtime,
-                },
-            ],
-            intrinsics: &[
-                IntrinsicBoundary::Atomic,
-                IntrinsicBoundary::MemoryMapping,
-                IntrinsicBoundary::StackSwitch,
-                IntrinsicBoundary::SafepointPoll,
-                IntrinsicBoundary::GcWriteBarrier,
-                IntrinsicBoundary::ForeignBridge,
-            ],
+            sources: source_views(Ok(artifact)),
+            intrinsics: INTRINSICS,
         }
     }
 
-    /// 返回已登记的 Gugu 源文件。
+    /// 返回宿主默认目标的 artifact source manifest view。
+    pub fn builtin() -> Self {
+        Self::for_target(TargetName::X86_64Linux)
+    }
+
+    /// 返回已登记的 source manifest 项。
     pub fn sources(&self) -> &[RuntimeSource] {
-        self.sources
+        &self.sources
     }
 
     /// 返回 compiler/runtime 之间允许的 intrinsic 边界。
     pub fn intrinsic_boundaries(&self) -> &[IntrinsicBoundary] {
         self.intrinsics
+    }
+
+    /// 返回 build-time artifact 固化的 source blob；仅供 artifact frontend adapter 使用。
+    pub(crate) fn source_blobs(
+        &self,
+        target: TargetName,
+    ) -> &'static [gugu_compiler_core::RuntimeSourceBlobV1] {
+        RuntimeArtifacts::for_target(target)
+            .expect("嵌入 artifact 已验证")
+            .payload
+            .sources
+            .as_slice()
     }
 
     pub(crate) fn attach(&self, target: TargetName) -> RuntimeAttachment {

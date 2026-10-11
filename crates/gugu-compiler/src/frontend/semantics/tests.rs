@@ -11,6 +11,7 @@ pub(super) fn accepts(source: &str) -> bool {
     c.is_success()
 }
 #[cfg(feature = "slow-tests")]
+#[test]
 fn initialization_merges_only_reachable_predecessors() {
     assert!(accepts(
         "fn choose(b: bool) int { let x: int\n if b { x = 1 } else { return 2 }\n x }\nfn main() {}"
@@ -22,6 +23,7 @@ fn initialization_merges_only_reachable_predecessors() {
     assert!(!accepts("fn main() { let x: int\n _ = x }"));
 }
 #[cfg(feature = "slow-tests")]
+#[test]
 fn boolean_product_coverage_is_structural() {
     assert!(accepts(
         "fn f(t: (bool, bool)) int { match t { (true, _) => 1\n (false, true) => 2\n (false, false) => 3 } }\nfn main() {}"
@@ -34,6 +36,7 @@ fn boolean_product_coverage_is_structural() {
     ));
 }
 #[cfg(feature = "slow-tests")]
+#[test]
 fn operators_and_loop_exit_types_are_checked() {
     assert!(!accepts("fn main() { let x = true + false }"));
     assert!(!accepts(
@@ -44,6 +47,7 @@ fn operators_and_loop_exit_types_are_checked() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn initializers_reject_cycles_and_separate_lazy_domains() {
     assert!(accepts(
         "static A: int = B + 1\nstatic B: int = 2\nfn main() {}"
@@ -64,6 +68,7 @@ fn initializers_reject_cycles_and_separate_lazy_domains() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn local_static_does_not_capture_automatic_slots() {
     assert!(accepts(
         "fn f() int { static count: int = 0\n count += 1\n count }\nfn main() {}"
@@ -74,6 +79,7 @@ fn local_static_does_not_capture_automatic_slots() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn literal_bounds_and_signed_patterns() {
     assert!(accepts(
         "fn f(v: i8) int { match v { -128 => 0, _ => 1 } }\nfn main() { let n: i8 = -128\n _ = n }"
@@ -89,6 +95,7 @@ fn literal_bounds_and_signed_patterns() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn try_failures_join_initialization_before_the_expression() {
     assert!(accepts(
         "fn f(o: Option[int]) Option[int] { let x = o?\n Some(x) }\nfn main() {}"
@@ -102,6 +109,7 @@ fn try_failures_join_initialization_before_the_expression() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn deferred_blocks_read_at_exit_and_calls_capture_at_registration() {
     assert!(accepts(
         "fn sink(v: int) {}\nfn main() { let x: int\n defer { sink(x) }\n x = 7 }"
@@ -119,6 +127,7 @@ fn deferred_blocks_read_at_exit_and_calls_capture_at_registration() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn places_preserve_references_and_reject_constants() {
     assert!(accepts(
         "fn f(p: &int) int { *p = 2\n *p }\nfn main() { let x = 0\n _ = f(&x) }"
@@ -129,6 +138,7 @@ fn places_preserve_references_and_reject_constants() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn numeric_inference_has_no_implicit_scalar_conversion() {
     assert!(accepts(
         "fn f(x: i8) bool { 1 == x }\nfn main() { let n = 1\n let x: i8 = n + 1\n _ = x }"
@@ -144,6 +154,7 @@ fn numeric_inference_has_no_implicit_scalar_conversion() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn patterns_cover_references_slices_ranges_and_alternatives() {
     assert!(accepts(
         "fn f(xs: &[bool]) int { match xs { [] => 0, [true, ..] => 1, [false, ..] => 2 } }\nfn main() {}"
@@ -166,6 +177,7 @@ fn patterns_cover_references_slices_ranges_and_alternatives() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn rest_patterns_and_product_coverage_preserve_types() {
     assert!(!accepts(
         "fn f(xs: &[bool]) &[bool] { let rest @ .. = xs\n rest }\nfn main() {}"
@@ -192,11 +204,13 @@ fn rest_patterns_and_product_coverage_preserve_types() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn pattern_matrix_fixture_compiles() {
     assert!(accepts(include_str!("../fixtures/patterns.gg")));
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn let_else_and_refutability_follow_spec() {
     // let-else 接受可驳模式，失败分支发散
     assert!(accepts(
@@ -252,6 +266,7 @@ fn let_else_and_refutability_follow_spec() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn struct_patterns_follow_record_shape_rules() {
     assert!(accepts(
         "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, y } = p\n x + y }\nfn main() {}"
@@ -277,6 +292,7 @@ fn struct_patterns_follow_record_shape_rules() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn struct_patterns_respect_private_fields() {
     let queries = crate::QueryEngine::new();
     let lib =
@@ -313,6 +329,7 @@ fn struct_patterns_respect_private_fields() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn array_or_and_range_patterns_validate_shapes() {
     // 固定数组精确模式长度必须一致，rest 可以吃掉剩余
     assert!(!accepts(
@@ -344,6 +361,7 @@ fn array_or_and_range_patterns_validate_shapes() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn condition_bindings_and_loop_initialization_follow_execution() {
     assert!(accepts(
         "fn f(o: Option[int]) int { if let Some(x) = o && x > 0 { x } else { 0 } }\nfn main() {}"
@@ -361,6 +379,7 @@ fn condition_bindings_and_loop_initialization_follow_execution() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn function_defer_outlives_nested_blocks() {
     assert!(accepts(
         "fn sink(x: int) {}\nfn main() { let x: int\n { defer ret { sink(x) } }\n x = 1 }"
@@ -413,6 +432,7 @@ pub(super) fn frontend(
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn declarations_enforce_visibility_and_initialization_domains() {
     let queries = crate::QueryEngine::new();
     let error = frontend(
@@ -465,6 +485,7 @@ fn declarations_enforce_visibility_and_initialization_domains() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn cached_constraint_failures_preserve_notes_and_current_source_table() {
     let source = "trait Marker {}\nstruct Box[T] { value: T }\nimpl[T] Marker for Box[T] {}\nimpl !Marker for Box[bool] {}\nfn use_marker[T: Marker](value: T) {}\nfn main() { let value: Box[bool] = Box { value: true }\n use_marker(value) }";
     let queries = crate::QueryEngine::new();
@@ -489,6 +510,7 @@ fn cached_constraint_failures_preserve_notes_and_current_source_table() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     use super::output::CheckKind;
     let queries = crate::QueryEngine::new();
@@ -617,6 +639,7 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
 }
 
 #[cfg(feature = "slow-tests")]
+#[test]
 fn failed_cached_queries_rebind_source_locations_and_stop_lowering() {
     let compiler = Compiler::new();
     let source = "fn main() { let x: int\n _ = x }";

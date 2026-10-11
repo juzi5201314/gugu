@@ -102,18 +102,20 @@ pub(crate) fn run(
                     concrete.generic_body,
                 ),
                 GirPass::CowAndResourceElision => cow::run(&mut editor),
-            };
-            let outcome = outcome.map_err(|error| vec![pack(pass.name(), error)])?;
+            }
+            .map_err(|error| vec![pack(pass.name(), error)])?;
             stats.inlined += outcome.inlined;
             stats.checks_elided += outcome.checks_elided;
-            concrete.body = editor
-                .finish()
-                .map_err(|error| vec![pack(pass.name(), error)])?;
-            super::verify(module, &concrete.body)
-                .map_err(|error| vec![pack(pass.name(), error)])?;
-            concrete
-                .refresh_fingerprint()
-                .map_err(|error| vec![pack(pass.name(), error)])?;
+            if outcome.changed {
+                concrete.body = editor
+                    .finish()
+                    .map_err(|error| vec![pack(pass.name(), error)])?;
+                super::verify(module, &concrete.body)
+                    .map_err(|error| vec![pack(pass.name(), error)])?;
+                concrete
+                    .refresh_fingerprint()
+                    .map_err(|error| vec![pack(pass.name(), error)])?;
+            }
         }
         stats.passes += 1;
     }

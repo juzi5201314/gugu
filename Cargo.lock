@@ -308,6 +308,8 @@ dependencies = [
  "bytes",
  "flate2",
  "foldhash",
+ "gugu-compiler-core",
+ "gugu-runtime-builder",
  "serde",
  "serde_json",
  "sha2",
@@ -319,6 +321,22 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "xxhash-rust",
+]
+
+[[package]]
+name = "gugu-compiler-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "gugu-runtime-builder"
+version = "0.1.0"
+dependencies = [
+ "gugu-compiler-core",
 ]
 
 [[package]]

@@ -1,3 +1,9 @@
+# runtime precomputed summary 与 proof identity
+
+build-time runtime artifact 保存 runtime-only closed SCC 的 `FunctionSummary` 与 contract evidence。用户 action 将 runtime summary 视作已完成的 callee node，只对用户函数、运行时泛型新实例和与用户相连的 SCC 继续 fixed point；高阶或 indirect callback 仍投影为 conservative summary，不能因 artifact 命中而收紧未知效果。
+
+跨编译 proof 不使用 `DefId`、`ExprId`、`TypeId` 或 owner index。稳定身份由 `StableDefKey`、body fingerprint、规范 `StableExprPath` 与 `CheckKind` 组成；artifact/source/schema、analysis policy、target descriptor 或 compiler identity 任一改变都会使 summary/action key 失效。当前编译的 dense owner/instance index 只服务本次 session。
+
 # comptime 与抽象分析
 
 本章规定官方编译器如何执行值 comptime、源码 comptime 宏以及面向未知运行时值的抽象分析。语言程序的合法性和可观察语义仍由 [`spec/`](../spec/overview.md) 规定；本章固定前端、query、HIR/GIR 优化器之间的内部边界。

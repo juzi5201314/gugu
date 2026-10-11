@@ -15,7 +15,9 @@ use super::stackmap::{
     HandleSlot, LandingRecord, WalkFunction, WalkMap, WalkSafepoint, WalkWorld, copy_input,
     find_function, find_safepoint, scan_roots, select_landing, verify_bridge_frame,
 };
-use super::stackmap_codec::{CodeLayout, SafepointLayout, decode, encode};
+use super::stackmap_codec::{
+    CodeLayout, FUNCTION_BYTES, HEADER_BYTES, SafepointLayout, decode, encode,
+};
 use crate::target::PointerCompression;
 
 /// 镜像内 runtime 逐字读取 section header 的前 12 字节，并在版本不符时 `fatal` 退出；
@@ -296,6 +298,26 @@ fn codec_rejects_reserved_bits_overlap_and_out_of_range() {
     // 截断的 section 必须拒绝。
     let bytes = encode(&functions, &[layout(0, 8, 0, 64, 0b001)]).expect("编码");
     assert!(decode(&bytes[..bytes.len() - 1]).is_err());
+}
+
+#[test]
+fn decoder_walks_empty_functions_and_rejects_non_monotonic_ranges() {
+    let functions = vec![
+        function(0x1000, 64),
+        function(0x2000, 64),
+        function(0x3000, 64),
+    ];
+    let safepoints = vec![layout(1, 8, 0, 64, 0b001), layout(2, 16, 0, 64, 0b001)];
+    let bytes = encode(&functions, &safepoints).expect("空函数前缀可编码");
+    assert_eq!(decode(&bytes).expect("单调函数范围可解码"), (3, 2, 1));
+
+    let mut non_monotonic = bytes;
+    let second_function = HEADER_BYTES + FUNCTION_BYTES;
+    non_monotonic[second_function + 16..second_function + 20].copy_from_slice(&1_u32.to_le_bytes());
+    assert!(
+        decode(&non_monotonic).is_err(),
+        "安全点函数范围倒退必须拒绝"
+    );
 }
 
 #[test]

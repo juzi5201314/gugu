@@ -125,7 +125,6 @@ fn compute_roots(
     if let Some(entry) = context.module.entry {
         push(context, interner, &mut seeds, entry, RootCategoryV1::Entry)?;
     }
-    // 导出与 used：链接属性表。
     for linkage in &context.module.linkage {
         let category = if linkage.export_name.is_some() {
             RootCategoryV1::Export
@@ -134,6 +133,8 @@ fn compute_roots(
         } else {
             continue;
         };
+        // artifact contract table 完成布局证据迁移后，ContractRecord 才从 executable root 移除；
+        // 当前 artifact 仍只携带 source/interface，保留现有根以维持 runtime layout verifier 输入。
         push(context, interner, &mut seeds, linkage.definition, category)?;
     }
     // static/const 初始化器：有 owner 的初始化条目。

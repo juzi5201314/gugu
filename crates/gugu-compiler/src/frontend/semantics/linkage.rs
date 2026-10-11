@@ -3,6 +3,26 @@ use super::super::ast::{FnBody, ItemKind, Visibility};
 use super::model::{DefRef, Model};
 use crate::{Diagnostic, TargetName};
 
+const CONTRACT_RECORD_NAMES: &[&str] = &[
+    "gc_startup_record",
+    "rt0_records",
+    "morestack_records",
+    "heap_records",
+    "heap_header_records",
+    "shared_heap_records",
+    "card_mark_records",
+    "mark_records",
+    "roots_records",
+    "sync_records",
+    "wait_records",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum RootLinkageKind {
+    ExecutableUsed,
+    ContractRecord,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Linkage {
     pub(crate) definition: DefRef,
@@ -10,8 +30,8 @@ pub(crate) struct Linkage {
     pub(crate) import_name: Option<String>,
     pub(crate) section: Option<String>,
     pub(crate) used: bool,
+    pub(crate) root_kind: RootLinkageKind,
 }
-
 impl Model<'_> {
     pub(super) fn item_linkage(&self, definition: DefRef) -> Result<Option<Linkage>, Diagnostic> {
         let module = definition.module;
@@ -24,12 +44,21 @@ impl Model<'_> {
         let imported = function
             .is_some_and(|function| function.extern_abi.is_some() && function.body == FnBody::None);
         let body = function.is_some_and(|function| function.body != FnBody::None);
+        let record_name = function
+            .and_then(|function| function.name)
+            .map(|name| self.name(module, name))
+            .is_some_and(|name| CONTRACT_RECORD_NAMES.contains(&name));
         let mut linkage = Linkage {
             definition,
             export_name: None,
             import_name: None,
             section: None,
             used: false,
+            root_kind: if record_name {
+                RootLinkageKind::ContractRecord
+            } else {
+                RootLinkageKind::ExecutableUsed
+            },
         };
         for (name, tokens) in self.attributes(module, item.attributes) {
             let permitted = match name {

@@ -7,7 +7,9 @@
 pub(crate) mod combining_impl;
 pub(crate) mod coroutine_impl;
 mod extent_impl;
-mod resource_impl;
+#[cfg(test)]
+#[allow(unused_imports)]
+pub(crate) use extent_impl::OWNER_ARENA_BYTES;
 pub(crate) mod routing_impl;
 #[cfg(test)]
 #[allow(unused_imports)]

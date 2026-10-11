@@ -183,6 +183,7 @@ impl<'m, 'a> Builder<'m, 'a> {
                 import_name: linkage.import_name.clone(),
                 section: linkage.section.clone(),
                 used: linkage.used,
+                root_kind: linkage.root_kind,
                 foreign: function.and_then(|function| function.effect),
                 naked: function.is_some_and(|function| function.naked()),
             });
@@ -203,6 +204,7 @@ impl<'m, 'a> Builder<'m, 'a> {
                 import_name: None,
                 section: None,
                 used: false,
+                root_kind: super::linkage::RootLinkageKind::ExecutableUsed,
                 foreign: function.effect,
                 naked: function.naked(),
             });

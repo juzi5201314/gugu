@@ -628,6 +628,30 @@ impl ObjectCache {
         }
     }
 
+    /// 读取并验证 runtime artifact object；不接受损坏或目标不匹配 bytes。
+    pub fn load_runtime_artifact(
+        &self,
+        key: ObjectKey,
+        target: crate::TargetName,
+    ) -> Result<crate::RuntimeArtifactV1, ObjectError> {
+        let payload = self.load(key, QueryKind::CodegenFragment, 1, |bytes| {
+            let artifact =
+                crate::RuntimeArtifactV1::decode(bytes).map_err(|error| error.to_string())?;
+            if artifact.manifest.target != target.name() {
+                return Err(format!(
+                    "runtime artifact target 不匹配：期望 {}，实际 {}",
+                    target.name(),
+                    artifact.manifest.target
+                ));
+            }
+            Ok(())
+        })?;
+        crate::RuntimeArtifactV1::decode(&payload).map_err(|error| ObjectError::Invalid {
+            path: self.object_path(key),
+            message: error.to_string(),
+        })
+    }
+
     fn object_path(&self, key: ObjectKey) -> PathBuf {
         let hex = key.hex();
         self.root.join("objects").join(&hex[..2]).join(hex)

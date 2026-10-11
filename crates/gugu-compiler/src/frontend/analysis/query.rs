@@ -139,6 +139,14 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
     for (index, owner) in module.owners.iter().enumerate() {
         owner_of[owner.definition.index()] = Some(index);
     }
+    let mut definition_of = vec![None; module.definitions.len()];
+    for (index, definition) in module.definitions.iter().enumerate() {
+        definition_of[index] = Some(definition.key);
+    }
+    debug_assert!(module.owners.iter().all(|owner| {
+        owner_of[owner.definition.index()]
+            .is_some_and(|index| module.owners[index].definition == owner.definition)
+    }));
     // 定义表按稳定 key 排序；实例表按 digest 排序，映射使用稠密实例下标。
     let digests: Vec<_> = mono
         .instances
@@ -156,6 +164,7 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
             .definitions
             .binary_search_by(|definition| definition.key.as_slice().cmp(key))
             .map_err(|_| invalid("闭合实例引用未知定义"))?;
+        debug_assert!(definition_of[definition].is_some());
         if let Some(owner) = owner_of[definition] {
             body_of_instance[index] = Some(selected.len());
             selected.push((instance, owner));

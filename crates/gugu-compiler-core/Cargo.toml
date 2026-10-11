@@ -1,0 +1,10 @@
+[package]
+name = "gugu-compiler-core"
+version = "0.1.0"
+edition = "2024"
+description = "Target-independent Gugu compiler artifact schemas and build-time validation"
+
+[dependencies]
+blake3 = "1"
+serde.workspace = true
+serde_json.workspace = true

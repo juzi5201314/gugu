@@ -97,10 +97,15 @@ pub(crate) struct ConcreteBody {
     pub(crate) types: Vec<TypeLayout>,
     pub(crate) calls: Vec<ConcreteCall>,
     pub(crate) fingerprint: [u8; 32],
+    #[serde(skip)]
+    pub(crate) fingerprint_valid: bool,
 }
 
 impl ConcreteBody {
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
+        if self.fingerprint_valid {
+            return self.fingerprint;
+        }
         crate::frontend::mono::keys::hash_domain(
             "gugu-concrete-gir-v1",
             &serde_json::to_vec(&(
@@ -116,7 +121,7 @@ impl ConcreteBody {
     }
 
     pub(crate) fn verify(&self) -> Result<(), Diagnostic> {
-        if self.fingerprint != self.fingerprint() {
+        if !self.fingerprint_valid && self.fingerprint != self.fingerprint() {
             return Err(invalid("具体 GIR 的 schema、实例替换或指纹不合法"));
         }
         self.verify_structure()
@@ -124,7 +129,9 @@ impl ConcreteBody {
 
     /// 新鲜构造或 pass 修改后的对象仍完整校验结构，只计算一次规范指纹。
     pub(crate) fn refresh_fingerprint(&mut self) -> Result<(), Diagnostic> {
+        self.fingerprint_valid = false;
         self.fingerprint = self.fingerprint();
+        self.fingerprint_valid = true;
         self.verify_structure()
     }
 
@@ -229,6 +236,7 @@ fn build_body(
         types,
         calls,
         fingerprint: [0; 32],
+        fingerprint_valid: false,
     };
     concrete.refresh_fingerprint()?;
     Ok(concrete)
