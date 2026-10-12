@@ -131,7 +131,7 @@ pub(crate) fn instantiate(
             }
             let record = walk_instance(context, interner, entry)
                 .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
-            let bytes = serde_json::to_vec(&record).expect("实例记录可序列化");
+            let bytes = crate::canonical::to_vec(&record).expect("实例记录编码");
             fresh = Some(record);
             Ok((bytes, Vec::new()))
         })
@@ -141,7 +141,7 @@ pub(crate) fn instantiate(
     if let Some(record) = fresh {
         return Ok(record);
     }
-    let record: InstanceRecordV1 = serde_json::from_slice(result.payload())
+    let record: InstanceRecordV1 = crate::canonical::from_slice(result.payload())
         .map_err(|_| vec![inconsistency("InstantiateGir 缓存 schema 不合法")])?;
     if record.schema != INSTANCE_SCHEMA
         || record.mono_key != entry.key.canonical_bytes()
@@ -869,7 +869,7 @@ impl InstanceRecordV1 {
         for callee in &self.callees {
             bytes.extend_from_slice(&callee.key.digest());
         }
-        let dependencies = serde_json::to_vec(&(
+        let dependencies = crate::canonical::to_vec(&(
             &self.call_targets,
             &self.selected_impls,
             &self.vtable_roots,

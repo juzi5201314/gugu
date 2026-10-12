@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 /// `CollectMonoRoots` 结果 schema。
-pub(crate) const ROOTS_SCHEMA: u32 = 2;
+pub(crate) const ROOTS_SCHEMA: u32 = 4;
 
 /// 一个根实例种子：key、工作条目与类别。
 #[derive(Clone)]
@@ -37,9 +37,10 @@ pub(crate) enum RootCategoryV1 {
     LangItem,
     ComptimeReference,
     LateClosure,
+    RuntimeGlue,
 }
 
-/// 根集合：按 key 摘要字节序稳定输出。
+/// 根集合：executable 根按 key 摘要输出，record 根只保存稳定定义 key。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct MonoRootsV1 {
     pub schema: u32,
@@ -47,6 +48,8 @@ pub(crate) struct MonoRootsV1 {
     pub keys: Vec<Vec<u8>>,
     /// 与 `keys` 一一对应的根类别。
     pub categories: Vec<RootCategoryV1>,
+    /// contract record 根的稳定定义 key；不生成 executable seed。
+    pub record_keys: Vec<Vec<u8>>,
 }
 
 /// 收集闭世界根并缓存；返回根集合与驱动用的种子。
@@ -67,44 +70,39 @@ pub(crate) fn collect(
     let result = queries.compute(key, |_| {
         let seeds = compute_roots(context, interner)
             .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
-        let payload: Vec<(u32, RootCategoryV1)> = seeds
-            .iter()
-            .map(|seed| (seed.entry.definition.0, seed.category))
-            .collect();
-        let bytes = serde_json::to_vec(&payload).expect("根集合序列化");
-        fresh = Some(seeds);
+        let payload = (
+            seeds
+                .iter()
+                .map(|seed| (seed.entry.definition.0, seed.category))
+                .collect::<Vec<_>>(),
+            record_keys(context),
+        );
+        let bytes = crate::canonical::to_vec(&payload).expect("根集合编码");
+        fresh = Some((seeds, payload.1));
         Ok((bytes, Vec::new()))
     });
     let result = result.map_err(|error| {
         crate::frontend::semantics::query::restore_errors(error, context.sources)
     })?;
-    if let Some(seeds) = fresh {
-        return Ok((roots_v1(&seeds), seeds));
+    if let Some((seeds, record_keys)) = fresh {
+        return Ok((roots_v1(&seeds, record_keys), seeds));
     }
-    let payload: Vec<(u32, RootCategoryV1)> = serde_json::from_slice(result.payload())
-        .map_err(|_| vec![restore_error("CollectMonoRoots 缓存 schema 不合法")])?;
-    let seeds = payload
-        .into_iter()
-        .map(|(definition, category)| {
-            let entry = super::instantiate::root_entry(
-                context,
-                interner,
-                hir::DefId(definition),
-                BTreeMap::new(),
-            )?;
-            interner.intern_key(&entry.key)?;
-            Ok(RootSeed {
-                key: entry.key.clone(),
-                entry,
-                category,
-            })
-        })
-        .collect::<Result<Vec<_>, Diagnostic>>()
-        .map_err(|error| vec![error])?;
-    Ok((roots_v1(&seeds), seeds))
+    let payload: (Vec<(u32, RootCategoryV1)>, Vec<Vec<u8>>) =
+        crate::canonical::from_slice(result.payload())
+            .map_err(|_| vec![restore_error("CollectMonoRoots 缓存 schema 不合法")])?;
+    let seeds = compute_roots(context, interner).map_err(|error| vec![error])?;
+    if !seeds
+        .iter()
+        .map(|seed| (seed.entry.definition.0, seed.category))
+        .eq(payload.0)
+    {
+        return Err(vec![restore_error("executable 根与当前定义或排序不一致")]);
+    }
+    validate_record_keys(context, &payload.1).map_err(|error| vec![error])?;
+    Ok((roots_v1(&seeds, payload.1), seeds))
 }
 
-fn roots_v1(seeds: &[RootSeed]) -> MonoRootsV1 {
+fn roots_v1(seeds: &[RootSeed], record_keys: Vec<Vec<u8>>) -> MonoRootsV1 {
     MonoRootsV1 {
         schema: ROOTS_SCHEMA,
         keys: seeds
@@ -112,6 +110,7 @@ fn roots_v1(seeds: &[RootSeed]) -> MonoRootsV1 {
             .map(|seed| seed.key.canonical_bytes())
             .collect(),
         categories: seeds.iter().map(|seed| seed.category).collect(),
+        record_keys,
     }
 }
 
@@ -125,16 +124,35 @@ fn compute_roots(
     if let Some(entry) = context.module.entry {
         push(context, interner, &mut seeds, entry, RootCategoryV1::Entry)?;
     }
+    if context.module.entry.is_some() {
+        for glue in crate::runtime::demand::IMAGE_ENTRIES {
+            let definition =
+                crate::runtime::demand::definition(context, glue).ok_or_else(|| {
+                    restore_error(&format!("镜像必需的 runtime 入口 `{glue}` 缺少执行定义"))
+                })?;
+            push(
+                context,
+                interner,
+                &mut seeds,
+                definition,
+                RootCategoryV1::RuntimeGlue,
+            )?;
+        }
+    }
     for linkage in &context.module.linkage {
+        if linkage.root_kind == super::super::semantics::linkage::RootLinkageKind::ContractRecord {
+            continue;
+        }
         let category = if linkage.export_name.is_some() {
             RootCategoryV1::Export
-        } else if linkage.used {
+        } else if linkage.used
+            && !context.definition_ref[linkage.definition.index()]
+                .is_some_and(|reference| context.model.is_runtime_source(reference.module))
+        {
             RootCategoryV1::Used
         } else {
             continue;
         };
-        // artifact contract table 完成布局证据迁移后，ContractRecord 才从 executable root 移除；
-        // 当前 artifact 仍只携带 source/interface，保留现有根以维持 runtime layout verifier 输入。
         push(context, interner, &mut seeds, linkage.definition, category)?;
     }
     // static/const 初始化器：有 owner 的初始化条目。
@@ -181,6 +199,35 @@ fn compute_roots(
     // late 依赖随可达的具体 owner 收集，不能把泛型声明当作空实参根。
     // runtime/std 源树当前为 bootstrap 空单元，lang item 根集合为空。
     Ok(seeds.into_values().collect())
+}
+
+fn record_keys(context: &MonoContext<'_>) -> Vec<Vec<u8>> {
+    let mut keys = context
+        .module
+        .linkage
+        .iter()
+        .filter(|linkage| {
+            linkage.root_kind == super::super::semantics::linkage::RootLinkageKind::ContractRecord
+        })
+        .map(|linkage| {
+            context.module.definitions[linkage.definition.index()]
+                .key
+                .to_vec()
+        })
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn validate_record_keys(context: &MonoContext<'_>, keys: &[Vec<u8>]) -> Result<(), Diagnostic> {
+    if keys.windows(2).any(|pair| pair[0] >= pair[1]) {
+        return Err(restore_error("contract record 根未按稳定 key 严格排序"));
+    }
+    if record_keys(context) != keys {
+        return Err(restore_error("contract record 根与当前定义不一致"));
+    }
+    Ok(())
 }
 
 /// 推入根种子；同 key 重复时保留类别优先级更高的记录。

@@ -8,6 +8,7 @@ pub(crate) mod constants;
 pub(crate) mod dce;
 pub(crate) mod graph;
 pub(crate) mod gvn;
+pub(crate) mod gvn_key;
 pub(crate) mod licm;
 pub(crate) mod loops;
 pub(crate) mod policy;
@@ -101,7 +102,9 @@ fn run_pass(
     baseline: CpuBaseline,
 ) -> Result<bool, Diagnostic> {
     match pass {
-        LirPass::VerifySsaAndMemory => Ok(false),
+        LirPass::VerifySsaAndMemory | LirPass::PrepareRegisterAllocation => {
+            Err(invalid("结构验证阶段不进入改写编辑器"))
+        }
         LirPass::CanonicalizeCfg => cfg::canonicalize(editor),
         LirPass::SparseConditionalConstants => constants::sparse_conditional(editor),
         LirPass::AlgebraicSimplification => constants::algebraic_simplify(editor),
@@ -118,7 +121,6 @@ fn run_pass(
         LirPass::ClassifyPollFreeLeafAndPlaceBudgetedPolls | LirPass::LowerPollFastPaths => {
             Err(invalid("poll pass 必须在 world 级运行"))
         }
-        LirPass::PrepareRegisterAllocation => Ok(false),
     }
 }
 
@@ -131,25 +133,37 @@ pub(crate) fn optimize_world(
 ) -> Result<(), Vec<Diagnostic>> {
     let mut optimized = Vec::with_capacity(bodies.len());
     for body in bodies.drain(..) {
-        let mut current = body;
+        super::verify::verify_structure(&body, module)
+            .map_err(|error| vec![pack(LirPass::VerifySsaAndMemory.name(), error)])?;
+        let mut editor = Editor::new(body);
         for pass in LIR_PASS_ORDER {
+            if matches!(
+                pass,
+                LirPass::VerifySsaAndMemory | LirPass::PrepareRegisterAllocation
+            ) {
+                continue;
+            }
             if matches!(
                 pass,
                 LirPass::ClassifyPollFreeLeafAndPlaceBudgetedPolls | LirPass::LowerPollFastPaths
             ) {
                 continue;
             }
-            let mut editor = Editor::new(current.clone());
+            // no-op pass 沿用工作图；只有变化时才物化并重新验证。
             let changed = run_pass(*pass, &mut editor, profile, baseline)
                 .map_err(|error| vec![pack(pass.name(), error)])?;
             if changed {
-                current = editor
+                let current = editor
                     .finish()
                     .map_err(|error| vec![pack(pass.name(), error)])?;
                 super::verify::verify_structure(&current, module)
                     .map_err(|error| vec![pack(pass.name(), error)])?;
+                editor = Editor::new(current);
             }
         }
+        let current = editor.unchanged();
+        super::verify::verify_structure(&current, module)
+            .map_err(|error| vec![pack(LirPass::PrepareRegisterAllocation.name(), error)])?;
         optimized.push(current);
     }
     *bodies = optimized;

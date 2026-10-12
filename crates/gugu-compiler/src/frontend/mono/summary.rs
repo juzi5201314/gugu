@@ -172,13 +172,13 @@ pub(crate) fn project(
                     analysis_dependency.key().clone(),
                     analysis_dependency.fingerprint(),
                 );
-                let bytes = serde_json::to_vec(&payload).expect("公共摘要序列化");
+                let bytes = crate::canonical::to_vec(&payload).expect("公共摘要编码");
                 fresh = Some(payload);
                 Ok((bytes, Vec::new()))
             })
             .map_err(|error| vec![invalid(error.to_string())])?;
         let payload: PublicFunctionSummaryV1 = fresh
-            .or_else(|| serde_json::from_slice(result.payload()).ok())
+            .or_else(|| crate::canonical::from_slice(result.payload()).ok())
             .ok_or_else(|| vec![invalid("PublicFunctionSummary 缓存不合法")])?;
         payload.verify().map_err(|error| vec![error])?;
         if payload.mono_key != instance.mono_key

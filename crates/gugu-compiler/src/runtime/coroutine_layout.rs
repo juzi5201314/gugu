@@ -1,12 +1,10 @@
 //! 从冻结HIR与具体GIR交叉校验Gugu控制块布局；不重新解释源码或名称解析。
 
+use super::contract_view::source_parameters;
 use super::coroutine_schema::CoroutineRuntimeContract;
 use super::model::RawModelError;
 use crate::frontend::{
-    gir::{
-        GirWorldV1,
-        concrete::{TypeKind, TypeLayout},
-    },
+    gir::concrete::{RecordTypes, TypeKind, TypeLayout},
     hir,
 };
 use std::collections::BTreeSet;
@@ -22,24 +20,21 @@ fn runtime_paths() -> BTreeSet<String> {
 pub(super) fn verify_source(
     contract: &CoroutineRuntimeContract,
     module: &hir::Module,
-    gir: &GirWorldV1,
+    gir: &[RecordTypes],
 ) -> Result<(), RawModelError> {
     // 空package没有runtime源图，也不生成镜像；固定machine布局仍由contract.verify校验。
     if module.sources.is_empty() {
-        debug_assert!(gir.concrete.is_empty());
+        debug_assert!(gir.is_empty());
         return Ok(());
     }
     let mut found = vec![false; contract.records.len()];
-    for concrete in &gir.concrete {
-        let definition = &module.definitions[concrete.body.owner.index()];
+    for concrete in gir {
+        let definition = &module.definitions[concrete.definition.index()];
         if !in_source(definition, module) {
             continue;
         }
-        let parameters = &gir.bodies
-            [usize::try_from(concrete.generic_body).expect("generic body下标")]
-        .signature
-        .parameters;
-        if parameters.len() != concrete.body.signature.parameters.len() {
+        let parameters = source_parameters(module, concrete.definition)?;
+        if parameters.len() != concrete.parameters.len() {
             return Err(RawModelError::new("协程入口具体签名与冻结HIR不一致"));
         }
         let mut verifier = Verifier {
@@ -49,7 +44,7 @@ pub(super) fn verify_source(
             found: &mut found,
             visited: BTreeSet::new(),
         };
-        for (source, target) in parameters.iter().zip(&concrete.body.signature.parameters) {
+        for (source, target) in parameters.iter().zip(&concrete.parameters) {
             verifier.walk(*source, target.0, false)?;
         }
     }

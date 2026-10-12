@@ -6,7 +6,7 @@ use crate::frontend::gir::placement::PlacementKind;
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, ops::Range};
 
-pub(crate) const REVISION: u32 = 8;
+pub(crate) const REVISION: u32 = 9;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -740,7 +740,7 @@ impl Body {
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
         crate::frontend::mono::keys::hash_domain(
             "gugu-lir-body-v1",
-            &serde_json::to_vec(self).expect("LIR 可序列化"),
+            &crate::canonical::to_vec(self).expect("LIR 编码"),
         )
     }
 }

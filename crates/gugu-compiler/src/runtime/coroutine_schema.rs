@@ -164,7 +164,7 @@ impl CoroutineRuntimeContract {
     }
 
     pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("协程契约可序列化")
+        crate::canonical::to_vec(self).expect("协程契约可序列化")
     }
 
     /// 协程契约的域隔离内容身份。

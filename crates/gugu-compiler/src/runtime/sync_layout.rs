@@ -1,12 +1,10 @@
-//! 从冻结 HIR 与具体 GIR 交叉校验同步控制块布局；不重新解释源码或名称解析。
+//! 从冻结 HIR 与独立签名布局目录交叉校验同步控制块布局。
 
+use super::contract_view::source_parameters;
 use super::model::RawModelError;
 use super::sync_schema::SyncRuntimeContract;
 use crate::frontend::{
-    gir::{
-        GirWorldV1,
-        concrete::{TypeKind, TypeLayout},
-    },
+    gir::concrete::{RecordTypes, TypeKind, TypeLayout},
     hir,
 };
 use std::collections::BTreeSet;
@@ -16,23 +14,20 @@ const SOURCE: &str = "std/runtime/sync.gg";
 pub(super) fn verify_source(
     contract: &SyncRuntimeContract,
     module: &hir::Module,
-    gir: &GirWorldV1,
+    gir: &[RecordTypes],
 ) -> Result<(), RawModelError> {
     if module.sources.is_empty() {
-        debug_assert!(gir.concrete.is_empty());
+        debug_assert!(gir.is_empty());
         return Ok(());
     }
     let mut found = vec![false; contract.records.len()];
-    for concrete in &gir.concrete {
-        let definition = &module.definitions[concrete.body.owner.index()];
+    for concrete in gir {
+        let definition = &module.definitions[concrete.definition.index()];
         if !in_source(definition, module) {
             continue;
         }
-        let parameters = &gir.bodies
-            [usize::try_from(concrete.generic_body).expect("generic body下标")]
-        .signature
-        .parameters;
-        if parameters.len() != concrete.body.signature.parameters.len() {
+        let parameters = source_parameters(module, concrete.definition)?;
+        if parameters.len() != concrete.parameters.len() {
             return Err(RawModelError::new("同步入口具体签名与冻结HIR不一致"));
         }
         let mut verifier = Verifier {
@@ -42,7 +37,7 @@ pub(super) fn verify_source(
             found: &mut found,
             visited: BTreeSet::new(),
         };
-        for (source, target) in parameters.iter().zip(&concrete.body.signature.parameters) {
+        for (source, target) in parameters.iter().zip(&concrete.parameters) {
             verifier.walk(*source, target.0, false)?;
         }
     }

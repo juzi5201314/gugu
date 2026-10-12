@@ -67,17 +67,24 @@ pub(crate) fn run_world(
         let leaf = info.get(&key).is_some_and(|(_, leaf)| *leaf);
         let recursive_body = recursive[index[&key]];
         let mut editor = Editor::new(body);
+        let mut changed = false;
         if !leaf {
-            insert_polls(&mut editor, &info)?;
+            changed |= insert_polls(&mut editor, &info)?;
         }
-        mark_calls(&mut editor, &info);
+        changed |= mark_calls(&mut editor, &info);
         if leaf {
-            remove_entry_stack_check(&mut editor)?;
+            changed |= remove_entry_stack_check(&mut editor)?;
         }
-        let mut body = editor.finish()?;
+        let mut body = if changed {
+            editor.finish()?
+        } else {
+            editor.unchanged()
+        };
         let (summary, _) = analyze(&body, &info, recursive_body);
         body.poll_summary = summary;
-        verify::verify(&body, module)?;
+        if changed {
+            verify::verify(&body, module)?;
+        }
         rebuilt.push(body);
     }
     *bodies = rebuilt;
@@ -179,8 +186,8 @@ fn call_sccs(callees: &[Vec<usize>]) -> Vec<Vec<usize>> {
 
 /// 计算摘要并分类叶。
 fn analyze(body: &Body, info: &CalleeInfo, recursive: bool) -> (PollSummary, bool) {
-    let (_, cost) = body_costs(body, info);
-    let cycle = clean_cycle(body, info).is_some();
+    let (cost, cycle) = body_flow_with(body, info);
+    let cycle = cycle.is_some();
     let entry_stack_check = entry_has_stack_check(body);
     let leaf = !recursive && classify_leaf(body, cost, cycle);
     (
@@ -191,6 +198,41 @@ fn analyze(body: &Body, info: &CalleeInfo, recursive: bool) -> (PollSummary, boo
         },
         leaf,
     )
+}
+
+pub(crate) fn has_linear_leaf_shape(body: &Body) -> bool {
+    body.blocks.len() == 1
+        && body.entry.index() == 0
+        && matches!(
+            body.blocks[0].terminator,
+            crate::lir::body::Terminator::Return { .. }
+        )
+        && body.blocks[0].instructions.start == 0
+        && usize::try_from(body.blocks[0].instructions.end).expect("指令编号适配宿主")
+            == body.instructions.len()
+        && body.instructions.iter().all(|instruction| {
+            instruction.safepoint.is_none()
+                && matches!(
+                    instruction.op,
+                    Op::IConst(_)
+                        | Op::FConst(_)
+                        | Op::Integer(_)
+                        | Op::Float(_)
+                        | Op::Compare { .. }
+                        | Op::Convert(_)
+                        | Op::Vector(_)
+                        | Op::Select
+                )
+        })
+}
+
+fn linear_leaf_cost(body: &Body) -> u32 {
+    body.instructions
+        .iter()
+        .map(|instruction| instruction.op.poll_cost_with(&body.assembly))
+        .fold(0_u32, |cost, step| {
+            cost.saturating_add(step).min(POLL_BUDGET.saturating_add(1))
+        })
 }
 
 fn entry_has_stack_check(body: &Body) -> bool {
@@ -242,17 +284,12 @@ fn classify_leaf(body: &Body, cost: u32, cycle: bool) -> bool {
 
 /// 单条指令的 (是否切断, 成本)。
 fn op_flow(op: &Op, assembly: &[hir::Assembly], info: &CalleeInfo) -> (bool, u32) {
-    if let Op::Call(call) | Op::ForeignCall(call) = op {
-        if call.kind == CallKind::Managed
-            && let CallTarget::Instance(key) = call.target
-            && let Some((summary, true)) = info.get(&key)
-        {
-            return (false, 5u32.saturating_add(summary.poll_free_cost));
-        }
-        return (
-            op.poll_cut_point_with(assembly),
-            op.poll_cost_with(assembly),
-        );
+    if let Op::Call(call) | Op::ForeignCall(call) = op
+        && call.kind == CallKind::Managed
+        && let CallTarget::Instance(key) = call.target
+        && let Some((summary, true)) = info.get(&key)
+    {
+        return (false, 5u32.saturating_add(summary.poll_free_cost));
     }
     (
         op.poll_cut_point_with(assembly),
@@ -345,25 +382,40 @@ fn leaf_flags(body: &Body) -> CalleeInfo {
     info
 }
 
-/// verifier 视角的 poll-free 路径饱和成本。
+/// verifier 与分类器共享一份只读 CFG/循环摘要。
+pub(crate) fn body_flow(body: &Body) -> (u32, Option<BlockId>) {
+    body_flow_with(body, &leaf_flags(body))
+}
+
+fn body_flow_with(body: &Body, info: &CalleeInfo) -> (u32, Option<BlockId>) {
+    if has_linear_leaf_shape(body) {
+        return (linear_leaf_cost(body), None);
+    }
+    let view = Editor::graph_view(body);
+    let bounded = bounded_back_edges(&view, info);
+    let cost = body_costs(body, info, &bounded).1;
+    (cost, clean_cycle(body, info, &bounded))
+}
+
+#[cfg(test)]
 pub(crate) fn body_poll_free_cost(body: &Body) -> u32 {
-    body_costs(body, &leaf_flags(body)).1
+    body_flow(body).0
 }
 
-/// verifier 视角的 poll-free 环位置。
+#[cfg(test)]
 pub(crate) fn body_clean_cycle(body: &Body) -> Option<BlockId> {
-    clean_cycle(body, &leaf_flags(body))
+    body_flow(body).1
 }
 
-/// 该 block 是否落在可证明有界的计数循环内。
-pub(crate) fn bounded_counted_cycle(body: &Body, block: BlockId) -> bool {
-    let editor = Editor::new(body.clone());
+#[cfg(test)]
+pub(crate) fn generic_body_flow(body: &Body) -> (u32, Option<BlockId>) {
     let info = leaf_flags(body);
-    loops::analyze(&editor).iter().any(|natural| {
-        natural.blocks.contains(&block)
-            && natural.counted.is_some()
-            && loop_total_cost(&editor, natural, &info) <= POLL_BUDGET
-    })
+    let view = Editor::graph_view(body);
+    let bounded = bounded_back_edges(&view, &info);
+    (
+        body_costs(body, &info, &bounded).1,
+        clean_cycle(body, &info, &bounded),
+    )
 }
 
 /// 可证明有界的计数循环回边：它们不构成 poll-free 环，也不参与成本饱和。
@@ -382,8 +434,11 @@ fn bounded_back_edges(editor: &Editor, info: &CalleeInfo) -> BTreeSet<(BlockId, 
     edges
 }
 
-fn body_costs(body: &Body, info: &CalleeInfo) -> (Vec<u32>, u32) {
-    let bounded = bounded_back_edges(&Editor::new(body.clone()), info);
+fn body_costs(
+    body: &Body,
+    info: &CalleeInfo,
+    bounded: &BTreeSet<(BlockId, BlockId)>,
+) -> (Vec<u32>, u32) {
     let order = super::graph::reverse_postorder(body);
     let entry = body.entry;
     propagate(
@@ -429,8 +484,11 @@ fn editor_costs(editor: &Editor, info: &CalleeInfo) -> (Vec<u32>, u32) {
 }
 
 /// 找到第一个处于 poll-free 环内的 block（clean 子图的 SCC 或自环）。
-fn clean_cycle(body: &Body, info: &CalleeInfo) -> Option<BlockId> {
-    let bounded = bounded_back_edges(&Editor::new(body.clone()), info);
+fn clean_cycle(
+    body: &Body,
+    info: &CalleeInfo,
+    bounded: &BTreeSet<(BlockId, BlockId)>,
+) -> Option<BlockId> {
     let clean: Vec<bool> = body
         .blocks
         .iter()
@@ -550,7 +608,8 @@ fn editor_clean_cycle(
 }
 
 /// 把 `poll_free_leaf` 写入所有 managed 直接调用。
-fn mark_calls(editor: &mut Editor, info: &CalleeInfo) {
+fn mark_calls(editor: &mut Editor, info: &CalleeInfo) -> bool {
+    let mut changed = false;
     for block in editor.live_blocks() {
         for index in 0..editor.instruction_count(block) {
             let at: InstRef = (block, index);
@@ -578,18 +637,22 @@ fn mark_calls(editor: &mut Editor, info: &CalleeInfo) {
                 _ => Op::ForeignCall(call),
             };
             editor.set_op(at, op);
+            changed = true;
         }
     }
+    changed
 }
 
-fn remove_entry_stack_check(editor: &mut Editor) -> Result<(), Diagnostic> {
+fn remove_entry_stack_check(editor: &mut Editor) -> Result<bool, Diagnostic> {
+    let mut changed = false;
     let entry = editor.entry();
     for index in 0..editor.instruction_count(entry) {
         if matches!(editor.instruction((entry, index)).op, Op::StackCheck) {
             editor.remove_instruction((entry, index))?;
+            changed = true;
         }
     }
-    Ok(())
+    Ok(changed)
 }
 
 /// 在 `block` 内插入一个预算化 poll。
@@ -651,7 +714,8 @@ fn insert_poll(editor: &mut Editor, block: BlockId, interval: u32) -> Result<(),
     Ok(())
 }
 
-fn insert_polls(editor: &mut Editor, info: &CalleeInfo) -> Result<(), Diagnostic> {
+fn insert_polls(editor: &mut Editor, info: &CalleeInfo) -> Result<bool, Diagnostic> {
+    let mut changed = false;
     // 已被 strip mining 的内层 header 由外层 poll 覆盖，不再单独插点。
     let mut stripped: BTreeSet<BlockId> = BTreeSet::new();
     let mut last = String::new();
@@ -684,6 +748,7 @@ fn insert_polls(editor: &mut Editor, info: &CalleeInfo) -> Result<(), Diagnostic
             {
                 stripped.insert(natural.header);
                 handled = true;
+                changed = true;
                 break;
             }
             let cost = loop_cycle_cost(editor, natural, info);
@@ -691,6 +756,7 @@ fn insert_polls(editor: &mut Editor, info: &CalleeInfo) -> Result<(), Diagnostic
             let latch = natural.latches[0];
             last = format!("loop latch {}", latch.0);
             insert_poll(editor, latch, interval)?;
+            changed = true;
             handled = true;
             break;
         }
@@ -700,14 +766,16 @@ fn insert_polls(editor: &mut Editor, info: &CalleeInfo) -> Result<(), Diagnostic
         if let Some(block) = editor_clean_cycle(editor, info, &exempt) {
             last = format!("clean cycle block {}", block.0);
             insert_poll(editor, block, 1)?;
+            changed = true;
             continue;
         }
         if let Some(block) = overflow_block(editor, info, &exempt) {
             last = format!("overflow block {}", block.0);
             insert_poll(editor, block, 1)?;
+            changed = true;
             continue;
         }
-        return Ok(());
+        return Ok(changed);
     }
     Err(invalid(&format!(
         "{}: poll 插入未在有限轮内收敛（{last}）",

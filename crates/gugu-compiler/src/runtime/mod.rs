@@ -15,7 +15,7 @@ pub use artifact::{
     RuntimeArtifacts, RuntimeContractRecordV1, RuntimeFunctionArtifactV1, RuntimeGenericTemplateV1,
     RuntimeModuleInterfaceV1, RuntimeSourceRecordV1,
 };
-mod barrier_layout;
+pub(crate) mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
 pub(crate) mod block_return_schema;
@@ -56,10 +56,12 @@ mod combining_tests;
 )]
 pub(crate) mod compression_schema;
 mod context;
+pub(crate) mod contract_view;
 #[allow(dead_code, reason = "协程布局与生命周期的确定性参照实现")]
 mod coroutine;
 mod coroutine_layout;
 mod coroutine_schema;
+pub(crate) mod demand;
 #[allow(
     dead_code,
     reason = "动态根登记契约由镜像 runtime、探针与后续收集器共同消费"

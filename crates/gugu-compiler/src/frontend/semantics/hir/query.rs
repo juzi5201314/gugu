@@ -48,7 +48,7 @@ pub(super) fn lower(
     if let Some(validated) = fresh {
         return Ok((validated, dependency));
     }
-    let module: hir::Module = serde_json::from_slice(result.payload())
+    let module: hir::Module = crate::canonical::from_slice(result.payload())
         .map_err(|_| vec![invalid("HIR query 缓存 schema 不合法")])?;
     if module.input_fingerprint != lower_input_fingerprint {
         return Err(vec![invalid("HIR query 输入身份不匹配")]);

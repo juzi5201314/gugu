@@ -7,6 +7,8 @@ const CONTRACT_RECORD_NAMES: &[&str] = &[
     "gc_startup_record",
     "rt0_records",
     "morestack_records",
+    "stack_bounds",
+    "saved_context",
     "heap_records",
     "heap_header_records",
     "shared_heap_records",
@@ -54,7 +56,7 @@ impl Model<'_> {
             import_name: None,
             section: None,
             used: false,
-            root_kind: if record_name {
+            root_kind: if record_name && self.is_runtime_source(module) {
                 RootLinkageKind::ContractRecord
             } else {
                 RootLinkageKind::ExecutableUsed

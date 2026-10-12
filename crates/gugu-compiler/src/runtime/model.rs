@@ -50,9 +50,8 @@ use crate::{
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 28 相对版本 27 的变化：LocalHeap 契约纳入 LargeMapping 记录区、固定大映射页粒度，
-/// 并把 page-cover/object-start/mark 的运行期消费者接入分配与屏障路径。
-pub(crate) const RAW_MODEL_SCHEMA: u32 = 28;
+/// 版本 29 使用独立签名类型目录验证源记录，不依赖可执行 GIR 闭包。
+pub(crate) const RAW_MODEL_SCHEMA: u32 = 29;
 
 /// 资源契约段的 schema 版本。
 pub(crate) const RESOURCE_SCHEMA: u32 = 1;
@@ -1602,7 +1601,7 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) placement_fingerprint: [u8; 32],
     pub(crate) sources: &'a SourceMap,
     pub(crate) hir: &'a crate::frontend::hir::Module,
-    pub(crate) gir: &'a crate::frontend::gir::GirWorldV1,
+    pub(crate) gir: &'a [crate::frontend::gir::concrete::RecordTypes],
 }
 
 /// 通过 query 构建并校验契约对象；失败进入 `E0058`。
@@ -1610,7 +1609,7 @@ pub(crate) fn run(
     inputs: RawModelInputs<'_>,
     queries: &QueryEngine,
 ) -> Result<RuntimeRawContractV1, Vec<Diagnostic>> {
-    let mut key_bytes = serde_json::to_vec(&(
+    let mut key_bytes = crate::canonical::to_vec(&(
         inputs.policy,
         inputs.demand,
         inputs.resource_demand,
@@ -1631,6 +1630,7 @@ pub(crate) fn run(
     .expect("runtime需求与策略可序列化");
     key_bytes.extend_from_slice(&inputs.lir_fingerprint);
     key_bytes.extend_from_slice(&inputs.placement_fingerprint);
+    key_bytes.extend_from_slice(&crate::canonical::to_vec(inputs.gir).expect("契约类型目录编码"));
     key_bytes.extend_from_slice(inputs.target.to_string().as_bytes());
     key_bytes.extend_from_slice(inputs.profile.name().as_bytes());
     let key = QueryKey::new(QueryKind::RuntimeRawModel, RAW_MODEL_SCHEMA, &key_bytes);
@@ -1696,7 +1696,7 @@ pub(crate) fn run(
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::mark_layout::verify_source(contract.mark(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            let bytes = serde_json::to_vec(&contract).expect("runtime raw 契约可序列化");
+            let bytes = crate::canonical::to_vec(&contract).expect("runtime raw 契约编码");
             fresh = Some(contract);
             Ok((bytes, Vec::new()))
         })
@@ -1707,22 +1707,18 @@ pub(crate) fn run(
                 None,
             )]
         })?;
-    let contract = match fresh {
-        Some(contract) => contract,
-        None => serde_json::from_slice(result.payload()).map_err(|_| {
-            vec![Diagnostic::error(
-                DiagnosticCode::RuntimeRawInvariant,
-                "缓存的 runtime raw 契约不是合法 schema",
-                None,
-            )]
-        })?,
-    };
-    let contract = contract
-        .with_gc_sections(
-            inputs.gc_type_section.to_vec(),
-            inputs.gc_metadata_section.to_vec(),
-        )
-        .map_err(|error| vec![error.diagnostic()])?;
+    if let Some(contract) = fresh {
+        return Ok(contract);
+    }
+    let contract: RuntimeRawContractV1 =
+        crate::canonical::from_slice(result.payload()).map_err(|_| {
+            vec![RawModelError::new("缓存的 runtime raw 契约不是合法 schema").diagnostic()]
+        })?;
+    if contract.target_semantics() != inputs.target.name() || contract.policy() != &inputs.policy {
+        return Err(vec![
+            RawModelError::new("缓存 runtime raw 契约与当前目标或策略不一致").diagnostic(),
+        ]);
+    }
     contract
         .verify()
         .map_err(|error| vec![error.diagnostic()])?;

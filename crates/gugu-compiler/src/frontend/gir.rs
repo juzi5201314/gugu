@@ -90,7 +90,7 @@ pub(crate) fn world_fingerprint(
     for body in bodies {
         hash.update(&body.fingerprint());
     }
-    let fragment_bytes = serde_json::to_vec(fragments).expect("GIR fragment 序列化");
+    let fragment_bytes = crate::canonical::to_vec(fragments).expect("GIR fragment 编码");
     hash.update(&fragment_bytes);
     hash.update(&placement.fingerprint);
     for body in concrete {

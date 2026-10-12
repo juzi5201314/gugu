@@ -207,8 +207,8 @@ fn query_is_stable_across_cache() {
         warm.gir.placement.fingerprint
     );
     assert_eq!(
-        serde_json::to_vec(&cold.gir.bodies).unwrap(),
-        serde_json::to_vec(&warm.gir.bodies).unwrap()
+        crate::canonical::to_vec(&cold.gir.bodies).unwrap(),
+        crate::canonical::to_vec(&warm.gir.bodies).unwrap()
     );
 }
 

@@ -106,7 +106,7 @@ impl Validated {
         module: Module,
     ) -> Result<(Self, Vec<u8>), crate::Diagnostic> {
         module.verify()?;
-        let bytes = serde_json::to_vec(&module).expect("HIR schema 序列化");
+        let bytes = crate::canonical::to_vec(&module).expect("HIR schema 序列化");
         let fingerprint = *blake3::Hasher::new_derive_key("gugu-validated-hir-v2")
             .update(&bytes)
             .finalize()

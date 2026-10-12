@@ -10,8 +10,9 @@ use crate::frontend::mono::{MonoWorldV1, collect::InstanceSummaryV1, keys::MonoC
 use crate::frontend::types::Layout;
 use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
-pub(crate) const SCHEMA: u32 = 1;
+pub(crate) const SCHEMA: u32 = 2;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Field {
@@ -87,6 +88,32 @@ pub(crate) struct ConcreteCall {
     pub(crate) parameters: Vec<u32>,
     pub(crate) result: u32,
 }
+/// 契约签名只形成类型布局，不形成可执行 GIR 体。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RecordTypes {
+    pub definition: hir::DefId,
+    pub parameters: Vec<hir::TypeId>,
+    pub types: Vec<TypeLayout>,
+}
+
+pub(crate) fn record_types(
+    context: &MonoContext<'_>,
+    definition: hir::DefId,
+) -> Result<RecordTypes, Diagnostic> {
+    let parameters = crate::runtime::contract_view::source_parameters(context.module, definition)
+        .map_err(|error| invalid(error.message()))?;
+    let substitutions = BTreeMap::new();
+    let mut layouts = layout::Builder::new(context, &substitutions);
+    let parameters = parameters
+        .iter()
+        .map(|parameter| layouts.source(*parameter))
+        .collect::<Result<_, _>>()?;
+    Ok(RecordTypes {
+        definition,
+        parameters,
+        types: layouts.finish()?,
+    })
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct ConcreteBody {
@@ -108,7 +135,7 @@ impl ConcreteBody {
         }
         crate::frontend::mono::keys::hash_domain(
             "gugu-concrete-gir-v1",
-            &serde_json::to_vec(&(
+            &crate::canonical::to_vec(&(
                 self.schema,
                 self.instance,
                 self.generic_body,
@@ -116,7 +143,7 @@ impl ConcreteBody {
                 &self.types,
                 &self.calls,
             ))
-            .expect("具体 GIR 可序列化"),
+            .expect("具体 GIR 编码"),
         )
     }
 
@@ -221,8 +248,8 @@ fn build_body(
     body_index: u32,
 ) -> Result<ConcreteBody, Diagnostic> {
     let mut body = world.bodies[index(body_index)].clone();
-    let mut layouts = layout::Builder::new(context, instance);
-    let calls = calls::bind(&body, mono, &mut layouts)?;
+    let mut layouts = layout::Builder::new(context, &instance.substitutions);
+    let calls = calls::bind(&body, mono, instance, &mut layouts)?;
     materialize::constants(context, mono, instance, &mut body)?;
     materialize::types(&mut body, &calls, &mut layouts)?;
     materialize::late(mono, instance, &mut body)?;

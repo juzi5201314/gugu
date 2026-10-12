@@ -212,7 +212,7 @@ impl<'a> Program<'a> {
             .collect();
         Ok(crate::frontend::mono::hash_domain(
             "gugu-late-closure-v1",
-            &serde_json::to_vec(&keys).expect("闭包可序列化"),
+            &crate::canonical::to_vec(&keys).expect("闭包可序列化"),
         ))
     }
 }

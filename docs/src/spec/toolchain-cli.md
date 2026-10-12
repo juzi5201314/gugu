@@ -93,6 +93,9 @@
 `wait-contract-fingerprint`、`wait-demand` 与 `wait-runtime`。
 fingerprint 编码为 32 个字节的数组。这些字段只说明已验证的
 编译计划，不代表最终可执行镜像已经写出，也不承诺 TypeId 跨镜像稳定。
+
+runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量；它仍须完成全部布局交叉验证。内置源码上未被实际引用的 `#[used]` 项不扩张用户执行闭包，用户源码的 `#[used]` 语义不变。内部 fingerprint/query/artifact 身份采用版本化的稳定二进制编码，CLI 的 JSON/NDJSON 外部格式不变。
+
 `large_copy` 默认警告仍可返回成功计划；`#[deny(large_copy)]` / `#[forbid(large_copy)]`
 使检查失败且 `image-plan` 为 `null`。
 协程 runtime 计划在 `coroutine-runtime` 中报告版本化 record 大小、对齐、字段偏移、stack arena/class/cache 策略、x86_64 switch/restore-only 片段，以及来自优化后 LIR 的创建点、入口检查和 suspend 需求。`coroutine-contract-fingerprint` 是该对象的 32 字节内容身份；这些内部字段不构成跨镜像稳定 ABI。

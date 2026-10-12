@@ -453,12 +453,7 @@ fn resolve_item(
             )));
         }
     }
-    match instance {
-        Some(instance) => Ok(Some(instance)),
-        None => Err(binding_error(format!(
-            "runtime glue `{glue}` 的绑定函数 `{item}` 在镜像中没有实例"
-        ))),
-    }
+    Ok(instance)
 }
 
 /// 最终 LIR 中是否存在引用该 glue 的调用点或隐含调用 op。

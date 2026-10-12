@@ -1,6 +1,5 @@
 use super::{
-    Diagnostic, Field, InstanceSummaryV1, Layout, MonoContext, PassingClass, TypeKind, TypeLayout,
-    hir, id, invalid,
+    Diagnostic, Field, Layout, MonoContext, PassingClass, TypeKind, TypeLayout, hir, id, invalid,
 };
 use crate::frontend::semantics::Ty;
 use crate::frontend::types::Layouts;
@@ -8,7 +7,7 @@ use std::collections::BTreeMap;
 
 pub(super) struct Builder<'a, 'm> {
     pub(super) context: &'a MonoContext<'m>,
-    pub(super) instance: &'a InstanceSummaryV1,
+    substitutions: &'a BTreeMap<String, Ty>,
     layouts: Layouts<'a, 'm>,
     indices: BTreeMap<Ty, u32>,
     types: Vec<Option<TypeLayout>>,
@@ -16,10 +15,13 @@ pub(super) struct Builder<'a, 'm> {
 }
 
 impl<'a, 'm> Builder<'a, 'm> {
-    pub(super) fn new(context: &'a MonoContext<'m>, instance: &'a InstanceSummaryV1) -> Self {
+    pub(super) fn new(
+        context: &'a MonoContext<'m>,
+        substitutions: &'a BTreeMap<String, Ty>,
+    ) -> Self {
         Self {
             context,
-            instance,
+            substitutions,
             layouts: Layouts::new(context.model, context.checked),
             indices: BTreeMap::new(),
             types: Vec::new(),
@@ -31,14 +33,14 @@ impl<'a, 'm> Builder<'a, 'm> {
         if let Some(bound) = self.bindings[source.index()] {
             return Ok(hir::TypeId(bound));
         }
-        let ty = self.context.type_at(source, &self.instance.substitutions)?;
+        let ty = self.context.type_at(source, self.substitutions)?;
         let bound = self.intern(&ty)?;
         self.bindings[source.index()] = Some(bound);
         Ok(hir::TypeId(bound))
     }
 
     pub(super) fn address_type(&mut self, source: hir::TypeId) -> Result<hir::TypeId, Diagnostic> {
-        let value = self.context.type_at(source, &self.instance.substitutions)?;
+        let value = self.context.type_at(source, self.substitutions)?;
         self.intern(&Ty::Ptr(Box::new(value))).map(hir::TypeId)
     }
 

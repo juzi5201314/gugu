@@ -37,7 +37,7 @@ mod trait_tests;
 mod unsafe_tests;
 
 use super::{ParsedModule, names::NameResolution};
-use crate::{Diagnostic, DiagnosticCode};
+use crate::Diagnostic;
 /// 前端语义阶段产物：冻结后的各层 world 与布局。
 pub(crate) type CheckedFrontend = (
     CheckedSemantics,
@@ -86,17 +86,7 @@ pub(crate) fn check(
         cfg.target(),
         cfg.harness(),
     );
-    let mut mono_world = super::mono::close(&context, queries)?;
-    let runtime_artifact =
-        crate::runtime::RuntimeArtifacts::for_target(cfg.target()).map_err(|error| {
-            vec![Diagnostic::error(
-                DiagnosticCode::BackendInvariant,
-                error.to_string(),
-                None,
-            )]
-        })?;
-    let _reachable_runtime =
-        super::mono::collect::reachable_runtime_functions(runtime_artifact, &mono_world)?;
+    let mut mono_world = super::mono::close(&context, queries, &gir)?;
     super::late::run(hir.module(), &mut mono_world, queries, sources)?;
     let gir = super::gir::attach_fragments(gir, &mono_world);
     let (analysis_world, analysis_dependency) = analysis::run_world(

@@ -103,7 +103,7 @@ impl ForeignRuntimeContract {
     }
 
     pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("外调契约可序列化")
+        crate::canonical::to_vec(self).expect("外调契约可序列化")
     }
 
     /// 外调契约的域隔离内容身份。

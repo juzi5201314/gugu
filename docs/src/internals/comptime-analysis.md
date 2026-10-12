@@ -1,6 +1,6 @@
 # runtime precomputed summary 与 proof identity
 
-build-time runtime artifact 保存 runtime-only closed SCC 的 `FunctionSummary` 与 contract evidence。用户 action 将 runtime summary 视作已完成的 callee node，只对用户函数、运行时泛型新实例和与用户相连的 SCC 继续 fixed point；高阶或 indirect callback 仍投影为 conservative summary，不能因 artifact 命中而收紧未知效果。
+当前 build-time runtime artifact 固化源码与接口摘要，并未保存 runtime SCC 的预计算 `FunctionSummary`。用户 action 对按实际需求可达的 runtime 与用户函数一起求解摘要；独立 record-only 类型目录不产生分析节点。高阶或 indirect callback 保持 conservative summary，不能因 artifact 命中而收紧未知效果。
 
 跨编译 proof 不使用 `DefId`、`ExprId`、`TypeId` 或 owner index。稳定身份由 `StableDefKey`、body fingerprint、规范 `StableExprPath` 与 `CheckKind` 组成；artifact/source/schema、analysis policy、target descriptor 或 compiler identity 任一改变都会使 summary/action key 失效。当前编译的 dense owner/instance index 只服务本次 session。
 
@@ -363,7 +363,9 @@ SCC 内按原成员顺序与轮次预算迭代，保存每个成员在当前 cal
 原轮次预算；合流改变目标状态时标记该块。同步 narrowing 仍在每轮合并全部前驱，
 不使用前向迭代的跳过规则。后继传播把状态所有权交给最后一条边，只有其它分支需要复制。
 
-管线顺序为 `LowerHir`（schema **5**，只构造、校验并冻结）→ `BuildGenericGir` →
+单 entry、单 Return、无回边且按块编号顺序连接的直线 CFG 允许标量叶快速解释：所有 local 必须是纯位值，只接受纯值/数值运算、转换和显式 checked op，以及 StorageLive/StorageDead、位值 Copy 与 Nop；拒绝调用、intrinsic、managed allocation、聚合构造、捕获、suspend、异常流、assembly、safepoint、发布/资源动作与特殊区域。快速路径使用同一个 `execute_statement`、证明函数和 summary/访问规则，一次遍历形成 return range、效果与 proofs；不能把未证明的 checked op 标记为安全。其它 body 继续通用 CFG 固定点；块迭代预算为零时仍走通用保守路径。
+
+管线顺序为 `LowerHir`（schema **7**，只构造、校验并冻结）→ `BuildGenericGir` →
 `mono::close` → `late::run` → `gir::attach_fragments` → `WholeProgramAnalysis` →
 `EscapeAndPlacement` → `PublicFunctionSummary`。分析输入使用放置前的 generic GIR 指纹。
 `WholeProgramAnalysis`（query schema **6**）输入指纹含冻结 HIR
@@ -392,7 +394,7 @@ GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir
 一类比较收窄。入口按局部整数类型播种位宽边界（例如 `u8` 移位量下界 ≥ 0）；
 调用 unwind 边只在当前状态已可能 panic 时传播，不把 CFG 上的 cleanup 边当成必然 panic。
 
-固定 **`analysis_semantics_revision = 5`**、**公共摘要策略 revision = 2**（与公共摘要对象复用同一版本常量）
+固定 **`analysis_semantics_revision = 6`**、**公共摘要策略 revision = 2**（与公共摘要对象复用同一版本常量）
 （默认 SCC 迭代 32、块迭代 256）。SCC 轮次或块迭代超预算 → 摘要取保守值、
 `budget_exhausted = true`，检查保持 `Unknown`；**不是**用户 `Error`。
 
@@ -489,11 +491,11 @@ WholeProgramAnalysis(world_key, analysis_policy)
 
 分析 query 在前端注册，身份键为 `MonoKey`：
 
-- `AnalysisSccSummary`（编号 27，schema 4）的 key 是排序后的 `MonoKey` 集、
+- `AnalysisSccSummary`（编号 27，schema 5）的 key 是排序后的 `MonoKey` 集、
   analysis policy 与 world 输入指纹；计算闭包内对具体实例做摘要固定点，
   不经 query 读取本 SCC 的半初始化结果。
-- `FunctionAnalysisSummary`（编号 23，schema 4）从已完成的 SCC 摘要投影单个实例。
-- `WholeProgramAnalysis`（编号 24，schema 5）按实例图凝聚拓扑请求上述嵌套 query，
+- `FunctionAnalysisSummary`（编号 23，schema 5）从已完成的 SCC 摘要投影单个实例。
+- `WholeProgramAnalysis`（编号 24，schema 6）按实例图凝聚拓扑请求上述嵌套 query，
   合并为 world-local 共同证明与按实例排序的摘要。
 - `PublicFunctionSummary`（编号 28，schema 2）以已完成 world 的结果指纹隔离生产者输入，
   投影不含私有定义的效果与参数序号；内容对象键独立于 body 和稠密定义编号，并进入前端 action key。

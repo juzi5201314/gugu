@@ -597,7 +597,9 @@ impl Validated {
     pub(crate) fn poll_summary_fingerprint(&self) -> [u8; 32] {
         let mut hash = blake3::Hasher::new_derive_key("gugu-lir-poll-summary-v1");
         for body in &self.world.bodies {
-            hash.update(&serde_json::to_vec(&body.poll_summary).expect("poll 摘要可序列化"));
+            hash.update(&[u8::from(body.poll_summary.entry_stack_check)]);
+            hash.update(&body.poll_summary.poll_free_cost.to_le_bytes());
+            hash.update(&[u8::from(body.poll_summary.has_poll_free_cycle)]);
         }
         *hash.finalize().as_bytes()
     }
@@ -649,6 +651,7 @@ pub(crate) fn build(
         bytes.extend_from_slice(&concrete.instance);
         bytes.extend_from_slice(&concrete.fingerprint);
         let key = QueryKey::new(QueryKind::BuildLir, SCHEMA, &bytes);
+        let mut fresh = None;
         let computed = queries.compute(key, |context| {
             for source in sources.snapshots() {
                 context.record_dependency(
@@ -687,22 +690,27 @@ pub(crate) fn build(
                 Ok(body)
             })
             .map_err(|error| crate::frontend::semantics::query::store_errors(&[error]))?;
-            Ok((
-                serde_json::to_vec(&body).expect("LIR body 可序列化"),
-                Vec::new(),
-            ))
+            let payload = crate::canonical::to_vec(&body).expect("LIR body 编码");
+            fresh = Some(body);
+            Ok((payload, Vec::new()))
         });
         let computed = computed
             .map_err(|error| crate::frontend::semantics::query::restore_errors(error, sources))?;
-        let body: body::Body = serde_json::from_slice(computed.payload())
-            .map_err(|_| vec![invalid("缓存 LIR 不是合法 schema")])?;
-        if body.input_fingerprint != fingerprint
-            || body.instance != concrete.instance
-            || body.target != target
-        {
-            return Err(vec![invalid("缓存 LIR 没有绑定当前输入或目标")]);
-        }
-        verify::verify_structure(&body, hir.module()).map_err(|error| vec![error])?;
+        let body = if let Some(body) = fresh {
+            body
+        } else {
+            let body: body::Body = crate::canonical::from_slice(computed.payload())
+                .map_err(|_| vec![invalid("缓存 LIR 不是合法 schema")])?;
+            if body.revision != body::REVISION
+                || body.input_fingerprint != fingerprint
+                || body.instance != concrete.instance
+                || body.target != target
+            {
+                return Err(vec![invalid("缓存 LIR 没有绑定当前输入或目标")]);
+            }
+            verify::verify_structure(&body, hir.module()).map_err(|error| vec![error])?;
+            body
+        };
         bodies.push(body);
     }
     function_adapter::materialize(&mut bodies, hir.module()).map_err(|error| vec![error])?;

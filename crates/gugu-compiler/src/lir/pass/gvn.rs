@@ -24,8 +24,7 @@ pub(crate) fn run(editor: &mut Editor) -> Result<bool, Diagnostic> {
             {
                 continue;
             }
-            let key = serde_json::to_vec(&(&instruction.op, &instruction.arguments))
-                .expect("LIR op 可序列化");
+            let key = super::gvn_key::encode_op_key(&instruction.op, &instruction.arguments);
             let result = instruction.results[0];
             if let Some((definition_block, definition_index, definition)) = table.get(&key).copied()
             {

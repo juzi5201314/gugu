@@ -171,7 +171,10 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
         } else if module.definitions[definition].kind
             != crate::frontend::hir::DefinitionKind::Constant
         {
-            return Err(invalid("可执行实例缺少 HIR body"));
+            return Err(invalid(&format!(
+                "可执行实例 `{}` 缺少 HIR body",
+                module.definitions[definition].name
+            )));
         }
     }
     let mut members = Vec::with_capacity(selected.len());

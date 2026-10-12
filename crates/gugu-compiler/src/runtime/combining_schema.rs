@@ -565,7 +565,7 @@ impl CombiningRuntimeContract {
 
     /// 返回规范编码；指纹字段不参与编码。
     pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("combining 契约可序列化")
+        crate::canonical::to_vec(self).expect("combining 契约可序列化")
     }
 
     /// 计算契约指纹。

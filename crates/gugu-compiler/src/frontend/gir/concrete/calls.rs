@@ -9,6 +9,7 @@ use crate::frontend::{
 pub(super) fn bind(
     body: &GirBody,
     world: &MonoWorldV1,
+    instance: &super::InstanceSummaryV1,
     layouts: &mut layout::Builder<'_, '_>,
 ) -> Result<Vec<ConcreteCall>, Diagnostic> {
     let mut calls = Vec::new();
@@ -19,15 +20,13 @@ pub(super) fn bind(
         if calls.iter().any(|call: &ConcreteCall| call.site == *site) {
             continue;
         }
-        let target = layouts
-            .instance
+        let target = instance
             .call_targets
             .iter()
             .find(|(candidate, _)| candidate == site)
             .map(|(_, key)| *key)
             .or_else(|| match callee {
-                Callee::Dispatch(dispatch) => layouts
-                    .instance
+                Callee::Dispatch(dispatch) => instance
                     .call_targets
                     .iter()
                     .find(|(candidate, _)| *candidate == CallSite::Dispatch(*dispatch))
@@ -64,7 +63,7 @@ pub(super) fn bind(
             if dispatch.dynamic {
                 continue;
             }
-            let mut bindings = layouts.instance.substitutions.clone();
+            let mut bindings = instance.substitutions.clone();
             let self_ty = layouts.context.type_at(dispatch.self_ty, &bindings)?;
             bindings.insert(
                 "Self".to_owned(),

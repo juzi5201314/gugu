@@ -86,7 +86,7 @@ impl TypeUniverse {
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
         hash_domain(
             "gugu-type-universe-v1",
-            &serde_json::to_vec(&(&self.records, &self.vtables)).expect("类型表可序列化"),
+            &crate::canonical::to_vec(&(&self.records, &self.vtables)).expect("类型表可序列化"),
         )
     }
 

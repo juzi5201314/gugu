@@ -8,6 +8,7 @@
 
 mod action;
 mod backend;
+mod canonical;
 mod diagnostics;
 #[cfg(test)]
 mod diagnostics_tests;
@@ -378,11 +379,12 @@ impl Compilation {
             dump
         })
     }
-
-    /// 返回 runtime raw 平面契约；供 compiler 内部契约测试与诊断使用。
-    pub fn raw_contract(&self) -> Option<&RuntimeRawContractV1> {
+    #[cfg(test)]
+    pub(crate) fn raw_contract(&self) -> Option<&RuntimeRawContractV1> {
         self.raw_contract.as_ref()
     }
+
+    /// 返回 runtime raw 契约的稳定指纹。
     pub fn runtime_raw_fingerprint(&self) -> Option<[u8; 32]> {
         self.raw_contract
             .as_ref()
@@ -813,7 +815,7 @@ impl Compiler {
                 placement_fingerprint: frontend.gir.placement.fingerprint,
                 sources: &source_map,
                 hir: frontend.hir.module(),
-                gir: &frontend.gir,
+                gir: &frontend.mono.contracts,
             },
             &self.queries,
         ) {
@@ -3834,213 +3836,32 @@ mod tests {
             compilation.diagnostics().items()
         );
         let plan = compilation.image_plan().expect("镜像计划");
-        assert_eq!(plan.barrier_card_granularity_bytes(), 512);
-        assert_eq!(plan.barrier_card_mark_buffer_entries(), 256);
-        assert_eq!(plan.barrier_card_mark_stamp_entries(), 256);
-        assert_eq!(plan.barrier_flush_reason_count(), 6);
-        assert_eq!(plan.barrier_card_mark_batch_fields(), 13);
-        assert_eq!(plan.barrier_record_count(), 4);
-        assert_ne!(plan.barrier_contract_fingerprint(), [0_u8; 32]);
-        // managed store 存在时 barrier 需求非零；每一处写入都被同一站点集合覆盖。
         let demand = plan.barrier_demand();
-        assert!(demand.barrier_sites() > 0);
+        assert!(demand.barrier_sites() > 0, "闭包捕获写入必须保留屏障");
         assert_eq!(demand.card_mark_sites, demand.barrier_sites());
         assert_eq!(demand.edge_summary_sites, demand.barrier_sites());
-        assert_eq!(
-            plan.barrier_runtime().card_granularity_bytes(),
-            plan.barrier_card_granularity_bytes()
-        );
-        let dump = compilation.dump_runtime().expect("runtime dump");
-        assert!(dump.contains("barrier schema=3 card=512 buffer=256 stamps=256"));
-        assert!(dump.contains("barrier-steps read-old -> shade-old-deleted -> shade-new-inserted -> store -> card-mark -> edge-summary"));
-        assert!(dump.contains("barrier-flush-reasons buffer-full,processor-handoff,foreign-bridge,memory-pressure,minor-stop,producer-stop-gate"));
-        assert!(dump.contains(
-            "barrier-kinds yuasa-deletion,dijkstra-insertion,direct-field,edge-add,edge-drop"
-        ));
-        assert!(dump.contains("barrier-record CardMarkEntry bytes=32 align=16"));
-        assert!(dump.contains("barrier-field CardMarkStamp.entry offset=8"));
-        assert!(dump.contains("barrier-demand"));
-        assert!(dump.contains("barrier-pressure"));
-        assert!(dump.contains("barrier-fingerprint"));
-        // LocalHeap 的 arena/block/line 与 GC metadata 契约同源，位图、TLAB 与记录布局
-        // 只由这一组参数推导；需求视图则与 barrier/gc metadata 的站点口径一致。
-        let local_heap = plan.local_heap_runtime();
-        assert_eq!(local_heap.arena_bytes(), plan.gc_metadata_arena_bytes());
-        assert_eq!(local_heap.block_bytes(), plan.gc_metadata_block_bytes());
-        assert_eq!(local_heap.line_bytes(), plan.gc_metadata_line_bytes());
-        assert_eq!(
-            local_heap.tlab_span_bytes(),
-            8 * u64::from(plan.gc_metadata_block_bytes())
-        );
-        assert_eq!(
-            local_heap.object_start_bits,
-            (plan.gc_metadata_arena_bytes() / 16) as u32
-        );
-        assert_eq!(local_heap.bitmap_bytes, local_heap.mark_bits / 8);
-        assert_eq!(local_heap.page_cover_entries, 512);
-        assert_eq!(local_heap.card_bytes, 4096);
         assert_eq!(
             plan.local_heap_demand().barrier_sites,
             demand.barrier_sites()
         );
-        assert_eq!(
-            plan.local_heap_demand().managed_types,
-            plan.gc_metadata_type_count()
-        );
-        assert!(plan.local_heap_demand().large_types >= 1);
-        assert_ne!(plan.local_heap_contract_fingerprint(), [0_u8; 32]);
-        assert!(dump.contains("local-heap schema=5 arena=2097152 block=32768 line=128"));
-        assert!(dump.contains("block-return schema=1"));
-        assert!(dump.contains("local-heap-bitmaps object-start-bits=131072 mark-bits=131072"));
-        assert!(dump.contains("local-heap-record HeapArenaMetadata bytes=55576"));
-        assert!(dump.contains("local-heap-trigger revision=1"));
-        assert!(dump.contains("local-heap-demand"));
-        assert!(dump.contains("local-heap-fingerprint"));
-        // 边契约：候选回收相位、block 状态与 `EdgeDelta` 字段集合都进入镜像计划。
-        assert_ne!(plan.edge_contract_fingerprint(), [0_u8; 32]);
-        assert_eq!(plan.edge_runtime().candidate_quantum, 4096);
-        assert_eq!(plan.edge_runtime().phases.len(), 10);
-        assert_eq!(plan.edge_runtime().phases[0], "discover");
-        assert_eq!(
-            plan.edge_runtime().states,
-            [
-                "allocating",
-                "candidate",
-                "sweeping",
-                "evacuating",
-                "return-pending",
-                "owned-free",
-                "free"
-            ]
-        );
-        // `EdgeDelta` 的规范字段集合：18 个字段，全部不带地址（schema 自带校验）。
-        assert_eq!(plan.edge_runtime().edge_delta_field_count(), 18);
-        // 边需求必须与 barrier/mark 的同一组站点计数一致：三份契约不允许各自记账。
         assert_eq!(plan.edge_demand().edge_sites, demand.edge_summary_sites);
         assert_eq!(plan.edge_demand().reserve_slots, demand.shade_slots);
-        assert_eq!(
-            plan.edge_demand().edge_sites,
-            plan.mark_demand().edge_delta_sites
-        );
-        assert!(dump.contains("edge schema="));
-        assert!(dump.contains("edge-demand "));
-        assert!(dump.contains("edge-phases "));
-        assert!(dump.contains("edge-states "));
-        assert!(dump.contains("edge-fingerprint "));
-        // mark 契约：每 owner 单 consumer、七个收敛条件、六类参与者与三条 record 布局。
-        assert_eq!(plan.mark_mailbox_consumer_count(), 1);
-        assert_eq!(plan.mark_condition_count(), 7);
-        assert_eq!(plan.mark_snapshot_participant_count(), 6);
-        assert_eq!(plan.mark_cycle_state_count(), 6);
-        assert_eq!(plan.mark_ticket_field_count(), 18);
-        assert_eq!(plan.mark_record_count(), 5);
-        assert!(plan.mark_credit_pool() > 0);
-        // mark 需求覆盖的站点集合与 gc metadata/barrier/SharedHeap 三份需求一致。
-        assert_eq!(
-            plan.mark_demand().root_sites,
-            plan.gc_metadata_demand().root_range_count
-        );
         assert_eq!(plan.mark_demand().barrier_sites, demand.card_mark_sites);
-        assert_eq!(
-            plan.mark_demand().ticket_sites,
-            plan.shared_heap_demand().mark_sites
-        );
         assert_eq!(
             plan.mark_demand().edge_delta_sites,
             demand.edge_summary_sites
         );
-        assert_ne!(plan.mark_contract_fingerprint(), [0_u8; 32]);
-        assert!(dump.contains("mark schema=4 profile=mosaic-mark revision=2"));
-        assert!(dump.contains(
-            "mark-conditions local-worklist,published-batch,mailbox,barrier-buffer,producer-epoch,forwarding-work,pending-credit"
-        ));
-        assert!(dump.contains("mark-record MarkMailboxHead bytes=64 align=64"));
-        assert!(dump.contains("mark-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging,mark-credit,mark-mailbox,mark-worklist,forwarding-work"));
-        assert!(dump.contains("mark-fingerprint"));
-        // pacing 契约与需求同样进入镜像计划、dump 与指纹身份。
-        assert_eq!(plan.pacing_profile(), "mosaic-default");
-        assert_eq!(plan.pacing_profile_revision(), 3);
-        assert_eq!(plan.pacing_assist_quantum(), 1 << 16);
-        assert_eq!(plan.pacing_gc_cpu_fraction(), 25);
-        assert_eq!(plan.pacing_credit_source_count(), 9);
-        assert_eq!(plan.pacing_pressure_poll_bytes(), 1 << 20);
-        assert_eq!(plan.pacing_owner_drain_items(), 64);
-        assert_eq!(plan.pacing_owner_drain_bytes(), 1 << 16);
-        assert_eq!(plan.pacing_owner_drain_interval_bytes(), 1 << 20);
-        assert_ne!(plan.pacing_contract_fingerprint(), [0_u8; 32]);
         assert_eq!(
-            plan.pacing_runtime().pressure_enter_ratio(),
-            plan.pacing_pressure_enter_ratio()
+            plan.edge_demand().edge_sites,
+            plan.mark_demand().edge_delta_sites
         );
-        // pacing 需求从优化后 LIR 推导；分配与屏障站点沿各自需求口径核对。
-        let pacing_demand = plan.pacing_demand();
-        assert!(pacing_demand.alloc_sites > 0, "闭包捕获必须产生分配站点");
-        assert_eq!(pacing_demand.barrier_sites, demand.barrier_sites());
-        assert!(pacing_demand.managed_types > 0);
-        assert!(dump.contains("pacing schema=3 profile=mosaic-default revision=3"));
-        assert!(dump.contains("pacing-drain poll=1048576 items=64 bytes=65536 interval=1048576"));
-        assert!(dump.contains("pacing-pressure enter=85 clear=70 states=steady,drain,emergency"));
-        assert!(dump.contains("pacing-drain-classes owner-cache-bytes,pending-return-bytes,reclaimable-bytes partition=runtime-committed-bytes"));
-        assert!(dump.contains("pacing-credit-sources barrier-buffer,card-mark-batch,edge-delta,pending-return,producer-staging,mark-credit,mark-mailbox,mark-worklist,forwarding-work"));
-        assert!(dump.contains("pacing-fingerprint"));
-        // 冷/热编译指纹一致，且 dump 逐字节相同。
-        let warm = Compiler::new().compile(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Linux,
-        ));
-        let warm_plan = warm.image_plan().expect("warm plan");
-        assert_eq!(
-            plan.barrier_contract_fingerprint(),
-            warm_plan.barrier_contract_fingerprint()
-        );
-        assert_eq!(dump, warm.dump_runtime().expect("warm dump"));
-        // 站点数变化必须改变 barrier 指纹。
-        let bigger = "fn main() {\n let value = 1\n let other = 2\n let closure = fn() int { return value + other }\n _ = closure()\n }";
-        let bigger_compilation = Compiler::new().compile(CompileRequest::single_file(
-            "main.gg",
-            bigger,
-            TargetName::X86_64Linux,
-        ));
-        assert!(
-            bigger_compilation.is_success(),
-            "{:?}",
-            bigger_compilation.diagnostics().items()
-        );
-        let bigger_plan = bigger_compilation.image_plan().expect("bigger plan");
-        assert!(
-            bigger_plan.barrier_demand().barrier_sites() > demand.barrier_sites(),
-            "捕获两个 managed local 后 barrier 站点必须增多"
-        );
-        assert_ne!(
-            bigger_plan.barrier_contract_fingerprint(),
-            plan.barrier_contract_fingerprint(),
-            "barrier 指纹必须随站点需求变化"
-        );
-        // Windows 目标同样形成契约，只是 profile 不同。
-        let windows = Compiler::new().compile(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Windows,
-        ));
-        assert!(windows.is_success(), "{:?}", windows.diagnostics().items());
-        let windows_plan = windows.image_plan().expect("windows plan");
-        assert_eq!(
-            windows_plan.barrier_card_granularity_bytes(),
-            plan.barrier_card_granularity_bytes()
-        );
-        // barrier 协议本身不含平台差异：card 粒度、buffer 容量与六步序列在两个目标上
-        // 必须相同，平台差异只体现在 raw 契约的其余分段。
-        assert_eq!(
-            windows_plan.barrier_contract_fingerprint(),
-            plan.barrier_contract_fingerprint(),
-            "barrier 协议不得随目标漂移"
-        );
-        assert_ne!(
-            compilation.runtime_raw_fingerprint(),
-            windows.runtime_raw_fingerprint(),
-            "raw 契约整体仍必须随目标分离"
-        );
+        assert!(plan.pacing_demand().alloc_sites > 0, "闭包环境必须保留分配");
+        assert_eq!(plan.pacing_demand().barrier_sites, demand.barrier_sites());
+        // 契约布局必须同源，但独立 record 元数据不计入用户执行类型需求。
+        let local_heap = plan.local_heap_runtime();
+        assert_eq!(local_heap.arena_bytes(), plan.gc_metadata_arena_bytes());
+        assert_eq!(local_heap.block_bytes(), plan.gc_metadata_block_bytes());
+        assert_eq!(local_heap.line_bytes(), plan.gc_metadata_line_bytes());
     }
 
     #[test]

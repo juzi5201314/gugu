@@ -138,8 +138,24 @@ pub(crate) struct MEdge {
     pub(crate) unwind: bool,
 }
 
+/// 原始稠密 arena 由 Editor 接管；no-op 直接交还，不重建或深拷贝函数体。
+#[derive(Default)]
+struct OriginalArenas {
+    values: Vec<Value>,
+    blocks: Vec<Block>,
+    instructions: Vec<Instruction>,
+    operands: Vec<ValueId>,
+    parameters: Vec<Parameter>,
+    edges: Vec<Edge>,
+    predecessors: Vec<EdgeId>,
+    switch_cases: Vec<(u64, EdgeId)>,
+    safepoints: Vec<Safepoint>,
+    uses: Vec<super::super::body::Use>,
+}
+
 /// 可变函数体视图；所有 pass 共享。
 pub(crate) struct Editor {
+    original: OriginalArenas,
     pub(crate) values: Vec<MValue>,
     pub(crate) blocks: Vec<Option<MBlock>>,
     pub(crate) edges: Vec<Option<MEdge>>,
@@ -170,9 +186,23 @@ pub(crate) struct Editor {
     pub(crate) poll_summary: PollSummary,
 }
 
+/// 只读图视图不暴露 finish 或可变访问，不能误生成缺少元数据的 Body。
+pub(crate) struct BodyView(Editor);
+
+impl std::ops::Deref for BodyView {
+    type Target = Editor;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
 impl Editor {
-    /// 把已验证的函数体拆成可变视图。
-    pub(crate) fn new(body: Body) -> Self {
+    pub(crate) fn graph_view(body: &Body) -> BodyView {
+        BodyView(Self::build_graph(body, body.assembly.clone()))
+    }
+
+    /// 只构建改写和图分析共享的 CFG arena；执行元数据仅由拥有型构造接管。
+    fn build_graph(body: &Body, assembly: Vec<Assembly>) -> Self {
         let instruction_count = body.instructions.len();
         let values = body
             .values
@@ -221,7 +251,7 @@ impl Editor {
             blocks.push(Some(MBlock {
                 params,
                 insts,
-                term: term_of(&body, &block.terminator),
+                term: term_of(body, &block.terminator),
                 source: block.source.clone(),
                 cleanup: block.cleanup,
             }));
@@ -251,24 +281,93 @@ impl Editor {
             revision: body.revision,
             instance: body.instance,
             owner: body.owner,
-            name: body.name,
-            target: body.target,
-            signature: body.signature,
-            stack_slots: body.stack_slots,
-            lifetimes: body.lifetimes,
-            root_inits: body.root_inits,
-            barrier_permits: body.barrier_permits,
-            no_safepoint_regions: body.no_safepoint_regions,
-            source_scopes: body.source_scopes,
-            data: body.data,
-            assembly: body.assembly,
-            environments: body.environments,
+            name: String::new(),
+            target: String::new(),
+            signature: super::super::body::Signature {
+                parameters: Vec::new(),
+                results: Vec::new(),
+                sret: None,
+                by_value: Vec::new(),
+            },
+            stack_slots: Vec::new(),
+            lifetimes: Vec::new(),
+            root_inits: Vec::new(),
+            barrier_permits: Vec::new(),
+            no_safepoint_regions: Vec::new(),
+            source_scopes: Vec::new(),
+            data: Vec::new(),
+            assembly,
+            environments: Vec::new(),
             input_fingerprint: body.input_fingerprint,
             poll_summary: body.poll_summary,
+            original: OriginalArenas::default(),
         };
         editor.recount_uses();
         editor.recount_definitions();
         editor
+    }
+
+    pub(crate) fn new(mut body: Body) -> Self {
+        let assembly = std::mem::take(&mut body.assembly);
+        let mut editor = Self::build_graph(&body, assembly);
+        editor.name = body.name;
+        editor.target = body.target;
+        editor.signature = body.signature;
+        editor.stack_slots = body.stack_slots;
+        editor.lifetimes = body.lifetimes;
+        editor.root_inits = body.root_inits;
+        editor.barrier_permits = body.barrier_permits;
+        editor.no_safepoint_regions = body.no_safepoint_regions;
+        editor.source_scopes = body.source_scopes;
+        editor.data = body.data;
+        editor.environments = body.environments;
+        editor.original = OriginalArenas {
+            values: body.values,
+            blocks: body.blocks,
+            instructions: body.instructions,
+            operands: body.operands,
+            parameters: body.parameters,
+            edges: body.edges,
+            predecessors: body.predecessors,
+            switch_cases: body.switch_cases,
+            safepoints: body.safepoints,
+            uses: body.uses,
+        };
+        editor
+    }
+
+    /// changed 为 false 时交还原始 arena；不会调用 `finish` 的重编号逻辑。
+    pub(crate) fn unchanged(self) -> Body {
+        Body {
+            revision: self.revision,
+            instance: self.instance,
+            owner: self.owner,
+            name: self.name,
+            target: self.target,
+            signature: self.signature,
+            values: self.original.values,
+            blocks: self.original.blocks,
+            instructions: self.original.instructions,
+            operands: self.original.operands,
+            parameters: self.original.parameters,
+            edges: self.original.edges,
+            predecessors: self.original.predecessors,
+            switch_cases: self.original.switch_cases,
+            safepoints: self.original.safepoints,
+            uses: self.original.uses,
+            stack_slots: self.stack_slots,
+            lifetimes: self.lifetimes,
+            root_inits: self.root_inits,
+            barrier_permits: self.barrier_permits,
+            no_safepoint_regions: self.no_safepoint_regions,
+            source_scopes: self.source_scopes,
+            data: self.data,
+            assembly: self.assembly,
+            environments: self.environments,
+            entry: self.entry,
+            input_fingerprint: self.input_fingerprint,
+            poll_summary: self.poll_summary,
+        }
     }
 
     fn recount_definitions(&mut self) {
@@ -921,6 +1020,7 @@ impl Editor {
     /// 重建稠密 arena 并返回新的函数体；调用方随后运行结构 verifier。
     pub(crate) fn finish(self) -> Result<Body, Diagnostic> {
         let Editor {
+            original: _,
             values,
             mut blocks,
             edges,

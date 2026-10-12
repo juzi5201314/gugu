@@ -24,6 +24,7 @@ pub(crate) mod call;
 pub(crate) mod ctrl;
 pub(crate) mod memory;
 pub(crate) mod numeric;
+mod poll_cost;
 #[cfg(test)]
 mod tests;
 pub(crate) mod vector;
@@ -269,6 +270,10 @@ pub(crate) fn lower_with(
 /// 类型变体（最宽整数、窄宽度掩码路径、无符号 u64 转换、浮点比较、最贵 lane），
 /// 保证用于 poll 插点的成本是不低于真实站点的上界。
 pub(crate) fn poll_cost(op: &Op) -> u32 {
+    poll_cost::cost(op)
+}
+
+fn poll_cost_uncached(op: &Op) -> u32 {
     let Some((operand_types, result_types)) = probe_types(op) else {
         return 1;
     };

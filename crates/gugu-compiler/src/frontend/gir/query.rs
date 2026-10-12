@@ -76,7 +76,7 @@ fn compute_body(
             );
             match build::lower(module, owner) {
                 Ok(body) => {
-                    let payload = serde_json::to_vec(&body).expect("GIR schema 序列化");
+                    let payload = crate::canonical::to_vec(&body).expect("GIR schema 编码");
                     fresh = Some(body);
                     Ok((payload, Vec::new()))
                 }
@@ -87,8 +87,11 @@ fn compute_body(
     if let Some(body) = fresh {
         return Ok(body);
     }
-    let body: GirBody = serde_json::from_slice(result.payload())
+    let body: GirBody = crate::canonical::from_slice(result.payload())
         .map_err(|_| vec![super::gir_error("GIR query 缓存 schema 不合法", None)])?;
+    if body.owner != owner.definition || body.owner_key != definition.key {
+        return Err(vec![super::gir_error("缓存 GIR 与当前 owner 不一致", None)]);
+    }
     super::verify(module, &body).map_err(|error| vec![error])?;
     Ok(body)
 }

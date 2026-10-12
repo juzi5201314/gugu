@@ -10,7 +10,7 @@ use crate::frontend::gir::body::{BlockId, GirBody, Rvalue, StatementKind, Termin
 use crate::frontend::gir::passing::PassingTable;
 use crate::frontend::hir::{self, ExprId, Module, Owner};
 use crate::frontend::mono::instantiate::CallSite;
-
+#[derive(Debug, Eq, PartialEq)]
 pub(crate) struct BodyResult {
     pub proofs: Vec<(ExprId, hir::CheckKind, ProofStatus)>,
     pub summary: FunctionSummary,
@@ -26,6 +26,23 @@ pub(crate) fn analyze_owner(
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
 ) -> BodyResult {
     let passing = PassingTable::new(module);
+    if policy.max_block_iterations != 0
+        && let Some(result) = analyze_linear_leaf(module, owner, body, &passing, callees)
+    {
+        return result;
+    }
+    analyze_generic(module, owner, body, owner_index, policy, callees, &passing)
+}
+
+pub(super) fn analyze_generic(
+    module: &Module,
+    owner: &Owner,
+    body: &GirBody,
+    owner_index: u32,
+    policy: AnalysisPolicyV1,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+    passing: &PassingTable,
+) -> BodyResult {
     let indexed = IndexedBody::new(body, owner);
     let body = &indexed;
     let locals = owner.locals.len();
@@ -86,6 +103,113 @@ pub(crate) fn analyze_owner(
     }
 }
 
+pub(super) fn analyze_linear_leaf(
+    module: &Module,
+    owner: &Owner,
+    body: &GirBody,
+    passing: &PassingTable,
+    callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+) -> Option<BodyResult> {
+    if body.entry.index() != 0
+        || body.blocks.is_empty()
+        || body.blocks.iter().enumerate().any(|(index, block)| {
+            let linear = match block.terminator {
+                Terminator::Goto { target } => target.index() == index + 1,
+                Terminator::Return => index + 1 == body.blocks.len(),
+                _ => false,
+            };
+            !linear
+                || block.cleanup
+                || (index == 0 && block.statements.start != 0)
+                || (index > 0 && body.blocks[index - 1].statements.end != block.statements.start)
+        })
+        || usize::try_from(body.blocks.last()?.statements.end).expect("语句编号适配宿主")
+            != body.statements.len()
+        || body
+            .locals
+            .iter()
+            .any(|local| !passing.class(local.ty).is_pure_bits())
+        || !owner.foreign_calls.is_empty()
+        || !owner.assembly.is_empty()
+        || !body.safepoints.is_empty()
+        || !body.no_safepoint_regions.is_empty()
+        || body.statements.iter().any(|statement| {
+            !matches!(
+                statement.kind,
+                StatementKind::StorageLive(_)
+                    | StatementKind::StorageDead(_)
+                    | StatementKind::ValueAction {
+                        action: crate::frontend::gir::body::ValueActionKind::Copy,
+                        ..
+                    }
+                    | StatementKind::Nop
+                    | StatementKind::Assign(
+                        _,
+                        Rvalue::Use(_)
+                            | Rvalue::ValueCopy(_)
+                            | Rvalue::UnaryOp { .. }
+                            | Rvalue::BinaryOp { .. }
+                            | Rvalue::Compare { .. }
+                            | Rvalue::Cast { .. }
+                            | Rvalue::CheckedOp { .. }
+                    )
+            )
+        })
+    {
+        return None;
+    }
+    let indexed = IndexedBody::new(body, owner);
+    let mut state = AbstractState::entry(
+        owner.locals.len(),
+        owner.expressions.len(),
+        owner.parameters.len(),
+    );
+    seed_param_lens(module, owner, &mut state);
+    let mut proofs = Vec::new();
+    let mut compare = None;
+    for statement in &body.statements {
+        if let StatementKind::Assign(_, Rvalue::CheckedOp { check, .. }) = &statement.kind {
+            transfer_gir::sync_resolved(module, owner, &indexed, &mut state);
+            let check = &owner.checks[usize::try_from(*check).expect("检查编号适配宿主")];
+            proofs.push((
+                check.expression,
+                check.kind.clone(),
+                super::prove::prove_check(module, owner, &state, check),
+            ));
+        }
+        transfer_gir::execute_statement(
+            module,
+            owner,
+            &indexed,
+            &mut state,
+            &statement.kind,
+            passing,
+            callees,
+            &mut compare,
+        );
+    }
+    transfer_gir::sync_resolved(module, owner, &indexed, &mut state);
+    let mut summary = FunctionSummary::default();
+    absorb_effects(&mut summary, &state);
+    let returns = state.range(ValueKey::Expr(owner.body));
+    if !returns.is_empty() {
+        summary.return_lo = i64::try_from(returns.lo).ok();
+        summary.return_hi = i64::try_from(returns.hi).ok();
+    }
+    summary
+        .return_relations
+        .extend(return_relation(owner, &state, owner.body));
+    super::access::summarize(module, owner, callees, &mut summary);
+    summary.may_panic |= proofs
+        .iter()
+        .any(|(_, _, status)| *status != ProofStatus::Proved);
+    Some(BodyResult {
+        proofs,
+        summary,
+        budget_exhausted: false,
+    })
+}
+
 pub(crate) fn body_of<'a>(module: &Module, gir: &'a GirWorldV1, owner_index: u32) -> &'a GirBody {
     let owner = &module.owners[usize::try_from(owner_index).expect("owner 编号适配宿主")];
     gir.bodies
@@ -93,7 +217,6 @@ pub(crate) fn body_of<'a>(module: &Module, gir: &'a GirWorldV1, owner_index: u32
         .find(|body| body.owner == owner.definition)
         .expect("每个 HIR owner 都有 generic GIR body")
 }
-
 fn seed_param_lens(module: &Module, owner: &Owner, state: &mut AbstractState) {
     for (index, local) in owner.locals.iter().enumerate() {
         let id = hir::LocalId(index as u32);

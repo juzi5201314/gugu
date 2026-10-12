@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// `MonoWorldV1` schema。
-pub(crate) const MONO_SCHEMA: u32 = 5;
+pub(crate) const MONO_SCHEMA: u32 = 6;
 
 /// 闭合后的实例图：实例按 key 摘要排序，`MonoId` 为排序后下标。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -27,6 +27,10 @@ pub(crate) struct MonoWorldV1 {
     /// 根 `MonoKey` 摘要（排序）。
     pub roots: Vec<[u8; 32]>,
     pub root_categories: Vec<RootCategoryV1>,
+    /// contract record 根的稳定定义 key；不生成实例。
+    pub record_roots: Vec<Vec<u8>>,
+    /// 签名类型证据，不携带可执行函数体。
+    pub contracts: Vec<crate::frontend::gir::concrete::RecordTypes>,
     /// 闭合实例摘要（按 key 摘要排序，下标即 `MonoId`）。
     pub instances: Vec<InstanceSummaryV1>,
     /// 闭世界 vtable/metadata 类型根（规范字节，排序去重）。
@@ -81,14 +85,19 @@ pub(crate) fn close(
     context: &MonoContext<'_>,
     interner: &mut MonoInterner,
     queries: &QueryEngine,
+    gir: &crate::frontend::gir::GirWorldV1,
 ) -> Result<MonoWorldV1, Vec<Diagnostic>> {
-    let (_roots, seeds) = roots::collect(context, interner, queries)?;
-    let mut driver = Driver::new(context, interner, queries);
+    let (roots, seeds) = roots::collect(context, interner, queries)?;
+    let record_roots = roots.record_keys;
+    let mut driver = Driver::new(context, interner, queries, record_roots);
     for seed in seeds {
         driver.enqueue_root(&seed)?;
     }
-    driver.run()?;
-    Ok(driver.world(input_fingerprint(context)))
+    driver.run(gir)?;
+    let mut world = driver.world(input_fingerprint(context));
+    world.contracts =
+        crate::runtime::contract_view::collect(context).map_err(|error| vec![error])?;
+    Ok(world)
 }
 
 /// 闭合输入指纹：模块指纹 + 目标 + harness。
@@ -97,45 +106,12 @@ pub(crate) fn input_fingerprint(context: &MonoContext<'_>) -> [u8; 32] {
     bytes.extend_from_slice(&context.module.input_fingerprint);
     bytes.extend_from_slice(context.target.to_string().as_bytes());
 
+    bytes.extend_from_slice(&MONO_SCHEMA.to_le_bytes());
+    bytes.extend_from_slice(
+        &crate::canonical::to_vec(crate::runtime::demand::IMAGE_ENTRIES).expect("镜像执行根编码"),
+    );
     bytes.push(u8::from(context.harness));
     hash_domain("gugu-mono-close-input-v1", &bytes)
-}
-
-/// 从 build-time artifact 按 stable MonoKey 选择当前闭包需要的 runtime function。
-pub(crate) fn reachable_runtime_functions(
-    artifact: &crate::RuntimeArtifactV1,
-    world: &MonoWorldV1,
-) -> Result<Vec<crate::RuntimeFunctionArtifactV1>, Vec<Diagnostic>> {
-    let reachable = world
-        .instances
-        .iter()
-        .filter_map(|instance| instance.mono_key.get(..32))
-        .collect::<BTreeSet<_>>();
-    let mut selected = artifact
-        .payload
-        .functions
-        .iter()
-        .filter(|function| {
-            let digest = crate::frontend::mono::keys::hash_domain(
-                "gugu-runtime-mono-key-v1",
-                function.stable_mono_key.as_bytes(),
-            );
-            reachable.contains(digest.as_slice())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    selected.sort_by(|left, right| left.stable_mono_key.cmp(&right.stable_mono_key));
-    if selected
-        .windows(2)
-        .any(|pair| pair[0].stable_mono_key == pair[1].stable_mono_key)
-    {
-        return Err(vec![crate::Diagnostic::error(
-            crate::DiagnosticCode::BackendInvariant,
-            "runtime artifact 含重复 stable MonoKey",
-            None,
-        )]);
-    }
-    Ok(selected)
 }
 
 /// 空 package 的空实例图。
@@ -145,6 +121,8 @@ pub(crate) fn empty_world() -> MonoWorldV1 {
         input_fingerprint: [0; 32],
         roots: Vec::new(),
         root_categories: Vec::new(),
+        record_roots: Vec::new(),
+        contracts: Vec::new(),
         instances: Vec::new(),
         metadata_roots: Vec::new(),
         externals: Vec::new(),
@@ -159,7 +137,7 @@ struct Driver<'a, 'b> {
     context: &'a MonoContext<'b>,
     interner: &'a mut MonoInterner,
     queries: &'a QueryEngine,
-    /// pending：按 key 摘要字节序稳定 pop。
+    record_roots: Vec<Vec<u8>>,
     pending: BTreeSet<[u8; 32]>,
     /// 已入队 key -> 工作条目 + ancestry。
     queued: BTreeMap<[u8; 32], (WalkEntry, Vec<AncestryLink>)>,
@@ -174,11 +152,13 @@ impl<'a, 'b> Driver<'a, 'b> {
         context: &'a MonoContext<'b>,
         interner: &'a mut MonoInterner,
         queries: &'a QueryEngine,
+        record_roots: Vec<Vec<u8>>,
     ) -> Self {
         Self {
             context,
             interner,
             queries,
+            record_roots,
             pending: BTreeSet::new(),
             queued: BTreeMap::new(),
             done: BTreeMap::new(),
@@ -210,7 +190,7 @@ impl<'a, 'b> Driver<'a, 'b> {
     ///
     /// 同 key 递归复用相同实例节点（`queued`/`done` 判定），只形成图边；
     /// 新 key 的 ancestry = 发现者 ancestry + 发现者链接。
-    fn run(&mut self) -> Result<(), Vec<Diagnostic>> {
+    fn run(&mut self, gir: &crate::frontend::gir::GirWorldV1) -> Result<(), Vec<Diagnostic>> {
         while let Some(digest) = self.pending.pop_first() {
             let (entry, ancestry) = self
                 .queued
@@ -225,6 +205,29 @@ impl<'a, 'b> Driver<'a, 'b> {
             };
             for callee in &record.callees {
                 self.enqueue_callee(&digest, &ancestry, &link, callee)?;
+            }
+            if let Some(body) = gir
+                .bodies
+                .iter()
+                .find(|body| body.owner == entry.definition)
+            {
+                for glue in crate::runtime::demand::referenced(body) {
+                    if let Some(definition) = crate::runtime::demand::definition(self.context, glue)
+                    {
+                        let entry = instantiate::root_entry(
+                            self.context,
+                            self.interner,
+                            definition,
+                            BTreeMap::new(),
+                        )
+                        .map_err(|error| vec![error])?;
+                        self.enqueue_root(&RootSeed {
+                            key: entry.key.clone(),
+                            entry,
+                            category: RootCategoryV1::RuntimeGlue,
+                        })?;
+                    }
+                }
             }
             if self.done.len() >= u32::MAX as usize {
                 return Err(vec![instance_limit()]);
@@ -298,22 +301,23 @@ impl<'a, 'b> Driver<'a, 'b> {
             })
             .collect();
         let mut hash = blake3::Hasher::new_derive_key("gugu-mono-graph-v2");
-        serde_json::to_writer(
-            &mut hash,
-            &(
-                &roots,
-                &root_categories,
-                &instances,
-                &metadata_roots,
-                &externals,
-            ),
-        )
-        .expect("闭世界图仅包含可规范序列化的稳定身份与实例事实");
+        let bytes = crate::canonical::to_vec(&(
+            &roots,
+            &root_categories,
+            &self.record_roots,
+            &instances,
+            &metadata_roots,
+            &externals,
+        ))
+        .expect("闭世界图编码");
+        hash.update(&bytes);
         MonoWorldV1 {
             schema: MONO_SCHEMA,
             input_fingerprint,
             roots,
             root_categories,
+            record_roots: self.record_roots,
+            contracts: Vec::new(),
             instances,
             metadata_roots: metadata_roots.into_iter().collect(),
             externals: externals.into_iter().collect(),

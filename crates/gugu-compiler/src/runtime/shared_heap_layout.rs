@@ -1,10 +1,11 @@
-//! 从冻结 HIR 与具体 GIR 交叉校验 SharedHeap handle slot 与 payload record 布局；
+//! 从冻结 HIR 与独立签名布局目录交叉校验 SharedHeap handle slot 与 payload record 布局；
 //! 不重新解释源码或名称解析。
 
+use super::contract_view::source_parameters;
 use super::model::RawModelError;
 use super::shared_heap_schema::SharedHeapRuntimeContract;
 use crate::frontend::{
-    gir::{GirWorldV1, concrete::TypeKind, concrete::TypeLayout},
+    gir::concrete::{RecordTypes, TypeKind, TypeLayout},
     hir,
 };
 use std::collections::BTreeSet;
@@ -14,24 +15,21 @@ const SOURCE: &str = "std/runtime/heap.gg";
 pub(super) fn verify_source(
     contract: &SharedHeapRuntimeContract,
     module: &hir::Module,
-    gir: &GirWorldV1,
+    gir: &[RecordTypes],
 ) -> Result<(), RawModelError> {
     // 空 package 没有 runtime 源图，也不生成镜像；固定 machine 布局仍由 contract.verify 校验。
     if module.sources.is_empty() {
-        debug_assert!(gir.concrete.is_empty());
+        debug_assert!(gir.is_empty());
         return Ok(());
     }
     let mut found = vec![false; contract.records.len()];
-    for concrete in &gir.concrete {
-        let definition = &module.definitions[concrete.body.owner.index()];
+    for concrete in gir {
+        let definition = &module.definitions[concrete.definition.index()];
         if !in_source(definition, module) {
             continue;
         }
-        let parameters = &gir.bodies
-            [usize::try_from(concrete.generic_body).expect("generic body 下标")]
-        .signature
-        .parameters;
-        if parameters.len() != concrete.body.signature.parameters.len() {
+        let parameters = source_parameters(module, concrete.definition)?;
+        if parameters.len() != concrete.parameters.len() {
             return Err(RawModelError::new(
                 "SharedHeap 入口具体签名与冻结 HIR 不一致",
             ));
@@ -43,7 +41,7 @@ pub(super) fn verify_source(
             found: &mut found,
             visited: BTreeSet::new(),
         };
-        for (source, target) in parameters.iter().zip(&concrete.body.signature.parameters) {
+        for (source, target) in parameters.iter().zip(&concrete.parameters) {
             verifier.walk(*source, target.0, false)?;
         }
     }
@@ -77,7 +75,7 @@ struct Verifier<'a> {
 }
 
 impl Verifier<'_> {
-    /// 沿冻结 HIR 与具体 GIR 走一层：引用解引用、数组/指针穿透、aggregate 展开。
+    /// 沿冻结 HIR 与契约类型目录走一层：引用解引用、数组/指针穿透、aggregate 展开。
     fn walk(&mut self, source: hir::TypeId, target: u32, field: bool) -> Result<(), RawModelError> {
         if !self.visited.insert((source, target)) {
             return Ok(());

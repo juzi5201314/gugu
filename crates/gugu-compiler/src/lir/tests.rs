@@ -19,9 +19,39 @@ use std::num::NonZeroU32;
 fn strength_reduction_constants_dominate_machine_order() {
     let compilation = compile(include_str!("fixtures/constant_dominance.gg"));
     let body = named(&compilation, "scale");
+    let unchanged = Editor::new(body.clone()).unchanged();
+    assert_eq!(&unchanged, body, "无变化路径必须保留全部 arena 与元数据");
+    assert_eq!(unchanged.fingerprint(), body.fingerprint());
+    let rewritten = Editor::new(body.clone()).finish().expect("重建合法 SSA");
     for input in [0, 1, 17, 63] {
         assert_eq!(interpret(body, &[input]), vec![input * 14]);
+        assert_eq!(interpret(&rewritten, &[input]), vec![input * 14]);
     }
+}
+
+#[test]
+fn poll_linear_leaf_matches_generic_and_rejects_calls_and_loops() {
+    let compilation =
+        compile("#[used] fn pure() int { 7 }\n#[used] fn spin() { loop {} }\nfn main() { }");
+    let body = named(&compilation, "pure");
+    assert!(poll::has_linear_leaf_shape(body));
+    assert_eq!(poll::body_flow(body), poll::generic_body_flow(body));
+    let mut called = body.clone();
+    called.instructions[0].op = Op::Call(body::Call {
+        target: body::CallTarget::Runtime(body::RuntimeCall::Yield),
+        kind: crate::frontend::gir::body::CallKind::Managed,
+        parameters: Vec::new(),
+        results: Vec::new(),
+        may_unwind: false,
+        may_suspend: true,
+        may_allocate: false,
+        captures_arguments: false,
+        by_value: Vec::new(),
+        sret: None,
+        poll_free_leaf: false,
+    });
+    assert!(!poll::has_linear_leaf_shape(&called));
+    assert!(!poll::has_linear_leaf_shape(named(&compilation, "spin")));
 }
 const SSA: &str = include_str!("fixtures/ssa.gg");
 const CONCRETE: &str = include_str!("fixtures/concrete.gg");

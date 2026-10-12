@@ -105,6 +105,88 @@ fn compile(
     .expect("前端检查通过")
 }
 
+#[test]
+fn scalar_leaf_fast_path_matches_generic_and_rejects_effects() {
+    use super::interpret;
+    use crate::frontend::gir::body::{Rvalue, StatementKind};
+    use crate::frontend::gir::passing::PassingTable;
+    let queries = crate::QueryEngine::new();
+    let output = compile(
+        &[(
+            "main.gg",
+            "#[used] fn pure(x: int) int { x + 1 }\n#[used] fn call(x: int) int { pure(x) }\n#[used] fn spin() { loop {} }\nfn main() {}",
+        )],
+        &queries,
+    );
+    let module = output.hir.module();
+    let passing = PassingTable::new(module);
+    let callees = |_| None;
+    for name in ["pure", "call", "spin"] {
+        let (index, owner) = module
+            .owners
+            .iter()
+            .enumerate()
+            .find(|(_, owner)| module.definitions[owner.definition.index()].name == name)
+            .expect("测试入口必须形成 HIR owner");
+        let index = u32::try_from(index).expect("owner 编号适配 u32");
+        let body = interpret::body_of(module, &output.gir, index);
+        let fast = interpret::analyze_linear_leaf(module, owner, body, &passing, &callees);
+        let generic = interpret::analyze_generic(
+            module,
+            owner,
+            body,
+            index,
+            AnalysisPolicyV1::default(),
+            &callees,
+            &passing,
+        );
+        if name == "pure" {
+            assert_eq!(
+                fast.unwrap_or_else(|| panic!("标量叶形状被拒绝：{body:?}")),
+                generic
+            );
+            let mut allocated = body.clone();
+            let statement = allocated
+                .statements
+                .iter_mut()
+                .find(|statement| matches!(statement.kind, StatementKind::Assign(_, _)))
+                .expect("纯函数赋值");
+            let StatementKind::Assign(_, value) = &mut statement.kind else {
+                unreachable!()
+            };
+            *value = Rvalue::AllocObject {
+                ty: body.signature.result,
+                operands: Vec::new(),
+            };
+            assert!(
+                interpret::analyze_linear_leaf(module, owner, &allocated, &passing, &callees)
+                    .is_none()
+            );
+            let policy = AnalysisPolicyV1 {
+                max_block_iterations: 0,
+                ..AnalysisPolicyV1::default()
+            };
+            assert_eq!(
+                interpret::analyze_owner(module, owner, body, index, policy, &callees),
+                interpret::analyze_generic(module, owner, body, index, policy, &callees, &passing)
+            );
+        } else {
+            assert!(fast.is_none(), "{name} 不得进入叶路径");
+            assert_eq!(
+                interpret::analyze_owner(
+                    module,
+                    owner,
+                    body,
+                    index,
+                    AnalysisPolicyV1::default(),
+                    &callees
+                ),
+                generic
+            );
+        }
+    }
+}
+
 fn proof_statuses(
     sources: &[(&str, &str)],
 ) -> Vec<(

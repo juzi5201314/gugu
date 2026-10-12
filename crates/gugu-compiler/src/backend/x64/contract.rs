@@ -187,7 +187,7 @@ impl EncoderContract {
 
     /// 契约的规范字节。
     pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("编码器契约可序列化")
+        crate::canonical::to_vec(self).expect("编码器契约编码")
     }
 
     /// 契约的域隔离内容身份；覆盖版本、基线与 form 目录。

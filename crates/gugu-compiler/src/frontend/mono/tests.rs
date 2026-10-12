@@ -182,6 +182,69 @@ fn used_and_export_functions_are_roots_without_callers() {
 }
 
 #[test]
+fn runtime_records_are_metadata_not_executable_instances() {
+    let output = compile(&[("main.gg", "fn main() {}")], &crate::QueryEngine::new());
+    let module = output.hir.module();
+    for record in &output.mono.contracts {
+        assert!(
+            output
+                .mono
+                .record_roots
+                .contains(&module.definitions[record.definition.index()].key.to_vec())
+        );
+        let name = &module.definitions[record.definition.index()].name;
+        assert!(
+            !output
+                .mono
+                .instances
+                .iter()
+                .any(|instance| instance.symbol == *name),
+            "记录 {name} 不得产生执行实例"
+        );
+        assert!(
+            !output
+                .gir
+                .concrete
+                .iter()
+                .any(|body| body.body.owner == record.definition)
+        );
+    }
+    for name in ["rt0_records", "mark_records", "wait_records"] {
+        let record = output
+            .mono
+            .contracts
+            .iter()
+            .find(|record| module.definitions[record.definition.index()].name == name)
+            .expect("布局记录必须存在");
+        assert!(!record.types.is_empty(), "布局证据必须完整形成");
+    }
+    let mut corrupted = output.mono.contracts.clone();
+    let barrier = corrupted
+        .iter_mut()
+        .find(|record| module.definitions[record.definition.index()].name == "card_mark_records")
+        .expect("barrier 布局证据");
+    let head = barrier
+        .types
+        .iter_mut()
+        .find(|ty| {
+            matches!(
+                &ty.kind,
+                crate::frontend::gir::concrete::TypeKind::Aggregate { .. }
+            )
+        })
+        .expect("barrier 聚合记录布局");
+    head.layout.as_mut().expect("完整布局").size += 64;
+    let contract = crate::runtime::barrier_schema::BarrierRuntimeContract::build(
+        crate::runtime::barrier_schema::BarrierDemand::default(),
+    )
+    .expect("机器侧布局契约");
+    assert!(
+        crate::runtime::barrier_layout::verify_source(&contract, module, &corrupted).is_err(),
+        "执行体缺席也不能绕过被篡改布局"
+    );
+}
+
+#[test]
 fn static_initializers_are_root_instances() {
     let source = "static GIFT: int = compute()\nfn compute() int = 7\nfn main() { _ = GIFT }";
     let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());

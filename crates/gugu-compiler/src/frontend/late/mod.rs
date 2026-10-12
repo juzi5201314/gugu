@@ -52,7 +52,7 @@ impl LateTable {
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
         hash_domain(
             "gugu-late-table-v1",
-            &serde_json::to_vec(&(&self.universe, &self.results)).expect("late 表可序列化"),
+            &crate::canonical::to_vec(&(&self.universe, &self.results)).expect("late 表可序列化"),
         )
     }
 

@@ -38,7 +38,7 @@ pub(crate) const GIR_PASS_ORDER: &[GirPass] = &[
 ];
 
 /// 管线 revision，进入 action key。
-pub(crate) const GIR_PIPELINE_REVISION: u32 = 1;
+pub(crate) const GIR_PIPELINE_REVISION: u32 = 2;
 
 impl GirPass {
     pub(crate) fn name(self) -> &'static str {
@@ -61,10 +61,15 @@ pub(crate) struct GirPassStats {
     pub(crate) checks_elided: u32,
 }
 
-/// 进入 action key 的 GIR 优化策略规范字节。
 pub(crate) fn policy_bytes() -> Vec<u8> {
-    let names: Vec<&str> = GIR_PASS_ORDER.iter().map(|pass| pass.name()).collect();
-    serde_json::to_vec(&(GIR_PIPELINE_REVISION, names)).expect("GIR 管线策略可序列化")
+    crate::canonical::to_vec(&(
+        GIR_PIPELINE_REVISION,
+        GIR_PASS_ORDER
+            .iter()
+            .map(|pass| pass.name())
+            .collect::<Vec<_>>(),
+    ))
+    .expect("GIR 管线策略编码")
 }
 
 /// 对全部具体 GIR 函数体运行固定管线。
@@ -79,11 +84,12 @@ pub(crate) fn run(
             world
                 .concrete
                 .iter()
-                .map(|concrete| (concrete.instance, concrete.body.clone()))
+                .map(|concrete| (concrete.instance, &concrete.body))
                 .collect::<std::collections::BTreeMap<_, _>>()
         });
-        for concrete in world.concrete.iter_mut() {
-            let mut editor = Editor::new(concrete.body.clone());
+        let mut updates = Vec::new();
+        for (index, concrete) in world.concrete.iter().enumerate() {
+            let mut editor = Editor::borrowed(&concrete.body);
             let outcome = match pass {
                 GirPass::Inline => inline::run(
                     &mut editor,
@@ -107,15 +113,19 @@ pub(crate) fn run(
             stats.inlined += outcome.inlined;
             stats.checks_elided += outcome.checks_elided;
             if outcome.changed {
-                concrete.body = editor
+                let body = editor
                     .finish()
                     .map_err(|error| vec![pack(pass.name(), error)])?;
-                super::verify(module, &concrete.body)
-                    .map_err(|error| vec![pack(pass.name(), error)])?;
-                concrete
-                    .refresh_fingerprint()
-                    .map_err(|error| vec![pack(pass.name(), error)])?;
+                super::verify(module, &body).map_err(|error| vec![pack(pass.name(), error)])?;
+                updates.push((index, body));
             }
+        }
+        for (index, body) in updates {
+            let concrete = &mut world.concrete[index];
+            concrete.body = body;
+            concrete
+                .refresh_fingerprint()
+                .map_err(|error| vec![pack(pass.name(), error)])?;
         }
         stats.passes += 1;
     }
@@ -153,13 +163,13 @@ pub(crate) struct GBlock {
 }
 
 /// 可变 GIR 函数体视图；所有 pass 共享。
-pub(crate) struct Editor {
-    body: GirBody,
+pub(crate) struct Editor<'body> {
+    body: std::borrow::Cow<'body, GirBody>,
     blocks: Vec<Option<GBlock>>,
 }
 
-impl Editor {
-    pub(crate) fn new(body: GirBody) -> Self {
+impl<'body> Editor<'body> {
+    fn borrowed(body: &'body GirBody) -> Self {
         let blocks = body
             .blocks
             .iter()
@@ -176,7 +186,10 @@ impl Editor {
                 })
             })
             .collect();
-        Self { body, blocks }
+        Self {
+            body: std::borrow::Cow::Borrowed(body),
+            blocks,
+        }
     }
 
     pub(crate) fn body(&self) -> &GirBody {
@@ -214,13 +227,13 @@ impl Editor {
     }
 
     pub(crate) fn set_statement(&mut self, index: usize, kind: StatementKind) {
-        self.body.statements[index].kind = kind;
+        self.body.to_mut().statements[index].kind = kind;
     }
 
     /// 追加一个局部并返回其编号。
     pub(crate) fn add_local(&mut self, local: super::body::GirLocal) -> LocalId {
         let id = LocalId(crate::frontend::gir::concrete::id(self.body.locals.len()));
-        self.body.locals.push(local);
+        self.body.to_mut().locals.push(local);
         id
     }
 
@@ -229,14 +242,14 @@ impl Editor {
         let id = super::body::ConstId(crate::frontend::gir::concrete::id(
             self.body.constants.len(),
         ));
-        self.body.constants.push(constant);
+        self.body.to_mut().constants.push(constant);
         id
     }
 
     /// 追加一条语句到 `block` 末尾并返回其全局下标。
     pub(crate) fn push_statement(&mut self, block: BlockId, statement: Statement) -> usize {
         let index = self.body.statements.len();
-        self.body.statements.push(statement);
+        self.body.to_mut().statements.push(statement);
         if let Some(target) = self.block_mut(block) {
             target.statements.push(index);
         }
@@ -322,6 +335,7 @@ impl Editor {
     /// 重建稠密 arena 并返回新的函数体。
     pub(crate) fn finish(self) -> Result<GirBody, Diagnostic> {
         let Editor { body, blocks } = self;
+        let body = body.into_owned();
         let mut block_map = vec![None; blocks.len()];
         let mut kept = Vec::new();
         for (index, block) in blocks.iter().enumerate() {

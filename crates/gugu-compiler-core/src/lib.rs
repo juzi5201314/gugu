@@ -9,7 +9,7 @@ use std::fmt;
 /// runtime artifact 容器魔数。
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"GUGURT01";
 /// runtime artifact schema。
-pub const ARTIFACT_SCHEMA: u32 = 1;
+pub const ARTIFACT_SCHEMA: u32 = 2;
 /// payload 的域隔离标签。
 pub const ARTIFACT_DOMAIN: &str = "gugu-runtime-artifact-v1";
 /// GBC payload 编码版本。
@@ -180,8 +180,8 @@ pub enum RuntimeArtifactError {
     Magic,
     /// schema 不匹配。
     Schema(u32),
-    /// JSON payload 无法解码。
-    Json(String),
+    /// 二进制字段或枚举判别值无效。
+    Codec(String),
     /// payload digest 不匹配。
     Digest,
     /// manifest 内容不满足稳定排序或内部一致性。
@@ -196,7 +196,7 @@ impl fmt::Display for RuntimeArtifactError {
             Self::Truncated => f.write_str("runtime artifact 截断或长度不匹配"),
             Self::Magic => f.write_str("runtime artifact 魔数不匹配"),
             Self::Schema(schema) => write!(f, "runtime artifact schema 不匹配：{schema}"),
-            Self::Json(message) => write!(f, "runtime artifact JSON 无效：{message}"),
+            Self::Codec(message) => write!(f, "runtime artifact 二进制无效：{message}"),
             Self::Digest => f.write_str("runtime artifact payload 摘要不匹配"),
             Self::Manifest(message) => write!(f, "runtime artifact manifest 无效：{message}"),
             Self::TargetMismatch { expected, actual } => {
@@ -353,6 +353,26 @@ impl RuntimeArtifactV1 {
         }
         if self
             .payload
+            .contracts
+            .windows(2)
+            .any(|pair| pair[0].key >= pair[1].key)
+        {
+            return Err(RuntimeArtifactError::Manifest(
+                "runtime contract manifest 未按 stable key 严格排序".to_owned(),
+            ));
+        }
+        if self
+            .payload
+            .generic_templates
+            .windows(2)
+            .any(|pair| pair[0].key >= pair[1].key)
+        {
+            return Err(RuntimeArtifactError::Manifest(
+                "runtime template manifest 未按 stable key 严格排序".to_owned(),
+            ));
+        }
+        if self
+            .payload
             .functions
             .windows(2)
             .any(|pair| pair[0].stable_mono_key >= pair[1].stable_mono_key)
@@ -367,18 +387,20 @@ impl RuntimeArtifactV1 {
     /// 编码 GUGURT01 容器。
     pub fn encode(&self) -> Result<Vec<u8>, RuntimeArtifactError> {
         self.validate()?;
-        let manifest = serde_json::to_vec(&self.manifest)
-            .map_err(|error| RuntimeArtifactError::Json(error.to_string()))?;
-        let payload = serde_json::to_vec(&self.payload)
-            .map_err(|error| RuntimeArtifactError::Json(error.to_string()))?;
-        let mut output = Vec::with_capacity(8 + 4 + 16 + manifest.len() + payload.len() + 32);
+        let manifest = encode_manifest(&self.manifest)?;
+        let payload = encode_payload(&self.payload)?;
+        let mut output = Vec::with_capacity(28 + manifest.len() + payload.len() + 32);
         output.extend_from_slice(&ARTIFACT_MAGIC);
         output.extend_from_slice(&ARTIFACT_SCHEMA.to_le_bytes());
         output.extend_from_slice(
-            &(u64::try_from(manifest.len()).expect("manifest length fits u64")).to_le_bytes(),
+            &u64::try_from(manifest.len())
+                .map_err(|_| RuntimeArtifactError::Truncated)?
+                .to_le_bytes(),
         );
         output.extend_from_slice(
-            &(u64::try_from(payload.len()).expect("payload length fits u64")).to_le_bytes(),
+            &u64::try_from(payload.len())
+                .map_err(|_| RuntimeArtifactError::Truncated)?
+                .to_le_bytes(),
         );
         output.extend_from_slice(&manifest);
         output.extend_from_slice(&payload);
@@ -399,12 +421,14 @@ impl RuntimeArtifactV1 {
         if schema != ARTIFACT_SCHEMA {
             return Err(RuntimeArtifactError::Schema(schema));
         }
-        let manifest_len = u64::from_le_bytes(bytes[12..20].try_into().expect("manifest length"));
-        let payload_len = u64::from_le_bytes(bytes[20..28].try_into().expect("payload length"));
-        let manifest_len =
-            usize::try_from(manifest_len).map_err(|_| RuntimeArtifactError::Truncated)?;
-        let payload_len =
-            usize::try_from(payload_len).map_err(|_| RuntimeArtifactError::Truncated)?;
+        let manifest_len = usize::try_from(u64::from_le_bytes(
+            bytes[12..20].try_into().expect("manifest length"),
+        ))
+        .map_err(|_| RuntimeArtifactError::Truncated)?;
+        let payload_len = usize::try_from(u64::from_le_bytes(
+            bytes[20..28].try_into().expect("payload length"),
+        ))
+        .map_err(|_| RuntimeArtifactError::Truncated)?;
         let payload_start = HEADER
             .checked_add(manifest_len)
             .ok_or(RuntimeArtifactError::Truncated)?;
@@ -417,15 +441,12 @@ impl RuntimeArtifactV1 {
         if end != bytes.len() {
             return Err(RuntimeArtifactError::Truncated);
         }
-        let manifest: RuntimeArtifactManifestV1 =
-            serde_json::from_slice(&bytes[HEADER..payload_start])
-                .map_err(|error| RuntimeArtifactError::Json(error.to_string()))?;
+        let manifest = decode_manifest(&bytes[HEADER..payload_start])?;
         let payload_bytes = &bytes[payload_start..digest_start];
         if bytes[digest_start..] != digest(ARTIFACT_DOMAIN.as_bytes(), payload_bytes) {
             return Err(RuntimeArtifactError::Digest);
         }
-        let payload: RuntimeArtifactPayloadV1 = serde_json::from_slice(payload_bytes)
-            .map_err(|error| RuntimeArtifactError::Json(error.to_string()))?;
+        let payload = decode_payload(payload_bytes)?;
         let artifact = Self { manifest, payload };
         artifact.validate()?;
         Ok(artifact)
@@ -443,12 +464,286 @@ impl RuntimeArtifactV1 {
     }
 }
 
+fn encode_manifest(manifest: &RuntimeArtifactManifestV1) -> Result<Vec<u8>, RuntimeArtifactError> {
+    let mut encoder = CodecEncoder::default();
+    encoder.u32(manifest.schema);
+    encoder.string(&manifest.target)?;
+    encoder.digest(&manifest.target_descriptor_digest);
+    encoder.digest(&manifest.sysroot_digest);
+    encoder.len(manifest.sources.len())?;
+    for source in &manifest.sources {
+        encoder.string(&source.logical_path)?;
+        encoder.digest(&source.content_digest);
+        encoder.role(source.role);
+    }
+    encoder.digest(&manifest.compiler_identity_digest);
+    encoder.len(manifest.revisions.len())?;
+    for (key, revision) in &manifest.revisions {
+        encoder.string(key)?;
+        encoder.u32(*revision);
+    }
+    encoder.digest(&manifest.analysis_policy);
+    encoder.digest(&manifest.target_features_digest);
+    Ok(encoder.finish())
+}
+
+fn decode_manifest(bytes: &[u8]) -> Result<RuntimeArtifactManifestV1, RuntimeArtifactError> {
+    let mut decoder = CodecDecoder::new(bytes);
+    let schema = decoder.u32()?;
+    let target = decoder.string()?;
+    let target_descriptor_digest = decoder.digest()?;
+    let sysroot_digest = decoder.digest()?;
+    let source_count = decoder.len()?;
+    let mut sources = Vec::with_capacity(source_count);
+    for _ in 0..source_count {
+        sources.push(RuntimeSourceRecordV1 {
+            logical_path: decoder.string()?,
+            content_digest: decoder.digest()?,
+            role: decoder.role()?,
+        });
+    }
+    let compiler_identity_digest = decoder.digest()?;
+    let revision_count = decoder.len()?;
+    let mut revisions = Vec::with_capacity(revision_count);
+    for _ in 0..revision_count {
+        revisions.push((decoder.string()?, decoder.u32()?));
+    }
+    let analysis_policy = decoder.digest()?;
+    let target_features_digest = decoder.digest()?;
+    decoder.finish()?;
+    Ok(RuntimeArtifactManifestV1 {
+        schema,
+        target,
+        target_descriptor_digest,
+        sysroot_digest,
+        sources,
+        compiler_identity_digest,
+        revisions,
+        analysis_policy,
+        target_features_digest,
+    })
+}
+
+fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, RuntimeArtifactError> {
+    let mut encoder = CodecEncoder::default();
+    encoder.u32(payload.module_interface.schema);
+    encoder.digest(&payload.module_interface.fingerprint);
+    encoder.len(payload.sources.len())?;
+    for source in &payload.sources {
+        encoder.string(&source.logical_path)?;
+        encoder.string(&source.source)?;
+        encoder.digest(&source.content_digest);
+        encoder.role(source.role);
+    }
+    encoder.len(payload.contracts.len())?;
+    for contract in &payload.contracts {
+        encoder.string(&contract.key)?;
+        encoder.digest(&contract.fingerprint);
+    }
+    encoder.len(payload.generic_templates.len())?;
+    for template in &payload.generic_templates {
+        encoder.string(&template.key)?;
+        encoder.digest(&template.fingerprint);
+    }
+    encoder.len(payload.functions.len())?;
+    for function in &payload.functions {
+        encoder.string(&function.stable_mono_key)?;
+        encoder.digest(&function.fingerprint);
+        encoder.bytes(&function.fragment)?;
+    }
+    Ok(encoder.finish())
+}
+
+fn decode_payload(bytes: &[u8]) -> Result<RuntimeArtifactPayloadV1, RuntimeArtifactError> {
+    let mut decoder = CodecDecoder::new(bytes);
+    let module_interface = RuntimeModuleInterfaceV1 {
+        schema: decoder.u32()?,
+        fingerprint: decoder.digest()?,
+    };
+    let source_count = decoder.len()?;
+    let mut sources = Vec::with_capacity(source_count);
+    for _ in 0..source_count {
+        sources.push(RuntimeSourceBlobV1 {
+            logical_path: decoder.string()?,
+            source: decoder.string()?,
+            content_digest: decoder.digest()?,
+            role: decoder.role()?,
+        });
+    }
+    let contract_count = decoder.len()?;
+    let mut contracts = Vec::with_capacity(contract_count);
+    for _ in 0..contract_count {
+        contracts.push(RuntimeContractRecordV1 {
+            key: decoder.string()?,
+            fingerprint: decoder.digest()?,
+        });
+    }
+    let template_count = decoder.len()?;
+    let mut generic_templates = Vec::with_capacity(template_count);
+    for _ in 0..template_count {
+        generic_templates.push(RuntimeGenericTemplateV1 {
+            key: decoder.string()?,
+            fingerprint: decoder.digest()?,
+        });
+    }
+    let function_count = decoder.len()?;
+    let mut functions = Vec::with_capacity(function_count);
+    for _ in 0..function_count {
+        functions.push(RuntimeFunctionArtifactV1 {
+            stable_mono_key: decoder.string()?,
+            fingerprint: decoder.digest()?,
+            fragment: decoder.bytes()?,
+        });
+    }
+    decoder.finish()?;
+    Ok(RuntimeArtifactPayloadV1 {
+        module_interface,
+        sources,
+        contracts,
+        generic_templates,
+        functions,
+    })
+}
+
+#[derive(Default)]
+struct CodecEncoder {
+    bytes: Vec<u8>,
+}
+
+impl CodecEncoder {
+    fn finish(self) -> Vec<u8> {
+        self.bytes
+    }
+
+    fn u32(&mut self, value: u32) {
+        self.bytes.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn len(&mut self, value: usize) -> Result<(), RuntimeArtifactError> {
+        self.bytes.extend_from_slice(
+            &u64::try_from(value)
+                .map_err(|_| RuntimeArtifactError::Truncated)?
+                .to_le_bytes(),
+        );
+        Ok(())
+    }
+
+    fn digest(&mut self, value: &[u8; 32]) {
+        self.bytes.extend_from_slice(value);
+    }
+
+    fn bytes(&mut self, value: &[u8]) -> Result<(), RuntimeArtifactError> {
+        self.len(value.len())?;
+        self.bytes.extend_from_slice(value);
+        Ok(())
+    }
+
+    fn string(&mut self, value: &str) -> Result<(), RuntimeArtifactError> {
+        self.bytes(value.as_bytes())
+    }
+
+    fn role(&mut self, role: RuntimeSourceRole) {
+        let tag: u16 = match role {
+            RuntimeSourceRole::StandardLibrary => 0,
+            RuntimeSourceRole::Runtime => 1,
+        };
+        self.bytes.extend_from_slice(&tag.to_le_bytes());
+    }
+}
+
+struct CodecDecoder<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> CodecDecoder<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn finish(self) -> Result<(), RuntimeArtifactError> {
+        if self.offset == self.bytes.len() {
+            Ok(())
+        } else {
+            Err(RuntimeArtifactError::Codec(
+                "artifact 含尾随字节".to_owned(),
+            ))
+        }
+    }
+
+    fn take<const N: usize>(&mut self) -> Result<[u8; N], RuntimeArtifactError> {
+        let end = self
+            .offset
+            .checked_add(N)
+            .ok_or(RuntimeArtifactError::Truncated)?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(RuntimeArtifactError::Truncated)?;
+        self.offset = end;
+        let mut output = [0_u8; N];
+        output.copy_from_slice(bytes);
+        Ok(output)
+    }
+
+    fn u32(&mut self) -> Result<u32, RuntimeArtifactError> {
+        Ok(u32::from_le_bytes(self.take()?))
+    }
+
+    fn len(&mut self) -> Result<usize, RuntimeArtifactError> {
+        let length = usize::try_from(u64::from_le_bytes(self.take()?))
+            .map_err(|_| RuntimeArtifactError::Truncated)?;
+        if length > self.bytes.len() - self.offset {
+            return Err(RuntimeArtifactError::Truncated);
+        }
+        Ok(length)
+    }
+
+    fn digest(&mut self) -> Result<[u8; 32], RuntimeArtifactError> {
+        self.take()
+    }
+
+    fn bytes(&mut self) -> Result<Vec<u8>, RuntimeArtifactError> {
+        let length = self.len()?;
+        let end = self
+            .offset
+            .checked_add(length)
+            .ok_or(RuntimeArtifactError::Truncated)?;
+        let bytes = self
+            .bytes
+            .get(self.offset..end)
+            .ok_or(RuntimeArtifactError::Truncated)?;
+        self.offset = end;
+        Ok(bytes.to_owned())
+    }
+
+    fn string(&mut self) -> Result<String, RuntimeArtifactError> {
+        String::from_utf8(self.bytes()?)
+            .map_err(|error| RuntimeArtifactError::Codec(error.to_string()))
+    }
+
+    fn role(&mut self) -> Result<RuntimeSourceRole, RuntimeArtifactError> {
+        match u16::from_le_bytes(self.take()?) {
+            0 => Ok(RuntimeSourceRole::StandardLibrary),
+            1 => Ok(RuntimeSourceRole::Runtime),
+            _ => Err(RuntimeArtifactError::Codec(
+                "runtime 源角色判别值无效".to_owned(),
+            )),
+        }
+    }
+}
+
 fn digest(domain: &[u8], bytes: &[u8]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new();
     hasher.update(domain);
     hasher.update(&[0]);
     hasher.update(bytes);
     *hasher.finalize().as_bytes()
+}
+
+/// 返回 manifest 的稳定二进制表示。
+pub fn canonical_manifest_bytes(manifest: &RuntimeArtifactManifestV1) -> Vec<u8> {
+    encode_manifest(manifest).expect("runtime artifact manifest 可编码")
 }
 
 /// 将 artifact 输入转换为确定性 source digest，供 builder 与测试共享。
@@ -462,7 +757,6 @@ impl fmt::Display for TargetName {
     }
 }
 
-// 保持核心 schema 不依赖 compiler；这两个轻量断言覆盖容器的关键拒绝路径。
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -501,37 +795,79 @@ mod tests {
             .for_target(TargetName::X86_64Linux)
             .expect_err("target mismatch");
     }
+
     #[test]
     fn artifact_rejects_magic_schema_length_and_unsorted_keys() {
         let artifact = RuntimeArtifactBuilder::build(TargetName::X86_64Linux, &[]).expect("build");
         let bytes = artifact.encode().expect("encode");
-
         let mut magic = bytes.clone();
         magic[0] ^= 1;
         assert_eq!(
             RuntimeArtifactV1::decode(&magic),
             Err(RuntimeArtifactError::Magic)
         );
-
         let mut schema = bytes.clone();
         schema[8..12].copy_from_slice(&99_u32.to_le_bytes());
         assert_eq!(
             RuntimeArtifactV1::decode(&schema),
             Err(RuntimeArtifactError::Schema(99))
         );
-
         let mut length = bytes;
         length[12..20].copy_from_slice(&u64::MAX.to_le_bytes());
         assert_eq!(
             RuntimeArtifactV1::decode(&length),
             Err(RuntimeArtifactError::Truncated)
         );
-
         let mut invalid = artifact;
         invalid.manifest.revisions.reverse();
         assert!(matches!(
             invalid.encode(),
             Err(RuntimeArtifactError::Manifest(_))
         ));
+    }
+
+    #[test]
+    fn artifact_rejects_trailing_truncated_payload_and_invalid_role() {
+        let artifact = RuntimeArtifactBuilder::build(
+            TargetName::X86_64Linux,
+            &[RuntimeSourceInput {
+                logical_path: "runtime/x.gg",
+                source: "fn x() {}",
+                role: RuntimeSourceRole::Runtime,
+            }],
+        )
+        .expect("构造 artifact");
+        let bytes = artifact.encode().expect("编码 artifact");
+        let mut trailing = bytes.clone();
+        trailing.push(0);
+        assert_eq!(
+            RuntimeArtifactV1::decode(&trailing),
+            Err(RuntimeArtifactError::Truncated)
+        );
+        assert_eq!(
+            RuntimeArtifactV1::decode(&bytes[..bytes.len() - 1]),
+            Err(RuntimeArtifactError::Truncated)
+        );
+        let mut payload = encode_payload(&artifact.payload).expect("编码 payload");
+        let mut decoder = CodecDecoder::new(&payload);
+        decoder.u32().expect("接口 schema");
+        decoder.digest().expect("接口摘要");
+        decoder.len().expect("source 数量");
+        decoder.string().expect("source path");
+        decoder.string().expect("source 文本");
+        decoder.digest().expect("source 摘要");
+        let role = decoder.offset;
+        payload[role..role + 2].copy_from_slice(&u16::MAX.to_le_bytes());
+        assert!(matches!(
+            decode_payload(&payload),
+            Err(RuntimeArtifactError::Codec(_))
+        ));
+        let mut huge = encode_payload(&artifact.payload).expect("编码 payload");
+        huge[36..44].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(decode_payload(&huge), Err(RuntimeArtifactError::Truncated));
+        assert_eq!(
+            RuntimeArtifactV1::decode(br#"{"manifest":{}}"#),
+            Err(RuntimeArtifactError::Truncated)
+        );
     }
 }

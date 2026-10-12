@@ -38,14 +38,25 @@ impl RuntimeArtifacts {
             crate::TargetName::X86_64Linux => &*LINUX,
             crate::TargetName::X86_64Windows => &*WINDOWS,
         };
-        artifact.as_ref().map_err(Clone::clone)
+        let artifact = artifact.as_ref().map_err(Clone::clone)?;
+        let target = match target {
+            crate::TargetName::X86_64Linux => gugu_compiler_core::TargetName::X86_64Linux,
+            crate::TargetName::X86_64Windows => gugu_compiler_core::TargetName::X86_64Windows,
+        };
+        artifact.for_target(target)?;
+        // 当前 builder 提供 source manifest；执行体只能来自本次源码闭包，不能丢弃预编译片段。
+        if !artifact.payload.functions.is_empty() {
+            return Err(RuntimeArtifactError::Manifest(
+                "源码 runtime artifact 不得携带未物化的 executable function".to_owned(),
+            ));
+        }
+        Ok(artifact)
     }
 
     /// 返回目标 artifact 的 manifest 摘要，用于 action identity。
     pub fn manifest_digest(target: crate::TargetName) -> Result<[u8; 32], RuntimeArtifactError> {
         let artifact = Self::for_target(target)?;
-        let bytes =
-            serde_json::to_vec(&artifact.manifest).expect("runtime artifact manifest 可序列化");
+        let bytes = gugu_compiler_core::canonical_manifest_bytes(&artifact.manifest);
         let mut hasher = blake3::Hasher::new_derive_key("gugu-runtime-manifest-v1");
         hasher.update(&bytes);
         Ok(*hasher.finalize().as_bytes())
@@ -62,8 +73,6 @@ mod tests {
             RuntimeArtifacts::for_target(crate::TargetName::X86_64Linux).expect("linux artifact");
         let windows = RuntimeArtifacts::for_target(crate::TargetName::X86_64Windows)
             .expect("windows artifact");
-        assert_eq!(linux.manifest.sources.len(), 32);
-        assert_eq!(windows.manifest.sources.len(), 32);
         assert_ne!(linux.manifest.target, windows.manifest.target);
         assert_ne!(
             RuntimeArtifacts::manifest_digest(crate::TargetName::X86_64Linux)

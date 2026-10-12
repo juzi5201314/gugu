@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 /// GIR schema revision（见 gir-lir.md「共同表示规则」）。
-pub(crate) const GIR_REVISION: u32 = 5;
+pub(crate) const GIR_REVISION: u32 = 6;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -763,7 +763,7 @@ impl GirBody {
         &self.predecessors[range.start as usize..range.end as usize]
     }
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
-        let bytes = serde_json::to_vec(self).expect("GIR schema 序列化");
+        let bytes = crate::canonical::to_vec(self).expect("GIR schema 编码");
         *blake3::Hasher::new_derive_key("gugu-generic-gir-v1")
             .update(&bytes)
             .finalize()

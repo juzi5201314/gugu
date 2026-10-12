@@ -19,7 +19,7 @@ const INLINE_MAX_COST: u32 = 32;
 pub(crate) fn run(
     editor: &mut Editor,
     _module: &hir::Module,
-    callees: &BTreeMap<[u8; 32], GirBody>,
+    callees: &BTreeMap<[u8; 32], &GirBody>,
     calls: &[ConcreteCall],
 ) -> Result<Outcome, Diagnostic> {
     let mut inlined = 0;

@@ -3,10 +3,15 @@
 本章规定 Gugu 的两个中间表示：GIR 是完成类型检查后的、目标无关且显式控制流的语义 IR；LIR 是完成具体布局和 ABI lowering 后、面向目标机器的 SSA IR。两者是编译器内部契约，不是序列化给第三方工具的稳定格式。
 ## stable fragment 复用与 changed-only pass
 
-runtime function artifact 以 stable `MonoKey` 保存可重定位 GIR/LIR/x64 fragment、relocation、frame、stackmap/unwind/source metadata、constant/global 和 glue 绑定。用户编译只吸收 reachable stable symbols；runtime-to-user relocation 必须由当前用户 LIR 生成，最终 image assembly 统一分配地址与 section，并以 stable symbol 到 merged function index 的映射重写 metadata。
+runtime artifact 当前固化源码而未携带可重用机器片段；运行时执行需求在同一个单态化闭包中形成，独立布局目录不进入 GIR/LIR 执行体。最终 image assembly 仍统一分配地址、验证 relocation 与重写 metadata。
 
 GIR/LIR pass driver 消费现有 `Outcome::changed`/changed 标志：未变化时保留 body、fingerprint 和 payload，不重复 `Editor::finish`、完整 verifier 或 fingerprint；变化时在 pass 边界执行 verifier 和 fingerprint，最终 world verifier 仍保留。GVN key 使用固定字段顺序的稳定二进制编码，不能依赖 JSON 或局部 ID 的偶然顺序。
 
+GIR 的 Editor 按需拥有工作体：no-op 只借用原 body，第一次修改才复制；inline callee 索引只借用当前 pass 的不可变快照，变化结果在 pass 结束时统一提交。LIR Editor 接管原始稠密 arenas，连续 no-op pass 沿用同一工作图，最终直接交还原 arena，变化时才重建 SSA。poll 的循环与成本分析共享不携带栈槽/常量数据/环境元数据的只读 `BodyView`，类型接口不提供 `finish`，不能误生成不完整 Body。
+
+`VerifySsaAndMemory` 与 `PrepareRegisterAllocation` 直接对原 LIR body 运行结构验证，不创建 Editor；x86_64 probe 成本按编译线程使用容量固定为 256 项的环形缓存，命中时不重新编码或分配，未命中项仍通过规范 probe lowering 计算，失败 lowering 仍采用保守成本。立即数只在已证明生成同一 form 序列的值域内合并，其它参数化 Op 保留完整身份；该上下文固定绑定当前二进制的 Linux probe/profile/form 表，不共享会话相关成本。无分支、无调用、无 allocation、无 safepoint 的单块标量 leaf 走线性成本路径；含循环或复杂控制流的 body 继续使用通用 SCC/预算分析。
+
+线性 leaf 与通用数据流都在 `POLL_BUDGET + 1` 饱和，不能因快速路径改变超预算摘要。只读分析先统一排除经过 trip count 与成本证明的有界回边；verifier 直接拒绝剩余 poll-free 环，不再逐块重新构造 Editor 和重复分析循环。拥有型 Editor 同时接管 assembly 元数据，不先复制后覆盖。
 
 完整管线固定为：
 
@@ -30,7 +35,7 @@ GIR 和 LIR 分别以一个函数、闭包、初始化器或编译器生成 glue
 - `signature`：规范化参数、返回类型和 effect；
 - `source_scopes`：可恢复到 HIR span 的内联作用域树；
 - `flags`：是否可 panic、可 suspend、可分配、含 unsafe 或属于 runtime glue；
-- `revision`：IR schema版本，当前 GIR 为 4、LIR 为 6，concrete GIR schema 为 1。
+- `revision`：当前 GIR 为 6、LIR 为 9，concrete GIR schema 为 2。
 
 成功产物不允许错误类型、未解析定义、未物化的早期 comptime 值或悬空 arena ID。GIR 可以保存已经验证的 `LateConstRef`，但它必须指向当前闭世界成功的 late 结果表，不表示延迟执行用户代码；进入 LIR 前必须物化为标量常量或明确的类型 metadata relocation。每个改写 pass 必须在调试构建中运行局部 verifier；跨阶段边界必须运行完整 verifier。
 

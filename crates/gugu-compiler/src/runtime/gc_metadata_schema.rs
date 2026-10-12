@@ -318,7 +318,7 @@ impl GcMetadataWorldV1 {
 
     /// 返回 world 内容指纹；编码变化必须使旧缓存失效。
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
-        let payload = serde_json::to_vec(&(
+        let payload = crate::canonical::to_vec(&(
             &self.types,
             &self.vtables,
             &self.trace_program,

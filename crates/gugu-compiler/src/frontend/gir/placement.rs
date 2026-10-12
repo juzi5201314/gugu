@@ -161,7 +161,7 @@ fn fingerprint(
     allocs: &[AllocPlacement],
     regions: &[RegionPlan],
 ) -> [u8; 32] {
-    let bytes = serde_json::to_vec(&(records, allocs, regions)).expect("placement 可序列化");
+    let bytes = crate::canonical::to_vec(&(records, allocs, regions)).expect("placement 编码");
     *blake3::Hasher::new_derive_key("gugu-placement-v1")
         .update(&bytes)
         .finalize()
@@ -217,14 +217,14 @@ pub(crate) fn run(
                 analysis.input_fingerprint,
             );
             let placement = compute(hir.module(), &world, analysis);
-            let payload = serde_json::to_vec(&placement).expect("placement schema 序列化");
+            let payload = crate::canonical::to_vec(&placement).expect("placement schema 编码");
             fresh = Some(placement);
             Ok((payload, Vec::new()))
         })
         .map_err(|error| restore_errors(error, sources))?;
     let placement = match fresh {
         Some(placement) => placement,
-        None => serde_json::from_slice(result.payload())
+        None => crate::canonical::from_slice(result.payload())
             .map_err(|_| vec![super::gir_error("placement query 缓存 schema 不合法", None)])?,
     };
     if placement.schema != PLACEMENT_SCHEMA {

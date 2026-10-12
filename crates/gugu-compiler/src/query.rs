@@ -83,7 +83,7 @@ pub enum QueryKind {
 
 /// query registry 的登记 revision；新增 kind 必须递增，旧 revision 的 action/query record
 /// 不得复用。
-pub(crate) const QUERY_REGISTRY_REVISION: u32 = 2;
+pub(crate) const QUERY_REGISTRY_REVISION: u32 = 3;
 
 impl QueryKind {
     /// 返回 kind 的稳定 ASCII 名。
@@ -211,6 +211,7 @@ impl QueryKey {
     pub fn fingerprint(&self) -> [u8; 32] {
         let mut bytes = Vec::with_capacity(2 + 4 + 8 + self.canonical_key.len());
         bytes.extend_from_slice(&(self.kind as u16).to_le_bytes());
+        bytes.extend_from_slice(&crate::canonical::REVISION.to_le_bytes());
         bytes.extend_from_slice(&self.schema_version.to_le_bytes());
         encode_bytes(&mut bytes, &self.canonical_key);
         hash_domain("gugu-query-key-v1", &bytes)

@@ -17,11 +17,14 @@
 
 ### Build-time runtime artifact
 
-compiler 构建阶段由 `gugu-runtime-builder` 唯一读取内建 `std/` 与 `runtime/` Gugu 源，按目标分别生成 `GUGURT01` artifact；`gugu-compiler` 只嵌入并校验 `x86_64-linux` 与 `x86_64-windows` 两份 bytes，不在用户编译中重新 lex/parse/type-check runtime 源，也没有运行时源码 fallback。artifact manifest 覆盖 target descriptor、源路径与内容摘要、compiler/artifact/schema revision、analysis policy 与 target feature 摘要。
+compiler 构建阶段由 `gugu-runtime-builder` 读取内建 `std/` 与 `runtime/` 源，按目标生成 `GUGURT01` artifact；`gugu-compiler` 嵌入并校验 Linux/Windows bytes。当前 artifact 固化 source blob 与 manifest，用户 frontend 仍解析这些固定源码；它不是已编译的 runtime fragment 容器。独立布局证据从 record 签名形成，不依赖 executable 闭包。
 
-artifact 中的 runtime item 分为 contract record、generic template 与可重定位 function fragment。record 只提供布局/ABI/schema 证据，不生成 executable root；`ExecutableUsed`、entry、静态初始化与实际 compiler-generated glue 才进入当前用户 action 的 root。用户编译以 stable `MonoKey` 计算 runtime 可达闭包，只注入可达摘要、IR 与片段；本次 session 重新分配 dense ID，不能把 artifact 的局部 ID 或最终地址作为身份。
+runtime 的契约入口为 record-only 根：用于原有 size/align/offset/managed 校验，不生成 executable body。runtime `#[used]` 不再隐式形成全局执行根；rt0 启动、登记机器片段的源目标与可达 GIR 操作产生的 glue 需求进入单态化固定点。用户的 `#[used]`、导出、入口和初始化语义不变。未引用的源 glue 缺少实例时不绑定，实际引用缺少目标仍是 invariant error。
 
-最终 image assembly 仍统一验证 target、encoder/raw/LIR fingerprint、符号、relocation、frame、stackmap、unwind、source metadata、section 范围和重复符号，并在合并时重写连续 function index。artifact manifest digest 与当前 demand digest 同时进入 runtime contract 和 action key；损坏、截断、schema/digest/target 不匹配均报告 compiler/backend invariant，绝不静默回退到源码编译。
+placement 在实例闭合后才形成，源引用/取址可能在后续落 LocalHeap/TurnRegion；因此这些真实地址操作会保守要求两种分配域和屏障入口，不能只扫描显式 `AllocObject`。这是闭包形成前缺少最终 placement 证据的固定选择，不恢复全部 runtime `#[used]` 根。
+
+最终 image assembly 保留原有 target、encoder/raw/LIR fingerprint、符号、relocation、frame、stackmap、unwind 与 source metadata 验证。artifact manifest digest、当前需求及记录目录共同参与 runtime contract 身份。
+
 `text` 保留人读的 action/诊断/最终结果，诊断按 `级别[代码]: 消息`、`--> 文件:行:列` 与带行号源码片段块渲染；`json` 为 NDJSON 事件信封，bootstrap 的构建事件顺序固定为 `build-start`、诊断、`build-finish`；`json-diagnostic-short` 只发布诊断事件。NDJSON 对源码路径使用逻辑相对路径，对工作区外路径使用 `<external>/文件名`，并清理凭据键值。
 
 ## 源码快照与 Span
@@ -165,11 +168,12 @@ crates/
 
 ### 编译器测试构建
 
-默认 `cargo nextest run --workspace` 使用 `profile.test`：`opt-level = 3`、有限调试信息，
-同时显式保留 `debug-assertions` 与 `overflow-checks`。测试、fixture、断言、目标矩阵、
-冷热缓存重放与生产编译阶段全部保留；不得通过忽略测试或降低分析预算来缩短验收。
-测试可执行文件的构建时间与 nextest 执行时间分别记录：优化构建增加首次编译成本，
-已有构建产物下的全量验收仍使用相同命令，不需要专用过滤条件或持久化测试缓存。
+`cargo nextest run --workspace` 使用当前 workspace 的测试构建配置：`opt-level = 0`、
+`debug = 1`，保留 `debug-assertions` 与 `overflow-checks`；不为验收切换新的 Cargo 构建 profile。
+构建时间与测试执行时间分别记录。`.config/nextest.toml` 固定两条测试线程、零重试与失败即停：
+每个测试和整轮测试执行均为 60 秒硬超时，宽限期为零，超时终止测试进程组并判失败，不仅打印 `SLOW`。
+该时限同样适用于显式运行 `slow-tests`；不得用连续分片、提高超时、黑名单或削弱 fixture 掩盖不合格的耗时。
+发现超时后停止本轮，修复对应的编译或测试路径，再做定向验证；不继续串行堆积全量验收。
 
 ## 目标描述与 rt0 边界
 

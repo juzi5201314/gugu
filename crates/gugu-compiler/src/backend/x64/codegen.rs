@@ -310,7 +310,7 @@ impl FragmentPayload {
         canonical.fingerprint = [0; 32];
         hash_domain(
             FRAGMENT_DOMAIN,
-            &serde_json::to_vec(&canonical).expect("机器片段可序列化"),
+            &crate::canonical::to_vec(&canonical).expect("机器片段编码"),
         )
     }
 }
@@ -1023,14 +1023,14 @@ pub(crate) fn build(
                 &glues,
             )
             .map_err(|errors| store_errors(&errors))?;
-            let bytes = serde_json::to_vec(&fragment).expect("机器片段可序列化");
+            let bytes = crate::canonical::to_vec(&fragment).expect("机器片段编码");
             fresh = Some(fragment);
             Ok((bytes, Vec::new()))
         });
         let computed = computed.map_err(|error| restore_errors(error, sources))?;
         let mut fragment = match fresh {
             Some(fragment) => fragment,
-            None => serde_json::from_slice(computed.payload())
+            None => crate::canonical::from_slice(computed.payload())
                 .map_err(|_| vec![invalid("缓存机器片段不是合法 schema")])?,
         };
         validate_fragment(&fragment, body, target, encoder, lir_fingerprint)?;

@@ -14,12 +14,12 @@ pub(super) fn verify(body: &Body, _graph: &Graph) -> Result<(), Diagnostic> {
     if body.poll_summary.poll_free_cost > POLL_BUDGET {
         return Err(invalid("poll 摘要记录了超过预算的 poll-free 路径"));
     }
-    if poll::body_poll_free_cost(body) > POLL_BUDGET {
+    let (cost, cycle) = poll::body_flow(body);
+    if cost > POLL_BUDGET {
         return Err(invalid("存在超过 poll 预算的 poll-free 路径"));
     }
-    if let Some(block) = poll::body_clean_cycle(body)
-        && !poll::bounded_counted_cycle(body, block)
-    {
+    // body_flow 已排除经过证明的有界回边；余下环必须直接拒绝。
+    if cycle.is_some() {
         return Err(invalid("poll-free 环没有 poll 切断且无法证明有界"));
     }
     Ok(())

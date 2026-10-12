@@ -328,7 +328,7 @@ impl WaitRuntimeContract {
     }
 
     pub(crate) fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).expect("等待契约可序列化")
+        crate::canonical::to_vec(self).expect("等待契约可序列化")
     }
 
     /// 等待契约的域隔离内容身份。

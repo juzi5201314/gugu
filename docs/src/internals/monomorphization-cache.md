@@ -29,9 +29,9 @@ BLAKE3-256(domain || 0x00 || canonical_bytes)
 
 ## GUGURT01 runtime artifact
 
-runtime/std 源只在 compiler build-time 进入 `gugu-runtime-builder`，生成 target 专属 `GUGURT01` 容器。容器包含长度前缀 manifest、JSON payload 与 `BLAKE3-256("gugu-runtime-artifact-v1" || 0x00 || payload)`；manifest 的 target descriptor、source content digest、compiler identity、schema/revision、analysis policy 和 target feature digest 是 cache/action 身份的一部分。向量按 stable key 排序，不能存 session-local `DefId`、`ExprId`、`TypeId`、owner index 或最终地址。
+runtime/std 源在 compiler build-time 由 `gugu-runtime-builder` 固化为 target 专属 `GUGURT01` 容器。容器包含 28 字节头、GBC1 manifest、GBC1 payload 与 `BLAKE3-256("gugu-runtime-artifact-v1" || 0x00 || payload)`；头部保存 schema 2 与 manifest/payload 的 `u64` 长度，schema 1 的 JSON 容器直接拒绝。manifest 的 target descriptor、source content digest、compiler identity、revision、analysis policy 和 target feature digest 均参与身份。内部 query key 同时纳入 GBC1 revision，旧 JSON payload 不作为新版本的命中。
 
-artifact payload 的 contract record、generic template 与 function artifact 分层：record 只参与 runtime contract/layout 验证，generic template 在用户 demand 下专门化，function fragment 按 stable `MonoKey` 与 reachable closure 复用。`ObjectCache` 读取 artifact 时必须同时验证 magic、schema、长度、payload digest、manifest 与 target；任一失败是 cache miss 或 compiler invariant，禁止把损坏 bytes 当成命中，也禁止运行时源码 fallback。
+当前 builder 提供 source manifest 与接口摘要，不执行语义类型求解；artifact 的 contract/template/function 表为空。compiler façade 核对请求目标，并显式拒绝源码 artifact 中未物化的 executable function，不能选出后丢弃，也不能把它冒充用户 HIR owner。用户编译从固定 source blob 形成独立的 `RecordTypes` 目录，复用正常类型布局求解器；它保存冻结参数类型和 size/align/field-offset 证据，不创建 executable instance、GIR/LIR body 或机器片段。七个 runtime layout verifier 在 query 构造与恢复时完整逐字段验证该目录，目录完整二进制身份进入 `RuntimeRawModel` key。fresh query 保留刚构造的类型表、late 值、GIR/LIR 与机器片段对象，不立即解码自身 payload；缓存命中仍解码并验证身份与结构。
 
 规范编码 `GBC1` 使用：
 
@@ -45,7 +45,7 @@ artifact payload 的 contract record、generic template 与 function artifact �
 - package/source 路径只使用 package-relative、`/` 分隔的规范 UTF-8；toolchain 文件使用 toolchain-relative逻辑路径加内容 digest；ELF `PT_INTERP` 等目标运行时路径使用目标 namespace 中以 `/` 开头的规范 byte path，不能写构建宿主 sysroot绝对位置；
 - 浮点写 IEEE bit pattern，不做文本转换或 NaN 规范化。
 
-session-local 的 `DefId`、`TyId`、arena ID、指针、线程编号和绝对 workspace 路径禁止进入规范编码。IR 在编码前按稳定定义键、block/value 的确定性构造顺序和规范化类型结构重编号。
+跨 session 的定义与类型身份使用稳定键；指针、线程编号和绝对 workspace 路径禁止进入规范编码。冻结 IR payload 保留现有确定性构造顺序下的稠密 arena ID，完整 HIR/world 输入指纹将其绑定到当前定义与类型表；不能把这些局部编号当成跨 world 的定义身份。
 
 ## 编译器构建身份
 
@@ -77,9 +77,9 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 8 | `TypeCheck` | stable owner key | typeck 侧表 |
 | 9 | `TraitSelection` | canonical obligation | impl selection |
 | 10 | `EvaluateEarlyComptime` | stable definition + args + comptime domain | 早期 comptime 值 |
-| 11 | `BuildGenericGir` | 冻结 HIR 指纹 + owner 稳定键 + owner 下标（schema 5，域 `gugu-build-generic-gir-v1`） | generic GIR body（含 `large_copies`） |
-| 12 | `CollectMonoRoots` | target/harness | 根 `MonoKey` 集合 |
-| 13 | `InstantiateGir` | `MonoKey` | monomorphic GIR |
+| 11 | `BuildGenericGir` | 冻结 HIR 指纹 + owner 稳定键 + owner 下标（schema 7，域 `gugu-build-generic-gir-v1`） | generic GIR body（含 `large_copies`） |
+| 12 | `CollectMonoRoots` | 冻结 HIR + target/harness + runtime 执行根策略（schema 4） | executable 根与独立 record 根 |
+| 13 | `InstantiateGir` | 冻结 HIR + `MonoKey`（schema 6） | 单态化实例记录 |
 | 14 | `LayoutOf` | stable concrete type key | 目标布局 |
 | 15 | `BuildLir` | `MonoKey` + consumed late-result fingerprint | 优化后 LIR + `PollSummary` |
 | 16 | `CodegenFragment` | `MonoKey` + LIR fingerprint | 机器码片段 |
@@ -89,18 +89,18 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 20 | `EmitImage` | image plan fingerprint | 最终镜像 |
 | 21 | `ParseSource` | generated source fingerprint + source slot | `ParsedSource` |
 | 22 | `ExpandSourceMacro` | stable macro call + round + source slot + script inputs | generated source/fragment + expansion record |
-| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy + world 输入（schema 4） | completed SCC 中的函数摘要投影 |
-| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（当前 schema 5，输入含冻结 HIR 指纹、generic GIR 指纹与实例图/late 指纹） | 排序摘要与 world-local 证明事实 |
-| 25 | `FreezeTypeUniverse` | closed-world instance graph（schema 1；实例 world schema 3） | `TypeUniverseKey`、类型序列与稠密编号 |
+| 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy + world 输入（schema 5） | completed SCC 中的函数摘要投影 |
+| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（schema 6，输入含冻结 HIR 指纹、generic GIR 指纹与实例图/late 指纹） | 排序摘要与 world-local 证明事实 |
+| 25 | `FreezeTypeUniverse` | closed-world instance graph（schema 1；实例 world schema 6） | `TypeUniverseKey`、类型序列与稠密编号 |
 | 26 | `EvaluateLateComptime` | `LateConstKey` + `TypeUniverseKey` + registry（schema 1） | 固定形状 late 标量聚合与类型重定位 |
-| 27 | `AnalysisSccSummary` | 排序 `MonoKey` 集 + analysis policy + world 输入（schema 4） | 完整 SCC 摘要固定点 |
+| 27 | `AnalysisSccSummary` | 排序 `MonoKey` 集 + analysis policy + world 输入（schema 5） | 完整 SCC 摘要固定点 |
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision + 已完成 world 的结果指纹（schema 2） | 内容寻址跨 package 摘要 |
-| 29 | `EscapeAndPlacement` | 放置前 GIR 指纹 + 分析输入指纹 + 冻结 HIR 指纹（schema 1，域 `gugu-escape-placement-v1`） | `PlacementWorldV1` |
-| 30 | `RuntimeRawModel` | target 语义 + tuning profile revision + LIR 指纹 + placement 指纹 + 平台 profile + 资源需求视图（schema 23，域 `gugu-runtime-raw-v1`） | `RuntimeRawContractV1`（dense size class、消息字段 schema、grace 步骤，以及 ResourceCell header/状态位/release 描述符/资源种类目录、`PlatformRangeSchemaV1` 操作目录与失败映射、`LedgerSchemaV1` 互斥分类、`BarrierRuntimeContract` 的 hybrid 序列/card 缓存与 edge scratch 预留、`TurnRegionRuntimeContract` 的容量 class/对象上界/export 位/状态/`RegionTransfer` 字段目录与需求、`LocalHeapRuntimeContract` 的 Immix/TLAB 尺寸、`HeapBlockRecord` 布局与分代 cycle 参数、`MarkRuntimeContract` 的 mailbox/credit 目录、七项收敛条件来源绑定与 `MarkTicket` 字段集合与 record 布局、`EdgeRuntimeContract` 的候选相位/block 状态/`EdgeDelta` 字段集合与 record 布局、`BlockReturnRuntimeContract` 的 return unit/发布门禁/queue-page grace、`CompressionRuntimeContract` 的 cage 位布局/上限与粒度/FFI 交接规则/统计名/目标能力/`CompressionDemand`、`RoutingRuntimeContract` 的路由模式/固定 `2^k` bucket/有限 levels/hop 上限/maintenance 相位序列/`RoutingDemand`、`ProvenanceRuntimeContract` 的释放 provenance 检查目录/per-domain secret 登记与管理规则/release-debug-security 检查绑定/拒绝分类/统计口径/`ProvenanceDemand`、`CombiningRuntimeContract` 的冷操作 tag 目录/允许与禁止用途/operation record 字段集合/状态与迁移/同步路径/合并与轮次预算/`CombiningDemand`） |
+| 29 | `EscapeAndPlacement` | 放置前 GIR 指纹 + 分析输入指纹 + 冻结 HIR 指纹（schema 2，域 `gugu-escape-placement-v1`） | `PlacementWorldV1` |
+| 30 | `RuntimeRawModel` | target + tuning/platform profile + LIR/placement 指纹 + 资源需求 + 独立契约类型目录（schema 29，域 `gugu-runtime-raw-v1`） | `RuntimeRawContractV1`：完整 raw/resource/rt0/scheduler/wait/sync/GC、屏障、LocalHeap/SharedHeap、mark/edge、region/block-return、compression/routing/provenance/combining 契约与真实 type/meta sections |
 
-新增 query kind 必须使 query registry schema revision 增加；旧 revision 的 action/query record 不得复用。编号 21--30 只表达登记的新 query，不得重用或改变既有编号的含义。`RuntimeRawModel` 落地把 registry 登记 revision 提升到 2，并新增 `QueryKind::name()` 与 `query::registry_fingerprint()`：指纹按编号升序编码全部 `(kind, name)`，经 `ActionInputs::set_query_registry` 进入 action key，因此新增或改名 kind 必然使旧 action record 失效。同时 `ActionInputs` 增加 `set_runtime_raw`，记录本次 action 消费的 raw 契约指纹。query 23 与 27 的 callable 身份是 `MonoKey`；使用 owner 键 `(owner 表下标, DefId)` 的旧 schema 记录一律失效。
+新增 query kind 或改变 payload 编码必须更新 query registry revision；当前 revision 为 3，并把 GBC1 revision 纳入 `QueryKey`。旧 revision 的 action/query record 不得复用。编号 21--30 不得重用或改变既有编号含义。`registry_fingerprint()` 按编号升序编码 `(kind, name)`，经 `ActionInputs::set_query_registry` 进入 action key；`set_runtime_raw` 记录本次 action 消费的 raw 契约指纹。query 23 与 27 的 callable 身份是 `MonoKey`，不使用 owner 下标作为跨实例身份。
 
-`BuildGenericGir` 为每个冻结 HIR owner 构造一份 generic body，依赖 `LowerHir` schema 6 的模块指纹。当前 schema 为 5，body 携带 `large_copies`；`GirWorldV1` schema 3 在 fragment 之外保存 placement，指纹域为 `gugu-gir-world-v3`。`InstantiateGir` 仍从 HIR 收集调用边，不从 GIR 重解析。generic GIR 指纹（含 placement）进入 `ActionInputs` 与 `ImagePlan`；全程序分析仍消费放置前的 GIR 指纹。`LowerHir` 只构造、校验并冻结；单态化闭合、late、分析与 placement 在冻结之后按 `gir → mono → late → analysis → placement → summary` 顺序执行。
+`BuildGenericGir` 为每个冻结 HIR owner 构造一份 generic body，依赖 `LowerHir` schema 7 的模块指纹，缓存恢复时核对 owner 定义及其稳定键。`GirWorldV1` schema 3 在 fragment 之外保存 placement，指纹域为 `gugu-gir-world-v3`。`InstantiateGir` 仍从 HIR 收集调用边；可达 GIR 的隐含 runtime glue 需求在同一闭包固定点内补齐。generic GIR 指纹（含 placement）进入 action identity 与镜像计划，全程序分析仍消费放置前的 GIR 指纹。冻结之后按 `gir → mono → late → analysis → placement → summary` 执行。
 
 ## query 状态机
 
@@ -227,7 +227,7 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
 
 ## 单态化闭合与公共摘要 {#mono-closure-public-digest}
 
-`CollectMonoRoots`（12，schema 2）与 `InstantiateGir`（13，schema 2）已在
+`CollectMonoRoots`（12，schema 4）与 `InstantiateGir`（13，schema 6）已在
 `gugu-compiler::frontend::mono` 落地。闭合发生在 `LowerHir` 冻结之后，
 与 generic GIR、late 和全程序分析同一管线：
 
@@ -240,11 +240,7 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
   selected_impls、`u16` call_abi、target、harness 与插桩位。C ABI 导入只登记
   外部符号，有体 C ABI 导出使用 C 调用 ABI。comptime 实参复用早期求值器的
   值树并按 GBC1 编码；相同值共享实例，不同值分别闭合。
-- 根：入口、`#[used]`、导出（`#[export_name]`/pub extern C 有体）、static/const
-  初始化器、global asm 与 harness 域 `#[test]`/`#[bench]`。late comptime 依赖
-  随已可达的具体实例收集，不能把未使用的泛型声明作为无实参根。lang item 根当前为空集——
-  runtime/std 源树仍是 bootstrap 空单元。`cfg` 裁掉的定义不在 HIR 定义表内，
-  天然不入根。
+- executable 根：入口、普通用户 `#[used]`、导出、static/const 初始化器、global asm 与 harness 函数，以及启动和登记机器入口必需的 runtime 定义。runtime 普通 `#[used]` 不再自动成为全局执行根；实际调用和可达 GIR 操作的隐含 glue 需求进入同一个固定点。record 根单独按稳定定义 key 排序、去重并进入图指纹，只生成签名布局目录。缓存恢复时核对 executable 根类别和排序、record 根完整集合，不接受缺失或额外定义。late comptime 依赖随可达具体实例收集，未使用的泛型声明不作为无实参根；被 cfg 裁掉的定义不入根。
 - 闭合 driver：pending 为按 key 摘要排序的 `BTreeSet`，依次取出首项实例化
   并把未见 callee 入队；递归调用复用相同实例节点只形成图边。ancestry 预算按
   链上不同 key 256 / 同一 definition 严格增长重复 128 报 `E0052`；实例总数
@@ -271,7 +267,7 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
   不包含私有定义或 session-local 编号。生产者输入更新会重算 query，但可消费内容
   未变时对象 key 不变。对象 key 经 `ActionInputs::add_public_summary` 进入前端 action key；
   磁盘持久化与跨 package 消费尚未接入 CLI。
-- 分析 query 23/27 的 schema 为 4，world schema 为 5。固定点在 generic GIR body 上求解，
+- 分析 query 23/27 的 schema 为 5，world schema 为 6。固定点在 generic GIR body 上求解，
   成员与调用位点按具体实例确定；不把同一泛型定义的首个摘要复制给其它实例。
   SCC 按凝聚图顺序完成，函数 query 仅投影完成结果。共享 HIR 上的检查只有在全部
   可达实例均证明安全时才省略；未收敛 SCC 置预算耗尽并保留检查。证明只存在于

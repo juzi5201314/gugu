@@ -7,4 +7,3 @@ description = "Target-independent Gugu compiler artifact schemas and build-time 
 [dependencies]
 blake3 = "1"
 serde.workspace = true
-serde_json.workspace = true

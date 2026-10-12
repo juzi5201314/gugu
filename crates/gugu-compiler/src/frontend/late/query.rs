@@ -23,6 +23,7 @@ pub(super) fn run(
     sources: &SourceMap,
 ) -> Result<(), Vec<Diagnostic>> {
     let freeze_key = QueryKey::new(QueryKind::FreezeTypeUniverse, 1, world.graph_fingerprint);
+    let mut fresh_universe = None;
     let frozen = queries
         .compute(freeze_key.clone(), |query| {
             query.record_dependency(
@@ -34,14 +35,16 @@ pub(super) fn run(
                 world.graph_fingerprint,
             );
             let universe = freeze(world).map_err(|error| store_errors(&[error]))?;
-            Ok((
-                serde_json::to_vec(&universe).expect("类型表可序列化"),
-                Vec::new(),
-            ))
+            let payload = crate::canonical::to_vec(&universe).expect("类型表编码");
+            fresh_universe = Some(universe);
+            Ok((payload, Vec::new()))
         })
         .map_err(|error| restore_errors(error, sources))?;
-    world.universe = serde_json::from_slice(frozen.payload())
-        .map_err(|_| vec![invalid("类型冻结缓存 schema 不合法")])?;
+    world.universe = match fresh_universe {
+        Some(universe) => universe,
+        None => crate::canonical::from_slice(frozen.payload())
+            .map_err(|_| vec![invalid("类型冻结缓存 schema 不合法")])?,
+    };
     world.universe.verify().map_err(|e| vec![e])?;
     let program = Program::new(module, world);
     let mut requests = BTreeMap::new();
@@ -83,9 +86,11 @@ pub(super) fn run(
     }
     let mut results = Vec::with_capacity(requests.len());
     for (key, (instance, id)) in requests {
-        let input = serde_json::to_vec(&(&key, world.universe.fingerprint, registry::summary()))
-            .expect("late query 身份可序列化");
+        let input =
+            crate::canonical::to_vec(&(&key, world.universe.fingerprint, registry::summary()))
+                .expect("late query 身份编码");
         let query_key = QueryKey::new(QueryKind::EvaluateLateComptime, 1, input);
+        let mut fresh_value = None;
         let outcome = queries
             .compute(query_key, |query| {
                 query.record_dependency(freeze_key.clone(), frozen.fingerprint());
@@ -114,14 +119,16 @@ pub(super) fn run(
                             });
                         store_errors(&[Diagnostic::error(error.code(), error.message(), span)])
                     })?;
-                Ok((
-                    serde_json::to_vec(&value).expect("late 值可序列化"),
-                    Vec::new(),
-                ))
+                let payload = crate::canonical::to_vec(&value).expect("late 值编码");
+                fresh_value = Some(value);
+                Ok((payload, Vec::new()))
             })
             .map_err(|error| restore_errors(error, sources))?;
-        let value = serde_json::from_slice(outcome.payload())
-            .map_err(|_| vec![invalid("late 缓存 schema 不合法")])?;
+        let value = match fresh_value {
+            Some(value) => value,
+            None => crate::canonical::from_slice(outcome.payload())
+                .map_err(|_| vec![invalid("late 缓存 schema 不合法")])?,
+        };
         results.push(LateResult { key, value });
     }
     let mut table = LateTable {
