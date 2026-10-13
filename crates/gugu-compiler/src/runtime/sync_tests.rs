@@ -158,7 +158,7 @@ fn sync_contract_and_image_plan_cli() {
         SyncRuntimeContract::build(demand_diff, PlatformProfile::Linux).expect("sync contract 3");
     assert_ne!(contract.fingerprint(), contract3.fingerprint());
 
-    let compiler = Compiler::new();
+    let compiler = Compiler::shared();
     let res = compiler.compile(CompileRequest::single_file(
         "main.gg",
         "fn main() { let value = 1\n _ = value }",

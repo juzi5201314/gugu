@@ -218,7 +218,7 @@ fn rt0_writes_the_same_state_slots_as_the_root_walker_reads() {
 #[cfg(feature = "runtime-gc-probes")]
 #[test]
 fn gc_probe_image_passes_every_compiler_contract() {
-    let compilation = crate::Compiler::new().compile(crate::CompileRequest::runtime_gc_probe(
+    let compilation = crate::Compiler::shared().compile(crate::CompileRequest::runtime_gc_probe(
         crate::TargetName::X86_64Linux,
     ));
     assert!(

@@ -47,7 +47,7 @@ fn descriptor_for_domain(domain: MemoryDomainId) -> super::slab::SlabDescriptor 
 fn real_compilation_defaults_to_release_provenance() {
     let source = "fn main() { let value = 1 _ = value }";
     let compile = || {
-        crate::Compiler::new().compile(crate::CompileRequest::single_file(
+        crate::Compiler::shared().compile(crate::CompileRequest::single_file(
             "main.gg",
             source,
             crate::TargetName::X86_64Linux,
@@ -100,7 +100,7 @@ fn real_compilation_defaults_to_release_provenance() {
 fn safety_profile_participates_in_contract_identity_and_action_key() {
     let source = "fn main() { let value = 1 _ = value }";
     let compile = |policy: ProvenancePolicyV1| {
-        crate::Compiler::new().compile(
+        crate::Compiler::shared().compile(
             crate::CompileRequest::single_file("main.gg", source, crate::TargetName::X86_64Linux)
                 .with_provenance_policy(policy),
         )

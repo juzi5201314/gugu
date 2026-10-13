@@ -68,7 +68,7 @@ fn deliver_all() -> impl FnMut(OwnerToken) -> Result<RouteResolution, RawInvaria
 fn real_compilation_defaults_to_direct_routing() {
     let source = "fn main() { let value = 1 _ = value }";
     let compile = || {
-        crate::Compiler::new().compile(crate::CompileRequest::single_file(
+        crate::Compiler::shared().compile(crate::CompileRequest::single_file(
             "main.gg",
             source,
             crate::TargetName::X86_64Linux,
@@ -120,7 +120,7 @@ fn real_compilation_defaults_to_direct_routing() {
 fn routing_mode_participates_in_contract_identity() {
     let source = "fn main() { let value = 1 _ = value }";
     let compile = |policy: RoutingPolicyV1| {
-        crate::Compiler::new().compile(
+        crate::Compiler::shared().compile(
             crate::CompileRequest::single_file("main.gg", source, crate::TargetName::X86_64Linux)
                 .with_routing_policy(policy),
         )

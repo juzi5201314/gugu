@@ -215,12 +215,12 @@ fn query_is_stable_across_cache() {
 #[test]
 #[ignore = "slow full compilation"]
 fn action_key_includes_generic_gir() {
-    let first = Compiler::new().compile(CompileRequest::single_file(
+    let first = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         "fn main() { _ = 1 }",
         TargetName::X86_64Linux,
     ));
-    let second = Compiler::new().compile(CompileRequest::single_file(
+    let second = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         "fn main() { _ = 2 }",
         TargetName::X86_64Linux,

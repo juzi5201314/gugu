@@ -5,7 +5,7 @@ use crate::{CompileRequest, Compiler, DiagnosticCode, TargetName};
 #[test]
 fn direct_blocking_call_counts_as_ordinary_and_blocking() {
     let source = "fn main() {}";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,

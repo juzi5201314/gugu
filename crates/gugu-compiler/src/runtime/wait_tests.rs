@@ -26,7 +26,7 @@ fn wait_contract_matches_profile_and_rejects_drift() {
 
 #[cfg(feature = "slow-tests")]
 fn wait_demand_and_frontend_gates_reach_image_plan() {
-    let compiler = Compiler::new();
+    let compiler = Compiler::shared();
     let idle = compiler.compile(CompileRequest::single_file(
         "main.gg",
         "fn main() { let value = 1\n _ = value }",

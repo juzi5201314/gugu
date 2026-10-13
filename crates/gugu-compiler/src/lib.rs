@@ -459,6 +459,17 @@ impl Compiler {
         Self::default()
     }
 
+    /// 测试用共享编译会话：同一测试二进制内复用 query session。
+    ///
+    /// fixture 助手逐个片段编译时，runtime 源树的逐模块 query 结果不必重算；共享 session 的
+    /// 编译必须与全新 world 一致，该不变量由专门的冷/热对比用例单独覆盖，因此只有 fixture
+    /// 助手走这里，冷/热对比用例仍各自 `Compiler::new()`。
+    #[cfg(test)]
+    pub(crate) fn shared() -> Self {
+        static SHARED: std::sync::LazyLock<Compiler> = std::sync::LazyLock::new(Compiler::new);
+        SHARED.clone()
+    }
+
     /// 注入经过 build-time 校验的 runtime artifact 视图。
     pub fn with_runtime_artifacts(mut self, artifacts: RuntimeArtifacts) -> Self {
         self.runtime_artifacts = artifacts;

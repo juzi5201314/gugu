@@ -22,7 +22,7 @@ use crate::runtime::size_class::RuntimeSizeClassId;
 
 /// 由真实编译得到 combining 契约；世界只按契约模式配置平面。
 fn contract(mode: CombiningMode) -> CombiningRuntimeContract {
-    let compilation = crate::Compiler::new().compile(
+    let compilation = crate::Compiler::shared().compile(
         crate::CompileRequest::single_file("main.gg", "fn main() {\n}\n", TargetName::X86_64Linux)
             .with_combining_policy(CombiningPolicyV1 { mode }),
     );

@@ -496,7 +496,7 @@ fn layout_and_context_corruption_are_rejected_before_backend_consumption() {
 #[cfg(feature = "slow-tests")]
 fn source_coroutines_feed_validated_layouts_context_and_query_identity() {
     use crate::{CompileRequest, Compiler, TargetName};
-    let compiler = Compiler::new();
+    let compiler = Compiler::shared();
     let source = include_str!("fixtures/coroutines.gg");
     for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
         let compile = || compiler.compile(CompileRequest::single_file("main.gg", source, target));

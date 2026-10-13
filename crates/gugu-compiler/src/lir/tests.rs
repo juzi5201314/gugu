@@ -304,7 +304,7 @@ fn static_initializer_call_survives_and_publishes() {
 }
 
 fn compile(source: &str) -> Compilation {
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -1699,7 +1699,7 @@ const COMPRESSED_CAPTURE: &str = "fn make() fn() int {\n let value = 1\n return 
 
 fn compile_with_compression(source: &str) -> Compilation {
     use crate::runtime::compression_schema::CompressionPolicyV1;
-    let compilation = Compiler::new().compile(
+    let compilation = Compiler::shared().compile(
         CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
             .with_compression_policy(CompressionPolicyV1::cage(
                 4 * crate::runtime::gc_metadata_contract::GC_ARENA_BYTES,

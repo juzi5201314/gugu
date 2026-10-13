@@ -1105,7 +1105,7 @@ struct Runner {
 impl Runner {
     fn new() -> Self {
         Self {
-            compiler: Compiler::new(),
+            compiler: Compiler::shared(),
             queries: crate::QueryEngine::new(),
         }
     }

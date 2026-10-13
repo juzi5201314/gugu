@@ -1,6 +1,6 @@
 use crate::{CompileRequest, Compiler, TargetName};
 pub(super) fn accepts(source: &str) -> bool {
-    let c = Compiler::new().compile(CompileRequest::single_file(
+    let c = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,

@@ -726,7 +726,7 @@ fn gc_metadata_contract_still_builds_alongside_barrier() {
 fn compile_slice_reports_barrier_contract_end_to_end() {
     let source =
         "fn main() { let value = 1\n let closure = fn() int { return value }\n _ = closure() }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -773,7 +773,7 @@ fn compile_slice_reports_barrier_contract_end_to_end() {
 #[test]
 fn publish_region_slice_exposes_permit_quotas_in_the_contract() {
     let source = "use std.runtime.{ownership_publish, root_publish}\nfn main() {\n let keep = 1\n let first = fn() { _ = keep }\n let publish = fn() {\n  let a = first\n  ownership_publish(first, a)\n }\n publish()\n _ = first\n}";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
