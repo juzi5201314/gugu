@@ -233,7 +233,7 @@ pub(crate) fn build(
             .binary_search(&fragment.digest)
             .map_err(|_| vec![invalid("GIR fragment 不在闭合实例图中")])?;
         let instance = &mono.instances[instance_index];
-        let body = build_body(context, world, mono, instance, fragment.body)
+        let body = build_body(context, world, mono, &digests, instance, fragment.body)
             .map_err(|error| vec![error])?;
         bodies.push(body);
     }
@@ -244,12 +244,13 @@ fn build_body(
     context: &MonoContext<'_>,
     world: &super::GirWorldV1,
     mono: &MonoWorldV1,
+    digests: &[[u8; 32]],
     instance: &InstanceSummaryV1,
     body_index: u32,
 ) -> Result<ConcreteBody, Diagnostic> {
     let mut body = world.bodies[index(body_index)].clone();
     let mut layouts = layout::Builder::new(context, &instance.substitutions);
-    let calls = calls::bind(&body, mono, instance, &mut layouts)?;
+    let calls = calls::bind(&body, mono, digests, instance, &mut layouts)?;
     materialize::constants(context, mono, instance, &mut body)?;
     materialize::types(&mut body, &calls, &mut layouts)?;
     materialize::late(mono, instance, &mut body)?;

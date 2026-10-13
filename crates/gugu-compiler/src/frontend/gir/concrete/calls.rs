@@ -9,6 +9,7 @@ use crate::frontend::{
 pub(super) fn bind(
     body: &GirBody,
     world: &MonoWorldV1,
+    digests: &[[u8; 32]],
     instance: &super::InstanceSummaryV1,
     layouts: &mut layout::Builder<'_, '_>,
 ) -> Result<Vec<ConcreteCall>, Diagnostic> {
@@ -34,11 +35,11 @@ pub(super) fn bind(
                 _ => None,
             });
         let (ty, protocol) = if let Some(target) = target {
-            let instance = world
-                .instances
-                .iter()
-                .find(|instance| crate::frontend::mono::digest_of(&instance.mono_key) == target)
-                .ok_or_else(|| invalid("调用签名缺少闭合实例"))?;
+            // 摘要表按实例摘要有序且与 `world.instances` 同位：点查不重算 mono 摘要。
+            let position = digests
+                .binary_search(&target)
+                .map_err(|_| invalid("调用签名缺少闭合实例"))?;
+            let instance = &world.instances[position];
             let signature = layouts.context.module.definitions[index(instance.definition)]
                 .signature
                 .ok_or_else(|| invalid("调用目标缺少函数签名"))?;
