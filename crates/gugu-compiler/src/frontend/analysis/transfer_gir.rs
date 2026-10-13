@@ -411,6 +411,24 @@ pub(crate) fn sync_resolved(
     if !state.reachable {
         return;
     }
+    // `body.relations` 是每个 body 固定的关系集，`resolved` 派生是状态上的幂等纯函数：
+    // 只要区间没有改动，重复同步只会重算出同一结果，因此按标记跳过。
+    if !state.derived_ready() {
+        derive_resolved(module, owner, body, state);
+    }
+    if !state.relations_synced {
+        state.relate_sorted(&body.relations);
+        state.relations_synced = true;
+    }
+}
+
+/// 把 `body.resolved` 的表达式区间从当前本地区间重新派生出来。
+fn derive_resolved(
+    module: &Module,
+    owner: &Owner,
+    body: &IndexedBody<'_>,
+    state: &mut AbstractState,
+) {
     for &(expr, local) in &body.resolved {
         let range =
             transfer::integer_range(module, owner, expr, state.range(ValueKey::Local(local)));
@@ -420,7 +438,7 @@ pub(crate) fn sync_resolved(
             state.range(ValueKey::LocalLen(local)),
         );
     }
-    state.relate_sorted(&body.relations);
+    state.mark_derived();
 }
 
 fn seed_local_array_len(

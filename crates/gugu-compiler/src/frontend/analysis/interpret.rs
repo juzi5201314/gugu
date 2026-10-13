@@ -356,7 +356,10 @@ fn execute_block(
     compare
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "块传播需要 module/owner/body/inbound/块号/状态/比较事实/摘要查询"
+)]
 fn propagate(
     module: &Module,
     owner: &Owner,

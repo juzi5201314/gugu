@@ -254,6 +254,18 @@ pub(crate) struct AbstractState {
     pub foreign_version: u32,
     /// 始终按 `Relation` 顺序排列且不重复，供汇合时做单遍归并求交。
     pub relations: Vec<Relation>,
+    /// 本状态是否已包含当前 owner body 的固定关系集（`body.relations`）。
+    ///
+    /// `sync_resolved` 每次调用都把该固定集并入状态，重复归并只是纯扫描；标记为真时
+    /// 可直接跳过。只有会收缩关系集的操作（`bump_local`、`bump_heap`，或与未同步状态
+    /// 求交）才复位标记，因此 99% 的重复同步都是 O(1)。
+    pub relations_synced: bool,
+    /// 本状态是否已完成 `sync_resolved` 的全部派生（`resolved` 表的表达式区间与关系集），
+    /// 且此后没有任何区间或关系写入。
+    ///
+    /// 派生是状态上的幂等纯函数：只要状态没变，重算必然得到同一结果。任何区间/关系写入
+    /// （`set_range`、`bump_*`、`join`、`widen`）都复位它，因此标记为真时跳过派生严格等价。
+    derived_synced: bool,
     pub effects: EffectFacts,
 }
 
@@ -273,6 +285,8 @@ impl AbstractState {
             heap_version: 0,
             foreign_version: 0,
             relations: Vec::new(),
+            relations_synced: false,
+            derived_synced: false,
             effects: EffectFacts::default(),
         }
     }
@@ -306,12 +320,24 @@ impl AbstractState {
         if !self.reachable {
             return;
         }
+        // 任何区间写入都可能让已派生的表达式区间失效。
+        self.derived_synced = false;
         match key {
             ValueKey::Local(id) => self.local_range[id.index()] = interval,
             ValueKey::Expr(id) => self.expr_range[id.index()] = interval,
             ValueKey::LocalLen(id) => self.local_len[id.index()] = interval,
             ValueKey::ExprLen(id) => self.expr_len[id.index()] = interval,
         }
+    }
+
+    /// 返回 `sync_resolved` 的派生结果是否仍与当前状态一致。
+    pub fn derived_ready(&self) -> bool {
+        self.derived_synced
+    }
+
+    /// 标记派生结果已按当前状态重算完毕。
+    pub fn mark_derived(&mut self) {
+        self.derived_synced = true;
     }
 
     pub fn join(&mut self, other: &Self) -> bool {
@@ -357,6 +383,9 @@ impl AbstractState {
         if !relations_done {
             changed |= intersect_relations(&mut self.relations, &other.relations);
         }
+        // 求交只保留双方共有的关系：两边都覆盖 body 关系集时结果仍覆盖，否则必须复位。
+        self.relations_synced &= other.relations_synced;
+        self.derived_synced = false;
         let before_effects = self.effects;
         self.effects.join(other.effects);
         changed |= self.effects != before_effects;
@@ -393,6 +422,9 @@ impl AbstractState {
         self.relations.retain(|relation| {
             !refers_local(relation.left(), local) && !refers_local(relation.right(), local)
         });
+        // 写入后的本地可能被移出固定关系集，下一处程序点必须重新同步。
+        self.relations_synced = false;
+        self.derived_synced = false;
     }
 
     pub fn bump_heap(&mut self) {
@@ -401,6 +433,8 @@ impl AbstractState {
         self.local_len.fill(Interval::UNKNOWN);
         self.expr_len.fill(Interval::UNKNOWN);
         self.relations.clear();
+        self.relations_synced = false;
+        self.derived_synced = false;
     }
 
     pub fn bump_foreign(&mut self) {
@@ -530,6 +564,44 @@ fn join_versions(slots: &mut [u32], other: &[u32]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 派生标记只允许以下三种情况保持有效：刚完成派生、克隆、以及不改变区间的读取。
+    /// 任何区间或关系写入都必须复位它，否则 `sync_resolved` 会跳过本该重算的派生。
+    #[test]
+    fn derived_flag_tracks_every_state_write() {
+        let mut state = AbstractState::entry(2, 2, 1);
+        assert!(!state.derived_ready(), "新建状态尚未派生");
+        state.mark_derived();
+        assert!(state.derived_ready(), "派生后标记有效");
+        assert!(state.clone().derived_ready(), "克隆必须保持标记");
+        assert_eq!(
+            state.range(ValueKey::Local(LocalId(0))),
+            state.clone().range(ValueKey::Local(LocalId(0))),
+            "读取不改变状态"
+        );
+        assert!(state.derived_ready(), "读取不得复位标记");
+
+        state.set_range(ValueKey::Expr(ExprId(0)), Interval::point(3));
+        assert!(!state.derived_ready(), "区间写入必须复位标记");
+
+        state.mark_derived();
+        state.bump_local(LocalId(0));
+        assert!(!state.derived_ready(), "本地写入必须复位标记");
+
+        state.mark_derived();
+        state.bump_heap();
+        assert!(!state.derived_ready(), "堆写入必须复位标记");
+
+        state.mark_derived();
+        let mut other = AbstractState::entry(2, 2, 1);
+        other.bump_heap();
+        state.join(&other);
+        assert!(!state.derived_ready(), "汇合必须复位标记");
+
+        state.mark_derived();
+        state.widen(&other);
+        assert!(!state.derived_ready(), "widen 必须复位标记");
+    }
 
     #[test]
     fn sorted_union_matches_individual_relations_for_all_small_sets() {
