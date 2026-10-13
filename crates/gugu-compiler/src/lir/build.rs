@@ -21,6 +21,100 @@ use gir::concrete::{ConcreteBody, TypeKind, TypeLayout};
 use mono::collect::InstanceSummaryV1;
 use std::ops::Range;
 
+/// 逐 body 查询用的 LIR 输入索引：按 LIR 输入建一次，`lower` 的每个 body 复用。
+///
+/// `lower` 要按 mono 摘要找到实例，`environment_observation` 要按闭包定义找到全部创建点。
+/// 两者逐 body 线性扫描会把整体放大成 O(body × 实例) 次摘要计算与 O(body × 语句) 次扫描，
+/// 那是本次编译最热的散列与扫描来源，因此改为一次建稠密索引、逐 body 点查。
+pub(crate) struct LirIndex {
+    /// `(mono 键摘要, mono.instances 下标)`，按摘要有序，供二分点查。
+    instances: Vec<([u8; 32], u32)>,
+    /// 按 `hir::DefId` 下标索引的闭包创建点 `(具体实例下标, 语句下标)`；保持输入顺序。
+    closure_sites: Vec<Vec<(u32, u32)>>,
+}
+
+impl LirIndex {
+    /// 扫描 mono 实例表与全部具体 GIR body 建立索引。
+    pub(crate) fn new(mono: &mono::MonoWorldV1, concrete: &[ConcreteBody]) -> Self {
+        let mut instances: Vec<([u8; 32], u32)> = mono
+            .instances
+            .iter()
+            .enumerate()
+            .map(|(index, instance)| {
+                (
+                    mono::digest_of(&instance.mono_key),
+                    u32::try_from(index).expect("实例数量适配 u32"),
+                )
+            })
+            .collect();
+        instances.sort_unstable_by_key(|(digest, _)| *digest);
+        let mut closure_sites: Vec<Vec<(u32, u32)>> = Vec::new();
+        for (index, body) in concrete.iter().enumerate() {
+            let concrete_index = u32::try_from(index).expect("具体实例数量适配 u32");
+            for (statement, value) in body.body.statements.iter().enumerate() {
+                let gir::body::StatementKind::Assign(
+                    _,
+                    gir::body::Rvalue::Aggregate {
+                        kind: gir::body::AggregateKind::Closure(definition),
+                        ..
+                    },
+                ) = &value.kind
+                else {
+                    continue;
+                };
+                let definition = definition.index();
+                if closure_sites.len() <= definition {
+                    closure_sites.resize(definition + 1, Vec::new());
+                }
+                closure_sites[definition].push((
+                    concrete_index,
+                    u32::try_from(statement).expect("语句下标适配 u32"),
+                ));
+            }
+        }
+        Self {
+            instances,
+            closure_sites,
+        }
+    }
+
+    /// 返回摘要对应的 `mono.instances` 下标。
+    pub(crate) fn instance(&self, digest: &[u8; 32]) -> Option<usize> {
+        let position = self
+            .instances
+            .binary_search_by_key(digest, |(digest, _)| *digest)
+            .ok()?;
+        Some(usize::try_from(self.instances[position].1).expect("实例下标适配宿主"))
+    }
+
+    /// 返回闭包定义的全部创建点；定义没有创建点时返回空切片。
+    pub(crate) fn closure_sites(&self, definition: hir::DefId) -> &[(u32, u32)] {
+        self.closure_sites
+            .get(definition.index())
+            .map_or(&[], Vec::as_slice)
+    }
+}
+
+/// 按 `(body, statement)` 在有序分配表里点查放置车道；未登记按 `LocalHeap`。
+///
+/// 同一键可能有多条记录，取最左侧一条，与线性查找的首次命中一致。
+fn placement_kind(
+    allocs: &[gir::placement::AllocPlacement],
+    body: u32,
+    statement: u32,
+) -> gir::placement::PlacementKind {
+    let Ok(found) = allocs.binary_search_by_key(&(body, statement), |alloc| {
+        (alloc.body, alloc.statement)
+    }) else {
+        return gir::placement::PlacementKind::LocalHeap;
+    };
+    let mut first = found;
+    while first > 0 && allocs[first - 1].body == body && allocs[first - 1].statement == statement {
+        first -= 1;
+    }
+    allocs[first].kind
+}
+
 #[derive(Clone, Copy)]
 struct Variable {
     source: (u32, u64),
@@ -60,6 +154,8 @@ struct Builder<'a> {
     sources: &'a crate::SourceMap,
     world: &'a gir::GirWorldV1,
     mono: &'a mono::MonoWorldV1,
+    /// LIR 输入级索引：实例摘要与闭包创建点都按它点查，不再逐 body 线性扫描世界。
+    index: &'a LirIndex,
     instance: &'a InstanceSummaryV1,
     owner: &'a hir::Owner,
     /// cage profile 开关；关闭态所有 lowering 路径与历史行为逐指令一致。
@@ -112,21 +208,25 @@ enum RegionEndKind {
     Transfer,
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "lower 需要具体实例、冻结 HIR/GIR/mono、输入索引、目标与压缩策略"
+)]
 pub(crate) fn lower(
     concrete: &ConcreteBody,
     module: &hir::Module,
     world: &gir::GirWorldV1,
     mono: &mono::MonoWorldV1,
+    index: &LirIndex,
     target: &str,
     input_fingerprint: [u8; 32],
     compression: crate::runtime::CompressionPolicyV1,
     sources: &crate::SourceMap,
 ) -> Result<Body, Diagnostic> {
     concrete.verify()?;
-    let instance = mono
-        .instances
-        .iter()
-        .find(|instance| mono::digest_of(&instance.mono_key) == concrete.instance)
+    let instance = index
+        .instance(&concrete.instance)
+        .map(|position| &mono.instances[position])
         .ok_or_else(|| invalid("LIR 输入不在闭合实例图中"))?;
     let owner = module
         .owners
@@ -143,6 +243,7 @@ pub(crate) fn lower(
         sources,
         world,
         mono,
+        index,
         instance,
         owner,
         compression,
@@ -401,40 +502,22 @@ impl Builder<'_> {
         let environment_bytes = u64::try_from(owner.captures.len()).expect("捕获数量适配 u64") * 8;
         compressible &= crate::runtime::local_heap::OBJECT_HEADER_BYTES + environment_bytes
             <= u64::from(crate::runtime::gc_metadata_contract::GC_BLOCK_BYTES);
-        for concrete in &self.world.concrete {
-            for (statement, value) in concrete.body.statements.iter().enumerate() {
-                let gir::body::StatementKind::Assign(
-                    _,
-                    gir::body::Rvalue::Aggregate {
-                        kind: gir::body::AggregateKind::Closure(closure),
-                        ..
-                    },
-                ) = &value.kind
-                else {
-                    continue;
-                };
-                if *closure != definition {
-                    continue;
-                }
-                let statement = u32::try_from(statement).expect("语句下标适配 u32");
-                let kind = self
-                    .world
-                    .placement
-                    .allocs
-                    .iter()
-                    .find(|alloc| {
-                        alloc.body == concrete.generic_body && alloc.statement == statement
-                    })
-                    .map_or(gir::placement::PlacementKind::LocalHeap, |alloc| alloc.kind);
-                if let Some(observed) = observed
-                    && observed != kind
-                {
-                    return Err(invalid("同一闭包本体不能同时由 shared 与 local 环境实例化"));
-                }
-                observed = Some(kind);
-                compressible &= kind == gir::placement::PlacementKind::LocalHeap;
-                compressible &= self.capture_cells_compressible(owner);
+        for &(concrete_index, statement) in self.index.closure_sites(definition) {
+            let concrete = &self.world.concrete
+                [usize::try_from(concrete_index).expect("具体实例下标适配宿主")];
+            let kind = placement_kind(
+                &self.world.placement.allocs,
+                concrete.generic_body,
+                statement,
+            );
+            if let Some(observed) = observed
+                && observed != kind
+            {
+                return Err(invalid("同一闭包本体不能同时由 shared 与 local 环境实例化"));
             }
+            observed = Some(kind);
+            compressible &= kind == gir::placement::PlacementKind::LocalHeap;
+            compressible &= self.capture_cells_compressible(owner);
         }
         Ok((observed, compressible))
     }

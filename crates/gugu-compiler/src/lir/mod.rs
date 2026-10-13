@@ -646,6 +646,9 @@ pub(crate) fn build(
     hash.update(&compression.cage_bytes.to_le_bytes());
     let fingerprint = *hash.finalize().as_bytes();
     let mut bodies = Vec::with_capacity(gir.concrete.len());
+    // 索引按 LIR 输入建一次：逐 body 线性扫描实例表与具体 body 会把 lowering 放大成
+    // O(body × 实例) 次 mono 摘要计算与 O(body × 语句) 次闭包创建点扫描。
+    let index = build::LirIndex::new(mono, &gir.concrete);
     for concrete in &gir.concrete {
         let mut bytes = fingerprint.to_vec();
         bytes.extend_from_slice(&concrete.instance);
@@ -680,6 +683,7 @@ pub(crate) fn build(
                 hir.module(),
                 gir,
                 mono,
+                &index,
                 &target,
                 fingerprint,
                 compression,
@@ -753,15 +757,27 @@ fn verify_world(world: &World, mono: &mono::MonoWorldV1) -> Result<(), Diagnosti
     {
         return Err(invalid("LIR world 身份、schema 或规范实例顺序不匹配"));
     }
+    // 实例摘要点查表：逐指令线性扫描实例表会重算 O(指令 × 实例) 次 mono 摘要。
+    let instances: Vec<[u8; 32]> = {
+        let mut digests: Vec<[u8; 32]> = mono
+            .instances
+            .iter()
+            .map(|instance| mono::digest_of(&instance.mono_key))
+            .collect();
+        digests.sort_unstable();
+        digests
+    };
     for body in &world.bodies {
         for instruction in &body.instructions {
             match &instruction.op {
-                body::Op::SymbolAddr(body::Symbol::Instance(key)) => instance_exists(mono, key)?,
+                body::Op::SymbolAddr(body::Symbol::Instance(key)) => {
+                    instance_exists(&instances, key)?
+                }
                 body::Op::SymbolAddr(body::Symbol::FunctionAdapter {
                     target,
                     has_environment,
                 }) => {
-                    instance_exists(mono, target)?;
+                    instance_exists(&instances, target)?;
                     let key = function_adapter::key(target, *has_environment);
                     if world
                         .bodies
@@ -775,7 +791,7 @@ fn verify_world(world: &World, mono: &mono::MonoWorldV1) -> Result<(), Diagnosti
                     mono.universe.record(key)?;
                 }
                 body::Op::Call(call) | body::Op::ForeignCall(call) => {
-                    verify_call(world, mono, call)?
+                    verify_call(world, &instances, call)?
                 }
                 _ => {}
             }
@@ -784,7 +800,7 @@ fn verify_world(world: &World, mono: &mono::MonoWorldV1) -> Result<(), Diagnosti
             if let body::Terminator::Invoke { call, .. } | body::Terminator::TailCall { call, .. } =
                 &block.terminator
             {
-                verify_call(world, mono, call)?;
+                verify_call(world, &instances, call)?;
             }
         }
     }
@@ -793,12 +809,9 @@ fn verify_world(world: &World, mono: &mono::MonoWorldV1) -> Result<(), Diagnosti
     Ok(())
 }
 
-fn instance_exists(mono: &mono::MonoWorldV1, key: &[u8; 32]) -> Result<(), Diagnostic> {
-    if mono
-        .instances
-        .iter()
-        .any(|instance| &mono::digest_of(&instance.mono_key) == key)
-    {
+/// 已排序实例摘要表里的点查；表由 `verify_world` 建一次。
+fn instance_exists(instances: &[[u8; 32]], key: &[u8; 32]) -> Result<(), Diagnostic> {
+    if instances.binary_search(key).is_ok() {
         Ok(())
     } else {
         Err(invalid("LIR 引用了实例闭包之外的代码"))
@@ -807,13 +820,13 @@ fn instance_exists(mono: &mono::MonoWorldV1, key: &[u8; 32]) -> Result<(), Diagn
 
 fn verify_call(
     world: &World,
-    mono: &mono::MonoWorldV1,
+    instances: &[[u8; 32]],
     call: &body::Call,
 ) -> Result<(), Diagnostic> {
     let body::CallTarget::Instance(key) = call.target else {
         return Ok(());
     };
-    instance_exists(mono, &key)?;
+    instance_exists(instances, &key)?;
     let target = world
         .bodies
         .binary_search_by_key(&key, |body| body.instance)

@@ -11,6 +11,8 @@ GIR 的 Editor 按需拥有工作体：no-op 只借用原 body，第一次修改
 
 `VerifySsaAndMemory` 与 `PrepareRegisterAllocation` 直接对原 LIR body 运行结构验证，不创建 Editor；x86_64 probe 成本按编译线程使用容量固定为 256 项的环形缓存，命中时不重新编码或分配，未命中项仍通过规范 probe lowering 计算，失败 lowering 仍采用保守成本。立即数只在已证明生成同一 form 序列的值域内合并，其它参数化 Op 保留完整身份；该上下文固定绑定当前二进制的 Linux probe/profile/form 表，不共享会话相关成本。无分支、无调用、无 allocation、无 safepoint 的单块标量 leaf 走线性成本路径；含循环或复杂控制流的 body 继续使用通用 SCC/预算分析。
 
+降低阶段按 LIR 输入建一次点查索引：mono 摘要到实例下标、闭包定义到全部创建点、实例摘要的有序表分别代替逐 body 的实例表线性扫描、全具体 body 语句扫描与逐指令 `instance_exists` 重算摘要。索引只在输入不变时建立一次，查表结果与逐次扫描相同；不得在 lowering 或 world verifier 内重新引入按 body 重算的摘要扫描。
+
 线性 leaf 与通用数据流都在 `POLL_BUDGET + 1` 饱和，不能因快速路径改变超预算摘要。只读分析先统一排除经过 trip count 与成本证明的有界回边；verifier 直接拒绝剩余 poll-free 环，不再逐块重新构造 Editor 和重复分析循环。拥有型 Editor 同时接管 assembly 元数据，不先复制后覆盖。
 
 完整管线固定为：

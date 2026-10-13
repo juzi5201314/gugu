@@ -404,10 +404,9 @@ impl Builder<'_> {
         {
             let key = *key;
             if let Some(instance) = self
-                .mono
-                .instances
-                .iter()
-                .find(|instance| mono::digest_of(&instance.mono_key) == key)
+                .index
+                .instance(&key)
+                .map(|position| &self.mono.instances[position])
                 && let Some(owner) = self
                     .module
                     .owners
