@@ -103,9 +103,9 @@ fn placement_kind(
     body: u32,
     statement: u32,
 ) -> gir::placement::PlacementKind {
-    let Ok(found) = allocs.binary_search_by_key(&(body, statement), |alloc| {
-        (alloc.body, alloc.statement)
-    }) else {
+    let Ok(found) =
+        allocs.binary_search_by_key(&(body, statement), |alloc| (alloc.body, alloc.statement))
+    else {
         return gir::placement::PlacementKind::LocalHeap;
     };
     let mut first = found;

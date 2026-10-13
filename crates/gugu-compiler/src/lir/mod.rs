@@ -818,11 +818,7 @@ fn instance_exists(instances: &[[u8; 32]], key: &[u8; 32]) -> Result<(), Diagnos
     }
 }
 
-fn verify_call(
-    world: &World,
-    instances: &[[u8; 32]],
-    call: &body::Call,
-) -> Result<(), Diagnostic> {
+fn verify_call(world: &World, instances: &[[u8; 32]], call: &body::Call) -> Result<(), Diagnostic> {
     let body::CallTarget::Instance(key) = call.target else {
         return Ok(());
     };
