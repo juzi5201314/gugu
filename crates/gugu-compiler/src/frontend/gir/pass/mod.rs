@@ -519,7 +519,87 @@ pub(crate) fn statement_defined(statement: &Statement) -> Option<LocalId> {
 }
 
 /// 语句读取的局部。
-pub(crate) fn statement_reads(statement: &Statement, out: &mut BTreeSet<LocalId>) {
+/// 稠密 `LocalId` 的位图集合。
+///
+/// `LocalId` 从 0 开始稠密分配、单个 body 的 local 数有上界，因此用按机器字组织的位图代替
+/// `BTreeSet`：插入/查询是常数次位运算，并集/差集/比较按 `u64` 字批量处理，且不再逐元素分配
+/// 树节点。位图按需增长，容量按最高出现的 local 下标对齐到字。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct LocalSet {
+    words: Vec<u64>,
+}
+
+impl LocalSet {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn grow(&mut self, index: usize) {
+        if self.words.len() * 64 <= index {
+            self.words.resize(index / 64 + 1, 0);
+        }
+    }
+
+    pub(crate) fn insert(&mut self, local: super::body::LocalId) {
+        let index = local.index();
+        self.grow(index);
+        self.words[index / 64] |= 1 << (index % 64);
+    }
+
+    pub(crate) fn contains(&self, local: super::body::LocalId) -> bool {
+        let index = local.index();
+        self.words
+            .get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
+    }
+
+    pub(crate) fn remove(&mut self, local: super::body::LocalId) {
+        let index = local.index();
+        if let Some(word) = self.words.get_mut(index / 64) {
+            *word &= !(1 << (index % 64));
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.words.fill(0);
+    }
+
+    /// 并入 `other`，返回是否有变化。
+    pub(crate) fn union_with(&mut self, other: &Self) -> bool {
+        if self.words.len() < other.words.len() {
+            self.words.resize(other.words.len(), 0);
+        }
+        let mut changed = false;
+        for (word, &other) in self.words.iter_mut().zip(&other.words) {
+            let merged = *word | other;
+            changed |= merged != *word;
+            *word = merged;
+        }
+        changed
+    }
+
+    /// 从自身删掉 `other` 里的位。
+    pub(crate) fn subtract(&mut self, other: &Self) {
+        for (word, &other) in self.words.iter_mut().zip(&other.words) {
+            *word &= !other;
+        }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = super::body::LocalId> + '_ {
+        self.words.iter().enumerate().flat_map(|(index, &word)| {
+            let base = index * 64;
+            (0..64).filter_map(move |bit| {
+                (word >> bit & 1 == 1).then(|| {
+                    super::body::LocalId(
+                        u32::try_from(base + bit).expect("local 下标已由 HIR 验证"),
+                    )
+                })
+            })
+        })
+    }
+}
+
+pub(crate) fn statement_reads(statement: &Statement, out: &mut LocalSet) {
     match &statement.kind {
         StatementKind::Assign(_, rvalue) => rvalue_reads(rvalue, out),
         StatementKind::SetDiscriminant { .. } => {}
@@ -599,15 +679,15 @@ pub(crate) fn statement_reads(statement: &Statement, out: &mut BTreeSet<LocalId>
     }
 }
 
-fn operand_reads(operand: &super::body::Operand, out: &mut BTreeSet<LocalId>) {
+fn operand_reads(operand: &super::body::Operand, out: &mut LocalSet) {
     if let super::body::Operand::Copy(place) | super::body::Operand::MoveInternal(place) = operand {
         out.insert(place.local);
     }
 }
 
-fn rvalue_reads(rvalue: &super::body::Rvalue, out: &mut BTreeSet<LocalId>) {
+fn rvalue_reads(rvalue: &super::body::Rvalue, out: &mut LocalSet) {
     use super::body::Rvalue;
-    let place = |place: &super::body::Place, out: &mut BTreeSet<LocalId>| {
+    let place = |place: &super::body::Place, out: &mut LocalSet| {
         out.insert(place.local);
     };
     match rvalue {

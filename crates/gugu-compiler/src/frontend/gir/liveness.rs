@@ -8,10 +8,8 @@
 //! 活跃位集按 block 展开为 `u64` 词数组：单个 body 的 local 数量很小，访问模式是逐 block
 //! 的全量迭代与位运算，位集比 `BTreeSet` 少掉全部堆分配与元素比较。
 
-use std::collections::BTreeSet;
-
 use super::body::{BlockId, Callee, GirBody, LocalId, Operand, Place, SelectOperation, Terminator};
-use super::pass::{statement_defined, statement_reads};
+use super::pass::{LocalSet, statement_defined, statement_reads};
 
 /// 一个 body 的局部活跃位集，按 block 稠密编号索引。
 ///
@@ -36,7 +34,7 @@ impl Liveness {
             live_in: vec![0; blocks * words],
             live_out: vec![0; blocks * words],
         };
-        let mut reads = BTreeSet::new();
+        let mut reads = LocalSet::new();
         let mut use_set = vec![0_u64; blocks * words];
         let mut def_set = vec![0_u64; blocks * words];
         for (index, block) in body.blocks.iter().enumerate() {
@@ -45,7 +43,7 @@ impl Liveness {
                 statement_reads(statement, &mut reads);
                 if let Some(defined) = statement_defined(statement) {
                     // 直接写整个 local 时，写入之前的读取不计入 use；带投影的写入仍然读取基址。
-                    for &read in &reads {
+                    for read in reads.iter() {
                         if read != defined {
                             set_bit(
                                 &mut use_set,
@@ -60,7 +58,7 @@ impl Liveness {
                         defined.0 as usize,
                     );
                 } else {
-                    for &read in &reads {
+                    for read in reads.iter() {
                         set_bit(
                             &mut use_set,
                             index * words + read.index() / 64,
@@ -79,9 +77,9 @@ impl Liveness {
                     }
                 }
             }
-            let mut terminator_reads = BTreeSet::new();
+            let mut terminator_reads = LocalSet::new();
             terminator_use_at(body, &block.terminator, &mut terminator_reads);
-            for &read in &terminator_reads {
+            for read in terminator_reads.iter() {
                 set_bit(
                     &mut use_set,
                     index * words + read.index() / 64,
@@ -207,8 +205,8 @@ fn statement_places(kind: &super::body::StatementKind) -> Vec<Place> {
 }
 
 /// terminator 读取的局部。
-fn terminator_use_at(body: &GirBody, terminator: &Terminator, out: &mut BTreeSet<LocalId>) {
-    let operand = |operand: &Operand, out: &mut BTreeSet<LocalId>| {
+fn terminator_use_at(body: &GirBody, terminator: &Terminator, out: &mut LocalSet) {
+    let operand = |operand: &Operand, out: &mut LocalSet| {
         if let Operand::Copy(place) | Operand::MoveInternal(place) = operand {
             out.insert(place.local);
         }

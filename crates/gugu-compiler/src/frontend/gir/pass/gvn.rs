@@ -6,9 +6,9 @@
 use super::super::body::{
     BlockId, LocalId, LocalKind, Operand, Place, Rvalue, StatementKind, Terminator,
 };
-use super::{Editor, Outcome};
+use super::{Editor, LocalSet, Outcome};
 use crate::Diagnostic;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub(crate) fn run(editor: &mut Editor) -> Result<Outcome, Diagnostic> {
     let mut changed = copy_propagate(editor)?;
@@ -26,7 +26,7 @@ enum ReadSite {
     Terminator(BlockId),
 }
 
-fn rvalue_locals(rvalue: &Rvalue, out: &mut BTreeSet<LocalId>) {
+fn rvalue_locals(rvalue: &Rvalue, out: &mut LocalSet) {
     match rvalue {
         Rvalue::Use(operand) | Rvalue::UnaryOp { operand, .. } => operand_local(operand, out),
         Rvalue::BinaryOp { left, right, .. } | Rvalue::Compare { left, right, .. } => {
@@ -57,7 +57,7 @@ fn rvalue_locals(rvalue: &Rvalue, out: &mut BTreeSet<LocalId>) {
     }
 }
 
-fn operand_local(operand: &Operand, out: &mut BTreeSet<LocalId>) {
+fn operand_local(operand: &Operand, out: &mut LocalSet) {
     if let Operand::Copy(place) | Operand::MoveInternal(place) = operand {
         out.insert(place.local);
     }
@@ -69,9 +69,9 @@ fn copy_propagate(editor: &mut Editor) -> Result<bool, Diagnostic> {
     for block in editor.live_blocks() {
         for (index, statement) in editor.statements(block) {
             if let StatementKind::Assign(_, rvalue) = &statement.kind {
-                let mut locals = BTreeSet::new();
+                let mut locals = LocalSet::new();
                 rvalue_locals(rvalue, &mut locals);
-                for local in locals {
+                for local in locals.iter() {
                     reads
                         .entry(local)
                         .or_default()
@@ -206,7 +206,7 @@ fn cse(editor: &mut Editor) -> bool {
     let mut changed = false;
     for block in editor.live_blocks() {
         let mut seen: BTreeMap<Vec<u8>, LocalId> = BTreeMap::new();
-        let mut defined_in_block: BTreeSet<LocalId> = BTreeSet::new();
+        let mut defined_in_block = LocalSet::new();
         let indices: Vec<usize> = editor.block(block).expect("活跃 block").statements.clone();
         for index in indices {
             let kind = editor.statement(index).kind.clone();
@@ -222,16 +222,16 @@ fn cse(editor: &mut Editor) -> bool {
                 }
                 continue;
             }
-            let mut locals = BTreeSet::new();
+            let mut locals = LocalSet::new();
             rvalue_locals(rvalue, &mut locals);
-            locals.remove(&place.local);
+            locals.remove(place.local);
             if locals.iter().any(|local| defined_in_block.contains(local)) {
                 defined_in_block.insert(place.local);
                 continue;
             }
             let key = rvalue_key(rvalue);
             match seen.get(&key).copied() {
-                Some(existing) if !defined_in_block.contains(&existing) => {
+                Some(existing) if !defined_in_block.contains(existing) => {
                     editor.set_statement(
                         index,
                         StatementKind::Assign(

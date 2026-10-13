@@ -1,8 +1,8 @@
 //! GIR COW 与资源动作消除：基于局部活跃性删除无读取的复制与相邻租约对。
 use super::super::body::{BlockId, LocalId, ResourceActionKind, Rvalue, StatementKind};
-use super::{Editor, Outcome};
+use super::{Editor, LocalSet, Outcome};
 use crate::Diagnostic;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 pub(crate) fn run(editor: &mut Editor) -> Result<Outcome, Diagnostic> {
     let mut changed = remove_lease_pairs(editor);
@@ -75,7 +75,7 @@ fn remove_dead_copies(editor: &mut Editor) -> Result<bool, Diagnostic> {
                 StatementKind::Assign(place, Rvalue::CowSnapshot(source))
                     if place.is_local() && place.local != source.local =>
                 {
-                    !live.contains(&place.local)
+                    !live.contains(place.local)
                 }
                 _ => false,
             };
@@ -85,32 +85,27 @@ fn remove_dead_copies(editor: &mut Editor) -> Result<bool, Diagnostic> {
                 continue;
             }
             if let Some(defined) = super::statement_defined(&statement) {
-                live.remove(&defined);
+                live.remove(defined);
             }
-            let mut reads = BTreeSet::new();
+            let mut reads = LocalSet::new();
             super::statement_reads(&statement, &mut reads);
-            live.extend(reads);
+            live.union_with(&reads);
         }
     }
     Ok(changed)
 }
 
-fn block_transfer(
-    editor: &Editor,
-) -> (
-    BTreeMap<BlockId, BTreeSet<LocalId>>,
-    BTreeMap<BlockId, BTreeSet<LocalId>>,
-) {
+fn block_transfer(editor: &Editor) -> (BTreeMap<BlockId, LocalSet>, BTreeMap<BlockId, LocalSet>) {
     let mut generated_by_block = BTreeMap::new();
     let mut kill = BTreeMap::new();
     for block in editor.live_blocks() {
-        let mut generated = BTreeSet::new();
-        let mut killed = BTreeSet::new();
+        let mut generated = LocalSet::new();
+        let mut killed = LocalSet::new();
         for (_, statement) in editor.statements(block) {
-            let mut reads = BTreeSet::new();
+            let mut reads = LocalSet::new();
             super::statement_reads(statement, &mut reads);
-            for read in reads {
-                if !killed.contains(&read) {
+            for read in reads.iter() {
+                if !killed.contains(read) {
                     generated.insert(read);
                 }
             }
@@ -126,37 +121,37 @@ fn block_transfer(
 
 fn liveness(
     editor: &Editor,
-    generated_by_block: &BTreeMap<BlockId, BTreeSet<LocalId>>,
-    kill: &BTreeMap<BlockId, BTreeSet<LocalId>>,
-) -> BTreeMap<BlockId, BTreeSet<LocalId>> {
+    generated_by_block: &BTreeMap<BlockId, LocalSet>,
+    kill: &BTreeMap<BlockId, LocalSet>,
+) -> BTreeMap<BlockId, LocalSet> {
     let blocks = editor.live_blocks();
-    let mut live_in: BTreeMap<BlockId, BTreeSet<LocalId>> = blocks
+    let mut live_in: BTreeMap<BlockId, LocalSet> = blocks
         .iter()
-        .map(|block| (*block, BTreeSet::new()))
+        .map(|block| (*block, LocalSet::new()))
         .collect();
+    let mut out = LocalSet::new();
+    let mut terminator_reads = LocalSet::new();
     loop {
         let mut changed = false;
         for block in &blocks {
-            let mut out = BTreeSet::new();
+            out.clear();
             for successor in editor.terminator(*block).successors() {
                 if let Some(successor_live) = live_in.get(&successor) {
-                    out.extend(successor_live.iter().copied());
+                    out.union_with(successor_live);
                 }
             }
-            for read in generated_by_block.get(block).into_iter().flatten() {
-                if !kill.get(block).is_some_and(|kill| kill.contains(read)) {
-                    out.insert(*read);
-                }
+            if let Some(generated) = generated_by_block.get(block) {
+                out.union_with(generated);
             }
-            for defined in kill.get(block).into_iter().flatten() {
-                out.remove(defined);
+            if let Some(kill) = kill.get(block) {
+                out.subtract(kill);
             }
             // 终结符读取的值也必须活跃。
-            let mut terminator_reads = BTreeSet::new();
+            terminator_reads.clear();
             terminator_locals(editor, *block, &mut terminator_reads);
-            out.extend(terminator_reads);
+            out.union_with(&terminator_reads);
             if live_in[block] != out {
-                live_in.insert(*block, out);
+                live_in.insert(*block, out.clone());
                 changed = true;
             }
         }
@@ -166,24 +161,20 @@ fn liveness(
     }
 }
 
-fn live_out(
-    editor: &Editor,
-    block: BlockId,
-    live_in: &BTreeMap<BlockId, BTreeSet<LocalId>>,
-) -> BTreeSet<LocalId> {
-    let mut out = BTreeSet::new();
+fn live_out(editor: &Editor, block: BlockId, live_in: &BTreeMap<BlockId, LocalSet>) -> LocalSet {
+    let mut out = LocalSet::new();
     for successor in editor.terminator(block).successors() {
         if let Some(successor_live) = live_in.get(&successor) {
-            out.extend(successor_live.iter().copied());
+            out.union_with(successor_live);
         }
     }
     terminator_locals(editor, block, &mut out);
     out
 }
 
-fn terminator_locals(editor: &Editor, block: BlockId, out: &mut BTreeSet<LocalId>) {
+fn terminator_locals(editor: &Editor, block: BlockId, out: &mut LocalSet) {
     use super::super::body::{SuspendReason, Terminator};
-    let operand = |operand: &super::super::body::Operand, out: &mut BTreeSet<LocalId>| {
+    let operand = |operand: &super::super::body::Operand, out: &mut LocalSet| {
         if let super::super::body::Operand::Copy(place)
         | super::super::body::Operand::MoveInternal(place) = operand
         {

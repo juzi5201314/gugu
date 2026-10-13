@@ -252,7 +252,7 @@ monomorphic GIR 必须按以下顺序处理；pass 可以在没有匹配机会�
 
 #### 管线实现边界
 
-步骤 1–4 在 generic GIR 构造、`ScopedView`/`NoSafepointRegion` 展开与值传递 lowering 中完成；步骤 10 由 `EscapeAndPlacement` 完成；步骤 12–15 在 GIR→LIR lowering 中完成。步骤 5–9、11 由 `gir::pass` 的固定管线驱动，顺序固定为 `Inline`、`SimplifyCfg`、`SparseConditionalConstants`、`CopyPropagationAndGvn`、`BoundsCheckElimination`、`CowAndResourceElision`，禁止运行时重排；每跑一个 pass 立即运行 `ConcreteBody` 与 GIR verifier，失败为 `E0055`。管线 revision 与 pass 名单进入前端 action key，`-Zdump-gir` 头部打印 `gir-passes`、`inline-count` 与 `checks-elided`。当前 `Inline` 只展开「无参数、无 cleanup、单出口、语句为纯标量赋值」的直接调用；参数传递、投影与跨体作用域复制仍保留为调用，完整展开由后端阶段的内联器承担。`BoundsCheckElimination` 只在 `AnalysisWorldV1.proofs` 为 `Proved` 时把检查分支改为不可达并交给 `SimplifyCfg` 删除。
+步骤 1–4 在 generic GIR 构造、`ScopedView`/`NoSafepointRegion` 展开与值传递 lowering 中完成；步骤 10 由 `EscapeAndPlacement` 完成；步骤 12–15 在 GIR→LIR lowering 中完成。步骤 5–9、11 由 `gir::pass` 的固定管线驱动，顺序固定为 `Inline`、`SimplifyCfg`、`SparseConditionalConstants`、`CopyPropagationAndGvn`、`BoundsCheckElimination`、`CowAndResourceElision`，禁止运行时重排；每跑一个 pass 立即运行 `ConcreteBody` 与 GIR verifier，失败为 `E0055`。局部集合（活跃性、读取集合、块内定义集合）用稠密 `LocalId` 位图 `LocalSet` 表示：插入/查询是常数次位运算，并集/差集/比较按 `u64` 字批量处理，不逐元素分配树节点。管线 revision 与 pass 名单进入前端 action key，`-Zdump-gir` 头部打印 `gir-passes`、`inline-count` 与 `checks-elided`。当前 `Inline` 只展开「无参数、无 cleanup、单出口、语句为纯标量赋值」的直接调用；参数传递、投影与跨体作用域复制仍保留为调用，完整展开由后端阶段的内联器承担。`BoundsCheckElimination` 只在 `AnalysisWorldV1.proofs` 为 `Proved` 时把检查分支改为不可达并交给 `SimplifyCfg` 删除。
 
 ## LIR
 
