@@ -15,5 +15,5 @@ unicode-width = "0.2"
 # 单次编译 runtime 源树要十几秒。O2 是编译时间与执行时间的平衡点（O3 收益有限）。
 opt-level = 2
 debug = 1
-debug-assertions = true
+debug-assertions = false
 overflow-checks = true

@@ -1,8 +1,8 @@
 nextest-version = "0.9.115"
 
 [profile.default]
-# 用例是纯 CPU 的进程内测试（单例峰值 RSS 约 120MB），10 核机器留 2 核给宿主调度。
-test-threads = 8
+# 用例是纯 CPU 的进程内测试（单例峰值 RSS 约 120MB），按 10 核机器满并发。
+test-threads = 10
 retries = 0
 fail-fast = true
 # 单个用例超过 3 秒即视为缺陷：超时直接失败并杀死测试进程组。
