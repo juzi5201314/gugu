@@ -1,9 +1,11 @@
 nextest-version = "0.9.115"
 
 [profile.default]
-test-threads = 2
+# 用例是纯 CPU 的进程内测试（单例峰值 RSS 约 120MB），10 核机器留 2 核给宿主调度。
+test-threads = 8
 retries = 0
 fail-fast = true
-# 单例和整轮测试执行都不得超过一分钟；超时直接失败并杀死测试进程组。
-slow-timeout = { period = "60s", terminate-after = 1, grace-period = "0s", on-timeout = "fail" }
-global-timeout = "60s"
+# 单个用例超过 3 秒即视为缺陷：超时直接失败并杀死测试进程组。
+slow-timeout = { period = "3s", terminate-after = 1, grace-period = "1s", on-timeout = "fail" }
+# 整轮（含 slow-tests）必须收敛在两分钟以内。
+global-timeout = "120s"

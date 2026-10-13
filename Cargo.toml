@@ -11,8 +11,9 @@ toml = "0.9"
 unicode-width = "0.2"
 
 [profile.test]
-# 测试只验证正确性，不需要 O3；O3 让 528 个测试编译暴增至 400s+
-opt-level = 0
+# 测试只验证正确性，但全量套件要在一分钟内跑完：编译器本体在 O0 下慢 3-4 倍，
+# 单次编译 runtime 源树要十几秒。O2 是编译时间与执行时间的平衡点（O3 收益有限）。
+opt-level = 2
 debug = 1
 debug-assertions = true
 overflow-checks = true
