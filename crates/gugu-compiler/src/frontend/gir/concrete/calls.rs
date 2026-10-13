@@ -68,14 +68,14 @@ pub(super) fn bind(
             let self_ty = layouts.context.type_at(dispatch.self_ty, &bindings)?;
             bindings.insert(
                 "Self".to_owned(),
-                crate::frontend::mono::universe::concrete(layouts.context, &self_ty)?,
+                crate::frontend::mono::universe::concrete(layouts.context, &self_ty)?.into_owned(),
             );
             let ty = layouts.context.type_at(dispatch.signature, &bindings)?;
             (ty, protocol(layouts.context.module, dispatch)?)
         } else {
             continue;
         };
-        let ty = crate::frontend::mono::universe::concrete(layouts.context, &ty)?;
+        let ty = crate::frontend::mono::universe::concrete(layouts.context, &ty)?.into_owned();
         let signature = match ty {
             Ty::Callable(_, _, signature) => *signature,
             signature => signature,

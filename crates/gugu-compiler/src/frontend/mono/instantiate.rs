@@ -395,7 +395,7 @@ fn callable_type(
         }
     }
     let ty = context.type_at(ty, &entry.bindings)?;
-    super::universe::concrete(context, &ty)
+    Ok(super::universe::concrete(context, &ty)?.into_owned())
 }
 
 struct ResolvedCallee {

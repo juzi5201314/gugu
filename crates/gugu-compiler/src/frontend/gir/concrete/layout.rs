@@ -52,7 +52,7 @@ impl<'a, 'm> Builder<'a, 'm> {
     }
 
     pub(super) fn intern(&mut self, ty: &Ty) -> Result<u32, Diagnostic> {
-        let ty = crate::frontend::mono::universe::concrete(self.context, ty)?;
+        let ty = crate::frontend::mono::universe::concrete(self.context, ty)?.into_owned();
         if let Some(&index) = self.indices.get(&ty) {
             return Ok(index);
         }

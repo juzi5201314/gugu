@@ -293,7 +293,7 @@ fn capture_type(
             .local
     };
     let ty = context.type_at(owner.locals[local.index()].ty, &entry.bindings)?;
-    let ty = super::universe::concrete(context, &ty)?;
+    let ty = super::universe::concrete(context, &ty)?.into_owned();
     if !super::universe::is_concrete(&ty) {
         return Err(crate::Diagnostic::error(
             crate::DiagnosticCode::MonoDivergence,

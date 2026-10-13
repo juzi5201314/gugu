@@ -9,6 +9,7 @@ use crate::frontend::{
     semantics::Ty,
     types::Layouts,
 };
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 实例闭合收集结果：类型记录表与稳定键分配表。
@@ -68,7 +69,8 @@ pub(crate) fn collect(
         }
     }
     for ty in entry.bindings.values() {
-        collector.visit(&concrete(context, ty)?)?;
+        let ty = concrete(context, ty)?;
+        collector.visit(&ty)?;
     }
     // 闭包环境与 spawn 参数包是真实分配出去的 managed 对象：它们的 descriptor 必须在冻结前
     // 进入同一张类型表，LIR 之后只按同一份键查表，不再自造 descriptor。
@@ -88,15 +90,27 @@ pub(crate) fn collect(
     Ok((collector.records.into_values().collect(), bindings))
 }
 
-pub(crate) fn concrete(context: &MonoContext<'_>, ty: &Ty) -> Result<Ty, Diagnostic> {
+/// 规约隐藏类型与投影；类型已经具体时直接借用原值，不做任何克隆。
+pub(crate) fn concrete<'t>(
+    context: &MonoContext<'_>,
+    ty: &'t Ty,
+) -> Result<Cow<'t, Ty>, Diagnostic> {
+    if already_concrete(ty) {
+        return Ok(Cow::Borrowed(ty));
+    }
     let mut ty = context
         .model
         .hidden_type(ty, &context.checked.hidden_types)?;
-    let map = |ty: &mut Ty| -> Result<(), Diagnostic> {
-        *ty = concrete(context, ty)?;
-        Ok(())
-    };
-    match &mut ty {
+    reduce_children(context, &mut ty)?;
+    Ok(Cow::Owned(ty))
+}
+
+/// 类型是否已经具体：不含 `Ty::Opaque` 与 `Ty::Projection` 时 `concrete` 原样返回。
+///
+/// 判定位置必须与 [`reduce_children`] 改写的位置逐一对应，否则会出现漏规约。
+fn already_concrete(ty: &Ty) -> bool {
+    match ty {
+        Ty::Opaque(..) | Ty::Projection(..) => false,
         Ty::Ref(t)
         | Ty::Ptr(t)
         | Ty::Slice(t)
@@ -104,42 +118,74 @@ pub(crate) fn concrete(context: &MonoContext<'_>, ty: &Ty) -> Result<Ty, Diagnos
         | Ty::Option(t)
         | Ty::Chan(t)
         | Ty::Join(t)
-        | Ty::MaybeUninit(t) => map(t)?,
+        | Ty::MaybeUninit(t) => already_concrete(t),
+        Ty::Tuple(ts) | Ty::Named(_, ts) => ts.iter().all(already_concrete),
+        Ty::Function(ts, result) | Ty::Callable(_, ts, result) => {
+            ts.iter().all(already_concrete) && already_concrete(result)
+        }
+        Ty::Result(t, e) => already_concrete(t) && already_concrete(e),
+        Ty::Dyn(interfaces) => interfaces
+            .iter()
+            .all(|interface| interface.arguments.iter().all(already_concrete)),
+        _ => true,
+    }
+}
+
+/// 就地规约子树：只有真的展开过隐藏类型或归一化过投影的子类型才写回。
+fn reduce_children(context: &MonoContext<'_>, ty: &mut Ty) -> Result<(), Diagnostic> {
+    fn reduce(context: &MonoContext<'_>, ty: &mut Ty) -> Result<(), Diagnostic> {
+        match concrete(context, ty)? {
+            Cow::Borrowed(_) => Ok(()),
+            Cow::Owned(reduced) => {
+                *ty = reduced;
+                Ok(())
+            }
+        }
+    }
+    match ty {
+        Ty::Ref(t)
+        | Ty::Ptr(t)
+        | Ty::Slice(t)
+        | Ty::Array(t, _)
+        | Ty::Option(t)
+        | Ty::Chan(t)
+        | Ty::Join(t)
+        | Ty::MaybeUninit(t) => reduce(context, t)?,
         Ty::Tuple(ts) | Ty::Named(_, ts) => {
             for t in ts {
-                map(t)?;
+                reduce(context, t)?;
             }
         }
         Ty::Function(ts, result) | Ty::Callable(_, ts, result) => {
             for t in ts {
-                map(t)?;
+                reduce(context, t)?;
             }
-            map(result)?;
+            reduce(context, result)?;
         }
         Ty::Result(t, e) => {
-            map(t)?;
-            map(e)?;
+            reduce(context, t)?;
+            reduce(context, e)?;
         }
         Ty::Dyn(interfaces) => {
             for interface in interfaces {
                 for t in &mut interface.arguments {
-                    map(t)?;
+                    reduce(context, t)?;
                 }
             }
         }
         Ty::Projection(self_ty, interface, _) => {
-            map(self_ty)?;
+            reduce(context, self_ty)?;
             for argument in &mut interface.arguments {
-                map(argument)?;
+                reduce(context, argument)?;
             }
-            let normalized = context.model.normalize(&ty, &[])?;
-            if normalized != ty {
-                return concrete(context, &normalized);
+            let normalized = context.model.normalize(ty, &[])?;
+            if normalized != *ty {
+                *ty = concrete(context, &normalized)?.into_owned();
             }
         }
         _ => {}
     }
-    Ok(ty)
+    Ok(())
 }
 
 pub(crate) fn is_concrete(ty: &Ty) -> bool {
@@ -174,9 +220,10 @@ struct Collector<'a, 'm> {
 
 impl Collector<'_, '_> {
     fn visit(&mut self, ty: &Ty) -> Result<Option<StableTypeKey>, Diagnostic> {
-        let ty = concrete(self.context, ty)?;
-        let canonical = self.context.encode_type(&ty)?;
-        let key = self.context.type_key(&ty)?;
+        let reduced = concrete(self.context, ty)?;
+        let ty: &Ty = &reduced;
+        let canonical = self.context.encode_type(ty)?;
+        let key = self.context.type_key(ty)?;
         if !self.visited.insert(key) {
             return Ok((!matches!(ty, Ty::Never | Ty::MaybeUninit(_))).then_some(key));
         }
@@ -190,7 +237,7 @@ impl Collector<'_, '_> {
             }
             Ok(key)
         };
-        let shape = match &ty {
+        let shape = match ty {
             Ty::Unit => Shape::Unit,
             Ty::Bool => Shape::Bool,
             Ty::Char => Shape::Char,
