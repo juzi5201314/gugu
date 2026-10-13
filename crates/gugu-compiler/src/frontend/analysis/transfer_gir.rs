@@ -28,6 +28,11 @@ pub(crate) struct IndexedBody<'a> {
     expressions: Vec<ExprId>,
     resolved: Vec<(ExprId, hir::LocalId)>,
     relations: Vec<Relation>,
+    /// `resolved` 的派生缓存，与 `resolved` 同长：`(本地区间, 本地长度区间, 表达式区间)`。
+    ///
+    /// 派生结果只由这两个输入决定（表达式类型固定），因此输入未变时可直接复用，
+    /// 不必重跑 `clamp_integer`；缓存按 body 分析期存活，随 `IndexedBody` 一起丢弃。
+    resolved_cache: std::cell::RefCell<Vec<(Interval, Interval, Interval)>>,
 }
 
 impl<'a> IndexedBody<'a> {
@@ -75,12 +80,15 @@ impl<'a> IndexedBody<'a> {
             }
         }
         relations.sort_unstable();
+        let cached =
+            vec![(Interval::UNKNOWN, Interval::UNKNOWN, Interval::UNKNOWN); resolved.len()];
         Self {
             body,
             offsets,
             expressions,
             resolved,
             relations,
+            resolved_cache: std::cell::RefCell::new(cached),
         }
     }
 
@@ -423,20 +431,29 @@ pub(crate) fn sync_resolved(
 }
 
 /// 把 `body.resolved` 的表达式区间从当前本地区间重新派生出来。
+///
+/// 每个条目的结果只由「本地区间 + 本地长度区间」决定（表达式类型固定），因此按这两个输入
+/// 缓存：输入未变时直接写入缓存值，跳过 `clamp_integer` 与类型查询。
 fn derive_resolved(
     module: &Module,
     owner: &Owner,
     body: &IndexedBody<'_>,
     state: &mut AbstractState,
 ) {
-    for &(expr, local) in &body.resolved {
-        let range =
-            transfer::integer_range(module, owner, expr, state.range(ValueKey::Local(local)));
-        state.set_range(ValueKey::Expr(expr), range);
-        state.set_range(
-            ValueKey::ExprLen(expr),
-            state.range(ValueKey::LocalLen(local)),
-        );
+    let mut cache = body.resolved_cache.borrow_mut();
+    for (index, &(expr, local)) in body.resolved.iter().enumerate() {
+        let base = state.range(ValueKey::Local(local));
+        let len = state.range(ValueKey::LocalLen(local));
+        let slot = &mut cache[index];
+        if slot.0 != base || slot.1 != len {
+            *slot = (
+                base,
+                len,
+                transfer::integer_range(module, owner, expr, base),
+            );
+        }
+        state.set_range(ValueKey::Expr(expr), slot.2);
+        state.set_range(ValueKey::ExprLen(expr), len);
     }
     state.mark_derived();
 }
