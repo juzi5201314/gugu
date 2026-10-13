@@ -9,7 +9,7 @@ const CALLS: &str = "fn ping(value: int) int {\n if value <= 0 { return 0 }\n le
 
 fn compile(source: &str, target: TargetName) -> crate::Compilation {
     let compilation =
-        Compiler::new().compile(CompileRequest::single_file("main.gg", source, target));
+        Compiler::shared().compile(CompileRequest::single_file("main.gg", source, target));
     assert!(
         compilation.is_success(),
         "{:?}",

@@ -321,7 +321,7 @@ fn coff_archive_extracts_only_the_named_member() {
 #[ignore = "slow full compilation"]
 fn compiled_windows_main_is_an_exe_and_linux_image_is_absent() {
     let source = "fn main() {}";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Windows,

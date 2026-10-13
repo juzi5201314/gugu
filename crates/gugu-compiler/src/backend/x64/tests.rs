@@ -948,7 +948,7 @@ fn harness_cases_and_switch_fragment_are_consistent() {
 /// 编译源码并统计栈图根：`(typed, bitmap, registers, points, conflicts)`。
 /// `conflicts` 统计同一个字同时出现在固定位图与逐根初始化条目里的次数——两者互斥是契约。
 fn describe_stackmap_roots(source: &str) -> (usize, usize, usize, usize, usize) {
-    let compilation = crate::Compiler::new().compile(crate::CompileRequest::single_file(
+    let compilation = crate::Compiler::shared().compile(crate::CompileRequest::single_file(
         "main.gg",
         source,
         crate::TargetName::X86_64Linux,
@@ -1076,7 +1076,7 @@ fn sites_record_every_call_return_pc() {
     ];
     let mut sites = 0_usize;
     for source in programs {
-        let compilation = crate::Compiler::new().compile(crate::CompileRequest::single_file(
+        let compilation = crate::Compiler::shared().compile(crate::CompileRequest::single_file(
             "main.gg",
             source,
             crate::TargetName::X86_64Linux,

@@ -245,7 +245,7 @@ fn dump_is_deterministic() {
 #[test]
 #[ignore = "slow full compilation"]
 fn image_plan_reports_gir_counts() {
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         "fn main() { _ = 1 }",
         TargetName::X86_64Linux,
@@ -327,7 +327,7 @@ fn bit_copy_emits_value_action_and_reuse_after_call() {
 fn string_copy_seals_and_chan_shares_identity() {
     let string =
         "fn take(s: string) { _ = s }\nfn main() { let t: string = \"ok\"\n take(t)\n _ = t }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         string,
         TargetName::X86_64Linux,
@@ -341,7 +341,7 @@ fn string_copy_seals_and_chan_shares_identity() {
     let string_main = body_named(&dump, "main", "String");
     assert!(string_main.contains("cow_snapshot"), "{string_main}");
     let chan = "fn take(c: chan[int]) { _ = c }\nfn main() { let c: chan[int] = chan[int](1)\n take(c)\n _ = c }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         chan,
         TargetName::X86_64Linux,
@@ -512,14 +512,19 @@ fn any_erase_seals_source_first() {
     assert!(action.unwrap() < erase.unwrap());
 }
 
-#[test]
-fn large_copy_warns_allow_suppresses_and_deny_fails() {
-    let source = "fn take(xs: [uint; 9]) { _ = xs }\nfn main() { take([0; 9]) }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+/// 大拷贝诊断：一次编译一个用例，单项不超过测试耗时上限。
+fn large_copy_compilation(source: &str) -> crate::Compilation {
+    Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
-    ));
+    ))
+}
+
+#[test]
+fn large_copy_warns_by_default() {
+    let compilation =
+        large_copy_compilation("fn take(xs: [uint; 9]) { _ = xs }\nfn main() { take([0; 9]) }");
     assert!(compilation.is_success());
     assert!(compilation.image_plan().is_some());
     assert!(
@@ -532,13 +537,13 @@ fn large_copy_warns_allow_suppresses_and_deny_fails() {
                     && diagnostic.severity() == crate::Severity::Warning
             )
     );
-    let allowed =
-        "fn take(xs: [uint; 9]) { _ = xs }\n#[allow(large_copy)]\nfn main() { take([0; 9]) }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        allowed,
-        TargetName::X86_64Linux,
-    ));
+}
+
+#[test]
+fn large_copy_allow_suppresses_the_lint() {
+    let compilation = large_copy_compilation(
+        "fn take(xs: [uint; 9]) { _ = xs }\n#[allow(large_copy)]\nfn main() { take([0; 9]) }",
+    );
     assert!(compilation.is_success());
     assert!(
         compilation
@@ -549,12 +554,12 @@ fn large_copy_warns_allow_suppresses_and_deny_fails() {
         "允许标记之后不得再报大拷贝：{:?}",
         compilation.diagnostics().items()
     );
-    let exact = "fn take(xs: [uint; 8]) { _ = xs }\nfn main() { take([0; 8]) }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        exact,
-        TargetName::X86_64Linux,
-    ));
+}
+
+#[test]
+fn large_copy_exact_limit_is_not_reported() {
+    let compilation =
+        large_copy_compilation("fn take(xs: [uint; 8]) { _ = xs }\nfn main() { take([0; 8]) }");
     assert!(compilation.is_success());
     assert!(
         compilation
@@ -563,13 +568,13 @@ fn large_copy_warns_allow_suppresses_and_deny_fails() {
             .iter()
             .all(|diagnostic| diagnostic.code() != crate::DiagnosticCode::LargeCopy)
     );
-    let denied =
-        "#![deny(large_copy)]\nfn take(xs: [uint; 9]) { _ = xs }\nfn main() { take([0; 9]) }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        denied,
-        TargetName::X86_64Linux,
-    ));
+}
+
+#[test]
+fn large_copy_deny_fails_without_an_image_plan() {
+    let compilation = large_copy_compilation(
+        "#![deny(large_copy)]\nfn take(xs: [uint; 9]) { _ = xs }\nfn main() { take([0; 9]) }",
+    );
     assert!(!compilation.is_success());
     assert!(compilation.image_plan().is_none());
     assert!(
@@ -588,7 +593,7 @@ fn large_copy_warns_allow_suppresses_and_deny_fails() {
 #[ignore = "slow full compilation"]
 fn borrowed_fields_keep_original_places_without_large_copy() {
     let source = "#[repr(C, align(64))]\nstruct Large { head: uint, tail: [uint; 9] }\n#[used]\n#[deny(large_copy)]\nfn field(value: &Large) &uint = &value.head\nfn main() {}";
-    let result = Compiler::new().compile(CompileRequest::single_file(
+    let result = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -605,7 +610,7 @@ fn borrowed_fields_keep_original_places_without_large_copy() {
     );
 
     let copying = "struct Large { bytes: [uint; 9] }\n#[used]\n#[deny(large_copy)]\nfn copy(value: &Large) Large = *value\nfn main() {}";
-    let result = Compiler::new().compile(CompileRequest::single_file(
+    let result = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         copying,
         TargetName::X86_64Linux,

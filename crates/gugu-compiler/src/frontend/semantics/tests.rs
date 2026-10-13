@@ -10,17 +10,30 @@ pub(super) fn accepts(source: &str) -> bool {
     }
     c.is_success()
 }
+
+/// 逐条断言的语义用例：一条断言一次整体编译（约 1 秒），聚合会让单个测试超过 3 秒上限，
+/// 因此一行一个测试。`true` 表示该源码必须被接受，`false` 表示必须被拒绝。
+macro_rules! accept_cases {
+    ($($name:ident: $accept:literal, $source:literal;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                assert_eq!(accepts($source), $accept);
+            }
+        )*
+    };
+}
+
+pub(super) use accept_cases;
 #[cfg(feature = "slow-tests")]
-#[test]
-fn initialization_merges_only_reachable_predecessors() {
-    assert!(accepts(
-        "fn choose(b: bool) int { let x: int\n if b { x = 1 } else { return 2 }\n x }\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "fn choose(b: bool) int { let x: int\n if b { x = 1 }\n x }\nfn main() {}"
-    ));
-    assert!(accepts("fn main() { let x = 1\n let x = x + 1\n _ = x }"));
-    assert!(!accepts("fn main() { let x: int\n _ = x }"));
+accept_cases! {
+    initialization_merges_only_reachable_predecessors_00: true,
+        "fn choose(b: bool) int { let x: int\n if b { x = 1 } else { return 2 }\n x }\nfn main() {}";
+    initialization_merges_only_reachable_predecessors_01: false,
+        "fn choose(b: bool) int { let x: int\n if b { x = 1 }\n x }\nfn main() {}";
+    initialization_merges_only_reachable_predecessors_02: true,
+        "fn main() { let x = 1\n let x = x + 1\n _ = x }";
+    initialization_merges_only_reachable_predecessors_03: false, "fn main() { let x: int\n _ = x }";
 }
 #[cfg(feature = "slow-tests")]
 #[test]
@@ -47,24 +60,18 @@ fn operators_and_loop_exit_types_are_checked() {
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn initializers_reject_cycles_and_separate_lazy_domains() {
-    assert!(accepts(
-        "static A: int = B + 1\nstatic B: int = 2\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "static A: int = B\nstatic B: int = A\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "static A: int = f()\nfn f() int = A\nfn main() {}"
-    ));
-    assert!(accepts(
-        "#[coroutine_local] static A: int = A\n#[os_thread_local] static B: int = B\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "#[coroutine_local] static A: int = 1\nstatic B: int = A\nfn main() {}"
-    ));
-    assert!(!accepts("fn main(_: int) {}"));
+accept_cases! {
+    initializers_reject_cycles_and_separate_lazy_domains_00: true,
+        "static A: int = B + 1\nstatic B: int = 2\nfn main() {}";
+    initializers_reject_cycles_and_separate_lazy_domains_01: false,
+        "static A: int = B\nstatic B: int = A\nfn main() {}";
+    initializers_reject_cycles_and_separate_lazy_domains_02: false,
+        "static A: int = f()\nfn f() int = A\nfn main() {}";
+    initializers_reject_cycles_and_separate_lazy_domains_03: true,
+        "#[coroutine_local] static A: int = A\n#[os_thread_local] static B: int = B\nfn main() {}";
+    initializers_reject_cycles_and_separate_lazy_domains_04: false,
+        "#[coroutine_local] static A: int = 1\nstatic B: int = A\nfn main() {}";
+    initializers_reject_cycles_and_separate_lazy_domains_05: false, "fn main(_: int) {}";
 }
 
 #[cfg(feature = "slow-tests")]
@@ -79,128 +86,97 @@ fn local_static_does_not_capture_automatic_slots() {
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn literal_bounds_and_signed_patterns() {
-    assert!(accepts(
-        "fn f(v: i8) int { match v { -128 => 0, _ => 1 } }\nfn main() { let n: i8 = -128\n _ = n }"
-    ));
-    assert!(!accepts("fn main() { let n: i8 = 128 }"));
-    assert!(!accepts("fn main() { let n: i8 = -129 }"));
-    assert!(accepts(
-        "fn main() { let n: u128 = 340282366920938463463374607431768211455\n _ = n }"
-    ));
-    assert!(!accepts(
-        "fn main() { let n: u128 = 340282366920938463463374607431768211456 }"
-    ));
+accept_cases! {
+    literal_bounds_and_signed_patterns_00: true,
+        "fn f(v: i8) int { match v { -128 => 0, _ => 1 } }\nfn main() { let n: i8 = -128\n _ = n }";
+    literal_bounds_and_signed_patterns_01: false, "fn main() { let n: i8 = 128 }";
+    literal_bounds_and_signed_patterns_02: false, "fn main() { let n: i8 = -129 }";
+    literal_bounds_and_signed_patterns_03: true,
+        "fn main() { let n: u128 = 340282366920938463463374607431768211455\n _ = n }";
+    literal_bounds_and_signed_patterns_04: false,
+        "fn main() { let n: u128 = 340282366920938463463374607431768211456 }";
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn try_failures_join_initialization_before_the_expression() {
-    assert!(accepts(
-        "fn f(o: Option[int]) Option[int] { let x = o?\n Some(x) }\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "fn f(o: Option[int]) int { let x: int\n let result: Option[int] = try { let y = o?\n x = y\n y }\n x }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn f(o: Option[int]) Option[int] { let result = try { o? + 1 }\n result }\nfn main() {}"
-    ));
+accept_cases! {
+    try_failures_join_initialization_before_the_expression_00: true,
+        "fn f(o: Option[int]) Option[int] { let x = o?\n Some(x) }\nfn main() {}";
+    try_failures_join_initialization_before_the_expression_01: false,
+        "fn f(o: Option[int]) int { let x: int\n let result: Option[int] = try { let y = o?\n x = y\n y }\n x }\nfn main() {}";
+    try_failures_join_initialization_before_the_expression_02: true,
+        "fn f(o: Option[int]) Option[int] { let result = try { o? + 1 }\n result }\nfn main() {}";
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn deferred_blocks_read_at_exit_and_calls_capture_at_registration() {
-    assert!(accepts(
-        "fn sink(v: int) {}\nfn main() { let x: int\n defer { sink(x) }\n x = 7 }"
-    ));
-    assert!(!accepts(
-        "fn sink(v: int) {}\nfn main() { let x: int\n defer sink(x)\n x = 7 }"
-    ));
-    assert!(!accepts("fn main() { defer { return } }"));
-    assert!(accepts(
-        "fn main() { defer panic(\"延迟\")\n let value = 3\n _ = value }"
-    ));
-    assert!(!accepts(
-        "fn sink(v: int) {}\nfn f(b: bool) { let x: int\n defer { sink(x) }\n if b { return }\n x = 7 }\nfn main() {}"
-    ));
+accept_cases! {
+    deferred_blocks_read_at_exit_and_calls_capture_at_registration_00: true,
+        "fn sink(v: int) {}\nfn main() { let x: int\n defer { sink(x) }\n x = 7 }";
+    deferred_blocks_read_at_exit_and_calls_capture_at_registration_01: false,
+        "fn sink(v: int) {}\nfn main() { let x: int\n defer sink(x)\n x = 7 }";
+    deferred_blocks_read_at_exit_and_calls_capture_at_registration_02: false,
+        "fn main() { defer { return } }";
+    deferred_blocks_read_at_exit_and_calls_capture_at_registration_03: true,
+        "fn main() { defer panic(\"延迟\")\n let value = 3\n _ = value }";
+    deferred_blocks_read_at_exit_and_calls_capture_at_registration_04: false,
+        "fn sink(v: int) {}\nfn f(b: bool) { let x: int\n defer { sink(x) }\n if b { return }\n x = 7 }\nfn main() {}";
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn places_preserve_references_and_reject_constants() {
-    assert!(accepts(
-        "fn f(p: &int) int { *p = 2\n *p }\nfn main() { let x = 0\n _ = f(&x) }"
-    ));
-    assert!(!accepts("const N = 1\nfn main() { N = 2 }"));
-    assert!(!accepts("fn main() { let p = &1 }"));
-    assert!(accepts("fn main() { let a = [1, 2]\n a[0] = 3 }"));
+accept_cases! {
+    places_preserve_references_and_reject_constants_00: true,
+        "fn f(p: &int) int { *p = 2\n *p }\nfn main() { let x = 0\n _ = f(&x) }";
+    places_preserve_references_and_reject_constants_01: false, "const N = 1\nfn main() { N = 2 }";
+    places_preserve_references_and_reject_constants_02: false, "fn main() { let p = &1 }";
+    places_preserve_references_and_reject_constants_03: true, "fn main() { let a = [1, 2]\n a[0] = 3 }";
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn numeric_inference_has_no_implicit_scalar_conversion() {
-    assert!(accepts(
-        "fn f(x: i8) bool { 1 == x }\nfn main() { let n = 1\n let x: i8 = n + 1\n _ = x }"
-    ));
-    assert!(!accepts("fn f(x: i8, y: int) int { x + y }\nfn main() {}"));
-    assert!(accepts(
-        "fn main() { let x = int(1.5)\n let y = byte(x)\n _ = y }"
-    ));
-    assert!(!accepts("fn main() { let x = bool(1) }"));
-    assert!(!accepts(
-        "struct S {}\nfn main() { _ = (S {},) == (S {},) }"
-    ));
+accept_cases! {
+    numeric_inference_has_no_implicit_scalar_conversion_00: true,
+        "fn f(x: i8) bool { 1 == x }\nfn main() { let n = 1\n let x: i8 = n + 1\n _ = x }";
+    numeric_inference_has_no_implicit_scalar_conversion_01: false,
+        "fn f(x: i8, y: int) int { x + y }\nfn main() {}";
+    numeric_inference_has_no_implicit_scalar_conversion_02: true,
+        "fn main() { let x = int(1.5)\n let y = byte(x)\n _ = y }";
+    numeric_inference_has_no_implicit_scalar_conversion_03: false, "fn main() { let x = bool(1) }";
+    numeric_inference_has_no_implicit_scalar_conversion_04: false,
+        "struct S {}\nfn main() { _ = (S {},) == (S {},) }";
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn patterns_cover_references_slices_ranges_and_alternatives() {
-    assert!(accepts(
-        "fn f(xs: &[bool]) int { match xs { [] => 0, [true, ..] => 1, [false, ..] => 2 } }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn f(c: char) int { match c { '\\0'..'\\u{10ffff}' => 0, '\\u{10ffff}' => 1 } }\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "fn f(v: int) int { match v { 2..2 => 0, _ => 1 } }\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "fn f(t: (int, int)) { let (x, x) = t }\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "fn f(o: Option[int]) int { match o { Some(x) | None => 0 } }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn f(v: int) int { match v { x @ 0..10 | x @ 10..20 => x, _ => 0 } }\nfn main() {}"
-    ));
+accept_cases! {
+    patterns_cover_references_slices_ranges_and_alternatives_00: true,
+        "fn f(xs: &[bool]) int { match xs { [] => 0, [true, ..] => 1, [false, ..] => 2 } }\nfn main() {}";
+    patterns_cover_references_slices_ranges_and_alternatives_01: true,
+        "fn f(c: char) int { match c { '\\0'..'\\u{10ffff}' => 0, '\\u{10ffff}' => 1 } }\nfn main() {}";
+    patterns_cover_references_slices_ranges_and_alternatives_02: false,
+        "fn f(v: int) int { match v { 2..2 => 0, _ => 1 } }\nfn main() {}";
+    patterns_cover_references_slices_ranges_and_alternatives_03: false,
+        "fn f(t: (int, int)) { let (x, x) = t }\nfn main() {}";
+    patterns_cover_references_slices_ranges_and_alternatives_04: false,
+        "fn f(o: Option[int]) int { match o { Some(x) | None => 0 } }\nfn main() {}";
+    patterns_cover_references_slices_ranges_and_alternatives_05: true,
+        "fn f(v: int) int { match v { x @ 0..10 | x @ 10..20 => x, _ => 0 } }\nfn main() {}";
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn rest_patterns_and_product_coverage_preserve_types() {
-    assert!(!accepts(
-        "fn f(xs: &[bool]) &[bool] { let rest @ .. = xs\n rest }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn f(xs: &[bool]) &[bool] { let [rest @ ..] = xs\n rest }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn f(xs: [bool; 4]) [bool; 2] { let [_, rest @ .., _] = xs\n rest }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn f(x: &bool) &bool { match x { same @ true | same @ false => same } }\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "fn f(pair: (bool, bool)) int { match pair { (true, true) => 1, (false, false) => 0 } }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn main() { let n = match 1 { 1 => 2, _ => 3 }\n _ = n }"
-    ));
-    assert!(accepts("fn main() { if let Some(1) = Some(2) {} }"));
-    assert!(accepts(
-        "fn f(b: bool) { let n: int\n match b { _ if { n = 1\n false } => (), _ => { _ = n } } }\nfn main() {}"
-    ));
+accept_cases! {
+    rest_patterns_and_product_coverage_preserve_types_00: false,
+        "fn f(xs: &[bool]) &[bool] { let rest @ .. = xs\n rest }\nfn main() {}";
+    rest_patterns_and_product_coverage_preserve_types_01: true,
+        "fn f(xs: &[bool]) &[bool] { let [rest @ ..] = xs\n rest }\nfn main() {}";
+    rest_patterns_and_product_coverage_preserve_types_02: true,
+        "fn f(xs: [bool; 4]) [bool; 2] { let [_, rest @ .., _] = xs\n rest }\nfn main() {}";
+    rest_patterns_and_product_coverage_preserve_types_03: true,
+        "fn f(x: &bool) &bool { match x { same @ true | same @ false => same } }\nfn main() {}";
+    rest_patterns_and_product_coverage_preserve_types_04: false,
+        "fn f(pair: (bool, bool)) int { match pair { (true, true) => 1, (false, false) => 0 } }\nfn main() {}";
+    rest_patterns_and_product_coverage_preserve_types_05: true,
+        "fn main() { let n = match 1 { 1 => 2, _ => 3 }\n _ = n }";
+    rest_patterns_and_product_coverage_preserve_types_06: true,
+        "fn main() { if let Some(1) = Some(2) {} }";
+    rest_patterns_and_product_coverage_preserve_types_07: true,
+        "fn f(b: bool) { let n: int\n match b { _ if { n = 1\n false } => (), _ => { _ = n } } }\nfn main() {}";
 }
 
 #[cfg(feature = "slow-tests")]
@@ -266,29 +242,22 @@ fn let_else_and_refutability_follow_spec() {
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn struct_patterns_follow_record_shape_rules() {
-    assert!(accepts(
-        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, y } = p\n x + y }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x: a, y } = p\n a + y }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, .. } = p\n x }\nfn main() {}"
-    ));
+accept_cases! {
+    struct_patterns_follow_record_shape_rules_00: true,
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, y } = p\n x + y }\nfn main() {}";
+    struct_patterns_follow_record_shape_rules_01: true,
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x: a, y } = p\n a + y }\nfn main() {}";
+    struct_patterns_follow_record_shape_rules_02: true,
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, .. } = p\n x }\nfn main() {}";
     // 省略字段必须写 ..
-    assert!(!accepts(
-        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x } = p\n x }\nfn main() {}"
-    ));
+    struct_patterns_follow_record_shape_rules_03: false,
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x } = p\n x }\nfn main() {}";
     // 字段必须存在
-    assert!(!accepts(
-        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { z, .. } = p\n z }\nfn main() {}"
-    ));
+    struct_patterns_follow_record_shape_rules_04: false,
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { z, .. } = p\n z }\nfn main() {}";
     // 同一字段不能出现两次
-    assert!(!accepts(
-        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, x } = p\n x }\nfn main() {}"
-    ));
+    struct_patterns_follow_record_shape_rules_05: false,
+        "struct Point { x: int, y: int }\nfn f(p: Point) int { let Point { x, x } = p\n x }\nfn main() {}";
 }
 
 #[cfg(feature = "slow-tests")]
@@ -361,41 +330,31 @@ fn array_or_and_range_patterns_validate_shapes() {
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn condition_bindings_and_loop_initialization_follow_execution() {
-    assert!(accepts(
-        "fn f(o: Option[int]) int { if let Some(x) = o && x > 0 { x } else { 0 } }\nfn main() {}"
-    ));
-    assert!(!accepts("fn main() { if let x = 1 {} }"));
-    assert!(!accepts(
-        "fn f(o: Option[int]) { if let Some(x) = o {} else { _ = x } }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn main() { let x: int\n while { x = 1\n false } {}\n _ = x }"
-    ));
-    assert!(!accepts(
-        "fn main() { let x: int\n while false { x = 1 }\n _ = x }"
-    ));
+accept_cases! {
+    condition_bindings_and_loop_initialization_follow_execution_00: true,
+        "fn f(o: Option[int]) int { if let Some(x) = o && x > 0 { x } else { 0 } }\nfn main() {}";
+    condition_bindings_and_loop_initialization_follow_execution_01: false,
+        "fn main() { if let x = 1 {} }";
+    condition_bindings_and_loop_initialization_follow_execution_02: false,
+        "fn f(o: Option[int]) { if let Some(x) = o {} else { _ = x } }\nfn main() {}";
+    condition_bindings_and_loop_initialization_follow_execution_03: true,
+        "fn main() { let x: int\n while { x = 1\n false } {}\n _ = x }";
+    condition_bindings_and_loop_initialization_follow_execution_04: false,
+        "fn main() { let x: int\n while false { x = 1 }\n _ = x }";
 }
 
 #[cfg(feature = "slow-tests")]
-#[test]
-fn function_defer_outlives_nested_blocks() {
-    assert!(accepts(
-        "fn sink(x: int) {}\nfn main() { let x: int\n { defer ret { sink(x) } }\n x = 1 }"
-    ));
-    assert!(!accepts(
-        "fn sink(x: int) {}\nfn main() { let x: int\n { defer ret { sink(x) } } }"
-    ));
-    assert!(!accepts(
-        "fn main() { defer { let x: bool = 1 }\n loop {} }"
-    ));
-    assert!(accepts(
-        "fn sink(x: int) {}\nfn f(flag: bool) { let x: int\n if flag { defer ret { sink(x) }\n x = 1 } }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "fn sink(x: int) {}\nfn f(flag: bool) { if flag { let x = 1\n defer ret { sink(x) } } }\nfn main() {}"
-    ));
+accept_cases! {
+    function_defer_outlives_nested_blocks_00: true,
+        "fn sink(x: int) {}\nfn main() { let x: int\n { defer ret { sink(x) } }\n x = 1 }";
+    function_defer_outlives_nested_blocks_01: false,
+        "fn sink(x: int) {}\nfn main() { let x: int\n { defer ret { sink(x) } } }";
+    function_defer_outlives_nested_blocks_02: false,
+        "fn main() { defer { let x: bool = 1 }\n loop {} }";
+    function_defer_outlives_nested_blocks_03: true,
+        "fn sink(x: int) {}\nfn f(flag: bool) { let x: int\n if flag { defer ret { sink(x) }\n x = 1 } }\nfn main() {}";
+    function_defer_outlives_nested_blocks_04: true,
+        "fn sink(x: int) {}\nfn f(flag: bool) { if flag { let x = 1\n defer ret { sink(x) } } }\nfn main() {}";
 }
 
 pub(super) fn frontend(
@@ -621,7 +580,7 @@ fn runtime_checks_survive_queries_and_reach_the_backend_plan() {
     );
     assert_eq!(operand_type(*float), &super::model::Ty::Float(64));
     assert_eq!(operand_type(*scalar), &super::model::Ty::int());
-    let compiler = Compiler::new();
+    let compiler = Compiler::shared();
     let first = compiler.compile(CompileRequest::single_file(
         "main.gg",
         "fn main() { let x = 1 }",

@@ -110,11 +110,9 @@ fn gc_atomic_authorization_rejects_aliases_and_counterfeit_runtime_paths() {
             let source = format!(
                 "use std.runtime.{{atomic_fetch_and_acq_rel as and_mask}}\nfn main() {{ let value: uint = 0\n unsafe {{ let p = std.ptr.addr_of(value)\n _ = {call} }} }}"
             );
-            let compilation = crate::Compiler::new().compile(crate::CompileRequest::single_file(
-                path,
-                &source,
-                crate::TargetName::X86_64Linux,
-            ));
+            let compilation = crate::Compiler::shared().compile(
+                crate::CompileRequest::single_file(path, &source, crate::TargetName::X86_64Linux),
+            );
             if path.starts_with("std/runtime/") {
                 assert!(
                     compilation.diagnostics().items().iter().any(|diagnostic| {

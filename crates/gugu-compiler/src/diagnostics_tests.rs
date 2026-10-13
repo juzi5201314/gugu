@@ -1405,18 +1405,93 @@ fn all_is_dense_and_ascending() {
 
 /// 全部活体输入必须与实装诊断逐项一致。
 ///
-/// 这是集成测试，遍历68个用例各编译一次，单次耗时60秒以上；移出默认套件。
+/// `CASES` 表尾的单例整体编译约 0.6–2.9 秒，其余行不足 0.1 秒；重活行各自成段、
+/// 轻活行按十行成段，单个测试便远低于 3 秒上限。
+#[cfg(feature = "slow-tests")]
+const CASE_GROUPS: &[&[usize]] = &[
+    &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9],
+    &[10, 11, 12, 13, 14, 15, 16, 17, 18, 19],
+    &[20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+    &[30, 31, 32, 33, 34, 35, 36, 37, 38, 39],
+    &[40, 41, 42, 43, 44, 45, 46, 47, 48, 49],
+    &[50, 51, 52, 53, 54, 55, 56, 57, 58, 59],
+    &[60, 61, 62, 63, 64, 66, 67, 68],
+    &[72, 73, 74, 75, 79],
+    &[65],
+    &[69],
+    &[70],
+    &[71],
+    &[76],
+    &[77],
+    &[78],
+];
+
+/// 核对一段契约表：段内每一行都逐项比对实装诊断。
+#[cfg(feature = "slow-tests")]
+fn run_case_group(group: usize) {
+    let indices = CASE_GROUPS[group];
+    let runner = Runner::new();
+    let mut problems = Vec::new();
+    for &index in indices {
+        problems.extend(drift(&runner, &CASES[index]));
+    }
+    assert!(
+        problems.is_empty(),
+        "诊断契约漂移（实装行为与契约表不一致）：\n{}",
+        problems.join("\n")
+    );
+}
+
+/// 分段必须恰好覆盖整张契约表：新增行没有落段时本测试失败。
 #[cfg(feature = "slow-tests")]
 #[test]
-fn cases_match_the_compiler() {
-    let runner = Runner::new();
-    let drift = CASES
+fn case_groups_cover_every_row() {
+    let mut covered = vec![false; CASES.len()];
+    for indices in CASE_GROUPS {
+        for &index in *indices {
+            assert!(!covered[index], "契约表下标 {index} 出现在多个分段");
+            covered[index] = true;
+        }
+    }
+    let missing = covered
         .iter()
-        .flat_map(|case| drift(&runner, case))
+        .enumerate()
+        .filter(|(_, seen)| !**seen)
+        .map(|(index, _)| index)
         .collect::<Vec<_>>();
     assert!(
-        drift.is_empty(),
-        "诊断契约漂移（实装行为与契约表不一致）：\n{}",
-        drift.join("\n")
+        missing.is_empty(),
+        "以下契约表下标没有落到任何分段：{missing:?}"
     );
+}
+
+#[cfg(feature = "slow-tests")]
+macro_rules! case_group_tests {
+    ($($name:ident = $group:expr;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                run_case_group($group);
+            }
+        )*
+    };
+}
+
+#[cfg(feature = "slow-tests")]
+case_group_tests! {
+    cases_match_the_compiler_light_00 = 0;
+    cases_match_the_compiler_light_01 = 1;
+    cases_match_the_compiler_light_02 = 2;
+    cases_match_the_compiler_light_03 = 3;
+    cases_match_the_compiler_light_04 = 4;
+    cases_match_the_compiler_light_05 = 5;
+    cases_match_the_compiler_light_06 = 6;
+    cases_match_the_compiler_light_07 = 7;
+    cases_match_the_compiler_mono_divergence = 8;
+    cases_match_the_compiler_large_copy_00 = 9;
+    cases_match_the_compiler_large_copy_01 = 10;
+    cases_match_the_compiler_large_copy_02 = 11;
+    cases_match_the_compiler_unused_must_use_00 = 12;
+    cases_match_the_compiler_unused_must_use_01 = 13;
+    cases_match_the_compiler_unused_must_use_02 = 14;
 }

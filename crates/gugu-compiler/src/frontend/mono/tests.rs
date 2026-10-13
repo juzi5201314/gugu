@@ -405,7 +405,7 @@ fn analysis_world_records_instances_by_mono_key() {
 
 #[test]
 fn empty_package_has_empty_mono_world() {
-    let compilation = crate::Compiler::new().compile(crate::CompileRequest::empty_package(
+    let compilation = crate::Compiler::shared().compile(crate::CompileRequest::empty_package(
         crate::TargetName::X86_64Linux,
     ));
     assert!(compilation.is_success());

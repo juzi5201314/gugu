@@ -256,7 +256,7 @@ fn static_access_compiles_with_lazy_initializer_guard() {
         "static M: int = 41\nfn take() int {\n static L: int = 9\n L + M\n}\nfn main() {\n if take() != 50 { panic(\"static\") }\n if take() != 50 { panic(\"static-again\") }\n}",
     ];
     for (index, source) in programs.into_iter().enumerate() {
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::shared().compile(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,

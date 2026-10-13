@@ -3,7 +3,7 @@
 use crate::{CompileRequest, Compiler, DiagnosticCode, TargetName};
 
 fn compile(source: &str) -> crate::Compilation {
-    Compiler::new().compile(CompileRequest::single_file(
+    Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -343,7 +343,7 @@ fn macro_free_sources_keep_baseline_pipeline() {
 #[ignore = "integration test with full compilation"]
 fn dual_target_macro_smoke() {
     for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::shared().compile(CompileRequest::single_file(
             "main.gg",
             "comptime source {\n    std.syntax.parse_items(\"fn gen() int { 5 }\")\n}\nfn main() { _ = gen() }",
             target,

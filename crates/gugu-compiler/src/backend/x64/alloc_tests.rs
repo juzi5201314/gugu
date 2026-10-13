@@ -50,7 +50,7 @@ fn main() {
 ";
 
 fn compile(source: &str) -> crate::Compilation {
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,

@@ -1,4 +1,4 @@
-use super::tests::accepts;
+use super::tests::{accept_cases, accepts};
 
 #[test]
 fn inherent_methods_accept_receiver_and_type_ufcs_forms() {
@@ -75,14 +75,11 @@ fn negative_impls_remove_only_strictly_more_general_positive_candidates() {
     ));
 }
 
-#[test]
-fn user_operators_dispatch_without_implicit_scalar_conversion() {
-    assert!(accepts(
-        "struct Point { x: int }\nimpl Add[Point] for Point { type Output = Point\n fn add(self, rhs: Point) Point = Point { x: self.x + rhs.x } }\nimpl Eq for Point { fn eq(self: &Self, other: &Self) bool = self.x == other.x }\nfn main() { let a = Point { x: 1 }\n let b = a + a\n _ = a == b }"
-    ));
-    assert!(!accepts(
-        "struct Point {}\nimpl Add[int] for Point { type Output = int\n fn add(self, rhs: int) int = rhs }\nfn main() { let rhs: i8 = 1\n _ = Point {} + rhs }"
-    ));
+accept_cases! {
+    user_operators_dispatch_without_implicit_scalar_conversion_00: true,
+        "struct Point { x: int }\nimpl Add[Point] for Point { type Output = Point\n fn add(self, rhs: Point) Point = Point { x: self.x + rhs.x } }\nimpl Eq for Point { fn eq(self: &Self, other: &Self) bool = self.x == other.x }\nfn main() { let a = Point { x: 1 }\n let b = a + a\n _ = a == b }";
+    user_operators_dispatch_without_implicit_scalar_conversion_01: false,
+        "struct Point {}\nimpl Add[int] for Point { type Output = int\n fn add(self, rhs: int) int = rhs }\nfn main() { let rhs: i8 = 1\n _ = Point {} + rhs }";
 }
 
 #[test]
@@ -96,14 +93,11 @@ fn forbidden_builtin_impls_and_forbid_downgrades_are_rejected() {
     ));
 }
 
-#[test]
-fn generic_associated_calls_preserve_type_arguments_and_field_calls() {
-    assert!(accepts(
-        "struct Box[T] { value: T }\nimpl Box[T] { fn new(value: T) Self = Self { value }\n fn get(self) T = self.value }\nfn main() { let b = Box[int]::new(1)\n let n: int = b.get()\n _ = n }"
-    ));
-    assert!(accepts(
-        "struct Holder { callback: fn(int) int }\nfn identity(x: int) int = x\nfn main() { let h = Holder { callback: identity }\n _ = h.callback(1)\n _ = (h).callback(2) }"
-    ));
+accept_cases! {
+    generic_associated_calls_preserve_type_arguments_and_field_calls_00: true,
+        "struct Box[T] { value: T }\nimpl Box[T] { fn new(value: T) Self = Self { value }\n fn get(self) T = self.value }\nfn main() { let b = Box[int]::new(1)\n let n: int = b.get()\n _ = n }";
+    generic_associated_calls_preserve_type_arguments_and_field_calls_01: true,
+        "struct Holder { callback: fn(int) int }\nfn identity(x: int) int = x\nfn main() { let h = Holder { callback: identity }\n _ = h.callback(1)\n _ = (h).callback(2) }";
 }
 
 #[test]
@@ -126,17 +120,13 @@ fn bounded_impls_are_not_available_without_their_evidence() {
     ));
 }
 
-#[test]
-fn lint_forbid_is_scoped_and_cfg_removed_nodes_do_not_participate() {
-    assert!(accepts(
-        "#[forbid(unused)] fn f() {}\n#[allow(unused)] fn main() {}"
-    ));
-    assert!(accepts(
-        "#![forbid(unused)]\n#[cfg(false)] #[allow(unused)] fn absent() {}\nfn main() {}"
-    ));
-    assert!(!accepts(
-        "#[forbid(unused)] fn main() { #[warn(unused)] let x = 1\n _ = x }"
-    ));
+accept_cases! {
+    lint_forbid_is_scoped_and_cfg_removed_nodes_do_not_participate_00: true,
+        "#[forbid(unused)] fn f() {}\n#[allow(unused)] fn main() {}";
+    lint_forbid_is_scoped_and_cfg_removed_nodes_do_not_participate_01: true,
+        "#![forbid(unused)]\n#[cfg(false)] #[allow(unused)] fn absent() {}\nfn main() {}";
+    lint_forbid_is_scoped_and_cfg_removed_nodes_do_not_participate_02: false,
+        "#[forbid(unused)] fn main() { #[warn(unused)] let x = 1\n _ = x }";
 }
 
 #[test]
@@ -159,20 +149,15 @@ fn builtin_arithmetic_impls_serve_generic_bounds_and_string_operators() {
     ));
 }
 
-#[test]
-fn associated_function_generic_order_and_method_contracts_are_preserved() {
-    assert!(accepts(
-        "trait Convert[Z, A] { fn convert(self, value: Z) A }\nstruct Point {}\nimpl Convert[int, bool] for Point { fn convert(self, value: int) bool = true }\nfn main() { let b: bool = Convert[int, bool]::convert(Point {}, 1)\n _ = b }"
-    ));
-    assert!(accepts(
-        "trait Identity { fn identity[T](self, value: T) T }\nstruct Point {}\nimpl Identity for Point { fn identity[U](self, value: U) U = value }\nfn main() { _ = Point {}.identity::[int](1) }"
-    ));
-    assert!(!accepts(
-        "trait Marker {}\ntrait Identity { fn identity[T](self, value: T) T }\nstruct Point {}\nimpl Identity for Point { fn identity[T: Marker](self, value: T) T = value }\nfn main() {}"
-    ));
-    assert!(accepts(
-        "trait Create { fn create(value: int) Self }\nstruct Point { value: int }\nimpl Create for Point { fn create(value: int) Self = Self { value } }\nfn main() { let point: Point = Create::create(1)\n _ = point }"
-    ));
+accept_cases! {
+    associated_function_generic_order_and_method_contracts_are_preserved_00: true,
+        "trait Convert[Z, A] { fn convert(self, value: Z) A }\nstruct Point {}\nimpl Convert[int, bool] for Point { fn convert(self, value: int) bool = true }\nfn main() { let b: bool = Convert[int, bool]::convert(Point {}, 1)\n _ = b }";
+    associated_function_generic_order_and_method_contracts_are_preserved_01: true,
+        "trait Identity { fn identity[T](self, value: T) T }\nstruct Point {}\nimpl Identity for Point { fn identity[U](self, value: U) U = value }\nfn main() { _ = Point {}.identity::[int](1) }";
+    associated_function_generic_order_and_method_contracts_are_preserved_02: false,
+        "trait Marker {}\ntrait Identity { fn identity[T](self, value: T) T }\nstruct Point {}\nimpl Identity for Point { fn identity[T: Marker](self, value: T) T = value }\nfn main() {}";
+    associated_function_generic_order_and_method_contracts_are_preserved_03: true,
+        "trait Create { fn create(value: int) Self }\nstruct Point { value: int }\nimpl Create for Point { fn create(value: int) Self = Self { value } }\nfn main() { let point: Point = Create::create(1)\n _ = point }";
 }
 
 #[test]
@@ -252,34 +237,30 @@ fn associated_constants_retain_non_integer_types_and_specialization_values() {
     ));
 }
 
-#[test]
-fn user_try_preserves_error_identity_and_records_conversion_calls() {
-    assert!(accepts(
-        "struct Attempt { value: Result[int, string] }\nimpl Try for Attempt { type Value = int\n type Error = string\n fn branch(self) Result[int, string] = self.value\n fn from_value(value: int) Self = Self { value: Ok(value) }\n fn from_error(error: string) Self = Self { value: Err(error) } }\nfn increment(value: Attempt) Attempt = try { value? + 1 }\nfn main() { _ = increment(Attempt { value: Ok(1) }) }"
-    ));
-    assert!(!accepts(
-        "struct Attempt { value: Result[int, string] }\nimpl Try for Attempt { type Value = int\n type Error = string\n fn branch(self) Result[int, string] = self.value\n fn from_value(value: int) Self = Self { value: Ok(value) }\n fn from_error(error: string) Self = Self { value: Err(error) } }\nfn invalid(value: Attempt) Result[int, bool] = Ok(value?)\nfn main() {}"
-    ));
+accept_cases! {
+    user_try_preserves_error_identity_and_records_conversion_calls_00: true,
+        "struct Attempt { value: Result[int, string] }\nimpl Try for Attempt { type Value = int\n type Error = string\n fn branch(self) Result[int, string] = self.value\n fn from_value(value: int) Self = Self { value: Ok(value) }\n fn from_error(error: string) Self = Self { value: Err(error) } }\nfn increment(value: Attempt) Attempt = try { value? + 1 }\nfn main() { _ = increment(Attempt { value: Ok(1) }) }";
+    user_try_preserves_error_identity_and_records_conversion_calls_01: false,
+        "struct Attempt { value: Result[int, string] }\nimpl Try for Attempt { type Value = int\n type Error = string\n fn branch(self) Result[int, string] = self.value\n fn from_value(value: int) Self = Self { value: Ok(value) }\n fn from_error(error: string) Self = Self { value: Err(error) } }\nfn invalid(value: Attempt) Result[int, bool] = Ok(value?)\nfn main() {}";
 }
 
-#[test]
-fn into_iter_checks_iterator_contract_and_item_projection() {
-    assert!(accepts(
-        "struct Counter {}\nimpl Iter for Counter { type Item = int\n fn next(self: &Self) Option[int] = None }\nimpl IntoIter for Counter { type Item = int\n type Iter = Counter\n fn into_iter(self) Counter = self }\nfn main() { for value in (Counter {}) { let n: int = value\n _ = n } }"
-    ));
-    assert!(!accepts(
-        "struct Counter {}\nimpl Iter for Counter { type Item = int\n fn next(self: &Self) Option[int] = None }\nimpl IntoIter for Counter { type Item = bool\n type Iter = Counter\n fn into_iter(self) Counter = self }\nfn main() {}"
-    ));
+accept_cases! {
+    into_iter_checks_iterator_contract_and_item_projection_00: true,
+        "struct Counter {}\nimpl Iter for Counter { type Item = int\n fn next(self: &Self) Option[int] = None }\nimpl IntoIter for Counter { type Item = int\n type Iter = Counter\n fn into_iter(self) Counter = self }\nfn main() { for value in (Counter {}) { let n: int = value\n _ = n } }";
+    into_iter_checks_iterator_contract_and_item_projection_01: false,
+        "struct Counter {}\nimpl Iter for Counter { type Item = int\n fn next(self: &Self) Option[int] = None }\nimpl IntoIter for Counter { type Item = bool\n type Iter = Counter\n fn into_iter(self) Counter = self }\nfn main() {}";
 }
 
+accept_cases! {
+    associated_items_resolve_trait_qualification_and_forward_aliases_00: true,
+        "trait Dim { const N: int\n type A\n type B }\nstruct Point {}\nimpl Dim for Point { const N = 4\n type A = Self::B\n type B = int }\nfn main() { let n: Dim::A = Dim::N\n _ = n }";
+    associated_items_resolve_trait_qualification_and_forward_aliases_01: false,
+        "trait Dim { type A\n type B }\nstruct Point {}\nimpl Dim for Point { type A = Self::B\n type B = Self::A }\nfn main() {}";
+}
+
+/// 跨模块前向别名：同一份 frontend 结果在两份源码上都要解析成功。
 #[test]
-fn associated_items_resolve_trait_qualification_and_forward_aliases() {
-    assert!(accepts(
-        "trait Dim { const N: int\n type A\n type B }\nstruct Point {}\nimpl Dim for Point { const N = 4\n type A = Self::B\n type B = int }\nfn main() { let n: Dim::A = Dim::N\n _ = n }"
-    ));
-    assert!(!accepts(
-        "trait Dim { type A\n type B }\nstruct Point {}\nimpl Dim for Point { type A = Self::B\n type B = Self::A }\nfn main() {}"
-    ));
+fn associated_items_resolve_across_modules() {
     let queries = crate::QueryEngine::new();
     super::tests::frontend(&[("main.gg", "use boxes\nfn main() { let b = boxes.Box[int]::new(1)\n let n: int = b.get()\n _ = n }"), ("boxes.gg", "pub struct Box[T] { value: T }\nimpl Box[T] { pub fn new(value: T) Self = Self { value }\n pub fn get(self) T = self.value }")], &queries).unwrap();
 }
@@ -328,54 +309,92 @@ fn core_prelude_traits_apply_conditionally() {
     ));
 }
 
+/// 编译一份 `main.gg`：lint 类用例只关心诊断与是否产出镜像。
+fn compile(source: &str) -> crate::Compilation {
+    crate::Compiler::shared().compile(crate::CompileRequest::single_file(
+        "main.gg",
+        source,
+        crate::TargetName::X86_64Linux,
+    ))
+}
+
+/// 该源码是否报告了指定诊断代码。
+fn reports(source: &str, code: crate::DiagnosticCode) -> bool {
+    compile(source)
+        .diagnostics()
+        .items()
+        .iter()
+        .any(|diagnostic| diagnostic.code() == code)
+}
+
 #[test]
-fn unused_must_use_is_a_lint_and_public_std_modules_are_importable() {
-    use crate::{CompileRequest, Compiler, DiagnosticCode, Severity, TargetName};
-    let compile = |source: &str| {
-        Compiler::new().compile(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Linux,
-        ))
-    };
-    let has = |source: &str, code: DiagnosticCode| {
-        compile(source)
-            .diagnostics()
-            .items()
-            .iter()
-            .any(|diagnostic| diagnostic.code() == code)
-    };
+fn unused_must_use_warns_by_default() {
     let warned = compile("fn main() { Some(1); }");
     assert!(warned.is_success());
     assert!(warned.diagnostics().items().iter().any(|diagnostic| {
-        diagnostic.code() == DiagnosticCode::UnusedMustUse
-            && diagnostic.severity() == Severity::Warning
+        diagnostic.code() == crate::DiagnosticCode::UnusedMustUse
+            && diagnostic.severity() == crate::Severity::Warning
     }));
+}
+
+#[test]
+fn unused_must_use_is_absent_when_the_value_is_kept() {
     let kept = compile("fn main() { _ = Some(1)\n let x = Some(1)\n _ = x }");
     assert!(kept.is_success());
     assert!(
         kept.diagnostics()
             .items()
             .iter()
-            .all(|diagnostic| diagnostic.code() != DiagnosticCode::UnusedMustUse)
+            .all(|diagnostic| diagnostic.code() != crate::DiagnosticCode::UnusedMustUse)
     );
+}
+
+#[test]
+fn denied_unused_must_use_fails_without_an_image_plan() {
     let denied = compile("#![deny(unused_must_use)]\nfn main() { Some(1); }");
     assert!(!denied.is_success());
     assert!(denied.image_plan().is_none());
+}
+
+#[test]
+fn allowed_unused_must_use_produces_no_lint() {
     let allowed = compile("#![allow(unused_must_use)]\nfn main() { Some(1); }");
     assert!(allowed.is_success());
-    assert!(!has(
-        "#![allow(unused_must_use)]\nfn main() { Some(1); }",
-        DiagnosticCode::UnusedMustUse
-    ));
-    assert!(has(
+    assert!(
+        allowed
+            .diagnostics()
+            .items()
+            .iter()
+            .all(|diagnostic| diagnostic.code() != crate::DiagnosticCode::UnusedMustUse)
+    );
+}
+
+#[test]
+fn must_use_function_result_reports_the_lint() {
+    assert!(reports(
         "#[must_use]\nfn answer() int = 1\nfn main() { answer(); }",
-        DiagnosticCode::UnusedMustUse
+        crate::DiagnosticCode::UnusedMustUse
     ));
-    assert!(has(
+}
+
+#[test]
+fn must_use_struct_value_reports_the_lint() {
+    assert!(reports(
         "#[must_use]\nstruct Token {}\nfn main() { Token {}; }",
-        DiagnosticCode::UnusedMustUse
+        crate::DiagnosticCode::UnusedMustUse
     ));
+}
+
+#[test]
+fn reserved_platform_install_name_is_rejected() {
+    assert!(reports(
+        "use std.runtime.platform.{install}\nfn main() { _ = install() }",
+        crate::DiagnosticCode::ReservedName
+    ));
+}
+
+#[test]
+fn public_std_modules_are_importable() {
     let imported = compile("use std.option\nfn main() {}");
     assert!(
         imported.is_success(),
@@ -389,8 +408,4 @@ fn unused_must_use_is_a_lint_and_public_std_modules_are_importable() {
             .iter()
             .any(|snapshot| snapshot.logical_path() == "std/option.gg")
     );
-    assert!(has(
-        "use std.runtime.platform.{install}\nfn main() { _ = install() }",
-        DiagnosticCode::ReservedName
-    ));
 }

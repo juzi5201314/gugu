@@ -6,7 +6,7 @@ use crate::frontend::ast::ItemKind;
 use crate::{CompileRequest, Compiler, DiagnosticCode, QueryEngine, TargetName};
 
 fn diagnostics_of(source: &str) -> Vec<DiagnosticCode> {
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,

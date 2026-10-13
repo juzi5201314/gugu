@@ -440,7 +440,7 @@ fn archive_member_resolves_an_unresolved_c_symbol() {
 #[ignore = "slow full compilation"]
 fn panic_message_constant_reaches_the_image() {
     let source = "fn main() { panic(\"boom\") }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
@@ -462,7 +462,7 @@ fn panic_message_constant_reaches_the_image() {
 #[ignore = "slow full compilation"]
 fn compiled_main_is_static_pie_without_interpreter() {
     let source = "fn main() {}";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
         TargetName::X86_64Linux,
