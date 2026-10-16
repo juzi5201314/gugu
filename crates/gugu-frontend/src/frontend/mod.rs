@@ -390,6 +390,7 @@ fn derive_world(
         entry_function,
         queries,
         runtime_paths,
+        prefix,
     )
     .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     Ok((names, derived))

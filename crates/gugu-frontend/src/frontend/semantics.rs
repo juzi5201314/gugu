@@ -66,6 +66,7 @@ pub(crate) fn check(
     entry: Option<model::CallableId>,
     queries: &crate::query::QueryEngine,
     runtime_paths: &std::collections::BTreeSet<String>,
+    prefix: Option<&super::prefix::BuiltinPrefix>,
 ) -> Result<DerivedWorld, Vec<Diagnostic>> {
     let model = model::Model::new(modules, names, runtime_paths)?;
     let (early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries)?;
@@ -81,10 +82,11 @@ pub(crate) fn check(
         entry,
         &dependency,
         queries,
+        prefix,
     )?;
     let gir = super::gir::build_world(&hir, queries, sources)?;
     let identities =
-        hir::identities(&model, names, &checked, sources).map_err(|error| vec![error])?;
+        hir::identities(&model, names, &checked, sources, prefix).map_err(|error| vec![error])?;
     let context = super::mono::keys::MonoContext::new(
         &model,
         &checked,

@@ -7,8 +7,8 @@ use crate::frontend::{ast, hir, names};
 use crate::{Diagnostic, DiagnosticCode, SourceMap, Span};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-pub(super) enum Origin {
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum Origin {
     Named(usize),
     Closure(CallableId),
     Async {
@@ -35,6 +35,10 @@ pub(crate) struct Identities {
     pub(crate) interfaces: Vec<hir::DefId>,
 }
 impl Identities {
+    /// 各 `HIR DefId` 的来源。编号前缀要求它按「物化内建块 + 会话追加」定序。
+    pub(crate) fn origins(&self) -> &[Origin] {
+        &self.origins
+    }
     pub(crate) fn item(&self, id: DefRef) -> hir::DefId {
         self.items[id.module][id.item.0 as usize].unwrap_or_else(|| {
             panic!(
@@ -64,6 +68,7 @@ pub(super) fn collect(
     names: &names::NameResolution,
     checked: &CheckedSemantics,
     sources: &SourceMap,
+    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<(Vec<hir::Definition>, Identities), Diagnostic> {
     let mut candidates: Vec<_> = names
         .definitions
@@ -206,30 +211,37 @@ pub(super) fn collect(
             interface_candidates.push(
                 items[definition.module][definition.item.0 as usize].expect("接口声明已登记"),
             );
-        } else {
-            let key = *blake3::Hasher::new_derive_key("gugu-hir-builtin-trait-v1")
-                .update(interface.name.as_bytes())
-                .finalize()
-                .as_bytes();
-            interface_candidates.push(candidates.len());
-            candidates.push(Candidate {
-                origin: Origin::BuiltinTrait(index),
-                module: 0,
-                span: None,
-                name: interface.name.clone(),
-                kind: hir::DefinitionKind::Trait,
-                key,
-                parent: None,
-                public: true,
-            });
+            continue;
         }
+        let key = *blake3::Hasher::new_derive_key("gugu-hir-builtin-trait-v1")
+            .update(interface.name.as_bytes())
+            .finalize()
+            .as_bytes();
+        interface_candidates.push(candidates.len());
+        candidates.push(Candidate {
+            origin: Origin::BuiltinTrait(index),
+            module: 0,
+            span: None,
+            name: interface.name.clone(),
+            kind: hir::DefinitionKind::Trait,
+            key,
+            parent: None,
+            public: true,
+        });
     }
     if candidates.len() >= u32::MAX as usize {
         return Err(invalid("HIR 定义数量超过 u32 上界"));
     }
-    // 编号 = 候选登记顺序：内建定义先编号、用户定义追加在后，与物化前缀一致。键是跨块引用身份，
-    // 只做唯一性校验，不参与重排。
-    let mut by_key: Vec<_> = (0..candidates.len()).collect();
+    // 编号 = 「物化覆盖的内建候选在前、会话派生在后」：块内保持登记顺序，跨块引用只走稳定键。
+    // 装上前缀后内建块由物化表整体占位，这里的顺序就是它可以沿用的前提。
+    let mut order: Vec<usize> = (0..candidates.len()).collect();
+    if let Some(prefix) = prefix {
+        order.sort_by_key(|&index| {
+            !matches!(candidates[index].origin, Origin::BuiltinTrait(_))
+                && !prefix.covers_module(&model.modules[candidates[index].module].path)
+        });
+    }
+    let mut by_key = order.clone();
     by_key.sort_unstable_by_key(|&index| candidates[index].key);
     if by_key
         .windows(2)
@@ -237,19 +249,22 @@ pub(super) fn collect(
     {
         return Err(invalid("HIR 稳定定义键冲突"));
     }
-    let origins = candidates
+    let mut remap = vec![0_usize; candidates.len()];
+    for (position, &index) in order.iter().enumerate() {
+        remap[index] = position;
+    }
+    let origins = order
         .iter()
-        .map(|candidate| candidate.origin)
-        .collect();
-    let definitions = candidates
-        .iter_mut()
-        .enumerate()
-        .map(|(index, candidate)| {
-            debug_assert!(index < u32::MAX as usize);
+        .map(|&index| candidates[index].origin)
+        .collect::<Vec<_>>();
+    let definitions = order
+        .into_iter()
+        .map(|index| {
+            let candidate = &mut candidates[index];
             Ok(hir::Definition {
                 key: candidate.key,
                 name: std::mem::take(&mut candidate.name),
-                parent: candidate.parent.map(hir_id),
+                parent: candidate.parent.map(|parent| hir_id(remap[parent])),
                 location: candidate
                     .span
                     .as_ref()
@@ -266,25 +281,92 @@ pub(super) fn collect(
     let remap_table = |table: Vec<Vec<Option<usize>>>| {
         table
             .into_iter()
-            .map(|module| module.into_iter().map(|id| id.map(hir_id)).collect())
-            .collect()
+            .map(|module| {
+                module
+                    .into_iter()
+                    .map(|id| id.map(|id| hir_id(remap[id])))
+                    .collect()
+            })
+            .collect::<Vec<Vec<Option<hir::DefId>>>>()
     };
+    let mut items = remap_table(items);
+    let mut functions = remap_table(functions);
+    let mut asynchronous = remap_table(asynchronous);
+    let mut local_statics = remap_table(local_statics);
+    let mut named_items = named_items;
+    let mut origins = origins;
+    let definitions = definitions;
+    let mut opaques = opaque_candidates
+        .into_iter()
+        .map(|index| hir_id(remap[index]))
+        .collect::<Vec<_>>();
+    let mut interfaces = interface_candidates
+        .into_iter()
+        .map(|index| hir_id(remap[index]))
+        .collect::<Vec<_>>();
+    if let Some(prefix) = prefix {
+        // 物化覆盖的模块整体取自前缀；装载前先核对现算结果与前缀同量同序——不符说明物化表与本次
+        // 源码树不是同一份，必须报错而不是拼出半个世界。
+        let installed = prefix.identities();
+        let installed_definitions = prefix.hir_definition_count() as usize;
+        if origins.len() < installed_definitions
+            || opaques.len() < installed.opaques.len()
+            || interfaces.len() < installed.interfaces.len()
+            || named_items.len() < installed.named_items.len()
+        {
+            return Err(invalid("内建块现算的身份少于物化前缀"));
+        }
+        if origins[..installed_definitions] != installed.origins[..]
+            || opaques[..installed.opaques.len()] != installed.opaques[..]
+            || interfaces[..installed.interfaces.len()] != installed.interfaces[..]
+        {
+            let fresh_named = origins[..installed_definitions]
+                .iter()
+                .filter(|origin| matches!(origin, Origin::Named(_)))
+                .count();
+            let installed_named = installed
+                .origins
+                .iter()
+                .filter(|origin| matches!(origin, Origin::Named(_)))
+                .count();
+            return Err(invalid(&format!(
+                "内建块现算的身份与物化前缀不一致：Named {fresh_named} vs {installed_named}"
+            )));
+        }
+        let mut spliced_origins = installed.origins.clone();
+        spliced_origins.extend_from_slice(&origins[installed_definitions..]);
+        origins = spliced_origins;
+        let mut spliced_opaques = installed.opaques.clone();
+        spliced_opaques.append(&mut opaques.split_off(installed.opaques.len()));
+        opaques = spliced_opaques;
+        let mut spliced_interfaces = installed.interfaces.clone();
+        spliced_interfaces.append(&mut interfaces.split_off(installed.interfaces.len()));
+        interfaces = spliced_interfaces;
+        let names_count = installed.named_items.len();
+        named_items[..names_count].copy_from_slice(&installed.named_items);
+        for module in 0..installed.items.len() {
+            items[module] = installed.items[module].clone();
+            functions[module] = installed.functions[module].clone();
+            asynchronous[module] = installed.asynchronous[module].clone();
+            local_statics[module] = installed.local_statics[module].clone();
+        }
+    }
     Ok((
         definitions,
         Identities {
             origins,
             named_items,
-            items: remap_table(items),
-            functions: remap_table(functions),
-            asynchronous: remap_table(asynchronous),
-            local_statics: remap_table(local_statics),
-            opaques: opaque_candidates.into_iter().map(hir_id).collect(),
-            interfaces: interface_candidates.into_iter().map(hir_id).collect(),
+            items,
+            functions,
+            asynchronous,
+            local_statics,
+            opaques,
+            interfaces,
         },
     ))
 }
 
-/// 候选下标即稠密 `HIR DefId`：编号只由登记顺序决定。
+/// 候选下标即稠密 `HIR DefId`：编号只由登记顺序决定，物化覆盖的内建块占据前缀。
 fn hir_id(index: usize) -> hir::DefId {
     debug_assert!(index < u32::MAX as usize, "HIR 定义数量超过 u32 上界");
     hir::DefId(index as u32)

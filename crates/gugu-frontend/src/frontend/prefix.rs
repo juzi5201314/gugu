@@ -6,19 +6,26 @@
 //! 内建块没有源码回退路径。
 
 use gugu_compiler_core::RuntimePrebuiltV1;
+use serde::de::DeserializeOwned;
 
 use crate::frontend::ParsedModule;
 use crate::frontend::names;
 use crate::frontend::prebuild::{declared_content_digest, layer_revisions, table_fingerprint};
+use crate::frontend::semantics::Identities;
 use crate::{Diagnostic, DiagnosticCode};
 
 /// names 表的层名：域摘要由层名派生，因此查指纹不依赖表的声明顺序。
 const NAMES_TABLE: &str = "names";
 
+/// 身份表的层名：`DefRef` 与 `HIR DefId` 的双向映射。
+const IDENTITIES_TABLE: &str = "identities";
+
 /// 已校验的内建块前缀：当前会话可直接安装的派生表。
 pub(crate) struct BuiltinPrefix {
     names: names::NameResolution,
+    identities: Identities,
     modules: Vec<String>,
+    identity: [u8; 32],
 }
 
 impl BuiltinPrefix {
@@ -53,15 +60,37 @@ impl BuiltinPrefix {
         }
         verify_positions(&names, prebuilt.module_order.len(), sources)?;
         rebind_spans(&mut names, source_map)?;
+        let identities: Identities =
+            decode_table(prebuilt, IDENTITIES_TABLE, &prebuilt.identities)?;
         Ok(Self {
             names,
+            identities,
             modules: prebuilt.module_order.clone(),
+            identity: installed_tables_digest(prebuilt),
         })
     }
 
-    /// 前缀定义数量：用户定义的编号从它开始。
+    /// 安装表的内容身份：参与 query 键，缓存不能跨 artifact 复用。
+    ///
+    /// 世界身份（如 HIR `input_fingerprint`）只由源码与依赖决定，不带它；这里只保证会话内的
+    /// 记忆化不会把另一份物化表的派生结果当成自己的。
+    pub(crate) fn identity(&self) -> [u8; 32] {
+        self.identity
+    }
+
+    /// 内建身份表：`DefRef` 与 `HIR DefId` 的映射，以及各 owner 的身份桶。
+    pub(crate) fn identities(&self) -> &Identities {
+        &self.identities
+    }
+
+    /// 名称解析前缀的定义数量：用户定义的 `names::DefId` 从它开始。
     pub(crate) fn definition_count(&self) -> u32 {
         u32::try_from(self.names.definitions.len()).expect("内建定义数量必须落在 u32")
+    }
+
+    /// 身份前缀的 `HIR DefId` 数量：用户定义的 HIR 编号从它开始。
+    pub(crate) fn hir_definition_count(&self) -> u32 {
+        u32::try_from(self.identities.origins().len()).expect("内建身份数量必须落在 u32")
     }
 
     /// 该模块路径是否由物化表覆盖；未覆盖的内建模块（探针源）追加在物化块之后派生。
@@ -90,6 +119,36 @@ impl BuiltinPrefix {
                     "物化模块 `{path}` 不在模块表前缀的第 {index} 位"
                 )));
             }
+        }
+        // 身份桶按会话 AST 的 arena 尺寸取值：长度不合说明物化表与本次源码树不是同一份。
+        for (index, parsed) in modules.iter().enumerate().take(self.modules.len()) {
+            let fits = self.identities.items[index].len() == parsed.arena.items.len()
+                && self.identities.functions[index].len() == parsed.arena.fns.len()
+                && self.identities.asynchronous[index].len() == parsed.arena.exprs.len()
+                && self.identities.local_statics[index].len() == parsed.arena.stmts.len();
+            if !fits {
+                return Err(invalid(&format!(
+                    "物化身份表的 `{}` 行与会话 AST 尺寸不符",
+                    parsed.path
+                )));
+            }
+        }
+        // 身份表里的定义下标必须落在前缀内。
+        let definitions =
+            u32::try_from(self.identities.origins().len()).expect("内建定义数量必须落在 u32");
+        let buckets = self
+            .identities
+            .items
+            .iter()
+            .chain(&self.identities.functions)
+            .chain(&self.identities.asynchronous)
+            .chain(&self.identities.local_statics);
+        if buckets
+            .flatten()
+            .flatten()
+            .any(|definition| definition.index() >= definitions as usize)
+        {
+            return Err(invalid("物化身份表引用越出内建定义前缀"));
         }
         Ok(())
     }
@@ -120,6 +179,36 @@ fn rebind_spans(
         import.span = rebind(&import.span)?;
     }
     Ok(())
+}
+
+/// 安装表的内容身份：容器 schema、层 revision 与各表字节。
+fn installed_tables_digest(prebuilt: &RuntimePrebuiltV1) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new_derive_key("gugu-builtin-prefix-v1");
+    hash.update(&prebuilt.schema.to_le_bytes());
+    for (layer, revision) in &prebuilt.revisions {
+        hash.update(layer.as_bytes());
+        hash.update(&revision.to_le_bytes());
+    }
+    for table in [&prebuilt.names, &prebuilt.identities, &prebuilt.hir] {
+        hash.update(&(table.len() as u64).to_le_bytes());
+        hash.update(table);
+    }
+    *hash.finalize().as_bytes()
+}
+
+/// 解码一张物化表：先核对表内容摘要，再按当前 schema 解码。
+fn decode_table<T: DeserializeOwned>(
+    prebuilt: &RuntimePrebuiltV1,
+    layer: &str,
+    encoded: &[u8],
+) -> Result<T, Vec<Diagnostic>> {
+    let declared = declared_content_digest(prebuilt, layer)
+        .ok_or_else(|| invalid(&format!("内建块物化表缺少 {layer} 表指纹")))?;
+    if table_fingerprint(layer, &[encoded]).1 != declared {
+        return Err(invalid(&format!("内建块物化表的 {layer} 表内容摘要不符")));
+    }
+    crate::canonical::from_slice(encoded)
+        .map_err(|_| invalid(&format!("内建块的 {layer} 表不能解码")))
 }
 
 /// 校验物化表里的位置都落在内建块前缀内。

@@ -9,6 +9,7 @@ pub(super) fn lower(
     entry: Option<CallableId>,
     dependency: &DependencyFingerprint,
     queries: &QueryEngine,
+    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<(hir::Validated, DependencyFingerprint), Vec<Diagnostic>> {
     let mut hash = blake3::Hasher::new_derive_key("gugu-lower-hir-input-v1");
     hash.update(&dependency.fingerprint());
@@ -24,9 +25,15 @@ pub(super) fn lower(
         hash.update(&expansion.macro_call().end().to_le_bytes());
     }
     let lower_input_fingerprint = *hash.finalize().as_bytes();
-    let key = QueryKey::new(QueryKind::LowerHir, 7, lower_input_fingerprint);
+    // 世界身份只由源码与依赖决定；物化前缀进记忆化键，不进世界身份——两条加载路径必须给出
+    // 同一种编号无关指纹，而缓存仍不能把另一份物化表的派生结果当成自己的。
+    let mut key_hash = blake3::Hasher::new_derive_key("gugu-lower-hir-key-v1");
+    key_hash.update(&lower_input_fingerprint);
+    key_hash.update(&prefix.map_or([0u8; 32], |prefix| prefix.identity()));
+    let key_fingerprint = *key_hash.finalize().as_bytes();
+    let key = QueryKey::new(QueryKind::LowerHir, 8, key_fingerprint);
     let (definitions, identities) =
-        identity::collect(model, names, checked, sources).map_err(|error| vec![error])?;
+        identity::collect(model, names, checked, sources, prefix).map_err(|error| vec![error])?;
     let mut fresh = None;
     let result = queries.compute(key.clone(), |context| {
         context.record_dependency(dependency.key().clone(), dependency.fingerprint());
