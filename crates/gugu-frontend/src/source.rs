@@ -581,32 +581,48 @@ impl SourceMap {
         Ok(SourceFileId::new(index as u32))
     }
 
-    /// 追加内建源码快照并恢复规范顺序。
-    ///
-    /// 文件 ID 是快照下标，因此重排会改变 ID 分配；调用者必须在任何 `file_id` 查询之前使用
-    /// 本方法，使后续解析看到的 ID 与排序后的表一致。
-    pub fn append_sorted(
-        &mut self,
-        snapshots: impl IntoIterator<Item = SourceSnapshot>,
-    ) -> Result<(), SourceMapError> {
-        let mut combined = std::mem::take(&mut self.snapshots);
-        combined.extend(snapshots);
-        combined.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-        for pair in combined.windows(2) {
-            if pair[0].logical_path == pair[1].logical_path {
-                return Err(SourceMapError::DuplicatePath(pair[0].logical_path.clone()));
-            }
-        }
-        if combined.len() > u32::MAX as usize {
+    /// 重排后的快照表重新建立路径索引与 ID 分配。
+    fn reindex(&mut self, snapshots: Vec<SourceSnapshot>) -> Result<(), SourceMapError> {
+        if snapshots.len() > u32::MAX as usize {
             return Err(SourceMapError::UnknownFile(SourceFileId::new(u32::MAX)));
         }
-        self.path_index = combined
+        self.path_index = snapshots
             .iter()
             .enumerate()
             .map(|(index, snapshot)| (snapshot.logical_path.clone(), index as u32))
             .collect();
-        self.snapshots = combined;
+        self.snapshots = snapshots;
         Ok(())
+    }
+
+    /// 把内建源装到文件 ID 前缀，用户快照按逻辑路径排序追加在后。
+    ///
+    /// 编号前缀是内建块身份的一部分：物化表的每个下标都以「内建块占 [0, N)」为前提，
+    /// 用户模块只能落在前缀之后。`prefix` 必须已按逻辑路径严格升序（artifact manifest 的
+    /// 规范顺序），用户快照与内建源不得同名。
+    pub fn prepend_builtin_prefix(
+        &mut self,
+        prefix: impl IntoIterator<Item = SourceSnapshot>,
+    ) -> Result<(), SourceMapError> {
+        let mut user = std::mem::take(&mut self.snapshots);
+        user.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
+        let mut combined: Vec<SourceSnapshot> = prefix.into_iter().collect();
+        for pair in combined.windows(2) {
+            if pair[0].logical_path >= pair[1].logical_path {
+                return Err(SourceMapError::DuplicatePath(pair[1].logical_path.clone()));
+            }
+        }
+        if let Some(duplicate) = user.iter().find(|snapshot| {
+            combined
+                .binary_search_by(|builtin| builtin.logical_path.cmp(&snapshot.logical_path))
+                .is_ok()
+        }) {
+            return Err(SourceMapError::DuplicatePath(
+                duplicate.logical_path.clone(),
+            ));
+        }
+        combined.extend(user);
+        self.reindex(combined)
     }
 
     /// 按逻辑路径查找稳定文件 ID。

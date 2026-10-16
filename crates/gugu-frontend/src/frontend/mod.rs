@@ -154,11 +154,12 @@ pub(crate) fn installs_builtin_source(logical_path: &str, entry: &str) -> bool {
     !is_probe_builtin_source(logical_path) || is_probe_builtin_source(entry)
 }
 
-/// 把 build-time artifact 的 source blob 适配为本次 session 的 frontend 输入。
+/// 把 build-time artifact 的 source blob 适配为本次 session 的 frontend 编号前缀。
 ///
 /// source table 的唯一权威是嵌入 artifact；compiler 不再通过 runtime 模块的 `include_str!`
-/// 持有第二份源码表。
-fn inject_builtin_sources(
+/// 持有第二份源码表。内建源占据文件 ID 前缀（artifact manifest 顺序），用户源码排序追加在后，
+/// 物化表的每个下标因此在新会话里仍然指向同一个内建单元。
+fn install_builtin_sources(
     source_map: &mut SourceMap,
     resources: crate::runtime::RuntimeResources<'_>,
     entry: &str,
@@ -170,13 +171,6 @@ fn inject_builtin_sources(
         let logical = source.logical_path.as_str();
         if !installs_builtin_source(logical, entry) {
             continue;
-        }
-        if source_map.file_id(logical).is_some() {
-            return Err(vec![Diagnostic::error(
-                DiagnosticCode::ModuleInvalidPath,
-                format!("内建源单元 `{logical}` 与 package 源码逻辑路径冲突"),
-                None,
-            )]);
         }
         let snapshot =
             SourceSnapshot::from_bytes(logical, source.source.as_bytes()).map_err(|error| {
@@ -192,13 +186,15 @@ fn inject_builtin_sources(
             runtime_paths.insert(logical.to_owned());
         }
     }
-    source_map.append_sorted(snapshots).map_err(|error| {
-        vec![Diagnostic::error(
-            DiagnosticCode::ModuleInvalidPath,
-            error.to_string(),
-            None,
-        )]
-    })?;
+    source_map
+        .prepend_builtin_prefix(snapshots)
+        .map_err(|error| {
+            vec![Diagnostic::error(
+                DiagnosticCode::ModuleInvalidPath,
+                format!("内建源单元与 package 源码冲突：{error}"),
+                None,
+            )]
+        })?;
     Ok((paths, runtime_paths))
 }
 
@@ -217,9 +213,10 @@ fn check_sources(
     queries: &crate::query::QueryEngine,
     resources: crate::runtime::RuntimeResources<'_>,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
-    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, resources, entry)?;
+    let (builtin_paths, runtime_paths) = install_builtin_sources(source_map, resources, entry)?;
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
-    modules.sort_by(|left, right| left.path.cmp(&right.path));
+    // 内建块占据模块编号前缀：物化表里的 owner/定义下标都以「内建块在前」为前提。
+    modules.sort_by(|left, right| (!left.builtin, &left.path).cmp(&(!right.builtin, &right.path)));
     let entry_file = source_map.file_id(entry).ok_or_else(|| {
         vec![Diagnostic::error(
             DiagnosticCode::ModuleNotFound,
@@ -360,7 +357,7 @@ pub(crate) fn derive_builtin(
     resources: crate::runtime::RuntimeResources<'_>,
     cfg: &cfg::CfgContext,
 ) -> Result<BuiltinDerivation, Vec<Diagnostic>> {
-    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, resources, "")?;
+    let (builtin_paths, runtime_paths) = install_builtin_sources(source_map, resources, "")?;
     let mut modules = parse_modules(source_map, "", cfg, &builtin_paths)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
     let module_order = modules.iter().map(|module| module.path.clone()).collect();
