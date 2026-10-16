@@ -7,7 +7,7 @@ use crate::frontend::{ast, hir, names};
 use crate::{Diagnostic, DiagnosticCode, SourceMap, Span};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 pub(super) enum Origin {
     Named(usize),
     Closure(CallableId),
@@ -23,6 +23,7 @@ pub(super) enum Origin {
     BuiltinTrait(usize),
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Identities {
     pub(super) origins: Vec<Origin>,
     pub(super) named_items: Vec<Option<DefRef>>,

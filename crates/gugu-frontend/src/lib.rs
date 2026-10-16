@@ -38,6 +38,7 @@ pub use backend::x64::harness::{
 };
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use frontend::format::{FormatError, format_source};
+pub use frontend::prebuild::{MaterializeError, materialize};
 pub use project::{
     ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyDomain,
     DependencyInput, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,

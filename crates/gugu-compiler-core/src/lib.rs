@@ -9,7 +9,10 @@ use std::fmt;
 /// runtime artifact 容器魔数。
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"GUGURT01";
 /// runtime artifact schema。
-pub const ARTIFACT_SCHEMA: u32 = 2;
+pub const ARTIFACT_SCHEMA: u32 = 3;
+
+/// 内建块物化表的 schema：表集或表内布局变化时递增。
+pub const PREBUILT_SCHEMA: u32 = 1;
 /// payload 的域隔离标签。
 pub const ARTIFACT_DOMAIN: &str = "gugu-runtime-artifact-v1";
 /// GBC payload 编码版本。
@@ -160,6 +163,70 @@ pub struct RuntimeArtifactPayloadV1 {
     pub generic_templates: Vec<RuntimeGenericTemplateV1>,
     /// 可执行 runtime 函数片段。
     pub functions: Vec<RuntimeFunctionArtifactV1>,
+    /// 内建块在构建期物化后的派生表；纯源码 artifact 为 None。
+    pub prebuilt: Option<RuntimePrebuiltV1>,
+}
+
+/// 内建块在构建期物化后的派生表。
+///
+/// 每张表都是前端 canonical 编码的字节。加载时按内建块规则安装到当前 world 的编号前缀，
+/// 安装前重算指纹并与 [`RuntimePrebuiltV1::fingerprints`] 比对：序列化里的指纹只作断言，
+/// 不作为信任来源。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RuntimePrebuiltV1 {
+    /// 物化表 schema，取 [`PREBUILT_SCHEMA`]。
+    pub schema: u32,
+    /// 派生层 revision（层名 → 版本），按层名严格排序。
+    pub revisions: Vec<(String, u32)>,
+    /// 内建模块的逻辑路径，按 artifact 规范顺序。
+    pub module_order: Vec<String>,
+    /// canonical(NameResolution 内建片段)。
+    pub names: Vec<u8>,
+    /// canonical(Identities 内建片段)。
+    pub identities: Vec<u8>,
+    /// canonical(CheckedSemantics 内建片段)。
+    pub checked: Vec<u8>,
+    /// canonical(早期常量表内建片段)。
+    pub early_constants: Vec<u8>,
+    /// canonical(hir::Module 内建片段)。
+    pub hir: Vec<u8>,
+    /// 按 owner 顺序的 canonical(GirBody) 序列。
+    pub gir_bodies: Vec<Vec<u8>>,
+    /// canonical(Vec<RecordTypes>)。
+    pub record_types: Vec<u8>,
+    /// 每张表的 (标识域摘要, 内容摘要)，与表的声明顺序一致。
+    pub fingerprints: Vec<([u8; 32], [u8; 32])>,
+}
+
+impl RuntimePrebuiltV1 {
+    /// 校验物化表的结构不变量。
+    ///
+    /// 这里只查容器可判定的部分：层名与表内容的对应关系、每张表的域摘要口径由前端在安装时
+    /// 重算比对，不在 core 里复述。
+    pub fn validate(&self) -> Result<(), RuntimeArtifactError> {
+        if self.schema != PREBUILT_SCHEMA {
+            return Err(RuntimeArtifactError::Schema(self.schema));
+        }
+        if self.module_order.is_empty()
+            || self.module_order.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(RuntimeArtifactError::Manifest(
+                "物化表模块顺序必须是非空严格升序的逻辑路径".to_owned(),
+            ));
+        }
+        if self.revisions.is_empty() || self.revisions.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(RuntimeArtifactError::Manifest(
+                "物化表 revision 必须按层名严格排序".to_owned(),
+            ));
+        }
+        if self.fingerprints.is_empty() {
+            return Err(RuntimeArtifactError::Manifest(
+                "物化表缺少指纹表".to_owned(),
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// 完整 runtime artifact。
@@ -291,6 +358,7 @@ impl RuntimeArtifactBuilder {
             contracts: Vec::new(),
             generic_templates: Vec::new(),
             functions: Vec::new(),
+            prebuilt: None,
         };
         let artifact = RuntimeArtifactV1 { manifest, payload };
         artifact.validate()?;
@@ -380,6 +448,9 @@ impl RuntimeArtifactV1 {
             return Err(RuntimeArtifactError::Manifest(
                 "runtime function manifest 未按 stable key 严格排序".to_owned(),
             ));
+        }
+        if let Some(prebuilt) = &self.payload.prebuilt {
+            prebuilt.validate()?;
         }
         Ok(())
     }
@@ -551,6 +622,34 @@ fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, Runtime
         encoder.digest(&function.fingerprint);
         encoder.bytes(&function.fragment)?;
     }
+    encoder.u32(u32::from(payload.prebuilt.is_some()));
+    if let Some(prebuilt) = &payload.prebuilt {
+        encoder.u32(prebuilt.schema);
+        encoder.len(prebuilt.revisions.len())?;
+        for (layer, revision) in &prebuilt.revisions {
+            encoder.string(layer)?;
+            encoder.u32(*revision);
+        }
+        encoder.len(prebuilt.module_order.len())?;
+        for path in &prebuilt.module_order {
+            encoder.string(path)?;
+        }
+        encoder.bytes(&prebuilt.names)?;
+        encoder.bytes(&prebuilt.identities)?;
+        encoder.bytes(&prebuilt.checked)?;
+        encoder.bytes(&prebuilt.early_constants)?;
+        encoder.bytes(&prebuilt.hir)?;
+        encoder.len(prebuilt.gir_bodies.len())?;
+        for body in &prebuilt.gir_bodies {
+            encoder.bytes(body)?;
+        }
+        encoder.bytes(&prebuilt.record_types)?;
+        encoder.len(prebuilt.fingerprints.len())?;
+        for (domain, content) in &prebuilt.fingerprints {
+            encoder.digest(domain);
+            encoder.digest(content);
+        }
+    }
     Ok(encoder.finish())
 }
 
@@ -595,6 +694,15 @@ fn decode_payload(bytes: &[u8]) -> Result<RuntimeArtifactPayloadV1, RuntimeArtif
             fragment: decoder.bytes()?,
         });
     }
+    let prebuilt = match decoder.u32()? {
+        0 => None,
+        1 => Some(decode_prebuilt(&mut decoder)?),
+        other => {
+            return Err(RuntimeArtifactError::Codec(format!(
+                "prebuilt 存在标志无效：{other}"
+            )));
+        }
+    };
     decoder.finish()?;
     Ok(RuntimeArtifactPayloadV1 {
         module_interface,
@@ -602,6 +710,53 @@ fn decode_payload(bytes: &[u8]) -> Result<RuntimeArtifactPayloadV1, RuntimeArtif
         contracts,
         generic_templates,
         functions,
+        prebuilt,
+    })
+}
+
+/// 解码物化表。
+fn decode_prebuilt(
+    decoder: &mut CodecDecoder<'_>,
+) -> Result<RuntimePrebuiltV1, RuntimeArtifactError> {
+    let schema = decoder.u32()?;
+    let revision_count = decoder.len()?;
+    let mut revisions = Vec::with_capacity(revision_count);
+    for _ in 0..revision_count {
+        revisions.push((decoder.string()?, decoder.u32()?));
+    }
+    let module_count = decoder.len()?;
+    let mut module_order = Vec::with_capacity(module_count);
+    for _ in 0..module_count {
+        module_order.push(decoder.string()?);
+    }
+    let names = decoder.bytes()?;
+    let identities = decoder.bytes()?;
+    let checked = decoder.bytes()?;
+    let early_constants = decoder.bytes()?;
+    let hir = decoder.bytes()?;
+    let body_count = decoder.len()?;
+    let mut gir_bodies = Vec::with_capacity(body_count);
+    for _ in 0..body_count {
+        gir_bodies.push(decoder.bytes()?);
+    }
+    let record_types = decoder.bytes()?;
+    let fingerprint_count = decoder.len()?;
+    let mut fingerprints = Vec::with_capacity(fingerprint_count);
+    for _ in 0..fingerprint_count {
+        fingerprints.push((decoder.digest()?, decoder.digest()?));
+    }
+    Ok(RuntimePrebuiltV1 {
+        schema,
+        revisions,
+        module_order,
+        names,
+        identities,
+        checked,
+        early_constants,
+        hir,
+        gir_bodies,
+        record_types,
+        fingerprints,
     })
 }
 
@@ -778,6 +933,80 @@ mod tests {
             artifact
         );
         assert_eq!(artifact.encode().expect("encode again"), bytes);
+    }
+
+    /// 构造一张通过结构校验的物化表。
+    fn sample_prebuilt() -> RuntimePrebuiltV1 {
+        RuntimePrebuiltV1 {
+            schema: PREBUILT_SCHEMA,
+            revisions: vec![("gir.body".to_owned(), 6), ("hir.module".to_owned(), 2)],
+            module_order: vec!["runtime/core.gg".to_owned(), "std/prelude.gg".to_owned()],
+            names: vec![1, 2, 3],
+            identities: Vec::new(),
+            checked: Vec::new(),
+            early_constants: Vec::new(),
+            hir: vec![9],
+            gir_bodies: vec![vec![4], vec![5, 6]],
+            record_types: vec![7],
+            fingerprints: vec![([1; 32], [2; 32])],
+        }
+    }
+
+    /// 带物化表的 artifact。
+    fn with_prebuilt(prebuilt: RuntimePrebuiltV1) -> RuntimeArtifactV1 {
+        let mut artifact = RuntimeArtifactBuilder::build(
+            TargetName::X86_64Linux,
+            &[RuntimeSourceInput {
+                logical_path: "std/prelude.gg",
+                source: "fn prelude() {}",
+                role: RuntimeSourceRole::StandardLibrary,
+            }],
+        )
+        .expect("build artifact");
+        artifact.payload.prebuilt = Some(prebuilt);
+        artifact
+    }
+
+    #[test]
+    fn prebuilt_tables_round_trip_through_payload_codec() {
+        let artifact = with_prebuilt(sample_prebuilt());
+        artifact.validate().expect("物化表结构合法");
+        let bytes = artifact.encode().expect("encode");
+        let decoded = RuntimeArtifactV1::decode(&bytes).expect("decode");
+        assert_eq!(decoded, artifact, "物化表必须逐字节往返");
+        assert_eq!(artifact.encode().expect("encode again"), bytes);
+        assert_eq!(
+            canonical_manifest_bytes(&decoded.manifest),
+            canonical_manifest_bytes(&artifact.manifest),
+            "artifact 身份由 manifest 决定，不随 payload 变化"
+        );
+    }
+
+    #[test]
+    fn prebuilt_tables_reject_unsorted_layers_and_missing_fingerprints() {
+        let mut unsorted_modules = sample_prebuilt();
+        unsorted_modules.module_order = vec!["std/b.gg".to_owned(), "std/a.gg".to_owned()];
+        with_prebuilt(unsorted_modules)
+            .validate()
+            .expect_err("模块顺序必须严格升序");
+
+        let mut repeated_layer = sample_prebuilt();
+        repeated_layer.revisions = vec![("names".to_owned(), 1), ("names".to_owned(), 2)];
+        with_prebuilt(repeated_layer)
+            .validate()
+            .expect_err("层名必须严格排序");
+
+        let mut no_fingerprints = sample_prebuilt();
+        no_fingerprints.fingerprints.clear();
+        with_prebuilt(no_fingerprints)
+            .validate()
+            .expect_err("必须带指纹表");
+
+        let mut wrong_schema = sample_prebuilt();
+        wrong_schema.schema = PREBUILT_SCHEMA + 1;
+        with_prebuilt(wrong_schema)
+            .validate()
+            .expect_err("schema 必须匹配");
     }
 
     #[test]

@@ -19,6 +19,7 @@ pub(crate) mod traits;
 pub(crate) use checker::must_use::lints as must_use_lints;
 pub(crate) use hir::identity::Identities;
 pub(crate) use model::{CallableId, DefRef, Model, Ty, substitute};
+pub(crate) use output::SCHEMA_VERSION as CHECKED_SCHEMA_VERSION;
 pub(crate) use output::{CheckedBody, CheckedSemantics, MemoryOperation};
 pub(crate) use traits::TraitRef;
 #[cfg(all(test, feature = "slow-tests"))]
@@ -38,17 +39,24 @@ mod unsafe_tests;
 
 use super::{ParsedModule, names::NameResolution};
 use crate::Diagnostic;
-/// 前端语义阶段产物：冻结后的各层 world 与布局。
-pub(crate) type CheckedFrontend = (
-    CheckedSemantics,
-    Vec<super::types::Layout>,
-    (u32, [u8; 32]),
-    super::hir::Validated,
-    analysis::AnalysisWorldV1,
-    super::mono::MonoWorldV1,
-    super::gir::GirWorldV1,
-    super::gir::pass::GirPassStats,
-);
+/// 一次前端派生冻结出的全部 world 产物。
+///
+/// 字段顺序即管线顺序：早期常量 → 类型检查 → 布局 → HIR → 身份 → 分析 → 单态化 → GIR。
+/// 构建期物化从这里取与用户无关的层，用户编译路径消费同一组字段。
+pub(crate) struct DerivedWorld {
+    pub(crate) checked: CheckedSemantics,
+    /// 早期常量表：构建期物化读取，用户编译路径只消费冻结进 HIR 的结果。
+    pub(crate) early: comptime::EarlyConstTable,
+    pub(crate) layouts: Vec<super::types::Layout>,
+    pub(crate) registry_identity: (u32, [u8; 32]),
+    pub(crate) hir: super::hir::Validated,
+    /// 身份表：构建期物化读取，用户编译路径只经查询键间接消费。
+    pub(crate) identities: hir::identity::Identities,
+    pub(crate) analysis: analysis::AnalysisWorldV1,
+    pub(crate) mono: super::mono::MonoWorldV1,
+    pub(crate) gir: super::gir::GirWorldV1,
+    pub(crate) gir_stats: super::gir::pass::GirPassStats,
+}
 
 pub(crate) fn check(
     modules: &[ParsedModule],
@@ -58,7 +66,7 @@ pub(crate) fn check(
     entry: Option<model::CallableId>,
     queries: &crate::query::QueryEngine,
     runtime_paths: &std::collections::BTreeSet<String>,
-) -> Result<CheckedFrontend, Vec<Diagnostic>> {
+) -> Result<DerivedWorld, Vec<Diagnostic>> {
     let model = model::Model::new(modules, names, runtime_paths)?;
     let (early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries)?;
     let registry_identity = early.registry_identity();
@@ -120,14 +128,16 @@ pub(crate) fn check(
         &gir.placement,
         &gir.concrete,
     );
-    Ok((
+    Ok(DerivedWorld {
         checked,
+        early,
         layouts,
         registry_identity,
         hir,
-        analysis_world,
-        mono_world,
+        identities,
+        analysis: analysis_world,
+        mono: mono_world,
         gir,
         gir_stats,
-    ))
+    })
 }

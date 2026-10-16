@@ -29,9 +29,9 @@ BLAKE3-256(domain || 0x00 || canonical_bytes)
 
 ## GUGURT01 runtime artifact
 
-runtime/std 源在 compiler build-time 由 `gugu-runtime-builder` 固化为 target 专属 `GUGURT01` 容器。容器包含 28 字节头、GBC1 manifest、GBC1 payload 与 `BLAKE3-256("gugu-runtime-artifact-v1" || 0x00 || payload)`；头部保存 schema 2 与 manifest/payload 的 `u64` 长度，schema 1 的 JSON 容器直接拒绝。manifest 的 target descriptor、source content digest、compiler identity、revision、analysis policy 和 target feature digest 均参与身份。内部 query key 同时纳入 GBC1 revision，旧 JSON payload 不作为新版本的命中。
+runtime/std 源在 compiler build-time 由 `gugu-runtime-builder` 固化为 target 专属 `GUGURT01` 容器。容器包含 28 字节头、GBC1 manifest、GBC1 payload 与 `BLAKE3-256("gugu-runtime-artifact-v1" || 0x00 || payload)`；头部保存 schema 3 与 manifest/payload 的 `u64` 长度，schema 1 的 JSON 容器直接拒绝。manifest 的 target descriptor、source content digest、compiler identity、revision、analysis policy 和 target feature digest 均参与身份。payload 在 source blob 之后带可选的 `prebuilt` 段（schema 1）：内建块的名称解析、身份、早期常量、类型检查、冻结 HIR、泛型 GIR 与 record 类型目录各是一段前端 canonical 编码字节，随表带 `(标识域摘要, 内容摘要)`。内部 query key 同时纳入 GBC1 revision，旧 JSON payload 不作为新版本的命中。
 
-当前 builder 提供 source manifest 与接口摘要，不执行语义类型求解；artifact 的 contract/template/function 表为空。compiler façade 核对请求目标，并显式拒绝源码 artifact 中未物化的 executable function，不能选出后丢弃，也不能把它冒充用户 HIR owner。用户编译从固定 source blob 形成独立的 `RecordTypes` 目录，复用正常类型布局求解器；它保存冻结参数类型和 size/align/field-offset 证据，不创建 executable instance、GIR/LIR body 或机器片段。七个 runtime layout verifier 在 query 构造与恢复时完整逐字段验证该目录，目录完整二进制身份进入 `RuntimeRawModel` key。fresh query 保留刚构造的类型表、late 值、GIR/LIR 与机器片段对象，不立即解码自身 payload；缓存命中仍解码并验证身份与结构。
+`gugu-runtime-builder` 只提供 source manifest 与接口摘要，不执行语义类型求解；`prebuilt` 段由 façade 的 build script 调用 `gugu_frontend::materialize` 派生并写入，contract/template/function 表仍为空。物化只覆盖与用户无关的层：编号前缀按 source manifest 顺序固定，跨块引用只走稳定键，因此内建块下标的含义在用户编译里仍然有效。物化在构建期拒绝非 target 的 cfg 谓词：内建块必须对用户 cfg 保持不变。compiler façade 核对请求目标，并显式拒绝源码 artifact 中未物化的 executable function，不能选出后丢弃，也不能把它冒充用户 HIR owner。用户编译从固定 source blob 形成独立的 `RecordTypes` 目录，复用正常类型布局求解器；它保存冻结参数类型和 size/align/field-offset 证据，不创建 executable instance、GIR/LIR body 或机器片段。七个 runtime layout verifier 在 query 构造与恢复时完整逐字段验证该目录，目录完整二进制身份进入 `RuntimeRawModel` key。fresh query 保留刚构造的类型表、late 值、GIR/LIR 与机器片段对象，不立即解码自身 payload；缓存命中仍解码并验证身份与结构。
 
 规范编码 `GBC1` 使用：
 

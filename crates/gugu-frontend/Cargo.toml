@@ -7,8 +7,6 @@ description = "Gugu compiler frontend: snapshots, semantics, frozen HIR/GIR and 
 [features]
 # 探针源是否进入 build-time artifact；由 façade 按同名开关转发。
 runtime-gc-probes = []
-# 构建期物化：在 build.rs 里派生一次内建世界并固化进 artifact。
-prebuild = ["dep:gugu-runtime-builder"]
 # 重负载/端到端用例的显式开关：默认关闭，避免默认套件编译和执行完整编译 fixture。
 slow-tests = []
 

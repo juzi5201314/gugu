@@ -1,6 +1,8 @@
 use crate::{frontend::ast::Visibility, source::Span};
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) struct ModuleId(pub(super) u32);
 
 impl ModuleId {
@@ -9,7 +11,9 @@ impl ModuleId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) struct DefId(pub(super) u32);
 
 impl DefId {
@@ -18,7 +22,9 @@ impl DefId {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub(crate) enum Namespace {
     Module,
     Type,
@@ -28,7 +34,9 @@ pub(crate) enum Namespace {
     External,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 #[repr(u8)]
 pub(crate) enum DefinitionKind {
     Function,
@@ -47,7 +55,7 @@ pub(crate) enum DefinitionKind {
     SourceMacro,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Definition {
     pub(crate) id: DefId,
     pub(crate) stable_key: [u8; 32],
@@ -61,14 +69,14 @@ pub(crate) struct Definition {
     pub(crate) span: Span,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) enum ResolvedTarget {
     Module(ModuleId),
     Def(DefId),
     External(String),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ResolvedImport {
     pub(crate) module: ModuleId,
     pub(crate) alias: String,
@@ -78,7 +86,7 @@ pub(crate) struct ResolvedImport {
     pub(crate) span: Span,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct NameResolution {
     pub(crate) definitions: Vec<Definition>,
     pub(crate) imports: Vec<ResolvedImport>,

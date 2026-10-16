@@ -19,6 +19,8 @@ fn main() {
     let artifacts = gugu_runtime_builder::build_all().expect("runtime artifact build/verify");
     fs::create_dir_all(&prebuilt_dir).expect("创建 prebuilt 目录");
     for (target, artifact) in artifacts {
+        let artifact =
+            gugu_frontend::materialize(frontend_target(target), artifact).expect("内建块物化");
         let bytes = artifact.encode().expect("runtime artifact encode");
         let decoded =
             gugu_compiler_core::RuntimeArtifactV1::decode(&bytes).expect("runtime artifact decode");
@@ -29,5 +31,13 @@ fn main() {
         };
         fs::write(out_dir.join(name), &bytes).expect("write runtime artifact");
         fs::write(prebuilt_dir.join(name), &bytes).expect("write prebuilt runtime artifact");
+    }
+}
+
+/// build-time 目标在 frontend 侧的名字。
+fn frontend_target(target: gugu_compiler_core::TargetName) -> gugu_frontend::TargetName {
+    match target {
+        gugu_compiler_core::TargetName::X86_64Linux => gugu_frontend::TargetName::X86_64Linux,
+        gugu_compiler_core::TargetName::X86_64Windows => gugu_frontend::TargetName::X86_64Windows,
     }
 }

@@ -20,6 +20,7 @@ mod lex;
 pub(crate) mod mono;
 mod names;
 mod parse;
+pub mod prebuild;
 #[cfg(all(test, feature = "runtime-gc-probes"))]
 mod probe_source_tests;
 pub(crate) mod semantics;
@@ -219,15 +220,6 @@ fn check_sources(
     let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, resources, entry)?;
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
-    let expansion_inputs = expand::run(
-        &mut modules,
-        source_map,
-        cfg,
-        queries,
-        package_identity,
-        external_packages,
-    )
-    .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     let entry_file = source_map.file_id(entry).ok_or_else(|| {
         vec![Diagnostic::error(
             DiagnosticCode::ModuleNotFound,
@@ -254,22 +246,20 @@ fn check_sources(
             Some(span),
         )]);
     }
-    let names = names::analyze(package_identity, external_packages, &modules)?;
-    let (semantics, types, registry, hir, analysis_world, mono_world, gir_world, gir_stats) =
-        semantics::check(
-            &modules,
-            &names,
-            source_map,
-            cfg,
-            entry_function,
-            queries,
-            &runtime_paths,
-        )
-        .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
-    let mut lints = semantics::must_use_lints(&modules, &semantics, source_map)
+    let (names, derived, expansion_inputs) = derive_world(
+        &mut modules,
+        source_map,
+        cfg,
+        package_identity,
+        external_packages,
+        entry_function,
+        queries,
+        &runtime_paths,
+    )?;
+    let mut lints = semantics::must_use_lints(&modules, &derived.checked, source_map)
         .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     lints.extend(
-        gir::large_copy_lints(&modules, &gir_world, source_map)
+        gir::large_copy_lints(&modules, &derived.gir, source_map)
             .map_err(|errors| expand::reanchor_errors(errors, source_map))?,
     );
     Ok(frontend_output(
@@ -277,18 +267,132 @@ fn check_sources(
         source_map,
         modules,
         names,
-        types,
-        registry,
+        derived.layouts,
+        derived.registry_identity,
         expansion_inputs,
-        semantics,
-        hir,
-        analysis_world,
-        mono_world,
-        gir_world,
-        gir_stats,
+        derived.checked,
+        derived.hir,
+        derived.analysis,
+        derived.mono,
+        derived.gir,
+        derived.gir_stats,
         lints,
     ))
 }
+
+/// 展开与语义检查的公共段：解析后的模块 → 名称解析 + 冻结 world。
+///
+/// 用户编译与构建期物化走同一段管线，因此内建块的编号与指纹在两条路径上同源。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "派生入口需要源码映射、cfg、入口与 query 引擎"
+)]
+fn derive_world(
+    modules: &mut [ParsedModule],
+    source_map: &mut SourceMap,
+    cfg: &cfg::CfgContext,
+    package_identity: &str,
+    external_packages: &BTreeSet<String>,
+    entry_function: Option<semantics::model::CallableId>,
+    queries: &crate::query::QueryEngine,
+    runtime_paths: &BTreeSet<String>,
+) -> Result<
+    (
+        names::NameResolution,
+        semantics::DerivedWorld,
+        expand::ExpansionInputs,
+    ),
+    Vec<Diagnostic>,
+> {
+    let expansion_inputs = expand::run(
+        modules,
+        source_map,
+        cfg,
+        queries,
+        package_identity,
+        external_packages,
+    )
+    .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+    let names = names::analyze(package_identity, external_packages, modules)?;
+    let derived = semantics::check(
+        modules,
+        &names,
+        source_map,
+        cfg,
+        entry_function,
+        queries,
+        runtime_paths,
+    )
+    .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+    Ok((names, derived, expansion_inputs))
+}
+
+/// 内建块派生结果：构建期物化的输入，每张表都是 canonical 编码的字节。
+///
+/// 编号前缀就是 artifact 的 source manifest 顺序；用户模块在用户编译里追加在它之后，
+/// 因此这里的每个下标在用户编译中仍然有效。
+pub(crate) struct BuiltinDerivation {
+    pub(crate) module_order: Vec<String>,
+    pub(crate) names: Vec<u8>,
+    pub(crate) identities: Vec<u8>,
+    pub(crate) checked: Vec<u8>,
+    pub(crate) early_constants: Vec<u8>,
+    pub(crate) hir: Vec<u8>,
+    pub(crate) gir_bodies: Vec<Vec<u8>>,
+    pub(crate) record_types: Vec<u8>,
+}
+
+/// canonical 编码一张物化表；编码失败是 compiler invariant，不是用户诊断。
+fn encode_table<T: serde::Serialize>(value: &T) -> Result<Vec<u8>, Vec<Diagnostic>> {
+    crate::canonical::to_vec(value).map_err(|error| {
+        vec![Diagnostic::error(
+            DiagnosticCode::BackendInvariant,
+            format!("内建物化表编码失败：{error}"),
+            None,
+        )]
+    })
+}
+
+/// 只派生内建块：入口取内建模块之一、关闭 `require_main`、按安装规则排除探针源。
+pub(crate) fn derive_builtin(
+    source_map: &mut SourceMap,
+    queries: &crate::query::QueryEngine,
+    resources: crate::runtime::RuntimeResources<'_>,
+    cfg: &cfg::CfgContext,
+) -> Result<BuiltinDerivation, Vec<Diagnostic>> {
+    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, resources, "")?;
+    let mut modules = parse_modules(source_map, "", cfg, &builtin_paths)?;
+    modules.sort_by(|left, right| left.path.cmp(&right.path));
+    let module_order = modules.iter().map(|module| module.path.clone()).collect();
+    let (names, derived, _expansion_inputs) = derive_world(
+        &mut modules,
+        source_map,
+        cfg,
+        BUILTIN_PACKAGE_IDENTITY,
+        &BTreeSet::new(),
+        None,
+        queries,
+        &runtime_paths,
+    )?;
+    Ok(BuiltinDerivation {
+        module_order,
+        names: encode_table(&names)?,
+        identities: encode_table(&derived.identities)?,
+        checked: encode_table(&derived.checked)?,
+        early_constants: encode_table(&derived.early)?,
+        hir: encode_table(derived.hir.module())?,
+        gir_bodies: derived
+            .gir
+            .bodies
+            .iter()
+            .map(encode_table)
+            .collect::<Result<Vec<_>, _>>()?,
+        record_types: encode_table(&derived.mono.contracts)?,
+    })
+}
+
+/// 内建块的包身份：artifact 源表在用户 package 之外，必须与任何用户包身份区分。
+const BUILTIN_PACKAGE_IDENTITY: &str = "builtin";
 
 fn parse_modules(
     source_map: &SourceMap,

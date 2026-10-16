@@ -20,6 +20,7 @@ gugu-frontend = { path = "../gugu-frontend" }
 
 [build-dependencies]
 gugu-compiler-core = { path = "../gugu-compiler-core" }
+gugu-frontend = { path = "../gugu-frontend" }
 gugu-runtime-builder = { path = "../gugu-runtime-builder" }
 
 [[bench]]

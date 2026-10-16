@@ -23,3 +23,11 @@ opt-level = 2
 debug = 1
 debug-assertions = false
 overflow-checks = true
+
+# build script 要跑一次完整的内建块派生并把结果物化进 artifact；debug/test 档默认 O0 会把它
+# 拖到十几秒，这里按 O2 编译 build script 自己的依赖。
+[profile.dev.build-override]
+opt-level = 2
+
+[profile.test.build-override]
+opt-level = 2

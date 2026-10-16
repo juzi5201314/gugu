@@ -71,7 +71,7 @@ impl<T> AstRange<T> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Visibility {
     Private,
     Pub,

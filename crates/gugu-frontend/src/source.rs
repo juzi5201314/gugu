@@ -8,7 +8,9 @@ use std::{
 pub const MAX_SOURCE_BYTES: usize = u32::MAX as usize;
 
 /// 编译 action 中的稳定源码文件编号。
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct SourceFileId(u32);
 
 impl SourceFileId {
@@ -29,7 +31,9 @@ impl SourceFileId {
 }
 
 /// 源码宏展开记录的稳定 action 内编号。
-#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, serde::Serialize, serde::Deserialize,
+)]
 pub struct ExpansionId(u32);
 
 impl ExpansionId {
@@ -56,7 +60,19 @@ impl ExpansionId {
 ///
 /// 每个非空源码表由 `SourceMap::new` 分配唯一编号；`0` 表示未绑定表的
 /// 独立 span（如 `SourceSnapshot::span` 与透传诊断），这类 span 不能注册展开。
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    Hash,
+    Ord,
+    PartialEq,
+    PartialOrd,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct SourceTableId(u64);
 
 impl SourceTableId {
@@ -323,7 +339,7 @@ impl fmt::Display for SpanError {
 impl std::error::Error for SpanError {}
 
 /// 一个带源码身份和展开上下文的半开字节范围。
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     file: SourceFileId,
     table: SourceTableId,
