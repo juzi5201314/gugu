@@ -33,6 +33,10 @@ gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-runtime-builder = { path = "../gugu-runtime-builder" }
 
 [[bench]]
+name = "pipeline_baseline"
+harness = false
+
+[[bench]]
 name = "coroutine_context"
 harness = false
 
