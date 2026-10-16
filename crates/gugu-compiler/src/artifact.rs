@@ -10,14 +10,18 @@ use gugu_frontend::{RuntimeArtifactError, RuntimeArtifactProvider, RuntimeArtifa
 static LINUX: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> = LazyLock::new(|| {
     RuntimeArtifactV1::decode(include_bytes!(concat!(
         env!("OUT_DIR"),
-        "/runtime-x86_64-linux.gbc"
+        "/runtime-x86_64-linux",
+        env!("GUGU_PREBUILT_FLAVOR"),
+        ".gbc"
     )))
 });
 
 static WINDOWS: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> = LazyLock::new(|| {
     RuntimeArtifactV1::decode(include_bytes!(concat!(
         env!("OUT_DIR"),
-        "/runtime-x86_64-windows.gbc"
+        "/runtime-x86_64-windows",
+        env!("GUGU_PREBUILT_FLAVOR"),
+        ".gbc"
     )))
 });
 

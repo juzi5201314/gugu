@@ -449,9 +449,16 @@ fn push_candidate(
         .entry((module_id, parent, kind, identity.clone()))
         .and_modify(|value| *value += 1)
         .or_insert(0);
+    // 内建块的稳定键由内建 package 身份给出，不能随编译它的用户 package 漂移：物化表按
+    // `BUILTIN_PACKAGE_IDENTITY` 冻结，用户编译必须复现同一批键。
+    let root = if module.builtin {
+        super::BUILTIN_PACKAGE_IDENTITY
+    } else {
+        package_identity
+    };
     let mut def_path = parent
         .map(|index| set.values[index].def_path.clone())
-        .unwrap_or_else(|| module_def_path(package_identity, &module.path));
+        .unwrap_or_else(|| module_def_path(root, &module.path));
     push_path_component(&mut def_path, kind as u8, identity.as_bytes(), *ordinal);
     let stable_key = *blake3::hash(&def_path).as_bytes();
     let index = set.values.len();
@@ -729,10 +736,6 @@ fn path_text(module: &ParsedModule, path_id: super::ast::PathId) -> Vec<String> 
         .collect()
 }
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "模块解析需要精确/折叠表、内建集合与导入者上下文"
-)]
 fn private_builtin_module(path: &str) -> bool {
     path == "std.prelude"
         || path == "std.runtime"
@@ -741,6 +744,10 @@ fn private_builtin_module(path: &str) -> bool {
         || path.starts_with("runtime.")
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "模块解析需要精确/折叠表、内建集合与导入者上下文"
+)]
 fn classify_module(
     path: &[String],
     external_packages: &BTreeSet<String>,
@@ -915,6 +922,10 @@ fn resolve_imports(
     resolved
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "解析单条导入需要待解队列、定义表、导出表、再导出表与状态位"
+)]
 fn resolve_import(
     index: usize,
     pending: &[PendingImport],

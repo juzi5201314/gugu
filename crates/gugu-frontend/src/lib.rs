@@ -14,6 +14,8 @@ mod diagnostics;
 mod diagnostics_tests;
 mod frontend;
 mod lir;
+#[cfg(all(test, feature = "slow-tests"))]
+mod numbering_tests;
 mod project;
 mod query;
 mod runtime;
@@ -454,6 +456,9 @@ impl Compilation {
 pub struct Compiler {
     queries: std::sync::Arc<query::QueryEngine>,
     artifacts: &'static dyn RuntimeArtifactProvider,
+    /// 测试专用：强制内建块从源码派生，用于比对两条加载路径的编号无关指纹。
+    #[cfg(all(test, feature = "slow-tests"))]
+    derive_builtins: bool,
 }
 
 impl Compiler {
@@ -465,6 +470,19 @@ impl Compiler {
         Self {
             queries: std::sync::Arc::new(query::QueryEngine::new()),
             artifacts,
+            #[cfg(all(test, feature = "slow-tests"))]
+            derive_builtins: false,
+        }
+    }
+
+    /// 测试专用：同一 query session 上强制内建块现算的会话。
+    ///
+    /// 共用 session 是刻意的：两条加载路径必须能在同一个缓存里共存而不互相污染。
+    #[cfg(all(test, feature = "slow-tests"))]
+    pub(crate) fn deriving_builtins(&self) -> Self {
+        Self {
+            derive_builtins: true,
+            ..self.clone()
         }
     }
 
@@ -486,6 +504,15 @@ impl Compiler {
     pub(crate) fn shared() -> Self {
         static SHARED: std::sync::LazyLock<Compiler> = std::sync::LazyLock::new(Compiler::new);
         SHARED.clone()
+    }
+
+    /// 内建块的加载方式：生产会话按物化表安装，测试会话可以强制现算。
+    fn prefix_mode(&self) -> frontend::PrefixMode {
+        #[cfg(all(test, feature = "slow-tests"))]
+        if self.derive_builtins {
+            return frontend::PrefixMode::Derive;
+        }
+        frontend::PrefixMode::Install
     }
 
     /// 返回当前目标的已验证 runtime artifact。
@@ -564,8 +591,12 @@ impl Compiler {
         };
         graph.complete(ActionKind::LoadSources, loaded.detail());
 
-        let frontend_result =
-            frontend::bootstrap(loaded.as_source_input(), &self.queries, resources);
+        let frontend_result = frontend::bootstrap_with(
+            loaded.as_source_input(),
+            &self.queries,
+            resources,
+            self.prefix_mode(),
+        );
         let source_map = loaded.source_map;
         let frontend = match frontend_result {
             Ok(output) => output,

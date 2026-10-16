@@ -79,14 +79,31 @@ impl SourceTableId {
     /// 未绑定任何源码表的 span 身份。
     pub const UNBOUND: Self = Self(0);
 
-    /// 分配一个新的进程内唯一源码表身份。
-    pub(crate) fn next() -> Self {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static NEXT: AtomicU64 = AtomicU64::new(1);
-        Self(NEXT.fetch_add(1, Ordering::Relaxed))
+    /// 按源码表内容派生身份。
+    ///
+    /// 身份必须由内容决定，而不是进程历史：同一份源码表在任何会话、任何编译顺序下都得到同一
+    /// 编号。`Span` 的规范编码与跨会话 span 校验都读这个编号，用进程内计数器会让等价的两份
+    /// 源码表互不相等，缓存命中与重新执行就再也对不上。
+    ///
+    /// 身份在源码表建立时定死，之后不随追加的生成快照或展开记录改变：span 校验要求同一个
+    /// 编译里的所有 span 共享一个身份，中途换号会把先前的 span 判成外来 span。
+    pub(crate) fn from_content(snapshots: &[SourceSnapshot]) -> Self {
+        let mut hash = blake3::Hasher::new_derive_key("gugu-source-table-v1");
+        hash.update(&(snapshots.len() as u64).to_le_bytes());
+        for snapshot in snapshots {
+            let path = snapshot.logical_path();
+            hash.update(&(path.len() as u64).to_le_bytes());
+            hash.update(path.as_bytes());
+            hash.update(&snapshot.content_hash());
+        }
+        let digest = hash.finalize();
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&digest.as_bytes()[..8]);
+        // 0 是 `UNBOUND`，内容身份避开它。
+        Self(u64::from_le_bytes(bytes) | 1)
     }
 
-    /// 返回线程内唯一编号。
+    /// 返回源码表身份编号。
     pub const fn as_u64(self) -> u64 {
         self.0
     }
@@ -539,7 +556,7 @@ impl SourceMap {
             .map(|(index, snapshot)| (snapshot.logical_path.clone(), index as u32))
             .collect();
         Ok(Self {
-            table: SourceTableId::next(),
+            table: SourceTableId::from_content(&snapshots),
             snapshots,
             path_index,
             expansions: Vec::new(),
@@ -551,7 +568,7 @@ impl SourceMap {
         Self::default()
     }
 
-    /// 返回该源码表在本进程内的唯一身份。
+    /// 返回该源码表的内容身份。
     pub fn table(&self) -> SourceTableId {
         self.table
     }
@@ -598,29 +615,31 @@ impl SourceMap {
     /// 把内建源装到文件 ID 前缀，用户快照按逻辑路径排序追加在后。
     ///
     /// 编号前缀是内建块身份的一部分：物化表的每个下标都以「内建块占 [0, N)」为前提，
-    /// 用户模块只能落在前缀之后。`prefix` 必须已按逻辑路径严格升序（artifact manifest 的
-    /// 规范顺序），用户快照与内建源不得同名。
+    /// 用户模块只能落在前缀之后。调用方负责给出「已物化的源在前、未物化的内建源在后」的
+    /// manifest 顺序（探针源这类未物化内建源会让前缀不是全局升序），这里只钉住两条硬约束：
+    /// 前缀内部没有重复逻辑路径，用户快照与内建源不同名。
     pub fn prepend_builtin_prefix(
         &mut self,
         prefix: impl IntoIterator<Item = SourceSnapshot>,
     ) -> Result<(), SourceMapError> {
         let mut user = std::mem::take(&mut self.snapshots);
         user.sort_by(|left, right| left.logical_path.cmp(&right.logical_path));
-        let mut combined: Vec<SourceSnapshot> = prefix.into_iter().collect();
-        for pair in combined.windows(2) {
-            if pair[0].logical_path >= pair[1].logical_path {
-                return Err(SourceMapError::DuplicatePath(pair[1].logical_path.clone()));
-            }
+        let combined: Vec<SourceSnapshot> = prefix.into_iter().collect();
+        let mut paths: Vec<&str> = combined.iter().map(SourceSnapshot::logical_path).collect();
+        paths.sort_unstable();
+        if let Some(pair) = paths.windows(2).find(|pair| pair[0] == pair[1]) {
+            return Err(SourceMapError::DuplicatePath(pair[0].to_owned()));
         }
-        if let Some(duplicate) = user.iter().find(|snapshot| {
-            combined
-                .binary_search_by(|builtin| builtin.logical_path.cmp(&snapshot.logical_path))
-                .is_ok()
-        }) {
+        let mut builtin_paths: std::collections::BTreeSet<&str> = paths.into_iter().collect();
+        if let Some(duplicate) = user
+            .iter()
+            .find(|snapshot| !builtin_paths.insert(snapshot.logical_path()))
+        {
             return Err(SourceMapError::DuplicatePath(
                 duplicate.logical_path.clone(),
             ));
         }
+        let mut combined = combined;
         combined.extend(user);
         self.reindex(combined)
     }

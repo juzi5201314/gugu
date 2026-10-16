@@ -476,10 +476,15 @@ fn cached_constraint_failures_preserve_notes_and_current_source_table() {
             .map(crate::Diagnostic::render_text)
             .collect::<Vec<_>>()
     );
-    assert_ne!(
-        cold[0].span().unwrap().table(),
-        warm[0].span().unwrap().table()
-    );
+    // 缓存诊断必须绑定当前源码表：源码表身份按内容派生，同一份源码在本次编译新建的源码表
+    // 与冷/热两条路径必须给出同一个身份；沿用旧会话编号会让这里对不上。
+    let current = crate::SourceMap::new(vec![
+        crate::SourceSnapshot::from_str("main.gg", source).expect("快照"),
+    ])
+    .expect("源码表")
+    .table();
+    assert_eq!(cold[0].span().unwrap().table(), current);
+    assert_eq!(warm[0].span().unwrap().table(), current);
 }
 
 #[cfg(feature = "slow-tests")]

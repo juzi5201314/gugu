@@ -86,10 +86,38 @@ pub(crate) struct ParsedModule {
     pub(crate) builtin: bool,
 }
 
+/// 内建块的加载方式。
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PrefixMode {
+    /// 生产路径：按 `prebuilt` 物化表安装内建块。
+    Install,
+    /// 测试路径：忽略物化表，内建块与用户模块一起现算。
+    ///
+    /// 只用于比对两条加载路径的编号无关指纹；它不是源码回退——`Install` 模式下缺少物化表
+    /// 仍然是 compiler invariant 失败。
+    #[cfg(all(test, feature = "slow-tests"))]
+    Derive,
+}
+
+/// 前端入口：解析、展开、名称解析与语义检查。
+///
+/// 生产入口是 [`bootstrap_with`]（会话按物化表安装内建块）；这个包装只给 crate 内测试用，
+/// 让不关心内建块加载方式的用例少传一个参数。
+#[cfg(test)]
 pub(crate) fn bootstrap(
     input: SourceInput<'_>,
     queries: &crate::query::QueryEngine,
     resources: crate::runtime::RuntimeResources<'_>,
+) -> Result<FrontendOutput, Vec<Diagnostic>> {
+    bootstrap_with(input, queries, resources, PrefixMode::Install)
+}
+
+/// 带内建块加载方式的前端入口。
+pub(crate) fn bootstrap_with(
+    input: SourceInput<'_>,
+    queries: &crate::query::QueryEngine,
+    resources: crate::runtime::RuntimeResources<'_>,
+    mode: PrefixMode,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
     match input {
         SourceInput::EmptyPackage => Ok(FrontendOutput {
@@ -132,6 +160,7 @@ pub(crate) fn bootstrap(
             external_packages,
             queries,
             resources,
+            mode,
         ),
     }
 }
@@ -187,18 +216,10 @@ fn install_builtin_sources(
             runtime_paths.insert(logical.to_owned());
         }
     }
-    // 内建源单元分两段：物化表覆盖的源按逻辑路径占据文件 ID 前缀，探针源这类未覆盖的源追加在
-    // 物化块之后。物化表里的位置以「物化源占前缀」为前提，顺序不能与构建期不同。
-    snapshots.sort_by(|left, right| {
-        (
-            is_probe_builtin_source(left.logical_path()),
-            left.logical_path(),
-        )
-            .cmp(&(
-                is_probe_builtin_source(right.logical_path()),
-                right.logical_path(),
-            ))
-    });
+    // 内建源单元分两段：物化表覆盖的源按 artifact manifest 顺序占据文件 ID 前缀，探针源这类
+    // 未覆盖的源追加在物化块之后。组内保持 manifest 顺序（稳定排序），不能按路径重排：
+    // 物化表里的位置以「物化源占前缀」为前提，顺序不能与构建期不同。
+    snapshots.sort_by_key(|snapshot| is_probe_builtin_source(snapshot.logical_path()));
     source_map
         .prepend_builtin_prefix(snapshots)
         .map_err(|error| {
@@ -225,6 +246,7 @@ fn check_sources(
     external_packages: &BTreeSet<String>,
     queries: &crate::query::QueryEngine,
     resources: crate::runtime::RuntimeResources<'_>,
+    mode: PrefixMode,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
     // 物化表按 target 派生：目标不一致时内建块的裁剪与物化位置都会错位，必须在这里失败。
     if resources.target_name() != cfg.target().name() {
@@ -241,19 +263,43 @@ fn check_sources(
     let (builtin_paths, runtime_paths) = install_builtin_sources(source_map, resources, entry)?;
     // 物化表决定编号前缀：内建块的位置与顺序都按它安装，缺表或校验失败即 compiler invariant。
     // 解码要在源安装之后：表里的源码位置按当前源码表重建。
-    let materialized_sources = resources
-        .source_blobs()
-        .iter()
-        .filter(|blob| !is_probe_builtin_source(&blob.logical_path))
-        .count();
-    let prefix =
-        prefix::BuiltinPrefix::decode(resources.prebuilt(), materialized_sources, source_map)?;
+    let prefix = match mode {
+        PrefixMode::Install => {
+            let materialized_sources = resources
+                .source_blobs()
+                .iter()
+                .filter(|blob| !is_probe_builtin_source(&blob.logical_path))
+                .count();
+            Some(prefix::BuiltinPrefix::decode(
+                resources.prebuilt(),
+                materialized_sources,
+                source_map,
+            )?)
+        }
+        #[cfg(all(test, feature = "slow-tests"))]
+        PrefixMode::Derive => None,
+    };
+    // 强制现算的测试路径没有物化表：用「非探针内建源」判定物化归属，模块位次与生产路径一致。
+    let probe_modules = match mode {
+        PrefixMode::Install => BTreeSet::new(),
+        #[cfg(all(test, feature = "slow-tests"))]
+        PrefixMode::Derive => probe_module_paths(resources),
+    };
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
     // 模块表定序：物化覆盖的内建模块（artifact 顺序）→ 未覆盖的内建模块 → 用户模块。
     modules.sort_by(|left, right| {
-        (module_rank(left, &prefix), &left.path).cmp(&(module_rank(right, &prefix), &right.path))
+        (
+            module_rank(left, prefix.as_ref(), &probe_modules),
+            &left.path,
+        )
+            .cmp(&(
+                module_rank(right, prefix.as_ref(), &probe_modules),
+                &right.path,
+            ))
     });
-    prefix.verify_installed(&modules)?;
+    if let Some(prefix) = prefix.as_ref() {
+        prefix.verify_installed(&modules)?;
+    }
     // 宏展开必须先于入口判定：`comptime source` 生成的 `fn main` 与源码 main 同等有效。
     let expansion_inputs = expand_modules(
         &mut modules,
@@ -262,7 +308,7 @@ fn check_sources(
         queries,
         package_identity,
         external_packages,
-        Some(&prefix),
+        prefix.as_ref(),
     )?;
     let entry_file = source_map.file_id(entry).ok_or_else(|| {
         vec![Diagnostic::error(
@@ -299,7 +345,7 @@ fn check_sources(
         entry_function,
         queries,
         &runtime_paths,
-        Some(&prefix),
+        prefix.as_ref(),
     )?;
     let mut lints = semantics::must_use_lints(&modules, &derived.checked, source_map)
         .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
@@ -352,15 +398,34 @@ fn expand_modules(
 /// 模块表定序：物化覆盖的内建模块 → 未覆盖的内建模块 → 用户模块。
 ///
 /// 物化表里的模块下标以「物化模块占前缀」为前提；探针源这类未物化的内建模块追加在物化块
-/// 之后，用户模块再追加在其后。
-fn module_rank(module: &ParsedModule, prefix: &prefix::BuiltinPrefix) -> u8 {
+/// 之后，用户模块再追加在其后。`Install` 模式的物化归属由物化表给出，`Derive` 模式没有
+/// 物化表，改由「非探针内建源」判定，两条路径的模块位次因此一致。
+fn module_rank(
+    module: &ParsedModule,
+    prefix: Option<&prefix::BuiltinPrefix>,
+    probe_modules: &BTreeSet<String>,
+) -> u8 {
     if !module.builtin {
         2
-    } else if prefix.covers_module(&module.path) {
+    } else if prefix.map_or_else(
+        || !probe_modules.contains(&module.path),
+        |prefix| prefix.covers_module(&module.path),
+    ) {
         0
     } else {
         1
     }
+}
+
+/// 探针内建源对应的模块路径集合。
+#[cfg(all(test, feature = "slow-tests"))]
+fn probe_module_paths(resources: crate::runtime::RuntimeResources<'_>) -> BTreeSet<String> {
+    resources
+        .source_blobs()
+        .iter()
+        .filter(|blob| is_probe_builtin_source(&blob.logical_path))
+        .filter_map(|blob| logical_to_module_path(&blob.logical_path))
+        .collect()
 }
 
 /// 名称解析与语义检查的公共段：已展开的模块 → 冻结 world。
@@ -516,10 +581,17 @@ fn parse_modules(
     }
 }
 
-/// 返回内建源单元对应的模块路径。
+/// 把内建逻辑路径映射成模块路径：去掉扩展名并把分隔符换成 `.`。
 ///
-/// 内建逻辑路径已经是 package 相对路径（例如 `std/runtime/platform.gg`），直接去掉扩展名并
-/// 把分隔符换成 `.`；它不受用户 `source_root` 约束。
+/// 内建逻辑路径已经是 package 相对路径（例如 `std/runtime/platform.gg`），不受用户
+/// `source_root` 约束。
+fn logical_to_module_path(logical: &str) -> Option<String> {
+    logical
+        .strip_suffix(".gg")
+        .map(|path| path.replace('/', "."))
+}
+
+/// 返回内建源单元对应的模块路径。
 fn builtin_module_path(
     snapshot: &SourceSnapshot,
     builtin_paths: &BTreeSet<String>,
@@ -528,9 +600,7 @@ fn builtin_module_path(
     if !builtin_paths.contains(logical) {
         return None;
     }
-    logical
-        .strip_suffix(".gg")
-        .map(|path| path.replace('/', "."))
+    logical_to_module_path(logical)
 }
 
 fn parse_module(

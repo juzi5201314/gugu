@@ -18,6 +18,13 @@ fn main() {
 
     let artifacts = gugu_runtime_builder::build_all().expect("runtime artifact build/verify");
     fs::create_dir_all(&prebuilt_dir).expect("创建 prebuilt 目录");
+    // 探针源只随 `runtime-gc-probes` 进入 artifact：文件名与嵌入路径都带上风味，两种构建互不覆盖。
+    let flavor = if cfg!(feature = "runtime-gc-probes") {
+        "-probes"
+    } else {
+        ""
+    };
+    println!("cargo:rustc-env=GUGU_PREBUILT_FLAVOR={flavor}");
     for (target, artifact) in artifacts {
         let artifact =
             gugu_frontend::materialize(frontend_target(target), artifact).expect("内建块物化");
@@ -26,11 +33,12 @@ fn main() {
             gugu_compiler_core::RuntimeArtifactV1::decode(&bytes).expect("runtime artifact decode");
         decoded.for_target(target).expect("runtime artifact target");
         let name = match target {
-            gugu_compiler_core::TargetName::X86_64Linux => "runtime-x86_64-linux.gbc",
-            gugu_compiler_core::TargetName::X86_64Windows => "runtime-x86_64-windows.gbc",
+            gugu_compiler_core::TargetName::X86_64Linux => "runtime-x86_64-linux",
+            gugu_compiler_core::TargetName::X86_64Windows => "runtime-x86_64-windows",
         };
-        fs::write(out_dir.join(name), &bytes).expect("write runtime artifact");
-        fs::write(prebuilt_dir.join(name), &bytes).expect("write prebuilt runtime artifact");
+        let name = format!("{name}{flavor}.gbc");
+        fs::write(out_dir.join(&name), &bytes).expect("write runtime artifact");
+        fs::write(prebuilt_dir.join(&name), &bytes).expect("write prebuilt runtime artifact");
     }
 }
 

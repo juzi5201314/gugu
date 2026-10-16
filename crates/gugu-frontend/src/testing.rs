@@ -17,10 +17,18 @@ use crate::{
 };
 
 /// build-time 物化产物的落盘位置。
+///
+/// 探针源只随 `runtime-gc-probes` 进入 artifact，两种风味各占一个文件：无探针构建不能覆盖
+/// 探针构建写出的物化产物，否则探针用例会拿到缺探针源的表。
 fn prebuilt_path(target: TargetName) -> PathBuf {
+    let flavor = if cfg!(feature = "runtime-gc-probes") {
+        "-probes"
+    } else {
+        ""
+    };
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/prebuilt")
-        .join(format!("runtime-{}.gbc", target.name()))
+        .join(format!("runtime-{}{flavor}.gbc", target.name()))
 }
 
 /// 读取并解码目标专属的物化产物。

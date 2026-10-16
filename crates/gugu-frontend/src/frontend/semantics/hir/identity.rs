@@ -232,15 +232,25 @@ pub(super) fn collect(
     if candidates.len() >= u32::MAX as usize {
         return Err(invalid("HIR 定义数量超过 u32 上界"));
     }
-    // 编号 = 「物化覆盖的内建候选在前、会话派生在后」：块内保持登记顺序，跨块引用只走稳定键。
-    // 装上前缀后内建块由物化表整体占位，这里的顺序就是它可以沿用的前提。
+    // 编号 = 「物化覆盖的内建候选在前、未覆盖的内建候选与用户模块在后」：块内保持登记顺序，
+    // 跨块引用只走稳定键。判定只看「内建源里未被物化的探针源」——与模块表定序用的是同一条
+    // 规则，构建期派生（没有探针源）与用户编译因此得到同一顺序；按「是否被物化表覆盖」判定
+    // 会让两条路径给出不同顺序。
+    let materialized_modules: Vec<bool> = model
+        .modules
+        .iter()
+        .map(|module| {
+            module.builtin
+                && sources.snapshot(module.file.source).is_none_or(|snapshot| {
+                    !crate::frontend::is_probe_builtin_source(snapshot.logical_path())
+                })
+        })
+        .collect();
     let mut order: Vec<usize> = (0..candidates.len()).collect();
-    if let Some(prefix) = prefix {
-        order.sort_by_key(|&index| {
-            !matches!(candidates[index].origin, Origin::BuiltinTrait(_))
-                && !prefix.covers_module(&model.modules[candidates[index].module].path)
-        });
-    }
+    order.sort_by_key(|&index| {
+        !matches!(candidates[index].origin, Origin::BuiltinTrait(_))
+            && !materialized_modules[candidates[index].module]
+    });
     let mut by_key = order.clone();
     by_key.sort_unstable_by_key(|&index| candidates[index].key);
     if by_key
@@ -253,7 +263,7 @@ pub(super) fn collect(
     for (position, &index) in order.iter().enumerate() {
         remap[index] = position;
     }
-    let origins = order
+    let mut origins = order
         .iter()
         .map(|&index| candidates[index].origin)
         .collect::<Vec<_>>();
@@ -293,9 +303,6 @@ pub(super) fn collect(
     let mut functions = remap_table(functions);
     let mut asynchronous = remap_table(asynchronous);
     let mut local_statics = remap_table(local_statics);
-    let mut named_items = named_items;
-    let mut origins = origins;
-    let definitions = definitions;
     let mut opaques = opaque_candidates
         .into_iter()
         .map(|index| hir_id(remap[index]))
@@ -333,22 +340,19 @@ pub(super) fn collect(
                 "内建块现算的身份与物化前缀不一致：Named {fresh_named} vs {installed_named}"
             )));
         }
-        let mut spliced_origins = installed.origins.clone();
-        spliced_origins.extend_from_slice(&origins[installed_definitions..]);
-        origins = spliced_origins;
-        let mut spliced_opaques = installed.opaques.clone();
-        spliced_opaques.append(&mut opaques.split_off(installed.opaques.len()));
-        opaques = spliced_opaques;
-        let mut spliced_interfaces = installed.interfaces.clone();
-        spliced_interfaces.append(&mut interfaces.split_off(installed.interfaces.len()));
-        interfaces = spliced_interfaces;
-        let names_count = installed.named_items.len();
-        named_items[..names_count].copy_from_slice(&installed.named_items);
+        // 核对通过后整段换上物化前缀：块内顺序已逐项相同，换的是跨会话不可沿用的会话局部身份。
+        origins.splice(..installed_definitions, installed.origins.iter().copied());
+        opaques.splice(..installed.opaques.len(), installed.opaques.iter().copied());
+        interfaces.splice(
+            ..installed.interfaces.len(),
+            installed.interfaces.iter().copied(),
+        );
+        named_items[..installed.named_items.len()].copy_from_slice(&installed.named_items);
         for module in 0..installed.items.len() {
-            items[module] = installed.items[module].clone();
-            functions[module] = installed.functions[module].clone();
-            asynchronous[module] = installed.asynchronous[module].clone();
-            local_statics[module] = installed.local_statics[module].clone();
+            items[module].clone_from_slice(&installed.items[module]);
+            functions[module].clone_from_slice(&installed.functions[module]);
+            asynchronous[module].clone_from_slice(&installed.asynchronous[module]);
+            local_statics[module].clone_from_slice(&installed.local_statics[module]);
         }
     }
     Ok((
