@@ -145,7 +145,8 @@ fn budget_exhaustion_is_deterministic() {
         depth: 128,
     });
     // fuel 耗尽：任何一个子表达式都无法完成求值。
-    let item = output.modules[0]
+    let module = super::tests::module_index(&output, "main");
+    let item = output.modules[module]
         .arena
         .items
         .iter()
@@ -158,7 +159,7 @@ fn budget_exhaustion_is_deterministic() {
         unreachable!("已过滤 const 项")
     };
     let error = model
-        .eval_early_const(0, value, &Ty::int())
+        .eval_early_const(module, value, &Ty::int())
         .expect_err("fuel 上限必须拒绝求值");
     assert_eq!(error.code(), DiagnosticCode::ComptimeBudget);
     // heap 耗尽：零字节配额下任何 string 构造都失败。
@@ -169,12 +170,12 @@ fn budget_exhaustion_is_deterministic() {
     });
     let ItemKind::Const {
         value: Some(value), ..
-    } = output.modules[0].arena.items[1].kind
+    } = output.modules[module].arena.items[1].kind
     else {
         unreachable!("第二项是 string 常量")
     };
     let error = model
-        .eval_early_const(0, value, &Ty::String)
+        .eval_early_const(module, value, &Ty::String)
         .expect_err("heap 上限必须拒绝分配");
     assert_eq!(error.code(), DiagnosticCode::ComptimeBudget);
 }
@@ -221,12 +222,15 @@ fn comptime_calls_use_lexical_scope() {
         &[("main.gg", "const X: int = 7\nfn read() int = X\nfn outer() int { let X = 2\n read() }\nconst N: int = outer()\nfn main() { _ = N }")],
         &QueryEngine::new(),
     ).expect("常量函数使用定义处名称");
+    let module = super::tests::module_index(&output, "main") as u32;
     let value = output
         .semantics
         .early_constants
         .constants
         .iter()
-        .find(|entry| entry.key.item == 3 && entry.key.expr == u32::MAX)
+        .find(|entry| {
+            entry.key.module == module && entry.key.item == 3 && entry.key.expr == u32::MAX
+        })
         .unwrap();
     assert_eq!(value.value, comptime::eval::ConstantValue::Int(7));
 }
@@ -237,12 +241,15 @@ fn comptime_match_compares_numeric_literals() {
         &[("main.gg", "fn choose(n: int) int { match n { 2 => 9, _ => 4 } }\nconst N: int = choose(2)\nfn main() { _ = N }")],
         &QueryEngine::new(),
     ).expect("整数模式可以在编译期匹配");
+    let module = super::tests::module_index(&output, "main") as u32;
     let value = output
         .semantics
         .early_constants
         .constants
         .iter()
-        .find(|entry| entry.key.item == 1 && entry.key.expr == u32::MAX)
+        .find(|entry| {
+            entry.key.module == module && entry.key.item == 1 && entry.key.expr == u32::MAX
+        })
         .unwrap();
     assert_eq!(value.value, comptime::eval::ConstantValue::Int(9));
 }
@@ -264,7 +271,8 @@ fn comptime_heap_accounts_for_aggregate_payloads() {
         heap_bytes: 16,
         depth: 128,
     });
-    for item in &output.modules[0].arena.items[..2] {
+    let module = super::tests::module_index(&output, "main");
+    for item in &output.modules[module].arena.items[..2] {
         let ItemKind::Const {
             value: Some(value), ..
         } = item.kind
@@ -272,7 +280,7 @@ fn comptime_heap_accounts_for_aggregate_payloads() {
             unreachable!()
         };
         let error = model
-            .eval_early_const(0, value, &Ty::int())
+            .eval_early_const(module, value, &Ty::int())
             .expect_err("复制的嵌套负载和拼接结果必须计入堆预算");
         assert_eq!(error.code(), DiagnosticCode::ComptimeBudget);
     }
@@ -320,12 +328,15 @@ fn comptime_loop_preserves_break_value() {
         &[("main.gg", "fn answer() int { let x = loop { break 7 }\n x }\nconst N: int = answer()\nfn main() { _ = N }")],
         &QueryEngine::new(),
     ).expect("有值 break 形成循环结果");
+    let module = super::tests::module_index(&output, "main") as u32;
     let value = output
         .semantics
         .early_constants
         .constants
         .iter()
-        .find(|entry| entry.key.item == 1 && entry.key.expr == u32::MAX)
+        .find(|entry| {
+            entry.key.module == module && entry.key.item == 1 && entry.key.expr == u32::MAX
+        })
         .unwrap();
     assert_eq!(value.value, comptime::eval::ConstantValue::Int(7));
 }

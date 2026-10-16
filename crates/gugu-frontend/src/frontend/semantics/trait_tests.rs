@@ -201,10 +201,12 @@ fn specialization_dispatch_survives_cached_frontend_results() {
     let queries = crate::QueryEngine::new();
     for _ in 0..2 {
         let checked = super::tests::frontend(&[("main.gg", source)], &queries).unwrap();
+        let user_module = super::tests::module_index(&checked, "main");
         let dispatch = checked
             .semantics
             .bodies
             .iter()
+            .filter(|body| body.definition.module == user_module)
             .flat_map(|body| &body.dispatches)
             .find(|dispatch| dispatch.implementation.is_some())
             .unwrap();
