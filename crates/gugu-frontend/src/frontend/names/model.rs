@@ -92,7 +92,7 @@ pub(crate) struct NameResolution {
     pub(crate) imports: Vec<ResolvedImport>,
 }
 
-pub(super) fn resolved_target_key(target: &ResolvedTarget) -> (u8, u32, &str) {
+pub(crate) fn resolved_target_key(target: &ResolvedTarget) -> (u8, u32, &str) {
     match target {
         ResolvedTarget::Module(module) => (0, module.0, ""),
         ResolvedTarget::Def(definition) => (1, definition.0, ""),
@@ -100,7 +100,7 @@ pub(super) fn resolved_target_key(target: &ResolvedTarget) -> (u8, u32, &str) {
     }
 }
 
-pub(super) fn resolution_is_valid(resolution: &NameResolution) -> bool {
+pub(crate) fn resolution_is_valid(resolution: &NameResolution) -> bool {
     let definitions = &resolution.definitions;
     definitions.iter().enumerate().all(|(index, definition)| {
         definition.id.index() == index

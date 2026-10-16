@@ -21,6 +21,7 @@ pub(crate) mod mono;
 mod names;
 mod parse;
 pub mod prebuild;
+mod prefix;
 #[cfg(all(test, feature = "runtime-gc-probes"))]
 mod probe_source_tests;
 pub(crate) mod semantics;
@@ -186,6 +187,18 @@ fn install_builtin_sources(
             runtime_paths.insert(logical.to_owned());
         }
     }
+    // 内建源单元分两段：物化表覆盖的源按逻辑路径占据文件 ID 前缀，探针源这类未覆盖的源追加在
+    // 物化块之后。物化表里的位置以「物化源占前缀」为前提，顺序不能与构建期不同。
+    snapshots.sort_by(|left, right| {
+        (
+            is_probe_builtin_source(left.logical_path()),
+            left.logical_path(),
+        )
+            .cmp(&(
+                is_probe_builtin_source(right.logical_path()),
+                right.logical_path(),
+            ))
+    });
     source_map
         .prepend_builtin_prefix(snapshots)
         .map_err(|error| {
@@ -213,10 +226,34 @@ fn check_sources(
     queries: &crate::query::QueryEngine,
     resources: crate::runtime::RuntimeResources<'_>,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
+    // 物化表按 target 派生：目标不一致时内建块的裁剪与物化位置都会错位，必须在这里失败。
+    if resources.target_name() != cfg.target().name() {
+        return Err(vec![Diagnostic::error(
+            DiagnosticCode::BackendInvariant,
+            format!(
+                "runtime artifact 目标 `{}` 与本次编译目标 `{}` 不一致",
+                resources.target_name(),
+                cfg.target().name()
+            ),
+            None,
+        )]);
+    }
     let (builtin_paths, runtime_paths) = install_builtin_sources(source_map, resources, entry)?;
+    // 物化表决定编号前缀：内建块的位置与顺序都按它安装，缺表或校验失败即 compiler invariant。
+    // 解码要在源安装之后：表里的源码位置按当前源码表重建。
+    let materialized_sources = resources
+        .source_blobs()
+        .iter()
+        .filter(|blob| !is_probe_builtin_source(&blob.logical_path))
+        .count();
+    let prefix =
+        prefix::BuiltinPrefix::decode(resources.prebuilt(), materialized_sources, source_map)?;
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
-    // 内建块占据模块编号前缀：物化表里的 owner/定义下标都以「内建块在前」为前提。
-    modules.sort_by(|left, right| (!left.builtin, &left.path).cmp(&(!right.builtin, &right.path)));
+    // 模块表定序：物化覆盖的内建模块（artifact 顺序）→ 未覆盖的内建模块 → 用户模块。
+    modules.sort_by(|left, right| {
+        (module_rank(left, &prefix), &left.path).cmp(&(module_rank(right, &prefix), &right.path))
+    });
+    prefix.verify_installed(&modules)?;
     // 宏展开必须先于入口判定：`comptime source` 生成的 `fn main` 与源码 main 同等有效。
     let expansion_inputs = expand_modules(
         &mut modules,
@@ -225,6 +262,7 @@ fn check_sources(
         queries,
         package_identity,
         external_packages,
+        Some(&prefix),
     )?;
     let entry_file = source_map.file_id(entry).ok_or_else(|| {
         vec![Diagnostic::error(
@@ -261,6 +299,7 @@ fn check_sources(
         entry_function,
         queries,
         &runtime_paths,
+        Some(&prefix),
     )?;
     let mut lints = semantics::must_use_lints(&modules, &derived.checked, source_map)
         .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
@@ -296,6 +335,7 @@ fn expand_modules(
     queries: &crate::query::QueryEngine,
     package_identity: &str,
     external_packages: &BTreeSet<String>,
+    prefix: Option<&prefix::BuiltinPrefix>,
 ) -> Result<expand::ExpansionInputs, Vec<Diagnostic>> {
     expand::run(
         modules,
@@ -304,8 +344,23 @@ fn expand_modules(
         queries,
         package_identity,
         external_packages,
+        prefix,
     )
     .map_err(|errors| expand::reanchor_errors(errors, source_map))
+}
+
+/// 模块表定序：物化覆盖的内建模块 → 未覆盖的内建模块 → 用户模块。
+///
+/// 物化表里的模块下标以「物化模块占前缀」为前提；探针源这类未物化的内建模块追加在物化块
+/// 之后，用户模块再追加在其后。
+fn module_rank(module: &ParsedModule, prefix: &prefix::BuiltinPrefix) -> u8 {
+    if !module.builtin {
+        2
+    } else if prefix.covers_module(&module.path) {
+        0
+    } else {
+        1
+    }
 }
 
 /// 名称解析与语义检查的公共段：已展开的模块 → 冻结 world。
@@ -324,8 +379,9 @@ fn derive_world(
     entry_function: Option<semantics::model::CallableId>,
     queries: &crate::query::QueryEngine,
     runtime_paths: &BTreeSet<String>,
+    prefix: Option<&prefix::BuiltinPrefix>,
 ) -> Result<(names::NameResolution, semantics::DerivedWorld), Vec<Diagnostic>> {
-    let names = names::analyze(package_identity, external_packages, modules)?;
+    let names = names::analyze_with_prefix(package_identity, external_packages, modules, prefix)?;
     let derived = semantics::check(
         modules,
         &names,
@@ -383,6 +439,7 @@ pub(crate) fn derive_builtin(
         queries,
         BUILTIN_PACKAGE_IDENTITY,
         &BTreeSet::new(),
+        None,
     )?;
     let module_order = modules.iter().map(|module| module.path.clone()).collect();
     let (names, derived) = derive_world(
@@ -394,6 +451,7 @@ pub(crate) fn derive_builtin(
         None,
         queries,
         &runtime_paths,
+        None,
     )?;
     Ok(BuiltinDerivation {
         module_order,

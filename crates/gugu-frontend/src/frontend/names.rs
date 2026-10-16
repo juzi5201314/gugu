@@ -2,11 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod model;
 
+use model::is_reserved_name;
 pub(crate) use model::{
     DefId, Definition, DefinitionKind, ModuleId, NameResolution, Namespace, ResolvedImport,
-    ResolvedTarget,
+    ResolvedTarget, resolution_is_valid, resolved_target_key,
 };
-use model::{is_reserved_name, resolution_is_valid, resolved_target_key};
 
 use crate::{
     diagnostics::{Diagnostic, DiagnosticCode},
@@ -68,17 +68,29 @@ struct Binding {
 }
 
 type ModuleBindings = BTreeMap<(ModuleId, String), Vec<(Namespace, DefId, Visibility)>>;
-pub(crate) fn analyze(
+/// 名称解析：`prefix` 为 `Some` 时按内建块物化表安装内建候选。
+///
+/// 物化覆盖的内建模块不参与候选收集，其定义与导入直接取自前缀；编号从物化前缀之后继续，
+/// 未覆盖的内建模块（探针源）与用户模块按模块表顺序追加。跨块引用只走稳定键。
+pub(crate) fn analyze_with_prefix(
     package_identity: &str,
     external_packages: &BTreeSet<String>,
     modules: &[ParsedModule],
+    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<NameResolution, Vec<Diagnostic>> {
     let mut diagnostics = validate_modules(external_packages, modules);
-    let candidates = collect_candidates(package_identity, modules, &mut diagnostics);
-    let definitions = assign_def_ids(&candidates.values, &mut diagnostics);
+    let candidates = collect_candidates(package_identity, modules, &mut diagnostics, prefix);
+    let offset = prefix.map_or(0, |prefix| prefix.definition_count());
+    let definitions = {
+        let mut definitions = prefix
+            .map(|prefix| prefix.names().definitions.clone())
+            .unwrap_or_default();
+        definitions.extend(assign_def_ids(&candidates.values, &mut diagnostics, offset));
+        definitions
+    };
     diagnose_definition_conflicts(&candidates.values, &mut diagnostics);
     let module_bindings = module_bindings(&definitions);
-    let pending = collect_imports(external_packages, modules, &mut diagnostics);
+    let pending = collect_imports(external_packages, modules, &mut diagnostics, prefix);
     if let Some(import) = import_cycle(&pending, modules.len()) {
         diagnostics.push(Diagnostic::error(
             DiagnosticCode::ImportCycle,
@@ -89,7 +101,17 @@ pub(crate) fn analyze(
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
-    let imports = resolve_imports(&pending, &module_bindings, modules, &mut diagnostics);
+    let reexports = prefix.map(prefix_reexports).unwrap_or_default();
+    let mut imports = prefix
+        .map(|prefix| prefix.names().imports.clone())
+        .unwrap_or_default();
+    imports.extend(resolve_imports(
+        &pending,
+        &module_bindings,
+        modules,
+        &reexports,
+        &mut diagnostics,
+    ));
     diagnose_import_conflicts(&definitions, &imports, &mut diagnostics);
     if diagnostics.is_empty() {
         let resolution = NameResolution {
@@ -101,6 +123,31 @@ pub(crate) fn analyze(
     } else {
         Err(diagnostics)
     }
+}
+
+/// 内建块的公开再导出：层名即 `(模块, 别名)` 键，用户导入沿它解析到已解析的内建目标。
+fn prefix_reexports(
+    prefix: &crate::frontend::prefix::BuiltinPrefix,
+) -> BTreeMap<(ModuleId, String), Vec<Binding>> {
+    let mut reexports = BTreeMap::<(ModuleId, String), Vec<Binding>>::new();
+    for import in prefix.names().imports.iter().filter(|import| import.public) {
+        reexports
+            .entry((import.module, import.alias.clone()))
+            .or_default()
+            .push(Binding {
+                namespace: import.namespace,
+                target: match &import.target {
+                    ResolvedTarget::Module(module) => BindingTarget::Module(*module),
+                    ResolvedTarget::Def(definition) => BindingTarget::Def(*definition),
+                    ResolvedTarget::External(path) => BindingTarget::External(path.clone()),
+                },
+            });
+    }
+    for bindings in reexports.values_mut() {
+        bindings.sort();
+        bindings.dedup();
+    }
+    reexports
 }
 
 fn validate_modules(
@@ -147,14 +194,23 @@ fn validate_modules(
     diagnostics
 }
 
+/// 物化覆盖的内建模块：候选与导入直接取自物化表，不在会话里重复收集。
+fn materialized(
+    module: &ParsedModule,
+    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+) -> bool {
+    module.builtin && prefix.is_some_and(|prefix| prefix.covers_module(&module.path))
+}
+
 fn collect_candidates(
     package_identity: &str,
     modules: &[ParsedModule],
     diagnostics: &mut Vec<Diagnostic>,
+    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> CandidateSet {
     let mut set = CandidateSet::default();
     for (index, module) in modules.iter().enumerate() {
-        if !module.configured.module_active() {
+        if !module.configured.module_active() || materialized(module, prefix) {
             continue;
         }
         let module_id = ModuleId(index as u32);
@@ -495,12 +551,16 @@ fn diagnose_definition_conflicts(candidates: &[Candidate], diagnostics: &mut Vec
     }
 }
 
-/// 按候选登记顺序分配稠密 `DefId`。
+/// 按候选登记顺序分配稠密 `DefId`，编号从 `offset` 之后继续。
 ///
-/// 内建模块在模块表里占据前缀，因此内建定义先编号、用户定义追加在后：这正是物化表的编号
-/// 前缀约定（见 `docs/src/internals/monomorphization-cache.md`）。跨块引用只走稳定键，
-/// 负载路径把内建块整体替换为物化前缀，所以这里不做任何按键重排。
-fn assign_def_ids(candidates: &[Candidate], diagnostics: &mut Vec<Diagnostic>) -> Vec<Definition> {
+/// 内建模块在模块表里占据前缀，因此内建定义先由物化表占据编号前缀、用户定义追加在后：这正是
+/// 物化表的编号前缀约定（见 `docs/src/internals/monomorphization-cache.md`）。跨块引用只走
+/// 稳定键，负载路径把内建块整体替换为物化前缀，所以这里不做任何按键重排。
+fn assign_def_ids(
+    candidates: &[Candidate],
+    diagnostics: &mut Vec<Diagnostic>,
+    offset: u32,
+) -> Vec<Definition> {
     // 键冲突检测需要按键有序的视图；它只读索引副本，不影响编号。
     let mut by_key = (0..candidates.len()).collect::<Vec<_>>();
     by_key.sort_unstable_by_key(|&index| candidates[index].stable_key);
@@ -519,12 +579,16 @@ fn assign_def_ids(candidates: &[Candidate], diagnostics: &mut Vec<Diagnostic>) -
         .iter()
         .enumerate()
         .map(|(index, candidate)| {
-            debug_assert!(index < u32::MAX as usize, "定义数量达到 u32 上界");
+            let id = offset
+                .checked_add(u32::try_from(index).expect("定义数量必须落在 u32"))
+                .expect("定义编号必须落在 u32");
             Definition {
-                id: DefId(index as u32),
+                id: DefId(id),
                 stable_key: candidate.stable_key,
                 module: candidate.module,
-                parent: candidate.parent.map(|parent| DefId(parent as u32)),
+                parent: candidate.parent.map(|parent| {
+                    DefId(offset + u32::try_from(parent).expect("父定义必须落在 u32"))
+                }),
                 module_binding: candidate.module_binding,
                 name: candidate.name.clone(),
                 kind: candidate.kind,
@@ -557,6 +621,7 @@ fn collect_imports(
     external_packages: &BTreeSet<String>,
     modules: &[ParsedModule],
     diagnostics: &mut Vec<Diagnostic>,
+    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Vec<PendingImport> {
     let exact = modules
         .iter()
@@ -577,7 +642,7 @@ fn collect_imports(
         .collect();
     let mut pending = Vec::new();
     for (index, module) in modules.iter().enumerate() {
-        if !module.configured.module_active() {
+        if !module.configured.module_active() || materialized(module, prefix) {
             continue;
         }
         let owner = ModuleId(index as u32);
@@ -784,6 +849,7 @@ fn resolve_imports(
     pending: &[PendingImport],
     definitions: &ModuleBindings,
     modules: &[ParsedModule],
+    reexports: &BTreeMap<(ModuleId, String), Vec<Binding>>,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Vec<ResolvedImport> {
     let mut exports = BTreeMap::<(ModuleId, String), Vec<usize>>::new();
@@ -804,6 +870,7 @@ fn resolve_imports(
             pending,
             definitions,
             &exports,
+            reexports,
             modules,
             &mut state,
             &mut cache,
@@ -853,6 +920,7 @@ fn resolve_import(
     pending: &[PendingImport],
     definitions: &ModuleBindings,
     exports: &BTreeMap<(ModuleId, String), Vec<usize>>,
+    reexports: &BTreeMap<(ModuleId, String), Vec<Binding>>,
     modules: &[ParsedModule],
     state: &mut [u8],
     cache: &mut [Option<Vec<Binding>>],
@@ -889,6 +957,7 @@ fn resolve_import(
             pending,
             definitions,
             exports,
+            reexports,
             modules,
             state,
             cache,
@@ -912,6 +981,7 @@ fn resolve_local_item(
     pending: &[PendingImport],
     definitions: &ModuleBindings,
     exports: &BTreeMap<(ModuleId, String), Vec<usize>>,
+    reexports: &BTreeMap<(ModuleId, String), Vec<Binding>>,
     modules: &[ParsedModule],
     state: &mut [u8],
     cache: &mut [Option<Vec<Binding>>],
@@ -930,13 +1000,18 @@ fn resolve_local_item(
             }
         }
     }
-    if let Some(reexports) = exports.get(&(target_module, name.to_owned())) {
-        for &reexport in reexports {
+    // 物化块的内建再导出已在构建期解析完成，这里直接取用已解析目标。
+    if let Some(installed) = reexports.get(&(target_module, name.to_owned())) {
+        bindings.extend(installed.iter().cloned());
+    }
+    if let Some(chained) = exports.get(&(target_module, name.to_owned())) {
+        for &reexport in chained {
             bindings.extend(resolve_import(
                 reexport,
                 pending,
                 definitions,
                 exports,
+                reexports,
                 modules,
                 state,
                 cache,

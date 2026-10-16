@@ -36,7 +36,12 @@ pub(crate) struct Identities {
 }
 impl Identities {
     pub(crate) fn item(&self, id: DefRef) -> hir::DefId {
-        self.items[id.module][id.item.0 as usize].expect("active 声明已分配 HIR 身份")
+        self.items[id.module][id.item.0 as usize].unwrap_or_else(|| {
+            panic!(
+                "active 声明已分配 HIR 身份：module {} item {}",
+                id.module, id.item.0
+            )
+        })
     }
     pub(crate) fn function(&self, id: CallableId) -> hir::DefId {
         self.functions[id.module][id.function as usize].expect("已检查函数具有 HIR 身份")

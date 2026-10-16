@@ -161,6 +161,7 @@ pub(crate) fn run(
     queries: &QueryEngine,
     package_identity: &str,
     external_packages: &BTreeSet<String>,
+    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<ExpansionInputs, Vec<Diagnostic>> {
     let mut budget = ExpansionBudget::default();
     let mut token_files: Vec<_> = modules.iter().map(TokenFileTable::new).collect();
@@ -183,7 +184,8 @@ pub(crate) fn run(
         }
         round += 1;
         // 阶段 A：冻结输入，在同一语义模型上求值本轮全部宏脚本。
-        let names = names::analyze(package_identity, external_packages, modules)?;
+        let names =
+            names::analyze_with_prefix(package_identity, external_packages, modules, prefix)?;
         // 展开阶段只做路径与宏解析，不构造 checker：GC 控制原语的授权集合在这里不被消费。
         let model =
             semantics::model::Model::new(modules, &names, &std::collections::BTreeSet::new())?;

@@ -74,9 +74,17 @@ pub(crate) fn provider() -> &'static dyn RuntimeArtifactProvider {
     &PROVIDER
 }
 
+/// 目标专属的 artifact source manifest 视图。
+///
+/// 物化表按 target 派生（内建源的 `os`/`arch` 谓词参与裁剪），因此编译目标与 artifact 必须
+/// 一致：非默认目标的用例要用这里取同目标的 artifact，不能沿用宿主默认目标那一份。
+pub(crate) fn resources_for(target: TargetName) -> RuntimeResources<'static> {
+    RuntimeResources::new(artifact(target)).expect("物化 artifact 必须通过校验")
+}
+
 /// 宿主默认目标的 artifact source manifest 视图。
 pub(crate) fn resources() -> RuntimeResources<'static> {
-    RuntimeResources::new(artifact(TargetName::X86_64Linux)).expect("嵌入 artifact 必须通过校验")
+    resources_for(TargetName::X86_64Linux)
 }
 
 /// 断言会话源码表恰由给定用户源码与内建库源组成。

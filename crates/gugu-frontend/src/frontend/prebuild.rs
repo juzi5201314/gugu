@@ -107,11 +107,11 @@ pub fn materialize(
     Ok(artifact)
 }
 
-/// 各派生层在物化表里的 revision。
+/// 各派生层在物化表里的 revision；加载端要求物化表声明的 revision 与当前编译器完全一致。
 ///
 /// 只登记已有版本常量的层：其余层的失效由表内容指纹（加载时重算比对）与容器
 /// [`PREBUILT_SCHEMA`] 共同承担，不在这里编造版本号。
-fn layer_revisions() -> Vec<(String, u32)> {
+pub(crate) fn layer_revisions() -> Vec<(String, u32)> {
     let mut layers = vec![
         ("canonical".to_owned(), canonical::REVISION),
         (
@@ -130,12 +130,25 @@ fn layer_revisions() -> Vec<(String, u32)> {
     layers
 }
 
-/// 表指纹：(标识域摘要, 内容摘要)。
-fn table_fingerprint(layer: &str, content: &[&[u8]]) -> ([u8; 32], [u8; 32]) {
+/// 表指纹：(标识域摘要, 内容摘要)。构建期物化与加载期安装共用同一口径。
+pub(crate) fn table_fingerprint(layer: &str, content: &[&[u8]]) -> ([u8; 32], [u8; 32]) {
     (
         keyed_digest("gugu-prebuilt-table-domain-v1", &[layer.as_bytes()]),
         keyed_digest("gugu-prebuilt-table-content-v1", content),
     )
+}
+
+/// 物化表里为某一层声明的内容摘要；层名决定域摘要，因此查表不依赖表顺序。
+pub(crate) fn declared_content_digest(
+    prebuilt: &RuntimePrebuiltV1,
+    layer: &str,
+) -> Option<[u8; 32]> {
+    let domain = keyed_digest("gugu-prebuilt-table-domain-v1", &[layer.as_bytes()]);
+    prebuilt
+        .fingerprints
+        .iter()
+        .find(|(candidate, _)| *candidate == domain)
+        .map(|(_, content)| *content)
 }
 
 /// 域隔离摘要：分片按长度前缀拼接，避免不同分片边界得到同一摘要。

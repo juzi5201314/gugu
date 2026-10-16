@@ -423,8 +423,13 @@ fn cached_macro_replays_resource_cost_without_caching_action_exhaustion() {
         Default::default(),
     );
     let modules = crate::frontend::parse_modules(&sources, "", &cfg, &Default::default()).unwrap();
-    let names =
-        crate::frontend::names::analyze("tests/macros@1", &Default::default(), &modules).unwrap();
+    let names = crate::frontend::names::analyze_with_prefix(
+        "tests/macros@1",
+        &Default::default(),
+        &modules,
+        None,
+    )
+    .unwrap();
     let model = crate::frontend::semantics::model::Model::new(
         &modules,
         &names,

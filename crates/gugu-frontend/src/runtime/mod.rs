@@ -13,7 +13,7 @@ pub use gugu_compiler_core::RuntimeSourceRole;
 pub use gugu_compiler_core::{
     RuntimeArtifactError, RuntimeArtifactManifestV1, RuntimeArtifactPayloadV1, RuntimeArtifactV1,
     RuntimeContractRecordV1, RuntimeFunctionArtifactV1, RuntimeGenericTemplateV1,
-    RuntimeModuleInterfaceV1, RuntimeSourceBlobV1, RuntimeSourceRecordV1,
+    RuntimeModuleInterfaceV1, RuntimePrebuiltV1, RuntimeSourceBlobV1, RuntimeSourceRecordV1,
 };
 
 /// 目标 → 已验证 runtime artifact 的解析器。
@@ -808,6 +808,16 @@ impl<'a> RuntimeResources<'a> {
     /// 返回 build-time artifact 固化的 source blob；仅供 artifact frontend adapter 使用。
     pub(crate) fn source_blobs(&self) -> &'a [RuntimeSourceBlobV1] {
         &self.artifact.payload.sources
+    }
+
+    /// 返回构建期物化的内建块派生表；源码 artifact 没有这一层，加载端必须失败而不是回退。
+    pub(crate) fn prebuilt(&self) -> Option<&'a RuntimePrebuiltV1> {
+        self.artifact.payload.prebuilt.as_ref()
+    }
+
+    /// artifact 的目标名；物化表按 target 派生，加载端必须核对它与本次编译目标一致。
+    pub(crate) fn target_name(&self) -> &'a str {
+        &self.artifact.manifest.target
     }
 
     /// 返回 manifest 摘要，用于 action identity。
