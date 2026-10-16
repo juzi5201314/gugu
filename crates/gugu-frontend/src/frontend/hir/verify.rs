@@ -13,9 +13,9 @@ fn invalid(message: &str) -> Diagnostic {
 
 impl Module {
     pub(in crate::frontend) fn verify(&self) -> Result<(), Diagnostic> {
-        // 源码表镜像 `SourceMap`：基础源码按逻辑路径排序，宏生成快照按展开顺序追加，内建源单元
-        // 与用户源码一起排序。顺序由 `SourceMap` 保证，HIR 这里只要求路径唯一——它是
-        // `Location.source` 下标与逻辑路径之间的双射，也是缓存命中重绑定位置的前提。
+        // 源码表镜像 `SourceMap`：内建源单元占据文件 ID 前缀，用户源码按逻辑路径排序追加在后。
+        // 顺序由 `SourceMap` 保证，HIR 这里只要求路径唯一——它是 `Location.source` 下标与逻辑
+        // 路径之间的双射，也是缓存命中重绑定位置的前提。
         let mut paths: Vec<&str> = self
             .sources
             .iter()
@@ -25,10 +25,15 @@ impl Module {
         if paths.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(invalid("源码路径不是唯一序列"));
         }
-        if !self
+        // 定义表按「内建前缀（物化顺序）+ 用户追加」定序，不再是全局按键排序；键仍是跨块引用
+        // 身份，因此这里校验键唯一性，owner 表仍必须按定义下标递增。
+        let mut keys: Vec<[u8; 32]> = self
             .definitions
-            .windows(2)
-            .all(|pair| pair[0].key < pair[1].key)
+            .iter()
+            .map(|definition| definition.key)
+            .collect();
+        keys.sort_unstable();
+        if keys.windows(2).any(|pair| pair[0] == pair[1])
             || !self
                 .owners
                 .windows(2)

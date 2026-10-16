@@ -222,31 +222,29 @@ pub(super) fn collect(
     if candidates.len() >= u32::MAX as usize {
         return Err(invalid("HIR 定义数量超过 u32 上界"));
     }
-    let mut order: Vec<_> = (0..candidates.len()).collect();
-    order.sort_unstable_by_key(|&index| candidates[index].key);
-    if order
+    // 编号 = 候选登记顺序：内建定义先编号、用户定义追加在后，与物化前缀一致。键是跨块引用身份，
+    // 只做唯一性校验，不参与重排。
+    let mut by_key: Vec<_> = (0..candidates.len()).collect();
+    by_key.sort_unstable_by_key(|&index| candidates[index].key);
+    if by_key
         .windows(2)
         .any(|pair| candidates[pair[0]].key == candidates[pair[1]].key)
     {
         return Err(invalid("HIR 稳定定义键冲突"));
     }
-    let mut remap = vec![hir::DefId(0); candidates.len()];
-    for (index, &candidate) in order.iter().enumerate() {
-        debug_assert!(index < u32::MAX as usize);
-        remap[candidate] = hir::DefId(index as u32);
-    }
-    let origins = order
+    let origins = candidates
         .iter()
-        .map(|&index| candidates[index].origin)
+        .map(|candidate| candidate.origin)
         .collect();
-    let definitions = order
-        .into_iter()
-        .map(|index| {
-            let candidate = &mut candidates[index];
+    let definitions = candidates
+        .iter_mut()
+        .enumerate()
+        .map(|(index, candidate)| {
+            debug_assert!(index < u32::MAX as usize);
             Ok(hir::Definition {
                 key: candidate.key,
                 name: std::mem::take(&mut candidate.name),
-                parent: candidate.parent.map(|parent| remap[parent]),
+                parent: candidate.parent.map(hir_id),
                 location: candidate
                     .span
                     .as_ref()
@@ -263,12 +261,7 @@ pub(super) fn collect(
     let remap_table = |table: Vec<Vec<Option<usize>>>| {
         table
             .into_iter()
-            .map(|module| {
-                module
-                    .into_iter()
-                    .map(|id| id.map(|id| remap[id]))
-                    .collect()
-            })
+            .map(|module| module.into_iter().map(|id| id.map(hir_id)).collect())
             .collect()
     };
     Ok((
@@ -280,16 +273,16 @@ pub(super) fn collect(
             functions: remap_table(functions),
             asynchronous: remap_table(asynchronous),
             local_statics: remap_table(local_statics),
-            opaques: opaque_candidates
-                .into_iter()
-                .map(|index| remap[index])
-                .collect(),
-            interfaces: interface_candidates
-                .into_iter()
-                .map(|index| remap[index])
-                .collect(),
+            opaques: opaque_candidates.into_iter().map(hir_id).collect(),
+            interfaces: interface_candidates.into_iter().map(hir_id).collect(),
         },
     ))
+}
+
+/// 候选下标即稠密 `HIR DefId`：编号只由登记顺序决定。
+fn hir_id(index: usize) -> hir::DefId {
+    debug_assert!(index < u32::MAX as usize, "HIR 定义数量超过 u32 上界");
+    hir::DefId(index as u32)
 }
 
 fn synthetic(origin: Origin, module: usize, span: Span, kind: hir::DefinitionKind) -> Candidate {

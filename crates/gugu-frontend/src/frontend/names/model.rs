@@ -108,9 +108,15 @@ pub(super) fn resolution_is_valid(resolution: &NameResolution) -> bool {
                 .parent
                 .is_none_or(|parent| parent.index() < definitions.len())
             && definition.namespace == definition_namespace(definition.kind)
-    }) && definitions
-        .windows(2)
-        .all(|pair| pair[0].stable_key < pair[1].stable_key)
+    }) && {
+        // 编号按收集顺序分配（内建前缀 + 用户追加），稳定键只需唯一，不再要求有序。
+        let mut keys: Vec<[u8; 32]> = definitions
+            .iter()
+            .map(|definition| definition.stable_key)
+            .collect();
+        keys.sort_unstable();
+        keys.windows(2).all(|pair| pair[0] != pair[1])
+    }
 }
 
 fn definition_namespace(kind: DefinitionKind) -> Option<Namespace> {

@@ -139,15 +139,19 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
     for (index, owner) in module.owners.iter().enumerate() {
         owner_of[owner.definition.index()] = Some(index);
     }
-    let mut definition_of = vec![None; module.definitions.len()];
-    for (index, definition) in module.definitions.iter().enumerate() {
-        definition_of[index] = Some(definition.key);
-    }
     debug_assert!(module.owners.iter().all(|owner| {
         owner_of[owner.definition.index()]
             .is_some_and(|index| module.owners[index].definition == owner.definition)
     }));
-    // 定义表按稳定 key 排序；实例表按 digest 排序，映射使用稠密实例下标。
+    // 定义表按「内建前缀 + 用户追加」定序，不再是全局按键排序；实例键只带定义键，这里建按键
+    // 有序的索引副本。实例表按 digest 排序，映射使用稠密实例下标。
+    let mut definition_by_key: Vec<_> = module
+        .definitions
+        .iter()
+        .enumerate()
+        .map(|(index, definition)| (definition.key, index))
+        .collect();
+    definition_by_key.sort_unstable();
     let digests: Vec<_> = mono
         .instances
         .iter()
@@ -160,11 +164,10 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
             .mono_key
             .get(..32)
             .ok_or_else(|| invalid("实例键缺少定义身份"))?;
-        let definition = module
-            .definitions
-            .binary_search_by(|definition| definition.key.as_slice().cmp(key))
+        let definition = definition_by_key
+            .binary_search_by(|(candidate, _)| candidate.as_slice().cmp(key))
+            .map(|position| definition_by_key[position].1)
             .map_err(|_| invalid("闭合实例引用未知定义"))?;
-        debug_assert!(definition_of[definition].is_some());
         if let Some(owner) = owner_of[definition] {
             body_of_instance[index] = Some(selected.len());
             selected.push((instance, owner));

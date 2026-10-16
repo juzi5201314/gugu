@@ -74,8 +74,8 @@ pub(crate) fn analyze(
     modules: &[ParsedModule],
 ) -> Result<NameResolution, Vec<Diagnostic>> {
     let mut diagnostics = validate_modules(external_packages, modules);
-    let mut candidates = collect_candidates(package_identity, modules, &mut diagnostics);
-    let definitions = assign_def_ids(&mut candidates.values, &mut diagnostics);
+    let candidates = collect_candidates(package_identity, modules, &mut diagnostics);
+    let definitions = assign_def_ids(&candidates.values, &mut diagnostics);
     diagnose_definition_conflicts(&candidates.values, &mut diagnostics);
     let module_bindings = module_bindings(&definitions);
     let pending = collect_imports(external_packages, modules, &mut diagnostics);
@@ -495,13 +495,16 @@ fn diagnose_definition_conflicts(candidates: &[Candidate], diagnostics: &mut Vec
     }
 }
 
-fn assign_def_ids(
-    candidates: &mut [Candidate],
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Vec<Definition> {
-    let mut order = (0..candidates.len()).collect::<Vec<_>>();
-    order.sort_by_key(|&index| candidates[index].stable_key);
-    for pair in order.windows(2) {
+/// 按候选登记顺序分配稠密 `DefId`。
+///
+/// 内建模块在模块表里占据前缀，因此内建定义先编号、用户定义追加在后：这正是物化表的编号
+/// 前缀约定（见 `docs/src/internals/monomorphization-cache.md`）。跨块引用只走稳定键，
+/// 负载路径把内建块整体替换为物化前缀，所以这里不做任何按键重排。
+fn assign_def_ids(candidates: &[Candidate], diagnostics: &mut Vec<Diagnostic>) -> Vec<Definition> {
+    // 键冲突检测需要按键有序的视图；它只读索引副本，不影响编号。
+    let mut by_key = (0..candidates.len()).collect::<Vec<_>>();
+    by_key.sort_unstable_by_key(|&index| candidates[index].stable_key);
+    for pair in by_key.windows(2) {
         let left = &candidates[pair[0]];
         let right = &candidates[pair[1]];
         if left.stable_key == right.stable_key && left.def_path != right.def_path {
@@ -512,20 +515,16 @@ fn assign_def_ids(
             ));
         }
     }
-    let mut ids = vec![DefId(0); candidates.len()];
-    for (id, &candidate) in order.iter().enumerate() {
-        debug_assert!(id < u32::MAX as usize, "定义数量达到 u32 上界");
-        ids[candidate] = DefId(id as u32);
-    }
-    order
-        .into_iter()
-        .map(|index| {
-            let candidate = &candidates[index];
+    candidates
+        .iter()
+        .enumerate()
+        .map(|(index, candidate)| {
+            debug_assert!(index < u32::MAX as usize, "定义数量达到 u32 上界");
             Definition {
-                id: ids[index],
+                id: DefId(index as u32),
                 stable_key: candidate.stable_key,
                 module: candidate.module,
-                parent: candidate.parent.map(|parent| ids[parent]),
+                parent: candidate.parent.map(|parent| DefId(parent as u32)),
                 module_binding: candidate.module_binding,
                 name: candidate.name.clone(),
                 kind: candidate.kind,

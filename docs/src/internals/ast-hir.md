@@ -213,7 +213,7 @@ parser 必须满足：
 
 ### 模块声明表与导入
 
-每个 target 在前端开始前一次性快照其 source root 下的 `.gg` 文件；目录枚举先排序，隐藏目录、构建输出和符号链接不进入源码树。模块路径由相对 source-root 的规范逻辑路径产生：`foo.gg` 与 `foo/mod.gg` 都声明 `foo`，二者并存是冲突；每个路径分量必须是 ASCII 标识符。active 模块按模块路径字节序分配稠密 `ModuleId`，仅大小写不同的 active 路径必须诊断，不能依赖宿主文件系统的大小写规则。
+每个 target 在前端开始前一次性快照其 source root 下的 `.gg` 文件；目录枚举先排序，隐藏目录、构建输出和符号链接不进入源码树。模块路径由相对 source-root 的规范逻辑路径产生：`foo.gg` 与 `foo/mod.gg` 都声明 `foo`，二者并存是冲突；每个路径分量必须是 ASCII 标识符。稠密 `ModuleId` 先按 artifact source manifest 顺序分配内建模块（占据前缀），用户模块再按模块路径字节序追加在后；仅大小写不同的 active 路径必须诊断，不能依赖宿主文件系统的大小写规则。
 
 定义收集完成后解析 `use/pub use`。本地 module/item、当前锁图解析域内的直接依赖别名和保留根 `std` 分开记录；依赖别名来自 normal/test/build 对应域，不能从未启用域泄漏。brace import 可以同时携带目标实际拥有的多个命名空间绑定。公开再导出沿同一导入图解析；循环、找不到的本地目标、跨模块私有访问和同命名空间别名冲突均在 body 名称解析前失败。`use` 不复制目标定义，也不改变目标可见性。
 
@@ -225,7 +225,7 @@ parser 必须满足：
 
 - `DefPath`：package identity、模块路径、父定义路径、名字、定义种类和同名消歧序号；匿名字段、impl 和生成定义使用 owner 路径、节点起始偏移与封闭 kind；
 - `StableDefKey`：`DefPath` 的长度前缀规范编码经 BLAKE3-256 得到的 32 字节值；
-- `DefId`：按 `StableDefKey` 完整字节序排序后的稠密 `u32` 编号。
+- `DefId`：按「内建定义先编号（artifact 顺序）+ 用户定义按收集顺序追加」分配的稠密 `u32` 编号；`StableDefKey` 仍是唯一的跨块身份，检索引擎按它建索引，编号本身不再由键排序决定。
 
 目录枚举顺序、线程完成顺序、hash 随机种子和宿主绝对路径不能进入上述身份。若两个不同的规范 `DefPath` 得到相同 `StableDefKey`，编译器必须报告 digest collision 并停止，不能合并定义或靠源码顺序消歧。
 
@@ -404,7 +404,7 @@ Registration = Static | Flag | Chain
 
 ## HIR 冻结条件
 
-`Module::verify` 独立检查源范围与展开链、定义稳定排序和无环父关系、类型/声明引用、owner 与所有侧表索引、表达式前向子边和可达性、构造器字段域、捕获来源、类型调整链及控制流出口的完整清理作用域链。`Validated` 的字段私有，唯一构造入口只对 frontend 可见；它持有不可变 `Arc<Module>` 和规范序列化指纹，backend 接口只接受 `&Validated`。
+`Module::verify` 独立检查源范围与展开链、定义稳定键唯一与 owner 下标递增、无环父关系、类型/声明引用、owner 与所有侧表索引、表达式前向子边和可达性、构造器字段域、捕获来源、类型调整链及控制流出口的完整清理作用域链。`Validated` 的字段私有，唯一构造入口只对 frontend 可见；它持有不可变 `Arc<Module>` 和规范序列化指纹，backend 接口只接受 `&Validated`。
 
 一个 owner 只有同时满足适用阶段的以下条件才可以冻结并交给 GIR；EarlyConst、源码宏、LateConst 的专用条件在对应阶段接入同一门禁：
 
