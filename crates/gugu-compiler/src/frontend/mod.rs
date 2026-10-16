@@ -21,6 +21,8 @@ mod lex;
 pub(crate) mod mono;
 mod names;
 mod parse;
+#[cfg(all(test, feature = "runtime-gc-probes"))]
+mod probe_source_tests;
 pub(crate) mod semantics;
 pub(crate) mod string;
 mod token;
@@ -131,6 +133,25 @@ pub(crate) fn bootstrap(
     }
 }
 
+/// 探针入口程序所在的内建源前缀。
+const ENTRY_ONLY_BUILTIN_SOURCES: &str = "std/runtime/fixtures/";
+
+/// 探针专用内建源：探针库与探针入口程序。
+///
+/// 它们随 `runtime-gc-probes` 特性进入 artifact 源表，只供 `CompileInput::RuntimeGcProbe`
+/// 的编译安装。普通编译一旦安装：探针库会把自身的大拷贝诊断混进用户诊断，探针入口程序会为
+/// 本不属于该程序的 `main` 多派生一份世界，且其中 `#[cfg(runtime_gc_case = ...)]` 的选择
+/// 函数在探针编译之外全部落空。
+pub(crate) fn is_probe_builtin_source(logical_path: &str) -> bool {
+    logical_path == "std/runtime/gc_probes.gg"
+        || logical_path.starts_with(ENTRY_ONLY_BUILTIN_SOURCES)
+}
+
+/// 内建源单元是否进入入口为 `entry` 的本次编译。
+pub(crate) fn installs_builtin_source(logical_path: &str, entry: &str) -> bool {
+    !is_probe_builtin_source(logical_path) || is_probe_builtin_source(entry)
+}
+
 /// 把 build-time artifact 的 source blob 适配为本次 session 的 frontend 输入。
 ///
 /// source table 的唯一权威是嵌入 artifact；compiler 不再通过 runtime 模块的 `include_str!`
@@ -138,12 +159,16 @@ pub(crate) fn bootstrap(
 fn inject_builtin_sources(
     source_map: &mut SourceMap,
     target: TargetName,
+    entry: &str,
 ) -> Result<(BTreeSet<String>, BTreeSet<String>), Vec<Diagnostic>> {
     let mut paths = BTreeSet::new();
     let mut runtime_paths = BTreeSet::new();
     let mut snapshots = Vec::new();
     for source in crate::runtime::RuntimeResources::for_target(target).source_blobs(target) {
         let logical = source.logical_path.as_str();
+        if !installs_builtin_source(logical, entry) {
+            continue;
+        }
         if source_map.file_id(logical).is_some() {
             return Err(vec![Diagnostic::error(
                 DiagnosticCode::ModuleInvalidPath,
@@ -189,7 +214,7 @@ fn check_sources(
     external_packages: &BTreeSet<String>,
     queries: &crate::query::QueryEngine,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
-    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, cfg.target())?;
+    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, cfg.target(), entry)?;
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
     let expansion_inputs = expand::run(

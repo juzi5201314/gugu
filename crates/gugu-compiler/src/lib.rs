@@ -3167,8 +3167,8 @@ mod tests {
     };
 
     use super::{
-        ActionKind, ActionStatus, CompileRequest, Compiler, DiagnosticCode, Project, TargetKind,
-        TargetName, logical_input_path, runtime,
+        ActionKind, ActionStatus, Compilation, CompileRequest, Compiler, DiagnosticCode, Project,
+        TargetKind, TargetName, logical_input_path, runtime,
     };
 
     /// op 形式的隐含调用必须参与 glue 引用判定：分配没有 `Call` 节点，若引用判定只看调用点，
@@ -3317,6 +3317,28 @@ mod tests {
         assert!(TargetName::parse("x86_64-freebsd").is_err());
     }
 
+    /// 断言会话源码表恰由给定用户源码与内建库源组成（入口专用夹具只在它是入口时安装）。
+    #[cfg(feature = "slow-tests")]
+    fn assert_session_sources(compilation: &Compilation, user: &[&str], entry: &str) {
+        let mut installed: Vec<&str> = compilation
+            .source_map()
+            .snapshots()
+            .iter()
+            .map(|snapshot| snapshot.logical_path())
+            .filter(|path| !user.contains(path))
+            .collect();
+        installed.sort_unstable();
+        let resources = runtime::RuntimeResources::builtin();
+        let mut expected: Vec<&str> = resources
+            .sources()
+            .iter()
+            .map(runtime::RuntimeSource::logical_path)
+            .filter(|path| crate::frontend::installs_builtin_source(path, entry))
+            .collect();
+        expected.sort_unstable();
+        assert_eq!(installed, expected, "会话源码表必须恰为内建库源与用户源码");
+    }
+
     #[test]
     #[cfg(feature = "slow-tests")]
     fn library_file_compiles_without_requiring_main() {
@@ -3342,12 +3364,9 @@ mod tests {
             Some(ActionStatus::Complete)
         );
         let source_map = compilation.source_map();
-        // 用户源码之后追加 compiler 内建的 std/runtime 源单元。
-        assert_eq!(
-            source_map.snapshots().len(),
-            1 + super::runtime::RuntimeResources::builtin().sources().len()
-        );
-        // 内建源单元的路径排在用户源码之前；库 target 仍然没有可执行入口。
+        // 内建 std/runtime 库源与用户源码共同组成会话源码表。
+        assert_session_sources(&compilation, &["src/lib.gg"], "src/lib.gg");
+        // 用户源与内建库源都在表内；库 target 仍然没有可执行入口。
         assert!(
             source_map
                 .snapshots()
@@ -3418,9 +3437,10 @@ mod tests {
         ));
 
         assert!(compilation.is_success());
-        assert_eq!(
-            compilation.source_map().snapshots().len(),
-            2 + super::runtime::RuntimeResources::builtin().sources().len()
+        assert_session_sources(
+            &compilation,
+            &["src/main.gg", "src/platform.gg"],
+            "src/main.gg",
         );
         assert!(compilation.image_plan().is_some());
     }
