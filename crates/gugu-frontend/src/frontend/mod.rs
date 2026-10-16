@@ -217,6 +217,15 @@ fn check_sources(
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
     // 内建块占据模块编号前缀：物化表里的 owner/定义下标都以「内建块在前」为前提。
     modules.sort_by(|left, right| (!left.builtin, &left.path).cmp(&(!right.builtin, &right.path)));
+    // 宏展开必须先于入口判定：`comptime source` 生成的 `fn main` 与源码 main 同等有效。
+    let expansion_inputs = expand_modules(
+        &mut modules,
+        source_map,
+        cfg,
+        queries,
+        package_identity,
+        external_packages,
+    )?;
     let entry_file = source_map.file_id(entry).ok_or_else(|| {
         vec![Diagnostic::error(
             DiagnosticCode::ModuleNotFound,
@@ -243,8 +252,8 @@ fn check_sources(
             Some(span),
         )]);
     }
-    let (names, derived, expansion_inputs) = derive_world(
-        &mut modules,
+    let (names, derived) = derive_world(
+        &modules,
         source_map,
         cfg,
         package_identity,
@@ -277,31 +286,18 @@ fn check_sources(
     ))
 }
 
-/// 展开与语义检查的公共段：解析后的模块 → 名称解析 + 冻结 world。
+/// 展开 `comptime source` 宏，返回可重放的展开输入。
 ///
-/// 用户编译与构建期物化走同一段管线，因此内建块的编号与指纹在两条路径上同源。
-#[expect(
-    clippy::too_many_arguments,
-    reason = "派生入口需要源码映射、cfg、入口与 query 引擎"
-)]
-fn derive_world(
+/// 入口判定必须看到宏生成的项，因此这一步与派生分开：调用方先展开、再定入口、最后派生。
+fn expand_modules(
     modules: &mut [ParsedModule],
     source_map: &mut SourceMap,
     cfg: &cfg::CfgContext,
+    queries: &crate::query::QueryEngine,
     package_identity: &str,
     external_packages: &BTreeSet<String>,
-    entry_function: Option<semantics::model::CallableId>,
-    queries: &crate::query::QueryEngine,
-    runtime_paths: &BTreeSet<String>,
-) -> Result<
-    (
-        names::NameResolution,
-        semantics::DerivedWorld,
-        expand::ExpansionInputs,
-    ),
-    Vec<Diagnostic>,
-> {
-    let expansion_inputs = expand::run(
+) -> Result<expand::ExpansionInputs, Vec<Diagnostic>> {
+    expand::run(
         modules,
         source_map,
         cfg,
@@ -309,7 +305,26 @@ fn derive_world(
         package_identity,
         external_packages,
     )
-    .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+    .map_err(|errors| expand::reanchor_errors(errors, source_map))
+}
+
+/// 名称解析与语义检查的公共段：已展开的模块 → 冻结 world。
+///
+/// 用户编译与构建期物化走同一段管线，因此内建块的编号与指纹在两条路径上同源。
+#[expect(
+    clippy::too_many_arguments,
+    reason = "派生入口需要源码映射、cfg、入口与 query 引擎"
+)]
+fn derive_world(
+    modules: &[ParsedModule],
+    source_map: &mut SourceMap,
+    cfg: &cfg::CfgContext,
+    package_identity: &str,
+    external_packages: &BTreeSet<String>,
+    entry_function: Option<semantics::model::CallableId>,
+    queries: &crate::query::QueryEngine,
+    runtime_paths: &BTreeSet<String>,
+) -> Result<(names::NameResolution, semantics::DerivedWorld), Vec<Diagnostic>> {
     let names = names::analyze(package_identity, external_packages, modules)?;
     let derived = semantics::check(
         modules,
@@ -321,7 +336,7 @@ fn derive_world(
         runtime_paths,
     )
     .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
-    Ok((names, derived, expansion_inputs))
+    Ok((names, derived))
 }
 
 /// 内建块派生结果：构建期物化的输入，每张表都是 canonical 编码的字节。
@@ -360,9 +375,18 @@ pub(crate) fn derive_builtin(
     let (builtin_paths, runtime_paths) = install_builtin_sources(source_map, resources, "")?;
     let mut modules = parse_modules(source_map, "", cfg, &builtin_paths)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
-    let module_order = modules.iter().map(|module| module.path.clone()).collect();
-    let (names, derived, _expansion_inputs) = derive_world(
+    // 内建块没有入口判定，但展开必须发生：物化表要在与用户编译相同的展开后世界上形成。
+    expand_modules(
         &mut modules,
+        source_map,
+        cfg,
+        queries,
+        BUILTIN_PACKAGE_IDENTITY,
+        &BTreeSet::new(),
+    )?;
+    let module_order = modules.iter().map(|module| module.path.clone()).collect();
+    let (names, derived) = derive_world(
+        &modules,
         source_map,
         cfg,
         BUILTIN_PACKAGE_IDENTITY,
