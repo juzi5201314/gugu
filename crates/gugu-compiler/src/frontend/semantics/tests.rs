@@ -13,6 +13,7 @@ pub(super) fn accepts(source: &str) -> bool {
 
 /// 逐条断言的语义用例：一条断言一次整体编译（约 1 秒），聚合会让单个测试超过 3 秒上限，
 /// 因此一行一个测试。`true` 表示该源码必须被接受，`false` 表示必须被拒绝。
+#[cfg(feature = "slow-tests")]
 macro_rules! accept_cases {
     ($($name:ident: $accept:literal, $source:literal;)*) => {
         $(
@@ -24,6 +25,7 @@ macro_rules! accept_cases {
     };
 }
 
+#[cfg(feature = "slow-tests")]
 pub(super) use accept_cases;
 #[cfg(feature = "slow-tests")]
 accept_cases! {

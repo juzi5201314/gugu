@@ -1,7 +1,7 @@
 //! EarlyConst 域、capability registry 与受限脚本解释器的验收测试。
 use super::comptime::{self, EarlyConstTable};
 use super::model::{Model, Ty};
-use super::tests::{accepts, frontend};
+use super::tests::{accept_cases, accepts, frontend};
 use crate::frontend::ast::ItemKind;
 use crate::{CompileRequest, Compiler, DiagnosticCode, QueryEngine, TargetName};
 
@@ -179,16 +179,14 @@ fn budget_exhaustion_is_deterministic() {
     assert_eq!(error.code(), DiagnosticCode::ComptimeBudget);
 }
 
-#[test]
-fn comptime_blocks_force_early_evaluation() {
-    assert!(accepts(
-        "fn main() { let x = comptime { let a = 2\n a * 3 }\n _ = x }"
-    ));
+accept_cases! {
+    comptime_blocks_force_early_evaluation_00: true,
+        "fn main() { let x = comptime { let a = 2\n a * 3 }\n _ = x }";
     // 运行时实参无法在编译期求值，`comptime` 强制立即失败。
-    assert!(!accepts(
-        "fn f(x: int) int { comptime x }\nfn main() { _ = f(1) }"
-    ));
-    assert!(accepts("fn main() { let x = comptime 1 + 2\n _ = x }"));
+    comptime_blocks_force_early_evaluation_01: false,
+        "fn f(x: int) int { comptime x }\nfn main() { _ = f(1) }";
+    comptime_blocks_force_early_evaluation_02: true,
+        "fn main() { let x = comptime 1 + 2\n _ = x }";
 }
 
 #[test]

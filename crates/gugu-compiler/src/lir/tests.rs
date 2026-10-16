@@ -248,25 +248,36 @@ fn borrowed_slot_roots_are_registered_at_call_sites() {
 /// 静态访问必须带惰性初始化守卫：模块 static 与函数局部 static 都在首次读取时发布值。
 ///
 /// 三段由小到大：只有模块 static、只有局部 static、两者同时出现在被调用两次的函数里。
+///
+/// 程序规模递增，逐个成测：一次整体编译约 1 秒，三段合测会超出单项耗时上限。
+fn static_access_compiles(source: &str) {
+    let compilation = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compilation.is_success(),
+        "程序失败：{:?}",
+        compilation.diagnostics().items()
+    );
+}
+
 #[test]
-fn static_access_compiles_with_lazy_initializer_guard() {
-    let programs = [
-        "static M: int = 41\nfn main() { _ = M }",
-        "fn take() int {\n static L: int = 9\n L\n}\nfn main() { _ = take() }",
+fn static_access_compiles_with_only_module_static() {
+    static_access_compiles("static M: int = 41\nfn main() { _ = M }");
+}
+
+#[test]
+fn static_access_compiles_with_only_local_static() {
+    static_access_compiles("fn take() int {\n static L: int = 9\n L\n}\nfn main() { _ = take() }");
+}
+
+#[test]
+fn static_access_compiles_with_module_and_local_static() {
+    static_access_compiles(
         "static M: int = 41\nfn take() int {\n static L: int = 9\n L + M\n}\nfn main() {\n if take() != 50 { panic(\"static\") }\n if take() != 50 { panic(\"static-again\") }\n}",
-    ];
-    for (index, source) in programs.into_iter().enumerate() {
-        let compilation = Compiler::shared().compile(CompileRequest::single_file(
-            "main.gg",
-            source,
-            TargetName::X86_64Linux,
-        ));
-        assert!(
-            compilation.is_success(),
-            "程序 {index} 失败：{:?}",
-            compilation.diagnostics().items()
-        );
-    }
+    );
 }
 
 /// 初始化器必须在镜像里真实发布：调用点保留成调用，实例末尾 release 置位。
@@ -867,24 +878,30 @@ fn unwind_edges_share_the_invoke_call_return_map() {
 }
 
 /// 跨点存活的受管值必须逐点在根集合里：这是物理层把分配器 spill 槽标成根的唯一来源。
+///
+/// 每个 fixture 单独成测：一次整体编译约 1 秒，合测会超出单项耗时上限。
 #[test]
-fn safepoints_root_every_live_value_in_their_world() {
-    for (fixture, source) in [
-        (
-            "closure",
-            "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n}",
-        ),
-        // 菱形合流：受管值在两个分支上都写入，合流点之后仍被使用，根必须跟着合流参数走。
-        (
-            "diamond",
-            "fn main() {\n let flag = 1\n let closure = fn() int { return flag }\n let chosen = closure\n if flag > 0 { chosen = closure } else { chosen = closure }\n _ = chosen()\n}",
-        ),
-        ("poll", POLL),
-        ("stackmap", STACKMAP),
-    ] {
-        let compilation = compile(source);
-        assert_records_root_live_values(&compilation, fixture);
-    }
+fn safepoints_root_every_live_value_in_their_world_closure() {
+    let source =
+        "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n}";
+    assert_records_root_live_values(&compile(source), "closure");
+}
+
+/// 菱形合流：受管值在两个分支上都写入，合流点之后仍被使用，根必须跟着合流参数走。
+#[test]
+fn safepoints_root_every_live_value_in_their_world_diamond() {
+    let source = "fn main() {\n let flag = 1\n let closure = fn() int { return flag }\n let chosen = closure\n if flag > 0 { chosen = closure } else { chosen = closure }\n _ = chosen()\n}";
+    assert_records_root_live_values(&compile(source), "diamond");
+}
+
+#[test]
+fn safepoints_root_every_live_value_in_their_world_poll() {
+    assert_records_root_live_values(&compile(POLL), "poll");
+}
+
+#[test]
+fn safepoints_root_every_live_value_in_their_world_stackmap() {
+    assert_records_root_live_values(&compile(STACKMAP), "stackmap");
 }
 
 #[test]

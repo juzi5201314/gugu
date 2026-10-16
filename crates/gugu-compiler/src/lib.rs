@@ -3671,7 +3671,7 @@ mod tests {
     #[cfg(feature = "slow-tests")]
     fn image_plan_reports_gc_metadata_contract() {
         let source = "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }";
-        let compilation = Compiler::new().compile(CompileRequest::single_file(
+        let compilation = Compiler::shared().compile(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
@@ -3711,50 +3711,61 @@ mod tests {
             plan.gc_metadata_trace_bytes() > plan.gc_metadata_type_count(),
             "trace program 必须包含逐类型指令而非单字节 END"
         );
-        // 冷/热编译指纹一致。
-        let warm = Compiler::new().compile(CompileRequest::single_file(
+    }
+
+    /// 编译一份 GC metadata 用例源码：第一次整体编译约 1.2 秒，逐个场景分开成测。
+    #[cfg(feature = "slow-tests")]
+    fn gc_metadata_compilation(source: &str) -> crate::Compilation {
+        Compiler::shared().compile(CompileRequest::single_file(
             "main.gg",
             source,
             TargetName::X86_64Linux,
-        ));
+        ))
+    }
+
+    /// 同一份源码重复编译（第二次命中 session 缓存）时 GC metadata 指纹必须一致。
+    #[test]
+    #[cfg(feature = "slow-tests")]
+    fn gc_metadata_fingerprints_agree_across_cached_compiles() {
+        let source = "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }";
+        let cold = gc_metadata_compilation(source);
+        let warm = gc_metadata_compilation(source);
+        let cold_plan = cold.image_plan().expect("冷编译计划");
+        let warm_plan = warm.image_plan().expect("热编译计划");
         assert_eq!(
-            plan.gc_metadata_contract_fingerprint(),
-            warm.image_plan()
-                .expect("warm plan")
-                .gc_metadata_contract_fingerprint()
+            cold_plan.gc_metadata_contract_fingerprint(),
+            warm_plan.gc_metadata_contract_fingerprint()
         );
         assert_eq!(
-            plan.gc_type_section_fingerprint(),
-            warm.image_plan()
-                .expect("warm plan")
-                .gc_type_section_fingerprint()
+            cold_plan.gc_type_section_fingerprint(),
+            warm_plan.gc_type_section_fingerprint()
         );
         assert_eq!(
-            plan.gc_metadata_section_fingerprint(),
-            warm.image_plan()
-                .expect("warm plan")
-                .gc_metadata_section_fingerprint()
+            cold_plan.gc_metadata_section_fingerprint(),
+            warm_plan.gc_metadata_section_fingerprint()
         );
-        // 类型表变化时 GC metadata 指纹必须变化。
-        let bigger = "struct ResourceCell { id: uint }\nstruct Extra { id: uint }\nfn helper(x: Extra) Extra = x\nfn main() {\n let value = ResourceCell { id: 1 }\n let extra = Extra { id: 2 }\n _ = helper(extra)\n _ = value\n }";
-        let bigger_compilation = Compiler::new().compile(CompileRequest::single_file(
-            "main.gg",
-            bigger,
-            TargetName::X86_64Linux,
-        ));
+    }
+
+    /// 类型表变化时 GC metadata 指纹必须变化。
+    #[test]
+    #[cfg(feature = "slow-tests")]
+    fn gc_metadata_fingerprint_changes_with_type_table() {
+        let base = gc_metadata_compilation(
+            "struct ResourceCell { id: uint }\nfn main() {\n let value = ResourceCell { id: 1 }\n _ = value\n }",
+        );
+        let bigger = gc_metadata_compilation(
+            "struct ResourceCell { id: uint }\nstruct Extra { id: uint }\nfn helper(x: Extra) Extra = x\nfn main() {\n let value = ResourceCell { id: 1 }\n let extra = Extra { id: 2 }\n _ = helper(extra)\n _ = value\n }",
+        );
+        assert!(bigger.is_success(), "{:?}", bigger.diagnostics().items());
+        let base_plan = base.image_plan().expect("基准计划");
+        let bigger_plan = bigger.image_plan().expect("扩张计划");
         assert!(
-            bigger_compilation.is_success(),
-            "{:?}",
-            bigger_compilation.diagnostics().items()
-        );
-        let bigger_plan = bigger_compilation.image_plan().expect("bigger plan");
-        assert!(
-            bigger_plan.gc_metadata_type_count() > plan.gc_metadata_type_count(),
+            bigger_plan.gc_metadata_type_count() > base_plan.gc_metadata_type_count(),
             "helper 加入后 GC 类型表必须扩张"
         );
         assert_ne!(
             bigger_plan.gc_metadata_contract_fingerprint(),
-            plan.gc_metadata_contract_fingerprint(),
+            base_plan.gc_metadata_contract_fingerprint(),
             "GC metadata 指纹必须随类型表变化"
         );
     }

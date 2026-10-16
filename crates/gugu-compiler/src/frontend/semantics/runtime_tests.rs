@@ -1,4 +1,4 @@
-use super::tests::accepts;
+use super::tests::{accept_cases, accepts};
 
 #[test]
 fn runtime_publish_resolves_imports_and_canonical_paths() {
@@ -44,20 +44,16 @@ fn runtime_publish_checks_explicit_handle_type() {
     ));
 }
 
-#[test]
-fn runtime_machine_intrinsics_accept_fixed_shapes() {
+accept_cases! {
     // `current_slot` 无实参、返回机器字；`process_exit` 接受一个机器字。
-    assert!(accepts(
-        "fn main() { unsafe { _ = std.runtime.current_slot()\n let code: uint = 0\n std.runtime.process_exit(code) } }"
-    ));
+    runtime_machine_intrinsics_accept_fixed_shapes_00: true,
+        "fn main() { unsafe { _ = std.runtime.current_slot()\n let code: uint = 0\n std.runtime.process_exit(code) } }";
     // `report_write` 形状 `(uint, *byte, uint) uint`。
-    assert!(accepts(
-        "use std.ptr\nfn main() { let value: uint = 0\n unsafe { let data = ptr.addr_of(value)\n let fd: uint = 2\n let len: uint = 8\n _ = std.runtime.report_write(fd, data, len) } }"
-    ));
+    runtime_machine_intrinsics_accept_fixed_shapes_01: true,
+        "use std.ptr\nfn main() { let value: uint = 0\n unsafe { let data = ptr.addr_of(value)\n let fd: uint = 2\n let len: uint = 8\n _ = std.runtime.report_write(fd, data, len) } }";
     // `context_switch`/`context_restore` 形状为四/三个原始指针。
-    assert!(accepts(
-        "use std.ptr\nfn main() { let value: uint = 0\n unsafe { let p = ptr.addr_of(value)\n std.runtime.context_switch(p, p, p, p)\n std.runtime.context_restore(p, p, p) } }"
-    ));
+    runtime_machine_intrinsics_accept_fixed_shapes_02: true,
+        "use std.ptr\nfn main() { let value: uint = 0\n unsafe { let p = ptr.addr_of(value)\n std.runtime.context_switch(p, p, p, p)\n std.runtime.context_restore(p, p, p) } }";
 }
 
 /// GC 控制原语按注入来源授权：普通源码即使写 `unsafe` 也不能调用，而既有机器原语的契约
