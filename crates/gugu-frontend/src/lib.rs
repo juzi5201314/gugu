@@ -1042,18 +1042,26 @@ fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMet
     demand
 }
 
-/// 编译器构建身份。`unicode-` 后缀是 Unicode 数据版本。
+/// 编译器构建身份。`unicode-` 后缀是目标 Unicode 数据版本，另附依赖 crate 提供的表版本。
+///
+/// 规范化与分段表来自依赖，版本不必等于目标版本；两者的实际版本必须进身份，否则 crate 升级
+/// 会改变文本行为却不改变缓存键。
 pub(crate) fn compiler_identity() -> String {
+    let (normalization, segmentation) = runtime::text::table_versions();
     format!(
-        "gugu-compiler-{} unicode-{} runtime-artifact-schema-{} core-revision-{}",
+        "gugu-compiler-{} unicode-{} unicode-tables-normalization-{} segmentation-{} \
+         runtime-artifact-schema-{} core-revision-{}",
         env!("CARGO_PKG_VERSION"),
         UNICODE_VERSION,
+        normalization,
+        segmentation,
         gugu_compiler_core::ARTIFACT_SCHEMA,
         gugu_compiler_core::GBC_SCHEMA,
     )
 }
 
-/// 工具链携带的 Unicode 数据版本。编码、大小写、规范化与切分使用同一版本。
+/// 工具链的目标 Unicode 数据版本：编码、大小写映射与随附 case fold 数据都按这一版；
+/// 规范化与分段表来自依赖，实际版本记录在 [`compiler_identity`] 里。
 pub const UNICODE_VERSION: &str = runtime::text::UNICODE_VERSION;
 
 /// 前端 action 的完整输入集合：identity、host/target、源码摘要、cfg 与 registry 摘要。

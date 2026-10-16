@@ -1,14 +1,22 @@
 //! UTF-8/UTF-16、大小写、规范化、切分与 COW 字节缓冲的确定性参照模型。
 //!
-//! 数据版本是 Unicode 17.0.0：编码用宿主 `char`，规范化与 grapheme/word/line
-//! 用同一版本的表，完整 case fold 用随附的 `CaseFolding.txt`。
+//! 目标数据版本是 Unicode 18.0.0：编码与大小写映射用宿主 `char`，完整 case fold 用随附的
+//! `CaseFolding.txt`（18.0.0）；规范化与 grapheme/word/line 由 `unicode-normalization` 与
+//! `unicode-segmentation` 提供，两者还没有 18.0.0 版本，实际版本按 [`NORMALIZATION_VERSION`]
+//! 与 [`SEGMENTATION_VERSION`] 记录进编译器身份，升级 crate 必须同步这三处。
 
 use std::sync::OnceLock;
 use unicode_normalization::UnicodeNormalization;
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Unicode 数据版本。编码、大小写、规范化与切分都按这一版。
-pub(crate) const UNICODE_VERSION: &str = "17.0.0";
+/// 目标 Unicode 数据版本。编码、大小写映射与随附的 case fold 数据都按这一版。
+pub(crate) const UNICODE_VERSION: &str = "18.0.0";
+
+/// 规范化表的实际版本：`unicode-normalization` 尚未发布 18.0.0 版本。
+pub(crate) const NORMALIZATION_VERSION: (u8, u8, u8) = (17, 0, 0);
+
+/// 分段表的实际版本：`unicode-segmentation` 尚未发布 18.0.0 版本。
+pub(crate) const SEGMENTATION_VERSION: (u64, u64, u64) = (17, 0, 0);
 
 /// 四种规范化形式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -270,11 +278,43 @@ pub(crate) fn lines(text: &str) -> Vec<String> {
     out
 }
 
-/// 三套 Unicode 17 表是否一致。
+/// 目标版本、随附数据与三套提供方表是否一致。
+///
+/// 宿主 `char` 与随附的 `CaseFolding.txt` 必须正好是 [`UNICODE_VERSION`]；规范化与分段表由
+/// 依赖提供，只要求它们正好是记录进身份的版本——crate 一旦升级，这里、身份与文档要一起改。
 pub(crate) fn unicode_tables_agree() -> bool {
-    unicode_normalization::UNICODE_VERSION == (17, 0, 0)
-        && unicode_segmentation::UNICODE_VERSION == (17, 0, 0)
-        && char::UNICODE_VERSION == (17, 0, 0)
+    char::UNICODE_VERSION == (18, 0, 0)
+        && case_folding_version() == UNICODE_VERSION
+        && unicode_normalization::UNICODE_VERSION == NORMALIZATION_VERSION
+        && unicode_segmentation::UNICODE_VERSION == SEGMENTATION_VERSION
+}
+
+/// 依赖提供的表版本（规范化、分段），用于编译器身份。
+pub(crate) fn table_versions() -> (String, String) {
+    (
+        format!(
+            "{}.{}.{}",
+            NORMALIZATION_VERSION.0, NORMALIZATION_VERSION.1, NORMALIZATION_VERSION.2
+        ),
+        format!(
+            "{}.{}.{}",
+            SEGMENTATION_VERSION.0, SEGMENTATION_VERSION.1, SEGMENTATION_VERSION.2
+        ),
+    )
+}
+
+/// 随附 case fold 数据的版本：文件首行 `# CaseFolding-<版本>.txt` 声明。
+fn case_folding_version() -> &'static str {
+    static VERSION: OnceLock<&'static str> = OnceLock::new();
+    VERSION.get_or_init(|| {
+        include_str!("../../resources/unicode/CaseFolding.txt")
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .strip_prefix("# CaseFolding-")
+            .and_then(|rest| rest.strip_suffix(".txt"))
+            .unwrap_or_default()
+    })
 }
 
 fn push_fold(out: &mut String, scalars: &[u32]) {

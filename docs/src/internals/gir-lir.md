@@ -192,7 +192,7 @@ HIR同样提供保持源码臂优先级的 pattern matrix。GIR把它编译成�
 
 place 与 value 消费共享一条表达式构造路径：字段/下标/借用消费者只构造投影，`Dereference` 调整继续延长原 place，不提前把被引用聚合复制到临时槽。真正的 value 消费才物化最终投影，并执行该值自己的传递动作。由字段取地址产生的引用因此仍指向原槽；仅为了形成 place 不应触发 `large_copy` 或 COW/resource 复制。
 
-`std.text.Bytes` 与 `std.io.ByteBuffer` 走上面的 `CowSnapshot`。复制封存 backing，之后修改的一侧分离，旧快照字节不变。runtime 参照模型按 Unicode 17.0.0 判定 UTF-8/UTF-16、lossy U+FFFD、负索引、标量边界、默认大小写、完整 case fold、NFC/NFD/NFKC/NFKD，以及 grapheme 与 word 边界。行切分目前只实现强制换行（CR LF 保持在一起，并在 LF、NEL、LS、PS 和不跟随 LF 的 CR 之后断开），不是完整的 UAX #14 类对规则。这些函数还没有降成可从 Gugu 源码调用的 intrinsic。
+`std.text.Bytes` 与 `std.io.ByteBuffer` 走上面的 `CowSnapshot`。复制封存 backing，之后修改的一侧分离，旧快照字节不变。runtime 参照模型按 Unicode 18.0.0 判定 UTF-8/UTF-16、lossy U+FFFD、负索引、标量边界、默认大小写、完整 case fold、NFC/NFD/NFKC/NFKD，以及 grapheme 与 word 边界；规范化与分段表来自 `unicode-normalization`/`unicode-segmentation`，两者尚未发布 18.0.0 版本，实际版本（当前 17.0.0）与目标版本一起进入编译器身份，crate 升级会同时改身份。行切分目前只实现强制换行（CR LF 保持在一起，并在 LF、NEL、LS、PS 和不跟随 LF 的 CR 之后断开），不是完整的 UAX #14 类对规则。这些函数还没有降成可从 Gugu 源码调用的 intrinsic。
 
 阻塞 I/O 原语在 LIR 是 `RuntimeCall::BlockingIo`，`CallKind::ForeignBridge`，`may_suspend = true`。`op` 固定为 0 read、1 write、2 seek、3 fill；`cancel` 表示该调用携带 `CancelToken`。timeout 是操作开始时捕获的状态，不进每个 LIR 操作数。每条 `BlockingIo` 同时计入普通 `ForeignBridge` 站点与 `blocking_io` 站点，因此 `blocking_io <= ordinary`。组合函数与 Path 纯函数保持普通 managed 调用。这些原语还没有从 Gugu 源码的 `read` / `write` / `seek` / `fill` 自动降下来。
 

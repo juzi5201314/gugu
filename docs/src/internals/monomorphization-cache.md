@@ -53,7 +53,7 @@ runtime/std 源在 compiler build-time 由 `gugu-runtime-builder` 固化为 targ
 
 `CompilerIdentity` 是下列字段的规范编码摘要：
 
-- 编译器源码 revision、工作树状态标志与 Unicode 数据版本（`unicode`，当前 17.0.0）；
+- 编译器源码 revision、工作树状态标志、目标 Unicode 数据版本（`unicode`，当前 18.0.0）与依赖提供的文本表版本（规范化、分段，当前 17.0.0）；
 - AST、HIR、GIR、LIR、cache、stack-map、GC metadata 与后端 schema 版本；
 - comptime capability registry 摘要、evaluator/验证器 revision、late comptime schema；
 - abstract analysis semantics revision、`PublicSummaryPolicyV1` revision 与公共摘要 schema；

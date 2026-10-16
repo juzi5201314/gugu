@@ -314,7 +314,7 @@ read-allows = ["/usr/include/**"]
 ```text
 gugu 0.1.0 (commit 8f3c2a1 2026-08-31)
 host: x86_64-linux
-unicode: 17.0.0
+unicode: 18.0.0
 llvm: 19.1.0
 ```
 
@@ -326,12 +326,12 @@ llvm: 19.1.0
   "commit": "8f3c2a1",
   "commit-date": "2026-08-31",
   "host": "x86_64-linux",
-  "unicode": "17.0.0",
+  "unicode": "18.0.0",
   "llvm": "19.1.0"
 }
 ```
 
-版本字符串、commit 与 `unicode` 共同构成编译器构建身份，进入编译缓存 key。`unicode` 是工具链携带的 Unicode 数据版本。
+版本字符串、commit 与 `unicode` 共同构成编译器构建身份，进入编译缓存 key。`unicode` 是工具链的目标 Unicode 数据版本：编码、大小写映射与随附 case fold 数据按它判定。规范化与分段表由依赖提供，crate 尚未跟到该版本时，两者的实际版本同样进入构建身份，因此表升级不会静默改变文本行为。
 
 ## 开发接口 {#development-interface}
 

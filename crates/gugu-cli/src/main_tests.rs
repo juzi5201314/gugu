@@ -59,7 +59,7 @@ fn version_text_output_includes_commit_host_and_llvm() {
     assert!(lines[0].starts_with("gugu "));
     assert!(lines[0].contains("(commit "));
     assert!(lines[1].starts_with("host: "));
-    assert_eq!(lines[2], "unicode: 17.0.0");
+    assert_eq!(lines[2], "unicode: 18.0.0");
     assert_eq!(lines[3], "llvm: not-used");
 }
 

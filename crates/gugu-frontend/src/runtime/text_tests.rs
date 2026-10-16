@@ -1,7 +1,7 @@
 use super::text::{
     CowBytes, Norm, TextFault, UNICODE_VERSION, byte_at, case_fold, char_at, graphemes, lines,
-    normalize, scalar_boundary, to_lowercase, to_uppercase, unicode_tables_agree, utf8_decode,
-    utf8_decode_lossy, utf16_decode, utf16_decode_lossy, utf16_encode, words,
+    normalize, scalar_boundary, table_versions, to_lowercase, to_uppercase, unicode_tables_agree,
+    utf8_decode, utf8_decode_lossy, utf16_decode, utf16_decode_lossy, utf16_encode, words,
 };
 
 #[test]
@@ -90,17 +90,21 @@ fn freeze_thaw_and_split_keep_snapshots_stable() {
 fn unicode_encoding_version_changes_compiler_identity() {
     use crate::project::ActionInputs;
     let version = UNICODE_VERSION;
-    assert_eq!(version, "17.0.0");
+    assert_eq!(version, "18.0.0");
     assert!(unicode_tables_agree());
     let current = crate::compiler_identity();
     assert!(current.contains(version));
+    // 依赖提供的表版本同样进身份：crate 升级会改文本行为，不能悄悄沿用旧缓存键。
+    let (normalization, segmentation) = table_versions();
+    assert!(current.contains(&format!("unicode-tables-normalization-{normalization}")));
+    assert!(current.contains(&format!("segmentation-{segmentation}")));
     let same = ActionInputs::new(current.clone(), "host", "host", "bin");
     let other = ActionInputs::new(current.replace(version, "15.1.0"), "host", "host", "bin");
     assert_ne!(same.key(), other.key());
 }
 
 #[test]
-fn case_normalization_and_segmentation_follow_unicode_17() {
+fn case_normalization_and_segmentation_follow_unicode_18() {
     assert!(unicode_tables_agree());
     assert_eq!(to_lowercase("İ"), "i\u{0307}");
     assert_eq!(to_uppercase("ß"), "SS");
