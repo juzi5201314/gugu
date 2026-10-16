@@ -323,8 +323,9 @@ fn bit_copy_emits_value_action_and_reuse_after_call() {
     )));
 }
 
+/// string 按值复制要密封：`main` 的 body 必须出现 `cow_snapshot`。
 #[test]
-fn string_copy_seals_and_chan_shares_identity() {
+fn string_copy_seals() {
     let string =
         "fn take(s: string) { _ = s }\nfn main() { let t: string = \"ok\"\n take(t)\n _ = t }";
     let compilation = Compiler::shared().compile(CompileRequest::single_file(
@@ -340,6 +341,11 @@ fn string_copy_seals_and_chan_shares_identity() {
     let dump = compilation.dump_gir().expect("string GIR");
     let string_main = body_named(&dump, "main", "String");
     assert!(string_main.contains("cow_snapshot"), "{string_main}");
+}
+
+/// chan 共享身份：复制不密封，`main` 的 body 不得出现 `cow_snapshot`。
+#[test]
+fn chan_shares_identity() {
     let chan = "fn take(c: chan[int]) { _ = c }\nfn main() { let c: chan[int] = chan[int](1)\n take(c)\n _ = c }";
     let compilation = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
