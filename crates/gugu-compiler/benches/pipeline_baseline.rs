@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use gugu_compiler::{CompileRequest, Compiler, TargetName};
+use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 
 /// 最小用户源：内建世界派生是这里唯一的可观成本。
 const MINIMAL: &str = "fn main() {}\n";
@@ -45,7 +45,7 @@ fn measure(label: &str, request: CompileRequest) -> f64 {
     let mut elapsed_ms = 0.0;
     for _ in 0..REPEATS {
         let start = Instant::now();
-        let compilation = Compiler::new().compile(request.clone());
+        let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(request.clone());
         elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         let fingerprint = compilation
             .lir_fingerprint()

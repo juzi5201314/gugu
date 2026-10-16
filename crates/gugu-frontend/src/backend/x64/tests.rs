@@ -908,8 +908,11 @@ fn fence_forms_emit_fixed_modrm() {
 /// harness 覆盖全部 lowering 规则，且编码器生成的上下文切换片段与运行时固定片段一致。
 #[test]
 fn harness_cases_and_switch_fragment_are_consistent() {
-    let harness = super::harness::X64Harness::new(crate::target::TargetName::X86_64Linux)
-        .expect("harness 构建");
+    let harness = super::harness::X64Harness::new(
+        crate::target::TargetName::X86_64Linux,
+        crate::testing::provider(),
+    )
+    .expect("harness 构建");
     let fixed = crate::runtime::ContextSwitchCode::fixed();
     assert_eq!(
         harness.switch_fragment().bytes,

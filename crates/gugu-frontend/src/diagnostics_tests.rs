@@ -1134,6 +1134,7 @@ impl Runner {
                         external_packages: &BTreeSet::new(),
                     },
                     &self.queries,
+                    crate::testing::resources(),
                 ) {
                     Ok(output) => output.lints.clone(),
                     Err(errors) => errors,

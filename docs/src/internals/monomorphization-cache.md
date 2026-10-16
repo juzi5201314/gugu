@@ -212,7 +212,7 @@ reader 的已打开文件句柄就是 lease：Linux 即使被 unlink 仍从原 i
 
 ## Query engine 与对象存储
 
-`gugu-compiler::query` 落地 session 内 query engine 与编译对象存储：
+`gugu-frontend::query` 落地 session 内 query engine 与编译对象存储（façade 再导出）：
 `QueryKind` 固定登记 1--30，`QueryKey` 使用 schema 与规范 key 形成域隔离摘要；每个
 query cell 按 `Uncomputed -> Computing -> Complete/Failed/Cancelled` 转换，并以条件变量
 让并发请求共享唯一计算结果。成功结果保存不可变 payload、结果 fingerprint 和按稳定 key
@@ -228,7 +228,7 @@ kind、flags、schema、长度与 BLAKE3 payload 摘要，再把 payload 交给 
 ## 单态化闭合与公共摘要 {#mono-closure-public-digest}
 
 `CollectMonoRoots`（12，schema 4）与 `InstantiateGir`（13，schema 6）已在
-`gugu-compiler::frontend::mono` 落地。闭合发生在 `LowerHir` 冻结之后，
+`gugu-frontend::frontend::mono` 落地。闭合发生在 `LowerHir` 冻结之后，
 与 generic GIR、late 和全程序分析同一管线：
 
 - `StableTypeKey`：语义类型经 GBC1 编码（`u16` kind tag、小端定宽、长度前缀）

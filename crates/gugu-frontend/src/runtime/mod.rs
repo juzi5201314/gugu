@@ -8,13 +8,25 @@
 
 use crate::target::{Rt0Kind, TargetName};
 
-#[allow(dead_code, reason = "屏障布局交叉校验由 RuntimeRawModel 消费")]
-pub mod artifact;
-pub use artifact::{
+pub use gugu_compiler_core::RuntimeSourceRecordV1 as RuntimeSource;
+pub use gugu_compiler_core::RuntimeSourceRole;
+pub use gugu_compiler_core::{
     RuntimeArtifactError, RuntimeArtifactManifestV1, RuntimeArtifactPayloadV1, RuntimeArtifactV1,
-    RuntimeArtifacts, RuntimeContractRecordV1, RuntimeFunctionArtifactV1, RuntimeGenericTemplateV1,
-    RuntimeModuleInterfaceV1, RuntimeSourceRecordV1,
+    RuntimeContractRecordV1, RuntimeFunctionArtifactV1, RuntimeGenericTemplateV1,
+    RuntimeModuleInterfaceV1, RuntimeSourceBlobV1, RuntimeSourceRecordV1,
 };
+
+/// 目标 → 已验证 runtime artifact 的解析器。
+///
+/// 前端不嵌入 artifact 字节，也不从目标名推断字节来源：build.rs 产出的静态字节留在 façade，
+/// 前端只按目标取用；取不到或校验失败即失败，没有源码回退。
+pub trait RuntimeArtifactProvider: std::fmt::Debug + Send + Sync {
+    /// 返回目标的已验证 artifact。
+    fn artifact(
+        &self,
+        target: TargetName,
+    ) -> Result<&'static RuntimeArtifactV1, RuntimeArtifactError>;
+}
 pub(crate) mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
@@ -343,40 +355,6 @@ const RUNTIME_GC_PROBES_SOURCE: &str = include_str!("../../resources/runtime/gc_
     reason = "layout mirror tests 读取 build-time runtime source"
 )]
 const RUNTIME_SCHEDULER_SOURCE: &str = include_str!("../../resources/runtime/scheduler.gg");
-
-/// artifact manifest 中的 runtime source 角色。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum RuntimeSourceRole {
-    /// Gugu 标准库源文件。
-    StandardLibrary,
-    /// Gugu runtime 源文件。
-    Runtime,
-}
-
-/// artifact manifest 中的 source view；不携带源码文本。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeSource {
-    logical_path: String,
-    content_digest: [u8; 32],
-    role: RuntimeSourceRole,
-}
-
-impl RuntimeSource {
-    /// 返回 package 内的规范逻辑路径。
-    pub fn logical_path(&self) -> &str {
-        &self.logical_path
-    }
-
-    /// 返回 source 内容摘要。
-    pub fn content_digest(&self) -> [u8; 32] {
-        self.content_digest
-    }
-
-    /// 返回源文件角色。
-    pub fn role(&self) -> RuntimeSourceRole {
-        self.role
-    }
-}
 
 /// runtime 所需的 compiler-owned intrinsic 边界。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -770,10 +748,12 @@ pub(crate) fn declared_glue_names() -> impl Iterator<Item = &'static str> {
     )
 }
 
-/// compiler 携带的 runtime contract、intrinsic 与 artifact source manifest view。
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RuntimeResources {
-    sources: Vec<RuntimeSource>,
+/// compiler 携带的 runtime source manifest、intrinsic 边界与 artifact 身份视图。
+///
+/// 视图不持有字节：artifact 由建造 session 的一方按目标注入，前端既不嵌入也不回退。
+#[derive(Clone, Copy, Debug)]
+pub struct RuntimeResources<'a> {
+    artifact: &'a RuntimeArtifactV1,
     intrinsics: &'static [IntrinsicBoundary],
 }
 
@@ -786,28 +766,20 @@ const INTRINSICS: &[IntrinsicBoundary] = &[
     IntrinsicBoundary::ForeignBridge,
 ];
 
-fn source_views(
-    artifact: Result<&'static RuntimeArtifactV1, RuntimeArtifactError>,
-) -> Vec<RuntimeSource> {
-    artifact
-        .expect("嵌入 runtime artifact 已在 build.rs 校验")
-        .manifest
-        .sources
-        .iter()
-        .map(|source| RuntimeSource {
-            logical_path: source.logical_path.clone(),
-            content_digest: source.content_digest,
-            role: match source.role {
-                gugu_compiler_core::RuntimeSourceRole::StandardLibrary => {
-                    RuntimeSourceRole::StandardLibrary
-                }
-                gugu_compiler_core::RuntimeSourceRole::Runtime => RuntimeSourceRole::Runtime,
-            },
+impl<'a> RuntimeResources<'a> {
+    /// 构造 artifact 视图；源码 artifact 不得携带未物化的 executable function。
+    pub fn new(artifact: &'a RuntimeArtifactV1) -> Result<Self, RuntimeArtifactError> {
+        if !artifact.payload.functions.is_empty() {
+            return Err(RuntimeArtifactError::Manifest(
+                "源码 runtime artifact 不得携带未物化的 executable function".to_owned(),
+            ));
+        }
+        Ok(Self {
+            artifact,
+            intrinsics: INTRINSICS,
         })
-        .collect()
-}
+    }
 
-impl RuntimeResources {
     /// 返回本变更登记的 runtime glue 绑定表。
     pub(crate) fn glue_defs(&self) -> &'static [GlueDef] {
         GLUE_DEFS
@@ -815,29 +787,17 @@ impl RuntimeResources {
 
     /// runtime 角色源文件的逻辑路径。
     pub(crate) fn runtime_paths(&self) -> impl Iterator<Item = &str> + '_ {
-        self.sources
+        self.artifact
+            .manifest
+            .sources
             .iter()
-            .filter(|source| source.role() == RuntimeSourceRole::Runtime)
-            .map(RuntimeSource::logical_path)
-    }
-
-    /// 返回目标 artifact 的 source manifest view，不携带源码文本。
-    pub fn for_target(target: TargetName) -> Self {
-        let artifact = RuntimeArtifacts::for_target(target).expect("嵌入 artifact 已验证");
-        Self {
-            sources: source_views(Ok(artifact)),
-            intrinsics: INTRINSICS,
-        }
-    }
-
-    /// 返回宿主默认目标的 artifact source manifest view。
-    pub fn builtin() -> Self {
-        Self::for_target(TargetName::X86_64Linux)
+            .filter(|source| source.role == RuntimeSourceRole::Runtime)
+            .map(|source| source.logical_path.as_str())
     }
 
     /// 返回已登记的 source manifest 项。
-    pub fn sources(&self) -> &[RuntimeSource] {
-        &self.sources
+    pub fn sources(&self) -> &'a [RuntimeSource] {
+        &self.artifact.manifest.sources
     }
 
     /// 返回 compiler/runtime 之间允许的 intrinsic 边界。
@@ -846,20 +806,22 @@ impl RuntimeResources {
     }
 
     /// 返回 build-time artifact 固化的 source blob；仅供 artifact frontend adapter 使用。
-    pub(crate) fn source_blobs(
-        &self,
-        target: TargetName,
-    ) -> &'static [gugu_compiler_core::RuntimeSourceBlobV1] {
-        RuntimeArtifacts::for_target(target)
-            .expect("嵌入 artifact 已验证")
-            .payload
-            .sources
-            .as_slice()
+    pub(crate) fn source_blobs(&self) -> &'a [RuntimeSourceBlobV1] {
+        &self.artifact.payload.sources
+    }
+
+    /// 返回 manifest 摘要，用于 action identity。
+    pub(crate) fn manifest_digest(&self) -> [u8; 32] {
+        let bytes = gugu_compiler_core::canonical_manifest_bytes(&self.artifact.manifest);
+        let mut hasher = blake3::Hasher::new_derive_key("gugu-runtime-manifest-v1");
+        hasher.update(&bytes);
+        *hasher.finalize().as_bytes()
     }
 
     pub(crate) fn attach(&self, target: TargetName) -> RuntimeAttachment {
         RuntimeAttachment {
-            source_count: self.sources.len() as u32,
+            source_count: u32::try_from(self.artifact.manifest.sources.len())
+                .expect("内建源数量必须落在 u32"),
             rt0: target.descriptor().rt0.into(),
         }
     }

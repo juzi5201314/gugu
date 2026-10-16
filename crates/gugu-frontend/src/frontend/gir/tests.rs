@@ -35,6 +35,7 @@ fn compile_sources(sources: &[(&str, &str)]) -> (crate::frontend::hir::Validated
             external_packages: &Default::default(),
         },
         &crate::QueryEngine::new(),
+        crate::testing::resources(),
     )
     .unwrap_or_else(|errors| panic!("{errors:?}"));
     (output.hir, output.gir)
@@ -67,6 +68,7 @@ fn compile_with(queries: &crate::QueryEngine, source: &str) -> crate::frontend::
             external_packages: &Default::default(),
         },
         queries,
+        crate::testing::resources(),
     )
     .unwrap()
 }

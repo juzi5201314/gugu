@@ -5,16 +5,15 @@
 //! 编译静默多编一份 `main` 或把探针库的诊断混进用户诊断。
 
 use super::{installs_builtin_source, is_probe_builtin_source};
-use crate::runtime::{RuntimeResources, RuntimeSource};
 
 /// 探针源恰好是探针库与探针入口程序两个。
 #[test]
 fn probe_builtin_sources_are_the_probe_library_and_entry() {
-    let resources = RuntimeResources::builtin();
+    let resources = crate::testing::resources();
     let mut probe: Vec<&str> = resources
         .sources()
         .iter()
-        .map(RuntimeSource::logical_path)
+        .map(|source| source.logical_path.as_str())
         .filter(|path| is_probe_builtin_source(path))
         .collect();
     probe.sort_unstable();

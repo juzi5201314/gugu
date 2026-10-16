@@ -2,14 +2,15 @@
 //!
 //! 不进默认测试套件；`cargo bench --bench x64_select` 手工验收。
 
-use gugu_compiler::{CompileRequest, Compiler, TargetName};
+use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 
 fn main() {
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        "fn main() {\n let n = 7\n if n > 3 { _ = n * 2 } else { _ = n + 1 }\n }",
-        TargetName::X86_64Linux,
-    ));
+    let compilation =
+        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+            "main.gg",
+            "fn main() {\n let n = 7\n if n > 3 { _ = n * 2 } else { _ = n + 1 }\n }",
+            TargetName::X86_64Linux,
+        ));
     if !compilation.is_success() {
         eprintln!("{:?}", compilation.diagnostics().items());
         std::process::exit(1);

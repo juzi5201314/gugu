@@ -2,7 +2,7 @@
 //!
 //! 不进默认测试套件。`cargo bench -p gugu-compiler --bench linux_pie --profile dev`。
 
-use gugu_compiler::{CompileRequest, Compiler, TargetName};
+use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
@@ -263,7 +263,7 @@ fn launch(name: &str, source: &str, code: i32, stdout: &str, stderr: &str) {
 }
 
 fn launch_request(name: &str, request: CompileRequest, code: i32, stdout: &str, stderr: &str) {
-    let compilation = Compiler::new().compile(request);
+    let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(request);
     if !compilation.is_success() {
         eprintln!("{name} 编译失败: {:?}", compilation.diagnostics().items());
         std::process::exit(1);

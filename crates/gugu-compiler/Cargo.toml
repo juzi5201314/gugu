@@ -3,30 +3,20 @@ name = "gugu-compiler"
 version = "0.1.0"
 edition = "2024"
 autobenches = false
-description = "Gugu compiler bootstrap and staged action graph"
+description = "Gugu compiler façade: frontend plus the embedded runtime artifact"
 
 [features]
-runtime-gc-probes = ["gugu-runtime-builder/runtime-gc-probes"]
+# 与前端同名开关：探针源是否进入 build-time artifact。
+runtime-gc-probes = [
+    "gugu-frontend/runtime-gc-probes",
+    "gugu-runtime-builder/runtime-gc-probes",
+]
 # 重负载/端到端用例的显式开关：默认关闭，避免默认套件编译和执行完整编译 fixture。
-slow-tests = []
+slow-tests = ["gugu-frontend/slow-tests"]
 
 [dependencies]
-bytes.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-toml.workspace = true
-unicode-width.workspace = true
-blake3 = "1"
-flate2 = "1"
-foldhash = "0.2"
-sha2 = "0.10"
-siphasher = "1.0"
-tar = "0.4"
-unicode-normalization = "0.1.25"
-unicode-segmentation = "1.13.3"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-
 gugu-compiler-core = { path = "../gugu-compiler-core" }
+gugu-frontend = { path = "../gugu-frontend" }
 
 [build-dependencies]
 gugu-compiler-core = { path = "../gugu-compiler-core" }
@@ -59,6 +49,3 @@ harness = false
 [[bench]]
 name = "x64_frame"
 harness = false
-
-[dev-dependencies]
-tempfile = "3"

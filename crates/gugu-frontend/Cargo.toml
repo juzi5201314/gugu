@@ -1,0 +1,35 @@
+[package]
+name = "gugu-frontend"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu compiler frontend: snapshots, semantics, frozen HIR/GIR and runtime contracts"
+
+[features]
+# 探针源是否进入 build-time artifact；由 façade 按同名开关转发。
+runtime-gc-probes = []
+# 构建期物化：在 build.rs 里派生一次内建世界并固化进 artifact。
+prebuild = ["dep:gugu-runtime-builder"]
+# 重负载/端到端用例的显式开关：默认关闭，避免默认套件编译和执行完整编译 fixture。
+slow-tests = []
+
+[dependencies]
+bytes.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+unicode-width.workspace = true
+blake3 = "1"
+flate2 = "1"
+foldhash = "0.2"
+sha2 = "0.10"
+siphasher = "1.0"
+tar = "0.4"
+unicode-normalization = "0.1.25"
+unicode-segmentation = "1.13.3"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+gugu-compiler-core = { path = "../gugu-compiler-core" }
+gugu-runtime-builder = { path = "../gugu-runtime-builder", optional = true }
+
+[dev-dependencies]
+tempfile = "3"

@@ -101,6 +101,7 @@ fn compile(
             external_packages: &Default::default(),
         },
         queries,
+        crate::testing::resources(),
     )
     .expect("前端检查通过")
 }

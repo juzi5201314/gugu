@@ -46,6 +46,7 @@ fn analyze_with_cfg(
             external_packages: &BTreeSet::new(),
         },
         &crate::query::QueryEngine::new(),
+        crate::testing::resources(),
     )
 }
 
@@ -54,10 +55,10 @@ fn analyze_with_cfg(
 /// 内建平台源单元与用户源码进入同一张定义表，按逻辑路径排除内建单元即可只针对用户源码断言，
 /// 也避免把内建单元的定义个数写死成常量。
 fn builtin_paths() -> Vec<String> {
-    crate::runtime::RuntimeResources::builtin()
+    crate::testing::resources()
         .sources()
         .iter()
-        .map(|source| source.logical_path().to_owned())
+        .map(|source| source.logical_path.to_owned())
         .collect()
 }
 

@@ -30,6 +30,7 @@ fn compile(sources: &[(&str, &str)], queries: &crate::QueryEngine) -> FrontendOu
             external_packages: &Default::default(),
         },
         queries,
+        crate::testing::resources(),
     )
     .expect("前端检查通过")
 }
@@ -61,6 +62,7 @@ fn compile_failing(sources: &[(&str, &str)]) -> Vec<crate::Diagnostic> {
             external_packages: &Default::default(),
         },
         &crate::QueryEngine::new(),
+        crate::testing::resources(),
     )
     .expect_err("前端必须失败")
 }
@@ -282,6 +284,7 @@ fn harness_test_items_become_roots() {
             external_packages: &Default::default(),
         },
         &crate::QueryEngine::new(),
+        crate::testing::resources(),
     )
     .expect("前端检查通过");
     let symbols = symbols(&output.mono);

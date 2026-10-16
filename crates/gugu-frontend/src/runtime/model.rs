@@ -1602,6 +1602,7 @@ pub(crate) struct RawModelInputs<'a> {
     pub(crate) sources: &'a SourceMap,
     pub(crate) hir: &'a crate::frontend::hir::Module,
     pub(crate) gir: &'a [crate::frontend::gir::concrete::RecordTypes],
+    pub(crate) resources: &'a super::RuntimeResources<'a>,
 }
 
 /// 通过 query 构建并校验契约对象；失败进入 `E0058`。
@@ -1678,8 +1679,13 @@ pub(crate) fn run(
                 )
             })
             .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
-                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
+            super::coroutine_layout::verify_source(
+                contract.coroutine(),
+                inputs.hir,
+                inputs.gir,
+                inputs.resources,
+            )
+            .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
                 .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
             super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
@@ -1722,8 +1728,13 @@ pub(crate) fn run(
     contract
         .verify()
         .map_err(|error| vec![error.diagnostic()])?;
-    super::coroutine_layout::verify_source(contract.coroutine(), inputs.hir, inputs.gir)
-        .map_err(|error| vec![error.diagnostic()])?;
+    super::coroutine_layout::verify_source(
+        contract.coroutine(),
+        inputs.hir,
+        inputs.gir,
+        inputs.resources,
+    )
+    .map_err(|error| vec![error.diagnostic()])?;
     super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
         .map_err(|error| vec![error.diagnostic()])?;
     super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)

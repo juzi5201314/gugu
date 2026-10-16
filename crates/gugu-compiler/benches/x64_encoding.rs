@@ -7,7 +7,7 @@
 #[path = "support/vm.rs"]
 mod vm;
 
-use gugu_compiler::{TargetName, X64Case, X64Harness, X64Register};
+use gugu_compiler::{EMBEDDED_ARTIFACTS, TargetName, X64Case, X64Harness, X64Register};
 
 /// 代码区大小：片段、冷边 stub 与末尾 `ret` 都放得下。
 const CODE_BYTES: usize = 4096;
@@ -48,7 +48,7 @@ fn main() {
     } else {
         TargetName::X86_64Linux
     };
-    let harness = match X64Harness::new(target) {
+    let harness = match X64Harness::new(target, &EMBEDDED_ARTIFACTS) {
         Ok(harness) => harness,
         Err(error) => {
             eprintln!("harness 构建失败: {error}");

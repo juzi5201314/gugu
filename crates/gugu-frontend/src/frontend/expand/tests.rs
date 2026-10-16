@@ -332,10 +332,7 @@ fn macro_free_sources_keep_baseline_pipeline() {
     let compilation = compile("fn main() { let x = 1\n _ = x }");
     assert!(compilation.is_success());
     assert_eq!(compilation.source_map().expansions().len(), 0);
-    assert_eq!(
-        compilation.source_map().snapshots().len(),
-        1 + crate::runtime::RuntimeResources::builtin().sources().len()
-    );
+    crate::testing::assert_session_sources(&compilation, &["main.gg"], "main.gg");
 }
 
 #[test]

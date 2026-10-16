@@ -14,7 +14,7 @@
 #[path = "support/vm.rs"]
 mod vm;
 
-use gugu_compiler::{CompileRequest, Compiler, TargetName, X64Fragment};
+use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName, X64Fragment};
 use std::collections::BTreeMap;
 
 /// 代码区大小：所有片段、捕获 stub 与 `ret` stub 都放得下。
@@ -133,8 +133,8 @@ fn main() {
 fn run(scenario: &Scenario, target: TargetName) -> Result<(), String> {
     let generated = program(scenario);
     let source = scenario.source.unwrap_or(generated.as_str());
-    let compilation =
-        Compiler::new().compile(CompileRequest::single_file("main.gg", source, target));
+    let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
+        .compile(CompileRequest::single_file("main.gg", source, target));
     if !compilation.is_success() {
         return Err(format!("{:?}", compilation.diagnostics().items()));
     }

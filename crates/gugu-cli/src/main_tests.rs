@@ -333,8 +333,8 @@ fn dump_internal_flags_parse_and_require_internal_gate() {
 fn build_json_reports_barrier_contract_keys() {
     let source =
         "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
-    let compilation =
-        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+    let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
+        .compile(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -548,8 +548,8 @@ fn build_json_reports_barrier_contract_keys() {
 fn build_json_reports_routing_contract_keys() {
     let source =
         "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
-    let compilation =
-        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+    let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
+        .compile(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -596,8 +596,8 @@ fn build_json_reports_routing_contract_keys() {
 fn build_json_reports_provenance_contract_keys() {
     let source =
         "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
-    let compilation =
-        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+    let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
+        .compile(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -655,8 +655,8 @@ fn build_json_reports_provenance_contract_keys() {
 #[test]
 fn build_json_reports_combining_contract_keys() {
     let source = "fn main() {\n}\n";
-    let compilation =
-        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+    let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
+        .compile(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -702,8 +702,8 @@ fn build_json_reports_combining_contract_keys() {
 #[test]
 fn build_json_reports_shared_heap_contract_keys() {
     let source = "fn main() {\n let channel = chan[fn() int](1)\n let value = 1\n let closure = fn() int { return value }\n channel.send(closure)\n _ = closure()\n }";
-    let compilation =
-        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+    let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
+        .compile(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,
@@ -776,8 +776,8 @@ fn build_json_reports_shared_heap_contract_keys() {
     // LocalHeap 路径，否则计划里每多一个共享站点都会给纯本地程序增加运行时状态。
     let local_only =
         "fn main() {\n let value = 1\n let closure = fn() int { return value }\n _ = closure()\n }";
-    let compilation =
-        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+    let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
+        .compile(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             local_only,
             gugu_compiler::TargetName::X86_64Linux,
@@ -813,8 +813,8 @@ fn build_json_reports_shared_heap_contract_keys() {
 #[test]
 fn build_json_reports_x64_fragment_keys() {
     let source = "fn main() {\n let index = 33\n let total = index * 7\n if total > 10 { _ = total / 3 }\n }";
-    let compilation =
-        gugu_compiler::Compiler::new().compile(gugu_compiler::CompileRequest::single_file(
+    let compilation = gugu_compiler::Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
+        .compile(gugu_compiler::CompileRequest::single_file(
             "main.gg",
             source,
             gugu_compiler::TargetName::X86_64Linux,

@@ -1,5 +1,11 @@
 [workspace]
-members = ["crates/gugu-cli", "crates/gugu-compiler", "crates/gugu-compiler-core", "crates/gugu-runtime-builder"]
+members = [
+    "crates/gugu-cli",
+    "crates/gugu-compiler",
+    "crates/gugu-compiler-core",
+    "crates/gugu-frontend",
+    "crates/gugu-runtime-builder",
+]
 resolver = "3"
 
 [workspace.dependencies]

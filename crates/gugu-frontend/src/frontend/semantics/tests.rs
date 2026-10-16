@@ -389,6 +389,7 @@ pub(super) fn frontend(
             external_packages: &Default::default(),
         },
         queries,
+        crate::testing::resources(),
     )
 }
 

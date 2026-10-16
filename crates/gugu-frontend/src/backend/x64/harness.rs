@@ -246,11 +246,15 @@ pub struct X64Harness {
     switch: X64Code,
     switch_restore_offset: u32,
     switch_matches: bool,
+    artifacts: &'static dyn crate::runtime::RuntimeArtifactProvider,
 }
 
 impl X64Harness {
     /// 构建 harness：契约、用例表、解码夹具与上下文切换片段。
-    pub fn new(target: TargetName) -> Result<Self, X64HarnessError> {
+    pub fn new(
+        target: TargetName,
+        artifacts: &'static dyn crate::runtime::RuntimeArtifactProvider,
+    ) -> Result<Self, X64HarnessError> {
         let contract = EncoderContract::build(target.descriptor().cpu_baseline);
         contract
             .verify()
@@ -268,6 +272,7 @@ impl X64Harness {
             switch,
             switch_restore_offset,
             switch_matches,
+            artifacts,
         })
     }
 
@@ -298,7 +303,7 @@ impl X64Harness {
 
     /// 汇总自检报告；会做一次真实的 cage 编译以统计解码点数。
     pub fn report(&self) -> X64HarnessReport {
-        let cage_sites = cage_decode_sites(self.target);
+        let cage_sites = cage_decode_sites(self.target, self.artifacts);
         let code_len = u32::try_from(self.switch.bytes.len()).unwrap_or(u32::MAX);
         X64HarnessReport {
             target: self.target.name().to_owned(),
@@ -321,10 +326,13 @@ impl X64Harness {
 }
 
 /// 一次真实编译里 `DecodeCompressedRef` 的站点数。
-fn cage_decode_sites(target: TargetName) -> u32 {
+fn cage_decode_sites(
+    target: TargetName,
+    artifacts: &'static dyn crate::runtime::RuntimeArtifactProvider,
+) -> u32 {
     let request = crate::CompileRequest::single_file("main.gg", COMPRESSED_CAPTURE, target)
         .with_compression_policy(CompressionPolicyV1::cage(4 * GC_ARENA_BYTES));
-    let compilation = crate::Compiler::new().compile(request);
+    let compilation = crate::Compiler::with_artifacts(artifacts).compile(request);
     if !compilation.is_success() {
         return 0;
     }

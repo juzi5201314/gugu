@@ -4,7 +4,7 @@
 //! 修补点自行给片段打补丁后执行，`context_switch` 位置用宿主 stub 顶替：stub 记录四个参数
 //! 并故意破坏九个整数参数寄存器与八个浮点参数寄存器，续点必须从 cold scratch 完整恢复。
 
-use gugu_compiler::{CompileRequest, Compiler, TargetName};
+use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, TargetName};
 use std::arch::naked_asm;
 use std::mem::offset_of;
 
@@ -175,11 +175,12 @@ fn main() {
     } else {
         TargetName::X86_64Linux
     };
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        "fn main() { let child = async { 42 }\n _ = child }",
-        target,
-    ));
+    let compilation =
+        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+            "main.gg",
+            "fn main() { let child = async { 42 }\n _ = child }",
+            target,
+        ));
     assert!(
         compilation.is_success(),
         "{:?}",

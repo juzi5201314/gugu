@@ -17,7 +17,7 @@
 
 ### Build-time runtime artifact
 
-compiler 构建阶段由 `gugu-runtime-builder` 读取内建 `std/` 与 `runtime/` 源，按目标生成 `GUGURT01` artifact；`gugu-compiler` 嵌入并校验 Linux/Windows bytes。当前 artifact 固化 source blob 与 manifest，用户 frontend 仍解析这些固定源码；它不是已编译的 runtime fragment 容器。独立布局证据从 record 签名形成，不依赖 executable 闭包。
+compiler 构建阶段由 `gugu-runtime-builder` 读取内建 `std/` 与 `runtime/` 源，按目标生成 `GUGURT01` artifact；`gugu-compiler`（façade）嵌入并校验 Linux/Windows bytes，`gugu-frontend` 不持有字节，只按目标接收注入的 `RuntimeArtifactProvider`。当前 artifact 固化 source blob 与 manifest，用户 frontend 仍解析这些固定源码；它不是已编译的 runtime fragment 容器。独立布局证据从 record 签名形成，不依赖 executable 闭包。
 
 runtime 的契约入口为 record-only 根：用于原有 size/align/offset/managed 校验，不生成 executable body。runtime `#[used]` 不再隐式形成全局执行根；rt0 启动、登记机器片段的源目标与可达 GIR 操作产生的 glue 需求进入单态化固定点。用户的 `#[used]`、导出、入口和初始化语义不变。未引用的源 glue 缺少实例时不绑定，实际引用缺少目标仍是 invariant error。
 
@@ -75,7 +75,13 @@ crates/
 │   ├── src/main.rs                 单一 gugu 入口、参数解析与 bootstrap 执行编排
 │   ├── src/config.rs               CLI 配置合并、环境变量与本地配置发现
 │   └── src/output.rs               Text/JSON 格式化、事件流、诊断渲染与敏感信息清理
-└── gugu-compiler/
+├── gugu-compiler/
+│   ├── build.rs                    build-time 物化：builder source 表 → 前端派生 → GUGURT01 bytes
+│   ├── src/lib.rs                  façade：嵌入 artifact、注入 provider、再导出前端 API
+│   ├── src/artifact.rs             目标专属 artifact 解码与 RuntimeArtifactProvider 实现
+│   ├── tests/docs_links.rs         文档链接与章节锚点契约
+│   └── benches/                    手工验收二进制（编码、栈图、片段、协程上下文）
+└── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/action.rs               稠密 action graph 与状态迁移
     ├── src/diagnostics.rs          稳定代码、源码范围与排序
@@ -164,7 +170,7 @@ crates/
 
 模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与尚未迁走的参照模型（raw 平面、资源租约、owner-directed return、rt0 启动/终止/报告）。channel、Join、select 与 `std.sync` 的执行在镜像内 Gugu 源；Rust 侧只留 schema、布局和非法序拒绝。
 
-`gugu-compiler` 使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
+`gugu-compiler` 与 `gugu-frontend` 都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
 
 ### 编译器测试构建
 

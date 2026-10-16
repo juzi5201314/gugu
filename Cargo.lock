@@ -304,6 +304,23 @@ dependencies = [
 name = "gugu-compiler"
 version = "0.1.0"
 dependencies = [
+ "gugu-compiler-core",
+ "gugu-frontend",
+ "gugu-runtime-builder",
+]
+
+[[package]]
+name = "gugu-compiler-core"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+]
+
+[[package]]
+name = "gugu-frontend"
+version = "0.1.0"
+dependencies = [
  "blake3",
  "bytes",
  "flate2",
@@ -321,14 +338,6 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "xxhash-rust",
-]
-
-[[package]]
-name = "gugu-compiler-core"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "serde",
 ]
 
 [[package]]

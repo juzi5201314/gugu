@@ -1,7 +1,6 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
 use crate::{
-    TargetName,
     diagnostics::{Diagnostic, DiagnosticCode},
     source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span},
 };
@@ -88,6 +87,7 @@ pub(crate) struct ParsedModule {
 pub(crate) fn bootstrap(
     input: SourceInput<'_>,
     queries: &crate::query::QueryEngine,
+    resources: crate::runtime::RuntimeResources<'_>,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
     match input {
         SourceInput::EmptyPackage => Ok(FrontendOutput {
@@ -129,6 +129,7 @@ pub(crate) fn bootstrap(
             cfg,
             external_packages,
             queries,
+            resources,
         ),
     }
 }
@@ -158,13 +159,13 @@ pub(crate) fn installs_builtin_source(logical_path: &str, entry: &str) -> bool {
 /// 持有第二份源码表。
 fn inject_builtin_sources(
     source_map: &mut SourceMap,
-    target: TargetName,
+    resources: crate::runtime::RuntimeResources<'_>,
     entry: &str,
 ) -> Result<(BTreeSet<String>, BTreeSet<String>), Vec<Diagnostic>> {
     let mut paths = BTreeSet::new();
     let mut runtime_paths = BTreeSet::new();
     let mut snapshots = Vec::new();
-    for source in crate::runtime::RuntimeResources::for_target(target).source_blobs(target) {
+    for source in resources.source_blobs() {
         let logical = source.logical_path.as_str();
         if !installs_builtin_source(logical, entry) {
             continue;
@@ -213,8 +214,9 @@ fn check_sources(
     cfg: &cfg::CfgContext,
     external_packages: &BTreeSet<String>,
     queries: &crate::query::QueryEngine,
+    resources: crate::runtime::RuntimeResources<'_>,
 ) -> Result<FrontendOutput, Vec<Diagnostic>> {
-    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, cfg.target(), entry)?;
+    let (builtin_paths, runtime_paths) = inject_builtin_sources(source_map, resources, entry)?;
     let mut modules = parse_modules(source_map, source_root, cfg, &builtin_paths)?;
     modules.sort_by(|left, right| left.path.cmp(&right.path));
     let expansion_inputs = expand::run(

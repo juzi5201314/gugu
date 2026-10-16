@@ -12,9 +12,9 @@ mod tests;
 
 use clap::{ArgAction, Args, CommandFactory, Parser, Subcommand, error::ErrorKind};
 use gugu_compiler::{
-    CachePolicy, CompileRequest, Compiler, DependencyCache, DependencyDomain, LockGraph, Package,
-    PackageSource, Project, ResolveOptions, TargetKind, TargetName, TargetSelection,
-    candidates_from_lock, default_cache_root, prepare_dependency_inputs,
+    CachePolicy, CompileRequest, Compiler, DependencyCache, DependencyDomain, EMBEDDED_ARTIFACTS,
+    LockGraph, Package, PackageSource, Project, ResolveOptions, TargetKind, TargetName,
+    TargetSelection, candidates_from_lock, default_cache_root, prepare_dependency_inputs,
 };
 use serde_json::json;
 use std::{
@@ -636,7 +636,8 @@ fn run_compile(file: Option<PathBuf>, options: &GlobalArgs, check_only: bool) ->
         emit_cli_error(format, &message);
         return 2;
     }
-    let compilation = Compiler::new().compile(CompileRequest::single_file_path(file, target));
+    let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
+        .compile(CompileRequest::single_file_path(file, target));
     print_compilation(&compilation, check_only, options, target);
     compilation.exit_code()
 }
@@ -923,7 +924,7 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
         Ok(lock) => lock,
         Err(()) => return 2,
     };
-    let compiler = Compiler::new();
+    let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
     let mut exit_code = 0;
     for package in packages {
         match compile_package(

@@ -1,5 +1,6 @@
 //! 从冻结HIR与具体GIR交叉校验Gugu控制块布局；不重新解释源码或名称解析。
 
+use super::RuntimeResources;
 use super::contract_view::source_parameters;
 use super::coroutine_schema::CoroutineRuntimeContract;
 use super::model::RawModelError;
@@ -9,18 +10,11 @@ use crate::frontend::{
 };
 use std::collections::BTreeSet;
 
-/// runtime 角色的全部源路径：控制块可以落在任一 runtime 单元（入口单元与协程单元分开）。
-fn runtime_paths() -> BTreeSet<String> {
-    super::RuntimeResources::builtin()
-        .runtime_paths()
-        .map(str::to_owned)
-        .collect()
-}
-
 pub(super) fn verify_source(
     contract: &CoroutineRuntimeContract,
     module: &hir::Module,
     gir: &[RecordTypes],
+    resources: &RuntimeResources<'_>,
 ) -> Result<(), RawModelError> {
     // 空package没有runtime源图，也不生成镜像；固定machine布局仍由contract.verify校验。
     if module.sources.is_empty() {
@@ -30,7 +24,7 @@ pub(super) fn verify_source(
     let mut found = vec![false; contract.records.len()];
     for concrete in gir {
         let definition = &module.definitions[concrete.definition.index()];
-        if !in_source(definition, module) {
+        if !in_source(definition, module, resources) {
             continue;
         }
         let parameters = source_parameters(module, concrete.definition)?;
@@ -43,6 +37,7 @@ pub(super) fn verify_source(
             types: &concrete.types,
             found: &mut found,
             visited: BTreeSet::new(),
+            resources,
         };
         for (source, target) in parameters.iter().zip(&concrete.parameters) {
             verifier.walk(*source, target.0, false)?;
@@ -63,8 +58,14 @@ pub(super) fn verify_source(
     Ok(())
 }
 
-fn in_source(definition: &hir::Definition, module: &hir::Module) -> bool {
-    runtime_paths().contains(source_path(definition, module))
+fn in_source(
+    definition: &hir::Definition,
+    module: &hir::Module,
+    resources: &RuntimeResources<'_>,
+) -> bool {
+    resources
+        .runtime_paths()
+        .any(|path| path == source_path(definition, module))
 }
 
 /// 定义所在的逻辑源路径。
@@ -82,6 +83,7 @@ struct Verifier<'a> {
     types: &'a [TypeLayout],
     found: &'a mut [bool],
     visited: BTreeSet<(hir::TypeId, u32)>,
+    resources: &'a RuntimeResources<'a>,
 }
 
 impl Verifier<'_> {
@@ -106,7 +108,7 @@ impl Verifier<'_> {
                 },
             ) => {
                 let definition_value = &self.module.definitions[definition.index()];
-                if !in_source(definition_value, self.module) {
+                if !in_source(definition_value, self.module, self.resources) {
                     return Err(RawModelError::new("控制块包含未登记外部record"));
                 }
                 let aggregate = self

@@ -852,6 +852,7 @@ mod tests {
                 external_packages: &Default::default(),
             },
             &QueryEngine::new(),
+            crate::testing::resources(),
         )
         .unwrap()
     }

@@ -1,7 +1,7 @@
 //! 手工machine-intrinsic smoke：运行compiler实际产出的代码，往返独立arena stack。
 //! 宿主VM与裸汇编仅存在于此验收二进制；compiler保持forbid(unsafe_code)。
 
-use gugu_compiler::{CompileRequest, Compiler, CoroutineContext, TargetName};
+use gugu_compiler::{CompileRequest, Compiler, CoroutineContext, EMBEDDED_ARTIFACTS, TargetName};
 use std::arch::naked_asm;
 use std::mem::offset_of;
 
@@ -93,11 +93,12 @@ fn main() {
     } else {
         TargetName::X86_64Linux
     };
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        "fn main() { let child = async { 42 }\n _ = child }",
-        target,
-    ));
+    let compilation =
+        Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(CompileRequest::single_file(
+            "main.gg",
+            "fn main() { let child = async { 42 }\n _ = child }",
+            target,
+        ));
     assert!(
         compilation.is_success(),
         "{:?}",

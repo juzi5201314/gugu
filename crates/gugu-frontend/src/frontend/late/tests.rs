@@ -21,6 +21,7 @@ fn compile(
             external_packages: &Default::default(),
         },
         queries,
+        crate::testing::resources(),
     )
 }
 

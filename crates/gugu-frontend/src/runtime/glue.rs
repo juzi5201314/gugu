@@ -96,7 +96,7 @@ pub(crate) struct RuntimeGlueBindings {
 impl RuntimeGlueBindings {
     /// 解析登记表：被引用的 `Item` glue 必须有唯一的非泛型定义与唯一实例。
     pub(crate) fn resolve(
-        resources: &RuntimeResources,
+        resources: &RuntimeResources<'_>,
         hir: &hir::Validated,
         lir: &lir::Validated,
     ) -> Result<Self, Diagnostic> {
