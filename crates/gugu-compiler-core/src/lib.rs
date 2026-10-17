@@ -12,7 +12,7 @@ pub const ARTIFACT_MAGIC: [u8; 8] = *b"GUGURT01";
 pub const ARTIFACT_SCHEMA: u32 = 3;
 
 /// 内建块物化表的 schema：表集或表内布局变化时递增。
-pub const PREBUILT_SCHEMA: u32 = 1;
+pub const PREBUILT_SCHEMA: u32 = 2;
 /// payload 的域隔离标签。
 pub const ARTIFACT_DOMAIN: &str = "gugu-runtime-artifact-v1";
 /// GBC payload 编码版本。
@@ -196,6 +196,10 @@ pub struct RuntimePrebuiltV1 {
     pub record_types: Vec<u8>,
     /// 每张表的 (标识域摘要, 内容摘要)，与表的声明顺序一致。
     pub fingerprints: Vec<([u8; 32], [u8; 32])>,
+    /// 固定地板集：rt0 与 machine entry 恒需的内建模块，按逻辑路径严格升序。
+    pub floor_modules: Vec<String>,
+    /// 贡献 `ContractRecord` 的定义所在的内建模块，按逻辑路径严格升序。
+    pub contract_modules: Vec<String>,
 }
 
 impl RuntimePrebuiltV1 {
@@ -223,6 +227,23 @@ impl RuntimePrebuiltV1 {
         if self.fingerprints.is_empty() {
             return Err(RuntimeArtifactError::Manifest(
                 "物化表缺少指纹表".to_owned(),
+            ));
+        }
+        for (name, modules) in [
+            ("地板集", &self.floor_modules),
+            ("契约集", &self.contract_modules),
+        ] {
+            if modules.windows(2).any(|pair| pair[0] >= pair[1])
+                || modules.iter().any(|path| !self.module_order.contains(path))
+            {
+                return Err(RuntimeArtifactError::Manifest(format!(
+                    "{name}必须是 module_order 内的严格升序子集"
+                )));
+            }
+        }
+        if self.floor_modules.is_empty() {
+            return Err(RuntimeArtifactError::Manifest(
+                "地板集不能为空：prelude 与 runtime 地板模块恒需".to_owned(),
             ));
         }
         Ok(())
@@ -649,6 +670,14 @@ fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, Runtime
             encoder.digest(domain);
             encoder.digest(content);
         }
+        encoder.len(prebuilt.floor_modules.len())?;
+        for path in &prebuilt.floor_modules {
+            encoder.string(path)?;
+        }
+        encoder.len(prebuilt.contract_modules.len())?;
+        for path in &prebuilt.contract_modules {
+            encoder.string(path)?;
+        }
     }
     Ok(encoder.finish())
 }
@@ -745,6 +774,16 @@ fn decode_prebuilt(
     for _ in 0..fingerprint_count {
         fingerprints.push((decoder.digest()?, decoder.digest()?));
     }
+    let floor_count = decoder.len()?;
+    let mut floor_modules = Vec::with_capacity(floor_count);
+    for _ in 0..floor_count {
+        floor_modules.push(decoder.string()?);
+    }
+    let contract_count = decoder.len()?;
+    let mut contract_modules = Vec::with_capacity(contract_count);
+    for _ in 0..contract_count {
+        contract_modules.push(decoder.string()?);
+    }
     Ok(RuntimePrebuiltV1 {
         schema,
         revisions,
@@ -757,6 +796,8 @@ fn decode_prebuilt(
         gir_bodies,
         record_types,
         fingerprints,
+        floor_modules,
+        contract_modules,
     })
 }
 
@@ -949,6 +990,8 @@ mod tests {
             gir_bodies: vec![vec![4], vec![5, 6]],
             record_types: vec![7],
             fingerprints: vec![([1; 32], [2; 32])],
+            floor_modules: vec!["std/prelude.gg".to_owned()],
+            contract_modules: vec!["runtime/core.gg".to_owned()],
         }
     }
 

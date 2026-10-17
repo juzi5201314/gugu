@@ -6,6 +6,7 @@
 //! 表内容全部是前端 canonical 编码；加载端按同一规则安装到编号前缀并重算指纹比对，
 //! 序列化里的指纹只作断言，不作为信任来源。
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 use gugu_compiler_core::{
@@ -91,6 +92,13 @@ pub fn materialize(
     let prebuilt = RuntimePrebuiltV1 {
         schema: PREBUILT_SCHEMA,
         revisions: layer_revisions(),
+        floor_modules: floor_modules(&derivation.module_order),
+        contract_modules: derivation
+            .module_order
+            .iter()
+            .filter(|path| path.starts_with("std.runtime."))
+            .cloned()
+            .collect(),
         module_order: derivation.module_order,
         names,
         identities,
@@ -105,6 +113,52 @@ pub fn materialize(
     artifact.payload.prebuilt = Some(prebuilt);
     artifact.validate()?;
     Ok(artifact)
+}
+
+/// 固定地板集：rt0 与 machine entry 恒需的内建模块，按逻辑路径升序给出。
+///
+/// 只在构建期计算一次并写进物化表；加载期直接取用，不再推断。
+fn floor_modules(module_order: &[String]) -> Vec<String> {
+    let mut floor = [
+        "std.prelude",
+        "std.runtime.core",
+        "std.runtime.platform",
+        "std.runtime.scheduler",
+    ]
+    .into_iter()
+    .filter(|path| module_order.iter().any(|module| module == path))
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    floor.sort();
+    floor
+}
+
+/// 内建世界的 import 闭包。
+///
+/// `std.prelude`、固定地板集与契约集恒在内；其余内建模块只在被用户 `use` 或路径引用触达时进入。
+/// 未出现在物化表 `module_order` 里的路径直接忽略，避免用户拼写把非内建路径带进闭包。
+pub fn closure_program_modules<'a>(
+    imported: impl IntoIterator<Item = &'a str>,
+    prebuilt: &RuntimePrebuiltV1,
+) -> BTreeSet<String> {
+    let known = prebuilt
+        .module_order
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut closure = prebuilt
+        .floor_modules
+        .iter()
+        .chain(&prebuilt.contract_modules)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    closure.extend(
+        imported
+            .into_iter()
+            .filter(|path| known.contains(path))
+            .map(str::to_owned),
+    );
+    closure
 }
 
 /// 各派生层在物化表里的 revision；加载端要求物化表声明的 revision 与当前编译器完全一致。
@@ -245,5 +299,56 @@ mod tests {
         for rejected in ["feature", "test", "bench", "target", "unix", "windows"] {
             assert!(!ALLOWED_CFG_KEYS.contains(&rejected), "{rejected} 不得通过");
         }
+    }
+}
+
+#[cfg(test)]
+mod closure_tests {
+    use super::*;
+
+    fn sample_prebuilt() -> RuntimePrebuiltV1 {
+        RuntimePrebuiltV1 {
+            schema: PREBUILT_SCHEMA,
+            revisions: vec![("names".to_owned(), 1)],
+            module_order: vec![
+                "std.prelude".to_owned(),
+                "std.runtime.core".to_owned(),
+                "std.runtime.scheduler".to_owned(),
+                "std.vec".to_owned(),
+            ],
+            names: Vec::new(),
+            identities: Vec::new(),
+            checked: Vec::new(),
+            early_constants: Vec::new(),
+            hir: Vec::new(),
+            gir_bodies: Vec::new(),
+            record_types: Vec::new(),
+            fingerprints: vec![([0; 32], [0; 32])],
+            floor_modules: vec!["std.prelude".to_owned(), "std.runtime.core".to_owned()],
+            contract_modules: vec!["std.runtime.scheduler".to_owned()],
+        }
+    }
+
+    #[test]
+    fn closure_keeps_floor_contracts_and_known_imports() {
+        let prebuilt = sample_prebuilt();
+        prebuilt.validate().expect("样例物化表合法");
+        let closure = closure_program_modules(["std.vec", "std.unknown"], &prebuilt);
+        assert_eq!(
+            closure.into_iter().collect::<Vec<_>>(),
+            vec![
+                "std.prelude",
+                "std.runtime.core",
+                "std.runtime.scheduler",
+                "std.vec",
+            ]
+        );
+    }
+
+    #[test]
+    fn floor_outside_module_order_is_rejected() {
+        let mut prebuilt = sample_prebuilt();
+        prebuilt.floor_modules = vec!["std.runtime.core".to_owned(), "std.nope".to_owned()];
+        assert!(prebuilt.validate().is_err());
     }
 }
