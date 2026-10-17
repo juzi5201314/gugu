@@ -20,10 +20,15 @@ const NAMES_TABLE: &str = "names";
 /// 身份表的层名：`DefRef` 与 `HIR DefId` 的双向映射。
 const IDENTITIES_TABLE: &str = "identities";
 
+/// HIR 片段的层名：内建模块的全部 HIR 表。
+const HIR_TABLE: &str = "hir.module";
+
 /// 已校验的内建块前缀：当前会话可直接安装的派生表。
 pub(crate) struct BuiltinPrefix {
     names: names::NameResolution,
     identities: Identities,
+    /// 内建模块的 HIR 片段：定义、类型与各侧表整段接管，用户侧只追加。已通过 verifier。
+    hir: std::sync::Arc<crate::frontend::hir::Validated>,
     modules: Vec<String>,
     identity: [u8; 32],
 }
@@ -62,12 +67,32 @@ impl BuiltinPrefix {
         rebind_spans(&mut names, source_map)?;
         let identities: Identities =
             decode_table(prebuilt, IDENTITIES_TABLE, &prebuilt.identities)?;
+        // HIR 片段在这里跑完整结构 verifier：定义稳定键唯一、侧表与 owner 下标自洽、类型与
+        // 声明引用完整。表字节的摘要已在上面比对过，这里钉的是结构。
+        let (hir, _) = crate::frontend::hir::Validated::freeze(decode_table(
+            prebuilt,
+            HIR_TABLE,
+            &prebuilt.hir,
+        )?)
+        .map_err(|error| invalid(&format!("内建块 HIR 片段结构非法：{error:?}")))?;
+        if hir.module().definitions.len() != identities.origins().len()
+            || hir.module().opaques.len() != identities.opaques.len()
+            || hir.module().interfaces.len() != identities.interfaces.len()
+        {
+            return Err(invalid("内建块物化表的 HIR 与身份表不同源"));
+        }
         Ok(Self {
             names,
             identities,
+            hir: std::sync::Arc::new(hir),
             modules: prebuilt.module_order.clone(),
             identity: installed_tables_digest(prebuilt),
         })
+    }
+
+    /// 内建模块的 HIR 片段：已通过 verifier，两条加载路径必须给出同一份。
+    pub(crate) fn hir(&self) -> &crate::frontend::hir::Validated {
+        &self.hir
     }
 
     /// 安装表的内容身份：参与 query 键，缓存不能跨 artifact 复用。

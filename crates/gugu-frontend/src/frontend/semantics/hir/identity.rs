@@ -69,7 +69,7 @@ pub(super) fn collect(
     checked: &CheckedSemantics,
     sources: &SourceMap,
     prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
-) -> Result<(Vec<hir::Definition>, Identities), Diagnostic> {
+) -> Result<(Vec<hir::Definition>, Identities, usize), Diagnostic> {
     let mut candidates: Vec<_> = names
         .definitions
         .iter()
@@ -246,6 +246,15 @@ pub(super) fn collect(
                 })
         })
         .collect();
+    // 内建块的规模先算出来：稳定排序把「BuiltinTrait 或物化模块」的候选放在最前，前 `builtin`
+    // 位就是物化表覆盖的编号前缀。
+    let builtin = candidates
+        .iter()
+        .filter(|candidate| {
+            matches!(candidate.origin, Origin::BuiltinTrait(_))
+                || materialized_modules[candidate.module]
+        })
+        .count();
     let mut order: Vec<usize> = (0..candidates.len()).collect();
     order.sort_by_key(|&index| {
         !matches!(candidates[index].origin, Origin::BuiltinTrait(_))
@@ -267,27 +276,34 @@ pub(super) fn collect(
         .iter()
         .map(|&index| candidates[index].origin)
         .collect::<Vec<_>>();
-    let definitions = order
-        .into_iter()
-        .map(|index| {
-            let candidate = &mut candidates[index];
-            Ok(hir::Definition {
-                key: candidate.key,
-                name: std::mem::take(&mut candidate.name),
-                parent: candidate.parent.map(|parent| hir_id(remap[parent])),
-                location: candidate
-                    .span
-                    .as_ref()
-                    .map(|span| location(sources, span))
-                    .transpose()?,
-                kind: candidate.kind,
-                signature: None,
-                parameters: Vec::new(),
-                obligations: Vec::new(),
-                public: candidate.public,
-            })
-        })
-        .collect::<Result<Vec<_>, Diagnostic>>()?;
+    let mut definitions = Vec::with_capacity(order.len());
+    if let Some(installed) = prefix {
+        // 物化片段的定义整段接管：稳定键与签名/参数/义务都按构建期派生原样沿用，用户侧才走
+        // 下面的 lowering。片段的顺序与本次现算逐项相同，装载前已在 origins 上核对过。
+        definitions.extend_from_slice(&installed.hir().module().definitions);
+    }
+    let installed_definitions = definitions.len();
+    for index in order {
+        if remap[index] < installed_definitions {
+            continue;
+        }
+        let candidate = &mut candidates[index];
+        definitions.push(hir::Definition {
+            key: candidate.key,
+            name: std::mem::take(&mut candidate.name),
+            parent: candidate.parent.map(|parent| hir_id(remap[parent])),
+            location: candidate
+                .span
+                .as_ref()
+                .map(|span| location(sources, span))
+                .transpose()?,
+            kind: candidate.kind,
+            signature: None,
+            parameters: Vec::new(),
+            obligations: Vec::new(),
+            public: candidate.public,
+        });
+    }
     let remap_table = |table: Vec<Vec<Option<usize>>>| {
         table
             .into_iter()
@@ -316,6 +332,11 @@ pub(super) fn collect(
         // 源码树不是同一份，必须报错而不是拼出半个世界。
         let installed = prefix.identities();
         let installed_definitions = prefix.hir_definition_count() as usize;
+        if installed_definitions != builtin {
+            return Err(invalid(&format!(
+                "内建块边界与物化前缀不符：现算 {builtin} 定义 vs 前缀 {installed_definitions}"
+            )));
+        }
         if origins.len() < installed_definitions
             || opaques.len() < installed.opaques.len()
             || interfaces.len() < installed.interfaces.len()
@@ -367,6 +388,7 @@ pub(super) fn collect(
             opaques,
             interfaces,
         },
+        builtin,
     ))
 }
 

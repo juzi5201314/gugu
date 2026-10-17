@@ -356,9 +356,15 @@ impl fmt::Display for SpanError {
 impl std::error::Error for SpanError {}
 
 /// 一个带源码身份和展开上下文的半开字节范围。
+///
+/// `file`、`start`、`end`、`expansion` 是跨会话可沿用的位置身份；`table` 只是本次会话里
+/// 「这个 span 来自哪张源码表」的内存标记，用于宏展开注册时拒绝外来 span。它不进规范编码：
+/// 物化表、query 缓存与诊断都要能被另一会话逐字节重建，会话局部编号进了摘要就再也对不上。
+/// 反序列化得到的 span 没有表身份（`UNBOUND`），跨表校验按「未知」放过，其余位置校验照旧。
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Span {
     file: SourceFileId,
+    #[serde(skip)]
     table: SourceTableId,
     path: PathBuf,
     start: u32,
@@ -724,7 +730,8 @@ impl SourceMap {
     }
 
     fn validate_span(&self, span: &Span) -> Result<(), SourceMapError> {
-        if span.table != self.table {
+        // 反序列化来的 span 没有表身份：位置身份仍然校验，跨表只对内存中的 span 生效。
+        if span.table != SourceTableId::UNBOUND && span.table != self.table {
             return Err(SourceMapError::ForeignSpan);
         }
         if self.snapshot(span.file).is_none() {

@@ -226,6 +226,8 @@ parser 必须满足：
 - `DefPath`：package identity、模块路径、父定义路径、名字、定义种类和同名消歧序号；匿名字段、impl 和生成定义使用 owner 路径、节点起始偏移与封闭 kind。内建模块的定义一律以固定内建 package identity 作根，不随编译它的用户 package 漂移：物化表按这个根冻结 `StableDefKey`，用户编译必须复现同一批键；
 - `StableDefKey`：`DefPath` 的长度前缀规范编码经 BLAKE3-256 得到的 32 字节值；
 - `DefId`：按「内建模块的定义先编号（块内保持登记顺序）+ 用户模块的定义按收集顺序追加」分配的稠密 `u32` 编号。定序只看模块是否属于内建块，不看它是否被物化表覆盖：构建期派生与用户编译必须给出同一顺序，物化表沿用的正是它自己派生出来的那一份。`StableDefKey` 仍是唯一的跨块身份，检索引擎按它建索引，编号本身不再由键排序决定。
+- `TypeId` 与各侧表（`aggregates`/`interfaces`/`implementations`/`opaques`/`owners`）：降级分两段——内建块的签名、侧表与 body 先整体完成，用户定义再从边界之后追加。类型驻留顺序因此只由「内建块 + 用户追加」决定，加载物化前缀与现算全量两条路径给出同一张类型表；不按「所有签名、所有 body」两趟推进，否则用户入口的类型会插进内建块的中段，编号前缀不再成立。
+- `Owner.input_fingerprint` 是 owner 级缓存的输入身份，按「定义稳定键 + 本次世界 `CheckedSemantics.input_fingerprint`」在**当前会话**重算；物化片段里的那份属于构建期世界，装载时必须覆盖，不能当内容搬运。
 
 目录枚举顺序、线程完成顺序、hash 随机种子和宿主绝对路径不能进入上述身份。若两个不同的规范 `DefPath` 得到相同 `StableDefKey`，编译器必须报告 digest collision 并停止，不能合并定义或靠源码顺序消歧。
 

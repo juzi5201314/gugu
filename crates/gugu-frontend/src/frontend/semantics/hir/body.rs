@@ -70,7 +70,7 @@ struct BodyBuilder<'b, 'f, 'm, 'a> {
 }
 
 impl<'m, 'a> Builder<'m, 'a> {
-    pub(super) fn lower_owners(&mut self) -> Result<(), Diagnostic> {
+    pub(super) fn lower_owners(&mut self, range: std::ops::Range<usize>) -> Result<(), Diagnostic> {
         for checked in &self.checked.bodies {
             let module = checked.definition.module;
             let item = &self.model.modules[module].arena.items[checked.definition.item.0 as usize];
@@ -88,6 +88,10 @@ impl<'m, 'a> Builder<'m, 'a> {
                 continue;
             };
             let definition = self.identities.item(checked.definition);
+            // 物化片段已带内建 owner 的完整 HIR 体，只对用户 owner 做 lowering。
+            if !range.contains(&definition.index()) {
+                continue;
+            }
             let facts = Facts::new(checked);
             self.lower_owner(&facts, definition, module, function, expression, Vec::new())?;
         }
@@ -242,12 +246,10 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
         self.output.expressions = completed(self.expressions, "表达式")?;
         self.output.statements = completed(self.statements, "语句")?;
         self.output.patterns = completed(self.patterns, "模式")?;
-        let fingerprint = *blake3::Hasher::new_derive_key("gugu-hir-owner-input-v1")
-            .update(&self.compiler.output.definitions[self.output.definition.index()].key)
-            .update(&self.compiler.checked.input_fingerprint)
-            .finalize()
-            .as_bytes();
-        self.output.input_fingerprint = fingerprint;
+        self.output.input_fingerprint = owner_input_fingerprint(
+            &self.compiler.output.definitions[self.output.definition.index()].key,
+            &self.compiler.checked.input_fingerprint,
+        );
         Ok(self.output)
     }
 

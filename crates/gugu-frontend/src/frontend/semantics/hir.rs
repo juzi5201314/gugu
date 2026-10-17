@@ -27,11 +27,23 @@ enum PendingParameterKind {
     Comptime { module: usize, ty: ast::TyId },
 }
 
+/// 物化内建块的安装信息。
+///
+/// `fragment` 是已通过 verifier 的 HIR 片段（物化路径才有）；`builtin` 是内建块的定义数，
+/// 也就是编号前缀的边界——两条加载路径都按它把降级切成「内建块先完成、用户定义整体追加」。
+#[derive(Clone, Copy)]
+struct InstalledBlock<'a> {
+    fragment: Option<&'a crate::frontend::hir::Validated>,
+    builtin: usize,
+}
+
 struct Builder<'m, 'a> {
     model: &'m Model<'a>,
     checked: &'m CheckedSemantics,
     sources: &'m SourceMap,
     identities: &'m Identities,
+    /// 物化内建块的安装信息：片段（可选）与内建块定义数（编号前缀边界）。
+    installed: InstalledBlock<'m>,
     output: hir::Module,
     parameters: Vec<Vec<PendingParameter>>,
     type_intern: BTreeMap<hir::Type, hir::TypeId>,
@@ -60,7 +72,7 @@ pub(super) fn identities(
     sources: &SourceMap,
     prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<identity::Identities, Diagnostic> {
-    identity::collect(model, names, checked, sources, prefix).map(|(_, identities)| identities)
+    identity::collect(model, names, checked, sources, prefix).map(|(_, identities, _)| identities)
 }
 
 impl<'m, 'a> Builder<'m, 'a> {
@@ -71,6 +83,7 @@ impl<'m, 'a> Builder<'m, 'a> {
         checked: &'m CheckedSemantics,
         sources: &'m SourceMap,
         entry: Option<CallableId>,
+        installed: InstalledBlock<'m>,
     ) -> Result<Self, Diagnostic> {
         let entry = entry.map(|entry| identities.function(entry));
         let expansions = sources
@@ -89,7 +102,7 @@ impl<'m, 'a> Builder<'m, 'a> {
             .collect::<Result<Vec<_>, Diagnostic>>()?;
         let parameters = vec![Vec::new(); definitions.len()];
         let type_cache = vec![BTreeMap::new(); definitions.len()];
-        let output = hir::Module {
+        let mut output = hir::Module {
             sources: sources
                 .snapshots()
                 .iter()
@@ -112,16 +125,53 @@ impl<'m, 'a> Builder<'m, 'a> {
             entry,
             input_fingerprint: checked.input_fingerprint,
         };
+        let mut type_intern = BTreeMap::new();
+        if let Some(installed) = installed.fragment {
+            // 物化片段整段接管：类型表按原下标装回并预置驻留表，用户侧复用同一批 `TypeId`；
+            // 各侧表直接沿用，只对用户定义做 lowering。
+            let fragment = installed.module();
+            output.types = fragment.types.clone();
+            output.aggregates = fragment.aggregates.clone();
+            output.interfaces = fragment.interfaces.clone();
+            output.implementations = fragment.implementations.clone();
+            output.opaques = fragment.opaques.clone();
+            output.owners = fragment.owners.clone();
+            // owner 输入身份必须在本次世界重算：片段里那份是构建期世界的编号。
+            for owner in &mut output.owners {
+                owner.input_fingerprint = owner_input_fingerprint(
+                    &output.definitions[owner.definition.index()].key,
+                    &checked.input_fingerprint,
+                );
+            }
+            output.initialization = fragment.initialization.clone();
+            output.linkage = fragment.linkage.clone();
+            for (index, formed) in fragment.types.iter().enumerate() {
+                type_intern.insert(formed.clone(), hir::TypeId(checked_id(index)?));
+            }
+        }
         Ok(Self {
             model,
             checked,
             sources,
             identities,
+            installed,
             output,
             parameters,
-            type_intern: BTreeMap::new(),
+            type_intern,
             type_cache,
         })
+    }
+
+    /// 物化片段覆盖的 `HIR DefId` 数量：用户编号从它开始。
+    fn installed_definitions(&self) -> usize {
+        self.installed
+            .fragment
+            .map_or(0, |installed| installed.module().definitions.len())
+    }
+
+    /// 内建块的定义数：编号前缀的边界。
+    fn builtin_definitions(&self) -> usize {
+        self.installed.builtin
     }
 
     fn intern_type(&mut self, formed: hir::Type) -> Result<hir::TypeId, Diagnostic> {
@@ -148,29 +198,51 @@ impl<'m, 'a> Builder<'m, 'a> {
         if !self.output.definitions.is_empty() {
             self.intern_primitives()?;
         }
-        self.lower_declarations()?;
-        self.lower_owners()?;
+        // 两段式降级：内建块先完成签名、侧表与 body，用户定义整体追加在后。类型驻留顺序因此
+        // 只由「内建块 + 用户追加」决定——物化路径直接沿用前缀类型，现算路径按同一顺序重算，
+        // 两条路径给出同一张类型表（I1 的编号前缀不变式）。
+        let builtin = self.builtin_definitions();
+        let total = self.identities.origins.len();
+        debug_assert!(
+            builtin <= total,
+            "内建块定义数不得超过定义表长度：{builtin} > {total}"
+        );
+        // 物化路径里内建块整段来自前缀，这一段没有可降级的东西；现算路径必须按同一顺序补算。
+        if self.installed_definitions() < builtin {
+            self.lower_declarations(0..builtin)?;
+            self.lower_owners(0..builtin)?;
+        }
+        self.lower_declarations(builtin..total)?;
+        self.lower_owners(builtin..total)?;
         self.output.owners.sort_by_key(|owner| owner.definition);
-        self.output.initialization = self
-            .checked
-            .initialization
-            .iter()
-            .map(|initialization| hir::Initialization {
-                definition: self.identities.item(initialization.definition),
-                domain: match initialization.kind {
-                    super::initialization::InitKind::Constant => hir::StorageDomain::Constant,
-                    super::initialization::InitKind::Process => hir::StorageDomain::Process,
-                    super::initialization::InitKind::Coroutine => hir::StorageDomain::Coroutine,
-                    super::initialization::InitKind::OsThread => hir::StorageDomain::OsThread,
-                },
-            })
-            .collect();
+        let installed = self.installed_definitions();
+        self.output.initialization.extend(
+            self.checked
+                .initialization
+                .iter()
+                .filter(|initialization| {
+                    self.identities.item(initialization.definition).index() >= installed
+                })
+                .map(|initialization| hir::Initialization {
+                    definition: self.identities.item(initialization.definition),
+                    domain: match initialization.kind {
+                        super::initialization::InitKind::Constant => hir::StorageDomain::Constant,
+                        super::initialization::InitKind::Process => hir::StorageDomain::Process,
+                        super::initialization::InitKind::Coroutine => hir::StorageDomain::Coroutine,
+                        super::initialization::InitKind::OsThread => hir::StorageDomain::OsThread,
+                    },
+                }),
+        );
         self.lower_linkage();
         Ok(self.output)
     }
 
     fn lower_linkage(&mut self) {
+        let installed = self.installed_definitions();
         for linkage in &self.checked.linkage {
+            if self.identities.item(linkage.definition).index() < installed {
+                continue;
+            }
             let function = match self.model.modules[linkage.definition.module].arena.items
                 [linkage.definition.item.0 as usize]
                 .kind
@@ -194,11 +266,12 @@ impl<'m, 'a> Builder<'m, 'a> {
         }
         for function in &self.checked.foreign_definitions {
             let definition = self.identities.function(function.callable);
-            if self
-                .output
-                .linkage
-                .iter()
-                .any(|linkage| linkage.definition == definition)
+            if definition.index() < installed
+                || self
+                    .output
+                    .linkage
+                    .iter()
+                    .any(|linkage| linkage.definition == definition)
             {
                 continue;
             }
@@ -234,6 +307,18 @@ impl<'m, 'a> Builder<'m, 'a> {
             });
         Diagnostic::error(DiagnosticCode::InvalidType, message, span)
     }
+}
+
+/// owner 的 HIR 输入身份：定义稳定键 + 本次世界的类型检查身份。
+///
+/// 物化片段的 owner 体按内容照搬，但这份身份必须在**本次会话**重算——它是 owner 级缓存的输入
+/// 身份，带着构建期世界的编号会让两条加载路径给出不同的结果。
+pub(super) fn owner_input_fingerprint(key: &[u8; 32], checked: &[u8; 32]) -> [u8; 32] {
+    *blake3::Hasher::new_derive_key("gugu-hir-owner-input-v1")
+        .update(key)
+        .update(checked)
+        .finalize()
+        .as_bytes()
 }
 
 fn checked_id(index: usize) -> Result<u32, Diagnostic> {

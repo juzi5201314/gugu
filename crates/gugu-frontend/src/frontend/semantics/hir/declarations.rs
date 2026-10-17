@@ -156,17 +156,25 @@ impl Builder<'_, '_> {
         Some((module, generics))
     }
 
-    pub(super) fn lower_declarations(&mut self) -> Result<(), Diagnostic> {
-        for index in 0..self.identities.origins.len() {
+    pub(super) fn lower_declarations(
+        &mut self,
+        range: std::ops::Range<usize>,
+    ) -> Result<(), Diagnostic> {
+        let installed = self.installed_definitions();
+        for index in range.clone() {
+            // 物化片段的定义已带齐签名、参数与义务，只对用户定义做 lowering。
+            if index < installed {
+                continue;
+            }
             let owner = hir::DefId(checked_id(index)?);
             let origin = self.identities.origins[index];
             self.lower_signature(owner, origin)?;
             self.lower_obligations(owner, origin)?;
         }
-        self.lower_aggregates()?;
-        self.lower_interfaces()?;
-        self.lower_implementations()?;
-        self.lower_opaques()?;
+        self.lower_aggregates(&range)?;
+        self.lower_interfaces(&range)?;
+        self.lower_implementations(&range)?;
+        self.lower_opaques(&range)?;
         Ok(())
     }
 
@@ -291,9 +299,12 @@ impl Builder<'_, '_> {
         Ok(())
     }
 
-    fn lower_aggregates(&mut self) -> Result<(), Diagnostic> {
+    fn lower_aggregates(&mut self, range: &std::ops::Range<usize>) -> Result<(), Diagnostic> {
         for nominal in &self.model.nominal {
             let owner = self.identities.item(nominal.definition);
+            if !range.contains(&owner.index()) {
+                continue;
+            }
             let mut variants = Vec::with_capacity(nominal.variants.len());
             for variant in &nominal.variants {
                 let fields = variant
@@ -334,9 +345,12 @@ impl Builder<'_, '_> {
         Ok(())
     }
 
-    fn lower_interfaces(&mut self) -> Result<(), Diagnostic> {
+    fn lower_interfaces(&mut self, range: &std::ops::Range<usize>) -> Result<(), Diagnostic> {
         for (index, interface) in self.model.traits.interfaces.iter().enumerate() {
             let owner = self.identities.interfaces[index];
+            if !range.contains(&owner.index()) {
+                continue;
+            }
             let members = self.lower_members(&interface.members, owner)?;
             for (ty, bound) in &interface.requirements {
                 let obligation = hir::Obligation::Trait {
@@ -359,9 +373,12 @@ impl Builder<'_, '_> {
         Ok(())
     }
 
-    fn lower_implementations(&mut self) -> Result<(), Diagnostic> {
+    fn lower_implementations(&mut self, range: &std::ops::Range<usize>) -> Result<(), Diagnostic> {
         for implementation in &self.model.traits.implementations {
             let owner = self.identities.item(implementation.definition);
+            if !range.contains(&owner.index()) {
+                continue;
+            }
             let self_ty = self.type_id(&implementation.self_ty, owner)?;
             let interface = implementation
                 .interface
@@ -423,9 +440,12 @@ impl Builder<'_, '_> {
             .collect()
     }
 
-    fn lower_opaques(&mut self) -> Result<(), Diagnostic> {
+    fn lower_opaques(&mut self, range: &std::ops::Range<usize>) -> Result<(), Diagnostic> {
         for (index, hidden) in self.checked.hidden_types.iter().enumerate() {
             let owner = self.identities.opaques[index];
+            if !range.contains(&owner.index()) {
+                continue;
+            }
             let hidden = hidden
                 .as_ref()
                 .map(|ty| self.type_id(ty, owner))

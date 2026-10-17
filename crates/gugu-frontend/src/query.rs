@@ -81,9 +81,11 @@ pub enum QueryKind {
     RuntimeRawModel = 30,
 }
 
-/// query registry 的登记 revision；新增 kind 必须递增，旧 revision 的 action/query record
-/// 不得复用。
-pub(crate) const QUERY_REGISTRY_REVISION: u32 = 3;
+/// query registry 的登记 revision；新增 kind 或改变 payload 编码必须递增，旧 revision 的
+/// action/query record 不得复用。
+///
+/// revision 4：`Span` 的规范编码去掉会话局部表身份，旧 payload 不再可复用。
+pub(crate) const QUERY_REGISTRY_REVISION: u32 = 4;
 
 impl QueryKind {
     /// 返回 kind 的稳定 ASCII 名。

@@ -86,14 +86,7 @@ impl Builder<'_, '_> {
             Ty::Hasher => hir::Type::Hasher,
             Ty::MaybeUninit(inner) => hir::Type::MaybeUninit(self.type_id(inner, owner)?),
         };
-        let id = if let Some(&id) = self.type_intern.get(&formed) {
-            id
-        } else {
-            let id = hir::TypeId(checked_id(self.output.types.len())?);
-            self.type_intern.insert(formed.clone(), id);
-            self.output.types.push(formed);
-            id
-        };
+        let id = self.intern_type(formed)?;
         self.type_cache[owner.index()].insert(ty.clone(), id);
         Ok(id)
     }

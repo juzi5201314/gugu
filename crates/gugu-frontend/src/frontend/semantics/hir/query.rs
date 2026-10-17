@@ -32,13 +32,24 @@ pub(super) fn lower(
     key_hash.update(&prefix.map_or([0u8; 32], |prefix| prefix.identity()));
     let key_fingerprint = *key_hash.finalize().as_bytes();
     let key = QueryKey::new(QueryKind::LowerHir, 8, key_fingerprint);
-    let (definitions, identities) =
+    let (definitions, identities, builtin) =
         identity::collect(model, names, checked, sources, prefix).map_err(|error| vec![error])?;
     let mut fresh = None;
     let result = queries.compute(key.clone(), |context| {
         context.record_dependency(dependency.key().clone(), dependency.fingerprint());
-        match Builder::new(model, &identities, definitions, checked, sources, entry)
-            .and_then(Builder::build)
+        match Builder::new(
+            model,
+            &identities,
+            definitions,
+            checked,
+            sources,
+            entry,
+            InstalledBlock {
+                fragment: prefix.map(|prefix| prefix.hir()),
+                builtin,
+            },
+        )
+        .and_then(Builder::build)
         {
             Ok(mut module) => {
                 module.input_fingerprint = lower_input_fingerprint;
