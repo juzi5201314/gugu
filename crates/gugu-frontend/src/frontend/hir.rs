@@ -46,6 +46,8 @@ pub(crate) struct Expansion {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Definition {
     pub(crate) key: [u8; 32],
+    /// 定义所属的会话模块编号；定义表按模块连续排列，分块安装据此切段。
+    pub(crate) module: u32,
     pub(crate) name: String,
     pub(crate) parent: Option<DefId>,
     pub(crate) location: Option<Location>,

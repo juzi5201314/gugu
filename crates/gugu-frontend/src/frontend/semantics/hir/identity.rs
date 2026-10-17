@@ -256,9 +256,15 @@ pub(super) fn collect(
         })
         .count();
     let mut order: Vec<usize> = (0..candidates.len()).collect();
+    // 排序键：物化块优先，其次按模块编号分组，组内保持候选登记顺序。定义表因此按模块连续排列
+    // （分块安装的前提），而 `Module::verify` 会校验这条单调性。
     order.sort_by_key(|&index| {
-        !matches!(candidates[index].origin, Origin::BuiltinTrait(_))
-            && !materialized_modules[candidates[index].module]
+        (
+            !matches!(candidates[index].origin, Origin::BuiltinTrait(_))
+                && !materialized_modules[candidates[index].module],
+            candidates[index].module,
+            index,
+        )
     });
     let mut by_key = order.clone();
     by_key.sort_unstable_by_key(|&index| candidates[index].key);
@@ -290,6 +296,7 @@ pub(super) fn collect(
         let candidate = &mut candidates[index];
         definitions.push(hir::Definition {
             key: candidate.key,
+            module: u32::try_from(candidate.module).map_err(|_| invalid("模块编号超出 u32"))?,
             name: std::mem::take(&mut candidate.name),
             parent: candidate.parent.map(|parent| hir_id(remap[parent])),
             location: candidate

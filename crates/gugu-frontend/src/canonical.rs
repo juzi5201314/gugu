@@ -14,7 +14,7 @@ use std::fmt;
 /// 二进制编码 revision，进入每个 query key，拒绝旧 JSON 缓存。
 ///
 /// revision 2：`Span` 的表身份移出规范编码，物化表与 query 缓存都能被另一会话逐字节重建。
-pub(crate) const REVISION: u32 = 2;
+pub(crate) const REVISION: u32 = 3;
 
 /// 编解码错误。
 #[derive(Clone, Debug, Eq, PartialEq)]

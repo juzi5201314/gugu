@@ -38,6 +38,10 @@ impl Module {
                 .owners
                 .windows(2)
                 .all(|pair| pair[0].definition < pair[1].definition)
+            || !self
+                .definitions
+                .windows(2)
+                .all(|pair| pair[0].module <= pair[1].module)
         {
             return Err(invalid("定义及 owner 身份不是规范唯一序列"));
         }
