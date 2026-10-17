@@ -154,6 +154,7 @@ pub(super) fn evaluate(
     sources: &SourceMap,
     cfg: &CfgContext,
     queries: &QueryEngine,
+    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<(EarlyConstTable, DependencyFingerprint), Vec<Diagnostic>> {
     let mut hash = blake3::Hasher::new_derive_key("gugu-early-comptime-input-v1");
     let configuration = format!("{cfg:?}");
@@ -165,6 +166,8 @@ pub(super) fn evaluate(
     }
     hash.update(&model.name_fingerprint());
     hash.update(&registry::summary());
+    // 物化前缀决定哪些定义在本次会话被跳过：身份不同的前缀不能共用同一条缓存记录。
+    hash.update(&installed.map_or([0u8; 32], |prefix| prefix.identity()));
     let input_fingerprint = *hash.finalize().as_bytes();
     let key = QueryKey::new(
         QueryKind::EvaluateEarlyComptime,
@@ -186,7 +189,7 @@ pub(super) fn evaluate(
             QueryKey::new(QueryKind::ResolveImports, 1, b"names"),
             model.name_fingerprint(),
         );
-        match collect(model) {
+        match collect(model, installed) {
             Ok(table) => Ok((
                 serde_json::to_vec(&table).expect("早期常量表 schema 序列化"),
                 Vec::new(),
@@ -216,10 +219,17 @@ pub(super) fn evaluate(
 /// 能力、预算与 panic 违规必须在此失败；evaluator 尚不支持的构造不在此处报错，
 /// 留给需要该值的使用点沿惰性路径给出精确诊断。表达式级条目（数组长度、repeat
 /// 计数、范围模式端点）只缓存成功结果，失败沿惰性路径诊断，避免重复报告。
-fn collect(model: &Model<'_>) -> Result<EarlyConstTable, Vec<Diagnostic>> {
+fn collect(
+    model: &Model<'_>,
+    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
+) -> Result<EarlyConstTable, Vec<Diagnostic>> {
     let mut entries: Vec<(ConstKey, ConstantValue)> = Vec::new();
     let mut errors = Vec::new();
     for (module, parsed) in model.modules.iter().enumerate() {
+        // 物化覆盖的内建模块的早期常量直取前缀，用户模块照旧现算。
+        if installed.is_some_and(|prefix| prefix.covers_module(&parsed.path)) {
+            continue;
+        }
         for (index, item) in parsed.arena.items.iter().enumerate() {
             if !parsed.configured.item_active(ItemId(index as u32)) {
                 continue;

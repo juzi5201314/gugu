@@ -69,7 +69,13 @@ pub(crate) fn check(
     prefix: Option<&super::prefix::BuiltinPrefix>,
 ) -> Result<DerivedWorld, Vec<Diagnostic>> {
     let model = model::Model::new(modules, names, runtime_paths)?;
-    let (early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries)?;
+    let (mut early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries, prefix)?;
+    if let Some(prefix) = prefix {
+        // 内建定义的早期常量直取物化表；用户定义现算后按定义序追加。
+        let mut constants = prefix.early_constants().constants.clone();
+        constants.append(&mut early.constants);
+        early.constants = constants;
+    }
     let registry_identity = early.registry_identity();
     let (checked, dependency) =
         query::check(&model, sources, cfg, queries, &early, &early_dependency)?;

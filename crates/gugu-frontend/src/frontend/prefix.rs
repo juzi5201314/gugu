@@ -29,6 +29,9 @@ const RECORD_TYPES_TABLE: &str = "record.types";
 /// GIR body 表的层名：内建 owner 的 generic GIR，与 owner 顺序一一对应。
 const GIR_BODIES_TABLE: &str = "gir.bodies";
 
+/// 早期常量表的层名：内建顶层 const/static 的 comptime 求值结果。
+const EARLY_TABLE: &str = "early.constants";
+
 /// 已校验的内建块前缀：当前会话可直接安装的派生表。
 pub(crate) struct BuiltinPrefix {
     names: names::NameResolution,
@@ -39,6 +42,8 @@ pub(crate) struct BuiltinPrefix {
     record_types: Vec<crate::frontend::gir::concrete::RecordTypes>,
     /// 内建 owner 的 generic GIR body：按 owner 顺序排列，装载时逐条校验 owner 与稳定键。
     gir_bodies: Vec<crate::frontend::gir::GirBody>,
+    /// 内建顶层 const/static 的 comptime 求值结果；用户定义照旧现算后追加。
+    early_constants: crate::frontend::semantics::comptime::EarlyConstTable,
     modules: Vec<String>,
     identity: [u8; 32],
 }
@@ -108,15 +113,23 @@ impl BuiltinPrefix {
                     .map_err(|_| invalid("内建块的 gir.bodies 表不能解码"))?,
             );
         }
+        let early_constants: crate::frontend::semantics::comptime::EarlyConstTable =
+            decode_table(prebuilt, EARLY_TABLE, &prebuilt.early_constants)?;
         Ok(Self {
             names,
             identities,
             hir: std::sync::Arc::new(hir),
             record_types,
             gir_bodies,
+            early_constants,
             modules: prebuilt.module_order.clone(),
             identity: installed_tables_digest(prebuilt),
         })
+    }
+
+    /// 内建顶层 const/static 的早期常量表。
+    pub(crate) fn early_constants(&self) -> &crate::frontend::semantics::comptime::EarlyConstTable {
+        &self.early_constants
     }
 
     /// 内建 owner 的 generic GIR body；下标与 HIR `owners` 一一对应。
@@ -258,9 +271,14 @@ fn installed_tables_digest(prebuilt: &RuntimePrebuiltV1) -> [u8; 32] {
         &prebuilt.identities[..],
         &prebuilt.hir[..],
         &prebuilt.record_types[..],
+        &prebuilt.early_constants[..],
     ] {
         hash.update(&(table.len() as u64).to_le_bytes());
         hash.update(table);
+    }
+    for body in &prebuilt.gir_bodies {
+        hash.update(&(body.len() as u64).to_le_bytes());
+        hash.update(body);
     }
     *hash.finalize().as_bytes()
 }
