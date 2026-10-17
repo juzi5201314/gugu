@@ -12,7 +12,7 @@ pub const ARTIFACT_MAGIC: [u8; 8] = *b"GUGURT01";
 pub const ARTIFACT_SCHEMA: u32 = 3;
 
 /// 内建块物化表的 schema：表集或表内布局变化时递增。
-pub const PREBUILT_SCHEMA: u32 = 2;
+pub const PREBUILT_SCHEMA: u32 = 3;
 /// payload 的域隔离标签。
 pub const ARTIFACT_DOMAIN: &str = "gugu-runtime-artifact-v1";
 /// GBC payload 编码版本。
@@ -167,6 +167,31 @@ pub struct RuntimeArtifactPayloadV1 {
     pub prebuilt: Option<RuntimePrebuiltV1>,
 }
 
+/// 物化表里一个模块占据的编号区间。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BlockRangeV1 {
+    /// 区间起点（含）。
+    pub start: u32,
+    /// 区间长度。
+    pub len: u32,
+}
+
+/// 单个内建模块在物化表里占据的定义/owner 区间。
+///
+/// 定义表与 owner 表都按模块连续排列，因此每块只需要一对区间；加载期按区间拼出选中的块，
+/// 未选中的块不进入会话。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModuleBlockV1 {
+    /// 模块逻辑路径。
+    pub path: String,
+    /// 该模块占据的定义编号区间。
+    pub definitions: BlockRangeV1,
+    /// 该模块占据的 owner 编号区间。
+    pub owners: BlockRangeV1,
+}
+
 /// 内建块在构建期物化后的派生表。
 ///
 /// 每张表都是前端 canonical 编码的字节。加载时按内建块规则安装到当前 world 的编号前缀，
@@ -200,6 +225,8 @@ pub struct RuntimePrebuiltV1 {
     pub floor_modules: Vec<String>,
     /// 贡献 `ContractRecord` 的定义所在的内建模块，按逻辑路径严格升序。
     pub contract_modules: Vec<String>,
+    /// 按 `module_order` 顺序的模块块，区间合起来覆盖整张定义表与 owner 表。
+    pub blocks: Vec<ModuleBlockV1>,
 }
 
 impl RuntimePrebuiltV1 {
@@ -239,6 +266,46 @@ impl RuntimePrebuiltV1 {
                 return Err(RuntimeArtifactError::Manifest(format!(
                     "{name}必须是 module_order 内的严格升序子集"
                 )));
+            }
+        }
+        if self.blocks.len() != self.module_order.len()
+            || self
+                .blocks
+                .iter()
+                .zip(&self.module_order)
+                .any(|(block, path)| &block.path != path)
+        {
+            return Err(RuntimeArtifactError::Manifest(
+                "模块块必须与 module_order 逐项对应".to_owned(),
+            ));
+        }
+        for (name, ranges) in [
+            (
+                "定义块",
+                self.blocks
+                    .iter()
+                    .map(|block| block.definitions)
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                "owner 块",
+                self.blocks
+                    .iter()
+                    .map(|block| block.owners)
+                    .collect::<Vec<_>>(),
+            ),
+        ] {
+            let mut next = 0_u32;
+            for range in ranges {
+                if range.start != next {
+                    return Err(RuntimeArtifactError::Manifest(format!(
+                        "{name}必须从 0 起首尾相接"
+                    )));
+                }
+                next = range
+                    .start
+                    .checked_add(range.len)
+                    .ok_or_else(|| RuntimeArtifactError::Manifest(format!("{name}区间溢出 u32")))?;
             }
         }
         if self.floor_modules.is_empty() {
@@ -678,6 +745,14 @@ fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, Runtime
         for path in &prebuilt.contract_modules {
             encoder.string(path)?;
         }
+        encoder.len(prebuilt.blocks.len())?;
+        for block in &prebuilt.blocks {
+            encoder.string(&block.path)?;
+            encoder.u32(block.definitions.start);
+            encoder.u32(block.definitions.len);
+            encoder.u32(block.owners.start);
+            encoder.u32(block.owners.len);
+        }
     }
     Ok(encoder.finish())
 }
@@ -784,6 +859,21 @@ fn decode_prebuilt(
     for _ in 0..contract_count {
         contract_modules.push(decoder.string()?);
     }
+    let block_count = decoder.len()?;
+    let mut blocks = Vec::with_capacity(block_count);
+    for _ in 0..block_count {
+        blocks.push(ModuleBlockV1 {
+            path: decoder.string()?,
+            definitions: BlockRangeV1 {
+                start: decoder.u32()?,
+                len: decoder.u32()?,
+            },
+            owners: BlockRangeV1 {
+                start: decoder.u32()?,
+                len: decoder.u32()?,
+            },
+        });
+    }
     Ok(RuntimePrebuiltV1 {
         schema,
         revisions,
@@ -798,6 +888,7 @@ fn decode_prebuilt(
         fingerprints,
         floor_modules,
         contract_modules,
+        blocks,
     })
 }
 
@@ -992,6 +1083,18 @@ mod tests {
             fingerprints: vec![([1; 32], [2; 32])],
             floor_modules: vec!["std/prelude.gg".to_owned()],
             contract_modules: vec!["runtime/core.gg".to_owned()],
+            blocks: vec![
+                ModuleBlockV1 {
+                    path: "runtime/core.gg".to_owned(),
+                    definitions: BlockRangeV1 { start: 0, len: 3 },
+                    owners: BlockRangeV1 { start: 0, len: 1 },
+                },
+                ModuleBlockV1 {
+                    path: "std/prelude.gg".to_owned(),
+                    definitions: BlockRangeV1 { start: 3, len: 2 },
+                    owners: BlockRangeV1 { start: 1, len: 2 },
+                },
+            ],
         }
     }
 

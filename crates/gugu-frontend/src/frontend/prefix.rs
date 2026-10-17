@@ -101,6 +101,24 @@ impl BuiltinPrefix {
         {
             return Err(invalid("内建块物化表的 HIR 与身份表不同源"));
         }
+        // 模块块必须逐段对应定义表与 owner 表：区间首尾相接、长度合计等于表长，
+        // 且每个定义确实归属它所在块声明的模块编号。
+        let mut definitions = 0_usize;
+        let mut owners = 0_usize;
+        for (index, block) in prebuilt.blocks.iter().enumerate() {
+            definitions += block.definitions.len as usize;
+            owners += block.owners.len as usize;
+            for definition in &hir.module().definitions[block.definitions.start as usize
+                ..(block.definitions.start + block.definitions.len) as usize]
+            {
+                if definition.module as usize != index {
+                    return Err(invalid("内建块物化表的模块块与定义归属不一致"));
+                }
+            }
+        }
+        if definitions != hir.module().definitions.len() || owners != hir.module().owners.len() {
+            return Err(invalid("内建块物化表的模块块没有覆盖整张表"));
+        }
         let record_types: Vec<crate::frontend::gir::concrete::RecordTypes> =
             decode_table(prebuilt, RECORD_TYPES_TABLE, &prebuilt.record_types)?;
         // GIR body 逐条编码，表摘要按「空表头 + 全部 body」一组计算，与构建期一致。

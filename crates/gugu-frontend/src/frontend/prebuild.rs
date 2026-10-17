@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 use std::fmt;
 
 use gugu_compiler_core::{
-    PREBUILT_SCHEMA, RuntimeArtifactError, RuntimeArtifactV1, RuntimePrebuiltV1,
+    BlockRangeV1, ModuleBlockV1, PREBUILT_SCHEMA, RuntimeArtifactError, RuntimeArtifactV1,
+    RuntimePrebuiltV1,
 };
 
 use crate::frontend::{cfg::CfgContext, derive_builtin, gir, semantics};
@@ -89,6 +90,8 @@ pub fn materialize(
         table_fingerprint("gir.bodies", &bodies_slices),
         table_fingerprint("record.types", &[&record_types]),
     ];
+    let hir_module: crate::frontend::hir::Module =
+        canonical::from_slice(&hir).expect("物化 HIR 片段可解码");
     let prebuilt = RuntimePrebuiltV1 {
         schema: PREBUILT_SCHEMA,
         revisions: layer_revisions(),
@@ -99,6 +102,7 @@ pub fn materialize(
             .filter(|path| path.starts_with("std.runtime."))
             .cloned()
             .collect(),
+        blocks: module_blocks(&hir_module, &derivation.module_order),
         module_order: derivation.module_order,
         names,
         identities,
@@ -113,6 +117,57 @@ pub fn materialize(
     artifact.payload.prebuilt = Some(prebuilt);
     artifact.validate()?;
     Ok(artifact)
+}
+
+/// 按 `module_order` 顺序算出每个模块占据的定义/owner 区间。
+///
+/// 定义表按「模块编号」单调排列（`Module::verify` 校验），因此每块就是一段连续区间；
+/// owner 表按定义下标递增，归属由 `Owner.definition` 反查定义得到。
+fn module_blocks(
+    module: &crate::frontend::hir::Module,
+    module_order: &[String],
+) -> Vec<ModuleBlockV1> {
+    let mut definitions = vec![BlockRangeV1 { start: 0, len: 0 }; module_order.len()];
+    let mut current: Option<u32> = None;
+    for definition in &module.definitions {
+        let slot = definition.module as usize;
+        if current != Some(definition.module) {
+            assert!(
+                definitions[slot].len == 0,
+                "定义表必须按模块连续排列：模块 {slot} 出现第二次"
+            );
+            current = Some(definition.module);
+        }
+        definitions[slot].len += 1;
+    }
+    let mut owners = vec![BlockRangeV1 { start: 0, len: 0 }; module_order.len()];
+    for (index, owner) in module.owners.iter().enumerate() {
+        let slot = module.definitions[owner.definition.index()].module as usize;
+        if owners[slot].len == 0 {
+            owners[slot].start = index as u32;
+        }
+        owners[slot].len += 1;
+    }
+    // 空块（模块没有定义或 owner）的起点也要落在前后两段之间，保证整串区间首尾相接。
+    let mut running = 0_u32;
+    for range in &mut definitions {
+        range.start = running;
+        running += range.len;
+    }
+    let mut running = 0_u32;
+    for range in &mut owners {
+        range.start = running;
+        running += range.len;
+    }
+    module_order
+        .iter()
+        .enumerate()
+        .map(|(index, path)| ModuleBlockV1 {
+            path: path.clone(),
+            definitions: definitions[index],
+            owners: owners[index],
+        })
+        .collect()
 }
 
 /// 固定地板集：rt0 与 machine entry 恒需的内建模块，按逻辑路径升序给出。
@@ -326,6 +381,28 @@ mod closure_tests {
             fingerprints: vec![([0; 32], [0; 32])],
             floor_modules: vec!["std.prelude".to_owned(), "std.runtime.core".to_owned()],
             contract_modules: vec!["std.runtime.scheduler".to_owned()],
+            blocks: vec![
+                ModuleBlockV1 {
+                    path: "std.prelude".to_owned(),
+                    definitions: BlockRangeV1 { start: 0, len: 2 },
+                    owners: BlockRangeV1 { start: 0, len: 1 },
+                },
+                ModuleBlockV1 {
+                    path: "std.runtime.core".to_owned(),
+                    definitions: BlockRangeV1 { start: 2, len: 0 },
+                    owners: BlockRangeV1 { start: 1, len: 0 },
+                },
+                ModuleBlockV1 {
+                    path: "std.runtime.scheduler".to_owned(),
+                    definitions: BlockRangeV1 { start: 2, len: 1 },
+                    owners: BlockRangeV1 { start: 1, len: 2 },
+                },
+                ModuleBlockV1 {
+                    path: "std.vec".to_owned(),
+                    definitions: BlockRangeV1 { start: 3, len: 1 },
+                    owners: BlockRangeV1 { start: 3, len: 1 },
+                },
+            ],
         }
     }
 
