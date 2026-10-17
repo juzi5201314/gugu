@@ -387,6 +387,22 @@ impl QueryEngine {
         cell.state.lock().expect("query cell lock poisoned").state
     }
 
+    /// 按 kind 统计已完成（`Complete`）的 query cell 数量。
+    ///
+    /// 只给测试用：它把「哪些单元真的被派生过」变成可断言的事实，用来钉住物化路径不会为
+    /// 内建定义重新计算 GIR body。
+    #[cfg(all(test, feature = "slow-tests"))]
+    pub(crate) fn completed_by_kind(&self) -> std::collections::BTreeMap<QueryKind, usize> {
+        let cells = self.cells.lock().expect("query registry lock poisoned");
+        let mut counts = std::collections::BTreeMap::new();
+        for (key, cell) in cells.iter() {
+            if cell.state.lock().expect("query cell lock poisoned").state == QueryState::Complete {
+                *counts.entry(key.kind()).or_insert(0) += 1;
+            }
+        }
+        counts
+    }
+
     /// 取消尚在计算的 query；取消不会写持久缓存。
     pub fn cancel(&self, key: &QueryKey) -> bool {
         let cells = self.cells.lock().expect("query registry lock poisoned");

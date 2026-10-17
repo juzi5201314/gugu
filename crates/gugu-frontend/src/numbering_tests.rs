@@ -130,3 +130,61 @@ fn gc_probe_installs_like_a_fresh_derivation() {
         CompileRequest::runtime_gc_probe("gc-alloc", TargetName::X86_64Linux)
     });
 }
+
+/// 物化块不参与派生：内建 owner 从不进入 `BuildGenericGir`。
+///
+/// 这条断言把「内建块已安装」从输出等价性提升到工作量的可观测事实：内建块占 owner 表绝大多数
+/// 条目，若其中任何一个被重新降级，`Complete` 的 GIR cell 数量会立刻跳到数百。
+#[test]
+fn materialized_block_skips_builtin_derivation() {
+    let mut source_map = crate::SourceMap::new(vec![
+        crate::SourceSnapshot::from_str("main.gg", "fn main() {}\n").unwrap(),
+    ])
+    .unwrap();
+    let cfg = crate::frontend::cfg::CfgContext::new(
+        TargetName::X86_64Linux,
+        [],
+        [],
+        false,
+        false,
+        Default::default(),
+    );
+    let engine = crate::QueryEngine::new();
+    let output = crate::frontend::bootstrap_with(
+        crate::frontend::SourceInput::Sources {
+            source_map: &mut source_map,
+            entry: "main.gg",
+            source_root: "",
+            package_identity: "tests/numbering@1.0.0",
+            require_main: true,
+            cfg: &cfg,
+            external_packages: &Default::default(),
+        },
+        &engine,
+        crate::testing::resources(),
+        crate::frontend::PrefixMode::Install,
+    )
+    .unwrap();
+    let owners = output.hir.module().owners.len();
+    let counts = engine.completed_by_kind();
+    let gir = counts
+        .get(&crate::QueryKind::BuildGenericGir)
+        .copied()
+        .unwrap_or(0);
+    assert!(
+        owners > 100,
+        "语料应当带完整运行时：owner 表只有 {owners} 条"
+    );
+    assert!(
+        gir < 10,
+        "内建 owner 不得进入 GIR 派生：{gir} 个 GIR cell 完成，owner 总数 {owners}"
+    );
+    assert_eq!(
+        counts
+            .get(&crate::QueryKind::TypeCheck)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "整世界类型检查应当只注册一个 cell"
+    );
+}
