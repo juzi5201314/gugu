@@ -238,6 +238,14 @@ test 与 bench 是正交 target/harness 模式，不是 profile。实现还可�
 
 运行时整数语义不因构建命令改变：加、减、乘、整数负号、有符号左移和显式整数变窄都按目标位宽二进制补码环绕或截断。除零仍 panic；`MIN / -1` 结果为 `MIN`，余数为 0。负移位量 panic；非负移位量先按位宽取模。comptime 溢出仍是编译错误。
 
+## 内建块物化与加载 {#builtin-materialization}
+
+内建源（`std/runtime` 等固定源树）不属于用户 package。它在构建期由 runtime builder 产出 `GUGURT01` artifact：`source manifest` 与接口摘要由 builder 写入，`prebuilt` 段由 façade 的 build script 调用 `gugu_frontend::materialize` 派生并写回。物化只覆盖与用户无关的层：名称前缀、身份表、早期常量、类型检查结果、HIR 片段、GIR body、契约类型目录与模型层。编号前缀按 `source manifest` 顺序固定，跨块引用只走稳定键，因此内建块下标的含义在用户编译里仍然成立。
+
+用户编译只有一条加载路径：`BuiltinPrefix` 先核对容器 schema、各层 revision 与表内容摘要，再校验结构（定义编号稠密、稳定键唯一、位置落在内建前缀内），最后把持久位置按当前 `SourceMap` 重建为会话局部 `Span`，并按当前世界重算 owner 输入身份。物化模块占据文件 ID 与模块表前缀，未物化的内建源（探针源）与用户模块依次追加。缺失 `prebuilt`、revision 或摘要不符、结构校验失败都直接失败，**不存在源码回退路径**。
+
+编号前缀不变式：内建块在 `names::DefId`、`HIR DefId`、`TypeId`、模块表与文件表里连续占位；降级按「内建块先完成签名、侧表与 body，用户定义整体追加」两段推进，否则用户入口诱导的类型会插进内建块中段。加载路径与强制现算路径必须给出完全相同的编号无关指纹与诊断集合，该等价性由 `numbering_stability` 用例以真实语料逐项锁定。
+
 ## 单一 build.gg
 
 package 根存在 `build.gg` 时，它是唯一 build task。没有该文件且未显式声明 build 路径时，不存在 build task。build.gg 为宿主目标名编译，使用 `[build.dependencies]`，在任何 target 源码解析前执行；它必须提供：
