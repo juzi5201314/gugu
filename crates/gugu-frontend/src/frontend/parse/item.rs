@@ -91,6 +91,11 @@ impl Parser<'_> {
     ) -> ItemId {
         self.bump();
         let path = self.parse_path();
+        // 记录 `use` 触达的点分模块路径：内建闭包裁剪据此决定保留哪些内建模块。
+        let module_path = self.path_text(path);
+        if !module_path.is_empty() {
+            self.imports.push(module_path);
+        }
         let kind = if self.at(TokenKind::Dot) && self.nth(1) == TokenKind::LBrace {
             self.bump();
             self.bump();
