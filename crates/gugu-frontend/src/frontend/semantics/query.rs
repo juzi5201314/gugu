@@ -19,6 +19,7 @@ pub(super) fn check(
     queries: &QueryEngine,
     early: &super::comptime::EarlyConstTable,
     early_dependency: &crate::query::DependencyFingerprint,
+    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<(CheckedSemantics, crate::query::DependencyFingerprint), Vec<Diagnostic>> {
     let mut hash = blake3::Hasher::new_derive_key("gugu-type-check-input-v1");
     let configuration = format!("{cfg:?}");
@@ -30,6 +31,8 @@ pub(super) fn check(
     }
     hash.update(&model.name_fingerprint());
     hash.update(&super::comptime::registry::summary());
+    // 类型检查的输出在两条加载路径上完全相同（内建 body 取自前缀、用户 body 现算），
+    // 因此查询键只由世界身份决定；把前缀折进键会让依赖指纹带着模式差异流进下游内容。
     let input_fingerprint = *hash.finalize().as_bytes();
     let key = QueryKey::new(QueryKind::TypeCheck, SCHEMA_VERSION, input_fingerprint);
     let result = queries.compute(key.clone(), |context| {
@@ -51,7 +54,7 @@ pub(super) fn check(
             early_dependency.key().clone(),
             early_dependency.fingerprint(),
         );
-        match checker::check(model, early) {
+        match checker::check(model, early, installed) {
             Ok(mut output) => {
                 output.input_fingerprint = input_fingerprint;
                 Ok((

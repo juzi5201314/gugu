@@ -111,16 +111,30 @@ struct Checker<'m, 'a> {
 pub(super) fn check(
     model: &Model<'_>,
     early: &super::comptime::EarlyConstTable,
+    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut bodies = Vec::new();
     let mut hidden_types = vec![None; model.opaques.definitions.len()];
+    // 内建隐藏类型必须先就位：用户 body 的推断会读到它们。
+    if let Some(prefix) = installed {
+        for (slot, value) in hidden_types
+            .iter_mut()
+            .zip(prefix.checked().hidden_types.iter())
+        {
+            slot.clone_from(value);
+        }
+    }
     let mut dependencies: Vec<Vec<Vec<DefRef>>> = model
         .modules
         .iter()
         .map(|m| vec![Vec::new(); m.arena.items.len()])
         .collect();
     for (module, parsed) in model.modules.iter().enumerate() {
+        // 物化覆盖的内建模块的 body 结果直取前缀，只对用户模块做类型检查。
+        if installed.is_some_and(|prefix| prefix.covers_module(&parsed.path)) {
+            continue;
+        }
         for (index, item) in parsed.arena.items.iter().enumerate() {
             if !parsed.configured.item_active(ItemId(index as u32)) {
                 continue;
@@ -213,14 +227,30 @@ pub(super) fn check(
             ));
         }
     }
-    let initialization = match super::initialization::plan(model, &dependencies) {
+    let mut initialization = match super::initialization::plan(model, &dependencies) {
         Ok(plan) => plan,
         Err(found) => {
             errors.extend(found);
             Vec::new()
         }
     };
+    if let Some(prefix) = installed {
+        // 内建模块未参与检查：初始化计划与 body 结果按前缀补齐，用户部分按定义序追加。
+        let materialized = |definition: super::DefRef| {
+            prefix.covers_module(&model.modules[definition.module].path)
+        };
+        initialization.retain(|entry| !materialized(entry.definition));
+        let mut merged = prefix.checked().initialization.clone();
+        merged.append(&mut initialization);
+        initialization = merged;
+    }
     if errors.is_empty() {
+        let mut bodies = bodies;
+        if let Some(prefix) = installed {
+            let mut merged = prefix.checked().bodies.clone();
+            merged.append(&mut bodies);
+            bodies = merged;
+        }
         let output = super::output::CheckedSemantics {
             early_constants: early.clone(),
             bodies,

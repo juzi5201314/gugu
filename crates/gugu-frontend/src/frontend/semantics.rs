@@ -77,8 +77,15 @@ pub(crate) fn check(
         early.constants = constants;
     }
     let registry_identity = early.registry_identity();
-    let (checked, dependency) =
-        query::check(&model, sources, cfg, queries, &early, &early_dependency)?;
+    let (checked, dependency) = query::check(
+        &model,
+        sources,
+        cfg,
+        queries,
+        &early,
+        &early_dependency,
+        prefix,
+    )?;
     let layouts = super::types::form_and_layout(&model, &checked, cfg.target())?;
     let (hir, lower_dependency) = hir::lower(
         &model,

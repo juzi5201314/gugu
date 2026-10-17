@@ -32,6 +32,9 @@ const GIR_BODIES_TABLE: &str = "gir.bodies";
 /// 早期常量表的层名：内建顶层 const/static 的 comptime 求值结果。
 const EARLY_TABLE: &str = "early.constants";
 
+/// 类型检查表的层名：内建每个 body 的推断结果与义务证据。
+const CHECKED_TABLE: &str = "checked.semantics";
+
 /// 已校验的内建块前缀：当前会话可直接安装的派生表。
 pub(crate) struct BuiltinPrefix {
     names: names::NameResolution,
@@ -44,6 +47,8 @@ pub(crate) struct BuiltinPrefix {
     gir_bodies: Vec<crate::frontend::gir::GirBody>,
     /// 内建顶层 const/static 的 comptime 求值结果；用户定义照旧现算后追加。
     early_constants: crate::frontend::semantics::comptime::EarlyConstTable,
+    /// 内建每个 body 的类型检查结果；用户 body 现算后按定义序追加。
+    checked: crate::frontend::semantics::CheckedSemantics,
     modules: Vec<String>,
     identity: [u8; 32],
 }
@@ -115,6 +120,8 @@ impl BuiltinPrefix {
         }
         let early_constants: crate::frontend::semantics::comptime::EarlyConstTable =
             decode_table(prebuilt, EARLY_TABLE, &prebuilt.early_constants)?;
+        let checked: crate::frontend::semantics::CheckedSemantics =
+            decode_table(prebuilt, CHECKED_TABLE, &prebuilt.checked)?;
         Ok(Self {
             names,
             identities,
@@ -122,9 +129,15 @@ impl BuiltinPrefix {
             record_types,
             gir_bodies,
             early_constants,
+            checked,
             modules: prebuilt.module_order.clone(),
             identity: installed_tables_digest(prebuilt),
         })
+    }
+
+    /// 内建每个 body 的类型检查结果。
+    pub(crate) fn checked(&self) -> &crate::frontend::semantics::CheckedSemantics {
+        &self.checked
     }
 
     /// 内建顶层 const/static 的早期常量表。
@@ -272,6 +285,7 @@ fn installed_tables_digest(prebuilt: &RuntimePrebuiltV1) -> [u8; 32] {
         &prebuilt.hir[..],
         &prebuilt.record_types[..],
         &prebuilt.early_constants[..],
+        &prebuilt.checked[..],
     ] {
         hash.update(&(table.len() as u64).to_le_bytes());
         hash.update(table);
