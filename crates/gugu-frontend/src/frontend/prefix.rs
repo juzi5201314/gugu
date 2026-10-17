@@ -23,12 +23,17 @@ const IDENTITIES_TABLE: &str = "identities";
 /// HIR 片段的层名：内建模块的全部 HIR 表。
 const HIR_TABLE: &str = "hir.module";
 
+/// 契约记录类型的层名：七个 runtime layout verifier 的校验对象。
+const RECORD_TYPES_TABLE: &str = "record.types";
+
 /// 已校验的内建块前缀：当前会话可直接安装的派生表。
 pub(crate) struct BuiltinPrefix {
     names: names::NameResolution,
     identities: Identities,
     /// 内建模块的 HIR 片段：定义、类型与各侧表整段接管，用户侧只追加。已通过 verifier。
     hir: std::sync::Arc<crate::frontend::hir::Validated>,
+    /// 内建契约记录的类型目录：layout verifier 在加载期逐字段校验它。
+    record_types: Vec<crate::frontend::gir::concrete::RecordTypes>,
     modules: Vec<String>,
     identity: [u8; 32],
 }
@@ -81,13 +86,21 @@ impl BuiltinPrefix {
         {
             return Err(invalid("内建块物化表的 HIR 与身份表不同源"));
         }
+        let record_types: Vec<crate::frontend::gir::concrete::RecordTypes> =
+            decode_table(prebuilt, RECORD_TYPES_TABLE, &prebuilt.record_types)?;
         Ok(Self {
             names,
             identities,
             hir: std::sync::Arc::new(hir),
+            record_types,
             modules: prebuilt.module_order.clone(),
             identity: installed_tables_digest(prebuilt),
         })
+    }
+
+    /// 内建契约记录的类型目录；安装后仍需过七个 layout verifier。
+    pub(crate) fn record_types(&self) -> &[crate::frontend::gir::concrete::RecordTypes] {
+        &self.record_types
     }
 
     /// 内建模块的 HIR 片段：已通过 verifier，两条加载路径必须给出同一份。
@@ -214,7 +227,12 @@ fn installed_tables_digest(prebuilt: &RuntimePrebuiltV1) -> [u8; 32] {
         hash.update(layer.as_bytes());
         hash.update(&revision.to_le_bytes());
     }
-    for table in [&prebuilt.names, &prebuilt.identities, &prebuilt.hir] {
+    for table in [
+        &prebuilt.names[..],
+        &prebuilt.identities[..],
+        &prebuilt.hir[..],
+        &prebuilt.record_types[..],
+    ] {
         hash.update(&(table.len() as u64).to_le_bytes());
         hash.update(table);
     }
