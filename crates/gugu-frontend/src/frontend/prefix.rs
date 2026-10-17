@@ -26,6 +26,9 @@ const HIR_TABLE: &str = "hir.module";
 /// 契约记录类型的层名：七个 runtime layout verifier 的校验对象。
 const RECORD_TYPES_TABLE: &str = "record.types";
 
+/// GIR body 表的层名：内建 owner 的 generic GIR，与 owner 顺序一一对应。
+const GIR_BODIES_TABLE: &str = "gir.bodies";
+
 /// 已校验的内建块前缀：当前会话可直接安装的派生表。
 pub(crate) struct BuiltinPrefix {
     names: names::NameResolution,
@@ -34,6 +37,8 @@ pub(crate) struct BuiltinPrefix {
     hir: std::sync::Arc<crate::frontend::hir::Validated>,
     /// 内建契约记录的类型目录：layout verifier 在加载期逐字段校验它。
     record_types: Vec<crate::frontend::gir::concrete::RecordTypes>,
+    /// 内建 owner 的 generic GIR body：按 owner 顺序排列，装载时逐条校验 owner 与稳定键。
+    gir_bodies: Vec<crate::frontend::gir::GirBody>,
     modules: Vec<String>,
     identity: [u8; 32],
 }
@@ -88,14 +93,35 @@ impl BuiltinPrefix {
         }
         let record_types: Vec<crate::frontend::gir::concrete::RecordTypes> =
             decode_table(prebuilt, RECORD_TYPES_TABLE, &prebuilt.record_types)?;
+        // GIR body 逐条编码，表摘要按「空表头 + 全部 body」一组计算，与构建期一致。
+        let mut slices: Vec<&[u8]> = prebuilt.gir_bodies.iter().map(Vec::as_slice).collect();
+        slices.insert(0, &[]);
+        let declared = declared_content_digest(prebuilt, GIR_BODIES_TABLE)
+            .ok_or_else(|| invalid("内建块物化表缺少 gir.bodies 表指纹"))?;
+        if table_fingerprint(GIR_BODIES_TABLE, &slices).1 != declared {
+            return Err(invalid("内建块物化表的 gir.bodies 表内容摘要不符"));
+        }
+        let mut gir_bodies = Vec::with_capacity(prebuilt.gir_bodies.len());
+        for encoded in &prebuilt.gir_bodies {
+            gir_bodies.push(
+                crate::canonical::from_slice(encoded)
+                    .map_err(|_| invalid("内建块的 gir.bodies 表不能解码"))?,
+            );
+        }
         Ok(Self {
             names,
             identities,
             hir: std::sync::Arc::new(hir),
             record_types,
+            gir_bodies,
             modules: prebuilt.module_order.clone(),
             identity: installed_tables_digest(prebuilt),
         })
+    }
+
+    /// 内建 owner 的 generic GIR body；下标与 HIR `owners` 一一对应。
+    pub(crate) fn gir_body(&self, index: usize) -> Option<&crate::frontend::gir::GirBody> {
+        self.gir_bodies.get(index)
     }
 
     /// 内建契约记录的类型目录；安装后仍需过七个 layout verifier。

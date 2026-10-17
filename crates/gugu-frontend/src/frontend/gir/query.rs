@@ -14,10 +14,22 @@ pub(crate) fn build_world(
     hir: &Validated,
     queries: &QueryEngine,
     sources: &SourceMap,
+    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
 ) -> Result<GirWorldV1, Vec<Diagnostic>> {
     let module = hir.module();
     let mut bodies = Vec::with_capacity(module.owners.len());
     for (index, owner) in module.owners.iter().enumerate() {
+        if let Some(body) = installed.and_then(|prefix| prefix.gir_body(index)) {
+            // 物化 body 与现算 body 必须同源：owner、稳定键与结构逐条对上，否则报 invariant，
+            // 不拼半个世界。
+            let definition = &module.definitions[owner.definition.index()];
+            if body.owner != owner.definition || body.owner_key != definition.key {
+                return Err(vec![super::gir_error("物化 GIR 与当前 owner 不一致", None)]);
+            }
+            super::verify(module, body).map_err(|error| vec![error])?;
+            bodies.push(body.clone());
+            continue;
+        }
         bodies.push(compute_body(hir, index, owner, queries, sources)?);
     }
     let placement = PlacementWorldV1::empty();

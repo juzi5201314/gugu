@@ -84,7 +84,7 @@ pub(crate) fn check(
         queries,
         prefix,
     )?;
-    let gir = super::gir::build_world(&hir, queries, sources)?;
+    let gir = super::gir::build_world(&hir, queries, sources, prefix)?;
     let identities =
         hir::identities(&model, names, &checked, sources, prefix).map_err(|error| vec![error])?;
     let context = super::mono::keys::MonoContext::new(
