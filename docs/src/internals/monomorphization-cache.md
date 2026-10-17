@@ -37,6 +37,8 @@ runtime/std 源在 compiler build-time 由 `gugu-runtime-builder` 固化为 targ
 
 版本策略：物化表与缓存 payload 的编码形态变更时，`canonical::REVISION` 与 `QUERY_REGISTRY_REVISION` 一起递增，旧 artifact 与旧 action/query record 全部失效；只在语义等价、payload 形状不变的前提下才允许共用记录。本轮把 `Span` 的会话局部表身份移出编码后，二者分别升到 2 与 4；`LowerHir` 在键内容变化时单独升到 8。各层 revision（`checked.semantics`、`early.constants`、`gir.body`、`gir.build`）只在对应派生规则改变时递增。
 
+按 import 闭包裁剪内建模块在本实现中不成立，已按计划 5.4 的收缩规则移除裁剪逻辑并保留分块 schema。实测依据：裁掉未引用模块的 `hir.owners`、`checked.bodies`、`early.constants`、`gir_bodies` 后，`identity::collect` 的边界断言（现算内建定义数必须等于物化前缀定义数）报出 1386 对 1388——`checked.bodies` 与 `hir.owners` 是身份表与模型派生的输入，不是纯派生成分，删条目会改变编号空间；`gir_bodies` 与 owner 下标一一对齐，单独剪会让装载期 `gir_body(index)` 错位；`early.constants` 可按 `ConstKey.module` 独立过滤，但只此一项收益不足以抵消重映射风险。因此安装路径仍整块安装内建块，分块清单（`blocks` 的定义/owner 区间）在装载期照常校验，作为后续裁剪的位置前提保留。
+
 规范编码 `GBC1` 使用：
 
 - 小端无符号固定宽度整数；

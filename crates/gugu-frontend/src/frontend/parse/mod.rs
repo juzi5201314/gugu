@@ -14,8 +14,8 @@ use crate::source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span};
 #[cfg(test)]
 use super::ast::FnBody;
 use super::ast::{
-    AstArena, AstFile, AstNodeId, AstRange, AttrKind, Attribute, ExprId, ItemId, ItemKind, PathId,
-    StmtId, try_extend_range,
+    AstArena, AstFile, AstNodeId, AstRange, AttrKind, Attribute, ExprId, ItemId, ItemKind, StmtId,
+    try_extend_range,
 };
 use super::intern::{Symbol, SymbolInterner};
 use super::token::{Token, TokenBuffer, TokenKind, TriviaKind};
@@ -61,8 +61,6 @@ pub(crate) struct ParseOutput {
     pub(crate) file: AstFile,
     pub(crate) arena: AstArena,
     pub(crate) diagnostics: Vec<Diagnostic>,
-    /// `use` 声明触达的点分模块路径。
-    pub(crate) imports: Vec<String>,
 }
 
 pub(crate) fn parse(
@@ -86,7 +84,6 @@ pub(crate) fn parse(
         delim_depth: 0,
         brace_depth: 0,
         extern_block_abi: None,
-        imports: Vec::new(),
         arena: AstArena::with_token_hint(buffer.tokens.len()),
         diagnostics: Vec::new(),
         allow_struct: true,
@@ -98,7 +95,6 @@ pub(crate) fn parse(
         file: ast_file,
         arena: parser.arena,
         diagnostics: parser.diagnostics,
-        imports: parser.imports,
     }
 }
 
@@ -199,7 +195,6 @@ pub(crate) fn parse_fragment(
         delim_depth: 0,
         brace_depth: 0,
         extern_block_abi: None,
-        imports: Vec::new(),
         arena,
         diagnostics: Vec::new(),
         allow_struct: true,
@@ -304,8 +299,6 @@ pub(super) struct Parser<'a> {
     pub(super) delim_depth: u32,
     pub(super) brace_depth: u32,
     pub(super) extern_block_abi: Option<Symbol>,
-    /// `use` 声明触达的点分模块路径，解析期记录，供内建闭包裁剪使用。
-    pub(super) imports: Vec<String>,
     pub(super) arena: AstArena,
     pub(super) diagnostics: Vec<Diagnostic>,
     pub(super) allow_struct: bool,
@@ -350,17 +343,6 @@ impl<'a> Parser<'a> {
 
     pub(super) fn interned_symbol(&self, token: Token) -> Symbol {
         self.symbol_from_token(token)
-    }
-
-    /// 把路径按段拼成点分文本；`use` 记模块路径与闭包裁剪都用这一种形状。
-    pub(super) fn path_text(&self, path: PathId) -> String {
-        self.arena.paths[path.0 as usize]
-            .segments
-            .as_slice(&self.arena.segments)
-            .iter()
-            .map(|segment| self.intern.get_str(segment.name))
-            .collect::<Vec<_>>()
-            .join(".")
     }
 
     pub(super) fn consume_decl_terminator(&mut self) {

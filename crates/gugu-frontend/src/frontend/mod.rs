@@ -79,8 +79,6 @@ pub(crate) struct ParsedModule {
     pub(crate) arena: AstArena,
     pub(crate) tokens: TokenBuffer,
     pub(crate) configured: cfg::ConfiguredAst,
-    /// `use` 声明触达的点分模块路径，内建闭包裁剪的输入。
-    pub(crate) imports: Vec<String>,
     /// 该模块来自 compiler 内建的源树登记，而不是用户源码。
     ///
     /// `std.option` 等公开标准库模块是 package API。`std.prelude`、`std.runtime.*` 与
@@ -636,7 +634,6 @@ fn parse_module(
         arena: parsed.arena,
         tokens,
         configured,
-        imports: parsed.imports,
         builtin,
     })
 }
