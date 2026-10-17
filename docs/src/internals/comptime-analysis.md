@@ -371,7 +371,7 @@ SCC 内按原成员顺序与轮次预算迭代，保存每个成员在当前 cal
 
 单 entry、单 Return、无回边且按块编号顺序连接的直线 CFG 允许标量叶快速解释：所有 local 必须是纯位值，只接受纯值/数值运算、转换和显式 checked op，以及 StorageLive/StorageDead、位值 Copy 与 Nop；拒绝调用、intrinsic、managed allocation、聚合构造、捕获、suspend、异常流、assembly、safepoint、发布/资源动作与特殊区域。快速路径使用同一个 `execute_statement`、证明函数和 summary/访问规则，一次遍历形成 return range、效果与 proofs；不能把未证明的 checked op 标记为安全。其它 body 继续通用 CFG 固定点；块迭代预算为零时仍走通用保守路径。
 
-管线顺序为 `LowerHir`（schema **7**，只构造、校验并冻结）→ `BuildGenericGir` →
+管线顺序为 `LowerHir`（schema **8**，只构造、校验并冻结）→ `BuildGenericGir` →
 `mono::close` → `late::run` → `gir::attach_fragments` → `WholeProgramAnalysis` →
 `EscapeAndPlacement` → `PublicFunctionSummary`。分析输入使用放置前的 generic GIR 指纹。
 `WholeProgramAnalysis`（query schema **6**）输入指纹含冻结 HIR

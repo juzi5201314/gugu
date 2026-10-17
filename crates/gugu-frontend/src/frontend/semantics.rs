@@ -6,6 +6,7 @@ mod checker;
 pub(crate) mod comptime;
 pub(crate) mod foreign;
 mod hir;
+pub(crate) use hir::{LOWER_SCHEMA, owner_dependency_fingerprint};
 mod initialization;
 pub(crate) mod linkage;
 pub(crate) mod model;

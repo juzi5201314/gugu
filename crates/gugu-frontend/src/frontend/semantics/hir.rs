@@ -5,11 +5,12 @@ use super::{
 };
 use crate::frontend::{ast, hir, names::NameResolution};
 use crate::{Diagnostic, DiagnosticCode, SourceMap};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 mod body;
 mod declarations;
 pub(crate) mod identity;
 mod query;
+pub(crate) use query::LOWER_SCHEMA;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -319,6 +320,145 @@ pub(super) fn owner_input_fingerprint(key: &[u8; 32], checked: &[u8; 32]) -> [u8
         .update(checked)
         .finalize()
         .as_bytes()
+}
+
+/// 一个类型直接引用的类型、接口与定义；未列出的变体不带引用。
+fn type_references(module: &hir::Module, id: hir::TypeId) -> (Vec<hir::TypeId>, Vec<hir::DefId>) {
+    use hir::Type;
+    let mut types = Vec::new();
+    let mut definitions = Vec::new();
+    match &module.types[id.index()] {
+        Type::Ref(inner)
+        | Type::Ptr(inner)
+        | Type::Slice(inner)
+        | Type::Option(inner)
+        | Type::Chan(inner)
+        | Type::Join(inner)
+        | Type::MaybeUninit(inner) => types.push(*inner),
+        Type::Array(inner, _) => types.push(*inner),
+        Type::Tuple(items) => types.extend(items.iter().copied()),
+        Type::Function { parameters, result } => {
+            types.extend(parameters.iter().copied());
+            types.push(*result);
+        }
+        Type::Callable {
+            definition,
+            arguments,
+            signature,
+        } => {
+            definitions.push(*definition);
+            types.extend(arguments.iter().copied());
+            types.push(*signature);
+        }
+        Type::Named {
+            definition,
+            arguments,
+        }
+        | Type::Opaque {
+            definition,
+            arguments,
+        } => {
+            definitions.push(*definition);
+            types.extend(arguments.iter().copied());
+        }
+        Type::Projection {
+            self_ty, interface, ..
+        } => {
+            types.push(*self_ty);
+            definitions.push(interface.definition);
+            types.extend(interface.arguments.iter().copied());
+        }
+        Type::Dyn(interfaces) => {
+            for reference in interfaces {
+                definitions.push(reference.definition);
+                types.extend(reference.arguments.iter().copied());
+            }
+        }
+        Type::Result(left, right) => {
+            types.push(*left);
+            types.push(*right);
+        }
+        _ => {}
+    }
+    (types, definitions)
+}
+
+/// owner 的单元依赖指纹：只覆盖该 owner 降级真正读到的内容。
+///
+/// 读集由 owner 自身的带类型表（表达式类型、局部、模式、分派、调整、检查、可变参数调用、借用约束）
+/// 出发，按 `hir::Type` 展开传递闭包，并把闭包里出现的定义签名一并纳入。`gir::build` 对模块表的读取
+/// 只有 `definitions[owner.definition].signature` 与由它展开的两处 `module.types` 查表，读集因此完整。
+pub(crate) fn owner_dependency_fingerprint(module: &hir::Module, owner: &hir::Owner) -> [u8; 32] {
+    let mut content = owner.clone();
+    content.input_fingerprint = [0; 32];
+    let mut hash = blake3::Hasher::new_derive_key("gugu-owner-dependency-v1");
+    hash.update(&crate::canonical::to_vec(&content).expect("Owner 可编码"));
+    let mut types = BTreeSet::new();
+    let mut definitions = BTreeSet::new();
+    types.extend(owner.expression_types.iter().copied());
+    types.extend(owner.expression_inputs.iter().copied());
+    types.extend(owner.patterns.iter().map(|pattern| pattern.ty));
+    types.extend(owner.locals.iter().map(|local| local.ty));
+    for dispatch in &owner.dispatches {
+        types.insert(dispatch.self_ty);
+        types.insert(dispatch.signature);
+        definitions.extend(dispatch.function);
+        definitions.extend(dispatch.implementation);
+    }
+    for adjustment in &owner.adjustments {
+        types.extend(match adjustment {
+            hir::Adjustment::Dereference => None,
+            hir::Adjustment::ArrayToSlice(ty)
+            | hir::Adjustment::NeverTo(ty)
+            | hir::Adjustment::Erase(ty)
+            | hir::Adjustment::Opaque(ty)
+            | hir::Adjustment::Instantiate(ty) => Some(*ty),
+        });
+    }
+    for check in &owner.checks {
+        types.extend(match &check.kind {
+            hir::CheckKind::Division { ty, .. } | hir::CheckKind::Shift { ty, .. } => Some(*ty),
+            _ => None,
+        });
+    }
+    types.extend(owner.variadic_calls.iter().map(|call| call.element));
+    for constraint in &owner.borrow_constraints {
+        types.insert(constraint.base);
+        types.insert(constraint.target);
+    }
+    definitions.extend(owner.captures.iter().map(|capture| capture.owner));
+    definitions.insert(owner.definition);
+    let mut pending_types = types.iter().copied().collect::<Vec<_>>();
+    let mut pending_definitions = definitions.iter().copied().collect::<Vec<_>>();
+    while !pending_types.is_empty() || !pending_definitions.is_empty() {
+        while let Some(id) = pending_types.pop() {
+            let (more_types, more_definitions) = type_references(module, id);
+            for ty in more_types {
+                if types.insert(ty) {
+                    pending_types.push(ty);
+                }
+            }
+            for definition in more_definitions {
+                if definitions.insert(definition) {
+                    pending_definitions.push(definition);
+                }
+            }
+        }
+        while let Some(id) = pending_definitions.pop() {
+            let definition = &module.definitions[id.index()];
+            hash.update(&definition.key);
+            hash.update(format!("{:?}", definition.kind).as_bytes());
+            if let Some(signature) = definition.signature
+                && types.insert(signature)
+            {
+                pending_types.push(signature);
+            }
+        }
+    }
+    for id in &types {
+        hash.update(&crate::canonical::to_vec(&module.types[id.index()]).expect("类型可编码"));
+    }
+    *hash.finalize().as_bytes()
 }
 
 fn checked_id(index: usize) -> Result<u32, Diagnostic> {

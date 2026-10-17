@@ -1,6 +1,9 @@
 use super::*;
 use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
 
+/// `LowerHir` 的记录 schema；键内容变化时递增。
+pub(crate) const LOWER_SCHEMA: u32 = 8;
+
 pub(super) fn lower(
     model: &Model<'_>,
     names: &NameResolution,
@@ -31,7 +34,7 @@ pub(super) fn lower(
     key_hash.update(&lower_input_fingerprint);
     key_hash.update(&prefix.map_or([0u8; 32], |prefix| prefix.identity()));
     let key_fingerprint = *key_hash.finalize().as_bytes();
-    let key = QueryKey::new(QueryKind::LowerHir, 8, key_fingerprint);
+    let key = QueryKey::new(QueryKind::LowerHir, LOWER_SCHEMA, key_fingerprint);
     let (definitions, identities, builtin) =
         identity::collect(model, names, checked, sources, prefix).map_err(|error| vec![error])?;
     let mut fresh = None;
