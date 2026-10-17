@@ -40,6 +40,12 @@ fn decode(
 ) -> Result<&'static RuntimeArtifactV1, RuntimeArtifactError> {
     let artifact = embedded.as_ref().map_err(Clone::clone)?;
     artifact.for_target(core_target(target))?;
+    // façade 只嵌入已物化的 artifact：内建块没有源码回退，缺表只能是构建管线出错。
+    if artifact.payload.prebuilt.is_none() {
+        return Err(RuntimeArtifactError::Manifest(
+            "嵌入 artifact 缺少内建块物化表".to_owned(),
+        ));
+    }
     Ok(artifact)
 }
 
