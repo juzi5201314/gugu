@@ -10,7 +10,7 @@ use super::coroutine::{
     MorestackScratch, StackDescriptor,
 };
 use super::entry::{Rt0Params, Rt0Payload};
-use super::fragments::{MainReturnCode, MorestackEntryCode};
+use super::fragment_code::{MainReturnCode, MorestackEntryCode};
 use super::model::RawModelError;
 use super::stack::{
     STACK_ARENA_BYTES, STACK_CACHE_CLASSES, STACK_CACHE_LIMIT, STACK_CACHE_LOW, STACK_CLASSES,
@@ -130,7 +130,8 @@ pub(crate) const fn stack_check_offset() -> u32 {
 }
 
 /// morestack mailbox 的字段偏移由 `MorestackMailbox` 结构唯一持有；片段按机器级消费者引用
-/// 同一份 `offset_of!`。
+/// 同一份 `offset_of!`。morestack 与 main 返回片段由 backend 编码，经 [`Self::with_code`]
+/// 注入；本层只校验 runtime 自持的布局、栈策略与 context 代码，片段字节由 backend 比对。
 impl CoroutineRuntimeContract {
     pub(crate) fn build(demand: CoroutineDemand) -> Result<Self, RawModelError> {
         let result = Self {
@@ -139,12 +140,25 @@ impl CoroutineRuntimeContract {
             records: fixed_layouts(),
             stack: StackPolicy::fixed(),
             context: ContextSwitchCode::fixed(),
-            morestack: MorestackEntryCode::fixed(),
-            main_return: MainReturnCode::fixed(),
+            morestack: MorestackEntryCode::default(),
+            main_return: MainReturnCode::default(),
             demand,
         };
         result.verify()?;
         Ok(result)
+    }
+
+    /// 注入 backend 编码的 morestack 与 main 返回片段。
+    pub(crate) fn with_code(
+        self,
+        morestack: MorestackEntryCode,
+        main_return: MainReturnCode,
+    ) -> Self {
+        Self {
+            morestack,
+            main_return,
+            ..self
+        }
     }
 
     pub(crate) fn verify(&self) -> Result<(), RawModelError> {
@@ -153,11 +167,9 @@ impl CoroutineRuntimeContract {
             || self.records != fixed_layouts()
             || self.stack != StackPolicy::fixed()
             || self.context != ContextSwitchCode::fixed()
-            || self.morestack != MorestackEntryCode::fixed()
-            || self.main_return != MainReturnCode::fixed()
         {
             return Err(RawModelError::new(
-                "协程布局、栈策略、context 代码或 morestack 片段与 runtime/backend schema 不匹配",
+                "协程布局、栈策略或 context 代码与 runtime schema 不匹配",
             ));
         }
         Ok(())

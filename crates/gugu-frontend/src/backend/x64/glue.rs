@@ -5,12 +5,12 @@
 //! 被 LIR 引用的 glue 缺失定义、定义重复、实例不唯一或调用点 ABI 形状不一致都在写出镜像
 //! 前失败（`E0062`），不再静默兜底到 stub；未被引用的条目留给后续阶段补齐定义。
 
-use super::{GlueDef, GlueDefKind, RuntimeResources};
 use crate::backend::x64::{abi, mangle};
 use crate::frontend::hir;
 use crate::hash::hash_domain;
 use crate::lir;
 use crate::lir::body::{CallTarget, Op, Terminator, Value, ValueType};
+use crate::runtime::{GLUE_DEFS, GlueDef, GlueDefKind, RuntimeResources};
 use crate::{Diagnostic, DiagnosticCode};
 use std::collections::BTreeMap;
 use std::ops::Range;
@@ -193,10 +193,6 @@ impl RuntimeGlueBindings {
         "platform_low_memory_hint",
         "platform_huge_page_hint",
     ];
-    /// 为 lowering 提供「已登记或已明确声明缺口」的 glue 名字集合。
-    pub(super) fn pending_glue_names() -> &'static [&'static str] {
-        RuntimeGlueBindings::PENDING_GLUE_IMPL
-    }
 
     /// 闭合检查：可达代码引用到的每个 glue 入口都必须有真实定义。
     ///
@@ -511,6 +507,26 @@ fn hex(bytes: &[u8]) -> String {
         out.push(char::from(DIGITS[usize::from(byte & 0x0f)]));
     }
     out
+}
+
+/// 判断 runtime glue 是否已经登记定义，或是否被显式列为当前迁移切片的缺口。
+///
+/// lowering 只在真正发出 runtime 符号调用时调用本查询；由 lowering 内联的 runtime 内建不会
+/// 经过这里，因此不会因为名字存在于 `RuntimeCall` 目录而误报。
+pub(crate) fn glue_is_declared(name: &str) -> bool {
+    GLUE_DEFS.iter().any(|definition| definition.glue == name)
+        || RuntimeGlueBindings::PENDING_GLUE_IMPL.contains(&name)
+}
+
+/// 闭世界 glue 目录里的全部入口名：真实定义与显式缺口记录的并集。
+///
+/// 诊断按名字反查符号哈希时必须遍历同一份闭世界目录，否则「引用但未实现」的入口会退化成
+/// 一堆无法辨认的哈希。
+pub(crate) fn declared_glue_names() -> impl Iterator<Item = &'static str> {
+    GLUE_DEFS
+        .iter()
+        .map(|definition| definition.glue)
+        .chain(RuntimeGlueBindings::PENDING_GLUE_IMPL.iter().copied())
 }
 
 #[cfg(test)]

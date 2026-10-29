@@ -114,17 +114,22 @@ crates/
 │   └── src/workspace.rs            workspace 成员与 glob 解析
 └── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排
+    ├── src/raw_model.rs            runtime raw 契约 query driver：注入 backend 片段并做跨层校验
     ├── src/frontend/               词法、AST、语义检查与冻结 HIR
     │   ├── mod.rs                  Frontend action 入口
     │   ├── lex.rs                  TokenBuffer、trivia 与字面量
     │   ├── parse/                  项、类型、表达式、模式
     │   ├── ast.rs                  u32 arena 与节点种类
     │   ├── semantics/              TypeCheck、布局交接与 AST 到 HIR 形成
+    │   ├── string/fmt.rs           `std.fmt` 的 `Formatter` 参照模型，comptime 格式化共用
+    │   ├── contract/               HIR/GIR 与 runtime 契约的交叉视图：源记录、image 根需求与控制块布局校验
     │   └── hir/                    类型化 owner、侧表与冻结 verifier
     ├── src/backend.rs              目标相关的内存 image plan 输入
+    ├── src/backend/x64/fragments.rs 登记机器片段编码与协程片段逐字节比对
+    ├── src/backend/x64/glue.rs     runtime glue 绑定、闭世界 glue 目录与 op 隐含 glue
     ├── src/runtime/                Gugu 源树登记、raw 平面契约、rt0 契约与 owner-directed return 参照实现
     │   ├── mod.rs                  源树/rt0/intrinsic 登记与 raw 平面常量
-    │   ├── model.rs                `RuntimeRawContractV1`、消息字段 schema 与 query driver
+    │   ├── model.rs                `RuntimeRawContractV1` 与消息字段 schema
     │   ├── startup_kinds.rs        rt0 启动/终止/报告的共享枚举目录与常量
     │   ├── startup_schema.rs       rt0 启动序列、生命周期、启动变量、fatal/退出/报告契约段
     │   ├── startup.rs              环境快照与启动配置解析的参照实现
@@ -141,10 +146,11 @@ crates/
     │   ├── size_class.rs           dense size class 表与 stride 除法常量
     │   ├── coroutine.rs            hot/cold/slot 固定布局、context 与地址稳定控制页
     │   ├── coroutine_schema.rs     版本化协程布局、栈策略、LIR需求与片段契约
+    │   ├── fragment_code.rs        协程契约携带的 morestack/main 返回片段数据形状
     │   ├── scheduler_schema.rs     版本化调度容量、分片、batch 与 service 节奏契约段
     │   ├── scheduler.rs            runnable 队列、park、steal、topology 与终止的确定性参照模型
     │   ├── scheduler_tests.rs      调度 deque 双变体、唤醒、retire 与契约闭环的确定性回归
-    │   ├── coroutine_layout.rs     冻结HIR/具体GIR与machine布局交叉验证
+    │   ├── coroutine_pack.rs       子协程参数包机器布局常量
     │   ├── context.rs              x86_64 switch/restore-only 直接编码
     │   ├── stack.rs                栈尺寸、迟滞收缩与精确StackInterior复制
     │   ├── stack_arena.rs          双端guard arena、span bitmap与有界cache
@@ -162,7 +168,6 @@ crates/
     │   ├── wait.rs                 WaitSourceId、wait-node slab、FIFO 与 park
     │   ├── wait_schema.rs          WaitRuntimeContract schema 1 与 WaitDemand
     │   ├── channel.rs              有/无缓冲环、会合、close 与 try_* 线性化
-    │   ├── channel_layout.rs       channel.gg 与 machine 布局交叉校验
     │   ├── select.rs               xoshiro256++ 与两条 select 提交路径
     │   ├── harness.rs              真实并发可运行切片（bench façade）
     │   └── tests.rs                确定性参照实现的验证套件

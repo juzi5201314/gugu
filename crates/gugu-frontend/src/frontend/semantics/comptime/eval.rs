@@ -1027,7 +1027,7 @@ impl Model<'_> {
                 },
             }
         })?;
-        let resolved = crate::runtime::fmt::resolve_counts(counted).map_err(|_| {
+        let resolved = crate::frontend::string::fmt::resolve_counts(counted).map_err(|_| {
             Diagnostic::error(
                 DiagnosticCode::ComptimePanic,
                 "编译期求值 panic：格式宽度或精度为负",

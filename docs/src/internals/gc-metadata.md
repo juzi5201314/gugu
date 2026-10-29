@@ -361,7 +361,7 @@ descriptor 驱动的 handle visitor 负责。因此同一闭包的不同具体�
 
 spawn 参数包是原始 ABI 车道缓冲（9 个整数车道 + 8 个 16 byte 浮点车道，车道区 200 byte，加 8
 byte 保留共 208 byte、16 byte 对齐），managed 车道由子协程入口的 `MorestackEntry` 栈图描述，
-因此包里不登记字段。布局只允许在 `runtime/coroutine_layout.rs` 的 `COROUTINE_PACK_*` 常量里定义：
+因此包里不登记字段。布局只允许在 `runtime/coroutine_pack.rs` 的 `COROUTINE_PACK_*` 常量里定义：
 入口片段、LIR 发包点与调度器复制点都从这同一份常量取偏移，`runtime/tests.rs` 的镜像断言把它与
 `std/runtime/scheduler.gg` 的 `COROUTINE_PACK_BYTES` 钉在一起。
 

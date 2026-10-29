@@ -1,8 +1,8 @@
 //! 契约记录只消费冻结签名与类型布局，不消费可执行函数体。
-use super::model::RawModelError;
 use crate::Diagnostic;
 use crate::frontend::semantics::linkage::RootLinkageKind;
 use crate::frontend::{gir::concrete::RecordTypes, hir, mono::keys::MonoContext};
+use crate::runtime::RawModelError;
 
 pub(crate) fn collect(context: &MonoContext<'_>) -> Result<Vec<RecordTypes>, Diagnostic> {
     context

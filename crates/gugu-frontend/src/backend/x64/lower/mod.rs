@@ -122,7 +122,7 @@ impl std::error::Error for LoweringError {}
 
 /// 在 runtime 符号真正发射前阻断未登记入口，避免链接器把它解析到退出桩。
 pub(crate) fn ensure_runtime_glue(name: &str) -> Result<(), LoweringError> {
-    if crate::runtime::glue_is_declared(name) {
+    if crate::backend::x64::glue::glue_is_declared(name) {
         Ok(())
     } else {
         Err(LoweringError::UnregisteredGlue {

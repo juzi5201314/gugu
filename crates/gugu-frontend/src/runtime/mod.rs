@@ -27,7 +27,6 @@ pub trait RuntimeArtifactProvider: std::fmt::Debug + Send + Sync {
         target: TargetName,
     ) -> Result<&'static RuntimeArtifactV1, RuntimeArtifactError>;
 }
-pub(crate) mod barrier_layout;
 #[allow(dead_code, reason = "屏障契约段由 runtime raw、LIR 与 ImagePlan 消费")]
 pub(crate) mod barrier_schema;
 pub(crate) mod block_return_schema;
@@ -41,8 +40,7 @@ mod cage;
 pub(crate) mod cage_control;
 #[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
 pub(crate) mod candidate_schema;
-mod channel_layout;
-mod collect_layout;
+pub(crate) mod collect_layout;
 #[allow(
     dead_code,
     reason = "Map/Set 参照模型由确定性测试消费，尚未降成 Gugu 可调用的集合实现"
@@ -68,12 +66,10 @@ mod combining_tests;
 )]
 pub(crate) mod compression_schema;
 mod context;
-pub(crate) mod contract_view;
 #[allow(dead_code, reason = "协程布局与生命周期的确定性参照实现")]
-mod coroutine;
-mod coroutine_layout;
+pub(crate) mod coroutine;
+pub(crate) mod coroutine_pack;
 mod coroutine_schema;
-pub(crate) mod demand;
 #[allow(
     dead_code,
     reason = "动态根登记契约由镜像 runtime、探针与后续收集器共同消费"
@@ -83,19 +79,11 @@ pub(crate) mod dynamic_roots_schema;
 pub(crate) mod edge_schema;
 /// rt0 与镜像 runtime 的启动边界：参数块 word 目录与启动载荷布局。
 pub(crate) mod entry;
-#[allow(
-    dead_code,
-    reason = "Formatter 写入方法由 comptime 静态格式化与确定性测试消费，尚未降成 Gugu 可调用的 intrinsic"
-)]
-pub(crate) mod fmt;
-#[cfg(test)]
-mod fmt_tests;
-pub(crate) mod fragments;
+pub(crate) mod fragment_code;
 pub(crate) mod gc_config;
 pub(crate) mod gc_metadata_contract;
 pub(crate) mod gc_metadata_schema;
 pub(crate) mod gc_metadata_section;
-mod glue;
 mod harness;
 #[allow(
     dead_code,
@@ -114,13 +102,11 @@ mod io_tests;
 /// managed block 身份与 object header 编码；分配和回收算法在镜像 runtime 中。
 #[allow(dead_code, reason = "LocalHeap 执行体已下沉，宿主仅保留稳定编码类型")]
 pub(crate) mod local_heap;
-mod local_heap_layout;
 #[allow(
     dead_code,
     reason = "LocalHeap 契约段由 runtime raw、world 与 ImagePlan 消费"
 )]
 pub(crate) mod local_heap_schema;
-pub(crate) mod mark_layout;
 #[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
 pub(crate) mod mark_schema;
 mod model;
@@ -172,7 +158,6 @@ pub(crate) mod scheduler_schema;
     reason = "stable handle 与 forwarding grace 的确定性参照实现"
 )]
 mod shared_heap;
-mod shared_heap_layout;
 #[allow(
     dead_code,
     reason = "shared heap 契约段由 runtime raw、世界与 ImagePlan 消费"
@@ -192,7 +177,6 @@ mod stackmap_codec;
 pub mod stackmap_schema;
 mod startup_kinds;
 mod startup_schema;
-pub(crate) mod sync_layout;
 pub mod sync_schema;
 mod wait_schema;
 
@@ -206,11 +190,11 @@ pub use coroutine_schema::{
     CoroutineDemand, CoroutineFieldLayout, CoroutineRecordLayout, CoroutineRuntimeContract,
     StackPolicy,
 };
-pub use fragments::{FragmentPatch, MainReturnCode, MorestackEntryCode};
+pub use fragment_code::{FragmentPatch, MainReturnCode, MorestackEntryCode};
 
 pub use block_return_schema::{BlockReturnDemand, BlockReturnRuntimeContract};
 pub use compression_schema::{CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract};
-pub(crate) use coroutine_layout::{
+pub(crate) use coroutine_pack::{
     COROUTINE_PACK_ALIGN, COROUTINE_PACK_BYTES, COROUTINE_PACK_FLOAT_LANES,
     COROUTINE_PACK_INTEGER_LANES, COROUTINE_PACK_TRACE_NONE, coroutine_pack_float_offset,
     coroutine_pack_integer_offset, coroutine_pack_trace_code, coroutine_pack_trace_shift,
@@ -219,7 +203,6 @@ pub use edge_schema::{EdgeDemand, EdgeRuntimeContract};
 pub use foreign_schema::{ForeignDemand, ForeignRuntimeContract};
 pub(crate) use gc_config::GcImageConfig;
 pub use gc_metadata_schema::GcMetadataDemand;
-pub(crate) use glue::{RuntimeGlueBindings, implied_glue};
 pub use local_heap_schema::{HeapTriggerProfile, LocalHeapDemand, LocalHeapRuntimeContract};
 pub use mark_schema::{MarkDemand, MarkRuntimeContract};
 pub use pacing_schema::{GcPacingDemand, GcPacingRuntimeContract};
@@ -296,8 +279,8 @@ pub use extent::EXTENT_CLASS_LADDER;
 pub use platform_schema::{PlatformOp, PlatformRangeDemand};
 
 pub(crate) use model::{
-    RAW_MODEL_SCHEMA, RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand,
-    RuntimeRawContractV1, run,
+    RAW_MODEL_SCHEMA, RawModelError, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand,
+    RuntimeRawContractV1,
 };
 pub use platform::PlatformProfile;
 pub(crate) use startup_schema::Rt0Demand;
@@ -457,7 +440,7 @@ pub(crate) enum GlueDefKind {
 ///
 /// glue 名与 `RuntimeCall` 目录、`RuntimeMachineOp` 目录及平台原语的 `platform_<name>`
 /// 命名一致，绑定表因此是「镜像里哪些 runtime 入口由 Gugu 实现或登记片段接管」的唯一清单。
-const GLUE_DEFS: &[GlueDef] = &[
+pub(crate) const GLUE_DEFS: &[GlueDef] = &[
     GlueDef {
         glue: "rt0_start",
         def: GlueDefKind::Item {
@@ -723,26 +706,6 @@ const GLUE_DEFS: &[GlueDef] = &[
         },
     },
 ];
-/// 判断 runtime glue 是否已经登记定义，或是否被显式列为当前迁移切片的缺口。
-///
-/// lowering 只在真正发出 runtime 符号调用时调用本查询；由 lowering 内联的 runtime 内建不会
-/// 经过这里，因此不会因为名字存在于 `RuntimeCall` 目录而误报。
-pub(crate) fn glue_is_declared(name: &str) -> bool {
-    GLUE_DEFS.iter().any(|definition| definition.glue == name)
-        || glue::RuntimeGlueBindings::pending_glue_names().contains(&name)
-}
-
-/// 闭世界 glue 目录里的全部入口名：真实定义与显式缺口记录的并集。
-///
-/// 诊断按名字反查符号哈希时必须遍历同一份闭世界目录，否则「引用但未实现」的入口会退化成
-/// 一堆无法辨认的哈希。
-pub(crate) fn declared_glue_names() -> impl Iterator<Item = &'static str> {
-    GLUE_DEFS.iter().map(|definition| definition.glue).chain(
-        glue::RuntimeGlueBindings::pending_glue_names()
-            .iter()
-            .copied(),
-    )
-}
 
 /// compiler 携带的 runtime source manifest、intrinsic 边界与 artifact 身份视图。
 ///

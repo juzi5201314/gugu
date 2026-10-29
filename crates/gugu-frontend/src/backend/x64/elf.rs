@@ -6,11 +6,10 @@
 //! `mprotect` 成只读。
 
 use crate::runtime::entry;
-use crate::runtime::fragments;
 
 use super::codegen::{BlobRelocation, FragmentPayload, X64World};
 use super::inst::{RelocKind, RelocTarget};
-use super::mangle;
+use super::{fragments, mangle};
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::offset_of;
 

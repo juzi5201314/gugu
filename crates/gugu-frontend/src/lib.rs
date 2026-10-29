@@ -13,6 +13,7 @@ mod frontend;
 mod lir;
 #[cfg(all(test, feature = "slow-tests"))]
 mod numbering_tests;
+mod raw_model;
 mod runtime;
 #[cfg(test)]
 mod testing;
@@ -83,9 +84,9 @@ use std::{
 
 use backend::BackendPlan;
 use frontend::{SourceInput, cfg::CfgContext};
+use raw_model::RawModelInputs;
 use runtime::{
-    RawModelInputs, RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, Rt0Demand,
-    RuntimeRawContractV1,
+    RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, Rt0Demand, RuntimeRawContractV1,
 };
 
 /// 一次 bootstrap 编译请求。
@@ -652,28 +653,30 @@ impl Compiler {
             }
         };
         // runtime glue 绑定：被 LIR 引用的 glue 在此解析为镜像内定义；失败在写出前闭环。
-        let glues = match runtime::RuntimeGlueBindings::resolve(&resources, &frontend.hir, &lir) {
-            Ok(glues) => glues,
-            Err(error) => {
-                diagnostics.push(error);
-                graph.fail(ActionKind::BuildIr, "runtime glue 绑定失败");
-                graph.skip_after(ActionKind::BuildIr, "runtime glue 绑定无效");
-                diagnostics.sort();
-                return Compilation {
-                    graph,
-                    diagnostics,
-                    source_map,
-                    image_plan: None,
-                    hir: Some(frontend.hir),
-                    gir: Some(frontend.gir),
-                    gir_stats: frontend.gir_stats,
-                    lir: Some(lir),
-                    raw_contract: None,
-                    x64: None,
-                    action_key: None,
-                };
-            }
-        };
+        let glues =
+            match backend::x64::glue::RuntimeGlueBindings::resolve(&resources, &frontend.hir, &lir)
+            {
+                Ok(glues) => glues,
+                Err(error) => {
+                    diagnostics.push(error);
+                    graph.fail(ActionKind::BuildIr, "runtime glue 绑定失败");
+                    graph.skip_after(ActionKind::BuildIr, "runtime glue 绑定无效");
+                    diagnostics.sort();
+                    return Compilation {
+                        graph,
+                        diagnostics,
+                        source_map,
+                        image_plan: None,
+                        hir: Some(frontend.hir),
+                        gir: Some(frontend.gir),
+                        gir_stats: frontend.gir_stats,
+                        lir: Some(lir),
+                        raw_contract: None,
+                        x64: None,
+                        action_key: None,
+                    };
+                }
+            };
         let gc_metadata = match frontend::gc::derive(
             &frontend.mono.universe,
             &frontend.gir,
@@ -772,7 +775,7 @@ impl Compiler {
         };
         // 栈图与压缩引用来自同一次栈图世界推导：压缩根槽与解码点必须与同一份 LIR 对齐。
         let (stackmap_demand, compression_demand) = lir.stackmap_demands(frontend.hir.module());
-        let raw_contract = match runtime::run(
+        let raw_contract = match raw_model::run(
             RawModelInputs {
                 target,
                 // cage profile 是编译期策略：demand 由优化后 LIR 推导，policy 必须在
@@ -802,7 +805,6 @@ impl Compiler {
                 profile: runtime::PlatformProfile::from(target),
                 lir_fingerprint: lir.fingerprint(),
                 placement_fingerprint: frontend.gir.placement.fingerprint,
-                sources: &source_map,
                 hir: frontend.hir.module(),
                 gir: &frontend.mono.contracts,
                 resources: &resources,
@@ -3191,7 +3193,7 @@ mod tests {
         );
         let hir = compilation.hir.as_ref().expect("HIR 已冻结");
         let lir = compilation.lir.as_ref().expect("LIR 已冻结");
-        let error = runtime::RuntimeGlueBindings::resolve_defs(&defs, hir, lir)
+        let error = crate::backend::x64::glue::RuntimeGlueBindings::resolve_defs(&defs, hir, lir)
             .expect_err("分配 op 隐含的 glue 缺失定义必须失败");
         assert_eq!(error.code(), DiagnosticCode::RuntimeGlueBinding);
         assert!(

@@ -16,6 +16,7 @@ use super::compression_schema::{
 use super::coroutine_schema::{CoroutineDemand, CoroutineRuntimeContract};
 use super::edge_schema::{EdgeDemand, EdgeRuntimeContract};
 use super::foreign_schema::{ForeignDemand, ForeignRuntimeContract};
+use super::fragment_code::{MainReturnCode, MorestackEntryCode};
 use super::gc_metadata_contract::GcMetadataRuntimeContract;
 use super::gc_metadata_schema::GcMetadataDemand;
 #[cfg(test)]
@@ -43,10 +44,7 @@ use super::{
     RETURN_SLAB_CACHE_SETS, RETURN_SLAB_CACHE_WAYS, TARGET_CACHE_ENTRIES,
 };
 use crate::tuning::{CACHE_LINE_BYTES, QUEUE_PAD_BYTES, RUNTIME_TUNING_PROFILE};
-use crate::{
-    Diagnostic, DiagnosticCode, SourceMap, TargetName,
-    query::{QueryEngine, QueryKey, QueryKind, QueryResult},
-};
+use crate::{Diagnostic, DiagnosticCode, TargetName};
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
@@ -711,6 +709,17 @@ impl RuntimeRawContractV1 {
         self.fingerprint = self.compute_fingerprint();
         self.verify()?;
         Ok(self)
+    }
+
+    /// 注入 backend 编码的 morestack 与 main 返回片段；字节由 backend 对照编码器逐字节比对。
+    pub(crate) fn with_coroutine_code(
+        mut self,
+        morestack: MorestackEntryCode,
+        main_return: MainReturnCode,
+    ) -> Self {
+        self.coroutine = self.coroutine.with_code(morestack, main_return);
+        self.fingerprint = self.compute_fingerprint();
+        self
     }
 
     /// 返回 schema 版本。
@@ -1562,191 +1571,4 @@ fn hex(bytes: &[u8]) -> String {
         text.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     text
-}
-/// 契约 query 的输入集合。
-pub(crate) struct RawModelInputs<'a> {
-    pub(crate) target: TargetName,
-    pub(crate) policy: RawPlanePolicyV1,
-    /// 平台 profile；决定平台常量、失败映射与 extent 阶梯的端点。
-    pub(crate) profile: PlatformProfile,
-    pub(crate) demand: RawPlaneDemand,
-    pub(crate) resource_demand: RawResourceDemand,
-    /// rt0 启动需求视图：入口存在性与 main 返回类型。
-    pub(crate) rt0_demand: Rt0Demand,
-    pub(crate) scheduler_demand: SchedulerDemand,
-    /// 等待源需求视图：channel / Join / select 调用计数。
-    pub(crate) wait_demand: WaitDemand,
-    /// 同步需求视图：atomic / mutex / rwlock / condvar / once / cancel 操作计数。
-    pub(crate) sync_demand: SyncDemand,
-    /// 栈图需求视图：逻辑函数、安全点、kind 分类与根字数。
-    pub(crate) stackmap_demand: StackMapDemand,
-    /// GC metadata 需求视图：类型表大小、trace/value program 字节数与 arena 布局。
-    pub(crate) gc_metadata_demand: GcMetadataDemand,
-    /// barrier 需求视图：permit 额度、reserved/bare 屏障与 edge summary 站点。
-    pub(crate) barrier_demand: BarrierDemand,
-    /// pacing 需求视图：分配站点、屏障站点、assist slow edge 与受管类型数。
-    pub(crate) pacing_demand: GcPacingDemand,
-    /// mark 需求视图：根站点、屏障站点、shared 站点与 edge delta 站点。
-    pub(crate) mark_demand: MarkDemand,
-    /// LocalHeap 需求视图：placement 站点、类型 footprint 与屏障站点。
-    pub(crate) local_heap_demand: LocalHeapDemand,
-    /// 压缩需求视图：解码点与压缩根槽上界。
-    pub(crate) compression_demand: CompressionDemand,
-    /// 已由 frontend 编码的真实 type/meta section。
-    pub(crate) gc_type_section: &'a [u8],
-    pub(crate) gc_metadata_section: &'a [u8],
-    /// 生成契约所依据的 LIR 输入指纹。
-    pub(crate) lir_fingerprint: [u8; 32],
-    /// placement world 指纹。
-    pub(crate) placement_fingerprint: [u8; 32],
-    pub(crate) sources: &'a SourceMap,
-    pub(crate) hir: &'a crate::frontend::hir::Module,
-    pub(crate) gir: &'a [crate::frontend::gir::concrete::RecordTypes],
-    pub(crate) resources: &'a super::RuntimeResources<'a>,
-}
-
-/// 通过 query 构建并校验契约对象；失败进入 `E0058`。
-pub(crate) fn run(
-    inputs: RawModelInputs<'_>,
-    queries: &QueryEngine,
-) -> Result<RuntimeRawContractV1, Vec<Diagnostic>> {
-    let mut key_bytes = crate::canonical::to_vec(&(
-        inputs.policy,
-        inputs.demand,
-        inputs.resource_demand,
-        inputs.rt0_demand,
-        inputs.scheduler_demand,
-        inputs.wait_demand,
-        inputs.sync_demand,
-        inputs.stackmap_demand,
-        inputs.gc_metadata_demand,
-        inputs.barrier_demand,
-        inputs.pacing_demand,
-        inputs.mark_demand,
-        inputs.local_heap_demand,
-        inputs.compression_demand,
-        inputs.gc_type_section,
-        inputs.gc_metadata_section,
-    ))
-    .expect("runtime需求与策略可序列化");
-    key_bytes.extend_from_slice(&inputs.lir_fingerprint);
-    key_bytes.extend_from_slice(&inputs.placement_fingerprint);
-    key_bytes.extend_from_slice(&crate::canonical::to_vec(inputs.gir).expect("契约类型目录编码"));
-    key_bytes.extend_from_slice(inputs.target.to_string().as_bytes());
-    key_bytes.extend_from_slice(inputs.profile.name().as_bytes());
-    let key = QueryKey::new(QueryKind::RuntimeRawModel, RAW_MODEL_SCHEMA, &key_bytes);
-    let mut fresh = None;
-    let result: QueryResult = queries
-        .compute(key, |context| {
-            context.record_dependency(
-                QueryKey::new(
-                    QueryKind::BuildLir,
-                    crate::lir::SCHEMA,
-                    inputs.lir_fingerprint,
-                ),
-                inputs.lir_fingerprint,
-            );
-            context.record_dependency(
-                QueryKey::new(
-                    QueryKind::EscapeAndPlacement,
-                    1,
-                    inputs.placement_fingerprint,
-                ),
-                inputs.placement_fingerprint,
-            );
-            let contract = RuntimeRawContractV1::build(
-                inputs.target,
-                inputs.policy,
-                inputs.demand,
-                inputs.resource_demand,
-                inputs.rt0_demand,
-                inputs.scheduler_demand,
-                inputs.wait_demand,
-                inputs.sync_demand,
-                inputs.stackmap_demand,
-                inputs.gc_metadata_demand,
-                inputs.barrier_demand,
-                inputs.pacing_demand,
-                inputs.mark_demand,
-                inputs.local_heap_demand,
-                inputs.compression_demand,
-                inputs.profile,
-            )
-            .and_then(|contract| {
-                contract.with_gc_sections(
-                    inputs.gc_type_section.to_vec(),
-                    inputs.gc_metadata_section.to_vec(),
-                )
-            })
-            .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            super::coroutine_layout::verify_source(
-                contract.coroutine(),
-                inputs.hir,
-                inputs.gir,
-                inputs.resources,
-            )
-            .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
-                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
-                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
-                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            super::local_heap_layout::verify_source(contract.local_heap(), inputs.hir, inputs.gir)
-                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            super::shared_heap_layout::verify_source(
-                contract.shared_heap(),
-                inputs.hir,
-                inputs.gir,
-            )
-            .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            super::mark_layout::verify_source(contract.mark(), inputs.hir, inputs.gir)
-                .map_err(|error| crate::query::QueryError::Failed(error.message().to_owned()))?;
-            let bytes = crate::canonical::to_vec(&contract).expect("runtime raw 契约编码");
-            fresh = Some(contract);
-            Ok((bytes, Vec::new()))
-        })
-        .map_err(|error| {
-            vec![Diagnostic::error(
-                DiagnosticCode::RuntimeRawInvariant,
-                error.to_string(),
-                None,
-            )]
-        })?;
-    if let Some(contract) = fresh {
-        return Ok(contract);
-    }
-    let contract: RuntimeRawContractV1 =
-        crate::canonical::from_slice(result.payload()).map_err(|_| {
-            vec![RawModelError::new("缓存的 runtime raw 契约不是合法 schema").diagnostic()]
-        })?;
-    if contract.target_semantics() != inputs.target.name() || contract.policy() != &inputs.policy {
-        return Err(vec![
-            RawModelError::new("缓存 runtime raw 契约与当前目标或策略不一致").diagnostic(),
-        ]);
-    }
-    contract
-        .verify()
-        .map_err(|error| vec![error.diagnostic()])?;
-    super::coroutine_layout::verify_source(
-        contract.coroutine(),
-        inputs.hir,
-        inputs.gir,
-        inputs.resources,
-    )
-    .map_err(|error| vec![error.diagnostic()])?;
-    super::channel_layout::verify_source(contract.wait(), inputs.hir, inputs.gir)
-        .map_err(|error| vec![error.diagnostic()])?;
-    super::sync_layout::verify_source(contract.sync(), inputs.hir, inputs.gir)
-        .map_err(|error| vec![error.diagnostic()])?;
-    super::barrier_layout::verify_source(contract.barrier(), inputs.hir, inputs.gir)
-        .map_err(|error| vec![error.diagnostic()])?;
-    super::local_heap_layout::verify_source(contract.local_heap(), inputs.hir, inputs.gir)
-        .map_err(|error| vec![error.diagnostic()])?;
-    super::shared_heap_layout::verify_source(contract.shared_heap(), inputs.hir, inputs.gir)
-        .map_err(|error| vec![error.diagnostic()])?;
-    super::mark_layout::verify_source(contract.mark(), inputs.hir, inputs.gir)
-        .map_err(|error| vec![error.diagnostic()])?;
-    let _ = inputs.sources;
-    Ok(contract)
 }

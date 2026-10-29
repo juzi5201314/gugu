@@ -135,7 +135,7 @@ fn machine_calls_that_park_leave_a_call_return_record() {
 /// 「只排片段世界」这类漂移，而不是复用被测实现自我印证。机器片段与 glue Item 实例共用
 /// `__gugu_runtime_*` 前缀，两者必然交错。
 fn code_layout(world: &X64World, target: TargetName) -> Vec<u64> {
-    let machine: Vec<(String, u64)> = runtime::fragments::registered_fragments(target)
+    let machine: Vec<(String, u64)> = crate::backend::x64::fragments::registered_fragments(target)
         .iter()
         .map(|blob| {
             (

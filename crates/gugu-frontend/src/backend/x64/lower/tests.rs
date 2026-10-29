@@ -972,8 +972,8 @@ fn invalid_operands_and_foreign_ops_are_rejected() {
 
 #[test]
 fn runtime_glue_gate_accepts_declared_and_rejects_unknown_names() {
-    assert!(crate::runtime::glue_is_declared("gc_alloc_slow"));
-    assert!(crate::runtime::glue_is_declared("value_repeat"));
+    assert!(crate::backend::x64::glue::glue_is_declared("gc_alloc_slow"));
+    assert!(crate::backend::x64::glue::glue_is_declared("value_repeat"));
     assert_eq!(
         lowering::ensure_runtime_glue("not_a_runtime_entry"),
         Err(LoweringError::UnregisteredGlue {

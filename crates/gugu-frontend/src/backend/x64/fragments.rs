@@ -11,14 +11,9 @@
 //!
 //! 片段内 `rel32`/`disp32` 修补点以 [`Relocation`] 形式登记（偏移相对片段起点）：目标 glue
 //! 名经 `mangle_runtime`/`mangle_symbol` 生成符号名，由镜像 writer 按绑定表与目录解析。
-//! 片段字节、入口偏移与 revision 进入 `CoroutineRuntimeContract` schema 2。
+//! morestack 与 main 返回片段同时进入 `CoroutineRuntimeContract` schema 2：driver 注入本模块
+//! 编码的字节，[`verify_coroutine_code`] 在消费契约前逐字节比对。
 
-use super::context::ContextSwitchCode;
-use super::coroutine::{CoroutineCold, MorestackMailbox, MorestackScratch};
-use super::coroutine_layout::{
-    COROUTINE_PACK_FLOAT_LANES, coroutine_pack_float_offset, coroutine_pack_integer_offset,
-};
-use super::processor;
 use crate::backend::x64::encode;
 use crate::backend::x64::inst::{Operand, RelocKind, RelocTarget, Relocation};
 use crate::backend::x64::lower::{Builder, gpr, imm, mem_base, reg, xmm};
@@ -28,6 +23,12 @@ use crate::backend::x64::table::{Access, OperandKind};
 use crate::hash::hash_domain;
 use crate::lir::body::Symbol;
 use crate::runtime::PlatformOp;
+use crate::runtime::coroutine::{CoroutineCold, MorestackMailbox, MorestackScratch};
+use crate::runtime::{
+    COROUTINE_PACK_FLOAT_LANES, ContextSwitchCode, CoroutineRuntimeContract, FragmentPatch,
+    MainReturnCode, MorestackEntryCode, RawModelError, coroutine_pack_float_offset,
+    coroutine_pack_integer_offset, processor,
+};
 use crate::target::TargetName;
 use std::mem::offset_of;
 
@@ -47,7 +48,7 @@ const XMMRM_XMM: &[OperandKind] = &[OperandKind::XmmRm, OperandKind::Xmm];
 /// 调度返回原因，写在 runtime 状态区邮箱之后的空闲字。0 是 morestack，1 是主动让出，2 是协程返回。
 ///
 /// 偏移来自 `entry::state` 的唯一契约，片段与镜像 runtime 共用同一份；这里只做窄化。
-const SCHEDULE_REASON: i32 = super::entry::state::REASON as i32;
+const SCHEDULE_REASON: i32 = crate::runtime::entry::state::REASON as i32;
 
 /// 片段内的一个入口符号。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -97,37 +98,6 @@ pub(crate) struct FragmentBlob {
 
 /// morestack 邮箱字段偏移的唯一来源是 `MorestackMailbox` 结构；片段是这些偏移的机器级消费者。
 
-/// 片段内的一个 4 字节 PC 相对修补点（字段偏移相对片段起点）。
-///
-/// 目标以 glue 名表达：镜像 writer 按绑定表解析为镜像内符号（函数实例、数据保留区或片段
-/// 入口），bench 与调试器按同一份字段自行打补丁。`addend` 用于 RIP 相对数据引用的字段内位移。
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct FragmentPatch {
-    /// `rel32`/`disp32` 字段在片段字节内的偏移。
-    pub field: u32,
-    /// 目标 glue 名（`mangle_runtime` 的输入）。
-    pub glue: String,
-    /// 字段内位移。
-    pub addend: i32,
-}
-
-/// `morestack_or_poll` 片段：[`MorestackEntryCode::fixed`] 的产物。
-///
-/// 入口 `rsp` 指向 return PC，`r14 = CoroutineSlot*`，`r15 = LogicalProcessor*`，`r11` 是候选
-/// 低水位；除 `r11`/`rsp` 外不写入口寄存器，也不读写候选以下的用户栈。`patches` 指向
-/// `morestack_mailbox` 数据区与 `context_switch` 片段。
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct MorestackEntryCode {
-    /// 内部边界与字节的版本。
-    pub revision: u32,
-    /// 经 `context_restore` 回到协程后的续点偏移。
-    pub resume_offset: u32,
-    /// 指令字节。
-    pub bytes: Vec<u8>,
-    /// 修补点，按字段偏移升序。
-    pub patches: Vec<FragmentPatch>,
-}
-
 /// 编码器输出的通用片段：固定字节 + 修补点。
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Encoded {
@@ -157,162 +127,160 @@ fn finish(builder: Builder) -> Encoded {
     }
 }
 
-impl MorestackEntryCode {
-    /// 固定内部边界：入口 `rsp` 指向 return PC，`r14 = CoroutineSlot*`，`r15 = LogicalProcessor*`，
-    /// `r11` 是候选低水位。除 `r11`/`rsp` 外不写入口寄存器，也不读写候选以下的用户栈。
-    pub(crate) fn fixed() -> Self {
-        let scratch = field_offset(offset_of!(CoroutineCold, morestack_scratch));
-        let return_pc = scratch + field_offset(offset_of!(MorestackScratch, return_pc));
-        let gprs = scratch + field_offset(offset_of!(MorestackScratch, gpr));
-        let xmms = scratch + field_offset(offset_of!(MorestackScratch, xmm));
-        let context = field_offset(offset_of!(CoroutineCold, context));
-        let mailbox_hot = field_offset(offset_of!(MorestackMailbox, hot));
-        let mailbox_entry_rsp = field_offset(offset_of!(MorestackMailbox, entry_rsp));
-        let mailbox_candidate = field_offset(offset_of!(MorestackMailbox, candidate));
-        let mailbox_required = field_offset(offset_of!(MorestackMailbox, required));
-        let mailbox_cold = field_offset(offset_of!(MorestackMailbox, cold));
-        let mailbox_system_context = field_offset(offset_of!(MorestackMailbox, system_context));
-        let mut builder = Builder::new();
-        let mut planned: Vec<(&'static str, i32)> = Vec::new();
-        // 入口登记与 required：candidate 在 r11，算完即释放 r11。
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![
-                mailbox_operand(&mut planned, mailbox_hot),
-                reg(gpr(Gpr::R14)),
-            ],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![
-                mailbox_operand(&mut planned, mailbox_entry_rsp),
-                reg(gpr(Gpr::Rsp)),
-            ],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![
-                mailbox_operand(&mut planned, mailbox_candidate),
-                reg(gpr(Gpr::R11)),
-            ],
-        );
-        // required = entry_rsp + 8 - candidate：candidate 已入 mailbox，r11 复用为计算寄存器。
-        builder.emit(
-            "sub",
-            RM64_R64,
-            Access::ReadWrite,
-            vec![reg(gpr(Gpr::R11)), reg(gpr(Gpr::Rsp))],
-        );
-        builder.emit("neg", RM64, Access::ReadWrite, vec![reg(gpr(Gpr::R11))]);
-        builder.emit(
-            "add",
-            RM64_IMM32,
-            Access::ReadWrite,
-            vec![reg(gpr(Gpr::R11)), imm(8)],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![
-                mailbox_operand(&mut planned, mailbox_required),
-                reg(gpr(Gpr::R11)),
-            ],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Read,
-            vec![
-                mailbox_operand(&mut planned, mailbox_cold),
-                reg(gpr(Gpr::R11)),
-            ],
-        );
-        save_parameter_registers(&mut builder, reg(gpr(Gpr::R11)), gprs, xmms);
-        // return PC 与 hot：rax 的入口值已入 scratch，可自由中转 `[rsp]`。
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Read,
-            vec![mem_base(gpr(Gpr::Rsp), 0), reg(gpr(Gpr::Rax))],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![mem_base(gpr(Gpr::R11), return_pc), reg(gpr(Gpr::Rax))],
-        );
-        // context_switch 的内部 ABI：rax=save、rbx=restore、rcx=hot、rdx=processor。
-        // 入口 rbx 已在 scratch 中保存，此处可安全复用。
-        builder.emit(
-            "lea",
-            MEM_R64,
-            Access::Address,
-            vec![mem_base(gpr(Gpr::R11), context), reg(gpr(Gpr::Rax))],
-        );
-        builder.emit(
-            "lea",
-            MEM_R64,
-            Access::Address,
-            vec![
-                mailbox_operand(&mut planned, mailbox_system_context),
-                reg(gpr(Gpr::Rbx)),
-            ],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![reg(gpr(Gpr::Rcx)), reg(gpr(Gpr::R14))],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![reg(gpr(Gpr::Rdx)), reg(gpr(Gpr::R15))],
-        );
-        planned.push(("context_switch", 0));
-        builder.emit(
-            "call",
-            REL32,
-            Access::Read,
-            vec![Operand::Reloc(
-                RelocTarget::Lir(glue_symbol("context_switch")),
-                RelocKind::PcRel32,
-            )],
-        );
-        let resume_index = builder.instruction_count();
-        // 续点：系统侧恢复 context 后落回这里；装载修正后的 scratch 并 `ret` 回 prologue。
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Read,
-            vec![
-                mailbox_operand(&mut planned, mailbox_cold),
-                reg(gpr(Gpr::R11)),
-            ],
-        );
-        restore_parameter_registers(&mut builder, reg(gpr(Gpr::R11)), gprs, xmms);
-        builder.emit("ret", &[], Access::Read, Vec::new());
-        let lowered = builder.finish();
-        let assembled = encode::assemble(&lowered.sequence).expect("morestack 片段编码");
-        let resume_offset = assembled
-            .instruction_offsets
-            .iter()
-            .find_map(|(index, offset)| (*index == resume_index).then_some(*offset))
-            .expect("续点指令存在偏移");
-        Self {
-            revision: 1,
-            resume_offset,
-            bytes: assembled.bytes,
-            patches: patch_list(&assembled.relocations, &planned),
-        }
+/// 固定内部边界：入口 `rsp` 指向 return PC，`r14 = CoroutineSlot*`，`r15 = LogicalProcessor*`，
+/// `r11` 是候选低水位。除 `r11`/`rsp` 外不写入口寄存器，也不读写候选以下的用户栈。
+pub(crate) fn morestack_entry_code() -> MorestackEntryCode {
+    let scratch = field_offset(offset_of!(CoroutineCold, morestack_scratch));
+    let return_pc = scratch + field_offset(offset_of!(MorestackScratch, return_pc));
+    let gprs = scratch + field_offset(offset_of!(MorestackScratch, gpr));
+    let xmms = scratch + field_offset(offset_of!(MorestackScratch, xmm));
+    let context = field_offset(offset_of!(CoroutineCold, context));
+    let mailbox_hot = field_offset(offset_of!(MorestackMailbox, hot));
+    let mailbox_entry_rsp = field_offset(offset_of!(MorestackMailbox, entry_rsp));
+    let mailbox_candidate = field_offset(offset_of!(MorestackMailbox, candidate));
+    let mailbox_required = field_offset(offset_of!(MorestackMailbox, required));
+    let mailbox_cold = field_offset(offset_of!(MorestackMailbox, cold));
+    let mailbox_system_context = field_offset(offset_of!(MorestackMailbox, system_context));
+    let mut builder = Builder::new();
+    let mut planned: Vec<(&'static str, i32)> = Vec::new();
+    // 入口登记与 required：candidate 在 r11，算完即释放 r11。
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![
+            mailbox_operand(&mut planned, mailbox_hot),
+            reg(gpr(Gpr::R14)),
+        ],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![
+            mailbox_operand(&mut planned, mailbox_entry_rsp),
+            reg(gpr(Gpr::Rsp)),
+        ],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![
+            mailbox_operand(&mut planned, mailbox_candidate),
+            reg(gpr(Gpr::R11)),
+        ],
+    );
+    // required = entry_rsp + 8 - candidate：candidate 已入 mailbox，r11 复用为计算寄存器。
+    builder.emit(
+        "sub",
+        RM64_R64,
+        Access::ReadWrite,
+        vec![reg(gpr(Gpr::R11)), reg(gpr(Gpr::Rsp))],
+    );
+    builder.emit("neg", RM64, Access::ReadWrite, vec![reg(gpr(Gpr::R11))]);
+    builder.emit(
+        "add",
+        RM64_IMM32,
+        Access::ReadWrite,
+        vec![reg(gpr(Gpr::R11)), imm(8)],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![
+            mailbox_operand(&mut planned, mailbox_required),
+            reg(gpr(Gpr::R11)),
+        ],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![
+            mailbox_operand(&mut planned, mailbox_cold),
+            reg(gpr(Gpr::R11)),
+        ],
+    );
+    save_parameter_registers(&mut builder, reg(gpr(Gpr::R11)), gprs, xmms);
+    // return PC 与 hot：rax 的入口值已入 scratch，可自由中转 `[rsp]`。
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::Rsp), 0), reg(gpr(Gpr::Rax))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![mem_base(gpr(Gpr::R11), return_pc), reg(gpr(Gpr::Rax))],
+    );
+    // context_switch 的内部 ABI：rax=save、rbx=restore、rcx=hot、rdx=processor。
+    // 入口 rbx 已在 scratch 中保存，此处可安全复用。
+    builder.emit(
+        "lea",
+        MEM_R64,
+        Access::Address,
+        vec![mem_base(gpr(Gpr::R11), context), reg(gpr(Gpr::Rax))],
+    );
+    builder.emit(
+        "lea",
+        MEM_R64,
+        Access::Address,
+        vec![
+            mailbox_operand(&mut planned, mailbox_system_context),
+            reg(gpr(Gpr::Rbx)),
+        ],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![reg(gpr(Gpr::Rcx)), reg(gpr(Gpr::R14))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![reg(gpr(Gpr::Rdx)), reg(gpr(Gpr::R15))],
+    );
+    planned.push(("context_switch", 0));
+    builder.emit(
+        "call",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(
+            RelocTarget::Lir(glue_symbol("context_switch")),
+            RelocKind::PcRel32,
+        )],
+    );
+    let resume_index = builder.instruction_count();
+    // 续点：系统侧恢复 context 后落回这里；装载修正后的 scratch 并 `ret` 回 prologue。
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![
+            mailbox_operand(&mut planned, mailbox_cold),
+            reg(gpr(Gpr::R11)),
+        ],
+    );
+    restore_parameter_registers(&mut builder, reg(gpr(Gpr::R11)), gprs, xmms);
+    builder.emit("ret", &[], Access::Read, Vec::new());
+    let lowered = builder.finish();
+    let assembled = encode::assemble(&lowered.sequence).expect("morestack 片段编码");
+    let resume_offset = assembled
+        .instruction_offsets
+        .iter()
+        .find_map(|(index, offset)| (*index == resume_index).then_some(*offset))
+        .expect("续点指令存在偏移");
+    MorestackEntryCode {
+        revision: 1,
+        resume_offset,
+        bytes: assembled.bytes,
+        patches: patch_list(&assembled.relocations, &planned),
     }
 }
 
@@ -465,92 +433,88 @@ impl ProcessExitCode {
     }
 }
 
-/// main 返回哨兵：main 的 `ret` 落到这里，把退出值记进 mailbox，再单向恢复系统上下文。
-///
-/// 入口 `rax` 是 main 的返回值（`main` 返回 `()` 时无意义，按退出码 0 处理）；`rsp` 指向
-/// `rt0_start` 预植的返回槽。片段不保存任何可恢复 PC：恢复系统上下文后不再回到这里。
-#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct MainReturnCode {
-    /// 内部边界的版本。
-    pub(crate) revision: u32,
-    /// 指令字节。
-    pub(crate) bytes: Vec<u8>,
-    /// 修补点，按字段偏移升序。
-    pub(crate) patches: Vec<FragmentPatch>,
+/// 用户 main 返回后记录退出值、清除当前协程，再以内部 ABI
+/// （rax=system context、rbx=hot、rcx=processor）跳入独立 restore 入口。
+pub(crate) fn main_return_code() -> MainReturnCode {
+    let return_value = field_offset(offset_of!(MorestackMailbox, return_value));
+    let system_context = field_offset(offset_of!(MorestackMailbox, system_context));
+    let hot = field_offset(offset_of!(MorestackMailbox, hot));
+    let processor = field_offset(offset_of!(MorestackMailbox, processor));
+    let mut builder = Builder::new();
+    let mut planned: Vec<(&'static str, i32)> = Vec::new();
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![
+            mailbox_operand(&mut planned, return_value),
+            reg(gpr(Gpr::Rax)),
+        ],
+    );
+    builder.emit(
+        "lea",
+        MEM_R64,
+        Access::Address,
+        vec![
+            mailbox_operand(&mut planned, system_context),
+            reg(gpr(Gpr::Rax)),
+        ],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mailbox_operand(&mut planned, hot), reg(gpr(Gpr::Rbx))],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![mailbox_operand(&mut planned, processor), reg(gpr(Gpr::Rcx))],
+    );
+    builder.emit(
+        "mov",
+        R32_IMM32,
+        Access::Write,
+        vec![reg(gpr(Gpr::Rdx)), imm(2)],
+    );
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Write,
+        vec![
+            mailbox_operand(&mut planned, SCHEDULE_REASON),
+            reg(gpr(Gpr::Rdx)),
+        ],
+    );
+    planned.push(("context_restore", 0));
+    builder.emit(
+        "jmp",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(
+            RelocTarget::Lir(glue_symbol("context_restore")),
+            RelocKind::PcRel32,
+        )],
+    );
+    let encoded = finish(builder);
+    MainReturnCode {
+        revision: 2,
+        patches: patch_list(&encoded.relocations, &planned),
+        bytes: encoded.bytes,
+    }
 }
 
-impl MainReturnCode {
-    /// 用户 main 返回后记录退出值、清除当前协程，再以内部 ABI
-    /// （rax=system context、rbx=hot、rcx=processor）跳入独立 restore 入口。
-    pub(crate) fn fixed() -> Self {
-        let return_value = field_offset(offset_of!(MorestackMailbox, return_value));
-        let system_context = field_offset(offset_of!(MorestackMailbox, system_context));
-        let hot = field_offset(offset_of!(MorestackMailbox, hot));
-        let processor = field_offset(offset_of!(MorestackMailbox, processor));
-        let mut builder = Builder::new();
-        let mut planned: Vec<(&'static str, i32)> = Vec::new();
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![
-                mailbox_operand(&mut planned, return_value),
-                reg(gpr(Gpr::Rax)),
-            ],
-        );
-        builder.emit(
-            "lea",
-            MEM_R64,
-            Access::Address,
-            vec![
-                mailbox_operand(&mut planned, system_context),
-                reg(gpr(Gpr::Rax)),
-            ],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Read,
-            vec![mailbox_operand(&mut planned, hot), reg(gpr(Gpr::Rbx))],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Read,
-            vec![mailbox_operand(&mut planned, processor), reg(gpr(Gpr::Rcx))],
-        );
-        builder.emit(
-            "mov",
-            R32_IMM32,
-            Access::Write,
-            vec![reg(gpr(Gpr::Rdx)), imm(2)],
-        );
-        builder.emit(
-            "mov",
-            RM64_R64,
-            Access::Write,
-            vec![
-                mailbox_operand(&mut planned, SCHEDULE_REASON),
-                reg(gpr(Gpr::Rdx)),
-            ],
-        );
-        planned.push(("context_restore", 0));
-        builder.emit(
-            "jmp",
-            REL32,
-            Access::Read,
-            vec![Operand::Reloc(
-                RelocTarget::Lir(glue_symbol("context_restore")),
-                RelocKind::PcRel32,
-            )],
-        );
-        let encoded = finish(builder);
-        Self {
-            revision: 2,
-            patches: patch_list(&encoded.relocations, &planned),
-            bytes: encoded.bytes,
-        }
+/// 契约携带的 morestack 与 main 返回片段必须与本编码器的产物逐字节一致。
+pub(crate) fn verify_coroutine_code(
+    contract: &CoroutineRuntimeContract,
+) -> Result<(), RawModelError> {
+    if contract.morestack != morestack_entry_code() || contract.main_return != main_return_code() {
+        return Err(RawModelError::new(
+            "协程契约的 morestack 或 main 返回片段与 backend 编码器产物不一致",
+        ));
     }
+    Ok(())
 }
 
 /// 由公开修补点视图生成片段重定位。
@@ -1453,11 +1417,11 @@ fn safepoint_slow_fragment() -> FragmentBlob {
 fn gc_enter_fragment() -> FragmentBlob {
     let mut builder = Builder::new();
     let state = i32::try_from(processor::PROCESSOR_STATE_OFFSET).expect("状态区偏移适配 i32");
-    let coordinator =
-        i32::try_from(super::entry::state::COORDINATOR).expect("coordinator 槽偏移适配 i32");
-    let entry_rsp = super::collect_layout::COORDINATOR_ENTRY_RSP_OFFSET;
-    let saved_rsp = super::collect_layout::COORDINATOR_SAVED_RSP_OFFSET;
-    let system_top = super::collect_layout::COORDINATOR_SYSTEM_TOP_OFFSET;
+    let coordinator = i32::try_from(crate::runtime::entry::state::COORDINATOR)
+        .expect("coordinator 槽偏移适配 i32");
+    let entry_rsp = crate::runtime::collect_layout::COORDINATOR_ENTRY_RSP_OFFSET;
+    let saved_rsp = crate::runtime::collect_layout::COORDINATOR_SAVED_RSP_OFFSET;
+    let system_top = crate::runtime::collect_layout::COORDINATOR_SYSTEM_TOP_OFFSET;
     // r11 = coordinator（processor 在 r15）。
     builder.emit(
         "mov",
@@ -1473,8 +1437,8 @@ fn gc_enter_fragment() -> FragmentBlob {
     );
     // system 模式下 r14 指向 collector 自己的栈描述符：否则收集器在 system stack 上执行时，
     // 栈检查仍拿 mutator 协程的 stack_check 比较，会误报 StackOverflow。
-    let system_descriptor = super::collect_layout::COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET;
-    let saved_r14 = super::collect_layout::COORDINATOR_SAVED_R14_OFFSET;
+    let system_descriptor = crate::runtime::collect_layout::COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET;
+    let saved_r14 = crate::runtime::collect_layout::COORDINATOR_SAVED_R14_OFFSET;
     builder.emit(
         "mov",
         RM64_R64,
@@ -1804,9 +1768,9 @@ pub(crate) const PLATFORM_OPS_WITH_CODE: [PlatformOp; 4] = [
 /// 目标平台的全部登记片段；一个 blob 可带多个入口（context 片段）。
 pub(crate) fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
     let context = ContextSwitchCode::fixed();
-    let morestack = MorestackEntryCode::fixed();
+    let morestack = morestack_entry_code();
     let exit = ProcessExitCode::fixed(target);
-    let main_return = MainReturnCode::fixed();
+    let main_return = main_return_code();
     let report = ReportWriteCode::fixed(target);
     let mut blobs = vec![
         FragmentBlob {
@@ -1979,7 +1943,38 @@ mod tests {
         assert_eq!(fragment.bytes, [0x4c, 0x89, 0xf0, 0xc3]);
     }
 
-    use crate::runtime::fragments::RelocKind;
+    /// 注入的 morestack/main 返回片段逐字节对照编码器：字节、长度、续点、版本与修补点
+    /// 任何一处被改都必须在 backend 消费契约前被拒。
+    #[test]
+    fn coroutine_code_corruption_is_rejected_before_consumption() {
+        use super::{main_return_code, morestack_entry_code, verify_coroutine_code};
+        use crate::runtime::{CoroutineDemand, CoroutineRuntimeContract};
+        let contract = CoroutineRuntimeContract::build(CoroutineDemand::default())
+            .unwrap()
+            .with_code(morestack_entry_code(), main_return_code());
+        verify_coroutine_code(&contract).expect("编码器产物自洽");
+        let corruptions: [(&str, fn(&mut CoroutineRuntimeContract)); 7] = [
+            ("改片段字节", |c| c.morestack.bytes[0] ^= 1),
+            ("截断片段", |c| {
+                let len = c.morestack.bytes.len();
+                c.morestack.bytes.truncate(len - 1);
+            }),
+            ("改续点偏移", |c| c.morestack.resume_offset += 1),
+            ("改片段版本", |c| c.morestack.revision += 1),
+            ("改修补点", |c| c.morestack.patches[0].field += 1),
+            ("改修补目标", |c| {
+                c.morestack.patches[0].glue = "context_restore".to_owned()
+            }),
+            ("改 main 返回字节", |c| c.main_return.bytes[0] ^= 1),
+        ];
+        for (label, corrupt) in corruptions {
+            let mut bad = contract.clone();
+            corrupt(&mut bad);
+            assert!(verify_coroutine_code(&bad).is_err(), "{label}必须被拒");
+        }
+    }
+
+    use crate::backend::x64::fragments::RelocKind;
 
     /// GC 配置由数据片段承载、访问器片段用 PC 相对 `lea` 取它的地址：记录字节与
     /// `GcImageConfig::canonical_bytes` 同源，访问器只有一个 PC 相对修补点。

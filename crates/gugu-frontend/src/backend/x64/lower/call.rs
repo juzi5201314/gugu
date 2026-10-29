@@ -45,8 +45,8 @@ pub(super) fn lower(
         // 分配 op 由 `lower/alloc.rs` 走专用四车道 ABI；这里显式拒绝，避免落到下面的目录分支。
         Op::GcAlloc { .. } | Op::RegionAlloc { .. } => Err(LoweringError::InvalidOperands),
         // 其余 runtime 入口全部来自同一份目录，名字不再在 lowering 里重复一遍。
-        op if crate::runtime::implied_glue(op).is_some() => {
-            let glue = crate::runtime::implied_glue(op).expect("目录已判定存在");
+        op if crate::backend::x64::glue::implied_glue(op).is_some() => {
+            let glue = crate::backend::x64::glue::implied_glue(op).expect("目录已判定存在");
             runtime_named(operands, results, builder, glue)
         }
         Op::Call(call) => emit_call(call, operands, results, ctx, builder),

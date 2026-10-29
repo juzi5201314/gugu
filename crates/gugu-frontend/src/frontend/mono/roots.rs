@@ -125,9 +125,9 @@ fn compute_roots(
         push(context, interner, &mut seeds, entry, RootCategoryV1::Entry)?;
     }
     if context.module.entry.is_some() {
-        for glue in crate::runtime::demand::IMAGE_ENTRIES {
-            let definition =
-                crate::runtime::demand::definition(context, glue).ok_or_else(|| {
+        for glue in crate::frontend::contract::demand::IMAGE_ENTRIES {
+            let definition = crate::frontend::contract::demand::definition(context, glue)
+                .ok_or_else(|| {
                     restore_error(&format!("镜像必需的 runtime 入口 `{glue}` 缺少执行定义"))
                 })?;
             push(

@@ -14,6 +14,8 @@ pub(crate) mod elf;
 #[cfg(test)]
 mod elf_tests;
 pub(crate) mod encode;
+pub(crate) mod fragments;
+pub(crate) mod glue;
 pub(crate) mod harness;
 mod harness_cases;
 pub(crate) mod inst;

@@ -16,6 +16,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
+use super::glue::RuntimeGlueBindings;
 use crate::Diagnostic;
 use crate::SourceMap;
 use crate::backend::x64::mangle;
@@ -26,7 +27,7 @@ use crate::hash::hash_domain;
 use crate::lir;
 use crate::lir::body::Body;
 use crate::query::{QueryEngine, QueryKey, QueryKind};
-use crate::runtime::{RAW_MODEL_SCHEMA, RuntimeGlueBindings, RuntimeRawContractV1};
+use crate::runtime::{RAW_MODEL_SCHEMA, RuntimeRawContractV1};
 use crate::target::TargetName;
 
 use super::alloc;
@@ -545,7 +546,7 @@ impl X64World {
             .iter()
             .flat_map(|fragment| fragment.symbols.iter().map(String::as_str))
             .collect();
-        crate::runtime::declared_glue_names()
+        crate::backend::x64::glue::declared_glue_names()
             .map(|name| {
                 let symbol = mangle::mangle_runtime(name);
                 (

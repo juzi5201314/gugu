@@ -1,18 +1,17 @@
-//! 从冻结 HIR 与独立签名布局目录交叉校验 MarkMailbox/credit/termination 记录布局。
+//! 从冻结 HIR 与独立签名布局目录交叉校验 LocalHeap arena metadata 记录布局。
 
 use super::contract_view::source_parameters;
-use super::mark_schema::MarkRuntimeContract;
-use super::model::RawModelError;
 use crate::frontend::{
     gir::concrete::{RecordTypes, TypeKind, TypeLayout},
     hir,
 };
+use crate::runtime::{LocalHeapRuntimeContract, RawModelError};
 use std::collections::BTreeSet;
 
-const SOURCE: &str = "std/runtime/mark.gg";
+const SOURCE: &str = "std/runtime/heap.gg";
 
-pub(super) fn verify_source(
-    contract: &MarkRuntimeContract,
+pub(crate) fn verify_source(
+    contract: &LocalHeapRuntimeContract,
     module: &hir::Module,
     gir: &[RecordTypes],
 ) -> Result<(), RawModelError> {
@@ -29,7 +28,9 @@ pub(super) fn verify_source(
         }
         let parameters = source_parameters(module, concrete.definition)?;
         if parameters.len() != concrete.parameters.len() {
-            return Err(RawModelError::new("mark 入口具体签名与冻结 HIR 不一致"));
+            return Err(RawModelError::new(
+                "LocalHeap 入口具体签名与冻结 HIR 不一致",
+            ));
         }
         let mut verifier = Verifier {
             contract,
@@ -50,7 +51,7 @@ pub(super) fn verify_source(
             .filter_map(|(record, found)| (!found).then_some(record.name.as_str()))
             .collect();
         return Err(RawModelError::new(format!(
-            "内建 Gugu mark 源缺少具体布局：{}",
+            "内建 Gugu LocalHeap 源缺少具体布局：{}",
             missing.join(", ")
         )));
     }
@@ -64,7 +65,7 @@ fn in_source(definition: &hir::Definition, module: &hir::Module) -> bool {
 }
 
 struct Verifier<'a> {
-    contract: &'a MarkRuntimeContract,
+    contract: &'a LocalHeapRuntimeContract,
     module: &'a hir::Module,
     types: &'a [TypeLayout],
     found: &'a mut [bool],
@@ -95,7 +96,7 @@ impl Verifier<'_> {
             ) => self.walk_aggregate(*definition, ty, variants),
             (hir::Type::Int { .. } | hir::Type::Unit, _) => Ok(()),
             _ => Err(RawModelError::new(
-                "mark record 含未登记的 managed 字段或表示",
+                "LocalHeap record 含未登记的 managed 字段或表示",
             )),
         }
     }
@@ -109,17 +110,17 @@ impl Verifier<'_> {
     ) -> Result<(), RawModelError> {
         let definition_value = &self.module.definitions[definition.index()];
         if !in_source(definition_value, self.module) {
-            return Err(RawModelError::new("mark record 包含未登记外部 record"));
+            return Err(RawModelError::new("LocalHeap record 包含未登记外部 record"));
         }
         let aggregate = self
             .module
             .aggregates
             .iter()
             .find(|aggregate| aggregate.definition == definition)
-            .ok_or_else(|| RawModelError::new("mark record 缺少 aggregate"))?;
+            .ok_or_else(|| RawModelError::new("LocalHeap record 缺少 aggregate"))?;
         let fields = &aggregate.variants[0].fields;
         if variants.len() != 1 || fields.len() != variants[0].len() {
-            return Err(RawModelError::new("mark record 字段集合不匹配"));
+            return Err(RawModelError::new("LocalHeap record 字段集合不匹配"));
         }
         if let Some(index) = self
             .contract
@@ -146,7 +147,7 @@ impl Verifier<'_> {
         let expected = &self.contract.records[index];
         let layout = ty
             .layout
-            .ok_or_else(|| RawModelError::new("mark record 布局未形成"))?;
+            .ok_or_else(|| RawModelError::new("LocalHeap record 布局未形成"))?;
         if layout.size != u64::from(expected.bytes) || layout.align != u64::from(expected.alignment)
         {
             return Err(RawModelError::new(format!(
@@ -158,7 +159,7 @@ impl Verifier<'_> {
             let position = fields
                 .iter()
                 .position(|field| field.name == expected_field.name)
-                .ok_or_else(|| RawModelError::new("mark record 缺少已登记字段"))?;
+                .ok_or_else(|| RawModelError::new("LocalHeap record 缺少已登记字段"))?;
             if variants[0][position].offset != u64::from(expected_field.offset) {
                 return Err(RawModelError::new(format!(
                     "{}.{} 的 Gugu 与 machine 字段偏移不一致",

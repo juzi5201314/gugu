@@ -9,6 +9,7 @@ pub(crate) mod analysis;
 mod ast;
 pub(crate) mod attr;
 pub(crate) mod cfg;
+pub(crate) mod contract;
 mod expand;
 pub(crate) mod format;
 pub(crate) mod gc;

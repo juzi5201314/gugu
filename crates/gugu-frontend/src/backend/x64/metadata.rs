@@ -196,7 +196,7 @@ fn assign_rvas(
             Some(index),
         ));
     }
-    for blob in crate::runtime::fragments::registered_fragments(target) {
+    for blob in crate::backend::x64::fragments::registered_fragments(target) {
         let Some(first) = blob.entries.first() else {
             return Err(vec![invalid("登记机器片段缺少入口符号")]);
         };

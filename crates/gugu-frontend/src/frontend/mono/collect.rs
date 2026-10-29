@@ -97,7 +97,7 @@ pub(crate) fn close(
     driver.run(gir)?;
     let mut world = driver.world(input_fingerprint(context));
     world.contracts =
-        crate::runtime::contract_view::collect(context).map_err(|error| vec![error])?;
+        crate::frontend::contract::contract_view::collect(context).map_err(|error| vec![error])?;
     Ok(world)
 }
 
@@ -109,7 +109,8 @@ pub(crate) fn input_fingerprint(context: &MonoContext<'_>) -> [u8; 32] {
 
     bytes.extend_from_slice(&MONO_SCHEMA.to_le_bytes());
     bytes.extend_from_slice(
-        &crate::canonical::to_vec(crate::runtime::demand::IMAGE_ENTRIES).expect("镜像执行根编码"),
+        &crate::canonical::to_vec(crate::frontend::contract::demand::IMAGE_ENTRIES)
+            .expect("镜像执行根编码"),
     );
     bytes.push(u8::from(context.harness));
     hash_domain("gugu-mono-close-input-v1", &bytes)
@@ -212,8 +213,9 @@ impl<'a, 'b> Driver<'a, 'b> {
                 .iter()
                 .find(|body| body.owner == entry.definition)
             {
-                for glue in crate::runtime::demand::referenced(body) {
-                    if let Some(definition) = crate::runtime::demand::definition(self.context, glue)
+                for glue in crate::frontend::contract::demand::referenced(body) {
+                    if let Some(definition) =
+                        crate::frontend::contract::demand::definition(self.context, glue)
                     {
                         let entry = instantiate::root_entry(
                             self.context,

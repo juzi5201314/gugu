@@ -1,18 +1,17 @@
-//! 从冻结 HIR 与独立签名布局目录交叉校验等待控制块布局。
+//! 从冻结 HIR 与独立签名布局目录交叉校验同步控制块布局。
 
 use super::contract_view::source_parameters;
-use super::model::RawModelError;
-use super::wait_schema::WaitRuntimeContract;
 use crate::frontend::{
     gir::concrete::{RecordTypes, TypeKind, TypeLayout},
     hir,
 };
+use crate::runtime::{RawModelError, SyncRuntimeContract};
 use std::collections::BTreeSet;
 
-const SOURCE: &str = "std/runtime/channel.gg";
+const SOURCE: &str = "std/runtime/sync.gg";
 
-pub(super) fn verify_source(
-    contract: &WaitRuntimeContract,
+pub(crate) fn verify_source(
+    contract: &SyncRuntimeContract,
     module: &hir::Module,
     gir: &[RecordTypes],
 ) -> Result<(), RawModelError> {
@@ -28,7 +27,7 @@ pub(super) fn verify_source(
         }
         let parameters = source_parameters(module, concrete.definition)?;
         if parameters.len() != concrete.parameters.len() {
-            return Err(RawModelError::new("等待入口具体签名与冻结HIR不一致"));
+            return Err(RawModelError::new("同步入口具体签名与冻结HIR不一致"));
         }
         let mut verifier = Verifier {
             contract,
@@ -49,7 +48,7 @@ pub(super) fn verify_source(
             .filter_map(|(record, found)| (!found).then_some(record.name.as_str()))
             .collect();
         return Err(RawModelError::new(format!(
-            "内建Gugu等待源缺少具体布局：{}",
+            "内建Gugu同步源缺少具体布局：{}",
             missing.join(", ")
         )));
     }
@@ -63,7 +62,7 @@ fn in_source(definition: &hir::Definition, module: &hir::Module) -> bool {
 }
 
 struct Verifier<'a> {
-    contract: &'a WaitRuntimeContract,
+    contract: &'a SyncRuntimeContract,
     module: &'a hir::Module,
     types: &'a [TypeLayout],
     found: &'a mut [bool],
@@ -103,7 +102,7 @@ impl Verifier<'_> {
                     .ok_or_else(|| RawModelError::new("控制块缺少aggregate"))?;
                 let fields = &aggregate.variants[0].fields;
                 if variants.len() != 1 || fields.len() != variants[0].len() {
-                    return Err(RawModelError::new("等待 record 字段集合不匹配"));
+                    return Err(RawModelError::new("同步 record 字段集合不匹配"));
                 }
                 if let Some(index) = self
                     .contract
@@ -114,7 +113,7 @@ impl Verifier<'_> {
                     let expected = &self.contract.records[index];
                     let layout = ty
                         .layout
-                        .ok_or_else(|| RawModelError::new("等待 record 布局未形成"))?;
+                        .ok_or_else(|| RawModelError::new("同步 record 布局未形成"))?;
                     if layout.size != u64::from(expected.bytes)
                         || layout.align != u64::from(expected.alignment)
                     {
@@ -131,7 +130,7 @@ impl Verifier<'_> {
                         let index = fields
                             .iter()
                             .position(|field| field.name == expected_field.name)
-                            .ok_or_else(|| RawModelError::new("等待 record 缺少已登记字段"))?;
+                            .ok_or_else(|| RawModelError::new("同步 record 缺少已登记字段"))?;
                         if variants[0][index].offset != u64::from(expected_field.offset) {
                             return Err(RawModelError::new(format!(
                                 "{}.{} 的Gugu与machine字段偏移不一致",
@@ -148,7 +147,7 @@ impl Verifier<'_> {
             }
             (hir::Type::Int { .. } | hir::Type::Unit, _) => Ok(()),
             _ => Err(RawModelError::new(
-                "等待 raw record 含未登记的 managed 字段或表示",
+                "同步 raw record 含未登记的 managed 字段或表示",
             )),
         }
     }

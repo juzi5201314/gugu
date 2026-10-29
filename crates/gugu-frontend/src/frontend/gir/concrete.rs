@@ -100,8 +100,9 @@ pub(crate) fn record_types(
     context: &MonoContext<'_>,
     definition: hir::DefId,
 ) -> Result<RecordTypes, Diagnostic> {
-    let parameters = crate::runtime::contract_view::source_parameters(context.module, definition)
-        .map_err(|error| invalid(error.message()))?;
+    let parameters =
+        crate::frontend::contract::contract_view::source_parameters(context.module, definition)
+            .map_err(|error| invalid(error.message()))?;
     let substitutions = BTreeMap::new();
     let mut layouts = layout::Builder::new(context, &substitutions);
     let parameters = parameters

@@ -1,3 +1,10 @@
+#[allow(
+    dead_code,
+    reason = "Formatter 写入方法由 comptime 静态格式化与确定性测试消费，尚未降成 Gugu 可调用的 intrinsic"
+)]
+pub(crate) mod fmt;
+#[cfg(test)]
+mod fmt_tests;
 mod format;
 pub(crate) use format::{
     Alignment, FormatKind, FormatSpec, ParsedCount, Sign, ValueClass, flag_conflict,

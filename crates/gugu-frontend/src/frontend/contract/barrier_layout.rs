@@ -1,19 +1,17 @@
-//! 从冻结 HIR 与独立签名布局目录交叉校验 SharedHeap handle slot 与 payload record 布局；
-//! 不重新解释源码或名称解析。
+//! 从冻结 HIR 与独立签名布局目录交叉校验写屏障控制块布局。
 
 use super::contract_view::source_parameters;
-use super::model::RawModelError;
-use super::shared_heap_schema::SharedHeapRuntimeContract;
 use crate::frontend::{
     gir::concrete::{RecordTypes, TypeKind, TypeLayout},
     hir,
 };
+use crate::runtime::{BarrierRuntimeContract, RawModelError};
 use std::collections::BTreeSet;
 
-const SOURCE: &str = "std/runtime/heap.gg";
+const SOURCE: &str = "std/runtime/barrier.gg";
 
-pub(super) fn verify_source(
-    contract: &SharedHeapRuntimeContract,
+pub(crate) fn verify_source(
+    contract: &BarrierRuntimeContract,
     module: &hir::Module,
     gir: &[RecordTypes],
 ) -> Result<(), RawModelError> {
@@ -30,9 +28,7 @@ pub(super) fn verify_source(
         }
         let parameters = source_parameters(module, concrete.definition)?;
         if parameters.len() != concrete.parameters.len() {
-            return Err(RawModelError::new(
-                "SharedHeap 入口具体签名与冻结 HIR 不一致",
-            ));
+            return Err(RawModelError::new("写屏障入口具体签名与冻结 HIR 不一致"));
         }
         let mut verifier = Verifier {
             contract,
@@ -53,7 +49,7 @@ pub(super) fn verify_source(
             .filter_map(|(record, found)| (!found).then_some(record.name.as_str()))
             .collect();
         return Err(RawModelError::new(format!(
-            "内建 Gugu SharedHeap 源缺少具体布局：{}",
+            "内建 Gugu 写屏障源缺少具体布局：{}",
             missing.join(", ")
         )));
     }
@@ -67,7 +63,7 @@ fn in_source(definition: &hir::Definition, module: &hir::Module) -> bool {
 }
 
 struct Verifier<'a> {
-    contract: &'a SharedHeapRuntimeContract,
+    contract: &'a BarrierRuntimeContract,
     module: &'a hir::Module,
     types: &'a [TypeLayout],
     found: &'a mut [bool],
@@ -98,7 +94,7 @@ impl Verifier<'_> {
             ) => self.walk_aggregate(*definition, ty, variants),
             (hir::Type::Int { .. } | hir::Type::Unit, _) => Ok(()),
             _ => Err(RawModelError::new(
-                "SharedHeap record 含未登记的 managed 字段或表示",
+                "写屏障 record 含未登记的 managed 字段或表示",
             )),
         }
     }
@@ -112,19 +108,17 @@ impl Verifier<'_> {
     ) -> Result<(), RawModelError> {
         let definition_value = &self.module.definitions[definition.index()];
         if !in_source(definition_value, self.module) {
-            return Err(RawModelError::new(
-                "SharedHeap record 包含未登记外部 record",
-            ));
+            return Err(RawModelError::new("写屏障控制块包含未登记外部 record"));
         }
         let aggregate = self
             .module
             .aggregates
             .iter()
             .find(|aggregate| aggregate.definition == definition)
-            .ok_or_else(|| RawModelError::new("SharedHeap record 缺少 aggregate"))?;
+            .ok_or_else(|| RawModelError::new("写屏障控制块缺少 aggregate"))?;
         let fields = &aggregate.variants[0].fields;
         if variants.len() != 1 || fields.len() != variants[0].len() {
-            return Err(RawModelError::new("SharedHeap record 字段集合不匹配"));
+            return Err(RawModelError::new("写屏障 record 字段集合不匹配"));
         }
         if let Some(index) = self
             .contract
@@ -151,7 +145,7 @@ impl Verifier<'_> {
         let expected = &self.contract.records[index];
         let layout = ty
             .layout
-            .ok_or_else(|| RawModelError::new("SharedHeap record 布局未形成"))?;
+            .ok_or_else(|| RawModelError::new("写屏障 record 布局未形成"))?;
         if layout.size != u64::from(expected.bytes) || layout.align != u64::from(expected.alignment)
         {
             return Err(RawModelError::new(format!(
@@ -159,19 +153,11 @@ impl Verifier<'_> {
                 expected.name, layout.size, layout.align, expected.bytes, expected.alignment
             )));
         }
-        if fields.len() != expected.fields.len() {
-            return Err(RawModelError::new(format!(
-                "{} 的字段数量与 machine 登记不一致",
-                expected.name
-            )));
-        }
-        for (position, expected_field) in expected.fields.iter().enumerate() {
-            if fields[position].name != expected_field.name {
-                return Err(RawModelError::new(format!(
-                    "{}.{} 的字段顺序与 machine 登记不一致",
-                    expected.name, expected_field.name
-                )));
-            }
+        for expected_field in &expected.fields {
+            let position = fields
+                .iter()
+                .position(|field| field.name == expected_field.name)
+                .ok_or_else(|| RawModelError::new("写屏障 record 缺少已登记字段"))?;
             if variants[0][position].offset != u64::from(expected_field.offset) {
                 return Err(RawModelError::new(format!(
                     "{}.{} 的 Gugu 与 machine 字段偏移不一致",

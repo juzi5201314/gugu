@@ -3,6 +3,7 @@ use crate::frontend::gir::body::{
     GirBody, IntrinsicOp, Rvalue, StatementKind, SuspendReason, Terminator,
 };
 use crate::frontend::{hir, mono::keys::MonoContext};
+use crate::runtime::{GLUE_DEFS, GlueDef, GlueDefKind};
 use std::collections::BTreeSet;
 
 /// 启动与登记机器片段无条件引用的源入口。
@@ -11,10 +12,10 @@ pub(crate) const IMAGE_ENTRIES: &[&str] =
 
 /// 只入队已落地的源定义；尚未落地的 intrinsic 由最终 LIR glue 门禁拒绝。
 pub(crate) fn definition(context: &MonoContext<'_>, glue: &str) -> Option<hir::DefId> {
-    let Some(super::GlueDef {
-        def: super::GlueDefKind::Item { source, item },
+    let Some(GlueDef {
+        def: GlueDefKind::Item { source, item },
         ..
-    }) = super::GLUE_DEFS.iter().find(|entry| entry.glue == glue)
+    }) = GLUE_DEFS.iter().find(|entry| entry.glue == glue)
     else {
         return None;
     };

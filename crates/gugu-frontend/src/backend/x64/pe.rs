@@ -5,10 +5,10 @@
 //! PC 相对在写出前修完。rt0 在调用前留出 32 字节 shadow space。
 
 use super::codegen::{BlobRelocation, FragmentPayload, X64World};
+use super::fragments;
 use super::inst::{RelocKind, RelocTarget};
 use super::mangle;
 use crate::runtime::entry;
-use crate::runtime::fragments;
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::offset_of;
 

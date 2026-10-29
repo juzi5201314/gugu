@@ -4,10 +4,10 @@
 //! 不能在编译期格式化。标志与值类型的兼容规则与类型检查器共用 `flag_conflict`。
 
 use super::eval::ConstantValue;
-use crate::frontend::string::{FormatKind, ValueClass, flag_conflict};
-use crate::runtime::fmt::{
+use crate::frontend::string::fmt::{
     Formatter, ResolvedSpec, format_bool, format_float, format_int, format_str,
 };
+use crate::frontend::string::{FormatKind, ValueClass, flag_conflict};
 
 /// 常量在标志兼容规则里的分类。
 pub(super) fn value_class(value: &ConstantValue) -> ValueClass {

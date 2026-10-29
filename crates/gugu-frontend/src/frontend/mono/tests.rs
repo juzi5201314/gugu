@@ -241,7 +241,8 @@ fn runtime_records_are_metadata_not_executable_instances() {
     )
     .expect("机器侧布局契约");
     assert!(
-        crate::runtime::barrier_layout::verify_source(&contract, module, &corrupted).is_err(),
+        crate::frontend::contract::barrier_layout::verify_source(&contract, module, &corrupted)
+            .is_err(),
         "执行体缺席也不能绕过被篡改布局"
     );
 }
