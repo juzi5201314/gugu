@@ -93,27 +93,27 @@ crates/
 │   ├── src/artifact.rs             目标专属 artifact 解码与 RuntimeArtifactProvider 实现
 │   ├── tests/docs_links.rs         文档链接与章节锚点契约
 │   └── benches/                    手工验收二进制（编码、栈图、片段、协程上下文）
+├── gugu-project/                   项目模型：只依赖 gugu-base
+│   ├── src/lib.rs                  项目聚合、选择与缓存输入导出
+│   ├── src/model.rs                package、target 与 workspace 模型
+│   ├── src/error.rs                项目发现、选择、依赖与锁文件错误
+│   ├── src/manifest.rs             清单 schema 与 package 构建
+│   ├── src/targets.rs              target 自动发现与源码布局校验
+│   ├── src/dependency_model.rs     package identity、source、域与 feature 模型
+│   ├── src/dependency_manifest.rs  依赖清单与 workspace 继承解析
+│   ├── src/semver.rs               SemVer 版本和版本约束
+│   ├── src/lock.rs                 确定性 gugu.lock 编解码与校验
+│   ├── src/resolver.rs             候选求解、域传播与循环检查
+│   ├── src/dependencies.rs         依赖子模块聚合与公共导出
+│   ├── src/dependencies_tests.rs   依赖解析、feature 和锁图确定性测试
+│   ├── src/cache.rs                依赖缓存、vendor、锁图输入和缓存记录
+│   ├── src/package_files.rs        归档解包、规范路径和 package checksum
+│   ├── src/action_key.rs           完整编译输入编码与 action key
+│   ├── src/target_view.rs          target 用户产物视图与原子物化
+│   ├── src/cache_tests.rs          缓存输入、损坏隔离、vendor 和 key 确定性测试
+│   └── src/workspace.rs            workspace 成员与 glob 解析
 └── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排
-    ├── src/project/                清单、workspace、target、依赖、锁图与缓存输入
-    │   ├── mod.rs                  项目聚合、选择与缓存输入导出
-    │   ├── model.rs                package、target 与 workspace 模型
-    │   ├── error.rs                项目发现、选择、依赖与锁文件错误
-    │   ├── manifest.rs             清单 schema 与 package 构建
-    │   ├── targets.rs              target 自动发现与源码布局校验
-    │   ├── dependency_model.rs     package identity、source、域与 feature 模型
-    │   ├── dependency_manifest.rs  依赖清单与 workspace 继承解析
-    │   ├── semver.rs               SemVer 版本和版本约束
-    │   ├── lock.rs                 确定性 gugu.lock 编解码与校验
-    │   ├── resolver.rs             候选求解、域传播与循环检查
-    │   ├── dependencies.rs         依赖子模块聚合与公共导出
-    │   ├── dependencies_tests.rs   依赖解析、feature 和锁图确定性测试
-    │   ├── cache.rs                依赖缓存、vendor、锁图输入和缓存记录
-    │   ├── package_files.rs        归档解包、规范路径和 package checksum
-    │   ├── action_key.rs           完整编译输入编码与 action key
-    │   ├── target_view.rs          target 用户产物视图与原子物化
-    │   ├── cache_tests.rs          缓存输入、损坏隔离、vendor 和 key 确定性测试
-    │   └── workspace.rs             workspace 成员与 glob 解析
     ├── src/frontend/               词法、AST、语义检查与冻结 HIR
     │   ├── mod.rs                  Frontend action 入口
     │   ├── lex.rs                  TokenBuffer、trivia 与字面量

@@ -5,10 +5,8 @@ use sha2::{Digest, Sha256};
 use tar::Builder;
 use tempfile::TempDir;
 
-use super::super::super::{
-    DependencyDomain, LockGraph, LockedPackage, PackageId, PackageSource, Version,
-};
 use super::*;
+use crate::{DependencyDomain, LockGraph, LockedPackage, PackageId, PackageSource, Version};
 
 fn registry_id() -> PackageId {
     PackageId::new(

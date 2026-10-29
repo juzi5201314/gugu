@@ -64,7 +64,8 @@ pub struct Target {
 }
 
 impl Target {
-    pub(crate) fn new(
+    /// 由已解析的 manifest 字段构造 target；driver 与测试可绕过 workspace 发现直接构造。
+    pub fn new(
         kind: TargetKind,
         name: String,
         entry: PathBuf,
@@ -138,7 +139,8 @@ pub struct Package {
 }
 
 impl Package {
-    pub(crate) fn new(
+    /// 由已解析的 manifest 字段构造 package；driver 与测试可绕过 workspace 发现直接构造。
+    pub fn new(
         root: PathBuf,
         manifest: PathBuf,
         owner: Option<String>,

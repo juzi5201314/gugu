@@ -5,6 +5,7 @@ members = [
     "crates/gugu-compiler",
     "crates/gugu-compiler-core",
     "crates/gugu-frontend",
+    "crates/gugu-project",
     "crates/gugu-runtime-builder",
 ]
 resolver = "3"

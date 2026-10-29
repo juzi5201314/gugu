@@ -1,4 +1,4 @@
-use crate::hash::hash_domain;
+use gugu_base::hash::hash_domain;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 影响编译 action 身份的完整输入集合。

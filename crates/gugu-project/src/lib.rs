@@ -1,3 +1,10 @@
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+
+//! Gugu 项目模型：manifest、workspace、依赖解析、包缓存与编译 action 身份。
+//!
+//! 只依赖 `gugu-base`，不依赖任何编译阶段；driver 用它发现项目并计算 action key。
+
 use std::{
     collections::BTreeSet,
     fs,

@@ -1,0 +1,17 @@
+[package]
+name = "gugu-project"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu project model: manifests, workspaces, dependency resolution, package cache, action keys"
+
+[dependencies]
+blake3 = "1"
+flate2 = "1"
+serde.workspace = true
+sha2 = "0.10"
+tar = "0.4"
+toml.workspace = true
+gugu-base = { path = "../gugu-base" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -17,17 +17,15 @@ serde_json.workspace = true
 toml.workspace = true
 unicode-width.workspace = true
 blake3 = "1"
-flate2 = "1"
 foldhash = "0.2"
-sha2 = "0.10"
 siphasher = "1.0"
-tar = "0.4"
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 gugu-base = { path = "../gugu-base" }
 gugu-compiler-core = { path = "../gugu-compiler-core" }
+gugu-project = { path = "../gugu-project" }
 gugu-runtime-builder = { path = "../gugu-runtime-builder", optional = true }
 
 [dev-dependencies]

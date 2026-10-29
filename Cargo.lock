@@ -335,22 +335,34 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "bytes",
- "flate2",
  "foldhash",
  "gugu-base",
  "gugu-compiler-core",
+ "gugu-project",
  "gugu-runtime-builder",
  "serde",
  "serde_json",
- "sha2",
  "siphasher",
- "tar",
  "tempfile",
  "toml",
  "unicode-normalization",
  "unicode-segmentation",
  "unicode-width",
  "xxhash-rust",
+]
+
+[[package]]
+name = "gugu-project"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "flate2",
+ "gugu-base",
+ "serde",
+ "sha2",
+ "tar",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]
