@@ -339,6 +339,7 @@ dependencies = [
  "gugu-base",
  "gugu-compiler-core",
  "gugu-project",
+ "gugu-runtime-abi",
  "gugu-runtime-builder",
  "serde",
  "serde_json",
@@ -363,6 +364,18 @@ dependencies = [
  "tar",
  "tempfile",
  "toml",
+]
+
+[[package]]
+name = "gugu-runtime-abi"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "gugu-base",
+ "gugu-compiler-core",
+ "serde",
+ "unicode-normalization",
+ "unicode-segmentation",
 ]
 
 [[package]]

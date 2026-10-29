@@ -112,6 +112,32 @@ crates/
 │   ├── src/target_view.rs          target 用户产物视图与原子物化
 │   ├── src/cache_tests.rs          缓存输入、损坏隔离、vendor 和 key 确定性测试
 │   └── src/workspace.rs            workspace 成员与 glob 解析
+├── gugu-runtime-abi/               runtime 契约层：只依赖 gugu-base
+│   ├── src/lib.rs                  源树/rt0/intrinsic 登记、raw 平面常量与 glue 定义表
+│   ├── src/model.rs                `RuntimeRawContractV1` 与消息字段 schema
+│   ├── src/startup_kinds.rs        rt0 启动/终止/报告的共享枚举目录与常量
+│   ├── src/startup_schema.rs       rt0 启动序列、生命周期、启动变量、fatal/退出/报告契约段
+│   ├── src/provider.rs             平台 range 操作、二次幂 extent 阶梯与确定性替身
+│   ├── src/platform.rs             Linux/Windows profile 常量与 fake platform
+│   ├── src/platform_schema.rs      平台操作目录、range 状态迁移与失败映射契约
+│   ├── src/extent.rs               extent 阶梯、三路 lease 与 queue-page grace 门禁
+│   ├── src/ledger.rs               内存账本互斥分类 schema
+│   ├── src/resource.rs             ResourceCell slab、lease 状态机与统一 release 入口
+│   ├── src/resource_schema.rs      ResourceCell header/状态位/release 描述符/资源种类契约 schema
+│   ├── src/size_class.rs           dense size class 表与 stride 除法常量
+│   ├── src/coroutine.rs            hot/cold/slot 固定布局、context 与地址稳定控制页
+│   ├── src/coroutine_schema.rs     版本化协程布局、栈策略、LIR需求与片段契约
+│   ├── src/coroutine_pack.rs       子协程参数包机器布局常量
+│   ├── src/fragment_code.rs        协程契约携带的 morestack/main 返回片段数据形状
+│   ├── src/context.rs              x86_64 switch/restore-only 直接编码
+│   ├── src/scheduler_schema.rs     版本化调度容量、分片、batch 与 service 节奏契约段
+│   ├── src/scheduler_tests.rs      调度 deque 双变体、唤醒、retire 与契约闭环的确定性回归
+│   ├── src/stack.rs                栈尺寸、迟滞收缩与精确StackInterior复制
+│   ├── src/slab.rs                 owner 目录、slab 描述符与 slot 状态机
+│   ├── src/message.rs              return message、link 编码、producer staging 与 source slab 聚合
+│   ├── src/inbox.rs                8 shard batch queue、bounded snapshot、epoch gate
+│   ├── src/wait_schema.rs          WaitRuntimeContract schema 1 与 WaitDemand
+│   └── src/harness.rs              真实并发可运行切片（bench façade）
 └── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/raw_model.rs            runtime raw 契约 query driver：注入 backend 片段并做跨层校验
@@ -127,50 +153,20 @@ crates/
     ├── src/backend.rs              目标相关的内存 image plan 输入
     ├── src/backend/x64/fragments.rs 登记机器片段编码与协程片段逐字节比对
     ├── src/backend/x64/glue.rs     runtime glue 绑定、闭世界 glue 目录与 op 隐含 glue
-    ├── src/runtime/                Gugu 源树登记、raw 平面契约、rt0 契约与 owner-directed return 参照实现
-    │   ├── mod.rs                  源树/rt0/intrinsic 登记与 raw 平面常量
-    │   ├── model.rs                `RuntimeRawContractV1` 与消息字段 schema
-    │   ├── startup_kinds.rs        rt0 启动/终止/报告的共享枚举目录与常量
-    │   ├── startup_schema.rs       rt0 启动序列、生命周期、启动变量、fatal/退出/报告契约段
+    ├── src/runtime/                world 参照实现与需要整条管线的 runtime 回归；契约层再导出自 gugu-runtime-abi
+    │   ├── mod.rs                  `pub use gugu_runtime_abi::*` 与 world 模块登记
     │   ├── startup.rs              环境快照与启动配置解析的参照实现
     │   ├── lifecycle.rs            生命周期状态机与 rt0 启动序列参照实现
     │   ├── report.rs               emergency buffer 与 text/NDJSON 报告渲染参照实现
     │   ├── termination.rs          `TerminationPlan` 构造与退出码解析参照实现
-    │   ├── provider.rs             平台 range 操作、二次幂 extent 阶梯与确定性替身
-    │   ├── platform.rs             Linux/Windows profile 常量与 fake platform
-    │   ├── platform_schema.rs      平台操作目录、range 状态迁移与失败映射契约
-    │   ├── extent.rs               extent 阶梯、三路 lease 与 queue-page grace 门禁
-    │   ├── ledger.rs               内存账本互斥分类 schema
-    │   ├── resource.rs             ResourceCell slab、lease 状态机与统一 release 入口
-    │   ├── resource_schema.rs      ResourceCell header/状态位/release 描述符/资源种类契约 schema
-    │   ├── size_class.rs           dense size class 表与 stride 除法常量
-    │   ├── coroutine.rs            hot/cold/slot 固定布局、context 与地址稳定控制页
-    │   ├── coroutine_schema.rs     版本化协程布局、栈策略、LIR需求与片段契约
-    │   ├── fragment_code.rs        协程契约携带的 morestack/main 返回片段数据形状
-    │   ├── scheduler_schema.rs     版本化调度容量、分片、batch 与 service 节奏契约段
-    │   ├── scheduler.rs            runnable 队列、park、steal、topology 与终止的确定性参照模型
-    │   ├── scheduler_tests.rs      调度 deque 双变体、唤醒、retire 与契约闭环的确定性回归
-    │   ├── coroutine_pack.rs       子协程参数包机器布局常量
-    │   ├── context.rs              x86_64 switch/restore-only 直接编码
-    │   ├── stack.rs                栈尺寸、迟滞收缩与精确StackInterior复制
     │   ├── stack_arena.rs          双端guard arena、span bitmap与有界cache
-    │   ├── slab.rs                 owner 目录、slab 描述符与 slot 状态机
     │   ├── owner.rs                本地 free path、本地/远程 return 分叉
-    │   ├── message.rs              return message、link 编码、producer staging 与 source slab 聚合
-    │   ├── inbox.rs                8 shard batch queue、bounded snapshot、epoch gate
-    │   ├── world/                  owner 上下文 service、转发、grace 与 retire
-    │   │   ├── mod.rs              raw owner 世界与 ResourceCell 世界骨架
-    │   │   ├── extent_impl.rs      arena 开立、extent 取用与 trim 门禁接入
-    │   │   ├── resource_impl.rs    资源分配、lease、close、release 与整页 mapping 接入
-    │   │   ├── coroutine_impl.rs   main/子协程创建、栈复制、cold完成发布与owner return
-    │   │   ├── wait_impl.rs        channel / Join wait / select 接入 ready_publish
-    │   │   └── termination_impl.rs rt0 进程模型：boot、终止路径与设施关闭接入
-    │   ├── wait.rs                 WaitSourceId、wait-node slab、FIFO 与 park
-    │   ├── wait_schema.rs          WaitRuntimeContract schema 1 与 WaitDemand
-    │   ├── channel.rs              有/无缓冲环、会合、close 与 try_* 线性化
-    │   ├── select.rs               xoshiro256++ 与两条 select 提交路径
-    │   ├── harness.rs              真实并发可运行切片（bench façade）
-    │   └── tests.rs                确定性参照实现的验证套件
+    │   └── world/                  owner 上下文 service、转发、grace 与 retire
+    │       ├── mod.rs              raw owner 世界与 ResourceCell 世界骨架
+    │       ├── extent_impl.rs      arena 开立、extent 取用与 trim 门禁接入
+    │       ├── resource_impl.rs    资源分配、lease、close、release 与整页 mapping 接入
+    │       ├── coroutine_impl.rs   main/子协程创建、栈复制、cold完成发布与owner return
+    │       └── termination_impl.rs rt0 进程模型：boot、终止路径与设施关闭接入
     └── resources/
         ├── std/prelude.gg          标准库 Gugu 源单元
         ├── runtime/core.gg         runtime Gugu 源单元
@@ -181,7 +177,7 @@ crates/
 
 模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与尚未迁走的参照模型（raw 平面、资源租约、owner-directed return、rt0 启动/终止/报告）。channel、Join、select 与 `std.sync` 的执行在镜像内 Gugu 源；Rust 侧只留 schema、布局和非法序拒绝。
 
-`gugu-compiler` 与 `gugu-frontend` 都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
+所有库 crate（`gugu-base`、`gugu-project`、`gugu-runtime-abi`、`gugu-frontend`、`gugu-compiler`）都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
 
 ### 编译器测试构建
 

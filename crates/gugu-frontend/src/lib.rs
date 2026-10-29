@@ -17,7 +17,7 @@ mod raw_model;
 mod runtime;
 #[cfg(test)]
 mod testing;
-use gugu_base::{action, canonical, diagnostics, hash, query, source, target, tuning};
+use gugu_base::{action, canonical, diagnostics, hash, query, source, target};
 use gugu_project as project;
 pub use query::{
     DependencyFingerprint, ObjectCache, ObjectError, ObjectKey, QueryContext, QueryEngine,

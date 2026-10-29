@@ -1,0 +1,20 @@
+[package]
+name = "gugu-runtime-abi"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu runtime contract layer: raw plane schemas, verifiers, runtime source registry and machine boundaries"
+
+[features]
+# 重负载/端到端用例的显式开关：默认关闭，由 frontend 按同名开关转发。
+slow-tests = []
+# frontend 的 world/管线测试复用这里的参照模型；只经 frontend 的 dev-dependency 打开。
+test-support = []
+
+[dependencies]
+blake3 = "1"
+serde.workspace = true
+unicode-normalization = "0.1.25"
+unicode-segmentation = "1.13.3"
+
+gugu-base = { path = "../gugu-base" }
+gugu-compiler-core = { path = "../gugu-compiler-core" }
