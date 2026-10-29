@@ -11,7 +11,7 @@ use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
-use crate::frontend::mono::keys::hash_domain;
+use crate::hash::hash_domain;
 use crate::target::{CpuBaseline, CpuFeature};
 
 use super::table;

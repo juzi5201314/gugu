@@ -133,7 +133,7 @@ impl ConcreteBody {
         if self.fingerprint_valid {
             return self.fingerprint;
         }
-        crate::frontend::mono::keys::hash_domain(
+        crate::hash::hash_domain(
             "gugu-concrete-gir-v1",
             &crate::canonical::to_vec(&(
                 self.schema,

@@ -218,7 +218,7 @@ reader 的已打开文件句柄就是 lease：Linux 即使被 unlink 仍从原 i
 
 ## Query engine 与对象存储
 
-`gugu-frontend::query` 落地 session 内 query engine 与编译对象存储（façade 再导出）：
+`gugu-base::query` 落地 session 内 query engine 与编译对象存储（façade 再导出）：
 `QueryKind` 固定登记 1--30，`QueryKey` 使用 schema 与规范 key 形成域隔离摘要；每个
 query cell 按 `Uncomputed -> Computing -> Complete/Failed/Cancelled` 转换，并以条件变量
 让并发请求共享唯一计算结果。成功结果保存不可变 payload、结果 fingerprint 和按稳定 key

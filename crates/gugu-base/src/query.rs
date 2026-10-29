@@ -1,5 +1,6 @@
 //! demand-driven query 状态机与编译中间对象缓存。
 
+use crate::hash::hash_domain;
 use bytes::Bytes;
 use std::{
     collections::BTreeMap,
@@ -85,11 +86,11 @@ pub enum QueryKind {
 /// action/query record 不得复用。
 ///
 /// revision 4：`Span` 的规范编码去掉会话局部表身份，旧 payload 不再可复用。
-pub(crate) const QUERY_REGISTRY_REVISION: u32 = 4;
+pub const QUERY_REGISTRY_REVISION: u32 = 4;
 
 impl QueryKind {
     /// 返回 kind 的稳定 ASCII 名。
-    pub(crate) const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::SourceSnapshot => "SourceSnapshot",
             Self::Lex => "Lex",
@@ -125,7 +126,7 @@ impl QueryKind {
     }
 
     /// 返回全部已登记 kind，按编号升序。
-    pub(crate) const fn all() -> [Self; 30] {
+    pub const fn all() -> [Self; 30] {
         [
             Self::SourceSnapshot,
             Self::Lex,
@@ -164,7 +165,7 @@ impl QueryKind {
 /// 返回 query registry 的内容指纹：登记 revision 与全部 kind 编号/名字的规范编码。
 ///
 /// 新增或改名 kind 必然改变该指纹，因此旧 action/query record 不会被复用。
-pub(crate) fn registry_fingerprint() -> [u8; 32] {
+pub fn registry_fingerprint() -> [u8; 32] {
     let mut bytes = Vec::with_capacity(8 + QueryKind::all().len() * 24);
     bytes.extend_from_slice(&QUERY_REGISTRY_REVISION.to_le_bytes());
     bytes.extend_from_slice(&(QueryKind::all().len() as u32).to_le_bytes());
@@ -389,10 +390,9 @@ impl QueryEngine {
 
     /// 按 kind 统计已完成（`Complete`）的 query cell 数量。
     ///
-    /// 只给测试用：它把「哪些单元真的被派生过」变成可断言的事实，用来钉住物化路径不会为
-    /// 内建定义重新计算 GIR body。
-    #[cfg(all(test, feature = "slow-tests"))]
-    pub(crate) fn completed_by_kind(&self) -> std::collections::BTreeMap<QueryKind, usize> {
+    /// 它把「哪些单元真的被派生过」变成可断言的事实，测试用它钉住物化路径不会为内建定义
+    /// 重新计算 GIR body。
+    pub fn completed_by_kind(&self) -> std::collections::BTreeMap<QueryKind, usize> {
         let cells = self.cells.lock().expect("query registry lock poisoned");
         let mut counts = std::collections::BTreeMap::new();
         for (key, cell) in cells.iter() {
@@ -651,11 +651,11 @@ impl ObjectCache {
     pub fn load_runtime_artifact(
         &self,
         key: ObjectKey,
-        target: crate::TargetName,
-    ) -> Result<crate::RuntimeArtifactV1, ObjectError> {
+        target: crate::target::TargetName,
+    ) -> Result<gugu_compiler_core::RuntimeArtifactV1, ObjectError> {
         let payload = self.load(key, QueryKind::CodegenFragment, 1, |bytes| {
-            let artifact =
-                crate::RuntimeArtifactV1::decode(bytes).map_err(|error| error.to_string())?;
+            let artifact = gugu_compiler_core::RuntimeArtifactV1::decode(bytes)
+                .map_err(|error| error.to_string())?;
             if artifact.manifest.target != target.name() {
                 return Err(format!(
                     "runtime artifact target 不匹配：期望 {}，实际 {}",
@@ -665,9 +665,11 @@ impl ObjectCache {
             }
             Ok(())
         })?;
-        crate::RuntimeArtifactV1::decode(&payload).map_err(|error| ObjectError::Invalid {
-            path: self.object_path(key),
-            message: error.to_string(),
+        gugu_compiler_core::RuntimeArtifactV1::decode(&payload).map_err(|error| {
+            ObjectError::Invalid {
+                path: self.object_path(key),
+                message: error.to_string(),
+            }
         })
     }
 
@@ -794,10 +796,6 @@ fn domain_bytes(domain: &str, bytes: &[u8]) -> Vec<u8> {
     domain_bytes.push(0);
     domain_bytes.extend_from_slice(bytes);
     domain_bytes
-}
-
-fn hash_domain(domain: &str, bytes: &[u8]) -> [u8; 32] {
-    *blake3::hash(&domain_bytes(domain, bytes)).as_bytes()
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

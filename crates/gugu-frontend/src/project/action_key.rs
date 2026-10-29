@@ -1,3 +1,4 @@
+use crate::hash::hash_domain;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// 影响编译 action 身份的完整输入集合。
@@ -257,14 +258,6 @@ impl ActionKey {
 
 fn input_digest(bytes: &[u8]) -> [u8; 32] {
     hash_domain("gugu-input-v1", bytes)
-}
-
-fn hash_domain(domain: &str, bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(bytes);
-    *hasher.finalize().as_bytes()
 }
 
 fn encode_bytes(output: &mut Vec<u8>, bytes: &[u8]) {

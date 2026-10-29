@@ -1,5 +1,6 @@
 //! 闭世界类型元数据：编号只存在于当前 universe，片段继续保存稳定类型键。
-use crate::frontend::mono::keys::{StableTypeKey, hash_domain};
+use crate::frontend::mono::keys::StableTypeKey;
+use crate::hash::hash_domain;
 use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 

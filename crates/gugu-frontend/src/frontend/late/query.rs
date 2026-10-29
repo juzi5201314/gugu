@@ -10,8 +10,9 @@ use crate::frontend::semantics::{
 };
 use crate::frontend::{
     hir,
-    mono::{MonoWorldV1, digest_of, hash_domain},
+    mono::{MonoWorldV1, digest_of},
 };
+use crate::hash::hash_domain;
 use crate::query::{QueryKey, QueryKind};
 use crate::{Diagnostic, QueryEngine, SourceMap};
 use std::collections::BTreeMap;

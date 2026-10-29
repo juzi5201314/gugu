@@ -27,11 +27,12 @@
 //! completion record 的 descriptor 字段），不来自复制出的类型。
 
 use super::instantiate::WalkEntry;
-use super::keys::{MonoContext, StableTypeKey, hash_domain};
+use super::keys::{MonoContext, StableTypeKey};
 use crate::Diagnostic;
 use crate::frontend::gir::passing::PassingClass;
 use crate::frontend::hir;
 use crate::frontend::late::universe::{MetadataShape, Shape, TypeRecord};
+use crate::hash::hash_domain;
 use std::collections::BTreeMap;
 
 /// compiler-storage 类型在 GBC1 里的枚举 tag；语言类型 tag 目前只用到 1..=30。

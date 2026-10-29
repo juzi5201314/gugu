@@ -14,11 +14,11 @@ use std::fmt;
 /// 二进制编码 revision，进入每个 query key，拒绝旧 JSON 缓存。
 ///
 /// revision 2：`Span` 的表身份移出规范编码，物化表与 query 缓存都能被另一会话逐字节重建。
-pub(crate) const REVISION: u32 = 3;
+pub const REVISION: u32 = 3;
 
 /// 编解码错误。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Error(String);
+pub struct Error(String);
 
 impl Error {
     fn message(message: impl Into<String>) -> Self {
@@ -44,7 +44,7 @@ impl de::Error for Error {
 }
 
 /// 将可序列化对象编码为稳定二进制。
-pub(crate) fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
+pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error> {
     let mut output = Vec::new();
     value.serialize(Encoder {
         output: &mut output,
@@ -53,7 +53,7 @@ pub(crate) fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>, Error>
 }
 
 /// 解码一个完整稳定二进制对象；尾随字节会被拒绝。
-pub(crate) fn from_slice<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
+pub fn from_slice<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     let mut decoder = Decoder { bytes, offset: 0 };
     let value = T::deserialize(&mut decoder)?;
     if decoder.offset != bytes.len() {

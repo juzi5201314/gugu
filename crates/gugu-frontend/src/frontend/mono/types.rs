@@ -1,8 +1,9 @@
 //! HIR 是实例边的唯一 owner 来源；类型替换与 impl 选择仍复用语义层。
 
-use super::keys::{MonoCallAbi, MonoContext, hash_domain};
+use super::keys::{MonoCallAbi, MonoContext};
 use crate::frontend::hir;
 use crate::frontend::semantics::{Model, TraitRef, Ty, substitute};
+use crate::hash::hash_domain;
 use crate::{Diagnostic, DiagnosticCode};
 use std::collections::{BTreeMap, BTreeSet};
 

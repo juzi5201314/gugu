@@ -43,7 +43,7 @@ pub(crate) fn run_world(
     let input_fingerprint = input_fingerprint(
         hir_fingerprint,
         gir.fingerprint,
-        crate::frontend::mono::hash_domain(
+        crate::hash::hash_domain(
             "gugu-analysis-late-input-v1",
             &[
                 mono.graph_fingerprint.as_slice(),

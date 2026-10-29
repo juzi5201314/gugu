@@ -31,7 +31,7 @@ fn scheduler_constants_match_contract() {
 
 #[test]
 fn tuning_profile_digest_is_field_sensitive() {
-    use super::scheduler_schema::RUNTIME_TUNING_PROFILE;
+    use crate::tuning::RUNTIME_TUNING_PROFILE;
 
     let baseline = RUNTIME_TUNING_PROFILE.digest();
     let mut changed = RUNTIME_TUNING_PROFILE;

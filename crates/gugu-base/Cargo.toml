@@ -1,0 +1,15 @@
+[package]
+name = "gugu-base"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu compiler base layer: sources, diagnostics, queries, canonical encoding, targets"
+
+[dependencies]
+blake3 = "1"
+bytes.workspace = true
+serde.workspace = true
+unicode-width.workspace = true
+gugu-compiler-core = { path = "../gugu-compiler-core" }
+
+[dev-dependencies]
+tempfile = "3"

@@ -233,9 +233,8 @@ impl DiagnosticCode {
     /// 全部诊断代码，顺序与枚举声明一致（当前即 `code()` 的稳定升序）。
     ///
     /// 新增 variant 必须同时补本表与 [`Self::index`]；`index` 是不带通配分支的穷尽匹配，
-    /// 漏项会让 compiler crate 的测试构建直接编译失败，这是覆盖闸门的编译期半边。
-    #[cfg(test)]
-    pub(crate) const ALL: [Self; 62] = [
+    /// 漏项会让测试构建直接编译失败，这是覆盖闸门的编译期半边。
+    pub const ALL: [Self; 62] = [
         Self::SourceRead,
         Self::MissingMain,
         Self::MalformedSource,
@@ -303,8 +302,7 @@ impl DiagnosticCode {
     /// 返回该代码在 [`Self::ALL`] 中的稠密下标。
     ///
     /// 本匹配必须保持穷尽：漏掉任一 variant 都是编译错误，诊断契约表据此按下标落位。
-    #[cfg(test)]
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::SourceRead => 0,
             Self::MissingMain => 1,
@@ -387,7 +385,7 @@ pub struct Diagnostic {
 ///
 /// 快照字节校验（超限、非法 UTF-8、BOM）与逻辑路径校验共用本映射：宏生成文本的
 /// 快照失败也必须落在快照自身的代码上，不能再一律归为非法逻辑路径。
-pub(crate) fn source_error_code(error: &SourceError) -> DiagnosticCode {
+pub fn source_error_code(error: &SourceError) -> DiagnosticCode {
     match error {
         SourceError::TooLarge { .. } => DiagnosticCode::SourceTooLarge,
         SourceError::InvalidUtf8 { .. } => DiagnosticCode::InvalidUtf8,
@@ -398,32 +396,24 @@ pub(crate) fn source_error_code(error: &SourceError) -> DiagnosticCode {
 
 impl Diagnostic {
     /// 创建带源码范围的错误诊断。
-    pub(crate) fn error(
-        code: DiagnosticCode,
-        message: impl Into<String>,
-        span: Option<Span>,
-    ) -> Self {
+    pub fn error(code: DiagnosticCode, message: impl Into<String>, span: Option<Span>) -> Self {
         Self::new(Severity::Error, code, message, span, u32::MAX)
     }
 
-    pub(crate) fn note(
-        code: DiagnosticCode,
-        message: impl Into<String>,
-        span: Option<Span>,
-    ) -> Self {
+    pub fn note(code: DiagnosticCode, message: impl Into<String>, span: Option<Span>) -> Self {
         Self::new(Severity::Note, code, message, span, u32::MAX)
     }
 
-    pub(crate) fn with_seq(mut self, seq: u32) -> Self {
+    pub fn with_seq(mut self, seq: u32) -> Self {
         self.seq = seq;
         self
     }
 
-    pub(crate) fn sequence(&self) -> u32 {
+    pub fn sequence(&self) -> u32 {
         self.seq
     }
 
-    pub(crate) fn new(
+    pub fn new(
         severity: Severity,
         code: DiagnosticCode,
         message: impl Into<String>,
@@ -440,7 +430,7 @@ impl Diagnostic {
     }
 
     /// 创建文件读取错误诊断。
-    pub(crate) fn source_read(path: &std::path::Path, error: &std::io::Error) -> Self {
+    pub fn source_read(path: &std::path::Path, error: &std::io::Error) -> Self {
         Self::error(
             DiagnosticCode::SourceRead,
             format!("无法读取源文件 `{}`：{error}", path.display()),
@@ -449,7 +439,7 @@ impl Diagnostic {
     }
 
     /// 创建源码快照校验错误诊断。
-    pub(crate) fn source_error(error: &SourceError) -> Self {
+    pub fn source_error(error: &SourceError) -> Self {
         let (path, offset) = match error {
             SourceError::TooLarge { path } => (path, 0),
             SourceError::InvalidUtf8 { path, offset } => (path, *offset as usize),
@@ -508,11 +498,11 @@ pub struct Diagnostics {
     items: Vec<Diagnostic>,
 }
 impl Diagnostics {
-    pub(crate) fn push(&mut self, diagnostic: Diagnostic) {
+    pub fn push(&mut self, diagnostic: Diagnostic) {
         self.items.push(diagnostic);
     }
 
-    pub(crate) fn sort(&mut self) {
+    pub fn sort(&mut self) {
         self.items.sort_by(|left, right| {
             left.seq
                 .cmp(&right.seq)

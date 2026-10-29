@@ -60,8 +60,7 @@ impl TargetName {
             linux_interpreter: sysroot.interpreter,
             sysroot_digest: target_sysroot_digest(self),
             import_policy_revision: IMPORT_POLICY_REVISION,
-            runtime_tuning_profile_digest: crate::runtime::scheduler_schema::RUNTIME_TUNING_PROFILE
-                .digest(),
+            runtime_tuning_profile_digest: crate::tuning::RUNTIME_TUNING_PROFILE.digest(),
             backend_cost_profile_digest: cost_profile.digest(),
             cost_profile,
             pointer_compression: PointerCompression::for_target(self),

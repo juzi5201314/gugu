@@ -103,7 +103,7 @@ pub struct ActionGraph {
 }
 
 impl ActionGraph {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let kinds = [
             ActionKind::ResolveTarget,
             ActionKind::LoadSources,
@@ -128,15 +128,15 @@ impl ActionGraph {
         Self { nodes }
     }
 
-    pub(crate) fn complete(&mut self, kind: ActionKind, detail: impl Into<String>) {
+    pub fn complete(&mut self, kind: ActionKind, detail: impl Into<String>) {
         self.set(kind, ActionStatus::Complete, detail);
     }
 
-    pub(crate) fn fail(&mut self, kind: ActionKind, detail: impl Into<String>) {
+    pub fn fail(&mut self, kind: ActionKind, detail: impl Into<String>) {
         self.set(kind, ActionStatus::Failed, detail);
     }
 
-    pub(crate) fn skip_after(&mut self, kind: ActionKind, detail: impl Into<String>) {
+    pub fn skip_after(&mut self, kind: ActionKind, detail: impl Into<String>) {
         let Some(index) = self.nodes.iter().position(|node| node.kind == kind) else {
             return;
         };

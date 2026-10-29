@@ -17,8 +17,8 @@ mod types;
 pub(crate) mod universe;
 
 pub(crate) use collect::{MonoWorldV1, empty_world};
-pub(crate) use keys::hash_domain;
 
+use crate::hash::hash_domain;
 use crate::query::QueryEngine;
 
 /// 收集根并闭合可达实例图。

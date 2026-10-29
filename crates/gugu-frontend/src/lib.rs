@@ -6,10 +6,7 @@
 //! compiler 前端：源码快照、词法及 AST、名称/类型/控制流检查、版本化查询与冻结 HIR。
 //! 后端只消费已验证 LIR 形成内存 image plan；机器代码生成由后续后端阶段实现。
 
-mod action;
 mod backend;
-mod canonical;
-mod diagnostics;
 #[cfg(test)]
 mod diagnostics_tests;
 mod frontend;
@@ -17,14 +14,10 @@ mod lir;
 #[cfg(all(test, feature = "slow-tests"))]
 mod numbering_tests;
 mod project;
-mod query;
 mod runtime;
-mod source;
-mod target;
-#[cfg(test)]
-mod target_tests;
 #[cfg(test)]
 mod testing;
+use gugu_base::{action, canonical, diagnostics, hash, query, source, target, tuning};
 pub use query::{
     DependencyFingerprint, ObjectCache, ObjectError, ObjectKey, QueryContext, QueryEngine,
     QueryError, QueryKey, QueryKind, QueryResult, QueryState,
@@ -1757,11 +1750,9 @@ impl ImagePlan {
         raw: &RuntimeRawContractV1,
     ) -> Self {
         let gc_type_section_fingerprint =
-            frontend::mono::keys::hash_domain("gugu-gc-type-section-v1", &plan.gc_type_section);
-        let gc_metadata_section_fingerprint = frontend::mono::keys::hash_domain(
-            "gugu-gc-metadata-section-v1",
-            &plan.gc_metadata_section,
-        );
+            crate::hash::hash_domain("gugu-gc-type-section-v1", &plan.gc_type_section);
+        let gc_metadata_section_fingerprint =
+            crate::hash::hash_domain("gugu-gc-metadata-section-v1", &plan.gc_metadata_section);
         Self {
             target: plan.target,
             entry: plan.entry,

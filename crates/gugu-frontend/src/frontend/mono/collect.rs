@@ -9,9 +9,10 @@ use super::instantiate::{
     self, AncestryLink, InstanceRecordV1, WalkEntry, arguments_structure, check_ancestry,
     walk_entry,
 };
-use super::keys::{MonoContext, MonoInterner, MonoKind, hash_domain};
+use super::keys::{MonoContext, MonoInterner, MonoKind};
 use super::roots::{self, RootCategoryV1, RootSeed};
 use crate::Diagnostic;
+use crate::hash::hash_domain;
 use crate::query::QueryEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};

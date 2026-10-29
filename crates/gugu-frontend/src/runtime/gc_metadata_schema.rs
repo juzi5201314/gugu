@@ -291,7 +291,7 @@ impl GcMetadataDemand {
         bytes.extend_from_slice(&self.type_section_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.metadata_section_bytes.to_le_bytes());
         bytes.extend_from_slice(&self.world_fingerprint);
-        crate::frontend::mono::keys::hash_domain("gugu-gc-metadata-demand-v2", &bytes)
+        crate::hash::hash_domain("gugu-gc-metadata-demand-v2", &bytes)
     }
 }
 
@@ -331,7 +331,7 @@ impl GcMetadataWorldV1 {
             self.schema,
         ))
         .expect("GC metadata 可序列化");
-        crate::frontend::mono::keys::hash_domain("gugu-gc-metadata-world-v2", &payload)
+        crate::hash::hash_domain("gugu-gc-metadata-world-v2", &payload)
     }
 }
 

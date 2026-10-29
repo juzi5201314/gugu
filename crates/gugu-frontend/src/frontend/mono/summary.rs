@@ -4,10 +4,11 @@
 //! 私有状态折叠为 hidden-state 标志；对象 key 由内容摘要产生，body 变化但摘要
 //! 不变时保持同一对象 key（red/green）。
 
-use super::keys::{MonoKind, hash_domain};
+use super::keys::MonoKind;
 use crate::frontend::analysis::{
     ANALYSIS_SEMANTICS_REVISION, AnalysisWorldV1, FunctionSummary, ReturnRelation,
 };
+use crate::hash::hash_domain;
 use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
 use crate::target::TargetName;
 use serde::{Deserialize, Serialize};

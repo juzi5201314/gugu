@@ -1,10 +1,10 @@
 //! 目标描述符、sysroot 与成本/调优 profile 身份回归：字段变化必须移动 descriptor 身份。
 
-use super::target::{
+use crate::target::{
     BackendCostProfile, CpuBaseline, CpuFeature, IMPORT_POLICY_REVISION, TARGET_PAGE_SIZE,
     TargetName, baseline_cost_profile, target_sysroot_digest,
 };
-use crate::runtime::scheduler_schema::RUNTIME_TUNING_PROFILE;
+use crate::tuning::RUNTIME_TUNING_PROFILE;
 
 #[test]
 fn registered_targets_have_distinct_stable_descriptor_digests() {

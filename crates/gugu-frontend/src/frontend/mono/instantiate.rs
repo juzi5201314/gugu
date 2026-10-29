@@ -1,10 +1,9 @@
 //! `InstantiateGir`：绑定具体实例，按 HIR owner 收集调用、函数值、初始化器与 metadata 边。
 
-use super::keys::{
-    MonoContext, MonoInterner, MonoKey, MonoKind, hash_domain, type_structure_size, unify,
-};
+use super::keys::{MonoContext, MonoInterner, MonoKey, MonoKind, type_structure_size, unify};
 use crate::frontend::semantics::{TraitRef, Ty, substitute};
 use crate::frontend::{ast, hir};
+use crate::hash::hash_domain;
 use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};

@@ -398,7 +398,7 @@ impl SharedHeapDemand {
         bytes.extend_from_slice(&self.payload_copy_sites.to_le_bytes());
         bytes.extend_from_slice(&self.handle_slots.to_le_bytes());
         bytes.extend_from_slice(&self.max_payload_bytes.to_le_bytes());
-        crate::frontend::mono::keys::hash_domain("gugu-shared-heap-demand-v1", &bytes)
+        crate::hash::hash_domain("gugu-shared-heap-demand-v1", &bytes)
     }
 
     /// 校验需求自身的可证明关系；跨段关系由 `RuntimeRawContractV1::verify` 检查。
@@ -759,10 +759,7 @@ impl SharedHeapRuntimeContract {
 
     /// 计算契约指纹。
     pub(crate) fn compute_fingerprint(&self) -> [u8; 32] {
-        crate::frontend::mono::keys::hash_domain(
-            "gugu-shared-heap-contract-v1",
-            &self.canonical_bytes(),
-        )
+        crate::hash::hash_domain("gugu-shared-heap-contract-v1", &self.canonical_bytes())
     }
 
     /// 返回人类可读的契约 dump；不含地址与 payload 内容。

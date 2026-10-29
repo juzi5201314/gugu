@@ -39,10 +39,10 @@ use super::startup_schema::{Rt0Demand, Rt0SchemaV1};
 use super::sync_schema::{SyncDemand, SyncRuntimeContract};
 use super::wait_schema::{WaitDemand, WaitRuntimeContract};
 use super::{
-    BATCH_MAX, CACHE_LINE_BYTES, MarkDemand, MarkRuntimeContract, OWNER_INBOX_SHARDS,
-    QUEUE_PAD_BYTES, RAW_SLAB_PAGE_BYTES, RETURN_SLAB_CACHE_SETS, RETURN_SLAB_CACHE_WAYS,
-    TARGET_CACHE_ENTRIES,
+    BATCH_MAX, MarkDemand, MarkRuntimeContract, OWNER_INBOX_SHARDS, RAW_SLAB_PAGE_BYTES,
+    RETURN_SLAB_CACHE_SETS, RETURN_SLAB_CACHE_WAYS, TARGET_CACHE_ENTRIES,
 };
+use crate::tuning::{CACHE_LINE_BYTES, QUEUE_PAD_BYTES, RUNTIME_TUNING_PROFILE};
 use crate::{
     Diagnostic, DiagnosticCode, SourceMap, TargetName,
     query::{QueryEngine, QueryKey, QueryKind, QueryResult},
@@ -1060,7 +1060,7 @@ impl RuntimeRawContractV1 {
         }
         // 调度段的字段必须与登记的调优 profile 和 processor 前缀同源：段内自洽但
         // profile/偏移对不上同样是非法状态。
-        let tuning = &crate::runtime::scheduler_schema::RUNTIME_TUNING_PROFILE;
+        let tuning = &RUNTIME_TUNING_PROFILE;
         if self.scheduler.local_capacity != tuning.local_capacity
             || self.scheduler.remote_shards != tuning.remote_shards
             || self.scheduler.batch_max != tuning.batch_max

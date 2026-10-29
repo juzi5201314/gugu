@@ -107,7 +107,7 @@ impl CompressionDemand {
         let mut bytes = Vec::with_capacity(8);
         bytes.extend_from_slice(&self.decode_sites.to_le_bytes());
         bytes.extend_from_slice(&self.compressed_root_slots.to_le_bytes());
-        crate::frontend::mono::keys::hash_domain("gugu-compression-demand-v1", &bytes)
+        crate::hash::hash_domain("gugu-compression-demand-v1", &bytes)
     }
 
     /// 校验需求自身：两个字段都是独立的编译期上界，没有交叉约束。

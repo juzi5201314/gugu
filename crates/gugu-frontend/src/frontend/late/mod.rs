@@ -8,10 +8,8 @@ pub(crate) mod universe;
 
 use crate::Diagnostic;
 use crate::frontend::hir;
-use crate::frontend::mono::{
-    MonoWorldV1,
-    keys::{StableTypeKey, hash_domain},
-};
+use crate::frontend::mono::{MonoWorldV1, keys::StableTypeKey};
+use crate::hash::hash_domain;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

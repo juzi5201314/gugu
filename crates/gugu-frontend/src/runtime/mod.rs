@@ -306,10 +306,6 @@ pub(crate) use startup_schema::Rt0Demand;
 pub(crate) const OWNER_INBOX_SHARDS: u32 = 8;
 /// 单个 batch 的 item 上限。
 pub(crate) const BATCH_MAX: u32 = 128;
-/// 高争用元数据的填充粒度。
-pub(crate) const QUEUE_PAD_BYTES: u64 = 128;
-/// x86_64 两目标的 cache line 字节数。
-pub(crate) const CACHE_LINE_BYTES: u64 = 64;
 /// scheduler raw 记录使用的分段 slab page 字节数。
 pub(crate) const RAW_SLAB_PAGE_BYTES: u64 = 65536;
 /// raw slab 的 dense size class 阶梯。

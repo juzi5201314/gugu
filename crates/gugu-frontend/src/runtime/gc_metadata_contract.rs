@@ -263,10 +263,7 @@ impl GcMetadataRuntimeContract {
     }
 
     pub(crate) fn compute_fingerprint(&self) -> [u8; 32] {
-        crate::frontend::mono::keys::hash_domain(
-            "gugu-gc-metadata-contract-v1",
-            &self.canonical_bytes(),
-        )
+        crate::hash::hash_domain("gugu-gc-metadata-contract-v1", &self.canonical_bytes())
     }
 
     pub(crate) fn dump(&self) -> String {
@@ -306,11 +303,11 @@ impl GcMetadataRuntimeContract {
             "gc-metadata-sections type_bytes={} metadata_bytes={} type_fingerprint={} metadata_fingerprint={}",
             self.type_section.len(),
             self.metadata_section.len(),
-            hex_lower(crate::frontend::mono::keys::hash_domain(
+            hex_lower(crate::hash::hash_domain(
                 "gugu-gc-type-section-v1",
                 &self.type_section
             )),
-            hex_lower(crate::frontend::mono::keys::hash_domain(
+            hex_lower(crate::hash::hash_domain(
                 "gugu-gc-metadata-section-v1",
                 &self.metadata_section
             )),

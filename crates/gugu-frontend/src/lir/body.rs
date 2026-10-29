@@ -738,7 +738,7 @@ impl Body {
         &self.parameters[range(&self.blocks[block.index()].parameters)]
     }
     pub(crate) fn fingerprint(&self) -> [u8; 32] {
-        crate::frontend::mono::keys::hash_domain(
+        crate::hash::hash_domain(
             "gugu-lir-body-v1",
             &crate::canonical::to_vec(self).expect("LIR 编码"),
         )

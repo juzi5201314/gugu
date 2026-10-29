@@ -3,7 +3,7 @@
 //! C import/export 与 `Symbol::External` 使用源名、不加前缀。跨 fragment 的 veneer
 //! 由镜像写出阶段处理，本模块不生成。
 
-use crate::frontend::mono::keys::hash_domain;
+use crate::hash::hash_domain;
 use crate::lir::body::{Body, RuntimeCall, Symbol};
 
 /// 内部函数符号：`__gugu_fn_` + `body.instance` 的 64 hex。

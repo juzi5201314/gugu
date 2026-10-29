@@ -10,6 +10,7 @@ use crate::{
         hir::{self, Module},
         semantics::{CallableId, DefRef, Identities, Model, TraitRef, Ty},
     },
+    hash::hash_domain,
     target::TargetName,
 };
 use serde::{Deserialize, Serialize};
@@ -126,14 +127,6 @@ fn intern(
             Ok(digest)
         }
     }
-}
-
-pub(crate) fn hash_domain(domain: &str, bytes: &[u8]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(domain.as_bytes());
-    hasher.update(&[0]);
-    hasher.update(bytes);
-    *hasher.finalize().as_bytes()
 }
 
 fn encode_string(out: &mut Vec<u8>, value: &str) {

@@ -25,7 +25,7 @@ use crate::backend::x64::lower::{Builder, gpr, imm, mem_base, reg, xmm};
 use crate::backend::x64::mangle;
 use crate::backend::x64::reg::Gpr;
 use crate::backend::x64::table::{Access, OperandKind};
-use crate::frontend::mono::keys::hash_domain;
+use crate::hash::hash_domain;
 use crate::lir::body::Symbol;
 use crate::runtime::PlatformOp;
 use crate::target::TargetName;

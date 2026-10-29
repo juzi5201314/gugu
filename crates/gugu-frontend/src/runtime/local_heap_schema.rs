@@ -370,7 +370,7 @@ impl LocalHeapDemand {
         bytes.extend_from_slice(&self.managed_types.to_le_bytes());
         bytes.extend_from_slice(&self.large_types.to_le_bytes());
         bytes.extend_from_slice(&self.max_object_bytes.to_le_bytes());
-        crate::frontend::mono::keys::hash_domain("gugu-local-heap-demand-v1", &bytes)
+        crate::hash::hash_domain("gugu-local-heap-demand-v1", &bytes)
     }
 
     /// 校验需求自身的可证明关系；跨段关系由 `RuntimeRawContractV1::verify` 检查。
@@ -711,10 +711,7 @@ impl LocalHeapRuntimeContract {
 
     /// 计算契约指纹。
     pub(crate) fn compute_fingerprint(&self) -> [u8; 32] {
-        crate::frontend::mono::keys::hash_domain(
-            "gugu-local-heap-contract-v1",
-            &self.canonical_bytes(),
-        )
+        crate::hash::hash_domain("gugu-local-heap-contract-v1", &self.canonical_bytes())
     }
 
     /// 返回人类可读的契约 dump。

@@ -8,7 +8,7 @@
 use super::{GlueDef, GlueDefKind, RuntimeResources};
 use crate::backend::x64::{abi, mangle};
 use crate::frontend::hir;
-use crate::frontend::mono::keys::hash_domain;
+use crate::hash::hash_domain;
 use crate::lir;
 use crate::lir::body::{CallTarget, Op, Terminator, Value, ValueType};
 use crate::{Diagnostic, DiagnosticCode};

@@ -71,6 +71,18 @@ target 自动发现覆盖 `src/lib.gg`、`src/main.gg`、`src/bin/`、`tests/`�
 
 ```text
 crates/
+├── gugu-base/                      最底层：不依赖任何编译阶段
+│   ├── src/action.rs               稠密 action graph 与状态迁移
+│   ├── src/canonical.rs            GBC1 规范编码
+│   ├── src/diagnostics.rs          稳定代码、源码范围与排序
+│   ├── src/diagnostics/            人读诊断渲染
+│   │   ├── human.rs                片段、插入符与 ANSI 颜色的文本布局
+│   │   └── human_tests.rs          渲染契约测试
+│   ├── src/hash.rs                 域隔离摘要 `hash_domain`（全仓唯一实现）
+│   ├── src/query.rs                session 内 query engine 与编译对象存储
+│   ├── src/source.rs               源码快照、Span、行首表与展开记录
+│   ├── src/target.rs               目标描述符、sysroot 与成本 profile
+│   └── src/tuning.rs               调度调优 profile（`RUNTIME_TUNING_PROFILE`）
 ├── gugu-cli/
 │   ├── src/main.rs                 单一 gugu 入口、参数解析与 bootstrap 执行编排
 │   ├── src/config.rs               CLI 配置合并、环境变量与本地配置发现
@@ -83,12 +95,6 @@ crates/
 │   └── benches/                    手工验收二进制（编码、栈图、片段、协程上下文）
 └── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排
-    ├── src/action.rs               稠密 action graph 与状态迁移
-    ├── src/diagnostics.rs          稳定代码、源码范围与排序
-    ├── src/diagnostics/            人读诊断渲染
-    │   ├── human.rs                片段、插入符与 ANSI 颜色的文本布局
-    │   └── human_tests.rs          渲染契约测试
-    ├── src/source.rs               源码快照、Span、行首表与展开记录
     ├── src/project/                清单、workspace、target、依赖、锁图与缓存输入
     │   ├── mod.rs                  项目聚合、选择与缓存输入导出
     │   ├── model.rs                package、target 与 workspace 模型

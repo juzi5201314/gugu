@@ -5,10 +5,8 @@
 
 use std::path::Path;
 
-use crate::{
-    Diagnostic, DiagnosticCode, Severity, SourceFileId, SourceMap, SourceSnapshot, Span,
-    source::ExpansionId,
-};
+use crate::diagnostics::{Diagnostic, DiagnosticCode, Severity};
+use crate::source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span};
 
 /// 建立单文件源码表并返回其文件 ID。
 fn source_map(path: &str, source: &str) -> (SourceMap, SourceFileId) {

@@ -13,7 +13,7 @@ use super::verify::verify_inst;
 use crate::frontend::gir::body::{CallKind, MemoryOrdering};
 use crate::frontend::gir::placement::PlacementKind;
 use crate::frontend::late::universe::{MetadataShape, Shape, TypeRecord, TypeUniverse};
-use crate::frontend::mono::keys::hash_domain;
+use crate::hash::hash_domain;
 use crate::lir::body::{AtomicOp, Call, CallTarget, Op, Provenance, Signature, Type, ValueType};
 use crate::target::{CpuBaseline, TargetName};
 

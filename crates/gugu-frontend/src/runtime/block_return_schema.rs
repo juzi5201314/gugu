@@ -92,7 +92,7 @@ impl BlockReturnDemand {
         bytes.extend_from_slice(&self.shared_block_sites.to_le_bytes());
         bytes.extend_from_slice(&self.resource_block_sites.to_le_bytes());
         bytes.extend_from_slice(&self.max_unit_bytes.to_le_bytes());
-        crate::frontend::mono::keys::hash_domain("gugu-block-return-demand-v1", &bytes)
+        crate::hash::hash_domain("gugu-block-return-demand-v1", &bytes)
     }
 
     /// 校验需求自身的可证明关系。
@@ -295,10 +295,7 @@ impl BlockReturnRuntimeContract {
 
     /// 计算契约指纹。
     pub(crate) fn compute_fingerprint(&self) -> [u8; 32] {
-        crate::frontend::mono::keys::hash_domain(
-            "gugu-block-return-contract-v1",
-            &self.canonical_bytes(),
-        )
+        crate::hash::hash_domain("gugu-block-return-contract-v1", &self.canonical_bytes())
     }
 
     /// 返回人类可读的契约 dump。

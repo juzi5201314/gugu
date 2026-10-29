@@ -272,7 +272,7 @@ fn early_value(
         ConstantValue::Bool(value) => ConstValue::Bool(*value),
         ConstantValue::Float(value) => ConstValue::Float(*value),
         ConstantValue::String(value) => ConstValue::String(value.clone()),
-        ConstantValue::Type(ty) => ConstValue::Type(crate::frontend::mono::keys::hash_domain(
+        ConstantValue::Type(ty) => ConstValue::Type(crate::hash::hash_domain(
             "gugu-mono-v1",
             &context.encode_type(ty)?,
         )),

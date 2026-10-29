@@ -87,7 +87,7 @@ impl SourceTableId {
     ///
     /// 身份在源码表建立时定死，之后不随追加的生成快照或展开记录改变：span 校验要求同一个
     /// 编译里的所有 span 共享一个身份，中途换号会把先前的 span 判成外来 span。
-    pub(crate) fn from_content(snapshots: &[SourceSnapshot]) -> Self {
+    pub fn from_content(snapshots: &[SourceSnapshot]) -> Self {
         let mut hash = blake3::Hasher::new_derive_key("gugu-source-table-v1");
         hash.update(&(snapshots.len() as u64).to_le_bytes());
         for snapshot in snapshots {
@@ -413,7 +413,7 @@ impl Span {
         })
     }
 
-    pub(crate) fn detached(path: &Path, start: usize, end: usize) -> Self {
+    pub fn detached(path: &Path, start: usize, end: usize) -> Self {
         Self {
             file: SourceFileId::new(0),
             table: SourceTableId::UNBOUND,
