@@ -5,7 +5,6 @@
 //! 旧 topology 转发收敛。全部进程内运行。
 
 use super::message::{ReturnNodeId, StagedChain};
-use super::routing::{MaintenancePhase, RouteAction, RouteResolution, RoutingPlane};
 use super::routing_schema::{
     MAX_RADIX_LEVELS, RADIX_BUCKET_LOG2, RADIX_BUCKETS, RADIX_HOP_LIMIT, ROUTE_MODES, RouteMode,
     RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract,
@@ -13,6 +12,7 @@ use super::routing_schema::{
 use super::slab::{
     Epoch, MemoryDomainId, OwnerGeneration, OwnerId, OwnerToken, RawInvariant, RouteKey,
 };
+use gugu_runtime_world::routing::{MaintenancePhase, RouteAction, RouteResolution, RoutingPlane};
 
 /// 构造一个 owner token；route key 由调用方指定以便 bucket 放置的确定性断言。
 fn token(route_key: u64) -> OwnerToken {
@@ -65,6 +65,7 @@ fn deliver_all() -> impl FnMut(OwnerToken) -> Result<RouteResolution, RawInvaria
 
 /// 真实编译默认走 direct：不分配 bucket、指纹可复现、dump 固定口径。
 #[test]
+#[cfg(feature = "slow-tests")]
 fn real_compilation_defaults_to_direct_routing() {
     let source = "fn main() { let value = 1 _ = value }";
     let compile = || {
@@ -115,7 +116,7 @@ fn real_compilation_defaults_to_direct_routing() {
 }
 
 /// 路由模式参与契约身份：显式 radix 改变指纹与 action key。
-#[cfg_attr(not(feature = "slow-tests"), ignore)]
+#[cfg(feature = "slow-tests")]
 #[test]
 fn routing_mode_participates_in_contract_identity() {
     let source = "fn main() { let value = 1 _ = value }";

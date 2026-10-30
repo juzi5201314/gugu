@@ -5,10 +5,23 @@
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
 pub mod combining_impl;
+#[cfg(test)]
+mod combining_tests;
+#[cfg(test)]
+mod contract_tests;
 pub mod coroutine_impl;
+#[cfg(test)]
+#[path = "../coroutine_tests.rs"]
+mod coroutine_tests;
 mod extent_impl;
 pub use extent_impl::OWNER_ARENA_BYTES;
+pub mod provenance_impl;
+#[cfg(test)]
+mod provenance_tests;
+pub mod resource_impl;
 pub mod routing_impl;
+#[cfg(test)]
+mod routing_tests;
 pub mod termination_impl;
 
 use std::collections::VecDeque;

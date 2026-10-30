@@ -431,6 +431,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "foldhash",
+ "gugu-base",
  "gugu-runtime-abi",
  "siphasher",
  "xxhash-rust",

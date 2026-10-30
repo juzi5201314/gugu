@@ -253,7 +253,7 @@ pub struct GcMetadataDemand {
 }
 
 impl GcMetadataDemand {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub const fn empty() -> Self {
         Self {

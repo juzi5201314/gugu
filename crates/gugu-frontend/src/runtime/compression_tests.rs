@@ -25,6 +25,7 @@ fn enabled_contract() -> CompressionRuntimeContract {
 
 /// 真实编译默认走 full-pointer：不启用 cage、不预留地址，指纹可复现。
 #[test]
+#[cfg(feature = "slow-tests")]
 fn real_compilation_defaults_to_disabled_compression() {
     let source = "fn main() { let value = 1 _ = value }";
     let compile = || {

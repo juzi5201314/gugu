@@ -291,17 +291,17 @@ fn heap_source_mirrors_the_object_header_encoding() {
             "heap.gg 的 {name} 与 compiler 常量不一致（结果会是对象头误读）"
         );
     }
-    // 位域必须互不重叠：相邻字段的掩码错位会让写方与读方各自解释同一批位。
-    let field = |name: &str| {
-        HEADER_ENCODING_MIRROR
-            .iter()
-            .find(|(field, _)| *field == name)
-            .unwrap_or_else(|| panic!("表里有 {name}"))
-            .1
-    };
+    // 位域必须互不重叠：相邻字段的掩码错位会让写方与读方各自解释同一批位。age 与
+    // generation 掩码只由 heap.gg 定义，直接从源码读取。
+    let field = |name: &str| super::tests::source_uint_constant(super::RUNTIME_HEAP_SOURCE, name);
     let age = field("CONTROL_AGE_MASK");
     let generation = field("CONTROL_GENERATION_MASK");
     assert_eq!(age & generation, 0, "age 与 generation 位域不得重叠");
+    assert_eq!(
+        generation.trailing_zeros(),
+        super::local_heap::CONTROL_GENERATION_SHIFT,
+        "generation 掩码必须从 compiler 登记的位移开始"
+    );
 }
 
 /// processor 页的机器侧槽位必须与 `processor.rs` 的固定偏移一致。

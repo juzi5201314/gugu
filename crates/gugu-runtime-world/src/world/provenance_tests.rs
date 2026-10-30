@@ -5,13 +5,13 @@
 //! （链损坏、伪造、重复返还、跨 owner/class、旧 generation）。全部进程内运行。
 
 use super::RawWorld;
-use super::heap_tests::{gc_contract, gc_contract_with};
+use super::contract_tests::{raw_contract, raw_contract_with};
+use crate::provenance::{GuardedBuffer, ReleaseRejection};
 use crate::runtime::inbox::{ServiceBudget, ShardIndex};
 use crate::runtime::message::{
     BatchLimits, FlushTrigger, ProducerStaging, ReturnKind, stage_message,
 };
 use crate::runtime::model::RawPlanePolicyV1;
-use crate::runtime::provenance::{GuardedBuffer, ReleaseRejection};
 use crate::runtime::provenance_schema::{
     ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract, SafetyProfile,
 };
@@ -21,7 +21,7 @@ use crate::runtime::{CompressionDemand, RuntimeRawContractV1};
 
 /// 构建带指定安全 profile 的整体契约。
 fn provenance_contract(profile: SafetyProfile) -> RuntimeRawContractV1 {
-    gc_contract_with(
+    raw_contract_with(
         RawPlanePolicyV1 {
             provenance: ProvenancePolicyV1 { profile },
             ..RawPlanePolicyV1::default()
@@ -88,7 +88,7 @@ fn publish(world: &RawWorld, owner: u32, message: &super::super::message::Return
 /// 整体契约的跨段校验：provenance 段与 raw policy 不一致、需求派生不一致均拒绝。
 #[test]
 fn raw_contract_cross_checks_provenance_segment() {
-    let mut contract = gc_contract();
+    let mut contract = raw_contract();
     contract.verify().expect("整体契约自洽");
 
     // 把 provenance 段换成 debug：子段自洽，但与 policy（release）对不上。
@@ -96,7 +96,7 @@ fn raw_contract_cross_checks_provenance_segment() {
     assert!(contract.verify().is_err());
 
     // 需求与 raw 平面派生值不一致。
-    let mut contract = gc_contract();
+    let mut contract = raw_contract();
     let drifted = ProvenanceRuntimeContract::build(
         ProvenanceDemand::derive(contract.provenance().demand().owners + 1, 0, 0),
         ProvenancePolicyV1::release(),

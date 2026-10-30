@@ -7,10 +7,10 @@
 
 use gugu_runtime_abi as runtime;
 use gugu_runtime_abi::{
-    OWNER_INBOX_SHARDS, PlatformProfile, RAW_SLAB_PAGE_BYTES, barrier_schema, combining_schema,
-    coroutine, edge_schema, extent, foreign_schema, inbox, local_heap, message, model, platform,
-    provenance_schema, provider, resource, routing_schema, scheduler_schema, shared_heap_schema,
-    size_class, slab, stack, startup_schema, text,
+    OWNER_INBOX_SHARDS, PlatformProfile, RAW_SLAB_PAGE_BYTES, RESOURCE_DEDICATED_ALIGN_LIMIT,
+    barrier_schema, combining_schema, coroutine, edge_schema, extent, foreign_schema, inbox,
+    local_heap, message, model, platform, provenance_schema, provider, resource, routing_schema,
+    scheduler_schema, shared_heap_schema, size_class, slab, stack, startup_schema, text,
 };
 
 pub mod candidate_schema;

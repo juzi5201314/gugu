@@ -880,7 +880,7 @@ impl RuntimeRawContractV1 {
     ///
     /// 只供契约不变量测试构造「子段内部自洽、跨段却对不上」的非法状态：正常路径只经 `build`
     /// 生成契约，不存在需要写这一段的生产代码。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub fn block_return_mut(&mut self) -> &mut BlockReturnRuntimeContract {
         &mut self.block_return
@@ -905,7 +905,7 @@ impl RuntimeRawContractV1 {
     ///
     /// 只供契约不变量测试构造「子段内部自洽、跨段却对不上」的非法状态：正常路径只经
     /// `build` 生成契约，不存在需要写这一段的生产代码。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     #[allow(dead_code)]
     pub fn provenance_mut(&mut self) -> &mut ProvenanceRuntimeContract {
         &mut self.provenance

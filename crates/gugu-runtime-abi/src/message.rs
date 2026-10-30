@@ -119,7 +119,7 @@ impl LinkCodec {
     }
 
     /// 编码一个「校验位合法但 tag 被替换」的伪造 link；只供链完整性测试构造攻击字。
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn forge_word(&self, offset: u64, tag: u16) -> Result<u64, RawInvariant> {
         let offset = u32::try_from(offset).map_err(|_| RawInvariant::new("偏移超出编码宽度"))?;
         let checksum = self.checksum(u64::from(offset), tag);

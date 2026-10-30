@@ -15,27 +15,24 @@ use super::super::model::GRACE_STEPS;
 use super::super::slab::{MemoryDomainId, OwnerToken, RouteKey};
 use super::RawWorld;
 use super::combining_impl::combining_outcome;
-use crate::TargetName;
+use super::contract_tests::raw_contract_with;
+use crate::runtime::CompressionDemand;
 use crate::runtime::OWNER_INBOX_SHARDS;
 use crate::runtime::combining_schema::CombiningRuntimeContract;
+use crate::runtime::model::RawPlanePolicyV1;
 use crate::runtime::size_class::RuntimeSizeClassId;
 
-/// 由真实编译得到 combining 契约；世界只按契约模式配置平面。
+/// 由整体契约装配点得到 combining 段；世界只按契约模式与限额配置平面。
 fn contract(mode: CombiningMode) -> CombiningRuntimeContract {
-    let compilation = crate::Compiler::shared().compile(
-        crate::CompileRequest::single_file("main.gg", "fn main() {\n}\n", TargetName::X86_64Linux)
-            .with_combining_policy(CombiningPolicyV1 { mode }),
-    );
-    assert!(
-        compilation.is_success(),
-        "{:?}",
-        compilation.diagnostics().items()
-    );
-    compilation
-        .image_plan()
-        .expect("镜像计划")
-        .combining_runtime()
-        .clone()
+    raw_contract_with(
+        RawPlanePolicyV1 {
+            combining: CombiningPolicyV1 { mode },
+            ..RawPlanePolicyV1::default()
+        },
+        CompressionDemand::default(),
+    )
+    .combining()
+    .clone()
 }
 
 /// 构建一个已配置 combining 的世界。

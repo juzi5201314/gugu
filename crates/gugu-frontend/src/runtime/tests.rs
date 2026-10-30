@@ -23,7 +23,6 @@ use super::model::{
     FieldKind, MessageFieldSchema, MessageSchemaV1, RawPlaneDemand, RawPlanePolicyV1,
     RawResourceDemand, RuntimeRawContractV1,
 };
-use super::owner::AllocationLevel;
 use super::pacing_schema::GcPacingDemand;
 use super::platform::{FakePlatform, PlatformProfile};
 use super::provider::{ProviderError, RangeProvider, RangeState};
@@ -43,9 +42,10 @@ use super::slab::{
 use super::stackmap_schema::StackMapDemand;
 use super::sync_schema::SyncDemand;
 use super::wait_schema::WaitDemand;
-use super::world::{RawWorld, ResourceShape};
 use super::{OWNER_INBOX_SHARDS, RAW_SLAB_PAGE_BYTES, RETURN_SLAB_CACHE_SETS, Rt0Demand};
 use crate::TargetName;
+use gugu_runtime_world::owner::AllocationLevel;
+use gugu_runtime_world::world::{RawWorld, ResourceShape};
 
 fn world(owners: u32, nodes: u32) -> RawWorld {
     RawWorld::new(7, owners, nodes, BatchLimits::default()).expect("raw world 可创建")
@@ -2369,7 +2369,7 @@ pub(super) fn source_uint_constant(source: &str, name: &str) -> u64 {
 /// 机器码层面不会有人报错，只有行为会静默错位。
 #[test]
 fn coroutine_pack_layout_matches_the_scheduler_mirror() {
-    use super::coroutine_layout as pack;
+    use super::coroutine_pack as pack;
     assert_eq!(
         source_uint_constant(super::RUNTIME_SCHEDULER_SOURCE, "COROUTINE_PACK_BYTES"),
         u64::try_from(pack::COROUTINE_PACK_BYTES).expect("字节数适配 u64"),
@@ -2399,7 +2399,7 @@ fn coroutine_pack_layout_matches_the_scheduler_mirror() {
 /// 让收集器按错的偏移取根，而机器码层面不会有人报错。
 #[test]
 fn coroutine_pack_lane_map_matches_the_scheduler_mirror() {
-    use super::coroutine_layout as pack;
+    use super::coroutine_pack as pack;
     let source = super::RUNTIME_SCHEDULER_SOURCE;
     assert_eq!(
         source_uint_constant(source, "COROUTINE_PACK_LANES"),
@@ -2456,7 +2456,7 @@ fn coroutine_pack_lane_map_matches_the_scheduler_mirror() {
 /// 读到别的字段，而机器码层面不会有人报错。
 #[test]
 fn dynamic_root_registry_matches_the_scheduler_mirror() {
-    use super::dynamic_roots_schema as registry;
+    use gugu_runtime_world::dynamic_roots_schema as registry;
     let source = super::RUNTIME_SCHEDULER_SOURCE;
     let mirror = |name: &str| source_uint_constant(source, name);
     assert_eq!(

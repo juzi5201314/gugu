@@ -215,38 +215,27 @@ pub const RETURN_SLAB_CACHE_WAYS: u32 = 2;
 /// direct mode 下的 temporal target cache 项数。
 pub const TARGET_CACHE_ENTRIES: u32 = 4;
 
-#[cfg(test)]
-#[allow(dead_code, reason = "测试目标按模块条件读取 runtime source mirror")]
-const RUNTIME_CORE_SOURCE: &str = include_str!("../../gugu-frontend/resources/runtime/core.gg");
-#[cfg(test)]
-#[expect(
-    dead_code,
-    reason = "layout mirror tests 读取 build-time runtime source"
-)]
-const RUNTIME_BARRIER_SOURCE: &str =
+/// 测试用：`runtime/core.gg` 源镜像，供布局交叉校验读取。
+#[cfg(any(test, feature = "test-support"))]
+pub const RUNTIME_CORE_SOURCE: &str = include_str!("../../gugu-frontend/resources/runtime/core.gg");
+/// 测试用：`runtime/barrier.gg` 源镜像，供布局交叉校验读取。
+#[cfg(any(test, feature = "test-support"))]
+pub const RUNTIME_BARRIER_SOURCE: &str =
     include_str!("../../gugu-frontend/resources/runtime/barrier.gg");
-#[cfg(test)]
-#[expect(
-    dead_code,
-    reason = "layout mirror tests 读取 build-time runtime source"
-)]
-const RUNTIME_HEAP_SOURCE: &str = include_str!("../../gugu-frontend/resources/runtime/heap.gg");
-#[cfg(test)]
-#[expect(
-    dead_code,
-    reason = "layout mirror tests 读取 build-time runtime source"
-)]
-const RUNTIME_ROOTS_SOURCE: &str = include_str!("../../gugu-frontend/resources/runtime/roots.gg");
-#[cfg(test)]
-#[expect(dead_code, reason = "slow GC tests 读取 build-time runtime source")]
-const RUNTIME_GC_PROBES_SOURCE: &str =
+/// 测试用：`runtime/heap.gg` 源镜像，供布局交叉校验读取。
+#[cfg(any(test, feature = "test-support"))]
+pub const RUNTIME_HEAP_SOURCE: &str = include_str!("../../gugu-frontend/resources/runtime/heap.gg");
+/// 测试用：`runtime/roots.gg` 源镜像，供布局交叉校验读取。
+#[cfg(any(test, feature = "test-support"))]
+pub const RUNTIME_ROOTS_SOURCE: &str =
+    include_str!("../../gugu-frontend/resources/runtime/roots.gg");
+/// 测试用：`runtime/gc_probes.gg` 源镜像，供 GC 探针用例读取。
+#[cfg(any(test, feature = "test-support"))]
+pub const RUNTIME_GC_PROBES_SOURCE: &str =
     include_str!("../../gugu-frontend/resources/runtime/gc_probes.gg");
-#[cfg(test)]
-#[expect(
-    dead_code,
-    reason = "layout mirror tests 读取 build-time runtime source"
-)]
-const RUNTIME_SCHEDULER_SOURCE: &str =
+/// 测试用：`runtime/scheduler.gg` 源镜像，供布局交叉校验读取。
+#[cfg(any(test, feature = "test-support"))]
+pub const RUNTIME_SCHEDULER_SOURCE: &str =
     include_str!("../../gugu-frontend/resources/runtime/scheduler.gg");
 
 /// runtime 所需的 compiler-owned intrinsic 边界。

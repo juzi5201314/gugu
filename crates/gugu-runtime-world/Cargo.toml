@@ -17,3 +17,4 @@ gugu-runtime-abi = { path = "../gugu-runtime-abi" }
 
 [dev-dependencies]
 gugu-runtime-abi = { path = "../gugu-runtime-abi", features = ["test-support"] }
+gugu-base = { path = "../gugu-base" }

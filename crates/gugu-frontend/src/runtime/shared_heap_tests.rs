@@ -1,10 +1,10 @@
 //! SharedHeap stable handle、access guard 与 forwarding grace 的确定性行为回归。
 
-use super::shared_heap::{ForwardDeferred, SharedForward, SharedHeap};
 use super::shared_heap_schema::{
     SHARED_FORWARDING_GRACE_STEPS, SharedHeapDemand, SharedHeapRuntimeContract, SharedPayloadId,
     SharedSlotState,
 };
+use gugu_runtime_world::shared_heap::{ForwardDeferred, SharedForward, SharedHeap};
 
 fn contract() -> SharedHeapRuntimeContract {
     SharedHeapRuntimeContract::build(SharedHeapDemand::default())

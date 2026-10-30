@@ -191,7 +191,10 @@ crates/
 │       ├── mod.rs                  raw owner 世界与 ResourceCell 世界骨架
 │       ├── extent_impl.rs          arena 开立、extent 取用与 trim 门禁接入
 │       ├── resource_impl.rs        资源分配、lease、close、release 与整页 mapping 接入
+│       ├── provenance_impl.rs      raw link provenance 平面接入与 release 拒绝分类
+│       ├── routing_impl.rs         direct/radix routing 平面配置、转发与 drain
 │       ├── coroutine_impl.rs       main/子协程创建、栈复制、cold完成发布与owner return
+│       ├── contract_tests.rs       世界测试共用的 raw 契约构造：直接 `RuntimeRawContractV1::build`，不经 Compiler
 │       └── termination_impl.rs     rt0 进程模型：boot、终止路径与设施关闭接入
 └── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排

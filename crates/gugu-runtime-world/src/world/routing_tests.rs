@@ -6,7 +6,7 @@
 
 use super::super::routing::MaintenancePhase;
 use super::RawWorld;
-use super::heap_tests::{configured_world, gc_contract, gc_contract_with};
+use super::contract_tests::{configured_world, raw_contract, raw_contract_with};
 use crate::runtime::inbox::{ServiceBudget, ShardIndex};
 use crate::runtime::message::{FlushTrigger, ReturnKind, RingCloseReason};
 use crate::runtime::model::RawPlanePolicyV1;
@@ -17,7 +17,7 @@ use crate::runtime::{CompressionDemand, OWNER_INBOX_SHARDS, RuntimeRawContractV1
 
 /// 构建一个已配置 radix 路由的整体契约。
 fn radix_contract() -> RuntimeRawContractV1 {
-    gc_contract_with(
+    raw_contract_with(
         RawPlanePolicyV1 {
             routing: RoutingPolicyV1 {
                 mode: RouteMode::Radix,
@@ -112,7 +112,7 @@ fn radix_world_delivers_returns_exactly_once() {
 /// direct 世界的路径零改动：bucket 容量为 0，发布直达 inbox，路由统计保持全零。
 #[test]
 fn direct_world_keeps_zero_buckets_and_unchanged_path() {
-    let mut world = configured_world(&gc_contract(), 7, 2, 64);
+    let mut world = configured_world(&raw_contract(), 7, 2, 64);
     assert_eq!(world.routing_bucket_capacity(), 0);
     let class = RuntimeSizeClassId::from_raw(0);
     let allocation = world.allocate(0, class).expect("分配成功");

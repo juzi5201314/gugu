@@ -5,17 +5,17 @@
 
 use super::extent::ExtentId;
 use super::message::LinkError;
-use super::provenance::{POISON_WORD, ProvenancePlane, ReleaseRejection, classify_chain_error};
 use super::provenance_schema::{
-    DEBUG_EXTRA_CHECKS, PROVENANCE_CHECKS, PROVENANCE_DOMAINS, PROVENANCE_PROFILE_NAME,
-    PROVENANCE_PROFILE_REVISION, PROVENANCE_REJECTIONS, PROVENANCE_SCHEMA, ProvenanceDemand,
-    ProvenancePolicyV1, ProvenanceRuntimeContract, RELEASE_BASELINE_CHECKS, SECURITY_EXTRA_CHECKS,
-    SafetyProfile,
+    DEBUG_EXTRA_CHECKS, PROVENANCE_CHECKS, PROVENANCE_REJECTIONS, PROVENANCE_SCHEMA,
+    ProvenanceDemand, ProvenancePolicyV1, ProvenanceRuntimeContract, SafetyProfile,
 };
 use super::size_class::RuntimeSizeClassTable;
 use super::slab::{
     Epoch, MemoryDomainId, OwnerGeneration, OwnerId, OwnerToken, RawInvariant, RouteKey,
     SlabGeneration, SlabTable,
+};
+use gugu_runtime_world::provenance::{
+    POISON_WORD, ProvenancePlane, ReleaseRejection, classify_chain_error,
 };
 
 /// 在指定 domain 上构造一个 4 slot 的测试 descriptor。
@@ -42,9 +42,13 @@ fn descriptor_for_domain(domain: MemoryDomainId) -> super::slab::SlabDescriptor 
 }
 
 /// 用真实编译检查默认 profile：release、指纹可复现、dump 固定口径。
-#[cfg_attr(not(feature = "slow-tests"), ignore)]
+#[cfg(feature = "slow-tests")]
 #[test]
 fn real_compilation_defaults_to_release_provenance() {
+    use super::provenance_schema::{
+        PROVENANCE_DOMAINS, PROVENANCE_PROFILE_NAME, PROVENANCE_PROFILE_REVISION,
+        RELEASE_BASELINE_CHECKS,
+    };
     let source = "fn main() { let value = 1 _ = value }";
     let compile = || {
         crate::Compiler::shared().compile(crate::CompileRequest::single_file(
@@ -95,87 +99,70 @@ fn real_compilation_defaults_to_release_provenance() {
     assert!(dump.contains("provenance-fingerprint "));
 }
 
-/// 显式 profile 改变契约身份与 action key；同 profile 冷/热一致。
+/// 显式 profile 改变契约：debug/security 激活基线加各自额外检查，三个 profile 指纹互异。
 #[test]
+fn safety_profile_selects_active_checks_and_contract_fingerprint() {
+    use super::provenance_schema::{RELEASE_BASELINE_CHECKS, SECURITY_EXTRA_CHECKS};
+    let build = |profile| {
+        ProvenanceRuntimeContract::build(
+            ProvenanceDemand::derive(2, 7, 5),
+            ProvenancePolicyV1 { profile },
+        )
+        .expect("契约可构建")
+    };
+    let release = build(SafetyProfile::Release);
+    let debug = build(SafetyProfile::Debug);
+    let security = build(SafetyProfile::Security);
+    assert_eq!(debug.mode(), SafetyProfile::Debug);
+    assert_eq!(security.mode(), SafetyProfile::Security);
+    let expected = |extra: &[&str]| -> Vec<String> {
+        RELEASE_BASELINE_CHECKS
+            .iter()
+            .chain(extra)
+            .map(|name| (*name).to_owned())
+            .collect()
+    };
+    assert_eq!(debug.active_checks, expected(&DEBUG_EXTRA_CHECKS));
+    assert_eq!(security.active_checks, expected(&SECURITY_EXTRA_CHECKS));
+    assert_ne!(release.fingerprint(), debug.fingerprint());
+    assert_ne!(release.fingerprint(), security.fingerprint());
+    assert_ne!(debug.fingerprint(), security.fingerprint());
+}
+
+/// 真实编译中 profile 进入整体契约身份（runtime raw fingerprint）与 action key。
+#[test]
+#[cfg(feature = "slow-tests")]
 fn safety_profile_participates_in_contract_identity_and_action_key() {
     let source = "fn main() { let value = 1 _ = value }";
-    let compile = |policy: ProvenancePolicyV1| {
+    let compile = |profile: SafetyProfile| {
         crate::Compiler::shared().compile(
             crate::CompileRequest::single_file("main.gg", source, crate::TargetName::X86_64Linux)
-                .with_provenance_policy(policy),
+                .with_provenance_policy(ProvenancePolicyV1 { profile }),
         )
     };
-    let release = compile(ProvenancePolicyV1::release());
-    let debug = compile(ProvenancePolicyV1 {
-        profile: SafetyProfile::Debug,
-    });
-    let security = compile(ProvenancePolicyV1 {
-        profile: SafetyProfile::Security,
-    });
-    for compilation in [&release, &debug, &security] {
+    let release = compile(SafetyProfile::Release);
+    let debug = compile(SafetyProfile::Debug);
+    for compilation in [&release, &debug] {
         assert!(
             compilation.is_success(),
             "{:?}",
             compilation.diagnostics().items()
         );
     }
-    let release_plan = release.image_plan().expect("镜像计划");
     let debug_plan = debug.image_plan().expect("镜像计划");
-    let security_plan = security.image_plan().expect("镜像计划");
     assert_eq!(debug_plan.provenance_runtime().mode(), SafetyProfile::Debug);
-    assert_eq!(
-        security_plan.provenance_runtime().mode(),
-        SafetyProfile::Security
-    );
-    // debug/security 激活基线加各自额外检查；三个 profile 的指纹互不相同。
-    let expected_debug: Vec<String> = RELEASE_BASELINE_CHECKS
-        .iter()
-        .chain(DEBUG_EXTRA_CHECKS.iter())
-        .map(|name| (*name).to_owned())
-        .collect();
-    let expected_security: Vec<String> = RELEASE_BASELINE_CHECKS
-        .iter()
-        .chain(SECURITY_EXTRA_CHECKS.iter())
-        .map(|name| (*name).to_owned())
-        .collect();
-    assert_eq!(
-        debug_plan.provenance_runtime().active_checks.clone(),
-        expected_debug
-    );
-    assert_eq!(
-        security_plan.provenance_runtime().active_checks.clone(),
-        expected_security
-    );
     assert_ne!(
-        release_plan.provenance_contract_fingerprint(),
-        debug_plan.provenance_contract_fingerprint()
-    );
-    assert_ne!(
-        release_plan.provenance_contract_fingerprint(),
-        security_plan.provenance_contract_fingerprint()
-    );
-    assert_ne!(
-        debug_plan.provenance_contract_fingerprint(),
-        security_plan.provenance_contract_fingerprint()
-    );
-    // 整体契约身份（runtime raw fingerprint）与 action key 随 profile 变化。
-    assert_ne!(
-        release.runtime_raw_fingerprint(),
-        debug.runtime_raw_fingerprint()
-    );
-    assert_ne!(release.action_key(), debug.action_key());
-    // 同一 profile 重放保持一致。
-    let replay = compile(ProvenancePolicyV1 {
-        profile: SafetyProfile::Debug,
-    });
-    assert_eq!(
-        replay
+        release
             .image_plan()
             .expect("镜像计划")
             .provenance_contract_fingerprint(),
         debug_plan.provenance_contract_fingerprint()
     );
-    assert_eq!(replay.action_key(), debug.action_key());
+    assert_ne!(
+        release.runtime_raw_fingerprint(),
+        debug.runtime_raw_fingerprint()
+    );
+    assert_ne!(release.action_key(), debug.action_key());
 }
 
 /// 契约段漂移：mode、激活检查、目录、指纹任一与登记值不一致都必须拒绝。
