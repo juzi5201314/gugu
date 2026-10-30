@@ -412,6 +412,7 @@ pub(super) fn frontend(
 /// 输出里指定模块路径对应的下标。
 ///
 /// 内建模块占据模块表前缀，用户模块因此不再固定落在下标 0；测试要定位自己的模块必须按路径查。
+#[cfg(feature = "slow-tests")]
 pub(super) fn module_index(output: &super::FrontendOutput, path: &str) -> usize {
     output
         .modules

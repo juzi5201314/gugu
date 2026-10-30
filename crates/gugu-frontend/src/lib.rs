@@ -382,7 +382,7 @@ impl Compilation {
             dump
         })
     }
-    #[cfg(test)]
+    #[cfg(all(test, feature = "slow-tests"))]
     pub(crate) fn raw_contract(&self) -> Option<&RuntimeRawContractV1> {
         self.raw_contract.as_ref()
     }

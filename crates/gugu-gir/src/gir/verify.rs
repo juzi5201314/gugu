@@ -262,7 +262,7 @@ fn cleanup_sequences(module: &hir::Module, body: &GirBody) -> Result<(), Diagnos
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "slow-tests"))]
 pub(super) fn reconstruct_for_test(body: &GirBody, record: &ExitRecord) -> Vec<CleanupAction> {
     reconstruct(body, record)
 }

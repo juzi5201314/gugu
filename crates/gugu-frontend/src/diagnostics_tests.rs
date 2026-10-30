@@ -14,6 +14,11 @@
 //! 非法签名、E0051 的两种宏失败、E0056 的 warn/allow/deny 三态）。绝大多数规则的输入
 //! 只产生一条主诊断；解析恢复（E0022/E0026）与 `?` 的非 `Try` 操作数（E0038）会同时
 //! 产生伴随诊断，这些行用 [`Expected::Diagnostic`] 的 `companions` 逐条登记，而不是放宽断言。
+// 表数据的字段只由慢档 `cases_match_the_compiler` 的 runner 读取；默认档只跑两个结构闸门。
+#![cfg_attr(
+    not(feature = "slow-tests"),
+    allow(dead_code, reason = "表字段与 runner 只在 slow-tests 下被读取")
+)]
 
 use std::collections::BTreeSet;
 
