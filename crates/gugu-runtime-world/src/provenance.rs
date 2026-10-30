@@ -20,18 +20,18 @@ use super::provenance_schema::{
 use super::slab::{MemoryDomainId, RawInvariant, RuntimeSeed, SlabDescriptorId, SlabTable};
 
 /// debug poison 的稳定标记字；ASCII "gugupois"。这是调试标记，不是安全 secret。
-pub(crate) const POISON_WORD: u64 = 0x6775_6775_706F_6973;
+pub const POISON_WORD: u64 = 0x6775_6775_706F_6973;
 
 /// security profile 随机复用的深度上界：每次弹出在前 `REUSE_DEPTH_LIMIT` 个 slot 中挑选，
 /// 深度越过链长时取链尾；release/debug 固定为 0（LIFO）。
-pub(crate) const REUSE_DEPTH_LIMIT: u32 = 8;
+pub const REUSE_DEPTH_LIMIT: u32 = 8;
 
 /// per-domain secret 的 blake3 派生键。
-pub(crate) const DOMAIN_SECRET_DERIVE_KEY: &str = "gugu-provenance-domain-secret-v1";
+pub const DOMAIN_SECRET_DERIVE_KEY: &str = "gugu-provenance-domain-secret-v1";
 
 /// 释放拒绝的稳定分类；顺序与契约的 `PROVENANCE_REJECTIONS` 一致。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReleaseRejection {
+pub enum ReleaseRejection {
     /// 链字被破坏或链上出现环。
     ChainCorruption,
     /// link 校验能过但归属、范围或状态不符，属于伪造。
@@ -50,12 +50,12 @@ pub(crate) enum ReleaseRejection {
 
 impl ReleaseRejection {
     /// 返回登记目录中的分类名。
-    pub(crate) const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         PROVENANCE_REJECTIONS[self.index()]
     }
 
     /// 返回统计数组的下标。
-    pub(crate) const fn index(self) -> usize {
+    pub const fn index(self) -> usize {
         match self {
             Self::ChainCorruption => 0,
             Self::ForgedLink => 1,
@@ -69,7 +69,7 @@ impl ReleaseRejection {
 }
 
 /// 把 free 链走查失败映射到稳定拒绝分类。
-pub(crate) fn classify_chain_error(error: &ChainWalkError) -> ReleaseRejection {
+pub fn classify_chain_error(error: &ChainWalkError) -> ReleaseRejection {
     match error {
         ChainWalkError::Link(super::message::LinkError::Null)
         | ChainWalkError::Link(super::message::LinkError::Checksum) => {
@@ -119,7 +119,7 @@ fn derive_domain_secrets(world_secret: &[u8; 32]) -> Result<Vec<[u8; 32]>, RawIn
 
 /// checked copy 使用的受限缓冲区；只在 provenance 平面内登记与访问。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct GuardedBuffer {
+pub struct GuardedBuffer {
     /// 缓冲区的稳定基址（foreign descriptor 内偏移，不是 managed 裸地址）。
     base: u64,
     readable: bool,
@@ -129,7 +129,7 @@ pub(crate) struct GuardedBuffer {
 
 impl GuardedBuffer {
     /// 创建一个受限缓冲区。
-    pub(crate) fn new(base: u64, readable: bool, writable: bool, bytes: Vec<u8>) -> Self {
+    pub fn new(base: u64, readable: bool, writable: bool, bytes: Vec<u8>) -> Self {
         Self {
             base,
             readable,
@@ -139,12 +139,12 @@ impl GuardedBuffer {
     }
 
     /// 返回缓冲区长度。
-    pub(crate) const fn len(&self) -> u64 {
+    pub const fn len(&self) -> u64 {
         self.bytes.len() as u64
     }
 
     /// 返回缓冲区内容快照。
-    pub(crate) fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 }
@@ -165,7 +165,7 @@ impl GuardRegion {
 /// raw link provenance 平面：per-domain secret、释放拒绝分类、debug poison 与 security
 /// 随机复用的确定性对偶。
 #[derive(Clone, Debug)]
-pub(crate) struct ProvenancePlane {
+pub struct ProvenancePlane {
     mode: SafetyProfile,
     secrets: Vec<[u8; 32]>,
     codecs: Vec<LinkCodec>,
@@ -177,7 +177,7 @@ pub(crate) struct ProvenancePlane {
 
 impl ProvenancePlane {
     /// 由 world secret 构建平面；任一 per-domain secret 为全零都按初始化失败拒绝。
-    pub(crate) fn new(
+    pub fn new(
         world_secret: [u8; 32],
         mode: SafetyProfile,
         rng_seed: u64,
@@ -199,73 +199,73 @@ impl ProvenancePlane {
     }
 
     /// 返回当前安全 profile。
-    pub(crate) const fn mode(&self) -> SafetyProfile {
+    pub const fn mode(&self) -> SafetyProfile {
         self.mode
     }
 
     /// 按已验证契约段配置安全 profile；其余契约字段由编译侧持有，平面只消费 mode。
-    pub(crate) fn configure(&mut self, contract: &ProvenanceRuntimeContract) {
+    pub fn configure(&mut self, contract: &ProvenanceRuntimeContract) {
         self.mode = contract.mode();
     }
 
     /// 返回某个 domain 的 secret；越界 domain 是不变量。
-    pub(crate) fn secret_for(&self, domain: MemoryDomainId) -> &[u8; 32] {
+    pub fn secret_for(&self, domain: MemoryDomainId) -> &[u8; 32] {
         self.secrets
             .get(usize::from(domain.raw()))
             .expect("domain 稠密编号与登记目录一致")
     }
 
     /// 返回某个 domain 的 link 编码器。
-    pub(crate) fn codec_for(&self, domain: MemoryDomainId) -> &LinkCodec {
+    pub fn codec_for(&self, domain: MemoryDomainId) -> &LinkCodec {
         self.codecs
             .get(usize::from(domain.raw()))
             .expect("domain 稠密编号与登记目录一致")
     }
 
     /// 返回统计快照；顺序与契约的统计目录一致。
-    pub(crate) const fn stats(&self) -> &[u64; PROVENANCE_STATISTICS.len()] {
+    pub const fn stats(&self) -> &[u64; PROVENANCE_STATISTICS.len()] {
         &self.stats
     }
 
     /// 返回某个拒绝分类的累计计数。
-    pub(crate) const fn rejection_count(&self, rejection: ReleaseRejection) -> u64 {
+    pub const fn rejection_count(&self, rejection: ReleaseRejection) -> u64 {
         self.rejections[rejection.index()]
     }
 
     /// 记录一次释放拒绝：分类计数与 release-rejections 总计同时推进。
-    pub(crate) fn record_rejection(&mut self, rejection: ReleaseRejection) {
+    pub fn record_rejection(&mut self, rejection: ReleaseRejection) {
         self.rejections[rejection.index()] += 1;
         self.stats[0] += 1;
     }
 
     /// debug profile：返还路径写入 poison 标记后记账。
-    pub(crate) fn note_poison_write(&mut self) {
+    pub fn note_poison_write(&mut self) {
         self.stats[1] += 1;
     }
 
     /// debug profile：识别到「对已返还 slot 的再次返还」标记。
-    pub(crate) fn note_double_return_marker(&mut self) {
+    pub fn note_double_return_marker(&mut self) {
         self.stats[2] += 1;
     }
 
     /// debug profile：完成一次全链走查。
-    pub(crate) fn note_full_chain_verification(&mut self) {
+    pub fn note_full_chain_verification(&mut self) {
         self.stats[3] += 1;
     }
 
     /// security profile：一次非零深度的随机弹出。
-    pub(crate) fn note_randomized_pop(&mut self) {
+    pub fn note_randomized_pop(&mut self) {
         self.stats[4] += 1;
     }
 
     /// security profile：一次通过校验的 checked copy。
-    pub(crate) fn note_checked_copy(&mut self) {
+    pub fn note_checked_copy(&mut self) {
         self.stats[5] += 1;
     }
 
     /// 返回本次分配使用的 free list 弹出深度：security profile 用独立 seed 随机挑选，
     /// 其余 profile 固定 LIFO。
-    pub(crate) fn next_reuse_depth(&mut self) -> u32 {
+    pub fn next_reuse_depth(&mut self) -> u32 {
         if self.mode != SafetyProfile::Security {
             return 0;
         }
@@ -278,7 +278,7 @@ impl ProvenancePlane {
     }
 
     /// debug profile：分配时校验 freed slot 的 poison 标记未被改写，然后清除。
-    pub(crate) fn check_freed_slot_stamp(&mut self, stamp: u64) -> Result<(), RawInvariant> {
+    pub fn check_freed_slot_stamp(&mut self, stamp: u64) -> Result<(), RawInvariant> {
         if stamp != 0 && stamp != POISON_WORD {
             self.record_rejection(ReleaseRejection::ChainCorruption);
             return Err(RawInvariant::new(
@@ -289,7 +289,7 @@ impl ProvenancePlane {
     }
 
     /// 按 provenance 契约执行全链走查：失败先按稳定分类记账，再以原不变量文本返回。
-    pub(crate) fn verify_full_chain(&mut self, table: &SlabTable) -> Result<(), RawInvariant> {
+    pub fn verify_full_chain(&mut self, table: &SlabTable) -> Result<(), RawInvariant> {
         for (index, descriptor) in table.descriptors().iter().enumerate() {
             if !descriptor.link_usable {
                 continue;
@@ -310,13 +310,13 @@ impl ProvenancePlane {
     }
 
     /// security profile：登记一段不可作为 payload 释放或拷贝的 guard region。
-    pub(crate) fn register_guard_region(&mut self, base: u64, bytes: u64) {
+    pub fn register_guard_region(&mut self, base: u64, bytes: u64) {
         self.guard_regions.push(GuardRegion { base, bytes });
     }
 
     /// ForeignBridge 接缝的 checked copy：校验读/写权限、双方越界与 guard region 重叠，
     /// 全部通过后执行拷贝。任何失败都不产生部分写入。
-    pub(crate) fn checked_copy(
+    pub fn checked_copy(
         &mut self,
         source: &GuardedBuffer,
         target: &mut GuardedBuffer,

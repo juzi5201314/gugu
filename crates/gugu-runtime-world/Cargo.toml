@@ -1,0 +1,19 @@
+[package]
+name = "gugu-runtime-world"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu runtime reference worlds: owner/routing/coroutine worlds, rt0 lifecycle and collection/hash/I/O models for deterministic tests"
+
+[features]
+# 上层整管线测试复用 world 的测试专用入口；只经 dev-dependency 打开。
+test-support = []
+
+[dependencies]
+blake3 = "1"
+foldhash = "0.2"
+siphasher = "1.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+gugu-runtime-abi = { path = "../gugu-runtime-abi" }
+
+[dev-dependencies]
+gugu-runtime-abi = { path = "../gugu-runtime-abi", features = ["test-support"] }

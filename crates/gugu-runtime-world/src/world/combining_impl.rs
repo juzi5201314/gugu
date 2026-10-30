@@ -34,7 +34,7 @@ const COMBINING_ROUND_LIMIT: u32 = 64;
 
 /// 一条冷路径请求的规范载荷；与 `combining_schema` 的 tag 目录一一对应。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum OperationRequest {
+pub enum OperationRequest {
     /// 记录池自身补充 chunk；`chunks` 是本次请求补充的 chunk 数。
     GlobalRangeRefill { chunks: u32, bytes: u64 },
     /// extent coalescing：把已撤销物理页的 extent 合回 buddy 阶梯。
@@ -57,12 +57,12 @@ pub(crate) enum OperationRequest {
 
 impl OperationRequest {
     /// 记录池补充请求；`bytes` 是本次请求占用的轮次预算。
-    pub(crate) const fn global_range_refill(chunks: u32, bytes: u64) -> Self {
+    pub const fn global_range_refill(chunks: u32, bytes: u64) -> Self {
         Self::GlobalRangeRefill { chunks, bytes }
     }
 
     /// extent coalescing 请求。
-    pub(crate) const fn extent_coalesce(
+    pub const fn extent_coalesce(
         extent: ExtentId,
         class: u32,
         owner_index: u32,
@@ -77,17 +77,12 @@ impl OperationRequest {
     }
 
     /// topology 目录重建请求。
-    pub(crate) const fn topology_rebuild(epoch: Epoch) -> Self {
+    pub const fn topology_rebuild(epoch: Epoch) -> Self {
         Self::TopologyRebuild { epoch }
     }
 
     /// 平台页 trim 请求。
-    pub(crate) const fn platform_trim(
-        extent: ExtentId,
-        class: u32,
-        owner_index: u32,
-        bytes: u64,
-    ) -> Self {
+    pub const fn platform_trim(extent: ExtentId, class: u32, owner_index: u32, bytes: u64) -> Self {
         Self::PlatformTrim {
             extent,
             class,
@@ -97,7 +92,7 @@ impl OperationRequest {
     }
 
     /// 返回冷操作 tag。
-    pub(crate) const fn tag(&self) -> OperationTag {
+    pub const fn tag(&self) -> OperationTag {
         match self {
             Self::GlobalRangeRefill { .. } => OperationTag::GlobalRangeRefill,
             Self::ExtentCoalesce { .. } => OperationTag::ExtentCoalesce,
@@ -111,7 +106,7 @@ impl OperationRequest {
     /// trim 按 class 合并（同一个 class 的多次页撤销进同一次执行），coalesce 按 owner
     /// arena 合并（buddy 阶梯的插入只在同一 arena 内相邻），refill 与 topology 各自
     /// 全局唯一，因此按自身参数合并。
-    pub(crate) const fn merge_key(&self) -> u64 {
+    pub const fn merge_key(&self) -> u64 {
         // `From` 不是 const trait，这里的 u32 → u64 是无损加宽，因此直接用 `as`。
         match self {
             Self::GlobalRangeRefill { .. } => 0,
@@ -122,7 +117,7 @@ impl OperationRequest {
     }
 
     /// 返回 stable descriptor id。
-    pub(crate) const fn descriptor(&self) -> u64 {
+    pub const fn descriptor(&self) -> u64 {
         match self {
             Self::GlobalRangeRefill { chunks, .. } => *chunks as u64,
             Self::ExtentCoalesce { extent, .. } | Self::PlatformTrim { extent, .. } => {
@@ -133,7 +128,7 @@ impl OperationRequest {
     }
 
     /// 返回标量参数。
-    pub(crate) const fn scalar(&self) -> u64 {
+    pub const fn scalar(&self) -> u64 {
         match self {
             Self::GlobalRangeRefill { .. } | Self::TopologyRebuild { .. } => 0,
             Self::ExtentCoalesce { class, .. } | Self::PlatformTrim { class, .. } => *class as u64,
@@ -141,7 +136,7 @@ impl OperationRequest {
     }
 
     /// 返回请求字节数。
-    pub(crate) const fn bytes(&self) -> u64 {
+    pub const fn bytes(&self) -> u64 {
         match self {
             Self::GlobalRangeRefill { bytes, .. }
             | Self::ExtentCoalesce { bytes, .. }
@@ -151,7 +146,7 @@ impl OperationRequest {
     }
 
     /// 返回执行所需的操作视图；direct 模式与 fast path 都用它。
-    pub(crate) const fn operation(&self) -> PlaneOperation {
+    pub const fn operation(&self) -> PlaneOperation {
         PlaneOperation {
             tag: self.tag(),
             descriptor: self.descriptor(),
@@ -192,15 +187,15 @@ impl OperationRequest {
 
 /// 一次 `drain_combining` 的累计结果；只进统计与确定性测试的观察面。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct CombiningDrainReport {
-    pub(crate) rounds: u32,
-    pub(crate) executions: u32,
-    pub(crate) items: u32,
-    pub(crate) bytes: u64,
-    pub(crate) merged: u32,
-    pub(crate) cancellations: u32,
-    pub(crate) timeouts: u32,
-    pub(crate) woken: u32,
+pub struct CombiningDrainReport {
+    pub rounds: u32,
+    pub executions: u32,
+    pub items: u32,
+    pub bytes: u64,
+    pub merged: u32,
+    pub cancellations: u32,
+    pub timeouts: u32,
+    pub woken: u32,
 }
 
 impl CombiningDrainReport {
@@ -227,7 +222,7 @@ impl CombiningDrainReport {
 /// 表只在 `rebuild` 里整表重填，且只在 topology epoch 前进时重建；查询是两次数组
 /// 索引，没有任何扫描。
 #[derive(Debug, Default)]
-pub(crate) struct TopologyIndex {
+pub struct TopologyIndex {
     epoch: Epoch,
     raw: Vec<u32>,
     resource: Vec<u32>,
@@ -235,12 +230,12 @@ pub(crate) struct TopologyIndex {
 
 impl TopologyIndex {
     /// 创建空索引；`RawWorld::new` 在 owner 登记完成后立即重建一次。
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// 按当前 owner 目录重建索引。
-    pub(crate) fn rebuild(
+    pub fn rebuild(
         &mut self,
         directory: &OwnerDirectory,
         owners: &[RawOwner],
@@ -271,7 +266,7 @@ impl TopologyIndex {
     }
 
     /// 返回 token 在所属 owner 列表里的下标；未登记或 domain 不符时返回 `None`。
-    pub(crate) fn slot(&self, token: &OwnerToken) -> Option<u32> {
+    pub fn slot(&self, token: &OwnerToken) -> Option<u32> {
         let table = match token.domain {
             MemoryDomainId::RESOURCE => &self.resource,
             _ => &self.raw,
@@ -282,7 +277,7 @@ impl TopologyIndex {
     }
 
     /// 返回索引建立时的 topology epoch。
-    pub(crate) const fn epoch(&self) -> Epoch {
+    pub const fn epoch(&self) -> Epoch {
         self.epoch
     }
 }
@@ -292,7 +287,7 @@ impl RawWorld {
     ///
     /// 配置后立即重建 topology 索引：combined 模式下这次重建本身就走一条 typed cold
     /// operation，因此「索引可用」与「平面可用」是同一个事实。
-    pub(crate) fn configure_combining(
+    pub fn configure_combining(
         &mut self,
         contract: &CombiningRuntimeContract,
     ) -> Result<(), RawModelError> {
@@ -317,42 +312,42 @@ impl RawWorld {
     }
 
     /// 返回 combining 平面统计快照。
-    pub(crate) fn combining_stats(&self) -> CombiningStats {
+    pub fn combining_stats(&self) -> CombiningStats {
         self.combining.stats()
     }
 
     /// 返回某个 tag 的累计冷操作请求数。
-    pub(crate) fn combining_tag_requests(&self, tag: OperationTag) -> u64 {
+    pub fn combining_tag_requests(&self, tag: OperationTag) -> u64 {
         self.combining.tag_requests(tag)
     }
 
     /// 返回在飞 operation record 数。
-    pub(crate) fn combining_pending_records(&self) -> u32 {
+    pub fn combining_pending_records(&self) -> u32 {
         self.combining.pending_records()
     }
 
     /// 返回在飞 operation record 携带的请求字节数。
-    pub(crate) fn combining_pending_bytes(&self) -> u64 {
+    pub fn combining_pending_bytes(&self) -> u64 {
         self.combining.pending_bytes()
     }
 
     /// 返回记录池的 chunk 数。
-    pub(crate) fn combining_pool_chunks(&self) -> u32 {
+    pub fn combining_pool_chunks(&self) -> u32 {
         self.combining.chunk_count()
     }
 
     /// 返回当前 combining 模式。
-    pub(crate) fn combining_mode(&self) -> CombiningMode {
+    pub fn combining_mode(&self) -> CombiningMode {
         self.combining.mode()
     }
 
     /// 返回 topology 索引建立时的 epoch。
-    pub(crate) fn combining_topology_epoch(&self) -> Epoch {
+    pub fn combining_topology_epoch(&self) -> Epoch {
         self.topology.epoch()
     }
 
     /// 判断当前是否有 combiner 正在执行一轮。
-    pub(crate) fn combining_round_open(&self) -> bool {
+    pub fn combining_round_open(&self) -> bool {
         self.combining.round_open()
     }
 
@@ -672,7 +667,7 @@ impl RawWorld {
     }
 
     /// `RawWorld::new` 使用的无平面版本：契约还不可用时索引也必须可查。
-    pub(crate) fn rebuild_topology_inline(&mut self) {
+    pub fn rebuild_topology_inline(&mut self) {
         self.topology
             .rebuild(&self.directory, &self.owners, &self.resource_owners);
     }
@@ -682,7 +677,7 @@ impl RawWorld {
     /// 该槽位已有的等待记录会先被排空：否则它们既不会被执行，也无法被 `end_round`
     /// 结清，测试会拿到与场景无关的不变量失败。
     #[cfg(test)]
-    pub(crate) fn begin_combining_round_for_test(&mut self, slot: u32) -> Result<(), RawInvariant> {
+    pub fn begin_combining_round_for_test(&mut self, slot: u32) -> Result<(), RawInvariant> {
         if self.combining.round_open() {
             return Err(RawInvariant::new("combiner 轮次已经打开"));
         }
@@ -692,16 +687,13 @@ impl RawWorld {
 
     /// 结束测试用的一轮空轮次。
     #[cfg(test)]
-    pub(crate) fn end_combining_round_for_test(
-        &mut self,
-        slot: u32,
-    ) -> Result<RoundReport, RawInvariant> {
+    pub fn end_combining_round_for_test(&mut self, slot: u32) -> Result<RoundReport, RawInvariant> {
         self.combining.end_round(slot, &[])
     }
 
     /// 排空某个 combiner 队列；只供确定性测试与 bench 驱动。
     #[cfg(test)]
-    pub(crate) fn drain_combining_for_test(
+    pub fn drain_combining_for_test(
         &mut self,
         slot: u32,
     ) -> Result<CombiningDrainReport, RawInvariant> {
@@ -710,7 +702,7 @@ impl RawWorld {
 
     /// 取消某个 combiner 队列头部的等待记录；只供确定性测试构造取消交错。
     #[cfg(test)]
-    pub(crate) fn cancel_parked_combining_for_test(
+    pub fn cancel_parked_combining_for_test(
         &mut self,
         slot: u32,
     ) -> Result<OperationOutcome, RawInvariant> {
@@ -721,19 +713,19 @@ impl RawWorld {
 
     /// 返回 owner token 的 combiner 槽位；只供确定性测试与 bench 驱动。
     #[cfg(test)]
-    pub(crate) fn combining_slot_for_test(&self, token: &OwnerToken) -> Result<u32, RawInvariant> {
+    pub fn combining_slot_for_test(&self, token: &OwnerToken) -> Result<u32, RawInvariant> {
         self.combiner_slot(token)
     }
 
     /// 返回只读的 combining 平面；只供确定性测试观察内部状态。
     #[cfg(test)]
-    pub(crate) const fn combining_ref(&self) -> &CombiningPlane {
+    pub const fn combining_ref(&self) -> &CombiningPlane {
         &self.combining
     }
 
     /// 返回可变的 combining 平面；只供确定性测试构造内部状态。
     #[cfg(test)]
-    pub(crate) fn combining_mut(&mut self) -> &mut CombiningPlane {
+    pub fn combining_mut(&mut self) -> &mut CombiningPlane {
         &mut self.combining
     }
 }
@@ -762,7 +754,7 @@ pub(super) fn combining_outcome(
 }
 
 /// `RawWorld::new` 使用的默认平面：direct 模式不创建任何记录。
-pub(crate) fn default_plane(queue_count: u32) -> CombiningPlane {
+pub fn default_plane(queue_count: u32) -> CombiningPlane {
     CombiningPlane::new(
         CombiningMode::Direct,
         queue_count,

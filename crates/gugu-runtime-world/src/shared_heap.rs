@@ -19,20 +19,20 @@ use super::shared_heap_schema::{
 
 /// 参照实现失败；世界层把它映射到现有 `RawInvariant`（运行时失败走 E0058 路径）。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SharedHeapError {
+pub struct SharedHeapError {
     message: String,
 }
 
 impl SharedHeapError {
     /// 用固定文本创建失败。
-    pub(crate) fn new(message: impl Into<String>) -> Self {
+    pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
         }
     }
 
     /// 返回失败文本。
-    pub(crate) fn message(&self) -> &str {
+    pub fn message(&self) -> &str {
         &self.message
     }
 }
@@ -54,86 +54,86 @@ impl From<RawModelError> for SharedHeapError {
 /// 它不是地址，也不是 stable handle：`ResolveSharedHandle` 用它在 handle 表里发布一个新身份，
 /// 同一个 payload identity 只能发布一次。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PayloadSource {
+pub struct PayloadSource {
     /// fresh payload 的逻辑身份。
-    pub(crate) id: SharedPayloadId,
+    pub id: SharedPayloadId,
     /// 拥有 payload 的 owner 编号。
-    pub(crate) owner_id: u32,
+    pub owner_id: u32,
     /// payload 所在共享 block 的全局身份。
-    pub(crate) block_id: u32,
+    pub block_id: u32,
     /// payload 在 block 内的字节偏移。
-    pub(crate) block_offset: u32,
+    pub block_offset: u32,
     /// payload 的逻辑字节数。
-    pub(crate) bytes: u32,
+    pub bytes: u32,
 }
 
 /// 参照模型里的一个 shared payload。
 ///
 /// `content` 只存在于参照模型；外层 API 返回的是字节副本或写入记录，从不返回地址。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SharedPayload {
+pub struct SharedPayload {
     /// payload 的逻辑身份。
-    pub(crate) id: SharedPayloadId,
+    pub id: SharedPayloadId,
     /// 拥有 payload 的 owner 编号。
-    pub(crate) owner_id: u32,
+    pub owner_id: u32,
     /// payload 所在共享 block 的全局身份。
-    pub(crate) block_id: u32,
+    pub block_id: u32,
     /// payload 在 block 内的字节偏移。
-    pub(crate) block_offset: u32,
+    pub block_offset: u32,
     /// payload 的逻辑字节数。
-    pub(crate) bytes: u32,
+    pub bytes: u32,
     /// 发布该 payload 时的 handle generation；0 表示尚未发布。
-    pub(crate) generation: u32,
+    pub generation: u32,
     /// payload 的状态；与 slot 状态同域。
-    pub(crate) state: SharedSlotState,
+    pub state: SharedSlotState,
     /// 是否已经被 `resolve_payload` 发布过。
-    pub(crate) resolved: bool,
+    pub resolved: bool,
     content: Vec<u8>,
 }
 
 impl SharedPayload {
     /// 返回 payload 的字节内容。
-    pub(crate) fn content(&self) -> &[u8] {
+    pub fn content(&self) -> &[u8] {
         &self.content
     }
 }
 
 /// 一个已经解析、仍然 active 的 access guard。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SharedAccessToken {
+pub struct SharedAccessToken {
     /// 建立 guard 时使用的稠密 token。
-    pub(crate) token: u32,
+    pub token: u32,
     /// guard 打开时的 handle。
-    pub(crate) handle: SharedHandle,
+    pub handle: SharedHandle,
     /// 解析当时捕获的 payload identity；forward 不会改变它。
-    pub(crate) payload: SharedPayloadId,
+    pub payload: SharedPayloadId,
 }
 
 /// forward 被推迟的原因。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ForwardDeferred {
+pub enum ForwardDeferred {
     /// 对象持有 pin lease：搬迁会移动被 pin 的 payload，因此必须推迟。
     Pinned,
 }
 
 /// 一次成功搬迁的转发记录。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SharedForwardRecord {
+pub struct SharedForwardRecord {
     /// 被搬迁的 handle。
-    pub(crate) handle: SharedHandle,
+    pub handle: SharedHandle,
     /// 搬迁前的 payload identity。
-    pub(crate) old_payload: SharedPayloadId,
+    pub old_payload: SharedPayloadId,
     /// 搬迁后的 payload identity。
-    pub(crate) new_payload: SharedPayloadId,
+    pub new_payload: SharedPayloadId,
     /// 本次搬迁推进到的 forward generation。
-    pub(crate) forward_generation: u32,
+    pub forward_generation: u32,
     /// 复制的字节数。
-    pub(crate) bytes: u32,
+    pub bytes: u32,
 }
 
 /// `forward` 的结果。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SharedForward {
+pub enum SharedForward {
     /// payload 已切换，旧 payload 进入 grace。
     Forwarded(SharedForwardRecord),
     /// 搬迁被推迟；slot 的 current/forward generation 都没有改变。
@@ -142,15 +142,15 @@ pub(crate) enum SharedForward {
 
 /// 一次成功的 shared 字段写入；barrier 账本按它记录 card 与 edge。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SharedWrite {
+pub struct SharedWrite {
     /// 目标 handle。
-    pub(crate) handle: SharedHandle,
+    pub handle: SharedHandle,
     /// 实际写入的 payload identity。
-    pub(crate) payload: SharedPayloadId,
+    pub payload: SharedPayloadId,
     /// payload 内偏移。
-    pub(crate) offset: u32,
+    pub offset: u32,
     /// 写入字节数。
-    pub(crate) bytes: u32,
+    pub bytes: u32,
 }
 
 /// 一条已经建立但可能尚未解析的 access guard 记录。
@@ -168,7 +168,7 @@ struct AccessRecord {
 /// `cycle_epoch` 与 `mark_epochs` 让「每个 cycle 每个对象至多一次 side mark」可判定：mark ticket
 /// 只延迟旧 payload 回收，不改变 current payload。
 #[derive(Debug)]
-pub(crate) struct SharedHeap {
+pub struct SharedHeap {
     table: u32,
     grace_steps: u32,
     slots: Vec<SharedHandleSlot>,
@@ -187,7 +187,7 @@ pub(crate) struct SharedHeap {
 
 impl SharedHeap {
     /// 建立一个空的 SharedHeap；空需求仍然得到完整的契约状态。
-    pub(crate) fn new(table: u32, contract: &SharedHeapRuntimeContract) -> Self {
+    pub fn new(table: u32, contract: &SharedHeapRuntimeContract) -> Self {
         debug_assert!(table < SHARED_HANDLE_TABLE_LIMIT);
         debug_assert_eq!(
             contract.handle_slot_bytes(),
@@ -210,22 +210,22 @@ impl SharedHeap {
     }
 
     /// 返回 SharedHeap 表身份。
-    pub(crate) const fn table(&self) -> u32 {
+    pub const fn table(&self) -> u32 {
         self.table
     }
 
     /// 返回当前登记（未释放）的 payload 数量。
-    pub(crate) fn payload_count(&self) -> usize {
+    pub fn payload_count(&self) -> usize {
         self.payloads.iter().flatten().count()
     }
 
     /// 返回 slot 表长度。
-    pub(crate) fn slot_count(&self) -> usize {
+    pub fn slot_count(&self) -> usize {
         self.slots.len()
     }
 
     /// 登记一个新的 fresh payload；block/offset 由世界的共享 block 分配器提供。
-    pub(crate) fn allocate_payload(
+    pub fn allocate_payload(
         &mut self,
         owner_id: u32,
         block_id: u32,
@@ -272,7 +272,7 @@ impl SharedHeap {
     }
 
     /// 把 fresh payload 发布成 stable handle；同一个 payload identity 只能发布一次。
-    pub(crate) fn resolve_payload(
+    pub fn resolve_payload(
         &mut self,
         source: PayloadSource,
     ) -> Result<SharedHandle, SharedHeapError> {
@@ -327,7 +327,7 @@ impl SharedHeap {
     }
 
     /// 建立 access guard；只登记 token，不返回地址。
-    pub(crate) fn begin_access(
+    pub fn begin_access(
         &mut self,
         token: u32,
         handle: SharedHandle,
@@ -352,10 +352,7 @@ impl SharedHeap {
     }
 
     /// 解析 guard 捕获的 payload；同一 token 只能解析一次，并递增 access guard 计数。
-    pub(crate) fn resolve_access(
-        &mut self,
-        token: u32,
-    ) -> Result<SharedAccessToken, SharedHeapError> {
+    pub fn resolve_access(&mut self, token: u32) -> Result<SharedAccessToken, SharedHeapError> {
         let index = self.access_index(token)?;
         let record = self.accesses[index]
             .as_mut()
@@ -388,7 +385,7 @@ impl SharedHeap {
     }
 
     /// 结束 access guard；未解析或重复结束都拒绝。
-    pub(crate) fn end_access(&mut self, token: u32) -> Result<(), SharedHeapError> {
+    pub fn end_access(&mut self, token: u32) -> Result<(), SharedHeapError> {
         let index = self.access_index(token)?;
         let record = self.accesses[index]
             .as_mut()
@@ -410,7 +407,7 @@ impl SharedHeap {
     }
 
     /// 通过 active guard 读取 payload 字节。
-    pub(crate) fn load(
+    pub fn load(
         &self,
         access: SharedAccessToken,
         offset: u32,
@@ -425,7 +422,7 @@ impl SharedHeap {
     }
 
     /// 通过 active guard 写入 payload 字节；返回写入记录供 barrier 账本使用。
-    pub(crate) fn store(
+    pub fn store(
         &mut self,
         access: SharedAccessToken,
         offset: u32,
@@ -447,7 +444,7 @@ impl SharedHeap {
     }
 
     /// 把一个 payload lease 提升为非移动 lease；它阻止 forwarding。
-    pub(crate) fn pin(&mut self, handle: SharedHandle) -> Result<(), SharedHeapError> {
+    pub fn pin(&mut self, handle: SharedHandle) -> Result<(), SharedHeapError> {
         let slot = self.access_slot(handle)?;
         self.slots[slot].pin_leases = self.slots[slot]
             .pin_leases
@@ -457,7 +454,7 @@ impl SharedHeap {
     }
 
     /// 释放一个 pin lease；没有未结清 lease 时拒绝。
-    pub(crate) fn unpin(&mut self, handle: SharedHandle) -> Result<(), SharedHeapError> {
+    pub fn unpin(&mut self, handle: SharedHandle) -> Result<(), SharedHeapError> {
         let slot = self.access_slot(handle)?;
         if self.slots[slot].pin_leases == 0 {
             return Err(SharedHeapError::new("shared pin lease 没有未结清租约"));
@@ -467,7 +464,7 @@ impl SharedHeap {
     }
 
     /// 推进 mark cycle；epoch 必须严格单调递增且非零。
-    pub(crate) fn begin_mark_cycle(&mut self, epoch: u32) -> Result<(), SharedHeapError> {
+    pub fn begin_mark_cycle(&mut self, epoch: u32) -> Result<(), SharedHeapError> {
         if epoch == 0 {
             return Err(SharedHeapError::new("shared mark cycle epoch 必须非零"));
         }
@@ -479,7 +476,7 @@ impl SharedHeap {
     }
 
     /// 为对象发出一次 side mark；每个 cycle 至多一次，返回本次是否真的发出。
-    pub(crate) fn mark_ticket(&mut self, handle: SharedHandle) -> Result<bool, SharedHeapError> {
+    pub fn mark_ticket(&mut self, handle: SharedHandle) -> Result<bool, SharedHeapError> {
         if self.cycle_epoch == 0 {
             return Err(SharedHeapError::new(
                 "shared mark ticket 需要已开始的 mark cycle",
@@ -498,10 +495,7 @@ impl SharedHeap {
     }
 
     /// 结清一次 side mark；没有未结清票据时拒绝。
-    pub(crate) fn finish_mark_ticket(
-        &mut self,
-        handle: SharedHandle,
-    ) -> Result<(), SharedHeapError> {
+    pub fn finish_mark_ticket(&mut self, handle: SharedHandle) -> Result<(), SharedHeapError> {
         let slot = self.access_slot(handle)?;
         if self.slots[slot].mark_tickets == 0 {
             return Err(SharedHeapError::new("shared mark ticket 没有未结清票据"));
@@ -514,7 +508,7 @@ impl SharedHeap {
     ///
     /// 目标 payload 由调用者（世界）先行分配，因此共享 block descriptor 始终来自世界的单调
     /// 分配器；本方法只负责身份切换、深复制与 grace 状态机。
-    pub(crate) fn forward(
+    pub fn forward(
         &mut self,
         handle: SharedHandle,
         destination: SharedPayloadId,
@@ -601,7 +595,7 @@ impl SharedHeap {
     }
 
     /// 结清一次 forwarding lease；lease 不匹配时拒绝。
-    pub(crate) fn end_forward_lease(
+    pub fn end_forward_lease(
         &mut self,
         handle: SharedHandle,
         lease: u32,
@@ -619,7 +613,7 @@ impl SharedHeap {
     }
 
     /// 推进 forwarding grace；只有 grace 走满且全部 lease 结清才释放旧 payload。
-    pub(crate) fn advance_grace(
+    pub fn advance_grace(
         &mut self,
         handle: SharedHandle,
         steps: u32,
@@ -662,7 +656,7 @@ impl SharedHeap {
     }
 
     /// 释放对象；只有没有 current/old pending 且全部 lease 结清时才允许。
-    pub(crate) fn release(&mut self, handle: SharedHandle) -> Result<(), SharedHeapError> {
+    pub fn release(&mut self, handle: SharedHandle) -> Result<(), SharedHeapError> {
         let slot = self.access_slot(handle)?;
         if SharedSlotState::from_raw(self.slots[slot].state) != Some(SharedSlotState::Live) {
             return Err(SharedHeapError::new(
@@ -696,18 +690,18 @@ impl SharedHeap {
     }
 
     /// 返回 slot 的状态；handle 过期时返回 `None`。
-    pub(crate) fn slot_state(&self, handle: SharedHandle) -> Option<SharedSlotState> {
+    pub fn slot_state(&self, handle: SharedHandle) -> Option<SharedSlotState> {
         let index = self.slot_index(handle).ok()?;
         SharedSlotState::from_raw(self.slots[index].state)
     }
 
     /// 返回 slot 的只读快照；handle 过期时返回 `None`。
-    pub(crate) fn slot_record(&self, handle: SharedHandle) -> Option<SharedHandleSlot> {
+    pub fn slot_record(&self, handle: SharedHandle) -> Option<SharedHandleSlot> {
         self.slot_index(handle).ok().map(|index| self.slots[index])
     }
 
     /// 返回当前 mark cycle epoch；尚未开始任何 cycle 时返回 `None`。
-    pub(crate) const fn mark_cycle(&self) -> Option<u32> {
+    pub const fn mark_cycle(&self) -> Option<u32> {
         if self.cycle_epoch == 0 {
             None
         } else {
@@ -720,38 +714,38 @@ impl SharedHeap {
     /// 判定口径与 mark ticket 同源：`mark_epochs[slot]` 等于当前 cycle 即本 cycle 已标记。
     /// 尚未开始任何 cycle 时不存在标记结果，返回 `false`；handle 已释放、generation 过期或
     /// table 不匹配时失败，不按 slot 猜测对象。
-    pub(crate) fn is_marked(&self, handle: SharedHandle) -> Result<bool, SharedHeapError> {
+    pub fn is_marked(&self, handle: SharedHandle) -> Result<bool, SharedHeapError> {
         let index = self.access_slot_raw(handle)?;
         Ok(self.cycle_epoch != 0 && self.mark_epochs[index] == self.cycle_epoch)
     }
 
     /// 判断某个 payload identity 是否仍然登记。
-    pub(crate) fn payload_exists(&self, payload: SharedPayloadId) -> bool {
+    pub fn payload_exists(&self, payload: SharedPayloadId) -> bool {
         self.payload_index(payload)
             .is_ok_and(|index| self.payloads[index].is_some())
     }
 
     /// 返回某个 payload 的字节内容。
-    pub(crate) fn payload_content(&self, payload: SharedPayloadId) -> Option<&[u8]> {
+    pub fn payload_content(&self, payload: SharedPayloadId) -> Option<&[u8]> {
         let index = self.payload_index(payload).ok()?;
         self.payloads[index].as_ref().map(SharedPayload::content)
     }
 
     /// 返回某个 payload 的登记记录。
-    pub(crate) fn payload_record(&self, payload: SharedPayloadId) -> Option<&SharedPayload> {
+    pub fn payload_record(&self, payload: SharedPayloadId) -> Option<&SharedPayload> {
         let index = self.payload_index(payload).ok()?;
         self.payloads[index].as_ref()
     }
 
     /// 返回 slot 的 current payload identity。
-    pub(crate) fn current_payload(&self, handle: SharedHandle) -> Option<SharedPayloadId> {
+    pub fn current_payload(&self, handle: SharedHandle) -> Option<SharedPayloadId> {
         let index = self.slot_index(handle).ok()?;
         let payload = SharedPayloadId::from_raw(self.slots[index].current_payload);
         payload.is_valid().then_some(payload)
     }
 
     /// 返回 slot 正在 grace 的旧 payload identity。
-    pub(crate) fn old_payload(&self, handle: SharedHandle) -> Option<SharedPayloadId> {
+    pub fn old_payload(&self, handle: SharedHandle) -> Option<SharedPayloadId> {
         let index = self.slot_index(handle).ok()?;
         let payload = SharedPayloadId::from_raw(self.slots[index].old_payload);
         payload.is_valid().then_some(payload)

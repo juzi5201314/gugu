@@ -11,7 +11,7 @@ use super::super::extent::{
     TrimReport,
 };
 use super::super::inbox::ShardIndex;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::super::inbox::{DrainStop, ServiceBudget};
 use super::super::message::{
     FlushTrigger, IntegrityTag, MessageState, ProducerStaging, ReturnKind, ReturnMessage,
@@ -56,7 +56,7 @@ impl Default for TrimCandidate {
 }
 
 /// 一个 owner arena 的容量；等于二次幂 extent 阶梯的顶层。
-pub(crate) const OWNER_ARENA_BYTES: u64 = 2 * 1024 * 1024;
+pub const OWNER_ARENA_BYTES: u64 = 2 * 1024 * 1024;
 
 impl RawWorld {
     /// 为 owner 的 raw/resource domain 建立 arena，并登记 extent 阶梯。
@@ -228,7 +228,7 @@ impl RawWorld {
     /// `reclaim`（owner retire 的按 token 过滤版）与 GC pacing（带 pause 预算的批次版）
     /// 各自需要候选或分批，因此它们仍直接用 `trim_candidates`/`trim_extents`；harness 与
     /// bench 只关心「这一轮能回收什么」，用这个入口即可，不必知道候选规则。
-    pub(crate) fn pressure_trim(&mut self) -> Result<TrimReport, RawInvariant> {
+    pub fn pressure_trim(&mut self) -> Result<TrimReport, RawInvariant> {
         let candidates = self.trim_candidates();
         self.trim_extents(&candidates)
     }
@@ -372,10 +372,7 @@ impl RawWorld {
     ///
     /// queue-page grace 是线性化点之后的等待：它按 epoch 累积，未走完时 extent 保持
     /// `ReturnQueued`，由后续 owner service 或 pressure trim 继续推进，不需要重新发布消息。
-    pub(crate) fn release_extent(
-        &mut self,
-        extent: ExtentId,
-    ) -> Result<ReturnMessage, RawInvariant> {
+    pub fn release_extent(&mut self, extent: ExtentId) -> Result<ReturnMessage, RawInvariant> {
         let descriptor = *self
             .extents
             .descriptor(extent)
@@ -395,7 +392,7 @@ impl RawWorld {
     }
 
     /// 把 extent 归还消息发布到目标 owner 的 inbox。
-    pub(crate) fn publish_extent_return(
+    pub fn publish_extent_return(
         &self,
         message: &ReturnMessage,
         shard: ShardIndex,
@@ -493,7 +490,7 @@ impl RawWorld {
     }
 
     /// 设置一个 range 的 dump policy；metadata 与 owner secret 使用 `Excluded`。
-    pub(crate) fn set_dump_policy(
+    pub fn set_dump_policy(
         &mut self,
         range: super::super::provider::RangeId,
         policy: DumpPolicy,
@@ -502,7 +499,7 @@ impl RawWorld {
     }
 
     /// 返回 extent 表的只读视图。
-    pub(crate) const fn extents(&self) -> &ExtentTable {
+    pub const fn extents(&self) -> &ExtentTable {
         &self.extents
     }
 
@@ -510,8 +507,8 @@ impl RawWorld {
     ///
     /// 供确定性测试直接观察门禁结果；生产路径经 `retire` 与 pressure trim 调用同一个
     /// `reclaim`。
-    #[cfg(test)]
-    pub(crate) fn reclaim_extents_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn reclaim_extents_for_test(
         &mut self,
         owner: u32,
     ) -> Result<Vec<TrimBlocked>, RawInvariant> {
@@ -524,8 +521,8 @@ impl RawWorld {
     }
 
     /// 在一个 owner 的 extent 上取得一条 lease；供门禁测试构造交错。
-    #[cfg(test)]
-    pub(crate) fn acquire_extent_lease_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn acquire_extent_lease_for_test(
         &mut self,
         owner: u32,
         extent: ExtentId,
@@ -536,8 +533,8 @@ impl RawWorld {
     }
 
     /// 结束一个 owner 的 extent lease。
-    #[cfg(test)]
-    pub(crate) fn release_extent_lease_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn release_extent_lease_for_test(
         &mut self,
         extent: ExtentId,
         lease: super::super::extent::ExtentLease,
@@ -546,8 +543,8 @@ impl RawWorld {
     }
 
     /// 推进一个 epoch，使 grace 计步前进。
-    #[cfg(test)]
-    pub(crate) fn advance_epoch_for_test(&mut self) {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn advance_epoch_for_test(&mut self) {
         self.epoch = self.epoch.next();
     }
 
@@ -555,8 +552,8 @@ impl RawWorld {
     ///
     /// 供确定性测试驱动完整的跨 owner 归还路径；生产路径由 pressure trim 与 owner service 触发
     /// 同一组函数。extent 已经在等 grace 时不再重新发布消息，只 service 一次推进 ticket。
-    #[cfg(test)]
-    pub(crate) fn return_extent_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn return_extent_for_test(
         &mut self,
         owner: u32,
         extent: ExtentId,
@@ -585,8 +582,8 @@ impl RawWorld {
     }
 
     /// 只发布 extent 归还消息，不消费它；供测试构造在途 return。
-    #[cfg(test)]
-    pub(crate) fn stage_extent_return_for_test(
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn stage_extent_return_for_test(
         &mut self,
         extent: ExtentId,
     ) -> Result<super::super::message::ReturnMessage, RawInvariant> {
@@ -701,7 +698,7 @@ impl RawWorld {
     ///
     /// 每条记录在 grace 走完后完成归还并从待决队列移除；仍未走完的留在队列里等下一次 service。
     /// 返回本轮真正完成的归还数量。
-    pub(crate) fn advance_pending_extent_trims(&mut self) -> Result<u32, RawInvariant> {
+    pub fn advance_pending_extent_trims(&mut self) -> Result<u32, RawInvariant> {
         if self.pending_extent_trims.is_empty() {
             return Ok(0);
         }

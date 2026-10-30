@@ -180,6 +180,19 @@ crates/
 │   ├── src/x64/glue.rs             runtime glue 绑定、闭世界 glue 目录与 op 隐含 glue
 │   ├── src/x64/oracle.rs           `X64Oracle`：`TargetOracle` 的 x86_64 实现
 │   └── src/x64/{elf,pe,metadata,unwind}.rs 镜像写出与元数据/unwind section
+├── gugu-runtime-world/             runtime world 参照实现：只依赖 gugu-runtime-abi，只被上层确定性测试消费
+│   ├── src/startup.rs              环境快照与启动配置解析的参照实现
+│   ├── src/lifecycle.rs            生命周期状态机与 rt0 启动序列参照实现
+│   ├── src/report.rs               emergency buffer 与 text/NDJSON 报告渲染参照实现
+│   ├── src/termination.rs          `TerminationPlan` 构造与退出码解析参照实现
+│   ├── src/stack_arena.rs          双端guard arena、span bitmap与有界cache
+│   ├── src/owner.rs                本地 free path、本地/远程 return 分叉
+│   └── src/world/                  owner 上下文 service、转发、grace 与 retire
+│       ├── mod.rs                  raw owner 世界与 ResourceCell 世界骨架
+│       ├── extent_impl.rs          arena 开立、extent 取用与 trim 门禁接入
+│       ├── resource_impl.rs        资源分配、lease、close、release 与整页 mapping 接入
+│       ├── coroutine_impl.rs       main/子协程创建、栈复制、cold完成发布与owner return
+│       └── termination_impl.rs     rt0 进程模型：boot、终止路径与设施关闭接入
 └── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/raw_model.rs            runtime raw 契约 query driver：注入 backend 片段并做跨层校验
@@ -187,20 +200,7 @@ crates/
     │   └── semantics_tests/        依赖整条管线的语义层回归
     ├── src/lir_tests/              依赖整条管线与 `X64Oracle` 的 LIR 回归及其 fixtures
     ├── src/backend/x64/            `gugu_backend::x64` 再导出、x64 验收 harness 与需要完整 Compiler 的后端回归
-    ├── src/runtime/                world 参照实现与需要整条管线的 runtime 回归；契约层再导出自 gugu-runtime-abi
-    │   ├── mod.rs                  `pub use gugu_runtime_abi::*` 与 world 模块登记
-    │   ├── startup.rs              环境快照与启动配置解析的参照实现
-    │   ├── lifecycle.rs            生命周期状态机与 rt0 启动序列参照实现
-    │   ├── report.rs               emergency buffer 与 text/NDJSON 报告渲染参照实现
-    │   ├── termination.rs          `TerminationPlan` 构造与退出码解析参照实现
-    │   ├── stack_arena.rs          双端guard arena、span bitmap与有界cache
-    │   ├── owner.rs                本地 free path、本地/远程 return 分叉
-    │   └── world/                  owner 上下文 service、转发、grace 与 retire
-    │       ├── mod.rs              raw owner 世界与 ResourceCell 世界骨架
-    │       ├── extent_impl.rs      arena 开立、extent 取用与 trim 门禁接入
-    │       ├── resource_impl.rs    资源分配、lease、close、release 与整页 mapping 接入
-    │       ├── coroutine_impl.rs   main/子协程创建、栈复制、cold完成发布与owner return
-    │       └── termination_impl.rs rt0 进程模型：boot、终止路径与设施关闭接入
+    ├── src/runtime/                需要整条管线的 runtime 回归；`mod.rs` 以 `pub use gugu_runtime_abi::*` 再导出契约层，world 参照实现经 dev-dependency 取自 gugu-runtime-world
     └── resources/
         ├── std/prelude.gg          标准库 Gugu 源单元
         ├── runtime/core.gg         runtime Gugu 源单元
@@ -211,7 +211,7 @@ crates/
 
 模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与尚未迁走的参照模型（raw 平面、资源租约、owner-directed return、rt0 启动/终止/报告）。channel、Join、select 与 `std.sync` 的执行在镜像内 Gugu 源；Rust 侧只留 schema、布局和非法序拒绝。
 
-所有库 crate（`gugu-base`、`gugu-project`、`gugu-runtime-abi`、`gugu-sema`、`gugu-gir`、`gugu-lir`、`gugu-backend`、`gugu-frontend`、`gugu-compiler`）都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
+所有库 crate（`gugu-base`、`gugu-project`、`gugu-runtime-abi`、`gugu-runtime-world`、`gugu-sema`、`gugu-gir`、`gugu-lir`、`gugu-backend`、`gugu-frontend`、`gugu-compiler`）都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
 
 ### 编译器测试构建
 

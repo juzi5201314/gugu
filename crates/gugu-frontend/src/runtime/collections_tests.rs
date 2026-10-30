@@ -1,6 +1,6 @@
-use super::collections::*;
-use super::hash::HashFamily;
 use crate::{CompileRequest, Compiler, TargetName};
+use gugu_runtime_world::collections::*;
+use gugu_runtime_world::hash::HashFamily;
 
 fn compile(source: &str) -> crate::Compilation {
     Compiler::shared().compile(CompileRequest::single_file(

@@ -21,14 +21,14 @@ use super::RawWorld;
 
 /// 共享 block descriptor 的起始编号；LocalHeap arena descriptor 从 1 开始稠密分配，两者
 /// 因此永远不会重合。
-pub(crate) const SHARED_DESCRIPTOR_BASE: u32 = 1 << 24;
+pub const SHARED_DESCRIPTOR_BASE: u32 = 1 << 24;
 
 /// 判断一个 block descriptor 是否来自共享编号段。
 ///
 /// block 身份解析必须先看编号段：共享 block 不在 `managed_arenas` 里（它的 arena 定位、物理归还
 /// 与 extent 阶梯属于后续的 block return 路径），因此凡是按 descriptor 反查 owner/manager 的
 /// 地方都必须在这里分流，否则共享 block 会被当成「未登记的 LocalHeap arena」。
-pub(crate) const fn is_shared_descriptor(descriptor: u32) -> bool {
+pub const fn is_shared_descriptor(descriptor: u32) -> bool {
     descriptor >= SHARED_DESCRIPTOR_BASE
 }
 
@@ -39,68 +39,68 @@ pub(crate) const fn is_shared_descriptor(descriptor: u32) -> bool {
 /// 才能回收。`lease` 是目标 owner 结清时唯一接受的凭据，`forward_generation` 使重复或跳号的
 /// 通知在写任何状态之前被拒绝。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SharedPendingForward {
+pub struct SharedPendingForward {
     /// 进入 forwarding grace 的旧 payload identity。
-    pub(crate) old_payload: SharedPayloadId,
+    pub old_payload: SharedPayloadId,
     /// 旧 payload 所在的世界级 block。
-    pub(crate) old_block: BlockRef,
+    pub old_block: BlockRef,
     /// 旧 payload 在旧 block 内的字节偏移。
-    pub(crate) old_block_offset: u32,
+    pub old_block_offset: u32,
     /// 旧 payload 的逻辑字节数。
-    pub(crate) bytes: u32,
+    pub bytes: u32,
     /// 本次搬迁的 forwarding lease；只有它能把 lease 结清。
-    pub(crate) lease: u32,
+    pub lease: u32,
     /// 本次搬迁推进到的 forward generation。
-    pub(crate) forward_generation: u32,
+    pub forward_generation: u32,
 }
 
 /// 一个共享 payload 的世界侧登记项。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SharedPayloadBlock {
+pub struct SharedPayloadBlock {
     /// 该 payload 的稳定 handle；table 与 generation 一起构成索引键。
-    pub(crate) handle: SharedHandle,
+    pub handle: SharedHandle,
     /// payload 的逻辑身份。
-    pub(crate) payload: SharedPayloadId,
+    pub payload: SharedPayloadId,
     /// 拥有 payload 的 owner 编号。
-    pub(crate) owner: u32,
+    pub owner: u32,
     /// 世界级稳定 block 身份。
-    pub(crate) block: BlockRef,
+    pub block: BlockRef,
     /// payload 在 block 内的字节偏移。
-    pub(crate) block_offset: u32,
+    pub block_offset: u32,
     /// payload 的逻辑字节数。
-    pub(crate) payload_bytes: u32,
+    pub payload_bytes: u32,
     /// 该 payload 是否已经交还给候选回收；交还后不再接受新的 mark/edge 工作。
-    pub(crate) returned: bool,
+    pub returned: bool,
     /// 在飞搬迁；`Some` 表示旧 payload 仍在 grace 且 lease 尚未在目标 owner 结清。
-    pub(crate) pending_forward: Option<SharedPendingForward>,
+    pub pending_forward: Option<SharedPendingForward>,
 }
 
 /// 一个共享 block 的世界级账本记录。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SharedBlockRecord {
+pub struct SharedBlockRecord {
     /// 世界级稳定 block 身份。
-    pub(crate) block: BlockRef,
+    pub block: BlockRef,
     /// 拥有该 block 的 owner 编号。
-    pub(crate) owner: u32,
+    pub owner: u32,
     /// bump 游标：下一个 payload 的起始偏移。
-    pub(crate) used_bytes: u32,
+    pub used_bytes: u32,
     /// 仍然在用的 payload 字节数；含仍在 forwarding grace 里的旧 payload。
-    pub(crate) live_bytes: u32,
+    pub live_bytes: u32,
     /// 已经真正释放的 payload 字节数。
-    pub(crate) dead_bytes: u32,
+    pub dead_bytes: u32,
     /// 仍然登记的 payload 数。
-    pub(crate) live_payloads: u32,
+    pub live_payloads: u32,
     /// 该 block 是否已经不再是正在填充的 block。
-    pub(crate) sealed: bool,
+    pub sealed: bool,
     /// 该 block 对应的 MANAGED_SHARED extent。
-    pub(crate) extent: Option<ExtentId>,
+    pub extent: Option<ExtentId>,
     /// extent 在 arena 内的字节偏移。
-    pub(crate) extent_offset: u64,
+    pub extent_offset: u64,
 }
 
 impl SharedBlockRecord {
     /// 判断 block 是否可以归还：已封口且不再有任何登记的 payload。
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.sealed && self.live_payloads == 0
     }
 }
@@ -116,7 +116,7 @@ struct OpenBlock {
 ///
 /// 线性化点之前失败（payload 未发布）时用它把 block 表恢复到预留之前：`used_bytes` 回写、
 /// 新开的 block 弹出、上一个活动块的封口位与 `current` 复位。
-pub(crate) struct BlockReservation {
+pub struct BlockReservation {
     descriptor: u32,
     /// 预留前的 `used_bytes`。
     offset: u32,
@@ -128,7 +128,7 @@ pub(crate) struct BlockReservation {
 
 /// 共享 block 登记表；按 handle slot 与 descriptor 稠密索引。
 #[derive(Debug)]
-pub(crate) struct SharedRegistry {
+pub struct SharedRegistry {
     entries: Vec<Option<SharedPayloadBlock>>,
     /// 下标就是 `descriptor - SHARED_DESCRIPTOR_BASE`：descriptor 由本表单调分配，因此编号段
     /// 与下标段一一对应，不需要哈希表，也不会出现空洞以外的分配。
@@ -145,7 +145,7 @@ impl Default for SharedRegistry {
 
 impl SharedRegistry {
     /// 建立空登记表；descriptor 从独立编号段开始。
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             entries: Vec::new(),
             blocks: Vec::new(),
@@ -245,7 +245,7 @@ impl SharedRegistry {
     /// payload 或 owner 变化时推进 descriptor，因此 block 身份既能区分 owner，也不会与
     /// LocalHeap arena descriptor 撞车。预留与实际登记分成两步：调用者先用这个位置在
     /// SharedHeap 上建立 payload 记录，再把发布后的 handle 交给 `insert`。
-    pub(crate) fn reserve(
+    pub fn reserve(
         &mut self,
         owner: u32,
         bytes: u32,
@@ -257,7 +257,7 @@ impl SharedRegistry {
     ///
     /// 只回滚 `reserve` 自身改动的表状态；已经提交的 extent 必须由调用者先经
     /// `discard_shared_block_pages` 结清，否则回滚会丢掉唯一引用它的 block 记录。
-    pub(crate) fn rollback_reserve(
+    pub fn rollback_reserve(
         &mut self,
         reservation: &BlockReservation,
     ) -> Result<(), RawInvariant> {
@@ -298,7 +298,7 @@ impl SharedRegistry {
     ///
     /// 首次分配与搬迁共用这一步：搬迁的新 payload 同样占用目标 block 的字节，旧 payload 在
     /// grace 结束前仍计 live，因此这里不释放任何字节，只把新 payload 累加进 `live_bytes`。
-    pub(crate) fn note_payload_added(
+    pub fn note_payload_added(
         &mut self,
         descriptor: u32,
         bytes: u32,
@@ -320,7 +320,7 @@ impl SharedRegistry {
     }
 
     /// 在一个已预留的位置登记已经发布的 payload。
-    pub(crate) fn insert(
+    pub fn insert(
         &mut self,
         handle: SharedHandle,
         payload: SharedPayloadId,
@@ -352,7 +352,7 @@ impl SharedRegistry {
     }
 
     /// 把一次搬迁后的新位置写回登记项；旧位置由 pending forward 记录。
-    pub(crate) fn relocate(
+    pub fn relocate(
         &mut self,
         handle: SharedHandle,
         payload: SharedPayloadId,
@@ -375,7 +375,7 @@ impl SharedRegistry {
     }
 
     /// 按 handle 取登记项；table、generation 不匹配或槽未登记都返回 `None`。
-    pub(crate) fn get(&self, handle: SharedHandle) -> Option<&SharedPayloadBlock> {
+    pub fn get(&self, handle: SharedHandle) -> Option<&SharedPayloadBlock> {
         let slot = usize::try_from(handle.slot()).ok()?;
         let entry = self.entries.get(slot)?.as_ref()?;
         (entry.handle.generation() == handle.generation() && entry.handle.table() == handle.table())
@@ -383,7 +383,7 @@ impl SharedRegistry {
     }
 
     /// 把一个 payload 登记为已交还；重复交还或身份不匹配返回错误。
-    pub(crate) fn mark_returned(&mut self, handle: SharedHandle) -> Result<(), RawInvariant> {
+    pub fn mark_returned(&mut self, handle: SharedHandle) -> Result<(), RawInvariant> {
         let slot = usize::try_from(handle.slot()).expect("handle slot 适配下标");
         let entry = self
             .entries
@@ -398,7 +398,7 @@ impl SharedRegistry {
     }
 
     /// 写入待结清的搬迁记录；已有记录时拒绝（同一个 handle 同时只能有一个在飞 forward）。
-    pub(crate) fn set_pending_forward(
+    pub fn set_pending_forward(
         &mut self,
         handle: SharedHandle,
         pending: SharedPendingForward,
@@ -420,12 +420,12 @@ impl SharedRegistry {
     }
 
     /// 按值复制待结清的搬迁记录；供消费与结清判定使用。
-    pub(crate) fn pending_forward(&self, handle: SharedHandle) -> Option<SharedPendingForward> {
+    pub fn pending_forward(&self, handle: SharedHandle) -> Option<SharedPendingForward> {
         self.get(handle)?.pending_forward
     }
 
     /// 清掉待结清的搬迁记录；只有旧 payload 真正释放之后才允许调用。
-    pub(crate) fn clear_pending_forward(
+    pub fn clear_pending_forward(
         &mut self,
         handle: SharedHandle,
     ) -> Result<(), RawInvariant> {
@@ -445,7 +445,7 @@ impl SharedRegistry {
     }
 
     /// 记入一个真正释放的 payload；下溢即不变量失败。
-    pub(crate) fn note_payload_freed(
+    pub fn note_payload_freed(
         &mut self,
         descriptor: u32,
         bytes: u32,
@@ -474,7 +474,7 @@ impl SharedRegistry {
     ///
     /// slot 已经被 SharedHeap 的 free 栈收回，条目必须让位给同 slot 的下一次发布；旧 handle 由
     /// generation 校验拒绝，因此这里不保留墓碑。
-    pub(crate) fn release_entry(&mut self, handle: SharedHandle) -> Result<(), RawInvariant> {
+    pub fn release_entry(&mut self, handle: SharedHandle) -> Result<(), RawInvariant> {
         let slot = usize::try_from(handle.slot()).expect("handle slot 适配下标");
         let entry = self
             .entries
@@ -489,7 +489,7 @@ impl SharedRegistry {
     }
 
     /// 按 handle slot 升序迭代某个 owner 的全部登记项。
-    pub(crate) fn entries_for_owner(
+    pub fn entries_for_owner(
         &self,
         owner: u32,
     ) -> impl Iterator<Item = (SharedHandle, &SharedPayloadBlock)> {
@@ -504,7 +504,7 @@ impl SharedRegistry {
     /// `(descriptor, 记录)`。
     ///
     /// 归还完成的 tombstone（`extent` 已清空）不再伪装成活动 block。
-    pub(crate) fn blocks_for_owner(
+    pub fn blocks_for_owner(
         &self,
         owner: u32,
     ) -> impl Iterator<Item = (u32, &SharedBlockRecord)> {
@@ -524,7 +524,7 @@ impl SharedRegistry {
     ///
     /// 与 `blocks_for_owner` 不同，这里不过滤 owner 与 extent：账本归属要按 extent 的物理
     /// owner 解析，因此必须能看到全部记录。
-    pub(crate) fn block_records(&self) -> impl Iterator<Item = (u32, &SharedBlockRecord)> {
+    pub fn block_records(&self) -> impl Iterator<Item = (u32, &SharedBlockRecord)> {
         self.blocks.iter().enumerate().map(|(index, record)| {
             (
                 SHARED_DESCRIPTOR_BASE + u32::try_from(index).expect("block 下标适配 u32"),
@@ -534,7 +534,7 @@ impl SharedRegistry {
     }
 
     /// 迭代全部在飞搬迁；元素是 `(handle, 记录)`，按 handle slot 升序。
-    pub(crate) fn pending_forwards(
+    pub fn pending_forwards(
         &self,
     ) -> impl Iterator<Item = (SharedHandle, SharedPendingForward)> + '_ {
         self.entries
@@ -544,13 +544,13 @@ impl SharedRegistry {
     }
 
     /// 按 descriptor 取 block 记录。
-    pub(crate) fn block_record(&self, descriptor: u32) -> Option<&SharedBlockRecord> {
+    pub fn block_record(&self, descriptor: u32) -> Option<&SharedBlockRecord> {
         let index = Self::block_index(descriptor).ok()?;
         self.blocks.get(index)
     }
 
     /// 把一个共享 block 绑定到它的 MANAGED_SHARED extent。
-    pub(crate) fn attach_extent(
+    pub fn attach_extent(
         &mut self,
         descriptor: u32,
         extent: ExtentId,
@@ -567,7 +567,7 @@ impl SharedRegistry {
     }
 
     /// 解绑一个共享 block 的 extent，清除记录上的物理绑定。
-    pub(crate) fn clear_extent(&mut self, descriptor: u32) -> Result<(), RawInvariant> {
+    pub fn clear_extent(&mut self, descriptor: u32) -> Result<(), RawInvariant> {
         let index = Self::block_index(descriptor)?;
         let record = self
             .blocks
@@ -579,7 +579,7 @@ impl SharedRegistry {
     }
 
     /// 从 registry 摔掉一个已归还的共享 block 记录。
-    pub(crate) fn drop_block(&mut self, descriptor: u32) -> Result<(), RawInvariant> {
+    pub fn drop_block(&mut self, descriptor: u32) -> Result<(), RawInvariant> {
         let index = Self::block_index(descriptor)?;
         let record = self
             .blocks
@@ -594,7 +594,7 @@ impl SharedRegistry {
     }
 
     /// 返回已封口、不再有存活 payload 且仍绑定 extent 的 block 数。
-    pub(crate) fn empty_block_count(&self) -> u64 {
+    pub fn empty_block_count(&self) -> u64 {
         u64::try_from(
             self.blocks
                 .iter()
@@ -608,7 +608,7 @@ impl SharedRegistry {
     ///
     /// payload 仍留在原 block，只有管理权与投递目标随之转移：搬迁判据、mark ticket 路由与
     /// card batch 目标读的都是这里的 owner，因此三者必须在同一个线性化点一起改。
-    pub(crate) fn handover_owner(&mut self, from: u32, to: u32) -> u64 {
+    pub fn handover_owner(&mut self, from: u32, to: u32) -> u64 {
         let mut moved = 0_u64;
         for entry in self.entries.iter_mut().flatten() {
             if entry.owner == from {
@@ -630,19 +630,19 @@ impl SharedRegistry {
     }
 
     /// 返回登记项数量。
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.entries.iter().flatten().count()
     }
 
     /// 返回已分配到的 descriptor 上界（不含）；测试用它断言与 LocalHeap 编号段不重叠。
-    pub(crate) const fn descriptor_high_water(&self) -> u32 {
+    pub const fn descriptor_high_water(&self) -> u32 {
         self.next_descriptor
     }
 }
 
 impl RawWorld {
     /// 返回一个共享 block 身份当前的 manager token（payload owner）。
-    pub(crate) fn shared_block_manager(&self, block: BlockRef) -> Result<OwnerToken, RawInvariant> {
+    pub fn shared_block_manager(&self, block: BlockRef) -> Result<OwnerToken, RawInvariant> {
         let owner = self.shared_block_owner(block)?;
         Ok(self.token(owner))
     }
@@ -651,7 +651,7 @@ impl RawWorld {
     ///
     /// generation 必须与登记项逐位相同：引用已复用的 block 是真正的不变量失败，不能按 descriptor
     /// 落回「某个还活着的块」。
-    pub(crate) fn shared_block_owner(&self, block: BlockRef) -> Result<u32, RawInvariant> {
+    pub fn shared_block_owner(&self, block: BlockRef) -> Result<u32, RawInvariant> {
         let record = self
             .shared_registry
             .block_record(block.id.arena())

@@ -13,13 +13,13 @@ use super::edge_schema::{EDGE_CANDIDATE_SCHEMA, EDGE_PHASES, EDGE_WORK_UNIT};
 use super::local_heap::ManagedBlockId;
 
 /// 候选推进的工作单位名；与 edge 契约同源，不新写第二份。
-pub(crate) const CANDIDATE_WORK_UNIT: &str = EDGE_WORK_UNIT;
+pub const CANDIDATE_WORK_UNIT: &str = EDGE_WORK_UNIT;
 
 /// 候选进度游标对外的字段布局：`(字段, 位宽)`。
 ///
 /// dump 与验收核对按这张表逐字段渲染，因此「游标有哪些字段、各占多少位」只有一份登记值，
 /// 不需要在诊断代码里另写一遍。
-pub(crate) const CANDIDATE_CURSOR_LAYOUT: [(&str, u32); 5] = [
+pub const CANDIDATE_CURSOR_LAYOUT: [(&str, u32); 5] = [
     ("job", 32),
     ("phase", 8),
     ("blocks", 32),
@@ -28,11 +28,11 @@ pub(crate) const CANDIDATE_CURSOR_LAYOUT: [(&str, u32); 5] = [
 ];
 
 /// 候选决议结构的 schema 版本；必须与 edge 契约登记的 `candidate_schema` 相等。
-pub(crate) const CANDIDATE_SCHEMA: u32 = EDGE_CANDIDATE_SCHEMA;
+pub const CANDIDATE_SCHEMA: u32 = EDGE_CANDIDATE_SCHEMA;
 
 /// 候选 job 的固定相位；顺序即状态机推进顺序，与契约目录逐项同源。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) enum CandidatePhase {
+pub enum CandidatePhase {
     /// 从 dirty 集合与零入边 block 出发，按无规模截断的弱连通扩张组成 job。
     Discover = 0,
     /// 精确追踪组内对象，得到组内 block 对计数与指向组外的出边。
@@ -57,7 +57,7 @@ pub(crate) enum CandidatePhase {
 
 impl CandidatePhase {
     /// 全部相位，顺序与契约目录一致。
-    pub(crate) const ALL: [Self; 10] = [
+    pub const ALL: [Self; 10] = [
         Self::Discover,
         Self::Trace,
         Self::Trial,
@@ -71,12 +71,12 @@ impl CandidatePhase {
     ];
 
     /// 返回契约中的相位名。
-    pub(crate) const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         EDGE_PHASES[self as usize]
     }
 
     /// 按下标取相位。
-    pub(crate) const fn from_index(index: usize) -> Option<Self> {
+    pub const fn from_index(index: usize) -> Option<Self> {
         if index < Self::ALL.len() {
             Some(Self::ALL[index])
         } else {
@@ -87,7 +87,7 @@ impl CandidatePhase {
 
 /// 一个 block 在候选判定中使用的快照；全部字段来自堆侧既有状态。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CandidateSnapshot {
+pub struct CandidateSnapshot {
     pub block: ManagedBlockId,
     pub generation: u32,
     /// `EdgePlane` 的已应用入边计数之和（target 侧真实值）。
@@ -109,7 +109,7 @@ pub(crate) struct CandidateSnapshot {
 
 impl CandidateSnapshot {
     /// 返回所有 lease 是否归零。
-    pub(crate) const fn leases_idle(&self) -> bool {
+    pub const fn leases_idle(&self) -> bool {
         self.incoming_leases == 0
             && self.allocator_leases == 0
             && self.scanner_leases == 0
@@ -120,14 +120,14 @@ impl CandidateSnapshot {
     ///
     /// 资格只看 lease：`incoming_leases` 是所有外部引用都已在途归零的证明；pin 与 resource
     /// 不阻止建组，它们在验证相位作为 gate 让整组失效，因此这两个事实不会被静默丢掉。
-    pub(crate) const fn allows_candidate(&self) -> bool {
+    pub const fn allows_candidate(&self) -> bool {
         self.leases_idle()
     }
 }
 
 /// 判定一个 block 组仍然存活的原因；进入诊断与 dump。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CandidateAliveReason {
+pub enum CandidateAliveReason {
     /// 组内 block 仍有来自组外的已应用入边。
     ExternalIncoming,
     /// 组内仍有本 epoch 标记过的对象，说明有组外根可达它。
@@ -146,7 +146,7 @@ pub(crate) enum CandidateAliveReason {
 
 /// 候选决议：私有结构，只有持有 sweep lease 的唯一消费者能按它执行释放。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) enum CandidateVerdict {
+pub enum CandidateVerdict {
     /// 整组判定死亡；`blocks` 按稳定顺序给出身份与世代。
     Dead(Vec<(ManagedBlockId, u32)>),
     /// 整组判定存活，附带第一个命中的原因与证据 block。
@@ -158,7 +158,7 @@ pub(crate) enum CandidateVerdict {
 
 impl CandidateVerdict {
     /// 返回决议是否判定死亡。
-    pub(crate) const fn is_dead(&self) -> bool {
+    pub const fn is_dead(&self) -> bool {
         matches!(self, Self::Dead(_))
     }
 }

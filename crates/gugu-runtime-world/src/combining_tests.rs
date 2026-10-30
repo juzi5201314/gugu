@@ -4,7 +4,6 @@
 //! 有限同类合并、轮次条目/字节预算、取消与超时、response 恰好一次、槽位 generation、
 //! 记录池的非移动补充与资源耗尽。全部进程内运行。
 
-use super::EXTENT_CLASS_LADDER;
 use super::combining::{
     CombiningLimits, CombiningPlane, MergeGroup, OpTicket, OperationOutcome, OperationRequest,
     OperationState, OperationTag, PublishOutcome,
@@ -19,6 +18,7 @@ use super::combining_schema::{
     CombiningRuntimeContract, OPERATION_OUTCOMES, OPERATION_STATES, OPERATION_TAGS,
 };
 use super::model::{FieldKind, MessageFieldSchema};
+use super::runtime::EXTENT_CLASS_LADDER;
 
 /// 世界用的 combiner 队列数：两条 raw、两条 resource 加一条 domain 队列。
 const QUEUES: u32 = 5;

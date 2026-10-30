@@ -12,32 +12,32 @@ use super::RawWorld;
 
 impl RawWorld {
     /// 按已验证的 provenance 契约段配置安全 profile；secret 与拒绝分类已在 `new` 建立。
-    pub(crate) fn configure_provenance(&mut self, contract: &ProvenanceRuntimeContract) {
+    pub fn configure_provenance(&mut self, contract: &ProvenanceRuntimeContract) {
         self.provenance.configure(contract);
     }
 
     /// 返回 provenance 平面。
-    pub(crate) fn provenance(&self) -> &ProvenancePlane {
+    pub fn provenance(&self) -> &ProvenancePlane {
         &self.provenance
     }
 
     /// 返回统计快照；顺序与契约的统计目录一致。
-    pub(crate) fn provenance_stats(&self) -> &[u64; PROVENANCE_STATISTICS.len()] {
+    pub fn provenance_stats(&self) -> &[u64; PROVENANCE_STATISTICS.len()] {
         self.provenance.stats()
     }
 
     /// 返回某个拒绝分类的累计计数。
-    pub(crate) fn provenance_rejection_count(&self, rejection: ReleaseRejection) -> u64 {
+    pub fn provenance_rejection_count(&self, rejection: ReleaseRejection) -> u64 {
         self.provenance.rejection_count(rejection)
     }
 
     /// security profile：登记一段不可作为 payload 释放或拷贝的 guard region。
-    pub(crate) fn register_guard_region(&mut self, base: u64, bytes: u64) {
+    pub fn register_guard_region(&mut self, base: u64, bytes: u64) {
         self.provenance.register_guard_region(base, bytes);
     }
 
     /// ForeignBridge 接缝的 checked copy：校验权限、越界与 guard region 后执行拷贝。
-    pub(crate) fn checked_copy(
+    pub fn checked_copy(
         &mut self,
         source: &GuardedBuffer,
         target: &mut GuardedBuffer,

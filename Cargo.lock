@@ -346,9 +346,7 @@ dependencies = [
 name = "gugu-frontend"
 version = "0.1.0"
 dependencies = [
- "blake3",
  "bytes",
- "foldhash",
  "gugu-backend",
  "gugu-base",
  "gugu-compiler-core",
@@ -357,16 +355,15 @@ dependencies = [
  "gugu-project",
  "gugu-runtime-abi",
  "gugu-runtime-builder",
+ "gugu-runtime-world",
  "gugu-sema",
  "serde",
  "serde_json",
- "siphasher",
  "tempfile",
  "toml",
  "unicode-normalization",
  "unicode-segmentation",
  "unicode-width",
- "xxhash-rust",
 ]
 
 [[package]]
@@ -426,6 +423,17 @@ name = "gugu-runtime-builder"
 version = "0.1.0"
 dependencies = [
  "gugu-compiler-core",
+]
+
+[[package]]
+name = "gugu-runtime-world"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "foldhash",
+ "gugu-runtime-abi",
+ "siphasher",
+ "xxhash-rust",
 ]
 
 [[package]]

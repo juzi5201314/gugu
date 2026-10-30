@@ -9,20 +9,20 @@ use super::text::{utf8_decode, utf16_decode};
 
 /// 路径比较与分隔符规则所属的目标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PathTarget {
+pub enum PathTarget {
     Linux,
     Windows,
 }
 
 /// 一次 Unicode 失败。`offset` 是原生 code unit 序号。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct UnicodeError {
+pub struct UnicodeError {
     offset: usize,
 }
 
 /// 无损的原生字符串。Linux 填 `linux_bytes`，Windows 填 `units`。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct OsString {
+pub struct OsString {
     units: Vec<u16>,
     linux_bytes: Option<Vec<u8>>,
     target: PathTarget,
@@ -30,7 +30,7 @@ pub(crate) struct OsString {
 
 /// 不可变路径值。变换只产生新值。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PathValue {
+pub struct PathValue {
     text: OsString,
 }
 
@@ -38,21 +38,21 @@ const LINUX_SEPARATOR: u8 = b'/';
 const WINDOWS_SEPARATORS: [u16; 2] = [b'\\' as u16, b'/' as u16];
 
 impl UnicodeError {
-    pub(crate) const fn offset(self) -> usize {
+    pub const fn offset(self) -> usize {
         self.offset
     }
 
-    pub(crate) const fn message(self) -> &'static str {
+    pub const fn message(self) -> &'static str {
         "invalid unicode"
     }
 
-    pub(crate) const fn source(self) -> Option<&'static IoError> {
+    pub const fn source(self) -> Option<&'static IoError> {
         None
     }
 }
 
 impl OsString {
-    pub(crate) fn from_string(value: &str, target: PathTarget) -> Result<Self, IoError> {
+    pub fn from_string(value: &str, target: PathTarget) -> Result<Self, IoError> {
         if value.contains('\0') {
             return Err(IoError::bare(io::INVALID_INPUT));
         }
@@ -62,7 +62,7 @@ impl OsString {
         }
     }
 
-    pub(crate) fn from_bytes(value: &[u8], target: PathTarget) -> Result<Self, UnicodeError> {
+    pub fn from_bytes(value: &[u8], target: PathTarget) -> Result<Self, UnicodeError> {
         match target {
             PathTarget::Linux => Ok(Self::linux(value.to_vec())),
             PathTarget::Windows => {
@@ -72,7 +72,7 @@ impl OsString {
         }
     }
 
-    pub(crate) fn from_units(value: &[u16], target: PathTarget) -> Result<Self, PathError> {
+    pub fn from_units(value: &[u16], target: PathTarget) -> Result<Self, PathError> {
         match target {
             PathTarget::Linux => Err(PathError::Io(IoError::bare(io::UNSUPPORTED))),
             PathTarget::Windows => {
@@ -82,14 +82,14 @@ impl OsString {
         }
     }
 
-    pub(crate) fn to_bytes(&self) -> Vec<u8> {
+    pub fn to_bytes(&self) -> Vec<u8> {
         match self.target {
             PathTarget::Linux => self.linux_bytes.clone().unwrap_or_default(),
             PathTarget::Windows => String::from_utf16_lossy(&self.units).into_bytes(),
         }
     }
 
-    pub(crate) fn to_units(&self) -> Vec<u16> {
+    pub fn to_units(&self) -> Vec<u16> {
         match self.target {
             PathTarget::Linux => self
                 .linux_bytes
@@ -102,7 +102,7 @@ impl OsString {
         }
     }
 
-    pub(crate) fn to_string(&self) -> Result<String, UnicodeError> {
+    pub fn to_string(&self) -> Result<String, UnicodeError> {
         match self.target {
             PathTarget::Linux => utf8_decode(self.linux_bytes.as_deref().unwrap_or_default())
                 .map_err(UnicodeError::new),
@@ -110,7 +110,7 @@ impl OsString {
         }
     }
 
-    pub(crate) fn to_string_lossy(&self) -> String {
+    pub fn to_string_lossy(&self) -> String {
         match self.target {
             PathTarget::Linux => {
                 String::from_utf8_lossy(self.linux_bytes.as_deref().unwrap_or_default())
@@ -120,23 +120,23 @@ impl OsString {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         match self.target {
             PathTarget::Linux => self.linux_bytes.as_deref().unwrap_or_default().len(),
             PathTarget::Windows => self.units.len(),
         }
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
 
-    pub(crate) const fn target(&self) -> PathTarget {
+    pub const fn target(&self) -> PathTarget {
         self.target
     }
 
     /// 按原生序列做长度前缀馈送。Windows 喂 UTF-16LE 字节。
-    pub(crate) fn feed(&self, hasher: &mut Hasher) {
+    pub fn feed(&self, hasher: &mut Hasher) {
         match self.target {
             PathTarget::Linux => {
                 hasher.write_bytes(self.linux_bytes.as_deref().unwrap_or_default())
@@ -189,33 +189,33 @@ impl Ord for OsString {
 
 /// 构造或比较路径时的失败。Windows 字节入口失败是 Unicode，Linux UTF-16 入口是 I/O。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PathError {
+pub enum PathError {
     Io(IoError),
     Unicode(UnicodeError),
 }
 
 impl PathValue {
-    pub(crate) fn from_os(value: OsString) -> Self {
+    pub fn from_os(value: OsString) -> Self {
         Self { text: value }
     }
 
-    pub(crate) fn from_string(value: &str, target: PathTarget) -> Result<Self, IoError> {
+    pub fn from_string(value: &str, target: PathTarget) -> Result<Self, IoError> {
         Ok(Self::from_os(OsString::from_string(value, target)?))
     }
 
-    pub(crate) fn as_os(&self) -> OsString {
+    pub fn as_os(&self) -> OsString {
         self.text.clone()
     }
 
-    pub(crate) fn to_string(&self) -> Result<String, UnicodeError> {
+    pub fn to_string(&self) -> Result<String, UnicodeError> {
         self.text.to_string()
     }
 
-    pub(crate) fn to_string_lossy(&self) -> String {
+    pub fn to_string_lossy(&self) -> String {
         self.text.to_string_lossy()
     }
 
-    pub(crate) fn is_absolute(&self) -> bool {
+    pub fn is_absolute(&self) -> bool {
         match self.text.target {
             PathTarget::Linux => self
                 .text
@@ -228,11 +228,11 @@ impl PathValue {
         }
     }
 
-    pub(crate) fn is_relative(&self) -> bool {
+    pub fn is_relative(&self) -> bool {
         !self.is_absolute()
     }
 
-    pub(crate) fn join(&self, child: &Self) -> Self {
+    pub fn join(&self, child: &Self) -> Self {
         if child.is_absolute() || self.text.is_empty() {
             return child.clone();
         }
@@ -242,11 +242,11 @@ impl PathValue {
         self.concat_with_separator(child)
     }
 
-    pub(crate) fn components(&self) -> Vec<OsString> {
+    pub fn components(&self) -> Vec<OsString> {
         split_components(&self.text)
     }
 
-    pub(crate) fn parent(&self) -> Option<Self> {
+    pub fn parent(&self) -> Option<Self> {
         if self.is_root() || !self.contains_separator() {
             return None;
         }
@@ -258,19 +258,19 @@ impl PathValue {
         Some(join_components(&parts[..kept], self.text.target))
     }
 
-    pub(crate) fn file_name(&self) -> Option<OsString> {
+    pub fn file_name(&self) -> Option<OsString> {
         self.components()
             .into_iter()
             .rev()
             .find(|part| !part.is_empty())
     }
 
-    pub(crate) fn extension(&self) -> Option<OsString> {
+    pub fn extension(&self) -> Option<OsString> {
         let name = self.file_name()?;
         extension_of(&name).map(|(_, extension)| extension)
     }
 
-    pub(crate) fn file_stem(&self) -> Option<OsString> {
+    pub fn file_stem(&self) -> Option<OsString> {
         let name = self.file_name()?;
         Some(match extension_of(&name) {
             Some((stem, _)) => stem,
@@ -278,7 +278,7 @@ impl PathValue {
         })
     }
 
-    pub(crate) fn with_file_name(&self, name: OsString) -> Self {
+    pub fn with_file_name(&self, name: OsString) -> Self {
         let Some(file_name) = self.file_name() else {
             return self.join(&Self::from_os(name));
         };
@@ -297,7 +297,7 @@ impl PathValue {
         join_components(&replaced, self.text.target)
     }
 
-    pub(crate) fn with_extension(&self, extension: OsString) -> Self {
+    pub fn with_extension(&self, extension: OsString) -> Self {
         let Some(name) = self.file_name() else {
             return self.clone();
         };

@@ -11,6 +11,7 @@ members = [
     "crates/gugu-project",
     "crates/gugu-runtime-abi",
     "crates/gugu-runtime-builder",
+    "crates/gugu-runtime-world",
     "crates/gugu-sema",
 ]
 resolver = "3"

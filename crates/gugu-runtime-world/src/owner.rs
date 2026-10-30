@@ -17,7 +17,7 @@ use super::slab::{
 
 /// 本地分配命中的层级。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AllocationLevel {
+pub enum AllocationLevel {
     /// 从 class 的 owner-local free list 取得。
     FreeList,
     /// 从当前 span 的 bump cursor 取得。
@@ -30,7 +30,7 @@ pub(crate) enum AllocationLevel {
 
 impl AllocationLevel {
     /// 返回层级名。
-    pub(crate) const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::FreeList => "free-list",
             Self::SpanBump => "span-bump",
@@ -42,16 +42,16 @@ impl AllocationLevel {
 
 /// 一次本地分配的 slot 与命中层级。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct Allocation {
-    pub(crate) slot: RawSlot,
-    pub(crate) level: AllocationLevel,
+pub struct Allocation {
+    pub slot: RawSlot,
+    pub level: AllocationLevel,
 }
 
 /// 一个已 decommit、可按 class 复用的 extent。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct CachedExtent {
-    pub(crate) class: u32,
-    pub(crate) extent: ExtentId,
+pub struct CachedExtent {
+    pub class: u32,
+    pub extent: ExtentId,
 }
 
 /// owner domain 的 local extent cache：保存已 decommit、可直接重新提交的 extent。
@@ -60,7 +60,7 @@ pub(crate) struct CachedExtent {
 /// 时只提交页，不重新走 arena 的 buddy 阶梯。小对象每次释放都不触发 decommit，只有 span 长期
 /// 空闲、memory pressure 或 owner/domain trim 才把 extent 送进这里。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct DomainRangeCache {
+pub struct DomainRangeCache {
     entries: Vec<CachedExtent>,
     committed_bytes: u64,
     refills: u32,
@@ -68,38 +68,38 @@ pub(crate) struct DomainRangeCache {
 
 impl DomainRangeCache {
     /// 返回缓存的 extent 数量。
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// 返回累计从平台补充的字节数。
-    pub(crate) const fn committed_bytes(&self) -> u64 {
+    pub const fn committed_bytes(&self) -> u64 {
         self.committed_bytes
     }
 
     /// 返回冷路径 refill 次数。
-    pub(crate) const fn refills(&self) -> u32 {
+    pub const fn refills(&self) -> u32 {
         self.refills
     }
 
     /// 返回缓存的 extent 快照；用于统计与校验。
-    pub(crate) fn entries(&self) -> &[CachedExtent] {
+    pub fn entries(&self) -> &[CachedExtent] {
         &self.entries
     }
 
     /// 取一个匹配 class 的已 decommit extent。
-    pub(crate) fn take(&mut self, class: u32) -> Option<ExtentId> {
+    pub fn take(&mut self, class: u32) -> Option<ExtentId> {
         let index = self.entries.iter().position(|entry| entry.class == class)?;
         Some(self.entries.swap_remove(index).extent)
     }
 
     /// 把一个已 decommit 的 extent 放进 cache。
-    pub(crate) fn park(&mut self, class: u32, extent: ExtentId) {
+    pub fn park(&mut self, class: u32, extent: ExtentId) {
         self.entries.push(CachedExtent { class, extent });
     }
 
     /// 从 owner arena 取得一个 extent 并提交它的页；`reserve_aligned` 只在建 arena 时发生。
-    pub(crate) fn refill(
+    pub fn refill(
         &mut self,
         extents: &mut ExtentTable,
         provider: &mut dyn RangeProvider,
@@ -123,7 +123,7 @@ impl DomainRangeCache {
     }
 
     /// 重新提交一个已缓存的 extent。
-    pub(crate) fn recommit(
+    pub fn recommit(
         &mut self,
         extents: &ExtentTable,
         provider: &mut dyn RangeProvider,
@@ -147,15 +147,15 @@ impl DomainRangeCache {
 ///
 /// raw slab page 是 64 KiB，落在二次幂 extent 阶梯的中间；span 一定取得整个 extent，使同一
 /// extent 内的 slot 地址连续且对齐由 extent 自身保证。
-pub(crate) fn span_extent_class() -> u32 {
+pub fn span_extent_class() -> u32 {
     class_for_bytes(super::RAW_SLAB_PAGE_BYTES).expect("raw slab page 落在 extent 阶梯内")
 }
 
 /// 当前正在 bump 的 span 游标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct SpanCursor {
-    pub(crate) descriptor: SlabDescriptorId,
-    pub(crate) next: u32,
+pub struct SpanCursor {
+    pub descriptor: SlabDescriptorId,
+    pub next: u32,
 }
 
 /// 一个 owner 在一个 class 上的本地 cache 计数与 span 游标。
@@ -163,7 +163,7 @@ pub(crate) struct SpanCursor {
 /// free structure 本身由 `SlabTable` 承载：`link_usable` 为真时 encoded link 写在 slot
 /// 头部字里，否则退回 descriptor 的显式 free 下标列表。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct OwnerClassCache {
+pub struct OwnerClassCache {
     span: Option<SpanCursor>,
     reused: u32,
     bumped: u32,
@@ -179,24 +179,24 @@ impl OwnerClassCache {
     }
 
     /// 返回从 free list 复用的 slot 累计数。
-    pub(crate) const fn reused(&self) -> u32 {
+    pub const fn reused(&self) -> u32 {
         self.reused
     }
 
     /// 返回从 bump cursor 取得的 slot 累计数。
-    pub(crate) const fn bumped(&self) -> u32 {
+    pub const fn bumped(&self) -> u32 {
         self.bumped
     }
 
     /// 返回当前 span 游标。
-    pub(crate) const fn span(&self) -> Option<SpanCursor> {
+    pub const fn span(&self) -> Option<SpanCursor> {
         self.span
     }
 }
 
 /// 一个 raw owner 的本地 cache 与 range cache。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct RawOwner {
+pub struct RawOwner {
     token: OwnerToken,
     classes: Vec<OwnerClassCache>,
     range_cache: DomainRangeCache,
@@ -204,7 +204,7 @@ pub(crate) struct RawOwner {
 
 impl RawOwner {
     /// 为一个 class 表创建 owner 本地 cache。
-    pub(crate) fn new(token: OwnerToken, classes: &RuntimeSizeClassTable) -> Self {
+    pub fn new(token: OwnerToken, classes: &RuntimeSizeClassTable) -> Self {
         Self {
             token,
             classes: vec![OwnerClassCache::new(); classes.classes().len()],
@@ -213,22 +213,22 @@ impl RawOwner {
     }
 
     /// 返回 owner token。
-    pub(crate) const fn token(&self) -> OwnerToken {
+    pub const fn token(&self) -> OwnerToken {
         self.token
     }
 
     /// 返回 domain range cache。
-    pub(crate) const fn range_cache(&self) -> &DomainRangeCache {
+    pub const fn range_cache(&self) -> &DomainRangeCache {
         &self.range_cache
     }
 
     /// 返回某个 class 的本地 cache。
-    pub(crate) fn class_cache(&self, id: RuntimeSizeClassId) -> &OwnerClassCache {
+    pub fn class_cache(&self, id: RuntimeSizeClassId) -> &OwnerClassCache {
         &self.classes[id.index()]
     }
 
     /// 判断本 owner 是否是给定描述符的回收 owner。
-    pub(crate) fn owns(&self, descriptor: &super::slab::SlabDescriptor) -> bool {
+    pub fn owns(&self, descriptor: &super::slab::SlabDescriptor) -> bool {
         self.token == descriptor.owner
     }
 
@@ -237,7 +237,7 @@ impl RawOwner {
         clippy::too_many_arguments,
         reason = "本地分配需要同时推进 free list、span、domain cache 与账本"
     )]
-    pub(crate) fn allocate(
+    pub fn allocate(
         &mut self,
         owner: u32,
         class: &RuntimeSizeClass,
@@ -367,7 +367,7 @@ impl RawOwner {
     }
 
     /// 记录完成生命周期：`Live` → `Dead`。
-    pub(crate) fn begin_return(
+    pub fn begin_return(
         &mut self,
         slot: RawSlot,
         table: &mut SlabTable,
@@ -381,7 +381,7 @@ impl RawOwner {
     }
 
     /// 赢得 return 线性化点：`Dead` → `ReturnQueued`；重复调用报不变量失败。
-    pub(crate) fn queue_return(
+    pub fn queue_return(
         &mut self,
         slot: RawSlot,
         table: &mut SlabTable,
@@ -408,7 +408,7 @@ impl RawOwner {
     }
 
     /// 回滚尚未发布的 return：`ReturnQueued` → `Live`。
-    pub(crate) fn cancel_return(
+    pub fn cancel_return(
         &mut self,
         slot: RawSlot,
         table: &mut SlabTable,
@@ -432,7 +432,7 @@ impl RawOwner {
     }
 
     /// owner 消费消息后把 slot 放回 free structure，并推进账本分类。
-    pub(crate) fn consume_return(
+    pub fn consume_return(
         &mut self,
         slot: RawSlot,
         table: &mut SlabTable,

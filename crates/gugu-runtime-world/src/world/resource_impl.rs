@@ -23,27 +23,27 @@ use super::{RawWorld, ResourceShape, ServiceBudget};
 
 impl RawWorld {
     /// 返回 Resource domain 的 class 表。
-    pub(crate) const fn resource_classes(&self) -> &RuntimeSizeClassTable {
+    pub const fn resource_classes(&self) -> &RuntimeSizeClassTable {
         &self.resource_classes
     }
 
     /// 返回统一 release 入口目录。
-    pub(crate) const fn registry(&self) -> &ReleaseRegistry {
+    pub const fn registry(&self) -> &ReleaseRegistry {
         &self.registry
     }
 
     /// 返回受限 cleanup 的累计次数。
-    pub(crate) const fn resource_cleanups(&self) -> u64 {
+    pub const fn resource_cleanups(&self) -> u64 {
         self.cells.cleanups()
     }
 
     /// 返回按发生顺序记录的 release。
-    pub(crate) fn release_records(&self) -> &[ReleaseTicket] {
+    pub fn release_records(&self) -> &[ReleaseTicket] {
         self.cells.records()
     }
 
     /// 返回尚未被 worker 取走的 release 请求数。
-    pub(crate) fn pending_release_requests(&self) -> usize {
+    pub fn pending_release_requests(&self) -> usize {
         self.release_queue.len()
     }
 
@@ -84,7 +84,7 @@ impl RawWorld {
     }
 
     /// 返回某个资源 slot 的 header。
-    pub(crate) fn resource_cell(
+    pub fn resource_cell(
         &self,
         handle: ResourceHandle,
     ) -> Result<&resource::ResourceCell, RawInvariant> {
@@ -93,7 +93,7 @@ impl RawWorld {
     }
 
     /// 返回某个资源 slot 当前的 lease 数。
-    pub(crate) fn resource_leases(&self, handle: ResourceHandle) -> Result<u64, RawInvariant> {
+    pub fn resource_leases(&self, handle: ResourceHandle) -> Result<u64, RawInvariant> {
         if self.validate_resource_handle(handle).is_ok() {
             return Ok(self.cells.get(handle.descriptor, handle.index)?.leases);
         }
@@ -109,7 +109,7 @@ impl RawWorld {
     }
 
     /// 校验 ResourceCell header 表与 slab 状态一致。
-    pub(crate) fn verify_resource_cells(&self) -> Result<(), RawInvariant> {
+    pub fn verify_resource_cells(&self) -> Result<(), RawInvariant> {
         self.cells.verify(&self.table)
     }
 
@@ -176,7 +176,7 @@ impl RawWorld {
     }
 
     /// 分配一个地址稳定的 ResourceCell；超出 class 阶梯或对齐上界时使用整页 mapping。
-    pub(crate) fn allocate_resource(
+    pub fn allocate_resource(
         &mut self,
         owner: u32,
         shape: ResourceShape,
@@ -301,19 +301,19 @@ impl RawWorld {
     }
 
     /// 复制资源值：增加一个 lease。
-    pub(crate) fn resource_acquire(&mut self, handle: ResourceHandle) -> Result<(), RawInvariant> {
+    pub fn resource_acquire(&mut self, handle: ResourceHandle) -> Result<(), RawInvariant> {
         self.validate_resource_handle(handle)?;
         self.cells.acquire(handle.descriptor, handle.index)
     }
 
     /// 发布到共享图；状态单向进入 Shared。
-    pub(crate) fn resource_publish(&mut self, handle: ResourceHandle) -> Result<(), RawInvariant> {
+    pub fn resource_publish(&mut self, handle: ResourceHandle) -> Result<(), RawInvariant> {
         self.validate_resource_handle(handle)?;
         self.cells.publish(handle.descriptor, handle.index)
     }
 
     /// 显式幂等 close；返回是否首次关闭。
-    pub(crate) fn resource_close(
+    pub fn resource_close(
         &mut self,
         owner: u32,
         handle: ResourceHandle,
@@ -328,7 +328,7 @@ impl RawWorld {
     }
 
     /// 结束当前执行者持有的 lease。
-    pub(crate) fn release_lease(
+    pub fn release_lease(
         &mut self,
         owner: u32,
         handle: ResourceHandle,
@@ -343,7 +343,7 @@ impl RawWorld {
     }
 
     /// detach：标记后仍走正常 release 路径结束自身 lease。
-    pub(crate) fn resource_detach(
+    pub fn resource_detach(
         &mut self,
         owner: u32,
         handle: ResourceHandle,
@@ -401,7 +401,7 @@ impl RawWorld {
     }
 
     /// release worker：执行一次受限 cleanup，并在 lease 归零时归还 slot。
-    pub(crate) fn drain_release_queue(&mut self, owner: u32) -> Result<u32, RawInvariant> {
+    pub fn drain_release_queue(&mut self, owner: u32) -> Result<u32, RawInvariant> {
         let mut drained = 0_u32;
         while let Some(ticket) = self.release_queue.pop_front() {
             let slab_generation = self
@@ -471,7 +471,7 @@ impl RawWorld {
     ///
     /// 调用者负责把返回的稳定消息按目标 owner 发布；消息只携带 descriptor、unit、
     /// generation 与 bytes，不携带任何地址。
-    pub(crate) fn prepare_foreign_release(
+    pub fn prepare_foreign_release(
         &mut self,
         owner: u32,
         handle: ResourceHandle,
@@ -542,7 +542,7 @@ impl RawWorld {
     }
 
     /// 把 release 消息发布到目标 owner 的 inbox。
-    pub(crate) fn publish_release_message(
+    pub fn publish_release_message(
         &self,
         message: &ReturnMessage,
         shard: ShardIndex,
@@ -672,7 +672,7 @@ impl RawWorld {
     }
 
     /// panic 展开：结束创建协程持有的未发布 lease。
-    pub(crate) fn panic_unwind(&mut self, owner: u32) -> Result<u32, RawInvariant> {
+    pub fn panic_unwind(&mut self, owner: u32) -> Result<u32, RawInvariant> {
         let mut handles = Vec::new();
         for handle in self.live_resource_handles()? {
             let cell = self.cells.get(handle.descriptor, handle.index)?;
@@ -795,7 +795,7 @@ impl RawWorld {
     }
 
     /// 进程终止：排空远程 return、结束全部 lease、执行 cleanup 并归还全部资源 slot。
-    pub(crate) fn shutdown(&mut self) -> Result<u32, RawInvariant> {
+    pub fn shutdown(&mut self) -> Result<u32, RawInvariant> {
         let active = self.active_resource_slots()?;
         self.drain_shutdown_messages()?;
         self.complete_pending_releases()?;

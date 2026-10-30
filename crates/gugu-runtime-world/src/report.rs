@@ -9,15 +9,15 @@ use super::startup_schema::{ExitCategory, REPORT_SCHEMA_NAME, ReportEvent, Repor
 
 /// 报告中的源位置；`Panic.location` 是原始 panic 调用点。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct SourceLocation {
-    pub(crate) file: String,
-    pub(crate) line: u32,
-    pub(crate) column: u32,
+pub struct SourceLocation {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
 }
 
 /// 一条报告事件的完整内容。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ReportRecord {
+pub struct ReportRecord {
     epoch: u64,
     event: ReportEvent,
     class: ExitCategory,
@@ -30,49 +30,49 @@ pub(crate) struct ReportRecord {
 
 impl ReportRecord {
     /// 返回报告序号。
-    pub(crate) const fn epoch(&self) -> u64 {
+    pub const fn epoch(&self) -> u64 {
         self.epoch
     }
 
     /// 返回事件类别。
-    pub(crate) const fn event(&self) -> ReportEvent {
+    pub const fn event(&self) -> ReportEvent {
         self.event
     }
 
     /// 返回逻辑退出类别。
-    pub(crate) const fn class(&self) -> ExitCategory {
+    pub const fn class(&self) -> ExitCategory {
         self.class
     }
 
     /// 返回 reason 短名。
-    pub(crate) const fn reason(&self) -> ReportReason {
+    pub const fn reason(&self) -> ReportReason {
         self.reason
     }
 
     /// 返回消息。
-    pub(crate) fn message(&self) -> Option<&str> {
+    pub fn message(&self) -> Option<&str> {
         self.message.as_deref()
     }
 
     /// 返回源位置。
-    pub(crate) fn location(&self) -> Option<&SourceLocation> {
+    pub fn location(&self) -> Option<&SourceLocation> {
         self.location.as_ref()
     }
 
     /// 返回回溯帧。
-    pub(crate) fn frames(&self) -> &[String] {
+    pub fn frames(&self) -> &[String] {
         &self.frames
     }
 
     /// 返回退出码。
-    pub(crate) const fn exit_code(&self) -> i64 {
+    pub const fn exit_code(&self) -> i64 {
         self.exit_code
     }
 }
 
 /// 定容、无分配的报告缓冲区。
 #[derive(Clone, Debug)]
-pub(crate) struct EmergencyBuffer {
+pub struct EmergencyBuffer {
     bytes: Box<[u8; super::startup_schema::EMERGENCY_BUFFER_BYTES as usize]>,
     len: usize,
     truncated: bool,
@@ -80,7 +80,7 @@ pub(crate) struct EmergencyBuffer {
 
 impl EmergencyBuffer {
     /// 创建空缓冲区。
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             bytes: Box::new([0; super::startup_schema::EMERGENCY_BUFFER_BYTES as usize]),
             len: 0,
@@ -89,22 +89,22 @@ impl EmergencyBuffer {
     }
 
     /// 返回剩余可写字节数。
-    pub(crate) fn remaining(&self) -> usize {
+    pub fn remaining(&self) -> usize {
         self.bytes.len() - self.len
     }
 
     /// 返回是否发生过截断。
-    pub(crate) const fn truncated(&self) -> bool {
+    pub const fn truncated(&self) -> bool {
         self.truncated
     }
 
     /// 返回已渲染的文本；截断只发生在字符边界。
-    pub(crate) fn as_str(&self) -> &str {
+    pub fn as_str(&self) -> &str {
         std::str::from_utf8(&self.bytes[..self.len]).expect("缓冲区只接收合法 UTF-8")
     }
 
     /// 追加文本；超出容量时在字符边界截断并标记。
-    pub(crate) fn push_str(&mut self, text: &str) {
+    pub fn push_str(&mut self, text: &str) {
         let remaining = self.remaining();
         if text.len() <= remaining {
             self.bytes[self.len..self.len + text.len()].copy_from_slice(text.as_bytes());
@@ -146,7 +146,7 @@ impl EmergencyBuffer {
     }
 
     /// 追加文本；写入量不超过 `budget`，超出部分按字符边界截断并标记。
-    pub(crate) fn push_str_bounded(&mut self, text: &str, budget: usize) {
+    pub fn push_str_bounded(&mut self, text: &str, budget: usize) {
         let mut take = text.len().min(budget);
         while take > 0 && !text.is_char_boundary(take) {
             take -= 1;
@@ -219,7 +219,7 @@ fn push_escaped(buffer: &mut EmergencyBuffer, character: char) {
 
 /// 报告的渲染形态；emergency 形态不依赖任何诊断配置。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RenderFormat {
+pub enum RenderFormat {
     /// 人类可读文本。
     Text,
     /// 稳定的逐行 JSON。
@@ -231,7 +231,7 @@ pub(crate) enum RenderFormat {
 }
 
 /// 由诊断配置推导渲染形态。
-pub(crate) fn render_format(diagnostics: DiagnosticsFormat) -> RenderFormat {
+pub fn render_format(diagnostics: DiagnosticsFormat) -> RenderFormat {
     match diagnostics {
         DiagnosticsFormat::Text => RenderFormat::Text,
         DiagnosticsFormat::Json => RenderFormat::Json,
@@ -240,7 +240,7 @@ pub(crate) fn render_format(diagnostics: DiagnosticsFormat) -> RenderFormat {
 }
 
 /// 按报告格式渲染一条记录。
-pub(crate) fn render(record: &ReportRecord, format: RenderFormat, buffer: &mut EmergencyBuffer) {
+pub fn render(record: &ReportRecord, format: RenderFormat, buffer: &mut EmergencyBuffer) {
     match format {
         RenderFormat::Text => render_text(record, buffer),
         RenderFormat::Json => render_json(record, buffer),
@@ -427,7 +427,7 @@ fn render_emergency(record: &ReportRecord, buffer: &mut EmergencyBuffer) {
 ///
 /// `GUGU_BACKTRACE=0` 不输出；`1` 输出触发故障协程的帧；`full` 输出全部协程与
 /// 工作线程帧。帧收集失败不升级成新的用户 panic。
-pub(crate) fn collect_backtrace(mode: BacktraceMode, triggering: &[String]) -> Vec<String> {
+pub fn collect_backtrace(mode: BacktraceMode, triggering: &[String]) -> Vec<String> {
     match mode {
         BacktraceMode::Off => Vec::new(),
         BacktraceMode::Triggering | BacktraceMode::Full => triggering.to_vec(),
@@ -436,54 +436,54 @@ pub(crate) fn collect_backtrace(mode: BacktraceMode, triggering: &[String]) -> V
 
 /// 已渲染的报告：内容与固定缓冲区一起保存。
 #[derive(Clone, Debug)]
-pub(crate) struct EmittedReport {
+pub struct EmittedReport {
     record: ReportRecord,
     buffer: EmergencyBuffer,
 }
 
 impl EmittedReport {
     /// 返回报告内容。
-    pub(crate) const fn record(&self) -> &ReportRecord {
+    pub const fn record(&self) -> &ReportRecord {
         &self.record
     }
 
     /// 返回渲染后的报告文本。
-    pub(crate) fn text(&self) -> &str {
+    pub fn text(&self) -> &str {
         self.buffer.as_str()
     }
 
     /// 返回是否发生过截断。
-    pub(crate) const fn truncated(&self) -> bool {
+    pub const fn truncated(&self) -> bool {
         self.buffer.truncated()
     }
 }
 
 /// 报告账本：单调序号与已发布报告；`report_epoch` 冲刷检查以 `next_epoch` 为准。
 #[derive(Clone, Debug, Default)]
-pub(crate) struct ReportLedger {
+pub struct ReportLedger {
     next_epoch: u64,
     emitted: Vec<EmittedReport>,
 }
 
 impl ReportLedger {
     /// 创建空账本。
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// 返回下一个报告的序号；终态计划以该值作为冲刷下界。
-    pub(crate) const fn next_epoch(&self) -> u64 {
+    pub const fn next_epoch(&self) -> u64 {
         self.next_epoch
     }
 
     /// 返回已发布的报告。
-    pub(crate) fn emitted(&self) -> &[EmittedReport] {
+    pub fn emitted(&self) -> &[EmittedReport] {
         &self.emitted
     }
 
     /// 发布一条报告并返回其序号。
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn emit(
+    pub fn emit(
         &mut self,
         event: ReportEvent,
         class: ExitCategory,

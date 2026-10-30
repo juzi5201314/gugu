@@ -16,7 +16,7 @@ use super::provider::{
 };
 use super::size_class::RuntimeSizeClassId;
 use super::slab::{Epoch, MemoryDomainId, OwnerToken, RuntimeSeed};
-use super::world::{OWNER_ARENA_BYTES, RawWorld};
+use gugu_runtime_world::world::{OWNER_ARENA_BYTES, RawWorld};
 
 fn world(owners: u32, nodes: u32) -> RawWorld {
     RawWorld::new(7, owners, nodes, super::message::BatchLimits::default())

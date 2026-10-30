@@ -23,7 +23,7 @@ const ROUTE_STEP_LIMIT: u32 = 4096;
 
 impl RawWorld {
     /// 按契约配置 routing 平面；要求世界尚未产生任何在飞 return。
-    pub(crate) fn configure_routing(
+    pub fn configure_routing(
         &mut self,
         routing: &RoutingRuntimeContract,
     ) -> Result<(), RawModelError> {
@@ -50,27 +50,27 @@ impl RawWorld {
     }
 
     /// 返回路由平面统计快照。
-    pub(crate) fn routing_stats(&self) -> RoutingStats {
+    pub fn routing_stats(&self) -> RoutingStats {
         self.routing.stats()
     }
 
     /// 返回 radix staging 与转发记录中的在飞字节数。
-    pub(crate) fn routing_pending_bytes(&self) -> u64 {
+    pub fn routing_pending_bytes(&self) -> u64 {
         self.routing.pending_bytes()
     }
 
     /// 返回 radix staging 与转发记录中的在飞 batch 数。
-    pub(crate) fn routing_pending_batches(&self) -> u64 {
+    pub fn routing_pending_batches(&self) -> u64 {
         self.routing.pending_batches()
     }
 
     /// 返回当前 maintenance 相位。
-    pub(crate) fn routing_maintenance(&self) -> MaintenancePhase {
+    pub fn routing_maintenance(&self) -> MaintenancePhase {
         self.routing.maintenance()
     }
 
     /// 返回 bucket 槽位总量；direct 模式为 0。
-    pub(crate) fn routing_bucket_capacity(&self) -> usize {
+    pub fn routing_bucket_capacity(&self) -> usize {
         self.routing.bucket_capacity()
     }
 
@@ -78,7 +78,7 @@ impl RawWorld {
     ///
     /// 触发条件由调用方决定（item/byte 上限、forced 触发或 maintenance service）；
     /// batch 在 plane 内按原始 target 的 route key 逐层前进，不经 owner inbox。
-    pub(crate) fn enqueue_routing_chain(&mut self, chain: StagedChain) -> Result<(), RawInvariant> {
+    pub fn enqueue_routing_chain(&mut self, chain: StagedChain) -> Result<(), RawInvariant> {
         self.routing.enqueue(chain)
     }
 
@@ -114,7 +114,7 @@ impl RawWorld {
     }
 
     /// 排空 radix staging：反复推进直到没有在飞 batch；迭代数有固定上界。
-    pub(crate) fn drain_routing(&mut self) -> Result<u32, RawInvariant> {
+    pub fn drain_routing(&mut self) -> Result<u32, RawInvariant> {
         let mut published = 0;
         for _ in 0..ROUTE_STEP_LIMIT {
             if self.routing.pending_batches() == 0 {
@@ -188,7 +188,7 @@ impl RawWorld {
     ///
     /// 返回 maintenance epoch；切换期间发布被冻结，pending bytes 仍在 pressure
     /// 账本口径内可见。
-    pub(crate) fn switch_routing_mode(&mut self, target: RouteMode) -> Result<u64, RawModelError> {
+    pub fn switch_routing_mode(&mut self, target: RouteMode) -> Result<u64, RawModelError> {
         let epoch = self.epoch.next().raw() as u64;
         self.routing
             .begin_maintenance(target, epoch)
@@ -233,7 +233,7 @@ impl RawWorld {
     /// 目录 epoch 前进意味着 owner 集合或 owner 状态刚发生变化，因此这里同时请求一次
     /// topology 索引重建：combined 模式下这次重建成一条 typed cold operation，direct
     /// 模式直接在请求者上下文执行。
-    pub(crate) fn observe_routing_topology(&mut self) -> Result<(), RawInvariant> {
+    pub fn observe_routing_topology(&mut self) -> Result<(), RawInvariant> {
         self.routing.observe_topology(self.directory.epoch())?;
         self.request_topology_rebuild()
     }
@@ -241,7 +241,7 @@ impl RawWorld {
 
 /// `RawWorld::new` 使用的默认平面装配；direct 模式不分配 bucket 表，
 /// 结构参数与契约 verifier 固定的常量同源。
-pub(crate) fn default_plane() -> RoutingPlane {
+pub fn default_plane() -> RoutingPlane {
     RoutingPlane::new(
         RouteMode::Direct,
         MAX_RADIX_LEVELS,

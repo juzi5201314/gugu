@@ -12,7 +12,7 @@ use super::startup_schema::{StartupVar, ValueGrammar};
 /// 快照一旦创建就不再随宿主变化重新读取；`std.env.set`/`remove` 只改变宿主快照，
 /// 不会重新配置 runtime。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct EnvironmentSnapshot {
+pub struct EnvironmentSnapshot {
     argv: Vec<String>,
     env: Vec<(String, String)>,
     working_directory: String,
@@ -21,7 +21,7 @@ pub(crate) struct EnvironmentSnapshot {
 
 impl EnvironmentSnapshot {
     /// 固定环境快照；环境变量按名字稳定排序，并行度探测失败回退为 1。
-    pub(crate) fn fix(
+    pub fn fix(
         argv: Vec<String>,
         mut env: Vec<(String, String)>,
         working_directory: String,
@@ -37,22 +37,22 @@ impl EnvironmentSnapshot {
     }
 
     /// 返回 argv 快照。
-    pub(crate) fn argv(&self) -> &[String] {
+    pub fn argv(&self) -> &[String] {
         &self.argv
     }
 
     /// 返回环境变量快照。
-    pub(crate) fn env(&self) -> &[(String, String)] {
+    pub fn env(&self) -> &[(String, String)] {
         &self.env
     }
 
     /// 返回初始工作目录。
-    pub(crate) fn working_directory(&self) -> &str {
+    pub fn working_directory(&self) -> &str {
         &self.working_directory
     }
 
     /// 返回启动时探测到的宿主并行度（至少 1）。
-    pub(crate) const fn host_parallelism(&self) -> u32 {
+    pub const fn host_parallelism(&self) -> u32 {
         self.host_parallelism
     }
 
@@ -66,7 +66,7 @@ impl EnvironmentSnapshot {
 
 /// 自动 GC 的堆增长目标配置。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GcTargetConfig {
+pub enum GcTargetConfig {
     /// 相对上次存活堆允许增长的百分数。
     Automatic(u32),
     /// 只关闭按堆增长触发的自动周期。
@@ -75,7 +75,7 @@ pub(crate) enum GcTargetConfig {
 
 /// fatal、`main` Err 与未处理 panic 的报告格式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DiagnosticsFormat {
+pub enum DiagnosticsFormat {
     /// 人类可读文本。
     Text,
     /// 稳定的逐行 JSON。
@@ -86,7 +86,7 @@ pub(crate) enum DiagnosticsFormat {
 
 /// 报告中包含的回溯范围。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BacktraceMode {
+pub enum BacktraceMode {
     /// 不输出回溯。
     Off,
     /// 输出触发故障的协程回溯。
@@ -97,7 +97,7 @@ pub(crate) enum BacktraceMode {
 
 /// runtime trace 的类别开关；重复类别合并。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct TraceSet {
+pub struct TraceSet {
     scheduler: bool,
     gc: bool,
     signal: bool,
@@ -106,7 +106,7 @@ pub(crate) struct TraceSet {
 
 impl TraceSet {
     /// 返回指定类别是否打开。
-    pub(crate) const fn is_open(&self, category: super::startup_schema::TraceCategory) -> bool {
+    pub const fn is_open(&self, category: super::startup_schema::TraceCategory) -> bool {
         match category {
             super::startup_schema::TraceCategory::Scheduler => self.scheduler,
             super::startup_schema::TraceCategory::Gc => self.gc,
@@ -118,7 +118,7 @@ impl TraceSet {
 
 /// 解析后的启动配置；动态 API 的设置在后续阶段覆盖启动值。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct StartupConfig {
+pub struct StartupConfig {
     parallelism: u32,
     gc_target: GcTargetConfig,
     memory_limit: Option<u64>,
@@ -130,56 +130,56 @@ pub(crate) struct StartupConfig {
 
 impl StartupConfig {
     /// 返回初始并行度目标。
-    pub(crate) const fn parallelism(&self) -> u32 {
+    pub const fn parallelism(&self) -> u32 {
         self.parallelism
     }
 
     /// 返回自动 GC 目标。
-    pub(crate) const fn gc_target(&self) -> GcTargetConfig {
+    pub const fn gc_target(&self) -> GcTargetConfig {
         self.gc_target
     }
 
     /// 返回 runtime 管理内存的软上限。
-    pub(crate) const fn memory_limit(&self) -> Option<u64> {
+    pub const fn memory_limit(&self) -> Option<u64> {
         self.memory_limit
     }
 
     /// 返回每用户协程的逻辑栈上限。
-    pub(crate) const fn stack_max(&self) -> u64 {
+    pub const fn stack_max(&self) -> u64 {
         self.stack_max
     }
 
     /// 返回 trace 类别开关。
-    pub(crate) const fn trace(&self) -> &TraceSet {
+    pub const fn trace(&self) -> &TraceSet {
         &self.trace
     }
 
     /// 返回报告格式。
-    pub(crate) const fn diagnostics(&self) -> DiagnosticsFormat {
+    pub const fn diagnostics(&self) -> DiagnosticsFormat {
         self.diagnostics
     }
 
     /// 返回回溯范围。
-    pub(crate) const fn backtrace(&self) -> BacktraceMode {
+    pub const fn backtrace(&self) -> BacktraceMode {
         self.backtrace
     }
 }
 
 /// 一个启动变量的解析失败；`detail` 面向 fatal 报告的 message。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct StartupError {
+pub struct StartupError {
     variable: &'static str,
     detail: String,
 }
 
 impl StartupError {
     /// 返回变量名。
-    pub(crate) const fn variable(&self) -> &'static str {
+    pub const fn variable(&self) -> &'static str {
         self.variable
     }
 
     /// 返回失败说明。
-    pub(crate) fn detail(&self) -> &str {
+    pub fn detail(&self) -> &str {
         &self.detail
     }
 }
@@ -188,7 +188,7 @@ impl StartupError {
 const STACK_MAX_MIN: u64 = 64 * 1024;
 
 /// 解析全部启动变量；存在错误时返回按 canonical 顺序排列的错误列表。
-pub(crate) fn parse(snapshot: &EnvironmentSnapshot) -> Result<StartupConfig, Vec<StartupError>> {
+pub fn parse(snapshot: &EnvironmentSnapshot) -> Result<StartupConfig, Vec<StartupError>> {
     let mut errors = Vec::new();
     let parallelism = parse_var(snapshot, ValueGrammar::PositiveDecimal)
         .and_then(|text| parse_parallelism(&text, &mut errors));
@@ -219,7 +219,7 @@ pub(crate) fn parse(snapshot: &EnvironmentSnapshot) -> Result<StartupConfig, Vec
 }
 
 /// 诊断配置本身非法时必须使用不依赖该配置的固定纯文本 emergency report。
-pub(crate) fn needs_emergency_report(errors: &[StartupError]) -> bool {
+pub fn needs_emergency_report(errors: &[StartupError]) -> bool {
     errors.iter().any(|error| {
         matches!(
             error.variable(),
@@ -229,14 +229,14 @@ pub(crate) fn needs_emergency_report(errors: &[StartupError]) -> bool {
 }
 
 /// 独立解析报告格式；`GUGU_RUNTIME_DIAGNOSTICS` 非法时返回 `None`。
-pub(crate) fn parse_diagnostics_var(snapshot: &EnvironmentSnapshot) -> Option<DiagnosticsFormat> {
+pub fn parse_diagnostics_var(snapshot: &EnvironmentSnapshot) -> Option<DiagnosticsFormat> {
     let text = snapshot.lookup("GUGU_RUNTIME_DIAGNOSTICS")?;
     let mut sink = Vec::new();
     parse_diagnostics(text, &mut sink)
 }
 
 /// 独立解析回溯范围；`GUGU_BACKTRACE` 非法时返回 `None`。
-pub(crate) fn parse_backtrace_var(snapshot: &EnvironmentSnapshot) -> Option<BacktraceMode> {
+pub fn parse_backtrace_var(snapshot: &EnvironmentSnapshot) -> Option<BacktraceMode> {
     let text = snapshot.lookup("GUGU_BACKTRACE")?;
     let mut sink = Vec::new();
     parse_backtrace(text, &mut sink)

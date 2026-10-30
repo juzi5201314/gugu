@@ -28,16 +28,16 @@ use super::coroutine_impl::CoroutineEntry;
 
 /// 终止执行结果：交给宿主的退出类别与码。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct TerminationOutcome {
-    pub(crate) category: ExitCategory,
-    pub(crate) code: i64,
+pub struct TerminationOutcome {
+    pub category: ExitCategory,
+    pub code: i64,
 }
 
 /// 启动结果：配置非法时进入 `InvalidConfiguration` fatal，world 已带终止计划。
-pub(crate) struct BootReport {
-    pub(crate) started: bool,
-    pub(crate) config: Option<StartupConfig>,
-    pub(crate) errors: Vec<StartupError>,
+pub struct BootReport {
+    pub started: bool,
+    pub config: Option<StartupConfig>,
+    pub errors: Vec<StartupError>,
 }
 
 /// rt0 进程模型的状态；`boot` 之前 world 没有 rt0 状态。
@@ -125,7 +125,7 @@ impl Rt0Process {
     }
 
     /// 由运行时内部（例如 GC 失败取消）发布一条 fatal 报告；返回报告序号。
-    pub(crate) fn emit_runtime_report(&mut self, spec: ReportSpec) -> u64 {
+    pub fn emit_runtime_report(&mut self, spec: ReportSpec) -> u64 {
         self.emit(spec)
     }
 
@@ -162,7 +162,7 @@ impl Rt0Process {
 
 impl RawWorld {
     /// rt0 启动：固定快照、解析配置；非法配置按 `InvalidConfiguration` fatal 结束。
-    pub(crate) fn boot(
+    pub fn boot(
         &mut self,
         argv: Vec<String>,
         env: Vec<(String, String)>,
@@ -233,57 +233,57 @@ impl RawWorld {
     }
 
     /// 返回当前生命周期状态。
-    pub(crate) fn rt0_state(&self) -> Result<LifecycleStateName, RawInvariant> {
+    pub fn rt0_state(&self) -> Result<LifecycleStateName, RawInvariant> {
         Ok(self.rt0_ref()?.lifecycle.state())
     }
 
     /// 返回解析后的启动配置；配置非法时为 `None`。
-    pub(crate) fn rt0_config(&self) -> Result<Option<&StartupConfig>, RawInvariant> {
+    pub fn rt0_config(&self) -> Result<Option<&StartupConfig>, RawInvariant> {
         Ok(self.rt0_ref()?.config.as_ref())
     }
 
     /// 返回已完成的 rt0 启动步骤。
-    pub(crate) fn rt0_boot_steps(&self) -> Result<&[Rt0Step], RawInvariant> {
+    pub fn rt0_boot_steps(&self) -> Result<&[Rt0Step], RawInvariant> {
         Ok(self.rt0_ref()?.boot.steps())
     }
 
     /// 返回已发布报告。
-    pub(crate) fn rt0_reports(&self) -> Result<&[EmittedReport], RawInvariant> {
+    pub fn rt0_reports(&self) -> Result<&[EmittedReport], RawInvariant> {
         Ok(self.rt0_ref()?.ledger.emitted())
     }
 
     /// 返回当前终止计划。
-    pub(crate) fn rt0_plan(&self) -> Result<Option<&TerminationPlan>, RawInvariant> {
+    pub fn rt0_plan(&self) -> Result<Option<&TerminationPlan>, RawInvariant> {
         Ok(self.rt0_ref()?.plan.as_ref())
     }
 
     /// 返回终止执行结果。
-    pub(crate) fn rt0_outcome(&self) -> Result<Option<TerminationOutcome>, RawInvariant> {
+    pub fn rt0_outcome(&self) -> Result<Option<TerminationOutcome>, RawInvariant> {
         self.rt0_ref().map(|rt0| rt0.outcome)
     }
 
     /// 返回用户 defer 执行次数；`Terminating` 中不得增长。
-    pub(crate) fn rt0_defer_runs(&self) -> Result<u32, RawInvariant> {
+    pub fn rt0_defer_runs(&self) -> Result<u32, RawInvariant> {
         Ok(self.rt0_ref()?.defer_runs)
     }
 
     /// 返回存活用户协程数量。
-    pub(crate) fn rt0_alive_coroutines(&self) -> Result<u32, RawInvariant> {
+    pub fn rt0_alive_coroutines(&self) -> Result<u32, RawInvariant> {
         Ok(self.rt0_ref()?.alive_user_coroutines)
     }
 
     /// 返回被 Terminating 抑制的用户失败事件数量。
-    pub(crate) fn rt0_suppressed_failures(&self) -> Result<u32, RawInvariant> {
+    pub fn rt0_suppressed_failures(&self) -> Result<u32, RawInvariant> {
         Ok(self.rt0_ref()?.suppressed_failures)
     }
 
     /// 返回已按固定顺序关闭的设施数量。
-    pub(crate) fn rt0_closed_facilities(&self) -> Result<usize, RawInvariant> {
+    pub fn rt0_closed_facilities(&self) -> Result<usize, RawInvariant> {
         Ok(self.rt0_ref()?.facilities_closed)
     }
 
     /// 检查用户 defer 执行边界；`Terminating` 中拒绝。
-    pub(crate) fn run_defer(&mut self, count: u32) -> Result<(), RawInvariant> {
+    pub fn run_defer(&mut self, count: u32) -> Result<(), RawInvariant> {
         let rt0 = self.rt0_mut()?;
         if !rt0.lifecycle.user_code_allowed() {
             return Err(RawInvariant::new("Terminating 中不能运行用户 defer"));
@@ -293,7 +293,7 @@ impl RawWorld {
     }
 
     /// 接纳一个新的用户协程；`Booting` 不运行用户函数，`Terminating` 不再启动。
-    pub(crate) fn spawn_user_coroutine(
+    pub fn spawn_user_coroutine(
         &mut self,
         owner: u32,
         entry: CoroutineEntry,
@@ -311,7 +311,7 @@ impl RawWorld {
     }
 
     /// 用户协程结束时归还资源；镜像内 main 的退出由 Gugu runtime 驱动。
-    pub(crate) fn coroutine_finished(
+    pub fn coroutine_finished(
         &mut self,
         handle: CoroutineHandle,
         owner: u32,
@@ -331,7 +331,7 @@ impl RawWorld {
     }
 
     /// 分离协程 panic 发布未处理报告；最终退出由镜像内 runtime 决定。
-    pub(crate) fn detached_panic(
+    pub fn detached_panic(
         &mut self,
         message: String,
         location: Option<SourceLocation>,
@@ -354,7 +354,7 @@ impl RawWorld {
     }
 
     /// `std.process.exit(code)`：立即进入 `Terminating` 并把 code 交给宿主。
-    pub(crate) fn request_exit(&mut self, code: i64) -> Result<(), RawInvariant> {
+    pub fn request_exit(&mut self, code: i64) -> Result<(), RawInvariant> {
         let rt0 = self.rt0_mut()?;
         if rt0.lifecycle.state() != LifecycleStateName::Running
             && rt0.lifecycle.state() != LifecycleStateName::Waiting
@@ -370,7 +370,7 @@ impl RawWorld {
 
     /// fatal 不能被 `catch`、`Join.wait` 或用户 defer 截获；已经进入终止状态的
     /// 后续 fatal 只累计抑制次数，不重复发布报告。
-    pub(crate) fn fatal(
+    pub fn fatal(
         &mut self,
         kind: FatalKind,
         message: String,
@@ -389,14 +389,14 @@ impl RawWorld {
     }
 
     /// 登记外部工作；GC stop/flush 由镜像 runtime 的 coordinator 完成。
-    pub(crate) fn enter_foreign(&mut self, _owner: u32) -> Result<(), RawInvariant> {
+    pub fn enter_foreign(&mut self, _owner: u32) -> Result<(), RawInvariant> {
         let rt0 = self.rt0_mut()?;
         rt0.foreign_work += 1;
         Ok(())
     }
 
     /// 一项外部工作完成。
-    pub(crate) fn leave_foreign(&mut self) -> Result<(), RawInvariant> {
+    pub fn leave_foreign(&mut self) -> Result<(), RawInvariant> {
         let rt0 = self.rt0_mut()?;
         if rt0.foreign_work == 0 {
             return Err(RawInvariant::new("外部工作计数下溢"));
@@ -406,7 +406,7 @@ impl RawWorld {
     }
 
     /// 执行终止计划；成功后 world 持有交给宿主的退出类别与码。
-    pub(crate) fn execute_termination(
+    pub fn execute_termination(
         &mut self,
         budget: &ServiceBudget,
     ) -> Result<TerminationOutcome, RawInvariant> {
@@ -457,12 +457,12 @@ impl RawWorld {
     }
 
     /// 返回启动快照的宿主并行度（测试与诊断视图）。
-    pub(crate) fn rt0_host_parallelism(&self) -> Result<u32, RawInvariant> {
+    pub fn rt0_host_parallelism(&self) -> Result<u32, RawInvariant> {
         Ok(self.rt0_ref()?.snapshot.host_parallelism())
     }
 
     /// 返回平台的 profile；信号退出码按目标语义解析。
-    pub(crate) const fn rt0_profile(&self) -> PlatformProfile {
+    pub const fn rt0_profile(&self) -> PlatformProfile {
         self.provider.profile()
     }
 }

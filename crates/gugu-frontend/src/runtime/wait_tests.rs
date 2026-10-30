@@ -25,24 +25,7 @@ fn wait_contract_matches_profile_and_rejects_drift() {
 }
 
 #[cfg(feature = "slow-tests")]
-fn wait_demand_and_frontend_gates_reach_image_plan() {
-    let compiler = Compiler::shared();
-    let idle = compiler.compile(CompileRequest::single_file(
-        "main.gg",
-        "fn main() { let value = 1\n _ = value }",
-        TargetName::X86_64Linux,
-    ));
-    assert!(idle.is_success(), "{:?}", idle.diagnostics().items());
-    let idle_plan = idle.image_plan().expect("image-plan");
-    assert_eq!(idle_plan.wait_inline_select_cases(), 8);
-    assert_eq!(idle_plan.wait_scratch_class_count(), 11);
-    assert_eq!(idle_plan.wait_node_class_count(), 2);
-    assert_ne!(idle_plan.wait_contract_fingerprint(), [0_u8; 32]);
-    let dump = idle.dump_runtime().expect("dump");
-    assert!(dump.contains("wait schema=1"));
-    assert_eq!(idle_plan.wait_demand().channel_ops(), 0);
-
-    let source = r#"fn work() int { 1 }
+const CHANNEL_SOURCE: &str = r#"fn work() int { 1 }
 fn main() {
     let c = chan[int](1)
     c.send(1)
@@ -59,29 +42,86 @@ fn main() {
     }
 }
 "#;
-    for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let compile = || compiler.compile(CompileRequest::single_file("main.gg", source, target));
-        let cold = compile();
-        let warm = compile();
-        assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
-        let plan = cold.image_plan().expect("image-plan");
-        let demand = plan.wait_demand();
-        assert!(demand.channel_new > 0);
-        assert!(demand.channel_send > 0);
-        assert!(demand.channel_try_send > 0);
-        assert!(demand.channel_try_recv > 0);
-        assert!(demand.channel_receive > 0);
-        assert!(demand.join_wait > 0);
-        assert!(demand.select_commit > 0);
-        assert!(demand.select_safepoints > 0);
-        assert_ne!(
-            plan.wait_contract_fingerprint(),
-            idle_plan.wait_contract_fingerprint()
-        );
-        assert_eq!(cold.action_key(), warm.action_key());
-        assert_eq!(cold.dump_runtime(), warm.dump_runtime());
-    }
 
+/// `target` 上零等待需求的契约指纹；不含 channel 的程序必须落在这条基线上。
+#[cfg(feature = "slow-tests")]
+fn zero_demand_fingerprint(target: TargetName) -> [u8; 32] {
+    WaitRuntimeContract::build(WaitDemand::default(), PlatformProfile::from(target))
+        .expect("等待契约可构建")
+        .fingerprint()
+}
+
+#[test]
+#[cfg(feature = "slow-tests")]
+fn idle_program_reaches_image_plan_with_default_wait_contract() {
+    let idle = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        "fn main() { let value = 1\n _ = value }",
+        TargetName::X86_64Linux,
+    ));
+    assert!(idle.is_success(), "{:?}", idle.diagnostics().items());
+    let idle_plan = idle.image_plan().expect("image-plan");
+    assert_eq!(idle_plan.wait_inline_select_cases(), 8);
+    assert_eq!(idle_plan.wait_scratch_class_count(), 11);
+    assert_eq!(idle_plan.wait_node_class_count(), 2);
+    assert_ne!(idle_plan.wait_contract_fingerprint(), [0_u8; 32]);
+    let dump = idle.dump_runtime().expect("dump");
+    assert!(dump.contains("wait schema=1"));
+    assert_eq!(idle_plan.wait_demand(), WaitDemand::default());
+    assert_eq!(
+        idle_plan.wait_contract_fingerprint(),
+        zero_demand_fingerprint(TargetName::X86_64Linux)
+    );
+}
+
+/// channel/join/select 需求进入 `target` 的 image plan，契约指纹偏离零需求基线，且重放稳定。
+#[cfg(feature = "slow-tests")]
+fn assert_channel_demand_reaches_image_plan(target: TargetName) {
+    let compiler = Compiler::shared();
+    let compile = || {
+        compiler.compile(CompileRequest::single_file(
+            "main.gg",
+            CHANNEL_SOURCE,
+            target,
+        ))
+    };
+    let cold = compile();
+    let warm = compile();
+    assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
+    let plan = cold.image_plan().expect("image-plan");
+    let demand = plan.wait_demand();
+    assert!(demand.channel_new > 0);
+    assert!(demand.channel_send > 0);
+    assert!(demand.channel_try_send > 0);
+    assert!(demand.channel_try_recv > 0);
+    assert!(demand.channel_receive > 0);
+    assert!(demand.join_wait > 0);
+    assert!(demand.select_commit > 0);
+    assert!(demand.select_safepoints > 0);
+    assert_ne!(
+        plan.wait_contract_fingerprint(),
+        zero_demand_fingerprint(target)
+    );
+    assert_eq!(cold.action_key(), warm.action_key());
+    assert_eq!(cold.dump_runtime(), warm.dump_runtime());
+}
+
+#[test]
+#[cfg(feature = "slow-tests")]
+fn channel_demand_reaches_linux_image_plan() {
+    assert_channel_demand_reaches_image_plan(TargetName::X86_64Linux);
+}
+
+#[test]
+#[cfg(feature = "slow-tests")]
+fn channel_demand_reaches_windows_image_plan() {
+    assert_channel_demand_reaches_image_plan(TargetName::X86_64Windows);
+}
+
+#[test]
+#[cfg(feature = "slow-tests")]
+fn wait_frontend_gates_reject_before_image_plan() {
+    let compiler = Compiler::shared();
     let negative = compiler.compile(CompileRequest::single_file(
         "main.gg",
         "fn main() { let c = chan[int](-1)\n _ = c }",

@@ -13,9 +13,9 @@ const SLOT_WORDS: usize = STACK_SPAN_BYTES / 512 / 64;
 const PAGE_WORDS: usize = STACK_SPAN_BYTES / PAGE / 64;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct StackHandle {
-    pub(crate) index: u32,
-    pub(crate) generation: u64,
+pub struct StackHandle {
+    pub index: u32,
+    pub generation: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -142,18 +142,18 @@ struct StackCache {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct StackStats {
-    pub(crate) reserved_bytes: u64,
-    pub(crate) committed_bytes: u64,
-    pub(crate) live_bytes: u64,
-    pub(crate) cache_bytes: u64,
-    pub(crate) pending_bytes: u64,
-    pub(crate) mappings: u32,
-    pub(crate) cache_hits: u64,
+pub struct StackStats {
+    pub reserved_bytes: u64,
+    pub committed_bytes: u64,
+    pub live_bytes: u64,
+    pub cache_bytes: u64,
+    pub pending_bytes: u64,
+    pub mappings: u32,
+    pub cache_hits: u64,
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct StackAllocator {
+pub struct StackAllocator {
     arenas: Vec<Option<Arena>>,
     available: [Option<SpanRef>; 13],
     slots: Vec<Allocation>,
@@ -163,11 +163,11 @@ pub(crate) struct StackAllocator {
 }
 
 impl StackAllocator {
-    pub(crate) fn stats(&self) -> StackStats {
+    pub fn stats(&self) -> StackStats {
         self.stats
     }
 
-    pub(crate) fn adopt(&mut self, handle: StackHandle, owner: u32) -> Result<(), StackError> {
+    pub fn adopt(&mut self, handle: StackHandle, owner: u32) -> Result<(), StackError> {
         if self.slot(handle)?.state != SlotState::Live {
             return Err(StackError::Invariant("只能交接live stack"));
         }
@@ -175,7 +175,7 @@ impl StackAllocator {
         Ok(())
     }
 
-    pub(crate) fn return_identity(&self, index: u32) -> Result<(StackHandle, usize), StackError> {
+    pub fn return_identity(&self, index: u32) -> Result<(StackHandle, usize), StackError> {
         let slot = self
             .slots
             .get(usize::try_from(index).expect("slot下标"))
@@ -190,7 +190,7 @@ impl StackAllocator {
         ))
     }
 
-    pub(crate) fn shutdown(&mut self, provider: &mut impl RangeProvider) -> Result<(), StackError> {
+    pub fn shutdown(&mut self, provider: &mut impl RangeProvider) -> Result<(), StackError> {
         if self.slots.iter().any(|slot| slot.state != SlotState::Free) {
             return Err(StackError::Invariant(
                 "stack arena关闭时仍有live/cache/pending slot",
@@ -214,12 +214,12 @@ impl StackAllocator {
             .ok_or(StackError::Invariant("stack handle已过期或已归还"))
     }
 
-    pub(crate) fn bounds(&self, handle: StackHandle) -> Result<(usize, usize), StackError> {
+    pub fn bounds(&self, handle: StackHandle) -> Result<(usize, usize), StackError> {
         let slot = self.slot(handle)?;
         Ok((slot.low, slot.capacity))
     }
 
-    pub(crate) fn owner(&self, handle: StackHandle) -> Result<u32, StackError> {
+    pub fn owner(&self, handle: StackHandle) -> Result<u32, StackError> {
         Ok(self.slot(handle)?.owner)
     }
 
@@ -307,7 +307,7 @@ impl StackAllocator {
         })
     }
 
-    pub(crate) fn reserve(
+    pub fn reserve(
         &mut self,
         owner: u32,
         capacity: usize,
@@ -393,7 +393,7 @@ impl StackAllocator {
         })
     }
 
-    pub(crate) fn commit(
+    pub fn commit(
         &mut self,
         handle: StackHandle,
         provider: &mut impl RangeProvider,
@@ -462,7 +462,7 @@ impl StackAllocator {
         index
     }
 
-    pub(crate) fn acquire(
+    pub fn acquire(
         &mut self,
         owner: u32,
         capacity: usize,
@@ -494,7 +494,7 @@ impl StackAllocator {
         Ok(handle)
     }
 
-    pub(crate) fn mark_pending(&mut self, handle: StackHandle) -> Result<(), StackError> {
+    pub fn mark_pending(&mut self, handle: StackHandle) -> Result<(), StackError> {
         let slot = self.slot(handle)?;
         if slot.state != SlotState::Live {
             return Err(StackError::Invariant("stack只能归还一次"));
@@ -506,7 +506,7 @@ impl StackAllocator {
         Ok(())
     }
 
-    pub(crate) fn reclaim_pending(
+    pub fn reclaim_pending(
         &mut self,
         handle: StackHandle,
         owner: u32,
@@ -523,7 +523,7 @@ impl StackAllocator {
         self.recycle(handle, owner, provider)
     }
 
-    pub(crate) fn recycle(
+    pub fn recycle(
         &mut self,
         handle: StackHandle,
         owner: u32,
@@ -558,7 +558,7 @@ impl StackAllocator {
         Ok(())
     }
 
-    pub(crate) fn trim_cache(
+    pub fn trim_cache(
         &mut self,
         owner: u32,
         target: usize,
@@ -602,7 +602,7 @@ impl StackAllocator {
         }
     }
 
-    pub(crate) fn release_global(
+    pub fn release_global(
         &mut self,
         handle: StackHandle,
         provider: &mut impl RangeProvider,

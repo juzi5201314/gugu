@@ -9,21 +9,21 @@ use super::text::{CowBytes, TextFault, utf8_decode};
 use crate::runtime::coroutine::CoroutineHandle;
 
 /// 组合函数的内部块长度。
-pub(crate) const IO_CHUNK_BYTES: usize = 8192;
+pub const IO_CHUNK_BYTES: usize = 8192;
 /// 无载荷变体的个数。编号 0..29 是它们，30 是 `Other`。
 const BARE_KINDS: u8 = 30;
 /// `Other` 的稳定编号。
-pub(crate) const OTHER: u8 = 30;
+pub const OTHER: u8 = 30;
 /// 错误链的最大深度。超过后 `with_source` 返回 `InvalidInput`。
 const MAX_CHAIN_DEPTH: usize = 8;
 
 const NOT_FOUND: u8 = 0;
 const PERMISSION_DENIED: u8 = 1;
 const ALREADY_EXISTS: u8 = 2;
-pub(crate) const INVALID_INPUT: u8 = 3;
-pub(crate) const INVALID_DATA: u8 = 4;
-pub(crate) const UNEXPECTED_EOF: u8 = 5;
-pub(crate) const WRITE_ZERO: u8 = 6;
+pub const INVALID_INPUT: u8 = 3;
+pub const INVALID_DATA: u8 = 4;
+pub const UNEXPECTED_EOF: u8 = 5;
+pub const WRITE_ZERO: u8 = 6;
 const INTERRUPTED: u8 = 7;
 const TIMED_OUT: u8 = 8;
 const CANCELLED: u8 = 9;
@@ -42,7 +42,7 @@ const CROSSES_DEVICES: u8 = 21;
 const NOT_SEEKABLE: u8 = 22;
 const INVALID_STATE: u8 = 23;
 const MESSAGE_TOO_LARGE: u8 = 24;
-pub(crate) const UNSUPPORTED: u8 = 25;
+pub const UNSUPPORTED: u8 = 25;
 const STORAGE_FULL: u8 = 26;
 const READ_ONLY_FILESYSTEM: u8 = 27;
 const FILE_TOO_LARGE: u8 = 28;
@@ -84,7 +84,7 @@ const MESSAGES: [&str; 31] = [
 
 /// 一次 I/O 失败。`source` 是拥有者错误表里的下标。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct IoError {
+pub struct IoError {
     kind: u8,
     code: i32,
     source: Option<u16>,
@@ -92,20 +92,20 @@ pub(crate) struct IoError {
 
 /// 错误链的拥有者。下标就是 `IoError.source`。
 #[derive(Clone, Debug, Default)]
-pub(crate) struct IoErrors {
+pub struct IoErrors {
     errors: Vec<IoError>,
 }
 
 /// 内存游标。读到尾返回 `Ok(0)`，不返回 EOF 错误。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct Cursor {
+pub struct Cursor {
     bytes: Vec<u8>,
     pos: usize,
 }
 
 /// 脚本化的短读/短写。每调用一次消费一项。
 #[derive(Clone, Debug)]
-pub(crate) struct Scripted {
+pub struct Scripted {
     reads: Vec<Result<Vec<u8>, IoError>>,
     writes: Vec<Result<usize, IoError>>,
     writes_done: usize,
@@ -113,7 +113,7 @@ pub(crate) struct Scripted {
 
 /// `Seek` 的起点。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SeekFrom {
+pub enum SeekFrom {
     Start(u64),
     End(i64),
     Current(i64),
@@ -121,7 +121,7 @@ pub(crate) enum SeekFrom {
 
 /// 阻塞操作的逻辑等待。时钟由调用方给出。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct IoWait {
+pub struct IoWait {
     cursor: u64,
     timeout: Option<u64>,
     cancel: bool,
@@ -132,7 +132,7 @@ pub(crate) struct IoWait {
 
 /// 一次等待的稳定结果。先提交的结果不会被后到事件覆盖。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IoWaitResult {
+pub enum IoWaitResult {
     Ready(usize),
     Eof,
     TimedOut,
@@ -142,18 +142,18 @@ pub(crate) enum IoWaitResult {
 }
 
 /// 可重复读取的字节源。
-pub(crate) trait ReadBytes {
+pub trait ReadBytes {
     fn read(&mut self, destination: &mut [u8]) -> Result<usize, IoError>;
 }
 
 /// 可重复写入的字节宿。
-pub(crate) trait WriteBytes {
+pub trait WriteBytes {
     fn write(&mut self, source: &[u8]) -> Result<usize, IoError>;
 }
 
 impl IoError {
     /// 构造一个无载荷变体。编号必须落在 0..30。
-    pub(crate) fn bare(kind: u8) -> Self {
+    pub fn bare(kind: u8) -> Self {
         debug_assert!(kind < BARE_KINDS, "无载荷变体编号 < 30");
         Self {
             kind,
@@ -163,7 +163,7 @@ impl IoError {
     }
 
     /// 构造 `Other`。`code` 是调用方给出的稳定编号。
-    pub(crate) fn other(code: i32) -> Self {
+    pub fn other(code: i32) -> Self {
         Self {
             kind: OTHER,
             code,
@@ -171,42 +171,42 @@ impl IoError {
         }
     }
 
-    pub(crate) const fn kind_code(&self) -> u8 {
+    pub const fn kind_code(&self) -> u8 {
         self.kind
     }
 
-    pub(crate) const fn code(&self) -> i32 {
+    pub const fn code(&self) -> i32 {
         self.code
     }
 
-    pub(crate) const fn source_index(&self) -> Option<u16> {
+    pub const fn source_index(&self) -> Option<u16> {
         self.source
     }
 
     /// 人读文本。只返回变体名，不拼接 code 或来源。
-    pub(crate) fn message(self) -> &'static str {
+    pub fn message(self) -> &'static str {
         MESSAGES[usize::from(self.kind)]
     }
 }
 
 impl IoErrors {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// 登记一个错误并返回它在表中的下标。
-    pub(crate) fn push(&mut self, error: IoError) -> u16 {
+    pub fn push(&mut self, error: IoError) -> u16 {
         let index = u16::try_from(self.errors.len()).expect("错误链下标适配 u16");
         self.errors.push(error);
         index
     }
 
-    pub(crate) fn get(&self, index: u16) -> Option<&IoError> {
+    pub fn get(&self, index: u16) -> Option<&IoError> {
         self.errors.get(usize::from(index))
     }
 
     /// 剥掉全部 `Other.source`，返回无嵌套来源的变体。
-    pub(crate) fn kind(&self, error: IoError) -> IoError {
+    pub fn kind(&self, error: IoError) -> IoError {
         let mut current = error;
         let mut seen = 0;
         while current.kind == OTHER {
@@ -232,7 +232,7 @@ impl IoErrors {
     }
 
     /// 只有 `Other` 且来源存在时返回直接原因。
-    pub(crate) fn source(&self, error: IoError) -> Option<IoError> {
+    pub fn source(&self, error: IoError) -> Option<IoError> {
         if error.kind != OTHER {
             return None;
         }
@@ -240,7 +240,7 @@ impl IoErrors {
     }
 
     /// 构造带一层来源的 `Other`。环或超深返回 `InvalidInput`，且该失败不再包来源。
-    pub(crate) fn with_source(&mut self, error: IoError, cause: IoError) -> IoError {
+    pub fn with_source(&mut self, error: IoError, cause: IoError) -> IoError {
         let kind = self.kind(error);
         if self.forms_cycle(kind.kind, cause) {
             return IoError::bare(INVALID_INPUT);
@@ -276,19 +276,19 @@ impl IoErrors {
 }
 
 impl Cursor {
-    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+    pub fn new(bytes: Vec<u8>) -> Self {
         Self { bytes, pos: 0 }
     }
 
-    pub(crate) fn position(&self) -> usize {
+    pub fn position(&self) -> usize {
         self.pos
     }
 
-    pub(crate) fn bytes(&self) -> &[u8] {
+    pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    pub(crate) fn seek(&mut self, from: SeekFrom) -> Result<u64, IoError> {
+    pub fn seek(&mut self, from: SeekFrom) -> Result<u64, IoError> {
         let next = match from {
             SeekFrom::Start(offset) => offset,
             SeekFrom::End(offset) => self.checked_offset(self.bytes.len(), offset)?,
@@ -332,10 +332,7 @@ impl WriteBytes for Cursor {
 }
 
 impl Scripted {
-    pub(crate) fn new(
-        reads: Vec<Result<Vec<u8>, IoError>>,
-        writes: Vec<Result<usize, IoError>>,
-    ) -> Self {
+    pub fn new(reads: Vec<Result<Vec<u8>, IoError>>, writes: Vec<Result<usize, IoError>>) -> Self {
         Self {
             reads,
             writes,
@@ -343,7 +340,7 @@ impl Scripted {
         }
     }
 
-    pub(crate) fn writes_done(&self) -> usize {
+    pub fn writes_done(&self) -> usize {
         self.writes_done
     }
 }
@@ -376,10 +373,7 @@ impl WriteBytes for Scripted {
 }
 
 /// 填满 destination。中途 `Ok(0)` 变成 `UnexpectedEof`，已写前缀保留。
-pub(crate) fn read_exact<R: ReadBytes>(
-    reader: &mut R,
-    destination: &mut [u8],
-) -> Result<(), IoError> {
+pub fn read_exact<R: ReadBytes>(reader: &mut R, destination: &mut [u8]) -> Result<(), IoError> {
     let mut filled = 0;
     while filled < destination.len() {
         match reader.read(&mut destination[filled..])? {
@@ -391,7 +385,7 @@ pub(crate) fn read_exact<R: ReadBytes>(
 }
 
 /// 写完 source。空输入不调用 `write`；非空写入的 `Ok(0)` 变成 `WriteZero`。
-pub(crate) fn write_all<W: WriteBytes>(writer: &mut W, source: &[u8]) -> Result<(), IoError> {
+pub fn write_all<W: WriteBytes>(writer: &mut W, source: &[u8]) -> Result<(), IoError> {
     let mut written = 0;
     if source.is_empty() {
         return Ok(());
@@ -406,10 +400,7 @@ pub(crate) fn write_all<W: WriteBytes>(writer: &mut W, source: &[u8]) -> Result<
 }
 
 /// 用固定 8192 字节缓冲复制。返回成功写出的累计字节。
-pub(crate) fn copy<R: ReadBytes, W: WriteBytes>(
-    reader: &mut R,
-    writer: &mut W,
-) -> Result<u64, IoError> {
+pub fn copy<R: ReadBytes, W: WriteBytes>(reader: &mut R, writer: &mut W) -> Result<u64, IoError> {
     let mut buffer = [0_u8; IO_CHUNK_BYTES];
     let mut copied = 0_u64;
     loop {
@@ -423,7 +414,7 @@ pub(crate) fn copy<R: ReadBytes, W: WriteBytes>(
 }
 
 /// 以 8192 为块读到 EOF，返回封存后的字节。
-pub(crate) fn read_to_end<R: ReadBytes>(reader: &mut R) -> Result<Vec<u8>, IoError> {
+pub fn read_to_end<R: ReadBytes>(reader: &mut R) -> Result<Vec<u8>, IoError> {
     let mut buffer = CowBytes::new();
     loop {
         let limit = isize::try_from(IO_CHUNK_BYTES).expect("块长");
@@ -437,13 +428,13 @@ pub(crate) fn read_to_end<R: ReadBytes>(reader: &mut R) -> Result<Vec<u8>, IoErr
 }
 
 /// 读到 EOF 后做严格 UTF-8 解码。非法序列是 `InvalidData`，不返回部分 string。
-pub(crate) fn read_to_string<R: ReadBytes>(reader: &mut R) -> Result<String, IoError> {
+pub fn read_to_string<R: ReadBytes>(reader: &mut R) -> Result<String, IoError> {
     let bytes = read_to_end(reader)?;
     utf8_decode(&bytes).map_err(|_| IoError::bare(INVALID_DATA))
 }
 
 /// 向缓冲追加至多 `limit` 字节。负 limit 是 panic 级 `TextFault::Negative`。
-pub(crate) fn read_buffer<R: ReadBytes>(
+pub fn read_buffer<R: ReadBytes>(
     buffer: &mut CowBytes,
     limit: isize,
     reader: &mut R,
@@ -461,7 +452,7 @@ pub(crate) fn read_buffer<R: ReadBytes>(
 }
 
 /// 把缓冲封存后交给一次 `write`。一次调用只写一个前缀。
-pub(crate) fn write_buffer<W: WriteBytes>(
+pub fn write_buffer<W: WriteBytes>(
     writer: &mut W,
     source: &mut CowBytes,
 ) -> Result<usize, IoError> {
@@ -470,10 +461,7 @@ pub(crate) fn write_buffer<W: WriteBytes>(
 }
 
 /// `limit == 0` 不读。其余把一次 `read_buffer` 的结果封存成字节。
-pub(crate) fn fill_buffer<R: ReadBytes>(
-    reader: &mut R,
-    limit: isize,
-) -> Result<Vec<u8>, TextFault> {
+pub fn fill_buffer<R: ReadBytes>(reader: &mut R, limit: isize) -> Result<Vec<u8>, TextFault> {
     if limit == 0 {
         return Ok(Vec::new());
     }
@@ -483,7 +471,7 @@ pub(crate) fn fill_buffer<R: ReadBytes>(
 }
 
 impl IoWait {
-    pub(crate) fn new(cursor: u64, timeout: Option<u64>, cancel: bool, closed: bool) -> Self {
+    pub fn new(cursor: u64, timeout: Option<u64>, cancel: bool, closed: bool) -> Self {
         Self {
             cursor,
             timeout,
@@ -495,12 +483,12 @@ impl IoWait {
     }
 
     /// 发放一次额度。已提交的结果不变。
-    pub(crate) fn grant_credit(&mut self) {
+    pub fn grant_credit(&mut self) {
         self.credit = true;
     }
 
     /// 判定顺序：关闭、取消、timeout、无额度、就绪。
-    pub(crate) fn poll(&mut self, ready_bytes: usize, eof: bool) -> IoWaitResult {
+    pub fn poll(&mut self, ready_bytes: usize, eof: bool) -> IoWaitResult {
         if let Some(result) = self.submitted {
             return result;
         }
@@ -523,7 +511,7 @@ impl IoWait {
 }
 
 /// 无额度时进入现有 waiting 队列；有额度后进入普通 `ForeignBridge`。
-pub(crate) fn admit_blocking(
+pub fn admit_blocking(
     world: &mut ForeignWorld,
     handle: CoroutineHandle,
     credit: bool,
@@ -540,7 +528,7 @@ pub(crate) fn admit_blocking(
 }
 
 /// 稳定编号。未列入的名字按语义映射，不新增变体。
-pub(crate) fn kind_of(name: &str) -> Option<u8> {
+pub fn kind_of(name: &str) -> Option<u8> {
     MESSAGES
         .iter()
         .position(|item| *item == name)
@@ -548,102 +536,102 @@ pub(crate) fn kind_of(name: &str) -> Option<u8> {
 }
 
 /// 这些常量保留给参照测试与调用方按名字取变体。
-pub(crate) fn not_found() -> IoError {
+pub fn not_found() -> IoError {
     IoError::bare(NOT_FOUND)
 }
 
-pub(crate) fn permission_denied() -> IoError {
+pub fn permission_denied() -> IoError {
     IoError::bare(PERMISSION_DENIED)
 }
 
-pub(crate) fn already_exists() -> IoError {
+pub fn already_exists() -> IoError {
     IoError::bare(ALREADY_EXISTS)
 }
 
-pub(crate) fn interrupted() -> IoError {
+pub fn interrupted() -> IoError {
     IoError::bare(INTERRUPTED)
 }
 
-pub(crate) fn timed_out() -> IoError {
+pub fn timed_out() -> IoError {
     IoError::bare(TIMED_OUT)
 }
 
-pub(crate) fn cancelled() -> IoError {
+pub fn cancelled() -> IoError {
     IoError::bare(CANCELLED)
 }
 
-pub(crate) fn closed() -> IoError {
+pub fn closed() -> IoError {
     IoError::bare(CLOSED)
 }
 
-pub(crate) fn broken_pipe() -> IoError {
+pub fn broken_pipe() -> IoError {
     IoError::bare(BROKEN_PIPE)
 }
 
-pub(crate) fn not_connected() -> IoError {
+pub fn not_connected() -> IoError {
     IoError::bare(NOT_CONNECTED)
 }
 
-pub(crate) fn connection_reset() -> IoError {
+pub fn connection_reset() -> IoError {
     IoError::bare(CONNECTION_RESET)
 }
 
-pub(crate) fn connection_refused() -> IoError {
+pub fn connection_refused() -> IoError {
     IoError::bare(CONNECTION_REFUSED)
 }
 
-pub(crate) fn connection_aborted() -> IoError {
+pub fn connection_aborted() -> IoError {
     IoError::bare(CONNECTION_ABORTED)
 }
 
-pub(crate) fn addr_in_use() -> IoError {
+pub fn addr_in_use() -> IoError {
     IoError::bare(ADDR_IN_USE)
 }
 
-pub(crate) fn addr_not_available() -> IoError {
+pub fn addr_not_available() -> IoError {
     IoError::bare(ADDR_NOT_AVAILABLE)
 }
 
-pub(crate) fn not_a_directory() -> IoError {
+pub fn not_a_directory() -> IoError {
     IoError::bare(NOT_A_DIRECTORY)
 }
 
-pub(crate) fn is_a_directory() -> IoError {
+pub fn is_a_directory() -> IoError {
     IoError::bare(IS_A_DIRECTORY)
 }
 
-pub(crate) fn directory_not_empty() -> IoError {
+pub fn directory_not_empty() -> IoError {
     IoError::bare(DIRECTORY_NOT_EMPTY)
 }
 
-pub(crate) fn crosses_devices() -> IoError {
+pub fn crosses_devices() -> IoError {
     IoError::bare(CROSSES_DEVICES)
 }
 
-pub(crate) fn not_seekable() -> IoError {
+pub fn not_seekable() -> IoError {
     IoError::bare(NOT_SEEKABLE)
 }
 
-pub(crate) fn invalid_state() -> IoError {
+pub fn invalid_state() -> IoError {
     IoError::bare(INVALID_STATE)
 }
 
-pub(crate) fn message_too_large() -> IoError {
+pub fn message_too_large() -> IoError {
     IoError::bare(MESSAGE_TOO_LARGE)
 }
 
-pub(crate) fn storage_full() -> IoError {
+pub fn storage_full() -> IoError {
     IoError::bare(STORAGE_FULL)
 }
 
-pub(crate) fn read_only_filesystem() -> IoError {
+pub fn read_only_filesystem() -> IoError {
     IoError::bare(READ_ONLY_FILESYSTEM)
 }
 
-pub(crate) fn file_too_large() -> IoError {
+pub fn file_too_large() -> IoError {
     IoError::bare(FILE_TOO_LARGE)
 }
 
-pub(crate) fn quota_exceeded() -> IoError {
+pub fn quota_exceeded() -> IoError {
     IoError::bare(QUOTA_EXCEEDED)
 }

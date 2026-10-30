@@ -16,12 +16,8 @@ serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
 unicode-width.workspace = true
-blake3 = "1"
-foldhash = "0.2"
-siphasher = "1.0"
 unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.3"
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 gugu-backend = { path = "../gugu-backend" }
 gugu-base = { path = "../gugu-base" }
@@ -40,3 +36,4 @@ gugu-runtime-abi = { path = "../gugu-runtime-abi", features = ["test-support"] }
 gugu-sema = { path = "../gugu-sema", features = ["test-support"] }
 gugu-gir = { path = "../gugu-gir", features = ["test-support"] }
 gugu-lir = { path = "../gugu-lir", features = ["test-support"] }
+gugu-runtime-world = { path = "../gugu-runtime-world", features = ["test-support"] }

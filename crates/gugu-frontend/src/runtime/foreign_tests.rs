@@ -1,10 +1,10 @@
 use super::coroutine::CoroutineState;
 use super::cstring::{scan, terminate};
-use super::foreign::{
-    AdmitOutcome, BridgeMode, ForeignWorld, IoClass, ManagedRoot, PollerFamily, ReturnPath,
-};
 use super::foreign_schema::MAX_BLOCKING_WORKERS;
 use crate::{CompileRequest, Compiler, TargetName};
+use gugu_runtime_world::foreign::{
+    AdmitOutcome, BridgeMode, ForeignWorld, IoClass, ManagedRoot, PollerFamily, ReturnPath,
+};
 
 fn root(pinned: bool) -> ManagedRoot {
     ManagedRoot { handle: 1, pinned }

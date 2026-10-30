@@ -19,9 +19,9 @@ use super::super::stack_arena::{StackHandle, StackStats};
 use super::RawWorld;
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct CoroutineEntry {
-    pub(crate) pc: usize,
-    pub(crate) required_frame: usize,
+pub struct CoroutineEntry {
+    pub pc: usize,
+    pub required_frame: usize,
 }
 
 /// 仅保存allocator租约与替身内存，不复制hot/cold中的调度、context或完成状态。
@@ -33,7 +33,7 @@ pub(super) struct CoroutineStorage {
 
 /// 完成trampoline已发布payload；只有system-stack侧能消费此票据。
 #[derive(Debug)]
-pub(crate) struct FinishTicket {
+pub struct FinishTicket {
     coroutine: CoroutineHandle,
     stack: StackHandle,
 }
@@ -98,7 +98,7 @@ impl RawWorld {
     }
 
     /// 调度者取得context前Acquire认领完整状态；第一次切入才commit宿主页。
-    pub(crate) fn enter_coroutine(
+    pub fn enter_coroutine(
         &mut self,
         handle: CoroutineHandle,
     ) -> Result<CoroutineContext, RawInvariant> {
@@ -126,7 +126,7 @@ impl RawWorld {
     }
 
     /// 替身保存精确safepoint内存；真实机器路径由context fragment保存寄存器。
-    pub(crate) fn save_coroutine(
+    pub fn save_coroutine(
         &mut self,
         handle: CoroutineHandle,
         context: CoroutineContext,
@@ -159,7 +159,7 @@ impl RawWorld {
     }
 
     /// 先由scheduler处理poll/GC，再带最新context进入此system-stack复制入口。
-    pub(crate) fn grow_coroutine(
+    pub fn grow_coroutine(
         &mut self,
         handle: CoroutineHandle,
         required: usize,
@@ -181,7 +181,7 @@ impl RawWorld {
         self.resize_coroutine(handle, capacity, epoch, true)
     }
 
-    pub(crate) fn shrink_coroutine(
+    pub fn shrink_coroutine(
         &mut self,
         handle: CoroutineHandle,
         epoch: u32,
@@ -290,7 +290,7 @@ impl RawWorld {
     }
 
     /// 在旧栈上完成result/panic transfer；完成记录的Release早于任何stack摘根。
-    pub(crate) fn stage_coroutine_finish(
+    pub fn stage_coroutine_finish(
         &mut self,
         handle: CoroutineHandle,
         value: CompletionValue,
@@ -310,7 +310,7 @@ impl RawWorld {
     }
 
     /// 单向切到system stack后调用；票据不包含旧rsp，函数也不读取旧stack bytes。
-    pub(crate) fn finish_coroutine_on_system(
+    pub fn finish_coroutine_on_system(
         &mut self,
         ticket: &FinishTicket,
         owner: u32,
@@ -482,11 +482,11 @@ impl RawWorld {
         }
     }
 
-    pub(crate) fn stack_stats(&self) -> StackStats {
+    pub fn stack_stats(&self) -> StackStats {
         self.stacks.stats()
     }
 
-    pub(crate) fn clone_join(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
+    pub fn clone_join(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
         let (_, cold) = self.controls.get_mut(handle)?;
         if cold.join_state.join_leases == 0 {
             return Err(RawInvariant::new("没有活跃Join可以复制"));
@@ -499,7 +499,7 @@ impl RawWorld {
         Ok(())
     }
 
-    pub(crate) fn read_completion(
+    pub fn read_completion(
         &self,
         handle: CoroutineHandle,
     ) -> Result<CompletionValue, RawInvariant> {
@@ -510,7 +510,7 @@ impl RawWorld {
         cold.join_state.read()
     }
 
-    pub(crate) fn release_join(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
+    pub fn release_join(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
         let (slot, cold) = self.controls.get_mut(handle)?;
         cold.join_state.join_leases = cold
             .join_state

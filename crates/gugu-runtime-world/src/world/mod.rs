@@ -4,22 +4,12 @@
 //! free structure 与账本只由 owner 上下文读写。跨 owner 的归还先经过 exactly-once 的
 //! `ReturnQueued` 状态迁移，再发布只携带逻辑序号的 return message。
 
-pub(crate) mod combining_impl;
-pub(crate) mod coroutine_impl;
+pub mod combining_impl;
+pub mod coroutine_impl;
 mod extent_impl;
-#[cfg(test)]
-#[allow(unused_imports)]
-pub(crate) use extent_impl::OWNER_ARENA_BYTES;
-pub(crate) mod routing_impl;
-#[cfg(test)]
-#[allow(unused_imports)]
-#[path = "../sync_tests.rs"]
-mod sync_tests;
-pub(crate) mod termination_impl;
-#[cfg(test)]
-#[allow(unused_imports)]
-#[path = "../wait_tests.rs"]
-mod wait_tests;
+pub use extent_impl::OWNER_ARENA_BYTES;
+pub mod routing_impl;
+pub mod termination_impl;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -49,25 +39,25 @@ use super::slab::{
 
 /// owner retire 的结果。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RetireReport {
+pub struct RetireReport {
     /// 排空时转发的消息数。
-    pub(crate) forwarded: u32,
+    pub forwarded: u32,
     /// 排空时本地消费的消息数。
-    pub(crate) consumed: u32,
+    pub consumed: u32,
     /// grace 的收敛结果。
-    pub(crate) grace: GraceOutcome,
+    pub grace: GraceOutcome,
     /// 回收的 span 数量。
-    pub(crate) reclaimed_spans: u32,
+    pub reclaimed_spans: u32,
     /// 因 lease、slot、在途 return 或 grace 门禁未通过而保留 committed 的 span 数量。
-    pub(crate) blocked_spans: u32,
+    pub blocked_spans: u32,
 }
 
 /// 资源分配的 payload 形状；kind 与对齐只作登记，不进入用户可见类型。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ResourceShape {
-    pub(crate) kind_id: u8,
-    pub(crate) payload_bytes: u32,
-    pub(crate) alignment: u32,
+pub struct ResourceShape {
+    pub kind_id: u8,
+    pub payload_bytes: u32,
+    pub alignment: u32,
 }
 
 /// 已过归还线性化点、等待 queue-page grace 的 extent 及其账本归属。
@@ -83,7 +73,7 @@ struct PendingExtentTrim {
 
 /// raw plane 的可运行模型世界。
 #[derive(Debug)]
-pub(crate) struct RawWorld {
+pub struct RawWorld {
     classes: RuntimeSizeClassTable,
     resource_classes: RuntimeSizeClassTable,
     provider: FakePlatform,
@@ -140,7 +130,7 @@ pub(crate) struct RawWorld {
 
 impl RawWorld {
     /// 创建世界：一个 domain owner 加 `owners` 个 raw owner，node pool 容量固定。
-    pub(crate) fn new(
+    pub fn new(
         seed: u64,
         owners: u32,
         node_capacity: u32,
@@ -220,57 +210,57 @@ impl RawWorld {
     }
 
     /// 返回 owner 数量。
-    pub(crate) fn owner_count(&self) -> u32 {
+    pub fn owner_count(&self) -> u32 {
         self.owners.len() as u32
     }
 
     /// 返回 owner 的 token。
-    pub(crate) fn token(&self, index: u32) -> OwnerToken {
+    pub fn token(&self, index: u32) -> OwnerToken {
         self.owners[index as usize].token()
     }
 
     /// 返回 Resource domain owner 的 token。
-    pub(crate) fn resource_token(&self, index: u32) -> OwnerToken {
+    pub fn resource_token(&self, index: u32) -> OwnerToken {
         self.resource_owners[index as usize].token()
     }
 
     /// 返回 owner 的 inbox；producer 通过它发布，不需要接触 owner 本地状态。
-    pub(crate) fn inbox(&self, index: u32) -> Arc<OwnerInbox> {
+    pub fn inbox(&self, index: u32) -> Arc<OwnerInbox> {
         Arc::clone(&self.inboxes[index as usize])
     }
 
     /// 返回 domain owner 的 token；owner 不可达或 retire 时作为 injection 终点。
-    pub(crate) const fn domain_owner(&self) -> OwnerToken {
+    pub const fn domain_owner(&self) -> OwnerToken {
         self.domain_owner
     }
 
     /// 返回 node pool。
-    pub(crate) fn pool(&self) -> Arc<ReturnNodePool> {
+    pub fn pool(&self) -> Arc<ReturnNodePool> {
         Arc::clone(&self.pool)
     }
 
     /// 返回 class 表。
-    pub(crate) fn classes(&self) -> &RuntimeSizeClassTable {
+    pub fn classes(&self) -> &RuntimeSizeClassTable {
         &self.classes
     }
 
     /// 返回 batch 上限。
-    pub(crate) const fn limits(&self) -> BatchLimits {
+    pub const fn limits(&self) -> BatchLimits {
         self.limits
     }
 
     /// 返回 integrity secret 派生的只读副本。
-    pub(crate) const fn integrity_secret(&self) -> &[u8; 32] {
+    pub const fn integrity_secret(&self) -> &[u8; 32] {
         &self.integrity_secret
     }
 
     /// 返回 owner directory。
-    pub(crate) const fn directory(&self) -> &OwnerDirectory {
+    pub const fn directory(&self) -> &OwnerDirectory {
         &self.directory
     }
 
     /// 返回 owner 账本。
-    pub(crate) fn accounting(&self, index: u32) -> &OwnerAccounting {
+    pub fn accounting(&self, index: u32) -> &OwnerAccounting {
         self.directory
             .accounting(self.owners[index as usize].token().owner_id)
             .expect("owner 必须已登记")
@@ -279,12 +269,12 @@ impl RawWorld {
     /// 返回 owner 的 managed 物理页账本。
 
     /// 返回 slab 描述符表。
-    pub(crate) const fn table(&self) -> &SlabTable {
+    pub const fn table(&self) -> &SlabTable {
         &self.table
     }
 
     /// 返回某个描述符的 class 与 generation，供 consumer 读取 node payload。
-    pub(crate) fn descriptor(
+    pub fn descriptor(
         &self,
         id: SlabDescriptorId,
     ) -> Result<&super::slab::SlabDescriptor, RawInvariant> {
@@ -294,22 +284,22 @@ impl RawWorld {
     }
 
     /// 返回 provider 统计：reserved/committed 字节与拒绝次数。
-    pub(crate) fn provider_stats(&self) -> ProviderStats {
+    pub fn provider_stats(&self) -> ProviderStats {
         self.provider.stats()
     }
 
     /// 返回 provider 登记的 range 列表。
-    pub(crate) fn provider_ranges(&self) -> &[RangeDescriptor] {
+    pub fn provider_ranges(&self) -> &[RangeDescriptor] {
         self.provider.describe_all()
     }
 
     /// 返回当前 epoch。
-    pub(crate) const fn epoch(&self) -> Epoch {
+    pub const fn epoch(&self) -> Epoch {
         self.epoch
     }
 
     /// 本地分配：owner 上下文的唯一分配入口。
-    pub(crate) fn allocate(
+    pub fn allocate(
         &mut self,
         owner: u32,
         class: RuntimeSizeClassId,
@@ -363,7 +353,7 @@ impl RawWorld {
     }
 
     /// 记录完成生命周期并赢得 return 线性化点。
-    pub(crate) fn queue_return(
+    pub fn queue_return(
         &mut self,
         owner: u32,
         slot: RawSlot,
@@ -399,7 +389,7 @@ impl RawWorld {
     }
 
     /// 本地 return：当前执行者仍是 slab owner，直接把 slot 放回本地 free structure。
-    pub(crate) fn local_return(
+    pub fn local_return(
         &mut self,
         owner: u32,
         slot: RawSlot,
@@ -439,7 +429,7 @@ impl RawWorld {
     }
 
     /// 发布转发目标：把旧 owner 置为 Draining/Forwarding，使在飞消息沿转发路径归还。
-    pub(crate) fn begin_forwarding(
+    pub fn begin_forwarding(
         &mut self,
         owner: u32,
         target: OwnerToken,
@@ -454,7 +444,7 @@ impl RawWorld {
     }
 
     /// 构造一个 return message；integrity 由 per-domain secret 绑定全部身份字段。
-    pub(crate) fn message(
+    pub fn message(
         &self,
         target: OwnerToken,
         kind: ReturnKind,
@@ -495,7 +485,7 @@ impl RawWorld {
     ///
     /// radix 模式下 flush 进入 radix staging 而不是目标 inbox：batch 由 routing 平面按
     /// 原始 target 的 route key 逐层转发；maintenance 期间发布被冻结。
-    pub(crate) fn publish_message(
+    pub fn publish_message(
         &mut self,
         owner: u32,
         message: &ReturnMessage,
@@ -575,7 +565,7 @@ impl RawWorld {
     /// ring 批次在 direct 模式直接进入目标 owner 的 inbox，不经过 producer staging：
     /// staging 只承载单条 return/card 消息，因此这里由 owner 自己推导目标与 shard。
     /// radix 模式下批次进入 radix staging，由 routing 平面按原始 target 逐层转发。
-    pub(crate) fn publish_ring(
+    pub fn publish_ring(
         &mut self,
         owner: u32,
         closed: &super::message::ClosedRing,
@@ -648,7 +638,7 @@ impl RawWorld {
     }
 
     /// consumer 侧关闭 owner-local return cache；GC card/mark flush 由镜像 coordinator 负责。
-    pub(crate) fn close_cache(
+    pub fn close_cache(
         &mut self,
         owner: u32,
         reason: RingCloseReason,
@@ -666,7 +656,7 @@ impl RawWorld {
     /// credit 观测到的 `producer-staging` 字节就是这里的输入；drain/retire 前必须冲刷，
     /// 否则「cycle 边界前 credit 收敛」会看到真实的在飞量而不是观测盲区。radix 模式下
     /// 冲刷进入 radix staging，由 routing 平面继续逐层转发。
-    pub(crate) fn flush_return_staging(
+    pub fn flush_return_staging(
         &mut self,
         owner: u32,
         trigger: FlushTrigger,
@@ -695,7 +685,7 @@ impl RawWorld {
     ///
     /// 这是 consumer 侧 same-slab 聚合的接入点：命中同一 `(descriptor, generation)` 时继续
     /// 填充，victim ring 被驱逐时立即整批发布给目标 owner。返回本次发布的 slot 数。
-    pub(crate) fn cache_return_slot(
+    pub fn cache_return_slot(
         &mut self,
         owner: u32,
         key: (SlabDescriptorId, SlabGeneration),
@@ -710,7 +700,7 @@ impl RawWorld {
     }
 
     /// owner 上下文：按固定顺序 service 一个 shard。
-    pub(crate) fn service(
+    pub fn service(
         &mut self,
         owner: u32,
         shard: ShardIndex,
@@ -883,7 +873,7 @@ impl RawWorld {
     }
 
     /// 排空全部 raw/resource shard；GC 消息不在宿主 world 执行。
-    pub(crate) fn drain_all(
+    pub fn drain_all(
         &mut self,
         owner: u32,
         budget: &ServiceBudget,
@@ -963,25 +953,25 @@ impl RawWorld {
     }
 
     /// queue-page grace：发布新 epoch 与 reclaim gate。
-    pub(crate) fn open_grace(&mut self, inbox: &OwnerInbox) -> Epoch {
+    pub fn open_grace(&mut self, inbox: &OwnerInbox) -> Epoch {
         let epoch = inbox.gate().open_grace();
         self.epoch = epoch;
         epoch
     }
 
     /// 返回 grace 收敛结果。
-    pub(crate) fn grace_outcome(inbox: &OwnerInbox) -> GraceOutcome {
+    pub fn grace_outcome(inbox: &OwnerInbox) -> GraceOutcome {
         inbox.gate().grace_outcome()
     }
 
     /// 关闭 grace 并重新开放登记。
-    pub(crate) fn close_grace(&mut self, inbox: &OwnerInbox) {
+    pub fn close_grace(&mut self, inbox: &OwnerInbox) {
         inbox.gate().close_grace();
         self.epoch = self.epoch.next();
     }
 
     /// retire 协议：Draining → Forwarding → 独占排空 → grace → 回收 → Retired。
-    pub(crate) fn retire(
+    pub fn retire(
         &mut self,
         owner: u32,
         target: OwnerToken,
@@ -1065,7 +1055,7 @@ impl RawWorld {
     ///
     /// 只在队列静止（producer 已停止或已排空）后调用：node 在 consumer 完成并经过 grace
     /// 前不得复用，否则 consumer 的 front/last 记账会指向被重新写入的 node。
-    pub(crate) fn release_graced_nodes(&mut self) -> Result<u32, RawInvariant> {
+    pub fn release_graced_nodes(&mut self) -> Result<u32, RawInvariant> {
         let nodes = std::mem::take(&mut self.graced_nodes);
         for node in &nodes {
             self.pool.release(*node)?;
@@ -1077,12 +1067,12 @@ impl RawWorld {
     }
 
     /// 返回尚未过 grace 的 node 数量。
-    pub(crate) fn pending_grace_nodes(&self) -> usize {
+    pub fn pending_grace_nodes(&self) -> usize {
         self.graced_nodes.len()
     }
 
     /// 校验账本：committed 必须等于 pending、reclaimable、cache 与 live record 之和。
-    pub(crate) fn ledger_invariant(&self, owner: u32) -> Result<(), RawInvariant> {
+    pub fn ledger_invariant(&self, owner: u32) -> Result<(), RawInvariant> {
         let token = self.owners[owner as usize].token();
         let accounting = self
             .directory
@@ -1119,7 +1109,7 @@ impl RawWorld {
     }
 
     /// 校验 Resource domain 的账本：committed 等于 live、pending、reclaimable 与 cache 之和。
-    pub(crate) fn resource_ledger_invariant(&self, owner: u32) -> Result<(), RawInvariant> {
+    pub fn resource_ledger_invariant(&self, owner: u32) -> Result<(), RawInvariant> {
         let token = self.resource_owners[owner as usize].token();
         let accounting = self
             .directory
@@ -1152,7 +1142,7 @@ impl RawWorld {
     }
 
     /// 校验 free 链完整性与描述符计数；失败先按 provenance 稳定分类记账。
-    pub(crate) fn verify_links(&mut self) -> Result<(), RawInvariant> {
+    pub fn verify_links(&mut self) -> Result<(), RawInvariant> {
         self.provenance.verify_full_chain(&self.table)
     }
 }

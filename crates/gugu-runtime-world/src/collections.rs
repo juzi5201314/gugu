@@ -14,7 +14,7 @@ use super::hash::{HashFamily, HashOutput, StableKey, StableOrdKey};
 
 /// 集合操作会在语言里 panic 的原因。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CollectionFault {
+pub enum CollectionFault {
     /// scoped view 尚未结束时对同一集合写入。
     WriteDuringView,
 }
@@ -44,7 +44,7 @@ struct State<K, V> {
 }
 
 /// Map 的共享身份句柄。
-pub(crate) struct Map<K, V> {
+pub struct Map<K, V> {
     state: Rc<RefCell<State<K, V>>>,
 }
 
@@ -58,7 +58,7 @@ impl<K, V> Clone for Map<K, V> {
 
 impl<K: StableKey, V: Clone> Map<K, V> {
     /// `HashMap` / `SecureHashMap`：由调用方选择哈希族。
-    pub(crate) fn hashed(family: HashFamily) -> Self {
+    pub fn hashed(family: HashFamily) -> Self {
         Self::with_layout(Layout::Hash {
             family,
             hash: K::stable_hash,
@@ -66,7 +66,7 @@ impl<K: StableKey, V: Clone> Map<K, V> {
     }
 
     /// `SmallMap[K, V, N]`：`limit` 是 comptime 提供的内联槽数。
-    pub(crate) fn small(limit: usize, family: HashFamily) -> Self {
+    pub fn small(limit: usize, family: HashFamily) -> Self {
         Self::with_layout(Layout::Small {
             limit,
             family,
@@ -77,7 +77,7 @@ impl<K: StableKey, V: Clone> Map<K, V> {
 
 impl<K: StableOrdKey, V: Clone> Map<K, V> {
     /// `BTreeMap`：按 `Ord + StableOrd` 排序。
-    pub(crate) fn ordered() -> Self {
+    pub fn ordered() -> Self {
         Self::with_layout(Layout::Ordered(K::cmp))
     }
 }
@@ -93,29 +93,29 @@ impl<K: Clone + Eq, V: Clone> Map<K, V> {
     }
 
     /// 两个句柄是否指向同一逻辑集合。
-    pub(crate) fn same_identity(&self, other: &Self) -> bool {
+    pub fn same_identity(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.state, &other.state)
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.state.borrow().backing.len()
     }
 
     /// 普通读取：返回 value 的语义副本。
-    pub(crate) fn get(&self, key: &K) -> Option<V> {
+    pub fn get(&self, key: &K) -> Option<V> {
         let state = self.state.borrow();
         state.find(key).map(|index| state.backing[index].1.clone())
     }
 
     /// key 存在时对 value 建立 `ScopedRead` view 并调用 callback。
-    pub(crate) fn with_ref<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
+    pub fn with_ref<R>(&self, key: &K, f: impl FnOnce(&V) -> R) -> Option<R> {
         let state = self.state.borrow();
         let index = state.find(key)?;
         Some(f(&state.backing[index].1))
     }
 
     /// 在一次共享结构访问中按实现当前顺序逐项调用 callback，不创建 snapshot。
-    pub(crate) fn for_each_ref(&self, mut f: impl FnMut(&K, &V)) {
+    pub fn for_each_ref(&self, mut f: impl FnMut(&K, &V)) {
         let state = self.state.borrow();
         for index in state.order() {
             let (key, value) = &state.backing[index];
@@ -124,7 +124,7 @@ impl<K: Clone + Eq, V: Clone> Map<K, V> {
     }
 
     /// 插入或替换；返回旧 value 的语义副本。
-    pub(crate) fn insert(&self, key: K, value: V) -> Result<Option<V>, CollectionFault> {
+    pub fn insert(&self, key: K, value: V) -> Result<Option<V>, CollectionFault> {
         let mut state = self.writable()?;
         let existing = state.find(&key);
         let backing = Rc::make_mut(&mut state.backing);
@@ -138,7 +138,7 @@ impl<K: Clone + Eq, V: Clone> Map<K, V> {
     }
 
     /// 删除；返回被删 value 的语义副本。
-    pub(crate) fn remove(&self, key: &K) -> Result<Option<V>, CollectionFault> {
+    pub fn remove(&self, key: &K) -> Result<Option<V>, CollectionFault> {
         let mut state = self.writable()?;
         let Some(index) = state.find(key) else {
             return Ok(None);
@@ -147,7 +147,7 @@ impl<K: Clone + Eq, V: Clone> Map<K, V> {
     }
 
     /// 键存在时调用一次 `f`，把当前 value 的语义副本交给它并用返回值替换槽。
-    pub(crate) fn update(&self, key: &K, f: impl FnOnce(V) -> V) -> Result<bool, CollectionFault> {
+    pub fn update(&self, key: &K, f: impl FnOnce(V) -> V) -> Result<bool, CollectionFault> {
         let mut state = self.writable()?;
         let Some(index) = state.find(key) else {
             return Ok(false);
@@ -159,7 +159,7 @@ impl<K: Clone + Eq, V: Clone> Map<K, V> {
     }
 
     /// 按键建立 Entry；只传入和返回语义副本。
-    pub(crate) fn entry(&self, key: K) -> Entry<K, V> {
+    pub fn entry(&self, key: K) -> Entry<K, V> {
         Entry {
             map: self.clone(),
             key,
@@ -167,7 +167,7 @@ impl<K: Clone + Eq, V: Clone> Map<K, V> {
     }
 
     /// 快照迭代：O(1) 封存 backing，之后任一别名的修改先分离。
-    pub(crate) fn iter(&self) -> MapIter<K, V> {
+    pub fn iter(&self) -> MapIter<K, V> {
         let state = self.state.borrow();
         MapIter {
             snapshot: Rc::clone(&state.backing),
@@ -176,12 +176,12 @@ impl<K: Clone + Eq, V: Clone> Map<K, V> {
     }
 
     /// backing 当前是否被快照封存。
-    pub(crate) fn is_sealed(&self) -> bool {
+    pub fn is_sealed(&self) -> bool {
         Rc::strong_count(&self.state.borrow().backing) > 1
     }
 
     /// SmallMap 是否仍在内联阶段。
-    pub(crate) fn is_inline(&self) -> bool {
+    pub fn is_inline(&self) -> bool {
         let state = self.state.borrow();
         matches!(state.layout, Layout::Small { limit, .. } if state.backing.len() <= limit)
     }
@@ -241,25 +241,25 @@ fn hash_bits(output: HashOutput) -> u128 {
 }
 
 /// `entry()` 结果：所有操作只传递语义副本。
-pub(crate) struct Entry<K, V> {
+pub struct Entry<K, V> {
     map: Map<K, V>,
     key: K,
 }
 
 impl<K: Clone + Eq, V: Clone> Entry<K, V> {
     /// 键存在时用副本调用 `f` 并替换槽。
-    pub(crate) fn and_modify(self, f: impl FnOnce(V) -> V) -> Result<Self, CollectionFault> {
+    pub fn and_modify(self, f: impl FnOnce(V) -> V) -> Result<Self, CollectionFault> {
         self.map.update(&self.key, f)?;
         Ok(self)
     }
 
     /// 键不存在时插入；返回槽内 value 的语义副本。
-    pub(crate) fn or_insert(self, value: V) -> Result<V, CollectionFault> {
+    pub fn or_insert(self, value: V) -> Result<V, CollectionFault> {
         self.or_insert_with(|| value)
     }
 
     /// 键不存在时才调用 `f` 插入；返回槽内 value 的语义副本。
-    pub(crate) fn or_insert_with(self, f: impl FnOnce() -> V) -> Result<V, CollectionFault> {
+    pub fn or_insert_with(self, f: impl FnOnce() -> V) -> Result<V, CollectionFault> {
         if let Some(existing) = self.map.get(&self.key) {
             return Ok(existing);
         }
@@ -270,7 +270,7 @@ impl<K: Clone + Eq, V: Clone> Entry<K, V> {
 }
 
 /// 创建时的快照迭代器；产生元素的语义副本。
-pub(crate) struct MapIter<K, V> {
+pub struct MapIter<K, V> {
     snapshot: Rc<Vec<(K, V)>>,
     order: std::vec::IntoIter<usize>,
 }
@@ -285,7 +285,7 @@ impl<K: Clone, V: Clone> Iterator for MapIter<K, V> {
 }
 
 /// Set 是键到 unit 的 Map；元素约束与对应 Map 的键约束相同。
-pub(crate) struct Set<T> {
+pub struct Set<T> {
     map: Map<T, ()>,
 }
 
@@ -298,7 +298,7 @@ impl<T> Clone for Set<T> {
 }
 
 impl<T: StableKey> Set<T> {
-    pub(crate) fn hashed(family: HashFamily) -> Self {
+    pub fn hashed(family: HashFamily) -> Self {
         Self {
             map: Map::hashed(family),
         }
@@ -306,7 +306,7 @@ impl<T: StableKey> Set<T> {
 }
 
 impl<T: StableOrdKey> Set<T> {
-    pub(crate) fn ordered() -> Self {
+    pub fn ordered() -> Self {
         Self {
             map: Map::ordered(),
         }
@@ -314,29 +314,29 @@ impl<T: StableOrdKey> Set<T> {
 }
 
 impl<T: Clone + Eq> Set<T> {
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.map.len()
     }
 
-    pub(crate) fn contains(&self, value: &T) -> bool {
+    pub fn contains(&self, value: &T) -> bool {
         self.map.get(value).is_some()
     }
 
     /// 新元素返回 true。
-    pub(crate) fn insert(&self, value: T) -> Result<bool, CollectionFault> {
+    pub fn insert(&self, value: T) -> Result<bool, CollectionFault> {
         Ok(self.map.insert(value, ())?.is_none())
     }
 
-    pub(crate) fn remove(&self, value: &T) -> Result<bool, CollectionFault> {
+    pub fn remove(&self, value: &T) -> Result<bool, CollectionFault> {
         Ok(self.map.remove(value)?.is_some())
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = T> {
+    pub fn iter(&self) -> impl Iterator<Item = T> {
         self.map.iter().map(|(value, ())| value)
     }
 
     /// 借用一次共享结构访问，按实现当前顺序访问元素。
-    pub(crate) fn for_each_ref(&self, mut f: impl FnMut(&T)) {
+    pub fn for_each_ref(&self, mut f: impl FnMut(&T)) {
         self.map.for_each_ref(|value, ()| f(value));
     }
 }

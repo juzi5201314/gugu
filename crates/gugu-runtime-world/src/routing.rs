@@ -15,7 +15,7 @@ use super::slab::{Epoch, OwnerToken, RawInvariant, RouteKey};
 
 /// maintenance 相位；名字与契约的 `ROUTING_MAINTENANCE_PHASES` 目录一致。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum MaintenancePhase {
+pub enum MaintenancePhase {
     /// 无切换进行中；publish 与 route step 的默认态。
     Idle,
     /// direct → radix：冻结 target cache，拒绝新的 direct staging。
@@ -34,7 +34,7 @@ pub(crate) enum MaintenancePhase {
 
 impl MaintenancePhase {
     /// 返回登记目录中的相位名。
-    pub(crate) const fn name(self) -> &'static str {
+    pub const fn name(self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::FreezeTargetCache => "freeze-target-cache",
@@ -49,7 +49,7 @@ impl MaintenancePhase {
 
 /// route step 对原始 target 的解析结果；由 world 用 owner directory 求值。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RouteResolution {
+pub enum RouteResolution {
     /// 目标 owner 匹配：batch 原样发布到该 owner 的 inbox。
     Deliver,
     /// 旧 epoch 转发：沿转发记录交给新 token。
@@ -60,7 +60,7 @@ pub(crate) enum RouteResolution {
 
 /// 一次 route step 交给 world 执行的动作。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RouteAction {
+pub enum RouteAction {
     /// 原样发布：chain 内 node 的 target 与 integrity 已经匹配 chain 的 target。
     Deliver(StagedChain),
     /// 终点改写：world 按 chain 的 target 重写 node 内容与 integrity 后发布，
@@ -85,22 +85,22 @@ struct ForwardRecord {
 
 /// 路由统计；字段顺序与契约的 `ROUTING_STATISTICS` 目录一致。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct RoutingStats {
+pub struct RoutingStats {
     /// 累计转发跳数。
-    pub(crate) remote_return_hops: u64,
+    pub remote_return_hops: u64,
     /// 进入 radix staging 的 batch 数。
-    pub(crate) radix_batches: u64,
+    pub radix_batches: u64,
     /// 完成的模式切换次数。
-    pub(crate) maintenance_switches: u64,
+    pub maintenance_switches: u64,
     /// 沿旧 topology 转发记录排空的 batch 数。
-    pub(crate) old_topology_drained_batches: u64,
+    pub old_topology_drained_batches: u64,
     /// 进入 domain injection 的 batch 数。
-    pub(crate) injection_fallbacks: u64,
+    pub injection_fallbacks: u64,
 }
 
 /// temporal radix fan-out 的执行平面。
 #[derive(Debug)]
-pub(crate) struct RoutingPlane {
+pub struct RoutingPlane {
     mode: RouteMode,
     maintenance: MaintenancePhase,
     maintenance_epoch: u64,
@@ -117,7 +117,7 @@ pub(crate) struct RoutingPlane {
 
 impl RoutingPlane {
     /// 由契约参数构建平面；direct 模式不分配 bucket 表。
-    pub(crate) fn new(
+    pub fn new(
         mode: RouteMode,
         level_count: u32,
         bucket_count: u32,
@@ -144,37 +144,37 @@ impl RoutingPlane {
     }
 
     /// 返回当前路由模式。
-    pub(crate) const fn mode(&self) -> RouteMode {
+    pub const fn mode(&self) -> RouteMode {
         self.mode
     }
 
     /// 返回当前 maintenance 相位。
-    pub(crate) const fn maintenance(&self) -> MaintenancePhase {
+    pub const fn maintenance(&self) -> MaintenancePhase {
         self.maintenance
     }
 
     /// 返回 maintenance epoch。
-    pub(crate) const fn maintenance_epoch(&self) -> u64 {
+    pub const fn maintenance_epoch(&self) -> u64 {
         self.maintenance_epoch
     }
 
     /// 返回 bucket 槽位总量；direct 模式为 0，即不分配 producer×owner 队列矩阵。
-    pub(crate) fn bucket_capacity(&self) -> usize {
+    pub fn bucket_capacity(&self) -> usize {
         self.buckets.len()
     }
 
     /// 返回统计快照。
-    pub(crate) const fn stats(&self) -> RoutingStats {
+    pub const fn stats(&self) -> RoutingStats {
         self.stats
     }
 
     /// 返回在飞转发记录数。
-    pub(crate) fn forwarding_count(&self) -> usize {
+    pub fn forwarding_count(&self) -> usize {
         self.forwardings.len()
     }
 
     /// 返回 radix staging 中未交付的字节数；direct 模式恒为 0。
-    pub(crate) fn pending_bytes(&self) -> u64 {
+    pub fn pending_bytes(&self) -> u64 {
         self.buckets
             .iter()
             .flat_map(|bucket| bucket.iter())
@@ -184,7 +184,7 @@ impl RoutingPlane {
     }
 
     /// 返回 radix staging 中的在飞 batch 数。
-    pub(crate) fn pending_batches(&self) -> u64 {
+    pub fn pending_batches(&self) -> u64 {
         let bucket_batches = self
             .buckets
             .iter()
@@ -194,12 +194,12 @@ impl RoutingPlane {
     }
 
     /// 返回发布是否被允许；maintenance 期间两种 mode 不得消费同一个 queue head。
-    pub(crate) const fn publish_allowed(&self) -> bool {
+    pub const fn publish_allowed(&self) -> bool {
         matches!(self.maintenance, MaintenancePhase::Idle)
     }
 
     /// 记录观测到的 owner directory topology epoch。
-    pub(crate) fn observe_topology(&mut self, epoch: Epoch) -> Result<(), RawInvariant> {
+    pub fn observe_topology(&mut self, epoch: Epoch) -> Result<(), RawInvariant> {
         if epoch < self.observed_topology_epoch {
             return Err(RawInvariant::new("routing 观测的 topology epoch 回退"));
         }
@@ -215,7 +215,7 @@ impl RoutingPlane {
     }
 
     /// 把一个 closed chain 放进 radix staging 的 level 0 bucket。
-    pub(crate) fn enqueue(&mut self, chain: StagedChain) -> Result<(), RawInvariant> {
+    pub fn enqueue(&mut self, chain: StagedChain) -> Result<(), RawInvariant> {
         if self.mode != RouteMode::Radix {
             return Err(RawInvariant::new("direct 模式不进入 radix staging"));
         }
@@ -238,7 +238,7 @@ impl RoutingPlane {
     /// 处理顺序固定：先交付在飞转发记录，再按 level 降序、bucket 槽位升序处理 bucket 内
     /// 的 FIFO 队列——终层先离开系统，随后才发生降层移动，因此每个 batch 每次调用恰好
     /// 前进一跳，同一输入得到同一份动作序列与统计。
-    pub(crate) fn route_step(
+    pub fn route_step(
         &mut self,
         resolve: &mut dyn FnMut(OwnerToken) -> Result<RouteResolution, RawInvariant>,
     ) -> Result<Vec<RouteAction>, RawInvariant> {
@@ -320,11 +320,7 @@ impl RoutingPlane {
     }
 
     /// 进入 maintenance：只在 idle 相位允许，且目标模式必须与当前不同。
-    pub(crate) fn begin_maintenance(
-        &mut self,
-        target: RouteMode,
-        epoch: u64,
-    ) -> Result<(), RawInvariant> {
+    pub fn begin_maintenance(&mut self, target: RouteMode, epoch: u64) -> Result<(), RawInvariant> {
         if self.maintenance != MaintenancePhase::Idle {
             return Err(RawInvariant::new("routing maintenance 已在进行中"));
         }
@@ -341,7 +337,7 @@ impl RoutingPlane {
     }
 
     /// 推进 maintenance 相位；每一步的前置条件由相位自身定义。
-    pub(crate) fn advance_maintenance(&mut self) -> Result<MaintenancePhase, RawInvariant> {
+    pub fn advance_maintenance(&mut self) -> Result<MaintenancePhase, RawInvariant> {
         let next = match (self.mode, self.maintenance) {
             (RouteMode::Direct, MaintenancePhase::FreezeTargetCache) => {
                 MaintenancePhase::FlushStaging

@@ -12,42 +12,42 @@
 use std::mem::{align_of, offset_of, size_of};
 
 /// 表头字节数：容量 + 已发布条数。
-pub(crate) const DYNAMIC_ROOT_TABLE_HEADER_BYTES: usize = 16;
+pub const DYNAMIC_ROOT_TABLE_HEADER_BYTES: usize = 16;
 /// 表头字段偏移。
-pub(crate) const DYNAMIC_ROOT_TABLE_CAPACITY_OFFSET: usize = 0;
-pub(crate) const DYNAMIC_ROOT_TABLE_COUNT_OFFSET: usize = 8;
+pub const DYNAMIC_ROOT_TABLE_CAPACITY_OFFSET: usize = 0;
+pub const DYNAMIC_ROOT_TABLE_COUNT_OFFSET: usize = 8;
 /// 单条记录字节数。
-pub(crate) const DYNAMIC_ROOT_RECORD_BYTES: usize = 48;
+pub const DYNAMIC_ROOT_RECORD_BYTES: usize = 48;
 /// 固定容量（条目数）。发布时表满是不变量错误，绝不静默丢弃已发布载荷。
-pub(crate) const DYNAMIC_ROOT_CAPACITY: usize = 256;
+pub const DYNAMIC_ROOT_CAPACITY: usize = 256;
 
 /// 记录内字段偏移。
-pub(crate) const DYNAMIC_ROOT_IDENTITY_OFFSET: usize = 0;
-pub(crate) const DYNAMIC_ROOT_SLOT_OFFSET: usize = 8;
-pub(crate) const DYNAMIC_ROOT_DESCRIPTOR_OFFSET: usize = 16;
-pub(crate) const DYNAMIC_ROOT_COUNT_OFFSET: usize = 24;
-pub(crate) const DYNAMIC_ROOT_KIND_OFFSET: usize = 32;
-pub(crate) const DYNAMIC_ROOT_FLAGS_OFFSET: usize = 40;
+pub const DYNAMIC_ROOT_IDENTITY_OFFSET: usize = 0;
+pub const DYNAMIC_ROOT_SLOT_OFFSET: usize = 8;
+pub const DYNAMIC_ROOT_DESCRIPTOR_OFFSET: usize = 16;
+pub const DYNAMIC_ROOT_COUNT_OFFSET: usize = 24;
+pub const DYNAMIC_ROOT_KIND_OFFSET: usize = 32;
+pub const DYNAMIC_ROOT_FLAGS_OFFSET: usize = 40;
 
 /// `flags` 位 0：载荷已完整初始化，可以进入根集合。
-pub(crate) const DYNAMIC_ROOT_FLAG_INITIALIZED: u64 = 1;
+pub const DYNAMIC_ROOT_FLAG_INITIALIZED: u64 = 1;
 
 /// 记录种类判别值。
 ///
 /// 每种载荷的 `descriptor` 按该种类的固定形态解释：`SPAWN_PAYLOAD` 与 `RESULT` 写 lane map。
 /// 后续类别（协程结果之外的 channel 槽、select 获胜项、Join 结果、active TurnRegion、消息、
 /// pin 记录）在各自生产者落地时按同一枚举追加判别值，在此之前不预登记空种类。
-pub(crate) const DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD: u64 = 0;
+pub const DYNAMIC_ROOT_KIND_SPAWN_PAYLOAD: u64 = 0;
 /// 已结束协程的结果字：载荷槽是冷记录里的结果槽，`count` 为 1，描述为 lane map。
-pub(crate) const DYNAMIC_ROOT_KIND_RESULT: u64 = 1;
+pub const DYNAMIC_ROOT_KIND_RESULT: u64 = 1;
 /// channel 环槽：载荷槽是环内的那条槽，描述是**元素类型的受管车道表地址**（表首字为条数，
 /// 其后每条是 `(偏移, lane map 编码)`），因为环里存的是任意类型的内联字节，车道偏移不固定。
-pub(crate) const DYNAMIC_ROOT_KIND_CHANNEL_SLOT: u64 = 2;
+pub const DYNAMIC_ROOT_KIND_CHANNEL_SLOT: u64 = 2;
 
 /// 一条动态根记录的机器布局。
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct DynamicRootRecordV1 {
+pub struct DynamicRootRecordV1 {
     /// 稳定身份：发布者的热记录地址（live coroutine），raw 控制地址本身不是根。
     pub identity: u64,
     /// 真实载荷槽地址；载荷由发布者自持、不可移动。
@@ -74,10 +74,9 @@ const _: () = {
 };
 
 /// 第 `index` 条记录相对表首的字节偏移。
-pub(crate) const fn dynamic_root_record_offset(index: usize) -> usize {
+pub const fn dynamic_root_record_offset(index: usize) -> usize {
     DYNAMIC_ROOT_TABLE_HEADER_BYTES + index * DYNAMIC_ROOT_RECORD_BYTES
 }
 
 /// 整表字节数（表头 + 全部记录），启动时一次性从 raw 区分配。
-pub(crate) const DYNAMIC_ROOT_TABLE_BYTES: usize =
-    dynamic_root_record_offset(DYNAMIC_ROOT_CAPACITY);
+pub const DYNAMIC_ROOT_TABLE_BYTES: usize = dynamic_root_record_offset(DYNAMIC_ROOT_CAPACITY);

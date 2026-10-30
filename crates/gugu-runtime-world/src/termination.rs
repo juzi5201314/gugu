@@ -11,27 +11,27 @@ use super::startup_schema::{ExitCategory, FatalKind, ReportEvent, ReportReason, 
 
 /// 一条待发布报告的描述；发布时才分配单调序号。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ReportSpec {
-    pub(crate) event: ReportEvent,
-    pub(crate) class: ExitCategory,
-    pub(crate) reason: ReportReason,
-    pub(crate) message: Option<String>,
-    pub(crate) location: Option<SourceLocation>,
+pub struct ReportSpec {
+    pub event: ReportEvent,
+    pub class: ExitCategory,
+    pub reason: ReportReason,
+    pub message: Option<String>,
+    pub location: Option<SourceLocation>,
     /// 报告 `exit_code` 字段：未处理 panic 事件按程序失败类别登记。
-    pub(crate) exit_code: i64,
+    pub exit_code: i64,
 }
 
 /// 终止计划与随计划发布的报告。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PlanWithReports {
-    pub(crate) plan: TerminationPlan,
-    pub(crate) panic_event: Option<ReportSpec>,
-    pub(crate) termination: Option<ReportSpec>,
+pub struct PlanWithReports {
+    pub plan: TerminationPlan,
+    pub panic_event: Option<ReportSpec>,
+    pub termination: Option<ReportSpec>,
 }
 
 /// 终止计划。
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct TerminationPlan {
+pub struct TerminationPlan {
     mode: TerminationMode,
     reason: Option<ReportReason>,
     admit_user_coroutines: bool,
@@ -44,52 +44,52 @@ pub(crate) struct TerminationPlan {
 
 impl TerminationPlan {
     /// 返回调度模式。
-    pub(crate) const fn mode(&self) -> TerminationMode {
+    pub const fn mode(&self) -> TerminationMode {
         self.mode
     }
 
     /// 返回计划的终止 reason；自然成功与显式退出没有失败记录。
-    pub(crate) const fn reason(&self) -> Option<ReportReason> {
+    pub const fn reason(&self) -> Option<ReportReason> {
         self.reason
     }
 
     /// 返回是否继续接纳新的用户协程；进入 `Terminating` 后一律关闭。
-    pub(crate) const fn admit_user_coroutines(&self) -> bool {
+    pub const fn admit_user_coroutines(&self) -> bool {
         self.admit_user_coroutines
     }
 
     /// 返回是否等待普通 foreign、`DirtyWaiting` 与执行中的 dirty work。
-    pub(crate) const fn wait_foreign(&self) -> bool {
+    pub const fn wait_foreign(&self) -> bool {
         self.wait_foreign
     }
 
     /// 返回报告冲刷下界。
-    pub(crate) const fn report_epoch(&self) -> u64 {
+    pub const fn report_epoch(&self) -> u64 {
         self.report_epoch
     }
 
     /// 返回逻辑退出类别。
-    pub(crate) const fn exit_category(&self) -> ExitCategory {
+    pub const fn exit_category(&self) -> ExitCategory {
         self.exit_category
     }
 
     /// 返回退出码。
-    pub(crate) const fn exit_code(&self) -> i64 {
+    pub const fn exit_code(&self) -> i64 {
         self.exit_code
     }
 
     /// 返回报告之后是否恢复宿主默认终止行为（硬件 fault）。
-    pub(crate) const fn host_default_after_report(&self) -> bool {
+    pub const fn host_default_after_report(&self) -> bool {
         self.host_default_after_report
     }
 
     /// 回填报告冲刷下界；由进程模型在发布终止报告后调用。
-    pub(crate) fn set_report_epoch(&mut self, flushed_reports: u64) {
+    pub fn set_report_epoch(&mut self, flushed_reports: u64) {
         self.report_epoch = flushed_reports;
     }
 
     /// 由字段构造计划；`report_epoch` 由进程模型在发布报告后回填。
-    pub(crate) fn new(
+    pub fn new(
         mode: TerminationMode,
         reason: Option<ReportReason>,
         wait_foreign: bool,
@@ -111,7 +111,7 @@ impl TerminationPlan {
 }
 
 /// 自然成功退出：等待全部用户协程与 dirty work，不发布终止报告。
-pub(crate) fn natural_success() -> PlanWithReports {
+pub fn natural_success() -> PlanWithReports {
     let plan = TerminationPlan::new(
         TerminationMode::Natural,
         None,
@@ -128,7 +128,7 @@ pub(crate) fn natural_success() -> PlanWithReports {
 }
 
 /// 带失败记录的自然退出：仍按自然规则等待，最后以程序失败类别退出。
-pub(crate) fn natural_failure(reason: ReportReason, message: Option<String>) -> PlanWithReports {
+pub fn natural_failure(reason: ReportReason, message: Option<String>) -> PlanWithReports {
     let plan = TerminationPlan::new(
         TerminationMode::Natural,
         Some(reason),
@@ -153,7 +153,7 @@ pub(crate) fn natural_failure(reason: ReportReason, message: Option<String>) -> 
 
 /// `main` panic：先发布 panic 事件，展开主协程 defer 后立即进入 `Terminating`；
 /// 其它协程不展开、不运行剩余 defer。
-pub(crate) fn main_panic(message: String, location: Option<SourceLocation>) -> PlanWithReports {
+pub fn main_panic(message: String, location: Option<SourceLocation>) -> PlanWithReports {
     let plan = TerminationPlan::new(
         TerminationMode::Immediate,
         Some(ReportReason::UnhandledPanic),
@@ -186,14 +186,14 @@ pub(crate) fn main_panic(message: String, location: Option<SourceLocation>) -> P
 /// 与 `natural_failure` 相同的计划，但不重复发布终止报告。
 ///
 /// `main` 返回 `Err` 时终止事件已经发布；之后的自然退出只沿用其类别与退出码。
-pub(crate) fn natural_failure_quiet(reason: ReportReason) -> PlanWithReports {
+pub fn natural_failure_quiet(reason: ReportReason) -> PlanWithReports {
     let mut with_reports = natural_failure(reason, None);
     with_reports.termination = None;
     with_reports
 }
 
 /// `std.process.exit(code)`：立即进入 `Terminating`，不等待、不运行剩余 defer。
-pub(crate) fn explicit_exit(code: i64) -> PlanWithReports {
+pub fn explicit_exit(code: i64) -> PlanWithReports {
     let plan = TerminationPlan::new(
         TerminationMode::ExplicitExit,
         None,
@@ -210,7 +210,7 @@ pub(crate) fn explicit_exit(code: i64) -> PlanWithReports {
 }
 
 /// fatal：发布终止报告后终止进程；不等待其它协程、不保证用户资源租约的 defer 清理。
-pub(crate) fn fatal(
+pub fn fatal(
     kind: FatalKind,
     message: String,
     location: Option<SourceLocation>,
@@ -238,10 +238,7 @@ pub(crate) fn fatal(
 }
 
 /// 未被订阅的普通终止信号：发布一条 signal 报告后恢复宿主默认动作。
-pub(crate) fn signal(
-    reason: ReportReason,
-    profile: PlatformProfile,
-) -> Result<PlanWithReports, String> {
+pub fn signal(reason: ReportReason, profile: PlatformProfile) -> Result<PlanWithReports, String> {
     let code = signal_exit_code(profile, reason)?;
     let plan = TerminationPlan::new(
         TerminationMode::Signal,
@@ -266,10 +263,7 @@ pub(crate) fn signal(
 }
 
 /// 解析信号类别的退出码：Linux 为 `128 + 信号号`，Windows 为登记的非零 status。
-pub(crate) fn signal_exit_code(
-    profile: PlatformProfile,
-    reason: ReportReason,
-) -> Result<i64, String> {
+pub fn signal_exit_code(profile: PlatformProfile, reason: ReportReason) -> Result<i64, String> {
     let signal = reason
         .signal()
         .ok_or_else(|| format!("reason `{}` 不是信号终止", reason.name()))?;

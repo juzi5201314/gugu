@@ -17,14 +17,14 @@ use super::slab::RawInvariant;
 
 /// 交给 native 之前必须 pin 的受管根。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ManagedRoot {
-    pub(crate) handle: u64,
-    pub(crate) pinned: bool,
+pub struct ManagedRoot {
+    pub handle: u64,
+    pub pinned: bool,
 }
 
 /// 调用点已经选定的交接模式。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BridgeMode {
+pub enum BridgeMode {
     /// 留在当前 processor 和协程栈上。
     Leaf,
     /// 可能阻塞，先取得 `BridgeCredit`。
@@ -35,7 +35,7 @@ pub(crate) enum BridgeMode {
 
 /// admission 的可观察结果。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum AdmitOutcome {
+pub enum AdmitOutcome {
     Leaf,
     Attached { credit: u64 },
     Waiting,
@@ -45,7 +45,7 @@ pub(crate) enum AdmitOutcome {
 
 /// native 返回后的恢复路径。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReturnPath {
+pub enum ReturnPath {
     Fast,
     IdleProcessor,
     Batch,
@@ -53,13 +53,13 @@ pub(crate) enum ReturnPath {
 
 /// poller 的目标族。两边都把完成事件收成同一条 ready 序列。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PollerFamily {
+pub enum PollerFamily {
     Linux,
     Windows,
 }
 
 impl PollerFamily {
-    pub(crate) const fn opcode(self) -> &'static str {
+    pub const fn opcode(self) -> &'static str {
         match self {
             Self::Linux => "epoll",
             Self::Windows => "iocp",
@@ -76,7 +76,7 @@ impl PollerFamily {
 
 /// 只有 socket 类操作进入 poller。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum IoClass {
+pub enum IoClass {
     Socket,
     RegularFile,
     ForeignCall,
@@ -84,7 +84,7 @@ pub(crate) enum IoClass {
 
 /// 已登记的外部线程。它不能直接碰协程或 GC metadata。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct ExternalThread {
+pub struct ExternalThread {
     id: u64,
 }
 
@@ -109,7 +109,7 @@ struct Poller {
 }
 
 /// 外调交接世界。逻辑时钟由调用方传入，测试不睡眠。
-pub(crate) struct ForeignWorld {
+pub struct ForeignWorld {
     table: CoroutineTable,
     next_credit: u64,
     active_blocking: u32,
@@ -131,7 +131,7 @@ pub(crate) struct ForeignWorld {
 }
 
 impl ForeignWorld {
-    pub(crate) fn new(parallelism: u64) -> Result<Self, RawInvariant> {
+    pub fn new(parallelism: u64) -> Result<Self, RawInvariant> {
         if parallelism == 0 {
             return Err(RawInvariant::new("调度并行度必须为正"));
         }
@@ -158,7 +158,7 @@ impl ForeignWorld {
         })
     }
 
-    pub(crate) fn spawn_running(&mut self) -> Result<CoroutineHandle, RawInvariant> {
+    pub fn spawn_running(&mut self) -> Result<CoroutineHandle, RawInvariant> {
         if self.idle_processors == 0 {
             return Err(RawInvariant::new("没有空闲 LogicalProcessor"));
         }
@@ -171,35 +171,35 @@ impl ForeignWorld {
         Ok(handle)
     }
 
-    pub(crate) const fn active_blocking(&self) -> u32 {
+    pub const fn active_blocking(&self) -> u32 {
         self.active_blocking
     }
 
-    pub(crate) fn waiting_len(&self) -> usize {
+    pub fn waiting_len(&self) -> usize {
         self.waiting.len()
     }
 
-    pub(crate) const fn dirty_active(&self) -> u64 {
+    pub const fn dirty_active(&self) -> u64 {
         self.dirty_active
     }
 
-    pub(crate) const fn leaf_error(&self) -> u64 {
+    pub const fn leaf_error(&self) -> u64 {
         self.leaf_error
     }
 
-    pub(crate) const fn captured_error(&self) -> u64 {
+    pub const fn captured_error(&self) -> u64 {
         self.captured_error
     }
 
-    pub(crate) const fn panic_abort(&self) -> bool {
+    pub const fn panic_abort(&self) -> bool {
         self.panic_abort
     }
 
-    pub(crate) const fn wake_managed(&self) -> bool {
+    pub const fn wake_managed(&self) -> bool {
         self.wake_managed
     }
 
-    pub(crate) fn set_parallelism(&mut self, parallelism: u64) -> Result<(), RawInvariant> {
+    pub fn set_parallelism(&mut self, parallelism: u64) -> Result<(), RawInvariant> {
         if parallelism == 0 {
             return Err(RawInvariant::new("调度并行度必须为正"));
         }
@@ -208,7 +208,7 @@ impl ForeignWorld {
         self.promote_dirty()
     }
 
-    pub(crate) fn admit(
+    pub fn admit(
         &mut self,
         handle: CoroutineHandle,
         mode: BridgeMode,
@@ -231,11 +231,11 @@ impl ForeignWorld {
         }
     }
 
-    pub(crate) fn capture_leaf_error(&mut self, errno: u64) {
+    pub fn capture_leaf_error(&mut self, errno: u64) {
         self.leaf_error = errno;
     }
 
-    pub(crate) fn complete(
+    pub fn complete(
         &mut self,
         handle: CoroutineHandle,
         errno: u64,
@@ -257,7 +257,7 @@ impl ForeignWorld {
         }
     }
 
-    pub(crate) fn arm_pressure(
+    pub fn arm_pressure(
         &mut self,
         handle: CoroutineHandle,
         now_us: u64,
@@ -285,7 +285,7 @@ impl ForeignWorld {
         Ok(())
     }
 
-    pub(crate) fn retake_pressure(
+    pub fn retake_pressure(
         &mut self,
         handle: CoroutineHandle,
         now_us: u64,
@@ -300,10 +300,7 @@ impl ForeignWorld {
         self.retake_immediate(handle)
     }
 
-    pub(crate) fn retake_immediate(
-        &mut self,
-        handle: CoroutineHandle,
-    ) -> Result<bool, RawInvariant> {
+    pub fn retake_immediate(&mut self, handle: CoroutineHandle) -> Result<bool, RawInvariant> {
         let (slot, _) = self.table.get_mut(handle)?;
         if slot.hot.retake_detached().is_err() {
             return Ok(false);
@@ -312,7 +309,7 @@ impl ForeignWorld {
         Ok(true)
     }
 
-    pub(crate) fn begin_callback(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
+    pub fn begin_callback(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
         let mode = self.bridge(handle)?.mode();
         if mode != ForeignBridgeState::ORDINARY {
             return Err(RawInvariant::new("不能从 leaf 或 dirty 回调 Gugu"));
@@ -325,7 +322,7 @@ impl ForeignWorld {
         Ok(())
     }
 
-    pub(crate) fn finish_callback(&mut self, panicked: bool) -> Result<(), RawInvariant> {
+    pub fn finish_callback(&mut self, panicked: bool) -> Result<(), RawInvariant> {
         if self.callback_depth == 0 {
             return Err(RawInvariant::new("没有进行中的回调"));
         }
@@ -336,7 +333,7 @@ impl ForeignWorld {
         Ok(())
     }
 
-    pub(crate) fn record_safepoint(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
+    pub fn record_safepoint(&mut self, handle: CoroutineHandle) -> Result<(), RawInvariant> {
         let live = self
             .live
             .iter_mut()
@@ -349,7 +346,7 @@ impl ForeignWorld {
         Ok(())
     }
 
-    pub(crate) fn safepoints(&self, handle: CoroutineHandle) -> u32 {
+    pub fn safepoints(&self, handle: CoroutineHandle) -> u32 {
         self.live
             .iter()
             .find(|live| live.handle == handle)
@@ -357,26 +354,26 @@ impl ForeignWorld {
             .unwrap_or(0)
     }
 
-    pub(crate) fn error_state(&self, handle: CoroutineHandle) -> Result<u64, RawInvariant> {
+    pub fn error_state(&self, handle: CoroutineHandle) -> Result<u64, RawInvariant> {
         Ok(self.bridge(handle)?.error_state())
     }
 
-    pub(crate) fn attach_external(&mut self) -> ExternalThread {
+    pub fn attach_external(&mut self) -> ExternalThread {
         self.next_external += 1;
         ExternalThread {
             id: self.next_external,
         }
     }
 
-    pub(crate) fn operate_coroutine(&self, thread: ExternalThread) -> Result<(), RawInvariant> {
+    pub fn operate_coroutine(&self, thread: ExternalThread) -> Result<(), RawInvariant> {
         self.reject_external(thread)
     }
 
-    pub(crate) fn operate_gc(&self, thread: ExternalThread) -> Result<(), RawInvariant> {
+    pub fn operate_gc(&self, thread: ExternalThread) -> Result<(), RawInvariant> {
         self.reject_external(thread)
     }
 
-    pub(crate) fn submit(
+    pub fn submit(
         &mut self,
         family: PollerFamily,
         class: IoClass,
@@ -393,11 +390,7 @@ impl ForeignWorld {
         }
     }
 
-    pub(crate) fn complete_io(
-        &mut self,
-        family: PollerFamily,
-        token: u64,
-    ) -> Result<(), RawInvariant> {
+    pub fn complete_io(&mut self, family: PollerFamily, token: u64) -> Result<(), RawInvariant> {
         let poller = &mut self.pollers[family.index()];
         let position = poller
             .pending
@@ -409,7 +402,7 @@ impl ForeignWorld {
         Ok(())
     }
 
-    pub(crate) fn ready(&self, family: PollerFamily) -> &[u64] {
+    pub fn ready(&self, family: PollerFamily) -> &[u64] {
         &self.pollers[family.index()].ready
     }
 
@@ -685,14 +678,11 @@ impl ForeignWorld {
         Ok(())
     }
 
-    pub(crate) fn lifecycle(
-        &self,
-        handle: CoroutineHandle,
-    ) -> Result<CoroutineState, RawInvariant> {
+    pub fn lifecycle(&self, handle: CoroutineHandle) -> Result<CoroutineState, RawInvariant> {
         Ok(self.table.get(handle)?.0.hot.lifecycle()?)
     }
 
-    pub(crate) fn detached(&self, handle: CoroutineHandle) -> Result<bool, RawInvariant> {
+    pub fn detached(&self, handle: CoroutineHandle) -> Result<bool, RawInvariant> {
         Ok(self.state_word(handle)? & FOREIGN_DETACHED != 0)
     }
 
