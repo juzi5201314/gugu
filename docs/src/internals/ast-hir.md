@@ -233,7 +233,7 @@ parser 必须满足：
 
 ## 声明、表达式与模式检查结果
 
-`frontend::bootstrap` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
+`gugu_gir::bootstrap_with` 在配置、定义收集和导入解析后调用唯一的 `semantics::check`。模型先形成声明签名和透明别名，body checker 再收集数值约束、检查位置和控制流、计算初始化状态与模式覆盖；布局计算消费同一份形成后的类型，不重新扫描 token 推断类型。
 
 版本化结果为 `CheckedSemantics`（schema 11），它在 TypeCheck query 中序列化，包含：
 

@@ -3128,26 +3128,6 @@ impl ImagePlan {
     }
 }
 
-impl frontend::FrontendOutput {
-    fn detail(&self) -> String {
-        match &self.path {
-            Some(path) => format!(
-                "{}，{} 个模块 / {} 字节，{} 个记号，{} 个 AST 项 / {} 个节点，{} 个定义 / {} 个导入，{} 个类型布局",
-                path.display(),
-                self.modules.len(),
-                self.source_len,
-                self.token_count,
-                self.item_count,
-                self.node_count,
-                self.names.definitions.len(),
-                self.names.imports.len(),
-                self.types.len(),
-            ),
-            None => "空模块".to_owned(),
-        }
-    }
-}
-
 #[cfg(test)]
 #[allow(unused_imports)]
 mod tests {

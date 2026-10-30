@@ -1,0 +1,28 @@
+[package]
+name = "gugu-gir"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu GIR layer: generic GIR, monomorphization, late comptime, whole-program analysis, placement and builtin prefix"
+
+[features]
+# 探针源是否进入 build-time artifact；决定测试装载哪一份物化产物，由 frontend 同名转发。
+runtime-gc-probes = []
+# 重负载/端到端用例的显式开关，由 frontend 同名转发。
+slow-tests = ["gugu-runtime-abi/slow-tests"]
+# 上层 crate 的测试复用 `bootstrap`、`testing` 与测试专用的语义表字段；只经 dev-dependency 打开。
+test-support = []
+
+[dependencies]
+blake3 = "1"
+bytes.workspace = true
+serde.workspace = true
+
+gugu-base = { path = "../gugu-base" }
+gugu-compiler-core = { path = "../gugu-compiler-core" }
+gugu-runtime-abi = { path = "../gugu-runtime-abi" }
+gugu-sema = { path = "../gugu-sema" }
+
+[dev-dependencies]
+gugu-project = { path = "../gugu-project" }
+gugu-runtime-abi = { path = "../gugu-runtime-abi", features = ["test-support"] }
+gugu-sema = { path = "../gugu-sema", features = ["test-support"] }

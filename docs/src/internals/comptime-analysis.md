@@ -107,7 +107,7 @@ registry 的规范摘要、条目 evaluator revision 和验证器 revision 都�
 重定位、运行时常量初始化和分支操作数消费；不得修改冻结 HIR/GIR，也不得触发新的前端或
 单态化 query。
 
-late 求值由 `frontend::late` 执行 `FreezeTypeUniverse`（query 25，schema 1）和
+late 求值由 `gugu_gir::late` 执行 `FreezeTypeUniverse`（query 25，schema 1）和
 `EvaluateLateComptime`（query 26，schema 1）。该步骤发生在 `LowerHir` 冻结之后、
 `mono::close` 与全程序分析之间，不再嵌在 `LowerHir` compute 内。
 `InstantiateGir` 和实例 world 的 schema 为 3，携带每实例具体类型记录与

@@ -87,7 +87,7 @@ fn empty_program_installs_like_a_fresh_derivation() {
 /// 泛型约束：接口 bound 驱动的实例化。
 #[test]
 fn bounded_generics_install_like_a_fresh_derivation() {
-    let source = include_str!("frontend/gir/fixtures/bounds.gg");
+    let source = include_str!("../../gugu-gir/src/gir/fixtures/bounds.gg");
     assert_numbering_stable("gir/bounds", || {
         CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
     });
@@ -96,7 +96,7 @@ fn bounded_generics_install_like_a_fresh_derivation() {
 /// 资源类型：字段布局与隐藏类型。
 #[test]
 fn resource_fields_install_like_a_fresh_derivation() {
-    let source = include_str!("frontend/gir/fixtures/resource_fields.gg");
+    let source = include_str!("../../gugu-gir/src/gir/fixtures/resource_fields.gg");
     assert_numbering_stable("gir/resource_fields", || {
         CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
     });

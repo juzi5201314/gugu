@@ -6,9 +6,9 @@ description = "Gugu compiler frontend: snapshots, semantics, frozen HIR/GIR and 
 
 [features]
 # 探针源是否进入 build-time artifact；由 façade 按同名开关转发。
-runtime-gc-probes = []
+runtime-gc-probes = ["gugu-gir/runtime-gc-probes"]
 # 重负载/端到端用例的显式开关：默认关闭，避免默认套件编译和执行完整编译 fixture。
-slow-tests = ["gugu-runtime-abi/slow-tests"]
+slow-tests = ["gugu-runtime-abi/slow-tests", "gugu-gir/slow-tests"]
 
 [dependencies]
 bytes.workspace = true
@@ -26,6 +26,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 gugu-base = { path = "../gugu-base" }
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-project = { path = "../gugu-project" }
+gugu-gir = { path = "../gugu-gir" }
 gugu-runtime-abi = { path = "../gugu-runtime-abi" }
 gugu-sema = { path = "../gugu-sema" }
 gugu-runtime-builder = { path = "../gugu-runtime-builder", optional = true }
@@ -34,3 +35,4 @@ gugu-runtime-builder = { path = "../gugu-runtime-builder", optional = true }
 tempfile = "3"
 gugu-runtime-abi = { path = "../gugu-runtime-abi", features = ["test-support"] }
 gugu-sema = { path = "../gugu-sema", features = ["test-support"] }
+gugu-gir = { path = "../gugu-gir", features = ["test-support"] }

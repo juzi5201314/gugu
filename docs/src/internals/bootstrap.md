@@ -150,15 +150,23 @@ crates/
 │   ├── src/sema_prefix.rs          内建块 sema 层物化表（names/identities/hir/early/checked）安装
 │   ├── src/string/fmt.rs           `std.fmt` 的 `Formatter` 参照模型，comptime 格式化共用
 │   └── src/hir/                    类型化 owner、侧表与冻结 verifier
+├── gugu-gir/                       GIR 层：只依赖 gugu-base、gugu-runtime-abi 与 gugu-sema，产物止于 GIR world
+│   ├── src/lib.rs                  Frontend action 入口 `bootstrap_with`：内建源安装、展开、derive_world、内建块派生
+│   ├── src/prefix.rs               内建块安装：核对 revision、委托 SemaPrefix、解码 GIR 层表
+│   ├── src/prebuild.rs             build-time 内建块物化与 cfg 独立性检查
+│   ├── src/pipeline.rs             冻结后 gir → mono → late → analysis → placement → summary
+│   ├── src/gir/                    generic/concrete GIR、pass 管线、placement 与 verifier
+│   ├── src/mono/                   单态化根、实例闭合、稳定类型键与公共摘要
+│   ├── src/late/                   冻结类型表与 late comptime
+│   ├── src/analysis/               全程序抽象分析与 SCC 摘要
+│   ├── src/gc.rs                   GC 元数据推导与两个镜像 section
+│   ├── src/contract/               HIR/GIR 与 runtime 契约的交叉视图：源记录、image 根需求与控制块布局校验
+│   └── src/testing.rs              测试用 build-time artifact provider（`test-support` 对上层开放）
 └── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/raw_model.rs            runtime raw 契约 query driver：注入 backend 片段并做跨层校验
-    ├── src/frontend/               GIR 层以上的管线编排；sema 模块再导出自 gugu-sema
-    │   ├── mod.rs                  Frontend action 入口：内建源安装、展开、derive_world
-    │   ├── prefix.rs               内建块安装：核对 revision、委托 SemaPrefix、解码 GIR 层表
-    │   ├── pipeline.rs             冻结后 gir → mono → late → analysis → placement → summary
-    │   ├── semantics_tests/        依赖整条管线的语义层回归
-    │   └── contract/               HIR/GIR 与 runtime 契约的交叉视图：源记录、image 根需求与控制块布局校验
+    ├── src/frontend/               sema 与 GIR 层模块的再导出，以及需要完整 Compiler 的前端回归
+    │   └── semantics_tests/        依赖整条管线的语义层回归
     ├── src/backend.rs              目标相关的内存 image plan 输入
     ├── src/backend/x64/fragments.rs 登记机器片段编码与协程片段逐字节比对
     ├── src/backend/x64/glue.rs     runtime glue 绑定、闭世界 glue 目录与 op 隐含 glue
@@ -186,7 +194,7 @@ crates/
 
 模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与尚未迁走的参照模型（raw 平面、资源租约、owner-directed return、rt0 启动/终止/报告）。channel、Join、select 与 `std.sync` 的执行在镜像内 Gugu 源；Rust 侧只留 schema、布局和非法序拒绝。
 
-所有库 crate（`gugu-base`、`gugu-project`、`gugu-runtime-abi`、`gugu-sema`、`gugu-frontend`、`gugu-compiler`）都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
+所有库 crate（`gugu-base`、`gugu-project`、`gugu-runtime-abi`、`gugu-sema`、`gugu-gir`、`gugu-frontend`、`gugu-compiler`）都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
 
 ### 编译器测试构建
 

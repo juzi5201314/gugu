@@ -338,6 +338,7 @@ dependencies = [
  "foldhash",
  "gugu-base",
  "gugu-compiler-core",
+ "gugu-gir",
  "gugu-project",
  "gugu-runtime-abi",
  "gugu-runtime-builder",
@@ -351,6 +352,20 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
  "xxhash-rust",
+]
+
+[[package]]
+name = "gugu-gir"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "bytes",
+ "gugu-base",
+ "gugu-compiler-core",
+ "gugu-project",
+ "gugu-runtime-abi",
+ "gugu-sema",
+ "serde",
 ]
 
 [[package]]
