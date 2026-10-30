@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/gugu-backend",
     "crates/gugu-base",
     "crates/gugu-cli",
     "crates/gugu-compiler",

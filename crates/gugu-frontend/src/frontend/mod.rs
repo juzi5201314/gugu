@@ -2,9 +2,11 @@
 //!
 //! 这里只保留需要完整 `Compiler` 的前端回归；只依赖 GIR 层输入的测试留在 `gugu-gir`。
 
+#[cfg(all(test, feature = "slow-tests"))]
+pub(crate) use gugu_gir::semantics;
 pub(crate) use gugu_gir::{
     FrontendOutput, PrefixMode, SourceInput, analysis, bootstrap_with, cfg, contract, format, gc,
-    gir, hir, late, mono, prebuild, semantics,
+    gir, hir, mono, prebuild,
 };
 #[cfg(test)]
 pub(crate) use gugu_gir::{ast, bootstrap, installs_builtin_source, source_map_span};

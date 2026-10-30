@@ -1,41 +1,16 @@
-//! x86_64 指令表示、描述符表、编码器与 instruction verifier。
-//!
-//! 表是单一事实来源：编码器只写表内形式，verifier 按目标 `cpu_baseline` 拒绝超出
-//! 可接受面的形式；lowering 与 codegen 在后续模块接入。
+//! `gugu_backend::x64` 的再导出，以及需要完整 `Compiler` 的 x64 验收 harness 与回归。
 
-pub(crate) mod abi;
-pub(crate) mod alloc;
+pub(crate) use gugu_backend::x64::*;
+
 #[cfg(test)]
 mod alloc_tests;
-pub(crate) mod codegen;
-pub(crate) mod contract;
-pub(crate) mod copies;
-pub(crate) mod elf;
 #[cfg(test)]
 mod elf_tests;
-pub(crate) mod encode;
-pub(crate) mod fragments;
-pub(crate) mod glue;
 pub(crate) mod harness;
 mod harness_cases;
-pub(crate) mod inst;
-pub(crate) mod layout;
-pub(crate) mod lower;
-pub(crate) mod mangle;
-pub(crate) mod metadata;
 #[cfg(test)]
 mod metadata_tests;
-pub(crate) mod oracle;
-pub(crate) mod pe;
 #[cfg(test)]
 mod pe_tests;
-pub(crate) mod reg;
-mod rows;
-pub(crate) mod select;
-#[cfg(test)]
-mod select_tests;
-pub(crate) mod table;
 #[cfg(test)]
 mod tests;
-pub(crate) mod unwind;
-pub(crate) mod verify;

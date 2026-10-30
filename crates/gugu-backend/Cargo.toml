@@ -1,0 +1,19 @@
+[package]
+name = "gugu-backend"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu x86_64 backend: lowering, register allocation, encoding, metadata sections and ELF/PE image writing"
+
+[features]
+# 上层 crate 的白盒测试复用编码长度、表查询与链接布局等测试专用入口；只经 dev-dependency 打开。
+test-support = []
+
+[dependencies]
+blake3 = "1"
+foldhash = "0.2"
+serde.workspace = true
+
+gugu-base = { path = "../gugu-base" }
+gugu-gir = { path = "../gugu-gir" }
+gugu-lir = { path = "../gugu-lir" }
+gugu-runtime-abi = { path = "../gugu-runtime-abi" }

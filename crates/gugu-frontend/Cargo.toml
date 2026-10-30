@@ -23,6 +23,7 @@ unicode-normalization = "0.1.25"
 unicode-segmentation = "1.13.3"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
+gugu-backend = { path = "../gugu-backend" }
 gugu-base = { path = "../gugu-base" }
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-project = { path = "../gugu-project" }
@@ -34,6 +35,7 @@ gugu-runtime-builder = { path = "../gugu-runtime-builder", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+gugu-backend = { path = "../gugu-backend", features = ["test-support"] }
 gugu-runtime-abi = { path = "../gugu-runtime-abi", features = ["test-support"] }
 gugu-sema = { path = "../gugu-sema", features = ["test-support"] }
 gugu-gir = { path = "../gugu-gir", features = ["test-support"] }

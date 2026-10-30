@@ -290,6 +290,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "gugu-backend"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "foldhash",
+ "gugu-base",
+ "gugu-gir",
+ "gugu-lir",
+ "gugu-runtime-abi",
+ "serde",
+]
+
+[[package]]
 name = "gugu-base"
 version = "0.1.0"
 dependencies = [
@@ -336,6 +349,7 @@ dependencies = [
  "blake3",
  "bytes",
  "foldhash",
+ "gugu-backend",
  "gugu-base",
  "gugu-compiler-core",
  "gugu-gir",
