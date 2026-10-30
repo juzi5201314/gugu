@@ -13,17 +13,38 @@ use crate::lir::body::{
     BlockId, Body, CallTarget, Condition, IntOp, Op, Origin, PollSummary, Provenance,
     SafepointKind, Type, ValueId, ValueType, range,
 };
+use crate::lir::target::TargetOracle;
 use crate::lir::{invalid, verify};
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 
-/// 每个实例的 (摘要, 是否 poll-free 叶)。
-type CalleeInfo = BTreeMap<[u8; 32], (PollSummary, bool)>;
+/// 每个实例的 (摘要, 是否 poll-free 叶)，以及给出机器 op 成本的目标 oracle。
+struct CalleeInfo<'t> {
+    summaries: BTreeMap<[u8; 32], (PollSummary, bool)>,
+    target: &'t dyn TargetOracle,
+}
+
+impl<'t> CalleeInfo<'t> {
+    fn new(target: &'t dyn TargetOracle) -> Self {
+        Self {
+            summaries: BTreeMap::new(),
+            target,
+        }
+    }
+
+    fn get(&self, key: &[u8; 32]) -> Option<&(PollSummary, bool)> {
+        self.summaries.get(key)
+    }
+
+    fn insert(&mut self, key: [u8; 32], value: (PollSummary, bool)) {
+        self.summaries.insert(key, value);
+    }
+}
 
 pub(crate) fn run_world(
     bodies: &mut Vec<Body>,
     module: &hir::Module,
-    _profile: &crate::BackendCostProfile,
+    target: &dyn TargetOracle,
 ) -> Result<(), Diagnostic> {
     let index: BTreeMap<[u8; 32], usize> = bodies
         .iter()
@@ -44,7 +65,7 @@ pub(crate) fn run_world(
     let recursive: Vec<bool> = (0..bodies.len())
         .map(|body| callees[body].contains(&body) || components[component_of[body]].len() > 1)
         .collect();
-    let mut info: CalleeInfo = BTreeMap::new();
+    let mut info = CalleeInfo::new(target);
     for component in &components {
         loop {
             let mut changed = false;
@@ -83,7 +104,7 @@ pub(crate) fn run_world(
         let (summary, _) = analyze(&body, &info, recursive_body);
         body.poll_summary = summary;
         if changed {
-            verify::verify(&body, module)?;
+            verify::verify(&body, module, target)?;
         }
         rebuilt.push(body);
     }
@@ -226,10 +247,10 @@ pub(crate) fn has_linear_leaf_shape(body: &Body) -> bool {
         })
 }
 
-fn linear_leaf_cost(body: &Body) -> u32 {
+fn linear_leaf_cost(body: &Body, target: &dyn TargetOracle) -> u32 {
     body.instructions
         .iter()
-        .map(|instruction| instruction.op.poll_cost_with(&body.assembly))
+        .map(|instruction| instruction.op.poll_cost_with(&body.assembly, target))
         .fold(0_u32, |cost, step| {
             cost.saturating_add(step).min(POLL_BUDGET.saturating_add(1))
         })
@@ -293,7 +314,7 @@ fn op_flow(op: &Op, assembly: &[hir::Assembly], info: &CalleeInfo) -> (bool, u32
     }
     (
         op.poll_cut_point_with(assembly),
-        op.poll_cost_with(assembly),
+        op.poll_cost_with(assembly, info.target),
     )
 }
 
@@ -357,8 +378,8 @@ fn body_successors(body: &Body, block: BlockId) -> Vec<BlockId> {
 }
 
 /// 从 body 自身的 `poll_free_leaf` 标记构造叶信息（叶成本未知按 0 计）。
-fn leaf_flags(body: &Body) -> CalleeInfo {
-    let mut info = CalleeInfo::new();
+fn leaf_flags<'t>(body: &Body, target: &'t dyn TargetOracle) -> CalleeInfo<'t> {
+    let mut info = CalleeInfo::new(target);
     let mut record = |call: &crate::lir::body::Call| {
         if call.poll_free_leaf
             && let CallTarget::Instance(key) = call.target
@@ -383,13 +404,13 @@ fn leaf_flags(body: &Body) -> CalleeInfo {
 }
 
 /// verifier 与分类器共享一份只读 CFG/循环摘要。
-pub(crate) fn body_flow(body: &Body) -> (u32, Option<BlockId>) {
-    body_flow_with(body, &leaf_flags(body))
+pub(crate) fn body_flow(body: &Body, target: &dyn TargetOracle) -> (u32, Option<BlockId>) {
+    body_flow_with(body, &leaf_flags(body, target))
 }
 
 fn body_flow_with(body: &Body, info: &CalleeInfo) -> (u32, Option<BlockId>) {
     if has_linear_leaf_shape(body) {
-        return (linear_leaf_cost(body), None);
+        return (linear_leaf_cost(body, info.target), None);
     }
     let view = Editor::graph_view(body);
     let bounded = bounded_back_edges(&view, info);
@@ -398,18 +419,18 @@ fn body_flow_with(body: &Body, info: &CalleeInfo) -> (u32, Option<BlockId>) {
 }
 
 #[cfg(test)]
-pub(crate) fn body_poll_free_cost(body: &Body) -> u32 {
-    body_flow(body).0
+pub(crate) fn body_poll_free_cost(body: &Body, target: &dyn TargetOracle) -> u32 {
+    body_flow(body, target).0
 }
 
 #[cfg(test)]
-pub(crate) fn body_clean_cycle(body: &Body) -> Option<BlockId> {
-    body_flow(body).1
+pub(crate) fn body_clean_cycle(body: &Body, target: &dyn TargetOracle) -> Option<BlockId> {
+    body_flow(body, target).1
 }
 
 #[cfg(test)]
-pub(crate) fn generic_body_flow(body: &Body) -> (u32, Option<BlockId>) {
-    let info = leaf_flags(body);
+pub(crate) fn generic_body_flow(body: &Body, target: &dyn TargetOracle) -> (u32, Option<BlockId>) {
+    let info = leaf_flags(body, target);
     let view = Editor::graph_view(body);
     let bounded = bounded_back_edges(&view, &info);
     (
@@ -1024,10 +1045,10 @@ fn strip_mine(
         condition: Condition::Lt,
         signed: counted.signed,
     }
-    .poll_cost_with(&editor.assembly);
+    .poll_cost_with(&editor.assembly, info.target);
     // 外层 header 自身还要执行 `iv + stride` 与边界比较；strip 后内层循环的 preheader 就是它，
     // 因此这两条指令的成本也属于内层的入口成本（否则内层总成本会越过预算并被再次插点）。
-    let stride_cost = Op::Integer(IntOp::Add).poll_cost_with(&editor.assembly);
+    let stride_cost = Op::Integer(IntOp::Add).poll_cost_with(&editor.assembly, info.target);
     let entry = entry_cost(editor, natural, info)
         .saturating_add(stride_cost)
         .saturating_add(boundary);

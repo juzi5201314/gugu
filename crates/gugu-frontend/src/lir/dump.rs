@@ -1,10 +1,11 @@
 use super::{
     World,
     body::{Definition, Op, Terminator, range},
+    target::TargetOracle,
 };
 use std::fmt::Write;
 
-pub(super) fn world(world: &World) -> String {
+pub(super) fn world(world: &World, oracle: &dyn TargetOracle) -> String {
     let mut output = String::new();
     writeln!(
         output,
@@ -90,7 +91,7 @@ pub(super) fn world(world: &World) -> String {
                 write!(
                     output,
                     " poll-cost={}",
-                    instruction.op.poll_cost_with(&body.assembly)
+                    instruction.op.poll_cost_with(&body.assembly, oracle)
                 )
                 .expect("写入 String");
                 writeln!(

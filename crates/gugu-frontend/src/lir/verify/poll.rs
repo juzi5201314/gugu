@@ -4,8 +4,13 @@ use crate::Diagnostic;
 use crate::lir::body::{Body, Op, range};
 use crate::lir::pass::policy::POLL_BUDGET;
 use crate::lir::pass::poll;
+use crate::lir::target::TargetOracle;
 
-pub(super) fn verify(body: &Body, _graph: &Graph) -> Result<(), Diagnostic> {
+pub(super) fn verify(
+    body: &Body,
+    _graph: &Graph,
+    target: &dyn TargetOracle,
+) -> Result<(), Diagnostic> {
     let entry_stack_check = range(&body.blocks[body.entry.index()].instructions)
         .any(|index| matches!(body.instructions[index].op, Op::StackCheck));
     if body.poll_summary.entry_stack_check != entry_stack_check {
@@ -14,7 +19,7 @@ pub(super) fn verify(body: &Body, _graph: &Graph) -> Result<(), Diagnostic> {
     if body.poll_summary.poll_free_cost > POLL_BUDGET {
         return Err(invalid("poll 摘要记录了超过预算的 poll-free 路径"));
     }
-    let (cost, cycle) = poll::body_flow(body);
+    let (cost, cycle) = poll::body_flow(body, target);
     if cost > POLL_BUDGET {
         return Err(invalid("存在超过 poll 预算的 poll-free 路径"));
     }

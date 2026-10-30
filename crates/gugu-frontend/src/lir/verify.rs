@@ -13,12 +13,17 @@ use super::body::{
 };
 use super::pass::graph::Graph;
 use super::{invalid, invalid_raw};
+use crate::lir::target::TargetOracle;
 use crate::{Diagnostic, frontend::hir};
 use std::ops::Range;
 
-pub(crate) fn verify(body: &Body, module: &hir::Module) -> Result<(), Diagnostic> {
+pub(crate) fn verify(
+    body: &Body,
+    module: &hir::Module,
+    target: &dyn TargetOracle,
+) -> Result<(), Diagnostic> {
     let graph = verify_structure_with(body, module, regions::Mode::Complete)?;
-    poll::verify(body, &graph)
+    poll::verify(body, &graph, target)
 }
 
 /// 结构不变量；poll 预算与 region 屏障预留由 [`verify`] 在固定管线结束后追加检查。

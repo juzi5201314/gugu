@@ -13,6 +13,7 @@ mod pass;
 )]
 pub(crate) mod root_init;
 pub(crate) mod stackmap;
+pub(crate) mod target;
 mod uses;
 mod verify;
 
@@ -603,8 +604,12 @@ impl Validated {
         }
         *hash.finalize().as_bytes()
     }
-    pub(crate) fn dump(&self) -> String {
-        dump::world(&self.world)
+    /// LIR world 的目标；world 只由已登记目标构造。
+    pub(crate) fn target(&self) -> crate::TargetName {
+        crate::TargetName::parse(&self.world.target).expect("LIR world 目标已登记")
+    }
+    pub(crate) fn dump(&self, oracle: &dyn target::TargetOracle) -> String {
+        dump::world(&self.world, oracle)
     }
     /// 固定管线 revision。
     pub(crate) fn optimization_revision(&self) -> u32 {
@@ -621,18 +626,22 @@ pub(crate) fn optimization_policy_bytes() -> Vec<u8> {
     pass::policy::OptimizationPolicyV1::default().canonical_bytes()
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "LIR 构建需要冻结 HIR、GIR/mono world、目标、压缩策略、目标 oracle、query 与源码表"
+)]
 pub(crate) fn build(
     hir: &hir::Validated,
     gir: &gir::GirWorldV1,
     mono: &mono::MonoWorldV1,
     target: crate::TargetName,
     compression: crate::runtime::CompressionPolicyV1,
+    oracle: &dyn target::TargetOracle,
     queries: &QueryEngine,
     sources: &crate::SourceMap,
 ) -> Result<Validated, Vec<Diagnostic>> {
     let descriptor = target.descriptor();
     let profile = descriptor.cost_profile;
-    let baseline = descriptor.cpu_baseline;
     let target = target.to_string();
     let mut hash = blake3::Hasher::new_derive_key("gugu-lir-input-v1");
     hash.update(&hir.fingerprint());
@@ -718,9 +727,9 @@ pub(crate) fn build(
         bodies.push(body);
     }
     function_adapter::materialize(&mut bodies, hir.module()).map_err(|error| vec![error])?;
-    pass::optimize_world(&mut bodies, hir.module(), &profile, baseline)?;
+    pass::optimize_world(&mut bodies, hir.module(), &profile, oracle)?;
     for body in &bodies {
-        verify::verify(body, hir.module()).map_err(|error| vec![error])?;
+        verify::verify(body, hir.module(), oracle).map_err(|error| vec![error])?;
     }
     let mut world = World {
         schema: SCHEMA,

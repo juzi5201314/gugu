@@ -1,16 +1,13 @@
-//! 目标 ABI 形态校验与 x86_64 legalization 边界。
+//! 目标 ABI 形态校验与目标 legalization 边界。
 //!
-//! 本阶段这两个 pass 只做显式校验，不改写语义；真正的寄存器分配与指令选择
-//! 由后端阶段在同一位置提供。
+//! 本阶段这两个 pass 只做显式校验，不改写语义；机器序列由注入的 [`TargetOracle`] 提供，
+//! 真正的寄存器分配与指令选择由后端阶段在同一位置提供。
 use super::rewrite::{Editor, Term};
 use crate::Diagnostic;
-use crate::backend::x64::lower::{self, SiteValue};
-use crate::backend::x64::reg::Reg;
-use crate::backend::x64::verify;
 use crate::frontend::gir::body::CallKind;
-use crate::lir::body::{Call, Lane, Op, Type, ValueId};
+use crate::lir::body::{Call, Op, Type};
 use crate::lir::invalid;
-use crate::target::CpuBaseline;
+use crate::lir::target::TargetOracle;
 
 pub(crate) fn lower_target_abi(editor: &mut Editor) -> Result<bool, Diagnostic> {
     for block in editor.live_blocks() {
@@ -59,14 +56,15 @@ fn check_call(call: &Call, editor: &Editor) -> Result<(), Diagnostic> {
     Ok(())
 }
 
-/// 目标 legalization：x86_64 的数值、向量、原子与压缩解码指令必须存在基线机器序列。
+/// 目标 legalization：数值、向量、原子与压缩解码指令必须存在基线机器序列。
 ///
-/// 门禁与 codegen 同源：用虚拟寄存器试 lower 一次并跑 instruction verifier，任何
-/// `Unsupported` 或非法序列都在这里变成 `E0057`，而不是留到片段生成阶段。
+/// 门禁与 codegen 同源：由目标 oracle 用虚拟寄存器试 lower 一次并跑 instruction verifier，
+/// 任何缺失或非法序列都在这里变成 `E0057`，而不是留到片段生成阶段。
 pub(crate) fn legalize_x86_64(
     editor: &mut Editor,
-    baseline: CpuBaseline,
+    target: &dyn TargetOracle,
 ) -> Result<bool, Diagnostic> {
+    let kind = |value| editor.kind(value);
     for block in editor.live_blocks() {
         for index in 0..editor.instruction_count(block) {
             let instruction = editor.instruction((block, index));
@@ -79,47 +77,16 @@ pub(crate) fn legalize_x86_64(
                     return Err(invalid("V128 不允许携带指针 provenance"));
                 }
             }
-            let op = lower::domain(&instruction.op);
-            if let Op::Vector(vector) = &instruction.op
-                && let Some(lane) = vector_lane(editor, &instruction.results)
-                && !lower::supports_vector(*vector, lane)
-            {
-                return Err(invalid(&format!(
-                    "目标 legalization 缺少机器序列: Vector::{vector:?}（lane {lane:?}）"
-                )));
-            }
-            let operands = site_values(editor, &instruction.arguments);
-            let results = site_values(editor, &instruction.results);
-            let lowered = lower::lower(&instruction.op, &operands, &results, &instruction.source)
-                .map_err(|error| {
-                invalid(&format!("目标 legalization 缺少机器序列: {op}（{error}）"))
-            })?;
-            verify::verify_sequence(&lowered.sequence, baseline).map_err(|error| {
-                invalid(&format!("目标 legalization 的 {op} 序列非法: {error}"))
-            })?;
+            target
+                .legalize(
+                    &instruction.op,
+                    &instruction.arguments,
+                    &instruction.results,
+                    &kind,
+                    &instruction.source,
+                )
+                .map_err(|error| invalid(&error.to_string()))?;
         }
     }
     Ok(false)
-}
-
-/// 站点的操作数表示：虚拟寄存器编号 = 值编号。
-fn site_values(editor: &Editor, values: &[ValueId]) -> Vec<SiteValue> {
-    values
-        .iter()
-        .map(|value| SiteValue {
-            ty: editor.kind(*value),
-            reg: Reg::Virtual(value.0),
-        })
-        .collect()
-}
-
-/// 向量结果类型的 lane；非 `V128` 结果返回 `None`。
-fn vector_lane(editor: &Editor, results: &[ValueId]) -> Option<Lane> {
-    let [result] = results else {
-        return None;
-    };
-    match editor.kind(*result).ty {
-        Type::V128(lane) => Some(lane),
-        _ => None,
-    }
 }

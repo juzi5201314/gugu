@@ -15,6 +15,10 @@ use crate::frontend::gir::placement::PlacementKind;
 use crate::{Compilation, CompileRequest, Compiler, DiagnosticCode, TargetName};
 use std::num::NonZeroU32;
 
+/// 测试用目标 oracle：与 driver 注入的同一 x86_64 实现。
+const ORACLE: crate::backend::x64::oracle::X64Oracle =
+    crate::backend::x64::oracle::X64Oracle::new(crate::target::CpuBaseline::X86_64V1);
+
 #[test]
 fn strength_reduction_constants_dominate_machine_order() {
     let compilation = compile(include_str!("fixtures/constant_dominance.gg"));
@@ -35,7 +39,10 @@ fn poll_linear_leaf_matches_generic_and_rejects_calls_and_loops() {
         compile("#[used] fn pure() int { 7 }\n#[used] fn spin() { loop {} }\nfn main() { }");
     let body = named(&compilation, "pure");
     assert!(poll::has_linear_leaf_shape(body));
-    assert_eq!(poll::body_flow(body), poll::generic_body_flow(body));
+    assert_eq!(
+        poll::body_flow(body, &ORACLE),
+        poll::generic_body_flow(body, &ORACLE)
+    );
     let mut called = body.clone();
     called.instructions[0].op = Op::Call(body::Call {
         target: body::CallTarget::Runtime(body::RuntimeCall::Yield),
@@ -347,7 +354,7 @@ fn named<'a>(compilation: &'a Compilation, name: &str) -> &'a Body {
 }
 fn rejected(compilation: &Compilation, mut body: Body) {
     super::uses::rebuild(&mut body);
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("非法 LIR 必须在后端前失败");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
@@ -355,7 +362,7 @@ fn rejected(compilation: &Compilation, mut body: Body) {
 /// 断言非法 LIR 在 runtime raw 平面契约上被拒绝。
 fn rejected_raw(compilation: &Compilation, mut body: Body) {
     super::uses::rebuild(&mut body);
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("非法 publish 区域必须在后端前失败");
     assert_eq!(
         error.code(),
@@ -1129,12 +1136,16 @@ fn pipeline_preserves_observable_effects() {
         &mut bodies,
         compilation.hir.as_ref().unwrap().module(),
         &crate::target::baseline_cost_profile(),
-        crate::target::CpuBaseline::X86_64V1,
+        &ORACLE,
     )
     .expect("固定管线必须通过每个 pass 后的结构 verifier");
     assert_eq!(effect_signature(&bodies[0]), before);
-    verify::verify(&bodies[0], compilation.hir.as_ref().unwrap().module())
-        .expect("优化后的 LIR 必须通过结构 verifier");
+    verify::verify(
+        &bodies[0],
+        compilation.hir.as_ref().unwrap().module(),
+        &ORACLE,
+    )
+    .expect("优化后的 LIR 必须通过结构 verifier");
 }
 
 #[test]
@@ -1178,7 +1189,7 @@ fn infinite_loop_gets_budgeted_poll() {
             .any(|instruction| matches!(instruction.op, Op::SafepointPoll { .. })),
         "无限循环必须被 poll 切断"
     );
-    assert!(poll::body_clean_cycle(body).is_none());
+    assert!(poll::body_clean_cycle(body, &ORACLE).is_none());
     assert!(!body.poll_summary.has_poll_free_cycle);
 }
 
@@ -1198,8 +1209,8 @@ fn counted_loop_strip_mining_has_poll_free_inner_loop() {
             interval: NonZeroU32::new(1).expect("interval 非零"),
         }
     );
-    assert!(poll::body_clean_cycle(body).is_none());
-    assert!(poll::body_poll_free_cost(body) <= POLL_BUDGET);
+    assert!(poll::body_clean_cycle(body, &ORACLE).is_none());
+    assert!(poll::body_poll_free_cost(body, &ORACLE) <= POLL_BUDGET);
 }
 
 #[test]
@@ -1260,7 +1271,7 @@ fn root_init_events_track_pointer_fields_only() {
         "整值写入必须为两个根字置位：{events:?}"
     );
     // 事件的位置必须落在所属块的指令范围内（verifier 与重写 pass 共用同一约束）。
-    super::verify::verify(body, module).expect("逐根初始化记录必须通过 verifier");
+    super::verify::verify(body, module, &ORACLE).expect("逐根初始化记录必须通过 verifier");
     assert!(
         body.root_inits
             .iter()
@@ -1401,7 +1412,7 @@ fn verifier_rejects_over_budget_poll_free_path() {
     editor.remove_instruction(poll_site).expect("删除 poll");
     let mut body = editor.finish().expect("finish");
     super::uses::rebuild(&mut body);
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("去掉 poll 后的 poll-free 环必须被拒绝");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
@@ -1698,10 +1709,10 @@ fn compressed_ref_as_foreign_argument_is_rejected() {
     // 对照组：同一个解码点不跨调用边界时通过，证明拒绝来自调用 ABI 规则而不是解码指令本身。
     let control = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), false)
         .expect("effects 夹具必须含挂起的 foreign 调用");
-    verify::verify(&control, module).expect("未跨调用边界的压缩引用解码必须通过");
+    verify::verify(&control, module, &ORACLE).expect("未跨调用边界的压缩引用解码必须通过");
     let body = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), true)
         .expect("effects 夹具必须含挂起的 foreign 调用");
-    let error = verify::verify(&body, module).expect_err("压缩引用不得作为 foreign 参数");
+    let error = verify::verify(&body, module, &ORACLE).expect_err("压缩引用不得作为 foreign 参数");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
     assert_eq!(
         error.message(),
@@ -1925,7 +1936,7 @@ fn compressed_ref_as_foreign_argument_is_rejected_with_cage_enabled() {
     let module = compilation.hir.as_ref().unwrap().module();
     let body = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), true)
         .expect("effects 夹具必须含挂起的 foreign 调用");
-    let error = verify::verify(&body, module).expect_err("压缩引用不得作为 foreign 参数");
+    let error = verify::verify(&body, module, &ORACLE).expect_err("压缩引用不得作为 foreign 参数");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
     assert_eq!(
         error.message(),
@@ -2164,7 +2175,7 @@ fn permit_quota_beyond_buffer_capacity_is_rejected() {
     permit.max_card_marks = CARD_MARK_BUFFER_ENTRIES + 1;
     // 必须断言具体分支：额度一致性检查也会以同一错误码拒绝，只断言错误码无法分辨。
     super::uses::rebuild(&mut body);
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("超额 permit 必须在后端前失败");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
     assert!(
@@ -2187,7 +2198,7 @@ fn permit_quota_at_buffer_capacity_passes_the_capacity_check() {
         .expect("publish region 必须带 permit");
     permit.max_card_marks = CARD_MARK_BUFFER_ENTRIES;
     super::uses::rebuild(&mut body);
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("额度与静态复算不一致仍必须失败");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
     assert!(
@@ -2323,7 +2334,7 @@ fn reset_is_rejected_when_export_summary_is_open() {
             *export = 1;
         }
     }
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("未闭合 summary 不能重置");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
     assert!(
@@ -2347,7 +2358,7 @@ fn region_without_end_action_is_rejected() {
         )
     });
     super::uses::rebuild(&mut body);
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("发布后必须有结束动作");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
@@ -2367,7 +2378,7 @@ fn region_transfer_requires_channel_send_boundary() {
         }
     }
     super::uses::rebuild(&mut body);
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("普通出口不得移交 region");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
     assert!(
@@ -2390,7 +2401,7 @@ fn region_lifecycle_ops_carry_no_values() {
         }
     }
     super::uses::rebuild(&mut body);
-    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module())
+    let error = verify::verify(&body, compilation.hir.as_ref().unwrap().module(), &ORACLE)
         .expect_err("region 指令不得带参数");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
@@ -2484,8 +2495,12 @@ fn shared_guard_and_resolution_rules_are_enforced() {
         .instructions
         .retain(|instruction| !matches!(instruction.op, Op::SharedAccessEnd { .. }));
     super::uses::rebuild(&mut missing_end);
-    let error = verify::verify(&missing_end, compilation.hir.as_ref().unwrap().module())
-        .expect_err("guard 必须结束");
+    let error = verify::verify(
+        &missing_end,
+        compilation.hir.as_ref().unwrap().module(),
+        &ORACLE,
+    )
+    .expect_err("guard 必须结束");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 
     let mut missing_resolve = shared_body(&compilation);
@@ -2493,8 +2508,12 @@ fn shared_guard_and_resolution_rules_are_enforced() {
         .instructions
         .retain(|instruction| !matches!(instruction.op, Op::ResolveSharedHandle));
     super::uses::rebuild(&mut missing_resolve);
-    let error = verify::verify(&missing_resolve, compilation.hir.as_ref().unwrap().module())
-        .expect_err("fresh payload 必须被解析");
+    let error = verify::verify(
+        &missing_resolve,
+        compilation.hir.as_ref().unwrap().module(),
+        &ORACLE,
+    )
+    .expect_err("fresh payload 必须被解析");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 
     let mut wrong_token = shared_body(&compilation);
@@ -2504,8 +2523,12 @@ fn shared_guard_and_resolution_rules_are_enforced() {
         }
     }
     super::uses::rebuild(&mut wrong_token);
-    let error = verify::verify(&wrong_token, compilation.hir.as_ref().unwrap().module())
-        .expect_err("guard 的 begin/end 必须配对");
+    let error = verify::verify(
+        &wrong_token,
+        compilation.hir.as_ref().unwrap().module(),
+        &ORACLE,
+    )
+    .expect_err("guard 的 begin/end 必须配对");
     assert_eq!(error.code(), DiagnosticCode::LirInvariant);
 }
 

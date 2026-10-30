@@ -4,6 +4,7 @@ use super::pass::policy::POLL_BUDGET;
 use crate::frontend::gir::body::CallKind;
 use crate::frontend::hir::Assembly;
 use crate::frontend::semantics::assembly::AssemblyContext;
+use crate::lir::target::TargetOracle;
 
 impl Op {
     pub(crate) fn has_memory(&self) -> bool {
@@ -100,10 +101,10 @@ impl Op {
 
     /// 固定 poll 成本表；权重与 [`super::pass::policy::POLL_COST_REVISION`] 绑定。
     ///
-    /// 成本表本体；只读取内联汇编模板与上下文。
-    pub(crate) fn poll_cost_with(&self, assembly: &[Assembly]) -> u32 {
+    /// 成本表本体；只读取内联汇编模板、上下文与目标 oracle。
+    pub(crate) fn poll_cost_with(&self, assembly: &[Assembly], target: &dyn TargetOracle) -> u32 {
         match self {
-            // 机器 lowering 域内的 op 取机器 form 权重的饱和和（`x64::lower::poll_cost`）：
+            // 机器 lowering 域内的 op 取机器 form 权重的饱和和（目标 oracle 的 `poll_cost`）：
             // 权重与后端实现单一来源，改 form 表即改 poll 模型。
             Self::IConst(_)
             | Self::FConst(_)
@@ -115,7 +116,7 @@ impl Op {
             | Self::Select
             | Self::TrapIf
             | Self::Atomic { .. }
-            | Self::DecodeCompressedRef => crate::backend::x64::lower::poll_cost(self),
+            | Self::DecodeCompressedRef => target.poll_cost(self),
             Self::SymbolAddr(_)
             | Self::StackAddr(_)
             | Self::PtrOffset

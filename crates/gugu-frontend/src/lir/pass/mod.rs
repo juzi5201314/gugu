@@ -21,7 +21,7 @@ pub(crate) mod versioning;
 use super::body::Body;
 use super::invalid;
 use crate::frontend::hir;
-use crate::target::CpuBaseline;
+use crate::lir::target::TargetOracle;
 use crate::{BackendCostProfile, Diagnostic, DiagnosticCode};
 use rewrite::Editor;
 
@@ -99,7 +99,7 @@ fn run_pass(
     pass: LirPass,
     editor: &mut Editor,
     profile: &BackendCostProfile,
-    baseline: CpuBaseline,
+    target: &dyn TargetOracle,
 ) -> Result<bool, Diagnostic> {
     match pass {
         LirPass::VerifySsaAndMemory | LirPass::PrepareRegisterAllocation => {
@@ -117,7 +117,7 @@ fn run_pass(
         LirPass::LoopVectorizationAndUnrolling => vectorize::run(editor, profile),
         LirPass::LowerAllocationAndBarrierFastPaths => barriers::run(editor),
         LirPass::LowerTargetAbi => abi::lower_target_abi(editor),
-        LirPass::LegalizeX86_64 => abi::legalize_x86_64(editor, baseline),
+        LirPass::LegalizeX86_64 => abi::legalize_x86_64(editor, target),
         LirPass::ClassifyPollFreeLeafAndPlaceBudgetedPolls | LirPass::LowerPollFastPaths => {
             Err(invalid("poll pass 必须在 world 级运行"))
         }
@@ -129,7 +129,7 @@ pub(crate) fn optimize_world(
     bodies: &mut Vec<Body>,
     module: &hir::Module,
     profile: &BackendCostProfile,
-    baseline: CpuBaseline,
+    target: &dyn TargetOracle,
 ) -> Result<(), Vec<Diagnostic>> {
     let mut optimized = Vec::with_capacity(bodies.len());
     for body in bodies.drain(..) {
@@ -150,7 +150,7 @@ pub(crate) fn optimize_world(
                 continue;
             }
             // no-op pass 沿用工作图；只有变化时才物化并重新验证。
-            let changed = run_pass(*pass, &mut editor, profile, baseline)
+            let changed = run_pass(*pass, &mut editor, profile, target)
                 .map_err(|error| vec![pack(pass.name(), error)])?;
             if changed {
                 let current = editor
@@ -167,7 +167,7 @@ pub(crate) fn optimize_world(
         optimized.push(current);
     }
     *bodies = optimized;
-    poll::run_world(bodies, module, profile).map_err(|error| vec![error])?;
+    poll::run_world(bodies, module, target).map_err(|error| vec![error])?;
     Ok(())
 }
 

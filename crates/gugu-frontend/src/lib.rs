@@ -340,7 +340,9 @@ impl Compilation {
 
     /// 返回已通过 verifier 的 LIR dump。
     pub fn dump_lir(&self) -> Option<String> {
-        self.lir.as_ref().map(lir::Validated::dump)
+        let lir = self.lir.as_ref()?;
+        let oracle = backend::x64::oracle::X64Oracle::new(lir.target().descriptor().cpu_baseline);
+        Some(lir.dump(&oracle))
     }
 
     /// 返回 LIR 世界指纹。
@@ -620,12 +622,14 @@ impl Compiler {
         for diagnostic in frontend.lints.iter().cloned() {
             diagnostics.push(diagnostic);
         }
+        let oracle = backend::x64::oracle::X64Oracle::new(target.descriptor().cpu_baseline);
         let lir = match lir::build(
             &frontend.hir,
             &frontend.gir,
             &frontend.mono,
             target,
             compression,
+            &oracle,
             &self.queries,
             &source_map,
         ) {
