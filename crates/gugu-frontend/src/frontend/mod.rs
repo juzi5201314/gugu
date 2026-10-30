@@ -21,10 +21,12 @@ mod lex;
 pub(crate) mod mono;
 mod names;
 mod parse;
+mod pipeline;
 pub mod prebuild;
 mod prefix;
 #[cfg(all(test, feature = "runtime-gc-probes"))]
 mod probe_source_tests;
+mod sema_prefix;
 pub(crate) mod semantics;
 pub(crate) mod string;
 mod token;
@@ -290,16 +292,24 @@ fn check_sources(
     // 模块表定序：物化覆盖的内建模块（artifact 顺序）→ 未覆盖的内建模块 → 用户模块。
     modules.sort_by(|left, right| {
         (
-            module_rank(left, prefix.as_ref(), &probe_modules),
+            module_rank(
+                left,
+                prefix.as_ref().map(prefix::BuiltinPrefix::sema),
+                &probe_modules,
+            ),
             &left.path,
         )
             .cmp(&(
-                module_rank(right, prefix.as_ref(), &probe_modules),
+                module_rank(
+                    right,
+                    prefix.as_ref().map(prefix::BuiltinPrefix::sema),
+                    &probe_modules,
+                ),
                 &right.path,
             ))
     });
     if let Some(prefix) = prefix.as_ref() {
-        prefix.verify_installed(&modules)?;
+        prefix.sema().verify_installed(&modules)?;
     }
     // 宏展开必须先于入口判定：`comptime source` 生成的 `fn main` 与源码 main 同等有效。
     let expansion_inputs = expand_modules(
@@ -309,7 +319,7 @@ fn check_sources(
         queries,
         package_identity,
         external_packages,
-        prefix.as_ref(),
+        prefix.as_ref().map(prefix::BuiltinPrefix::sema),
     )?;
     let entry_file = source_map.file_id(entry).ok_or_else(|| {
         vec![Diagnostic::error(
@@ -382,7 +392,7 @@ fn expand_modules(
     queries: &crate::query::QueryEngine,
     package_identity: &str,
     external_packages: &BTreeSet<String>,
-    prefix: Option<&prefix::BuiltinPrefix>,
+    prefix: Option<&sema_prefix::SemaPrefix>,
 ) -> Result<expand::ExpansionInputs, Vec<Diagnostic>> {
     expand::run(
         modules,
@@ -403,7 +413,7 @@ fn expand_modules(
 /// 物化表，改由「非探针内建源」判定，两条路径的模块位次因此一致。
 fn module_rank(
     module: &ParsedModule,
-    prefix: Option<&prefix::BuiltinPrefix>,
+    prefix: Option<&sema_prefix::SemaPrefix>,
     probe_modules: &BTreeSet<String>,
 ) -> u8 {
     if !module.builtin {
@@ -446,9 +456,11 @@ fn derive_world(
     queries: &crate::query::QueryEngine,
     runtime_paths: &BTreeSet<String>,
     prefix: Option<&prefix::BuiltinPrefix>,
-) -> Result<(names::NameResolution, semantics::DerivedWorld), Vec<Diagnostic>> {
-    let names = names::analyze_with_prefix(package_identity, external_packages, modules, prefix)?;
-    let derived = semantics::check(
+) -> Result<(names::NameResolution, pipeline::DerivedWorld), Vec<Diagnostic>> {
+    let sema_prefix = prefix.map(prefix::BuiltinPrefix::sema);
+    let names =
+        names::analyze_with_prefix(package_identity, external_packages, modules, sema_prefix)?;
+    let sema = semantics::check(
         modules,
         &names,
         source_map,
@@ -456,9 +468,11 @@ fn derive_world(
         entry_function,
         queries,
         runtime_paths,
-        prefix,
+        sema_prefix,
     )
     .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
+    let derived = pipeline::derive(sema, source_map, cfg, queries, prefix)
+        .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     Ok((names, derived))
 }
 

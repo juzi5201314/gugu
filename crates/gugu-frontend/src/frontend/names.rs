@@ -76,7 +76,7 @@ pub(crate) fn analyze_with_prefix(
     package_identity: &str,
     external_packages: &BTreeSet<String>,
     modules: &[ParsedModule],
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<NameResolution, Vec<Diagnostic>> {
     let mut diagnostics = validate_modules(external_packages, modules);
     let candidates = collect_candidates(package_identity, modules, &mut diagnostics, prefix);
@@ -127,7 +127,7 @@ pub(crate) fn analyze_with_prefix(
 
 /// 内建块的公开再导出：层名即 `(模块, 别名)` 键，用户导入沿它解析到已解析的内建目标。
 fn prefix_reexports(
-    prefix: &crate::frontend::prefix::BuiltinPrefix,
+    prefix: &crate::frontend::sema_prefix::SemaPrefix,
 ) -> BTreeMap<(ModuleId, String), Vec<Binding>> {
     let mut reexports = BTreeMap::<(ModuleId, String), Vec<Binding>>::new();
     for import in prefix.names().imports.iter().filter(|import| import.public) {
@@ -197,7 +197,7 @@ fn validate_modules(
 /// 物化覆盖的内建模块：候选与导入直接取自物化表，不在会话里重复收集。
 fn materialized(
     module: &ParsedModule,
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> bool {
     module.builtin && prefix.is_some_and(|prefix| prefix.covers_module(&module.path))
 }
@@ -206,7 +206,7 @@ fn collect_candidates(
     package_identity: &str,
     modules: &[ParsedModule],
     diagnostics: &mut Vec<Diagnostic>,
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> CandidateSet {
     let mut set = CandidateSet::default();
     for (index, module) in modules.iter().enumerate() {
@@ -628,7 +628,7 @@ fn collect_imports(
     external_packages: &BTreeSet<String>,
     modules: &[ParsedModule],
     diagnostics: &mut Vec<Diagnostic>,
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Vec<PendingImport> {
     let exact = modules
         .iter()

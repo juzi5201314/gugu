@@ -68,7 +68,7 @@ pub(super) fn collect(
     names: &names::NameResolution,
     checked: &CheckedSemantics,
     sources: &SourceMap,
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<(Vec<hir::Definition>, Identities, usize), Diagnostic> {
     let mut candidates: Vec<_> = names
         .definitions

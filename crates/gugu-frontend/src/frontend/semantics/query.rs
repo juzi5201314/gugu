@@ -19,7 +19,7 @@ pub(super) fn check(
     queries: &QueryEngine,
     early: &super::comptime::EarlyConstTable,
     early_dependency: &crate::query::DependencyFingerprint,
-    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    installed: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<(CheckedSemantics, crate::query::DependencyFingerprint), Vec<Diagnostic>> {
     let mut hash = blake3::Hasher::new_derive_key("gugu-type-check-input-v1");
     let configuration = format!("{cfg:?}");

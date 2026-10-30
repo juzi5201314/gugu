@@ -59,7 +59,7 @@ pub(super) fn lower(
     entry: Option<CallableId>,
     dependency: &crate::query::DependencyFingerprint,
     queries: &crate::query::QueryEngine,
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<(hir::Validated, crate::query::DependencyFingerprint), Vec<Diagnostic>> {
     query::lower(
         model, names, checked, sources, entry, dependency, queries, prefix,
@@ -71,7 +71,7 @@ pub(super) fn identities(
     names: &NameResolution,
     checked: &CheckedSemantics,
     sources: &SourceMap,
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<identity::Identities, Diagnostic> {
     identity::collect(model, names, checked, sources, prefix).map(|(_, identities, _)| identities)
 }

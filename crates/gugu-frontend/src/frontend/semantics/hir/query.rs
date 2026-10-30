@@ -12,7 +12,7 @@ pub(super) fn lower(
     entry: Option<CallableId>,
     dependency: &DependencyFingerprint,
     queries: &QueryEngine,
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<(hir::Validated, DependencyFingerprint), Vec<Diagnostic>> {
     let mut hash = blake3::Hasher::new_derive_key("gugu-lower-hir-input-v1");
     hash.update(&dependency.fingerprint());

@@ -14,6 +14,7 @@ use gugu_compiler_core::{
     RuntimePrebuiltV1,
 };
 
+use crate::frontend::sema_prefix::table_fingerprint;
 use crate::frontend::{cfg::CfgContext, derive_builtin, gir, semantics};
 use crate::query::QueryEngine;
 use crate::runtime::RuntimeResources;
@@ -237,41 +238,6 @@ pub(crate) fn layer_revisions() -> Vec<(String, u32)> {
     ];
     layers.sort();
     layers
-}
-
-/// 表指纹：(标识域摘要, 内容摘要)。构建期物化与加载期安装共用同一口径。
-pub(crate) fn table_fingerprint(layer: &str, content: &[&[u8]]) -> ([u8; 32], [u8; 32]) {
-    (
-        keyed_digest("gugu-prebuilt-table-domain-v1", &[layer.as_bytes()]),
-        keyed_digest("gugu-prebuilt-table-content-v1", content),
-    )
-}
-
-/// 物化表里为某一层声明的内容摘要；层名决定域摘要，因此查表不依赖表顺序。
-pub(crate) fn declared_content_digest(
-    prebuilt: &RuntimePrebuiltV1,
-    layer: &str,
-) -> Option<[u8; 32]> {
-    let domain = keyed_digest("gugu-prebuilt-table-domain-v1", &[layer.as_bytes()]);
-    prebuilt
-        .fingerprints
-        .iter()
-        .find(|(candidate, _)| *candidate == domain)
-        .map(|(_, content)| *content)
-}
-
-/// 域隔离摘要：分片按长度前缀拼接，避免不同分片边界得到同一摘要。
-fn keyed_digest(domain: &str, parts: &[&[u8]]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new_derive_key(domain);
-    for part in parts {
-        hasher.update(
-            &u64::try_from(part.len())
-                .expect("摘要分片长度必须落在 u64")
-                .to_le_bytes(),
-        );
-        hasher.update(part);
-    }
-    *hasher.finalize().as_bytes()
 }
 
 /// 内建源只允许 target 派生的 cfg 键。

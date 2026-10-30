@@ -111,7 +111,7 @@ struct Checker<'m, 'a> {
 pub(super) fn check(
     model: &Model<'_>,
     early: &super::comptime::EarlyConstTable,
-    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    installed: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<super::output::CheckedSemantics, Vec<Diagnostic>> {
     let mut errors = Vec::new();
     let mut bodies = Vec::new();

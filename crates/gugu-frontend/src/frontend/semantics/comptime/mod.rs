@@ -154,7 +154,7 @@ pub(super) fn evaluate(
     sources: &SourceMap,
     cfg: &CfgContext,
     queries: &QueryEngine,
-    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    installed: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<(EarlyConstTable, DependencyFingerprint), Vec<Diagnostic>> {
     let mut hash = blake3::Hasher::new_derive_key("gugu-early-comptime-input-v1");
     let configuration = format!("{cfg:?}");
@@ -221,7 +221,7 @@ pub(super) fn evaluate(
 /// 计数、范围模式端点）只缓存成功结果，失败沿惰性路径诊断，避免重复报告。
 fn collect(
     model: &Model<'_>,
-    installed: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    installed: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<EarlyConstTable, Vec<Diagnostic>> {
     let mut entries: Vec<(ConstKey, ConstantValue)> = Vec::new();
     let mut errors = Vec::new();

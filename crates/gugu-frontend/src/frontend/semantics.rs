@@ -1,6 +1,5 @@
 //! 类型化表达式与确定初始化检查共用唯一的局部槽表。
 pub(crate) mod assembly;
-pub(crate) use crate::frontend::analysis;
 pub(crate) mod borrow;
 mod checker;
 pub(crate) mod comptime;
@@ -40,11 +39,12 @@ mod unsafe_tests;
 
 use super::{ParsedModule, names::NameResolution};
 use crate::Diagnostic;
-/// 一次前端派生冻结出的全部 world 产物。
+/// 语义层派生冻结出的产物：GIR 层以它为输入继续派生。
 ///
-/// 字段顺序即管线顺序：早期常量 → 类型检查 → 布局 → HIR → 身份 → 分析 → 单态化 → GIR。
-/// 构建期物化从这里取与用户无关的层，用户编译路径消费同一组字段。
-pub(crate) struct DerivedWorld {
+/// 字段顺序即管线顺序：早期常量 → 类型检查 → 布局 → HIR → 身份。`model` 借用模块表与名称
+/// 解析，单态化上下文需要它；`dependency`/`lower_dependency` 是下游分析的 query 依赖。
+pub(crate) struct SemaWorld<'a> {
+    pub(crate) model: model::Model<'a>,
     pub(crate) checked: CheckedSemantics,
     /// 早期常量表：构建期物化读取，用户编译路径只消费冻结进 HIR 的结果。
     pub(crate) early: comptime::EarlyConstTable,
@@ -53,22 +53,24 @@ pub(crate) struct DerivedWorld {
     pub(crate) hir: super::hir::Validated,
     /// 身份表：构建期物化读取，用户编译路径只经查询键间接消费。
     pub(crate) identities: hir::identity::Identities,
-    pub(crate) analysis: analysis::AnalysisWorldV1,
-    pub(crate) mono: super::mono::MonoWorldV1,
-    pub(crate) gir: super::gir::GirWorldV1,
-    pub(crate) gir_stats: super::gir::pass::GirPassStats,
+    pub(crate) dependency: crate::query::DependencyFingerprint,
+    pub(crate) lower_dependency: crate::query::DependencyFingerprint,
 }
 
-pub(crate) fn check(
-    modules: &[ParsedModule],
-    names: &NameResolution,
+#[expect(
+    clippy::too_many_arguments,
+    reason = "语义层入口需要模块表、名称解析、源码映射、cfg、入口、query 引擎与内建前缀"
+)]
+pub(crate) fn check<'a>(
+    modules: &'a [ParsedModule],
+    names: &'a NameResolution,
     sources: &crate::SourceMap,
     cfg: &super::cfg::CfgContext,
     entry: Option<model::CallableId>,
     queries: &crate::query::QueryEngine,
     runtime_paths: &std::collections::BTreeSet<String>,
-    prefix: Option<&super::prefix::BuiltinPrefix>,
-) -> Result<DerivedWorld, Vec<Diagnostic>> {
+    prefix: Option<&super::sema_prefix::SemaPrefix>,
+) -> Result<SemaWorld<'a>, Vec<Diagnostic>> {
     let model = model::Model::new(modules, names, runtime_paths)?;
     let (mut early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries, prefix)?;
     if let Some(prefix) = prefix {
@@ -98,67 +100,17 @@ pub(crate) fn check(
         queries,
         prefix,
     )?;
-    let gir = super::gir::build_world(&hir, queries, sources, prefix)?;
     let identities =
         hir::identities(&model, names, &checked, sources, prefix).map_err(|error| vec![error])?;
-    let context = super::mono::keys::MonoContext::new(
-        &model,
-        &checked,
-        &identities,
-        hir.module(),
-        sources,
-        cfg.target(),
-        cfg.harness(),
-    );
-    let mut mono_world = super::mono::close(&context, queries, &gir)?;
-    // 内建 link 未被裁剪时，契约记录类型目录直取物化表：七个 layout verifier 仍随后逐字段
-    // 校验它，加载即校验的规矩不变。
-    if let Some(prefix) = prefix {
-        mono_world.contracts = prefix.record_types().to_vec();
-    }
-    super::late::run(hir.module(), &mut mono_world, queries, sources)?;
-    let gir = super::gir::attach_fragments(gir, &mono_world);
-    let (analysis_world, analysis_dependency) = analysis::run_world(
-        hir.module(),
-        hir.fingerprint(),
-        &gir,
-        &mono_world,
-        cfg,
-        &dependency,
-        &lower_dependency,
-        analysis::AnalysisPolicyV1::default(),
-        queries,
-        sources,
-    )?;
-    let gir = super::gir::place_world(&hir, gir, &analysis_world, queries, sources)?;
-    let summaries = super::mono::summary::project(
-        cfg.target(),
-        &mono_world,
-        &analysis_world,
-        &analysis_dependency,
-        queries,
-    )?;
-    mono_world.public_summaries = summaries;
-    let mut gir = gir;
-    gir.concrete = super::gir::concrete::build(&context, &gir, &mono_world)?;
-    let gir_stats = super::gir::pass::run(&mut gir, hir.module(), &analysis_world)?;
-    gir.fingerprint = super::gir::world_fingerprint(
-        &gir.bodies,
-        &gir.fragments,
-        gir.hir_fingerprint,
-        &gir.placement,
-        &gir.concrete,
-    );
-    Ok(DerivedWorld {
+    Ok(SemaWorld {
+        model,
         checked,
         early,
         layouts,
         registry_identity,
         hir,
         identities,
-        analysis: analysis_world,
-        mono: mono_world,
-        gir,
-        gir_stats,
+        dependency,
+        lower_dependency,
     })
 }

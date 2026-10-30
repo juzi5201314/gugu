@@ -161,7 +161,7 @@ pub(crate) fn run(
     queries: &QueryEngine,
     package_identity: &str,
     external_packages: &BTreeSet<String>,
-    prefix: Option<&crate::frontend::prefix::BuiltinPrefix>,
+    prefix: Option<&crate::frontend::sema_prefix::SemaPrefix>,
 ) -> Result<ExpansionInputs, Vec<Diagnostic>> {
     let mut budget = ExpansionBudget::default();
     let mut token_files: Vec<_> = modules.iter().map(TokenFileTable::new).collect();
