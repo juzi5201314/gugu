@@ -1,0 +1,51 @@
+//! 固定优化管线的策略常量与规范编码。
+//!
+//! 这些值决定 pass 行为与 action key 身份；运行时不得重排或改写。
+use serde::{Deserialize, Serialize};
+
+/// 任意 poll-free 路径允许累积的最大成本。
+pub const POLL_BUDGET: u32 = 4096;
+/// 允许被分类为 poll-free 叶调用的最大成本。
+pub const POLL_FREE_LEAF_MAX_COST: u32 = 64;
+/// LIR 固定管线顺序的 revision。
+pub const PASS_PIPELINE_REVISION: u32 = 3;
+/// poll 成本表的 revision；权重来自 x64 form 表（`x64::lower::poll_cost` 的指令权重和），
+/// 因此随 backend schema 变化。
+pub const POLL_COST_REVISION: u32 = 3;
+/// 内联策略的 revision。
+pub const INLINE_POLICY_REVISION: u32 = 1;
+/// 向量化策略的 revision。
+pub const VECTOR_POLICY_REVISION: u32 = 1;
+/// strip mining 策略的 revision。
+pub const STRIP_MINING_REVISION: u32 = 1;
+
+/// 进入 action key 的 LIR 优化策略快照。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct OptimizationPolicyV1 {
+    pub pass_pipeline_revision: u32,
+    pub poll_budget: u32,
+    pub poll_cost_revision: u32,
+    pub inline_policy_revision: u32,
+    pub vector_policy_revision: u32,
+    pub strip_mining_revision: u32,
+}
+
+impl Default for OptimizationPolicyV1 {
+    fn default() -> Self {
+        Self {
+            pass_pipeline_revision: PASS_PIPELINE_REVISION,
+            poll_budget: POLL_BUDGET,
+            poll_cost_revision: POLL_COST_REVISION,
+            inline_policy_revision: INLINE_POLICY_REVISION,
+            vector_policy_revision: VECTOR_POLICY_REVISION,
+            strip_mining_revision: STRIP_MINING_REVISION,
+        }
+    }
+}
+
+impl OptimizationPolicyV1 {
+    /// 返回字段顺序固定的规范编码。
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        crate::canonical::to_vec(self).expect("优化策略可序列化")
+    }
+}

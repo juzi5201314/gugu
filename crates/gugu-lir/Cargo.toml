@@ -1,0 +1,18 @@
+[package]
+name = "gugu-lir"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu LIR layer: concrete GIR lowering, fixed optimization pipeline, poll placement, stack maps and structural verifier"
+
+[features]
+# 上层 crate 的白盒测试复用 poll/body 测试专用入口；只经 dev-dependency 打开。
+test-support = []
+
+[dependencies]
+blake3 = "1"
+serde.workspace = true
+serde_json.workspace = true
+
+gugu-base = { path = "../gugu-base" }
+gugu-gir = { path = "../gugu-gir" }
+gugu-runtime-abi = { path = "../gugu-runtime-abi" }

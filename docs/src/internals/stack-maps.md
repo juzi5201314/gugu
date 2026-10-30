@@ -124,7 +124,7 @@ LIR 为每个栈槽维护逐根字段的初始化事件流 `RootInit { slot, pos
 
 帧内位图已接线：`FrameLayout::init_bases` 为每个带根字的栈槽在 frame 内分配**每根一字节**的区域（`base + bit`），`alloc/rewrite.rs` 在每个站点代码之前按块内位置游标发射 `mov byte [rsp + offset], 1/0`。选一字节一根而不是位图字，是因为置位与复位都不需要读改写、不占用 scratch 寄存器；站点游标保证这些写入落在那次读取位图的安全点之前，块尾把剩余事件全部刷新。每帧位图与普通值存储分开，未初始化 payload 不会被读到。
 
-静态完整初始化证明已落地：`lir/root_init.rs::InitSlots` 以 **must** 语义求块级不动点（汇合点取前驱交集），`fully_initialized(block, position, slot)` 只在该点沿所有路径都写全该槽根字时为真——它是 `mask = 0`（无需读帧内位图的判定依据）、不是过滤器：未证明已初始化**不得**据此丢根。帧内位图与证明当前由回归测试与真实镜像行为覆盖，站点条目（消费方）随后续集成变更接入。
+静态完整初始化证明已落地：`gugu_lir::root_init::InitSlots` 以 **must** 语义求块级不动点（汇合点取前驱交集），`fully_initialized(block, position, slot)` 只在该点沿所有路径都写全该槽根字时为真——它是 `mask = 0`（无需读帧内位图的判定依据）、不是过滤器：未证明已初始化**不得**据此丢根。帧内位图与证明当前由回归测试与真实镜像行为覆盖，站点条目（消费方）随后续集成变更接入。
 
 ## 二进制 section
 
@@ -220,7 +220,7 @@ bitmap 的 bit `i` 对应 `[frame_base + i * 8]`，最低有效 bit 先写。超
 
 逐根初始化字节位于槽位图范围**之外**的帧内区域（每个根字一字节，由 `FrameLayout::init_bases` 分配），因此按 `slot_count` 合成帧的消费者必须先按 `frame_size` 开表再扫描：`slot_count * 8` 不是帧的上界，`frame_size` 才是。
 
-门控根只对**栈驻留**的并集值存在：SSA 常驻的并集值走 `Value` 根，不经过栈槽、也没有初始化字节。判定由 `lir/root_init.rs::InitSlots`（must 语义块级不动点）给出，`mask = 0` 之外的根一律写成条目。
+门控根只对**栈驻留**的并集值存在：SSA 常驻的并集值走 `Value` 根，不经过栈槽、也没有初始化字节。判定由 `gugu_lir::root_init::InitSlots`（must 语义块级不动点）给出，`mask = 0` 之外的根一律写成条目。
 
 map 去重基于完整 record bytes；map table 按 record bytes 字典序分配 `map_index`，不能按发现时序分配。version 2 的 `SharedHandle` 和 `CompressedRef` 位置仍是 managed root；decoder 必须拒绝 version 1（`SharedHandle`/`CompressedRef` 表示不同）、version 2（缺少裸屏障调用的 `CallReturn` record）与 version 3（map record 没有逐根初始化尾字段）记录，避免把旧 world 当当前 world 使用。
 

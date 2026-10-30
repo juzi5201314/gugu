@@ -10,7 +10,8 @@ mod backend;
 #[cfg(test)]
 mod diagnostics_tests;
 mod frontend;
-mod lir;
+#[cfg(all(test, feature = "slow-tests"))]
+mod lir_tests;
 #[cfg(all(test, feature = "slow-tests"))]
 mod numbering_tests;
 mod raw_model;
@@ -18,6 +19,7 @@ mod runtime;
 #[cfg(test)]
 mod testing;
 use gugu_base::{action, canonical, diagnostics, hash, query, source, target};
+use gugu_lir as lir;
 use gugu_project as project;
 pub use query::{
     DependencyFingerprint, ObjectCache, ObjectError, ObjectKey, QueryContext, QueryEngine,

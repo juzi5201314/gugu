@@ -375,7 +375,7 @@ LIR 构造后按下列顺序运行：
 
 机器合法化后这些 operation 的 `poll_cost` 取实际机器形式的权重和，而不是 LIR opcode 的抽象权重：`x64::lower::poll_cost` 是唯一来源，`Select`、`TrapIf`、`DecodeCompressedRef` 的展开长度直接反映在路径预算里，权重口径 revision 与 LIR/cache schema 同步递增。
 
-LIR 不直接依赖 backend：`lir::target::TargetOracle` 声明 LIR 需要的两项目标知识，即机器域 op 的 `poll_cost` 和单条指令的 `legalize` 检查（返回 `LegalizeError`）。backend 的 `X64Oracle` 按 descriptor 的 CPU 基线实现它，driver 在 `lir::build` 时注入。同一个 oracle 贯穿优化管线、`LegalizeX86_64`、poll placement、`PollSummary` 推导、world verifier 与 `dump_lir` 的 `poll-cost` 输出，因此 LIR 侧的预算与 backend 实际 lowering 不会出现两套口径。
+LIR 不直接依赖 backend：`gugu_lir` crate 只依赖 `gugu-base`、`gugu-runtime-abi` 与 `gugu-gir`，`gugu_lir::target::TargetOracle` 声明 LIR 需要的两项目标知识，即机器域 op 的 `poll_cost` 和单条指令的 `legalize` 检查（返回 `LegalizeError`）。backend 的 `X64Oracle` 按 descriptor 的 CPU 基线实现它，driver 在 `gugu_lir::build` 时注入。同一个 oracle 贯穿优化管线、`LegalizeX86_64`、poll placement、`PollSummary` 推导、world verifier 与 `dump_lir` 的 `poll-cost` 输出，因此 LIR 侧的预算与 backend 实际 lowering 不会出现两套口径。
 
 `CanonicalizeLoops` 只把可证明有限 trip count、单 latch、固定非零 step和可比较终点的 natural loop标为 counted loop。任何 loop pass都不得把 backedge引入 `NoSafepointRegion`、复制 region marker或把 operation移入/移出 region。`LoopVersioningAndUnswitching` 与 `LoopVectorizationAndUnrolling` 在 compiler budget poll尚不存在时完成其它会改变循环 trip count、CFG cycle、vector factor或 unroll factor的变换；只有依赖、alias、panic/effect顺序与整数/浮点语义都证明等价时才能变换，浮点归约不能为向量化重关联。vectorizer使用目标 cost model拒绝保守 legalized单次迭代可能超过 `POLL_BUDGET` 的 factor组合。
 

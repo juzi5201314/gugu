@@ -114,7 +114,7 @@ fn coroutines_install_like_a_fresh_derivation() {
 /// 标准库导入：用户模块引用内建公开面。
 #[test]
 fn std_imports_install_like_a_fresh_derivation() {
-    let source = include_str!("lir/fixtures/effects.gg");
+    let source = include_str!("lir_tests/fixtures/effects.gg");
     assert_numbering_stable("lir/effects", || {
         CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
     });

@@ -339,6 +339,7 @@ dependencies = [
  "gugu-base",
  "gugu-compiler-core",
  "gugu-gir",
+ "gugu-lir",
  "gugu-project",
  "gugu-runtime-abi",
  "gugu-runtime-builder",
@@ -366,6 +367,18 @@ dependencies = [
  "gugu-runtime-abi",
  "gugu-sema",
  "serde",
+]
+
+[[package]]
+name = "gugu-lir"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "gugu-base",
+ "gugu-gir",
+ "gugu-runtime-abi",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -162,11 +162,20 @@ crates/
 │   ├── src/gc.rs                   GC 元数据推导与两个镜像 section
 │   ├── src/contract/               HIR/GIR 与 runtime 契约的交叉视图：源记录、image 根需求与控制块布局校验
 │   └── src/testing.rs              测试用 build-time artifact provider（`test-support` 对上层开放）
+├── gugu-lir/                       LIR 层：只依赖 gugu-base、gugu-runtime-abi 与 gugu-gir，产物止于已验证 LIR world
+│   ├── src/lib.rs                  BuildLir query、`Validated` world 与 runtime 需求推导
+│   ├── src/target.rs               `TargetOracle`：LIR 向 backend 索取的目标知识边界
+│   ├── src/build/                  GIR → SSA LIR lowering
+│   ├── src/pass/                   LIR 优化管线、poll placement 与 rewrite editor
+│   ├── src/verify/                 结构、provenance、region 与资源隔离 verifier
+│   ├── src/stackmap.rs             逻辑栈图推导
+│   └── src/root_init.rs            逐根初始化 must 证明
 └── gugu-frontend/
     ├── src/lib.rs                  CompileRequest 与 action 编排
     ├── src/raw_model.rs            runtime raw 契约 query driver：注入 backend 片段并做跨层校验
     ├── src/frontend/               sema 与 GIR 层模块的再导出，以及需要完整 Compiler 的前端回归
     │   └── semantics_tests/        依赖整条管线的语义层回归
+    ├── src/lir_tests/              依赖整条管线与 `X64Oracle` 的 LIR 回归及其 fixtures
     ├── src/backend.rs              目标相关的内存 image plan 输入
     ├── src/backend/x64/fragments.rs 登记机器片段编码与协程片段逐字节比对
     ├── src/backend/x64/glue.rs     runtime glue 绑定、闭世界 glue 目录与 op 隐含 glue
@@ -194,7 +203,7 @@ crates/
 
 模块职责是单向的：CLI 只构造请求和渲染结果；compiler 负责管线编排；frontend 不创建机器码；IR 不读取源码文本；backend 只消费 IR 与目标描述；runtime 模块只提供 compiler 携带的 Gugu 源资源和边界登记。Rust compiler 不实现 Gugu runtime 的镜像执行路径：调度、GC、资源释放与标准库语义必须在镜像内的 Gugu runtime、rt0 与登记的 machine intrinsic 中落地；compiler 只持有确定性的契约与尚未迁走的参照模型（raw 平面、资源租约、owner-directed return、rt0 启动/终止/报告）。channel、Join、select 与 `std.sync` 的执行在镜像内 Gugu 源；Rust 侧只留 schema、布局和非法序拒绝。
 
-所有库 crate（`gugu-base`、`gugu-project`、`gugu-runtime-abi`、`gugu-sema`、`gugu-gir`、`gugu-frontend`、`gugu-compiler`）都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
+所有库 crate（`gugu-base`、`gugu-project`、`gugu-runtime-abi`、`gugu-sema`、`gugu-gir`、`gugu-lir`、`gugu-frontend`、`gugu-compiler`）都使用 `#![forbid(unsafe_code)]`。平台入口、系统调用、原子、换栈、safepoint、GC 写屏障和外部函数交接以 `IntrinsicBoundary` 登记；context switch 已在 runtime 侧直接编码为 x86_64 machine 片段，通过 backend 的已验证契约交接。真实宿主 VM 与裸汇编仅位于 `coroutine_context` 手工验收二进制中，不进入 compiler 或默认测试套件。
 
 ### 编译器测试构建
 
