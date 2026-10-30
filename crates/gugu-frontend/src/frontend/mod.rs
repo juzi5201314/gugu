@@ -2,43 +2,36 @@ use std::{collections::BTreeSet, path::PathBuf};
 
 use crate::{
     diagnostics::{Diagnostic, DiagnosticCode},
-    source::{ExpansionId, SourceFileId, SourceMap, SourceSnapshot, Span},
+    source::{SourceMap, SourceSnapshot},
 };
 
 pub(crate) mod analysis;
-mod ast;
-pub(crate) mod attr;
-pub(crate) mod cfg;
 pub(crate) mod contract;
-mod expand;
-pub(crate) mod format;
 pub(crate) mod gc;
 pub(crate) mod gir;
-pub(crate) mod hir;
-mod intern;
 pub(crate) mod late;
-mod lex;
 pub(crate) mod mono;
-mod names;
-mod parse;
 mod pipeline;
 pub mod prebuild;
 mod prefix;
 #[cfg(all(test, feature = "runtime-gc-probes"))]
 mod probe_source_tests;
-mod sema_prefix;
-pub(crate) mod semantics;
-pub(crate) mod string;
-mod token;
-mod types;
 
-use ast::{AstArena, AstFile, ItemKind};
-pub(crate) use lex::lex;
-pub(crate) use parse::parse;
+#[cfg(all(test, feature = "slow-tests"))]
+use gugu_sema::modules::logical_to_module_path;
+use gugu_sema::modules::parse_modules;
+pub(crate) use gugu_sema::modules::source_map_span;
+pub(crate) use gugu_sema::{
+    BUILTIN_PACKAGE_IDENTITY, ParsedModule, ast, attr, cfg, expand, format, hir,
+    is_probe_builtin_source, names, sema_prefix, semantics, types,
+};
+
+use ast::ItemKind;
+#[cfg(test)]
+use gugu_sema::{lex, parse};
 #[cfg(test)]
 #[allow(unused_imports, reason = "parse helper 仅由部分测试目标共享")]
-pub(crate) use parse::{dump_ast, has_main_fn, parent_before_child};
-pub(crate) use token::TokenBuffer;
+use parse::{dump_ast, has_main_fn, parent_before_child};
 
 pub(crate) enum SourceInput<'a> {
     EmptyPackage,
@@ -73,20 +66,6 @@ pub(crate) struct FrontendOutput {
     pub(crate) gir: gir::GirWorldV1,
     pub(crate) gir_stats: gir::pass::GirPassStats,
     pub(crate) lints: Vec<Diagnostic>,
-}
-
-#[derive(Clone, Debug)]
-pub(crate) struct ParsedModule {
-    pub(crate) path: String,
-    pub(crate) file: AstFile,
-    pub(crate) arena: AstArena,
-    pub(crate) tokens: TokenBuffer,
-    pub(crate) configured: cfg::ConfiguredAst,
-    /// 该模块来自 compiler 内建的源树登记，而不是用户源码。
-    ///
-    /// `std.option` 等公开标准库模块是 package API。`std.prelude`、`std.runtime.*` 与
-    /// `runtime.*` 仍是私有实现：用户源码不能声明 `std` 根，也不能导入这些私有模块。
-    pub(crate) builtin: bool,
 }
 
 /// 内建块的加载方式。
@@ -166,20 +145,6 @@ pub(crate) fn bootstrap_with(
             mode,
         ),
     }
-}
-
-/// 探针入口程序所在的内建源前缀。
-const ENTRY_ONLY_BUILTIN_SOURCES: &str = "std/runtime/fixtures/";
-
-/// 探针专用内建源：探针库与探针入口程序。
-///
-/// 它们随 `runtime-gc-probes` 特性进入 artifact 源表，只供 `CompileInput::RuntimeGcProbe`
-/// 的编译安装。普通编译一旦安装：探针库会把自身的大拷贝诊断混进用户诊断，探针入口程序会为
-/// 本不属于该程序的 `main` 多派生一份世界，且其中 `#[cfg(runtime_gc_case = ...)]` 的选择
-/// 函数在探针编译之外全部落空。
-pub(crate) fn is_probe_builtin_source(logical_path: &str) -> bool {
-    logical_path == "std/runtime/gc_probes.gg"
-        || logical_path.starts_with(ENTRY_ONLY_BUILTIN_SOURCES)
 }
 
 /// 内建源单元是否进入入口为 `entry` 的本次编译。
@@ -551,125 +516,6 @@ pub(crate) fn derive_builtin(
     })
 }
 
-/// 内建块的包身份：artifact 源表在用户 package 之外，必须与任何用户包身份区分。
-const BUILTIN_PACKAGE_IDENTITY: &str = "builtin";
-
-fn parse_modules(
-    source_map: &SourceMap,
-    source_root: &str,
-    cfg: &cfg::CfgContext,
-    builtin_paths: &BTreeSet<String>,
-) -> Result<Vec<ParsedModule>, Vec<Diagnostic>> {
-    let mut modules = Vec::with_capacity(source_map.snapshots().len());
-    let mut diagnostics = Vec::new();
-    let mut occupied = std::collections::BTreeMap::new();
-    for snapshot in source_map.snapshots() {
-        let file = source_map
-            .file_id(snapshot.logical_path())
-            .expect("源码表快照必须有稳定文件 ID");
-        let builtin = builtin_paths.contains(snapshot.logical_path());
-        let path = match builtin_module_path(snapshot, builtin_paths) {
-            Some(path) => path,
-            None => match module_path(snapshot, source_root, source_map, file) {
-                Ok(path) => path,
-                Err(diagnostic) => {
-                    diagnostics.push(diagnostic);
-                    continue;
-                }
-            },
-        };
-        if let Some(previous) = occupied.insert(path.clone(), snapshot.logical_path()) {
-            diagnostics.push(module_path_conflict(
-                snapshot, source_map, file, &path, previous,
-            ));
-            continue;
-        }
-        match parse_module(snapshot, source_map, file, path, cfg, builtin) {
-            Ok(module) => modules.push(module),
-            Err(errors) => diagnostics.extend(errors),
-        }
-    }
-    if diagnostics.is_empty() {
-        Ok(modules)
-    } else {
-        Err(diagnostics)
-    }
-}
-
-/// 把内建逻辑路径映射成模块路径：去掉扩展名并把分隔符换成 `.`。
-///
-/// 内建逻辑路径已经是 package 相对路径（例如 `std/runtime/platform.gg`），不受用户
-/// `source_root` 约束。
-fn logical_to_module_path(logical: &str) -> Option<String> {
-    logical
-        .strip_suffix(".gg")
-        .map(|path| path.replace('/', "."))
-}
-
-/// 返回内建源单元对应的模块路径。
-fn builtin_module_path(
-    snapshot: &SourceSnapshot,
-    builtin_paths: &BTreeSet<String>,
-) -> Option<String> {
-    let logical = snapshot.logical_path();
-    if !builtin_paths.contains(logical) {
-        return None;
-    }
-    logical_to_module_path(logical)
-}
-
-fn parse_module(
-    snapshot: &SourceSnapshot,
-    source_map: &SourceMap,
-    file: SourceFileId,
-    path: String,
-    cfg: &cfg::CfgContext,
-    builtin: bool,
-) -> Result<ParsedModule, Vec<Diagnostic>> {
-    let lexed = lex(snapshot, source_map, file);
-    if !lexed.diagnostics.is_empty() || lexed.buffer.has_error_tokens() {
-        return Err(lexed.diagnostics);
-    }
-    let mut tokens = lexed.buffer;
-    let parsed = parse(snapshot.content(), source_map, file, &mut tokens);
-    if !parsed.diagnostics.is_empty() {
-        return Err(parsed.diagnostics);
-    }
-    let configured = cfg::configure(
-        snapshot,
-        source_map,
-        &parsed.file,
-        &parsed.arena,
-        &tokens,
-        cfg,
-    )?;
-    Ok(ParsedModule {
-        path,
-        file: parsed.file,
-        arena: parsed.arena,
-        tokens,
-        configured,
-        builtin,
-    })
-}
-
-fn module_path_conflict(
-    snapshot: &SourceSnapshot,
-    source_map: &SourceMap,
-    file: SourceFileId,
-    path: &str,
-    previous: &str,
-) -> Diagnostic {
-    Diagnostic::error(
-        DiagnosticCode::ModuleInvalidPath,
-        format!(
-            "模块路径 `{path}` 同时由 `{previous}` 与 `{}` 声明",
-            snapshot.logical_path()
-        ),
-        source_map_span(source_map, file, 0, 0).ok(),
-    )
-}
-
 #[expect(
     clippy::too_many_arguments,
     reason = "汇总所有前端阶段的 world 与诊断，参数即各阶段产物"
@@ -726,81 +572,6 @@ fn frontend_output(
         lints,
     }
 }
-
-/// 在源码表上取 span，并把 `SpanError` 映射为 `SpanOutOfBounds` 诊断。
-///
-/// 诊断契约闸门直接调用本函数验证 E0007 的归属；公开编译输入无法触达该分支，
-/// 因为现有调用点都请求已注册文件的 `(0, 0)`。
-pub(crate) fn source_map_span(
-    source_map: &SourceMap,
-    file: SourceFileId,
-    start: usize,
-    end: usize,
-) -> Result<Span, Vec<Diagnostic>> {
-    source_map
-        .span(file, start, end, ExpansionId::ROOT)
-        .map_err(|error| {
-            vec![Diagnostic::error(
-                DiagnosticCode::SpanOutOfBounds,
-                error.to_string(),
-                None,
-            )]
-        })
-}
-
-fn module_path(
-    snapshot: &SourceSnapshot,
-    source_root: &str,
-    source_map: &SourceMap,
-    file: SourceFileId,
-) -> Result<String, Diagnostic> {
-    let logical = snapshot.logical_path();
-    let relative = if source_root.is_empty() {
-        logical
-    } else {
-        logical
-            .strip_prefix(source_root)
-            .and_then(|path| path.strip_prefix('/'))
-            .ok_or_else(|| {
-                Diagnostic::error(
-                    DiagnosticCode::ModuleInvalidPath,
-                    format!("源码 `{logical}` 不在 target 源码根 `{source_root}` 下"),
-                    source_map_span(source_map, file, 0, 0).ok(),
-                )
-            })?
-    };
-    let path = relative.strip_suffix(".gg").ok_or_else(|| {
-        Diagnostic::error(
-            DiagnosticCode::ModuleInvalidPath,
-            format!("模块源码 `{logical}` 必须使用 `.gg` 扩展名"),
-            source_map_span(source_map, file, 0, 0).ok(),
-        )
-    })?;
-    let mut segments = path.split('/').collect::<Vec<_>>();
-    if segments.last() == Some(&"mod") {
-        segments.pop();
-    }
-    if segments
-        .iter()
-        .any(|segment| !valid_module_segment(segment))
-    {
-        return Err(Diagnostic::error(
-            DiagnosticCode::ModuleInvalidPath,
-            format!("模块源码 `{logical}` 包含非法模块名"),
-            source_map_span(source_map, file, 0, 0).ok(),
-        ));
-    }
-    Ok(segments.join("."))
-}
-
-fn valid_module_segment(segment: &str) -> bool {
-    let mut bytes = segment.bytes();
-    bytes
-        .next()
-        .is_some_and(|byte| byte == b'_' || byte.is_ascii_alphabetic())
-        && bytes.all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
-}
-
 fn active_main(module: &ParsedModule) -> Option<ast::FnId> {
     module
         .file
@@ -828,5 +599,7 @@ mod docs_code_tests;
 mod lex_tests;
 #[cfg(all(test, feature = "slow-tests"))]
 mod parse_tests;
+#[cfg(test)]
+mod semantics_tests;
 #[cfg(all(test, feature = "slow-tests"))]
 mod stage10_tests;

@@ -341,6 +341,7 @@ dependencies = [
  "gugu-project",
  "gugu-runtime-abi",
  "gugu-runtime-builder",
+ "gugu-sema",
  "serde",
  "serde_json",
  "siphasher",
@@ -383,6 +384,18 @@ name = "gugu-runtime-builder"
 version = "0.1.0"
 dependencies = [
  "gugu-compiler-core",
+]
+
+[[package]]
+name = "gugu-sema"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "gugu-base",
+ "gugu-compiler-core",
+ "gugu-runtime-abi",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

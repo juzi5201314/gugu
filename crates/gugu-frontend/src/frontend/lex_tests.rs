@@ -4,7 +4,7 @@ use crate::{
 };
 
 use super::lex::lex;
-use super::token::{TokenKind, TriviaKind};
+use gugu_sema::token::{TokenKind, TriviaKind};
 
 fn lex_source(source: &str) -> (Vec<TokenKind>, Vec<DiagnosticCode>) {
     let snapshot = SourceSnapshot::from_str("lex.gg", source).expect("utf-8 fixture");
@@ -137,7 +137,7 @@ fn nested_block_comment_is_trivia() {
             .buffer
             .leading_trivia(ident_b)
             .iter()
-            .any(|trivia| trivia.kind == super::token::TriviaKind::BlockComment)
+            .any(|trivia| trivia.kind == TriviaKind::BlockComment)
     );
 }
 
@@ -165,7 +165,7 @@ fn line_continue_trivia_keeps_newline() {
             .buffer
             .leading_trivia(xs)
             .iter()
-            .any(|trivia| trivia.kind == super::token::TriviaKind::Newline)
+            .any(|trivia| trivia.kind == TriviaKind::Newline)
     );
 }
 

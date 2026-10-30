@@ -27,8 +27,10 @@ gugu-base = { path = "../gugu-base" }
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-project = { path = "../gugu-project" }
 gugu-runtime-abi = { path = "../gugu-runtime-abi" }
+gugu-sema = { path = "../gugu-sema" }
 gugu-runtime-builder = { path = "../gugu-runtime-builder", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
 gugu-runtime-abi = { path = "../gugu-runtime-abi", features = ["test-support"] }
+gugu-sema = { path = "../gugu-sema", features = ["test-support"] }
