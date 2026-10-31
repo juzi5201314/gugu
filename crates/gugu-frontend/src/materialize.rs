@@ -2,14 +2,14 @@
 //!
 //! 录制在刚物化的 artifact 上按安装模式编译 canonical 程序 `fn main() {}`：此时函数表为空，
 //! 内建实例全部现算，产物与用户编译现算的结果同源。分析分片取自 GIR 层，LIR 层取 poll
-//! 之后的 body；入选规则由 [`frontend::functions::record`] 统一判定。
+//! 之后的 body，x64 层取 absorb 之前的片段；入选规则由 [`frontend::functions::record`] 统一判定。
 
 use std::collections::BTreeSet;
 
-use crate::backend::x64::oracle::X64Oracle;
+use crate::backend::x64::{codegen, glue::RuntimeGlueBindings, installed, oracle::X64Oracle};
 use crate::frontend::{self, PrefixMode, SourceInput, cfg::CfgContext, prebuild};
 use crate::{MaterializeError, QueryEngine, RuntimeArtifactV1, RuntimeResources, SourceMap};
-use crate::{SourceSnapshot, TargetName, lir};
+use crate::{SourceSnapshot, TargetName, lir, raw_model, runtime::RawPlanePolicyV1};
 
 /// 把 source-only artifact 物化成带内建块派生表与函数表的 artifact。
 pub fn materialize(
@@ -27,6 +27,7 @@ pub fn materialize(
     prebuilt
         .function_revisions
         .extend(lir::installed::revisions());
+    prebuilt.function_revisions.extend(installed::revisions());
     prebuilt.functions = functions;
     artifact.validate()?;
     Ok(artifact)
@@ -70,6 +71,34 @@ fn record_functions(
         &source_map,
         (&output.installed, Some(prebuilt)),
     )?;
+    let glues = RuntimeGlueBindings::resolve(&resources, &output.hir, &lir)
+        .map_err(|error| vec![error])?;
+    let gc_metadata =
+        frontend::gc::derive(&output.mono.universe, &output.gir, output.hir.module())
+            .map_err(|error| vec![error])?;
+    let policy = RawPlanePolicyV1 {
+        compression: lir::installed::RECORDED_COMPRESSION,
+        ..RawPlanePolicyV1::default()
+    };
+    let raw = raw_model::derive(
+        target,
+        policy,
+        &output,
+        &lir,
+        &gc_metadata,
+        &resources,
+        &queries,
+    )?;
+    let (_, fragments) = codegen::fragments(
+        &lir,
+        &output.mono.universe,
+        &raw,
+        target,
+        &queries,
+        &source_map,
+        &glues,
+        (&output.installed, Some(prebuilt)),
+    )?;
     let bodies = lir.bodies();
     frontend::functions::record(
         output.hir.module(),
@@ -78,10 +107,15 @@ fn record_functions(
         &output.analysis,
         prebuild::builtin_definitions(prebuilt),
         |digest| {
-            bodies
+            let index = bodies
                 .binary_search_by_key(digest, |body| body.instance)
-                .ok()
-                .map(|index| lir::installed::encode(&bodies[index]))
+                .ok()?;
+            let x64 = if installed::recordable(&bodies[index]) {
+                installed::encode(&fragments[index])
+            } else {
+                Vec::new()
+            };
+            Some((lir::installed::encode(&bodies[index]), x64))
         },
     )
     .map_err(|error| vec![error])

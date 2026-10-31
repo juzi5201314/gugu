@@ -13,6 +13,7 @@ pub mod encode;
 pub mod fragments;
 pub mod glue;
 pub mod inst;
+pub mod installed;
 pub mod layout;
 pub mod lower;
 pub mod mangle;

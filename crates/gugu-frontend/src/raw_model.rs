@@ -8,18 +8,162 @@ use crate::frontend::contract::{
     barrier_layout, channel_layout, coroutine_layout, local_heap_layout, mark_layout,
     shared_heap_layout, sync_layout,
 };
-use crate::frontend::{gir::concrete::RecordTypes, hir};
+use crate::frontend::{self, gc::GcMetadataBundle, gir::concrete::RecordTypes, hir};
+use crate::lir;
 use crate::query::{QueryEngine, QueryError, QueryKey, QueryKind, QueryResult};
 use crate::runtime::{
-    BarrierDemand, CompressionDemand, GcMetadataDemand, GcPacingDemand, LocalHeapDemand,
+    self, BarrierDemand, CompressionDemand, GcMetadataDemand, GcPacingDemand, LocalHeapDemand,
     MarkDemand, PlatformProfile, RAW_MODEL_SCHEMA, RawModelError, RawPlaneDemand, RawPlanePolicyV1,
     RawResourceDemand, Rt0Demand, RuntimeRawContractV1, RuntimeResources, SchedulerDemand,
     StackMapDemand, SyncDemand, WaitDemand,
 };
 use crate::{Diagnostic, DiagnosticCode, TargetName};
 
+/// 从冻结前端、优化后 LIR 与 GC metadata 汇集各层需求，构建并校验 raw 契约。
+///
+/// 编译管线与内建函数表录制共用这一份需求口径：录制端的机器片段与用户编译现算的片段读同一份
+/// 契约推导规则。
+pub(crate) fn derive(
+    target: TargetName,
+    policy: RawPlanePolicyV1,
+    frontend: &frontend::FrontendOutput,
+    lir: &lir::Validated,
+    gc_metadata: &GcMetadataBundle,
+    resources: &RuntimeResources<'_>,
+    queries: &QueryEngine,
+) -> Result<RuntimeRawContractV1, Vec<Diagnostic>> {
+    // LocalHeap 类型侧口径与 GC metadata 共用同一份冻结类型表：managed 类型数、超过单个
+    // Immix block 的类型数与最大 payload 都由这些记录推导，避免两处口径漂移。
+    let managed_type_count = frontend.mono.universe.records.len() as u32;
+    let mut large_type_count = 0_u32;
+    let mut max_object_bytes = 0_u64;
+    for record in &frontend.mono.universe.records {
+        let (size, _) = record.layout.unwrap_or((0, 1));
+        max_object_bytes = max_object_bytes.max(size);
+        if size + u64::from(runtime::local_heap_schema::HEAP_OBJECT_HEADER_BYTES)
+            > u64::from(runtime::gc_metadata_contract::GC_BLOCK_BYTES)
+        {
+            large_type_count += 1;
+        }
+    }
+    let coroutine_demand = lir.coroutine_demand();
+    let shared_heap_demand = lir.shared_heap_demand(max_object_bytes);
+    let demand = RawPlaneDemand {
+        coroutine_sites: coroutine_demand.creation_sites,
+        checked_entries: coroutine_demand.checked_entries,
+        suspend_points: coroutine_demand.suspend_points,
+        resource_sites: frontend.gir.placement.counts().resource,
+        runtime_raw_sites: frontend.gir.placement.counts().runtime_raw,
+        owners: 0,
+        message_nodes: 0,
+        turn_region: lir.turn_region_demand(),
+        shared_heap: shared_heap_demand,
+        foreign: foreign_demand(lir, &frontend.gir),
+    };
+    let module = frontend.hir.module();
+    let main_returns_result = module
+        .entry
+        .and_then(|entry| {
+            frontend
+                .gir
+                .bodies
+                .iter()
+                .find(|body| body.owner == entry)
+                .map(|body| body.signature.result)
+        })
+        .and_then(|result| module.types.get(result.index()))
+        .is_some_and(|result| matches!(result, hir::Type::Result(..)));
+    let rt0_demand = Rt0Demand {
+        entry_present: module.entry.is_some(),
+        main_returns_result,
+    };
+    let action_counts = frontend.gir.resource_action_counts();
+    let resource_demand = RawResourceDemand {
+        resource_sites: frontend.gir.placement.counts().resource,
+        acquire_sites: action_counts.0,
+        release_sites: action_counts.1,
+        transfer_sites: action_counts.2,
+        finalize_sites: action_counts.3,
+        owners: 0,
+        kinds: 0,
+    };
+    let barrier_demand = lir.barrier_demand();
+    let gc_demand = gc_metadata_demand(gc_metadata);
+    let local_heap_demand =
+        lir.local_heap_demand(managed_type_count, large_type_count, max_object_bytes);
+    // mark 需求完全由已有三份 demand 推导，不新增 LIR 遍历，避免出现第二份站点口径；
+    // 跨 owner ticket 的来源就是 SharedHeap 的共享字段屏障站点。
+    let mark_demand = MarkDemand {
+        root_sites: gc_demand.root_range_count,
+        barrier_sites: barrier_demand.card_mark_sites,
+        ticket_sites: shared_heap_demand.mark_sites,
+        edge_delta_sites: barrier_demand.edge_summary_sites,
+    };
+    // 栈图与压缩引用来自同一次栈图世界推导：压缩根槽与解码点必须与同一份 LIR 对齐。
+    let (stackmap_demand, compression_demand) = lir.stackmap_demands(module);
+    run(
+        RawModelInputs {
+            target,
+            policy,
+            demand,
+            resource_demand,
+            rt0_demand,
+            scheduler_demand: lir.scheduler_demand(),
+            wait_demand: lir.wait_demand(),
+            sync_demand: lir.sync_demand(),
+            stackmap_demand,
+            compression_demand,
+            gc_metadata_demand: gc_demand,
+            barrier_demand,
+            pacing_demand: lir.pacing_demand(managed_type_count),
+            mark_demand,
+            local_heap_demand,
+            gc_type_section: &gc_metadata.type_section,
+            gc_metadata_section: &gc_metadata.metadata_section,
+            profile: PlatformProfile::from(target),
+            lir_fingerprint: lir.fingerprint(),
+            placement_fingerprint: frontend.gir.placement.fingerprint,
+            hir: module,
+            gir: &frontend.mono.contracts,
+            resources,
+        },
+        queries,
+    )
+}
+
+/// 外调需求：LIR 的调用模式加上 GIR 里的 asm / global_asm 站点。
+fn foreign_demand(lir: &lir::Validated, gir: &frontend::gir::GirWorldV1) -> runtime::ForeignDemand {
+    let mut demand = lir.foreign_demand();
+    for body in &gir.bodies {
+        if body.kind == frontend::gir::body::BodyKind::GlobalAsm {
+            demand.global_asm += 1;
+        }
+        for statement in &body.statements {
+            if let frontend::gir::body::StatementKind::Assign(
+                _,
+                frontend::gir::body::Rvalue::Intrinsic {
+                    op: frontend::gir::body::IntrinsicOp::Asm(_),
+                    ..
+                },
+            ) = statement.kind
+            {
+                demand.asm += 1;
+            }
+        }
+    }
+    demand
+}
+
+/// 将真实 GC metadata bundle 的 section 大小写入 runtime demand。
+fn gc_metadata_demand(bundle: &GcMetadataBundle) -> GcMetadataDemand {
+    let mut demand = bundle.world.demand();
+    demand.type_section_bytes = bundle.type_section.len() as u32;
+    demand.metadata_section_bytes = bundle.metadata_section.len() as u32;
+    demand
+}
+
 /// 契约 query 的输入集合。
-pub(crate) struct RawModelInputs<'a> {
+struct RawModelInputs<'a> {
     pub(crate) target: TargetName,
     pub(crate) policy: RawPlanePolicyV1,
     /// 平台 profile；决定平台常量、失败映射与 extent 阶梯的端点。
@@ -60,7 +204,7 @@ pub(crate) struct RawModelInputs<'a> {
 }
 
 /// 通过 query 构建并校验契约对象；失败进入 `E0058`。
-pub(crate) fn run(
+fn run(
     inputs: RawModelInputs<'_>,
     queries: &QueryEngine,
 ) -> Result<RuntimeRawContractV1, Vec<Diagnostic>> {

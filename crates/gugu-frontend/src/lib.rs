@@ -88,10 +88,7 @@ use std::{
 
 use backend::BackendPlan;
 use frontend::{SourceInput, cfg::CfgContext};
-use raw_model::RawModelInputs;
-use runtime::{
-    RawPlaneDemand, RawPlanePolicyV1, RawResourceDemand, Rt0Demand, RuntimeRawContractV1,
-};
+use runtime::{RawPlanePolicyV1, RuntimeRawContractV1};
 
 /// 一次 bootstrap 编译请求。
 #[derive(Clone, Debug)]
@@ -709,112 +706,22 @@ impl Compiler {
                 };
             }
         };
-        // LocalHeap 类型侧口径与 GC metadata 共用同一份冻结类型表：managed 类型数、超过单个
-        // Immix block 的类型数与最大 payload 都由这些记录推导，避免两处口径漂移。
-        let managed_type_count = frontend.mono.universe.records.len() as u32;
-        let mut large_type_count = 0_u32;
-        let mut max_object_bytes = 0_u64;
-        for record in &frontend.mono.universe.records {
-            let (size, _) = record.layout.unwrap_or((0, 1));
-            max_object_bytes = max_object_bytes.max(size);
-            if size + u64::from(runtime::local_heap_schema::HEAP_OBJECT_HEADER_BYTES)
-                > u64::from(runtime::gc_metadata_contract::GC_BLOCK_BYTES)
-            {
-                large_type_count += 1;
-            }
-        }
         // runtime raw 平面契约：输入来自冻结前端产物与目标描述，与 LIR 一起构成内部表示。
-        let coroutine_demand = lir.coroutine_demand();
-        let shared_heap_demand = lir.shared_heap_demand(max_object_bytes);
-        let demand = RawPlaneDemand {
-            coroutine_sites: coroutine_demand.creation_sites,
-            checked_entries: coroutine_demand.checked_entries,
-            suspend_points: coroutine_demand.suspend_points,
-            resource_sites: frontend.gir.placement.counts().resource,
-            runtime_raw_sites: frontend.gir.placement.counts().runtime_raw,
-            owners: 0,
-            message_nodes: 0,
-            turn_region: lir.turn_region_demand(),
-            shared_heap: shared_heap_demand,
-            foreign: foreign_demand(&lir, &frontend.gir),
-        };
-        let rt0_demand = {
-            let module = frontend.hir.module();
-            let main_returns_result = module
-                .entry
-                .and_then(|entry| {
-                    frontend
-                        .gir
-                        .bodies
-                        .iter()
-                        .find(|body| body.owner == entry)
-                        .map(|body| body.signature.result)
-                })
-                .and_then(|result| module.types.get(result.index()))
-                .is_some_and(|result| matches!(result, frontend::hir::Type::Result(..)));
-            Rt0Demand {
-                entry_present: module.entry.is_some(),
-                main_returns_result,
-            }
-        };
-        let action_counts = frontend.gir.resource_action_counts();
-        let resource_demand = RawResourceDemand {
-            resource_sites: frontend.gir.placement.counts().resource,
-            acquire_sites: action_counts.0,
-            release_sites: action_counts.1,
-            transfer_sites: action_counts.2,
-            finalize_sites: action_counts.3,
-            owners: 0,
-            kinds: 0,
-        };
-        let barrier_demand = lir.barrier_demand();
-        let gc_demand = gc_metadata_demand(&gc_metadata);
-        let local_heap_demand =
-            lir.local_heap_demand(managed_type_count, large_type_count, max_object_bytes);
-        // mark 需求完全由已有三份 demand 推导，不新增 LIR 遍历，避免出现第二份站点口径；
-        // 跨 owner ticket 的来源就是 SharedHeap 的共享字段屏障站点。
-        let mark_demand = runtime::MarkDemand {
-            root_sites: gc_demand.root_range_count,
-            barrier_sites: barrier_demand.card_mark_sites,
-            ticket_sites: shared_heap_demand.mark_sites,
-            edge_delta_sites: barrier_demand.edge_summary_sites,
-        };
-        // 栈图与压缩引用来自同一次栈图世界推导：压缩根槽与解码点必须与同一份 LIR 对齐。
-        let (stackmap_demand, compression_demand) = lir.stackmap_demands(frontend.hir.module());
-        let raw_contract = match raw_model::run(
-            RawModelInputs {
-                target,
-                // cage profile 是编译期策略：demand 由优化后 LIR 推导，policy 必须在
-                // lowering 前已知，这里只把它带进 raw 平面契约，不做事后修正。
-                policy: RawPlanePolicyV1 {
-                    compression,
-                    routing,
-                    provenance,
-                    combining,
-                    ..RawPlanePolicyV1::default()
-                },
-                demand,
-                resource_demand,
-                rt0_demand,
-                scheduler_demand: lir.scheduler_demand(),
-                wait_demand: lir.wait_demand(),
-                sync_demand: lir.sync_demand(),
-                stackmap_demand,
-                compression_demand,
-                gc_metadata_demand: gc_demand,
-                barrier_demand,
-                pacing_demand: lir.pacing_demand(frontend.mono.universe.records.len() as u32),
-                mark_demand,
-                local_heap_demand,
-                gc_type_section: &gc_metadata.type_section,
-                gc_metadata_section: &gc_metadata.metadata_section,
-                profile: runtime::PlatformProfile::from(target),
-                lir_fingerprint: lir.fingerprint(),
-                placement_fingerprint: frontend.gir.placement.fingerprint,
-                hir: frontend.hir.module(),
-                gir: &frontend.mono.contracts,
-                resources: &resources,
+        let raw_contract = match raw_model::derive(
+            target,
+            // cage profile 是编译期策略：demand 由优化后 LIR 推导，policy 必须在
+            // lowering 前已知，这里只把它带进 raw 平面契约，不做事后修正。
+            RawPlanePolicyV1 {
+                compression,
+                routing,
+                provenance,
+                combining,
+                ..RawPlanePolicyV1::default()
             },
+            &frontend,
+            &lir,
+            &gc_metadata,
+            &resources,
             &self.queries,
         ) {
             Ok(contract) => contract,
@@ -891,6 +798,7 @@ impl Compiler {
                         &source_map,
                         &entry,
                         glues,
+                        (&frontend.installed, resources.prebuilt()),
                     )
                 });
             match outcome {
@@ -1041,37 +949,6 @@ impl Compiler {
             action_key,
         }
     }
-}
-
-/// 外调需求：LIR 的调用模式加上 GIR 里的 asm / global_asm 站点。
-fn foreign_demand(lir: &lir::Validated, gir: &frontend::gir::GirWorldV1) -> runtime::ForeignDemand {
-    let mut demand = lir.foreign_demand();
-    for body in &gir.bodies {
-        if body.kind == frontend::gir::body::BodyKind::GlobalAsm {
-            demand.global_asm += 1;
-        }
-        for statement in &body.statements {
-            if let frontend::gir::body::StatementKind::Assign(
-                _,
-                frontend::gir::body::Rvalue::Intrinsic {
-                    op: frontend::gir::body::IntrinsicOp::Asm(_),
-                    ..
-                },
-            ) = statement.kind
-            {
-                demand.asm += 1;
-            }
-        }
-    }
-    demand
-}
-
-/// 将真实 GC metadata bundle 的 section 大小写入 runtime demand。
-fn gc_metadata_demand(bundle: &frontend::gc::GcMetadataBundle) -> runtime::GcMetadataDemand {
-    let mut demand = bundle.world.demand();
-    demand.type_section_bytes = bundle.type_section.len() as u32;
-    demand.metadata_section_bytes = bundle.metadata_section.len() as u32;
-    demand
 }
 
 /// 编译器构建身份。`unicode-` 后缀是目标 Unicode 数据版本，另附依赖 crate 提供的表版本。

@@ -13,7 +13,8 @@ pub const ARTIFACT_SCHEMA: u32 = 4;
 
 /// 内建块物化表的 schema：表集或表内布局变化时递增。
 /// 5：函数表项追加 poll 之后的 LIR body 层。
-pub const PREBUILT_SCHEMA: u32 = 5;
+/// 6：函数表项追加 absorb 之前的 x64 片段层。
+pub const PREBUILT_SCHEMA: u32 = 6;
 /// payload 的域隔离标签。
 pub const ARTIFACT_DOMAIN: &str = "gugu-runtime-artifact-v1";
 /// GBC payload 编码版本。
@@ -128,6 +129,8 @@ pub struct RuntimeFunctionArtifactV1 {
     pub analysis: Vec<u8>,
     /// 该实例 poll 之后的 LIR body 规范编码。
     pub lir: Vec<u8>,
+    /// 该实例 absorb 之前的 x64 片段规范编码；空表示该实例的片段依赖本 world，不录制。
+    pub x64: Vec<u8>,
 }
 
 impl RuntimeFunctionArtifactV1 {
@@ -135,7 +138,7 @@ impl RuntimeFunctionArtifactV1 {
     pub fn content_fingerprint(&self) -> [u8; 32] {
         let mut hash = blake3::Hasher::new_derive_key("gugu-builtin-function-v1");
         hash.update(self.stable_mono_key.as_bytes());
-        for layer in [&self.analysis, &self.lir] {
+        for layer in [&self.analysis, &self.lir, &self.x64] {
             hash.update(&(layer.len() as u64).to_le_bytes());
             hash.update(layer);
         }
@@ -801,6 +804,7 @@ fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, Runtime
             encoder.digest(&function.fingerprint);
             encoder.bytes(&function.analysis)?;
             encoder.bytes(&function.lir)?;
+            encoder.bytes(&function.x64)?;
         }
     }
     Ok(encoder.finish())
@@ -926,6 +930,7 @@ fn decode_prebuilt(
             fingerprint: decoder.digest()?,
             analysis: decoder.bytes()?,
             lir: decoder.bytes()?,
+            x64: decoder.bytes()?,
         });
     }
     Ok(RuntimePrebuiltV1 {
@@ -1163,6 +1168,7 @@ mod tests {
             fingerprint: [3; 32],
             analysis: vec![1],
             lir: vec![2],
+            x64: vec![4],
         }
     }
 

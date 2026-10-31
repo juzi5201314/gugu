@@ -135,7 +135,8 @@ fn gc_probe_installs_like_a_fresh_derivation() {
 ///
 /// 这条断言把「内建块已安装」从输出等价性提升到工作量的可观测事实：内建块占 owner 表绝大多数
 /// 条目，若其中任何一个被重新降级，`Complete` 的 GIR cell 数量会立刻跳到数百。canonical 程序与
-/// 录制用的程序同形，函数表每一项都必须入选可安装集，且这些实例不注册 `BuildLir` cell。
+/// 录制用的程序同形，函数表每一项都必须入选可安装集，这些实例不注册 `BuildLir` cell，录制了
+/// x64 层的实例也不注册 `CodegenFragment` cell。
 #[test]
 fn materialized_block_skips_builtin_derivation() {
     let mut source_map = crate::SourceMap::new(vec![
@@ -219,5 +220,50 @@ fn materialized_block_skips_builtin_derivation() {
             .unwrap_or(0),
         1,
         "整世界类型检查应当只注册一个 cell"
+    );
+    let resources = crate::testing::resources();
+    let prebuilt = resources.prebuilt();
+    let glues =
+        crate::backend::x64::glue::RuntimeGlueBindings::resolve(&resources, &output.hir, &lir)
+            .unwrap();
+    let gc_metadata =
+        crate::frontend::gc::derive(&output.mono.universe, &output.gir, output.hir.module())
+            .unwrap();
+    let raw = crate::raw_model::derive(
+        TargetName::X86_64Linux,
+        Default::default(),
+        &output,
+        &lir,
+        &gc_metadata,
+        &resources,
+        &engine,
+    )
+    .unwrap();
+    crate::backend::x64::codegen::fragments(
+        &lir,
+        &output.mono.universe,
+        &raw,
+        TargetName::X86_64Linux,
+        &engine,
+        &source_map,
+        &glues,
+        (&output.installed, prebuilt),
+    )
+    .unwrap();
+    let machine = prebuilt
+        .unwrap()
+        .functions
+        .iter()
+        .filter(|function| !function.x64.is_empty())
+        .count();
+    assert!(machine > 100, "x64 层应覆盖大多数内建实例：只有 {machine} 项");
+    assert_eq!(
+        engine
+            .completed_by_kind()
+            .get(&crate::QueryKind::CodegenFragment)
+            .copied()
+            .unwrap_or(0),
+        lir.body_count() - machine,
+        "录制了 x64 层的实例不得进入 CodegenFragment"
     );
 }

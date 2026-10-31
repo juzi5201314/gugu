@@ -43,6 +43,8 @@ struct World {
     target: String,
     input_fingerprint: [u8; 32],
     bodies: Vec<body::Body>,
+    /// 与 `bodies` 同序：该 body 是否由内建函数表安装。安装来源不是 body 内容，不进指纹。
+    installed: Vec<bool>,
     fingerprint: [u8; 32],
 }
 
@@ -62,10 +64,15 @@ impl Validated {
     pub fn bodies(&self) -> &[body::Body] {
         &self.world.bodies
     }
-    /// 测试用：沿用本 world 的 schema、目标与指纹，只替换 body 列表；不重算指纹。
+    /// 与 [`Self::bodies`] 同序：该 body 是否由内建函数表安装（poll 之后的录制形态）。
+    pub fn installed(&self) -> &[bool] {
+        &self.world.installed
+    }
+    /// 测试用：沿用本 world 的 schema、目标与指纹，只替换 body 列表（视为全部现算）；不重算指纹。
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_bodies(&self, bodies: Vec<body::Body>) -> Self {
         let mut world = (*self.world).clone();
+        world.installed = vec![false; bodies.len()];
         world.bodies = bodies;
         Self {
             world: Arc::new(world),
@@ -773,6 +780,7 @@ pub fn build(
         target,
         input_fingerprint: fingerprint,
         bodies,
+        installed,
         fingerprint: [0; 32],
     };
     world.fingerprint = world_fingerprint(&world);

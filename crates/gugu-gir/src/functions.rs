@@ -1,7 +1,7 @@
 //! 内建实例的物化函数表：可安装集的判定、表项内容校验与构建期录制。
 //!
 //! 函数表在构建期由 canonical 程序的编译录制，每项按实例 MonoKey digest 存该实例各层的冻结
-//! 结果：分析分片（函数摘要与本 owner 的证明）与下层（LIR）字节。
+//! 结果：分析分片（函数摘要与本 owner 的证明）与下层（LIR、x64 片段）字节。
 //!
 //! 用户编译在单态化闭合之后求可安装集：实例 digest 在表内、它的 owner 在本 world 只有这一个
 //! 实例，并且全部可执行 callee 同样可安装（按 callee 闭合取最大不动点）。在这个集合上安装的
@@ -83,7 +83,7 @@ impl InstalledFunctions {
 
 /// 构建期录制：从 canonical 程序的已完成 world 取内建实例的各层结果，按 key 升序。
 ///
-/// `builtin` 是内建编号前缀的定义数；`lower` 按实例 digest 给出下层（LIR）的录制字节。入选
+/// `builtin` 是内建编号前缀的定义数；`lower` 按实例 digest 给出下层的录制字节 `(LIR, x64)`。入选
 /// 条件与安装端相同（单实例 owner、callee 闭合），另排除观察到预算耗尽的 owner（安装端组装的
 /// SCC 预算位恒为假）、没有具体 body 的实例，以及读取类型宇宙稠密编号的实例
 /// （[`reads_type_numbering`]）。
@@ -93,7 +93,7 @@ pub fn record(
     gir: &GirWorldV1,
     world: &AnalysisWorldV1,
     builtin: usize,
-    lower: impl Fn(&[u8; 32]) -> Option<Vec<u8>>,
+    lower: impl Fn(&[u8; 32]) -> Option<(Vec<u8>, Vec<u8>)>,
 ) -> Result<Vec<RuntimeFunctionArtifactV1>, Diagnostic> {
     let mut concrete: Vec<([u8; 32], &ConcreteBody)> = gir
         .concrete
@@ -126,13 +126,14 @@ pub fn record(
             let digest = digest_of(mono_key);
             let analysis = analysis::encode_shard(world, owner, mono_key)
                 .ok_or_else(|| invariant("录制的内建实例不在分析 world 中".to_owned()))?;
-            let lir = lower(&digest)
+            let (lir, x64) = lower(&digest)
                 .ok_or_else(|| invariant("录制的内建实例没有 LIR body".to_owned()))?;
             let mut artifact = RuntimeFunctionArtifactV1 {
                 stable_mono_key: digest_hex(&digest),
                 fingerprint: [0; 32],
                 analysis,
                 lir,
+                x64,
             };
             artifact.fingerprint = artifact.content_fingerprint();
             Ok(artifact)

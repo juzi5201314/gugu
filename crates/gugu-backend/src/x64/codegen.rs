@@ -25,10 +25,11 @@ use crate::late::universe::TypeUniverse;
 use crate::lir;
 use crate::lir::body::Body;
 use crate::query::{QueryEngine, QueryKey, QueryKind};
-use crate::runtime::{RAW_MODEL_SCHEMA, RuntimeRawContractV1};
+use crate::runtime::{RAW_MODEL_SCHEMA, RuntimePrebuiltV1, RuntimeRawContractV1};
 use crate::semantics::query::{restore_errors, store_errors};
 use crate::target::TargetName;
 use crate::x64::mangle;
+use gugu_gir::functions::InstalledFunctions;
 
 use super::alloc;
 use super::contract::{self, EncoderContract};
@@ -977,61 +978,17 @@ pub fn build(
     sources: &SourceMap,
     entry: &[u8; 32],
     glues: RuntimeGlueBindings,
+    functions: (&InstalledFunctions, Option<&RuntimePrebuiltV1>),
 ) -> Result<X64World, Vec<Diagnostic>> {
-    let contract = EncoderContract::build(target.descriptor().cpu_baseline);
-    contract
-        .verify()
-        .map_err(|error| vec![invalid(error.message())])?;
-    let encoder = contract.fingerprint();
-    let lir_fingerprint = lir.fingerprint();
-    let mut fragments = Vec::with_capacity(lir.bodies().len());
+    let (contract, mut fragments) =
+        self::fragments(lir, universe, raw, target, queries, sources, &glues, functions)?;
     let mut constants = DataPool::default();
     let mut entry_symbol = None;
-    for body in lir.bodies() {
-        let key = QueryKey::new(
-            QueryKind::CodegenFragment,
-            CODEGEN_SCHEMA,
-            fragment_key(lir_fingerprint, body, target, encoder, raw, universe),
-        );
-        let mut fresh = None;
-        let computed = queries.compute(key, |context| {
-            for source in sources.snapshots() {
-                context.record_dependency(
-                    QueryKey::new(QueryKind::SourceSnapshot, 1, source.logical_path()),
-                    source.content_hash(),
-                );
-            }
-            context.record_dependency(
-                QueryKey::new(QueryKind::BuildLir, lir::SCHEMA, lir_fingerprint),
-                lir_fingerprint,
-            );
-            context.record_dependency(
-                QueryKey::new(
-                    QueryKind::RuntimeRawModel,
-                    RAW_MODEL_SCHEMA,
-                    raw.fingerprint(),
-                ),
-                raw.fingerprint(),
-            );
-            let fragment =
-                assemble_fragment(body, universe, raw, target, encoder, &contract, &glues)
-                    .map_err(|errors| store_errors(&errors))?;
-            let bytes = crate::canonical::to_vec(&fragment).expect("机器片段编码");
-            fresh = Some(fragment);
-            Ok((bytes, Vec::new()))
-        });
-        let computed = computed.map_err(|error| restore_errors(error, sources))?;
-        let mut fragment = match fresh {
-            Some(fragment) => fragment,
-            None => crate::canonical::from_slice(computed.payload())
-                .map_err(|_| vec![invalid("缓存机器片段不是合法 schema")])?,
-        };
-        validate_fragment(&fragment, body, target, encoder)?;
-        constants.absorb(body, &mut fragment)?;
+    for (body, fragment) in lir.bodies().iter().zip(&mut fragments) {
+        constants.absorb(body, fragment)?;
         if body.instance == *entry {
             entry_symbol = Some(fragment.symbol.clone());
         }
-        fragments.push(fragment);
     }
     // 入口实例必然有 LIR body（它是闭世界根之一）；缺失说明入口没有走到选指。
     let entry_symbol = entry_symbol.ok_or_else(|| vec![invalid("入口实例没有机器片段")])?;
@@ -1056,6 +1013,106 @@ pub fn build(
     };
     world.fingerprint = world_fingerprint(&world);
     Ok(world)
+}
+
+/// 逐 body 产出 absorb 之前的机器片段，与 `lir.bodies()` 同序；同时返回生成它们的 encoder 契约。
+///
+/// LIR 层从内建函数表安装的 body 安装录制的片段并跳过 `CodegenFragment` query；未录制本层的
+/// 安装 body 与现算 body 一样走 query。两条路径的片段都经同一个 verifier 校验。
+pub fn fragments(
+    lir: &lir::Validated,
+    universe: &TypeUniverse,
+    raw: &RuntimeRawContractV1,
+    target: TargetName,
+    queries: &QueryEngine,
+    sources: &SourceMap,
+    glues: &RuntimeGlueBindings,
+    (installed, prebuilt): (&InstalledFunctions, Option<&RuntimePrebuiltV1>),
+) -> Result<(EncoderContract, Vec<FragmentPayload>), Vec<Diagnostic>> {
+    let contract = EncoderContract::build(target.descriptor().cpu_baseline);
+    contract
+        .verify()
+        .map_err(|error| vec![invalid(error.message())])?;
+    let encoder = contract.fingerprint();
+    let lir_fingerprint = lir.fingerprint();
+    let entries = super::installed::entries(prebuilt).map_err(|error| vec![error])?;
+    let mut fragments = Vec::with_capacity(lir.bodies().len());
+    for (body, &from_table) in lir.bodies().iter().zip(lir.installed()) {
+        let recorded = if from_table {
+            super::installed::decode(installed, entries, body, glues)
+                .map_err(|error| vec![error])?
+        } else {
+            None
+        };
+        let fragment = match recorded {
+            Some(fragment) => fragment,
+            None => fragment_query(
+                lir_fingerprint,
+                body,
+                universe,
+                raw,
+                target,
+                (encoder, &contract),
+                queries,
+                sources,
+                glues,
+            )?,
+        };
+        validate_fragment(&fragment, body, target, encoder)?;
+        fragments.push(fragment);
+    }
+    Ok((contract, fragments))
+}
+
+/// 经 `CodegenFragment` query 现算或取缓存的单个片段。
+fn fragment_query(
+    lir_fingerprint: [u8; 32],
+    body: &Body,
+    universe: &TypeUniverse,
+    raw: &RuntimeRawContractV1,
+    target: TargetName,
+    (encoder, contract): ([u8; 32], &EncoderContract),
+    queries: &QueryEngine,
+    sources: &SourceMap,
+    glues: &RuntimeGlueBindings,
+) -> Result<FragmentPayload, Vec<Diagnostic>> {
+    let key = QueryKey::new(
+        QueryKind::CodegenFragment,
+        CODEGEN_SCHEMA,
+        fragment_key(lir_fingerprint, body, target, encoder, raw, universe),
+    );
+    let mut fresh = None;
+    let computed = queries.compute(key, |context| {
+        for source in sources.snapshots() {
+            context.record_dependency(
+                QueryKey::new(QueryKind::SourceSnapshot, 1, source.logical_path()),
+                source.content_hash(),
+            );
+        }
+        context.record_dependency(
+            QueryKey::new(QueryKind::BuildLir, lir::SCHEMA, lir_fingerprint),
+            lir_fingerprint,
+        );
+        context.record_dependency(
+            QueryKey::new(
+                QueryKind::RuntimeRawModel,
+                RAW_MODEL_SCHEMA,
+                raw.fingerprint(),
+            ),
+            raw.fingerprint(),
+        );
+        let fragment = assemble_fragment(body, universe, raw, target, encoder, contract, glues)
+            .map_err(|errors| store_errors(&errors))?;
+        let bytes = crate::canonical::to_vec(&fragment).expect("机器片段编码");
+        fresh = Some(fragment);
+        Ok((bytes, Vec::new()))
+    });
+    let computed = computed.map_err(|error| restore_errors(error, sources))?;
+    match fresh {
+        Some(fragment) => Ok(fragment),
+        None => crate::canonical::from_slice(computed.payload())
+            .map_err(|_| vec![invalid("缓存机器片段不是合法 schema")]),
+    }
 }
 
 /// 为每个被引用的静态存储求出镜像内块尺寸（`initialized` 字 + 值槽）。
@@ -1139,7 +1196,11 @@ fn fragment_key(
 }
 
 /// 绑定实例的函数体符号改为 runtime glue 名；其余维持实例 mangling。
-fn fragment_symbol(body: &Body, allocated: &str, glues: &RuntimeGlueBindings) -> String {
+pub(super) fn fragment_symbol(
+    body: &Body,
+    allocated: &str,
+    glues: &RuntimeGlueBindings,
+) -> String {
     match glues.glue_of_instance(&body.instance) {
         Some(glue) => super::mangle::mangle_runtime(glue),
         None => allocated.to_owned(),
