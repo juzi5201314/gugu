@@ -47,8 +47,10 @@ use super::verify;
 ///
 /// 版本 5 在每个站点记录调用返回 PC 与 morestack 返回 PC，供分配后的栈图按指令边界回填；
 /// 版本 6 把「最后一条 call 的返回点」改成「站点内全部 call 的返回点」，让同一 LIR 点上
-/// 的多条收集 slow call 各自命中同一语义 map，而不是只有最后一条被登记。
-pub const CODEGEN_SCHEMA: u32 = 7;
+/// 的多条收集 slow call 各自命中同一语义 map，而不是只有最后一条被登记；
+/// 版本 8 去掉 payload 里的 LIR world 指纹：输入身份只由 query key 绑定，
+/// 同一 body 在任何 world 里产出同一份 payload。
+pub const CODEGEN_SCHEMA: u32 = 8;
 
 /// 片段 query key 的域。
 const FRAGMENT_KEY_DOMAIN: &str = "gugu-x64-fragment-key-v1";
@@ -264,8 +266,6 @@ pub struct FragmentPayload {
     pub target: String,
     /// 实例稳定键。
     pub instance: [u8; 32],
-    /// 生成时刻的 LIR world 指纹。
-    pub lir_fingerprint: [u8; 32],
     /// 生成时刻的 encoder 契约指纹。
     pub encoder_fingerprint: [u8; 32],
     /// 内部 mangled 符号。
@@ -1013,17 +1013,9 @@ pub fn build(
                 ),
                 raw.fingerprint(),
             );
-            let fragment = assemble_fragment(
-                body,
-                universe,
-                raw,
-                target,
-                encoder,
-                lir_fingerprint,
-                &contract,
-                &glues,
-            )
-            .map_err(|errors| store_errors(&errors))?;
+            let fragment =
+                assemble_fragment(body, universe, raw, target, encoder, &contract, &glues)
+                    .map_err(|errors| store_errors(&errors))?;
             let bytes = crate::canonical::to_vec(&fragment).expect("机器片段编码");
             fresh = Some(fragment);
             Ok((bytes, Vec::new()))
@@ -1034,7 +1026,7 @@ pub fn build(
             None => crate::canonical::from_slice(computed.payload())
                 .map_err(|_| vec![invalid("缓存机器片段不是合法 schema")])?,
         };
-        validate_fragment(&fragment, body, target, encoder, lir_fingerprint)?;
+        validate_fragment(&fragment, body, target, encoder)?;
         constants.absorb(body, &mut fragment)?;
         if body.instance == *entry {
             entry_symbol = Some(fragment.symbol.clone());
@@ -1191,7 +1183,6 @@ fn assemble_fragment(
     raw: &RuntimeRawContractV1,
     target: TargetName,
     encoder: [u8; 32],
-    lir_fingerprint: [u8; 32],
     contract: &EncoderContract,
     glues: &RuntimeGlueBindings,
 ) -> Result<FragmentPayload, Vec<Diagnostic>> {
@@ -1237,7 +1228,6 @@ fn assemble_fragment(
         schema: CODEGEN_SCHEMA,
         target: target.name().to_owned(),
         instance: body.instance,
-        lir_fingerprint,
         encoder_fingerprint: encoder,
         symbol: fragment_symbol(body, &allocated.symbol, glues),
         symbols: reference_symbols(&assembled.relocations),
@@ -1465,12 +1455,10 @@ fn validate_fragment(
     body: &Body,
     target: TargetName,
     encoder: [u8; 32],
-    lir_fingerprint: [u8; 32],
 ) -> Result<(), Vec<Diagnostic>> {
     if fragment.schema != CODEGEN_SCHEMA
         || fragment.target != target.name()
         || fragment.instance != body.instance
-        || fragment.lir_fingerprint != lir_fingerprint
         || fragment.encoder_fingerprint != encoder
     {
         return Err(vec![invalid("机器片段没有绑定当前输入、目标或编码规则")]);

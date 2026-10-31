@@ -6,7 +6,8 @@ use crate::gir::placement::PlacementKind;
 use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, ops::Range};
 
-pub const REVISION: u32 = 9;
+/// body 规范字节的 revision。10：body 不再携带整世界输入指纹，同一实例的 body 只由自身内容决定。
+pub const REVISION: u32 = 10;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -726,7 +727,6 @@ pub struct Body {
     pub assembly: Vec<crate::hir::Assembly>,
     pub environments: Vec<Environment>,
     pub entry: BlockId,
-    pub input_fingerprint: [u8; 32],
     pub poll_summary: PollSummary,
 }
 

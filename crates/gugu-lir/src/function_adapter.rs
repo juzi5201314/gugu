@@ -86,7 +86,6 @@ fn build(target: &Body, has_environment: bool) -> Body {
         assembly: Vec::new(),
         environments: Vec::new(),
         entry: BlockId(0),
-        input_fingerprint: target.input_fingerprint,
         poll_summary: PollSummary::default(),
     };
     let memory = parameter(&mut body, BlockId(0), 0, ValueType::scalar(Type::Mem));

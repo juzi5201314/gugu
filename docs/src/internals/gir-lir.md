@@ -431,7 +431,7 @@ LIR verifier 至少检查：
 
 release 编译器在进入代码生成前也必须运行完整 verifier。验证失败属于编译器内部错误并停止产出镜像，不能降级成保守机器码继续运行。
 
-`BuildLir`（query 15，schema 2）按具体实例键、GIR/布局、late、placement 与目标指纹隔离缓存。构造结果与缓存恢复都必须经过同一结构 verifier，只有校验凭据能够进入 backend/image plan；失败诊断为 `E0057`。此构造边界验证 SSA、Mem、source scope、指针来源、原子序与 region/barrier 的结构，不要求尚未运行的屏障预留 pass 已经完成，也不冒充 target legalization、预算化 poll、寄存器分配或机器码联合校验。固定优化管线在 world 级确定性运行、不写入该缓存；冷/热编译必须得到相同的 `dump_lir` 与 `lir_fingerprint`，每个 pass 之后运行结构 verifier，整条管线结束后运行完整 verifier。
+`BuildLir`（query 15，schema 2）按具体实例键、GIR/布局、late、placement 与目标指纹隔离缓存。输入身份只在 query key 里：body（revision 10）不携带整世界输入指纹，同一实例在任何 world 里降级出同一份 body，restore 只核对 revision、实例与目标。构造结果与缓存恢复都必须经过同一结构 verifier，只有校验凭据能够进入 backend/image plan；失败诊断为 `E0057`。此构造边界验证 SSA、Mem、source scope、指针来源、原子序与 region/barrier 的结构，不要求尚未运行的屏障预留 pass 已经完成，也不冒充 target legalization、预算化 poll、寄存器分配或机器码联合校验。固定优化管线在 world 级确定性运行、不写入该缓存；冷/热编译必须得到相同的 `dump_lir` 与 `lir_fingerprint`，每个 pass 之后运行结构 verifier，整条管线结束后运行完整 verifier。
 
 ## IR dump
 

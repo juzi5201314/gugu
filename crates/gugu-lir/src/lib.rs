@@ -708,7 +708,6 @@ pub fn build(
                 mono,
                 &index,
                 &target,
-                fingerprint,
                 compression,
                 sources,
             )
@@ -728,12 +727,13 @@ pub fn build(
         } else {
             let body: body::Body = crate::canonical::from_slice(computed.payload())
                 .map_err(|_| vec![invalid("缓存 LIR 不是合法 schema")])?;
+            // 输入身份由 BuildLir query key（world 输入指纹 + 实例 + 具体 GIR 指纹）绑定；
+            // body 自身只核对 revision、实例与目标。
             if body.revision != body::REVISION
-                || body.input_fingerprint != fingerprint
                 || body.instance != concrete.instance
                 || body.target != target
             {
-                return Err(vec![invalid("缓存 LIR 没有绑定当前输入或目标")]);
+                return Err(vec![invalid("缓存 LIR 没有绑定当前实例或目标")]);
             }
             verify::verify_structure(&body, hir.module()).map_err(|error| vec![error])?;
             body

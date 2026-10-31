@@ -219,7 +219,6 @@ pub fn lower(
     mono: &mono::MonoWorldV1,
     index: &LirIndex,
     target: &str,
-    input_fingerprint: [u8; 32],
     compression: crate::runtime::CompressionPolicyV1,
     sources: &crate::SourceMap,
 ) -> Result<Body, Diagnostic> {
@@ -279,7 +278,6 @@ pub fn lower(
             assembly: owner.assembly.clone(),
             environments: Vec::new(),
             entry: BlockId(0),
-            input_fingerprint,
             poll_summary: body::PollSummary::default(),
         },
         blocks: Vec::new(),

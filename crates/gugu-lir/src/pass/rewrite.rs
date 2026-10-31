@@ -182,7 +182,6 @@ pub struct Editor {
     pub data: Vec<super::super::body::Data>,
     pub assembly: Vec<Assembly>,
     pub environments: Vec<super::super::body::Environment>,
-    pub input_fingerprint: [u8; 32],
     pub poll_summary: PollSummary,
 }
 
@@ -298,7 +297,6 @@ impl Editor {
             data: Vec::new(),
             assembly,
             environments: Vec::new(),
-            input_fingerprint: body.input_fingerprint,
             poll_summary: body.poll_summary,
             original: OriginalArenas::default(),
         };
@@ -365,7 +363,6 @@ impl Editor {
             assembly: self.assembly,
             environments: self.environments,
             entry: self.entry,
-            input_fingerprint: self.input_fingerprint,
             poll_summary: self.poll_summary,
         }
     }
@@ -1040,7 +1037,6 @@ impl Editor {
             data,
             assembly,
             environments,
-            input_fingerprint,
             poll_summary,
         } = self;
 
@@ -1431,7 +1427,6 @@ impl Editor {
             assembly,
             environments,
             entry,
-            input_fingerprint,
             poll_summary,
         };
         super::super::uses::rebuild(&mut body);
