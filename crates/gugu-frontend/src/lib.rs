@@ -537,7 +537,7 @@ impl Compiler {
         graph.complete(ActionKind::ResolveTarget, target.to_string());
         let resources = match self
             .artifact_for_target(target)
-            .and_then(RuntimeResources::new)
+            .map(RuntimeResources::new)
         {
             Ok(resources) => resources,
             Err(error) => {

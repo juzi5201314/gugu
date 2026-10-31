@@ -131,10 +131,11 @@ fn gc_probe_installs_like_a_fresh_derivation() {
     });
 }
 
-/// 物化块不参与派生：内建 owner 从不进入 `BuildGenericGir`。
+/// 物化块不参与派生：内建 owner 从不进入 `BuildGenericGir`，内建实例的分析摘要全部从函数表安装。
 ///
 /// 这条断言把「内建块已安装」从输出等价性提升到工作量的可观测事实：内建块占 owner 表绝大多数
-/// 条目，若其中任何一个被重新降级，`Complete` 的 GIR cell 数量会立刻跳到数百。
+/// 条目，若其中任何一个被重新降级，`Complete` 的 GIR cell 数量会立刻跳到数百。canonical 程序与
+/// 录制用的程序同形，函数表每一项都必须入选可安装集。
 #[test]
 fn materialized_block_skips_builtin_derivation() {
     let mut source_map = crate::SourceMap::new(vec![
@@ -166,6 +167,17 @@ fn materialized_block_skips_builtin_derivation() {
     )
     .unwrap();
     let owners = output.hir.module().owners.len();
+    let recorded = crate::testing::resources()
+        .prebuilt()
+        .expect("测试 artifact 已物化")
+        .functions
+        .len();
+    assert!(recorded > 100, "函数表应覆盖运行时实例：只有 {recorded} 项");
+    assert_eq!(
+        output.installed.len(),
+        recorded,
+        "canonical 程序必须安装函数表的每一项"
+    );
     let counts = engine.completed_by_kind();
     let gir = counts
         .get(&crate::QueryKind::BuildGenericGir)

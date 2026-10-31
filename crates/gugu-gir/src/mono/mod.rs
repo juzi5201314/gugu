@@ -35,3 +35,8 @@ pub fn close(
 pub fn digest_of(mono_key: &[u8]) -> [u8; 32] {
     hash_domain("gugu-mono-v1", mono_key)
 }
+
+/// 实例 digest 的小写十六进制；公共摘要表与内建函数表都以它为键。
+pub fn digest_hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}

@@ -8,13 +8,18 @@ use super::callgraph;
 use super::encode;
 use super::policy::AnalysisPolicyV1;
 use super::solver::{self, SccMember};
-use super::types::{AnalysisWorldV1, FunctionSummary, SccSummaryV1, WORLD_SCHEMA_VERSION};
+use super::types::{
+    AnalysisWorldV1, FunctionSummary, InstanceSummaryRecord, SccSummaryV1, WORLD_SCHEMA_VERSION,
+    sort_proofs,
+};
 use crate::SourceMap;
 use crate::cfg::CfgContext;
+use crate::functions::InstalledFunctions;
 use crate::gir::GirWorldV1;
 use crate::hir::Module;
 use crate::mono::{MonoWorldV1, digest_of};
-use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
+use crate::query::{DependencyFingerprint, QueryEngine, QueryError, QueryKey, QueryKind};
+use crate::runtime::RuntimeFunctionArtifactV1;
 
 const SCC_SCHEMA: u32 = 5;
 const FUNCTION_SCHEMA: u32 = 5;
@@ -28,7 +33,7 @@ struct InstancePlan {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "world 边界固定 HIR、GIR、实例图、策略与 query 来源"
+    reason = "world 边界固定 HIR、GIR、实例图、策略、函数表与 query 来源"
 )]
 pub fn run_world(
     module: &Module,
@@ -41,6 +46,7 @@ pub fn run_world(
     policy: AnalysisPolicyV1,
     queries: &QueryEngine,
     sources: &SourceMap,
+    installed: (&InstalledFunctions, &[RuntimeFunctionArtifactV1]),
 ) -> Result<(AnalysisWorldV1, DependencyFingerprint), Vec<crate::Diagnostic>> {
     let input_fingerprint = input_fingerprint(
         hir_fingerprint,
@@ -93,6 +99,7 @@ pub fn run_world(
                     input_fingerprint,
                     policy,
                     &completed,
+                    installed,
                     queries,
                 )?;
                 context.record_dependency(dependency.key().clone(), dependency.fingerprint());
@@ -233,7 +240,7 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "SCC 摘要需要 world、成员、依赖与策略一同参与指纹"
+    reason = "SCC 摘要需要 world、成员、依赖、策略与函数表一同参与指纹"
 )]
 fn scc_summary(
     module: &Module,
@@ -243,8 +250,9 @@ fn scc_summary(
     input: [u8; 32],
     policy: AnalysisPolicyV1,
     completed: &[Option<(FunctionSummary, DependencyFingerprint)>],
+    installed: (&InstalledFunctions, &[RuntimeFunctionArtifactV1]),
     queries: &QueryEngine,
-) -> Result<(SccSummaryV1, encode::EncodedScc, DependencyFingerprint), crate::query::QueryError> {
+) -> Result<(SccSummaryV1, encode::EncodedScc, DependencyFingerprint), QueryError> {
     let mut bytes = input.to_vec();
     bytes.extend_from_slice(
         &u64::try_from(component.len())
@@ -265,13 +273,16 @@ fn scc_summary(
                 }
             }
         }
-        let summary = solver::analyze_scc(module, gir, members, component, policy, &|index| {
-            completed[index]
-                .as_ref()
-                .expect("凝聚图拓扑保证外部 callee SCC 已完成")
-                .0
-                .clone()
-        });
+        let summary = match installed_scc(members, component, installed)? {
+            Some(summary) => summary,
+            None => solver::analyze_scc(module, gir, members, component, policy, &|index| {
+                completed[index]
+                    .as_ref()
+                    .expect("凝聚图拓扑保证外部 callee SCC 已完成")
+                    .0
+                    .clone()
+            }),
+        };
         let encoded = encode::encode_scc(&summary);
         let payload = encoded.payload.clone();
         fresh = Some((summary, encoded));
@@ -298,6 +309,57 @@ fn scc_summary(
         encoded,
         DependencyFingerprint::new(key, result.fingerprint()),
     ))
+}
+
+/// 成员全部可安装的 SCC 由函数表分片组装，不再求解。
+///
+/// 可安装集按 callee 闭合，SCC 成员互相可达，因此一个分量要么整体在集合内、要么整体不在。
+/// 入选实例的预算位在录制时恒为假（耗尽的 owner 不录制）；证明键里的 owner 下标处于内建
+/// 编号前缀，分片里的证明必须指向本成员自己的 owner。
+fn installed_scc(
+    members: &[SccMember],
+    component: &[usize],
+    (installed, entries): (&InstalledFunctions, &[RuntimeFunctionArtifactV1]),
+) -> Result<Option<SccSummaryV1>, QueryError> {
+    let mut shards = Vec::with_capacity(component.len());
+    for &index in component {
+        match installed.entry(entries, &digest_of(&members[index].mono_key)) {
+            Some(entry) => shards.push(entry),
+            None => {
+                debug_assert!(
+                    shards.is_empty(),
+                    "可安装集按 callee 闭合，SCC 不会被部分安装"
+                );
+                return Ok(None);
+            }
+        }
+    }
+    let mut instances = Vec::with_capacity(component.len());
+    let mut proofs = Vec::new();
+    for (&index, entry) in component.iter().zip(shards) {
+        let member = &members[index];
+        let (summary, facts) = encode::decode_shard(&entry.analysis)
+            .map_err(|_| QueryError::Failed("内建函数表的分析分片不能解码".into()))?;
+        if facts
+            .iter()
+            .any(|fact| fact.key.owner_index != member.owner.owner_index)
+        {
+            return Err(QueryError::Failed(
+                "内建函数表的分析分片指向其它 owner".into(),
+            ));
+        }
+        instances.push(InstanceSummaryRecord {
+            mono_key: member.mono_key.clone(),
+            summary,
+        });
+        proofs.extend(facts);
+    }
+    sort_proofs(&mut proofs);
+    Ok(Some(SccSummaryV1 {
+        instances,
+        proofs,
+        budget_exhausted: false,
+    }))
 }
 
 fn function_summary(

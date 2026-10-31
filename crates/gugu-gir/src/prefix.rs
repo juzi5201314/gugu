@@ -5,9 +5,10 @@
 //! 并比对，再跑结构校验；缺少物化表、revision 不符或校验失败一律按 compiler invariant 失败，
 //! 内建块没有源码回退路径。
 //!
-//! 语义层各表由 [`SemaPrefix`] 解码与持有；这里在其上追加 GIR 层的 body 与契约记录类型。
+//! 语义层各表由 [`SemaPrefix`] 解码与持有；这里在其上追加 GIR 层的 body、契约记录类型与
+//! 内建实例的函数表。
 
-use gugu_compiler_core::RuntimePrebuiltV1;
+use gugu_compiler_core::{RuntimeFunctionArtifactV1, RuntimePrebuiltV1};
 
 use crate::Diagnostic;
 use crate::prebuild::layer_revisions;
@@ -22,20 +23,22 @@ const RECORD_TYPES_TABLE: &str = "record.types";
 const GIR_BODIES_TABLE: &str = "gir.bodies";
 
 /// 已校验的内建块前缀：当前会话可直接安装的派生表。
-pub struct BuiltinPrefix {
+pub struct BuiltinPrefix<'a> {
     sema: SemaPrefix,
     /// 内建契约记录的类型目录：layout verifier 在加载期逐字段校验它。
     record_types: Vec<crate::gir::concrete::RecordTypes>,
     /// 内建 owner 的 generic GIR body：按 owner 顺序排列，装载时逐条校验 owner 与稳定键。
     gir_bodies: Vec<crate::gir::GirBody>,
+    /// 内建实例的函数表：按 key 升序，表项内容在求可安装集时逐项校验。
+    functions: &'a [RuntimeFunctionArtifactV1],
 }
 
-impl BuiltinPrefix {
+impl<'a> BuiltinPrefix<'a> {
     /// 解码并校验内建块前缀。
     ///
     /// `sources` 是本次会话安装的内建源单元数（文件 ID 前缀长度），语义层据此校验表内位置。
     pub fn decode(
-        prebuilt: Option<&RuntimePrebuiltV1>,
+        prebuilt: Option<&'a RuntimePrebuiltV1>,
         sources: usize,
         source_map: &crate::SourceMap,
     ) -> Result<Self, Vec<Diagnostic>> {
@@ -47,6 +50,11 @@ impl BuiltinPrefix {
             .map_err(|error| invalid(&format!("内建块物化表结构非法：{error}")))?;
         if prebuilt.revisions != layer_revisions() {
             return Err(invalid("内建块物化表的派生层 revision 与当前编译器不符"));
+        }
+        if !prebuilt.functions.is_empty()
+            && prebuilt.function_revisions != crate::functions::revisions()
+        {
+            return Err(invalid("内建块函数表的层 revision 与当前编译器不符"));
         }
         let sema = SemaPrefix::decode(prebuilt, sources, source_map)?;
         let record_types: Vec<crate::gir::concrete::RecordTypes> =
@@ -70,6 +78,7 @@ impl BuiltinPrefix {
             sema,
             record_types,
             gir_bodies,
+            functions: &prebuilt.functions,
         })
     }
 
@@ -86,6 +95,11 @@ impl BuiltinPrefix {
     /// 内建契约记录的类型目录；安装后仍需过七个 layout verifier。
     pub fn record_types(&self) -> &[crate::gir::concrete::RecordTypes] {
         &self.record_types
+    }
+
+    /// 内建实例的函数表；为空表示物化表未录制函数层。
+    pub fn functions(&self) -> &'a [RuntimeFunctionArtifactV1] {
+        self.functions
     }
 }
 

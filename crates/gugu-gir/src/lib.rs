@@ -18,6 +18,7 @@ use target::TargetName;
 
 pub mod analysis;
 pub mod contract;
+pub mod functions;
 pub mod gc;
 pub mod gir;
 pub mod late;
@@ -70,6 +71,8 @@ pub struct FrontendOutput {
     pub semantics: semantics::CheckedSemantics,
     pub hir: hir::Validated,
     pub analysis: analysis::AnalysisWorldV1,
+    /// 从内建函数表安装的实例；后续层按同一集合安装，测试据此观察安装覆盖面。
+    pub installed: functions::InstalledFunctions,
     pub mono: mono::MonoWorldV1,
     pub gir: gir::GirWorldV1,
     pub gir_stats: gir::pass::GirPassStats,
@@ -148,6 +151,7 @@ pub fn bootstrap_with(
                 .map_err(|error| vec![error])?
                 .0,
             analysis: analysis::empty_world(),
+            installed: functions::InstalledFunctions::default(),
             mono: mono::empty_world(),
             gir: gir::empty_world(),
             gir_stats: gir::pass::GirPassStats::default(),
@@ -369,6 +373,7 @@ fn check_sources(
         derived.checked,
         derived.hir,
         derived.analysis,
+        derived.installed,
         derived.mono,
         derived.gir,
         derived.gir_stats,
@@ -449,7 +454,7 @@ fn derive_world(
     entry_function: Option<semantics::model::CallableId>,
     queries: &crate::query::QueryEngine,
     runtime_paths: &BTreeSet<String>,
-    prefix: Option<&prefix::BuiltinPrefix>,
+    prefix: Option<&prefix::BuiltinPrefix<'_>>,
 ) -> Result<(names::NameResolution, pipeline::DerivedWorld), Vec<Diagnostic>> {
     let sema_prefix = prefix.map(prefix::BuiltinPrefix::sema);
     let names =
@@ -560,6 +565,7 @@ fn frontend_output(
     semantics: semantics::CheckedSemantics,
     hir: hir::Validated,
     analysis: analysis::AnalysisWorldV1,
+    installed: functions::InstalledFunctions,
     mono: mono::MonoWorldV1,
     gir: gir::GirWorldV1,
     gir_stats: gir::pass::GirPassStats,
@@ -595,6 +601,7 @@ fn frontend_output(
         semantics,
         hir,
         analysis,
+        installed,
         mono,
         gir,
         gir_stats,

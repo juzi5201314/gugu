@@ -176,6 +176,47 @@ pub fn decode_world(payload: &Bytes) -> Result<AnalysisWorldV1, DecodeError> {
     })
 }
 
+/// 逐函数分析分片的字节布局版本；布局变化时递增。
+pub const SHARD_REVISION: u32 = 1;
+
+/// 从已完成的 world 取一个实例的分析分片：函数摘要加本 owner 的全部证明。
+///
+/// 只对单实例 owner 有意义：证明按 owner 键合并，分片里的证明就是该实例自己的结论。
+/// 实例不在 world 内时返回 `None`。
+pub fn encode_shard(world: &AnalysisWorldV1, owner_index: u32, mono_key: &[u8]) -> Option<Vec<u8>> {
+    let record = world
+        .instances
+        .binary_search_by(|record| record.mono_key.as_slice().cmp(mono_key))
+        .ok()
+        .map(|position| &world.instances[position])?;
+    let start = world
+        .proofs
+        .partition_point(|fact| fact.key.owner_index < owner_index);
+    let end = world
+        .proofs
+        .partition_point(|fact| fact.key.owner_index <= owner_index);
+    let mut encoder = Encoder::new();
+    encode_function_summary(&record.summary, &mut encoder);
+    encoder.len_of(end - start);
+    for fact in &world.proofs[start..end] {
+        encode_proof_fact(fact, &mut encoder);
+    }
+    Some(encoder.finish())
+}
+
+/// 解码逐函数分析分片。
+pub fn decode_shard(bytes: &[u8]) -> Result<(FunctionSummary, Vec<ProofFact>), DecodeError> {
+    let mut decoder = Decoder::new(bytes);
+    let summary = decode_function_summary(&mut decoder)?;
+    let count = decoder.len_of()?;
+    let mut proofs = Vec::with_capacity(count);
+    for _ in 0..count {
+        proofs.push(decode_proof_fact(&mut decoder)?);
+    }
+    decoder.expect_end()?;
+    Ok((summary, proofs))
+}
+
 fn encode_function_summary(summary: &FunctionSummary, out: &mut Encoder) {
     out.len_of(summary.preconditions.len());
     out.option_i64(summary.return_lo);

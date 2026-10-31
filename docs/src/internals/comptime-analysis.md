@@ -405,6 +405,8 @@ GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir
 `budget_exhausted = true`，检查保持 `Unknown`；**不是**用户 `Error`。耗尽沿调用边向 caller
 传播：world 的 `exhausted_owners` 列出至少一个实例的自身 SCC 或可达 callee SCC 耗尽的 owner，
 placement 只对这些 body 按 unknown 放置。
+内建函数表里的实例跳过 solver：SCC 摘要与 proof 由构建期录制的分析分片组装，query 键与
+指纹不变（见[内建函数表](monomorphization-cache.md#builtin-function-table)）。
 
 证明读检查表达式所在程序点、当前 memory version 上的状态：
 

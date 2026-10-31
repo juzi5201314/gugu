@@ -87,7 +87,7 @@ pub fn provider() -> &'static dyn RuntimeArtifactProvider {
 /// 物化表按 target 派生（内建源的 `os`/`arch` 谓词参与裁剪），因此编译目标与 artifact 必须
 /// 一致：非默认目标的用例要用这里取同目标的 artifact，不能沿用宿主默认目标那一份。
 pub fn resources_for(target: TargetName) -> RuntimeResources<'static> {
-    RuntimeResources::new(artifact(target)).expect("物化 artifact 必须通过校验")
+    RuntimeResources::new(artifact(target))
 }
 
 /// 宿主默认目标的 artifact source manifest 视图。

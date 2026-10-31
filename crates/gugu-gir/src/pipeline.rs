@@ -1,4 +1,5 @@
-//! 语义层之上的派生编排：GIR 构建 → 单态化闭包 → late → 分析 → 放置 → 具体化 → GIR pass。
+//! 语义层之上的派生编排：GIR 构建 → 单态化闭包 → late → 可安装集 → 分析 → 放置 → 具体化 →
+//! GIR pass。
 //!
 //! 语义层只产出 [`SemaWorld`]；本模块把它与 GIR 层内建前缀接起来，冻结出完整的前端 world。
 
@@ -20,6 +21,8 @@ pub struct DerivedWorld {
     /// 身份表：构建期物化读取，用户编译路径只经查询键间接消费。
     pub identities: Identities,
     pub analysis: analysis::AnalysisWorldV1,
+    /// 本 world 从内建函数表安装的实例；强制现算或函数表为空时为空集。
+    pub installed: crate::functions::InstalledFunctions,
     pub mono: super::mono::MonoWorldV1,
     pub gir: super::gir::GirWorldV1,
     pub gir_stats: super::gir::pass::GirPassStats,
@@ -31,7 +34,7 @@ pub fn derive(
     sources: &crate::SourceMap,
     cfg: &super::cfg::CfgContext,
     queries: &crate::query::QueryEngine,
-    prefix: Option<&super::prefix::BuiltinPrefix>,
+    prefix: Option<&super::prefix::BuiltinPrefix<'_>>,
 ) -> Result<DerivedWorld, Vec<Diagnostic>> {
     let SemaWorld {
         model,
@@ -62,6 +65,10 @@ pub fn derive(
     }
     super::late::run(hir.module(), &mut mono_world, queries, sources)?;
     let gir = super::gir::attach_fragments(gir, &mono_world);
+    let entries = prefix.map_or(&[][..], super::prefix::BuiltinPrefix::functions);
+    let installed =
+        crate::functions::InstalledFunctions::resolve(hir.module(), &mono_world, entries)
+            .map_err(|error| vec![error])?;
     let (analysis_world, analysis_dependency) = analysis::run_world(
         hir.module(),
         hir.fingerprint(),
@@ -73,6 +80,7 @@ pub fn derive(
         analysis::AnalysisPolicyV1::default(),
         queries,
         sources,
+        (&installed, entries),
     )?;
     let gir = super::gir::place_world(&hir, gir, &analysis_world, queries, sources)?;
     let summaries = super::mono::summary::project(
@@ -101,6 +109,7 @@ pub fn derive(
         hir,
         identities,
         analysis: analysis_world,
+        installed,
         mono: mono_world,
         gir,
         gir_stats,

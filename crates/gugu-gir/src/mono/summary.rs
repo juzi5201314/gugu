@@ -192,7 +192,7 @@ pub fn project(
             )]);
         }
         let digest = payload.object_key();
-        summaries.insert(hex(&digest_of(&instance.mono_key)), digest);
+        summaries.insert(super::digest_hex(&digest_of(&instance.mono_key)), digest);
     }
     Ok(summaries)
 }
@@ -269,10 +269,6 @@ fn encode_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
 
 fn digest_of(mono_key: &[u8]) -> [u8; 32] {
     hash_domain("gugu-mono-v1", mono_key)
-}
-
-fn hex(bytes: &[u8; 32]) -> String {
-    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn invalid(message: impl Into<String>) -> crate::Diagnostic {

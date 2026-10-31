@@ -15,6 +15,7 @@ mod transfer;
 mod transfer_gir;
 mod types;
 
+pub use encode::{SHARD_REVISION, encode_shard};
 pub use policy::AnalysisPolicyV1;
 pub use query::run_world;
 #[allow(unused_imports, reason = "测试与下游 crate 模块经此根导出证明类型")]

@@ -629,17 +629,12 @@ const INTRINSICS: &[IntrinsicBoundary] = &[
 ];
 
 impl<'a> RuntimeResources<'a> {
-    /// 构造 artifact 视图；源码 artifact 不得携带未物化的 executable function。
-    pub fn new(artifact: &'a RuntimeArtifactV1) -> Result<Self, RuntimeArtifactError> {
-        if !artifact.payload.functions.is_empty() {
-            return Err(RuntimeArtifactError::Manifest(
-                "源码 runtime artifact 不得携带未物化的 executable function".to_owned(),
-            ));
-        }
-        Ok(Self {
+    /// 构造 artifact 视图；可执行内建实例只经物化表的函数表进入会话。
+    pub fn new(artifact: &'a RuntimeArtifactV1) -> Self {
+        Self {
             artifact,
             intrinsics: INTRINSICS,
-        })
+        }
     }
 
     /// 返回本变更登记的 runtime glue 绑定表。

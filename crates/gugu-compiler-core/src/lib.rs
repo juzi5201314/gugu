@@ -9,10 +9,11 @@ use std::fmt;
 /// runtime artifact 容器魔数。
 pub const ARTIFACT_MAGIC: [u8; 8] = *b"GUGURT01";
 /// runtime artifact schema。
-pub const ARTIFACT_SCHEMA: u32 = 3;
+pub const ARTIFACT_SCHEMA: u32 = 4;
 
 /// 内建块物化表的 schema：表集或表内布局变化时递增。
-pub const PREBUILT_SCHEMA: u32 = 3;
+/// 4：函数表并入物化表，每个内建实例携带逐函数分析分片。
+pub const PREBUILT_SCHEMA: u32 = 4;
 /// payload 的域隔离标签。
 pub const ARTIFACT_DOMAIN: &str = "gugu-runtime-artifact-v1";
 /// GBC payload 编码版本。
@@ -113,16 +114,18 @@ pub struct RuntimeGenericTemplateV1 {
     pub fingerprint: [u8; 32],
 }
 
-/// 可按 stable key 复用的 runtime 函数产物。
+/// 一个可安装内建实例的物化产物。
+///
+/// 层字节是前端 canonical 编码，core 只按 key 排序与长度校验；层内语义与校验由安装端负责。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeFunctionArtifactV1 {
-    /// 稳定 mono key。
+    /// 实例 MonoKey digest 的小写十六进制。
     pub stable_mono_key: String,
-    /// 函数摘要。
+    /// 层字节的内容摘要；只作断言，安装端重算比对。
     pub fingerprint: [u8; 32],
-    /// 无绝对地址的 relocatable fragment bytes。
-    pub fragment: Vec<u8>,
+    /// 该实例的分析分片：函数摘要与本 owner 的证明。
+    pub analysis: Vec<u8>,
 }
 
 /// artifact manifest；字段是所有跨 build 身份输入的可审计摘要。
@@ -161,8 +164,6 @@ pub struct RuntimeArtifactPayloadV1 {
     pub contracts: Vec<RuntimeContractRecordV1>,
     /// runtime 泛型模板。
     pub generic_templates: Vec<RuntimeGenericTemplateV1>,
-    /// 可执行 runtime 函数片段。
-    pub functions: Vec<RuntimeFunctionArtifactV1>,
     /// 内建块在构建期物化后的派生表；纯源码 artifact 为 None。
     pub prebuilt: Option<RuntimePrebuiltV1>,
 }
@@ -221,6 +222,10 @@ pub struct RuntimePrebuiltV1 {
     pub record_types: Vec<u8>,
     /// 每张表的 (标识域摘要, 内容摘要)，与表的声明顺序一致。
     pub fingerprints: Vec<([u8; 32], [u8; 32])>,
+    /// 函数表各层的 revision（层名 → 版本），按层名严格排序；函数表为空时也可为空。
+    pub function_revisions: Vec<(String, u32)>,
+    /// 可安装内建实例，按 `stable_mono_key` 严格升序。
+    pub functions: Vec<RuntimeFunctionArtifactV1>,
     /// 固定地板集：rt0 与 machine entry 恒需的内建模块，按逻辑路径严格升序。
     pub floor_modules: Vec<String>,
     /// 贡献 `ContractRecord` 的定义所在的内建模块，按逻辑路径严格升序。
@@ -311,6 +316,40 @@ impl RuntimePrebuiltV1 {
         if self.floor_modules.is_empty() {
             return Err(RuntimeArtifactError::Manifest(
                 "地板集不能为空：prelude 与 runtime 地板模块恒需".to_owned(),
+            ));
+        }
+        self.validate_functions()
+    }
+
+    /// 函数表：key 是 64 位小写十六进制且严格升序；有函数时必须声明各层 revision。
+    fn validate_functions(&self) -> Result<(), RuntimeArtifactError> {
+        if self
+            .function_revisions
+            .windows(2)
+            .any(|pair| pair[0].0 >= pair[1].0)
+            || (!self.functions.is_empty() && self.function_revisions.is_empty())
+        {
+            return Err(RuntimeArtifactError::Manifest(
+                "函数表 revision 必须按层名严格排序，且非空函数表必须声明 revision".to_owned(),
+            ));
+        }
+        let well_formed = |key: &str| {
+            key.len() == 64
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        };
+        if self
+            .functions
+            .iter()
+            .any(|function| !well_formed(&function.stable_mono_key))
+            || self
+                .functions
+                .windows(2)
+                .any(|pair| pair[0].stable_mono_key >= pair[1].stable_mono_key)
+        {
+            return Err(RuntimeArtifactError::Manifest(
+                "函数表 key 必须是严格升序的 64 位小写十六进制 digest".to_owned(),
             ));
         }
         Ok(())
@@ -445,7 +484,6 @@ impl RuntimeArtifactBuilder {
             sources: source_blobs,
             contracts: Vec::new(),
             generic_templates: Vec::new(),
-            functions: Vec::new(),
             prebuilt: None,
         };
         let artifact = RuntimeArtifactV1 { manifest, payload };
@@ -525,16 +563,6 @@ impl RuntimeArtifactV1 {
         {
             return Err(RuntimeArtifactError::Manifest(
                 "runtime template manifest 未按 stable key 严格排序".to_owned(),
-            ));
-        }
-        if self
-            .payload
-            .functions
-            .windows(2)
-            .any(|pair| pair[0].stable_mono_key >= pair[1].stable_mono_key)
-        {
-            return Err(RuntimeArtifactError::Manifest(
-                "runtime function manifest 未按 stable key 严格排序".to_owned(),
             ));
         }
         if let Some(prebuilt) = &self.payload.prebuilt {
@@ -704,12 +732,6 @@ fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, Runtime
         encoder.string(&template.key)?;
         encoder.digest(&template.fingerprint);
     }
-    encoder.len(payload.functions.len())?;
-    for function in &payload.functions {
-        encoder.string(&function.stable_mono_key)?;
-        encoder.digest(&function.fingerprint);
-        encoder.bytes(&function.fragment)?;
-    }
     encoder.u32(u32::from(payload.prebuilt.is_some()));
     if let Some(prebuilt) = &payload.prebuilt {
         encoder.u32(prebuilt.schema);
@@ -753,6 +775,17 @@ fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, Runtime
             encoder.u32(block.owners.start);
             encoder.u32(block.owners.len);
         }
+        encoder.len(prebuilt.function_revisions.len())?;
+        for (layer, revision) in &prebuilt.function_revisions {
+            encoder.string(layer)?;
+            encoder.u32(*revision);
+        }
+        encoder.len(prebuilt.functions.len())?;
+        for function in &prebuilt.functions {
+            encoder.string(&function.stable_mono_key)?;
+            encoder.digest(&function.fingerprint);
+            encoder.bytes(&function.analysis)?;
+        }
     }
     Ok(encoder.finish())
 }
@@ -789,15 +822,6 @@ fn decode_payload(bytes: &[u8]) -> Result<RuntimeArtifactPayloadV1, RuntimeArtif
             fingerprint: decoder.digest()?,
         });
     }
-    let function_count = decoder.len()?;
-    let mut functions = Vec::with_capacity(function_count);
-    for _ in 0..function_count {
-        functions.push(RuntimeFunctionArtifactV1 {
-            stable_mono_key: decoder.string()?,
-            fingerprint: decoder.digest()?,
-            fragment: decoder.bytes()?,
-        });
-    }
     let prebuilt = match decoder.u32()? {
         0 => None,
         1 => Some(decode_prebuilt(&mut decoder)?),
@@ -813,7 +837,6 @@ fn decode_payload(bytes: &[u8]) -> Result<RuntimeArtifactPayloadV1, RuntimeArtif
         sources,
         contracts,
         generic_templates,
-        functions,
         prebuilt,
     })
 }
@@ -874,6 +897,20 @@ fn decode_prebuilt(
             },
         });
     }
+    let revision_count = decoder.len()?;
+    let mut function_revisions = Vec::with_capacity(revision_count);
+    for _ in 0..revision_count {
+        function_revisions.push((decoder.string()?, decoder.u32()?));
+    }
+    let function_count = decoder.len()?;
+    let mut functions = Vec::with_capacity(function_count);
+    for _ in 0..function_count {
+        functions.push(RuntimeFunctionArtifactV1 {
+            stable_mono_key: decoder.string()?,
+            fingerprint: decoder.digest()?,
+            analysis: decoder.bytes()?,
+        });
+    }
     Ok(RuntimePrebuiltV1 {
         schema,
         revisions,
@@ -886,6 +923,8 @@ fn decode_prebuilt(
         gir_bodies,
         record_types,
         fingerprints,
+        function_revisions,
+        functions,
         floor_modules,
         contract_modules,
         blocks,
@@ -1081,6 +1120,8 @@ mod tests {
             gir_bodies: vec![vec![4], vec![5, 6]],
             record_types: vec![7],
             fingerprints: vec![([1; 32], [2; 32])],
+            function_revisions: vec![("analysis.shard".to_owned(), 1)],
+            functions: vec![sample_function("0a"), sample_function("ff")],
             floor_modules: vec!["std/prelude.gg".to_owned()],
             contract_modules: vec!["runtime/core.gg".to_owned()],
             blocks: vec![
@@ -1095,6 +1136,15 @@ mod tests {
                     owners: BlockRangeV1 { start: 1, len: 2 },
                 },
             ],
+        }
+    }
+
+    /// 一条函数表项；key 以两位前缀加零补齐成 64 位十六进制。
+    fn sample_function(prefix: &str) -> RuntimeFunctionArtifactV1 {
+        RuntimeFunctionArtifactV1 {
+            stable_mono_key: format!("{prefix:0<64}"),
+            fingerprint: [3; 32],
+            analysis: vec![1],
         }
     }
 
@@ -1153,6 +1203,41 @@ mod tests {
         with_prebuilt(wrong_schema)
             .validate()
             .expect_err("schema 必须匹配");
+    }
+
+    /// 函数表 key 必须规范且严格升序，非空函数表必须声明 revision。
+    #[test]
+    fn prebuilt_function_table_rejects_bad_keys_and_missing_revisions() {
+        let mut unsorted = sample_prebuilt();
+        unsorted.functions.reverse();
+        with_prebuilt(unsorted)
+            .validate()
+            .expect_err("函数表 key 必须严格升序");
+
+        let mut uppercase = sample_prebuilt();
+        uppercase.functions[0].stable_mono_key = format!("{:0<64}", "0A");
+        with_prebuilt(uppercase)
+            .validate()
+            .expect_err("函数表 key 必须是小写十六进制");
+
+        let mut short = sample_prebuilt();
+        short.functions[0].stable_mono_key = "0a".to_owned();
+        with_prebuilt(short)
+            .validate()
+            .expect_err("函数表 key 必须是 64 位");
+
+        let mut unversioned = sample_prebuilt();
+        unversioned.function_revisions.clear();
+        with_prebuilt(unversioned)
+            .validate()
+            .expect_err("非空函数表必须声明 revision");
+
+        let mut empty = sample_prebuilt();
+        empty.functions.clear();
+        empty.function_revisions.clear();
+        with_prebuilt(empty)
+            .validate()
+            .expect("空函数表无需 revision");
     }
 
     #[test]
