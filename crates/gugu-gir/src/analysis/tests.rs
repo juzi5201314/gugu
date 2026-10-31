@@ -582,10 +582,38 @@ fn shared_check_requires_proof_in_every_instance() {
                 budget_exhausted: false,
             })
             .collect();
-        let world = super::solver::world_from_sccs(parts, [0; 32]);
+        let world = super::solver::world_from_sccs(parts, Vec::new(), [0; 32]);
         assert_eq!(world.proof_status(&key), ProofStatus::Unknown);
         assert_eq!(world.runtime_checks_elided_count, 0);
     }
+}
+
+/// 预算耗尽只沿调用边污染 caller：callee、无关分量与耗尽分量的下游都保持干净。
+#[test]
+fn budget_exhaustion_reaches_callers_only() {
+    // 成员 0 → 1 → 2，2 ↔ 3 成环；4 调用 0 但与环无关的 5 独立。owner 与成员下标错开。
+    let successors = vec![vec![1], vec![2], vec![3], vec![2], vec![0], vec![]];
+    let owners = [10, 11, 12, 13, 14, 15];
+    let sccs = super::callgraph::strongly_connected_components(&successors);
+    let flag = |exhausted_member: usize| {
+        sccs.iter()
+            .map(|members| members.contains(&exhausted_member))
+            .collect::<Vec<_>>()
+    };
+    // 环耗尽：环自身与经 1、0 到达它的 caller 都受影响，4 经 0 间接受影响，5 不受影响。
+    assert_eq!(
+        super::solver::exhausted_owners(&sccs, &successors, &owners, &flag(3)),
+        vec![10, 11, 12, 13, 14]
+    );
+    // 链中段耗尽：下游的环不受影响。
+    assert_eq!(
+        super::solver::exhausted_owners(&sccs, &successors, &owners, &flag(1)),
+        vec![10, 11, 14]
+    );
+    assert!(
+        super::solver::exhausted_owners(&sccs, &successors, &owners, &vec![false; sccs.len()])
+            .is_empty()
+    );
 }
 
 // 这个测试调用 proof_statuses 做双编译，耗时过长；移出默认套件

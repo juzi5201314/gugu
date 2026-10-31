@@ -15,7 +15,7 @@ use crate::semantics::query::restore_errors;
 use crate::{Diagnostic, SourceMap};
 use serde::{Deserialize, Serialize};
 
-pub const PLACEMENT_SCHEMA: u32 = 2;
+pub const PLACEMENT_SCHEMA: u32 = 3;
 
 /// export summary 位：逃逸、别名、资源、FFI、发布、未知、可转移与被 send 读取。上界 8 位。
 pub struct ExportFlags;
@@ -239,7 +239,9 @@ fn compute(
     world: &GirWorldV1,
     analysis: &AnalysisWorldV1,
 ) -> PlacementWorldV1 {
-    let unknown_program = analysis.budget_exhausted;
+    let exhausted = |body_index: usize| {
+        analysis.owner_exhausted(u32::try_from(body_index).expect("owner 下标适配 u32"))
+    };
     let table = PassingTable::new(module);
     let mut records = Vec::new();
     let mut allocs = Vec::new();
@@ -248,7 +250,7 @@ fn compute(
         let mut edges = Vec::new();
         let flags = escape(module, body, &table, &mut edges);
         let body_unknown =
-            unknown_program || flags.iter().any(|flag| flag & ExportFlags::UNKNOWN != 0);
+            exhausted(body_index) || flags.iter().any(|flag| flag & ExportFlags::UNKNOWN != 0);
         for (local_index, local) in body.locals.iter().enumerate() {
             let class = table.class(local.ty);
             let export = flags.get(local_index).copied().unwrap_or(0) | class_export(class);

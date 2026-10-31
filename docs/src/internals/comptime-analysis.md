@@ -374,7 +374,7 @@ SCC 内按原成员顺序与轮次预算迭代，保存每个成员在当前 cal
 管线顺序为 `LowerHir`（schema **8**，只构造、校验并冻结）→ `BuildGenericGir` →
 `mono::close` → `late::run` → `gir::attach_fragments` → `WholeProgramAnalysis` →
 `EscapeAndPlacement` → `PublicFunctionSummary`。分析输入使用放置前的 generic GIR 指纹。
-`WholeProgramAnalysis`（query schema **6**）输入指纹含冻结 HIR
+`WholeProgramAnalysis`（query schema **7**）输入指纹含冻结 HIR
 指纹、generic GIR 指纹、late/mono 图指纹与策略字节；其内再嵌套 `AnalysisSccSummary`
 （27，schema **5**）与 `FunctionAnalysisSummary`（23，schema **5**）。身份键为 `MonoKey`
 （见[单态化与编译缓存](monomorphization-cache.md#mono-closure-public-digest)）。
@@ -401,8 +401,10 @@ GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir
 调用 unwind 边只在当前状态已可能 panic 时传播，不把 CFG 上的 cleanup 边当成必然 panic。
 
 固定 **`analysis_semantics_revision = 6`**、**公共摘要策略 revision = 2**（与公共摘要对象复用同一版本常量）
-（默认 SCC 迭代 32、块迭代 256）。SCC 轮次或块迭代超预算 → 摘要取保守值、
-`budget_exhausted = true`，检查保持 `Unknown`；**不是**用户 `Error`。
+（默认 SCC 迭代 32、块迭代 256）。SCC 轮次或块迭代超预算 → 该 SCC 摘要取保守值、
+`budget_exhausted = true`，检查保持 `Unknown`；**不是**用户 `Error`。耗尽沿调用边向 caller
+传播：world 的 `exhausted_owners` 列出至少一个实例的自身 SCC 或可达 callee SCC 耗尽的 owner，
+placement 只对这些 body 按 unknown 放置。
 
 证明读检查表达式所在程序点、当前 memory version 上的状态：
 
@@ -501,8 +503,8 @@ WholeProgramAnalysis(world_key, analysis_policy)
   analysis policy 与 world 输入指纹；计算闭包内对具体实例做摘要固定点，
   不经 query 读取本 SCC 的半初始化结果。
 - `FunctionAnalysisSummary`（编号 23，schema 5）从已完成的 SCC 摘要投影单个实例。
-- `WholeProgramAnalysis`（编号 24，schema 6）按实例图凝聚拓扑请求上述嵌套 query，
-  合并为 world-local 共同证明与按实例排序的摘要。
+- `WholeProgramAnalysis`（编号 24，schema 7）按实例图凝聚拓扑请求上述嵌套 query，
+  合并为 world-local 共同证明、按实例排序的摘要与预算耗尽 owner 表。
 - `PublicFunctionSummary`（编号 28，schema 2）以已完成 world 的结果指纹隔离生产者输入，
   投影不含私有定义的效果与参数序号；内容对象键独立于 body 和稠密定义编号，并进入前端 action key。
 

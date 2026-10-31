@@ -31,7 +31,7 @@ pub fn empty_world() -> AnalysisWorldV1 {
         input_fingerprint: [0; 32],
         instances: Vec::new(),
         proofs: Vec::new(),
-        budget_exhausted: false,
+        exhausted_owners: Vec::new(),
         runtime_checks_elided_count: 0,
     }
 }

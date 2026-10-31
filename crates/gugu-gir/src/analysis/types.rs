@@ -6,7 +6,7 @@
 use crate::hir::{CheckKind, ExprId};
 use serde::{Deserialize, Serialize};
 
-pub const WORLD_SCHEMA_VERSION: u32 = 6;
+pub const WORLD_SCHEMA_VERSION: u32 = 7;
 
 /// 检查的证明状态：`Proved` 表示 HIR 局部事实可证安全，`Disproved` 表示 HIR 局部
 /// 事实可证必然失败，`Unknown` 表示局部事实不足、必须保留检查。
@@ -140,11 +140,20 @@ pub struct AnalysisWorldV1 {
     pub input_fingerprint: [u8; 32],
     pub instances: Vec<InstanceSummaryRecord>,
     pub proofs: Vec<ProofFact>,
-    pub budget_exhausted: bool,
+    /// 至少一个实例的自身 SCC 或可达 callee SCC 耗尽预算的 owner 下标，严格升序。
+    ///
+    /// placement 按 body 查询它：预算耗尽只污染能经调用边观察到保守摘要的 body，
+    /// 与之无调用关系的 body（例如不调用用户代码的内建实例）不受影响。
+    pub exhausted_owners: Vec<u32>,
     pub runtime_checks_elided_count: u32,
 }
 
 impl AnalysisWorldV1 {
+    /// owner 是否经调用闭包观察到预算耗尽的 SCC。
+    pub fn owner_exhausted(&self, owner_index: u32) -> bool {
+        self.exhausted_owners.binary_search(&owner_index).is_ok()
+    }
+
     /// 按检查键取证明；缺省为 `Unknown`。测试与摘要投影读取此方法。
     #[allow(dead_code, reason = "库路径经 world.proofs 投影；测试直接调用")]
     pub fn proof_status(&self, key: &RuntimeCheckKey) -> ProofStatus {

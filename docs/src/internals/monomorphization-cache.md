@@ -96,12 +96,12 @@ query kind 使用固定 `u16` 编号和独立 schema 版本。当前注册表为
 | 21 | `ParseSource` | generated source fingerprint + source slot | `ParsedSource` |
 | 22 | `ExpandSourceMacro` | stable macro call + round + source slot + script inputs | generated source/fragment + expansion record |
 | 23 | `FunctionAnalysisSummary` | `MonoKey` + analysis policy + world 输入（schema 5） | completed SCC 中的函数摘要投影 |
-| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（schema 6，输入含冻结 HIR 指纹、generic GIR 指纹与实例图/late 指纹） | 排序摘要与 world-local 证明事实 |
+| 24 | `WholeProgramAnalysis` | closed-world instance graph + analysis policy + late table（schema 7，输入含冻结 HIR 指纹、generic GIR 指纹与实例图/late 指纹） | 排序摘要、world-local 证明事实与按调用闭包传播的预算耗尽 owner 表 |
 | 25 | `FreezeTypeUniverse` | closed-world instance graph（schema 1；实例 world schema 6） | `TypeUniverseKey`、类型序列与稠密编号 |
 | 26 | `EvaluateLateComptime` | `LateConstKey` + `TypeUniverseKey` + registry（schema 1） | 固定形状 late 标量聚合与类型重定位 |
 | 27 | `AnalysisSccSummary` | 排序 `MonoKey` 集 + analysis policy + world 输入（schema 5） | 完整 SCC 摘要固定点 |
 | 28 | `PublicFunctionSummary` | `MonoKey` + analysis semantics revision + public policy revision + 已完成 world 的结果指纹（schema 2） | 内容寻址跨 package 摘要 |
-| 29 | `EscapeAndPlacement` | 放置前 GIR 指纹 + 分析输入指纹 + 冻结 HIR 指纹（schema 2，域 `gugu-escape-placement-v1`） | `PlacementWorldV1` |
+| 29 | `EscapeAndPlacement` | 放置前 GIR 指纹 + 分析输入指纹 + 冻结 HIR 指纹（schema 3，域 `gugu-escape-placement-v1`） | `PlacementWorldV1` |
 | 30 | `RuntimeRawModel` | target + tuning/platform profile + LIR/placement 指纹 + 资源需求 + 独立契约类型目录（schema 29，域 `gugu-runtime-raw-v1`） | `RuntimeRawContractV1`：完整 raw/resource/rt0/scheduler/wait/sync/GC、屏障、LocalHeap/SharedHeap、mark/edge、region/block-return、compression/routing/provenance/combining 契约与真实 type/meta sections |
 
 新增 query kind 或改变 payload 编码必须更新 query registry revision；当前 revision 为 3，并把 GBC1 revision 纳入 `QueryKey`。旧 revision 的 action/query record 不得复用。编号 21--30 不得重用或改变既有编号含义。`registry_fingerprint()` 按编号升序编码 `(kind, name)`，经 `ActionInputs::set_query_registry` 进入 action key；`set_runtime_raw` 记录本次 action 消费的 raw 契约指纹。query 23 与 27 的 callable 身份是 `MonoKey`，不使用 owner 下标作为跨实例身份。

@@ -21,6 +21,8 @@ const FUNCTION_SCHEMA: u32 = 5;
 
 struct InstancePlan {
     members: Vec<SccMember>,
+    /// 成员下标上的直接 callee 成员；预算耗尽沿它向 caller 传播。
+    successors: Vec<Vec<usize>>,
     sccs: Vec<Vec<usize>>,
 }
 
@@ -116,7 +118,20 @@ pub fn run_world(
                 summaries.push(summary);
                 parts.push(encoded);
             }
-            let world = solver::world_from_sccs(summaries, input_fingerprint);
+            let exhausted = solver::exhausted_owners(
+                &plan.sccs,
+                &plan.successors,
+                &plan
+                    .members
+                    .iter()
+                    .map(|member| member.owner.owner_index)
+                    .collect::<Vec<_>>(),
+                &summaries
+                    .iter()
+                    .map(|summary| summary.budget_exhausted)
+                    .collect::<Vec<_>>(),
+            );
+            let world = solver::world_from_sccs(summaries, exhausted, input_fingerprint);
             let bytes = encode::encode_world(&world, &parts);
             fresh = Some(world);
             Ok((bytes, Vec::new()))
@@ -212,6 +227,7 @@ fn plan_instances(module: &Module, mono: &MonoWorldV1) -> Result<InstancePlan, c
     Ok(InstancePlan {
         members,
         sccs: callgraph::strongly_connected_components(&graph),
+        successors: graph,
     })
 }
 

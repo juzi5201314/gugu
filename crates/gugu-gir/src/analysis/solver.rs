@@ -166,12 +166,54 @@ fn analyze_member(
     )
 }
 
-pub fn world_from_sccs(sccs: Vec<SccSummaryV1>, input_fingerprint: [u8; 32]) -> AnalysisWorldV1 {
+/// 预算耗尽沿调用边向 caller 传播：返回自身 SCC 或可达 callee SCC 耗尽的成员 owner。
+///
+/// `sccs` 必须是 Tarjan 的产出顺序（callee 分量先于 caller）；`successors[m]` 是成员 `m` 的
+/// 直接 callee 成员，`owners[m]` 是其 owner 下标，`exhausted[c]` 是分量 `c` 自身的预算位。
+/// 一次逆拓扑扫描即完成闭包；结果按 owner 升序去重。
+pub fn exhausted_owners(
+    sccs: &[Vec<usize>],
+    successors: &[Vec<usize>],
+    owners: &[u32],
+    exhausted: &[bool],
+) -> Vec<u32> {
+    debug_assert_eq!(sccs.len(), exhausted.len());
+    debug_assert_eq!(successors.len(), owners.len());
+    let mut component_of = vec![usize::MAX; owners.len()];
+    for (component, members) in sccs.iter().enumerate() {
+        for &member in members {
+            component_of[member] = component;
+        }
+    }
+    let mut reached = exhausted.to_vec();
+    let mut result = Vec::new();
+    for (component, members) in sccs.iter().enumerate() {
+        // callee 分量都排在前面，此时它们的可达位已经定稿。
+        let inherited = members.iter().any(|&member| {
+            successors[member].iter().any(|&callee| {
+                let target = component_of[callee];
+                debug_assert!(target <= component, "Tarjan 顺序保证 callee 分量先完成");
+                reached[target]
+            })
+        });
+        reached[component] |= inherited;
+        if reached[component] {
+            result.extend(members.iter().map(|&member| owners[member]));
+        }
+    }
+    result.sort_unstable();
+    result.dedup();
+    result
+}
+
+pub fn world_from_sccs(
+    sccs: Vec<SccSummaryV1>,
+    exhausted_owners: Vec<u32>,
+    input_fingerprint: [u8; 32],
+) -> AnalysisWorldV1 {
     let mut instances = Vec::new();
     let mut proofs = Vec::new();
-    let mut budget_exhausted = false;
     for scc in sccs {
-        budget_exhausted |= scc.budget_exhausted;
         instances.extend(scc.instances);
         proofs.extend(scc.proofs);
     }
@@ -187,16 +229,19 @@ pub fn world_from_sccs(sccs: Vec<SccSummaryV1>, input_fingerprint: [u8; 32]) -> 
         }
         true
     });
-    let runtime_checks_elided_count = proofs
-        .iter()
-        .filter(|fact| fact.status == super::types::ProofStatus::Proved)
-        .count() as u32;
+    let runtime_checks_elided_count = u32::try_from(
+        proofs
+            .iter()
+            .filter(|fact| fact.status == super::types::ProofStatus::Proved)
+            .count(),
+    )
+    .expect("证明数量适配 u32");
     AnalysisWorldV1 {
         schema: WORLD_SCHEMA_VERSION,
         input_fingerprint,
         instances,
         proofs,
-        budget_exhausted,
+        exhausted_owners,
         runtime_checks_elided_count,
     }
 }

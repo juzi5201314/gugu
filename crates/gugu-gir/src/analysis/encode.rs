@@ -120,7 +120,10 @@ pub fn encode_world(world: &AnalysisWorldV1, parts: &[EncodedScc]) -> Bytes {
     let mut encoder = Encoder::new();
     encoder.u32(world.schema);
     encoder.bytes(&world.input_fingerprint);
-    encoder.bool(world.budget_exhausted);
+    encoder.len_of(world.exhausted_owners.len());
+    for &owner in &world.exhausted_owners {
+        encoder.u32(owner);
+    }
     encoder.u32(world.runtime_checks_elided_count);
     encoder.len_of(world.instances.len());
     for record in &world.instances {
@@ -144,7 +147,11 @@ pub fn decode_world(payload: &Bytes) -> Result<AnalysisWorldV1, DecodeError> {
     let mut decoder = Decoder::new(payload);
     let schema = decoder.u32()?;
     let input_fingerprint: [u8; 32] = decoder.bytes()?.try_into().map_err(|_| DecodeError)?;
-    let budget_exhausted = decoder.bool()?;
+    let exhausted_count = decoder.len_of()?;
+    let mut exhausted_owners = Vec::with_capacity(exhausted_count);
+    for _ in 0..exhausted_count {
+        exhausted_owners.push(decoder.u32()?);
+    }
     let runtime_checks_elided_count = decoder.u32()?;
     let instance_count = decoder.len_of()?;
     let mut instances = Vec::with_capacity(instance_count);
@@ -164,7 +171,7 @@ pub fn decode_world(payload: &Bytes) -> Result<AnalysisWorldV1, DecodeError> {
         input_fingerprint,
         instances,
         proofs,
-        budget_exhausted,
+        exhausted_owners,
         runtime_checks_elided_count,
     })
 }
@@ -531,7 +538,7 @@ mod tests {
             input_fingerprint: [9; 32],
             instances: summary.instances.clone(),
             proofs: summary.proofs.clone(),
-            budget_exhausted: summary.budget_exhausted,
+            exhausted_owners: vec![3, 7],
             runtime_checks_elided_count: 0,
         }
     }
