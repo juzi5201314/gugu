@@ -4,8 +4,8 @@
 //! Mem 链连续、block 参数规范排序与 use 链不变量，随后由驱动运行结构 verifier。
 use super::super::body::{
     Block, BlockId, Body, Call, Definition, Edge, EdgeId, InstId, Instruction, Lifetime, Memory,
-    Op, Origin, Parameter, PermitId, PollSummary, RootInit, Safepoint, SafepointId, SafepointKind,
-    Terminator, Value, ValueId, ValueType, id, range,
+    Op, Origin, Parameter, PermitId, PollInterface, PollSummary, RootInit, Safepoint, SafepointId,
+    SafepointKind, Terminator, Value, ValueId, ValueType, id, range,
 };
 use super::super::invalid;
 use crate::Diagnostic;
@@ -183,6 +183,7 @@ pub struct Editor {
     pub assembly: Vec<Assembly>,
     pub environments: Vec<super::super::body::Environment>,
     pub poll_summary: PollSummary,
+    pub poll_interface: PollInterface,
 }
 
 /// 只读图视图不暴露 finish 或可变访问，不能误生成缺少元数据的 Body。
@@ -298,6 +299,7 @@ impl Editor {
             assembly,
             environments: Vec::new(),
             poll_summary: body.poll_summary,
+            poll_interface: body.poll_interface,
             original: OriginalArenas::default(),
         };
         editor.recount_uses();
@@ -364,6 +366,7 @@ impl Editor {
             environments: self.environments,
             entry: self.entry,
             poll_summary: self.poll_summary,
+            poll_interface: self.poll_interface,
         }
     }
 
@@ -1038,6 +1041,7 @@ impl Editor {
             assembly,
             environments,
             poll_summary,
+            poll_interface,
         } = self;
 
         // pass 可以在遍历期间创建入口常量，但不能使已有 InstRef 失效。直到重建时才把新建的
@@ -1428,6 +1432,7 @@ impl Editor {
             environments,
             entry,
             poll_summary,
+            poll_interface,
         };
         super::super::uses::rebuild(&mut body);
         Ok(body)

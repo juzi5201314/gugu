@@ -279,6 +279,7 @@ pub fn lower(
             environments: Vec::new(),
             entry: BlockId(0),
             poll_summary: body::PollSummary::default(),
+            poll_interface: body::PollInterface::default(),
         },
         blocks: Vec::new(),
         block_map: vec![None; concrete.body.blocks.len()],

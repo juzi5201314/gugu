@@ -270,6 +270,7 @@ LirBody {
     barrier_permits: IndexVec<BarrierPermitId, BarrierPermitData>,
     safepoints: IndexVec<SafepointId, SafepointData>,
     poll_summary: PollSummary,
+    poll_interface: PollInterface,
     no_safepoint_regions: IndexVec<NoSafepointRegionId, NoSafepointReason>,
     source_scopes,
 }
@@ -386,6 +387,8 @@ budget poll放置后，除 `LowerPollFastPaths`、critical-edge split和不跨 p
 poll placement在全部 loop transformation与 target legalization之后、寄存器分配之前运行。x86_64 target固定 `POLL_BUDGET = 4096` cost units；该常量、vector/unroll cost model、opcode weight表、`NoSafepointRegion`规则和 strip-mining算法revision属于 LIR/cache schema，不是语言的 wall-clock或时间片语义。每个 legalized opcode在 target表中有 `1..64` 的非零权重；路径累计使用饱和 `u32`，超过 budget即视为超限。普通/dirty bridge、mandatory statepoint和带 entry `StackCheck` 的 managed call终止当前 poll-free区间；`ForeignLeaf` 以完整 budget的 opaque cost计费，仍由 unsafe leaf契约约束真实运行时间。managed inline asm按已解析 opcode权重求和，不能以单个 opaque instruction规避预算。每个 no-safepoint region先验证自身无环且每条路径不超 budget，再折叠成不可切分的 cost segment；插点只能位于 begin前或 end后。
 
 每个 `MonoKey` 产生固定尺寸的 `PollSummary { entry_stack_check, poll_free_cost, has_poll_free_cycle }`。只有同时满足“无 call、无循环、无 safepoint/unwind、frame payload为0、legalized cost不超过64”的函数才是 `PollFreeLeaf`，可以删除 entry `StackCheck`；直接 caller把它的 `poll_free_cost` 加入路径预算。函数地址被获取或经过间接分派时，入口必须使用带 `StackCheck` 的 checked thunk，不能把 leaf cost隐含在普通 `fn` 值里。其它 out-of-line managed函数保留 entry check，因此 caller只依赖 callee内部 ABI中的 summary，不读取 callee body。
+
+body 另存 `PollInterface { summary, leaf }`：world 级不动点在插 poll 之前给出的 caller 可见接口与 leaf 判定。它可能不同于插点后按 body 重算的 `poll_summary`，leaf 判定也无法从插点后的 body 还原；从[内建函数表](monomorphization-cache.md#builtin-function-table)安装的 body 用它播种 callee 接口，poll 对这类 body 不重算不动点、不重建。body `REVISION = 11`，LIR `SCHEMA = 8`。
 
 `ClassifyPollFreeLeafAndPlaceBudgetedPolls` 按以下规则处理每个 CFG：
 

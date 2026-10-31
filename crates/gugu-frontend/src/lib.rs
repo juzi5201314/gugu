@@ -12,6 +12,7 @@ mod diagnostics_tests;
 mod frontend;
 #[cfg(all(test, feature = "slow-tests"))]
 mod lir_tests;
+mod materialize;
 #[cfg(all(test, feature = "slow-tests"))]
 mod numbering_tests;
 mod raw_model;
@@ -36,7 +37,8 @@ pub use backend::x64::harness::{
 };
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use frontend::format::{FormatError, format_source};
-pub use frontend::prebuild::{MaterializeError, closure_program_modules, materialize};
+pub use frontend::prebuild::{MaterializeError, closure_program_modules};
+pub use materialize::materialize;
 pub use project::{
     ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyDomain,
     DependencyInput, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,
@@ -535,10 +537,7 @@ impl Compiler {
         let mut diagnostics = Diagnostics::default();
         let descriptor = target.descriptor();
         graph.complete(ActionKind::ResolveTarget, target.to_string());
-        let resources = match self
-            .artifact_for_target(target)
-            .map(RuntimeResources::new)
-        {
+        let resources = match self.artifact_for_target(target).map(RuntimeResources::new) {
             Ok(resources) => resources,
             Err(error) => {
                 diagnostics.push(Diagnostic::error(
@@ -634,6 +633,7 @@ impl Compiler {
             &oracle,
             &self.queries,
             &source_map,
+            (&frontend.installed, resources.prebuilt()),
         ) {
             Ok(lir) => lir,
             Err(errors) => {

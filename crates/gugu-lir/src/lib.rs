@@ -7,6 +7,7 @@ mod build;
 mod dump;
 mod effects;
 pub mod function_adapter;
+pub mod installed;
 pub use pass::graph::Graph;
 pub mod liveness;
 pub mod pass;
@@ -33,7 +34,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub const SCHEMA: u32 = 7;
+/// LIR query 与 world 的 schema。8：body 携带 poll 不动点接口。
+pub const SCHEMA: u32 = 8;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -642,7 +644,7 @@ pub fn optimization_policy_bytes() -> Vec<u8> {
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "LIR 构建需要冻结 HIR、GIR/mono world、目标、压缩策略、目标 oracle、query 与源码表"
+    reason = "LIR 构建需要冻结 HIR、GIR/mono world、目标、压缩策略、目标 oracle、query、源码表与函数表"
 )]
 pub fn build(
     hir: &hir::Validated,
@@ -653,7 +655,13 @@ pub fn build(
     oracle: &dyn target::TargetOracle,
     queries: &QueryEngine,
     sources: &crate::SourceMap,
+    functions: (
+        &gugu_gir::functions::InstalledFunctions,
+        Option<&crate::runtime::RuntimePrebuiltV1>,
+    ),
 ) -> Result<Validated, Vec<Diagnostic>> {
+    let (installed_functions, prebuilt) = functions;
+    let entries = installed::entries(prebuilt, compression).map_err(|error| vec![error])?;
     let descriptor = target.descriptor();
     let profile = descriptor.cost_profile;
     let target = target.to_string();
@@ -672,7 +680,17 @@ pub fn build(
     // 索引按 LIR 输入建一次：逐 body 线性扫描实例表与具体 body 会把 lowering 放大成
     // O(body × 实例) 次 mono 摘要计算与 O(body × 语句) 次闭包创建点扫描。
     let index = build::LirIndex::new(mono, &gir.concrete);
+    let mut installed_instances = Vec::new();
     for concrete in &gir.concrete {
+        // 函数表安装的 body 已是 poll 之后的形态，不经 BuildLir 与逐 body pass。
+        if let Some(body) =
+            installed::decode(installed_functions, entries, &concrete.instance, &target)
+                .map_err(|error| vec![error])?
+        {
+            installed_instances.push(body.instance);
+            bodies.push(body);
+            continue;
+        }
         let mut bytes = fingerprint.to_vec();
         bytes.extend_from_slice(&concrete.instance);
         bytes.extend_from_slice(&concrete.fingerprint);
@@ -741,7 +759,12 @@ pub fn build(
         bodies.push(body);
     }
     function_adapter::materialize(&mut bodies, hir.module()).map_err(|error| vec![error])?;
-    pass::optimize_world(&mut bodies, hir.module(), &profile, oracle)?;
+    installed_instances.sort_unstable();
+    let installed: Vec<bool> = bodies
+        .iter()
+        .map(|body| installed_instances.binary_search(&body.instance).is_ok())
+        .collect();
+    pass::optimize_world(&mut bodies, &installed, hir.module(), &profile, oracle)?;
     for body in &bodies {
         verify::verify(body, hir.module(), oracle).map_err(|error| vec![error])?;
     }

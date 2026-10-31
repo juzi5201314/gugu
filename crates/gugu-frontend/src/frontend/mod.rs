@@ -5,8 +5,8 @@
 #[cfg(all(test, feature = "slow-tests"))]
 pub(crate) use gugu_gir::semantics;
 pub(crate) use gugu_gir::{
-    FrontendOutput, PrefixMode, SourceInput, analysis, bootstrap_with, cfg, contract, format, gc,
-    gir, hir, mono, prebuild,
+    FrontendOutput, PrefixMode, SourceInput, analysis, bootstrap_with, cfg, contract, format,
+    functions, gc, gir, hir, mono, prebuild,
 };
 #[cfg(test)]
 pub(crate) use gugu_gir::{ast, bootstrap, installs_builtin_source, source_map_span};

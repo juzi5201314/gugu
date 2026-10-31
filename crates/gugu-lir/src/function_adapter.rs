@@ -1,8 +1,8 @@
 //! 擦除函数句柄的 checked 入口：只适配隐藏环境，不改变目标函数和 runtime 的直接调用 ABI。
 use super::body::{
     Block, BlockId, Body, Call, CallTarget, Definition, Edge, EdgeId, InstId, Instruction, Memory,
-    Op, Origin, Parameter, PollSummary, Provenance, REVISION, Safepoint, SafepointId,
-    SafepointKind, Symbol, Terminator, Type, Value, ValueId, ValueType, id,
+    Op, Origin, Parameter, PollInterface, PollSummary, Provenance, REVISION, Safepoint,
+    SafepointId, SafepointKind, Symbol, Terminator, Type, Value, ValueId, ValueType, id,
 };
 use super::{invalid, uses, verify};
 use crate::Diagnostic;
@@ -87,6 +87,7 @@ fn build(target: &Body, has_environment: bool) -> Body {
         environments: Vec::new(),
         entry: BlockId(0),
         poll_summary: PollSummary::default(),
+        poll_interface: PollInterface::default(),
     };
     let memory = parameter(&mut body, BlockId(0), 0, ValueType::scalar(Type::Mem));
     let mut arguments = Vec::with_capacity(target.signature.parameters.len());

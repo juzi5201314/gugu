@@ -8,8 +8,8 @@ use super::policy::{POLL_BUDGET, POLL_FREE_LEAF_MAX_COST};
 use super::rewrite::{Editor, InstRef, Term};
 use crate::Diagnostic;
 use crate::body::{
-    BlockId, Body, CallTarget, Condition, IntOp, Op, Origin, PollSummary, Provenance,
-    SafepointKind, Type, ValueId, ValueType, range,
+    BlockId, Body, CallTarget, Condition, IntOp, Op, Origin, PollInterface, PollSummary,
+    Provenance, SafepointKind, Type, ValueId, ValueType, range,
 };
 use crate::gir::body::CallKind;
 use crate::hir;
@@ -41,11 +41,18 @@ impl<'t> CalleeInfo<'t> {
     }
 }
 
+/// world 级 poll：按调用图 SCC 求 (摘要, 叶) 不动点，再按不动点插入 poll 并标记调用。
+///
+/// `installed[i]` 为真的 body 来自内建函数表：它已是 poll 之后的形态，接口取自
+/// `poll_interface`，既不参与不动点也不重建。安装集按 callee 闭合，安装 body 调用未安装
+/// 实例说明函数表与本 world 不符，报 compiler invariant。
 pub fn run_world(
     bodies: &mut Vec<Body>,
+    installed: &[bool],
     module: &hir::Module,
     target: &dyn TargetOracle,
 ) -> Result<(), Diagnostic> {
+    debug_assert_eq!(bodies.len(), installed.len());
     let index: BTreeMap<[u8; 32], usize> = bodies
         .iter()
         .enumerate()
@@ -55,6 +62,22 @@ pub fn run_world(
         .iter()
         .map(|body| direct_callees(body, &index))
         .collect();
+    let mut info = CalleeInfo::new(target);
+    for (body, _) in bodies
+        .iter()
+        .zip(installed)
+        .filter(|(_, installed)| **installed)
+    {
+        info.insert(
+            body.instance,
+            (body.poll_interface.summary, body.poll_interface.leaf),
+        );
+    }
+    for (body, callees) in callees.iter().enumerate() {
+        if installed[body] && callees.iter().any(|&callee| !installed[callee]) {
+            return Err(invalid("内建函数表安装的 body 调用了未安装的实例"));
+        }
+    }
     let components = call_sccs(&callees);
     let mut component_of = vec![0usize; bodies.len()];
     for (component, members) in components.iter().enumerate() {
@@ -65,8 +88,8 @@ pub fn run_world(
     let recursive: Vec<bool> = (0..bodies.len())
         .map(|body| callees[body].contains(&body) || components[component_of[body]].len() > 1)
         .collect();
-    let mut info = CalleeInfo::new(target);
-    for component in &components {
+    // 安装 body 的 callee 全部已安装，因此一个分量要么整体安装、要么整体现算。
+    for component in components.iter().filter(|members| !installed[members[0]]) {
         loop {
             let mut changed = false;
             for &body in component {
@@ -83,9 +106,13 @@ pub fn run_world(
         }
     }
     let mut rebuilt = Vec::with_capacity(bodies.len());
-    for body in bodies.drain(..) {
+    for (body, installed) in bodies.drain(..).zip(installed) {
+        if *installed {
+            rebuilt.push(body);
+            continue;
+        }
         let key = body.instance;
-        let leaf = info.get(&key).is_some_and(|(_, leaf)| *leaf);
+        let (fixpoint, leaf) = info.get(&key).copied().expect("每个现算 body 都在不动点里");
         let recursive_body = recursive[index[&key]];
         let mut editor = Editor::new(body);
         let mut changed = false;
@@ -103,6 +130,10 @@ pub fn run_world(
         };
         let (summary, _) = analyze(&body, &info, recursive_body);
         body.poll_summary = summary;
+        body.poll_interface = PollInterface {
+            summary: fixpoint,
+            leaf,
+        };
         if changed {
             verify::verify(&body, module, target)?;
         }

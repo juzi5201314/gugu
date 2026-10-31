@@ -52,9 +52,10 @@ impl<'a> BuiltinPrefix<'a> {
             return Err(invalid("内建块物化表的派生层 revision 与当前编译器不符"));
         }
         if !prebuilt.functions.is_empty()
-            && prebuilt.function_revisions != crate::functions::revisions()
+            && crate::functions::declared_revisions(&prebuilt.function_revisions)
+                != crate::functions::revisions()
         {
-            return Err(invalid("内建块函数表的层 revision 与当前编译器不符"));
+            return Err(invalid("内建块函数表的分析层 revision 与当前编译器不符"));
         }
         let sema = SemaPrefix::decode(prebuilt, sources, source_map)?;
         let record_types: Vec<crate::gir::concrete::RecordTypes> =

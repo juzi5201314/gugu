@@ -12,8 +12,8 @@ pub const ARTIFACT_MAGIC: [u8; 8] = *b"GUGURT01";
 pub const ARTIFACT_SCHEMA: u32 = 4;
 
 /// 内建块物化表的 schema：表集或表内布局变化时递增。
-/// 4：函数表并入物化表，每个内建实例携带逐函数分析分片。
-pub const PREBUILT_SCHEMA: u32 = 4;
+/// 5：函数表项追加 poll 之后的 LIR body 层。
+pub const PREBUILT_SCHEMA: u32 = 5;
 /// payload 的域隔离标签。
 pub const ARTIFACT_DOMAIN: &str = "gugu-runtime-artifact-v1";
 /// GBC payload 编码版本。
@@ -122,10 +122,25 @@ pub struct RuntimeGenericTemplateV1 {
 pub struct RuntimeFunctionArtifactV1 {
     /// 实例 MonoKey digest 的小写十六进制。
     pub stable_mono_key: String,
-    /// 层字节的内容摘要；只作断言，安装端重算比对。
+    /// 层字节的内容摘要（[`Self::content_fingerprint`]）；只作断言，安装端重算比对。
     pub fingerprint: [u8; 32],
     /// 该实例的分析分片：函数摘要与本 owner 的证明。
     pub analysis: Vec<u8>,
+    /// 该实例 poll 之后的 LIR body 规范编码。
+    pub lir: Vec<u8>,
+}
+
+impl RuntimeFunctionArtifactV1 {
+    /// key 与各层字节的内容摘要：每层先写 `u64` 小端长度再写字节。
+    pub fn content_fingerprint(&self) -> [u8; 32] {
+        let mut hash = blake3::Hasher::new_derive_key("gugu-builtin-function-v1");
+        hash.update(self.stable_mono_key.as_bytes());
+        for layer in [&self.analysis, &self.lir] {
+            hash.update(&(layer.len() as u64).to_le_bytes());
+            hash.update(layer);
+        }
+        *hash.finalize().as_bytes()
+    }
 }
 
 /// artifact manifest；字段是所有跨 build 身份输入的可审计摘要。
@@ -785,6 +800,7 @@ fn encode_payload(payload: &RuntimeArtifactPayloadV1) -> Result<Vec<u8>, Runtime
             encoder.string(&function.stable_mono_key)?;
             encoder.digest(&function.fingerprint);
             encoder.bytes(&function.analysis)?;
+            encoder.bytes(&function.lir)?;
         }
     }
     Ok(encoder.finish())
@@ -909,6 +925,7 @@ fn decode_prebuilt(
             stable_mono_key: decoder.string()?,
             fingerprint: decoder.digest()?,
             analysis: decoder.bytes()?,
+            lir: decoder.bytes()?,
         });
     }
     Ok(RuntimePrebuiltV1 {
@@ -1145,6 +1162,7 @@ mod tests {
             stable_mono_key: format!("{prefix:0<64}"),
             fingerprint: [3; 32],
             analysis: vec![1],
+            lir: vec![2],
         }
     }
 

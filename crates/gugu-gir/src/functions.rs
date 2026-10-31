@@ -1,23 +1,25 @@
 //! 内建实例的物化函数表：可安装集的判定、表项内容校验与构建期录制。
 //!
-//! 函数表在构建期由 canonical 程序的编译录制，每项按实例 MonoKey digest 存该实例的分析
-//! 分片（函数摘要与本 owner 的证明）。
+//! 函数表在构建期由 canonical 程序的编译录制，每项按实例 MonoKey digest 存该实例各层的冻结
+//! 结果：分析分片（函数摘要与本 owner 的证明）与下层（LIR）字节。
 //!
 //! 用户编译在单态化闭合之后求可安装集：实例 digest 在表内、它的 owner 在本 world 只有这一个
 //! 实例，并且全部可执行 callee 同样可安装（按 callee 闭合取最大不动点）。在这个集合上安装的
 //! 结果与现算一致：MonoKey 决定调用目标，集合内的 body 只调用集合内的 body；单实例 owner 的
-//! 证明不与其它实例合并；内建 owner 与表达式编号处于编号前缀，证明键在两个 world 里同义。
-//! 不在集合内的实例照常现算，这是安装边界本身而不是回退；表项内容校验失败才是 compiler
-//! invariant。
+//! 证明不与其它实例合并；内建 owner 与表达式编号处于编号前缀，证明键在两个 world 里同义；
+//! 录制排除了读取类型宇宙稠密编号的实例，用户类型改变编号也不影响已安装的字节。不在集合内
+//! 的实例照常现算，这是安装边界本身而不是回退；表项内容校验失败才是 compiler invariant。
 
 use crate::analysis::{self, AnalysisWorldV1};
+use crate::gir::body::{ConstValue, IntrinsicOp, Rvalue, StatementKind};
+use crate::gir::{GirWorldV1, concrete::ConcreteBody};
 use crate::hir::Module;
 use crate::mono::{MonoWorldV1, digest_hex, digest_of};
 use crate::runtime::RuntimeFunctionArtifactV1;
 use crate::{Diagnostic, DiagnosticCode};
 
-/// 函数表项层字节的内容摘要域。
-const FUNCTION_DOMAIN: &str = "gugu-builtin-function-v1";
+/// 本层在 `function_revisions` 里的层名前缀。
+const LAYER: &str = "analysis.";
 
 /// 本 world 的可安装集：`(实例 digest, 表项下标)`，按 digest 严格升序。
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -45,7 +47,7 @@ impl InstalledFunctions {
         let mut members = Vec::with_capacity(selected.len());
         for (index, position) in selected {
             let artifact = &entries[position as usize];
-            if fingerprint(artifact) != artifact.fingerprint {
+            if artifact.content_fingerprint() != artifact.fingerprint {
                 return Err(invariant(format!(
                     "内建函数表项 `{}` 的内容摘要不符",
                     artifact.stable_mono_key
@@ -79,39 +81,93 @@ impl InstalledFunctions {
     }
 }
 
-/// 构建期录制：从 canonical 程序的已完成 world 取内建实例的分析分片，按 key 升序。
+/// 构建期录制：从 canonical 程序的已完成 world 取内建实例的各层结果，按 key 升序。
 ///
-/// `builtin` 是内建编号前缀的定义数。入选条件与安装端相同（单实例 owner、callee 闭合），另
-/// 排除观察到预算耗尽的 owner：安装端组装的 SCC 预算位恒为假。
+/// `builtin` 是内建编号前缀的定义数；`lower` 按实例 digest 给出下层（LIR）的录制字节。入选
+/// 条件与安装端相同（单实例 owner、callee 闭合），另排除观察到预算耗尽的 owner（安装端组装的
+/// SCC 预算位恒为假）、没有具体 body 的实例，以及读取类型宇宙稠密编号的实例
+/// （[`reads_type_numbering`]）。
 pub fn record(
     module: &Module,
     mono: &MonoWorldV1,
+    gir: &GirWorldV1,
     world: &AnalysisWorldV1,
     builtin: usize,
+    lower: impl Fn(&[u8; 32]) -> Option<Vec<u8>>,
 ) -> Result<Vec<RuntimeFunctionArtifactV1>, Diagnostic> {
-    let selected = select(module, mono, |owner, _| {
+    let mut concrete: Vec<([u8; 32], &ConcreteBody)> = gir
+        .concrete
+        .iter()
+        .map(|body| (body.instance, body))
+        .collect();
+    concrete.sort_unstable_by_key(|(instance, _)| *instance);
+    let mut late: Vec<[u8; 32]> = mono
+        .late
+        .results
+        .iter()
+        .map(|result| result.key.instance)
+        .collect();
+    late.sort_unstable();
+    let selected = select(module, mono, |owner, digest| {
         let index = u32::try_from(owner).expect("owner 下标适配 u32");
-        (module.owners[owner].definition.index() < builtin && !world.owner_exhausted(index))
-            .then_some(index)
+        let body = concrete
+            .binary_search_by_key(digest, |(instance, _)| *instance)
+            .ok()
+            .map(|position| concrete[position].1)?;
+        (module.owners[owner].definition.index() < builtin
+            && !world.owner_exhausted(index)
+            && !reads_type_numbering(body, &late))
+        .then_some(index)
     })?;
     selected
         .into_iter()
         .map(|(index, owner)| {
             let mono_key = &mono.instances[index].mono_key;
+            let digest = digest_of(mono_key);
             let analysis = analysis::encode_shard(world, owner, mono_key)
                 .ok_or_else(|| invariant("录制的内建实例不在分析 world 中".to_owned()))?;
+            let lir = lower(&digest)
+                .ok_or_else(|| invariant("录制的内建实例没有 LIR body".to_owned()))?;
             let mut artifact = RuntimeFunctionArtifactV1 {
-                stable_mono_key: digest_hex(&digest_of(mono_key)),
+                stable_mono_key: digest_hex(&digest),
                 fingerprint: [0; 32],
                 analysis,
+                lir,
             };
-            artifact.fingerprint = fingerprint(&artifact);
+            artifact.fingerprint = artifact.content_fingerprint();
             Ok(artifact)
         })
         .collect()
 }
 
-/// 函数表各层的 revision，按层名排序；安装端要求与物化表声明完全一致。
+/// 具体 body 是否读取类型宇宙的稠密编号：类型常量与带类型实参的 `TypeId` 降为编号整数，
+/// late 值（如 `TypeIdCount`）可以是编号的函数。编号随用户类型变化，这类 body 不能冻结。
+///
+/// `late` 是有 late 结果的实例 digest，升序。
+fn reads_type_numbering(body: &ConcreteBody, late: &[[u8; 32]]) -> bool {
+    fn mentions_type(value: &ConstValue) -> bool {
+        match value {
+            ConstValue::Type(_) => true,
+            ConstValue::Aggregate(values) => values.iter().any(mentions_type),
+            _ => false,
+        }
+    }
+    late.binary_search(&body.instance).is_ok()
+        || body
+            .body
+            .constants
+            .iter()
+            .any(|constant| mentions_type(&constant.value))
+        || body.body.statements.iter().any(|statement| {
+            matches!(
+                &statement.kind,
+                StatementKind::Assign(_, Rvalue::Intrinsic { op: IntrinsicOp::TypeId, types, .. })
+                    if !types.is_empty()
+            )
+        })
+}
+
+/// 本层的 revision，按层名排序；安装端要求与物化表里 `analysis.` 前缀的条目完全一致。
 pub fn revisions() -> Vec<(String, u32)> {
     vec![
         (
@@ -123,13 +179,13 @@ pub fn revisions() -> Vec<(String, u32)> {
     ]
 }
 
-/// 函数表项层字节的内容摘要；物化端写入、安装端重算比对。
-pub fn fingerprint(artifact: &RuntimeFunctionArtifactV1) -> [u8; 32] {
-    let mut hash = blake3::Hasher::new_derive_key(FUNCTION_DOMAIN);
-    hash.update(artifact.stable_mono_key.as_bytes());
-    hash.update(&(artifact.analysis.len() as u64).to_le_bytes());
-    hash.update(&artifact.analysis);
-    *hash.finalize().as_bytes()
+/// 物化表里属于本层的 revision 条目。
+pub fn declared_revisions(declared: &[(String, u32)]) -> Vec<(String, u32)> {
+    declared
+        .iter()
+        .filter(|(layer, _)| layer.starts_with(LAYER))
+        .cloned()
+        .collect()
 }
 
 /// 入选实例 `(实例下标, accept 的取值)`，按实例下标（即 digest）升序。

@@ -1132,6 +1132,7 @@ fn pipeline_preserves_observable_effects() {
     let mut bodies = vec![body];
     pass::optimize_world(
         &mut bodies,
+        &[false],
         compilation.hir.as_ref().unwrap().module(),
         &crate::target::baseline_cost_profile(),
         &ORACLE,

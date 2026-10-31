@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::{num::NonZeroU32, ops::Range};
 
 /// body 规范字节的 revision。10：body 不再携带整世界输入指纹，同一实例的 body 只由自身内容决定。
-pub const REVISION: u32 = 10;
+/// 11：body 携带 poll 不动点时 caller 可见的接口，安装的 body 据此播种 poll 而不重算。
+pub const REVISION: u32 = 11;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -699,6 +700,18 @@ pub struct PollSummary {
     pub has_poll_free_cycle: bool,
 }
 
+/// poll 不动点时 caller 可见的接口：caller 的预算数据流与叶标记只读这一份。
+///
+/// 它是插入 poll 之前的 body 在不动点上的取值，与插入之后重算的 [`PollSummary`] 可以不同；
+/// 叶标记不由 body 内容决定，只能随 body 保存。
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PollInterface {
+    /// 不动点时的预算摘要。
+    pub summary: PollSummary,
+    /// 是否 poll-free 叶。
+    pub leaf: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Body {
     pub revision: u32,
@@ -728,6 +741,7 @@ pub struct Body {
     pub environments: Vec<Environment>,
     pub entry: BlockId,
     pub poll_summary: PollSummary,
+    pub poll_interface: PollInterface,
 }
 
 impl Body {

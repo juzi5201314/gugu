@@ -1,8 +1,8 @@
 //! 构建期物化：把内建块的派生做一次并编码成 artifact 表。
 //!
-//! 物化覆盖与用户无关的层：名称解析、身份、早期常量、类型检查、冻结 HIR、泛型 GIR 与
-//! record 类型目录；随后在物化后的 artifact 上编译 canonical 程序，录制内建实例的函数表。
-//! 用户相关层（单态化实例、具体体、GIR pass、LIR、机器码）仍每次现算。
+//! 本层物化与用户无关的表：名称解析、身份、早期常量、类型检查、冻结 HIR、泛型 GIR 与
+//! record 类型目录。函数表要在已物化的前缀上编译 canonical 程序并经过 LIR，由 driver 在
+//! [`materialize_tables`] 之后录制（见 [`crate::functions::record`]）。
 //!
 //! 表内容全部是前端 canonical 编码；加载端按同一规则安装到编号前缀并重算指纹比对，
 //! 序列化里的指纹只作断言，不作为信任来源。
@@ -19,8 +19,7 @@ use crate::query::QueryEngine;
 use crate::runtime::RuntimeResources;
 use crate::sema_prefix::table_fingerprint;
 use crate::source::SourceMap;
-use crate::source::SourceSnapshot;
-use crate::{PrefixMode, SourceInput, TargetName, canonical};
+use crate::{TargetName, canonical};
 use crate::{cfg::CfgContext, derive_builtin, gir, semantics};
 
 /// 物化失败：构建期必须直接失败，不做降级。
@@ -61,11 +60,11 @@ impl From<RuntimeArtifactError> for MaterializeError {
     }
 }
 
-/// 把 source-only artifact 物化成带内建块派生表的 artifact。
+/// 把 source-only artifact 物化成带内建块派生表的 artifact；函数表留空。
 ///
 /// 派生用 `CfgContext::target_only`：内建块必须对用户 cfg 保持不变，这一点由
 /// [`check_cfg_independence`] 在构建期钉住。
-pub fn materialize(
+pub fn materialize_tables(
     target: TargetName,
     source: RuntimeArtifactV1,
 ) -> Result<RuntimeArtifactV1, MaterializeError> {
@@ -121,54 +120,16 @@ pub fn materialize(
     let mut artifact = source;
     artifact.payload.prebuilt = Some(prebuilt);
     artifact.validate()?;
-    let functions = record_functions(&artifact, &cfg).map_err(MaterializeError::Derive)?;
-    let prebuilt = artifact
-        .payload
-        .prebuilt
-        .as_mut()
-        .expect("物化表刚写入 artifact");
-    prebuilt.function_revisions = crate::functions::revisions();
-    prebuilt.functions = functions;
-    artifact.validate()?;
     Ok(artifact)
 }
 
-/// 编译 canonical 程序 `fn main() {}` 并录制内建实例的函数表。
-///
-/// 编译走用户路径的安装模式：前缀来自刚物化的表，函数表此时为空，分析全部现算。录制只取
-/// 编号前缀内的定义，探针等未物化的内建块不在其中。
-fn record_functions(
-    artifact: &RuntimeArtifactV1,
-    cfg: &CfgContext,
-) -> Result<Vec<gugu_compiler_core::RuntimeFunctionArtifactV1>, Vec<crate::Diagnostic>> {
-    let resources = RuntimeResources::new(artifact);
-    let builtin = resources
-        .prebuilt()
-        .expect("物化表刚写入 artifact")
+/// 内建编号前缀的定义数：物化块的定义区间之和，探针等未物化的内建块不在其中。
+pub fn builtin_definitions(prebuilt: &RuntimePrebuiltV1) -> usize {
+    prebuilt
         .blocks
         .iter()
         .map(|block| block.definitions.len as usize)
-        .sum();
-    let mut source_map = SourceMap::new(vec![
-        SourceSnapshot::from_str("main.gg", "fn main() {}\n").expect("canonical 程序是合法快照"),
-    ])
-    .expect("canonical 程序的源码表合法");
-    let output = crate::bootstrap_with(
-        SourceInput::Sources {
-            source_map: &mut source_map,
-            entry: "main.gg",
-            source_root: "",
-            package_identity: "single-file",
-            require_main: true,
-            cfg,
-            external_packages: &BTreeSet::new(),
-        },
-        &QueryEngine::new(),
-        resources,
-        PrefixMode::Install,
-    )?;
-    crate::functions::record(output.hir.module(), &output.mono, &output.analysis, builtin)
-        .map_err(|error| vec![error])
+        .sum()
 }
 
 /// 按 `module_order` 顺序算出每个模块占据的定义/owner 区间。

@@ -125,14 +125,22 @@ fn run_pass(
 }
 
 /// 对全部函数体运行固定管线；每个 pass 后立即运行结构 verifier。
+///
+/// `installed[i]` 为真的 body 来自内建函数表，已是 poll 之后的形态：跳过逐 body pass，只
+/// 进入 world 级 poll 播种，最终 verifier 由调用方统一运行。
 pub fn optimize_world(
     bodies: &mut Vec<Body>,
+    installed: &[bool],
     module: &hir::Module,
     profile: &BackendCostProfile,
     target: &dyn TargetOracle,
 ) -> Result<(), Vec<Diagnostic>> {
     let mut optimized = Vec::with_capacity(bodies.len());
-    for body in bodies.drain(..) {
+    for (body, installed) in bodies.drain(..).zip(installed) {
+        if *installed {
+            optimized.push(body);
+            continue;
+        }
         super::verify::verify_structure(&body, module)
             .map_err(|error| vec![pack(LirPass::VerifySsaAndMemory.name(), error)])?;
         let mut editor = Editor::new(body);
@@ -167,7 +175,7 @@ pub fn optimize_world(
         optimized.push(current);
     }
     *bodies = optimized;
-    poll::run_world(bodies, module, target).map_err(|error| vec![error])?;
+    poll::run_world(bodies, installed, module, target).map_err(|error| vec![error])?;
     Ok(())
 }
 
