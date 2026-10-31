@@ -270,6 +270,23 @@ pub fn select_landing<'a>(
     best.ok_or_else(|| RawModelError::new("程序计数器没有覆盖的落地记录"))
 }
 
+/// 校验一个函数的落地链：每条记录以自己的 `pc_start` 选中的最内层记录必须就是它自己的落点。
+///
+/// 落地选择只读落地链本身，不依赖已编码 section；逐函数校验因此不必重解码整张栈图。
+pub fn check_landings(landings: &[LandingRecord]) -> Result<u32, RawModelError> {
+    let world = WalkWorld {
+        landings,
+        ..WalkWorld::default()
+    };
+    for landing in landings {
+        let selected = select_landing(&world, landing.pc_start)?;
+        if selected.landing_pc != landing.landing_pc || selected.cleanup != landing.cleanup {
+            return Err(RawModelError::new("落地链选择与记录不一致"));
+        }
+    }
+    u32::try_from(landings.len()).map_err(|_| RawModelError::new("落地记录数超出 u32"))
+}
+
 /// 由扫描到的栈根组装复制输入：槽偏移按字节换算后必须严格升序且不重叠。
 pub fn copy_input(roots: &[ScannedRoot], used: usize) -> Result<StackImage, RawModelError> {
     let mut offsets: Vec<u32> = roots
@@ -395,12 +412,7 @@ pub fn consume_metadata(
             ));
         }
     }
-    for landing in landings {
-        let selected = select_landing(&world, landing.pc_start)?;
-        if selected.landing_pc != landing.landing_pc || selected.cleanup != landing.cleanup {
-            return Err(RawModelError::new("落地链选择与记录不一致"));
-        }
-    }
+    check_landings(landings)?;
     Ok(ConsumeReport {
         functions: functions.len() as u32,
         safepoints: safepoints.len() as u32,

@@ -150,7 +150,7 @@ pub use region_schema::{TurnRegionDemand, TurnRegionRuntimeContract};
 pub use routing_schema::{RouteMode, RoutingDemand, RoutingPolicyV1, RoutingRuntimeContract};
 pub use scheduler_schema::{SchedulerDemand, SchedulerRuntimeContract};
 pub use shared_heap_schema::{SharedHeapDemand, SharedHeapRuntimeContract};
-pub use stackmap::{LandingRecord as StackLanding, consume_metadata};
+pub use stackmap::{LandingRecord as StackLanding, check_landings, consume_metadata};
 pub use stackmap_codec::{
     CodeLayout, DecodedSection, SafepointLayout, TypedRoot, decode_tables,
     encode as encode_stackmap,

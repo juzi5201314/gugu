@@ -96,7 +96,7 @@ pub fn build(
     {
         return Err(vec![invalid("runtime 消费的栈图计数与 section 不一致")]);
     }
-    let landing_count = consume_landings(&stackmap_section, &prepared, raw)?;
+    let landing_count = consume_landings(&prepared)?;
     let mut metadata = MachineMetadata {
         stackmap_name: stackmap_name(target).to_owned(),
         unwind_name: unwind_name(target).to_owned(),
@@ -136,29 +136,21 @@ fn source_section_name(target: TargetName) -> &'static str {
 }
 
 /// 每个函数的落地链单独交给 walker：记录里的 PC 相对函数起点，不能跨函数混查。
-fn consume_landings(
-    section: &[u8],
-    prepared: &[Prepared<'_>],
-    raw: &crate::runtime::RuntimeRawContractV1,
-) -> Result<u32, Vec<Diagnostic>> {
+/// 栈图本身已在上面整体消费过一次，这里只校验落地选择。
+fn consume_landings(prepared: &[Prepared<'_>]) -> Result<u32, Vec<Diagnostic>> {
     let mut total = 0_u32;
+    let mut landings = Vec::new();
     for item in prepared {
-        if item.landings.is_empty() {
-            continue;
-        }
-        let landings = item
-            .landings
-            .iter()
-            .map(|landing| StackLanding {
-                pc_start: landing.pc_start,
-                pc_end: landing.pc_end,
-                landing_pc: landing.landing_pc,
-                cleanup: landing.cleanup,
-            })
-            .collect::<Vec<_>>();
-        let consumed = runtime::consume_metadata(section, &landings, raw.compression())
-            .map_err(|error| vec![invalid(error.message())])?;
-        total = total.saturating_add(consumed.landings);
+        landings.clear();
+        landings.extend(item.landings.iter().map(|landing| StackLanding {
+            pc_start: landing.pc_start,
+            pc_end: landing.pc_end,
+            landing_pc: landing.landing_pc,
+            cleanup: landing.cleanup,
+        }));
+        let consumed =
+            runtime::check_landings(&landings).map_err(|error| vec![invalid(error.message())])?;
+        total = total.saturating_add(consumed);
     }
     Ok(total)
 }
