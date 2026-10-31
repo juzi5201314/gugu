@@ -1096,19 +1096,9 @@ stack arena 与 raw plane 共用同一 provider，加一次 stack committed 会�
 提供 `pacing-state`/`pacing-debt`/`pacing-pressure`/`pacing-credit`/`pacing-assists`/
 `pacing-outcomes`/`pacing-gc-cpu` 各段 dump。
 
-`pacing_tests` 覆盖：契约自洽与参数/目录漂移拒绝、指纹随需求变化、debt 公式与
-`GcTarget::Off` 只关闭 debt 触发、assist 的四种结局与不虚构进度、assist 只按真实交接的
-键数偿还（`pending_mark_work` 与 allocation debt 各扣一次）、没有交接时 `no-work` 不记账、
-cost window 拒绝越过预算并把超出部分转为 debt、deferred mark 工作跨 cycle 存活、
-per-cycle 工作量取自累计计数器差值、remark continuation 与未开启 barrier 拒绝、
-evacuation 三项上界、credit 收敛与 epoch 只能前进、hysteresis 开启/结束条件（分类为空不算
-drain 证据）、一个 episode 至多一次 forced cycle 后才是 OOM、请求字节与 committed 之和才决定
-headroom、episode drain 的节奏门禁、world 侧真实 credit 观测与 drain、drain 冲刷真实 return
-staging、稳态分配不读全局快照、memory-pressure 每 owner 只冲刷一遍、连续 cycle 持续推进
-epoch、空载 extent 过 grace 后 committed 真实回落、allocation 慢路径真实启动自动 cycle 并
-记录 live record 残差、软上限下分配被真实拒绝、未收敛的 cycle 既不报错也不推进 credit
-epoch，以及候选超出 relocation 预算时整块延后而预算内前缀仍真实 decommit；契约在
-`RuntimeRawContractV1::build`、镜像计划与 CLI JSON 内的端到端集成同样验证。
+pacing 契约在 `RuntimeRawContractV1::build`、镜像计划与 CLI JSON（`build_json_reports_barrier_contract_keys`）
+内的端到端集成中验证；`8b21ce3` 改由镜像内 `LocalHeap` 承载回收后，旧 world 参照实现的
+`pacing_tests` 随之删除。
 契约还同样固定 Callable 的稳定类型键修复，该修复在提交 `0813ad6` 中独立完成：
 [`mono/keys.rs`](monomorphization-cache.md) 统一 `Ty::Callable` 类型
 稳定键，`concrete/layout.rs` 删除 `Callable` 特例，`mono/universe.rs` 改用
