@@ -1,0 +1,365 @@
+use std.runtime.net_platform as native
+use std.runtime.network_service as services
+use std.runtime.fs_platform as bridge
+use std.runtime.heap.{heap_word, heap_store_word, heap_word32, heap_store_word32, heap_fail}
+use std.runtime.resource.{ResourceCell, begin, end, begin_control, end_control}
+use std.runtime.scheduler.{park_current, ready_hot}
+use std.net.address.{SocketAddr}
+use std.io as io
+use std.runtime.heap.{copy_bytes}
+
+static state: uint = 0
+pub const NEXT: uint = 200
+pub const PREVIOUS: uint = 208
+pub const HEAD: uint = 216
+pub const TAIL: uint = 224
+pub const REGISTERED: uint = 232
+pub const FAMILY: uint = 240
+pub const REQUEST: uint = 2048
+pub const CLOSED: uint = 18446744073709551614
+pub const CANCELLED: uint = 18446744073709551615
+const BUDGET: uint = 128
+pub struct Accepted { pub handle: uint, pub peer: SocketAddr }
+
+pub fn initialize() Result[(), io.Error] {
+    if state != 0 { return Ok(()) }
+    bridge.ensure_pool()
+    let created = bridge.control_allocate(4096)
+    let result = create_poller(created)
+    if result.error != 0 { bridge.control_free(created, 4096)
+        return Err(native.from_error(result.error)) }
+    heap_store_word(created, result.value)
+    state = created
+    services.install(service, pending, shutdown)
+    Ok(())
+}
+pub fn first_control() uint = heap_word(state + 8)
+#[cfg(os = "linux")]
+fn cancel_native(control: uint, hot: uint) bool { _ = control
+    _ = hot
+    true }
+pub fn request() uint = state + REQUEST
+pub fn port() uint = heap_word(state)
+pub fn wait_record(hot: uint) uint = heap_word(hot + 48) + 272
+pub fn cancelled(control: uint) bool { unsafe {
+    control != 0 && std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](control)) != 0
+} }
+fn closed(control: uint) bool = heap_word32(control + 8) & uint(2) != 0
+
+pub fn accept(cell: &ResourceCell, cancel: uint) Result[Accepted, io.Error] { unsafe {
+    let handle = begin(cell)
+    if handle == ~uint(0) { return Err(io.Error::Closed) }
+    if cancelled(cancel) { end(cell)
+        return Err(io.Error::Cancelled) }
+    let hot = std.runtime.current_slot()
+    let wait = wait_record(hot)
+    let control = cell.control
+    heap_store_word(wait, 0)
+    heap_store_word(wait + 8, heap_word(control + TAIL))
+    heap_store_word(wait + 16, control)
+    heap_store_word(wait + 24, cancel)
+    heap_store_word(wait + 32, 0)
+    heap_store_word(wait + 40, 0)
+    if heap_word(control + TAIL) == 0 {
+        let result = register(control)
+        if result.error != 0 { end(cell)
+            return Err(native.from_error(result.error)) }
+        heap_store_word(control + HEAD, hot)
+        append(control)
+    } else { heap_store_word(wait_record(heap_word(control + TAIL)), hot) }
+    heap_store_word(control + TAIL, hot)
+    heap_store_word(state + 24, heap_word(state + 24) + 1)
+    park_current()
+    let error = heap_word(wait + 40)
+    if error == CLOSED { return Err(io.Error::Closed) }
+    if error == CANCELLED { return Err(io.Error::Cancelled) }
+    if error != 0 { return Err(native.from_error(error)) }
+    let peer = native.decode(wait + 48, heap_word32(wait + 80))
+    match peer {
+        Ok(peer) => Ok(Accepted { handle: heap_word(wait + 32), peer }),
+        Err(error) => { _ = native.call(7, heap_word(wait + 32), 0, 0, 0, 0, 0)
+            Err(error) },
+    }
+} }
+fn append(control: uint) {
+    let tail = heap_word(state + 16)
+    heap_store_word(control + NEXT, 0)
+    heap_store_word(control + PREVIOUS, tail)
+    if tail == 0 { heap_store_word(state + 8, control) }
+    else { heap_store_word(tail + NEXT, control) }
+    heap_store_word(state + 16, control)
+}
+fn remove(control: uint) {
+    let before = heap_word(control + PREVIOUS)
+    let after = heap_word(control + NEXT)
+    if before == 0 { heap_store_word(state + 8, after) }
+    else { heap_store_word(before + NEXT, after) }
+    if after == 0 { heap_store_word(state + 16, before) }
+    else { heap_store_word(after + PREVIOUS, before) }
+    if heap_word(state + 32) == control { heap_store_word(state + 32, after)
+        heap_store_word(state + 40, 0) }
+    heap_store_word(control + NEXT, 0)
+    heap_store_word(control + PREVIOUS, 0)
+}
+pub fn complete(control: uint, hot: uint, value: uint, error: uint) {
+    let wait = wait_record(hot)
+    let before = heap_word(wait + 8)
+    let after = heap_word(wait)
+    if before == 0 { heap_store_word(control + HEAD, after) }
+    else { heap_store_word(wait_record(before), after) }
+    if after == 0 { heap_store_word(control + TAIL, before) }
+    else { heap_store_word(wait_record(after) + 8, before) }
+    if heap_word(state + 40) == hot { heap_store_word(state + 40, after) }
+    if heap_word(control + HEAD) == 0 {
+        unregister(control)
+        remove(control)
+    }
+    heap_store_word(state + 24, heap_word(state + 24) - 1)
+    heap_store_word(wait + 32, value)
+    heap_store_word(wait + 40, error)
+    end_control(control)
+    ready_hot(hot)
+}
+fn service(processor: uint) {
+    _ = processor
+    if state == 0 { return }
+    cancel_waiters()
+    poll(state)
+}
+fn pending(processor: uint) bool { _ = processor
+    state != 0 && (heap_word(state + 24) != 0 || platform_pending()) }
+fn shutdown(processor: uint) {
+    _ = processor
+    if state == 0 { return }
+    if heap_word(state + 24) != 0 || platform_pending() { heap_fail() }
+    close_poller(heap_word(state))
+    bridge.control_free(state, 4096)
+    state = 0
+}
+fn cancel_waiters() {
+    let control = heap_word(state + 32)
+    let hot = heap_word(state + 40)
+    if control == 0 { control = heap_word(state + 8) }
+    let remaining = BUDGET
+    while control != 0 && remaining != 0 {
+        if hot == 0 { hot = heap_word(control + HEAD) }
+        let following = heap_word(control + NEXT)
+        while hot != 0 && remaining != 0 {
+            let next = heap_word(wait_record(hot))
+            remaining = remaining - 1
+            if closed(control) { complete(control, hot, 0, CLOSED) }
+            else { if cancelled(heap_word(wait_record(hot) + 24)) && cancel_native(control, hot) { complete(control, hot, 0, CANCELLED) }; }
+            hot = next
+        }
+        if hot == 0 { control = following };
+    }
+    heap_store_word(state + 32, control)
+    heap_store_word(state + 40, hot)
+}
+
+#[cfg(os = "linux")]
+fn create_poller(s: uint) bridge.FsResult = native.request(s + REQUEST, 8, 524288, 0, 0, 0, 0, 0)
+#[cfg(os = "linux")]
+fn register(control: uint) bridge.FsResult { unsafe {
+    let event = state + 96
+    heap_store_word32(event, 1)
+    std.ptr.write_unaligned[uint](std.mem.transmute[uint, *uint](event + 4), control)
+    let result = native.request(request(), 9, port(), 1, heap_word(control + 64), event, 0, 0)
+    if result.error == 0 { heap_store_word(control + REGISTERED, 1) }
+    result
+} }
+#[cfg(os = "linux")]
+fn unregister(control: uint) {
+    if heap_word(control + REGISTERED) == 0 { return }
+    let result = native.request(request(), 9, port(), 2, heap_word(control + 64), 0, 0, 0)
+    if result.error != 0 { heap_fail() }
+    heap_store_word(control + REGISTERED, 0)
+}
+#[cfg(os = "linux")]
+fn platform_pending() bool = false
+#[cfg(os = "linux")]
+fn close_poller(handle: uint) { if native.request(request(), 7, handle, 0, 0, 0, 0, 0).error != 0 { heap_fail() }; }
+#[cfg(os = "linux")]
+fn poll(s: uint) { unsafe {
+    let result = native.request(request(), 10, port(), s + 128, BUDGET, 0, 0, 0)
+    if result.error == 4 { return }
+    if result.error != 0 || result.value > BUDGET { heap_fail() }
+    let budget = BUDGET
+    let index: uint = 0
+    while index < result.value && budget != 0 {
+        let control = std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](s + 132 + index * 12))
+        let hot = heap_word(control + HEAD)
+        while hot != 0 && budget != 0 {
+            let wait = wait_record(hot)
+            budget = budget - 1
+            if closed(control) { complete(control, hot, 0, CLOSED) }
+            else {
+                if cancelled(heap_word(wait + 24)) { complete(control, hot, 0, CANCELLED) }
+                else {
+                    heap_store_word32(wait + 80, 32)
+                    let accepted = native.request(request(), 4, heap_word(control + 64), wait + 48, wait + 80, 526336, 0, 0)
+                    if native.would_block(accepted.error) { break }
+                    if accepted.error != 4 { complete(control, hot, accepted.value, accepted.error) };
+                }
+            }
+            hot = heap_word(control + HEAD)
+        }
+        index = index + 1
+    }
+} }
+
+#[cfg(os = "windows")]
+fn create_poller(s: uint) bridge.FsResult = native.request(s + REQUEST, 8, ~uint(0), 0, 0, 1, 0, 0)
+// 每个 listener 最多一个 AcceptEx；收到 completion 前独立操作租约保持 OVERLAPPED 存活。
+const ACTIVE: uint = 512
+const ACCEPTED: uint = 520
+const OWNER: uint = 528
+const CANCELLING: uint = 536
+const BYTES: uint = 544
+const OVERLAPPED: uint = 576
+const ADDRESSES: uint = 640
+const ACCEPT_FN: uint = 936
+const ADDRESS_FN: uint = 944
+#[cfg(os = "windows")]
+static active: uint = 0
+#[cfg(os = "windows")]
+static cursor: uint = 0
+#[cfg(os = "windows")]
+fn register(control: uint) bridge.FsResult {
+    if heap_word(control + REGISTERED) != 0 { return bridge.FsResult { value: 0, error: 0 } }
+    let storage = control + 1024
+    let associated = native.request(storage, 8, heap_word(control + 64), port(), control, 0, 0, 0)
+    if associated.error != 0 { return associated }
+    let accept = extension(control, uint(0x11cfcbacb5367df1), control + ACCEPT_FN)
+    if accept.error != 0 { return accept }
+    let address = extension(control, uint(0x11cfcbacb5367df2), control + ADDRESS_FN)
+    if address.error != 0 { return address }
+    heap_store_word(control + REGISTERED, 1)
+    bridge.FsResult { value: 0, error: 0 }
+}
+#[cfg(os = "windows")]
+fn extension(control: uint, guid: uint, out: uint) bridge.FsResult {
+    let storage = control + 1024
+    heap_store_word(control + 960, guid)
+    heap_store_word32(control + 968, uint(0x8000ca95))
+    heap_store_word32(control + 972, uint(0x92a1485f))
+    native.prepare(storage, heap_word(control + 64), uint(3355443206), control + 960, 16, out, 8)
+    heap_store_word(storage + 48, control + BYTES)
+    native.run(storage, 9)
+}
+#[cfg(os = "windows")]
+fn unregister(control: uint) {
+    if cursor == control { cursor = heap_word(control + NEXT) }
+    if heap_word(control + ACTIVE) != 0 { _ = cancel_native(control, heap_word(control + OWNER)) };
+}
+#[cfg(os = "windows")]
+fn platform_pending() bool = active != 0
+#[cfg(os = "windows")]
+fn close_poller(handle: uint) {
+    if native.request(request(), 20, handle, 0, 0, 0, 0, 0).error != 0 { heap_fail() }
+    cursor = 0
+}
+#[cfg(os = "windows")]
+fn cancel_native(control: uint, hot: uint) bool {
+    if heap_word(control + ACTIVE) == 0 || heap_word(control + OWNER) != hot { return true }
+    if heap_word(control + CANCELLING) == 0 {
+        let result = native.request(request(), 17, heap_word(control + 64), control + OVERLAPPED, 0, 0, 0, 0)
+        if result.error != 0 && result.error != 1168 { heap_fail() }
+        heap_store_word(control + CANCELLING, 1)
+    }
+    false
+}
+#[cfg(os = "windows")]
+fn poll(s: uint) {
+    let budget: uint = BUDGET
+    while budget != 0 && active != 0 {
+        heap_store_word(s + 80, 0)
+        let result = native.request(request(), 10, port(), s + 64, s + 72, s + 80, 0, 0)
+        let overlapped = heap_word(s + 80)
+        if overlapped == 0 {
+            if result.error != 258 { heap_fail() }
+            break
+        }
+        let control = overlapped - OVERLAPPED
+        if heap_word(s + 72) != control || heap_word(control + ACTIVE) == 0 { heap_fail() }
+        complete_windows(control, result.error)
+        budget = budget - 1
+    }
+    let control = cursor
+    if control == 0 { control = first_control() }
+    budget = BUDGET
+    while control != 0 && budget != 0 {
+        let next = heap_word(control + NEXT)
+        if heap_word(control + ACTIVE) == 0 && !closed(control) {
+            let hot = heap_word(control + HEAD)
+            if hot != 0 {
+                if cancelled(heap_word(wait_record(hot) + 24)) { complete(control, hot, 0, CANCELLED) }
+                else { start_windows(control, hot) };
+            };
+        }
+        control = next
+        budget = budget - 1
+    }
+    cursor = control
+}
+#[cfg(os = "windows")]
+fn start_windows(control: uint, hot: uint) {
+    let storage = control + 1024
+    let created = native.request(storage, 0, heap_word(control + FAMILY), 1, 0, 0, 0, 0)
+    if created.error != 0 { complete(control, hot, 0, created.error)
+        return }
+    if begin_control(control) == ~uint(0) { heap_fail() }
+    heap_store_word(control + ACTIVE, 1)
+    heap_store_word(control + ACCEPTED, created.value)
+    heap_store_word(control + OWNER, hot)
+    heap_store_word(control + CANCELLING, 0)
+    for index in 0..4 { heap_store_word(control + OVERLAPPED + uint(index) * 8, 0) }
+    active = active + 1
+    native.prepare(storage, heap_word(control + 64), created.value, control + ADDRESSES, 0, 144, 144)
+    heap_store_word(storage + 48, control + BYTES)
+    heap_store_word(storage + 56, control + OVERLAPPED)
+    heap_store_word(storage + 88, heap_word(control + ACCEPT_FN))
+    let result = native.run(storage, 14)
+    // 同步成功同样由 IOCP 交付；没有设置 FILE_SKIP_COMPLETION_PORT_ON_SUCCESS。
+    if result.error != 0 && result.error != 997 { complete_windows(control, result.error) };
+}
+#[cfg(os = "windows")]
+fn complete_windows(control: uint, status: uint) {
+    let accepted = heap_word(control + ACCEPTED)
+    let hot = heap_word(control + OWNER)
+    let error = status
+    let is_closed = closed(control)
+    if is_closed { error = CLOSED }
+    else { if error == 995 && cancelled(heap_word(wait_record(hot) + 24)) { error = CANCELLED }; }
+    if error == 0 { error = finish_address(control, hot, accepted) }
+    if error != 0 {
+        if native.request(request(), 7, accepted, 0, 0, 0, 0, 0).error != 0 { heap_fail() };
+    }
+    heap_store_word(control + ACTIVE, 0)
+    heap_store_word(control + ACCEPTED, 0)
+    active = active - 1
+    // close 已移除全部用户等待者，只剩 native completion 的操作租约。
+    if !is_closed { complete(control, hot, if error == 0 { accepted } else { 0 }, error) }
+    end_control(control)
+}
+#[cfg(os = "windows")]
+fn finish_address(control: uint, hot: uint, accepted: uint) uint {
+    let storage = control + 1024
+    let configured = native.request(storage, 1, accepted, 65535, 28683, control + 64, 8, 0)
+    if configured.error != 0 { return configured.error }
+    heap_store_word32(control + BYTES, 1)
+    let mode = native.request(storage, 11, accepted, uint(2147772030), control + BYTES, 0, 0, 0)
+    if mode.error != 0 { return mode.error }
+    native.prepare(storage, control + ADDRESSES, 0, 144, 144, control + 976, control + 984)
+    heap_store_word(storage + 48, control + 992)
+    heap_store_word(storage + 56, control + 1000)
+    heap_store_word(storage + 88, heap_word(control + ADDRESS_FN))
+    _ = native.run(storage, 15)
+    let source = heap_word(control + 992)
+    let length = heap_word32(control + 1000)
+    if length < 16 || length > 32 || source < control + ADDRESSES || source + length > control + ADDRESSES + 288 { heap_fail() }
+    let output = wait_record(hot)
+    copy_bytes(output + 48, source, length)
+    heap_store_word32(output + 80, length)
+    0
+}

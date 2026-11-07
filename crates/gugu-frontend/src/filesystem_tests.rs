@@ -1,5 +1,6 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
 mod copy;
+mod network;
 mod platform;
 mod resource;
 
@@ -253,6 +254,10 @@ fn interpret_bounded(
                 Op::IConst(value) => value,
                 Op::StackAddr(slot) => slots[slot.index()],
                 Op::PtrOffset => args[0].wrapping_add(args[1]),
+                Op::Convert(crate::lir::body::Conversion::SignExtend) => {
+                    let bits = body.values[operands[0].index()].kind.ty.bytes().unwrap() * 8;
+                    ((args[0] << (64 - bits)) as i64 >> (64 - bits)) as u64
+                }
                 Op::Convert(
                     crate::lir::body::Conversion::Truncate
                     | crate::lir::body::Conversion::ZeroExtend

@@ -1,3 +1,4 @@
+pub use std.vec.{Vec, VecIter}
 pub struct HashMap[K, V] {}
 pub struct HashSet[T] {}
 pub struct SecureHashMap[K, V] {}

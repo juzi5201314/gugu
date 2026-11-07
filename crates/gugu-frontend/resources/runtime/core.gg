@@ -4,6 +4,7 @@ use std.runtime.gc.{gc_config_check}
 use std.runtime.collect.{gc_boot}
 use std.runtime.native_memory as mapping
 use std.runtime.fs_platform as filesystem
+use std.runtime.network_service as network
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
@@ -297,17 +298,20 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
             _ = reason
         }
         filesystem.shutdown(processor_addr)
+        network.shutdown(processor_addr)
+        mapping.verify_drained(processor_addr)
         0
     }
 }
 fn resume_with_io(state: uint, processor: uint) uint {
     loop {
+        network.poll(processor)
         filesystem.service(processor)
         callback_service(processor)
         pressure_service(processor)
         let ready = resume_ready(state)
         if ready != 0 { return ready }
-        if !filesystem.pending(processor) && !callback_pending() { return 0 };
+        if !filesystem.pending(processor) && !callback_pending() && !network.pending(processor) { return 0 };
     }
 }
 unsafe fn resume_main(state: uint) {

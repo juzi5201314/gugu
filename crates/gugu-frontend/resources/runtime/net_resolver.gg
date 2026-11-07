@@ -1,0 +1,183 @@
+use std.collections.{Vec}
+use std.net.address.{SocketAddr}
+use std.net.types.{ResolveError}
+use std.runtime.net_platform as native
+use std.runtime.network_service as services
+use std.runtime.fs_platform as bridge
+use std.runtime.heap.{heap_word, heap_word32, heap_store_word, heap_store_word32, heap_fail}
+use std.runtime.scheduler.{park_current, ready_hot}
+use std.text.{Bytes}
+
+// raw 请求只持有取消控制和协程身份；托管结果由 helper 捕获的 Response 精确追踪。
+// helper 与调用协程独立，调用方取消不释放宿主仍在读取的 host/hints/result 存储。
+struct Response { value: Option[Result[Vec[SocketAddr], ResolveError]] }
+static first: uint = 0
+static last: uint = 0
+static pending_count: uint = 0
+static cursor: uint = 0
+const PACKET: uint = 512
+
+pub fn resolve(host: string, port: u16, cancel: uint) Result[Vec[SocketAddr], ResolveError] { unsafe {
+    if cancelled(cancel) { return Err(ResolveError::Cancelled) }
+    match native.initialize() { Ok(_) => (), Err(error) => return Err(ResolveError::System(error)) }
+    bridge.ensure_pool()
+    services.install_resolver(service, pending, shutdown)
+    let node = bridge.control_allocate(4096)
+    let owner = std.runtime.current_slot()
+    heap_store_word(node + 16, owner)
+    heap_store_word(node + 24, cancel)
+    let source = Bytes::from_string(host).as_slice()
+    for index in 0..source.len() { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](node + 1024 + uint(index)), source[index]) }
+    let value = uint(port)
+    let index: uint = 0
+    let buffer: [byte; 5] = [0; 5]
+    loop {
+        buffer[int(index)] = byte(value % 10 + 48)
+        value = value / 10
+        index = index + 1
+        if value == 0 { break };
+    }
+    for digit in 0..int(index) { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](node + 1408 + uint(digit)), buffer[int(index) - digit - 1]) }
+    // AF_UNSPEC / SOCK_STREAM：每个系统地址一个条目，避免协议组合重复，保留系统顺序。
+    heap_store_word32(node + 1536 + 8, 1)
+    let response = Response { value: None }
+    append(node)
+    let task = async execute(node, &response)
+    park_current()
+    _ = task
+    match response.value {
+        Some(value) => value,
+        None => Err(ResolveError::Cancelled),
+    }
+} }
+fn append(node: uint) {
+    heap_store_word(node + 8, last)
+    if last == 0 { first = node } else { heap_store_word(last, node) }
+    last = node
+    pending_count = pending_count + 1
+}
+fn unlink(node: uint) {
+    let previous = heap_word(node + 8)
+    let next = heap_word(node)
+    if cursor == node { cursor = next }
+    if previous == 0 { first = next } else { heap_store_word(previous, next) }
+    if next == 0 { last = previous } else { heap_store_word(next + 8, previous) }
+    heap_store_word(node, 0)
+    heap_store_word(node + 8, 0)
+}
+fn cancelled(control: uint) bool { unsafe {
+    control != 0 && std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](control)) != 0
+} }
+fn execute(node: uint, response: &Response) { unsafe {
+    defer { bridge.control_free(node, 4096) }
+    let result = query(node)
+    let owner = heap_word(node + 16)
+    if owner != 0 {
+        unlink(node)
+        if !cancelled(heap_word(node + 24)) { response.value = Some(result) }
+        ready_hot(owner)
+    }
+    pending_count = pending_count - 1
+} }
+fn query(node: uint) Result[Vec[SocketAddr], ResolveError] { unsafe {
+    if heap_word(node + 16) == 0 || cancelled(heap_word(node + 24)) { return Err(ResolveError::Cancelled) }
+    let packet = node + PACKET
+    heap_store_word(packet, std.runtime.resolver_symbol(0))
+    prepare(packet, node + 1024, node + 1408, node + 1536, node + 1600)
+    let finished = bridge.native_call(~uint(0), packet, 0, 0, 0, 0, 0, 0, 0, heap_word(node + 24))
+    let status = int(i32(heap_word32(packet + 128)))
+    let saved_errno = heap_word(packet + 160)
+    let addresses = heap_word(node + 1600)
+    let result = if finished.error != 0 {
+        Err(if finished.error == ~uint(0) { ResolveError::Cancelled } else { ResolveError::System(native.from_error(finished.error)) })
+    } else {
+        if status != 0 { Err(resolve_error(status, saved_errno)) }
+        else {
+            if heap_word(node + 16) == 0 || cancelled(heap_word(node + 24)) {
+                Err(ResolveError::Cancelled)
+            } else { copy_addresses(addresses) }
+        }
+    }
+    if addresses != 0 {
+        heap_store_word(packet, std.runtime.resolver_symbol(1))
+        prepare(packet, addresses, 0, 0, 0)
+        let freed = bridge.native_call(~uint(0), packet, 0, 0, 0, 0, 0, 0, 0, 0)
+        if freed.error != 0 { heap_fail() };
+    }
+    result
+} }
+#[cfg(os = "linux")]
+fn prepare(packet: uint, a: uint, b: uint, c: uint, d: uint) {
+    heap_store_word(packet + 8, 0)
+    heap_store_word(packet + 16, a)
+    heap_store_word(packet + 24, b)
+    heap_store_word(packet + 32, c)
+    heap_store_word(packet + 40, d)
+}
+#[cfg(os = "windows")]
+fn prepare(packet: uint, a: uint, b: uint, c: uint, d: uint) {
+    heap_store_word(packet + 8, 32)
+    heap_store_word(packet + 16, a)
+    heap_store_word(packet + 24, b)
+    heap_store_word(packet + 32, c)
+    heap_store_word(packet + 40, d)
+}
+#[cfg(os = "linux")]
+fn sockaddr(node: uint) uint = heap_word(node + 24)
+#[cfg(os = "windows")]
+fn sockaddr(node: uint) uint = heap_word(node + 32)
+fn copy_addresses(first: uint) Result[Vec[SocketAddr], ResolveError] {
+    let result = Vec[SocketAddr]::new()
+    let current = first
+    while current != 0 {
+        let family = heap_word32(current + 4)
+        if family == 2 || family == native.family6() {
+            match native.decode(sockaddr(current), heap_word32(current + 16)) {
+                Ok(address) => result.push(address),
+                Err(error) => return Err(ResolveError::System(error)),
+            }
+        }
+        current = heap_word(current + 40)
+    }
+    if result.is_empty() { Err(ResolveError::NotFound) } else { Ok(result) }
+}
+#[cfg(os = "linux")]
+fn resolve_error(code: int, native_error: uint) ResolveError = match code {
+    -2 | -5 | -9 => ResolveError::NotFound,
+    -3 => ResolveError::TemporaryFailure,
+    -11 => ResolveError::System(native.from_error(native_error)),
+    _ => ResolveError::Other(code),
+}
+#[cfg(os = "windows")]
+fn resolve_error(code: int, native_error: uint) ResolveError {
+    _ = native_error
+    match code {
+        11001 | 11004 => ResolveError::NotFound,
+        11002 => ResolveError::TemporaryFailure,
+        _ => ResolveError::Other(code),
+    }
+}
+fn service(processor: uint) {
+    _ = processor
+    let node = cursor
+    if node == 0 { node = first }
+    let budget: uint = 128
+    while node != 0 && budget != 0 {
+        budget = budget - 1
+        let next = heap_word(node)
+        if cancelled(heap_word(node + 24)) {
+            let owner = heap_word(node + 16)
+            unlink(node)
+            heap_store_word(node + 16, 0)
+            ready_hot(owner)
+        }
+        node = next
+    }
+    cursor = node
+}
+fn pending(processor: uint) bool { _ = processor
+    pending_count != 0 }
+fn shutdown(processor: uint) {
+    _ = processor
+    if pending_count != 0 || first != 0 || last != 0 { heap_fail() }
+}

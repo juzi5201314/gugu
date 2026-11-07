@@ -87,6 +87,8 @@ pub enum RuntimeMachineIntrinsic {
     StringFromUtf8Unchecked,
     FsStart,
     FsPoll,
+    NetCall,
+    ResolverSymbol,
     MonotonicNanos,
     StackReadWord,
     StackCopyRaw,
@@ -98,7 +100,7 @@ pub enum RuntimeMachineIntrinsic {
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 23] = [
+    pub const ALL: [Self; 25] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -115,6 +117,8 @@ impl RuntimeMachineIntrinsic {
         Self::StringFromUtf8Unchecked,
         Self::FsStart,
         Self::FsPoll,
+        Self::NetCall,
+        Self::ResolverSymbol,
         Self::MonotonicNanos,
         Self::StackReadWord,
         Self::StackCopyRaw,
@@ -149,6 +153,8 @@ impl RuntimeMachineIntrinsic {
             Self::StringFromUtf8Unchecked => "string_from_utf8_unchecked",
             Self::FsStart => "fs_start",
             Self::FsPoll => "fs_poll",
+            Self::NetCall => "net_call",
+            Self::ResolverSymbol => "resolver_symbol",
             Self::MonotonicNanos => "monotonic_nanos",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
@@ -178,11 +184,13 @@ impl RuntimeMachineIntrinsic {
             | Self::StringBytes
             | Self::StringFromUtf8Unchecked
             | Self::FsPoll
-            | Self::StackReadWord => 1,
+            | Self::StackReadWord
+            | Self::ResolverSymbol => 1,
             Self::AtomicStoreRelease
             | Self::AtomicFetchOrAcqRel
             | Self::AtomicFetchAndAcqRel
-            | Self::FsStart => 2,
+            | Self::FsStart
+            | Self::NetCall => 2,
         }
     }
 
@@ -196,6 +204,8 @@ impl RuntimeMachineIntrinsic {
                 | Self::GcEnter
                 | Self::FsStart
                 | Self::FsPoll
+                | Self::NetCall
+                | Self::ResolverSymbol
                 | Self::MonotonicNanos
                 | Self::StackReadWord
                 | Self::CageControl
@@ -213,6 +223,8 @@ impl RuntimeMachineIntrinsic {
                 | Self::GcEnter
                 | Self::FsStart
                 | Self::FsPoll
+                | Self::NetCall
+                | Self::ResolverSymbol
                 | Self::MonotonicNanos
                 | Self::StackReadWord
                 | Self::StackCopyRaw

@@ -1,0 +1,31 @@
+use std.net.{SocketAddr, IpAddr, Ipv4Addr, BindOptions, TcpListener}
+use std.fs as fs
+use std.path.{Path}
+use std.text.{Bytes}
+use std.sync.{CancelSource, CancelToken}
+use std.io as io
+
+fn cancelled_accept(listener: TcpListener, token: CancelToken, done: chan[int]) {
+    match listener.accept_cancel(&token) { Err(io.Error::Cancelled) => done.send(1), _ => panic("等待取消未生效") }
+}
+fn main() {
+    let listener = match TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0), BindOptions::new()) {
+        Ok(value) => value, Err(_) => panic("绑定失败"),
+    }
+    let local = match listener.local_addr() { Ok(value) => value, Err(_) => panic("地址查询失败") }
+    let cancel = CancelSource::new()
+    let done = chan[int](1)
+    let task = async cancelled_accept(listener, cancel.token(), done)
+    yield
+    cancel.cancel()
+    _ = done.recv()
+    _ = task.wait()
+    let path = Path::from_string("/tmp/gugu-net-accept-address")
+    if let Err(_) = fs.write(path, Bytes::from_string(local.to_string())) { panic("地址公布失败") }
+    let (stream, peer) = match listener.accept() { Ok(pair) => pair, Err(_) => panic("接受失败") }
+    if peer.port() == 0 { panic("peer 端口丢失") }
+    if let Err(_) = listener.close() { panic("listener 关闭失败") }
+    if let Err(_) = stream.local_addr() { panic("listener 关闭影响已交付连接") }
+    if let Err(_) = stream.close() { panic("stream 关闭失败") }
+    if let Err(_) = fs.remove_file(path) { panic("清理地址文件失败") };
+}

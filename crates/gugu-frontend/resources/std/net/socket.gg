@@ -1,0 +1,72 @@
+use std.net.types.{BindOptions, DatagramBindOptions, Ipv6BindMode}
+use std.net.address.{SocketAddr, IpAddr}
+use std.runtime.net_platform as native
+use std.runtime.net_wait as waiting
+use std.runtime.resource as resources
+use std.runtime.resource.{ResourceCell}
+use std.runtime.heap.{heap_store_word}
+use std.io.{Error, CancelToken}
+
+pub struct TcpListener { cell: ResourceCell }
+pub struct TcpStream { cell: ResourceCell }
+pub struct UdpSocket { cell: ResourceCell }
+
+fn dual(mode: Ipv6BindMode) bool = match mode { Ipv6BindMode::V6Only => false, Ipv6BindMode::DualStack => true }
+fn cell(handle: uint, address: SocketAddr) ResourceCell {
+    let result = resources.create(handle, native.SOCKET_KIND)
+    heap_store_word(result.control + waiting.FAMILY, match address.ip() { IpAddr::V4(_) => uint(2), IpAddr::V6(_) => native.family6() })
+    close_packet(result.control, handle)
+    result
+}
+#[cfg(os = "linux")]
+fn close_packet(control: uint, handle: uint) { _ = control
+    _ = handle }
+#[cfg(os = "windows")]
+fn close_packet(control: uint, handle: uint) {
+    heap_store_word(control + 256, native.call(19, 0, 0, 0, 0, 0, 0).value)
+    heap_store_word(control + 264, 32)
+    heap_store_word(control + 272, handle)
+}
+fn bind(address: SocketAddr, tcp: bool, backlog: int, reuse: bool, mode: Ipv6BindMode) Result[ResourceCell, Error] {
+    let handle = native.bind(address, tcp, backlog, reuse, dual(mode))?
+    match waiting.initialize() {
+        Ok(_) => Ok(cell(handle, address)),
+        Err(error) => { _ = native.call(7, handle, 0, 0, 0, 0, 0)
+            Err(error) },
+    }
+}
+fn close(cell: &ResourceCell) Result[(), Error] {
+    let error = resources.close(cell)
+    if error == 0 { Ok(()) } else { Err(native.from_error(error)) }
+}
+fn address(cell: &ResourceCell, peer: bool) Result[SocketAddr, Error] {
+    let handle = resources.begin(cell)
+    if handle == ~uint(0) { return Err(Error::Closed) }
+    defer { resources.end(cell) }
+    native.address(handle, peer)
+}
+impl TcpListener {
+    pub fn bind(address: SocketAddr, options: BindOptions) Result[Self, Error] {
+        Ok(Self { cell: bind(address, true, options.backlog, options.reuse_address, options.ipv6_mode)? })
+    }
+    pub fn accept(self: &Self) Result[(TcpStream, SocketAddr), Error] = self.accept_inner(0)
+    pub fn accept_cancel(self: &Self, cancel: &CancelToken) Result[(TcpStream, SocketAddr), Error] = self.accept_inner(unsafe { cancel.raw_control() })
+    fn accept_inner(self: &Self, cancel: uint) Result[(TcpStream, SocketAddr), Error] {
+        let accepted = waiting.accept(&self.cell, cancel)?
+        Ok((TcpStream { cell: cell(accepted.handle, accepted.peer) }, accepted.peer))
+    }
+    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = address(&self.cell, false)
+    pub fn close(self: &Self) Result[(), Error] = close(&self.cell)
+}
+impl TcpStream {
+    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = address(&self.cell, false)
+    pub fn peer_addr(self: &Self) Result[SocketAddr, Error] = address(&self.cell, true)
+    pub fn close(self: &Self) Result[(), Error] = close(&self.cell)
+}
+impl UdpSocket {
+    pub fn bind(address: SocketAddr, options: DatagramBindOptions) Result[Self, Error] {
+        Ok(Self { cell: bind(address, false, 0, options.reuse_address, options.ipv6_mode)? })
+    }
+    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = address(&self.cell, false)
+    pub fn close(self: &Self) Result[(), Error] = close(&self.cell)
+}

@@ -246,7 +246,12 @@ pub(super) fn constants(
                 .find(|result| {
                     result.key.instance == target && result.key.expression == owner.body.0
                 })
-                .ok_or_else(|| invalid("常量定义缺少 EarlyConst/LateConst 已求值结果"))?;
+                .ok_or_else(|| {
+                    invalid(&format!(
+                        "常量 `{}` 缺少 EarlyConst/LateConst 已求值结果",
+                        context.module.definitions[definition.index()].name
+                    ))
+                })?;
             constant.value = late_value(&result.value);
         }
     }

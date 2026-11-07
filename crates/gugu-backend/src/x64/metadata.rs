@@ -189,6 +189,11 @@ fn assign_rvas(
         ));
     }
     for blob in crate::x64::fragments::registered_fragments(target) {
+        if matches!(blob.entries[0].glue, "net_call" | "resolver_symbol")
+            && !super::fs_native::net::required(fragments, blob.entries[0].glue)
+        {
+            continue;
+        }
         let Some(first) = blob.entries.first() else {
             return Err(vec![invalid("登记机器片段缺少入口符号")]);
         };

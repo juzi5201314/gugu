@@ -1,0 +1,72 @@
+use std.collections.{Vec}
+use std.net.resolver.{validate_host}
+use std.net.{Ipv4Addr, Ipv6Addr, SocketAddr, UnixAddr, ParseError}
+use std.path.{Path, OsString}
+use std.text.{Bytes}
+
+pub fn ipv4(text: string) uint {
+    match Ipv4Addr::parse(text) {
+        Ok(address) => { let octets = address.octets()
+            uint(octets[0]) << 24 | uint(octets[1]) << 16 | uint(octets[2]) << 8 | uint(octets[3]) },
+        Err(_) => ~uint(0),
+    }
+}
+pub fn ipv6(text: string, index: int) uint {
+    match Ipv6Addr::parse(text) {
+        Ok(address) => uint(address.segments()[index]),
+        Err(_) => ~uint(0),
+    }
+}
+pub fn socket(text: string) uint {
+    match SocketAddr::parse(text) {
+        Ok(address) => uint(address.port()) | uint(address.scope_id()) << 16,
+        Err(ParseError::InvalidAddress) => ~uint(0),
+        Err(ParseError::InvalidPort) => ~uint(1),
+    }
+}
+pub fn format4(text: string) string {
+    match Ipv4Addr::parse(text) {
+        Ok(address) => address.to_string(),
+        Err(_) => "无效",
+    }
+}
+pub fn format6(text: string) string {
+    match Ipv6Addr::parse(text) {
+        Ok(address) => address.to_string(),
+        Err(_) => "无效",
+    }
+}
+#[cfg(os = "linux")]
+pub fn unix_path(text: string) bool {
+    let path = Path::from_os(OsString::from_bytes(Bytes::from_string(text)))
+    match UnixAddr::from_path(path) { Ok(_) => true, Err(_) => false }
+}
+pub fn format_socket(text: string) string {
+    match SocketAddr::parse(text) { Ok(value) => value.to_string(), Err(_) => "无效" }
+}
+pub fn host_valid(text: string) bool = match validate_host(text) { Ok(_) => true, Err(_) => false }
+pub fn vector_snapshot() int {
+    let values = Vec[int]::new()
+    for index in 0..10 { values.push(index) }
+    let snapshot = values.iter()
+    let alias = values
+    if !alias.set(0, 99) || alias.set(-1, 1) { return -1 }
+    alias.push(10)
+    let sum = 0
+    while let Some(value) = snapshot.next() { sum = sum + value }
+    let first = match values.get(0) { Some(value) => value, None => return -2 }
+    if values.len() != 11 || first != 99 || sum != 45 { return -3 }
+    1
+}
+fn main() {
+    _ = vector_snapshot()
+    _ = format_socket("[::1]:80")
+    _ = host_valid("localhost")
+    _ = ipv4("127.0.0.1")
+    _ = ipv6("::1", 7)
+    _ = socket("[fe80::1%2]:80")
+    _ = format4("127.0.0.1")
+    _ = format6("::1")
+    #[cfg(os = "linux")]
+    _ = unix_path("/tmp/gugu.sock")
+}

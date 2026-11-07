@@ -10,6 +10,77 @@ pub struct NativeLink {
 }
 
 impl NativeLink {
+    /// 内建网络需求在 action key 形成前合并，显式导入仍保留原顺序和冲突校验。
+    pub fn with_standard_library(
+        mut self,
+        target: crate::TargetName,
+        lir: &crate::lir::Validated,
+    ) -> Self {
+        let network = lir.bodies().iter().any(|body| {
+            body.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.op,
+                    crate::lir::body::Op::RuntimeMachineCall(
+                        crate::runtime::RuntimeMachineOp::NetCall
+                    )
+                )
+            })
+        });
+        if network && target == crate::TargetName::X86_64Windows {
+            for &name in crate::x64::fs_native::net::WINDOWS_SYMBOLS {
+                self.add_system_import("ws2_32.dll", name);
+            }
+            for name in [
+                "CreateIoCompletionPort",
+                "GetQueuedCompletionStatus",
+                "CancelIoEx",
+            ] {
+                self.add_system_import("kernel32.dll", name);
+            }
+        }
+        let resolver = lir.bodies().iter().any(|body| {
+            body.instructions.iter().any(|instruction| {
+                matches!(
+                    instruction.op,
+                    crate::lir::body::Op::RuntimeMachineCall(
+                        crate::runtime::RuntimeMachineOp::ResolverSymbol
+                    )
+                )
+            })
+        });
+        if resolver {
+            let library = if target == crate::TargetName::X86_64Linux {
+                "libc.so.6"
+            } else {
+                "ws2_32.dll"
+            };
+            for symbol in ["getaddrinfo", "freeaddrinfo"] {
+                self.add_system_import(library, symbol);
+            }
+            if target == crate::TargetName::X86_64Linux {
+                if self.interpreter.is_none() {
+                    self.interpreter = target.descriptor().linux_interpreter.map(str::to_owned);
+                }
+                for symbol in Self::THREAD_SYMBOLS {
+                    self.add_system_import(library, symbol);
+                }
+            }
+        }
+        self
+    }
+
+    fn add_system_import(&mut self, library: &str, symbol: &str) {
+        if !self
+            .imports
+            .iter()
+            .any(|(existing_library, existing_symbol)| {
+                existing_library.eq_ignore_ascii_case(library) && existing_symbol == symbol
+            })
+        {
+            self.imports.push((library.to_owned(), symbol.to_owned()));
+        }
+    }
+
     /// x86_64 glibc 线程入口需要的符号；静态 syscall 文件 worker 不消费这些符号。
     pub const THREAD_SYMBOLS: [&'static str; 6] = [
         "pthread_create",

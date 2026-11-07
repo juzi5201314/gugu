@@ -1,0 +1,43 @@
+use std.io as io
+
+pub enum Ipv6BindMode { V6Only, DualStack }
+pub struct BindOptions {
+    pub backlog: int,
+    pub reuse_address: bool,
+    pub ipv6_mode: Ipv6BindMode,
+}
+pub struct DatagramBindOptions {
+    pub reuse_address: bool,
+    pub ipv6_mode: Ipv6BindMode,
+}
+impl BindOptions {
+    pub fn new() Self = Self { backlog: 1024, reuse_address: true, ipv6_mode: Ipv6BindMode::V6Only }
+}
+impl DatagramBindOptions {
+    pub fn new() Self = Self { reuse_address: true, ipv6_mode: Ipv6BindMode::V6Only }
+}
+pub enum ResolveError {
+    InvalidHost,
+    InvalidPort,
+    NotFound,
+    TemporaryFailure,
+    Cancelled,
+    System(io.Error),
+    Other(int),
+}
+impl Error for ResolveError {
+    fn message(self: &Self) string = match *self {
+        ResolveError::InvalidHost => "主机名无效",
+        ResolveError::InvalidPort => "端口无效",
+        ResolveError::NotFound => "未找到主机地址",
+        ResolveError::TemporaryFailure => "系统解析器暂时失败",
+        ResolveError::Cancelled => "地址解析已取消",
+        ResolveError::System(error) => error.message(),
+        ResolveError::Other(_) => "系统解析器失败",
+    }
+    fn source(self: &Self) Option[&dyn Error] = match *self {
+        ResolveError::System(error) => { let cause: dyn Error = error
+            Some(&cause) },
+        _ => None,
+    }
+}

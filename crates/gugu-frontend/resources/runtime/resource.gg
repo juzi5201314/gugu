@@ -42,8 +42,8 @@ pub fn close(cell: &ResourceCell) uint {
 }
 
 /// 全一字表示Closed；成功调用必须与end成对。
-pub fn begin(cell: &ResourceCell) uint {
-    let control = cell.control
+pub fn begin(cell: &ResourceCell) uint = begin_control(cell.control)
+pub fn begin_control(control: uint) uint {
     if control == 0 || (heap_word32(control + 8) & CLOSED) != 0 { return ~uint(0) }
     let count = heap_word(control + 80)
     if count == ~uint(0) { heap_fail() }
@@ -51,8 +51,8 @@ pub fn begin(cell: &ResourceCell) uint {
     heap_word(control + 64)
 }
 
-pub fn end(cell: &ResourceCell) {
-    let control = cell.control
+pub fn end(cell: &ResourceCell) { end_control(cell.control) }
+pub fn end_control(control: uint) {
     let count = heap_word(control + 80)
     if count == 0 { heap_fail() }
     heap_store_word(control + 80, count - 1)

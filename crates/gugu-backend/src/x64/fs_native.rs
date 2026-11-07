@@ -14,6 +14,7 @@ use crate::target::TargetName;
 mod callback;
 pub(crate) mod exports;
 mod foreign;
+pub(crate) mod net;
 mod stack;
 const OPERATION: i32 = bridge::NATIVE_REQUEST_OPERATION as i32;
 const ARGUMENTS: i32 = bridge::NATIVE_REQUEST_ARGUMENTS as i32;
@@ -161,6 +162,7 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
             blob("cage_control", stack::cage_control()),
             blob("stack_copy_raw", stack::copy_raw()),
         ])
+        .chain([net::fragment(target), net::resolver_fragment(target)])
         .collect()
 }
 fn thread_id(target: TargetName) -> Builder {
@@ -513,7 +515,7 @@ mod tests {
     fn native_boundary_encodes_for_both_targets() {
         for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
             let blobs = fragments(target);
-            assert_eq!(blobs.len(), 12);
+            assert_eq!(blobs.len(), 14);
             assert_eq!(
                 blobs.iter().map(|b| b.entries[0].glue).collect::<Vec<_>>(),
                 [
@@ -528,7 +530,9 @@ mod tests {
                     "callback_queue",
                     "stack_read_word",
                     "cage_control",
-                    "stack_copy_raw"
+                    "stack_copy_raw",
+                    "net_call",
+                    "resolver_symbol"
                 ]
             );
             assert!(blobs.iter().all(|b| !b.bytes.is_empty()));

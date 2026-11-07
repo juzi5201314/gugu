@@ -48,8 +48,8 @@ use crate::{Diagnostic, DiagnosticCode, TargetName};
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 44：镜像 cage reservation、checked 根回写及启动配置。
-pub const RAW_MODEL_SCHEMA: u32 = 44;
+/// 版本 45：非阻塞 socket、系统 resolver 和共享请求池的 socket 释放。
+pub const RAW_MODEL_SCHEMA: u32 = 45;
 
 /// 资源契约段的 schema 版本。
 pub const RESOURCE_SCHEMA: u32 = 1;

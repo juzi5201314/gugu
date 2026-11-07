@@ -209,6 +209,56 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::Runtime,
     ),
     source(
+        "std/vec.gg",
+        include_str!("../../gugu-frontend/resources/std/vec.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/net/resolver.gg",
+        include_str!("../../gugu-frontend/resources/std/net/resolver.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/net_resolver.gg",
+        include_str!("../../gugu-frontend/resources/runtime/net_resolver.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/net/socket.gg",
+        include_str!("../../gugu-frontend/resources/std/net/socket.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/net_wait.gg",
+        include_str!("../../gugu-frontend/resources/runtime/net_wait.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/net/types.gg",
+        include_str!("../../gugu-frontend/resources/std/net/types.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/network_service.gg",
+        include_str!("../../gugu-frontend/resources/runtime/network_service.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/net_platform.gg",
+        include_str!("../../gugu-frontend/resources/runtime/net_platform.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/net.gg",
+        include_str!("../../gugu-frontend/resources/std/net.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/net/address.gg",
+        include_str!("../../gugu-frontend/resources/std/net/address.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
         "std/fs.gg",
         include_str!("../../gugu-frontend/resources/std/fs.gg"),
         RuntimeSourceRole::StandardLibrary,
@@ -318,7 +368,7 @@ mod tests {
         let sources = sources();
         assert_eq!(
             sources.len(),
-            49 + usize::from(cfg!(feature = "runtime-gc-probes")) * 2
+            59 + usize::from(cfg!(feature = "runtime-gc-probes")) * 2
         );
         let artifact = build(TargetName::X86_64Linux).expect("build runtime artifact");
         let bytes = artifact.encode().expect("encode runtime artifact");

@@ -860,6 +860,7 @@ impl Compiler {
             None
         };
 
+        let native_link = native_link.with_standard_library(target, &lir);
         let action_key = Some(compilation_action_key(
             target,
             &source_map,

@@ -36,8 +36,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。17：回调线程登记与借用请求参数区。
-pub const SCHEMA: u32 = 17;
+/// LIR query 与 world 的 schema。18：网络机器操作与按需系统 resolver。
+pub const SCHEMA: u32 = 18;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {

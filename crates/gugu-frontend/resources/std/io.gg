@@ -279,7 +279,10 @@ pub fn from_native_error(code: uint) Error {
         22 | 36 | 40 => Error::InvalidInput, 4 => Error::Interrupted, 9 => Error::Closed,
         32 => Error::BrokenPipe, 20 => Error::NotADirectory, 21 => Error::IsADirectory,
         39 => Error::DirectoryNotEmpty, 18 => Error::CrossesDevices, 29 => Error::NotSeekable,
-        38 | 95 => Error::Unsupported, 28 => Error::StorageFull, 30 => Error::ReadOnlyFilesystem,
+        38 | 92 | 93 | 95 | 97 => Error::Unsupported, 28 => Error::StorageFull, 30 => Error::ReadOnlyFilesystem,
+        90 => Error::MessageTooLarge, 98 => Error::AddrInUse, 99 => Error::AddrNotAvailable,
+        103 => Error::ConnectionAborted, 104 => Error::ConnectionReset, 107 => Error::NotConnected,
+        110 => Error::TimedOut, 111 => Error::ConnectionRefused,
         27 => Error::FileTooLarge, 122 => Error::QuotaExceeded,
         _ => Error::Other { code: int(code), source: None },
     }

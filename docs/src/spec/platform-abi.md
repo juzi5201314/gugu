@@ -49,7 +49,7 @@ target_name ::= arch "-" os
 
 两行均为“已支持目标”。本版本不定义 tier-2、tier-3 或“尽力支持”目标；未登记组合没有部分支持状态。
 
-Linux 目标的默认镜像不依赖动态解释器或 libc 初始化。Windows 目标的默认镜像不链接 CRT，并通过薄 IAT 使用运行时所需的系统 DLL。额外动态库只能通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐，详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
+Linux 目标在没有动态 FFI 或系统 Resolver 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver 自动采用目标工具链登记的 libc、pthread 与解释器，纯数字地址解析及 bind 仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号和解释器均进入 action key；同名符号来自冲突库时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
 
 ### 新目标登记
 
@@ -297,7 +297,7 @@ PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]`
 
 ### 可执行镜像形式 {#executable-image-forms}
 
-没有动态 FFI 导入的 Linux executable必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0完成镜像自身允许的 relative relocation并支持加载基址随机化；不能退化成依赖 libc/系统 linker的启动路径。运行时只应用 relative relocation，并把加载偏移加到 addend 上；PC 相对位移与 RVA 在镜像写出前修完。显式登记动态 `.so` 后才可以加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT和对应 relocation，解释器与 sysroot必须来自选中的 target/toolchain描述而不是宿主 PATH探测。
+没有动态 FFI 或系统 Resolver 需求的 Linux executable 必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0 完成镜像自身允许的 relative relocation 并支持加载基址随机化。运行时只应用 relative relocation，并把加载偏移加到 addend 上；PC 相对位移与 RVA 在镜像写出前修完。显式登记动态 `.so` 或可达内建 Resolver 引入目标系统库后，才加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT 和对应 relocation。解释器与 sysroot 必须来自选中的 target/toolchain 描述而不是宿主 PATH 探测。
 
 启动载荷（`Rt0Payload`，`REVISION = 4`，128 字节）里的镜像内地址字段全部参与这批 relative relocation：`main_entry`、`initial_slot`、`runtime_state`、`main_return`、`stackmap`、`fragment_base`、`unwind`，以及 `gc_types`（类型段）与 `gc_meta`（GC metadata blob）。两段不存在时对应字段保持 0，且**不得**登记重定位——否则运行期会把加载基址当成有效地址。`boot_environment` 是 rt0 运行期捕获的 native 环境块地址，写明为「不叠加加载偏移」的字段：Linux 直接保存初始栈的 `envp`，Windows 保存 `GetEnvironmentStringsW` 返回的 UTF-16 块；runtime 完成启动配置读取后释放 Windows 副本。该字段不参加 image relocation，不能把它当作镜像内地址。对应的长度字段 `gc_types_len`、`gc_meta_len` 与 `stackmap_len`、`unwind_len` 一样是镜像字节数，不参与重定位。
 

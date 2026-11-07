@@ -66,6 +66,11 @@ pub fn link_world(
         });
     }
     for blob in fragments::registered_fragments(world.target) {
+        if matches!(blob.entries[0].glue, "net_call" | "resolver_symbol")
+            && !super::fs_native::net::required(&world.fragments, blob.entries[0].glue)
+        {
+            continue;
+        }
         symbols.push(symbol_from_machine_fragment(&blob)?);
     }
     let mut readonly = vec![

@@ -718,6 +718,8 @@ fn runtime_machine_op(
         Source::GcEnter => Target::GcEnter,
         Source::FsStart => Target::FsStart,
         Source::FsPoll => Target::FsPoll,
+        Source::NetCall => Target::NetCall,
+        Source::ResolverSymbol => Target::ResolverSymbol,
         Source::MonotonicNanos => Target::MonotonicNanos,
         Source::StackReadWord => Target::StackReadWord,
         Source::StackCopyRaw => Target::StackCopyRaw,

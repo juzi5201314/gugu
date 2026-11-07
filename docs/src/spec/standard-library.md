@@ -332,6 +332,8 @@ MultiMap 不作为独立标准类型；使用 `HashMap[K, Vec[V]]` 或 `BTreeMap
 
 Vec、Deque、BinaryHeap、LinkedList、BitSet、SmallVec 和全部 Map/Set 都是共享身份句柄：赋值只复制句柄，通过任一别名修改时，所有别名继续观察同一个逻辑集合。集合内部可以为快照迭代封存并替换 backing；这只改变物理表示，不把集合改成 COW 值语义。
 
+`Vec.new()` 建立空集合，`Vec.from_slice(&[T])` 按顺序复制元素；`len()`、`is_empty()`、`get(index:int) -> Option[T]`、`set(index:int,value:T) -> bool` 和 `push(value:T)` 操作共享集合。负数或越界的 get 返回 None、set 返回 false；push 超过 int 可表示长度时 panic。`iter()` 和 IntoIter 保存创建时的元素快照；后来通过任一别名 push/set 不改变已有迭代器。Resolver 每次创建独立 Vec，返回后修改它不影响系统解析结果或其它调用。
+
 Map 的普通读取返回 value 的语义副本，不公开会因 rehash、树旋转或紧凑化而失效的普通 `&K` / `&V`：
 
 ```text
@@ -617,6 +619,12 @@ ReadDir 实现 `Iter[Item = Result[DirEntry, io.Error]]` 与 `IntoIter`；`next(
 ## 网络
 
 `std.net` 稳定提供 IPv4/IPv6 地址、SocketAddr、系统 DNS resolver、TcpListener、TcpStream、UdpSocket，以及目标支持时由 cfg 控制的 Unix domain socket。transport 操作接入 Read/Write、取消和资源租约。TLS、HTTP、WebSocket 与 QUIC 不在 std。
+
+数字地址使用不可变值：`Ipv4Addr.new(a:byte, b:byte, c:byte, d:byte)`、`Ipv6Addr.new(segments:[u16;8])`、`IpAddr.V4/V6` 和 `SocketAddr.new(ip:IpAddr, port:u16)`。IPv4 提供 `octets()`，IPv6 提供 `segments()`；SocketAddr 提供 `ip()`、`port()`。四种类型均提供 `parse(string)` 与 `to_string()`，解析失败为 `ParseError.InvalidAddress` 或 `InvalidPort`。IPv4 必须恰好四段十进制，除单独的零外不接受前导零；IPv6 接受一次 `::` 压缩和末尾 IPv4，输出使用小写十六进制，压缩第一个最长且长度至少为二的零段。SocketAddr 的 IPv6 始终带方括号；数字解析不调用 resolver，不接受空白、符号、NUL、非 ASCII、zone name 或端口溢出。地址携带数值 `scope_id` 的 IPv6 可由 `SocketAddr.scoped(ip:Ipv6Addr, port:u16, scope_id:u32)` 构造，`scope_id()` 可查询；文本使用 `%` 后的十进制接口编号。
+
+`ResolveError` 区分 `InvalidHost`、`InvalidPort`、`NotFound`、`TemporaryFailure`、`Cancelled`、`System(io.Error)` 与保留原始系统 resolver 码的 `Other(int)`。无地址的成功系统响应映射为 `NotFound`。Unix `AddressError` 区分 `Empty`、`Nul`、`TooLong`；Linux 路径保留原始字节，Windows AF_UNIX 路径使用 UTF-8；两目标的 `sun_path` 容量为 108 字节，末尾 NUL 占一字节，因而路径最多 107 字节。地址构造不访问文件系统。
+
+系统库按实际可达的内建功能加入链接输入：Linux 的系统 Resolver 自动登记目标工具链的 libc、pthread 符号与动态解释器，数字地址解析及 bind 不引入这些依赖；Windows 的网络操作按需登记 Winsock 系统 DLL。不探测编译宿主的库或配置，导入身份、顺序与目标解释器均参与编译缓存身份。
 
 ```text
 trait ToSocketAddrs {

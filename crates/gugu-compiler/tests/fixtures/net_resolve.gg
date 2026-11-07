@@ -1,0 +1,19 @@
+use std.net.{Resolver, ResolveError, ToSocketAddrs, SocketAddr, IpAddr, Ipv4Addr}
+use std.sync.{CancelSource}
+
+fn main() {
+    let resolver = Resolver::system()
+    let addresses = match resolver.resolve("localhost", 80) { Ok(value) => value, Err(_) => panic("系统 localhost 解析失败") }
+    if addresses.is_empty() { panic("解析结果为空") }
+    for address in addresses { if address.port() != 80 { panic("解析端口错误") }; }
+    let cancel = CancelSource::new()
+    cancel.cancel()
+    let token = cancel.token()
+    match resolver.resolve_cancel("localhost", 80, &token) { Err(ResolveError::Cancelled) => (), _ => panic("解析预取消失败") }
+    let target = "localhost:80"
+    let from_text = match target.socket_addrs() { Ok(value) => value, Err(_) => panic("字符串解析失败") }
+    if from_text.is_empty() { panic("字符串解析为空") }
+    let single = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 42)
+    let direct = match single.socket_addrs() { Ok(value) => value, Err(_) => panic("数字地址转换失败") }
+    if direct.len() != 1 { panic("数字地址数量错误") };
+}

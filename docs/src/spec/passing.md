@@ -21,7 +21,7 @@
 | `String` 唯一拥有 backing | Gugu string 用密封式 COW 保持可复制值语义 |
 | Drop 在 owner 退出时运行 | 普通类型没有 Drop；外部资源由 Adaptive Resource Leasing 在最后 lease 结束时 release |
 
-编译器管理动作不是任意用户回调。COW 封存与资源租约管理不能由用户重载；具体 descriptor/intrinsic 只在 internals 定义。
+编译器管理动作不是任意用户回调。COW 封存与资源租约管理不能由用户重载；具体 descriptor/intrinsic 只在 internals 定义。泛型结构体按其实际类型实参确定字段的传递语义；按值复制迭代器等混合聚合时，标量游标是独立副本，引用字段仍共享原对象，不能保留未替换的声明形参。
 
 ## string、身份句柄与资源句柄
 

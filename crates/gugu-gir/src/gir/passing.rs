@@ -384,8 +384,12 @@ pub fn aggregate_of(module: &hir::Module, definition: hir::DefId) -> Option<&hir
 
 pub fn struct_fields(module: &hir::Module, ty: TypeId) -> Option<&[hir::Field]> {
     match module.types.get(ty.index())? {
-        hir::Type::Named { definition, .. } => {
-            if lang_item(module, *definition).is_some() {
+        hir::Type::Named {
+            definition,
+            arguments,
+        } => {
+            // 声明字段仍含形参；泛型实例用整体描述符传递，不能生成未替换字段投影。
+            if !arguments.is_empty() || lang_item(module, *definition).is_some() {
                 return None;
             }
             let aggregate = aggregate_of(module, *definition)?;

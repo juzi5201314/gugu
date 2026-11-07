@@ -683,14 +683,14 @@ fn runtime_machine_call_valid(
         // 无实参，返回编译器生成的只读 `GcImageConfig` 地址（机器字）。
         Kind::GcConfig => args.is_empty() && results.len() == 1 && word(&results[0]),
         // 单个请求指针实参；返回 dispatcher 的状态字。
-        Kind::GcEnter | Kind::FsPoll | Kind::StackReadWord => {
+        Kind::GcEnter | Kind::FsPoll | Kind::StackReadWord | Kind::ResolverSymbol => {
             args.len() == 1 && results.len() == 1 && word(&args[0]) && word(&results[0])
         }
         Kind::StackCopyRaw => args.len() == 4 && args.iter().all(word) && results.is_empty(),
         Kind::CallbackQueue => {
             args.len() == 3 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
-        Kind::FsStart => {
+        Kind::FsStart | Kind::NetCall => {
             args.len() == 2 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
     }

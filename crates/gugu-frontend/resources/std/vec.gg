@@ -1,0 +1,111 @@
+// 8 路索引页保持 GC 的固定数组描述；int 下标至多 63 位，路径至多 21 页。
+// 地址快照通常只有一个叶页；不以逐项链表查找索引，也不把托管元素藏入字节缓冲。
+// 叶页最多复制 8 个元素；分支页最多复制 8 个引用，避免小地址结果复制 32 个槽。
+// 修改只复制访问路径；迭代器保存旧根，创建快照 O(1)，引用槽均由普通 GC 元数据追踪。
+#[allow(large_copy)]
+enum VecPage[T] {
+    Leaf([Option[T]; 8]),
+    Branch([Option[&VecPage[T]]; 8]),
+}
+struct VecState[T] { root: &VecPage[T], level: uint, length: int }
+pub struct Vec[T] { state: &VecState[T] }
+pub struct VecIter[T] { root: &VecPage[T], level: uint, index: int, length: int }
+
+impl[T] Vec[T] {
+    pub fn new() Self {
+        let values: [Option[T]; 8] = [None; 8]
+        let page: VecPage[T] = VecPage[T]::Leaf(values)
+        let state = VecState { root: &page, level: 0, length: 0 }
+        Self { state: &state }
+    }
+    pub fn from_slice(values: &[T]) Self {
+        let result = Self::new()
+        for index in 0..values.len() { result.push(values[index]) }
+        result
+    }
+    pub fn len(self: &Self) int = self.state.length
+    pub fn is_empty(self: &Self) bool = self.state.length == 0
+    pub fn get(self: &Self, index: int) Option[T] {
+        if index < 0 || index >= self.state.length { return None }
+        lookup(self.state.root, self.state.level, uint(index))
+    }
+    pub fn set(self: &Self, index: int, value: T) bool {
+        if index < 0 || index >= self.state.length { return false }
+        self.state.root = put(self.state.root, self.state.level, uint(index), value)
+        true
+    }
+    pub fn push(self: &Self, value: T) {
+        if self.state.length == 9223372036854775807 { panic("Vec 长度溢出") }
+        let level = self.state.level
+        let root = self.state.root
+        let index = uint(self.state.length)
+        // level==20 已覆盖所有非负 int；分支条件避免移位达到机器字宽。
+        if level > 20 { panic("Vec 层级越界") }
+        if level < 20 && index >> ((level + 1) * 3) != 0 {
+            let branches: [Option[&VecPage[T]]; 8] = [None; 8]
+            branches[0] = Some(root)
+            let page: VecPage[T] = VecPage[T]::Branch(branches)
+            root = &page
+            level = level + 1
+        }
+        self.state.root = put(root, level, index, value)
+        self.state.level = level
+        self.state.length = self.state.length + 1
+    }
+    pub fn iter(self: &Self) VecIter[T] = VecIter {
+        root: self.state.root, level: self.state.level, index: 0, length: self.state.length,
+    }
+}
+fn lookup[T](root: &VecPage[T], level: uint, index: uint) Option[T] {
+    match *root {
+        VecPage::Leaf(values) => values[int(index & uint(7))],
+        VecPage::Branch(branches) => match branches[int(index >> (level * 3) & uint(7))] {
+            Some(child) => lookup(child, level - 1, index),
+            None => None,
+        },
+    }
+}
+fn put[T](root: &VecPage[T], level: uint, index: uint, value: T) &VecPage[T] {
+    match *root {
+        VecPage::Leaf(values) => {
+            values[int(index & uint(7))] = Some(value)
+            let page: VecPage[T] = VecPage[T]::Leaf(values)
+            &page
+        },
+        VecPage::Branch(branches) => {
+            let slot = int(index >> (level * 3) & uint(7))
+            let child = match branches[slot] {
+                Some(child) => child,
+                None => empty_page::[T](level - 1),
+            }
+            branches[slot] = Some(put(child, level - 1, index, value))
+            let page: VecPage[T] = VecPage[T]::Branch(branches)
+            &page
+        },
+    }
+}
+fn empty_page[T](level: uint) &VecPage[T] {
+    if level == 0 {
+        let values: [Option[T]; 8] = [None; 8]
+        let page: VecPage[T] = VecPage[T]::Leaf(values)
+        &page
+    } else {
+        let branches: [Option[&VecPage[T]]; 8] = [None; 8]
+        let page: VecPage[T] = VecPage[T]::Branch(branches)
+        &page
+    }
+}
+impl[T] Iter for VecIter[T] {
+    type Item = T
+    fn next(self: &Self) Option[T] {
+        if self.index >= self.length { return None }
+        let value = lookup(self.root, self.level, uint(self.index))
+        self.index = self.index + 1
+        value
+    }
+}
+impl[T] IntoIter for Vec[T] {
+    type Item = T
+    type Iter = VecIter[T]
+    fn into_iter(self: Self) VecIter[T] = self.iter()
+}

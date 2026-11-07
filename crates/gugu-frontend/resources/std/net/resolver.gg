@@ -1,0 +1,111 @@
+use std.net.address.{SocketAddr, Ipv4Addr, Ipv6Addr, split_target, parse_port}
+use std.net.types.{ResolveError}
+use std.collections.{Vec}
+use std.io.{CancelToken}
+use std.text.{Bytes}
+use std.runtime.net_resolver as native
+
+pub struct Resolver {}
+pub trait ToSocketAddrs {
+    fn socket_addrs(self: &Self) Result[Vec[SocketAddr], ResolveError]
+    fn socket_addrs_cancel(self: &Self, cancel: &CancelToken) Result[Vec[SocketAddr], ResolveError]
+}
+impl Resolver {
+    pub fn system() Self = Self {}
+    pub fn resolve(self: &Self, host: string, port: u16) Result[Vec[SocketAddr], ResolveError] {
+        validate_host(host)?
+        native.resolve(host, port, 0)
+    }
+    pub fn resolve_cancel(self: &Self, host: string, port: u16, cancel: &CancelToken) Result[Vec[SocketAddr], ResolveError] {
+        validate_host(host)?
+        native.resolve(host, port, unsafe { cancel.raw_control() })
+    }
+}
+impl ToSocketAddrs for SocketAddr {
+    fn socket_addrs(self: &Self) Result[Vec[SocketAddr], ResolveError] {
+        let result = Vec[SocketAddr]::new()
+        result.push(*self)
+        Ok(result)
+    }
+    fn socket_addrs_cancel(self: &Self, cancel: &CancelToken) Result[Vec[SocketAddr], ResolveError] {
+        if cancel.is_cancelled() { return Err(ResolveError::Cancelled) }
+        self.socket_addrs()
+    }
+}
+impl ToSocketAddrs for &[SocketAddr] {
+    fn socket_addrs(self: &Self) Result[Vec[SocketAddr], ResolveError] = Ok(Vec[SocketAddr]::from_slice(*self))
+    fn socket_addrs_cancel(self: &Self, cancel: &CancelToken) Result[Vec[SocketAddr], ResolveError] {
+        if cancel.is_cancelled() { return Err(ResolveError::Cancelled) }
+        Ok(Vec[SocketAddr]::from_slice(*self))
+    }
+}
+impl ToSocketAddrs for string {
+    fn socket_addrs(self: &Self) Result[Vec[SocketAddr], ResolveError] {
+        let (host, port) = target(*self)?
+        Resolver::system().resolve(host, port)
+    }
+    fn socket_addrs_cancel(self: &Self, cancel: &CancelToken) Result[Vec[SocketAddr], ResolveError] {
+        let (host, port) = target(*self)?
+        Resolver::system().resolve_cancel(host, port, cancel)
+    }
+}
+fn target(text: string) Result[(string, u16), ResolveError] {
+    let bytes = Bytes::from_string(text)
+    let data = unsafe { bytes.as_slice() }
+    let parts = match split_target(data) {
+        Ok(parts) => parts,
+        Err(_) => return Err(ResolveError::InvalidHost),
+    }
+    let port = match parse_port(data[parts.1..]) {
+        Ok(value) => value,
+        Err(_) => return Err(ResolveError::InvalidPort),
+    }
+    if parts.0 != 0 {
+        // 方括号只包 IPv6 数字地址，不能将 [hostname] 交给系统 resolver。
+        if let Err(_) = SocketAddr::parse(text) { return Err(ResolveError::InvalidHost) };
+    }
+    let host = unsafe { std.runtime.string_from_utf8_unchecked(data[parts.0..parts.2]) }
+    validate_host(host)?
+    Ok((host, port))
+}
+pub fn validate_host(host: string) Result[(), ResolveError] {
+    let data = unsafe { Bytes::from_string(host).as_slice() }
+    if data.len() == 0 || data.len() > 254 { return Err(ResolveError::InvalidHost) }
+    let colon = false
+    let scope = -1
+    for index in 0..data.len() {
+        if data[index] == 0 || data[index] >= 128 { return Err(ResolveError::InvalidHost) }
+        if data[index] == 58 { colon = true }
+        if data[index] == 37 { scope = index };
+    }
+    if colon {
+        let end = if scope == -1 { data.len() } else { scope }
+        let address = unsafe { std.runtime.string_from_utf8_unchecked(data[..end]) }
+        if let Err(_) = Ipv6Addr::parse(address) { return Err(ResolveError::InvalidHost) }
+        if scope != -1 {
+            let value: uint = 0
+            if scope + 1 == data.len() { return Err(ResolveError::InvalidHost) }
+            for index in scope + 1..data.len() {
+                let digit = uint(data[index])
+                if digit < 48 || digit > 57 || value > (uint(4294967295) - (digit - 48)) / 10 { return Err(ResolveError::InvalidHost) }
+                value = value * 10 + digit - 48
+            }
+        }
+        return Ok(())
+    }
+    if let Ok(_) = Ipv4Addr::parse(host) { return Ok(()) }
+    let length = data.len()
+    if data[length - 1] == 46 { length = length - 1 }
+    if length == 0 || length > 253 { return Err(ResolveError::InvalidHost) }
+    let start = 0
+    for index in 0..length + 1 {
+        if index == length || data[index] == 46 {
+            if index == start || index - start > 63 || data[start] == 45 || data[index - 1] == 45 { return Err(ResolveError::InvalidHost) }
+            start = index + 1
+        } else {
+            let ch = data[index]
+            if !((ch >= 48 && ch <= 57) || (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122) || ch == 45) { return Err(ResolveError::InvalidHost) };
+        }
+    }
+    Ok(())
+}

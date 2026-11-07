@@ -1,0 +1,31 @@
+use std.net.{SocketAddr, IpAddr, Ipv4Addr, Ipv6Addr, BindOptions, DatagramBindOptions, TcpListener, UdpSocket}
+use std.sync.{CancelSource}
+use std.io as io
+
+pub fn numeric_v6() SocketAddr = SocketAddr::new(IpAddr::V6(Ipv6Addr::new([0, 0, 0, 0, 0, 0, 0, 1])), 0)
+fn main() {
+    _ = numeric_v6()
+    let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0)
+    let listener = match TcpListener::bind(address, BindOptions::new()) { Ok(value) => value, Err(_) => panic("监听绑定失败") }
+    let local = match listener.local_addr() { Ok(value) => value, Err(_) => panic("查询地址失败") }
+    if local.port() == 0 { panic("未分配端口") }
+    match TcpListener::bind(local, BindOptions::new()) {
+        Ok(_) => panic("活动 listener 地址不应被复用"),
+        Err(io.Error::AddrInUse) => (),
+        Err(_) => panic("地址冲突错误分类"),
+    }
+    let cancel = CancelSource::new()
+    cancel.cancel()
+    let token = cancel.token()
+    match listener.accept_cancel(&token) {
+        Err(io.Error::Cancelled) => (),
+        _ => panic("预取消 accept"),
+    }
+    let alias = listener
+    if let Err(_) = alias.close() { panic("关闭 listener") }
+    if let Err(_) = listener.close() { panic("幂等关闭 listener") }
+    match listener.local_addr() { Err(io.Error::Closed) => (), _ => panic("关闭后的地址查询") }
+    let udp = match UdpSocket::bind(address, DatagramBindOptions::new()) { Ok(value) => value, Err(_) => panic("UDP 绑定失败") }
+    match udp.local_addr() { Ok(local) => { if local.port() == 0 { panic("UDP 未分配端口") }; }, Err(_) => panic("UDP 地址查询失败") }
+    if let Err(_) = udp.close() { panic("UDP 关闭失败") };
+}

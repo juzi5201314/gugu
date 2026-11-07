@@ -1,0 +1,199 @@
+use std.runtime.network_service as services
+use std.net.address.{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr}
+use std.runtime.fs_platform.{FsResult, raw_allocate, raw_free}
+use std.runtime.heap.{heap_word, heap_word32, heap_store_word, heap_store_word32, heap_fail}
+use std.io as io
+
+pub const REQUEST_BYTES: uint = 128
+pub const REQUEST_VALUE: uint = 72
+pub const REQUEST_ERROR: uint = 80
+pub const SOCKET_KIND: uint = 3
+
+pub fn call(op: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint) FsResult {
+    let storage = raw_allocate(REQUEST_BYTES)
+    defer { raw_free(storage, REQUEST_BYTES) }
+    request(storage, op, a, b, c, d, e, f)
+}
+pub fn prepare(storage: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint) {
+    heap_store_word(storage, a)
+    heap_store_word(storage + 8, b)
+    heap_store_word(storage + 16, c)
+    heap_store_word(storage + 24, d)
+    heap_store_word(storage + 32, e)
+    heap_store_word(storage + 40, f)
+    heap_store_word(storage + 48, 0)
+    heap_store_word(storage + 56, 0)
+    heap_store_word(storage + 64, 0)
+    heap_store_word(storage + 88, 0)
+}
+pub fn run(storage: uint, op: uint) FsResult { unsafe {
+    _ = std.runtime.net_call(op, storage)
+    FsResult { value: heap_word(storage + REQUEST_VALUE), error: heap_word(storage + REQUEST_ERROR) }
+} }
+pub fn request(storage: uint, op: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint) FsResult {
+    prepare(storage, a, b, c, d, e, f)
+    run(storage, op)
+}
+fn put16(address: uint, value: u16) { unsafe { std.ptr.write_unaligned[u16](std.mem.transmute[uint, *u16](address), value) } }
+fn get16(address: uint) u16 { unsafe { std.ptr.read_unaligned[u16](std.mem.transmute[uint, *u16](address)) } }
+fn get8(address: uint) byte { unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](address)) } }
+fn put8(address: uint, value: byte) { unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](address), value) } }
+fn network16(address: uint, value: u16) { put8(address, byte(value >> 8))
+    put8(address + 1, byte(value & u16(255))) }
+fn read_network16(address: uint) u16 = u16(get8(address)) * u16(256) + u16(get8(address + 1))
+#[cfg(os = "linux")]
+pub fn family6() uint = 10
+#[cfg(os = "windows")]
+pub fn family6() uint = 23
+
+pub fn encode(address: SocketAddr, out: uint) uint {
+    // 两目标 sockaddr_in/in6 的端口和地址偏移一致；字段按目标 native/network 字节序分别写入。
+    heap_store_word(out, 0)
+    heap_store_word(out + 8, 0)
+    heap_store_word(out + 16, 0)
+    heap_store_word(out + 24, 0)
+    network16(out + 2, address.port())
+    match address.ip() {
+        IpAddr::V4(value) => { put16(out, 2)
+            let octets = value.octets()
+            for index in 0..4 { put8(out + 4 + uint(index), octets[index]) }
+            16 },
+        IpAddr::V6(value) => { put16(out, u16(family6()))
+            let segments = value.segments()
+            for index in 0..8 { network16(out + 8 + uint(index) * 2, segments[index]) }
+            heap_store_word32(out + 24, uint(address.scope_id()))
+            28 },
+    }
+}
+pub fn decode(source: uint, length: uint) Result[SocketAddr, io.Error] {
+    if length < 2 { return Err(io.Error::InvalidData) }
+    let family = uint(get16(source))
+    if family == 2 {
+        if length < 16 { return Err(io.Error::InvalidData) }
+        let value = Ipv4Addr::new(get8(source + 4), get8(source + 5), get8(source + 6), get8(source + 7))
+        return Ok(SocketAddr::new(IpAddr::V4(value), read_network16(source + 2)))
+    }
+    if family == family6() {
+        if length < 28 { return Err(io.Error::InvalidData) }
+        let segments: [u16; 8] = [0; 8]
+        for index in 0..8 { segments[index] = read_network16(source + 8 + uint(index) * 2) }
+        return Ok(SocketAddr::scoped(Ipv6Addr::new(segments), read_network16(source + 2), u32(heap_word32(source + 24))))
+    }
+    Err(io.Error::Unsupported)
+}
+#[cfg(os = "linux")]
+pub fn from_error(code: uint) io.Error = io.from_native_error(code)
+#[cfg(os = "windows")]
+pub fn from_error(code: uint) io.Error = match code {
+    10004 => io.Error::Interrupted, 10013 => io.Error::PermissionDenied,
+    10022 => io.Error::InvalidInput, 10038 => io.Error::Closed,
+    10040 => io.Error::MessageTooLarge, 10042 | 10043 | 10047 => io.Error::Unsupported,
+    10048 => io.Error::AddrInUse, 10049 => io.Error::AddrNotAvailable,
+    10053 => io.Error::ConnectionAborted, 10054 => io.Error::ConnectionReset,
+    10057 => io.Error::NotConnected, 10060 => io.Error::TimedOut,
+    10061 => io.Error::ConnectionRefused, _ => io.from_native_error(code),
+}
+pub fn checked(result: FsResult) Result[uint, io.Error] {
+    if result.error == 0 { Ok(result.value) } else { Err(from_error(result.error)) }
+}
+#[cfg(os = "linux")]
+pub fn would_block(error: uint) bool = error == 11
+#[cfg(os = "windows")]
+pub fn would_block(error: uint) bool = error == 10035
+
+#[cfg(os = "linux")]
+pub fn initialize() Result[(), io.Error] = Ok(())
+#[cfg(os = "windows")]
+static winsock_ready: bool = false
+#[cfg(os = "windows")]
+pub fn initialize() Result[(), io.Error] {
+    if winsock_ready { return Ok(()) }
+    let data = raw_allocate(512)
+    defer { raw_free(data, 512) }
+    _ = checked(call(12, 514, data, 0, 0, 0, 0))?
+    winsock_ready = true
+    services.install_platform_cleanup(shutdown)
+    Ok(())
+}
+#[cfg(os = "linux")]
+pub fn shutdown() {}
+#[cfg(os = "windows")]
+pub fn shutdown() {
+    if winsock_ready {
+        if call(13, 0, 0, 0, 0, 0, 0).error != 0 { heap_fail() }
+        winsock_ready = false
+    };
+}
+#[cfg(os = "linux")]
+fn create_socket(family: uint, kind: uint) FsResult = call(0, family, kind | uint(526336), 0, 0, 0, 0)
+#[cfg(os = "windows")]
+fn create_socket(family: uint, kind: uint) FsResult = call(0, family, kind, 0, 0, 0, 0)
+#[cfg(os = "linux")]
+fn nonblocking(handle: uint, scratch: uint) FsResult {
+    _ = handle
+    _ = scratch
+    // socket 已用 SOCK_NONBLOCK 创建，无需再次修改描述符标志。
+    FsResult { value: 0, error: 0 }
+}
+#[cfg(os = "windows")]
+fn nonblocking(handle: uint, scratch: uint) FsResult {
+    heap_store_word32(scratch, 1)
+    call(11, handle, uint(2147772030), scratch, 0, 0, 0)
+}
+#[cfg(os = "linux")]
+fn reuse(handle: uint, enabled: bool, tcp: bool, scratch: uint) FsResult {
+    // UDP 没有 TCP 的 TIME_WAIT；不设置 SO_REUSEADDR，避免两个活动 endpoint 共享地址。
+    heap_store_word32(scratch, if enabled && tcp { uint(1) } else { uint(0) })
+    call(1, handle, 1, 2, scratch, 4, 0)
+}
+#[cfg(os = "windows")]
+fn reuse(handle: uint, enabled: bool, tcp: bool, scratch: uint) FsResult {
+    _ = enabled
+    _ = tcp
+    heap_store_word32(scratch, 1)
+    // Windows SO_REUSEADDR 允许抢占活动 listener；排他绑定才满足公开契约。
+    call(1, handle, 65535, uint(4294967291), scratch, 4, 0)
+}
+#[cfg(os = "linux")]
+fn v6only_option() uint = 26
+#[cfg(os = "windows")]
+fn v6only_option() uint = 27
+#[cfg(os = "linux")]
+fn bind_mode_error(code: uint, dual: bool) io.Error {
+    if dual && (code == 22 || code == 92 || code == 93 || code == 97) { io.Error::Unsupported }
+    else { from_error(code) }
+}
+#[cfg(os = "windows")]
+fn bind_mode_error(code: uint, dual: bool) io.Error {
+    if dual && (code == 10022 || code == 10042 || code == 10043 || code == 10047) { io.Error::Unsupported }
+    else { from_error(code) }
+}
+pub fn bind(address: SocketAddr, tcp: bool, backlog: int, reuse_address: bool, dual: bool) Result[uint, io.Error] {
+    if tcp && backlog <= 0 { return Err(io.Error::InvalidInput) }
+    initialize()?
+    let family = match address.ip() { IpAddr::V4(_) => uint(2), IpAddr::V6(_) => family6() }
+    let handle = checked(create_socket(family, if tcp { 1 } else { 2 }))?
+    let retained = false
+    defer { if !retained { _ = call(7, handle, 0, 0, 0, 0, 0) }; }
+    let scratch = raw_allocate(64)
+    defer { raw_free(scratch, 64) }
+    _ = checked(nonblocking(handle, scratch))?
+    _ = checked(reuse(handle, reuse_address, tcp, scratch))?
+    if family == family6() {
+        heap_store_word32(scratch, if dual { uint(0) } else { uint(1) })
+        let configured = call(1, handle, 41, v6only_option(), scratch, 4, 0)
+        if configured.error != 0 { return Err(bind_mode_error(configured.error, dual)) };
+    }
+    let bytes = encode(address, scratch)
+    _ = checked(call(2, handle, scratch, bytes, 0, 0, 0))?
+    if tcp { _ = checked(call(3, handle, uint(if backlog > 2147483647 { 2147483647 } else { backlog }), 0, 0, 0, 0))? }
+    retained = true
+    Ok(handle)
+}
+pub fn address(handle: uint, peer: bool) Result[SocketAddr, io.Error] {
+    let scratch = raw_allocate(64)
+    defer { raw_free(scratch, 64) }
+    heap_store_word32(scratch + 32, 32)
+    _ = checked(call(if peer { 6 } else { 5 }, handle, scratch, scratch + 32, 0, 0, 0))?
+    decode(scratch, heap_word32(scratch + 32))
+}

@@ -8,6 +8,8 @@ mod exports;
 #[path = "protocol_tests/foreign.rs"]
 mod foreign_tests;
 mod gc_entry;
+#[path = "protocol_tests/net.rs"]
+mod network;
 
 const REQUEST: u64 = 256;
 const STACK: u64 = 8192 + 8;

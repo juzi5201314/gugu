@@ -1,0 +1,34 @@
+// 唯一网络 service 槽。只有网络 API 安装函数值，rt0 本身不引用网络平台实现，
+// 因而无网络程序不会因调度器地板集而引入 Winsock 或 resolver。
+struct NetworkService {
+    poll: fn(uint),
+    pending: fn(uint) bool,
+    shutdown: fn(uint),
+}
+static network: Option[NetworkService] = None
+static resolver: Option[NetworkService] = None
+static platform_cleanup: Option[fn()] = None
+pub fn install_platform_cleanup(cleanup: fn()) { platform_cleanup = Some(cleanup) }
+pub fn install_resolver(poll: fn(uint), pending: fn(uint) bool, shutdown: fn(uint)) {
+    resolver = Some(NetworkService { poll, pending, shutdown })
+}
+pub fn install(poll: fn(uint), pending: fn(uint) bool, shutdown: fn(uint)) {
+    network = Some(NetworkService { poll, pending, shutdown })
+}
+pub fn poll(processor: uint) {
+    if let Some(service) = network { (service.poll)(processor) };
+    if let Some(service) = resolver { (service.poll)(processor) };
+}
+pub fn pending(processor: uint) bool {
+    if let Some(service) = network { if (service.pending)(processor) { return true }; }
+    if let Some(service) = resolver { return (service.pending)(processor) }
+    false
+}
+pub fn shutdown(processor: uint) {
+    if let Some(service) = network { (service.shutdown)(processor) };
+    network = None
+    if let Some(service) = resolver { (service.shutdown)(processor) };
+    resolver = None
+    if let Some(cleanup) = platform_cleanup { cleanup() };
+    platform_cleanup = None
+}

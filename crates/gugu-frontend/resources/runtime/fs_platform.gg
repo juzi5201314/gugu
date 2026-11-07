@@ -1,6 +1,6 @@
 use std.runtime.scheduler.{park_current, ready_hot, callback_complete}
 use std.runtime.resource_state.{complete_close, reclaim}
-use std.runtime.native_memory.{allocate, release, page_bytes, verify_drained, pressure_poll, pressure_dirty, RUNTIME_PRESSURE_STATE_OFFSET}
+use std.runtime.native_memory.{allocate, release, page_bytes, pressure_poll, pressure_dirty, RUNTIME_PRESSURE_STATE_OFFSET}
 
 /* 私有文件系统平台边界。worker仅消费raw请求，绝不接收托管地址。
  * processor+4024为固定状态页；8条128B请求、8个64KiB system stack。
@@ -66,6 +66,7 @@ pub fn raw_free(base: uint, bytes: uint) { unsafe {
 // 这些映射的生命周期不属于调用协程：请求池、worker 栈和目录原生控制。
 pub fn control_allocate(bytes: uint) uint = allocate(bytes)
 pub fn control_free(base: uint, bytes: uint) { release(base, bytes) }
+pub fn ensure_pool() { _ = state(processor()) }
 fn state(processor: uint) uint {
     let existing = word(processor + 4024)
     if existing != 0 { return existing }
@@ -185,6 +186,13 @@ fn cancel_waiters(s: uint) {
     }
 }
 
+#[cfg(os = "linux")]
+fn close_error(control: uint, error: uint) uint { _ = control
+    error }
+#[cfg(os = "windows")]
+fn close_error(control: uint, error: uint) uint {
+    if error == 0 && word(control + 72) == 3 { word(control + 384) } else { error }
+}
 fn complete_request(req: uint) {
     let owner = word(req + REQUEST_OWNER)
     let result = word(req + REQUEST_VALUE)
@@ -194,7 +202,7 @@ fn complete_request(req: uint) {
     if owner & uint(1) != 0 {
         let control = owner & ~uint(1)
         if word(control + 112) == 2 { control_free(word(control + 104), 4096) }
-        complete_resource(control, error)
+        complete_resource(control, close_error(control, error))
     } else {
         let wait = wait_record(owner)
         put(wait + 80, result)
@@ -209,7 +217,7 @@ fn prepare_request(s: uint, req: uint) {
         let control = word(s + 16)
         put(s + 16, word(control + 96))
         if word(s + 16) == 0 { put(s + 24, 0) }
-        prepare_close(req, word(control + 104), word(control + 112))
+        prepare_close(req, control, word(control + 104), word(control + 112))
         put(req + REQUEST_OWNER, control | uint(1))
     } else {
         let hot = word(s)
@@ -327,7 +335,6 @@ pub fn shutdown(processor: uint) {
     trim_idle_stacks(s + DIRTY_POOL_OFFSET, MAX_DIRTY_WORKERS)
     put(processor + 4024, 0)
     control_free(s, 4096)
-    verify_drained(processor)
 }
 /// 内部采样，waiter_metadata_bytes 不包含排队 payload；worker 栈只统计 runtime 自建映射。
 pub struct BlockingSnapshot {
@@ -392,11 +399,21 @@ pub fn pending(processor: uint) bool {
     observed.inflight_requests != 0 || observed.waiting_requests != 0 || observed.close_pending || dirty.inflight_requests != 0 || dirty.waiting_requests != 0
 }
 #[cfg(os = "linux")]
-fn prepare_close(req: uint, handle: uint, kind: uint) { put(req + REQUEST_OPERATION, 3)
- put(req + REQUEST_ARGUMENTS, if kind == 2 { word(handle) } else { handle }) }
+fn prepare_close(req: uint, control: uint, handle: uint, kind: uint) {
+    _ = control
+    put(req + REQUEST_OPERATION, 3)
+    put(req + REQUEST_ARGUMENTS, if kind == 2 { word(handle) } else { handle })
+}
 #[cfg(os = "windows")]
-fn prepare_close(req: uint, handle: uint, kind: uint) { put(req + REQUEST_OPERATION, if kind == 2 { 11 } else { 1 })
- put(req + REQUEST_ARGUMENTS, if kind == 2 { word(handle) } else { handle }) }
+fn prepare_close(req: uint, control: uint, handle: uint, kind: uint) {
+    if kind == 3 {
+        put(req + REQUEST_OPERATION, ~uint(0))
+        put(req + REQUEST_ARGUMENTS, control + 256)
+    } else {
+        put(req + REQUEST_OPERATION, if kind == 2 { 11 } else { 1 })
+        put(req + REQUEST_ARGUMENTS, if kind == 2 { word(handle) } else { handle })
+    }
+}
 
 #[cfg(os = "linux")]
 pub fn call(op: uint, a0: uint, a1: uint, a2: uint, a3: uint, a4: uint, a5: uint) FsResult = call_cancel(op, a0, a1, a2, a3, a4, a5, 0)

@@ -1,0 +1,279 @@
+use std.text.{Bytes, alloc_bytes}
+use std.path.{Path}
+
+pub enum ParseError { InvalidAddress, InvalidPort }
+pub enum AddressError { Empty, Nul, TooLong }
+
+impl Error for ParseError {
+    fn message(self: &Self) string = match *self {
+        ParseError::InvalidAddress => "地址格式无效",
+        ParseError::InvalidPort => "端口格式无效",
+    }
+    fn source(self: &Self) Option[&dyn Error] = None
+}
+impl Error for AddressError {
+    fn message(self: &Self) string = match *self {
+        AddressError::Empty => "Unix 地址为空",
+        AddressError::Nul => "Unix 地址包含 NUL",
+        AddressError::TooLong => "Unix 地址超过 sockaddr 容量",
+    }
+    fn source(self: &Self) Option[&dyn Error] = None
+}
+
+pub struct Ipv4Addr { value: [byte; 4] }
+pub struct Ipv6Addr { value: [u16; 8] }
+pub enum IpAddr { V4(Ipv4Addr), V6(Ipv6Addr) }
+pub struct SocketAddr { address: IpAddr, number: u16, scope: u32 }
+
+impl Ipv4Addr {
+    pub fn new(a: byte, b: byte, c: byte, d: byte) Self = Self { value: [a, b, c, d] }
+    pub fn octets(self: &Self) [byte; 4] = self.value
+    pub fn parse(text: string) Result[Self, ParseError] = parse_v4(unsafe { Bytes::from_string(text).as_slice() })
+    pub fn to_string(self: &Self) string {
+        let buffer: [byte; 15] = [0; 15]
+        let end = 0
+        for index in 0..4 {
+            if index != 0 { buffer[end] = 46
+                end = end + 1 }
+            end = digits(&buffer, end, uint(self.value[index]), 10)
+        }
+        ascii(buffer[..end])
+    }
+}
+impl Ipv6Addr {
+    pub fn new(segments: [u16; 8]) Self = Self { value: segments }
+    pub fn segments(self: &Self) [u16; 8] = self.value
+    pub fn parse(text: string) Result[Self, ParseError] = parse_v6(unsafe { Bytes::from_string(text).as_slice() })
+    pub fn to_string(self: &Self) string {
+        let best = -1
+        let longest = 1
+        let index = 0
+        while index < 8 {
+            let start = index
+            while index < 8 && self.value[index] == 0 { index = index + 1 }
+            if index - start > longest { best = start
+                longest = index - start }
+            if start == index { index = index + 1 };
+        }
+        let buffer: [byte; 39] = [0; 39]
+        let end = 0
+        index = 0
+        while index < 8 {
+            if index == best {
+                buffer[end] = 58
+                buffer[end + 1] = 58
+                end = end + 2
+                index = index + longest
+            } else {
+                if end != 0 && buffer[end - 1] != 58 { buffer[end] = 58
+                    end = end + 1 }
+                end = digits(&buffer, end, uint(self.value[index]), 16)
+                index = index + 1
+            }
+        }
+        ascii(buffer[..end])
+    }
+}
+impl IpAddr {
+    pub fn parse(text: string) Result[Self, ParseError] {
+        let data = unsafe { Bytes::from_string(text).as_slice() }
+        for index in 0..data.len() {
+            if data[index] == 58 { return Ok(IpAddr::V6(parse_v6(data)?)) };
+        }
+        Ok(IpAddr::V4(parse_v4(data)?))
+    }
+    pub fn to_string(self: &Self) string = match *self {
+        IpAddr::V4(value) => value.to_string(),
+        IpAddr::V6(value) => value.to_string(),
+    }
+}
+impl SocketAddr {
+    pub fn new(ip: IpAddr, port: u16) Self = Self { address: ip, number: port, scope: 0 }
+    pub fn scoped(ip: Ipv6Addr, port: u16, scope_id: u32) Self = Self { address: IpAddr::V6(ip), number: port, scope: scope_id }
+    pub fn ip(self: &Self) IpAddr = self.address
+    pub fn port(self: &Self) u16 = self.number
+    pub fn scope_id(self: &Self) u32 = self.scope
+    pub fn parse(text: string) Result[Self, ParseError] {
+        let data = unsafe { Bytes::from_string(text).as_slice() }
+        let parts = split_target(data)?
+        let port = parse_port(data[parts.1..])?
+        let host = data[parts.0..parts.2]
+        if parts.0 == 0 { return Ok(Self::new(IpAddr::V4(parse_v4(host)?), port)) }
+        let end = host.len()
+        let scope: uint = 0
+        for index in 0..host.len() {
+            if host[index] == 37 {
+                end = index
+                scope = decimal(host[index + 1..], uint(4294967295), false)?
+                break
+            };
+        }
+        Ok(Self::scoped(parse_v6(host[..end])?, port, u32(scope)))
+    }
+    pub fn to_string(self: &Self) string {
+        // IPv6 最长39字节、scope最多11字节、括号2字节、冒号和端口6字节，总长不超过58。
+        let buffer: [byte; 58] = [0; 58]
+        let v6 = match self.address { IpAddr::V4(_) => false, IpAddr::V6(_) => true }
+        let end = 0
+        if v6 { buffer[0] = 91
+            end = 1 }
+        let text = self.address.to_string()
+        let address = unsafe { Bytes::from_string(text).as_slice() }
+        for index in 0..address.len() { buffer[end] = address[index]
+            end = end + 1 }
+        if v6 {
+            if self.scope != 0 { buffer[end] = 37
+                end = digits(&buffer, end + 1, uint(self.scope), 10) }
+            buffer[end] = 93
+            end = end + 1
+        }
+        buffer[end] = 58
+        end = digits(&buffer, end + 1, uint(self.number), 10)
+        ascii(buffer[..end])
+    }
+}
+
+// 只接收本模块生成的 ASCII；复制后不暴露可写别名。
+fn ascii(data: &[byte]) string { unsafe {
+    let owned = alloc_bytes(data.len())
+    for index in 0..data.len() { owned[index] = data[index] }
+    std.runtime.string_from_utf8_unchecked(owned)
+} }
+fn digits(out: &[byte], start: int, value: uint, radix: uint) int {
+    let count = 1
+    let cursor = value
+    while cursor >= radix { count = count + 1
+        cursor = cursor / radix }
+    let index = start + count
+    cursor = value
+    while index > start {
+        index = index - 1
+        let digit = cursor % radix
+        out[index] = byte(if digit < 10 { digit + 48 } else { digit + 87 })
+        cursor = cursor / radix
+    }
+    start + count
+}
+fn decimal(data: &[byte], limit: uint, strict: bool) Result[uint, ParseError] {
+    if data.len() == 0 { return Err(ParseError::InvalidAddress) }
+    if strict && data.len() > 1 && data[0] == 48 { return Err(ParseError::InvalidAddress) }
+    let value: uint = 0
+    for index in 0..data.len() {
+        let digit = uint(data[index])
+        if digit < 48 || digit > 57 { return Err(ParseError::InvalidAddress) }
+        if value > (limit - (digit - 48)) / 10 { return Err(ParseError::InvalidAddress) }
+        value = value * 10 + digit - 48
+    }
+    Ok(value)
+}
+pub fn parse_port(data: &[byte]) Result[u16, ParseError] = match decimal(data, 65535, false) {
+    Ok(value) => Ok(u16(value)),
+    Err(_) => Err(ParseError::InvalidPort),
+}
+fn parse_v4(data: &[byte]) Result[Ipv4Addr, ParseError] {
+    let octets: [byte; 4] = [0; 4]
+    let start = 0
+    for part in 0..4 {
+        let end = start
+        while end < data.len() && data[end] != 46 { end = end + 1 }
+        octets[part] = byte(decimal(data[start..end], 255, true)?)
+        if (part == 3 && end != data.len()) || (part != 3 && end == data.len()) { return Err(ParseError::InvalidAddress) }
+        start = end + 1
+    }
+    Ok(Ipv4Addr { value: octets })
+}
+fn parse_v6(data: &[byte]) Result[Ipv6Addr, ParseError] {
+    if data.len() == 0 { return Err(ParseError::InvalidAddress) }
+    let words: [u16; 8] = [0; 8]
+    let count = 0
+    let gap = -1
+    let start = 0
+    if data[0] == 58 {
+        if data.len() < 2 || data[1] != 58 { return Err(ParseError::InvalidAddress) }
+        gap = 0
+        start = 2
+    }
+    while start < data.len() {
+        if count >= 8 { return Err(ParseError::InvalidAddress) }
+        let end = start
+        let dotted = false
+        while end < data.len() && data[end] != 58 {
+            if data[end] == 46 { dotted = true }
+            end = end + 1
+        }
+        if dotted {
+            if end != data.len() || count > 6 { return Err(ParseError::InvalidAddress) }
+            let v4 = parse_v4(data[start..end])?.octets()
+            words[count] = u16(v4[0]) * u16(256) + u16(v4[1])
+            words[count + 1] = u16(v4[2]) * u16(256) + u16(v4[3])
+            count = count + 2
+        } else {
+            if end == start || end - start > 4 { return Err(ParseError::InvalidAddress) }
+            let value: uint = 0
+            for index in start..end {
+                let ch = uint(data[index])
+                let digit = if ch >= 48 && ch <= 57 { ch - 48 } else {
+                    if ch >= 65 && ch <= 70 { ch - 55 } else {
+                        if ch >= 97 && ch <= 102 { ch - 87 } else { return Err(ParseError::InvalidAddress) }
+                    }
+                }
+                value = value * 16 + digit
+            }
+            words[count] = u16(value)
+            count = count + 1
+        }
+        if end == data.len() { break }
+        start = end + 1
+        if start == data.len() { return Err(ParseError::InvalidAddress) }
+        if data[start] == 58 {
+            if gap != -1 { return Err(ParseError::InvalidAddress) }
+            gap = count
+            start = start + 1
+        };
+    }
+    if gap == -1 {
+        if count != 8 { return Err(ParseError::InvalidAddress) };
+    } else {
+        if count >= 8 { return Err(ParseError::InvalidAddress) }
+        let index = count
+        while index > gap { index = index - 1
+            words[index + 8 - count] = words[index] }
+        for index in gap..gap + 8 - count { words[index] = 0 }
+    }
+    Ok(Ipv6Addr { value: words })
+}
+
+// 返回 (host起点, port起点, host终点)；只拆结构，不把DNS名当数字地址。
+pub fn split_target(data: &[byte]) Result[(int, int, int), ParseError] {
+    if data.len() == 0 { return Err(ParseError::InvalidAddress) }
+    if data[0] == 91 {
+        let end = 1
+        while end < data.len() && data[end] != 93 { end = end + 1 }
+        if end == 1 || end + 1 >= data.len() || data[end + 1] != 58 { return Err(ParseError::InvalidAddress) }
+        return Ok((1, end + 2, end))
+    }
+    let colon = -1
+    for index in 0..data.len() {
+        if data[index] == 58 {
+            if colon != -1 { return Err(ParseError::InvalidAddress) }
+            colon = index
+        };
+    }
+    if colon <= 0 { return Err(ParseError::InvalidAddress) }
+    Ok((0, colon + 1, colon))
+}
+
+#[cfg(arch = "x86_64")]
+pub struct UnixAddr { value: Path }
+#[cfg(arch = "x86_64")]
+impl UnixAddr {
+    pub fn from_path(path: Path) Result[Self, AddressError] {
+        let bytes = path.as_os().to_bytes()
+        if bytes.len() == 0 { return Err(AddressError::Empty) }
+        let data = unsafe { bytes.as_slice() }
+        for index in 0..data.len() { if data[index] == 0 { return Err(AddressError::Nul) }; }
+        if bytes.len() > 107 { return Err(AddressError::TooLong) }
+        Ok(Self { value: path })
+    }
+    pub fn path(self: &Self) Path = self.value
+}

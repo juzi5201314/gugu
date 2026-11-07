@@ -14,6 +14,14 @@
 
 CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。`I8` 与 `I16` 在寄存器中保持零扩展到 64 位。内存 `Load` 用 `movzx` 写入 32 位目的寄存器来建立这个规范形；只覆盖低 8 位或低 16 位的 `mov` 不能作为载入。
 
+## 标准网络系统依赖
+
+`NativeLink.with_standard_library` 在形成最终 action key 前扫描已验证 LIR 的网络机器操作。NetCall 的 Windows 路径加入 ws2_32 与 IOCP 所需 kernel32 符号；ResolverSymbol 在 Linux 加入 libc.so.6 的 getaddrinfo/freeaddrinfo 和既有 pthread/TLS 符号，在 Windows 加入 Winsock 解析入口。缺省 Linux 解释器取目标 descriptor，用户显式提供的解释器保持原值。先保留显式导入顺序，再按固定目录追加内建依赖，完全相同的项不重复添加，符号跨库冲突交给既有校验拒绝。合并后的规范编码进入 action key、backend plan、ELF PT_INTERP/DT_NEEDED 或 PE IAT。import policy revision 为2；不探测宿主库、NSS 配置或 PATH。
+
+net_call 和 resolver_symbol 机器片段独立按实际机器重定位的可达引用选择。ELF、PE 和 stackmap/unwind 的 RVA 布局共用同一判定；未使用 Resolver 的数字 bind 不包含 resolver 动态依赖。网络请求布局为九个八字节参数，value 位于72、error位于80，Windows provider 扩展函数地址位于88；全部请求为 raw 存储。Winsock SOCKET 保持64位，SOCKET_ERROR 只比较32位返回，错误读取 WSAGetLastError；IOCP/句柄操作读取 GetLastError。Linux 负 syscall 返回转换为正 errno。Windows 关闭 socket 的回调使用 C ABI，回传捕获的 WSA 错误供共享资源完成路径消费。
+
+内部调用的 outgoing 栈实参必须在任何参数寄存器改写前保存，随后统一解析寄存器并行拷贝组。否则十参数 native_call 的最后一个取消实参可能被第一个操作码覆盖；固定回归覆盖这一情况，真实 Resolver 的 freeaddrinfo 路径也消费同一规则。
+
 ## 后端阶段
 
 cage 控制记录含机器更新的解码计数，ELF 将其放在 rt0 只读收尾范围之外的保留可写区，PE 放在 `.data`；两者都不可执行。PE 的 cage 重定位直接使用数据 RVA，不叠加文本 RVA。私有 `cage_control` 访问器与解码序列共用 `CageControl` relocation，因此公开统计与机器更新消费同一份记录。栈深度读取/复制片段在入口根据当前 r14 的 stack_high 重建地址，复制尾跳 glue 域的既有 memcpy；不能误用 runtime 域同名符号。双目标镜像布局与登记片段重定位回归分别验证页权限、地址及尾跳定义。

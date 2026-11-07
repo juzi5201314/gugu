@@ -242,13 +242,21 @@ fn vtable_disp(slot: u32) -> Result<i32, LoweringError> {
 
 /// 实参落位：寄存器槽直接搬，栈 piece 写进 caller outgoing 区。
 ///
-/// 寄存器落位按声明顺序渲染，同时登记为并行拷贝组；outgoing 栈 piece 不参与寄存器并行
-/// 语义，出现时收束当前组后直接发射。
+/// outgoing 栈 piece 先保存，再把全部寄存器实参作为同一并行拷贝组落位；
+/// 栈实参的源可能恰好占用某个参数寄存器，不能在该寄存器改写后读取。
 pub(super) fn shuffle_arguments(
     operands: &[SiteValue],
     layout: &AbiLayout,
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
+    for value in &layout.arguments {
+        if let Some(AbiSlot::Stack { offset }) = value.slot {
+            let source = operands
+                .get(value.index as usize)
+                .ok_or(LoweringError::InvalidOperands)?;
+            super::store_stack(builder, source.reg, offset, value.ty.ty)?;
+        }
+    }
     let mut pending: Vec<Copy> = Vec::new();
     let mut start = builder.instruction_count();
     for value in &layout.arguments {
@@ -276,10 +284,7 @@ pub(super) fn shuffle_arguments(
                 });
                 value_move(builder, source.reg, Reg::Xmm(xmm), value.ty.ty)?;
             }
-            AbiSlot::Stack { offset } => {
-                flush_group(builder, &mut pending, &mut start);
-                super::store_stack(builder, source.reg, offset, value.ty.ty)?;
-            }
+            AbiSlot::Stack { .. } => {}
         }
     }
     flush_group(builder, &mut pending, &mut start);
@@ -347,6 +352,56 @@ fn emit_symbol_call(builder: &mut Builder, symbol: Symbol) -> Result<(), Lowerin
         vec![Operand::Reloc(RelocTarget::Lir(symbol), RelocKind::PcRel32)],
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+    use crate::gir::body::CallKind;
+    use crate::lir::body::{Type, ValueType};
+
+    #[test]
+    fn stack_argument_survives_register_argument_overwrite() {
+        let ty = ValueType::scalar(Type::I64);
+        let call = Call {
+            target: CallTarget::Instance([1; 32]),
+            kind: CallKind::Managed,
+            parameters: vec![ty; 10],
+            results: vec![],
+            may_unwind: false,
+            may_suspend: false,
+            may_allocate: false,
+            captures_arguments: false,
+            by_value: vec![],
+            foreign_arguments: vec![],
+            sret: None,
+            poll_free_leaf: false,
+        };
+        let layout = abi::classify_call(&call, crate::TargetName::X86_64Linux).unwrap();
+        let mut operands: Vec<_> = (0..10)
+            .map(|index| SiteValue {
+                ty,
+                reg: Reg::Virtual(index),
+            })
+            .collect();
+        operands[9].reg = Reg::Gpr(Gpr::Rax);
+        let mut builder = Builder::new();
+        shuffle_arguments(&operands, &layout, &mut builder).unwrap();
+        let lowered = builder.finish();
+        let stack_write = lowered.sequence.instructions.iter().position(|inst| {
+            matches!(inst.operands.first(), Some(Operand::Mem(mem)) if mem.base == Some(Reg::Gpr(Gpr::Rsp)))
+        }).unwrap();
+        let overwrite = lowered
+            .sequence
+            .instructions
+            .iter()
+            .position(|inst| inst.operands == [reg(Reg::Gpr(Gpr::Rax)), reg(Reg::Virtual(0))])
+            .unwrap();
+        assert!(
+            stack_write < overwrite,
+            "第十实参必须在 rax 被第一个实参覆盖前写入 outgoing 区"
+        );
+    }
 }
 
 fn emit_symbol_jump(builder: &mut Builder, symbol: Symbol) -> Result<(), LoweringError> {

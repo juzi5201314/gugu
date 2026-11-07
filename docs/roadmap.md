@@ -491,10 +491,13 @@
   - 最终验收：`cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail` 默认配置下 646 项通过、66 项沿用既有跳过设置，耗时 89.374 秒；单项 3 秒、整轮 120 秒限制不变，默认并发按实测设为 2。两目标物化一致性按生产基础表/函数表阶段分别逐字节比较完整产物，回调往返按目标拆分，保留全部输入和断言，没有新增忽略项。修正验收耗时的生产改动包括按入选集录制机器片段、共享冻结类型分类、不可达块延迟建立状态、证明查询移除冗余复制，以及目标 descriptor/源码归一化复用。`cargo fmt --all --check`、`git diff --check` 与 `mdbook build -d target/book` 通过。
   - 验证边界：默认用例在进程内解释生产 LIR/待编码机器序列，宿主 syscall/IAT 和调度事件使用固定钩子；同时验证实际 ELF/PE 字节。Linux 原生证据见本阶段已记录的手工闭环；Windows 宿主原生执行不属于本次已执行的验证，不能把确定性边界测试描述成真实 Windows 运行。
 
-- [ ] **阶段 64：实现 std.net 地址、resolver 与监听器**（复杂度：3）
+- [x] **阶段 64：实现 std.net 地址、resolver 与监听器**（复杂度：3）
   - 依赖：阶段 31、37、58、62、63。
-  - 实现 IPv4/IPv6/SocketAddr、ToSocketAddrs、system Resolver、DNS 错误、TcpListener/UdpSocket bind/accept 基础和 cfg 控制的 Unix domain address。
-  - 验收：IPv6 `[addr]:port`、ASCII DNS、NUL/非 ASCII/非法端口、IPv6 bind mode、backlog 和 Unix path 边界均有固定测试；不创建第二层 DNS cache。
+  - 已实现 IPv4/IPv6/IpAddr/SocketAddr 的解析与规范格式化、ASCII `ToSocketAddrs` 校验、系统 `getaddrinfo/freeaddrinfo` Resolver、DNS 错误映射、固定页 Vec 地址快照、TcpListener/UdpSocket bind/accept/close，以及 cfg 控制的 UnixAddr 路径边界。Linux 使用非阻塞 epoll，Windows 使用 IOCP/AcceptEx；取消、close 和迟到 resolver 结果均沿 ResourceCell/BlockingBridge 生命周期清理。
+  - 已验收 IPv6 `[addr]:port`、scope、ASCII DNS、NUL/非 ASCII/非法端口、IPv6 bind mode、backlog、Unix path 边界、Linux/Windows 原生请求 ABI、Resolver 取消后的 `freeaddrinfo` 清理和确定性 listener FIFO。Linux 另外执行了回环 accept 手工闭环；数字地址 bind 不引入 libc，Resolver 按可达功能自动加入目标 libc/pthread/解释器或 Winsock 依赖。
+  - 归属层修复：内部调用先保存 outgoing 栈实参再搬运参数寄存器，避免 freeaddrinfo 请求的取消参数被操作码覆盖；泛型混合聚合使用实际描述符复制，避免 Vec 迭代快照引用未替换的声明字段。保留完整跨页、别名修改与旧快照断言，负 DNS 状态通过实际 query 路径检查符号扩展。GIR build schema 13、RuntimeRaw schema 45、LIR world/body 18/19、x64 lowering/metadata 19/3 与 import policy 2 同步失效旧缓存。
+  - 最终验收：`cargo build --workspace` 无 warning，`cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail` 默认配置下 659 项通过、66 项沿用既有跳过设置，耗时 86.948 秒；未放宽单项或整轮超时。`cargo fmt --all --check`、`git diff --check` 与 `mdbook build -d target/book` 通过，既有 SUMMARY 已覆盖全部修改章节。
+  - 验证边界：默认测试只解释生产 LIR/机器序列并检查双目标镜像；平台与调度使用固定钩子。Linux 手工执行系统 localhost 解析、取消与回环 accept/资源关闭；Windows 已验证 IOCP/AcceptEx 协议和 PE 导入，没有执行真实 Windows 镜像。
 
 - [ ] **阶段 65：实现 std.net transport、TCP/UDP 与 Unix socket**（复杂度：4）
   - 依赖：阶段 64、61d、62。
