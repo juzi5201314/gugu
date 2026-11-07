@@ -78,6 +78,7 @@ impl Builder<'_> {
             captures_arguments,
             by_value: Vec::new(),
             sret: None,
+            foreign_arguments: Vec::new(),
             poll_free_leaf: false,
         };
         Ok(self.emit(
@@ -154,11 +155,17 @@ impl Builder<'_> {
                 }
                 let values = if let Some(sret) = self.sret {
                     let source = self.computed_address(value)?;
-                    self.copy_memory(sret, source, self.gir.signature.result.0)?;
+                    let ty = self.gir.signature.result.0;
+                    self.copy_memory(sret, source, ty)?;
+                    if self.layout(ty).passing.has_resource() {
+                        let descriptor = self.descriptor(ty);
+                        self.runtime(RuntimeCall::ValueForget, &[source, descriptor], &[])?;
+                    }
                     Vec::new()
                 } else {
                     self.computed_values(value)?
                 };
+                self.release_stack_resources()?;
                 if let Storage::Stack { slot, .. } = self.storage[0] {
                     self.lifetime(slot, false);
                 }
@@ -168,6 +175,7 @@ impl Builder<'_> {
                     Some(Terminator::Return { values, memory });
             }
             g::Terminator::ResumePanic => {
+                self.release_stack_resources()?;
                 let memory = self.blocks[self.current.index()].memory;
                 self.blocks[self.current.index()].terminator =
                     Some(Terminator::ResumePanic { memory });
@@ -246,6 +254,7 @@ impl Builder<'_> {
                     captures_arguments: false,
                     by_value: Vec::new(),
                     sret: None,
+                    foreign_arguments: Vec::new(),
                     poll_free_leaf: false,
                 };
                 let normal = self.fresh(self.source.clone(), true);
@@ -299,9 +308,16 @@ impl Builder<'_> {
         } else {
             self.address(destination)?.1
         };
+        let foreign = kind != g::CallKind::Managed;
         let mut arguments = Vec::new();
         let mut by_value = Vec::new();
-        let output = if self.indirect_abi(result_ty) {
+        let mut foreign_arguments = Vec::new();
+        let indirect_result = if foreign {
+            self.c_layout(result_ty).memory
+        } else {
+            self.indirect_abi(result_ty)
+        };
+        let output = if indirect_result {
             let output = self.temporary(result_ty)?;
             arguments.push(output);
             Some(output)
@@ -311,6 +327,10 @@ impl Builder<'_> {
         let target = self.callee(callee, site, &mut arguments)?;
         for operand in operands {
             let value = self.operand(operand)?;
+            if foreign {
+                self.c_argument(value, &mut arguments, &mut foreign_arguments, &mut by_value)?;
+                continue;
+            }
             let ty = value.ty();
             if self.indirect_abi(ty) {
                 by_value.push((
@@ -324,10 +344,12 @@ impl Builder<'_> {
         let results: Vec<_> = if output.is_some() {
             Vec::new()
         } else {
-            self.abi_lanes(result_ty)
-                .into_iter()
-                .map(|(_, _, kind)| kind)
-                .collect()
+            let lanes = if foreign {
+                self.c_layout(result_ty).lanes
+            } else {
+                self.abi_lanes(result_ty)
+            };
+            lanes.into_iter().map(|(_, _, kind)| kind).collect()
         };
         let sret = output.map(|_| {
             (
@@ -350,6 +372,7 @@ impl Builder<'_> {
             captures_arguments: false,
             by_value,
             sret,
+            foreign_arguments,
             poll_free_leaf: false,
         };
         let values = if let Some(unwind) = unwind {
@@ -375,16 +398,19 @@ impl Builder<'_> {
                     .collect::<Vec<_>>(),
             )
         };
-        let result = output.map_or(
+        let result = if let Some(address) = output {
+            Computed::Address {
+                ty: result_ty,
+                address,
+            }
+        } else if foreign {
+            self.c_result(result_ty, &values)?
+        } else {
             Computed::Values {
                 ty: result_ty,
                 values,
-            },
-            |address| Computed::Address {
-                ty: result_ty,
-                address,
-            },
-        );
+            }
+        };
         self.write_place(destination, result)?;
         self.jump(self.target(normal));
         Ok(())
@@ -403,6 +429,22 @@ impl Builder<'_> {
             .find(|(candidate, _)| *candidate == site)
         {
             let key = *key;
+            if let Some(instance) = self
+                .index
+                .instance(&key)
+                .map(|position| &self.mono.instances[position])
+                && let Some(linkage) = self.module.linkage.iter().find(|linkage| {
+                    linkage.definition.0 == instance.definition
+                        && linkage.foreign.is_some()
+                        && !linkage.naked
+                })
+                && let Some(name) = &linkage.export_name
+            {
+                return Ok(CallTarget::External {
+                    key: self.module.definitions[instance.definition as usize].key,
+                    name: name.clone(),
+                });
+            }
             if let Some(instance) = self
                 .index
                 .instance(&key)
@@ -447,7 +489,9 @@ impl Builder<'_> {
                             key: definition.key,
                             name: linkage
                                 .import_name
-                                .clone()
+                                .as_ref()
+                                .or(linkage.export_name.as_ref())
+                                .cloned()
                                 .unwrap_or_else(|| definition.name.clone()),
                         });
                     }

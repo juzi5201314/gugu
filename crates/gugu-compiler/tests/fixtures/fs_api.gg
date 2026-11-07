@@ -1,0 +1,53 @@
+use std.fs as fs
+use std.path.{Path}
+use std.text.{Bytes}
+use std.io.{Error, Read, Write, Seek, SeekFrom}
+
+fn exercise(path: Path, other: Path) Result[(), Error] {
+    let options = fs.OpenOptions::new()
+    options.read = true
+    options.write = true
+    options.create_new = true
+    let file = fs.open(path, options)?
+    defer { _ = file.close() }
+    _ = file.write(Bytes::from_string("hello"))?
+    _ = file.seek(SeekFrom::Start(0))?
+    let data = [byte(0); 5]
+    _ = file.read(&data)?
+    _ = file.metadata()?
+    file.set_len(3)?
+    file.sync_data()?
+    file.sync_all()?
+    let clone = file.try_clone()?
+    clone.close()?
+    file.close()?
+    _ = fs.read(path)?
+    if fs.read_string(path)? != "hello" { panic("text mismatch") }
+    fs.write(path, Bytes::from_string("new"))?
+    _ = fs.copy(path, other)?
+    _ = fs.metadata(path, false)?
+    _ = fs.exists(path)?
+    _ = fs.canonicalize(path)?
+    fs.rename(path, other)?
+    fs.hard_link(path, other)?
+    fs.symlink(path, other)?
+    _ = fs.read_link(other)?
+    fs.create_dir(path)?
+    fs.create_dir_all(other)?
+    let directory = fs.read_dir(path)?
+    for entry in directory {
+        let entry = entry?
+        _ = entry.path()
+        _ = entry.file_name()
+        _ = entry.metadata()?
+    }
+    directory.close()?
+    fs.remove_file(path)?
+    fs.remove_dir(other)?
+    fs.remove_dir_all(path)?
+    Ok(())
+}
+
+fn main() {
+    _ = exercise(Path::from_string("sample"), Path::from_string("other"))
+}

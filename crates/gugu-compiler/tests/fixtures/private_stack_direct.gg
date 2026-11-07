@@ -1,0 +1,4 @@
+fn main() { unsafe {
+    _ = std.runtime.stack_read_word(uint(8))
+    std.runtime.stack_copy_raw(uint(8), uint(4096), uint(8), uint(0))
+} }

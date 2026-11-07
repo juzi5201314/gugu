@@ -735,7 +735,6 @@ fn path_text(module: &ParsedModule, path_id: super::ast::PathId) -> Vec<String> 
 
 fn private_builtin_module(path: &str) -> bool {
     path == "std.prelude"
-        || path == "std.runtime"
         || path.starts_with("std.runtime.")
         || path == "runtime"
         || path.starts_with("runtime.")

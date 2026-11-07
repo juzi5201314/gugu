@@ -8,7 +8,13 @@ use std::{num::NonZeroU32, ops::Range};
 
 /// body 规范字节的 revision。10：body 不再携带整世界输入指纹，同一实例的 body 只由自身内容决定。
 /// 11：body 携带 poll 不动点时 caller 可见的接口，安装的 body 据此播种 poll 而不重算。
-pub const REVISION: u32 = 11;
+/// 13：机器操作目录含栈深度读取/复制与 cage 控制访问。
+/// 14：C 按值临时副本与 sret 地址保留 Stack provenance。
+/// 15：删除无执行入口的 Pin/Unpin 枚举，统一使用源码函数调用。
+/// 16：共享 guard 返回载荷，end 显式携带 handle，字段屏障保留操作数。
+/// 17：压缩字编码从运行期 cage 基址计算 offset。
+/// 18：原生 cage 参数按值复制使用登记的 ForeignCopy 入口。
+pub const REVISION: u32 = 18;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -345,13 +351,12 @@ pub enum RuntimeCall {
     ValueForget,
     CowSnapshot,
     ValueTransfer,
+    ForeignCopy,
     ValueRepeat,
     ResourceAcquire,
     ResourceRelease,
     ResourceTransfer,
     ResourceFinalize,
-    Pin,
-    Unpin,
     DynamicErase,
     TypeIs,
     Downcast,
@@ -372,6 +377,7 @@ pub enum RuntimeCall {
     Format,
     /// 字符串拼接：参数为两组 `(data, len)`，返回新的 `(data, len)`。
     Concat,
+    StringCompare,
     Utf8Boundary,
     /// panic 调用在编译期解析为稳定源码 descriptor，ABI 为 payload lanes、path/len、line、column。
     Panic,
@@ -399,6 +405,16 @@ pub enum CallTarget {
     Vtable { slot: u32 },
 }
 
+/// C 参数在展开车道中的边界；SysV 寄存器耗尽必须按整个参数回退。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ForeignArgument {
+    pub first: u32,
+    pub lanes: u32,
+    pub bytes: u32,
+    pub align: u32,
+    pub memory: bool,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Call {
     pub target: CallTarget,
@@ -411,6 +427,8 @@ pub struct Call {
     pub captures_arguments: bool,
     /// 按值聚合指针的参数编号、稳定 descriptor 与字节大小。
     pub by_value: Vec<(u32, [u8; 32], u64)>,
+    /// 非 managed 调用保留原始 C 参数边界，按 first 严格升序。
+    pub foreign_arguments: Vec<ForeignArgument>,
     pub sret: Option<(u32, u64, [u8; 32])>,
     /// poll pass 分类出的 managed 直接叶调用；region verifier 与预算数据流消费。
     pub poll_free_leaf: bool,

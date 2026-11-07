@@ -1,0 +1,510 @@
+use std.runtime.scheduler.{park_current, ready_hot, callback_complete}
+use std.runtime.resource_state.{complete_close, reclaim}
+use std.runtime.native_memory.{allocate, release, page_bytes, verify_drained, pressure_poll, pressure_dirty, RUNTIME_PRESSURE_STATE_OFFSET}
+
+/* 私有文件系统平台边界。worker仅消费raw请求，绝不接收托管地址。
+ * processor+4024为固定状态页；8条128B请求、8个64KiB system stack。
+ * caller cold+272..368复用wait_record/foreign_bridge，离开等待前不复用。
+ */
+// 与 foreign_schema 的固定 profile 逐项交叉校验；请求槽数是 worker credit 上界。
+pub const MAX_BLOCKING_WORKERS: uint = 8
+pub const MAX_DIRTY_WORKERS: uint = 1
+pub const DIRTY_POOL_OFFSET: uint = 2048
+pub const PRESSURE_BLOCKING_WORKERS: uint = 1
+pub const BLOCKING_WAITER_BYTES: uint = 64
+pub const BLOCKING_QUEUE_CAP_BYTES: uint = 4096
+pub const BLOCKING_SERVICE_BUDGET: uint = 128
+pub const BLOCKING_WORKER_STACK_BYTES: uint = 65536
+const REQUEST_BYTES: uint = 128
+const REQUEST_OPERATION: uint = 8
+const REQUEST_ARGUMENTS: uint = 16
+const REQUEST_VALUE: uint = 64
+const REQUEST_ERROR: uint = 72
+const REQUEST_THREAD_HANDLE: uint = 80
+const REQUEST_EXTRA_ARGUMENTS: uint = 88
+const REQUEST_OWNER: uint = 104
+const REQUEST_CANCEL: uint = 112
+const REQUEST_CANCELLED: uint = 120
+const REQUESTS_OFFSET: uint = 64
+const STACKS_OFFSET: uint = REQUESTS_OFFSET + MAX_BLOCKING_WORKERS * REQUEST_BYTES
+
+pub struct FsResult { pub value: uint, pub error: uint }
+fn word(p: uint) uint { unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](p)) } }
+fn put(p: uint, v: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](p), v) } }
+fn byte_at(p: uint) byte { unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](p)) } }
+fn put_byte(p: uint, v: byte) { unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](p), v) } }
+fn u32_at(p: uint) uint { unsafe { uint(std.ptr.read_unaligned[u32](std.mem.transmute[uint, *u32](p))) } }
+fn u16_at(p: uint) uint { unsafe { uint(std.ptr.read_unaligned[u16](std.mem.transmute[uint, *u16](p))) } }
+fn fail() { unsafe { std.runtime.process_exit(2) } }
+fn ok(value: uint) FsResult = FsResult { value: value, error: 0 }
+fn err(error: uint) FsResult = FsResult { value: 0, error: error }
+fn copy(dst: uint, src: uint, count: uint) { let i: uint = 0
+ while i < count { put_byte(dst + i, byte_at(src + i))
+ i = i + 1 } }
+fn clear(p: uint, bytes: uint) { let i: uint = 0
+ while i < bytes { put(p + i, 0)
+ i = i + 8 } }
+fn processor() uint { unsafe { word(std.runtime.current_slot() + 16) } }
+pub const CALLER_PAYLOAD_BYTES_OFFSET: uint = 480
+
+pub fn raw_allocate(bytes: uint) uint { unsafe {
+    let base = allocate(bytes)
+    let slot = word(std.runtime.current_slot() + 48) + CALLER_PAYLOAD_BYTES_OFFSET
+    let pages = page_bytes(bytes)
+    let previous = word(slot)
+    if previous > ~uint(0) - pages { fail() }
+    put(slot, previous + pages)
+    base
+} }
+pub fn raw_free(base: uint, bytes: uint) { unsafe {
+    let slot = word(std.runtime.current_slot() + 48) + CALLER_PAYLOAD_BYTES_OFFSET
+    let pages = page_bytes(bytes)
+    if word(slot) < pages { fail() }
+    release(base, bytes)
+    put(slot, word(slot) - pages)
+} }
+// 这些映射的生命周期不属于调用协程：请求池、worker 栈和目录原生控制。
+pub fn control_allocate(bytes: uint) uint = allocate(bytes)
+pub fn control_free(base: uint, bytes: uint) { release(base, bytes) }
+fn state(processor: uint) uint {
+    let existing = word(processor + 4024)
+    if existing != 0 { return existing }
+    let created = control_allocate(4096)
+    put(processor + 4024, created)
+    created
+}
+#[cfg(os = "linux")]
+fn worker_stack() uint = control_allocate(BLOCKING_WORKER_STACK_BYTES) + BLOCKING_WORKER_STACK_BYTES
+#[cfg(os = "windows")]
+fn worker_stack() uint = 0
+fn stack_for(s: uint, index: uint) uint {
+    let slot = s + STACKS_OFFSET + index * 8
+    let top = word(slot)
+    if top != 0 { return top }
+    let created = worker_stack()
+    put(slot, created)
+    created
+}
+
+/// service 确认线程退出、清除 owner 后才能归还；每轮至多检查固定八个槽。
+fn trim_idle_stacks(s: uint, capacity: uint) {
+    let index: uint = 0
+    while index < capacity {
+        let req = s + REQUESTS_OFFSET + index * REQUEST_BYTES
+        let slot = s + STACKS_OFFSET + index * 8
+        let top = word(slot)
+        if word(req + REQUEST_OWNER) == 0 && top != 0 {
+            put(slot, 0)
+            control_free(top - BLOCKING_WORKER_STACK_BYTES, BLOCKING_WORKER_STACK_BYTES)
+            return
+        }
+        index = index + 1
+    }
+}
+fn wait_record(hot: uint) uint = word(hot + 48) + 272
+fn cancelled(control: uint) bool { unsafe {
+    control != 0 && std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](control)) != 0
+} }
+
+pub fn native_call(op: uint, a0: uint, a1: uint, a2: uint, a3: uint, a4: uint, a5: uint, a6: uint, a7: uint, cancel: uint) FsResult { unsafe {
+    if cancelled(cancel) { return err(~uint(0)) }
+    let hot = std.runtime.current_slot()
+    let s = state(word(hot + 16)) + (if op == ~uint(0) && a1 != 0 { DIRTY_POOL_OFFSET } else { uint(0) })
+    pressure_poll(word(hot + 16))
+    // profile: 4096B / 64B = 64 等待 credit；用协程自带冷区保存请求，不另建无界节点。
+    if word(s + 32) >= BLOCKING_QUEUE_CAP_BYTES / BLOCKING_WAITER_BYTES { fail() }
+    put(s + 32, word(s + 32) + 1)
+    let wait = wait_record(hot)
+    put(wait, 0)
+ put(wait + 8, op)
+    put(wait + 16, a0)
+ put(wait + 24, a1)
+ put(wait + 32, a2)
+ put(wait + 40, a3)
+    put(wait + 48, a4)
+ put(wait + 56, a5)
+ put(wait + 64, a6)
+ put(wait + 72, a7)
+    // select scratch只在本协程阻塞文件请求期间复用，不与select并行。
+    put(word(hot + 48) + 464, cancel)
+    if word(s + 8) == 0 { put(s, hot) } else { put(wait_record(word(s + 8)), hot) }
+    put(s + 8, hot)
+    park_current()
+    FsResult { value: word(wait + 80), error: word(wait + 88) }
+} }
+fn native(op: uint, a0: uint, a1: uint, a2: uint, a3: uint, a4: uint, a5: uint) FsResult = native_call(op, a0, a1, a2, a3, a4, a5, 0, 0, 0)
+
+/// 受限cleanup只在既有ResourceCell请求区挂链，无分配、等待、用户回调。
+pub fn enqueue_close(control: uint, handle: uint, kind: uint) {
+    let s = word(processor() + 4024)
+    if s == 0 { fail() }
+    put(control + 96, 0)
+ put(control + 104, handle)
+ put(control + 112, kind)
+    if word(s + 24) == 0 { put(s + 16, control) } else { put(word(s + 24) + 96, control) }
+    put(s + 24, control)
+}
+pub fn await_close(control: uint) uint { unsafe {
+    if u32_at(control + 8) & uint(8) != 0 { return word(control + 88) }
+    let hot = std.runtime.current_slot()
+    put(wait_record(hot), 0)
+    if word(control + 128) == 0 { put(control + 120, hot) } else { put(wait_record(word(control + 128)), hot) }
+    put(control + 128, hot)
+    park_current()
+    word(control + 88)
+} }
+fn complete_resource(control: uint, error: uint) {
+    let hot = word(control + 120)
+    put(control + 120, 0)
+ put(control + 128, 0)
+    while hot != 0 { let next = word(wait_record(hot))
+ ready_hot(hot)
+ hot = next }
+    complete_close(control, error)
+}
+
+/// 尚未提交的等待者不持有 worker credit；取消退出不能依赖在途线程完成。
+fn cancel_waiters(s: uint) {
+    let remaining = word(s + 32)
+    let previous: uint = 0
+    let hot = word(s)
+    while remaining != 0 {
+        let wait = wait_record(hot)
+        let next = word(wait)
+        if cancelled(word(word(hot + 48) + 464)) {
+            if previous == 0 { put(s, next) } else { put(wait_record(previous), next) }
+            if word(s + 8) == hot { put(s + 8, previous) }
+            put(s + 32, word(s + 32) - 1)
+            put(wait, 0)
+            put(wait + 80, 0)
+            put(wait + 88, ~uint(0))
+            ready_hot(hot)
+        } else { previous = hot }
+        hot = next
+        remaining = remaining - 1
+    }
+}
+
+fn complete_request(req: uint) {
+    let owner = word(req + REQUEST_OWNER)
+    let result = word(req + REQUEST_VALUE)
+    let error = if word(req + REQUEST_CANCELLED) != 0 { ~uint(0) } else { word(req + REQUEST_ERROR) }
+    put(req + REQUEST_OWNER, 0)
+    pressure_dirty(processor(), 2)
+    if owner & uint(1) != 0 {
+        let control = owner & ~uint(1)
+        if word(control + 112) == 2 { control_free(word(control + 104), 4096) }
+        complete_resource(control, error)
+    } else {
+        let wait = wait_record(owner)
+        put(wait + 80, result)
+        put(wait + 88, error)
+        ready_hot(owner)
+    }
+}
+
+fn prepare_request(s: uint, req: uint) {
+    clear(req, REQUEST_BYTES)
+    if word(s + 16) != 0 {
+        let control = word(s + 16)
+        put(s + 16, word(control + 96))
+        if word(s + 16) == 0 { put(s + 24, 0) }
+        prepare_close(req, word(control + 104), word(control + 112))
+        put(req + REQUEST_OWNER, control | uint(1))
+    } else {
+        let hot = word(s)
+        let wait = wait_record(hot)
+        put(s, word(wait))
+        put(s + 32, word(s + 32) - 1)
+        if word(s) == 0 { put(s + 8, 0) }
+        copy(req + REQUEST_OPERATION, wait + 8, 56)
+        put(req + REQUEST_EXTRA_ARGUMENTS, word(wait + 64))
+        put(req + REQUEST_EXTRA_ARGUMENTS + 8, word(wait + 72))
+        put(req + REQUEST_OWNER, hot)
+        put(req + REQUEST_CANCEL, word(word(hot + 48) + 464))
+    }
+}
+
+/// 回调等待者已经拥有 native 线程/栈；借用它推进同一个普通 FIFO，不新建线程或撤销外层 credit。
+fn service_callbacks(s: uint) { unsafe {
+    let node = word(std.runtime.callback_control() + 48)
+    while node != 0 {
+        let next = word(node)
+        let req = node + 256
+        let status = std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](node + 8))
+        if status == 5 {
+            complete_request(req)
+            std.runtime.atomic_store_release[uint](std.mem.transmute[uint, *uint](node + 8), uint(2))
+            status = 2
+        } else {
+            if status == 4 && cancelled(word(req + REQUEST_CANCEL)) { put(req + REQUEST_CANCELLED, 1) };
+        }
+        if status == 2 {
+            if word(node + 16) == 0 { callback_complete(node) }
+            else {
+                if word(node + 400) != 0 && (word(s) != 0 || word(s + 16) != 0) {
+                    prepare_request(s, req)
+                    std.runtime.atomic_store_release[uint](std.mem.transmute[uint, *uint](node + 8), uint(4))
+                };
+            }
+        };
+        node = next
+    }
+} }
+
+/// system-stack 每轮最多8完成、64等待者检查、8提交；幸存等待者按 FIFO 推进。
+pub fn service(processor: uint) {
+    let s = word(processor + 4024)
+    if s == 0 { return }
+    service_pool(processor, s, MAX_BLOCKING_WORKERS)
+    service_pool(processor, s + DIRTY_POOL_OFFSET, MAX_DIRTY_WORKERS)
+    service_callbacks(s)
+}
+fn service_pool(processor: uint, s: uint, capacity: uint) { unsafe {
+    let active: uint = 0
+    let i: uint = 0
+    while i < capacity {
+        let req = s + REQUESTS_OFFSET + i * REQUEST_BYTES
+        let owner = word(req + REQUEST_OWNER)
+        if owner != 0 {
+            if std.runtime.fs_poll(req) != 0 {
+                complete_request(req)
+            } else {
+                if cancelled(word(req + REQUEST_CANCEL)) { put(req + REQUEST_CANCELLED, 1) };
+            }
+        }
+        if word(req + REQUEST_OWNER) != 0 { active = active + 1 }
+        i = i + 1
+    }
+    cancel_waiters(s)
+    i = 0
+    while i < capacity {
+        let req = s + REQUESTS_OFFSET + i * REQUEST_BYTES
+        let limit = if word(processor + RUNTIME_PRESSURE_STATE_OFFSET) != 0 { PRESSURE_BLOCKING_WORKERS } else { capacity }
+        if active < limit && word(req + REQUEST_OWNER) == 0 && (word(s) != 0 || word(s + 16) != 0) {
+            prepare_request(s, req)
+            let owner = word(req + REQUEST_OWNER)
+            let rejected: uint = 0
+            if cancelled(word(req + REQUEST_CANCEL)) { rejected = ~uint(0) }
+            if rejected == 0 { rejected = std.runtime.fs_start(req, stack_for(s, i)) }
+            if rejected != 0 {
+                put(req + REQUEST_OWNER, 0)
+                pressure_dirty(processor, 2)
+                // close 尚未执行时不能发布 DONE；线程资源耗尽按 runtime failure 处理。
+                if owner & uint(1) != 0 { fail() }
+                else { let wait = wait_record(owner)
+ put(wait + 80, 0)
+ put(wait + 88, rejected)
+ ready_hot(owner) }
+            } else { active = active + 1 }
+        }
+        i = i + 1
+    }
+    if word(processor + RUNTIME_PRESSURE_STATE_OFFSET) != 0 { trim_idle_stacks(s, capacity) }
+} }
+pub fn shutdown(processor: uint) {
+    let s = word(processor + 4024)
+    if s == 0 { return }
+    while pending(processor) { service(processor) }
+    let control = word(processor + 4016)
+    while control != 0 {
+        let next = word(control + 184)
+        if u32_at(control + 8) & uint(8) == 0 {
+            if word(control + 80) != 0 { fail() }
+            // 保留用户租约直到 close 完成；只在所有协程结束后的 teardown 执行。
+            put(control + 8, word(control + 8) | uint(6))
+            enqueue_close(control, word(control + 64), word(control + 72))
+        }
+        control = next
+    }
+    while pending(processor) { service(processor) }
+    while word(processor + 4016) != 0 { reclaim(word(processor + 4016)) }
+    let stacks: uint = 0
+    while stacks < MAX_BLOCKING_WORKERS {
+        trim_idle_stacks(s, MAX_BLOCKING_WORKERS)
+        stacks = stacks + 1
+    }
+    trim_idle_stacks(s + DIRTY_POOL_OFFSET, MAX_DIRTY_WORKERS)
+    put(processor + 4024, 0)
+    control_free(s, 4096)
+    verify_drained(processor)
+}
+/// 内部采样，waiter_metadata_bytes 不包含排队 payload；worker 栈只统计 runtime 自建映射。
+pub struct BlockingSnapshot {
+    pub inflight_requests: uint,
+    pub waiting_requests: uint,
+    pub waiter_metadata_bytes: uint,
+    pub stack_committed_bytes: uint,
+    pub stack_cached_bytes: uint,
+    pub close_pending: bool,
+    pub queued_payload_bytes: uint,
+}
+
+/// 包括原生已返回、owner 尚未消费的借用请求；活动链最多 64 个节点。
+pub fn borrowed_requests() uint { unsafe {
+    let node = word(std.runtime.callback_control() + 48)
+    let count: uint = 0
+    while node != 0 {
+        let state = std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](node + 8))
+        if state == 4 || state == 5 { count = count + 1 }
+        node = word(node)
+    }
+    count
+} }
+
+pub fn snapshot(processor: uint) BlockingSnapshot = snapshot_pool(word(processor + 4024), MAX_BLOCKING_WORKERS)
+pub fn dirty_snapshot(processor: uint) BlockingSnapshot {
+    let s = word(processor + 4024)
+    snapshot_pool(if s == 0 { uint(0) } else { s + DIRTY_POOL_OFFSET }, MAX_DIRTY_WORKERS)
+}
+fn snapshot_pool(s: uint, capacity: uint) BlockingSnapshot {
+    let observed = BlockingSnapshot { inflight_requests: 0, waiting_requests: 0,
+        waiter_metadata_bytes: 0, stack_committed_bytes: 0, stack_cached_bytes: 0, close_pending: false, queued_payload_bytes: 0 }
+    if s == 0 { return observed }
+    observed.waiting_requests = word(s + 32)
+    observed.waiter_metadata_bytes = observed.waiting_requests * BLOCKING_WAITER_BYTES
+    observed.close_pending = word(s + 16) != 0
+    let hot = word(s)
+    let remaining = observed.waiting_requests
+    while remaining != 0 {
+        let bytes = word(word(hot + 48) + CALLER_PAYLOAD_BYTES_OFFSET)
+        if observed.queued_payload_bytes > ~uint(0) - bytes { fail() }
+        observed.queued_payload_bytes = observed.queued_payload_bytes + bytes
+        hot = word(wait_record(hot))
+        remaining = remaining - 1
+    }
+    let i: uint = 0
+    while i < capacity {
+        let owner = word(s + REQUESTS_OFFSET + i * REQUEST_BYTES + REQUEST_OWNER)
+        if owner != 0 { observed.inflight_requests = observed.inflight_requests + 1 }
+        if word(s + STACKS_OFFSET + i * 8) != 0 {
+            observed.stack_committed_bytes = observed.stack_committed_bytes + BLOCKING_WORKER_STACK_BYTES
+            if owner == 0 { observed.stack_cached_bytes = observed.stack_cached_bytes + BLOCKING_WORKER_STACK_BYTES };
+        }
+        i = i + 1
+    }
+    observed
+}
+
+pub fn pending(processor: uint) bool {
+    let observed = snapshot(processor)
+    let dirty = dirty_snapshot(processor)
+    observed.inflight_requests != 0 || observed.waiting_requests != 0 || observed.close_pending || dirty.inflight_requests != 0 || dirty.waiting_requests != 0
+}
+#[cfg(os = "linux")]
+fn prepare_close(req: uint, handle: uint, kind: uint) { put(req + REQUEST_OPERATION, 3)
+ put(req + REQUEST_ARGUMENTS, if kind == 2 { word(handle) } else { handle }) }
+#[cfg(os = "windows")]
+fn prepare_close(req: uint, handle: uint, kind: uint) { put(req + REQUEST_OPERATION, if kind == 2 { 11 } else { 1 })
+ put(req + REQUEST_ARGUMENTS, if kind == 2 { word(handle) } else { handle }) }
+
+#[cfg(os = "linux")]
+pub fn call(op: uint, a0: uint, a1: uint, a2: uint, a3: uint, a4: uint, a5: uint) FsResult = call_cancel(op, a0, a1, a2, a3, a4, a5, 0)
+#[cfg(os = "linux")]
+pub fn call_cancel(op: uint, a0: uint, a1: uint, a2: uint, a3: uint, a4: uint, a5: uint, cancel: uint) FsResult {
+    if op == 0 { return native(2, a0, linux_flags(a1), a2, 0, 0, 0) }
+    if op == 1 { return native(3, a0, 0, 0, 0, 0, 0) }
+    if op == 2 || op == 3 { return native_call(op - 2, a0, a1, a2, 0, 0, 0, 0, 0, cancel) }
+    if op == 4 { return native(8, a0, a1, a2, 0, 0, 0) }
+    if op == 5 || op == 6 { return linux_stat(op, a0, a1, a2) }
+    if op == 7 { return native(77, a0, a1, 0, 0, 0, 0) }
+    if op == 8 { return native(75, a0, 0, 0, 0, 0, 0) }
+    if op == 9 { return native(74, a0, 0, 0, 0, 0, 0) }
+    if op == 10 { return native(32, a0, 0, 0, 0, 0, 0) }
+    if op == 11 {
+        let result = native(2, a0, 589824, 0, 0, 0, 0)
+        if result.error != 0 { return result }
+        let control = control_allocate(4096)
+ put(control, result.value)
+ return ok(control)
+    }
+    if op == 12 { return linux_dir_next(a0, a1, a2) }
+    if op == 13 { let result = native(3, word(a0), 0, 0, 0, 0, 0)
+ control_free(a0, 4096)
+ return result }
+    if op == 14 { return native(83, a0, a1, 0, 0, 0, 0) }
+    if op == 15 { return native(87, a0, 0, 0, 0, 0, 0) }
+    if op == 16 { return native(84, a0, 0, 0, 0, 0, 0) }
+    if op == 17 { return native(82, a0, a1, 0, 0, 0, 0) }
+    if op == 18 { return native(86, a0, a1, 0, 0, 0, 0) }
+    if op == 19 { return native(88, a0, a1, 0, 0, 0, 0) }
+    if op == 20 { return native(89, a0, a1, a2, 0, 0, 0) }
+    if op == 21 { return linux_canonical(a0, a1, a2) }
+    err(22)
+}
+#[cfg(os = "linux")]
+fn linux_flags(flags: uint) uint {
+    let native: uint = 524288
+    if flags & uint(1) != 0 && flags & uint(6) != 0 { native = native | uint(2) } else { if flags & uint(6) != 0 { native = native | uint(1) }; }
+    if flags & uint(4) != 0 { native = native | uint(1024) }
+    if flags & uint(8) != 0 { native = native | uint(512) }
+    if flags & uint(16) != 0 { native = native | uint(64) }
+    if flags & uint(32) != 0 { native = native | uint(192) }
+    if flags & uint(64) == 0 { native = native | uint(131072) }
+    native
+}
+#[cfg(os = "linux")]
+fn linux_stat(op: uint, a0: uint, a1: uint, a2: uint) FsResult {
+    let buffer = raw_allocate(4096)
+    let result = if op == 5 { native(262, ~uint(99), a0, buffer, if a1 == 0 { 256 } else { 0 }, 0, 0) } else { native(5, a0, buffer, 0, 0, 0, 0) }
+    if result.error == 0 {
+        let out = if op == 5 { a2 } else { a1 }
+        let mode = u32_at(buffer + 24)
+        put(out, word(buffer + 48))
+ put(out + 8, mode)
+        put(out + 16, if mode & uint(61440) == 32768 { 1 } else { if mode & uint(61440) == 16384 { 2 } else { if mode & uint(61440) == 40960 { 3 } else { 0 } } })
+        put(out + 24, word(buffer + 88))
+ put(out + 32, word(buffer + 96))
+        put(out + 40, if mode & uint(146) == 0 { 1 } else { 0 })
+        put(out + 48, word(buffer))
+ put(out + 56, word(buffer + 8))
+    }
+    raw_free(buffer, 4096)
+ result
+}
+#[cfg(os = "linux")]
+fn linux_dir_next(control: uint, out: uint, capacity: uint) FsResult {
+    let buffer = control + 64
+    if word(control + 8) == word(control + 16) {
+        let result = native(217, word(control), buffer, 4000, 0, 0, 0)
+        if result.error != 0 || result.value == 0 { return result }
+        put(control + 8, 0)
+ put(control + 16, result.value)
+    }
+    let entry = buffer + word(control + 8)
+    let record_bytes = u16_at(entry + 16)
+    if record_bytes < 20 || word(control + 8) + record_bytes > word(control + 16) { fail() }
+    let length: uint = 0
+    while length + 19 < record_bytes && byte_at(entry + 19 + length) != byte(0) { length = length + 1 }
+    if length + 19 >= record_bytes { fail() }
+    if length + 16 > capacity { return err(36) }
+    let kind = byte_at(entry + 18)
+    put(out, if kind == byte(8) { 1 } else { if kind == byte(4) { 2 } else { if kind == byte(10) { 3 } else { 0 } } })
+    put(out + 8, length)
+ copy(out + 16, entry + 19, length)
+    put(control + 8, word(control + 8) + record_bytes)
+    ok(length)
+}
+#[cfg(os = "linux")]
+fn linux_canonical(path: uint, out: uint, capacity: uint) FsResult {
+    let opened = native(2, path, 2621440, 0, 0, 0, 0)
+    if opened.error != 0 { return opened }
+    let name = raw_allocate(4096)
+    // /proc/self/fd/，后缀按十进制编码且显式终止。
+    put(name, uint(0x65732f636f72702f))
+ put(name + 8, uint(0x2f64662f666c))
+    let value = opened.value
+    let count: uint = 1
+ let divisor: uint = 10
+    while value >= divisor { count = count + 1
+ divisor = divisor * 10 }
+    let i = count
+    while i != 0 { i = i - 1
+ put_byte(name + 14 + i, byte(value % 10 + 48))
+ value = value / 10 }
+    put_byte(name + 14 + count, byte(0))
+    let result = native(89, name, out, capacity, 0, 0, 0)
+    _ = native(3, opened.value, 0, 0, 0, 0, 0)
+    raw_free(name, 4096)
+    result
+}

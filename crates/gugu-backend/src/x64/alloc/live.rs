@@ -49,6 +49,9 @@ use super::{AllocError, Hint, RegClass, RootClass};
 use crate::lir::body::{BlockId, Body, Definition, Op, Terminator};
 use crate::target::TargetName;
 
+#[cfg(test)]
+mod foreign_root_tests;
+
 /// 调用点 outgoing 区里的一个指针字。偏移相对 outgoing 区起点，供栈图扫描栈上副本。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OutgoingRoot {
@@ -1031,7 +1034,12 @@ fn attach_outgoing(
         .map_err(|_| AllocError::new("调用 ABI 分类失败"))?;
     let mut roots = Vec::new();
     for argument in &layout.arguments {
-        let Some(super::super::abi::AbiSlot::Stack { offset }) = argument.slot else {
+        let Some(slot) = argument.slot else {
+            continue;
+        };
+        let Some(offset) = super::super::lower::foreign::outgoing_offset(call.kind, slot, target)
+            .map_err(|_| AllocError::new("调用参数包车道分类失败"))?
+        else {
             continue;
         };
         let Some(value) = args.get(usize::try_from(argument.index).expect("参数下标适配 usize"))

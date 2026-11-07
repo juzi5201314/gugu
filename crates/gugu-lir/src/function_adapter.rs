@@ -45,7 +45,7 @@ pub(super) fn materialize(bodies: &mut Vec<Body>, module: &hir::Module) -> Resul
     Ok(())
 }
 
-fn build(target: &Body, has_environment: bool) -> Body {
+pub(crate) fn build(target: &Body, has_environment: bool) -> Body {
     let mut signature = target.signature.clone();
     let environment = usize::from(signature.sret.is_some());
     if !has_environment {
@@ -164,6 +164,7 @@ fn build(target: &Body, has_environment: bool) -> Body {
                     .signature
                     .sret
                     .map(|(bytes, _, descriptor)| (0, bytes, descriptor)),
+                foreign_arguments: Vec::new(),
                 poll_free_leaf: false,
             },
             arguments: 0..argument_end,

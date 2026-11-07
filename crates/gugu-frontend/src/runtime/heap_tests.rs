@@ -43,8 +43,8 @@ fn local_heap_contract_derives_immix_sizes_from_the_gc_arena() {
     assert_eq!(contract.card_bytes, 4096);
     assert_eq!(contract.card_bytes % contract.blocks_per_arena, 0);
     // 记录规格 5 条：ObjectHeader 2 + HeapArenaMetadata 11 + HeapPinEntry 4 + HeapBlockRecord 13
-    // + LargeMappingRecord 5 = 35 个字段；数字变化必须同时改这里与 `HEAP_RECORD_SPECS`。
-    assert_eq!(contract.record_field_count(), 35);
+    // + LargeMappingRecord 7 = 37 个字段；数字变化必须同时改这里与 `HEAP_RECORD_SPECS`。
+    assert_eq!(contract.record_field_count(), 37);
     // arena 内每 granule 一位，且 page-cover 覆盖整 arena。
     assert_eq!(
         u64::from(contract.object_start_bits) * u64::from(HEAP_GRANULE_BYTES),
@@ -84,7 +84,7 @@ fn local_heap_contract_is_deterministic_across_builds() {
 #[test]
 fn local_heap_contract_dump_reports_records_bitmaps_and_trigger() {
     let dump = contract().dump();
-    assert!(dump.contains("local-heap schema=5 arena=2097152 block=32768 line=128"));
+    assert!(dump.contains("local-heap schema=6 arena=2097152 block=32768 line=128"));
     assert!(dump.contains("tlab-span=262144 blocks=64 lines-per-block=256"));
     assert!(dump.contains("local-heap-bitmaps object-start-bits=131072 mark-bits=131072"));
     assert!(dump.contains("page-cover=512 cards=4096"));

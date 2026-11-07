@@ -30,14 +30,14 @@ std.build         std.hint
 
 ```text
 reserve_aligned(bytes, alignment) RangeId
-commit(range)                 decommit(range)            release(range)
+commit(range) uint            decommit(range) uint       release(range)
 protect_guard(range)          unprotect(range)           zero(range)
 wait(word, expected) bool     wake(word, count) uint     entropy(bytes) *byte
 set_dump_policy(range, policy)                           low_memory_hint() bool
 huge_page_hint(range)
 ```
 
-固定操作集合、二次幂 extent 阶梯、range 状态迁移与失败分类由 compiler 持有的 `PlatformRangeSchemaV1` 契约固定；`std.platform` 的每个入口都对应契约目录中的一项，新增操作必须同时登记契约、Gugu 源码与 GIR/LIR 原语。
+固定操作集合、二次幂 extent 阶梯、range 状态迁移与失败分类由 compiler 持有的平台范围契约固定（当前 schema 2）；`commit` 与 `decommit` 返回无符号平台状态字，0 表示成功，非零交给 runtime 的平台错误处理。只有成功后才能更新提交标志和 committed 账本；decommit 失败保持原提交状态，成功仅归还提交页、保留虚拟 reservation，之后复用必须重新 commit。`std.platform` 的每个入口都对应契约目录中的一项，新增操作必须同时登记契约、Gugu 源码与 GIR/LIR 原语。
 
 平台范围的生命周期是 `reserved → committed → decommitted → released`。`reserve_aligned` 只取得虚拟地址，不占物理页；`commit`/`decommit` 以平台页为粒度推进同一 range 的子区间；`release` 归还整个 range。地址只在 `reserved` 与 `committed` 期间有效，`decommitted` 与 `released` 的 range 不得解引用。
 
@@ -385,7 +385,7 @@ ResourceCell 是 raw OS handle、open/closed 状态与租约的一份共享逻�
 
 `std.io` 提供组合式 I/O trait。可能阻塞的方法只挂起当前协程，runtime 通过有界 `BlockingBridge` admission 管理操作系统线程：没有 `BridgeCredit` 时不执行系统调用，调用方在等待队列中挂起；取得额度后才进入普通 `ForeignBridge`。`ForeignLeaf` 不得承载可能阻塞的 I/O，`ForeignBridge[DirtyCpu]` 不用于标准库文件操作。
 
-含资源字段的受管值仍按 Adaptive Resource Leasing 保持一次性 release 语义；收集器物理移动不是语言复制，不能因此增加租约。资源只藏在不可达受管容器环中时，release 可以延迟到收集器发现该环；普通局部最后租约仍按[内存与对象模型](memory.md#adaptive-resource-leasing)结束。官方 descriptor 与 resource arena 实现见 [GC 元数据](../internals/gc-metadata.md)。
+含资源字段的受管值仍按 Adaptive Resource Leasing 保持一次性 release 语义；收集器物理移动不是语言复制，不能因此增加租约。资源只藏在不可达受管容器环中时，release 可以延迟到收集器发现该环；上一周期可达不构成本周期的根，残留扫描队列不得将已失去根的资源重新保活。栈和保存寄存器中的有效强根必须保留其可达资源；文件调用触发或跨越 GC 时，调用边界必须按栈图保存活跃根，并在恢复用户代码时使用收集器修正后的地址。未登记为根的字或已失效的初始化槽不能因残留地址而延长资源寿命。普通局部最后租约仍按[内存与对象模型](memory.md#adaptive-resource-leasing)结束。官方 descriptor 与 resource arena 实现见 [GC 元数据](../internals/gc-metadata.md)。
 
 `MaybeUninit`、union、transmute、arena 批量释放和原始按位复制不能绕过资源租约语义，具体限制见[unsafe 与 intrinsic](unsafe.md)和[内存与对象模型](memory.md)。
 
@@ -458,7 +458,7 @@ enum Error {
     ReadOnlyFilesystem
     FileTooLarge
     QuotaExceeded
-    Other { code: int, source: Option[Error] }
+    Other { code: int, source: Option[&Error] }
 }
 fn Error.message(self: &Self) string
 fn Error.source(self: &Self) Option[&dyn Error]
@@ -466,7 +466,7 @@ fn Error.kind(self: &Self) Error
 fn Error.with_source(self: &Self, cause: Error) Error
 ```
 
-`Other` 是唯一带载荷的变体；`source` 只接受同一 `std.io.Error`，不是 `&dyn Error`。`kind()` 剥掉全部 `Other.source`，返回无嵌套来源的变体；`Other` 的 `kind()` 仍是 `Other { code, source: None }`。`message()` 只给人读，按变体名固定，不把 `code` 或来源文本拼进去。`source()` 只有 `Other` 且其 `source` 为 `Some` 时返回 `Some(&dyn Error)`，其余返回 `None`。`with_source` 不修改原值：结果是 `Other { code: self.kind 的稳定编号, source: Some(cause) }`。稳定编号按上面枚举顺序从 0 开始，`Other` 是 30。错误链必须无环：`with_source` 若发现 `cause` 的链已经包含与 `self.kind()` 相同的编号，或链深超过 8，返回 `InvalidInput` 而不是构造环；这个失败本身不再包来源。
+`Other` 是唯一带载荷的变体；`source` 以受管引用保存同一 `std.io.Error`，不是 `&dyn Error`，从而让递归错误链具有有限的值布局。`kind()` 去掉当前错误的来源载荷；`Other` 的 `kind()` 仍是 `Other { code, source: None }`。`message()` 只给人读，按变体名固定，不把 `code` 或来源文本拼进去。`source()` 只有 `Other` 且其 `source` 为 `Some` 时返回 `Some(&dyn Error)`，其余返回 `None`。`with_source` 不修改原值：结果是 `Other { code: self.kind 的稳定编号, source: Some(&cause) }`，引用使 cause 在返回后继续存活。稳定编号按上面枚举顺序从 0 开始，`Other` 是 30。错误链必须无环：`with_source` 若发现 `cause` 的链已经包含与 `self.kind()` 相同的编号，或链深超过 8，返回 `InvalidInput` 而不是构造环；这个失败本身不再包来源。
 
 组合函数是 `std.io` 的自由函数，不是 trait 默认方法：
 
@@ -602,9 +602,17 @@ fn symlink(target: Path, link: Path) Result[(), io.Error]
 fn read_link(path: Path) Result[Path, io.Error]
 ```
 
-OpenOptions 显式设置 read、write、append、truncate、create、create_new 与 follow_symlinks；非法组合在 open 时返回 InvalidInput。`create_new` 只保证单次 OS open 的排他创建语义。`write` 等价于 create + truncate + write_all，不承诺崩溃一致性或原子替换。rename、copy、remove_dir_all 的跨文件系统、部分完成、symlink 和平台差异通过具体 io.Error 变体报告，标准库不把多次 syscall 包装成伪原子操作。
+OpenOptions 显式设置 read、write、append、truncate、create、create_new 与 follow_symlinks；非法组合在 open 时返回 InvalidInput。`OpenOptions.new()` 将前六项设为 false，`follow_symlinks` 设为 true；这些选项是公开 bool 字段。必须至少启用 read、write、append 之一；truncate、create、create_new 要求 write 或 append；append 与 truncate 不可同时启用。create_new 优先于 create，排他创建失败不得截断已有文件。`follow_symlinks = false` 拒绝最终路径分量为符号链接；若需先打开再检查，检查与后续截断必须作用于同一已打开句柄，拒绝链接之前不得执行截断。`create_new` 只保证单次 OS open 的排他创建语义。`write` 等价于 create + truncate + write_all，不承诺崩溃一致性或原子替换。rename、copy、remove_dir_all 的跨文件系统、部分完成、symlink 和平台差异通过具体 io.Error 变体报告，标准库不把多次 syscall 包装成伪原子操作。跨设备 rename 返回 `CrossesDevices`，不隐式退化为复制后删除。多步骤操作在取得临时句柄后失败时仍须执行清理；查询或检查的主错误不被后续清理错误覆盖，临时缓冲也须归还。
 
-File 实现 Read、Write 与 Seek，并提供 metadata、set_len、sync_data、sync_all、try_clone 和幂等 close。ReadDir 是资源句柄与迭代器；每次 next 返回一个 DirEntry 或该次读取的 io.Error，顺序不保证。File、ReadDir 和复制出来的 OS handle 都按 Adaptive Resource Leasing 管理。regular file 和无法由 poller 异步化的文件系统操作经过有界 `BlockingBridge`；worker、system stack、bridge frame、waiter 和排队 payload受 runtime tuning profile 与 memory pressure 约束，队列饱和时挂起调用协程，不创建额外无界 OS thread。
+File 实现 Read、Write 与 Seek，并提供 metadata、set_len、sync_data、sync_all、try_clone 和幂等 close。close 的完成必须建立在平台关闭操作已经执行之上；运行时资源耗尽导致关闭操作无法提交时属于 runtime failure，不能伪造成功关闭。值复制共享同一关闭状态与文件位置；关闭一旦被请求，新操作返回 `Closed`，已开始的操作仍须归还操作租约才能执行平台关闭。后续 close 返回已记录的关闭结果（包括错误），不能重复关闭 OS handle；所有用户租约归还且平台关闭完成后，控制存储才可回收。GC 搬迁不得增加或重复释放资源租约；不可达资源值的同一租约最多释放一次，已转发的旧副本不再承担释放责任。`try_clone` 创建独立可关闭的 OS handle，但文件位置仍按宿主 duplicate 语义共享。`copy` 在截断目的文件前比较 device/inode，源与目的指向同一文件时返回 `InvalidInput`；其它错误可能发生在已经复制部分内容之后。目标打开失败仍关闭已打开的源；传输期间短写只重试未写后缀，零写返回 `WriteZero`，任一读写错误立即停止传输并保留已写内容，不回滚或删除目标。清理错误不得覆盖打开、元数据检查、截断或传输的主错误。传输成功后须检查目标关闭结果，关闭失败返回该错误；只有传输与目标关闭均成功才返回复制字节数。
+
+`read_link` 只从宿主实际返回的有效记录中读取目标；记录截断、名称区间越界或不满足宿主字符单元对齐要求时返回 `InvalidData`，不能把缓冲尾部解释为目标路径。
+
+`Metadata` 提供 `len()`、`is_file()`、`is_dir()`、`is_symlink()`，并公开 `size:uint`、`permissions:Permissions`、`kind:uint`、`modified_seconds:int`、`modified_nanoseconds:uint`、`device:uint`、`inode:uint`。kind 为 0 其它、1 普通文件、2 目录、3 链接；修改时间以 Unix epoch 为基准。`Permissions` 公开 `readonly:bool` 与宿主原始 `native:uint`，不提供跨平台权限设置事务。
+
+ReadDir 实现 `Iter[Item = Result[DirEntry, io.Error]]` 与 `IntoIter`；`next()` 返回 `Option[Result[DirEntry, io.Error]]`，跳过 `.` 和 `..`，顺序不保证。副本共享游标与 EOF，读取串行化；等待游标的读者恢复时必须重新检查关闭状态。关闭请求先禁止新读取，已经取得操作租约的读取结束后才执行底层关闭；尚未取得游标的等待者不能越过关闭状态开始新的原生读取。EOF 后保持 `None`，关闭后读取返回 `Some(Err(Closed))`，即使此前已经到达 EOF 也一样。`DirEntry.path()`、`file_name()` 返回路径与名称快照，后续目录读取或关闭不改变已返回的名称；内部缓冲容量不足不应悄悄跳过尚未交付的目录项。`metadata()` 重新查询且不跟随链接。File、ReadDir 和复制出来的 OS handle 都按 Adaptive Resource Leasing 管理。regular file 和无法由 poller 异步化的文件系统操作经过有界 `BlockingBridge`；worker、system stack、bridge frame、waiter 和排队 payload受 runtime tuning profile 与 memory pressure 约束，队列饱和时挂起调用协程，不创建额外无界 OS thread。
+
+文件操作的原生缓冲、请求状态和资源控制存储必须计入 runtime 管理内存，并与堆、协程栈及 runtime 辅助映射采用相同的平台计费口径。预留地址空间不等于已提交内存；提交失败不增加 committed，复用已提交页不重复计费，文件分类小计不能与总量再次相加。尚未提交给 native worker 的文件请求在观察到取消后须退出 admission 等待并返回 `Cancelled`，不应为了取消等待无关 worker 完成；退出不消耗 worker 额度，剩余等待者的顺序保持不变。取消请求不能提前扣减仍被 native worker 使用的缓冲。确认线程退出的宿主等待失败、或 runtime 持有的线程句柄无法回收时属于 runtime failure；不得将失败当作普通 pending，也不得发布完成并复用请求存储。原生 worker 栈应随实际需求建立，空闲栈可以缓存复用；压力回收必须先确认相应线程已退出且该栈未被新请求取得，不能仅凭取消标志释放。自然退出排空后，已登记的文件原生映射须全部归还，不能仅依靠进程结束回收来掩盖账目残留。
 
 ## 网络
 
@@ -886,6 +894,8 @@ fn sleep(duration: Duration)
 fn sleep_cancel(duration: Duration, cancel: &CancelToken)
 ```
 
+Duration 提供 `from_secs(uint)`、`from_millis(uint)`、`from_nanos(uint)`，以及 `as_secs() uint`、`subsec_nanos() uint`、`as_nanos() u128`、`is_zero() bool`；秒与不足一秒的纳秒分开保存，转为总纳秒不会因 uint 乘法溢出而丢失时长。`RuntimeStats.gc_pause_total` 使用同一 Duration 类型。
+
 Instant 的比较和相减只对同一进程产生的值定义；不同进程或反序列化值不能互相比较。SystemTime 的 duration_since 在 earlier 晚于当前值时返回 ClockWentBackward，不把墙钟回拨伪装成负 Duration。Duration 不含时区、日历或闰秒；Gregorian 日历和 leap second 不进入稳定语义。sleep(0) 立即返回，正 duration 至少等待该时长；sleep_cancel 被取消时返回 Cancelled，取消不会撤销已经完成的等待。timeout 是带 CancelToken 的操作组合器：它在 deadline 到期时取消本次操作并返回 TimedOut；操作已经在线性化点完成则返回操作结果，超时不强制终止外部资源，调用方必须使用操作自身的取消契约。
 
 ## 运行时控制与信号订阅
@@ -982,7 +992,7 @@ fn root_publish[T](place: T, value: T)
 
 整条存储及其 GC 混合写屏障位于 `NoSafepointRegion` 内，原因分别为 `OwnershipPublish` 与 `RootPublish`。需要写屏障时，区域外的 `BarrierReserve` 保证处理器屏障 buffer 有足够 shade 与 card-mark 额度，区域内只允许不带 refill slow edge 的 `GcWriteBarrierReserved`。这两个原语不建立 happens-before，不替代普通赋值或同步操作，也不得写进 asm 模板；调用方不能借此构造任意无 safepoint 区域。
 
-`RuntimeStats` 是逐字段快照。`stack_reserved_bytes`、`stack_committed_bytes`与`stack_live_bytes` 分别观察地址 reservation、已提交宿主页和 live coroutine逻辑 stack容量，三者会因亚页共享、cache和decommit而不同；`dirty_cpu_active` 是当前执行 native work的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待 dirty 额度的调用数。`blocking_bridge_active` 是已取得 BridgeCredit 并执行普通 blocking native 的调用数，`blocking_bridge_waiting` 是 admission waiter 或已发布普通 bridge roots但尚未取得 credit 的调用数，`blocking_bridge_workers` 不超过 `max_blocking_workers`，`blocking_bridge_queue_bytes` 包含 waiter metadata 与排队 payload。timer字段分别统计 active wheel/heap entries、已取消但尚未 compact 的 entries与 overflow heap/runtime slab bytes。上述统计会随并发调度立即变化，不提供取消 native work、强杀线程、固定调度顺序或固定回收时刻的能力。
+`heap_committed_bytes` 是 managed heap 数据页的提交量，包含块内未使用页和大对象对齐开销；它与 `runtime_committed_bytes` 分开报告，但两者之和用于 runtime memory limit。`stack_reserved_bytes`、`stack_committed_bytes`与`stack_live_bytes` 分别观察地址 reservation、已提交宿主页和 live coroutine逻辑 stack容量，三者会因亚页共享、cache和decommit而不同；`dirty_cpu_active` 是当前执行 native work的数量，`dirty_cpu_waiting` 是已发布 bridge roots但等待 dirty 额度的调用数。`blocking_bridge_active` 是已取得 BridgeCredit 并执行普通 blocking native 的调用数，`blocking_bridge_waiting` 是 admission waiter 或已发布普通 bridge roots但尚未取得 credit 的调用数，`blocking_bridge_workers` 不超过 `max_blocking_workers`，`blocking_bridge_queue_bytes` 包含 waiter metadata 与排队 payload。timer字段分别统计 active wheel/heap entries、已取消但尚未 compact 的 entries与 overflow heap/runtime slab bytes。上述统计会随并发调度立即变化，不提供取消 native work、强杀线程、固定调度顺序或固定回收时刻的能力。
 
 `std.signal` 把普通 OS 终止通知显式交给用户。没有订阅者时遵循目标 OS 默认动作；订阅不会自动取消根协程、触发 panic 或等待其它用户协程。fatal signal、`SIGKILL`、`SIGSTOP` 和 Windows 不可拦截的同步 fault 不在订阅集合中。
 

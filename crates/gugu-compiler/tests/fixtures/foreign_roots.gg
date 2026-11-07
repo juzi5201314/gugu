@@ -1,0 +1,9 @@
+#[repr(C)] struct Large { a: uint, b: uint, c: uint }
+unsafe extern "C" fn ordinary(a: Large, b: Large, c: Large, d: Large, e: Large, f: Large, g: Large) Large
+#[ffi(dirty_cpu)] unsafe extern "C" fn dirty(a: Large, b: Large, c: Large, d: Large, e: Large, f: Large, g: Large) Large
+fn main() { unsafe {
+    let value = Large { a: 1, b: 2, c: 3 }
+    let first = ordinary(value, value, value, value, value, value, value)
+    let second = dirty(first, first, first, first, first, first, first)
+    if second.a != 1 { panic("foreign result") }
+} }

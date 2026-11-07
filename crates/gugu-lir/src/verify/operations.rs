@@ -7,6 +7,9 @@ use crate::body::{
 use crate::gir::body::{CallKind, MemoryOrdering};
 use std::collections::BTreeSet;
 
+#[cfg(test)]
+mod foreign_tests;
+
 pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
     for instruction in &body.instructions {
         let args: Vec<_> = body
@@ -146,12 +149,21 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && r == [Type::Ptr]
                     && results[0].provenance == Some(Provenance::GcHeap)
             }
-            Op::SharedAccessBegin { .. } => a == [Type::Ptr] && r.is_empty(),
-            Op::SharedAccessEnd { .. } | Op::ScopedViewEnd { .. } => a.is_empty() && r.is_empty(),
-            // 共享字段屏障不带参数与结果：地址与新值留在它关联的 Store 里，token 与 permit
-            // 由 shared access verifier 与 region 生命周期 verifier 交叉检查。
+            Op::SharedAccessBegin { .. } => {
+                a == [Type::Ptr]
+                    && r == [Type::Ptr]
+                    && args[0].provenance == Some(Provenance::SharedHandle)
+                    && results[0].provenance == Some(Provenance::GcHeap)
+            }
+            Op::SharedAccessEnd { .. } => {
+                a == [Type::Ptr]
+                    && r.is_empty()
+                    && args[0].provenance == Some(Provenance::SharedHandle)
+            }
+            Op::ScopedViewEnd { .. } => a.is_empty() && r.is_empty(),
+            // 共享字段屏障携带字段地址与旧新引用；token 与 permit 仍由 guard verifier 校验。
             Op::SharedFieldBarrier { store, token } => {
-                a.is_empty()
+                a == [Type::Ptr; 3]
                     && r.is_empty()
                     && *token != 0
                     && store.index() < body.instructions.len()
@@ -161,7 +173,7 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                 token,
                 permit,
             } => {
-                a.is_empty()
+                a == [Type::Ptr; 3]
                     && r.is_empty()
                     && *token != 0
                     && store.index() < body.instructions.len()
@@ -620,18 +632,15 @@ fn platform_call_valid(
                 && results[0].ty == Type::Ptr
                 && results[0].provenance == Some(Provenance::Raw)
         }
-        Kind::Commit => {
+        Kind::Commit | Kind::Decommit => {
             args.len() == 1
                 && results.len() == 1
                 && results[0].ty == Type::I64
                 && results[0].provenance.is_none()
         }
-        Kind::Decommit
-        | Kind::Release
-        | Kind::ProtectGuard
-        | Kind::Unprotect
-        | Kind::Zero
-        | Kind::HugePageHint => args.len() == 1 && results.is_empty(),
+        Kind::Release | Kind::ProtectGuard | Kind::Unprotect | Kind::Zero | Kind::HugePageHint => {
+            args.len() == 1 && results.is_empty()
+        }
         Kind::SetDumpPolicy => args.len() == 2 && results.is_empty(),
     }
 }
@@ -655,7 +664,11 @@ fn runtime_machine_call_valid(
         // (restore, hot, processor) 单向恢复入口，不保存可恢复 PC。
         Kind::ContextRestore => args.len() == 3 && results.is_empty() && args.iter().all(pointer),
         // 当前协程 slot 指针以机器字返回，Gugu 侧用 `transmute` 取得类型化指针。
-        Kind::CurrentSlot => args.is_empty() && results.len() == 1 && word(&results[0]),
+        Kind::CurrentSlot
+        | Kind::MonotonicNanos
+        | Kind::CageControl
+        | Kind::CallbackControl
+        | Kind::ThreadId => args.is_empty() && results.len() == 1 && word(&results[0]),
         // 终止码是无符号机器字；不返回。
         Kind::ProcessExit => args.len() == 1 && results.is_empty() && word(&args[0]),
         // `(fd, data, len)` 写出报告字节，返回写出字节数。
@@ -670,8 +683,15 @@ fn runtime_machine_call_valid(
         // 无实参，返回编译器生成的只读 `GcImageConfig` 地址（机器字）。
         Kind::GcConfig => args.is_empty() && results.len() == 1 && word(&results[0]),
         // 单个请求指针实参；返回 dispatcher 的状态字。
-        Kind::GcEnter => {
+        Kind::GcEnter | Kind::FsPoll | Kind::StackReadWord => {
             args.len() == 1 && results.len() == 1 && word(&args[0]) && word(&results[0])
+        }
+        Kind::StackCopyRaw => args.len() == 4 && args.iter().all(word) && results.is_empty(),
+        Kind::CallbackQueue => {
+            args.len() == 3 && args.iter().all(word) && results.len() == 1 && word(&results[0])
+        }
+        Kind::FsStart => {
+            args.len() == 2 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
     }
 }
@@ -719,18 +739,19 @@ fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
         return false;
     }
     if call.kind != CallKind::Managed
-        && args.iter().chain(results).any(|kind| {
-            matches!(
-                kind.provenance,
-                Some(
-                    Provenance::GcHeap
-                        | Provenance::GcInterior
-                        | Provenance::SharedHandle
-                        | Provenance::CompressedRef
-                        | Provenance::Stack
-                )
-            )
-        })
+        && (args.iter().enumerate().any(|(index, kind)| {
+            kind.provenance.is_some_and(Provenance::managed)
+                || kind.provenance == Some(Provenance::Stack)
+                    && !call
+                        .by_value
+                        .iter()
+                        .any(|(parameter, _, _)| *parameter as usize == index)
+                    && !call
+                        .sret
+                        .is_some_and(|(parameter, _, _)| parameter as usize == index)
+        }) || results
+            .iter()
+            .any(|kind| kind.provenance.and_then(Provenance::root_kind).is_some()))
     {
         return false;
     }
@@ -746,6 +767,15 @@ fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
             call.may_allocate,
             call.captures_arguments,
         ) != effects
+        {
+            return false;
+        }
+        if runtime == RuntimeCall::ForeignCopy
+            && (args.len() != 3
+                || !results.is_empty()
+                || args[0].ty != Type::Ptr
+                || args[1].ty != Type::Ptr
+                || args[2] != ValueType::scalar(Type::I64))
         {
             return false;
         }
@@ -767,6 +797,26 @@ fn call_valid(call: &Call, args: &[ValueType], results: &[ValueType]) -> bool {
         {
             return false;
         }
+    }
+    let mut end = 0;
+    if call.kind == CallKind::Managed && !call.foreign_arguments.is_empty() {
+        return false;
+    }
+    for group in &call.foreign_arguments {
+        if group.first < end
+            || group.lanes == 0
+            || group.bytes == 0
+            || !group.align.is_power_of_two()
+        {
+            return false;
+        }
+        let Some(next) = group.first.checked_add(group.lanes) else {
+            return false;
+        };
+        if next as usize > args.len() {
+            return false;
+        }
+        end = next;
     }
     if call.by_value.iter().any(|(index, _, _)| {
         args.get(usize::try_from(*index).expect("参数编号"))

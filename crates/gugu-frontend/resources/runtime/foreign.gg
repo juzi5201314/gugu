@@ -1,0 +1,75 @@
+//! C 外调：按值副本位于 raw 包；普通与 dirty 分别取得各自 admission 额度。
+use std.runtime.fs_platform as bridge
+use std.runtime.pinning as pinning
+use std.runtime.heap.{heap_word, heap_store_word, heap_fail, copy_bytes}
+use std.runtime.compression as compression
+use std.runtime.counters as counters
+
+/// 原生按值临时副本；不持有 native 地址租约，复制过程不触发 GC。
+pub fn foreign_copy(destination: *(), source: *(), bytes: uint) { unsafe {
+    let source = std.mem.transmute[*(), uint](source)
+    let destination = std.mem.transmute[*(), uint](destination)
+    let cage = compression.contains(source)
+    if cage {
+        let control = std.runtime.cage_control()
+        let offset = source - heap_word(control + 8)
+        if bytes > heap_word(control + 16) - offset {
+            counters.add(counters.FOREIGN_REJECTIONS, 1)
+            heap_fail()
+        };
+    }
+    copy_bytes(destination, source, bytes)
+    if cage { counters.add(counters.FOREIGN_COPIES, 1) }
+} }
+
+/// frame 为 stack_high 相对深度，任何普通调用或栈增长后仍有效。
+pub fn foreign_dispatch(frame: uint, bytes: uint, fixups: uint, count: uint) { dispatch(frame, bytes, fixups, count, 0) }
+pub fn foreign_dirty_dispatch(frame: uint, bytes: uint, fixups: uint, count: uint) { dispatch(frame, bytes, fixups, count, 1) }
+fn dispatch(frame: uint, bytes: uint, fixups: uint, count: uint, dirty: uint) { unsafe {
+    let total = bytes
+    let index: uint = 0
+    while index < count {
+        let length = std.runtime.stack_read_word(frame - fixups - index * 32 - 16)
+        if length > ~uint(0) - 15 { heap_fail() }
+        let aligned = (length + 15) / 16 * 16
+        if total > ~uint(0) - aligned { heap_fail() }
+        total = total + aligned
+        index = index + 1
+    }
+    let packet = bridge.raw_allocate(total)
+    std.runtime.stack_copy_raw(frame, packet, bytes, 0)
+    let cursor = bytes
+    index = 0
+    while index < count {
+        let record = packet + fixups + index * 32
+        let slot = heap_word(record)
+        let depth = heap_word(record + 8)
+        let length = heap_word(record + 16)
+        if heap_word(record + 24) == 2 {
+            if !pinning.foreign_save(depth) { bridge.raw_free(packet, total)
+                heap_fail() };
+        } else {
+            if heap_word(record + 24) == 0 { std.runtime.stack_copy_raw(depth, packet + cursor, length, 0) }
+            heap_store_word(packet + slot, packet + cursor)
+            cursor = cursor + (length + 15) / 16 * 16
+        }
+        // native 仅获得值副本或已验证裸地址，原始描述位置在提交前清除。
+        heap_store_word(record + 8, 0)
+        index = index + 1
+    }
+    let result = bridge.native_call(~uint(0), packet, dirty, 0, 0, 0, 0, 0, 0, 0)
+    if result.error != 0 { bridge.raw_free(packet, total)
+        heap_fail() }
+    heap_store_word(heap_word(std.runtime.current_slot() + 48) + 360, heap_word(packet + 160))
+    std.runtime.stack_copy_raw(frame - 128, packet + 128, 40, 1)
+    index = 0
+    while index < count {
+        let record = packet + fixups + index * 32
+        if heap_word(record + 24) == 1 {
+            let depth = std.runtime.stack_read_word(frame - fixups - index * 32 - 8)
+            std.runtime.stack_copy_raw(depth, heap_word(packet + heap_word(record)), heap_word(record + 16), 1)
+        }
+        index = index + 1
+    }
+    bridge.raw_free(packet, total)
+} }

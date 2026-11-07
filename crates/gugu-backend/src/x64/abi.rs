@@ -131,6 +131,7 @@ pub fn classify_signature(signature: &Signature) -> Result<AbiLayout, LoweringEr
         &signature.results,
         sret,
         &signature.by_value,
+        &[],
         Convention::Internal,
         None,
         None,
@@ -167,6 +168,7 @@ pub fn classify_call(call: &Call, target: TargetName) -> Result<AbiLayout, Lower
         &call.results,
         call.sret,
         &call.by_value,
+        &call.foreign_arguments,
         convention,
         callee,
         dispatch,
@@ -295,6 +297,7 @@ fn classify(
     results: &[ValueType],
     sret: Option<(u32, u64, [u8; 32])>,
     by_value: &[(u32, [u8; 32], u64)],
+    groups: &[crate::lir::body::ForeignArgument],
     convention: Convention,
     callee: Option<u32>,
     dispatch: Option<Dispatch>,
@@ -303,10 +306,57 @@ fn classify(
     let sret_index = sret.map(|(index, _, _)| index);
     let mut slots = Slots::new(convention);
     let mut arguments = Vec::with_capacity(parameters.len());
+    let mut group_index = 0;
+    let mut stack_until = 0;
+    let mut stack_group_end = 0;
     for (index, ty) in parameters.iter().enumerate() {
         let index = u32::try_from(index).expect("参数下标适配 u32");
+        if let Some(group) = groups.get(group_index) {
+            if group.first == index {
+                let end = index
+                    .checked_add(group.lanes)
+                    .ok_or(LoweringError::InvalidOperands)?;
+                let lanes = parameters
+                    .get(index as usize..end as usize)
+                    .ok_or(LoweringError::InvalidOperands)?;
+                if convention == Convention::SysV {
+                    let floats = lanes.iter().filter(|ty| is_float(**ty)).count();
+                    let integers = lanes.len() - floats;
+                    if group.memory
+                        || integers + slots.integer > SYSV_INTEGER.len()
+                        || floats + slots.float > INTERNAL_FLOAT.len()
+                    {
+                        slots.stack = slots
+                            .stack
+                            .checked_add(group.align.max(8) - 1)
+                            .ok_or(LoweringError::InvalidOperands)?
+                            & !(group.align.max(8) - 1);
+                        stack_until = end;
+                        stack_group_end = slots
+                            .stack
+                            .checked_add(
+                                group
+                                    .bytes
+                                    .max(8)
+                                    .checked_add(7)
+                                    .ok_or(LoweringError::InvalidOperands)?
+                                    & !7,
+                            )
+                            .ok_or(LoweringError::InvalidOperands)?;
+                    }
+                }
+                group_index += 1;
+            }
+        }
         let by_address = by_value.iter().any(|(parameter, _, _)| *parameter == index);
-        let value = if Some(index) == sret_index {
+        let value = if index < stack_until {
+            AbiValue {
+                index,
+                ty: *ty,
+                slot: Some(slots.push(super::lower::stack_piece_bytes(ty.ty))),
+                indirect: false,
+            }
+        } else if Some(index) == sret_index {
             // 隐藏返回指针复用该参数的位置：caller 必须真正把指针装进第一个整数槽。
             AbiValue {
                 index,
@@ -326,6 +376,9 @@ fn classify(
             classify_parameter(index, *ty, by_address, &mut slots)
         };
         arguments.push(value);
+        if index + 1 == stack_until {
+            slots.stack = slots.stack.max(stack_group_end);
+        }
     }
     Ok(AbiLayout {
         arguments,

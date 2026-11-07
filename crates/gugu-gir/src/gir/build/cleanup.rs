@@ -50,7 +50,7 @@ impl Builder<'_> {
         if actions.is_empty() {
             return Ok(self.terminal_block(chain, destination));
         }
-        let key = (chain, actions.to_vec());
+        let key = (chain, actions.to_vec(), destination);
         if let Some(&block) = self.intern.get(&key) {
             return Ok(block);
         }
@@ -160,7 +160,14 @@ impl Builder<'_> {
             }
             SavedCleanup::Body(expr) => {
                 let expr = *expr;
-                let _ = self.emit_expr(expr)?;
+                let locals = self.expression_locals.clone();
+                let places = self.expression_places.clone();
+                self.expression_locals.fill(None);
+                self.expression_places.fill(None);
+                let result = self.emit_expr(expr);
+                self.expression_locals = locals;
+                self.expression_places = places;
+                result?;
                 Ok(())
             }
         }

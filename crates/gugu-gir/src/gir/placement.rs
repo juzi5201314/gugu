@@ -15,7 +15,7 @@ use crate::semantics::query::restore_errors;
 use crate::{Diagnostic, SourceMap};
 use serde::{Deserialize, Serialize};
 
-pub const PLACEMENT_SCHEMA: u32 = 3;
+pub const PLACEMENT_SCHEMA: u32 = 4;
 
 /// export summary 位：逃逸、别名、资源、FFI、发布、未知、可转移与被 send 读取。上界 8 位。
 pub struct ExportFlags;
@@ -305,7 +305,7 @@ fn place_local(
     export: u8,
     body_unknown: bool,
 ) -> (PlacementKind, ProofStatus) {
-    if class.has_resource() && !class.has_identity() && !class.has_cow() {
+    if class.has_resource() && address_taken && export & ExportFlags::ESCAPE != 0 {
         return (PlacementKind::Resource, ProofStatus::Proved);
     }
     let unknown = body_unknown || export & ExportFlags::UNKNOWN != 0;
@@ -500,6 +500,11 @@ fn seed_assign(
             kind: AggregateKind::Closure(definition) | AggregateKind::Coroutine(definition),
             ..
         } => mark_captures(module, body, *definition, flags),
+        Rvalue::Aggregate { operands, .. } => {
+            for operand in operands {
+                connect(body, table, dest, operand, false, edges);
+            }
+        }
         _ => {}
     }
 }

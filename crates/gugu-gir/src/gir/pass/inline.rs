@@ -19,8 +19,9 @@ const INLINE_MAX_COST: u32 = 32;
 pub fn run(
     editor: &mut Editor,
     _module: &hir::Module,
-    callees: &BTreeMap<[u8; 32], &GirBody>,
+    callees: &BTreeMap<[u8; 32], &crate::gir::concrete::ConcreteBody>,
     calls: &[ConcreteCall],
+    types: &[crate::gir::concrete::TypeLayout],
 ) -> Result<Outcome, Diagnostic> {
     let mut inlined = 0;
     for block in editor.live_blocks() {
@@ -53,12 +54,47 @@ pub fn run(
         let Some(callee) = callees.get(&target) else {
             continue;
         };
-        if cost(callee) > INLINE_MAX_COST {
+        if cost(&callee.body) > INLINE_MAX_COST {
             continue;
         }
-        let Some(plan) = plan(callee) else {
+        let Some(mut plan) = plan(&callee.body) else {
             continue;
         };
+        let type_map: Vec<_> = callee
+            .types
+            .iter()
+            .map(|ty| {
+                types
+                    .iter()
+                    .position(|candidate| candidate.key == ty.key)
+                    .map(|index| hir::TypeId(index as u32))
+            })
+            .collect();
+        let mut body = callee.body.clone();
+        if body
+            .locals
+            .iter()
+            .any(|local| type_map[local.ty.index()].is_none())
+            || body
+                .constants
+                .iter()
+                .any(|value| type_map[value.ty.index()].is_none())
+        {
+            continue;
+        }
+        for local in &mut body.locals {
+            local.ty = type_map[local.ty.index()].expect("已检查类型映射");
+        }
+        for value in &mut body.constants {
+            value.ty = type_map[value.ty.index()].expect("已检查类型映射");
+        }
+        for kind in &mut plan {
+            if let StatementKind::ValueAction { descriptor, .. } = kind {
+                *descriptor = type_map[descriptor.index()]
+                    .ok_or_else(|| crate::gir::gir_error("内联 descriptor 缺少类型映射", None))?;
+            }
+        }
+        let callee = &body;
         let source = editor.block(block).expect("活跃 block").source.clone();
         let mut map: Vec<Option<LocalId>> = Vec::with_capacity(callee.locals.len());
         map.push(Some(destination.local));

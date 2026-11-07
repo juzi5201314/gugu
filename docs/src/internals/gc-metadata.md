@@ -72,7 +72,9 @@ owner token、region generation、capacity、used bytes、export summary、activ
 lease 和 reset state。region payload 只容纳已由 `EscapeAndPlacement` 证明为当前 coroutine
 turn 私有的 managed allocation；它不进入普通 mark bitmap，也不能包含必须独立 release
 的 ResourceCell。region 的 object-start metadata 仍按 concrete `TypeId` 记录，使 promote
-和验证可以使用同一 trace/value program。
+和验证可以使用同一 trace/value program。当前控制区为 384 字节：104 为 next、112 为 major epoch、120 为活动对象 pin 数，128 起的 256 字节保存 32 KiB 区域的 object-start 位图。coordinator+176 保存登记链；快慢分配都在同一分配操作中发布对象起点，reset 和 transfer 均要求 pin 数为零。
+
+minor 扫描登记区域的对象字段并更新年轻引用。major 按内部根解析精确对象，按 epoch 保留所在区域并将其对象加入同一 trace 工作列表；当前分配区和活动 transfer/pin 区域同样保活。无根、无门禁且已退役的区域先从登记链摘除，再整体释放数据与控制页，分别扣减 heap 与非 heap committed，并撤销 region payload 小计。字段屏障按登记范围识别区域，不推算不存在的 arena metadata。
 
 region state 只能按下列方向转换：
 
@@ -94,13 +96,13 @@ reset 或复用，两侧 owner 账本在接收方采纳后才一起移动。
 
 ### LocalHeap arena 与 LargeMapping {#localheap-large-mapping}
 
-LocalHeap 的数据段按 `arena_bytes` 对齐；当前记录布局的 side metadata 为 55,576 字节，随后是每个 block 64 字节的 `HeapBlockRecord`，最后是独立的 `LargeMappingRecord` 表。表容量固定为 64，每条记录 32 字节：`base:u64`、`payload:u64`、`bytes:u64`、`generation:u32` 和 `state:u32`。这些字段是 range identity、payload identity 与生命周期账本，不是可跨 safepoint 保存的用户引用；表不参加普通 block 的 object-start、mark 或 line-live 位图。
+LocalHeap 的数据段按 `arena_bytes` 对齐；当前记录布局的 side metadata 为 55,576 字节，随后是每个 block 64 字节的 `HeapBlockRecord`，最后是独立的 `LargeMappingRecord` 表。表容量固定为 64，每条记录 48 字节：`base:u64`、`payload:u64`、`bytes:u64`、`generation:u32`、`state:u32`、`mapped_bytes:u64` 和 `mark_epoch:u64`。这些字段是 range identity、payload identity 与生命周期账本，不是可跨 safepoint 保存的用户引用；表不参加普通 block 的 object-start、mark 或 line-live 位图。
 
 请求的 `header + align - 1 + payload_bytes` 超过单个 Immix block，或 `align` 超过配置的 `large_align_limit` 时，分配器进入 LargeMapping slow path。它以平台页为最小粒度向上取整总范围，按 `max(align, page_bytes)` reserve 并 commit 整段，在 payload 前写入统一的 16 字节 object header、清零 payload，再以 release 顺序将记录状态置为 `ACTIVE`。`payload = align_up(base + header, mapping_align)`；header 的 `payload_size_or_forward` 保存实际 payload 字节数，不能以 block size 或类型静态 size 替代运行时请求。空间或记录槽不足走既有 runtime fatal，不截断、回退到普通 block 或返回伪造地址。
 普通 block slow path 通过 `gc_refill_line(kind, payload_bytes, align, flags)` 取得已对齐 run 起点：先检查当前 TLAB 的 `cursor/limit`，只有请求放不下时才提交并打开下一个 block，同时回写 processor 的 TLAB。返回 0 只表示没有可用 block 或请求不能容纳；`gc_alloc_slow` 不得把它解释成可继续写入的伪地址。
 
 镜像当前还提供 `gc_move_one(root)` 这一受限复制原语：读取真实 header 的 type/size，按请求字节数复制 payload，先在新对象完成初始化，再以 forwarding 标志和新 payload 地址发布旧 header；重复命中直接返回既有 forwarding。LargeMapping 不伪装成普通 block 搬迁，调用方必须走其独立 range 生命周期。该原语只负责一个对象的复制与 forwarding 发布，root/field 的回写和 cycle 级 work/credit 仍由 collector 协议负责。
-当前解析入口从 processor 的 TLAB cursor 反推当前 arena，按稳定槽序扫描 `ACTIVE` 记录；只有 `payload <= address < payload + bytes` 的地址解析为该 mapping 的 payload，其它地址返回空。大对象不能通过普通 block candidate 或 line return 单独释放；后续归还必须继续使用 `LargeMappingReturn` 的 span/generation/exactly-once 门禁。页提交 owner 仍记入物理 committed ledger，mapping 表本身位于 arena side metadata 的已提交记录区。
+收集器通过 nursery/old 登记表解析 `payload <= address < payload + bytes` 的首地址与内部引用，按本轮 epoch 去重并加入同一 descriptor 工作列表。minor 扫描有效大对象字段以更新年轻引用，major 只标记根图可达的大对象；pin 与普通对象共用 allocation 租约表。major 在字段遍历闭合后，把无本轮标记且无固定租约的记录撤销，再以登记的实际 `mapped_bytes` 整体释放映射，扣减 reservation、committed 和 heap 分区，不影响文件小计。重复扫描跳过已撤销记录；槽重用递增 generation。大对象不能通过普通 block candidate 或 line return 单独释放。字段写屏障先查询已登记的大对象范围，命中时不读取地址附近假定的 arena metadata，也不生成普通 block 卡片；其年轻字段由 minor 的大对象表扫描更新。
 
 ### 镜像执行边界与 block 账本 {#image-execution-boundary-block-ledger}
 
@@ -113,6 +115,45 @@ compiler 侧只保留 `local_heap_schema`、header 编码、metadata section、d
 forwarder lease、pin、resource 与 candidate 全部清零后才可回到 `Free`。major sweep 逐 object
 检查 object-start 与 mark bitmap，再重建 line-live、page-cover、card 与 block state；活对象
 不因 block 扫描顺序改变，未标记对象只在 forwarding/candidate 门禁闭合后清除。
+每次 major 进入时必须先清空 coordinator 的 worklist count，再开始本轮 mark epoch 和根遍历；
+minor 留下的扫描项以及上一轮 major 的对象地址都不是本轮根。固定三对象回归执行真实
+major 根遍历、descriptor trace、mark bitmap 与 sweep：可达自环容器保留文件资源，
+不可达文件触发一次终结；撤销全部强根后的下一轮回收容器内文件，第三轮不重复终结。
+根记录由真实 `gc_walk_roots` 生成：权威编码器构造两帧栈图，按非零加载偏移解析 section
+与代码基址，首帧消费 suspend-resume 点的寄存器根和初始化门控槽，调用者按 call-return 点
+枚举内部指针根，直到返回地址落在函数表外。未登记字和失效门控槽即使残留资源地址也不参与
+保活；容量不足时 `needed` 保留完整根数，截断的 `written` 不交给 GC。类型段、帧和寄存器
+保存区由夹具提供，关闭提交与平台释放由钩子控制；此项覆盖扫描器的 LIR 执行。
+实际文件 API 镜像另经 `decode_tables` 检查：存在带根的 CallReturn 图，CallReturn/Suspend
+图的五类寄存器掩码均为零，符合调用点强制根落栈的分配规则。因此 `gc_dispatch` 扫描
+CallReturn 帧时传空寄存器保存区；合成 SuspendResume 寄存器根用例验证 walker 的能力，
+不表示当前文件镜像使用该保存协议。单 managed owner 的活跃协程通过 processor+4000 注册，
+启动主协程与子协程入队前登记，完成后摘除。dispatcher 合并发起者和动态根后，继续枚举其它
+已启动协程保存的 context.rsp/rip，以 CallReturn 栈图追加根；未启动协程的入口包由动态根表保活，
+不扫描入口哨兵。追加复用原栈根缓冲，容量不足进入不变量失败，不接受截断根集合。
+固定暂停栈回归验证仅从另一协程栈可达的文件在 major 中保留，注销后下一轮才关闭；Join 结果根
+与栈登记独立。`gc_enter` 的同一生产指令序列在编码前执行确定性验证：
+发布 mutator RSP/R14、切换系统栈与 descriptor、传递 request/entry_rsp，dispatcher 钩子
+改写栈根并破坏易失寄存器后，入口重新加载 coordinator、恢复 RSP/R14，保留 R15 和返回
+状态；成功和非零状态都覆盖。该验证不执行宿主机器码，亦不声称测试了独立寄存器根保存协议。
+
+`std.mem.pin` 先经 `pin_prepare` 在系统栈完成一次 minor 提升，调用方安全引用在精确根图内回写，之后才转换地址并执行 `pin_acquire`。old arena 内首地址与内部地址解析为同一个对象，16 字节记录保存 payload 与嵌套计数；4 KiB 登记页通过 coordinator+168 的双向链管理，空页立即归还共同 provider，不能计入文件小计。对象首次取得租约时置 `CONTROL_PINNED`，最后释放清位；major 在用户根之外扫描活动 pin 记录并追踪字段。标准库 defer 在正常返回和 panic 展开时各走一次 release；清理重新读取安全引用槽，禁止提前把根寿命折叠为整数。静态和协程栈已有非移动存储，继续由原安全引用保持生命周期；TurnRegion、LargeMapping 与 ordinary old 对象共用显式 pin 租约。需求统计依据冻结 HIR 中 `std/runtime/pinning.gg` 的定义身份解析实际 acquire/release 实例，统计优化后 LIR 的普通调用、Invoke 与 TailCall；同名用户函数不计入。无生成方、无执行入口的 GIR/LIR Pin/Unpin 伪操作已移除。
+
+minor 在重置 nursery 之前 flush 当前 owner 的 card staging，按脏卡片覆盖的完整 old 对象运行同一 descriptor trace，并将新复制对象加入既有工作列表直到闭合。已进入 old 存储的 aging 对象也必须登记新写的年轻引用。卡片只在覆盖对象扫描后清零，不能仅清 staging 后就宣称消费完成；固定对象图回归验证 pinned 容器的新字段经 minor 搬迁后仍保持值，容器本身地址不变。
+
+x64 普通对象快分配在对象头写入之后、返回 payload 之前，用 arena 相对 header granule
+置 object-start 位；整个序列没有 safepoint。lowering revision 7 失效旧片段，侧元数据位图
+偏移与 Gugu 常量交叉校验。机器序列解释并装配回归覆盖位图字/块边界和 arena 尾部，
+置位保留其它对象的标志。慢分配与 collector 搬运继续使用同一位图。
+`gc_heap_live_bytes` 读取 nursery/old 的 object-start，跳过 forwarded 旧副本，累加载荷长度，
+并加入有效大对象记录的 payload 字节；同一 arena 不重复遍历。只读取置位对象头，空位不访问
+未提交数据页；不把页提交量、对象头和对齐间隙算作 payload。minor/major 完成后将观测写入
+coordinator+152。三对象真实 major 回归验证载荷 32→24→0，大对象回归验证 40000 字节
+载荷与更大的页提交量分开；采样不进行额外收集。TurnRegion 打开时先提交数据页再写对象头，
+数据归 heap 分区、控制记录归非 heap；快慢分配都累加实际 payload，区域控制+96 保存本区总量，
+processor 的区域载荷计数保留全部尚未 reset 的区域。reset 门禁通过后扣载荷并清本区计数，
+promote 保留载荷，已提交页不因逻辑 reset 被假装释放。机器快路径同时更新区域对象数，
+测试覆盖动态七字节载荷；实际 LIR 测试区分 384 字节控制描述符与一页物理计费。
 
 Gugu image 的 coordinator 以固定 worklist 和 owner credit 追踪标记收敛：根、barrier、
 MarkTicket 与 EdgeDelta 各自增加可追踪 credit，消费完成后归还；只有 worklist、已发布 batch、
@@ -127,6 +168,8 @@ cycle。`gc_image.gg` 通过 action key 的 `runtime_gc_case` 选择 Linux PIE �
 迁移只在 handle slot 的线性化点替换 current payload；旧 payload 在全部 access guard、
 pin、mark ticket 和 forwarding grace 结束前不能复用。generation 变化时旧 handle 进入
 `StaleHandle` verifier 路径，不能静默解析到复用对象。
+
+当前镜像执行体以 8 KiB 表页保存 64 个既有布局的 handle slot、独立的物理地址登记和 payload identity 记录；coordinator+184 为表链，+192 为单调表编号。共享 payload 走 LargeMapping 非移动分配，GC 复用同一 descriptor/mark/sweep，handle 根先 checked 解析，访问与初始化租约作为强根。映射实际回收后 slot 才进入 OwnedFree，下次复用推进 generation；过期 handle 不能按槽号访问新对象。`SharedAccessBegin` 返回载荷地址，`SharedAccessEnd` 显式携带同一 handle，成功 begin 更新共同 HANDLE_RESOLVES 计数。字段屏障验证当前访问租约，minor 扫描非移动映射字段。首个 pin 记录增加共享 slot 的 pin 门禁，最后一个释放同步清门禁。表+16 保存活跃/初始化 slot 数；空表计入共同 reclaimable 字节，复用时扣除，压力 sweep 先摘链再归还空表，两笔计数都只转换一次。
 
 `LocalHeap` 的 direct managed pointer 不经过 read barrier。只有 SharedHeap 的 handle
 resolve、compressed reference decode 或 forwarding guard 需要额外访问步骤；compiler
@@ -512,7 +555,7 @@ slab以 64 KiB页按 64、128、256、512、1024、2048、4096 byte class管理�
 
 block 身份是全局稠密的 `ManagedBlockId`（`descriptor * 64 + block`，arena 内下标只占低 6 位），`BlockRef` 在它之上再带 block generation：管理权转移不改变 payload 的 heap/arena 定位，消费端也必须按全局身份解析来源块，只带 arena 内下标的旧编码会被拒绝。arena 登记在世界级 `managed_arenas` 表里，每项记录 descriptor、heap owner、heap 内 arena 槽、extent arena id 与 arena 基址；`allocate_managed` 只在已登记且仍有空 block 的 arena 上分配，`commit_managed_block` 按调用方指定的 extent arena 提交 block，不再隐式落到「第一个 arena」。
 
-本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 5` 契约段（版本 5 相对 4 的变化：新增独立 `LargeMappingRecord` 表、固定大映射页粒度，并把 page-cover/object-start/mark 的运行期消费者接入分配与屏障路径；版本 4 相对 3 的变化：块状态目录扩为 `allocating`/`candidate`/`sweeping`/`evacuating`/`return-pending`/`owned-free`/`free`，归还入队位、large span 成员与 span 起止位置进入 `reserved`，块记录成为 managed extent 与归还门禁的唯一账本；版本 3 相对 2 的变化：块记录新增 `candidate_job` 绑定与候选绑定语义，lease 计数成为候选、扫描、迁移和 allocator 之间的共同门禁）。构造时继续以 arena/block/line/granule 常量推导 bitmaps、page-cover、card 与 side metadata 字节数，并由 source-layout verifier 逐字段拒绝漂移。
+本阶段的实现证据：`local_heap_schema.rs` 把上述常量固定成 `LOCAL_HEAP_SCHEMA = 6` 契约段（版本 6 新增实际映射长度与独立标记 epoch，统一大对象 pin、字段追踪和整映射释放；版本 5 相对 4 的变化：新增独立 `LargeMappingRecord` 表、固定大映射页粒度，并把 page-cover/object-start/mark 的运行期消费者接入分配与屏障路径；版本 4 相对 3 的变化：块状态目录扩为 `allocating`/`candidate`/`sweeping`/`evacuating`/`return-pending`/`owned-free`/`free`，归还入队位、large span 成员与 span 起止位置进入 `reserved`，块记录成为 managed extent 与归还门禁的唯一账本；版本 3 相对 2 的变化：块记录新增 `candidate_job` 绑定与候选绑定语义，lease 计数成为候选、扫描、迁移和 allocator 之间的共同门禁）。构造时继续以 arena/block/line/granule 常量推导 bitmaps、page-cover、card 与 side metadata 字节数，并由 source-layout verifier 逐字段拒绝漂移。
 
 ## trace descriptor
 
@@ -626,6 +669,8 @@ value program 用于编译器在 GIR 中展开语义复制、销毁、发布和 
 常见小类型直接在 GIR/LIR 中 inline value program；较大或多个调用点共用时调用 `copy_glue`/`drop_glue`/`publish_glue`。两条路径必须由同一个 value program 生成，不能维护第二份字段规则。glue 的 safepoint/effect 由 LIR 显式标注并有正常 stack map。
 
 不可达且仍含最后 resource lease 的对象进入受限 release queue 并保持到 descriptor 已执行；队列只运行 compiler/runtime 生成的 resource drop glue，不执行任意用户析构或 finalizer，不允许复活、分配、panic 或等待。同一对象最多排队一次，release 完成后才可回收。
+
+镜像内 `value_copy/drop/publish/forget/transfer`、`cow_snapshot` 与 resource glue 已绑定到 Gugu `value` 模块。解释器直接消费 80 字节 TypeRecord 的 value offset/length；零长度表示无动作。ResourceCell 的单 END 程序是资源叶，Acquire 增租约，Release 先清空槽再减租约，Forget 只清空槽。结构 wrapper 按当前模式选择前向或逆向动作，enum 只处理当前 tag。控制页登记在 owner 上，GC 释放最后租约只提交 close 队列；原生 close 完成后才能回收控制页，自然退出排空剩余登记。`finalize_resource` 跳过无资源标志及已 forwarding 的旧对象，先清除资源标志再执行 descriptor，重复访问不会再次释放。进程内 LIR 测试执行该入口、ResourceCell 叶程序、租约释放、完成发布、登记表摘除及 native_memory 账本扣减；测试提供固定类型段，并在最终平台释放处记录事件。该测试不代替整个 GC 可达性扫描或原生线程的验证。
 
 value glue 的符号也受后端的真实发射门禁约束：只有 lowering 实际发出 `CallTarget::Runtime` 或专用 value op 的入口才检查，不会因为 `RuntimeCall` 枚举中存在一个由 lowering 内联的名字而误报。未接管的 `value_*`、COW、resource、pin 和动态擦除入口必须留在显式迁移缺口清单；它们不是定义，不能被 bench 当作镜像运行期证明。实现接管时，入口必须绑定到 `GLUE_DEFS` 的 Gugu `Item`/machine `Fragment`，并同步移除缺口记录。
 

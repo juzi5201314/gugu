@@ -1,4 +1,7 @@
 use std.runtime.barrier.{barrier_init}
+use std.runtime.native_memory as mapping
+use std.runtime.counters as counters
+use std.runtime.compression as compression
 use std.runtime.heap.{copy_bytes, heap_boot, value_size}
 use std.runtime.trace.{trace_init}
 
@@ -74,7 +77,10 @@ pub const COROUTINE_COLD_RESULT_PUBLISHED_BIT: uint = 2
 pub const COROUTINE_COLD_RESULT_KIND_SHIFT: uint = 3
 pub const COROUTINE_COLD_RESULT_KIND_MASK: uint = 7
 /// 冷记录里结果字槽的偏移；结束写、Join 取，`take_result` 是该字的唯读取入口。
-pub const COROUTINE_COLD_RESULT_OFFSET: uint = 368
+pub const COROUTINE_COLD_COMPLETION_OFFSET: uint = 368
+pub const COROUTINE_COLD_RESULT_OFFSET: uint = 376
+pub const COROUTINE_COLD_JOIN_WAITER_OFFSET: uint = 512
+pub const COROUTINE_COLD_BYTES: uint = 576
 /// 结果区的字节数：子协程返回 ABI 只携带两个机器字，结果槽的上界就是它。
 ///
 /// 超过该上界的载荷需要子侧装箱（结果字退化成指向带描述符载荷对象的引用），属显式迁移缺口；
@@ -144,6 +150,86 @@ pub fn dynamic_root_retire(processor: uint, identity: uint) {
     }
 }
 
+pub const PROCESSOR_COROUTINE_REGISTRY_OFFSET: uint = 4000
+pub const PROCESSOR_RETIRED_STACKS_OFFSET: uint = 4008
+pub const RETIRED_STACK_SERVICE_BUDGET: uint = 8
+
+/// 只在系统栈调度入口调用；节点中的 hot 继续保留 Join 结果。
+pub fn trim_retired_stacks(processor: uint) {
+    if word(processor + mapping.RUNTIME_PRESSURE_STATE_OFFSET) == 0 { return }
+    let remaining = RETIRED_STACK_SERVICE_BUDGET
+    let budget = mapping.OWNER_DRAIN_BYTES
+    while remaining != 0 && budget != 0 {
+        let node = word(processor + PROCESSOR_RETIRED_STACKS_OFFSET)
+        if node == 0 { return }
+        let hot = word(node + 8)
+        if word(hot) != 16 { fail() }
+        let capacity = word(hot + 88)
+        if capacity > budget {
+            let low = word(hot + 80) - capacity
+            if mapping.decommit_retired_stack(low, budget) != 0 { return }
+            store_word(hot + 88, capacity - budget)
+            store_word(hot + 72, low + budget)
+            store_word(hot + 64, low + budget + 512)
+            return
+        }
+        budget = budget - capacity
+        let reserve: uint = 1073741824
+        if mapping.release_retired_stack(word(hot + 80) - reserve, reserve, capacity) != 0 { return }
+        store_word(hot + 64, 0)
+        store_word(hot + 72, 0)
+        store_word(hot + 80, 0)
+        store_word(hot + 88, 0)
+        store_word(processor + PROCESSOR_RETIRED_STACKS_OFFSET, word(node))
+        let storage = word(word(hot + 48) + 528)
+        if storage != 0 {
+            counters.remove(counters.CALLBACK_CACHE, 4096)
+            mapping.release_mapping(storage, 4096, 4096)
+        }
+        remaining = remaining - 1
+    }
+}
+
+
+/// 控制区只使用前缀；整页尾部可在原 reservation 内撤销提交。
+pub fn trim_control_cache(processor: uint) bool { unsafe {
+    let cursor = word(processor + 4048)
+    let end = word(processor + mapping.SCHEDULER_COMMITTED_END_OFFSET)
+    let first = (cursor + 4095) / 4096 * 4096
+    if end <= first { return true }
+    let bytes = if end - first > mapping.OWNER_DRAIN_BYTES { mapping.OWNER_DRAIN_BYTES } else { end - first }
+    let range = StackRange { base: end - bytes, bytes }
+    if mapping.decommit(std.mem.transmute[*StackRange, uint](std.ptr.addr_of(range))) != 0 { return false }
+    store_word(processor + mapping.SCHEDULER_COMMITTED_END_OFFSET, end - bytes)
+    end - bytes == first
+} }
+
+fn register_coroutine(processor: uint, hot: uint) {
+    let storage = word(word(hot + 48) + 528)
+    let node = if storage != 0 { storage + 960 } else { heap_alloc(processor, 16) }
+    store_word(node, word(processor + PROCESSOR_COROUTINE_REGISTRY_OFFSET))
+    store_word(node + 8, hot)
+    store_word(processor + PROCESSOR_COROUTINE_REGISTRY_OFFSET, node)
+}
+
+pub fn unregister_coroutine(processor: uint, hot: uint) uint {
+    let link = processor + PROCESSOR_COROUTINE_REGISTRY_OFFSET
+    let remaining = live_count(processor)
+    while word(link) != 0 && remaining != 0 {
+        let node = word(link)
+        if word(node + 8) == hot {
+            store_word(link, word(node))
+            store_word(node, word(processor + PROCESSOR_RETIRED_STACKS_OFFSET))
+            store_word(processor + PROCESSOR_RETIRED_STACKS_OFFSET, node)
+            return node
+        }
+        link = node
+        remaining = remaining - 1
+    }
+    fail()
+    0
+}
+
 /// 当前已发布的动态根条数；收集器与探针从这里进入。
 pub fn dynamic_root_count(processor: uint) uint = word(dynamic_root_table(processor) + DYNAMIC_ROOT_TABLE_COUNT_OFFSET)
 
@@ -163,6 +249,13 @@ pub fn heap_alloc(processor: uint, bytes: uint) uint {
     let aligned = cursor / 64 * 64
     let start = if aligned == cursor { cursor } else { aligned + 64 }
     if start + bytes > word(processor + 4056) { fail() }
+    let end = word(processor + mapping.SCHEDULER_COMMITTED_END_OFFSET)
+    if start + bytes > end {
+        let needed = (start + bytes + 4095) / 4096 * 4096
+        commit_stack(end, needed - end)
+        store_word(processor + mapping.SCHEDULER_COMMITTED_END_OFFSET, needed)
+        mapping.pressure_dirty(processor, 2)
+    }
     store_word(processor + 4048, start + bytes)
     start
 }
@@ -170,7 +263,7 @@ pub fn heap_alloc(processor: uint, bytes: uint) uint {
 fn commit_stack(base: uint, bytes: uint) {
     unsafe {
         let range = StackRange { base: base, bytes: bytes }
-        if std.platform.commit(std.mem.transmute[*StackRange, uint](std.ptr.addr_of(range))) != 0 { fail() }
+        if mapping.commit(std.mem.transmute[*StackRange, uint](std.ptr.addr_of(range))) != 0 { fail() }
     }
 }
 
@@ -187,7 +280,7 @@ fn zero_range(processor: uint, start: uint, end: uint) {
 
 fn map_span(bytes: uint) uint {
     unsafe {
-        let base = std.platform.reserve_aligned(bytes, uint(4096))
+        let base = mapping.reserve_aligned(bytes, uint(4096))
         if base == 0 { fail() }
         commit_stack(base, bytes)
         base
@@ -201,10 +294,13 @@ pub fn boot(processor: uint, state: uint, slot: uint, cold: uint, enter: uint) {
     unsafe {
         zero_range(processor, 64, 3520)
         zero_range(processor, 3552, 4096)
+        store_word(slot + 16, processor)
+        mapping.adopt_boot(processor, uint(1073741824), uint(65536), word(word(state + 760) + 8))
         let heap = map_span(1048576)
         // TLAB 不再是裸映射：由分配器建立真实 arena 并把 cursor/limit 指向首块的可分配范围。
         // TurnRegion 也不再是裸映射：cursor/limit 留 0，首次区域分配由 `gc_region_slow` 建立
         // 真实区域（容量取自配置的块字节数），快路径在 limit==0 时必然走慢路，不会写到空地址。
+        compression.cage_boot()
         heap_boot(processor)
         barrier_init(processor)
         trace_init(processor)
@@ -213,6 +309,11 @@ pub fn boot(processor: uint, state: uint, slot: uint, cold: uint, enter: uint) {
         store_word(processor + 4032, 1)
         store_word(processor + 4048, heap)
         store_word(processor + 4056, heap + 1048576)
+        store_word(processor + mapping.SCHEDULER_COMMITTED_END_OFFSET, heap + 1048576)
+        // 系统服务运行在启动线程原栈，由 OS 栈守卫约束；零检查界与 rt0 初始槽一致。
+        let system_slot = heap_alloc(processor, 128)
+        store_word(system_slot + 16, processor)
+        store_word(processor + 4088, system_slot)
         let roots = heap_alloc(processor, DYNAMIC_ROOT_TABLE_HEADER_BYTES + DYNAMIC_ROOT_CAPACITY * DYNAMIC_ROOT_RECORD_BYTES)
         store_word(roots, DYNAMIC_ROOT_CAPACITY)
         store_word(roots + DYNAMIC_ROOT_TABLE_COUNT_OFFSET, 0)
@@ -222,6 +323,7 @@ pub fn boot(processor: uint, state: uint, slot: uint, cold: uint, enter: uint) {
         store_word(slot + 16, processor)
         store_word(slot + 48, cold)
         store_word(slot, 1)
+        register_coroutine(processor, slot)
     }
 }
 
@@ -286,7 +388,7 @@ fn switch_out(hot: uint) {
         std.runtime.context_switch(
             std.mem.transmute[uint, *()](cold + 8),
             std.mem.transmute[uint, *()](state + 40),
-            std.mem.transmute[uint, *()](hot),
+            std.mem.transmute[uint, *()](word(processor + 4088)),
             std.mem.transmute[uint, *()](processor),
         )
     }
@@ -300,7 +402,7 @@ pub fn yield_now() {
         let processor = proc_of(hot)
         store_word(hot, 6)
         enqueue(processor, hot)
-        store_word(state_of(processor) + 688, 1)
+        store_word(state_of(processor) + 752, 1)
         switch_out(hot)
     }
 }
@@ -309,29 +411,57 @@ pub fn park_current() {
     unsafe {
         let hot = std.runtime.current_slot()
         store_word(hot, 8)
-        store_word(state_of(proc_of(hot)) + 688, 1)
+        store_word(state_of(proc_of(hot)) + 752, 1)
         switch_out(hot)
     }
 }
 
-fn prepare_child(processor: uint, code: uint, env: uint, trace: uint, result_kind: uint) uint {
+/// 回调没有用户 Join 句柄；退役且已结清根后可复用整页控制记录和原栈。
+fn reuse_callback(processor: uint) uint {
+    let link = processor + PROCESSOR_RETIRED_STACKS_OFFSET
+    let remaining = RETIRED_STACK_SERVICE_BUDGET
+    while word(link) != 0 && remaining != 0 {
+        let node = word(link)
+        let hot = word(node + 8)
+        if word(word(hot + 48) + 528) != 0 {
+            store_word(link, word(node))
+            counters.remove(counters.CALLBACK_CACHE, 4096)
+            return hot
+        }
+        link = node
+        remaining = remaining - 1
+    }
+    0
+}
+
+fn prepare_child(processor: uint, code: uint, env: uint, trace: uint, result_kind: uint, callback: bool) uint {
     unsafe {
         let reserve: uint = 1073741824
-        let capacity: uint = 65536
-        let stack_base = std.platform.reserve_aligned(reserve, uint(4096))
-        if stack_base == 0 { fail() }
-        let stack_high = stack_base + reserve
-        commit_stack(stack_high - capacity, capacity)
-        let slot = heap_alloc(processor, 128)
-        let cold = heap_alloc(processor, 512)
+        let reused = if callback { reuse_callback(processor) } else { uint(0) }
+        let storage = if callback { if reused != 0 { reused } else { map_span(4096) } } else { uint(0) }
+        let capacity = if reused != 0 { word(reused + 88) } else { uint(65536) }
+        let stack_high: uint = 0
+        if reused != 0 {
+            stack_high = word(reused + 80)
+            store_word(processor + mapping.STACK_LIVE_OFFSET, word(processor + mapping.STACK_LIVE_OFFSET) + capacity)
+        } else {
+            let stack_base = mapping.reserve_stack(reserve)
+            if stack_base == 0 { fail() }
+            stack_high = stack_base + reserve
+            let extent = StackRange { base: stack_high - capacity, bytes: capacity }
+            if mapping.commit_stack(std.mem.transmute[*StackRange, uint](std.ptr.addr_of(extent))) != 0 { fail() };
+        }
+        let slot = if callback { storage } else { heap_alloc(processor, 128) }
+        let cold = if callback { storage + 128 } else { heap_alloc(processor, COROUTINE_COLD_BYTES) }
         let index: uint = 0
-        while index < 512 {
+        while index < COROUTINE_COLD_BYTES {
             store_word(cold + index, 0)
             index = index + 8
         }
         // 参数包必须复制到子协程自持的原始内存并在入队前完成：父帧在 spawn 返回后即可被复用，
         // 子协程稍后运行时再读父帧就是悬垂读（复制源与目标在交接期间都可定位）。
-        let pack = heap_alloc(processor, COROUTINE_PACK_BYTES)
+        store_word(cold + 528, storage)
+        let pack = if callback { storage + 704 } else { heap_alloc(processor, COROUTINE_PACK_BYTES) }
         let copied: uint = 0
         while copied < COROUTINE_PACK_BYTES {
             store_word(pack + copied, word(env + copied))
@@ -355,6 +485,7 @@ fn prepare_child(processor: uint, code: uint, env: uint, trace: uint, result_kin
         store_word(cold + 8, frame)
         store_word(cold + 16, word(processor + 4072))
         store_word(slot, 6)
+        register_coroutine(processor, slot)
         slot
     }
 }
@@ -365,12 +496,63 @@ pub fn spawn(code: *(), env: *(), trace: uint, result_kind: uint) uint {
     unsafe {
         let parent = std.runtime.current_slot()
         let processor = proc_of(parent)
-        let child = prepare_child(processor, std.mem.transmute[*(), uint](code), std.mem.transmute[*(), uint](env), trace, result_kind)
+        let child = prepare_child(processor, std.mem.transmute[*(), uint](code), std.mem.transmute[*(), uint](env), trace, result_kind, false)
         store_word(processor + 4032, word(processor + 4032) + 1)
         enqueue(processor, child)
         child
     }
 }
+
+/// 外部线程的队列节点保持存活至完成确认；参数包不含 managed 引用。
+pub fn callback_service(processor: uint) { unsafe {
+    let control = std.runtime.callback_control()
+    let node = std.runtime.callback_queue(control, 0, 2)
+    if node == 0 || node == 3 { return }
+    if node < 16 { fail() }
+    let child = prepare_child(processor, word(node + 16), node + 32, 0, 0, true)
+    store_word(word(child + 48) + 520, node)
+    store_word(processor + 4032, word(processor + 4032) + 1)
+    ready_hot(child)
+} }
+
+/// 控制操作只在机器锁外重试；外部线程仍需 detach 后才结清登记。
+pub fn callback_gate(action: uint) { unsafe {
+    let processor = word(std.runtime.current_slot() + 16)
+    if action == 0 { store_word(std.runtime.callback_control() + 72, std.runtime.thread_id()) }
+    let status = std.runtime.callback_queue(std.runtime.callback_control(), processor, action)
+    while status == 3 { status = std.runtime.callback_queue(std.runtime.callback_control(), processor, action) }
+    if status != 0 { fail() }
+} }
+
+/// safepoint_slow 尾跳此入口，父帧仍是精确 PollResume。
+pub fn callback_poll() { unsafe {
+    let processor = word(std.runtime.current_slot() + 16)
+    let _ = std.runtime.atomic_fetch_and_acq_rel[u32](std.mem.transmute[uint, *u32](processor), ~u32(4))
+    mapping.pressure_poll(processor)
+    yield_now()
+} }
+
+pub fn callback_pending() bool { unsafe {
+    std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](std.runtime.callback_control() + 32)) != 0
+} }
+
+fn callback_finish(cold: uint) { unsafe {
+    let node = word(cold + 520)
+    if node == 0 { return }
+    store_word(cold + 520, 0)
+    store_word(node + 16, 0)
+    callback_complete(node)
+} }
+
+/// 只有 managed 回调和借用请求均已结束，才撤销活动登记并 release 发布完成。
+pub fn callback_complete(node: uint) { unsafe {
+    let state = std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](node + 8))
+    if state != 2 || word(node + 16) != 0 { return }
+    let control = std.runtime.callback_control()
+    let status = std.runtime.callback_queue(control, node, 3)
+    while status == 3 { status = std.runtime.callback_queue(control, node, 3) }
+    if status != 0 { fail() }
+} }
 
 /// 协程返回：结清自己的动态根登记、发布结果、唤醒 Join，并减少存活数。
 pub fn finish_hot(hot: uint, value: uint, second: uint) {
@@ -389,14 +571,18 @@ pub fn finish_hot(hot: uint, value: uint, second: uint) {
     } else {
         store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, state & COROUTINE_COLD_SPAWN_PUBLISHED_BIT)
     }
-    store_word(cold + 360, 1)
-    store_word(cold + 368, value)
-    store_word(cold + 376, second)
-    let joiner = word(cold + 384)
+    store_word(cold + COROUTINE_COLD_RESULT_OFFSET, value)
+    store_word(cold + COROUTINE_COLD_RESULT_OFFSET + 8, second)
+    store_word(cold + COROUTINE_COLD_COMPLETION_OFFSET, 1)
+    let joiner = word(cold + COROUTINE_COLD_JOIN_WAITER_OFFSET)
     if joiner != 0 { ready_hot(joiner) }
     store_word(hot, 16)
+    let _ = unregister_coroutine(processor, hot)
+    mapping.retire_stack(processor, word(hot + 88))
+    if word(cold + 528) != 0 { counters.add(counters.CALLBACK_CACHE, 4096) }
     let live = word(processor + 4032)
     if live != 0 { store_word(processor + 4032, live - 1) }
+    callback_finish(cold)
 }
 
 /// 取走一个已结束协程的结果：先结清结果载荷登记，再把结果值复制进 `dst`（0 表示丢弃）。

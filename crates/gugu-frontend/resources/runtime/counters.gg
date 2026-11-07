@@ -1,0 +1,70 @@
+/* processor 的 owner-local 事件账本。启动清零、只在对应状态转换成功后更新。
+ * 单 managed owner 发布，native worker 只通过 completion 回到 owner 更新。
+ */
+use std.runtime.native_memory as mapping
+
+fn heap_word(at: uint) uint { unsafe { std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](at)) } }
+fn heap_store_word(at: uint, value: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](at), value) } }
+fn heap_fail() { unsafe { std.runtime.process_exit(2) } }
+
+pub const COUNTERS_OFFSET: uint = 3624
+pub const COUNTERS_COUNT: uint = 30
+pub const DIRTY_ACTIVE: uint = 0
+pub const DIRTY_WAITING: uint = 1
+pub const TIMER_LIVE: uint = 2
+pub const TIMER_CANCELLED: uint = 3
+pub const TIMER_BYTES: uint = 4
+pub const SIGNAL_DROPPED: uint = 5
+pub const TRACE_DROPPED: uint = 6
+pub const PENDING_RETURN: uint = 7
+pub const RECLAIMABLE: uint = 8
+pub const RETURN_BATCHES: uint = 9
+pub const RETURN_HOPS: uint = 10
+pub const FORWARDED_MESSAGES: uint = 11
+pub const MARK_BATCHES: uint = 12
+pub const EDGE_BATCHES: uint = 13
+pub const MARK_PENDING: uint = 14
+pub const HANDLE_RESOLVES: uint = 15
+pub const HANDLE_FORWARDS: uint = 16
+pub const REGION_RESETS: uint = 17
+pub const REGION_PROMOTIONS: uint = 18
+// 19/20 保留；解码计数直接读取机器侧 cage 控制记录。
+pub const FOREIGN_PINS: uint = 21
+pub const FOREIGN_SAVES: uint = 22
+pub const FOREIGN_COPIES: uint = 23
+pub const FOREIGN_REJECTIONS: uint = 24
+pub const REGION_PAYLOAD: uint = 25
+// 26/27 是压力 drain 位与控制区提交边界，28 为回调控制缓存。
+pub const CALLBACK_CACHE: uint = 28
+
+/// 最后用户租约已撤销、owner 尚未消费 close 完成的控制页和目录页。
+pub fn pending_returns(owner: uint) uint = read(owner, PENDING_RETURN)
+
+pub fn callback_threads() uint { unsafe {
+    std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](std.runtime.callback_control() + 56))
+} }
+
+pub fn compression_counts() (uint, uint) { unsafe {
+    let cage = std.runtime.cage_control()
+    (std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](cage + 32)),
+     std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](cage + 40)))
+} }
+
+pub fn read(owner: uint, index: uint) uint {
+    if index >= COUNTERS_COUNT { heap_fail() }
+    heap_word(owner + COUNTERS_OFFSET + index * 8)
+}
+pub fn add(index: uint, amount: uint) { unsafe {
+    let owner = heap_word(std.runtime.current_slot() + 16)
+    let previous = read(owner, index)
+    if previous > ~uint(0) - amount { heap_fail() }
+    heap_store_word(owner + COUNTERS_OFFSET + index * 8, previous + amount)
+    let category = if index == PENDING_RETURN { uint(1) } else { if index == RECLAIMABLE { uint(4) } else { if index == CALLBACK_CACHE { uint(2) } else { uint(0) } } }
+    if category != 0 && amount != 0 { mapping.pressure_dirty(owner, category) };
+} }
+pub fn remove(index: uint, amount: uint) { unsafe {
+    let owner = heap_word(std.runtime.current_slot() + 16)
+    let previous = read(owner, index)
+    if previous < amount { heap_fail() }
+    heap_store_word(owner + COUNTERS_OFFSET + index * 8, previous - amount)
+} }

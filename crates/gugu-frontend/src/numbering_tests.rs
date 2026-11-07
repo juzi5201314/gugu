@@ -256,7 +256,10 @@ fn materialized_block_skips_builtin_derivation() {
         .iter()
         .filter(|function| !function.x64.is_empty())
         .count();
-    assert!(machine > 100, "x64 层应覆盖大多数内建实例：只有 {machine} 项");
+    assert!(
+        machine > 100,
+        "x64 层应覆盖大多数内建实例：只有 {machine} 项"
+    );
     assert_eq!(
         engine
             .completed_by_kind()

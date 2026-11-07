@@ -318,6 +318,51 @@ impl Builder<'_> {
 /// 实参按源码顺序求值并保留为 operands；返回值按 `types` 中的结果类型建立临时位置（只有
 /// `current_slot`/`report_write` 返回机器字）。机器原语一律禁止进入 `NoSafepointRegion`。
 impl Builder<'_> {
+    pub(super) fn emit_buffer_intrinsic(
+        &mut self,
+        id: ExprId,
+        kind: crate::semantics::model::RuntimeMachineIntrinsic,
+        arguments: Range<u32>,
+    ) -> Result<Option<LocalId>, Diagnostic> {
+        use crate::semantics::model::RuntimeMachineIntrinsic as Source;
+        let argument = expr_range(self.owner, &arguments)
+            .into_iter()
+            .next()
+            .ok_or_else(|| gir_error("字节原语缺少输入", None))?;
+        let Some(local) = self.emit_expr(argument)? else {
+            return Ok(None);
+        };
+        let ty = self.expr_ty(id);
+        let value = match kind {
+            Source::AllocBytes => {
+                let hir::Type::Ref(slice) = self.module.types[ty.index()] else {
+                    return Err(gir_error("字节分配结果不是引用", None));
+                };
+                let hir::Type::Slice(element) = self.module.types[slice.index()] else {
+                    return Err(gir_error("字节分配结果不是切片", None));
+                };
+                Rvalue::AllocArray {
+                    element,
+                    length: copy_of(local),
+                }
+            }
+            Source::StringBytes | Source::StringFromUtf8Unchecked => Rvalue::Intrinsic {
+                op: if kind == Source::StringBytes {
+                    IntrinsicOp::StringBytes
+                } else {
+                    IntrinsicOp::StringFromUtf8Unchecked
+                },
+                operands: vec![copy_of(local)],
+                types: vec![ty],
+            },
+            _ => return Err(gir_error("非字节原语进入存储 lowering", None)),
+        };
+        let dest = self.temp(ty);
+        self.assign(Place::local(dest), value);
+        self.set_value(id, dest);
+        Ok(Some(dest))
+    }
+
     pub(super) fn emit_runtime_machine_call(
         &mut self,
         id: ExprId,

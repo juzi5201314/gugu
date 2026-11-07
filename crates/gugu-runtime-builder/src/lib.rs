@@ -9,6 +9,26 @@ use gugu_compiler_core::{
 
 const SOURCES: &[RuntimeSourceInput<'static>] = &[
     source(
+        "std/runtime/compression.gg",
+        include_str!("../../gugu-frontend/resources/runtime/compression.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime.gg",
+        include_str!("../../gugu-frontend/resources/std/runtime.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/time.gg",
+        include_str!("../../gugu-frontend/resources/std/time.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/counters.gg",
+        include_str!("../../gugu-frontend/resources/runtime/counters.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
         "std/prelude.gg",
         include_str!("../../gugu-frontend/resources/std/prelude.gg"),
         RuntimeSourceRole::StandardLibrary,
@@ -46,7 +66,7 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
     source(
         "std/text.gg",
         include_str!("../../gugu-frontend/resources/std/text.gg"),
-        RuntimeSourceRole::StandardLibrary,
+        RuntimeSourceRole::Runtime,
     ),
     source(
         "std/io.gg",
@@ -168,6 +188,71 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         include_str!("../../gugu-frontend/resources/runtime/block_return.gg"),
         RuntimeSourceRole::Runtime,
     ),
+    source(
+        "std/mem.gg",
+        include_str!("../../gugu-frontend/resources/std/mem.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/pin_layout.gg",
+        include_str!("../../gugu-frontend/resources/runtime/pin_layout.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/shared.gg",
+        include_str!("../../gugu-frontend/resources/runtime/shared.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/pinning.gg",
+        include_str!("../../gugu-frontend/resources/runtime/pinning.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/fs.gg",
+        include_str!("../../gugu-frontend/resources/std/fs.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/pressure.gg",
+        include_str!("../../gugu-frontend/resources/runtime/pressure.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/native_memory.gg",
+        include_str!("../../gugu-frontend/resources/runtime/native_memory.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/fs_platform.gg",
+        include_str!("../../gugu-frontend/resources/runtime/fs_platform.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/foreign.gg",
+        include_str!("../../gugu-frontend/resources/runtime/foreign.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/fs_windows.gg",
+        include_str!("../../gugu-frontend/resources/runtime/fs_windows.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/resource_state.gg",
+        include_str!("../../gugu-frontend/resources/runtime/resource_state.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/resource.gg",
+        include_str!("../../gugu-frontend/resources/runtime/resource.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/value.gg",
+        include_str!("../../gugu-frontend/resources/runtime/value.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
 ];
 
 #[cfg(feature = "runtime-gc-probes")]
@@ -233,7 +318,7 @@ mod tests {
         let sources = sources();
         assert_eq!(
             sources.len(),
-            32 + usize::from(cfg!(feature = "runtime-gc-probes")) * 2
+            49 + usize::from(cfg!(feature = "runtime-gc-probes")) * 2
         );
         let artifact = build(TargetName::X86_64Linux).expect("build runtime artifact");
         let bytes = artifact.encode().expect("encode runtime artifact");

@@ -1,0 +1,333 @@
+/* 单 managed processor 的平台映射账本。堆、栈、辅助页和文件映射共用 reserve/commit；
+ * 文件映射另保留可在退出时归零的小计。平台内部建立的线程栈不在本账本内。
+ */
+use std.runtime.gc.{PROCESSOR_GC_REQUEST_OFFSET, GC_REQUEST_PRESSURE}
+
+#[repr(C)]
+struct NativeExtent { base: uint, bytes: uint }
+
+pub const NATIVE_RESERVED_OFFSET: uint = 3968
+pub const NATIVE_COMMITTED_OFFSET: uint = 3976
+pub const NATIVE_MAPPINGS_OFFSET: uint = 3984
+pub const NATIVE_PEAK_OFFSET: uint = 3992
+pub const NATIVE_PAGE_BYTES: uint = 4096
+
+fn word(address: uint) uint { unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) } }
+fn put(address: uint, value: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](address), value) } }
+fn fail() { unsafe { std.runtime.process_exit(2) } }
+fn processor() uint { unsafe { word(std.runtime.current_slot() + 16) } }
+
+pub fn page_bytes(bytes: uint) uint {
+    if bytes == 0 || bytes > ~uint(0) - (NATIVE_PAGE_BYTES - 1) { fail() }
+    (bytes + NATIVE_PAGE_BYTES - 1) / NATIVE_PAGE_BYTES * NATIVE_PAGE_BYTES
+}
+
+pub const STACK_RESERVED_OFFSET: uint = 3864
+pub const STACK_COMMITTED_OFFSET: uint = 3872
+pub const STACK_LIVE_OFFSET: uint = 3880
+
+pub fn reserve_stack(bytes: uint) uint {
+    let base = reserve_aligned(bytes, NATIVE_PAGE_BYTES)
+    if base != 0 { add(processor(), STACK_RESERVED_OFFSET, page_bytes(bytes)) }
+    base
+}
+
+/// 仅由活跃协程建立/增长栈调用；系统栈与 metadata 继续使用普通 commit。
+pub fn commit_stack(extent: uint) uint {
+    let bytes = page_bytes(word(extent + 8))
+    let status = commit(extent)
+    if status == 0 {
+        let owner = processor()
+        add(owner, STACK_COMMITTED_OFFSET, bytes)
+        add(owner, STACK_LIVE_OFFSET, word(extent + 8))
+    }
+    status
+}
+
+pub fn retire_stack(owner: uint, bytes: uint) {
+    let live = word(owner + STACK_LIVE_OFFSET)
+    if live < bytes { fail() }
+    put(owner + STACK_LIVE_OFFSET, live - bytes)
+    pressure_dirty(owner, 2)
+}
+
+pub fn decommit_retired_stack(base: uint, bytes: uint) uint { unsafe {
+    let owner = processor()
+    if word(owner + STACK_COMMITTED_OFFSET) < bytes { fail() }
+    let extent = NativeExtent { base, bytes }
+    let status = decommit(std.mem.transmute[*NativeExtent, uint](std.ptr.addr_of(extent)))
+    if status == 0 { put(owner + STACK_COMMITTED_OFFSET, word(owner + STACK_COMMITTED_OFFSET) - bytes) }
+    status
+} }
+
+/// 仅供 owner 回收已退出协程的栈；失败保持 reservation 与提交分区。
+pub fn release_retired_stack(base: uint, reserved: uint, committed: uint) uint { unsafe {
+    let owner = processor()
+    if word(owner + STACK_RESERVED_OFFSET) < reserved || word(owner + STACK_COMMITTED_OFFSET) < committed { fail() }
+    let extent = NativeExtent { base: base + reserved - committed, bytes: committed }
+    let status = decommit(std.mem.transmute[*NativeExtent, uint](std.ptr.addr_of(extent)))
+    if status != 0 { return status }
+    put(owner + STACK_COMMITTED_OFFSET, word(owner + STACK_COMMITTED_OFFSET) - committed)
+    release_mapping(base, reserved, 0)
+    put(owner + STACK_RESERVED_OFFSET, word(owner + STACK_RESERVED_OFFSET) - reserved)
+    0
+} }
+
+pub const RUNTIME_PRESSURE_ENTER_RATIO: uint = 85
+pub const RUNTIME_PRESSURE_CLEAR_RATIO: uint = 70
+pub const RUNTIME_PRESSURE_STATE_OFFSET: uint = 3888
+pub const RUNTIME_PRESSURE_EPISODES_OFFSET: uint = 3896
+pub const RUNTIME_PRESSURE_CYCLES_OFFSET: uint = 3904
+pub const RUNTIME_PRESSURE_READY_OFFSET: uint = 3912
+/// 使用事件账本保留字；三位分别确认 pending return、owner cache 和 reclaimable 的扫描。
+pub const PRESSURE_DRAIN_MASK_OFFSET: uint = 3832
+pub const SCHEDULER_COMMITTED_END_OFFSET: uint = 3840
+pub const OWNER_DRAIN_BYTES: uint = 65536
+
+pub fn pressure_dirty(owner: uint, categories: uint) {
+    put(owner + PRESSURE_DRAIN_MASK_OFFSET, word(owner + PRESSURE_DRAIN_MASK_OFFSET) & ~categories)
+    pressure_update(owner)
+}
+
+pub fn pressure_drained(owner: uint, categories: uint) {
+    if word(owner + RUNTIME_PRESSURE_STATE_OFFSET) == 0 { return }
+    put(owner + PRESSURE_DRAIN_MASK_OFFSET, word(owner + PRESSURE_DRAIN_MASK_OFFSET) | categories)
+    pressure_update(owner)
+}
+
+// ceil(limit * percent / 100)，分解乘法避免大内存上限溢出。
+fn pressure_threshold(limit: uint, percent: uint) uint = limit / 100 * percent + (limit % 100 * percent + 99) / 100
+
+/// 0 无压力，1 等待收集，2 本 episode 已收集；只发布状态，不在映射事务中进入 GC。
+pub fn pressure_update(owner: uint) {
+    let limit = word(owner + RUNTIME_LIMIT_OFFSET)
+    let used = word(owner + RUNTIME_COMMITTED_OFFSET)
+    if limit == 0 { put(owner + RUNTIME_PRESSURE_STATE_OFFSET, 0)
+        return }
+    if used <= limit / 100 * RUNTIME_PRESSURE_CLEAR_RATIO + limit % 100 * RUNTIME_PRESSURE_CLEAR_RATIO / 100 && word(owner + PRESSURE_DRAIN_MASK_OFFSET) == 7 {
+        put(owner + RUNTIME_PRESSURE_STATE_OFFSET, 0)
+        return
+    }
+    if word(owner + RUNTIME_PRESSURE_STATE_OFFSET) == 0 && used >= pressure_threshold(limit, RUNTIME_PRESSURE_ENTER_RATIO) {
+        put(owner + PRESSURE_DRAIN_MASK_OFFSET, 0)
+        put(owner + RUNTIME_PRESSURE_STATE_OFFSET, 1)
+        add(owner, RUNTIME_PRESSURE_EPISODES_OFFSET, 1)
+    }
+    if word(owner + RUNTIME_PRESSURE_STATE_OFFSET) != 0 && word(owner + RUNTIME_PRESSURE_READY_OFFSET) == 1 && (word(owner + PRESSURE_DRAIN_MASK_OFFSET) != 7 || (word(owner + RUNTIME_PRESSURE_STATE_OFFSET) == 1 && used > limit)) {
+        unsafe { let _ = std.runtime.atomic_fetch_or_acq_rel[u32](std.mem.transmute[uint, *u32](owner), u32(4)) }
+    }
+    if word(owner + RUNTIME_PRESSURE_STATE_OFFSET) == 1 && word(owner + RUNTIME_PRESSURE_READY_OFFSET) == 1 && used > limit {
+        unsafe {
+            let _ = std.runtime.atomic_fetch_or_acq_rel[u32](std.mem.transmute[uint, *u32](owner), u32(1))
+        }
+    }
+}
+
+/// GC 栈与根扫描设施完整发布之后，启动方才打开消费入口。
+pub fn pressure_enable(owner: uint) {
+    put(owner + RUNTIME_PRESSURE_READY_OFFSET, 1)
+    pressure_update(owner)
+}
+
+pub fn pressure_claim(owner: uint) bool {
+    if word(owner + RUNTIME_PRESSURE_READY_OFFSET) != 1 || word(owner + RUNTIME_PRESSURE_STATE_OFFSET) != 1 { return false }
+    if word(owner + RUNTIME_COMMITTED_OFFSET) <= word(owner + RUNTIME_LIMIT_OFFSET) { return false }
+    put(owner + RUNTIME_PRESSURE_STATE_OFFSET, 2)
+    put(owner + RUNTIME_PRESSURE_READY_OFFSET, 2)
+    true
+}
+
+pub fn pressure_complete(owner: uint) {
+    add(owner, RUNTIME_PRESSURE_CYCLES_OFFSET, 1)
+    put(owner + RUNTIME_PRESSURE_READY_OFFSET, 1)
+    pressure_update(owner)
+}
+
+/// 只由映射事务外的 managed 慢路调用；先领取 episode，防止收集期间再次触发。
+pub fn pressure_poll(owner: uint) { unsafe {
+    if !pressure_claim(owner) { return }
+    std.ptr.ptr_write[u32](std.mem.transmute[uint, *u32](owner + PROCESSOR_GC_REQUEST_OFFSET), u32(GC_REQUEST_PRESSURE))
+    let status = std.runtime.gc_enter(owner + PROCESSOR_GC_REQUEST_OFFSET)
+    if status != 0 { fail() }
+    pressure_complete(owner)
+} }
+
+pub const RUNTIME_RESERVED_OFFSET: uint = 3920
+pub const RUNTIME_COMMITTED_OFFSET: uint = 3928
+pub const RUNTIME_MAPPINGS_OFFSET: uint = 3936
+pub const RUNTIME_PEAK_OFFSET: uint = 3944
+pub const RUNTIME_LIMIT_OFFSET: uint = 3952
+
+// Windows 的 64 KiB 约束针对基址；预留和提交长度均按页取整。
+
+fn add(owner: uint, offset: uint, bytes: uint) {
+    let previous = word(owner + offset)
+    if previous > ~uint(0) - bytes { fail() }
+    put(owner + offset, previous + bytes)
+}
+
+/// 启动时仅调用一次：三个映射在 processor 发布前已建立，后续均走计费入口。
+pub fn adopt_boot(owner: uint, stack_reserved: uint, stack_committed: uint, limit: uint) {
+    put(owner + RUNTIME_RESERVED_OFFSET, page_bytes(stack_reserved) + 2 * page_bytes(4096))
+    put(owner + RUNTIME_COMMITTED_OFFSET, page_bytes(stack_committed) + 8192)
+    put(owner + RUNTIME_MAPPINGS_OFFSET, 3)
+    put(owner + RUNTIME_PEAK_OFFSET, page_bytes(stack_committed) + 8192)
+    put(owner + RUNTIME_LIMIT_OFFSET, limit)
+    put(owner + STACK_RESERVED_OFFSET, page_bytes(stack_reserved))
+    put(owner + STACK_COMMITTED_OFFSET, page_bytes(stack_committed))
+    put(owner + STACK_LIVE_OFFSET, stack_committed)
+}
+
+/// 调用方保证范围互不重叠；arena 重用通过既有 committed 位避免重复提交。
+pub fn reserve_aligned(bytes: uint, alignment: uint) uint { unsafe {
+    let base = std.platform.reserve_aligned(bytes, alignment)
+    if base == 0 || base > uint(140737488355327) { return 0 }
+    let owner = processor()
+    add(owner, RUNTIME_RESERVED_OFFSET, page_bytes(bytes))
+    add(owner, RUNTIME_MAPPINGS_OFFSET, 1)
+    base
+} }
+
+pub fn commit(extent: uint) uint { unsafe {
+    let bytes = page_bytes(word(extent + 8))
+    let status = std.platform.commit(extent)
+    if status != 0 { return status }
+    let owner = processor()
+    add(owner, RUNTIME_COMMITTED_OFFSET, bytes)
+    let committed = word(owner + RUNTIME_COMMITTED_OFFSET)
+    if committed > word(owner + RUNTIME_PEAK_OFFSET) { put(owner + RUNTIME_PEAK_OFFSET, committed) }
+    pressure_update(owner)
+    0
+} }
+
+/// 仅用于调用方已确认无使用者的整页范围；失败保持 committed，成功保留 reservation。
+pub fn decommit(extent: uint) uint { unsafe {
+    let owner = processor()
+    let bytes = page_bytes(word(extent + 8))
+    if word(owner + RUNTIME_COMMITTED_OFFSET) < bytes { fail() }
+    let status = std.platform.decommit(extent)
+    if status != 0 { return status }
+    put(owner + RUNTIME_COMMITTED_OFFSET, word(owner + RUNTIME_COMMITTED_OFFSET) - bytes)
+    pressure_update(owner)
+    0
+} }
+
+/// 数据页分区，不含 arena 侧元数据和 GC 辅助映射。
+pub const HEAP_COMMITTED_OFFSET: uint = 3960
+
+pub fn commit_heap(extent: uint) uint {
+    let status = commit(extent)
+    if status == 0 { add(processor(), HEAP_COMMITTED_OFFSET, page_bytes(word(extent + 8))) }
+    status
+}
+
+pub fn decommit_heap(extent: uint) uint {
+    let owner = processor()
+    let bytes = page_bytes(word(extent + 8))
+    let previous = word(owner + HEAP_COMMITTED_OFFSET)
+    if previous < bytes { fail() }
+    let status = decommit(extent)
+    if status == 0 { put(owner + HEAP_COMMITTED_OFFSET, previous - bytes) }
+    status
+}
+
+pub fn release_heap(base: uint, bytes: uint) {
+    release_heap_mapping(base, bytes, bytes)
+}
+
+pub fn release_heap_mapping(base: uint, bytes: uint, heap_bytes: uint) {
+    let owner = processor()
+    let committed = word(owner + HEAP_COMMITTED_OFFSET)
+    let length = page_bytes(heap_bytes)
+    if committed < length { fail() }
+    release_mapping(base, bytes, page_bytes(bytes))
+    put(owner + HEAP_COMMITTED_OFFSET, committed - length)
+}
+
+pub fn release_mapping(base: uint, bytes: uint, committed: uint) { unsafe {
+    let owner = processor()
+    let reserved = page_bytes(bytes)
+    if word(owner + RUNTIME_RESERVED_OFFSET) < reserved || word(owner + RUNTIME_COMMITTED_OFFSET) < committed || word(owner + RUNTIME_MAPPINGS_OFFSET) == 0 { fail() }
+    let extent = NativeExtent { base: base, bytes: page_bytes(bytes) }
+    std.platform.release(std.mem.transmute[*NativeExtent, uint](std.ptr.addr_of(extent)))
+    put(owner + RUNTIME_RESERVED_OFFSET, word(owner + RUNTIME_RESERVED_OFFSET) - reserved)
+    put(owner + RUNTIME_COMMITTED_OFFSET, word(owner + RUNTIME_COMMITTED_OFFSET) - committed)
+    put(owner + RUNTIME_MAPPINGS_OFFSET, word(owner + RUNTIME_MAPPINGS_OFFSET) - 1)
+    pressure_update(owner)
+} }
+
+pub fn allocate(bytes: uint) uint { unsafe {
+    let length = page_bytes(bytes)
+    let owner = processor()
+    let reserved = word(owner + NATIVE_RESERVED_OFFSET)
+    if reserved > ~uint(0) - page_bytes(length) { fail() }
+    let base = reserve_aligned(length, NATIVE_PAGE_BYTES)
+    if base == 0 { fail() }
+    let extent = NativeExtent { base: base, bytes: length }
+    if commit(std.mem.transmute[*NativeExtent, uint](std.ptr.addr_of(extent))) != 0 {
+        release_mapping(base, length, 0)
+        fail()
+    }
+    put(owner + NATIVE_RESERVED_OFFSET, reserved + page_bytes(length))
+    let committed = word(owner + NATIVE_COMMITTED_OFFSET) + length
+    put(owner + NATIVE_COMMITTED_OFFSET, committed)
+    put(owner + NATIVE_MAPPINGS_OFFSET, word(owner + NATIVE_MAPPINGS_OFFSET) + 1)
+    if committed > word(owner + NATIVE_PEAK_OFFSET) { put(owner + NATIVE_PEAK_OFFSET, committed) }
+    base
+} }
+
+pub fn release(base: uint, bytes: uint) { unsafe {
+    let length = page_bytes(bytes)
+    let owner = processor()
+    let reserved = word(owner + NATIVE_RESERVED_OFFSET)
+    let committed = word(owner + NATIVE_COMMITTED_OFFSET)
+    let mappings = word(owner + NATIVE_MAPPINGS_OFFSET)
+    let reservation = page_bytes(length)
+    if base == 0 || reserved < reservation || committed < length || mappings == 0 { fail() }
+    release_mapping(base, length, length)
+    put(owner + NATIVE_RESERVED_OFFSET, reserved - reservation)
+    put(owner + NATIVE_COMMITTED_OFFSET, committed - length)
+    put(owner + NATIVE_MAPPINGS_OFFSET, mappings - 1)
+} }
+
+/// provider 总量包含 managed heap；文件分类是总量的子集，不可再次相加。
+pub struct MemorySnapshot {
+    pub reserved_address_bytes: uint,
+    pub committed_bytes: uint,
+    pub uncommitted_reserved_bytes: uint,
+    pub mappings: uint,
+    pub peak_committed_bytes: uint,
+    pub file_reserved_bytes: uint,
+    pub file_committed_bytes: uint,
+    pub file_mappings: uint,
+    pub file_peak_committed_bytes: uint,
+    pub heap_committed_bytes: uint,
+    pub nonheap_committed_bytes: uint,
+}
+
+#[allow(large_copy)]
+pub fn snapshot(owner: uint) MemorySnapshot {
+    let reserved = word(owner + RUNTIME_RESERVED_OFFSET)
+    let committed = word(owner + RUNTIME_COMMITTED_OFFSET)
+    let heap = word(owner + HEAP_COMMITTED_OFFSET)
+    if committed > reserved || heap > committed { fail() }
+    MemorySnapshot {
+        reserved_address_bytes: reserved,
+        committed_bytes: committed,
+        uncommitted_reserved_bytes: reserved - committed,
+        mappings: word(owner + RUNTIME_MAPPINGS_OFFSET),
+        peak_committed_bytes: word(owner + RUNTIME_PEAK_OFFSET),
+        file_reserved_bytes: word(owner + NATIVE_RESERVED_OFFSET),
+        file_committed_bytes: word(owner + NATIVE_COMMITTED_OFFSET),
+        file_mappings: word(owner + NATIVE_MAPPINGS_OFFSET),
+        file_peak_committed_bytes: word(owner + NATIVE_PEAK_OFFSET),
+        heap_committed_bytes: heap,
+        nonheap_committed_bytes: committed - heap,
+    }
+}
+
+#[allow(large_copy)]
+pub fn verify_drained(owner: uint) {
+    let observed = snapshot(owner)
+    if observed.file_reserved_bytes != 0 || observed.file_committed_bytes != 0 || observed.file_mappings != 0 { fail() }
+}

@@ -78,7 +78,18 @@ impl Builder<'_> {
     pub(super) fn store(&mut self, pointer: ValueId, value: ValueId, align: u32, volatile: bool) {
         let provenance = self.machine_type(pointer).provenance;
         let heap = provenance.is_some_and(Provenance::managed);
-        let shared = provenance == Some(Provenance::SharedHandle);
+        let shared = self.shared_guards.last().is_some_and(|(_, _, payload)| {
+            let mut base = pointer;
+            loop {
+                if base == *payload {
+                    return true;
+                }
+                match self.body.values[base.index()].origin {
+                    Origin::Derived(parent) => base = parent,
+                    _ => return false,
+                }
+            }
+        });
         let managed = self
             .machine_type(value)
             .provenance
@@ -108,7 +119,11 @@ impl Builder<'_> {
                 let token = self
                     .active_shared_token()
                     .expect("shared 字段写入必然在 access guard 内");
-                self.emit(Op::SharedFieldBarrier { store, token }, &[], &[]);
+                self.emit(
+                    Op::SharedFieldBarrier { store, token },
+                    &[pointer, old, value],
+                    &[],
+                );
             } else {
                 self.emit(Op::GcWriteBarrier { store }, &[pointer, old, value], &[]);
             }
@@ -135,7 +150,12 @@ impl Builder<'_> {
     fn address_mode(&mut self, place: Place, shared: bool) -> Result<(ValueId, u32), Diagnostic> {
         let mut ty = self.local_ty(place.local);
         let mut address = if shared {
-            Some(self.shared_handle(place.local)?)
+            Some(
+                self.shared_guards
+                    .last()
+                    .ok_or_else(|| invalid("共享地址没有 guard"))?
+                    .2,
+            )
         } else {
             match self.storage[place.local.index()].clone() {
                 Storage::Stack { address, .. } | Storage::Capture { address } => Some(address),
@@ -337,7 +357,11 @@ impl Builder<'_> {
     ) -> Result<ValueId, Diagnostic> {
         // 资源值只能由 Resource placement 管理，不能进入任何 managed heap/region。
         if self.layout(ty).passing.has_resource() != (placement == PlacementKind::Resource) {
-            return Err(invalid_resource("资源值必须使用 Resource placement"));
+            return Err(invalid_resource(&format!(
+                "资源值必须使用 Resource placement（{}，类型{ty}，{placement:?}，类别{:?}）",
+                self.body.name,
+                self.layout(ty).passing
+            )));
         }
         let layout = self.layout(ty);
         let descriptor = layout.key;
@@ -412,16 +436,31 @@ impl Builder<'_> {
         use crate::runtime::compression_schema::{
             CAGE_GENERATION_MIN, CAGE_GENERATION_SHIFT, CAGE_OFFSET_MASK,
         };
+        let control = self.emit_one(
+            Op::RuntimeMachineCall(crate::runtime::RuntimeMachineOp::CageControl),
+            &[],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        let control = self.int_to_raw(control);
+        let base_slot = self.offset(control, 8);
+        let base = self.load(base_slot, ValueType::scalar(Type::I64), 8, false);
         let bits = self.emit_one(
             Op::Convert(Conversion::PointerToInt),
             &[pointer],
             ValueType::scalar(Type::I64),
             Origin::None,
         );
+        let relative = self.emit_one(
+            Op::Integer(IntOp::Sub),
+            &[bits, base],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
         let mask = self.constant(CAGE_OFFSET_MASK, Type::I64);
         let offset = self.emit_one(
             Op::Integer(IntOp::And),
-            &[bits, mask],
+            &[relative, mask],
             ValueType::scalar(Type::I64),
             Origin::None,
         );

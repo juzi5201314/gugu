@@ -1,6 +1,6 @@
 //! rt0 机器码、动态节与 SysV ar。布局与程序头留在 `elf`。
 
-use super::{DT_NEEDED, DT_NULL, DT_STRSZ, DT_STRTAB, LinkRequest, ObjectSymbol, put_u64};
+use super::{LinkRequest, ObjectSymbol};
 use std::collections::BTreeMap;
 
 /// rt0：从初始栈定位 envp，再从 auxv 取 `AT_PHDR`，加上参数块里的链接期 phdr 虚址得到 bias，
@@ -115,44 +115,6 @@ fn unresolved_c_names(request: &LinkRequest) -> Vec<String> {
         }
     }
     names
-}
-
-pub(super) fn dynamic_blobs(request: &LinkRequest) -> (Vec<u8>, Vec<u8>) {
-    let mut dynstr = Vec::new();
-    let mut offsets = BTreeMap::new();
-    for (soname, _) in &request.imports {
-        if offsets.contains_key(soname) {
-            continue;
-        }
-        let at = dynstr.len() as u64;
-        dynstr.extend(soname.as_bytes());
-        dynstr.push(0);
-        offsets.insert(soname.clone(), at);
-    }
-    let mut dynamic = Vec::new();
-    push_dyn(&mut dynamic, DT_STRTAB, 0);
-    push_dyn(&mut dynamic, DT_STRSZ, dynstr.len() as u64);
-    for offset in offsets.values() {
-        push_dyn(&mut dynamic, DT_NEEDED, *offset);
-    }
-    push_dyn(&mut dynamic, DT_NULL, 0);
-    (dynstr, dynamic)
-}
-
-fn push_dyn(out: &mut Vec<u8>, tag: i64, value: u64) {
-    out.extend_from_slice(&tag.to_le_bytes());
-    out.extend_from_slice(&value.to_le_bytes());
-}
-
-pub(super) fn patch_dynamic(
-    file: &mut [u8],
-    defined: &BTreeMap<String, u64>,
-) -> Result<(), String> {
-    let (Some(dynamic), Some(dynstr)) = (defined.get(".dynamic"), defined.get(".dynstr")) else {
-        return Ok(());
-    };
-    let at = usize::try_from(*dynamic).map_err(|_| "动态节越界".to_owned())?;
-    put_u64(file, at + 8, *dynstr)
 }
 
 /// 按未解析的 C 符号名精确抽取 SysV ar 成员。

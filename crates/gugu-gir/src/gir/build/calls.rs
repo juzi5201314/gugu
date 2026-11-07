@@ -470,6 +470,9 @@ impl Builder<'_> {
             return self.emit_platform_call(id, platform_op(kind), arguments, types);
         }
         if let hir::Builtin::RuntimeMachine(kind) = operation {
+            if kind.is_buffer() {
+                return self.emit_buffer_intrinsic(id, kind, arguments);
+            }
             if let Some(op) = runtime_machine_op(kind) {
                 return self.emit_runtime_machine_call(id, op, arguments, types);
             }
@@ -713,6 +716,16 @@ fn runtime_machine_op(
         Source::ReportWrite => Target::ReportWrite,
         Source::GcConfig => Target::GcConfig,
         Source::GcEnter => Target::GcEnter,
+        Source::FsStart => Target::FsStart,
+        Source::FsPoll => Target::FsPoll,
+        Source::MonotonicNanos => Target::MonotonicNanos,
+        Source::StackReadWord => Target::StackReadWord,
+        Source::StackCopyRaw => Target::StackCopyRaw,
+        Source::CageControl => Target::CageControl,
+        Source::CallbackControl => Target::CallbackControl,
+        Source::CallbackQueue => Target::CallbackQueue,
+        Source::ThreadId => Target::ThreadId,
+        Source::AllocBytes | Source::StringBytes | Source::StringFromUtf8Unchecked => return None,
         Source::AtomicLoadAcquire
         | Source::AtomicStoreRelease
         | Source::AtomicFetchOrAcqRel

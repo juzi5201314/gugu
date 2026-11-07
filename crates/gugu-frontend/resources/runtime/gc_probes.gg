@@ -1,5 +1,6 @@
 // 仅由 runtime-gc-probes 构建注入；探针与生产 runtime 走同一来源授权和编译管线。
 use std.runtime.{atomic_load_acquire as load, atomic_store_release as store, atomic_fetch_or_acq_rel as fetch_or, atomic_fetch_and_acq_rel as fetch_and}
+use std.runtime.native_memory as mapping
 use std.runtime.barrier.{gc_write_barrier, BARRIER_ENTRIES_OFFSET, BARRIER_FLUSHES_OFFSET, BARRIER_STAMPS_OFFSET, BARRIER_STAMP_BYTES}
 use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_entries, gc_config_card_bytes, gc_config_granule_bytes, gc_config_object_header_bytes, gc_config_stamp_entries, GC_REQUEST_PRESSURE, PROCESSOR_GC_REQUEST_OFFSET}
 use std.runtime.heap.{gc_alloc_slow, gc_move_one, heap_large_resolve, heap_local_arena, heap_mark_begin, heap_mark_end, heap_mark_test_and_set, heap_metadata, heap_resolve_object, heap_stack_scanned, heap_word, ARENA_CARDS_OFFSET, ARENA_MARK_OFFSET, ARENA_PAGE_COVER_OFFSET, CONTROL_FORWARDED, CONTROL_GENERATION_MASK, CONTROL_GENERATION_SHIFT, CONTROL_LARGE_OBJECT, CONTROL_TYPE_MASK, EDGE_RECORDS_OFFSET, EDGE_RECORD_BYTES, GENERATION_OLD, PROCESSOR_BARRIER_SCRATCH_OFFSET, PROCESSOR_EDGE_SCRATCH_OFFSET}
@@ -483,10 +484,10 @@ fn registry_probe(cold: uint, frame: uint) uint {
 /// 根图探针：等待中协程的帧链必须按保存的 PC/RSP 精确枚举出托管根，raw 副本不得进入根集合。
 pub fn root_map_probe() uint {
     unsafe {
-        let page = std.platform.reserve_aligned(uint(65536), uint(4096))
+        let page = mapping.reserve_aligned(uint(65536), uint(4096))
         if page == 0 { return 51 }
         let range = ProbeRange { base: page, bytes: 65536 }
-        if std.platform.commit(std.mem.transmute[*ProbeRange, uint](std.ptr.addr_of(range))) != 0 { return 52 }
+        if mapping.commit(std.mem.transmute[*ProbeRange, uint](std.ptr.addr_of(range))) != 0 { return 52 }
         let control = channel_new(0, probe_pointer(0))
         if control == 0 { return 53 }
         // 跨协程受管车道：父协程自持的捕获闭包经参数包交给子协程，登记记录里必须标出它的堆环境。

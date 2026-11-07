@@ -16,12 +16,12 @@ use super::model::RawModelError;
 use crate::target::PointerCompression;
 
 /// 压缩契约段 schema。
-pub const COMPRESSION_SCHEMA: u32 = 2;
+pub const COMPRESSION_SCHEMA: u32 = 3;
 
 /// 内建 compression profile 名。
 pub const COMPRESSION_PROFILE_NAME: &str = "mosaic-compression";
 /// profile revision；位布局、粒度、FFI 规则、控制记录或统计口径变化都必须递增。
-pub const COMPRESSION_PROFILE_REVISION: u32 = 2;
+pub const COMPRESSION_PROFILE_REVISION: u32 = 3;
 
 /// 压缩字里的 cage id 位数。
 pub const CAGE_ID_BITS: u32 = 8;

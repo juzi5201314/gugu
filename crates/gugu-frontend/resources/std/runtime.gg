@@ -1,0 +1,108 @@
+use std.time.{Duration}
+use std.runtime.native_memory as mapping
+use std.runtime.fs_platform as blocking
+use std.runtime.counters as counters
+use std.runtime.collect as collector
+use std.runtime.heap.{heap_word}
+use std.runtime.scheduler.{live_count}
+
+pub struct RuntimeStats {
+    pub live_coroutines: uint,
+    pub live_os_threads: uint,
+    pub parallelism: uint,
+    pub heap_committed_bytes: uint,
+    pub heap_live_bytes: uint,
+    pub stack_reserved_bytes: uint,
+    pub stack_committed_bytes: uint,
+    pub stack_live_bytes: uint,
+    pub dirty_cpu_active: uint,
+    pub dirty_cpu_waiting: uint,
+    pub blocking_bridge_active: uint,
+    pub blocking_bridge_waiting: uint,
+    pub blocking_bridge_workers: uint,
+    pub blocking_bridge_queue_bytes: uint,
+    pub timer_live: uint,
+    pub timer_cancelled: uint,
+    pub timer_overflow_bytes: uint,
+    pub gc_cycles: uint,
+    pub gc_pause_total: Duration,
+    pub signal_events_dropped: uint,
+    pub trace_events_dropped: uint,
+    pub runtime_committed_bytes: uint,
+    pub pending_return_bytes: uint,
+    pub owner_cache_bytes: uint,
+    pub reclaimable_bytes: uint,
+    pub remote_return_batches: uint,
+    pub remote_return_hops: uint,
+    pub forwarded_messages: uint,
+    pub mark_ticket_batches: uint,
+    pub edge_delta_batches: uint,
+    pub mark_credit_pending: uint,
+    pub shared_handle_resolves: uint,
+    pub shared_handle_forwards: uint,
+    pub turn_region_resets: uint,
+    pub region_promotions: uint,
+    pub compressed_ref_decodes: uint,
+    pub compression_decode_rejections: uint,
+    pub compression_foreign_pins: uint,
+    pub compression_foreign_saves: uint,
+    pub compression_foreign_copies: uint,
+    pub compression_foreign_rejections: uint,
+    pub range_reserved_bytes: uint,
+}
+
+/// 采样不触发 GC、完成轮询、资源关闭或新线程建立。
+#[allow(large_copy)]
+pub fn stats() RuntimeStats { unsafe {
+    let owner = heap_word(std.runtime.current_slot() + 16)
+    let memory = mapping.snapshot(owner)
+    let bridge = blocking.snapshot(owner)
+    let compression = counters.compression_counts()
+    let dirty = blocking.dirty_snapshot(owner)
+    let stack_committed = heap_word(owner + mapping.STACK_COMMITTED_OFFSET)
+    let stack_live = heap_word(owner + mapping.STACK_LIVE_OFFSET)
+    RuntimeStats {
+        live_coroutines: live_count(owner),
+        live_os_threads: 1 + bridge.inflight_requests + dirty.inflight_requests + counters.callback_threads(),
+        parallelism: 1,
+        heap_committed_bytes: memory.heap_committed_bytes,
+        heap_live_bytes: collector.gc_heap_live_bytes(owner),
+        stack_reserved_bytes: heap_word(owner + mapping.STACK_RESERVED_OFFSET),
+        stack_committed_bytes: stack_committed,
+        stack_live_bytes: stack_live,
+        dirty_cpu_active: dirty.inflight_requests,
+        dirty_cpu_waiting: dirty.waiting_requests,
+        blocking_bridge_active: bridge.inflight_requests + blocking.borrowed_requests(),
+        blocking_bridge_waiting: bridge.waiting_requests,
+        blocking_bridge_workers: bridge.inflight_requests,
+        blocking_bridge_queue_bytes: bridge.waiter_metadata_bytes + bridge.queued_payload_bytes,
+        timer_live: counters.read(owner, counters.TIMER_LIVE),
+        timer_cancelled: counters.read(owner, counters.TIMER_CANCELLED),
+        timer_overflow_bytes: counters.read(owner, counters.TIMER_BYTES),
+        gc_cycles: collector.gc_minor_cycles(owner) + collector.gc_major_cycles(owner),
+        gc_pause_total: Duration::from_nanos(collector.gc_pause_nanos(owner)),
+        signal_events_dropped: counters.read(owner, counters.SIGNAL_DROPPED),
+        trace_events_dropped: counters.read(owner, counters.TRACE_DROPPED),
+        runtime_committed_bytes: memory.nonheap_committed_bytes,
+        pending_return_bytes: counters.pending_returns(owner),
+        owner_cache_bytes: counters.read(owner, counters.CALLBACK_CACHE) + bridge.stack_cached_bytes + dirty.stack_cached_bytes + stack_committed - stack_live + heap_word(owner + mapping.SCHEDULER_COMMITTED_END_OFFSET) - heap_word(owner + 4048),
+        reclaimable_bytes: counters.read(owner, counters.RECLAIMABLE),
+        remote_return_batches: counters.read(owner, counters.RETURN_BATCHES),
+        remote_return_hops: counters.read(owner, counters.RETURN_HOPS),
+        forwarded_messages: counters.read(owner, counters.FORWARDED_MESSAGES),
+        mark_ticket_batches: counters.read(owner, counters.MARK_BATCHES),
+        edge_delta_batches: counters.read(owner, counters.EDGE_BATCHES),
+        mark_credit_pending: counters.read(owner, counters.MARK_PENDING),
+        shared_handle_resolves: counters.read(owner, counters.HANDLE_RESOLVES),
+        shared_handle_forwards: counters.read(owner, counters.HANDLE_FORWARDS),
+        turn_region_resets: counters.read(owner, counters.REGION_RESETS),
+        region_promotions: counters.read(owner, counters.REGION_PROMOTIONS),
+        compressed_ref_decodes: compression.0,
+        compression_decode_rejections: compression.1,
+        compression_foreign_pins: counters.read(owner, counters.FOREIGN_PINS),
+        compression_foreign_saves: counters.read(owner, counters.FOREIGN_SAVES),
+        compression_foreign_copies: counters.read(owner, counters.FOREIGN_COPIES),
+        compression_foreign_rejections: counters.read(owner, counters.FOREIGN_REJECTIONS),
+        range_reserved_bytes: memory.uncommitted_reserved_bytes,
+    }
+} }

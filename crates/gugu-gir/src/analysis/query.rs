@@ -87,6 +87,8 @@ pub fn run_world(
             );
             let plan = plan_instances(module, mono)
                 .map_err(|error| crate::semantics::query::store_errors(&[error]))?;
+            let passing =
+                std::cell::LazyCell::new(|| crate::gir::passing::PassingTable::new(module));
             let mut completed = vec![None; plan.members.len()];
             let mut summaries = Vec::with_capacity(plan.sccs.len());
             let mut parts = Vec::with_capacity(plan.sccs.len());
@@ -101,6 +103,7 @@ pub fn run_world(
                     &completed,
                     installed,
                     queries,
+                    &passing,
                 )?;
                 context.record_dependency(dependency.key().clone(), dependency.fingerprint());
                 for (local, (&index, record)) in
@@ -252,6 +255,10 @@ fn scc_summary(
     completed: &[Option<(FunctionSummary, DependencyFingerprint)>],
     installed: (&InstalledFunctions, &[RuntimeFunctionArtifactV1]),
     queries: &QueryEngine,
+    passing: &std::cell::LazyCell<
+        crate::gir::passing::PassingTable,
+        impl FnOnce() -> crate::gir::passing::PassingTable,
+    >,
 ) -> Result<(SccSummaryV1, encode::EncodedScc, DependencyFingerprint), QueryError> {
     let mut bytes = input.to_vec();
     bytes.extend_from_slice(
@@ -275,13 +282,21 @@ fn scc_summary(
         }
         let summary = match installed_scc(members, component, installed)? {
             Some(summary) => summary,
-            None => solver::analyze_scc(module, gir, members, component, policy, &|index| {
-                completed[index]
-                    .as_ref()
-                    .expect("凝聚图拓扑保证外部 callee SCC 已完成")
-                    .0
-                    .clone()
-            }),
+            None => solver::analyze_scc(
+                module,
+                gir,
+                members,
+                component,
+                policy,
+                &|index| {
+                    completed[index]
+                        .as_ref()
+                        .expect("凝聚图拓扑保证外部 callee SCC 已完成")
+                        .0
+                        .clone()
+                },
+                passing,
+            ),
         };
         let encoded = encode::encode_scc(&summary);
         let payload = encoded.payload.clone();

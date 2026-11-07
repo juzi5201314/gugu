@@ -18,6 +18,7 @@ fn symbol(name: &str, bytes: Vec<u8>, relocs: Vec<ObjectReloc>) -> ObjectSymbol 
 fn request(entry: &str, symbols: Vec<ObjectSymbol>) -> LinkRequest {
     LinkRequest {
         entry: entry.to_owned(),
+        cage_bytes: 0,
         symbols,
         readonly: vec![
             Blob {
@@ -242,6 +243,76 @@ fn payload_registers_type_and_metadata_relocations_only_when_present() {
 }
 
 #[test]
+fn gc_metadata_relocations_reserve_space_at_page_boundary() {
+    use crate::runtime::entry::rt0_params;
+    let relocations = (0..240)
+        .map(|index| ObjectReloc {
+            offset: index * 8,
+            kind: RelocKindCode::Abs64,
+            target: "main".into(),
+            addend: 0,
+        })
+        .collect();
+    let mut request = request("main", vec![symbol("main", vec![0; 240 * 8], relocations)]);
+    for name in [".gugu.types", ".gugu.meta"] {
+        request.readonly.push(Blob {
+            name: name.into(),
+            bytes: vec![0; 16],
+        });
+    }
+    let image = link(&request).expect("边界布局必须容纳全部重定位");
+    let params = image.entry as usize + super::elf::rt0_len() as usize;
+    let word = |index: usize| {
+        u64::from_le_bytes(
+            image.bytes[params + index * 8..params + index * 8 + 8]
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_eq!(word(rt0_params::RELOC_COUNT), 249);
+    let end = word(rt0_params::RELOC_TABLE) + word(rt0_params::RELOC_COUNT) * 16;
+    assert!(word(rt0_params::INITIAL_SLOT) >= end.next_multiple_of(4096));
+    assert!(
+        word(rt0_params::INITIAL_SLOT)
+            >= word(rt0_params::PROTECT_VA) + word(rt0_params::PROTECT_LEN)
+    );
+}
+
+#[test]
+fn cage_counter_record_is_in_writable_data() {
+    use crate::runtime::entry::rt0_params;
+    let mut prepared = request(
+        "main",
+        vec![symbol(
+            "main",
+            vec![0; 8],
+            vec![ObjectReloc {
+                offset: 0,
+                kind: RelocKindCode::Abs64,
+                target: "__gugu_cage_control".into(),
+                addend: 0,
+            }],
+        )],
+    );
+    prepared.cage_bytes = 8388608;
+    let image = link(&prepared).unwrap();
+    let word = |at: usize| u64::from_le_bytes(image.bytes[at..at + 8].try_into().unwrap());
+    let params = image.entry as usize + super::elf::rt0_len() as usize;
+    let address = word(word(params + rt0_params::ENTRY * 8) as usize);
+    assert_eq!(word(address as usize + 56), 8388608);
+    let count = u16::from_le_bytes(image.bytes[56..58].try_into().unwrap()) as usize;
+    assert!((0..count).any(|index| {
+        let at = 64 + index * 56;
+        let flags = u32::from_le_bytes(image.bytes[at + 4..at + 8].try_into().unwrap());
+        let base = word(at + 16);
+        flags & 3 == 2 && address >= base && address + 64 <= base + word(at + 40)
+    }));
+    let protect = word(params + rt0_params::PROTECT_VA * 8);
+    let end = protect + word(params + rt0_params::PROTECT_LEN * 8);
+    assert!(address >= end || address + 64 <= protect);
+}
+
+#[test]
 fn relative_reloc_uses_load_bias() {
     let mut bytes = vec![0_u8; 16];
     bytes.extend_from_slice(&0_u64.to_le_bytes());
@@ -358,6 +429,79 @@ fn duplicate_slot_and_out_of_range_pc_are_rejected() {
         ))
         .is_err()
     );
+}
+
+#[test]
+fn dynamic_symbols_bind_got_and_survive_rt0_relocation() {
+    let mut request = request(
+        "main",
+        vec![symbol(
+            "main",
+            vec![0xe8, 0, 0, 0, 0, 0xc3],
+            vec![ObjectReloc {
+                offset: 1,
+                kind: RelocKindCode::PcRel32,
+                target: "write".into(),
+                addend: 0,
+            }],
+        )],
+    );
+    request.imports = vec![
+        ("libc.so.6".into(), "write".into()),
+        ("libc.so.6".into(), "pthread_create".into()),
+    ];
+    request.interpreter = Some("/lib64/ld-linux-x86-64.so.2".into());
+    let mut image = link(&request).unwrap();
+    let word = |bytes: &[u8], at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap());
+    let count = u16::from_le_bytes(image.bytes[56..58].try_into().unwrap());
+    let dynamic = (0..count)
+        .find_map(|index| {
+            let at = 64 + usize::from(index) * 56;
+            (u32::from_le_bytes(image.bytes[at..at + 4].try_into().unwrap()) == 2).then(|| {
+                (
+                    word(&image.bytes, at + 16) as usize,
+                    word(&image.bytes, at + 32) as usize,
+                )
+            })
+        })
+        .unwrap();
+    let tags: std::collections::BTreeMap<_, _> = image.bytes[dynamic.0..dynamic.0 + dynamic.1]
+        .chunks_exact(16)
+        .map(|entry| (word(entry, 0), word(entry, 8) as usize))
+        .collect();
+    assert_eq!((tags[&9], tags[&11], tags[&8]), (24, 24, 48));
+    assert_eq!(image.bytes[tags[&5]], 0, "字符串表首字为 NUL");
+    let mut slots = Vec::new();
+    for (index, name) in ["write", "pthread_create"].into_iter().enumerate() {
+        let symbol = tags[&6] + (index + 1) * 24;
+        let name_at = tags[&5]
+            + u32::from_le_bytes(image.bytes[symbol..symbol + 4].try_into().unwrap()) as usize;
+        assert_eq!(&image.bytes[name_at..name_at + name.len()], name.as_bytes());
+        assert_eq!(image.bytes[symbol + 4], 0x12);
+        assert_eq!(&image.bytes[symbol + 6..symbol + 24], &[0; 18]);
+        let reloc = tags[&7] + index * 24;
+        let slot = word(&image.bytes, reloc) as usize;
+        assert_eq!(
+            word(&image.bytes, reloc + 8),
+            ((index as u64 + 1) << 32) | 6
+        );
+        assert_eq!(word(&image.bytes, slot), 0);
+        let resolved = 0x7f00_0000 + index as u64 * 4096;
+        image.bytes[slot..slot + 8].copy_from_slice(&resolved.to_le_bytes());
+        slots.push((slot, resolved));
+    }
+    apply_relative(
+        &mut image.bytes,
+        image.reloc_vaddr,
+        image.reloc_count,
+        0x400000,
+    )
+    .unwrap();
+    for (slot, resolved) in slots {
+        assert_eq!(word(&image.bytes, slot), resolved);
+    }
+    request.imports.push(request.imports[0].clone());
+    assert!(link(&request).unwrap_err().contains("重复导入"));
 }
 
 #[test]

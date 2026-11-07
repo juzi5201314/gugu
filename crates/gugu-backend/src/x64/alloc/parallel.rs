@@ -18,6 +18,9 @@ use super::super::select::{SelectedFunction, SiteKind};
 use super::{AllocError, LiveInfo, Location, Placement, RegClass, ValueAllocation, live};
 use crate::lir::body::{Body, Type};
 
+#[cfg(test)]
+mod fs_copy_tests;
+
 /// 一个物理位置。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Loc {
@@ -471,8 +474,7 @@ fn resolve_group(
     let mut cycles = 0_u32;
     let mut uses_scratch = false;
     loop {
-        pending
-            .retain(|mov| !(mov.src == mov.dst && !matches!(mov.dst, Loc::Slot(_) | Loc::Scratch)));
+        pending.retain(|mov| mov.src != mov.dst);
         if pending.is_empty() {
             break;
         }
@@ -492,7 +494,13 @@ fn resolve_group(
         let saved = pending[0].dst;
         cycles += 1;
         match saved {
-            Loc::Gpr(_) if pending.iter().any(|mov| mov.src == Loc::Gpr(Gpr::R11)) => {
+            Loc::Gpr(_)
+                if pending.iter().any(|mov| {
+                    mov.src == Loc::Gpr(Gpr::R11)
+                        || (matches!(mov.src, Loc::Slot(_) | Loc::Scratch)
+                            && matches!(mov.dst, Loc::Slot(_) | Loc::Scratch))
+                }) =>
+            {
                 // 重建已经把常量放在 `r11` 里，环打断改走 frame scratch。
                 uses_scratch = true;
                 if scratch.is_none() {

@@ -24,24 +24,12 @@ pub(super) fn verify(body: &Body, graph: &Graph) -> Result<(), Diagnostic> {
                 {
                     return Err(invalid("压缩引用不能直接做指针偏移"));
                 }
-                // SharedHandle 的偏移是 guard 内的字段投影：它保持 handle provenance，
-                // 由 shared access verifier 强制「只在派生它的 guard 内使用」。
-                if matches!(
-                    (input, output),
-                    (
-                        Some(Provenance::SharedHandle),
-                        Some(Provenance::SharedHandle)
-                    )
-                ) {
-                    if results[0].origin != Origin::Derived(args[0]) {
-                        return Err(invalid("PtrOffset 丢失基址来源"));
-                    }
-                    return Ok(());
-                }
                 if matches!(input, Some(Provenance::SharedHandle))
                     || matches!(output, Some(Provenance::SharedHandle))
                 {
-                    return Err(invalid("handle 的偏移必须保持 handle provenance"));
+                    return Err(invalid(
+                        "handle 不是地址，必须先取得 access guard 的 payload",
+                    ));
                 }
                 if input != output
                     && !matches!(

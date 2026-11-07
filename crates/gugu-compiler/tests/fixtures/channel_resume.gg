@@ -1,0 +1,18 @@
+fn child(done: chan[int]) {
+    let count = 0
+    for i in 0..3 {
+        count = count + 1
+        yield
+    }
+    done.send(count)
+}
+fn main() {
+    let done = chan[int](2)
+    let a = async child(done)
+    let b = async child(done)
+    let first = match done.recv() { Ok(value) => value, Err(_) => panic("first") }
+    let second = match done.recv() { Ok(value) => value, Err(_) => panic("second") }
+    if first + second != 6 { panic("counts") }
+    _ = a.wait()
+    _ = b.wait()
+}

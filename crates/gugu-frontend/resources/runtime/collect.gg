@@ -12,14 +12,25 @@
  * 因此一次 GC 不会改变 mutator 的分配游标，也不会把半构造对象发布给 mutator。
  */
 
-use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_bytes, gc_config_granule_bytes, gc_config_line_bytes, gc_config_object_header_bytes, gc_config_tenure_age, GC_REQUEST_ALLOC, GC_REQUEST_KIND_OFFSET, GC_REQUEST_MAJOR, GC_REQUEST_PRESSURE}
+use std.runtime.counters as counters
+use std.runtime.shared as shared
+use std.runtime.compression as compression
+use std.runtime.heap.{heap_region_head_slot, heap_region_lookup, REGION_NEXT_OFFSET, REGION_MARK_EPOCH_OFFSET, REGION_PIN_COUNT_OFFSET, REGION_OBJECT_START_OFFSET, REGION_CONTROL_BYTES, REGION_CAPACITY_OFFSET, REGION_PAYLOAD_BYTES_OFFSET, REGION_LEASE_OFFSET}
+use std.runtime.pin_layout as pinning
+use std.runtime.barrier as barrier
+use std.runtime.heap.{ARENA_CARDS_OFFSET, heap_large_lookup, heap_large_table, LARGE_MAPPING_CAPACITY, LARGE_MAPPING_RECORD_BYTES, LARGE_MAPPING_STATE_ACTIVE, CONTROL_PINNED}
+use std.runtime.native_memory as mapping
+use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_bytes, gc_config_granule_bytes, gc_config_line_bytes, gc_config_object_header_bytes, gc_config_tenure_age, GC_REQUEST_ALLOC, GC_REQUEST_KIND_OFFSET, GC_REQUEST_MAJOR, GC_REQUEST_PRESSURE, GC_REQUEST_POLL}
 use std.runtime.heap.{copy_bytes, heap_arena_create, heap_arena_of, heap_block_set_state, heap_block_state_word, heap_byte, heap_clear_block_cards, heap_clear_block_object_starts, heap_clear_object_start, heap_clear_page_cover, heap_fail, heap_mark_begin_arena, heap_mark_bit, heap_mark_end, heap_mark_object_start, heap_mark_page_cover, heap_mark_test_and_set, heap_metadata, heap_object_start, heap_open_block, heap_open_block_meta, heap_open_free_block_meta, heap_resolve_object, heap_set_line_state, heap_store_byte, heap_store_word, heap_store_word32, heap_word, heap_word32, header_control, header_type_index, ARENA_ALLOC_CURSOR_OFFSET, ARENA_LINE_LIVE_OFFSET, ARENA_NO_BLOCK, ARENA_OBJECT_START_OFFSET, BLOCK_RECORD_BYTES, BLOCK_STATE_ALLOCATING, BLOCK_STATE_FREE, CONTROL_AGE_MASK, CONTROL_AGE_SHIFT, CONTROL_FORWARDED, GENERATION_AGING, GENERATION_OLD, LARGE_MAPPING_TABLE_BYTES, LINE_FREE, LINE_OCCUPIED, REPRESENTATION_LOCAL_DIRECT}
-use std.runtime.roots.{gc_initiator_frame, gc_type_trace, gc_type_trace_length, gc_types_section, gc_visit_dynamic_roots, gc_walk_roots, ROOT_KIND_COMPRESSED, ROOT_KIND_DIRECT, ROOT_KIND_HANDLE, ROOT_KIND_INTERIOR, ROOT_KIND_STACK_INTERIOR, ROOT_RECORD_BYTES, ROOT_SCAN_HEADER_BYTES, SAFEPOINT_KIND_CALL_RETURN}
-use std.runtime.scheduler.{heap_alloc}
+use std.runtime.roots.{gc_initiator_frame, gc_type_trace, gc_type_trace_length, gc_types_section, gc_visit_dynamic_roots, gc_walk_roots, ROOT_KIND_COMPRESSED, ROOT_KIND_DIRECT, ROOT_KIND_HANDLE, ROOT_KIND_INTERIOR, ROOT_KIND_STACK_INTERIOR, ROOT_RECORD_BYTES, ROOT_SCAN_HEADER_BYTES, SAFEPOINT_KIND_CALL_RETURN, SAFEPOINT_KIND_POLL_RESUME}
+use std.runtime.value.{resource_finalize}
+use std.runtime.roots.{gc_type_record}
+use std.runtime.heap.{CONTROL_HAS_RESOURCE_INSTANCE, heap_trim_free_blocks, heap_payload_bytes, PROCESSOR_ARENA_OFFSET}
+use std.runtime.scheduler.{heap_alloc, PROCESSOR_COROUTINE_REGISTRY_OFFSET}
 use std.runtime.trace.{trace_advance, trace_begin, trace_cursor, trace_grant, trace_last_op, trace_last_word, trace_open, TRACE_COMPLETE, TRACE_OP_INTERIOR, TRACE_PENDING, TRACE_VISIT}
 
 /// runtime 状态区内 coordinator 指针的槽位；与 `entry.rs` 的 `RUNTIME_STATE_COORDINATOR` 同源。
-pub const GC_COORDINATOR_STATE_OFFSET: uint = 696
+pub const GC_COORDINATOR_STATE_OFFSET: uint = 760
 
 /// coordinator 页布局。整页从处理器 bump 区取得，生命周期与进程相同，收集器期间不被移动。
 pub const COORDINATOR_MODE_OFFSET: uint = 0
@@ -67,6 +78,46 @@ pub const GC_COORDINATOR_PAGE_BYTES: uint = 4096
 pub const GC_MODE_MUTATOR: uint = 0
 pub const GC_MODE_COLLECTOR: uint = 1
 pub const COORDINATOR_MAJOR_CYCLES_OFFSET: uint = 144
+pub const COORDINATOR_LIVE_BYTES_OFFSET: uint = 152
+pub const COORDINATOR_PAUSE_NANOS_OFFSET: uint = 160
+pub const COORDINATOR_PIN_PAGES_OFFSET: uint = 168
+
+fn coordinator_shared_roots(coordinator: uint) {
+    let table = shared.shared_head()
+    while table != 0 {
+        let index: uint = 0
+        while index < shared.SHARED_SLOT_COUNT {
+            let slot = shared.shared_slot(table, index)
+            if heap_word32(slot + 4) == 1 && (heap_word(slot + 32) != 0 || heap_word(slot + 40) != 0) {
+                coordinator_mark_object(coordinator, shared.shared_address(table, index))
+            }
+            index = index + 1
+        }
+        table = heap_word(table)
+    }
+}
+
+fn coordinator_pin_roots(coordinator: uint) {
+    let page = heap_word(coordinator + COORDINATOR_PIN_PAGES_OFFSET)
+    while page != 0 {
+        let index: uint = 0
+        while index < pinning.PIN_RECORD_CAPACITY {
+            let record = page + pinning.PIN_RECORDS_OFFSET + index * pinning.PIN_RECORD_BYTES
+            if heap_word(record + 8) != 0 { coordinator_mark_object(coordinator, heap_word(record)) }
+            index = index + 1
+        }
+        page = heap_word(page)
+    }
+}
+
+pub fn gc_record_pause(processor: uint, started: uint, finished: uint) {
+    let slot = gc_coordinator(processor) + COORDINATOR_PAUSE_NANOS_OFFSET
+    let total = heap_word(slot)
+    if finished < started || total > ~uint(0) - (finished - started) { heap_fail() }
+    heap_store_word(slot, total + finished - started)
+}
+
+pub fn gc_pause_nanos(processor: uint) uint = heap_word(gc_coordinator(processor) + COORDINATOR_PAUSE_NANOS_OFFSET)
 
 /// side metadata 里需要随 nursery 一起重置的范围：object-start 到 line 表末尾。
 /// 头部 24 字节（state/generation/mark_epoch/alloc_cursor/pin_count）与 mark_epoch 不在其中。
@@ -245,6 +296,7 @@ fn coordinator_copy(coordinator: uint, source: uint, control: uint, config: uint
     let generation = if age >= tenure { GENERATION_OLD } else { GENERATION_AGING }
     let destination = coordinator_allocate(coordinator, bytes, granule, kind, generation, age)
     copy_bytes(destination, source, bytes)
+    heap_store_word(destination - header, heap_word(destination - header) | (control & (CONTROL_HAS_RESOURCE_INSTANCE | uint(3) << 43)))
     heap_store_word(source - header, control | CONTROL_FORWARDED)
     heap_store_word(source - header + 8, destination)
     heap_store_word(coordinator + COORDINATOR_EVACUATED_OFFSET, heap_word(coordinator + COORDINATOR_EVACUATED_OFFSET) + 1)
@@ -277,7 +329,9 @@ fn coordinator_scan(coordinator: uint, processor: uint, address: uint) {
                 let value = heap_word(field)
                 // 字段必须按 opcode 回写，不能一律当 direct：INTERIOR 字段里存的是
                 // `payload + delta`，直接拿它去搬运会把对象中段的字节当成 header。
-                let moved = if trace_last_op(cursor) == TRACE_OP_INTERIOR {
+                let moved = if (control >> 43 & 3) == 3 {
+                    compression.encode(coordinator_evacuate(coordinator, compression.decode(value)))
+                } else { if trace_last_op(cursor) == TRACE_OP_INTERIOR {
                     let located = heap_resolve_object(value, heap_word(coordinator + COORDINATOR_NURSERY_OFFSET), arena_bytes, granule, header)
                     if located.2 == 0 {
                         // 指向不搬动存储（静态、栈、large mapping）的内部指针不需要修正。
@@ -287,7 +341,7 @@ fn coordinator_scan(coordinator: uint, processor: uint, address: uint) {
                     }
                 } else {
                     coordinator_evacuate(coordinator, value)
-                }
+                } }
                 if moved != value {
                     heap_store_word(field, moved)
                 } else {
@@ -310,6 +364,55 @@ fn coordinator_scan(coordinator: uint, processor: uint, address: uint) {
         }
     } else {
         let _ = 0
+    }
+}
+
+/// 已停止 mutator；先 flush 卡片，再按 object-start 扫描覆盖脏卡片的完整对象。
+fn coordinator_remembered(coordinator: uint, processor: uint) {
+    barrier.gc_barrier_flush(processor)
+    let config = coordinator_config()
+    let arena = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
+    let arena_bytes = gc_config_arena_bytes(config)
+    let block_bytes = gc_config_block_bytes(config)
+    let card_bytes = gc_config_card_bytes(config)
+    let granule = gc_config_granule_bytes(config)
+    let header = gc_config_object_header_bytes(config)
+    let cards = heap_metadata(arena, arena_bytes) + ARENA_CARDS_OFFSET
+    let block: uint = 0
+    while block < arena_bytes / block_bytes {
+        if heap_block_state_word(arena, arena_bytes, block_bytes, block) == BLOCK_STATE_FREE {
+            block = block + 1
+            continue
+        }
+        let first_card = block * block_bytes / card_bytes
+        let end_card = (block + 1) * block_bytes / card_bytes
+        let card = first_card
+        let dirty = false
+        while card < end_card {
+            if heap_byte(cards + card) != 0 { dirty = true }
+            card = card + 1
+        }
+        if dirty {
+            let offset = block * block_bytes
+            while offset < (block + 1) * block_bytes {
+                if heap_object_start(arena, arena_bytes, arena + offset, granule) != 0 {
+                    let bytes = heap_word(arena + offset + 8)
+                    let current = offset / card_bytes
+                    let end = (offset + header + bytes - 1) / card_bytes
+                    let touched = false
+                    while current <= end {
+                        if heap_byte(cards + current) != 0 { touched = true }
+                        current = current + 1
+                    }
+                    if touched { coordinator_scan(coordinator, processor, arena + offset + header) };
+                }
+                offset = offset + granule
+            }
+        }
+        card = first_card
+        while card < end_card { heap_store_byte(cards + card, 0)
+            card = card + 1 }
+        block = block + 1
     }
 }
 
@@ -344,6 +447,14 @@ fn coordinator_reset_nursery(processor: uint, coordinator: uint) uint {
             while line < lines {
                 heap_set_line_state(nursery, arena_bytes, block_bytes, line_bytes, block * lines + line, LINE_FREE)
                 line = line + 1
+            }
+            let offset = block * block_bytes
+            while offset < (block + 1) * block_bytes {
+                let object = nursery + offset
+                if heap_object_start(nursery, arena_bytes, object, granule) != 0 {
+                    finalize_resource(object)
+                }
+                offset = offset + granule
             }
             heap_clear_block_object_starts(nursery, arena_bytes, block_bytes, block, granule, card)
             heap_block_set_state(nursery, arena_bytes, block_bytes, block, BLOCK_STATE_FREE)
@@ -394,7 +505,7 @@ pub fn gc_collect_minor(processor: uint, roots: uint, capacity: uint) uint {
                 if located.2 == 0 { moved = value } else { moved = coordinator_evacuate(coordinator, located.2) + located.3 }
             } else {
                 if kind == ROOT_KIND_HANDLE { moved = value } else {
-                    if kind == ROOT_KIND_COMPRESSED { moved = coordinator_evacuate(coordinator, value) } else { heap_fail() }
+                    if kind == ROOT_KIND_COMPRESSED { moved = compression.encode(coordinator_evacuate(coordinator, compression.decode(value))) } else { heap_fail() }
                 }
             }
         }
@@ -402,13 +513,32 @@ pub fn gc_collect_minor(processor: uint, roots: uint, capacity: uint) uint {
         heap_store_word(record + 16, moved)
         index = index + 1
     }
+    coordinator_remembered(coordinator, processor)
+    coordinator_large_tables(coordinator, processor, false)
+    coordinator_regions_minor(coordinator, processor)
     coordinator_drain(coordinator, processor)
     let reclaimed = coordinator_reset_nursery(processor, coordinator)
     heap_store_word(coordinator + COORDINATOR_RECLAIMED_OFFSET, reclaimed)
+    heap_store_word(coordinator + COORDINATOR_LIVE_BYTES_OFFSET, gc_heap_live_bytes(processor))
     heap_store_word(coordinator + COORDINATOR_MINOR_CYCLES_OFFSET, heap_word(coordinator + COORDINATOR_MINOR_CYCLES_OFFSET) + 1)
     heap_store_word(coordinator + COORDINATOR_EPOCH_OFFSET, heap_word(coordinator + COORDINATOR_EPOCH_OFFSET) + 1)
     heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_MUTATOR)
     0
+}
+
+/// 采样不启动 GC；不可达对象在实际 sweep/reset 删除起始记录前仍计入。
+#[used]
+pub fn gc_heap_live_bytes(processor: uint) uint {
+    let config = coordinator_config()
+    let nursery = heap_word(processor + PROCESSOR_ARENA_OFFSET)
+    let old = heap_word(gc_coordinator(processor) + COORDINATOR_OLD_OFFSET)
+    let nursery_bytes = heap_payload_bytes(nursery, config)
+    let old_bytes = if old == nursery { uint(0) } else { heap_payload_bytes(old, config) }
+    if nursery_bytes > ~uint(0) - old_bytes { heap_fail() }
+    let local_bytes = nursery_bytes + old_bytes
+    let region_bytes = counters.read(processor, counters.REGION_PAYLOAD)
+    if local_bytes > ~uint(0) - region_bytes { heap_fail() }
+    local_bytes + region_bytes
 }
 
 /// coordinator 计数读取口；探针与后续 pacing 从这里观测真实完成的工作。
@@ -422,7 +552,116 @@ pub const GC_MAJOR_REQUEST_KIND: uint = 2
 pub const GC_MARK_TICKET_BYTES: uint = 32
 pub const GC_MAJOR_MAX_WORK: uint = 384
 
+pub fn gc_large_record(coordinator: uint, address: uint) uint {
+    let config = coordinator_config()
+    let found = heap_large_lookup(heap_word(coordinator + COORDINATOR_OLD_OFFSET), address, config)
+    if found != 0 { return found }
+    let processor = heap_word(unsafe { std.runtime.current_slot() } + 16)
+    heap_large_lookup(heap_word(processor + PROCESSOR_ARENA_OFFSET), address, config)
+}
+
+/// minor 扫描所有非移动大对象的字段；major 按 epoch 标记并释放不可达映射。
+fn coordinator_large_table(coordinator: uint, processor: uint, arena: uint, sweep: bool) {
+    if arena == 0 { return }
+    let config = coordinator_config()
+    let arena_bytes = gc_config_arena_bytes(config)
+    let table = heap_large_table(heap_metadata(arena, arena_bytes), arena_bytes, gc_config_block_bytes(config))
+    let epoch = heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1
+    let index: uint = 0
+    while index < LARGE_MAPPING_CAPACITY {
+        let record = table + index * LARGE_MAPPING_RECORD_BYTES
+        if heap_word32(record + 28) == LARGE_MAPPING_STATE_ACTIVE {
+            let payload = heap_word(record + 8)
+            if sweep {
+                if heap_word(record + 40) != epoch && (heap_word(payload - 16) & CONTROL_PINNED) == 0 {
+                    finalize_resource(payload - 16)
+                    heap_store_word32(record + 28, 0)
+                    mapping.release_heap(heap_word(record), heap_word(record + 32))
+                };
+            } else { coordinator_scan(coordinator, processor, payload) }
+        }
+        index = index + 1
+    }
+}
+
+fn coordinator_large_tables(coordinator: uint, processor: uint, sweep: bool) {
+    let nursery = heap_word(processor + PROCESSOR_ARENA_OFFSET)
+    let old = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
+    coordinator_large_table(coordinator, processor, nursery, sweep)
+    if old != nursery { coordinator_large_table(coordinator, processor, old, sweep) };
+}
+
+fn coordinator_region_objects(coordinator: uint, processor: uint, control: uint, major: bool) {
+    let base = control - heap_word(control + REGION_CAPACITY_OFFSET)
+    let slot = control + REGION_OBJECT_START_OFFSET
+    while slot < control + REGION_CONTROL_BYTES {
+        let bits = heap_word(slot)
+        let bit: uint = 0
+        while bits != 0 {
+            if bits & 1 != 0 {
+                let payload = base + ((slot - control - REGION_OBJECT_START_OFFSET) * 8 + bit) * 16 + 16
+                if major { coordinator_push(coordinator, payload) }
+                else { coordinator_scan(coordinator, processor, payload) }
+            }
+            bit = bit + 1
+            bits = bits >> 1
+        }
+        slot = slot + 8
+    }
+}
+
+fn coordinator_region_mark(coordinator: uint, processor: uint, control: uint) {
+    let epoch = heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1
+    if heap_word(control + REGION_MARK_EPOCH_OFFSET) == epoch { return }
+    heap_store_word(control + REGION_MARK_EPOCH_OFFSET, epoch)
+    coordinator_region_objects(coordinator, processor, control, true)
+}
+
+fn coordinator_regions_minor(coordinator: uint, processor: uint) {
+    let control = heap_word(heap_region_head_slot(processor))
+    while control != 0 {
+        coordinator_region_objects(coordinator, processor, control, false)
+        control = heap_word(control + REGION_NEXT_OFFSET)
+    }
+}
+
+fn coordinator_regions_sweep(coordinator: uint, processor: uint, sweep: bool) {
+    let link = heap_region_head_slot(processor)
+    let control = heap_word(link)
+    let cursor = heap_word(processor + 3536)
+    let epoch = heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1
+    while control != 0 {
+        let bytes = heap_word(control + REGION_CAPACITY_OFFSET)
+        let base = control - bytes
+        let next = heap_word(control + REGION_NEXT_OFFSET)
+        let owned = (cursor >= base && cursor <= control) || heap_word32(control + REGION_LEASE_OFFSET) != 0 || heap_word(control + REGION_PIN_COUNT_OFFSET) != 0
+        if !sweep && owned { coordinator_region_mark(coordinator, processor, control) };
+        if sweep && !owned && heap_word(control + REGION_MARK_EPOCH_OFFSET) != epoch {
+            counters.remove(counters.REGION_PAYLOAD, heap_word(control + REGION_PAYLOAD_BYTES_OFFSET))
+            heap_store_word(link, next)
+            mapping.release_heap_mapping(base, bytes + REGION_CONTROL_BYTES, bytes)
+        } else { link = control + REGION_NEXT_OFFSET }
+        control = next
+    }
+}
+
 fn coordinator_mark_object(coordinator: uint, address: uint) {
+    let address = if address >> 60 == 10 { shared.shared_payload(address) } else { address }
+    let processor = heap_word(unsafe { std.runtime.current_slot() } + 16)
+    let region = heap_region_lookup(processor, address)
+    if region.0 != 0 {
+        coordinator_region_mark(coordinator, processor, region.0)
+        return
+    }
+    let record = gc_large_record(coordinator, address)
+    if record != 0 {
+        let epoch = heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1
+        if heap_word(record + 40) != epoch {
+            heap_store_word(record + 40, epoch)
+            coordinator_push(coordinator, heap_word(record + 8))
+        }
+        return
+    }
     let config = coordinator_config()
     let arena = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
     let located = heap_resolve_object(address, arena, gc_config_arena_bytes(config), gc_config_granule_bytes(config), gc_config_object_header_bytes(config))
@@ -451,7 +690,7 @@ fn coordinator_major_scan(coordinator: uint, processor: uint, address: uint) {
             if status == TRACE_VISIT {
                 let field = address + trace_last_word(cursor) * 8
                 let value = heap_word(field)
-                coordinator_mark_object(coordinator, value)
+                coordinator_mark_object(coordinator, if (control >> 43 & 3) == 3 { compression.decode(value) } else { value })
             } else {
                 if status == TRACE_PENDING {
                     grants = grants + 1
@@ -470,6 +709,16 @@ fn coordinator_major_drain(coordinator: uint, processor: uint) {
     while index < heap_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET) {
         coordinator_major_scan(coordinator, processor, coordinator_worklist_entry(coordinator, index))
         index = index + 1
+    }
+}
+
+fn finalize_resource(header: uint) {
+    let control = heap_word(header)
+    if (control & CONTROL_HAS_RESOURCE_INSTANCE) == 0 || (control & CONTROL_FORWARDED) != 0 { return }
+    heap_store_word(header, control & ~CONTROL_HAS_RESOURCE_INSTANCE)
+    let descriptor = gc_type_record(gc_types_section(), header_type_index(control))
+    unsafe {
+        resource_finalize(std.mem.transmute[uint, *()](header + 16), std.mem.transmute[uint, *()](descriptor))
     }
 }
 
@@ -518,6 +767,7 @@ fn coordinator_sweep_major(coordinator: uint) uint {
                         }
                         live_objects = live_objects + 1
                     } else {
+                        finalize_resource(object_header)
                         heap_clear_object_start(arena, arena_bytes, object_header, granule)
                         reclaimed = reclaimed + header + bytes
                     }
@@ -545,6 +795,7 @@ pub fn gc_collect_major(processor: uint, roots: uint, capacity: uint) uint {
     let written = heap_word(roots + 8)
     if arena == 0 || written > capacity { heap_fail() }
     heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_COLLECTOR)
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, 0)
     let _ = heap_mark_begin_arena(processor, arena, arena_bytes)
     let index: uint = 0
     while index < written {
@@ -554,15 +805,34 @@ pub fn gc_collect_major(processor: uint, roots: uint, capacity: uint) uint {
         if kind == ROOT_KIND_DIRECT || kind == ROOT_KIND_INTERIOR || kind == ROOT_KIND_STACK_INTERIOR {
             coordinator_mark_object(coordinator, value)
         } else {
-            if kind == ROOT_KIND_HANDLE { let _ = 0 } else { heap_fail() }
+            if kind == ROOT_KIND_HANDLE { coordinator_mark_object(coordinator, shared.shared_payload(value)) } else {
+                if kind == ROOT_KIND_COMPRESSED { coordinator_mark_object(coordinator, compression.decode(value)) } else { heap_fail() };
+            }
         }
         index = index + 1
     }
+    coordinator_pin_roots(coordinator)
+    coordinator_shared_roots(coordinator)
+    coordinator_regions_sweep(coordinator, processor, false)
     coordinator_major_drain(coordinator, processor)
+    coordinator_regions_sweep(coordinator, processor, true)
+    coordinator_large_tables(coordinator, processor, true)
+    shared.shared_sweep()
     let reclaimed = coordinator_sweep_major(coordinator)
+    barrier.gc_edge_complete(processor)
     heap_mark_end(processor)
+    let limit = heap_word(coordinator + COORDINATOR_EVAC_LIMIT_OFFSET)
+    if limit > arena && limit <= arena + arena_bytes {
+        let block = (limit - arena - 1) / gc_config_block_bytes(config)
+        if heap_block_state_word(arena, arena_bytes, gc_config_block_bytes(config), block) == BLOCK_STATE_FREE {
+            heap_store_word(coordinator + COORDINATOR_EVAC_CURSOR_OFFSET, 0)
+            heap_store_word(coordinator + COORDINATOR_EVAC_LIMIT_OFFSET, 0)
+        };
+    }
+    let _ = heap_trim_free_blocks(processor, arena, arena_bytes, gc_config_block_bytes(config))
     heap_store_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET, heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1)
     heap_store_word(coordinator + COORDINATOR_RECLAIMED_OFFSET, reclaimed)
+    heap_store_word(coordinator + COORDINATOR_LIVE_BYTES_OFFSET, gc_heap_live_bytes(processor))
     heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_MUTATOR)
     0
 }
@@ -603,6 +873,35 @@ fn gc_merge_roots(combined: uint, stack: uint, dynamic: uint) uint {
     total
 }
 
+/// 保存的 context.rsp 已越过 context_switch 返回地址，rip 是调用点续点。
+/// 未启动协程只有入口包，仍由动态根表保活，不把入口哨兵当作 managed 帧。
+pub fn gc_append_parked_roots(processor: uint, current: uint, combined: uint, scratch: uint) uint {
+    let node = heap_word(processor + PROCESSOR_COROUTINE_REGISTRY_OFFSET)
+    let remaining = heap_word(processor + 4032)
+    while node != 0 {
+        if remaining == 0 { heap_fail() }
+        let hot = heap_word(node + 8)
+        if hot != current {
+            let cold = heap_word(hot + 48)
+            let pc = heap_word(cold + 16)
+            if pc != heap_word(processor + 4072) {
+                heap_store_word(scratch, 0)
+                heap_store_word(scratch + 8, 0)
+                let needed = gc_walk_roots(scratch, GC_ROOT_RECORDS, heap_word(cold + 8), pc, SAFEPOINT_KIND_CALL_RETURN, 0, 0)
+                let previous = heap_word(combined + 8)
+                if needed > GC_ROOT_RECORDS || previous > GC_ROOT_RECORDS - needed { heap_fail() }
+                copy_bytes(combined + ROOT_SCAN_HEADER_BYTES + previous * GC_ROOT_RECORD_BYTES,
+                    scratch + ROOT_SCAN_HEADER_BYTES, needed * GC_ROOT_RECORD_BYTES)
+                heap_store_word(combined, previous + needed)
+                heap_store_word(combined + 8, previous + needed)
+            };
+        }
+        node = heap_word(node)
+        remaining = remaining - 1
+    }
+    heap_word(combined + 8)
+}
+
 /// GC dispatcher：在 runtime 专用 system stack 上取根并推进一个回收周期。
 ///
 /// `request` 指向当前线程的非移动控制记录（首字是 kind），`entry_rsp` 是 `gc_enter` 片段
@@ -616,15 +915,19 @@ pub fn gc_dispatch(request: uint, entry_rsp: uint) uint {
     let coordinator = gc_coordinator(processor)
     let kind = heap_word(request + GC_REQUEST_KIND_OFFSET)
     let status: uint = 0
-    if kind == GC_REQUEST_ALLOC || kind == GC_REQUEST_PRESSURE || kind == GC_REQUEST_MAJOR {
-        let located = gc_initiator_frame(entry_rsp)
+    let from_poll = kind == GC_REQUEST_POLL
+    if from_poll && !mapping.pressure_claim(processor) { return 0 }
+    if from_poll || kind == GC_REQUEST_ALLOC || kind == GC_REQUEST_PRESSURE || kind == GC_REQUEST_MAJOR {
+        let started = unsafe { std.runtime.monotonic_nanos() }
+        let located = if from_poll { (entry_rsp + 8, heap_word(entry_rsp)) } else { gc_initiator_frame(entry_rsp) }
         let frame = located.0
         let pc = located.1
         if frame == 0 || pc == 0 { heap_fail() } else { let _ = 0 }
         let stack = heap_word(coordinator + COORDINATOR_STACK_ROOTS_OFFSET)
         heap_store_word(stack, 0)
         heap_store_word(stack + 8, 0)
-        let needed = gc_walk_roots(stack, GC_ROOT_RECORDS, frame, pc, SAFEPOINT_KIND_CALL_RETURN, 0, 0)
+        let root_kind = if from_poll { SAFEPOINT_KIND_POLL_RESUME } else { SAFEPOINT_KIND_CALL_RETURN }
+        let needed = gc_walk_roots(stack, GC_ROOT_RECORDS, frame, pc, root_kind, 0, 0)
         if needed > GC_ROOT_RECORDS { heap_fail() } else { let _ = 0 }
         let dynamic = heap_word(coordinator + COORDINATOR_DYNAMIC_ROOTS_OFFSET)
         let combined = heap_word(coordinator + COORDINATOR_COMBINED_ROOTS_OFFSET)
@@ -633,11 +936,18 @@ pub fn gc_dispatch(request: uint, entry_rsp: uint) uint {
         let visited = gc_visit_dynamic_roots(processor, dynamic, GC_ROOT_RECORDS)
         if visited > GC_ROOT_RECORDS { heap_fail() } else { let _ = 0 }
         let total = gc_merge_roots(combined, stack, dynamic)
+        let _ = gc_append_parked_roots(processor, heap_word(coordinator + COORDINATOR_SAVED_R14_OFFSET), combined, stack)
         status = gc_collect_minor(processor, combined, GC_ROOT_RECORDS)
-        if status == 0 && (kind == GC_REQUEST_PRESSURE || kind == GC_REQUEST_MAJOR) {
+        if status == 0 && (from_poll || kind == GC_REQUEST_PRESSURE || kind == GC_REQUEST_MAJOR) {
             status = gc_collect_major(processor, combined, GC_ROOT_RECORDS)
         }
         if total == 0 { let _ = 0 } else { let _ = total }
+        let finished = unsafe { std.runtime.monotonic_nanos() }
+        gc_record_pause(processor, started, finished)
+        if from_poll {
+            if status != 0 { heap_fail() }
+            mapping.pressure_complete(processor)
+        };
     } else {
         let _ = 0
     }
@@ -659,10 +969,10 @@ pub fn gc_boot(processor: uint) {
     // 之后所有读取都走 `gc_coordinator` 的「已发布」断言。
     let coordinator = coordinator_create(processor, heap_word(processor + 4080))
     unsafe {
-        let base = std.platform.reserve_aligned(GC_SYSTEM_STACK_BYTES, uint(4096))
+        let base = mapping.reserve_aligned(GC_SYSTEM_STACK_BYTES, uint(4096))
         if base == 0 { heap_fail() } else { let _ = 0 }
         let range = GcExtent { base: base, bytes: GC_SYSTEM_STACK_BYTES }
-        if std.platform.commit(std.mem.transmute[*GcExtent, uint](std.ptr.addr_of(range))) != 0 { heap_fail() } else { let _ = 0 }
+        if mapping.commit(std.mem.transmute[*GcExtent, uint](std.ptr.addr_of(range))) != 0 { heap_fail() } else { let _ = 0 }
         heap_store_word(coordinator + COORDINATOR_SYSTEM_TOP_OFFSET, (base + GC_SYSTEM_STACK_BYTES) / 16 * 16)
         // collector 专用栈描述符：system 模式下 r14 指向它，因此收集器自身的栈检查不会去
         // 读 mutator 协程的 stack_check（那会让 system stack 地址看起来越界）。

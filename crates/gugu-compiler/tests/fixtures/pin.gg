@@ -1,0 +1,13 @@
+use std.mem.{pin}
+fn nested(p: &int) int {
+    pin(p, fn() int { pin(p, fn() int { *p + 1 }) })
+}
+fn failing(p: &int) int {
+    pin(p, fn() int { if *p < 0 { panic("pin callback") }
+        *p })
+}
+fn main() {
+    let value = 41
+    let result = nested(&value)
+    _ = failing(&result)
+}

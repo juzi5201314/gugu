@@ -9,6 +9,7 @@
  * 推进都由调用方重新给出，符合「跨批不保存裸地址」的契约。
  */
 
+use std.runtime.native_memory as mapping
 use std.runtime.heap.{heap_byte, heap_fail, heap_store_word, heap_word, PROCESSOR_TRACE_CURSOR_OFFSET}
 
 /// 与验证器共用的最大嵌套深度。
@@ -84,17 +85,17 @@ const FRAME_E: uint = 40
 const FRAME_F: uint = 48
 const FRAME_G: uint = 56
 
-/// 保留范围描述；与 `std.platform.commit` 的入参一致。
+/// 保留范围描述；与 `mapping.commit` 的入参一致。
 #[repr(C)]
 struct TraceExtent { base: uint, bytes: uint }
 
 /// 保留游标页；`boot` 在屏障状态页之后调用。
 pub fn trace_init(processor: uint) {
     unsafe {
-        let base = std.platform.reserve_aligned(TRACE_SCRATCH_BYTES, uint(4096))
+        let base = mapping.reserve_aligned(TRACE_SCRATCH_BYTES, uint(4096))
         if base == 0 { heap_fail() }
         let extent = TraceExtent { base, bytes: TRACE_SCRATCH_BYTES }
-        if std.platform.commit(std.mem.transmute[*TraceExtent, uint](std.ptr.addr_of(extent))) != 0 {
+        if mapping.commit(std.mem.transmute[*TraceExtent, uint](std.ptr.addr_of(extent))) != 0 {
             heap_fail()
         }
         let at = base

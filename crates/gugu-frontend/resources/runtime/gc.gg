@@ -141,6 +141,7 @@ pub const PROCESSOR_GC_REQUEST_OFFSET: uint = 3616
 /// 请求记录首字的 kind 字段：0 分配、1 poll、2 major、3 promote、4 pressure。
 pub const GC_REQUEST_KIND_OFFSET: uint = 0
 pub const GC_REQUEST_ALLOC: uint = 0
+pub const GC_REQUEST_POLL: uint = 1
 pub const GC_REQUEST_MAJOR: uint = 2
 pub const GC_REQUEST_PRESSURE: uint = 4
 pub fn gc_config_card_bytes(address: uint) uint {

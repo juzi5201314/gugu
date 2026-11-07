@@ -16,7 +16,17 @@ use super::gc_metadata_contract::GC_BLOCK_BYTES;
 use super::model::{FieldKind, MessageFieldSchema, MessageSchemaV1, RawModelError};
 
 /// region 契约段的 schema 版本。
-pub const REGION_SCHEMA: u32 = 1;
+pub const REGION_SCHEMA: u32 = 2;
+/// region 控制页：计数头之后接 32 KiB 数据段的 object-start 位图。
+pub const REGION_CONTROL_BYTES: u32 = 384;
+pub const REGION_OBJECT_START_OFFSET: u32 = 128;
+pub const REGION_NEXT_OFFSET: u32 = 104;
+pub const REGION_MARK_EPOCH_OFFSET: u32 = 112;
+pub const REGION_PIN_COUNT_OFFSET: u32 = 120;
+pub const COORDINATOR_REGION_HEAD_OFFSET: u32 = 176;
+/// 区域控制页中累计 payload 字节数（不含 header 与对齐）。
+pub const REGION_PAYLOAD_BYTES_OFFSET: u32 = 96;
+pub const REGION_OBJECTS_OFFSET: u32 = 40;
 
 /// 一个 region 允许容纳的对象数上界。
 pub const REGION_OBJECT_LIMIT: u32 = 64;

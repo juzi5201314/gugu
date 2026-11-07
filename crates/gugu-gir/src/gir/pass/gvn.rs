@@ -115,6 +115,26 @@ fn copy_propagate(editor: &mut Editor) -> Result<bool, Diagnostic> {
                 continue;
             }
             let site = reads[&place.local][0];
+            // 只有同块、定义之后且没有来源寿命结束的读取才可复用来源槽。
+            // 跨块传播需要额外支配证明；仅统计一次定义不能证明所有到达路径都经过它。
+            let statements = &editor.block(block).expect("活跃 block").statements;
+            let Some(start) = statements.iter().position(|&candidate| candidate == index) else {
+                continue;
+            };
+            let end = match site {
+                ReadSite::Statement(target) => {
+                    match statements.iter().position(|&candidate| candidate == target) {
+                        Some(end) if end > start => end,
+                        _ => continue,
+                    }
+                }
+                ReadSite::Terminator(target) if target == block => statements.len(),
+                _ => continue,
+            };
+            if statements[start + 1..end].iter().any(|&index| matches!(
+                editor.statement(index).kind,
+                StatementKind::StorageLive(local) | StatementKind::StorageDead(local) if local == source.local
+            )) { continue; }
             let rewritten = match site {
                 ReadSite::Statement(target) => {
                     let mut kind = editor.statement(target).kind.clone();
@@ -152,9 +172,26 @@ fn copy_propagate(editor: &mut Editor) -> Result<bool, Diagnostic> {
     Ok(changed)
 }
 
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn copy_propagation_preserves_consumed_slot_identity() {
+        let original = LocalId(1);
+        let temporary = LocalId(2);
+        let mut borrowed = Operand::Copy(Place::local(temporary));
+        let mut consumed = Operand::MoveInternal(Place::local(temporary));
+        assert!(rewrite_operand(&mut borrowed, temporary, original));
+        assert_eq!(borrowed, Operand::Copy(Place::local(original)));
+        assert!(!rewrite_operand(&mut consumed, temporary, original));
+        assert_eq!(consumed, Operand::MoveInternal(Place::local(temporary)));
+    }
+}
+
 fn rewrite_operand(operand: &mut Operand, from: LocalId, to: LocalId) -> bool {
     match operand {
-        Operand::Copy(place) | Operand::MoveInternal(place) if place.local == from => {
+        Operand::Copy(place) if place.local == from => {
             place.local = to;
             true
         }

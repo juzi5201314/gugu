@@ -149,9 +149,11 @@ impl BodyBuilder<'_, '_, '_, '_> {
             }
             ast::StmtKind::SourceMacro { .. } => return Err(self.error("未展开语句不能进入 HIR")),
         };
+        let unwind_plan = self.request_plan(hir::ExitKind::Unwind(self.scope), self.scope)?;
         self.statements[id.index()] = Some(hir::Statement {
             location: identity::location(self.compiler.sources, &statement.span)?,
             scope: self.scope,
+            unwind_plan,
             kind,
         });
         Ok(id)

@@ -67,6 +67,8 @@ struct BodyBuilder<'b, 'f, 'm, 'a> {
     tries: Vec<hir::ScopeId>,
     unsafe_depth: usize,
     pending_plans: Vec<cleanup::PendingPlan>,
+    /// 每个 scope 的最近 `(已注册数, unwind 计划)`；scope 编号稠密。
+    unwind_plans: Vec<Option<(usize, u32)>>,
 }
 
 impl<'m, 'a> Builder<'m, 'a> {
@@ -223,6 +225,7 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
             tries: Vec::new(),
             unsafe_depth: 0,
             pending_plans: Vec::new(),
+            unwind_plans: Vec::new(),
         };
         // 函数作用域的入口 Unwind 计划固定占用编号 0。
         builder.request_plan(hir::ExitKind::Unwind(hir::ScopeId(0)), hir::ScopeId(0))?;
@@ -284,9 +287,11 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
         span: &Span,
         effects: u32,
     ) -> Result<(), Diagnostic> {
+        let unwind_plan = self.request_plan(hir::ExitKind::Unwind(scope), scope)?;
         self.expressions[id.index()] = Some(hir::Expression {
             kind,
             scope,
+            unwind_plan,
             location: identity::location(self.compiler.sources, span)?,
             adjustments: 0..0,
             effects: hir::Effects::new(effects),

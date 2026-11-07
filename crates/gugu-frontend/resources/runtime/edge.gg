@@ -2,6 +2,8 @@
  * 过期周期、乱序序列与容量溢出都保留为可观测状态，不静默丢边。
  */
 
+use std.runtime.counters as counters
+use std.runtime.native_memory as mapping
 use std.runtime.heap.{heap_fail, heap_store_word, heap_word}
 
 pub const EDGE_STATE_BYTES: uint = 4096
@@ -25,10 +27,10 @@ fn edge_zero(base: uint) {
 }
 
 pub fn edge_new(cycle: uint) uint {
-    let base = unsafe { std.platform.reserve_aligned(EDGE_STATE_BYTES, uint(4096)) }
+    let base = unsafe { mapping.reserve_aligned(EDGE_STATE_BYTES, uint(4096)) }
     if base == 0 { heap_fail() }
     let extent = EdgeExtent { base: base, bytes: EDGE_STATE_BYTES }
-    if unsafe { std.platform.commit(std.mem.transmute[*EdgeExtent, uint](std.ptr.addr_of(extent))) } != 0 {
+    if unsafe { mapping.commit(std.mem.transmute[*EdgeExtent, uint](std.ptr.addr_of(extent))) } != 0 {
         heap_fail()
     }
     edge_zero(base)
@@ -51,6 +53,7 @@ pub fn edge_append(state: uint, source: uint, target: uint, sequence: uint, delt
     heap_store_word(record + 24, uint(delta))
     heap_store_word(state + EDGE_COUNT_OFFSET, count + 1)
     heap_store_word(state + EDGE_NEXT_SEQUENCE_OFFSET, sequence + 1)
+    counters.add(counters.EDGE_BATCHES, 1)
     0
 }
 

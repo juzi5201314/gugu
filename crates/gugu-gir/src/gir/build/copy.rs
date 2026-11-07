@@ -193,6 +193,12 @@ impl Builder<'_> {
         if !class.has_resource() && !class.is_unknown() {
             return;
         }
+        if class.is_pure_resource() {
+            if self.is_written(place) {
+                self.resource_action(ResourceActionKind::ReleaseLease, place, ty);
+            }
+            return;
+        }
         if class.has_resource()
             && let Some(fields) = passing::struct_fields(self.module, ty)
         {

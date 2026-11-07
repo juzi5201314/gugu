@@ -99,6 +99,19 @@ fn gc_alloc(
             "gc_region_slow",
         );
     }
+    if placement == PlacementKind::SharedHeap {
+        return slow_alloc(
+            dest,
+            descriptor,
+            align,
+            placement,
+            compressed,
+            bytes,
+            ctx,
+            builder,
+            "gc_shared_alloc",
+        );
+    }
     if placement == PlacementKind::LocalHeap && fast_path_eligible(descriptor, align, ctx) {
         return bump(
             dest,
@@ -319,6 +332,11 @@ fn bump(
             reg(size),
         ],
     );
+    if turn_region {
+        record_region_payload(builder);
+    } else {
+        mark_object_start(builder);
+    }
     if let Some(dest) = dest {
         builder.emit(
             "mov",
@@ -334,6 +352,161 @@ fn bump(
     )?;
     builder.define(done);
     Ok(())
+}
+
+/// r11 为区域 payload，r10 为动态载荷大小；不引入 safepoint。
+pub(crate) fn record_region_payload(builder: &mut Builder) {
+    use crate::runtime::processor::PROCESSOR_REGION_PAYLOAD_BYTES_OFFSET;
+    use crate::runtime::region_schema::{REGION_OBJECTS_OFFSET, REGION_PAYLOAD_BYTES_OFFSET};
+    let rax = gpr(Gpr::Rax);
+    let size = gpr(Gpr::R10);
+    builder.emit(
+        "mov",
+        move_kinds(64),
+        Access::Write,
+        vec![reg(rax), reg(gpr(Gpr::R11))],
+    );
+    builder.emit(
+        "sub",
+        &[OperandKind::Rm64, OperandKind::Imm32],
+        Access::ReadWrite,
+        vec![reg(rax), imm(OBJECT_HEADER_BYTES)],
+    );
+    builder.emit(
+        "and",
+        &[OperandKind::Rm64, OperandKind::Imm32],
+        Access::ReadWrite,
+        vec![reg(rax), imm((-(i64::from(GC_BLOCK_BYTES))) as u64)],
+    );
+    builder.emit(
+        "add",
+        &[OperandKind::Rm64, OperandKind::Imm8],
+        Access::ReadWrite,
+        vec![
+            mem_base(rax, (GC_BLOCK_BYTES + REGION_OBJECTS_OFFSET) as i32),
+            imm(1),
+        ],
+    );
+    builder.emit(
+        "add",
+        move_kinds(64),
+        Access::ReadWrite,
+        vec![
+            mem_base(rax, (GC_BLOCK_BYTES + REGION_PAYLOAD_BYTES_OFFSET) as i32),
+            reg(size),
+        ],
+    );
+    builder.emit(
+        "add",
+        move_kinds(64),
+        Access::ReadWrite,
+        vec![
+            mem_base(gpr(Gpr::R15), PROCESSOR_REGION_PAYLOAD_BYTES_OFFSET as i32),
+            reg(size),
+        ],
+    );
+    mark_start(
+        builder,
+        u64::from(GC_BLOCK_BYTES),
+        u64::from(crate::runtime::region_schema::REGION_OBJECT_START_OFFSET),
+        Gpr::Rdx,
+    );
+}
+
+/// r11 为 payload；对象头已经写入。无 safepoint 的同一分配序列发布 object-start。
+pub(crate) fn mark_object_start(builder: &mut Builder) {
+    mark_start(
+        builder,
+        crate::runtime::gc_metadata_contract::GC_ARENA_BYTES,
+        crate::runtime::local_heap_schema::HEAP_OBJECT_START_OFFSET,
+        Gpr::R10,
+    );
+}
+
+fn mark_start(builder: &mut Builder, range_bytes: u64, bitmap_offset: u64, scratch: Gpr) {
+    let rm_imm = &[OperandKind::Rm64, OperandKind::Imm32];
+    let shift = &[OperandKind::Rm64, OperandKind::Imm8];
+    let rax = gpr(Gpr::Rax);
+    let r10 = gpr(scratch);
+    let rcx = gpr(Gpr::Rcx);
+    builder.clobber_gpr(scratch);
+    builder.clobber_gpr(Gpr::Rcx);
+    builder.emit(
+        "mov",
+        move_kinds(64),
+        Access::Write,
+        vec![reg(r10), reg(gpr(Gpr::R11))],
+    );
+    builder.emit(
+        "sub",
+        rm_imm,
+        Access::ReadWrite,
+        vec![reg(r10), imm(OBJECT_HEADER_BYTES)],
+    );
+    builder.emit(
+        "mov",
+        move_kinds(64),
+        Access::Write,
+        vec![reg(rax), reg(r10)],
+    );
+    builder.emit(
+        "and",
+        rm_imm,
+        Access::ReadWrite,
+        vec![reg(rax), imm((-(range_bytes as i64)) as u64)],
+    );
+    builder.emit(
+        "and",
+        rm_imm,
+        Access::ReadWrite,
+        vec![reg(r10), imm(range_bytes - 1)],
+    );
+    builder.emit(
+        "shr",
+        shift,
+        Access::ReadWrite,
+        vec![
+            reg(r10),
+            imm(u64::from(HEAP_GRANULE_BYTES.trailing_zeros())),
+        ],
+    );
+    builder.emit(
+        "mov",
+        move_kinds(64),
+        Access::Write,
+        vec![reg(rcx), reg(r10)],
+    );
+    builder.emit("and", rm_imm, Access::ReadWrite, vec![reg(rcx), imm(63)]);
+    builder.emit("shr", shift, Access::ReadWrite, vec![reg(r10), imm(6)]);
+    builder.emit("shl", shift, Access::ReadWrite, vec![reg(r10), imm(3)]);
+    builder.emit(
+        "add",
+        move_kinds(64),
+        Access::ReadWrite,
+        vec![reg(rax), reg(r10)],
+    );
+    builder.emit(
+        "lea",
+        &[OperandKind::Mem, OperandKind::R64],
+        Access::Address,
+        vec![
+            mem_base(rax, (range_bytes + bitmap_offset) as i32),
+            reg(rax),
+        ],
+    );
+    emit_imm64(builder, scratch, 1);
+    builder.emit(
+        "shl",
+        &[OperandKind::Rm64, OperandKind::Cl],
+        Access::ReadWrite,
+        vec![reg(r10), reg(rcx)],
+    );
+    builder.emit(
+        "or",
+        move_kinds(64),
+        Access::ReadWrite,
+        vec![mem_base(rax, 0), reg(r10)],
+    );
 }
 
 /// 分配 slow path：按固定 ABI 传参并调用 runtime 入口。
@@ -477,7 +650,10 @@ fn tlab_offsets(ctx: LowerCtx<'_>, turn_region: bool) -> (i32, i32) {
     )
 }
 
-fn safepoint_poll(ctx: LowerCtx<'_>, builder: &mut Builder) -> Result<(), LoweringError> {
+pub(crate) fn safepoint_poll(
+    ctx: LowerCtx<'_>,
+    builder: &mut Builder,
+) -> Result<(), LoweringError> {
     let raw = ctx
         .raw
         .map_or_else(poll_flags_offset, |raw| raw.scheduler().poll_flags_offset());

@@ -37,6 +37,7 @@ pub fn implied_glue(op: &Op) -> Option<&'static str> {
         Op::GcWriteBarrierReserved { .. } => "gc_write_barrier_reserved",
         Op::GcWriteBarrier { .. } => "gc_write_barrier",
         Op::GcAlloc { placement, .. } => match placement {
+            crate::gir::placement::PlacementKind::SharedHeap => "gc_shared_alloc",
             crate::gir::placement::PlacementKind::TurnRegion => "gc_region_slow",
             _ => "gc_alloc_slow",
         },
@@ -90,6 +91,7 @@ pub enum BindingTarget {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeGlueBindings {
     map: BTreeMap<&'static str, BindingTarget>,
+    runtime_owners: std::collections::BTreeSet<[u8; 32]>,
     fingerprint: [u8; 32],
 }
 
@@ -100,7 +102,29 @@ impl RuntimeGlueBindings {
         hir: &hir::Validated,
         lir: &lir::Validated,
     ) -> Result<Self, Diagnostic> {
-        Self::resolve_defs(resources.glue_defs(), hir, lir)
+        let mut bindings = Self::resolve_defs(resources.glue_defs(), hir, lir)?;
+        let paths: std::collections::BTreeSet<_> = resources.runtime_paths().collect();
+        let hashes: BTreeMap<_, _> = resources
+            .source_blobs()
+            .iter()
+            .filter(|source| paths.contains(source.logical_path.as_str()))
+            .map(|source| {
+                (
+                    source.logical_path.as_str(),
+                    *blake3::hash(source.source.as_bytes()).as_bytes(),
+                )
+            })
+            .collect();
+        let module = hir.module();
+        bindings.runtime_owners = module
+            .definitions
+            .iter()
+            .filter_map(|definition| {
+                let source = &module.sources[definition.location.as_ref()?.source as usize];
+                (hashes.get(source.path.as_str()) == Some(&source.hash)).then_some(definition.key)
+            })
+            .collect();
+        Ok(bindings.sealed())
     }
 
     /// 按给定定义表解析；确定性测试用合成表覆盖缺失、重复与签名不一致。
@@ -136,6 +160,7 @@ impl RuntimeGlueBindings {
         }
         let bindings = Self {
             map,
+            runtime_owners: Default::default(),
             fingerprint: [0; 32],
         };
         let bindings = bindings.sealed();
@@ -155,30 +180,11 @@ impl RuntimeGlueBindings {
         // 但 Rust 与 Gugu runtime 都没有实现。此前静默解析到 `__gugu_stub_exit`（含闭包的程序
         // 运行期 exit 56），属动态值单元而不是 LocalHeap/回收迁移面。
         "dynamic_erase",
-        // COW 快照需要镜像侧 value/resource 发布语义，仍由步骤 5 接管。
-        "cow_snapshot",
-        // 以下动态值、resource 与调度入口属于步骤 5 的镜像生命周期实现；它们先以显式缺口
-        // 记录，任何实际发射点仍会经过 lowering 门禁而不会静默生成未知符号。
-        "value_copy",
-        "value_publish",
-        "value_drop",
-        "value_forget",
-        "value_transfer",
-        "resource_acquire",
-        "resource_release",
-        "resource_transfer",
-        "resource_finalize",
-        "pin",
-        "unpin",
         "type_is",
         "downcast",
         "downcast_copy",
         "gc_mark_ticket_batch",
         "gc_edge_delta_batch",
-        "gc_resolve_shared_handle",
-        "gc_shared_access_begin",
-        "gc_shared_access_end",
-        "gc_shared_field_barrier",
         "gc_forward_shared_handle",
         // 平台范围原语只实现了 reserve/commit/decommit/release 四个（`fragments.rs` 的
         // `PLATFORM_OPS_WITH_CODE`）：guard 页、显式清零、字上等待/唤醒与 entropy 属步骤 6 的
@@ -281,6 +287,15 @@ impl RuntimeGlueBindings {
                     "runtime glue `{glue}` 的绑定实例不在 LIR 世界中"
                 )));
             };
+            if matches!(*glue, "foreign_dispatch" | "foreign_dirty_dispatch")
+                && (body.signature.parameters
+                    != vec![ValueType::scalar(crate::lir::body::Type::I64); 4]
+                    || !body.signature.results.is_empty())
+            {
+                return Err(binding_error(
+                    "foreign_dispatch 必须是四个机器字参数且无返回车道",
+                ));
+            }
             for site in bodies {
                 for (parameters, results) in site
                     .instructions
@@ -372,6 +387,10 @@ impl RuntimeGlueBindings {
             .collect()
     }
 
+    pub(crate) fn defers_automatic_poll(&self, owner: &[u8; 32]) -> bool {
+        self.runtime_owners.contains(owner)
+    }
+
     fn sealed(mut self) -> Self {
         let canonical = self.canonical();
         self.fingerprint = hash_domain("gugu-runtime-glue-bindings-v1", &canonical);
@@ -390,6 +409,10 @@ impl RuntimeGlueBindings {
                 BindingTarget::Fragment => bytes.extend_from_slice(b"fragment"),
             }
             bytes.push(b'\n');
+        }
+        for owner in &self.runtime_owners {
+            bytes.extend_from_slice(b"runtime-owner=");
+            bytes.extend_from_slice(owner);
         }
         bytes
     }
@@ -454,6 +477,12 @@ fn resolve_item(
 
 /// 最终 LIR 中是否存在引用该 glue 的调用点或隐含调用 op。
 fn referenced(lir: &lir::Validated, glue: &str) -> bool {
+    if matches!(glue, "foreign_dispatch" | "foreign_dirty_dispatch") {
+        return lir.bodies().iter().any(|body| {
+            body.instructions.iter().any(|instruction| matches!(&instruction.op, Op::Call(call) | Op::ForeignCall(call) if super::lower::foreign::dispatcher(call.kind) == Some(glue)))
+                || body.blocks.iter().any(|block| matches!(&block.terminator, Terminator::Invoke { call, .. } if super::lower::foreign::dispatcher(call.kind) == Some(glue)))
+        });
+    }
     lir.bodies().iter().any(|body| {
         body.instructions.iter().any(|instruction| {
             implied_glue(&instruction.op) == Some(glue)

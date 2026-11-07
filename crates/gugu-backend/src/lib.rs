@@ -5,7 +5,9 @@
 //! `Compiler` 的验收 harness 与回归留在上层 driver。
 #![forbid(unsafe_code)]
 
+mod native_link;
 pub mod x64;
+pub use native_link::NativeLink;
 
 use gugu_base::{
     canonical, diagnostics, diagnostics::Diagnostic, hash, query, source, source::SourceMap,
@@ -319,7 +321,11 @@ pub fn plan(
     raw: &crate::runtime::RuntimeRawContractV1,
     x64: &crate::x64::codegen::X64World,
     runtime_checks_elided_count: u32,
+    native_link: &NativeLink,
 ) -> Result<Option<BackendPlan>, String> {
+    native_link.validate(target)?;
+    native_link.validate_bridge(target, x64)?;
+    native_link.validate_bridge_targets(lir)?;
     let descriptor = target.descriptor();
     let module = hir.module();
     let Some(entry) = module.entry else {
@@ -331,6 +337,7 @@ pub fn plan(
                 x64,
                 &raw.gc_metadata().type_section,
                 &raw.gc_metadata().metadata_section,
+                native_link,
             )?,
             x64::pe::PeImage::absent(),
         ),
@@ -340,6 +347,7 @@ pub fn plan(
                 x64,
                 &raw.gc_metadata().type_section,
                 &raw.gc_metadata().metadata_section,
+                native_link,
             )?,
         ),
     };

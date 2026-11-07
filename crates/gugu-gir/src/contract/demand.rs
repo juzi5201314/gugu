@@ -37,8 +37,38 @@ pub fn definition(context: &MonoContext<'_>, glue: &str) -> Option<hir::DefId> {
 pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
     let mut demand = BTreeSet::new();
     for statement in &body.statements {
+        use crate::gir::body::{ResourceActionKind as Resource, ValueActionKind as Value};
+        match &statement.kind {
+            StatementKind::ResourceAction { action, .. } => {
+                demand.insert(match action {
+                    Resource::AcquireLease => "resource_acquire",
+                    Resource::ReleaseLease => "resource_release",
+                    Resource::Transfer => "resource_transfer",
+                    Resource::Finalize => "resource_finalize",
+                });
+            }
+            StatementKind::ValueAction { action, .. } => {
+                demand.insert(match action {
+                    Value::Copy => "value_copy",
+                    Value::Publish => "value_publish",
+                    Value::Drop => "value_drop",
+                    Value::Forget => "value_forget",
+                });
+            }
+            _ => {}
+        }
         if let StatementKind::Assign(_, value) = &statement.kind {
+            // 聚合写入托管槽时由 LIR 使用同一 descriptor 搬运与发布。
+            demand.insert("value_transfer");
+            demand.insert("value_forget");
+            demand.insert("resource_release");
             match value {
+                Rvalue::Compare { .. } => {
+                    demand.insert("string_compare");
+                }
+                Rvalue::CowSnapshot(_) => {
+                    demand.insert("cow_snapshot");
+                }
                 Rvalue::AllocObject { .. }
                 | Rvalue::AllocArray { .. }
                 | Rvalue::Ref(_)
@@ -47,6 +77,11 @@ pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
                     // placement 在实例闭合后才形成；两种分配域共享真实分配操作的需求。
                     demand.extend([
                         "gc_alloc_slow",
+                        "gc_shared_alloc",
+                        "gc_resolve_shared_handle",
+                        "gc_shared_access_begin",
+                        "gc_shared_access_end",
+                        "gc_shared_field_barrier",
                         "gc_region_slow",
                         "gc_region_publish",
                         "gc_region_reset",
@@ -94,7 +129,23 @@ pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
         }
     }
     for block in &body.blocks {
+        if matches!(&block.terminator, Terminator::Call { call_kind, .. } if *call_kind != crate::gir::body::CallKind::Managed)
+        {
+            demand.insert("foreign_copy");
+        }
         match &block.terminator {
+            Terminator::Call {
+                call_kind: crate::gir::body::CallKind::ForeignBridge,
+                ..
+            } => {
+                demand.insert("foreign_dispatch");
+            }
+            Terminator::Call {
+                call_kind: crate::gir::body::CallKind::ForeignBridgeDirtyCpu,
+                ..
+            } => {
+                demand.insert("foreign_dirty_dispatch");
+            }
             Terminator::Suspend { reason, .. } => {
                 demand.insert(match reason {
                     SuspendReason::ChanSend { .. } => "channel_send",

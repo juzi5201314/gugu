@@ -22,6 +22,7 @@ pub mod asm;
 pub mod atomic;
 pub mod call;
 pub mod ctrl;
+pub(crate) mod foreign;
 pub mod memory;
 pub mod numeric;
 mod poll_cost;
@@ -691,6 +692,17 @@ pub fn load_stack(
     let disp = i32::try_from(offset).expect("outgoing 偏移适配 i32");
     let place = mem_base(gpr(Gpr::Rsp), disp);
     match ty {
+        Type::I8 | Type::I16 => builder.emit(
+            "movzx",
+            if ty == Type::I8 {
+                &[OperandKind::Rm8, OperandKind::R32]
+            } else {
+                &[OperandKind::Rm16, OperandKind::R32]
+            },
+            Access::Read,
+            vec![place, reg(dest)],
+        ),
+        Type::I32 => builder.emit("mov", move_kinds(32), Access::Read, vec![place, reg(dest)]),
         Type::F32 | Type::F64 => builder.emit(
             "movsd",
             &[OperandKind::XmmRm, OperandKind::Xmm][..],

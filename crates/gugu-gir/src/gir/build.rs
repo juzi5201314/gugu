@@ -88,7 +88,7 @@ struct Builder<'a> {
     chain_head: Option<LocalId>,
     cleanup_flags: Vec<Option<LocalId>>,
     saved: Vec<SavedCleanup>,
-    intern: BTreeMap<(CleanupChain, Vec<hir::CleanupAction>), BlockId>,
+    intern: BTreeMap<(CleanupChain, Vec<hir::CleanupAction>, Option<BlockId>), BlockId>,
     intern_order: u32,
     loops: Vec<LoopFrame>,
     tries: Vec<TryFrame>,
@@ -693,12 +693,8 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
-    fn unwind_of(&self, scope: hir::ScopeId) -> u32 {
-        self.owner.scopes[scope.index()].unwind_plan
-    }
-
     fn current_unwind(&self, id: ExprId) -> u32 {
-        self.unwind_of(self.expr_scope(id))
+        self.owner.expressions[id.index()].unwind_plan
     }
 
     fn panic_string(&mut self, text: &str) -> Operand {

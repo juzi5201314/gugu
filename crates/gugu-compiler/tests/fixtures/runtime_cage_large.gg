@@ -1,0 +1,7 @@
+fn make() fn() int {
+    let values: [int; 4096] = [73; 4096]
+    return fn() int { return values[0] }
+}
+fn main() { let closure = make()
+    _ = closure()
+}

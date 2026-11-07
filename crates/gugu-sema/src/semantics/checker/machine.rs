@@ -70,10 +70,18 @@ impl Checker<'_, '_> {
             );
             return Some(Ty::Error);
         }
-        // 指针实参必须是原始指针，机器字实参必须是无符号整数；点类型与前置条件由登记机器
-        // 片段的固定内部边界维护，checker 只验机器形状。
+        // 字节视图保留托管根，不能按普通机器字检查或借 transmute 绕过 COW。
         for (index, &argument) in args.iter().enumerate() {
-            let ty = self.expression(argument, None);
+            let expected_buffer = match kind {
+                RuntimeMachineIntrinsic::StringBytes => Some(Ty::String),
+                RuntimeMachineIntrinsic::StringFromUtf8Unchecked => Some(byte_slice()),
+                _ => None,
+            };
+            let ty = self.expression(argument, expected_buffer.as_ref());
+            if let Some(expected_buffer) = expected_buffer {
+                self.unify(&ty, &expected_buffer, span);
+                continue;
+            }
             let normalized = self.normalized(&ty);
             let pointer = matches!(
                 (kind, index),
@@ -194,15 +202,25 @@ impl Checker<'_, '_> {
         ty
     }
 
-    /// 返回原语的返回类型：`current_slot`/`report_write` 返回机器字 `uint`，其余不返回值。
+    /// 原语结果由同一目录决定；字节视图仍是正常的受管切片类型。
     fn runtime_machine_result(&self, kind: RuntimeMachineIntrinsic) -> Ty {
-        if kind.yields_word() {
-            Ty::Int {
+        match kind {
+            RuntimeMachineIntrinsic::AllocBytes | RuntimeMachineIntrinsic::StringBytes => {
+                byte_slice()
+            }
+            RuntimeMachineIntrinsic::StringFromUtf8Unchecked => Ty::String,
+            _ if kind.yields_word() => Ty::Int {
                 signed: false,
                 bits: 64,
-            }
-        } else {
-            Ty::Unit
+            },
+            _ => Ty::Unit,
         }
     }
+}
+
+fn byte_slice() -> Ty {
+    Ty::Ref(Box::new(Ty::Slice(Box::new(Ty::Int {
+        signed: false,
+        bits: 8,
+    }))))
 }

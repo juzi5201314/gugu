@@ -238,9 +238,9 @@ pub fn layout(
     let calls = call_layouts(body, selected, target)?;
     let mut has_call = instruction_has_call(selected);
     let mut outgoing = 0_u32;
-    for (layout, _) in &calls {
+    for (layout, _, packet_bytes) in &calls {
         has_call = true;
-        outgoing = outgoing.max(call_stack_bytes(layout));
+        outgoing = outgoing.max(call_stack_bytes(layout)).max(*packet_bytes);
     }
     if target == TargetName::X86_64Windows && has_call {
         outgoing = outgoing.max(WIN_SHADOW_BYTES);
@@ -435,7 +435,7 @@ fn call_layouts(
     body: &Body,
     selected: &SelectedFunction,
     target: TargetName,
-) -> Result<Vec<(AbiLayout, CallKind)>, AllocError> {
+) -> Result<Vec<(AbiLayout, CallKind, u32)>, AllocError> {
     let mut layouts = Vec::new();
     for block in &selected.blocks {
         for site in &block.sites {
@@ -455,15 +455,22 @@ fn call_layouts(
 }
 
 /// 调用分类。
-fn classify(call: &Call, target: TargetName) -> Result<(AbiLayout, CallKind), AllocError> {
+fn classify(call: &Call, target: TargetName) -> Result<(AbiLayout, CallKind, u32), AllocError> {
     let layout = abi::classify_call(call, target)
         .map_err(|error| AllocError::new(format!("调用 ABI 分类失败：{error}")))?;
-    Ok((layout, call.kind))
+    let packet_bytes = if lower::foreign::dispatcher(call.kind).is_some() {
+        lower::foreign::layout(call, target)
+            .map_err(|error| AllocError::new(format!("外调封装失败：{error}")))?
+            .bytes
+    } else {
+        0
+    };
+    Ok((layout, call.kind, packet_bytes))
 }
 
 /// 一个调用点需要的 outgoing 字节数（含 shadow space 基址）。
 fn call_stack_bytes(layout: &AbiLayout) -> u32 {
-    let mut bytes = 0_u32;
+    let mut bytes = layout.stack_slots.saturating_mul(8);
     for value in layout.arguments.iter().chain(&layout.results) {
         if let Some(AbiSlot::Stack { offset }) = value.slot {
             bytes = bytes.max(offset.saturating_add(lower::stack_piece_bytes(value.ty.ty)));

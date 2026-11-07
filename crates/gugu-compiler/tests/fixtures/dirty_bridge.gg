@@ -1,0 +1,11 @@
+use std.runtime as runtime
+use std.fs
+use std.path.{Path}
+#[ffi(dirty_cpu)] unsafe extern "C" fn dirty_probe(value: uint) uint
+unsafe extern "C" fn native_probe(value: uint) uint
+fn main() { unsafe {
+    _ = dirty_probe(7)
+    _ = native_probe(9)
+    _ = fs.exists(Path::from_string("bridge"))
+    _ = runtime.stats()
+} }

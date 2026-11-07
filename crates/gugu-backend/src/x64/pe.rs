@@ -12,6 +12,9 @@ use crate::runtime::entry;
 use std::collections::{BTreeMap, BTreeSet};
 use std::mem::offset_of;
 
+#[path = "pe_exports.rs"]
+mod exports;
+
 const IMAGE_BASE: u64 = 0x0000_0001_4000_0000;
 /// 类型描述符记录的宿主 section；`Symbol::TypeDescriptor` 的地址由它派生。
 const TYPE_SECTION_NAME: &str = ".gugutyp";
@@ -33,6 +36,32 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "WriteFile",
             "GetEnvironmentStringsW",
             "FreeEnvironmentStringsW",
+            "CreateThread",
+            "WaitForSingleObject",
+            "Sleep",
+            "CloseHandle",
+            "GetLastError",
+            "GetCurrentThreadId",
+            "GetTickCount64",
+            "CreateFileW",
+            "ReadFile",
+            "SetFilePointerEx",
+            "GetFileInformationByHandle",
+            "SetEndOfFile",
+            "SetFileInformationByHandle",
+            "FlushFileBuffers",
+            "DuplicateHandle",
+            "FindFirstFileW",
+            "FindNextFileW",
+            "FindClose",
+            "CreateDirectoryW",
+            "DeleteFileW",
+            "RemoveDirectoryW",
+            "MoveFileExW",
+            "CreateHardLinkW",
+            "CreateSymbolicLinkW",
+            "DeviceIoControl",
+            "GetFinalPathNameByHandleW",
         ],
     ),
     (
@@ -102,11 +131,13 @@ pub enum RelocKindCode {
 #[derive(Clone, Debug)]
 pub struct PeRequest {
     pub entry: String,
+    pub cage_bytes: u64,
     pub symbols: Vec<ObjectSymbol>,
     pub readonly: Vec<(String, Vec<u8>)>,
     /// 常量数据块 `(符号名, 字节)`：进 `.rdata` 并按符号登记，不作为节名（节名限 8 字节）。
     pub constants: Vec<(String, Vec<u8>)>,
     pub dll: bool,
+    pub imports: Vec<(String, String)>,
     /// 已绑定 glue 的 mangled 符号名；这些名字缺失定义时按 `E0062` 语义失败。
     pub bound_glues: std::collections::BTreeSet<String>,
     /// 类型描述符符号 → `.gugutyp` 内偏移；这些符号的地址由 type section 派生。
@@ -131,10 +162,32 @@ struct RipSite {
 }
 
 /// 链接一个已编码片段世界。
-pub fn link_world(world: &X64World, types: &[u8], meta: &[u8]) -> Result<PeImage, String> {
+pub fn link_world(
+    world: &X64World,
+    types: &[u8],
+    meta: &[u8],
+    native_link: &crate::NativeLink,
+) -> Result<PeImage, String> {
     let mut symbols = Vec::new();
     for fragment in &world.fragments {
         symbols.push(symbol_from_fragment(fragment)?);
+    }
+    for export in &world.native_exports {
+        symbols.push(ObjectSymbol {
+            name: format!("~gugu_export_{}", export.name),
+            bytes: export.bytes.clone(),
+            aliases: vec![(export.name.clone(), 0)],
+            relocs: export
+                .relocations
+                .iter()
+                .map(|reloc| ObjectReloc {
+                    offset: reloc.offset,
+                    kind: RelocKindCode::PcRel32,
+                    target: reloc_name(&reloc.target),
+                    addend: reloc.addend,
+                })
+                .collect(),
+        });
     }
     for blob in fragments::registered_fragments(world.target) {
         symbols.push(symbol_from_machine_fragment(&blob)?);
@@ -157,10 +210,22 @@ pub fn link_world(world: &X64World, types: &[u8], meta: &[u8]) -> Result<PeImage
     ];
     link(&PeRequest {
         entry: world.entry_symbol.clone(),
+        cage_bytes: world.cage_bytes,
         symbols,
         readonly,
-        constants: world.constants.clone(),
+        constants: world
+            .constants
+            .iter()
+            .cloned()
+            .chain(world.native_exports.iter().map(|export| {
+                (
+                    format!("~gugu_unwind_{}", export.name),
+                    export.unwind.clone(),
+                )
+            }))
+            .collect(),
         dll: false,
+        imports: native_link.imports.clone(),
         bound_glues: world.glues().bound_symbols(),
         type_descriptors: world.type_descriptors.iter().cloned().collect(),
         globals: world.globals.iter().cloned().collect(),
@@ -242,13 +307,65 @@ pub fn link_with_layout(request: &PeRequest) -> Result<(PeImage, BTreeMap<String
     link_inner(request)
 }
 
+type Imports<'a> = Vec<(&'a str, Vec<&'a str>)>;
+
+fn imports_for(request: &PeRequest) -> Result<Imports<'_>, String> {
+    let mut imports: Imports<'_> = IMPORTS
+        .iter()
+        .map(|(library, symbols)| (*library, symbols.to_vec()))
+        .collect();
+    let mut names: BTreeMap<&str, &str> = imports
+        .iter()
+        .flat_map(|(library, symbols)| symbols.iter().map(move |symbol| (*symbol, *library)))
+        .collect();
+    for (library, symbol) in &request.imports {
+        if library.is_empty()
+            || symbol.is_empty()
+            || library.contains('\0')
+            || symbol.contains('\0')
+        {
+            return Err("动态导入名为空或包含 NUL".into());
+        }
+        if let Some(previous) = names.get(symbol.as_str()) {
+            if previous.eq_ignore_ascii_case(library) {
+                continue;
+            }
+            return Err(format!(
+                "动态符号 {symbol} 同时来自 {previous} 和 {library}"
+            ));
+        }
+        names.insert(symbol, library);
+        if let Some((_, symbols)) = imports
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case(library))
+        {
+            symbols.push(symbol);
+        } else {
+            imports.push((library, vec![symbol]));
+        }
+    }
+    Ok(imports)
+}
+
 fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), String> {
+    let imports = imports_for(request)?;
     archive_ready()?;
-    let (mut text, mut defined, sites) = assemble_prefix(
+    let (mut text, mut defined, mut sites) = assemble_prefix(
         request
             .bound_glues
             .contains(&mangle::mangle_runtime("rt0_start")),
     )?;
+    for (_, symbol) in &request.imports {
+        if defined.contains_key(symbol) {
+            return Err(format!("导入符号 {symbol} 与镜像保留符号重名"));
+        }
+        defined.insert(symbol.clone(), text.len() as u64);
+        sites.push(rip(
+            &mut text,
+            &[0xff, 0x25],
+            &format!("__gugu_iat_{symbol}"),
+        ));
+    }
     let fragment_off = place_fragments(request, &mut text, &mut defined)?;
     if !defined.contains_key(&request.entry) {
         return Err(format!("入口符号 {} 不存在", request.entry));
@@ -256,7 +373,7 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
     let mut named = named_sections(request)?;
     let mut rdata = Vec::new();
     let mut rdata_at = BTreeMap::new();
-    let import_at = append_imports(&mut rdata)?;
+    let import_at = append_imports(&mut rdata, &imports)?;
     append_standins(&mut rdata, &mut rdata_at)?;
     // 常量数据块：追加到 `.rdata` 并按符号登记（符号名不受节名 8 字节限制）。
     let mut const_at = Vec::with_capacity(request.constants.len());
@@ -270,7 +387,10 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         rdata.extend_from_slice(bytes);
         const_at.push((name.clone(), offset as u64));
     }
-    let (data, reserved) = data_with_reserved(iat_template(), &request.globals)?;
+    let (mut data, reserved) = data_with_reserved(iat_template(&imports), &request.globals)?;
+    let cage = crate::runtime::cage_control::CageControlRecord::boot_bytes(request.cage_bytes);
+    let at = reserved.cage as usize;
+    data[at..at + cage.len()].copy_from_slice(&cage);
     let mut sections = Vec::new();
     sections.push(section(".text", text, TEXT_CHARS));
     sections.append(&mut named);
@@ -278,6 +398,7 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
     sections.push(section(".data", data, DATA_CHARS));
     sections.push(section(".pdata", Vec::new(), RDATA_CHARS));
     sections.push(section(".reloc", Vec::new(), RELOC_CHARS));
+    sections.push(section(".edata", Vec::new(), RDATA_CHARS));
     assign_rvas(&mut sections)?;
     let text_rva = rva_of(&sections, ".text")?;
     let rdata_rva = rva_of(&sections, ".rdata")?;
@@ -287,8 +408,13 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         rdata_at.insert(name.clone(), *offset);
     }
     // 保留可写区在 `.data` 内，紧随 IAT；地址按 RVA 登记，供参数块与重定位使用。
+    defined.insert("__gugu_cage_control".to_owned(), data_rva + reserved.cage);
     defined.insert("__gugu_initial_slot".to_owned(), data_rva + reserved.slot);
     defined.insert("__gugu_runtime_state".to_owned(), data_rva + reserved.state);
+    defined.insert(
+        "__gugu_callback_control".to_owned(),
+        data_rva + reserved.state + entry::state::CALLBACK,
+    );
     // mailbox 是 runtime 状态区首部的别名：morestack 与返回哨兵片段都按这个符号打补丁。
     defined.insert(
         mangle::mangle_runtime("morestack_mailbox"),
@@ -304,7 +430,7 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
     let fragment_rva = text_rva + fragment_off;
     defined.insert("__gugu_fragments_base".to_owned(), fragment_rva);
     apply_blob_relocations(request, &mut sections, &defined)?;
-    fill_imports(&mut sections, rdata_rva, data_rva, import_at)?;
+    fill_imports(&mut sections, rdata_rva, data_rva, import_at, &imports)?;
     patch_rip(
         &mut sections,
         text_rva,
@@ -313,9 +439,18 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         &defined,
         &rdata_at,
         &sites,
+        &imports,
     )?;
-    let abs64 = patch_fragments(request, &mut sections, text_rva, data_rva, &defined)?;
+    let abs64 = patch_fragments(
+        request,
+        &mut sections,
+        text_rva,
+        data_rva,
+        &defined,
+        &imports,
+    )?;
     fill_pdata(&mut sections, fragment_rva)?;
+    exports::unwind(request, &mut sections, &defined, text_rva)?;
     let reloc = reloc_bytes(&abs64)?;
     if let Some(section) = sections.iter_mut().find(|item| item.name == ".reloc") {
         section.bytes = reloc;
@@ -332,7 +467,10 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         rdata_rva,
         data_rva,
     )?;
-    let bytes = write_image(request, &sections, import_at)?;
+    let export_rva = rva_of(&sections, ".edata")?;
+    *section_bytes(&mut sections, ".edata")? =
+        exports::directory(request, &defined, export_rva, text_rva)?;
+    let bytes = write_image(request, &sections, import_at, &imports)?;
     let image = PeImage {
         bytes: bytes.clone(),
         kind: if request.dll {
@@ -342,7 +480,7 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         },
         entry_rva: u32::try_from(text_rva).map_err(|_| "入口 RVA 超出 u32".to_owned())?,
         reloc_count: u32::try_from(abs64.len()).unwrap_or(u32::MAX),
-        import_dlls: IMPORTS.len() as u32,
+        import_dlls: imports.len() as u32,
         fingerprint: fingerprint(&bytes),
     };
     Ok((image, defined))
@@ -432,8 +570,6 @@ fn assemble_prefix(
     text.push(0xcc);
     defined.insert("__gugu_cold_trap".to_owned(), text.len() as u64);
     text.extend_from_slice(&[0x0f, 0x0b]);
-    defined.insert("__gugu_cage_control".to_owned(), text.len() as u64);
-    text.extend(std::iter::repeat_n(0, 48));
     defined.insert("__gugu_rt0_params".to_owned(), text.len() as u64);
     text.extend(std::iter::repeat_n(
         0,
@@ -513,21 +649,26 @@ fn named_sections(request: &PeRequest) -> Result<Vec<Section>, String> {
     Ok(sections)
 }
 
-fn append_imports(rdata: &mut Vec<u8>) -> Result<usize, String> {
-    let at = rdata.len();
-    let dlls = IMPORTS.len();
-    let desc = (dlls + 1) * 20;
-    let mut ilt_len = 0_usize;
-    for (_, symbols) in IMPORTS {
-        ilt_len += (symbols.len() + 1) * 8;
-    }
-    let mut hint_len = 0_usize;
-    for (dll, symbols) in IMPORTS {
-        hint_len += dll.len() + 1;
-        for symbol in *symbols {
-            hint_len += 2 + symbol.len() + 1;
+fn import_hint_bytes(imports: &Imports<'_>) -> usize {
+    let mut bytes: usize = 0;
+    for (dll, symbols) in imports {
+        bytes += dll.len() + 1;
+        for symbol in symbols {
+            bytes = bytes.next_multiple_of(2) + 2 + symbol.len() + 1;
         }
     }
+    bytes
+}
+
+fn append_imports(rdata: &mut Vec<u8>, imports: &Imports<'_>) -> Result<usize, String> {
+    let at = rdata.len();
+    let dlls = imports.len();
+    let desc = (dlls + 1) * 20;
+    let mut ilt_len = 0_usize;
+    for (_, symbols) in imports {
+        ilt_len += (symbols.len() + 1) * 8;
+    }
+    let hint_len = import_hint_bytes(imports);
     rdata.resize(at + desc + ilt_len + hint_len, 0);
     Ok(at)
 }
@@ -544,9 +685,9 @@ fn append_standins(rdata: &mut Vec<u8>, at: &mut BTreeMap<String, u64>) -> Resul
     Ok(())
 }
 
-fn iat_template() -> Vec<u8> {
+fn iat_template(imports: &Imports<'_>) -> Vec<u8> {
     let mut bytes = Vec::new();
-    for (_, symbols) in IMPORTS {
+    for (_, symbols) in imports {
         bytes.extend(std::iter::repeat_n(0, (symbols.len() + 1) * 8));
     }
     bytes
@@ -554,6 +695,7 @@ fn iat_template() -> Vec<u8> {
 
 /// 保留可写区在 `.data` 内的偏移。
 struct ReservedData {
+    cage: u64,
     slot: u64,
     state: u64,
     payload: u64,
@@ -600,7 +742,8 @@ fn data_with_reserved(
     let slot = align_up(iat.len() as u64, 64)?;
     let state = align_up(slot + entry::INITIAL_SLOT_BYTES, 64)?;
     let payload = align_up(state + entry::RUNTIME_STATE_BYTES, 8)?;
-    let mut end = payload + entry::Rt0Payload::bytes();
+    let cage = align_up(payload + entry::Rt0Payload::bytes(), 16)?;
+    let mut end = cage + u64::from(crate::runtime::cage_control::CageControlRecord::byte_len());
     let mut blocks = std::collections::BTreeMap::new();
     for (name, bytes) in globals {
         end = align_up(end, 16)?;
@@ -617,6 +760,7 @@ fn data_with_reserved(
     Ok((
         data,
         ReservedData {
+            cage,
             slot,
             state,
             payload,
@@ -780,12 +924,13 @@ fn patch_rip(
     defined: &BTreeMap<String, u64>,
     rdata_at: &BTreeMap<String, u64>,
     sites: &[RipSite],
+    imports: &Imports<'_>,
 ) -> Result<(), String> {
     let text = section_bytes(sections, ".text")?;
     for site in sites {
         let target = if let Some(offset) = rdata_at.get(site.target.as_str()) {
             rdata_rva + offset
-        } else if let Some(offset) = iat_offset(site.target.as_str()) {
+        } else if let Some(offset) = iat_offset(site.target.as_str(), imports) {
             data_rva + offset
         } else if let Some(offset) = defined.get(site.target.as_str()) {
             match site.target.as_str() {
@@ -811,11 +956,11 @@ fn section_bytes<'a>(sections: &'a mut [Section], name: &str) -> Result<&'a mut 
         .ok_or_else(|| format!("节 {name} 缺失"))
 }
 
-fn iat_offset(name: &str) -> Option<u64> {
+fn iat_offset(name: &str, imports: &Imports<'_>) -> Option<u64> {
     let symbol = name.strip_prefix("__gugu_iat_")?;
     let mut cursor = 0_u64;
-    for (_, symbols) in IMPORTS {
-        for item in *symbols {
+    for (_, symbols) in imports {
+        for item in symbols {
             if *item == symbol {
                 return Some(cursor);
             }
@@ -831,8 +976,9 @@ fn fill_imports(
     rdata_rva: u64,
     data_rva: u64,
     import_at: usize,
+    imports: &Imports<'_>,
 ) -> Result<(), String> {
-    let (region, iat) = import_bytes(rdata_rva, data_rva, import_at)?;
+    let (region, iat) = import_bytes(rdata_rva, data_rva, import_at, imports)?;
     {
         let rdata = section_bytes(sections, ".rdata")?;
         let end = import_at
@@ -855,27 +1001,18 @@ fn import_bytes(
     rdata_rva: u64,
     data_rva: u64,
     import_at: usize,
+    imports: &Imports<'_>,
 ) -> Result<(Vec<u8>, Vec<u8>), String> {
-    let desc = (IMPORTS.len() + 1) * 20;
-    let ilt: usize = IMPORTS
+    let desc = (imports.len() + 1) * 20;
+    let ilt: usize = imports
         .iter()
         .map(|(_, symbols)| (symbols.len() + 1) * 8)
         .sum();
-    let hint: usize = IMPORTS
-        .iter()
-        .map(|(dll, symbols)| {
-            dll.len()
-                + 1
-                + symbols
-                    .iter()
-                    .map(|symbol| 2 + symbol.len() + 1)
-                    .sum::<usize>()
-        })
-        .sum();
+    let hint = import_hint_bytes(imports);
     let mut region = vec![0_u8; desc + ilt + hint];
     let mut iat = vec![
         0_u8;
-        IMPORTS
+        imports
             .iter()
             .map(|(_, symbols)| (symbols.len() + 1) * 8)
             .sum()
@@ -883,7 +1020,7 @@ fn import_bytes(
     let mut hint_at = desc + ilt;
     let mut ilt_at = desc;
     let mut iat_at = 0_usize;
-    for (index, (dll, symbols)) in IMPORTS.iter().enumerate() {
+    for (index, (dll, symbols)) in imports.iter().enumerate() {
         let name_at = hint_at;
         region[hint_at..hint_at + dll.len()].copy_from_slice(dll.as_bytes());
         hint_at += dll.len() + 1;
@@ -903,7 +1040,8 @@ fn import_bytes(
             desc_at + 16,
             u32::try_from(data_rva + iat_at as u64).unwrap_or(0),
         );
-        for symbol in *symbols {
+        for symbol in symbols {
+            hint_at = hint_at.next_multiple_of(2);
             let entry_at = hint_at;
             hint_at += 2;
             region[hint_at..hint_at + symbol.len()].copy_from_slice(symbol.as_bytes());
@@ -926,6 +1064,7 @@ fn patch_fragments(
     text_rva: u64,
     data_rva: u64,
     defined: &BTreeMap<String, u64>,
+    imports: &Imports<'_>,
 ) -> Result<Vec<u64>, String> {
     let mut seen = BTreeSet::new();
     let mut abs64 = Vec::new();
@@ -942,6 +1081,7 @@ fn patch_fragments(
         .iter()
         .map(|(name, _)| name.as_str())
         .chain([
+            "__gugu_cage_control",
             "__gugu_initial_slot",
             "__gugu_runtime_state",
             "__gugu_rt0_payload",
@@ -973,7 +1113,7 @@ fn patch_fragments(
             if !seen.insert(slot) {
                 return Err(format!("重定位槽 {slot:#x} 重复"));
             }
-            let target_rva = if let Some(offset) = iat_offset(&reloc.target) {
+            let target_rva = if let Some(offset) = iat_offset(&reloc.target, imports) {
                 data_rva + offset
             } else if let Some(offset) = request.type_descriptors.get(reloc.target.as_str()) {
                 type_section_rva + offset
@@ -1105,6 +1245,7 @@ fn write_image(
     request: &PeRequest,
     sections: &[Section],
     import_at: usize,
+    imports: &Imports<'_>,
 ) -> Result<Vec<u8>, String> {
     let header = header_size(sections.len())? as usize;
     let last = sections.last().ok_or_else(|| "没有节".to_owned())?;
@@ -1141,7 +1282,7 @@ fn write_image(
     put_u64_at(&mut file, 88 + 88, 0x10_0000)?;
     put_u64_at(&mut file, 88 + 96, 0x1000)?;
     put_u32_at(&mut file, 88 + 108, 16)?;
-    write_directories(&mut file, sections, import_at)?;
+    write_directories(&mut file, sections, import_at, imports)?;
     for (index, section) in sections.iter().enumerate() {
         reject_section(section)?;
         let at = 328 + index * 40;
@@ -1169,6 +1310,7 @@ fn write_directories(
     file: &mut [u8],
     sections: &[Section],
     import_at: usize,
+    imports: &Imports<'_>,
 ) -> Result<(), String> {
     let rdata = sections
         .iter()
@@ -1187,15 +1329,25 @@ fn write_directories(
         .find(|section| section.name == ".reloc")
         .ok_or_else(|| "缺少 .reloc".to_owned())?;
     let dir = 88 + 112;
-    put_directory(file, dir + 8, rdata.rva + import_at as u64, import_span())?;
+    let exports = sections
+        .iter()
+        .find(|section| section.name == ".edata")
+        .ok_or("缺少导出节")?;
+    put_directory(file, dir, exports.rva, exports.bytes.len() as u64)?;
+    put_directory(
+        file,
+        dir + 8,
+        rdata.rva + import_at as u64,
+        ((imports.len() + 1) * 20) as u64,
+    )?;
     put_directory(file, dir + 24, pdata.rva, pdata.bytes.len() as u64)?;
     put_directory(file, dir + 40, reloc.rva, reloc.bytes.len() as u64)?;
-    put_directory(file, dir + 96, data.rva, data.bytes.len() as u64)?;
+    let iat_bytes: usize = imports
+        .iter()
+        .map(|(_, symbols)| (symbols.len() + 1) * 8)
+        .sum();
+    put_directory(file, dir + 96, data.rva, iat_bytes as u64)?;
     Ok(())
-}
-
-fn import_span() -> u64 {
-    ((IMPORTS.len() + 1) * 20) as u64
 }
 
 fn put_directory(file: &mut [u8], at: usize, rva: u64, size: u64) -> Result<(), String> {

@@ -43,6 +43,8 @@ pub struct Owner {
 pub struct Expression {
     pub location: Location,
     pub scope: ScopeId,
+    /// 子表达式求值后、执行当前操作时已注册的清理动作。
+    pub unwind_plan: u32,
     pub kind: ExprKind,
     pub adjustments: Range<u32>,
     pub effects: Effects,
@@ -255,6 +257,7 @@ pub struct Dispatch {
 pub struct Statement {
     pub location: Location,
     pub scope: ScopeId,
+    pub unwind_plan: u32,
     pub kind: StatementKind,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

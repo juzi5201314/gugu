@@ -2,6 +2,7 @@
  * 每个 episode 只允许一次 forced cycle。
  */
 
+use std.runtime.native_memory as mapping
 use std.runtime.heap.{heap_store_word, heap_word}
 
 pub const PACING_STATE_BYTES: uint = 128
@@ -15,10 +16,10 @@ pub const PACING_CLEAR_RATIO: uint = 70
 pub const PACING_QUANTUM: uint = 65536
 
 pub fn pacing_new() uint {
-    let state = unsafe { std.platform.reserve_aligned(PACING_STATE_BYTES, uint(4096)) }
+    let state = unsafe { mapping.reserve_aligned(PACING_STATE_BYTES, uint(4096)) }
     if state == 0 { unsafe { std.runtime.process_exit(2) } }
     let extent = PacingExtent { base: state, bytes: PACING_STATE_BYTES }
-    if unsafe { std.platform.commit(std.mem.transmute[*PacingExtent, uint](std.ptr.addr_of(extent))) } != 0 {
+    if unsafe { mapping.commit(std.mem.transmute[*PacingExtent, uint](std.ptr.addr_of(extent))) } != 0 {
         unsafe { std.runtime.process_exit(2) }
     }
     let at = state

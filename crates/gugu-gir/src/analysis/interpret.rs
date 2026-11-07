@@ -24,8 +24,8 @@ pub fn analyze_owner(
     owner_index: u32,
     policy: AnalysisPolicyV1,
     callees: &dyn Fn(CallSite) -> Option<FunctionSummary>,
+    passing: &PassingTable,
 ) -> BodyResult {
-    let passing = PassingTable::new(module);
     if policy.max_block_iterations != 0
         && let Some(result) = analyze_linear_leaf(module, owner, body, &passing, callees)
     {
@@ -48,8 +48,9 @@ pub(super) fn analyze_generic(
     let locals = owner.locals.len();
     let exprs = owner.expressions.len();
     let params = owner.parameters.len();
+    // 不可达状态不读事实数组；首次 join/widen 从真实入边复制完整状态。
     let mut inbound: Vec<AbstractState> = (0..body.blocks.len())
-        .map(|_| AbstractState::bottom(locals, exprs))
+        .map(|_| AbstractState::bottom(0, 0))
         .collect();
     inbound[body.entry.index()] = AbstractState::entry(locals, exprs, params);
     seed_param_lens(module, owner, &mut inbound[body.entry.index()]);
@@ -293,10 +294,7 @@ fn narrow(
 ) {
     let entry = inbound[body.entry.index()].clone();
     for _ in 0..rounds {
-        let mut next = vec![
-            AbstractState::bottom(owner.locals.len(), owner.expressions.len());
-            body.blocks.len()
-        ];
+        let mut next = vec![AbstractState::bottom(0, 0); body.blocks.len()];
         next[body.entry.index()] = entry.clone();
         for (index, old) in inbound.iter().enumerate() {
             if !old.reachable {
@@ -419,11 +417,20 @@ fn collect_proofs(
     use super::prove;
     let mut proofs = Vec::new();
     for (index, block) in body.blocks.iter().enumerate() {
+        let statements =
+            &body.statements[block.statements.start as usize..block.statements.end as usize];
+        let Some(last_check) = statements.iter().rposition(|statement| {
+            matches!(
+                statement.kind,
+                StatementKind::Assign(_, Rvalue::CheckedOp { .. })
+            )
+        }) else {
+            continue;
+        };
         let mut state = inbound[index].clone();
         let mut compare = None;
-        for statement in
-            &body.statements[block.statements.start as usize..block.statements.end as usize]
-        {
+        // inbound 已由不动点求得；末个检查后的转移不能影响本块任何证明。
+        for statement in &statements[..=last_check] {
             if let StatementKind::Assign(_, Rvalue::CheckedOp { check, .. }) = &statement.kind {
                 transfer_gir::sync_resolved(module, owner, body, &mut state);
                 let check = &owner.checks[usize::try_from(*check).expect("检查编号适配宿主")];
@@ -435,6 +442,9 @@ fn collect_proofs(
                     },
                     status: prove::prove_check(module, owner, &state, check),
                 });
+            }
+            if !state.reachable {
+                continue;
             }
             transfer_gir::execute_statement(
                 module,

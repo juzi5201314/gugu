@@ -2,7 +2,7 @@ use super::*;
 use crate::query::{DependencyFingerprint, QueryEngine, QueryKey, QueryKind};
 
 /// `LowerHir` 的记录 schema；键内容变化时递增。
-pub const LOWER_SCHEMA: u32 = 8;
+pub const LOWER_SCHEMA: u32 = 10;
 
 pub(super) fn lower(
     model: &Model<'_>,

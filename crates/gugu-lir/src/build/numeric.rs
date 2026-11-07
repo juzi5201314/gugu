@@ -127,6 +127,21 @@ impl Builder<'_> {
     ) -> Result<Computed, Diagnostic> {
         let lhs = self.operand(left)?;
         let rhs = self.operand(right)?;
+        if matches!(self.kind(lhs.ty()), TypeKind::String) {
+            let mut arguments = self.explicit_abi_values(lhs)?;
+            arguments.extend(self.explicit_abi_values(rhs)?);
+            let result = self.runtime(
+                RuntimeCall::StringCompare,
+                &arguments,
+                &[ValueType::scalar(Type::I64)],
+            )?[0];
+            let zero = self.constant(0, Type::I64);
+            let value = self.compare_value(condition(op), true, result, zero);
+            return Ok(Computed::Values {
+                ty,
+                values: vec![value],
+            });
+        }
         let signed = matches!(self.kind(lhs.ty()), TypeKind::Int { signed: true, .. });
         let lhs = self.computed_values(lhs)?;
         let rhs = self.computed_values(rhs)?;

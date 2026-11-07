@@ -2535,8 +2535,21 @@ fn dynamic_root_registry_matches_the_scheduler_mirror() {
     assert_eq!(mirror("COROUTINE_COLD_RESULT_KIND_MASK"), 7);
     assert_eq!(
         mirror("COROUTINE_COLD_RESULT_OFFSET"),
-        368,
-        "结果槽偏移必须与 finish_hot/take_result 读写的位置一致"
+        (std::mem::offset_of!(super::coroutine::CoroutineCold, join_state)
+            + std::mem::offset_of!(super::coroutine::CompletionRecord, payload)) as u64,
+        "结果槽必须来自真实 CompletionRecord 布局",
+    );
+    assert_eq!(
+        mirror("COROUTINE_COLD_COMPLETION_OFFSET"),
+        std::mem::offset_of!(super::coroutine::CoroutineCold, join_state) as u64
+    );
+    assert_eq!(
+        mirror("COROUTINE_COLD_JOIN_WAITER_OFFSET"),
+        std::mem::offset_of!(super::coroutine::CoroutineCold, join_waiter) as u64
+    );
+    assert_eq!(
+        mirror("COROUTINE_COLD_BYTES"),
+        std::mem::size_of::<super::coroutine::CoroutineCold>() as u64
     );
     assert_eq!(
         mirror("COROUTINE_COLD_RESULT_BYTES"),

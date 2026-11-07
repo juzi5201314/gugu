@@ -93,11 +93,14 @@ impl Builder<'_> {
                         && addressed[index]
                 });
             if escape {
-                let placement =
+                let placement = if self.layout(ty).passing.has_resource() {
+                    PlacementKind::Resource
+                } else {
                     placement.map_or(PlacementKind::LocalHeap, |record| match record.kind {
                         PlacementKind::Stack => PlacementKind::LocalHeap,
                         kind => kind,
-                    });
+                    })
+                };
                 // SharedHeap 的 Heap storage 保存 stable handle；其余 placement 保存 direct pointer。
                 // 两种车道严格区分，因此 handle 不可能被当作地址送进 LocalHeap 的地址 API。
                 let kind = if placement == PlacementKind::SharedHeap {
@@ -199,10 +202,22 @@ impl Builder<'_> {
                     Origin::Stack(slot),
                 );
                 self.storage[index] = Storage::Stack { slot, address };
+                let ty = self.local_ty(LocalId(id(index)));
+                if self.layout(ty).passing.has_resource() {
+                    self.lifetime(slot, true);
+                    let zero = self.constant(0, Type::I8);
+                    let bytes = self.layout(ty).layout.expect("资源值布局").size;
+                    self.emit(Op::Memset { bytes }, &[address, zero], &[]);
+                }
             }
         }
         if let Some(environment) = self.environment {
             let shared = self.shared_environment(self.owner.definition)?;
+            let environment = if shared {
+                self.begin_shared(environment)
+            } else {
+                environment
+            };
             // 压缩判定与构造侧（capture_environment）使用同一世界扫描：构造侧 encode 过的
             // 槽在实例侧必须按压缩字读出。压缩字是 pointer(Raw)，解码结果是普通 GcHeap
             // 引用，可以直接进入 Capture storage 与后续读写。
@@ -248,13 +263,20 @@ impl Builder<'_> {
                 self.storage[local] = Storage::Capture { address };
                 offset += 8;
             }
+            if shared {
+                self.end_shared()?;
+            }
         }
         Ok(())
     }
 
     pub(super) fn live(&mut self, local: LocalId) -> Result<(), Diagnostic> {
         match self.storage[local.index()].clone() {
-            Storage::Stack { slot, .. } => self.lifetime(slot, true),
+            Storage::Stack { slot, .. } => {
+                if !self.layout(self.local_ty(local)).passing.has_resource() {
+                    self.lifetime(slot, true);
+                }
+            }
             Storage::Heap {
                 variable,
                 placement,
@@ -291,10 +313,30 @@ impl Builder<'_> {
 
     pub(super) fn dead(&mut self, local: LocalId) {
         if local.0 != 0
+            && !self.layout(self.local_ty(local)).passing.has_resource()
             && let Storage::Stack { slot, .. } = self.storage[local.index()]
         {
             self.lifetime(slot, false);
         }
+    }
+
+    pub(super) fn release_stack_resources(&mut self) -> Result<(), Diagnostic> {
+        for index in 1..self.storage.len() {
+            let ty = self.local_ty(LocalId(id(index)));
+            if !self.layout(ty).passing.has_resource() {
+                continue;
+            }
+            if let Storage::Stack { slot, address } = self.storage[index] {
+                let descriptor = self.descriptor(ty);
+                self.runtime(
+                    crate::body::RuntimeCall::ResourceRelease,
+                    &[address, descriptor],
+                    &[],
+                )?;
+                self.lifetime(slot, false);
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn lifetime(&mut self, slot: SlotId, live: bool) {

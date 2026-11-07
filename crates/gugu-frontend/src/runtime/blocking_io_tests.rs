@@ -33,6 +33,7 @@ fn direct_blocking_call_counts_as_ordinary_and_blocking() {
             captures_arguments: true,
             by_value: Vec::new(),
             sret: None,
+            foreign_arguments: Vec::new(),
             poll_free_leaf: false,
         }),
         arguments: 0..0,

@@ -15,12 +15,26 @@ impl BodyBuilder<'_, '_, '_, '_> {
         exit: hir::ExitKind,
         from: hir::ScopeId,
     ) -> Result<u32, Diagnostic> {
+        let registered = self.output.cleanup.len();
+        if matches!(exit, hir::ExitKind::Unwind(scope) if scope == from) {
+            if let Some(Some((count, plan))) = self.unwind_plans.get(from.index())
+                && *count == registered
+            {
+                return Ok(*plan);
+            }
+            debug_assert!(from.index() <= self.output.scopes.len());
+            self.unwind_plans
+                .resize(self.output.scopes.len().max(from.index() + 1), None);
+        }
         let id = checked_id(self.pending_plans.len())?;
         self.pending_plans.push(PendingPlan {
             exit,
             from,
-            registered: self.output.cleanup.len(),
+            registered,
         });
+        if matches!(exit, hir::ExitKind::Unwind(scope) if scope == from) {
+            self.unwind_plans[from.index()] = Some((registered, id));
+        }
         Ok(id)
     }
 

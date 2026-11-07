@@ -61,7 +61,7 @@ vtable、cage id 和 code pointer 是 `NonRoot`。`#[repr(packed)]` 不能含 ma
 
 普通/dirty `ForeignBridge`、park/suspend、runtime lock acquire的 contention edge和其它 mandatory statepoint一定建立对应 map。直接 managed call若目标保留 entry `StackCheck`，caller return PC必须有 `CallReturn` map，因为 callee可能在建立 frame前进入 `morestack_or_poll`；`PollFreeLeaf` 调用和 `ForeignLeaf` 本身不建立专用 safepoint record，即使它们带 unwind 边。这些叶调用的落地链仍从 unwind 边生成，不依赖 safepoint 记录。counted inner chunk edge与 uncounted countdown-only edge没有 map，只有实际读取 poll word后的 resume label建立 `PollResume`；显式 `safepoint_poll()` 使用同一 kind。poisoned函数入口使用 `MorestackEntry`，同时覆盖 poll和真实 stack growth。`NoSafepointRegion` 内没有 map或 resume PC，begin前/end后的实际 poll仍使用 `PollResume`。
 
-LIR 侧的映射补充：无 default 的 `select` 经挂起路径提交，走 `SuspendResume`；有 default 的非挂起 `select` 走 `CallReturn`。分配操作（`GcAlloc`/`RegionAlloc`/`PromoteManaged`）进入函数级分配站点计数，并在所在指令上留下强制 `CallReturn` 记录：bump 快路径本身不回收，但同一站点发射的 slow call 可以启动回收，返回 PC 必须能按本帧 map 扫描根；**裸**屏障（`GcWriteBarrier`/`SharedFieldBarrier`，无 permit）在 lowering 里落成 runtime 调用，slow path 会 shade，必须留下 `CallReturn` 记录并同时计入屏障站点计数；带 permit 的预留屏障只在对应的 `NoSafepointRegion` 内出现、由 `BarrierReserve` 额度保证不进入 slow path，与不产出指令的 `BarrierReserve` 标记一样只计数。`DecodeCompressedRef` 为纯解码，不建立记录；`ResolveSharedHandle` 与 `ForwardSharedHandle` 调用走 `CallReturn`。
+LIR 侧的映射补充：无 default 的 `select` 经挂起路径提交，走 `SuspendResume`；有 default 的非挂起 `select` 走 `CallReturn`。分配操作（`GcAlloc`/`RegionAlloc`/`PromoteManaged`）进入函数级分配站点计数，并在所在指令上留下强制 `CallReturn` 记录：bump 快路径本身不回收，但同一站点发射的 slow call 可以启动回收，返回 PC 必须能按本帧 map 扫描根；**裸**屏障（`GcWriteBarrier`/`SharedFieldBarrier`，无 permit）在 lowering 里落成 runtime 调用，slow path 会 shade，必须留下 `CallReturn` 记录并同时计入屏障站点计数；带 permit 的预留屏障只在对应的 `NoSafepointRegion` 内出现、由 `BarrierReserve` 额度保证不进入 slow path，与不产出指令的 `BarrierReserve` 标记一样只计数。`DecodeCompressedRef` 为纯解码，不建立记录；`ResolveSharedHandle`、`ForwardSharedHandle`、`SharedAccessBegin/End` 调用走 `CallReturn`。访问 begin/end 同时登记输入 handle，尚未写回的 payload 结果不充当当前点的根；该推导规则进入逻辑栈图 schema 9。
 
 `MorestackEntry` 的固定 scratch发布发生在任何 GC/preempt处理之前，且不写 candidate以下地址；因此 slow path即使同时由容量不足和 poison触发，也能先停机或调度出去。恢复后必须以 GC/stack copy已经修正的 scratch和最新 `stack_low`重试原 `StackCheck`，不能从旧 candidate直接建立 frame。
 
@@ -84,13 +84,13 @@ stack map 的通用寄存器编号固定为：
 
 `rsp` 不作为普通根；它由 coroutine context单独保存。managed pointer不放入 XMM寄存器，`V128` 也禁止 pointer lane并始终属于 non-root；跨 taken poll slow edge活跃的向量值由普通16字节 spill保存，但不进入 root map。`r14`/`r15` 是 runtime保留寄存器，普通用户值不能占用；对应 mask bit在普通函数中必须为0，runtime bridge只通过专用根表扫描它们。
 
-在 `SuspendResume`、`ForeignBridge` 点，所有跨该点活跃的用户 managed/stack pointer必须 spill到 stack slot，三个寄存器 mask均为0。`ForeignBridge[DirtyCpu]` 使用相同 bridge root map，native段不建立额外 stack map；`CallReturn` map必须包含被调方 entry check期间仍活跃的 caller root、outgoing managed/stack参数word和 aggregate副本，即使它们在正常返回后已死。`PollResume`可以保留普通寄存器根。`MorestackEntry` 的 `slot_count`固定为0，register mask描述保存到 coroutine morestack scratch的 managed参数寄存器；caller stack参数和 aggregate副本由外层 `CallReturn` map追踪。`PollFreeLeaf`/`ForeignLeaf` 没有 map，caller prologue必须已把函数内所有 direct leaf `stack = N` 的最大值计入 reserve。
+在 `SuspendResume`、`ForeignBridge` 点，所有跨该点活跃的用户 managed/stack pointer必须 spill到 stack slot，三个寄存器 mask均为0。`ForeignBridge[DirtyCpu]` 使用相同 bridge root map，native段不建立额外 stack map；`CallReturn` map必须包含被调方 entry check期间仍活跃的 caller root、outgoing managed/stack参数word和 aggregate副本，即使它们在正常返回后已死。`PollResume` 同样把跨点 managed/stack pointer 落栈，五类 register mask 为零；压力慢路由 system-stack collector 直接回写这些槽。`MorestackEntry` 的 `slot_count`固定为0，register mask描述保存到 coroutine morestack scratch的 managed参数寄存器；caller stack参数和 aggregate副本由外层 `CallReturn` map追踪。`PollFreeLeaf`/`ForeignLeaf` 没有 map，caller prologue必须已把函数内所有 direct leaf `stack = N` 的最大值计入 reserve。
 
-该限制避免 caller frame 依赖 callee-saved 寄存器的跨 frame 追踪，同时保留无调用循环 poll 中的寄存器分配质量。
+该限制避免 caller frame 依赖 callee-saved 寄存器的跨 frame 追踪；poll 中的非根标量仍按通常规则分配。
 
 ## 构造流程
 
-stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layout 后生成。逻辑推导的 schema 是 `STACKMAP_SCHEMA = 7`：托管调用上的分配种类仍产出 `CallReturn`，按值副本只展开已有 provenance 的根字；裸屏障调用与其它 mandatory statepoint 一样产出 `CallReturn`（v3 只计数、不产记录）；v5 起调用点还登记本帧活跃的槽根字；v6 起分配 op（`GcAlloc`/`RegionAlloc`/`PromoteManaged`）的返回 PC 也是强制 `CallReturn`——同一站点发射的 slow call 可以启动回收，回收要在该返回 PC 上按本帧 map 扫描根；v7 起根集合改由 SSA 逆向活跃集（`LiveValues`）枚举，跨点存活但既不是本条指令操作数、也不在 LIR 栈槽的受管值同样登记 `Value` 根。
+stack map 只能在 LIR 完成寄存器分配、spill slot 分配和 frame layout 后生成。逻辑推导的 schema 是 `STACKMAP_SCHEMA = 9`：v9 为共享访问 begin/end 登记 `CallReturn` handle 根；回调与压力服务在 poll 慢路尾跳到 managed 让出入口，父帧仍按原始返回 PC 精确匹配 `PollResume`，挂起期间同样保留根。v8 起普通和 dirty bridge 的指令与 Invoke 都登记 outgoing 参数包根；整数地址车道从包偏移 16 开始，原 C 栈参数从 176 加平台栈偏移开始，32 字节 fixup 中的栈深度仍是标量。分配器与物理栈图共用 lowering 的车道换算；`ALLOCATION_REVISION = 6`、`METADATA_REVISION = 2` 使旧机器片段失效。托管调用上的分配种类仍产出 `CallReturn`，按值副本只展开已有 provenance 的根字；裸屏障调用与其它 mandatory statepoint 一样产出 `CallReturn`（v3 只计数、不产记录）；v5 起调用点还登记本帧活跃的槽根字；v6 起分配 op（`GcAlloc`/`RegionAlloc`/`PromoteManaged`）的返回 PC 也是强制 `CallReturn`——同一站点发射的 slow call 可以启动回收，回收要在该返回 PC 上按本帧 map 扫描根；v7 起根集合改由 SSA 逆向活跃集（`LiveValues`）枚举，跨点存活但既不是本条指令操作数、也不在 LIR 栈槽的受管值同样登记 `Value` 根。
 
 1. 从 safepoint 的跨点活跃集（`LiveValues`，SSA 逆向、may 语义）取得所有 `Ptr` value，并入本条指令自己的操作数与 LIR 栈槽根字；`CallReturn` 另加入 outgoing 参数，以及本帧按值聚合副本槽上已有 provenance 的 root word。活跃集沿边把后继块参数替换为对应实参（参数是被持有的接收入口，值在实参一侧），并扣除位于该点位的定义——安全点在该指令执行期间触发，该指令的结果尚未写入。块内由指令定义的值不构成 live-in（SSA 下同块定义必然支配同块使用），否则定义点之前的前驱会凭空多出根。**块参数不受这两条扣除影响**：它是块的输入，在块入口处就已可用，且只有留在 live-in 里才能被边实参替换；把它当成「本块产生的定义」一并扣掉，会让替换永不触发，于是跨块携带的受管值——未取地址的切片恰好退化成一条块参数链——在前驱块里凭空消失，安全点上不再登记根。没有 provenance 的位字是 `NonRoot`，不进入 bitmap；副本地址不属于本帧栈槽时，字根由持有副本的外层帧登记；
 2. `CallReturn` 还必须登记本帧在该点仍活跃的槽根字：被调方执行期间调用方帧仍按调用返回 PC 的 map 扫描，而借出地址的槽（`let view = &value`）没有活跃值、只有活跃地址，槽根表是它唯一的登记来源。未写入的根字由逐根初始化字节在下游门控，因此登记本身不会引入假根；
@@ -282,7 +282,7 @@ raw pointer 即使数值落在 heap 内也不扫描。它跨 safepoint 的合法
 - 每个要求 safepoint 的 call/poll/suspend 和每个可增长 frame 的 morestack entry 都有 exact record；
 - 裸屏障调用点必须有 `CallReturn` record，且根集非空；预留屏障与 `BarrierReserve` 标记在 `NoSafepointRegion` 内不得留下 record；
 - 每个 map 与最终活跃/分配位置逐项一致，CallReturn map 覆盖 outgoing managed/stack 参数；
-- `CallReturn`/`SuspendResume`/`ForeignBridge` 点没有用户 register root；`PollResume` 与 `MorestackEntry` 只使用各自声明的 register/scratch roots；
+- `CallReturn`/`PollResume`/`SuspendResume`/`ForeignBridge` 点没有用户 register root；`MorestackEntry` 只使用声明的 register/scratch roots；
 - 根完备性：`CallReturn`/`SuspendResume`/`ForeignBridge` 点上，分配器为**跨点存活**的受管值准备的 frame slot 必须出现在该点的根位图或逐根条目里（`metadata.rs::verify_live_pointers_are_rooted`）。这些点位按寄存分配规则不允许保留用户寄存器根，跨点受管值必然落 frame slot；逻辑根集合漏登记时物理层不会有任何报错，收集器只是扫不到仍被持有的对象，因此漏登记必须是编译期错误而不是运行期现象；“跨点存活”的判定是分配区间同时覆盖点位前与点位后，该点位自身定义（例如调用结果）不算；
 - direct callee的 `PollSummary.entry_stack_check` 与 caller是否生成 `CallReturn` map一致；`PollFreeLeaf`/`ForeignLeaf` 不得伪造 map；
 - 普通 bridge的 `lease_word` 固定保存该 invocation原始 attached `Foreign(g)`；当前 lifecycle只能是该 exact word、带 scan lock的竞争态或同 generation的 detached Foreign。dirty mode设置 `DIRTY_CPU_BRIDGE` flag：active Foreign必须带 `FOREIGN_DETACHED`，DirtyWaiting保持同 generation且不能带该 bit。所有模式的 `ForeignBridgeState.frame_offset + frame_size` checked落在已用 stack范围；

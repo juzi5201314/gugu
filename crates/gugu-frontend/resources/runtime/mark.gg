@@ -4,6 +4,8 @@
  * 禁止出现 managed pointer、field 地址或栈指针。
  */
 
+use std.runtime.counters as counters
+use std.runtime.native_memory as mapping
 use std.runtime.heap.{heap_store_word, heap_word}
 
 #[repr(C, align(64))]
@@ -99,10 +101,10 @@ pub const MARK_TICKET_CYCLE_OFFSET: uint = 16
 pub const MARK_TICKET_RECORDS_OFFSET: uint = 64
 
 pub fn mark_ticket_new(cycle: uint) uint {
-    let state = unsafe { std.platform.reserve_aligned(MARK_TICKET_STATE_BYTES, uint(4096)) }
+    let state = unsafe { mapping.reserve_aligned(MARK_TICKET_STATE_BYTES, uint(4096)) }
     if state == 0 { unsafe { std.runtime.process_exit(2) } }
     let extent = MarkExtent { base: state, bytes: MARK_TICKET_STATE_BYTES }
-    if unsafe { std.platform.commit(std.mem.transmute[*MarkExtent, uint](std.ptr.addr_of(extent))) } != 0 {
+    if unsafe { mapping.commit(std.mem.transmute[*MarkExtent, uint](std.ptr.addr_of(extent))) } != 0 {
         unsafe { std.runtime.process_exit(2) }
     }
     let at = state
@@ -124,6 +126,8 @@ pub fn mark_ticket_issue(state: uint, owner: uint) uint {
     heap_store_word(ticket + 16, 0)
     heap_store_word(ticket + 24, heap_word(state + MARK_TICKET_CYCLE_OFFSET))
     heap_store_word(state + MARK_TICKET_COUNT_OFFSET, count + 1)
+    counters.add(counters.MARK_BATCHES, 1)
+    counters.add(counters.MARK_PENDING, 1)
     ticket
 }
 
@@ -140,6 +144,7 @@ pub fn mark_ticket_return(state: uint, ticket: uint) uint {
     if state == 0 || ticket < state + MARK_TICKET_RECORDS_OFFSET { return 1 }
     if heap_word(ticket + 16) != 1 { return 2 }
     heap_store_word(ticket + 16, 2)
+    counters.remove(counters.MARK_PENDING, 1)
     0
 }
 

@@ -81,11 +81,24 @@ pub enum RuntimeMachineIntrinsic {
     AtomicStoreRelease,
     AtomicFetchOrAcqRel,
     AtomicFetchAndAcqRel,
+    /// 标准库字节存储只通过受管分配与保留 provenance 的视图转换形成。
+    AllocBytes,
+    StringBytes,
+    StringFromUtf8Unchecked,
+    FsStart,
+    FsPoll,
+    MonotonicNanos,
+    StackReadWord,
+    StackCopyRaw,
+    CageControl,
+    CallbackControl,
+    CallbackQueue,
+    ThreadId,
 }
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 23] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -97,6 +110,18 @@ impl RuntimeMachineIntrinsic {
         Self::AtomicStoreRelease,
         Self::AtomicFetchOrAcqRel,
         Self::AtomicFetchAndAcqRel,
+        Self::AllocBytes,
+        Self::StringBytes,
+        Self::StringFromUtf8Unchecked,
+        Self::FsStart,
+        Self::FsPoll,
+        Self::MonotonicNanos,
+        Self::StackReadWord,
+        Self::StackCopyRaw,
+        Self::CageControl,
+        Self::CallbackControl,
+        Self::CallbackQueue,
+        Self::ThreadId,
     ];
 
     /// 按规范路径识别 runtime 机器原语；导入别名与再导出保留同一身份。
@@ -119,38 +144,92 @@ impl RuntimeMachineIntrinsic {
             Self::AtomicStoreRelease => "atomic_store_release",
             Self::AtomicFetchOrAcqRel => "atomic_fetch_or_acq_rel",
             Self::AtomicFetchAndAcqRel => "atomic_fetch_and_acq_rel",
+            Self::AllocBytes => "alloc_bytes",
+            Self::StringBytes => "string_bytes",
+            Self::StringFromUtf8Unchecked => "string_from_utf8_unchecked",
+            Self::FsStart => "fs_start",
+            Self::FsPoll => "fs_poll",
+            Self::MonotonicNanos => "monotonic_nanos",
+            Self::StackReadWord => "stack_read_word",
+            Self::StackCopyRaw => "stack_copy_raw",
+            Self::CageControl => "cage_control",
+            Self::CallbackControl => "callback_control",
+            Self::CallbackQueue => "callback_queue",
+            Self::ThreadId => "thread_id",
         }
     }
 
     /// 返回该原语的值实参数量。
     pub const fn value_arguments(self) -> usize {
         match self {
-            Self::ContextSwitch => 4,
-            Self::ContextRestore => 3,
-            Self::CurrentSlot => 0,
+            Self::ContextSwitch | Self::StackCopyRaw => 4,
+            Self::ContextRestore | Self::CallbackQueue => 3,
+            Self::CurrentSlot
+            | Self::MonotonicNanos
+            | Self::CageControl
+            | Self::CallbackControl
+            | Self::ThreadId => 0,
             Self::ProcessExit => 1,
             Self::ReportWrite => 3,
             Self::GcConfig => 0,
             Self::GcEnter => 1,
-            Self::AtomicLoadAcquire => 1,
-            Self::AtomicStoreRelease | Self::AtomicFetchOrAcqRel | Self::AtomicFetchAndAcqRel => 2,
+            Self::AtomicLoadAcquire
+            | Self::AllocBytes
+            | Self::StringBytes
+            | Self::StringFromUtf8Unchecked
+            | Self::FsPoll
+            | Self::StackReadWord => 1,
+            Self::AtomicStoreRelease
+            | Self::AtomicFetchOrAcqRel
+            | Self::AtomicFetchAndAcqRel
+            | Self::FsStart => 2,
         }
     }
 
-    /// 判断该原语的返回类型是否是机器字 `uint`；其余不返回值。
+    /// 判断该原语的返回类型是否是机器字 `uint`。
     pub const fn yields_word(self) -> bool {
         matches!(
             self,
-            Self::CurrentSlot | Self::ReportWrite | Self::GcConfig | Self::GcEnter
+            Self::CurrentSlot
+                | Self::ReportWrite
+                | Self::GcConfig
+                | Self::GcEnter
+                | Self::FsStart
+                | Self::FsPoll
+                | Self::MonotonicNanos
+                | Self::StackReadWord
+                | Self::CageControl
+                | Self::CallbackControl
+                | Self::CallbackQueue
+                | Self::ThreadId
         )
     }
 
-    /// 该原语是否只接受由 `RuntimeResources` 以 `Runtime` 角色注入的源身份。
-    ///
-    /// GC 控制原语按注入身份授权，而不只是规范路径：普通源码即使写 `unsafe` 也不能调用；
-    /// 其余机器原语保持既有契约（按规范路径识别）。
+    /// 私有原语同时要求 runtime 注入源身份，不能只凭规范路径获取授权。
     pub const fn requires_runtime_source(self) -> bool {
-        matches!(self, Self::GcConfig | Self::GcEnter) || self.is_atomic()
+        matches!(
+            self,
+            Self::GcConfig
+                | Self::GcEnter
+                | Self::FsStart
+                | Self::FsPoll
+                | Self::MonotonicNanos
+                | Self::StackReadWord
+                | Self::StackCopyRaw
+                | Self::CageControl
+                | Self::CallbackControl
+                | Self::CallbackQueue
+                | Self::ThreadId
+        ) || self.is_atomic()
+            || self.is_buffer()
+    }
+
+    /// 字节存储原语在 GIR/LIR 中展开，不生成同名机器 glue。
+    pub const fn is_buffer(self) -> bool {
+        matches!(
+            self,
+            Self::AllocBytes | Self::StringBytes | Self::StringFromUtf8Unchecked
+        )
     }
 
     /// 这四个原语直接降到 Atomic，不生成 runtime 调用或 safepoint。
@@ -251,13 +330,13 @@ impl PlatformIntrinsic {
         }
     }
 
-    /// 需要向 runtime 返回的机器字：reserve 返回基址、commit 返回平台状态，wake 返回计数。
+    /// 需要向 runtime 返回的机器字：reserve 返回基址、commit/decommit 返回平台状态，wake 返回计数。
     pub const fn yields_range(self) -> bool {
         matches!(self, Self::ReserveAligned)
     }
 
     pub const fn yields_count(self) -> bool {
-        matches!(self, Self::Commit | Self::Wake)
+        matches!(self, Self::Commit | Self::Decommit | Self::Wake)
     }
 
     /// 判断该原语的返回类型是否是 `bool`。

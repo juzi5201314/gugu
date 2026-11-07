@@ -455,6 +455,12 @@ pub struct CoroutineCold {
     /// spawn 在入队前发布、结束时就地结清；结果在结束时发布、被 Join/select 取走时结清。
     /// 未发布过载荷的协程（bootstrap/main）三位置零，不允许也无从结清。
     pub payload_state: AtomicU64,
+    /// 等待本协程完成的协程地址；不复用本协程的原生请求区。
+    pub join_waiter: u64,
+    /// 外部线程持有的回调节点；零表示普通协程，完成清理后才发布节点完成。
+    pub callback_node: u64,
+    /// 回调热记录、冷记录、参数包及 registry 的同页映射；普通协程为零。
+    pub callback_storage: u64,
 }
 
 /// morestack 入口片段与镜像 runtime 交接的固定邮箱；位于 runtime 状态区首部。
@@ -489,7 +495,7 @@ const _: () = {
     assert!(std::mem::offset_of!(CoroutineSlot, stack) == 64);
     assert!(size_of::<CoroutineContext>() == 48);
     assert!(size_of::<MorestackScratch>() == 208);
-    assert!(size_of::<CoroutineCold>() == 512 && align_of::<CoroutineCold>() == 64);
+    assert!(size_of::<CoroutineCold>() == 576 && align_of::<CoroutineCold>() == 64);
     assert!(std::mem::offset_of!(CoroutineCold, payload_state) == 504);
     assert!(size_of::<MorestackMailbox>() == 104 && align_of::<MorestackMailbox>() == 8);
     assert!(std::mem::offset_of!(MorestackMailbox, system_context) == 40);

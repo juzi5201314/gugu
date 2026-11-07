@@ -17,7 +17,7 @@ pub const CAGE_CONTROL_ID: u8 = 0;
 ///
 /// offset/size 与 `CageControlRecord` 的 `repr(C)` 布局一致，由契约 verifier 用
 /// `offset_of!`/`size_of` 逐项核对。
-pub const CAGE_CONTROL_FIELDS: [(&str, u32, u32); 7] = [
+pub const CAGE_CONTROL_FIELDS: [(&str, u32, u32); 9] = [
     ("generation", 0, 4),
     ("cage_id", 4, 1),
     ("base", 8, 8),
@@ -25,6 +25,8 @@ pub const CAGE_CONTROL_FIELDS: [(&str, u32, u32); 7] = [
     ("canonical_headroom", 24, 8),
     ("decodes", 32, 8),
     ("rejections", 40, 8),
+    ("arena_cursor", 48, 8),
+    ("configured_bytes", 56, 8),
 ];
 
 /// 机器解码序列读取的控制记录。
@@ -47,9 +49,20 @@ pub struct CageControlRecord {
     pub decodes: u64,
     /// 拒绝计数。
     pub rejections: u64,
+    /// 镜像 owner 分配 arena 的字节游标。
+    pub arena_cursor: u64,
+    /// writer 固定的 reservation 容量，启动时消费；零表示关闭。
+    pub configured_bytes: u64,
 }
 
 impl CageControlRecord {
+    pub fn boot_bytes(configured_bytes: u64) -> Vec<u8> {
+        Self {
+            configured_bytes,
+            ..Self::default()
+        }
+        .to_bytes()
+    }
     /// 从参照平面读取控制记录；没有已预留 cage 时报错。
     pub fn from_plane(plane: &CompressionPlane) -> Result<Self, RawInvariant> {
         let cage = plane
@@ -65,6 +78,8 @@ impl CageControlRecord {
             canonical_headroom: CAGE_CANONICAL_LIMIT.saturating_sub(cage.base),
             decodes: stats.decodes,
             rejections: stats.rejections,
+            arena_cursor: plane.island_count() * plane.contract().cage_granule_bytes(),
+            configured_bytes: cage.len,
         })
     }
 
@@ -79,6 +94,8 @@ impl CageControlRecord {
         bytes.extend_from_slice(&self.canonical_headroom.to_le_bytes());
         bytes.extend_from_slice(&self.decodes.to_le_bytes());
         bytes.extend_from_slice(&self.rejections.to_le_bytes());
+        bytes.extend_from_slice(&self.arena_cursor.to_le_bytes());
+        bytes.extend_from_slice(&self.configured_bytes.to_le_bytes());
         bytes
     }
 

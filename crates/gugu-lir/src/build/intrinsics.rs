@@ -22,6 +22,29 @@ impl Builder<'_> {
         ty: u32,
     ) -> Result<Computed, Diagnostic> {
         match op {
+            g::IntrinsicOp::StringBytes | g::IntrinsicOp::StringFromUtf8Unchecked => {
+                let input = self.operand(&operands[0])?;
+                let values = match input {
+                    Computed::Values { values, .. } => values,
+                    Computed::Address { address, .. } => {
+                        let pointer =
+                            self.load(address, ValueType::pointer(Provenance::GcHeap), 8, false);
+                        let length_address = self.offset(address, 8);
+                        let length =
+                            self.load(length_address, ValueType::scalar(Type::I64), 8, false);
+                        vec![pointer, length]
+                    }
+                };
+                if matches!(op, g::IntrinsicOp::StringBytes) {
+                    Ok(Computed::Values { ty, values })
+                } else {
+                    let address = self.temporary(ty)?;
+                    self.store(address, values[0], 8, false);
+                    let length_address = self.offset(address, 8);
+                    self.store(length_address, values[1], 8, false);
+                    Ok(Computed::Address { ty, address })
+                }
+            }
             g::IntrinsicOp::SizeOf | g::IntrinsicOp::AlignOf | g::IntrinsicOp::OffsetOf { .. } => {
                 let input = types
                     .first()
@@ -996,7 +1019,9 @@ impl Builder<'_> {
             // 这里不登记 LocalHeap 的 managed 根；压缩环境的槽是压缩字，按压缩引用种类登记；
             // 其余环境保存 direct cell 地址。
             roots: if shared {
-                Vec::new()
+                (0..slots.len())
+                    .map(|index| (index as u64 * 8, Provenance::SharedHandle))
+                    .collect()
             } else {
                 slots
                     .iter()
@@ -1016,11 +1041,13 @@ impl Builder<'_> {
         });
         let environment =
             self.allocate_descriptor(descriptor, 8, bytes, placement, region, compressed)?;
-        if shared {
-            self.begin_shared(environment);
-        }
+        let payload = if shared {
+            self.begin_shared(environment)
+        } else {
+            environment
+        };
         for (index, slot) in slots.into_iter().enumerate() {
-            let destination = self.offset(environment, u64::try_from(index).expect("捕获编号") * 8);
+            let destination = self.offset(payload, u64::try_from(index).expect("捕获编号") * 8);
             if compressed && !shared {
                 let word = self.encode_compressed_word(slot);
                 self.store_compressed_slot(destination, word);

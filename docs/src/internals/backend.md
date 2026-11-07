@@ -16,6 +16,8 @@ CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline
 
 ## 后端阶段
 
+cage 控制记录含机器更新的解码计数，ELF 将其放在 rt0 只读收尾范围之外的保留可写区，PE 放在 `.data`；两者都不可执行。PE 的 cage 重定位直接使用数据 RVA，不叠加文本 RVA。私有 `cage_control` 访问器与解码序列共用 `CageControl` relocation，因此公开统计与机器更新消费同一份记录。栈深度读取/复制片段在入口根据当前 r14 的 stack_high 重建地址，复制尾跳 glue 域的既有 memcpy；不能误用 runtime 域同名符号。双目标镜像布局与登记片段重定位回归分别验证页权限、地址及尾跳定义。
+
 LIR 后端严格按以下顺序运行：
 
 1. `Legalize`：把剩余高层 operation 变成 baseline 可表达序列；`DecodeCompressedRef` 由此展成 cage id 抽取、generation 校验、offset/bounds 检查与基址拼回的完整机器码序列（LIR 层只产出该 op 本身，见[内存 owner lowering](gir-lir.md#memory-owner-lowering)）；
@@ -186,7 +188,7 @@ Batch publish的CAS retry是合法cyclic runtime CFG，不得包在`NoSafepointR
 
 ### interval
 
-block 按最终 layout 编号，每条 instruction 获得间隔为 2 的 position：`use_slot = 2p`、`def_slot = 2p + 1`，相邻 instruction 之间留出定义与使用分开的缝隙。一个**点位**（point）是分配与 stack map 共用的最小单位，携带 `(site, kind, block, instructions, mask, clobber, pointer_spill, fixed_physical, outgoing_roots)`：`kind` 取 `Normal`/`Call`/`Bridge`/`Prologue`，由 LIR op 的规范 safepoint 种类推出；`mask` 是该点位会写或会读的物理寄存器集合，加上 form 自带 clobber，Call 点位再加全部 caller-saved GPR（`rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10`）与全部 XMM，`CallReturn`、会分配的调用、`SuspendResume`、普通与 dirty `ForeignBridge`、会挂起的 `Select` 以及 `Invoke` 把 `pointer_spill` 置位；`PollResume` 与 `ForeignLeaf`、`PollFreeLeaf` 不置位，因此 poll 点可以保留寄存器根。调用点另在 `outgoing_roots` 记录 outgoing 区里的指针字。读也必须进 mask：ABI 返回寄存器（`rax`、`rbx`、`rdx`、`xmm0`、`xmm1`）在返回值搬运点只是被**读**，若只按写建 mask，转换或 scratch 仍可能覆写它们。
+block 按最终 layout 编号，每条 instruction 获得间隔为 2 的 position：`use_slot = 2p`、`def_slot = 2p + 1`，相邻 instruction 之间留出定义与使用分开的缝隙。一个**点位**（point）是分配与 stack map 共用的最小单位，携带 `(site, kind, block, instructions, mask, clobber, pointer_spill, fixed_physical, outgoing_roots)`：`kind` 取 `Normal`/`Call`/`Bridge`/`Prologue`，由 LIR op 的规范 safepoint 种类推出；`mask` 是该点位会写或会读的物理寄存器集合，加上 form 自带 clobber，Call 点位再加全部 caller-saved GPR（`rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10`）与全部 XMM，`CallReturn`、会分配的调用、`SuspendResume`、普通与 dirty `ForeignBridge`、会挂起的 `Select` 以及 `Invoke` 把 `pointer_spill` 置位；`PollResume` 同样置位，`ForeignLeaf`、`PollFreeLeaf` 不置位。调用点另在 `outgoing_roots` 记录 outgoing 区里的指针字。读也必须进 mask：ABI 返回寄存器（`rax`、`rbx`、`rdx`、`xmm0`、`xmm1`）在返回值搬运点只是被**读**，若只按写建 mask，转换或 scratch 仍可能覆写它们。
 
 liveness 按 CFG fixed point 求得，block 参数与 edge copy 在 predecessor 末端建 use；某个值的 interval 是**单条保守区间**：`start` 取 `live_in` 首点与所有读点最小值，`end` 取 `live_out` 末点与所有写点最大值。这与"在每个 clobber 点把区间切开、边界插转换 move"的经典做法不同：块内存在 `Switch` trampoline、`GcAlloc` 快慢路这类**同一 block 内的条件跳转**，块参数还可能由多条边定义并跨 backedge 使用，边界 move 无法保证在所有路径上恰好执行一次；统一按值给一个位置、溢出值在使用处读回、定义处写回，可证明地对任意 CFG 成立，代价是牺牲了分裂带来的更细粒度着色。
 
@@ -194,7 +196,7 @@ spill weight 使用 `u64` 饱和累加：普通 use 1，含 fixed-register 或 C
 
 ### 分配规则
 
-GPR 和 XMM 独立分配。可用 GPR 池是 `rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10, rbp, r12, r13`——`rsp`、`r14`、`r15` 与内部 ABI 保留的 scratch `r11` 不参与；XMM 池是 `xmm0..xmm15`。值跨 Call/Bridge 点位活跃时优先 `rbp, r12, r13`（callee-saved，被调者会保存），其余情况按上表顺序；`pointer_spill` 点位上，根类要求必须落栈的值（managed heap 指针、stack 指针）直接占用 spill slot，整条活跃区间不再进寄存器；`PollResume` 不置该标记，寄存器根仍然合法。调用点另记录 outgoing 区里的指针字（值编号、根类、相对 outgoing 区起点的偏移），寄存器参数仍留给 `MorestackEntry`。
+GPR 和 XMM 独立分配。可用 GPR 池是 `rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10, rbp, r12, r13`——`rsp`、`r14`、`r15` 与内部 ABI 保留的 scratch `r11` 不参与；XMM 池是 `xmm0..xmm15`。值跨 Call/Bridge 点位活跃时优先 `rbp, r12, r13`（callee-saved，被调者会保存），其余情况按上表顺序；`pointer_spill` 点位上，根类要求必须落栈的值（managed heap 指针、stack 指针）直接占用 spill slot，整条活跃区间不再进寄存器；`PollResume` 也置该标记，由系统栈上的 collector 回写 spill 槽。调用点另记录 outgoing 区里的指针字（值编号、根类、相对 outgoing 区起点的偏移），寄存器参数仍留给 `MorestackEntry`。
 
 候选寄存器必须同时满足三条：不在该值覆盖范围内任一点位的 `mask` 里、当前没有别的活跃值占用、通过宽度检查（8 位操作数的值只能放在能编码 `r/m8` 的寄存器上，溢出槽不受限）。选择用确定性的候选序，不使用随机或哈希顺序。
 
@@ -279,7 +281,7 @@ Linux 用不可访问的匿名映射取得虚址窗口，再对末端页调用 `
 
 片段 payload（`CODEGEN_SCHEMA = 5`）新增 `frame`、`points`、`values`、`stats` 四段与站点级 `points` 范围：`frame` 给出 `frame_size`/`payload_bytes`/`outgoing_bytes`/`required_frame`/`entry_required_frame`/`max_leaf_reserve`/`locals`/`spill_slots`/`scratch_offset`/`save_offsets`/`checked`；点位另带 `outgoing_roots`；`stats` 给出 `peak_live_gpr`、`peak_live_xmm`、`spill_slot_count`、`spill_bytes`、`spill_stores`、`reloads`、`rematerializations`、`copy_moves`、`copy_cycles`、`call_sites`、`safepoint_spills`、`allocated_values`、`frame_size_max`，其中 `frame_size_max` 必须等于该片段 `frame.frame_size`，`points` 段数必须等于站点 `points` 范围之和。这些计数就是 [Cost calibration profile](#cost-calibration-profile) 里 `CostRecord` 的 spill/reload 字段来源，因此必须取 branch relaxation 与 frame layout 之后的结果，不能用分配前估计代替。分配规则 revision 由 `ALLOCATION_REVISION = 2` 表达并进入 fragment key：规则变化会改变 query key，不会静默复用旧片段。站点 payload 同时记录 `call_return_pc` 与 `morestack_pc`，栈图生成规则由 `METADATA_REVISION = 1` 一并进入 fragment key。
 
-`CODEGEN_SCHEMA = 8` 起 payload 不再携带 LIR world 指纹：输入身份只由 `CodegenFragment` query key（world 指纹、实例、body 指纹、目标、encoder、契约与 revision）绑定，restore 只核对 schema、目标、实例与 encoder 指纹。同一 body 在任何 world 里产出同一份 absorb 前 payload，这是内建片段物化安装的前提。`codegen::fragments` 按 `lir.bodies()` 顺序产出全部 absorb 前 payload（LIR 已安装的 body 优先从[内建函数表](monomorphization-cache.md#builtin-function-table)解码 x64 层，其余走 `CodegenFragment`），每份都经过 `validate_fragment`；`codegen::build` 在其上完成 absorb、入口符号、metadata、类型描述符与全局区，构建期录制直接复用 `fragments`。
+`CODEGEN_SCHEMA = 8` 起 payload 不再携带 LIR world 指纹：输入身份只由 `CodegenFragment` query key（world 指纹、实例、body 指纹、目标、encoder、契约、来源自动 poll 策略与 revision）绑定，restore 只核对 schema、目标、实例与 encoder 指纹。同一 body 在任何 world 里产出同一份 absorb 前 payload，这是内建片段物化安装的前提。`codegen::fragments` 按 `lir.bodies()` 顺序产出全部 absorb 前 payload（LIR 已安装的 body 优先从[内建函数表](monomorphization-cache.md#builtin-function-table)解码 x64 层，其余走 `CodegenFragment`），每份都经过 `validate_fragment`；`codegen::build` 在其上完成 absorb、入口符号、metadata、类型描述符与全局区，构建期先选定录制集，再通过 `record_fragment` 复用同一 `assemble_fragment` 与 `validate_fragment`，不为丢弃实例编码或建立一次性片段 query 缓存。
 
 宿主执行验收：`Compilation::x64_fragments()` 暴露逐片段的机器字节、重定位、frame 视图，`cargo bench --bench x64_frame` 把片段按符号顺序映射为可执行页、解析内部 relocation、用 `ret` stub 兜住运行时入口，然后在真实 CPU 上按内部 ABI 调用入口片段并核对结果。它覆盖默认测试套件覆盖不到的部分：spill 槽读写、prologue/epilogue 的 `rsp` 调整、callee-saved 保存、栈参数传递与并行拷贝破环。指针值重定位到栈地址的场景需要 runtime allocator 才能构造参数，因此不在该 bench 的范围内。
 
@@ -345,7 +347,7 @@ fragment relocation 封闭为：
 
 镜像固定为 `ET_DYN`、页大小 4096。无动态导入时程序头是 `PT_PHDR`、三个 `PT_LOAD`（RX 含文件头与 rt0、R 为只读逻辑节、RW 为 `.data.rel.ro`）和 `PT_GNU_RELRO`，不写 `PT_INTERP`。RX 前缀依次是 `_start`、8 个 `u64` 的参数块、`ud2` 冷陷阱、48 字节 cage 控制、`write`/`mmap` syscall stub，以及 `ret` / `exit` 兜底。用户片段与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐接在前缀之后（栈图与展开表的 `code_rva` 由同一次排序得出：glue Item 实例与机器片段共用 `__gugu_runtime_*` 前缀因而交错，只排片段世界会给排在机器片段之后的函数算出偏小的偏移）；栈图里的 `code_rva` 仍相对该片段区，绝对虚址是片段区基址加 `code_rva`。只读节装入下一页，含 `.gugu.stackmap`、`.eh_frame`、`.gugu.src`、`.gugu.types`、`.gugu.meta` 和 4096 字节的处理器前缀。RW 页前 128 字节为 `0xFF` 栈界限，随后是 16 字节一组的 `(slot, addend)`；文件偏移等于虚址。`PcRel32` 与 `Rva32` 在写出前修完，`Abs64` 进入这张表。未解析的 `morestack_or_poll` 接到 `ret` stub，其余未解析的 `__gugu_*` 与未带归档的 C 符号接到 `exit` stub。编译请求目前不携带归档字节；非空 SysV ar 按未解析 C 符号名精确抽取成员，时间戳、uid、gid 为 0。
 
-显式动态导入才写 `PT_INTERP` 与 `PT_DYNAMIC`。解释器路径来自 `TargetDescriptor`，不搜索宿主 PATH。`.dynstr` 收纳 SONAME，`.dynamic` 含 `DT_STRTAB`、`DT_STRSZ`、每个 SONAME 一条 `DT_NEEDED` 和 `DT_NULL`。每个导入符号在 RX 有一条 `jmp [rip+GOT]`，GOT 槽位于栈界限之后、相对重定位表之前，初值指向 `exit` stub 并作为 relative relocation。机器 rt0 只做重定位、`mprotect`、调用入口和 `exit`；它不解析启动环境变量，也不发布生命周期状态。`r14` 指向这 128 字节，栈检查因此放行。镜像 runtime 的 `rt0_start` 另外分配一页可写 processor 作为 `r15`：`boot` 清零队列，把 TLAB 与 TurnRegion 的 cursor/limit 指到已提交的堆，不把这两对字清成 0。只读节里的 `0xFF` 处理器前缀只作为未进入镜像 runtime 时的兜底。语言级 panic、GC 与 channel 的运行时例程由镜像内 Gugu runtime 实现。
+显式动态导入才写 `PT_INTERP` 与 `PT_DYNAMIC`。`CompileRequest::with_native_link` 把库/符号列表和目标工具链提供的解释器传到 writer，并用规范编码加入 action key，不搜索宿主 PATH。`.dynstr` 以 NUL 开头并收纳 SONAME 与符号名，`.dynsym` 含零项及 undefined GLOBAL/FUNC 项，SysV `.hash` 描述符号表。`.dynamic` 登记字符串、符号、hash、RELA 表地址及各自长度/项宽，依声明顺序写 `DT_NEEDED`，使用即时绑定。每个导入符号在 RX 有一条 `jmp [rip+GOT]`，GOT 初值为零；loader 通过 `R_X86_64_GLOB_DAT` 写入函数地址。这些槽不进入 rt0 自重定位表，避免覆盖 loader 的结果。动态镜像的 loader RELRO 范围为空，rt0 完成自重定位后才按既有精确范围执行 `mprotect`；运行时可写区保持可写。机器 rt0 只做重定位、`mprotect`、调用入口和 `exit`；它不解析启动环境变量，也不发布生命周期状态。`r14` 指向这 128 字节，栈检查因此放行。镜像 runtime 的 `rt0_start` 另外分配一页可写 processor 作为 `r15`：`boot` 清零队列，把 TLAB 与 TurnRegion 的 cursor/limit 指到已提交的堆，不把这两对字清成 0。只读节里的 `0xFF` 处理器前缀只作为未进入镜像 runtime 时的兜底。语言级 panic、GC 与 channel 的运行时例程由镜像内 Gugu runtime 实现。
 
 `staticlib` 写确定性 SysV ar archive，member timestamp/uid/gid 为 0、mode固定，成员按 symbol key排序；`cdylib` 写 ET_DYN、只导出显式 C symbol并包含自有闭世界 runtime/metadata。
 
@@ -353,7 +355,7 @@ fragment relocation 封闭为：
 
 PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。`DllCharacteristics` 固定带 dynamic base、high-entropy VA 和 NX。逻辑节按登记名各写一节，名字长于 8 字节则写出失败。用户片段仍与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐接在 rt0 之后（栈图 `code_rva` 与 `.pdata` 都取自这次排序，两者必须与放置同源）；栈图 `code_rva` 相对该片段区，`.pdata` 里的 `RUNTIME_FUNCTION` 再加上片段区 RVA。`.xdata` 保留完整 `GUGUUN01` 容器，其平台尾里的 `UNWIND_INFO` 偏移改写成镜像 RVA。
 
-绝对地址写成 preferred VA 并进入 `IMAGE_REL_BASED_DIR64`；`PcRel32` 与 `Rva32` 在写出前修完，不进重定位表。重复槽、未知种类、超出 i32 的 PC 相对、可写可执行节和缺失入口在写出前失败。导入表只含按名字排序的 `kernel32.dll`（`ExitProcess`、`SetConsoleCtrlHandler`）和 `ntdll.dll`（`NtTerminateProcess`），不搜索宿主、不写 `msvcrt`。IAT 初值是 hint/name 的 RVA。rt0 第一条指令是 `sub rsp, 0x28`，随后用 RIP 相对地址安装只调用 `NtTerminateProcess` 的 console handler，再调用入口，最后 `ExitProcess(0)`。`r14` 指向 128 字节 `0xFF`，`r15` 指向 4096 字节 `0xFF`。未解析的 `morestack_or_poll` 接到 `ret`，其余未解析符号接到 `mov ecx, 1` 后调用 `ExitProcess` 的 abort stub。export directory 只含显式 C export；当前编译路径没有登记导出时该目录为空。`staticlib` 使用与 SysV ar 相同的确定性 COFF archive（时间戳、uid、gid 为 0）；`cdylib` 置 `IMAGE_FILE_DLL`。不生成 `.lib` 导入库。
+绝对地址写成 preferred VA 并进入 `IMAGE_REL_BASED_DIR64`；`PcRel32` 与 `Rva32` 在写出前修完，不进重定位表。重复槽、未知种类、超出 i32 的 PC 相对、可写可执行节和缺失入口在写出前失败。导入表默认包含 runtime 所需的 `kernel32.dll` 与 `ntdll.dll` API，不搜索宿主、不隐式写入 CRT。显式 `NativeLink` 按声明顺序追加 DLL/符号，DLL 名大小写无关地合并，同一符号跨库登记报错。普通 C 调用和取址使用 `jmp [rip+IAT]` 桩，机器 runtime 的 `__gugu_iat_*` 引用仍直接指向槽。IAT 初值是两字节对齐的 hint/name RVA，数据目录只覆盖 IAT 槽，不包含后续 runtime 状态区。rt0 第一条指令是 `sub rsp, 0x28`，随后用 RIP 相对地址安装只调用 `NtTerminateProcess` 的 console handler，再调用入口，最后 `ExitProcess(0)`。`r14` 指向 128 字节 `0xFF`，`r15` 指向 4096 字节 `0xFF`。未解析的 `morestack_or_poll` 接到 `ret`，其余未解析符号接到 `mov ecx, 1` 后调用 `ExitProcess` 的 abort stub。export directory 只含显式 C export；当前编译路径没有登记导出时该目录为空。`staticlib` 使用与 SysV ar 相同的确定性 COFF archive（时间戳、uid、gid 为 0）；`cdylib` 置 `IMAGE_FILE_DLL`。不生成 `.lib` 导入库。
 
 ## 直接编码与验证
 

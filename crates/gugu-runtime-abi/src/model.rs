@@ -48,8 +48,8 @@ use crate::{Diagnostic, DiagnosticCode, TargetName};
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 29 使用独立签名类型目录验证源记录，不依赖可执行 GIR 闭包。
-pub const RAW_MODEL_SCHEMA: u32 = 29;
+/// 版本 44：镜像 cage reservation、checked 根回写及启动配置。
+pub const RAW_MODEL_SCHEMA: u32 = 44;
 
 /// 资源契约段的 schema 版本。
 pub const RESOURCE_SCHEMA: u32 = 1;

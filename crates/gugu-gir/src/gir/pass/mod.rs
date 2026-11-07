@@ -38,7 +38,7 @@ pub const GIR_PASS_ORDER: &[GirPass] = &[
 ];
 
 /// 管线 revision，进入 action key。
-pub const GIR_PIPELINE_REVISION: u32 = 2;
+pub const GIR_PIPELINE_REVISION: u32 = 4;
 
 impl GirPass {
     pub fn name(self) -> &'static str {
@@ -84,7 +84,7 @@ pub fn run(
             world
                 .concrete
                 .iter()
-                .map(|concrete| (concrete.instance, &concrete.body))
+                .map(|concrete| (concrete.instance, concrete))
                 .collect::<std::collections::BTreeMap<_, _>>()
         });
         let mut updates = Vec::new();
@@ -96,6 +96,7 @@ pub fn run(
                     module,
                     callees.as_ref().expect("Inline 需要具体体表"),
                     &concrete.calls,
+                    &concrete.types,
                 ),
                 GirPass::SimplifyCfg => cfg::simplify(&mut editor),
                 GirPass::SparseConditionalConstants => constants::propagate(&mut editor),
@@ -612,9 +613,6 @@ pub fn statement_reads(statement: &Statement, out: &mut LocalSet) {
             out.insert(owner.local);
             out.insert(destination.local);
             operand_reads(value, out);
-        }
-        StatementKind::Pin { place, .. } => {
-            out.insert(place.local);
         }
         StatementKind::PlatformCall {
             operands,

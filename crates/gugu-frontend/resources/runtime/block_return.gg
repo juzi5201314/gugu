@@ -2,6 +2,8 @@
  * pin、lease 与 grace 任一未清零都不能进入 decommit。
  */
 
+use std.runtime.counters as counters
+use std.runtime.native_memory as mapping
 use std.runtime.heap.{heap_store_word, heap_word}
 
 pub const RETURN_STATE_BYTES: uint = 4096
@@ -19,10 +21,10 @@ pub const RETURN_RELEASED: uint = 2
 struct ReturnExtent { base: uint, bytes: uint }
 
 pub fn return_new(epoch: uint) uint {
-    let state = unsafe { std.platform.reserve_aligned(RETURN_STATE_BYTES, uint(4096)) }
+    let state = unsafe { mapping.reserve_aligned(RETURN_STATE_BYTES, uint(4096)) }
     if state == 0 { unsafe { std.runtime.process_exit(2) } }
     let extent = ReturnExtent { base: state, bytes: RETURN_STATE_BYTES }
-    if unsafe { std.platform.commit(std.mem.transmute[*ReturnExtent, uint](std.ptr.addr_of(extent))) } != 0 {
+    if unsafe { mapping.commit(std.mem.transmute[*ReturnExtent, uint](std.ptr.addr_of(extent))) } != 0 {
         unsafe { std.runtime.process_exit(2) }
     }
     let at = state
@@ -45,6 +47,7 @@ pub fn return_publish(state: uint, unit: uint, generation: uint, pins: uint, lea
     heap_store_word(record + 32, grace)
     heap_store_word(record + 40, RETURN_PENDING)
     heap_store_word(state + RETURN_COUNT_OFFSET, count + 1)
+    counters.add(counters.RETURN_BATCHES, 1)
     0
 }
 

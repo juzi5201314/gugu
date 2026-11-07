@@ -1,0 +1,7 @@
+fn main() {
+    let channel = chan[fn() int](1)
+    let value = 41
+    let closure = fn() int { value + 1 }
+    channel.send(closure)
+    _ = closure()
+}

@@ -1,0 +1,20 @@
+use std.runtime as runtime
+use std.fs as fs
+use std.path.{Path}
+
+fn observe() uint {
+    let measured = runtime.stats()
+    if measured.heap_live_bytes > measured.heap_committed_bytes { panic("heap accounting") }
+    if measured.stack_live_bytes > measured.stack_committed_bytes { panic("stack accounting") }
+    if measured.blocking_bridge_workers > 8 { panic("worker cap") }
+    _ = measured.gc_pause_total.as_nanos()
+    measured.live_coroutines
+}
+fn main() {
+    let before = observe()
+    let child = async observe()
+    _ = child.wait()
+    let directory = fs.read_dir(Path::from_string("sample"))
+    if let Ok(value) = directory { _ = value.close() }
+    _ = before + observe()
+}

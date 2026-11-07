@@ -31,12 +31,10 @@ pub fn revisions() -> Vec<(String, u32)> {
 
 /// 该 body 的片段是否与 world 无关：分配 lowering 把类型宇宙编号写进立即数。
 pub fn recordable(body: &Body) -> bool {
-    !body.instructions.iter().any(|instruction| {
-        matches!(
-            instruction.op,
-            Op::GcAlloc { .. } | Op::RegionAlloc { .. }
-        )
-    })
+    !body
+        .instructions
+        .iter()
+        .any(|instruction| matches!(instruction.op, Op::GcAlloc { .. } | Op::RegionAlloc { .. }))
 }
 
 /// 录制：absorb 之前片段的规范编码。

@@ -89,8 +89,12 @@ pub(crate) fn derive(
     };
     let barrier_demand = lir.barrier_demand();
     let gc_demand = gc_metadata_demand(gc_metadata);
-    let local_heap_demand =
-        lir.local_heap_demand(managed_type_count, large_type_count, max_object_bytes);
+    let local_heap_demand = lir.local_heap_demand(
+        module,
+        managed_type_count,
+        large_type_count,
+        max_object_bytes,
+    );
     // mark 需求完全由已有三份 demand 推导，不新增 LIR 遍历，避免出现第二份站点口径；
     // 跨 owner ticket 的来源就是 SharedHeap 的共享字段屏障站点。
     let mark_demand = MarkDemand {

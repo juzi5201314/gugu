@@ -1,0 +1,8 @@
+fn make() fn() int {
+    let value = 73
+    return fn() int { return value }
+}
+fn main() {
+    let closure = make()
+    _ = closure()
+}

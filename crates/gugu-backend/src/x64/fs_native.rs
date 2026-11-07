@@ -1,0 +1,537 @@
+//! 文件系统 native worker 边界；请求只含 non-moving raw 地址。
+//! Linux 以 CHILD_CLEARTID、Windows 以 thread handle 确认退出后才允许复用请求与栈。
+use super::encode;
+use super::fragments::{FragmentBlob, FragmentDomain, FragmentEntry};
+use super::inst::{LabelId, Operand, RelocKind, RelocTarget};
+use super::lower::{Builder, gpr, imm, mem_base, reg};
+use super::mangle;
+use super::reg::Gpr::{self, *};
+use super::table::{Access, OperandKind as K};
+use crate::hash::hash_domain;
+use crate::lir::body::Symbol;
+use crate::runtime::foreign_schema as bridge;
+use crate::target::TargetName;
+mod callback;
+pub(crate) mod exports;
+mod foreign;
+mod stack;
+const OPERATION: i32 = bridge::NATIVE_REQUEST_OPERATION as i32;
+const ARGUMENTS: i32 = bridge::NATIVE_REQUEST_ARGUMENTS as i32;
+const VALUE: i32 = bridge::NATIVE_REQUEST_VALUE as i32;
+const ERROR: i32 = bridge::NATIVE_REQUEST_ERROR as i32;
+const THREAD_HANDLE: i32 = bridge::NATIVE_REQUEST_THREAD_HANDLE as i32;
+const EXTRA_ARGUMENTS: i32 = bridge::NATIVE_REQUEST_EXTRA_ARGUMENTS as i32;
+const MOV: &[K] = &[K::Rm64, K::R64];
+const IMM: &[K] = &[K::Rm64, K::Imm32];
+fn rr(b: &mut Builder, dst: Gpr, src: Gpr) {
+    b.emit(
+        "mov",
+        MOV,
+        Access::Write,
+        vec![reg(gpr(dst)), reg(gpr(src))],
+    );
+}
+fn load(b: &mut Builder, dst: Gpr, base: Gpr, offset: i32) {
+    b.emit(
+        "mov",
+        MOV,
+        Access::Read,
+        vec![mem_base(gpr(base), offset), reg(gpr(dst))],
+    );
+}
+fn store(b: &mut Builder, base: Gpr, offset: i32, src: Gpr) {
+    b.emit(
+        "mov",
+        MOV,
+        Access::Write,
+        vec![mem_base(gpr(base), offset), reg(gpr(src))],
+    );
+}
+fn number(b: &mut Builder, dst: Gpr, value: i32) {
+    b.emit(
+        "mov",
+        &[K::R32, K::Imm32],
+        Access::Write,
+        vec![reg(gpr(dst)), imm(value as i64 as u64)],
+    );
+}
+fn set(b: &mut Builder, base: Gpr, offset: i32, value: i32) {
+    b.emit(
+        "mov",
+        IMM,
+        Access::Write,
+        vec![mem_base(gpr(base), offset), imm(value as i64 as u64)],
+    );
+}
+fn adjust(b: &mut Builder, op: &'static str, dst: Gpr, value: i32) {
+    b.emit(
+        op,
+        IMM,
+        Access::ReadWrite,
+        vec![reg(gpr(dst)), imm(value as i64 as u64)],
+    );
+}
+fn jump(b: &mut Builder, op: &'static str, target: LabelId) {
+    b.emit(op, &[K::Rel32], Access::Read, vec![Operand::Label(target)]);
+}
+fn compare(b: &mut Builder, register: Gpr, value: i32) {
+    b.emit(
+        "cmp",
+        IMM,
+        Access::Read,
+        vec![reg(gpr(register)), imm(value as i64 as u64)],
+    );
+}
+fn ret(b: &mut Builder) {
+    b.emit("ret", &[], Access::Read, vec![]);
+}
+fn syscall(b: &mut Builder) {
+    b.emit("syscall", &[], Access::Read, vec![]);
+}
+fn push(b: &mut Builder, r: Gpr) {
+    b.emit("push", &[K::R64], Access::Read, vec![reg(gpr(r))]);
+}
+fn pop(b: &mut Builder, r: Gpr) {
+    b.emit("pop", &[K::R64], Access::Write, vec![reg(gpr(r))]);
+}
+fn iat(name: &str) -> Operand {
+    Operand::Rip(
+        RelocTarget::Lir(Symbol::External {
+            key: hash_domain("gugu-pe-iat-symbol-v1", name.as_bytes()),
+            name: format!("__gugu_iat_{name}"),
+        }),
+        0,
+    )
+}
+fn win_call(b: &mut Builder, name: &str) {
+    b.emit("call", &[K::Mem], Access::Read, vec![iat(name)]);
+}
+fn dword_result(b: &mut Builder) {
+    b.emit(
+        "mov",
+        &[K::Rm32, K::R32],
+        Access::Write,
+        vec![reg(gpr(Rax)), reg(gpr(Rax))],
+    );
+}
+fn blob(name: &'static str, b: Builder) -> FragmentBlob {
+    let encoded = encode::assemble(&b.finish().sequence).expect("文件系统 native 片段编码");
+    FragmentBlob {
+        alignment: 16,
+        domain: FragmentDomain::Runtime,
+        bytes: encoded.bytes,
+        entries: vec![FragmentEntry {
+            glue: name,
+            offset: 0,
+        }],
+        relocations: encoded.relocations,
+    }
+}
+/// 调度、额度与错误分类由 Gugu 实现；机器片段只负责 native 线程入口。
+pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
+    let builders = match target {
+        TargetName::X86_64Linux => [linux_start(), linux_poll(), linux_worker(), linux_clock()],
+        TargetName::X86_64Windows => [
+            windows_start(),
+            windows_poll(),
+            windows_worker(),
+            windows_clock(),
+        ],
+    };
+    ["fs_start", "fs_poll", "fs_native_worker", "monotonic_nanos"]
+        .into_iter()
+        .zip(builders)
+        .map(|(name, builder)| blob(name, builder))
+        .chain(std::iter::once(blob(
+            "foreign_native_worker",
+            foreign::worker(target),
+        )))
+        .chain([
+            blob(
+                "callback_file_worker",
+                match target {
+                    TargetName::X86_64Linux => linux_file_worker(false),
+                    TargetName::X86_64Windows => windows_worker(),
+                },
+            ),
+            blob("thread_id", thread_id(target)),
+            blob("callback_control", callback::control()),
+            blob("callback_queue", callback::queue()),
+            blob("stack_read_word", stack::read_word()),
+            blob("cage_control", stack::cage_control()),
+            blob("stack_copy_raw", stack::copy_raw()),
+        ])
+        .collect()
+}
+fn thread_id(target: TargetName) -> Builder {
+    let mut b = Builder::new();
+    match target {
+        TargetName::X86_64Linux => {
+            number(&mut b, Rax, 186);
+            syscall(&mut b);
+        }
+        TargetName::X86_64Windows => {
+            adjust(&mut b, "sub", Rsp, 40);
+            win_call(&mut b, "GetCurrentThreadId");
+            dword_result(&mut b);
+            adjust(&mut b, "add", Rsp, 40);
+        }
+    }
+    ret(&mut b);
+    b
+}
+
+fn multiply(b: &mut Builder, scale: u64) {
+    b.emit(
+        "imul",
+        &[K::Rm64, K::R64, K::Imm32],
+        Access::Read,
+        vec![reg(gpr(Rax)), reg(gpr(Rax)), imm(scale)],
+    );
+}
+fn linux_clock() -> Builder {
+    let mut b = Builder::new();
+    let failed = b.label();
+    adjust(&mut b, "sub", Rsp, 16);
+    number(&mut b, Rax, 228);
+    number(&mut b, Rdi, 7); // CLOCK_BOOTTIME 含系统挂起时间。
+    rr(&mut b, Rsi, Rsp);
+    syscall(&mut b);
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "jne", failed);
+    load(&mut b, Rax, Rsp, 0);
+    multiply(&mut b, 1_000_000_000);
+    load(&mut b, R10, Rsp, 8);
+    b.emit(
+        "add",
+        MOV,
+        Access::ReadWrite,
+        vec![reg(gpr(Rax)), reg(gpr(R10))],
+    );
+    adjust(&mut b, "add", Rsp, 16);
+    ret(&mut b);
+    b.define(failed);
+    number(&mut b, Rax, 231);
+    number(&mut b, Rdi, 2);
+    syscall(&mut b);
+    b.emit("ud2", &[], Access::Read, vec![]);
+    b
+}
+fn windows_clock() -> Builder {
+    let mut b = Builder::new();
+    adjust(&mut b, "sub", Rsp, 40);
+    win_call(&mut b, "GetTickCount64");
+    multiply(&mut b, 1_000_000);
+    adjust(&mut b, "add", Rsp, 40);
+    ret(&mut b);
+    b
+}
+
+fn linux_start() -> Builder {
+    let mut b = Builder::new();
+    let file = b.label();
+    load(&mut b, R11, Rax, OPERATION);
+    compare(&mut b, R11, -1);
+    jump(&mut b, "jne", file);
+    foreign::linux_start(&mut b);
+    b.define(file);
+    let child = b.label();
+    let failed = b.label();
+    rr(&mut b, Rdx, Rax);
+    rr(&mut b, R10, Rax);
+    rr(&mut b, Rsi, Rbx);
+    adjust(&mut b, "sub", Rsi, 16);
+    store(&mut b, Rsi, 0, Rax);
+    number(&mut b, R8, 0);
+    // VM|FS|FILES|SIGHAND|THREAD|SYSVSEM|PARENT_SETTID|CHILD_CLEARTID。
+    number(&mut b, Rdi, 0x350f00);
+    number(&mut b, Rax, 56);
+    syscall(&mut b);
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "je", child);
+    jump(&mut b, "jl", failed);
+    number(&mut b, Rax, 0);
+    ret(&mut b);
+    b.define(failed);
+    b.emit("neg", &[K::Rm64], Access::ReadWrite, vec![reg(gpr(Rax))]);
+    store(&mut b, Rdx, ERROR, Rax);
+    ret(&mut b);
+    b.define(child);
+    load(&mut b, Rdi, Rsp, 0);
+    b.emit(
+        "jmp",
+        &[K::Rel32],
+        Access::Read,
+        vec![Operand::Reloc(
+            RelocTarget::Lir(mangle::runtime_symbol("fs_native_worker")),
+            RelocKind::PcRel32,
+        )],
+    );
+    b
+}
+fn linux_poll() -> Builder {
+    let mut b = Builder::new();
+    let file = b.label();
+    load(&mut b, R11, Rax, OPERATION);
+    compare(&mut b, R11, -1);
+    jump(&mut b, "jne", file);
+    foreign::linux_poll(&mut b);
+    b.define(file);
+    let pending = b.label();
+    // tid 为内核32位字，高32位在提交前清零。x86 load 提供 acquire。
+    load(&mut b, Rax, Rax, 0);
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "jne", pending);
+    number(&mut b, Rax, 1);
+    ret(&mut b);
+    b.define(pending);
+    number(&mut b, Rax, 0);
+    ret(&mut b);
+    b
+}
+fn linux_worker() -> Builder {
+    linux_file_worker(true)
+}
+fn linux_file_worker(exit_thread: bool) -> Builder {
+    let mut b = Builder::new();
+    if !exit_thread {
+        push(&mut b, R12);
+    }
+    let accepted = b.label();
+    let done = b.label();
+    rr(&mut b, R12, Rdi);
+    load(&mut b, Rax, R12, OPERATION);
+    for code in [
+        0, 1, 2, 3, 5, 8, 32, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262,
+    ] {
+        compare(&mut b, Rax, code);
+        jump(&mut b, "je", accepted);
+    }
+    set(&mut b, R12, VALUE, 0);
+    set(&mut b, R12, ERROR, 22);
+    jump(&mut b, "jmp", done);
+    b.define(accepted);
+    for (index, r) in [Rdi, Rsi, Rdx, R10, R8, R9].into_iter().enumerate() {
+        load(&mut b, r, R12, ARGUMENTS + index as i32 * 8);
+    }
+    syscall(&mut b);
+    store(&mut b, R12, VALUE, Rax);
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "jge", done);
+    b.emit("neg", &[K::Rm64], Access::ReadWrite, vec![reg(gpr(Rax))]);
+    store(&mut b, R12, ERROR, Rax);
+    b.define(done);
+    if exit_thread {
+        number(&mut b, Rdi, 0);
+        number(&mut b, Rax, 60);
+        syscall(&mut b);
+        b.emit("ud2", &[], Access::Read, vec![]);
+    } else {
+        pop(&mut b, R12);
+        ret(&mut b);
+    }
+    b
+}
+fn windows_start() -> Builder {
+    let mut b = Builder::new();
+    push(&mut b, R12);
+    adjust(&mut b, "sub", Rsp, 48);
+    rr(&mut b, R12, Rax);
+    rr(&mut b, R9, Rax);
+    number(&mut b, Rcx, 0);
+    number(
+        &mut b,
+        Rdx,
+        crate::runtime::foreign_schema::BLOCKING_WORKER_STACK_BYTES as i32,
+    );
+    b.emit(
+        "lea",
+        &[K::Mem, K::R64],
+        Access::Address,
+        vec![
+            Operand::Rip(
+                RelocTarget::Lir(mangle::runtime_symbol("fs_native_worker")),
+                0,
+            ),
+            reg(gpr(R8)),
+        ],
+    );
+    let file_worker = b.label();
+    load(&mut b, R11, R12, OPERATION);
+    compare(&mut b, R11, -1);
+    jump(&mut b, "jne", file_worker);
+    b.emit(
+        "lea",
+        &[K::Mem, K::R64],
+        Access::Address,
+        vec![
+            Operand::Rip(
+                RelocTarget::Lir(mangle::runtime_symbol("foreign_native_worker")),
+                0,
+            ),
+            reg(gpr(R8)),
+        ],
+    );
+    b.define(file_worker);
+    set(&mut b, Rsp, 32, 0);
+    set(&mut b, Rsp, 40, 0);
+    win_call(&mut b, "CreateThread");
+    store(&mut b, R12, THREAD_HANDLE, Rax);
+    let success = b.label();
+    let end = b.label();
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "jne", success);
+    win_call(&mut b, "GetLastError");
+    dword_result(&mut b);
+    store(&mut b, R12, ERROR, Rax);
+    jump(&mut b, "jmp", end);
+    b.define(success);
+    number(&mut b, Rax, 0);
+    b.define(end);
+    adjust(&mut b, "add", Rsp, 48);
+    pop(&mut b, R12);
+    ret(&mut b);
+    b
+}
+fn windows_poll() -> Builder {
+    let mut b = Builder::new();
+    push(&mut b, R12);
+    adjust(&mut b, "sub", Rsp, 32);
+    rr(&mut b, R12, Rax);
+    load(&mut b, Rcx, R12, THREAD_HANDLE);
+    number(&mut b, Rdx, 0);
+    win_call(&mut b, "WaitForSingleObject");
+    dword_result(&mut b);
+    let pending = b.label();
+    let failed = b.label();
+    let end = b.label();
+    compare(&mut b, Rax, 258);
+    jump(&mut b, "je", pending);
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "jne", failed);
+    load(&mut b, Rcx, R12, THREAD_HANDLE);
+    win_call(&mut b, "CloseHandle");
+    dword_result(&mut b);
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "je", failed);
+    set(&mut b, R12, THREAD_HANDLE, 0);
+    number(&mut b, Rax, 1);
+    jump(&mut b, "jmp", end);
+    b.define(pending);
+    number(&mut b, Rax, 0);
+    b.define(end);
+    adjust(&mut b, "add", Rsp, 32);
+    pop(&mut b, R12);
+    ret(&mut b);
+    b.define(failed);
+    number(&mut b, Rcx, 2);
+    win_call(&mut b, "ExitProcess");
+    b.emit("ud2", &[], Access::Read, vec![]);
+    b
+}
+/// opcode、薄入口名、失败哨兵；参数按 Win64 ABI 传递。
+const WINDOWS_CALLS: &[(i32, &str, i32)] = &[
+    (0, "CreateFileW", -1),
+    (1, "CloseHandle", 0),
+    (2, "ReadFile", 0),
+    (3, "WriteFile", 0),
+    (4, "SetFilePointerEx", 0),
+    (5, "GetFileInformationByHandle", 0),
+    (6, "SetEndOfFile", 0),
+    (7, "FlushFileBuffers", 0),
+    (8, "DuplicateHandle", 0),
+    (9, "FindFirstFileW", -1),
+    (10, "FindNextFileW", 0),
+    (11, "FindClose", 0),
+    (12, "CreateDirectoryW", 0),
+    (13, "DeleteFileW", 0),
+    (14, "RemoveDirectoryW", 0),
+    (15, "MoveFileExW", 0),
+    (16, "CreateHardLinkW", 0),
+    (17, "CreateSymbolicLinkW", 0),
+    (18, "DeviceIoControl", 0),
+    (19, "GetFinalPathNameByHandleW", 0),
+    (20, "SetFileInformationByHandle", 0),
+];
+fn windows_worker() -> Builder {
+    let mut b = Builder::new();
+    push(&mut b, R12);
+    adjust(&mut b, "sub", Rsp, 64);
+    rr(&mut b, R12, Rcx);
+    let done = b.label();
+    for &(code, name, failure) in WINDOWS_CALLS {
+        let next = b.label();
+        load(&mut b, Rax, R12, OPERATION);
+        compare(&mut b, Rax, code);
+        jump(&mut b, "jne", next);
+        for (index, r) in [Rcx, Rdx, R8, R9].into_iter().enumerate() {
+            load(&mut b, r, R12, ARGUMENTS + index as i32 * 8);
+        }
+        for index in 0..4 {
+            load(
+                &mut b,
+                Rax,
+                R12,
+                if index < 2 {
+                    ARGUMENTS + 32 + index * 8
+                } else {
+                    EXTRA_ARGUMENTS + (index - 2) * 8
+                },
+            );
+            store(&mut b, Rsp, 32 + index * 8, Rax);
+        }
+        win_call(&mut b, name);
+        if name == "CreateSymbolicLinkW" {
+            b.emit("and", IMM, Access::ReadWrite, vec![reg(gpr(Rax)), imm(255)]);
+        } else if failure == 0 {
+            dword_result(&mut b);
+        }
+        store(&mut b, R12, VALUE, Rax);
+        compare(&mut b, Rax, failure);
+        jump(&mut b, "jne", done);
+        win_call(&mut b, "GetLastError");
+        dword_result(&mut b);
+        store(&mut b, R12, ERROR, Rax);
+        jump(&mut b, "jmp", done);
+        b.define(next);
+    }
+    set(&mut b, R12, ERROR, 87);
+    b.define(done);
+    number(&mut b, Rax, 0);
+    adjust(&mut b, "add", Rsp, 64);
+    pop(&mut b, R12);
+    ret(&mut b);
+    b
+}
+#[cfg(test)]
+mod protocol_tests;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_boundary_encodes_for_both_targets() {
+        for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
+            let blobs = fragments(target);
+            assert_eq!(blobs.len(), 12);
+            assert_eq!(
+                blobs.iter().map(|b| b.entries[0].glue).collect::<Vec<_>>(),
+                [
+                    "fs_start",
+                    "fs_poll",
+                    "fs_native_worker",
+                    "monotonic_nanos",
+                    "foreign_native_worker",
+                    "callback_file_worker",
+                    "thread_id",
+                    "callback_control",
+                    "callback_queue",
+                    "stack_read_word",
+                    "cage_control",
+                    "stack_copy_raw"
+                ]
+            );
+            assert!(blobs.iter().all(|b| !b.bytes.is_empty()));
+        }
+    }
+}

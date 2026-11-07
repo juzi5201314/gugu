@@ -9,6 +9,11 @@
 mod backend;
 #[cfg(test)]
 mod diagnostics_tests;
+#[cfg(test)]
+mod filesystem_tests;
+#[cfg(test)]
+#[path = "lir_tests/foreign_abi.rs"]
+mod foreign_abi_tests;
 mod frontend;
 #[cfg(all(test, feature = "slow-tests"))]
 mod lir_tests;
@@ -37,8 +42,9 @@ pub use backend::x64::harness::{
 };
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use frontend::format::{FormatError, format_source};
-pub use frontend::prebuild::{MaterializeError, closure_program_modules};
-pub use materialize::materialize;
+pub use frontend::prebuild::{MaterializeError, closure_program_modules, materialize_tables};
+pub use gugu_backend::NativeLink;
+pub use materialize::{materialize, materialize_functions};
 pub use project::{
     ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyDomain,
     DependencyInput, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,
@@ -99,9 +105,15 @@ pub struct CompileRequest {
     routing: RoutingPolicyV1,
     provenance: ProvenancePolicyV1,
     combining: CombiningPolicyV1,
+    native_link: NativeLink,
 }
 
 impl CompileRequest {
+    /// 显式指定 native 导入；配置参与 action key，不探测宿主库或解释器。
+    pub fn with_native_link(mut self, native_link: NativeLink) -> Self {
+        self.native_link = native_link;
+        self
+    }
     /// 创建空 package 请求。
     pub fn empty_package(target: TargetName) -> Self {
         Self {
@@ -111,6 +123,7 @@ impl CompileRequest {
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
             combining: CombiningPolicyV1::direct(),
+            native_link: NativeLink::default(),
         }
     }
 
@@ -130,6 +143,7 @@ impl CompileRequest {
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
             combining: CombiningPolicyV1::direct(),
+            native_link: NativeLink::default(),
         }
     }
 
@@ -146,6 +160,7 @@ impl CompileRequest {
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
             combining: CombiningPolicyV1::direct(),
+            native_link: NativeLink::default(),
         }
     }
     /// 编译构建内登记的 runtime GC 探针入口；case 进入 cfg 与 action key。
@@ -170,6 +185,7 @@ impl CompileRequest {
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
             combining: CombiningPolicyV1::direct(),
+            native_link: NativeLink::default(),
         }
     }
 
@@ -208,6 +224,7 @@ impl CompileRequest {
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
             combining: CombiningPolicyV1::direct(),
+            native_link: NativeLink::default(),
         }
     }
 
@@ -529,6 +546,7 @@ impl Compiler {
             routing,
             provenance,
             combining,
+            native_link,
         } = request;
         let mut graph = ActionGraph::new();
         let mut diagnostics = Diagnostics::default();
@@ -854,6 +872,7 @@ impl Compiler {
                 .plan
                 .as_ref()
                 .map(|plan| (plan.require_main, &plan.cfg)),
+            &native_link,
         ));
 
         let hir = frontend.hir;
@@ -870,6 +889,7 @@ impl Compiler {
                 &raw_contract,
                 world,
                 frontend.analysis.runtime_checks_elided_count,
+                &native_link,
             ),
         };
         let backend_plan = match backend_plan {
@@ -987,6 +1007,7 @@ fn compilation_action_key(
     runtime_artifact: [u8; 32],
     x64: Option<&backend::x64::codegen::X64World>,
     plan: Option<(bool, &frontend::cfg::CfgContext)>,
+    native_link: &NativeLink,
 ) -> project::ActionKey {
     const EMPTY_PLAN: (bool, Option<&frontend::cfg::CfgContext>) = (true, None);
     let (require_main, cfg) = plan
@@ -1012,6 +1033,7 @@ fn compilation_action_key(
     for (key, value) in cfg.action_inputs() {
         inputs.set_cfg(key, value);
     }
+    inputs.set_native_link_metadata(native_link.canonical_bytes());
     inputs.set_comptime_registry(frontend.comptime_registry.1);
     inputs.set_type_universe(frontend.mono.universe.fingerprint);
     inputs.set_late_constants(frontend.mono.late.fingerprint);
@@ -3663,7 +3685,7 @@ mod tests {
             "RegionTransfer 字段目录必须进入契约"
         );
         let dump = reset.dump_runtime().expect("runtime dump");
-        assert!(dump.contains("region schema=1 object-limit=64 max-active=64 transfer-lease=1"));
+        assert!(dump.contains("region schema=2 object-limit=64 max-active=64 transfer-lease=1"));
         assert!(dump.contains("region-states private,publishing,reset-pending,reset,local-promote,region-transfer,received"));
         assert!(dump.contains("region-transfer-fields"));
         assert!(dump.contains("region-demand"));

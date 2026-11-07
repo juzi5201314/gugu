@@ -18,6 +18,9 @@ slow-tests = ["gugu-frontend/slow-tests"]
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-frontend = { path = "../gugu-frontend" }
 
+[dev-dependencies]
+gugu-runtime-abi = { path = "../gugu-runtime-abi" }
+
 [build-dependencies]
 gugu-compiler-core = { path = "../gugu-compiler-core" }
 gugu-frontend = { path = "../gugu-frontend" }

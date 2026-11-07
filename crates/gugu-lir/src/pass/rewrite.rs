@@ -603,7 +603,6 @@ impl Editor {
         for value in &result_values {
             self.definitions[value.index()] = Some((block, index));
         }
-        self.block_origins[block.index()].push(None);
         result_values
     }
 
@@ -818,7 +817,6 @@ impl Editor {
             },
         );
         self.recount_definitions();
-        self.block_origins[at.0.index()].insert(at.1, None);
         (result_values, output)
     }
 
@@ -945,7 +943,6 @@ impl Editor {
         for value in &results {
             self.definitions[value.index()] = Some((block, index));
         }
-        self.block_origins[block.index()].push(None);
     }
 
     /// 合并 `a` 与它唯一后继 `b`。
@@ -973,12 +970,57 @@ impl Editor {
         for (parameter, argument) in params.iter().zip(&arguments) {
             self.replace_value(*parameter, *argument);
         }
+        // 空块也能携带 StorageLive/根初始化事件；没有指令 origin 可供 finish 找回。
+        // 合并前把事件重锚到相邻原指令，不能把这些事件随空块删除。
+        let left = self.blocks[a.index()]
+            .as_ref()
+            .expect("活跃 block")
+            .insts
+            .iter()
+            .rev()
+            .find_map(|instruction| instruction.origin);
+        let right = self.blocks[b.index()]
+            .as_ref()
+            .expect("活跃 block")
+            .insts
+            .iter()
+            .find_map(|instruction| instruction.origin);
+        for (empty, origin, after) in [(a, right, false), (b, left.or(right), left.is_some())] {
+            if !self.block_origins[empty.index()].is_empty() {
+                continue;
+            }
+            let anchor = origin
+                .and_then(|origin| {
+                    self.block_origins
+                        .iter()
+                        .enumerate()
+                        .find_map(|(block, origins)| {
+                            origins
+                                .iter()
+                                .position(|candidate| *candidate == Some(origin))
+                                .map(|position| {
+                                    (BlockId(id(block)), id(position + usize::from(after)))
+                                })
+                        })
+                })
+                .unwrap_or((a, 0));
+            for lifetime in &mut self.lifetimes {
+                if lifetime.block == empty {
+                    lifetime.block = anchor.0;
+                    lifetime.position = anchor.1;
+                }
+            }
+            for root in &mut self.root_inits {
+                if root.block == empty {
+                    root.block = anchor.0;
+                    root.position = anchor.1;
+                }
+            }
+        }
         let (insts, term) = {
             let block = self.blocks[b.index()].take().expect("活跃 block");
             (block.insts, block.term)
         };
-        let origins = self.block_origins[b.index()].clone();
-        self.block_origins[a.index()].extend(origins);
         self.blocks[a.index()]
             .as_mut()
             .expect("活跃 block")

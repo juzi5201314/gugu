@@ -69,24 +69,34 @@ fn guard_discipline(
     body: &Body,
     addresses: &BTreeMap<ValueId, Vec<u32>>,
 ) -> Result<(), Diagnostic> {
-    let mut states: BTreeMap<u32, TokenState> = BTreeMap::new();
+    let mut states: BTreeMap<u32, (TokenState, ValueId)> = BTreeMap::new();
     let mut stack: Vec<u32> = Vec::new();
     for block in &body.blocks {
         for instruction in &body.instructions[range(&block.instructions)] {
             let active = stack.last().copied();
             match &instruction.op {
                 Op::SharedAccessBegin { token } => {
-                    if *token == 0 || states.insert(*token, TokenState::Begun).is_some() {
+                    if *token == 0
+                        || states
+                            .insert(
+                                *token,
+                                (TokenState::Begun, body.args(&instruction.arguments)[0]),
+                            )
+                            .is_some()
+                    {
                         return Err(invalid("shared access token 必须非零且在 body 内唯一"));
                     }
                     stack.push(*token);
                 }
                 Op::SharedAccessEnd { token } => match stack.pop() {
                     Some(open) if open == *token => {
-                        if states.get(token) != Some(&TokenState::Resolved) {
-                            return Err(invalid("shared access guard 必须在访问之后才结束"));
+                        let handle = body.args(&instruction.arguments)[0];
+                        if states.get(token) != Some(&(TokenState::Resolved, handle)) {
+                            return Err(invalid(
+                                "shared access guard 必须在访问后以同一 handle 结束",
+                            ));
                         }
-                        states.insert(*token, TokenState::Ended);
+                        states.insert(*token, (TokenState::Ended, handle));
                     }
                     _ => return Err(invalid("shared access guard 的 begin/end 不配对")),
                 },
@@ -114,6 +124,11 @@ fn guard_discipline(
                         ));
                     }
                     for argument in address_positions(body, instruction) {
+                        if body.values[argument.index()].kind.provenance
+                            == Some(Provenance::SharedHandle)
+                        {
+                            return Err(invalid("稳定 handle 不能作为 payload 地址"));
+                        }
                         let Some(owners) = addresses.get(&argument) else {
                             continue;
                         };
@@ -123,13 +138,19 @@ fn guard_discipline(
                             ));
                         }
                     }
+                    if matches!(op, Op::Store(_))
+                        && addresses.contains_key(&body.args(&instruction.arguments)[1])
+                    {
+                        return Err(invalid("shared payload 地址不能作为数据逃出 guard"));
+                    }
                     // 首次真实字段访问把当前 guard 推进到 resolved。
                     if let Some(token) = active
                         && address_positions(body, instruction)
                             .iter()
                             .any(|argument| addresses.contains_key(argument))
                     {
-                        states.insert(token, TokenState::Resolved);
+                        states.get_mut(&token).expect("active guard 已登记").0 =
+                            TokenState::Resolved;
                     }
                 }
             }
@@ -213,11 +234,8 @@ fn terminator_escape(
 
 /// 收集所有 shared 地址 value 及拥有它的 guard token 集合。
 ///
-/// 地址包括两部分：每个 `SharedAccessBegin` 的 handle root（它在该 token 内被当作 payload
-/// 基址），以及 guard 内从 shared 基址 `PtrOffset` 出来的派生值。同一个 handle 可以是多个
-/// guard 的根（同一对象可以先后开多个 guard），因此每个地址记录一组 token；使用点只要落在
-/// 其中任何一个仍然打开的 guard 内即可。从 payload 读出的嵌套 handle 是数据，可以在 guard
-/// 结束后继续使用，因此不在这里登记。
+/// 地址从 `SharedAccessBegin` 的 payload 结果开始沿 PtrOffset 派生；输入 handle 是
+/// 可跨 guard 保存的身份。从 payload 读取出的嵌套 handle 也是数据，不登记为派生地址。
 fn shared_addresses(body: &Body) -> BTreeMap<ValueId, Vec<u32>> {
     let mut addresses: BTreeMap<ValueId, Vec<u32>> = BTreeMap::new();
     for block in &body.blocks {
@@ -225,14 +243,8 @@ fn shared_addresses(body: &Body) -> BTreeMap<ValueId, Vec<u32>> {
         for instruction in &body.instructions[range(&block.instructions)] {
             match &instruction.op {
                 Op::SharedAccessBegin { token } => {
-                    if let Some(root) = body.args(&instruction.arguments).first().copied()
-                        && body.values[root.index()].kind.provenance
-                            == Some(Provenance::SharedHandle)
-                    {
-                        let owners = addresses.entry(root).or_default();
-                        if !owners.contains(token) {
-                            owners.push(*token);
-                        }
+                    for root in range(&instruction.results) {
+                        addresses.insert(ValueId(id(root)), vec![*token]);
                     }
                     stack.push(*token);
                 }
@@ -246,17 +258,15 @@ fn shared_addresses(body: &Body) -> BTreeMap<ValueId, Vec<u32>> {
                     let Some(base) = body.args(&instruction.arguments).first().copied() else {
                         continue;
                     };
-                    let shared_base =
-                        body.values[base.index()].kind.provenance == Some(Provenance::SharedHandle);
-                    if !shared_base {
+                    if !addresses
+                        .get(&base)
+                        .is_some_and(|owners| owners.contains(&token))
+                    {
                         continue;
                     }
                     for result in range(&instruction.results) {
                         let value = ValueId(id(result));
-                        if body.values[value.index()].kind.provenance
-                            == Some(Provenance::SharedHandle)
-                            && matches!(body.values[value.index()].origin, Origin::Derived(_))
-                        {
+                        if matches!(body.values[value.index()].origin, Origin::Derived(_)) {
                             let owners = addresses.entry(value).or_default();
                             if !owners.contains(&token) {
                                 owners.push(token);

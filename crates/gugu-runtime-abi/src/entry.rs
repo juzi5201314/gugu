@@ -44,8 +44,11 @@ pub mod rt0_params {
 
 /// 初始协程槽保留字节数；两个 writer 共用同一份预约。
 pub const INITIAL_SLOT_BYTES: u64 = 128;
-/// 状态区首部是 104 字节邮箱，后接 512 字节冷记录与 64 字节 panic 记录。
-pub const RUNTIME_STATE_BYTES: u64 = 704;
+/// 状态区首部是邮箱和冷记录，随后为 panic/调度记录及独立回调控制区。
+pub const RUNTIME_STATE_BYTES: u64 = 128
+    + size_of::<super::coroutine::CoroutineCold>() as u64
+    + 64
+    + super::callback::CONTROL_BYTES as u64;
 
 /// runtime 状态区各槽偏移；rt0、调度器、片段、镜像 runtime 与 collector 共用这一份契约。
 ///
@@ -64,11 +67,14 @@ pub mod state {
     /// 主协程冷记录。
     pub const COLD: u64 = 128;
     /// panic 记录起点：message/len/path/path_len/line/column 六个字。
-    pub const PANIC_MESSAGE: u64 = 640;
+    pub const PANIC_MESSAGE: u64 =
+        COLD + size_of::<super::super::coroutine::CoroutineCold>() as u64;
     /// 调度器返回原因：0 morestack、1 主动让出、2 协程返回。
-    pub const REASON: u64 = 688;
+    pub const REASON: u64 = PANIC_MESSAGE + 48;
     /// GC coordinator 指针；与 panic 区、原因槽都不重叠。
-    pub const COORDINATOR: u64 = 696;
+    pub const COORDINATOR: u64 = REASON + 8;
+    /// 外部回调控制区，独占 coordinator 后的 raw 字节。
+    pub const CALLBACK: u64 = COORDINATOR + 8;
     /// 状态区字节数。
     pub const BYTES: u64 = RUNTIME_STATE_BYTES;
 }
@@ -82,10 +88,13 @@ const _: () = {
     assert!(state::PAYLOAD + 8 == state::BIAS);
     assert!(state::BIAS + 8 <= state::COLD);
     // 冷记录之后是 panic 六字记录，原因槽与 coordinator 各自独占一个字。
-    assert!(state::COLD + 512 == state::PANIC_MESSAGE);
+    assert!(
+        state::COLD + size_of::<super::coroutine::CoroutineCold>() as u64 == state::PANIC_MESSAGE
+    );
     assert!(state::PANIC_MESSAGE + 48 <= state::REASON);
     assert!(state::REASON + 8 == state::COORDINATOR);
-    assert!(state::COORDINATOR + 8 == state::BYTES);
+    assert!(state::COORDINATOR + 8 == state::CALLBACK);
+    assert!(state::CALLBACK + super::callback::CONTROL_BYTES as u64 == state::BYTES);
 };
 
 /// rt0 交给镜像 runtime 的启动载荷；rt0 在其中写回加载偏移，其余字段由 writer 预置为链接期值。

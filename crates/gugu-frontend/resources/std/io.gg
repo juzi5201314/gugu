@@ -1,6 +1,40 @@
-struct ByteBuffer {}
-struct CancelToken {}
-struct Bytes {}
+pub use std.text.{Bytes}
+use std.text.{alloc_bytes}
+pub use std.sync.{CancelToken}
+
+// 不可变块链让追加为 O(1)，复制缓冲只共享已封存节点；freeze 线性物化一次。
+struct BufferChunk {
+    previous: Option[&BufferChunk],
+    data: Bytes,
+}
+
+pub struct ByteBuffer {
+    head: Option[&BufferChunk],
+    length: int,
+}
+
+impl ByteBuffer {
+    pub fn new() ByteBuffer = ByteBuffer { head: None, length: 0 }
+    pub fn len(self: &Self) int = self.length
+    pub fn freeze(self: &Self) Bytes {
+        let data = unsafe { alloc_bytes(self.length) }
+        let end = self.length
+        let cursor = self.head
+        while let Some(chunk) = cursor {
+            end = end - chunk.data.len()
+            _ = chunk.data.copy_to(data[end..])
+            cursor = chunk.previous
+        }
+        unsafe { Bytes::from_owned(data) }
+    }
+    pub fn append(self: &Self, source: Bytes) {
+        if source.len() == 0 { return }
+        if source.len() > 9223372036854775807 - self.length { panic("byte buffer overflow") }
+        let chunk = BufferChunk { previous: self.head, data: source }
+        self.head = Some(&chunk)
+        self.length = self.length + source.len()
+    }
+}
 
 pub trait Read {
     fn read(self: &Self, destination: &[byte]) Result[int, Error]
@@ -60,12 +94,36 @@ pub enum Error {
     ReadOnlyFilesystem,
     FileTooLarge,
     QuotaExceeded,
-    Other,
+    Other { code: int, source: Option[&Error] },
 }
 
 impl Error for Error {
-    fn message(self: &Self) string = "io"
-    fn source(self: &Self) Option[&dyn Error] = None
+    fn message(self: &Self) string {
+        match *self {
+            Error::NotFound => "NotFound", Error::PermissionDenied => "PermissionDenied",
+            Error::AlreadyExists => "AlreadyExists", Error::InvalidInput => "InvalidInput",
+            Error::InvalidData => "InvalidData", Error::UnexpectedEof => "UnexpectedEof",
+            Error::WriteZero => "WriteZero", Error::Interrupted => "Interrupted",
+            Error::TimedOut => "TimedOut", Error::Cancelled => "Cancelled", Error::Closed => "Closed",
+            Error::BrokenPipe => "BrokenPipe", Error::NotConnected => "NotConnected",
+            Error::ConnectionReset => "ConnectionReset", Error::ConnectionRefused => "ConnectionRefused",
+            Error::ConnectionAborted => "ConnectionAborted", Error::AddrInUse => "AddrInUse",
+            Error::AddrNotAvailable => "AddrNotAvailable", Error::NotADirectory => "NotADirectory",
+            Error::IsADirectory => "IsADirectory", Error::DirectoryNotEmpty => "DirectoryNotEmpty",
+            Error::CrossesDevices => "CrossesDevices", Error::NotSeekable => "NotSeekable",
+            Error::InvalidState => "InvalidState", Error::MessageTooLarge => "MessageTooLarge",
+            Error::Unsupported => "Unsupported", Error::StorageFull => "StorageFull",
+            Error::ReadOnlyFilesystem => "ReadOnlyFilesystem", Error::FileTooLarge => "FileTooLarge",
+            Error::QuotaExceeded => "QuotaExceeded", Error::Other { .. } => "Other",
+        }
+    }
+    fn source(self: &Self) Option[&dyn Error] {
+        match *self {
+            Error::Other { source: Some(cause), .. } => { let erased: dyn Error = *cause
+                Some(&erased) },
+            _ => None,
+        }
+    }
 }
 
 impl Print for Error {
@@ -76,72 +134,173 @@ impl Debug for Error {
     fn debug(self: &Self, out: &Formatter) {}
 }
 
-pub fn kind(value: &Error) Error {
-    _ = value
-    Error::InvalidInput
+fn error_code(value: &Error) int {
+    match *value {
+        Error::NotFound => 0, Error::PermissionDenied => 1, Error::AlreadyExists => 2,
+        Error::InvalidInput => 3, Error::InvalidData => 4, Error::UnexpectedEof => 5,
+        Error::WriteZero => 6, Error::Interrupted => 7, Error::TimedOut => 8,
+        Error::Cancelled => 9, Error::Closed => 10, Error::BrokenPipe => 11,
+        Error::NotConnected => 12, Error::ConnectionReset => 13, Error::ConnectionRefused => 14,
+        Error::ConnectionAborted => 15, Error::AddrInUse => 16, Error::AddrNotAvailable => 17,
+        Error::NotADirectory => 18, Error::IsADirectory => 19, Error::DirectoryNotEmpty => 20,
+        Error::CrossesDevices => 21, Error::NotSeekable => 22, Error::InvalidState => 23,
+        Error::MessageTooLarge => 24, Error::Unsupported => 25, Error::StorageFull => 26,
+        Error::ReadOnlyFilesystem => 27, Error::FileTooLarge => 28, Error::QuotaExceeded => 29,
+        Error::Other { .. } => 30,
+    }
 }
-
+pub fn kind(value: &Error) Error {
+    match *value {
+        Error::Other { code, .. } => Error::Other { code: code, source: None },
+        _ => *value,
+    }
+}
 pub fn with_source(value: &Error, cause: Error) Error {
-    _ = value
-    _ = cause
-    Error::InvalidInput
+    let base = kind(value)
+    let code = error_code(&base)
+    let current = &cause
+    let depth = 0
+    loop {
+        let current_kind = kind(current)
+        if error_code(&current_kind) == code || depth >= 8 { return Error::InvalidInput }
+        depth = depth + 1
+        match *current {
+            Error::Other { source: Some(next), .. } => { current = next },
+            _ => break,
+        }
+    }
+    Error::Other { code: code, source: Some(&cause) }
+}
+impl Error {
+    pub fn kind(self: &Self) Error = kind(self)
+    pub fn with_source(self: &Self, cause: Error) Error = with_source(self, cause)
 }
 
 pub fn read_exact[R: Read](reader: &R, destination: &[byte]) Result[(), Error] {
-    let read = reader.read(destination)?
-    if read == 0 { Err(Error::UnexpectedEof) } else { Ok(()) }
+    let offset = 0
+    while offset < destination.len() {
+        let count = reader.read(destination[offset..])?
+        if count == 0 { return Err(Error::UnexpectedEof) }
+        offset = offset + count
+    }
+    Ok(())
 }
 
 pub fn write_all[W: Write](writer: &W, source: Bytes) Result[(), Error] {
-    let written = writer.write(source)?
-    if written == 0 { Err(Error::WriteZero) } else { Ok(()) }
+    let remaining = source
+    while remaining.len() != 0 {
+        let count = writer.write(remaining)?
+        if count == 0 { return Err(Error::WriteZero) }
+        let (_, tail) = remaining.split_at(count)
+        remaining = tail
+    }
+    Ok(())
 }
 
 pub fn copy[R: Read, W: Write](reader: &R, writer: &W) Result[uint, Error] {
-    _ = reader
-    _ = writer
-    Ok(0)
+    let buffer = unsafe { alloc_bytes(8192) }
+    let copied: uint = 0
+    loop {
+        let count = reader.read(buffer)?
+        if count == 0 { return Ok(copied) }
+        write_all(writer, Bytes::copy_from(buffer[..count]))?
+        copied = copied + uint(count)
+    }
 }
 
 pub fn read_to_end[R: Read](reader: &R) Result[Bytes, Error] {
-    _ = reader
-    Ok(Bytes {})
+    let buffer = ByteBuffer::new()
+    loop {
+        if reader.read_buffer(&buffer, 8192)? == 0 { return Ok(buffer.freeze()) };
+    }
 }
 
 pub fn read_to_string[R: Read](reader: &R) Result[string, Error] {
-    _ = reader
-    Err(Error::InvalidData)
+    let bytes = read_to_end(reader)?
+    match bytes.to_string() {
+        Ok(value) => Ok(value),
+        Err(_) => Err(Error::InvalidData),
+    }
 }
 
 pub fn fill_buffer[R: Read](reader: &R, limit: int) Result[Bytes, Error] {
-    _ = reader
-    _ = limit
-    Ok(Bytes {})
+    if limit < 0 { panic("negative read limit") }
+    if limit == 0 { return Ok(Bytes::new()) }
+    let buffer = ByteBuffer::new()
+    _ = reader.read_buffer(&buffer, limit)?
+    Ok(buffer.freeze())
 }
 
 pub fn write_buffer[W: Write](writer: &W, source: &ByteBuffer) Result[int, Error] {
-    _ = source
-    writer.write(Bytes {})
+    writer.write(source.freeze())
 }
 
-pub struct Buffered[R] {}
+pub struct Buffered[R] {
+    reader: &R,
+    bytes: Bytes,
+    offset: int,
+    capacity: int,
+}
 
 pub fn buffered[R: Read](reader: &R, capacity: int) Result[Buffered[R], Error] {
-    _ = reader
-    if capacity < 0 { Err(Error::InvalidInput) } else { Ok(Buffered {}) }
+    if capacity < 0 { return Err(Error::InvalidInput) }
+    Ok(Buffered { reader: reader, bytes: Bytes::new(), offset: 0, capacity: capacity })
 }
 
 impl[R: Read] Buffered[R] {
-    pub fn fill(self: &Self) Result[Bytes, Error] = Ok(Bytes {})
-    pub fn consume(self: &Self, count: int) { _ = count }
+    pub fn fill(self: &Self) Result[Bytes, Error] {
+        if self.offset == self.bytes.len() {
+            let data = unsafe { alloc_bytes(self.capacity) }
+            let count = self.reader.read(data)?
+            self.bytes = unsafe { Bytes::from_owned(data[..count]) }
+            self.offset = 0
+        }
+        let (_, tail) = self.bytes.split_at(self.offset)
+        Ok(tail)
+    }
+    pub fn consume(self: &Self, count: int) {
+        if count < 0 || count > self.bytes.len() - self.offset { panic("consume out of range") }
+        self.offset = self.offset + count
+    }
     pub fn read(self: &Self, destination: &[byte]) Result[int, Error] {
-        _ = destination
-        Ok(0)
+        if destination.len() == 0 { return Ok(0) }
+        let bytes = self.fill()?
+        let count = bytes.copy_to(destination)
+        self.consume(count)
+        Ok(count)
+    }
+}
+
+#[cfg(os = "linux")]
+pub fn from_native_error(code: uint) Error {
+    if code == ~uint(0) { return Error::Cancelled }
+    match code {
+        2 => Error::NotFound, 1 | 13 => Error::PermissionDenied, 17 => Error::AlreadyExists,
+        22 | 36 | 40 => Error::InvalidInput, 4 => Error::Interrupted, 9 => Error::Closed,
+        32 => Error::BrokenPipe, 20 => Error::NotADirectory, 21 => Error::IsADirectory,
+        39 => Error::DirectoryNotEmpty, 18 => Error::CrossesDevices, 29 => Error::NotSeekable,
+        38 | 95 => Error::Unsupported, 28 => Error::StorageFull, 30 => Error::ReadOnlyFilesystem,
+        27 => Error::FileTooLarge, 122 => Error::QuotaExceeded,
+        _ => Error::Other { code: int(code), source: None },
+    }
+}
+#[cfg(os = "windows")]
+pub fn from_native_error(code: uint) Error {
+    if code == ~uint(0) { return Error::Cancelled }
+    match code {
+        2 | 3 => Error::NotFound, 5 | 32 | 33 | 1314 => Error::PermissionDenied,
+        80 | 183 => Error::AlreadyExists, 87 | 123 | 206 | 1921 => Error::InvalidInput,
+        13 | 1113 => Error::InvalidData, 6 => Error::Closed, 109 => Error::BrokenPipe,
+        267 => Error::NotADirectory, 145 => Error::DirectoryNotEmpty, 17 => Error::CrossesDevices,
+        25 => Error::NotSeekable, 1 | 50 => Error::Unsupported, 39 | 112 => Error::StorageFull,
+        19 => Error::ReadOnlyFilesystem, 223 => Error::FileTooLarge, 1816 => Error::QuotaExceeded,
+        995 => Error::Cancelled, 121 | 1460 => Error::TimedOut,
+        _ => Error::Other { code: int(code), source: None },
     }
 }
 
 fn share_buffer() {
-    let value = ByteBuffer {}
+    let value = ByteBuffer::new()
     let copy = value
     _ = value
     _ = copy

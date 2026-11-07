@@ -83,16 +83,6 @@ impl Builder<'_> {
                 let value = self.operand(value)?;
                 self.write_place(*destination, value)?;
             }
-            StatementKind::Pin { place, token } => {
-                let value = self.read_place(*place)?;
-                let mut args = self.computed_values(value)?;
-                args.push(self.constant(u64::from(token.0), Type::I64));
-                self.runtime(RuntimeCall::Pin, &args, &[])?;
-            }
-            StatementKind::Unpin { token } => {
-                let token = self.constant(u64::from(token.0), Type::I64);
-                self.runtime(RuntimeCall::Unpin, &[token], &[])?;
-            }
             StatementKind::ScopedViewBegin {
                 source,
                 mode,
@@ -563,7 +553,11 @@ impl Builder<'_> {
             let count = self
                 .static_length(source_ty)
                 .ok_or_else(|| invalid("数组转切片缺少固定长度"))?;
-            let pointer = self.computed_address(value)?;
+            let pointer = if matches!(self.kind(source_ty), TypeKind::Reference(_)) {
+                self.computed_values(value)?[0]
+            } else {
+                self.computed_address(value)?
+            };
             let count = self.constant(count, Type::I64);
             return Ok(Computed::Values {
                 ty,

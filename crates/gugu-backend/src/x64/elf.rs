@@ -15,6 +15,8 @@ use std::mem::offset_of;
 
 #[path = "elf_codec.rs"]
 mod codec;
+#[path = "elf_dynamic.rs"]
+mod dynamic;
 
 #[cfg(any(test, feature = "test-support"))]
 pub use codec::{extract_archive, pack_archive, rt0_bytes};
@@ -33,17 +35,35 @@ const PT_GNU_RELRO: u32 = 0x6474_e552;
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
 const PF_R: u32 = 4;
-const DT_NULL: i64 = 0;
-const DT_NEEDED: i64 = 1;
-const DT_STRTAB: i64 = 5;
-const DT_STRSZ: i64 = 10;
 const PLT_LEN: u64 = 6;
 
 /// 链接一个已编码片段世界。Windows 调用方不要走这里。
-pub fn link_world(world: &X64World, types: &[u8], meta: &[u8]) -> Result<LinuxImage, String> {
+pub fn link_world(
+    world: &X64World,
+    types: &[u8],
+    meta: &[u8],
+    native_link: &crate::NativeLink,
+) -> Result<LinuxImage, String> {
     let mut symbols = Vec::new();
     for fragment in &world.fragments {
         symbols.push(symbol_from_fragment(fragment)?);
+    }
+    for export in &world.native_exports {
+        symbols.push(ObjectSymbol {
+            name: format!("~gugu_export_{}", export.name),
+            bytes: export.bytes.clone(),
+            aliases: vec![(export.name.clone(), 0)],
+            relocs: export
+                .relocations
+                .iter()
+                .map(|reloc| ObjectReloc {
+                    offset: reloc.offset,
+                    kind: RelocKindCode::PcRel32,
+                    target: reloc_name(&reloc.target),
+                    addend: reloc.addend,
+                })
+                .collect(),
+        });
     }
     for blob in fragments::registered_fragments(world.target) {
         symbols.push(symbol_from_machine_fragment(&blob)?);
@@ -77,10 +97,11 @@ pub fn link_world(world: &X64World, types: &[u8], meta: &[u8]) -> Result<LinuxIm
     }));
     link(&LinkRequest {
         entry: world.entry_symbol.clone(),
+        cage_bytes: world.cage_bytes,
         symbols,
         readonly,
-        imports: Vec::new(),
-        interpreter: None,
+        imports: native_link.imports.clone(),
+        interpreter: native_link.interpreter.clone(),
         archive: Vec::new(),
         bound_glues: world.glues().bound_symbols(),
         type_descriptors: world.type_descriptors.iter().cloned().collect(),
@@ -192,6 +213,7 @@ pub enum RelocKindCode {
 #[derive(Clone, Debug)]
 pub struct LinkRequest {
     pub entry: String,
+    pub cage_bytes: u64,
     pub symbols: Vec<ObjectSymbol>,
     pub readonly: Vec<Blob>,
     pub imports: Vec<(String, String)>,
@@ -291,6 +313,13 @@ fn apply_blob_relocations(
 }
 
 fn link_static(request: &mut LinkRequest) -> Result<LinuxImage, String> {
+    if request
+        .symbols
+        .iter()
+        .any(|symbol| symbol.name.starts_with("~gugu_export_"))
+    {
+        request.readonly.extend(dynamic::blobs(request)?);
+    }
     finish(request, None, "static-pie")
 }
 
@@ -304,15 +333,7 @@ fn link_dynamic(request: &mut LinkRequest, interpreter: &str) -> Result<LinuxIma
             bytes: path,
         },
     );
-    let (dynstr, dynamic) = codec::dynamic_blobs(request);
-    request.readonly.push(Blob {
-        name: ".dynstr".to_owned(),
-        bytes: dynstr,
-    });
-    request.readonly.push(Blob {
-        name: ".dynamic".to_owned(),
-        bytes: dynamic,
-    });
+    request.readonly.extend(dynamic::blobs(request)?);
     finish(request, Some(interpreter.to_owned()), "dynamic-pie")
 }
 
@@ -321,8 +342,9 @@ fn finish(
     interpreter: Option<String>,
     kind: &str,
 ) -> Result<LinuxImage, String> {
-    let dynamic = interpreter.is_some();
-    let phnum: u16 = if dynamic { 7 } else { 5 };
+    let phnum: u16 = 5
+        + u16::from(interpreter.is_some())
+        + u16::from(request.readonly.iter().any(|blob| blob.name == ".dynamic"));
     let header_end = 64 + u64::from(phnum) * 56;
     let defined = defined_layout(request, header_end)?;
     if !defined.contains_key(&request.entry) {
@@ -339,7 +361,10 @@ fn finish(
     let rw_va = align_down(limit_va, PAGE);
     // 静态块排在启动载荷之后，可写区必须覆盖到最后一个块，否则它们落在映射之外。
     let payload_end = defined["__gugu_rt0_payload"] + entry::Rt0Payload::bytes();
-    let mut rw_end = payload_end;
+    let mut rw_end = payload_end.max(
+        defined["__gugu_cage_control"]
+            + u64::from(crate::runtime::cage_control::CageControlRecord::byte_len()),
+    );
     for (name, bytes) in &request.globals {
         let address = defined
             .get(name)
@@ -397,7 +422,6 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
         entry::rt0_params::BYTES,
     )?;
     cursor = place(&mut map, "__gugu_cold_trap", cursor, 2)?;
-    cursor = place(&mut map, "__gugu_cage_control", cursor, 48)?;
     cursor = place(&mut map, "__gugu_syscall_write", cursor, 8)?;
     cursor = place(&mut map, "__gugu_syscall_mmap", cursor, 8)?;
     cursor = place(&mut map, "__gugu_stub_ret", cursor, 1)?;
@@ -459,11 +483,17 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     map.insert("__gugu_initial_slot".to_owned(), reserved);
     reserved = align_up(reserved + SLOT_BYTES, 64)?;
     map.insert("__gugu_runtime_state".to_owned(), reserved);
+    map.insert(
+        "__gugu_callback_control".to_owned(),
+        reserved + entry::state::CALLBACK,
+    );
     // mailbox 是 runtime 状态区首部的别名：morestack 与返回哨兵片段都按这个符号打补丁。
     map.insert(mangle::mangle_runtime("morestack_mailbox"), reserved);
     reserved = align_up(reserved + STATE_BYTES, 8)?;
     map.insert("__gugu_rt0_payload".to_owned(), reserved);
     reserved = align_up(reserved + entry::Rt0Payload::bytes(), 16)?;
+    map.insert("__gugu_cage_control".to_owned(), reserved);
+    reserved += u64::from(crate::runtime::cage_control::CageControlRecord::byte_len());
     // 静态块放在载荷之后：符号本身是可写数据，值槽必须能被 release 写入。
     for (name, bytes) in &request.globals {
         if map.contains_key(name) {
@@ -485,7 +515,7 @@ const SLOT_BYTES: u64 = entry::INITIAL_SLOT_BYTES;
 /// runtime 状态区保留字节数：首部是 `MorestackMailbox`。
 const STATE_BYTES: u64 = entry::RUNTIME_STATE_BYTES;
 
-/// 相对重定位条数：符号里的 `Abs64` 加上每个导入的 GOT 槽，再加启动载荷的地址字段。
+/// 相对重定位条数：符号里的 Abs64 与实际存在的启动载荷地址字段。
 fn reloc_count(request: &LinkRequest) -> Result<u64, String> {
     let abs = request
         .symbols
@@ -493,8 +523,11 @@ fn reloc_count(request: &LinkRequest) -> Result<u64, String> {
         .flat_map(|symbol| &symbol.relocs)
         .filter(|reloc| reloc.kind == RelocKindCode::Abs64)
         .count();
-    u64::try_from(abs + request.imports.len() + PAYLOAD_RELOCS)
-        .map_err(|_| "重定位条数溢出".to_owned())
+    let optional = [TYPE_SECTION_NAME, GC_METADATA_NAME]
+        .iter()
+        .filter(|name| request.readonly.iter().any(|blob| blob.name == **name))
+        .count();
+    u64::try_from(abs + PAYLOAD_RELOCS + optional).map_err(|_| "重定位条数溢出".to_owned())
 }
 
 /// 启动载荷中需重定位的地址：入口、槽、状态、哨兵、栈图、展开表与函数基址。
@@ -610,11 +643,6 @@ fn relative_relocs(
             relocs.push((slot, addend));
         }
     }
-    let stub = defined["__gugu_stub_exit"];
-    let limit = defined["__gugu_stack_limit"];
-    for index in 0..request.imports.len() {
-        relocs.push((limit + 128 + index as u64 * 8, stub));
-    }
     // 启动载荷的地址字段：写出链接期值，rt0 按同一批对补上加载偏移。
     let payload = defined["__gugu_rt0_payload"];
     let entry = defined[&request.entry];
@@ -705,9 +733,12 @@ fn assemble(
     )?;
     write_text(&mut file, request, defined)?;
     write_readonly(&mut file, request, defined)?;
-    codec::patch_dynamic(&mut file, defined)?;
+    dynamic::patch(&mut file, defined, request.imports.len(), request)?;
     write_relro(&mut file, request, defined, relocs)?;
     write_payload(&mut file, defined, request)?;
+    let cage = crate::runtime::cage_control::CageControlRecord::boot_bytes(request.cage_bytes);
+    let at = defined["__gugu_cage_control"] as usize;
+    file[at..at + cage.len()].copy_from_slice(&cage);
     write_params(&mut file, defined, request, relocs, rw_va, protect_end)?;
     reject_writable_executable(false, true)?;
     Ok(file)
@@ -749,7 +780,9 @@ fn symbol_len(request: &LinkRequest, name: &str) -> u64 {
         "_start" => rt0_len(),
         "__gugu_rt0_params" => entry::rt0_params::BYTES,
         "__gugu_cold_trap" => 2,
-        "__gugu_cage_control" => 48,
+        "__gugu_cage_control" => {
+            u64::from(crate::runtime::cage_control::CageControlRecord::byte_len())
+        }
         "__gugu_syscall_write" | "__gugu_syscall_mmap" | "__gugu_stub_exit" => 8,
         "__gugu_stub_ret" => 1,
         name if name.starts_with("__gugu_plt_") => PLT_LEN,
@@ -856,6 +889,8 @@ fn write_phdrs(
         write_phdr(file, index, PT_DYNAMIC, PF_R, va, va, len, len, 8)?;
         index += 1;
     }
+    // 动态 loader 先处理 GOT；自重定位和运行时状态由 rt0 初始化后再封闭精确范围。
+    let loader_relro_len = if dynamic.is_some() { 0 } else { rw_len };
     write_phdr(
         file,
         index,
@@ -863,8 +898,8 @@ fn write_phdrs(
         PF_R,
         rw_va,
         rw_va,
-        rw_len,
-        rw_len,
+        loader_relro_len,
+        loader_relro_len,
         1,
     )?;
     Ok(())
@@ -1020,9 +1055,8 @@ fn write_relro(
     for byte in &mut file[limit_at..limit_at + 128] {
         *byte = 0xff;
     }
-    let stub = defined["__gugu_stub_exit"];
     for index in 0..request.imports.len() {
-        put_u64(file, limit_at + 128 + index * 8, stub)?;
+        put_u64(file, limit_at + 128 + index * 8, 0)?;
     }
     let mut at =
         usize::try_from(reloc_table_va(limit, request)?).map_err(|_| "重定位表越界".to_owned())?;

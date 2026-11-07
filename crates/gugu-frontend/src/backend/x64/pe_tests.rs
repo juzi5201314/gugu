@@ -17,10 +17,12 @@ fn symbol(name: &str, bytes: Vec<u8>, relocs: Vec<ObjectReloc>) -> ObjectSymbol 
 fn request(entry: &str, symbols: Vec<ObjectSymbol>) -> PeRequest {
     PeRequest {
         entry: entry.to_owned(),
+        cage_bytes: 0,
         symbols,
         readonly: vec![(".gugustk".to_owned(), b"GUGUSM01".to_vec())],
         constants: Vec::new(),
         dll: false,
+        imports: Vec::new(),
         bound_glues: std::collections::BTreeSet::new(),
         type_descriptors: std::collections::BTreeMap::new(),
         globals: std::collections::BTreeMap::new(),
@@ -193,6 +195,38 @@ fn writable_section(bytes: &[u8], rva: u64) -> bool {
 /// 参数块与保留可写区契约：与 ELF 侧共用同一份 `rt0_params`/`Rt0Payload`；PE 没有自举重定位，
 /// 参数与载荷里的地址都是 RVA，加载基址由入口 stub 写进载荷的 bias 字段。
 #[test]
+fn cage_counter_record_is_in_writable_data() {
+    let mut prepared = request(
+        "main",
+        vec![symbol(
+            "main",
+            vec![0; 4],
+            vec![ObjectReloc {
+                offset: 0,
+                kind: RelocKindCode::Rva32,
+                target: "__gugu_cage_control".into(),
+                addend: 0,
+            }],
+        )],
+    );
+    prepared.cage_bytes = 8388608;
+    let (image, defined) = link_with_layout(&prepared).unwrap();
+    let address = defined["__gugu_cage_control"];
+    let at = file_offset(&image.bytes, image.entry_rva + defined["main"] as u32);
+    assert_eq!(
+        u32::from_le_bytes(image.bytes[at..at + 4].try_into().unwrap()) as u64,
+        address
+    );
+    assert!(writable_section(&image.bytes, address));
+    assert!(writable_section(&image.bytes, address + 63));
+    let config = file_offset(&image.bytes, address as u32 + 56);
+    assert_eq!(
+        u64::from_le_bytes(image.bytes[config..config + 8].try_into().unwrap()),
+        8388608
+    );
+}
+
+#[test]
 fn runtime_entry_keeps_param_block_and_writable_reserved_region() {
     use crate::runtime::entry::{Rt0Payload, rt0_params};
     let (image, defined) = link_with_layout(&request(
@@ -290,6 +324,71 @@ fn duplicate_slot_missing_entry_and_wx_are_rejected() {
         )],
     ));
     assert!(unknown.is_err());
+}
+
+#[test]
+fn explicit_import_thunks_point_to_aligned_names_and_exact_iat() {
+    let mut request = request("main", vec![symbol("main", vec![0xc3], Vec::new())]);
+    request.imports = vec![
+        ("odd.dll".into(), "probe_a".into()),
+        ("ODD.DLL".into(), "probe_b".into()),
+        ("even.dll".into(), "probe_c".into()),
+    ];
+    let (image, layout) = link_with_layout(&request).unwrap();
+    assert_eq!(image.import_dlls, 4);
+    let bytes = &image.bytes;
+    let u32_at = |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+    let u64_at = |at: usize| u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()) as usize;
+    let count = u16::from_le_bytes(bytes[70..72].try_into().unwrap()) as usize;
+    let offset = |rva: usize| {
+        (0..count)
+            .find_map(|index| {
+                let section = 328 + index * 40;
+                let base = u32_at(section + 12);
+                let size = u32_at(section + 8);
+                (rva >= base && rva < base + size).then(|| u32_at(section + 20) + rva - base)
+            })
+            .expect("RVA 必须落在真实节")
+    };
+    let directory = 88 + 112;
+    let mut descriptor = offset(u32_at(directory + 8));
+    let iat_base = u32_at(directory + 96);
+    let mut iat_bytes = 0;
+    while u32_at(descriptor) != 0 {
+        let mut ilt = offset(u32_at(descriptor));
+        let iat = u32_at(descriptor + 16);
+        assert_eq!(iat, iat_base + iat_bytes);
+        while u64_at(ilt) != 0 {
+            let name = u64_at(ilt);
+            assert_eq!(name % 2, 0, "Hint/Name 必须对齐");
+            assert_eq!(u64_at(offset(iat_base + iat_bytes)), name);
+            iat_bytes += 8;
+            ilt += 8;
+        }
+        assert_eq!(u64_at(offset(iat_base + iat_bytes)), 0);
+        iat_bytes += 8;
+        descriptor += 20;
+    }
+    assert_eq!(
+        u32_at(directory + 100),
+        iat_bytes,
+        "IAT 范围不得包含 runtime 状态"
+    );
+    let text_rva = u32_at(328 + 12);
+    for name in ["probe_a", "probe_b", "probe_c"] {
+        let rva = text_rva + layout[name] as usize;
+        let thunk = offset(rva);
+        assert_eq!(&bytes[thunk..thunk + 2], &[0xff, 0x25]);
+        let displacement = i32::from_le_bytes(bytes[thunk + 2..thunk + 6].try_into().unwrap());
+        let slot = (rva + 6).wrapping_add_signed(displacement as isize);
+        assert!((iat_base..iat_base + iat_bytes).contains(&slot));
+        let name_at = offset(u64_at(offset(slot))) + 2;
+        assert_eq!(&bytes[name_at..name_at + name.len()], name.as_bytes());
+    }
+    request
+        .imports
+        .push(("another.dll".into(), "probe_a".into()));
+    assert!(link(&request).unwrap_err().contains("同时来自"));
 }
 
 #[test]

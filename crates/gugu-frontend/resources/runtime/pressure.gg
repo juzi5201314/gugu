@@ -1,0 +1,22 @@
+//! 系统栈上的压力服务；三类 owner 状态均经过实际扫描才允许结束 episode。
+use std.runtime.native_memory as mapping
+use std.runtime.scheduler as scheduler
+use std.runtime.fs_platform as filesystem
+use std.runtime.shared as shared
+use std.runtime.counters as counters
+use std.runtime.heap.{heap_word}
+
+#[allow(large_copy)]
+pub fn pressure_service(owner: uint) {
+    if heap_word(owner + mapping.RUNTIME_PRESSURE_STATE_OFFSET) == 0 { return }
+    // 文件完成消费已由本轮 filesystem.service 执行；在途 return 尚存时不能确认该分类。
+    if counters.pending_returns(owner) == 0 { mapping.pressure_drained(owner, 1) }
+    scheduler.trim_retired_stacks(owner)
+    let control_done = scheduler.trim_control_cache(owner)
+    let ordinary = filesystem.snapshot(owner)
+    let dirty = filesystem.dirty_snapshot(owner)
+    if control_done && heap_word(owner + scheduler.PROCESSOR_RETIRED_STACKS_OFFSET) == 0 && ordinary.stack_cached_bytes == 0 && dirty.stack_cached_bytes == 0 {
+        mapping.pressure_drained(owner, 2)
+    }
+    if shared.shared_trim() { mapping.pressure_drained(owner, 4) }
+}

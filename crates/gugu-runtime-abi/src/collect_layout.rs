@@ -15,6 +15,12 @@ pub const COORDINATOR_SYSTEM_TOP_OFFSET: i32 = 32;
 pub const COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET: i32 = 128;
 /// `gc_enter` 保存并在 dispatcher 返回后恢复的 mutator r14。
 pub const COORDINATOR_SAVED_R14_OFFSET: i32 = 136;
+/// 上一次已完成 cycle 发布的对象载荷字节快照。
+pub const COORDINATOR_LIVE_BYTES_OFFSET: i32 = 152;
+/// 已完成 dispatcher 的累计单调耗时。
+pub const COORDINATOR_PAUSE_NANOS_OFFSET: i32 = 160;
+/// 按对象计数的 pin 登记页链，空页在最后租约释放时归还。
+pub const COORDINATOR_PIN_PAGES_OFFSET: i32 = 168;
 
 /// 源文本交叉校验：`collect.gg` 的同名常量必须与片段使用的偏移逐项一致。
 #[cfg(test)]
@@ -30,6 +36,15 @@ pub fn verify_source(source: &str) -> Result<(), String> {
             "COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET",
             COORDINATOR_SYSTEM_DESCRIPTOR_OFFSET,
         ),
+        (
+            "COORDINATOR_LIVE_BYTES_OFFSET",
+            COORDINATOR_LIVE_BYTES_OFFSET,
+        ),
+        (
+            "COORDINATOR_PAUSE_NANOS_OFFSET",
+            COORDINATOR_PAUSE_NANOS_OFFSET,
+        ),
+        ("COORDINATOR_PIN_PAGES_OFFSET", COORDINATOR_PIN_PAGES_OFFSET),
         ("COORDINATOR_SAVED_R14_OFFSET", COORDINATOR_SAVED_R14_OFFSET),
     ] {
         let needle = format!("pub const {name}: uint = {value}");

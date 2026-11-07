@@ -274,6 +274,9 @@ fn emit_managed_or_foreign(
     target: TargetName,
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
+    if super::foreign::dispatcher(call.kind).is_some() {
+        return super::foreign::emit(call, args, results, target, builder);
+    }
     let layout = abi::classify_call(call, target)?;
     call::shuffle_arguments(args, &layout, builder)?;
     call::emit_target(call, &layout, args, builder)?;

@@ -486,7 +486,10 @@ fn place_argument(
     };
     let abi =
         abi::classify_call(call, target).map_err(|error| vec![invalid(&error.to_string())])?;
-    if let Some(AbiSlot::Stack { offset }) = argument_slot(&abi, index) {
+    if let Some(slot) = argument_slot(&abi, index)
+        && let Some(offset) = super::lower::foreign::outgoing_offset(call.kind, slot, target)
+            .map_err(|error| vec![invalid(&error.to_string())])?
+    {
         set_slot(slots, class, offset / 8, slot_count)?;
     }
     Ok(())

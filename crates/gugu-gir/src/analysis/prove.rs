@@ -1,7 +1,7 @@
 //! 在检查点当前 memory version 上判定 `proved` / `disproved` / `unknown`。
 
 use super::domain::{AbstractState, Interval, ValueKey};
-use super::transfer::{array_len, len_key, seed_array_len};
+use super::transfer::{array_len, len_key};
 use crate::hir::{CheckKind, ExprKind, Module, Owner, RuntimeCheck};
 
 pub fn prove_check(
@@ -35,8 +35,7 @@ fn prove_index(
     else {
         return super::types::ProofStatus::Unknown;
     };
-    let mut state = state.clone();
-    seed_array_len(module, owner, &mut state, base);
+    // 静态数组长度直接取类型；动态长度只读当前事实，不复制整份分析状态。
     let index = state.range(ValueKey::Expr(index));
     let length = array_len(module, owner, base)
         .map(|length| Interval::point(i128::from(length)))
@@ -54,8 +53,7 @@ fn prove_slice(
     else {
         return super::types::ProofStatus::Unknown;
     };
-    let mut state = state.clone();
-    seed_array_len(module, owner, &mut state, base);
+    // 静态数组长度直接取类型；动态长度只读当前事实，不复制整份分析状态。
     let length = array_len(module, owner, base)
         .map(|length| Interval::point(i128::from(length)))
         .unwrap_or_else(|| state.range(len_key(owner, base)));

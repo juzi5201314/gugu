@@ -237,8 +237,14 @@ pub fn morestack_entry_code() -> MorestackEntryCode {
     builder.emit(
         "mov",
         RM64_R64,
-        Access::Write,
-        vec![reg(gpr(Gpr::Rcx)), reg(gpr(Gpr::R14))],
+        Access::Read,
+        vec![
+            mem_base(
+                gpr(Gpr::R15),
+                crate::runtime::processor::PROCESSOR_SYSTEM_SLOT_OFFSET as i32,
+            ),
+            reg(gpr(Gpr::Rcx)),
+        ],
     );
     builder.emit(
         "mov",
@@ -377,7 +383,7 @@ pub struct ProcessExitCode {
 }
 
 impl ProcessExitCode {
-    /// Linux 走 `exit_group(2)` 的 RT 等价 `exit(60)`；Windows 走 `ExitProcess`。
+    /// Linux 走 `exit_group(231)` 结束所有 native worker；Windows 走 `ExitProcess`。
     pub fn fixed(target: TargetName) -> Self {
         let mut builder = Builder::new();
         match target {
@@ -393,7 +399,7 @@ impl ProcessExitCode {
                     "mov",
                     R32_IMM32,
                     Access::Write,
-                    vec![reg(gpr(Gpr::Rax)), imm(60)],
+                    vec![reg(gpr(Gpr::Rax)), imm(231)],
                 );
                 builder.emit("syscall", &[], Access::Read, Vec::new());
             }
@@ -432,7 +438,6 @@ impl ProcessExitCode {
 pub fn main_return_code() -> MainReturnCode {
     let return_value = field_offset(offset_of!(MorestackMailbox, return_value));
     let system_context = field_offset(offset_of!(MorestackMailbox, system_context));
-    let hot = field_offset(offset_of!(MorestackMailbox, hot));
     let processor = field_offset(offset_of!(MorestackMailbox, processor));
     let mut builder = Builder::new();
     let mut planned: Vec<(&'static str, i32)> = Vec::new();
@@ -458,7 +463,13 @@ pub fn main_return_code() -> MainReturnCode {
         "mov",
         RM64_R64,
         Access::Read,
-        vec![mailbox_operand(&mut planned, hot), reg(gpr(Gpr::Rbx))],
+        vec![
+            mem_base(
+                gpr(Gpr::R15),
+                crate::runtime::processor::PROCESSOR_SYSTEM_SLOT_OFFSET as i32,
+            ),
+            reg(gpr(Gpr::Rbx)),
+        ],
     );
     builder.emit(
         "mov",
@@ -1364,31 +1375,89 @@ fn panic_entry_fragment() -> FragmentBlob {
         relocations: encoded.relocations,
     }
 }
-/// PollResume 的同步慢路只消费 PREEMPT 位，保留 GC_STOP 交给 collector；它不分配、不切换栈。
-fn safepoint_slow_fragment() -> FragmentBlob {
+/// PollResume 复用 gc_enter 的系统栈入口；尾跳保持 mutator 的返回 PC 与 RSP。
+pub(super) fn safepoint_slow_sequence() -> Builder {
     let mut builder = Builder::new();
     let offset = i32::try_from(processor::poll_flags_offset()).expect("poll flags 偏移适配 i32");
-    let poll = mem_base(gpr(Gpr::R15), offset);
     builder.emit(
-        "mov",
-        RM32_R32,
+        "test",
+        &[OperandKind::Rm32, OperandKind::Imm32],
         Access::Read,
-        vec![poll.clone(), reg(gpr(Gpr::Rax))],
+        vec![
+            mem_base(gpr(Gpr::R15), offset),
+            imm(u64::from(crate::runtime::callback::POLL_BIT)),
+        ],
     );
+    let pressure = builder.label();
+    builder.emit("je", REL32, Access::Read, vec![Operand::Label(pressure)]);
     builder.emit(
+        "jmp",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(
+            RelocTarget::Lir(mangle::runtime_symbol("callback_poll")),
+            RelocKind::PcRel32,
+        )],
+    );
+    builder.define(pressure);
+    builder.emit_locked(
         "and",
         RM32_IMM8,
         Access::ReadWrite,
-        vec![reg(gpr(Gpr::Rax)), imm(2)],
+        vec![mem_base(gpr(Gpr::R15), offset), imm(u64::MAX - 1)],
     );
+    let done = builder.label();
+    for field in [3888, 3912] {
+        builder.emit(
+            "cmp",
+            RM64_IMM32,
+            Access::Read,
+            vec![mem_base(gpr(Gpr::R15), field), imm(1)],
+        );
+        builder.emit("jne", REL32, Access::Read, vec![Operand::Label(done)]);
+    }
     builder.emit(
         "mov",
-        RM32_R32,
-        Access::Write,
-        vec![poll, reg(gpr(Gpr::Rax))],
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R15), 3928), reg(gpr(Gpr::Rax))],
     );
-    builder.emit("ret", &[], Access::Read, Vec::new());
-    let encoded = finish(builder);
+    builder.emit(
+        "cmp",
+        RM64_R64,
+        Access::Read,
+        vec![mem_base(gpr(Gpr::R15), 3952), reg(gpr(Gpr::Rax))],
+    );
+    builder.emit("jae", REL32, Access::Read, vec![Operand::Label(done)]);
+    let request = processor::PROCESSOR_GC_REQUEST_OFFSET as i32;
+    builder.emit(
+        "mov",
+        &[OperandKind::Rm64, OperandKind::Imm32],
+        Access::Write,
+        vec![mem_base(gpr(Gpr::R15), request), imm(1)],
+    );
+    builder.emit(
+        "lea",
+        MEM_R64,
+        Access::Address,
+        vec![mem_base(gpr(Gpr::R15), request), reg(gpr(Gpr::Rax))],
+    );
+    builder.emit(
+        "jmp",
+        REL32,
+        Access::Read,
+        vec![Operand::Reloc(
+            RelocTarget::Lir(mangle::runtime_symbol("gc_enter")),
+            RelocKind::PcRel32,
+        )],
+    );
+    builder.define(done);
+    builder.emit("ret", &[], Access::Read, vec![]);
+    builder
+}
+
+fn safepoint_slow_fragment() -> FragmentBlob {
+    let encoded = finish(safepoint_slow_sequence());
     FragmentBlob {
         alignment: FRAGMENT_ALIGNMENT,
         domain: FragmentDomain::Runtime,
@@ -1406,7 +1475,7 @@ fn safepoint_slow_fragment() -> FragmentBlob {
 /// 收集器必须在与协程栈分离的边界上运行：它在 system stack 上执行，因此自身帧既不会触达
 /// mutator 的栈上限，也不会被发起者的根扫描当成 mutator 帧。`rax` 是请求指针、`rbx` 是发起者
 /// RSP，两者都是登记片段 ABI 的一部分。
-fn gc_enter_fragment() -> FragmentBlob {
+pub(super) fn gc_enter_sequence() -> Builder {
     let mut builder = Builder::new();
     let state = i32::try_from(processor::PROCESSOR_STATE_OFFSET).expect("状态区偏移适配 i32");
     let coordinator = i32::try_from(crate::runtime::entry::state::COORDINATOR)
@@ -1518,7 +1587,11 @@ fn gc_enter_fragment() -> FragmentBlob {
         vec![mem_base(gpr(Gpr::R11), saved_rsp), reg(gpr(Gpr::Rsp))],
     );
     builder.emit("ret", &[], Access::Read, Vec::new());
-    let encoded = finish(builder);
+    builder
+}
+
+fn gc_enter_fragment() -> FragmentBlob {
+    let encoded = finish(gc_enter_sequence());
     FragmentBlob {
         alignment: FRAGMENT_ALIGNMENT,
         domain: FragmentDomain::Runtime,
@@ -1551,14 +1624,11 @@ fn panic_resume_fragment() -> FragmentBlob {
     );
     let invalid = builder.label();
     builder.emit("jne", REL32, Access::Read, vec![Operand::Label(invalid)]);
-    for (register, offset) in [
-        (Gpr::Rax, 640),
-        (Gpr::Rbx, 648),
-        (Gpr::Rcx, 656),
-        (Gpr::Rdx, 664),
-        (Gpr::Rdi, 672),
-        (Gpr::Rsi, 680),
-    ] {
+    for (index, register) in [Gpr::Rax, Gpr::Rbx, Gpr::Rcx, Gpr::Rdx, Gpr::Rdi, Gpr::Rsi]
+        .into_iter()
+        .enumerate()
+    {
+        let offset = crate::runtime::entry::state::PANIC_MESSAGE as i32 + index as i32 * 8;
         builder.emit(
             "mov",
             RM64_R64,
@@ -1670,7 +1740,6 @@ fn coroutine_enter_fragment() -> FragmentBlob {
     let return_value = field_offset(offset_of!(MorestackMailbox, return_value));
     let candidate = field_offset(offset_of!(MorestackMailbox, candidate));
     let system_context = field_offset(offset_of!(MorestackMailbox, system_context));
-    let hot = field_offset(offset_of!(MorestackMailbox, hot));
     let processor = field_offset(offset_of!(MorestackMailbox, processor));
     builder.emit(
         "mov",
@@ -1715,7 +1784,13 @@ fn coroutine_enter_fragment() -> FragmentBlob {
         "mov",
         RM64_R64,
         Access::Read,
-        vec![mailbox_operand(&mut planned, hot), reg(gpr(Gpr::Rbx))],
+        vec![
+            mem_base(
+                gpr(Gpr::R15),
+                crate::runtime::processor::PROCESSOR_SYSTEM_SLOT_OFFSET as i32,
+            ),
+            reg(gpr(Gpr::Rbx)),
+        ],
     );
     builder.emit(
         "mov",
@@ -1791,12 +1866,14 @@ pub fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
             }],
             relocations: Vec::new(),
         },
+        safepoint_slow_fragment(),
         FragmentBlob {
             alignment: FRAGMENT_ALIGNMENT,
             domain: FragmentDomain::Runtime,
-            bytes: safepoint_slow_fragment().bytes,
+            // runtime 控制事务不能自动让出；不消费 poll word，外层用户安全点继续处理。
+            bytes: vec![0xc3],
             entries: vec![FragmentEntry {
-                glue: "safepoint_slow",
+                glue: "runtime_poll_defer",
                 offset: 0,
             }],
             relocations: Vec::new(),
@@ -1842,6 +1919,7 @@ pub fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
             relocations: report.relocations,
         },
     ];
+    blobs.extend(super::fs_native::fragments(target));
     blobs.push(gc_enter_fragment());
     blobs.push(coroutine_enter_fragment());
     blobs.push(panic_entry_fragment());
@@ -1919,6 +1997,44 @@ pub fn registered_fragments(target: TargetName) -> Vec<FragmentBlob> {
 mod tests {
     use super::{current_slot_bytes, registered_fragments};
     use crate::target::TargetName;
+
+    #[test]
+    fn scheduler_returns_load_stable_system_slot() {
+        use super::*;
+        let load_slot = |destination| {
+            let mut builder = Builder::new();
+            builder.emit(
+                "mov",
+                RM64_R64,
+                Access::Read,
+                vec![
+                    mem_base(
+                        gpr(Gpr::R15),
+                        crate::runtime::processor::PROCESSOR_SYSTEM_SLOT_OFFSET as i32,
+                    ),
+                    reg(gpr(destination)),
+                ],
+            );
+            finish(builder).bytes
+        };
+        let morestack = morestack_entry_code();
+        let main_return = main_return_code();
+        let coroutine = coroutine_enter_fragment();
+        for (bytes, destination) in [
+            (&morestack.bytes, Gpr::Rcx),
+            (&main_return.bytes, Gpr::Rbx),
+            (&coroutine.bytes, Gpr::Rbx),
+        ] {
+            let load = load_slot(destination);
+            assert_eq!(
+                bytes
+                    .windows(load.len())
+                    .filter(|window| *window == load)
+                    .count(),
+                1
+            );
+        }
+    }
 
     #[test]
     fn current_slot_returns_r14_in_rax() {

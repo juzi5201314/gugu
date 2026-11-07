@@ -331,6 +331,7 @@ version = "0.1.0"
 dependencies = [
  "gugu-compiler-core",
  "gugu-frontend",
+ "gugu-runtime-abi",
  "gugu-runtime-builder",
 ]
 

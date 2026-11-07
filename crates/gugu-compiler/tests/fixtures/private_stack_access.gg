@@ -1,0 +1,6 @@
+use std.runtime.{stack_read_word as read_stack}
+fn main() { unsafe {
+    _ = std.runtime.stack_read_word(uint(8))
+    _ = read_stack(uint(16))
+    std.runtime.stack_copy_raw(uint(8), uint(4096), uint(8), uint(0))
+} }

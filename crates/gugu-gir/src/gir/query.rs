@@ -8,7 +8,7 @@ use crate::query::{QueryEngine, QueryKey, QueryKind};
 use crate::semantics::query::{restore_errors, store_errors};
 use crate::{Diagnostic, SourceMap};
 
-pub const BUILD_SCHEMA: u32 = 8;
+pub const BUILD_SCHEMA: u32 = 12;
 
 pub fn build_world(
     hir: &Validated,

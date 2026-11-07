@@ -1,0 +1,41 @@
+use std.runtime.heap.{heap_word, heap_word32, heap_store_word, heap_store_word32, heap_fail}
+use std.runtime.native_memory.{release}
+use std.runtime.counters as counters
+
+pub const PENDING_ACCOUNTED: uint = 16
+pub fn pending_return(control: uint) {
+    heap_store_word32(control + 8, heap_word32(control + 8) | PENDING_ACCOUNTED)
+    counters.add(counters.PENDING_RETURN, if heap_word(control + 72) == 2 { uint(8192) } else { uint(4096) })
+}
+
+// 完成发布与控制页回收是资源层叶节点，队列服务与租约入口共用它。
+pub fn complete_close(control: uint, error: uint) {
+    let state = heap_word32(control + 8)
+    if (state & uint(4)) == 0 || (state & uint(8)) != 0 || heap_word(control + 80) != 0 { heap_fail() }
+    heap_store_word(control + 88, error)
+    heap_store_word32(control + 8, state | uint(8))
+    if state & PENDING_ACCOUNTED != 0 && heap_word(control + 72) == 2 { counters.remove(counters.PENDING_RETURN, 4096) }
+    if heap_word(control) == 0 { reclaim(control) };
+}
+pub fn register(control: uint) { unsafe {
+    let processor = heap_word(std.runtime.current_slot() + 16)
+    let first = heap_word(processor + 4016)
+    heap_store_word(control + 176, 0)
+    heap_store_word(control + 184, first)
+    heap_store_word(control + 192, processor)
+    if first != 0 { heap_store_word(first + 176, control) }
+    heap_store_word(processor + 4016, control)
+} }
+
+pub fn reclaim(control: uint) {
+    unsafe {
+        let previous = heap_word(control + 176)
+        let next = heap_word(control + 184)
+        let processor = heap_word(control + 192)
+        if previous == 0 { heap_store_word(processor + 4016, next) }
+        else { heap_store_word(previous + 184, next) }
+        if next != 0 { heap_store_word(next + 176, previous) }
+        if heap_word32(control + 8) & PENDING_ACCOUNTED != 0 { counters.remove(counters.PENDING_RETURN, 4096) }
+        release(control, 4096)
+    }
+}

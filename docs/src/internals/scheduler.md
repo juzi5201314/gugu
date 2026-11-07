@@ -74,6 +74,8 @@ CoroutineCold {
     select_rng: [u64; 4],
     select_scratch: [u64; 4],
     gc_scan_epoch: AtomicU64,
+    payload_state: AtomicU64,
+    join_waiter: u64,
 }
 ```
 
@@ -85,7 +87,9 @@ CoroutineCold {
 
 `morestack_scratch` 保存 return PC、九个 GPR参数和八个 XMM参数；只有 lifecycle Running且当前 PC为 `MorestackEntry` 时有效，并由该 entry map精确扫描，不属于常驻 runtime root。
 
-控制块布局由 `CoroutineRuntimeContract` schema 1 发布：`CoroutineHot` 为 64 B、`StackDescriptor` 为 64 B、`CoroutineSlot` 为 128 B，三者均按 64 B 对齐；`CoroutineContext` 为 48 B，`MorestackScratch` 为 208 B 且按 16 B 对齐，`CoroutineCold` 为 512 B 且按 64 B 对齐。hot 与 cold 分别以 64 KiB 地址稳定页扩容；页表可增长，已公开 record 不移动。cold 表下标是稠密的稳定控制块索引，槽复用必须推进独立 generation，过期 handle 不得认领新协程。
+控制块布局由 `CoroutineRuntimeContract` schema 3 发布：`CoroutineHot` 为 64 B、`StackDescriptor` 为 64 B、`CoroutineSlot` 为 128 B，三者均按 64 B 对齐；`CoroutineContext` 为 48 B，`MorestackScratch` 为 208 B 且按 16 B 对齐，`CoroutineCold` 为 576 B 且按 64 B 对齐。hot 与 cold 分别以 64 KiB 地址稳定页扩容；页表可增长，已公开 record 不移动。cold 表下标是稠密的稳定控制块索引，槽复用必须推进独立 generation，过期 handle 不得认领新协程。
+
+`join_state` 位于 cold+368，内联结果占 cold+376..392；cold+392 的租约计数不能用于等待者。独立 `join_waiter` 位于 cold+512，文件请求仍复用 cold+272..368，因此请求错误不会发布 Join 完成，登记 Join 也不会破坏目标协程的请求链。主协程启动区由冷记录实际大小推导为 768 B，panic 六字记录从 704 开始，返回原因与 coordinator 分别位于 752/760；机器片段和镜像侧必须消费一致布局。
 
 `std/runtime/coroutine.gg` 的 `#[repr(C)]` record 经冻结 HIR、具体 GIR 与真实布局器形成后，逐字段同 machine layout 交叉验证；不重新读取源码推测 offset。契约同时携带 layout 目录、栈策略和实际 x86_64 context 片段，任一大小、对齐、字段偏移或代码版本不匹配都以 `E0058` 停止下游。hot 内的 atomic 存储车道仍为一个机器字，普通 Gugu 字段访问不能替代其 acquire/release machine intrinsic。
 
@@ -232,9 +236,39 @@ TimerEntry 位于 non-moving owner slab，含 `{ timer_id, generation, deadline,
 
 普通 `ForeignBridge`、`std.fs` 的文件操作、`process wait` 与其它不能使用 poller的阻塞系统调用统一经过 `BlockingBridge` admission；`ForeignLeaf` 不得走该路径，`ForeignBridge[DirtyCpu]` 仍使用独立 dirty admission。`BlockingBridge` 维护独立于 runnable、idle、timer和injection锁的 FIFO gate，并为每次 admitted call保留一个 `BridgeCredit`：attached bridge 进入 native前就占用该 credit，若被 retake，replacement worker只能消费同一个 credit；返回或取消后 credit归还。因此 retake不能通过每个调用无界创建 OS worker。
 
-当前 profile 固定 `max_blocking_workers = 8`、`blocking_waiter_bytes = 64`、队列上限 4096 字节、`blocking_service_budget = 128`、`blocking_worker_stack_bytes = 65536`，压力 retake 的逻辑宽限是 20µs。`max_blocking_workers`、`blocking_worker_stack_bytes`、`blocking_waiter_bytes`和`blocking_service_budget`属于 runtime tuning profile；worker 数量不能超过 `max_blocking_workers`，并且所有 worker system stack、bridge frame、wait node和排队 payload计入 runtime committed/pressure账本。没有 credit时调用方在 `Waiting` 中排队并释放 processor，不执行 native code；取得 credit后才转为 `Foreign`。等待队列有 FIFO service和有限 batch，队列背压表现为协程挂起而非 OS thread oversubscription；waiter metadata达到 profile memory cap时按统一 runtime resource-exhaustion错误结束 admission，不绕过上限创建 worker。
+当前 profile 固定 `max_blocking_workers = 8`、`pressure_blocking_workers = 1`、`blocking_waiter_bytes = 64`、队列上限 4096 字节、`blocking_service_budget = 128`、`blocking_worker_stack_bytes = 65536`，压力 retake 的逻辑宽限是 20µs。`max_blocking_workers`、`blocking_worker_stack_bytes`、`blocking_waiter_bytes`和`blocking_service_budget`属于 runtime tuning profile；worker 数量不能超过 `max_blocking_workers`，并且所有 worker system stack、bridge frame、wait node和排队 payload计入 runtime committed/pressure账本。没有 credit时调用方在 `Waiting` 中排队并释放 processor，不执行 native code；压力 episode 只限制新准入，已有 owner/BridgeCredit 继续到完成，不能撤销线程或 payload；完成后不补到普通上限。压力解除后按 FIFO 恢复，至少保留一个目标槽使自然排空可推进；取得 credit后才转为 `Foreign`。等待队列有 FIFO service和有限 batch，队列背压表现为协程挂起而非 OS thread oversubscription；waiter metadata达到 profile memory cap时按统一 runtime resource-exhaustion错误结束 admission，不绕过上限创建 worker。
 
 CPU quota/container探测先决定 managed `parallelism`，再按 profile计算 blocking worker cap；探测失败使用 target descriptor的固定 profile，不读取宿主无限制的 CPU 数。active、waiting、credit、worker stack committed和队列 bytes必须进入 `RuntimeStats`，长阻塞调用与短调用的计数分开；任何普通 bridge实现不能以“预计很快”跳过 admission。
+
+### 文件系统镜像接入
+
+当前镜像仍沿用单个 managed worker。外调契约 schema 4 登记压力准入目标并固化 `NativeRequest` 的 128 字节布局：thread id 位于 0、opcode 位于 8、六个参数位于 16..64、返回值/错误位于 64/72、Windows thread handle 位于 80、两个额外参数位于 88/96、owner credit 位于 104、取消控制与观察位位于 112/120。owner 非零表示该请求占用 worker credit，只有确认线程退出或启动失败后才能归零。Rust 机器片段从 `repr(C)` 偏移派生地址，测试逐项校验 Gugu 镜像常量和 profile，并拒绝布局漂移；RuntimeRaw schema 为 44。
+
+文件请求由 `fs_platform` 驱动：processor 的 4024 槽指向状态页，4016 槽登记稳定资源控制页。状态页含 8 个 128 字节请求槽，Linux 在槽首次提交时按需分配 64 KiB 原生栈，正常完成后缓存复用；Windows 使用 CreateThread 与宿主栈。等待请求暂存在 coroutine cold 的 272..368 区间，取消控制地址放在 464 槽，与 morestack 的 264 槽分离。最多登记 64 个等待 credit，超过固定 profile 的 metadata 上限走 runtime failure；没有可用请求槽时挂起协程。单次 read/write 的 raw bounce buffer 至多 64 KiB，组合函数处理短读短写。
+
+目录原生控制页保留尚未交付的数据。Linux 仅在当前 getdents 批次耗尽后刷新，成功复制名称后推进 record offset；容量不足保留原 offset。Windows control+8 表示 FindFirst/FindNext 已取得而尚未交付的条目，容量检查失败保留该标志，复制名称后才清零；重试不得再调用 FindNext 跳过当前项。适配器复制到独立输出，后续刷新不修改先前输出；错误和 EOF 不写输出。确定性 LIR 测试覆盖跨批刷新、短缓冲重试、Linux 非 UTF-8 名称、Windows UTF-16 名称及 reparse 属性优先级。
+
+Windows `read_link` 的 `FSCTL_GET_REPARSE_POINT` 结果先读取 DWORD 返回字节数，再归还计数缓冲；实际返回范围必须包含 8 字节头且不超过 16 KiB，`8 + ReparseDataLength` 不得超出返回范围。symlink/mount-point 的 PathBuffer 基址分别为 20/16，记录必须覆盖固定头，substitute-name offset/length 必须按 UTF-16 单元对齐且完整落在记录内；不满足时返回 InvalidData。未知 tag 保留 InvalidInput，宿主操作失败保留原错误。关闭临时句柄和归还两块缓冲的路径由实际 LIR 固定脚本验证；失败与输出容量不足均不写输出。结构布局参照 [REPARSE_DATA_BUFFER](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_reparse_data_buffer)。
+
+worker 只接收 raw 请求与 raw 缓冲，不接收托管地址。Linux 通过 clone/CHILD_CLEARTID 判定真正退出；Windows 通过线程句柄的完成等待判定。`WaitForSingleObject` 仅 `WAIT_TIMEOUT` 返回 pending，`WAIT_OBJECT_0` 后必须成功 `CloseHandle` 才清零线程句柄并发布完成；其余等待结果或 CloseHandle 失败进入 runtime failure，保持请求所有权直到终止。Win32 BOOL/DWORD 和 GetLastError 的有效位先归一化，再参与判断或写入请求；64 位 handle 不截断。x64 lowering revision 6 失效旧片段。确定性测试直接解释生产待编码指令，宿主调用使用固定脚本，覆盖两平台启动、clone 子入口、退出发布顺序、Windows 全部文件操作的八参数 ABI、调用栈对齐与 R12 保持、错误哨兵及未定义高位；同时装配同一序列，但不代替真实宿主线程执行。owner 在 completion 后才恢复调用者和释放 payload。先取得完成再观察取消；运行中观察到取消时继续等待 worker 退出，避免释放仍被 syscall 使用的内存。每轮 service 在完成检查后、提交新请求前独立扫描 admission 等待队列，最多 64 项；取消者先摘链并更新队首/队尾/数量，再写入 Cancelled 并唤醒一次，不分配栈或取得 worker credit。即使八个 worker 全部仍阻塞也能处理排队取消，幸存队列保持 FIFO；提交前仍再次检查取消以覆盖扫描后的变化。close 使用控制块内嵌队列节点，等待所有操作租约归还后只提交一次；close worker 创建失败时进入 runtime failure，不发布 DONE，也不把仍打开的 OS handle 当作已关闭。自然退出先排空操作，再关闭资源登记表，最后回收控制页和 worker 栈。
+
+文件原生映射统一经过 `native_memory` 的 allocate/release，资源控制页不再单独调用平台分配。processor 的 3968/3976/3984/3992 分别保存 reserved、committed、映射数和 committed 高水位；所有映射整页提交，只有 commit 成功后计入，commit 失败先释放预留区。归还扣减对应页数，自然退出排空后检查前三项归零。它覆盖 raw payload、目录缓冲、资源控制页、请求状态页与 Linux worker 栈；Windows 宿主线程内部提交的栈页尚不在此账本，GC 与 coroutine stack 也不计入本小计。
+
+镜像主动建立的映射现共用 `native_memory.reserve_aligned/commit`：堆 arena/大对象/region、协程栈及增长、GC 系统栈、调度器与 GC 辅助页，以及上述文件映射。processor 的 3920/3928/3936/3944 保存预留字节、提交字节、映射数和提交高水位；3952 保存启动内存限制，提交与归还后据此更新压力状态。启动时先发布当前 slot 的 processor，再补记已建立的主栈、启动配置页和 processor 页，后续分配才进入计费入口。reserve/commit 仅在平台成功后增加相应账目，commit 失败回滚预留时不扣减 committed。调用方用 arena 的 committed 位和栈增长边界避免重复计费；复用已提交块不再增加 committed。计费长度按宿主页向上取整，Windows 的预留基址对齐与长度计费分开。
+
+processor 的 3888/3896/3904/3912 分别保存压力状态、episode 数、已完成压力周期数和入口门禁。状态为 0 无压力、1 待收集、2 本 episode 已收集；达到 85% 进入、降至 70% 清除；只有 committed 实际超过 soft limit 才消费一次强制收集机会。阈值计算分解乘法，避免大 limit 溢出。reserve/commit/release 事务中只记状态；`gc_boot` 完成之后打开门禁，`gc_alloc_slow` 修改分配状态前及 `native_call` 发布等待节点前消费请求。消费先领取 episode 并关闭重入门禁，再调用既有 `gc_enter(GC_REQUEST_PRESSURE)` 完成收集，成功后恢复门禁。同一个持续压力 episode 最多一次压力收集。Linux 手工验证 1 MiB limit 下记录一个 episode、一个压力周期与一个 major GC，文件闭环正常结束。压力期间每轮 service 先确认完成并归还额度，再提交等待请求，最后扫描八个槽归还仍空闲的 Linux 栈；owner 非零的在途槽绝不回收。预取消请求不分配栈，启动失败留下的空闲栈也可在压力扫描中归还。栈归还通过共同映射入口同时扣减总量和文件小计，退出排空复用同一归还函数。major 清扫后还会检查 old arena 的空闲已提交块：incoming、allocator、scanner、evacuation lease 与 candidate 均为零，line-live 和 object-start 为空，且不与 mutator TLAB 相交时才尝试 decommit。对应 collector 分配范围变空时先清除 cursor/limit，活块保留剩余分配空间。平台成功后仅扣减共同 committed、清除块提交位；失败保留原状态，后续可重试。重新开块走既有 commit 分支，因此不会向已归还页继续写入。扫描以固定 arena 的块数为上界，降至 clear 水位即停止。文件 service 在完成检查中统计仍在途 owner，取消扫描后每次提交前重新读取压力状态：非零时以一个 worker 为目标，未准入节点保持原位置且不分配栈；无压力恢复八个。Close 请求保留既有清理优先级并消费同一目标槽；启动失败不保留 active 计数。实际 LIR 验证两种压力状态下 1/3/8 个在途请求均不被撤销，完成后只补一项，排队取消独立推进，解除压力恢复幸存 FIFO；参照 ForeignWorld 使用同一登记常量。其它 owner 缓存的 drain 继续按各自生命周期接入。超限且入口就绪时，`pressure_update` 原子置既有 PREEMPT 通知并保留 GC_STOP；快速 poll 仍只读取 poll word。`safepoint_slow` 在换栈前检查压力状态、就绪门禁与 committed/limit，尾跳 `gc_enter` 保留原返回 PC。dispatcher 领取同一 episode，以入口 RSP+8 和返回 PC 扫描 PollResume 图，完成 minor/major 后记录耗时并恢复门禁；无可领取压力时直接返回。lowering revision 11、allocation revision 5 固定 poll 指针落栈，真实镜像的 PollResume 根掩码必须全零。固定机器序列与真实 dispatcher 测试覆盖门禁、系统栈入口、文件根保活及同一 episode 只收集一次。已退出协程栈使用 processor+4008 的 retired 链，节点由 processor+4000 活跃登记链移交；完成载荷仍留在 hot/cold 控制记录中。系统栈 `resume_with_io` 在文件 service 之后按每轮八项预算处理压力回收，先 decommit 退出栈数据页，再 release 完整 reservation；失败保留节点和全部计数，成功才清空栈边界并扣减 stack/provider 分区。固定虚拟地址替身使用 64 KiB backing 验证失败、成功、重复服务及 Join 值保持，不分配 GiB 测试内存。
+
+内部 `native_memory.snapshot` 返回总 reservation、provider committed、二者差额、映射数、高水位、文件分类小计和 managed heap 数据页提交量；`nonheap_committed_bytes = provider committed - heap_committed_bytes` 是互斥派生值。它只读 processor 账本，`verify_drained` 使用文件分类检查排空。processor+3960 保存 heap committed；普通块、大对象和区域数据页使用 `commit_heap`，空块 trim 使用 `decommit_heap`。arena 侧元数据、GC 辅助页、region 控制页归非 heap，平台失败不改变分区。
+
+`fs_platform.snapshot` 扫描固定八个请求槽和最多六十四个 admission waiter，返回在途数、等待数、waiter metadata、排队原生载荷、worker 栈提交/缓存及 close 标志。调用协程冷记录+480 跟踪其 scratch 缓冲所占宿主页；分配与释放同步更新。请求池、worker 栈、目录控制页使用独立控制映射入口，不归到某次调用。等待者移出队列后其缓冲仍可持有，但不再计入 queue payload。采样不分配、不调用 fs_poll，owner 尚未确认完成的请求仍计在途，缓存栈不计 OS worker。
+
+`std.runtime.stats()` 通过公开标准库源登记，私有子模块仍由名称解析拒绝用户导入。它读取上述快照、真实堆对象登记、coordinator 和 owner 事件账本。processor 的 3864/3872/3880 保存用户协程栈 reservation/committed/live：主栈启动、子栈建立和 morestack 成功后计费，协程结束只扣 live，实际保留的提交页归缓存。3624 起的三十个 owner-local 字保存诊断事件；region reset/promote、ticket 发放/归还、单记录 edge/return 发布在成功转换处更新。`gc_dispatch` 前后读取无分配、无挂起的 `monotonic_nanos`，将差累计到 coordinator+160；Linux 使用 CLOCK_BOOTTIME，Windows 使用 GetTickCount64 并转换为纳秒单位，分辨率依平台。公开 Duration 以秒/纳秒保存，转换为 u128 纳秒不丢失范围。RuntimeRaw schema 35 使旧账本与机器操作目录失效。实际 LIR 回归对比采样前后的内存，检查无分配或调度，并验证栈提交失败、增长、退役及排队载荷从等待到在途的变化。
+
+普通 C 调用的实际 lowering 现调用 `foreign_dispatch`。caller outgoing 区保存 176 字节固定头：target/stack bytes、六个整数车道、八个 SSE 车道、四个结果车道、线程本地错误；其后为按 16 字节取整的栈参数和按值/隐藏返回的复制描述。所有未使用车道先清零。dispatcher 建立 raw 包，重定向按值指针和 sret，清除包中的协程栈源地址，再以 opcode `~uint(0)` 调用与文件操作相同的 `native_call`。GIR demand 显式拉入 dispatcher，返回地址扫描接受 ForeignBridge 栈图；普通调用及 Invoke 共用这一 lowering。
+
+Linux 文件 syscall worker 仍以 CHILD_CLEARTID 完成；C worker 使用目标 glibc pthread 建立合法独立 TLS，`pthread_attr_setstack` 使用同一槽缓存的 64 KiB raw 栈。创建或属性设置失败回传实际错误，属性销毁失败立即终止；`pthread_tryjoin_np` 的 EBUSY 保留 credit，成功才清空 handle，其余错误立即终止并保持所有权。Windows 从同一 CreateThread 请求按 opcode 选择 C worker，仍通过现有线程等待/CloseHandle 完成。C worker 逐页触碰栈参数区后复制参数，调用后保存 rax/rdx/xmm0/xmm1，再捕获本线程 errno/GetLastError；完成后 dispatcher 回写聚合和结果，最后归还 raw 包。Linux pthread 库内部 TLS/控制分配与 Windows 宿主栈不计入 provider 自建映射。x64 lowering revision 11、RuntimeRaw schema 35 失效旧机器片段与绑定。固定生产指令测试覆盖 TLS 入口协议、属性栈、创建失败、join 忙碌/成功/失败及两目标整数/SSE/栈车道；实际 Gugu LIR 测试覆盖八个文件请求占满后 C 请求排队、取得槽、等待真正完成与最终 raw 账本归零，不宣称已执行 Windows 宿主线程。
+
+这个共同账本尚不包含 PE/ELF 映像、宿主初始线程栈、pthread 库内部 TLS/控制分配和 Windows CreateThread 内部建立的栈，不能宣称为进程 RSS。普通 ForeignBridge 已与文件池共用额度；DirtyCpu 使用同一状态页 +2048 的独立 FIFO 与一个执行槽（当前镜像单 processor 的 dirty target），复用 service/pending/trim 算法但不借用 blocking credit 或其 waiter cap。公开 dirty active/waiting、OS thread 与 owner cache 从两池真实所有权采集；退出等待两池自然排空。compiler 传递 stack_high 相对 frame 深度，按值临时槽和 sret 复制描述也使用相对深度，挂起栈移动后 dispatcher 用最新栈界重建回写地址。实际 LIR 测试覆盖 blocking 满额与 dirty 满额独立排队、busy 不释放、完成唤醒，以及挂起期间栈迁移后的返回写入。回调接入及其余 owner 生命周期统计继续按本章完整契约实现。上述固定容量检查不能代替统一压力账本，也不代表多 managed worker 的共享资源协议已经实现。
 
 ## WorkerThread
 
@@ -462,6 +496,12 @@ DirtyCpu admission不可在持有 `LogicalProcessor` 时等待。并行度降低
 ### 外部代码回调
 
 只有普通 `ForeignBridge` 允许外部代码回调 Gugu。回调首先按 lease-retake协议打破 outer coroutine的 attached lease；若赢得原 processor即可用它建立 callback coroutine frame，否则按普通规则取得其它 processor。callback结束后 processor交还 scheduler，不把 lease重新附着到仍在 C中的 outer coroutine；outer native返回时走 detached路径。bridge查找/建立当前 OS thread的 worker登记，嵌套 callback以 worker-local depth区分；返回 C前必须完成 callback panic边界和临时 root清理。从 `ForeignLeaf`、`ForeignBridge[DirtyCpu]` 或 `DirtyWaiting` 回调 Gugu是违反对应 unsafe契约，不进入隐式桥接路径。
+
+当前单 managed worker 镜像的普通外调在提交时已经 detached，因此回调不会重新占有 outer lease。processor+4088 指向进程期存活的系统栈槽，yield/park、morestack 和协程返回都在换回系统栈时装入该槽；系统服务不借用可回收协程的 hot。宿主初始栈沿用 OS guard，GC 仍使用独立 collector 栈描述符。回调 hot/cold/pack/registry 使用同一 4 KiB 控制页，cold+528 记录映射；退役链最多检查八项取得可复用页，复用同步恢复 stack live，压力时先归还栈再归还控制页。processor+3848 记录这些控制页缓存。退休大栈按每轮 64 KiB 撤销提交，保存剩余容量；普通 Join 的结果记录继续保留。共享表 trim 每轮至多访问 16 表、归还 64 KiB，coordinator+200 保存链游标；新空表出现时重启扫描。processor+3832 的三类确认在新 pending/cache/reclaimable 事件上撤销。当前 RuntimeRaw schema 为 44、x64 lowering revision 为 18。
+
+C 回调同时登记上限为 64，包含排队、执行和等待 DETACH 的节点。C 入口保留原生寄存器和参数包，通过独立 raw 控制区的锁发布 FIFO 节点并设置 processor poll bit2。调度服务取出节点后建立普通 managed coroutine；完成顺序为动态根清理、活跃登记摘除、栈退役、live count 更新，最后发布 callback COMPLETE。外部线程观察完成并 DETACH 后才能销毁节点；关闭准入仍允许已经登记的回调排空。
+
+节点中的 OS 线程身份与普通/dirty 请求池交叉检查；managed 线程和 DirtyCpu 线程被拒绝，普通 worker 与独立外部线程分别计数，同线程嵌套登记只持有一份外部线程计数。持有外层普通 worker credit 的 native 等待线程可以执行同一普通 FIFO 的借用请求；独立外部线程不获借用资格。借用复用原文件/C worker 分派，避免八个外层 worker 全部等待回调时嵌套请求无法推进；借用不撤销外层 credit，不建立新线程。节点同时跟踪 managed 完成与借用请求完成，二者都结束才通知 C 返回。
 
 ## GC 协作
 

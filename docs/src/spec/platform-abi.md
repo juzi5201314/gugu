@@ -241,7 +241,7 @@ Linux 使用 System V AMD64 psABI，Windows 使用 Microsoft x64 calling convent
 
 Gugu 的整数参数和原始指针按 `rdi, rsi, rdx, rcx, r8, r9` 的顺序使用通用寄存器；浮点 eightbyte 按 `xmm0` 至 `xmm7` 的顺序使用向量寄存器。返回值遵循 SysV 的 `rax` / `rdx` 与 `xmm0` / `xmm1` 返回位置。
 
-不超过 16 字节的 `repr(C)` 聚合按平台 eightbyte 分类算法递归处理；超过 16 字节、含未对齐字段或被分类为 MEMORY 的聚合通过隐藏存储指针传递。`i128` / `u128` 遵循现有 `__int128` 约定；整数返回使用 `rdx:rax`，参数必须占用连续的 INTEGER 位置。
+不超过 16 字节的 `repr(C)` 聚合按平台 eightbyte 分类算法递归处理；超过 16 字节、含未对齐字段或被分类为 MEMORY 的聚合参数在调用者栈参数区按值传递，MEMORY 返回值使用隐藏返回存储指针。同一参数需要多个 INTEGER/SSE 位置时，任何一组寄存器不足都必须让整个参数回退到栈，并保留未使用的寄存器给后续参数；栈副本保留对象大小、填充与所需对齐。`i128` / `u128` 遵循现有 `__int128` 约定；整数返回使用 `rdx:rax`，参数必须占用连续的 INTEGER 位置。
 
 调用点的栈对齐、栈参数顺序和寄存器耗尽后的回退规则遵循 System V AMD64 psABI。Gugu 生成的调用点在执行 `call` 前保持 16 字节栈对齐；SysV 的 128 字节 red zone 不能被用来保存需要跨 safepoint、阻塞或外部保留的 Gugu 根。
 
@@ -261,11 +261,13 @@ C ABI 的寄存器、栈槽、布局和符号规则与 runtime 的调度效应�
 
 未标注导入和 effect未知的间接调用使用普通 `ForeignBridge`：跨到 C代码前，runtime必须使用该目标可识别的连续 system stack和合法栈边界，保存 Gugu context并登记精确根；调用先经过有界 `BlockingBridge` admission并取得 `BridgeCredit`，runtime可以在 native快速返回期间保留可被 retake的 processor lease，GC、回调、退役或持续 runnable压力可以打破 lease并把 processor交给其它 managed work。没有 credit时调用方不能执行 native code，只能在不持有 processor的 admission waiter中挂起。是否直接恢复或重新入队完全属于 runtime内部，C代码不能观察 processor身份或依赖其不变。
 
+普通 bridge 的按值聚合、栈参数和隐藏返回存储由 runtime 建立非移动副本；建立副本之前以及 C 执行期间，调用者参数区中保留的所有可移动地址副本都必须登记精确根，包括原 C ABI 寄存器参数的存储副本。相对栈顶的深度和字节数属于标量，不能作为地址根扫描。确认原生线程退出后才回写结果并归还 credit。原生函数返回并不等于线程退出：线程本地析构仍可能执行，不能提前复用请求或系统栈。C 返回时捕获的 `errno`/`GetLastError` 随调用结果保存在原协程中，不能被线程创建、等待或清理的状态覆盖；外调缓冲释放后仍保留该错误状态。raw pointer 参数仍由调用方遵守已有 pin 与借用契约，按值复制不改变其指向对象的生命周期。Linux 的 glibc 线程实现要求链接输入显式提供目标解释器以及 `pthread_create`、`pthread_tryjoin_np`、`pthread_attr_init`、`pthread_attr_setstack`、`pthread_attr_destroy`、`__errno_location`；缺失时编译失败，禁止探测宿主或用退出桩替代普通外调。普通及 DirtyCpu 调用的外部目标也必须在 native 链接输入中登记；缺失时诊断点名该符号，不生成可执行镜像。外部整数返回只消费其类型规定的有效低位；`u8/u16/u32` 在进入 Gugu 表示时零扩展，不能依赖 native 返回寄存器未定义的高位。
+
 `#[ffi(dirty_cpu)]` 导入或 native definition、相应调用点，以及 managed `#[naked]` 使用 `ForeignBridge[DirtyCpu]`：持久 bridge state定位 coroutine stack上的 ABI frame和精确 roots，调用释放 `LogicalProcessor`，native stack不进入 Gugu stack map，且 native body不能回调 Gugu。`global_asm` 符号的模式来自显式 extern 声明；dirty CPU额度和等待状态属于 runtime 内部，不进入 C ABI。
 
 满足 `#[ffi(leaf)]` 契约的直接调用使用 `ForeignLeaf`：调用留在当前 worker、processor和 coroutine stack上，不建立 bridge state、不释放 processor，也不允许 C回调 Gugu。属性的 `stack = N`（省略时为0）计入 caller函数的 `max_leaf_reserve`；caller prologue以所有 direct leaf调用预算的最大值只执行一次 `StackCheck`，不在每个调用点重复检查。leaf调用仍须遵守本章的 C类型、pointer pin、内存别名和展开边界规则。
 
-`extern "C"` 导出函数被非 Gugu 线程调用时，必须按运行时的线程接入规则登记该线程；导出函数返回后才能撤销临时登记。C 线程不能直接操作 Gugu 协程句柄或 GC 元数据。DirtyCpu 与 ForeignLeaf 均不提供从 C 调入 Gugu 的回调桥。
+`extern "C"` 导出函数被非 Gugu 线程调用时，必须按运行时的线程接入规则登记该线程；导出函数返回后才能撤销临时登记。外部线程等待期间，参数与返回存储必须保持有效；managed 函数在受调度器管理的协程上执行，因此可以分配、挂起和参与 GC。完成发布必须晚于协程根与栈登记的结清，等待线程观察完成之后才可读取返回值并复用入口参数区。运行时关闭入口后不再接受新的线程登记。回调登记有固定 profile 上界，耗尽时在发布节点之前终止入口，不扩张无界链表或创建额外线程。回调提交必须通知 managed 安全点；长时间运行的协程在安全点让出后仍保留精确根。持有外层普通 worker credit 的回调等待线程可以借用执行同一普通 admission FIFO 中的请求；同线程嵌套回调继承该资格，独立外部线程不自带 credit，必须继续通过普通 admission。外层 credit 保留到外层线程退出，借用不建立额外 worker；回调协程的参数根、登记和结果交付全部结清后，其控制存储与栈才能复用；压力期间将空闲存储实际归还 provider，并扣除 owner cache 统计；DirtyCpu 不参与借用。回调协程与借用请求都结清后才能发布完成。线程数按 OS 线程身份计数：已有 worker 不重复计入，同一外部线程的嵌套回调只计一次，最后一次返回确认后撤销登记。C 线程不能直接操作 Gugu 协程句柄或 GC 元数据。DirtyCpu 与 ForeignLeaf 均不提供从 C 调入 Gugu 的回调桥。
 
 ## 符号、镜像与节
 

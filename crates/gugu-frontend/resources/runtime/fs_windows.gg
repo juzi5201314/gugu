@@ -1,0 +1,206 @@
+use std.runtime.fs_platform.{FsResult, native_call, raw_allocate, raw_free, control_allocate, control_free}
+fn word(p: uint) uint { unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](p)) } }
+fn put(p: uint, value: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](p), value) } }
+fn u32_at(p: uint) uint { unsafe { uint(std.ptr.read_unaligned[u32](std.mem.transmute[uint, *u32](p))) } }
+fn u16_at(p: uint) uint { unsafe { uint(std.ptr.read_unaligned[u16](std.mem.transmute[uint, *u16](p))) } }
+fn byte_at(p: uint) byte { unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](p)) } }
+fn put_byte(p: uint, value: byte) { unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](p), value) } }
+fn copy(out: uint, input: uint, count: uint) { let i: uint = 0
+ while i < count { put_byte(out + i, byte_at(input + i))
+ i = i + 1 } }
+fn native(op: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint) FsResult = native_call(op, a, b, c, d, e, f, 0, 0, 0)
+fn ok(value: uint) FsResult = FsResult { value: value, error: 0 }
+fn err(error: uint) FsResult = FsResult { value: 0, error: error }
+
+#[cfg(os = "windows")]
+pub fn call(op: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint) FsResult = call_cancel(op, a, b, c, d, e, f, 0)
+
+#[cfg(os = "windows")]
+pub fn call_cancel(op: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint, cancel: uint) FsResult {
+    _ = d
+ _ = e
+ _ = f
+    if op == 0 { return open(a, b) }
+    if op == 1 { return native(1, a, 0, 0, 0, 0, 0) }
+    if op == 2 || op == 3 {
+        let scratch = raw_allocate(8)
+        defer { raw_free(scratch, 8) }
+        let count = if c > uint(4294967295) { uint(4294967295) } else { c }
+        let result = native_call(op, a, b, count, scratch, 0, 0, 0, 0, cancel)
+        return FsResult { value: u32_at(scratch), error: result.error }
+    }
+    if op == 4 {
+        let scratch = raw_allocate(8)
+        defer { raw_free(scratch, 8) }
+        let result = native(4, a, b, scratch, c, 0, 0)
+        return FsResult { value: word(scratch), error: result.error }
+    }
+    if op == 5 {
+        let handle = open_attributes(a, b == 0)
+        if handle.error != 0 { return handle }
+        let result = stat(handle.value, c)
+        _ = native(1, handle.value, 0, 0, 0, 0, 0)
+        return result
+    }
+    if op == 6 { return stat(a, b) }
+    if op == 7 {
+        // FileEndOfFileInfo通过SetFileInformationByHandle，不移动共享文件位置。
+        let scratch = raw_allocate(8)
+        defer { raw_free(scratch, 8) }
+        put(scratch, b)
+        return native(20, a, 6, scratch, 8, 0, 0)
+    }
+    if op == 8 || op == 9 { return native(7, a, 0, 0, 0, 0, 0) }
+    if op == 10 {
+        let scratch = raw_allocate(8)
+        defer { raw_free(scratch, 8) }
+        let result = native_call(8, ~uint(0), a, ~uint(0), scratch, 0, 0, 2, 0, 0)
+        return FsResult { value: word(scratch), error: result.error }
+    }
+    if op == 11 { return dir_open(a) }
+    if op == 12 { return dir_next(a, b, c) }
+    if op == 13 { let result = native(11, word(a), 0, 0, 0, 0, 0)
+ control_free(a, 4096)
+ return result }
+    if op == 14 { return native(12, a, 0, 0, 0, 0, 0) }
+    if op == 15 { return native(13, a, 0, 0, 0, 0, 0) }
+    if op == 16 { return native(14, a, 0, 0, 0, 0, 0) }
+    if op == 17 { return native(15, a, b, 1, 0, 0, 0) }
+    if op == 18 { return native(16, b, a, 0, 0, 0, 0) }
+    if op == 19 {
+        let scratch = raw_allocate(64)
+        defer { raw_free(scratch, 64) }
+        let info = call_cancel(5, a, 1, scratch, 0, 0, 0, 0)
+        let directory = info.error == 0 && word(scratch + 16) == 2
+        return native(17, b, a, if directory { 3 } else { 2 }, 0, 0, 0)
+    }
+    if op == 20 { return read_link(a, b, c) }
+    if op == 21 {
+        let handle = open_attributes(a, false)
+        if handle.error != 0 { return handle }
+        let result = native(19, handle.value, b, c / 2, 0, 0, 0)
+        _ = native(1, handle.value, 0, 0, 0, 0, 0)
+        return FsResult { value: result.value * 2, error: result.error }
+    }
+    err(87)
+}
+#[cfg(os = "windows")]
+fn open(path: uint, options: uint) FsResult {
+    let access: uint = 0
+    if options & uint(1) != 0 { access = access | uint(2147483648) }
+    if options & uint(4) != 0 { access = access | uint(4) }
+    else { if options & uint(2) != 0 { access = access | uint(1073741824) }; }
+    let creation = open_creation(options)
+    let attributes = if options & uint(64) == 0 { uint(2097280) } else { uint(128) }
+    let result = native_call(0, path, access, 7, 0, creation, attributes, 0, 0, 0)
+    if result.error != 0 || options & uint(64) != 0 { return result }
+    let information = raw_allocate(64)
+    let inspected = stat(result.value, information)
+    let link = word(information + 16) == 3
+    raw_free(information, 64)
+    if inspected.error != 0 || link {
+        _ = native(1, result.value, 0, 0, 0, 0, 0)
+        return if link { err(1921) } else { inspected }
+    }
+    if options & uint(8) != 0 && options & uint(32) == 0 {
+        let length = raw_allocate(8)
+        put(length, 0)
+        let truncated = native(20, result.value, 6, length, 8, 0, 0)
+        raw_free(length, 8)
+        if truncated.error != 0 {
+            _ = native(1, result.value, 0, 0, 0, 0, 0)
+            return truncated
+        };
+    }
+    result
+}
+// nofollow 先取得同一文件的句柄并检查 reparse 属性，避免在拒绝链接之前截断。
+fn open_creation(options: uint) uint {
+    if options & uint(32) != 0 { return 1 }
+    let truncate = options & uint(8) != 0 && options & uint(64) != 0
+    if options & uint(16) != 0 { return if truncate { 2 } else { 4 } }
+    if truncate { 5 } else { 3 }
+}
+#[cfg(os = "windows")]
+fn open_attributes(path: uint, nofollow: bool) FsResult = native_call(0, path, 0, 7, 0, 3, if nofollow { 35651584 } else { 33554432 }, 0, 0, 0)
+#[cfg(os = "windows")]
+fn stat(handle: uint, out: uint) FsResult {
+    let buffer = raw_allocate(64)
+    defer { raw_free(buffer, 64) }
+    let result = native(5, handle, buffer, 0, 0, 0, 0)
+    if result.error != 0 { return result }
+    let attributes = u32_at(buffer)
+    put(out, u32_at(buffer + 32) * uint(4294967296) + u32_at(buffer + 36))
+    put(out + 8, attributes)
+    put(out + 16, if attributes & uint(1024) != 0 { 3 } else { if attributes & uint(16) != 0 { 2 } else { 1 } })
+    let ticks = word(buffer + 20)
+    put(out + 24, uint(int(ticks / uint(10000000)) - int(11644473600)))
+    put(out + 32, ticks % uint(10000000) * 100)
+    put(out + 40, attributes & uint(1))
+    put(out + 48, u32_at(buffer + 28))
+    put(out + 56, u32_at(buffer + 44) * uint(4294967296) + u32_at(buffer + 48))
+    ok(0)
+}
+#[cfg(os = "windows")]
+fn dir_open(path: uint) FsResult {
+    let length: uint = 0
+    while u16_at(path + length) != 0 { length = length + 2 }
+    let pattern = raw_allocate(length + 6)
+    copy(pattern, path, length)
+    put_byte(pattern + length, byte(92))
+ put_byte(pattern + length + 2, byte(42))
+    let control = control_allocate(4096)
+    let result = native(9, pattern, control + 64, 0, 0, 0, 0)
+    raw_free(pattern, length + 6)
+    if result.error != 0 { control_free(control, 4096)
+ return result }
+    put(control, result.value)
+ put(control + 8, 1)
+    ok(control)
+}
+#[cfg(os = "windows")]
+fn dir_next(control: uint, out: uint, capacity: uint) FsResult {
+    if word(control + 8) == 0 {
+        let result = native(10, word(control), control + 64, 0, 0, 0, 0)
+        if result.error == 18 { return ok(0) }
+        if result.error != 0 { return result }
+        put(control + 8, 1)
+    }
+    let attributes = u32_at(control + 64)
+    let name = control + 64 + 44
+    let length: uint = 0
+    while length < 520 && u16_at(name + length) != 0 { length = length + 2 }
+    if length + 16 > capacity { return err(122) }
+    put(out, if attributes & uint(1024) != 0 { 3 } else { if attributes & uint(16) != 0 { 2 } else { 1 } })
+    put(out + 8, length)
+ copy(out + 16, name, length)
+    put(control + 8, 0)
+    ok(length)
+}
+#[cfg(os = "windows")]
+fn read_link(path: uint, out: uint, capacity: uint) FsResult {
+    let handle = open_attributes(path, true)
+    if handle.error != 0 { return handle }
+    let buffer = raw_allocate(16384)
+    defer { raw_free(buffer, 16384) }
+    let count = raw_allocate(8)
+    let result = native_call(18, handle.value, 589992, 0, 0, buffer, 16384, count, 0, 0)
+    _ = native(1, handle.value, 0, 0, 0, 0, 0)
+    let returned = u32_at(count)
+    raw_free(count, 8)
+    if result.error != 0 { return result }
+    if returned < 8 || returned > 16384 { return err(13) }
+    let end = uint(8) + u16_at(buffer + 4)
+    if end > returned { return err(13) }
+    let tag = u32_at(buffer)
+    let base: uint = 0
+    if tag == uint(2684354572) { base = 20 }
+    if tag == uint(2684354563) { base = 16 }
+    if base == 0 { return err(87) }
+    if end < base { return err(13) }
+    let offset = u16_at(buffer + 8)
+    let length = u16_at(buffer + 10)
+    if offset % 2 != 0 || length % 2 != 0 || base + offset + length > end { return err(13) }
+    if length <= capacity { copy(out, buffer + base + offset, length) }
+    ok(length)
+}

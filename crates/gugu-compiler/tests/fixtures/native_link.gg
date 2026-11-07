@@ -1,0 +1,3 @@
+#[ffi(leaf, stack = 128)]
+unsafe extern "C" fn native_probe(value: uint) uint
+fn main() { unsafe { let _ = native_probe(7) } }

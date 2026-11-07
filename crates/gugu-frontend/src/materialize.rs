@@ -16,7 +16,14 @@ pub fn materialize(
     target: TargetName,
     source: RuntimeArtifactV1,
 ) -> Result<RuntimeArtifactV1, MaterializeError> {
-    let mut artifact = prebuild::materialize_tables(target, source)?;
+    materialize_functions(target, prebuild::materialize_tables(target, source)?)
+}
+
+/// 在已物化的基础表上录制函数表；输入的函数表必须为空。
+pub fn materialize_functions(
+    target: TargetName,
+    mut artifact: RuntimeArtifactV1,
+) -> Result<RuntimeArtifactV1, MaterializeError> {
     let functions = record_functions(&artifact, target).map_err(MaterializeError::Derive)?;
     let prebuilt = artifact
         .payload
@@ -71,11 +78,10 @@ fn record_functions(
         &source_map,
         (&output.installed, Some(prebuilt)),
     )?;
-    let glues = RuntimeGlueBindings::resolve(&resources, &output.hir, &lir)
+    let glues =
+        RuntimeGlueBindings::resolve(&resources, &output.hir, &lir).map_err(|error| vec![error])?;
+    let gc_metadata = frontend::gc::derive(&output.mono.universe, &output.gir, output.hir.module())
         .map_err(|error| vec![error])?;
-    let gc_metadata =
-        frontend::gc::derive(&output.mono.universe, &output.gir, output.hir.module())
-            .map_err(|error| vec![error])?;
     let policy = RawPlanePolicyV1 {
         compression: lir::installed::RECORDED_COMPRESSION,
         ..RawPlanePolicyV1::default()
@@ -89,16 +95,9 @@ fn record_functions(
         &resources,
         &queries,
     )?;
-    let (_, fragments) = codegen::fragments(
-        &lir,
-        &output.mono.universe,
-        &raw,
-        target,
-        &queries,
-        &source_map,
-        &glues,
-        (&output.installed, Some(prebuilt)),
-    )?;
+    let contract =
+        crate::backend::x64::contract::EncoderContract::build(target.descriptor().cpu_baseline);
+    contract.verify().expect("目标 encoder 契约");
     let bodies = lir.bodies();
     frontend::functions::record(
         output.hir.module(),
@@ -109,13 +108,22 @@ fn record_functions(
         |digest| {
             let index = bodies
                 .binary_search_by_key(digest, |body| body.instance)
-                .ok()?;
+                .expect("录制集实例都有 LIR body");
             let x64 = if installed::recordable(&bodies[index]) {
-                installed::encode(&fragments[index])
+                let fragment = codegen::record_fragment(
+                    &bodies[index],
+                    &output.mono.universe,
+                    &raw,
+                    target,
+                    &contract,
+                    &glues,
+                )
+                .map_err(|errors| errors.into_iter().next().expect("编码失败包含诊断"))?;
+                installed::encode(&fragment)
             } else {
                 Vec::new()
             };
-            Some((lir::installed::encode(&bodies[index]), x64))
+            Ok((lir::installed::encode(&bodies[index]), x64))
         },
     )
     .map_err(|error| vec![error])

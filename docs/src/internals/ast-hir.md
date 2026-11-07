@@ -382,7 +382,7 @@ Registration = Static | Flag | Chain
 ```
 
 - owner 另存 `return_plan`：函数体正常落到末尾时与显式 `return` 共用同一 `ExitKind::Return` 计划。冻结 verifier 要求该字段引用 `Return` 计划。
-- `Exit`/`TryExit` 节点携带 `plan`，`Block` 节点在其作用域注册过块 defer 时携带 `end_plan`，每个 `Scope` 携带进入时的 `unwind_plan`，每个 `Cleanup` 注册携带注册完成后立即生效的 `unwind_plan`。任意程序点的 panic 展开计划是当前作用域链上最近一次注册的 `unwind_plan`，否则是所在作用域的入口计划；函数作用域的入口 `Unwind` 计划固定为编号 0。
+- `Exit`/`TryExit` 节点携带 `plan`，`Block` 节点在其作用域注册过块 defer 时携带 `end_plan`，每个 `Scope` 携带进入时的 `unwind_plan`，每个 `Cleanup` 注册携带注册完成后立即生效的 `unwind_plan`。每个 `Expression` 与 `Statement` 另存其具体执行点的 `unwind_plan`，包含此前已注册且仍属退出作用域链的动作；GIR 调用、检查和局部 static 初始化只消费该快照。构造器按稠密 scope 编号缓存最近的 `(已注册数, plan)`，同一注册状态复用计划；函数作用域的入口 `Unwind` 计划固定为编号 0。
 - 动作序列先列出块 defer：沿出口的作用域链由内向外，每个作用域内按后注册先执行，只包含出口点之前已经注册的 action。`Break`/`Try`/`BlockEnd`/`Continue` 计划只含块 defer；`Return` 与 `Unwind` 计划随后列出函数出口 defer。
 - `defer ret` 的注册表示由注册点到函数作用域之间的控制结构决定：只有 Block 作用域时为 `Static`（到达出口必然已注册）；含 Branch 或 Try 时为 `Flag`（出口按运行时注册标志守卫）；含 Loop 时为 `Chain`（每轮注册一次，出口按每帧 defer 链 LIFO 消费）。块 defer 始终是 `Static`。
 - owner 存在 `Chain` 站点时，`Return`/`Unwind` 计划在每个 `Static`/`Flag` 站点前放置 `DrainChain { until: Some(站点) }`，消费比该站点注册更晚的链记录，末尾以 `DrainChain { until: None }` 消费到链底；未注册的 `Flag` 站点没有 mark，对应的消费直接到链底。没有链站点的 owner 不出现 `DrainChain`。

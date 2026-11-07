@@ -24,7 +24,7 @@ use crate::mono::MonoWorldV1;
 use crate::{Diagnostic, DiagnosticCode};
 use serde::{Deserialize, Serialize};
 
-pub const WORLD_SCHEMA: u32 = 3;
+pub const WORLD_SCHEMA: u32 = 4;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GirFragment {

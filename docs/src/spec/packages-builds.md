@@ -240,7 +240,7 @@ test 与 bench 是正交 target/harness 模式，不是 profile。实现还可�
 
 ## 内建块物化与加载 {#builtin-materialization}
 
-`GUGURT01` artifact 的 `source manifest` 与接口摘要由 builder 写入，`prebuilt` 段由 façade 的 build script 调用 `gugu_frontend::materialize` 派生并写回。物化只覆盖与用户无关的层：名称前缀、身份表、早期常量、类型检查结果、HIR 片段、GIR body、契约类型目录、模型层，以及可安装内建实例的分析摘要、poll 之后的 LIR body 与 absorb 之前的 x64 机器片段。编号前缀按 `source manifest` 顺序固定，跨块引用只走稳定键，因此内建块下标的含义在用户编译里仍然成立。
+`GUGURT01` artifact 的 `source manifest` 与接口摘要由 builder 写入，`prebuilt` 段由 façade 的 build script 调用 `gugu_frontend::materialize` 派生并写回；该入口依次组合基础表 `materialize_tables` 与函数表 `materialize_functions`。两阶段分别必须确定性复现，函数阶段输入是已验证且函数表为空的基础表，输出比较覆盖完整 artifact。物化只覆盖与用户无关的层：名称前缀、身份表、早期常量、类型检查结果、HIR 片段、GIR body、契约类型目录、模型层，以及可安装内建实例的分析摘要、poll 之后的 LIR body 与 absorb 之前的 x64 机器片段。编号前缀按 `source manifest` 顺序固定，跨块引用只走稳定键，因此内建块下标的含义在用户编译里仍然成立。机器片段可以在可安装集合选定后按需派生，但入选集合、各层编码及验证规则必须与完整派生一致；避免计算最终不录制的片段不得改变 artifact 字节。冻结类型表的传递分类可以在同一分析 world 内共享；函数状态、调用摘要和预算仍按各实例独立求解。目标不可变 descriptor 及注入源码路径的规范化结果可复用，但不得改变目标摘要或 runtime 来源授权依据。
 
 内建世界的参与范围由 import 闭包决定，闭包本身在构建期算好：物化表用 `floor_modules` 写出固定地板集（`std.prelude` 与 `std.runtime.core`/`std.runtime.platform`/`std.runtime.scheduler`，按点分模块路径严格升序），用 `contract_modules` 写出贡献 `ContractRecord` 的内建模块（当前取 `std.runtime.*` 全集：它是契约载体的超集，分块安装落地后再按 `linkage` 精确收敛）。加载期的 `gugu_frontend::closure_program_modules(imports, prebuilt)` 取「地板集 ∪ 契约集 ∪ 被用户 `use`/路径引用触达且出现在 `module_order` 里的模块」：地板集与契约集恒在内，用户拼写的非内建路径直接忽略。物化表校验要求这两个集合都是 `module_order` 内的严格升序子集，且地板集不能为空——地板集写空意味着 artifact 的生产方漏算了恒需模块，属于 invariant 失败而不是可退化状态。 物化表还按 `module_order` 逐模块记录定义与 owner 区间（`blocks`）：定义编号按「物化块优先、模块编号、模块内登记顺序」排列，`Definition.module` 因此单调不减，区间首尾相接即可覆盖整张表；安装端校验每块里的定义归属与该块声明的模块编号一致、两列区间长度合计等于表长。
 

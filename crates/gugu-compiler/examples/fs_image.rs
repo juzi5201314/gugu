@@ -1,0 +1,40 @@
+//! 手工文件系统镜像验证入口；真实进程与文件操作不进入默认测试套件。
+use gugu_compiler::{CompileRequest, Compiler, TargetName};
+use std::{env, fs, path::PathBuf};
+
+fn main() {
+    let source = PathBuf::from(env::args_os().nth(1).expect("源码路径"));
+    let target = if env::args().nth(2).as_deref() == Some("windows") {
+        TargetName::X86_64Windows
+    } else {
+        TargetName::X86_64Linux
+    };
+    let text = fs::read_to_string(source).expect("读取手工输入");
+    let compilation = Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
+        .compile(CompileRequest::single_file("main.gg", text, target));
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    let plan = compilation.image_plan().expect("镜像计划");
+    if env::var_os("GUGU_FS_DUMP").is_some() {
+        fs::write(
+            "/tmp/gugu_fs_x64.txt",
+            compilation.dump_x64().expect("机器码 dump"),
+        )
+        .expect("写出机器码 dump");
+        fs::write(
+            "/tmp/gugu_fs_lir.txt",
+            compilation.dump_lir().expect("LIR dump"),
+        )
+        .expect("写出 LIR dump");
+    }
+    let (name, bytes) = if target == TargetName::X86_64Linux {
+        ("/tmp/gugu_fs_image", plan.linux_image())
+    } else {
+        ("/tmp/gugu_fs_image.exe", plan.windows_image())
+    };
+    fs::write(name, bytes).expect("写出手工验证镜像");
+    println!("{name}");
+}

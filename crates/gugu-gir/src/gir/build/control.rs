@@ -254,7 +254,7 @@ impl Builder<'_> {
     ) -> Result<(), Diagnostic> {
         let slot_ty = self.owner.locals[local.index()].ty;
         self.static_bindings.insert(local.index(), definition);
-        let unwind = self.unwind_of(self.owner.statements[statement.index()].scope);
+        let unwind = self.owner.statements[statement.index()].unwind_plan;
         self.emit_static_guard(
             definition,
             crate::mono::instantiate::CallSite::Initializer(
@@ -453,7 +453,7 @@ impl Builder<'_> {
         } else {
             Some(self.temp(self.expr_ty(id)))
         };
-        let scope = self.owner.expressions[body.index()].scope;
+        let scope = self.expr_scope(id);
         self.goto(header);
         self.switch_to(header);
         if let Some(condition) = condition {
@@ -524,7 +524,7 @@ impl Builder<'_> {
         };
         let header = self.fresh(false);
         let exit = self.fresh(false);
-        let scope = self.owner.expressions[body.index()].scope;
+        let scope = self.expr_scope(id);
         self.goto(header);
         self.switch_to(header);
         let item = if let Some(dispatch) = next {
@@ -612,7 +612,7 @@ impl Builder<'_> {
         });
         self.switch_to(body_block);
         self.loops.push(LoopFrame {
-            scope: self.owner.expressions[body.index()].scope,
+            scope: self.expr_scope(id),
             header,
             exit,
             value: None,
@@ -685,7 +685,7 @@ impl Builder<'_> {
         let element = self.project(base, Projection::Index(index));
         self.bind_pattern(element, pattern)?;
         self.loops.push(LoopFrame {
-            scope: self.owner.expressions[body.index()].scope,
+            scope: self.expr_scope(id),
             header,
             exit,
             value: None,
@@ -947,6 +947,12 @@ impl Builder<'_> {
                     .map(|frame| frame.exit)
             }
         };
+        if dest.is_none() {
+            return Err(gir_error(
+                &format!("退出目标没有对应控制流帧：{target:?}"),
+                None,
+            ));
+        }
         let cleanup = self.intern_cleanup(plan, CleanupChain::Normal, dest)?;
         self.goto(cleanup);
         Ok(())

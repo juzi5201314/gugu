@@ -386,7 +386,7 @@ world 层按全局 mono_key 序复制各 SCC 的记录字节，只重新编码 p
 排序与冲突降级是全局语义）。session 内新鲜路径持有类型化对象，不做编码往返；
 缓存命中路径先按 schema 解码，再校验 `input_fingerprint` 与成员一致性。
 SCC 按实例图的凝聚顺序求解，每个实例具有独立固定点状态；解释器共享 owner 的 generic
-GIR，但调用点消费该实例实际选中的 callee 摘要。`InstantiateGir` 仍从 HIR 收集调用边，
+GIR，并在 world 内懒初始化一份只读 PassingTable，供全部实例与 SCC 轮次复用；调用点消费该实例实际选中的 callee 摘要。`InstantiateGir` 仍从 HIR 收集调用边，
 不从 GIR 重解析。运算符、迭代、try、格式化与局部 static 初始化器的调用效果均进入分析。
 函数 query 只投影已完成 SCC，不通过 query 读取半初始化成员。共享 HIR 检查必须在所有
 可达实例中都得到相同安全证明才可省略。证明只写入 `AnalysisWorldV1.proofs`，不回写
@@ -408,7 +408,7 @@ placement 只对这些 body 按 unknown 放置。
 内建函数表里的实例跳过 solver：SCC 摘要与 proof 由构建期录制的分析分片组装，query 键与
 指纹不变（见[内建函数表](monomorphization-cache.md#builtin-function-table)）。
 
-证明读检查表达式所在程序点、当前 memory version 上的状态：
+证明读检查表达式所在程序点、当前 memory version 上的状态。收集阶段直接使用已收敛的块入口事实，只重放含检查的块至末个检查；不可达块保持空事实数组，第一次 join/widen 时由真实入边完整建立，证明仍为 Unknown 且不执行状态转移。无检查块和末个检查后的语句不能改变所收集的证明。静态数组长度直接读类型，动态长度只读当前区间，不为长度查询复制整份抽象状态：
 
 - 数组 / 切片下标：`0 <= i < N` 或 `0 <= i < Len(base)` 才 `Proved`；字面量越界仍
   `Disproved`。切片 `Bounds { slice: true }` 要求 `0 <= start <= end <= Len`，允许长度处的空切片。

@@ -37,6 +37,17 @@ impl TargetName {
 
     /// 返回目标的不可变 descriptor。
     pub fn descriptor(self) -> TargetDescriptor {
+        static LINUX: std::sync::LazyLock<TargetDescriptor> =
+            std::sync::LazyLock::new(|| TargetName::X86_64Linux.build_descriptor());
+        static WINDOWS: std::sync::LazyLock<TargetDescriptor> =
+            std::sync::LazyLock::new(|| TargetName::X86_64Windows.build_descriptor());
+        match self {
+            Self::X86_64Linux => *LINUX,
+            Self::X86_64Windows => *WINDOWS,
+        }
+    }
+
+    fn build_descriptor(self) -> TargetDescriptor {
         let cost_profile = baseline_cost_profile();
         let sysroot = sysroot_entry(self);
         TargetDescriptor {

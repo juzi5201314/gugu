@@ -24,11 +24,15 @@ pub const ENCODER_REVISION: u32 = 3;
 /// 阶段 54 起：`StackCheck` 降级为标记、`StackAddr` 用 frame 占位基址、成组搬运走拷贝组。
 /// 阶段 61b：`I8`/`I16` 的 `Load` 用 `movzx` 建立零扩展规范形。
 /// TLAB bump 在新 cursor 超过 limit 时进入 slow path。
-pub const LOWERING_REVISION: u32 = 4;
+/// Windows 文件线程等待/回收失败进入 fatal，DWORD 状态归一化。
+/// 普通对象快分配同步发布 object-start 位图。
+/// PollResume 压力分支进入系统栈并强制指针根落栈。
+/// 区域快分配同步发布 object-start 位图。
+pub const LOWERING_REVISION: u32 = 18;
 /// 寄存器分配与 frame 规则 revision：候选过滤、spill 权重、frame 布局顺序与 prologue 形状。
-pub const ALLOCATION_REVISION: u32 = 2;
+pub const ALLOCATION_REVISION: u32 = 6;
 /// 栈图、unwind 与 source record 的生成规则 revision。
-pub const METADATA_REVISION: u32 = 1;
+pub const METADATA_REVISION: u32 = 2;
 
 /// 契约指纹域。
 const ENCODER_DOMAIN: &str = "gugu-x64-encoder-v1";

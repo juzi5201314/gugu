@@ -1,5 +1,5 @@
 use std.runtime.heap.{copy_bytes, value_size}
-use std.runtime.scheduler.{dynamic_root_publish, dynamic_root_retire, park_current, ready_hot, take_result, DYNAMIC_ROOT_KIND_CHANNEL_SLOT}
+use std.runtime.scheduler.{dynamic_root_publish, dynamic_root_retire, park_current, ready_hot, take_result, COROUTINE_COLD_COMPLETION_OFFSET, COROUTINE_COLD_JOIN_WAITER_OFFSET, DYNAMIC_ROOT_KIND_CHANNEL_SLOT}
 
 /* 等待源控制块的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
  * wait-node 只保存协程句柄、generation、case 和下标偏移，禁止裸栈指针。
@@ -229,8 +229,11 @@ pub fn channel_send(handle: uint, payload: *(), desc: *()) byte {
         park_on(handle, handle + 56, src, 0)
         return 1
     }
-    if enqueue_value(handle, src, roots) == 1 { return 1 }
-    park_on(handle, handle + 56, src, 0)
+    while enqueue_value(handle, src, roots) == 0 {
+        if word(handle + 24) != 0 { return 0 }
+        park_on(handle, handle + 56, src, 0)
+        if word(handle + 24) != 0 { return 0 };
+    }
     1
 }
 
@@ -269,9 +272,10 @@ pub fn channel_receive(handle: uint, payload: *(), desc: *()) byte {
         park_on(handle, handle + 64, 0, dst)
         return 1
     }
-    if dequeue_value(handle, dst) == 1 { return 1 }
-    if word(handle + 24) != 0 { return 0 }
-    park_on(handle, handle + 64, 0, dst)
+    while dequeue_value(handle, dst) == 0 {
+        if word(handle + 24) != 0 { return 0 }
+        park_on(handle, handle + 64, 0, dst)
+    }
     1
 }
 
@@ -311,11 +315,11 @@ pub fn join_wait(handle: uint, out: *(), desc: *()) byte {
     let cold = word(handle + 48)
     let dst = as_uint(out)
     let descriptor = as_uint(desc)
-    if word(cold + 360) == 1 {
+    if word(cold + COROUTINE_COLD_COMPLETION_OFFSET) == 1 {
         take_result(handle, dst, descriptor)
         return 1
     }
-    store_word(cold + 384, current_hot())
+    store_word(cold + COROUTINE_COLD_JOIN_WAITER_OFFSET, current_hot())
     park_current()
     take_result(handle, dst, descriptor)
     1
@@ -334,7 +338,7 @@ fn commit_case(base: uint, index: uint) byte {
     }
     if op == 2 {
         let cold = word(handle + 48)
-        if word(cold + 360) == 1 {
+        if word(cold + COROUTINE_COLD_COMPLETION_OFFSET) == 1 {
             let result = word(at + 32)
             take_result(handle, result + word(at + 48), word(at + 40))
             return 1
@@ -376,7 +380,7 @@ pub fn select_commit(records: *(), count: uint, has_default: byte) (uint, uint) 
         let op = word(at)
         let handle = word(at + 8)
         let queue = if op == 0 { handle + 56 } else { handle + 64 }
-        if op == 2 { store_word(word(handle + 48) + 384, current_hot()) }
+        if op == 2 { store_word(word(handle + 48) + COROUTINE_COLD_JOIN_WAITER_OFFSET, current_hot()) }
         else {
             let node = alloc_node(proc_of(current_hot()), current_hot(), word(at + 16), word(at + 32) + word(at + 48), cursor)
             push_queue(queue, node)

@@ -1,6 +1,9 @@
-use std.runtime.scheduler.{boot, finish_hot, live_count, resume_ready}
+use std.runtime.scheduler.{boot, finish_hot, live_count, resume_ready, callback_gate, callback_service, callback_pending}
+use std.runtime.pressure.{pressure_service}
 use std.runtime.gc.{gc_config_check}
 use std.runtime.collect.{gc_boot}
+use std.runtime.native_memory as mapping
+use std.runtime.fs_platform as filesystem
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
@@ -129,12 +132,21 @@ unsafe fn startup_decimal(value: uint, bytes: bool, allow_off: bool) uint { unsa
     }
 }
 
+fn has_key_bytes(entry: uint, count: uint) bool {
+    let index: uint = 0
+    while index < count {
+        if unsafe { byte_at(entry + index) } == byte(0) { return false }
+        index = index + 1
+    }
+    true
+}
+
 unsafe fn is_gc_target_key(entry: uint) bool {
-    unsafe { word(entry) == uint(0x4e55525f55554747) && word(entry + 8) == uint(0x5f43475f454d4954) && word(entry + 16) == uint(0x003d544547524154) }
+    unsafe { has_key_bytes(entry, 23) && word(entry) == uint(0x4e55525f55475547) && word(entry + 8) == uint(0x5f43475f454d4954) && word(entry + 15) == uint(0x3d5445475241545f) }
 }
 
 unsafe fn is_memory_limit_key(entry: uint) bool {
-    unsafe { word(entry) == uint(0x4e55525f55554747) && word(entry + 8) == uint(0x4d454d5f454d4954) && word(entry + 16) == uint(0x494d494c5f59524f) && word(entry + 24) == uint(0x3d54) }
+    unsafe { has_key_bytes(entry, 26) && word(entry) == uint(0x4e55525f55475547) && word(entry + 8) == uint(0x4d454d5f454d4954) && word(entry + 16) == uint(0x494d494c5f59524f) && byte_at(entry + 24) == byte(84) && byte_at(entry + 25) == byte(61) }
 }
 
 unsafe fn parse_startup_environment(environment: uint, destination: uint) { unsafe {
@@ -214,7 +226,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         }
         parse_startup_environment(payload.boot_environment, startup_page)
         store_word(block.payload_va + bias + 120, payload.boot_environment & ~uint(1))
-        store_word(state + 696, startup_page)
+        store_word(state + 760, startup_page)
         // 唯一 main 协程预留 1 GiB 虚址，初始只提交 64 KiB；增长在同一虚址内提交新页，
         // 因此活跃 StackInterior 指针无需搬迁，且未触及的页始终不可访问。
         let reserve: uint = 1073741824
@@ -254,6 +266,8 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         boot(processor_addr, state, slot, cold, block.reserved_13 + bias)
         // 收集器专用 system stack 必须在任何分配前建立：`gc_enter` 会在第一次压力时切到它。
         gc_boot(processor_addr)
+        mapping.pressure_enable(processor_addr)
+        callback_gate(0)
         let system_context = std.mem.transmute[uint, *()](state + 40)
         let main_context = std.mem.transmute[uint, *()](cold + 8)
         let hot = std.mem.transmute[uint, *()](slot)
@@ -261,28 +275,39 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         std.runtime.context_switch(system_context, main_context, hot, processor)
         let running: uint = 1
         while running == 1 {
-            let reason = word(state + 688)
-            store_word(state + 688, 0)
+            let reason = word(state + 752)
+            store_word(state + 752, 0)
             if reason == 0 {
                 _ = morestack_handle(payload.stackmap + address_bias, payload.stackmap_len, payload.fragment_base + address_bias, state, stack_base)
                 resume_main(state)
             }
             if reason == 2 {
                 finish_hot(word(state), word(state + 88), word(state + 16))
-                if live_count(processor_addr) == 0 { running = 0 }
-                if live_count(processor_addr) != 0 {
-                    if resume_ready(state) == 0 { fatal_runtime() }
-                    _ = 0
+                if live_count(processor_addr) == 0 { callback_gate(5) }
+                if resume_with_io(state, processor_addr) == 0 {
+                    if live_count(processor_addr) != 0 { fatal_runtime() }
+                    running = 0
                 }
                 _ = 0
             }
             if reason == 1 {
-                if resume_ready(state) == 0 { fatal_runtime() }
+                if resume_with_io(state, processor_addr) == 0 { fatal_runtime() }
                 _ = 0
             }
             _ = reason
         }
+        filesystem.shutdown(processor_addr)
         0
+    }
+}
+fn resume_with_io(state: uint, processor: uint) uint {
+    loop {
+        filesystem.service(processor)
+        callback_service(processor)
+        pressure_service(processor)
+        let ready = resume_ready(state)
+        if ready != 0 { return ready }
+        if !filesystem.pending(processor) && !callback_pending() { return 0 };
     }
 }
 unsafe fn resume_main(state: uint) {
@@ -394,7 +419,7 @@ unsafe fn morestack_handle(section: uint, length: uint, fragment_base: uint, sta
         }
         if next == old { fatal_runtime() }
         let addition = StackRangeDescriptor { base: high - next, bytes: next - old }
-        if std.platform.commit(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(addition))) != 0 { fatal_runtime() }
+        if mapping.commit_stack(std.mem.transmute[*StackRangeDescriptor, uint](std.ptr.addr_of(addition))) != 0 { fatal_runtime() }
         store_word(slot + 64, high - next + 512)
         store_word(slot + 72, high - next)
         store_word(slot + 88, next)
@@ -526,12 +551,12 @@ pub fn panic_dispatch(message: *byte, len: uint, path: *byte, path_len: uint, li
         let base = word(payload + 56) + bias
         checked_safepoint(section, word(payload + 64), base, pc, byte(0))
         let landing = panic_landing(word(payload + 72) + bias, word(payload + 80), base, pc)
-        store_word(state + 640, std.mem.transmute[*byte, uint](message))
-        store_word(state + 648, len)
-        store_word(state + 656, std.mem.transmute[*byte, uint](path))
-        store_word(state + 664, path_len)
-        store_word(state + 672, line)
-        store_word(state + 680, column)
+        store_word(state + 704, std.mem.transmute[*byte, uint](message))
+        store_word(state + 712, len)
+        store_word(state + 720, std.mem.transmute[*byte, uint](path))
+        store_word(state + 728, path_len)
+        store_word(state + 736, line)
+        store_word(state + 744, column)
         store_word(state + 104, 1)
         landing
     }

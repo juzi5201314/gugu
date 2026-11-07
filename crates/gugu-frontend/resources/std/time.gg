@@ -1,0 +1,12 @@
+/// 不含时区和日历的非负时长，纳秒精度与可表示范围相互独立。
+#[repr(C)]
+pub struct Duration { seconds: uint, nanoseconds: uint }
+impl Duration {
+    pub fn from_secs(seconds: uint) Self = Self { seconds, nanoseconds: 0 }
+    pub fn from_millis(value: uint) Self = Self { seconds: value / 1000, nanoseconds: value % 1000 * 1000000 }
+    pub fn from_nanos(value: uint) Self = Self { seconds: value / 1000000000, nanoseconds: value % 1000000000 }
+    pub fn as_secs(self: &Self) uint = self.seconds
+    pub fn subsec_nanos(self: &Self) uint = self.nanoseconds
+    pub fn as_nanos(self: &Self) u128 = u128(self.seconds) * u128(1000000000) + u128(self.nanoseconds)
+    pub fn is_zero(self: &Self) bool = self.seconds == 0 && self.nanoseconds == 0
+}

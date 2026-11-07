@@ -354,14 +354,16 @@ fn roots_map_at(section: uint, index: uint) uint = roots_word(roots_map_index(se
 /// map 记录在 section 内的结束偏移。
 fn roots_map_end(section: uint, index: uint) uint = roots_word(roots_map_index(section) + (index + 1) * ROOT_MAP_INDEX_BYTES)
 
-/// 调用返回点上的安全点：普通/分配返回记为 `call-return`，能挂起的调用返回记为 `suspend-resume`。
-///
-/// 帧链上每一帧的 PC 都是「调用返回点」——父帧正是在调用子帧时挂起的；一条调用只产生一个
-/// 锚点，因此按这两类精确匹配仍是唯一命中，不是近似定位。顺序固定，便于诊断复现。
+/// 调用返回点上的安全点：普通/分配、挂起与两类外调共享精确返回 PC。
+/// 每条记录按类别与函数内偏移精确匹配，不使用近似地址定位。
 fn roots_find_return_safepoint(section: uint, function: uint, offset: uint) uint {
     let found = roots_find_safepoint(section, function, offset, SAFEPOINT_KIND_CALL_RETURN)
     if found != ROOT_NO_ENTRY { return found }
-    roots_find_safepoint(section, function, offset, SAFEPOINT_KIND_SUSPEND_RESUME)
+    let suspended = roots_find_safepoint(section, function, offset, SAFEPOINT_KIND_SUSPEND_RESUME)
+    if suspended != ROOT_NO_ENTRY { return suspended }
+    let polled = roots_find_safepoint(section, function, offset, SAFEPOINT_KIND_POLL_RESUME)
+    if polled != ROOT_NO_ENTRY { return polled }
+    roots_find_safepoint(section, function, offset, SAFEPOINT_KIND_FOREIGN_BRIDGE)
 }
 
 /// 写入一条根记录：零字是空引用，不计数也不写入。

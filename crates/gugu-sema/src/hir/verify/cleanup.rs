@@ -44,7 +44,23 @@ impl Module {
         if return_plan.exit != ExitKind::Return {
             return Err(invalid("隐式返回计划必须是指向函数作用域的 Return"));
         }
+        for statement in &owner.statements {
+            if !plan_is(
+                owner,
+                statement.unwind_plan,
+                ExitKind::Unwind(statement.scope),
+            ) {
+                return Err(invalid("语句没有对应的执行点 Unwind 计划"));
+            }
+        }
         for expression in &owner.expressions {
+            if !plan_is(
+                owner,
+                expression.unwind_plan,
+                ExitKind::Unwind(expression.scope),
+            ) {
+                return Err(invalid("表达式没有对应的执行点 Unwind 计划"));
+            }
             let valid = match &expression.kind {
                 ExprKind::Exit { target, plan, .. } | ExprKind::TryExit { target, plan, .. } => {
                     plan_is(owner, *plan, exit_kind(*target))

@@ -1,0 +1,7 @@
+fn mutate_slice(data: &[byte]) { data[0] = 120 }
+fn borrow_array(data: &[byte; 1]) { mutate_slice(data) }
+fn main() {
+    let data = [byte(0); 1]
+    borrow_array(&data)
+    if data[0] != 120 { panic("array slice mutation") }
+}

@@ -1,0 +1,9 @@
+use std.fs
+use std.path.{Path}
+#[repr(C)] struct Large { a: uint, b: uint, c: uint }
+unsafe extern "C" fn native_probe(value: Large) Large
+fn main() { unsafe {
+    let value = native_probe(Large { a: 1, b: 2, c: 3 })
+    let _ = value.a
+    let _ = fs.exists(Path::from_string("bridge"))
+} }

@@ -15,7 +15,7 @@ use super::stack::STACK_CACHE_CLASSES;
 /// 独占一条 cache line 的 poll 控制块。
 #[repr(C, align(64))]
 pub struct PollControl {
-    /// bit0 PREEMPT，bit1 GC_STOP；其余位必须为 0。
+    /// bit0 PREEMPT，bit1 GC_STOP，bit2 回调/owner drain 服务通知。
     pub poll_flags: AtomicU32,
     reserved: u32,
     /// collector 发布的 requested epoch。
@@ -129,12 +129,22 @@ pub const PROCESSOR_MARK_ACTIVE_OFFSET: usize = 3600;
 pub const PROCESSOR_TRACE_CURSOR_OFFSET: usize = 3608;
 /// GC 请求记录：分配侧向收集器发起请求的非移动控制记录（首字是 kind）。
 pub const PROCESSOR_GC_REQUEST_OFFSET: usize = 3616;
+/// 30 个 owner-local 统计字；尾部紧邻协程栈账本。
+pub const PROCESSOR_COUNTERS_OFFSET: usize = 3624;
+pub const PROCESSOR_COUNTERS_COUNT: usize = 30;
+pub const PROCESSOR_REGION_PAYLOAD_BYTES_OFFSET: usize = PROCESSOR_COUNTERS_OFFSET + 25 * 8;
+/// 活跃协程根扫描登记链。
+pub const PROCESSOR_COROUTINE_REGISTRY_OFFSET: usize = 4000;
+/// 已退出协程的栈回收链；不包含 Join 完成载荷。
+pub const PROCESSOR_RETIRED_STACKS_OFFSET: usize = 4008;
 /// 存活协程数。
 pub const PROCESSOR_LIVE_COUNT_OFFSET: usize = 4032;
 /// 子协程入口片段地址（`prepare_child` 写入子上下文 rip）。
 pub const PROCESSOR_CHILD_ENTER_OFFSET: usize = 4072;
 /// runtime 状态区指针；`rt0_start` 写入、镜像 runtime 全程读取。
 pub const PROCESSOR_STATE_OFFSET: usize = 4080;
+/// 系统调度栈使用独立、进程期存活的槽；不能借用可回收协程控制页。
+pub const PROCESSOR_SYSTEM_SLOT_OFFSET: usize = 4088;
 /// 堆游标/上界：bump 分配器只在这里记账，不与 arena 记账混用。
 pub const PROCESSOR_HEAP_CURSOR_OFFSET: usize = 4048;
 pub const PROCESSOR_HEAP_LIMIT_OFFSET: usize = 4056;
@@ -182,6 +192,8 @@ const _: () = {
     assert!(PROCESSOR_MARK_ACTIVE_OFFSET == PROCESSOR_ARENA_OFFSET + 8);
     assert!(PROCESSOR_TRACE_CURSOR_OFFSET == PROCESSOR_MARK_ACTIVE_OFFSET + 8);
     assert!(PROCESSOR_GC_REQUEST_OFFSET == PROCESSOR_TRACE_CURSOR_OFFSET + 8);
+    assert!(PROCESSOR_RETIRED_STACKS_OFFSET == PROCESSOR_COROUTINE_REGISTRY_OFFSET + 8);
+    assert!(PROCESSOR_RETIRED_STACKS_OFFSET + 8 == 4016);
     assert!(PROCESSOR_LIVE_COUNT_OFFSET > PROCESSOR_GC_REQUEST_OFFSET);
     assert!(PROCESSOR_LIVE_COUNT_OFFSET > PROCESSOR_OVERFLOW_CARRY_OFFSET);
     assert!(PROCESSOR_HEAP_CURSOR_OFFSET == PROCESSOR_LIVE_COUNT_OFFSET + 16);

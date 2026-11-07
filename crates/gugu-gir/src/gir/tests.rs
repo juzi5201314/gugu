@@ -662,7 +662,7 @@ fn gir_pass_order_is_fixed() {
             GirPass::CowAndResourceElision,
         ]
     );
-    assert_eq!(super::pass::GIR_PIPELINE_REVISION, 1);
+    assert_eq!(super::pass::GIR_PIPELINE_REVISION, 4);
 }
 
 #[test]

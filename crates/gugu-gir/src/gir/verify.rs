@@ -123,8 +123,7 @@ fn statements(body: &GirBody) -> Result<(), Diagnostic> {
             }
             StatementKind::ValueAction { place, .. }
             | StatementKind::ResourceAction { place, .. }
-            | StatementKind::SetDiscriminant { place, .. }
-            | StatementKind::Pin { place, .. } => place_in_body(body, *place)?,
+            | StatementKind::SetDiscriminant { place, .. } => place_in_body(body, *place)?,
             StatementKind::GcWrite {
                 owner,
                 destination,

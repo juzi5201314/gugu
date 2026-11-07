@@ -19,12 +19,13 @@ use super::platform::PlatformProfile;
 
 /// 本地堆契约段 schema。
 ///
-/// 版本 5 相对版本 4 的变化：新增独立 `LargeMappingRecord` 表、固定大映射页粒度与 arena-side
-/// range 记录，并把 page-cover/object-start/mark 的运行期消费者接入分配与屏障路径。
-pub const LOCAL_HEAP_SCHEMA: u32 = 5;
+/// 版本 6：大对象记录保存实际映射长度与标记周期，参与精确追踪和释放。
+pub const LOCAL_HEAP_SCHEMA: u32 = 6;
 
 /// allocation granule：object-start bitmap 每一位对应一个 granule。
 pub const HEAP_GRANULE_BYTES: u32 = 16;
+/// arena 侧元数据中 object-start 位图起点；与 Gugu heap 常量交叉校验。
+pub const HEAP_OBJECT_START_OFFSET: u64 = 24;
 /// 一个 arena 内的 Immix block 数。
 pub const HEAP_BLOCKS_PER_ARENA: u32 = 64;
 /// 一个 block 内的 line 数。
@@ -186,9 +187,11 @@ pub struct LargeMappingRecord {
     pub bytes: u64,
     pub generation: u32,
     pub state: u32,
+    pub mapped_bytes: u64,
+    pub mark_epoch: u64,
 }
 
-const _: () = assert!(std::mem::size_of::<LargeMappingRecord>() == 32);
+const _: () = assert!(std::mem::size_of::<LargeMappingRecord>() == 48);
 /// 一条运行时记录的完整布局；由 `heap.gg` 逐字段交叉校验。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -273,7 +276,7 @@ const HEAP_RECORD_SPECS: [HeapRecordSpec; 5] = [
     },
     HeapRecordSpec {
         name: "LargeMappingRecord",
-        bytes: 32,
+        bytes: 48,
         alignment: 8,
         fields: &[
             field("base", 0, 8),
@@ -281,6 +284,8 @@ const HEAP_RECORD_SPECS: [HeapRecordSpec; 5] = [
             field("bytes", 16, 8),
             field("generation", 24, 4),
             field("state", 28, 4),
+            field("mapped_bytes", 32, 8),
+            field("mark_epoch", 40, 8),
         ],
     },
 ];
@@ -342,9 +347,9 @@ pub struct LocalHeapDemand {
     pub resource_sites: u32,
     /// TurnRegion 提升站点数。
     pub promote_sites: u32,
-    /// `RuntimeCall::Pin` 站点数。
+    /// `std.runtime.pinning.pin_acquire` 的实际调用站点数。
     pub pin_sites: u32,
-    /// `RuntimeCall::Unpin` 站点数。
+    /// `std.runtime.pinning.pin_release` 的实际调用站点数。
     pub unpin_sites: u32,
     /// managed store 的屏障站点数。
     pub barrier_sites: u32,

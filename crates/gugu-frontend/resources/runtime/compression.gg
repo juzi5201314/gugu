@@ -1,0 +1,59 @@
+//! 单 managed owner 的 cage reservation；collector 与 mutator 共用 checked 编码和解码。
+use std.runtime.native_memory as mapping
+fn heap_word(at: uint) uint { unsafe { std.ptr.ptr_read[uint](std.mem.transmute[uint, *uint](at)) } }
+fn heap_store_word(at: uint, value: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](at), value) } }
+fn heap_word32(at: uint) uint { unsafe { uint(std.ptr.ptr_read[u32](std.mem.transmute[uint, *u32](at))) } }
+fn heap_store_word32(at: uint, value: uint) { unsafe { std.ptr.ptr_write[u32](std.mem.transmute[uint, *u32](at), u32(value)) } }
+fn heap_fail() { unsafe { std.runtime.process_exit(2) } }
+
+fn control() uint = unsafe { std.runtime.cage_control() }
+
+pub fn cage_boot() {
+    let state = control()
+    let bytes = heap_word(state + 56)
+    if bytes == 0 { return }
+    let base = mapping.reserve_aligned(bytes, 2097152)
+    if base == 0 || base >= uint(140737488355328) || bytes > uint(140737488355328) - base { heap_fail() }
+    heap_store_word32(state, 1)
+    heap_store_word(state + 8, base)
+    heap_store_word(state + 16, bytes)
+    heap_store_word(state + 24, uint(140737488355328) - base)
+    heap_store_word(state + 48, 0)
+}
+
+/// arena 与侧元数据共享同一 reservation；起点按 arena 粒度对齐，不重复计费。
+pub fn reserve_arena(bytes: uint, alignment: uint) uint {
+    let state = control()
+    let length = heap_word(state + 16)
+    if length == 0 { return mapping.reserve_aligned(bytes, alignment) }
+    let cursor = heap_word(state + 48)
+    let offset = (cursor + alignment - 1) / alignment * alignment
+    if offset > length || bytes > length - offset { return 0 }
+    heap_store_word(state + 48, offset + bytes)
+    heap_word(state + 8) + offset
+}
+
+pub fn contains(address: uint) bool {
+    let state = control()
+    let base = heap_word(state + 8)
+    address >= base && address - base < heap_word(state + 16)
+}
+
+pub fn encode(address: uint) uint {
+    if address == 0 { return 0 }
+    if !contains(address) { heap_fail() }
+    let state = control()
+    (heap_word32(state) << 32) | (address - heap_word(state + 8))
+}
+
+pub fn decode(value: uint) uint {
+    if value == 0 { return 0 }
+    let state = control()
+    let offset = value & uint(4294967295)
+    if value >> 56 != 0 || (value >> 32 & 16777215) != heap_word32(state) || heap_word32(state) == 0 || offset >= heap_word(state + 16) || offset >= heap_word(state + 24) {
+        heap_store_word(state + 40, heap_word(state + 40) + 1)
+        heap_fail()
+    }
+    heap_store_word(state + 32, heap_word(state + 32) + 1)
+    heap_word(state + 8) + offset
+}

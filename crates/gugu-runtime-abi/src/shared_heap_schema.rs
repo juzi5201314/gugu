@@ -19,7 +19,50 @@ use std::mem::{align_of, offset_of, size_of};
 use super::model::{FieldKind, MessageFieldSchema, MessageSchemaV1, RawModelError};
 
 /// SharedHeap 契约段 schema。
-pub const SHARED_HEAP_SCHEMA: u32 = 1;
+pub const SHARED_HEAP_SCHEMA: u32 = 2;
+pub const SHARED_HEAD_OFFSET: u32 = 184;
+pub const SHARED_NEXT_TABLE_OFFSET: u32 = 192;
+pub const SHARED_TRIM_LINK_OFFSET: u32 = 200;
+pub const SHARED_TABLE_BYTES: u32 = 8192;
+pub const SHARED_SLOT_COUNT: u32 = 64;
+pub const SHARED_SLOTS_OFFSET: u32 = 64;
+pub const SHARED_ADDRESSES_OFFSET: u32 = 4160;
+pub const SHARED_PAYLOADS_OFFSET: u32 = 4672;
+
+#[cfg(test)]
+#[test]
+fn shared_table_layout_matches_runtime_source() {
+    let source = include_str!("../../gugu-frontend/resources/runtime/shared.gg");
+    for (name, value) in [
+        ("SHARED_HEAD_OFFSET", SHARED_HEAD_OFFSET),
+        ("SHARED_NEXT_TABLE_OFFSET", SHARED_NEXT_TABLE_OFFSET),
+        ("SHARED_TRIM_LINK_OFFSET", SHARED_TRIM_LINK_OFFSET),
+        ("SHARED_TABLE_BYTES", SHARED_TABLE_BYTES),
+        ("SHARED_SLOT_COUNT", SHARED_SLOT_COUNT),
+        ("SHARED_SLOTS_OFFSET", SHARED_SLOTS_OFFSET),
+        ("SHARED_ADDRESSES_OFFSET", SHARED_ADDRESSES_OFFSET),
+        ("SHARED_PAYLOADS_OFFSET", SHARED_PAYLOADS_OFFSET),
+    ] {
+        assert!(
+            source
+                .lines()
+                .any(|line| line == format!("pub const {name}: uint = {value}")),
+            "{name}"
+        );
+    }
+    assert_eq!(
+        SHARED_ADDRESSES_OFFSET,
+        SHARED_SLOTS_OFFSET + SHARED_SLOT_COUNT * SHARED_HANDLE_SLOT_BYTES
+    );
+    assert_eq!(
+        SHARED_PAYLOADS_OFFSET,
+        SHARED_ADDRESSES_OFFSET + SHARED_SLOT_COUNT * 8
+    );
+    assert!(
+        SHARED_PAYLOADS_OFFSET + SHARED_SLOT_COUNT * SHARED_PAYLOAD_RECORD_BYTES
+            <= SHARED_TABLE_BYTES
+    );
+}
 
 /// 内建 SharedHeap profile 名。
 pub const SHARED_HEAP_PROFILE_NAME: &str = "mosaic-shared-handle";

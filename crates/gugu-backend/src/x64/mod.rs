@@ -11,6 +11,7 @@ pub mod copies;
 pub mod elf;
 pub mod encode;
 pub mod fragments;
+mod fs_native;
 pub mod glue;
 pub mod inst;
 pub mod installed;

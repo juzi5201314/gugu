@@ -24,7 +24,7 @@
 
 ## 存储与寿命
 
-语义值可以由实现放入寄存器、栈、区域或受管堆。存储等级、逃逸分析、提升时点和闭包环境布局不可由程序观察；只有本章明确提供的 arena、pin、raw pointer 和 FFI 边界对存储寿命提出额外前置条件。
+语义值可以由实现放入寄存器、栈、区域或受管堆。存储等级、逃逸分析、提升时点和闭包环境布局不可由程序观察；内部区域停止分配或被替换，不得使仍由安全引用或活动 pin 可达的对象及其字段失效。只有本章明确提供的 arena、pin、raw pointer 和 FFI 边界对存储寿命提出额外前置条件。
 
 ## GC 语义
 
@@ -35,7 +35,7 @@
 用户安全代码不调用 `free`，也不能观察收集器内部阶段、空间分区、根编码、屏障或回收线程。内存申请无法满足时按[运行时](runtime.md#fatal-resource-exhaustion)进入 `OutOfMemory` fatal；GC 不运行任意用户 finalizer。
 LocalHeap 的运行时布局版本在引入独立大映射记录后递增；镜像与编译器必须拒绝不匹配的 `local_heap_schema`，不能把旧版 side metadata 当作新版解释。
 
-实现可以把超过普通分配单元容量或需要更高对齐的受管对象放入独立的 non-moving range；这不改变对象的可达性、初始化、`pin` 或 OOM 语义。该 range 不是用户可观察的地址稳定承诺：只有规范明确的 `pin`/FFI 生命周期才允许依赖地址有效性，普通安全引用仍由收集器按其内部表示维护。
+实现可以把超过普通分配单元容量或需要更高对齐的受管对象放入独立的 non-moving range；这不改变对象的可达性、初始化、`pin` 或 OOM 语义。该 range 不是用户可观察的地址稳定承诺：只有规范明确的 `pin`/FFI 生命周期才允许依赖地址有效性，普通安全引用仍由收集器按其内部表示维护。独立映射中的受管字段同样参与追踪，写入后的年轻引用必须在下一次收集期间保持有效；指向 payload 内部的引用保留整个 allocation。最后一个根或 pin 租约消失后，大对象可以被回收，其提交字节必须从堆和共同映射账本一并扣除。
 
 本章不规定收集器算法、heap 参数、root 编码或写屏障实现。官方 compiler/runtime 的当前契约见 [GC 元数据](../internals/gc-metadata.md)与[栈图](../internals/stack-maps.md)；替代实现可以不同，但必须满足本节全部可观察约束。
 
@@ -48,7 +48,7 @@ descriptor 或重复 return ticket 都进入 `RuntimeInvariant`/`OutOfMemory` �
 
 runtime 可以在不改变语言语义的前提下，为地址稳定的 control、stack、resource 和 GC range descriptor 使用 owner-directed return message。该机制不产生用户级 `free`，不使受管地址稳定，不承诺 processor affinity 或回收时刻，也不能让安全代码观察 raw slab、route key 或 batch 延迟。
 
-跨 owner 发布过的受管对象以稳定句柄暴露：句柄由 `table/slot/generation` 组成，table 是逻辑表身份而不是宿主地址，每次 slot 复用都会推进 generation，因此携带旧 generation 的句柄必须被拒绝，而不允许按 slot 猜测对象。句柄必须经 access guard 解析后才可访问，guard 期间该句柄捕获的 payload 保持有效；`pin` 把访问提升为不移动租约。发布之后不得把任何 direct pointer 当作长期身份继续使用——它既不是句柄，也不能跨 owner 传递。
+跨 owner 发布过的受管对象以稳定句柄暴露：句柄由 `table/slot/generation` 组成，table 是逻辑表身份而不是宿主地址，每次 slot 复用都会推进 generation，因此携带旧 generation 的句柄必须被拒绝，而不允许按 slot 猜测对象。句柄必须经 access guard 解析后才可访问，稳定身份本身不能用于地址算术；guard 期间该句柄捕获的 payload 保持有效；`pin` 把访问提升为不移动租约。活动 guard 或 pin 不得被 GC 回收越过，租约结束后保留的过期身份不能访问复用后的对象。发布之后不得把任何 direct pointer 当作长期身份继续使用——它既不是句柄，也不能跨 owner 传递。
 
 ## Adaptive Resource Leasing {#adaptive-resource-leasing}
 
@@ -104,6 +104,8 @@ fn pin[T, R, F: Fn() R](p: &T, f: F) R
 ```
 
 `f` 执行期间 `*p` 不会被移动；pin 可以嵌套，固定计数在最外层调用返回或 panic 展开清理完毕后解除。`f` 只能通过传入的槽或闭包捕获访问 `p`；把 `p` 交给外部函数必须在 pin 期间完成，或先拷贝到非移动缓冲。`pin` 不改变引用的类型，也不使 `reset` / `destroy` 后的区域引用重新有效。
+
+`pin` 可以在调用 `f` 之前执行一次收集或提升；这期间调用方的安全引用必须由精确根保持并更新，不能提前缓存裸地址。`f` 开始后，活动租约保持该 allocation 可达且地址不变；正常返回和 panic 展开都必须结清本次取得的租约；内部采用普通函数调用或其它降级形式不得改变这一语义。pin 不递归固定字段引用的对象，但这些字段继续遵守普通 GC 可达性与写屏障规则。
 
 区域分配与 pin 的用法：
 

@@ -12,7 +12,7 @@ use super::platform::PlatformProfile;
 use super::provider::{FaultClass, ProviderError, RangeCost, RangeState};
 
 /// 平台范围契约段的 schema 版本。
-pub const PLATFORM_SCHEMA: u32 = 1;
+pub const PLATFORM_SCHEMA: u32 = 2;
 
 /// 平台 range 的固定操作。
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]

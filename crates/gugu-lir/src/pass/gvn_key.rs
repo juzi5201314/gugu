@@ -50,6 +50,7 @@ mod tests {
                 captures_arguments: false,
                 by_value: Vec::new(),
                 sret: None,
+                foreign_arguments: Vec::new(),
                 poll_free_leaf: false,
             })
         };

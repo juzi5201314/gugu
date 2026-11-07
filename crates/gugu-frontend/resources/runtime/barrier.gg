@@ -4,9 +4,13 @@
  */
 
 use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_bytes, gc_config_card_entries, gc_config_edge_entries, gc_config_granule_bytes, gc_config_object_header_bytes, gc_config_stamp_entries}
-use std.runtime.heap.{heap_arena_of, heap_fail, heap_mark_active, heap_mark_epoch, heap_metadata, heap_owner_payload, heap_shade_target, heap_stack_grey, heap_store_byte, heap_store_word, heap_store_word32, heap_word, heap_word32, header_generation, ARENA_CARDS_OFFSET, ARENA_GENERATION_OFFSET, EDGE_RECORDS_OFFSET, EDGE_RECORD_BYTES, GENERATION_AGING, GENERATION_OLD, PROCESSOR_BARRIER_SCRATCH_OFFSET, PROCESSOR_EDGE_SCRATCH_OFFSET}
+use std.runtime.native_memory as mapping
+use std.runtime.counters as counters
+use std.runtime.compression as compression
+use std.runtime.heap.{heap_large_lookup, heap_region_lookup, PROCESSOR_ARENA_OFFSET}
+use std.runtime.heap.{heap_arena_of, heap_fail, heap_mark_active, heap_mark_epoch, heap_metadata, heap_owner_payload, heap_shade_target, heap_stack_grey, heap_store_byte, heap_store_word, heap_store_word32, heap_word, heap_word32, header_generation, ARENA_CARDS_OFFSET, ARENA_GENERATION_OFFSET, EDGE_RECORDS_OFFSET, EDGE_RECORD_BYTES, GENERATION_AGING, PROCESSOR_BARRIER_SCRATCH_OFFSET, PROCESSOR_EDGE_SCRATCH_OFFSET}
 
-/// 屏障状态页保留范围的描述；与 `std.platform.commit` 的入参一致。
+/// 屏障状态页保留范围的描述；与 `mapping.commit` 的入参一致。
 #[repr(C)]
 struct BarrierExtent { base: uint, bytes: uint }
 
@@ -75,10 +79,10 @@ pub const BARRIER_STAMP_EMPTY: uint = 0
 /// 建立 barrier 状态页：card buffer、stamp 表与 edge staging 都在独立 raw 页上，不进 processor 页。
 pub fn barrier_init(processor: uint) {
     unsafe {
-        let base = std.platform.reserve_aligned(BARRIER_SCRATCH_BYTES, uint(4096))
+        let base = mapping.reserve_aligned(BARRIER_SCRATCH_BYTES, uint(4096))
         if base == 0 { heap_fail() }
         let extent = BarrierExtent { base, bytes: BARRIER_SCRATCH_BYTES }
-        if std.platform.commit(std.mem.transmute[*BarrierExtent, uint](std.ptr.addr_of(extent))) != 0 {
+        if mapping.commit(std.mem.transmute[*BarrierExtent, uint](std.ptr.addr_of(extent))) != 0 {
             heap_fail()
         }
         let at = base
@@ -179,6 +183,15 @@ fn barrier_edge_append(processor: uint, source_block: uint, target_block: uint, 
     heap_store_word(record + 16, kind)
     heap_store_word(record + 24, count)
     heap_store_word(scratch, count + 1)
+    if count == 0 { counters.add(counters.EDGE_BATCHES, 1) }
+}
+
+/// 单 owner stop-the-world major 已完整重扫对象图，已覆盖本轮全部差量和 overflow。
+pub fn gc_edge_complete(processor: uint) {
+    let scratch = heap_word(processor + PROCESSOR_EDGE_SCRATCH_OFFSET)
+    if scratch == 0 { return }
+    heap_store_word(scratch, 0)
+    heap_store_word(scratch + 8, 0)
 }
 
 /// 六步 hybrid barrier：read-old（实参）→ shade-old → shade-new → store（配对指令）→ card → edge。
@@ -200,6 +213,15 @@ fn barrier_write(pointer: uint, old: uint, value: uint) {
     let arena = heap_arena_of(pointer, arena_bytes)
     let epoch = heap_mark_epoch(processor)
     let marking = heap_mark_active(processor) != 0
+    // 大对象范围来自登记表；其字段由 minor 的非移动对象扫描覆盖。
+    let large = heap_large_lookup(heap_word(processor + PROCESSOR_ARENA_OFFSET), pointer, config)
+    let region = heap_region_lookup(processor, pointer)
+    let owner = if large != 0 { heap_word(large + 8) } else {
+        if region.0 != 0 { region.1 } else { heap_owner_payload(pointer, arena, arena_bytes, granule_bytes, header_bytes) }
+    }
+    let compressed = owner != 0 && (heap_word(owner - header_bytes) >> 43 & 3) == 3
+    let old = if compressed { compression.decode(old) } else { old }
+    let value = if compressed { compression.decode(value) } else { value }
     if marking {
         if old != 0 { heap_shade_target(old, arena_bytes, granule_bytes, header_bytes) } else { let _ = 0 }
         if value != 0 && heap_stack_grey(processor, epoch) != 0 {
@@ -210,13 +232,11 @@ fn barrier_write(pointer: uint, old: uint, value: uint) {
     } else {
         let _ = 0
     }
-    // barrier 的入参是受管对象的字段地址，它所属的 arena 由该地址本身确定。
-    let owner = heap_owner_payload(pointer, heap_arena_of(pointer, arena_bytes), arena_bytes, granule_bytes, header_bytes)
     if marking && owner == 0 { heap_fail() }
-    if owner != 0 && value != 0 {
+    if owner != 0 && value != 0 && large == 0 && region.0 == 0 {
         let owner_generation = header_generation(heap_word(owner - header_bytes))
         let new_generation = header_generation(heap_word(value - header_bytes))
-        if owner_generation >= GENERATION_OLD && new_generation <= GENERATION_AGING {
+        if owner_generation >= GENERATION_AGING && new_generation <= GENERATION_AGING {
             let card = (pointer - arena) / card_bytes
             barrier_card_append(processor, arena, heap_word32(heap_metadata(arena, arena_bytes) + ARENA_GENERATION_OFFSET), card, epoch)
         } else {

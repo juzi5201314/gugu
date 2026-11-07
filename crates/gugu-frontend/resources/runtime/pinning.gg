@@ -1,0 +1,145 @@
+//! pin 在回调前把 nursery 引用提升至非移动 old arena；登记页只由 managed owner 修改。
+use std.runtime.native_memory as mapping
+use std.runtime.shared as shared
+use std.runtime.compression as compression
+use std.runtime.counters as counters
+use std.runtime.collect.{gc_coordinator, gc_large_record, COORDINATOR_OLD_OFFSET, COORDINATOR_PIN_PAGES_OFFSET}
+use std.runtime.gc.{gc_config_arena_bytes, gc_config_granule_bytes, gc_config_object_header_bytes, GC_REQUEST_ALLOC, PROCESSOR_GC_REQUEST_OFFSET}
+use std.runtime.heap.{heap_word, heap_store_word, heap_store_word32, heap_resolve_object, heap_fail, CONTROL_PINNED}
+
+use std.runtime.heap.{heap_region_lookup, REGION_PIN_COUNT_OFFSET}
+use std.runtime.pin_layout.{PIN_PAGE_BYTES, PIN_RECORDS_OFFSET, PIN_RECORD_BYTES, PIN_RECORD_CAPACITY}
+
+#[repr(C)]
+struct PinExtent { base: uint, bytes: uint }
+
+/// 调用者保留安全引用；准备阶段不接收或缓存裸地址。
+pub fn pin_prepare() { unsafe {
+    let owner = heap_word(std.runtime.current_slot() + 16)
+    heap_store_word32(owner + PROCESSOR_GC_REQUEST_OFFSET, GC_REQUEST_ALLOC)
+    if std.runtime.gc_enter(owner + PROCESSOR_GC_REQUEST_OFFSET) != 0 { heap_fail() };
+} }
+
+fn pin_payload(coordinator: uint, address: uint) uint { unsafe {
+    let region = heap_region_lookup(heap_word(std.runtime.current_slot() + 16), address)
+    if region.0 != 0 { return region.1 }
+    let large = gc_large_record(coordinator, address)
+    if large != 0 { return heap_word(large + 8) }
+    let arena = heap_word(coordinator + COORDINATOR_OLD_OFFSET)
+    if arena == 0 { return 0 }
+    let config = std.runtime.gc_config()
+    heap_resolve_object(address, arena, gc_config_arena_bytes(config), gc_config_granule_bytes(config), gc_config_object_header_bytes(config)).2
+} }
+
+fn pin_new_page(coordinator: uint) uint { unsafe {
+    let page = mapping.reserve_aligned(PIN_PAGE_BYTES, PIN_PAGE_BYTES)
+    if page == 0 { heap_fail() }
+    let extent = PinExtent { base: page, bytes: PIN_PAGE_BYTES }
+    if mapping.commit(std.mem.transmute[*PinExtent, uint](std.ptr.addr_of(extent))) != 0 {
+        mapping.release_mapping(page, PIN_PAGE_BYTES, 0)
+        heap_fail()
+    }
+    let at = page
+    while at < page + PIN_PAGE_BYTES {
+        heap_store_word(at, 0)
+        at = at + 8
+    }
+    let next = heap_word(coordinator + COORDINATOR_PIN_PAGES_OFFSET)
+    heap_store_word(page, next)
+    if next != 0 { heap_store_word(next + 8, page) }
+    heap_store_word(coordinator + COORDINATOR_PIN_PAGES_OFFSET, page)
+    page
+} }
+
+pub fn pin_acquire(address: uint) uint { unsafe {
+    let coordinator = gc_coordinator(heap_word(std.runtime.current_slot() + 16))
+    let payload = pin_payload(coordinator, address)
+    // 静态与栈已有非移动存储；调用方仍保留原安全引用。
+    if payload == 0 { return 0 }
+    let page = heap_word(coordinator + COORDINATOR_PIN_PAGES_OFFSET)
+    let available: uint = 0
+    while page != 0 {
+        let index: uint = 0
+        while index < PIN_RECORD_CAPACITY {
+            let record = page + PIN_RECORDS_OFFSET + index * PIN_RECORD_BYTES
+            let count = heap_word(record + 8)
+            if count != 0 && heap_word(record) == payload {
+                if count == ~uint(0) { heap_fail() }
+                heap_store_word(record + 8, count + 1)
+                if compression.contains(payload) { counters.add(counters.FOREIGN_PINS, 1) }
+                return record
+            }
+            if count == 0 && available == 0 { available = record }
+            index = index + 1
+        }
+        page = heap_word(page)
+    }
+    if available == 0 { available = pin_new_page(coordinator) + PIN_RECORDS_OFFSET }
+    let page = available / PIN_PAGE_BYTES * PIN_PAGE_BYTES
+    heap_store_word(available, payload)
+    heap_store_word(available + 8, 1)
+    heap_store_word(page + 16, heap_word(page + 16) + 1)
+    heap_store_word(payload - 16, heap_word(payload - 16) | CONTROL_PINNED)
+    let region = heap_region_lookup(heap_word(std.runtime.current_slot() + 16), payload)
+    if region.0 != 0 { heap_store_word(region.0 + REGION_PIN_COUNT_OFFSET, heap_word(region.0 + REGION_PIN_COUNT_OFFSET) + 1) }
+    shared.shared_pin(payload, true)
+    if compression.contains(payload) { counters.add(counters.FOREIGN_PINS, 1) }
+    available
+} }
+
+/// raw 请求包留存 cage 地址前，必须由现有 pin 记录保活；不猜测外部地址的位布局。
+pub fn foreign_save(address: uint) bool { unsafe {
+    if !compression.contains(address) { return true }
+    let coordinator = gc_coordinator(heap_word(std.runtime.current_slot() + 16))
+    let payload = pin_payload(coordinator, address)
+    let page = heap_word(coordinator + COORDINATOR_PIN_PAGES_OFFSET)
+    while page != 0 {
+        let index: uint = 0
+        while index < PIN_RECORD_CAPACITY {
+            let record = page + PIN_RECORDS_OFFSET + index * PIN_RECORD_BYTES
+            if payload != 0 && heap_word(record) == payload && heap_word(record + 8) != 0 {
+                counters.add(counters.FOREIGN_SAVES, 1)
+                return true
+            }
+            index = index + 1
+        }
+        page = heap_word(page)
+    }
+    counters.add(counters.FOREIGN_REJECTIONS, 1)
+    false
+} }
+
+pub fn pin_release(lease: uint, address: uint) { unsafe {
+    if lease == 0 { return }
+    let coordinator = gc_coordinator(heap_word(std.runtime.current_slot() + 16))
+    let page = lease / PIN_PAGE_BYTES * PIN_PAGE_BYTES
+    let registered = heap_word(coordinator + COORDINATOR_PIN_PAGES_OFFSET)
+    while registered != 0 && registered != page { registered = heap_word(registered) }
+    if registered == 0 || lease - page < PIN_RECORDS_OFFSET || (lease - page - PIN_RECORDS_OFFSET) % PIN_RECORD_BYTES != 0 { heap_fail() }
+    let payload = heap_word(lease)
+    let count = heap_word(lease + 8)
+    if count == 0 || payload != pin_payload(coordinator, address) { heap_fail() }
+    if count != 1 { heap_store_word(lease + 8, count - 1)
+        return }
+    // 固定记录仍是强根时清对象标志；撤销根之后不再访问对象。
+    let region = heap_region_lookup(heap_word(std.runtime.current_slot() + 16), payload)
+    if region.0 != 0 {
+        let pins = heap_word(region.0 + REGION_PIN_COUNT_OFFSET)
+        if pins == 0 { heap_fail() }
+        heap_store_word(region.0 + REGION_PIN_COUNT_OFFSET, pins - 1)
+    }
+    shared.shared_pin(payload, false)
+    heap_store_word(payload - 16, heap_word(payload - 16) & ~CONTROL_PINNED)
+    heap_store_word(lease, 0)
+    heap_store_word(lease + 8, 0)
+    let live = heap_word(page + 16)
+    if live == 0 { heap_fail() }
+    heap_store_word(page + 16, live - 1)
+    if live != 1 { return }
+    let next = heap_word(page)
+    let previous = heap_word(page + 8)
+    if previous == 0 { heap_store_word(coordinator + COORDINATOR_PIN_PAGES_OFFSET, next) }
+    else { heap_store_word(previous, next) }
+    if next != 0 { heap_store_word(next + 8, previous) }
+    mapping.release_mapping(page, PIN_PAGE_BYTES, PIN_PAGE_BYTES)
+} }

@@ -4,8 +4,10 @@
 #![forbid(unsafe_code)]
 pub mod body;
 mod build;
+mod callback_adapter;
 mod dump;
 mod effects;
+pub mod exports;
 pub mod function_adapter;
 pub mod installed;
 pub use pass::graph::Graph;
@@ -34,8 +36,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。8：body 携带 poll 不动点接口。
-pub const SCHEMA: u32 = 8;
+/// LIR query 与 world 的 schema。17：回调线程登记与借用请求参数区。
+pub const SCHEMA: u32 = 17;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
@@ -43,6 +45,7 @@ struct World {
     target: String,
     input_fingerprint: [u8; 32],
     bodies: Vec<body::Body>,
+    exports: Vec<exports::Export>,
     /// 与 `bodies` 同序：该 body 是否由内建函数表安装。安装来源不是 body 内容，不进指纹。
     installed: Vec<bool>,
     fingerprint: [u8; 32],
@@ -56,6 +59,9 @@ pub struct Validated {
 impl Validated {
     pub fn fingerprint(&self) -> [u8; 32] {
         self.world.fingerprint
+    }
+    pub fn exports(&self) -> &[exports::Export] {
+        &self.world.exports
     }
     pub fn body_count(&self) -> usize {
         self.world.bodies.len()
@@ -250,6 +256,13 @@ impl Validated {
                 if let body::Op::Call(call) | body::Op::ForeignCall(call) = &instruction.op {
                     bump(&mut demand, call);
                 }
+                if matches!(
+                    instruction.op,
+                    body::Op::RuntimeMachineCall(crate::runtime::RuntimeMachineOp::FsStart)
+                ) {
+                    demand.ordinary += 1;
+                    demand.blocking_io += 1;
+                }
             }
             for block in &world_body.blocks {
                 if let body::Terminator::Invoke { call, .. }
@@ -395,6 +408,7 @@ impl Validated {
     /// 因此调用方必须传入同一份计数，跨段相等性由 runtime raw 契约复验。
     pub fn local_heap_demand(
         &self,
+        module: &hir::Module,
         managed_types: u32,
         large_types: u32,
         max_object_bytes: u64,
@@ -406,14 +420,34 @@ impl Validated {
             max_object_bytes,
             ..crate::runtime::LocalHeapDemand::default()
         };
+        let pin_targets = ["pin_acquire", "pin_release"].map(|name| {
+            module
+                .definitions
+                .iter()
+                .find(|definition| {
+                    definition.name == name
+                        && definition.kind == hir::DefinitionKind::Function
+                        && definition.location.as_ref().is_some_and(|location| {
+                            module.sources[location.source as usize].path
+                                == "std/runtime/pinning.gg"
+                        })
+                })
+                .and_then(|definition| {
+                    self.bodies()
+                        .iter()
+                        .find(|body| body.owner == definition.key)
+                })
+                .map(|body| body.instance)
+        });
         let visit = |demand: &mut crate::runtime::LocalHeapDemand, call: &body::Call| {
-            let body::CallTarget::Runtime(target) = call.target else {
+            let body::CallTarget::Instance(target) = call.target else {
                 return;
             };
-            match target {
-                body::RuntimeCall::Pin => demand.pin_sites += 1,
-                body::RuntimeCall::Unpin => demand.unpin_sites += 1,
-                _ => {}
+            if pin_targets[0] == Some(target) {
+                demand.pin_sites += 1;
+            }
+            if pin_targets[1] == Some(target) {
+                demand.unpin_sites += 1;
             }
         };
         for world_body in &self.world.bodies {
@@ -450,9 +484,9 @@ impl Validated {
     /// SharedHeap 需求：从优化后 LIR 的 handle 指令与 placement 推导。
     ///
     /// 分配站点与解析站点分别计数，再由 `SharedHeapDemand::verify` 强制相等：任何一个
-    /// SharedHeap allocation 缺少对应解析都会在契约构建阶段变成 `E0058`。pin 站点只看
-    /// `RuntimeCall::Pin`/`Unpin` 的第一参数 provenance 是否为 SharedHandle，因此 LocalHeap
-    /// 的 pin 不会进入共享段。payload 复制站点与 forward 站点同源，共享字段屏障站点按
+    /// SharedHeap allocation 缺少对应解析都会在契约构建阶段变成 `E0058`。源码 pin 的
+    /// acquire/release 调用统一进入 LocalHeap 需求；未产生 handle pin 指令时共享 pin 计数为零。
+    /// payload 复制站点与 forward 站点同源，共享字段屏障站点按
     /// `SharedFieldBarrier`/`SharedFieldBarrierReserved` 计数，mark 站点取同一集合（每次共享
     /// 字段写入都可能产生跨 owner 标记）。最大 payload 字节数由调用方传入的冻结类型表上界
     /// 给出，没有共享分配时保持 0。
@@ -460,18 +494,6 @@ impl Validated {
         use crate::gir::placement::PlacementKind;
         let mut demand = crate::runtime::SharedHeapDemand::default();
         for world_body in &self.world.bodies {
-            let shared_pin = |call: &body::Call, arguments: &std::ops::Range<u32>| {
-                if !matches!(
-                    call.target,
-                    body::CallTarget::Runtime(body::RuntimeCall::Pin | body::RuntimeCall::Unpin)
-                ) {
-                    return false;
-                }
-                world_body.args(arguments).first().is_some_and(|value| {
-                    world_body.values[value.index()].kind.provenance
-                        == Some(body::Provenance::SharedHandle)
-                })
-            };
             for instruction in &world_body.instructions {
                 match &instruction.op {
                     body::Op::GcAlloc { placement, .. } => {
@@ -485,24 +507,6 @@ impl Validated {
                     body::Op::ForwardSharedHandle => demand.forward_sites += 1,
                     body::Op::SharedFieldBarrier { .. }
                     | body::Op::SharedFieldBarrierReserved { .. } => demand.barrier_sites += 1,
-                    body::Op::Call(call) | body::Op::ForeignCall(call)
-                        if shared_pin(call, &instruction.arguments) =>
-                    {
-                        demand.pin_sites += 1;
-                    }
-                    _ => {}
-                }
-            }
-            for block in &world_body.blocks {
-                match &block.terminator {
-                    body::Terminator::Invoke {
-                        call, arguments, ..
-                    }
-                    | body::Terminator::TailCall {
-                        call, arguments, ..
-                    } if shared_pin(call, arguments) => {
-                        demand.pin_sites += 1;
-                    }
                     _ => {}
                 }
             }
@@ -765,6 +769,8 @@ pub fn build(
         };
         bodies.push(body);
     }
+    let exports = exports::materialize(&mut bodies, hir.module(), &gir.concrete)
+        .map_err(|error| vec![error])?;
     function_adapter::materialize(&mut bodies, hir.module()).map_err(|error| vec![error])?;
     installed_instances.sort_unstable();
     let installed: Vec<bool> = bodies
@@ -780,6 +786,7 @@ pub fn build(
         target,
         input_fingerprint: fingerprint,
         bodies,
+        exports,
         installed,
         fingerprint: [0; 32],
     };
@@ -795,6 +802,7 @@ fn world_fingerprint(world: &World) -> [u8; 32] {
     hash.update(&world.schema.to_le_bytes());
     hash.update(world.target.as_bytes());
     hash.update(&world.input_fingerprint);
+    hash.update(&canonical::to_vec(&world.exports).expect("C 导出清单编码"));
     for body in &world.bodies {
         hash.update(&body.fingerprint());
     }

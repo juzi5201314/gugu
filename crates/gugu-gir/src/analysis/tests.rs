@@ -165,7 +165,7 @@ fn scalar_leaf_fast_path_matches_generic_and_rejects_effects() {
                 ..AnalysisPolicyV1::default()
             };
             assert_eq!(
-                interpret::analyze_owner(module, owner, body, index, policy, &callees),
+                interpret::analyze_owner(module, owner, body, index, policy, &callees, &passing),
                 interpret::analyze_generic(module, owner, body, index, policy, &callees, &passing)
             );
         } else {
@@ -177,7 +177,8 @@ fn scalar_leaf_fast_path_matches_generic_and_rejects_effects() {
                     body,
                     index,
                     AnalysisPolicyV1::default(),
-                    &callees
+                    &callees,
+                    &passing,
                 ),
                 generic
             );
@@ -475,9 +476,16 @@ fn block_iteration_budget_exhaustion_keeps_checks_unknown() {
         ..AnalysisPolicyV1::default()
     };
     let component: Vec<_> = (0..keys.len()).collect();
-    let scc = super::solver::analyze_scc(module, &output.gir, &keys, &component, policy, &|_| {
-        super::FunctionSummary::default()
-    });
+    let passing = crate::gir::passing::PassingTable::new(module);
+    let scc = super::solver::analyze_scc(
+        module,
+        &output.gir,
+        &keys,
+        &component,
+        policy,
+        &|_| super::FunctionSummary::default(),
+        &passing,
+    );
     assert!(scc.budget_exhausted, "循环在 1 次块迭代下必须耗尽预算");
     assert!(
         scc.proofs

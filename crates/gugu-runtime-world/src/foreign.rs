@@ -10,10 +10,13 @@ use super::coroutine::{
 };
 use super::foreign_schema::{
     BLOCKING_QUEUE_CAP_BYTES, BLOCKING_SERVICE_BUDGET, BLOCKING_WAITER_BYTES, MAX_BLOCKING_WORKERS,
-    RETAKE_GRACE_US,
+    PRESSURE_BLOCKING_WORKERS, RETAKE_GRACE_US,
 };
 use super::scheduler_schema::dirty_target;
 use super::slab::RawInvariant;
+
+#[cfg(test)]
+mod pressure_tests;
 
 /// 交给 native 之前必须 pin 的受管根。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -113,6 +116,7 @@ pub struct ForeignWorld {
     table: CoroutineTable,
     next_credit: u64,
     active_blocking: u32,
+    blocking_target: u32,
     waiting: VecDeque<CoroutineHandle>,
     dirty_active: u64,
     dirty_limit: u64,
@@ -140,6 +144,7 @@ impl ForeignWorld {
             table: CoroutineTable::default(),
             next_credit: 0,
             active_blocking: 0,
+            blocking_target: MAX_BLOCKING_WORKERS,
             waiting: VecDeque::new(),
             dirty_active: 0,
             dirty_limit: target,
@@ -197,6 +202,16 @@ impl ForeignWorld {
 
     pub const fn wake_managed(&self) -> bool {
         self.wake_managed
+    }
+
+    /// owner 发布内存压力快照；只限制新准入，不撤销在途 credit。
+    pub fn set_memory_pressure(&mut self, pressured: bool) -> Result<(), RawInvariant> {
+        self.blocking_target = if pressured {
+            PRESSURE_BLOCKING_WORKERS
+        } else {
+            MAX_BLOCKING_WORKERS
+        };
+        self.service(BLOCKING_SERVICE_BUDGET)
     }
 
     pub fn set_parallelism(&mut self, parallelism: u64) -> Result<(), RawInvariant> {
@@ -413,7 +428,7 @@ impl ForeignWorld {
         frame_offset: u64,
         frame_size: u64,
     ) -> Result<AdmitOutcome, RawInvariant> {
-        if stub == 0 || self.active_blocking >= MAX_BLOCKING_WORKERS {
+        if stub == 0 || self.active_blocking >= self.blocking_target {
             return self.enqueue_waiter(handle, stub, frame_offset, frame_size);
         }
         self.enter_ordinary(handle, false, stub, frame_offset, frame_size)?;
@@ -653,7 +668,7 @@ impl ForeignWorld {
     fn service(&mut self, budget: u32) -> Result<(), RawInvariant> {
         let budget = budget.min(BLOCKING_SERVICE_BUDGET);
         let mut granted = 0;
-        while granted < budget && self.active_blocking < MAX_BLOCKING_WORKERS {
+        while granted < budget && self.active_blocking < self.blocking_target {
             let Some(handle) = self.waiting.pop_front() else {
                 break;
             };

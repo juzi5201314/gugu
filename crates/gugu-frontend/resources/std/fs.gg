@@ -1,0 +1,349 @@
+use std.io.{Error, Read, Write, Seek, SeekFrom, ByteBuffer, CancelToken}
+use std.io as io
+use std.text.{Bytes, alloc_bytes}
+use std.path.{Path, OsString, native_bytes, from_native_bytes}
+use std.runtime.fs_platform.{raw_allocate, raw_free, FsResult}
+#[cfg(os = "linux")]
+use std.runtime.fs_platform.{call, call_cancel}
+#[cfg(os = "windows")]
+use std.runtime.fs_windows.{call, call_cancel}
+use std.runtime.resource.{ResourceCell, create, begin, end, close, begin_directory, end_directory, directory_exhausted, exhaust_directory}
+
+pub struct OpenOptions {
+    pub read: bool,
+    pub write: bool,
+    pub append: bool,
+    pub truncate: bool,
+    pub create: bool,
+    pub create_new: bool,
+    pub follow_symlinks: bool,
+}
+impl OpenOptions {
+    pub fn new() OpenOptions = OpenOptions {
+        read: false, write: false, append: false, truncate: false,
+        create: false, create_new: false, follow_symlinks: true,
+    }
+}
+fn flags(options: OpenOptions) Result[uint, Error] {
+    if !options.read && !options.write && !options.append { return Err(Error::InvalidInput) }
+    if (options.truncate || options.create || options.create_new) && !options.write && !options.append { return Err(Error::InvalidInput) }
+    if options.truncate && options.append { return Err(Error::InvalidInput) }
+    let bits: uint = 0
+    if options.read { bits = bits | uint(1) }
+    if options.write { bits = bits | uint(2) }
+    if options.append { bits = bits | uint(4) }
+    if options.truncate && !options.create_new { bits = bits | uint(8) }
+    if options.create { bits = bits | uint(16) }
+    if options.create_new { bits = bits | uint(32) }
+    if options.follow_symlinks { bits = bits | uint(64) }
+    Ok(bits)
+}
+
+pub struct Permissions { pub readonly: bool, pub native: uint }
+pub struct Metadata {
+    pub size: uint,
+    pub permissions: Permissions,
+    pub kind: uint,
+    pub modified_seconds: int,
+    pub modified_nanoseconds: uint,
+    pub device: uint,
+    pub inode: uint,
+}
+impl Metadata {
+    pub fn len(self: &Self) uint = self.size
+    pub fn is_file(self: &Self) bool = self.kind == 1
+    pub fn is_dir(self: &Self) bool = self.kind == 2
+    pub fn is_symlink(self: &Self) bool = self.kind == 3
+}
+pub struct File { cell: ResourceCell }
+pub struct ReadDir { cell: ResourceCell, root: Path }
+pub struct DirEntry { entry_path: Path, name: OsString, kind: uint }
+impl DirEntry {
+    pub fn path(self: &Self) Path = self.entry_path
+    pub fn file_name(self: &Self) OsString = self.name
+    pub fn metadata(self: &Self) Result[Metadata, Error] = metadata(self.entry_path, false)
+}
+
+fn word(address: uint) uint { unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) } }
+fn raw_bytes(bytes: Bytes) uint {
+    let address = raw_allocate(uint(bytes.len()) + 1)
+    let source = unsafe { bytes.as_slice() }
+    for index in 0..source.len() { unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](address + uint(index)), source[index]) } }
+    address
+}
+fn load_bytes(address: uint, count: int) Bytes {
+    let data = unsafe { alloc_bytes(count) }
+    for index in 0..count { data[index] = unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](address + uint(index))) } }
+    unsafe { Bytes::from_owned(data) }
+}
+fn checked(result: FsResult) Result[uint, Error] {
+    if result.error == 0 { Ok(result.value) } else { Err(io.from_native_error(result.error)) }
+}
+fn metadata_value(address: uint) Metadata = Metadata {
+    size: word(address), permissions: Permissions { readonly: word(address + 40) != 0, native: word(address + 8) },
+    kind: word(address + 16), modified_seconds: int(word(address + 24)),
+    modified_nanoseconds: word(address + 32), device: word(address + 48), inode: word(address + 56),
+}
+fn path_call(op: uint, path: Path, argument: uint, output: uint) Result[uint, Error] {
+    let bytes = native_bytes(path)?
+    let raw = raw_bytes(bytes)
+    defer { raw_free(raw, uint(bytes.len()) + 1) }
+    checked(call(op, raw, argument, output, 0, 0, 0))
+}
+fn pair_call(op: uint, from: Path, to: Path) Result[(), Error] {
+    let first = native_bytes(from)?
+    let second = native_bytes(to)?
+    let a = raw_bytes(first)
+    defer { raw_free(a, uint(first.len()) + 1) }
+    let b = raw_bytes(second)
+    defer { raw_free(b, uint(second.len()) + 1) }
+    _ = checked(call(op, a, b, 0, 0, 0, 0))?
+    Ok(())
+}
+
+pub fn open(path: Path, options: OpenOptions) Result[File, Error] {
+    let bits = flags(options)?
+    let handle = path_call(0, path, bits, 438)?
+    Ok(File { cell: create(handle, 1) })
+}
+impl File {
+    pub fn close(self: &Self) Result[(), Error] {
+        let error = close(&self.cell)
+        if error == 0 { Ok(()) } else { Err(io.from_native_error(error)) }
+    }
+    pub fn try_clone(self: &Self) Result[File, Error] {
+        let handle = begin(&self.cell)
+        if handle == ~uint(0) { return Err(Error::Closed) }
+        defer { end(&self.cell) }
+        let duplicate = checked(call(10, handle, 0, 0, 0, 0, 0))?
+        Ok(File { cell: create(duplicate, 1) })
+    }
+    pub fn metadata(self: &Self) Result[Metadata, Error] {
+        let handle = begin(&self.cell)
+        if handle == ~uint(0) { return Err(Error::Closed) }
+        defer { end(&self.cell) }
+        let out = raw_allocate(64)
+        defer { raw_free(out, 64) }
+        _ = checked(call(6, handle, out, 0, 0, 0, 0))?
+        Ok(metadata_value(out))
+    }
+    pub fn set_len(self: &Self, length: uint) Result[(), Error] {
+        if length > uint(9223372036854775807) { return Err(Error::InvalidInput) }
+        self.simple(7, length)
+    }
+    pub fn sync_data(self: &Self) Result[(), Error] = self.simple(8, 0)
+    pub fn sync_all(self: &Self) Result[(), Error] = self.simple(9, 0)
+    fn simple(self: &Self, op: uint, argument: uint) Result[(), Error] {
+        let handle = begin(&self.cell)
+        if handle == ~uint(0) { return Err(Error::Closed) }
+        defer { end(&self.cell) }
+        _ = checked(call(op, handle, argument, 0, 0, 0, 0))?
+        Ok(())
+    }
+    fn read_inner(self: &Self, destination: &[byte], cancel: uint) Result[int, Error] {
+        let handle = begin(&self.cell)
+        if handle == ~uint(0) { return Err(Error::Closed) }
+        defer { end(&self.cell) }
+        let capacity = if destination.len() > 65536 { 65536 } else { destination.len() }
+        let raw = raw_allocate(uint(capacity) + 1)
+        defer { raw_free(raw, uint(capacity) + 1) }
+        let result = call_cancel(2, handle, raw, uint(capacity), 0, 0, 0, cancel)
+        // worker已经退出；成功读取的前缀即使随后观察到取消也保留。
+        if result.value <= uint(destination.len()) {
+            for index in 0..int(result.value) { destination[index] = unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](raw + uint(index))) } }
+        }
+        Ok(int(checked(result)?))
+    }
+    fn write_inner(self: &Self, source: Bytes, cancel: uint) Result[int, Error] {
+        let handle = begin(&self.cell)
+        if handle == ~uint(0) { return Err(Error::Closed) }
+        defer { end(&self.cell) }
+        let source = if source.len() > 65536 { source.split_at(65536).0 } else { source }
+        let raw = raw_bytes(source)
+        defer { raw_free(raw, uint(source.len()) + 1) }
+        let count = checked(call_cancel(3, handle, raw, uint(source.len()), 0, 0, 0, cancel))?
+        if count == 0 && source.len() != 0 { return Err(Error::WriteZero) }
+        Ok(int(count))
+    }
+}
+impl Read for File {
+    fn read(self: &Self, destination: &[byte]) Result[int, Error] = self.read_inner(destination, 0)
+    fn read_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[int, Error] = self.read_inner(destination, unsafe { cancel.raw_control() })
+    fn read_buffer(self: &Self, destination: &ByteBuffer, limit: int) Result[int, Error] {
+        if limit < 0 { panic("negative read limit") }
+        let data = unsafe { alloc_bytes(limit) }
+        let count = self.read(data)?
+        destination.append(unsafe { Bytes::from_owned(data[..count]) })
+        Ok(count)
+    }
+    fn read_buffer_cancel(self: &Self, destination: &ByteBuffer, limit: int, cancel: &CancelToken) Result[int, Error] {
+        if limit < 0 { panic("negative read limit") }
+        let data = unsafe { alloc_bytes(limit) }
+        let count = self.read_cancel(data, cancel)?
+        destination.append(unsafe { Bytes::from_owned(data[..count]) })
+        Ok(count)
+    }
+}
+impl Write for File {
+    fn write(self: &Self, source: Bytes) Result[int, Error] = self.write_inner(source, 0)
+    fn write_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[int, Error] = self.write_inner(source, unsafe { cancel.raw_control() })
+}
+impl Seek for File {
+    fn seek(self: &Self, from: SeekFrom) Result[uint, Error] {
+        let handle = begin(&self.cell)
+        if handle == ~uint(0) { return Err(Error::Closed) }
+        defer { end(&self.cell) }
+        let (offset, whence) = match from {
+            SeekFrom::Start(value) => { if value > uint(9223372036854775807) { return Err(Error::InvalidInput) }
+ (value, uint(0)) },
+            SeekFrom::End(value) => (uint(value), uint(2)),
+            SeekFrom::Current(value) => (uint(value), uint(1)),
+        }
+        checked(call(4, handle, offset, whence, 0, 0, 0))
+    }
+}
+
+pub fn read(path: Path) Result[Bytes, Error] {
+    let options = OpenOptions::new()
+ options.read = true
+    let file = open(path, options)?
+    defer { _ = file.close() }
+    io.read_to_end(&file)
+}
+pub fn read_string(path: Path) Result[string, Error] {
+    let bytes = read(path)?
+    match bytes.to_string() { Ok(value) => Ok(value), Err(_) => Err(Error::InvalidData) }
+}
+pub fn write(path: Path, content: Bytes) Result[(), Error] {
+    let options = OpenOptions::new()
+ options.write = true
+ options.create = true
+ options.truncate = true
+    let file = open(path, options)?
+    defer { _ = file.close() }
+    io.write_all(&file, content)?
+    file.close()
+}
+pub fn metadata(path: Path, follow_symlinks: bool) Result[Metadata, Error] {
+    let out = raw_allocate(64)
+    defer { raw_free(out, 64) }
+    _ = path_call(5, path, if follow_symlinks { 1 } else { 0 }, out)?
+    Ok(metadata_value(out))
+}
+pub fn exists(path: Path) Result[bool, Error] {
+    match metadata(path, true) { Ok(_) => Ok(true), Err(Error::NotFound) => Ok(false), Err(error) => Err(error) }
+}
+fn returned_path(op: uint, path: Path) Result[Path, Error] {
+    let input = native_bytes(path)?
+    let raw = raw_bytes(input)
+    defer { raw_free(raw, uint(input.len()) + 1) }
+    let capacity: uint = 256
+    loop {
+        let out = raw_allocate(capacity)
+        let result = call(op, raw, out, capacity, 0, 0, 0)
+        if result.error != 0 { raw_free(out, capacity)
+ return Err(io.from_native_error(result.error)) }
+        if result.value < capacity {
+            let bytes = load_bytes(out, int(result.value))
+            raw_free(out, capacity)
+            return Ok(Path::from_os(from_native_bytes(bytes)?))
+        }
+        raw_free(out, capacity)
+        if capacity > uint(9223372036854775807) / 2 { return Err(Error::InvalidInput) }
+        capacity = capacity * 2
+    }
+}
+pub fn canonicalize(path: Path) Result[Path, Error] = returned_path(21, path)
+pub fn read_link(path: Path) Result[Path, Error] = returned_path(20, path)
+pub fn create_dir(path: Path) Result[(), Error] { _ = path_call(14, path, 511, 0)?
+ Ok(()) }
+pub fn remove_file(path: Path) Result[(), Error] { _ = path_call(15, path, 0, 0)?
+ Ok(()) }
+pub fn remove_dir(path: Path) Result[(), Error] { _ = path_call(16, path, 0, 0)?
+ Ok(()) }
+pub fn rename(from: Path, to: Path) Result[(), Error] = pair_call(17, from, to)
+pub fn hard_link(from: Path, to: Path) Result[(), Error] = pair_call(18, from, to)
+pub fn symlink(target: Path, link: Path) Result[(), Error] = pair_call(19, target, link)
+pub fn create_dir_all(path: Path) Result[(), Error] {
+    match create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(Error::AlreadyExists) => { if metadata(path, true)?.is_dir() { Ok(()) } else { Err(Error::AlreadyExists) } },
+        Err(Error::NotFound) => {
+            match path.parent() { Some(parent) => { create_dir_all(parent)? }, None => return Err(Error::NotFound) }
+            match create_dir(path) { Ok(()) => Ok(()), Err(Error::AlreadyExists) => { if metadata(path, true)?.is_dir() { Ok(()) } else { Err(Error::AlreadyExists) } }, Err(error) => Err(error) }
+        },
+        Err(error) => Err(error),
+    }
+}
+pub fn copy(from: Path, to: Path) Result[uint, Error] {
+    let options = OpenOptions::new()
+ options.read = true
+    let source = open(from, options)?
+    defer { _ = source.close() }
+    options.read = false
+ options.write = true
+ options.create = true
+    let destination = open(to, options)?
+    defer { _ = destination.close() }
+    let a = source.metadata()?
+ let b = destination.metadata()?
+    if a.device == b.device && a.inode == b.inode { return Err(Error::InvalidInput) }
+    destination.set_len(0)?
+    let count = io.copy(&source, &destination)?
+    destination.close()?
+    Ok(count)
+}
+pub fn read_dir(path: Path) Result[ReadDir, Error] {
+    let handle = path_call(11, path, 0, 0)?
+    Ok(ReadDir { cell: create(handle, 2), root: path })
+}
+impl Iter for ReadDir {
+    type Item = Result[DirEntry, Error]
+    fn next(self: &Self) Option[Result[DirEntry, Error]] = self.next_entry()
+}
+impl IntoIter for ReadDir {
+    type Item = Result[DirEntry, Error]
+    type Iter = ReadDir
+    fn into_iter(self) ReadDir = self
+}
+impl ReadDir {
+    pub fn close(self: &Self) Result[(), Error] {
+        let error = close(&self.cell)
+        if error == 0 { Ok(()) } else { Err(io.from_native_error(error)) }
+    }
+    pub fn next(self: &Self) Option[Result[DirEntry, Error]] = self.next_entry()
+    fn next_entry(self: &Self) Option[Result[DirEntry, Error]] {
+        let handle = begin_directory(&self.cell)
+        if handle == ~uint(0) { return Some(Err(Error::Closed)) }
+        defer { end_directory(&self.cell) }
+        if directory_exhausted(&self.cell) { return None }
+        let out = raw_allocate(1040)
+        defer { raw_free(out, 1040) }
+        loop {
+            let result = call(12, handle, out, 1040, 0, 0, 0)
+            if result.error != 0 { return Some(Err(io.from_native_error(result.error))) }
+            if result.value == 0 { exhaust_directory(&self.cell)
+ return None }
+            let bytes = load_bytes(out + 16, int(word(out + 8)))
+            let name = match from_native_bytes(bytes) { Ok(name) => name, Err(error) => return Some(Err(error)) }
+            let text = name.to_bytes()
+            if text.len() == 1 && text.get(0) == Some(byte(46)) { continue }
+            if text.len() == 2 && text.get(0) == Some(byte(46)) && text.get(1) == Some(byte(46)) { continue }
+            return Some(Ok(DirEntry { entry_path: self.root.join(Path::from_os(name)), name: name, kind: word(out) }))
+        }
+    }
+}
+pub fn remove_dir_all(path: Path) Result[(), Error] {
+    let information = metadata(path, false)?
+    if information.is_symlink() { return remove_file(path) }
+    if !information.is_dir() { return Err(Error::NotADirectory) }
+    let directory = read_dir(path)?
+    defer { _ = directory.close() }
+    while let Some(entry) = directory.next() {
+        let entry = entry?
+        let information = entry.metadata()?
+        if information.is_dir() { remove_dir_all(entry.path())? } else { remove_file(entry.path())? }
+    }
+    directory.close()?
+    remove_dir(path)
+}

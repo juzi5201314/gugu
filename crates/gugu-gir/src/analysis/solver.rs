@@ -25,6 +25,7 @@ pub fn analyze_scc(
     component: &[usize],
     policy: AnalysisPolicyV1,
     callees: &dyn Fn(usize) -> FunctionSummary,
+    passing: &crate::gir::passing::PassingTable,
 ) -> SccSummaryV1 {
     let mut summaries = vec![FunctionSummary::default(); component.len()];
     let dependents = summary_dependents(members, component);
@@ -45,6 +46,7 @@ pub fn analyze_scc(
                     &summaries,
                     policy,
                     callees,
+                    passing,
                 )
             });
             budget_exhausted |= result.budget_exhausted;
@@ -84,7 +86,9 @@ pub fn analyze_scc(
     for (position, &index) in component.iter().enumerate() {
         let member = &members[index];
         let result = results[position].take().unwrap_or_else(|| {
-            analyze_member(module, gir, member, component, &summaries, policy, callees)
+            analyze_member(
+                module, gir, member, component, &summaries, policy, callees, passing,
+            )
         });
         for (expression, kind, status) in result.proofs {
             proofs.push(ProofFact {
@@ -142,6 +146,7 @@ fn analyze_member(
     summaries: &[FunctionSummary],
     policy: AnalysisPolicyV1,
     callees: &dyn Fn(usize) -> FunctionSummary,
+    passing: &crate::gir::passing::PassingTable,
 ) -> interpret::BodyResult {
     debug_assert_eq!(component.len(), summaries.len());
     let lookup = |site| {
@@ -163,6 +168,7 @@ fn analyze_member(
         owner_index,
         policy,
         &lookup,
+        passing,
     )
 }
 

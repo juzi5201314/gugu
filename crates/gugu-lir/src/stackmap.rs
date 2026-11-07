@@ -47,7 +47,9 @@ use serde::{Deserialize, Serialize};
 /// 记录——同一站点发射的 slow call 可以启动回收，必须能在该返回 PC 上按本帧 map 扫根。
 /// 7：根枚举改为 SSA 逆向活跃（`LiveValues`）：跨点存活但并非本指令操作数、也不在 LIR
 /// 栈槽的受管值同样登记 `Value` 根——分配器把它们强制落 spill slot，而槽的分类只能来自这里。
-pub const STACKMAP_SCHEMA: u32 = 7;
+/// 8：普通和 dirty bridge 同时登记 caller 参数包的地址车道。
+/// 9：共享访问 begin/end 建立 CallReturn，并登记 handle 实参。
+pub const STACKMAP_SCHEMA: u32 = 9;
 
 /// 规范 safepoint kind 编号：与栈图契约的 kind 数值一一对应。
 pub const KIND_CALL_RETURN: u8 = 0;
@@ -518,6 +520,12 @@ fn map_instruction(
                 super::body::Op::Call(_) | super::body::Op::ForeignCall(_) => {
                     collect_call(body, block, index, live, &after)?
                 }
+                super::body::Op::SharedAccessBegin { .. }
+                | super::body::Op::SharedAccessEnd { .. } => {
+                    let mut roots = collect_live(body, block, index, live, &after)?;
+                    collect_operands(body, index, &mut roots)?;
+                    roots
+                }
                 super::body::Op::PlatformCall(_)
                 | super::body::Op::RuntimeMachineCall(_)
                 | super::body::Op::ResolveSharedHandle
@@ -542,6 +550,8 @@ fn map_instruction(
             Ok(Some(safepoint))
         }
         SafepointKind::ForeignBridge | SafepointKind::DirtyCpuBridge => {
+            let mut roots = collect_call(body, block, index, live, &after)?;
+            collect_operands(body, index, &mut roots)?;
             let mut safepoint = LogicalSafepoint {
                 kind: KIND_FOREIGN_BRIDGE,
                 flags: 0b011,
@@ -549,7 +559,7 @@ fn map_instruction(
                 position: position_of(body, block, Some(super::body::InstId(id(index)))),
                 block: block.0,
                 instruction: id(index),
-                roots: collect_live(body, block, index, live, &after)?,
+                roots,
             };
             if safepoint.dirty {
                 safepoint.flags |= 0b1000;
@@ -669,7 +679,7 @@ fn push_live_slot_roots(
 
 /// 收集调用点的传出根：调用实参中的受管或栈指针字与按值聚合副本展开。
 ///
-/// sret 目标是调用方未初始化字节，不得加入根集合。
+/// sret 目标中的未初始化字节不是根；bridge 参数包里的目标地址仍须随栈迁移更新。
 fn collect_call(
     body: &Body,
     block: super::body::BlockId,
@@ -701,7 +711,12 @@ fn collect_invoke(
     let sret_parameter = call.sret.map(|(index, _, _)| index);
     // 调用实参的权威来源是 `Call.parameters` 的机器类型：逐个按来源种类登记。
     for (position, parameter) in call.parameters.iter().enumerate() {
-        if Some(position as u32) == sret_parameter {
+        if Some(position as u32) == sret_parameter
+            && !matches!(
+                call.kind,
+                CallKind::ForeignBridge | CallKind::ForeignBridgeDirtyCpu
+            )
+        {
             continue;
         }
         let Some(kind) = parameter.provenance.and_then(Provenance::root_kind) else {

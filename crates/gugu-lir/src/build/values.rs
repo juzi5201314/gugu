@@ -29,7 +29,27 @@ impl Builder<'_> {
 
     pub(super) fn operand(&mut self, operand: &Operand) -> Result<Computed, Diagnostic> {
         match operand {
-            Operand::Copy(place) | Operand::MoveInternal(place) => self.read_place(*place),
+            Operand::Copy(place) => self.read_place(*place),
+            Operand::MoveInternal(place) => {
+                let value = self.read_place(*place)?;
+                let ty = value.ty();
+                if !self.layout(ty).passing.has_resource() {
+                    return Ok(value);
+                }
+                let source = self.computed_address(value)?;
+                let destination = self.temporary(ty)?;
+                self.copy_memory(destination, source, ty)?;
+                let descriptor = self.descriptor(ty);
+                self.runtime(
+                    crate::body::RuntimeCall::ValueForget,
+                    &[source, descriptor],
+                    &[],
+                )?;
+                Ok(Computed::Address {
+                    ty,
+                    address: destination,
+                })
+            }
             Operand::Constant(constant) => {
                 let constant = &self.gir.constants[constant.index()];
                 self.literal(&constant.value, constant.ty.0)
@@ -188,7 +208,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn load_bits(&mut self, address: ValueId, bytes: u64) -> ValueId {
+    pub(super) fn load_bits(&mut self, address: ValueId, bytes: u64) -> ValueId {
         let mut result = self.constant(0, Type::I64);
         let mut offset = 0;
         while offset < bytes {
@@ -221,7 +241,7 @@ impl Builder<'_> {
         result
     }
 
-    fn store_bits(&mut self, address: ValueId, value: ValueId, bytes: u64) {
+    pub(super) fn store_bits(&mut self, address: ValueId, value: ValueId, bytes: u64) {
         let mut offset = 0;
         while offset < bytes {
             let chunk = chunk(bytes - offset);
@@ -255,6 +275,12 @@ impl Builder<'_> {
                 let lanes = self
                     .scalar_lanes(ty)
                     .ok_or_else(|| invalid("整数常量类型没有标量布局"))?;
+                if lanes.iter().any(|(_, kind)| kind.ty == Type::Ptr) {
+                    return Err(invalid(&format!(
+                        "整数常量 {value} 采用引用布局：{} 类型 {ty}",
+                        self.body.name
+                    )));
+                }
                 let bytes = value.to_le_bytes();
                 lanes
                     .into_iter()
@@ -362,6 +388,7 @@ impl Builder<'_> {
         count: usize,
     ) -> Result<Vec<(u64, u32)>, Diagnostic> {
         match self.kind(ty) {
+            TypeKind::Unit if count == 0 => Ok(Vec::new()),
             TypeKind::Array { element, .. } => {
                 let bytes = self
                     .layout(*element)
@@ -378,7 +405,11 @@ impl Builder<'_> {
                 .iter()
                 .map(|field| (field.offset, field.ty))
                 .collect()),
-            _ => Err(invalid("聚合构造没有具体字段布局")),
+            _ => Err(invalid(&format!(
+                "聚合构造没有具体字段布局（{}，类型 {ty}: {:?}，字段数 {count}）",
+                self.body.name,
+                self.kind(ty)
+            ))),
         }
     }
 

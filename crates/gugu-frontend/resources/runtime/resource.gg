@@ -1,0 +1,134 @@
+/* 文件与目录共用稳定控制页；受限释放只入队，OS close在平台worker执行。
+ * 前64字节对应ResourceCell header；96..160保留给平台close请求链接。
+ * 当前只有一个managed worker；native完成必须经service回到该worker更新状态。
+ */
+use std.runtime.heap.{heap_word, heap_store_word, heap_word32, heap_store_word32, heap_fail}
+use std.runtime.fs_platform.{enqueue_close, await_close}
+use std.runtime.resource_state.{reclaim, register, pending_return}
+use std.runtime.scheduler.{park_current, ready_hot}
+use std.runtime.native_memory.{allocate}
+
+#[repr(C)]
+pub struct ResourceCell { pub control: uint }
+const CLOSED: uint = 2
+const QUEUED: uint = 4
+const DONE: uint = 8
+const SHARED: uint = 1
+const PAGE_BYTES: uint = 4096
+pub const CLOSE_REQUEST_OFFSET: uint = 96
+
+/// kind为1(File)或2(ReadDir)；首个值持有一个租约。
+pub fn create(native_handle: uint, kind: uint) ResourceCell {
+    unsafe {
+        let control = allocate(PAGE_BYTES)
+        heap_store_word(control, 1)
+        heap_store_word32(control + 8, 0)
+        heap_store_word32(control + 12, 32)
+        heap_store_word(control + 64, native_handle)
+        heap_store_word(control + 72, kind)
+        heap_store_word(control + 80, 0)
+        register(control)
+        ResourceCell { control }
+    }
+}
+
+/// 所有副本共享关闭状态；显式关闭等平台完成并报告错误。
+pub fn close(cell: &ResourceCell) uint {
+    let control = cell.control
+    if control == 0 { return 0 }
+    heap_store_word32(control + 8, heap_word32(control + 8) | CLOSED)
+    request_close(control)
+    await_close(control)
+}
+
+/// 全一字表示Closed；成功调用必须与end成对。
+pub fn begin(cell: &ResourceCell) uint {
+    let control = cell.control
+    if control == 0 || (heap_word32(control + 8) & CLOSED) != 0 { return ~uint(0) }
+    let count = heap_word(control + 80)
+    if count == ~uint(0) { heap_fail() }
+    heap_store_word(control + 80, count + 1)
+    heap_word(control + 64)
+}
+
+pub fn end(cell: &ResourceCell) {
+    let control = cell.control
+    let count = heap_word(control + 80)
+    if count == 0 { heap_fail() }
+    heap_store_word(control + 80, count - 1)
+    request_close(control)
+}
+
+/// 目录句柄副本共享游标；挂起期间只把协程句柄挂入控制页。
+pub fn begin_directory(cell: &ResourceCell) uint { unsafe {
+    let control = cell.control
+    while heap_word(control + 80) != 0 {
+        if (heap_word32(control + 8) & CLOSED) != 0 { return ~uint(0) }
+        let hot = std.runtime.current_slot()
+        let wait = heap_word(hot + 48) + 272
+        heap_store_word(wait, 0)
+        if heap_word(control + 152) == 0 {
+            heap_store_word(control + 144, hot)
+        } else {
+            heap_store_word(heap_word(heap_word(control + 152) + 48) + 272, hot)
+        }
+        heap_store_word(control + 152, hot)
+        park_current()
+    }
+    begin(cell)
+} }
+
+pub fn end_directory(cell: &ResourceCell) {
+    let control = cell.control
+    end(cell)
+    let hot = heap_word(control + 144)
+    heap_store_word(control + 144, 0)
+    heap_store_word(control + 152, 0)
+    while hot != 0 {
+        let next = heap_word(heap_word(hot + 48) + 272)
+        ready_hot(hot)
+        hot = next
+    }
+}
+
+pub fn directory_exhausted(cell: &ResourceCell) bool = heap_word(cell.control + 160) != 0
+pub fn exhaust_directory(cell: &ResourceCell) { heap_store_word(cell.control + 160, 1) }
+
+pub fn handle(cell: &ResourceCell) uint {
+    if cell.control == 0 || (heap_word32(cell.control + 8) & CLOSED) != 0 { return ~uint(0) }
+    heap_word(cell.control + 64)
+}
+
+/// 已关闭句柄仍可复制，副本继续观察同一Closed状态。
+pub fn acquire_control(control: uint) {
+    if control == 0 { return }
+    let count = heap_word(control)
+    if count == 0 || count == ~uint(0) { heap_fail() }
+    heap_store_word(control, count + 1)
+}
+
+pub fn release_control(control: uint) {
+    if control == 0 { return }
+    let count = heap_word(control)
+    if count == 0 { heap_fail() }
+    heap_store_word(control, count - 1)
+    if count == 1 {
+        heap_store_word32(control + 8, heap_word32(control + 8) | CLOSED)
+        if (heap_word32(control + 8) & DONE) != 0 { reclaim(control) } else {
+            pending_return(control)
+            request_close(control)
+        }
+    }
+}
+
+pub fn publish_control(control: uint) {
+    if control != 0 { heap_store_word32(control + 8, heap_word32(control + 8) | SHARED) }
+}
+
+fn request_close(control: uint) {
+    let state = heap_word32(control + 8)
+    if (state & CLOSED) == 0 || (state & QUEUED) != 0 || heap_word(control + 80) != 0 { return }
+    heap_store_word32(control + 8, state | QUEUED)
+    enqueue_close(control, heap_word(control + 64), heap_word(control + 72))
+}
+

@@ -1,0 +1,7 @@
+use std.mem.{pin}
+unsafe extern "C" fn native_probe(value: *int) int
+fn main() { unsafe {
+    let value = 73
+    _ = pin(&value, fn() int { value })
+    _ = native_probe(std.ptr.addr_of(value))
+} }

@@ -70,6 +70,9 @@ pub(crate) fn decode(
     instance: &[u8; 32],
     target: &str,
 ) -> Result<Option<Body>, Diagnostic> {
+    if entries.is_empty() {
+        return Ok(None);
+    }
     let Some(entry) = installed.entry(entries, instance) else {
         return Ok(None);
     };

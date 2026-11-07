@@ -40,6 +40,7 @@ pub mod block_return_schema;
 )]
 pub mod cage;
 pub mod cage_control;
+pub mod callback;
 pub mod collect_layout;
 #[allow(
     dead_code,
@@ -95,6 +96,7 @@ pub mod routing_schema;
 pub mod text;
 
 pub mod cstring;
+pub mod foreign_packet;
 pub mod foreign_schema;
 pub mod scheduler_schema;
 #[allow(
@@ -295,6 +297,20 @@ pub enum RuntimeMachineOp {
     /// GC 入口：只由 runtime 注入源调用；保存发起者上下文、切 system stack、
     /// 调用 dispatcher 后恢复，返回值是 dispatcher 的状态字。
     GcEnter,
+    /// 在有界 native worker 上提交 raw 文件系统请求。
+    FsStart,
+    /// 只在 OS 确认 worker 退出之后报告完成。
+    FsPoll,
+    /// 单调纳秒，供 GC 暂停和 native 逻辑时间观察。
+    MonotonicNanos,
+    /// 以当前 stack_high 相对深度读取机器字，不增长栈。
+    StackReadWord,
+    /// 在可移动协程栈与非移动 raw 缓冲之间精确复制字节。
+    StackCopyRaw,
+    CageControl,
+    CallbackControl,
+    CallbackQueue,
+    ThreadId,
 }
 
 impl RuntimeMachineOp {
@@ -308,6 +324,15 @@ impl RuntimeMachineOp {
             Self::ReportWrite => "report_write",
             Self::GcConfig => "gc_config",
             Self::GcEnter => "gc_enter",
+            Self::FsStart => "fs_start",
+            Self::FsPoll => "fs_poll",
+            Self::MonotonicNanos => "monotonic_nanos",
+            Self::StackReadWord => "stack_read_word",
+            Self::StackCopyRaw => "stack_copy_raw",
+            Self::CageControl => "cage_control",
+            Self::CallbackControl => "callback_control",
+            Self::CallbackQueue => "callback_queue",
+            Self::ThreadId => "thread_id",
         }
     }
 }
@@ -344,6 +369,163 @@ pub enum GlueDefKind {
 /// glue 名与 `RuntimeCall` 目录、`RuntimeMachineOp` 目录及平台原语的 `platform_<name>`
 /// 命名一致，绑定表因此是「镜像里哪些 runtime 入口由 Gugu 实现或登记片段接管」的唯一清单。
 pub const GLUE_DEFS: &[GlueDef] = &[
+    GlueDef {
+        glue: "runtime_poll_defer",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "thread_id",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "callback_file_worker",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "callback_poll",
+        def: GlueDefKind::Item {
+            source: "std/runtime/scheduler.gg",
+            item: "callback_poll",
+        },
+    },
+    GlueDef {
+        glue: "callback_control",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "callback_queue",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "cage_control",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "stack_read_word",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "stack_copy_raw",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "foreign_dirty_dispatch",
+        def: GlueDefKind::Item {
+            source: "std/runtime/foreign.gg",
+            item: "foreign_dirty_dispatch",
+        },
+    },
+    GlueDef {
+        glue: "foreign_dispatch",
+        def: GlueDefKind::Item {
+            source: "std/runtime/foreign.gg",
+            item: "foreign_dispatch",
+        },
+    },
+    GlueDef {
+        glue: "foreign_native_worker",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "monotonic_nanos",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "fs_start",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "fs_poll",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "fs_native_worker",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "resource_acquire",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "resource_acquire",
+        },
+    },
+    GlueDef {
+        glue: "resource_release",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "resource_release",
+        },
+    },
+    GlueDef {
+        glue: "resource_transfer",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "resource_transfer",
+        },
+    },
+    GlueDef {
+        glue: "resource_finalize",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "resource_finalize",
+        },
+    },
+    GlueDef {
+        glue: "string_compare",
+        def: GlueDefKind::Item {
+            source: "std/text.gg",
+            item: "string_compare",
+        },
+    },
+    GlueDef {
+        glue: "value_copy",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "value_copy",
+        },
+    },
+    GlueDef {
+        glue: "value_publish",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "value_publish",
+        },
+    },
+    GlueDef {
+        glue: "value_drop",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "value_drop",
+        },
+    },
+    GlueDef {
+        glue: "value_forget",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "value_forget",
+        },
+    },
+    GlueDef {
+        glue: "foreign_copy",
+        def: GlueDefKind::Item {
+            source: "std/runtime/foreign.gg",
+            item: "foreign_copy",
+        },
+    },
+    GlueDef {
+        glue: "value_transfer",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "value_transfer",
+        },
+    },
+    GlueDef {
+        glue: "cow_snapshot",
+        def: GlueDefKind::Item {
+            source: "std/runtime/value.gg",
+            item: "cow_snapshot",
+        },
+    },
     GlueDef {
         glue: "rt0_start",
         def: GlueDefKind::Item {
@@ -550,6 +732,41 @@ pub const GLUE_DEFS: &[GlueDef] = &[
         def: GlueDefKind::Item {
             source: "std/runtime/heap.gg",
             item: "gc_alloc_slow",
+        },
+    },
+    GlueDef {
+        glue: "gc_shared_alloc",
+        def: GlueDefKind::Item {
+            source: "std/runtime/shared.gg",
+            item: "gc_shared_alloc",
+        },
+    },
+    GlueDef {
+        glue: "gc_resolve_shared_handle",
+        def: GlueDefKind::Item {
+            source: "std/runtime/shared.gg",
+            item: "gc_resolve_shared_handle",
+        },
+    },
+    GlueDef {
+        glue: "gc_shared_access_begin",
+        def: GlueDefKind::Item {
+            source: "std/runtime/shared.gg",
+            item: "gc_shared_access_begin",
+        },
+    },
+    GlueDef {
+        glue: "gc_shared_access_end",
+        def: GlueDefKind::Item {
+            source: "std/runtime/shared.gg",
+            item: "gc_shared_access_end",
+        },
+    },
+    GlueDef {
+        glue: "gc_shared_field_barrier",
+        def: GlueDefKind::Item {
+            source: "std/runtime/shared.gg",
+            item: "gc_shared_field_barrier",
         },
     },
     GlueDef {

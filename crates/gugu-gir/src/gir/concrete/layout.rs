@@ -11,6 +11,8 @@ pub(super) struct Builder<'a, 'm> {
     layouts: Layouts<'a, 'm>,
     indices: BTreeMap<Ty, u32>,
     types: Vec<Option<TypeLayout>>,
+    /// 引用目标先分配稠密编号，在外层值布局闭合后再展开。
+    deferred: Vec<(u32, Ty)>,
     bindings: Vec<Option<u32>>,
 }
 
@@ -25,6 +27,7 @@ impl<'a, 'm> Builder<'a, 'm> {
             layouts: Layouts::new(context.model, context.checked),
             indices: BTreeMap::new(),
             types: Vec::new(),
+            deferred: Vec::new(),
             bindings: vec![None; context.module.types.len()],
         }
     }
@@ -44,7 +47,10 @@ impl<'a, 'm> Builder<'a, 'm> {
         self.intern(&Ty::Ptr(Box::new(value))).map(hir::TypeId)
     }
 
-    pub(super) fn finish(self) -> Result<Vec<TypeLayout>, Diagnostic> {
+    pub(super) fn finish(mut self) -> Result<Vec<TypeLayout>, Diagnostic> {
+        while let Some((index, ty)) = self.deferred.pop() {
+            self.fill(index, &ty)?;
+        }
         self.types
             .into_iter()
             .map(|ty| ty.ok_or_else(|| invalid("具体类型递归未闭合")))
@@ -54,21 +60,50 @@ impl<'a, 'm> Builder<'a, 'm> {
     pub(super) fn intern(&mut self, ty: &Ty) -> Result<u32, Diagnostic> {
         let ty = crate::mono::universe::concrete(self.context, ty)?.into_owned();
         if let Some(&index) = self.indices.get(&ty) {
+            if let Some(position) = self
+                .deferred
+                .iter()
+                .position(|(pending, _)| *pending == index)
+            {
+                let (_, pending) = self.deferred.swap_remove(position);
+                self.fill(index, &pending)?;
+            }
             return Ok(index);
         }
         let index = id(self.types.len());
         self.indices.insert(ty.clone(), index);
         self.types.push(None);
-        let layout = self.layouts.layout(&ty)?;
-        let key = self.context.type_key(&ty)?;
-        let (kind, passing) = self.kind(&ty, layout)?;
+        self.fill(index, &ty)?;
+        Ok(index)
+    }
+
+    fn referent(&mut self, ty: &Ty) -> Result<u32, Diagnostic> {
+        let ty = crate::mono::universe::concrete(self.context, ty)?.into_owned();
+        if let Some(&index) = self.indices.get(&ty) {
+            return Ok(index);
+        }
+        let index = id(self.types.len());
+        self.indices.insert(ty.clone(), index);
+        self.types.push(None);
+        self.deferred.push((index, ty));
+        Ok(index)
+    }
+
+    fn fill(&mut self, index: u32, ty: &Ty) -> Result<(), Diagnostic> {
+        if self.types[super::index(index)].is_some() {
+            return Ok(());
+        }
+        let layout = self.layouts.layout(ty)?;
+        let key = self.context.type_key(ty)?;
+        let (kind, passing) = self.kind(ty, layout)?;
         self.types[super::index(index)] = Some(TypeLayout {
             key,
             layout,
             kind,
             passing,
+            transparent: matches!(ty, Ty::Named(index, _) if self.context.model.nominal[*index].repr.transparent()),
         });
-        Ok(index)
+        Ok(())
     }
 
     fn kind(
@@ -98,11 +133,11 @@ impl<'a, 'm> Builder<'a, 'm> {
             Ty::Formatter => (TypeKind::Formatter, bits),
             Ty::Hasher => (TypeKind::Hasher, bits),
             Ty::String => (TypeKind::String, PassingClass::COW),
-            Ty::Ref(inner) => (TypeKind::Reference(self.intern(inner)?), identity),
-            Ty::Ptr(inner) => (TypeKind::Pointer(self.intern(inner)?), bits),
-            Ty::Slice(inner) => (TypeKind::Slice(self.intern(inner)?), identity),
-            Ty::Chan(inner) => (TypeKind::Channel(self.intern(inner)?), identity),
-            Ty::Join(inner) => (TypeKind::Join(self.intern(inner)?), identity),
+            Ty::Ref(inner) => (TypeKind::Reference(self.referent(inner)?), identity),
+            Ty::Ptr(inner) => (TypeKind::Pointer(self.referent(inner)?), bits),
+            Ty::Slice(inner) => (TypeKind::Slice(self.referent(inner)?), identity),
+            Ty::Chan(inner) => (TypeKind::Channel(self.referent(inner)?), identity),
+            Ty::Join(inner) => (TypeKind::Join(self.referent(inner)?), identity),
             Ty::Panic => (TypeKind::Panic, identity),
             Ty::MaybeUninit(inner) => {
                 let inner = self.intern(inner)?;

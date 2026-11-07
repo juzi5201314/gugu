@@ -92,6 +92,10 @@ pub struct CoroutineCold {
     pub select_rng: [uint; 4],
     pub select_scratch: [uint; 4],
     pub gc_scan_epoch: uint,
+    pub payload_state: uint,
+    pub join_waiter: uint,
+    pub callback_node: uint,
+    pub callback_storage: uint,
 }
 
 /// 栈策略错误由rt0提升为不可捕获的StackOverflow，不进入用户Result通道。

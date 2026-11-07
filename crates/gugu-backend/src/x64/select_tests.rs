@@ -61,8 +61,77 @@ fn call(target: CallTarget, parameters: Vec<ValueType>, results: Vec<ValueType>)
         captures_arguments: false,
         by_value: Vec::new(),
         sret: None,
+        foreign_arguments: Vec::new(),
         poll_free_leaf: false,
     }
+}
+
+#[test]
+fn sysv_aggregate_exhaustion_rolls_back_both_register_banks() {
+    use crate::lir::body::ForeignArgument;
+    let integer = ValueType::scalar(Type::I64);
+    let float = ValueType::scalar(Type::F64);
+    let mut call = call(CallTarget::Indirect, vec![integer; 6], vec![]);
+    call.target = CallTarget::External {
+        key: [0; 32],
+        name: "probe".into(),
+    };
+    call.kind = CallKind::ForeignBridge;
+    call.parameters.extend([integer, float, float]);
+    call.foreign_arguments.push(ForeignArgument {
+        first: 6,
+        lanes: 2,
+        bytes: 16,
+        align: 8,
+        memory: false,
+    });
+    let layout = abi::classify_call(&call, TargetName::X86_64Linux).unwrap();
+    assert_eq!(layout.arguments[6].slot, Some(AbiSlot::Stack { offset: 0 }));
+    assert_eq!(layout.arguments[7].slot, Some(AbiSlot::Stack { offset: 8 }));
+    assert_eq!(layout.arguments[8].slot, Some(AbiSlot::Float(Xmm::Xmm0)));
+}
+
+#[test]
+fn sysv_stack_groups_preserve_padding_and_unused_integer_registers() {
+    use crate::lir::body::ForeignArgument;
+    let integer = ValueType::scalar(Type::I64);
+    let float = ValueType::scalar(Type::F64);
+    let mut probe = call(
+        CallTarget::External {
+            key: [0; 32],
+            name: "probe".into(),
+        },
+        vec![float; 8],
+        vec![],
+    );
+    probe.kind = CallKind::ForeignBridge;
+    probe.parameters.extend([integer, float, integer]);
+    probe.foreign_arguments.push(ForeignArgument {
+        first: 8,
+        lanes: 2,
+        bytes: 16,
+        align: 8,
+        memory: false,
+    });
+    let layout = abi::classify_call(&probe, TargetName::X86_64Linux).unwrap();
+    assert_eq!(layout.arguments[8].slot, Some(AbiSlot::Stack { offset: 0 }));
+    assert_eq!(layout.arguments[9].slot, Some(AbiSlot::Stack { offset: 8 }));
+    assert_eq!(layout.arguments[10].slot, Some(AbiSlot::Integer(Gpr::Rdi)));
+    probe.parameters = vec![integer; 8];
+    probe.foreign_arguments = vec![ForeignArgument {
+        first: 6,
+        lanes: 1,
+        bytes: 16,
+        align: 16,
+        memory: false,
+    }];
+    let layout = abi::classify_call(&probe, TargetName::X86_64Linux).unwrap();
+    assert_eq!(layout.arguments[6].slot, Some(AbiSlot::Stack { offset: 0 }));
+    assert_eq!(
+        layout.arguments[7].slot,
+        Some(AbiSlot::Stack { offset: 16 })
+    );
+    assert_eq!(layout.stack_slots, 3);
 }
 
 #[test]

@@ -1,0 +1,10 @@
+use std.runtime.pinning.{pin_prepare, pin_acquire, pin_release}
+
+/// 回调前提升可移动对象；defer 在返回与 panic 展开两条路径归还同一租约。
+pub fn pin[T, R, F: Fn() R](p: &T, f: F) R { unsafe {
+    pin_prepare()
+    let lease = pin_acquire(std.mem.transmute[&T, uint](p))
+    // 清理再次使用原引用，保证 prepare/acquire 期间它始终在精确根图中。
+    defer { pin_release(lease, std.mem.transmute[&T, uint](std.ptr.volatile_load[&T](std.ptr.addr_of(p)))) }
+    f()
+} }

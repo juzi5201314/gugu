@@ -93,7 +93,7 @@ pub fn record(
     gir: &GirWorldV1,
     world: &AnalysisWorldV1,
     builtin: usize,
-    lower: impl Fn(&[u8; 32]) -> Option<(Vec<u8>, Vec<u8>)>,
+    lower: impl Fn(&[u8; 32]) -> Result<(Vec<u8>, Vec<u8>), Diagnostic>,
 ) -> Result<Vec<RuntimeFunctionArtifactV1>, Diagnostic> {
     let mut concrete: Vec<([u8; 32], &ConcreteBody)> = gir
         .concrete
@@ -126,8 +126,7 @@ pub fn record(
             let digest = digest_of(mono_key);
             let analysis = analysis::encode_shard(world, owner, mono_key)
                 .ok_or_else(|| invariant("录制的内建实例不在分析 world 中".to_owned()))?;
-            let (lir, x64) = lower(&digest)
-                .ok_or_else(|| invariant("录制的内建实例没有 LIR body".to_owned()))?;
+            let (lir, x64) = lower(&digest)?;
             let mut artifact = RuntimeFunctionArtifactV1 {
                 stable_mono_key: digest_hex(&digest),
                 fingerprint: [0; 32],

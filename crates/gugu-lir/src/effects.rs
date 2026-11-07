@@ -92,9 +92,10 @@ impl Op {
             // 普通调用返回点记录 live roots。
             Self::RuntimeMachineCall(_) => Some(SafepointKind::CallReturn),
             Self::Call(call) | Self::ForeignCall(call) => call.safepoint_kind(),
-            Self::ResolveSharedHandle | Self::ForwardSharedHandle => {
-                Some(SafepointKind::CallReturn)
-            }
+            Self::ResolveSharedHandle
+            | Self::ForwardSharedHandle
+            | Self::SharedAccessBegin { .. }
+            | Self::SharedAccessEnd { .. } => Some(SafepointKind::CallReturn),
             _ => None,
         }
     }
@@ -243,19 +244,19 @@ impl RuntimeCall {
             Self::ValuePublish | Self::ResourceTransfer => (false, false, false, true),
             Self::ChannelTrySend | Self::ChannelTryRecv => (false, false, false, true),
             Self::ValueTransfer
+            | Self::ForeignCopy
             | Self::ValueDrop
             | Self::ValueForget
             | Self::ResourceAcquire
             | Self::ResourceRelease
             | Self::ResourceFinalize
-            | Self::Pin
-            | Self::Unpin
             | Self::TypeIs
             | Self::Downcast
             | Self::ChannelClose
             | Self::SelectCommit {
                 has_default: true, ..
             }
+            | Self::StringCompare
             | Self::Utf8Boundary
             | Self::DeferAction
             | Self::DeferEnvironment

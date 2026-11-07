@@ -103,6 +103,9 @@ fn emit_call(
     ctx: LowerCtx<'_>,
     builder: &mut Builder,
 ) -> Result<(), LoweringError> {
+    if super::foreign::dispatcher(call.kind).is_some() {
+        return super::foreign::emit(call, operands, results, ctx.target, builder);
+    }
     let layout = abi::classify_call(call, ctx.target)?;
     shuffle_arguments(operands, &layout, builder)?;
     emit_target(call, &layout, operands, builder)?;

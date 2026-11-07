@@ -1,0 +1,9 @@
+use std.fs as fs
+use std.path.{Path}
+fn main() {
+    let task = async {
+        _ = fs.exists(Path::from_string("probe"))
+        42
+    }
+    _ = task.wait()
+}

@@ -310,17 +310,13 @@ impl<'a> Model<'a> {
         names: &'a NameResolution,
         runtime_paths: &std::collections::BTreeSet<String>,
     ) -> Result<Self, Vec<Diagnostic>> {
+        let key = |path: &str| path.strip_suffix(".gg").unwrap_or(path).replace('/', ".");
+        let runtime_modules: std::collections::BTreeSet<_> =
+            runtime_paths.iter().map(|path| key(path)).collect();
         let runtime_sources: std::collections::BTreeSet<usize> = modules
             .iter()
             .enumerate()
-            .filter(|(_, module)| {
-                // 注入侧登记的是源文件名（`std/runtime/core.gg`），模块身份可能是点号形式
-                // （`std.runtime.core`）：统一去 `.gg` 后缀并把分隔符归一到点号再比较。
-                let key = |path: &str| path.strip_suffix(".gg").unwrap_or(path).replace('/', ".");
-                runtime_paths
-                    .iter()
-                    .any(|path| key(path) == key(&module.path))
-            })
+            .filter(|(_, module)| runtime_modules.contains(&key(&module.path)))
             .map(|(index, _)| index)
             .collect();
         let mut model = Self {
@@ -457,7 +453,14 @@ impl<'a> Model<'a> {
                             name: model.name(def.module, v.name).to_owned(),
                             fields: match v.kind {
                                 VariantKind::Unit => Vec::new(),
-                                VariantKind::Tuple(r) | VariantKind::Struct(r) => fields(r)?,
+                                VariantKind::Tuple(r) => fields(r)?
+                                    .into_iter()
+                                    .map(|mut field| {
+                                        field.public = true;
+                                        field
+                                    })
+                                    .collect(),
+                                VariantKind::Struct(r) => fields(r)?,
                             },
                             record: matches!(v.kind, VariantKind::Struct(_)),
                         })

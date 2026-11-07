@@ -442,6 +442,15 @@ pub struct BlobRelocation {
     pub symbol: String,
 }
 
+/// C 导出入口没有 managed 栈图，用户代码通过另一个受管适配器执行。
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NativeExport {
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub relocations: Vec<Relocation>,
+    pub unwind: Vec<u8>,
+}
+
 /// 全部实例的机器码片段世界。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct X64World {
@@ -450,6 +459,9 @@ pub struct X64World {
     pub contract: EncoderContract,
     /// 片段，按实例稳定键升序（LIR world 已强制该顺序）。
     pub fragments: Vec<FragmentPayload>,
+    pub native_exports: Vec<NativeExport>,
+    /// 显式 cage profile 的 reservation 容量；零表示关闭。
+    pub cage_bytes: u64,
     /// 入口函数 mangled 符号：`RootCategoryV1::Entry` 实例对应的片段。
     pub entry_symbol: String,
     /// 分配并编码之后的栈图、展开记录与源码记录。
@@ -980,8 +992,9 @@ pub fn build(
     glues: RuntimeGlueBindings,
     functions: (&InstalledFunctions, Option<&RuntimePrebuiltV1>),
 ) -> Result<X64World, Vec<Diagnostic>> {
-    let (contract, mut fragments) =
-        self::fragments(lir, universe, raw, target, queries, sources, &glues, functions)?;
+    let (contract, mut fragments) = self::fragments(
+        lir, universe, raw, target, queries, sources, &glues, functions,
+    )?;
     let mut constants = DataPool::default();
     let mut entry_symbol = None;
     for (body, fragment) in lir.bodies().iter().zip(&mut fragments) {
@@ -995,11 +1008,19 @@ pub fn build(
     let metadata = super::metadata::build(lir, &fragments, sources, target, raw)?;
     let type_descriptors = type_descriptor_offsets(&fragments, universe)?;
     let globals = global_blocks(&fragments)?;
+    let native_exports = lir
+        .exports()
+        .iter()
+        .map(|export| super::fs_native::exports::build(export, target))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| vec![invalid(&error)])?;
     let mut world = X64World {
         schema: CODEGEN_SCHEMA,
         target,
         contract,
         fragments,
+        native_exports,
+        cage_bytes: raw.compression().cage_bytes(),
         entry_symbol,
         metadata,
         glues,
@@ -1064,6 +1085,21 @@ pub fn fragments(
     Ok((contract, fragments))
 }
 
+/// 按需录制一个已选中的函数；共用镜像编码和片段 verifier，不建立临时 query 缓存。
+pub fn record_fragment(
+    body: &Body,
+    universe: &TypeUniverse,
+    raw: &RuntimeRawContractV1,
+    target: TargetName,
+    contract: &EncoderContract,
+    glues: &RuntimeGlueBindings,
+) -> Result<FragmentPayload, Vec<Diagnostic>> {
+    let encoder = contract.fingerprint();
+    let fragment = assemble_fragment(body, universe, raw, target, encoder, contract, glues)?;
+    validate_fragment(&fragment, body, target, encoder)?;
+    Ok(fragment)
+}
+
 /// 经 `CodegenFragment` query 现算或取缓存的单个片段。
 fn fragment_query(
     lir_fingerprint: [u8; 32],
@@ -1079,7 +1115,15 @@ fn fragment_query(
     let key = QueryKey::new(
         QueryKind::CodegenFragment,
         CODEGEN_SCHEMA,
-        fragment_key(lir_fingerprint, body, target, encoder, raw, universe),
+        fragment_key(
+            lir_fingerprint,
+            body,
+            target,
+            encoder,
+            raw,
+            universe,
+            glues.defers_automatic_poll(&body.owner),
+        ),
     );
     let mut fresh = None;
     let computed = queries.compute(key, |context| {
@@ -1179,8 +1223,10 @@ fn fragment_key(
     encoder: [u8; 32],
     raw: &RuntimeRawContractV1,
     universe: &TypeUniverse,
+    defer_poll: bool,
 ) -> [u8; 32] {
     let mut canonical = Vec::with_capacity(32 * 8 + 16);
+    canonical.push(u8::from(defer_poll));
     canonical.extend_from_slice(&lir_fingerprint);
     canonical.extend_from_slice(&body.instance);
     canonical.extend_from_slice(&body.fingerprint());
@@ -1196,11 +1242,7 @@ fn fragment_key(
 }
 
 /// 绑定实例的函数体符号改为 runtime glue 名；其余维持实例 mangling。
-pub(super) fn fragment_symbol(
-    body: &Body,
-    allocated: &str,
-    glues: &RuntimeGlueBindings,
-) -> String {
+pub(super) fn fragment_symbol(body: &Body, allocated: &str, glues: &RuntimeGlueBindings) -> String {
     match glues.glue_of_instance(&body.instance) {
         Some(glue) => super::mangle::mangle_runtime(glue),
         None => allocated.to_owned(),
@@ -1211,6 +1253,8 @@ fn world_fingerprint(world: &X64World) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_derive_key(WORLD_DOMAIN);
     hasher.update(&world.schema.to_le_bytes());
     hasher.update(world.target.name().as_bytes());
+    hasher.update(&world.cage_bytes.to_le_bytes());
+    hasher.update(&crate::canonical::to_vec(&world.native_exports).expect("原生导出编码"));
     for (name, bytes) in &world.constants {
         hasher.update(name.as_bytes());
         hasher.update(bytes);
@@ -1247,8 +1291,14 @@ fn assemble_fragment(
     contract: &EncoderContract,
     glues: &RuntimeGlueBindings,
 ) -> Result<FragmentPayload, Vec<Diagnostic>> {
-    let selected = select::select_body(body, universe, raw, target)
-        .map_err(|error| vec![invalid(&format!("{} 的指令选择失败：{error}", body.name))])?;
+    let selected = select::select_body_with_poll(
+        body,
+        universe,
+        raw,
+        target,
+        glues.defers_automatic_poll(&body.owner),
+    )
+    .map_err(|error| vec![invalid(&format!("{} 的指令选择失败：{error}", body.name))])?;
     verify::verify_function_sequence(&selected.sequence, contract.baseline)
         .map_err(|error| vec![invalid(&format!("{} 的选指序列非法：{error}", body.name))])?;
     let allocated = alloc::allocate(body, selected, target, raw)?;

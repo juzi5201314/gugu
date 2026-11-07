@@ -69,6 +69,7 @@ pub fn spills_pointers(op: &crate::lir::body::Op) -> bool {
         kind,
         Some(
             SafepointKind::CallReturn
+                | SafepointKind::Poll
                 | SafepointKind::Allocation
                 | SafepointKind::Suspend
                 | SafepointKind::ForeignBridge
@@ -89,6 +90,7 @@ pub fn call_spills(call: &crate::lir::body::Call) -> bool {
         call.safepoint_kind(),
         Some(
             SafepointKind::CallReturn
+                | SafepointKind::Poll
                 | SafepointKind::Allocation
                 | SafepointKind::Suspend
                 | SafepointKind::ForeignBridge
@@ -142,6 +144,16 @@ pub fn select_body(
     raw: &RuntimeRawContractV1,
     target: TargetName,
 ) -> Result<SelectedFunction, LoweringError> {
+    select_body_with_poll(body, universe, raw, target, false)
+}
+
+pub(crate) fn select_body_with_poll(
+    body: &Body,
+    universe: &TypeUniverse,
+    raw: &RuntimeRawContractV1,
+    target: TargetName,
+    defer_poll: bool,
+) -> Result<SelectedFunction, LoweringError> {
     // 值编号与 lowering 临时编号共享同一上界：`StackAddr` 的 frame 占位基址从
     // `FRAME_SLOT_BASE` 起，两个空间不能重叠。
     debug_assert!(
@@ -168,7 +180,7 @@ pub fn select_body(
             ctx.site = crate::lir::body::id(index);
             let operands = site_values(body, body.args(&instruction.arguments));
             let results = result_values(body, &instruction.results);
-            let lowered = lower::lower_with(
+            let mut lowered = lower::lower_with(
                 &instruction.op,
                 &operands,
                 &results,
@@ -188,6 +200,17 @@ pub fn select_body(
                     detail: "操作数不符合 op 语义",
                 },
             })?;
+            if defer_poll && matches!(instruction.op, crate::lir::body::Op::SafepointPoll { .. }) {
+                for machine in &mut lowered.sequence.instructions {
+                    for operand in &mut machine.operands {
+                        if let Operand::Reloc(super::inst::RelocTarget::Lir(symbol), _) = operand
+                            && *symbol == mangle::runtime_symbol("safepoint_slow")
+                        {
+                            *symbol = mangle::runtime_symbol("runtime_poll_defer");
+                        }
+                    }
+                }
+            }
             clobbers = clobbers.union(lowered.clobbers);
             sites.push(SelectedSite {
                 instruction: crate::lir::body::id(index),

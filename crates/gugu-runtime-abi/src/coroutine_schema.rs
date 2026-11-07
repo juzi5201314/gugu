@@ -135,7 +135,7 @@ pub const fn stack_check_offset() -> u32 {
 impl CoroutineRuntimeContract {
     pub fn build(demand: CoroutineDemand) -> Result<Self, RawModelError> {
         let result = Self {
-            schema: 2,
+            schema: 3,
             stack_check_offset: stack_check_offset(),
             records: fixed_layouts(),
             stack: StackPolicy::fixed(),
@@ -158,7 +158,7 @@ impl CoroutineRuntimeContract {
     }
 
     pub fn verify(&self) -> Result<(), RawModelError> {
-        if self.schema != 2
+        if self.schema != 3
             || self.stack_check_offset != 64
             || self.records != fixed_layouts()
             || self.stack != StackPolicy::fixed()
@@ -241,7 +241,7 @@ fn fixed_layouts() -> Vec<CoroutineRecordLayout> {
         record!(CoroutineSlot; hot, stack),
         record!(CoroutineContext; rsp, rip, rbx, rbp, r12, r13),
         record!(MorestackScratch; return_pc, gpr, xmm),
-        record!(CoroutineCold; id, context, morestack_scratch, wait_record, foreign_bridge, join_state, coroutine_locals, panic_state, select_rng, select_scratch, gc_scan_epoch),
+        record!(CoroutineCold; id, context, morestack_scratch, wait_record, foreign_bridge, join_state, coroutine_locals, panic_state, select_rng, select_scratch, gc_scan_epoch, payload_state, join_waiter, callback_node, callback_storage),
         record!(MorestackMailbox; hot, entry_rsp, candidate, required, cold, system_context, return_value, processor),
         record!(Rt0Payload; revision, main_entry, initial_slot, runtime_state, bias, main_return, stackmap, fragment_base, stackmap_len, unwind, unwind_len, gc_types, gc_types_len, gc_meta, gc_meta_len, boot_environment),
         record!(Rt0Params; bias_baseline, reloc_table, reloc_count, protect_va, protect_len, entry, boot_r14, processor, rt0_start, payload_va, payload_len, initial_slot, runtime_state, reserved_13, reserved_14, reserved_15),

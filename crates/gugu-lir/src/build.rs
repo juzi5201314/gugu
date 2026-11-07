@@ -1,5 +1,6 @@
 //! 具体 GIR 到 LIR；变量读取由 block 参数封口，不引入 phi 或平行语义 IR。
 mod calls;
+pub(crate) mod foreign;
 mod intrinsics;
 mod memory;
 mod numeric;
@@ -187,7 +188,7 @@ struct Builder<'a> {
     ///
     /// 共享 place 的字段访问必须在这个 guard 内发生：`address`/`read_place`/`write_place`
     /// 用它决定 `SharedFieldBarrier` 关联的 token，并阻止 guard 内的派生地址泄漏到 guard 外。
-    shared_guards: Vec<u32>,
+    shared_guards: Vec<(u32, ValueId, ValueId)>,
 }
 
 /// 一个边界 block 上的 region 结束动作。
@@ -449,28 +450,33 @@ impl Builder<'_> {
         self.read(variable)
     }
 
-    /// 打开一段 shared access guard；返回该 guard 的 token。
-    pub(super) fn begin_shared(&mut self, handle: ValueId) -> u32 {
+    /// 打开 shared access guard，返回只在 guard 内有效的 payload。
+    pub(super) fn begin_shared(&mut self, handle: ValueId) -> ValueId {
         self.next_shared_token += 1;
         let token = self.next_shared_token;
-        self.emit(Op::SharedAccessBegin { token }, &[handle], &[]);
-        self.shared_guards.push(token);
-        token
+        let payload = self.emit_one(
+            Op::SharedAccessBegin { token },
+            &[handle],
+            ValueType::pointer(body::Provenance::GcHeap),
+            Origin::Derived(handle),
+        );
+        self.shared_guards.push((token, handle, payload));
+        payload
     }
 
     /// 关闭最近打开的 shared access guard。
     pub(super) fn end_shared(&mut self) -> Result<(), Diagnostic> {
-        let token = self
+        let (token, handle, _) = self
             .shared_guards
             .pop()
             .ok_or_else(|| invalid("shared access guard 栈为空"))?;
-        self.emit(Op::SharedAccessEnd { token }, &[], &[]);
+        self.emit(Op::SharedAccessEnd { token }, &[handle], &[]);
         Ok(())
     }
 
     /// 返回当前打开的 shared access guard 的 token。
     pub(super) fn active_shared_token(&self) -> Option<u32> {
-        self.shared_guards.last().copied()
+        self.shared_guards.last().map(|entry| entry.0)
     }
 
     /// 世界扫描：按闭包定义逐实例点查环境分配点，观察环境车道与压缩可行性。
@@ -499,7 +505,10 @@ impl Builder<'_> {
         // 环境对象自身 footprint 超过 block 时 runtime 写 LOCAL_DIRECT | LARGE_OBJECT；
         // header 与字段表示必须同源，因此这样的环境整个定义退回 full-pointer 槽。
         let environment_bytes = u64::try_from(owner.captures.len()).expect("捕获数量适配 u64") * 8;
-        compressible &= crate::runtime::local_heap::OBJECT_HEADER_BYTES + environment_bytes
+        compressible &= crate::runtime::local_heap::OBJECT_HEADER_BYTES
+            + environment_bytes
+            + u64::from(crate::runtime::local_heap_schema::HEAP_GRANULE_BYTES)
+            - 1
             <= u64::from(crate::runtime::gc_metadata_contract::GC_BLOCK_BYTES);
         for &(concrete_index, statement) in self.index.closure_sites(definition) {
             let concrete = &self.world.concrete
@@ -577,10 +586,17 @@ impl Builder<'_> {
                     else {
                         return false;
                     };
-                    let Some(layout) = instance.types.get(local).and_then(|ty| ty.layout) else {
+                    let ty = instance.body.locals[local].ty.0 as usize;
+                    let Some(layout) = instance.types.get(ty).and_then(|ty| ty.layout) else {
                         return false;
                     };
-                    crate::runtime::local_heap::OBJECT_HEADER_BYTES + layout.size <= block_bytes
+                    layout.align <= 256
+                        && crate::runtime::local_heap::OBJECT_HEADER_BYTES
+                            + u64::from(layout.align)
+                                .max(crate::runtime::local_heap_schema::HEAP_GRANULE_BYTES.into())
+                            - 1
+                            + layout.size
+                            <= block_bytes
                 })
         })
     }

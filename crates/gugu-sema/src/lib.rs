@@ -42,7 +42,7 @@ pub struct ParsedModule {
     pub configured: cfg::ConfiguredAst,
     /// 该模块来自 compiler 内建的源树登记，而不是用户源码。
     ///
-    /// `std.option` 等公开标准库模块是 package API。`std.prelude`、`std.runtime.*` 与
+    /// `std.option`、`std.runtime` 等公开标准库模块是 package API。`std.prelude`、`std.runtime.*` 与
     /// `runtime.*` 仍是私有实现：用户源码不能声明 `std` 根，也不能导入这些私有模块。
     pub builtin: bool,
 }

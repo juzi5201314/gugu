@@ -1,0 +1,5 @@
+//! pin 登记页的共享几何；不依赖分配器或收集器执行入口。
+pub const PIN_PAGE_BYTES: uint = 4096
+pub const PIN_RECORDS_OFFSET: uint = 32
+pub const PIN_RECORD_BYTES: uint = 16
+pub const PIN_RECORD_CAPACITY: uint = (PIN_PAGE_BYTES - PIN_RECORDS_OFFSET) / PIN_RECORD_BYTES

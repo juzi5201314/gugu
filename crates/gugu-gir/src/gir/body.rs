@@ -438,6 +438,9 @@ pub enum IntrinsicOp {
     DeferChainPop,
     /// 空链句柄。
     DeferChainEmpty,
+    /// string 与只读字节视图共用 backing；输入只能来自受限 runtime 原语。
+    StringBytes,
+    StringFromUtf8Unchecked,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -526,13 +529,6 @@ pub enum StatementKind {
         owner: Place,
         destination: Place,
         value: Operand,
-    },
-    Pin {
-        place: Place,
-        token: LocalId,
-    },
-    Unpin {
-        token: LocalId,
     },
     ScopedViewBegin {
         source: Place,

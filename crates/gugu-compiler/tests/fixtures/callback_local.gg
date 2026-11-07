@@ -1,0 +1,4 @@
+#[repr(C)]
+struct Mixed { pub number: i64, pub fraction: f64 }
+pub extern "C" fn callback_identity(value: Mixed) Mixed { value }
+fn main() { unsafe { _ = callback_identity(Mixed { number: 7, fraction: 2.5 }) } }

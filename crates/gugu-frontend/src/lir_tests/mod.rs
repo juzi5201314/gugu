@@ -55,6 +55,7 @@ fn poll_linear_leaf_matches_generic_and_rejects_calls_and_loops() {
         captures_arguments: false,
         by_value: Vec::new(),
         sret: None,
+        foreign_arguments: Vec::new(),
         poll_free_leaf: false,
     });
     assert!(!poll::has_linear_leaf_shape(&called));
@@ -2470,9 +2471,18 @@ fn shared_environment_offset_stays_inside_guard() {
             let Some(base) = body.args(&instruction.arguments).first() else {
                 continue;
             };
-            if body.values[base.index()].kind.provenance != Some(Provenance::SharedHandle) {
+            assert_ne!(
+                body.values[base.index()].kind.provenance,
+                Some(Provenance::SharedHandle),
+                "稳定 handle 不能参与地址算术"
+            );
+            if token.is_none() {
                 continue;
             }
+            assert!(matches!(
+                body.values[base.index()].kind.provenance,
+                Some(Provenance::GcHeap | Provenance::GcInterior)
+            ));
             offsets += 1;
             assert!(token.is_some(), "shared 字段偏移必须在 guard 内");
         }
