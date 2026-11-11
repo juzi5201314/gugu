@@ -1,0 +1,26 @@
+use std.net.{TcpStream, SocketAddr, Ipv4Addr, Ipv6Addr, IpAddr, UnixStream}
+use std.collections.{Vec}
+use std.io.{Error}
+
+#[used]
+fn candidates() Vec[SocketAddr] {
+    let values = Vec[SocketAddr]::new()
+    values.push(SocketAddr::new(IpAddr::V6(Ipv6Addr::new([0; 8])), 1))
+    values.push(SocketAddr::new(IpAddr::V6(Ipv6Addr::new([0; 8])), 2))
+    values.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 3))
+    values.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 4))
+    values
+}
+#[used]
+fn candidate_port(values: Vec[SocketAddr], index: int) uint = match values.get(index) {
+    Some(value) => uint(value.port()), None => uint(0),
+}
+#[used]
+fn options(stream: TcpStream) Result[(), Error] {
+    stream.set_recv_buffer_size(8192)?
+    _ = stream.recv_buffer_size()?
+    Ok(())
+}
+#[used]
+fn unix_address(stream: UnixStream) { _ = stream.peer_addr() }
+fn main() { _ = TcpStream::connect(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 80)) }

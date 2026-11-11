@@ -1,0 +1,116 @@
+use std.runtime.net_platform as native
+use std.runtime.net_endpoint as endpoint
+use std.runtime.net_wait as waiting
+use std.runtime.net_transport as transport
+use std.runtime.resource.{ResourceCell}
+use std.runtime.resource as resources
+use std.runtime.fs_platform.{raw_allocate, raw_free}
+use std.runtime.heap.{heap_word, heap_word32, heap_store_word, heap_store_word32}
+use std.net.address.{UnixAddr}
+use std.path.{Path, OsString}
+use std.io.{Error, Bytes}
+use std.text.{alloc_bytes}
+
+pub fn encode(address: UnixAddr, out: uint) uint { unsafe {
+    let bytes = address.path().as_os().to_bytes()
+    let data = bytes.as_slice()
+    std.ptr.write_unaligned[u16](std.mem.transmute[uint, *u16](out), u16(1))
+    endpoint.copy_in(out + 2, bytes)
+    std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](out + 2 + uint(data.len())), byte(0))
+    uint(data.len()) + 3
+} }
+pub fn decode(data: uint, length: uint) Result[Option[UnixAddr], Error] { unsafe {
+    if length < 2 || length > 110 { return Err(Error::InvalidData) }
+    if std.ptr.read_unaligned[u16](std.mem.transmute[uint, *u16](data)) != u16(1) { return Err(Error::InvalidData) }
+    if length == 2 || std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](data + 2)) == byte(0) { return Ok(None) }
+    let count: uint = 0
+    while count < length - 2 && std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](data + 2 + count)) != byte(0) { count = count + 1 }
+    if count > 107 { return Err(Error::InvalidData) }
+    let bytes = alloc_bytes(int(count))
+    endpoint.copy_out(data + 2, bytes, int(count))
+    let path = path_from_bytes(Bytes::from_owned(bytes))?
+    match UnixAddr::from_path(path) { Ok(value) => Ok(Some(value)), Err(_) => Err(Error::InvalidData) }
+} }
+#[cfg(os = "linux")]
+fn path_from_bytes(bytes: Bytes) Result[Path, Error] = Ok(Path::from_os(OsString::from_bytes(bytes)))
+#[cfg(os = "windows")]
+fn path_from_bytes(bytes: Bytes) Result[Path, Error] {
+    match bytes.to_string() { Ok(value) => Ok(Path::from_string(value)), Err(_) => Err(Error::InvalidData) }
+}
+pub fn bind(address: UnixAddr, stream: bool) Result[ResourceCell, Error] {
+    native.initialize()?
+    waiting.initialize()?
+    let handle = native.checked(native.create_socket(1, if stream { 1 } else { 2 }))?
+    let retained = false
+    defer { if !retained { _ = native.call(7, handle, 0, 0, 0, 0, 0) }; }
+    let raw = raw_allocate(128)
+    defer { raw_free(raw, 128) }
+    let length = encode(address, raw)
+    _ = native.checked(native.call(2, handle, raw, length, 0, 0, 0))?
+    if stream { _ = native.checked(native.call(3, handle, 1024, 0, 0, 0, 0))? }
+    retained = true
+    Ok(endpoint.create(handle, 1))
+}
+pub fn connect(address: UnixAddr, cancel: uint, deadline: uint) Result[ResourceCell, Error] {
+    native.initialize()?
+    waiting.initialize()?
+    let handle = native.checked(native.create_socket(1, 1))?
+    let cell = endpoint.create(handle, 1)
+    let retained = false
+    defer { if !retained { _ = endpoint.close(&cell) }; }
+    let node = transport.allocate(cell.control, transport.CONNECT, 0, 0, cancel)
+    defer { transport.dispose(node) }
+    heap_store_word(node + 40, deadline)
+    heap_store_word(node + 96, encode(address, node + transport.ADDRESS))
+    _ = transport.submit(node)?
+    retained = true
+    Ok(cell)
+}
+pub fn address(cell: &ResourceCell, peer: bool) Result[Option[UnixAddr], Error] {
+    let handle = resources.begin(cell)
+    if handle == ~uint(0) { return Err(Error::Closed) }
+    defer { resources.end(cell) }
+    let raw = raw_allocate(128)
+    defer { raw_free(raw, 128) }
+    heap_store_word32(raw + 112, 110)
+    _ = native.checked(native.call(if peer { 6 } else { 5 }, handle, raw, raw + 112, 0, 0, 0))?
+    decode(raw, heap_word32(raw + 112))
+}
+#[cfg(os = "linux")]
+pub fn send(cell: &ResourceCell, bytes: Bytes, target: Option[UnixAddr], cancel: uint) Result[(), Error] {
+    endpoint.connected(cell, match target { Some(_) => false, None => true })?
+    let length = uint(bytes.len())
+    let raw = raw_allocate(length + 1)
+    defer { raw_free(raw, length + 1) }
+    endpoint.copy_in(raw, bytes)
+    let node = transport.allocate(cell.control, transport.SEND, raw, length, cancel)
+    defer { transport.dispose(node) }
+    heap_store_word(node + 320, match target { Some(_) => uint(1), None => uint(2) })
+    if let Some(value) = target { heap_store_word(node + 96, encode(value, node + transport.ADDRESS)) }
+    let sent = transport.submit(node)?
+    if sent != length { return Err(if sent == 0 { Error::WriteZero } else { Error::InvalidData }) }
+    Ok(())
+}
+#[cfg(os = "linux")]
+pub fn receive(cell: &ResourceCell, destination: &[byte], cancel: uint, connected: bool) Result[(int, Option[UnixAddr], bool), Error] {
+    endpoint.connected(cell, connected)?
+    let capacity = uint(destination.len())
+    let raw = raw_allocate(capacity + 1)
+    defer { raw_free(raw, capacity + 1) }
+    let node = transport.allocate(cell.control, transport.RECEIVE, raw, capacity, cancel)
+    defer { transport.dispose(node) }
+    heap_store_word(node + 320, if connected { 2 } else { 1 })
+    let received = transport.submit(node)?
+    let count = if received > capacity { capacity } else { received }
+    endpoint.copy_out(raw, destination, int(count))
+    let source = if heap_word(node + 96) == 0 { None } else { decode(node + transport.ADDRESS, heap_word(node + 96))? }
+    Ok((int(count), source, received > capacity))
+}
+#[cfg(os = "linux")]
+pub fn datagram_connect(cell: &ResourceCell, address: Option[UnixAddr]) Result[(), Error] {
+    let node = transport.allocate(cell.control, match address { Some(_) => transport.UDP_CONNECT, None => transport.UDP_DISCONNECT }, 0, 0, 0)
+    defer { transport.dispose(node) }
+    heap_store_word(node + 96, match address { Some(value) => encode(value, node + transport.ADDRESS), None => uint(2) })
+    _ = transport.submit(node)?
+    Ok(())
+}

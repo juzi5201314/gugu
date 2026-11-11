@@ -352,6 +352,12 @@ poller每批返回事件时按合法 preferred processor和shard分组，每组�
 
 每个用户等待者持有一个 ResourceCell 操作租约，Windows 内核请求另外持有独立操作租约。用户 close 建立共享关闭位后唤醒全部等待者；已提交的 AcceptEx 保留控制页与缓冲，迟到成功的 socket 被关闭，完成后才归还最后原生操作租约。资源 kind=3 的关闭复用文件/C worker 池，Linux 关闭 fd，Windows 通过控制页中的 C ABI 包调用 closesocket，绝不对 SOCKET 使用 CloseHandle。`begin_control/end_control` 只操作在途计数，不临时构造会触发值租约释放的 ResourceCell。
 
+`net_transport` 在同一 epoll/IOCP 上扩展流、报文和连接请求，不创建第二个 poller。`net_dispatch` 只由 poller 请求链引用并按需安装 transport/计时回调；rt0 的 `network_service` 不引用这些私有实现，无网络程序不引入它们的可执行闭包。ResourceCell 控制页1216..1304保存两个方向的 FIFO、connected/half-shutdown 状态、readiness 登记、到达序号和控制屏障链；取消扫描使用请求页上的独立双向链，跨轮保留请求游标，单 endpoint 的长队列不会让尾部取消饥饿；1536/1560/1584 分别保存 read/write/accept 的秒、纳秒及是否设置，避开已有关闭请求包和 AcceptEx 存储。单次操作使用计费的 4096 字节非移动请求页，保存控制页、协程、取消控制、捕获的绝对 deadline、raw 数据、结果和 sockaddr；Windows 的 OVERLAPPED、WSABUF 和原生参数也保存在该页。用户数据通过 raw 缓冲交接，完成前不把可移动 managed 地址传给内核。
+
+读和写队列可独立推进，同方向只提交队首；UDP connect/disconnect 以到达序号与另一方向形成屏障，模式在实际提交前复查。Linux EAGAIN 保留队首直到 epoll readiness；用户数据低位标记区分 listener 与 transport，socket 控制页按页对齐。Windows 请求关联原有 IOCP，同步成功仍等完成包，CancelIoEx 只发出一次，收到终止完成前不结束操作租约或释放 raw 页。完整报文接收在 Windows 使用有 16 位 IP 长度上界的 raw 缓冲，再按调用方 destination 返回前缀和 truncated；Linux 使用 MSG_TRUNC 取得原报文长度。发送量与请求长度不一致必须报告错误。
+
+`net_event` 为连接竞速提供事件和绝对 deadline 等待，复用现有单调时钟机器原语；网络服务有界推进，不建立公开 sleep/Instant 的平行实现。连接在 DNS 之前捕获总时限，地址族内保持 resolver 顺序并交错启动；一次硬失败使下一候选立即具备启动资格，其余间隔 250 ms。首个成功者发布共享结果，失败结果按启动索引保存；退出后取消其它尝试，迟到成功的资源仍须关闭。pending 同时包含这些等待和原生请求，退出必须排空。
+
 `net_resolver` 将 ASCII host、service、hints、结果指针和 C 调用包复制到计费 raw 页；系统 getaddrinfo/freeaddrinfo 复用普通八槽 BlockingBridge，pthread 保证 Linux TLS 合法。每次请求由独立 managed helper 持有 raw 页和精确追踪的 Response，原调用者取消后从等待链摘除且只唤醒一次，helper 继续等待宿主工作退出并释放迟到地址链。未取消结果按系统链表顺序复制为独立 Vec，不缓存、不排序、不去重。自建 raw 页使用统一 native_memory 账本；libc 内部分配由 getaddrinfo/freeaddrinfo 成对管理，不虚报为 provider 自建映射。
 
 ## 可复制协程栈
@@ -507,7 +513,7 @@ DirtyCpu admission不可在持有 `LogicalProcessor` 时等待。并行度降低
 
 只有普通 `ForeignBridge` 允许外部代码回调 Gugu。回调首先按 lease-retake协议打破 outer coroutine的 attached lease；若赢得原 processor即可用它建立 callback coroutine frame，否则按普通规则取得其它 processor。callback结束后 processor交还 scheduler，不把 lease重新附着到仍在 C中的 outer coroutine；outer native返回时走 detached路径。bridge查找/建立当前 OS thread的 worker登记，嵌套 callback以 worker-local depth区分；返回 C前必须完成 callback panic边界和临时 root清理。从 `ForeignLeaf`、`ForeignBridge[DirtyCpu]` 或 `DirtyWaiting` 回调 Gugu是违反对应 unsafe契约，不进入隐式桥接路径。
 
-当前单 managed worker 镜像的普通外调在提交时已经 detached，因此回调不会重新占有 outer lease。processor+4088 指向进程期存活的系统栈槽，yield/park、morestack 和协程返回都在换回系统栈时装入该槽；系统服务不借用可回收协程的 hot。宿主初始栈沿用 OS guard，GC 仍使用独立 collector 栈描述符。回调 hot/cold/pack/registry 使用同一 4 KiB 控制页，cold+528 记录映射；退役链最多检查八项取得可复用页，复用同步恢复 stack live，压力时先归还栈再归还控制页。processor+3848 记录这些控制页缓存。退休大栈按每轮 64 KiB 撤销提交，保存剩余容量；普通 Join 的结果记录继续保留。共享表 trim 每轮至多访问 16 表、归还 64 KiB，coordinator+200 保存链游标；新空表出现时重启扫描。processor+3832 的三类确认在新 pending/cache/reclaimable 事件上撤销。当前 RuntimeRaw schema 为 45、x64 lowering revision 为 19。
+当前单 managed worker 镜像的普通外调在提交时已经 detached，因此回调不会重新占有 outer lease。processor+4088 指向进程期存活的系统栈槽，yield/park、morestack 和协程返回都在换回系统栈时装入该槽；系统服务不借用可回收协程的 hot。宿主初始栈沿用 OS guard，GC 仍使用独立 collector 栈描述符。回调 hot/cold/pack/registry 使用同一 4 KiB 控制页，cold+528 记录映射；退役链最多检查八项取得可复用页，复用同步恢复 stack live，压力时先归还栈再归还控制页。processor+3848 记录这些控制页缓存。退休大栈按每轮 64 KiB 撤销提交，保存剩余容量；普通 Join 的结果记录继续保留。共享表 trim 每轮至多访问 16 表、归还 64 KiB，coordinator+200 保存链游标；新空表出现时重启扫描。processor+3832 的三类确认在新 pending/cache/reclaimable 事件上撤销。当前 RuntimeRaw schema 为 46、x64 lowering revision 为 20。
 
 C 回调同时登记上限为 64，包含排队、执行和等待 DETACH 的节点。C 入口保留原生寄存器和参数包，通过独立 raw 控制区的锁发布 FIFO 节点并设置 processor poll bit2。调度服务取出节点后建立普通 managed coroutine；完成顺序为动态根清理、活跃登记摘除、栈退役、live count 更新，最后发布 callback COMPLETE。外部线程观察完成并 DETACH 后才能销毁节点；关闭准入仍允许已经登记的回调排空。
 

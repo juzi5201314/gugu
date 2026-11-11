@@ -2,6 +2,11 @@
 #[repr(C)]
 pub struct Duration { seconds: uint, nanoseconds: uint }
 impl Duration {
+    pub fn new(seconds: uint, nanoseconds: u32) Self {
+        let extra = uint(nanoseconds) / 1000000000
+        if seconds > ~uint(0) - extra { panic("时长溢出") }
+        Self { seconds: seconds + extra, nanoseconds: uint(nanoseconds) % 1000000000 }
+    }
     pub fn from_secs(seconds: uint) Self = Self { seconds, nanoseconds: 0 }
     pub fn from_millis(value: uint) Self = Self { seconds: value / 1000, nanoseconds: value % 1000 * 1000000 }
     pub fn from_nanos(value: uint) Self = Self { seconds: value / 1000000000, nanoseconds: value % 1000000000 }

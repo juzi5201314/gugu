@@ -1,0 +1,127 @@
+use std.runtime.resource as resources
+use std.runtime.resource.{ResourceCell}
+use std.runtime.net_platform as native
+use std.runtime.net_wait as waiting
+use std.runtime.net_transport as transport
+use std.runtime.net_deadline as clock
+use std.runtime.fs_platform.{raw_allocate, raw_free}
+use std.runtime.heap.{heap_word, heap_store_word}
+use std.net.address.{SocketAddr, IpAddr}
+use std.net.types.{Shutdown}
+use std.io.{Error, Bytes, ByteBuffer}
+use std.text.{alloc_bytes}
+
+pub fn create(handle: uint, family: uint) ResourceCell {
+    let result = resources.create(handle, native.SOCKET_KIND)
+    heap_store_word(result.control + waiting.FAMILY, family)
+    close_packet(result.control, handle)
+    result
+}
+#[cfg(os = "linux")]
+fn close_packet(control: uint, handle: uint) { _ = control
+    _ = handle }
+#[cfg(os = "windows")]
+fn close_packet(control: uint, handle: uint) {
+    heap_store_word(control + 256, native.call(19, 0, 0, 0, 0, 0, 0).value)
+    heap_store_word(control + 264, 32)
+    heap_store_word(control + 272, handle)
+}
+pub fn family(address: SocketAddr) uint = match address.ip() { IpAddr::V4(_) => uint(2), IpAddr::V6(_) => native.family6() }
+pub fn close(cell: &ResourceCell) Result[(), Error] {
+    let error = resources.close(cell)
+    if error == 0 { Ok(()) } else { Err(native.from_error(error)) }
+}
+pub fn address(cell: &ResourceCell, peer: bool) Result[SocketAddr, Error] {
+    let handle = resources.begin(cell)
+    if handle == ~uint(0) { return Err(Error::Closed) }
+    defer { resources.end(cell) }
+    native.address(handle, peer)
+}
+pub fn copy_out(data: uint, destination: &[byte], count: int) { unsafe {
+    for index in 0..count { destination[index] = std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](data + uint(index))) }
+} }
+pub fn copy_in(data: uint, source: Bytes) { unsafe {
+    let bytes = source.as_slice()
+    for index in 0..bytes.len() { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](data + uint(index)), bytes[index]) }
+} }
+pub fn read(cell: &ResourceCell, destination: &[byte], cancel: uint) Result[int, Error] {
+    if resources.handle(cell) == ~uint(0) { return Err(Error::Closed) }
+    if heap_word(cell.control + transport.SHUT) & uint(1) != 0 { return Ok(0) }
+    if waiting.cancelled(cancel) { return Err(Error::Cancelled) }
+    if destination.len() == 0 { return Ok(0) }
+    let length = if destination.len() > 65536 { 65536 } else { destination.len() }
+    let raw = raw_allocate(uint(length))
+    defer { raw_free(raw, uint(length)) }
+    let node = transport.allocate(cell.control, transport.READ, raw, uint(length), cancel)
+    defer { transport.dispose(node) }
+    let count = transport.submit(node)?
+    if count > uint(length) { return Err(Error::InvalidData) }
+    copy_out(raw, destination, int(count))
+    Ok(int(count))
+}
+pub fn write(cell: &ResourceCell, source: Bytes, cancel: uint) Result[int, Error] {
+    if resources.handle(cell) == ~uint(0) { return Err(Error::Closed) }
+    if waiting.cancelled(cancel) { return Err(Error::Cancelled) }
+    if source.len() == 0 { return Ok(0) }
+    let source = if source.len() > 65536 { source.split_at(65536).0 } else { source }
+    let raw = raw_allocate(uint(source.len()))
+    defer { raw_free(raw, uint(source.len())) }
+    copy_in(raw, source)
+    let node = transport.allocate(cell.control, transport.WRITE, raw, uint(source.len()), cancel)
+    defer { transport.dispose(node) }
+    let count = transport.submit(node)?
+    if count == 0 { return Err(Error::WriteZero) }
+    if count > uint(source.len()) { return Err(Error::InvalidData) }
+    Ok(int(count))
+}
+pub fn read_buffer(cell: &ResourceCell, destination: &ByteBuffer, limit: int, cancel: uint) Result[int, Error] {
+    if limit < 0 { panic("读取上限不能为负数") }
+    let data = unsafe { alloc_bytes(if limit > 65536 { 65536 } else { limit }) }
+    let count = read(cell, data, cancel)?
+    destination.append(unsafe { Bytes::from_owned(data[..count]) })
+    Ok(count)
+}
+pub fn shutdown(cell: &ResourceCell, direction: Shutdown) Result[(), Error] {
+    let handle = resources.begin(cell)
+    if handle == ~uint(0) { return Err(Error::Closed) }
+    defer { resources.end(cell) }
+    let read = match direction { Shutdown::Read | Shutdown::Both => true, _ => false }
+    if read && heap_word(cell.control + transport.SHUT) & uint(1) == 0 {
+        _ = native.checked(native.call(22, handle, 0, 0, 0, 0, 0))?
+        transport.close_read(cell.control)
+    }
+    let write = match direction { Shutdown::Write | Shutdown::Both => true, _ => false }
+    if write {
+        let node = transport.allocate(cell.control, transport.SHUT_WRITE, 0, 0, 0)
+        defer { transport.dispose(node) }
+        // 半关闭在先前写请求之后执行，不受写 timeout 影响。
+        heap_store_word(node + 40, 0)
+        _ = transport.submit(node)?
+    }
+    Ok(())
+}
+pub fn connected(cell: &ResourceCell, required: bool) Result[(), Error] {
+    if resources.handle(cell) == ~uint(0) { return Err(Error::Closed) }
+    let value = heap_word(cell.control + transport.CONNECTED) != 0
+    if value != required { return Err(if required { Error::NotConnected } else { Error::InvalidState }) }
+    Ok(())
+}
+pub fn connect_one(address: SocketAddr, cancel: uint, deadline: uint) Result[ResourceCell, Error] {
+    native.initialize()?
+    waiting.initialize()?
+    if waiting.cancelled(cancel) { return Err(Error::Cancelled) }
+    if deadline != 0 && clock.expired(deadline, clock.now()) { return Err(Error::TimedOut) }
+    let family = family(address)
+    let handle = native.checked(native.create_socket(family, 1))?
+    let cell = create(handle, family)
+    let retained = false
+    defer { if !retained { _ = close(&cell) }; }
+    let node = transport.allocate(cell.control, transport.CONNECT, 0, 0, cancel)
+    defer { transport.dispose(node) }
+    heap_store_word(node + 40, deadline)
+    heap_store_word(node + 96, native.encode(address, node + transport.ADDRESS))
+    _ = transport.submit(node)?
+    heap_store_word(cell.control + transport.CONNECTED, 1)
+    retained = true
+    Ok(cell)
+}

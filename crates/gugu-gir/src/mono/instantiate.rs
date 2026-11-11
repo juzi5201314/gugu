@@ -9,7 +9,7 @@ use crate::{ast, hir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const INSTANCE_SCHEMA: u32 = 6;
+pub const INSTANCE_SCHEMA: u32 = 7;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]

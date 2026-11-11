@@ -1,9 +1,9 @@
 nextest-version = "0.9.115"
 
 [profile.default]
-# 纯 CPU 的进程内编译用例，物化峰值 RSS 约 309 MiB。
-# 当前完整套件六并发出现资源争用超时；两并发 643 项在 97.48 秒内全部通过。
-test-threads = 2
+# 纯 CPU 的进程内编译用例；重编译用例按下方规则独占槽位。
+# 三并发的完整网络扩展套件在约65秒完成，单项仍限制为3秒。
+test-threads = 3
 retries = 0
 fail-fast = true
 # 单个用例超过 3 秒即视为缺陷：超时直接失败并杀死测试进程组。
@@ -16,12 +16,12 @@ global-timeout = "120s"
 filter = 'test(/^lir_tests::(spawn_result_kind_matches_the_payload_roots|bare_barrier_sites_have_mandatory_call_return_records|runtime_machine_calls_enter_lir_with_glue_shape|root_init_narrows_union_words_by_variant|root_init_events_track_pointer_fields_only|init_proof_marks_only_fully_written_slots|safepoints_root_every_live_value_in_their_world_stackmap)$/) | test(/^numbering_tests::\w+_install_like_a_fresh_derivation$/) | test(/frontend::semantics_tests::comptime::user_functions_are_interpreted_with_capability_propagation$/) | test(/frontend::semantics_tests::opaque::apit_occurrences_have_independent_types_and_enforce_bounds$/) | test(/runtime::(collections_tests::std_collections_are_importable_and_require_stable_keys|blocking_io_tests::std_io_and_path_compile_and_user_path_stays_reserved|foreign_tests::compiled_foreign_sites_enter_the_runtime_contract|wait_tests::channel_demand_reaches_(linux|windows)_image_plan|compression_tests::real_compilation_defaults_to_disabled_compression|coroutine_tests::source_coroutines_reach_(linux|windows)_image_plan|provenance_tests::(real_compilation_defaults_to_release_provenance|safety_profile_participates_in_contract_identity_and_action_key)|routing_tests::(real_compilation_defaults_to_direct_routing|routing_mode_participates_in_contract_identity))$/) | test(/(image_plan_reports_turn_region_contract|main_result_type_enters_rt0_demand_and_contract|configured_target_changes_raw_contract_fingerprint|gc_metadata_fingerprint_changes_with_type_table)$/)'
 threads-required = 2
 
-# 三槽用例；默认两槽时独占，手工提高并发时仍限制资源竞争。
+# 三槽用例；默认独占，手工提高并发时仍限制资源竞争。
 [[profile.default.overrides]]
 filter = 'test(/frontend::semantics_tests::runtime::runtime_publish_resolves_imports_and_canonical_paths$/) | test(/frontend::semantics_tests::opaque::generic_opaque_instances_preserve_declared_type_parameters$/) | test(/build_json_reports_shared_heap_contract_keys$/)'
 threads-required = 3
 
 # 单次整体编译 2.6 秒以上或需要两次以上整体编译的用例：独占运行，任何并发都会推过 3 秒上限。
 [[profile.default.overrides]]
-filter = 'test(/^lir_tests::(stackmap_world_covers_call_poll_suspend_and_select|cached_lir_matches_fresh_output_and_action_identity)$/) | test(/^mono::tests::(public_summary_changes_with_effects_but_not_private_definition_ids|changed_source_with_shared_queries_matches_a_fresh_world)$/) | test(/frontend::semantics_tests::runtime_checks_survive_queries_and_reach_the_backend_plan$/) | test(/frontend::semantics_tests::comptime::action_key_is_deterministic_and_input_sensitive$/) | binary(=materialization_equivalence)'
+filter = 'test(/^lir_tests::(stackmap_world_covers_call_poll_suspend_and_select|cached_lir_matches_fresh_output_and_action_identity)$/) | test(/^mono::tests::(public_summary_changes_with_effects_but_not_private_definition_ids|changed_source_with_shared_queries_matches_a_fresh_world)$/) | test(/frontend::semantics_tests::runtime_checks_survive_queries_and_reach_the_backend_plan$/) | test(/frontend::semantics_tests::comptime::action_key_is_deterministic_and_input_sensitive$/) | binary(=materialization_equivalence) | test(/connection_order_options_and_unix_addresses_follow_contract$/) | test(/filesystem_tests::resource::(running_cancellation_retains_credit_until_worker_exits|runtime_mapping_ledger_charges_only_successful_platform_operations)$/)'
 threads-required = 6

@@ -8,6 +8,11 @@ fn linux_socket_calls_preserve_arguments_and_native_errno() {
         (2, "syscall:49", (-98i64) as u64, 0, 98),
         (4, "syscall:288", (-11i64) as u64, 0, 11),
         (10, "syscall:232", 2, 2, 0),
+        (21, "syscall:42", (-115i64) as u64, 0, 115),
+        (22, "syscall:48", 0, 0, 0),
+        (23, "syscall:55", 0, 0, 0),
+        (24, "syscall:45", 3, 3, 0),
+        (25, "syscall:44", (-90i64) as u64, 0, 90),
     ] {
         let mut machine = Machine::new(&[(syscall, returned)]);
         machine.set_reg(Rax, op);
@@ -41,6 +46,23 @@ fn winsock_errors_use_wsa_status_and_preserve_wide_socket_handles() {
             10048,
         ),
         (12, vec![("WSAStartup", 10093)], 10093, 10093),
+        (
+            21,
+            vec![("connect", u64::MAX), ("WSAGetLastError", 10035)],
+            u32::MAX as u64,
+            10035,
+        ),
+        (22, vec![("shutdown", 0)], 0, 0),
+        (23, vec![("getsockopt", 0)], 0, 0),
+        (
+            26,
+            vec![("WSARecvFrom", u64::MAX), ("WSAGetLastError", 997)],
+            u32::MAX as u64,
+            997,
+        ),
+        (27, vec![("WSASendTo", 0)], 0, 0),
+        (28, vec![("WSARecv", 0)], 0, 0),
+        (29, vec![("WSASend", 0)], 0, 0),
         (
             10,
             vec![("GetQueuedCompletionStatus", 0), ("GetLastError", 258)],

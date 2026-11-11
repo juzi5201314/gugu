@@ -1,4 +1,12 @@
-use std.net.{Resolver, ResolveError, ToSocketAddrs, SocketAddr, IpAddr, Ipv4Addr}
+use std.net.{Resolver, ResolveError, ToSocketAddrs, SocketAddr, IpAddr, Ipv4Addr, TcpStream, ConnectOptions}
+use std.time.{Duration}
+
+#[used]
+fn connect_targets() {
+    _ = TcpStream::connect_with("localhost:80", ConnectOptions { timeout: Some(Duration::from_millis(250)), cancel: None })
+    let target: [SocketAddr; 1] = [SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 80)]
+    _ = TcpStream::connect(target[..])
+}
 use std.sync.{CancelSource}
 
 fn main() {

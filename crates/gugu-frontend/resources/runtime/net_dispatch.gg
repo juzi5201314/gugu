@@ -1,0 +1,29 @@
+// listener 与 transport 共享 poller；这些可选回调只在网络请求可达时进入镜像。
+struct Transport {
+    service: fn(),
+    pending: fn() bool,
+    ready: fn(uint),
+    complete: fn(uint, uint, uint),
+}
+struct Timer { service: fn(), pending: fn() bool }
+static transport: Option[Transport] = None
+static timer: Option[Timer] = None
+pub fn install_transport(service: fn(), pending: fn() bool, ready: fn(uint), complete: fn(uint, uint, uint)) {
+    transport = Some(Transport { service, pending, ready, complete })
+}
+pub fn install_timer(service: fn(), pending: fn() bool) {
+    timer = Some(Timer { service, pending })
+}
+pub fn poll() {
+    if let Some(value) = timer { (value.service)() }
+    if let Some(value) = transport { (value.service)() };
+}
+pub fn pending() bool {
+    if let Some(value) = timer { if (value.pending)() { return true }; }
+    if let Some(value) = transport { return (value.pending)() }
+    false
+}
+pub fn ready(control: uint) { if let Some(value) = transport { (value.ready)(control) }; }
+pub fn complete(node: uint, bytes: uint, status: uint) { if let Some(value) = transport { (value.complete)(node, bytes, status) }; }
+pub fn shutdown() { transport = None
+    timer = None }

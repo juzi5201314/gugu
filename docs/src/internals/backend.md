@@ -16,9 +16,9 @@ CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline
 
 ## 标准网络系统依赖
 
-`NativeLink.with_standard_library` 在形成最终 action key 前扫描已验证 LIR 的网络机器操作。NetCall 的 Windows 路径加入 ws2_32 与 IOCP 所需 kernel32 符号；ResolverSymbol 在 Linux 加入 libc.so.6 的 getaddrinfo/freeaddrinfo 和既有 pthread/TLS 符号，在 Windows 加入 Winsock 解析入口。缺省 Linux 解释器取目标 descriptor，用户显式提供的解释器保持原值。先保留显式导入顺序，再按固定目录追加内建依赖，完全相同的项不重复添加，符号跨库冲突交给既有校验拒绝。合并后的规范编码进入 action key、backend plan、ELF PT_INTERP/DT_NEEDED 或 PE IAT。import policy revision 为2；不探测宿主库、NSS 配置或 PATH。
+`NativeLink.with_standard_library` 在形成最终 action key 前扫描已验证 LIR 的网络机器操作。NetCall 的 Windows 路径加入 ws2_32 与 IOCP 所需 kernel32 符号；ResolverSymbol 在 Linux 加入 libc.so.6 的 getaddrinfo/freeaddrinfo 和既有 pthread/TLS 符号，在 Windows 加入 Winsock 解析入口。缺省 Linux 解释器取目标 descriptor，用户显式提供的解释器保持原值。先保留显式导入顺序，再按固定目录追加内建依赖，完全相同的项不重复添加，符号跨库冲突交给既有校验拒绝。合并后的规范编码进入 action key、backend plan、ELF PT_INTERP/DT_NEEDED 或 PE IAT。import policy revision 为3；不探测宿主库、NSS 配置或 PATH。
 
-net_call 和 resolver_symbol 机器片段独立按实际机器重定位的可达引用选择。ELF、PE 和 stackmap/unwind 的 RVA 布局共用同一判定；未使用 Resolver 的数字 bind 不包含 resolver 动态依赖。网络请求布局为九个八字节参数，value 位于72、error位于80，Windows provider 扩展函数地址位于88；全部请求为 raw 存储。Winsock SOCKET 保持64位，SOCKET_ERROR 只比较32位返回，错误读取 WSAGetLastError；IOCP/句柄操作读取 GetLastError。Linux 负 syscall 返回转换为正 errno。Windows 关闭 socket 的回调使用 C ABI，回传捕获的 WSA 错误供共享资源完成路径消费。
+net_call 和 resolver_symbol 机器片段独立按实际机器重定位的可达引用选择。ELF、PE 和 stackmap/unwind 的 RVA 布局共用同一判定；未使用 Resolver 的数字 bind 不包含 resolver 动态依赖。网络请求布局为九个八字节参数，value 位于72、error位于80，Windows provider 扩展函数地址位于88；transport 的 connect/shutdown/getsockopt/recvfrom/sendto/WSARecvFrom/WSASendTo/WSARecv/WSASend 继续复用同一 raw request。流读写与 datagram 交给 epoll/IOCP，Windows 的 WSABUF、地址缓冲和 OVERLAPPED 保存在请求页直到 completion。全部请求为 raw 存储。Winsock SOCKET 保持64位，SOCKET_ERROR 只比较32位返回，错误读取 WSAGetLastError；IOCP/句柄操作读取 GetLastError。Linux 负 syscall 返回转换为正 errno。Windows 关闭 socket 的回调使用 C ABI，回传捕获的 WSA 错误供共享资源完成路径消费。
 
 内部调用的 outgoing 栈实参必须在任何参数寄存器改写前保存，随后统一解析寄存器并行拷贝组。否则十参数 native_call 的最后一个取消实参可能被第一个操作码覆盖；固定回归覆盖这一情况，真实 Resolver 的 freeaddrinfo 路径也消费同一规则。
 

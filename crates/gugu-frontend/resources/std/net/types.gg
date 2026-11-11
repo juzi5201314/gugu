@@ -1,6 +1,62 @@
 use std.io as io
+use std.net.address.{SocketAddr}
+use std.text.{Bytes}
+use std.time.{Duration}
+use std.sync.{CancelToken}
+use std.collections.{Vec}
 
 pub enum Ipv6BindMode { V6Only, DualStack }
+pub struct ConnectOptions { pub timeout: Option[Duration], pub cancel: Option[CancelToken] }
+impl ConnectOptions { pub fn new() Self = Self { timeout: None, cancel: None } }
+pub enum ConnectError {
+    Resolve(ResolveError),
+    TimedOut,
+    Cancelled,
+    Failed(Vec[(SocketAddr, io.Error)]),
+}
+impl Error for ConnectError {
+    fn message(self: &Self) string = match *self {
+        ConnectError::Resolve(error) => error.message(),
+        ConnectError::TimedOut => "连接超时",
+        ConnectError::Cancelled => "连接已取消",
+        ConnectError::Failed(_) => "全部地址连接失败",
+    }
+    fn source(self: &Self) Option[&dyn Error] = None
+}
+
+pub enum Shutdown { Read, Write, Both }
+
+#[repr(C)]
+pub struct DatagramRead {
+    pub len: int,
+    pub source: SocketAddr,
+    pub truncated: bool,
+}
+
+#[repr(C)]
+pub struct DatagramRecv {
+    pub len: int,
+    pub truncated: bool,
+}
+
+#[repr(C)]
+pub struct DatagramPacket {
+    pub data: Bytes,
+    pub source: SocketAddr,
+}
+
+#[repr(C)]
+pub struct InterfaceIndex(pub u32)
+pub struct KeepAliveConfig {
+    pub idle: Option[Duration],
+    pub interval: Option[Duration],
+    pub count: Option[int],
+}
+
+impl KeepAliveConfig {
+    pub fn new() Self = Self { idle: None, interval: None, count: None }
+}
+
 pub struct BindOptions {
     pub backlog: int,
     pub reuse_address: bool,

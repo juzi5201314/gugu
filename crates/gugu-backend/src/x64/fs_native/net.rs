@@ -114,6 +114,11 @@ const LINUX: &[(i32, i32)] = &[
     (8, 291),
     (9, 233),
     (10, 232),
+    (21, 42), // connect
+    (22, 48), // shutdown
+    (23, 55), // getsockopt
+    (24, 45), // recvfrom
+    (25, 44), // sendto
 ];
 fn close_address(b: &mut Builder, done: LabelId) {
     let next = b.label();
@@ -183,6 +188,13 @@ pub(crate) const WINDOWS_SYMBOLS: &[&str] = &[
     "WSACleanup",
     "WSAGetLastError",
     "WSAIoctl",
+    "connect",
+    "shutdown",
+    "getsockopt",
+    "WSARecvFrom",
+    "WSASendTo",
+    "WSARecv",
+    "WSASend",
 ];
 // code、符号、返回分类：0=SOCKET、1=SOCKET_ERROR、2=直接错误码、3=BOOL、4=HANDLE。
 const WINDOWS: &[(i32, &str, u8)] = &[
@@ -202,6 +214,13 @@ const WINDOWS: &[(i32, &str, u8)] = &[
     (13, "WSACleanup", 1),
     (17, "CancelIoEx", 3),
     (20, "CloseHandle", 3),
+    (21, "connect", 1),
+    (22, "shutdown", 1),
+    (23, "getsockopt", 1),
+    (26, "WSARecvFrom", 1),
+    (27, "WSASendTo", 1),
+    (28, "WSARecv", 1),
+    (29, "WSASend", 1),
 ];
 fn windows_arguments(b: &mut Builder) {
     for (index, r) in [Rcx, Rdx, R8, R9].into_iter().enumerate() {
@@ -213,7 +232,7 @@ fn windows_arguments(b: &mut Builder) {
     }
 }
 fn windows_extensions(b: &mut Builder, done: LabelId) {
-    for op in [14, 15] {
+    for op in [14, 15, 31] {
         let next = b.label();
         compare(b, Rax, op);
         jump(b, "jne", next);

@@ -29,7 +29,8 @@ pub const ENCODER_REVISION: u32 = 3;
 /// PollResume 压力分支进入系统栈并强制指针根落栈。
 /// 区域快分配同步发布 object-start 位图。
 /// 网络短调用与系统 resolver 地址按可达性选择片段。
-pub const LOWERING_REVISION: u32 = 19;
+/// transport 收发、连接、方向关闭和类型化选项扩展网络机器目录。
+pub const LOWERING_REVISION: u32 = 20;
 /// 寄存器分配与 frame 规则 revision：候选过滤、spill 权重、frame 布局顺序与 prologue 形状。
 pub const ALLOCATION_REVISION: u32 = 6;
 /// 栈图、unwind 与 source record 的生成规则 revision。

@@ -7,7 +7,17 @@ use std.io as io
 pub const REQUEST_BYTES: uint = 128
 pub const REQUEST_VALUE: uint = 72
 pub const REQUEST_ERROR: uint = 80
+pub const TRANSPORT_OVERLAPPED: uint = 256
 pub const SOCKET_KIND: uint = 3
+pub const FAMILY: uint = 240
+pub const CLOSED: uint = 18446744073709551614
+pub const CANCELLED: uint = 18446744073709551615
+static poller_port: uint = 0
+pub fn set_port(value: uint) { poller_port = value }
+pub fn port() uint = poller_port
+pub fn cancelled(control: uint) bool { unsafe {
+    control != 0 && std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](control)) != 0
+} }
 
 pub fn call(op: uint, a: uint, b: uint, c: uint, d: uint, e: uint, f: uint) FsResult {
     let storage = raw_allocate(REQUEST_BYTES)
@@ -90,7 +100,7 @@ pub fn from_error(code: uint) io.Error = match code {
     10040 => io.Error::MessageTooLarge, 10042 | 10043 | 10047 => io.Error::Unsupported,
     10048 => io.Error::AddrInUse, 10049 => io.Error::AddrNotAvailable,
     10053 => io.Error::ConnectionAborted, 10054 => io.Error::ConnectionReset,
-    10057 => io.Error::NotConnected, 10060 => io.Error::TimedOut,
+    10057 => io.Error::NotConnected, 10058 => io.Error::BrokenPipe, 10060 => io.Error::TimedOut,
     10061 => io.Error::ConnectionRefused, _ => io.from_native_error(code),
 }
 pub fn checked(result: FsResult) Result[uint, io.Error] {
@@ -125,9 +135,9 @@ pub fn shutdown() {
     };
 }
 #[cfg(os = "linux")]
-fn create_socket(family: uint, kind: uint) FsResult = call(0, family, kind | uint(526336), 0, 0, 0, 0)
+pub fn create_socket(family: uint, kind: uint) FsResult = call(0, family, kind | uint(526336), 0, 0, 0, 0)
 #[cfg(os = "windows")]
-fn create_socket(family: uint, kind: uint) FsResult = call(0, family, kind, 0, 0, 0, 0)
+pub fn create_socket(family: uint, kind: uint) FsResult = call(0, family, kind, 0, 0, 0, 0)
 #[cfg(os = "linux")]
 fn nonblocking(handle: uint, scratch: uint) FsResult {
     _ = handle

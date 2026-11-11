@@ -38,10 +38,10 @@ use std::collections::BTreeMap;
 /// compiler-storage 类型在 GBC1 里的枚举 tag；语言类型 tag 目前只用到 1..=30。
 pub const STORAGE_TAG: u16 = 0x8000;
 
-/// spawn 参数包的字节数：9 个整数车道（含 code）与 8 个 16 字节浮点车道。
-pub const SPAWN_PACK_BYTES: u64 = 200;
-/// spawn 参数包的对齐：浮点车道需要 16 字节对齐。
-pub const SPAWN_PACK_ALIGN: u64 = 16;
+/// spawn 参数包包含 ABI 车道及尾部对齐，与实际分配使用同一权威定义。
+pub const SPAWN_PACK_BYTES: u64 = gugu_runtime_abi::COROUTINE_PACK_BYTES as u64;
+/// spawn 参数包的对齐由 ABI 车道布局统一定义。
+pub const SPAWN_PACK_ALIGN: u64 = gugu_runtime_abi::COROUTINE_PACK_ALIGN as u64;
 
 /// 存储类型角色；进入规范字节。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]

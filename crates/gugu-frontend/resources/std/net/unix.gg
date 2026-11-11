@@ -1,0 +1,124 @@
+use std.net.address.{UnixAddr}
+use std.net.types.{Shutdown, DatagramRecv, ConnectOptions}
+use std.runtime.resource.{ResourceCell}
+use std.runtime.net_unix as unix
+use std.runtime.net_endpoint as endpoint
+use std.runtime.net_wait as waiting
+use std.runtime.net_deadline as timeout
+use std.io.{Error, CancelToken, Read, Write, Bytes, ByteBuffer}
+use std.time.{Duration}
+use std.text.{alloc_bytes}
+
+pub struct UnixListener { cell: ResourceCell }
+pub struct UnixStream { cell: ResourceCell }
+pub struct UnixReadHalf { cell: ResourceCell }
+pub struct UnixWriteHalf { cell: ResourceCell }
+impl UnixListener {
+    pub fn bind(address: UnixAddr) Result[Self, Error] = Ok(Self { cell: unix.bind(address, true)? })
+    pub fn accept(self: &Self) Result[(UnixStream, Option[UnixAddr]), Error] = self.accept_inner(0)
+    pub fn accept_cancel(self: &Self, cancel: &CancelToken) Result[(UnixStream, Option[UnixAddr]), Error] = self.accept_inner(unsafe { cancel.raw_control() })
+    fn accept_inner(self: &Self, cancel: uint) Result[(UnixStream, Option[UnixAddr]), Error] {
+        let handle = waiting.accept_handle(&self.cell, cancel)?
+        let stream = UnixStream { cell: endpoint.create(handle, 1) }
+        let peer = stream.peer_addr()?
+        Ok((stream, peer))
+    }
+    pub fn local_addr(self: &Self) Result[Option[UnixAddr], Error] = unix.address(&self.cell, false)
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn set_accept_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.ACCEPT, value)
+    pub fn accept_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.ACCEPT)
+}
+impl UnixStream {
+    pub fn connect(address: UnixAddr) Result[Self, Error] = Ok(Self { cell: unix.connect(address, 0, 0)? })
+    pub fn connect_with(address: UnixAddr, options: ConnectOptions) Result[Self, Error] {
+        let cancel = match options.cancel { Some(token) => unsafe { token.raw_control() }, None => uint(0) }
+        let deadline = match options.timeout { Some(value) => timeout.after(value), None => uint(0) }
+        Ok(Self { cell: unix.connect(address, cancel, deadline)? })
+    }
+    pub fn local_addr(self: &Self) Result[Option[UnixAddr], Error] = unix.address(&self.cell, false)
+    pub fn peer_addr(self: &Self) Result[Option[UnixAddr], Error] = unix.address(&self.cell, true)
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn split(self: &Self) (UnixReadHalf, UnixWriteHalf) = (UnixReadHalf { cell: self.cell }, UnixWriteHalf { cell: self.cell })
+    pub fn shutdown(self: &Self, direction: Shutdown) Result[(), Error] = endpoint.shutdown(&self.cell, direction)
+    pub fn set_read_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.READ, value)
+    pub fn read_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.READ)
+    pub fn set_write_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.WRITE, value)
+    pub fn write_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.WRITE)
+}
+impl UnixReadHalf {
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn shutdown(self: &Self) Result[(), Error] = endpoint.shutdown(&self.cell, Shutdown::Read)
+    pub fn set_read_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.READ, value)
+    pub fn read_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.READ)
+}
+impl UnixWriteHalf {
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn shutdown(self: &Self) Result[(), Error] = endpoint.shutdown(&self.cell, Shutdown::Write)
+    pub fn set_write_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.WRITE, value)
+    pub fn write_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.WRITE)
+}
+impl Read for UnixStream {
+    fn read(self: &Self, destination: &[byte]) Result[int, Error] = endpoint.read(&self.cell, destination, 0)
+    fn read_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[int, Error] = endpoint.read(&self.cell, destination, unsafe { cancel.raw_control() })
+    fn read_buffer(self: &Self, destination: &ByteBuffer, limit: int) Result[int, Error] = endpoint.read_buffer(&self.cell, destination, limit, 0)
+    fn read_buffer_cancel(self: &Self, destination: &ByteBuffer, limit: int, cancel: &CancelToken) Result[int, Error] = endpoint.read_buffer(&self.cell, destination, limit, unsafe { cancel.raw_control() })
+}
+impl Read for UnixReadHalf {
+    fn read(self: &Self, destination: &[byte]) Result[int, Error] = endpoint.read(&self.cell, destination, 0)
+    fn read_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[int, Error] = endpoint.read(&self.cell, destination, unsafe { cancel.raw_control() })
+    fn read_buffer(self: &Self, destination: &ByteBuffer, limit: int) Result[int, Error] = endpoint.read_buffer(&self.cell, destination, limit, 0)
+    fn read_buffer_cancel(self: &Self, destination: &ByteBuffer, limit: int, cancel: &CancelToken) Result[int, Error] = endpoint.read_buffer(&self.cell, destination, limit, unsafe { cancel.raw_control() })
+}
+impl Write for UnixStream {
+    fn write(self: &Self, source: Bytes) Result[int, Error] = endpoint.write(&self.cell, source, 0)
+    fn write_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[int, Error] = endpoint.write(&self.cell, source, unsafe { cancel.raw_control() })
+}
+impl Write for UnixWriteHalf {
+    fn write(self: &Self, source: Bytes) Result[int, Error] = endpoint.write(&self.cell, source, 0)
+    fn write_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[int, Error] = endpoint.write(&self.cell, source, unsafe { cancel.raw_control() })
+}
+#[cfg(os = "linux")]
+pub struct UnixDatagram { cell: ResourceCell }
+#[cfg(os = "linux")]
+pub struct UnixDatagramRead { pub len: int, pub source: Option[UnixAddr], pub truncated: bool }
+#[cfg(os = "linux")]
+pub struct UnixDatagramPacket { pub data: Bytes, pub source: Option[UnixAddr] }
+#[cfg(os = "linux")]
+impl UnixDatagram {
+    pub fn bind(address: UnixAddr) Result[Self, Error] = Ok(Self { cell: unix.bind(address, false)? })
+    pub fn local_addr(self: &Self) Result[Option[UnixAddr], Error] = unix.address(&self.cell, false)
+    pub fn peer_addr(self: &Self) Result[Option[UnixAddr], Error] { endpoint.connected(&self.cell, true)?
+        unix.address(&self.cell, true) }
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn connect(self: &Self, address: UnixAddr) Result[(), Error] = unix.datagram_connect(&self.cell, Some(address))
+    pub fn disconnect(self: &Self) Result[(), Error] = unix.datagram_connect(&self.cell, None)
+    pub fn send(self: &Self, source: Bytes) Result[(), Error] = unix.send(&self.cell, source, None, 0)
+    pub fn send_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[(), Error] = unix.send(&self.cell, source, None, unsafe { cancel.raw_control() })
+    pub fn send_to(self: &Self, source: Bytes, address: UnixAddr) Result[(), Error] = unix.send(&self.cell, source, Some(address), 0)
+    pub fn send_to_cancel(self: &Self, source: Bytes, address: UnixAddr, cancel: &CancelToken) Result[(), Error] = unix.send(&self.cell, source, Some(address), unsafe { cancel.raw_control() })
+    pub fn recv(self: &Self, destination: &[byte]) Result[DatagramRecv, Error] = self.recv_inner(destination, 0)
+    pub fn recv_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[DatagramRecv, Error] = self.recv_inner(destination, unsafe { cancel.raw_control() })
+    fn recv_inner(self: &Self, destination: &[byte], cancel: uint) Result[DatagramRecv, Error] {
+        let result = unix.receive(&self.cell, destination, cancel, true)?
+        Ok(DatagramRecv { len: result.0, truncated: result.2 })
+    }
+    pub fn recv_packet(self: &Self, max_len: int) Result[UnixDatagramPacket, Error] = self.packet(max_len, 0)
+    pub fn recv_packet_cancel(self: &Self, max_len: int, cancel: &CancelToken) Result[UnixDatagramPacket, Error] = self.packet(max_len, unsafe { cancel.raw_control() })
+    fn packet(self: &Self, max_len: int, cancel: uint) Result[UnixDatagramPacket, Error] {
+        if max_len < 0 { panic("报文上限不能为负数") }
+        let data = unsafe { alloc_bytes(max_len) }
+        let result = self.receive(data, cancel)?
+        if result.truncated { return Err(Error::MessageTooLarge) }
+        Ok(UnixDatagramPacket { data: Bytes::copy_from(data[..result.len]), source: result.source })
+    }
+    pub fn recv_from(self: &Self, destination: &[byte]) Result[UnixDatagramRead, Error] = self.receive(destination, 0)
+    pub fn recv_from_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[UnixDatagramRead, Error] = self.receive(destination, unsafe { cancel.raw_control() })
+    fn receive(self: &Self, destination: &[byte], cancel: uint) Result[UnixDatagramRead, Error] {
+        let result = unix.receive(&self.cell, destination, cancel, false)?
+        Ok(UnixDatagramRead { len: result.0, source: result.1, truncated: result.2 })
+    }
+    pub fn set_read_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.READ, value)
+    pub fn read_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.READ)
+    pub fn set_write_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.WRITE, value)
+    pub fn write_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.WRITE)
+}

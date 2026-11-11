@@ -93,14 +93,8 @@ pub fn derive(
     mono_world.public_summaries = summaries;
     let mut gir = gir;
     gir.concrete = super::gir::concrete::build(&context, &gir, &mono_world)?;
+    // pass::run 已在全部变换完成后刷新 world 指纹，此处直接消费同一冻结结果。
     let gir_stats = super::gir::pass::run(&mut gir, hir.module(), &analysis_world)?;
-    gir.fingerprint = super::gir::world_fingerprint(
-        &gir.bodies,
-        &gir.fragments,
-        gir.hir_fingerprint,
-        &gir.placement,
-        &gir.concrete,
-    );
     Ok(DerivedWorld {
         checked,
         early,

@@ -6,6 +6,7 @@ use crate::lir::body::{Body, CallTarget, Op, RuntimeCall, Symbol};
 use std::collections::HashMap;
 
 mod protocol;
+mod transport;
 
 fn word(memory: &[u8], at: u64) -> u64 {
     u64::from_le_bytes(memory[at as usize..at as usize + 8].try_into().unwrap())
@@ -24,6 +25,9 @@ struct Harness<'a> {
     calls: Vec<(u64, Vec<u64>)>,
     woken: Vec<u64>,
     close_requests: Vec<Vec<u64>>,
+    park_hook: Option<fn(&mut Harness<'_>, &mut Vec<u8>)>,
+    current: u64,
+    now: u64,
     native_hook: Option<fn(&mut Harness<'_>, u64, u64, &mut Vec<u8>)>,
     bridge_hook: Option<fn(&mut Harness<'_>, &[u64], &mut Vec<u8>) -> Vec<u64>>,
 }
@@ -62,6 +66,9 @@ impl<'a> Harness<'a> {
             calls: vec![],
             woken: vec![],
             close_requests: vec![],
+            park_hook: None,
+            current: 128,
+            now: 1000,
             native_hook: None,
             bridge_hook: None,
             bodies: output
@@ -150,6 +157,14 @@ impl<'a> Harness<'a> {
                             "std/runtime/network_service.gg",
                             "install" | "install_resolver",
                         )) => return vec![],
+                        Some((
+                            "std/runtime/net_dispatch.gg",
+                            "install_transport" | "install_timer",
+                        )) => return vec![],
+                        Some(("std/runtime/scheduler.gg", "park_current")) => {
+                            self.park_hook.expect("固定调度事件")(self, memory);
+                            return vec![];
+                        }
                         Some(("std/runtime/scheduler.gg", "ready_hot")) => {
                             self.woken.push(args[0]);
                             return vec![];
@@ -167,6 +182,12 @@ impl<'a> Harness<'a> {
                     }
                     let next = self.bodies[instance];
                     self.run(next, args, memory)
+                }
+                Boundary::Machine(crate::runtime::RuntimeMachineOp::CurrentSlot) => {
+                    vec![self.current]
+                }
+                Boundary::Machine(crate::runtime::RuntimeMachineOp::MonotonicNanos) => {
+                    vec![self.now]
                 }
                 Boundary::Machine(crate::runtime::RuntimeMachineOp::ResolverSymbol) => {
                     vec![args[0] + 100]

@@ -1,0 +1,118 @@
+use std.net.resolver.{ToSocketAddrs}
+use std.net.address.{SocketAddr, IpAddr}
+use std.net.types.{ConnectOptions, ConnectError, ResolveError}
+use std.runtime.resource.{ResourceCell}
+use std.runtime.net_endpoint as endpoint
+use std.runtime.net_platform as native
+use std.runtime.net_wait as poller
+use std.runtime.net_event as events
+use std.runtime.net_event.{Event}
+use std.runtime.net_deadline as clock
+use std.collections.{Vec}
+use std.sync.{CancelSource, CancelToken}
+use std.time.{Duration}
+use std.io.{Error}
+
+struct Resolution { value: Option[Result[Vec[SocketAddr], ResolveError]] }
+struct Race {
+    event: Event,
+    winner: Option[ResourceCell],
+    errors: Vec[Option[Error]],
+    finished: int,
+    stopped: bool,
+}
+fn resolve[T: ToSocketAddrs](target: T, deadline: uint, external: uint, cancel: &CancelSource) Result[Vec[SocketAddr], ConnectError] {
+    let response = Resolution { value: None }
+    let event = events.event()
+    let token = cancel.token()
+    let task = async {
+        response.value = Some(target.socket_addrs_cancel(&token))
+        events.notify(&event)
+    }
+    let status = events.wait(&event, 0, deadline, external)
+    _ = task
+    if status != 0 { cancel.cancel()
+        return Err(if status == clock.TIMED_OUT { ConnectError::TimedOut } else { ConnectError::Cancelled }) }
+    match response.value {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(error)) => Err(ConnectError::Resolve(error)),
+        None => panic("解析完成事件缺少结果"),
+    }
+}
+// 分族后按首地址的族交错，族内保持 resolver 顺序。
+fn at(addresses: &Vec[SocketAddr], index: int) SocketAddr = match addresses.get(index) {
+    Some(value) => value,
+    None => panic("连接候选下标越界"),
+}
+pub fn ordered(addresses: &Vec[SocketAddr]) Vec[SocketAddr] {
+    let v4 = Vec[SocketAddr]::new()
+    let v6 = Vec[SocketAddr]::new()
+    let first6 = if addresses.is_empty() { false } else { match at(addresses, 0).ip() { IpAddr::V4(_) => false, IpAddr::V6(_) => true } }
+    for address in *addresses {
+        match address.ip() { IpAddr::V4(_) => v4.push(address), IpAddr::V6(_) => v6.push(address) }
+    }
+    let result = Vec[SocketAddr]::new()
+    let a = if first6 { v6 } else { v4 }
+    let b = if first6 { v4 } else { v6 }
+    let index = 0
+    while index < a.len() || index < b.len() {
+        if index < a.len() { result.push(at(&a, index)) }
+        if index < b.len() { result.push(at(&b, index)) }
+        index = index + 1
+    }
+    result
+}
+fn attempt(race: &Race, index: int, address: SocketAddr, cancel: CancelToken, deadline: uint) {
+    let result = endpoint.connect_one(address, unsafe { cancel.raw_control() }, deadline)
+    match result {
+        Ok(cell) => {
+            let won = match race.winner { Some(_) => true, None => false }
+            if race.stopped || won { _ = endpoint.close(&cell) }
+            else { race.winner = Some(cell) }
+        },
+        Err(error) => { _ = race.errors.set(index, Some(error)) },
+    }
+    race.finished = race.finished + 1
+    events.notify(&race.event)
+}
+pub fn connect[T: ToSocketAddrs](target: T, options: ConnectOptions) Result[ResourceCell, ConnectError] {
+    let deadline = match options.timeout { Some(value) => clock.after(value), None => uint(0) }
+    let external = match options.cancel { Some(token) => unsafe { token.raw_control() }, None => uint(0) }
+    if native.cancelled(external) { return Err(ConnectError::Cancelled) }
+    match poller.initialize() { Ok(_) => (), Err(error) => return Err(ConnectError::Resolve(ResolveError::System(error))) }
+    let cancel = CancelSource::new()
+    let resolved = resolve(target, deadline, external, &cancel)?
+    let addresses = ordered(&resolved)
+    let race = Race { event: events.event(), winner: None, errors: Vec[Option[Error]]::new(), finished: 0, stopped: false }
+    defer { race.stopped = true
+        cancel.cancel() }
+    let started = 0
+    let observed_finished = 0
+    let launch_at: uint = 0
+    loop {
+        let sequence = race.event.sequence
+        if let Some(cell) = race.winner { return Ok(cell) }
+        if native.cancelled(external) { return Err(ConnectError::Cancelled) }
+        if deadline != 0 && clock.expired(deadline, clock.now()) { return Err(ConnectError::TimedOut) }
+        if started == addresses.len() && race.finished == started {
+            let failures = Vec[(SocketAddr, Error)]::new()
+            for index in 0..started {
+                if let Some(Some(error)) = race.errors.get(index) { failures.push((at(&addresses, index), error)) };
+            }
+            return Err(ConnectError::Failed(failures))
+        }
+        if started < addresses.len() && (started == 0 || race.finished > observed_finished || clock.now() >= launch_at) {
+            observed_finished = race.finished
+            let index = started
+            let address = at(&addresses, index)
+            race.errors.push(None)
+            let token = cancel.token()
+            let task = async attempt(&race, index, address, token, deadline)
+            _ = task
+            started = started + 1
+            launch_at = clock.after(Duration::from_millis(250))
+        }
+        let wake = if started < addresses.len() && (deadline == 0 || launch_at < deadline) { launch_at } else { deadline }
+        _ = events.wait(&race.event, sequence, wake, external)
+    }
+}

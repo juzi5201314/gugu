@@ -1,49 +1,63 @@
-use std.net.types.{BindOptions, DatagramBindOptions, Ipv6BindMode}
-use std.net.address.{SocketAddr, IpAddr}
+use std.net.types.{BindOptions, DatagramBindOptions, Ipv6BindMode, Shutdown, DatagramRead, DatagramRecv, DatagramPacket, ConnectOptions, ConnectError}
+use std.net.address.{SocketAddr}
+use std.net.resolver.{ToSocketAddrs}
 use std.runtime.net_platform as native
 use std.runtime.net_wait as waiting
-use std.runtime.resource as resources
+use std.runtime.net_endpoint as endpoint
+use std.runtime.net_datagram as datagram
+use std.runtime.net_connect as connecting
+use std.runtime.net_deadline as timeout
 use std.runtime.resource.{ResourceCell}
-use std.runtime.heap.{heap_store_word}
-use std.io.{Error, CancelToken}
+use std.io.{Error, CancelToken, Read, Write, Bytes, ByteBuffer}
+use std.time.{Duration}
+use std.net.types.{KeepAliveConfig, InterfaceIndex}
+use std.net.address.{IpAddr}
+use std.runtime.net_options as options
+
+impl TcpStream {
+    pub fn set_nodelay(self: &Self, enabled: bool) Result[(), Error] = options.set(&self.cell, 0, if enabled { 1 } else { 0 })
+    pub fn nodelay(self: &Self) Result[bool, Error] = Ok(options.get(&self.cell, 0)? != 0)
+    #[allow(large_copy)]
+    pub fn set_keepalive(self: &Self, value: Option[KeepAliveConfig]) Result[(), Error] = options.set_keepalive(&self.cell, value)
+    pub fn keepalive(self: &Self) Result[Option[KeepAliveConfig], Error] = options.keepalive(&self.cell)
+    pub fn set_ttl(self: &Self, hops: u32) Result[(), Error] = options.set(&self.cell, 2, uint(hops))
+    pub fn ttl(self: &Self) Result[u32, Error] = Ok(u32(options.get(&self.cell, 2)?))
+    pub fn set_recv_buffer_size(self: &Self, bytes: int) Result[(), Error] = options.set(&self.cell, 3, uint(bytes))
+    pub fn recv_buffer_size(self: &Self) Result[int, Error] = Ok(int(options.get(&self.cell, 3)?))
+    pub fn set_send_buffer_size(self: &Self, bytes: int) Result[(), Error] = options.set(&self.cell, 4, uint(bytes))
+    pub fn send_buffer_size(self: &Self) Result[int, Error] = Ok(int(options.get(&self.cell, 4)?))
+}
+impl UdpSocket {
+    pub fn set_broadcast(self: &Self, enabled: bool) Result[(), Error] = options.set(&self.cell, 5, if enabled { 1 } else { 0 })
+    pub fn broadcast(self: &Self) Result[bool, Error] = Ok(options.get(&self.cell, 5)? != 0)
+    pub fn set_ttl(self: &Self, hops: u32) Result[(), Error] = options.set(&self.cell, 2, uint(hops))
+    pub fn ttl(self: &Self) Result[u32, Error] = Ok(u32(options.get(&self.cell, 2)?))
+    pub fn set_recv_buffer_size(self: &Self, bytes: int) Result[(), Error] = options.set(&self.cell, 3, uint(bytes))
+    pub fn recv_buffer_size(self: &Self) Result[int, Error] = Ok(int(options.get(&self.cell, 3)?))
+    pub fn set_send_buffer_size(self: &Self, bytes: int) Result[(), Error] = options.set(&self.cell, 4, uint(bytes))
+    pub fn send_buffer_size(self: &Self) Result[int, Error] = Ok(int(options.get(&self.cell, 4)?))
+    pub fn set_multicast_loop(self: &Self, enabled: bool) Result[(), Error] = options.set(&self.cell, 6, if enabled { 1 } else { 0 })
+    pub fn multicast_loop(self: &Self) Result[bool, Error] = Ok(options.get(&self.cell, 6)? != 0)
+    pub fn set_multicast_ttl(self: &Self, hops: u32) Result[(), Error] = options.set(&self.cell, 7, uint(hops))
+    pub fn multicast_ttl(self: &Self) Result[u32, Error] = Ok(u32(options.get(&self.cell, 7)?))
+    pub fn join_multicast(self: &Self, group: IpAddr, interface: Option[InterfaceIndex]) Result[(), Error] = options.membership(&self.cell, group, interface, true)
+    pub fn leave_multicast(self: &Self, group: IpAddr, interface: Option[InterfaceIndex]) Result[(), Error] = options.membership(&self.cell, group, interface, false)
+}
 
 pub struct TcpListener { cell: ResourceCell }
 pub struct TcpStream { cell: ResourceCell }
+pub struct TcpReadHalf { cell: ResourceCell }
+pub struct TcpWriteHalf { cell: ResourceCell }
 pub struct UdpSocket { cell: ResourceCell }
 
 fn dual(mode: Ipv6BindMode) bool = match mode { Ipv6BindMode::V6Only => false, Ipv6BindMode::DualStack => true }
-fn cell(handle: uint, address: SocketAddr) ResourceCell {
-    let result = resources.create(handle, native.SOCKET_KIND)
-    heap_store_word(result.control + waiting.FAMILY, match address.ip() { IpAddr::V4(_) => uint(2), IpAddr::V6(_) => native.family6() })
-    close_packet(result.control, handle)
-    result
-}
-#[cfg(os = "linux")]
-fn close_packet(control: uint, handle: uint) { _ = control
-    _ = handle }
-#[cfg(os = "windows")]
-fn close_packet(control: uint, handle: uint) {
-    heap_store_word(control + 256, native.call(19, 0, 0, 0, 0, 0, 0).value)
-    heap_store_word(control + 264, 32)
-    heap_store_word(control + 272, handle)
-}
 fn bind(address: SocketAddr, tcp: bool, backlog: int, reuse: bool, mode: Ipv6BindMode) Result[ResourceCell, Error] {
     let handle = native.bind(address, tcp, backlog, reuse, dual(mode))?
     match waiting.initialize() {
-        Ok(_) => Ok(cell(handle, address)),
+        Ok(_) => Ok(endpoint.create(handle, endpoint.family(address))),
         Err(error) => { _ = native.call(7, handle, 0, 0, 0, 0, 0)
             Err(error) },
     }
-}
-fn close(cell: &ResourceCell) Result[(), Error] {
-    let error = resources.close(cell)
-    if error == 0 { Ok(()) } else { Err(native.from_error(error)) }
-}
-fn address(cell: &ResourceCell, peer: bool) Result[SocketAddr, Error] {
-    let handle = resources.begin(cell)
-    if handle == ~uint(0) { return Err(Error::Closed) }
-    defer { resources.end(cell) }
-    native.address(handle, peer)
 }
 impl TcpListener {
     pub fn bind(address: SocketAddr, options: BindOptions) Result[Self, Error] {
@@ -53,20 +67,82 @@ impl TcpListener {
     pub fn accept_cancel(self: &Self, cancel: &CancelToken) Result[(TcpStream, SocketAddr), Error] = self.accept_inner(unsafe { cancel.raw_control() })
     fn accept_inner(self: &Self, cancel: uint) Result[(TcpStream, SocketAddr), Error] {
         let accepted = waiting.accept(&self.cell, cancel)?
-        Ok((TcpStream { cell: cell(accepted.handle, accepted.peer) }, accepted.peer))
+        Ok((TcpStream { cell: endpoint.create(accepted.handle, endpoint.family(accepted.peer)) }, accepted.peer))
     }
-    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = address(&self.cell, false)
-    pub fn close(self: &Self) Result[(), Error] = close(&self.cell)
+    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = endpoint.address(&self.cell, false)
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn set_accept_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.ACCEPT, value)
+    pub fn accept_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.ACCEPT)
 }
 impl TcpStream {
-    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = address(&self.cell, false)
-    pub fn peer_addr(self: &Self) Result[SocketAddr, Error] = address(&self.cell, true)
-    pub fn close(self: &Self) Result[(), Error] = close(&self.cell)
+    pub fn connect[T: ToSocketAddrs](target: T) Result[Self, ConnectError] = Self::connect_with(target, ConnectOptions::new())
+    pub fn connect_with[T: ToSocketAddrs](target: T, options: ConnectOptions) Result[Self, ConnectError] {
+        Ok(Self { cell: connecting.connect(target, options)? })
+    }
+    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = endpoint.address(&self.cell, false)
+    pub fn peer_addr(self: &Self) Result[SocketAddr, Error] = endpoint.address(&self.cell, true)
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn split(self: &Self) (TcpReadHalf, TcpWriteHalf) = (TcpReadHalf { cell: self.cell }, TcpWriteHalf { cell: self.cell })
+    pub fn shutdown(self: &Self, direction: Shutdown) Result[(), Error] = endpoint.shutdown(&self.cell, direction)
+    pub fn set_read_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.READ, value)
+    pub fn read_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.READ)
+    pub fn set_write_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.WRITE, value)
+    pub fn write_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.WRITE)
+}
+impl TcpReadHalf {
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn shutdown(self: &Self) Result[(), Error] = endpoint.shutdown(&self.cell, Shutdown::Read)
+    pub fn set_read_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.READ, value)
+    pub fn read_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.READ)
+}
+impl TcpWriteHalf {
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn shutdown(self: &Self) Result[(), Error] = endpoint.shutdown(&self.cell, Shutdown::Write)
+    pub fn set_write_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.WRITE, value)
+    pub fn write_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.WRITE)
+}
+impl Read for TcpStream {
+    fn read(self: &Self, destination: &[byte]) Result[int, Error] = endpoint.read(&self.cell, destination, 0)
+    fn read_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[int, Error] = endpoint.read(&self.cell, destination, unsafe { cancel.raw_control() })
+    fn read_buffer(self: &Self, destination: &ByteBuffer, limit: int) Result[int, Error] = endpoint.read_buffer(&self.cell, destination, limit, 0)
+    fn read_buffer_cancel(self: &Self, destination: &ByteBuffer, limit: int, cancel: &CancelToken) Result[int, Error] = endpoint.read_buffer(&self.cell, destination, limit, unsafe { cancel.raw_control() })
+}
+impl Read for TcpReadHalf {
+    fn read(self: &Self, destination: &[byte]) Result[int, Error] = endpoint.read(&self.cell, destination, 0)
+    fn read_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[int, Error] = endpoint.read(&self.cell, destination, unsafe { cancel.raw_control() })
+    fn read_buffer(self: &Self, destination: &ByteBuffer, limit: int) Result[int, Error] = endpoint.read_buffer(&self.cell, destination, limit, 0)
+    fn read_buffer_cancel(self: &Self, destination: &ByteBuffer, limit: int, cancel: &CancelToken) Result[int, Error] = endpoint.read_buffer(&self.cell, destination, limit, unsafe { cancel.raw_control() })
+}
+impl Write for TcpStream {
+    fn write(self: &Self, source: Bytes) Result[int, Error] = endpoint.write(&self.cell, source, 0)
+    fn write_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[int, Error] = endpoint.write(&self.cell, source, unsafe { cancel.raw_control() })
+}
+impl Write for TcpWriteHalf {
+    fn write(self: &Self, source: Bytes) Result[int, Error] = endpoint.write(&self.cell, source, 0)
+    fn write_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[int, Error] = endpoint.write(&self.cell, source, unsafe { cancel.raw_control() })
 }
 impl UdpSocket {
     pub fn bind(address: SocketAddr, options: DatagramBindOptions) Result[Self, Error] {
         Ok(Self { cell: bind(address, false, 0, options.reuse_address, options.ipv6_mode)? })
     }
-    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = address(&self.cell, false)
-    pub fn close(self: &Self) Result[(), Error] = close(&self.cell)
+    pub fn local_addr(self: &Self) Result[SocketAddr, Error] = endpoint.address(&self.cell, false)
+    pub fn peer_addr(self: &Self) Result[SocketAddr, Error] { endpoint.connected(&self.cell, true)?
+        endpoint.address(&self.cell, true) }
+    pub fn close(self: &Self) Result[(), Error] = endpoint.close(&self.cell)
+    pub fn connect(self: &Self, peer: SocketAddr) Result[(), Error] = datagram.connect(&self.cell, Some(peer))
+    pub fn disconnect(self: &Self) Result[(), Error] = datagram.connect(&self.cell, None)
+    pub fn send(self: &Self, source: Bytes) Result[(), Error] = datagram.send(&self.cell, source, None, 0)
+    pub fn send_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[(), Error] = datagram.send(&self.cell, source, None, unsafe { cancel.raw_control() })
+    pub fn send_to(self: &Self, source: Bytes, target: SocketAddr) Result[(), Error] = datagram.send(&self.cell, source, Some(target), 0)
+    pub fn send_to_cancel(self: &Self, source: Bytes, target: SocketAddr, cancel: &CancelToken) Result[(), Error] = datagram.send(&self.cell, source, Some(target), unsafe { cancel.raw_control() })
+    pub fn recv(self: &Self, destination: &[byte]) Result[DatagramRecv, Error] = datagram.recv(&self.cell, destination, 0)
+    pub fn recv_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[DatagramRecv, Error] = datagram.recv(&self.cell, destination, unsafe { cancel.raw_control() })
+    pub fn recv_from(self: &Self, destination: &[byte]) Result[DatagramRead, Error] = datagram.receive(&self.cell, destination, 0, false)
+    pub fn recv_from_cancel(self: &Self, destination: &[byte], cancel: &CancelToken) Result[DatagramRead, Error] = datagram.receive(&self.cell, destination, unsafe { cancel.raw_control() }, false)
+    pub fn recv_packet(self: &Self, max_len: int) Result[DatagramPacket, Error] = datagram.packet(&self.cell, max_len, 0)
+    pub fn recv_packet_cancel(self: &Self, max_len: int, cancel: &CancelToken) Result[DatagramPacket, Error] = datagram.packet(&self.cell, max_len, unsafe { cancel.raw_control() })
+    pub fn set_read_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.READ, value)
+    pub fn read_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.READ)
+    pub fn set_write_timeout(self: &Self, value: Option[Duration]) Result[(), Error] = timeout.set(&self.cell, timeout.WRITE, value)
+    pub fn write_timeout(self: &Self) Result[Option[Duration], Error] = timeout.get(&self.cell, timeout.WRITE)
 }

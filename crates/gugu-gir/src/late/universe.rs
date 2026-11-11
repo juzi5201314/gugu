@@ -119,7 +119,15 @@ impl TypeUniverse {
                     .iter()
                     .any(|key| self.type_id(key).is_none())
             {
-                return Err(invalid("类型 descriptor 身份、布局或子类型引用不合法"));
+                return Err(invalid(&format!(
+                    "类型 descriptor 身份、布局或子类型引用不合法：{} layout={:?} children_complete={}",
+                    record.name,
+                    record.layout,
+                    record
+                        .children
+                        .iter()
+                        .all(|key| self.type_id(key).is_some()),
+                )));
             }
         }
         if self

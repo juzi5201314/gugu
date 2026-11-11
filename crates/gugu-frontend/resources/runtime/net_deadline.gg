@@ -1,0 +1,44 @@
+use std.time.{Duration}
+use std.io.{Error}
+use std.runtime.resource.{ResourceCell, begin, end}
+use std.runtime.heap.{heap_word, heap_store_word}
+
+// 三种 timeout 各占三个字：秒、纳秒、Some；不把超长 Duration 截断后返回给用户。
+pub const READ: uint = 1536
+pub const WRITE: uint = 1560
+pub const ACCEPT: uint = 1584
+pub const TIMED_OUT: uint = 18446744073709551613
+pub fn now() uint = unsafe { std.runtime.monotonic_nanos() }
+pub fn after(value: Duration) uint = deadline(value.as_secs(), value.subsec_nanos())
+fn deadline(seconds: uint, nanos: uint) uint {
+    let current = now()
+    let remaining = ~uint(0) - current
+    if nanos >= remaining || seconds > (remaining - nanos) / 1000000000 { return ~uint(0) }
+    current + seconds * 1000000000 + nanos
+}
+pub fn expired(deadline: uint, current: uint) bool = deadline != 0 && current >= deadline
+pub fn capture(control: uint, offset: uint) uint {
+    if heap_word(control + offset + 16) == 0 { return 0 }
+    deadline(heap_word(control + offset), heap_word(control + offset + 8))
+}
+pub fn get(cell: &ResourceCell, offset: uint) Result[Option[Duration], Error] {
+    if begin(cell) == ~uint(0) { return Err(Error::Closed) }
+    defer { end(cell) }
+    if heap_word(cell.control + offset + 16) == 0 { return Ok(None) }
+    let seconds = heap_word(cell.control + offset)
+    let nanos = heap_word(cell.control + offset + 8)
+    Ok(Some(Duration::new(seconds, u32(nanos))))
+}
+pub fn set(cell: &ResourceCell, offset: uint, value: Option[Duration]) Result[(), Error] {
+    if begin(cell) == ~uint(0) { return Err(Error::Closed) }
+    defer { end(cell) }
+    match value {
+        None => heap_store_word(cell.control + offset + 16, 0),
+        Some(duration) => {
+            heap_store_word(cell.control + offset, duration.as_secs())
+            heap_store_word(cell.control + offset + 8, duration.subsec_nanos())
+            heap_store_word(cell.control + offset + 16, 1)
+        },
+    }
+    Ok(())
+}

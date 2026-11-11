@@ -703,10 +703,11 @@ UDP 同时提供无连接与 connected 两组明确不同的操作：
 fn UdpSocket.connect(self: &Self, peer: SocketAddr) Result[(), io.Error]
 fn UdpSocket.disconnect(self: &Self) Result[(), io.Error]
 fn UdpSocket.send(self: &Self, source: Bytes) Result[(), io.Error]
+struct DatagramRecv { pub len: int, pub truncated: bool }
 fn UdpSocket.recv(self: &Self, destination: &[byte])
-    Result[int, io.Error]
+    Result[DatagramRecv, io.Error]
 fn UdpSocket.recv_cancel(self: &Self, destination: &[byte],
-                         cancel: &CancelToken) Result[int, io.Error]
+                         cancel: &CancelToken) Result[DatagramRecv, io.Error]
 ```
 
 `connect(peer)` 是 UDP endpoint 的共享状态转换，不建立 TCP 连接；成功后 send 只发给 peer，recv 只接收 peer 的 datagram，来自其它来源的 datagram 按内核 connected-UDP 语义过滤。send/recv 与 send_to/recv_from 互斥：connected 期间调用无连接操作返回 InvalidState，disconnect 成功后才恢复；未 connected 时调用 send/recv 返回 NotConnected。connect、disconnect 与收发各有线性化点，已经在线性化点提交的操作使用旧状态，之后的操作使用新状态。connected UDP 的 peer_addr 返回当前 peer；disconnect 后再次返回 NotConnected。
@@ -787,7 +788,9 @@ fn UdpSocket.send_to(self: &Self, source: Bytes, target: SocketAddr)
 
 recv_from 每次消费恰好一个 datagram。若 destination 太小，len 等于实际写入长度且 truncated 为 true；尾部被丢弃，绝不静默伪装成完整报文。零长度 datagram 返回 len 0、truncated false。recv_packet 分配恰好容纳完整 datagram 的 Bytes；max_len 为调用方给出的分配上界，负值 panic，报文超过上界时消费该报文并返回 MessageTooLarge。send_to 要么提交整个 datagram 并返回成功，要么返回错误，不报告短写。UdpSocket 与 TcpStream 一样允许一个接收方向操作和一个发送方向操作并行，同方向请求按状态机到达顺序排队。
 
-`recv` 与 `recv_cancel` 的返回值是写入 destination 的 byte 数；每次同样恰好消费一个来自 connected peer 的 datagram，并采用 recv_from 的截断规则。connected UDP 不提供来源地址，因为 peer 已固定。
+`recv` 与 `recv_cancel` 返回 `DatagramRecv { len, truncated }`；len 是写入 destination 的 byte 数，每次恰好消费一个来自 connected peer 的 datagram，截断与零长度报文规则和 recv_from 相同。connected UDP 不提供来源地址，因为 peer 已固定。
+
+`ConnectOptions.new()` 默认 timeout 与 cancel 都是 None。`ConnectError` 为 `Resolve(ResolveError)`、`TimedOut`、`Cancelled`、`Failed(Vec[(SocketAddr, io.Error)])`；空候选列表返回空的 Failed，单地址失败也以该列表保留具体地址与错误。
 
 Unix domain socket 的稳定地址面只接受文件系统 Path：
 
@@ -801,7 +804,13 @@ fn UnixListener.bind(address: UnixAddr) Result[UnixListener, io.Error]
 fn UnixStream.connect(address: UnixAddr) Result[UnixStream, io.Error]
 ```
 
-这些类型只在目标提供文件系统 Unix domain socket 时存在；Linux 另提供 UnixDatagram，Windows 目标不承诺 datagram。地址含 NUL 或超过宿主 sockaddr 上限时返回 AddressError。bind 不自动删除已有路径，close 也不 unlink socket 文件；清理必须显式调用 std.fs。Linux abstract namespace、ancillary data、文件描述符传递与 peer credentials 不在首批稳定 std，需走 FFI 或生态 package。Unix stream/listener 的阻塞、取消、timeout、方向关闭和 Adaptive Resource Leasing 与 TCP 对应接口相同。
+这些类型只在目标提供文件系统 Unix domain socket 时存在；Linux 另提供 UnixDatagram，Windows 目标不承诺 datagram。
+
+UnixStream 的 `connect_with(UnixAddr, ConnectOptions)` 使用单地址连接时限与取消，不产生 DNS 请求。UnixListener 的 `accept/accept_cancel` 返回 `(UnixStream, Option[UnixAddr])`；Unix stream/listener 的 `local_addr` 与 stream 的 `peer_addr` 返回 `Option[UnixAddr]` 地址快照，未命名 endpoint 为 None，不伪造空 Path。`split()` 返回共享同一 ResourceCell 的 UnixReadHalf/UnixWriteHalf，分别实现 Read/Write，具有与 TCP half 相同的 close、shutdown 和相应方向 timeout 方法。两个目标的 listener 提供 `set_accept_timeout` 与 `accept_timeout`，timeout getter 返回 `Result[Option[Duration], io.Error]`，已关闭资源返回 Closed。
+
+Linux UnixDatagram 提供 bind、connect/disconnect、send/send_to、recv/recv_from、recv_packet、对应逐操作取消版本以及读写 timeout、local/peer addr 和 close。connected recv 返回 DatagramRecv；无连接 recv_from 返回 `UnixDatagramRead { len:int, source:Option[UnixAddr], truncated:bool }`，recv_packet 返回 `UnixDatagramPacket { data:Bytes, source:Option[UnixAddr] }`。来源未命名时为 None；报文消费、截断、连接模式与错误规则和 UDP 相同。UDP 与 UnixDatagram 的发送取消方法为 `send_cancel(source, cancel)` 与 `send_to_cancel(source, target, cancel)`。TCP/Unix half 的 read_buffer 也实现 Read trait 的缓冲追加与负上限 panic 规则。
+
+地址含 NUL 或超过宿主 sockaddr 上限时返回 AddressError。bind 不自动删除已有路径，close 也不 unlink socket 文件；清理必须显式调用 std.fs。Linux abstract namespace、ancillary data、文件描述符传递与 peer credentials 不在首批稳定 std，需走 FFI 或生态 package。Unix stream/listener 的阻塞、取消、timeout、方向关闭和 Adaptive Resource Leasing 与 TCP 对应接口相同。
 
 ## 进程与 shell
 
@@ -902,7 +911,7 @@ fn sleep(duration: Duration)
 fn sleep_cancel(duration: Duration, cancel: &CancelToken)
 ```
 
-Duration 提供 `from_secs(uint)`、`from_millis(uint)`、`from_nanos(uint)`，以及 `as_secs() uint`、`subsec_nanos() uint`、`as_nanos() u128`、`is_zero() bool`；秒与不足一秒的纳秒分开保存，转为总纳秒不会因 uint 乘法溢出而丢失时长。`RuntimeStats.gc_pause_total` 使用同一 Duration 类型。
+Duration 提供 `new(seconds:uint, nanoseconds:u32)`（归一化十亿以上的纳秒，秒数溢出时 panic）、`from_secs(uint)`、`from_millis(uint)`、`from_nanos(uint)`，以及 `as_secs() uint`、`subsec_nanos() uint`、`as_nanos() u128`、`is_zero() bool`；秒与不足一秒的纳秒分开保存，转为总纳秒不会因 uint 乘法溢出而丢失时长。`RuntimeStats.gc_pause_total` 使用同一 Duration 类型。
 
 Instant 的比较和相减只对同一进程产生的值定义；不同进程或反序列化值不能互相比较。SystemTime 的 duration_since 在 earlier 晚于当前值时返回 ClockWentBackward，不把墙钟回拨伪装成负 Duration。Duration 不含时区、日历或闰秒；Gregorian 日历和 leap second 不进入稳定语义。sleep(0) 立即返回，正 duration 至少等待该时长；sleep_cancel 被取消时返回 Cancelled，取消不会撤销已经完成的等待。timeout 是带 CancelToken 的操作组合器：它在 deadline 到期时取消本次操作并返回 TimedOut；操作已经在线性化点完成则返回操作结果，超时不强制终止外部资源，调用方必须使用操作自身的取消契约。
 

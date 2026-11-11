@@ -9,6 +9,41 @@ fn compile(source: &str, target: TargetName) -> gugu_compiler::Compilation {
 }
 
 #[test]
+fn transport_apis_link_linux_without_resolver_dependencies() {
+    let output = compile(
+        include_str!("fixtures/net_transport.gg"),
+        TargetName::X86_64Linux,
+    );
+    assert!(!output.image_plan().unwrap().linux_image().is_empty());
+    assert!(output.image_plan().unwrap().linux_interpreter().is_empty());
+    assert!(output.dump_lir().unwrap().contains("NetCall"));
+}
+
+#[test]
+fn transport_apis_link_windows_overlapped_operations() {
+    let output = compile(
+        include_str!("fixtures/net_transport.gg"),
+        TargetName::X86_64Windows,
+    );
+    let image = output.image_plan().unwrap().windows_image();
+    for name in [
+        "WSARecv",
+        "WSASend",
+        "WSARecvFrom",
+        "WSASendTo",
+        "shutdown",
+        "getsockopt",
+    ] {
+        assert!(
+            image
+                .windows(name.len())
+                .any(|value| value == name.as_bytes()),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn numeric_listener_and_datagram_bind_link_static_linux() {
     let output = compile(
         include_str!("fixtures/net_bind.gg"),

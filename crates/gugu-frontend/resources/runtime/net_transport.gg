@@ -1,0 +1,411 @@
+// 稳定请求页只保存 raw 缓冲与协程身份；完成确认之前不归还 OVERLAPPED 或数据。
+use std.runtime.net_platform as native
+use std.runtime.net_dispatch as services
+use std.runtime.net_deadline as clock
+use std.runtime.resource as resource
+use std.runtime.fs_platform.{FsResult, control_allocate, control_free}
+use std.runtime.heap.{heap_word, heap_store_word, heap_word32, heap_store_word32, heap_fail}
+use std.runtime.scheduler.{park_current, ready_hot}
+use std.io.{Error}
+
+pub const READ: uint = 0
+pub const WRITE: uint = 1
+pub const RECEIVE: uint = 2
+pub const SEND: uint = 3
+pub const CONNECT: uint = 4
+pub const SHUT_WRITE: uint = 5
+pub const UDP_CONNECT: uint = 7
+pub const UDP_DISCONNECT: uint = 8
+const NEXT: uint = 344
+const PREVIOUS: uint = 352
+const HEAD: uint = 1216
+const TAIL: uint = 1224
+pub const CONNECTED: uint = 1248
+pub const SHUT: uint = 1256
+const REGISTERED: uint = 1264
+pub const OVERLAPPED: uint = native.TRANSPORT_OVERLAPPED
+pub const ADDRESS: uint = 128
+pub const SCRATCH: uint = 512
+const ACTIVE: uint = 104
+const STOP: uint = 112
+static first: uint = 0
+static last: uint = 0
+static cursor: uint = 0
+static count: uint = 0
+static native_count: uint = 0
+
+fn direction(op: uint) uint = if op == WRITE || op == SEND || op == CONNECT || op == SHUT_WRITE || op == UDP_CONNECT || op == UDP_DISCONNECT { 16 } else { 0 }
+pub fn closed(control: uint) bool = heap_word32(control + 8) & uint(2) != 0
+pub fn allocate(control: uint, op: uint, data: uint, length: uint, cancel: uint) uint {
+    services.install_transport(service, pending, ready, complete_native)
+    let node = control_allocate(4096)
+    heap_store_word(node + 16, control)
+    heap_store_word(node + 32, cancel)
+    heap_store_word(node + 40, clock.capture(control, if direction(op) == 0 { clock.READ } else { clock.WRITE }))
+    heap_store_word(node + 48, op)
+    heap_store_word(node + 56, length)
+    heap_store_word(node + 64, data)
+    node
+}
+const READ_EOF: uint = 18446744073709551610
+pub fn close_read(control: uint) {
+    heap_store_word(control + SHUT, heap_word(control + SHUT) | uint(1))
+    let node = heap_word(control + HEAD)
+    while node != 0 {
+        let next = heap_word(node)
+        cancel(node, READ_EOF)
+        node = next
+    }
+}
+pub fn dispose(node: uint) { control_free(node, 4096) }
+pub fn error(code: uint) Error {
+    if code == native.CLOSED { return Error::Closed }
+    if code == native.CANCELLED { return Error::Cancelled }
+    if code == clock.TIMED_OUT { return Error::TimedOut }
+    if code == INVALID_STATE { return Error::InvalidState }
+    if code == NOT_CONNECTED { return Error::NotConnected }
+    native.from_error(code)
+}
+pub fn submit(node: uint) Result[uint, Error] { unsafe {
+    let control = heap_word(node + 16)
+    if resource.begin_control(control) == ~uint(0) { return Err(Error::Closed) }
+    let stop = interruption(node)
+    if stop != 0 { resource.end_control(control)
+        return Err(error(stop)) }
+    enqueue(node, std.runtime.current_slot())
+    park_current()
+    let status = heap_word(node + 72)
+    if status != 0 { Err(error(status)) } else { Ok(heap_word(node + 80)) }
+} }
+fn enqueue(node: uint, hot: uint) {
+    let control = heap_word(node + 16)
+    heap_store_word(node + 24, hot)
+    let sequence = heap_word(control + 1280) + 1
+    heap_store_word(control + 1280, sequence)
+    heap_store_word(node + 120, sequence)
+    let op = heap_word(node + 48)
+    if op == UDP_CONNECT || op == UDP_DISCONNECT {
+        let barrier = heap_word(control + 1296)
+        heap_store_word(node + 336, barrier)
+        if barrier == 0 { heap_store_word(control + 1288, node) }
+        else { heap_store_word(barrier + 328, node) }
+        heap_store_word(control + 1296, node)
+    }
+    let lane = direction(op)
+    let tail = heap_word(control + TAIL + lane)
+    heap_store_word(node + 8, tail)
+    if tail == 0 { heap_store_word(control + HEAD + lane, node) }
+    else { heap_store_word(tail, node) }
+    heap_store_word(control + TAIL + lane, node)
+    append(node)
+    count = count + 1
+}
+fn append(node: uint) {
+    heap_store_word(node + PREVIOUS, last)
+    heap_store_word(node + NEXT, 0)
+    if last == 0 { first = node } else { heap_store_word(last + NEXT, node) }
+    last = node
+}
+fn remove(node: uint) {
+    let before = heap_word(node + PREVIOUS)
+    let next = heap_word(node + NEXT)
+    if before == 0 { first = next } else { heap_store_word(before + NEXT, next) }
+    if next == 0 { last = before } else { heap_store_word(next + PREVIOUS, before) }
+    if cursor == node { cursor = next }
+}
+pub fn finish(node: uint, value: uint, status: uint) {
+    let control = heap_word(node + 16)
+    let lane = direction(heap_word(node + 48))
+    let op = heap_word(node + 48)
+    if op == UDP_CONNECT || op == UDP_DISCONNECT {
+        let previous = heap_word(node + 336)
+        let following = heap_word(node + 328)
+        if following != 0 { heap_store_word(following + 336, previous) }
+        if previous == 0 { heap_store_word(control + 1288, following) }
+        else { heap_store_word(previous + 328, following) }
+        if heap_word(control + 1296) == node { heap_store_word(control + 1296, previous) };
+    }
+    let before = heap_word(node + 8)
+    let next = heap_word(node)
+    if before == 0 { heap_store_word(control + HEAD + lane, next) }
+    else { heap_store_word(before, next) }
+    if next == 0 { heap_store_word(control + TAIL + lane, before) }
+    else { heap_store_word(next + 8, before) }
+    heap_store_word(node + 72, if status == READ_EOF { 0 } else { status })
+    heap_store_word(node + 80, value)
+    count = count - 1
+    if heap_word(control + HEAD) == 0 && heap_word(control + HEAD + 16) == 0 {
+        unregister(control)
+    }
+    remove(node)
+    resource.end_control(control)
+    ready_hot(heap_word(node + 24))
+}
+fn interruption(node: uint) uint {
+    if closed(heap_word(node + 16)) { return native.CLOSED }
+    if native.cancelled(heap_word(node + 32)) { return native.CANCELLED }
+    let deadline = heap_word(node + 40)
+    if deadline != 0 && clock.expired(deadline, clock.now()) { return clock.TIMED_OUT }
+    0
+}
+fn eligible(node: uint) bool {
+    let control = heap_word(node + 16)
+    let op = heap_word(node + 48)
+    let barrier = heap_word(control + 1288)
+    if direction(op) == 0 && barrier != 0 && heap_word(barrier + 120) < heap_word(node + 120) { return false }
+    let other = heap_word(control + HEAD + (if direction(op) == 0 { uint(16) } else { uint(0) }))
+    if other == 0 { return true }
+    let other_op = heap_word(other + 48)
+    let barrier = op == UDP_CONNECT || op == UDP_DISCONNECT || other_op == UDP_CONNECT || other_op == UDP_DISCONNECT
+    !barrier || heap_word(node + 120) < heap_word(other + 120)
+}
+fn mode_error(node: uint) uint {
+    let expected = heap_word(node + 320)
+    let connected = heap_word(heap_word(node + 16) + CONNECTED) != 0
+    if expected == 1 && connected { return INVALID_STATE }
+    if expected == 2 && !connected { return NOT_CONNECTED }
+    0
+}
+pub const INVALID_STATE: uint = 18446744073709551612
+pub const NOT_CONNECTED: uint = 18446744073709551611
+fn udp_control(node: uint) FsResult {
+    let control = heap_word(node + 16)
+    let result = native.request(node + SCRATCH, 21, heap_word(control + 64), node + ADDRESS, heap_word(node + 96), 0, 0, 0)
+    if result.error == 0 { heap_store_word(control + CONNECTED, if heap_word(node + 48) == UDP_CONNECT { 1 } else { 0 }) }
+    result
+}
+#[cfg(os = "linux")]
+fn complete_native(node: uint, bytes: uint, status: uint) { finish(node, bytes, status) }
+#[cfg(os = "windows")]
+fn complete_native(node: uint, bytes: uint, status: uint) { complete_windows(node, bytes, status) }
+pub fn pending() bool = count != 0 || native_count != 0
+pub fn service() {
+    let node = cursor
+    if node == 0 { node = first }
+    let budget: uint = 128
+    while node != 0 && budget != 0 {
+        let following = heap_word(node + NEXT)
+        let control = heap_word(node + 16)
+        let stop = interruption(node)
+        if stop != 0 { cancel(node, stop) }
+        else {
+            let lane = direction(heap_word(node + 48))
+            if node == heap_word(control + HEAD + lane) && heap_word(node + ACTIVE) == 0 { attempt(node) };
+        }
+        node = following
+        budget = budget - 1
+    }
+    cursor = node
+}
+pub fn ready(control: uint) {
+    for lane in 0..2 {
+        let node = heap_word(control + HEAD + uint(lane) * 16)
+        if node != 0 {
+            heap_store_word(node + ACTIVE, 0)
+            let stop = interruption(node)
+            if stop != 0 { cancel(node, stop) } else { attempt(node) };
+        };
+    }
+}
+#[cfg(os = "linux")]
+fn unregister(control: uint) {
+    if heap_word(control + REGISTERED) == 0 { return }
+    let result = native.call(9, native.port(), 2, heap_word(control + 64), 0, 0, 0)
+    if result.error != 0 { heap_fail() }
+    heap_store_word(control + REGISTERED, 0)
+}
+#[cfg(os = "linux")]
+fn register(node: uint) uint { unsafe {
+    let control = heap_word(node + 16)
+    let events: uint = 0
+    if heap_word(control + HEAD) != 0 { events = events | uint(1) }
+    if heap_word(control + HEAD + 16) != 0 { events = events | uint(4) }
+    if events == heap_word(control + REGISTERED) { return 0 }
+    heap_store_word32(node + 304, events)
+    std.ptr.write_unaligned[uint](std.mem.transmute[uint, *uint](node + 308), control | uint(1))
+    let result = native.request(node + SCRATCH, 9, native.port(), if heap_word(control + REGISTERED) == 0 { 1 } else { 3 }, heap_word(control + 64), node + 304, 0, 0)
+    if result.error == 0 { heap_store_word(control + REGISTERED, events) }
+    result.error
+} }
+#[cfg(os = "linux")]
+fn cancel(node: uint, reason: uint) { finish(node, 0, reason) }
+#[cfg(os = "linux")]
+fn attempt(node: uint) {
+    if !eligible(node) { return }
+    let mode = mode_error(node)
+    if mode != 0 { finish(node, 0, mode)
+        return }
+    let op = heap_word(node + 48)
+    if op == UDP_CONNECT || op == UDP_DISCONNECT {
+        let result = udp_control(node)
+        finish(node, result.value, result.error)
+        return
+    }
+    let result = linux_call(node)
+    if native.would_block(result.error) || result.error == 115 || result.error == 114 || result.error == 4 {
+        let error = register(node)
+        if error != 0 { finish(node, 0, error) }
+        else { heap_store_word(node + ACTIVE, 1) }
+        return
+    }
+    finish(node, result.value, result.error)
+}
+#[cfg(os = "linux")]
+fn linux_call(node: uint) FsResult {
+    let control = heap_word(node + 16)
+    let handle = heap_word(control + 64)
+    let op = heap_word(node + 48)
+    let data = heap_word(node + 64)
+    let length = heap_word(node + 56)
+    let scratch = node + SCRATCH
+    if op == SHUT_WRITE {
+        if heap_word(control + SHUT) & uint(2) != 0 { return FsResult { value: 0, error: 0 } }
+        let result = native.request(scratch, 22, handle, 1, 0, 0, 0, 0)
+        if result.error == 0 { heap_store_word(control + SHUT, heap_word(control + SHUT) | uint(2)) }
+        return result
+    }
+    if op == CONNECT {
+        if heap_word(node + 88) == 0 {
+            heap_store_word(node + 88, 1)
+            let started = native.request(scratch, 21, handle, node + ADDRESS, heap_word(node + 96), 0, 0, 0)
+            if started.error == 11 && heap_word(control + native.FAMILY) == 1 { heap_store_word(node + 88, 0) }
+            return started
+        }
+        heap_store_word32(node + 304, 4)
+        let result = native.request(scratch, 23, handle, 1, 4, node + 300, node + 304, 0)
+        if result.error != 0 { return result }
+        let status = heap_word32(node + 300)
+        if status != 0 { return FsResult { value: 0, error: status } }
+        // SO_ERROR=0 也可能仍在握手，getpeername 确认真正建立连接。
+        heap_store_word32(node + 304, 128)
+        let peer = native.request(scratch, 6, handle, node + ADDRESS, node + 304, 0, 0, 0)
+        if peer.error == 107 { return FsResult { value: 0, error: 115 } }
+        return peer
+    }
+    if op == READ && heap_word(control + SHUT) & uint(1) != 0 { return FsResult { value: 0, error: 0 } }
+    if op == WRITE && heap_word(control + SHUT) & uint(2) != 0 { return FsResult { value: 0, error: 32 } }
+    if op == WRITE || op == SEND {
+        return native.request(scratch, 25, handle, data, length, 16384, if op == SEND && heap_word(node + 96) != 0 { node + ADDRESS } else { 0 }, if op == SEND { heap_word(node + 96) } else { 0 })
+    }
+    heap_store_word32(node + 96, 128)
+    native.request(scratch, 24, handle, data, length, if op == RECEIVE { 32 } else { 0 }, if op == READ { 0 } else { node + ADDRESS }, if op == READ { 0 } else { node + 96 })
+}
+
+#[cfg(os = "windows")]
+fn unregister(control: uint) { _ = control }
+#[cfg(os = "windows")]
+fn associate(node: uint) uint {
+    let control = heap_word(node + 16)
+    if heap_word(control + REGISTERED) != 0 { return 0 }
+    let result = native.request(node + SCRATCH, 8, heap_word(control + 64), native.port(), control, 0, 0, 0)
+    if result.error == 0 { heap_store_word(control + REGISTERED, 1) }
+    result.error
+}
+#[cfg(os = "windows")]
+fn cancel(node: uint, reason: uint) {
+    if heap_word(node + ACTIVE) == 0 { finish(node, 0, reason)
+        return }
+    if heap_word(node + STOP) == 0 {
+        heap_store_word(node + STOP, reason)
+        let result = native.request(node + SCRATCH, 17, heap_word(heap_word(node + 16) + 64), node + OVERLAPPED, 0, 0, 0, 0)
+        if result.error != 0 && result.error != 1168 { heap_fail() };
+    }
+}
+#[cfg(os = "windows")]
+fn attempt(node: uint) {
+    if !eligible(node) { return }
+    let mode = mode_error(node)
+    if mode != 0 { finish(node, 0, mode)
+        return }
+    let op = heap_word(node + 48)
+    if op == UDP_CONNECT || op == UDP_DISCONNECT {
+        let result = udp_control(node)
+        finish(node, result.value, result.error)
+        return
+    }
+    if heap_word(node + ACTIVE) != 0 { return }
+    let status = associate(node)
+    if status != 0 { finish(node, 0, status)
+        return }
+    let op = heap_word(node + 48)
+    let control = heap_word(node + 16)
+    let handle = heap_word(control + 64)
+    if op == READ && heap_word(control + SHUT) & uint(1) != 0 { finish(node, 0, 0)
+        return }
+    if op == WRITE && heap_word(control + SHUT) & uint(2) != 0 { finish(node, 0, 10058)
+        return }
+    if op == SHUT_WRITE {
+        let result = if heap_word(control + SHUT) & uint(2) != 0 { FsResult { value: 0, error: 0 } } else { native.request(node + SCRATCH, 22, handle, 1, 0, 0, 0, 0) }
+        if result.error == 0 { heap_store_word(control + SHUT, heap_word(control + SHUT) | uint(2)) }
+        finish(node, 0, result.error)
+        return
+    }
+    let result = windows_start(node)
+    if result.error != 0 && result.error != 997 { finish(node, 0, result.error)
+        return }
+    heap_store_word(node + ACTIVE, 1)
+    native_count = native_count + 1
+}
+#[cfg(os = "windows")]
+fn windows_start(node: uint) FsResult {
+    let handle = heap_word(heap_word(node + 16) + 64)
+    let op = heap_word(node + 48)
+    let scratch = node + SCRATCH
+    for index in 0..4 { heap_store_word(node + OVERLAPPED + uint(index) * 8, 0) }
+    if op == CONNECT { return windows_connect(node) }
+    heap_store_word32(node + 288, heap_word(node + 56))
+    heap_store_word(node + 296, heap_word(node + 64))
+    heap_store_word32(node + 304, 0)
+    if op == READ || op == WRITE {
+        native.prepare(scratch, handle, node + 288, 1, 0, if op == READ { node + 304 } else { 0 }, node + OVERLAPPED)
+        return native.run(scratch, if op == READ { 28 } else { 29 })
+    }
+    if op == RECEIVE { heap_store_word32(node + 96, 128) }
+    native.prepare(scratch, handle, node + 288, 1, 0, if op == RECEIVE { node + 304 } else { 0 }, if op == RECEIVE || heap_word(node + 96) != 0 { node + ADDRESS } else { 0 })
+    heap_store_word(scratch + 48, if op == RECEIVE { node + 96 } else { heap_word(node + 96) })
+    heap_store_word(scratch + 56, node + OVERLAPPED)
+    native.run(scratch, if op == RECEIVE { 26 } else { 27 })
+}
+#[cfg(os = "windows")]
+fn windows_connect(node: uint) FsResult {
+    let control = heap_word(node + 16)
+    let handle = heap_word(control + 64)
+    let scratch = node + SCRATCH
+    let family = heap_word(control + native.FAMILY)
+    // ConnectEx 要求先绑定本地地址；所有地址存储在稳定请求页。
+    heap_store_word(node + 640, family)
+    let bound = native.request(scratch, 2, handle, node + 640, if family == 2 { 16 } else { if family == 1 { 2 } else { 28 } }, 0, 0, 0)
+    if bound.error != 0 { return bound }
+    heap_store_word(node + 672, uint(0x4660ddf325a207b9))
+    heap_store_word(node + 680, uint(0x3e06748ce576e98e))
+    native.prepare(scratch, handle, uint(3355443206), node + 672, 16, node + 688, 8)
+    heap_store_word(scratch + 48, node + 696)
+    let extension = native.run(scratch, 9)
+    if extension.error != 0 { return extension }
+    native.prepare(scratch, handle, node + ADDRESS, heap_word(node + 96), 0, 0, 0)
+    heap_store_word(scratch + 48, node + OVERLAPPED)
+    heap_store_word(scratch + 88, heap_word(node + 688))
+    native.run(scratch, 31)
+}
+#[cfg(os = "windows")]
+pub fn complete_windows(node: uint, bytes: uint, status: uint) {
+    if heap_word(node + ACTIVE) == 0 { heap_fail() }
+    heap_store_word(node + ACTIVE, 0)
+    native_count = native_count - 1
+    let op = heap_word(node + 48)
+    let error = status
+    let value = bytes
+    if error == 995 && heap_word(node + STOP) != 0 { error = heap_word(node + STOP) }
+    if (op == READ || op == WRITE) && bytes != 0 { error = 0 }
+    // WSAEMSGSIZE 是报文已消费且前缀已写入；显式标记截断，不把它当完整成功。
+    if op == RECEIVE && (error == 10040 || error == 234) {
+        heap_store_word(node + 88, 1)
+        value = heap_word(node + 56)
+        error = 0
+    }
+    if op == CONNECT && error == 0 {
+        let handle = heap_word(heap_word(node + 16) + 64)
+        error = native.request(node + SCRATCH, 1, handle, 65535, 28688, 0, 0, 0).error
+    }
+    finish(node, value, error)
+}

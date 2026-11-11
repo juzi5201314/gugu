@@ -1,0 +1,26 @@
+use std.net.{TcpStream, UdpSocket, SocketAddr, IpAddr, Ipv4Addr, DatagramBindOptions, Shutdown}
+use std.io.{Read, Write, Bytes, Error}
+use std.sync.{CancelSource}
+use std.time.{Duration}
+#[used]
+fn stream(value: TcpStream) Result[(), Error] {
+    let data: [byte; 8] = [0; 8]
+    _ = value.read(&data)?
+    _ = value.write(Bytes::copy_from(&data))?
+    value.shutdown(Shutdown::Both)
+}
+#[used]
+fn packets(value: UdpSocket) Result[(), Error] {
+    let data: [byte; 4] = [0; 4]
+    let cancel = CancelSource::new().token()
+    _ = value.recv_from_cancel(&data, &cancel)?
+    _ = value.recv_packet_cancel(2, &cancel)?
+    _ = value.recv_cancel(&data, &cancel)?
+    value.send(Bytes::copy_from(&data))?
+    value.connect(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 90))?
+    value.disconnect()?
+    value.set_read_timeout(Some(Duration::from_nanos(10)))?
+    _ = value.read_timeout()?
+    Ok(())
+}
+fn main() { _ = UdpSocket::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 0), DatagramBindOptions::new()) }

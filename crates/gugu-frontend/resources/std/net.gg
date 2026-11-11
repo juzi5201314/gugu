@@ -1,6 +1,10 @@
 pub use std.net.address.{Ipv4Addr, Ipv6Addr, IpAddr, SocketAddr, ParseError, AddressError}
-pub use std.net.types.{BindOptions, DatagramBindOptions, Ipv6BindMode, ResolveError}
+pub use std.net.types.{BindOptions, DatagramBindOptions, Ipv6BindMode, ResolveError, ConnectOptions, ConnectError, Shutdown, DatagramRead, DatagramRecv, DatagramPacket, InterfaceIndex, KeepAliveConfig}
 pub use std.net.resolver.{Resolver, ToSocketAddrs}
-pub use std.net.socket.{TcpListener, TcpStream, UdpSocket}
+pub use std.net.socket.{TcpListener, TcpStream, UdpSocket, TcpReadHalf, TcpWriteHalf}
 #[cfg(arch = "x86_64")]
 pub use std.net.address.{UnixAddr}
+#[cfg(arch = "x86_64")]
+pub use std.net.unix.{UnixStream, UnixListener, UnixReadHalf, UnixWriteHalf}
+#[cfg(os = "linux")]
+pub use std.net.unix.{UnixDatagram, UnixDatagramRead, UnixDatagramPacket}

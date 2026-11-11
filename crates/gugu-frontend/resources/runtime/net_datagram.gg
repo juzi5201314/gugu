@@ -1,0 +1,71 @@
+use std.runtime.resource.{ResourceCell}
+use std.runtime.net_endpoint as endpoint
+use std.runtime.net_platform as native
+use std.runtime.net_transport as transport
+use std.runtime.fs_platform.{raw_allocate, raw_free}
+use std.runtime.heap.{heap_word, heap_store_word}
+use std.net.types.{DatagramRead, DatagramRecv, DatagramPacket}
+use std.net.address.{SocketAddr}
+use std.io.{Bytes, Error}
+use std.text.{alloc_bytes}
+
+#[cfg(os = "linux")]
+fn native_capacity(capacity: uint) uint = capacity
+#[cfg(os = "windows")]
+fn native_capacity(capacity: uint) uint { _ = capacity
+    // IP 报文长度有 16 位上界；完整接收到稳定 raw 区后按 destination 显式裁剪。
+    65535
+}
+pub fn receive(cell: &ResourceCell, destination: &[byte], cancel: uint, connected: bool) Result[DatagramRead, Error] {
+    endpoint.connected(cell, connected)?
+    let capacity = uint(destination.len())
+    let allocated = native_capacity(capacity)
+    let raw = raw_allocate(allocated + 1)
+    defer { raw_free(raw, allocated + 1) }
+    let node = transport.allocate(cell.control, transport.RECEIVE, raw, allocated, cancel)
+    defer { transport.dispose(node) }
+    heap_store_word(node + 320, if connected { 2 } else { 1 })
+    let received = transport.submit(node)?
+    let count = if received > capacity { capacity } else { received }
+    endpoint.copy_out(raw, destination, int(count))
+    let source = native.decode(node + transport.ADDRESS, heap_word(node + 96))?
+    Ok(DatagramRead { len: int(count), source, truncated: received > capacity || heap_word(node + 88) != 0 })
+}
+pub fn recv(cell: &ResourceCell, destination: &[byte], cancel: uint) Result[DatagramRecv, Error] {
+    let result = receive(cell, destination, cancel, true)?
+    Ok(DatagramRecv { len: result.len, truncated: result.truncated })
+}
+pub fn packet(cell: &ResourceCell, max_len: int, cancel: uint) Result[DatagramPacket, Error] {
+    if max_len < 0 { panic("报文上限不能为负数") }
+    // IP datagram 受 16 位长度约束；调用方上界更大也不预分配无界缓冲。
+    let capacity = if max_len > 65535 { 65535 } else { max_len }
+    let bytes = unsafe { alloc_bytes(capacity) }
+    let result = receive(cell, bytes, cancel, false)?
+    if result.truncated { return Err(Error::MessageTooLarge) }
+    Ok(DatagramPacket { data: Bytes::copy_from(bytes[..result.len]), source: result.source })
+}
+pub fn send(cell: &ResourceCell, source: Bytes, target: Option[SocketAddr], cancel: uint) Result[(), Error] {
+    let connected = match target { Some(_) => false, None => true }
+    endpoint.connected(cell, connected)?
+    if source.len() > 65535 { return Err(Error::MessageTooLarge) }
+    let length = uint(source.len())
+    let raw = raw_allocate(length + 1)
+    defer { raw_free(raw, length + 1) }
+    endpoint.copy_in(raw, source)
+    let node = transport.allocate(cell.control, transport.SEND, raw, length, cancel)
+    defer { transport.dispose(node) }
+    heap_store_word(node + 320, if connected { 2 } else { 1 })
+    if let Some(address) = target { heap_store_word(node + 96, native.encode(address, node + transport.ADDRESS)) }
+    let count = transport.submit(node)?
+    if count != length { return Err(if count == 0 { Error::WriteZero } else { Error::InvalidData }) }
+    Ok(())
+}
+pub fn connect(cell: &ResourceCell, peer: Option[SocketAddr]) Result[(), Error] {
+    let op = match peer { Some(_) => transport.UDP_CONNECT, None => transport.UDP_DISCONNECT }
+    let node = transport.allocate(cell.control, op, 0, 0, 0)
+    defer { transport.dispose(node) }
+    if let Some(address) = peer { heap_store_word(node + 96, native.encode(address, node + transport.ADDRESS)) }
+    else { heap_store_word(node + 96, 16) }
+    _ = transport.submit(node)?
+    Ok(())
+}

@@ -48,8 +48,8 @@ use crate::{Diagnostic, DiagnosticCode, TargetName};
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 45：非阻塞 socket、系统 resolver 和共享请求池的 socket 释放。
-pub const RAW_MODEL_SCHEMA: u32 = 45;
+/// 版本 46：双向 transport、报文边界、连接竞速和共享 timeout 状态。
+pub const RAW_MODEL_SCHEMA: u32 = 46;
 
 /// 资源契约段的 schema 版本。
 pub const RESOURCE_SCHEMA: u32 = 1;

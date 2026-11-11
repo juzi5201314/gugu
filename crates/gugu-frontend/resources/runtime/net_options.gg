@@ -1,0 +1,125 @@
+use std.runtime.net_platform as native
+use std.runtime.resource as resources
+use std.runtime.resource.{ResourceCell}
+use std.runtime.fs_platform.{raw_allocate, raw_free}
+use std.runtime.heap.{heap_word, heap_word32, heap_store_word32, copy_bytes}
+use std.net.types.{KeepAliveConfig, InterfaceIndex}
+use std.net.address.{IpAddr, SocketAddr}
+use std.time.{Duration}
+use std.io.{Error}
+
+// 固定十一个类型化选项；原生 level/name 不越过 std.net 公开接口。
+#[cfg(os = "linux")]
+fn option(index: uint, v6: bool) (uint, uint) = match index {
+    0 => (6, 1), 1 => (1, 9), 2 => (if v6 { uint(41) } else { uint(0) }, if v6 { uint(16) } else { uint(2) }),
+    3 => (1, 8), 4 => (1, 7), 5 => (1, 6),
+    6 => (if v6 { uint(41) } else { uint(0) }, if v6 { uint(19) } else { uint(34) }),
+    7 => (if v6 { uint(41) } else { uint(0) }, if v6 { uint(18) } else { uint(33) }),
+    8 => (6, 4), 9 => (6, 5), 10 => (6, 6), _ => panic("socket 选项编号越界"),
+}
+#[cfg(os = "windows")]
+fn option(index: uint, v6: bool) (uint, uint) = match index {
+    0 => (6, 1), 1 => (65535, 8), 2 => (if v6 { uint(41) } else { uint(0) }, uint(4)),
+    3 => (65535, 4098), 4 => (65535, 4097), 5 => (65535, 32),
+    6 => (if v6 { uint(41) } else { uint(0) }, uint(11)),
+    7 => (if v6 { uint(41) } else { uint(0) }, uint(10)),
+    8 => (6, 3), 9 => (6, 17), 10 => (6, 16), _ => panic("socket 选项编号越界"),
+}
+pub fn get(cell: &ResourceCell, index: uint) Result[uint, Error] {
+    let handle = resources.begin(cell)
+    if handle == ~uint(0) { return Err(Error::Closed) }
+    defer { resources.end(cell) }
+    let scratch = raw_allocate(8)
+    defer { raw_free(scratch, 8) }
+    heap_store_word32(scratch + 4, 4)
+    let key = option(index, heap_word(cell.control + native.FAMILY) == native.family6())
+    _ = native.checked(native.call(23, handle, key.0, key.1, scratch, scratch + 4, 0))?
+    Ok(heap_word32(scratch))
+}
+pub fn set(cell: &ResourceCell, index: uint, value: uint) Result[(), Error] {
+    let handle = resources.begin(cell)
+    if handle == ~uint(0) { return Err(Error::Closed) }
+    defer { resources.end(cell) }
+    if (index == 2 && (value == 0 || value > 255)) || (index == 7 && value > 255)
+        || ((index == 3 || index == 4 || index >= 8) && (value == 0 || value > 2147483647)) { return Err(Error::InvalidInput) }
+    let scratch = raw_allocate(4)
+    defer { raw_free(scratch, 4) }
+    heap_store_word32(scratch, value)
+    let key = option(index, heap_word(cell.control + native.FAMILY) == native.family6())
+    _ = native.checked(native.call(1, handle, key.0, key.1, scratch, 4, 0))?
+    Ok(())
+}
+fn seconds(value: Duration) Result[uint, Error] {
+    let seconds = value.as_secs()
+    if seconds > 2147483647 { return Err(Error::InvalidInput) }
+    if value.subsec_nanos() != 0 { seconds = seconds + 1 }
+    if seconds == 0 || seconds > 2147483647 { return Err(Error::InvalidInput) }
+    Ok(seconds)
+}
+pub fn set_keepalive(cell: &ResourceCell, value: Option[KeepAliveConfig]) Result[(), Error] {
+    let config = match value { None => return set(cell, 1, 0), Some(config) => config }
+    let idle = match config.idle { Some(value) => Some(seconds(value)?), None => None }
+    let interval = match config.interval { Some(value) => Some(seconds(value)?), None => None }
+    if let Some(count) = config.count { if count <= 0 || count > 2147483647 { return Err(Error::InvalidInput) }; }
+    if let Some(value) = idle { set(cell, 8, value)? }
+    if let Some(value) = interval { set(cell, 9, value)? }
+    if let Some(value) = config.count { set(cell, 10, uint(value))? }
+    set(cell, 1, 1)
+}
+#[allow(large_copy)]
+pub fn keepalive(cell: &ResourceCell) Result[Option[KeepAliveConfig], Error] {
+    if get(cell, 1)? == 0 { return Ok(None) }
+    Ok(Some(KeepAliveConfig { idle: Some(Duration::from_secs(get(cell, 8)?)), interval: Some(Duration::from_secs(get(cell, 9)?)), count: Some(int(get(cell, 10)?)) }))
+}
+#[cfg(os = "linux")]
+fn membership_option(v6: bool, join: bool) uint = if v6 { if join { uint(20) } else { uint(21) } } else { if join { uint(35) } else { uint(36) } }
+#[cfg(os = "windows")]
+fn membership_option(v6: bool, join: bool) uint { _ = v6
+    if join { uint(12) } else { uint(13) } }
+#[cfg(os = "linux")]
+fn interface4(raw: uint, index: uint) uint {
+    heap_store_word32(raw + 4, 0)
+    heap_store_word32(raw + 8, index)
+    12
+}
+#[cfg(os = "windows")]
+fn interface4(raw: uint, index: uint) uint {
+    // Winsock 的 0.0.0.0/8 编码接口编号，0 表示默认接口。
+    heap_store_word32(raw + 4, ((index & uint(255)) << 24) | ((index & uint(65280)) << 8) | ((index & uint(16711680)) >> 8))
+    8
+}
+#[cfg(os = "linux")]
+fn validate_interface(index: uint) Result[(), Error] { _ = index
+    Ok(()) }
+#[cfg(os = "windows")]
+fn validate_interface(index: uint) Result[(), Error] {
+    if index > 16777215 { Err(Error::Unsupported) } else { Ok(()) }
+}
+pub fn membership(cell: &ResourceCell, group: IpAddr, interface: Option[InterfaceIndex], join: bool) Result[(), Error] {
+    let handle = resources.begin(cell)
+    if handle == ~uint(0) { return Err(Error::Closed) }
+    defer { resources.end(cell) }
+    let index = match interface { Some(InterfaceIndex(value)) => uint(value), None => uint(0) }
+    let raw = raw_allocate(64)
+    defer { raw_free(raw, 64) }
+    let address = SocketAddr::new(group, 0)
+    _ = native.encode(address, raw + 32)
+    let v6 = match group { IpAddr::V4(value) => { let octets = value.octets()
+        if octets[0] < 224 || octets[0] > 239 { return Err(Error::InvalidInput) }
+        false },
+        IpAddr::V6(value) => { let segments = value.segments()
+            if segments[0] >> 8 != u16(255) { return Err(Error::InvalidInput) }
+            true },
+    }
+    let length = if v6 {
+        copy_bytes(raw, raw + 40, 16)
+        heap_store_word32(raw + 16, index)
+        uint(20)
+    } else {
+        validate_interface(index)?
+        copy_bytes(raw, raw + 36, 4)
+        interface4(raw, index)
+    }
+    _ = native.checked(native.call(1, handle, if v6 { 41 } else { 0 }, membership_option(v6, join), raw, length, 0))?
+    Ok(())
+}

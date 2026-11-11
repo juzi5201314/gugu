@@ -499,10 +499,15 @@
   - 最终验收：`cargo build --workspace` 无 warning，`cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail` 默认配置下 659 项通过、66 项沿用既有跳过设置，耗时 86.948 秒；未放宽单项或整轮超时。`cargo fmt --all --check`、`git diff --check` 与 `mdbook build -d target/book` 通过，既有 SUMMARY 已覆盖全部修改章节。
   - 验证边界：默认测试只解释生产 LIR/机器序列并检查双目标镜像；平台与调度使用固定钩子。Linux 手工执行系统 localhost 解析、取消与回环 accept/资源关闭；Windows 已验证 IOCP/AcceptEx 协议和 PE 导入，没有执行真实 Windows 镜像。
 
-- [ ] **阶段 65：实现 std.net transport、TCP/UDP 与 Unix socket**（复杂度：4）
+- [x] **阶段 65：实现 std.net transport、TCP/UDP 与 Unix socket**（复杂度：4）
   - 依赖：阶段 64、61d、62。
-  - 实现 TcpStream、UDP datagram、recv_from/recv_packet、方向并发、截断规则、timeout/cancel、local/peer addr、UnixStream/UnixListener/UnixDatagram 的目标条件。
-  - 验收：每个 datagram 恰消费一次，destination 不足明确 truncated，短写/MessageTooLarge/Closed/NotConnected 不被伪装；poller 与 BlockingBridge 选择遵守 runtime 规则。
+  - 已实现 TcpStream 的 Read/Write、共享 split half、方向关闭、地址快照、共享 timeout、逐操作取消及类型化 socket options；ToSocketAddrs 的数字、字符串与地址切片进入同一连接链，总 deadline 包含解析，双栈候选保持族内顺序并交错启动、硬失败提前启动下一项、首胜取消其余尝试，错误按启动顺序保存。
+  - 已实现 UdpSocket 的 send/recv、send_to/recv_from、recv_packet、connected/disconnect 及取消版本。connected recv 返回 `DatagramRecv { len, truncated }`；接收只消费一次报文，超上限返回 MessageTooLarge，发送短提交不得伪装完整成功。控制请求与读写队列按到达序号形成屏障，模式在真正提交前复查。UnixStream/UnixListener 共用 stream 生命周期；Linux UnixDatagram 共用报文路径，Windows 不导出该类型；匿名来源明确为 None，不隐式 unlink 文件系统地址。
+  - poller 接入：复用单一 epoll/IOCP 与 ResourceCell，双方向独立 FIFO；请求、raw 数据、OVERLAPPED 使用统一计费存储。取消/超时不提前回收 Windows 在途缓冲，completion 才结束操作租约；读半关闭唤醒等待读取并使未来读取返回 EOF，写半关闭排在先前写之后。取消扫描每轮至多128项且跨轮保持请求游标。连接计时事件按需安装，网络功能不把 Resolver/libc 引入数字地址程序。
+  - 确定性验收：生产 LIR 与机器序列覆盖短读短写/EOF/BrokenPipe、跨方向推进与同方向 FIFO、UDP 截断/零长/超上限/短发送拒绝、模式屏障、共享 timeout 捕获及超长时限饱和、预取消与在途取消、迟到 completion/close/读半关闭、超过扫描预算的尾部取消、连接候选排序、Linux connect readiness、Windows ConnectEx/上下文更新、事件先通知/重复通知、Unix 地址和类型化选项。完整 API 形成两目标镜像；字符串和地址切片连接泛型进入真实 Resolver fixture。
+  - 归属层修复：spawn-pack 的冻结 descriptor 曾保留200字节旧布局，现直接引用权威208字节/16字节对齐 ABI；InstantiateGir schema 7、RuntimeRaw schema 46、x64 lowering 20、import policy 3 同步失效旧缓存。移除 GIR pass 后对同一冻结 world 的重复指纹扫描。三槽测试调度及重编译用例独占避免资源争用，保持3秒单项与120秒全量限制。
+  - 最终验收：`cargo build --workspace` 无 warning；`cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail` 默认配置669项全通过、66项沿用原有跳过设置，耗时63.248秒；`cargo fmt --all --check`、`git diff --check` 与 `mdbook build -d target/book` 通过。SUMMARY 已覆盖全部修改规范与内部章节。
+  - 验证边界：本阶段未执行真实网络或 Windows 主机程序；网络、时钟与调度采用确定性的进程内钩子，执行真实标准库 LIR/native 指令并检查 ELF/PE。没有用真实网络吞吐、压力或原生 Windows 执行作为验收证据。
 
 - [ ] **阶段 66：实现 std.process 与 std.env**（复杂度：4）
   - 依赖：阶段 31、37、58、62、63。
