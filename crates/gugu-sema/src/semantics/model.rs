@@ -15,6 +15,7 @@ pub use lang::MemoryIntrinsic;
 pub use lang::PlatformIntrinsic;
 pub use lang::RuntimeIntrinsic;
 pub use lang::RuntimeMachineIntrinsic;
+pub(crate) use lang::compiler_owned_item;
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum Ty {
     Error,

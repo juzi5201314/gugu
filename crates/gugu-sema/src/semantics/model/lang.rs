@@ -454,3 +454,16 @@ impl Model<'_> {
         None
     }
 }
+
+/// 编译器拥有、无源码声明的标准项：只按规范路径识别，导入别名与再导出保留同一身份。
+/// builtin 模块的条目导入解析用它把 `use std.mem.{transmute}` 这类导入还原为
+/// `External(规范路径)`，与经 `ModuleTarget::External` 到达的路径完全一致。
+pub(crate) fn compiler_owned_item(path: &str) -> bool {
+    // `RuntimeMachineIntrinsic` 不在其中：机器原语只允许由 runtime 注入源
+    // 通过限定路径调用，从来不是可导入项；导入解析必须继续报「不存在可导入项」，
+    // 调用点再由 checker 报「只能由 runtime 注入源调用」。
+    path == "std.mem.MaybeUninit"
+        || MemoryIntrinsic::from_path(path).is_some()
+        || RuntimeIntrinsic::from_path(path).is_some()
+        || PlatformIntrinsic::from_path(path).is_some()
+}

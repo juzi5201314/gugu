@@ -957,15 +957,18 @@ fn resolve_import(
             namespace: Namespace::Module,
             target: BindingTarget::Module(*module),
         }],
-        // 编译器拥有的非预导入类型没有源码声明，仍必须保留规范路径和导入别名。
+        // 编译器拥有的标准项（原语、非预导入类型）没有源码声明，仍必须保留规范路径
+        // 和导入别名；按规范路径还原为 External，导入别名不改变原语身份。
         (ModuleTarget::Local(module), Some(name))
             if modules[module.index()].builtin
-                && modules[module.index()].path == "std.mem"
-                && name == "MaybeUninit" =>
+                && crate::semantics::model::compiler_owned_item(&format!(
+                    "{}.{name}",
+                    modules[module.index()].path
+                )) =>
         {
             vec![Binding {
                 namespace: Namespace::External,
-                target: BindingTarget::External("std.mem.MaybeUninit".to_owned()),
+                target: BindingTarget::External(format!("{}.{name}", modules[module.index()].path)),
             }]
         }
         (ModuleTarget::Local(module), Some(name)) => resolve_local_item(
