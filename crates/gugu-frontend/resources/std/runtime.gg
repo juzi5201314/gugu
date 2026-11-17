@@ -106,3 +106,104 @@ pub fn stats() RuntimeStats { unsafe {
         range_reserved_bytes: memory.uncommitted_reserved_bytes,
     }
 } }
+
+pub enum RuntimeError {
+    InvalidValue,
+    Terminating,
+}
+
+/* `Automatic(p)` 是按堆增长触发自动周期的非负百分数；`Off` 只关闭增长触发，内存上限和
+ * 分配失败仍可以强制启动 GC。 */
+pub enum GcTarget {
+    Automatic(uint),
+    Off,
+}
+
+pub struct TraceConfig {
+    pub scheduler: bool,
+    pub gc: bool,
+    pub signal: bool,
+    pub panic: bool,
+}
+
+use std.runtime.control as control
+
+pub fn available_parallelism() uint = 1
+
+pub fn parallelism() uint = control.parallelism()
+
+pub fn set_parallelism(value: uint) Result[uint, RuntimeError] {
+    let (code, previous) = control.set_parallelism(value)
+    if code == control.TERMINATING { return Err(RuntimeError::Terminating) }
+    if code == control.INVALID_VALUE { return Err(RuntimeError::InvalidValue) }
+    Ok(previous)
+}
+
+pub fn gc_target() GcTarget {
+    let (percent, disabled) = control.gc_target()
+    if disabled != 0 { return GcTarget::Off }
+    GcTarget::Automatic(percent)
+}
+
+pub fn set_gc_target(value: GcTarget) Result[GcTarget, RuntimeError] {
+    let (percent, disabled) = match value {
+        GcTarget::Automatic(p) => (p, uint(0)),
+        GcTarget::Off => (uint(0), uint(1)),
+    }
+    let (code, old_percent, old_disabled) = control.set_gc_target(percent, disabled)
+    if code == control.TERMINATING { return Err(RuntimeError::Terminating) }
+    if old_disabled != 0 { return Ok(GcTarget::Off) }
+    Ok(GcTarget::Automatic(old_percent))
+}
+
+pub fn memory_limit() Option[uint] {
+    let limit = control.memory_limit()
+    if limit == 0 { return None }
+    Some(limit)
+}
+
+pub fn set_memory_limit(value: Option[uint]) Result[Option[uint], RuntimeError] {
+    let bytes = match value { Some(v) => v, None => uint(0) }
+    let (code, previous) = control.set_memory_limit(bytes)
+    if code == control.TERMINATING { return Err(RuntimeError::Terminating) }
+    if previous == 0 { return Ok(None) }
+    Ok(Some(previous))
+}
+
+/* 当前每协程逻辑栈上限；只由 GUGU_RUNTIME_STACK_MAX 在启动时设置。 */
+pub fn stack_limit() uint = 1073741824
+
+pub fn safepoint_poll() = control.safepoint_poll()
+
+pub fn collect() = control.collect()
+
+const TRACE_SCHEDULER: uint = 1
+const TRACE_GC: uint = 2
+const TRACE_SIGNAL: uint = 4
+const TRACE_PANIC: uint = 8
+
+fn trace_config_of(mask: uint) TraceConfig {
+    TraceConfig {
+        scheduler: mask & TRACE_SCHEDULER != 0,
+        gc: mask & TRACE_GC != 0,
+        signal: mask & TRACE_SIGNAL != 0,
+        panic: mask & TRACE_PANIC != 0,
+    }
+}
+
+fn trace_mask_of(config: &TraceConfig) uint {
+    let mask: uint = 0
+    if config.scheduler { mask = mask | TRACE_SCHEDULER }
+    if config.gc { mask = mask | TRACE_GC }
+    if config.signal { mask = mask | TRACE_SIGNAL }
+    if config.panic { mask = mask | TRACE_PANIC }
+    mask
+}
+
+pub fn trace_config() TraceConfig = trace_config_of(control.trace_mask())
+
+pub fn set_trace(value: TraceConfig) Result[TraceConfig, RuntimeError] {
+    let (code, previous) = control.set_trace_mask(trace_mask_of(&value))
+    if code == control.TERMINATING { return Err(RuntimeError::Terminating) }
+    Ok(trace_config_of(previous))
+}

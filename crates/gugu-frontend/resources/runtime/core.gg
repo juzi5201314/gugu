@@ -7,6 +7,7 @@ use std.runtime.fs_platform as filesystem
 use std.runtime.network_service as network
 use std.runtime.process_context as process_context
 use std.runtime.timer as timer
+use std.runtime.control as control
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
@@ -230,6 +231,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
             fatal_configuration()
         }
         parse_startup_environment(payload.boot_environment, startup_page)
+        control.init_gc_target(word(startup_page), word(startup_page + 16))
         store_word(block.payload_va + bias + 120, payload.boot_environment & ~uint(1))
         store_word(state + 760, startup_page)
         // 唯一 main 协程预留 1 GiB 虚址，初始只提交 64 KiB；增长在同一虚址内提交新页，
@@ -303,6 +305,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
             }
             _ = reason
         }
+        control.mark_terminating()
         filesystem.shutdown(processor_addr)
         network.shutdown(processor_addr)
         process_context.shutdown()

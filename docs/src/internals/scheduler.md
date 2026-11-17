@@ -10,7 +10,7 @@
 
 ## 镜像内单 worker {#image-worker}
 
-当前 Linux 镜像固定一个 OS worker。`rt0_start` 分配一页可写 processor，`boot` 清零队列，并把 TLAB 与 TurnRegion 的 cursor/limit 指到各自已提交的 1 MiB 堆。`parallelism = 1`，没有 steal、`clone` 或 futex。`take_next` 先取 `run_next`，再从本地头取出最老的项，最后取 overflow carry；`yield` 把当前协程放进本地尾，已经在队列里的协程先被选中。子协程各自保留 1 GiB、初次提交 64 KiB。等待只改协程状态并切回系统栈。channel、Join、select 与 `std.sync` 的方法体在镜像内 Gugu 源里执行。`gc_write_barrier` 直接返回；收集器仍属于后续阶段。
+当前 Linux 镜像固定一个 OS worker。`rt0_start` 分配一页可写 processor，`boot` 清零队列，并把 TLAB 与 TurnRegion 的 cursor/limit 指到各自已提交的 1 MiB 堆。`parallelism = 1`，没有 steal、`clone` 或 futex。进程级控制面由 `std.runtime.control` 模块的进程级 static 发布：`set_parallelism`/`set_gc_target`/`set_trace` 先校验 `Terminating` 与参数再写入，`memory_limit` 直接写 owner 页的 `RUNTIME_LIMIT_OFFSET` 活账本；`set_parallelism` 只发布目标值，processor pool 收敛属于多 processor 阶段；`safepoint_poll`/`collect` 在 owner 的 GC 请求槽登记 POLL/MAJOR 后走 `gc_enter`。`GUGU_RUNTIME_GC_TARGET` 的启动解析结果经 `control.init_gc_target` 进入同一存储；`Terminating` 标记在主调度循环退出时由 rt0 写入。`take_next` 先取 `run_next`，再从本地头取出最老的项，最后取 overflow carry；`yield` 把当前协程放进本地尾，已经在队列里的协程先被选中。子协程各自保留 1 GiB、初次提交 64 KiB。等待只改协程状态并切回系统栈。channel、Join、select 与 `std.sync` 的方法体在镜像内 Gugu 源里执行。`gc_write_barrier` 直接返回；收集器仍属于后续阶段。
 
 runtime源码需要在锁所有权或 root publication的常数临界区暂缓 safepoint时，只能使用 compiler内部的 [`NoSafepointRegion`](gir-lir.md#no-safepoint-region)；它不是用户 attribute，也不允许建立另一套不受 poll预算约束的 runtime路径。
 
