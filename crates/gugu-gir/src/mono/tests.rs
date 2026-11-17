@@ -650,13 +650,13 @@ fn public_summaries_preserve_hidden_state_effects() {
 
 #[test]
 fn each_generic_instance_consumes_its_own_selected_callee_summary() {
-    let source = "trait Value { fn value(self) int }\nstruct Box[T] { value: T }\nimpl Value for Box[T] { fn value(self) int = panic(\"stop\") }\nimpl Value for Box[int] { fn value(self) int = 1 }\nfn read[T](value: Box[T]) int = value.value()\nfn main() { _ = read(Box { value: 1 })\n _ = read(Box { value: true }) }";
+    let source = "trait Value { fn value(self) int }\nstruct Box[T] { value: T }\nimpl Value for Box[T] { fn value(self) int = panic(\"stop\") }\nimpl Value for Box[int] { fn value(self) int = 1 }\nfn probe[T](value: Box[T]) int = value.value()\nfn main() { _ = probe(Box { value: 1 })\n _ = probe(Box { value: true }) }";
     let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
     let mut effects: Vec<_> = output
         .mono
         .instances
         .iter()
-        .filter(|instance| instance.symbol == "read")
+        .filter(|instance| instance.symbol == "probe")
         .map(|instance| {
             output
                 .analysis
@@ -731,20 +731,22 @@ fn metadata_roots_change_closed_world_fingerprint() {
 
 #[test]
 fn packs_and_callable_bounds_preserve_all_concrete_edges() {
-    let source = "fn leaf() {}\nfn consume[Ts...](...args: Ts) { leaf() }\nfn apply[T, U, F: Fn(T) U](f: F, value: T) U = f(value)\nfn inc(value: int) int = value + 1\nfn main() { consume()\n consume(1, true)\n _ = apply(inc, 1) }";
+    // 符号名必须与 runtime 内建项无碰撞：实例图按裸符号名导航，
+    // runtime 的 value.gg 已占用 `apply`。
+    let source = "fn sink() {}\nfn spread[Ts...](...args: Ts) { sink() }\nfn relay[T, U, F: Fn(T) U](f: F, value: T) U = f(value)\nfn bump(value: int) int = value + 1\nfn main() { spread()\n spread(1, true)\n _ = relay(bump, 1) }";
     let output = compile(&[("main.gg", source)], &crate::QueryEngine::new());
     assert_eq!(
         output
             .mono
             .instances
             .iter()
-            .filter(|instance| instance.symbol == "consume")
+            .filter(|instance| instance.symbol == "spread")
             .count(),
         2
     );
     let map = instance_map(&output.mono);
-    assert_eq!(map["consume"], vec!["leaf"]);
-    assert_eq!(map["apply"], vec!["inc"]);
+    assert_eq!(map["spread"], vec!["sink"]);
+    assert_eq!(map["relay"], vec!["bump"]);
 }
 
 #[test]
@@ -764,3 +766,4 @@ fn caller_type_parameter_does_not_rebind_callee_parameter() {
     );
     assert_eq!(instance_map(&output.mono)["outer"], vec!["inner", "inner"]);
 }
+

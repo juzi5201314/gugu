@@ -275,41 +275,29 @@ fn generic_iteration_retains_the_into_iter_item_equality() {
     ));
 }
 
-#[test]
-fn core_prelude_traits_apply_conditionally() {
-    assert!(accepts(
-        "fn show[T: Print + Debug + Eq + Hash + Default](value: T) {}\nfn main() { show(1)\n show(true)\n show((1, true))\n show([1, 2])\n show(Some(1))\n let text = f\"{1}\"\n let hex = f\"{1:x}\"\n _ = text\n _ = hex }"
-    ));
-    assert!(accepts(
-        "fn step(value: Option[int]) Option[int] { let n = value?\n Some(n + 1) }\nfn main() { _ = step(Some(1)) }"
-    ));
-    assert!(accepts(
-        "fn show[T: Print + Debug + Eq + Hash](value: T) {}\nfn main() { let value: Result[int, string] = Ok(1)\n show(value) }"
-    ));
-    assert!(accepts(
-        "struct Bare {}\nfn take[T: Default](value: T) {}\nfn main() { take(Some(Bare {})) }"
-    ));
-    assert!(!accepts(
-        "struct Bare {}\nfn take[T: Default](value: T) {}\nfn main() { take(Bare {}) }"
-    ));
-    assert!(accepts(
-        "struct Probe { text: string }\nimpl Error for Probe { fn message(self: &Self) string = self.text\n fn source(self: &Self) Option[&dyn Error] { let missing: Option[&dyn Error] = None\n missing } }\nimpl Print for Probe { fn print(self: &Self, out: &Formatter) {} }\nimpl Debug for Probe { fn debug(self: &Self, out: &Formatter) {} }\nfn main() { let probe = Probe { text: \"x\" }\n _ = probe.message() }"
-    ));
-    assert!(!accepts(
-        "fn show[T: Default](value: T) {}\nfn main() { let value: Result[int, string] = Ok(1)\n show(value) }"
-    ));
-    assert!(!accepts(
-        "fn hash[T: Hash](value: T) {}\nfn main() { hash(1.0) }"
-    ));
-    assert!(!accepts(
-        "fn eq[T: Eq](value: T) {}\nfn main() { eq(Some(1.0)) }"
-    ));
-    assert!(!accepts(
-        "fn main() { let text = f\"{true:x}\"\n _ = text }"
-    ));
-    assert!(!accepts(
-        "impl Print for int { fn print(self: &Self, out: &Formatter) {} }\nfn main() {}"
-    ));
+accept_cases! {
+    core_prelude_traits_apply_conditionally_00: true,
+        "fn show[T: Print + Debug + Eq + Hash + Default](value: T) {}\nfn main() { show(1)\n show(true)\n show((1, true))\n show([1, 2])\n show(Some(1))\n let text = f\"{1}\"\n let hex = f\"{1:x}\"\n _ = text\n _ = hex }";
+    core_prelude_traits_apply_conditionally_01: true,
+        "fn step(value: Option[int]) Option[int] { let n = value?\n Some(n + 1) }\nfn main() { _ = step(Some(1)) }";
+    core_prelude_traits_apply_conditionally_02: true,
+        "fn show[T: Print + Debug + Eq + Hash](value: T) {}\nfn main() { let value: Result[int, string] = Ok(1)\n show(value) }";
+    core_prelude_traits_apply_conditionally_03: true,
+        "struct Bare {}\nfn take[T: Default](value: T) {}\nfn main() { take(Some(Bare {})) }";
+    core_prelude_traits_apply_conditionally_04: false,
+        "struct Bare {}\nfn take[T: Default](value: T) {}\nfn main() { take(Bare {}) }";
+    core_prelude_traits_apply_conditionally_05: true,
+        "struct Probe { text: string }\nimpl Error for Probe { fn message(self: &Self) string = self.text\n fn source(self: &Self) Option[&dyn Error] { let missing: Option[&dyn Error] = None\n missing } }\nimpl Print for Probe { fn print(self: &Self, out: &Formatter) {} }\nimpl Debug for Probe { fn debug(self: &Self, out: &Formatter) {} }\nfn main() { let probe = Probe { text: \"x\" }\n _ = probe.message() }";
+    core_prelude_traits_apply_conditionally_06: false,
+        "fn show[T: Default](value: T) {}\nfn main() { let value: Result[int, string] = Ok(1)\n show(value) }";
+    core_prelude_traits_apply_conditionally_07: false,
+        "fn hash[T: Hash](value: T) {}\nfn main() { hash(1.0) }";
+    core_prelude_traits_apply_conditionally_08: false,
+        "fn eq[T: Eq](value: T) {}\nfn main() { eq(Some(1.0)) }";
+    core_prelude_traits_apply_conditionally_09: false,
+        "fn main() { let text = f\"{true:x}\"\n _ = text }";
+    core_prelude_traits_apply_conditionally_10: false,
+        "impl Print for int { fn print(self: &Self, out: &Formatter) {} }\nfn main() {}";
 }
 
 /// 编译一份 `main.gg`：lint 类用例只关心诊断与是否产出镜像。

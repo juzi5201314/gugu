@@ -161,12 +161,21 @@ fn any_plans_preserve_exact_payload_across_cached_queries() {
         &std::collections::BTreeSet::new(),
     )
     .unwrap();
-    let main = warm
+    // 用擦除链的形状定位 main 体：`adjustments.len() == 2` 不唯一，
+    // 真正的判别是「具体值先擦到 dyn Value、再从 dyn Value 擦到 dyn Any」
+    // 这一对相邻且首尾相接的调整。
+    let index = warm
         .semantics
         .bodies
         .iter()
-        .find(|body| body.adjustments.len() == 2)
+        .position(|body| {
+            let [object, erased] = body.adjustments.as_slice() else {
+                return false;
+            };
+            object.target == erased.source && matches!(&erased.source, Ty::Dyn(_))
+        })
         .unwrap();
+    let main = &warm.semantics.bodies[index];
     let [object, erased] = main.adjustments.as_slice() else {
         panic!("仅具体值和接口值进入不同擦除容器");
     };
@@ -185,13 +194,7 @@ fn any_plans_preserve_exact_payload_across_cached_queries() {
         ]
     );
     let mut corrupted = warm.semantics.clone();
-    let reflection = corrupted
-        .bodies
-        .iter_mut()
-        .flat_map(|body| &mut body.reflections)
-        .next()
-        .unwrap();
-    reflection.kind = ReflectionKind::Downcast(Ty::Never);
+    corrupted.bodies[index].reflections[0].kind = ReflectionKind::Downcast(Ty::Never);
     assert!(corrupted.verify(&model).is_err());
 }
 
