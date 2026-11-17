@@ -40,7 +40,10 @@ fn virtual_workspace_resolves_members_globs_and_defaults() {
 
     // 从 workspace 根构建：default-members 只选 app。
     let project = Project::discover(root.path()).expect("workspace discovers");
-    assert_eq!(project.workspace().root(), root.path());
+    assert_eq!(
+        project.workspace().root(),
+        fs::canonicalize(root.path()).expect("canonicalize root").as_path()
+    );
     assert!(project.current_package().is_none());
     assert_eq!(
         project.workspace().default_members(),
