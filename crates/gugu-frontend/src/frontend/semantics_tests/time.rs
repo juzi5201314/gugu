@@ -12,4 +12,10 @@ accept_cases! {
     // `Instant.nanos` 不公开：外部不能构造或读取单调时刻的字面值。
     std_time_instant_field_private_04: false,
         "use std.time.{Instant}\nfn main() { _ = Instant { nanos: 0 } }";
+    std_time_sleep_05: true,
+        "use std.time.{Duration, sleep}\nfn main() { sleep(Duration::from_secs(0))\n sleep(Duration::from_millis(10)) }";
+    std_time_sleep_cancel_06: true,
+        "use std.time.{Duration, sleep_cancel}\nuse std.sync.{CancelSource, Cancelled}\nfn main() { let source = CancelSource::new()\n let token = source.token()\n match sleep_cancel(Duration::from_millis(1), &token) { Ok(_) => (), Err(e) => match e { Cancelled => () } } }";
+    std_sync_cancel_check_07: true,
+        "use std.sync.{CancelSource, Cancelled}\nfn main() { let source = CancelSource::new()\n let token = source.token()\n source.cancel()\n if !token.is_cancelled() { panic(\"x\") }\n match token.check() { Ok(_) => (), Err(e) => match e { Cancelled => () } } }";
 }

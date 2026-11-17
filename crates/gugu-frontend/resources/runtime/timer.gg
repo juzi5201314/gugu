@@ -1,0 +1,113 @@
+use std.runtime.fs_platform.{control_allocate, control_free}
+use std.runtime.heap.{heap_word, heap_store_word}
+use std.runtime.scheduler.{park_current, ready_hot}
+use std.runtime.counters as counters
+
+/* sleep/timeout 的到期等待表：节点按 (deadline, 登记序) 升序插入，service 由 worker 的
+ * pending 循环驱动，只在线性化点取消在途等待，永远不执行用户代码。
+ * 节点布局：+0 next、+8 hot、+16 deadline、+24 cancel、+32 status、+40 done。
+ * 远 deadline 节点全部进入这一份有序链；分层 wheel 是后续 drain 内部结构，对外契约不变。
+ * 不依赖 `std.time`：deadline 是单调时钟纳秒，在 runtime 层只做无符号比较。
+ */
+const NODE_NEXT: uint = 0
+const NODE_HOT: uint = 8
+const NODE_DEADLINE: uint = 16
+const NODE_CANCEL: uint = 24
+const NODE_STATUS: uint = 32
+const NODE_DONE: uint = 40
+const NODE_BYTES: uint = 64
+const DRAIN_BUDGET: uint = 128
+
+static first: uint = 0
+
+pub const CANCELLED: uint = 18446744073709551615
+
+pub fn pending() bool = first != 0
+
+fn cancelled(control: uint) bool { unsafe {
+    control != 0 && std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](control)) != 0
+} }
+
+fn unlink_head() {
+    first = heap_word(first + NODE_NEXT)
+    counters.remove(counters.TIMER_LIVE, 1)
+    counters.remove(counters.TIMER_BYTES, NODE_BYTES)
+}
+
+fn complete(node: uint, status: uint) {
+    if heap_word(node + NODE_DONE) != 0 { return }
+    heap_store_word(node + NODE_DONE, 1)
+    heap_store_word(node + NODE_STATUS, status)
+    unlink_head()
+    ready_hot(heap_word(node + NODE_HOT))
+}
+
+/* 按 deadline 升序；同 deadline 保持 FIFO（按登记序），无需显式序号比较。 */
+fn insert(node: uint) {
+    let deadline = heap_word(node + NODE_DEADLINE)
+    if first == 0 || deadline < heap_word(first + NODE_DEADLINE) {
+        heap_store_word(node + NODE_NEXT, first)
+        first = node
+        return
+    }
+    let cursor = first
+    loop {
+        let next = heap_word(cursor + NODE_NEXT)
+        if next == 0 || deadline < heap_word(next + NODE_DEADLINE) {
+            heap_store_word(node + NODE_NEXT, next)
+            heap_store_word(cursor + NODE_NEXT, node)
+            return
+        }
+        cursor = next
+    }
+}
+
+fn now() uint { unsafe { std.runtime.monotonic_nanos() } }
+
+fn expired(deadline: uint, current: uint) bool = current >= deadline
+
+/* 以现在为基准的饱和 deadline；duration 过大时钳到 ~uint(0)，永不回绕成已到期。 */
+pub fn deadline_after(seconds: uint, nanos: uint) uint {
+    let current = now()
+    let remaining = ~uint(0) - current
+    if nanos >= remaining || seconds > (remaining - nanos) / 1000000000 { return ~uint(0) }
+    current + seconds * 1000000000 + nanos
+}
+
+/* 返回 0 表示到期完成，CANCELLED 表示在到期前观察到取消。取消不撤销已经完成的等待：
+ * 到期与取消同轮到达时以 service 先写入的 status 为准。 */
+pub fn sleep_until(deadline: uint, cancel: uint) uint { unsafe {
+    if cancelled(cancel) { return CANCELLED }
+    if expired(deadline, now()) { return 0 }
+    let node = control_allocate(NODE_BYTES)
+    defer { control_free(node, NODE_BYTES) }
+    heap_store_word(node + NODE_NEXT, 0)
+    heap_store_word(node + NODE_HOT, std.runtime.current_slot())
+    heap_store_word(node + NODE_DEADLINE, deadline)
+    heap_store_word(node + NODE_CANCEL, cancel)
+    heap_store_word(node + NODE_STATUS, 0)
+    heap_store_word(node + NODE_DONE, 0)
+    counters.add(counters.TIMER_LIVE, 1)
+    counters.add(counters.TIMER_BYTES, NODE_BYTES)
+    insert(node)
+    park_current()
+    heap_word(node + NODE_STATUS)
+} }
+
+pub fn service() {
+    let budget: uint = DRAIN_BUDGET
+    loop {
+        let node = first
+        if node == 0 || budget == 0 { return }
+        let cancel = heap_word(node + NODE_CANCEL)
+        if cancelled(cancel) {
+            counters.add(counters.TIMER_CANCELLED, 1)
+            complete(node, CANCELLED)
+        } else {
+            let deadline = heap_word(node + NODE_DEADLINE)
+            if !expired(deadline, now()) { return }
+            complete(node, 0)
+        }
+        budget = budget - 1
+    }
+}

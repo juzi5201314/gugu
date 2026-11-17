@@ -1,4 +1,6 @@
 use std.runtime.time as clock
+use std.runtime.timer as timer
+use std.sync.{CancelToken, Cancelled}
 
 /// 不含时区和日历的非负时长，纳秒精度与可表示范围相互独立。
 #[repr(C)]
@@ -58,4 +60,15 @@ impl SystemTime {
         if earlier.nanos > self.nanos { return Err(Error::ClockWentBackward) }
         Ok(Duration::from_nanos(self.nanos - earlier.nanos))
     }
+}
+
+/* sleep 挂起当前协程而不是 OS 线程；deadline 到期前被 cancel 的等待返回 Cancelled，
+ * 取消不会撤销已经完成的等待。sleep(0) 立即返回。 */
+pub fn sleep(duration: Duration) {
+    _ = timer.sleep_until(timer.deadline_after(duration.as_secs(), duration.subsec_nanos()), 0)
+}
+pub fn sleep_cancel(duration: Duration, cancel: &CancelToken) Result[(), Cancelled] {
+    let status = unsafe { timer.sleep_until(timer.deadline_after(duration.as_secs(), duration.subsec_nanos()), cancel.raw_control()) }
+    if status == timer.CANCELLED { return Err(Cancelled {}) }
+    Ok(())
 }
