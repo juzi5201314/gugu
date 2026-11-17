@@ -4,6 +4,24 @@ pub struct Bytes {
 }
 
 #[used]
+pub fn concat(left: &[byte], right: &[byte]) string {
+    let data = unsafe { alloc_bytes(left.len() + right.len()) }
+    for index in 0..left.len() { data[index] = left[index] }
+    for index in 0..right.len() { data[index] = right[index] }
+    unsafe { std.runtime.string_from_utf8_unchecked(data) }
+}
+
+// UTF-8 切片边界检查：位置 i 是标量边界当且仅当 i == 0、i == len，
+// 或 data[i] 不是续字节（0b10xxxxxx）。返回值是 I8 车道 bool。
+#[used]
+pub fn utf8_boundary(data: &[byte], start: int, end: int) bool {
+    if start < 0 || end < 0 || start > end || end > data.len() { return false }
+    if start > 0 && data[start] & 192 == 128 { return false }
+    if end < data.len() && data[end] & 192 == 128 { return false }
+    true
+}
+
+#[used]
 pub fn string_compare(left: &[byte], right: &[byte]) int {
     let length = if left.len() < right.len() { left.len() } else { right.len() }
     for index in 0..length {

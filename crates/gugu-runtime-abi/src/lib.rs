@@ -520,10 +520,24 @@ pub const GLUE_DEFS: &[GlueDef] = &[
         },
     },
     GlueDef {
+        glue: "concat",
+        def: GlueDefKind::Item {
+            source: "std/text.gg",
+            item: "concat",
+        },
+    },
+    GlueDef {
         glue: "string_compare",
         def: GlueDefKind::Item {
             source: "std/text.gg",
             item: "string_compare",
+        },
+    },
+    GlueDef {
+        glue: "utf8_boundary",
+        def: GlueDefKind::Item {
+            source: "std/text.gg",
+            item: "utf8_boundary",
         },
     },
     GlueDef {

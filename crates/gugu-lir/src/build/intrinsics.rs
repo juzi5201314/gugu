@@ -519,11 +519,20 @@ impl Builder<'_> {
         let local = self.gir.expression_locals[base.index()]
             .ok_or_else(|| invalid("字符串检查缺少已求值 base"))?;
         let base = self.read_place(g::Place::local(local))?;
-        let mut args = self.computed_values(base)?;
-        for endpoint in [start, end].into_iter().flatten() {
-            let local = self.gir.expression_locals[endpoint.index()]
-                .ok_or_else(|| invalid("字符串检查缺少已求值端点"))?;
-            args.extend(self.local_values(local)?);
+        // 与 `concat` 同理：切片/字符串是 COW 聚合，glue 绑定需要显式 (data, len) 车道。
+        let mut args = self.explicit_abi_values(base)?;
+        // 调用形状固定为 (data, len, start, end)：缺省起点归一为 0，缺省终点归一为 len，
+        // `utf8_boundary` glue 因此绑定到一个固定四参数的 Gugu 函数。
+        for (index, endpoint) in [start, end].into_iter().enumerate() {
+            match endpoint {
+                Some(endpoint) => {
+                    let local = self.gir.expression_locals[endpoint.index()]
+                        .ok_or_else(|| invalid("字符串检查缺少已求值端点"))?;
+                    args.extend(self.local_values(local)?);
+                }
+                None if index == 0 => args.push(self.constant(0, Type::I64)),
+                None => args.push(args[1]),
+            }
         }
         Ok(self.runtime(
             RuntimeCall::Utf8Boundary,

@@ -34,7 +34,7 @@ pub fn definition(context: &MonoContext<'_>, glue: &str) -> Option<hir::DefId> {
         .map(|(index, _)| hir::DefId(u32::try_from(index).expect("定义编号适配 u32")))
 }
 
-pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
+pub fn referenced(context: &MonoContext<'_>, body: &GirBody) -> BTreeSet<&'static str> {
     let mut demand = BTreeSet::new();
     for statement in &body.statements {
         use crate::gir::body::{ResourceActionKind as Resource, ValueActionKind as Value};
@@ -57,7 +57,7 @@ pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
             }
             _ => {}
         }
-        if let StatementKind::Assign(_, value) = &statement.kind {
+        if let StatementKind::Assign(place, value) = &statement.kind {
             // 聚合写入托管槽时由 LIR 使用同一 descriptor 搬运与发布。
             demand.insert("value_transfer");
             demand.insert("value_forget");
@@ -65,6 +65,25 @@ pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
             match value {
                 Rvalue::Compare { .. } => {
                     demand.insert("string_compare");
+                }
+                // `+` 只在 string 结果上发 `concat` runtime 调用：按赋值目标 local 的
+                // 语义类型判定，不给普通整数加法强行实例化 std.text 依赖。
+                Rvalue::BinaryOp {
+                    op: crate::gir::body::BinaryOp::Add,
+                    ..
+                } if place.is_local()
+                    && matches!(
+                        context.semantic_type(body.locals[place.local.index()].ty),
+                        Ok(crate::semantics::Ty::String)
+                    ) =>
+                {
+                    demand.insert("concat");
+                }
+                Rvalue::CheckedOp {
+                    kind: crate::gir::body::CheckOpKind::Utf8Boundary,
+                    ..
+                } => {
+                    demand.insert("utf8_boundary");
                 }
                 Rvalue::CowSnapshot(_) => {
                     demand.insert("cow_snapshot");
