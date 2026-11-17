@@ -31,6 +31,34 @@ pub fn collect(context: &MonoContext<'_>, entry: &WalkEntry) -> Result<Collected
         ids.extend(owner.expression_types.iter().copied());
         ids.extend(owner.expression_inputs.iter().copied());
         ids.extend(owner.locals.iter().map(|local| local.ty));
+        // 静态访问在 GIR 物化时把 `StaticRef` 槽改写为 `*T`：该指针类型同样是具体类型，
+        // 必须在冻结前入表。来源有两处：`let` 绑定静态的槽位，与直接解析到静态定义的表达式。
+        let static_slot = |id: hir::TypeId, collector: &mut Collector<'_, '_>| {
+            let ty = context.type_at(id, &entry.bindings)?;
+            let ty = concrete(context, &ty)?;
+            if is_concrete(&ty) {
+                collector.visit(&Ty::Ptr(Box::new(ty.into_owned())))?;
+            }
+            Ok::<(), Diagnostic>(())
+        };
+        for statement in &owner.statements {
+            if let hir::StatementKind::Static { local, .. } = &statement.kind {
+                static_slot(owner.locals[local.index()].ty, &mut collector)?;
+            }
+        }
+        for (index, expression) in owner.expressions.iter().enumerate() {
+            let definition = match &expression.kind {
+                hir::ExprKind::Resolved(hir::Res::Def(definition))
+                | hir::ExprKind::Resolved(hir::Res::Associated { definition, .. }) => *definition,
+                _ => continue,
+            };
+            if matches!(
+                context.module.definitions[definition.index()].kind,
+                hir::DefinitionKind::Static | hir::DefinitionKind::LocalStatic
+            ) {
+                static_slot(owner.expression_types[index], &mut collector)?;
+            }
+        }
         if !owner.checks.is_empty()
             || owner.expressions.iter().any(|expression| {
                 expression.effects.0 & (hir::Effects::PANIC | hir::Effects::SUSPEND) != 0

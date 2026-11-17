@@ -738,6 +738,10 @@ kind 为 0 global、1 OS-thread-local template、2 coroutine-local template、3 
 初始化器实例**不可被 GIR 内联**：它的发布动作挂在自身 `Return` 降级上，内联只搬语句会让初始化
 静默变成空操作。
 
+持有 `StaticRef` 结果的 local 在具体类型表中物化为 `*T`（`T` 是静态的声明类型），包括 `let` 绑定
+静态的槽位和直接解析到静态定义的表达式两种来源；实例类型收集在冻结前把该指针类型一并登记进
+类型宇宙，否则具体 body 的类型键无法在冻结后解析。
+
 局部 `static` 的绑定槽只保存存储地址（供闭包捕获），本 owner 内的读写都经同一存储 place，
 因此写入跨调用可见。受管值类型（值槽含受管指针）的静态仍被拒绝，待 `RootRecord` 与 `LAZY_SLOT`
 扫描接线后再放开。
