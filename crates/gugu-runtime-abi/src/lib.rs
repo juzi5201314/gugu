@@ -314,6 +314,8 @@ pub enum RuntimeMachineOp {
     ProcessWorker,
     /// 单调纳秒，供 GC 暂停和 native 逻辑时间观察。
     MonotonicNanos,
+    /// UTC 墙钟纳秒（Unix epoch 起），供 `SystemTime` 观察；可因校时跳变。
+    WallNanos,
     /// 以当前 stack_high 相对深度读取机器字，不增长栈。
     StackReadWord,
     /// 在可移动协程栈与非移动 raw 缓冲之间精确复制字节。
@@ -344,6 +346,7 @@ impl RuntimeMachineOp {
             Self::ProcessCall => "process_call",
             Self::ProcessWorker => "process_worker",
             Self::MonotonicNanos => "monotonic_nanos",
+            Self::WallNanos => "wall_nanos",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
             Self::CageControl => "cage_control",
@@ -477,6 +480,10 @@ pub const GLUE_DEFS: &[GlueDef] = &[
     },
     GlueDef {
         glue: "monotonic_nanos",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "wall_nanos",
         def: GlueDefKind::Fragment,
     },
     GlueDef {

@@ -30,7 +30,7 @@ Rt0Payload revision=5、144 字节；Linux 独立寄存器保存初始 argc/argv
 
 ## 后端阶段
 
-cage 控制记录含机器更新的解码计数，ELF 将其放在 rt0 只读收尾范围之外的保留可写区，PE 放在 `.data`；两者都不可执行。PE 的 cage 重定位直接使用数据 RVA，不叠加文本 RVA。私有 `cage_control` 访问器与解码序列共用 `CageControl` relocation，因此公开统计与机器更新消费同一份记录。栈深度读取/复制片段在入口根据当前 r14 的 stack_high 重建地址，复制尾跳 glue 域的既有 memcpy；不能误用 runtime 域同名符号。双目标镜像布局与登记片段重定位回归分别验证页权限、地址及尾跳定义。
+cage 控制记录含机器更新的解码计数，ELF 将其放在 rt0 只读收尾范围之外的保留可写区，PE 放在 `.data`；两者都不可执行。PE 的 cage 重定位直接使用数据 RVA，不叠加文本 RVA。私有 `cage_control` 访问器与解码序列共用 `CageControl` relocation，因此公开统计与机器更新消费同一份记录。栈深度读取/复制片段在入口根据当前 r14 的 stack_high 重建地址，复制尾跳 glue 域的既有 memcpy；不能误用 runtime 域同名符号。时钟由两个片段分别提供：`monotonic_nanos` 在 Linux 使用 CLOCK_BOOTTIME（计入系统挂起时间）、在 Windows 使用 GetTickCount64；`wall_nanos` 在 Linux 使用 CLOCK_REALTIME、在 Windows 读取 GetSystemTimePreciseAsFileTime 并把 FILETIME 换成 Unix epoch 纳秒（输出缓冲位于 shadow space 之上）。双目标镜像布局与登记片段重定位回归分别验证页权限、地址及尾跳定义。
 
 LIR 后端严格按以下顺序运行：
 

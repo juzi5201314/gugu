@@ -725,6 +725,7 @@ fn runtime_machine_op(
         Source::ProcessCall => Target::ProcessCall,
         Source::ProcessWorker => Target::ProcessWorker,
         Source::MonotonicNanos => Target::MonotonicNanos,
+        Source::WallNanos => Target::WallNanos,
         Source::StackReadWord => Target::StackReadWord,
         Source::StackCopyRaw => Target::StackCopyRaw,
         Source::CageControl => Target::CageControl,

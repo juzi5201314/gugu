@@ -11,6 +11,8 @@ mod opaque;
 #[cfg(feature = "slow-tests")]
 mod runtime;
 #[cfg(feature = "slow-tests")]
+mod time;
+#[cfg(feature = "slow-tests")]
 mod traits;
 #[cfg(feature = "slow-tests")]
 mod unsafety;

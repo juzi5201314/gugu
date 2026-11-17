@@ -693,6 +693,7 @@ fn runtime_machine_call_valid(
         // 当前协程 slot 指针以机器字返回，Gugu 侧用 `transmute` 取得类型化指针。
         Kind::CurrentSlot
         | Kind::MonotonicNanos
+        | Kind::WallNanos
         | Kind::CageControl
         | Kind::CallbackControl
         | Kind::ProcessWorker

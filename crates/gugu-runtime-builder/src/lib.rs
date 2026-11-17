@@ -24,6 +24,11 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/runtime/time.gg",
+        include_str!("../../gugu-frontend/resources/runtime/time.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
         "std/runtime/counters.gg",
         include_str!("../../gugu-frontend/resources/runtime/counters.gg"),
         RuntimeSourceRole::Runtime,

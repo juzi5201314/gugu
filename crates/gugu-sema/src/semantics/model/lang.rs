@@ -94,6 +94,7 @@ pub enum RuntimeMachineIntrinsic {
     ProcessCall,
     ProcessWorker,
     MonotonicNanos,
+    WallNanos,
     StackReadWord,
     StackCopyRaw,
     CageControl,
@@ -104,7 +105,7 @@ pub enum RuntimeMachineIntrinsic {
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 30] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -128,6 +129,7 @@ impl RuntimeMachineIntrinsic {
         Self::ProcessCall,
         Self::ProcessWorker,
         Self::MonotonicNanos,
+        Self::WallNanos,
         Self::StackReadWord,
         Self::StackCopyRaw,
         Self::CageControl,
@@ -168,6 +170,7 @@ impl RuntimeMachineIntrinsic {
             Self::ProcessCall => "process_call",
             Self::ProcessWorker => "process_worker",
             Self::MonotonicNanos => "monotonic_nanos",
+            Self::WallNanos => "wall_nanos",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
             Self::CageControl => "cage_control",
@@ -185,6 +188,7 @@ impl RuntimeMachineIntrinsic {
             Self::ContextRestore | Self::CallbackQueue => 3,
             Self::CurrentSlot
             | Self::MonotonicNanos
+            | Self::WallNanos
             | Self::CageControl
             | Self::CallbackControl
             | Self::ThreadId => 0,
@@ -227,6 +231,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::ProcessCall
                 | Self::ProcessWorker
                 | Self::MonotonicNanos
+                | Self::WallNanos
                 | Self::StackReadWord
                 | Self::CageControl
                 | Self::CallbackControl
@@ -250,6 +255,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::ProcessCall
                 | Self::ProcessWorker
                 | Self::MonotonicNanos
+                | Self::WallNanos
                 | Self::StackReadWord
                 | Self::StackCopyRaw
                 | Self::CageControl

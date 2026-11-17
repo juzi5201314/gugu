@@ -294,13 +294,31 @@ fn clock_fragments_return_monotonic_nanoseconds() {
     let mut linux = Machine::new(&[("syscall:228", 0)]);
     linux.put(STACK - 16, 123);
     linux.put(STACK - 8, 456);
-    assert_eq!(linux.execute(linux_clock()), Stop::Return);
+    assert_eq!(linux.execute(linux_clock(7)), Stop::Return);
     assert_eq!(&linux.calls[0].1[..2], &[7, STACK - 16]);
     assert_eq!(linux.get(Rax), 123_000_000_456);
     assert_eq!(linux.get(Rsp), STACK);
     let mut windows = Machine::new(&[("GetTickCount64", 1234)]);
     assert_eq!(windows.execute(windows_clock()), Stop::Return);
     assert_eq!(windows.get(Rax), 1_234_000_000);
+    assert_eq!(windows.get(Rsp), STACK);
+}
+
+#[test]
+fn wall_clock_fragments_return_unix_nanoseconds() {
+    let mut linux = Machine::new(&[("syscall:228", 0)]);
+    linux.put(STACK - 16, 1_700_000_000);
+    linux.put(STACK - 8, 42);
+    assert_eq!(linux.execute(linux_clock(1)), Stop::Return);
+    assert_eq!(&linux.calls[0].1[..2], &[1, STACK - 16]);
+    assert_eq!(linux.get(Rax), 1_700_000_000_000_000_042);
+    assert_eq!(linux.get(Rsp), STACK);
+    // FILETIME 缓冲位于 shadow space 之上：`sub rsp,40` 后的 `rsp+32`。
+    let filetime = 116_444_736_000_000_000_u64 + 1_234_567_800;
+    let mut windows = Machine::new(&[("GetSystemTimePreciseAsFileTime", 0)]);
+    windows.put(STACK - 8, filetime);
+    assert_eq!(windows.execute(windows_wall_clock()), Stop::Return);
+    assert_eq!(windows.get(Rax), 123_456_780_000);
     assert_eq!(windows.get(Rsp), STACK);
 }
 

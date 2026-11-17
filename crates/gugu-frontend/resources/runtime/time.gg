@@ -1,0 +1,4 @@
+// std.time 的时钟边界：单调源与 UTC 墙钟分开登记。
+// 两个机器原语只允许由 runtime 注入源触碰，std facade 经本模块取得机器字。
+pub fn monotonic() uint = unsafe { std.runtime.monotonic_nanos() }
+pub fn wall() uint = unsafe { std.runtime.wall_nanos() }

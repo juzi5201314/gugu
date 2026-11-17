@@ -1,3 +1,5 @@
+use std.runtime.time as clock
+
 /// 不含时区和日历的非负时长，纳秒精度与可表示范围相互独立。
 #[repr(C)]
 pub struct Duration { seconds: uint, nanoseconds: uint }
@@ -14,4 +16,46 @@ impl Duration {
     pub fn subsec_nanos(self: &Self) uint = self.nanoseconds
     pub fn as_nanos(self: &Self) u128 = u128(self.seconds) * u128(1000000000) + u128(self.nanoseconds)
     pub fn is_zero(self: &Self) bool = self.seconds == 0 && self.nanoseconds == 0
+}
+
+/// `std.time` 的错误；墙钟回拨不以负时长伪装。
+pub enum Error {
+    ClockWentBackward,
+}
+
+/// 不可序列化的单调时刻：使用目标提供的、计入系统挂起时间的单调时钟。
+/// 字段私有，外部只能由 `now` 构造、经 `elapsed`/checked 相减构造 deadline，不能转换为 Unix timestamp。
+#[repr(C)]
+pub struct Instant { nanos: uint }
+impl Instant {
+    pub fn now() Instant = Instant { nanos: clock.monotonic() }
+    pub fn elapsed(self: &Self) Duration {
+        let current = Instant::now()
+        current.saturating_since(self)
+    }
+    /// 单调时钟不会回拨，防御性饱和仍把不可能的回拨收敛到零时长。
+    fn saturating_since(self: &Self, earlier: &Instant) Duration {
+        if self.nanos <= earlier.nanos { return Duration::from_nanos(0) }
+        Duration::from_nanos(self.nanos - earlier.nanos)
+    }
+    pub fn checked_add(self: &Self, duration: Duration) Option[Instant] {
+        let total = u128(self.nanos) + duration.as_nanos()
+        if total > u128(~uint(0)) { return None }
+        Some(Instant { nanos: uint(total) })
+    }
+    pub fn checked_sub(self: &Self, duration: Duration) Option[Instant] {
+        if duration.as_nanos() > u128(self.nanos) { return None }
+        Some(Instant { nanos: self.nanos - uint(duration.as_nanos()) })
+    }
+}
+
+/// UTC 墙钟时刻，字段私有，可因校时跳变；不能用来测量持续时间，日历与时区不在 std。
+#[repr(C)]
+pub struct SystemTime { nanos: uint }
+impl SystemTime {
+    pub fn now() SystemTime = SystemTime { nanos: clock.wall() }
+    pub fn duration_since(self: &Self, earlier: SystemTime) Result[Duration, Error] {
+        if earlier.nanos > self.nanos { return Err(Error::ClockWentBackward) }
+        Ok(Duration::from_nanos(self.nanos - earlier.nanos))
+    }
 }

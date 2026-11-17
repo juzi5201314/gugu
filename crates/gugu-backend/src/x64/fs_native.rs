@@ -133,15 +133,22 @@ fn blob(name: &'static str, b: Builder) -> FragmentBlob {
 /// 调度、额度与错误分类由 Gugu 实现；机器片段只负责 native 线程入口。
 pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
     let builders = match target {
-        TargetName::X86_64Linux => [linux_start(), linux_poll(), linux_worker(), linux_clock()],
+        TargetName::X86_64Linux => [
+            linux_start(),
+            linux_poll(),
+            linux_worker(),
+            linux_clock(7),
+            linux_clock(1),
+        ],
         TargetName::X86_64Windows => [
             windows_start(),
             windows_poll(),
             windows_worker(),
             windows_clock(),
+            windows_wall_clock(),
         ],
     };
-    ["fs_start", "fs_poll", "fs_native_worker", "monotonic_nanos"]
+    ["fs_start", "fs_poll", "fs_native_worker", "monotonic_nanos", "wall_nanos"]
         .into_iter()
         .zip(builders)
         .map(|(name, builder)| blob(name, builder))
@@ -212,12 +219,13 @@ fn multiply(b: &mut Builder, scale: u64) {
         vec![reg(gpr(Rax)), reg(gpr(Rax)), imm(scale)],
     );
 }
-fn linux_clock() -> Builder {
+/// `clock_id`：单调源用 7（CLOCK_BOOTTIME，含系统挂起时间），墙钟用 1（CLOCK_REALTIME）。
+fn linux_clock(clock_id: i32) -> Builder {
     let mut b = Builder::new();
     let failed = b.label();
     adjust(&mut b, "sub", Rsp, 16);
     number(&mut b, Rax, 228);
-    number(&mut b, Rdi, 7); // CLOCK_BOOTTIME 含系统挂起时间。
+    number(&mut b, Rdi, clock_id);
     rr(&mut b, Rsi, Rsp);
     syscall(&mut b);
     compare(&mut b, Rax, 0);
@@ -245,6 +253,36 @@ fn windows_clock() -> Builder {
     adjust(&mut b, "sub", Rsp, 40);
     win_call(&mut b, "GetTickCount64");
     multiply(&mut b, 1_000_000);
+    adjust(&mut b, "add", Rsp, 40);
+    ret(&mut b);
+    b
+}
+/// FILETIME 是 1601-01-01 起 100 纳秒计数；减去 Unix epoch 偏移后乘 100 得到墙钟纳秒。
+fn windows_wall_clock() -> Builder {
+    let mut b = Builder::new();
+    adjust(&mut b, "sub", Rsp, 40);
+    // 输出缓冲放在 shadow space 之上，callee 的寄存器回写不能覆盖它。
+    b.emit(
+        "lea",
+        &[K::Mem, K::R64],
+        Access::Address,
+        vec![mem_base(gpr(Rsp), 32), reg(gpr(Rcx))],
+    );
+    win_call(&mut b, "GetSystemTimePreciseAsFileTime");
+    load(&mut b, Rax, Rsp, 32);
+    b.emit(
+        "mov",
+        &[K::R64, K::Imm64],
+        Access::Write,
+        vec![reg(gpr(R10)), imm(116_444_736_000_000_000)],
+    );
+    b.emit(
+        "sub",
+        MOV,
+        Access::ReadWrite,
+        vec![reg(gpr(Rax)), reg(gpr(R10))],
+    );
+    multiply(&mut b, 100);
     adjust(&mut b, "add", Rsp, 40);
     ret(&mut b);
     b
