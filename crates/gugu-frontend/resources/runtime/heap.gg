@@ -325,6 +325,13 @@ fn heap_arena_base(address: uint, arena_bytes: uint) uint {
     address & ~(arena_bytes - uint(1))
 }
 
+/// TLAB cursor 可停在块首或块末；limit-1 始终属于已打开块，不能把末端当成下一 arena。
+pub fn heap_tlab_arena(processor: uint, arena_bytes: uint) uint {
+    let limit = heap_word(processor + 3528)
+    if limit == 0 { heap_fail() }
+    heap_arena_base(limit - 1, arena_bytes)
+}
+
 pub fn heap_large_lookup(arena: uint, address: uint, config: uint) uint {
     if arena == 0 || address == 0 { return 0 }
     let arena_bytes = gc_config_arena_bytes(config)
@@ -348,7 +355,7 @@ pub fn heap_large_resolve(processor: uint, address: uint, arena_bytes: uint) uin
         let cursor = heap_word(processor + 3520)
         if cursor == 0 { return 0 }
         let config = std.runtime.gc_config()
-        let record = heap_large_lookup(heap_arena_base(cursor, arena_bytes), address, config)
+        let record = heap_large_lookup(heap_tlab_arena(processor, arena_bytes), address, config)
         if record == 0 { 0 } else { heap_word(record + 8) }
     }
 }
@@ -365,9 +372,7 @@ pub fn heap_large_allocate(
     unsafe {
         let config = std.runtime.gc_config()
         let block_bytes = gc_config_block_bytes(config)
-        let cursor = heap_word(processor + 3520)
-        if cursor == 0 { heap_fail() }
-        let arena = heap_arena_base(cursor, arena_bytes)
+        let arena = heap_tlab_arena(processor, arena_bytes)
         let meta = heap_metadata(arena, arena_bytes)
         let slot = heap_large_find_free(meta, arena_bytes, block_bytes)
         if slot >= LARGE_MAPPING_CAPACITY { heap_fail() }
@@ -926,8 +931,8 @@ pub fn heap_stack_grey(processor: uint, epoch: uint) byte {
 /// `arena` 必须由调用方给出：side metadata 就紧跟在 arena 数据段之后，把任意地址按
 /// `arena_bytes` 向下对齐再当 arena 用会读到未映射地址。不属于该 arena 的地址一律返回 0。
 pub fn heap_owner_payload(field: uint, arena: uint, arena_bytes: uint, granule_bytes: uint, header_bytes: uint) uint {
-    if field < header_bytes { return 0 }
     if field < arena || field - arena >= arena_bytes { return 0 }
+    if field - arena < header_bytes { return 0 }
     let meta = heap_metadata(arena, arena_bytes)
     // 账本口径：bitmap 的 granule 下标是 `payload - arena - header`（与 `heap_mark_payload`
     // 一致），因此 header 基址是 `arena + granule * granule_bytes`，payload 起点再加一个 header。
@@ -980,13 +985,10 @@ fn heap_scan_object_start(meta: uint, from: uint, first: uint) uint {
 }
 /// 取一个新的块并把可分配范围交给 TLAB；arena 内已无空闲块时返回 0。
 ///
-/// 慢路只在快路失败后进入，此时当前块的 cursor 必然已经推进过，因此由 cursor-1 反推所在
-/// arena 不会落到下一个 arena 的边界上。
+/// 按已打开块的 limit-1 反推 arena，cursor 停在块首与 arena 末端时都不改变归属。
 fn heap_refill(processor: uint, arena_bytes: uint, block_bytes: uint, line_bytes: uint) uint {
     unsafe {
-        let cursor = heap_word(processor + 3520)
-        let probe = if cursor == 0 { uint(0) } else { cursor - uint(1) }
-        let arena = heap_arena_of(probe, arena_bytes)
+        let arena = heap_tlab_arena(processor, arena_bytes)
         let meta = heap_metadata(arena, arena_bytes)
         let blocks = arena_bytes / block_bytes
         let recorded = heap_word32(meta + ARENA_ALLOC_CURSOR_OFFSET)

@@ -16,6 +16,12 @@ const DONE: uint = 8
 const SHARED: uint = 1
 const PAGE_BYTES: uint = 4096
 pub const CLOSE_REQUEST_OFFSET: uint = 96
+static child_cleanup: Option[fn(uint)] = None
+static pipe_cleanup: Option[fn(uint)] = None
+pub fn install_process_cleanup(child: fn(uint), pipe: fn(uint)) {
+    child_cleanup = Some(child)
+    pipe_cleanup = Some(pipe)
+}
 
 /// kind为1(File)或2(ReadDir)；首个值持有一个租约。
 pub fn create(native_handle: uint, kind: uint) ResourceCell {
@@ -41,6 +47,12 @@ pub fn close(cell: &ResourceCell) uint {
     await_close(control)
 }
 
+pub fn close_raw(control: uint) {
+    heap_store_word32(control + 8, heap_word32(control + 8) | CLOSED)
+    request_close(control)
+}
+pub fn control_address(cell: &ResourceCell) uint = cell.control
+pub fn close_intent(cell: &ResourceCell) { close_raw(cell.control) }
 /// 全一字表示Closed；成功调用必须与end成对。
 pub fn begin(cell: &ResourceCell) uint = begin_control(cell.control)
 pub fn begin_control(control: uint) uint {
@@ -127,7 +139,15 @@ pub fn publish_control(control: uint) {
 
 fn request_close(control: uint) {
     let state = heap_word32(control + 8)
-    if (state & CLOSED) == 0 || (state & QUEUED) != 0 || heap_word(control + 80) != 0 { return }
+    if (state & CLOSED) == 0 || (state & QUEUED) != 0 { return }
+    let kind = heap_word(control + 72)
+    if kind == 4 || kind == 5 {
+        heap_store_word32(control + 8, state | QUEUED)
+        let cleanup = if kind == 4 { child_cleanup } else { pipe_cleanup }
+        match cleanup { Some(cleanup) => cleanup(control), None => heap_fail() }
+        return
+    }
+    if heap_word(control + 80) != 0 { return }
     heap_store_word32(control + 8, state | QUEUED)
     enqueue_close(control, heap_word(control + 64), heap_word(control + 72))
 }

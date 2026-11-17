@@ -514,7 +514,8 @@ fn trace_step_body(cursor: uint, descriptor: uint, descriptor_len: uint, payload
         trace_uleb_into(cursor, program, program_len, after_width)
         let case_count = heap_word(cursor + TRACE_SCRATCH_OFFSET)
         let after_count = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
-        let tag = trace_field(payload, payload_len, tag_offset, width)
+        let shift_bytes = shift * 8
+        let tag = trace_field(payload + shift_bytes, payload_len - shift_bytes, tag_offset, width)
         trace_set_frame(cursor, depth, FRAME_SWITCH, after_count, 0, case_count, tag, TRACE_NONE, TRACE_NONE, shift)
         return STEP_CONTINUE
     }
@@ -553,7 +554,8 @@ fn trace_open_repeat_field(cursor: uint, program: uint, program_len: uint, paylo
     trace_uleb_into(cursor, program, program_len, after_offset)
     let width = heap_word(cursor + TRACE_SCRATCH_OFFSET)
     let after_width = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)
-    let count = trace_field(payload, payload_len, count_offset, width)
+    let shift_bytes = shift * 8
+    let count = trace_field(payload + shift_bytes, payload_len - shift_bytes, count_offset, width)
     trace_uleb_into(cursor, program, program_len, after_width)
     let stride = heap_word(cursor + TRACE_SCRATCH_OFFSET)
     let after = heap_word(cursor + TRACE_SCRATCH_OFFSET + 8)

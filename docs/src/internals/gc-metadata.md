@@ -100,6 +100,7 @@ LocalHeap 的数据段按 `arena_bytes` 对齐；当前记录布局的 side meta
 
 请求的 `header + align - 1 + payload_bytes` 超过单个 Immix block，或 `align` 超过配置的 `large_align_limit` 时，分配器进入 LargeMapping slow path。它以平台页为最小粒度向上取整总范围，按 `max(align, page_bytes)` reserve 并 commit 整段，在 payload 前写入统一的 16 字节 object header、清零 payload，再以 release 顺序将记录状态置为 `ACTIVE`。`payload = align_up(base + header, mapping_align)`；header 的 `payload_size_or_forward` 保存实际 payload 字节数，不能以 block size 或类型静态 size 替代运行时请求。空间或记录槽不足走既有 runtime fatal，不截断、回退到普通 block 或返回伪造地址。
 普通 block slow path 通过 `gc_refill_line(kind, payload_bytes, align, flags)` 取得已对齐 run 起点：先检查当前 TLAB 的 `cursor/limit`，只有请求放不下时才提交并打开下一个 block，同时回写 processor 的 TLAB。返回 0 只表示没有可用 block 或请求不能容纳；`gc_alloc_slow` 不得把它解释成可继续写入的伪地址。
+动态数组或 `alloc_bytes` 的逻辑长度为零时，LIR 仍保留零长度，但把实际分配 payload 钳位为 8 字节；对象头必须记录非零物理大小，collector 才能解析和搬迁该 backing。不得把最小物理 payload 当作语言级元素数，也不得以放宽 collector 的零大小校验掩盖非法对象头。
 
 镜像当前还提供 `gc_move_one(root)` 这一受限复制原语：读取真实 header 的 type/size，按请求字节数复制 payload，先在新对象完成初始化，再以 forwarding 标志和新 payload 地址发布旧 header；重复命中直接返回既有 forwarding。LargeMapping 不伪装成普通 block 搬迁，调用方必须走其独立 range 生命周期。该原语只负责一个对象的复制与 forwarding 发布，root/field 的回写和 cycle 级 work/credit 仍由 collector 协议负责。
 收集器通过 nursery/old 登记表解析 `payload <= address < payload + bytes` 的首地址与内部引用，按本轮 epoch 去重并加入同一 descriptor 工作列表。minor 扫描有效大对象字段以更新年轻引用，major 只标记根图可达的大对象；pin 与普通对象共用 allocation 租约表。major 在字段遍历闭合后，把无本轮标记且无固定租约的记录撤销，再以登记的实际 `mapped_bytes` 整体释放映射，扣减 reservation、committed 和 heap 分区，不影响文件小计。重复扫描跳过已撤销记录；槽重用递增 generation。大对象不能通过普通 block candidate 或 line return 单独释放。字段写屏障先查询已登记的大对象范围，命中时不读取地址附近假定的 arena metadata，也不生成普通 block 卡片；其年轻字段由 minor 的大对象表扫描更新。
@@ -601,6 +602,7 @@ opcode 固定为：
 `body_len`、`default_len` 为小端 `u32`；其余整数除 `count_width`/`tag_width` 外使用 ULEB128。field/tag width 只允许 1、2、4、8，按目标小端读取。
 
 `SWITCH` 的每个 case 依次编码 `tag_value: u64`、`body_len: u32`、`body`，case 按无符号 tag 严格递增。子 program 使用当前 payload 作为基准，因而字段偏移是绝对的；nested `REPEAT` 才改变子基准。
+在 Repeat 元素内部，Switch 的 tag 和 RepeatField 的 count 均相对当前元素基址读取；游标的元素偏移以 word 保存，读取这些 byte offset 字段前必须乘以 8，不能重新以最外层对象地址为基准。
 
 program 必须恰以 `END` 结束，END 后无非 padding 字节；嵌套深度不超过 32，单 program 小于 4 GiB。每次 direct/interior 范围和每个动态 repeat 的最终范围都必须在 object payload size 内。动态 count 与 stride 的乘加使用 checked arithmetic；越界进入 `RuntimeInvariant` fatal。
 
@@ -671,6 +673,8 @@ value program 用于编译器在 GIR 中展开语义复制、销毁、发布和 
 不可达且仍含最后 resource lease 的对象进入受限 release queue 并保持到 descriptor 已执行；队列只运行 compiler/runtime 生成的 resource drop glue，不执行任意用户析构或 finalizer，不允许复活、分配、panic 或等待。同一对象最多排队一次，release 完成后才可回收。
 
 镜像内 `value_copy/drop/publish/forget/transfer`、`cow_snapshot` 与 resource glue 已绑定到 Gugu `value` 模块。解释器直接消费 80 字节 TypeRecord 的 value offset/length；零长度表示无动作。ResourceCell 的单 END 程序是资源叶，Acquire 增租约，Release 先清空槽再减租约，Forget 只清空槽。结构 wrapper 按当前模式选择前向或逆向动作，enum 只处理当前 tag。控制页登记在 owner 上，GC 释放最后租约只提交 close 队列；原生 close 完成后才能回收控制页，自然退出排空剩余登记。`finalize_resource` 跳过无资源标志及已 forwarding 的旧对象，先清除资源标志再执行 descriptor，重复访问不会再次释放。进程内 LIR 测试执行该入口、ResourceCell 叶程序、租约释放、完成发布、登记表摘除及 native_memory 账本扣减；测试提供固定类型段，并在最终平台释放处记录事件。该测试不代替整个 GC 可达性扫描或原生线程的验证。
+
+值动作解释器的 ULEB128、定宽整数读取和嵌套 Repeat/Switch 均按值传递游标并返回续点，不对游标取地址、不给游标建立托管盒。GC 的资源终结会执行同一解释器；若在这里触发托管分配，慢路径再次切到 collector 栈顶会覆盖尚未返回的终结帧。因此这条路径必须保持无托管分配，嵌套程序结束后仍从父程序的正确续点执行后续动作。
 
 value glue 的符号也受后端的真实发射门禁约束：只有 lowering 实际发出 `CallTarget::Runtime` 或专用 value op 的入口才检查，不会因为 `RuntimeCall` 枚举中存在一个由 lowering 内联的名字而误报。未接管的 `value_*`、COW、resource、pin 和动态擦除入口必须留在显式迁移缺口清单；它们不是定义，不能被 bench 当作镜像运行期证明。实现接管时，入口必须绑定到 `GLUE_DEFS` 的 Gugu `Item`/machine `Fragment`，并同步移除缺口记录。
 
@@ -863,6 +867,7 @@ summary。shade 操作只入队第一次从 white 转 grey 的对象；不能递
 barrier 在完成实际 field store 后，把 distinct card 键放入本地 buffer。dedup 使用固定大小的直接映射 stamp 表：冲突只会留下已经进入 buffer 的旧键，不得丢弃尚未发布的键。当前 processor 是 arena allocation owner 时，flush 可以在 owner 上按 arena/generation 合并后写 card table；其它情况发布 `CardMarkBatch` 到 arena allocation owner 的 card mailbox。batch 只携带稳定 arena descriptor、generation、card index/range、cycle epoch 和 bytes，不携带 field 地址或 managed pointer。card table 只能由 arena owner 写入，避免多个 processor 长期争用同一 card cache line。
 
 buffer 满、processor 交接、进入 `ForeignBridge`、memory pressure、minor stop 请求和 producer stop gate 都必须 flush。flush 以 Release 发布实际 field store 之前已经完成的 buffer 内容；owner 以 Acquire 消费 batch 后再写 card table。minor cycle 在扫描 remembered set 前必须确认所有 active processor 的 buffer 已 flush、所有旧 epoch card batch 已消费或登记在 owner credit 中；因此不能以“当前 card table 已清零”代替 producer drain。卡片重复写是幂等的，按 arena/generation 不匹配的键进入 `RuntimeInvariant`，不能静默忽略。
+flush 后必须同时使 stamp 的键与 buffer 索引失效，不能只把 epoch 清零：非标记期间的合法 epoch 也是零。镜像实现清除整条 32 字节记录；有效 card 键包含非零 arena 地址，因此零键不可能误命中，后续同一卡片必须重新追加到已清空的 buffer。
 
 card buffer 的 256 项、dedup stamp 和 pending batch bytes 都计入 runtime pressure；pressure flush 可以提高 batch drain budget，但不得在 `NoSafepointRegion` 内分配节点、阻塞或遍历其它 owner。若 flush 需要 refill，必须在 region 外建立 mandatory statepoint；`BarrierReserve.max_card_marks` 不足时不能把 card table直接写成共享 fast path。
 
@@ -1144,6 +1149,7 @@ stack arena 与 raw plane 共用同一 provider，加一次 stack committed 会�
 pacing 契约在 `RuntimeRawContractV1::build`、镜像计划与 CLI JSON（`build_json_reports_barrier_contract_keys`）
 内的端到端集成中验证；`8b21ce3` 改由镜像内 `LocalHeap` 承载回收后，旧 world 参照实现的
 `pacing_tests` 随之删除。
+TLAB 的 arena 归属统一由已发布的 `limit - 1` 反推：cursor 可以停在块首，也可以恰好到达 arena 末端。minor nursery 定位、large mapping 查询/分配和 refill 共用这一条规则，避免末端 cursor 选择未提交的下一 arena 元数据或错误回收存活尾链。
 契约还同样固定 Callable 的稳定类型键修复，该修复在提交 `0813ad6` 中独立完成：
 [`mono/keys.rs`](monomorphization-cache.md) 统一 `Ty::Callable` 类型
 稳定键，`concrete/layout.rs` 删除 `Callable` 特例，`mono/universe.rs` 改用

@@ -17,6 +17,7 @@
 平台文档的名称或版本变化不能自动改变 Gugu 语义。若平台 ABI 的新版本与本章的规范性表格冲突，目标实现必须继续遵守本章；要采用新约定，必须先修订本规范。
 
 本章不承诺 Gugu 内部 ABI。默认调用约定、闭包环境、runtime私有对象 metadata、vtable、GC 根编码、内部符号名和未标注 `repr` 的字段布局都属于编译器实现，可随编译器构建身份改变。
+Windows runtime 的高对齐堆预约保持既有 NT API 兼容范围，不要求新增 `VirtualAlloc2` 等系统入口。高于宿主预约粒度的对齐由 Gugu 映射归属层整块过量预约并选择内部对齐区；原始 reservation、padding 和登记页都必须由同一所有者持有，释放时返还整个原块，不能对内部对齐地址执行 `MEM_RELEASE`。
 
 ## 目标模型
 
@@ -49,7 +50,7 @@ target_name ::= arch "-" os
 
 两行均为“已支持目标”。本版本不定义 tier-2、tier-3 或“尽力支持”目标；未登记组合没有部分支持状态。
 
-Linux 目标在没有动态 FFI 或系统 Resolver 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver 自动采用目标工具链登记的 libc、pthread 与解释器，纯数字地址解析及 bind 仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号和解释器均进入 action key；同名符号来自冲突库时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
+Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver、环境 API 及通过环境快照依赖它的 Command.spawn 自动采用目标工具链登记的 libc、pthread 与解释器。args/current_dir/set_current_dir、普通 fs、数字网络和空程序仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock，进程创建遵守 [CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) 的 application、命令行、环境与继承句柄契约。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号、Function/Data 种类和解释器均进入 action key；同名符号来自冲突库或具有冲突种类时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
 
 ### 新目标登记
 
@@ -297,11 +298,12 @@ PE 节名长度和节属性必须符合 PE/COFF 目标限制。`#[link_section]`
 
 ### 可执行镜像形式 {#executable-image-forms}
 
-没有动态 FFI 或系统 Resolver 需求的 Linux executable 必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0 完成镜像自身允许的 relative relocation 并支持加载基址随机化。运行时只应用 relative relocation，并把加载偏移加到 addend 上；PC 相对位移与 RVA 在镜像写出前修完。显式登记动态 `.so` 或可达内建 Resolver 引入目标系统库后，才加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT 和对应 relocation。解释器与 sysroot 必须来自选中的 target/toolchain 描述而不是宿主 PATH 探测。
+没有动态 FFI、系统 Resolver 或可达环境 API（含 Command.spawn 的环境快照）需求的 Linux executable 必须是无 `PT_INTERP` 的 static PIE `ET_DYN`，由 rt0 完成镜像自身允许的 relative relocation 并支持加载基址随机化。运行时只应用 relative relocation，并把加载偏移加到 addend 上；PC 相对位移与 RVA 在镜像写出前修完。显式登记动态 `.so` 或可达内建功能引入目标系统库后，才加入 `PT_INTERP`、`DT_NEEDED`、GOT/PLT 和对应 relocation。Function 导入使用 PLT/GOT；Data 导入使用 STT_OBJECT 与 GLOB_DAT，不生成 PLT，也不能作为普通外调目标。解释器与 sysroot 必须来自选中的 target/toolchain 描述而不是宿主 PATH 探测。
 
-启动载荷（`Rt0Payload`，`REVISION = 4`，128 字节）里的镜像内地址字段全部参与这批 relative relocation：`main_entry`、`initial_slot`、`runtime_state`、`main_return`、`stackmap`、`fragment_base`、`unwind`，以及 `gc_types`（类型段）与 `gc_meta`（GC metadata blob）。两段不存在时对应字段保持 0，且**不得**登记重定位——否则运行期会把加载基址当成有效地址。`boot_environment` 是 rt0 运行期捕获的 native 环境块地址，写明为「不叠加加载偏移」的字段：Linux 直接保存初始栈的 `envp`，Windows 保存 `GetEnvironmentStringsW` 返回的 UTF-16 块；runtime 完成启动配置读取后释放 Windows 副本。该字段不参加 image relocation，不能把它当作镜像内地址。对应的长度字段 `gc_types_len`、`gc_meta_len` 与 `stackmap_len`、`unwind_len` 一样是镜像字节数，不参与重定位。
+启动载荷（`Rt0Payload`，`REVISION = 5`，144 字节）里的镜像内地址字段全部参与这批 relative relocation：`main_entry`、`initial_slot`、`runtime_state`、`main_return`、`stackmap`、`fragment_base`、`unwind`，以及 `gc_types`（类型段）与 `gc_meta`（GC metadata blob）。两段不存在时对应字段保持 0，且**不得**登记重定位——否则运行期会把加载基址当成有效地址。偏移 120 的 `boot_environment` 是 rt0 捕获的 native 环境块地址：Linux 保存初始栈 envp，Windows 保存 GetEnvironmentStringsW 返回的 UTF-16 块；runtime 完成启动配置读取后释放 Windows 副本。偏移 128 的 `boot_argc` 与偏移 136 的 `boot_argv` 在 Linux 保存初始 argc/argv，Windows 分别为 0 和 GetCommandLineW 原始 UTF-16 命令行地址；按目标 cfg 解释，不按 argc 是否为零猜测操作系统。三个 native 字段在镜像内初值为 0，不参加 relative/base relocation。runtime 在 main 前复制 argv 和宿主 cwd 到独立计费 raw 存储。ELF 若导入 environ 数据符号，rt0 在相对重定位后仅当其值为 NULL 时以启动 envp 初始化，保留 loader/构造器已经设置的非空环境；没有此导入时不发射初始化路径。`gc_types_len`、`gc_meta_len`、`stackmap_len`、`unwind_len` 是镜像字节数，不参与重定位。
 
 Windows executable和 `cdylib` 使用 PE32+，包含合法 base-relocation table并设置 ASLR、high-entropy ASLR和 NX兼容标志；默认不导入 CRT。preferred image base、file/section排列和 padding是当前 writer实现细节，外部代码只能依赖本章登记的导入导出、逻辑节、入口、TLS和展开面。
+PE 的 C 导出函数必须登记可解析的异常展开地址；入口载荷里的镜像内函数地址使用 RVA，而不是 `.text` 内偏移。
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 

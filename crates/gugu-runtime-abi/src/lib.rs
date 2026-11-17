@@ -84,6 +84,7 @@ pub mod model;
 #[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
 pub mod pacing_schema;
 pub mod platform_schema;
+pub mod process_schema;
 pub mod processor;
 pub mod provenance_schema;
 #[allow(dead_code, reason = "GC schema 由 metadata 编码与镜像探针契约消费")]
@@ -305,6 +306,12 @@ pub enum RuntimeMachineOp {
     NetCall,
     /// 目标系统 resolver 函数地址；不读取编译宿主。
     ResolverSymbol,
+    /// 不依赖 worker 或 libc 的启动平台操作。
+    StartupCall,
+    /// 宿主环境函数或 environ 数据变量地址。
+    EnvironmentSymbol,
+    ProcessCall,
+    ProcessWorker,
     /// 单调纳秒，供 GC 暂停和 native 逻辑时间观察。
     MonotonicNanos,
     /// 以当前 stack_high 相对深度读取机器字，不增长栈。
@@ -332,6 +339,10 @@ impl RuntimeMachineOp {
             Self::FsPoll => "fs_poll",
             Self::NetCall => "net_call",
             Self::ResolverSymbol => "resolver_symbol",
+            Self::StartupCall => "startup_call",
+            Self::EnvironmentSymbol => "environment_symbol",
+            Self::ProcessCall => "process_call",
+            Self::ProcessWorker => "process_worker",
             Self::MonotonicNanos => "monotonic_nanos",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
@@ -375,6 +386,26 @@ pub enum GlueDefKind {
 /// glue 名与 `RuntimeCall` 目录、`RuntimeMachineOp` 目录及平台原语的 `platform_<name>`
 /// 命名一致，绑定表因此是「镜像里哪些 runtime 入口由 Gugu 实现或登记片段接管」的唯一清单。
 pub const GLUE_DEFS: &[GlueDef] = &[
+    GlueDef {
+        glue: "process_call",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "process_worker",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "process_native_worker",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "startup_call",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "environment_symbol",
+        def: GlueDefKind::Fragment,
+    },
     GlueDef {
         glue: "resolver_symbol",
         def: GlueDefKind::Fragment,

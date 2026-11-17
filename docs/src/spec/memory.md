@@ -59,6 +59,7 @@ ResourceCell 是外部资源的共享逻辑身份，保存 raw resource、open/c
 若最后的租约只存在于不可达受管容器环内，release 可以推迟到 GC 发现该环；普通作用域中的最后租约不依赖 GC 周期。清理可以异步执行，语言不承诺具体执行单元或时刻，只承诺一次性和本节限制。shutdown 必须排空 owner inbox、grace node、pending release ticket 与 active Resource slot，再释放没有 live slot 的 resource range；当前租约动作与回收队列见 [GIR/LIR](../internals/gir-lir.md)和 [GC 元数据](../internals/gc-metadata.md)。
 
 第三方 FFI package 只能通过 `std.resource` 的受限构造接口登记 release。raw state 必须是无 GC 引用的位值；release 不能捕获 owner、访问 GC 图、复活对象、分配、panic、获取 Gugu 锁、等待 channel 或启动协程。语言不提供任意 `Finalize` trait。
+收集器执行的编译器生成资源遍历同样不得分配受管对象或递归进入收集；该限制覆盖数组、枚举和嵌套聚合的字段解释过程，不只覆盖最终 release 回调。
 ResourceCell 的受限 cleanup 完成后可以进入 raw owner return；租约的一次性线性化、close 结果和 panic/作用域一致性仍由本章规定，不能由 message queue 的消费时刻决定。标准库侧的封装与 `std.resource` 接口见[标准库](standard-library.md#adaptive-resource-leasing)。
 
 ## 移动与 FFI
@@ -128,6 +129,10 @@ fn export(p: &Point) {
 安全引用 `&T` 必须始终非空、对齐、指向仍存活且已初始化的 `T` 槽。引用逃逸时实现必须延长目标存储寿命，收集器移动对象时必须更新安全引用；因此安全代码不观察地址变化。原始指针不享有此保证，见[unsafe 与 intrinsic](unsafe.md)。
 
 每个类型字段、数组元素和被读取的绑定都必须已经写入有效位模式；读取未初始化值是编译错误，除非本规范明确允许的纯 ZST 例外。把安全引用写入仍存活的受管值必须保持目标可达；写入 `MaybeUninit` 或位 union 的普通字节不以目标静态类型建立活引用。
+
+精确根只包含活动 enum 变体中已经初始化的引用字段，不能把变体的根偏移并集直接视作活引用：同一偏移在另一变体中可能是整数或判别值。整值复制和入口按值参数同样按活动变体更新根有效位。内部引用归属解析必须先证明地址落在 arena 的有效 payload 范围；arena 起点及首个对象 header 中的地址不是 payload，不能经无符号减法下溢变成位图下标。
+同一根字在安全点前的多次初始化/失效事件以最后一次为准；本块无事件时只能使用所有前驱共同保证的初始化事实。
+分配游标允许等于已打开块的末端；收集器仍必须把该游标归属到原 arena，不能把 one-past-end 地址误当成下一 arena 并清除另一组存活对象。
 
 ## 逃逸与闭包
 

@@ -957,6 +957,17 @@ fn resolve_import(
             namespace: Namespace::Module,
             target: BindingTarget::Module(*module),
         }],
+        // 编译器拥有的非预导入类型没有源码声明，仍必须保留规范路径和导入别名。
+        (ModuleTarget::Local(module), Some(name))
+            if modules[module.index()].builtin
+                && modules[module.index()].path == "std.mem"
+                && name == "MaybeUninit" =>
+        {
+            vec![Binding {
+                namespace: Namespace::External,
+                target: BindingTarget::External("std.mem.MaybeUninit".to_owned()),
+            }]
+        }
         (ModuleTarget::Local(module), Some(name)) => resolve_local_item(
             import,
             *module,

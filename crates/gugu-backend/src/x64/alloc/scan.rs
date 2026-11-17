@@ -74,6 +74,12 @@ pub struct Scanned {
 
 /// 扫描一个函数的全部值。
 pub fn scan(live: &LiveInfo) -> Result<Scanned, AllocError> {
+    // 点位由 visit_site 按 slot 递增生成；二分跳过区间之前的全部机器点位。
+    debug_assert!(
+        live.points.windows(2).all(
+            |pair| pair[0].use_slot <= pair[1].use_slot && pair[0].def_slot <= pair[1].def_slot
+        )
+    );
     let mut values: Vec<ValueAllocation> = live
         .values
         .iter()
@@ -225,14 +231,13 @@ fn blocked_masks(live: &LiveInfo) -> Vec<Blocked> {
             if !value.is_live() {
                 return Blocked { mask, forced_slot };
             }
-            for point in live
+            let first = live
                 .points
+                .partition_point(|point| point.def_slot < value.start);
+            for point in live.points[first..]
                 .iter()
-                .take_while(|point| point.use_slot <= value.end + 1)
+                .take_while(|point| point.use_slot <= value.end)
             {
-                if point.use_slot > value.end || point.def_slot < value.start {
-                    continue;
-                }
                 mask = mask.union(point.mask);
                 if point.pointer_spill && value.root.must_spill() {
                     forced_slot = true;
@@ -245,12 +250,11 @@ fn blocked_masks(live: &LiveInfo) -> Vec<Blocked> {
 
 /// 区间是否覆盖 call/bridge 点位：决定 GPR 偏好序前缀。
 fn cross_call_range(live: &LiveInfo, start: u32, end: u32) -> bool {
-    live.points
+    let first = live.points.partition_point(|point| point.def_slot < start);
+    live.points[first..]
         .iter()
-        .take_while(|point| point.use_slot <= end + 1)
-        .any(|point| {
-            point.kind.is_call_or_bridge() && point.use_slot <= end && point.def_slot >= start
-        })
+        .take_while(|point| point.use_slot <= end)
+        .any(|point| point.kind.is_call_or_bridge())
 }
 
 /// 候选过滤的固定输入。

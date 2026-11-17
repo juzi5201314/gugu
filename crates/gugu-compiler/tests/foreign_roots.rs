@@ -1,19 +1,21 @@
 //! 真实 C 按值调用的 caller 参数包必须进入最终编码栈图。
-use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, NativeLink, TargetName};
+use gugu_compiler::{
+    CompileRequest, Compiler, EMBEDDED_ARTIFACTS, NativeImport, NativeLink, TargetName,
+};
 
 fn verify(target: TargetName) {
     let mut imports: Vec<_> = ["ordinary", "dirty"]
         .into_iter()
-        .map(|name| ("probe.dll".into(), name.into()))
+        .map(|name| NativeImport::function("probe.dll", name))
         .collect();
     if target == TargetName::X86_64Linux {
         for import in &mut imports {
-            import.0 = "libprobe.so".into();
+            import.library = "libprobe.so".into();
         }
         imports.extend(
             NativeLink::THREAD_SYMBOLS
                 .into_iter()
-                .map(|name| ("libc.so.6".into(), name.into())),
+                .map(|name| NativeImport::function("libc.so.6", name)),
         );
     }
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(

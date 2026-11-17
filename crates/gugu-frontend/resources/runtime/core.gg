@@ -5,6 +5,7 @@ use std.runtime.collect.{gc_boot}
 use std.runtime.native_memory as mapping
 use std.runtime.fs_platform as filesystem
 use std.runtime.network_service as network
+use std.runtime.process_context as process_context
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
@@ -57,6 +58,8 @@ pub struct Rt0Payload {
     pub gc_meta: uint,
     pub gc_meta_len: uint,
     pub boot_environment: uint,
+    pub boot_argc: uint,
+    pub boot_argv: uint,
 }
 
 #[repr(C)]
@@ -211,7 +214,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         let address_bias = if block.reloc_count == 0 { bias } else { 0 }
         let slot = payload.initial_slot + address_bias
         let state = payload.runtime_state + address_bias
-        if payload.revision != 4 || slot != block.initial_slot + bias || state != block.runtime_state + bias || payload.stackmap_len < 72 || payload.unwind_len < 48 {
+        if payload.revision != 5 || slot != block.initial_slot + bias || state != block.runtime_state + bias || payload.stackmap_len < 72 || payload.unwind_len < 48 {
             fatal_runtime()
         }
         // GC 配置记录：镜像里的记录必须与 runtime 视图一致（版本与字节长度）。
@@ -255,7 +258,6 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         store_word(state + 104, 0)
         store_word(state + 112, block.payload_va + bias)
         store_word(state + 120, address_bias)
-        store_word(slot + 64, stack_high - capacity + 512)
         store_word(slot + 72, stack_high - capacity)
         store_word(slot + 80, stack_high)
         store_word(slot + 88, capacity)
@@ -267,12 +269,15 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         boot(processor_addr, state, slot, cold, block.reserved_13 + bias)
         // 收集器专用 system stack 必须在任何分配前建立：`gc_enter` 会在第一次压力时切到它。
         gc_boot(processor_addr)
+        process_context.boot(payload.boot_argc, payload.boot_argv)
         mapping.pressure_enable(processor_addr)
         callback_gate(0)
         let system_context = std.mem.transmute[uint, *()](state + 40)
         let main_context = std.mem.transmute[uint, *()](cold + 8)
         let hot = std.mem.transmute[uint, *()](slot)
         let processor = std.mem.transmute[uint, *()](processor_addr)
+        // 初始化仍在宿主栈执行；只有真正切到 main 栈时才启用它的入口检查界限。
+        store_word(slot + 64, stack_high - capacity + 512)
         std.runtime.context_switch(system_context, main_context, hot, processor)
         let running: uint = 1
         while running == 1 {
@@ -299,6 +304,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         }
         filesystem.shutdown(processor_addr)
         network.shutdown(processor_addr)
+        process_context.shutdown()
         mapping.verify_drained(processor_addr)
         0
     }

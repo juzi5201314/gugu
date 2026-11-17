@@ -7,7 +7,7 @@
 
 mod native_link;
 pub mod x64;
-pub use native_link::NativeLink;
+pub use native_link::{NativeImport, NativeImportKind, NativeLink};
 
 use gugu_base::{
     canonical, diagnostics, diagnostics::Diagnostic, hash, query, source, source::SourceMap,

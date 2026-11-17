@@ -816,12 +816,21 @@ Linux UnixDatagram 提供 bind、connect/disconnect、send/send_to、recv/recv_f
 
 `std.process.Command` 只接受 executable + argv，不经过 shell；Stdio 可设为 inherit、null、pipe 或已有 File。Child 提供 stdin/stdout/stderr、wait、wait_cancel、try_wait、kill、detach、id 与幂等 close。Command.spawn 在一个线性化点捕获全局 OS 环境和 runtime 虚拟 cwd，再应用 builder 上的 env/remove_env/cwd 覆盖。
 
+`process.Error` 与 `env.Error` 均直接重导出 `std.io.Error`。Command 的副本共享 builder 身份；spawn/output 在入口复制配置，arg 保持追加顺序，同名 env/remove_env 以最后一次调用为准。Linux 名称按 byte 比较，Windows 使用系统 ordinal ignore-case 比较。
+
+executable 是 Path，不搜索 PATH、不补扩展名、不解释 shell。相对 executable 基于本次子进程 cwd；相对 cwd 覆盖基于捕获的虚拟 cwd。空 executable、NUL、空环境名称和含 `=` 的名称均为 InvalidInput；setter 不返回 Result，故 spawn/output 在任何 OS 副作用前统一验证。空参数和空环境值合法，空值不是删除。
+
+Windows 使用明确非空的 application name 与独立可写 UTF-16 命令行；参数按 Microsoft C argv 引号与反斜杠规则编码，保留空参数，不保证外部程序自定义解析规则。含终止符的命令行超过 32767 个 UTF-16 单元返回 InvalidInput，不截断。
+
 ```text
 struct Command
 struct ShellCommand
 struct Child
 struct Stdio
 struct ExitStatus
+struct ChildStdin
+struct ChildStdout
+struct ChildStderr
 
 fn Command.new(executable: Path) Command
 fn Command.arg(self: &Self, arg: OsString)
@@ -845,7 +854,7 @@ fn ShellCommand.with(executable: Path, leading_args: &[OsString], script: string
     ShellCommand
 fn ShellCommand.spawn(self: &Self) Result[Child, process.Error]
 fn ShellCommand.output(self: &Self) Result[process.Output, process.Error]
-fn exit(code: int) !
+#[track_caller] fn exit(code: int) !
 
 fn Child.wait(self: &Self) Result[ExitStatus, process.Error]
 fn Child.wait_cancel(self: &Self, cancel: &CancelToken)
@@ -855,6 +864,12 @@ fn Child.kill(self: &Self) Result[(), process.Error]
 fn Child.detach(self: &Self) Result[(), process.Error]
 fn Child.close(self: &Self) Result[(), process.Error]
 fn Child.id(self: &Self) u32
+fn Child.stdin(self: &Self) Option[ChildStdin]
+fn Child.stdout(self: &Self) Option[ChildStdout]
+fn Child.stderr(self: &Self) Option[ChildStderr]
+fn ChildStdin.close(self: &Self) Result[(), io.Error]
+fn ChildStdout.close(self: &Self) Result[(), io.Error]
+fn ChildStderr.close(self: &Self) Result[(), io.Error]
 
 struct Output {
     pub status: ExitStatus
@@ -869,9 +884,16 @@ fn ExitStatus.signal(self: &Self) Option[int]
 
 `Command` 的 Stdio 默认是 inherit，显式设置后才改为 null、pipe 或已有 File；`output()` 强制把 stdout/stderr 接成独立 pipe，并把 stdin 设为 null。它并行排空 stdout 与 stderr，再等待子进程退出，返回完整 Bytes；不提供无界 pipe 的隐式聚合上限，调用方需要对不受信任的输出自行使用 Stdio.pipe 并流式读取。手动 spawn + pipe 后直接 wait 不会替调用方排空 stdout/stderr；调用方必须并发读取，否则子进程可能因 OS pipe 满而等待。wait 会先关闭仍持有的 stdin，再等待退出；try_wait 不阻塞，只在状态已经可收集时返回 Some。
 
+三个 pipe getter 仅在对应 Stdio 为 pipe 且 Child 尚可使用时返回 Some；重复取得的是共享关闭状态的资源别名，不转移 Child 的所有权。ChildStdin 实现 Write，ChildStdout/ChildStderr 实现 Read；detach/close 关闭所有别名的底层父端。Stdio.file 保留原 File 的资源租约，创建时使用独立临时副本，不消费或关闭调用者的 File。output 的 stdio 覆盖不修改 builder；任一排空失败时终止并清理子进程、取消另一排空操作并等其清理完成，返回最先观察的错误，不返回部分 Output。
+
 wait 成功后退出状态被缓存，重复 wait 与 try_wait 观察同一个状态，不重复等待。kill 向目标发送强制终止；目标已经退出时返回成功，但 kill 不代替 wait。wait_cancel 只取消当前等待者并返回 Cancelled，既不 kill 也不改变 Child；其它等待者继续有效。Child 的资源 lease 最后释放时等价于显式 detach：关闭父侧管道和观察句柄，子进程继续运行；runtime supervisor 负责回收已脱离进程的终止记录。detach 是同一行为的显式幂等请求；detach 后不能再次 wait、kill 或 close。close 才是终止语义：若尚未退出则强制 kill，再 wait/reap；若已经退出则直接收集状态。close 成功后所有别名观察 Closed，close 本身幂等。对进程退出码为零以外的状态，wait 仍成功返回 ExitStatus，成功与否由 `success()` 判断；signal 只在目标能提供信号原因时返回 Some。
 
-ShellCommand.new 在 Linux 固定执行 `/bin/sh -c <script>`，在 Windows 固定执行系统 `cmd.exe /S /C <script>`；不读取 `$SHELL`、COMSPEC 或 PowerShell 偏好。`with` 使用显式 shell executable，并把 leading_args 后的最后一个 argv 元素设为完整 script。
+预取消的 wait_cancel 在改变 Child 或 stdin 前返回 Cancelled；在途取消只摘除本等待者。退出完成与取消同轮到达时先消费已提交退出结果。close 发布关闭意图后拒绝新操作，已有 wait 返回同一退出状态；重复 close 返回首次关闭结果。detach 后 wait/kill/close 返回 Closed；close 完成后仅 close 幂等，其它操作返回 Closed。id 始终返回原始 pid。脱离进程仍在运行时，单独的 supervisor 观察记录不阻止 runtime 自然退出，shutdown 不终止脱离进程。
+
+Linux 正常退出 code 为 Some(0..255)、signal 为 None；信号退出 code 为 None、signal 为 Some(sig)。Windows code 是完整 u32 无符号扩展到 int，signal 为 None；退出码 259 也是可收集的正常状态，不能仅凭 STILL_ACTIVE 判断仍运行。success 仅对正常退出码 0 为 true。exit 复用 runtime 的进程终止入口，不运行剩余 defer；Linux 观察低 8 位，Windows 观察低 32 位。
+管道缓冲读取在 raw 请求暂存区等待完成，只按实际读到的字节数建立托管 Bytes；短读不得把未使用的请求容量长期保留在 ByteBuffer 输出链中。请求释放仍必须晚于 native 完成及唯一一次字节复制，EOF 不追加数据。
+
+ShellCommand.new 在 Linux 固定执行 `/bin/sh -c <script>`，在 Windows 用 GetSystemDirectoryW 取得系统目录下的 `cmd.exe`，固定 `/S /C`；其尾部按 cmd 的原始脚本规则包裹，不套用普通 CRT argv encoder。不读取 `$SHELL`、COMSPEC、PATH 或 PowerShell 偏好。`with` 使用显式 shell executable，并把 leading_args 后的最后一个 argv 元素设为完整 script，复用结构化 argv 编码。
 
 ShellCommand 只接受裸 string，不提供自动模板、参数转义类型或动态拼接 lint。script 的 quoting、命令替换、重定向、glob、编码与注入风险全部按所选 shell 解释；包含不可信数据时必须改用结构化 Command。ShellCommand 是普通程序接口；build.gg 只能使用 std.build.run，不能借它绕过 build action 记录和权限门。
 
@@ -889,9 +911,13 @@ fn current_dir() Path
 fn set_current_dir(path: Path) Result[(), io.Error]
 ```
 
-`args` 每次返回启动 argv 的独立 Vec，修改结果不会改变进程参数。Gugu runtime 用一把专用进程环境锁线性化 get、vars、set、remove 和 Command.spawn 的环境快照；任一 Gugu 协程只观察修改前或修改后的完整环境。外部 C/系统库不使用这把锁：程序若让 FFI 与 env.set/remove 并发访问宿主环境，行为由外部 ABI 决定，Gugu 不保证数据竞争安全。名称和值不得含 NUL；名称还不得含 `=`。Windows 名称比较不区分大小写，Linux 按 byte 区分。
+`args` 每次返回启动 argv 的独立 Vec，修改结果不会改变进程参数；启动后修改宿主 argv 也不改变该快照。Windows 宿主 argv/cwd 若不能表示为严格 OsString，启动以 InvalidConfiguration 失败，不做有损替换。Gugu runtime 用一把启动时建立的专用进程锁线性化 get、vars、set、remove、cwd 替换和 Command.spawn 的环境/cwd 联合快照；任一 Gugu 协程只观察修改前或修改后的完整环境。外部 C/系统库不使用这把锁：程序若让 FFI 与 env.set/remove 并发访问宿主环境，行为由外部 ABI 决定，Gugu 不保证数据竞争安全。名称和值不得含 NUL；名称还不得为空或含 `=`，否则返回 InvalidInput。Windows 名称按系统 ordinal ignore-case 比较，Linux 按 byte 区分。set 空值后 get 返回 Some(空)，remove 后为 None，删除不存在的键成功。
+
+Linux 环境 API 访问 libc 当前 environ/getenv/setenv/unsetenv，不把启动 envp 当作实时环境；返回值在锁内复制，不保留 libc 指针。Windows get/vars 遇到非法 UTF-16 返回 InvalidData，并仍释放系统环境块；空环境块返回空 Vec。宿主 `=C:` 等系统条目保留给 spawn，但不由 vars 作为普通可修改名称暴露。spawn 释放锁后仅在捕获的环境副本上应用 builder 覆盖，不重新读取全局状态；Windows 最终环境块按 ordinal ignore-case 排序并以双 NUL 终止。
 
 cwd 不调用 OS chdir/SetCurrentDirectory。runtime 启动时读取一次宿主 cwd，之后维护进程内的不可变 Path 快照；set_current_dir 验证目标是目录后原子替换该快照。每个 fs 相对路径操作开始时捕获一次 cwd，并在 syscall 前合成绝对 Path；Command 默认把同一快照显式传给子进程。并发 set_current_dir 不会改变已经开始的 fs/spawn 操作。
+
+set_current_dir 的相对路径基于调用时的旧 cwd；验证失败不改变状态，非目录返回 NotADirectory。空 Path 返回 InvalidInput，不能经 join 变成 cwd。单路径操作捕获一次 cwd；copy、rename、hard_link 在操作任何一端前用同一个 base 固定两端，递归 create_dir_all/remove_dir_all 在进入递归前固定根。symlink 只解析 link 位置，target 保持原始链接文本；read_link 返回宿主实际文本，不附加 cwd。ReadDir 保存解析后的绝对 root，后续 DirEntry.path/metadata 不受 cwd 更新影响。filesystem UnixAddr 在 bind/connect/send_to/datagram_connect 请求开始时解析一次，并重新检查最终 sockaddr 长度，超长返回 InvalidInput；收到的地址仍是原生快照，不改写来源。
 
 FFI 与直接 syscall 仍看到进程启动时的宿主 cwd；需要确定互操作路径的代码必须传绝对 Path。虚拟 cwd 是进程级状态，不是 coroutine-local。
 

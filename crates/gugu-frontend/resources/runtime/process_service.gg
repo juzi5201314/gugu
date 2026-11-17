@@ -1,0 +1,50 @@
+use std.runtime.network_service as services
+use std.runtime.heap.{heap_word, heap_word32, heap_store_word, heap_fail}
+use std.runtime.scheduler.{ready_hot}
+use std.runtime.resource_state as states
+
+struct Service { poll: fn(uint), pending: fn(uint) bool, shutdown: fn(uint) }
+static children: Option[Service] = None
+static pipes: Option[Service] = None
+pub fn install_child(poll: fn(uint), pending: fn(uint) bool, shutdown: fn(uint)) {
+    children = Some(Service { poll, pending, shutdown })
+    services.install_process(service, pending_work, stop)
+}
+pub fn install_pipe(poll: fn(uint), pending: fn(uint) bool, shutdown: fn(uint)) {
+    pipes = Some(Service { poll, pending, shutdown })
+    services.install_process(service, pending_work, stop)
+}
+fn service(processor: uint) {
+    if let Some(value) = pipes { (value.poll)(processor) };
+    if let Some(value) = children { (value.poll)(processor) };
+}
+fn pending_work(processor: uint) bool {
+    if let Some(value) = pipes { if (value.pending)(processor) { return true }; }
+    if let Some(value) = children { return (value.pending)(processor) }
+    false
+}
+fn stop(processor: uint) {
+    if let Some(value) = pipes { (value.shutdown)(processor) };
+    if let Some(value) = children { (value.shutdown)(processor) };
+    pipes = None
+    children = None
+}
+pub fn cancelled(control: uint) bool { unsafe {
+    control != 0 && std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](control)) != 0
+} }
+pub fn closed(control: uint) bool = heap_word32(control + 8) & uint(2) != 0
+pub fn complete_close(control: uint, error: uint) {
+    let hot = heap_word(control + 120)
+    heap_store_word(control + 120, 0)
+    heap_store_word(control + 128, 0)
+    while hot != 0 {
+        let next = heap_word(heap_word(hot + 48) + 272)
+        ready_hot(hot)
+        hot = next
+    }
+    states.complete_close(control, error)
+}
+pub fn checked(value: uint) uint {
+    if value == 0 { heap_fail() }
+    value
+}

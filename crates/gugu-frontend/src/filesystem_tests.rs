@@ -1,8 +1,11 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
 mod copy;
+mod harness;
 mod network;
 mod platform;
+mod process;
 mod resource;
+mod trace;
 
 use crate::lir::body::{Body, Condition, IntOp, Op, Terminator, range};
 use crate::{Compilation, CompileRequest, Compiler, TargetName};
@@ -272,6 +275,16 @@ fn interpret_bounded(
                     IntOp::Xor => args[0] ^ args[1],
                     IntOp::RemUnsigned => args[0] % args[1],
                     IntOp::DivUnsigned => args[0] / args[1],
+                    IntOp::RemSigned | IntOp::DivSigned => {
+                        let left = i64::from_ne_bytes(args[0].to_ne_bytes());
+                        let right = i64::from_ne_bytes(args[1].to_ne_bytes());
+                        let value = if op == IntOp::RemSigned {
+                            left.wrapping_rem(right)
+                        } else {
+                            left.wrapping_div(right)
+                        };
+                        u64::from_ne_bytes(value.to_ne_bytes())
+                    }
                     IntOp::Mul => args[0].wrapping_mul(args[1]),
                     IntOp::And => args[0] & args[1],
                     IntOp::Or => args[0] | args[1],
@@ -335,12 +348,19 @@ fn interpret_bounded(
                     memory[at..at + bytes].copy_from_slice(&(old | args[1]).to_le_bytes()[..bytes]);
                     old
                 }
-                Op::Memmove { bytes } => {
+                Op::Memmove { bytes } | Op::Memcpy { bytes } => {
                     memory.copy_within(
                         args[1] as usize..args[1] as usize + bytes as usize,
                         args[0] as usize,
                     );
                     continue;
+                }
+                Op::Select => {
+                    if args[0] != 0 {
+                        args[1]
+                    } else {
+                        args[2]
+                    }
                 }
                 Op::Memset { bytes } => {
                     memory[args[0] as usize..args[0] as usize + bytes as usize].fill(args[1] as u8);

@@ -1,0 +1,7 @@
+use std.process.{ExitStatus}
+fn main() {
+    let status = ExitStatus { status_kind: 1, value: 0 }
+    _ = status.code()
+    _ = status.signal()
+    _ = status.success()
+}

@@ -1,0 +1,88 @@
+use std.env as env
+use std.process.{Command, Stdio}
+use std.path.{Path, OsString}
+use std.text.{Bytes}
+use std.io as io
+use std.io.{Error, Read}
+use std.fs as fs
+use std.sync.{CancelSource}
+fn ok[T](value: Result[T, Error]) T = match value { Ok(value) => value, Err(_) => panic("stdio 操作失败") }
+fn os(value: string) OsString = ok(OsString::from_string(value))
+fn expect(actual: Bytes, expected: string) {
+    let source = Bytes::from_string(expected)
+    if actual.len() != source.len() { panic("回执长度") }
+    for index in 0..source.len() { if actual.get(index) != source.get(index) { panic("回执内容") }; }
+}
+struct Captured { value: Option[Bytes] }
+fn drain[T: Read](reader: &T, result: &Captured) { result.value = Some(ok(io.read_to_end(reader))) }
+#[cfg(os = "linux")]
+fn main() {
+    if env.args().len() == 2 {
+        let read_options = fs.OpenOptions::new()
+        read_options.read = true
+        let write_options = fs.OpenOptions::new()
+        write_options.write = true
+        let input = ok(fs.open(Path::from_string("/dev/stdin"), read_options))
+        let data = ok(io.read_to_end(&input))
+        expect(data, "request\n")
+        let stdout = ok(fs.open(Path::from_string("/dev/stdout"), write_options))
+        let stderr = ok(fs.open(Path::from_string("/dev/stderr"), write_options))
+        ok(io.write_all(&stdout, Bytes::from_string("reply\n")))
+        ok(io.write_all(&stderr, Bytes::from_string("reply-err\n")))
+        ok(input.close())
+        ok(stdout.close())
+        ok(stderr.close())
+        return
+    }
+    let executable = Path::from_os(match env.args().get(0) { Some(value) => value, None => panic("自身路径") })
+    let command = Command::new(executable)
+    command.arg(os("child"))
+    command.stdin(Stdio::pipe())
+    command.stdout(Stdio::pipe())
+    command.stderr(Stdio::pipe())
+    let child = ok(command.spawn())
+    let input = match child.stdin() { Some(value) => value, None => panic("stdin pipe") }
+    let stdout = match child.stdout() { Some(value) => value, None => panic("stdout pipe") }
+    let stderr = match child.stderr() { Some(value) => value, None => panic("stderr pipe") }
+    ok(io.write_all(&input, Bytes::from_string("request\n")))
+    ok(input.close())
+    let captured_out = Captured { value: None }
+    let captured_err = Captured { value: None }
+    let out = async drain(&stdout, &captured_out)
+    let err = async drain(&stderr, &captured_err)
+    match out.wait() { Ok(_) => (), Err(_) => panic("stdout drain") }
+    match err.wait() { Ok(_) => (), Err(_) => panic("stderr drain") }
+    expect(match captured_out.value { Some(value) => value, None => panic("stdout 回执") }, "reply\n")
+    expect(match captured_err.value { Some(value) => value, None => panic("stderr 回执") }, "reply-err\n")
+    if !ok(child.wait()).success() { panic("子进程结果") }
+    ok(child.close())
+    ok(child.close())
+    let blocked = Command::new(Path::from_string("/bin/cat"))
+    blocked.stdin(Stdio::pipe())
+    blocked.stdout(Stdio::null())
+    let blocked = ok(blocked.spawn())
+    let cancelled = CancelSource::new()
+    cancelled.cancel()
+    let token = cancelled.token()
+    match blocked.wait_cancel(&token) { Err(Error::Cancelled) => (), _ => panic("预取消 wait") }
+    ok(blocked.close())
+    ok(blocked.close())
+}
+#[cfg(os = "windows")]
+fn main() {
+    let command = Command::new(Path::from_string("C:\\Windows\\System32\\cmd.exe"))
+    command.arg(os("/C"))
+    command.arg(os("exit 0"))
+    command.stdin(Stdio::pipe())
+    command.stdout(Stdio::pipe())
+    command.stderr(Stdio::pipe())
+    let child = ok(command.spawn())
+    _ = child.stdin()
+    _ = child.stdout()
+    _ = child.stderr()
+    _ = child.try_wait()
+    _ = child.kill()
+    _ = child.wait()
+    _ = child.close()
+    _ = child.detach()
+}

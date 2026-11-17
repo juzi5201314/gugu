@@ -48,8 +48,8 @@ use crate::{Diagnostic, DiagnosticCode, TargetName};
 
 /// `RuntimeRawContractV1` 的 schema 版本。
 ///
-/// 版本 46：双向 transport、报文边界、连接竞速和共享 timeout 状态。
-pub const RAW_MODEL_SCHEMA: u32 = 46;
+/// 版本 48：进程与环境 raw 协议、启动 argv、类型化导入以及 Windows 对齐预约归属。
+pub const RAW_MODEL_SCHEMA: u32 = 48;
 
 /// 资源契约段的 schema 版本。
 pub const RESOURCE_SCHEMA: u32 = 1;

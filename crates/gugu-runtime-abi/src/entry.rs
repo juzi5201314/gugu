@@ -132,11 +132,15 @@ pub struct Rt0Payload {
     pub gc_meta_len: u64,
     /// rt0 动态捕获的 native 环境块地址；不做 image bias，镜像内保持 0。
     pub boot_environment: u64,
+    /// Linux 初始 argc；Windows 固定为 0，由目标 cfg 解释 argv。
+    pub boot_argc: u64,
+    /// Linux 初始 argv 或 Windows 原始 UTF-16 命令行；native 地址不重定位。
+    pub boot_argv: u64,
 }
 
 impl Rt0Payload {
     /// 当前载荷版本；布局变化必须递增。
-    pub const REVISION: u64 = 4;
+    pub const REVISION: u64 = 5;
 
     /// 载荷字节数。
     pub fn bytes() -> u64 {
@@ -202,7 +206,7 @@ const _: () = {
 };
 
 const _: () = {
-    assert!(size_of::<Rt0Payload>() == 128 && align_of::<Rt0Payload>() == 8);
+    assert!(size_of::<Rt0Payload>() == 144 && align_of::<Rt0Payload>() == 8);
     assert!(offset_of!(Rt0Payload, main_entry) == 8);
     assert!(offset_of!(Rt0Payload, initial_slot) == 16);
     assert!(offset_of!(Rt0Payload, runtime_state) == 24);
@@ -218,4 +222,6 @@ const _: () = {
     assert!(offset_of!(Rt0Payload, gc_meta) == 104);
     assert!(offset_of!(Rt0Payload, gc_meta_len) == 112);
     assert!(offset_of!(Rt0Payload, boot_environment) == 120);
+    assert!(offset_of!(Rt0Payload, boot_argc) == 128);
+    assert!(offset_of!(Rt0Payload, boot_argv) == 136);
 };

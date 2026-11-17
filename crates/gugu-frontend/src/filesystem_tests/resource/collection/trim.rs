@@ -97,6 +97,7 @@ fn large_object_mapping_charges_heap_partition_without_file_subtotal() {
     let arena = 2097152;
     memory.resize((arena * 2 + 65536) as usize, 0);
     put(&mut memory, PROCESSOR + 3520, arena + 16);
+    put(&mut memory, PROCESSOR + 3528, arena + 32768);
     harness.reserve_result = 131072;
     let result = harness.run(
         "heap",

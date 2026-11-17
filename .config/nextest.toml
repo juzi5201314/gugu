@@ -1,9 +1,9 @@
 nextest-version = "0.9.115"
 
 [profile.default]
-# 纯 CPU 的进程内编译用例；重编译用例按下方规则独占槽位。
-# 三并发的完整网络扩展套件在约65秒完成，单项仍限制为3秒。
-test-threads = 3
+# 轻量用例最多四槽；完整编译独占、生产协议最多两并发，避免内存带宽争用。
+# 单项仍限制为 3 秒，整轮仍限制为 120 秒。
+test-threads = 4
 retries = 0
 fail-fast = true
 # 单个用例超过 3 秒即视为缺陷：超时直接失败并杀死测试进程组。
@@ -25,3 +25,12 @@ threads-required = 3
 [[profile.default.overrides]]
 filter = 'test(/^lir_tests::(stackmap_world_covers_call_poll_suspend_and_select|cached_lir_matches_fresh_output_and_action_identity)$/) | test(/^mono::tests::(public_summary_changes_with_effects_but_not_private_definition_ids|changed_source_with_shared_queries_matches_a_fresh_world)$/) | test(/frontend::semantics_tests::runtime_checks_survive_queries_and_reach_the_backend_plan$/) | test(/frontend::semantics_tests::comptime::action_key_is_deterministic_and_input_sensitive$/) | binary(=materialization_equivalence) | test(/connection_order_options_and_unix_addresses_follow_contract$/) | test(/filesystem_tests::resource::(running_cancellation_retains_credit_until_worker_exits|runtime_mapping_ledger_charges_only_successful_platform_operations)$/)'
 threads-required = 6
+
+# 进程镜像验收包含完整后端；协议解释用例共享既有两槽资源策略。
+[[profile.default.overrides]]
+filter = 'binary(=process) | binary(=network) | test(bridge_target_must_be_imported_or_defined) | test(resolver_cancellation_releases_late_result_and_wakes_only_once)'
+threads-required = 4
+
+[[profile.default.overrides]]
+filter = 'test(/^filesystem_tests::process::/)'
+threads-required = 2

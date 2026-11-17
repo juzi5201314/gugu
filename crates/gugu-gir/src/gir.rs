@@ -150,16 +150,29 @@ pub fn body_kind(kind: hir::DefinitionKind) -> BodyKind {
 }
 
 pub fn fragments_of(mono: &MonoWorldV1, bodies: &[GirBody]) -> Vec<GirFragment> {
+    // DefId 是 HIR 稠密 arena 下标；这里只索引具有 body 的前缀范围。
+    let extent = bodies
+        .iter()
+        .map(|body| body.owner.index() + 1)
+        .max()
+        .unwrap_or(0);
+    let mut owners = vec![None; extent];
+    let mut fingerprints = vec![None; bodies.len()];
+    for (index, body) in bodies.iter().enumerate() {
+        debug_assert!(body.owner.index() < owners.len());
+        owners[body.owner.index()].get_or_insert(index);
+    }
     let mut fragments = Vec::with_capacity(mono.instances.len());
     for instance in &mono.instances {
         let definition = hir::DefId(instance.definition);
-        let Some(index) = bodies.iter().position(|body| body.owner == definition) else {
+        let Some(&Some(index)) = owners.get(definition.index()) else {
             continue;
         };
         fragments.push(GirFragment {
             digest: crate::mono::digest_of(&instance.mono_key),
-            body: index as u32,
-            body_fingerprint: bodies[index].fingerprint(),
+            body: u32::try_from(index).expect("body arena 使用 u32 编号"),
+            body_fingerprint: *fingerprints[index]
+                .get_or_insert_with(|| bodies[index].fingerprint()),
         });
     }
     fragments

@@ -662,14 +662,10 @@ impl Builder<'_> {
             Computed::Address { address, .. } => self.copy_memory(destination, address, ty),
             Computed::Values { values, .. } => self.store_abi(destination, ty, &values),
         }?;
-        // 整值写入栈槽：写入范围内被完整覆盖的根字都记成已初始化。字段写入的槽内偏移在
-        // `address` 内部累积、此处不可得，所以只处理无投影写入；按变体逐字段置位的更精确版本
-        // 在构造点。
         if self.gir.projections_of(place).is_empty()
             && let Storage::Stack { slot, .. } = self.storage[place.local.index()]
-            && let Some(layout) = self.layout(ty).layout
         {
-            self.root_init_cover(slot, 0, layout.size);
+            self.root_init_value(slot, 0, ty, destination)?;
         }
         Ok(())
     }

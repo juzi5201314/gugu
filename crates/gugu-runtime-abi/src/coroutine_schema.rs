@@ -112,6 +112,8 @@ pub struct CoroutineRuntimeContract {
     pub stack_check_offset: u32,
     /// 固定record目录。
     pub records: Vec<CoroutineRecordLayout>,
+    /// 与控制记录一同进入 RuntimeRaw 指纹的进程操作目录。
+    pub process: crate::process_schema::ProcessContract,
     /// 固定栈策略。
     pub stack: StackPolicy,
     /// x86_64换栈实际代码。
@@ -138,6 +140,7 @@ impl CoroutineRuntimeContract {
             schema: 3,
             stack_check_offset: stack_check_offset(),
             records: fixed_layouts(),
+            process: crate::process_schema::ProcessContract::fixed(),
             stack: StackPolicy::fixed(),
             context: ContextSwitchCode::fixed(),
             morestack: MorestackEntryCode::default(),
@@ -161,6 +164,7 @@ impl CoroutineRuntimeContract {
         if self.schema != 3
             || self.stack_check_offset != 64
             || self.records != fixed_layouts()
+            || self.process != crate::process_schema::ProcessContract::fixed()
             || self.stack != StackPolicy::fixed()
             || self.context != ContextSwitchCode::fixed()
         {
@@ -235,7 +239,7 @@ fn fixed_layouts() -> Vec<CoroutineRecordLayout> {
             }
         };
     }
-    vec![
+    let mut records = vec![
         record!(CoroutineHot; state, run_link_next, current_processor, preferred_processor, preferred_processor_id, wait_word, cold_index, run_batch_len),
         record!(StackDescriptor; stack_check, stack_low, stack_high, capacity, recent_high_water, last_grow_gc_epoch, low_use_gc_cycles, flags),
         record!(CoroutineSlot; hot, stack),
@@ -243,7 +247,9 @@ fn fixed_layouts() -> Vec<CoroutineRecordLayout> {
         record!(MorestackScratch; return_pc, gpr, xmm),
         record!(CoroutineCold; id, context, morestack_scratch, wait_record, foreign_bridge, join_state, coroutine_locals, panic_state, select_rng, select_scratch, gc_scan_epoch, payload_state, join_waiter, callback_node, callback_storage),
         record!(MorestackMailbox; hot, entry_rsp, candidate, required, cold, system_context, return_value, processor),
-        record!(Rt0Payload; revision, main_entry, initial_slot, runtime_state, bias, main_return, stackmap, fragment_base, stackmap_len, unwind, unwind_len, gc_types, gc_types_len, gc_meta, gc_meta_len, boot_environment),
+        record!(Rt0Payload; revision, main_entry, initial_slot, runtime_state, bias, main_return, stackmap, fragment_base, stackmap_len, unwind, unwind_len, gc_types, gc_types_len, gc_meta, gc_meta_len, boot_environment, boot_argc, boot_argv),
         record!(Rt0Params; bias_baseline, reloc_table, reloc_count, protect_va, protect_len, entry, boot_r14, processor, rt0_start, payload_va, payload_len, initial_slot, runtime_state, reserved_13, reserved_14, reserved_15),
-    ]
+    ];
+    records.extend(crate::process_schema::layouts());
+    records
 }

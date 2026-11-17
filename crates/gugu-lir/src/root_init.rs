@@ -11,20 +11,21 @@ use super::pass::graph::Graph;
 
 /// 块级逐根初始化不动点 + 逐位置事件重放。
 pub struct InitSlots {
-    /// 每块的 in 状态：`input[block][slot]` 是"一定已写成指针"的根位集合。
-    input: Vec<Vec<LiveSet>>,
+    /// 每块一个连续位图；槽根按 slot ID 顺序拼接，避免每块每槽独立分配。
+    input: Vec<LiveSet>,
+    offsets: Vec<usize>,
     /// 每块按位置排序的事件：`(块内位置, 槽下标, 根下标, initialized)`。
     events: Vec<Vec<(u32, u32, u32, bool)>>,
 }
 
 impl InitSlots {
     pub fn new(body: &Body, graph: &Graph) -> Self {
-        let empty = || {
-            body.stack_slots
-                .iter()
-                .map(|slot| LiveSet::empty(slot.roots.len()))
-                .collect::<Vec<_>>()
-        };
+        let mut offsets = Vec::with_capacity(body.stack_slots.len() + 1);
+        offsets.push(0usize);
+        for slot in &body.stack_slots {
+            offsets.push(offsets.last().expect("已有起点") + slot.roots.len());
+        }
+        let empty = || LiveSet::empty(*offsets.last().expect("已有终点"));
         let mut events = vec![Vec::new(); body.blocks.len()];
         for root in &body.root_inits {
             if let Some(block) = events.get_mut(root.block.index()) {
@@ -46,13 +47,14 @@ impl InitSlots {
                 });
                 for edge in incoming.iter().skip(1) {
                     let from = body.edges[edge.index()].from;
-                    for (slot, other) in state.iter_mut().zip(&output[from.index()]) {
-                        slot.intersect_with(other);
-                    }
+                    state.intersect_with(&output[from.index()]);
                 }
                 let entry = state.clone();
                 for &(_, slot, bit, initialized) in &events[block.index()] {
-                    state[slot as usize].set(bit as usize, initialized);
+                    let slot = usize::try_from(slot).expect("槽编号适配宿主");
+                    let bit = usize::try_from(bit).expect("根编号适配宿主");
+                    debug_assert!(bit < offsets[slot + 1] - offsets[slot]);
+                    state.set(offsets[slot] + bit, initialized);
                 }
                 input[block.index()] = entry;
                 if output[block.index()] != state {
@@ -64,26 +66,30 @@ impl InitSlots {
                 break;
             }
         }
-        Self { input, events }
-    }
-
-    /// 块内某位置的逐槽初始化位；位置是块内相对指令下标，与事件同一坐标。
-    pub fn at(&self, block: BlockId, position: u32) -> Vec<LiveSet> {
-        let mut state = self.input[block.index()].clone();
-        for &(at, slot, bit, initialized) in &self.events[block.index()] {
-            if at > position {
-                break;
-            }
-            state[slot as usize].set(bit as usize, initialized);
+        Self {
+            input,
+            events,
+            offsets,
         }
-        state
     }
 
     /// 该点该槽的某个根字是否已经写成指针；越界的槽或根下标视作未初始化。
     pub fn is_initialized(&self, block: BlockId, position: u32, slot: usize, bit: usize) -> bool {
-        self.at(block, position)
-            .get(slot)
-            .is_some_and(|state| state.is_live(bit))
+        let Some((&start, &end)) = self.offsets.get(slot).zip(self.offsets.get(slot + 1)) else {
+            return false;
+        };
+        if bit >= end - start {
+            return false;
+        }
+        for &(at, event_slot, event_bit, initialized) in self.events[block.index()].iter().rev() {
+            if at <= position
+                && usize::try_from(event_slot).expect("槽编号适配宿主") == slot
+                && usize::try_from(event_bit).expect("根编号适配宿主") == bit
+            {
+                return initialized;
+            }
+        }
+        self.input[block.index()].is_live(start + bit)
     }
 
     /// 该点该槽的根字是否**全部**已写成指针；没有根字的槽恒为真。
@@ -95,11 +101,38 @@ impl InitSlots {
         slot: usize,
     ) -> bool {
         let roots = body.stack_slots[slot].roots.len();
-        (0..roots).all(|bit| self.at(block, position)[slot].is_live(bit))
+        (0..roots).all(|bit| self.is_initialized(block, position, slot, bit))
     }
 }
 
 fn predecessors(body: &Body, block: BlockId) -> &[super::body::EdgeId] {
     let range = &body.blocks[block.index()].predecessors;
     &body.predecessors[range.start as usize..range.end as usize]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_queries_keep_entry_facts_until_the_last_local_event() {
+        let mut entry = LiveSet::empty(2);
+        entry.set(1, true);
+        let slots = InitSlots {
+            input: vec![entry],
+            offsets: vec![0, 2],
+            events: vec![vec![
+                (2, 0, 0, true),
+                (4, 0, 0, false),
+                (4, 0, 0, true),
+                (5, 0, 1, false),
+            ]],
+        };
+        assert!(!slots.is_initialized(BlockId(0), 1, 0, 0));
+        assert!(slots.is_initialized(BlockId(0), 2, 0, 0));
+        assert!(slots.is_initialized(BlockId(0), 4, 0, 0));
+        assert!(slots.is_initialized(BlockId(0), 4, 0, 1));
+        assert!(!slots.is_initialized(BlockId(0), 5, 0, 1));
+        assert!(!slots.is_initialized(BlockId(0), 5, 1, 0));
+    }
 }

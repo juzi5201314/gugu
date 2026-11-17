@@ -110,6 +110,7 @@ fn pressure_reclaims_empty_shared_table_and_clears_reclaimable_bytes() {
     let arena = 2097152;
     memory.resize((arena * 2 + 65536) as usize, 0);
     put(&mut memory, PROCESSOR + 3520, arena + 16);
+    put(&mut memory, PROCESSOR + 3528, arena + 32768);
     put(&mut memory, PROCESSOR + 3592, arena);
     harness.reserve_script.extend([73728, 262144]);
     let payload = harness.run("shared", "gc_shared_alloc", &[1, 16, 8, 4], &mut memory)[0];
@@ -157,6 +158,7 @@ fn shared_access_and_root_keep_payload_then_generation_rejects_stale_handle() {
     let mapping = 262144;
     memory.resize((arena * 2 + 65536) as usize, 0);
     put(&mut memory, PROCESSOR + 3520, arena + 16);
+    put(&mut memory, PROCESSOR + 3528, arena + 32768);
     put(&mut memory, PROCESSOR + 3592, arena);
     harness.reserve_script.extend([table, mapping]);
     let payload = harness.run("shared", "gc_shared_alloc", &[1, 16, 8, 4], &mut memory)[0];

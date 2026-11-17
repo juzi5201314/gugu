@@ -1,0 +1,52 @@
+use std.env as env
+use std.process.{Command, ShellCommand}
+use std.path.{OsString, Path}
+use std.text.{Bytes}
+use std.io.{Error}
+fn ok[T](value: Result[T, Error]) T = match value { Ok(value) => value, Err(_) => panic("父进程操作失败") }
+fn os(value: string) OsString = ok(OsString::from_string(value))
+fn expect(actual: Bytes, expected: string) {
+    let source = Bytes::from_string(expected)
+    if actual.len() != source.len() { panic("字节长度不一致") }
+    for index in 0..source.len() { if actual.get(index) != source.get(index) { panic("字节内容不一致") }; }
+}
+#[cfg(os = "linux")]
+#[ffi(leaf)]
+extern "C" fn getenv(name: *byte) *byte
+fn main() {
+    let name = os("GUGU_PROCESS_PROBE")
+    ok(env.set(name, os("")))
+    match ok(env.get(name)) { Some(value) => { if !value.is_empty() { panic("空环境值") }; }, None => panic("空值被删除") }
+    ok(env.remove(name))
+    match ok(env.get(name)) { None => (), Some(_) => panic("环境未删除") }
+    ok(env.set(name, os("child")))
+    #[cfg(os = "linux")]
+    {
+        unsafe {
+            let value = getenv(c"GUGU_PROCESS_PROBE")
+            if std.mem.transmute[*byte, uint](value) == 0 { panic("libc 环境不可见") }
+            let expected: [byte; 5] = [99, 104, 105, 108, 100]
+            let address = std.mem.transmute[*byte, uint](value)
+            for index in 0..5 { if std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](address + uint(index))) != expected[index] { panic("libc 环境值") }; }
+        }
+        ok(env.set_current_dir(Path::from_string("/tmp/gugu-process-cwd")))
+        let command = Command::new(Path::from_string("/tmp/gugu-process-child"))
+        for value in ["a b", "", "x\"y", "tail\\", "😀"] { command.arg(os(value)) }
+        let raw_argument: [byte; 1] = [255]
+        command.arg(OsString::from_bytes(Bytes::copy_from(raw_argument[..])))
+        let output = ok(command.output())
+        match output.status.code() { Some(value) => { if value != 7 { panic("子进程退出码") }; }, None => panic("子进程信号退出") }
+        if output.status.success() { panic("非零退出被判成功") }
+        expect(output.stdout, "child-ok\n")
+        expect(output.stderr, "child-err\n")
+        let exited = ok(Command::new(Path::from_string("/bin/true")).spawn())
+        if !ok(exited.wait()).success() || !ok(exited.wait()).success() { panic("wait 缓存") }
+        match ok(exited.try_wait()) { Some(value) => { if !value.success() { panic("try_wait 缓存") }; }, None => panic("缺少缓存退出") }
+        ok(exited.detach())
+        ok(exited.detach())
+        match exited.wait() { Err(Error::Closed) => (), _ => panic("detach 后 wait") }
+        match Command::new(Path::from_string("/gugu/no-such-executable")).spawn() { Err(Error::NotFound) => (), _ => panic("exec 失败未回传") }
+    }
+    let output = ok(ShellCommand::new("exit 0").output())
+    if !output.status.success() { panic("固定系统 shell") }
+}

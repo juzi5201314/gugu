@@ -43,7 +43,7 @@ pub use backend::x64::harness::{
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use frontend::format::{FormatError, format_source};
 pub use frontend::prebuild::{MaterializeError, closure_program_modules, materialize_tables};
-pub use gugu_backend::NativeLink;
+pub use gugu_backend::{NativeImport, NativeImportKind, NativeLink};
 pub use materialize::{materialize, materialize_functions};
 pub use project::{
     ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyDomain,

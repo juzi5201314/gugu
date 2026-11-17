@@ -342,7 +342,10 @@ impl RuntimeGlueBindings {
                     if implied_glue(&instruction.op) != Some(*glue) {
                         continue;
                     }
-                    let arguments = lanes(&site.values, &instruction.arguments);
+                    let arguments = site
+                        .args(&instruction.arguments)
+                        .iter()
+                        .map(|id| &site.values[id.index()]);
                     let results = lanes(&site.values, &instruction.results);
                     // 分配族与 region 生命周期入口的传出参数由 lowering 合成（分配族：bytes 取自
                     // 操作数，type/align/flags 是立即数；region：plan/export 是立即数），操作数车道
@@ -360,7 +363,7 @@ impl RuntimeGlueBindings {
                             && body.signature.results.iter().all(|ty| !abi::is_float(*ty))
                     } else {
                         lanes_are_integer(arguments, &body.signature.parameters)
-                            && lanes_are_integer(results, &body.signature.results)
+                            && lanes_are_integer(results.iter(), &body.signature.results)
                     };
                     if !matches {
                         return Err(binding_error(format!(
@@ -522,9 +525,12 @@ fn lanes<'a>(operands: &'a [Value], range: &Range<u32>) -> &'a [Value] {
 }
 
 /// op 形式的隐含调用只走整数车道：车道数与签名一致，且两侧都不得出现浮点车道。
-fn lanes_are_integer(values: &[Value], expected: &[ValueType]) -> bool {
+fn lanes_are_integer<'a>(
+    mut values: impl ExactSizeIterator<Item = &'a Value>,
+    expected: &[ValueType],
+) -> bool {
     values.len() == expected.len()
-        && values.iter().all(|value| !abi::is_float(value.kind))
+        && values.all(|value| !abi::is_float(value.kind))
         && expected.iter().all(|ty| !abi::is_float(*ty))
 }
 
@@ -582,17 +588,20 @@ mod tests {
         let ints = [value(Type::I64), value(Type::Ptr)];
         let floats = [value(Type::F64)];
         let expected = [ValueType::scalar(Type::I64), ValueType::scalar(Type::Ptr)];
-        assert!(lanes_are_integer(&ints, &expected), "同宽整数车道必须通过");
         assert!(
-            !lanes_are_integer(&ints[..1], &expected),
+            lanes_are_integer(ints.iter(), &expected),
+            "同宽整数车道必须通过"
+        );
+        assert!(
+            !lanes_are_integer(ints[..1].iter(), &expected),
             "车道数不足必须拒绝"
         );
         assert!(
-            !lanes_are_integer(&floats, &[ValueType::scalar(Type::I64)]),
+            !lanes_are_integer(floats.iter(), &[ValueType::scalar(Type::I64)]),
             "实参浮点车道必须拒绝"
         );
         assert!(
-            !lanes_are_integer(&ints[..1], &[ValueType::scalar(Type::F64)]),
+            !lanes_are_integer(ints[..1].iter(), &[ValueType::scalar(Type::F64)]),
             "签名浮点车道必须拒绝"
         );
     }

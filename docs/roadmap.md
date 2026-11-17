@@ -509,10 +509,13 @@
   - 最终验收：`cargo build --workspace` 无 warning；`cargo nextest run --workspace --no-fail-fast --status-level fail --final-status-level fail` 默认配置669项全通过、66项沿用原有跳过设置，耗时63.248秒；`cargo fmt --all --check`、`git diff --check` 与 `mdbook build -d target/book` 通过。SUMMARY 已覆盖全部修改规范与内部章节。
   - 验证边界：本阶段未执行真实网络或 Windows 主机程序；网络、时钟与调度采用确定性的进程内钩子，执行真实标准库 LIR/native 指令并检查 ELF/PE。没有用真实网络吞吐、压力或原生 Windows 执行作为验收证据。
 
-- [ ] **阶段 66：实现 std.process 与 std.env**（复杂度：4）
+- [x] **阶段 66：实现 std.process 与 std.env**（复杂度：4）
   - 依赖：阶段 31、37、58、62、63。
   - 实现 Command/ShellCommand/Child/Stdio/Output/ExitStatus、spawn/wait/try_wait/kill/detach/close、argv、环境锁、env set/remove、虚拟 cwd。
   - 验收：Command 不经过 shell，ShellCommand 显式按目标 shell；stdout/stderr 并行排空；wait/close/detach 语义、环境快照、NUL/大小写规则和子进程资源回收符合规范。
+  - 归属层修复：资源终结的 value program 改用按值游标与续点，删除临时返回地址 canary；修复 barrier stamp 清理、嵌套 trace 元素基址、零字节 payload 与 TLAB one-past-end 的 arena 归属。x64 修复寄存器专用 ReadWrite 溢出回写、纯写 LEA scratch 复用和并行拷贝常量生命周期；永久回归执行真实 LIR 与分配后机器序列。Windows 保留旧系统兼容范围，以 Gugu 过量预约与原 reservation 登记支持高对齐映射、完整归还及精确计费。
+  - 原生验证：Linux 环境/libc 可见性、非 UTF-8 argv、子进程 cwd、退出与缓存、exec 错误回传、shell、双向 pipe 和取消探针退出 0；Windows 实际运行参数编码、环境大小写与覆盖、cwd、退出码 259、重复关闭、预取消、双向管道、stdout/stderr 各 128 KiB 排空与系统 shell，父程序退出 0、stderr 为空。PE 加载、RVA、全局数据、展开与启动栈界限均已按实际主机失败修复。
+  - 已批准验收边界：按本阶段默认 workspace、确定性生产路径矩阵与双目标原生闭环交付。默认门禁 706 项全部通过、102.92 秒；格式、workspace 构建和 mdBook 通过。唯一 dev 档 O3 保留 debug assertions、溢出检查和行号信息，构建最多两任务，轻量测试四槽、完整编译独占；单项 3 秒、全轮 120 秒未放宽。附加 `slow-tests` 整轮仍在 120 秒终止，已检查分片存在格式化/拼接 lowering、公开 runtime intrinsic 导入及实现相关断言失败；这些未纳入阶段 66 完成范围，不宣称附加慢套件已通过。
 
 - [ ] **阶段 67：实现 std.time、std.runtime 与 std.signal facade**（复杂度：4）
   - 依赖：阶段 33、41、58、61d、66。

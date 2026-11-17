@@ -1,0 +1,93 @@
+use std.path.{Path, OsString}
+use std.collections.{Vec}
+use std.text.{Bytes}
+use std.io.{Read, ByteBuffer}
+use std.sync.{CancelSource}
+use std.runtime.process_spawn as spawn
+use std.runtime.process_state as state
+pub use std.io.{Error}
+pub use std.runtime.process_spawn.{Stdio}
+pub use std.runtime.process_state.{Child, ExitStatus}
+pub use std.runtime.process_pipe.{ChildStdin, ChildStdout, ChildStderr}
+
+pub struct Output { pub status: ExitStatus, pub stdout: Bytes, pub stderr: Bytes }
+pub struct Command { configuration: &spawn.Configuration }
+pub struct ShellCommand { command: Command }
+impl Command {
+    pub fn new(executable: Path) Command {
+        let configuration = spawn.configuration(executable)
+        Command { configuration: &configuration }
+    }
+    pub fn arg(self: &Self, value: OsString) { self.configuration.arguments.push(value) }
+    pub fn env(self: &Self, name: OsString, value: OsString) { self.configuration.environment.push((name, Some(value))) }
+    pub fn remove_env(self: &Self, name: OsString) { self.configuration.environment.push((name, None)) }
+    pub fn cwd(self: &Self, path: Path) { self.configuration.cwd = Some(path) }
+    pub fn stdin(self: &Self, value: Stdio) { self.configuration.input = value }
+    pub fn stdout(self: &Self, value: Stdio) { self.configuration.output = value }
+    pub fn stderr(self: &Self, value: Stdio) { self.configuration.error = value }
+    pub fn spawn(self: &Self) Result[Child, Error] = Ok(state.adopt(spawn.spawn(spawn.snapshot(self.configuration))?))
+    pub fn output(self: &Self) Result[Output, Error] {
+        let configuration = spawn.snapshot(self.configuration)
+        configuration.input = Stdio::null()
+        configuration.output = Stdio::pipe()
+        configuration.error = Stdio::pipe()
+        let child = state.adopt(spawn.spawn(configuration)?)
+        let stdout = match child.stdout() { Some(value) => value, None => panic("missing stdout pipe") }
+        let stderr = match child.stderr() { Some(value) => value, None => panic("missing stderr pipe") }
+        let failure = Failure { error: None }
+        let cancel = CancelSource::new()
+        let captured_out = Captured { result: None }
+        let captured_err = Captured { result: None }
+        let out = async drain(&stdout, &child, &failure, &cancel, &captured_out)
+        let err = async drain(&stderr, &child, &failure, &cancel, &captured_err)
+        match out.wait() { Ok(_) => (), Err(_) => panic("stdout 排空协程 panic") }
+        match err.wait() { Ok(_) => (), Err(_) => panic("stderr 排空协程 panic") }
+        let stdout = match captured_out.result { Some(value) => value, None => panic("缺少 stdout 排空结果") }
+        let stderr = match captured_err.result { Some(value) => value, None => panic("缺少 stderr 排空结果") }
+        if let Some(error) = failure.error { _ = child.close()
+            return Err(error) }
+        let status = child.wait()
+        let closed = child.close()
+        let status = status?
+        closed?
+        Ok(Output { status, stdout: stdout?, stderr: stderr? })
+    }
+}
+impl ShellCommand {
+    pub fn new(script: string) ShellCommand {
+        let configuration = spawn.shell(script)
+        ShellCommand { command: Command { configuration: &configuration } }
+    }
+    pub fn with(executable: Path, leading_args: Vec[OsString], script: string) ShellCommand {
+        let command = Command::new(executable)
+        for argument in leading_args { command.arg(argument) }
+        command.arg(match OsString::from_string(script) { Ok(value) => value, Err(_) => panic("invalid shell script") })
+        ShellCommand { command }
+    }
+    pub fn spawn(self: &Self) Result[Child, Error] = self.command.spawn()
+    pub fn output(self: &Self) Result[Output, Error] = self.command.output()
+}
+struct Failure { error: Option[Error] }
+struct Captured { result: Option[Result[Bytes, Error]] }
+fn drain[T: Read](reader: &T, child: &Child, failure: &Failure, cancel: &CancelSource, captured: &Captured) {
+    let result = collect(reader, cancel)
+    if let Err(error) = result {
+        if let None = failure.error { failure.error = Some(error) }
+        cancel.cancel()
+        _ = child.close()
+    }
+    captured.result = Some(result)
+}
+fn collect[T: Read](reader: &T, cancel: &CancelSource) Result[Bytes, Error] {
+    let result = ByteBuffer::new()
+    let token = cancel.token()
+    loop {
+        let count = reader.read_buffer_cancel(&result, 8192, &token)?
+        if count == 0 { return Ok(result.freeze()) };
+    }
+}
+#[track_caller]
+pub fn exit(code: int) ! { unsafe {
+    std.runtime.process_exit(std.mem.transmute[int, uint](code))
+    std.hint.unreachable()
+} }

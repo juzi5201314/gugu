@@ -66,9 +66,7 @@ pub fn link_world(
         });
     }
     for blob in fragments::registered_fragments(world.target) {
-        if matches!(blob.entries[0].glue, "net_call" | "resolver_symbol")
-            && !super::fs_native::net::required(&world.fragments, blob.entries[0].glue)
-        {
+        if !super::fs_native::required(&world.fragments, &blob) {
             continue;
         }
         symbols.push(symbol_from_machine_fragment(&blob)?);
@@ -221,7 +219,7 @@ pub struct LinkRequest {
     pub cage_bytes: u64,
     pub symbols: Vec<ObjectSymbol>,
     pub readonly: Vec<Blob>,
-    pub imports: Vec<(String, String)>,
+    pub imports: Vec<crate::NativeImport>,
     pub interpreter: Option<String>,
     /// 非空时按未解析的 C 符号名抽取 SysV ar 成员。
     pub archive: Vec<u8>,
@@ -419,7 +417,12 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     let text_off = align_up(header_end, 16)?;
     let mut cursor = text_off;
     let mut map = BTreeMap::new();
-    cursor = place(&mut map, "_start", cursor, rt0_code_len())?;
+    cursor = place(
+        &mut map,
+        "_start",
+        cursor,
+        rt0_code_len(has_environ(request)),
+    )?;
     cursor = place(
         &mut map,
         "__gugu_rt0_params",
@@ -431,14 +434,14 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     cursor = place(&mut map, "__gugu_syscall_mmap", cursor, 8)?;
     cursor = place(&mut map, "__gugu_stub_ret", cursor, 1)?;
     cursor = place(&mut map, "__gugu_stub_exit", cursor, 8)?;
-    for index in 0..request.imports.len() {
+    for (index, import) in request.imports.iter().enumerate() {
+        if import.kind == crate::NativeImportKind::Data {
+            continue;
+        }
         let key = plt_name(index);
         cursor = place(&mut map, &key, cursor, PLT_LEN)?;
-        let symbol = &request.imports[index].1;
-        if !map.contains_key(symbol) {
-            let va = map[&key];
-            map.insert(symbol.clone(), va);
-        }
+        let va = map[&key];
+        map.entry(import.name.clone()).or_insert(va);
     }
     cursor = align_up(cursor, 16)?;
     let mut order: Vec<usize> = (0..request.symbols.len()).collect();
@@ -480,6 +483,10 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     }
     let rw_va = align_up(ro_cursor, PAGE)?;
     map.insert("__gugu_stack_limit".to_owned(), rw_va);
+    for (index, import) in request.imports.iter().enumerate() {
+        let got = rw_va + 128 + u64::try_from(index).map_err(|_| "GOT 下标溢出")? * 8;
+        map.insert(format!("__gugu_got_{}", import.name), got);
+    }
     // 保留可写区紧接重定位表之后并独占页：rt0 只把只读区收尾，保留区保持可写。
     let mut reserved = align_up(
         reloc_table_va(rw_va, request)? + reloc_count(request)? * 16,
@@ -543,13 +550,20 @@ fn place(map: &mut BTreeMap<String, u64>, name: &str, at: u64, len: u64) -> Resu
     at.checked_add(len).ok_or_else(|| "镜像地址溢出".to_owned())
 }
 
-fn rt0_code_len() -> u64 {
-    codec::rt0_bytes(0).len() as u64
+fn rt0_code_len(environment: bool) -> u64 {
+    u64::try_from(codec::rt0_bytes(0, environment).len()).expect("rt0 长度适配 u64")
+}
+
+fn has_environ(request: &LinkRequest) -> bool {
+    request
+        .imports
+        .iter()
+        .any(|import| import.name == "environ" && import.kind == crate::NativeImportKind::Data)
 }
 
 /// rt0 机器码长度：参数块紧随其后，测试与放置共用同一来源。
 pub fn rt0_len() -> u64 {
-    rt0_code_len()
+    rt0_code_len(false)
 }
 
 fn resolve_relocs(request: &LinkRequest, defined: &BTreeMap<String, u64>) -> Result<(), String> {
@@ -782,7 +796,7 @@ fn symbol_len(request: &LinkRequest, name: &str) -> u64 {
         return (symbol.bytes.len() as u64).max(1);
     }
     match name {
-        "_start" => rt0_len(),
+        "_start" => rt0_code_len(has_environ(request)),
         "__gugu_rt0_params" => entry::rt0_params::BYTES,
         "__gugu_cold_trap" => 2,
         "__gugu_cage_control" => {
@@ -941,6 +955,7 @@ fn write_text(
     let start = defined["_start"] as usize;
     let code = codec::rt0_bytes(
         i32::try_from(defined["__gugu_rt0_params"] - defined["_start"] - 7).unwrap_or(0),
+        has_environ(request),
     );
     file[start..start + code.len()].copy_from_slice(&code);
     put_bytes(file, defined["__gugu_cold_trap"], &[0x0f, 0x0b])?;
@@ -992,6 +1007,9 @@ fn write_plt(
 ) -> Result<(), String> {
     let limit = defined["__gugu_stack_limit"];
     for index in 0..request.imports.len() {
+        if request.imports[index].kind == crate::NativeImportKind::Data {
+            continue;
+        }
         let plt = defined[&plt_name(index)];
         let got = limit + 128 + index as u64 * 8;
         let disp = i64::try_from(got).unwrap_or(0) - (i64::try_from(plt).unwrap_or(0) + 6);
@@ -1102,6 +1120,9 @@ fn write_params(
     words[rt0_params::RUNTIME_STATE] = defined["__gugu_runtime_state"];
     words[rt0_params::COROUTINE_ENTER] =
         resolve_target(&mangle::mangle_runtime("coroutine_enter"), defined, request)?;
+    if has_environ(request) {
+        words[14] = defined["__gugu_got_environ"];
+    }
     for (index, word) in words.iter().enumerate() {
         put_u64(file, params + index * 8, *word)?;
     }

@@ -1,0 +1,267 @@
+use std.collections.{Vec}
+use std.path.{OsString, Path, native_bytes, from_native_bytes}
+use std.text.{Bytes, alloc_bytes}
+use std.io as io
+use std.runtime.native_memory as memory
+use std.runtime.sync as sync
+use std.runtime.heap.{heap_word, heap_store_word, heap_fail}
+
+// context 的前 64 字节保存 raw 快照，+64 是零初始化的 MutexControl。
+// 启动在 main 之前完成，所有地址均为独立计费 raw 存储，不持有 managed 指针。
+static context: uint = 0
+const CONTEXT_BYTES: uint = 128
+const STARTUP_GETCWD: uint = 0
+
+fn at(address: uint) byte { unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](address)) } }
+fn put(address: uint, value: byte) { unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](address), value) } }
+fn copy(destination: uint, source: uint, bytes: uint) {
+    let index: uint = 0
+    while index < bytes { put(destination + index, at(source + index))
+        index = index + 1 }
+}
+fn add(left: uint, right: uint) uint {
+    if left > ~uint(0) - right { heap_fail() }
+    left + right
+}
+#[cfg(os = "linux")]
+pub fn unit_bytes() uint = 1
+#[cfg(os = "windows")]
+pub fn unit_bytes() uint = 2
+pub fn unit(address: uint) uint {
+    let value = uint(at(address))
+    if unit_bytes() == 2 { value = value | (uint(at(address + 1)) << 8) }
+    value
+}
+pub fn native_length(address: uint) uint {
+    let bytes: uint = 0
+    while unit(address + bytes) != 0 { bytes = add(bytes, unit_bytes()) }
+    bytes
+}
+fn fatal_configuration() { unsafe {
+    let report = c"runtime fatal: invalid process configuration\n"
+    _ = std.runtime.report_write(2, report, 45)
+    std.runtime.process_exit(2)
+} }
+#[cfg(os = "linux")]
+fn valid_native(address: uint, bytes: uint) bool { _ = address
+    _ = bytes
+    true }
+#[cfg(os = "windows")]
+fn valid_native(address: uint, bytes: uint) bool {
+    let index: uint = 0
+    while index < bytes {
+        let value = unit(address + index)
+        index = index + 2
+        if value >= 55296 && value <= 56319 {
+            if index == bytes { return false }
+            let low = unit(address + index)
+            if low < 56320 || low > 57343 { return false }
+            index = index + 2
+        } else { if value >= 56320 && value <= 57343 { return false }; }
+    }
+    true
+}
+
+pub fn boot(argc: uint, argv: uint) {
+    context = memory.allocate(CONTEXT_BYTES)
+    boot_args(argc, argv)
+    let capacity: uint = 256
+    let request = memory.allocate(88)
+    defer { memory.release(request, 88) }
+    loop {
+        let buffer = memory.allocate(capacity)
+        // ProcessRequest 的 operation/arguments/value/error；启动阶段不进入 worker。
+        heap_store_word(request, STARTUP_GETCWD)
+        heap_store_word(request + 8, buffer)
+        heap_store_word(request + 16, capacity)
+        _ = unsafe { std.runtime.startup_call(STARTUP_GETCWD, request) }
+        if heap_word(request + 80) == 0 {
+            let bytes = native_length(buffer)
+            if !valid_native(buffer, bytes) { fatal_configuration() }
+            heap_store_word(context + 24, buffer)
+            heap_store_word(context + 32, bytes)
+            heap_store_word(context + 40, capacity)
+            #[cfg(os = "windows")]
+            heap_store_word(context + 48, heap_word(request + 24))
+            return
+        }
+        memory.release(buffer, capacity)
+        if !short_buffer(heap_word(request + 80)) { fatal_configuration() }
+        capacity = add(capacity, capacity)
+    }
+}
+#[cfg(os = "linux")]
+fn short_buffer(error: uint) bool = error == 34
+#[cfg(os = "windows")]
+fn short_buffer(error: uint) bool = error == 122
+
+#[cfg(os = "linux")]
+fn boot_args(argc: uint, argv: uint) {
+    if argc > (~uint(0) / 8) - 1 { fatal_configuration() }
+    let bytes = (argc + 1) * 8
+    let index: uint = 0
+    while index < argc {
+        bytes = add(bytes, add(native_length(heap_word(argv + index * 8)), 1))
+        index = index + 1
+    }
+    let storage = memory.allocate(bytes)
+    let cursor = storage + (argc + 1) * 8
+    index = 0
+    while index < argc {
+        let source = heap_word(argv + index * 8)
+        let length = native_length(source) + 1
+        heap_store_word(storage + index * 8, cursor)
+        copy(cursor, source, length)
+        cursor = cursor + length
+        index = index + 1
+    }
+    heap_store_word(context, argc)
+    heap_store_word(context + 8, storage)
+    heap_store_word(context + 16, bytes)
+}
+
+#[cfg(os = "windows")]
+fn space(value: uint) bool = value == 32 || value == 9
+#[cfg(os = "windows")]
+fn emit(destination: uint, offset: uint, value: uint) {
+    if destination != 0 {
+        put(destination + offset, byte(value & 255))
+        put(destination + offset + 1, byte(value >> 8))
+    }
+}
+// 两遍同一状态机：先计数，再写紧凑 char** + UTF-16 区；argv[0] 不解释反斜杠。
+#[cfg(os = "windows")]
+fn parse_command_line(source: uint, pointers: uint, destination: uint) (uint, uint) {
+    let cursor: uint = 0
+    let count: uint = 0
+    let written: uint = 0
+    loop {
+        if count != 0 {
+            while space(unit(source + cursor)) { cursor = cursor + 2 }
+            if unit(source + cursor) == 0 { break };
+        }
+        if pointers != 0 { heap_store_word(pointers + count * 8, destination + written) }
+        let quoted = false
+        loop {
+            let value = unit(source + cursor)
+            if value == 0 || (!quoted && space(value)) { break }
+            if count == 0 {
+                if value == 34 { quoted = !quoted }
+                else { emit(destination, written, value)
+                    written = written + 2 }
+                cursor = cursor + 2
+            } else {
+                let slashes: uint = 0
+                while unit(source + cursor) == 92 { slashes = slashes + 1
+                    cursor = cursor + 2 }
+                value = unit(source + cursor)
+                let literal = if value == 34 { slashes / 2 } else { slashes }
+                let index: uint = 0
+                while index < literal { emit(destination, written, 92)
+                    written = written + 2
+                    index = index + 1 }
+                if value == 34 {
+                    if slashes % 2 != 0 { emit(destination, written, 34)
+                        written = written + 2 }
+                    else {
+                        if quoted && unit(source + cursor + 2) == 34 {
+                            emit(destination, written, 34)
+                            written = written + 2
+                            cursor = cursor + 2
+                        } else { quoted = !quoted }
+                    }
+                    cursor = cursor + 2
+                } else {
+                    if value == 0 || (!quoted && space(value)) { break }
+                    emit(destination, written, value)
+                    written = written + 2
+                    cursor = cursor + 2
+                }
+            }
+        }
+        emit(destination, written, 0)
+        written = written + 2
+        count = count + 1
+    }
+    (count, written)
+}
+#[cfg(os = "windows")]
+fn boot_args(argc: uint, argv: uint) {
+    _ = argc
+    if argv == 0 { fatal_configuration() }
+    let length = native_length(argv)
+    if !valid_native(argv, length) { fatal_configuration() }
+    let command = memory.allocate(add(length, 2))
+    copy(command, argv, length + 2)
+    let (count, data_bytes) = parse_command_line(command, 0, 0)
+    if count > (~uint(0) / 8) - 1 { fatal_configuration() }
+    let table_bytes = (count + 1) * 8
+    let bytes = add(table_bytes, data_bytes)
+    let storage = memory.allocate(bytes)
+    _ = parse_command_line(command, storage, storage + table_bytes)
+    memory.release(command, length + 2)
+    heap_store_word(context, count)
+    heap_store_word(context + 8, storage)
+    heap_store_word(context + 16, bytes)
+}
+
+pub fn lock() = sync.mutex_lock(context + 64)
+pub fn unlock() = sync.mutex_unlock(context + 64)
+pub fn copy_native(address: uint, bytes: uint) Result[OsString, io.Error] {
+    let buffer = unsafe { alloc_bytes(int(bytes)) }
+    for index in 0..int(bytes) { buffer[index] = at(address + uint(index)) }
+    from_native_bytes(unsafe { Bytes::from_owned(buffer) })
+}
+pub fn args() Vec[OsString] {
+    let result = Vec[OsString]::new()
+    let index: uint = 0
+    while index < heap_word(context) {
+        let address = heap_word(heap_word(context + 8) + index * 8)
+        match copy_native(address, native_length(address)) {
+            Ok(value) => result.push(value),
+            Err(_) => heap_fail(),
+        }
+        index = index + 1
+    }
+    result
+}
+// 调用者已经持锁；与 environment 的联合快照共用，不递归获取锁。
+pub fn cwd_locked() Path {
+    match copy_native(heap_word(context + 24), heap_word(context + 32)) {
+        Ok(value) => Path::from_os(value),
+        Err(_) => { heap_fail()
+            unsafe { std.hint.unreachable() } },
+    }
+}
+pub fn snapshot_cwd() Path {
+    lock()
+    defer { unlock() }
+    cwd_locked()
+}
+pub fn process_id() uint = heap_word(context + 48)
+pub fn resolve_at(base: Path, path: Path) Path {
+    if path.is_absolute() { path } else { base.join(path) }
+}
+// facade 已验证绝对路径为目录；本层只准备 raw 副本并在线性化点替换。
+pub fn replace_cwd(path: Path) Result[(), io.Error] {
+    let bytes = native_bytes(path)?
+    let size = uint(bytes.len())
+    let storage = memory.allocate(size)
+    let source = unsafe { bytes.as_slice() }
+    for index in 0..source.len() { put(storage + uint(index), source[index]) }
+    lock()
+    let old = heap_word(context + 24)
+    let capacity = heap_word(context + 40)
+    heap_store_word(context + 24, storage)
+    heap_store_word(context + 32, size - unit_bytes())
+    heap_store_word(context + 40, size)
+    memory.release(old, capacity)
+    unlock()
+    Ok(())
+}
+pub fn shutdown() {
+    memory.release(heap_word(context + 8), heap_word(context + 16))
+    memory.release(heap_word(context + 24), heap_word(context + 40))
+    memory.release(context, CONTEXT_BYTES)
+    context = 0
+}

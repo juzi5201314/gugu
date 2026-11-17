@@ -282,7 +282,7 @@ impl Builder<'_> {
         Ok(())
     }
 
-    fn branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId) {
+    pub(super) fn branch(&mut self, condition: ValueId, yes: BlockId, no: BlockId) {
         let yes = self.edge(yes, false);
         let no = self.edge(no, false);
         self.blocks[self.current.index()].terminator =

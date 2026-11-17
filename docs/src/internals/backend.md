@@ -14,13 +14,19 @@
 
 CPU可接受面只读取[平台 CPU 基线](../spec/platform-abi.md#cpu-baseline)，后端 instruction verifier拒绝任何超出 descriptor的机器指令。数值 lowering只实现[类型系统](../spec/types.md)给定的整数/浮点结果；SSE2、NaN、overflow、shift和conversion选择是这些结果的机器实现，不在本章创建另一套数值规则。`I8` 与 `I16` 在寄存器中保持零扩展到 64 位。内存 `Load` 用 `movzx` 写入 32 位目的寄存器来建立这个规范形；只覆盖低 8 位或低 16 位的 `mov` 不能作为载入。
 
-## 标准网络系统依赖
+## 标准库系统依赖
 
-`NativeLink.with_standard_library` 在形成最终 action key 前扫描已验证 LIR 的网络机器操作。NetCall 的 Windows 路径加入 ws2_32 与 IOCP 所需 kernel32 符号；ResolverSymbol 在 Linux 加入 libc.so.6 的 getaddrinfo/freeaddrinfo 和既有 pthread/TLS 符号，在 Windows 加入 Winsock 解析入口。缺省 Linux 解释器取目标 descriptor，用户显式提供的解释器保持原值。先保留显式导入顺序，再按固定目录追加内建依赖，完全相同的项不重复添加，符号跨库冲突交给既有校验拒绝。合并后的规范编码进入 action key、backend plan、ELF PT_INTERP/DT_NEEDED 或 PE IAT。import policy revision 为3；不探测宿主库、NSS 配置或 PATH。
+`NativeLink.with_standard_library` 在形成最终 action key 前扫描已验证 LIR 的私有机器操作。NetCall 的 Windows 路径加入 ws2_32 与 IOCP 所需 kernel32 符号；ResolverSymbol 在 Linux 加入 libc.so.6 的 getaddrinfo/freeaddrinfo 和既有 pthread/TLS 符号，在 Windows 加入 Winsock 解析入口。EnvironmentSymbol 在 Linux 引入 environ(Data)、getenv/setenv/unsetenv(Function) 与 pthread/TLS，Windows 引入环境块与 ordinal 比较 API；ProcessWorker 使用既有 ForeignBridge 创建事务，Linux 子分支只发射 syscall，Windows 使用系统 DLL。缺省 Linux 解释器取目标 descriptor，用户显式解释器保持原值。保留显式导入顺序后按固定目录追加内建依赖，完全相同的项不重复添加；库或 Function/Data 种类冲突拒绝。规范编码进入 action key、backend plan、ELF PT_INTERP/DT_NEEDED 或 PE IAT。import policy revision 为 4，不探测宿主库、NSS 配置或 PATH。StartupCall 不引入 libc。
 
 net_call 和 resolver_symbol 机器片段独立按实际机器重定位的可达引用选择。ELF、PE 和 stackmap/unwind 的 RVA 布局共用同一判定；未使用 Resolver 的数字 bind 不包含 resolver 动态依赖。网络请求布局为九个八字节参数，value 位于72、error位于80，Windows provider 扩展函数地址位于88；transport 的 connect/shutdown/getsockopt/recvfrom/sendto/WSARecvFrom/WSASendTo/WSARecv/WSASend 继续复用同一 raw request。流读写与 datagram 交给 epoll/IOCP，Windows 的 WSABUF、地址缓冲和 OVERLAPPED 保存在请求页直到 completion。全部请求为 raw 存储。Winsock SOCKET 保持64位，SOCKET_ERROR 只比较32位返回，错误读取 WSAGetLastError；IOCP/句柄操作读取 GetLastError。Linux 负 syscall 返回转换为正 errno。Windows 关闭 socket 的回调使用 C ABI，回传捕获的 WSA 错误供共享资源完成路径消费。
 
 内部调用的 outgoing 栈实参必须在任何参数寄存器改写前保存，随后统一解析寄存器并行拷贝组。否则十参数 native_call 的最后一个取消实参可能被第一个操作码覆盖；固定回归覆盖这一情况，真实 Resolver 的 freeaddrinfo 路径也消费同一规则。
+
+进程私有机器目录为 StartupCall(op,request)、EnvironmentSymbol(op)、ProcessCall(op,request) 与 ProcessWorker()，全部要求 runtime 注入源身份及 unsafe。ProcessRequest 为 88 字节、8 字节对齐，字段依次是 operation、八个 arguments、value、error；SpawnPacket 为十个机器字、80 字节。process_schema=1 将操作目录和 Child/pipe 控制记录纳入 RuntimeRaw=47 的指纹与恢复验证；冻结 HIR/具体 GIR 对照 repr(C) 与 offset_of 逐字段验证。Child/pipe 扩展从资源控制页 +200 开始，不覆盖资源 header、关闭队列和 registry。LIR world/body 为 19/20，x64 lowering 为 21；旧缓存不回退。
+
+Rt0Payload revision=5、144 字节；Linux 独立寄存器保存初始 argc/argv，Windows 获取 GetCommandLineW 原始地址，分别写偏移 128/136，不重定位。Gugu process_context 在 boot/gc_boot 之后、main 之前复制 raw argv/cwd，创建专用进程锁，退出时在 mapping.verify_drained 前归还。三个镜像布局消费者统一用 fs_native.required 按重定位可达性选择网络、环境与进程片段，不能把可选进程或 Winsock 放进启动地板集。
+
+原生导入明确分 Function/Data。ELF 为每项提供 `__gugu_got_<name>` 槽符号，Data 的 dynsym 为 STT_OBJECT、重定位为 GLOB_DAT，不生成 PLT；environ 操作加载槽中的变量地址，再由 Gugu 读取当前 char**。导入 environ 时，rt0 使用参数块 reserved_14 定位 GOT，仅在变量为 NULL 时以启动 envp 初始化，保留 loader/构造器修改。没有此数据导入便不发射初始化代码。PE 使用 IAT 槽，普通 C 外调只接受 Function。
 
 ## 后端阶段
 
@@ -207,6 +213,12 @@ spill weight 使用 `u64` 饱和累加：普通 use 1，含 fixed-register 或 C
 GPR 和 XMM 独立分配。可用 GPR 池是 `rax, rcx, rdx, rbx, rsi, rdi, r8, r9, r10, rbp, r12, r13`——`rsp`、`r14`、`r15` 与内部 ABI 保留的 scratch `r11` 不参与；XMM 池是 `xmm0..xmm15`。值跨 Call/Bridge 点位活跃时优先 `rbp, r12, r13`（callee-saved，被调者会保存），其余情况按上表顺序；`pointer_spill` 点位上，根类要求必须落栈的值（managed heap 指针、stack 指针）直接占用 spill slot，整条活跃区间不再进寄存器；`PollResume` 也置该标记，由系统栈上的 collector 回写 spill 槽。调用点另记录 outgoing 区里的指针字（值编号、根类、相对 outgoing 区起点的偏移），寄存器参数仍留给 `MorestackEntry`。
 
 候选寄存器必须同时满足三条：不在该值覆盖范围内任一点位的 `mask` 里、当前没有别的活跃值占用、通过宽度检查（8 位操作数的值只能放在能编码 `r/m8` 的寄存器上，溢出槽不受限）。选择用确定性的候选序，不使用随机或哈希顺序。
+机器点位的 use/def slot 同序递增；候选掩码及跨调用查询先二分跳过 `def_slot < interval.start` 的前缀，只遍历 `use_slot <= interval.end` 的覆盖部分，区间端点语义保持不变。
+重载内存地址后，全宽 GPR 纯写输出可复用读取地址所用的临时寄存器，因为 x64 先读取源/有效地址再写目标；其他已选输出仍独占临时位置。窄写和 ReadWrite 不复用，也不能以预先重载未初始化的旧输出值占用额外 scratch。该规则使高压力下的 `lea dst,[base+index]` 即便 base 与 dst 都溢出，也能用唯一保留的 `r11` 完成，不牺牲活跃寄存器。
+指令表必须真实描述旧目标的读取：二操作数 `imul` 与 `cmovcc` 的目标是 ReadWrite，前者参与乘积，后者在条件不成立时保留原值。若错标为纯 Write，溢出重写可能用源重载槽覆盖旧目标，导致乘积变成源值平方或丢失选择的默认分支；三操作数 `imul` 才是纯写目标。
+仅寄存器目标的 ReadWrite 指令在 spill 后必须重载旧值，并在最后一次写入后把仍活跃的完整结果写回原槽；不能因为 `imul`/`cmovcc` 有读写语义就省略回写。可直接使用内存目标的指令仍在原槽上更新，不重复搬运。
+逐根初始化查询直接检查当前块中该根的最后一条有效事件；没有对应事件时读取块入口的 must 位图，不为单个根复制全部槽状态。根为未初始化时仍保留动态位图检查，不能通过性能优化放宽精确根条件。
+块入口初始化事实按槽顺序拼接为连续根位图，槽起点由前缀和定位；零根槽不单独分配位图。前驱交集与事件应用仍使用相同根编号和 must 语义。
 
 没有可用候选时，在当前 interval 与占用冲突的候选中选择 `spill_weight / remaining_length` 最低者 spill；比例用 `u128` 交叉乘法比较，不使用宿主浮点。相等时 spill 稳定 value ID 较大者。**分类与占用都按点位推进**：候选检查使用该值覆盖范围内全部点位 mask 的并集，因此一次放置对整条区间成立。
 
@@ -234,7 +246,7 @@ jmp taken
 
 stitch 阶段把站点序列按累积位移重写标签：块标签编号在 `0..block_count`，站点内标签平移后在终结符编号空间之前；终结符自己的标签编号已是函数级，但**定义位置必须按终结符在函数序列里的起点重定基**，否则 trampoline 标签会指到函数开头。
 
-寄存器分配阶段按同一批 pairs 重发整段拷贝（渲染结果被整体丢弃）：每组的物化把 rematerializable 的源按原 lowering 重建，优先直接重建进本组拷贝的目标寄存器（要求它不被同组其它拷贝读、也未被先前重建占用），否则取该点位空闲且不在 mask 内的池内寄存器，最后才用既不是本组源、也不在 mask 内的 `r11`；拷贝按目标空闲顺序执行，内存到内存经 `r11` 搬机器字（16 字节值搬两个字），环用 `r11`（GPR 目标）或 frame 里预留的 **16 字节 copy scratch**（XMM/内存目标）打断，`r11` 已被本组重建占用时改走 copy scratch。同一条指令里为重建或重载挑出的多个 scratch 互斥，指令结束即释放。scratch 只在需要时预留，不进入 stack map，且在 safepoint 前 copy 必须全部完成。逐组统计 `copy_moves` 与 `copy_cycles` 进入 payload 的 `stats`。
+寄存器分配阶段按同一批 pairs 重发整段拷贝（渲染结果被整体丢弃）：先按目标空闲顺序完成全部已有位置之间的搬运，再将 rematerializable 源按原 lowering 重建到最终目标。内存目标通过 `r11` 或 `xmm15` 重建并立即写入，禁止把临时重建值跨后续搬运保存，因为内存到内存搬运也会破坏 `r11`。环用 `r11`（GPR 目标）或 frame 里预留的 **16 字节 copy scratch**（XMM/内存目标）打断；剩余搬运需要 `r11` 时，环上旧值必须放入 copy scratch。同一条指令里的读取 scratch 互斥，全宽纯写输出可在源读取后复用它。scratch 只在需要时预留，不进入 stack map，且在 safepoint 前 copy 必须全部完成。逐组统计 `copy_moves` 与 `copy_cycles` 进入 payload 的 `stats`。
 
 ## frame layout
 
@@ -363,7 +375,9 @@ fragment relocation 封闭为：
 
 PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。`DllCharacteristics` 固定带 dynamic base、high-entropy VA 和 NX。逻辑节按登记名各写一节，名字长于 8 字节则写出失败。用户片段仍与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐接在 rt0 之后（栈图 `code_rva` 与 `.pdata` 都取自这次排序，两者必须与放置同源）；栈图 `code_rva` 相对该片段区，`.pdata` 里的 `RUNTIME_FUNCTION` 再加上片段区 RVA。`.xdata` 保留完整 `GUGUUN01` 容器，其平台尾里的 `UNWIND_INFO` 偏移改写成镜像 RVA。
 
-绝对地址写成 preferred VA 并进入 `IMAGE_REL_BASED_DIR64`；`PcRel32` 与 `Rva32` 在写出前修完，不进重定位表。重复槽、未知种类、超出 i32 的 PC 相对、可写可执行节和缺失入口在写出前失败。导入表默认包含 runtime 所需的 `kernel32.dll` 与 `ntdll.dll` API，不搜索宿主、不隐式写入 CRT。显式 `NativeLink` 按声明顺序追加 DLL/符号，DLL 名大小写无关地合并，同一符号跨库登记报错。普通 C 调用和取址使用 `jmp [rip+IAT]` 桩，机器 runtime 的 `__gugu_iat_*` 引用仍直接指向槽。IAT 初值是两字节对齐的 hint/name RVA，数据目录只覆盖 IAT 槽，不包含后续 runtime 状态区。rt0 第一条指令是 `sub rsp, 0x28`，随后用 RIP 相对地址安装只调用 `NtTerminateProcess` 的 console handler，再调用入口，最后 `ExitProcess(0)`。`r14` 指向 128 字节 `0xFF`，`r15` 指向 4096 字节 `0xFF`。未解析的 `morestack_or_poll` 接到 `ret`，其余未解析符号接到 `mov ecx, 1` 后调用 `ExitProcess` 的 abort stub。export directory 只含显式 C export；当前编译路径没有登记导出时该目录为空。`staticlib` 使用与 SysV ar 相同的确定性 COFF archive（时间戳、uid、gid 为 0）；`cdylib` 置 `IMAGE_FILE_DLL`。不生成 `.lib` 导入库。
+绝对地址写成 preferred VA 并进入 `IMAGE_REL_BASED_DIR64`；`PcRel32` 与 `Rva32` 在写出前修完，不进重定位表。重复槽、未知种类、超出 i32 的 PC 相对、可写可执行节和缺失入口在写出前失败。实际节表省略零长度节，不能把 `VirtualAddress == SizeOfImage` 的空尾节交给 Windows loader。导入表默认包含 runtime 所需的 `kernel32.dll` 与 `ntdll.dll` API，不搜索宿主、不隐式写入 CRT。显式 `NativeLink` 按声明顺序追加 DLL/符号，DLL 名大小写无关地合并，同一符号跨库登记报错。普通 C 调用和取址使用 `jmp [rip+IAT]` 桩，机器 runtime 的 `__gugu_iat_*` 引用仍直接指向槽。IAT 初值是两字节对齐的 hint/name RVA，数据目录只覆盖 IAT 槽，不包含后续 runtime 状态区。rt0 用 RIP 相对地址取得可写初始槽和启动载荷，捕获原生环境与命令行，再调用 Gugu `rt0_start`，按实际返回状态调用 `ExitProcess`。载荷内所有代码地址都包含 `.text RVA`，初始化仍在宿主栈上时不得激活 main 栈的 stack-check limit；首次切栈前最后发布。Win64 报告长度保存在既有栈槽中跨过 `GetStdHandle`，不依赖 volatile `r11`。未解析入口按登记的 runtime glue 门禁拒绝，不写退出桩或 `ret`。export directory 只含显式 C export；`staticlib` 使用确定性 COFF archive（时间戳、uid、gid 为 0），`cdylib` 置 `IMAGE_FILE_DLL`；不生成 `.lib` 导入库。
+
+C 导出入口的 `.pdata` 在常量符号 RVA 发布后追加，`UNWIND_INFO` 指向实际 `.rdata` 常量；不得在常量尚未进入符号表时查找导出展开信息。追加仅改变后置节，不移动此前的文本与常量 RVA。
 
 ## 直接编码与验证
 

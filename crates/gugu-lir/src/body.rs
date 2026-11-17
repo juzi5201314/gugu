@@ -14,8 +14,8 @@ use std::{num::NonZeroU32, ops::Range};
 /// 16：共享 guard 返回载荷，end 显式携带 handle，字段屏障保留操作数。
 /// 17：压缩字编码从运行期 cage 基址计算 offset。
 /// 18：原生 cage 参数按值复制使用登记的 ForeignCopy 入口。
-/// 19：网络非阻塞调用和系统 resolver 符号进入机器操作目录。
-pub const REVISION: u32 = 19;
+/// 20：进程与环境机器操作目录。
+pub const REVISION: u32 = 20;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(

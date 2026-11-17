@@ -5,9 +5,9 @@ use super::*;
 fn foreign_cage_address_requires_live_pin_before_submission() {
     let mut imports: Vec<_> = crate::NativeLink::THREAD_SYMBOLS
         .into_iter()
-        .map(|name| ("libc.so.6".into(), name.into()))
+        .map(|name| crate::NativeImport::function("libc.so.6", name))
         .collect();
-    imports.push(("libprobe.so".into(), "native_probe".into()));
+    imports.push(crate::NativeImport::function("libprobe.so", "native_probe"));
     let output = Compiler::shared().compile(
         CompileRequest::single_file(
             "main.gg",

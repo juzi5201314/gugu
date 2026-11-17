@@ -1,5 +1,7 @@
 //! 两目标显式 native 配置经过 Compiler、action key 和真实镜像 writer；不执行宿主程序。
-use gugu_compiler::{CompileRequest, Compiler, EMBEDDED_ARTIFACTS, NativeLink, TargetName};
+use gugu_compiler::{
+    CompileRequest, Compiler, EMBEDDED_ARTIFACTS, NativeImport, NativeLink, TargetName,
+};
 
 fn verify(target: TargetName) {
     let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
@@ -9,7 +11,7 @@ fn verify(target: TargetName) {
         "probe.dll"
     };
     let config = NativeLink {
-        imports: vec![(library.into(), "native_probe".into())],
+        imports: vec![NativeImport::function(library, "native_probe")],
         interpreter: (target == TargetName::X86_64Linux).then(|| "/toolchain/ld.so".into()),
     };
     let request =
@@ -31,7 +33,7 @@ fn verify(target: TargetName) {
     );
     assert!(bytes.windows(13).any(|bytes| bytes == b"native_probe\0"));
     let mut changed = config;
-    changed.imports[0].0 = if target == TargetName::X86_64Linux {
+    changed.imports[0].library = if target == TargetName::X86_64Linux {
         "libother.so"
     } else {
         "other.dll"
@@ -47,14 +49,13 @@ fn verify(target: TargetName) {
 }
 
 fn ordinary(target: TargetName) {
-    let mut imports = vec![(
+    let mut imports = vec![NativeImport::function(
         if target == TargetName::X86_64Linux {
             "libprobe.so"
         } else {
             "probe.dll"
-        }
-        .into(),
-        "native_probe".into(),
+        },
+        "native_probe",
     )];
     if target == TargetName::X86_64Linux {
         imports.extend(
@@ -66,7 +67,7 @@ fn ordinary(target: TargetName) {
                 "pthread_attr_destroy",
                 "__errno_location",
             ]
-            .map(|symbol| ("libc.so.6".into(), symbol.into())),
+            .map(|symbol| NativeImport::function("libc.so.6", symbol)),
         );
     }
     let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
@@ -88,40 +89,47 @@ fn ordinary(target: TargetName) {
 }
 
 #[test]
-fn bridge_target_must_be_imported_or_defined() {
-    for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-        let imports = if target == TargetName::X86_64Linux {
-            NativeLink::THREAD_SYMBOLS
-                .into_iter()
-                .map(|name| ("libc.so.6".into(), name.into()))
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
-            CompileRequest::single_file(
-                "main.gg",
-                include_str!("fixtures/foreign_bridge.gg"),
-                target,
-            )
-            .with_native_link(NativeLink {
-                imports,
-                interpreter: (target == TargetName::X86_64Linux).then(|| "/target/ld.so".into()),
-            }),
-        );
-        assert!(
-            !output.is_success(),
-            "缺少 native 导入时 bridge 镜像必须失败"
-        );
-        assert!(output.image_plan().is_none());
-        assert!(
-            output
-                .diagnostics()
-                .items()
-                .iter()
-                .any(|diagnostic| diagnostic.message().contains("native_probe"))
-        );
-    }
+fn linux_bridge_target_must_be_imported_or_defined() {
+    missing_target(TargetName::X86_64Linux);
+}
+
+#[test]
+fn windows_bridge_target_must_be_imported_or_defined() {
+    missing_target(TargetName::X86_64Windows);
+}
+
+fn missing_target(target: TargetName) {
+    let imports = if target == TargetName::X86_64Linux {
+        NativeLink::THREAD_SYMBOLS
+            .into_iter()
+            .map(|name| NativeImport::function("libc.so.6", name))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let output = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS).compile(
+        CompileRequest::single_file(
+            "main.gg",
+            include_str!("fixtures/foreign_bridge.gg"),
+            target,
+        )
+        .with_native_link(NativeLink {
+            imports,
+            interpreter: (target == TargetName::X86_64Linux).then(|| "/target/ld.so".into()),
+        }),
+    );
+    assert!(
+        !output.is_success(),
+        "缺少 native 导入时 bridge 镜像必须失败"
+    );
+    assert!(output.image_plan().is_none());
+    assert!(
+        output
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("native_probe"))
+    );
 }
 
 #[test]
@@ -153,8 +161,8 @@ fn dirty_foreign_bridge_reaches_windows_dispatcher() {
         )
         .with_native_link(NativeLink {
             imports: vec![
-                ("probe.dll".into(), "native_probe".into()),
-                ("probe.dll".into(), "dirty_probe".into()),
+                NativeImport::function("probe.dll", "native_probe"),
+                NativeImport::function("probe.dll", "dirty_probe"),
             ],
             interpreter: None,
         }),
@@ -186,7 +194,7 @@ fn native_link_configuration_reaches_windows_image() {
 #[test]
 fn native_link_configuration_rejects_invalid_descriptors() {
     let mut config = NativeLink {
-        imports: vec![("libc.so.6".into(), "probe".into())],
+        imports: vec![NativeImport::function("libc.so.6", "probe")],
         interpreter: None,
     };
     assert!(config.validate(TargetName::X86_64Linux).is_err());
@@ -197,6 +205,8 @@ fn native_link_configuration_rejects_invalid_descriptors() {
     config.interpreter = Some("/lib/ld.so".into());
     assert!(config.validate(TargetName::X86_64Windows).is_err());
     assert!(config.validate(TargetName::X86_64Linux).is_ok());
-    config.imports.push(("other.so".into(), "probe".into()));
+    config
+        .imports
+        .push(NativeImport::function("other.so", "probe"));
     assert!(config.validate(TargetName::X86_64Linux).is_err());
 }

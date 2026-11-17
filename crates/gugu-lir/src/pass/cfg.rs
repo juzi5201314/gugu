@@ -69,6 +69,14 @@ pub fn remove_unreachable(editor: &mut Editor) -> Result<bool, Diagnostic> {
 /// 合并「唯一前驱 + 唯一后继」的 block，直到不动点。
 fn merge_all(editor: &mut Editor) -> Result<bool, Diagnostic> {
     let mut changed = false;
+    // 合并只删除 a→b 并改写 b 的出边起点，不改变其它目标的入边数量或编号。
+    let mut incoming = vec![(0usize, None); editor.blocks.len()];
+    for (id, edge) in editor.edges() {
+        debug_assert!(edge.to.index() < incoming.len());
+        let entry = &mut incoming[edge.to.index()];
+        entry.0 += 1;
+        entry.1 = Some(id);
+    }
     loop {
         let mut merged = false;
         for a in editor.live_blocks() {
@@ -80,11 +88,11 @@ fn merge_all(editor: &mut Editor) -> Result<bool, Diagnostic> {
             if b == a || b == editor.entry() {
                 continue;
             }
-            let predecessors = editor.predecessors(b);
-            if predecessors.len() != 1 {
+            let (count, edge) = incoming[b.index()];
+            if count != 1 {
                 continue;
             }
-            let Some(edge) = editor.edge(predecessors[0]) else {
+            let Some(edge) = editor.edge(edge.expect("唯一前驱已有编号")) else {
                 continue;
             };
             if edge.unwind {
@@ -98,6 +106,7 @@ fn merge_all(editor: &mut Editor) -> Result<bool, Diagnostic> {
                 continue;
             }
             editor.merge_blocks(a, b)?;
+            incoming[b.index()] = (0, None);
             merged = true;
             changed = true;
             break;

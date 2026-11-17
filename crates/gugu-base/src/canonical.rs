@@ -67,6 +67,7 @@ struct Encoder<'a> {
 }
 
 impl Encoder<'_> {
+    #[inline]
     fn length(&mut self, length: usize) -> Result<(), Error> {
         self.output.extend_from_slice(
             &u64::try_from(length)
@@ -75,6 +76,7 @@ impl Encoder<'_> {
         );
         Ok(())
     }
+    #[inline]
     fn variant(&mut self, index: u32) {
         let index = u16::try_from(index).expect("IR schema 的枚举变体数量小于 65536");
         self.output.extend_from_slice(&index.to_le_bytes());
@@ -97,73 +99,90 @@ impl<'a> Serializer for Encoder<'a> {
     type SerializeStruct = Sequence<'a>;
     type SerializeStructVariant = Sequence<'a>;
 
+    #[inline]
     fn serialize_bool(self, value: bool) -> Result<(), Self::Error> {
         self.output.push(u8::from(value));
         Ok(())
     }
+    #[inline]
     fn serialize_i8(self, value: i8) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_i16(self, value: i16) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_i32(self, value: i32) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_i64(self, value: i64) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_i128(self, value: i128) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_u8(self, value: u8) -> Result<(), Self::Error> {
         self.output.push(value);
         Ok(())
     }
+    #[inline]
     fn serialize_u16(self, value: u16) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_u32(self, value: u32) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_u64(self, value: u64) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_u128(self, value: u128) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_f32(self, value: f32) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_f64(self, value: f64) -> Result<(), Self::Error> {
         self.output.extend_from_slice(&value.to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_char(self, value: char) -> Result<(), Self::Error> {
         self.output
             .extend_from_slice(&u32::from(value).to_le_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_str(mut self, value: &str) -> Result<(), Self::Error> {
         self.length(value.len())?;
         self.output.extend_from_slice(value.as_bytes());
         Ok(())
     }
+    #[inline]
     fn serialize_bytes(mut self, value: &[u8]) -> Result<(), Self::Error> {
         self.length(value.len())?;
         self.output.extend_from_slice(value);
         Ok(())
     }
+    #[inline]
     fn serialize_none(self) -> Result<(), Self::Error> {
         self.output.push(0);
         Ok(())
@@ -178,6 +197,7 @@ impl<'a> Serializer for Encoder<'a> {
     fn serialize_unit_struct(self, _name: &'static str) -> Result<(), Self::Error> {
         Ok(())
     }
+    #[inline]
     fn serialize_unit_variant(
         mut self,
         _name: &'static str,
@@ -204,9 +224,11 @@ impl<'a> Serializer for Encoder<'a> {
         self.variant(index);
         self.child(value)
     }
+    #[inline]
     fn serialize_seq(self, _len: Option<usize>) -> Result<Self::SerializeSeq, Self::Error> {
         Sequence::new(self.output, None, true)
     }
+    #[inline]
     fn serialize_tuple(self, len: usize) -> Result<Self::SerializeTuple, Self::Error> {
         Sequence::new(self.output, Some(len), true)
     }
@@ -234,6 +256,7 @@ impl<'a> Serializer for Encoder<'a> {
             key: None,
         })
     }
+    #[inline]
     fn serialize_struct(
         self,
         _name: &'static str,
@@ -241,6 +264,7 @@ impl<'a> Serializer for Encoder<'a> {
     ) -> Result<Self::SerializeStruct, Self::Error> {
         Sequence::new(self.output, Some(len), false)
     }
+    #[inline]
     fn serialize_struct_variant(
         mut self,
         _name: &'static str,
@@ -263,6 +287,7 @@ struct Sequence<'a> {
     prefix: Option<usize>,
 }
 impl<'a> Sequence<'a> {
+    #[inline]
     fn new(
         output: &'a mut Vec<u8>,
         expected: Option<usize>,
@@ -287,6 +312,7 @@ impl<'a> Sequence<'a> {
         self.written += 1;
         Ok(())
     }
+    #[inline]
     fn finish(self) -> Result<(), Error> {
         if self
             .expected
@@ -308,6 +334,7 @@ impl SerializeSeq for Sequence<'_> {
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         self.element(value)
     }
+    #[inline]
     fn end(self) -> Result<(), Error> {
         self.finish()
     }
@@ -318,6 +345,7 @@ impl SerializeTuple for Sequence<'_> {
     fn serialize_element<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         self.element(value)
     }
+    #[inline]
     fn end(self) -> Result<(), Error> {
         self.finish()
     }
@@ -328,6 +356,7 @@ impl SerializeTupleStruct for Sequence<'_> {
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         self.element(value)
     }
+    #[inline]
     fn end(self) -> Result<(), Error> {
         self.finish()
     }
@@ -338,6 +367,7 @@ impl SerializeTupleVariant for Sequence<'_> {
     fn serialize_field<T: ?Sized + Serialize>(&mut self, value: &T) -> Result<(), Error> {
         self.element(value)
     }
+    #[inline]
     fn end(self) -> Result<(), Error> {
         self.finish()
     }
@@ -352,6 +382,7 @@ impl SerializeStruct for Sequence<'_> {
     ) -> Result<(), Error> {
         self.element(value)
     }
+    #[inline]
     fn end(self) -> Result<(), Error> {
         self.finish()
     }
@@ -366,6 +397,7 @@ impl SerializeStructVariant for Sequence<'_> {
     ) -> Result<(), Error> {
         self.element(value)
     }
+    #[inline]
     fn end(self) -> Result<(), Error> {
         self.finish()
     }
@@ -416,6 +448,7 @@ struct Decoder<'a> {
     offset: usize,
 }
 impl<'a> Decoder<'a> {
+    #[inline]
     fn take(&mut self, length: usize) -> Result<&'a [u8], Error> {
         let end = self
             .offset
@@ -428,20 +461,24 @@ impl<'a> Decoder<'a> {
         self.offset = end;
         Ok(bytes)
     }
+    #[inline]
     fn byte(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
     }
+    #[inline]
     fn u32(&mut self) -> Result<u32, Error> {
         Ok(u32::from_le_bytes(
             self.take(4)?.try_into().expect("u32 width"),
         ))
     }
+    #[inline]
     fn length(&mut self) -> Result<usize, Error> {
         usize::try_from(u64::from_le_bytes(
             self.take(8)?.try_into().expect("u64 宽度"),
         ))
         .map_err(|_| Error::message("规范编码长度不适配宿主"))
     }
+    #[inline]
     fn sequence<'de>(&'de mut self, length: usize) -> SequenceAccess<'de, 'a> {
         SequenceAccess {
             decoder: self,
@@ -455,6 +492,7 @@ struct SequenceAccess<'a, 'de> {
 }
 impl<'de> SeqAccess<'de> for SequenceAccess<'_, 'de> {
     type Error = Error;
+    #[inline]
     fn next_element_seed<T: de::DeserializeSeed<'de>>(
         &mut self,
         seed: T,
@@ -465,6 +503,7 @@ impl<'de> SeqAccess<'de> for SequenceAccess<'_, 'de> {
         self.remaining -= 1;
         seed.deserialize(&mut *self.decoder).map(Some)
     }
+    #[inline]
     fn size_hint(&self) -> Option<usize> {
         Some(
             self.remaining

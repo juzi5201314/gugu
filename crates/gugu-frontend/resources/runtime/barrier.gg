@@ -123,7 +123,13 @@ pub fn gc_barrier_flush(processor: uint) {
     let stamp_capacity = gc_config_stamp_entries(config)
     let stamp: uint = 0
     while stamp < stamp_capacity {
-        heap_store_word(state + BARRIER_STAMPS_OFFSET + stamp * BARRIER_STAMP_BYTES + 16, BARRIER_STAMP_EMPTY)
+        // 必须清掉键本身：mutator 的 epoch 为 0，与「空」哨兵相等，只清 epoch 会让旧键
+        // 命中已 flush 的索引，新卡片被静默跳过。键里的 arena 非零，0 不是合法键。
+        let slot = state + BARRIER_STAMPS_OFFSET + stamp * BARRIER_STAMP_BYTES
+        heap_store_word(slot, 0)
+        heap_store_word(slot + 8, 0)
+        heap_store_word(slot + 16, BARRIER_STAMP_EMPTY)
+        heap_store_word(slot + 24, 0)
         stamp = stamp + 1
     }
 }

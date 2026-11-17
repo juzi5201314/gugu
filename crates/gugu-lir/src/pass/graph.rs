@@ -153,8 +153,9 @@ pub fn dominators(
     count: usize,
     entry: BlockId,
     successors: impl Fn(BlockId) -> Vec<BlockId>,
-    predecessors: impl Fn(BlockId) -> Vec<BlockId>,
+    predecessors: &[Vec<BlockId>],
 ) -> Option<Vec<BlockId>> {
+    debug_assert_eq!(predecessors.len(), count, "前驱表覆盖全部稠密 block ID");
     let postorder = reverse_postorder_from(count, entry, &successors);
     if postorder.len() != count {
         return None;
@@ -169,7 +170,7 @@ pub fn dominators(
         let mut changed = false;
         for &block in postorder.iter().skip(1) {
             let mut next = None;
-            for predecessor in predecessors(block) {
+            for &predecessor in &predecessors[block.index()] {
                 if dominators[predecessor.index()].is_none() {
                     continue;
                 }

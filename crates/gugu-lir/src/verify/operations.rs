@@ -113,7 +113,10 @@ pub(super) fn verify(body: &Body) -> Result<(), Diagnostic> {
                     && align.is_power_of_two()
             }
             Op::PlatformCall(op) => platform_call_valid(*op, &args, &results),
-            Op::RuntimeMachineCall(op) => runtime_machine_call_valid(*op, &args, &results),
+            Op::RuntimeMachineCall(op) => {
+                runtime_machine_call_valid(*op, &args, &results)
+                    && machine_operation_known(body, *op, body.args(&instruction.arguments))
+            }
             // region 生命周期 op 没有参数与结果：region 身份与顺序由 region 生命周期 verifier 检查。
             Op::RegionPublish { .. }
             | Op::RegionReset { .. }
@@ -649,6 +652,30 @@ fn platform_call_valid(
 ///
 /// 与平台调用同一纪律：不得携带受管引用穿过 runtime 边界。指针实参是 `Raw` 原始指针，机器字
 /// 实参是无符号标量；每个操作的 lane 形状与登记机器片段的固定内部边界逐一对应。
+fn machine_operation_known(
+    body: &Body,
+    op: crate::runtime::RuntimeMachineOp,
+    args: &[ValueId],
+) -> bool {
+    use crate::runtime::RuntimeMachineOp as Kind;
+    let count = match op {
+        Kind::StartupCall => 2,
+        Kind::EnvironmentSymbol => 4,
+        Kind::ProcessCall => 7,
+        _ => return true,
+    };
+    let Some(value) = args.first().map(|value| &body.values[value.index()]) else {
+        return false;
+    };
+    let Definition::Instruction { instruction, .. } = value.definition else {
+        return true;
+    };
+    match body.instructions[instruction.index()].op {
+        Op::IConst(value) => value < count,
+        _ => true,
+    }
+}
+
 fn runtime_machine_call_valid(
     op: crate::runtime::RuntimeMachineOp,
     args: &[ValueType],
@@ -668,6 +695,7 @@ fn runtime_machine_call_valid(
         | Kind::MonotonicNanos
         | Kind::CageControl
         | Kind::CallbackControl
+        | Kind::ProcessWorker
         | Kind::ThreadId => args.is_empty() && results.len() == 1 && word(&results[0]),
         // 终止码是无符号机器字；不返回。
         Kind::ProcessExit => args.len() == 1 && results.is_empty() && word(&args[0]),
@@ -683,14 +711,18 @@ fn runtime_machine_call_valid(
         // 无实参，返回编译器生成的只读 `GcImageConfig` 地址（机器字）。
         Kind::GcConfig => args.is_empty() && results.len() == 1 && word(&results[0]),
         // 单个请求指针实参；返回 dispatcher 的状态字。
-        Kind::GcEnter | Kind::FsPoll | Kind::StackReadWord | Kind::ResolverSymbol => {
+        Kind::GcEnter
+        | Kind::FsPoll
+        | Kind::StackReadWord
+        | Kind::ResolverSymbol
+        | Kind::EnvironmentSymbol => {
             args.len() == 1 && results.len() == 1 && word(&args[0]) && word(&results[0])
         }
         Kind::StackCopyRaw => args.len() == 4 && args.iter().all(word) && results.is_empty(),
         Kind::CallbackQueue => {
             args.len() == 3 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
-        Kind::FsStart | Kind::NetCall => {
+        Kind::FsStart | Kind::NetCall | Kind::StartupCall | Kind::ProcessCall => {
             args.len() == 2 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
     }

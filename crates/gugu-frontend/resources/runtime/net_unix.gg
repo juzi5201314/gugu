@@ -10,14 +10,20 @@ use std.net.address.{UnixAddr}
 use std.path.{Path, OsString}
 use std.io.{Error, Bytes}
 use std.text.{alloc_bytes}
+use std.runtime.process_context as context
 
-pub fn encode(address: UnixAddr, out: uint) uint { unsafe {
-    let bytes = address.path().as_os().to_bytes()
+fn resolve(address: UnixAddr) Result[UnixAddr, Error] {
+    let path = address.path()
+    let path = if path.is_absolute() { path } else { context.resolve_at(context.snapshot_cwd(), path) }
+    match UnixAddr::from_path(path) { Ok(value) => Ok(value), Err(_) => Err(Error::InvalidInput) }
+}
+pub fn encode(address: UnixAddr, out: uint) Result[uint, Error] { unsafe {
+    let bytes = resolve(address)?.path().as_os().to_bytes()
     let data = bytes.as_slice()
     std.ptr.write_unaligned[u16](std.mem.transmute[uint, *u16](out), u16(1))
     endpoint.copy_in(out + 2, bytes)
     std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](out + 2 + uint(data.len())), byte(0))
-    uint(data.len()) + 3
+    Ok(uint(data.len()) + 3)
 } }
 pub fn decode(data: uint, length: uint) Result[Option[UnixAddr], Error] { unsafe {
     if length < 2 || length > 110 { return Err(Error::InvalidData) }
@@ -38,6 +44,7 @@ fn path_from_bytes(bytes: Bytes) Result[Path, Error] {
     match bytes.to_string() { Ok(value) => Ok(Path::from_string(value)), Err(_) => Err(Error::InvalidData) }
 }
 pub fn bind(address: UnixAddr, stream: bool) Result[ResourceCell, Error] {
+    let address = resolve(address)?
     native.initialize()?
     waiting.initialize()?
     let handle = native.checked(native.create_socket(1, if stream { 1 } else { 2 }))?
@@ -45,13 +52,14 @@ pub fn bind(address: UnixAddr, stream: bool) Result[ResourceCell, Error] {
     defer { if !retained { _ = native.call(7, handle, 0, 0, 0, 0, 0) }; }
     let raw = raw_allocate(128)
     defer { raw_free(raw, 128) }
-    let length = encode(address, raw)
+    let length = encode(address, raw)?
     _ = native.checked(native.call(2, handle, raw, length, 0, 0, 0))?
     if stream { _ = native.checked(native.call(3, handle, 1024, 0, 0, 0, 0))? }
     retained = true
     Ok(endpoint.create(handle, 1))
 }
 pub fn connect(address: UnixAddr, cancel: uint, deadline: uint) Result[ResourceCell, Error] {
+    let address = resolve(address)?
     native.initialize()?
     waiting.initialize()?
     let handle = native.checked(native.create_socket(1, 1))?
@@ -61,7 +69,7 @@ pub fn connect(address: UnixAddr, cancel: uint, deadline: uint) Result[ResourceC
     let node = transport.allocate(cell.control, transport.CONNECT, 0, 0, cancel)
     defer { transport.dispose(node) }
     heap_store_word(node + 40, deadline)
-    heap_store_word(node + 96, encode(address, node + transport.ADDRESS))
+    heap_store_word(node + 96, encode(address, node + transport.ADDRESS)?)
     _ = transport.submit(node)?
     retained = true
     Ok(cell)
@@ -78,6 +86,7 @@ pub fn address(cell: &ResourceCell, peer: bool) Result[Option[UnixAddr], Error] 
 }
 #[cfg(os = "linux")]
 pub fn send(cell: &ResourceCell, bytes: Bytes, target: Option[UnixAddr], cancel: uint) Result[(), Error] {
+    let target = match target { Some(value) => Some(resolve(value)?), None => None }
     endpoint.connected(cell, match target { Some(_) => false, None => true })?
     let length = uint(bytes.len())
     let raw = raw_allocate(length + 1)
@@ -86,7 +95,7 @@ pub fn send(cell: &ResourceCell, bytes: Bytes, target: Option[UnixAddr], cancel:
     let node = transport.allocate(cell.control, transport.SEND, raw, length, cancel)
     defer { transport.dispose(node) }
     heap_store_word(node + 320, match target { Some(_) => uint(1), None => uint(2) })
-    if let Some(value) = target { heap_store_word(node + 96, encode(value, node + transport.ADDRESS)) }
+    if let Some(value) = target { heap_store_word(node + 96, encode(value, node + transport.ADDRESS)?) }
     let sent = transport.submit(node)?
     if sent != length { return Err(if sent == 0 { Error::WriteZero } else { Error::InvalidData }) }
     Ok(())
@@ -108,9 +117,10 @@ pub fn receive(cell: &ResourceCell, destination: &[byte], cancel: uint, connecte
 }
 #[cfg(os = "linux")]
 pub fn datagram_connect(cell: &ResourceCell, address: Option[UnixAddr]) Result[(), Error] {
+    let address = match address { Some(value) => Some(resolve(value)?), None => None }
     let node = transport.allocate(cell.control, match address { Some(_) => transport.UDP_CONNECT, None => transport.UDP_DISCONNECT }, 0, 0, 0)
     defer { transport.dispose(node) }
-    heap_store_word(node + 96, match address { Some(value) => encode(value, node + transport.ADDRESS), None => uint(2) })
+    heap_store_word(node + 96, match address { Some(value) => encode(value, node + transport.ADDRESS)?, None => uint(2) })
     _ = transport.submit(node)?
     Ok(())
 }

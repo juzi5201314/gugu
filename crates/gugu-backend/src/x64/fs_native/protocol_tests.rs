@@ -10,11 +10,13 @@ mod foreign_tests;
 mod gc_entry;
 #[path = "protocol_tests/net.rs"]
 mod network;
+#[path = "protocol_tests/process.rs"]
+mod process_tests;
 
 const REQUEST: u64 = 256;
 const STACK: u64 = 8192 + 8;
 #[derive(Debug, PartialEq)]
-enum Stop {
+pub(crate) enum Stop {
     Return,
     Exit,
     Worker,
@@ -23,7 +25,7 @@ struct HostCall {
     name: &'static str,
     result: u64,
 }
-struct Machine {
+pub(crate) struct Machine {
     registers: [u64; 16],
     floats: [u64; 16],
     native: Option<fn(&mut Machine)>,
@@ -34,7 +36,7 @@ struct Machine {
     calls: Vec<(String, Vec<u64>)>,
 }
 impl Machine {
-    fn new(script: &[(&'static str, u64)]) -> Self {
+    pub(crate) fn new(script: &[(&'static str, u64)]) -> Self {
         let mut machine = Self {
             registers: [0; 16],
             floats: [0; 16],
@@ -55,31 +57,37 @@ impl Machine {
         machine.set_reg(R12, 0x1234);
         machine
     }
-    fn get(&self, r: Gpr) -> u64 {
+    pub(crate) fn get(&self, r: Gpr) -> u64 {
         self.registers[r as usize]
     }
-    fn set_reg(&mut self, r: Gpr, value: u64) {
+    pub(crate) fn set_reg(&mut self, r: Gpr, value: u64) {
         self.registers[r as usize] = value;
     }
-    fn word(&self, address: u64) -> u64 {
+    pub(crate) fn word(&self, address: u64) -> u64 {
         u64::from_le_bytes(
             self.memory[address as usize..address as usize + 8]
                 .try_into()
                 .unwrap(),
         )
     }
-    fn put(&mut self, address: u64, value: u64) {
+    pub(crate) fn put(&mut self, address: u64, value: u64) {
         self.memory[address as usize..address as usize + 8].copy_from_slice(&value.to_le_bytes());
     }
     fn address(&self, operand: &Operand) -> u64 {
         let Operand::Mem(mem) = operand else {
             panic!("预期基址操作数")
         };
-        assert!(mem.index.is_none());
         let Some(Reg::Gpr(base)) = mem.base else {
             panic!("预期物理基址")
         };
-        self.get(base).wrapping_add_signed(i64::from(mem.disp))
+        let index = match mem.index {
+            Some(Reg::Gpr(index)) => self.get(index) << mem.scale.shift(),
+            None => 0,
+            _ => panic!("预期物理索引"),
+        };
+        self.get(base)
+            .wrapping_add(index)
+            .wrapping_add_signed(i64::from(mem.disp))
     }
     fn value(&self, operand: &Operand) -> u64 {
         match operand {
@@ -117,7 +125,7 @@ impl Machine {
         }
         name == "ExitProcess" || name == "syscall:60" || name == "syscall:231"
     }
-    fn run(&mut self, sequence: &Sequence) -> Stop {
+    pub(crate) fn run(&mut self, sequence: &Sequence) -> Stop {
         let mut pc = 0;
         let mut comparison = (0, 0);
         for _ in 0..1024 {
@@ -152,6 +160,11 @@ impl Machine {
                     }
                     self.store(&ops[dst], value);
                 }
+                "cmove" => {
+                    if comparison.0 == comparison.1 {
+                        self.store(&ops[1], self.value(&ops[0]));
+                    }
+                }
                 "lea" => {
                     let address = match &ops[0] {
                         Operand::Mem(_) => self.address(&ops[0]),
@@ -182,20 +195,29 @@ impl Machine {
                     };
                     self.store(&ops[0], value);
                 }
-                "imul" => self.store(
-                    &ops[1],
-                    self.value(&ops[0]).wrapping_mul(self.value(&ops[2])),
-                ),
+                "imul" => {
+                    let (dest, left, right) = if ops.len() == 2 {
+                        (&ops[1], self.value(&ops[1]), self.value(&ops[0]))
+                    } else {
+                        (&ops[1], self.value(&ops[0]), self.value(&ops[2]))
+                    };
+                    self.store(dest, left.wrapping_mul(right));
+                }
                 "neg" => self.store(&ops[0], self.value(&ops[0]).wrapping_neg()),
                 "test" => comparison = (self.value(&ops[0]) & self.value(&ops[1]), 0),
                 "cmp" => comparison = (self.value(&ops[0]), self.value(&ops[1])),
-                "jmp" | "je" | "jne" | "jl" | "jge" | "jae" => {
+                "jmp" | "je" | "jne" | "jl" | "jg" | "jge" | "jae" | "jbe" => {
                     let (a, b) = comparison;
                     let take = match form.mnemonic {
                         "je" => a == b,
                         "jne" => a != b,
                         "jl" => (a as i64) < (b as i64),
                         "jae" => a >= b,
+                        "jbe" => a <= b,
+                        "jg" => {
+                            i64::from_ne_bytes(a.to_ne_bytes())
+                                > i64::from_ne_bytes(b.to_ne_bytes())
+                        }
                         "jge" => (a as i64) >= (b as i64),
                         _ => true,
                     };
@@ -235,7 +257,7 @@ impl Machine {
                     };
                     let name = name.strip_prefix("__gugu_iat_").unwrap();
                     let mut args = [Rcx, Rdx, R8, R9].map(|r| self.get(r)).to_vec();
-                    args.extend((0..4).map(|index| self.word(self.get(Rsp) + 32 + index * 8)));
+                    args.extend((0..6).map(|index| self.word(self.get(Rsp) + 32 + index * 8)));
                     if self.host(name, args, true) {
                         return Stop::Exit;
                     }
@@ -503,8 +525,8 @@ fn windows_worker_preserves_argument_lanes_and_normalizes_results() {
             }
             assert_eq!(m.execute(windows_worker()), Stop::Return);
             assert_eq!(
-                m.calls[0].1,
-                [100, 101, 102, 103, 104, 105, 106, 107],
+                &m.calls[0].1[..8],
+                &[100, 101, 102, 103, 104, 105, 106, 107],
                 "{name}"
             );
             let normalized = if sentinel == -1 {

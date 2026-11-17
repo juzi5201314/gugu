@@ -5,7 +5,7 @@ use crate::lir::body::{
 };
 use crate::x64::lower::{self, LowerCtx, SiteValue};
 
-fn body(parameters: &[ValueType]) -> Body {
+pub(crate) fn body(parameters: &[ValueType]) -> Body {
     Body {
         revision: crate::lir::body::REVISION,
         instance: [0; 32],

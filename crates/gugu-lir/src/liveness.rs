@@ -60,10 +60,14 @@ impl LiveSet {
         }
     }
 
-    fn union_with(&mut self, other: &Self) {
+    fn union_with(&mut self, other: &Self) -> bool {
+        let mut changed = false;
         for (word, other) in self.words.iter_mut().zip(&other.words) {
-            *word |= *other;
+            let next = *word | *other;
+            changed |= next != *word;
+            *word = next;
         }
+        changed
     }
 
     /// must 语义的汇合：只保留两侧都置位的元素。
@@ -223,7 +227,8 @@ impl LiveValues {
         let mut incoming = output.clone();
         loop {
             let mut changed = false;
-            for &block in &graph.order {
+            // 值活跃性向前驱传播；后序可在同一轮穿过整条无回边路径。
+            for &block in graph.order.iter().rev() {
                 let mut live = LiveSet::empty(values);
                 // SSA 下同块定义必然支配同块使用，所以本块自己定义过的值不构成 live-in：
                 // 它的值由本块产生，只有块参数才需要沿边接收（随后由实参替换）。
@@ -259,11 +264,7 @@ impl LiveValues {
                         flow.set(parameter.value.index(), false);
                         flow.set(argument.index(), true);
                     }
-                    let before = output[from.index()].clone();
-                    output[from.index()].union_with(&flow);
-                    if output[from.index()] != before {
-                        changed = true;
-                    }
+                    changed |= output[from.index()].union_with(&flow);
                 }
             }
             if !changed {

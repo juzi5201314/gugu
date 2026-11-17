@@ -82,9 +82,11 @@ impl Builder<'_> {
                     .push(Storage::Values(start..id(self.variables.len())));
                 continue;
             }
-            let placement = self.world.placement.records.iter().find(|record| {
-                record.body == self.concrete.generic_body && record.local == id(index)
-            });
+            let placement = crate::gir::placement::record_of(
+                &self.world.placement,
+                self.concrete.generic_body,
+                LocalId(id(index)),
+            );
             let escape = local.pinned_storage
                 || placement.is_some_and(|record| {
                     record.export
@@ -301,11 +303,9 @@ impl Builder<'_> {
             } else {
                 self.store_abi(destination, ty, &arguments)?;
             }
-            // 入口实参是构造完成的整值：写入整槽的根字都是活的。
-            if let Storage::Stack { slot, .. } = self.storage[local.index()]
-                && let Some(layout) = self.layout(ty).layout
-            {
-                self.root_init_cover(slot, 0, layout.size);
+            // 并集根表只能登记活动变体；位字段不能因覆盖同一偏移被误作指针。
+            if let Storage::Stack { slot, .. } = self.storage[local.index()] {
+                self.root_init_value(slot, 0, ty, destination)?;
             }
         }
         Ok(())
@@ -358,19 +358,96 @@ impl Builder<'_> {
         }
     }
 
-    /// 逐根初始化位置位：写入覆盖 `[offset, offset + bytes)` 时置位被完整覆盖的根字。
-    ///
-    /// 调用点目前只处理**整值**写入，因此置位的是覆盖范围内全部根字；对多变体聚合这是并集
-    /// 超集（保守方向）：位图只证明"该根字被完整写入过"，按变体收窄到具体字段的置位在构造点
-    /// 另行给出。
-    pub(super) fn root_init_cover(&mut self, slot: SlotId, offset: u64, bytes: u64) {
+    pub(super) fn root_init_value(
+        &mut self,
+        slot: SlotId,
+        offset: u64,
+        ty: u32,
+        pointer: crate::body::ValueId,
+    ) -> Result<(), Diagnostic> {
+        let bytes = self
+            .layout(ty)
+            .layout
+            .ok_or_else(|| invalid("根初始化类型缺少布局"))?
+            .size;
         let roots = self.body.stack_slots[slot.index()].roots.clone();
-        let end = offset.saturating_add(bytes);
         for (index, (root, _)) in roots.iter().enumerate() {
-            if *root >= offset && root.saturating_add(8) <= end {
-                self.root_init(slot, u32::try_from(index).expect("根下标适配 u32"), true);
+            if *root >= offset && *root < offset + bytes {
+                self.root_init(slot, u32::try_from(index).expect("根编号适配 u32"), false);
             }
         }
+        self.root_init_active(slot, offset, ty, pointer)
+    }
+
+    fn root_init_active(
+        &mut self,
+        slot: SlotId,
+        offset: u64,
+        ty: u32,
+        pointer: crate::body::ValueId,
+    ) -> Result<(), Diagnostic> {
+        if self.roots(ty).is_empty() {
+            return Ok(());
+        }
+        match self.kind(ty).clone() {
+            TypeKind::Aggregate {
+                tag_bytes,
+                variants,
+                ..
+            } => {
+                if tag_bytes != 0 && variants.len() > 1 {
+                    let tag_ty = integer_type(u16::from(tag_bytes) * 8);
+                    let tag = self.load(pointer, ValueType::scalar(tag_ty), 1, false);
+                    let done = self.fresh(self.source.clone(), false);
+                    for (index, fields) in variants.into_iter().enumerate() {
+                        if fields.iter().all(|field| self.roots(field.ty).is_empty()) {
+                            continue;
+                        }
+                        let selected = self.fresh(self.source.clone(), false);
+                        let next = self.fresh(self.source.clone(), false);
+                        let expected =
+                            self.constant(u64::try_from(index).expect("变体编号适配 u64"), tag_ty);
+                        let condition =
+                            self.compare_value(crate::body::Condition::Eq, false, tag, expected);
+                        self.branch(condition, selected, next);
+                        self.current = selected;
+                        for field in fields {
+                            let child = self.offset(pointer, field.offset);
+                            self.root_init_active(slot, offset + field.offset, field.ty, child)?;
+                        }
+                        self.jump(done);
+                        self.current = next;
+                    }
+                    self.jump(done);
+                    self.current = done;
+                } else {
+                    for field in variants.into_iter().flatten() {
+                        let child = self.offset(pointer, field.offset);
+                        self.root_init_active(slot, offset + field.offset, field.ty, child)?;
+                    }
+                }
+            }
+            TypeKind::Array { element, count } if !self.roots(element).is_empty() => {
+                let stride = self.layout(element).layout.expect("数组元素有布局").size;
+                for index in 0..count {
+                    let child = self.offset(pointer, index * stride);
+                    self.root_init_active(slot, offset + index * stride, element, child)?;
+                }
+            }
+            _ => {
+                let wanted = self.roots(ty);
+                let roots = self.body.stack_slots[slot.index()].roots.clone();
+                for (index, (root, provenance)) in roots.iter().enumerate() {
+                    if wanted
+                        .iter()
+                        .any(|(at, kind)| offset + at == *root && kind == provenance)
+                    {
+                        self.root_init(slot, u32::try_from(index).expect("根编号适配 u32"), true);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     fn root_init(&mut self, slot: SlotId, bit: u32, initialized: bool) {

@@ -784,12 +784,23 @@ fn check_turn(kind: PlacementKind, proof: ProofStatus, export: u8) -> Result<(),
     Ok(())
 }
 
-#[allow(dead_code, reason = "测试读取 local 下标")]
+/// records 已按 `(body, local)` 排序；取最左侧记录，保留首次命中语义。
 pub fn record_of(world: &PlacementWorldV1, body: u32, local: LocalId) -> Option<&PlacementRecord> {
+    let key = (body, local.0);
+    let index = world
+        .records
+        .partition_point(|record| (record.body, record.local) < key);
+    debug_assert!(
+        index == 0
+            || (
+                world.records[index - 1].body,
+                world.records[index - 1].local
+            ) < key
+    );
     world
         .records
-        .iter()
-        .find(|record| record.body == body && record.local == local.0)
+        .get(index)
+        .filter(|record| (record.body, record.local) == key)
 }
 
 /// 一个 body 的 region 决策结果。

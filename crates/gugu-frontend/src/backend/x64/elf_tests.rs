@@ -42,7 +42,7 @@ fn request(entry: &str, symbols: Vec<ObjectSymbol>) -> LinkRequest {
 
 #[test]
 fn rt0_captures_envp_without_biasing_native_pointer() {
-    let bytes = super::elf::rt0_bytes(0);
+    let bytes = super::elf::rt0_bytes(0, false);
     assert!(bytes.windows(3).any(|window| window == [0x49, 0x89, 0xf0]));
     assert!(bytes.windows(14).any(|window| {
         window
@@ -447,8 +447,8 @@ fn dynamic_symbols_bind_got_and_survive_rt0_relocation() {
         )],
     );
     request.imports = vec![
-        ("libc.so.6".into(), "write".into()),
-        ("libc.so.6".into(), "pthread_create".into()),
+        crate::NativeImport::function("libc.so.6", "write"),
+        crate::NativeImport::function("libc.so.6", "pthread_create"),
     ];
     request.interpreter = Some("/lib64/ld-linux-x86-64.so.2".into());
     let mut image = link(&request).unwrap();
@@ -509,7 +509,7 @@ fn dynamic_import_adds_interpreter_from_the_descriptor() {
     let mut request = request("main", vec![symbol("main", vec![0xc3], Vec::new())]);
     request
         .imports
-        .push(("libc.so.6".to_owned(), "write".to_owned()));
+        .push(crate::NativeImport::function("libc.so.6", "write"));
     request.interpreter = Some("/lib64/ld-linux-x86-64.so.2".to_owned());
     let image = link(&request).expect("动态 PIE");
     assert_eq!(image.kind, "dynamic-pie");

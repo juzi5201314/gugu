@@ -1,0 +1,66 @@
+// 与 process_schema 的 repr(C) 布局由冻结 HIR/具体 GIR 逐字段交叉验证。
+pub const SCHEMA: uint = 1
+pub const SPAWN: uint = 0
+pub const CREATE_PIPE: uint = 1
+pub const OPEN_NULL: uint = 2
+pub const DUPLICATE_STDIO: uint = 3
+pub const TRY_WAIT: uint = 0
+pub const KILL: uint = 1
+pub const CLOSE_HANDLE: uint = 2
+pub const PIPE_READ: uint = 3
+pub const PIPE_WRITE: uint = 4
+pub const PIPE_COMPLETION: uint = 5
+pub const PIPE_CANCEL: uint = 6
+pub const CHILD_KIND: uint = 4
+pub const PIPE_KIND: uint = 5
+pub const LIFECYCLE: uint = 200
+pub const STATUS_KIND: uint = 208
+pub const STATUS_VALUE: uint = 216
+pub const OBSERVER: uint = 224
+pub const STDIN: uint = 232
+pub const STDOUT: uint = 240
+pub const STDERR: uint = 248
+pub const WAIT_HEAD: uint = 256
+pub const WAIT_TAIL: uint = 264
+pub const CHILD_NEXT: uint = 272
+pub const CHILD_PREV: uint = 280
+pub const DIRECTION: uint = 200
+pub const QUEUE_HEAD: uint = 208
+pub const QUEUE_TAIL: uint = 216
+pub const ACTIVE: uint = 224
+pub const PIPE_NEXT: uint = 232
+pub const PIPE_PREV: uint = 240
+pub const RUNNING: uint = 0
+pub const EXITED: uint = 1
+pub const DETACHING: uint = 2
+pub const DETACHED: uint = 3
+pub const CLOSING: uint = 4
+pub const CLOSED: uint = 5
+pub const REQUEST_VALUE: uint = 72
+pub const REQUEST_ERROR: uint = 80
+pub const REQUEST_BYTES: uint = 88
+
+#[repr(C, align(8))]
+pub struct ProcessRequest { pub operation: uint, pub arguments: [uint; 8], pub value: uint, pub error: uint }
+#[repr(C, align(8))]
+pub struct SpawnPacket {
+    pub executable: uint, pub argv: uint, pub environment: uint, pub cwd: uint,
+    pub stdin_handle: uint, pub stdout_handle: uint, pub stderr_handle: uint,
+    pub process_handle: uint, pub process_id: uint, pub error: uint,
+}
+#[repr(C, align(8))]
+pub struct ProcessChildControl {
+    pub resource: [uint; 25], pub lifecycle: uint, pub cached_status_kind: uint,
+    pub cached_status_value: uint, pub observer: uint,
+    pub stdin_control: uint, pub stdout_control: uint, pub stderr_control: uint,
+    pub wait_head: uint, pub wait_tail: uint, pub service_next: uint, pub service_prev: uint,
+}
+#[repr(C, align(8))]
+pub struct ProcessPipeControl {
+    pub resource: [uint; 25], pub direction: uint, pub queue_head: uint, pub queue_tail: uint,
+    pub active_request: uint, pub service_next: uint, pub service_prev: uint,
+}
+#[used]
+pub fn process_records(request: &ProcessRequest, spawn: &SpawnPacket, child: &ProcessChildControl, pipe: &ProcessPipeControl) uint {
+    request.operation + spawn.process_id + child.lifecycle + pipe.direction
+}

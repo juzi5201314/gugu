@@ -504,19 +504,18 @@ impl Builder<'_> {
         if fields.len() != operands.len() {
             return Err(invalid("聚合操作数与具体字段不匹配"));
         }
+        let tagged =
+            matches!(self.kind(ty), TypeKind::Aggregate { tag_bytes, .. } if *tag_bytes != 0);
         for ((offset, field_ty), operand) in fields.into_iter().zip(operands) {
             let value = self.operand(operand)?;
             let pointer = self.offset(address, offset);
             self.store_computed(pointer, field_ty, value)?;
-            // 构造点已知变体：只有自身携带根的字段才置位。同一偏移在别的变体里是标量时不会被
-            // 标成指针——这正是 `slot.roots` 并集超集需要被逐根位图收窄的地方。
-            let carries = !self.roots(field_ty).is_empty();
-            if carries
-                && let Some(slot) = self.value_slot(address)
-                && let Some(layout) = self.layout(field_ty).layout
-            {
-                self.root_init_cover(slot, offset, layout.size);
+            if !tagged && let Some(slot) = self.value_slot(address) {
+                self.root_init_value(slot, offset, field_ty, pointer)?;
             }
+        }
+        if tagged && let Some(slot) = self.value_slot(address) {
+            self.root_init_value(slot, 0, ty, address)?;
         }
         Ok(())
     }

@@ -1,0 +1,50 @@
+use std.env
+use std.process.{Command}
+use std.path.{Path, OsString}
+use std.io.{Error}
+use std.fs
+use std.text.{Bytes}
+fn os(value: string) OsString = match OsString::from_string(value) { Ok(value) => value, Err(_) => panic("编码失败") }
+#[used]
+fn args_snapshot() bool {
+    let first = env.args()
+    let value = match first.get(0) { Some(value) => value.to_bytes(), None => return false }
+    if value.len() != 2 || value.get(0) != Some(byte(255)) || value.get(1) != Some(byte(65)) { return false }
+    _ = first.set(0, os("changed"))
+    first.push(os("extra"))
+    let second = env.args()
+    let original = match second.get(0) { Some(value) => value.to_bytes(), None => return false }
+    second.len() == 1 && original.len() == 2 && original.get(0) == Some(byte(255)) && original.get(1) == Some(byte(65))
+}
+#[used]
+fn change_cwd() { _ = env.set_current_dir(Path::from_string("/two")) }
+#[used]
+fn spawn_snapshot() bool {
+    let command = Command::new(Path::from_string("child"))
+    let alias = command
+    alias.arg(os("$();"))
+    command.env(os("A"), os("builder"))
+    match command.spawn() { Err(Error::NotFound) => true, _ => false }
+}
+#[used]
+fn invalid_cwd() bool {
+    let before = env.current_dir()
+    match env.set_current_dir(Path::from_string("missing")) { Err(Error::NotFound) => (), _ => return false }
+    match env.set_current_dir(Path::from_string("file")) { Err(Error::NotADirectory) => (), _ => return false }
+    before.as_os().to_bytes().to_string_lossy() == env.current_dir().as_os().to_bytes().to_string_lossy()
+}
+#[used]
+fn symlink_snapshot() bool {
+    match fs.symlink(Path::from_string("../target"), Path::from_string("link")) { Ok(_) => true, _ => false }
+}
+#[used]
+fn recursive_snapshot() bool {
+    match fs.remove_dir_all(Path::from_string("tree")) { Err(Error::PermissionDenied) => true, _ => false }
+}
+#[used]
+fn directory_snapshot() bool {
+    let reader = match fs.read_dir(Path::from_string("directory")) { Ok(value) => value, Err(_) => return false }
+    let entry = match reader.next() { Some(Ok(value)) => value, _ => return false }
+    match entry.metadata() { Err(Error::NotFound) => true, _ => false }
+}
+fn main() {}

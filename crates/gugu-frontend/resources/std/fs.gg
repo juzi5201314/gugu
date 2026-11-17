@@ -8,6 +8,7 @@ use std.runtime.fs_platform.{call, call_cancel}
 #[cfg(os = "windows")]
 use std.runtime.fs_windows.{call, call_cancel}
 use std.runtime.resource.{ResourceCell, create, begin, end, close, begin_directory, end_directory, directory_exhausted, exhaust_directory}
+use std.runtime.process_context as context
 
 pub struct OpenOptions {
     pub read: bool,
@@ -56,6 +57,9 @@ impl Metadata {
     pub fn is_symlink(self: &Self) bool = self.kind == 3
 }
 pub struct File { cell: ResourceCell }
+// 私有 std 注入源调用：spawn 只借用操作租约，在 native dup 完成后归还。
+pub fn process_begin(file: &File) uint = begin(&file.cell)
+pub fn process_end(file: &File) { end(&file.cell) }
 pub struct ReadDir { cell: ResourceCell, root: Path }
 pub struct DirEntry { entry_path: Path, name: OsString, kind: uint }
 impl DirEntry {
@@ -84,6 +88,15 @@ fn metadata_value(address: uint) Metadata = Metadata {
     kind: word(address + 16), modified_seconds: int(word(address + 24)),
     modified_nanoseconds: word(address + 32), device: word(address + 48), inode: word(address + 56),
 }
+fn resolve(base: Path, path: Path) Result[Path, Error] {
+    if path.as_os().is_empty() { return Err(Error::InvalidInput) }
+    Ok(context.resolve_at(base, path))
+}
+fn snapshot(path: Path) Result[Path, Error] {
+    if path.as_os().is_empty() { return Err(Error::InvalidInput) }
+    if path.is_absolute() { return Ok(path) }
+    resolve(context.snapshot_cwd(), path)
+}
 fn path_call(op: uint, path: Path, argument: uint, output: uint) Result[uint, Error] {
     let bytes = native_bytes(path)?
     let raw = raw_bytes(bytes)
@@ -102,6 +115,7 @@ fn pair_call(op: uint, from: Path, to: Path) Result[(), Error] {
 }
 
 pub fn open(path: Path, options: OpenOptions) Result[File, Error] {
+    let path = snapshot(path)?
     let bits = flags(options)?
     let handle = path_call(0, path, bits, 438)?
     Ok(File { cell: create(handle, 1) })
@@ -225,6 +239,7 @@ pub fn write(path: Path, content: Bytes) Result[(), Error] {
     file.close()
 }
 pub fn metadata(path: Path, follow_symlinks: bool) Result[Metadata, Error] {
+    let path = snapshot(path)?
     let out = raw_allocate(64)
     defer { raw_free(out, 64) }
     _ = path_call(5, path, if follow_symlinks { 1 } else { 0 }, out)?
@@ -253,29 +268,42 @@ fn returned_path(op: uint, path: Path) Result[Path, Error] {
         capacity = capacity * 2
     }
 }
-pub fn canonicalize(path: Path) Result[Path, Error] = returned_path(21, path)
-pub fn read_link(path: Path) Result[Path, Error] = returned_path(20, path)
-pub fn create_dir(path: Path) Result[(), Error] { _ = path_call(14, path, 511, 0)?
+pub fn canonicalize(path: Path) Result[Path, Error] = returned_path(21, snapshot(path)?)
+pub fn read_link(path: Path) Result[Path, Error] = returned_path(20, snapshot(path)?)
+pub fn create_dir(path: Path) Result[(), Error] { _ = path_call(14, snapshot(path)?, 511, 0)?
  Ok(()) }
-pub fn remove_file(path: Path) Result[(), Error] { _ = path_call(15, path, 0, 0)?
+pub fn remove_file(path: Path) Result[(), Error] { _ = path_call(15, snapshot(path)?, 0, 0)?
  Ok(()) }
-pub fn remove_dir(path: Path) Result[(), Error] { _ = path_call(16, path, 0, 0)?
+pub fn remove_dir(path: Path) Result[(), Error] { _ = path_call(16, snapshot(path)?, 0, 0)?
  Ok(()) }
-pub fn rename(from: Path, to: Path) Result[(), Error] = pair_call(17, from, to)
-pub fn hard_link(from: Path, to: Path) Result[(), Error] = pair_call(18, from, to)
-pub fn symlink(target: Path, link: Path) Result[(), Error] = pair_call(19, target, link)
-pub fn create_dir_all(path: Path) Result[(), Error] {
+pub fn rename(from: Path, to: Path) Result[(), Error] {
+    let base = context.snapshot_cwd()
+    pair_call(17, resolve(base, from)?, resolve(base, to)?)
+}
+pub fn hard_link(from: Path, to: Path) Result[(), Error] {
+    let base = context.snapshot_cwd()
+    pair_call(18, resolve(base, from)?, resolve(base, to)?)
+}
+pub fn symlink(target: Path, link: Path) Result[(), Error] {
+    if target.as_os().is_empty() { return Err(Error::InvalidInput) }
+    pair_call(19, target, snapshot(link)?)
+}
+pub fn create_dir_all(path: Path) Result[(), Error] = create_tree(snapshot(path)?)
+fn create_tree(path: Path) Result[(), Error] {
     match create_dir(path) {
         Ok(()) => Ok(()),
         Err(Error::AlreadyExists) => { if metadata(path, true)?.is_dir() { Ok(()) } else { Err(Error::AlreadyExists) } },
         Err(Error::NotFound) => {
-            match path.parent() { Some(parent) => { create_dir_all(parent)? }, None => return Err(Error::NotFound) }
+            match path.parent() { Some(parent) => { create_tree(parent)? }, None => return Err(Error::NotFound) }
             match create_dir(path) { Ok(()) => Ok(()), Err(Error::AlreadyExists) => { if metadata(path, true)?.is_dir() { Ok(()) } else { Err(Error::AlreadyExists) } }, Err(error) => Err(error) }
         },
         Err(error) => Err(error),
     }
 }
 pub fn copy(from: Path, to: Path) Result[uint, Error] {
+    let base = context.snapshot_cwd()
+    let from = resolve(base, from)?
+    let to = resolve(base, to)?
     let options = OpenOptions::new()
  options.read = true
     let source = open(from, options)?
@@ -294,6 +322,7 @@ pub fn copy(from: Path, to: Path) Result[uint, Error] {
     Ok(count)
 }
 pub fn read_dir(path: Path) Result[ReadDir, Error] {
+    let path = snapshot(path)?
     let handle = path_call(11, path, 0, 0)?
     Ok(ReadDir { cell: create(handle, 2), root: path })
 }
@@ -333,7 +362,8 @@ impl ReadDir {
         }
     }
 }
-pub fn remove_dir_all(path: Path) Result[(), Error] {
+pub fn remove_dir_all(path: Path) Result[(), Error] = remove_tree(snapshot(path)?)
+fn remove_tree(path: Path) Result[(), Error] {
     let information = metadata(path, false)?
     if information.is_symlink() { return remove_file(path) }
     if !information.is_dir() { return Err(Error::NotADirectory) }
@@ -342,7 +372,7 @@ pub fn remove_dir_all(path: Path) Result[(), Error] {
     while let Some(entry) = directory.next() {
         let entry = entry?
         let information = entry.metadata()?
-        if information.is_dir() { remove_dir_all(entry.path())? } else { remove_file(entry.path())? }
+        if information.is_dir() { remove_tree(entry.path())? } else { remove_file(entry.path())? }
     }
     directory.close()?
     remove_dir(path)

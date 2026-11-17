@@ -2,8 +2,7 @@
 //!
 //! 语义仍是「所有读先于所有写」。解析分三步：
 //!
-//! 1. 把组的 `pairs` 映射成物理位置；源是 spilled 且可重建的值先在组前物化进一个
-//!    该点位空闲、不在点位 mask 内、且不在本组任何源/目标里的 scratch 寄存器；
+//! 1. 把组的 `pairs` 映射成物理位置；可重建的源另记最终目标，等全部旧值搬运完再物化；
 //! 2. 丢弃 `src == dst` 的自拷贝；
 //! 3. 反复发射「目标不再是任何剩余 move 源」的 move；只剩环时取第一条 move 的**目标**，
 //!    保存到 GPR scratch（`r11`）或为该函数预留的 16 字节 frame scratch，再把仍读该目标的
@@ -13,9 +12,9 @@
 //! 按「解析是否真的用到了它」预留。
 
 use super::super::lower::Lowered;
-use super::super::reg::{Clobbers, Gpr, Reg, Xmm};
+use super::super::reg::{Gpr, Reg, Xmm};
 use super::super::select::{SelectedFunction, SiteKind};
-use super::{AllocError, LiveInfo, Location, Placement, RegClass, ValueAllocation, live};
+use super::{AllocError, LiveInfo, Location, Placement, ValueAllocation, live};
 use crate::lir::body::{Body, Type};
 
 #[cfg(test)]
@@ -59,7 +58,7 @@ pub enum EmittedMove {
         dst: Loc,
         ty: Type,
     },
-    /// 重建常量/symbol/stack 地址到寄存器（该值的定义站点已被丢弃）。
+    /// 重建常量/symbol/stack 地址到最终位置（该值的定义站点已被丢弃）。
     Rematerialize {
         value: u32,
         dest: Loc,
@@ -105,7 +104,7 @@ pub const PREPEND_SITE: u32 = u32::MAX;
 /// 组的一侧：物理位置或需要先重建的可重建值。
 enum Side {
     Loc(Loc),
-    Rebuild { value: u32, class: RegClass },
+    Rebuild { value: u32 },
 }
 
 /// 一个待解析的组。
@@ -113,7 +112,7 @@ struct PendingGroup {
     site: u32,
     point: u32,
     moves: Vec<Move>,
-    /// `(值, 物化目标)`，按出现顺序在组前发射。
+    /// `(值, 最终目标)`，全部旧值搬运结束后按出现顺序物化。
     materializations: Vec<(u32, Loc)>,
 }
 
@@ -135,7 +134,6 @@ impl Request {
         let mut groups = Vec::new();
         let mut site_index = 0_u32;
         let mut prologue_site = None;
-        let mut entry_free = Clobbers::NONE;
         for block in &selected.blocks {
             let mut visit = |kind: SiteKind, lowered: &Lowered| -> Result<(), AllocError> {
                 let entries = live::site_plan(lowered)?;
@@ -143,21 +141,13 @@ impl Request {
                     .sites
                     .get(site_index as usize)
                     .ok_or_else(|| AllocError::new("点位表缺少站点"))?;
-                if entry_free == Clobbers::NONE && points.points.start < points.points.end {
-                    entry_free = point_free(live, values, points.points.start);
-                }
                 for (offset, entry) in entries.iter().enumerate() {
                     let Some(pairs) = &entry.pairs else {
                         continue;
                     };
                     let point =
                         points.points.start + u32::try_from(offset).expect("点位偏移适配 u32");
-                    let free = point_free(live, values, point);
-                    let mask = live
-                        .points
-                        .get(point as usize)
-                        .map_or(Clobbers::NONE, |point| point.mask);
-                    let (moves, materializations) = group_moves(pairs, values, free, mask)?;
+                    let (moves, materializations) = group_moves(pairs, values)?;
                     groups.push(PendingGroup {
                         site: site_index,
                         point,
@@ -217,144 +207,31 @@ impl Request {
     }
 }
 
-/// 点位空闲的寄存器：池减去活跃值占用与点位 mask。
-///
-/// 物化与环打断都在**该点位**上插入指令，所以只看这一个点位的 mask 与占用：按整段站点
-/// 合并会误把站点内其它指令破坏的寄存器也算进来，常见形态下会把 scratch 池清空。
-fn point_free(live: &LiveInfo, values: &[ValueAllocation], point: u32) -> Clobbers {
-    let mask = live
-        .points
-        .get(point as usize)
-        .map_or(Clobbers::NONE, |point| point.mask);
-    let mut occupied = Clobbers::NONE;
-    for value in values {
-        if !value.is_live() || !live::range_covers_point(value.range, point) {
-            continue;
-        }
-        match value.location() {
-            Some(Location::Gpr(gpr)) => occupied = occupied.union(Clobbers::gpr(gpr)),
-            Some(Location::Xmm(xmm)) => occupied = occupied.union(Clobbers::xmm(xmm)),
-            Some(Location::Slot(_)) | None => {}
-        }
-    }
-    let pool_gpr = super::scan::GPR_POOL
-        .iter()
-        .fold(0_u32, |bits, gpr| bits | gpr.bit());
-    let pool_xmm = super::scan::XMM_POOL
-        .iter()
-        .fold(0_u32, |bits, xmm| bits | xmm.bit());
-    Clobbers {
-        // `r11` 留给环打断与指令级 reload scratch，不作物化目标。
-        gpr: pool_gpr & !occupied.gpr & !mask.gpr & !Gpr::R11.bit(),
-        xmm: pool_xmm & !occupied.xmm & !mask.xmm,
-    }
-}
-
 /// 一组的映射结果：串行 move 与需要先重建的 `(值, 重建目标)`。
 type GroupMoves = (Vec<Move>, Vec<(u32, Loc)>);
 
-/// 组 `pairs` 的物理位置映射与需要重建的源。
+/// 组 `pairs` 的物理位置映射与需要在组尾重建的源。
 fn group_moves(
     pairs: &[super::super::copies::Copy],
     values: &[ValueAllocation],
-    free: Clobbers,
-    mask: Clobbers,
 ) -> Result<GroupMoves, AllocError> {
     let mut moves = Vec::with_capacity(pairs.len());
-    let mut materializations: Vec<(u32, Loc)> = Vec::new();
-    let mut touched = Clobbers::NONE;
-    let mut claimed = Clobbers::NONE;
-    let mut sources = Clobbers::NONE;
-    let mut sides: Vec<(Side, Loc, Type)> = Vec::with_capacity(pairs.len());
+    let mut materializations = Vec::new();
     for pair in pairs {
         let (src, dst) = (side(pair.src, values)?, side(pair.dest, values)?);
-        if let Side::Loc(location) = src {
-            touched = touched.union(bits_of(location));
-            sources = sources.union(bits_of(location));
-        }
-        if let Side::Loc(location) = dst {
-            touched = touched.union(bits_of(location));
-        }
-        let dst = match dst {
-            Side::Loc(location) => location,
-            Side::Rebuild { value, .. } => {
-                return Err(AllocError::new(format!(
-                    "可重建值 v{value} 不能作为并行拷贝的目标"
-                )));
-            }
+        let Side::Loc(dst) = dst else {
+            return Err(AllocError::new("可重建值不能作为并行拷贝的目标"));
         };
-        sides.push((src, dst, pair.ty));
-    }
-    for (src, dst, ty) in sides {
-        let src = match src {
-            Side::Loc(location) => location,
-            Side::Rebuild { value, class } => {
-                // 目标不是别的拷贝的源时，直接重建进去，自拷贝随后会被丢掉。
-                let dest = rebuild_dest(class, dst, sources, claimed)
-                    .or_else(|| pick_rebuild(class, free, touched))
-                    .or_else(|| r11_rebuild(class, sources, touched, mask))
-                    .ok_or_else(|| AllocError::new("并行拷贝组里没有可用的常量重建 scratch"))?;
-                claimed = claimed.union(bits_of(dest));
-                touched = touched.union(bits_of(dest));
-                materializations.push((value, dest));
-                dest
-            }
-        };
-        moves.push(Move { src, dst, ty });
+        match src {
+            Side::Loc(src) => moves.push(Move {
+                src,
+                dst,
+                ty: pair.ty,
+            }),
+            Side::Rebuild { value } => materializations.push((value, dst)),
+        }
     }
     Ok((moves, materializations))
-}
-
-/// 目标寄存器可以承接重建：它不会被同组其它拷贝再读。
-fn rebuild_dest(class: RegClass, dst: Loc, sources: Clobbers, used: Clobbers) -> Option<Loc> {
-    match (class, dst) {
-        (RegClass::Gpr, Loc::Gpr(gpr))
-            if sources.gpr & gpr.bit() == 0 && used.gpr & gpr.bit() == 0 =>
-        {
-            Some(Loc::Gpr(gpr))
-        }
-        (RegClass::Xmm, Loc::Xmm(xmm))
-            if sources.xmm & xmm.bit() == 0 && used.xmm & xmm.bit() == 0 =>
-        {
-            Some(Loc::Xmm(xmm))
-        }
-        _ => None,
-    }
-}
-
-/// 池里没有空位时用 `r11`。它不在分配池里，且不能已经是本组的源或点位 mask。
-fn r11_rebuild(class: RegClass, sources: Clobbers, used: Clobbers, mask: Clobbers) -> Option<Loc> {
-    if class != RegClass::Gpr {
-        return None;
-    }
-    let bit = Gpr::R11.bit();
-    (sources.gpr & bit == 0 && used.gpr & bit == 0 && mask.gpr & bit == 0)
-        .then_some(Loc::Gpr(Gpr::R11))
-}
-
-/// 物化 scratch：按 bank 偏好序取第一个既空闲、又不在本组任何源/目标里的寄存器。
-fn pick_rebuild(class: RegClass, free: Clobbers, touched: Clobbers) -> Option<Loc> {
-    match class {
-        RegClass::Gpr => super::scan::GPR_POOL
-            .iter()
-            .copied()
-            .find(|gpr| free.gpr & gpr.bit() != 0 && touched.gpr & gpr.bit() == 0)
-            .map(Loc::Gpr),
-        RegClass::Xmm => super::scan::XMM_POOL
-            .iter()
-            .copied()
-            .find(|xmm| free.xmm & xmm.bit() != 0 && touched.xmm & xmm.bit() == 0)
-            .map(Loc::Xmm),
-    }
-}
-
-/// 物理寄存器的位图。
-const fn bits_of(location: Loc) -> Clobbers {
-    match location {
-        Loc::Gpr(gpr) => Clobbers::gpr(gpr),
-        Loc::Xmm(xmm) => Clobbers::xmm(xmm),
-        Loc::Slot(_) | Loc::Scratch => Clobbers::NONE,
-    }
 }
 
 /// 把组的一侧映射成物理位置或待重建值。
@@ -369,10 +246,7 @@ fn side(reg: Reg, values: &[ValueAllocation]) -> Result<Side, AllocError> {
                 .ok_or_else(|| AllocError::new(format!("拷贝引用未登记的值 v{id}")))?;
             match value.placement {
                 Placement::Location(location) => Ok(Side::Loc(loc_of(location))),
-                Placement::Rematerialize => Ok(Side::Rebuild {
-                    value: id,
-                    class: value.class,
-                }),
+                Placement::Rematerialize => Ok(Side::Rebuild { value: id }),
                 Placement::Dead => Err(AllocError::new(format!("拷贝引用已死的值 v{id}"))),
             }
         }
@@ -457,19 +331,13 @@ fn stack_arguments(body: &Body, selected: &SelectedFunction) -> Vec<(u32, u32, T
     stack
 }
 
-/// 一个组的解析：物化、去自拷贝、目标空闲顺序发射与环打断。
+/// 一个组的解析：去自拷贝、目标空闲顺序发射、环打断，最后重建常量。
 fn resolve_group(
     moves: &[Move],
     materializations: &[(u32, Loc)],
     scratch: Option<u32>,
 ) -> Result<(Vec<EmittedMove>, u32, bool), AllocError> {
-    let mut emitted: Vec<EmittedMove> = materializations
-        .iter()
-        .map(|(value, dest)| EmittedMove::Rematerialize {
-            value: *value,
-            dest: *dest,
-        })
-        .collect();
+    let mut emitted = Vec::with_capacity(moves.len() + materializations.len());
     let mut pending: Vec<Move> = moves.to_vec();
     let mut cycles = 0_u32;
     let mut uses_scratch = false;
@@ -501,7 +369,7 @@ fn resolve_group(
                             && matches!(mov.dst, Loc::Slot(_) | Loc::Scratch))
                 }) =>
             {
-                // 重建已经把常量放在 `r11` 里，环打断改走 frame scratch。
+                // 剩余内存搬运会使用 `r11`，环上旧值改存 frame scratch。
                 uses_scratch = true;
                 if scratch.is_none() {
                     return Ok((emitted, cycles, true));
@@ -541,6 +409,11 @@ fn resolve_group(
             }
         }
     }
+    emitted.extend(
+        materializations
+            .iter()
+            .map(|&(value, dest)| EmittedMove::Rematerialize { value, dest }),
+    );
     Ok((emitted, cycles, uses_scratch))
 }
 

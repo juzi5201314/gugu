@@ -98,12 +98,12 @@ fn verify_pe_exports(bytes: &[u8]) {
 
 #[test]
 fn source_calls_to_c_exports_use_the_native_entry() {
-    use gugu_compiler::NativeLink;
+    use gugu_compiler::{NativeImport, NativeLink};
     for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
         let imports = if target == TargetName::X86_64Linux {
             NativeLink::THREAD_SYMBOLS
                 .into_iter()
-                .map(|name| ("libc.so.6".into(), name.into()))
+                .map(|name| NativeImport::function("libc.so.6", name))
                 .collect()
         } else {
             Vec::new()

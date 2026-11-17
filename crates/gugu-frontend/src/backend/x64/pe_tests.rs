@@ -243,13 +243,15 @@ fn runtime_entry_keeps_param_block_and_writable_reserved_region() {
         );
         u64::from_le_bytes(image.bytes[at..at + 8].try_into().expect("参数块 word"))
     };
-    assert_eq!(rt0_params::WORDS, 16);
     assert_eq!(
         word(rt0_params::RT0_START),
         0,
         "未绑定 rt0_start 时留 0 走过渡路径"
     );
-    assert_eq!(word(rt0_params::ENTRY), defined["main"]);
+    assert_eq!(
+        word(rt0_params::ENTRY),
+        u64::from(image.entry_rva) + defined["main"]
+    );
     let payload = word(rt0_params::PAYLOAD_VA);
     assert_eq!(payload, defined["__gugu_rt0_payload"]);
     assert_eq!(word(rt0_params::PAYLOAD_LEN), Rt0Payload::bytes());
@@ -268,7 +270,11 @@ fn runtime_entry_keeps_param_block_and_writable_reserved_region() {
         )
     };
     assert_eq!(payload_word(0), Rt0Payload::REVISION, "载荷版本");
-    assert_eq!(payload_word(8), defined["main"], "载荷的 main 入口");
+    assert_eq!(
+        payload_word(8),
+        u64::from(image.entry_rva) + defined["main"],
+        "载荷的 main RVA"
+    );
     assert_eq!(payload_word(16), slot);
     assert_eq!(payload_word(24), state);
     assert_eq!(payload_word(32), 0, "加载基址由入口 stub 写回");
@@ -330,9 +336,9 @@ fn duplicate_slot_missing_entry_and_wx_are_rejected() {
 fn explicit_import_thunks_point_to_aligned_names_and_exact_iat() {
     let mut request = request("main", vec![symbol("main", vec![0xc3], Vec::new())]);
     request.imports = vec![
-        ("odd.dll".into(), "probe_a".into()),
-        ("ODD.DLL".into(), "probe_b".into()),
-        ("even.dll".into(), "probe_c".into()),
+        crate::NativeImport::function("odd.dll", "probe_a"),
+        crate::NativeImport::function("ODD.DLL", "probe_b"),
+        crate::NativeImport::function("even.dll", "probe_c"),
     ];
     let (image, layout) = link_with_layout(&request).unwrap();
     assert_eq!(image.import_dlls, 4);
@@ -387,7 +393,7 @@ fn explicit_import_thunks_point_to_aligned_names_and_exact_iat() {
     }
     request
         .imports
-        .push(("another.dll".into(), "probe_a".into()));
+        .push(crate::NativeImport::function("another.dll", "probe_a"));
     assert!(link(&request).unwrap_err().contains("同时来自"));
 }
 

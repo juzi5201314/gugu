@@ -427,7 +427,7 @@ pub fn call_cancel(op: uint, a0: uint, a1: uint, a2: uint, a3: uint, a4: uint, a
     if op == 7 { return native(77, a0, a1, 0, 0, 0, 0) }
     if op == 8 { return native(75, a0, 0, 0, 0, 0, 0) }
     if op == 9 { return native(74, a0, 0, 0, 0, 0, 0) }
-    if op == 10 { return native(32, a0, 0, 0, 0, 0, 0) }
+    if op == 10 { return native(72, a0, 1030, 3, 0, 0, 0) }
     if op == 11 {
         let result = native(2, a0, 589824, 0, 0, 0, 0)
         if result.error != 0 { return result }

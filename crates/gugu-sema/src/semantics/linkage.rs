@@ -6,6 +6,7 @@ use crate::{Diagnostic, TargetName};
 const CONTRACT_RECORD_NAMES: &[&str] = &[
     "gc_startup_record",
     "rt0_records",
+    "process_records",
     "morestack_records",
     "stack_bounds",
     "saved_context",

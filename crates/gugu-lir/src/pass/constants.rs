@@ -242,7 +242,14 @@ pub fn sparse_conditional(editor: &mut Editor) -> Result<bool, Diagnostic> {
 
 fn propagate(editor: &Editor) -> Known {
     let mut known: Known = vec![None; editor.values.len()];
-    for block in editor.live_blocks() {
+    let blocks = editor.live_blocks();
+    // 此阶段只读 CFG；block ID 稠密且小于 blocks arena 长度。
+    let mut incoming = vec![Vec::new(); editor.blocks.len()];
+    for (_, edge) in editor.edges() {
+        debug_assert!(edge.to.index() < incoming.len());
+        incoming[edge.to.index()].push(edge);
+    }
+    for &block in &blocks {
         for index in 0..editor.instruction_count(block) {
             let instruction = editor.instruction((block, index));
             if instruction.removed {
@@ -257,16 +264,15 @@ fn propagate(editor: &Editor) -> Known {
     }
     loop {
         let mut changed = false;
-        for block in editor.live_blocks() {
-            let params = editor.block(block).expect("活跃 block").params.clone();
+        for &block in &blocks {
+            let params = &editor.block(block).expect("活跃 block").params;
             for (index, param) in params.iter().enumerate().skip(1) {
                 if known[param.value.index()].is_some() {
                     continue;
                 }
                 let mut candidate = None;
                 let mut consistent = false;
-                for edge in editor.predecessors(block) {
-                    let edge = editor.edge(edge).expect("活跃边");
+                for edge in &incoming[block.index()] {
                     match known.get(edge.arguments[index].index()).copied().flatten() {
                         Some(value) => match candidate {
                             None => {
@@ -291,7 +297,7 @@ fn propagate(editor: &Editor) -> Known {
                 }
             }
         }
-        for block in editor.live_blocks() {
+        for &block in &blocks {
             for index in 0..editor.instruction_count(block) {
                 let instruction = editor.instruction((block, index));
                 if instruction.removed

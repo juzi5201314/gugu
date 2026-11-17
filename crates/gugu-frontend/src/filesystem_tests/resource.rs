@@ -1,6 +1,6 @@
 //! 资源终结、计数、关闭与账本回收执行真实 LIR；平台操作和调度由固定钩子控制。
 use super::{Compilation, CompileRequest, Compiler, TargetName};
-use crate::lir::body::{Body, CallTarget};
+use crate::lir::body::{Body, CallTarget, Op, Symbol};
 
 mod admission;
 mod callback;
@@ -23,9 +23,11 @@ fn put(memory: &mut [u8], at: u64, value: u64) {
 #[derive(Debug)]
 struct RuntimeExit(u64);
 
-struct ResourceHarness<'a> {
+pub(super) struct ResourceHarness<'a> {
     instances: std::collections::HashMap<[u8; 32], &'a Body>,
     runtime_bodies: std::collections::HashMap<(&'a str, &'a str), &'a Body>,
+    globals: std::collections::HashMap<[u8; 32], u64>,
+    next_global: u64,
     submitted: Vec<Vec<u64>>,
     reclaimed: Vec<u64>,
     completion_error: u64,
@@ -54,9 +56,14 @@ struct ResourceHarness<'a> {
 
 impl<'a> ResourceHarness<'a> {
     fn new(output: &'a Compilation) -> Self {
-        let bodies = output.lir.as_ref().unwrap().bodies();
+        Self::from_bodies(
+            output.hir.as_ref().unwrap().module(),
+            output.lir.as_ref().unwrap().bodies(),
+        )
+    }
+
+    pub(super) fn from_bodies(hir: &'a crate::frontend::hir::Module, bodies: &'a [Body]) -> Self {
         let instances = bodies.iter().map(|body| (body.instance, body)).collect();
-        let hir = output.hir.as_ref().unwrap().module();
         let owners: std::collections::HashMap<_, _> =
             bodies.iter().map(|body| (body.owner, body)).collect();
         let runtime_bodies = hir
@@ -73,6 +80,8 @@ impl<'a> ResourceHarness<'a> {
         Self {
             instances,
             runtime_bodies,
+            globals: std::collections::HashMap::new(),
+            next_global: 12288,
             submitted: Vec::new(),
             reclaimed: Vec::new(),
             completion_error: 0,
@@ -113,7 +122,13 @@ impl<'a> ResourceHarness<'a> {
             .is_some_and(|candidate| candidate.instance == body.instance)
     }
 
-    fn run(&mut self, module: &str, name: &str, args: &[u64], memory: &mut Vec<u8>) -> Vec<u64> {
+    pub(super) fn run(
+        &mut self,
+        module: &str,
+        name: &str,
+        args: &[u64],
+        memory: &mut Vec<u8>,
+    ) -> Vec<u64> {
         let body = self.body(module, name);
         if let Some((bytes, _, _)) = body.signature.sret
             && body.params(body.entry).len() == args.len() + 2
@@ -157,6 +172,22 @@ impl<'a> ResourceHarness<'a> {
         memory: &mut Vec<u8>,
     ) -> Vec<u64> {
         let target = match target {
+            super::Boundary::Storage(Op::SymbolAddr(Symbol::Global {
+                key,
+                bytes,
+                thread_local: false,
+            })) => {
+                let address = match self.globals.entry(*key) {
+                    std::collections::hash_map::Entry::Occupied(entry) => *entry.get(),
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        let address = self.next_global;
+                        self.next_global += (bytes + 7) / 8 * 8;
+                        entry.insert(address);
+                        address
+                    }
+                };
+                return vec![address];
+            }
             super::Boundary::Machine(crate::runtime::RuntimeMachineOp::ThreadId) => return vec![1],
             super::Boundary::Machine(crate::runtime::RuntimeMachineOp::CallbackControl) => {
                 return vec![64];
@@ -435,6 +466,61 @@ fn gc_finalization_releases_resource_leaf_once_and_skips_forwarded_copy() {
             assert_eq!(word(&memory, OBJECT + 16), CONTROL);
             assert!(harness.submitted.is_empty());
         }
+    }
+}
+
+#[test]
+fn gc_finalization_nested_program_resumes_without_managed_allocation() {
+    let (hir, bodies) = super::harness::runtime_bodies();
+    // Switch 活跃分支中的 Repeat 释放两个槽，然后父程序继续释放第三个槽。
+    let mut repeated = vec![21, 1, 2, 1];
+    repeated.extend_from_slice(&4u32.to_le_bytes());
+    repeated.extend_from_slice(&[20, 0, 1, 0]);
+    repeated.push(0);
+    let mut program = vec![22, 0, 1, 1];
+    program.extend_from_slice(&0u64.to_le_bytes());
+    program.extend_from_slice(&u32::try_from(repeated.len()).unwrap().to_le_bytes());
+    program.extend_from_slice(&repeated);
+    program.extend_from_slice(&1u32.to_le_bytes());
+    program.extend_from_slice(&[0, 20, 24, 1, 0]);
+    for tag in [0, 1] {
+        let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+        // 此 harness 不接受托管分配边界；资源遍历取地址产生的盒会立即失败。
+        let mut memory = resource_object_memory();
+        let descriptor = TYPE_SECTION + 128;
+        let leaf = descriptor + 80;
+        put(&mut memory, TYPE_SECTION + 48, 320);
+        put(&mut memory, descriptor, 32);
+        let descriptor_at = usize::try_from(descriptor).unwrap();
+        memory[descriptor_at + 36..descriptor_at + 40]
+            .copy_from_slice(&u32::try_from(program.len()).unwrap().to_le_bytes());
+        put(&mut memory, leaf, 8);
+        let leaf_at = usize::try_from(leaf).unwrap();
+        memory[leaf_at + 12..leaf_at + 16].copy_from_slice(&8u32.to_le_bytes());
+        memory[leaf_at + 32..leaf_at + 36]
+            .copy_from_slice(&u32::try_from(program.len()).unwrap().to_le_bytes());
+        memory[leaf_at + 36..leaf_at + 40].copy_from_slice(&1u32.to_le_bytes());
+        let program_at = usize::try_from(TYPE_SECTION + 320).unwrap();
+        memory[program_at..program_at + program.len()].copy_from_slice(&program);
+        put(&mut memory, OBJECT + 8, 32);
+        put(&mut memory, OBJECT + 16, tag);
+        for offset in [24, 32, 40] {
+            put(&mut memory, OBJECT + offset, CONTROL);
+        }
+        put(&mut memory, CONTROL, if tag == 0 { 3 } else { 1 });
+        for _ in 0..2 {
+            harness.run("collect", "finalize_resource", &[OBJECT], &mut memory);
+        }
+        let inactive = if tag == 0 { 0 } else { CONTROL };
+        assert_eq!(word(&memory, OBJECT + 24), inactive);
+        assert_eq!(word(&memory, OBJECT + 32), inactive);
+        assert_eq!(
+            word(&memory, OBJECT + 40),
+            0,
+            "父程序必须从 Switch 之后继续"
+        );
+        assert_eq!(word(&memory, CONTROL), 0);
+        assert_eq!(harness.submitted, vec![vec![CONTROL, 42, 1]]);
     }
 }
 

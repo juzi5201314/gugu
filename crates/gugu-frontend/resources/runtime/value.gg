@@ -70,32 +70,29 @@ fn apply(value: uint, descriptor: uint, mode: uint, depth: uint) {
 }
 
 /// canonical ULEB128在镜像写出前已验证，执行侧仍限制读取范围与64位移位。
-fn uleb(cursor: &uint, end: uint) uint {
+/// 游标按值传入并返回续点，避免取地址产生托管盒；GC 释放资源时也执行这条路径。
+fn uleb(cursor: uint, end: uint) (uint, uint) {
     let result: uint = 0
     let shift: uint = 0
     loop {
-        if *cursor >= end || shift >= 64 { heap_fail() }
-        let part = uint(heap_byte(*cursor))
-        *cursor = *cursor + 1
+        if cursor >= end || shift >= 64 { heap_fail() }
+        let part = uint(heap_byte(cursor))
+        cursor = cursor + 1
         if shift == 63 && part > 1 { heap_fail() }
         result = result | ((part & uint(127)) << shift)
-        if (part & uint(128)) == 0 { return result }
+        if (part & uint(128)) == 0 { return (result, cursor) }
         shift = shift + 7
     }
 }
 
-fn read32(cursor: &uint, end: uint) uint {
-    if *cursor > end || end - *cursor < 4 { heap_fail() }
-    let value = heap_word32(*cursor)
-    *cursor = *cursor + 4
-    value
+fn read32(cursor: uint, end: uint) (uint, uint) {
+    if cursor > end || end - cursor < 4 { heap_fail() }
+    (heap_word32(cursor), cursor + 4)
 }
 
-fn read64(cursor: &uint, end: uint) uint {
-    if *cursor > end || end - *cursor < 8 { heap_fail() }
-    let value = heap_word(*cursor)
-    *cursor = *cursor + 8
-    value
+fn read64(cursor: uint, end: uint) (uint, uint) {
+    if cursor > end || end - cursor < 8 { heap_fail() }
+    (heap_word(cursor), cursor + 8)
 }
 
 fn program_run(start: uint, end: uint, value: uint, descriptor: uint, mode: uint, depth: uint) {
@@ -109,8 +106,11 @@ fn program_run(start: uint, end: uint, value: uint, descriptor: uint, mode: uint
             return
         }
         if op >= uint(16) && op <= uint(20) {
-            let offset = uleb(&cursor, end)
-            let index = uleb(&cursor, end)
+            let decoded_offset = uleb(cursor, end)
+            let offset = decoded_offset.0
+            let decoded_index = uleb(decoded_offset.1, end)
+            let index = decoded_index.0
+            cursor = decoded_index.1
             let child = gc_type_record(gc_types_section(), index)
             if offset > heap_word(descriptor) || heap_word(child) > heap_word(descriptor) - offset { heap_fail() }
             let forward = op == uint(16) || op == uint(19)
@@ -120,21 +120,25 @@ fn program_run(start: uint, end: uint, value: uint, descriptor: uint, mode: uint
             };
         } else {
             if op == uint(21) {
-                repeat_run(&cursor, end, value, descriptor, mode, depth)
+                cursor = repeat_run(cursor, end, value, descriptor, mode, depth)
             } else {
-                if op == uint(22) { switch_run(&cursor, end, value, descriptor, mode, depth) } else { heap_fail() }
+                if op == uint(22) { cursor = switch_run(cursor, end, value, descriptor, mode, depth) } else { heap_fail() }
             }
         }
     }
     heap_fail()
 }
 
-fn repeat_run(cursor: &uint, end: uint, value: uint, descriptor: uint, mode: uint, depth: uint) {
-    let base = uleb(cursor, end) * 8
-    let count = uleb(cursor, end)
-    let stride = uleb(cursor, end) * 8
-    let length = read32(cursor, end)
-    let body = *cursor
+fn repeat_run(cursor: uint, end: uint, value: uint, descriptor: uint, mode: uint, depth: uint) uint {
+    let decoded_base = uleb(cursor, end)
+    let base = decoded_base.0 * 8
+    let decoded_count = uleb(decoded_base.1, end)
+    let count = decoded_count.0
+    let decoded_stride = uleb(decoded_count.1, end)
+    let stride = decoded_stride.0 * 8
+    let decoded_length = read32(decoded_stride.1, end)
+    let length = decoded_length.0
+    let body = decoded_length.1
     if body > end || length > end - body { heap_fail() }
     let index: uint = 0
     while index < count {
@@ -142,13 +146,17 @@ fn repeat_run(cursor: &uint, end: uint, value: uint, descriptor: uint, mode: uin
         program_run(body, body + length, value + base + item * stride, descriptor, mode, depth + 1)
         index = index + 1
     }
-    *cursor = body + length
+    body + length
 }
 
-fn switch_run(cursor: &uint, end: uint, value: uint, descriptor: uint, mode: uint, depth: uint) {
-    let offset = uleb(cursor, end)
-    let width = uleb(cursor, end)
-    let count = uleb(cursor, end)
+fn switch_run(cursor: uint, end: uint, value: uint, descriptor: uint, mode: uint, depth: uint) uint {
+    let decoded_offset = uleb(cursor, end)
+    let offset = decoded_offset.0
+    let decoded_width = uleb(decoded_offset.1, end)
+    let width = decoded_width.0
+    let decoded_count = uleb(decoded_width.1, end)
+    let count = decoded_count.0
+    cursor = decoded_count.1
     if width != 1 && width != 2 && width != 4 && width != 8 { heap_fail() }
     let tag: uint = 0
     let byte_index: uint = 0
@@ -160,22 +168,28 @@ fn switch_run(cursor: &uint, end: uint, value: uint, descriptor: uint, mode: uin
     let selected_length: uint = 0
     let index: uint = 0
     while index < count {
-        let candidate = read64(cursor, end)
-        let length = read32(cursor, end)
-        if *cursor > end || length > end - *cursor { heap_fail() }
+        let decoded_candidate = read64(cursor, end)
+        let candidate = decoded_candidate.0
+        let decoded_length = read32(decoded_candidate.1, end)
+        let length = decoded_length.0
+        cursor = decoded_length.1
+        if cursor > end || length > end - cursor { heap_fail() }
         if candidate == tag {
-            selected = *cursor
+            selected = cursor
             selected_length = length
         }
-        *cursor = *cursor + length
+        cursor = cursor + length
         index = index + 1
     }
-    let length = read32(cursor, end)
-    if *cursor > end || length > end - *cursor { heap_fail() }
+    let decoded_length = read32(cursor, end)
+    let length = decoded_length.0
+    cursor = decoded_length.1
+    if cursor > end || length > end - cursor { heap_fail() }
     if selected == 0 {
-        selected = *cursor
+        selected = cursor
         selected_length = length
     }
-    *cursor = *cursor + length
+    cursor = cursor + length
     program_run(selected, selected + selected_length, value, descriptor, mode, depth + 1)
+    cursor
 }

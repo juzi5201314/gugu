@@ -1,0 +1,38 @@
+use std.env as env
+use std.process as process
+use std.path.{OsString, Path}
+use std.text.{Bytes}
+use std.io.{Error, Write}
+use std.fs as fs
+fn ok[T](value: Result[T, Error]) T = match value { Ok(value) => value, Err(_) => panic("子进程操作失败") }
+fn arg(index: int) OsString = match env.args().get(index) { Some(value) => value, None => panic("缺少参数") }
+fn expect(actual: Bytes, expected: string) {
+    let source = Bytes::from_string(expected)
+    if actual.len() != source.len() { panic("字节长度不一致") }
+    for index in 0..source.len() { if actual.get(index) != source.get(index) { panic("字节内容不一致") }; }
+}
+fn main() {
+    if env.args().len() != 7 { panic("子进程参数数量") }
+    expect(arg(1).to_bytes(), "a b")
+    expect(arg(2).to_bytes(), "")
+    expect(arg(3).to_bytes(), "x\"y")
+    expect(arg(4).to_bytes(), "tail\\")
+    expect(arg(5).to_bytes(), "😀")
+    #[cfg(os = "linux")]
+    {
+        if arg(6).to_bytes().get(0) != Some(byte(255)) { panic("非 UTF-8 参数") }
+        let name = ok(OsString::from_string("GUGU_PROCESS_PROBE"))
+        match ok(env.get(name)) { Some(value) => expect(value.to_bytes(), "child"), None => panic("子进程环境") }
+        expect(env.current_dir().as_os().to_bytes(), "/tmp/gugu-process-cwd")
+        expect(ok(fs.read(Path::from_string("probe"))), "cwd-ok\n")
+        let options = fs.OpenOptions::new()
+        options.write = true
+        let stdout = ok(fs.open(Path::from_string("/dev/stdout"), options))
+        let stderr = ok(fs.open(Path::from_string("/dev/stderr"), options))
+        _ = ok(stdout.write(Bytes::from_string("child-ok\n")))
+        _ = ok(stderr.write(Bytes::from_string("child-err\n")))
+        ok(stdout.close())
+        ok(stderr.close())
+    }
+    process.exit(7)
+}

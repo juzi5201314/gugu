@@ -138,6 +138,89 @@ fn memory_snapshot_separates_uncommitted_reservation_and_file_subtotal() {
 }
 
 #[test]
+fn windows_aligned_reservations_release_original_blocks_and_account_metadata() {
+    let (hir, bodies) = super::super::harness::runtime_bodies_for(TargetName::X86_64Windows);
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut memory = vec![0; 524288];
+    put(&mut memory, HOT + 16, PROCESSOR);
+    harness.reserve_result = 65536;
+    let first = harness.run(
+        "native_memory",
+        "reserve_aligned",
+        &[4096, 131072],
+        &mut memory,
+    )[0];
+    assert_eq!(first, 131072);
+    harness.reserve_result = 262144;
+    let second = harness.run(
+        "native_memory",
+        "reserve_aligned",
+        &[4096, 131072],
+        &mut memory,
+    )[0];
+    assert_eq!(second, 393216);
+    assert_eq!(word(&memory, PROCESSOR + 3920), 2 * 139264);
+    assert_eq!(word(&memory, PROCESSOR + 3928), 8192);
+    assert_eq!(word(&memory, PROCESSOR + 3936), 2);
+    put(&mut memory, 2048, first);
+    put(&mut memory, 2056, 4096);
+    assert_eq!(
+        harness.run("native_memory", "commit_heap", &[2048], &mut memory),
+        [0]
+    );
+    assert_eq!(word(&memory, PROCESSOR + 3960), 4096);
+    // 先释放非链首，不能误删后一个预约或只释放对齐后的内部地址。
+    harness.run(
+        "native_memory",
+        "release_heap_mapping",
+        &[first, 4096, 4096],
+        &mut memory,
+    );
+    assert_eq!(harness.released, [(65536, 139264)]);
+    assert_eq!(word(&memory, PROCESSOR + 3920), 139264);
+    assert_eq!(word(&memory, PROCESSOR + 3928), 4096);
+    assert_eq!(word(&memory, PROCESSOR + 3960), 0);
+    harness.run(
+        "native_memory",
+        "release_mapping",
+        &[second, 4096, 0],
+        &mut memory,
+    );
+    assert_eq!(harness.released, [(65536, 139264), (262144, 139264)]);
+    assert_eq!(word(&memory, PROCESSOR + 3920), 0);
+    assert_eq!(word(&memory, PROCESSOR + 3928), 0);
+    assert_eq!(word(&memory, PROCESSOR + 3936), 0);
+    assert_eq!(
+        word(&memory, PROCESSOR + 3944),
+        12288,
+        "实际 metadata 提交计入高水位"
+    );
+}
+
+#[test]
+fn windows_aligned_metadata_commit_failure_releases_unpublished_reservation() {
+    let (hir, bodies) = super::super::harness::runtime_bodies_for(TargetName::X86_64Windows);
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut memory = vec![0; 262144];
+    put(&mut memory, HOT + 16, PROCESSOR);
+    harness.reserve_result = 65536;
+    harness.commit_error = 12;
+    assert_eq!(
+        harness.run(
+            "native_memory",
+            "reserve_aligned",
+            &[4096, 131072],
+            &mut memory
+        ),
+        [0]
+    );
+    assert_eq!(harness.released, [(65536, 139264)]);
+    assert_eq!(word(&memory, PROCESSOR + 3920), 0);
+    assert_eq!(word(&memory, PROCESSOR + 3928), 0);
+    assert_eq!(word(&memory, PROCESSOR + 3936), 0);
+}
+
+#[test]
 fn coroutine_stack_ledger_preserves_failed_commit_and_retires_only_live_bytes() {
     let output = compile_stats();
     let mut harness = ResourceHarness::new(&output);
@@ -607,4 +690,52 @@ fn blocking_snapshot_tracks_waiting_inflight_completion_and_stack_cache() {
     assert_eq!(word(&memory, COLD + 480), 4096);
     harness.run("fs_platform", "raw_free", &[STACK_BASE, 12], &mut memory);
     assert_eq!(word(&memory, COLD + 480), 0);
+}
+
+#[test]
+fn verified_morestack_entry_commits_and_publishes_larger_stack() {
+    let (hir, bodies) = super::super::harness::runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
+    let mut memory = vec![0; 16384];
+    const SECTION: u64 = 512;
+    const STATE: u64 = 1024;
+    const COLD: u64 = 1152;
+    const FRAGMENT: u64 = 1048576;
+    const HIGH: u64 = 1073807360;
+    memory[512..520].copy_from_slice(b"GUGUSM01");
+    memory[520..524].copy_from_slice(&0x01080004u32.to_le_bytes());
+    memory[524..528].copy_from_slice(&2u32.to_le_bytes());
+    memory[528..532].copy_from_slice(&1u32.to_le_bytes());
+    put(&mut memory, SECTION + 32, 72);
+    put(&mut memory, SECTION + 40, 136);
+    put(&mut memory, SECTION + 72, 100);
+    memory[592..596].copy_from_slice(&100u32.to_le_bytes());
+    memory[604..608].copy_from_slice(&1u32.to_le_bytes());
+    put(&mut memory, SECTION + 104, 300);
+    memory[624..628].copy_from_slice(&100u32.to_le_bytes());
+    memory[632..636].copy_from_slice(&1u32.to_le_bytes());
+    memory[648..652].copy_from_slice(&7u32.to_le_bytes());
+    memory[656] = 4;
+    put(&mut memory, HOT + 16, PROCESSOR);
+    put(&mut memory, HOT + 80, HIGH);
+    put(&mut memory, HOT + 88, 65536);
+    put(&mut memory, PROCESSOR + 3928, 65536);
+    put(&mut memory, PROCESSOR + 3872, 65536);
+    put(&mut memory, PROCESSOR + 3880, 65536);
+    put(&mut memory, STATE, HOT);
+    put(&mut memory, STATE + 8, HIGH - 65536 + 2048);
+    put(&mut memory, STATE + 24, 65536);
+    put(&mut memory, STATE + 32, COLD);
+    put(&mut memory, COLD + 64, FRAGMENT + 107);
+    harness.run(
+        "core",
+        "morestack_handle",
+        &[SECTION, 160, FRAGMENT, STATE, HIGH - 1073741824],
+        &mut memory,
+    );
+    assert_eq!(word(&memory, HOT + 88), 131072);
+    assert_eq!(word(&memory, HOT + 64), HIGH - 131072 + 512);
+    assert_eq!(word(&memory, PROCESSOR + 3928), 131072);
+    assert_eq!(word(&memory, PROCESSOR + 3872), 131072);
+    assert_eq!(word(&memory, PROCESSOR + 3880), 131072);
 }

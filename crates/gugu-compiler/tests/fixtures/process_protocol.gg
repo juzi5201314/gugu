@@ -1,0 +1,38 @@
+use std.process.{Command, Child, Stdio}
+use std.path.{Path}
+use std.io.{Read, Write, ByteBuffer}
+use std.text.{Bytes}
+use std.sync.{CancelSource}
+use std.env
+use std.path.{OsString}
+#[used]
+fn environment_protocol(name: OsString, value: OsString) {
+    _ = env.get(name)
+    _ = env.set(name, value)
+    _ = env.remove(name)
+    _ = env.vars()
+    _ = env.args()
+    _ = env.current_dir()
+}
+#[used]
+fn child_protocol(child: &Child) {
+    _ = child.try_wait()
+    _ = child.wait()
+    let cancel = CancelSource::new()
+    let token = cancel.token()
+    _ = child.wait_cancel(&token)
+    _ = child.kill()
+    _ = child.detach()
+    _ = child.close()
+    if let Some(input) = child.stdin() { _ = input.write(Bytes::from_string("input")) }
+    let buffer = ByteBuffer::new()
+    if let Some(output) = child.stdout() { _ = output.read_buffer(&buffer, 16) }
+    if let Some(error) = child.stderr() { _ = error.read_buffer(&buffer, 16) };
+}
+fn main() {
+    let command = Command::new(Path::from_string("/unused"))
+    command.stdin(Stdio::pipe())
+    command.stdout(Stdio::pipe())
+    command.stderr(Stdio::pipe())
+    _ = command.spawn()
+}

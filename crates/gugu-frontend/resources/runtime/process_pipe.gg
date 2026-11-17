@@ -1,0 +1,190 @@
+use std.text.{Bytes, alloc_bytes}
+use std.io as io
+use std.io.{Error, Read, Write, ByteBuffer}
+use std.sync.{CancelToken}
+use std.runtime.resource as resource
+use std.runtime.resource.{ResourceCell}
+use std.runtime.process_layout as layout
+use std.runtime.process_spawn as native
+use std.runtime.process_service as service
+use std.runtime.fs_platform as bridge
+use std.runtime.heap.{heap_word, heap_store_word, heap_fail}
+use std.runtime.scheduler.{park_current, ready_hot}
+
+static head: uint = 0
+static cursor: uint = 0
+const NODE_BYTES: uint = 256
+pub struct ChildStdin { pub cell: ResourceCell }
+pub struct ChildStdout { pub cell: ResourceCell }
+pub struct ChildStderr { pub cell: ResourceCell }
+pub fn adopt(handle: uint, direction: uint) ResourceCell {
+    service.install_pipe(poll, pending, shutdown)
+    let cell = resource.create(handle, layout.PIPE_KIND)
+    let control = resource.control_address(&cell)
+    heap_store_word(control + layout.DIRECTION, direction)
+    heap_store_word(control + layout.PIPE_NEXT, head)
+    if head != 0 { heap_store_word(head + layout.PIPE_PREV, control) }
+    head = control
+    cell
+}
+pub fn request_close(control: uint) { heap_store_word(control + layout.ACTIVE, 1) }
+pub fn close(cell: &ResourceCell) Result[(), Error] {
+    resource.close_intent(cell)
+    let error = bridge.await_close(resource.control_address(cell))
+    if error == 0 { Ok(()) } else { Err(io.from_native_error(error)) }
+}
+impl ChildStdin { pub fn close(self: &Self) Result[(), Error] = close(&self.cell) }
+impl ChildStdout { pub fn close(self: &Self) Result[(), Error] = close(&self.cell) }
+impl ChildStderr { pub fn close(self: &Self) Result[(), Error] = close(&self.cell) }
+fn remove(control: uint) {
+    let next = heap_word(control + layout.PIPE_NEXT)
+    let previous = heap_word(control + layout.PIPE_PREV)
+    if previous == 0 { head = next } else { heap_store_word(previous + layout.PIPE_NEXT, next) }
+    if next != 0 { heap_store_word(next + layout.PIPE_PREV, previous) }
+}
+fn finish(control: uint, node: uint) {
+    let next = heap_word(node + 152)
+    heap_store_word(control + layout.QUEUE_HEAD, next)
+    if next == 0 { heap_store_word(control + layout.QUEUE_TAIL, 0) }
+    heap_store_word(node + 160, 1)
+    ready_hot(heap_word(node + 136))
+}
+#[cfg(os = "linux")]
+fn progress(control: uint, node: uint) bool {
+    let result = native.call(heap_word(node), node)
+    if result.error != 4 && result.error != 11 { return true }
+    if service.closed(control) { heap_store_word(node + 80, 9)
+        return true }
+    if service.cancelled(heap_word(node + 144)) { heap_store_word(node + 80, ~uint(0))
+        return true }
+    false
+}
+#[cfg(os = "windows")]
+fn progress(control: uint, node: uint) bool {
+    let active = heap_word(node + 168) != 0
+    let op = if active { layout.PIPE_COMPLETION } else { if heap_word(control + layout.DIRECTION) == 0 { layout.PIPE_READ } else { layout.PIPE_WRITE } }
+    let result = native.call(op, node)
+    if result.error != 996 && result.error != 997 { return true }
+    heap_store_word(node + 168, 1)
+    if (service.closed(control) || service.cancelled(heap_word(node + 144))) && heap_word(node + 176) == 0 {
+        let result = native.call(layout.PIPE_CANCEL, node)
+        if result.error != 0 && result.error != 1168 { heap_fail() }
+        heap_store_word(node + 176, 1)
+    }
+    false
+}
+fn poll(processor: uint) {
+    _ = processor
+    let control = if cursor == 0 { head } else { cursor }
+    let budget: uint = 64
+    let start = control
+    while control != 0 && budget != 0 {
+        budget = budget - 1
+        let next = heap_word(control + layout.PIPE_NEXT)
+        let node = heap_word(control + layout.QUEUE_HEAD)
+        if node != 0 {
+            // 队首已经提交时优先消费完成；排队但未提交的请求可以直接取消。
+            if heap_word(node + 184) == 0 && (service.closed(control) || service.cancelled(heap_word(node + 144))) {
+                heap_store_word(node + 80, if service.closed(control) { uint(9) } else { ~uint(0) })
+                finish(control, node)
+            } else {
+                heap_store_word(node + 184, 1)
+                if progress(control, node) { finish(control, node) };
+            }
+        }
+        if heap_word(control + layout.ACTIVE) != 0 && heap_word(control + layout.QUEUE_HEAD) == 0 && heap_word(control + 80) == 0 {
+            remove(control)
+            native.close_native(heap_word(control + 64))
+            service.complete_close(control, 0)
+        }
+        control = if next == 0 { head } else { next }
+        if control == start { break };
+    }
+    cursor = control
+}
+fn pending(processor: uint) bool {
+    _ = processor
+    let control = head
+    while control != 0 {
+        if heap_word(control + layout.QUEUE_HEAD) != 0 || service.closed(control) { return true }
+        control = heap_word(control + layout.PIPE_NEXT)
+    }
+    false
+}
+fn shutdown(processor: uint) {
+    _ = processor
+    if head != 0 { heap_fail() }
+}
+fn operation(cell: &ResourceCell, buffer: &[byte], write: bool, cancel: uint, destination: Option[&ByteBuffer], limit: int) Result[int, Error] { unsafe {
+    if service.cancelled(cancel) { return Err(Error::Cancelled) }
+    let handle = resource.begin(cell)
+    if handle == native.INVALID { return Err(Error::Closed) }
+    defer { resource.end(cell) }
+    let count = match destination { Some(_) => limit, None => buffer.len() }
+    if count == 0 { return Ok(0) }
+    let count = if count > 65536 { 65536 } else { count }
+    let bytes = NODE_BYTES + uint(count)
+    let node = bridge.control_allocate(bytes)
+    defer { bridge.control_free(node, bytes) }
+    let data = node + NODE_BYTES
+    if write {
+        for index in 0..count { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](data + uint(index)), buffer[index]) }
+    }
+    let control = resource.control_address(cell)
+    heap_store_word(node, if write { layout.PIPE_WRITE } else { layout.PIPE_READ })
+    heap_store_word(node + 8, handle)
+    heap_store_word(node + 16, data)
+    heap_store_word(node + 24, uint(count))
+    heap_store_word(node + 32, node + 96)
+    heap_store_word(node + 128, control)
+    heap_store_word(node + 136, std.runtime.current_slot())
+    heap_store_word(node + 144, cancel)
+    if heap_word(control + layout.QUEUE_TAIL) == 0 { heap_store_word(control + layout.QUEUE_HEAD, node) }
+    else { heap_store_word(heap_word(control + layout.QUEUE_TAIL) + 152, node) }
+    heap_store_word(control + layout.QUEUE_TAIL, node)
+    park_current()
+    if heap_word(node + 160) != 1 { heap_fail() }
+    let error = heap_word(node + 80)
+    if error == ~uint(0) { return Err(Error::Cancelled) }
+    if service.closed(control) && error != 0 { return Err(Error::Closed) }
+    #[cfg(os = "windows")]
+    {
+        if !write && (error == 109 || error == 232) { return Ok(0) }
+        if error == 995 && service.cancelled(cancel) { return Err(Error::Cancelled) };
+    }
+    if error != 0 { return Err(io.from_native_error(error)) }
+    let received = heap_word(node + 72)
+    if received > uint(count) { heap_fail() }
+    if !write && received != 0 {
+        match destination {
+            Some(output) => {
+                let owned = alloc_bytes(int(received))
+                for index in 0..int(received) { owned[index] = std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](data + uint(index))) }
+                output.append(Bytes::from_owned(owned))
+            }
+            None => { for index in 0..int(received) { buffer[index] = std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](data + uint(index))) } }
+        }
+    }
+    Ok(int(received))
+} }
+fn buffered(cell: &ResourceCell, destination: &ByteBuffer, limit: int, cancel: uint) Result[int, Error] {
+    if limit < 0 { panic("读取上限不得为负") }
+    let empty: [byte; 0] = []
+    operation(cell, empty[..], false, cancel, Some(destination), limit)
+}
+impl Write for ChildStdin {
+    fn write(self: &Self, source: Bytes) Result[int, Error] = operation(&self.cell, unsafe { source.as_slice() }, true, 0, None, 0)
+    fn write_cancel(self: &Self, source: Bytes, cancel: &CancelToken) Result[int, Error] = operation(&self.cell, unsafe { source.as_slice() }, true, unsafe { cancel.raw_control() }, None, 0)
+}
+impl Read for ChildStdout {
+    fn read(self: &Self, buffer: &[byte]) Result[int, Error] = operation(&self.cell, buffer, false, 0, None, 0)
+    fn read_cancel(self: &Self, buffer: &[byte], cancel: &CancelToken) Result[int, Error] = operation(&self.cell, buffer, false, unsafe { cancel.raw_control() }, None, 0)
+    fn read_buffer(self: &Self, destination: &ByteBuffer, limit: int) Result[int, Error] = buffered(&self.cell, destination, limit, 0)
+    fn read_buffer_cancel(self: &Self, destination: &ByteBuffer, limit: int, cancel: &CancelToken) Result[int, Error] = buffered(&self.cell, destination, limit, unsafe { cancel.raw_control() })
+}
+impl Read for ChildStderr {
+    fn read(self: &Self, buffer: &[byte]) Result[int, Error] = operation(&self.cell, buffer, false, 0, None, 0)
+    fn read_cancel(self: &Self, buffer: &[byte], cancel: &CancelToken) Result[int, Error] = operation(&self.cell, buffer, false, unsafe { cancel.raw_control() }, None, 0)
+    fn read_buffer(self: &Self, destination: &ByteBuffer, limit: int) Result[int, Error] = buffered(&self.cell, destination, limit, 0)
+    fn read_buffer_cancel(self: &Self, destination: &ByteBuffer, limit: int, cancel: &CancelToken) Result[int, Error] = buffered(&self.cell, destination, limit, unsafe { cancel.raw_control() })
+}

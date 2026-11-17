@@ -457,16 +457,16 @@ impl Editor {
 
     /// 迭代式支配树；存在不可达 block 时返回 `None`。
     pub fn dominators(&self) -> Option<Vec<BlockId>> {
+        // 支配迭代只读 CFG；稠密 block ID 上缓存前驱，避免每轮按块重扫全部边。
+        let mut incoming = vec![Vec::new(); self.blocks.len()];
+        for (_, edge) in self.edges() {
+            incoming[edge.to.index()].push(edge.from);
+        }
         super::graph::dominators(
             self.blocks.len(),
             self.entry,
             |block| self.successors(block),
-            |block| {
-                self.predecessors(block)
-                    .into_iter()
-                    .filter_map(|edge| self.edge(edge).map(|edge| edge.from))
-                    .collect()
-            },
+            &incoming,
         )
     }
 

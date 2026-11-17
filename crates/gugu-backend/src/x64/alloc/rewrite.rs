@@ -25,7 +25,7 @@ use std::ops::Range;
 use super::super::inst::{Inst, LabelDefinition, LabelId, Mem, Operand, Scale, Sequence};
 use super::super::layout;
 use super::super::lower::{self, Builder, LowerCtx, LoweringError, SiteValue};
-use super::super::reg::{Clobbers, FRAME_SLOT_BASE, Gpr, Reg};
+use super::super::reg::{Clobbers, FRAME_SLOT_BASE, Gpr, Reg, Xmm};
 use super::super::select::{self, SelectedBlock, SelectedFunction, SiteKind};
 use super::super::table::{self, Access, OperandKind};
 use super::super::verify;
@@ -514,7 +514,7 @@ fn define_labels(
     Ok(())
 }
 
-/// 站点内窄宽度写入后仍需补 64 位存储的登记项。
+/// 站点内寄存器写入后仍需补整宽存储的登记项。
 struct PendingStore {
     value: u32,
     /// 最后一次写入的点位。
@@ -523,7 +523,7 @@ struct PendingStore {
     live_after: bool,
 }
 
-/// 扫描站点，登记窄宽度写入的值与它们的最后一次写入点位。
+/// 扫描站点，登记不能直接写入 spill slot 的值与最后一次写入点位。
 fn pending_stores(
     emit: &Emit<'_>,
     lowered: &lower::Lowered,
@@ -558,14 +558,14 @@ fn pending_stores(
             if matches!(kind, OperandKind::Rm64 | OperandKind::XmmRm) {
                 continue;
             }
-            if matches!(form.access.get(position), Some(Access::ReadWrite)) {
-                continue;
-            }
             let point_index = points.start + u32::try_from(offset).expect("点位偏移适配 u32");
             let def_slot = point_index * 2 + 1;
             let live_after = value.range.1 > def_slot;
             match pending.iter_mut().find(|store| store.value == *id) {
-                Some(store) => store.last_write = point_index,
+                Some(store) => {
+                    store.last_write = point_index;
+                    store.live_after = live_after;
+                }
                 None => pending.push(PendingStore {
                     value: *id,
                     last_write: point_index,
@@ -623,11 +623,22 @@ fn rewrite_instruction(
                         if reads_memory || writes_memory {
                             operands.push(lower::mem_base(Reg::Gpr(Gpr::Rsp), disp(offset)?));
                         } else {
+                            // 全宽纯写在地址/源操作数读取之后发生，可复用其临时寄存器；
+                            // 已选的其它输出仍须独占。窄写与 ReadWrite 不能这样复用。
+                            let full_write = access == Access::Write && kind == OperandKind::R64;
+                            let mut forbidden = if full_write { Clobbers::NONE } else { reserved };
+                            if full_write {
+                                for (_, output) in &written {
+                                    reserve_scratch(&mut forbidden, *output);
+                                }
+                            }
                             let scratch =
-                                emit.choose_scratch(point, value.class, kind, &reserved)?;
+                                emit.choose_scratch(point, value.class, kind, &forbidden)?;
                             reserve_scratch(&mut reserved, scratch);
-                            emit.emit_load_place(builder, offset, scratch, value.class);
-                            emit.count_reloads(1);
+                            if !full_write {
+                                emit.emit_load_place(builder, offset, scratch, value.class);
+                                emit.count_reloads(1);
+                            }
                             operands.push(Operand::Reg(reg_of(scratch)?));
                             if matches!(access, Access::Write | Access::ReadWrite) {
                                 written.push((*id, scratch));
@@ -810,7 +821,17 @@ fn emit_moves(
                 emit_loc_move(emit, builder, src, dst, ty)?;
             }
             EmittedMove::Rematerialize { value, dest } => {
-                emit.rematerialize(builder, value, dest)?;
+                if dest.register().is_some() {
+                    emit.rematerialize(builder, value, dest)?;
+                } else {
+                    let ty = emit.body.values[value as usize].kind.ty;
+                    let scratch = match RegClass::of(ty) {
+                        RegClass::Gpr => Loc::Gpr(Gpr::R11),
+                        RegClass::Xmm => Loc::Xmm(Xmm::Xmm15),
+                    };
+                    emit.rematerialize(builder, value, scratch)?;
+                    emit_loc_move(emit, builder, scratch, dest, ty)?;
+                }
             }
         }
     }
@@ -1264,3 +1285,6 @@ fn absolute_regions(blocks: &[SelectedBlock], regions: &[(u32, Range<u32>)]) -> 
     }
     absolute
 }
+
+#[cfg(test)]
+mod spill_tests;

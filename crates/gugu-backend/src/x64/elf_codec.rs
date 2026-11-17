@@ -6,12 +6,14 @@ use std::collections::BTreeMap;
 /// rt0：从初始栈定位 envp，再从 auxv 取 `AT_PHDR`，加上参数块里的链接期 phdr 虚址得到 bias，
 /// 按 `.data.rel.ro` 的相对重定位表回填，封闭 RELRO，调用入口并 `exit`。envp 写入载荷的
 /// `boot_environment` 字段时保持 native 地址，不参与 image bias。
-pub fn rt0_bytes(params_disp: i32) -> Vec<u8> {
+pub fn rt0_bytes(params_disp: i32, initialize_environment: bool) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend_from_slice(&[0x48, 0x8d, 0x1d]);
     out.extend_from_slice(&params_disp.to_le_bytes());
     out.extend_from_slice(&[0x48, 0x89, 0xe6]);
     out.extend_from_slice(&[0x48, 0x8b, 0x0e]);
+    // r9/r10 跨 auxv 与 relocation 循环保存 argc/argv，不借用循环计数 rcx。
+    out.extend_from_slice(&[0x49, 0x89, 0xc9, 0x4c, 0x8d, 0x56, 0x08]);
     out.extend_from_slice(&[0x48, 0x8d, 0x74, 0xce, 0x10]);
     // envp 由 rt0 保存在 r8；这是 native 启动栈地址，不参与 image bias。
     out.extend_from_slice(&[0x49, 0x89, 0xf0]);
@@ -50,6 +52,20 @@ pub fn rt0_bytes(params_disp: i32) -> Vec<u8> {
     out.extend_from_slice(&[
         0x48, 0x8b, 0x53, 0x48, 0x48, 0x01, 0xc2, 0x4c, 0x89, 0x82, 0x78, 0x00, 0x00, 0x00,
     ]);
+    out.extend_from_slice(&[
+        0x4c, 0x89, 0x8a, 0x80, 0x00, 0x00, 0x00, 0x4c, 0x89, 0x92, 0x88, 0x00, 0x00, 0x00,
+    ]);
+    if initialize_environment {
+        // reserved_14 是 environ 的 GOT 槽 RVA。只初始化 NULL，保留 loader/构造器修改。
+        out.extend_from_slice(&[
+            0x4c, 0x8b, 0x53, 0x70, // mov r10, [rbx+112]
+            0x49, 0x01, 0xc2, // add r10, rax（加载 bias）
+            0x4d, 0x8b, 0x12, // mov r10, [r10]（变量地址）
+            0x49, 0x83, 0x3a, 0x00, // cmp qword [r10], 0
+            0x75, 0x03, // jne 保留现值
+            0x4d, 0x89, 0x02, // mov [r10], r8（启动 envp）
+        ]);
+    }
     out.extend_from_slice(&[
         0x4c, 0x8b, 0x73, 0x30, 0x49, 0x01, 0xc6, 0x4c, 0x8b, 0x7b, 0x38, 0x49, 0x01, 0xc7,
     ]);

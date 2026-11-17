@@ -36,6 +36,10 @@ const IMPORTS: &[(&str, &[&str])] = &[
             "WriteFile",
             "GetEnvironmentStringsW",
             "FreeEnvironmentStringsW",
+            "GetCommandLineW",
+            "GetCurrentDirectoryW",
+            "GetCurrentProcessId",
+            "GetSystemDirectoryW",
             "CreateThread",
             "WaitForSingleObject",
             "Sleep",
@@ -137,7 +141,7 @@ pub struct PeRequest {
     /// 常量数据块 `(符号名, 字节)`：进 `.rdata` 并按符号登记，不作为节名（节名限 8 字节）。
     pub constants: Vec<(String, Vec<u8>)>,
     pub dll: bool,
-    pub imports: Vec<(String, String)>,
+    pub imports: Vec<crate::NativeImport>,
     /// 已绑定 glue 的 mangled 符号名；这些名字缺失定义时按 `E0062` 语义失败。
     pub bound_glues: std::collections::BTreeSet<String>,
     /// 类型描述符符号 → `.gugutyp` 内偏移；这些符号的地址由 type section 派生。
@@ -190,9 +194,7 @@ pub fn link_world(
         });
     }
     for blob in fragments::registered_fragments(world.target) {
-        if matches!(blob.entries[0].glue, "net_call" | "resolver_symbol")
-            && !super::fs_native::net::required(&world.fragments, blob.entries[0].glue)
-        {
+        if !super::fs_native::required(&world.fragments, &blob) {
             continue;
         }
         symbols.push(symbol_from_machine_fragment(&blob)?);
@@ -323,7 +325,12 @@ fn imports_for(request: &PeRequest) -> Result<Imports<'_>, String> {
         .iter()
         .flat_map(|(library, symbols)| symbols.iter().map(move |symbol| (*symbol, *library)))
         .collect();
-    for (library, symbol) in &request.imports {
+    for crate::NativeImport {
+        library,
+        name: symbol,
+        kind,
+    } in &request.imports
+    {
         if library.is_empty()
             || symbol.is_empty()
             || library.contains('\0')
@@ -332,7 +339,8 @@ fn imports_for(request: &PeRequest) -> Result<Imports<'_>, String> {
             return Err("动态导入名为空或包含 NUL".into());
         }
         if let Some(previous) = names.get(symbol.as_str()) {
-            if previous.eq_ignore_ascii_case(library) {
+            if previous.eq_ignore_ascii_case(library) && *kind == crate::NativeImportKind::Function
+            {
                 continue;
             }
             return Err(format!(
@@ -360,7 +368,13 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
             .bound_glues
             .contains(&mangle::mangle_runtime("rt0_start")),
     )?;
-    for (_, symbol) in &request.imports {
+    for crate::NativeImport {
+        name: symbol, kind, ..
+    } in &request.imports
+    {
+        if *kind == crate::NativeImportKind::Data {
+            continue;
+        }
         if defined.contains_key(symbol) {
             return Err(format!("导入符号 {symbol} 与镜像保留符号重名"));
         }
@@ -406,12 +420,17 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
     sections.push(section(".edata", Vec::new(), RDATA_CHARS));
     assign_rvas(&mut sections)?;
     let text_rva = rva_of(&sections, ".text")?;
+    let fragment_rva = text_rva + fragment_off;
+    // unwind 转换会改变 .xdata 尺寸；先完成所有前置节，再发布常量、IAT 与可写静态块 RVA。
+    fill_pdata(&mut sections, fragment_rva)?;
+    assign_rvas(&mut sections)?;
     let rdata_rva = rva_of(&sections, ".rdata")?;
     let data_rva = rva_of(&sections, ".data")?;
     for (name, offset) in &const_at {
         defined.insert(name.clone(), rdata_rva + offset);
         rdata_at.insert(name.clone(), *offset);
     }
+    exports::unwind(request, &mut sections, &defined, text_rva)?;
     // 保留可写区在 `.data` 内，紧随 IAT；地址按 RVA 登记，供参数块与重定位使用。
     defined.insert("__gugu_cage_control".to_owned(), data_rva + reserved.cage);
     defined.insert("__gugu_initial_slot".to_owned(), data_rva + reserved.slot);
@@ -432,7 +451,6 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
             return Err(format!("静态块 {name} 与已有符号重名"));
         }
     }
-    let fragment_rva = text_rva + fragment_off;
     defined.insert("__gugu_fragments_base".to_owned(), fragment_rva);
     apply_blob_relocations(request, &mut sections, &defined)?;
     fill_imports(&mut sections, rdata_rva, data_rva, import_at, &imports)?;
@@ -454,8 +472,6 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         &defined,
         &imports,
     )?;
-    fill_pdata(&mut sections, fragment_rva)?;
-    exports::unwind(request, &mut sections, &defined, text_rva)?;
     let reloc = reloc_bytes(&abs64)?;
     if let Some(section) = sections.iter_mut().find(|item| item.name == ".reloc") {
         section.bytes = reloc;
@@ -534,6 +550,9 @@ fn assemble_prefix(
         text.extend_from_slice(&[0x48, 0x8b, 0x56, 0x48, 0x48, 0x01, 0xda]);
         text.extend_from_slice(&[0x49, 0x83, 0xcc, 0x01]);
         text.extend_from_slice(&[0x4c, 0x89, 0xa2, 0x78, 0x00, 0x00, 0x00]);
+        sites.push(rip(&mut text, &[0xff, 0x15], "__gugu_iat_GetCommandLineW"));
+        text.extend_from_slice(&[0x48, 0x8b, 0x56, 0x48, 0x48, 0x01, 0xda]);
+        text.extend_from_slice(&[0x48, 0x89, 0x82, 0x88, 0x00, 0x00, 0x00]);
         text.extend_from_slice(&[0x48, 0x89, 0xf0]);
         sites.push(rip(
             &mut text,
@@ -541,6 +560,8 @@ fn assemble_prefix(
             &mangle::mangle_runtime("rt0_start"),
         ));
         text.extend_from_slice(&[0x49, 0x89, 0xc5]);
+        // bit 0 仅标记启动环境编码；释放必须使用 GetEnvironmentStringsW 返回的原始指针。
+        text.extend_from_slice(&[0x49, 0x83, 0xe4, 0xfe]);
         text.extend_from_slice(&[0x4d, 0x85, 0xe4]);
         let free_branch = text.len();
         text.extend_from_slice(&[0x74, 0x00]);
@@ -797,14 +818,14 @@ fn fill_entry(
     let text_rva = rva_of(sections, ".text")?;
     let rt0_start = mangle::mangle_runtime("rt0_start");
     let mut words = [0_u64; rt0_params::WORDS];
-    words[rt0_params::ENTRY] = defined[&request.entry];
+    words[rt0_params::ENTRY] = text_rva + defined[&request.entry];
     words[rt0_params::BOOT_R14] = defined["__gugu_initial_slot"];
     words[rt0_params::PROCESSOR] = rdata("__gugu_processor")?;
     words[rt0_params::RT0_START] = defined
         .get(&rt0_start)
         .copied()
         .filter(|_| request.bound_glues.contains(&rt0_start))
-        .unwrap_or(0);
+        .map_or(0, |offset| text_rva + offset);
     words[rt0_params::PAYLOAD_VA] = defined["__gugu_rt0_payload"];
     words[rt0_params::PAYLOAD_LEN] = Rt0Payload::bytes();
     words[rt0_params::INITIAL_SLOT] = defined["__gugu_initial_slot"];
@@ -1085,11 +1106,13 @@ fn patch_fragments(
         .constants
         .iter()
         .map(|(name, _)| name.as_str())
+        .chain(request.globals.keys().map(String::as_str))
         .chain([
             "__gugu_cage_control",
             "__gugu_initial_slot",
             "__gugu_runtime_state",
             "__gugu_rt0_payload",
+            "__gugu_callback_control",
             mailbox.as_str(),
         ])
         .collect();
@@ -1252,16 +1275,25 @@ fn write_image(
     import_at: usize,
     imports: &Imports<'_>,
 ) -> Result<Vec<u8>, String> {
-    let header = header_size(sections.len())? as usize;
-    let last = sections.last().ok_or_else(|| "没有节".to_owned())?;
-    let file_len = align_up(last.raw + last.bytes.len() as u64, FILE_ALIGN)? as usize;
+    // 空节没有映射范围；尤其尾部空节的 RVA 等于 SizeOfImage，Windows loader 会拒绝。
+    let populated = || sections.iter().filter(|section| !section.bytes.is_empty());
+    let section_count = populated().count();
+    let header = usize::try_from(header_size(section_count)?).map_err(|_| "PE header 越界")?;
+    let last = populated().last().ok_or_else(|| "没有节".to_owned())?;
+    let last_bytes = u64::try_from(last.bytes.len()).map_err(|_| "PE 节大小越界")?;
+    let file_len = usize::try_from(align_up(last.raw + last_bytes, FILE_ALIGN)?)
+        .map_err(|_| "PE 文件大小越界")?;
     let mut file = vec![0_u8; file_len.max(header)];
     file[0] = b'M';
     file[1] = b'Z';
     file[0x3c..0x40].copy_from_slice(&64_u32.to_le_bytes());
     file[64..68].copy_from_slice(b"PE\0\0");
     put_u16_at(&mut file, 68, 0x8664)?;
-    put_u16_at(&mut file, 70, sections.len() as u16)?;
+    put_u16_at(
+        &mut file,
+        70,
+        u16::try_from(section_count).map_err(|_| "PE 节数量越界")?,
+    )?;
     put_u16_at(&mut file, 84, 240)?;
     let characteristics = if request.dll { 0x2022 } else { 0x0022 };
     put_u16_at(&mut file, 86, characteristics)?;
@@ -1288,7 +1320,7 @@ fn write_image(
     put_u64_at(&mut file, 88 + 96, 0x1000)?;
     put_u32_at(&mut file, 88 + 108, 16)?;
     write_directories(&mut file, sections, import_at, imports)?;
-    for (index, section) in sections.iter().enumerate() {
+    for (index, section) in populated().enumerate() {
         reject_section(section)?;
         let at = 328 + index * 40;
         let mut name = [0_u8; 8];

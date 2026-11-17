@@ -144,8 +144,9 @@ fn compressed_fields_and_roots_survive_minor_and_major() {
     let encode = |address| (1 << 32) | (address - OLD);
     put(&mut memory, COORDINATOR + 48, OLD);
     put(&mut memory, PROCESSOR + 3592, YOUNG);
-    put(&mut memory, PROCESSOR + 3520, YOUNG + 32);
-    put(&mut memory, PROCESSOR + 3528, YOUNG + 32768);
+    // cursor 恰好到达 nursery 末端仍属于原 arena，不能按 cursor 对齐到下一 arena。
+    put(&mut memory, PROCESSOR + 3520, YOUNG + 2097152);
+    put(&mut memory, PROCESSOR + 3528, YOUNG + 2097152);
     put(&mut memory, PROCESSOR + 3576, BARRIER);
     put(&mut memory, OLD, 1 | (2 << 36) | (3 << 43));
     put(&mut memory, OLD + 16, encode(YOUNG + 16));
@@ -182,6 +183,7 @@ fn compressed_fields_and_roots_survive_minor_and_major() {
         ),
         [0]
     );
+    assert_eq!(word(&memory, COORDINATOR + 40), YOUNG);
     let moved_word = word(&memory, OLD + 16);
     assert_eq!(word(&memory, 90000), moved_word);
     let moved = harness.run("compression", "decode", &[moved_word], &mut memory)[0];

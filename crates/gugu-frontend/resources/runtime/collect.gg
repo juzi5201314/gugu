@@ -20,6 +20,7 @@ use std.runtime.pin_layout as pinning
 use std.runtime.barrier as barrier
 use std.runtime.heap.{ARENA_CARDS_OFFSET, heap_large_lookup, heap_large_table, LARGE_MAPPING_CAPACITY, LARGE_MAPPING_RECORD_BYTES, LARGE_MAPPING_STATE_ACTIVE, CONTROL_PINNED}
 use std.runtime.native_memory as mapping
+use std.runtime.heap.{heap_tlab_arena}
 use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_bytes, gc_config_granule_bytes, gc_config_line_bytes, gc_config_object_header_bytes, gc_config_tenure_age, GC_REQUEST_ALLOC, GC_REQUEST_KIND_OFFSET, GC_REQUEST_MAJOR, GC_REQUEST_PRESSURE, GC_REQUEST_POLL}
 use std.runtime.heap.{copy_bytes, heap_arena_create, heap_arena_of, heap_block_set_state, heap_block_state_word, heap_byte, heap_clear_block_cards, heap_clear_block_object_starts, heap_clear_object_start, heap_clear_page_cover, heap_fail, heap_mark_begin_arena, heap_mark_bit, heap_mark_end, heap_mark_object_start, heap_mark_page_cover, heap_mark_test_and_set, heap_metadata, heap_object_start, heap_open_block, heap_open_block_meta, heap_open_free_block_meta, heap_resolve_object, heap_set_line_state, heap_store_byte, heap_store_word, heap_store_word32, heap_word, heap_word32, header_control, header_type_index, ARENA_ALLOC_CURSOR_OFFSET, ARENA_LINE_LIVE_OFFSET, ARENA_NO_BLOCK, ARENA_OBJECT_START_OFFSET, BLOCK_RECORD_BYTES, BLOCK_STATE_ALLOCATING, BLOCK_STATE_FREE, CONTROL_AGE_MASK, CONTROL_AGE_SHIFT, CONTROL_FORWARDED, GENERATION_AGING, GENERATION_OLD, LARGE_MAPPING_TABLE_BYTES, LINE_FREE, LINE_OCCUPIED, REPRESENTATION_LOCAL_DIRECT}
 use std.runtime.roots.{gc_initiator_frame, gc_type_trace, gc_type_trace_length, gc_types_section, gc_visit_dynamic_roots, gc_walk_roots, ROOT_KIND_COMPRESSED, ROOT_KIND_DIRECT, ROOT_KIND_HANDLE, ROOT_KIND_INTERIOR, ROOT_KIND_STACK_INTERIOR, ROOT_RECORD_BYTES, ROOT_SCAN_HEADER_BYTES, SAFEPOINT_KIND_CALL_RETURN, SAFEPOINT_KIND_POLL_RESUME}
@@ -475,9 +476,7 @@ pub fn gc_collect_minor(processor: uint, roots: uint, capacity: uint) uint {
     let config = coordinator_config()
     let arena_bytes = gc_config_arena_bytes(config)
     let coordinator = gc_coordinator(processor)
-    let tlab = heap_word(processor + 3520)
-    if tlab == 0 { heap_fail() }
-    let nursery = heap_arena_of(tlab, arena_bytes)
+    let nursery = heap_tlab_arena(processor, arena_bytes)
     heap_store_word(coordinator + COORDINATOR_NURSERY_OFFSET, nursery)
     heap_store_word(coordinator + COORDINATOR_EVAC_CURSOR_OFFSET, 0)
     heap_store_word(coordinator + COORDINATOR_EVAC_LIMIT_OFFSET, 0)

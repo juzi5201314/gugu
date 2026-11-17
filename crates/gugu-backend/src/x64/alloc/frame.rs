@@ -317,6 +317,19 @@ pub fn layout(
             .ok_or_else(|| AllocError::new("frame 负载溢出"))?;
     }
     let payload_bytes = offset;
+    let frame_size = if has_call || payload_bytes != 0 {
+        let padded = align_up(
+            payload_bytes
+                .checked_add(8)
+                .ok_or_else(|| AllocError::new("frame 负载溢出"))?,
+            16,
+        )?;
+        padded
+            .checked_sub(8)
+            .ok_or_else(|| AllocError::new("frame size 下溢"))?
+    } else {
+        0
+    };
     debug_assert!(
         frame_regions_are_disjoint(
             body,
@@ -334,19 +347,6 @@ pub fn layout(
         ),
         "frame 各区域必须互不重叠且完整落在 payload 内"
     );
-    let frame_size = if has_call || payload_bytes != 0 {
-        let padded = align_up(
-            payload_bytes
-                .checked_add(8)
-                .ok_or_else(|| AllocError::new("frame 负载溢出"))?,
-            16,
-        )?;
-        padded
-            .checked_sub(8)
-            .ok_or_else(|| AllocError::new("frame size 下溢"))?
-    } else {
-        0
-    };
     if i32::try_from(frame_size).is_err() {
         return Err(AllocError::new("frame size 超出 i32 位移可编码范围"));
     }

@@ -178,13 +178,85 @@ pub fn adopt_boot(owner: uint, stack_reserved: uint, stack_committed: uint, limi
     put(owner + STACK_LIVE_OFFSET, stack_committed)
 }
 
+// 单 managed owner 的高对齐预约链；节点位于各 reservation 自有的前置页中，不是托管对象。
+#[cfg(os = "windows")]
+static aligned_reservations: uint = 0
+
+#[cfg(os = "linux")]
+fn reserve_native(bytes: uint, alignment: uint) (uint, uint, uint) {
+    (unsafe { std.platform.reserve_aligned(bytes, alignment) }, page_bytes(bytes), 0)
+}
+
+#[cfg(os = "windows")]
+fn reserve_native(bytes: uint, alignment: uint) (uint, uint, uint) { unsafe {
+    let length = page_bytes(bytes)
+    if alignment <= 65536 { return (std.platform.reserve_aligned(length, alignment), length, 0) }
+    if alignment > uint(140737488355327) - NATIVE_PAGE_BYTES || length > uint(140737488355327) - alignment - NATIVE_PAGE_BYTES { return (0, 0, 0) }
+    let reserved = page_bytes(length + alignment + NATIVE_PAGE_BYTES)
+    let original = std.platform.reserve_aligned(reserved, NATIVE_PAGE_BYTES)
+    if original == 0 { return (0, 0, 0) }
+    if original > uint(140737488355327) - reserved {
+        release_native(original, reserved)
+        return (0, 0, 0)
+    }
+    let base = (original + NATIVE_PAGE_BYTES + alignment - 1) / alignment * alignment
+    let record = base - NATIVE_PAGE_BYTES
+    let extent = NativeExtent { base: record, bytes: NATIVE_PAGE_BYTES }
+    let status = std.platform.commit(std.mem.transmute[*NativeExtent, uint](std.ptr.addr_of(extent)))
+    if status != 0 {
+        release_native(original, reserved)
+        return (0, 0, 0)
+    }
+    put(record, aligned_reservations)
+    put(record + 8, original)
+    put(record + 16, reserved)
+    put(record + 24, base)
+    put(record + 32, length)
+    aligned_reservations = record
+    (base, reserved, NATIVE_PAGE_BYTES)
+} }
+
+#[cfg(os = "linux")]
+fn take_native(base: uint, bytes: uint) (uint, uint, uint) = (base, bytes, 0)
+
+#[cfg(os = "windows")]
+fn take_native(base: uint, bytes: uint) (uint, uint, uint) {
+    let previous: uint = 0
+    let record = aligned_reservations
+    while record != 0 {
+        if word(record + 24) == base {
+            if word(record + 32) != bytes { fail() }
+            let original = word(record + 8)
+            let reserved = word(record + 16)
+            let next = word(record)
+            if previous == 0 { aligned_reservations = next } else { put(previous, next) }
+            return (original, reserved, NATIVE_PAGE_BYTES)
+        }
+        previous = record
+        record = word(record)
+    }
+    (base, bytes, 0)
+}
+
+fn release_native(base: uint, bytes: uint) { unsafe {
+    let extent = NativeExtent { base, bytes }
+    std.platform.release(std.mem.transmute[*NativeExtent, uint](std.ptr.addr_of(extent)))
+} }
+
 /// 调用方保证范围互不重叠；arena 重用通过既有 committed 位避免重复提交。
 pub fn reserve_aligned(bytes: uint, alignment: uint) uint { unsafe {
-    let base = std.platform.reserve_aligned(bytes, alignment)
+    let native = reserve_native(bytes, alignment)
+    let base = native.0
     if base == 0 || base > uint(140737488355327) { return 0 }
     let owner = processor()
-    add(owner, RUNTIME_RESERVED_OFFSET, page_bytes(bytes))
+    add(owner, RUNTIME_RESERVED_OFFSET, native.1)
+    add(owner, RUNTIME_COMMITTED_OFFSET, native.2)
     add(owner, RUNTIME_MAPPINGS_OFFSET, 1)
+    if native.2 != 0 {
+        let committed = word(owner + RUNTIME_COMMITTED_OFFSET)
+        if committed > word(owner + RUNTIME_PEAK_OFFSET) { put(owner + RUNTIME_PEAK_OFFSET, committed) }
+        pressure_update(owner)
+    }
     base
 } }
 
@@ -246,10 +318,11 @@ pub fn release_heap_mapping(base: uint, bytes: uint, heap_bytes: uint) {
 
 pub fn release_mapping(base: uint, bytes: uint, committed: uint) { unsafe {
     let owner = processor()
-    let reserved = page_bytes(bytes)
+    let native = take_native(base, page_bytes(bytes))
+    let reserved = native.1
+    committed = committed + native.2
     if word(owner + RUNTIME_RESERVED_OFFSET) < reserved || word(owner + RUNTIME_COMMITTED_OFFSET) < committed || word(owner + RUNTIME_MAPPINGS_OFFSET) == 0 { fail() }
-    let extent = NativeExtent { base: base, bytes: page_bytes(bytes) }
-    std.platform.release(std.mem.transmute[*NativeExtent, uint](std.ptr.addr_of(extent)))
+    release_native(native.0, reserved)
     put(owner + RUNTIME_RESERVED_OFFSET, word(owner + RUNTIME_RESERVED_OFFSET) - reserved)
     put(owner + RUNTIME_COMMITTED_OFFSET, word(owner + RUNTIME_COMMITTED_OFFSET) - committed)
     put(owner + RUNTIME_MAPPINGS_OFFSET, word(owner + RUNTIME_MAPPINGS_OFFSET) - 1)

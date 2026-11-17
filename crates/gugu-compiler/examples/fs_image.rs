@@ -1,5 +1,5 @@
 //! 手工文件系统镜像验证入口；真实进程与文件操作不进入默认测试套件。
-use gugu_compiler::{CompileRequest, Compiler, TargetName};
+use gugu_compiler::{CompileRequest, Compiler, NativeImport, NativeLink, TargetName};
 use std::{env, fs, path::PathBuf};
 
 fn main() {
@@ -10,8 +10,19 @@ fn main() {
         TargetName::X86_64Linux
     };
     let text = fs::read_to_string(source).expect("读取手工输入");
-    let compilation = Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS)
-        .compile(CompileRequest::single_file("main.gg", text, target));
+    let imports = env::args()
+        .skip(3)
+        .map(|entry| {
+            let (library, symbol) = entry.split_once(':').expect("导入格式为 library:symbol");
+            NativeImport::function(library, symbol)
+        })
+        .collect();
+    let compilation = Compiler::with_artifacts(&gugu_compiler::EMBEDDED_ARTIFACTS).compile(
+        CompileRequest::single_file("main.gg", text, target).with_native_link(NativeLink {
+            imports,
+            interpreter: None,
+        }),
+    );
     assert!(
         compilation.is_success(),
         "{:?}",

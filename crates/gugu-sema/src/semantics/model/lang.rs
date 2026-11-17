@@ -89,6 +89,10 @@ pub enum RuntimeMachineIntrinsic {
     FsPoll,
     NetCall,
     ResolverSymbol,
+    StartupCall,
+    EnvironmentSymbol,
+    ProcessCall,
+    ProcessWorker,
     MonotonicNanos,
     StackReadWord,
     StackCopyRaw,
@@ -100,7 +104,7 @@ pub enum RuntimeMachineIntrinsic {
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 29] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -119,6 +123,10 @@ impl RuntimeMachineIntrinsic {
         Self::FsPoll,
         Self::NetCall,
         Self::ResolverSymbol,
+        Self::StartupCall,
+        Self::EnvironmentSymbol,
+        Self::ProcessCall,
+        Self::ProcessWorker,
         Self::MonotonicNanos,
         Self::StackReadWord,
         Self::StackCopyRaw,
@@ -155,6 +163,10 @@ impl RuntimeMachineIntrinsic {
             Self::FsPoll => "fs_poll",
             Self::NetCall => "net_call",
             Self::ResolverSymbol => "resolver_symbol",
+            Self::StartupCall => "startup_call",
+            Self::EnvironmentSymbol => "environment_symbol",
+            Self::ProcessCall => "process_call",
+            Self::ProcessWorker => "process_worker",
             Self::MonotonicNanos => "monotonic_nanos",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
@@ -168,6 +180,7 @@ impl RuntimeMachineIntrinsic {
     /// 返回该原语的值实参数量。
     pub const fn value_arguments(self) -> usize {
         match self {
+            Self::ProcessWorker => 0,
             Self::ContextSwitch | Self::StackCopyRaw => 4,
             Self::ContextRestore | Self::CallbackQueue => 3,
             Self::CurrentSlot
@@ -185,11 +198,14 @@ impl RuntimeMachineIntrinsic {
             | Self::StringFromUtf8Unchecked
             | Self::FsPoll
             | Self::StackReadWord
+            | Self::EnvironmentSymbol
             | Self::ResolverSymbol => 1,
             Self::AtomicStoreRelease
             | Self::AtomicFetchOrAcqRel
             | Self::AtomicFetchAndAcqRel
             | Self::FsStart
+            | Self::StartupCall
+            | Self::ProcessCall
             | Self::NetCall => 2,
         }
     }
@@ -206,6 +222,10 @@ impl RuntimeMachineIntrinsic {
                 | Self::FsPoll
                 | Self::NetCall
                 | Self::ResolverSymbol
+                | Self::StartupCall
+                | Self::EnvironmentSymbol
+                | Self::ProcessCall
+                | Self::ProcessWorker
                 | Self::MonotonicNanos
                 | Self::StackReadWord
                 | Self::CageControl
@@ -225,6 +245,10 @@ impl RuntimeMachineIntrinsic {
                 | Self::FsPoll
                 | Self::NetCall
                 | Self::ResolverSymbol
+                | Self::StartupCall
+                | Self::EnvironmentSymbol
+                | Self::ProcessCall
+                | Self::ProcessWorker
                 | Self::MonotonicNanos
                 | Self::StackReadWord
                 | Self::StackCopyRaw

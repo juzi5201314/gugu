@@ -594,6 +594,14 @@ SharedHeap forwarding；scheduler 保留至少一个 worker 处理 poller、time
 Retiring processor若正被attached普通bridge保留，立即按精确generation retake而不等待native返回。完成当前managed coroutine或取得lease并完成producer grace后，按`run_next`、local deque、8个remote head/carry、injection carry、timer inbox、barrier buffer、mark work与pending poll flag的固定顺序转移：runnable按batch边界进入同NUMA injection，timer重新选择active target，其它processor-local状态按所属子系统handoff。确认所有queue ownership为空后才进入Idle并归还pool。旧`preferred_processor`只作为失效hint，后续ready自动走injection。processor ID不复用，控制块重新激活时取得新ID；managed worker绑定仍遵守第一个章节定义的共享CPU预算。
 processor retire 同时必须交接 owner inbox、raw local/range cache、return staging 和 forwarding chain；这些状态不能遗留在已移除的 processor。具体 generation、handoff 和压力排空顺序见[内存所有权与消息通道](memory-messaging.md#owner-retire)。
 
+## 进程与管道服务
+
+network_service 保留可选 process 槽，首次创建 Child/pipe 才安装；基础资源层仅保存 kind=4/5 的 close-enqueue 函数值。回调只发布控制页意图，OS 调用、挂起和 raw 归还由 managed owner 的 service 完成。每轮 pipe 和 child 各推进至多 64 个节点，总预算 128；跨轮游标随删除修正，避免链尾请求饥饿。创建走已有有界 ForeignBridge，观察退出与管道等待不占 blocking credit。
+
+Child 每个等待者独立持有操作 lease 和取消节点。service 先收集已经提交的退出状态，再取消尚未完成的等待者；在途取消不 kill、不关闭输出。显式 close 保留 Closing 意图，关闭管道并在必要时 kill，然后非阻塞回收。最后用户 lease 默认 detach，关闭父端并将不含 managed 指针或 Child lease 的 observer 交给 supervisor；detached 观察不计入必等工作，shutdown 释放记录或 Windows 观察句柄，不终止仍运行的 detached 子进程。
+
+pipe 使用每方向 FIFO 和至多 64 KiB 的计费 raw 请求。Linux 为 nonblocking syscall，写入局部屏蔽 SIGPIPE 并保留旧 pending 状态。Windows buffer/OVERLAPPED 保留至确定完成；CancelIoEx 仅发一次，NOT_FOUND 后继续收集，不能凭取消返回提前释放。完成后恰好一次唤醒、释放操作 lease；handle 关闭和控制页 reclaim 仍汇入 resource_state.complete_close。
+
 ## 终止
 
 runtime状态机先根据[进程寿命](../spec/runtime.md#process-lifetime)生成`TerminationPlan { mode, admit_user_coroutines, wait_foreign, report_epoch }`；scheduler只执行该plan，不决定`process.exit`、fatal、defer或报告语义。`mode`取`natural`（自然收尾，等待全部用户协程）、`immediate`（主协程panic后立即收尾，不再等待其余协程）、`explicit-exit`、`fatal`与`signal`之一；失败记录（main-error、unhandled-panic、fatal reason、signal reason）由plan内的reason承载。`admit_user_coroutines`进入`Terminating`后一律关闭。`report_epoch`是必须冲刷的报告数量下界：plan发布终止报告时记录`报告账本已发布数量`，自然成功与显式退出记录当前数量；shutdown完成前报告账本至少要冲刷这么多条。计划构造、退出码解析（Linux按`128 + 信号号`、Windows按登记的非零status）与七类fatal的报告形态由compiler侧确定性参照模型固定，与[bootstrap](bootstrap.md)的rt0契约段共用同一schema；镜像内的Gugu runtime按同一语义执行。停止接纳后先阻止新producer登记，要求全部producer flush `pending_node/staging`并越过最新topology/slab epoch，再唤醒parked worker、关闭新poller注册并等runtime critical section到达安全边界；`wait_foreign`同时覆盖普通foreign、`DirtyWaiting`和正在执行的dirty work。

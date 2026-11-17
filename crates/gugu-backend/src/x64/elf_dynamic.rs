@@ -21,7 +21,12 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
     let mut symbols = vec![0; SYMBOL_BYTES];
     let mut needed = Vec::new();
     let mut names = std::collections::BTreeSet::new();
-    for (library, name) in &request.imports {
+    for crate::NativeImport {
+        library,
+        name,
+        kind,
+    } in &request.imports
+    {
         if library.is_empty() || name.is_empty() || library.contains('\0') || name.contains('\0') {
             return Err("动态导入名为空或包含 NUL".into());
         }
@@ -41,7 +46,10 @@ pub(super) fn blobs(request: &LinkRequest) -> Result<Vec<Blob>, String> {
         let at = symbols.len();
         symbols.resize(at + SYMBOL_BYTES, 0);
         symbols[at..at + 4].copy_from_slice(&name_offset.to_le_bytes());
-        symbols[at + 4] = 0x12; // STB_GLOBAL | STT_FUNC，SHN_UNDEF。
+        symbols[at + 4] = match kind {
+            crate::NativeImportKind::Function => 0x12, // STB_GLOBAL | STT_FUNC。
+            crate::NativeImportKind::Data => 0x11,     // STB_GLOBAL | STT_OBJECT。
+        };
     }
     for symbol in &request.symbols {
         let Some(name) = symbol.name.strip_prefix("~gugu_export_") else {

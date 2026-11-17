@@ -82,8 +82,8 @@ impl TargetName {
 /// 平台页大小；当前两个目标均为 4 KiB。
 pub const TARGET_PAGE_SIZE: u32 = 4096;
 
-/// 导入策略 revision；IAT 只含登记导入库。
-pub const IMPORT_POLICY_REVISION: u32 = 3;
+/// 导入策略 revision；区分 Function/Data，环境与进程系统库按需引入。
+pub const IMPORT_POLICY_REVISION: u32 = 4;
 
 /// 后端接受的 CPU 指令集特性；`CpuBaseline` 用它表达目标可接受面。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

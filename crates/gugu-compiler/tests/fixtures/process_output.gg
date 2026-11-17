@@ -1,0 +1,8 @@
+use std.process.{Command}
+use std.path.{Path}
+#[used]
+fn captured() bool {
+    let result = match Command::new(Path::from_string("/child")).output() { Ok(value) => value, Err(_) => return false }
+    result.status.success() && result.stdout.to_string_lossy() == "out" && result.stderr.to_string_lossy() == "err"
+}
+fn main() {}

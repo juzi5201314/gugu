@@ -1,0 +1,271 @@
+use std.io as io
+use std.io.{Error}
+use std.sync.{CancelToken}
+use std.runtime.resource as resource
+use std.runtime.resource.{ResourceCell}
+use std.runtime.process_layout as layout
+use std.runtime.process_spawn as native
+use std.runtime.process_pipe as pipe
+use std.runtime.process_pipe.{ChildStdin, ChildStdout, ChildStderr}
+use std.runtime.process_service as service
+use std.runtime.fs_platform as bridge
+use std.runtime.heap.{heap_word, heap_word32, heap_store_word, heap_fail}
+use std.runtime.scheduler.{park_current, ready_hot}
+
+pub struct ExitStatus { pub status_kind: uint, pub value: uint }
+impl ExitStatus {
+    pub fn success(self: &Self) bool = self.status_kind == 1 && self.value == 0
+    pub fn code(self: &Self) Option[int] = if self.status_kind == 1 { Some(int(self.value)) } else { None }
+    pub fn signal(self: &Self) Option[int] = if self.status_kind == 2 { Some(int(self.value)) } else { None }
+}
+pub struct Child {
+    cell: ResourceCell, process_id: u32,
+    input: Option[ResourceCell], output: Option[ResourceCell], error: Option[ResourceCell],
+}
+static observers: uint = 0
+static cursor: uint = 0
+const OBSERVER_BYTES: uint = 128
+pub fn adopt(value: native.Spawned) Child {
+    resource.install_process_cleanup(request_close, pipe.request_close)
+    service.install_child(poll, pending, shutdown)
+    let input = adopt_pipe(value.input, 1)
+    let output = adopt_pipe(value.output, 0)
+    let error = adopt_pipe(value.error, 0)
+    let cell = resource.create(value.handle, layout.CHILD_KIND)
+    let control = resource.control_address(&cell)
+    let observer = bridge.control_allocate(OBSERVER_BYTES)
+    heap_store_word(observer, value.handle)
+    heap_store_word(observer + 8, uint(value.id))
+    heap_store_word(observer + 16, observers)
+    heap_store_word(observer + 24, control)
+    if observers != 0 { heap_store_word(observers + 120, observer) }
+    observers = observer
+    heap_store_word(control + layout.OBSERVER, observer)
+    heap_store_word(control + layout.STDIN, address(input))
+    heap_store_word(control + layout.STDOUT, address(output))
+    heap_store_word(control + layout.STDERR, address(error))
+    Child { cell, process_id: value.id, input, output, error }
+}
+fn adopt_pipe(handle: uint, direction: uint) Option[ResourceCell] = if handle == native.INVALID { None } else { Some(pipe.adopt(handle, direction)) }
+fn address(value: Option[ResourceCell]) uint = match value {
+    Some(value) => { let control = resource.control_address(&value)
+        resource.acquire_control(control)
+        control },
+    None => uint(0),
+}
+fn status(control: uint) ExitStatus = ExitStatus { status_kind: heap_word(control + layout.STATUS_KIND), value: heap_word(control + layout.STATUS_VALUE) }
+fn usable(control: uint) bool = heap_word(control + layout.LIFECYCLE) < layout.DETACHING && !service.closed(control)
+fn close_pipes(control: uint) {
+    for offset in [layout.STDIN, layout.STDOUT, layout.STDERR] {
+        let pipe = heap_word(control + offset)
+        if pipe != 0 { resource.close_raw(pipe) };
+    }
+}
+fn pipes_closed(control: uint) bool {
+    for offset in [layout.STDIN, layout.STDOUT, layout.STDERR] {
+        let pipe = heap_word(control + offset)
+        if pipe != 0 && heap_word32(pipe + 8) & uint(8) == 0 { return false };
+    }
+    true
+}
+fn terminate(control: uint) Result[(), Error] {
+    if heap_word(control + layout.STATUS_KIND) != 0 { return Ok(()) }
+    let raw = bridge.control_allocate(88)
+    defer { bridge.control_free(raw, 88) }
+    heap_store_word(raw + 8, heap_word(control + 64))
+    let result = native.call(layout.KILL, raw)
+    if result.error != 0 {
+        // Linux ESRCH 是退出观察与 kill 的合法竞态；仍由 supervisor 收集。
+        #[cfg(os = "linux")]
+        { if result.error == 3 { return Ok(()) }; }
+        return Err(io.from_native_error(result.error))
+    }
+    Ok(())
+}
+pub fn request_close(control: uint) {
+    // cleanup 回调仅发布意图；不得在 GC 受限上下文调用 OS、分配或 park。
+    if heap_word(control + layout.LIFECYCLE) < layout.DETACHING { heap_store_word(control + layout.LIFECYCLE, layout.DETACHING) }
+}
+impl Child {
+    pub fn id(self: &Self) u32 = self.process_id
+    pub fn stdin(self: &Self) Option[ChildStdin] {
+        if !usable(resource.control_address(&self.cell)) { return None }
+        match self.input { Some(cell) => Some(ChildStdin { cell }), None => None }
+    }
+    pub fn stdout(self: &Self) Option[ChildStdout] {
+        if !usable(resource.control_address(&self.cell)) { return None }
+        match self.output { Some(cell) => Some(ChildStdout { cell }), None => None }
+    }
+    pub fn stderr(self: &Self) Option[ChildStderr] {
+        if !usable(resource.control_address(&self.cell)) { return None }
+        match self.error { Some(cell) => Some(ChildStderr { cell }), None => None }
+    }
+    pub fn try_wait(self: &Self) Result[Option[ExitStatus], Error] {
+        let control = resource.control_address(&self.cell)
+        if !usable(control) { return Err(Error::Closed) }
+        _ = observe(heap_word(control + layout.OBSERVER), control)
+        if heap_word(control + layout.STATUS_KIND) != 0 { return Ok(Some(status(control))) }
+        Ok(None)
+    }
+    pub fn wait(self: &Self) Result[ExitStatus, Error] = wait(self, 0)
+    pub fn wait_cancel(self: &Self, cancel: &CancelToken) Result[ExitStatus, Error] = wait(self, unsafe { cancel.raw_control() })
+    pub fn kill(self: &Self) Result[(), Error] {
+        let control = resource.control_address(&self.cell)
+        if !usable(control) { return Err(Error::Closed) }
+        _ = observe(heap_word(control + layout.OBSERVER), control)
+        terminate(control)
+    }
+    pub fn close(self: &Self) Result[(), Error] {
+        let control = resource.control_address(&self.cell)
+        let state = heap_word(control + layout.LIFECYCLE)
+        if state == layout.DETACHED || state == layout.DETACHING { return Err(Error::Closed) }
+        if state == layout.CLOSED {
+            let result = heap_word(control + 88)
+            return if result == 0 { Ok(()) } else { Err(io.from_native_error(result)) }
+        }
+        heap_store_word(control + layout.LIFECYCLE, layout.CLOSING)
+        resource.close_intent(&self.cell)
+        let result = bridge.await_close(control)
+        if result == 0 { Ok(()) } else { Err(io.from_native_error(result)) }
+    }
+    pub fn detach(self: &Self) Result[(), Error] {
+        let control = resource.control_address(&self.cell)
+        let state = heap_word(control + layout.LIFECYCLE)
+        if state == layout.DETACHED { return Ok(()) }
+        if state == layout.DETACHING {
+            let result = bridge.await_close(control)
+            return if result == 0 { Ok(()) } else { Err(io.from_native_error(result)) }
+        }
+        if !usable(control) { return Err(Error::Closed) }
+        heap_store_word(control + layout.LIFECYCLE, layout.DETACHING)
+        resource.close_intent(&self.cell)
+        let result = bridge.await_close(control)
+        if result == 0 { Ok(()) } else { Err(io.from_native_error(result)) }
+    }
+}
+fn wait(child: &Child, cancel: uint) Result[ExitStatus, Error] { unsafe {
+    if service.cancelled(cancel) { return Err(Error::Cancelled) }
+    let control = resource.control_address(&child.cell)
+    if !usable(control) { return Err(Error::Closed) }
+    if resource.begin(&child.cell) == native.INVALID { return Err(Error::Closed) }
+    defer { resource.end(&child.cell) }
+    if let Some(cell) = child.input { pipe.close(&cell)? }
+    if heap_word(control + layout.STATUS_KIND) != 0 { return Ok(status(control)) }
+    let node = bridge.control_allocate(64)
+    defer { bridge.control_free(node, 64) }
+    heap_store_word(node + 8, std.runtime.current_slot())
+    heap_store_word(node + 16, cancel)
+    let tail = heap_word(control + layout.WAIT_TAIL)
+    if tail == 0 { heap_store_word(control + layout.WAIT_HEAD, node) } else { heap_store_word(tail, node) }
+    heap_store_word(control + layout.WAIT_TAIL, node)
+    park_current()
+    let error = heap_word(node + 48)
+    if error == ~uint(0) { return Err(Error::Cancelled) }
+    if error != 0 { return Err(Error::Closed) }
+    Ok(ExitStatus { status_kind: heap_word(node + 32), value: heap_word(node + 40) })
+} }
+fn waiters(control: uint) {
+    let node = heap_word(control + layout.WAIT_HEAD)
+    let previous: uint = 0
+    while node != 0 {
+        let next = heap_word(node)
+        let kind = heap_word(control + layout.STATUS_KIND)
+        let state = heap_word(control + layout.LIFECYCLE)
+        let error = if state == layout.DETACHING { uint(9) } else { if kind == 0 && service.cancelled(heap_word(node + 16)) { ~uint(0) } else { uint(0) } }
+        if kind != 0 || error != 0 {
+            if previous == 0 { heap_store_word(control + layout.WAIT_HEAD, next) } else { heap_store_word(previous, next) }
+            if next == 0 { heap_store_word(control + layout.WAIT_TAIL, previous) }
+            heap_store_word(node + 32, kind)
+            heap_store_word(node + 40, heap_word(control + layout.STATUS_VALUE))
+            heap_store_word(node + 48, error)
+            ready_hot(heap_word(node + 8))
+        } else { previous = node }
+        node = next
+    }
+}
+#[cfg(os = "windows")]
+fn release_handle(handle: uint) { native.close_native(handle) }
+#[cfg(os = "linux")]
+fn release_handle(handle: uint) { _ = handle }
+fn observe(observer: uint, control: uint) bool {
+    if control != 0 && heap_word(control + layout.STATUS_KIND) != 0 { return true }
+    let request = observer + 32
+    heap_store_word(request + 8, heap_word(observer))
+    let result = native.call(layout.TRY_WAIT, request)
+    if result.error != 0 && result.error != 4 { heap_fail() }
+    if result.value == 0 { return false }
+    if control != 0 {
+        heap_store_word(control + layout.STATUS_KIND, result.value)
+        heap_store_word(control + layout.STATUS_VALUE, heap_word(request + 16))
+        if heap_word(control + layout.LIFECYCLE) == layout.RUNNING { heap_store_word(control + layout.LIFECYCLE, layout.EXITED) };
+    }
+    true
+}
+fn poll(processor: uint) {
+    _ = processor
+    let observer = if cursor == 0 { observers } else { cursor }
+    let budget: uint = 64
+    let start = observer
+    while observer != 0 && budget != 0 {
+        budget = budget - 1
+        let previous = heap_word(observer + 120)
+        let next = heap_word(observer + 16)
+        let control = heap_word(observer + 24)
+        let remove = observe(observer, control) && control == 0
+        if control != 0 {
+            let state = heap_word(control + layout.LIFECYCLE)
+            waiters(control)
+            if state == layout.CLOSING || state == layout.DETACHING {
+                close_pipes(control)
+                if state == layout.CLOSING && heap_word(control + layout.CHILD_PREV) == 0 {
+                    // CHILD_PREV 在本单链实现中保存 kill 已提交标志。
+                    match terminate(control) { Ok(_) => (), Err(_) => heap_fail() }
+                    heap_store_word(control + layout.CHILD_PREV, 1)
+                }
+                if pipes_closed(control) && heap_word(control + 80) == 0 && (state == layout.DETACHING || heap_word(control + layout.STATUS_KIND) != 0) {
+                    heap_store_word(control + layout.LIFECYCLE, if state == layout.DETACHING { layout.DETACHED } else { layout.CLOSED })
+                    heap_store_word(control + layout.OBSERVER, 0)
+                    heap_store_word(observer + 24, 0)
+                    remove = state == layout.CLOSING || heap_word(control + layout.STATUS_KIND) != 0
+                    #[cfg(os = "windows")]
+                    { remove = true }
+                    for offset in [layout.STDIN, layout.STDOUT, layout.STDERR] {
+                        let pipe = heap_word(control + offset)
+                        heap_store_word(control + offset, 0)
+                        resource.release_control(pipe)
+                    }
+                    service.complete_close(control, 0)
+                };
+            };
+        }
+        if remove {
+            release_handle(heap_word(observer))
+            if previous == 0 { observers = next } else { heap_store_word(previous + 16, next) }
+            if next != 0 { heap_store_word(next + 120, previous) }
+            bridge.control_free(observer, OBSERVER_BYTES)
+        }
+        observer = if next == 0 { observers } else { next }
+        if observer == start { break };
+    }
+    cursor = observer
+}
+fn pending(processor: uint) bool {
+    _ = processor
+    let observer = observers
+    while observer != 0 {
+        let control = heap_word(observer + 24)
+        if control != 0 && (heap_word(control + layout.WAIT_HEAD) != 0 || heap_word(control + layout.LIFECYCLE) >= layout.DETACHING) { return true }
+        observer = heap_word(observer + 16)
+    }
+    false
+}
+fn shutdown(processor: uint) {
+    _ = processor
+    while observers != 0 {
+        let observer = observers
+        observers = heap_word(observer + 16)
+        if heap_word(observer + 24) != 0 { heap_fail() }
+        release_handle(heap_word(observer))
+        bridge.control_free(observer, OBSERVER_BYTES)
+    }
+}

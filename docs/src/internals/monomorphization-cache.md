@@ -53,6 +53,8 @@ runtime/std 源在 compiler build-time 由 `gugu-runtime-builder` 固化为 targ
 
 跨 session 的定义与类型身份使用稳定键；指针、线程编号和绝对 workspace 路径禁止进入规范编码。冻结 IR payload 保留现有确定性构造顺序下的稠密 arena ID，完整 HIR/world 输入指纹将其绑定到当前定义与类型表；不能把这些局部编号当成跨 world 的定义身份。
 
+标量编解码、序列结束及解码边界检查的短路径允许跨 crate 内联，避免为每个 IR 字段保留独立调用；编码格式、长度核对和排序规则不变，因此不递增编码 revision。
+
 ### 内建函数表 {#builtin-function-table}
 
 `prebuilt.functions` 记录可安装内建实例的冻结派生结果，按 `stable_mono_key`（实例 `MonoKey` digest 的小写十六进制）严格升序；`function_revisions` 按层名严格升序列出表内各层 revision，当前为 `analysis.semantics`、`analysis.shard`（`SHARD_REVISION = 1`）、`analysis.world`、`lir.body`（LIR body `REVISION = 18`）、`lir.passes`、`lir.poll_cost`、`lir.schema`、`x64.allocation`、`x64.codegen`（`CODEGEN_SCHEMA`）、`x64.lowering` 与 `x64.metadata`。每项带三层：`analysis` 分片是该实例的函数摘要，加上 key 属于其 owner 的全部 proof；`lir` 是该实例 poll 之后 LIR body 的 canonical 编码；`x64` 是该实例 absorb 之前的机器片段 payload，body 含 `GcAlloc`/`RegionAlloc`（lowering 读取本 world 的 `TypeId` 立即数）时为空。内容摘要由 `RuntimeFunctionArtifactV1::content_fingerprint` 计算：`BLAKE3 derive_key("gugu-builtin-function-v1")` 依次吸收 key，以及按 `analysis`、`lir`、`x64` 顺序的各层长度（`u64` 小端）与字节。

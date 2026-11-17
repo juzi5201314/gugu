@@ -593,7 +593,7 @@ impl ReportWriteCode {
                     "mov",
                     RM64_R64,
                     Access::Write,
-                    vec![reg(gpr(Gpr::R11)), reg(gpr(Gpr::Rcx))],
+                    vec![mem_base(gpr(Gpr::Rsp), 0x28), reg(gpr(Gpr::Rcx))],
                 );
                 builder.emit(
                     "mov",
@@ -665,8 +665,8 @@ impl ReportWriteCode {
                 builder.emit(
                     "mov",
                     RM64_R64,
-                    Access::Write,
-                    vec![reg(gpr(Gpr::R8)), reg(gpr(Gpr::R11))],
+                    Access::Read,
+                    vec![mem_base(gpr(Gpr::Rsp), 0x28), reg(gpr(Gpr::R8))],
                 );
                 builder.emit(
                     "lea",
@@ -697,7 +697,7 @@ impl ReportWriteCode {
         }
         let encoded = finish(builder);
         Self {
-            revision: 1,
+            revision: 2,
             bytes: encoded.bytes,
             relocations: encoded.relocations,
         }

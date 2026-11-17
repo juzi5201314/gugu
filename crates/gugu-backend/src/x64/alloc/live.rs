@@ -50,7 +50,7 @@ use crate::lir::body::{BlockId, Body, Definition, Op, Terminator};
 use crate::target::TargetName;
 
 #[cfg(test)]
-mod foreign_root_tests;
+pub(crate) mod foreign_root_tests;
 
 /// 调用点 outgoing 区里的一个指针字。偏移相对 outgoing 区起点，供栈图扫描栈上副本。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -1,0 +1,347 @@
+use std.collections.{Vec}
+use std.path.{Path, OsString, native_bytes}
+use std.text.{Bytes, alloc_bytes}
+use std.fs.{File}
+use std.fs as fs
+use std.io.{Error}
+use std.io as io
+use std.runtime.environment as environment
+use std.runtime.process_context as context
+use std.runtime.process_layout as layout
+use std.runtime.fs_platform as bridge
+use std.runtime.heap.{heap_word, heap_store_word, heap_fail}
+
+pub struct Stdio { mode: uint, file: Option[File] }
+impl Stdio {
+    pub fn inherit() Stdio = Stdio { mode: 0, file: None }
+    pub fn null() Stdio = Stdio { mode: 1, file: None }
+    pub fn pipe() Stdio = Stdio { mode: 2, file: None }
+    pub fn file(file: File) Stdio = Stdio { mode: 3, file: Some(file) }
+}
+pub struct Configuration {
+    pub executable: Path,
+    pub arguments: Vec[OsString],
+    pub environment: Vec[(OsString, Option[OsString])],
+    pub cwd: Option[Path],
+    pub input: Stdio, pub output: Stdio, pub error: Stdio,
+    pub script: Option[string],
+}
+pub struct Spawned { pub handle: uint, pub id: u32, pub input: uint, pub output: uint, pub error: uint }
+pub const INVALID: uint = 18446744073709551615
+static pipe_sequence: uint = 0
+
+pub fn configuration(executable: Path) Configuration = Configuration {
+    executable, arguments: Vec[OsString]::new(), environment: Vec[(OsString, Option[OsString])]::new(),
+    cwd: None, input: Stdio::inherit(), output: Stdio::inherit(), error: Stdio::inherit(), script: None,
+}
+pub fn snapshot(source: &Configuration) Configuration {
+    let arguments = Vec[OsString]::new()
+    for value in source.arguments { arguments.push(value) }
+    let environment = Vec[(OsString, Option[OsString])]::new()
+    for value in source.environment { environment.push(value) }
+    Configuration { executable: source.executable, arguments, environment, cwd: source.cwd,
+        input: source.input, output: source.output, error: source.error, script: source.script }
+}
+fn checked_add(left: uint, right: uint) uint {
+    if left > uint(9223372036854775807) - right { heap_fail() }
+    left + right
+}
+fn put(address: uint, value: byte) { unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](address), value) } }
+fn copy(destination: uint, bytes: Bytes) {
+    let source = unsafe { bytes.as_slice() }
+    for index in 0..source.len() { put(destination + uint(index), source[index]) }
+}
+pub fn call(op: uint, request: uint) bridge.FsResult { unsafe {
+    heap_store_word(request, op)
+    _ = std.runtime.process_call(op, request)
+    bridge.FsResult { value: heap_word(request + 72), error: heap_word(request + 80) }
+} }
+pub fn close_native(handle: uint) {
+    if handle == INVALID { return }
+    let request = bridge.control_allocate(88)
+    heap_store_word(request + 8, handle)
+    let result = call(layout.CLOSE_HANDLE, request)
+    bridge.control_free(request, 88)
+    if result.error != 0 { heap_fail() }
+}
+#[cfg(os = "linux")]
+fn stack_bytes() uint = 0
+#[cfg(os = "windows")]
+fn stack_bytes() uint = 32
+fn worker(op: uint, a: uint, b: uint) Result[(uint, uint), Error] { unsafe {
+    let raw = bridge.raw_allocate(384)
+    defer { bridge.raw_free(raw, 384) }
+    heap_store_word(raw, op)
+    heap_store_word(raw + 8, a)
+    heap_store_word(raw + 16, b)
+    let packet = raw + 128
+    heap_store_word(packet, std.runtime.process_worker())
+    heap_store_word(packet + 8, stack_bytes())
+    heap_store_word(packet + 16, raw)
+    let finished = bridge.native_call(~uint(0), packet, 0, 0, 0, 0, 0, 0, 0, 0)
+    if finished.error != 0 { return Err(io.from_native_error(finished.error)) }
+    let error = heap_word(raw + 80)
+    if error != 0 { return Err(io.from_native_error(error)) }
+    Ok((heap_word(raw + 72), heap_word(raw + 24)))
+} }
+fn os(value: string) OsString = match OsString::from_string(value) { Ok(value) => value, Err(_) => panic("invalid process text") }
+#[cfg(os = "linux")]
+pub fn shell(script: string) Configuration {
+    let result = configuration(Path::from_string("/bin/sh"))
+    result.arguments.push(os("-c"))
+    result.arguments.push(os(script))
+    result
+}
+#[cfg(os = "windows")]
+pub fn shell(script: string) Configuration {
+    let result = configuration(Path::from_string(""))
+    result.script = Some(script)
+    result
+}
+#[cfg(os = "windows")]
+fn system_shell() Result[Path, Error] {
+    let capacity: uint = 512
+    loop {
+        let raw = bridge.raw_allocate(capacity + 88)
+        heap_store_word(raw, 1)
+        heap_store_word(raw + 8, raw + 88)
+        heap_store_word(raw + 16, capacity)
+        _ = unsafe { std.runtime.startup_call(1, raw) }
+        let error = heap_word(raw + 80)
+        if error == 0 {
+            let value = context.copy_native(raw + 88, context.native_length(raw + 88))
+            bridge.raw_free(raw, capacity + 88)
+            return Ok(Path::from_os(value?).join(Path::from_string("cmd.exe")))
+        }
+        bridge.raw_free(raw, capacity + 88)
+        if error != 122 { return Err(io.from_native_error(error)) }
+        capacity = checked_add(capacity, capacity)
+    }
+}
+fn merge(entries: Vec[(OsString, OsString)], changes: Vec[(OsString, Option[OsString])]) Result[Vec[(OsString, OsString)], Error] {
+    let result = entries
+    for change in changes {
+        let next = Vec[(OsString, OsString)]::new()
+        for entry in result {
+            if environment.compare(entry.0, change.0)? != 0 { next.push(entry) };
+        }
+        if let Some(value) = change.1 { next.push((change.0, value)) }
+        result = next
+    }
+    Ok(result)
+}
+fn environment_bytes(entries: Vec[(OsString, OsString)]) Result[Vec[Bytes], Error] {
+    let sorted = entries
+    #[cfg(os = "windows")]
+    {
+        // 环境通常较小；排序只复制不可变句柄，不复制字符串 payload。
+        for index in 1..sorted.len() {
+            let value = match sorted.get(index) { Some(value) => value, None => panic("environment index") }
+            let at = index
+            while at > 0 {
+                let previous = match sorted.get(at - 1) { Some(value) => value, None => panic("environment index") }
+                if environment.compare(previous.0, value.0)? <= 0 { break }
+                _ = sorted.set(at, previous)
+                at = at - 1
+            }
+            _ = sorted.set(at, value)
+        }
+    }
+    let result = Vec[Bytes]::new()
+    let width = int(context.unit_bytes())
+    for entry in sorted {
+        let name = native_bytes(Path::from_os(entry.0))?
+        let value = native_bytes(Path::from_os(entry.1))?
+        let buffer = unsafe { alloc_bytes(name.len() + value.len()) }
+        _ = name.copy_to(buffer)
+        buffer[name.len() - width] = 61
+        _ = value.copy_to(buffer[name.len()..])
+        result.push(unsafe { Bytes::from_owned(buffer) })
+    }
+    Ok(result)
+}
+#[cfg(os = "linux")]
+fn encode_arguments(executable: Path, arguments: Vec[OsString], script: Option[string]) Result[Vec[Bytes], Error] {
+    _ = script
+    let result = Vec[Bytes]::new()
+    result.push(native_bytes(executable)?)
+    for argument in arguments { result.push(native_bytes(Path::from_os(argument))?) }
+    Ok(result)
+}
+#[cfg(os = "windows")]
+fn push_unit(out: Vec[byte], unit: uint) { out.push(byte(unit & 255))
+    out.push(byte(unit >> 8)) }
+#[cfg(os = "windows")]
+fn quoted(out: Vec[byte], value: Bytes) {
+    let data = unsafe { value.as_slice() }
+    push_unit(out, 34)
+    let index = 0
+    let slashes: uint = 0
+    while index < data.len() - 2 {
+        let unit = uint(data[index]) | (uint(data[index + 1]) << 8)
+        index = index + 2
+        if unit == 92 { slashes = slashes + 1 }
+        else {
+            let count = if unit == 34 { slashes * 2 + 1 } else { slashes }
+            for _ in 0..int(count) { push_unit(out, 92) }
+            push_unit(out, unit)
+            slashes = 0
+        }
+    }
+    for _ in 0..int(slashes * 2) { push_unit(out, 92) }
+    push_unit(out, 34)
+}
+#[cfg(os = "windows")]
+fn encode_arguments(executable: Path, arguments: Vec[OsString], script: Option[string]) Result[Vec[Bytes], Error] {
+    let out = Vec[byte]::new()
+    quoted(out, native_bytes(executable)?)
+    match script {
+        Some(script) => {
+            for byte in unsafe { Bytes::from_string(" /S /C \"").as_slice() } { push_unit(out, uint(byte)) }
+            let bytes = native_bytes(Path::from_os(os(script)))?
+            let source = unsafe { bytes.as_slice() }
+            for index in 0..source.len() - 2 { out.push(source[index]) }
+            push_unit(out, 34)
+        },
+        None => { for argument in arguments { push_unit(out, 32)
+            quoted(out, native_bytes(Path::from_os(argument))?) } },
+    }
+    push_unit(out, 0)
+    if out.len() / 2 > 32767 { return Err(Error::InvalidInput) }
+    let bytes = unsafe { alloc_bytes(out.len()) }
+    for index in 0..out.len() { bytes[index] = match out.get(index) { Some(value) => value, None => panic("command line index") } }
+    let result = Vec[Bytes]::new()
+    result.push(unsafe { Bytes::from_owned(bytes) })
+    Ok(result)
+}
+#[cfg(os = "linux")]
+fn table_bytes(count: int) uint = (uint(count) + 1) * 8
+#[cfg(os = "windows")]
+fn table_bytes(count: int) uint { _ = count
+    0 }
+fn sequence_bytes(values: Vec[Bytes], environment: bool) uint {
+    let length = table_bytes(values.len())
+    for value in values { length = checked_add(length, uint(value.len())) }
+    #[cfg(os = "windows")]
+    { if environment { length = checked_add(length, if values.is_empty() { 4 } else { 2 }) }; }
+    #[cfg(os = "linux")]
+    { _ = environment }
+    length
+}
+fn encode_sequence(raw: uint, values: Vec[Bytes]) {
+    let cursor = raw + table_bytes(values.len())
+    let index: uint = 0
+    for value in values {
+        #[cfg(os = "linux")]
+        heap_store_word(raw + index * 8, cursor)
+        copy(cursor, value)
+        cursor = cursor + uint(value.len())
+        index = index + 1
+    }
+}
+#[cfg(os = "linux")]
+fn pipe_name() Result[Bytes, Error] = Ok(Bytes::from_string(""))
+#[cfg(os = "windows")]
+fn pipe_name() Result[Bytes, Error] {
+    pipe_sequence = checked_add(pipe_sequence, 1)
+    let prefix = "\\\\.\\pipe\\gugu-"
+    let pid = context.process_id()
+    let buffer = unsafe { alloc_bytes(128) }
+    let text = Bytes::from_string(prefix)
+    _ = text.copy_to(buffer)
+    let count = text.len()
+    for value in [pid, pipe_sequence] {
+        for shift in 0..16 {
+            let digit = (value >> uint((15 - shift) * 4)) & 15
+            buffer[count] = byte(if digit < 10 { digit + 48 } else { digit + 87 })
+            count = count + 1
+        }
+        buffer[count] = 45
+        count = count + 1
+    }
+    let text = unsafe { Bytes::from_owned(buffer[..count]) }.to_string()
+    match text { Ok(value) => native_bytes(Path::from_string(value)), Err(_) => Err(Error::InvalidData) }
+}
+fn stdio(value: Stdio, direction: uint) Result[(uint, uint), Error] {
+    if value.mode == 0 { let (handle, _) = worker(layout.DUPLICATE_STDIO, direction, 1)?
+        return Ok((handle, INVALID)) }
+    if value.mode == 3 {
+        let file = match value.file { Some(value) => value, None => panic("missing stdio file") }
+        let handle = fs.process_begin(&file)
+        if handle == INVALID { return Err(Error::Closed) }
+        defer { fs.process_end(&file) }
+        let (duplicate, _) = worker(layout.DUPLICATE_STDIO, handle, 0)?
+        return Ok((duplicate, INVALID))
+    }
+    if value.mode == 1 {
+        let (handle, _) = worker(layout.OPEN_NULL, direction, 0)?
+        defer { close_native(handle) }
+        let (duplicate, _) = worker(layout.DUPLICATE_STDIO, handle, 0)?
+        return Ok((duplicate, INVALID))
+    }
+    let name = pipe_name()?
+    let raw = if name.is_empty() { 0 } else { environment.copy_bytes(name) }
+    defer { if raw != 0 { bridge.raw_free(raw, uint(name.len())) }; }
+    let (parent, child) = worker(layout.CREATE_PIPE, direction, raw)?
+    let keep = false
+    defer { close_native(child)
+        if !keep { close_native(parent) }; }
+    let (duplicate, _) = worker(layout.DUPLICATE_STDIO, child, 0)?
+    keep = true
+    Ok((duplicate, parent))
+}
+pub fn spawn(config: Configuration) Result[Spawned, Error] {
+    let executable = config.executable
+    #[cfg(os = "windows")]
+    { if let Some(_) = config.script { executable = system_shell()? }; }
+    if executable.as_os().is_empty() { return Err(Error::InvalidInput) }
+    environment.validate_value(executable.as_os())?
+    for value in config.arguments { environment.validate_value(value)? }
+    for value in config.environment {
+        environment.validate_name(value.0)?
+        if let Some(value) = value.1 { environment.validate_value(value)? };
+    }
+    let captured = environment.snapshot()?
+    let cwd = match config.cwd { Some(value) => {
+        if value.as_os().is_empty() { return Err(Error::InvalidInput) }
+        context.resolve_at(captured.cwd, value)
+    }, None => captured.cwd }
+    executable = context.resolve_at(cwd, executable)
+    let application = native_bytes(executable)?
+    let directory = native_bytes(cwd)?
+    let arguments = encode_arguments(executable, config.arguments, config.script)?
+    let entries = environment_bytes(merge(captured.entries, config.environment)?)?
+    let argv_bytes = sequence_bytes(arguments, false)
+    let env_bytes = sequence_bytes(entries, true)
+    let bytes = checked_add(checked_add(checked_add(80, argv_bytes), env_bytes), checked_add(uint(application.len()), uint(directory.len())))
+    let raw = bridge.raw_allocate(bytes)
+    defer { bridge.raw_free(raw, bytes) }
+    let argv = raw + 80
+    let env = argv + argv_bytes
+    let app = env + env_bytes
+    let dir = app + uint(application.len())
+    encode_sequence(argv, arguments)
+    encode_sequence(env, entries)
+    copy(app, application)
+    copy(dir, directory)
+    heap_store_word(raw, app)
+    heap_store_word(raw + 8, argv)
+    heap_store_word(raw + 16, env)
+    heap_store_word(raw + 24, dir)
+    let keep = false
+    let (input, parent_in) = stdio(config.input, 0)?
+    defer { close_native(input)
+        if !keep { close_native(parent_in) }; }
+    let (output, parent_out) = stdio(config.output, 1)?
+    defer { close_native(output)
+        if !keep { close_native(parent_out) }; }
+    let (error, parent_error) = stdio(config.error, 2)?
+    defer { close_native(error)
+        if !keep { close_native(parent_error) }; }
+    heap_store_word(raw + 32, input)
+    heap_store_word(raw + 40, output)
+    heap_store_word(raw + 48, error)
+    _ = worker(layout.SPAWN, raw, 0)?
+    keep = true
+    Ok(Spawned { handle: heap_word(raw + 56), id: u32(heap_word(raw + 64)), input: parent_in, output: parent_out, error: parent_error })
+}

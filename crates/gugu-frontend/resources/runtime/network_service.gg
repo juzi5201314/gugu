@@ -7,6 +7,10 @@ struct NetworkService {
 }
 static network: Option[NetworkService] = None
 static resolver: Option[NetworkService] = None
+static process: Option[NetworkService] = None
+pub fn install_process(poll: fn(uint), pending: fn(uint) bool, shutdown: fn(uint)) {
+    process = Some(NetworkService { poll, pending, shutdown })
+}
 static platform_cleanup: Option[fn()] = None
 pub fn install_platform_cleanup(cleanup: fn()) { platform_cleanup = Some(cleanup) }
 pub fn install_resolver(poll: fn(uint), pending: fn(uint) bool, shutdown: fn(uint)) {
@@ -18,13 +22,17 @@ pub fn install(poll: fn(uint), pending: fn(uint) bool, shutdown: fn(uint)) {
 pub fn poll(processor: uint) {
     if let Some(service) = network { (service.poll)(processor) };
     if let Some(service) = resolver { (service.poll)(processor) };
+    if let Some(service) = process { (service.poll)(processor) };
 }
 pub fn pending(processor: uint) bool {
     if let Some(service) = network { if (service.pending)(processor) { return true }; }
-    if let Some(service) = resolver { return (service.pending)(processor) }
+    if let Some(service) = resolver { if (service.pending)(processor) { return true }; }
+    if let Some(service) = process { return (service.pending)(processor) }
     false
 }
 pub fn shutdown(processor: uint) {
+    if let Some(service) = process { (service.shutdown)(processor) };
+    process = None
     if let Some(service) = network { (service.shutdown)(processor) };
     network = None
     if let Some(service) = resolver { (service.shutdown)(processor) };

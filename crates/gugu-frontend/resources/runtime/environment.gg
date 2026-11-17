@@ -1,0 +1,202 @@
+use std.collections.{Vec}
+use std.path.{OsString, Path, native_bytes}
+use std.text.{Bytes}
+use std.io as io
+use std.runtime.process_context as context
+use std.runtime.fs_platform as bridge
+use std.runtime.heap.{heap_word, heap_store_word, heap_fail}
+
+pub struct Snapshot { pub cwd: Path, pub entries: Vec[(OsString, OsString)] }
+const PACKET_BYTES: uint = 256
+#[cfg(os = "linux")]
+const ENVIRON: uint = 0
+#[cfg(os = "linux")]
+const SET: uint = 1
+#[cfg(os = "linux")]
+const REMOVE: uint = 2
+#[cfg(os = "linux")]
+const GET: uint = 3
+#[cfg(os = "windows")]
+const STRINGS: uint = 0
+#[cfg(os = "windows")]
+const FREE_STRINGS: uint = 1
+#[cfg(os = "windows")]
+const SET: uint = 2
+#[cfg(os = "windows")]
+const COMPARE: uint = 3
+
+pub fn validate_name(name: OsString) Result[(), io.Error] {
+    let bytes = unsafe { name.to_bytes().as_slice() }
+    if bytes.len() == 0 { return Err(io.Error::InvalidInput) }
+    for index in 0..bytes.len() {
+        if bytes[index] == 0 || bytes[index] == 61 { return Err(io.Error::InvalidInput) };
+    }
+    Ok(())
+}
+pub fn validate_value(value: OsString) Result[(), io.Error] {
+    let bytes = unsafe { value.to_bytes().as_slice() }
+    for index in 0..bytes.len() { if bytes[index] == 0 { return Err(io.Error::InvalidInput) }; }
+    Ok(())
+}
+pub fn copy_bytes(bytes: Bytes) uint {
+    let raw = bridge.raw_allocate(uint(bytes.len()))
+    let source = unsafe { bytes.as_slice() }
+    for index in 0..source.len() {
+        unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](raw + uint(index)), source[index]) }
+    }
+    raw
+}
+#[cfg(os = "linux")]
+fn stack_bytes() uint = 0
+#[cfg(os = "windows")]
+fn stack_bytes() uint = 48
+// 唯一 packet 编码；返回指针仍受进程锁保护，调用方在解锁前完成复制。
+fn call(symbol: uint, a: uint, b: uint, c: uint, d: uint, e: uint) bridge.FsResult { unsafe {
+    let packet = bridge.raw_allocate(PACKET_BYTES)
+    defer { bridge.raw_free(packet, PACKET_BYTES) }
+    heap_store_word(packet, std.runtime.environment_symbol(symbol))
+    heap_store_word(packet + 8, stack_bytes())
+    heap_store_word(packet + 16, a)
+    heap_store_word(packet + 24, b)
+    heap_store_word(packet + 32, c)
+    heap_store_word(packet + 40, d)
+    heap_store_word(packet + 48, e)
+    // Microsoft x64 的第五参数位于 shadow space 之后。
+    #[cfg(os = "windows")]
+    heap_store_word(packet + 176 + 32, e)
+    let completed = bridge.native_call(~uint(0), packet, 0, 0, 0, 0, 0, 0, 0, 0)
+    if completed.error != 0 { heap_fail() }
+    bridge.FsResult { value: heap_word(packet + 128), error: heap_word(packet + 160) }
+} }
+
+pub fn set(name: OsString, value: OsString) Result[(), io.Error] {
+    validate_name(name)?
+    validate_value(value)?
+    let key = native_bytes(Path::from_os(name))?
+    let data = native_bytes(Path::from_os(value))?
+    let key_raw = copy_bytes(key)
+    defer { bridge.raw_free(key_raw, uint(key.len())) }
+    let data_raw = copy_bytes(data)
+    defer { bridge.raw_free(data_raw, uint(data.len())) }
+    context.lock()
+    defer { context.unlock() }
+    changed(call(SET, key_raw, data_raw, 1, 0, 0), false)
+}
+pub fn remove(name: OsString) Result[(), io.Error] {
+    validate_name(name)?
+    let key = native_bytes(Path::from_os(name))?
+    let key_raw = copy_bytes(key)
+    defer { bridge.raw_free(key_raw, uint(key.len())) }
+    context.lock()
+    defer { context.unlock() }
+    remove_locked(key_raw)
+}
+#[cfg(os = "linux")]
+fn changed(result: bridge.FsResult, removing: bool) Result[(), io.Error] {
+    _ = removing
+    if i32(result.value) == 0 { Ok(()) } else { Err(io.from_native_error(result.error)) }
+}
+#[cfg(os = "windows")]
+fn changed(result: bridge.FsResult, removing: bool) Result[(), io.Error] {
+    if u32(result.value) != 0 || (removing && result.error == 203) { Ok(()) }
+    else { Err(io.from_native_error(result.error)) }
+}
+#[cfg(os = "linux")]
+fn remove_locked(key: uint) Result[(), io.Error] = changed(call(REMOVE, key, 0, 0, 0, 0), true)
+#[cfg(os = "windows")]
+fn remove_locked(key: uint) Result[(), io.Error] = changed(call(SET, key, 0, 0, 0, 0), true)
+
+#[cfg(os = "linux")]
+pub fn get(name: OsString) Result[Option[OsString], io.Error] {
+    validate_name(name)?
+    let key = native_bytes(Path::from_os(name))?
+    let key_raw = copy_bytes(key)
+    defer { bridge.raw_free(key_raw, uint(key.len())) }
+    context.lock()
+    defer { context.unlock() }
+    let address = call(GET, key_raw, 0, 0, 0, 0).value
+    if address == 0 { return Ok(None) }
+    Ok(Some(context.copy_native(address, context.native_length(address))?))
+}
+#[cfg(os = "windows")]
+pub fn get(name: OsString) Result[Option[OsString], io.Error] {
+    validate_name(name)?
+    context.lock()
+    defer { context.unlock() }
+    let entries = entries_locked(false)?
+    for entry in entries { if compare(entry.0, name)? == 0 { return Ok(Some(entry.1)) }; }
+    Ok(None)
+}
+#[cfg(os = "linux")]
+pub fn compare(left: OsString, right: OsString) Result[int, io.Error] {
+    let a = unsafe { left.to_bytes().as_slice() }
+    let b = unsafe { right.to_bytes().as_slice() }
+    let index = 0
+    while index < a.len() && index < b.len() {
+        if a[index] < b[index] { return Ok(-1) }
+        if a[index] > b[index] { return Ok(1) }
+        index = index + 1
+    }
+    Ok(if a.len() < b.len() { -1 } else { if a.len() > b.len() { 1 } else { 0 } })
+}
+#[cfg(os = "windows")]
+pub fn compare(left: OsString, right: OsString) Result[int, io.Error] {
+    let a = native_bytes(Path::from_os(left))?
+    let b = native_bytes(Path::from_os(right))?
+    let ar = copy_bytes(a)
+    defer { bridge.raw_free(ar, uint(a.len())) }
+    let br = copy_bytes(b)
+    defer { bridge.raw_free(br, uint(b.len())) }
+    let result = call(COMPARE, ar, ~uint(0), br, ~uint(0), 1)
+    if result.value == 0 { return Err(io.from_native_error(result.error)) }
+    Ok(int(result.value) - 2)
+}
+fn append_entry(result: Vec[(OsString, OsString)], address: uint, bytes: uint, system: bool) Result[(), io.Error] {
+    let width = context.unit_bytes()
+    let split = width
+    while split < bytes && context.unit(address + split) != 61 { split = split + width }
+    if split == bytes { return Err(io.Error::InvalidData) }
+    // 即使跳过系统键也验证整个 UTF-16 记录；无效块仍由调用者释放。
+    let name = context.copy_native(address, split)?
+    let value = context.copy_native(address + split + width, bytes - split - width)?
+    if system || context.unit(address) != 61 { result.push((name, value)) }
+    Ok(())
+}
+#[cfg(os = "linux")]
+fn entries_locked(system: bool) Result[Vec[(OsString, OsString)], io.Error] {
+    let result = Vec[(OsString, OsString)]::new()
+    let cursor = heap_word(unsafe { std.runtime.environment_symbol(ENVIRON) })
+    while cursor != 0 {
+        let address = heap_word(cursor)
+        if address == 0 { break }
+        append_entry(result, address, context.native_length(address), system)?
+        cursor = cursor + 8
+    }
+    Ok(result)
+}
+#[cfg(os = "windows")]
+fn entries_locked(system: bool) Result[Vec[(OsString, OsString)], io.Error] {
+    let block = call(STRINGS, 0, 0, 0, 0, 0)
+    if block.value == 0 { return Err(io.from_native_error(block.error)) }
+    defer { if call(FREE_STRINGS, block.value, 0, 0, 0, 0).value == 0 { heap_fail() }; }
+    let result = Vec[(OsString, OsString)]::new()
+    let cursor = block.value
+    while context.unit(cursor) != 0 {
+        let bytes = context.native_length(cursor)
+        append_entry(result, cursor, bytes, system)?
+        cursor = cursor + bytes + 2
+    }
+    Ok(result)
+}
+pub fn vars() Result[Vec[(OsString, OsString)], io.Error] {
+    context.lock()
+    defer { context.unlock() }
+    entries_locked(false)
+}
+pub fn snapshot() Result[Snapshot, io.Error] {
+    context.lock()
+    defer { context.unlock() }
+    let cwd = context.cwd_locked()
+    let entries = entries_locked(true)?
+    Ok(Snapshot { cwd, entries })
+}

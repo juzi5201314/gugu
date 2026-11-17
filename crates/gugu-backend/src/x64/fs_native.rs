@@ -12,9 +12,11 @@ use crate::lir::body::Symbol;
 use crate::runtime::foreign_schema as bridge;
 use crate::target::TargetName;
 mod callback;
+pub(crate) mod environment;
 pub(crate) mod exports;
 mod foreign;
 pub(crate) mod net;
+pub(crate) mod process;
 mod stack;
 const OPERATION: i32 = bridge::NATIVE_REQUEST_OPERATION as i32;
 const ARGUMENTS: i32 = bridge::NATIVE_REQUEST_ARGUMENTS as i32;
@@ -163,7 +165,26 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
             blob("stack_copy_raw", stack::copy_raw()),
         ])
         .chain([net::fragment(target), net::resolver_fragment(target)])
+        .chain([environment::startup(target), environment::symbols(target)])
+        .chain([process::call(target), process::worker(target)])
         .collect()
+}
+
+/// 可选片段统一按已生成代码的重定位可达性选择，三个镜像消费者共用。
+pub(crate) fn required(
+    fragments: &[crate::x64::codegen::FragmentPayload],
+    blob: &FragmentBlob,
+) -> bool {
+    let glue = blob.entries[0].glue;
+    !matches!(
+        glue,
+        "net_call"
+            | "resolver_symbol"
+            | "environment_symbol"
+            | "startup_call"
+            | "process_call"
+            | "process_worker"
+    ) || net::required(fragments, glue)
 }
 fn thread_id(target: TargetName) -> Builder {
     let mut b = Builder::new();
@@ -304,7 +325,7 @@ fn linux_file_worker(exit_thread: bool) -> Builder {
     rr(&mut b, R12, Rdi);
     load(&mut b, Rax, R12, OPERATION);
     for code in [
-        0, 1, 2, 3, 5, 8, 32, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262,
+        0, 1, 2, 3, 5, 8, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262,
     ] {
         compare(&mut b, Rax, code);
         jump(&mut b, "je", accepted);
@@ -506,36 +527,4 @@ fn windows_worker() -> Builder {
     b
 }
 #[cfg(test)]
-mod protocol_tests;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn native_boundary_encodes_for_both_targets() {
-        for target in [TargetName::X86_64Linux, TargetName::X86_64Windows] {
-            let blobs = fragments(target);
-            assert_eq!(blobs.len(), 14);
-            assert_eq!(
-                blobs.iter().map(|b| b.entries[0].glue).collect::<Vec<_>>(),
-                [
-                    "fs_start",
-                    "fs_poll",
-                    "fs_native_worker",
-                    "monotonic_nanos",
-                    "foreign_native_worker",
-                    "callback_file_worker",
-                    "thread_id",
-                    "callback_control",
-                    "callback_queue",
-                    "stack_read_word",
-                    "cage_control",
-                    "stack_copy_raw",
-                    "net_call",
-                    "resolver_symbol"
-                ]
-            );
-            assert!(blobs.iter().all(|b| !b.bytes.is_empty()));
-        }
-    }
-}
+pub(crate) mod protocol_tests;

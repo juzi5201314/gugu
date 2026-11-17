@@ -19,7 +19,7 @@ use super::table;
 /// 编码器契约 schema 版本。
 pub const ENCODER_SCHEMA: u32 = 2;
 /// 描述符表与编码规则 revision。
-pub const ENCODER_REVISION: u32 = 3;
+pub const ENCODER_REVISION: u32 = 4;
 /// lowering 规则 revision。
 /// 阶段 54 起：`StackCheck` 降级为标记、`StackAddr` 用 frame 占位基址、成组搬运走拷贝组。
 /// 阶段 61b：`I8`/`I16` 的 `Load` 用 `movzx` 建立零扩展规范形。
@@ -29,10 +29,10 @@ pub const ENCODER_REVISION: u32 = 3;
 /// PollResume 压力分支进入系统栈并强制指针根落栈。
 /// 区域快分配同步发布 object-start 位图。
 /// 网络短调用与系统 resolver 地址按可达性选择片段。
-/// transport 收发、连接、方向关闭和类型化选项扩展网络机器目录。
-pub const LOWERING_REVISION: u32 = 20;
+/// 进程与环境机器入口以及启动 argv 载荷扩展。
+pub const LOWERING_REVISION: u32 = 22;
 /// 寄存器分配与 frame 规则 revision：候选过滤、spill 权重、frame 布局顺序与 prologue 形状。
-pub const ALLOCATION_REVISION: u32 = 6;
+pub const ALLOCATION_REVISION: u32 = 9;
 /// 栈图、unwind 与 source record 的生成规则 revision。
 pub const METADATA_REVISION: u32 = 3;
 

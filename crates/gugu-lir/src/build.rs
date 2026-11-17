@@ -827,6 +827,11 @@ impl Builder<'_> {
     fn materialize_blocks(&mut self) -> Result<(), Diagnostic> {
         let mut instructions = Vec::with_capacity(self.body.instructions.len());
         let mut remap = vec![InstId(0); self.body.instructions.len()];
+        // block ID 稠密；一次按原 edge 顺序归组，避免每个 block 重扫全部边。
+        let mut incoming = vec![Vec::new(); self.blocks.len()];
+        for (index, edge) in self.body.edges.iter().enumerate() {
+            incoming[edge.to.index()].push(EdgeId(id(index)));
+        }
         for (index, pending) in self.blocks.iter_mut().enumerate() {
             let instruction_start = id(instructions.len());
             for old in &pending.instructions {
@@ -841,14 +846,7 @@ impl Builder<'_> {
                     .map(|(_, parameter)| parameter.clone()),
             );
             let predecessor_start = id(self.body.predecessors.len());
-            self.body.predecessors.extend(
-                self.body
-                    .edges
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, edge)| edge.to.index() == index)
-                    .map(|(edge, _)| EdgeId(id(edge))),
-            );
+            self.body.predecessors.extend_from_slice(&incoming[index]);
             self.body.blocks.push(Block {
                 parameters: parameter_start..id(self.body.parameters.len()),
                 instructions: instruction_start..id(instructions.len()),

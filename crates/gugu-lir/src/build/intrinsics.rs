@@ -1,8 +1,8 @@
 use super::values::Computed;
 use super::{Builder, Diagnostic, Storage, TypeKind, invalid};
 use crate::body::{
-    Conversion, IntOp, Op, Origin, Provenance, RuntimeCall, Symbol, Type, ValueId, ValueType, id,
-    range,
+    Condition, Conversion, IntOp, Op, Origin, Provenance, RuntimeCall, Symbol, Type, ValueId,
+    ValueType, id, range,
 };
 use crate::gir::placement::PlacementKind;
 use crate::invalid_resource;
@@ -549,6 +549,18 @@ impl Builder<'_> {
         let bytes = self.emit_one(
             Op::Integer(IntOp::Mul),
             &[length, size],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        // 零长度动态数组仍必须分配一个非空对象：收集器以 header 里的字节数区分
+        // 「有效对象」与陈旧指针，0 字节对象会被当成坏指针；对象尺寸钳到 8 字节，
+        // 逻辑长度仍保留 0。
+        let zero = self.constant(0, Type::I64);
+        let empty = self.compare_value(Condition::Eq, false, bytes, zero);
+        let minimum = self.constant(8, Type::I64);
+        let bytes = self.emit_one(
+            Op::Select,
+            &[empty, minimum, bytes],
             ValueType::scalar(Type::I64),
             Origin::None,
         );

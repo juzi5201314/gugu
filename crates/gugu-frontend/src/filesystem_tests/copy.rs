@@ -26,6 +26,7 @@ enum Failure {
 }
 struct CopyHarness<'a> {
     output: &'a Compilation,
+    cwd_symbol: [u8; 32],
     failure: Failure,
     events: Vec<String>,
     next: u64,
@@ -71,6 +72,12 @@ impl CopyHarness<'_> {
     fn call(&mut self, boundary: Boundary<'_>, args: &[u64], memory: &mut Vec<u8>) -> Vec<u64> {
         match boundary {
             Boundary::Storage(Op::GcAlloc { .. }) => vec![self.allocate(args[0])],
+            Boundary::Storage(Op::SymbolAddr(Symbol::Global { key, .. }))
+                if key == &self.cwd_symbol =>
+            {
+                vec![512]
+            }
+            Boundary::Machine(crate::runtime::RuntimeMachineOp::ThreadId) => vec![1],
             Boundary::Storage(Op::SymbolAddr(Symbol::TypeDescriptor(key))) => {
                 let bytes = self
                     .output
@@ -87,7 +94,9 @@ impl CopyHarness<'_> {
                 put(memory, address, bytes);
                 vec![address]
             }
-            Boundary::Storage(Op::GcWriteBarrier { .. }) => Vec::new(),
+            Boundary::Storage(Op::GcWriteBarrier { .. } | Op::GcWriteBarrierReserved { .. }) => {
+                Vec::new()
+            }
             Boundary::Call(CallTarget::Runtime(
                 RuntimeCall::CowSnapshot | RuntimeCall::ValueTransfer,
             )) => {
@@ -152,6 +161,24 @@ impl CopyHarness<'_> {
             }
         );
         self.events.push(format!("open{handle}"));
+        let at = usize::try_from(word(memory, args[1])).unwrap();
+        let length = usize::try_from(word(memory, args[1] + 8)).unwrap();
+        let windows = self.output.lir.as_ref().unwrap().bodies()[0].target == "x86_64-windows";
+        let expected: &[u8] = match (windows, handle) {
+            (false, 1) => b"/one/source",
+            (false, _) => b"/one/target",
+            (true, 1) => b"/one\\source",
+            (true, _) => b"/one\\target",
+        };
+        assert_eq!(&memory[at..at + length], expected);
+        // 第一次打开后改变全局 cwd，第二个路径仍须使用入口捕获的同一 base。
+        let bytes = if self.output.lir.as_ref().unwrap().bodies()[0].target == "x86_64-windows" {
+            &b"/\0t\0w\0o\0"[..]
+        } else {
+            &b"/two"[..]
+        };
+        memory[768..768 + bytes.len()].copy_from_slice(bytes);
+        put(memory, 640 + 32, u64::try_from(bytes.len()).unwrap());
         let failed = (handle == 1 && matches!(self.failure, Failure::SourceOpen))
             || (handle == 2 && matches!(self.failure, Failure::DestinationOpen));
         result(memory, args[0], handle, failed.then_some(PERMISSION_DENIED));
@@ -259,6 +286,21 @@ fn verify_target(target: TargetName) {
     verify_copy_cases(&output);
 }
 fn verify_copy_cases(output: &Compilation) {
+    let cwd_symbol = output
+        .lir
+        .as_ref()
+        .unwrap()
+        .bodies()
+        .iter()
+        .find(|body| body.name == "cwd_locked")
+        .expect("真实 cwd 快照实现")
+        .instructions
+        .iter()
+        .find_map(|instruction| match instruction.op {
+            Op::SymbolAddr(Symbol::Global { key, .. }) => Some(key),
+            _ => None,
+        })
+        .expect("启动 cwd 控制记录");
     let hir = output.hir.as_ref().unwrap().module();
     let key = hir
         .definitions
@@ -347,6 +389,7 @@ fn verify_copy_cases(output: &Compilation) {
     ] {
         let mut harness = CopyHarness {
             output,
+            cwd_symbol,
             failure,
             events: Vec::new(),
             next: 4096,
@@ -357,6 +400,23 @@ fn verify_copy_cases(output: &Compilation) {
             depth: 0,
         };
         let mut memory = vec![0; 16384];
+        // 显式提供启动快照和两个相对 Path；继续执行真实锁与双路径定位。
+        put(&mut memory, 512, 1);
+        put(&mut memory, 520, 640);
+        put(&mut memory, 640 + 24, 768);
+        let cwd = if body.target == "x86_64-windows" {
+            &b"/\0o\0n\0e\0"[..]
+        } else {
+            &b"/one"[..]
+        };
+        memory[768..768 + cwd.len()].copy_from_slice(cwd);
+        put(&mut memory, 640 + 32, u64::try_from(cwd.len()).unwrap());
+        put(&mut memory, 128, 1024);
+        put(&mut memory, 136, 6);
+        put(&mut memory, 256, 1040);
+        put(&mut memory, 264, 6);
+        memory[1024..1030].copy_from_slice(b"source");
+        memory[1040..1046].copy_from_slice(b"target");
         harness.evaluate(body, &[0, 128, 256], &mut memory);
         assert_eq!(memory[0], u8::from(error.is_some()), "{failure:?}");
         if let Some(error) = error {

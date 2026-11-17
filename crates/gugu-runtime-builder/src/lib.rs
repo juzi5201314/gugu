@@ -79,6 +79,51 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/env.gg",
+        include_str!("../../gugu-frontend/resources/std/env.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/process_context.gg",
+        include_str!("../../gugu-frontend/resources/runtime/process_context.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/environment.gg",
+        include_str!("../../gugu-frontend/resources/runtime/environment.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/process_layout.gg",
+        include_str!("../../gugu-frontend/resources/runtime/process_layout.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/process.gg",
+        include_str!("../../gugu-frontend/resources/std/process.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/process_spawn.gg",
+        include_str!("../../gugu-frontend/resources/runtime/process_spawn.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/process_state.gg",
+        include_str!("../../gugu-frontend/resources/runtime/process_state.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/process_pipe.gg",
+        include_str!("../../gugu-frontend/resources/runtime/process_pipe.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/process_service.gg",
+        include_str!("../../gugu-frontend/resources/runtime/process_service.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
         "std/fmt.gg",
         include_str!("../../gugu-frontend/resources/std/fmt.gg"),
         RuntimeSourceRole::StandardLibrary,
@@ -407,23 +452,4 @@ pub fn build_all() -> Result<[(TargetName, RuntimeArtifactV1); 2], RuntimeArtifa
         (TargetName::X86_64Linux, build(TargetName::X86_64Linux)?),
         (TargetName::X86_64Windows, build(TargetName::X86_64Windows)?),
     ])
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn source_table_is_complete_and_decodable() {
-        let sources = sources();
-        assert_eq!(
-            sources.len(),
-            69 + usize::from(cfg!(feature = "runtime-gc-probes")) * 2
-        );
-        let artifact = build(TargetName::X86_64Linux).expect("build runtime artifact");
-        let bytes = artifact.encode().expect("encode runtime artifact");
-        let decoded = RuntimeArtifactV1::decode(&bytes).expect("decode runtime artifact");
-        assert_eq!(decoded.manifest.sources.len(), sources.len());
-        assert_eq!(decoded.manifest.target, "x86_64-linux");
-    }
 }

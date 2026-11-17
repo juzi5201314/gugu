@@ -71,9 +71,12 @@ fn native_work(harness: &mut ResourceHarness<'_>, memory: &mut Vec<u8>) {
 fn dirty_admission_is_independent_of_blocking_credit_and_observes_completion() {
     let mut imports: Vec<_> = crate::NativeLink::THREAD_SYMBOLS
         .into_iter()
-        .map(|name| ("libc.so.6".into(), name.into()))
+        .map(|name| crate::NativeImport::function("libc.so.6", name))
         .collect();
-    imports.extend(["native_probe", "dirty_probe"].map(|name| ("libprobe.so".into(), name.into())));
+    imports.extend(
+        ["native_probe", "dirty_probe"]
+            .map(|name| crate::NativeImport::function("libprobe.so", name)),
+    );
     let output = Compiler::shared().compile(
         CompileRequest::single_file(
             "main.gg",
@@ -151,9 +154,9 @@ fn dirty_work(harness: &mut ResourceHarness<'_>, memory: &mut Vec<u8>) {
 fn ordinary_c_and_files_share_admission_and_release_packet_after_completion() {
     let mut imports: Vec<_> = crate::NativeLink::THREAD_SYMBOLS
         .into_iter()
-        .map(|name| ("libc.so.6".into(), name.into()))
+        .map(|name| crate::NativeImport::function("libc.so.6", name))
         .collect();
-    imports.push(("libprobe.so".into(), "native_probe".into()));
+    imports.push(crate::NativeImport::function("libprobe.so", "native_probe"));
     let output = Compiler::shared().compile(
         CompileRequest::single_file(
             "main.gg",
