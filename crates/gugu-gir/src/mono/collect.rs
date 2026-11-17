@@ -212,11 +212,8 @@ impl<'a, 'b> Driver<'a, 'b> {
                 .iter()
                 .find(|body| body.owner == entry.definition)
             {
-                for glue in crate::contract::demand::referenced(
-                    self.context,
-                    body,
-                    &entry.bindings,
-                ) {
+                for glue in crate::contract::demand::referenced(self.context, body, &entry.bindings)
+                {
                     if let Some(definition) =
                         crate::contract::demand::definition(self.context, glue)
                     {

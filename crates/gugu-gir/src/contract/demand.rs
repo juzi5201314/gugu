@@ -78,7 +78,8 @@ pub fn referenced(
                     ..
                 } if place.is_local()
                     && matches!(
-                        context.type_at(body.locals[place.local.index()].ty, bindings)
+                        context
+                            .type_at(body.locals[place.local.index()].ty, bindings)
                             .as_ref(),
                         Ok(crate::semantics::Ty::String)
                     ) =>

@@ -450,13 +450,7 @@ impl Builder<'_> {
                 } else {
                     for field in variants.into_iter().flatten() {
                         let child = self.offset(pointer, field.offset);
-                        self.root_init_active(
-                            slot,
-                            offset + field.offset,
-                            field.ty,
-                            child,
-                            None,
-                        )?;
+                        self.root_init_active(slot, offset + field.offset, field.ty, child, None)?;
                     }
                 }
             }
@@ -464,13 +458,7 @@ impl Builder<'_> {
                 let stride = self.layout(element).layout.expect("数组元素有布局").size;
                 for index in 0..count {
                     let child = self.offset(pointer, index * stride);
-                    self.root_init_active(
-                        slot,
-                        offset + index * stride,
-                        element,
-                        child,
-                        None,
-                    )?;
+                    self.root_init_active(slot, offset + index * stride, element, child, None)?;
                 }
             }
             _ => {

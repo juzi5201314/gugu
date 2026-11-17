@@ -766,4 +766,3 @@ fn caller_type_parameter_does_not_rebind_callee_parameter() {
     );
     assert_eq!(instance_map(&output.mono)["outer"], vec!["inner", "inner"]);
 }
-

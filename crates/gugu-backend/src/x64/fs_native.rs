@@ -148,33 +148,39 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
             windows_wall_clock(),
         ],
     };
-    ["fs_start", "fs_poll", "fs_native_worker", "monotonic_nanos", "wall_nanos"]
-        .into_iter()
-        .zip(builders)
-        .map(|(name, builder)| blob(name, builder))
-        .chain(std::iter::once(blob(
-            "foreign_native_worker",
-            foreign::worker(target),
-        )))
-        .chain([
-            blob(
-                "callback_file_worker",
-                match target {
-                    TargetName::X86_64Linux => linux_file_worker(false),
-                    TargetName::X86_64Windows => windows_worker(),
-                },
-            ),
-            blob("thread_id", thread_id(target)),
-            blob("callback_control", callback::control()),
-            blob("callback_queue", callback::queue()),
-            blob("stack_read_word", stack::read_word()),
-            blob("cage_control", stack::cage_control()),
-            blob("stack_copy_raw", stack::copy_raw()),
-        ])
-        .chain([net::fragment(target), net::resolver_fragment(target)])
-        .chain([environment::startup(target), environment::symbols(target)])
-        .chain([process::call(target), process::worker(target)])
-        .collect()
+    [
+        "fs_start",
+        "fs_poll",
+        "fs_native_worker",
+        "monotonic_nanos",
+        "wall_nanos",
+    ]
+    .into_iter()
+    .zip(builders)
+    .map(|(name, builder)| blob(name, builder))
+    .chain(std::iter::once(blob(
+        "foreign_native_worker",
+        foreign::worker(target),
+    )))
+    .chain([
+        blob(
+            "callback_file_worker",
+            match target {
+                TargetName::X86_64Linux => linux_file_worker(false),
+                TargetName::X86_64Windows => windows_worker(),
+            },
+        ),
+        blob("thread_id", thread_id(target)),
+        blob("callback_control", callback::control()),
+        blob("callback_queue", callback::queue()),
+        blob("stack_read_word", stack::read_word()),
+        blob("cage_control", stack::cage_control()),
+        blob("stack_copy_raw", stack::copy_raw()),
+    ])
+    .chain([net::fragment(target), net::resolver_fragment(target)])
+    .chain([environment::startup(target), environment::symbols(target)])
+    .chain([process::call(target), process::worker(target)])
+    .collect()
 }
 
 /// 可选片段统一按已生成代码的重定位可达性选择，三个镜像消费者共用。

@@ -226,7 +226,10 @@ fn compiled_foreign_sites_enter_the_runtime_contract() {
         plan.foreign_ordinary_sites(),
         baseline.foreign_ordinary_sites() + 1
     );
-    assert_eq!(plan.foreign_dirty_sites(), baseline.foreign_dirty_sites() + 1);
+    assert_eq!(
+        plan.foreign_dirty_sites(),
+        baseline.foreign_dirty_sites() + 1
+    );
     assert_eq!(plan.foreign_leaf_sites(), baseline.foreign_leaf_sites() + 1);
     assert_eq!(plan.foreign_max_blocking_workers(), MAX_BLOCKING_WORKERS);
     let again = Compiler::new().compile(

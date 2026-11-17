@@ -70,7 +70,11 @@ fn std_io_and_path_compile_and_user_path_stays_reserved() {
         "fn main() {}",
         TargetName::X86_64Linux,
     ));
-    assert!(baseline.is_success(), "{:?}", baseline.diagnostics().items());
+    assert!(
+        baseline.is_success(),
+        "{:?}",
+        baseline.diagnostics().items()
+    );
     let plan = cold.image_plan().expect("计划");
     assert_eq!(
         plan.blocking_io_sites(),
