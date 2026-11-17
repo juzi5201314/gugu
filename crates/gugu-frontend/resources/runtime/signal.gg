@@ -1,0 +1,239 @@
+/* 信号捕获：OS 侧只运行 signalfd 读线程，绝不执行用户代码。*/
+/* 订阅记录挂在进程级 ctl 页；投递、合并与 dropped 账本由 service 在 worker 循环内驱动。*/
+
+use std.runtime.fs_platform.{control_allocate, control_free, native_call}
+use std.runtime.heap.{heap_word, heap_store_word, heap_store_word32}
+use std.runtime.scheduler.{park_current, ready_hot}
+use std.runtime.counters as counters
+
+const REQUEST_BYTES: uint = 128
+const REQUEST_VALUE: uint = 64
+const REQUEST_ERROR: uint = 72
+const WORKER_STACK_BYTES: uint = 65536
+const SIGINFO_BYTES: uint = 128
+const DEFAULT_CAPACITY: uint = 16
+const RING_ENTRY_BYTES: uint = 16
+const SUB_BYTES: uint = 96
+const NODE_BYTES: uint = 32
+
+/* ctl 页：+0 subs, +8 fd, +16 mask, +24 req, +32 stack, +40 siginfo buf, +48 mask cell, +56 inflight。*/
+static ctl: uint = 0
+/* 订阅：+0 next, +8 mask, +16 pending_mask, +24 ring, +32 capacity, +40 head, +48 count, +56 dropped, +64 closed, +72/+80 waiter 链。*/
+/* 等待节点：+0 next, +8 hot, +16 sub。*/
+
+pub const ERROR_CLOSED: uint = 1
+
+fn word(p: uint) uint { unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](p)) } }
+fn put(p: uint, v: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](p), v) } }
+fn fail() { unsafe { std.runtime.process_exit(2) } }
+fn mask_bit(signo: uint) uint { if signo == 0 || signo > 64 { return 0 } uint(1) << (signo - 1) }
+
+pub fn pending() bool { unsafe { ctl != 0 && word(ctl) != 0 } }
+
+fn control() uint {
+    if ctl != 0 { return ctl }
+    let page = control_allocate(4096)
+    let i: uint = 0
+    while i < 4096 { put(page + i, 0)
+ i = i + 8 }
+    let mask_cell = control_allocate(8)
+    put(page + 48, mask_cell)
+    put(page + 40, control_allocate(SIGINFO_BYTES))
+    ctl = page
+    page
+}
+
+/* 合并 Linux 侧捕获面：先 sigprocmask(SIG_BLOCK) 防止默认处理，再创建或重设 signalfd。*/
+#[cfg(os = "linux")]
+fn arm(extra_mask: uint) uint { unsafe {
+    let page = control()
+    let merged = word(page + 16) | extra_mask
+    if merged == word(page + 16) { return 0 }
+    put(page + 16, merged)
+    put(word(page + 48), merged)
+    let blocked = native_call(14, 0, word(page + 48), 0, 8, 0, 0, 0, 0, 0)
+    if blocked.error != 0 { return blocked.error }
+    let fd = word(page + 8)
+    let created = native_call(289, if fd == 0 { ~uint(0) } else { fd }, word(page + 48), 524288, 0, 0, 0, 0, 0, 0)
+    if created.error != 0 { return created.error }
+    if fd == 0 { put(page + 8, created.value) }
+    0
+} }
+#[cfg(os = "windows")]
+fn arm(extra_mask: uint) uint { unsafe {
+    let page = control()
+    put(page + 16, word(page + 16) | extra_mask)
+    0
+} }
+
+/// `capacity` 是不同信号各自的队列深度；同一 signo 未取走时合并而不是占新槽。
+pub fn subscribe(mask: uint, capacity: uint) uint { unsafe {
+    let page = control()
+    if arm(mask) != 0 { return 0 }
+    let sub = control_allocate(SUB_BYTES)
+    let i: uint = 0
+    while i < SUB_BYTES { put(sub + i, 0)
+ i = i + 8 }
+    put(sub + 8, mask)
+    put(sub + 24, control_allocate(capacity * RING_ENTRY_BYTES))
+    put(sub + 32, capacity)
+    put(sub, word(page))
+    put(page, sub)
+    sub
+} }
+
+/* 关闭只打标记；在途等待者与已排队事件由 service 清扫，保持单一唤醒者。*/
+pub fn close(sub: uint) { unsafe {
+    if sub == 0 { return }
+    put(sub + 64, 1)
+} }
+
+/* 提交一次阻塞读：native worker 线程持有 in-flight 请求直到 signalfd 可读或 fd 关闭。*/
+#[cfg(os = "linux")]
+fn pump(page: uint) { unsafe {
+    if word(page + 8) == 0 || word(page + 56) != 0 { return }
+    if word(page + 24) == 0 {
+        put(page + 24, control_allocate(REQUEST_BYTES))
+        put(page + 32, control_allocate(WORKER_STACK_BYTES) + WORKER_STACK_BYTES)
+    }
+    let req = word(page + 24)
+    let i: uint = 0
+    while i < REQUEST_BYTES { put(req + i, 0)
+ i = i + 8 }
+    put(req + 8, 0)
+    put(req + 16, word(page + 8))
+    put(req + 24, word(page + 40))
+    put(req + 32, SIGINFO_BYTES)
+    if std.runtime.fs_start(req, word(page + 32)) == 0 { put(page + 56, 1) }
+} }
+#[cfg(os = "windows")]
+fn pump(page: uint) { _ = page }
+
+/* signalfd_siginfo 的 ssi_signo 在 +0（u32）。*/
+#[cfg(os = "linux")]
+fn harvest(page: uint) { unsafe {
+    if word(page + 56) == 0 { return }
+    let req = word(page + 24)
+    if std.runtime.fs_poll(req) == 0 { return }
+    put(page + 56, 0)
+    if word(req + REQUEST_ERROR) != 0 || word(req + REQUEST_VALUE) < 32 { return }
+    deliver(word(word(page + 40)) & 4294967295)
+} }
+#[cfg(os = "windows")]
+fn harvest(page: uint) { _ = page }
+
+fn deliver(signo: uint) { unsafe {
+    if signo == 0 { return }
+    let bit = mask_bit(signo)
+    let sub = word(ctl)
+    while sub != 0 {
+        if word(sub + 64) == 0 && word(sub + 8) & bit != 0 { enqueue(sub, signo, bit) }
+        sub = word(sub)
+    }
+} }
+
+fn enqueue(sub: uint, signo: uint, bit: uint) { unsafe {
+    if word(sub + 16) & bit != 0 {
+        /* 已排队同 signo：occurrences 饱和递增，饱和后计入 dropped。*/
+        let count = word(sub + 48)
+        let i: uint = 0
+        while i < count {
+            let slot = word(sub + 24) + ((word(sub + 40) + i) % word(sub + 32)) * RING_ENTRY_BYTES
+            if word(slot) == signo {
+                if word(slot + 8) == ~uint(0) { drop_one(sub) } else { put(slot + 8, word(slot + 8) + 1) }
+                return
+            }
+            i = i + 1
+        }
+        return
+    }
+    if word(sub + 48) >= word(sub + 32) { drop_one(sub)
+ return }
+    let slot = word(sub + 24) + ((word(sub + 40) + word(sub + 48)) % word(sub + 32)) * RING_ENTRY_BYTES
+    put(slot, signo)
+    put(slot + 8, 1)
+    put(sub + 48, word(sub + 48) + 1)
+    put(sub + 16, word(sub + 16) | bit)
+    wake_waiter(sub)
+} }
+
+fn drop_one(sub: uint) { unsafe {
+    put(sub + 56, word(sub + 56) + 1)
+    counters.add(counters.SIGNAL_DROPPED, 1)
+} }
+
+/* 唤醒首个等待者：把 signo 留在队列里，recv 醒来后 pop。*/
+fn wake_waiter(sub: uint) { unsafe {
+    let node = word(sub + 72)
+    if node == 0 { return }
+    put(sub + 72, word(node))
+    if word(sub + 72) == 0 { put(sub + 80, 0) }
+    let hot = word(node + 8)
+    control_free(node, NODE_BYTES)
+    ready_hot(hot)
+} }
+
+/// service 在 worker 循环内运行：收获完成的读、重挂泵、清扫已关闭订阅的等待者。
+pub fn service() { unsafe {
+    if ctl == 0 { return }
+    let page = ctl
+    let sub = word(page)
+    while sub != 0 {
+        if word(sub + 64) != 0 || word(sub + 48) != 0 {
+            /* 已关闭的等待者直接唤醒；未关闭时队列有货即可唤醒排队者。*/
+            while word(sub + 72) != 0 && (word(sub + 64) != 0 || word(sub + 48) != 0) {
+                let node = word(sub + 72)
+                put(sub + 72, word(node))
+                if word(sub + 72) == 0 { put(sub + 80, 0) }
+                let hot = word(node + 8)
+                control_free(node, NODE_BYTES)
+                ready_hot(hot)
+            }
+        }
+        sub = word(sub)
+    }
+    if word(page) != 0 {
+        harvest(page)
+        pump(page)
+    }
+} }
+
+/* try_recv：摘取 head 事件；返回 (signo, occurrences, error)。*/
+pub fn try_recv(sub: uint) (uint, uint, uint) { unsafe {
+    if sub == 0 { return (0, 0, ERROR_CLOSED) }
+    if word(sub + 48) != 0 {
+        let slot = word(sub + 24) + word(sub + 40) * RING_ENTRY_BYTES
+        let signo = word(slot)
+        let occurrences = word(slot + 8)
+        put(sub + 40, (word(sub + 40) + 1) % word(sub + 32))
+        put(sub + 48, word(sub + 48) - 1)
+        put(sub + 16, word(sub + 16) & ~mask_bit(signo))
+        return (signo, occurrences, 0)
+    }
+    if word(sub + 64) != 0 { return (0, 0, ERROR_CLOSED) }
+    (0, 0, 0)
+} }
+
+/* recv：队列空且未关闭时挂起当前协程。*/
+pub fn recv(sub: uint) (uint, uint, uint) { unsafe {
+    if sub == 0 { return (0, 0, ERROR_CLOSED) }
+    let (signo, occurrences, error) = try_recv(sub)
+    if error != 0 || signo != 0 { return (signo, occurrences, error) }
+    if word(sub + 64) != 0 { return (0, 0, ERROR_CLOSED) }
+    let node = control_allocate(NODE_BYTES)
+    put(node, 0)
+    put(node + 8, std.runtime.current_slot())
+    put(node + 16, sub)
+    if word(sub + 80) != 0 { put(word(sub + 80), node) } else { put(sub + 72, node) }
+    put(sub + 80, node)
+    park_current()
+    /* 醒来：已关闭清理由 service 完成；这里直接尝试摘取。*/
+    try_recv(sub)
+} }
+
+pub fn dropped(sub: uint) uint { unsafe {
+    if sub == 0 { return 0 }
+    let count = word(sub + 56)
+    put(sub + 56, 0)
+    count
+} }

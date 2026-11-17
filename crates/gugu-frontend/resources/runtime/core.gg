@@ -8,6 +8,7 @@ use std.runtime.network_service as network
 use std.runtime.process_context as process_context
 use std.runtime.timer as timer
 use std.runtime.control as control
+use std.runtime.signal as signal
 
 /* Gugu runtime 源树的 bootstrap 编译单元。平台入口和 intrinsic 保持在明确边界内。
  *
@@ -320,9 +321,10 @@ fn resume_with_io(state: uint, processor: uint) uint {
         callback_service(processor)
         pressure_service(processor)
         timer.service()
+        signal.service()
         let ready = resume_ready(state)
         if ready != 0 { return ready }
-        if !filesystem.pending(processor) && !callback_pending() && !network.pending(processor) && !timer.pending() { return 0 };
+        if !filesystem.pending(processor) && !callback_pending() && !network.pending(processor) && !timer.pending() && !signal.pending() { return 0 };
     }
 }
 unsafe fn resume_main(state: uint) {

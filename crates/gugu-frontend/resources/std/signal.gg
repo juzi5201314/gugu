@@ -1,0 +1,101 @@
+use std.runtime.signal as cap
+
+pub enum Signal {
+    Interrupt,
+    Terminate,
+    #[cfg(os = "linux")] Hangup,
+    #[cfg(os = "linux")] User1,
+    #[cfg(os = "linux")] User2,
+    #[cfg(os = "windows")] Break,
+}
+
+pub enum Error {
+    Closed,
+    Unsupported,
+    InvalidSignal,
+    InvalidCapacity,
+    Empty,
+}
+
+pub struct SignalEvent {
+    pub signal: Signal,
+    pub occurrences: uint,
+}
+
+pub struct SignalSubscription {
+    control: uint,
+}
+
+/* Linux 按 POSIX signo 编码；Windows 按控制台事件编码（Interrupt=0, Break=1, Terminate=2）。*/
+#[cfg(os = "linux")]
+fn signo(signal: Signal) uint {
+    match signal {
+        Signal::Interrupt => 2,
+        Signal::Terminate => 15,
+        Signal::Hangup => 1,
+        Signal::User1 => 10,
+        Signal::User2 => 12,
+    }
+}
+#[cfg(os = "windows")]
+fn signo(signal: Signal) uint {
+    match signal {
+        Signal::Interrupt => 0,
+        Signal::Terminate => 2,
+        Signal::Break => 1,
+    }
+}
+#[cfg(os = "linux")]
+fn signal_of(value: uint) Signal {
+    if value == 2 { return Signal::Interrupt }
+    if value == 15 { return Signal::Terminate }
+    if value == 1 { return Signal::Hangup }
+    if value == 10 { return Signal::User1 }
+    if value == 12 { return Signal::User2 }
+    Signal::Interrupt
+}
+#[cfg(os = "windows")]
+fn signal_of(value: uint) Signal {
+    if value == 0 { return Signal::Interrupt }
+    if value == 1 { return Signal::Break }
+    Signal::Terminate
+}
+
+fn subscribe_inner(signals: &[Signal], capacity: uint) Result[SignalSubscription, Error] {
+    if signals.len() == 0 { return Err(Error::InvalidSignal) }
+    if capacity == 0 { return Err(Error::InvalidCapacity) }
+    let mask: uint = 0
+    let i = 0
+    while i < signals.len() {
+        let value = signo(signals[i])
+        if value > 64 { return Err(Error::InvalidSignal) }
+        mask = mask | (uint(1) << (value - 1))
+        i = i + 1
+    }
+    /* Windows 控制台捕获面尚未实现：订阅结构正常建立但不投递。*/
+    #[cfg(os = "windows")]
+    { return Err(Error::Unsupported) }
+    let control = cap.subscribe(mask, capacity)
+    if control == 0 { return Err(Error::Unsupported) }
+    Ok(SignalSubscription { control: control })
+}
+
+pub fn subscribe(signals: &[Signal]) Result[SignalSubscription, Error] = subscribe_inner(signals, 16)
+
+pub fn subscribe_with_capacity(signals: &[Signal], capacity: uint) Result[SignalSubscription, Error] = subscribe_inner(signals, capacity)
+
+impl SignalSubscription {
+    pub fn recv(self: &Self) Result[SignalEvent, Error] {
+        let (signo, occurrences, error) = unsafe { cap.recv(self.control) }
+        if error != 0 { return Err(Error::Closed) }
+        Ok(SignalEvent { signal: signal_of(signo), occurrences: occurrences })
+    }
+    pub fn try_recv(self: &Self) Result[SignalEvent, Error] {
+        let (signo, occurrences, error) = unsafe { cap.try_recv(self.control) }
+        if error != 0 { return Err(Error::Closed) }
+        if signo == 0 { return Err(Error::Empty) }
+        Ok(SignalEvent { signal: signal_of(signo), occurrences: occurrences })
+    }
+    pub fn close(self: &Self) { unsafe { cap.close(self.control) } }
+    pub fn dropped(self: &Self) uint = unsafe { cap.dropped(self.control) }
+}

@@ -369,7 +369,7 @@ fn linux_file_worker(exit_thread: bool) -> Builder {
     rr(&mut b, R12, Rdi);
     load(&mut b, Rax, R12, OPERATION);
     for code in [
-        0, 1, 2, 3, 5, 8, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262,
+        0, 1, 2, 3, 5, 8, 14, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262, 289,
     ] {
         compare(&mut b, Rax, code);
         jump(&mut b, "je", accepted);
