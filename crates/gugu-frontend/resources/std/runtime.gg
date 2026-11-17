@@ -171,7 +171,7 @@ pub fn set_memory_limit(value: Option[uint]) Result[Option[uint], RuntimeError] 
 }
 
 /* 当前每协程逻辑栈上限；只由 GUGU_RUNTIME_STACK_MAX 在启动时设置。 */
-pub fn stack_limit() uint = 1073741824
+pub fn stack_limit() uint = control.stack_limit()
 
 pub fn safepoint_poll() = control.safepoint_poll()
 

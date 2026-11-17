@@ -156,6 +156,52 @@ unsafe fn is_memory_limit_key(entry: uint) bool {
     unsafe { has_key_bytes(entry, 26) && word(entry) == uint(0x4e55525f55475547) && word(entry + 8) == uint(0x4d454d5f454d4954) && word(entry + 16) == uint(0x494d494c5f59524f) && byte_at(entry + 24) == byte(84) && byte_at(entry + 25) == byte(61) }
 }
 
+/* `GUGU_RUNTIME_PROCS=`：名称 18 字节，`=` 在 18，值从 +19 开始。*/
+unsafe fn is_procs_key(entry: uint) bool {
+    unsafe { has_key_bytes(entry, 19) && word(entry) == uint(0x4e55525f55475547) && word(entry + 8) == uint(0x4f52505f454d4954) && word(entry + 16) & uint(16777215) == uint(0x3d5343) }
+}
+
+/* `GUGU_RUNTIME_STACK_MAX=`：名称 22 字节，值从 +23 开始。*/
+unsafe fn is_stack_max_key(entry: uint) bool {
+    unsafe { has_key_bytes(entry, 23) && word(entry) == uint(0x4e55525f55475547) && word(entry + 8) == uint(0x4154535f454d4954) && word(entry + 16) & uint(72057594037927935) == uint(0x3d58414d5f4b43) }
+}
+
+/* `GUGU_RUNTIME_TRACE=`：名称 18 字节，值从 +19 开始。*/
+unsafe fn is_trace_key(entry: uint) bool {
+    unsafe { has_key_bytes(entry, 19) && word(entry) == uint(0x4e55525f55475547) && word(entry + 8) == uint(0x4152545f454d4954) && word(entry + 16) & uint(16777215) == uint(0x3d4543) }
+}
+
+/* trace 类别名：scheduler=1, gc=2, signal=4, panic=8；all=15, off=0。未知名属于
+ * InvalidConfiguration。返回段 mask，段为 [start, end)。*/
+unsafe fn trace_name(start: uint, end: uint) uint {
+    unsafe {
+        let len = end - start
+        if len == 2 && byte_at(start) == byte(103) && byte_at(start + 1) == byte(99) { return uint(2) }
+        if len == 3 && byte_at(start) == byte(97) && byte_at(start + 1) == byte(108) && byte_at(start + 2) == byte(108) { return uint(15) }
+        if len == 3 && byte_at(start) == byte(111) && byte_at(start + 1) == byte(102) && byte_at(start + 2) == byte(102) { return uint(0) }
+        if len == 5 && byte_at(start) == byte(112) && byte_at(start + 1) == byte(97) && byte_at(start + 2) == byte(110) && byte_at(start + 3) == byte(105) && byte_at(start + 4) == byte(99) { return uint(8) }
+        if len == 6 && byte_at(start) == byte(115) && byte_at(start + 1) == byte(105) && byte_at(start + 2) == byte(103) && byte_at(start + 3) == byte(110) && byte_at(start + 4) == byte(97) && byte_at(start + 5) == byte(108) { return uint(4) }
+        if len == 9 && word(start) == uint(0x656c756465686373) && byte_at(start + 8) == byte(114) { return uint(1) }
+        fatal_configuration()
+        uint(0)
+    }
+}
+
+unsafe fn parse_trace(value: uint) uint {
+    unsafe {
+        let mask: uint = 0
+        let seg = value
+        let done = false
+        while done == false {
+            let end = seg
+            while byte_at(end) != byte(44) && byte_at(end) != byte(0) { end = end + 1 }
+            mask = mask | trace_name(seg, end)
+            if byte_at(end) == byte(0) { done = true } else { seg = end + 1 }
+        }
+        mask
+    }
+}
+
 unsafe fn parse_startup_environment(environment: uint, destination: uint) { unsafe {
     let tagged = environment & uint(1)
     let environment = environment & ~uint(1)
@@ -164,11 +210,17 @@ unsafe fn parse_startup_environment(environment: uint, destination: uint) { unsa
         store_word(destination + 8, 0)
         store_word(destination + 16, 0)
         store_word(destination + 24, environment)
+        store_word(destination + 32, 0)
+        store_word(destination + 40, 0)
+        store_word(destination + 48, 0)
         return
     }
     let target: uint = 100
     let memory_limit: uint = 0
     let flags: uint = 0
+    let procs: uint = 0
+    let trace: uint = 0
+    let stack_max: uint = 0
     let cursor = environment
     while cursor != 0 {
         let entry = word(cursor)
@@ -185,6 +237,17 @@ unsafe fn parse_startup_environment(environment: uint, destination: uint) { unsa
                 memory_limit = value
                 if value == 0 { flags = flags | MEMORY_LIMIT_OFF } else { let _ = 0 }
             }
+            if is_procs_key(entry) {
+                procs = startup_decimal(entry + 19, false, false)
+            }
+            if is_stack_max_key(entry) {
+                let value = startup_decimal(entry + 23, true, false)
+                if value < uint(65536) || value > uint(9223372036854775807) { fatal_configuration() }
+                stack_max = value
+            }
+            if is_trace_key(entry) {
+                trace = parse_trace(entry + 19)
+            }
             cursor = cursor + 8
         }
     }
@@ -192,6 +255,9 @@ unsafe fn parse_startup_environment(environment: uint, destination: uint) { unsa
     store_word(destination + 8, memory_limit)
     store_word(destination + 16, flags)
     store_word(destination + 24, environment)
+    store_word(destination + 32, procs)
+    store_word(destination + 40, trace)
+    store_word(destination + 48, stack_max)
     }
 }
 
@@ -233,6 +299,7 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         }
         parse_startup_environment(payload.boot_environment, startup_page)
         control.init_gc_target(word(startup_page), word(startup_page + 16))
+        control.init_startup(word(startup_page + 32), word(startup_page + 40), word(startup_page + 48))
         store_word(block.payload_va + bias + 120, payload.boot_environment & ~uint(1))
         store_word(state + 760, startup_page)
         // 唯一 main 协程预留 1 GiB 虚址，初始只提交 64 KiB；增长在同一虚址内提交新页，

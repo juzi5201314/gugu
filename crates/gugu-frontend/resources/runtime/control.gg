@@ -16,6 +16,7 @@ static parallelism_target: uint = 1
 static gc_target_percent: uint = 100
 static gc_target_disabled: uint = 0
 static trace_flags: uint = 0
+static stack_limit_bytes: uint = 1073741824
 
 fn fail() { unsafe { std.runtime.process_exit(2) } }
 
@@ -28,6 +29,15 @@ pub fn terminating() bool = terminating_state != 0
 pub fn init_gc_target(percent: uint, flags: uint) {
     if flags & uint(1) != 0 { gc_target_disabled = 1 } else { gc_target_percent = percent }
 }
+
+/* 启动环境写入的初始目标：值已由启动解析校验；未配置的键以 0 哨兵跳过。*/
+pub fn init_startup(procs: uint, trace: uint, stack_max: uint) {
+    if procs != 0 { parallelism_target = procs }
+    trace_flags = trace
+    if stack_max != 0 { stack_limit_bytes = stack_max }
+}
+
+pub fn stack_limit() uint = stack_limit_bytes
 
 pub fn parallelism() uint = parallelism_target
 
