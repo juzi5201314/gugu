@@ -511,11 +511,11 @@ impl Builder<'_> {
             let pointer = self.offset(address, offset);
             self.store_computed(pointer, field_ty, value)?;
             if !tagged && let Some(slot) = self.value_slot(address) {
-                self.root_init_value(slot, offset, field_ty, pointer)?;
+                self.root_init_value(slot, offset, field_ty, pointer, None)?;
             }
         }
         if tagged && let Some(slot) = self.value_slot(address) {
-            self.root_init_value(slot, 0, ty, address)?;
+            self.root_init_value(slot, 0, ty, address, Some(variant))?;
         }
         Ok(())
     }

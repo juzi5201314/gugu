@@ -665,7 +665,7 @@ impl Builder<'_> {
         if self.gir.projections_of(place).is_empty()
             && let Storage::Stack { slot, .. } = self.storage[place.local.index()]
         {
-            self.root_init_value(slot, 0, ty, destination)?;
+            self.root_init_value(slot, 0, ty, destination, None)?;
         }
         Ok(())
     }

@@ -305,7 +305,7 @@ impl Builder<'_> {
             }
             // 并集根表只能登记活动变体；位字段不能因覆盖同一偏移被误作指针。
             if let Storage::Stack { slot, .. } = self.storage[local.index()] {
-                self.root_init_value(slot, 0, ty, destination)?;
+                self.root_init_value(slot, 0, ty, destination, None)?;
             }
         }
         Ok(())
@@ -364,6 +364,7 @@ impl Builder<'_> {
         offset: u64,
         ty: u32,
         pointer: crate::body::ValueId,
+        variant: Option<u32>,
     ) -> Result<(), Diagnostic> {
         let bytes = self
             .layout(ty)
@@ -376,7 +377,7 @@ impl Builder<'_> {
                 self.root_init(slot, u32::try_from(index).expect("根编号适配 u32"), false);
             }
         }
-        self.root_init_active(slot, offset, ty, pointer)
+        self.root_init_active(slot, offset, ty, pointer, variant)
     }
 
     fn root_init_active(
@@ -385,6 +386,7 @@ impl Builder<'_> {
         offset: u64,
         ty: u32,
         pointer: crate::body::ValueId,
+        variant: Option<u32>,
     ) -> Result<(), Diagnostic> {
         if self.roots(ty).is_empty() {
             return Ok(());
@@ -396,6 +398,25 @@ impl Builder<'_> {
                 ..
             } => {
                 if tag_bytes != 0 && variants.len() > 1 {
+                    if let Some(index) = variant {
+                        // 构造现场已知 tag：只按该变体的字段收窄，不为其它
+                        // 变体发运行时分支，也不置位。
+                        let fields = variants
+                            .get(usize::try_from(index).expect("变体编号适配宿主"))
+                            .ok_or_else(|| invalid("静态变体编号越界"))?
+                            .clone();
+                        for field in fields {
+                            let child = self.offset(pointer, field.offset);
+                            self.root_init_active(
+                                slot,
+                                offset + field.offset,
+                                field.ty,
+                                child,
+                                None,
+                            )?;
+                        }
+                        return Ok(());
+                    }
                     let tag_ty = integer_type(u16::from(tag_bytes) * 8);
                     let tag = self.load(pointer, ValueType::scalar(tag_ty), 1, false);
                     let done = self.fresh(self.source.clone(), false);
@@ -413,7 +434,13 @@ impl Builder<'_> {
                         self.current = selected;
                         for field in fields {
                             let child = self.offset(pointer, field.offset);
-                            self.root_init_active(slot, offset + field.offset, field.ty, child)?;
+                            self.root_init_active(
+                                slot,
+                                offset + field.offset,
+                                field.ty,
+                                child,
+                                None,
+                            )?;
                         }
                         self.jump(done);
                         self.current = next;
@@ -423,7 +450,13 @@ impl Builder<'_> {
                 } else {
                     for field in variants.into_iter().flatten() {
                         let child = self.offset(pointer, field.offset);
-                        self.root_init_active(slot, offset + field.offset, field.ty, child)?;
+                        self.root_init_active(
+                            slot,
+                            offset + field.offset,
+                            field.ty,
+                            child,
+                            None,
+                        )?;
                     }
                 }
             }
@@ -431,7 +464,13 @@ impl Builder<'_> {
                 let stride = self.layout(element).layout.expect("数组元素有布局").size;
                 for index in 0..count {
                     let child = self.offset(pointer, index * stride);
-                    self.root_init_active(slot, offset + index * stride, element, child)?;
+                    self.root_init_active(
+                        slot,
+                        offset + index * stride,
+                        element,
+                        child,
+                        None,
+                    )?;
                 }
             }
             _ => {
