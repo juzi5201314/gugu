@@ -210,12 +210,24 @@ impl Builder<'_> {
                     args.extend(self.computed_values(value)?);
                 }
                 let ty = destination.map(|place| self.local_ty(place.local));
-                let results = ty.map_or_else(Vec::new, |ty| {
+                let mut results = ty.map_or_else(Vec::new, |ty| {
                     self.abi_lanes(ty)
                         .into_iter()
                         .map(|(_, _, kind)| (kind, Origin::None))
                         .collect()
                 });
+                if *op == GirAtomic::CompareExchange {
+                    // CAS 的结果通道固定为 (前值, i8 成功标志)：目标聚合 ABI 把
+                    // bool 槽升格成 8 字节，直接按不变量要求重定形。
+                    let value = args
+                        .get(1)
+                        .map(|value| self.body.values[value.index()].kind)
+                        .unwrap_or(ValueType::scalar(Type::I64));
+                    results = vec![
+                        (value, Origin::None),
+                        (ValueType::scalar(Type::I8), Origin::None),
+                    ];
+                }
                 let operation = match op {
                     GirAtomic::Load => AtomicOp::Load,
                     GirAtomic::Store => AtomicOp::Store,
@@ -511,11 +523,11 @@ impl Builder<'_> {
             let pointer = self.offset(address, offset);
             self.store_computed(pointer, field_ty, value)?;
             if !tagged && let Some(slot) = self.value_slot(address) {
-                self.root_init_value(slot, offset, field_ty, pointer)?;
+                self.root_init_value(slot, offset, field_ty, pointer, None)?;
             }
         }
         if tagged && let Some(slot) = self.value_slot(address) {
-            self.root_init_value(slot, 0, ty, address)?;
+            self.root_init_value(slot, 0, ty, address, Some(variant))?;
         }
         Ok(())
     }

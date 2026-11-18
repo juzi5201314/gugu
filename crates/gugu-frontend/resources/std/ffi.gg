@@ -1,0 +1,137 @@
+use std.text.{Bytes, EncodingError, utf8_decode, utf8_decode_lossy, alloc_bytes}
+
+/* 透明 C 标量别名：不产生新类型或 TypeId，宽度按目标平台表；
+   c_long/c_ulong/c_wchar 在两个目标上不同，其余固定。 */
+pub type c_char = i8
+pub type c_schar = i8
+pub type c_uchar = u8
+pub type c_short = i16
+pub type c_ushort = u16
+pub type c_int = i32
+pub type c_uint = u32
+#[cfg(os = "linux")]
+pub type c_long = i64
+#[cfg(os = "windows")]
+pub type c_long = i32
+#[cfg(os = "linux")]
+pub type c_ulong = u64
+#[cfg(os = "windows")]
+pub type c_ulong = u32
+pub type c_longlong = i64
+pub type c_ulonglong = u64
+pub type c_size = usize
+pub type c_ssize = isize
+pub type c_intptr = isize
+pub type c_uintptr = usize
+pub type c_ptrdiff = isize
+#[cfg(os = "linux")]
+pub type c_wchar = i32
+#[cfg(os = "windows")]
+pub type c_wchar = u16
+pub type c_bool = bool
+pub type c_float = f32
+pub type c_double = f64
+
+// `from_*` 的拒绝原因只记录首个 NUL 的字节序号；输入可以是任意长度。
+pub struct NulError {
+    pub offset: int,
+}
+
+impl Error for NulError {
+    fn message(self: &Self) string = "interior nul byte"
+    fn source(self: &Self) Option[&dyn Error] = None
+}
+
+impl Print for NulError {
+    fn print(self: &Self, out: &Formatter) {}
+}
+
+impl Debug for NulError {
+    fn debug(self: &Self, out: &Formatter) {}
+}
+
+// `from_ptr` 的拒绝只有空指针一种：外部内存的可读性与终止 NUL 属于 unsafe 契约。
+pub struct InvalidCString {}
+
+impl Error for InvalidCString {
+    fn message(self: &Self) string = "invalid c string pointer"
+    fn source(self: &Self) Option[&dyn Error] = None
+}
+
+impl Print for InvalidCString {
+    fn print(self: &Self, out: &Formatter) {}
+}
+
+impl Debug for InvalidCString {
+    fn debug(self: &Self, out: &Formatter) {}
+}
+
+// backing 恒含末尾 NUL；复制保持 GC 可搬迁，因此 as_ptr 的指针只在本值 pin
+// 住或不可能触发 safepoint 的区间内有效。
+pub struct CString {
+    bytes: Bytes,
+}
+
+impl CString {
+    fn checked_copy(value: Bytes) Result[CString, NulError] {
+        let source = unsafe { value.as_slice() }
+        for index in 0..source.len() {
+            if source[index] == byte(0) { return Err(NulError { offset: index }) } else {}
+        }
+        let data = unsafe { alloc_bytes(source.len() + 1) }
+        for index in 0..source.len() { data[index] = source[index] }
+        data[source.len()] = byte(0)
+        Ok(CString { bytes: unsafe { Bytes::from_owned(data) } })
+    }
+
+    pub fn from_string(value: string) Result[CString, NulError] {
+        CString::checked_copy(Bytes::from_string(value))
+    }
+
+    pub fn from_bytes(value: Bytes) Result[CString, NulError] {
+        CString::checked_copy(value)
+    }
+
+    // 返回不含结尾 NUL 的独立副本；调用方修改副本不影响本对象。
+    pub fn as_bytes(self: &Self) Bytes {
+        let data = unsafe { self.bytes.as_slice() }
+        Bytes::copy_from(data[..data.len() - 1])
+    }
+
+    // 指向含结尾 NUL 的表示；跨 safepoint 保存该指针属于调用方违约。
+    pub fn as_ptr(self: &Self) *byte {
+        let data = unsafe { self.bytes.as_slice() }
+        unsafe { std.mem.transmute[&byte, *byte](&data[0]) }
+    }
+}
+
+// 非拥有视图：只记录地址与不含 NUL 的长度，不接管外部内存寿命。
+pub struct CStr {
+    address: uint,
+    length: int,
+}
+
+impl CStr {
+    // 扫描到首个 NUL 为止；指针可读性与终止 NUL 的存在由调用方保证。
+    pub unsafe fn from_ptr(pointer: *byte) Result[CStr, InvalidCString] { unsafe {
+        let base = std.mem.transmute[*byte, uint](pointer)
+        if base == 0 { return Err(InvalidCString {}) }
+        let length = 0
+        while std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](base + uint(length))) != byte(0) {
+            length = length + 1
+        }
+        Ok(CStr { address: base, length: length })
+    } }
+
+    // 复制到受管存储；之后外部内存可以失效。
+    pub fn to_bytes(self: &Self) Bytes {
+        let data = unsafe { alloc_bytes(self.length) }
+        for index in 0..self.length {
+            data[index] = unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](self.address + uint(index))) }
+        }
+        unsafe { Bytes::from_owned(data) }
+    }
+
+    pub fn to_string(self: &Self) Result[string, EncodingError] = utf8_decode(self.to_bytes())
+    pub fn to_string_lossy(self: &Self) string = utf8_decode_lossy(self.to_bytes())
+}

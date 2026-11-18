@@ -314,6 +314,13 @@ pub enum RuntimeMachineOp {
     ProcessWorker,
     /// 单调纳秒，供 GC 暂停和 native 逻辑时间观察。
     MonotonicNanos,
+    /// 宿主当前可用并行度（CPU 数量）；失败返回 0 由调用方回落到 1。
+    ParallelismProbe,
+    /// UTC 墙钟纳秒（Unix epoch 起），供 `SystemTime` 观察；可因校时跳变。
+    WallNanos,
+    /// Windows 控制台信号登记：(ctl 页, 事件句柄) → BOOL。
+    /// handler 是纯机器片段，只写 ctl 请求槽并 SetEvent，绝不运行托管代码。
+    SignalInstall,
     /// 以当前 stack_high 相对深度读取机器字，不增长栈。
     StackReadWord,
     /// 在可移动协程栈与非移动 raw 缓冲之间精确复制字节。
@@ -344,6 +351,9 @@ impl RuntimeMachineOp {
             Self::ProcessCall => "process_call",
             Self::ProcessWorker => "process_worker",
             Self::MonotonicNanos => "monotonic_nanos",
+            Self::ParallelismProbe => "parallelism_probe",
+            Self::WallNanos => "wall_nanos",
+            Self::SignalInstall => "signal_install",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
             Self::CageControl => "cage_control",
@@ -480,6 +490,22 @@ pub const GLUE_DEFS: &[GlueDef] = &[
         def: GlueDefKind::Fragment,
     },
     GlueDef {
+        glue: "wall_nanos",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "parallelism_probe",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "signal_install",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "signal_handler",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
         glue: "fs_start",
         def: GlueDefKind::Fragment,
     },
@@ -520,10 +546,24 @@ pub const GLUE_DEFS: &[GlueDef] = &[
         },
     },
     GlueDef {
+        glue: "concat",
+        def: GlueDefKind::Item {
+            source: "std/text.gg",
+            item: "concat",
+        },
+    },
+    GlueDef {
         glue: "string_compare",
         def: GlueDefKind::Item {
             source: "std/text.gg",
             item: "string_compare",
+        },
+    },
+    GlueDef {
+        glue: "utf8_boundary",
+        def: GlueDefKind::Item {
+            source: "std/text.gg",
+            item: "utf8_boundary",
         },
     },
     GlueDef {
@@ -781,6 +821,27 @@ pub const GLUE_DEFS: &[GlueDef] = &[
         def: GlueDefKind::Item {
             source: "std/runtime/heap.gg",
             item: "gc_alloc_slow",
+        },
+    },
+    GlueDef {
+        glue: "gc_arena_new",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_arena_new",
+        },
+    },
+    GlueDef {
+        glue: "gc_arena_alloc",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_arena_alloc",
+        },
+    },
+    GlueDef {
+        glue: "gc_arena_alloc_sync",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_arena_alloc_sync",
         },
     },
     GlueDef {

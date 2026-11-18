@@ -1,9 +1,13 @@
 //! LIR `Op` 的稳定 GVN key 编码。
+use crate::body::ValueType;
 use crate::body::{Op, ValueId};
 use crate::canonical;
 
-pub fn encode_op_key(op: &Op, arguments: &[ValueId]) -> Vec<u8> {
-    canonical::to_vec(&(op, arguments)).expect("GVN op key 编码")
+/// 结果类型必须进 key：同一 op+参数可以按不同 `ValueType` 发射
+///（`SymbolAddr` 同一数据块允许携带不同 provenance），只看 op 会把
+/// `Ptr(GcHeap)` 与 `Ptr(Raw)` 错并。
+pub fn encode_op_key(op: &Op, arguments: &[ValueId], result: ValueType) -> Vec<u8> {
+    canonical::to_vec(&(op, arguments, result)).expect("GVN op key 编码")
 }
 
 #[cfg(test)]
@@ -13,15 +17,44 @@ mod tests {
 
     #[test]
     fn key_distinguishes_operation_and_arguments() {
-        let add = encode_op_key(&Op::Integer(IntOp::Add), &[ValueId(1), ValueId(2)]);
-        let swapped = encode_op_key(&Op::Integer(IntOp::Add), &[ValueId(2), ValueId(1)]);
-        let sub = encode_op_key(&Op::Integer(IntOp::Sub), &[ValueId(1), ValueId(2)]);
+        let scalar = || crate::body::ValueType::scalar(crate::body::Type::I64);
+        let add = encode_op_key(
+            &Op::Integer(IntOp::Add),
+            &[ValueId(1), ValueId(2)],
+            scalar(),
+        );
+        let swapped = encode_op_key(
+            &Op::Integer(IntOp::Add),
+            &[ValueId(2), ValueId(1)],
+            scalar(),
+        );
+        let sub = encode_op_key(
+            &Op::Integer(IntOp::Sub),
+            &[ValueId(1), ValueId(2)],
+            scalar(),
+        );
         assert_ne!(add, swapped);
         assert_ne!(add, sub);
         assert_eq!(
             add,
-            encode_op_key(&Op::Integer(IntOp::Add), &[ValueId(1), ValueId(2)])
+            encode_op_key(
+                &Op::Integer(IntOp::Add),
+                &[ValueId(1), ValueId(2)],
+                scalar()
+            )
         );
+        // 同 op+参数、不同结果类型不得共享 key。
+        let raw = encode_op_key(
+            &Op::SymbolAddr(crate::body::Symbol::Data(0)),
+            &[],
+            crate::body::ValueType::pointer(crate::body::Provenance::Raw),
+        );
+        let heap = encode_op_key(
+            &Op::SymbolAddr(crate::body::Symbol::Data(0)),
+            &[],
+            crate::body::ValueType::pointer(crate::body::Provenance::GcHeap),
+        );
+        assert_ne!(raw, heap);
     }
 
     #[test]
@@ -73,9 +106,10 @@ mod tests {
                 Op::Convert(Conversion::IntToFloat { signed: false }),
             ),
         ] {
-            let key = encode_op_key(&left, &[ValueId(3)]);
-            assert_eq!(key, encode_op_key(&left, &[ValueId(3)]));
-            assert_ne!(key, encode_op_key(&right, &[ValueId(3)]));
+            let scalar = crate::body::ValueType::scalar(crate::body::Type::I64);
+            let key = encode_op_key(&left, &[ValueId(3)], scalar);
+            assert_eq!(key, encode_op_key(&left, &[ValueId(3)], scalar));
+            assert_ne!(key, encode_op_key(&right, &[ValueId(3)], scalar));
         }
     }
 }

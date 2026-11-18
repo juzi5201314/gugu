@@ -418,6 +418,9 @@ impl Builder<'_> {
             Source::AtomicStoreRelease => (AtomicOp::Store, MemoryOrdering::Release),
             Source::AtomicFetchOrAcqRel => (AtomicOp::FetchOr, MemoryOrdering::AcqRel),
             Source::AtomicFetchAndAcqRel => (AtomicOp::FetchAnd, MemoryOrdering::AcqRel),
+            Source::AtomicCompareExchangeAcqRel => {
+                (AtomicOp::CompareExchange, MemoryOrdering::AcqRel)
+            }
             _ => return Err(gir_error("非原子原语进入 Atomic lowering", None)),
         };
         let mut values = Vec::with_capacity(kind.value_arguments());

@@ -56,8 +56,10 @@ pub fn check<'a>(
     queries: &crate::query::QueryEngine,
     runtime_paths: &std::collections::BTreeSet<String>,
     prefix: Option<&super::sema_prefix::SemaPrefix>,
+    embed: Option<comptime::embed::EmbedHost>,
 ) -> Result<SemaWorld<'a>, Vec<Diagnostic>> {
-    let model = model::Model::new(modules, names, runtime_paths)?;
+    let mut model = model::Model::new(modules, names, runtime_paths)?;
+    model.embed = embed;
     let (mut early, early_dependency) = comptime::evaluate(&model, sources, cfg, queries, prefix)?;
     if let Some(prefix) = prefix {
         // 内建定义的早期常量直取物化表；用户定义现算后按定义序追加。

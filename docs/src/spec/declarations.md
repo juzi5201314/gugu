@@ -166,7 +166,7 @@ static COUNTER: int = 0
 `Option` `Result` `Some` `None` `Ok` `Err` `Vec` `Range` `Join` `ChanClosed` `TrySendErr` `TryRecvErr` `Panic` `panic` `Print` `Debug` `Clone` `Eq` `Ord` `Hash` `StableHash` `StableOrd` `Default` `Error` `Iter` `IntoIter` `Index` `Try` `Fn` `Any` `TypeId` `Formatter` `Hasher` `Read` `Write` `HashMap` `HashSet` `Path` `Duration`
 
 `size_of` / `align_of` / `offset_of` / `type_id` / `type_id_count` 是关键字，不必 `use`，写法见 [类型](types.md)。`print` / `println` 仍在 `std.io`。`MaybeUninit`、`LocalArena`、`SyncArena`、`transmute`、`embed_file` 在 `std.mem`；`addr_of`、`ptr_read` / `ptr_write`、`read_unaligned` / `write_unaligned`、`volatile_load` / `volatile_store` 在 `std.ptr`；`unreachable` 在 `std.hint`（见 [unsafe](unsafe.md) 与 [编译期执行](comptime.md)）。`std.src.file` / `line` / `column` / `caller` 见 [词法 · track_caller](lexical.md)。`Seek`、`BufRead`、`File`、socket、进程类型、其它集合和其它标准库项按模块路径导入，见[标准库](standard-library.md)。编译器把上表里的语言 trait 当 lang item（按名字挂钩的标准库项，见 [概述 · 术语](overview.md#terminology)）：插值、`for`、`?`、`==`、`[]`（用户类型）、`dyn Any` 必须解析到这些定义，用户不能在自己的模块里再声明同名预导入项。`TypeId` 不能由用户再定义。`Any` 的 impl 由编译器生成，见 [类型 · TypeId](types.md)。
-编译器拥有但不预导入的类型同样允许按其规范模块路径导入、起别名与再导出，不要求标准库伪造一个同名源码声明；`std.mem.MaybeUninit` 必须一直保持同一 lang item 身份。
+编译器拥有但没有源码声明的标准项同样允许按其规范模块路径导入、起别名与再导出，不要求标准库伪造一个同名源码声明：非预导入类型（`std.mem.MaybeUninit` 必须一直保持同一 lang item 身份）、`std.mem`/`std.ptr`/`std.hint`/`std.platform` 的公开原语，以及 `std.runtime` 的公开运行时原语。导入别名与经模块路径到达的引用解析到同一 `External(规范路径)` 身份。`std.runtime` 的机器原语（`stack_read_word`、`alloc_bytes` 等）不是可导入项：`use` 它们报「不存在可导入项」，在源码中按限定路径调用它们报「只能由 runtime 注入源调用」。
 
 ## 结构体与枚举的值
 

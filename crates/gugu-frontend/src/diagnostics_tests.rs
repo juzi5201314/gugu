@@ -1137,6 +1137,7 @@ impl Runner {
                         require_main: true,
                         cfg: &cfg,
                         external_packages: &BTreeSet::new(),
+                        embed: None,
                     },
                     &self.queries,
                     crate::testing::resources(),

@@ -13,13 +13,17 @@ impl Builder<'_> {
     ) -> Result<Computed, Diagnostic> {
         let left = self.operand(left)?;
         let right = self.operand(right)?;
-        let left = self.computed_values(left)?;
-        let right = self.computed_values(right)?;
         if op == BinaryOp::Add && matches!(self.kind(ty), TypeKind::String) {
-            let mut args = left;
-            args.extend(right);
+            // `concat` 调用形状固定为显式 ABI 车道 (data, len) × 2：字符串是 COW 聚合，
+            // `computed_values` 只给聚合地址，glue 绑定需要逐车道实参。
+            let mut args = self.explicit_abi_values(left)?;
+            args.extend(self.explicit_abi_values(right)?);
+            // `runtime_result` 给 COW 返回值补 sret 形参，与绑定签名
+            // `(sret, &[byte], &[byte]) -> &[byte]` 的五车道形状一致。
             return self.runtime_result(RuntimeCall::Concat, args, ty);
         }
+        let left = self.computed_values(left)?;
+        let right = self.computed_values(right)?;
         if left.len() == 2 && matches!(self.kind(ty), TypeKind::Int { bits: 128, .. }) {
             return self.wide_binary(op, &left, &right, ty);
         }

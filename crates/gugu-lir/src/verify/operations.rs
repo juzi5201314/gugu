@@ -693,6 +693,8 @@ fn runtime_machine_call_valid(
         // 当前协程 slot 指针以机器字返回，Gugu 侧用 `transmute` 取得类型化指针。
         Kind::CurrentSlot
         | Kind::MonotonicNanos
+        | Kind::WallNanos
+        | Kind::ParallelismProbe
         | Kind::CageControl
         | Kind::CallbackControl
         | Kind::ProcessWorker
@@ -722,7 +724,11 @@ fn runtime_machine_call_valid(
         Kind::CallbackQueue => {
             args.len() == 3 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
-        Kind::FsStart | Kind::NetCall | Kind::StartupCall | Kind::ProcessCall => {
+        Kind::FsStart
+        | Kind::NetCall
+        | Kind::StartupCall
+        | Kind::ProcessCall
+        | Kind::SignalInstall => {
             args.len() == 2 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
     }

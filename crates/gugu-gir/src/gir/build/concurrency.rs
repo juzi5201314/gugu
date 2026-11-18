@@ -329,10 +329,11 @@ impl Builder<'_> {
                     self.locals[dest.index()].ty,
                 );
             }
+            self.goto(join);
         } else {
-            self.assign_unit(dest);
+            // 没有 default 时 otherwise 不可达，不能向结果槽写零分量值。
+            self.terminate(Terminator::Unreachable);
         }
-        self.goto(join);
         Ok(())
     }
 

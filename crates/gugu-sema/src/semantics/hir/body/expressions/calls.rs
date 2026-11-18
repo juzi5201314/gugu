@@ -95,6 +95,43 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     .expr_active(argument)
             })
             .collect();
+        if let Some(embed_literal) = self
+            .facts
+            .body
+            .embed_literals
+            .iter()
+            .find(|entry| entry.expression == callee)
+        {
+            self.expression_map[callee.0 as usize] = Some(id);
+            return Ok((
+                hir::ExprKind::Literal(hir::Literal::Bytes(embed_literal.bytes.clone())),
+                0,
+            ));
+        }
+        if let Some(source_literal) = self
+            .facts
+            .body
+            .source_literals
+            .iter()
+            .find(|entry| entry.expression == callee)
+        {
+            self.expression_map[callee.0 as usize] = Some(id);
+            let literal = match source_literal.kind {
+                crate::semantics::output::SourceField::File => {
+                    hir::Literal::String(source_literal.file.clone())
+                }
+                crate::semantics::output::SourceField::Line => {
+                    hir::Literal::Integer(u128::from(source_literal.line))
+                }
+                crate::semantics::output::SourceField::Column => {
+                    hir::Literal::Integer(u128::from(source_literal.column))
+                }
+                crate::semantics::output::SourceField::Caller => {
+                    return self.caller_construct(source_literal);
+                }
+            };
+            return Ok((hir::ExprKind::Literal(literal), 0));
+        }
         if let Some(operation) = self
             .facts
             .body
@@ -108,6 +145,8 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 MemoryIntrinsic::UninitAsPtr | MemoryIntrinsic::AssumeInit
             ) && operation.arguments.is_empty()
                 || operation.kind == MemoryIntrinsic::UninitWrite && operation.arguments.len() == 1
+                || matches!(operation.kind, MemoryIntrinsic::ArenaAlloc { .. })
+                    && operation.arguments.len() == 1
             {
                 values.push(self.receiver(callee)?);
             }
@@ -323,6 +362,28 @@ impl BodyBuilder<'_, '_, '_, '_> {
         let mut values = Vec::with_capacity(arguments.len());
         for &argument in &arguments {
             values.push(self.expression(argument)?);
+        }
+        /* #[track_caller] 目标追加调用点隐藏实参：直调走 Value 目标（callee 是
+        Resolved(Def) 的静态可解值），派发目标读 dispatch.function。*/
+        let track_caller = match target {
+            hir::CallTarget::Dispatch(dispatch) => {
+                self.output.dispatches[dispatch as usize].function
+            }
+            hir::CallTarget::Value(expression) => {
+                match self.expressions[expression.index()].as_ref() {
+                    Some(hir::Expression {
+                        kind: hir::ExprKind::Resolved(hir::Res::Def(definition)),
+                        ..
+                    }) => Some(*definition),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(definition) = track_caller
+            && self.compiler.output.definitions[definition.index()].track_caller
+        {
+            self.caller_arguments(&mut values, callee)?;
         }
         let effects = self.call_plans(source, callee, id)?;
         let arguments = self.expression_list(values)?;
@@ -582,6 +643,101 @@ impl BodyBuilder<'_, '_, '_, '_> {
 
     fn is_len_self(ty: &Ty) -> bool {
         matches!(ty.deref(), Ty::Array(_, _) | Ty::Slice(_))
+    }
+
+    /// `std.src.caller()`：track_caller owner 读隐藏形参，普通 owner 折叠为
+    /// 调用点常量；`Construct` 直接产 `Location` 值。
+    fn caller_construct(
+        &mut self,
+        literal: &crate::semantics::output::SourceLiteral,
+    ) -> Result<(hir::ExprKind, u32), Diagnostic> {
+        let span = self.arena().exprs[literal.expression.0 as usize]
+            .span
+            .clone();
+        let mut fields = Vec::with_capacity(3);
+        if let Some(locals) = self.caller_params_locals() {
+            for local in locals {
+                let ty = self.output.locals[local.index()].ty;
+                fields.push(self.caller_arg(
+                    ty,
+                    hir::ExprKind::Resolved(hir::Res::Local(local)),
+                    &span,
+                )?);
+            }
+        } else {
+            let string = self.type_id(&Ty::String)?;
+            let int = self.type_id(&Ty::int())?;
+            fields.push(self.caller_arg(
+                string,
+                hir::ExprKind::Literal(hir::Literal::String(literal.file.clone())),
+                &span,
+            )?);
+            fields.push(self.caller_arg(
+                int,
+                hir::ExprKind::Literal(hir::Literal::Integer(u128::from(literal.line))),
+                &span,
+            )?);
+            fields.push(self.caller_arg(
+                int,
+                hir::ExprKind::Literal(hir::Literal::Integer(u128::from(literal.column))),
+                &span,
+            )?);
+        }
+        let start = checked_id(self.output.fields.len())?;
+        for (index, value) in fields.into_iter().enumerate() {
+            self.output.fields.push(hir::FieldValue {
+                field: checked_id(index)?,
+                value,
+            });
+        }
+        Ok((
+            hir::ExprKind::Construct {
+                variant: 0,
+                fields: start..checked_id(self.output.fields.len())?,
+            },
+            0,
+        ))
+    }
+
+    /// 调用 `#[track_caller]` 函数时按规范追加三个隐藏实参：track_caller
+    /// 调用方转发自己的隐藏形参，普通调用方折叠为调用点常量。
+    fn caller_arguments(
+        &mut self,
+        values: &mut Vec<hir::ExprId>,
+        callee: ast::ExprId,
+    ) -> Result<(), Diagnostic> {
+        let span = self.arena().exprs[callee.0 as usize].span.clone();
+        if let Some(locals) = self.caller_params_locals() {
+            for local in locals {
+                let ty = self.output.locals[local.index()].ty;
+                values.push(self.caller_arg(
+                    ty,
+                    hir::ExprKind::Resolved(hir::Res::Local(local)),
+                    &span,
+                )?);
+            }
+            return Ok(());
+        }
+        let string = self.type_id(&Ty::String)?;
+        let int = self.type_id(&Ty::int())?;
+        values.push(self.caller_arg(
+            string,
+            hir::ExprKind::Literal(hir::Literal::String(
+                span.path().to_string_lossy().into_owned(),
+            )),
+            &span,
+        )?);
+        values.push(self.caller_arg(
+            int,
+            hir::ExprKind::Literal(hir::Literal::Integer(u128::from(span.line()))),
+            &span,
+        )?);
+        values.push(self.caller_arg(
+            int,
+            hir::ExprKind::Literal(hir::Literal::Integer(u128::from(span.column()))),
+            &span,
+        )?);
+        Ok(())
     }
 }
 

@@ -1,6 +1,8 @@
 use crate::{CompileRequest, Compiler, TargetName};
 
 #[cfg(feature = "slow-tests")]
+mod arena;
+#[cfg(feature = "slow-tests")]
 mod callable;
 #[cfg(feature = "slow-tests")]
 mod comptime;
@@ -10,6 +12,12 @@ mod hir;
 mod opaque;
 #[cfg(feature = "slow-tests")]
 mod runtime;
+#[cfg(feature = "slow-tests")]
+mod signal;
+#[cfg(feature = "slow-tests")]
+mod src;
+#[cfg(feature = "slow-tests")]
+mod time;
 #[cfg(feature = "slow-tests")]
 mod traits;
 #[cfg(feature = "slow-tests")]
@@ -403,6 +411,7 @@ pub(super) fn frontend(
             require_main: true,
             cfg: &cfg,
             external_packages: &Default::default(),
+            embed: None,
         },
         queries,
         crate::testing::resources(),

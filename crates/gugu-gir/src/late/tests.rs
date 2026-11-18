@@ -20,6 +20,7 @@ fn compile(
             require_main: true,
             cfg: &cfg,
             external_packages: &Default::default(),
+            embed: None,
         },
         queries,
         crate::testing::resources(),

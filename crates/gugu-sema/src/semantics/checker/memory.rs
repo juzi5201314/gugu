@@ -47,7 +47,7 @@ impl Checker<'_, '_> {
         }
         let count = match kind {
             MemoryIntrinsic::Transmute => 2,
-            MemoryIntrinsic::Unreachable => 0,
+            MemoryIntrinsic::Unreachable | MemoryIntrinsic::ArenaNew { .. } => 0,
             _ => 1,
         };
         if !types.is_empty() && types.len() != count {
@@ -83,6 +83,9 @@ impl Checker<'_, '_> {
                 arguments: args.to_vec(),
             });
             return Some(result);
+        }
+        if let MemoryIntrinsic::ArenaNew { sync } = kind {
+            return Some(self.arena_new_call(callee, sync, args, expected, span));
         }
         let (parameters, result) = match kind {
             MemoryIntrinsic::PtrRead
@@ -122,6 +125,9 @@ impl Checker<'_, '_> {
             MemoryIntrinsic::PointerCast | MemoryIntrinsic::ScalarCast => {
                 unreachable!("类型构造语法形成转换")
             }
+            MemoryIntrinsic::ArenaNew { .. } | MemoryIntrinsic::ArenaAlloc { .. } => {
+                unreachable!("arena 原语有专属通道")
+            }
         };
         if !matches!(
             kind,
@@ -129,6 +135,8 @@ impl Checker<'_, '_> {
                 | MemoryIntrinsic::UninitNew
                 | MemoryIntrinsic::UninitAsPtr
                 | MemoryIntrinsic::UninitWrite
+                | MemoryIntrinsic::ArenaNew { .. }
+                | MemoryIntrinsic::ArenaAlloc { .. }
         ) && self.unsafe_depth == 0
         {
             self.error(
@@ -163,6 +171,9 @@ impl Checker<'_, '_> {
         args: &[ExprId],
         expected: Option<&Ty>,
     ) -> Option<Ty> {
+        if let Some(result) = self.arena_method(callee, receiver, name, types, args, expected) {
+            return Some(result);
+        }
         let Ty::MaybeUninit(value) = receiver.deref() else {
             return None;
         };
@@ -188,6 +199,90 @@ impl Checker<'_, '_> {
                 span.clone(),
             );
         }
+        Some(self.memory_method_tail(
+            callee,
+            kind,
+            parameters,
+            result,
+            (**value).clone(),
+            args,
+            expected,
+            span,
+        ))
+    }
+
+    /// arena `alloc[T]`：receiver 是 `std.mem.LocalArena`/`SyncArena` 及其引用，结果 `&T`。
+    /// 返回 Some 表示已接管；返回 None 交给 MaybeUninit 检查。
+    fn arena_method(
+        &mut self,
+        callee: ExprId,
+        receiver: &Ty,
+        name: &str,
+        types: AstRange<GenericArg>,
+        args: &[ExprId],
+        expected: Option<&Ty>,
+    ) -> Option<Ty> {
+        let Ty::Named(index, _) = receiver.deref() else {
+            return None;
+        };
+        let nominal = &self.model.nominal[*index];
+        let sync = match (
+            nominal.name.as_str(),
+            self.model.modules[nominal.definition.module].path.as_str(),
+        ) {
+            ("LocalArena", "std.mem") => false,
+            ("SyncArena", "std.mem") => true,
+            _ => return None,
+        };
+        if name != "alloc" {
+            return None;
+        }
+        let span = &self.arena().exprs[callee.0 as usize].span;
+        let slice = types.as_slice(&self.arena().generic_args);
+        let value = match slice.len() {
+            // 缺省类型实参走常规推断：元素类型由 `v` 反解。
+            0 => self.fresh(),
+            1 => match self.model.form_argument(self.module, slice[0]) {
+                Ok(ty) => ty,
+                Err(error) => {
+                    self.errors.push(error);
+                    return Some(Ty::Error);
+                }
+            },
+            _ => {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    "arena 的 alloc 至多接受一个类型实参",
+                    span.clone(),
+                );
+                return Some(Ty::Error);
+            }
+        };
+        let result = Ty::Ref(Box::new(value.clone()));
+        Some(self.memory_method_tail(
+            callee,
+            MemoryIntrinsic::ArenaAlloc { sync },
+            vec![value.clone()],
+            result,
+            value,
+            args,
+            expected,
+            span,
+        ))
+    }
+
+    /// `alloc`/`write`/`as_ptr`/`assume_init` 共用的调用构造与操作登记。
+    fn memory_method_tail(
+        &mut self,
+        callee: ExprId,
+        kind: MemoryIntrinsic,
+        parameters: Vec<Ty>,
+        result: Ty,
+        value: Ty,
+        args: &[ExprId],
+        expected: Option<&Ty>,
+        span: &Span,
+    ) -> Ty {
         if kind == MemoryIntrinsic::AssumeInit && self.unsafe_depth == 0 {
             self.error(
                 DiagnosticCode::InvalidExpression,
@@ -206,10 +301,98 @@ impl Checker<'_, '_> {
         self.memory_operations.push(MemoryOperation {
             expression: callee,
             kind,
-            value: (**value).clone(),
+            value,
             result,
             arguments: args.to_vec(),
         });
-        Some(ty)
+        ty
+    }
+
+    /// `std.mem.LocalArena::new`/`SyncArena::new`/`with_capacity`：构造由 LIR 降级完成，
+    /// 这里只建立签名与登记操作；`with_capacity` 的字面量负值在编译期拒绝。
+    fn arena_new_call(
+        &mut self,
+        callee: ExprId,
+        sync: bool,
+        args: &[ExprId],
+        expected: Option<&Ty>,
+        span: &Span,
+    ) -> Ty {
+        let wanted = if sync { "SyncArena" } else { "LocalArena" };
+        let Some(index) = self.model.nominal.iter().position(|nominal| {
+            nominal.name == wanted
+                && self.model.modules[nominal.definition.module].path == "std.mem"
+        }) else {
+            self.error(
+                DiagnosticCode::InvalidType,
+                "std.mem 缺少 arena 句柄类型",
+                span.clone(),
+            );
+            return Ty::Error;
+        };
+        if args.len() > 1 {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "with_capacity 只接受一个容量实参",
+                span.clone(),
+            );
+            return Ty::Error;
+        }
+        if let Some(&argument) = args.first() {
+            let exprs = &self.arena().exprs;
+            let ExprKind::Unary {
+                op: UnOp::Neg,
+                expr,
+            } = exprs[argument.0 as usize].kind
+            else {
+                return self.arena_new_call_tail(callee, index, sync, args, expected);
+            };
+            if matches!(
+                exprs[expr.0 as usize].kind,
+                ExprKind::Literal(LitKind::Int { .. })
+            ) {
+                self.error(
+                    DiagnosticCode::InvalidExpression,
+                    "with_capacity 的容量不能为负",
+                    span.clone(),
+                );
+                return Ty::Error;
+            }
+        }
+        self.arena_new_call_tail(callee, index, sync, args, expected)
+    }
+
+    fn arena_new_call_tail(
+        &mut self,
+        callee: ExprId,
+        index: usize,
+        sync: bool,
+        args: &[ExprId],
+        expected: Option<&Ty>,
+    ) -> Ty {
+        let parameters = if args.is_empty() {
+            Vec::new()
+        } else {
+            vec![Ty::Int {
+                signed: true,
+                bits: 64,
+            }]
+        };
+        let result = Ty::Named(index, Vec::new());
+        let ty = self.invoke(
+            callee,
+            Ty::Function(parameters, Box::new(result.clone())),
+            args.to_vec(),
+            None,
+            expected,
+        );
+        self.memory_operations.push(MemoryOperation {
+            expression: callee,
+            kind: MemoryIntrinsic::ArenaNew { sync },
+            value: result.clone(),
+            result,
+            arguments: args.to_vec(),
+        });
+        ty
     }
 }

@@ -79,9 +79,16 @@ pub struct CancelToken {
     control: uint,
 }
 
+pub struct Cancelled {
+}
+
 impl CancelToken {
     pub fn is_cancelled(self: &Self) bool {
         unsafe { cancel_is_set(self.control) != byte(0) }
+    }
+    pub fn check(self: &Self) Result[(), Cancelled] {
+        if self.is_cancelled() { return Err(Cancelled {}) }
+        Ok(())
     }
     // 原始控制块地址仅供 native admission 读取，不指向托管对象。
     pub unsafe fn raw_control(self: &Self) uint = self.control

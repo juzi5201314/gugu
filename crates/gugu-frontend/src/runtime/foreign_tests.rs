@@ -1,7 +1,24 @@
 use super::coroutine::CoroutineState;
 use super::cstring::{scan, terminate};
 use super::foreign_schema::MAX_BLOCKING_WORKERS;
-use crate::{CompileRequest, Compiler, TargetName};
+use crate::{CompileRequest, Compiler, NativeImport, NativeLink, TargetName};
+
+fn linux_link(symbols: &[&str]) -> NativeLink {
+    let mut imports: Vec<_> = NativeLink::THREAD_SYMBOLS
+        .into_iter()
+        .map(|name| NativeImport::function("libc.so.6", name))
+        .collect();
+    imports.extend(
+        symbols
+            .iter()
+            .map(|name| NativeImport::function("libprobe.so", *name)),
+    );
+    NativeLink {
+        imports,
+        interpreter: Some("/toolchain/ld.so".into()),
+    }
+}
+
 use gugu_runtime_world::foreign::{
     AdmitOutcome, BridgeMode, ForeignWorld, IoClass, ManagedRoot, PollerFamily, ReturnPath,
 };
@@ -187,26 +204,38 @@ fn c_string_rejects_interior_nul_and_scans_one_terminator() {
 #[test]
 fn compiled_foreign_sites_enter_the_runtime_contract() {
     let source = "extern \"C\" fn write(n: int) int\n#[ffi(leaf(stack = 16))] extern \"C\" fn leaf(n: int) int\n#[ffi(dirty_cpu)] extern \"C\" fn dirty(n: int) int\nfn main() { _ = write(1)\n _ = leaf(1)\n _ = dirty(1) }";
-    let compilation = Compiler::new().compile(CompileRequest::single_file(
-        "main.gg",
-        source,
-        TargetName::X86_64Linux,
-    ));
+    let compilation = Compiler::new().compile(
+        CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
+            .with_native_link(linux_link(&["write", "leaf", "dirty"])),
+    );
     assert!(
         compilation.is_success(),
         "{:?}",
         compilation.diagnostics().items()
     );
-    let plan = compilation.image_plan().expect("镜像计划");
-    assert_eq!(plan.foreign_ordinary_sites(), 1);
-    assert_eq!(plan.foreign_dirty_sites(), 1);
-    assert_eq!(plan.foreign_leaf_sites(), 1);
-    assert_eq!(plan.foreign_max_blocking_workers(), MAX_BLOCKING_WORKERS);
-    let again = Compiler::new().compile(CompileRequest::single_file(
+    // runtime 的 fs service 池常驻镜像并自带一处普通 bridge 站点；站点断言相对
+    // 空程序基线增量判定。
+    let baseline = Compiler::new().compile(CompileRequest::single_file(
         "main.gg",
-        source,
+        "fn main() {}",
         TargetName::X86_64Linux,
     ));
+    let baseline = baseline.image_plan().expect("基线计划");
+    let plan = compilation.image_plan().expect("镜像计划");
+    assert_eq!(
+        plan.foreign_ordinary_sites(),
+        baseline.foreign_ordinary_sites() + 1
+    );
+    assert_eq!(
+        plan.foreign_dirty_sites(),
+        baseline.foreign_dirty_sites() + 1
+    );
+    assert_eq!(plan.foreign_leaf_sites(), baseline.foreign_leaf_sites() + 1);
+    assert_eq!(plan.foreign_max_blocking_workers(), MAX_BLOCKING_WORKERS);
+    let again = Compiler::new().compile(
+        CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
+            .with_native_link(linux_link(&["write", "leaf", "dirty"])),
+    );
     let again = again.image_plan().expect("重放");
     assert_eq!(
         again.foreign_contract_fingerprint(),

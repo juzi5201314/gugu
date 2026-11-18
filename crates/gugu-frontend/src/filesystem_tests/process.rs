@@ -58,6 +58,7 @@ fn protocol_source(target: TargetName, source: &str) -> Protocol {
             require_main: true,
             cfg: &CfgContext::target_only(target),
             external_packages: &Default::default(),
+            embed: None,
         },
         &queries,
         resources,

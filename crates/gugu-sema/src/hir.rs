@@ -56,6 +56,9 @@ pub struct Definition {
     pub parameters: Vec<Parameter>,
     pub obligations: Vec<Obligation>,
     pub public: bool,
+    /// `#[track_caller]`：`caller()` 在该函数体内读到的是其调用者的位置；
+    /// 由 callsite 追加的隐藏形参携带。
+    pub track_caller: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

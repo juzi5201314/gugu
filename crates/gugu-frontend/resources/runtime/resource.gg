@@ -18,12 +18,15 @@ const PAGE_BYTES: uint = 4096
 pub const CLOSE_REQUEST_OFFSET: uint = 96
 static child_cleanup: Option[fn(uint)] = None
 static pipe_cleanup: Option[fn(uint)] = None
+static signal_cleanup: Option[fn(uint)] = None
 pub fn install_process_cleanup(child: fn(uint), pipe: fn(uint)) {
     child_cleanup = Some(child)
     pipe_cleanup = Some(pipe)
 }
+/* kind 6(Signal) 的 cleanup 由信号模块登记；只允许标记与完成发布。*/
+pub fn install_signal_cleanup(signal: fn(uint)) { signal_cleanup = Some(signal) }
 
-/// kind为1(File)或2(ReadDir)；首个值持有一个租约。
+/// kind为1(File)、2(ReadDir)、4(Child)、5(Pipe)或6(Signal)；首个值持有一个租约。
 pub fn create(native_handle: uint, kind: uint) ResourceCell {
     unsafe {
         let control = allocate(PAGE_BYTES)
@@ -141,9 +144,9 @@ fn request_close(control: uint) {
     let state = heap_word32(control + 8)
     if (state & CLOSED) == 0 || (state & QUEUED) != 0 { return }
     let kind = heap_word(control + 72)
-    if kind == 4 || kind == 5 {
+    if kind == 4 || kind == 5 || kind == 6 {
         heap_store_word32(control + 8, state | QUEUED)
-        let cleanup = if kind == 4 { child_cleanup } else { pipe_cleanup }
+        let cleanup = if kind == 4 { child_cleanup } else { if kind == 5 { pipe_cleanup } else { signal_cleanup } }
         match cleanup { Some(cleanup) => cleanup(control), None => heap_fail() }
         return
     }

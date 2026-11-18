@@ -161,6 +161,8 @@ pub(super) struct EvalState<'a> {
     frame_bases: Vec<usize>,
     /// SourceExpand 域的插入上下文与 query 访问；其它域为空。
     expand: Option<ExpandState<'a>>,
+    /// `embed_file` 的编译输入根；无文件系统边界的输入为空。
+    embed: Option<&'a super::embed::EmbedHost>,
 }
 
 /// SourceExpand 域的求值上下文。
@@ -184,6 +186,7 @@ impl<'a> EvalState<'a> {
             frames: Vec::new(),
             frame_bases: Vec::new(),
             expand: None,
+            embed: None,
         }
     }
 
@@ -457,6 +460,7 @@ impl Model<'_> {
             ));
         }
         let mut state = EvalState::new(Domain::EARLY_CONST, self.eval_profile());
+        state.embed = self.embed.as_ref();
         let value = self
             .value(module, expression, &mut state)
             .map_err(|error| {
@@ -479,6 +483,7 @@ impl Model<'_> {
     ) -> Result<MacroEval, Diagnostic> {
         let profile = self.eval_profile();
         let mut state = EvalState::source_expand(Domain::SOURCE_EXPAND, profile, slot, host);
+        state.embed = self.embed.as_ref();
         let result = self.value(module, body, &mut state);
         let fuel_used = profile.fuel - state.fuel;
         let heap_used = state.heap;
@@ -1193,7 +1198,15 @@ impl Model<'_> {
             return self.comptime_panic(module, args, &span, state);
         }
         self.check_capability(module, &segments, &span, state)?;
+        if let Some(value) = self.src_builtin(module, expression, &segments, args, &span)? {
+            return Ok(value);
+        }
         let arguments = self.value_list(module, args, state)?;
+        if let Some(value) =
+            self.embed_builtin(module, expression, &segments, &arguments, &span, state)?
+        {
+            return Ok(value);
+        }
         if state.domain == Domain::SOURCE_EXPAND
             && let Some(value) =
                 self.expand_builtin(module, expression, &segments, &arguments, &span, state)?
@@ -1210,6 +1223,79 @@ impl Model<'_> {
             return Err(self.fail(module, expression, "被调端点不是函数"));
         }
         self.interpret_function(def, &arguments, &span, state)
+    }
+
+    /// `std.src.file`/`line`/`column` 的内建求值：折叠为调用表达式的
+    /// 物理位置，不经被调函数体，EarlyConst 与 SourceExpand 两域共用。
+    fn src_builtin(
+        &self,
+        module: usize,
+        expression: ExprId,
+        segments: &[&str],
+        args: AstRange<ExprId>,
+        span: &crate::Span,
+    ) -> EvalResult<Option<ConstantValue>> {
+        let Some(canonical) = self.external_path(module, segments) else {
+            return Ok(None);
+        };
+        let kind = match canonical.as_str() {
+            "std.src.file" => 0,
+            "std.src.line" => 1,
+            "std.src.column" => 2,
+            _ => return Ok(None),
+        };
+        if args.len != 0 {
+            return Err(self.fail(module, expression, "std.src 源位置查询不接收参数"));
+        }
+        Ok(Some(match kind {
+            0 => ConstantValue::String(span.path().to_string_lossy().into_owned()),
+            1 => ConstantValue::Int(i128::from(span.line())),
+            _ => ConstantValue::Int(i128::from(span.column())),
+        }))
+    }
+
+    /// `std.mem.embed_file` 的内建求值：相对路径按调用源文件的逻辑目录
+    /// 经 `EmbedHost` 映射回物理文件并读为 `[byte]` 值；越界、缺宿主与
+    /// 读失败都是编译错误，文件内容随常量成为编译输入。
+    fn embed_builtin(
+        &self,
+        module: usize,
+        expression: ExprId,
+        segments: &[&str],
+        arguments: &[ConstantValue],
+        span: &crate::Span,
+        state: &mut EvalState,
+    ) -> EvalResult<Option<ConstantValue>> {
+        let Some(canonical) = self.external_path(module, segments) else {
+            return Ok(None);
+        };
+        if canonical != "std.mem.embed_file" {
+            return Ok(None);
+        }
+        let [ConstantValue::String(relative)] = arguments else {
+            return Err(self.fail(module, expression, "embed_file 需要恰好一个 string 参数"));
+        };
+        let Some(host) = state.embed else {
+            return Err(self.fail(
+                module,
+                expression,
+                "embed_file 需要带文件系统边界的编译输入（内存源码不支持）",
+            ));
+        };
+        let caller_dir = span
+            .path()
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new(""));
+        let bytes = host
+            .resolve(caller_dir, relative)
+            .map_err(|message| self.fail(module, expression, &message))?;
+        state.alloc(64u64.saturating_add(bytes.len() as u64), span)?;
+        Ok(Some(ConstantValue::Array(
+            bytes
+                .into_iter()
+                .map(|byte| ConstantValue::Int(i128::from(byte)))
+                .collect(),
+        )))
     }
 
     /// SourceExpand 域的内建调用：`std.syntax.parse_*` 解析闸门与 `Ok`/`Err` 构造。

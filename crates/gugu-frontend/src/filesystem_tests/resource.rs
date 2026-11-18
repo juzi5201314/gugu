@@ -899,6 +899,48 @@ fn startup_environment_reads_gc_target_and_memory_limit_keys() {
     }
 }
 
+#[test]
+fn startup_environment_reads_diagnostics_and_backtrace_keys() {
+    let output = compile();
+    for (diagnostics, backtrace, expected) in [
+        ("json", "full", (1, 2)),
+        ("both", "0", (2, 0)),
+        ("text", "1", (0, 1)),
+    ] {
+        let mut harness = ResourceHarness::new(&output);
+        let mut memory = vec![0; 16384];
+        let entries = [
+            "A=1".to_owned(),
+            format!("GUGU_RUNTIME_DIAGNOSTICS={diagnostics}"),
+            format!("GUGU_BACKTRACE={backtrace}"),
+        ];
+        for (index, entry) in entries.iter().enumerate() {
+            let address = 2048 + index * 128;
+            memory[address..address + entry.len()].copy_from_slice(entry.as_bytes());
+            put(&mut memory, 1024 + index as u64 * 8, address as u64);
+        }
+        harness.run(
+            "core",
+            "parse_startup_environment",
+            &[1024, 512],
+            &mut memory,
+        );
+        assert_eq!(word(&memory, 512 + 56), expected.0);
+        assert_eq!(word(&memory, 512 + 64), expected.1);
+    }
+    // 变量缺失时使用规范默认值 text=0 与 triggering=1。
+    let mut harness = ResourceHarness::new(&output);
+    let mut memory = vec![0; 16384];
+    harness.run(
+        "core",
+        "parse_startup_environment",
+        &[1024, 512],
+        &mut memory,
+    );
+    assert_eq!(word(&memory, 512 + 56), 0);
+    assert_eq!(word(&memory, 512 + 64), 1);
+}
+
 const STACK_SLOT: u64 = POOL + 64 + 8 * 128;
 const STACK_BASE: u64 = 12288;
 const STACK_BYTES: u64 = 65536;

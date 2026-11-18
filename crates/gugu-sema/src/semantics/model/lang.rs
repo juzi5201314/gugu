@@ -19,6 +19,14 @@ pub enum MemoryIntrinsic {
     AssumeInit,
     PointerCast,
     ScalarCast,
+    /// `std.mem.LocalArena`/`SyncArena` 的 `new`/`with_capacity`；`sync` 区分两种句柄。
+    ArenaNew {
+        sync: bool,
+    },
+    /// 两种 arena 的 `alloc[T]`；结果 `&T` 指向区域槽，T 的资源检查在 GIR 完成。
+    ArenaAlloc {
+        sync: bool,
+    },
 }
 
 impl MemoryIntrinsic {
@@ -38,6 +46,12 @@ impl MemoryIntrinsic {
             "std.mem.MaybeUninit.as_ptr" => Self::UninitAsPtr,
             "std.mem.MaybeUninit.write" => Self::UninitWrite,
             "std.mem.MaybeUninit.assume_init" => Self::AssumeInit,
+            "std.mem.LocalArena.new" | "std.mem.LocalArena.with_capacity" => {
+                Self::ArenaNew { sync: false }
+            }
+            "std.mem.SyncArena.new" | "std.mem.SyncArena.with_capacity" => {
+                Self::ArenaNew { sync: true }
+            }
             _ => return None,
         })
     }
@@ -81,6 +95,7 @@ pub enum RuntimeMachineIntrinsic {
     AtomicStoreRelease,
     AtomicFetchOrAcqRel,
     AtomicFetchAndAcqRel,
+    AtomicCompareExchangeAcqRel,
     /// 标准库字节存储只通过受管分配与保留 provenance 的视图转换形成。
     AllocBytes,
     StringBytes,
@@ -94,6 +109,10 @@ pub enum RuntimeMachineIntrinsic {
     ProcessCall,
     ProcessWorker,
     MonotonicNanos,
+    WallNanos,
+    ParallelismProbe,
+    /// Windows 控制台信号登记：(ctl 页, 事件句柄) → BOOL；Windows 目标专用。
+    SignalInstall,
     StackReadWord,
     StackCopyRaw,
     CageControl,
@@ -104,7 +123,7 @@ pub enum RuntimeMachineIntrinsic {
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 29] = [
+    pub const ALL: [Self; 33] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -116,6 +135,7 @@ impl RuntimeMachineIntrinsic {
         Self::AtomicStoreRelease,
         Self::AtomicFetchOrAcqRel,
         Self::AtomicFetchAndAcqRel,
+        Self::AtomicCompareExchangeAcqRel,
         Self::AllocBytes,
         Self::StringBytes,
         Self::StringFromUtf8Unchecked,
@@ -128,6 +148,9 @@ impl RuntimeMachineIntrinsic {
         Self::ProcessCall,
         Self::ProcessWorker,
         Self::MonotonicNanos,
+        Self::WallNanos,
+        Self::ParallelismProbe,
+        Self::SignalInstall,
         Self::StackReadWord,
         Self::StackCopyRaw,
         Self::CageControl,
@@ -156,6 +179,7 @@ impl RuntimeMachineIntrinsic {
             Self::AtomicStoreRelease => "atomic_store_release",
             Self::AtomicFetchOrAcqRel => "atomic_fetch_or_acq_rel",
             Self::AtomicFetchAndAcqRel => "atomic_fetch_and_acq_rel",
+            Self::AtomicCompareExchangeAcqRel => "atomic_compare_exchange_acq_rel",
             Self::AllocBytes => "alloc_bytes",
             Self::StringBytes => "string_bytes",
             Self::StringFromUtf8Unchecked => "string_from_utf8_unchecked",
@@ -168,6 +192,9 @@ impl RuntimeMachineIntrinsic {
             Self::ProcessCall => "process_call",
             Self::ProcessWorker => "process_worker",
             Self::MonotonicNanos => "monotonic_nanos",
+            Self::WallNanos => "wall_nanos",
+            Self::ParallelismProbe => "parallelism_probe",
+            Self::SignalInstall => "signal_install",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
             Self::CageControl => "cage_control",
@@ -185,6 +212,8 @@ impl RuntimeMachineIntrinsic {
             Self::ContextRestore | Self::CallbackQueue => 3,
             Self::CurrentSlot
             | Self::MonotonicNanos
+            | Self::WallNanos
+            | Self::ParallelismProbe
             | Self::CageControl
             | Self::CallbackControl
             | Self::ThreadId => 0,
@@ -203,10 +232,12 @@ impl RuntimeMachineIntrinsic {
             Self::AtomicStoreRelease
             | Self::AtomicFetchOrAcqRel
             | Self::AtomicFetchAndAcqRel
+            | Self::SignalInstall
             | Self::FsStart
             | Self::StartupCall
             | Self::ProcessCall
             | Self::NetCall => 2,
+            Self::AtomicCompareExchangeAcqRel => 3,
         }
     }
 
@@ -227,6 +258,9 @@ impl RuntimeMachineIntrinsic {
                 | Self::ProcessCall
                 | Self::ProcessWorker
                 | Self::MonotonicNanos
+                | Self::WallNanos
+                | Self::ParallelismProbe
+                | Self::SignalInstall
                 | Self::StackReadWord
                 | Self::CageControl
                 | Self::CallbackControl
@@ -250,6 +284,9 @@ impl RuntimeMachineIntrinsic {
                 | Self::ProcessCall
                 | Self::ProcessWorker
                 | Self::MonotonicNanos
+                | Self::WallNanos
+                | Self::ParallelismProbe
+                | Self::SignalInstall
                 | Self::StackReadWord
                 | Self::StackCopyRaw
                 | Self::CageControl
@@ -276,6 +313,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::AtomicStoreRelease
                 | Self::AtomicFetchOrAcqRel
                 | Self::AtomicFetchAndAcqRel
+                | Self::AtomicCompareExchangeAcqRel
         )
     }
 }
@@ -453,4 +491,17 @@ impl Model<'_> {
         }
         None
     }
+}
+
+/// 编译器拥有、无源码声明的标准项：只按规范路径识别，导入别名与再导出保留同一身份。
+/// builtin 模块的条目导入解析用它把 `use std.mem.{transmute}` 这类导入还原为
+/// `External(规范路径)`，与经 `ModuleTarget::External` 到达的路径完全一致。
+pub(crate) fn compiler_owned_item(path: &str) -> bool {
+    // `RuntimeMachineIntrinsic` 不在其中：机器原语只允许由 runtime 注入源
+    // 通过限定路径调用，从来不是可导入项；导入解析必须继续报「不存在可导入项」，
+    // 调用点再由 checker 报「只能由 runtime 注入源调用」。
+    path == "std.mem.MaybeUninit"
+        || MemoryIntrinsic::from_path(path).is_some()
+        || RuntimeIntrinsic::from_path(path).is_some()
+        || PlatformIntrinsic::from_path(path).is_some()
 }

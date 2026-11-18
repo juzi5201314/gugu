@@ -935,11 +935,16 @@ fn SystemTime.duration_since(self: &Self, earlier: SystemTime)
     Result[Duration, time.Error]
 fn sleep(duration: Duration)
 fn sleep_cancel(duration: Duration, cancel: &CancelToken)
+
+struct TimedOut
+
+fn timeout[T](duration: Duration, operation: fn(&CancelToken) T)
+    Result[T, TimedOut]
 ```
 
 Duration 提供 `new(seconds:uint, nanoseconds:u32)`（归一化十亿以上的纳秒，秒数溢出时 panic）、`from_secs(uint)`、`from_millis(uint)`、`from_nanos(uint)`，以及 `as_secs() uint`、`subsec_nanos() uint`、`as_nanos() u128`、`is_zero() bool`；秒与不足一秒的纳秒分开保存，转为总纳秒不会因 uint 乘法溢出而丢失时长。`RuntimeStats.gc_pause_total` 使用同一 Duration 类型。
 
-Instant 的比较和相减只对同一进程产生的值定义；不同进程或反序列化值不能互相比较。SystemTime 的 duration_since 在 earlier 晚于当前值时返回 ClockWentBackward，不把墙钟回拨伪装成负 Duration。Duration 不含时区、日历或闰秒；Gregorian 日历和 leap second 不进入稳定语义。sleep(0) 立即返回，正 duration 至少等待该时长；sleep_cancel 被取消时返回 Cancelled，取消不会撤销已经完成的等待。timeout 是带 CancelToken 的操作组合器：它在 deadline 到期时取消本次操作并返回 TimedOut；操作已经在线性化点完成则返回操作结果，超时不强制终止外部资源，调用方必须使用操作自身的取消契约。
+Instant 的比较和相减只对同一进程产生的值定义；不同进程或反序列化值不能互相比较。SystemTime 的 duration_since 在 earlier 晚于当前值时返回 ClockWentBackward，不把墙钟回拨伪装成负 Duration。Duration 不含时区、日历或闰秒；Gregorian 日历和 leap second 不进入稳定语义。sleep(0) 立即返回，正 duration 至少等待该时长；sleep_cancel 被取消时返回 Cancelled，取消不会撤销已经完成的等待。timeout 是带 CancelToken 的操作组合器：`operation` 在新建协程上运行并取得一个新建的 `CancelToken`；deadline 到期时线性化为取消该 token 并返回 `Err(TimedOut)`，在同一时间窗内已经线性化完成的 operation 仍返回其 `Ok` 结果。operation panic 时该 panic 传播给 `timeout` 的调用方；在 `Panic` 字段结构接入前，传播使用固定 message。超时不强制终止外部资源：被取消的协程在自己的取消观察点结束，`timeout` 不等待它收尾，调用方必须使用操作自身的取消契约。
 
 ## 运行时控制与信号订阅
 
@@ -1054,6 +1059,7 @@ enum Error {
     Unsupported,
     InvalidSignal,
     InvalidCapacity,
+    Empty,
 }
 
 struct SignalEvent {
@@ -1073,7 +1079,7 @@ fn SignalSubscription.close(self: &Self)
 fn SignalSubscription.dropped(self: &Self) uint
 ```
 
-`signals` 不能为空，重复项合并；默认队列容量为 16，显式容量必须大于 0。一个进程可以有多个订阅，每个订阅收到匹配信号的独立副本。相同信号在同一订阅尚未取走时合并，`occurrences` 饱和递增；计数饱和后的额外到达也计入 `dropped()`。不同信号各占一个队列项。队列满时不阻塞 OS 信号处理路径，新增事件计入 `dropped()`。`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。
+`signals` 不能为空，重复项合并；默认队列容量为 16，显式容量必须大于 0。一个进程可以有多个订阅，每个订阅收到匹配信号的独立副本。相同信号在同一订阅尚未取走时合并，`occurrences` 饱和递增；计数饱和后的额外到达也计入 `dropped()`。不同信号各占一个队列项。队列满时不阻塞 OS 信号处理路径，新增事件计入 `dropped()`。`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`，未关闭但无事件时 `try_recv` 返回 `signal.Error::Empty`。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。
 
 `std.panic.panic(message)` 是 `!` 返回的 lang item，必须带 `#[track_caller]`。它与 `catch` 共享当前协程的展开边界；未处理时由[运行时与运维语义](runtime.md)产生 `unhandled-panic` 报告。标准库不提供 Go 式 `recover`，也不提供可以抑制 fatal、替换默认报告或改变退出类别的全局 panic hook。被 `catch` 或 `Join.wait()` 处理的 panic 不自动写 runtime 报告。
 
@@ -1126,6 +1132,8 @@ FastRandom 与 Xoshiro256PlusPlus 共享标准采样方法：无偏 `int(a..b)`�
 ```text
 struct CString
 struct CStr
+struct NulError { offset: int }
+struct InvalidCString
 
 fn CString.from_string(value: string) Result[CString, ffi.NulError]
 fn CString.from_bytes(value: Bytes) Result[CString, ffi.NulError]
@@ -1133,7 +1141,7 @@ fn CString.as_bytes(self: &Self) Bytes
 fn CString.as_ptr(self: &Self) *byte
 unsafe fn CStr.from_ptr(pointer: *byte) Result[CStr, ffi.InvalidCString]
 fn CStr.to_bytes(self: &Self) Bytes
-fn CStr.to_string(self: &Self) Result[string, text.Utf8Error]
+fn CStr.to_string(self: &Self) Result[string, text.EncodingError]
 fn CStr.to_string_lossy(self: &Self) string
 ```
 
@@ -1148,4 +1156,4 @@ c_bool c_float c_double
 
 这些别名不创建新的类型或 `TypeId`；`c_long`、`c_wchar` 等的目标差异必须按[平台与 ABI 参考](platform-abi.md)的表使用。
 
-`CString.from_*` 拒绝输入中已有 NUL，并在末尾补一个 NUL；as_bytes 不包含终止 NUL，as_ptr 指向以 NUL 结尾的表示。向外部函数传递该指针时，调用方必须让 CString backing 在整个外部调用期间保持 pinned，或把内容复制到 `std.mem` 的非移动缓冲；指针不能跨越可能触发 GC 的 safepoint 保存。`CStr.from_ptr` 要求 pointer 非空、指向可读且最终存在 NUL 的内存；扫描越界、保存超过外部内存寿命或让 CStr 逃逸为长期 Gugu 值都是调用方违反 unsafe 契约。CStr 转换为 Bytes/string 会复制到 Gugu 自有存储，UTF-8 无效时只允许使用 to_string_lossy 或接收 Utf8Error。std.ffi 不提供动态库加载器、C varargs、任意 ABI 转换、外部线程手工注册或跨边界异常封装。
+`CString.from_*` 拒绝输入中已有 NUL，并在末尾补一个 NUL；as_bytes 不包含终止 NUL，as_ptr 指向以 NUL 结尾的表示。向外部函数传递该指针时，调用方必须让 CString backing 在整个外部调用期间保持 pinned，或把内容复制到 `std.mem` 的非移动缓冲；指针不能跨越可能触发 GC 的 safepoint 保存。`CStr.from_ptr` 要求 pointer 非空、指向可读且最终存在 NUL 的内存；扫描越界、保存超过外部内存寿命或让 CStr 逃逸为长期 Gugu 值都是调用方违反 unsafe 契约。CStr 转换为 Bytes/string 会复制到 Gugu 自有存储，UTF-8 无效时只允许使用 to_string_lossy 或接收 EncodingError。std.ffi 不提供动态库加载器、C varargs、任意 ABI 转换、外部线程手工注册或跨边界异常封装。

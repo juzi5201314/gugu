@@ -2,7 +2,7 @@
 use crate::gir::body::{GirBody, IntrinsicOp, Rvalue, StatementKind, SuspendReason, Terminator};
 use crate::runtime::{GLUE_DEFS, GlueDef, GlueDefKind};
 use crate::{hir, mono::keys::MonoContext};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// 启动与登记机器片段无条件引用的源入口。
 pub const IMAGE_ENTRIES: &[&str] = &["rt0_start", "panic_dispatch", "panic_unwind", "gc_dispatch"];
@@ -34,7 +34,11 @@ pub fn definition(context: &MonoContext<'_>, glue: &str) -> Option<hir::DefId> {
         .map(|(index, _)| hir::DefId(u32::try_from(index).expect("定义编号适配 u32")))
 }
 
-pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
+pub fn referenced(
+    context: &MonoContext<'_>,
+    body: &GirBody,
+    bindings: &BTreeMap<String, crate::semantics::Ty>,
+) -> BTreeSet<&'static str> {
     let mut demand = BTreeSet::new();
     for statement in &body.statements {
         use crate::gir::body::{ResourceActionKind as Resource, ValueActionKind as Value};
@@ -57,7 +61,7 @@ pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
             }
             _ => {}
         }
-        if let StatementKind::Assign(_, value) = &statement.kind {
+        if let StatementKind::Assign(place, value) = &statement.kind {
             // 聚合写入托管槽时由 LIR 使用同一 descriptor 搬运与发布。
             demand.insert("value_transfer");
             demand.insert("value_forget");
@@ -65,6 +69,28 @@ pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
             match value {
                 Rvalue::Compare { .. } => {
                     demand.insert("string_compare");
+                }
+                // `+` 只在 string 结果上发 `concat` runtime 调用：按实例绑定代入后
+                // 赋值目标 local 的具体类型判定（如 `T::Output` 在 T=string 实例里是
+                // String），不给普通整数加法强行实例化 std.text 依赖。
+                Rvalue::BinaryOp {
+                    op: crate::gir::body::BinaryOp::Add,
+                    ..
+                } if place.is_local()
+                    && matches!(
+                        context
+                            .type_at(body.locals[place.local.index()].ty, bindings)
+                            .as_ref(),
+                        Ok(crate::semantics::Ty::String)
+                    ) =>
+                {
+                    demand.insert("concat");
+                }
+                Rvalue::CheckedOp {
+                    kind: crate::gir::body::CheckOpKind::Utf8Boundary,
+                    ..
+                } => {
+                    demand.insert("utf8_boundary");
                 }
                 Rvalue::CowSnapshot(_) => {
                     demand.insert("cow_snapshot");
@@ -121,6 +147,15 @@ pub fn referenced(body: &GirBody) -> BTreeSet<&'static str> {
                     }
                     IntrinsicOp::DeferChainPop => {
                         demand.insert("defer_pop");
+                    }
+                    IntrinsicOp::ArenaNew { .. } => {
+                        demand.insert("gc_arena_new");
+                    }
+                    IntrinsicOp::ArenaAlloc { sync: false } => {
+                        demand.insert("gc_arena_alloc");
+                    }
+                    IntrinsicOp::ArenaAlloc { sync: true } => {
+                        demand.insert("gc_arena_alloc_sync");
                     }
                     _ => {}
                 },

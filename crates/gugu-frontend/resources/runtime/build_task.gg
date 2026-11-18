@@ -1,0 +1,311 @@
+// build task 动作记录：emit/rerun/link/define/warning/run 全部追加进同一份进程
+// 记录；host 在任务启动时写 context，任务结束后整份读走。非任务上下文的调用
+// 由 std.build 门面先以 panic 报告，这里仍以进程失败兜底。static 只能持
+// POD，记录落在 native bump arena：头部 72B 定长，条目 64B 定长进 meta chunk
+// 链，字符串字节进 byte chunk 链。
+use std.collections.{Vec}
+use std.runtime.fs_platform as bridge
+use std.text.{Bytes, alloc_bytes, utf8_decode}
+
+pub const ENTRY_RERUN_FILE: uint = 1
+pub const ENTRY_RERUN_ENV: uint = 2
+pub const ENTRY_RERUN_ALWAYS: uint = 3
+pub const ENTRY_EMIT: uint = 4
+pub const ENTRY_DEFINE: uint = 5
+pub const ENTRY_LINK: uint = 6
+pub const ENTRY_LINK_SEARCH: uint = 7
+pub const ENTRY_WARNING: uint = 8
+pub const ENTRY_ERROR: uint = 9
+pub const ENTRY_FEATURE: uint = 10
+pub const ENTRY_RUN: uint = 11
+pub const ENTRY_RUN_ARG: uint = 12
+pub const ENTRY_RUN_ENV: uint = 13
+
+const HEADER_BYTES: uint = 72
+const CHUNK_BODY: uint = 16384
+const ENTRY_BYTES: uint = 64
+const META_HEAD: uint = 0
+const BYTE_HEAD: uint = 8
+
+static record: uint = 0
+
+fn fail() { unsafe { std.runtime.process_exit(2) } }
+
+fn word(at: uint) uint { unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](at)) } }
+
+fn put(at: uint, v: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[uint, *uint](at), v) } }
+
+fn new_chunk(body: uint) uint {
+    let chunk = bridge.raw_allocate(24 + body)
+    put(chunk, 0)
+    put(chunk + 8, body)
+    put(chunk + 16, 0)
+    chunk
+}
+
+fn bump(head_field: uint, bytes: uint) uint {
+    let chunk = word(record + head_field)
+    if chunk == 0 || word(chunk + 16) + bytes > word(chunk + 8) {
+        let body = if bytes > CHUNK_BODY { bytes } else { CHUNK_BODY }
+        let fresh = new_chunk(body)
+        put(fresh, chunk)
+        put(record + head_field, fresh)
+        chunk = fresh
+    }
+    let at = chunk + 24 + word(chunk + 16)
+    put(chunk + 16, word(chunk + 16) + bytes)
+    at
+}
+
+fn put_text(value: Bytes) (uint, uint) {
+    let data = unsafe { value.as_slice() }
+    let at = bump(BYTE_HEAD, uint(data.len()))
+    for index in 0..data.len() {
+        unsafe { std.ptr.ptr_write[byte](std.mem.transmute[uint, *byte](at + uint(index)), data[index]) }
+    }
+    (at, uint(data.len()))
+}
+
+fn entry(kind: uint) uint {
+    let at = bump(META_HEAD, ENTRY_BYTES)
+    put(at, kind)
+    put(at + 8, 0)
+    at
+}
+
+fn set_str(at: uint, slot: uint, value: string) {
+    let saved = put_text(Bytes::from_string(value))
+    put(at + 16 + slot * 16, saved.0)
+    put(at + 16 + slot * 16 + 8, saved.1)
+}
+
+fn byte_at(at: uint) byte { unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](at)) } }
+
+fn str_eq(ptr: uint, len: uint, value: string) bool {
+    let data = unsafe { Bytes::from_string(value).as_slice() }
+    if int(len) != data.len() { return false }
+    for index in 0..data.len() {
+        if byte_at(ptr + uint(index)) != data[index] { return false };
+    }
+    true
+}
+
+fn read_string(ptr: uint, len: uint) string {
+    if ptr == 0 { return "" }
+    let data = unsafe { alloc_bytes(int(len)) }
+    for index in 0..int(len) { data[index] = byte_at(ptr + uint(index)) }
+    match utf8_decode(unsafe { Bytes::from_owned(data) }) {
+        Ok(value) => value,
+        Err(_) => panic("build task context 字符串不是 UTF-8"),
+    }
+}
+
+pub fn active() bool = record != 0 && word(record + 16) != 0
+
+fn require() { if !active() { fail() } }
+
+fn read_field(offset: uint) string {
+    require()
+    read_string(word(record + offset), word(record + offset + 8))
+}
+
+pub fn begin(out_dir: string, host: string, target: string, features: Vec[string]) {
+    record = bridge.raw_allocate(HEADER_BYTES)
+    put(record, 0)
+    put(record + 8, 0)
+    put(record + 16, 1)
+    let saved_dir = put_text(Bytes::from_string(out_dir))
+    put(record + 24, saved_dir.0)
+    put(record + 32, saved_dir.1)
+    let saved_host = put_text(Bytes::from_string(host))
+    put(record + 40, saved_host.0)
+    put(record + 48, saved_host.1)
+    let saved_target = put_text(Bytes::from_string(target))
+    put(record + 56, saved_target.0)
+    put(record + 64, saved_target.1)
+    for value in features {
+        let at = entry(ENTRY_FEATURE)
+        set_str(at, 0, value)
+    }
+}
+
+pub fn finish() uint {
+    let at = record
+    record = 0
+    at
+}
+
+pub fn out_dir() string = read_field(24)
+
+pub fn host() string = read_field(40)
+
+pub fn target() string = read_field(56)
+
+fn collect_features(result: Vec[string]) {
+    let chunk = word(record + META_HEAD)
+    while chunk != 0 {
+        let at = chunk + 24
+        while at < chunk + 24 + word(chunk + 16) {
+            if word(at) == ENTRY_FEATURE {
+                let name = read_string(word(at + 16), word(at + 24))
+                result.push(name)
+            };
+            at = at + ENTRY_BYTES
+        }
+        chunk = word(chunk)
+    }
+}
+
+pub fn features() Vec[string] {
+    require()
+    let result = Vec[string]::new()
+    collect_features(result)
+    result
+}
+
+pub fn known_feature(name: string) bool {
+    require()
+    let chunk = word(record + META_HEAD)
+    while chunk != 0 {
+        let at = chunk + 24
+        while at < chunk + 24 + word(chunk + 16) {
+            if word(at) == ENTRY_FEATURE && str_eq(word(at + 16), word(at + 24), name) { return true };
+            at = at + ENTRY_BYTES
+        }
+        chunk = word(chunk)
+    }
+    false
+}
+
+pub fn add_rerun_file(path: string) {
+    require()
+    let at = entry(ENTRY_RERUN_FILE)
+    set_str(at, 0, path)
+}
+
+pub fn add_rerun_env(name: string) {
+    require()
+    let at = entry(ENTRY_RERUN_ENV)
+    set_str(at, 0, name)
+}
+
+pub fn mark_rerun_always() {
+    require()
+    let _ = entry(ENTRY_RERUN_ALWAYS)
+}
+
+fn emit_dup(name: string) bool {
+    let chunk = word(record + META_HEAD)
+    while chunk != 0 {
+        let at = chunk + 24
+        while at < chunk + 24 + word(chunk + 16) {
+            if word(at) == ENTRY_EMIT && str_eq(word(at + 16), word(at + 24), name) { return true };
+            at = at + ENTRY_BYTES
+        }
+        chunk = word(chunk)
+    }
+    false
+}
+
+pub fn record_emit(name: string, path: string) {
+    require()
+    if emit_dup(name) { panic("emit_module 重复生成同名模块") }
+    let at = entry(ENTRY_EMIT)
+    set_str(at, 0, name)
+    set_str(at, 1, path)
+}
+
+fn define_state(name: string) uint {
+    // 0 未定义；1 仅有名字；2 名字+值且首字节指针在返回值里没法带，调用方再查。
+    let chunk = word(record + META_HEAD)
+    while chunk != 0 {
+        let at = chunk + 24
+        while at < chunk + 24 + word(chunk + 16) {
+            if word(at) == ENTRY_DEFINE && str_eq(word(at + 16), word(at + 24), name) {
+                return word(at + 8) + 1
+            };
+            at = at + ENTRY_BYTES
+        }
+        chunk = word(chunk)
+    }
+    0
+}
+
+fn define_value_matches(name: string, value: string) bool {
+    let chunk = word(record + META_HEAD)
+    while chunk != 0 {
+        let at = chunk + 24
+        while at < chunk + 24 + word(chunk + 16) {
+            if word(at) == ENTRY_DEFINE && word(at + 8) != 0 && str_eq(word(at + 16), word(at + 24), name) {
+                return str_eq(word(at + 32), word(at + 40), value)
+            };
+            at = at + ENTRY_BYTES
+        }
+        chunk = word(chunk)
+    }
+    false
+}
+
+pub fn record_define(name: string, has_value: bool, value: string) {
+    require()
+    let state = define_state(name)
+    if state != 0 {
+        let same = if has_value && state == 2 { define_value_matches(name, value) } else { !has_value && state == 1 }
+        if !same { panic("define_cfg 与已有定义取不同值") }
+        return
+    }
+    let at = entry(ENTRY_DEFINE)
+    put(at + 8, if has_value { 1 } else { 0 })
+    set_str(at, 0, name)
+    if has_value { set_str(at, 1, value) };
+}
+
+pub fn record_link(kind: string, name: string, path: string) {
+    require()
+    let at = entry(ENTRY_LINK)
+    set_str(at, 0, kind)
+    set_str(at, 1, name)
+    set_str(at, 2, path)
+}
+
+pub fn record_link_search(path: string) {
+    require()
+    let at = entry(ENTRY_LINK_SEARCH)
+    set_str(at, 0, path)
+}
+
+pub fn record_warning(message: string) {
+    require()
+    let at = entry(ENTRY_WARNING)
+    set_str(at, 0, message)
+}
+
+pub fn record_error(message: string) {
+    require()
+    let at = entry(ENTRY_ERROR)
+    set_str(at, 0, message)
+    put(record + 16, 2)
+}
+
+pub fn record_run_begin(executable: string, args: Vec[string], cwd: string, env: Vec[(string, string)], inherit_env: bool) uint {
+    require()
+    let at = entry(ENTRY_RUN)
+    set_str(at, 0, executable)
+    set_str(at, 1, cwd)
+    put(at + 48, if inherit_env { 1 } else { 0 })
+    for value in args {
+        let arg = entry(ENTRY_RUN_ARG)
+        set_str(arg, 0, value)
+    }
+    for pair in env {
+        let change = entry(ENTRY_RUN_ENV)
+        set_str(change, 0, pair.0)
+        set_str(change, 1, pair.1)
+    }
+    at
+}
+
+pub fn record_run_code(entry_addr: uint, code: int) {
+    require()
+    put(entry_addr + 56, unsafe { std.mem.transmute[int, uint](code) })
+}

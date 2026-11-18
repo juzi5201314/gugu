@@ -409,7 +409,77 @@ impl<'b, 'f, 'm, 'a> BodyBuilder<'b, 'f, 'm, 'a> {
                 self.output.parameters.push(id);
             }
         }
+        if self.compiler.output.definitions[self.output.definition.index()].track_caller {
+            self.caller_params(&function.span)?;
+        }
         Ok(())
+    }
+
+    /// `#[track_caller]` 函数追加三个隐藏形参（file/line/column），调用方在
+    /// 实参尾部压入调用点位置；取址或 fn 指针调用时无处可传，规范判错。
+    fn caller_params(&mut self, span: &Span) -> Result<(), Diagnostic> {
+        for (name, ty) in [
+            ("__caller_location_file", Ty::String),
+            ("__caller_location_line", Ty::int()),
+            ("__caller_location_column", Ty::int()),
+        ] {
+            let ty = self.type_id(&ty)?;
+            let location = identity::location(self.compiler.sources, span)?;
+            let local = hir::LocalId(checked_id(self.output.locals.len())?);
+            self.output.locals.push(hir::Local {
+                name: name.to_string(),
+                ty,
+                location: location.clone(),
+                storage: 0,
+            });
+            let pattern = hir::PatternId(checked_id(self.patterns.len())?);
+            self.patterns.push(Some(hir::Pattern {
+                location,
+                ty,
+                kind: hir::PatternKind::Bind(local),
+            }));
+            self.output.parameters.push(pattern);
+        }
+        Ok(())
+    }
+
+    /// owner 是 `#[track_caller]` 时返回其隐藏位置形参（file/line/column）。
+    pub(super) fn caller_params_locals(&self) -> Option<[hir::LocalId; 3]> {
+        if !self.compiler.output.definitions[self.output.definition.index()].track_caller {
+            return None;
+        }
+        let mut locals = Vec::with_capacity(3);
+        for &pattern in self.output.parameters.iter().rev() {
+            let Some(hir::Pattern {
+                kind: hir::PatternKind::Bind(local),
+                ..
+            }) = self.patterns[pattern.index()]
+            else {
+                continue;
+            };
+            locals.push(local);
+            if locals.len() == 3 {
+                break;
+            }
+        }
+        locals.reverse();
+        <[hir::LocalId; 3]>::try_from(locals).ok()
+    }
+
+    /// 合成一个 HIR 表达式（隐藏实参/`caller()` 字段），不走 AST 映射。
+    pub(super) fn caller_arg(
+        &mut self,
+        ty: hir::TypeId,
+        kind: hir::ExprKind,
+        span: &Span,
+    ) -> Result<hir::ExprId, Diagnostic> {
+        let id = hir::ExprId(checked_id(self.expressions.len())?);
+        self.expressions.push(None);
+        self.adjustments.push(Vec::new());
+        self.output.expression_types.push(ty);
+        self.output.expression_inputs.push(ty);
+        self.set_expression(id, kind, self.scope, span, 0)?;
+        Ok(id)
     }
 }
 

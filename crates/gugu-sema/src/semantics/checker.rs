@@ -27,6 +27,7 @@ mod operations;
 mod platform;
 mod reflection;
 mod runtime;
+mod source;
 
 #[derive(Clone)]
 struct State {
@@ -73,6 +74,8 @@ struct Checker<'m, 'a> {
     number_kinds: Vec<inference::NumberKind>,
     literals: Vec<(Ty, LitKind, bool, Span)>,
     unsafe_depth: usize,
+    /// 非零表示正在求值直接调用的 callee：`#[track_caller]` 函数只在此时允许物化为值。
+    direct_callable: u32,
     dependencies: Vec<DefRef>,
     expressions: Vec<(ExprId, Ty)>,
     local_statics: Vec<super::output::LocalStatic>,
@@ -105,6 +108,8 @@ struct Checker<'m, 'a> {
     borrow_checks: Vec<super::borrow::BorrowCheck>,
     slot_reads: Vec<bool>,
     must_use_sites: Vec<super::output::MustUseSite>,
+    source_literals: Vec<super::output::SourceLiteral>,
+    embed_literals: Vec<super::output::EmbedLiteral>,
     format_traits: Vec<formatting::PendingFormat>,
 }
 
@@ -213,6 +218,8 @@ pub(super) fn check(
                 assembly: checker.assembly,
                 borrow_checks: checker.borrow_checks,
                 must_use: checker.must_use_sites,
+                source_literals: checker.source_literals,
+                embed_literals: checker.embed_literals,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
@@ -301,6 +308,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             number_kinds: Vec::new(),
             literals: Vec::new(),
             unsafe_depth: 0,
+            direct_callable: 0,
             dependencies: Vec::new(),
             expressions: Vec::new(),
             local_statics: Vec::new(),
@@ -333,6 +341,8 @@ impl<'m, 'a> Checker<'m, 'a> {
             borrow_checks: Vec::new(),
             slot_reads: Vec::new(),
             must_use_sites: Vec::new(),
+            source_literals: Vec::new(),
+            embed_literals: Vec::new(),
             format_traits: Vec::new(),
         }
     }

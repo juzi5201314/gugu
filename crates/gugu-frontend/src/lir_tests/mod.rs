@@ -12,7 +12,9 @@ use crate::lir::{
     },
     verify,
 };
-use crate::{Compilation, CompileRequest, Compiler, DiagnosticCode, TargetName};
+use crate::{
+    Compilation, CompileRequest, Compiler, DiagnosticCode, NativeImport, NativeLink, TargetName,
+};
 use std::num::NonZeroU32;
 
 /// 测试用目标 oracle：与 driver 注入的同一 x86_64 实现。
@@ -337,6 +339,33 @@ fn compile(source: &str) -> Compilation {
     );
     compilation
 }
+
+/// EFFECTS 夹具的 `extern "C" fn external` 是普通 ForeignBridge 目标：按平台
+/// ABI 契约显式登记目标符号、glibc 解释器与 pthread 导入。
+fn compile_effects() -> Compilation {
+    let compilation = Compiler::shared().compile(
+        CompileRequest::single_file("main.gg", EFFECTS, TargetName::X86_64Linux)
+            .with_native_link(effects_link()),
+    );
+    assert!(
+        compilation.is_success(),
+        "{:?}",
+        compilation.diagnostics().items()
+    );
+    compilation
+}
+
+pub(crate) fn effects_link() -> NativeLink {
+    let mut imports: Vec<_> = NativeLink::THREAD_SYMBOLS
+        .into_iter()
+        .map(|name| NativeImport::function("libc.so.6", name))
+        .collect();
+    imports.push(NativeImport::function("libprobe.so", "external"));
+    NativeLink {
+        imports,
+        interpreter: Some("/toolchain/ld.so".into()),
+    }
+}
 fn named<'a>(compilation: &'a Compilation, name: &str) -> &'a Body {
     let module = compilation.hir.as_ref().unwrap().module();
     let key = module
@@ -562,7 +591,7 @@ fn concrete_instances_preserve_scalar_and_wide_returns() {
 
 #[test]
 fn memory_chain_cannot_skip_a_volatile_effect() {
-    let compilation = compile(EFFECTS);
+    let compilation = compile_effects();
     let mut body = named(&compilation, "main").clone();
     let block = body
         .blocks
@@ -623,7 +652,7 @@ fn integer_pointer_cast_cannot_forge_a_managed_root() {
 
 #[test]
 fn atomic_load_rejects_release_order() {
-    let compilation = compile(EFFECTS);
+    let compilation = compile_effects();
     let mut body = named(&compilation, "main").clone();
     let load = body
         .instructions
@@ -1123,7 +1152,7 @@ fn effect_signature(body: &Body) -> Vec<String> {
 
 #[test]
 fn pipeline_preserves_observable_effects() {
-    let compilation = compile(EFFECTS);
+    let compilation = compile_effects();
     let body = named(&compilation, "main").clone();
     let before = effect_signature(&body);
     assert!(
@@ -1699,7 +1728,7 @@ fn foreign_call_with_decoded_argument(body: &Body, pass_to_call: bool) -> Option
 /// `DecodeCompressedRef` 的结果作为非 Managed 调用参数必须被 verifier 拒绝。
 #[test]
 fn compressed_ref_as_foreign_argument_is_rejected() {
-    let compilation = compile(EFFECTS);
+    let compilation = compile_effects();
     let module = compilation.hir.as_ref().unwrap().module();
     // 对照组：同一个解码点不跨调用边界时通过，证明拒绝来自调用 ABI 规则而不是解码指令本身。
     let control = foreign_call_with_decoded_argument(&named(&compilation, "main").clone(), false)
@@ -1722,12 +1751,14 @@ const COMPRESSED_CAPTURE: &str = "fn make() fn() int {\n let value = 1\n return 
 
 fn compile_with_compression(source: &str) -> Compilation {
     use crate::runtime::compression_schema::CompressionPolicyV1;
-    let compilation = Compiler::shared().compile(
-        CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
-            .with_compression_policy(CompressionPolicyV1::cage(
-                4 * crate::runtime::gc_metadata_contract::GC_ARENA_BYTES,
-            )),
-    );
+    let mut request = CompileRequest::single_file("main.gg", source, TargetName::X86_64Linux)
+        .with_compression_policy(CompressionPolicyV1::cage(
+            4 * crate::runtime::gc_metadata_contract::GC_ARENA_BYTES,
+        ));
+    if source == EFFECTS {
+        request = request.with_native_link(effects_link());
+    }
+    let compilation = Compiler::shared().compile(request);
     assert!(
         compilation.is_success(),
         "{:?}",

@@ -19,7 +19,8 @@ pub(super) fn package(
     }
     fs::create_dir_all(&package_root).expect("create package root");
     fs::write(package_root.join("gugu.toml"), manifest).expect("write manifest");
-    package_root
+    // 与 Project::discover 的路径规范化保持一致（如 macOS 上 /var → /private/var）。
+    fs::canonicalize(package_root).expect("canonicalize package root")
 }
 
 pub(super) fn target_summary(package: &Package) -> Vec<(TargetKind, String)> {

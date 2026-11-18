@@ -228,21 +228,31 @@ impl Builder<'_> {
                         Origin::Derived(message),
                     );
                 }
-                let source = self
-                    .sources
-                    .snapshot(crate::SourceFileId::new(location.source))
-                    .ok_or_else(|| invalid("panic 源位置引用未知源码快照"))?;
-                let position = source
-                    .line_column(usize::try_from(location.start).expect("源码偏移适配宿主"))
-                    .map_err(|_| invalid("panic 源位置不在源码快照边界内"))?;
-                let path = self.data(source.logical_path().as_bytes().to_vec(), Provenance::Raw);
-                args.push(path);
-                args.push(self.constant(
-                    u64::try_from(source.logical_path().len()).expect("源码路径长度适配 u64"),
-                    Type::I64,
-                ));
-                args.push(self.constant(u64::from(position.line), Type::I64));
-                args.push(self.constant(u64::from(position.column), Type::I64));
+                /* #[track_caller] owner 的 panic 报告调用者位置：转发签名末尾三个
+                隐藏实参（file 字符串按 ABI 展开为 ptr+len），普通 owner 折叠为
+                编译期常量。*/
+                if let Some([file, line, column]) = self.caller_location_params() {
+                    args.extend(self.local_values(file)?);
+                    args.extend(self.local_values(line)?);
+                    args.extend(self.local_values(column)?);
+                } else {
+                    let source = self
+                        .sources
+                        .snapshot(crate::SourceFileId::new(location.source))
+                        .ok_or_else(|| invalid("panic 源位置引用未知源码快照"))?;
+                    let position = source
+                        .line_column(usize::try_from(location.start).expect("源码偏移适配宿主"))
+                        .map_err(|_| invalid("panic 源位置不在源码快照边界内"))?;
+                    let path =
+                        self.data(source.logical_path().as_bytes().to_vec(), Provenance::Raw);
+                    args.push(path);
+                    args.push(self.constant(
+                        u64::try_from(source.logical_path().len()).expect("源码路径长度适配 u64"),
+                        Type::I64,
+                    ));
+                    args.push(self.constant(u64::from(position.line), Type::I64));
+                    args.push(self.constant(u64::from(position.column), Type::I64));
+                }
                 let call = Call {
                     target: CallTarget::Runtime(RuntimeCall::Panic),
                     kind: g::CallKind::Managed,
@@ -815,7 +825,7 @@ impl Builder<'_> {
         )
     }
 
-    fn pointer_bits(&mut self, pointer: ValueId) -> ValueId {
+    pub(super) fn pointer_bits(&mut self, pointer: ValueId) -> ValueId {
         if self.machine_type(pointer).ty == Type::Ptr {
             self.emit_one(
                 Op::Convert(Conversion::PointerToInt),
@@ -965,6 +975,26 @@ impl Builder<'_> {
     fn store_record_word(&mut self, base: ValueId, offset: u64, value: ValueId) {
         let slot = self.offset(base, offset);
         self.store(slot, value, 8, false);
+    }
+
+    /// `#[track_caller]` owner 的末尾三个 Argument local 是调用点隐藏位置实参
+    /// `(file, line, column)`；非 track_caller owner 返回 `None`，panic 退到常量路径。
+    fn caller_location_params(&self) -> Option<[g::LocalId; 3]> {
+        if self.gir.flags & g::BodyFlags::TRACK_CALLER == 0 {
+            return None;
+        }
+        let mut hidden: Vec<g::LocalId> = self
+            .gir
+            .locals
+            .iter()
+            .enumerate()
+            .filter(|(_, local)| local.kind == g::LocalKind::Argument)
+            .map(|(index, _)| g::LocalId(index as u32))
+            .rev()
+            .take(3)
+            .collect();
+        hidden.reverse();
+        <[g::LocalId; 3]>::try_from(hidden).ok()
     }
 }
 

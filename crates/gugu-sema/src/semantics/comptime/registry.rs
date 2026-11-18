@@ -13,7 +13,7 @@ pub const REGISTRY_REVISION: u32 = 1;
 pub const EARLY_REGISTRY_IDENTITY: (u32, [u8; 32]) = (REGISTRY_REVISION, [0; 32]);
 
 /// evaluator 核心的 revision；registry 条目各自声明其依赖的版本。
-pub const EVALUATOR_REVISION: u32 = 4;
+pub const EVALUATOR_REVISION: u32 = 5;
 
 /// comptime 执行域位掩码。
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -68,6 +68,8 @@ pub enum ResultKind {
     ParsedSource,
     /// 不产生值，只终止当前求值。
     Terminates,
+    /// 定长 `[byte; N]` 值。
+    Bytes,
 }
 
 /// 一条封闭登记的能力。
@@ -253,7 +255,7 @@ const EXACT_ENTRIES: &[(&str, CapabilityEntry)] = &[
             domains: EARLY_AND_EXPAND,
             effects: EffectSet(Effect::FILE_INPUT.0),
             explicit_inputs: &["package_embedded_file"],
-            result_kind: ResultKind::String,
+            result_kind: ResultKind::Bytes,
             evaluator_revision: EVALUATOR_REVISION,
         },
     ),
@@ -427,6 +429,7 @@ pub fn summary() -> [u8; 32] {
             ResultKind::InitialBits => 2,
             ResultKind::ParsedSource => 3,
             ResultKind::Terminates => 4,
+            ResultKind::Bytes => 5,
         }]);
         hasher.update(&entry.evaluator_revision.to_le_bytes());
     }

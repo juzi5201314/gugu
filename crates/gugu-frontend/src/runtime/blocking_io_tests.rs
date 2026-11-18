@@ -63,8 +63,23 @@ fn std_io_and_path_compile_and_user_path_stays_reserved() {
     ));
     assert_eq!(cold.action_key(), warm.action_key());
     assert_eq!(cold.dump_runtime(), warm.dump_runtime());
+    // runtime 的 fs service 池常驻镜像并自带一处 blocking-io 站点；断言
+    // std.io/std.path 相对空程序基线不新增站点。
+    let baseline = Compiler::new().compile(CompileRequest::single_file(
+        "main.gg",
+        "fn main() {}",
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        baseline.is_success(),
+        "{:?}",
+        baseline.diagnostics().items()
+    );
     let plan = cold.image_plan().expect("计划");
-    assert_eq!(plan.blocking_io_sites(), 0);
+    assert_eq!(
+        plan.blocking_io_sites(),
+        baseline.image_plan().expect("基线计划").blocking_io_sites()
+    );
     let dump = cold.dump_runtime().expect("dump");
     assert!(dump.contains("blocking-io="));
     let reserved = Compiler::new().compile(CompileRequest::single_file(

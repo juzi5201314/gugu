@@ -255,6 +255,71 @@ impl Builder<'_> {
                     values: vec![pointer],
                 })
             }
+            g::IntrinsicOp::ArenaNew { sync } => {
+                let capacity = self.operand(&operands[0])?;
+                let capacity = self.computed_values(capacity)?[0];
+                let capacity = self.integer_resize(capacity, Type::I64, true);
+                let shared = self.constant(u64::from(*sync), Type::I64);
+                // glue 约定返回 `uint`（data 段尾 control-16），这里落成句柄
+                // `_region` 字段要求的 GcInterior 引用车道。
+                let word = self.runtime(
+                    RuntimeCall::ArenaNew,
+                    &[capacity, shared],
+                    &[ValueType::scalar(Type::I64)],
+                )?[0];
+                let pointer = self.arena_word_to_ref(word)?;
+                Ok(Computed::Values {
+                    ty,
+                    values: vec![pointer],
+                })
+            }
+            g::IntrinsicOp::ArenaAlloc { sync } => {
+                let element = types
+                    .first()
+                    .ok_or_else(|| invalid("arena alloc 缺少元素类型"))?
+                    .0;
+                let (key, layout) = {
+                    let info = self.layout(element);
+                    if info.passing.has_resource() {
+                        return Err(invalid("arena 不接受含 resource 字段的类型"));
+                    }
+                    (
+                        info.key,
+                        info.layout
+                            .ok_or_else(|| invalid("arena alloc 的元素类型缺少布局"))?,
+                    )
+                };
+                let receiver = self.operand(&operands[0])?;
+                let address = self.computed_address(receiver)?;
+                let region = self.load(
+                    address,
+                    ValueType::pointer(Provenance::GcInterior),
+                    8,
+                    false,
+                );
+                let region = self.pointer_bits(region);
+                let kind = self.type_id_value(&key)?;
+                let kind = self.integer_resize(kind, Type::I64, false);
+                let bytes = self.constant(layout.size, Type::I64);
+                let granular = self.constant(layout.align, Type::I64);
+                let call = if *sync {
+                    RuntimeCall::ArenaAllocSync
+                } else {
+                    RuntimeCall::ArenaAlloc
+                };
+                let word = self.runtime(
+                    call,
+                    &[region, kind, bytes, granular],
+                    &[ValueType::scalar(Type::I64)],
+                )?[0];
+                let pointer = self.arena_word_to_ref(word)?;
+                let value = self.operand(&operands[1])?;
+                self.store_computed(pointer, element, value)?;
+                Ok(Computed::Values {
+                    ty,
+                    values: vec![pointer],
+                })
+            }
             g::IntrinsicOp::Subslice { .. } => self.subslice(operands, ty),
             g::IntrinsicOp::PackSlice => {
                 let element = types
@@ -372,6 +437,18 @@ impl Builder<'_> {
             thread_local,
             bytes: layout.size,
         })
+    }
+
+    /// glue 返回的 `uint` 槽位地址落成受管引用：I64 → 裸指针 → GcInterior，
+    /// 与 `(&T)(p)` 的 RawToReference 是同一条转换通道。
+    fn arena_word_to_ref(&mut self, word: ValueId) -> Result<ValueId, Diagnostic> {
+        let raw = self.int_to_raw(word);
+        Ok(self.emit_one(
+            Op::Convert(crate::body::Conversion::RawToReference),
+            &[raw],
+            ValueType::pointer(Provenance::GcInterior),
+            Origin::Derived(raw),
+        ))
     }
 
     pub(super) fn runtime_result(
@@ -519,11 +596,20 @@ impl Builder<'_> {
         let local = self.gir.expression_locals[base.index()]
             .ok_or_else(|| invalid("字符串检查缺少已求值 base"))?;
         let base = self.read_place(g::Place::local(local))?;
-        let mut args = self.computed_values(base)?;
-        for endpoint in [start, end].into_iter().flatten() {
-            let local = self.gir.expression_locals[endpoint.index()]
-                .ok_or_else(|| invalid("字符串检查缺少已求值端点"))?;
-            args.extend(self.local_values(local)?);
+        // 与 `concat` 同理：切片/字符串是 COW 聚合，glue 绑定需要显式 (data, len) 车道。
+        let mut args = self.explicit_abi_values(base)?;
+        // 调用形状固定为 (data, len, start, end)：缺省起点归一为 0，缺省终点归一为 len，
+        // `utf8_boundary` glue 因此绑定到一个固定四参数的 Gugu 函数。
+        for (index, endpoint) in [start, end].into_iter().enumerate() {
+            match endpoint {
+                Some(endpoint) => {
+                    let local = self.gir.expression_locals[endpoint.index()]
+                        .ok_or_else(|| invalid("字符串检查缺少已求值端点"))?;
+                    args.extend(self.local_values(local)?);
+                }
+                None if index == 0 => args.push(self.constant(0, Type::I64)),
+                None => args.push(args[1]),
+            }
         }
         Ok(self.runtime(
             RuntimeCall::Utf8Boundary,

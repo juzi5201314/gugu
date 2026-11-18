@@ -1,0 +1,120 @@
+use std.runtime.native_memory.{RUNTIME_LIMIT_OFFSET}
+use std.runtime.heap.{heap_word, heap_store_word, heap_store_word32}
+use std.runtime.gc.{PROCESSOR_GC_REQUEST_OFFSET, GC_REQUEST_POLL, GC_REQUEST_MAJOR}
+
+/* 进程级 runtime 控制的发布存储：setter 按线性化顺序最后发布生效，不建立业务
+ * happens-before。memory_limit 直接落在 owner 的活账本（native_memory 的 pressure 消费
+ * 同一槽位）；parallelism/gc_target/trace 是已发布目标，多 processor 调度与事件流
+ * 分别在各自阶段消费。
+ */
+pub const OK: uint = 0
+pub const INVALID_VALUE: uint = 1
+pub const TERMINATING: uint = 2
+
+static terminating_state: uint = 0
+static parallelism_target: uint = 1
+static gc_target_percent: uint = 100
+static gc_target_disabled: uint = 0
+static trace_flags: uint = 0
+static stack_limit_bytes: uint = 1073741824
+
+fn fail() { unsafe { std.runtime.process_exit(2) } }
+
+fn owner() uint = unsafe { heap_word(std.runtime.current_slot() + 16) }
+
+pub fn mark_terminating() { terminating_state = 1 }
+
+pub fn terminating() bool = terminating_state != 0
+
+pub fn init_gc_target(percent: uint, flags: uint) {
+    if flags & uint(1) != 0 { gc_target_disabled = 1 } else { gc_target_percent = percent }
+}
+
+static host_parallelism_cache: uint = 0
+
+/* 宿主可用并行度：探测失败回落到 1（spec 下界）。*/
+pub fn host_parallelism() uint { unsafe {
+    if host_parallelism_cache != 0 { return host_parallelism_cache }
+    let probed = std.runtime.parallelism_probe()
+    host_parallelism_cache = if probed == 0 { uint(1) } else { probed }
+    host_parallelism_cache
+} }
+
+/* 启动环境写入的初始目标：值已由启动解析校验；未配置的键以 0 哨兵跳过，
+ * parallelism 的缺省是宿主可用并行度。*/
+pub fn init_startup(procs: uint, trace: uint, stack_max: uint) {
+    parallelism_target = if procs != 0 { procs } else { host_parallelism() }
+    trace_flags = trace
+    if stack_max != 0 { stack_limit_bytes = stack_max }
+}
+
+/* 报告模式：diagnostics 0=text/1=json/2=both，backtrace 0=off/1=triggering/2=full；
+ * 值已由启动解析校验，报告路径在 diagnostics 章节消费。*/
+static diagnostics_mode: uint = 0
+static backtrace_mode: uint = 1
+
+pub fn init_diagnostics(diagnostics: uint, backtrace: uint) {
+    diagnostics_mode = diagnostics
+    backtrace_mode = backtrace
+}
+
+pub fn diagnostics() uint = diagnostics_mode
+
+pub fn backtrace() uint = backtrace_mode
+
+pub fn stack_limit() uint = stack_limit_bytes
+
+pub fn parallelism() uint = parallelism_target
+
+pub fn set_parallelism(value: uint) (uint, uint) {
+    if terminating_state != 0 { return (TERMINATING, 0) }
+    if value == 0 { return (INVALID_VALUE, 0) }
+    let previous = parallelism_target
+    parallelism_target = value
+    (OK, previous)
+}
+
+pub fn gc_target() (uint, uint) = (gc_target_percent, gc_target_disabled)
+
+pub fn set_gc_target(percent: uint, disabled: uint) (uint, uint, uint) {
+    if terminating_state != 0 { return (TERMINATING, 0, 0) }
+    let previous_percent = gc_target_percent
+    let previous_disabled = gc_target_disabled
+    gc_target_percent = percent
+    gc_target_disabled = disabled
+    (OK, previous_percent, previous_disabled)
+}
+
+pub fn memory_limit() uint = heap_word(owner() + RUNTIME_LIMIT_OFFSET)
+
+pub fn set_memory_limit(bytes: uint) (uint, uint) {
+    if terminating_state != 0 { return (TERMINATING, 0) }
+    let processor = owner()
+    let previous = heap_word(processor + RUNTIME_LIMIT_OFFSET)
+    heap_store_word(processor + RUNTIME_LIMIT_OFFSET, bytes)
+    (OK, previous)
+}
+
+pub fn trace_mask() uint = trace_flags
+
+pub fn set_trace_mask(mask: uint) (uint, uint) {
+    if terminating_state != 0 { return (TERMINATING, 0) }
+    let previous = trace_flags
+    trace_flags = mask
+    (OK, previous)
+}
+
+/* 显式 safepoint：slow path 登记 POLL 请求并进入 GC 调度点；fast path 由 lowering 周期
+ * 性检查 processor 的 poll word，二者共用同一请求记录。 */
+pub fn safepoint_poll() { unsafe {
+    let processor = owner()
+    heap_store_word32(processor + PROCESSOR_GC_REQUEST_OFFSET, GC_REQUEST_POLL)
+    if std.runtime.gc_enter(processor + PROCESSOR_GC_REQUEST_OFFSET) != 0 { fail() }
+} }
+
+/* 等待一个完整 GC 周期；不承诺空闲页返还 OS，也不运行 finalizer。 */
+pub fn collect() { unsafe {
+    let processor = owner()
+    heap_store_word32(processor + PROCESSOR_GC_REQUEST_OFFSET, GC_REQUEST_MAJOR)
+    if std.runtime.gc_enter(processor + PROCESSOR_GC_REQUEST_OFFSET) != 0 { fail() }
+} }

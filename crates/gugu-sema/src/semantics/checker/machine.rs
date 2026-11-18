@@ -176,12 +176,14 @@ impl Checker<'_, '_> {
             );
             return Ty::Error;
         }
-        if let Some(&argument) = args.get(1) {
+        for &argument in args.get(1..).unwrap_or_default() {
             let operand = self.expression(argument, Some(&value));
             self.unify(&operand, &value, &span);
         }
         let ty = if kind == RuntimeMachineIntrinsic::AtomicStoreRelease {
             Ty::Unit
+        } else if kind == RuntimeMachineIntrinsic::AtomicCompareExchangeAcqRel {
+            Ty::Tuple(vec![value, Ty::Bool])
         } else {
             value
         };

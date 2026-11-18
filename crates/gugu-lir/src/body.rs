@@ -395,6 +395,12 @@ pub enum RuntimeCall {
         op: u8,
         cancel: bool,
     },
+    /// `std.mem` arena 构造：`gc_arena_new(capacity, shared)` → 句柄的 `&byte` 字段值。
+    ArenaNew,
+    /// `LocalArena.alloc`：`gc_arena_alloc(region, kind, bytes, granular)` → payload 指针。
+    ArenaAlloc,
+    /// `SyncArena.alloc`：`gc_arena_alloc_sync(region, kind, bytes, granular)` → payload 指针。
+    ArenaAllocSync,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

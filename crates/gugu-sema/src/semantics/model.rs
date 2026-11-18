@@ -15,6 +15,7 @@ pub use lang::MemoryIntrinsic;
 pub use lang::PlatformIntrinsic;
 pub use lang::RuntimeIntrinsic;
 pub use lang::RuntimeMachineIntrinsic;
+pub(crate) use lang::compiler_owned_item;
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
 pub enum Ty {
     Error,
@@ -180,6 +181,8 @@ pub struct Model<'a> {
     names: &'a NameResolution,
     // comptime 求值资源边界；由 compiler profile 固定，测试可注入更小的边界。
     pub(super) eval_profile: super::comptime::eval::EvalProfile,
+    /// `embed_file` 的编译输入根；内存源码等无文件系统边界的输入为 `None`。
+    pub embed: Option<super::comptime::embed::EmbedHost>,
     // 模块/FnDecl 编号稠密；匿名闭包没有具名 ItemId，不参与函数地址的初始化依赖。
     function_items: Vec<Vec<Option<ItemId>>>,
 }
@@ -328,6 +331,7 @@ impl<'a> Model<'a> {
             traits: super::traits::Traits::default(),
             opaques: super::opaque::Opaques::default(),
             foreign: super::foreign::Foreign::default(),
+            embed: None,
             function_items: modules
                 .iter()
                 .map(|module| {

@@ -276,7 +276,7 @@ struct ProcessOutput {
 fn out_dir() string
 fn host() string
 fn target() string
-fn features() &[string]
+fn features() Vec[string]
 fn rerun_if_changed(path_or_glob: string)
 fn rerun_if_env_changed(name: string)
 fn rerun_always()
@@ -290,7 +290,7 @@ fn error(message: string) !
 fn run(executable: string, args: &[string], options: RunOptions) ProcessOutput
 ```
 
-构建信息通过这些类型化 API 传递，不解析 stdout 魔法指令。`emit_module` 的文件必须位于 `out_dir()` 下，并以保留根 `generated.<name>` 加入当前 package；同名用户模块或重复 emit 是错误。`link_library` 的 kind 只能是 `"static"` 或 `"dynamic"`，最终仍由 Gugu 编译器写 ELF/PE，不调用系统链接器。`define_cfg*` 不能覆盖内置 cfg、feature 或另一不同值，并进入缓存 key。`run` 捕获 stdout/stderr，进程非零退出不会自动 panic，由 build.gg 根据 `code` 决定；无法启动进程则 panic。
+构建信息通过这些类型化 API 传递，不解析 stdout 魔法指令。所有 `std.build` 调用共享一条按序追加的原生 action 记录：构建宿主在任务开始时写入 out_dir/host/target/features 头，每个 API 追加对应条目，宿主在任务结束时回收——因此 `std.build` 只能在 build task 上下文中调用，任务外调用（包括普通程序里的调用）一律 panic。`emit_module` 的文件必须位于 `out_dir()` 下，并以保留根 `generated.<name>` 加入当前 package；同名用户模块或重复 emit 是错误。`link_library` 的 kind 只能是 `"static"` 或 `"dynamic"`，最终仍由 Gugu 编译器写 ELF/PE，不调用系统链接器。`define_cfg*` 不能覆盖内置 cfg、feature 或另一不同值，并进入缓存 key。`run` 捕获 stdout/stderr，进程非零退出不会自动 panic，由 build.gg 根据 `code` 决定；无法启动进程则 panic。
 
 build.gg 首次构建必定执行。执行期间调用 `rerun_if_changed` / `rerun_if_env_changed` 记录下一次重跑条件；任一匹配输入变化、build.gg/清单/build 依赖变化、宿主/目标/feature 变化或 `rerun_always` 都使任务失效。一次成功执行没有登记任何 rerun 条件时，默认 package 归档范围内任一文件变化都重跑，与 Cargo build.rs 一致。
 

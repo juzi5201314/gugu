@@ -24,8 +24,12 @@ pub fn run(editor: &mut Editor) -> Result<bool, Diagnostic> {
             {
                 continue;
             }
-            let key = super::gvn_key::encode_op_key(&instruction.op, &instruction.arguments);
             let result = instruction.results[0];
+            let key = super::gvn_key::encode_op_key(
+                &instruction.op,
+                &instruction.arguments,
+                editor.values[result.index()].kind,
+            );
             if let Some((definition_block, definition_index, definition)) = table.get(&key).copied()
             {
                 let available = if definition_block == block {

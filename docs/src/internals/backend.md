@@ -30,7 +30,7 @@ Rt0Payload revision=5、144 字节；Linux 独立寄存器保存初始 argc/argv
 
 ## 后端阶段
 
-cage 控制记录含机器更新的解码计数，ELF 将其放在 rt0 只读收尾范围之外的保留可写区，PE 放在 `.data`；两者都不可执行。PE 的 cage 重定位直接使用数据 RVA，不叠加文本 RVA。私有 `cage_control` 访问器与解码序列共用 `CageControl` relocation，因此公开统计与机器更新消费同一份记录。栈深度读取/复制片段在入口根据当前 r14 的 stack_high 重建地址，复制尾跳 glue 域的既有 memcpy；不能误用 runtime 域同名符号。双目标镜像布局与登记片段重定位回归分别验证页权限、地址及尾跳定义。
+cage 控制记录含机器更新的解码计数，ELF 将其放在 rt0 只读收尾范围之外的保留可写区，PE 放在 `.data`；两者都不可执行。PE 的 cage 重定位直接使用数据 RVA，不叠加文本 RVA。私有 `cage_control` 访问器与解码序列共用 `CageControl` relocation，因此公开统计与机器更新消费同一份记录。栈深度读取/复制片段在入口根据当前 r14 的 stack_high 重建地址，复制尾跳 glue 域的既有 memcpy；不能误用 runtime 域同名符号。时钟由两个片段分别提供：`monotonic_nanos` 在 Linux 使用 CLOCK_BOOTTIME（计入系统挂起时间）、在 Windows 使用 GetTickCount64；`wall_nanos` 在 Linux 使用 CLOCK_REALTIME、在 Windows 读取 GetSystemTimePreciseAsFileTime 并把 FILETIME 换成 Unix epoch 纳秒（输出缓冲位于 shadow space 之上）。双目标镜像布局与登记片段重定位回归分别验证页权限、地址及尾跳定义。
 
 LIR 后端严格按以下顺序运行：
 
@@ -171,7 +171,7 @@ runtime 符号只能在 lowering 的真实发声点发射，并必须先通过 c
 - 普通 `Call`/`ForeignCall` 的 `CallTarget::Runtime`，包括 `Invoke` 与 `TailCall`；
 - `GcAlloc`/`RegionAlloc` 的 slow ABI、region 生命周期入口和 safepoint slow edge。
 
-由 lowering 内联的 `wide_div`、`concat`、`format` 等目录名字不会凭名字触发检查。真正发射的名字若不在 `GLUE_DEFS`，也不在带注释的迁移缺口清单 `PENDING_GLUE_IMPL`，立即产生 `LoweringError::UnregisteredGlue`，禁止生成 relocation；后端不能把缺失符号交给 ELF/PE writer 的退出桩兜底。`PENDING_GLUE_IMPL` 只是迁移期间的显式缺口记录，不是 runtime 实现证明；对应消费者接管后必须从清单移除并登记真实 `Item` 或 `Fragment`。
+由 lowering 内联的 `wide_div`、`format` 等目录名字不会凭名字触发检查。真正发射的名字若不在 `GLUE_DEFS`，也不在带注释的迁移缺口清单 `PENDING_GLUE_IMPL`，立即产生 `LoweringError::UnregisteredGlue`，禁止生成 relocation；后端不能把缺失符号交给 ELF/PE writer 的退出桩兜底。`PENDING_GLUE_IMPL` 只是迁移期间的显式缺口记录，不是 runtime 实现证明；对应消费者接管后必须从清单移除并登记真实 `Item` 或 `Fragment`。
 
 `SafepointPoll` 的 cold edge 只调用登记的 `safepoint_slow` fragment：它在 `r15 + poll_flags_offset` 上保留 `GC_STOP` 位、清除已消费的 `PREEMPT` 位并 `ret`，不分配、不切换栈、不伪装成普通 Gugu 函数。`RuntimeMachineIntrinsic` 的四个定宽原子入口则直接落到既有 `Atomic` lowering；其 fetch-and/or CAS 循环在高寄存器压力点预留地址与候选值，必要的索引常量和栈地址先折叠成内存位移，不能因 scratch 不足退化为错误宽度或 runtime 调用。
 `GcWriteBarrierReserved` 使用独立的 `gc_write_barrier_reserved` glue 入口；它与普通入口共享同一 `(pointer, old, new)` ABI 和 card 写入顺序，但不允许在屏障函数内重新申请额度。该入口只有 `BarrierReserve` 建立的 permit 才可达；当前镜像实现已完成有界 card 记账，shade 与 edge-summary 消费者仍由后续 mark/trace 单元接管，不能把 card 置位本身当作完整回收证明。

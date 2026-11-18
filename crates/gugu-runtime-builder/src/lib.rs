@@ -24,6 +24,31 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/runtime/time.gg",
+        include_str!("../../gugu-frontend/resources/runtime/time.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/timer.gg",
+        include_str!("../../gugu-frontend/resources/runtime/timer.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/control.gg",
+        include_str!("../../gugu-frontend/resources/runtime/control.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/runtime/signal.gg",
+        include_str!("../../gugu-frontend/resources/runtime/signal.gg"),
+        RuntimeSourceRole::Runtime,
+    ),
+    source(
+        "std/signal.gg",
+        include_str!("../../gugu-frontend/resources/std/signal.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
         "std/runtime/counters.gg",
         include_str!("../../gugu-frontend/resources/runtime/counters.gg"),
         RuntimeSourceRole::Runtime,
@@ -237,6 +262,26 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         "std/mem.gg",
         include_str!("../../gugu-frontend/resources/std/mem.gg"),
         RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/ffi.gg",
+        include_str!("../../gugu-frontend/resources/std/ffi.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/src.gg",
+        include_str!("../../gugu-frontend/resources/std/src.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/build.gg",
+        include_str!("../../gugu-frontend/resources/std/build.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
+        "std/runtime/build_task.gg",
+        include_str!("../../gugu-frontend/resources/runtime/build_task.gg"),
+        RuntimeSourceRole::Runtime,
     ),
     source(
         "std/runtime/pin_layout.gg",

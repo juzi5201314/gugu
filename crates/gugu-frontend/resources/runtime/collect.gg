@@ -15,7 +15,7 @@
 use std.runtime.counters as counters
 use std.runtime.shared as shared
 use std.runtime.compression as compression
-use std.runtime.heap.{heap_region_head_slot, heap_region_lookup, REGION_NEXT_OFFSET, REGION_MARK_EPOCH_OFFSET, REGION_PIN_COUNT_OFFSET, REGION_OBJECT_START_OFFSET, REGION_CONTROL_BYTES, REGION_CAPACITY_OFFSET, REGION_PAYLOAD_BYTES_OFFSET, REGION_LEASE_OFFSET}
+use std.runtime.heap.{heap_region_head_slot, heap_region_lookup, heap_region_extent_lookup, REGION_NEXT_OFFSET, REGION_MARK_EPOCH_OFFSET, REGION_MARK_BORN_BIT, REGION_PIN_COUNT_OFFSET, REGION_OBJECT_START_OFFSET, REGION_CONTROL_BYTES, REGION_CAPACITY_OFFSET, REGION_PAYLOAD_BYTES_OFFSET, REGION_LEASE_OFFSET, REGION_STATE_OFFSET, REGION_STATE_ARENA_BIT, REGION_ARENA_NEXT_OFFSET}
 use std.runtime.pin_layout as pinning
 use std.runtime.barrier as barrier
 use std.runtime.heap.{ARENA_CARDS_OFFSET, heap_large_lookup, heap_large_table, LARGE_MAPPING_CAPACITY, LARGE_MAPPING_RECORD_BYTES, LARGE_MAPPING_STATE_ACTIVE, CONTROL_PINNED}
@@ -58,6 +58,11 @@ pub const COORDINATOR_OLD_OFFSET: uint = 48
 pub const COORDINATOR_EVAC_CURSOR_OFFSET: uint = 56
 pub const COORDINATOR_EVAC_LIMIT_OFFSET: uint = 64
 pub const COORDINATOR_WORKLIST_COUNT_OFFSET: uint = 72
+/// 工作列表溢出页链：`[0]=next、[8]=count、[16..] 为对象地址槽`，每页 510 槽。
+/// 页内列表写满后追加宿主页，队列只是缓冲、不是容量上限。
+pub const COORDINATOR_WORKLIST_SPILL_OFFSET: uint = 208
+pub const COORDINATOR_WORKLIST_SPILL_TAIL_OFFSET: uint = 216
+pub const GC_WORKLIST_SPILL_ENTRIES: uint = 510
 pub const COORDINATOR_MINOR_CYCLES_OFFSET: uint = 80
 pub const COORDINATOR_EVACUATED_OFFSET: uint = 88
 pub const COORDINATOR_RECLAIMED_OFFSET: uint = 96
@@ -210,9 +215,28 @@ fn coordinator_evacuate(coordinator: uint, value: uint) uint {
 
 fn coordinator_push(coordinator: uint, address: uint) {
     let count = heap_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET)
-    if count >= GC_WORKLIST_CAPACITY { heap_fail() }
-    heap_store_word(coordinator + COORDINATOR_WORKLIST_BYTES + count * 8, address)
-    heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, count + 1)
+    if count < GC_WORKLIST_CAPACITY {
+        heap_store_word(coordinator + COORDINATOR_WORKLIST_BYTES + count * 8, address)
+        heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, count + 1)
+        return
+    }
+    /* 页内列表写满后溢出到宿主页链：超过 384 个待扫描对象（多区域 arena、
+       大图）不再让回收中止。追加只发生在链尾，扫描按链序推进到定点。*/
+    let tail = heap_word(coordinator + COORDINATOR_WORKLIST_SPILL_TAIL_OFFSET)
+    if tail == 0 || heap_word(tail + 8) == GC_WORKLIST_SPILL_ENTRIES {
+        let page = mapping.allocate(uint(4096))
+        if page == 0 { heap_fail() }
+        heap_store_word(page, 0)
+        heap_store_word(page + 8, 0)
+        if tail != 0 { heap_store_word(tail, page) } else {
+            heap_store_word(coordinator + COORDINATOR_WORKLIST_SPILL_OFFSET, page)
+        }
+        heap_store_word(coordinator + COORDINATOR_WORKLIST_SPILL_TAIL_OFFSET, page)
+        tail = page
+    }
+    let used = heap_word(tail + 8)
+    heap_store_word(tail + 16 + used * 8, address)
+    heap_store_word(tail + 8, used + 1)
 }
 
 fn coordinator_worklist_entry(coordinator: uint, index: uint) uint =
@@ -424,6 +448,28 @@ fn coordinator_drain(coordinator: uint, processor: uint) {
         coordinator_scan(coordinator, processor, coordinator_worklist_entry(coordinator, index))
         index = index + 1
     }
+    coordinator_spill_drain(coordinator, processor, false)
+}
+
+/// 扫描并释放溢出页链：追加只发生在链尾，next 在扫描后读取使新页自然被消费；
+/// 释放发生在链尾页清空之后，tail 不会悬空引用已释放页。
+fn coordinator_spill_drain(coordinator: uint, processor: uint, major: bool) {
+    let page = heap_word(coordinator + COORDINATOR_WORKLIST_SPILL_OFFSET)
+    while page != 0 {
+        let index: uint = 0
+        /* 上界逐次重读：扫描中往尾页同页追加的槽位也要扫到，否则释放时丢条目。*/
+        while index < heap_word(page + 8) {
+            let address = heap_word(page + 16 + index * 8)
+            if major { coordinator_major_scan(coordinator, processor, address) }
+            else { coordinator_scan(coordinator, processor, address) }
+            index = index + 1
+        }
+        let next = heap_word(page)
+        mapping.release(page, uint(4096))
+        page = next
+    }
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_SPILL_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_SPILL_TAIL_OFFSET, 0)
 }
 
 /// 重置 nursery：逐块清除对象账本，只有块记录状态回到 FREE 后才可再次提交。
@@ -481,6 +527,8 @@ pub fn gc_collect_minor(processor: uint, roots: uint, capacity: uint) uint {
     heap_store_word(coordinator + COORDINATOR_EVAC_CURSOR_OFFSET, 0)
     heap_store_word(coordinator + COORDINATOR_EVAC_LIMIT_OFFSET, 0)
     heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_SPILL_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_SPILL_TAIL_OFFSET, 0)
     heap_store_word(coordinator + COORDINATOR_EVACUATED_OFFSET, 0)
     heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_COLLECTOR)
     let _ = coordinator_old(coordinator)
@@ -611,9 +659,18 @@ fn coordinator_region_objects(coordinator: uint, processor: uint, control: uint,
 
 fn coordinator_region_mark(coordinator: uint, processor: uint, control: uint) {
     let epoch = heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1
-    if heap_word(control + REGION_MARK_EPOCH_OFFSET) == epoch { return }
-    heap_store_word(control + REGION_MARK_EPOCH_OFFSET, epoch)
-    coordinator_region_objects(coordinator, processor, control, true)
+    let current = control
+    loop {
+        if heap_word(current + REGION_MARK_EPOCH_OFFSET) == epoch { return }
+        heap_store_word(current + REGION_MARK_EPOCH_OFFSET, epoch)
+        coordinator_region_objects(coordinator, processor, current, true)
+        /* arena 链：句柄只根到首区域，后续扩容区域随首区域同生共死。+48 对
+           TurnRegion 是 RESETS 计数不是指针，只有 ARENA 位才允许沿链。*/
+        if heap_word32(current + REGION_STATE_OFFSET) & REGION_STATE_ARENA_BIT == 0 { return }
+        let next = heap_word(current + REGION_ARENA_NEXT_OFFSET)
+        if next == 0 { return }
+        current = next
+    }
 }
 
 fn coordinator_regions_minor(coordinator: uint, processor: uint) {
@@ -635,7 +692,10 @@ fn coordinator_regions_sweep(coordinator: uint, processor: uint, sweep: bool) {
         let next = heap_word(control + REGION_NEXT_OFFSET)
         let owned = (cursor >= base && cursor <= control) || heap_word32(control + REGION_LEASE_OFFSET) != 0 || heap_word(control + REGION_PIN_COUNT_OFFSET) != 0
         if !sweep && owned { coordinator_region_mark(coordinator, processor, control) };
-        if sweep && !owned && heap_word(control + REGION_MARK_EPOCH_OFFSET) != epoch {
+        /* BORN 位让新建区域的首轮 sweep 视为已标记（存活到首次根扫描），但不影响
+           mark 路径的完整比较（mark 仍把它当未标记，正常扫描对象）。*/
+        let stamped = heap_word(control + REGION_MARK_EPOCH_OFFSET) & ~REGION_MARK_BORN_BIT
+        if sweep && !owned && stamped != epoch {
             counters.remove(counters.REGION_PAYLOAD, heap_word(control + REGION_PAYLOAD_BYTES_OFFSET))
             heap_store_word(link, next)
             mapping.release_heap_mapping(base, bytes + REGION_CONTROL_BYTES, bytes)
@@ -650,6 +710,13 @@ fn coordinator_mark_object(coordinator: uint, address: uint) {
     let region = heap_region_lookup(processor, address)
     if region.0 != 0 {
         coordinator_region_mark(coordinator, processor, region.0)
+        return
+    }
+    // 指向区域数据段但不在已登记对象上的内部根（user arena 句柄的 `&byte` 字段）：
+    // 命中即整段标记，句柄不可达后区域才进 sweep。
+    let extent = heap_region_extent_lookup(processor, address)
+    if extent != 0 {
+        coordinator_region_mark(coordinator, processor, extent)
         return
     }
     let record = gc_large_record(coordinator, address)
@@ -709,6 +776,7 @@ fn coordinator_major_drain(coordinator: uint, processor: uint) {
         coordinator_major_scan(coordinator, processor, coordinator_worklist_entry(coordinator, index))
         index = index + 1
     }
+    coordinator_spill_drain(coordinator, processor, true)
 }
 
 fn finalize_resource(header: uint) {
@@ -795,6 +863,8 @@ pub fn gc_collect_major(processor: uint, roots: uint, capacity: uint) uint {
     if arena == 0 || written > capacity { heap_fail() }
     heap_store_word(coordinator + COORDINATOR_MODE_OFFSET, GC_MODE_COLLECTOR)
     heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_SPILL_OFFSET, 0)
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_SPILL_TAIL_OFFSET, 0)
     let _ = heap_mark_begin_arena(processor, arena, arena_bytes)
     let index: uint = 0
     while index < written {

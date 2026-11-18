@@ -106,6 +106,17 @@ fn iat(name: &str) -> Operand {
         0,
     )
 }
+/// `__gugu_signal_mailbox`：镜像保留可写单元（16B，见 pe.rs/elf.rs 保留区）。
+/// +0 存信号 ctl 页地址；SetConsoleCtrlHandler 回调无上下文，靠它找到 ctl 页。
+fn signal_mailbox() -> Operand {
+    Operand::Rip(
+        RelocTarget::Lir(Symbol::External {
+            key: hash_domain("gugu-signal-mailbox-v1", b"signal_mailbox"),
+            name: "__gugu_signal_mailbox".to_owned(),
+        }),
+        0,
+    )
+}
 fn win_call(b: &mut Builder, name: &str) {
     b.emit("call", &[K::Mem], Access::Read, vec![iat(name)]);
 }
@@ -133,41 +144,68 @@ fn blob(name: &'static str, b: Builder) -> FragmentBlob {
 /// 调度、额度与错误分类由 Gugu 实现；机器片段只负责 native 线程入口。
 pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
     let builders = match target {
-        TargetName::X86_64Linux => [linux_start(), linux_poll(), linux_worker(), linux_clock()],
+        TargetName::X86_64Linux => [
+            linux_start(),
+            linux_poll(),
+            linux_worker(),
+            linux_clock(7),
+            linux_clock(1),
+            linux_parallelism_probe(),
+        ],
         TargetName::X86_64Windows => [
             windows_start(),
             windows_poll(),
             windows_worker(),
             windows_clock(),
+            windows_wall_clock(),
+            windows_parallelism_probe(),
         ],
     };
-    ["fs_start", "fs_poll", "fs_native_worker", "monotonic_nanos"]
-        .into_iter()
-        .zip(builders)
-        .map(|(name, builder)| blob(name, builder))
-        .chain(std::iter::once(blob(
-            "foreign_native_worker",
-            foreign::worker(target),
-        )))
-        .chain([
-            blob(
-                "callback_file_worker",
-                match target {
-                    TargetName::X86_64Linux => linux_file_worker(false),
-                    TargetName::X86_64Windows => windows_worker(),
-                },
-            ),
-            blob("thread_id", thread_id(target)),
-            blob("callback_control", callback::control()),
-            blob("callback_queue", callback::queue()),
-            blob("stack_read_word", stack::read_word()),
-            blob("cage_control", stack::cage_control()),
-            blob("stack_copy_raw", stack::copy_raw()),
-        ])
-        .chain([net::fragment(target), net::resolver_fragment(target)])
-        .chain([environment::startup(target), environment::symbols(target)])
-        .chain([process::call(target), process::worker(target)])
-        .collect()
+    [
+        "fs_start",
+        "fs_poll",
+        "fs_native_worker",
+        "monotonic_nanos",
+        "wall_nanos",
+        "parallelism_probe",
+    ]
+    .into_iter()
+    .zip(builders)
+    .map(|(name, builder)| blob(name, builder))
+    .chain(std::iter::once(blob(
+        "foreign_native_worker",
+        foreign::worker(target),
+    )))
+    .chain([
+        blob(
+            "callback_file_worker",
+            match target {
+                TargetName::X86_64Linux => linux_file_worker(false),
+                TargetName::X86_64Windows => windows_worker(),
+            },
+        ),
+        blob("thread_id", thread_id(target)),
+        blob("callback_control", callback::control()),
+        blob("callback_queue", callback::queue()),
+        blob("stack_read_word", stack::read_word()),
+        blob("cage_control", stack::cage_control()),
+        blob("stack_copy_raw", stack::copy_raw()),
+    ])
+    .chain([net::fragment(target), net::resolver_fragment(target)])
+    .chain([environment::startup(target), environment::symbols(target)])
+    .chain([process::call(target), process::worker(target)])
+    .chain(
+        (target == TargetName::X86_64Windows)
+            .then(|| {
+                [
+                    blob("signal_install", windows_signal_install()),
+                    blob("signal_handler", windows_signal_handler()),
+                ]
+            })
+            .into_iter()
+            .flatten(),
+    )
+    .collect()
 }
 
 /// 可选片段统一按已生成代码的重定位可达性选择，三个镜像消费者共用。
@@ -212,12 +250,13 @@ fn multiply(b: &mut Builder, scale: u64) {
         vec![reg(gpr(Rax)), reg(gpr(Rax)), imm(scale)],
     );
 }
-fn linux_clock() -> Builder {
+/// `clock_id`：单调源用 7（CLOCK_BOOTTIME，含系统挂起时间），墙钟用 1（CLOCK_REALTIME）。
+fn linux_clock(clock_id: i32) -> Builder {
     let mut b = Builder::new();
     let failed = b.label();
     adjust(&mut b, "sub", Rsp, 16);
     number(&mut b, Rax, 228);
-    number(&mut b, Rdi, 7); // CLOCK_BOOTTIME 含系统挂起时间。
+    number(&mut b, Rdi, clock_id);
     rr(&mut b, Rsi, Rsp);
     syscall(&mut b);
     compare(&mut b, Rax, 0);
@@ -249,7 +288,153 @@ fn windows_clock() -> Builder {
     ret(&mut b);
     b
 }
+/// FILETIME 是 1601-01-01 起 100 纳秒计数；减去 Unix epoch 偏移后乘 100 得到墙钟纳秒。
+/// `signal_install(ctl, event)`：把 ctl 页登记进镜像邮箱（ctl+64 存事件句柄），
+/// 然后 `SetConsoleCtrlHandler(signal_handler, TRUE)`。返回 BOOL（非 0 成功）。
+fn windows_signal_install() -> Builder {
+    let mut b = Builder::new();
+    b.emit(
+        "mov",
+        MOV,
+        Access::Write,
+        vec![signal_mailbox(), reg(gpr(Rax))],
+    );
+    store(&mut b, Rax, 64, Rbx);
+    adjust(&mut b, "sub", Rsp, 40);
+    b.emit(
+        "lea",
+        &[K::Mem, K::R64],
+        Access::Address,
+        vec![
+            Operand::Rip(
+                RelocTarget::Lir(mangle::runtime_symbol("signal_handler")),
+                0,
+            ),
+            reg(gpr(Rcx)),
+        ],
+    );
+    number(&mut b, Rdx, 1);
+    win_call(&mut b, "SetConsoleCtrlHandler");
+    dword_result(&mut b);
+    adjust(&mut b, "add", Rsp, 40);
+    ret(&mut b);
+    b
+}
+/// `signal_handler(ctrl)`：控制台 ctrl 回调（ecx = CTRL_* 事件码）。
+/// 运行在 Windows 自起的 OS 线程上，只做两件原子小事：把 `1 << ctrl` 并入
+/// ctl+72 的 signo 掩码、然后 SetEvent(ctl+64)；绝不触碰托管代码或堆。
+fn windows_signal_handler() -> Builder {
+    let mut b = Builder::new();
+    b.emit(
+        "mov",
+        MOV,
+        Access::Read,
+        vec![signal_mailbox(), reg(gpr(Rax))],
+    );
+    number(&mut b, Rdx, 1);
+    b.emit(
+        "shl",
+        &[K::Rm32, K::Cl],
+        Access::ReadWrite,
+        vec![reg(gpr(Rdx)), reg(gpr(Rcx))],
+    );
+    b.emit(
+        "or",
+        &[K::Rm32, K::R32],
+        Access::ReadWrite,
+        vec![mem_base(gpr(Rax), 72), reg(gpr(Rdx))],
+    );
+    load(&mut b, Rcx, Rax, 64);
+    adjust(&mut b, "sub", Rsp, 40);
+    win_call(&mut b, "SetEvent");
+    adjust(&mut b, "add", Rsp, 40);
+    number(&mut b, Rax, 1);
+    ret(&mut b);
+    b
+}
+fn windows_wall_clock() -> Builder {
+    let mut b = Builder::new();
+    adjust(&mut b, "sub", Rsp, 40);
+    // 输出缓冲放在 shadow space 之上，callee 的寄存器回写不能覆盖它。
+    b.emit(
+        "lea",
+        &[K::Mem, K::R64],
+        Access::Address,
+        vec![mem_base(gpr(Rsp), 32), reg(gpr(Rcx))],
+    );
+    win_call(&mut b, "GetSystemTimePreciseAsFileTime");
+    load(&mut b, Rax, Rsp, 32);
+    b.emit(
+        "mov",
+        &[K::R64, K::Imm64],
+        Access::Write,
+        vec![reg(gpr(R10)), imm(116_444_736_000_000_000)],
+    );
+    b.emit(
+        "sub",
+        MOV,
+        Access::ReadWrite,
+        vec![reg(gpr(Rax)), reg(gpr(R10))],
+    );
+    multiply(&mut b, 100);
+    adjust(&mut b, "add", Rsp, 40);
+    ret(&mut b);
+    b
+}
 
+/// `sched_getaffinity(0, 8, mask)`：宿主可用 CPU 掩码位计数；失败返回 0，调用方回落到 1。
+fn linux_parallelism_probe() -> Builder {
+    let mut b = Builder::new();
+    let failed = b.label();
+    let bits = b.label();
+    adjust(&mut b, "sub", Rsp, 16);
+    number(&mut b, Rax, 204);
+    number(&mut b, Rdi, 0);
+    number(&mut b, Rsi, 8);
+    rr(&mut b, Rdx, Rsp);
+    syscall(&mut b);
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "jl", failed);
+    load(&mut b, Rdx, Rsp, 0);
+    number(&mut b, Rax, 0);
+    number(&mut b, Rcx, 64);
+    b.define(bits);
+    rr(&mut b, R11, Rdx);
+    b.emit("and", IMM, Access::ReadWrite, vec![reg(gpr(R11)), imm(1)]);
+    b.emit(
+        "add",
+        MOV,
+        Access::ReadWrite,
+        vec![reg(gpr(Rax)), reg(gpr(R11))],
+    );
+    b.emit(
+        "shr",
+        &[K::Rm64, K::Imm8],
+        Access::ReadWrite,
+        vec![reg(gpr(Rdx)), imm(1)],
+    );
+    adjust(&mut b, "sub", Rcx, 1);
+    jump(&mut b, "jne", bits);
+    adjust(&mut b, "add", Rsp, 16);
+    ret(&mut b);
+    b.define(failed);
+    number(&mut b, Rax, 0);
+    adjust(&mut b, "add", Rsp, 16);
+    ret(&mut b);
+    b
+}
+/// `GetSystemInfo` 的 `dwNumberOfProcessors` 在 SYSTEM_INFO +32；失败时 API 不写值，返回 0。
+fn windows_parallelism_probe() -> Builder {
+    let mut b = Builder::new();
+    adjust(&mut b, "sub", Rsp, 48);
+    rr(&mut b, Rcx, Rsp);
+    win_call(&mut b, "GetSystemInfo");
+    load(&mut b, Rax, Rsp, 32);
+    dword_result(&mut b);
+    adjust(&mut b, "add", Rsp, 48);
+    ret(&mut b);
+    b
+}
 fn linux_start() -> Builder {
     let mut b = Builder::new();
     let file = b.label();
@@ -325,7 +510,7 @@ fn linux_file_worker(exit_thread: bool) -> Builder {
     rr(&mut b, R12, Rdi);
     load(&mut b, Rax, R12, OPERATION);
     for code in [
-        0, 1, 2, 3, 5, 8, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262,
+        0, 1, 2, 3, 5, 8, 14, 72, 74, 75, 77, 82, 83, 84, 86, 87, 88, 89, 217, 262, 289,
     ] {
         compare(&mut b, Rax, code);
         jump(&mut b, "je", accepted);
@@ -475,6 +660,8 @@ const WINDOWS_CALLS: &[(i32, &str, i32)] = &[
     (18, "DeviceIoControl", 0),
     (19, "GetFinalPathNameByHandleW", 0),
     (20, "SetFileInformationByHandle", 0),
+    (21, "CreateEventW", 0),
+    (22, "WaitForSingleObject", -1),
 ];
 fn windows_worker() -> Builder {
     let mut b = Builder::new();
@@ -506,11 +693,25 @@ fn windows_worker() -> Builder {
         win_call(&mut b, name);
         if name == "CreateSymbolicLinkW" {
             b.emit("and", IMM, Access::ReadWrite, vec![reg(gpr(Rax)), imm(255)]);
+        } else if name == "WaitForSingleObject" {
+            // 失败哨兵是 WAIT_FAILED (0xFFFFFFFF) 而非 -1；先零扩展再按 dword 比较。
+            dword_result(&mut b);
+        } else if name == "CreateEventW" {
+            // 返回 HANDLE 保持原生宽度；失败哨兵是 NULL，不能 dword 截断。
         } else if failure == 0 {
             dword_result(&mut b);
         }
         store(&mut b, R12, VALUE, Rax);
-        compare(&mut b, Rax, failure);
+        if name == "WaitForSingleObject" {
+            b.emit(
+                "cmp",
+                &[K::Rm32, K::Imm32],
+                Access::Read,
+                vec![reg(gpr(Rax)), imm(0xffff_ffff)],
+            );
+        } else {
+            compare(&mut b, Rax, failure);
+        }
         jump(&mut b, "jne", done);
         win_call(&mut b, "GetLastError");
         dword_result(&mut b);

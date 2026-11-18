@@ -172,9 +172,30 @@ accept_cases! {
         "fn main() { unsafe { asm(\"nop\", out(\"rax\") 1) } }";
 }
 
+#[test]
+fn naked_requires_one_asm_and_an_unsafe_c_definition_00() {
+    // `#[naked] unsafe extern "C"` 调用走 ForeignBridge[DirtyCpu]，Linux 链接按
+    // 平台 ABI 契约需要显式 glibc 解释器与 pthread 导入；有配置时整体编译必须成功。
+    let mut imports: Vec<_> = crate::NativeLink::THREAD_SYMBOLS
+        .into_iter()
+        .map(|name| crate::NativeImport::function("libc.so.6", name))
+        .collect();
+    imports.push(crate::NativeImport::function("libprobe.so", "identity"));
+    let output = crate::Compiler::shared().compile(
+        crate::CompileRequest::single_file(
+            "main.gg",
+            "#[naked] unsafe extern \"C\" fn identity(n: int) int = asm(\"mov %rdi, %rax; ret\")\nfn main() { unsafe { _ = identity(1) } }",
+            crate::TargetName::X86_64Linux,
+        )
+        .with_native_link(crate::NativeLink {
+            imports,
+            interpreter: Some("/toolchain/ld.so".into()),
+        }),
+    );
+    assert!(output.is_success(), "{:?}", output.diagnostics().items());
+}
+
 accept_cases! {
-    naked_requires_one_asm_and_an_unsafe_c_definition_00: true,
-        "#[naked] unsafe extern \"C\" fn identity(n: int) int = asm(\"mov %rdi, %rax; ret\")\nfn main() { unsafe { _ = identity(1) } }";
     naked_requires_one_asm_and_an_unsafe_c_definition_01: true,
         "global_asm(\".text\\n\" + \"custom: ret\")\nfn main() {}";
     naked_requires_one_asm_and_an_unsafe_c_definition_02: false,

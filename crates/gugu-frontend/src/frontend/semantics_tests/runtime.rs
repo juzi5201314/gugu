@@ -127,3 +127,12 @@ fn gc_atomic_authorization_rejects_aliases_and_counterfeit_runtime_paths() {
         }
     }
 }
+
+accept_cases! {
+    std_runtime_setters_facade_00: true,
+        "use std.runtime.{GcTarget, RuntimeError, parallelism, set_parallelism, gc_target, set_gc_target, memory_limit, set_memory_limit, stack_limit, safepoint_poll, collect, stats, available_parallelism}\nfn main() { _ = available_parallelism()\n _ = parallelism()\n match set_parallelism(4) { Ok(p) => { _ = p }, Err(e) => match e { RuntimeError::InvalidValue => (), RuntimeError::Terminating => () } }\n match gc_target() { GcTarget::Automatic(p) => { _ = p }, GcTarget::Off => () }\n _ = set_gc_target(GcTarget::Automatic(50))\n _ = set_gc_target(GcTarget::Off)\n _ = memory_limit()\n _ = set_memory_limit(Some(uint(1024)))\n _ = set_memory_limit(None)\n _ = stack_limit()\n safepoint_poll()\n collect()\n _ = stats() }";
+    std_runtime_trace_config_01: true,
+        "use std.runtime.{TraceConfig, trace_config, set_trace}\nfn main() { let c = trace_config()\n _ = c.scheduler\n _ = c.gc\n _ = c.signal\n _ = c.panic\n _ = set_trace(c)\n _ = set_trace(TraceConfig { scheduler: true, gc: true, signal: false, panic: false }) }";
+    std_runtime_set_parallelism_zero_02: true,
+        "use std.runtime.{RuntimeError, set_parallelism}\nfn main() { match set_parallelism(0) { Ok(p) => { _ = p }, Err(e) => match e { RuntimeError::InvalidValue => (), RuntimeError::Terminating => () } } }";
+}

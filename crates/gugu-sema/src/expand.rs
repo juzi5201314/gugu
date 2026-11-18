@@ -162,6 +162,7 @@ pub fn run(
     package_identity: &str,
     external_packages: &BTreeSet<String>,
     prefix: Option<&crate::sema_prefix::SemaPrefix>,
+    embed: Option<&semantics::comptime::embed::EmbedHost>,
 ) -> Result<ExpansionInputs, Vec<Diagnostic>> {
     let mut budget = ExpansionBudget::default();
     let mut token_files: Vec<_> = modules.iter().map(TokenFileTable::new).collect();
@@ -187,8 +188,9 @@ pub fn run(
         let names =
             names::analyze_with_prefix(package_identity, external_packages, modules, prefix)?;
         // 展开阶段只做路径与宏解析，不构造 checker：GC 控制原语的授权集合在这里不被消费。
-        let model =
+        let mut model =
             semantics::model::Model::new(modules, &names, &std::collections::BTreeSet::new())?;
+        model.embed = embed.cloned();
         let mut round_hash = blake3::Hasher::new_derive_key("gugu-expand-round-input-v1");
         for source in sources.snapshots() {
             round_hash.update(

@@ -147,6 +147,20 @@ lint 级别只由 `allow`、`warn`、`deny`、`forbid` 的参数列表决定。`
 
 `std.src.file()` / `line()` / `column()` 始终是**该调用表达式在源文件里的物理位置**（1 基；`column` 按该行的 Unicode 标量计），不受 `track_caller` 影响。
 
+`caller()` 的返回类型是 `std.src.Location`：
+
+```text
+struct Location {
+    pub file: string
+    pub line: int
+    pub column: int
+}
+
+fn caller() Location
+```
+
+`file` 是与 `std.src.file()` 同一约定的逻辑路径，`line`/`column` 同为 1 基。在普通（非 `track_caller`）函数体内，`caller()` 折叠为该调用表达式自身的 `Location`——最近的 `track_caller` 边界就是 `caller()` 自身。对 `track_caller` 函数取址或经 fn 指针调用是错误：`track_caller` 只在直接调用上有定义。
+
 ## 标识符
 
 从 ASCII 字母或 `_` 开始，后接 ASCII 字母、数字、`_`。区分大小写。
