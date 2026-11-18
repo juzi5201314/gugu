@@ -15,3 +15,14 @@ pub fn line() int {
 pub fn column() int {
     panic("std.src.column 只能按调用点直接调用")
 }
+
+/// `std.src.caller()` 的返回类型：调用点源位置。
+pub struct Location {
+    pub file: string
+    pub line: int
+    pub column: int
+}
+
+pub fn caller() Location {
+    panic("std.src.caller 只能按调用点直接调用")
+}
