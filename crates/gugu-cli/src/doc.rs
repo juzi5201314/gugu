@@ -4,15 +4,15 @@
 //! HTML：模块页列出公共项签名与文档，项链接到带行锚点的源码页。`--no-deps`
 //! 只生成当前 package；默认同时生成锁图中依赖 package 的文档。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use gugu_compiler::docs::{DocItem, DocModule, DocWorld};
 use gugu_compiler::{
-    Compilation, CompileRequest, Compiler, DependencyCache, DependencyDomain, EMBEDDED_ARTIFACTS,
-    LockGraph, Package, PackageSource, Project, Target, TargetName, TargetSelection,
-    default_cache_root,
+    CachePolicy, Compilation, CompileRequest, Compiler, DependencyCache, DependencyDomain,
+    EMBEDDED_ARTIFACTS, LockGraph, Package, PackageFiles, PackageSource, Project, Target,
+    TargetName, TargetSelection, default_cache_root, prepare_dependency_inputs,
 };
 use serde_json::json;
 
@@ -180,17 +180,52 @@ fn render_dependencies(
 ) -> Result<Vec<(String, PathBuf)>, ()> {
     let format = options.format.unwrap_or_default();
     let cache = DependencyCache::new(options.cache_dir.clone().unwrap_or_else(default_cache_root));
+    // 与 build/check 同一条依赖输入路径：离线、locked 与 --vendor 在此统一处理，
+    // 文档始终由校验过的锁定源码生成，不读取任何此前生成的文档或 target 产物。
+    let policy = CachePolicy {
+        offline: options.offline,
+        locked: options.locked,
+        vendor: options.vendor,
+    };
+    let inputs = match prepare_dependency_inputs(
+        lock,
+        &cache,
+        workspace_root,
+        &workspace_root.join("vendor"),
+        policy,
+    ) {
+        Ok(inputs) => inputs,
+        Err(error) => {
+            emit_cli_error(format, &error.to_string());
+            return Err(());
+        }
+    };
+    let inputs: BTreeMap<String, PackageFiles> = inputs
+        .into_iter()
+        .map(|input| (input.package().to_string(), input.files().clone()))
+        .collect();
     let mut written = Vec::new();
     for locked in &lock.packages {
-        let dep_root =
-            match dep_package_root(locked, workspace_root, member_roots, &cache, doc_root) {
-                Ok(Some(root)) => root,
-                Ok(None) => continue,
-                Err(message) => {
-                    emit_cli_error(format, &message);
-                    return Err(());
-                }
-            };
+        // workspace 成员的文档由上层 package 循环生成，这里跳过。
+        if matches!(locked.id.source(), PackageSource::Path { path }
+            if member_roots.contains(&workspace_root.join(path)))
+        {
+            continue;
+        }
+        let Some(files) = inputs.get(&locked.id.to_string()) else {
+            emit_cli_error(
+                format,
+                &format!("依赖 `{}` 缺少已校验的锁定输入", locked.id),
+            );
+            return Err(());
+        };
+        let dep_root = doc_root
+            .join(".deps")
+            .join(sanitize(&locked.id.to_string()));
+        if let Err(message) = materialize_package(&dep_root, files) {
+            emit_cli_error(format, &message);
+            return Err(());
+        }
         let dep_project = match Project::discover(&dep_root) {
             Ok(project) => project,
             Err(error) => {
@@ -214,7 +249,12 @@ fn render_dependencies(
             );
             return Err(());
         };
-        let features = Vec::new();
+        // 用锁图记录的真实启用特性：feature 门控的公共 API 才能进入依赖文档。
+        let features = locked
+            .features
+            .get(&DependencyDomain::Normal)
+            .cloned()
+            .unwrap_or_default();
         let Some(target_ref) = doc_target(dep_package, &features) else {
             continue;
         };
@@ -252,43 +292,18 @@ fn render_dependencies(
     Ok(written)
 }
 
-/// 依赖 package 的源码目录：path 依赖直指工作区相对路径；registry/git 依赖
-/// 从确定性缓存取出文件集并物化到 `doc/.deps/`，文档始终由锁定的真实源码生成，
-/// 不读取任何此前生成的文档或 target 产物。
-fn dep_package_root(
-    locked: &gugu_compiler::LockedPackage,
-    workspace_root: &Path,
-    member_roots: &BTreeSet<PathBuf>,
-    cache: &DependencyCache,
-    doc_root: &Path,
-) -> Result<Option<PathBuf>, String> {
-    match locked.id.source() {
-        PackageSource::Path { path } => {
-            let root = workspace_root.join(path);
-            if member_roots.contains(&root) {
-                return Ok(None);
-            }
-            Ok(Some(root))
+/// 把已校验的依赖文件集物化到 `doc/.deps/` 供 Project::discover 读取。
+fn materialize_package(dir: &Path, files: &PackageFiles) -> Result<(), String> {
+    for (path, bytes) in files.files() {
+        let file = dir.join(path);
+        if let Some(parent) = file.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("物化 `{}` 失败：{error}", file.display()))?;
         }
-        PackageSource::Registry { .. } | PackageSource::Git { .. } => {
-            let input = cache
-                .load(&locked.id, locked.checksum.as_deref())
-                .map_err(|error| format!("依赖 `{}` 缓存读取失败：{error}", locked.id))?;
-            let dir = doc_root
-                .join(".deps")
-                .join(sanitize(&locked.id.to_string()));
-            for (path, bytes) in input.files().files() {
-                let file = dir.join(path);
-                if let Some(parent) = file.parent() {
-                    fs::create_dir_all(parent)
-                        .map_err(|error| format!("物化 `{}` 失败：{error}", file.display()))?;
-                }
-                fs::write(&file, bytes)
-                    .map_err(|error| format!("物化 `{}` 失败：{error}", file.display()))?;
-            }
-            Ok(Some(dir))
-        }
+        fs::write(&file, bytes)
+            .map_err(|error| format!("物化 `{}` 失败：{error}", file.display()))?;
     }
+    Ok(())
 }
 
 fn sanitize(name: &str) -> String {
