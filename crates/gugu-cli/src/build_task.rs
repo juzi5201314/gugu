@@ -97,8 +97,17 @@ impl TaskLock {
     }
 
     /// build task 子进程与宿主共持锁：宿主退出而子进程存活时锁仍有效。
+    /// 先写临时文件再原子 rename，宿主中断不会留下截断的空锁。
     fn watch_child(&self, pid: u32) {
-        let _ = fs::write(&self.path, format!("{}\n{}\n", self.pid, pid));
+        let content = format!("{}\n{}\n", self.pid, pid);
+        let tmp = self.path.with_extension(format!("write-{}", self.pid));
+        if fs::write(&tmp, &content).is_ok()
+            && (fs::rename(&tmp, &self.path).is_ok()
+                || (fs::remove_file(&self.path).is_ok() && fs::rename(&tmp, &self.path).is_ok()))
+        {
+            return;
+        }
+        let _ = fs::write(&self.path, content);
     }
 }
 
@@ -127,7 +136,9 @@ fn try_reclaim(path: &Path) -> Result<bool, std::io::Error> {
     }
 }
 
-/// 锁内所有记录的 pid 都已退出才算残留锁；读不到合法 pid 按持有中处理。
+/// 锁内所有记录的 pid 都已退出才算残留锁。写不到任何 pid 只可能是
+/// create 与写 pid 之间的碎片、或宿主被杀留下的残壳：超过初始化窗口
+/// 同样按残留处理，否则视为持有中。
 fn lock_is_stale(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
@@ -142,12 +153,32 @@ fn lock_is_stale(path: &Path) -> bool {
             return false;
         }
     }
-    any
+    if any {
+        return true;
+    }
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|mtime| mtime.elapsed().ok())
+        .is_some_and(|age| age >= std::time::Duration::from_secs(5))
 }
 
 #[cfg(target_os = "linux")]
 fn pid_alive(pid: u32) -> bool {
-    Path::new(&format!("/proc/{pid}")).exists()
+    let path = format!("/proc/{pid}");
+    if !Path::new(&path).exists() {
+        return false;
+    }
+    // 僵尸与退出中的进程虽留 /proc 条目，但不会再写构建产物，不算持有者。
+    match fs::read_to_string(format!("{path}/stat")) {
+        Ok(stat) => !matches!(
+            stat.rsplit(')')
+                .next()
+                .and_then(|rest| rest.split_whitespace().next()),
+            Some("Z" | "X")
+        ),
+        Err(_) => false,
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
