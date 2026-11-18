@@ -48,6 +48,20 @@ pub fn init_startup(procs: uint, trace: uint, stack_max: uint) {
     if stack_max != 0 { stack_limit_bytes = stack_max }
 }
 
+/* 报告模式：diagnostics 0=text/1=json/2=both，backtrace 0=off/1=triggering/2=full；
+ * 值已由启动解析校验，报告路径在 diagnostics 章节消费。*/
+static diagnostics_mode: uint = 0
+static backtrace_mode: uint = 1
+
+pub fn init_diagnostics(diagnostics: uint, backtrace: uint) {
+    diagnostics_mode = diagnostics
+    backtrace_mode = backtrace
+}
+
+pub fn diagnostics() uint = diagnostics_mode
+
+pub fn backtrace() uint = backtrace_mode
+
 pub fn stack_limit() uint = stack_limit_bytes
 
 pub fn parallelism() uint = parallelism_target
