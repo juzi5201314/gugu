@@ -1,6 +1,6 @@
 use std.runtime.time as clock
 use std.runtime.timer as timer
-use std.sync.{CancelToken, Cancelled}
+use std.sync.{CancelSource, CancelToken, Cancelled}
 
 /// 不含时区和日历的非负时长，纳秒精度与可表示范围相互独立。
 #[repr(C)]
@@ -71,4 +71,46 @@ pub fn sleep_cancel(duration: Duration, cancel: &CancelToken) Result[(), Cancell
     let status = unsafe { timer.sleep_until(timer.deadline_after(duration.as_secs(), duration.subsec_nanos()), cancel.raw_control()) }
     if status == timer.CANCELLED { return Err(Cancelled {}) }
     Ok(())
+}
+
+/* `TimedOut` 只标记超时这一种结果；operation 自身的失败原样通过。*/
+pub struct TimedOut {
+}
+
+fn joined[T](result: Result[T, Panic]) Result[T, TimedOut] {
+    match result {
+        Ok(value) => Ok(value),
+        Err(_) => panic("timeout 内的 operation panic"),
+    }
+}
+
+/* 到期胜出后先取消 token，再非阻塞收尾同一窗口内已经完成的 operation。*/
+fn expired[T](source: &CancelSource, join: Join[T]) Result[T, TimedOut] {
+    source.cancel()
+    select {
+        let late = join.wait() => joined(late)
+        _ => Err(TimedOut {})
+    }
+}
+
+/* `operation` 在新建协程上运行并取得新 token；超时分支胜出即取消，
+ * 被取消的协程在自己的取消观察点结束，timeout 不等待其收尾。*/
+pub fn timeout[T](duration: Duration, operation: fn(&CancelToken) T) Result[T, TimedOut] {
+    let source = CancelSource::new()
+    let token = source.token()
+    let join = async { operation(&token) }
+    let fired = chan[()](1)
+    let timer_source = CancelSource::new()
+    let timer_token = timer_source.token()
+    let deadline = timer.deadline_after(duration.as_secs(), duration.subsec_nanos())
+    async {
+        let status = unsafe { timer.sleep_until(deadline, timer_token.raw_control()) }
+        if status == 0 { fired.send(()) } else { let _ = 0 }
+    }
+    let outcome = select {
+        let result = join.wait() => joined(result)
+        let _ = fired.recv() => expired(&source, join)
+    }
+    timer_source.cancel()
+    outcome
 }
