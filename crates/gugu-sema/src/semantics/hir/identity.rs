@@ -61,6 +61,7 @@ struct Candidate {
     key: [u8; 32],
     parent: Option<usize>,
     public: bool,
+    track_caller: bool,
 }
 
 pub(super) fn collect(
@@ -77,6 +78,18 @@ pub(super) fn collect(
         .map(|(index, definition)| Candidate {
             origin: Origin::Named(index),
             module: definition.module.index(),
+            track_caller: model.modules[definition.module.index()]
+                .arena
+                .items
+                .iter()
+                .find(|item| item.span == definition.span)
+                .is_some_and(|item| {
+                    model.has_attribute(
+                        definition.module.index(),
+                        item.attributes.clone(),
+                        "track_caller",
+                    )
+                }),
             span: Some(definition.span.clone()),
             name: definition.name.clone().unwrap_or_default(),
             kind: definition_kind(definition.kind),
@@ -227,6 +240,7 @@ pub(super) fn collect(
             key,
             parent: None,
             public: true,
+            track_caller: false,
         });
     }
     if candidates.len() >= u32::MAX as usize {
@@ -309,6 +323,7 @@ pub(super) fn collect(
             parameters: Vec::new(),
             obligations: Vec::new(),
             public: candidate.public,
+            track_caller: candidate.track_caller,
         });
     }
     let remap_table = |table: Vec<Vec<Option<usize>>>| {
@@ -415,6 +430,7 @@ fn synthetic(origin: Origin, module: usize, span: Span, kind: hir::DefinitionKin
         key: [0; 32],
         parent: None,
         public: false,
+        track_caller: false,
     }
 }
 
