@@ -222,10 +222,23 @@ fn wake_waiter(sub: uint) { unsafe {
     ready_hot(hot)
 } }
 
+/* 掩码同步：service 跑在每个 worker 线程上，把订阅并集掩码就地应用到当前线程；
+   之后 pump 派生的原生读线程随创建者继承掩码，pre-subscribe 的 worker 在下一轮
+   service 里自愈。避免信号落到未屏蔽线程执行默认动作。*/
+#[cfg(os = "linux")]
+fn mask_sync(page: uint) { unsafe {
+    if word(page + 16) == 0 { return }
+    let applied = native_call(14, 0, word(page + 48), 0, 8, 0, 0, 0, 0, 0)
+    if applied.error != 0 { panic("signal: sigprocmask 失败") }
+} }
+#[cfg(os = "windows")]
+fn mask_sync(page: uint) { unsafe { } }
+
 /// service 在 worker 循环内运行：收获完成的读、重挂泵、清扫已关闭订阅的等待者。
 pub fn service() { unsafe {
     if ctl == 0 { return }
     let page = ctl
+    mask_sync(page)
     let sub = word(page)
     while sub != 0 {
         if word(sub + 64) != 0 || word(sub + 48) != 0 {
@@ -270,7 +283,7 @@ pub fn try_recv(cell: uint) (uint, uint, uint) { unsafe {
 pub fn recv(cell: uint) (uint, uint, uint) { unsafe {
     let sub = sub_of(cell)
     if sub == 0 { return (0, 0, ERROR_CLOSED) }
-    let (signo, occurrences, error) = try_recv(sub)
+    let (signo, occurrences, error) = try_recv(cell)
     if error != 0 || signo != 0 { return (signo, occurrences, error) }
     if word(sub + 64) != 0 { return (0, 0, ERROR_CLOSED) }
     let node = control_allocate(NODE_BYTES)
@@ -281,7 +294,7 @@ pub fn recv(cell: uint) (uint, uint, uint) { unsafe {
     put(sub + 80, node)
     park_current()
     /* 醒来：已关闭清理由 service 完成；这里直接尝试摘取。*/
-    try_recv(sub)
+    try_recv(cell)
 } }
 
 pub fn dropped(cell: uint) uint { unsafe {
