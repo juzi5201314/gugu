@@ -134,7 +134,8 @@ fn signature_text(source_map: &SourceMap, span: &Span) -> String {
 }
 
 fn is_generated(module: &ParsedModule) -> bool {
-    module.builtin || module.path.starts_with("__gugu_")
+    // `generated.` 是 build task `emit_module` 的保留根。
+    module.builtin || module.path.starts_with("__gugu_") || module.path.starts_with("generated.")
 }
 
 /// 收集一个 package 的公共 API 文档表；内建与生成模块不进入文档。

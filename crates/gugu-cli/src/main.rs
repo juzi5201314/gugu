@@ -2,6 +2,7 @@
 // SharedHeap 段落追加后键数继续增长，因此上界同步调高。
 #![recursion_limit = "1024"]
 
+mod build_task;
 mod cache;
 mod config;
 mod doc;
@@ -762,11 +763,25 @@ fn compile_package(
             return Err(());
         }
     };
+    // build task 在任何 target 源码编译前运行一次；输出注入所有 target。
+    let (build_identity, build_externals) =
+        package_resolution(lock, project_root, package, TargetKind::Build);
+    let build_output = build_task::run_build_task(
+        project_root,
+        package,
+        compiler,
+        options,
+        target,
+        &features,
+        format,
+        build_externals,
+        build_identity,
+    )?;
     let mut exit_code = 0;
     for package_target in selected {
         let (package_identity, external_packages) =
             package_resolution(lock, project_root, package, package_target.kind());
-        let request = CompileRequest::project_target(
+        let mut request = CompileRequest::project_target(
             package,
             package_target,
             package_identity,
@@ -774,6 +789,12 @@ fn compile_package(
             features.clone(),
             external_packages,
         );
+        if let Some(output) = &build_output {
+            request = request
+                .with_custom_cfg(output.defines.clone())
+                .with_generated_modules(output.modules.clone())
+                .with_native_link(output.native_link());
+        }
         let compilation = compiler.compile(request);
         // 头行只属于 text 输出；json 与 json-diagnostic-short 保持纯事件流。
         if !options.quiet && format == OutputFormat::Text {

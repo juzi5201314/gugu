@@ -117,6 +117,31 @@ impl CompileRequest {
         self.native_link = native_link;
         self
     }
+    /// 注入 build task `define_cfg`/`define_cfg_value` 声明的自定义 cfg。
+    ///
+    /// 只作用于 project 输入；内建 cfg（os/arch/test/bench/feature）在 CfgContext 里
+    /// 已按身份占用，自定义条目与内建名冲突时按现有 cfg 规则诊断。
+    pub fn with_custom_cfg(mut self, custom_cfg: BTreeMap<String, Option<String>>) -> Self {
+        if let CompileInput::Project {
+            custom_cfg: slot, ..
+        } = &mut self.input
+        {
+            *slot = custom_cfg;
+        }
+        self
+    }
+    /// 注入 build task `emit_module` 生成的模块；`generated.<name>` 进入闭包。
+    ///
+    /// `name` 以 `.` 分隔模块段；内容即 `.gg` 源码文本。只作用于 project 输入。
+    pub fn with_generated_modules(mut self, modules: Vec<(String, String)>) -> Self {
+        if let CompileInput::Project {
+            generated_modules, ..
+        } = &mut self.input
+        {
+            *generated_modules = modules;
+        }
+        self
+    }
     /// 创建空 package 请求。
     pub fn empty_package(target: TargetName) -> Self {
         Self {
@@ -259,6 +284,8 @@ impl CompileRequest {
                 bench: package_target.kind() == TargetKind::Bench,
                 bench_harness: package_target.harness(),
                 custom_cfg: BTreeMap::new(),
+                generated_modules: Vec::new(),
+                build_task: package_target.kind() == TargetKind::Build,
             },
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
@@ -338,6 +365,10 @@ enum CompileInput {
         /// `harness = false` 的 bench target 标记。
         bench_harness: bool,
         custom_cfg: BTreeMap<String, Option<String>>,
+        /// build task 经 `emit_module` 生成的模块：`generated.<name>` 的内容。
+        generated_modules: Vec<(String, String)>,
+        /// build task 输入只编译入口 build.gg，不收集 package 其余源码。
+        build_task: bool,
     },
 }
 
@@ -1325,6 +1356,8 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
             bench,
             bench_harness,
             custom_cfg,
+            generated_modules,
+            build_task,
         } => load_project_sources(
             &package_root,
             &source_root,
@@ -1341,6 +1374,8 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
             )
             .with_bench_harness(bench_harness),
             external_packages,
+            generated_modules,
+            build_task,
         ),
     }
 }
@@ -1382,9 +1417,15 @@ fn load_project_sources(
     require_main: bool,
     cfg: CfgContext,
     external_packages: BTreeSet<String>,
+    generated_modules: Vec<(String, String)>,
+    build_task: bool,
 ) -> Result<LoadedInput, LoadInputError> {
     let mut paths = Vec::new();
     collect_source_paths(source_root, &mut paths)?;
+    if build_task {
+        // build task 闭包只含入口 build.gg 与 build 依赖，不收集其他 target 源码。
+        paths.retain(|path| path == entry);
+    }
     // 输入根即 package 根：每个源文件的逻辑父目录映射回物理父目录。
     let embed_root = package_root
         .canonicalize()
@@ -1413,6 +1454,22 @@ fn load_project_sources(
     } else {
         project_logical_path(package_root, source_root)?
     };
+    for (name, content) in generated_modules {
+        let logical = generated_logical_path(&source_root, &name).map_err(|message| {
+            LoadInputError::ModuleTree {
+                path: package_root.to_path_buf(),
+                message,
+            }
+        })?;
+        let snapshot =
+            SourceSnapshot::from_bytes(&logical, content.into_bytes()).map_err(|error| {
+                LoadInputError::ModuleTree {
+                    path: package_root.to_path_buf(),
+                    message: format!("build task 生成模块 `{name}` 无效: {error}"),
+                }
+            })?;
+        snapshots.push(snapshot);
+    }
     let source_map = SourceMap::new(snapshots).map_err(|error| LoadInputError::ModuleTree {
         path: package_root.to_path_buf(),
         message: error.to_string(),
@@ -1428,6 +1485,29 @@ fn load_project_sources(
             external_packages,
         }),
         embed: Some(EmbedHost::new(embed_root, embed_dirs)),
+    })
+}
+
+/// 把 build task `emit_module` 的 `generated.<name>` 映射成逻辑源码路径：
+/// `name` 按 `.` 分段落在 target 源码根下的 `generated/` 目录。
+fn generated_logical_path(source_root: &str, name: &str) -> Result<String, String> {
+    let mut segments = Vec::new();
+    for segment in name.split('.') {
+        if segment.is_empty()
+            || !segment
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            || segment.chars().next().is_some_and(|c| c.is_ascii_digit())
+        {
+            return Err(format!("emit_module 名称 `{name}` 不是合法模块段"));
+        }
+        segments.push(segment);
+    }
+    let relative = format!("generated/{}.gg", segments.join("/"));
+    Ok(if source_root.is_empty() {
+        relative
+    } else {
+        format!("{source_root}/{relative}")
     })
 }
 
@@ -4048,6 +4128,59 @@ mod tests {
             demand.large_sites,
             demand.block_sites
         );
+    }
+
+    #[test]
+    fn generated_modules_enter_project_sources() {
+        let dir = tempfile::tempdir().expect("临时目录");
+        let root = dir.path();
+        let src = root.join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.gg"), "pub fn x() int = 1\n").unwrap();
+
+        let cfg = gugu_sema::cfg::CfgContext::new(
+            TargetName::X86_64Linux,
+            [],
+            [],
+            false,
+            false,
+            std::collections::BTreeMap::new(),
+        );
+        let loaded = super::load_project_sources(
+            root,
+            &src,
+            &src.join("lib.gg"),
+            "demo".to_owned(),
+            false,
+            cfg,
+            BTreeSet::new(),
+            vec![("values".to_owned(), "pub fn answer() int = 42\n".to_owned())],
+            false,
+        )
+        .expect("project 源码加载");
+        assert!(
+            loaded
+                .source_map
+                .snapshots()
+                .iter()
+                .any(|snapshot| snapshot.logical_path() == "src/generated/values.gg"),
+            "emit_module 内容必须以 generated.* 逻辑路径进入源码集"
+        );
+    }
+
+    #[test]
+    fn generated_logical_path_validates_segments() {
+        assert_eq!(
+            super::generated_logical_path("src", "values").unwrap(),
+            "src/generated/values.gg"
+        );
+        assert_eq!(
+            super::generated_logical_path("src", "a.b").unwrap(),
+            "src/generated/a/b.gg"
+        );
+        assert!(super::generated_logical_path("src", "Bad-Name").is_err());
+        assert!(super::generated_logical_path("src", "").is_err());
+        assert!(super::generated_logical_path("src", "9x").is_err());
     }
 
     #[test]

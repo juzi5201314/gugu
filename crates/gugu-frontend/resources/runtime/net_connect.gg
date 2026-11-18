@@ -8,6 +8,7 @@ use std.runtime.net_wait as poller
 use std.runtime.net_event as events
 use std.runtime.net_event.{Event}
 use std.runtime.net_deadline as clock
+use std.runtime.permission as permission
 use std.collections.{Vec}
 use std.sync.{CancelSource, CancelToken}
 use std.time.{Duration}
@@ -82,6 +83,7 @@ pub fn connect[T: ToSocketAddrs](target: T, options: ConnectOptions) Result[Reso
     match poller.initialize() { Ok(_) => (), Err(error) => return Err(ConnectError::Resolve(ResolveError::System(error))) }
     let cancel = CancelSource::new()
     let resolved = resolve(target, deadline, external, &cancel)?
+    for address in resolved { permission::check_net(address.to_string()) }
     let addresses = ordered(&resolved)
     let race = Race { event: events.event(), winner: None, errors: Vec[Option[Error]]::new(), finished: 0, stopped: false }
     defer { race.stopped = true

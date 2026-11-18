@@ -1,0 +1,169 @@
+//! `std.runtime.permission` —— build task 权限门（advisory）。
+//!
+//! 这不是安全边界：门只约束 build task 宿主进程内经 std API 的文件、环境、
+//! 网络与进程操作。`GUGU_PERM_MODE`：`advisory` 生效、`allow-all`/`off` 放行；
+//! 规则来自 `GUGU_PERM_{READ,WRITE,ENV,NET,RUN}`（分号分隔 glob），非交互
+//! (`GUGU_PERM_NONINTERACTIVE=1`) 无匹配即拒绝。
+//! 注意：不能 `use std.env`/`std.fs`——它们经本模块做权限检查，必须保持无环。
+
+use std.collections.{Vec}
+use std.path.{OsString, Path}
+use std.runtime.environment as host
+use std.text.{Bytes}
+
+fn env_text(name: string) string {
+    match OsString::from_string(name) {
+        Ok(key) => match host.get(key) {
+            Ok(Some(value)) => match value.to_string() { Ok(text) => text, Err(_) => "" },
+            _ => "",
+        }
+        Err(_) => "",
+    }
+}
+
+pub fn enforcement() string {
+    let mode = env_text("GUGU_PERM_MODE")
+    if !build_task_context() { return "off" }
+    if mode == "advisory" { "advisory" } else { "off" }
+}
+
+fn build_task_context() bool {
+    let flag = env_text("GUGU_BUILD_TASK")
+    flag == "1" || flag == "true" || flag == "yes"
+}
+
+pub fn noninteractive() bool {
+    let flag = env_text("GUGU_PERM_NONINTERACTIVE")
+    flag == "1" || flag == "true" || flag == "yes"
+}
+
+fn rules(name: string) Vec[string] {
+    let entries = Vec[string]::new()
+    let raw = Bytes::from_string(env_text(name))
+    if raw.len() == 0 { return entries }
+    let start: int = 0
+    let index: int = 0
+    while index <= raw.len() {
+        let end = if index == raw.len() { true } else {
+            match raw.get(index) { Some(b) => b == byte(59), None => true }
+        }
+        if end {
+            // 切片取 raw[start..index]：先截尾再断头。
+            let piece = raw.split_at(index).0.split_at(start).1
+            entries.push(piece.to_string_lossy())
+            start = index + 1
+        }
+        index = index + 1
+    }
+    entries
+}
+
+fn glob_match(rule: string, value: string) bool {
+    // 单 `*` 通配任意段；规则 `**` 等同 `*`。
+    let pattern = Bytes::from_string(rule)
+    let text = Bytes::from_string(value)
+    wildcard(pattern, text, 0, 0)
+}
+
+fn wildcard(pattern: Bytes, text: Bytes, pi: int, ti: int) bool {
+    if pi == pattern.len() { return ti == text.len() }
+    match pattern.get(pi) {
+        Some(b) => {
+            if b == byte(42) {
+                let skip = pi
+                while skip < pattern.len() {
+                    match pattern.get(skip) {
+                        Some(c) => { if c != byte(42) { break } else {} }
+                        None => break,
+                    }
+                    skip = skip + 1
+                }
+                if skip == pattern.len() { return true }
+                let probe = ti
+                while probe <= text.len() {
+                    if wildcard(pattern, text, skip, probe) { return true }
+                    probe = probe + 1
+                }
+                false
+            } else {
+                if ti == text.len() { return false }
+                match text.get(ti) {
+                    Some(c) => if c == b { wildcard(pattern, text, pi + 1, ti + 1) } else { false },
+                    None => false,
+                }
+            }
+        }
+        None => false,
+    }
+}
+
+fn allowed(list: string, value: string) bool {
+    for rule in rules(list) {
+        if rule == "*" || glob_match(rule, value) { return true } else {}
+    }
+    false
+}
+
+fn path_prefix(rule: string, value: string) bool {
+    // 无通配的规则按目录前缀匹配：`/etc` 覆盖 `/etc/passwd`。
+    if rule == "" { return false }
+    let r = Bytes::from_string(rule)
+    let v = Bytes::from_string(value)
+    if r.len() > v.len() { return false }
+    if !v.starts_with(r) { return false }
+    if v.len() == r.len() { return true }
+    // 规则以 `/` 结尾或值在边界处是 `/` 才算子路径。
+    match r.get(r.len() - 1) { Some(b) => if b == byte(47) { return true } else {}, None => {} }
+    match v.get(r.len()) { Some(b) => b == byte(47), None => false }
+}
+
+fn path_allowed(list: string, value: string) bool {
+    for rule in rules(list) {
+        if rule == "*" || glob_match(rule, value) || path_prefix(rule, value) {
+            return true
+        } else {}
+    }
+    false
+}
+
+fn gate(op: string, list: string, value: string) {
+    if enforcement() != "advisory" { return }
+    if allowed(list, value) { return }
+    deny(op, value)
+}
+
+fn deny(op: string, value: string) {
+    panic("build task 权限门拒绝 " + op + ": " + value + "（以 --" + op + "-allows 授权）")
+}
+
+fn path_text(path: Path) string = path.to_string_lossy()
+
+pub fn check_read(path: Path) {
+    gate_path("read", "GUGU_PERM_READ", path_text(path))
+}
+
+pub fn check_write(path: Path) {
+    gate_path("write", "GUGU_PERM_WRITE", path_text(path))
+}
+
+fn gate_path(op: string, list: string, value: string) {
+    if enforcement() != "advisory" { return }
+    if path_allowed(list, value) { return }
+    deny(op, value)
+}
+
+pub fn check_env(name: OsString) {
+    gate("env", "GUGU_PERM_ENV", name.to_string_lossy())
+}
+
+pub fn check_env_name(name: string) {
+    gate("env", "GUGU_PERM_ENV", name)
+}
+
+pub fn check_net(address: string) {
+    gate("net", "GUGU_PERM_NET", address)
+}
+
+pub fn check_run(executable: Path) {
+    gate("run", "GUGU_PERM_RUN", path_text(executable))
+}

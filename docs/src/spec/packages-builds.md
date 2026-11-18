@@ -256,7 +256,7 @@ package 根存在 `build.gg` 时，它是唯一 build task。没有该文件且�
 fn main() Result[(), string]
 ```
 
-返回 `Err`、panic 或违反输出协议都会使 package 构建失败。build task 可以使用完整 Gugu、unsafe、FFI 和宿主标准库；权限门不是安全沙箱，低层代码可以绕过它。
+返回 `Err`、panic 或违反输出协议都会使 package 构建失败。build task 可以使用完整 Gugu、unsafe、FFI 和宿主标准库；权限门不是安全沙箱，低层代码可以绕过它。build task 的模块闭包只包含 `build.gg` 自身与 `[build.dependencies]` 提供的模块——package 其余源码不进入 build task 编译，`emit_module` 产生的 `generated.*` 模块也只注入 target 编译，不回流到 build task。
 
 `std.build` 提供类型化构建接口，至少包括：
 
@@ -304,20 +304,16 @@ build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进
 
 权限门默认关闭；关闭时 build.gg 的文件、环境、网络和进程操作全部放行，行为与普通本地程序相同。`--permission` 开启规则检查：
 
-- 已有匹配的永久授权则放行；
-- 交互 TTY 中没有匹配项时显示 package 身份、build.gg 内容哈希、操作、路径/主机或 executable+argv，并询问；
-- 同意后永久记录，不提供“仅本次”或“本次会话”；
-- 非交互环境中没有匹配项立即失败；
+- `GUGU_PERM_{READ,WRITE,ENV,NET,RUN}` 与对应 `--*-allows` 命令行列表提供预授权规则；`--read-allows`、`--write-allows` 的无通配规则按目录前缀匹配（`/etc` 覆盖 `/etc/passwd`），其余按 `*` 单通配 glob 比较；
+- 非交互环境（stdin 非 TTY，或 `GUGU_PERM_NONINTERACTIVE`）中没有匹配项立即失败；交互式询问与永久授权存储在本版本未实现，授权只能通过命令行或环境变量逐次给出；
 - `-A` 显式允许全部操作；
-- `--read-allows`、`--write-allows`、`--env-allows`、`--net-allows`、`--run-allows` 可以预先提供精确或 glob 规则。
+- 拒绝表现为 build task 以带说明的 panic 退出，不记录 deny 状态，宿主将任务视为失败。
 
-永久授权绑定到 package source、owner/name、version、registry 归档 checksum 或 Git tree/path 身份、build.gg 内容哈希和规范化操作。版本、source、checksum、build.gg 或被批准操作变化后不匹配旧授权，必须重新确认。拒绝只使当前构建失败，不写永久 deny。
-
-`--run-allows` 同时匹配规范化 executable 路径 glob 与 argv 各位置的 glob；规则缺少 argv 部分时只授权 executable，不限制参数。Windows 路径比较使用规范大小写与分隔符，Unix 按字节区分大小写。TUI 始终显示最终解析路径和 argv 数组，不把参数拼成 shell 字符串。
+`--run-allows` 同时匹配规范化 executable 路径 glob 与 argv 各位置的 glob；规则缺少 argv 部分时只授权 executable，不限制参数。Windows 路径比较使用规范大小写与分隔符，Unix 按字节区分大小写。
 
 该机制完全是 advisory 规则检查，不是 OS sandbox：build.gg 可以通过 unsafe、FFI、直接 syscall、已获准进程或修改工具状态绕过；`-A` 也允许写任意宿主位置，包括缓存。工具必须在界面和文档中明确这一点，不能把 `--permission` 描述为执行不可信依赖的安全边界。
 
-永久授权放在用户配置目录，不写 workspace、锁文件或 package 归档。授权与否不进入编译缓存 key；它只决定本次需要执行 build.gg 时某个操作能否发生。
+授权与否不进入编译缓存 key；它只决定本次需要执行 build.gg 时某个操作能否发生。
 
 ## 缓存与 Target 视图 {#cache-and-target-view}
 
