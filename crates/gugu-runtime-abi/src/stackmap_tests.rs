@@ -195,6 +195,43 @@ fn typed_roots_round_trip_and_reject_conflicts() {
         encode(&functions, std::slice::from_ref(&unsorted)).is_err(),
         "字下标乱序必须拒绝"
     );
+
+    // 多变体槽：同一字允许在不同变体下承担不同根种类（init_byte 各自门控），按
+    // init_byte 递增接受；同 word 同 init_byte 的完全重复条目仍必须拒绝。
+    let mut variants = layout(0, 16, 0, 64, 0b001);
+    variants.1.typed.push(TypedRoot {
+        word: 3,
+        root_kind: 0,
+        init_byte: 8,
+    });
+    variants.1.typed.push(TypedRoot {
+        word: 3,
+        root_kind: 1,
+        init_byte: 9,
+    });
+    let bytes = encode(&functions, std::slice::from_ref(&variants)).expect("同字多根种类条目");
+    let section = super::stackmap_codec::decode_tables(&bytes).expect("解码 section");
+    assert_eq!(
+        section.maps[0].typed.len(),
+        2,
+        "同 word 不同 kind 与 init_byte 的条目必须保留"
+    );
+
+    let mut duplicate = layout(0, 16, 0, 64, 0b001);
+    duplicate.1.typed.push(TypedRoot {
+        word: 3,
+        root_kind: 0,
+        init_byte: 8,
+    });
+    duplicate.1.typed.push(TypedRoot {
+        word: 3,
+        root_kind: 1,
+        init_byte: 8,
+    });
+    assert!(
+        encode(&functions, std::slice::from_ref(&duplicate)).is_err(),
+        "同 word 同 init_byte 的重复条目必须拒绝"
+    );
 }
 
 /// 门控根：初始化字节为 0 时该字不参与扫描，置 1 后才成为对应类的根。

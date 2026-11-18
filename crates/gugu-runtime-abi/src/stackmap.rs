@@ -170,14 +170,15 @@ pub fn scan_roots(
         }
     }
     // 逐根初始化条目：只有帧内初始化字节非零时该字才参与扫描——并集条目在别的变体里可能是
-    // 标量，不得当作指针。字节与固定位图互斥由编码校验保证，这里按读取顺序复验一次。
+    // 标量或另一种根种类，不得当作指针。同一字在编码层允许携带多种 kind（由各自的初始化
+    // 字节在运行期择一），因此查重只对实际激活的条目进行。
     let mut gated: [Vec<u32>; 5] = std::array::from_fn(|_| Vec::new());
     for entry in &map.typed {
-        if !seen.insert(entry.word) {
-            return Err(RawModelError::new("同一槽在两类位图中重复出现"));
-        }
         if byte_at(words, entry.init_byte)? == 0 {
             continue;
+        }
+        if !seen.insert(entry.word) {
+            return Err(RawModelError::new("同一槽在两类位图中重复出现"));
         }
         let class = usize::try_from(entry.root_kind)
             .ok()

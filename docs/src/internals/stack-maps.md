@@ -214,7 +214,7 @@ root_kind:  u32   五类根之一（0=Direct、1=Interior、2=Handle、3=Compres
 init_byte:  u32   帧内逐根初始化字节的字节偏移；非零表示该字已成写指针
 ```
 
-条目按 `word` 严格递增（重复或乱序一律拒绝），且 `word` 不得同时出现在任一固定位图里。`root_kind` 越界一律拒绝。没有条目的记录写 `typed_count = 0`。
+条目按 `word` 非递减排列：同一 `word` 允许携带多个 `root_kind` 条目——多变体槽的同一个字在不同变体下可以是不同种类的根，由各自的 `init_byte` 在运行期择一门控；同 `word` 的条目按 `init_byte` 严格递增，完全重复或乱序一律拒绝。条目 `word` 不得同时出现在任一固定位图里；编码侧发现同一 offset 登记了多种根种类时，全部改写成逐根初始化条目而不进固定位图。`root_kind` 越界一律拒绝。没有条目的记录写 `typed_count = 0`。
 
 bitmap 的 bit `i` 对应 `[frame_base + i * 8]`，最低有效 bit 先写。超出 `slot_count` 的尾 bit 必须为 0。`slot_count * 8` 不得超过所属函数 `frame_size`。五个位图互斥，五个 register mask 也互斥；bit 15 必须为 0。
 

@@ -441,7 +441,12 @@ fn verify_layout(layout: &SafepointLayout) -> Result<(), RawModelError> {
     }
     // 记录字节的全部结构约束（位图互斥、尾 bit、逐根初始化条目排序与去重）在编码侧
     // 复用同一份校验，避免编码器产出自己解不出的 section。
-    verify_map_record(&map_record(layout))?;
+    verify_map_record(&map_record(layout)).map_err(|error| {
+        RawModelError::new(format!(
+            "{error} (function={} pc={:#x} kind={})",
+            layout.function, layout.pc_offset, layout.kind
+        ))
+    })?;
     // 普通函数的保留位（r14、r15）必须为 0；bridge 的专用根表不在此处编码。
     for (class, mask) in layout.registers.iter().enumerate() {
         let _ = class;
@@ -534,18 +539,25 @@ fn verify_map_record(record: &[u8]) -> Result<(), RawModelError> {
     if expected != record.len() {
         return Err(RawModelError::new("map 记录逐根初始化条目长度不符"));
     }
-    let mut previous: Option<u32> = None;
+    let mut previous: Option<(u32, u32)> = None;
     for index in 0..typed {
         let at = start + index * TYPED_ROOT_BYTES;
         let word = u32::from_le_bytes(record[at..at + 4].try_into().expect("条目字段"));
         let kind = u32::from_le_bytes(record[at + 4..at + 8].try_into().expect("条目字段"));
+        let init_byte = u32::from_le_bytes(record[at + 8..at + 12].try_into().expect("条目字段"));
         if kind > 4 {
             return Err(RawModelError::new("逐根初始化条目根种类越界"));
         }
-        if previous.is_some_and(|previous| previous >= word) {
-            return Err(RawModelError::new("逐根初始化条目必须按字下标严格递增"));
+        // 多变体槽的同一字可在不同变体下承担不同根种类，由各自的初始化字节门控：word 相同
+        // 合法，但初始化字节必须严格递增（完全相同的条目没有意义）。
+        if let Some((previous_word, previous_init)) = previous
+            && (previous_word > word || (previous_word == word && previous_init >= init_byte))
+        {
+            return Err(RawModelError::new(format!(
+                "逐根初始化条目必须按字下标与初始化字节严格递增: prev=({previous_word},{previous_init}) word={word} init={init_byte}"
+            )));
         }
-        previous = Some(word);
+        previous = Some((word, init_byte));
         let byte = (word / 8) as usize;
         let bit = 1_u8 << (word % 8);
         if byte < words && bitmaps.iter().any(|class| class[byte] & bit != 0) {

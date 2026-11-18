@@ -309,8 +309,14 @@ fn layout_of(
         init,
         slot_count,
     )?;
-    // 条目按五类根分组收集，落地前按帧内字下标排序；重复字由编码校验拒绝。
-    typed.sort_by_key(|root| root.word);
+    // 条目按五类根分组收集，落地前按帧内字下标排序；同一根在不同变体里可能重复登记，
+    // 完全相同的三元组去重一次，同 word 不同 kind 的条目按初始化字节递增（编码契约）。
+    typed.sort_by_key(|root| (root.word, root.init_byte));
+    typed.dedup_by(|next, previous| {
+        next.word == previous.word
+            && next.init_byte == previous.init_byte
+            && next.root_kind == previous.root_kind
+    });
     if matches!(anchor.kind, 0 | 2 | 3) && registers.iter().any(|mask| *mask != 0) {
         return Err(vec![invalid("调用、挂起或 bridge 点保留了用户寄存器根")]);
     }
@@ -555,15 +561,34 @@ fn place_slot(
         return Err(vec![invalid("栈槽根没有对齐到机器字")]);
     }
     let word = byte / 8;
+    // `slot.roots` 是多变体并集：同一 offset 可在不同变体下登记成不同 Provenance 的独立
+    // 条目，各自的初始化位不同。按 (offset, class↔Provenance) 精确匹配，避免把两种 kind
+    // 压到同一初始化字节上。
     let bit = body.stack_slots[slot as usize]
         .roots
         .iter()
-        .position(|(root, _)| *root == offset)
+        .position(|(root, provenance)| {
+            *root == offset && provenance.root_kind() == Some(u32::try_from(class).unwrap_or(0))
+        })
+        .or_else(|| {
+            body.stack_slots[slot as usize]
+                .roots
+                .iter()
+                .position(|(root, _)| *root == offset)
+        })
         .ok_or_else(|| vec![invalid("栈槽根不在槽 root 表里")])?;
+    // 同一 offset 在多变体下登记了多种根种类时，静态初始化证明分不出当前变体，一律改用
+    // 帧内初始化字节在运行期门控，避免同一个字同时落进两类固定位图。
+    let ambiguous = body.stack_slots[slot as usize]
+        .roots
+        .iter()
+        .filter(|(root, _)| *root == offset)
+        .count()
+        > 1;
     // 该根字可能在别的变体里是标量：静态证明不了"已写成指针"时不做固定根，改由帧内初始化
     // 字节在运行期门控——证明已成立才直接登记进位图。
     let block = crate::lir::body::BlockId(id(anchor.block as usize));
-    if !init.is_initialized(block, anchor.position, slot as usize, bit) {
+    if ambiguous || !init.is_initialized(block, anchor.position, slot as usize, bit) {
         let base = fragment
             .frame
             .init_bases
