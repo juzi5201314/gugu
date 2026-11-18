@@ -1210,6 +1210,9 @@ pub const REGION_STATE_RESET: uint = 3
 pub const REGION_STATE_LOCAL_PROMOTE: uint = 4
 pub const REGION_STATE_REGION_TRANSFER: uint = 5
 pub const REGION_STATE_RECEIVED: uint = 6
+/// STATE 高位标记：该区域属 user arena 链（+48 是 ARENA_NEXT 指针）。TurnRegion 的
+/// +48 是 RESETS 计数，两者共享控制页布局，判别只能靠该位。
+pub const REGION_STATE_ARENA_BIT: uint = 2147483648
 pub const REGION_PLAN_OFFSET: uint = 0
 pub const REGION_GENERATION_OFFSET: uint = 4
 pub const REGION_STATE_OFFSET: uint = 8
@@ -1525,7 +1528,7 @@ fn gc_arena_region_open(processor: uint, region_bytes: uint, owner: uint, arena_
         }
         heap_store_word32(control + REGION_GENERATION_OFFSET, 1)
         heap_store_word32(control + REGION_PLAN_OFFSET, REGION_PLAN_UNCLAIMED)
-        heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_PRIVATE)
+        heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_PRIVATE | REGION_STATE_ARENA_BIT)
         heap_store_word(control + REGION_CAPACITY_OFFSET, region_bytes)
         heap_store_word(control + REGION_ARENA_OWNER_OFFSET, owner)
         heap_store_word(control + REGION_ARENA_CURSOR_OFFSET, extent)

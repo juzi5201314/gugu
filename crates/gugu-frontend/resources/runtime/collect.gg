@@ -15,7 +15,7 @@
 use std.runtime.counters as counters
 use std.runtime.shared as shared
 use std.runtime.compression as compression
-use std.runtime.heap.{heap_region_head_slot, heap_region_lookup, heap_region_extent_lookup, REGION_NEXT_OFFSET, REGION_MARK_EPOCH_OFFSET, REGION_MARK_BORN_BIT, REGION_PIN_COUNT_OFFSET, REGION_OBJECT_START_OFFSET, REGION_CONTROL_BYTES, REGION_CAPACITY_OFFSET, REGION_PAYLOAD_BYTES_OFFSET, REGION_LEASE_OFFSET}
+use std.runtime.heap.{heap_region_head_slot, heap_region_lookup, heap_region_extent_lookup, REGION_NEXT_OFFSET, REGION_MARK_EPOCH_OFFSET, REGION_MARK_BORN_BIT, REGION_PIN_COUNT_OFFSET, REGION_OBJECT_START_OFFSET, REGION_CONTROL_BYTES, REGION_CAPACITY_OFFSET, REGION_PAYLOAD_BYTES_OFFSET, REGION_LEASE_OFFSET, REGION_STATE_OFFSET, REGION_STATE_ARENA_BIT, REGION_ARENA_NEXT_OFFSET}
 use std.runtime.pin_layout as pinning
 use std.runtime.barrier as barrier
 use std.runtime.heap.{ARENA_CARDS_OFFSET, heap_large_lookup, heap_large_table, LARGE_MAPPING_CAPACITY, LARGE_MAPPING_RECORD_BYTES, LARGE_MAPPING_STATE_ACTIVE, CONTROL_PINNED}
@@ -611,9 +611,18 @@ fn coordinator_region_objects(coordinator: uint, processor: uint, control: uint,
 
 fn coordinator_region_mark(coordinator: uint, processor: uint, control: uint) {
     let epoch = heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1
-    if heap_word(control + REGION_MARK_EPOCH_OFFSET) == epoch { return }
-    heap_store_word(control + REGION_MARK_EPOCH_OFFSET, epoch)
-    coordinator_region_objects(coordinator, processor, control, true)
+    let current = control
+    loop {
+        if heap_word(current + REGION_MARK_EPOCH_OFFSET) == epoch { return }
+        heap_store_word(current + REGION_MARK_EPOCH_OFFSET, epoch)
+        coordinator_region_objects(coordinator, processor, current, true)
+        /* arena 链：句柄只根到首区域，后续扩容区域随首区域同生共死。+48 对
+           TurnRegion 是 RESETS 计数不是指针，只有 ARENA 位才允许沿链。*/
+        if heap_word32(current + REGION_STATE_OFFSET) & REGION_STATE_ARENA_BIT == 0 { return }
+        let next = heap_word(current + REGION_ARENA_NEXT_OFFSET)
+        if next == 0 { return }
+        current = next
+    }
 }
 
 fn coordinator_regions_minor(coordinator: uint, processor: uint) {
