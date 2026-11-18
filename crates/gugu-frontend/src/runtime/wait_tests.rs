@@ -156,3 +156,22 @@ fn wait_frontend_gates_reject_before_image_plan() {
             .any(|item| item.message().contains("try_send"))
     );
 }
+
+/// select 用作表达式时无 default 的 otherwise 必须终止为不可达，不能向结果槽写 unit。
+#[test]
+#[cfg(feature = "slow-tests")]
+fn select_expression_without_default_reaches_image_plan() {
+    let compiler = Compiler::shared();
+    for source in [
+        "fn main() {\n let a = chan[int](1)\n let b = chan[int](1)\n let r = select {\n let x = a.recv() => 0\n let y = b.recv() => 1\n }\n _ = r\n}",
+        "fn main() {\n let a = async { 1 }\n let b = async { 2 }\n let r = select {\n let x = a.wait() => x\n let y = b.wait() => y\n }\n _ = r\n}",
+    ] {
+        let compile = compiler.compile(CompileRequest::single_file(
+            "main.gg",
+            source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(compile.is_success(), "{:?}", compile.diagnostics().items());
+        assert!(compile.image_plan().is_some());
+    }
+}
