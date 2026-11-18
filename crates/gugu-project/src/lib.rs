@@ -24,9 +24,9 @@ mod support;
 
 pub use cache::candidates_from_lock;
 pub use cache::{
-    ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyInput,
-    PackageFiles, TargetArtifact, TargetView, default_cache_root, materialize_vendor,
-    prepare_dependency_inputs,
+    ActionInputs, ActionKey, ActionMeta, ActionStore, CacheError, CachePolicy, DependencyCache,
+    DependencyInput, GcReport, PackageFiles, TargetArtifact, TargetView, VerifyReport,
+    default_cache_root, materialize_vendor, prepare_dependency_inputs,
 };
 pub use dependencies::{
     DependencyDomain, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,

@@ -167,9 +167,10 @@ pub(crate) fn print_compilation_text(
             println!("check succeeded: {}", plan.target());
         } else {
             println!(
-                "bootstrap plan ready: target={}, entry={}, image not emitted",
+                "build succeeded: target={}, entry={}, image {} bytes",
                 plan.target(),
-                plan.entry()
+                plan.entry(),
+                plan.linux_image().len().max(plan.windows_image().len())
             );
         }
         println!(

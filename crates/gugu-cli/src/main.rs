@@ -2,9 +2,11 @@
 // SharedHeap 段落追加后键数继续增长，因此上界同步调高。
 #![recursion_limit = "1024"]
 
+mod cache;
 mod config;
 mod doc;
 mod formatting;
+mod materialize;
 mod output;
 
 #[cfg(all(test, feature = "slow-tests"))]
@@ -458,6 +460,12 @@ fn execute(cli: Cli, internal: bool) -> i32 {
     match command {
         Command::Build { file } => run_compile(file, &options, false),
         Command::Check { file } => run_compile(file, &options, true),
+        Command::Clean {
+            cache,
+            registry,
+            all,
+        } => cache::run_clean(&options, cache, registry, all),
+        Command::Cache(command) => cache::run_cache(&options, &command),
         Command::Fmt { check, all } => formatting::run(check, all, &options),
         Command::Doc { open, no_deps } => doc::run(&options, open, no_deps),
         command => run_registered_command(&command, options.format.unwrap_or_default()),
@@ -638,9 +646,22 @@ fn run_compile(file: Option<PathBuf>, options: &GlobalArgs, check_only: bool) ->
         emit_cli_error(format, &message);
         return 2;
     }
+    let source = file;
     let compilation = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS)
-        .compile(CompileRequest::single_file_path(file, target));
+        .compile(CompileRequest::single_file_path(source.clone(), target));
     print_compilation(&compilation, check_only, options, target);
+    if materialize::materialize_single_file(
+        &source,
+        &compilation,
+        options,
+        target,
+        check_only,
+        format,
+    )
+    .is_err()
+    {
+        return 2;
+    }
     compilation.exit_code()
 }
 
@@ -763,6 +784,19 @@ fn compile_package(
             );
         }
         print_compilation(&compilation, check_only, options, target);
+        if materialize::materialize_target(
+            project_root,
+            package_target,
+            &compilation,
+            options,
+            target,
+            check_only,
+            format,
+        )
+        .is_err()
+        {
+            return Err(());
+        }
         exit_code = exit_code.max(compilation.exit_code());
     }
     Ok(exit_code)
