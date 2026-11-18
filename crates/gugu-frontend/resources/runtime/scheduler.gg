@@ -80,6 +80,10 @@ pub const COROUTINE_COLD_RESULT_KIND_MASK: uint = 7
 pub const COROUTINE_COLD_COMPLETION_OFFSET: uint = 368
 pub const COROUTINE_COLD_RESULT_OFFSET: uint = 376
 pub const COROUTINE_COLD_JOIN_WAITER_OFFSET: uint = 512
+/// 测试 harness 子树归属：组记录地址，spawn 时从当前协程冷记录继承；零表示无归属。
+pub const COROUTINE_COLD_SUBTREE_GROUP_OFFSET: uint = 536
+/// 完成结果为未交付 panic 时置位；Join/select 取走时清零并把组 panic 数减回。
+pub const COROUTINE_COLD_PANIC_RESULT_OFFSET: uint = 544
 pub const COROUTINE_COLD_BYTES: uint = 576
 /// 结果区的字节数：子协程返回 ABI 只携带两个机器字，结果槽的上界就是它。
 ///
@@ -497,6 +501,13 @@ pub fn spawn(code: *(), env: *(), trace: uint, result_kind: uint) uint {
         let parent = std.runtime.current_slot()
         let processor = proc_of(parent)
         let child = prepare_child(processor, std.mem.transmute[*(), uint](code), std.mem.transmute[*(), uint](env), trace, result_kind, false)
+        // 子树归属在子协程运行前继承：测试 runner 用 group 挂接标记归属，detach 的普通
+        // 协程 group 为零、不产生任何记账。
+        let group = word(word(parent + 48) + COROUTINE_COLD_SUBTREE_GROUP_OFFSET)
+        if group != 0 {
+            store_word(word(child + 48) + COROUTINE_COLD_SUBTREE_GROUP_OFFSET, group)
+            store_word(group, word(group) + 1)
+        }
         store_word(processor + 4032, word(processor + 4032) + 1)
         enqueue(processor, child)
         child
@@ -558,6 +569,9 @@ pub fn callback_complete(node: uint) { unsafe {
 pub fn finish_hot(hot: uint, value: uint, second: uint) {
     let cold = word(hot + 48)
     let processor = proc_of(hot)
+    // 归属组的 pending 记账只数存活，不管结果成败；panic 记账见 `panic_unwind` 与 `take_result`。
+    let group = word(cold + COROUTINE_COLD_SUBTREE_GROUP_OFFSET)
+    if group != 0 { store_word(group, word(group) - 1) }
     let state = word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET)
     if state & COROUTINE_COLD_SPAWN_PUBLISHED_BIT != 0 {
         dynamic_root_retire(processor, hot)
@@ -597,11 +611,46 @@ pub fn take_result(hot: uint, dst: uint, descriptor: uint) {
         dynamic_root_retire(proc_of(hot), hot)
         store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, state & ~COROUTINE_COLD_RESULT_PUBLISHED_BIT)
     }
+    // panic 完成记录不按 T 载荷复制：RESULT+0 是 Panic 句柄，取走即「已处理」，
+    // 把发布时计入的组 panics 与状态区未处理数减回。句柄本体由 `join_panic` 读取。
+    if word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET) != 0 {
+        store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, 0)
+        let group = word(cold + COROUTINE_COLD_SUBTREE_GROUP_OFFSET)
+        if group != 0 { store_word(group + 8, word(group + 8) - 1) }
+        let runtime_state = word(proc_of(hot) + 4080)
+        if word(runtime_state + 768) != 0 {
+            store_word(runtime_state + 768, word(runtime_state + 768) - 1)
+        }
+        return
+    }
     if dst == 0 { return }
     let bytes = value_size(descriptor)
     if bytes > COROUTINE_COLD_RESULT_BYTES { fail() }
     copy_bytes(dst, cold + COROUTINE_COLD_RESULT_OFFSET, bytes)
 }
+
+/// 测试 harness 子树记账：组记录两车道 {pending, panics}，分配在当前处理器堆游标上。
+///
+/// runner 对每个测试建一条组记录，spawn 前挂接、spawn 后清回；组内协程结束时 pending--,
+/// 未交付 panic 发布时 panics++、被取走时 panics--。组记录不回收，随堆区释放。
+pub fn subtree_group_new() uint {
+    unsafe {
+        let group = heap_alloc(proc_of(std.runtime.current_slot()), 16)
+        store_word(group, 0)
+        store_word(group + 8, 0)
+        group
+    }
+}
+
+/// 把当前协程挂接/脱离子树组；runner 在 spawn 前设置、spawn 后立即清回 0。
+pub fn subtree_group_attach(group: uint) {
+    unsafe {
+        store_word(word(std.runtime.current_slot() + 48) + COROUTINE_COLD_SUBTREE_GROUP_OFFSET, group)
+    }
+}
+
+pub fn subtree_group_pending(group: uint) uint = word(group)
+pub fn subtree_group_panics(group: uint) uint = word(group + 8)
 
 pub fn live_count(processor: uint) uint = word(processor + 4032)
 

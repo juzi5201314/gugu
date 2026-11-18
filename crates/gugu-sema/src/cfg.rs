@@ -45,6 +45,8 @@ pub struct CfgContext {
     enabled_features: BTreeSet<String>,
     test: bool,
     bench: bool,
+    /// `harness = false` 的 bench target：`cfg(bench)` 仍为真，但 `#[bench]` 项是编译错误。
+    bench_harness: bool,
     custom: BTreeMap<String, Option<String>>,
 }
 
@@ -63,17 +65,25 @@ impl CfgContext {
             enabled_features: enabled_features.into_iter().collect(),
             test,
             bench,
+            bench_harness: true,
             custom,
         }
+    }
+
+    /// `harness = false` 的 bench target：收集 `#[bench]` 改为编译错误。
+    pub fn with_bench_harness(mut self, harness: bool) -> Self {
+        self.bench_harness = harness;
+        self
     }
 
     pub fn target_only(target: TargetName) -> Self {
         Self::new(target, [], [], false, false, BTreeMap::new())
     }
 
-    /// 是否处于 test/bench harness 编译域。
+    /// 是否处于 harness 收集域：测试域或 `harness = true` 的 bench 域。
+    /// `harness = false` 的 bench target 按普通 main 构建，不收集用例。
     pub fn harness(&self) -> bool {
-        self.test || self.bench
+        self.test || (self.bench && self.bench_harness)
     }
     pub fn target(&self) -> TargetName {
         self.target
@@ -91,6 +101,10 @@ impl CfgContext {
         }
         if self.bench {
             map.insert("bench".to_owned(), "1".to_owned());
+            map.insert(
+                "bench-harness".to_owned(),
+                if self.bench_harness { "1" } else { "0" }.to_owned(),
+            );
         }
         for (key, value) in &self.custom {
             map.insert(format!("cfg:{key}"), value.clone().unwrap_or_default());
@@ -393,7 +407,8 @@ struct Configurator<'a> {
 impl Configurator<'_> {
     fn item(&mut self, item_id: ItemId) {
         let item = &self.arena.items[item_id.0 as usize];
-        let active = self.attributes(item.attributes);
+        let mut active = self.attributes(item.attributes);
+        active &= self.harness_domain(item.attributes);
         self.configured.items[item_id.0 as usize] = active;
         if !active {
             return;
@@ -936,6 +951,44 @@ impl Configurator<'_> {
                 }
             }
         }
+    }
+
+    /// test/bench 标记项只在对应编译域存在；域外与 `cfg` 裁除等价。
+    /// `harness = false` 的 bench target 里 `#[bench]` 是编译错误。
+    fn harness_domain(&mut self, attributes: AstRange<Attribute>) -> bool {
+        let mut active = true;
+        for attribute in attributes.as_slice(&self.arena.attrs) {
+            let open = match attribute.kind {
+                AttrKind::Outer { token_open, .. } | AttrKind::Inner { token_open, .. } => {
+                    token_open as usize + 1
+                }
+                AttrKind::Doc { .. } | AttrKind::InnerDoc { .. } => continue,
+            };
+            let Some(name) = self
+                .tokens
+                .tokens
+                .get(open)
+                .map(|token| token.text(self.snapshot.content()))
+            else {
+                continue;
+            };
+            match name {
+                "test" => active &= self.context.test,
+                "bench" => {
+                    if !self.context.bench {
+                        active = false;
+                    } else if !self.context.bench_harness {
+                        self.diagnostics.push(Diagnostic::error(
+                            DiagnosticCode::LexInvalidAttributeArg,
+                            "harness = false 的 bench target 中不允许 #[bench]",
+                            Some(attribute.span.clone()),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        active
     }
 
     fn attributes(&mut self, attributes: AstRange<Attribute>) -> bool {

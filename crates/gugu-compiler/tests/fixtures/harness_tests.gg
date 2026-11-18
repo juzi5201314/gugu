@@ -1,0 +1,55 @@
+use std.test.{assert}
+
+fn helper() int = 1
+
+/// 示例文档注释，含 gugu 围栏。
+/// ```gugu
+/// if 1 != 1 { panic("boom") }
+/// ```
+pub fn documented() int = 2
+
+/// 含独立程序的围栏。
+/// ```
+/// fn main() {
+///     if documented() != 2 { panic("bad") }
+/// }
+/// ```
+pub fn program_doc() int = 3
+
+/// text 围栏跳过。
+/// ```text
+/// not gugu
+/// ```
+pub fn text_doc() int = 4
+
+#[test]
+fn zulu() {
+    assert(helper() == 1)
+}
+
+#[test]
+#[ignore]
+fn alpha_ignored() {
+    assert(false)
+}
+
+#[test]
+#[should_panic]
+fn mid_panics() {
+    panic("boom")
+}
+
+#[test]
+#[should_panic(eq = "boom")]
+fn aardvark_panics_eq() {
+    panic("boom")
+}
+
+#[test]
+fn result_ok() Result[(), int] = Ok(())
+
+#[cfg(test)]
+#[test]
+fn cfg_test_only() {
+    assert(true)
+}

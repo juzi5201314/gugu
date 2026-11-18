@@ -96,6 +96,13 @@ pub struct CoroutineCold {
     pub join_waiter: uint,
     pub callback_node: uint,
     pub callback_storage: uint,
+    /* 测试 harness 子树归属：spawn 时从当前协程继承的组记录地址；零表示不属于任何测试组。
+     * 组记录两车道 {pending, panics}，结束与未处理 panic 的记账由 scheduler/core 完成。
+     */
+    pub subtree_group: uint,
+    /* 完成结果为未交付 panic 时置位；Join/select 晚到取走时清零并把组 panic 数减回。
+     */
+    pub panic_result: uint,
 }
 
 /// 栈策略错误由rt0提升为不可捕获的StackOverflow，不进入用户Result通道。

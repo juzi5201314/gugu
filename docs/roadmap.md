@@ -517,19 +517,19 @@
   - 原生验证：Linux 环境/libc 可见性、非 UTF-8 argv、子进程 cwd、退出与缓存、exec 错误回传、shell、双向 pipe 和取消探针退出 0；Windows 实际运行参数编码、环境大小写与覆盖、cwd、退出码 259、重复关闭、预取消、双向管道、stdout/stderr 各 128 KiB 排空与系统 shell，父程序退出 0、stderr 为空。PE 加载、RVA、全局数据、展开与启动栈界限均已按实际主机失败修复。
   - 已批准验收边界：按本阶段默认 workspace、确定性生产路径矩阵与双目标原生闭环交付。默认门禁 706 项全部通过、102.92 秒；格式、workspace 构建和 mdBook 通过。唯一 dev 档 O3 保留 debug assertions、溢出检查和行号信息，构建最多两任务，轻量测试四槽、完整编译独占；单项 3 秒、全轮 120 秒未放宽。附加 `slow-tests` 整轮仍在 120 秒终止，已检查分片存在格式化/拼接 lowering、公开 runtime intrinsic 导入及实现相关断言失败；这些未纳入阶段 66 完成范围，不宣称附加慢套件已通过。
 
-- [ ] **阶段 67：实现 std.time、std.runtime 与 std.signal facade**（复杂度：4）
+- [x] **阶段 67：实现 std.time、std.runtime 与 std.signal facade**（复杂度：4）
   - 依赖：阶段 33、41、58、61d、66。
   - 实现 Instant/SystemTime/Duration/sleep/timeout、runtime stats/GC target/parallelism/trace facade、Linux/Windows signal subscription、合并计数、dropped 和关闭语义。
   - 验收：单调时钟与墙钟边界、超时只取消当前操作、signal handler 不运行用户代码；所有 setter 在 Terminating 返回正确错误；RuntimeStats 字段与内部账本一致。
 
-- [ ] **阶段 68：实现 std.mem、std.ptr、std.ffi、std.src、std.syntax/build/hint**（复杂度：5）
+- [x] **阶段 68：实现 std.mem、std.ptr、std.ffi、std.src、std.syntax/build/hint**（复杂度：5）
   - 依赖：阶段 19、21、22、31、32、58、59。
   - 实现 LocalArena/SyncArena/pin/MaybeUninit、pointer intrinsic、CStr/CString、source location、syntax parser facade、build task API、embed_file 和 unreachable 等 lang item。
   - 验收：arena 不接受 resource 类型；pin 生命周期、MaybeUninit 初始化、source location、build emit/rerun/link/define API 与 capability registry 统一；这些 API 不泄漏 compiler private representation。
 
 ## 七、测试、构建任务、生态与工具闭环
 
-- [ ] **阶段 69：实现测试/文档测试/benchmark harness**（复杂度：5）
+- [x] **阶段 69：实现测试/文档测试/benchmark harness**（复杂度：5）
   - 依赖：阶段 20、25、59、61d、67。
   - 实现 `cfg(test/bench)`、`#[test]`、`should_panic(eq)`, `ignore`、稳定测试身份、并行用户协程、panic 捕获、doctest 围栏、`#[bench]`/Bencher/black_box。
   - 验收：测试收集顺序确定、执行可并行、报告按身份排序；测试后代协程归属正确；失败不终止其它测试；ignored/零匹配成功；bench 不缓存历史测量。

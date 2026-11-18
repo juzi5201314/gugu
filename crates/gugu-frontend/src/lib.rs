@@ -139,12 +139,48 @@ impl CompileRequest {
             input: CompileInput::SingleFileSource {
                 path: path.into(),
                 source: source.into(),
+                test: false,
+                bench: false,
             },
             compression: CompressionPolicyV1::disabled(),
             routing: RoutingPolicyV1::default(),
             provenance: ProvenancePolicyV1::release(),
             combining: CombiningPolicyV1::direct(),
             native_link: NativeLink::default(),
+        }
+    }
+
+    /// 创建内存中的单文件 test 域请求：`cfg(test)` 生效并生成测试 harness 入口。
+    pub fn single_file_test(
+        path: impl Into<PathBuf>,
+        source: impl Into<String>,
+        target: TargetName,
+    ) -> Self {
+        Self {
+            input: CompileInput::SingleFileSource {
+                path: path.into(),
+                source: source.into(),
+                test: true,
+                bench: false,
+            },
+            ..CompileRequest::single_file("", "", target)
+        }
+    }
+
+    /// 创建内存中的单文件 bench 域请求：`cfg(bench)` 生效并生成 bench harness 入口。
+    pub fn single_file_bench(
+        path: impl Into<PathBuf>,
+        source: impl Into<String>,
+        target: TargetName,
+    ) -> Self {
+        Self {
+            input: CompileInput::SingleFileSource {
+                path: path.into(),
+                source: source.into(),
+                test: false,
+                bench: true,
+            },
+            ..CompileRequest::single_file("", "", target)
         }
     }
 
@@ -219,6 +255,7 @@ impl CompileRequest {
                 external_packages,
                 test: package_target.kind() == TargetKind::Test,
                 bench: package_target.kind() == TargetKind::Bench,
+                bench_harness: package_target.harness(),
                 custom_cfg: BTreeMap::new(),
             },
             compression: CompressionPolicyV1::disabled(),
@@ -277,6 +314,8 @@ enum CompileInput {
     SingleFileSource {
         path: PathBuf,
         source: String,
+        test: bool,
+        bench: bool,
     },
     File {
         path: PathBuf,
@@ -294,6 +333,8 @@ enum CompileInput {
         external_packages: BTreeSet<String>,
         test: bool,
         bench: bool,
+        /// `harness = false` 的 bench target 标记。
+        bench_harness: bool,
         custom_cfg: BTreeMap<String, Option<String>>,
     },
 }
@@ -1182,11 +1223,16 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
             }),
             embed: None,
         }),
-        CompileInput::SingleFileSource { path, source } => {
+        CompileInput::SingleFileSource {
+            path,
+            source,
+            test,
+            bench,
+        } => {
             let snapshot =
                 SourceSnapshot::from_bytes(logical_input_path(&path), source.into_bytes())
                     .map_err(LoadInputError::Snapshot)?;
-            loaded_single(snapshot, target, true, None)
+            loaded_single(snapshot, target, true, None, test, bench)
         }
         CompileInput::File {
             path,
@@ -1223,6 +1269,8 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
                 target,
                 require_main,
                 Some(EmbedHost::new(root, dirs)),
+                false,
+                false,
             )
         }
         CompileInput::Project {
@@ -1236,6 +1284,7 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
             external_packages,
             test,
             bench,
+            bench_harness,
             custom_cfg,
         } => load_project_sources(
             &package_root,
@@ -1250,7 +1299,8 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
                 test,
                 bench,
                 custom_cfg,
-            ),
+            )
+            .with_bench_harness(bench_harness),
             external_packages,
         ),
     }
@@ -1261,6 +1311,8 @@ fn loaded_single(
     target: TargetName,
     require_main: bool,
     embed: Option<EmbedHost>,
+    test: bool,
+    bench: bool,
 ) -> Result<LoadedInput, LoadInputError> {
     let entry = snapshot.logical_path().to_owned();
     let source_map =
@@ -1275,7 +1327,8 @@ fn loaded_single(
             source_root: String::new(),
             package_identity: "single-file".to_owned(),
             require_main,
-            cfg: CfgContext::target_only(target),
+            cfg: CfgContext::new(target, [], [], test, bench, BTreeMap::new())
+                .with_bench_harness(true),
             external_packages: BTreeSet::new(),
         }),
         embed,

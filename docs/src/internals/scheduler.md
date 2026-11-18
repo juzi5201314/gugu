@@ -78,6 +78,10 @@ CoroutineCold {
     gc_scan_epoch: AtomicU64,
     payload_state: AtomicU64,
     join_waiter: u64,
+    callback_node: u64,
+    callback_storage: u64,
+    subtree_group: u64,
+    panic_result: u64,
 }
 ```
 
@@ -91,7 +95,9 @@ CoroutineCold {
 
 控制块布局由 `CoroutineRuntimeContract` schema 3 发布：`CoroutineHot` 为 64 B、`StackDescriptor` 为 64 B、`CoroutineSlot` 为 128 B，三者均按 64 B 对齐；`CoroutineContext` 为 48 B，`MorestackScratch` 为 208 B 且按 16 B 对齐，`CoroutineCold` 为 576 B 且按 64 B 对齐。hot 与 cold 分别以 64 KiB 地址稳定页扩容；页表可增长，已公开 record 不移动。cold 表下标是稠密的稳定控制块索引，槽复用必须推进独立 generation，过期 handle 不得认领新协程。
 
-`join_state` 位于 cold+368，内联结果占 cold+376..392；cold+392 的租约计数不能用于等待者。独立 `join_waiter` 位于 cold+512，文件请求仍复用 cold+272..368，因此请求错误不会发布 Join 完成，登记 Join 也不会破坏目标协程的请求链。主协程启动区由冷记录实际大小推导为 768 B，panic 六字记录从 704 开始，返回原因与 coordinator 分别位于 752/760；机器片段和镜像侧必须消费一致布局。
+`join_state` 位于 cold+368，内联结果占 cold+376..392；cold+392 的租约计数不能用于等待者。独立 `join_waiter` 位于 cold+512，文件请求仍复用 cold+272..368，因此请求错误不会发布 Join 完成，登记 Join 也不会破坏目标协程的请求链。`subtree_group`/`panic_result` 位于 cold+536/+544；`CoroutineCold` 总长仍为 576 B。主协程启动区由冷记录实际大小推导为 768 B，panic 六字记录从 704 开始，返回原因与 coordinator 分别位于 752/760；机器片段和镜像侧必须消费一致布局。
+
+子协程 panic 不外展开到进程：`panic_unwind` 机器片段带第七个内部整数参数（runtime 状态区地址，r8），主协程照旧打印报告并 `process_exit(1)`；子协程把 panic 物化为调度 bump 堆上的 48 字节记录 `{消息 ptr,len, 位置 ptr,len, line, column}`，写回结果车道并置 `panic_result`，payload_state 只保留 spawn 标记后按完成路径发布。无等待者且无组归属时按未处理分离 panic 立即打印并 `state+768` 计数；归属测试子树组的只 `group+8` 计数交给 runner 判定。`join_wait`/`select` 取走 panic 记录时 `join_deliver`/`commit_case` 返回状态 2，LIR 对 `JoinWait` 完成无条件调用 `join_panic` 取回句柄（非 panic 提前返回 0），`take_result` 在 panic 分支复制前结清 `panic_result`、组 panics 与 `state+768`；`Join.wait` 的 `Err` 载荷即该 Panic 句柄，`JoinPanic` glue 因此按 `JoinWait` demand 同步实例化。测试子树组记录为两车道 `{pending, panics}`：`subtree_group_new` 在处理器堆分配，`subtree_group_attach` 挂接到当前协程后 spawn 使子协程继承并把 pending 加一、普通协程组为零不记账；协程结束 pending 减一，等待侧以 `subtree_group_pending` 排空、`subtree_group_panics` 读取失败归属。组记录不回收，随调度堆区释放。
 
 `std/runtime/coroutine.gg` 的 `#[repr(C)]` record 经冻结 HIR、具体 GIR 与真实布局器形成后，逐字段同 machine layout 交叉验证；不重新读取源码推测 offset。契约同时携带 layout 目录、栈策略和实际 x86_64 context 片段，任一大小、对齐、字段偏移或代码版本不匹配都以 `E0058` 停止下游。hot 内的 atomic 存储车道仍为一个机器字，普通 Gugu 字段访问不能替代其 acquire/release machine intrinsic。
 

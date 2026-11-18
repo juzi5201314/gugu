@@ -1,5 +1,5 @@
 use std.runtime.heap.{copy_bytes, value_size}
-use std.runtime.scheduler.{dynamic_root_publish, dynamic_root_retire, park_current, ready_hot, take_result, COROUTINE_COLD_COMPLETION_OFFSET, COROUTINE_COLD_JOIN_WAITER_OFFSET, DYNAMIC_ROOT_KIND_CHANNEL_SLOT}
+use std.runtime.scheduler.{dynamic_root_publish, dynamic_root_retire, park_current, ready_hot, take_result, COROUTINE_COLD_COMPLETION_OFFSET, COROUTINE_COLD_JOIN_WAITER_OFFSET, COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_RESULT_OFFSET, DYNAMIC_ROOT_KIND_CHANNEL_SLOT}
 
 /* 等待源控制块的 Gugu 定义；与 compiler runtime layout query 逐字段交叉校验。
  * wait-node 只保存协程句柄、generation、case 和下标偏移，禁止裸栈指针。
@@ -313,16 +313,31 @@ pub fn channel_try_recv(handle: uint, payload: *(), desc: *()) byte {
 #[used]
 pub fn join_wait(handle: uint, out: *(), desc: *()) byte {
     let cold = word(handle + 48)
-    let dst = as_uint(out)
-    let descriptor = as_uint(desc)
     if word(cold + COROUTINE_COLD_COMPLETION_OFFSET) == 1 {
-        take_result(handle, dst, descriptor)
-        return 1
+        return join_deliver(handle, cold, as_uint(out), as_uint(desc))
     }
     store_word(cold + COROUTINE_COLD_JOIN_WAITER_OFFSET, current_hot())
     park_current()
+    join_deliver(handle, cold, as_uint(out), as_uint(desc))
+}
+
+/// 完成记录分流：panic 结果返回 2（panic 载荷由 `join_panic` 取走），正常结果复制后返回 1。
+fn join_deliver(handle: uint, cold: uint, dst: uint, descriptor: uint) byte {
+    if word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET) != 0 { return 2 }
     take_result(handle, dst, descriptor)
     1
+}
+
+/// 取走 panic 完成记录：结清结果登记与「未处理」记账，返回 Panic 句柄。
+///
+/// 调用方无条件调用：非 panic 结果提前返回 0 且不改任何状态。Panic 对象布局与
+/// `panic_unwind` 里的 48 字节记录一致。
+#[used]
+pub fn join_panic(handle: uint) uint {
+    let cold = word(handle + 48)
+    if word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET) == 0 { return 0 }
+    take_result(handle, 0, 0)
+    word(cold + COROUTINE_COLD_RESULT_OFFSET)
 }
 
 fn record(base: uint, index: uint) uint = base + index * 64
@@ -340,6 +355,13 @@ fn commit_case(base: uint, index: uint) byte {
         let cold = word(handle + 48)
         if word(cold + COROUTINE_COLD_COMPLETION_OFFSET) == 1 {
             let result = word(at + 32)
+            if word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET) != 0 {
+                // panic 完成：把 Err 判别字与 Panic 句柄写进结果对象，再结清登记。
+                let panic = join_panic(handle)
+                store_word(result, 1)
+                store_word(result + word(at + 48), panic)
+                return 1
+            }
             take_result(handle, result + word(at + 48), word(at + 40))
             return 1
         }

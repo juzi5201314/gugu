@@ -461,6 +461,11 @@ pub struct CoroutineCold {
     pub callback_node: u64,
     /// 回调热记录、冷记录、参数包及 registry 的同页映射；普通协程为零。
     pub callback_storage: u64,
+    /// 测试 harness 子树归属：spawn 时从当前协程继承的组记录地址；零表示不属于任何测试组。
+    /// 组记录两车道 `{pending, panics}`，结束与未处理 panic 的记账由镜像 runtime 完成。
+    pub subtree_group: u64,
+    /// 完成结果为未交付 panic 时置位；Join/select 晚到取走时清零并把组 panic 数减回。
+    pub panic_result: u64,
 }
 
 /// morestack 入口片段与镜像 runtime 交接的固定邮箱；位于 runtime 状态区首部。

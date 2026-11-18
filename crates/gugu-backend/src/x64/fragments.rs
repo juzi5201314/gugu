@@ -1636,6 +1636,13 @@ fn panic_resume_fragment() -> FragmentBlob {
             vec![mem_base(gpr(Gpr::R11), offset), reg(gpr(register))],
         );
     }
+    // 第七个内部整数车道：runtime 状态区地址，panic_unwind 用它区分主/子协程并投递结果。
+    builder.emit(
+        "mov",
+        RM64_R64,
+        Access::Read,
+        vec![reg(gpr(Gpr::R11)), reg(gpr(Gpr::R8))],
+    );
     builder.emit(
         "call",
         REL32,

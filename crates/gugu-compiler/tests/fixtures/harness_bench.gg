@@ -1,0 +1,16 @@
+use std.test.{Bencher, black_box}
+
+#[bench]
+fn bench_add(b: &Bencher) {
+    b.iter(fn() {
+        _ = black_box(1 + 1)
+    })
+    b.bytes(64)
+}
+
+#[bench]
+fn bench_batched(b: &Bencher) {
+    b.iter_batched(fn() int { 7 }, fn(v: int) {
+        _ = black_box(v + 1)
+    })
+}

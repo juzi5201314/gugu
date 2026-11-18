@@ -21,6 +21,7 @@ pub mod contract;
 pub mod functions;
 pub mod gc;
 pub mod gir;
+mod harness;
 pub mod late;
 pub mod mono;
 mod pipeline;
@@ -324,13 +325,18 @@ fn check_sources(
         prefix.as_ref().map(prefix::BuiltinPrefix::sema),
         embed,
     )?;
-    let entry_file = source_map.file_id(entry).ok_or_else(|| {
-        vec![Diagnostic::error(
-            DiagnosticCode::ModuleNotFound,
-            format!("target 入口 `{entry}` 未进入源码模块表"),
-            None,
-        )]
-    })?;
+    // harness 域：收集测试/bench 与 doctest，生成 `__gugu_harness` 模块并把入口指向它。
+    let harness_entry = harness::apply(&mut modules, source_map, cfg)?;
+    let entry_file = match harness_entry {
+        Some(file) => file,
+        None => source_map.file_id(entry).ok_or_else(|| {
+            vec![Diagnostic::error(
+                DiagnosticCode::ModuleNotFound,
+                format!("target 入口 `{entry}` 未进入源码模块表"),
+                None,
+            )]
+        })?,
+    };
     let entry_function = modules
         .iter()
         .enumerate()

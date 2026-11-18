@@ -124,6 +124,7 @@ pub fn runtime_call_name(call: RuntimeCall) -> &'static str {
         RuntimeCall::ChannelTrySend => "channel_try_send",
         RuntimeCall::ChannelTryRecv => "channel_try_recv",
         RuntimeCall::JoinWait => "join_wait",
+        RuntimeCall::JoinPanic => "join_panic",
         RuntimeCall::Yield => "yield",
         RuntimeCall::Spawn => "spawn",
         RuntimeCall::SelectCommit { .. } => "select_commit",

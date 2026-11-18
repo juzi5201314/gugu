@@ -1,0 +1,469 @@
+//! `std.test` —— `#[test]`/`#[bench]` harness 的原语集：断言、Bencher、black_box，
+//! 以及生成 manifest 调用的 runner。runner 本身是普通 Gugu 代码：测试协程的 panic
+//! 边界、后代协程归属与按身份排序的报告都在这里用调度器原语实现。
+
+use std.collections.{Vec}
+use std.text.{Bytes}
+use std.env as env
+use std.runtime.scheduler.{subtree_group_new, subtree_group_attach, subtree_group_pending, subtree_group_panics, yield_now}
+use std.runtime.time as clock
+
+/// manifest 表里的 flags 位。
+pub const FLAG_IGNORE: uint = 1
+pub const FLAG_SHOULD_PANIC: uint = 2
+pub const FLAG_EXPECT: uint = 4
+
+/// `#[should_panic]` 判定用：Panic 记录布局 {msg_ptr, msg_len, path_ptr, path_len, line, column}。
+const PANIC_MSG_PTR: uint = 0
+const PANIC_MSG_LEN: uint = 8
+
+#[track_caller]
+pub fn assert(cond: bool) {
+    if !cond { panic("assertion failed") }
+    ()
+}
+
+#[track_caller]
+pub fn assert_eq[T: Eq + Print](left: T, right: T) {
+    if !(left == right) { panic(f"assert_eq failed: {left} != {right}") }
+    ()
+}
+
+#[track_caller]
+pub fn assert_ne[T: Eq + Print](left: T, right: T) {
+    if left == right { panic(f"assert_ne failed: {left} != {right}") }
+    ()
+}
+
+/// 优化屏障：当前编译期不做跨调用常折叠/内联，普通函数调用已是不透明边界。
+pub fn black_box[T](value: T) T = value
+
+/// 适配器返回「测试返回 Err」时占位用的 Panic 句柄；runner 只区分 Ok/Err，不读其记录。
+pub fn __synthetic_panic() Panic = unsafe { std.mem.transmute[uint, Panic](uint(0)) }
+
+/// `Result` 返回测试的失败详情：由 wrap adapter 在测试协程内提前写出 Err 的 Print 内容，
+/// runner 在 join 后只补 `test <identity> ... FAILED` 与汇总。
+pub fn __report_test_err(text: string) {
+    write_str(1, "    returned Err: ")
+    write_str(1, text)
+    write_str(1, "\n")
+}
+
+pub struct Bencher {
+    bytes: uint,
+    iters: uint,
+    nanos: uint,
+    measured: uint,
+}
+
+/// 单样本的最小计时时长（纳秒）与迭代数上限：自适应迭代在两者之间倍增。
+const BENCH_MIN_NS: uint = 1000000
+const BENCH_MAX_ITERS: uint = 1048576
+
+impl Bencher {
+    /// 顶层测量：预热一次后倍增迭代数直到样本达到最短计时时长；只统计 f 的执行。
+    /// 一个 benchmark 只允许一个顶层测量。
+    pub fn iter(self: &Self, f: fn()) {
+        if self.measured != uint(0) { panic("benchmark 一次只能有一个顶层测量") }
+        self.measured = 1
+        f()
+        let iters = uint(1)
+        loop {
+            let t0 = clock.monotonic()
+            let k = 0
+            while uint(k) < iters { f()  k = k + 1 }
+            let elapsed = clock.monotonic() - t0
+            if elapsed >= BENCH_MIN_NS || iters >= BENCH_MAX_ITERS {
+                self.nanos = self.nanos + elapsed
+                self.iters = self.iters + iters
+                break
+            }
+            iters = iters * uint(2)
+            ()
+        }
+        ()
+    }
+
+    /// 带批量的测量：setup 在计时外为每次迭代准备新值，只统计 routine。
+    /// 预热一轮后同样按最短计时时长自适应迭代数。
+    pub fn iter_batched[I](self: &Self, setup: fn() I, routine: fn(I)) {
+        if self.measured != uint(0) { panic("benchmark 一次只能有一个顶层测量") }
+        self.measured = 1
+        routine(setup())
+        let iters = uint(1)
+        loop {
+            let elapsed = uint(0)
+            let k = 0
+            while uint(k) < iters {
+                let value = setup()
+                let t0 = clock.monotonic()
+                routine(value)
+                elapsed = elapsed + (clock.monotonic() - t0)
+                k = k + 1
+            }
+            if elapsed >= BENCH_MIN_NS || iters >= BENCH_MAX_ITERS {
+                self.nanos = self.nanos + elapsed
+                self.iters = self.iters + iters
+                break
+            }
+            iters = iters * uint(2)
+            ()
+        }
+        ()
+    }
+
+    /// 标记本次测量每次迭代处理的字节数（非负；供吞吐报告），重复设置覆盖前值。
+    pub fn bytes(self: &Self, count: int) {
+        if count < 0 { panic("bytes 计数必须非负") }
+        self.bytes = uint(count)
+    }
+}
+
+/// 一次 benchmark 的汇总：样本数、每样本迭代数、中位/最小/最大纳秒每迭代、标记字节数。
+pub struct BenchSample {
+    pub samples: uint,
+    pub iters: uint,
+    pub median_ns: uint,
+    pub min_ns: uint,
+    pub max_ns: uint,
+    pub bytes: uint,
+}
+
+const BENCH_SAMPLES: uint = 9
+
+/// 在测试协程内部跑 `#[bench]` 函数：每样本新建 Bencher，串行取样。
+/// 未执行测量或迭代数为 0 按契约 panic，由 runner 记为失败。
+pub fn __bench_run(case: fn(&Bencher)) BenchSample {
+    let times: Vec[uint] = Vec[uint]::new()
+    let bytes_marked: uint = uint(0)
+    let total_iters: uint = uint(0)
+    let s = 0
+    while uint(s) < BENCH_SAMPLES {
+        let b = Bencher { bytes: uint(0), iters: uint(0), nanos: uint(0), measured: uint(0) }
+        case(&b)
+        if b.measured == uint(0) { panic("benchmark 未执行测量") }
+        if b.iters == uint(0) { panic("benchmark 迭代数为 0") }
+        times.push(b.nanos / b.iters)
+        bytes_marked = b.bytes
+        total_iters = total_iters + b.iters
+        s = s + 1
+    }
+    // 插入排序取中位/最小/最大；样本数是编译期常量，规模固定。
+    let a = 0
+    while a < times.len() {
+        let b2 = a + 1
+        while b2 < times.len() {
+            match (times.get(a), times.get(b2)) {
+                (Some(x), Some(y)) => {
+                    if y < x {
+                        _ = times.set(a, y)
+                        _ = times.set(b2, x)
+                    }
+                    ()
+                },
+                _ => (),
+            }
+            b2 = b2 + 1
+        }
+        a = a + 1
+    }
+    let median = match times.get(times.len() / 2) { Some(v) => v, None => uint(0) }
+    let min = match times.get(0) { Some(v) => v, None => uint(0) }
+    let max = match times.get(times.len() - 1) { Some(v) => v, None => uint(0) }
+    BenchSample {
+        samples: BENCH_SAMPLES,
+        iters: total_iters / BENCH_SAMPLES,
+        median_ns: median,
+        min_ns: min,
+        max_ns: max,
+        bytes: bytes_marked,
+    }
+}
+
+fn word(address: uint) uint {
+    unsafe { std.ptr.read_unaligned[uint](std.mem.transmute[uint, *uint](address)) }
+}
+
+fn write_raw(fd: uint, ptr: uint, len: uint) {
+    if len == uint(0) { return }
+    unsafe { _ = std.runtime.report_write(fd, std.mem.transmute[uint, *byte](ptr), len) }
+}
+
+fn sb(value: string) &[byte] {
+    unsafe { Bytes::from_string(value).as_slice() }
+}
+
+fn write_str(fd: uint, value: string) {
+    let bytes = sb(value)
+    if bytes.len() == 0 { return }
+    unsafe { _ = std.runtime.report_write(fd, std.ptr.addr_of(bytes[0]), uint(bytes.len())) }
+}
+
+fn write_uint(fd: uint, value: uint) {
+    let buffer: [byte; 20] = [byte(0); 20]
+    let cursor = 20
+    let v = value
+    loop {
+        cursor = cursor - 1
+        buffer[cursor] = byte(v % uint(10)) + byte(48)
+        v = v / uint(10)
+        if v == uint(0) { break }
+        ()
+    }
+    unsafe { _ = std.runtime.report_write(fd, std.ptr.addr_of(buffer[cursor]), uint(20 - cursor)) }
+}
+
+fn contains(hay: string, needle: string) bool {
+    let hb = sb(hay)
+    let nb = sb(needle)
+    if nb.len() == 0 { return true }
+    if nb.len() > hb.len() { return false }
+    let i = 0
+    while i + nb.len() <= hb.len() {
+        let j = 0
+        while j < nb.len() && hb[i + j] == nb[j] { j = j + 1 }
+        if j == nb.len() { return true }
+        i = i + 1
+    }
+    false
+}
+
+fn str_eq(left: string, right: string) bool = left == right
+
+fn is_flag(text: string) bool {
+    let b = sb(text)
+    b.len() >= 2 && b[0] == byte(45) && b[1] == byte(45)
+}
+
+struct HarnessArgs { filter: string, list: bool, ignored: bool }
+
+fn __args() HarnessArgs {
+    let argv = env.args()
+    let args = HarnessArgs { filter: "", list: false, ignored: false }
+    let i = 1
+    while i < argv.len() {
+        match argv.get(i) {
+            Some(arg) => {
+                let text = arg.to_string_lossy()
+                if str_eq(text, "--ignored") || str_eq(text, "--include-ignored") {
+                    args.ignored = true
+                } else if str_eq(text, "--list") {
+                    args.list = true
+                } else if !is_flag(text) && string_len(args.filter) == 0 {
+                    args.filter = text
+                } else {
+                    ()
+                }
+                ()
+            },
+            None => (),
+        }
+        i = i + 1
+    }
+    args
+}
+
+/// `#[should_panic(eq)]` 的消息比较：只比 Panic.message 的 UTF-8 字节。
+fn panic_eq(handle: uint, expect: string) bool {
+    if handle == uint(0) { return false }
+    let len = word(handle + PANIC_MSG_LEN)
+    let ptr = word(handle + PANIC_MSG_PTR)
+    let eb = sb(expect)
+    if uint(eb.len()) != len { return false }
+    let i = 0
+    while uint(i) < len {
+        let byte = unsafe { std.ptr.read_unaligned[byte](std.mem.transmute[uint, *byte](ptr + uint(i))) }
+        if eb[i] != byte { return false }
+        i = i + 1
+    }
+    true
+}
+
+fn report_case(name: string, verdict: string) {
+    write_str(1, "test ")
+    write_str(1, name)
+    write_str(1, " ... ")
+    write_str(1, verdict)
+    write_str(1, "\n")
+}
+
+fn panic_message(handle: uint) {
+    let len = word(handle + PANIC_MSG_LEN)
+    let ptr = word(handle + PANIC_MSG_PTR)
+    if len == uint(0) { return }
+    write_str(1, "    panic: ")
+    write_raw(1, ptr, len)
+    write_str(1, "\n")
+}
+
+/// 测试 runner：并行 spawn 选中用例，按收集顺序 join 判定并报告。返回失败数。
+///
+/// 每个测试协程挂独立 subtree 组：自身 panic 由 Join 投递，分离后代的未处理 panic
+/// 计入组 panics；Join 处理过的不计。drain 等待组内仍存活的协程结束。
+pub fn __run_tests(
+    count: uint,
+    spawn: fn(uint) Join[Result[(), Panic]],
+    name: fn(uint) string,
+    flags: fn(uint) uint,
+    expect: fn(uint) string,
+) uint {
+    let args = __args()
+    let joins: Vec[Join[Result[(), Panic]]] = Vec[Join[Result[(), Panic]]]::new()
+    let groups: Vec[uint] = Vec[uint]::new()
+    let chosen: Vec[uint] = Vec[uint]::new()
+    let ignored_count: uint = uint(0)
+    let i = 0
+    while uint(i) < count {
+        let id = uint(i)
+        let nm = name(id)
+        if args.list {
+            write_str(1, nm)
+            write_str(1, ": test\n")
+        } else if (flags(id) & FLAG_IGNORE) != uint(0) && !args.ignored {
+            report_case(nm, "ignored")
+            ignored_count = ignored_count + 1
+        } else if uint(string_len(args.filter)) == 0 || contains(nm, args.filter) {
+            let group = subtree_group_new()
+            subtree_group_attach(group)
+            let join = spawn(id)
+            subtree_group_attach(uint(0))
+            joins.push(join)
+            groups.push(group)
+            chosen.push(id)
+        } else {
+            ()
+        }
+        i = i + 1
+        ()
+    }
+    if args.list { return uint(0) }
+    let failures: uint = uint(0)
+    let k = 0
+    while k < chosen.len() {
+        let index = k
+        match (chosen.get(index), groups.get(index), joins.get(index)) {
+            (Some(id), Some(group), Some(join)) => {
+                let f = flags(id)
+                let panicked = false
+                let panic_handle: uint = uint(0)
+                let returned_err = false
+                match join.wait() {
+                    Ok(inner) => match inner {
+                        Ok(()) => (),
+                        Err(_) => { returned_err = true },
+                    },
+                    Err(p) => {
+                        panicked = true
+                        panic_handle = unsafe { std.mem.transmute[Panic, uint](p) }
+                    },
+                }
+                while subtree_group_pending(group) != uint(0) { yield_now() }
+                let descendants = subtree_group_panics(group)
+                let case_ok = if panicked {
+                    if (f & FLAG_SHOULD_PANIC) != uint(0) {
+                        if (f & FLAG_EXPECT) != uint(0) {
+                            panic_eq(panic_handle, expect(id))
+                        } else {
+                            true
+                        }
+                    } else {
+                        false
+                    }
+                } else {
+                    !returned_err && (f & FLAG_SHOULD_PANIC) == uint(0)
+                }
+                let ok = case_ok && descendants == uint(0)
+                let nm = name(id)
+                if ok {
+                    report_case(nm, "ok")
+                } else {
+                    report_case(nm, "FAILED")
+                    if panicked { panic_message(panic_handle) }
+                    if returned_err { () }
+                    if descendants != uint(0) {
+                        write_str(1, "    未处理的分离协程 panic: ")
+                        write_uint(1, descendants)
+                        write_str(1, "\n")
+                    }
+                    failures = failures + 1
+                }
+            },
+            _ => (),
+        }
+        k = k + 1
+    }
+    let passed = uint(chosen.len()) - failures
+    write_str(1, "test result: ")
+    write_str(1, if failures == uint(0) { "ok. " } else { "FAILED. " })
+    write_uint(1, passed)
+    write_str(1, " passed; ")
+    write_uint(1, failures)
+    write_str(1, " failed; ")
+    write_uint(1, ignored_count)
+    write_str(1, " ignored\n")
+    failures
+}
+
+fn string_len(value: string) int = sb(value).len()
+
+/// bench runner：默认串行，逐用例 spawn + join。返回失败数。
+pub fn __run_bench(
+    count: uint,
+    spawn: fn(uint) Join[Result[BenchSample, Panic]],
+    name: fn(uint) string,
+) uint {
+    let failures: uint = uint(0)
+    let i = 0
+    while uint(i) < count {
+        let id = uint(i)
+        let nm = name(id)
+        let group = subtree_group_new()
+        subtree_group_attach(group)
+        let join = spawn(id)
+        subtree_group_attach(uint(0))
+        let panicked = false
+        let ok = false
+        match join.wait() {
+            Ok(inner) => match inner {
+                Ok(sample) => {
+                    write_str(1, "bench ")
+                    write_str(1, nm)
+                    write_str(1, " ... samples=")
+                    write_uint(1, sample.samples)
+                    write_str(1, " iters=")
+                    write_uint(1, sample.iters)
+                    write_str(1, " median=")
+                    write_uint(1, sample.median_ns)
+                    write_str(1, "ns/iter min=")
+                    write_uint(1, sample.min_ns)
+                    write_str(1, " max=")
+                    write_uint(1, sample.max_ns)
+                    if sample.bytes != uint(0) && sample.median_ns != uint(0) {
+                        write_str(1, " thpt=")
+                        write_uint(1, sample.bytes * uint(1000000000) / sample.median_ns)
+                        write_str(1, "B/s")
+                        ()
+                    }
+                    write_str(1, "\n")
+                    ok = true
+                },
+                Err(_) => write_str(1, "    returned Err\n"),
+            },
+            Err(p) => {
+                panicked = true
+                panic_message(unsafe { std.mem.transmute[Panic, uint](p) })
+            },
+        }
+        while subtree_group_pending(group) != uint(0) { yield_now() }
+        if subtree_group_panics(group) != uint(0) { ok = false }
+        if !ok {
+            write_str(1, "bench ")
+            write_str(1, nm)
+            write_str(1, " ... FAILED\n")
+            failures = failures + 1
+        }
+        i = i + 1
+        ()
+    }
+    failures
+}
