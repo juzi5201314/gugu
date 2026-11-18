@@ -139,6 +139,7 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
             linux_worker(),
             linux_clock(7),
             linux_clock(1),
+            linux_parallelism_probe(),
         ],
         TargetName::X86_64Windows => [
             windows_start(),
@@ -146,6 +147,7 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
             windows_worker(),
             windows_clock(),
             windows_wall_clock(),
+            windows_parallelism_probe(),
         ],
     };
     [
@@ -154,6 +156,7 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
         "fs_native_worker",
         "monotonic_nanos",
         "wall_nanos",
+        "parallelism_probe",
     ]
     .into_iter()
     .zip(builders)
@@ -294,6 +297,59 @@ fn windows_wall_clock() -> Builder {
     b
 }
 
+/// `sched_getaffinity(0, 8, mask)`：宿主可用 CPU 掩码位计数；失败返回 0，调用方回落到 1。
+fn linux_parallelism_probe() -> Builder {
+    let mut b = Builder::new();
+    let failed = b.label();
+    let bits = b.label();
+    adjust(&mut b, "sub", Rsp, 16);
+    number(&mut b, Rax, 204);
+    number(&mut b, Rdi, 0);
+    number(&mut b, Rsi, 8);
+    rr(&mut b, Rdx, Rsp);
+    syscall(&mut b);
+    compare(&mut b, Rax, 0);
+    jump(&mut b, "jl", failed);
+    load(&mut b, Rdx, Rsp, 0);
+    number(&mut b, Rax, 0);
+    number(&mut b, Rcx, 64);
+    b.define(bits);
+    rr(&mut b, R11, Rdx);
+    b.emit("and", IMM, Access::ReadWrite, vec![reg(gpr(R11)), imm(1)]);
+    b.emit(
+        "add",
+        MOV,
+        Access::ReadWrite,
+        vec![reg(gpr(Rax)), reg(gpr(R11))],
+    );
+    b.emit(
+        "shr",
+        &[K::Rm64, K::Imm8],
+        Access::ReadWrite,
+        vec![reg(gpr(Rdx)), imm(1)],
+    );
+    adjust(&mut b, "sub", Rcx, 1);
+    jump(&mut b, "jne", bits);
+    adjust(&mut b, "add", Rsp, 16);
+    ret(&mut b);
+    b.define(failed);
+    number(&mut b, Rax, 0);
+    adjust(&mut b, "add", Rsp, 16);
+    ret(&mut b);
+    b
+}
+/// `GetSystemInfo` 的 `dwNumberOfProcessors` 在 SYSTEM_INFO +32；失败时 API 不写值，返回 0。
+fn windows_parallelism_probe() -> Builder {
+    let mut b = Builder::new();
+    adjust(&mut b, "sub", Rsp, 48);
+    rr(&mut b, Rcx, Rsp);
+    win_call(&mut b, "GetSystemInfo");
+    load(&mut b, Rax, Rsp, 32);
+    dword_result(&mut b);
+    adjust(&mut b, "add", Rsp, 48);
+    ret(&mut b);
+    b
+}
 fn linux_start() -> Builder {
     let mut b = Builder::new();
     let file = b.label();

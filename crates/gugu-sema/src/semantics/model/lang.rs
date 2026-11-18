@@ -95,6 +95,7 @@ pub enum RuntimeMachineIntrinsic {
     ProcessWorker,
     MonotonicNanos,
     WallNanos,
+    ParallelismProbe,
     StackReadWord,
     StackCopyRaw,
     CageControl,
@@ -105,7 +106,7 @@ pub enum RuntimeMachineIntrinsic {
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -130,6 +131,7 @@ impl RuntimeMachineIntrinsic {
         Self::ProcessWorker,
         Self::MonotonicNanos,
         Self::WallNanos,
+        Self::ParallelismProbe,
         Self::StackReadWord,
         Self::StackCopyRaw,
         Self::CageControl,
@@ -171,6 +173,7 @@ impl RuntimeMachineIntrinsic {
             Self::ProcessWorker => "process_worker",
             Self::MonotonicNanos => "monotonic_nanos",
             Self::WallNanos => "wall_nanos",
+            Self::ParallelismProbe => "parallelism_probe",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
             Self::CageControl => "cage_control",
@@ -189,6 +192,7 @@ impl RuntimeMachineIntrinsic {
             Self::CurrentSlot
             | Self::MonotonicNanos
             | Self::WallNanos
+            | Self::ParallelismProbe
             | Self::CageControl
             | Self::CallbackControl
             | Self::ThreadId => 0,
@@ -232,6 +236,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::ProcessWorker
                 | Self::MonotonicNanos
                 | Self::WallNanos
+                | Self::ParallelismProbe
                 | Self::StackReadWord
                 | Self::CageControl
                 | Self::CallbackControl
@@ -256,6 +261,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::ProcessWorker
                 | Self::MonotonicNanos
                 | Self::WallNanos
+                | Self::ParallelismProbe
                 | Self::StackReadWord
                 | Self::StackCopyRaw
                 | Self::CageControl

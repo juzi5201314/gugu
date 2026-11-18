@@ -694,6 +694,7 @@ fn runtime_machine_call_valid(
         Kind::CurrentSlot
         | Kind::MonotonicNanos
         | Kind::WallNanos
+        | Kind::ParallelismProbe
         | Kind::CageControl
         | Kind::CallbackControl
         | Kind::ProcessWorker

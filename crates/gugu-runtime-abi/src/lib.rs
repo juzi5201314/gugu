@@ -314,6 +314,8 @@ pub enum RuntimeMachineOp {
     ProcessWorker,
     /// 单调纳秒，供 GC 暂停和 native 逻辑时间观察。
     MonotonicNanos,
+    /// 宿主当前可用并行度（CPU 数量）；失败返回 0 由调用方回落到 1。
+    ParallelismProbe,
     /// UTC 墙钟纳秒（Unix epoch 起），供 `SystemTime` 观察；可因校时跳变。
     WallNanos,
     /// 以当前 stack_high 相对深度读取机器字，不增长栈。
@@ -346,6 +348,7 @@ impl RuntimeMachineOp {
             Self::ProcessCall => "process_call",
             Self::ProcessWorker => "process_worker",
             Self::MonotonicNanos => "monotonic_nanos",
+            Self::ParallelismProbe => "parallelism_probe",
             Self::WallNanos => "wall_nanos",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
@@ -484,6 +487,10 @@ pub const GLUE_DEFS: &[GlueDef] = &[
     },
     GlueDef {
         glue: "wall_nanos",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "parallelism_probe",
         def: GlueDefKind::Fragment,
     },
     GlueDef {

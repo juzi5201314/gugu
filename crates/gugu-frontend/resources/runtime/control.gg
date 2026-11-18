@@ -30,9 +30,20 @@ pub fn init_gc_target(percent: uint, flags: uint) {
     if flags & uint(1) != 0 { gc_target_disabled = 1 } else { gc_target_percent = percent }
 }
 
-/* 启动环境写入的初始目标：值已由启动解析校验；未配置的键以 0 哨兵跳过。*/
+static host_parallelism_cache: uint = 0
+
+/* 宿主可用并行度：探测失败回落到 1（spec 下界）。*/
+pub fn host_parallelism() uint { unsafe {
+    if host_parallelism_cache != 0 { return host_parallelism_cache }
+    let probed = std.runtime.parallelism_probe()
+    host_parallelism_cache = if probed == 0 { uint(1) } else { probed }
+    host_parallelism_cache
+} }
+
+/* 启动环境写入的初始目标：值已由启动解析校验；未配置的键以 0 哨兵跳过，
+ * parallelism 的缺省是宿主可用并行度。*/
 pub fn init_startup(procs: uint, trace: uint, stack_max: uint) {
-    if procs != 0 { parallelism_target = procs }
+    parallelism_target = if procs != 0 { procs } else { host_parallelism() }
     trace_flags = trace
     if stack_max != 0 { stack_limit_bytes = stack_max }
 }
