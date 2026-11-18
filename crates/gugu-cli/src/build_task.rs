@@ -6,7 +6,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::IsTerminal,
+    io::{IsTerminal, Write},
     path::{Path, PathBuf},
 };
 
@@ -42,7 +42,9 @@ fn build_dir(workspace_root: &Path, options: &GlobalArgs, package: &Package) -> 
 }
 
 /// build task 目录的进程互斥：同包并发构建共享 record/inputs/out，
-/// 无锁会混读另一进程的产物。存在性锁文件 + 有界等待。
+/// 无锁会混读另一进程的产物。锁文件记录持有者 pid，持有者已退出
+/// （Ctrl+C 等路径不经过 Drop）时后到的进程回收锁而不是等死；
+/// 存活持有者下有界等待。
 struct TaskLock {
     path: PathBuf,
 }
@@ -57,8 +59,15 @@ impl TaskLock {
                 .create_new(true)
                 .open(&path)
             {
-                Ok(_) => return Ok(Self { path: path.clone() }),
+                Ok(mut file) => {
+                    let _ = writeln!(file, "{}", std::process::id());
+                    return Ok(Self { path: path.clone() });
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(&path) {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
                     if std::time::Instant::now() >= deadline {
                         emit_cli_error(format, "另一个构建进程正在执行该 build task");
                         return Err(());
@@ -72,6 +81,28 @@ impl TaskLock {
             }
         }
     }
+}
+
+/// 锁持有者已退出即视为残留锁；读不到合法 pid 一律按持有中处理。
+fn lock_is_stale(path: &Path) -> bool {
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        return false;
+    };
+    !pid_alive(pid)
+}
+
+#[cfg(target_os = "linux")]
+fn pid_alive(pid: u32) -> bool {
+    Path::new(&format!("/proc/{pid}")).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn pid_alive(_pid: u32) -> bool {
+    // 无非 libc 的进程存活查询；保守按持有中处理。
+    true
 }
 
 impl Drop for TaskLock {
@@ -215,11 +246,29 @@ fn emit_path(out_dir: &Path, recorded: &str) -> Option<PathBuf> {
             other => cleaned.push(other.as_os_str()),
         }
     }
-    if cleaned.strip_prefix(out_dir).is_ok() {
+    // 两侧同一词法口径：含 `..`/`./` 的 --target-dir 不能令合法记录误判越界。
+    let base = lexical_normalize(out_dir);
+    if cleaned.strip_prefix(&base).is_ok() {
         Some(cleaned)
     } else {
         None
     }
+}
+
+/// 词法折叠 `.`/`..`：不解析符号链接，绝对路径根部之上的 `..` 按根处理。
+fn lexical_normalize(path: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut cleaned = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::ParentDir => {
+                cleaned.pop();
+            }
+            Component::CurDir => {}
+            other => cleaned.push(other.as_os_str()),
+        }
+    }
+    cleaned
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {

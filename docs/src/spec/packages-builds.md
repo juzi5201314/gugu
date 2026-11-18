@@ -312,7 +312,7 @@ build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进
 - 权限门当前只在 Linux 宿主编译域生效：windows 目标中检查点为空操作，授权判定不生效；windows 宿主的 env 读取通道在本版本未实现。
 - env 检查点覆盖 `std.env` 全量操作与 `rerun_if_env_changed` 声明读取；run 检查点在 `std.build.run` 与 `std.process` 的启动点；net 检查点覆盖 TCP connect、bind 与 UDP `send_to`/`connect` 的远端地址。
 - 记录协议字段中的 TAB/CR/LF 统一清洗为空格，字段内容不能伪造额外记录行；`rerun-env` 记录只保存变量名，宿主在计算指纹时重新读取值，明文不落盘。
-- 同一 package 的 build task 目录（record/inputs/out/lock）在并发构建间互斥：后到的进程等待锁释放，超时即报错，不会混读另一进程的产物；指纹文件只在任务成功后才写出，失败留下的半截记录不会被后续构建复用。
+- 同一 package 的 build task 目录（record/inputs/out/lock）在并发构建间互斥：锁文件记录持有者 pid，持有者已退出时后到的进程回收锁而不是等待；持有者在运行时后到的进程等待锁释放，超时即报错，不会混读另一进程的产物；指纹文件只在任务成功后才写出，失败留下的半截记录不会被后续构建复用。
 
 `--run-allows` 同时匹配规范化 executable 路径 glob 与 argv 各位置的 glob；规则缺少 argv 部分时只授权 executable，不限制参数。Windows 路径比较使用规范大小写与分隔符，Unix 按字节区分大小写。
 
