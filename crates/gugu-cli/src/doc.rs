@@ -219,8 +219,11 @@ fn render_dependencies(
             );
             return Err(());
         };
-        let dep_root = doc_root
-            .join(".deps")
+        // 物化到全局缓存下而非 doc 输出目录：放在工作区内会让 find_workspace_manifest
+        // 把依赖清单归进宿主 workspace，导致非成员错误。
+        let dep_root = cache
+            .root()
+            .join("doc-src")
             .join(sanitize(&locked.id.to_string()));
         if let Err(message) = materialize_package(&dep_root, files) {
             emit_cli_error(format, &message);
