@@ -778,16 +778,6 @@ impl Builder<'_> {
             );
             self.store(address, tag, u32::from(tag_bytes), false);
         }
-        if let Some(panic) = panic {
-            // Err 载荷与 Ok 载荷共享联合体偏移；panic 句柄先落槽，Ok 路径随后覆盖。
-            let fields = self.fields(result_ty, 1, 1)?;
-            let (offset, _) = fields
-                .first()
-                .copied()
-                .ok_or_else(|| invalid("Result 缺少 Err 载荷"))?;
-            let slot = self.offset(address, offset);
-            self.store(slot, panic, 8, false);
-        }
         if let (Some(payload), Some(payload_ty)) = (payload, payload_ty) {
             let fields = self.fields(result_ty, 0, 1)?;
             let (offset, _) = fields
@@ -796,6 +786,24 @@ impl Builder<'_> {
                 .ok_or_else(|| invalid("Result 缺少 Ok 载荷"))?;
             let destination = self.offset(address, offset);
             self.copy_memory(destination, payload, payload_ty)?;
+        }
+        if let Some(panic) = panic {
+            // panic 完成时 runtime 不写正常载荷，临时槽是未初始化字节：Err 分支写 Panic 句柄，
+            // Ok 分支保持刚复制的载荷原样（把读回的值原样写回即不生效的写）。
+            let fields = self.fields(result_ty, 1, 1)?;
+            let (offset, _) = fields
+                .first()
+                .copied()
+                .ok_or_else(|| invalid("Result 缺少 Err 载荷"))?;
+            let slot = self.offset(address, offset);
+            let current = self.load(slot, ValueType::scalar(Type::I64), 8, false);
+            let merged = self.emit_one(
+                Op::Select,
+                &[ok, current, panic],
+                ValueType::scalar(Type::I64),
+                Origin::None,
+            );
+            self.store(slot, merged, 8, false);
         }
         Ok(address)
     }
