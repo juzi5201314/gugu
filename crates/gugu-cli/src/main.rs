@@ -752,6 +752,7 @@ fn compile_package(
     compiler: &Compiler,
     lock: &LockGraph,
     format: OutputFormat,
+    written: &mut BTreeSet<PathBuf>,
 ) -> Result<i32, ()> {
     let features = enabled_features(options, package);
     let selected = match package.select_targets_in(&target_selection(options), &features) {
@@ -792,6 +793,7 @@ fn compile_package(
             target,
             check_only,
             format,
+            written,
         )
         .is_err()
         {
@@ -962,6 +964,7 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
     };
     let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
     let mut exit_code = 0;
+    let mut written = BTreeSet::new();
     for package in packages {
         match compile_package(
             project.workspace().root(),
@@ -972,6 +975,7 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             &compiler,
             &lock,
             format,
+            &mut written,
         ) {
             Ok(package_exit_code) => exit_code = exit_code.max(package_exit_code),
             Err(()) => return 2,

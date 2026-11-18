@@ -29,6 +29,7 @@ pub(crate) fn materialize_target(
     target: TargetName,
     check_only: bool,
     format: OutputFormat,
+    written: &mut std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), ()> {
     if check_only || !compilation.is_success() {
         return Ok(());
@@ -53,11 +54,26 @@ pub(crate) fn materialize_target(
         );
         let bytes = finalize_bytes(target, bytes, &name, compilation, options, format)?;
         let view = TargetView::new(&target_root);
-        let artifact = TargetArtifact::new(name, bytes)
+        let artifact = TargetArtifact::new(name.clone(), bytes)
             .map_err(|error| emit_cli_error(format, &error.to_string()))?;
         // `target/<target-triple>/<dir>/<name>`，与规范布局一致。
-        view.materialize(&target.to_string(), &[artifact])
+        let paths = view
+            .materialize(&target.to_string(), &[artifact])
             .map_err(|error| emit_cli_error(format, &error.to_string()))?;
+        for path in paths {
+            // workspace 成员同名产物属于声明冲突，报错而不是静默覆盖。
+            if !written.insert(path.clone()) {
+                emit_cli_error(
+                    format,
+                    &format!(
+                        "目标产物路径冲突：`{}`（workspace 成员产物重名）",
+                        path.display()
+                    ),
+                );
+                return Err(());
+            }
+            make_executable(&path, package_target.kind(), format)?;
+        }
     }
     write_build_log(&target_root, package_target.name(), compilation, format)
 }
@@ -184,6 +200,23 @@ fn write_build_log(
     fs::write(&path, text).map_err(|error| {
         emit_cli_error(format, &format!("写出 `{}` 失败：{error}", path.display()));
     })
+}
+
+/// 可执行目录的产物在 Unix 上补执行位；静态/动态库保持普通文件权限。
+fn make_executable(path: &Path, kind: TargetKind, format: OutputFormat) -> Result<(), ()> {
+    #[cfg(unix)]
+    if !matches!(kind, TargetKind::Lib) {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|error| {
+            emit_cli_error(
+                format,
+                &format!("设置 `{}` 执行权限失败：{error}", path.display()),
+            );
+        })?;
+    }
+    #[cfg(not(unix))]
+    let _ = (path, kind, format);
+    Ok(())
 }
 
 fn target_dir_name(kind: TargetKind) -> &'static str {
