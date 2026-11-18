@@ -1364,15 +1364,22 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
             &entry,
             package_identity,
             require_main,
-            CfgContext::new(
-                target,
-                declared_features,
-                enabled_features,
-                test,
-                bench,
-                custom_cfg,
-            )
-            .with_bench_harness(bench_harness),
+            {
+                // build 域定义 cfg(build_task)：build.gg 可据此区分自身与普通 target 编译。
+                let mut custom_cfg = custom_cfg;
+                if build_task {
+                    custom_cfg.insert("build_task".to_owned(), None);
+                }
+                CfgContext::new(
+                    target,
+                    declared_features,
+                    enabled_features,
+                    test,
+                    bench,
+                    custom_cfg,
+                )
+                .with_bench_harness(bench_harness)
+            },
             external_packages,
             generated_modules,
             build_task,

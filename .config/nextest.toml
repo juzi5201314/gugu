@@ -28,8 +28,14 @@ threads-required = 6
 
 # 进程镜像验收包含完整后端；协议解释用例共享既有两槽资源策略。
 [[profile.default.overrides]]
-filter = 'binary(=process) | binary(=network) | test(bridge_target_must_be_imported_or_defined) | test(resolver_cancellation_releases_late_result_and_wakes_only_once)'
+filter = 'binary(=process) | test(bridge_target_must_be_imported_or_defined) | test(resolver_cancellation_releases_late_result_and_wakes_only_once)'
 threads-required = 4
+
+# network 镜像验收编译完整 socket 闭包，已贴近 3 秒上限：独占运行，
+# 任何并发争用都会把用例推过上限。
+[[profile.default.overrides]]
+filter = 'binary(=network)'
+threads-required = 6
 
 # 文档/harness/callback 端到端编译用例单次接近上限：独占运行，避免并发争用推过 3 秒。
 [[profile.default.overrides]]

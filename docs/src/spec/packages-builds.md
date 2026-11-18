@@ -256,7 +256,7 @@ package 根存在 `build.gg` 时，它是唯一 build task。没有该文件且�
 fn main() Result[(), string]
 ```
 
-返回 `Err`、panic 或违反输出协议都会使 package 构建失败。build task 可以使用完整 Gugu、unsafe、FFI 和宿主标准库；权限门不是安全沙箱，低层代码可以绕过它。build task 的模块闭包只包含 `build.gg` 自身与 `[build.dependencies]` 提供的模块——package 其余源码不进入 build task 编译，`emit_module` 产生的 `generated.*` 模块也只注入 target 编译，不回流到 build task。
+返回 `Err`、panic 或违反输出协议都会使 package 构建失败。build task 可以使用完整 Gugu、unsafe、FFI 和宿主标准库；权限门不是安全沙箱，低层代码可以绕过它。build task 的模块闭包只包含 `build.gg` 自身与 `[build.dependencies]` 提供的模块——package 其余源码不进入 build task 编译，`emit_module` 产生的 `generated.*` 模块也只注入 target 编译，不回流到 build task。build task 编译域定义 `cfg(build_task)` 为真，build.gg 可据此条件化只面向构建场景的代码路径；普通 target 编译不定义该 atom。
 
 `std.build` 提供类型化构建接口，至少包括：
 
@@ -307,7 +307,9 @@ build.gg 不能直接调用 `std.process.Command` 或 `ShellCommand`；外部进
 - `GUGU_PERM_{READ,WRITE,ENV,NET,RUN}` 与对应 `--*-allows` 命令行列表提供预授权规则；`--read-allows`、`--write-allows` 的无通配规则按目录前缀匹配（`/etc` 覆盖 `/etc/passwd`），其余按 `*` 单通配 glob 比较；
 - 非交互环境（stdin 非 TTY，或 `GUGU_PERM_NONINTERACTIVE`）中没有匹配项立即失败；交互式询问与永久授权存储在本版本未实现，授权只能通过命令行或环境变量逐次给出；
 - `-A` 显式允许全部操作；
-- 拒绝表现为 build task 以带说明的 panic 退出，不记录 deny 状态，宿主将任务视为失败。
+- 拒绝表现为 build task 以带说明的 panic 退出，不记录 deny 状态，宿主将任务视为失败；
+- 工具链自身对 record 文件与 out_dir 的写入不经权限门，out_dir 同时是 `emit_module` 等生成操作的授权输出区；
+- 权限门当前只在 Linux 宿主编译域生效：windows 目标中检查点为空操作，授权判定不生效；windows 宿主的 env 读取通道在本版本未实现。
 
 `--run-allows` 同时匹配规范化 executable 路径 glob 与 argv 各位置的 glob；规则缺少 argv 部分时只授权 executable，不限制参数。Windows 路径比较使用规范大小写与分隔符，Unix 按字节区分大小写。
 

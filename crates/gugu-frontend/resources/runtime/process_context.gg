@@ -118,6 +118,8 @@ fn boot_args(argc: uint, argv: uint) {
     heap_store_word(context, argc)
     heap_store_word(context + 8, storage)
     heap_store_word(context + 16, bytes)
+    // argv[argc] 为 NULL，其后是 environ 指针表；免 environ 外部符号读取。
+    heap_store_word(context + 56, argv + (argc + 1) * 8)
 }
 
 #[cfg(os = "windows")]
@@ -239,6 +241,8 @@ pub fn snapshot_cwd() Path {
     cwd_locked()
 }
 pub fn process_id() uint = heap_word(context + 48)
+// linux：argv 之后紧随的 environ 指针表；windows 无 argv envp，返回 0。
+pub fn environ() uint = heap_word(context + 56)
 pub fn resolve_at(base: Path, path: Path) Path {
     if path.is_absolute() { path } else { base.join(path) }
 }

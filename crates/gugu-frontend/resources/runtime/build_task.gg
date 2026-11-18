@@ -6,7 +6,8 @@
 //!
 
 use std.collections.{Vec}
-use std.env as env
+// 内部协议读取必须绕过权限门（env 检查点在 std.env，本模块是工具链内部通道）。
+use std.runtime.environment as env
 use std.fs as fs
 use std.io as io
 use std.path.{OsString, Path}
@@ -14,7 +15,7 @@ use std.text.{Bytes, alloc_bytes}
 
 fn env_text(name: string) string {
     match OsString::from_string(name) {
-        Ok(key) => match env::get(key) {
+        Ok(key) => match env.get(key) {
             Ok(Some(value)) => match value.to_string() { Ok(text) => text, Err(_) => "" },
             _ => "",
         }
