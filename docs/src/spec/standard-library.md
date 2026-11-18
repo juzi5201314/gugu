@@ -1132,6 +1132,8 @@ FastRandom 与 Xoshiro256PlusPlus 共享标准采样方法：无偏 `int(a..b)`�
 ```text
 struct CString
 struct CStr
+struct NulError { offset: int }
+struct InvalidCString
 
 fn CString.from_string(value: string) Result[CString, ffi.NulError]
 fn CString.from_bytes(value: Bytes) Result[CString, ffi.NulError]
@@ -1139,7 +1141,7 @@ fn CString.as_bytes(self: &Self) Bytes
 fn CString.as_ptr(self: &Self) *byte
 unsafe fn CStr.from_ptr(pointer: *byte) Result[CStr, ffi.InvalidCString]
 fn CStr.to_bytes(self: &Self) Bytes
-fn CStr.to_string(self: &Self) Result[string, text.Utf8Error]
+fn CStr.to_string(self: &Self) Result[string, text.EncodingError]
 fn CStr.to_string_lossy(self: &Self) string
 ```
 
@@ -1154,4 +1156,4 @@ c_bool c_float c_double
 
 这些别名不创建新的类型或 `TypeId`；`c_long`、`c_wchar` 等的目标差异必须按[平台与 ABI 参考](platform-abi.md)的表使用。
 
-`CString.from_*` 拒绝输入中已有 NUL，并在末尾补一个 NUL；as_bytes 不包含终止 NUL，as_ptr 指向以 NUL 结尾的表示。向外部函数传递该指针时，调用方必须让 CString backing 在整个外部调用期间保持 pinned，或把内容复制到 `std.mem` 的非移动缓冲；指针不能跨越可能触发 GC 的 safepoint 保存。`CStr.from_ptr` 要求 pointer 非空、指向可读且最终存在 NUL 的内存；扫描越界、保存超过外部内存寿命或让 CStr 逃逸为长期 Gugu 值都是调用方违反 unsafe 契约。CStr 转换为 Bytes/string 会复制到 Gugu 自有存储，UTF-8 无效时只允许使用 to_string_lossy 或接收 Utf8Error。std.ffi 不提供动态库加载器、C varargs、任意 ABI 转换、外部线程手工注册或跨边界异常封装。
+`CString.from_*` 拒绝输入中已有 NUL，并在末尾补一个 NUL；as_bytes 不包含终止 NUL，as_ptr 指向以 NUL 结尾的表示。向外部函数传递该指针时，调用方必须让 CString backing 在整个外部调用期间保持 pinned，或把内容复制到 `std.mem` 的非移动缓冲；指针不能跨越可能触发 GC 的 safepoint 保存。`CStr.from_ptr` 要求 pointer 非空、指向可读且最终存在 NUL 的内存；扫描越界、保存超过外部内存寿命或让 CStr 逃逸为长期 Gugu 值都是调用方违反 unsafe 契约。CStr 转换为 Bytes/string 会复制到 Gugu 自有存储，UTF-8 无效时只允许使用 to_string_lossy 或接收 EncodingError。std.ffi 不提供动态库加载器、C varargs、任意 ABI 转换、外部线程手工注册或跨边界异常封装。
