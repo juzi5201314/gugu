@@ -80,6 +80,11 @@ impl CfgContext {
         Self::new(target, [], [], false, false, BTreeMap::new())
     }
 
+    /// 是否处于测试编译域：`#[test]` 项存在、doctest 参与收集。
+    pub fn test(&self) -> bool {
+        self.test
+    }
+
     /// 是否处于 harness 收集域：测试域或 `harness = true` 的 bench 域。
     /// `harness = false` 的 bench target 按普通 main 构建，不收集用例。
     pub fn harness(&self) -> bool {

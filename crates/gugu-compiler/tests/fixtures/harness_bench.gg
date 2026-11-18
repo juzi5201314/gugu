@@ -1,5 +1,9 @@
 use std.test.{Bencher, black_box}
 
+/// 加法基准。
+/// ```gugu
+/// let _ = 1 + 1
+/// ```
 #[bench]
 fn bench_add(b: &Bencher) {
     b.iter(fn() {

@@ -95,6 +95,16 @@ fn bench_domain_collects_benches() {
     assert!(manifest.contains("__gugu_bwrap_1"));
     assert!(manifest.contains("__bench_run"));
     assert!(manifest.contains("__gugu_bench_spawn"));
+    // bench 域不生成 doctest 模块：fixture 带 gugu 围栏时 `#[test]` 项会被裁除，
+    // manifest 继续引用它们就会构建失败（回归）。
+    assert!(
+        !output
+            .source_map()
+            .snapshots()
+            .iter()
+            .any(|snapshot| snapshot.logical_path().contains("__gugu_doctest")),
+        "bench 域不得生成 __gugu_doctest_ 模块"
+    );
     assert!(output.dump_lir().is_some());
 }
 

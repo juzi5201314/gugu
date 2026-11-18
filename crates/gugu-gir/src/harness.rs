@@ -76,22 +76,26 @@ pub fn apply(
         );
     }
     let mut doctest_sources = Vec::new();
-    for (index, doctest) in doctests.iter().enumerate() {
-        doctest_sources.push((
-            doctest_source(&modules[doctest.module], doctest, index),
-            format!("__gugu_doctest_{index}"),
-        ));
-        cases.push(Case {
-            module: format!("__gugu_doctest_{index}"),
-            name: "__gugu_dt_case".to_owned(),
-            identity: format!(
-                "doctest:{}:{}:{}",
-                modules[doctest.module].path, doctest.line, doctest.index
-            ),
-            flags: 0,
-            expect: String::new(),
-            returns_result: false,
-        });
+    // doctest 只属于测试域：bench 构建中 `#[test]` 项被 harness_domain 裁除，
+    // 生成的 doctest 模块若继续生成，manifest 会引用不存在的函数。
+    if cfg.test() {
+        for (index, doctest) in doctests.iter().enumerate() {
+            doctest_sources.push((
+                doctest_source(&modules[doctest.module], doctest, index),
+                format!("__gugu_doctest_{index}"),
+            ));
+            cases.push(Case {
+                module: format!("__gugu_doctest_{index}"),
+                name: "__gugu_dt_case".to_owned(),
+                identity: format!(
+                    "doctest:{}:{}:{}",
+                    modules[doctest.module].path, doctest.line, doctest.index
+                ),
+                flags: 0,
+                expect: String::new(),
+                returns_result: false,
+            });
+        }
     }
     if !diagnostics.is_empty() {
         return Err(diagnostics);
