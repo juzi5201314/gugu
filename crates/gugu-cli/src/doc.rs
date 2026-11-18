@@ -295,8 +295,13 @@ fn render_dependencies(
     Ok(written)
 }
 
-/// 把已校验的依赖文件集物化到 `doc/.deps/` 供 Project::discover 读取。
+/// 把已校验的依赖文件集物化到 `doc-src/` 供 Project::discover 读取；
+/// 先清空固定目录，防止已删除的源文件残留参与编译。
 fn materialize_package(dir: &Path, files: &PackageFiles) -> Result<(), String> {
+    if dir.exists() {
+        fs::remove_dir_all(dir)
+            .map_err(|error| format!("清理 `{}` 失败：{error}", dir.display()))?;
+    }
     for (path, bytes) in files.files() {
         let file = dir.join(path);
         if let Some(parent) = file.parent() {
