@@ -204,6 +204,7 @@ fn render_dependencies(
         .into_iter()
         .map(|input| (input.package().to_string(), input.files().clone()))
         .collect();
+    let dep_src_root = std::env::temp_dir().join(format!("gugu-doc-src-{}", std::process::id()));
     let mut written = Vec::new();
     for locked in &lock.packages {
         // workspace 成员的文档由上层 package 循环生成，这里跳过。
@@ -219,12 +220,10 @@ fn render_dependencies(
             );
             return Err(());
         };
-        // 物化到全局缓存下而非 doc 输出目录：放在工作区内会让 find_workspace_manifest
-        // 把依赖清单归进宿主 workspace，导致非成员错误。
-        let dep_root = cache
-            .root()
-            .join("doc-src")
-            .join(sanitize(&locked.id.to_string()));
+        // 物化到按进程隔离的临时目录而非 doc 输出目录：放在工作区内会让
+        // find_workspace_manifest 把依赖清单归进宿主 workspace，导致非成员错误；
+        // 共享固定目录则会让并行的 gugu doc 互相清空依赖源码。
+        let dep_root = dep_src_root.join(sanitize(&locked.id.to_string()));
         if let Err(message) = materialize_package(&dep_root, files) {
             emit_cli_error(format, &message);
             return Err(());
@@ -292,11 +291,12 @@ fn render_dependencies(
             }
         }
     }
+    let _ = fs::remove_dir_all(&dep_src_root);
     Ok(written)
 }
 
-/// 把已校验的依赖文件集物化到 `doc-src/` 供 Project::discover 读取；
-/// 先清空固定目录，防止已删除的源文件残留参与编译。
+/// 把已校验的依赖文件集物化到本进程的 `gugu-doc-src-<pid>/` 供
+/// Project::discover 读取；先清空目标目录，防止已删除的源文件残留参与编译。
 fn materialize_package(dir: &Path, files: &PackageFiles) -> Result<(), String> {
     if dir.exists() {
         fs::remove_dir_all(dir)
