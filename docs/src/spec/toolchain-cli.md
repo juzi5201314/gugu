@@ -65,7 +65,9 @@
 
 编译选中 target。无 target 选择器时，默认选择当前 package 的 lib 与所有 bin；在 workspace 根且无 `-p` 时，依次选择 `default-members`、根 package 或全部成员；在成员目录启动时默认只选择当前 package。`--workspace` 覆盖默认选择并包含根 package 在内的全部成员。
 
-`gugu build <file.gg>` 是单文件编译入口：绕过 package 模型，直接把该文件作为闭世界根编译。此时 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets` 非法。`--target`、`--strip`、`--offline` 仍有效。
+编译成功后把镜像物化到 `target/<target>/` 下种类目录（`bin`、`lib`、`tests`、`benches`、`examples`，见[缓存与 Target 视图](packages-builds.md#cache-and-target-view)），并在 `build-logs/` 写本次 action graph 的可读日志；image 与 `--strip` 后的 stripped image 作为两个末端 action 记入编译 action cache。`check` 不物化。
+
+`gugu build <file.gg>` 是单文件编译入口：绕过 package 模型，直接把该文件作为闭世界根编译。此时 `-p`、`--workspace`、`--features`、`--no-default-features`、`--all-features`、`--lib`、`--bin`、`--test`、`--bench`、`--example`、`--all-targets` 非法。`--target`、`--strip`、`--offline` 仍有效；产物写到当前目录或 `--target-dir` 指定目录。
 
 ### `gugu check`
 
