@@ -95,6 +95,27 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     .expr_active(argument)
             })
             .collect();
+        if let Some(source_literal) = self
+            .facts
+            .body
+            .source_literals
+            .iter()
+            .find(|entry| entry.expression == callee)
+        {
+            self.expression_map[callee.0 as usize] = Some(id);
+            let literal = match source_literal.kind {
+                crate::semantics::output::SourceField::File => {
+                    hir::Literal::String(source_literal.file.clone())
+                }
+                crate::semantics::output::SourceField::Line => {
+                    hir::Literal::Integer(u128::from(source_literal.line))
+                }
+                crate::semantics::output::SourceField::Column => {
+                    hir::Literal::Integer(u128::from(source_literal.column))
+                }
+            };
+            return Ok((hir::ExprKind::Literal(literal), 0));
+        }
         if let Some(operation) = self
             .facts
             .body

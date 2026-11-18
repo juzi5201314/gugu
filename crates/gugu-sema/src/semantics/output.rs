@@ -45,6 +45,7 @@ pub struct CheckedBody {
     pub assembly: Vec<super::assembly::AssemblyPlan>,
     pub borrow_checks: Vec<super::borrow::BorrowCheck>,
     pub must_use: Vec<MustUseSite>,
+    pub source_literals: Vec<SourceLiteral>,
 }
 
 /// 丢掉必须使用的值的源码范围。诊断在 lint 级别解析之后才发射。
@@ -69,6 +70,25 @@ pub struct MemoryOperation {
     pub value: Ty,
     pub result: Ty,
     pub arguments: Vec<ExprId>,
+}
+
+/// `std.src.*` 查询的字段身份。
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SourceField {
+    File,
+    Line,
+    Column,
+}
+
+/// 一次 `std.src.file`/`line`/`column` 调用折叠；位置在 checker 取定，
+/// 所有下游只消费这份快照，宏展开点的 span 不进入其它常量。
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SourceLiteral {
+    pub expression: ExprId,
+    pub kind: SourceField,
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

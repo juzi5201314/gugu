@@ -1193,6 +1193,9 @@ impl Model<'_> {
             return self.comptime_panic(module, args, &span, state);
         }
         self.check_capability(module, &segments, &span, state)?;
+        if let Some(value) = self.src_builtin(module, expression, &segments, args, &span)? {
+            return Ok(value);
+        }
         let arguments = self.value_list(module, args, state)?;
         if state.domain == Domain::SOURCE_EXPAND
             && let Some(value) =
@@ -1210,6 +1213,35 @@ impl Model<'_> {
             return Err(self.fail(module, expression, "被调端点不是函数"));
         }
         self.interpret_function(def, &arguments, &span, state)
+    }
+
+    /// `std.src.file`/`line`/`column` 的内建求值：折叠为调用表达式的
+    /// 物理位置，不经被调函数体，EarlyConst 与 SourceExpand 两域共用。
+    fn src_builtin(
+        &self,
+        module: usize,
+        expression: ExprId,
+        segments: &[&str],
+        args: AstRange<ExprId>,
+        span: &crate::Span,
+    ) -> EvalResult<Option<ConstantValue>> {
+        let Some(canonical) = self.external_path(module, segments) else {
+            return Ok(None);
+        };
+        let kind = match canonical.as_str() {
+            "std.src.file" => 0,
+            "std.src.line" => 1,
+            "std.src.column" => 2,
+            _ => return Ok(None),
+        };
+        if args.len != 0 {
+            return Err(self.fail(module, expression, "std.src 源位置查询不接收参数"));
+        }
+        Ok(Some(match kind {
+            0 => ConstantValue::String(span.path().to_string_lossy().into_owned()),
+            1 => ConstantValue::Int(i128::from(span.line())),
+            _ => ConstantValue::Int(i128::from(span.column())),
+        }))
     }
 
     /// SourceExpand 域的内建调用：`std.syntax.parse_*` 解析闸门与 `Ok`/`Err` 构造。

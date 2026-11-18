@@ -178,6 +178,8 @@ parse / lex
 
 每个生成节点保留生成文本的半开字节范围、宏调用点、宏定义点和父 `ExpansionId`。生成代码中的 `std.src.file`、`line`、`column` 使用调用点的逻辑源位置；诊断以调用点为主位置，并附加生成偏移和宏定义位置。
 
+`std.src.file`/`line`/`column` 按 capability registry 的 `EarlyConst`+`SourceExpand` 域登记，不走普通函数调用：comptime 求值在 `call_value` 内经 `src_builtin` 直接返回调用表达式 span 的路径/行/列；普通代码中的调用由 checker 的 `src_call` 拦截并记录 `SourceLiteral` 快照，HIR 构建落成 `Literal`，因此运行时代码里的调用同样是编译期常量。三个查询均不接收参数，函数体仅为名称解析与取址路径存在。`std.src.caller` 依赖 `#[track_caller]` 的调用点传播，尚未实现。
+
 ### 递归与预算
 
 生成源码可以再次包含 `comptime source`。每一次新的源码宏展开都消耗以下独立预算：

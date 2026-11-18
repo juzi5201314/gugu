@@ -1,0 +1,17 @@
+//! `std.src` —— 调用点物理源位置查询。
+//!
+//! `file`/`line`/`column` 由编译器在调用点直接折叠为字面量：普通调用经
+//! checker 落成 `Literal`，早期 comptime 与源码宏展开经内建求值返回常量。
+//! 函数体仅存在于解析与取址路径，任何到达此处的执行都是契约外使用。
+
+pub fn file() string {
+    panic("std.src.file 只能按调用点直接调用")
+}
+
+pub fn line() int {
+    panic("std.src.line 只能按调用点直接调用")
+}
+
+pub fn column() int {
+    panic("std.src.column 只能按调用点直接调用")
+}

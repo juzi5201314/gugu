@@ -269,6 +269,11 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/src.gg",
+        include_str!("../../gugu-frontend/resources/std/src.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
         "std/runtime/pin_layout.gg",
         include_str!("../../gugu-frontend/resources/runtime/pin_layout.gg"),
         RuntimeSourceRole::Runtime,

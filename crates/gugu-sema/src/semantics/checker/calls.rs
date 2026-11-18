@@ -63,6 +63,9 @@ impl Checker<'_, '_> {
             if let Some(result) = self.platform_call(callee, path, type_args, &args, expected) {
                 return result;
             }
+            if let Some(result) = self.src_call(callee, path, &args) {
+                return result;
+            }
             let parts = self.model.path(self.module, path);
             if parts == ["panic"] {
                 if self.native_definition().is_some() {
