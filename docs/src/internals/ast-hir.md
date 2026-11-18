@@ -420,6 +420,10 @@ Registration = Static | Flag | Chain
 
 冻结后的 HIR 与侧表不可修改。late comptime 通过独立结果表解析 `LateConstKey`，不回写 HIR；优化、资源动作展开、协程 lowering、逃逸分析和布局选择都属于后续 GIR/LIR 阶段。
 
+## `track_caller` 隐藏位置实参
+
+`Definition::track_caller` 由 identity 阶段从 `#[track_caller]` 项属性登记。HIR body 构建在 `parameters()` 末尾为 track_caller owner 追加三个隐藏形参（`__caller_location_file: string`、`__caller_location_line/column: int`），作为普通参数 local 进入签名——GIR `signature()`/`allocate_locals` 与 LIR 调用参数传递因此无需专用通道。对 track_caller callee 的直接调用（`CallTarget::Value` 且 callee 是 `Resolved(Def)`）或派发调用（`dispatch.function`）在实参表末尾追加三元组：调用方自身是 track_caller 时转发自身隐藏形参（`Resolved(Local)`），否则折叠为 callee 表达式 span 的字面量常量。`std.src.caller()` 经 `SourceField::Caller` 在普通体内折叠为常量 `Location`，在 track_caller 体内构造隐藏形参的 `Location` 聚合。`#[track_caller]` 函数物化为函数值被拒（`instantiate_callable` 检查 `direct_callable` 深度，只有直接调用的 callee 求值位置放行），因为指针/取址无法转述隐藏实参。
+
 ## 诊断与确定性
 
 阶段可以并行处理 owner，但最终诊断按规范路径、起始字节、结束字节、诊断代码和稳定定义键排序。相同位置的主诊断先于附注和建议。类型变量编号、hash 表遍历、线程完成顺序不能出现在用户诊断、HIR dump 或持久摘要中。

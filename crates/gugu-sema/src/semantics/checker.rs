@@ -74,6 +74,8 @@ struct Checker<'m, 'a> {
     number_kinds: Vec<inference::NumberKind>,
     literals: Vec<(Ty, LitKind, bool, Span)>,
     unsafe_depth: usize,
+    /// 非零表示正在求值直接调用的 callee：`#[track_caller]` 函数只在此时允许物化为值。
+    direct_callable: u32,
     dependencies: Vec<DefRef>,
     expressions: Vec<(ExprId, Ty)>,
     local_statics: Vec<super::output::LocalStatic>,
@@ -306,6 +308,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             number_kinds: Vec::new(),
             literals: Vec::new(),
             unsafe_depth: 0,
+            direct_callable: 0,
             dependencies: Vec::new(),
             expressions: Vec::new(),
             local_statics: Vec::new(),

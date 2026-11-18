@@ -39,7 +39,9 @@ impl BodyFlags {
     pub const UNSAFE: u32 = 8;
     pub const RUNTIME_GLUE: u32 = 16;
     pub const FOREIGN: u32 = 32;
-    pub const KNOWN: u32 = 63;
+    /// `#[track_caller]` owner：末尾三个 Argument local 是调用点隐藏位置实参。
+    pub const TRACK_CALLER: u32 = 64;
+    pub const KNOWN: u32 = 127;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

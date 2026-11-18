@@ -21,6 +21,7 @@ impl Checker<'_, '_> {
             "std.src.file" => SourceField::File,
             "std.src.line" => SourceField::Line,
             "std.src.column" => SourceField::Column,
+            "std.src.caller" => SourceField::Caller,
             _ => return None,
         };
         let span = &self.arena().exprs[callee.0 as usize].span;
@@ -35,6 +36,17 @@ impl Checker<'_, '_> {
         let result = match kind {
             SourceField::File => Ty::String,
             SourceField::Line | SourceField::Column => Ty::int(),
+            SourceField::Caller => {
+                let Some(ty) = self.location_ty() else {
+                    self.error(
+                        DiagnosticCode::InvalidExpression,
+                        "std.src.Location 未定义",
+                        span.clone(),
+                    );
+                    return Some(Ty::Error);
+                };
+                ty
+            }
         };
         self.source_literals.push(SourceLiteral {
             expression: callee,
@@ -44,6 +56,23 @@ impl Checker<'_, '_> {
             column: span.column(),
         });
         Some(result)
+    }
+
+    /// `std.src.Location` 的命名类型；`caller()` 的返回类型由它决定。
+    /// `resolve` 是相对模块作用域的，先定位 `std.src` 模块再在其中解析。
+    fn location_ty(&self) -> Option<Ty> {
+        let module = self
+            .model
+            .modules
+            .iter()
+            .position(|module| module.path == "std.src")?;
+        let definition = self.model.resolve(module, &["Location"]).ok()?;
+        let index = self
+            .model
+            .nominal
+            .iter()
+            .position(|nominal| nominal.definition == definition)?;
+        Some(Ty::Named(index, Vec::new()))
     }
 
     /// `std.mem.embed_file` 只在早期常量位置（const/static 初始化器）合法；

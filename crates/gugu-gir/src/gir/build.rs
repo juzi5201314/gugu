@@ -189,6 +189,9 @@ impl<'a> Builder<'a> {
         {
             self.flags |= BodyFlags::UNSAFE;
         }
+        if definition.track_caller {
+            self.flags |= BodyFlags::TRACK_CALLER;
+        }
         debug_assert_eq!(self.flags & !BodyFlags::KNOWN, 0);
         Ok(GirBody {
             owner: self.owner.definition,

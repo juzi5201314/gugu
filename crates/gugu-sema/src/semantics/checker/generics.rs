@@ -19,6 +19,23 @@ impl Checker<'_, '_> {
             }
             return ty;
         };
+        /* `#[track_caller]` 函数带调用点隐藏实参，函数值（指针/取址/传参）无法
+        转述它们：只在直接调用 callee 位置允许物化（`direct_callable`）。*/
+        if self.direct_callable == 0
+            && let Some(definition) = self.model.function_definition(id)
+            && self.model.has_attribute(
+                definition.module,
+                self.model.modules[definition.module].arena.items[definition.item.0 as usize]
+                    .attributes,
+                "track_caller",
+            )
+        {
+            self.error(
+                DiagnosticCode::InvalidExpression,
+                "#[track_caller] 函数只能直接调用，不能作为函数值使用",
+                span.clone(),
+            );
+        }
         let function = &self.model.modules[id.module].arena.fns[id.function as usize];
         let generics = function
             .generics
@@ -167,10 +184,10 @@ impl Checker<'_, '_> {
         arguments: AstRange<GenericArg>,
         expected: Option<&Ty>,
     ) -> Ty {
-        if arguments.len == 0 {
-            return self.expression(expression, expected);
-        }
-        if let ExprKind::Path(path) = self.arena().exprs[expression.0 as usize].kind {
+        self.direct_callable += 1;
+        let ty = if arguments.len == 0 {
+            self.expression(expression, expected)
+        } else if let ExprKind::Path(path) = self.arena().exprs[expression.0 as usize].kind {
             let ty = self.path_value(expression, path, true, expected, arguments);
             self.expressions.push((expression, ty.clone()));
             ty
@@ -181,7 +198,9 @@ impl Checker<'_, '_> {
                 self.arena().exprs[expression.0 as usize].span.clone(),
             );
             Ty::Error
-        }
+        };
+        self.direct_callable -= 1;
+        ty
     }
 
     fn bound_signature(&mut self, module: usize, bound: &BoundKind) -> Option<Ty> {

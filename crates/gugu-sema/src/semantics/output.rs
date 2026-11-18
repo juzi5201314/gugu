@@ -79,6 +79,9 @@ pub enum SourceField {
     File,
     Line,
     Column,
+    /// `std.src.caller()`：HIR 按 owner 是否 `#[track_caller]` 决定折叠为
+    /// 调用点常量还是读取调用方追加的隐藏位置形参。
+    Caller,
 }
 
 /// 一次 `std.src.file`/`line`/`column` 调用折叠；位置在 checker 取定，

@@ -20,4 +20,20 @@ accept_cases! {
     /* 内存源码没有编译输入根：const 位置求值时报缺宿主。*/
     std_mem_embed_no_host_05: false,
         "const b: [byte; 1] = std.mem.embed_file(\"data.bin\")\nfn main() {}";
+    /* 普通函数体内 caller() 折叠为调用点常量 Location。*/
+    std_src_caller_fold_06: true,
+        "fn main() { let l = std.src.caller()\n if l.line < 1 || l.column < 1 || l.file == \"\" { panic(\"caller\") } else {} }";
+    /* #[track_caller] 函数体内 caller() 读到其调用者的位置：隐藏位置形参
+       在调用点注入并由体内 Resolved 转发。*/
+    std_src_caller_track_caller_07: true,
+        "#[track_caller]\nfn where_line() int { std.src.caller().line }\nfn main() { if where_line() < 1 { panic(\"caller\") } else {} }";
+    /* 链式 track_caller：inner 的 caller() 走到 inner 的调用者 outer 的调用点。*/
+    std_src_caller_chain_08: true,
+        "#[track_caller]\nfn inner() int { std.src.caller().line }\n#[track_caller]\nfn outer() int { inner() }\nfn main() { if outer() < 1 { panic(\"caller\") } else {} }";
+    /* track_caller 函数物化为函数值即拒：隐藏实参无法经指针转述。*/
+    std_src_track_caller_fn_value_09: false,
+        "#[track_caller]\nfn inner() int { std.src.caller().line }\nfn main() { let f = inner\n _ = f() }";
+    /* track_caller 函数作实参同样拒。*/
+    std_src_track_caller_as_argument_10: false,
+        "#[track_caller]\nfn inner() int { std.src.caller().line }\nfn apply(f: fn() int) int { f() }\nfn main() { _ = apply(inner) }";
 }
