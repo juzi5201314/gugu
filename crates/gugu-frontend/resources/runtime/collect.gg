@@ -215,6 +215,15 @@ fn coordinator_push(coordinator: uint, address: uint) {
     heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, count + 1)
 }
 
+/* 工作列表按批次使用：生产者压栈前保证空位——满则先把已排队对象扫描到定点、
+   清零计数再继续。已消费条目靠 mark 位图 / FORWARDED / mark_epoch 去重，不会跨
+   批次重扫；外层调用方按 `while 计数 != 0` 循环收尾，兜住嵌套 room 后剩余的尾巴。*/
+fn coordinator_room(coordinator: uint, processor: uint, major: bool) {
+    if heap_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET) < GC_WORKLIST_CAPACITY { return }
+    if major { coordinator_major_drain(coordinator, processor) } else { coordinator_drain(coordinator, processor) }
+    heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, 0)
+}
+
 fn coordinator_worklist_entry(coordinator: uint, index: uint) uint =
     heap_word(coordinator + COORDINATOR_WORKLIST_BYTES + index * 8)
 
@@ -286,6 +295,7 @@ fn coordinator_allocate(coordinator: uint, bytes: uint, align: uint, kind: uint,
 fn coordinator_copy(coordinator: uint, source: uint, control: uint, config: uint) uint {
     let header = gc_config_object_header_bytes(config)
     let granule = gc_config_granule_bytes(config)
+    let processor = heap_word(unsafe { std.runtime.current_slot() } + 16)
     let tenure = gc_config_tenure_age(config)
     let bytes = heap_word(source - header + 8)
     // 对象字节数必须落在块内：超过 block_bytes 的分配走大对象路径，nursery 里不可能出现。
@@ -301,6 +311,7 @@ fn coordinator_copy(coordinator: uint, source: uint, control: uint, config: uint
     heap_store_word(source - header, control | CONTROL_FORWARDED)
     heap_store_word(source - header + 8, destination)
     heap_store_word(coordinator + COORDINATOR_EVACUATED_OFFSET, heap_word(coordinator + COORDINATOR_EVACUATED_OFFSET) + 1)
+    coordinator_room(coordinator, processor, false)
     coordinator_push(coordinator, destination)
     destination
 }
@@ -515,7 +526,10 @@ pub fn gc_collect_minor(processor: uint, roots: uint, capacity: uint) uint {
     coordinator_remembered(coordinator, processor)
     coordinator_large_tables(coordinator, processor, false)
     coordinator_regions_minor(coordinator, processor)
-    coordinator_drain(coordinator, processor)
+    while heap_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET) != 0 {
+        coordinator_drain(coordinator, processor)
+        heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, 0)
+    }
     let reclaimed = coordinator_reset_nursery(processor, coordinator)
     heap_store_word(coordinator + COORDINATOR_RECLAIMED_OFFSET, reclaimed)
     heap_store_word(coordinator + COORDINATOR_LIVE_BYTES_OFFSET, gc_heap_live_bytes(processor))
@@ -599,8 +613,10 @@ fn coordinator_region_objects(coordinator: uint, processor: uint, control: uint,
         while bits != 0 {
             if bits & 1 != 0 {
                 let payload = base + ((slot - control - REGION_OBJECT_START_OFFSET) * 8 + bit) * 16 + 16
-                if major { coordinator_push(coordinator, payload) }
-                else { coordinator_scan(coordinator, processor, payload) }
+                if major {
+                    coordinator_room(coordinator, processor, true)
+                    coordinator_push(coordinator, payload)
+                } else { coordinator_scan(coordinator, processor, payload) }
             }
             bit = bit + 1
             bits = bits >> 1
@@ -676,6 +692,7 @@ fn coordinator_mark_object(coordinator: uint, address: uint) {
         let epoch = heap_word(coordinator + COORDINATOR_MAJOR_CYCLES_OFFSET) + 1
         if heap_word(record + 40) != epoch {
             heap_store_word(record + 40, epoch)
+            coordinator_room(coordinator, processor, true)
             coordinator_push(coordinator, heap_word(record + 8))
         }
         return
@@ -685,7 +702,10 @@ fn coordinator_mark_object(coordinator: uint, address: uint) {
     let located = heap_resolve_object(address, arena, gc_config_arena_bytes(config), gc_config_granule_bytes(config), gc_config_object_header_bytes(config))
     if located.2 != 0 {
         let marked = heap_mark_test_and_set(located.2, arena, gc_config_arena_bytes(config), gc_config_granule_bytes(config), gc_config_object_header_bytes(config))
-        if marked != 0 { coordinator_push(coordinator, located.2) } else { let _ = 0 }
+        if marked != 0 {
+            coordinator_room(coordinator, processor, true)
+            coordinator_push(coordinator, located.2)
+        } else { let _ = 0 }
     } else { let _ = 0 }
 }
 
@@ -832,7 +852,10 @@ pub fn gc_collect_major(processor: uint, roots: uint, capacity: uint) uint {
     coordinator_pin_roots(coordinator)
     coordinator_shared_roots(coordinator)
     coordinator_regions_sweep(coordinator, processor, false)
-    coordinator_major_drain(coordinator, processor)
+    while heap_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET) != 0 {
+        coordinator_major_drain(coordinator, processor)
+        heap_store_word(coordinator + COORDINATOR_WORKLIST_COUNT_OFFSET, 0)
+    }
     coordinator_regions_sweep(coordinator, processor, true)
     coordinator_large_tables(coordinator, processor, true)
     shared.shared_sweep()
