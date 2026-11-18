@@ -234,7 +234,7 @@ per-processor timer使用四层、每层256 bucket的 hierarchical timing wheel�
 
 TimerEntry 位于 non-moving owner slab，含 `{ timer_id, generation, deadline, bucket_link, cancelled, owner }`。cancel 只在线性化点标记 generation/cancelled并唤醒等待者，不要求远程调用者取得 timer owner 锁；owner 在 cursor经过 bucket、inbox drain、pressure或 cancel/live 比例达到 profile阈值时批量摘除无效项并归还 entry。bucket 的取消节点不能无限滞留，compact 每次受 `timer_compact_budget` 限制并在后续 service 继续；active timer、cancelled bytes和 overflow heap capacity都计入 runtime pressure。
 
-当前镜像的 sleep/timeout 等待表先用一份按 (exact deadline, 登记序) 升序的 intrusive 链保存全部 timer，`std.runtime.timer` 的 service 由 `resume_with_io` 的 pending 循环驱动、每次最多摘除 `DRAIN_BUDGET` 个 head 节点并按 exact deadline 提前退出；同 deadline 的节点稳定保持 FIFO。wheel/heap 分桶是 drain 内部结构，不改变 observable 契约，`TIMER_LIVE`/`TIMER_CANCELLED`/`TIMER_BYTES` 账本从登记起就按现行口径计入。
+当前镜像的 sleep/timeout 等待表先用一份按 (exact deadline, 登记序) 升序的 intrusive 链保存全部 timer，`std.runtime.timer` 的 service 由 `resume_with_io` 的 pending 循环驱动、每轮最多访问 `DRAIN_BUDGET` 个节点：到期节点按 deadline 顺序只在头部摘除，已取消节点（cancel 只写标志）可能位于任意深度，service 沿 `prev` 指针全表扫描并就地摘链完成，不再依赖"取消节点必然是 head"；同 deadline 的节点稳定保持 FIFO。wheel/heap 分桶是 drain 内部结构，不改变 observable 契约，`TIMER_LIVE`/`TIMER_CANCELLED`/`TIMER_BYTES` 账本从登记起就按现行口径计入。
 
 ### Bounded blocking bridge
 

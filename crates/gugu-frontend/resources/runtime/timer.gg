@@ -28,17 +28,12 @@ fn cancelled(control: uint) bool { unsafe {
     control != 0 && std.runtime.atomic_load_acquire[uint](std.mem.transmute[uint, *uint](control)) != 0
 } }
 
-fn unlink_head() {
-    first = heap_word(first + NODE_NEXT)
-    counters.remove(counters.TIMER_LIVE, 1)
-    counters.remove(counters.TIMER_BYTES, NODE_BYTES)
-}
-
-fn complete(node: uint, status: uint) {
+fn finish(node: uint, status: uint) {
     if heap_word(node + NODE_DONE) != 0 { return }
     heap_store_word(node + NODE_DONE, 1)
     heap_store_word(node + NODE_STATUS, status)
-    unlink_head()
+    counters.remove(counters.TIMER_LIVE, 1)
+    counters.remove(counters.TIMER_BYTES, NODE_BYTES)
     ready_hot(heap_word(node + NODE_HOT))
 }
 
@@ -94,20 +89,32 @@ pub fn sleep_until(deadline: uint, cancel: uint) uint { unsafe {
     heap_word(node + NODE_STATUS)
 } }
 
+/* deadline 有序意味着到期节点只在头部；已取消节点可能出现在任意深度——取消只是
+   写了一个标志，要靠 service 走到它才完成。扫描全表：取消的立即摘除唤醒，到期的
+   按序摘除，首个未到期节点之后只需继续扫取消。*/
 pub fn service() {
     let budget: uint = DRAIN_BUDGET
-    loop {
-        let node = first
-        if node == 0 || budget == 0 { return }
-        let cancel = heap_word(node + NODE_CANCEL)
-        if cancelled(cancel) {
+    let instant = now()
+    let prev: uint = 0
+    let node = first
+    while node != 0 && budget != 0 {
+        let next = heap_word(node + NODE_NEXT)
+        let unlink = false
+        if cancelled(heap_word(node + NODE_CANCEL)) {
             counters.add(counters.TIMER_CANCELLED, 1)
-            complete(node, CANCELLED)
-        } else {
-            let deadline = heap_word(node + NODE_DEADLINE)
-            if !expired(deadline, now()) { return }
-            complete(node, 0)
+            finish(node, CANCELLED)
+            unlink = true
         }
+        if !unlink && expired(heap_word(node + NODE_DEADLINE), instant) {
+            finish(node, 0)
+            unlink = true
+        }
+        if unlink {
+            if prev == 0 { first = next } else { heap_store_word(prev + NODE_NEXT, next) }
+        } else {
+            prev = node
+        }
+        node = next
         budget = budget - 1
     }
 }
