@@ -80,10 +80,38 @@ impl TaskLock {
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     let _ = fs::remove_file(&tmp);
                 }
-                Err(error) => {
+                Err(link_error) => {
                     let _ = fs::remove_file(&tmp);
-                    emit_cli_error(format, &format!("无法创建 build task 锁文件: {error}"));
-                    return Err(());
+                    // exFAT/FAT 等不支持 hard_link 的文件系统：退回 create_new + 写
+                    // pid，留毫秒级空窗，由残留判定的兜底规则覆盖。
+                    match fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(&path)
+                    {
+                        Ok(mut file) => {
+                            use std::io::Write;
+                            if let Err(error) = file.write_all(format!("{pid}\n").as_bytes()) {
+                                emit_cli_error(
+                                    format,
+                                    &format!("无法写入 build task 锁文件: {error}"),
+                                );
+                                return Err(());
+                            }
+                            return Ok(Self {
+                                path: path.clone(),
+                                pid,
+                            });
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                        Err(_) => {
+                            emit_cli_error(
+                                format,
+                                &format!("无法创建 build task 锁文件: {link_error}"),
+                            );
+                            return Err(());
+                        }
+                    }
                 }
             }
             match fs::metadata(&path) {
