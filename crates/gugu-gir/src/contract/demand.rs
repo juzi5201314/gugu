@@ -148,6 +148,15 @@ pub fn referenced(
                     IntrinsicOp::DeferChainPop => {
                         demand.insert("defer_pop");
                     }
+                    IntrinsicOp::ArenaNew { .. } => {
+                        demand.insert("gc_arena_new");
+                    }
+                    IntrinsicOp::ArenaAlloc { sync: false } => {
+                        demand.insert("gc_arena_alloc");
+                    }
+                    IntrinsicOp::ArenaAlloc { sync: true } => {
+                        demand.insert("gc_arena_alloc_sync");
+                    }
                     _ => {}
                 },
                 _ => {}

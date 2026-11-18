@@ -145,6 +145,8 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 MemoryIntrinsic::UninitAsPtr | MemoryIntrinsic::AssumeInit
             ) && operation.arguments.is_empty()
                 || operation.kind == MemoryIntrinsic::UninitWrite && operation.arguments.len() == 1
+                || matches!(operation.kind, MemoryIntrinsic::ArenaAlloc { .. })
+                    && operation.arguments.len() == 1
             {
                 values.push(self.receiver(callee)?);
             }

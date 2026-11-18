@@ -36,7 +36,7 @@ ELF/PE自重定位、TLS、metadata验证、heap/scheduler建立和平台 fault 
 
 GC 控制类 machine intrinsic（`gc_config()` 及后续 GC 协调入口）只接受由 runtime 资源以 runtime 角色注入的源身份：授权依据是源单元被注入时的角色，不是模块名或路径前缀，因此普通用户源码即使写 `unsafe` 也不能调用。其余 machine intrinsic 保持既有契约（按规范路径识别）。
 
-同一来源门禁也约束四个私有原子原语：`atomic_load_acquire[T](*T) T`、`atomic_store_release[T](*T, T)`、`atomic_fetch_or_acq_rel[T](*T, T) T` 与 `atomic_fetch_and_acq_rel[T](*T, T) T`。`T` 仅允许 `byte`、`u32`、`uint`，可省略并由地址类型推导；显式类型必须与指针指向的类型一致。地址必须自然对齐、指向存活且已初始化的可访问字段，这些前置条件由 `unsafe` 调用方承担。fetch 返回该次更新线性化时的旧值，而不是新值。访问严格限于 T 的宽度，不得为了修改 byte 标志而覆盖相邻字段。内存序由名字固定，调用者不能传入可变 order；这些原语不分配、不切栈，也不形成 GC 停点。
+同一来源门禁也约束五个私有原子原语：`atomic_load_acquire[T](*T) T`、`atomic_store_release[T](*T, T)`、`atomic_fetch_or_acq_rel[T](*T, T) T`、`atomic_fetch_and_acq_rel[T](*T, T) T` 与 `atomic_compare_exchange_acq_rel[T](*T, T, T) (T, bool)`。`T` 仅允许 `byte`、`u32`、`uint`，可省略并由地址类型推导；显式类型必须与指针指向的类型一致。地址必须自然对齐、指向存活且已初始化的可访问字段，这些前置条件由 `unsafe` 调用方承担。fetch 返回该次更新线性化时的旧值，而不是新值；compare-exchange 返回读到的旧值与是否成功替换的标志，失败序固定为 Relaxed。访问严格限于 T 的宽度，不得为了修改 byte 标志而覆盖相邻字段。内存序由名字固定，调用者不能传入可变 order；这些原语不分配、不切栈，也不形成 GC 停点。
 
 同一 runtime 注入源门禁也约束 `stack_read_word(depth)` 与 `stack_copy_raw(depth, raw, bytes, to_stack)`。depth 是从当前协程 `stack_high` 到访问起点的字节深度，raw 是非移动原生缓冲地址，to_stack 只允许 0（读栈）或 1（写栈）。调用者保证访问区间位于已初始化、仍存活的栈槽或对应输出区；原语在入口读取最新栈界后完成精确字节访问，不分配、不增长栈、不挂起，也不在访问中触发 GC。该边界用于外调按值封装和结果回写，避免普通辅助函数的入口栈增长使先前计算的裸栈地址失效，不提供用户可调用的新指针 API。
 

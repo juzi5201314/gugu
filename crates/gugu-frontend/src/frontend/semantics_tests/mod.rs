@@ -1,6 +1,8 @@
 use crate::{CompileRequest, Compiler, TargetName};
 
 #[cfg(feature = "slow-tests")]
+mod arena;
+#[cfg(feature = "slow-tests")]
 mod callable;
 #[cfg(feature = "slow-tests")]
 mod comptime;

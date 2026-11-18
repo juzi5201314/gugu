@@ -237,7 +237,10 @@ impl RuntimeCall {
             | Self::DynamicErase
             | Self::Format
             | Self::Concat
-            | Self::DeferPush => (false, false, true, true),
+            | Self::DeferPush
+            | Self::ArenaNew
+            | Self::ArenaAlloc
+            | Self::ArenaAllocSync => (false, false, true, true),
             Self::ValueCopy | Self::CowSnapshot | Self::DowncastCopy | Self::ValueRepeat => {
                 (false, false, true, false)
             }

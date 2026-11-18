@@ -138,5 +138,8 @@ pub fn runtime_call_name(call: RuntimeCall) -> &'static str {
         RuntimeCall::DeferPop => "defer_pop",
         RuntimeCall::WideDiv { .. } => "wide_div",
         RuntimeCall::BlockingIo { .. } => "blocking_io",
+        RuntimeCall::ArenaNew => "gc_arena_new",
+        RuntimeCall::ArenaAlloc => "gc_arena_alloc",
+        RuntimeCall::ArenaAllocSync => "gc_arena_alloc_sync",
     }
 }

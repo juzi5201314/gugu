@@ -19,6 +19,14 @@ pub enum MemoryIntrinsic {
     AssumeInit,
     PointerCast,
     ScalarCast,
+    /// `std.mem.LocalArena`/`SyncArena` 的 `new`/`with_capacity`；`sync` 区分两种句柄。
+    ArenaNew {
+        sync: bool,
+    },
+    /// 两种 arena 的 `alloc[T]`；结果 `&T` 指向区域槽，T 的资源检查在 GIR 完成。
+    ArenaAlloc {
+        sync: bool,
+    },
 }
 
 impl MemoryIntrinsic {
@@ -38,6 +46,12 @@ impl MemoryIntrinsic {
             "std.mem.MaybeUninit.as_ptr" => Self::UninitAsPtr,
             "std.mem.MaybeUninit.write" => Self::UninitWrite,
             "std.mem.MaybeUninit.assume_init" => Self::AssumeInit,
+            "std.mem.LocalArena.new" | "std.mem.LocalArena.with_capacity" => {
+                Self::ArenaNew { sync: false }
+            }
+            "std.mem.SyncArena.new" | "std.mem.SyncArena.with_capacity" => {
+                Self::ArenaNew { sync: true }
+            }
             _ => return None,
         })
     }
@@ -81,6 +95,7 @@ pub enum RuntimeMachineIntrinsic {
     AtomicStoreRelease,
     AtomicFetchOrAcqRel,
     AtomicFetchAndAcqRel,
+    AtomicCompareExchangeAcqRel,
     /// 标准库字节存储只通过受管分配与保留 provenance 的视图转换形成。
     AllocBytes,
     StringBytes,
@@ -108,7 +123,7 @@ pub enum RuntimeMachineIntrinsic {
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 32] = [
+    pub const ALL: [Self; 33] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -120,6 +135,7 @@ impl RuntimeMachineIntrinsic {
         Self::AtomicStoreRelease,
         Self::AtomicFetchOrAcqRel,
         Self::AtomicFetchAndAcqRel,
+        Self::AtomicCompareExchangeAcqRel,
         Self::AllocBytes,
         Self::StringBytes,
         Self::StringFromUtf8Unchecked,
@@ -163,6 +179,7 @@ impl RuntimeMachineIntrinsic {
             Self::AtomicStoreRelease => "atomic_store_release",
             Self::AtomicFetchOrAcqRel => "atomic_fetch_or_acq_rel",
             Self::AtomicFetchAndAcqRel => "atomic_fetch_and_acq_rel",
+            Self::AtomicCompareExchangeAcqRel => "atomic_compare_exchange_acq_rel",
             Self::AllocBytes => "alloc_bytes",
             Self::StringBytes => "string_bytes",
             Self::StringFromUtf8Unchecked => "string_from_utf8_unchecked",
@@ -220,6 +237,7 @@ impl RuntimeMachineIntrinsic {
             | Self::StartupCall
             | Self::ProcessCall
             | Self::NetCall => 2,
+            Self::AtomicCompareExchangeAcqRel => 3,
         }
     }
 
@@ -295,6 +313,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::AtomicStoreRelease
                 | Self::AtomicFetchOrAcqRel
                 | Self::AtomicFetchAndAcqRel
+                | Self::AtomicCompareExchangeAcqRel
         )
     }
 }

@@ -825,7 +825,7 @@ impl Builder<'_> {
         )
     }
 
-    fn pointer_bits(&mut self, pointer: ValueId) -> ValueId {
+    pub(super) fn pointer_bits(&mut self, pointer: ValueId) -> ValueId {
         if self.machine_type(pointer).ty == Type::Ptr {
             self.emit_one(
                 Op::Convert(Conversion::PointerToInt),

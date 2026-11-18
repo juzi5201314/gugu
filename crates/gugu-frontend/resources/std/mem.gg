@@ -1,4 +1,5 @@
 use std.runtime.pinning.{pin_prepare, pin_acquire, pin_release}
+use std.runtime.heap.{gc_arena_local_reset, gc_arena_local_destroy, gc_arena_shared_reset, gc_arena_shared_destroy}
 
 /// 把输入根内的文件内容按 `[byte; N]` 编译期常量嵌入；路径相对调用
 /// 源文件目录解析，越出编译输入根或读失败都是编译错误。函数体与返回
@@ -16,3 +17,37 @@ pub fn pin[T, R, F: Fn() R](p: &T, f: F) R { unsafe {
     defer { pin_release(lease, std.mem.transmute[&T, uint](std.ptr.volatile_load[&T](std.ptr.addr_of(p)))) }
     f()
 } }
+
+/* LocalArena/SyncArena 是 lang item 句柄：`_region` 指向所属区域数据段的末端（control-16），
+ * 它位于区域地址范围内，`heap_region_lookup` 因此能把句柄可达性转成区域标记——句柄不可达
+ * 后区域由 GC sweep 回收。`new`/`with_capacity`/`alloc[T]` 由编译器按路径识别后降到
+ * `gc_arena_new`/`gc_arena_alloc[_sync]`，函数体只是声明占位；`alloc` 拒绝含 resource 字段的
+ * T（GIR 层报诊断）。`reset`/`destroy` 是普通封装：runtime 侧对 LocalArena 校验 owner 协程，
+ * 其它协程调用按规范属未定义行为，这里显式中止。*/
+pub struct LocalArena { _region: &byte }
+
+impl LocalArena {
+    pub fn new() LocalArena { panic("std.mem.LocalArena::new 由编译器降级") }
+    pub fn with_capacity(n: int) LocalArena { panic("std.mem.LocalArena::with_capacity 由编译器降级") }
+    pub fn alloc[T](self: &Self, v: T) &T { panic("std.mem.LocalArena::alloc 由编译器降级") }
+    pub unsafe fn reset(self: &Self) { unsafe {
+        gc_arena_local_reset(std.mem.transmute[&byte, uint](self._region))
+    } }
+    pub unsafe fn destroy(self: &Self) { unsafe {
+        gc_arena_local_destroy(std.mem.transmute[&byte, uint](self._region))
+    } }
+}
+
+pub struct SyncArena { _region: &byte }
+
+impl SyncArena {
+    pub fn new() SyncArena { panic("std.mem.SyncArena::new 由编译器降级") }
+    pub fn with_capacity(n: int) SyncArena { panic("std.mem.SyncArena::with_capacity 由编译器降级") }
+    pub fn alloc[T](self: &Self, v: T) &T { panic("std.mem.SyncArena::alloc 由编译器降级") }
+    pub unsafe fn reset(self: &Self) { unsafe {
+        gc_arena_shared_reset(std.mem.transmute[&byte, uint](self._region))
+    } }
+    pub unsafe fn destroy(self: &Self) { unsafe {
+        gc_arena_shared_destroy(std.mem.transmute[&byte, uint](self._region))
+    } }
+}

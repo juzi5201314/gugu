@@ -824,6 +824,27 @@ pub const GLUE_DEFS: &[GlueDef] = &[
         },
     },
     GlueDef {
+        glue: "gc_arena_new",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_arena_new",
+        },
+    },
+    GlueDef {
+        glue: "gc_arena_alloc",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_arena_alloc",
+        },
+    },
+    GlueDef {
+        glue: "gc_arena_alloc_sync",
+        def: GlueDefKind::Item {
+            source: "std/runtime/heap.gg",
+            item: "gc_arena_alloc_sync",
+        },
+    },
+    GlueDef {
         glue: "gc_shared_alloc",
         def: GlueDefKind::Item {
             source: "std/runtime/shared.gg",

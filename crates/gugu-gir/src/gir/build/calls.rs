@@ -642,6 +642,48 @@ impl Builder<'_> {
                 self.set_value(id, dest);
                 return Ok(Some(dest));
             }
+            MemoryIntrinsic::ArenaNew { sync } => {
+                let int = self.int_ty();
+                let capacity = operands
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| self.const_operand(int, ConstValue::Integer(0)));
+                self.assign(
+                    Place::local(dest),
+                    Rvalue::Intrinsic {
+                        op: IntrinsicOp::ArenaNew { sync },
+                        operands: vec![capacity],
+                        types: vec![self.expr_ty(id)],
+                    },
+                );
+                self.set_value(id, dest);
+                return Ok(Some(dest));
+            }
+            MemoryIntrinsic::ArenaAlloc { sync } => {
+                let ty = self.expr_ty(id);
+                let hir::Type::Ref(inner) = self.module.types[ty.index()] else {
+                    return Err(gir_error(
+                        "arena alloc 的结果必须是引用类型",
+                        Some(&self.source_of(id).location),
+                    ));
+                };
+                if self.passing().class(inner).has_resource() {
+                    return Err(gir_error(
+                        "arena 不接受含 resource 字段的类型",
+                        Some(&self.source_of(id).location),
+                    ));
+                }
+                self.assign(
+                    Place::local(dest),
+                    Rvalue::Intrinsic {
+                        op: IntrinsicOp::ArenaAlloc { sync },
+                        operands,
+                        types: vec![inner],
+                    },
+                );
+                self.set_value(id, dest);
+                return Ok(Some(dest));
+            }
             _ => IntrinsicOp::PtrRead,
         };
         self.assign(
@@ -738,7 +780,8 @@ fn runtime_machine_op(
         Source::AtomicLoadAcquire
         | Source::AtomicStoreRelease
         | Source::AtomicFetchOrAcqRel
-        | Source::AtomicFetchAndAcqRel => return None,
+        | Source::AtomicFetchAndAcqRel
+        | Source::AtomicCompareExchangeAcqRel => return None,
     })
 }
 

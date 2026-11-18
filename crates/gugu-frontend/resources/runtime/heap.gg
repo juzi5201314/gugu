@@ -2,6 +2,9 @@ use std.runtime.counters as counters
 use std.runtime.compression as compression
 use std.runtime.native_memory as mapping
 use std.runtime.gc.{gc_config_arena_bytes, gc_config_block_bytes, gc_config_card_bytes, gc_config_granule_bytes, gc_config_large_align_limit, gc_config_line_bytes, gc_config_object_header_bytes, GC_REQUEST_ALLOC, PROCESSOR_GC_REQUEST_OFFSET}
+// `std.runtime.collect` 反向依赖本模块、不能互引；此值必须与
+// COORDINATOR_MAJOR_CYCLES_OFFSET 保持一致。
+const ARENA_MAJOR_CYCLES_OFFSET: uint = 144
 
 /* LocalHeap 的 Immix arena side metadata、object header 与 pin side table 的 Gugu 定义；
  * 与 compiler runtime layout query 逐字段交叉校验。
@@ -1466,4 +1469,235 @@ pub fn gc_region_transfer(plan: uint) {
         heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_REGION_TRANSFER)
         heap_region_retire(processor)
     }
+}
+
+// ── UserArena：std.mem.LocalArena/SyncArena ──
+// 与 TurnRegion 共用控制页布局与全局链表：区域数据段按区域字节数对齐、控制页紧随；对象
+// （16B 头 + payload + object-start 位图）与 `gc_region_slow` 一致，`coordinator_region_*`
+// 的标记/扫描/清扫原样适用——句柄的 `&byte` 字段是指向数据段的内部根（extend 型查找命中
+// 即标区域），句柄不可达后区域由 GC sweep 回收。差别只在游标与归属：arena 的 cursor 存在
+// 自己的控制页而非 processor；LocalArena 记 owner 协程并校验；SyncArena 用 CAS 推进。
+pub const REGION_ARENA_OWNER_OFFSET: uint = 32
+pub const REGION_ARENA_CURSOR_OFFSET: uint = 40
+pub const REGION_ARENA_NEXT_OFFSET: uint = 48
+
+fn gc_arena_control(region16: uint) uint { region16 + 16 }
+
+/// LocalArena 的归属校验；SyncArena 的 owner 记 0 直接放行。违反属未定义行为，这里显式中止。
+fn gc_arena_owner_check(control: uint) {
+    let owner = heap_word(control + REGION_ARENA_OWNER_OFFSET)
+    if owner != 0 && owner != unsafe { std.runtime.current_slot() } { heap_fail() }
+}
+
+/// 区域数据段内任意地址 → 控制页：与 `heap_region_lookup` 同一链表但不验证 object-start，
+/// 服务句柄内部根——`&byte` 字段指向的是数据段末端，本身不对应任何已登记对象。
+pub fn heap_region_extent_lookup(processor: uint, address: uint) uint {
+    if address == 0 { return uint(0) }
+    let control = heap_word(heap_region_head_slot(processor))
+    while control != 0 {
+        let bytes = heap_word(control + REGION_CAPACITY_OFFSET)
+        if address >= control - bytes && address < control { return control }
+        control = heap_word(control + REGION_NEXT_OFFSET)
+    }
+    0
+}
+
+/// 开一块新区域挂进全局链表（CAS，非 safepoint 并发安全），返回控制页地址。
+/// `arena_head` 是同一个 arena 里上一个区域的控制页（挂进 ARENA_NEXT 链），没有传 0。
+fn gc_arena_region_open(processor: uint, region_bytes: uint, owner: uint, arena_head: uint) uint {
+    unsafe {
+        let total = region_bytes + REGION_CONTROL_BYTES
+        let extent = mapping.reserve_aligned(total, region_bytes)
+        if extent == 0 { heap_fail() }
+        let data = HeapExtent { base: extent, bytes: region_bytes }
+        if mapping.commit_heap(std.mem.transmute[*HeapExtent, uint](std.ptr.addr_of(data))) != 0 { heap_fail() }
+        let control = extent + region_bytes
+        let side = HeapExtent { base: control, bytes: REGION_CONTROL_BYTES }
+        if mapping.commit(std.mem.transmute[*HeapExtent, uint](std.ptr.addr_of(side))) != 0 { heap_fail() }
+        let at = control
+        let end = control + REGION_CONTROL_BYTES
+        while at < end {
+            heap_store_word(at, 0)
+            at = at + 8
+        }
+        heap_store_word32(control + REGION_GENERATION_OFFSET, 1)
+        heap_store_word32(control + REGION_PLAN_OFFSET, REGION_PLAN_UNCLAIMED)
+        heap_store_word32(control + REGION_STATE_OFFSET, REGION_STATE_PRIVATE)
+        heap_store_word(control + REGION_CAPACITY_OFFSET, region_bytes)
+        heap_store_word(control + REGION_ARENA_OWNER_OFFSET, owner)
+        heap_store_word(control + REGION_ARENA_CURSOR_OFFSET, extent)
+        heap_store_word(control + REGION_ARENA_NEXT_OFFSET, arena_head)
+        // 继承当前标记 epoch：句柄还没来得及被根图扫描时，不能让首次 sweep 按
+        // mark_epoch!=epoch 把它释放掉；下一轮未标记才回收。
+        let coordinator = heap_region_head_slot(processor) - COORDINATOR_REGION_HEAD_OFFSET
+        heap_store_word(control + REGION_MARK_EPOCH_OFFSET, heap_word(coordinator + ARENA_MAJOR_CYCLES_OFFSET) + uint(1))
+        let head = heap_region_head_slot(processor)
+        loop {
+            let next = heap_word(head)
+            heap_store_word(control + REGION_NEXT_OFFSET, next)
+            let cas = std.runtime.atomic_compare_exchange_acq_rel[uint](std.mem.transmute[uint, *uint](head), next, control)
+            if cas.1 { break };
+        }
+        control
+    }
+}
+
+/// 写对象头、清零 payload、登记 object-start 位，返回 payload 地址。bit 布局与
+/// `coordinator_region_objects` 的扫描公式一致：granule = (aligned-16-base)/16。
+fn gc_arena_slot(control: uint, aligned: uint, kind: uint, bytes: uint) {
+    let base = control - heap_word(control + REGION_CAPACITY_OFFSET)
+    heap_store_word(aligned - uint(16), header_control(kind, GENERATION_NURSERY, uint(0), REPRESENTATION_TURN_REGION))
+    heap_store_word(aligned - uint(8), bytes)
+    let at = aligned
+    while at < aligned + bytes {
+        heap_store_byte(at, 0)
+        at = at + 1
+    }
+    let bit = (aligned - uint(16) - base) / 16
+    let slot = control + REGION_OBJECT_START_OFFSET + bit / 64 * 8
+    heap_store_word(slot, heap_word(slot) | uint(1) << (bit % 64))
+    heap_store_word(control + REGION_PAYLOAD_BYTES_OFFSET, heap_word(control + REGION_PAYLOAD_BYTES_OFFSET) + bytes)
+    counters.add(counters.REGION_PAYLOAD, bytes)
+}
+
+/// 区域写不下时沿 ARENA_NEXT 找下一块，没有就按容量级扩容；所需字节超出块级容量时按
+/// 4KiB 向上取整单开一段。
+fn gc_arena_grow(processor: uint, control: uint, bytes: uint, object_header: uint) uint { unsafe {
+    let config = std.runtime.gc_config()
+    let block = gc_config_block_bytes(config)
+    let owner = heap_word(control + REGION_ARENA_OWNER_OFFSET)
+    let wanted = bytes + object_header + uint(4095) / uint(4096) * uint(4096)
+    let region_bytes = if wanted > block { wanted } else { block }
+    gc_arena_region_open(processor, region_bytes, owner, control)
+} }
+
+#[used]
+pub fn gc_arena_new(capacity: int, shared: uint) uint {
+    unsafe {
+        if capacity < int(0) { panic("arena 容量不能为负") }
+        let config = std.runtime.gc_config()
+        let block = gc_config_block_bytes(config)
+        let wanted = uint(capacity) + uint(4095) / uint(4096) * uint(4096)
+        let region_bytes = if wanted > block { wanted } else { block }
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let owner = if shared != 0 { uint(0) } else { std.runtime.current_slot() }
+        gc_arena_region_open(processor, region_bytes, owner, 0) - 16
+    }
+}
+
+#[used]
+pub fn gc_arena_alloc(region16: uint, kind: uint, bytes: uint, granular: uint) uint {
+    unsafe {
+        let object_header = gc_config_object_header_bytes(std.runtime.gc_config())
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let control = gc_arena_control(region16)
+        gc_arena_owner_check(control)
+        let align = if granular < uint(16) { uint(16) } else { granular }
+        loop {
+            let cursor = heap_word(control + REGION_ARENA_CURSOR_OFFSET)
+            let aligned = (cursor + object_header + align - uint(1)) / align * align
+            if aligned + bytes <= control {
+                gc_arena_slot(control, aligned, kind, bytes)
+                heap_store_word(control + REGION_ARENA_CURSOR_OFFSET, aligned + bytes)
+                return aligned
+            }
+            let next = heap_word(control + REGION_ARENA_NEXT_OFFSET)
+            if next != 0 { control = next } else {
+                control = gc_arena_grow(processor, control, bytes, object_header)
+            }
+        }
+    }
+}
+
+#[used]
+pub fn gc_arena_alloc_sync(region16: uint, kind: uint, bytes: uint, granular: uint) uint {
+    unsafe {
+        let object_header = gc_config_object_header_bytes(std.runtime.gc_config())
+        let processor = heap_word(std.runtime.current_slot() + 16)
+        let control = gc_arena_control(region16)
+        let align = if granular < uint(16) { uint(16) } else { granular }
+        loop {
+            let cursor = heap_word(control + REGION_ARENA_CURSOR_OFFSET)
+            let aligned = (cursor + object_header + align - uint(1)) / align * align
+            if aligned + bytes <= control {
+                let cas = std.runtime.atomic_compare_exchange_acq_rel[uint](std.mem.transmute[uint, *uint](control + REGION_ARENA_CURSOR_OFFSET), cursor, aligned + bytes)
+                if cas.1 {
+                    gc_arena_slot(control, aligned, kind, bytes)
+                    return aligned
+                }
+                continue
+            }
+            let next = heap_word(control + REGION_ARENA_NEXT_OFFSET)
+            if next != 0 { control = next } else {
+                let grown = gc_arena_grow(processor, control, bytes, object_header)
+                // 扩容链同样可能并发：CAS 抢挂，输了用胜者的区域继续分配。
+                let cas = std.runtime.atomic_compare_exchange_acq_rel[uint](std.mem.transmute[uint, *uint](control + REGION_ARENA_NEXT_OFFSET), uint(0), grown)
+                control = if cas.1 { grown } else {
+                    // 让回收器自然收掉这块没被挂上的区域：不从链表摘除，靠 sweep 释放。
+                    heap_word(control + REGION_ARENA_NEXT_OFFSET)
+                }
+            }
+        }
+    }
+}
+
+/// `reset`：清整条 arena 链的位图与游标、代次前进。旧 `&T` 再被使用属未定义行为。
+fn gc_arena_do_reset(control: uint) {
+    let chain = control
+    while chain != 0 {
+        let at = chain + REGION_OBJECT_START_OFFSET
+        let end = chain + REGION_CONTROL_BYTES
+        while at < end {
+            heap_store_word(at, 0)
+            at = at + 8
+        }
+        heap_store_word(chain + REGION_ARENA_CURSOR_OFFSET, chain - heap_word(chain + REGION_CAPACITY_OFFSET))
+        heap_store_word(chain + REGION_PAYLOAD_BYTES_OFFSET, 0)
+        heap_store_word32(chain + REGION_GENERATION_OFFSET, heap_word32(chain + REGION_GENERATION_OFFSET) + uint(1))
+        chain = heap_word(chain + REGION_ARENA_NEXT_OFFSET)
+    }
+}
+
+pub fn gc_arena_local_reset(region16: uint) {
+    let control = gc_arena_control(region16)
+    gc_arena_owner_check(control)
+    gc_arena_do_reset(control)
+}
+
+pub fn gc_arena_shared_reset(region16: uint) {
+    gc_arena_do_reset(gc_arena_control(region16))
+}
+
+/// `destroy`：整条链从全局链表摘除并释放映射；之后的句柄与旧引用均不可用。
+fn gc_arena_do_destroy(control: uint) {
+    let processor = heap_word(unsafe { std.runtime.current_slot() } + 16)
+    let head = heap_region_head_slot(processor)
+    let chain = control
+    while chain != 0 {
+        let next_arena = heap_word(chain + REGION_ARENA_NEXT_OFFSET)
+        let link = head
+        loop {
+            let current = heap_word(link)
+            if current == 0 { break }
+            if current == chain {
+                heap_store_word(link, heap_word(chain + REGION_NEXT_OFFSET))
+                break
+            }
+            link = current + REGION_NEXT_OFFSET
+        }
+        let bytes = heap_word(chain + REGION_CAPACITY_OFFSET)
+        counters.remove(counters.REGION_PAYLOAD, heap_word(chain + REGION_PAYLOAD_BYTES_OFFSET))
+        mapping.release_heap_mapping(chain - bytes, bytes + REGION_CONTROL_BYTES, bytes)
+        chain = next_arena
+    }
+}
+
+pub fn gc_arena_local_destroy(region16: uint) {
+    let control = gc_arena_control(region16)
+    gc_arena_owner_check(control)
+    gc_arena_do_destroy(control)
+}
+
+pub fn gc_arena_shared_destroy(region16: uint) {
+    gc_arena_do_destroy(gc_arena_control(region16))
 }

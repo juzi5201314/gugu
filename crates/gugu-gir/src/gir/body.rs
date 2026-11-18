@@ -426,6 +426,17 @@ pub enum IntrinsicOp {
     WriteUnaligned,
     UninitAsPtr,
     UninitWrite,
+    /// `std.mem.LocalArena`/`SyncArena` 的 `new`/`with_capacity`：operands = [capacity]
+    /// （`new` 折叠为 0 常量），结果是与句柄同形（单个 `&byte` 字段）的值；`sync`
+    /// 标记是否走并发安全的共享分配路径。
+    ArenaNew {
+        sync: bool,
+    },
+    /// `alloc[T]`：operands = [receiver_ref, value]，types = [T]；LIR 负责
+    /// resource 字段拒绝、区域写头与值落槽，结果 `&T`。
+    ArenaAlloc {
+        sync: bool,
+    },
     /// 每帧 defer 链：压入一条记录，operands = [head, env...]，返回新头。
     DeferChainPush {
         action: u32,

@@ -74,6 +74,8 @@ turn 私有的 managed allocation；它不进入普通 mark bitmap，也不能�
 的 ResourceCell。region 的 object-start metadata 仍按 concrete `TypeId` 记录，使 promote
 和验证可以使用同一 trace/value program。当前控制区为 384 字节：104 为 next、112 为 major epoch、120 为活动对象 pin 数，128 起的 256 字节保存 32 KiB 区域的 object-start 位图。coordinator+176 保存登记链；快慢分配都在同一分配操作中发布对象起点，reset 和 transfer 均要求 pin 数为零。
 
+`std.mem.LocalArena`/`SyncArena` 的用户区域与 TurnRegion 复用同一控制页布局与全局登记链：数据段按区域字节数对齐、控制页紧随，对象头（16 字节）与 object-start 位图公式一致，因此 `coordinator_region_*` 的标记/扫描/清扫原样适用。差别是三个槽位按 arena 语义重载：+32 记 owner 协程槽（LocalArena 校验，`gc_arena_owner_check`；SyncArena 恒 0 放行），+40 记 arena 自己的 bump cursor（替代 processor 侧 cursor，SyncArena 用 CAS 推进），+48 记 arena 内部区域链（`gc_arena_grow` 追加、reset/destroy 遍历整条链）；+96 仍是真实的 payload 小计，+104 仍是全局登记链 `heap_region_lookup` 所需。句柄 `_region` 指向数据段末尾（control-16），不是对象起点——`heap_region_extent_lookup` 只做区域覆盖范围的查找，内部根命中即经 `coordinator_region_mark` 整区保活；句柄不可达后区域按 `mark_epoch != epoch` 清扫。新建区域把 mark_epoch 预置为 `coordinator+144` 的当前 epoch + 1，避免区域先于首次根扫描被同轮 sweep 回收；collect.gg 已依赖 heap.gg 不能反向引用，该偏移以 `ARENA_MAJOR_CYCLES_OFFSET` 本地常量镜像。
+
 minor 扫描登记区域的对象字段并更新年轻引用。major 按内部根解析精确对象，按 epoch 保留所在区域并将其对象加入同一 trace 工作列表；当前分配区和活动 transfer/pin 区域同样保活。无根、无门禁且已退役的区域先从登记链摘除，再整体释放数据与控制页，分别扣减 heap 与非 heap committed，并撤销 region payload 小计。字段屏障按登记范围识别区域，不推算不存在的 arena metadata。
 
 region state 只能按下列方向转换：
