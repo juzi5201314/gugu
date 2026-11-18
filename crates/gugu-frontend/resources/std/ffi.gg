@@ -1,5 +1,37 @@
 use std.text.{Bytes, EncodingError, utf8_decode, utf8_decode_lossy, alloc_bytes}
 
+/* 透明 C 标量别名：不产生新类型或 TypeId，宽度按目标平台表；
+   c_long/c_ulong/c_wchar 在两个目标上不同，其余固定。 */
+pub type c_char = i8
+pub type c_schar = i8
+pub type c_uchar = u8
+pub type c_short = i16
+pub type c_ushort = u16
+pub type c_int = i32
+pub type c_uint = u32
+#[cfg(os = "linux")]
+pub type c_long = i64
+#[cfg(os = "windows")]
+pub type c_long = i32
+#[cfg(os = "linux")]
+pub type c_ulong = u64
+#[cfg(os = "windows")]
+pub type c_ulong = u32
+pub type c_longlong = i64
+pub type c_ulonglong = u64
+pub type c_size = usize
+pub type c_ssize = isize
+pub type c_intptr = isize
+pub type c_uintptr = usize
+pub type c_ptrdiff = isize
+#[cfg(os = "linux")]
+pub type c_wchar = i32
+#[cfg(os = "windows")]
+pub type c_wchar = u16
+pub type c_bool = bool
+pub type c_float = f32
+pub type c_double = f64
+
 // `from_*` 的拒绝原因只记录首个 NUL 的字节序号；输入可以是任意长度。
 pub struct NulError {
     pub offset: int,
