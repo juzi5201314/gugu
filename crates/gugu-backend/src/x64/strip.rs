@@ -14,8 +14,8 @@ use crate::target::TargetName;
 pub struct StripResult {
     /// 处理后字节（与原字节相同时就是已最小镜像）。
     pub bytes: Vec<u8>,
-    /// 删除的字节数。
-    pub removed_bytes: u64,
+    /// 被清零的节表条目数；节体字节保持原位，不重复计数。
+    pub removed_sections: u32,
 }
 
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
@@ -52,7 +52,7 @@ fn strip_elf(bytes: &[u8]) -> Result<StripResult, String> {
     if e_shoff == 0 || e_shnum == 0 || e_shstrndx >= e_shnum {
         return Ok(StripResult {
             bytes: bytes.to_vec(),
-            removed_bytes: 0,
+            removed_sections: 0,
         });
     }
     if e_shentsize < 64 || e_shoff + e_shnum * e_shentsize > bytes.len() {
@@ -62,15 +62,14 @@ fn strip_elf(bytes: &[u8]) -> Result<StripResult, String> {
     let shstr = &bytes[shstr_off..];
     // 原位删除：把可删节的 64 字节节表条目清成 SHT_NULL。节体偏移、
     // e_shnum/e_shstrndx、program header 引用全部不动，所以镜像仍然可执行；
-    // 被删节的节体变成死字节区（工具链产物中本来就没有这些节）。
+    // 被删节的节体成为死字节区（工具链产物中本来就没有这些节）。
     let mut out = bytes.to_vec();
-    let mut removed_bytes = 0_u64;
+    let mut removed_sections = 0_u32;
     for index in 0..e_shnum {
         let at = e_shoff + index * e_shentsize;
         let name_off = u32_at(bytes, at) as usize;
         let sh_type = u32_at(bytes, at + 4);
         let flags = u64_at(bytes, at + 8);
-        let body_size = u64_at(bytes, at + 0x20);
         let name = section_name(shstr, name_off);
         let required = index == 0
             || index == e_shstrndx
@@ -84,12 +83,12 @@ fn strip_elf(bytes: &[u8]) -> Result<StripResult, String> {
             || name == ".comment";
         if strippable && !required {
             out[at..at + 64].fill(0);
-            removed_bytes += body_size;
+            removed_sections += 1;
         }
     }
     Ok(StripResult {
         bytes: out,
-        removed_bytes,
+        removed_sections,
     })
 }
 
@@ -111,7 +110,7 @@ fn strip_pe(bytes: &[u8]) -> Result<StripResult, String> {
     }
     Ok(StripResult {
         bytes: out,
-        removed_bytes: 0,
+        removed_sections: 0,
     })
 }
 
