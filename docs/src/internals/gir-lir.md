@@ -5,7 +5,7 @@
 
 runtime artifact 当前固化源码而未携带可重用机器片段；运行时执行需求在同一个单态化闭包中形成，独立布局目录不进入 GIR/LIR 执行体。最终 image assembly 仍统一分配地址、验证 relocation 与重写 metadata。
 
-GIR/LIR pass driver 消费现有 `Outcome::changed`/changed 标志：未变化时保留 body、fingerprint 和 payload，不重复 `Editor::finish`、完整 verifier 或 fingerprint；变化时在 pass 边界执行 verifier 和 fingerprint，最终 world verifier 仍保留。GVN key 使用固定字段顺序的稳定二进制编码，不能依赖 JSON 或局部 ID 的偶然顺序。
+GIR/LIR pass driver 消费现有 `Outcome::changed`/changed 标志：未变化时保留 body、fingerprint 和 payload，不重复 `Editor::finish`、完整 verifier 或 fingerprint；变化时在 pass 边界执行 verifier 和 fingerprint，最终 world verifier 仍保留。GVN key 使用固定字段顺序的稳定二进制编码，不能依赖 JSON 或局部 ID 的偶然顺序；key 覆盖 op、参数与结果的 `ValueType`——同一 `SymbolAddr(Data(i))` 允许按不同 provenance 发射（例如 `std.src.file()` 的 `string` 数据与 panic 位置的裸路径字节相同但 provenance 不同），只看 op+参数会把 `Ptr(GcHeap)` 与 `Ptr(Raw)` 错误合并。
 
 GIR 的 Editor 按需拥有工作体：no-op 只借用原 body，第一次修改才复制；inline callee 索引只借用当前 pass 的不可变快照，变化结果在 pass 结束时统一提交。LIR Editor 接管原始稠密 arenas，连续 no-op pass 沿用同一工作图，最终直接交还原 arena，变化时才重建 SSA。poll 的循环与成本分析共享不携带栈槽/常量数据/环境元数据的只读 `BodyView`，类型接口不提供 `finish`，不能误生成不完整 Body。
 
