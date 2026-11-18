@@ -25,12 +25,15 @@ const VENDOR_RECORD: &str = ".gugu-vendor.toml";
 const MAX_CACHE_PATH_BYTES: usize = 4096;
 #[path = "action_key.rs"]
 mod action_key;
+#[path = "action_store.rs"]
+mod action_store;
 #[path = "package_files.rs"]
 mod package_files;
 #[path = "target_view.rs"]
 mod target_view;
 
 pub use action_key::{ActionInputs, ActionKey};
+pub use action_store::{ActionMeta, ActionStore, GcReport, VerifyReport};
 pub use package_files::PackageFiles;
 pub use target_view::{TargetArtifact, TargetView};
 static TEMP_SERIAL: AtomicU64 = AtomicU64::new(0);

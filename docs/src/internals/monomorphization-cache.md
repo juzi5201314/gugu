@@ -228,7 +228,7 @@ reader 的已打开文件句柄就是 lease：Linux 即使被 unlink 仍从原 i
 
 ## 依赖缓存与 ActionInputs
 
-`project::cache::ActionInputs` 已实现 action key 的输入收集和规范排序。session 内 query engine 与编译对象存储见下一节；持久 action record reader、LRU 索引和 CLI cache 子命令尚未接入。`DependencyCache` 只负责外部 package 源码输入，不把未验证源码、编译中间对象或 target 视图混入依赖缓存。
+`project::cache::ActionInputs` 已实现 action key 的输入收集和规范排序。session 内 query engine 与编译对象存储见下一节；持久 action record store（`project::ActionStore`）已接入：内容寻址 entry（`<cache>/actions/v1/entries/<key>/`）、`tmp/` 原子发布、按 `last_used_at` 的 LRU 回收（在使用窗口内的 entry 不回收）、损坏 entry 隔离到 `quarantine/`，CLI 由 `gugu cache dir|clean|gc|verify` 与 `gugu clean --cache` 驱动。`DependencyCache` 只负责外部 package 源码输入，不把未验证源码、编译中间对象或 target 视图混入依赖缓存。
 
 ## Query engine 与对象存储
 

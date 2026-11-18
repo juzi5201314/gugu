@@ -541,10 +541,12 @@
   - 接入证据：`gugu doc` 编译 lib target 并渲染 `<target-dir>/doc/<package>/` HTML 模块页（签名、文档、`src/<module>.html#L<n>` 行锚点源码链接），`--no-deps` 跳过依赖，默认生成锁图依赖 package 文档；`missing_docs`（E0063）登记为风格 lint（`allow`/`warn`/`deny`/`forbid` 级别生效），公共模块/函数/类型/字段/trait/trait 方法缺文档时报告；doctest 包装模块登记为展开记录，parse/sema 错误重锚定回围栏行并附「生成文本位置/宏调用位置/宏定义位置」note；生成模块不参与 missing_docs，文档由锁定源码编译、不读取既有文档副本。
   - 验收证据：`crates/gugu-compiler/tests/doc.rs` 覆盖公共 API 收集（成员可见性过滤、签名截取、行号）、missing_docs 默认 warn/allow/deny/成员覆盖、doctest 语义错误重锚定到 `main.gg` 围栏行+展开链 note、生成模块 lint 豁免；`cargo nextest run --workspace` 全绿，`mdbook build` 通过。
 
-- [ ] **阶段 71：完成 action cache、target 物化与 cache 子命令**（复杂度：4）
+- [x] **阶段 71：完成 action cache、target 物化与 cache 子命令**（复杂度：4）
   - 依赖：阶段 06、11、24、56、57、69。
   - 实现 action cache LRU、clean/cache clean/cache gc/cache verify/cache dir、target/bin/lib/tests/benches/examples/generated/build-logs 物化、strip 末端 action。
   - 验收：正在读写的 entry 不被回收；损坏 entry 隔离重算；strip 不删除 C export、GC metadata、stack map、source/unwind；clean 默认不误删全局依赖缓存。
+  - 接入证据：`project::ActionStore`（`<cache>/actions/v1/entries/<key>/`，`tmp/` 原子发布、`last_used_at` LRU、损坏 entry 隔离 `quarantine/`、使用窗口内不回收）；`gugu cache dir|clean|gc|verify` 与 `gugu clean --cache/--registry/--all` 接入 dispatch；`gugu build` 把镜像物化到 `target/<target>/{bin,lib,tests,benches,examples}` 并在 `build-logs/` 写 action graph JSONL；`--strip` 经 `backend::x64::strip` 做末端后处理，image 与 stripped image 记为两条 record；`emit-image` action 在镜像生成后 `complete`。
+  - 验收证据：`action_store` 单元测试覆盖 publish/read、digest 不符、verify 隔离、LRU 淘汰跳过使用窗口、clean；`strip` 测试覆盖非法输入拒绝与 PE debug 目录清零；手工验证 `gugu build` 物化 `target/x86_64-linux/bin/hello` + build-log，`--strip` 产生两条末端 record，`gugu clean` 只删 `target/` 不动全局缓存。
 
 - [ ] **阶段 72：实现 build.gg、权限门与生成模块闭环**（复杂度：5）
   - 依赖：阶段 05、06、58、66、68、71。

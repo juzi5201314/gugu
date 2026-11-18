@@ -44,16 +44,17 @@ pub use backend::x64::harness::{
 pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use frontend::format::{FormatError, format_source};
 pub use frontend::prebuild::{MaterializeError, closure_program_modules, materialize_tables};
+pub use gugu_backend::x64::strip::{StripResult, strip_image};
 pub use gugu_backend::{NativeImport, NativeImportKind, NativeLink};
 pub use gugu_gir::docs;
 pub use materialize::{materialize, materialize_functions};
 pub use project::{
-    ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyDomain,
-    DependencyInput, DependencySource, DependencySpec, LockGraph, LockedDependency, LockedPackage,
-    Package, PackageFiles, PackageId, PackageMetadata, PackageSource, Project, ProjectError,
-    ResolveOptions, Target, TargetArtifact, TargetCondition, TargetKind, TargetSelection,
-    TargetView, Version, VersionReq, Workspace, candidates_from_lock, default_cache_root,
-    materialize_vendor, prepare_dependency_inputs,
+    ActionInputs, ActionKey, ActionMeta, ActionStore, CacheError, CachePolicy, DependencyCache,
+    DependencyDomain, DependencyInput, DependencySource, DependencySpec, LockGraph,
+    LockedDependency, LockedPackage, Package, PackageFiles, PackageId, PackageMetadata,
+    PackageSource, Project, ProjectError, ResolveOptions, Target, TargetArtifact, TargetCondition,
+    TargetKind, TargetSelection, TargetView, Version, VersionReq, Workspace, candidates_from_lock,
+    default_cache_root, materialize_vendor, prepare_dependency_inputs,
 };
 pub use runtime::{
     BlockReturnDemand, BlockReturnRuntimeContract, CompressionDemand, CompressionPolicyV1,
@@ -1032,7 +1033,7 @@ impl Compiler {
             ),
         );
         graph.complete(ActionKind::ValidateImage, "image plan 校验通过");
-        graph.skip_after(ActionKind::ValidateImage, "仅保留内存计划，未写出镜像");
+        graph.complete(ActionKind::EmitImage, "镜像已生成，由宿主工具物化");
 
         let image_plan = Some(ImagePlan::new(backend_plan, attachment, &raw_contract));
         diagnostics.sort();
@@ -3297,7 +3298,7 @@ mod tests {
                 .iter()
                 .find(|node| node.kind() == ActionKind::EmitImage)
                 .map(|node| node.status()),
-            Some(ActionStatus::Skipped)
+            Some(ActionStatus::Complete)
         );
     }
 

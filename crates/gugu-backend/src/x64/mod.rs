@@ -26,6 +26,7 @@ mod rows;
 pub mod select;
 #[cfg(test)]
 mod select_tests;
+pub mod strip;
 pub mod table;
 pub mod unwind;
 pub mod verify;
