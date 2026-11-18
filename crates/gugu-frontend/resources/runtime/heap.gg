@@ -1196,6 +1196,9 @@ pub const REGION_CONTROL_BYTES: uint = 384
 pub const REGION_OBJECT_START_OFFSET: uint = 128
 pub const REGION_NEXT_OFFSET: uint = 104
 pub const REGION_MARK_EPOCH_OFFSET: uint = 112
+/// mark_epoch 高位：区域刚注册、句柄尚未被根图扫描时的「新生」标记。sweep 比较时
+/// 屏蔽该位（按已标记对待、存活一轮），mark 完整比较（视为未标记、正常扫描对象）。
+pub const REGION_MARK_BORN_BIT: uint = 0x8000000000000000
 pub const REGION_PIN_COUNT_OFFSET: uint = 120
 pub const COORDINATOR_REGION_HEAD_OFFSET: uint = 176
 /// 计划编号哨兵：区域已建立但还没有 `publish` 声明它属于哪个 region plan。
@@ -1527,10 +1530,11 @@ fn gc_arena_region_open(processor: uint, region_bytes: uint, owner: uint, arena_
         heap_store_word(control + REGION_ARENA_OWNER_OFFSET, owner)
         heap_store_word(control + REGION_ARENA_CURSOR_OFFSET, extent)
         heap_store_word(control + REGION_ARENA_NEXT_OFFSET, arena_head)
-        // 继承当前标记 epoch：句柄还没来得及被根图扫描时，不能让首次 sweep 按
-        // mark_epoch!=epoch 把它释放掉；下一轮未标记才回收。
+        // 存活过本轮 sweep：句柄还没来得及被根图扫描时，不能让首次 sweep 按
+        // mark_epoch!=epoch 把它释放掉。高位 BORN 位让 mark 仍能识别它是新区域：
+        // sweep 按低位比较（视为已标记），mark 完整比较（正常进扫描路径）。
         let coordinator = heap_region_head_slot(processor) - COORDINATOR_REGION_HEAD_OFFSET
-        heap_store_word(control + REGION_MARK_EPOCH_OFFSET, heap_word(coordinator + ARENA_MAJOR_CYCLES_OFFSET) + uint(1))
+        heap_store_word(control + REGION_MARK_EPOCH_OFFSET, (heap_word(coordinator + ARENA_MAJOR_CYCLES_OFFSET) + uint(1)) | REGION_MARK_BORN_BIT)
         let head = heap_region_head_slot(processor)
         loop {
             let next = heap_word(head)
@@ -1560,15 +1564,20 @@ fn gc_arena_slot(control: uint, aligned: uint, kind: uint, bytes: uint) {
     counters.add(counters.REGION_PAYLOAD, bytes)
 }
 
-/// 区域写不下时沿 ARENA_NEXT 找下一块，没有就按容量级扩容；所需字节超出块级容量时按
-/// 4KiB 向上取整单开一段。
+/// 位图覆盖上限：256B object-start 位图按 16B 粒度最多追踪 32KiB 数据段。
+/// 超出的容量提示按 32KiB 封顶；单对象超出部分走托管堆兜底。
+pub const REGION_BITMAP_COVER_BYTES: uint = 32768
+
+/// 区域写不下时沿 ARENA_NEXT 找下一块，没有就按容量级扩容：新区域挂到当前
+/// 区域之后（前向链），`arena_head` 参数固定为 0——由调用方把 NEXT 写进旧区域。
 fn gc_arena_grow(processor: uint, control: uint, bytes: uint, object_header: uint) uint { unsafe {
     let config = std.runtime.gc_config()
     let block = gc_config_block_bytes(config)
     let owner = heap_word(control + REGION_ARENA_OWNER_OFFSET)
-    let wanted = bytes + object_header + uint(4095) / uint(4096) * uint(4096)
+    let wanted = (bytes + object_header + uint(4095)) / uint(4096) * uint(4096)
     let region_bytes = if wanted > block { wanted } else { block }
-    gc_arena_region_open(processor, region_bytes, owner, control)
+    let region_bytes = if region_bytes > REGION_BITMAP_COVER_BYTES { REGION_BITMAP_COVER_BYTES } else { region_bytes }
+    gc_arena_region_open(processor, region_bytes, owner, 0)
 } }
 
 #[used]
@@ -1577,13 +1586,20 @@ pub fn gc_arena_new(capacity: int, shared: uint) uint {
         if capacity < int(0) { panic("arena 容量不能为负") }
         let config = std.runtime.gc_config()
         let block = gc_config_block_bytes(config)
-        let wanted = uint(capacity) + uint(4095) / uint(4096) * uint(4096)
+        let wanted = (uint(capacity) + uint(4095)) / uint(4096) * uint(4096)
         let region_bytes = if wanted > block { wanted } else { block }
+        let region_bytes = if region_bytes > REGION_BITMAP_COVER_BYTES { REGION_BITMAP_COVER_BYTES } else { region_bytes }
         let processor = heap_word(std.runtime.current_slot() + 16)
         let owner = if shared != 0 { uint(0) } else { std.runtime.current_slot() }
         gc_arena_region_open(processor, region_bytes, owner, 0) - 16
     }
 }
+
+/// 单对象超出区域位图覆盖（单块区域放不下的巨型对象）时走普通托管分配：
+/// 对象按托管语义存活，arena reset/destroy 不提前回收它，旧引用天然安全。
+fn gc_arena_alloc_managed(kind: uint, bytes: uint, granular: uint) uint { unsafe {
+    gc_alloc_slow(kind, bytes, granular, uint(2))
+} }
 
 #[used]
 pub fn gc_arena_alloc(region16: uint, kind: uint, bytes: uint, granular: uint) uint {
@@ -1593,6 +1609,7 @@ pub fn gc_arena_alloc(region16: uint, kind: uint, bytes: uint, granular: uint) u
         let control = gc_arena_control(region16)
         gc_arena_owner_check(control)
         let align = if granular < uint(16) { uint(16) } else { granular }
+        if bytes + object_header > REGION_BITMAP_COVER_BYTES { return gc_arena_alloc_managed(kind, bytes, granular) }
         loop {
             let cursor = heap_word(control + REGION_ARENA_CURSOR_OFFSET)
             let aligned = (cursor + object_header + align - uint(1)) / align * align
@@ -1603,7 +1620,9 @@ pub fn gc_arena_alloc(region16: uint, kind: uint, bytes: uint, granular: uint) u
             }
             let next = heap_word(control + REGION_ARENA_NEXT_OFFSET)
             if next != 0 { control = next } else {
-                control = gc_arena_grow(processor, control, bytes, object_header)
+                let grown = gc_arena_grow(processor, control, bytes, object_header)
+                heap_store_word(control + REGION_ARENA_NEXT_OFFSET, grown)
+                control = grown
             }
         }
     }
@@ -1616,6 +1635,7 @@ pub fn gc_arena_alloc_sync(region16: uint, kind: uint, bytes: uint, granular: ui
         let processor = heap_word(std.runtime.current_slot() + 16)
         let control = gc_arena_control(region16)
         let align = if granular < uint(16) { uint(16) } else { granular }
+        if bytes + object_header > REGION_BITMAP_COVER_BYTES { return gc_arena_alloc_managed(kind, bytes, granular) }
         loop {
             let cursor = heap_word(control + REGION_ARENA_CURSOR_OFFSET)
             let aligned = (cursor + object_header + align - uint(1)) / align * align
