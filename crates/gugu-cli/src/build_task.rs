@@ -6,7 +6,7 @@
 use std::{
     collections::BTreeMap,
     fs,
-    io::{IsTerminal, Write},
+    io::IsTerminal,
     path::{Path, PathBuf},
 };
 
@@ -54,21 +54,40 @@ impl TaskLock {
     fn acquire(dir: &Path, format: OutputFormat) -> Result<Self, ()> {
         let path = dir.join("lock");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let pid = std::process::id();
         loop {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    let pid = std::process::id();
-                    let _ = writeln!(file, "{pid}");
+            // 先把 pid 写进临时文件再 hard_link 进锁位：锁文件落盘即完整，
+            // 不存在“已创建未写 pid”的空锁窗口。
+            let tmp = path.with_extension(format!(
+                "claim-{pid}-{:x}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|span| span.as_nanos())
+                    .unwrap_or(0)
+            ));
+            if let Err(error) = fs::write(&tmp, format!("{pid}\n")) {
+                emit_cli_error(format, &format!("无法创建 build task 锁文件: {error}"));
+                return Err(());
+            }
+            match fs::hard_link(&tmp, &path) {
+                Ok(()) => {
+                    let _ = fs::remove_file(&tmp);
                     return Ok(Self {
                         path: path.clone(),
                         pid,
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let _ = fs::remove_file(&tmp);
+                }
+                Err(error) => {
+                    let _ = fs::remove_file(&tmp);
+                    emit_cli_error(format, &format!("无法创建 build task 锁文件: {error}"));
+                    return Err(());
+                }
+            }
+            match fs::metadata(&path) {
+                Ok(_) => {
                     if lock_is_stale(&path) {
                         match try_reclaim(&path) {
                             Ok(true) => continue,
@@ -88,10 +107,7 @@ impl TaskLock {
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                Err(error) => {
-                    emit_cli_error(format, &format!("无法创建 build task 锁文件: {error}"));
-                    return Err(());
-                }
+                Err(_) => continue,
             }
         }
     }
@@ -136,9 +152,9 @@ fn try_reclaim(path: &Path) -> Result<bool, std::io::Error> {
     }
 }
 
-/// 锁内所有记录的 pid 都已退出才算残留锁。写不到任何 pid 只可能是
-/// create 与写 pid 之间的碎片、或宿主被杀留下的残壳：超过初始化窗口
-/// 同样按残留处理，否则视为持有中。
+/// 锁内所有记录的 pid 都已退出才算残留锁。写不到任何 pid 的文件只可能
+/// 是外部残留的垃圾（锁文件落盘即带 pid），超过几秒窗口同样按残留处理，
+/// 否则视为持有中。
 fn lock_is_stale(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
@@ -170,13 +186,19 @@ fn pid_alive(pid: u32) -> bool {
         return false;
     }
     // 僵尸与退出中的进程虽留 /proc 条目，但不会再写构建产物，不算持有者。
-    match fs::read_to_string(format!("{path}/stat")) {
-        Ok(stat) => !matches!(
-            stat.rsplit(')')
-                .next()
-                .and_then(|rest| rest.split_whitespace().next()),
-            Some("Z" | "X")
-        ),
+    // comm 允许任意字节（含非 UTF-8），stat 按字节解析最后一个 `)` 后的 state。
+    match fs::read(format!("{path}/stat")) {
+        Ok(stat) => {
+            let tail = stat
+                .iter()
+                .rposition(|byte| *byte == b')')
+                .map(|at| &stat[at + 1..])
+                .unwrap_or(&stat[..]);
+            let state = tail
+                .split(|byte| byte.is_ascii_whitespace())
+                .find(|token| !token.is_empty());
+            !matches!(state, Some(b"Z") | Some(b"X"))
+        }
         Err(_) => false,
     }
 }
