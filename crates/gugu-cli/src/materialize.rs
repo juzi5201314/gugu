@@ -53,6 +53,12 @@ pub(crate) fn materialize_target(
             artifact_extension(target, kind)
         );
         let bytes = finalize_bytes(target, bytes, &name, compilation, options, format)?;
+        // workspace 成员同名产物属于声明冲突，写入前报错而不是覆盖。
+        let output = target_root.join(target.to_string()).join(&name);
+        if !written.insert(output) {
+            emit_cli_error(format, "目标产物路径冲突：workspace 成员产物重名");
+            return Err(());
+        }
         let view = TargetView::new(&target_root);
         let artifact = TargetArtifact::new(name.clone(), bytes)
             .map_err(|error| emit_cli_error(format, &error.to_string()))?;
@@ -61,17 +67,6 @@ pub(crate) fn materialize_target(
             .materialize(&target.to_string(), &[artifact])
             .map_err(|error| emit_cli_error(format, &error.to_string()))?;
         for path in paths {
-            // workspace 成员同名产物属于声明冲突，报错而不是静默覆盖。
-            if !written.insert(path.clone()) {
-                emit_cli_error(
-                    format,
-                    &format!(
-                        "目标产物路径冲突：`{}`（workspace 成员产物重名）",
-                        path.display()
-                    ),
-                );
-                return Err(());
-            }
             make_executable(&path, package_target.kind(), format)?;
         }
     }
@@ -207,11 +202,25 @@ fn make_executable(path: &Path, kind: TargetKind, format: OutputFormat) -> Resul
     #[cfg(unix)]
     if !matches!(kind, TargetKind::Lib) {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|error| {
+        // chmod a+x 语义：只在已有读位上加执行位，不绕过用户 umask。
+        let mode = fs::metadata(path)
+            .map_err(|error| {
+                emit_cli_error(
+                    format,
+                    &format!("读取 `{}` 权限失败：{error}", path.display()),
+                )
+            })?
+            .permissions()
+            .mode();
+        fs::set_permissions(
+            path,
+            fs::Permissions::from_mode(mode | ((mode & 0o444) >> 2)),
+        )
+        .map_err(|error| {
             emit_cli_error(
                 format,
                 &format!("设置 `{}` 执行权限失败：{error}", path.display()),
-            );
+            )
         })?;
     }
     #[cfg(not(unix))]
