@@ -875,6 +875,7 @@ impl Compiler {
                 .as_ref()
                 .map(|plan| (plan.require_main, &plan.cfg)),
             &native_link,
+            loaded.embed.as_ref(),
         ));
 
         let hir = frontend.hir;
@@ -1010,6 +1011,7 @@ fn compilation_action_key(
     x64: Option<&backend::x64::codegen::X64World>,
     plan: Option<(bool, &frontend::cfg::CfgContext)>,
     native_link: &NativeLink,
+    embed: Option<&EmbedHost>,
 ) -> project::ActionKey {
     const EMPTY_PLAN: (bool, Option<&frontend::cfg::CfgContext>) = (true, None);
     let (require_main, cfg) = plan
@@ -1044,6 +1046,11 @@ fn compilation_action_key(
     }
     if !frontend.expansion_inputs.budget.is_empty() {
         inputs.set_macro_budget(&frontend.expansion_inputs.budget);
+    }
+    if let Some(host) = embed {
+        for (path, bytes) in host.recorded() {
+            inputs.add_embedded_file(path.to_string_lossy().into_owned(), bytes);
+        }
     }
     inputs.set_analysis_policy(frontend::analysis::AnalysisPolicyV1::default().canonical_bytes());
     inputs.set_analysis_world(frontend.analysis.input_fingerprint);

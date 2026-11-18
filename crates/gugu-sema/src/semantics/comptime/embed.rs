@@ -1,5 +1,6 @@
 //! `embed_file` 的编译输入根：把逻辑源目录映射回物理目录，并把
 //! 嵌入路径约束在输入根之内（含符号链接解析后的最终位置）。
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
 
@@ -14,13 +15,25 @@ pub struct EmbedHost {
     root: PathBuf,
     /// 逻辑目录（如 `src/util`）→ 物理目录；调用文件目录先查表，缺失回退 `root` 拼接。
     dirs: BTreeMap<PathBuf, PathBuf>,
+    /// 已解析的文件：canonical 路径 → 字节。编译输入登记（action key）依赖它，
+    /// 记录缺失会让增量缓存把旧字节当成当前输入。
+    recorded: RefCell<BTreeMap<PathBuf, Vec<u8>>>,
 }
 
 impl EmbedHost {
     /// `root` 为已 canonicalize 的物理输入根，`dirs` 把每个源文件的
     /// 逻辑父目录映射回物理父目录。
     pub fn new(root: PathBuf, dirs: BTreeMap<PathBuf, PathBuf>) -> Self {
-        Self { root, dirs }
+        Self {
+            root,
+            dirs,
+            recorded: RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// 编译期实际嵌入的文件集合；供 action key 把内容纳入编译输入。
+    pub fn recorded(&self) -> BTreeMap<PathBuf, Vec<u8>> {
+        self.recorded.borrow().clone()
     }
 
     /// 把调用源文件目录下的相对路径解析为文件字节；越界与读失败都是编译错误。
@@ -53,7 +66,9 @@ impl EmbedHost {
             .ok()
             .filter(|meta| meta.is_file())
             .ok_or_else(|| format!("embed_file 目标 `{relative}` 不是文件"))?;
-        std::fs::read(&canonical)
-            .map_err(|error| format!("embed_file 读取 `{relative}` 失败: {error}"))
+        let bytes = std::fs::read(&canonical)
+            .map_err(|error| format!("embed_file 读取 `{relative}` 失败: {error}"))?;
+        self.recorded.borrow_mut().insert(canonical, bytes.clone());
+        Ok(bytes)
     }
 }
