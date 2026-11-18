@@ -226,15 +226,17 @@ fn render_dependencies(
                 format,
                 &format!("依赖 `{}` 缺少已校验的锁定输入", locked.id),
             );
-            return Err(());
+            dep_error = true;
+            break;
         };
-        // 物化到按进程隔离的临时目录而非 doc 输出目录：放在工作区内会让
+        // 物化到本次运行唯一的临时目录而非 doc 输出目录：放在工作区内会让
         // find_workspace_manifest 把依赖清单归进宿主 workspace，导致非成员错误；
         // 共享固定目录则会让并行的 gugu doc 互相清空依赖源码。
         let dep_root = dep_src_root.join(sanitize(&locked.id.to_string()));
         if let Err(message) = materialize_package(&dep_root, files) {
             emit_cli_error(format, &message);
-            return Err(());
+            dep_error = true;
+            break;
         }
         let dep_project = match Project::discover(&dep_root) {
             Ok(project) => project,
@@ -243,7 +245,8 @@ fn render_dependencies(
                     format,
                     &format!("依赖 `{}` 清单读取失败：{error}", locked.id),
                 );
-                return Err(());
+                dep_error = true;
+                break;
             }
         };
         let Some(dep_package) = dep_project.packages().iter().find(|package| {
@@ -257,7 +260,8 @@ fn render_dependencies(
                     dep_root.display()
                 ),
             );
-            return Err(());
+            dep_error = true;
+            break;
         };
         // 用锁图记录的真实启用特性：feature 门控的公共 API 才能进入依赖文档。
         let features = locked
@@ -285,7 +289,8 @@ fn render_dependencies(
         let compilation = compiler.compile(request);
         print_compilation(&compilation, true, options, target);
         if compilation.exit_code() != 0 {
-            return Err(());
+            dep_error = true;
+            break;
         }
         let Some(docs) = compilation.docs() else {
             continue;
@@ -295,11 +300,15 @@ fn render_dependencies(
             Ok(()) => written.push((locked.id.to_string(), dir)),
             Err(error) => {
                 emit_cli_error(format, &error);
-                return Err(());
+                dep_error = true;
+                break;
             }
         }
     }
     let _ = fs::remove_dir_all(&dep_src_root);
+    if dep_error {
+        return Err(());
+    }
     Ok(written)
 }
 
