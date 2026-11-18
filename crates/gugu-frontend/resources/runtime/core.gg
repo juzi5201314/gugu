@@ -1,4 +1,4 @@
-use std.runtime.scheduler.{boot, finish_hot, heap_alloc, live_count, resume_ready, callback_gate, callback_service, callback_pending, COROUTINE_COLD_PAYLOAD_STATE_OFFSET, COROUTINE_COLD_SPAWN_PUBLISHED_BIT, COROUTINE_COLD_SUBTREE_GROUP_OFFSET, COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_JOIN_WAITER_OFFSET}
+use std.runtime.scheduler.{boot, finish_hot, heap_alloc, live_count, resume_ready, callback_gate, callback_service, callback_pending, COROUTINE_COLD_PAYLOAD_STATE_OFFSET, COROUTINE_COLD_SPAWN_PUBLISHED_BIT, COROUTINE_COLD_SUBTREE_GROUP_OFFSET, COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_WAITED, COROUTINE_COLD_PANIC_GROUPED, COROUTINE_COLD_PANIC_DETACHED, COROUTINE_COLD_JOIN_WAITER_OFFSET}
 use std.runtime.pressure.{pressure_service}
 use std.runtime.gc.{gc_config_check}
 use std.runtime.collect.{gc_boot}
@@ -719,7 +719,7 @@ pub fn panic_unwind(message: *byte, len: uint, path: *byte, path_len: uint, line
         store_word(record + 40, column)
         store_word(state + 88, record)
         store_word(state + 16, 0)
-        store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, 1)
+        store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_WAITED)
         // 结果车道只保留 spawn 标记：Panic 句柄不是按 T 的根种类发布的载荷。
         let payload_state = word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET)
         store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, payload_state & COROUTINE_COLD_SPAWN_PUBLISHED_BIT)
@@ -727,9 +727,11 @@ pub fn panic_unwind(message: *byte, len: uint, path: *byte, path_len: uint, line
         if word(cold + COROUTINE_COLD_JOIN_WAITER_OFFSET) == 0 {
             if group != 0 {
                 store_word(group + 8, word(group + 8) + 1)
+                store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_GROUPED)
             } else {
                 write_panic_report(message, len, path, path_len, line, column)
                 store_word(state + 768, word(state + 768) + 1)
+                store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_DETACHED)
             }
         }
         store_word(state + 752, 2)

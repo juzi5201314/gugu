@@ -82,8 +82,13 @@ pub const COROUTINE_COLD_RESULT_OFFSET: uint = 376
 pub const COROUTINE_COLD_JOIN_WAITER_OFFSET: uint = 512
 /// 测试 harness 子树归属：组记录地址，spawn 时从当前协程冷记录继承；零表示无归属。
 pub const COROUTINE_COLD_SUBTREE_GROUP_OFFSET: uint = 536
-/// 完成结果为未交付 panic 时置位；Join/select 取走时清零并把组 panic 数减回。
+/// 完成结果为未交付 panic 时置位，取值记录「未处理」计数的归属：
+/// `COROUTINE_COLD_PANIC_WAITED` 已登记等待者（不计数）、`COROUTINE_COLD_PANIC_GROUPED`
+/// 计入子树组、`COROUTINE_COLD_PANIC_DETACHED` 计入 state+768。取走时清零并按归属减回。
 pub const COROUTINE_COLD_PANIC_RESULT_OFFSET: uint = 544
+pub const COROUTINE_COLD_PANIC_WAITED: uint = 1
+pub const COROUTINE_COLD_PANIC_GROUPED: uint = 2
+pub const COROUTINE_COLD_PANIC_DETACHED: uint = 3
 pub const COROUTINE_COLD_BYTES: uint = 576
 /// 结果区的字节数：子协程返回 ABI 只携带两个机器字，结果槽的上界就是它。
 ///
@@ -611,14 +616,19 @@ pub fn take_result(hot: uint, dst: uint, descriptor: uint) {
         dynamic_root_retire(proc_of(hot), hot)
         store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, state & ~COROUTINE_COLD_RESULT_PUBLISHED_BIT)
     }
-    // panic 完成记录不按 T 载荷复制：RESULT+0 是 Panic 句柄，取走即「已处理」，
-    // 把发布时计入的组 panics 与状态区未处理数减回。句柄本体由 `join_panic` 读取。
-    if word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET) != 0 {
+    // panic 完成记录不按 T 载荷复制：RESULT+0 是 Panic 句柄，取走即「已处理」。
+    // panic_result 记录发布时计入了哪个未处理计数，这里按同一归属减回；
+    // 已登记等待者的 panic 没有计数，不动任何账目。句柄本体由 `join_panic` 读取。
+    let panic_kind = word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET)
+    if panic_kind != 0 {
         store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, 0)
-        let group = word(cold + COROUTINE_COLD_SUBTREE_GROUP_OFFSET)
-        if group != 0 { store_word(group + 8, word(group + 8) - 1) }
-        let runtime_state = word(proc_of(hot) + 4080)
-        if word(runtime_state + 768) != 0 {
+        if panic_kind == COROUTINE_COLD_PANIC_GROUPED {
+            let group = word(cold + COROUTINE_COLD_SUBTREE_GROUP_OFFSET)
+            if group != 0 { store_word(group + 8, word(group + 8) - 1) }
+            ()
+        }
+        if panic_kind == COROUTINE_COLD_PANIC_DETACHED {
+            let runtime_state = word(proc_of(hot) + 4080)
             store_word(runtime_state + 768, word(runtime_state + 768) - 1)
         }
         return
