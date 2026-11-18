@@ -11,6 +11,9 @@ accept_cases! {
         "use std.signal.{Signal, subscribe}\nfn main() { let arr = [Signal::Interrupt]\n match subscribe(arr[0..]) { Ok(sub) => { _ = sub + 1 }, Err(e) => { _ = e } } }";
     std_signal_error_variants_04: true,
         "use std.signal.{Error}\nfn main() { match Error::Closed { Error::Closed => (), Error::Unsupported => (), Error::InvalidSignal => (), Error::InvalidCapacity => (), Error::Empty => () } }";
+    /* 副本共享同一 cell lease；一个别名 close 后其它别名观察 Closed。*/
+    std_signal_subscription_lease_05: true,
+        "use std.signal.{Signal, subscribe}\nfn main() { let arr = [Signal::Interrupt]\n match subscribe(arr[0..]) { Ok(sub) => { let alias = sub\n sub.close()\n _ = alias.try_recv()\n _ = alias.dropped() }, Err(_) => () } }";
 }
 
 #[test]

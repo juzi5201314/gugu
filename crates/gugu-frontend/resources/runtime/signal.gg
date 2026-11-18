@@ -5,6 +5,8 @@ use std.runtime.fs_platform.{control_allocate, control_free, native_call}
 use std.runtime.heap.{heap_word, heap_store_word, heap_store_word32}
 use std.runtime.scheduler.{park_current, ready_hot}
 use std.runtime.counters as counters
+use std.runtime.resource as resource
+use std.runtime.resource_state.{complete_close}
 
 const REQUEST_BYTES: uint = 128
 const REQUEST_VALUE: uint = 64
@@ -40,6 +42,7 @@ fn control() uint {
     put(page + 48, mask_cell)
     put(page + 40, control_allocate(SIGINFO_BYTES))
     ctl = page
+    resource.install_signal_cleanup(cleanup)
     page
 }
 
@@ -66,7 +69,15 @@ fn arm(extra_mask: uint) uint { unsafe {
     0
 } }
 
+/* kind 6 cleanup：租约耗尽或显式 close 路径的同步收尾，只标记并发布完成。*/
+fn cleanup(control: uint) { unsafe {
+    let sub = word(control + 64)
+    if sub != 0 { put(sub + 64, 1) }
+    complete_close(control, 0)
+} }
+
 /// `capacity` 是不同信号各自的队列深度；同一 signo 未取走时合并而不是占新槽。
+/// 返回值为 ResourceCell 控制页：最后一个句柄 lease 释放等价于 close。
 pub fn subscribe(mask: uint, capacity: uint) uint { unsafe {
     let page = control()
     if arm(mask) != 0 { return 0 }
@@ -79,13 +90,14 @@ pub fn subscribe(mask: uint, capacity: uint) uint { unsafe {
     put(sub + 32, capacity)
     put(sub, word(page))
     put(page, sub)
-    sub
+    let cell = resource.create(sub, 6)
+    resource.control_address(&cell)
 } }
 
-/* 关闭只打标记；在途等待者与已排队事件由 service 清扫，保持单一唤醒者。*/
-pub fn close(sub: uint) { unsafe {
-    if sub == 0 { return }
-    put(sub + 64, 1)
+/* 显式 close 与 lease 耗尽走同一路径；service 统一清扫在途等待者。*/
+pub fn close(control: uint) { unsafe {
+    if control == 0 { return }
+    resource.close_raw(control)
 } }
 
 /* 提交一次阻塞读：native worker 线程持有 in-flight 请求直到 signalfd 可读或 fd 关闭。*/
@@ -198,8 +210,11 @@ pub fn service() { unsafe {
     }
 } }
 
+fn sub_of(cell: uint) uint { unsafe { if cell == 0 { return 0 } word(cell + 64) } }
+
 /* try_recv：摘取 head 事件；返回 (signo, occurrences, error)。*/
-pub fn try_recv(sub: uint) (uint, uint, uint) { unsafe {
+pub fn try_recv(cell: uint) (uint, uint, uint) { unsafe {
+    let sub = sub_of(cell)
     if sub == 0 { return (0, 0, ERROR_CLOSED) }
     if word(sub + 48) != 0 {
         let slot = word(sub + 24) + word(sub + 40) * RING_ENTRY_BYTES
@@ -215,7 +230,8 @@ pub fn try_recv(sub: uint) (uint, uint, uint) { unsafe {
 } }
 
 /* recv：队列空且未关闭时挂起当前协程。*/
-pub fn recv(sub: uint) (uint, uint, uint) { unsafe {
+pub fn recv(cell: uint) (uint, uint, uint) { unsafe {
+    let sub = sub_of(cell)
     if sub == 0 { return (0, 0, ERROR_CLOSED) }
     let (signo, occurrences, error) = try_recv(sub)
     if error != 0 || signo != 0 { return (signo, occurrences, error) }
@@ -231,7 +247,8 @@ pub fn recv(sub: uint) (uint, uint, uint) { unsafe {
     try_recv(sub)
 } }
 
-pub fn dropped(sub: uint) uint { unsafe {
+pub fn dropped(cell: uint) uint { unsafe {
+    let sub = sub_of(cell)
     if sub == 0 { return 0 }
     let count = word(sub + 56)
     put(sub + 56, 0)
