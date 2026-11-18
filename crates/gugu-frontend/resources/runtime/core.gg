@@ -1,4 +1,5 @@
 use std.runtime.scheduler.{boot, finish_hot, heap_alloc, live_count, resume_ready, callback_gate, callback_service, callback_pending, COROUTINE_COLD_PAYLOAD_STATE_OFFSET, COROUTINE_COLD_SPAWN_PUBLISHED_BIT, COROUTINE_COLD_SUBTREE_GROUP_OFFSET, COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_WAITED, COROUTINE_COLD_PANIC_GROUPED, COROUTINE_COLD_PANIC_DETACHED, COROUTINE_COLD_JOIN_WAITER_OFFSET}
+use std.runtime.heap.{copy_bytes}
 use std.runtime.pressure.{pressure_service}
 use std.runtime.gc.{gc_config_check}
 use std.runtime.collect.{gc_boot}
@@ -710,10 +711,14 @@ pub fn panic_unwind(message: *byte, len: uint, path: *byte, path_len: uint, line
             std.runtime.process_exit(1)
         }
         let processor = word(state + 96)
-        let record = heap_alloc(processor, 48)
-        store_word(record, std.mem.transmute[*byte, uint](message))
+        // 记录把消息与位置字节原地复制到尾部：调度 bump 堆不是 GC 根，
+        // 直接引用动态串会在回收后悬空，记录必须自持其内容。
+        let record = heap_alloc(processor, 48 + len + path_len)
+        copy_bytes(record + 48, std.mem.transmute[*byte, uint](message), len)
+        copy_bytes(record + 48 + len, std.mem.transmute[*byte, uint](path), path_len)
+        store_word(record, record + 48)
         store_word(record + 8, len)
-        store_word(record + 16, std.mem.transmute[*byte, uint](path))
+        store_word(record + 16, record + 48 + len)
         store_word(record + 24, path_len)
         store_word(record + 32, line)
         store_word(record + 40, column)
