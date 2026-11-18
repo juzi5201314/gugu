@@ -9,6 +9,8 @@ use crate::Span;
 pub const LARGE_COPY: usize = 0;
 /// `unused_must_use` 在闭集表中的下标。
 pub const UNUSED_MUST_USE: usize = 1;
+/// `missing_docs` 在闭集表中的下标。
+pub const MISSING_DOCS: usize = 8;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LintLevel {

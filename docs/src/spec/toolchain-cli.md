@@ -122,7 +122,11 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu doc`
 
-生成文档。`--open` 在浏览器打开。`--no-deps` 只生成当前 package。
+生成 API 文档。对选中的每个 package 编译 lib target（没有 lib 时退回默认构建 target），收集公共模块、函数、类型、字段、trait、trait 方法和常量的签名与 `///`/`//!` 文档，渲染为 `<target-dir>/doc/<package>/` 下的静态 HTML：每个模块一页，列出公共项签名、文档与指向行锚点源码页的 `[source]` 链接；`<target-dir>/doc/index.html` 汇总本次生成的全部 package。
+
+文档始终由锁定的真实源码编译得到，不读取 `target/` 或缓存中此前生成的文档副本。默认同时生成锁图中非 workspace 成员的依赖 package 文档（写入 `deps/`）：依赖输入与 build/check 走同一条校验路径（缓存、vendor、本地 path），并按锁图记录的特性编译依赖的 lib target；`--no-deps` 只生成当前 package。`--open` 生成后在系统浏览器中打开 index。
+
+文档编译照常输出诊断（含 `missing_docs` lint，见[格式化与代码风格](format-style.md)）；诊断含错误时退出码非 0，不写出文档。生成模块（`__gugu_` 前缀）不视为对外 API，不参与 `missing_docs`。
 
 ### `gugu clean`
 

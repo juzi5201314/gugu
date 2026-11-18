@@ -81,12 +81,35 @@ pub fn parse_module(
     cfg: &cfg::CfgContext,
     builtin: bool,
 ) -> Result<ParsedModule, Vec<Diagnostic>> {
-    let lexed = lex(snapshot, source_map, file);
+    parse_module_in_expansion(
+        snapshot,
+        source_map,
+        file,
+        ExpansionId::ROOT,
+        path,
+        cfg,
+        builtin,
+    )
+}
+
+/// 在指定源码宏展开上下文中解析模块；生成模块的 span 归到该展开记录，
+/// 诊断可经 `reanchor_errors` 回锚到生成调用点。
+pub fn parse_module_in_expansion(
+    snapshot: &SourceSnapshot,
+    source_map: &SourceMap,
+    file: SourceFileId,
+    expansion: ExpansionId,
+    path: String,
+    cfg: &cfg::CfgContext,
+    builtin: bool,
+) -> Result<ParsedModule, Vec<Diagnostic>> {
+    let lexed = lex::lex_in_expansion(snapshot, source_map, file, expansion);
     if !lexed.diagnostics.is_empty() || lexed.buffer.has_error_tokens() {
         return Err(lexed.diagnostics);
     }
     let mut tokens = lexed.buffer;
-    let parsed = parse(snapshot.content(), source_map, file, &mut tokens);
+    let parsed =
+        parse::parse_in_expansion(snapshot.content(), source_map, file, expansion, &mut tokens);
     if !parsed.diagnostics.is_empty() {
         return Err(parsed.diagnostics);
     }

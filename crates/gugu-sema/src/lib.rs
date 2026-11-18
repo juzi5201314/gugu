@@ -15,6 +15,7 @@ use target::TargetName;
 pub mod ast;
 pub mod attr;
 pub mod cfg;
+pub mod docs;
 pub mod expand;
 pub mod format;
 pub mod hir;

@@ -157,6 +157,8 @@ pub enum DiagnosticCode {
     UnusedMustUse,
     /// runtime glue 绑定缺失或签名不匹配。
     RuntimeGlueBinding,
+    /// 对外可见项缺少有意义的 `///` 文档。
+    MissingDocs,
 }
 
 impl fmt::Display for DiagnosticCode {
@@ -224,6 +226,7 @@ impl fmt::Display for DiagnosticCode {
             Self::BackendInvariant => "E0060",
             Self::UnusedMustUse => "E0061",
             Self::RuntimeGlueBinding => "E0062",
+            Self::MissingDocs => "E0063",
         };
         formatter.write_str(code)
     }
@@ -234,7 +237,7 @@ impl DiagnosticCode {
     ///
     /// 新增 variant 必须同时补本表与 [`Self::index`]；`index` 是不带通配分支的穷尽匹配，
     /// 漏项会让测试构建直接编译失败，这是覆盖闸门的编译期半边。
-    pub const ALL: [Self; 62] = [
+    pub const ALL: [Self; 63] = [
         Self::SourceRead,
         Self::MissingMain,
         Self::MalformedSource,
@@ -297,6 +300,7 @@ impl DiagnosticCode {
         Self::BackendInvariant,
         Self::UnusedMustUse,
         Self::RuntimeGlueBinding,
+        Self::MissingDocs,
     ];
 
     /// 返回该代码在 [`Self::ALL`] 中的稠密下标。
@@ -366,6 +370,7 @@ impl DiagnosticCode {
             Self::BackendInvariant => 59,
             Self::UnusedMustUse => 60,
             Self::RuntimeGlueBinding => 61,
+            Self::MissingDocs => 62,
         }
     }
 }

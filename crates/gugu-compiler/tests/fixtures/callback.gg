@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 #[repr(C)]
 struct Mixed { pub number: i64, pub fraction: f64 }
 #[repr(C)]

@@ -45,6 +45,7 @@ pub use diagnostics::{Diagnostic, DiagnosticCode, Diagnostics, Severity};
 pub use frontend::format::{FormatError, format_source};
 pub use frontend::prebuild::{MaterializeError, closure_program_modules, materialize_tables};
 pub use gugu_backend::{NativeImport, NativeImportKind, NativeLink};
+pub use gugu_gir::docs;
 pub use materialize::{materialize, materialize_functions};
 pub use project::{
     ActionInputs, ActionKey, CacheError, CachePolicy, DependencyCache, DependencyDomain,
@@ -353,12 +354,18 @@ pub struct Compilation {
     raw_contract: Option<RuntimeRawContractV1>,
     x64: Option<backend::x64::codegen::X64World>,
     action_key: Option<project::ActionKey>,
+    docs: Option<gugu_gir::docs::DocWorld>,
 }
 
 impl Compilation {
     /// 返回 action graph。
     pub fn action_graph(&self) -> &ActionGraph {
         &self.graph
+    }
+
+    /// 返回公共 API 文档表；前端成功时存在。
+    pub fn docs(&self) -> Option<&gugu_gir::docs::DocWorld> {
+        self.docs.as_ref()
     }
 
     /// 返回按规范排序的诊断。
@@ -617,6 +624,7 @@ impl Compiler {
                     raw_contract: None,
                     x64: None,
                     action_key: None,
+                    docs: None,
                 };
             }
         };
@@ -640,6 +648,7 @@ impl Compiler {
                     raw_contract: None,
                     x64: None,
                     action_key: None,
+                    docs: None,
                 };
             }
         };
@@ -673,12 +682,33 @@ impl Compiler {
                     raw_contract: None,
                     x64: None,
                     action_key: None,
+                    docs: None,
                 };
             }
         };
         graph.complete(ActionKind::Frontend, frontend.detail());
         for diagnostic in frontend.lints.iter().cloned() {
             diagnostics.push(diagnostic);
+        }
+        // lint 中的错误（如 deny 级别）必须阻断后续产物，不能照常生成镜像计划。
+        if diagnostics.has_errors() {
+            graph.fail(ActionKind::BuildIr, "lint 诊断包含错误");
+            graph.skip_after(ActionKind::BuildIr, "lint 诊断无效");
+            diagnostics.sort();
+            return Compilation {
+                graph,
+                diagnostics,
+                source_map,
+                image_plan: None,
+                hir: Some(frontend.hir),
+                gir: Some(frontend.gir),
+                gir_stats: frontend.gir_stats,
+                lir: None,
+                raw_contract: None,
+                x64: None,
+                action_key: None,
+                docs: Some(frontend.docs),
+            };
         }
         let oracle = backend::x64::oracle::X64Oracle::new(target.descriptor().cpu_baseline);
         let lir = match lir::build(
@@ -712,6 +742,7 @@ impl Compiler {
                     raw_contract: None,
                     x64: None,
                     action_key: None,
+                    docs: Some(frontend.docs),
                 };
             }
         };
@@ -737,6 +768,7 @@ impl Compiler {
                         raw_contract: None,
                         x64: None,
                         action_key: None,
+                        docs: Some(frontend.docs),
                     };
                 }
             };
@@ -763,6 +795,7 @@ impl Compiler {
                     raw_contract: None,
                     x64: None,
                     action_key: None,
+                    docs: Some(frontend.docs),
                 };
             }
         };
@@ -804,6 +837,7 @@ impl Compiler {
                     raw_contract: None,
                     x64: None,
                     action_key: None,
+                    docs: Some(frontend.docs),
                 };
             }
         };
@@ -894,6 +928,7 @@ impl Compiler {
                         raw_contract: Some(raw_contract),
                         x64: None,
                         action_key: None,
+                        docs: Some(frontend.docs),
                     };
                 }
             }
@@ -954,6 +989,7 @@ impl Compiler {
                     raw_contract: Some(raw_contract),
                     x64,
                     action_key,
+                    docs: Some(frontend.docs),
                 };
             }
             Err(message) => {
@@ -977,6 +1013,7 @@ impl Compiler {
                     raw_contract: Some(raw_contract),
                     x64,
                     action_key,
+                    docs: Some(frontend.docs),
                 };
             }
         };
@@ -1011,6 +1048,7 @@ impl Compiler {
             raw_contract: Some(raw_contract),
             x64,
             action_key,
+            docs: Some(frontend.docs),
         }
     }
 }
