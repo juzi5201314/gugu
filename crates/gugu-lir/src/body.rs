@@ -369,6 +369,8 @@ pub enum RuntimeCall {
     ChannelTrySend,
     ChannelTryRecv,
     JoinWait,
+    /// 取走 panic 完成记录的 Panic 句柄；非 panic 结果返回 0 且无副作用。
+    JoinPanic,
     Yield,
     Spawn,
     SelectCommit {

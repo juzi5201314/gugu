@@ -188,6 +188,10 @@ pub fn referenced(
                     SuspendReason::JoinWait { .. } => "join_wait",
                     SuspendReason::Yield => "yield",
                 });
+                // JoinWait 的 LIR 结果物化无条件调用 `join_panic` 取 panic 载荷。
+                if matches!(reason, SuspendReason::JoinWait { .. }) {
+                    demand.insert("join_panic");
+                }
             }
             Terminator::SelectCommit { .. } => {
                 demand.insert("select_commit");

@@ -1,4 +1,5 @@
-use std.runtime.scheduler.{boot, finish_hot, live_count, resume_ready, callback_gate, callback_service, callback_pending}
+use std.runtime.scheduler.{boot, finish_hot, heap_alloc, live_count, resume_ready, callback_gate, callback_service, callback_pending, COROUTINE_COLD_PAYLOAD_STATE_OFFSET, COROUTINE_COLD_SPAWN_PUBLISHED_BIT, COROUTINE_COLD_SUBTREE_GROUP_OFFSET, COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_WAITED, COROUTINE_COLD_PANIC_GROUPED, COROUTINE_COLD_PANIC_DETACHED, COROUTINE_COLD_JOIN_WAITER_OFFSET}
+use std.runtime.heap.{copy_bytes}
 use std.runtime.pressure.{pressure_service}
 use std.runtime.gc.{gc_config_check}
 use std.runtime.collect.{gc_boot}
@@ -425,7 +426,8 @@ pub fn rt0_start(params: *Rt0Params, bias: uint) uint {
         network.shutdown(processor_addr)
         process_context.shutdown()
         mapping.verify_drained(processor_addr)
-        0
+        // 自然退出类别：仍有未处理的分离 panic 时提升为非零退出（已被 wait 取走的不计）。
+        if word(state + 768) != 0 { 1 } else { 0 }
     }
 }
 fn resume_with_io(state: uint, processor: uint) uint {
@@ -693,12 +695,56 @@ pub fn panic_dispatch(message: *byte, len: uint, path: *byte, path_len: uint, li
     }
 }
 
-/// 未捕获的 panic 由镜像 runtime 报告并结束，不允许从报告路径返回用户代码。
+/// 未捕获的 panic：主协程照旧报告并终止进程；子协程把完成记录写成 panic 结果。
+///
+/// Panic 对象是调度堆上的 48 字节记录 `{消息 ptr,len, 位置 ptr,len, line, column}`，
+/// 取走方（`join_wait`/`select` 的 panic 分支、`std.test`）按同一布局还原；分配在调度
+/// bump 堆上，不进 GC 根发布。没有被等待者且无子树组归属时按「未处理分离 panic」记账
+/// （state+768）并立即打印报告；归属组的交给测试 runner 判定，不重复打印。
 #[used]
-pub fn panic_unwind(message: *byte, len: uint, path: *byte, path_len: uint, line: uint, column: uint) uint {
+pub fn panic_unwind(message: *byte, len: uint, path: *byte, path_len: uint, line: uint, column: uint, state: uint) uint {
     unsafe {
-        write_panic_report(message, len, path, path_len, line, column)
-        std.runtime.process_exit(1)
+        let hot = word(state)
+        let cold = word(hot + 48)
+        if cold == state + 128 {
+            write_panic_report(message, len, path, path_len, line, column)
+            std.runtime.process_exit(1)
+        }
+        let processor = word(state + 96)
+        // 记录把消息与位置字节原地复制到尾部：调度 bump 堆不是 GC 根，
+        // 直接引用动态串会在回收后悬空，记录必须自持其内容。
+        let record = heap_alloc(processor, 48 + len + path_len)
+        copy_bytes(record + 48, std.mem.transmute[*byte, uint](message), len)
+        copy_bytes(record + 48 + len, std.mem.transmute[*byte, uint](path), path_len)
+        store_word(record, record + 48)
+        store_word(record + 8, len)
+        store_word(record + 16, record + 48 + len)
+        store_word(record + 24, path_len)
+        store_word(record + 32, line)
+        store_word(record + 40, column)
+        store_word(state + 88, record)
+        store_word(state + 16, 0)
+        store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_WAITED)
+        // 结果车道只保留 spawn 标记：Panic 句柄不是按 T 的根种类发布的载荷。
+        let payload_state = word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET)
+        store_word(cold + COROUTINE_COLD_PAYLOAD_STATE_OFFSET, payload_state & COROUTINE_COLD_SPAWN_PUBLISHED_BIT)
+        let group = word(cold + COROUTINE_COLD_SUBTREE_GROUP_OFFSET)
+        if word(cold + COROUTINE_COLD_JOIN_WAITER_OFFSET) == 0 {
+            if group != 0 {
+                store_word(group + 8, word(group + 8) + 1)
+                store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_GROUPED)
+            } else {
+                write_panic_report(message, len, path, path_len, line, column)
+                store_word(state + 768, word(state + 768) + 1)
+                store_word(cold + COROUTINE_COLD_PANIC_RESULT_OFFSET, COROUTINE_COLD_PANIC_DETACHED)
+            }
+        }
+        store_word(state + 752, 2)
+        std.runtime.context_restore(
+            std.mem.transmute[uint, *()](state + 40),
+            std.mem.transmute[uint, *()](word(processor + 4088)),
+            std.mem.transmute[uint, *()](processor),
+        )
         0
     }
 }

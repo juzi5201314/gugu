@@ -715,7 +715,19 @@ impl Builder<'_> {
             &[handle_bits, pointer, desc],
             &[ValueType::scalar(Type::I8)],
         )?;
-        let address = self.materialize_status(result_ty, payload_ty, payload, status[0])?;
+        // `Join.wait` 的 panic 完成：状态 2 时 Panic 句柄由单独车道取回（非 panic 返回 0）。
+        let panic = if matches!(target, RuntimeCall::JoinWait) {
+            Some(
+                self.runtime(
+                    RuntimeCall::JoinPanic,
+                    &[handle_bits],
+                    &[ValueType::scalar(Type::I64)],
+                )?[0],
+            )
+        } else {
+            None
+        };
+        let address = self.materialize_status(result_ty, payload_ty, payload, status[0], panic)?;
         self.write_place(
             place,
             Computed::Address {
@@ -737,18 +749,19 @@ impl Builder<'_> {
             .map(|field| field.ty))
     }
 
-    /// 状态非 0 装 Ok，0 装 Err。
+    /// 状态 1 装 Ok，其余装 Err；`panic` 非空时把 panic 句柄写入 Err 载荷字段。
     pub(super) fn materialize_status(
         &mut self,
         result_ty: u32,
         payload_ty: Option<u32>,
         payload: Option<ValueId>,
         status: ValueId,
+        panic: Option<ValueId>,
     ) -> Result<ValueId, Diagnostic> {
         let address = self.temporary(result_ty)?;
         self.zero_object(address, result_ty)?;
-        let failure = self.constant(0, Type::I8);
-        let ok = self.compare_value(Condition::Ne, false, status, failure);
+        let success = self.constant(1, Type::I8);
+        let ok = self.compare_value(Condition::Eq, false, status, success);
         let tag_bytes = match self.kind(result_ty) {
             TypeKind::Aggregate { tag_bytes, .. } if *tag_bytes != 0 => Some(*tag_bytes),
             _ => None,
@@ -773,6 +786,24 @@ impl Builder<'_> {
                 .ok_or_else(|| invalid("Result 缺少 Ok 载荷"))?;
             let destination = self.offset(address, offset);
             self.copy_memory(destination, payload, payload_ty)?;
+        }
+        if let Some(panic) = panic {
+            // panic 完成时 runtime 不写正常载荷，临时槽是未初始化字节：Err 分支写 Panic 句柄，
+            // Ok 分支保持刚复制的载荷原样（把读回的值原样写回即不生效的写）。
+            let fields = self.fields(result_ty, 1, 1)?;
+            let (offset, _) = fields
+                .first()
+                .copied()
+                .ok_or_else(|| invalid("Result 缺少 Err 载荷"))?;
+            let slot = self.offset(address, offset);
+            let current = self.load(slot, ValueType::scalar(Type::I64), 8, false);
+            let merged = self.emit_one(
+                Op::Select,
+                &[ok, current, panic],
+                ValueType::scalar(Type::I64),
+                Origin::None,
+            );
+            self.store(slot, merged, 8, false);
         }
         Ok(address)
     }

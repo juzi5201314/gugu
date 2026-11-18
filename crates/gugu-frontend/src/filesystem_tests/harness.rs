@@ -374,6 +374,9 @@ impl<'a> Harness<'a> {
                     }
                     vec![1]
                 }
+                // `JoinWait` 完成后编译器无条件调用 `join_panic`；解释器调度的协程
+                // 不会 panic（panic 传播即测试失败），因此固定返回 0。
+                Boundary::Call(CallTarget::Runtime(RuntimeCall::JoinPanic)) => vec![0],
                 Boundary::Call(CallTarget::Runtime(RuntimeCall::StringCompare)) => {
                     self.invoke("std/text.gg", "string_compare", args, memory)
                 }

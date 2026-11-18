@@ -791,6 +791,13 @@ pub const GLUE_DEFS: &[GlueDef] = &[
         },
     },
     GlueDef {
+        glue: "join_panic",
+        def: GlueDefKind::Item {
+            source: "std/runtime/channel.gg",
+            item: "join_panic",
+        },
+    },
+    GlueDef {
         glue: "select_commit",
         def: GlueDefKind::Item {
             source: "std/runtime/channel.gg",

@@ -72,7 +72,8 @@ fn builtin_module_path(
     logical_to_module_path(logical)
 }
 
-fn parse_module(
+/// 解析单个模块；harness manifest 等生成源码也走同一词法/语法/cfg 管线。
+pub fn parse_module(
     snapshot: &SourceSnapshot,
     source_map: &SourceMap,
     file: SourceFileId,

@@ -264,6 +264,7 @@ impl RuntimeCall {
             | Self::DeferAction
             | Self::DeferEnvironment
             | Self::DeferPop
+            | Self::JoinPanic
             | Self::WideDiv { .. } => (false, false, false, false),
         }
     }

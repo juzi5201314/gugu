@@ -159,6 +159,11 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/test.gg",
+        include_str!("../../gugu-frontend/resources/std/test.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
         "std/collections.gg",
         include_str!("../../gugu-frontend/resources/std/collections.gg"),
         RuntimeSourceRole::StandardLibrary,
