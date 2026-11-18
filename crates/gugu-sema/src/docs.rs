@@ -53,7 +53,7 @@ pub struct DocItem {
 
 /// 由 `///` 行抽取的文档文本；无文档行时返回 `None`（空白行不算「有意义」）。
 pub fn doc_text(
-    source: &str,
+    source_map: &SourceMap,
     attributes: AstRange<Attribute>,
     arena_attrs: &[Attribute],
 ) -> Option<String> {
@@ -65,6 +65,13 @@ pub fn doc_text(
         ) {
             continue;
         }
+        // 宏生成的项带生成快照 span：按 span.file 取源，禁止用宿主源切片。
+        let Some(source) = source_map
+            .snapshot(attribute.span.file())
+            .map(|snapshot| snapshot.content())
+        else {
+            continue;
+        };
         text.push_str(doc_line(
             &source[attribute.span.start() as usize..attribute.span.end() as usize],
         ));
@@ -89,7 +96,13 @@ fn doc_line(raw: &str) -> &str {
 }
 
 /// 声明签名：item 头部文本到第一个顶层 `{`、`=`、`;`、`,` 为止，空白折叠。
-fn signature_text(source: &str, span: &Span) -> String {
+fn signature_text(source_map: &SourceMap, span: &Span) -> String {
+    let Some(source) = source_map
+        .snapshot(span.file())
+        .map(|snapshot| snapshot.content())
+    else {
+        return String::new();
+    };
     let text = &source[span.start() as usize..span.end() as usize];
     let mut depth = 0_u32;
     let mut cut = text.len();
@@ -134,17 +147,20 @@ pub fn world(modules: &[ParsedModule], source_map: &SourceMap) -> DocWorld {
         let Some(snapshot) = source_map.snapshot(module.file.source) else {
             continue;
         };
-        let source = snapshot.content();
         let source_path = snapshot.logical_path().to_owned();
-        let docs =
-            doc_text(source, module.file.inner_attributes, &module.arena.attrs).unwrap_or_default();
+        let docs = doc_text(
+            source_map,
+            module.file.inner_attributes,
+            &module.arena.attrs,
+        )
+        .unwrap_or_default();
         let mut items = Vec::new();
         for item_id in module.file.items.as_slice(&module.arena.item_ids) {
             if !module.configured.item_active(*item_id) {
                 continue;
             }
             let item = &module.arena.items[item_id.0 as usize];
-            if let Some(doc_item) = item_doc(module, source, &source_path, item) {
+            if let Some(doc_item) = item_doc(module, source_map, &source_path, item) {
                 items.push(doc_item);
             }
         }
@@ -163,7 +179,7 @@ pub fn world(modules: &[ParsedModule], source_map: &SourceMap) -> DocWorld {
 
 fn item_doc(
     module: &ParsedModule,
-    source: &str,
+    source_map: &SourceMap,
     source_path: &str,
     item: &Item,
 ) -> Option<DocItem> {
@@ -172,9 +188,10 @@ fn item_doc(
     }
     let (kind, members) = match &item.kind {
         ItemKind::Function(_) => ("function", Vec::new()),
-        ItemKind::Struct { body, .. } => {
-            ("struct", field_members(module, source, source_path, body))
-        }
+        ItemKind::Struct { body, .. } => (
+            "struct",
+            field_members(module, source_map, source_path, body),
+        ),
         ItemKind::Enum { variants, .. } => (
             "enum",
             variants
@@ -183,8 +200,8 @@ fn item_doc(
                 .map(|variant| DocItem {
                     name: module.tokens.intern.get_str(variant.name).to_owned(),
                     kind: "variant",
-                    signature: signature_text(source, &variant.span),
-                    docs: doc_text(source, variant.attributes, &module.arena.attrs)
+                    signature: signature_text(source_map, &variant.span),
+                    docs: doc_text(source_map, variant.attributes, &module.arena.attrs)
                         .unwrap_or_default(),
                     source_path: source_path.to_owned(),
                     line: variant.span.line(),
@@ -198,7 +215,7 @@ fn item_doc(
                 .as_slice(&module.arena.fields)
                 .iter()
                 .filter(|field| field.visibility == Visibility::Pub)
-                .filter_map(|field| field_doc(module, source, source_path, field))
+                .filter_map(|field| field_doc(module, source_map, source_path, field))
                 .collect(),
         ),
         ItemKind::TypeAlias { .. } => ("type", Vec::new()),
@@ -211,7 +228,7 @@ fn item_doc(
                 .iter()
                 .filter(|id| module.configured.item_active(**id))
                 .map(|id| &module.arena.items[id.0 as usize])
-                .filter_map(|member| trait_member_doc(module, source, source_path, member))
+                .filter_map(|member| trait_member_doc(module, source_map, source_path, member))
                 .collect(),
         ),
         ItemKind::Impl { items, .. } => (
@@ -226,8 +243,8 @@ fn item_doc(
                     member.name.map(|name| DocItem {
                         name: module.tokens.intern.get_str(name).to_owned(),
                         kind: "function",
-                        signature: signature_text(source, &member.span),
-                        docs: doc_text(source, member.attributes, &module.arena.attrs)
+                        signature: signature_text(source_map, &member.span),
+                        docs: doc_text(source_map, member.attributes, &module.arena.attrs)
                             .unwrap_or_default(),
                         source_path: source_path.to_owned(),
                         line: member.span.line(),
@@ -242,8 +259,8 @@ fn item_doc(
     Some(DocItem {
         name: module.tokens.intern.get_str(name).to_owned(),
         kind,
-        signature: signature_text(source, &item.span),
-        docs: doc_text(source, item.attributes, &module.arena.attrs).unwrap_or_default(),
+        signature: signature_text(source_map, &item.span),
+        docs: doc_text(source_map, item.attributes, &module.arena.attrs).unwrap_or_default(),
         source_path: source_path.to_owned(),
         line: item.span.line(),
         members,
@@ -252,15 +269,15 @@ fn item_doc(
 
 fn field_doc(
     module: &ParsedModule,
-    source: &str,
+    source_map: &SourceMap,
     source_path: &str,
     field: &crate::ast::Field,
 ) -> Option<DocItem> {
     Some(DocItem {
         name: module.tokens.intern.get_str(field.name?).to_owned(),
         kind: "field",
-        signature: signature_text(source, &field.span),
-        docs: doc_text(source, field.attributes, &module.arena.attrs).unwrap_or_default(),
+        signature: signature_text(source_map, &field.span),
+        docs: doc_text(source_map, field.attributes, &module.arena.attrs).unwrap_or_default(),
         source_path: source_path.to_owned(),
         line: field.span.line(),
         members: Vec::new(),
@@ -269,7 +286,7 @@ fn field_doc(
 
 fn field_members(
     module: &ParsedModule,
-    source: &str,
+    source_map: &SourceMap,
     source_path: &str,
     body: &StructBody,
 ) -> Vec<DocItem> {
@@ -280,13 +297,13 @@ fn field_members(
     fields
         .iter()
         .filter(|field| field.visibility == Visibility::Pub)
-        .filter_map(|field| field_doc(module, source, source_path, field))
+        .filter_map(|field| field_doc(module, source_map, source_path, field))
         .collect()
 }
 
 fn trait_member_doc(
     module: &ParsedModule,
-    source: &str,
+    source_map: &SourceMap,
     source_path: &str,
     member: &Item,
 ) -> Option<DocItem> {
@@ -299,8 +316,8 @@ fn trait_member_doc(
     Some(DocItem {
         name: module.tokens.intern.get_str(member.name?).to_owned(),
         kind,
-        signature: signature_text(source, &member.span),
-        docs: doc_text(source, member.attributes, &module.arena.attrs).unwrap_or_default(),
+        signature: signature_text(source_map, &member.span),
+        docs: doc_text(source_map, member.attributes, &module.arena.attrs).unwrap_or_default(),
         source_path: source_path.to_owned(),
         line: member.span.line(),
         members: Vec::new(),
@@ -322,19 +339,30 @@ pub fn missing_docs_lints(modules: &[ParsedModule], source_map: &SourceMap) -> V
             continue;
         };
         let source = snapshot.content();
-        lint_module_docs(module, source, &mut diagnostics);
+        lint_module_docs(module, source_map, source, &mut diagnostics);
         for item_id in module.file.items.as_slice(&module.arena.item_ids) {
             if !module.configured.item_active(*item_id) {
                 continue;
             }
-            lint_item(module, source, *item_id, &mut diagnostics);
+            lint_item(module, source_map, source, *item_id, &mut diagnostics);
         }
     }
     diagnostics
 }
 
-fn lint_module_docs(module: &ParsedModule, source: &str, diagnostics: &mut Vec<Diagnostic>) {
-    if doc_text(source, module.file.inner_attributes, &module.arena.attrs).is_some() {
+fn lint_module_docs(
+    module: &ParsedModule,
+    source_map: &SourceMap,
+    source: &str,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if doc_text(
+        source_map,
+        module.file.inner_attributes,
+        &module.arena.attrs,
+    )
+    .is_some()
+    {
         return;
     }
     let Some(first) = module.file.items.as_slice(&module.arena.item_ids).first() else {
@@ -352,6 +380,7 @@ fn lint_module_docs(module: &ParsedModule, source: &str, diagnostics: &mut Vec<D
 
 fn lint_item(
     module: &ParsedModule,
+    source_map: &SourceMap,
     source: &str,
     item_id: ItemId,
     diagnostics: &mut Vec<Diagnostic>,
@@ -363,12 +392,12 @@ fn lint_item(
     let kind: &str = match &item.kind {
         ItemKind::Function(_) => "函数",
         ItemKind::Struct { body, .. } => {
-            lint_fields(module, source, body, diagnostics);
+            lint_fields(module, source_map, source, body, diagnostics);
             "类型"
         }
         ItemKind::Enum { .. } => "类型",
         ItemKind::Union { fields, .. } => {
-            lint_field_range(module, source, *fields, diagnostics);
+            lint_field_range(module, source_map, source, *fields, diagnostics);
             "类型"
         }
         ItemKind::TypeAlias { .. } => "类型",
@@ -383,7 +412,7 @@ fn lint_item(
                 if !matches!(member.kind, ItemKind::Function(_)) {
                     continue;
                 }
-                if doc_text(source, member.attributes, &module.arena.attrs).is_some() {
+                if doc_text(source_map, member.attributes, &module.arena.attrs).is_some() {
                     continue;
                 }
                 let name = member
@@ -409,7 +438,7 @@ fn lint_item(
                 if !module.configured.item_active(*member_id) {
                     continue;
                 }
-                lint_item(module, source, *member_id, diagnostics);
+                lint_item(module, source_map, source, *member_id, diagnostics);
             }
             "impl"
         }
@@ -418,7 +447,7 @@ fn lint_item(
     if kind == "impl" {
         return;
     }
-    if doc_text(source, item.attributes, &module.arena.attrs).is_some() {
+    if doc_text(source_map, item.attributes, &module.arena.attrs).is_some() {
         return;
     }
     let name = item
@@ -437,6 +466,7 @@ fn lint_item(
 
 fn lint_fields(
     module: &ParsedModule,
+    source_map: &SourceMap,
     source: &str,
     body: &StructBody,
     diagnostics: &mut Vec<Diagnostic>,
@@ -446,23 +476,25 @@ fn lint_fields(
         StructBody::Record(fields) => fields.as_slice(&module.arena.fields),
     };
     for field in fields {
-        lint_field(module, source, field, diagnostics);
+        lint_field(module, source_map, source, field, diagnostics);
     }
 }
 
 fn lint_field_range(
     module: &ParsedModule,
+    source_map: &SourceMap,
     source: &str,
     fields: AstRange<Field>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for field in fields.as_slice(&module.arena.fields) {
-        lint_field(module, source, field, diagnostics);
+        lint_field(module, source_map, source, field, diagnostics);
     }
 }
 
 fn lint_field(
     module: &ParsedModule,
+    source_map: &SourceMap,
     source: &str,
     field: &Field,
     diagnostics: &mut Vec<Diagnostic>,
@@ -470,7 +502,7 @@ fn lint_field(
     if field.visibility != Visibility::Pub {
         return;
     }
-    if doc_text(source, field.attributes, &module.arena.attrs).is_some() {
+    if doc_text(source_map, field.attributes, &module.arena.attrs).is_some() {
         return;
     }
     let Some(name) = field.name else { return };
