@@ -1,0 +1,133 @@
+//! `std.build` —— build task 类型化接口。API 只在 build task 上下文可用：host
+//! 在任务启动时经 `std.runtime.build_task.begin` 写入 context；普通程序里调用
+//! 是 panic。所有 emit/rerun/link/define/warning/run 进入同一份动作记录，
+//! 不解析 stdout 魔法指令，也不把 compiler 私有表示暴露给 build.gg。
+
+use std.collections.{Vec}
+use std.env as env
+use std.path.{OsString, Path}
+use std.process as process
+use std.runtime.build_task as task
+use std.text.{Bytes}
+
+pub struct RunOptions {
+    pub cwd: string,
+    pub env: Vec[(string, string)],
+    pub inherit_env: bool,
+}
+
+pub struct ProcessOutput {
+    pub code: int,
+    pub stdout: Vec[byte],
+    pub stderr: Vec[byte],
+}
+
+fn require_task() {
+    if !task.active() { panic("std.build 只能在 build task 上下文调用") }
+}
+
+pub fn out_dir() string { require_task(); task.out_dir() }
+pub fn host() string { require_task(); task.host() }
+pub fn target() string { require_task(); task.target() }
+pub fn features() Vec[string] { require_task(); task.features() }
+
+pub fn rerun_if_changed(path_or_glob: string) {
+    require_task()
+    task.add_rerun_file(path_or_glob)
+}
+
+pub fn rerun_if_env_changed(name: string) {
+    require_task()
+    task.add_rerun_env(name)
+}
+
+pub fn rerun_always() { require_task(); task.mark_rerun_always() }
+
+fn under_out_dir(path: string) bool {
+    let base = Bytes::from_string(task.out_dir())
+    let full = Bytes::from_string(path)
+    if !full.starts_with(base) { return false }
+    if full.len() == base.len() { return false }
+    match full.get(base.len()) {
+        Some(separator) => separator == byte(47) || separator == byte(92),
+        None => false,
+    }
+}
+
+pub fn emit_module(name: string, path: string) {
+    require_task()
+    if !under_out_dir(path) { panic("emit_module 的 path 必须位于 out_dir() 下") }
+    task.record_emit(name, path)
+}
+
+fn reserved_name(name: string) bool {
+    if name == "os" || name == "arch" || name == "test" || name == "bench" || name == "feature" { return true }
+    task.known_feature(name)
+}
+
+pub fn define_cfg(name: string) {
+    require_task()
+    if reserved_name(name) { panic("define_cfg 不能覆盖内建 cfg 或 feature") }
+    task.record_define(name, false, "")
+}
+
+pub fn define_cfg_value(name: string, value: string) {
+    require_task()
+    if reserved_name(name) { panic("define_cfg_value 不能覆盖内建 cfg 或 feature") }
+    task.record_define(name, true, value)
+}
+
+pub fn link_library(kind: string, name: string, path: string) {
+    require_task()
+    if kind != "static" && kind != "dynamic" { panic("link_library 的 kind 只能是 static 或 dynamic") }
+    task.record_link(kind, name, path)
+}
+
+pub fn link_search(path: string) {
+    require_task()
+    task.record_link_search(path)
+}
+
+pub fn warning(message: string) {
+    require_task()
+    task.record_warning(message)
+}
+
+pub fn error(message: string) ! {
+    require_task()
+    task.record_error(message)
+    panic(message)
+}
+
+fn to_os(value: string) OsString {
+    match OsString::from_string(value) {
+        Ok(name) => name,
+        Err(_) => panic("std.build.run 收到无法编码的参数"),
+    }
+}
+
+pub fn run(executable: string, args: &[string], options: RunOptions) ProcessOutput {
+    require_task()
+    let index = task.record_run_begin(executable, Vec::from_slice(args), options.cwd, options.env, options.inherit_env)
+    let command = process::Command::new(Path::from_string(executable))
+    for value in args { command.arg(to_os(value)) }
+    if !options.inherit_env {
+        match env.vars() {
+            Ok(inherited) => for pair in inherited { command.remove_env(pair.0) },
+            Err(_) => panic("std.build.run 无法枚举宿主环境"),
+        }
+    }
+    for pair in options.env { command.env(to_os(pair.0), to_os(pair.1)) }
+    if options.cwd != "" { command.cwd(Path::from_string(options.cwd)) }
+    let output = match command.output() {
+        Ok(done) => done,
+        Err(_) => panic("std.build.run 无法启动进程"),
+    }
+    let code = match output.status.code() { Some(code) => code, None => -1 }
+    task.record_run_code(index, code)
+    ProcessOutput {
+        code: code,
+        stdout: unsafe { Vec::from_slice(output.stdout.as_slice()) },
+        stderr: unsafe { Vec::from_slice(output.stderr.as_slice()) },
+    }
+}

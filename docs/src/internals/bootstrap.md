@@ -307,6 +307,8 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 | `std/runtime/coroutine.gg` | runtime 源单元 | 固定协程控制块布局交叉校验 |
 | `std/runtime/channel.gg` | runtime 源单元 | 固定 `ChannelControl`/`WaitNode`/`SelectTxn`/`SelectScratchCache` 布局交叉校验 |
 | `std/runtime/sync.gg` | runtime 源单元 | 固定 `MutexControl`/`RwLockControl`/`CondvarControl`/`OnceControl`/`CancelControl` 布局交叉校验 |
+| `std/build.gg` | 标准库源单元 | `std.build` 门面：输入校验、保留名拒绝、调用转交 `std.runtime.build_task` |
+| `std/runtime/build_task.gg` | runtime 源单元 | 构建 action 记录：头 + 追加条目原生 bump arena，非活动上下文一律 panic |
 
 这些源单元在 `LoadSources` 内注入源码表，与用户源码走同一条解析、cfg 与检查路径。它们是 `std` 的私有实现：只有 `std` 内部模块可以互相引用，非 `std` 模块导入实现模块按保留名拒绝（`E0031`），用户源码占用内建逻辑路径同样被拒绝。`std/runtime/platform.gg`、`std/runtime/coroutine.gg`、`std/runtime/channel.gg` 与 `std/runtime/sync.gg` 的 `#[used]` 入口使对应布局记录成为闭世界镜像的根，不依赖某个用户调用点是否出现。
 
@@ -325,7 +327,7 @@ schema 4 再并入 `Rt0SchemaV1`：rt0 五步启动序列、四个进程生命�
 | `types` | type arena、type checker | 类型形成、布局、TypeCheck 与冻结 TypeId 已落地 |
 | `declarations` | module tree、definition collector | 模块树、定义收集、绑定与初始化检查已落地 |
 | `program-model` | action、backend、runtime | 已建立 plan/不写部分镜像契约 |
-| `packages-builds` | `project` 清单、依赖解析、workspace、target、锁图与缓存 | 清单发现、workspace、target、SemVer、锁图、依赖缓存与 vendor 已落地；build.gg 闭环未落地 |
+| `packages-builds` | `project` 清单、依赖解析、workspace、target、锁图与缓存 | 清单发现、workspace、target、SemVer、锁图、依赖缓存与 vendor 已落地；`std.build` 门面与 action 记录已落地；build.gg 宿主执行闭环未落地 |
 | `publishing-ecosystem` | registry、archive、signature | 未实现 |
 | `toolchain-cli` | `gugu-cli` 与 action orchestrator | 已建立单一入口、项目/单文件模式与 `fmt`/`build`/`check` |
 | `expressions` | frontend、HIR、GIR | 类型检查、HIR 与 generic GIR 已落地；LIR 与机器码未落地 |
