@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::path::{Component, Path, PathBuf};
+use std::rc::Rc;
 
 /// 一次编译可见的包输入根。
 ///
@@ -16,8 +17,9 @@ pub struct EmbedHost {
     /// 逻辑目录（如 `src/util`）→ 物理目录；调用文件目录先查表，缺失回退 `root` 拼接。
     dirs: BTreeMap<PathBuf, PathBuf>,
     /// 已解析的文件：canonical 路径 → 字节。编译输入登记（action key）依赖它，
-    /// 记录缺失会让增量缓存把旧字节当成当前输入。
-    recorded: RefCell<BTreeMap<PathBuf, Vec<u8>>>,
+    /// 记录缺失会让增量缓存把旧字节当成当前输入。`Rc` 共享：语义检查会克隆宿主，
+    /// 复制出的登记表必须写回同一集合，否则 action key 读到空表。
+    recorded: Rc<RefCell<BTreeMap<PathBuf, Vec<u8>>>>,
 }
 
 impl EmbedHost {
@@ -27,7 +29,7 @@ impl EmbedHost {
         Self {
             root,
             dirs,
-            recorded: RefCell::new(BTreeMap::new()),
+            recorded: Rc::new(RefCell::new(BTreeMap::new())),
         }
     }
 
