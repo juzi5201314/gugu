@@ -4,6 +4,7 @@
 //! 初始化器并登记 registry 摘要；类型检查与 HIR lowering 通过本表消费已求值常量，
 //! 表中缺失的位置回退到带 fuel 的惰性求值路径。
 
+pub mod embed;
 pub mod eval;
 mod format;
 mod phase;

@@ -95,6 +95,19 @@ impl BodyBuilder<'_, '_, '_, '_> {
                     .expr_active(argument)
             })
             .collect();
+        if let Some(embed_literal) = self
+            .facts
+            .body
+            .embed_literals
+            .iter()
+            .find(|entry| entry.expression == callee)
+        {
+            self.expression_map[callee.0 as usize] = Some(id);
+            return Ok((
+                hir::ExprKind::Literal(hir::Literal::Bytes(embed_literal.bytes.clone())),
+                0,
+            ));
+        }
         if let Some(source_literal) = self
             .facts
             .body

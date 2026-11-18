@@ -44,6 +44,7 @@ fn analyze_with_cfg(
             require_main: true,
             cfg,
             external_packages: &BTreeSet::new(),
+            embed: None,
         },
         &crate::query::QueryEngine::new(),
         crate::testing::resources_for(cfg.target()),

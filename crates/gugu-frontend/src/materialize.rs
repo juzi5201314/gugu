@@ -62,6 +62,7 @@ fn record_functions(
             require_main: true,
             cfg: &cfg,
             external_packages: &BTreeSet::new(),
+            embed: None,
         },
         &queries,
         resources,

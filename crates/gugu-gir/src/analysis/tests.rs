@@ -96,6 +96,7 @@ fn compile(sources: &[(&str, &str)], queries: &crate::QueryEngine) -> crate::Fro
             require_main: true,
             cfg: &cfg,
             external_packages: &Default::default(),
+            embed: None,
         },
         queries,
         crate::testing::resources(),

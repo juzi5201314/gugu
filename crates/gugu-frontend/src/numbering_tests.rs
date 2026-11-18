@@ -165,6 +165,7 @@ fn materialized_block_skips_builtin_derivation() {
             require_main: true,
             cfg: &cfg,
             external_packages: &Default::default(),
+            embed: None,
         },
         &engine,
         crate::testing::resources(),

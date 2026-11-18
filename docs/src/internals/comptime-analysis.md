@@ -180,6 +180,8 @@ parse / lex
 
 `std.src.file`/`line`/`column` 按 capability registry 的 `EarlyConst`+`SourceExpand` 域登记，不走普通函数调用：comptime 求值在 `call_value` 内经 `src_builtin` 直接返回调用表达式 span 的路径/行/列；普通代码中的调用由 checker 的 `src_call` 拦截并记录 `SourceLiteral` 快照，HIR 构建落成 `Literal`，因此运行时代码里的调用同样是编译期常量。三个查询均不接收参数，函数体仅为名称解析与取址路径存在。`std.src.caller` 依赖 `#[track_caller]` 的调用点传播，尚未实现。
 
+`std.mem.embed_file` 按 `EarlyConst`+`SourceExpand` 域与 `FILE_INPUT` 效果登记，需要把物理输入根送回求值层：源码快照加载后只保留逻辑路径，`EmbedHost` 在 `load_input` 按 `CompileInput` 形态重建「逻辑目录 → 物理目录」映射并给出 canonical 输入根（`File` 输入的根是文件目录，`Project` 是 `package_root`，内存源码没有宿主）；它经 `SourceInput`/`expand::run`/`semantics::check` 挂到 `Model` 与 `EvalState`，`call_value` 的 `embed_builtin` 把参数按调用源文件的逻辑目录解析，`canonicalize` 后校验仍在输入根内再读字节（越界、缺宿主、读失败都是编译错误），结果按 `Array(Int)` 常量折叠并计 comptime heap。checker 的 `embed_call` 只允许 `const`/`static` 初始值等早期常量位置（函数体内调用直接报错），再经 `eval_early_const` 把定长 `Ty::Array(byte, N)` 与 `EmbedLiteral` 快照记入 `BodyFacts`，HIR 落成 `Literal::Bytes`；运行期代码因此接触不到文件系统，函数体只是占位声明。
+
 ### 递归与预算
 
 生成源码可以再次包含 `comptime source`。每一次新的源码宏展开都消耗以下独立预算：

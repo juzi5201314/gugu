@@ -46,6 +46,7 @@ pub struct CheckedBody {
     pub borrow_checks: Vec<super::borrow::BorrowCheck>,
     pub must_use: Vec<MustUseSite>,
     pub source_literals: Vec<SourceLiteral>,
+    pub embed_literals: Vec<EmbedLiteral>,
 }
 
 /// 丢掉必须使用的值的源码范围。诊断在 lint 级别解析之后才发射。
@@ -89,6 +90,14 @@ pub struct SourceLiteral {
     pub file: String,
     pub line: u32,
     pub column: u32,
+}
+
+/// 一次 `std.mem.embed_file` 调用折叠；字节内容在 checker 的早期求值中
+/// 取定，HIR 落成 `Literal::Bytes`，文件路径与内容都是编译输入。
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct EmbedLiteral {
+    pub expression: ExprId,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]

@@ -143,6 +143,7 @@ mod tests {
                 require_main: true,
                 cfg: &cfg,
                 external_packages: &Default::default(),
+                embed: None,
             },
             &QueryEngine::new(),
             resources,

@@ -14,4 +14,10 @@ accept_cases! {
     /* 源位置查询不接收参数。*/
     std_src_rejects_arguments_03: false,
         "fn main() { _ = std.src.line(1) }";
+    /* embed_file 在函数体运行期位置拒绝：checker 先拦，不走到求值。*/
+    std_mem_embed_runtime_position_04: false,
+        "fn main() { let b = std.mem.embed_file(\"data.bin\") }";
+    /* 内存源码没有编译输入根：const 位置求值时报缺宿主。*/
+    std_mem_embed_no_host_05: false,
+        "const b: [byte; 1] = std.mem.embed_file(\"data.bin\")\nfn main() {}";
 }

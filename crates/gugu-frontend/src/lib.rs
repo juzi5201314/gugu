@@ -27,6 +27,7 @@ mod testing;
 use gugu_base::{action, canonical, diagnostics, hash, query, source, target};
 use gugu_lir as lir;
 use gugu_project as project;
+use gugu_sema::semantics::comptime::embed::EmbedHost;
 pub use query::{
     DependencyFingerprint, ObjectCache, ObjectError, ObjectKey, QueryContext, QueryEngine,
     QueryError, QueryKey, QueryKind, QueryResult, QueryState,
@@ -1080,6 +1081,8 @@ struct FrontendPlan {
 struct LoadedInput {
     source_map: SourceMap,
     plan: Option<FrontendPlan>,
+    /// `embed_file` 的编译输入根；内存源码等无文件系统边界的输入为 `None`。
+    embed: Option<EmbedHost>,
 }
 
 impl LoadedInput {
@@ -1094,6 +1097,7 @@ impl LoadedInput {
                 require_main: plan.require_main,
                 cfg: &plan.cfg,
                 external_packages: &plan.external_packages,
+                embed: self.embed.as_ref(),
             },
         }
     }
@@ -1152,6 +1156,7 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
         CompileInput::EmptyPackage => Ok(LoadedInput {
             source_map: SourceMap::empty(),
             plan: None,
+            embed: None,
         }),
         #[cfg(feature = "runtime-gc-probes")]
         CompileInput::RuntimeGcProbe { case } => Ok(LoadedInput {
@@ -1168,12 +1173,13 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
                 },
                 external_packages: BTreeSet::new(),
             }),
+            embed: None,
         }),
         CompileInput::SingleFileSource { path, source } => {
             let snapshot =
                 SourceSnapshot::from_bytes(logical_input_path(&path), source.into_bytes())
                     .map_err(LoadInputError::Snapshot)?;
-            loaded_single(snapshot, target, true)
+            loaded_single(snapshot, target, true, None)
         }
         CompileInput::File {
             path,
@@ -1185,9 +1191,32 @@ fn load_input(input: CompileInput, target: TargetName) -> Result<LoadedInput, Lo
                 error,
             })?;
             let logical = logical_path.unwrap_or_else(|| logical_input_path(&path));
+            // 输入根即文件所在目录：相对路径在目录内解析，不得越出目录。
+            let root = path
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .canonicalize()
+                .map_err(|error| LoadInputError::Read {
+                    path: path.clone(),
+                    error,
+                })?;
+            let dirs = [(
+                Path::new(&logical)
+                    .parent()
+                    .unwrap_or_else(|| Path::new(""))
+                    .to_path_buf(),
+                root.clone(),
+            )]
+            .into_iter()
+            .collect();
             let snapshot =
                 SourceSnapshot::from_bytes(logical, bytes).map_err(LoadInputError::Snapshot)?;
-            loaded_single(snapshot, target, require_main)
+            loaded_single(
+                snapshot,
+                target,
+                require_main,
+                Some(EmbedHost::new(root, dirs)),
+            )
         }
         CompileInput::Project {
             package_root,
@@ -1224,6 +1253,7 @@ fn loaded_single(
     snapshot: SourceSnapshot,
     target: TargetName,
     require_main: bool,
+    embed: Option<EmbedHost>,
 ) -> Result<LoadedInput, LoadInputError> {
     let entry = snapshot.logical_path().to_owned();
     let source_map =
@@ -1241,6 +1271,7 @@ fn loaded_single(
             cfg: CfgContext::target_only(target),
             external_packages: BTreeSet::new(),
         }),
+        embed,
     })
 }
 
@@ -1255,8 +1286,26 @@ fn load_project_sources(
 ) -> Result<LoadedInput, LoadInputError> {
     let mut paths = Vec::new();
     collect_source_paths(source_root, &mut paths)?;
+    // 输入根即 package 根：每个源文件的逻辑父目录映射回物理父目录。
+    let embed_root = package_root
+        .canonicalize()
+        .map_err(|error| LoadInputError::Read {
+            path: package_root.to_path_buf(),
+            error,
+        })?;
+    let mut embed_dirs = BTreeMap::new();
     let mut snapshots = Vec::with_capacity(paths.len());
     for path in paths {
+        let logical = project_logical_path(package_root, &path)?;
+        embed_dirs.insert(
+            Path::new(&logical)
+                .parent()
+                .unwrap_or_else(|| Path::new(""))
+                .to_path_buf(),
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| package_root.to_path_buf()),
+        );
         snapshots.push(read_project_snapshot(package_root, &path)?);
     }
     let entry = project_logical_path(package_root, entry)?;
@@ -1279,6 +1328,7 @@ fn load_project_sources(
             cfg,
             external_packages,
         }),
+        embed: Some(EmbedHost::new(embed_root, embed_dirs)),
     })
 }
 
@@ -3297,6 +3347,118 @@ mod tests {
             "src/main.gg",
         );
         assert!(compilation.image_plan().is_some());
+    }
+
+    /// `embed_file` 按调用源文件目录解析，内容折叠为 `[byte; N]` 早期常量。
+    #[test]
+    #[cfg(feature = "slow-tests")]
+    fn embed_file_reads_bytes_relative_to_source_file() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(
+            src.join("main.gg"),
+            concat!(
+                "fn main() { let first = blob[0] }\n",
+                "const blob: [byte; 3] = std.mem.embed_file(\"data.bin\")\n",
+                "const check: () = comptime {\n",
+                "    if blob[0] != 97 { panic(\"embed_file 内容不符\") }\n",
+                "    if blob[2] != 99 { panic(\"embed_file 内容不符\") }\n",
+                "}\n",
+            ),
+        )
+        .expect("write entry");
+        std::fs::write(src.join("data.bin"), b"abc").expect("write asset");
+
+        let compilation = Compiler::new().compile(CompileRequest::single_file_path(
+            src.join("main.gg"),
+            TargetName::X86_64Linux,
+        ));
+
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+    }
+
+    /// 经符号链接或 `..` 解析后的最终位置越出输入根是编译错误。
+    #[test]
+    #[cfg(feature = "slow-tests")]
+    fn embed_file_rejects_paths_escaping_input_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(root.path().join("secret.txt"), b"secret").expect("write outside");
+        std::fs::write(
+            src.join("main.gg"),
+            "fn main() {}\nconst leak = std.mem.embed_file(\"../secret.txt\")\n",
+        )
+        .expect("write entry");
+
+        let compilation = Compiler::new().compile(CompileRequest::single_file_path(
+            src.join("main.gg"),
+            TargetName::X86_64Linux,
+        ));
+
+        assert!(!compilation.is_success());
+        assert!(
+            compilation
+                .diagnostics()
+                .items()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("越出编译输入根")),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
+    }
+
+    /// Project 输入的根是 package 根；嵌入路径在各模块源目录内解析。
+    #[test]
+    #[cfg(feature = "slow-tests")]
+    fn embed_file_resolves_under_project_package_root() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let src = root.path().join("src");
+        std::fs::create_dir(&src).expect("create src");
+        std::fs::write(
+            root.path().join("gugu.toml"),
+            "[package]\nname = \"demo\"\nversion = \"1.0.0\"\n",
+        )
+        .expect("write manifest");
+        std::fs::write(
+            src.join("main.gg"),
+            concat!(
+                "fn main() { let first = blob[0] }\n",
+                "const blob: [byte; 2] = std.mem.embed_file(\"data.bin\")\n",
+                "const check: () = comptime {\n",
+                "    if blob[0] != 104 { panic(\"embed_file 内容不符\") }\n",
+                "}\n",
+            ),
+        )
+        .expect("write entry");
+        std::fs::write(src.join("data.bin"), b"hi").expect("write asset");
+        let project = Project::discover(root.path()).expect("discover project");
+        let package = project.current_package().expect("current package");
+        let target = package
+            .targets()
+            .iter()
+            .find(|target| target.kind() == TargetKind::Bin)
+            .expect("bin target");
+
+        let compilation = Compiler::new().compile(CompileRequest::project_target(
+            package,
+            target,
+            "demo@1.0.0 (path+.)",
+            TargetName::X86_64Linux,
+            vec!["default".to_owned()],
+            BTreeSet::new(),
+        ));
+
+        assert!(
+            compilation.is_success(),
+            "{:?}",
+            compilation.diagnostics().items()
+        );
     }
 
     #[test]

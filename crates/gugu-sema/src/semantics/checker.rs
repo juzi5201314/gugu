@@ -107,6 +107,7 @@ struct Checker<'m, 'a> {
     slot_reads: Vec<bool>,
     must_use_sites: Vec<super::output::MustUseSite>,
     source_literals: Vec<super::output::SourceLiteral>,
+    embed_literals: Vec<super::output::EmbedLiteral>,
     format_traits: Vec<formatting::PendingFormat>,
 }
 
@@ -216,6 +217,7 @@ pub(super) fn check(
                 borrow_checks: checker.borrow_checks,
                 must_use: checker.must_use_sites,
                 source_literals: checker.source_literals,
+                embed_literals: checker.embed_literals,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
@@ -337,6 +339,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             slot_reads: Vec::new(),
             must_use_sites: Vec::new(),
             source_literals: Vec::new(),
+            embed_literals: Vec::new(),
             format_traits: Vec::new(),
         }
     }

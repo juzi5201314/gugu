@@ -66,6 +66,9 @@ impl Checker<'_, '_> {
             if let Some(result) = self.src_call(callee, path, &args) {
                 return result;
             }
+            if let Some(result) = self.embed_call(callee, path, &args) {
+                return result;
+            }
             let parts = self.model.path(self.module, path);
             if parts == ["panic"] {
                 if self.native_definition().is_some() {

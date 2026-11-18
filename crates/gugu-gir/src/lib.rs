@@ -52,6 +52,7 @@ pub enum SourceInput<'a> {
         require_main: bool,
         cfg: &'a cfg::CfgContext,
         external_packages: &'a BTreeSet<String>,
+        embed: Option<&'a gugu_sema::semantics::comptime::embed::EmbedHost>,
     },
 }
 
@@ -165,6 +166,7 @@ pub fn bootstrap_with(
             require_main,
             cfg,
             external_packages,
+            embed,
         } => check_sources(
             source_map,
             entry,
@@ -173,6 +175,7 @@ pub fn bootstrap_with(
             require_main,
             cfg,
             external_packages,
+            embed,
             queries,
             resources,
             mode,
@@ -245,6 +248,7 @@ fn check_sources(
     require_main: bool,
     cfg: &cfg::CfgContext,
     external_packages: &BTreeSet<String>,
+    embed: Option<&gugu_sema::semantics::comptime::embed::EmbedHost>,
     queries: &crate::query::QueryEngine,
     resources: crate::runtime::RuntimeResources<'_>,
     mode: PrefixMode,
@@ -318,6 +322,7 @@ fn check_sources(
         package_identity,
         external_packages,
         prefix.as_ref().map(prefix::BuiltinPrefix::sema),
+        embed,
     )?;
     let entry_file = source_map.file_id(entry).ok_or_else(|| {
         vec![Diagnostic::error(
@@ -355,6 +360,7 @@ fn check_sources(
         queries,
         &runtime_paths,
         prefix.as_ref(),
+        embed,
     )?;
     let mut lints = semantics::must_use_lints(&modules, &derived.checked, source_map)
         .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
@@ -392,6 +398,7 @@ fn expand_modules(
     package_identity: &str,
     external_packages: &BTreeSet<String>,
     prefix: Option<&sema_prefix::SemaPrefix>,
+    embed: Option<&gugu_sema::semantics::comptime::embed::EmbedHost>,
 ) -> Result<expand::ExpansionInputs, Vec<Diagnostic>> {
     expand::run(
         modules,
@@ -401,6 +408,7 @@ fn expand_modules(
         package_identity,
         external_packages,
         prefix,
+        embed,
     )
     .map_err(|errors| expand::reanchor_errors(errors, source_map))
 }
@@ -455,6 +463,7 @@ fn derive_world(
     queries: &crate::query::QueryEngine,
     runtime_paths: &BTreeSet<String>,
     prefix: Option<&prefix::BuiltinPrefix<'_>>,
+    embed: Option<&gugu_sema::semantics::comptime::embed::EmbedHost>,
 ) -> Result<(names::NameResolution, pipeline::DerivedWorld), Vec<Diagnostic>> {
     let sema_prefix = prefix.map(prefix::BuiltinPrefix::sema);
     let names =
@@ -468,6 +477,7 @@ fn derive_world(
         queries,
         runtime_paths,
         sema_prefix,
+        embed.cloned(),
     )
     .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     let derived = pipeline::derive(sema, source_map, cfg, queries, prefix)
@@ -520,6 +530,7 @@ pub fn derive_builtin(
         BUILTIN_PACKAGE_IDENTITY,
         &BTreeSet::new(),
         None,
+        None,
     )?;
     let module_order = modules.iter().map(|module| module.path.clone()).collect();
     let (names, derived) = derive_world(
@@ -531,6 +542,7 @@ pub fn derive_builtin(
         None,
         queries,
         &runtime_paths,
+        None,
         None,
     )?;
     Ok(BuiltinDerivation {

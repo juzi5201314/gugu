@@ -1,5 +1,13 @@
 use std.runtime.pinning.{pin_prepare, pin_acquire, pin_release}
 
+/// 把输入根内的文件内容按 `[byte; N]` 编译期常量嵌入；路径相对调用
+/// 源文件目录解析，越出编译输入根或读失败都是编译错误。函数体与返回
+/// 类型只作声明占位：真实长度随文件字节数由 comptime evaluator 直接
+/// 折叠，调用只在早期常量位置合法，运行期永不进入本函数。
+pub fn embed_file(comptime path: string) [byte; 0] {
+    panic("std.mem.embed_file 只能在 const/static 初始值等早期常量位置使用")
+}
+
 /// 回调前提升可移动对象；defer 在返回与 panic 展开两条路径归还同一租约。
 pub fn pin[T, R, F: Fn() R](p: &T, f: F) R { unsafe {
     pin_prepare()
