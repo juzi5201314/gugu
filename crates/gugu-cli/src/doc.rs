@@ -204,8 +204,16 @@ fn render_dependencies(
         .into_iter()
         .map(|input| (input.package().to_string(), input.files().clone()))
         .collect();
-    let dep_src_root = std::env::temp_dir().join(format!("gugu-doc-src-{}", std::process::id()));
+    // pid + 纳秒随机后缀：共享 /tmp 上其他本地用户无法预建或冒充固定目录。
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let dep_src_root =
+        std::env::temp_dir().join(format!("gugu-doc-src-{}-{nonce:x}", std::process::id()));
     let mut written = Vec::new();
+    // 失败也要清理临时依赖源码：把 return Err(()) 改为 dep_error + break。
+    let mut dep_error = false;
     for locked in &lock.packages {
         // workspace 成员的文档由上层 package 循环生成，这里跳过。
         if matches!(locked.id.source(), PackageSource::Path { path }
