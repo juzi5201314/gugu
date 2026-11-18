@@ -41,6 +41,45 @@ fn build_dir(workspace_root: &Path, options: &GlobalArgs, package: &Package) -> 
         .join(format!("{}-{}", package.package_name(), short_key(package)))
 }
 
+/// build task 目录的进程互斥：同包并发构建共享 record/inputs/out，
+/// 无锁会混读另一进程的产物。存在性锁文件 + 有界等待。
+struct TaskLock {
+    path: PathBuf,
+}
+
+impl TaskLock {
+    fn acquire(dir: &Path, format: OutputFormat) -> Result<Self, ()> {
+        let path = dir.join("lock");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(_) => return Ok(Self { path: path.clone() }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if std::time::Instant::now() >= deadline {
+                        emit_cli_error(format, "另一个构建进程正在执行该 build task");
+                        return Err(());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(error) => {
+                    emit_cli_error(format, &format!("无法创建 build task 锁文件: {error}"));
+                    return Err(());
+                }
+            }
+        }
+    }
+}
+
+impl Drop for TaskLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 fn short_key(package: &Package) -> String {
     format!(
         "{:016x}",
@@ -93,6 +132,13 @@ fn fingerprint(
         let mut files = Vec::new();
         collect_inputs(package, &mut files);
         for file in files {
+            // 路径与内容都进指纹：改名不改内容也必须重跑。
+            hasher.extend_from_slice(
+                file.strip_prefix(package.root())
+                    .unwrap_or(&file)
+                    .to_string_lossy()
+                    .as_bytes(),
+            );
             hasher.extend_from_slice(&hash_file(&file).to_le_bytes());
         }
     } else {
@@ -100,9 +146,17 @@ fn fingerprint(
             let path = package.root().join(pattern);
             if pattern.contains('*') {
                 for matched in glob_matches(package.root(), pattern) {
+                    hasher.extend_from_slice(
+                        matched
+                            .strip_prefix(package.root())
+                            .unwrap_or(&matched)
+                            .to_string_lossy()
+                            .as_bytes(),
+                    );
                     hasher.extend_from_slice(&hash_file(&matched).to_le_bytes());
                 }
             } else {
+                hasher.extend_from_slice(pattern.as_bytes());
                 hasher.extend_from_slice(&hash_file(&path).to_le_bytes());
             }
         }
@@ -142,6 +196,30 @@ fn glob_matches(root: &Path, pattern: &str) -> Vec<PathBuf> {
                 .is_some_and(|rel| glob_match(pattern, rel))
         })
         .collect()
+}
+
+/// 词法归一记录里的生成路径：必须仍在 `out_dir` 下。记录的 `..`/`.`
+/// 段先折叠，越界（`out/../x`）或根本不带前缀的记录一律拒收；
+/// 相对与绝对写法都归一到记录文本本身，避免与 out_dir 重复拼接。
+fn emit_path(out_dir: &Path, recorded: &str) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut cleaned = PathBuf::new();
+    for component in Path::new(recorded).components() {
+        match component {
+            Component::ParentDir => {
+                if !cleaned.pop() {
+                    return None;
+                }
+            }
+            Component::CurDir => {}
+            other => cleaned.push(other.as_os_str()),
+        }
+    }
+    if cleaned.strip_prefix(out_dir).is_ok() {
+        Some(cleaned)
+    } else {
+        None
+    }
 }
 
 fn glob_match(pattern: &str, text: &str) -> bool {
@@ -189,12 +267,14 @@ fn parse_record(text: &str, out_dir: &Path) -> Record {
             ["rerun-file", pattern] => record.rerun_files.push((*pattern).to_owned()),
             ["rerun-env", name, ..] => record.rerun_envs.push((*name).to_owned()),
             ["rerun-always"] => record.rerun_always = true,
-            ["emit", name, path] => {
-                record.emits.push((
-                    (*name).to_owned(),
-                    out_dir.join(path).to_string_lossy().into_owned(),
-                ));
-            }
+            ["emit", name, path] => match emit_path(out_dir, path) {
+                Some(full) => {
+                    record
+                        .emits
+                        .push(((*name).to_owned(), full.to_string_lossy().into_owned()));
+                }
+                None => record.errors.push(format!("emit 路径越出 out_dir: {path}")),
+            },
             ["define", name] => {
                 record.defines.insert((*name).to_owned(), None);
             }
@@ -203,9 +283,16 @@ fn parse_record(text: &str, out_dir: &Path) -> Record {
                     .defines
                     .insert((*name).to_owned(), Some((*value).to_owned()));
             }
-            ["link", _kind, name, _path] => {
-                // 符号占位导入：只为库名生成 DT_NEEDED 条目；不引用即不解析。
-                record.imports.push(NativeImport::data(*name, *name));
+            ["link", kind, name, _path] => {
+                if *kind == "dynamic" {
+                    // Library 导入：DT_NEEDED/导入目录条目，不伪造符号引用。
+                    record.imports.push(NativeImport::library(*name));
+                } else {
+                    // 静态 .a 需要搜索路径解析，NativeLink 尚无此通道。
+                    record
+                        .errors
+                        .push(format!("link static 目标暂不支持: {name}"));
+                }
             }
             ["link-search", _path] => {}
             ["warning", message] => record.warnings.push((*message).to_owned()),
@@ -247,6 +334,7 @@ pub(crate) fn run_build_task(
     fs::create_dir_all(&out_dir).map_err(|error| {
         emit_cli_error(format, &format!("无法创建 build task 目录: {error}"));
     })?;
+    let _lock = TaskLock::acquire(&dir, format)?;
 
     let record = parse_record(
         &fs::read_to_string(&record_path).unwrap_or_default(),
@@ -307,6 +395,8 @@ pub(crate) fn run_build_task(
                 emit_cli_error(format, &format!("无法设置 build task 可执行位: {error}"));
             })?;
         }
+        // 失败任务可能留下半截记录：先作废指纹缓存，半成品才不会被复用。
+        let _ = fs::remove_file(&inputs_path);
         let _ = fs::remove_file(&record_path);
         let mut command = std::process::Command::new(&binary);
         command.env("GUGU_BUILD_TASK", "1");

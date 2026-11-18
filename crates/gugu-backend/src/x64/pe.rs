@@ -338,6 +338,16 @@ fn imports_for(request: &PeRequest) -> Result<Imports<'_>, String> {
         {
             return Err("动态导入名为空或包含 NUL".into());
         }
+        // Library 导入只登记 DLL 依赖：进导入目录但不产符号与 IAT 表项。
+        if *kind == crate::NativeImportKind::Library {
+            if !imports
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(library))
+            {
+                imports.push((library, Vec::new()));
+            }
+            continue;
+        }
         if let Some(previous) = names.get(symbol.as_str()) {
             if previous.eq_ignore_ascii_case(library) && *kind == crate::NativeImportKind::Function
             {
@@ -372,7 +382,7 @@ fn link_inner(request: &PeRequest) -> Result<(PeImage, BTreeMap<String, u64>), S
         name: symbol, kind, ..
     } in &request.imports
     {
-        if *kind == crate::NativeImportKind::Data {
+        if *kind != crate::NativeImportKind::Function {
             continue;
         }
         if defined.contains_key(symbol) {

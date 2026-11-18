@@ -1,11 +1,13 @@
 //! 显式 native 链接输入；顺序属于 loader 查找语义，规范编码保留声明顺序。
 use serde::{Deserialize, Serialize};
 
-/// 数据导入不能作为普通外调入口。
+/// 数据导入不能作为普通外调入口；Library 只声明 DT_NEEDED/导入目录条目，
+/// 不产生待解析符号。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum NativeImportKind {
     Function,
     Data,
+    Library,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -29,6 +31,17 @@ impl NativeImport {
             library: library.into(),
             name: name.into(),
             kind: NativeImportKind::Data,
+        }
+    }
+
+    /// 仅声明对某个动态库的装载依赖；`name` 与 `library` 相同以通过非空校验，
+    /// 但后端不为它生成符号或重定位。
+    pub fn library(name: impl Into<String>) -> Self {
+        let name = name.into();
+        Self {
+            library: name.clone(),
+            name,
+            kind: NativeImportKind::Library,
         }
     }
 }
@@ -264,7 +277,7 @@ impl NativeLink {
         for NativeImport {
             library,
             name: symbol,
-            ..
+            kind,
         } in &self.imports
         {
             if library.is_empty()
@@ -273,6 +286,9 @@ impl NativeLink {
                 || symbol.contains('\0')
             {
                 return Err("native 导入名为空或包含 NUL".into());
+            }
+            if *kind == NativeImportKind::Library {
+                continue;
             }
             if !symbols.insert(symbol) {
                 return Err(format!("native 符号 {symbol} 重复导入"));

@@ -69,6 +69,21 @@ fn wildcard(pattern: Bytes, text: Bytes, pi: int, ti: int) bool {
     false
 }
 
+// `..` 词法成分可绕开文本前缀规则（`/work/out/../x` 归一后逃逸）：
+// path 模式下含 `..` 段的读写一律拒绝，不做归一化推断。
+fn has_dotdot(value: Bytes) bool {
+    let index: int = 0
+    while index + 1 < value.len() {
+        if byte_at(value, index) == byte(46) && byte_at(value, index + 1) == byte(46) {
+            let before = index == 0 || byte_at(value, index - 1) == byte(47) || byte_at(value, index - 1) == byte(92)
+            let after = index + 2 == value.len() || byte_at(value, index + 2) == byte(47) || byte_at(value, index + 2) == byte(92)
+            if before && after { return true } else {}
+        }
+        index = index + 1
+    }
+    false
+}
+
 // 无通配的规则按目录前缀匹配：`/etc` 覆盖 `/etc/passwd`。
 fn path_prefix(rule: Bytes, value: Bytes) bool {
     if rule.len() == 0 || rule.len() > value.len() || !value.starts_with(rule) { return false }
@@ -87,6 +102,7 @@ fn internal_path(value: string) bool {
 
 // 顺序扫 `;` 分隔规则流，path 模式额外加目录前缀匹配；不必构造规则 Vec。
 fn matches(list: string, value: string, path_mode: bool) bool {
+    if path_mode && has_dotdot(Bytes::from_string(value)) { return false }
     if path_mode && internal_path(value) { return true }
     let raw = Bytes::from_string(env_text(list))
     let v = Bytes::from_string(value)

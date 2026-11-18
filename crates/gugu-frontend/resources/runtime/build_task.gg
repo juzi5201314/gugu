@@ -8,6 +8,7 @@
 use std.collections.{Vec}
 // 内部协议读取必须绕过权限门（env 检查点在 std.env，本模块是工具链内部通道）。
 use std.runtime.environment as env
+use std.runtime.permission as permission
 use std.fs as fs
 use std.io as io
 use std.path.{OsString, Path}
@@ -89,12 +90,13 @@ fn append(line: string) {
 }
 
 fn escape(value: string) string {
-    // TAB 是分隔符：参数里的 TAB 替换为空格，保持一行一条记录。
+    // 一行一条记录：字段内容不得携带 TAB/CR/LF。
     let bytes = Bytes::from_string(value)
     let cleaned = unsafe { alloc_bytes(bytes.len()) }
     for index in 0..bytes.len() {
         let current = match bytes.get(index) { Some(b) => b, None => byte(32) }
-        cleaned[index] = if current == byte(9) { byte(32) } else { current }
+        // TAB 分隔字段、换行分隔记录：三类字符都替换为空格。
+        cleaned[index] = if current == byte(9) || current == byte(10) || current == byte(13) { byte(32) } else { current }
     }
     unsafe { Bytes::from_owned(cleaned) }.to_string_lossy()
 }
@@ -104,7 +106,13 @@ pub fn add_rerun_file(path_or_glob: string) {
 }
 
 pub fn add_rerun_env(name: string) {
-    append("rerun-env\t" + escape(name) + "\t" + escape(env_text(name)))
+    // 声明需 --env-allows 授权；记录只写名字，env 值由宿主在指纹时重读，
+    // 不落盘——否则未授权脚本可让凭据经记录进入 target 目录。
+    match OsString::from_string(name) {
+        Ok(key) => permission::check_env(key),
+        Err(_) => panic("rerun_if_env_changed 收到非法环境变量名"),
+    }
+    append("rerun-env\t" + escape(name))
 }
 
 pub fn mark_rerun_always() {

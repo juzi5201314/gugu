@@ -2,6 +2,7 @@ use std.runtime.resource.{ResourceCell}
 use std.runtime.net_endpoint as endpoint
 use std.runtime.net_platform as native
 use std.runtime.net_transport as transport
+use std.runtime.permission as permission
 use std.runtime.fs_platform.{raw_allocate, raw_free}
 use std.runtime.heap.{heap_word, heap_store_word}
 use std.net.types.{DatagramRead, DatagramRecv, DatagramPacket}
@@ -55,7 +56,10 @@ pub fn send(cell: &ResourceCell, source: Bytes, target: Option[SocketAddr], canc
     let node = transport.allocate(cell.control, transport.SEND, raw, length, cancel)
     defer { transport.dispose(node) }
     heap_store_word(node + 320, if connected { 2 } else { 1 })
-    if let Some(address) = target { heap_store_word(node + 96, native.encode(address, node + transport.ADDRESS)) }
+    if let Some(address) = target {
+        permission::check_net(address.to_string())
+        heap_store_word(node + 96, native.encode(address, node + transport.ADDRESS))
+    }
     let count = transport.submit(node)?
     if count != length { return Err(if count == 0 { Error::WriteZero } else { Error::InvalidData }) }
     Ok(())
@@ -64,7 +68,10 @@ pub fn connect(cell: &ResourceCell, peer: Option[SocketAddr]) Result[(), Error] 
     let op = match peer { Some(_) => transport.UDP_CONNECT, None => transport.UDP_DISCONNECT }
     let node = transport.allocate(cell.control, op, 0, 0, 0)
     defer { transport.dispose(node) }
-    if let Some(address) = peer { heap_store_word(node + 96, native.encode(address, node + transport.ADDRESS)) }
+    if let Some(address) = peer {
+        permission::check_net(address.to_string())
+        heap_store_word(node + 96, native.encode(address, node + transport.ADDRESS))
+    }
     else { heap_store_word(node + 96, 16) }
     _ = transport.submit(node)?
     Ok(())
