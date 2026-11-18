@@ -406,7 +406,32 @@ pub fn __run_tests(
 
 fn string_len(value: string) int = sb(value).len()
 
+fn report_bench(nm: string, sample: BenchSample) {
+    write_str(1, "bench ")
+    write_str(1, nm)
+    write_str(1, " ... samples=")
+    write_uint(1, sample.samples)
+    write_str(1, " iters=")
+    write_uint(1, sample.iters)
+    write_str(1, " median=")
+    write_uint(1, sample.median_ns)
+    write_str(1, "ns/iter min=")
+    write_uint(1, sample.min_ns)
+    write_str(1, " max=")
+    write_uint(1, sample.max_ns)
+    if sample.bytes != uint(0) && sample.median_ns != uint(0) {
+        write_str(1, " thpt=")
+        write_uint(1, sample.bytes * uint(1000000000) / sample.median_ns)
+        write_str(1, "B/s")
+        ()
+    }
+    write_str(1, "\n")
+}
+
 /// bench runner：默认串行，逐用例 spawn + join。返回失败数。
+///
+/// 与 `__run_tests` 同构：先 join 再排空分离后代，最后按组 panics 一次判定；
+/// 成功行只在用例确认无失败归属后打印，不会出现成功与 FAILED 同时输出。
 pub fn __run_bench(
     count: uint,
     spawn: fn(uint) Join[Result[BenchSample, Panic]],
@@ -422,44 +447,41 @@ pub fn __run_bench(
         let join = spawn(id)
         subtree_group_attach(uint(0))
         let panicked = false
-        let ok = false
+        let returned_err = false
+        let panic_handle: uint = uint(0)
+        let got: Option[BenchSample] = None
         match join.wait() {
             Ok(inner) => match inner {
-                Ok(sample) => {
-                    write_str(1, "bench ")
-                    write_str(1, nm)
-                    write_str(1, " ... samples=")
-                    write_uint(1, sample.samples)
-                    write_str(1, " iters=")
-                    write_uint(1, sample.iters)
-                    write_str(1, " median=")
-                    write_uint(1, sample.median_ns)
-                    write_str(1, "ns/iter min=")
-                    write_uint(1, sample.min_ns)
-                    write_str(1, " max=")
-                    write_uint(1, sample.max_ns)
-                    if sample.bytes != uint(0) && sample.median_ns != uint(0) {
-                        write_str(1, " thpt=")
-                        write_uint(1, sample.bytes * uint(1000000000) / sample.median_ns)
-                        write_str(1, "B/s")
-                        ()
-                    }
-                    write_str(1, "\n")
-                    ok = true
-                },
-                Err(_) => write_str(1, "    returned Err\n"),
+                Ok(sample) => { got = Some(sample) },
+                Err(_) => { returned_err = true },
             },
             Err(p) => {
                 panicked = true
-                panic_message(unsafe { std.mem.transmute[Panic, uint](p) })
+                panic_handle = unsafe { std.mem.transmute[Panic, uint](p) }
             },
         }
         while subtree_group_pending(group) != uint(0) { yield_now() }
-        if subtree_group_panics(group) != uint(0) { ok = false }
-        if !ok {
+        let descendants = subtree_group_panics(group)
+        let ok = match got {
+            Some(_) => descendants == uint(0),
+            None => false,
+        }
+        if ok {
+            match got {
+                Some(sample) => report_bench(nm, sample),
+                None => (),
+            }
+        } else {
             write_str(1, "bench ")
             write_str(1, nm)
             write_str(1, " ... FAILED\n")
+            if panicked { panic_message(panic_handle) }
+            if returned_err { write_str(1, "    returned Err\n") }
+            if descendants != uint(0) {
+                write_str(1, "    未处理的分离协程 panic: ")
+                write_uint(1, descendants)
+                write_str(1, "\n")
+            }
             failures = failures + 1
         }
         i = i + 1
