@@ -74,6 +74,10 @@ impl Machine {
         self.memory[address as usize..address as usize + 8].copy_from_slice(&value.to_le_bytes());
     }
     fn address(&self, operand: &Operand) -> u64 {
+        // RIP 相对镜像符号统一落到固定替身地址，邮箱/数据单元测试据此观察读写。
+        if let Operand::Rip(_, _) = operand {
+            return 0xfeed;
+        }
         let Operand::Mem(mem) = operand else {
             panic!("预期基址操作数")
         };
@@ -94,7 +98,7 @@ impl Machine {
             Operand::Reg(Reg::Gpr(r)) => self.get(*r),
             Operand::Reg(Reg::Xmm(r)) => self.floats[*r as usize],
             Operand::Imm(value) => *value,
-            Operand::Mem(_) => self.word(self.address(operand)),
+            Operand::Mem(_) | Operand::Rip(_, _) => self.word(self.address(operand)),
             _ => panic!("未登记操作数 {operand:?}"),
         }
     }
@@ -102,7 +106,7 @@ impl Machine {
         match operand {
             Operand::Reg(Reg::Gpr(r)) => self.set_reg(*r, value),
             Operand::Reg(Reg::Xmm(r)) => self.floats[*r as usize] = value,
-            Operand::Mem(_) => self.put(self.address(operand), value),
+            Operand::Mem(_) | Operand::Rip(_, _) => self.put(self.address(operand), value),
             _ => panic!("未登记写入 {operand:?}"),
         }
     }
@@ -520,7 +524,10 @@ fn linux_worker_publishes_result_before_thread_exit_and_poll_waits_for_tid() {
 fn windows_worker_preserves_argument_lanes_and_normalizes_results() {
     for &(opcode, name, sentinel) in WINDOWS_CALLS {
         for failed in [false, true] {
-            let result = if sentinel == -1 {
+            let result = if name == "CreateEventW" {
+                // HANDLE 保持原生宽度：失败哨兵就是 NULL。
+                if failed { 0 } else { 0x1234567800000042 }
+            } else if sentinel == -1 {
                 if failed { u64::MAX } else { 0x1234567800000042 }
             } else if name == "CreateSymbolicLinkW" {
                 0x12345678ffffff00 | u64::from(!failed)
@@ -547,7 +554,11 @@ fn windows_worker_preserves_argument_lanes_and_normalizes_results() {
                 &[100, 101, 102, 103, 104, 105, 106, 107],
                 "{name}"
             );
-            let normalized = if sentinel == -1 {
+            let normalized = if name == "WaitForSingleObject" {
+                result & 0xffff_ffff
+            } else if name == "CreateEventW" {
+                result
+            } else if sentinel == -1 {
                 result
             } else {
                 u64::from(!failed)
@@ -616,5 +627,38 @@ fn windows_poll_distinguishes_timeout_completion_and_native_failure() {
         } else {
             assert_eq!(machine.calls.last().unwrap().1[0], 2);
         }
+    }
+}
+
+#[test]
+fn windows_signal_install_publishes_mailbox_and_registers_handler() {
+    let mut m = Machine::new(&[("SetConsoleCtrlHandler", 1)]);
+    m.memory.resize(0xfeed + 8, 0);
+    m.set_reg(Rax, REQUEST);
+    m.set_reg(Rbx, 777);
+    assert_eq!(m.execute(windows_signal_install()), Stop::Return);
+    // lea [rip+handler] 在模拟器落地为固定替身地址 0xfeed。
+    assert_eq!(m.calls[0].1[..2], [0xfeed, 1]);
+    assert_eq!(m.get(Rax), 1);
+    assert_eq!(m.word(0xfeed), REQUEST);
+    assert_eq!(m.word(REQUEST + 64), 777);
+    assert_eq!(m.get(Rsp), STACK);
+    assert_eq!(m.get(R12), 0x1234);
+}
+
+#[test]
+fn windows_signal_handler_merges_ctrl_bit_and_signals_event() {
+    for ctrl in [0u64, 1, 2] {
+        let mut m = Machine::new(&[("SetEvent", 1)]);
+        m.memory.resize(0xfeed + 8, 0);
+        m.put(0xfeed, REQUEST);
+        m.put(REQUEST + 64, 555);
+        m.put(REQUEST + 72, 0b10000);
+        m.set_reg(Rcx, ctrl);
+        assert_eq!(m.execute(windows_signal_handler()), Stop::Return);
+        assert_eq!(m.calls[0].1[0], 555);
+        assert_eq!(m.word(REQUEST + 72), 0b10000 | (1 << ctrl));
+        assert_eq!(m.get(Rax), 1);
+        assert_eq!(m.get(Rsp), STACK);
     }
 }

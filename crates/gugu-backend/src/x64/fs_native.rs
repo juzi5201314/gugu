@@ -106,6 +106,17 @@ fn iat(name: &str) -> Operand {
         0,
     )
 }
+/// `__gugu_signal_mailbox`：镜像保留可写单元（16B，见 pe.rs/elf.rs 保留区）。
+/// +0 存信号 ctl 页地址；SetConsoleCtrlHandler 回调无上下文，靠它找到 ctl 页。
+fn signal_mailbox() -> Operand {
+    Operand::Rip(
+        RelocTarget::Lir(Symbol::External {
+            key: hash_domain("gugu-signal-mailbox-v1", b"signal_mailbox"),
+            name: "__gugu_signal_mailbox".to_owned(),
+        }),
+        0,
+    )
+}
 fn win_call(b: &mut Builder, name: &str) {
     b.emit("call", &[K::Mem], Access::Read, vec![iat(name)]);
 }
@@ -183,6 +194,17 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
     .chain([net::fragment(target), net::resolver_fragment(target)])
     .chain([environment::startup(target), environment::symbols(target)])
     .chain([process::call(target), process::worker(target)])
+    .chain(
+        (target == TargetName::X86_64Windows)
+            .then(|| {
+                [
+                    blob("signal_install", windows_signal_install()),
+                    blob("signal_handler", windows_signal_handler()),
+                ]
+            })
+            .into_iter()
+            .flatten(),
+    )
     .collect()
 }
 
@@ -267,6 +289,69 @@ fn windows_clock() -> Builder {
     b
 }
 /// FILETIME 是 1601-01-01 起 100 纳秒计数；减去 Unix epoch 偏移后乘 100 得到墙钟纳秒。
+/// `signal_install(ctl, event)`：把 ctl 页登记进镜像邮箱（ctl+64 存事件句柄），
+/// 然后 `SetConsoleCtrlHandler(signal_handler, TRUE)`。返回 BOOL（非 0 成功）。
+fn windows_signal_install() -> Builder {
+    let mut b = Builder::new();
+    b.emit(
+        "mov",
+        MOV,
+        Access::Write,
+        vec![signal_mailbox(), reg(gpr(Rax))],
+    );
+    store(&mut b, Rax, 64, Rbx);
+    adjust(&mut b, "sub", Rsp, 40);
+    b.emit(
+        "lea",
+        &[K::Mem, K::R64],
+        Access::Address,
+        vec![
+            Operand::Rip(
+                RelocTarget::Lir(mangle::runtime_symbol("signal_handler")),
+                0,
+            ),
+            reg(gpr(Rcx)),
+        ],
+    );
+    number(&mut b, Rdx, 1);
+    win_call(&mut b, "SetConsoleCtrlHandler");
+    dword_result(&mut b);
+    adjust(&mut b, "add", Rsp, 40);
+    ret(&mut b);
+    b
+}
+/// `signal_handler(ctrl)`：控制台 ctrl 回调（ecx = CTRL_* 事件码）。
+/// 运行在 Windows 自起的 OS 线程上，只做两件原子小事：把 `1 << ctrl` 并入
+/// ctl+72 的 signo 掩码、然后 SetEvent(ctl+64)；绝不触碰托管代码或堆。
+fn windows_signal_handler() -> Builder {
+    let mut b = Builder::new();
+    b.emit(
+        "mov",
+        MOV,
+        Access::Read,
+        vec![signal_mailbox(), reg(gpr(Rax))],
+    );
+    number(&mut b, Rdx, 1);
+    b.emit(
+        "shl",
+        &[K::Rm32, K::Cl],
+        Access::ReadWrite,
+        vec![reg(gpr(Rdx)), reg(gpr(Rcx))],
+    );
+    b.emit(
+        "or",
+        &[K::Rm32, K::R32],
+        Access::ReadWrite,
+        vec![mem_base(gpr(Rax), 72), reg(gpr(Rdx))],
+    );
+    load(&mut b, Rcx, Rax, 64);
+    adjust(&mut b, "sub", Rsp, 40);
+    win_call(&mut b, "SetEvent");
+    adjust(&mut b, "add", Rsp, 40);
+    number(&mut b, Rax, 1);
+    ret(&mut b);
+    b
+}
 fn windows_wall_clock() -> Builder {
     let mut b = Builder::new();
     adjust(&mut b, "sub", Rsp, 40);
@@ -575,6 +660,8 @@ const WINDOWS_CALLS: &[(i32, &str, i32)] = &[
     (18, "DeviceIoControl", 0),
     (19, "GetFinalPathNameByHandleW", 0),
     (20, "SetFileInformationByHandle", 0),
+    (21, "CreateEventW", 0),
+    (22, "WaitForSingleObject", -1),
 ];
 fn windows_worker() -> Builder {
     let mut b = Builder::new();
@@ -606,11 +693,25 @@ fn windows_worker() -> Builder {
         win_call(&mut b, name);
         if name == "CreateSymbolicLinkW" {
             b.emit("and", IMM, Access::ReadWrite, vec![reg(gpr(Rax)), imm(255)]);
+        } else if name == "WaitForSingleObject" {
+            // 失败哨兵是 WAIT_FAILED (0xFFFFFFFF) 而非 -1；先零扩展再按 dword 比较。
+            dword_result(&mut b);
+        } else if name == "CreateEventW" {
+            // 返回 HANDLE 保持原生宽度；失败哨兵是 NULL，不能 dword 截断。
         } else if failure == 0 {
             dword_result(&mut b);
         }
         store(&mut b, R12, VALUE, Rax);
-        compare(&mut b, Rax, failure);
+        if name == "WaitForSingleObject" {
+            b.emit(
+                "cmp",
+                &[K::Rm32, K::Imm32],
+                Access::Read,
+                vec![reg(gpr(Rax)), imm(0xffff_ffff)],
+            );
+        } else {
+            compare(&mut b, Rax, failure);
+        }
         jump(&mut b, "jne", done);
         win_call(&mut b, "GetLastError");
         dword_result(&mut b);

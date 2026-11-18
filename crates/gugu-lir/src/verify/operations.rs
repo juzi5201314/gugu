@@ -724,7 +724,11 @@ fn runtime_machine_call_valid(
         Kind::CallbackQueue => {
             args.len() == 3 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
-        Kind::FsStart | Kind::NetCall | Kind::StartupCall | Kind::ProcessCall => {
+        Kind::FsStart
+        | Kind::NetCall
+        | Kind::StartupCall
+        | Kind::ProcessCall
+        | Kind::SignalInstall => {
             args.len() == 2 && args.iter().all(word) && results.len() == 1 && word(&results[0])
         }
     }

@@ -727,6 +727,7 @@ fn runtime_machine_op(
         Source::MonotonicNanos => Target::MonotonicNanos,
         Source::WallNanos => Target::WallNanos,
         Source::ParallelismProbe => Target::ParallelismProbe,
+        Source::SignalInstall => Target::SignalInstall,
         Source::StackReadWord => Target::StackReadWord,
         Source::StackCopyRaw => Target::StackCopyRaw,
         Source::CageControl => Target::CageControl,

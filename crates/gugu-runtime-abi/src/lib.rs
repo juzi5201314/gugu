@@ -318,6 +318,9 @@ pub enum RuntimeMachineOp {
     ParallelismProbe,
     /// UTC 墙钟纳秒（Unix epoch 起），供 `SystemTime` 观察；可因校时跳变。
     WallNanos,
+    /// Windows 控制台信号登记：(ctl 页, 事件句柄) → BOOL。
+    /// handler 是纯机器片段，只写 ctl 请求槽并 SetEvent，绝不运行托管代码。
+    SignalInstall,
     /// 以当前 stack_high 相对深度读取机器字，不增长栈。
     StackReadWord,
     /// 在可移动协程栈与非移动 raw 缓冲之间精确复制字节。
@@ -350,6 +353,7 @@ impl RuntimeMachineOp {
             Self::MonotonicNanos => "monotonic_nanos",
             Self::ParallelismProbe => "parallelism_probe",
             Self::WallNanos => "wall_nanos",
+            Self::SignalInstall => "signal_install",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
             Self::CageControl => "cage_control",
@@ -491,6 +495,14 @@ pub const GLUE_DEFS: &[GlueDef] = &[
     },
     GlueDef {
         glue: "parallelism_probe",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "signal_install",
+        def: GlueDefKind::Fragment,
+    },
+    GlueDef {
+        glue: "signal_handler",
         def: GlueDefKind::Fragment,
     },
     GlueDef {

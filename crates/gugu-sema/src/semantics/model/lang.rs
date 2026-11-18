@@ -96,6 +96,8 @@ pub enum RuntimeMachineIntrinsic {
     MonotonicNanos,
     WallNanos,
     ParallelismProbe,
+    /// Windows 控制台信号登记：(ctl 页, 事件句柄) → BOOL；Windows 目标专用。
+    SignalInstall,
     StackReadWord,
     StackCopyRaw,
     CageControl,
@@ -106,7 +108,7 @@ pub enum RuntimeMachineIntrinsic {
 
 impl RuntimeMachineIntrinsic {
     /// 全部操作的稠密登记顺序；`from_path` 按 `name()` 匹配（与 `PlatformIntrinsic` 同法）。
-    pub const ALL: [Self; 31] = [
+    pub const ALL: [Self; 32] = [
         Self::ContextSwitch,
         Self::ContextRestore,
         Self::CurrentSlot,
@@ -132,6 +134,7 @@ impl RuntimeMachineIntrinsic {
         Self::MonotonicNanos,
         Self::WallNanos,
         Self::ParallelismProbe,
+        Self::SignalInstall,
         Self::StackReadWord,
         Self::StackCopyRaw,
         Self::CageControl,
@@ -174,6 +177,7 @@ impl RuntimeMachineIntrinsic {
             Self::MonotonicNanos => "monotonic_nanos",
             Self::WallNanos => "wall_nanos",
             Self::ParallelismProbe => "parallelism_probe",
+            Self::SignalInstall => "signal_install",
             Self::StackReadWord => "stack_read_word",
             Self::StackCopyRaw => "stack_copy_raw",
             Self::CageControl => "cage_control",
@@ -211,6 +215,7 @@ impl RuntimeMachineIntrinsic {
             Self::AtomicStoreRelease
             | Self::AtomicFetchOrAcqRel
             | Self::AtomicFetchAndAcqRel
+            | Self::SignalInstall
             | Self::FsStart
             | Self::StartupCall
             | Self::ProcessCall
@@ -237,6 +242,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::MonotonicNanos
                 | Self::WallNanos
                 | Self::ParallelismProbe
+                | Self::SignalInstall
                 | Self::StackReadWord
                 | Self::CageControl
                 | Self::CallbackControl
@@ -262,6 +268,7 @@ impl RuntimeMachineIntrinsic {
                 | Self::MonotonicNanos
                 | Self::WallNanos
                 | Self::ParallelismProbe
+                | Self::SignalInstall
                 | Self::StackReadWord
                 | Self::StackCopyRaw
                 | Self::CageControl

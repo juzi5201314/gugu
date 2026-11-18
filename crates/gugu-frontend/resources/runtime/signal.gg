@@ -18,7 +18,8 @@ const RING_ENTRY_BYTES: uint = 16
 const SUB_BYTES: uint = 96
 const NODE_BYTES: uint = 32
 
-/* ctl 页：+0 subs, +8 fd, +16 mask, +24 req, +32 stack, +40 siginfo buf, +48 mask cell, +56 inflight。*/
+/* ctl 页：+0 subs, +8 fd, +16 mask, +24 req, +32 stack, +40 siginfo buf, +48 mask cell, +56 inflight；
+   Windows 专用 +64 事件句柄（signal_install 片段写入）、+72 signo 掩码位图（handler 片段并入）。*/
 static ctl: uint = 0
 /* 订阅：+0 next, +8 mask, +16 pending_mask, +24 ring, +32 capacity, +40 head, +48 count, +56 dropped, +64 closed, +72/+80 waiter 链。*/
 /* 等待节点：+0 next, +8 hot, +16 sub。*/
@@ -62,10 +63,16 @@ fn arm(extra_mask: uint) uint { unsafe {
     if fd == 0 { put(page + 8, created.value) }
     0
 } }
+/* Windows 捕获面：CreateEventW 创建 auto-reset 事件后 signal_install 片段登记
+   SetConsoleCtrlHandler；回调是纯机器代码，只把 ctrl 位并入 ctl+72 并 SetEvent。*/
 #[cfg(os = "windows")]
 fn arm(extra_mask: uint) uint { unsafe {
     let page = control()
     put(page + 16, word(page + 16) | extra_mask)
+    if word(page + 64) != 0 { return 0 }
+    let created = native_call(21, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+    if created.error != 0 { return created.error }
+    if std.runtime.signal_install(page, created.value) == 0 { return 1 }
     0
 } }
 
@@ -118,8 +125,24 @@ fn pump(page: uint) { unsafe {
     put(req + 32, SIGINFO_BYTES)
     if std.runtime.fs_start(req, word(page + 32)) == 0 { put(page + 56, 1) }
 } }
+/* Windows 泵：native worker 在事件上 WaitForSingleObject(INFINITE)；
+   事件由 handler 片段 SetEvent，auto-reset 保证返回后自动清位。*/
 #[cfg(os = "windows")]
-fn pump(page: uint) { _ = page }
+fn pump(page: uint) { unsafe {
+    if word(page + 64) == 0 || word(page + 56) != 0 { return }
+    if word(page + 24) == 0 {
+        put(page + 24, control_allocate(REQUEST_BYTES))
+        put(page + 32, control_allocate(WORKER_STACK_BYTES) + WORKER_STACK_BYTES)
+    }
+    let req = word(page + 24)
+    let i: uint = 0
+    while i < REQUEST_BYTES { put(req + i, 0)
+ i = i + 8 }
+    put(req + 8, 22)
+    put(req + 16, word(page + 64))
+    put(req + 24, 4294967295)
+    if std.runtime.fs_start(req, word(page + 32)) == 0 { put(page + 56, 1) }
+} }
 
 /* signalfd_siginfo 的 ssi_signo 在 +0（u32）。*/
 #[cfg(os = "linux")]
@@ -131,8 +154,22 @@ fn harvest(page: uint) { unsafe {
     if word(req + REQUEST_ERROR) != 0 || word(req + REQUEST_VALUE) < 32 { return }
     deliver(word(word(page + 40)) & 4294967295)
 } }
+/* Windows 收获：等待返回后把 ctl+72 掩码各位翻译成 signo 逐位投递（ctrl+1）。*/
 #[cfg(os = "windows")]
-fn harvest(page: uint) { _ = page }
+fn harvest(page: uint) { unsafe {
+    if word(page + 56) == 0 { return }
+    let req = word(page + 24)
+    if std.runtime.fs_poll(req) == 0 { return }
+    put(page + 56, 0)
+    if word(req + REQUEST_ERROR) != 0 { return }
+    let mask = word(page + 72)
+    put(page + 72, 0)
+    let signo: uint = 1
+    while signo <= 8 {
+        if mask & mask_bit(signo) != 0 { deliver(signo) }
+        signo = signo + 1
+    }
+} }
 
 fn deliver(signo: uint) { unsafe {
     if signo == 0 { return }

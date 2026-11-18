@@ -506,6 +506,9 @@ fn defined_layout(request: &LinkRequest, header_end: u64) -> Result<BTreeMap<Str
     reserved = align_up(reserved + entry::Rt0Payload::bytes(), 16)?;
     map.insert("__gugu_cage_control".to_owned(), reserved);
     reserved += u64::from(crate::runtime::cage_control::CageControlRecord::byte_len());
+    // Windows 信号回调邮箱：SetConsoleCtrlHandler 回调无上下文，经该单元找到 ctl 页。
+    map.insert("__gugu_signal_mailbox".to_owned(), reserved);
+    reserved += 16;
     // 静态块放在载荷之后：符号本身是可写数据，值槽必须能被 release 写入。
     for (name, bytes) in &request.globals {
         if map.contains_key(name) {

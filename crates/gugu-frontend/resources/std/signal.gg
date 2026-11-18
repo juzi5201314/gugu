@@ -27,7 +27,8 @@ pub struct SignalSubscription {
     cell: ResourceCell,
 }
 
-/* Linux 按 POSIX signo 编码；Windows 按控制台事件编码（Interrupt=0, Break=1, Terminate=2）。*/
+/* Linux 按 POSIX signo 编码；Windows 按控制台事件编码（Interrupt=1, Break=2, Terminate=3，
+   即 CTRL_* 事件码 +1，避开 signo=0 的空哨兵）。*/
 #[cfg(os = "linux")]
 fn signo(signal: Signal) uint {
     match signal {
@@ -41,9 +42,9 @@ fn signo(signal: Signal) uint {
 #[cfg(os = "windows")]
 fn signo(signal: Signal) uint {
     match signal {
-        Signal::Interrupt => 0,
-        Signal::Terminate => 2,
-        Signal::Break => 1,
+        Signal::Interrupt => 1,
+        Signal::Break => 2,
+        Signal::Terminate => 3,
     }
 }
 #[cfg(os = "linux")]
@@ -57,8 +58,8 @@ fn signal_of(value: uint) Signal {
 }
 #[cfg(os = "windows")]
 fn signal_of(value: uint) Signal {
-    if value == 0 { return Signal::Interrupt }
-    if value == 1 { return Signal::Break }
+    if value == 1 { return Signal::Interrupt }
+    if value == 2 { return Signal::Break }
     Signal::Terminate
 }
 
@@ -73,9 +74,6 @@ fn subscribe_inner(signals: &[Signal], capacity: uint) Result[SignalSubscription
         mask = mask | (uint(1) << (value - 1))
         i = i + 1
     }
-    /* Windows 控制台捕获面尚未实现：订阅结构正常建立但不投递。*/
-    #[cfg(os = "windows")]
-    { return Err(Error::Unsupported) }
     let control = cap.subscribe(mask, capacity)
     if control == 0 { return Err(Error::Unsupported) }
     Ok(SignalSubscription { cell: ResourceCell { control: control } })

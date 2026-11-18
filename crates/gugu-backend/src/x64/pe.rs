@@ -778,6 +778,10 @@ fn data_with_reserved(
             .checked_add(*bytes)
             .ok_or_else(|| "静态块偏移溢出".to_owned())?;
     }
+    // Windows 信号回调邮箱：SetConsoleCtrlHandler 回调无上下文，经该单元找到 ctl 页。
+    end = align_up(end, 16)?;
+    blocks.insert("__gugu_signal_mailbox".to_owned(), end);
+    end += 16;
     let mut data = iat;
     data.resize(
         usize::try_from(end).map_err(|_| "保留区超出镜像".to_owned())?,
