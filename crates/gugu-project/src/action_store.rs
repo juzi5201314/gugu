@@ -104,18 +104,37 @@ impl ActionStore {
             created_at: now,
             last_used_at: now,
         };
-        let tmp = self.root.join("tmp").join(format!("publish-{now:x}"));
+        // 唯一临时目录：同秒并发发布互不踩踏。
+        let tmp = self
+            .root
+            .join("tmp")
+            .join(format!("publish-{}", super::temporary_suffix()));
         fs::create_dir_all(&tmp).map_err(|error| io_error(&tmp, error))?;
         write_file(&tmp.join(META_FILE), meta_json(&meta)?.as_bytes())?;
         write_file(&tmp.join(PAYLOAD_FILE), payload)?;
         let destination = self.entry_dir(key);
-        if destination.exists() {
-            fs::remove_dir_all(&destination).map_err(|e| io_error(&destination, e))?;
-        }
         if let Some(parent) = destination.parent() {
             fs::create_dir_all(parent).map_err(|e| io_error(parent, e))?;
         }
-        fs::rename(&tmp, &destination).map_err(|e| io_error(&destination, e))?;
+        // 旧 entry 先原位移走再发布新 entry：重命名失败时回滚，读者至多看到
+        // 一次 miss（按未命中重算），不会读到半更新状态。
+        let replaced = destination
+            .parent()
+            .unwrap_or(&self.root)
+            .join(format!("replaced-{}", super::temporary_suffix()));
+        let had_previous = destination.exists();
+        if had_previous {
+            fs::rename(&destination, &replaced).map_err(|e| io_error(&destination, e))?;
+        }
+        if let Err(error) = fs::rename(&tmp, &destination) {
+            if had_previous {
+                let _ = fs::rename(&replaced, &destination);
+            }
+            return Err(io_error(&destination, error));
+        }
+        if had_previous {
+            let _ = fs::remove_dir_all(&replaced);
+        }
         Ok(destination)
     }
 
