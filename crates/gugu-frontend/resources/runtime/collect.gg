@@ -60,8 +60,8 @@ pub const COORDINATOR_EVAC_LIMIT_OFFSET: uint = 64
 pub const COORDINATOR_WORKLIST_COUNT_OFFSET: uint = 72
 /// 工作列表溢出页链：`[0]=next、[8]=count、[16..] 为对象地址槽`，每页 510 槽。
 /// 页内列表写满后追加宿主页，队列只是缓冲、不是容量上限。
-pub const COORDINATOR_WORKLIST_SPILL_OFFSET: uint = 184
-pub const COORDINATOR_WORKLIST_SPILL_TAIL_OFFSET: uint = 192
+pub const COORDINATOR_WORKLIST_SPILL_OFFSET: uint = 208
+pub const COORDINATOR_WORKLIST_SPILL_TAIL_OFFSET: uint = 216
 pub const GC_WORKLIST_SPILL_ENTRIES: uint = 510
 pub const COORDINATOR_MINOR_CYCLES_OFFSET: uint = 80
 pub const COORDINATOR_EVACUATED_OFFSET: uint = 88
