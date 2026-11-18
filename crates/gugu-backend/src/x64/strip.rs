@@ -21,7 +21,6 @@ pub struct StripResult {
 const ELF_MAGIC: &[u8; 4] = b"\x7fELF";
 const EI_CLASS_64: u8 = 2;
 const SHT_SYMTAB: u32 = 2;
-const SHT_STRTAB: u32 = 3;
 const SHT_DEBUG_BASE: u32 = 0x7000_0000;
 const SHT_NOTE: u32 = 7;
 const SHF_ALLOC: u64 = 0x2;
@@ -61,13 +60,17 @@ fn strip_elf(bytes: &[u8]) -> Result<StripResult, String> {
     }
     let shstr_off = u64_at(bytes, e_shoff + e_shstrndx * e_shentsize + 0x18) as usize;
     let shstr = &bytes[shstr_off..];
-    // 保留规则：SHF_ALLOC、规范禁删名单中的节名，以及 NULL/shstrtab 结构节。
-    let mut keep = Vec::with_capacity(e_shnum);
+    // 原位删除：把可删节的 64 字节节表条目清成 SHT_NULL。节体偏移、
+    // e_shnum/e_shstrndx、program header 引用全部不动，所以镜像仍然可执行；
+    // 被删节的节体变成死字节区（工具链产物中本来就没有这些节）。
+    let mut out = bytes.to_vec();
+    let mut removed_bytes = 0_u64;
     for index in 0..e_shnum {
         let at = e_shoff + index * e_shentsize;
         let name_off = u32_at(bytes, at) as usize;
         let sh_type = u32_at(bytes, at + 4);
         let flags = u64_at(bytes, at + 8);
+        let body_size = u64_at(bytes, at + 0x20);
         let name = section_name(shstr, name_off);
         let required = index == 0
             || index == e_shstrndx
@@ -79,59 +82,14 @@ fn strip_elf(bytes: &[u8]) -> Result<StripResult, String> {
             || sh_type >= SHT_DEBUG_BASE
             || name.starts_with(".debug")
             || name == ".comment";
-        keep.push(!(strippable && !required));
-    }
-    // 重建：顺序写出保留节内容 + 新节表；偏移前移到内容区之后。
-    let mut out = bytes[..e_shoff].to_vec();
-    let mut name_pool = Vec::new();
-    let mut new_headers = Vec::new();
-    let mut written = 0_usize;
-    for index in 0..e_shnum {
-        if !keep[index] {
-            continue;
+        if strippable && !required {
+            out[at..at + 64].fill(0);
+            removed_bytes += body_size;
         }
-        let at = e_shoff + index * e_shentsize;
-        let name_off = u32_at(bytes, at) as usize;
-        let name = section_name(shstr, name_off);
-        name_pool.extend_from_slice(name.as_bytes());
-        name_pool.push(0);
-        let content_off = u64_at(bytes, at + 0x18) as usize;
-        let size = u64_at(bytes, at + 0x20) as usize;
-        let sh_type = u32_at(bytes, at + 4);
-        let body_off = out.len();
-        if sh_type != 8 /* SHT_NOBITS */ && content_off + size <= bytes.len() {
-            out.extend_from_slice(&bytes[content_off..content_off + size]);
-        }
-        let mut header = bytes[at..at + 64].to_vec();
-        header[0..4].copy_from_slice(&(name_pool.len() - name.len() - 1).to_le_bytes()[..4]);
-        header[0x18..0x20].copy_from_slice(&(body_off as u64).to_le_bytes());
-        header[0x28..0x30].copy_from_slice(&(u64::try_from(written).unwrap_or(0)).to_le_bytes());
-        new_headers.push(header);
-        written += 1;
     }
-    // 新 shstrtab 内容：先补 .shstrtab 名，再串全部保留节名。
-    let shstrtab_name_off = name_pool.len();
-    name_pool.extend_from_slice(b".shstrtab\0");
-    let shstrtab_off = out.len();
-    out.extend_from_slice(&name_pool);
-    let mut shstrtab_header = [0_u8; 64];
-    shstrtab_header[0..4].copy_from_slice(&shstrtab_name_off.to_le_bytes());
-    shstrtab_header[4..8].copy_from_slice(&SHT_STRTAB.to_le_bytes());
-    shstrtab_header[0x18..0x20].copy_from_slice(&(shstrtab_off as u64).to_le_bytes());
-    shstrtab_header[0x20..0x28].copy_from_slice(&(name_pool.len() as u64).to_le_bytes());
-    new_headers.push(shstrtab_header.to_vec());
-    let new_shoff = out.len();
-    let new_shnum = new_headers.len();
-    let new_shstrndx = new_shnum - 1;
-    for header in &new_headers {
-        out.extend_from_slice(header);
-    }
-    out[0x28..0x30].copy_from_slice(&(new_shoff as u64).to_le_bytes());
-    out[0x3c..0x3e].copy_from_slice(&(new_shnum as u16).to_le_bytes());
-    out[0x3e..0x40].copy_from_slice(&(new_shstrndx as u16).to_le_bytes());
     Ok(StripResult {
-        removed_bytes: bytes.len().saturating_sub(out.len()) as u64,
         bytes: out,
+        removed_bytes,
     })
 }
 
