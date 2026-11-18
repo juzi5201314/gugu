@@ -42,11 +42,12 @@ fn build_dir(workspace_root: &Path, options: &GlobalArgs, package: &Package) -> 
 }
 
 /// build task 目录的进程互斥：同包并发构建共享 record/inputs/out，
-/// 无锁会混读另一进程的产物。锁文件记录持有者 pid，持有者已退出
-/// （Ctrl+C 等路径不经过 Drop）时后到的进程回收锁而不是等死；
-/// 存活持有者下有界等待。
+/// 无锁会混读另一进程的产物。锁文件记录宿主与 build task 子进程 pid，
+/// 全部已退出（Ctrl+C 等路径不经过 Drop）时后到的进程回收锁而不是等死；
+/// 回收用原子 rename 认领，不删他人文件；存活持有者下有界等待。
 struct TaskLock {
     path: PathBuf,
+    pid: u32,
 }
 
 impl TaskLock {
@@ -60,13 +61,26 @@ impl TaskLock {
                 .open(&path)
             {
                 Ok(mut file) => {
-                    let _ = writeln!(file, "{}", std::process::id());
-                    return Ok(Self { path: path.clone() });
+                    let pid = std::process::id();
+                    let _ = writeln!(file, "{pid}");
+                    return Ok(Self {
+                        path: path.clone(),
+                        pid,
+                    });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
                     if lock_is_stale(&path) {
-                        let _ = fs::remove_file(&path);
-                        continue;
+                        match try_reclaim(&path) {
+                            Ok(true) => continue,
+                            Ok(false) => {}
+                            Err(error) => {
+                                emit_cli_error(
+                                    format,
+                                    &format!("无法回收 build task 残留锁: {error}"),
+                                );
+                                return Err(());
+                            }
+                        }
                     }
                     if std::time::Instant::now() >= deadline {
                         emit_cli_error(format, "另一个构建进程正在执行该 build task");
@@ -81,17 +95,54 @@ impl TaskLock {
             }
         }
     }
+
+    /// build task 子进程与宿主共持锁：宿主退出而子进程存活时锁仍有效。
+    fn watch_child(&self, pid: u32) {
+        let _ = fs::write(&self.path, format!("{}\n{}\n", self.pid, pid));
+    }
 }
 
-/// 锁持有者已退出即视为残留锁；读不到合法 pid 一律按持有中处理。
+/// 原子认领残留锁：rename 把文件抢先移出锁位，随后重新读内容——
+/// 仍是死 pid 才可删，若捕获的是他人刚写的活锁则尽量链接回原位。
+/// 返回 Ok(true) 表示锁位已空可重试 create_new，Ok(false) 表示锁有人持有。
+fn try_reclaim(path: &Path) -> Result<bool, std::io::Error> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.as_nanos())
+        .unwrap_or(0);
+    let claim = path.with_extension(format!("reclaim-{}-{nanos:x}", std::process::id()));
+    match fs::rename(path, &claim) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(error) => return Err(error),
+    }
+    if lock_is_stale(&claim) {
+        let _ = fs::remove_file(&claim);
+        Ok(true)
+    } else {
+        // 原路径已被新持有者占住时链接失败，claim 只是过期副本，删除即可。
+        let _ = fs::hard_link(&claim, path);
+        let _ = fs::remove_file(&claim);
+        Ok(false)
+    }
+}
+
+/// 锁内所有记录的 pid 都已退出才算残留锁；读不到合法 pid 按持有中处理。
 fn lock_is_stale(path: &Path) -> bool {
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
-    let Ok(pid) = text.trim().parse::<u32>() else {
-        return false;
-    };
-    !pid_alive(pid)
+    let mut any = false;
+    for token in text.split_whitespace() {
+        let Ok(pid) = token.parse::<u32>() else {
+            continue;
+        };
+        any = true;
+        if pid_alive(pid) {
+            return false;
+        }
+    }
+    any
 }
 
 #[cfg(target_os = "linux")]
@@ -107,7 +158,13 @@ fn pid_alive(_pid: u32) -> bool {
 
 impl Drop for TaskLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // 极端竞态下锁文件可能已被新持有者占住；只删仍写着自己 pid 的锁。
+        let owned = fs::read_to_string(&self.path)
+            .map(|text| text.split_whitespace().any(|t| t == self.pid.to_string()))
+            .unwrap_or(false);
+        if owned {
+            let _ = fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -383,7 +440,7 @@ pub(crate) fn run_build_task(
     fs::create_dir_all(&out_dir).map_err(|error| {
         emit_cli_error(format, &format!("无法创建 build task 目录: {error}"));
     })?;
-    let _lock = TaskLock::acquire(&dir, format)?;
+    let lock = TaskLock::acquire(&dir, format)?;
 
     let record = parse_record(
         &fs::read_to_string(&record_path).unwrap_or_default(),
@@ -474,7 +531,11 @@ pub(crate) fn run_build_task(
         if !std::io::stdin().is_terminal() {
             command.env("GUGU_PERM_NONINTERACTIVE", "1");
         }
-        let status = command.status().map_err(|error| {
+        let mut child = command.spawn().map_err(|error| {
+            emit_cli_error(format, &format!("无法执行 build task: {error}"));
+        })?;
+        lock.watch_child(child.id());
+        let status = child.wait().map_err(|error| {
             emit_cli_error(format, &format!("无法执行 build task: {error}"));
         })?;
         if !status.success() {
