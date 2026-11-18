@@ -282,13 +282,19 @@ fn check_cfg_independence(
     Ok(())
 }
 
-/// 返回源文本里 `cfg(...)` 的括号内谓词。
+/// 返回源文本里 `cfg(...)` 属性的括号内谓词。
 fn cfg_predicates(source: &str) -> Vec<String> {
     let mut found = Vec::new();
     let bytes = source.as_bytes();
     let mut index = 0;
     while let Some(offset) = source[index..].find("cfg(") {
-        let start = index + offset + "cfg(".len();
+        let hit = index + offset;
+        // 只有 `#[cfg(` / `#![cfg(` 是属性；标识符或调用中的 `cfg(` 子串不是谓词。
+        if !is_attribute_cfg(bytes, hit) {
+            index = hit + "cfg(".len();
+            continue;
+        }
+        let start = hit + "cfg(".len();
         let mut depth = 1_u32;
         let mut cursor = start;
         while cursor < bytes.len() && depth > 0 {
@@ -306,6 +312,28 @@ fn cfg_predicates(source: &str) -> Vec<String> {
     found
 }
 
+/// 判断 `cfg(` 命中是否位于 `#[`/`#![` 属性括号内。
+fn is_attribute_cfg(bytes: &[u8], hit: usize) -> bool {
+    let mut cursor = hit;
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    if cursor == 0 || bytes[cursor - 1] != b'[' {
+        return false;
+    }
+    cursor -= 1;
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    if cursor > 0 && bytes[cursor - 1] == b'!' {
+        cursor -= 1;
+        while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+            cursor -= 1;
+        }
+    }
+    cursor > 0 && bytes[cursor - 1] == b'#'
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +348,12 @@ mod tests {
                 "all(unix, not(feature = \"x\"))".to_owned(),
             ]
         );
+    }
+
+    #[test]
+    fn cfg_predicates_ignore_identifier_and_call_positions() {
+        let source = "fn define_cfg(name: string) {}\n#![cfg(os = \"linux\")]\nlet x = my_cfg(foo)";
+        assert_eq!(cfg_predicates(source), vec!["os = \"linux\"".to_owned()]);
     }
 
     #[test]
