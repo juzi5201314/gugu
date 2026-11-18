@@ -173,8 +173,29 @@ fn try_reclaim(path: &Path) -> Result<bool, std::io::Error> {
         let _ = fs::remove_file(&claim);
         Ok(true)
     } else {
-        // 原路径已被新持有者占住时链接失败，claim 只是过期副本，删除即可。
-        let _ = fs::hard_link(&claim, path);
+        // 捕获的是他人活锁：把内容放回锁位。优先 hard_link（原子创建）；
+        // 不支持硬链接的文件系统退回 create_new + 回写内容。锁位已被新
+        // 持有者占住时 claim 只是过期副本，删除即可。
+        if fs::hard_link(&claim, path).is_ok() {
+            let _ = fs::remove_file(&claim);
+            return Ok(false);
+        }
+        let content = fs::read(&claim).unwrap_or_default();
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => {
+                use std::io::Write;
+                let _ = file.write_all(&content);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                let _ = fs::remove_file(&claim);
+                return Err(error);
+            }
+        }
         let _ = fs::remove_file(&claim);
         Ok(false)
     }
