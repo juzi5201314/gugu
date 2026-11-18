@@ -37,7 +37,7 @@ use gugu_sema::modules::logical_to_module_path;
 use gugu_sema::modules::parse_modules;
 pub use gugu_sema::modules::source_map_span;
 pub use gugu_sema::{
-    BUILTIN_PACKAGE_IDENTITY, ParsedModule, ast, attr, cfg, expand, format, hir,
+    BUILTIN_PACKAGE_IDENTITY, ParsedModule, ast, attr, cfg, docs, expand, format, hir,
     is_probe_builtin_source, names, sema_prefix, semantics, types,
 };
 
@@ -78,6 +78,8 @@ pub struct FrontendOutput {
     pub mono: mono::MonoWorldV1,
     pub gir: gir::GirWorldV1,
     pub gir_stats: gir::pass::GirPassStats,
+    /// 公共 API 文档表；`gugu doc` 的消费产物。
+    pub docs: docs::DocWorld,
     pub lints: Vec<Diagnostic>,
 }
 
@@ -157,6 +159,7 @@ pub fn bootstrap_with(
             mono: mono::empty_world(),
             gir: gir::empty_world(),
             gir_stats: gir::pass::GirPassStats::default(),
+            docs: docs::DocWorld::default(),
             lints: Vec::new(),
         }),
         SourceInput::Sources {
@@ -326,7 +329,9 @@ fn check_sources(
         embed,
     )?;
     // harness 域：收集测试/bench 与 doctest，生成 `__gugu_harness` 模块并把入口指向它。
-    let harness_entry = harness::apply(&mut modules, source_map, cfg)?;
+    // doctest 模块按展开登记，其诊断回锚到文档围栏所在行。
+    let harness_entry = harness::apply(&mut modules, source_map, cfg)
+        .map_err(|errors| expand::reanchor_errors(errors, source_map))?;
     let entry_file = match harness_entry {
         Some(file) => file,
         None => source_map.file_id(entry).ok_or_else(|| {
@@ -374,6 +379,7 @@ fn check_sources(
         gir::large_copy_lints(&modules, &derived.gir, source_map)
             .map_err(|errors| expand::reanchor_errors(errors, source_map))?,
     );
+    lints.extend(docs::missing_docs_lints(&modules, source_map));
     Ok(frontend_output(
         entry,
         source_map,
@@ -610,6 +616,7 @@ fn frontend_output(
             .iter()
             .map(|module| u64::from(module.arena.next_node))
             .sum(),
+        docs: docs::world(&modules, source_map),
         modules,
         names,
         types,

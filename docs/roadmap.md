@@ -534,10 +534,12 @@
   - 实现 `cfg(test/bench)`、`#[test]`、`should_panic(eq)`, `ignore`、稳定测试身份、并行用户协程、panic 捕获、doctest 围栏、`#[bench]`/Bencher/black_box。
   - 验收：测试收集顺序确定、执行可并行、报告按身份排序；测试后代协程归属正确；失败不终止其它测试；ignored/零匹配成功；bench 不缓存历史测量。
 
-- [ ] **阶段 70：实现 `gugu doc`、API 文档与 doctest 生成**（复杂度：4）
+- [x] **阶段 70：实现 `gugu doc`、API 文档与 doctest 生成**（复杂度：4）
   - 依赖：阶段 09、20、59、69。
   - 生成公共 module/function/type/field/trait 文档、缺失文档 lint、源位置链接、doctest source context、依赖文档和 `--open/--no-deps` 视图。
   - 验收：文档测试失败指向原始围栏位置和宏展开链；生成内容不读取 target/cache 临时副本；公共 API 的错误、panic、资源和并发限制可追踪到规范章节。
+  - 接入证据：`gugu doc` 编译 lib target 并渲染 `<target-dir>/doc/<package>/` HTML 模块页（签名、文档、`src/<module>.html#L<n>` 行锚点源码链接），`--no-deps` 跳过依赖，默认生成锁图依赖 package 文档；`missing_docs`（E0063）登记为风格 lint（`allow`/`warn`/`deny`/`forbid` 级别生效），公共模块/函数/类型/字段/trait/trait 方法缺文档时报告；doctest 包装模块登记为展开记录，parse/sema 错误重锚定回围栏行并附「生成文本位置/宏调用位置/宏定义位置」note；生成模块不参与 missing_docs，文档由锁定源码编译、不读取既有文档副本。
+  - 验收证据：`crates/gugu-compiler/tests/doc.rs` 覆盖公共 API 收集（成员可见性过滤、签名截取、行号）、missing_docs 默认 warn/allow/deny/成员覆盖、doctest 语义错误重锚定到 `main.gg` 围栏行+展开链 note、生成模块 lint 豁免；`cargo nextest run --workspace` 全绿，`mdbook build` 通过。
 
 - [ ] **阶段 71：完成 action cache、target 物化与 cache 子命令**（复杂度：4）
   - 依赖：阶段 06、11、24、56、57、69。

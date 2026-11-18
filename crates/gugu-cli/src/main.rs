@@ -3,6 +3,7 @@
 #![recursion_limit = "1024"]
 
 mod config;
+mod doc;
 mod formatting;
 mod output;
 
@@ -458,6 +459,7 @@ fn execute(cli: Cli, internal: bool) -> i32 {
         Command::Build { file } => run_compile(file, &options, false),
         Command::Check { file } => run_compile(file, &options, true),
         Command::Fmt { check, all } => formatting::run(check, all, &options),
+        Command::Doc { open, no_deps } => doc::run(&options, open, no_deps),
         command => run_registered_command(&command, options.format.unwrap_or_default()),
     }
 }

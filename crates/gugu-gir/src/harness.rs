@@ -5,13 +5,15 @@ use std::collections::BTreeMap;
 
 use gugu_base::{
     diagnostics::{Diagnostic, DiagnosticCode},
-    source::{SourceFileId, SourceMap, SourceSnapshot, Span},
+    source::{
+        ExpansionId, ExpansionInput, SourceFileId, SourceMap, SourceSlot, SourceSnapshot, Span,
+    },
 };
 use gugu_sema::{
     ParsedModule,
     ast::{AstRange, AttrKind, Attribute, FnDecl, ItemKind, TyId, TyKind, Visibility},
     cfg::CfgContext,
-    modules::parse_module,
+    modules::{parse_module, parse_module_in_expansion},
 };
 
 /// 生成的 runner 模块逻辑文件名（模块路径即去掉扩展名）。
@@ -36,6 +38,8 @@ struct Doctest {
     line: u32,
     index: u32,
     code: String,
+    /// 围栏起始 ` ``` ` 文档行 span；诊断重锚定的调用点。
+    fence: Span,
     /// `fn main` 独立程序：Some(主体源码) 时生成 `fn __gugu_dt_prog`。
     program: bool,
 }
@@ -81,7 +85,7 @@ pub fn apply(
     if cfg.test() {
         for (index, doctest) in doctests.iter().enumerate() {
             doctest_sources.push((
-                doctest_source(&modules[doctest.module], doctest, index),
+                doctest_source(&modules[doctest.module], doctest),
                 format!("__gugu_doctest_{index}"),
             ));
             cases.push(Case {
@@ -100,8 +104,8 @@ pub fn apply(
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
-    for (source, path) in doctest_sources {
-        let module = push_generated(source_map, &path, &source, cfg)?;
+    for ((source, path), doctest) in doctest_sources.into_iter().zip(&doctests) {
+        let module = push_doctest(source_map, &path, &source, cfg, doctest)?;
         modules.push(module);
     }
     // 收集顺序确定：按身份排序后生成表。
@@ -112,6 +116,57 @@ pub fn apply(
     let entry = module.file.source;
     modules.push(module);
     Ok(Some(entry))
+}
+
+/// doctest 模块按展开注册：span 携带展开记录，诊断经 `reanchor_errors`
+/// 回锚到文档围栏所在行，附注给出展开链。
+fn push_doctest(
+    source_map: &mut SourceMap,
+    path: &str,
+    source: &str,
+    cfg: &CfgContext,
+    doctest: &Doctest,
+) -> Result<ParsedModule, Vec<Diagnostic>> {
+    let snapshot = SourceSnapshot::from_str(path, source).map_err(|error| {
+        vec![Diagnostic::error(
+            DiagnosticCode::InvalidDeclaration,
+            format!("harness 生成模块 `{path}` 无效：{error}"),
+            None,
+        )]
+    })?;
+    let file = source_map.push_snapshot(snapshot).map_err(|error| {
+        vec![Diagnostic::error(
+            DiagnosticCode::InvalidDeclaration,
+            format!("harness 生成模块 `{path}` 登记失败：{error}"),
+            None,
+        )]
+    })?;
+    let expansion = source_map
+        .register_expansion(ExpansionInput {
+            parent: ExpansionId::ROOT,
+            macro_call: doctest.fence.clone(),
+            macro_definition: doctest.fence.clone(),
+            generated_source: file,
+            fragment_kind: SourceSlot::Item,
+            round: 0,
+            fragment_order: doctest.index,
+        })
+        .map_err(|error| {
+            vec![Diagnostic::error(
+                DiagnosticCode::InvalidDeclaration,
+                format!("harness 生成模块 `{path}` 展开登记失败：{error}"),
+                Some(doctest.fence.clone()),
+            )]
+        })?;
+    parse_module_in_expansion(
+        source_map.snapshot(file).expect("生成模块快照已登记"),
+        source_map,
+        file,
+        expansion,
+        path.strip_suffix(".gg").unwrap_or(path).to_owned(),
+        cfg,
+        false,
+    )
 }
 
 fn push_generated(
@@ -459,6 +514,7 @@ fn collect_doctests(
 ) {
     let mut in_fence = false;
     let mut fence_line = 0_u32;
+    let mut fence_span: Option<Span> = None;
     let mut code = String::new();
     for attribute in attributes.as_slice(&module.arena.attrs) {
         let (AttrKind::Doc { .. } | AttrKind::InnerDoc { .. }) = attribute.kind else {
@@ -468,7 +524,14 @@ fn collect_doctests(
         let line_text = doc_line(raw);
         if line_text.trim_start().starts_with("```") {
             if in_fence {
-                finish_fence(module_index, fence_line, doc_index, &code, doctests);
+                finish_fence(
+                    module_index,
+                    fence_line,
+                    fence_span.take(),
+                    doc_index,
+                    &code,
+                    doctests,
+                );
                 code.clear();
                 in_fence = false;
                 continue;
@@ -476,6 +539,7 @@ fn collect_doctests(
             let info = line_text.trim_start()[3..].trim();
             in_fence = info.is_empty() || info == "gugu";
             fence_line = attribute.span.line();
+            fence_span = Some(attribute.span.clone());
             continue;
         }
         if in_fence {
@@ -484,7 +548,14 @@ fn collect_doctests(
         }
     }
     if in_fence {
-        finish_fence(module_index, fence_line, doc_index, &code, doctests);
+        finish_fence(
+            module_index,
+            fence_line,
+            fence_span.take(),
+            doc_index,
+            &code,
+            doctests,
+        );
     }
 }
 
@@ -500,24 +571,27 @@ fn doc_line(raw: &str) -> &str {
 fn finish_fence(
     module_index: usize,
     line: u32,
+    fence: Option<Span>,
     doc_index: &mut u32,
     code: &str,
     doctests: &mut Vec<Doctest>,
 ) {
     let index = *doc_index;
     *doc_index += 1;
+    let Some(fence) = fence else { return };
     doctests.push(Doctest {
         module: module_index,
         line,
         index,
         code: code.to_owned(),
+        fence,
         program: code.contains("fn main"),
     });
 }
 
 /// doctest 模块源码：pub 项入作用域，`fn main` 围栏改独立程序名 + `#[test]` 适配器。
-fn doctest_source(module: &ParsedModule, doctest: &Doctest, index: usize) -> String {
-    let mut out = String::from("//! doctest 生成模块\n");
+fn doctest_source(module: &ParsedModule, doctest: &Doctest) -> String {
+    let mut out = String::from("//! doctest 生成模块\n#![allow(missing_docs)]\n");
     let pubs: Vec<String> = module
         .file
         .items
@@ -564,7 +638,6 @@ fn doctest_source(module: &ParsedModule, doctest: &Doctest, index: usize) -> Str
         out.push_str(&doctest.code);
         out.push_str("}\n");
     }
-    let _ = index;
     out
 }
 
@@ -587,7 +660,7 @@ fn gugu_string(text: &str) -> String {
 /// `__gugu_harness` 模块：use 别名 + per-case 包装 + 调度表 + `fn main`。
 fn manifest_source(cases: &[Case], benches: &[Case]) -> String {
     let mut out = String::from(
-        "//! 测试/bench harness 入口（生成）。\nuse std.test.{__run_tests, __run_bench, __synthetic_panic, __bench_run, __report_test_err, BenchSample}\n",
+        "//! 测试/bench harness 入口（生成）。\n#![allow(missing_docs)]\nuse std.test.{__run_tests, __run_bench, __synthetic_panic, __bench_run, __report_test_err, BenchSample}\n",
     );
     for (index, case) in cases.iter().enumerate() {
         out.push_str(&format!(

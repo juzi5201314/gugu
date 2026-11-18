@@ -69,12 +69,23 @@ pub fn parse(
     file: SourceFileId,
     buffer: &mut TokenBuffer,
 ) -> ParseOutput {
+    parse_in_expansion(source, source_map, file, ExpansionId::ROOT, buffer)
+}
+
+/// 在指定源码宏展开上下文中解析完整文件；生成模块借此把 span 归到展开记录。
+pub fn parse_in_expansion(
+    source: &str,
+    source_map: &SourceMap,
+    file: SourceFileId,
+    expansion: ExpansionId,
+    buffer: &mut TokenBuffer,
+) -> ParseOutput {
     let empty_symbol = buffer.intern.intern_str("");
     let mut parser = Parser {
         source,
         source_map,
         file,
-        expansion: ExpansionId::ROOT,
+        expansion,
         token_base: 0,
         tokens: &buffer.tokens,
         trivia: &buffer.trivia,
