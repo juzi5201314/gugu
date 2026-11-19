@@ -23,7 +23,7 @@ pub fn install_process_cleanup(child: fn(uint), pipe: fn(uint)) {
     child_cleanup = Some(child)
     pipe_cleanup = Some(pipe)
 }
-/* kind 6(Signal) 的 cleanup 由信号模块登记；只允许标记与完成发布。*/
+/* kind 6(Signal) 的 cleanup 由信号模块登记；不得分配或挂起当前协程。*/
 pub fn install_signal_cleanup(signal: fn(uint)) { signal_cleanup = Some(signal) }
 
 /// kind为1(File)、2(ReadDir)、4(Child)、5(Pipe)或6(Signal)；首个值持有一个租约。
@@ -154,4 +154,3 @@ fn request_close(control: uint) {
     heap_store_word32(control + 8, state | QUEUED)
     enqueue_close(control, heap_word(control + 64), heap_word(control + 72))
 }
-

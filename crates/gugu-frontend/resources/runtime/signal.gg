@@ -21,7 +21,7 @@ const NODE_BYTES: uint = 32
 
 /* ctl 页：+0 subs, +8 fd, +16 mask, +24 req, +32 stack, +40 siginfo buf, +48 mask cell, +56 inflight；
    Windows 专用 +64 事件句柄（signal_install 片段写入）、+72 signo 掩码位图（handler 片段并入）。
-   Darwin +8 保存 kqueue fd + 1，+56 标记待解除的订阅，+128 起保存旧 sigaction（每个 signo 16B）。*/
+   Darwin +8 保存 kqueue fd + 1，+128 起保存旧 sigaction（每个 signo 16B）。*/
 static ctl: uint = 0
 /* 订阅：+0 next, +8 mask, +16 pending_mask, +24 ring, +32 capacity, +40 head, +48 count, +56 dropped, +64 closed, +72/+80 waiter 链。*/
 /* 等待节点：+0 next, +8 hot, +16 sub。*/
@@ -71,7 +71,6 @@ fn arm(extra_mask: uint) uint { unsafe {
 #[cfg(os = "macos")]
 fn arm(extra_mask: uint) uint { unsafe {
     let page = control()
-    disarm_closed()
     let old = word(page + 16)
     let extra = extra_mask & ~old
     if extra == 0 { return 0 }
@@ -139,8 +138,6 @@ fn darwin_disarm(page: uint, keep: uint) {
 }
 #[cfg(os = "macos")]
 fn disarm_closed() {
-    if ctl == 0 || word(ctl + 56) == 0 { return }
-    put(ctl + 56, 0)
     let keep: uint = 0
     let sub = word(ctl)
     while sub != 0 {
@@ -170,12 +167,7 @@ fn harvest(page: uint) { unsafe {
     }
 } }
 #[cfg(os = "macos")]
-fn mask_sync(page: uint) { _ = page
-    disarm_closed() }
-#[cfg(os = "macos")]
-fn mark_disarm() { put(ctl + 56, 1) }
-#[cfg(not(os = "macos"))]
-fn mark_disarm() {}
+fn mask_sync(page: uint) { _ = page }
 /* Windows 捕获面：CreateEventW 创建 auto-reset 事件后 signal_install 片段登记
    SetConsoleCtrlHandler；回调是纯机器代码，只把 ctrl 位并入 ctl+72 并 SetEvent。*/
 #[cfg(os = "windows")]
@@ -189,11 +181,13 @@ fn arm(extra_mask: uint) uint { unsafe {
     0
 } }
 
-/* kind 6 cleanup：租约耗尽或显式 close 路径的同步收尾，只标记并发布完成。*/
+/* kind 6 cleanup：租约耗尽或显式 close 时同步恢复原生信号处理，再发布完成。*/
 fn cleanup(control: uint) { unsafe {
     let sub = word(control + 64)
-    if sub != 0 { put(sub + 64, 1) }
-    mark_disarm()
+    if sub != 0 {
+        put(sub + 64, 1)
+        disarm_closed()
+    }
     complete_close(control, 0)
 } }
 
@@ -219,7 +213,6 @@ pub fn subscribe(mask: uint, capacity: uint) uint { unsafe {
 pub fn close(control: uint) { unsafe {
     if control == 0 { return }
     resource.close_raw(control)
-    disarm_closed()
 } }
 
 /* 提交一次阻塞读：native worker 线程持有 in-flight 请求直到 signalfd 可读或 fd 关闭。*/

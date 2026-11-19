@@ -268,7 +268,7 @@ fn SignalSubscription.dropped(self: &Self) uint
 
 默认订阅队列容量为 16。一个进程可以有多个订阅；每个订阅都收到匹配信号的独立副本。相同信号在同一订阅尚未取走时合并为一个 `SignalEvent`，`occurrences` 递增并在 `uint::MAX` 饱和；计数饱和后的额外到达也计入 `dropped()`。不同信号占用不同队列项。队列满时新信号不阻塞 OS 信号处理路径，计入 `dropped()` 并继续保留已经排队的事件。
 
-`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`。关闭订阅不影响其它订阅；某个信号没有任何订阅者后，runtime 恢复该目标的默认处理动作。订阅的建立和关闭都在线性化点生效，信号处理器绝不直接运行 Gugu 用户代码。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。
+`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`。关闭订阅不影响其它订阅；某个信号没有任何订阅者后，runtime 恢复该目标的默认处理动作。订阅的建立和关闭都在线性化点生效，信号处理器绝不直接运行 Gugu 用户代码。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。在 macOS 上，若该关闭移除了某个信号的最后一个订阅，信号的原生处理动作在关闭或释放返回前恢复，不等待下一轮调度。
 
 信号到达时如果程序已有订阅，runtime 把事件投递给匹配订阅，不触发隐式取消、panic 或进程退出。用户可以把 `SignalEvent` 映射到 `CancelSource.cancel()`，随后按[并发与调度](concurrency.md)和[资源租约](standard-library.md)规则完成清理。没有订阅者时，普通信号的默认 OS 动作生效；runtime 在能够使用 signal-safe 输出时先尝试一条 `signal` termination 报告，再恢复默认动作。报告失败不得阻止或改变默认动作，也不能把默认终止改成等待用户协程。
 

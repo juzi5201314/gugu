@@ -4,6 +4,7 @@ use super::{
 };
 
 const SIGNAL: &str = "std/runtime/signal.gg";
+const RESOURCE: &str = "std/runtime/resource.gg";
 const USER1: u64 = 1 << 29;
 const USER2: u64 = 1 << 30;
 const HANDLER: u64 = 0x1234;
@@ -66,15 +67,26 @@ fn darwin_signals_arm_deliver_counts_and_restore_disposition() {
 
     let page = h.invoke(SIGNAL, "control", &[], &mut memory)[0];
     let mut previous = 0;
-    let subscriptions = [(256, 512, 768), (384, 640, 896)];
-    for (sub, cell, ring) in subscriptions {
+    put(&mut memory, h.current + 16, 131072);
+    let subscriptions = [(256, 768), (384, 896)].map(|(sub, ring)| {
+        let cell = h.allocate(&mut memory, 4096);
+        h.allocations.insert(cell, 4096);
+        put(&mut memory, cell, 1);
+        put(&mut memory, cell + 64, sub);
+        put(&mut memory, cell + 72, 6);
+        h.invoke(
+            "std/runtime/resource_state.gg",
+            "register",
+            &[cell],
+            &mut memory,
+        );
         put(&mut memory, sub, previous);
         put(&mut memory, sub + 8, USER1);
         put(&mut memory, sub + 24, ring);
         put(&mut memory, sub + 32, 1);
-        put(&mut memory, cell + 64, sub);
         previous = sub;
-    }
+        (sub, cell, ring)
+    });
     put(&mut memory, page, previous);
     h.script.push_back((9, 1, 0));
     h.invoke(SIGNAL, "service", &[], &mut memory);
@@ -91,15 +103,24 @@ fn darwin_signals_arm_deliver_counts_and_restore_disposition() {
     assert_eq!(word(&memory, page + 16), USER1);
     assert_eq!(h.calls.last().unwrap().1[6..8], [31, 0x2_fffa]);
 
-    put(&mut memory, subscriptions[0].0 + 64, 1);
-    h.invoke(SIGNAL, "mark_disarm", &[], &mut memory);
-    h.invoke(SIGNAL, "disarm_closed", &[], &mut memory);
+    let calls = h.calls.len();
+    h.invoke(
+        RESOURCE,
+        "release_control",
+        &[subscriptions[0].1],
+        &mut memory,
+    );
+    assert_eq!(h.calls.len(), calls);
     assert_eq!(word(&memory, page + 16), USER1);
 
-    put(&mut memory, subscriptions[1].0 + 64, 1);
-    h.invoke(SIGNAL, "mark_disarm", &[], &mut memory);
     h.script.extend([(29, 0, 0), (9, 0, 0), (7, 0, 0)]);
-    h.invoke(SIGNAL, "service", &[], &mut memory);
+    h.invoke(
+        RESOURCE,
+        "release_control",
+        &[subscriptions[1].1],
+        &mut memory,
+    );
+    assert_eq!(h.calls.len(), calls + 3);
     let tail = &h.calls[h.calls.len() - 3..];
     assert_eq!((tail[0].1[0], tail[0].1[2]), (30, 0));
     assert_eq!(tail[0].1[6..8], [1, 2]);
