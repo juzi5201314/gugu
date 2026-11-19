@@ -54,12 +54,34 @@ fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error
         successors: vec![body.entry.index() + 1],
     };
     for (index, block) in body.blocks.iter().enumerate() {
+        let mut events = if runtime {
+            body.root_inits
+                .iter()
+                .filter(|event| event.block.index() == index)
+                .map(|e| (e.position, e.slot.0, e.bit, e.initialized))
+                .collect::<Vec<_>>()
+        } else {
+            vec![]
+        };
+        events.sort_by_key(|event| (event.0, event.1, event.2));
+        let mut cursor = 0;
         let mut b = Builder {
             function: &mut function,
             items: vec![],
             context: format!("{} block {index} entry", body.name),
         };
         for site in block.instructions.clone() {
+            for &(_, slot, bit, initialized) in crate::metadata::init_events_until(
+                &events,
+                &mut cursor,
+                site - block.instructions.start,
+            ) {
+                b.push(Item::RootInit {
+                    slot,
+                    bit,
+                    initialized,
+                });
+            }
             let instruction = &body.instructions[site as usize];
             b.context = format!(
                 "{} block {index} site {site} {:?}",
@@ -95,6 +117,17 @@ fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error
             }
             lower::lower(body, instruction, &mut b)
                 .map_err(|e| Error(format!("{}: {e}", b.context)))?;
+        }
+        for &(_, slot, bit, initialized) in crate::metadata::init_events_until(
+            &events,
+            &mut cursor,
+            block.instructions.end - block.instructions.start,
+        ) {
+            b.push(Item::RootInit {
+                slot,
+                bit,
+                initialized,
+            });
         }
         b.context = format!(
             "{} block {index} terminator {:?}",
@@ -372,7 +405,8 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
         }
     }
     for slot in &body.stack_slots {
-        if !slot.roots.is_empty() || !slot.align.is_power_of_two() || slot.align > 16 {
+        if (!runtime && !slot.roots.is_empty()) || !slot.align.is_power_of_two() || slot.align > 16
+        {
             return Err(super::error("unsupported rooted/overaligned local slot"));
         }
     }

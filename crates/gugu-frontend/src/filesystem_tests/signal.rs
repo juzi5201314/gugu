@@ -9,6 +9,7 @@ const USER1: u64 = 1 << 29;
 const USER2: u64 = 1 << 30;
 const HANDLER: u64 = 0x1234;
 
+#[expect(clippy::ptr_arg, reason = "签名需与 native_hook 一致")]
 fn native(h: &mut Harness<'_>, op: u64, request: u64, memory: &mut Vec<u8>) {
     let args = &mut h.calls.last_mut().unwrap().1;
     if op == 9 && args[2] == 1 {

@@ -1,4 +1,5 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
+mod collections;
 mod copy;
 mod debug_builders;
 mod docs_examples;
@@ -15,8 +16,9 @@ mod signal;
 mod strings;
 mod trace;
 
-use crate::lir::body::{Body, Condition, IntOp, Op, Terminator, range};
+use crate::lir::body::{Body, Condition, IntOp, Op, Terminator, Type, range};
 use crate::{Compilation, CompileRequest, Compiler, TargetName};
+use std::cmp::Ordering;
 
 fn named<'a>(output: &'a Compilation, name: &str) -> &'a Body {
     let module = output.hir.as_ref().unwrap().module();
@@ -236,6 +238,8 @@ fn interpret_bounded(
             let args: Vec<_> = operands.iter().map(|value| values[value.index()]).collect();
             let value = match instruction.op {
                 Op::StackCheck
+                | Op::ScopedViewBegin { .. }
+                | Op::ScopedViewEnd { .. }
                 | Op::SafepointPoll { .. }
                 | Op::RegionPublish { .. }
                 | Op::RegionReset { .. }
@@ -330,18 +334,22 @@ fn interpret_bounded(
                     _ => panic!("未登记整数操作：{op:?}"),
                 },
                 Op::Compare { condition, signed } => {
-                    let ordering = if signed {
-                        (args[0] as i64).cmp(&(args[1] as i64))
-                    } else {
-                        args[0].cmp(&args[1])
+                    let ordering = match body.values[operands[0].index()].kind.ty {
+                        Type::F32 => f32::from_bits(args[0] as u32)
+                            .partial_cmp(&f32::from_bits(args[1] as u32)),
+                        Type::F64 => f64::from_bits(args[0]).partial_cmp(&f64::from_bits(args[1])),
+                        _ if signed => Some((args[0] as i64).cmp(&(args[1] as i64))),
+                        _ => Some(args[0].cmp(&args[1])),
                     };
                     u64::from(match condition {
-                        Condition::Eq => ordering.is_eq(),
-                        Condition::Ne => !ordering.is_eq(),
-                        Condition::Lt => ordering.is_lt(),
-                        Condition::Le => !ordering.is_gt(),
-                        Condition::Gt => ordering.is_gt(),
-                        Condition::Ge => !ordering.is_lt(),
+                        Condition::Eq => ordering == Some(Ordering::Equal),
+                        Condition::Ne => ordering != Some(Ordering::Equal),
+                        Condition::Lt => ordering == Some(Ordering::Less),
+                        Condition::Le => matches!(ordering, Some(Ordering::Less | Ordering::Equal)),
+                        Condition::Gt => ordering == Some(Ordering::Greater),
+                        Condition::Ge => {
+                            matches!(ordering, Some(Ordering::Greater | Ordering::Equal))
+                        }
                     })
                 }
                 Op::Store(_)
@@ -458,7 +466,7 @@ fn interpret_bounded(
                 memory.truncate(frame_base);
                 return returned;
             }
-            other => panic!("纯函数解释器遇到未登记终结符：{other:?}"),
+            other => panic!("纯函数解释器遇到未登记终结符：{}: {other:?}", body.name),
         };
         let edge = &body.edges[edge.index()];
         let incoming: Vec<_> = body

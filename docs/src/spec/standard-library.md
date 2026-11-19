@@ -358,6 +358,8 @@ SmallVec[T, comptime N: int]
 SmallMap[K, V, comptime N: int]
 ```
 
+预导入的 `HashMap` / `HashSet` 与 `std.collections` 导出的同名类型相同；不需要显式 use 即可构造和使用。
+
 MultiMap 不作为独立标准类型；使用 `HashMap[K, Vec[V]]` 或 `BTreeMap[K, Vec[V]]` 组合，重复值顺序由所选 Vec 明确表达。
 
 Vec、Deque、BinaryHeap、LinkedList、BitSet、SmallVec 和全部 Map/Set 都是共享身份句柄：赋值只复制句柄，通过任一别名修改时，所有别名继续观察同一个逻辑集合。集合内部可以为快照迭代封存并替换 backing；这只改变物理表示，不把集合改成 COW 值语义。
@@ -368,35 +370,91 @@ Map 的普通读取返回 value 的语义副本，不公开会因 rehash、树�
 
 ```text
 impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
+    fn new() Self
+    fn len(self: &Self) int
+    fn is_empty(self: &Self) bool
     fn get(self: &Self, key: &K) Option[V]
+    fn contains_key(self: &Self, key: &K) bool
     fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R]
     fn for_each_ref[F: Fn(&K, &V) ()](self: &Self, f: F)
     fn insert(self: &Self, key: K, value: V) Option[V]
     fn remove(self: &Self, key: &K) Option[V]
     fn update[F: Fn(V) V](self: &Self, key: &K, f: F) bool
     fn entry(self: &Self, key: K) Entry[K, V]
+    fn iter(self: &Self) HashMapIter[K, V]
 }
 
 impl[K: Ord + StableOrd, V] BTreeMap[K, V] {
+    fn new() Self
+    fn len(self: &Self) int
+    fn is_empty(self: &Self) bool
+    fn get(self: &Self, key: &K) Option[V]
+    fn contains_key(self: &Self, key: &K) bool
     fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R]
     fn for_each_ref[F: Fn(&K, &V) ()](self: &Self, f: F)
-    /* 其它 value 访问操作同 HashMap */
+    fn insert(self: &Self, key: K, value: V) Option[V]
+    fn remove(self: &Self, key: &K) Option[V]
+    fn update[F: Fn(V) V](self: &Self, key: &K, f: F) bool
+    fn entry(self: &Self, key: K) BTreeEntry[K, V]
+    fn iter(self: &Self) BTreeMapIter[K, V]
+}
+
+impl[K: Eq + Hash + StableHash, V] Entry[K, V] {
+    fn or_insert(self: &Self, value: V) V
+    fn or_insert_with[F: Fn() V](self: &Self, f: F) V
+    fn and_modify[F: Fn(V) V](self: &Self, f: F) Self
+}
+
+impl[K: Ord + StableOrd, V] BTreeEntry[K, V] {
+    fn or_insert(self: &Self, value: V) V
+    fn or_insert_with[F: Fn() V](self: &Self, f: F) V
+    fn and_modify[F: Fn(V) V](self: &Self, f: F) Self
 }
 ```
 
-SecureHashMap、SmallMap 与 HashMap 使用同一组 value 访问操作和约束。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间按实现当前顺序逐项调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中修改同一 map：通过任一别名发出的 `insert`、`remove`、`update` 与 Entry 写入都必须等待 view 结束，在 view 内写入是 panic。整个 `with_ref` / `for_each_ref` 调用位于接收者的 view 动态 extent 内；callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
+`new` 建立空 Map；`len` 返回键数，`is_empty` 等价于长度为零。键按 Eq 相等或 Ord 比较等价视为同一键。`get` / `contains_key` 只查询；`insert` 在新键时返回 None，在已有键时替换 value 并返回旧值；`remove` 删除已有键并返回旧值，缺失时返回 None 且不改变长度。插入使长度超出 int 上界时 panic。BTreeMap 的查询、插入、删除使用 O(log len) 次键比较；其 `iter` 和 `for_each_ref` 都按键升序访问，每个键恰好一次。
 
-`update` 只在键存在时调用一次 `f`，把当前 value 的语义副本交给它，再以返回值替换槽；存在时返回 true。Entry 的 `and_modify`、`or_insert` 和 `or_insert_with` 同样只传入或返回语义副本，不产生集合内部引用。Set 的元素约束与对应 Map 的键约束相同。
+SecureHashMap、SmallMap 保留与 HashMap 相同的 value 访问契约和约束，当前版本尚未实现其完整可执行 API。`with_ref` 在 key 存在时对 value 建立 `ScopedRead` view，调用 callback 并返回 `Some` 结果；key 不存在时不调用 callback 并返回 `None`。`for_each_ref` 在一次共享结构访问期间逐项调用 callback，每个键恰好一次，空 Map 不调用 callback，不创建 snapshot，也不复制 K/V。两者都不能在 callback 中修改同一 map：通过任一别名发出的 `insert`、`remove`、`update` 与 Entry 写入在 view 内都是 panic，包括缺失键或本不会改变内容的写操作。整个 `with_ref` / `for_each_ref` 调用位于接收者的 view 动态 extent 内；callback 的无 suspend、无 escape 和 safepoint relocation 规则见[函数与闭包](functions.md#scoped-borrowed-view-callback)。
 
-标准集合的 `iter()` 捕获创建时快照，产生元素的语义副本；Map 的 Item 是 `(K, V)`。拥有独立 backing 的集合创建迭代器时 O(1) 封存 backing，之后通过任一集合别名发生的第一次修改先分离 backing，现有迭代器继续遍历旧快照。内联 Small 容器和 LinkedList 创建迭代器时分别复制至多 N 个槽和当前全部节点值，以保持相同快照语义；因此它们的迭代器创建成本分别是 O(N) 上界和 O(len)。迭代器与集合可以同时存活，修改集合不会让 `next` panic，也不会让迭代结果弱一致。需要避免大值复制时使用 Map 的 `with_ref`、Map 的 `for_each_ref` 或 LinkedList 的 `for_each_ref`；这些 API 不改变 `iter()` 的 snapshot 语义。
+`update` 只在键存在时调用一次 `f`，把当前 value 的语义副本交给它，再以返回值替换槽；存在时返回 true，缺失时不调用 f 并返回 false。`entry` 保存集合身份与键，不锁定当前是否存在；每次 Entry 操作都查询同一共享 Map 的当前状态。`and_modify` 等价于对该键 update 后返回 Entry；`or_insert` 在缺失时插入传入值，否则保留旧值；`or_insert_with` 只在缺失时调用一次 f 生成插入值。后两者返回最终 value 的语义副本。所有 Entry 操作只传入或返回语义副本，不产生集合内部引用。
+
+Set 的元素约束与对应 Map 的键约束相同：
+
+```text
+impl[T: Eq + Hash + StableHash] HashSet[T] {
+    fn new() Self
+    fn len(self: &Self) int
+    fn is_empty(self: &Self) bool
+    fn contains(self: &Self, key: &T) bool
+    fn insert(self: &Self, key: T) bool
+    fn remove(self: &Self, key: &T) bool
+    fn iter(self: &Self) HashSetIter[T]
+    fn for_each_ref[F: Fn(&T) ()](self: &Self, f: F)
+}
+
+impl[T: Ord + StableOrd] BTreeSet[T] {
+    fn new() Self
+    fn len(self: &Self) int
+    fn is_empty(self: &Self) bool
+    fn contains(self: &Self, key: &T) bool
+    fn insert(self: &Self, key: T) bool
+    fn remove(self: &Self, key: &T) bool
+    fn iter(self: &Self) BTreeSetIter[T]
+    fn for_each_ref[F: Fn(&T) ()](self: &Self, f: F)
+}
+```
+
+Set 的 `insert` 只在新增元素时返回 true，`remove` 只在实际删除时返回 true。`for_each_ref` 恰好访问每个现存元素一次，空 Set 不调用 callback；view 内通过任一别名写同一 Set 必须 panic。BTreeSet 的遍历为升序。四种 Map/Set 均实现 IntoIter；其关联迭代器实现 Iter，Map 的 Item 为 `(K, V)`，Set 为 T，耗尽后继续返回 None。
+
+标准集合的 `iter()` 捕获创建时快照，产生元素的语义副本；Map 的 Item 是 `(K, V)`。Vec、HashMap、HashSet、BTreeMap、BTreeSet 创建迭代器的成本是 O(1)，之后通过任一集合别名插入、删除或替换值都不改变现有迭代器观察的键和值，每个快照元素恰好出现一次；这不递归复制元素内部的共享身份对象。内联 Small 容器和 LinkedList 创建迭代器时分别复制至多 N 个槽和当前全部节点值，以保持相同快照语义；因此它们的迭代器创建成本分别是 O(N) 上界和 O(len)。迭代器与集合可以同时存活，修改集合不会让 `next` panic，也不会让迭代结果弱一致。需要避免大值复制时使用 Map 的 `with_ref`、Map 的 `for_each_ref` 或 LinkedList 的 `for_each_ref`；这些 API 不改变 `iter()` 的 snapshot 语义。
 
 SmallVec 与 SmallMap 的 N 必须是非负 comptime 整数。它们的 GC 对象内含 N 个连续内联槽，复制容器仍只复制共享身份句柄；元素超过 N 后溢出到堆 backing，别名、相等、修改和迭代语义不变。SmallMap 在内联阶段使用至多 N 项的紧凑线性查找，溢出后使用与 HashMap 相同的表表示；N 是调用方明确提供的小规模上界，不是运行时猜测阈值。
 
 LinkedList 的节点是具有稳定 GC 身份且不复用代际的对象。`ListCursor[T]` 绑定 list 身份、node 身份与 node generation；`cursor_front`、`cursor_back`、`insert_before`、`insert_after`、`remove`、`splice_before`、`splice_after` 和 `value` / `update` 都返回 `Result[..., StaleCursor]`，不暴露节点引用。另提供 `for_each_ref[F: Fn(&T) ()](self: &Self, f: F)`：它在一次受保护遍历中直接访问节点值，不创建 snapshot或复制 T；callback 不能结构性修改该 list，且遵守 scoped view 的无 suspend、无 escape 和 relocation 规则。插入和同一 list 内的重排不使既有 cursor 失效；删除节点会使其全部 cursor 变为 stale。把另一 list 的节点 splice 进当前 list 时，目标 cursor 以及两边未移动节点的 cursor 仍有效，绑定到被移动节点旧 list 身份的 cursor 变为 stale。StaleCursor 是普通领域错误，不是 panic 或未定义行为。
 
-HashMap/HashSet 使用 hashbrown/SwissTable 类的 control-byte group、SIMD lookup 与三角 group probing；具体 group 宽度、装载阈值和内存布局不是稳定 ABI，可以随目标指令集和工具链改变。迭代顺序不保证，也可以在不同进程、不同表和不同工具链间变化。
+HashMap/HashSet 的表示和内存布局不是稳定 ABI，可以随目标指令集和工具链改变。迭代顺序不保证，也可以在不同进程、不同集合和不同工具链间变化。
 
-默认 HashMap/HashSet 使用随机化 FoldHash-fast。它追求整数和 string 键的吞吐，不承诺抵抗能与进程交互并观察行为的 HashDoS 攻击。SecureHashMap/SecureHashSet 使用由 OS CSPRNG 初始化的 SipHash 1-3，供不可信键使用。两组类型的集合语义相同，不能依赖具体 hash 值或迭代顺序。
+默认 HashMap/HashSet 使用 FoldHash-fast，seed 由实现选择，允许在不同进程和工具链间变化。它追求整数和 string 键的吞吐，不承诺抵抗能与进程交互并观察行为的 HashDoS 攻击。SecureHashMap/SecureHashSet 保留由 OS CSPRNG 初始化的 SipHash 1-3 契约，供不可信键使用；当前版本仅保留类型声明，其实现是后续工作。不能依赖具体 hash 值或迭代顺序。
 
 `std.hash.Hasher` 是预导入的普通名义值类型，当前公开确定性 FoldHash-fast 接口：
 

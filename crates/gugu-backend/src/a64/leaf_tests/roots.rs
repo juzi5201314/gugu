@@ -240,7 +240,7 @@ fn scalar_stack_roots_feed_existing_stack_copy_fixups() {
 }
 
 #[test]
-fn managed_map_admission_rejects_missing_maps_suspension_and_rooted_locals() {
+fn managed_map_admission_rejects_missing_maps_and_suspension() {
     let mut callee = Fixture::new(&[], &[]);
     callee.body.instance = [2; 32];
     callee.ret(&[]);
@@ -284,10 +284,5 @@ fn managed_map_admission_rejects_missing_maps_suspension_and_rooted_locals() {
         roots: vec![(0, Provenance::GcHeap)],
         descriptor: [0; 32],
     });
-    assert!(
-        codegen::compile_runtime(&root_slot, &bindings())
-            .unwrap_err()
-            .0
-            .contains("rooted locals")
-    );
+    assert!(codegen::compile_runtime(&root_slot, &bindings()).is_ok());
 }

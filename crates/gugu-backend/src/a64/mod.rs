@@ -12,6 +12,7 @@ pub mod frame;
 pub mod glue;
 pub mod inst;
 pub mod layout;
+mod locals;
 mod lower;
 pub mod machine;
 pub mod metadata;

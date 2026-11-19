@@ -114,6 +114,8 @@ fn protocol(
         .ok_or_else(|| invalid("内建派发缺少 trait 身份"))?;
     let name = &module.definitions[interface.definition.index()].name;
     let protocol = match (name.as_str(), dispatch.member) {
+        ("Eq", _) => Protocol::Eq,
+        ("Ord", _) => Protocol::Cmp,
         ("Clone", _) => Protocol::Clone,
         ("Try", Some(2)) => Protocol::TryBranch,
         ("Try", Some(3)) => Protocol::TryFromValue,

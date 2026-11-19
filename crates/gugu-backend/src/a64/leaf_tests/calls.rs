@@ -93,6 +93,8 @@ fn large_slot_copy_cycles_do_not_clobber_address_scratch() {
         saves: vec![],
         spills: vec![base + 32, base + 40],
         locals: vec![],
+        init_bases: vec![],
+        init_bytes: 0..0,
     };
     for (index, value) in [a, b].iter().enumerate() {
         fragment.allocation.values[value.index()].placement =
