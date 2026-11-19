@@ -6,6 +6,7 @@
 
 ## `trait`
 
+<!-- docs-example: parse -->
 ```gugu
 trait Add[Rhs] {
     type Output
@@ -60,6 +61,7 @@ trait Print {
 
 ### `IntoIter` / `Iter`
 
+<!-- docs-example: parse -->
 ```gugu
 trait IntoIter {
     type Item
@@ -79,6 +81,7 @@ trait Iter {
 
 ### `Try` {#try}
 
+<!-- docs-example: parse -->
 ```gugu
 trait Try {
     type Value
@@ -97,6 +100,7 @@ trait Try {
 
 ### `Index`
 
+<!-- docs-example: parse -->
 ```gugu
 trait Index {
     type Output
@@ -111,6 +115,7 @@ trait Index {
 
 `Fn(T) U` 见 [函数](functions.md)，不能用户 `impl`。`Any` 见下，同样不能用户 `impl`。
 
+<!-- docs-example: parse -->
 ```gugu
 trait Eq {
     fn eq(self: &Self, other: &Self) bool
@@ -143,6 +148,7 @@ trait Default {
 
 ### `Any`
 
+<!-- docs-example: parse -->
 ```gugu
 trait Any {
     fn type_of(self: &Self) TypeId

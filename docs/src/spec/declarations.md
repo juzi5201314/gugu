@@ -20,6 +20,7 @@
 
 ## `use`
 
+<!-- docs-example: parse -->
 ```gugu
 use green
 use green.{bar}
@@ -39,6 +40,7 @@ use std.io as io2
 
 ## `let`
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo(pair: (int, int), p: Point, r: Result[int, string]) {
     let i = 0
@@ -109,6 +111,7 @@ fn println[Ts: Print...](...args: Ts) { ... }
 
 ## 结构体、枚举、`const`、`type`、`static`
 
+<!-- docs-example: gap 未解析名称 `K` -->
 ```gugu
 struct Point {
     pub x: int
@@ -120,7 +123,7 @@ struct Empty {}
 struct Meters(int)
 struct Id(pub uint)
 
-enum Option[T] {
+enum Maybe[T] {
     Some(T)
     None
 }
@@ -172,6 +175,7 @@ static COUNTER: int = 0
 
 ## 结构体与枚举的值
 
+<!-- docs-example: parse -->
 ```gugu
 fn demo(x: int, y: int, p: Point) {
     let a = Point { x: 1, y: 2 }

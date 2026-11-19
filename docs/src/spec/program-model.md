@@ -49,6 +49,7 @@ gugu build main.gg
 
 按目标裁代码用 `#[cfg]`，见[词法 · cfg](lexical.md)。被裁掉的项在该次编译中不存在：
 
+<!-- docs-example: parse -->
 ```gugu
 #[cfg(os = "linux")]
 fn page_size() int {
