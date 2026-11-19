@@ -53,6 +53,111 @@ pub const REGISTER_NAMES: [&str; 15] = [
 /// 普通函数禁止占用的保留寄存器位。
 pub const RESERVED_REGISTER_BITS: u16 = (1 << 13) | (1 << 14);
 
+pub const AARCH64_SECTION_VERSION: u16 = 5;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StackMapArchitecture {
+    X86_64,
+    Aarch64,
+}
+
+impl StackMapArchitecture {
+    pub fn section_version(self) -> u16 {
+        match self {
+            Self::X86_64 => STACKMAP_SECTION_VERSION,
+            Self::Aarch64 => AARCH64_SECTION_VERSION,
+        }
+    }
+
+    pub fn header_tag(self) -> u32 {
+        match self {
+            Self::X86_64 => 0,
+            Self::Aarch64 => 183,
+        }
+    }
+
+    pub fn register_count(self) -> u8 {
+        match self {
+            Self::X86_64 => 15,
+            Self::Aarch64 => 31,
+        }
+    }
+
+    pub fn register_bit(self, number: u8) -> Option<u32> {
+        (number < self.register_count()).then(|| 1_u32 << number)
+    }
+
+    pub(crate) fn mask_bytes(self) -> usize {
+        match self {
+            Self::X86_64 => 2,
+            Self::Aarch64 => 4,
+        }
+    }
+
+    pub(crate) fn map_header_bytes(self) -> usize {
+        match self {
+            Self::X86_64 => 16,
+            Self::Aarch64 => 24,
+        }
+    }
+
+    pub(crate) fn reserved_registers(self) -> u32 {
+        match self {
+            Self::X86_64 => u32::from(RESERVED_REGISTER_BITS),
+            Self::Aarch64 => {
+                (1 << 16) | (1 << 17) | (1 << 18) | (1 << 27) | (1 << 28) | (1 << 29) | (1 << 30)
+            }
+        }
+    }
+
+    pub(crate) fn valid_registers(self) -> u32 {
+        (1_u32 << self.register_count()) - 1
+    }
+
+    pub(crate) fn frame_aligned(self, frame: u32) -> bool {
+        frame == 0
+            || frame % 16
+                == match self {
+                    Self::X86_64 => 8,
+                    Self::Aarch64 => 0,
+                }
+    }
+
+    pub(crate) fn verify_site(
+        self,
+        kind: u8,
+        masks: [u32; 5],
+        slots: u32,
+        typed: &[super::stackmap_codec::TypedRoot],
+        frame: u32,
+    ) -> Result<(), RawModelError> {
+        if self == Self::X86_64 {
+            return Ok(());
+        }
+        if kind == 4 {
+            if slots != 0 || !typed.is_empty() || masks.iter().any(|mask| mask & !0x1ff != 0) {
+                return Err(RawModelError::new(
+                    "A64 MorestackEntry permits only x0-x8 register roots",
+                ));
+            }
+        } else {
+            if masks.iter().any(|mask| *mask != 0) {
+                return Err(RawModelError::new(
+                    "A64 call/poll/suspend/bridge roots must be spilled",
+                ));
+            }
+            if u64::from(slots) * 8 > u64::from(frame)
+                || typed
+                    .iter()
+                    .any(|root| root.word >= frame / 8 || root.init_byte >= frame)
+            {
+                return Err(RawModelError::new("A64 root map exceeds its frame"));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// 从优化后 LIR 推导的栈图需求视图，不是机器布局的行数。
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

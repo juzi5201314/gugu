@@ -81,6 +81,115 @@ pub struct WalkWorld<'a> {
     pub landings: &'a [LandingRecord],
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScannedFrame {
+    pub function: u32,
+    pub safepoint: u32,
+    pub slots: Vec<ScannedRoot>,
+    /// Offsets here are architecture register numbers, not frame-word offsets.
+    pub registers: Vec<ScannedRoot>,
+}
+
+/// Scan an exact return PC and its caller-provided frame/register snapshot.
+pub fn scan_frame(
+    decoded: &super::stackmap_codec::DecodedSection,
+    return_pc: u64,
+    words: &[u64],
+    registers: &[u64],
+    handles: &[HandleSlot],
+    compression: &mut CompressionPlane,
+) -> Result<ScannedFrame, RawModelError> {
+    let functions = walk_functions(decoded);
+    let safepoints = walk_safepoints(decoded)?;
+    let maps = walk_maps(decoded);
+    let world = WalkWorld {
+        functions: &functions,
+        safepoints: &safepoints,
+        maps: &maps,
+        handles,
+        landings: &[],
+    };
+    let function = find_function(&world, return_pc)?;
+    let code = &functions[function as usize];
+    let offset = u32::try_from(return_pc - code.code_rva)
+        .map_err(|_| RawModelError::new("return PC offset overflow"))?;
+    let safepoint = find_safepoint(&world, function, offset)?;
+    let point = &safepoints[safepoint as usize];
+    let map = decoded
+        .maps
+        .get(point.map as usize)
+        .ok_or_else(|| RawModelError::new("invalid map index"))?;
+    if point.kind != 4 && words.len() < code.frame_size as usize / 8 {
+        return Err(RawModelError::new(
+            "frame snapshot is smaller than the declared frame",
+        ));
+    }
+    if map.registers.iter().any(|mask| {
+        mask & (!decoded.architecture.valid_registers() | decoded.architecture.reserved_registers())
+            != 0
+    }) {
+        return Err(RawModelError::new("invalid register snapshot root mask"));
+    }
+    let slots = scan_roots(&world, safepoint, words, compression)?;
+    let register_map = super::stackmap_codec::DecodedMap {
+        slots: std::array::from_fn(|class| {
+            (0..decoded.architecture.register_count())
+                .filter(|reg| map.registers[class] & (1_u32 << reg) != 0)
+                .map(u32::from)
+                .collect()
+        }),
+        registers: [0; 5],
+        typed: vec![],
+    };
+    let register_maps = [walk_map(&register_map)];
+    let register_points = [WalkSafepoint {
+        function: 0,
+        pc_offset: 0,
+        kind: point.kind,
+        map: 0,
+    }];
+    let register_world = WalkWorld {
+        maps: &register_maps,
+        safepoints: &register_points,
+        handles,
+        ..WalkWorld::default()
+    };
+    let registers = scan_roots(&register_world, 0, registers, compression)?;
+    Ok(ScannedFrame {
+        function,
+        safepoint,
+        slots,
+        registers,
+    })
+}
+
+fn walk_functions(decoded: &super::stackmap_codec::DecodedSection) -> Vec<WalkFunction> {
+    decoded
+        .functions
+        .iter()
+        .map(|function| WalkFunction {
+            code_rva: function.code_rva,
+            code_size: function.code_size,
+            frame_size: function.frame_size,
+        })
+        .collect()
+}
+
+fn walk_map(map: &super::stackmap_codec::DecodedMap) -> WalkMap {
+    WalkMap {
+        direct: map.slots[0].clone(),
+        interior: map.slots[1].clone(),
+        handle: map.slots[2].clone(),
+        compressed: map.slots[3].clone(),
+        stack: map.slots[4].clone(),
+        typed: map.typed.clone(),
+    }
+}
+
+fn walk_maps(decoded: &super::stackmap_codec::DecodedSection) -> Vec<WalkMap> {
+    decoded.maps.iter().map(walk_map).collect()
+}
+
 /// 在按 `code_rva` 排序的函数表中二分查找包含 `pc` 的函数。
 pub fn find_function(world: &WalkWorld<'_>, pc: u64) -> Result<u32, RawModelError> {
     let mut low = 0usize;
@@ -339,28 +448,9 @@ pub fn consume_metadata(
     compression: &super::compression_schema::CompressionRuntimeContract,
 ) -> Result<ConsumeReport, RawModelError> {
     let decoded = super::stackmap_codec::decode_tables(section)?;
-    let functions: Vec<WalkFunction> = decoded
-        .functions
-        .iter()
-        .map(|function| WalkFunction {
-            code_rva: function.code_rva,
-            code_size: function.code_size,
-            frame_size: function.frame_size,
-        })
-        .collect();
+    let functions = walk_functions(&decoded);
     let safepoints = walk_safepoints(&decoded)?;
-    let maps: Vec<WalkMap> = decoded
-        .maps
-        .iter()
-        .map(|map| WalkMap {
-            direct: map.slots[0].clone(),
-            interior: map.slots[1].clone(),
-            handle: map.slots[2].clone(),
-            compressed: map.slots[3].clone(),
-            stack: map.slots[4].clone(),
-            typed: map.typed.clone(),
-        })
-        .collect();
+    let maps = walk_maps(&decoded);
     let world = WalkWorld {
         functions: &functions,
         safepoints: &safepoints,

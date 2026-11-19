@@ -1,0 +1,175 @@
+//! Deterministic substitutes for the already independently tested PR24 fragments.
+use super::*;
+use std::collections::{BTreeMap, VecDeque};
+
+pub(super) fn bindings() -> glue::RuntimeBindings {
+    glue::RuntimeBindings {
+        morestack_or_poll: "__gugu_runtime_morestack_or_poll".into(),
+        safepoint_slow: "__gugu_runtime_safepoint_slow".into(),
+    }
+}
+
+pub(super) struct Harness {
+    pub expected_sp: u64,
+    pub watermark: u64,
+    pub flags: u32,
+    pub growth: VecDeque<u64>,
+    pub candidates: Vec<u64>,
+    pub guard_loads: usize,
+    pub polls: usize,
+    pub(super) processor: u64,
+    pub(super) arguments: [u64; 9],
+}
+
+impl Default for Harness {
+    fn default() -> Self {
+        Self {
+            expected_sp: 1 << 40,
+            watermark: 0,
+            flags: 0,
+            growth: VecDeque::new(),
+            candidates: vec![],
+            guard_loads: 0,
+            polls: 0,
+            processor: 0x2000,
+            arguments: [0; 9],
+        }
+    }
+}
+
+fn word(memory: &mut BTreeMap<u64, u8>, at: u64, value: u64, bytes: u64) {
+    for byte in 0..bytes {
+        memory.insert(at + byte, (value >> (8 * byte)) as u8);
+    }
+}
+
+impl Harness {
+    pub fn setup(&self, registers: &mut [u64; 32]) {
+        registers[31] = self.expected_sp;
+        registers[27] = 0x1000;
+        registers[28] = self.processor;
+        registers[8] = 0x8888;
+    }
+    pub fn initialize(&mut self, registers: &[u64; 32], memory: &mut BTreeMap<u64, u8>) {
+        self.arguments.copy_from_slice(&registers[..9]);
+        word(
+            memory,
+            registers[27] + u64::from(crate::runtime::coroutine_schema::stack_check_offset()),
+            self.watermark,
+            8,
+        );
+        word(
+            memory,
+            registers[28] + u64::from(crate::runtime::processor::poll_flags_offset()),
+            u64::from(self.flags),
+            4,
+        );
+    }
+    pub fn load(
+        &mut self,
+        fragment: &codegen::LeafFragment,
+        at: u64,
+        registers: &[u64; 32],
+        memory: &BTreeMap<u64, u8>,
+    ) {
+        if at == 0x1000 + u64::from(crate::runtime::coroutine_schema::stack_check_offset()) {
+            self.guard_loads += 1;
+            assert_eq!(
+                registers[31], self.expected_sp,
+                "SP changed before entry check"
+            );
+            let candidate = self
+                .expected_sp
+                .wrapping_sub(u64::from(fragment.frame.size));
+            assert_eq!(registers[11], candidate);
+            assert!(
+                !memory
+                    .keys()
+                    .any(|at| *at >= candidate && *at < self.expected_sp),
+                "frame store before entry check"
+            );
+            assert_eq!(&registers[..9], &self.arguments);
+        }
+    }
+    pub fn call(
+        &mut self,
+        fragment: &codegen::LeafFragment,
+        pc: usize,
+        registers: &mut [u64; 32],
+        memory: &mut BTreeMap<u64, u8>,
+        args: usize,
+    ) -> bool {
+        let Some(fixup) = fragment.relocations.iter().find(|r| r.offset == pc as u64) else {
+            return false;
+        };
+        let binding = bindings();
+        if fixup.relocation.target != binding.morestack_or_poll
+            && fixup.relocation.target != binding.safepoint_slow
+        {
+            return false;
+        }
+        registers[30] = pc as u64 + 4;
+        let site = sites::lookup(&fragment.runtime_sites, registers[30] as u32).unwrap();
+        if fixup.relocation.target == binding.morestack_or_poll {
+            assert_eq!(site.kind, sites::SiteKind::MorestackEntry);
+            assert_eq!(registers[31], self.expected_sp);
+            assert_eq!(registers[10], u64::MAX);
+            assert_eq!(&registers[..9], &self.arguments);
+            self.candidates.push(registers[11]);
+            let delta = self.growth.pop_front().expect("unexpected morestack retry");
+            let old_sp = self.expected_sp;
+            self.expected_sp += delta;
+            for offset in 0..args.saturating_sub(8) as u64 * 8 {
+                let value = *memory.get(&(old_sp + offset)).unwrap_or(&0);
+                memory.insert(self.expected_sp + offset, value);
+            }
+            registers[31] = self.expected_sp;
+            let watermark = if self.growth.is_empty() {
+                self.expected_sp - u64::from(fragment.frame.size)
+            } else {
+                crate::runtime::coroutine::POLL_SENTINEL as u64
+            };
+            word(
+                memory,
+                0x1000 + u64::from(crate::runtime::coroutine_schema::stack_check_offset()),
+                watermark,
+                8,
+            );
+            for (id, register) in registers.iter_mut().enumerate().take(15).skip(9) {
+                if id != 10 {
+                    *register = 0xbad0 + id as u64;
+                }
+            }
+        } else if fixup.relocation.target == binding.safepoint_slow {
+            assert_eq!(site.kind, sites::SiteKind::PollResume);
+            self.polls += 1;
+            for (id, reg) in registers.iter_mut().enumerate().take(27) {
+                *reg = 0xdead0000 + id as u64;
+            }
+            registers[29] = 0xbad29;
+            self.processor = 0x3000;
+            registers[28] = self.processor;
+            word(
+                memory,
+                self.processor + u64::from(crate::runtime::processor::poll_flags_offset()),
+                0,
+                4,
+            );
+        } else {
+            return false;
+        }
+        true
+    }
+}
+
+pub(super) fn run(
+    fragment: &codegen::LeafFragment,
+    args: &[u64],
+    harness: &mut Harness,
+) -> [u64; 2] {
+    let mut morestack = Fixture::new(&[], &[]).compile();
+    let mut poll = morestack.clone();
+    morestack.symbol = bindings().morestack_or_poll;
+    poll.symbol = bindings().safepoint_slow;
+    vm::execute_inner(fragment, &[&morestack, &poll], args, Some(harness)).0
+}

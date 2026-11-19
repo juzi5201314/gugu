@@ -249,7 +249,11 @@ impl Checker<'_, '_> {
         if prefix.len() == 1
             && let Some(ty) = Ty::primitive(prefix[0])
         {
-            return Some(ty);
+            return Some(if ty == Ty::Formatter {
+                self.model.formatter_type()
+            } else {
+                ty
+            });
         }
         let def = self.model.resolve(self.module, prefix).ok()?;
         let id = self
@@ -362,7 +366,7 @@ impl Checker<'_, '_> {
             return self.invoke(callee, ty, args.to_vec(), None, expected);
         }
         let span = &self.arena().exprs[callee.0 as usize].span;
-        let assumptions = match self.model.assumptions_at(self.module, span) {
+        let assumptions = match self.assumptions(span) {
             Ok(assumptions) => assumptions,
             Err(error) => {
                 self.errors.push(error);
@@ -532,7 +536,7 @@ impl Checker<'_, '_> {
                 vec![right.clone()]
             },
         };
-        let assumptions = match self.model.assumptions_at(self.module, span) {
+        let assumptions = match self.assumptions(span) {
             Ok(assumptions) => assumptions,
             Err(error) => {
                 self.errors.push(error);

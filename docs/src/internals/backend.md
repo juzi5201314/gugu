@@ -437,7 +437,7 @@ foldhash 固定种子状态，避免每次 emit 使用 SipHash。索引保留表
 
 ### A64 独立编码库
 
-`gugu-backend::a64` 尚未接入任何目标、CLI 或 lowering，不能据此选择
+`gugu-backend::a64` 尚未接入任何目标或 CLI，不能据此选择
 `aarch64` 目标。封闭表目前包含 307 个 ARMv8.0-A base 与 FP/AdvSIMD 标量形式；不包含
 LSE 或 V128 整数向量指令。`FormId` 是固定表序下标，操作数采用汇编顺序；W/X 与
 B/H/S/D/Q 是寄存器视图，SP 与 XZR 是不同寄存器种类，编码号 31 的解释由槽决定。
@@ -467,6 +467,112 @@ revision 并更新测试中的指纹钉值，不能静默沿用身份。
 `clang -c -target arm64-apple-macos` 与 `otool -t`，并非由本编码器生成期望值。
 测试明确引用该 fixture，通过 Rust 构造每个 form 的样本及边界样本，同时比较规范文本、
 字节和解码回环；默认测试不启动 assembler 或任何子进程。
+
+### A64 内部整数叶 lowering
+
+`a64::codegen::compile_leaf(&Body)` 消费已验证的 LIR，再检查 arena/CFG、整数签名与
+`PollFreeLeaf` 接口；不进入 `plan()` 或前端派发。不明确证明为 leaf，仍带 stack check、
+poll、安全点或 managed/root 初始化义务的函数被拒绝，而不是删除这些操作。
+输出为字节、最终标签偏移、frame 与 allocation 诊断，没有镜像或 GC map。
+
+`compile_function(&Body)` 是另一个显式隔离入口：调用方预留入口栈容量，测试手建满足
+约束的 LIR；它不要求 caller 的 leaf 标志，也不删除 StackCheck 或伪造 callee metadata。
+仍带 StackCheck、poll、safepoint 或需要 call map 的 managed call 均以
+`requires checked entry / stack maps (4c)` 拒绝。正常生产 caller 保留 checked entry，
+所以仍被拒绝，直到 4c。`compile_leaf` 继续拒绝全部 Call/TailCall。
+只接受 `CallTarget::Instance`、Managed、现有 `Call.poll_free_leaf = true` 且无
+unwind/suspend/allocation/capture 的调用；runtime、foreign、indirect/vtable 均不支持。
+
+这是私有整数叶 ABI，不是 AAPCS64/Darwin C ABI：参数用 `x0–x7`，其余标量用入口 SP
+以上的 8 字节槽；结果用 `x0–x1`。隔离入口遵守现有 LIR sret：隐藏指针为首个参数，
+多字返回由 LIR Store 写入其存储，寄存器结果为空，不把第三字放到 x2。
+普通 `compile_leaf` 不接受 sret；正常 sret callee 没有 poll_free_leaf 证明，其调用仍须 4c。
+保留 SP、`x16/x17`（rewrite/copy scratch）、`x18`（平台）、`x29`（FP）、`x30`（LR）；
+`x27 = CoroutineHot*`、`x28 = LogicalProcessor*` 均不分配。分配池为 `x0–x15`、`x19–x26`，
+用到的 `x19–x26` 保存恢复。非零 frame 保存 FP/LR；SP 16 字节对齐，无 red zone。
+在上述两个隔离入口中，入口容量仍是调用方义务。frame 低地址为最大
+outgoing 参数区（向上取整至 16 字节），后面为 FP/LR record、copy scratch、保存寄存器、
+spill 与 local。x29 指向 record，所有 BL 强制建立 record，退出恢复 FP/LR 与 SP。
+frame 不再限制为 32752 字节：大 SP delta 用 scratch 常量与 extended-register ADD/SUB，
+大栈偏移先物化地址；frame/槽/偏移的算术溢出仍返回错误。
+
+`machine` 虚拟操作数显式携带 read/write/read-write 角色，地址基址是 read。
+`select` 与 `lower/{integer,memory}` 负责整数/原始指针、常量、访存与 CFG 选指。
+比较物化为 0/1，窄值为零扩展位模式，有符号运算先扩展；carry/borrow 为两段进位/借位的或。
+除法只接受静态非零除数，不能以 A64 零除结果代替语言 panic。FP/V128、managed/compressed
+引用、异常、原子、runtime 与外部地址符号操作返回带 body/block/site 的错误。
+显式终止的 Trap/Unreachable 用 BRK，TrapIf 不替代为 BRK。
+
+`alloc` 仅归一化事件，共享 `regalloc` 完成 CFG liveness、加权 scan、slot 复用与并行 copy
+调度，不做 rematerialization，没有第二套分配器。边拆为 copy block，支持同时赋值和环。
+ABI 参数的寄存器/栈搬运与窄值规范化只在独立入口 stub 执行一次；stub 转入 LIR 入口块，
+所有 CFG 边（含指向入口的回边）只指向 LIR 块，不重复读取调用方参数。
+`frame/rewrite` 在 x16/x17 内完成 spill/reload、MOVZ/MOVN/MOVK 常量、SP 地址合法化；
+小 frame 的 copy 环用 x16；大 frame 的环使用独立 frame scratch，避免地址合法化
+覆盖 holder。slot-to-slot 搬运用 x17，不借用活跃分配寄存器。
+调用以原子 use/def 事件送入共享分配器，`call = true` 且 mask 为 x0–x15；跨调用值
+只分配 x19–x26 或 spill。先写 outgoing 栈参数，再用共享并行 copy 调度器放入 x0–x7；
+返回后同时收集 x0/x1。TailCall 恢复当前保存寄存器/SP/LR 后 B 到符号，只复用足够大的
+incoming 参数区；sret、local 栈逃逸、参数区增长和结果签名不匹配均拒绝。
+`layout` 单调扩展越界 B.cond/CBZ/CBNZ/TBZ/TBNZ 为反条件跳过一条 B，再按最终 PC 回填；
+B 仍越界则报错，不生成 veneer。现有 verifier/encoder 是最终边界；fragment 公开内部
+`__gugu_fn_<instance hex>` 符号，以及最终字节 offset 的 Call26/尾调 Branch26 重定位。
+其他未解决符号仍被拒绝，不在这里接入目标 linker。
+测试进程内手建 LIR，选指到编码/解码回环，用有限的确定性解释器核对整数、CFG、内存、
+spill 和保存寄存器。VM 在合成地址空间链接 fragment 并模拟 BL/LR/RET；大 frame 用稀疏
+内存，距离边界/级联扩展使用合成大小，不分配巨大 padding。
+
+未来站点已约定：poll clobber 所有 caller-saved 寄存器；morestack clobber `x9–x14`，
+保留 `x0–x8/q0–q7`。叶与隔离调用入口不调用这些片段；runtime-site 入口开始消费此约束。
+
+### A64 checked entry 与 poll（4c.1）
+
+`compile_runtime(&Body, &RuntimeBindings)` 与现有选指、分配、frame/rewrite/layout 共用同一
+路径，接受无根整数/原始指针函数和 StackCheck/SafepointPoll。绑定必须是不同且非空的
+morestack_or_poll/safepoint_slow 符号，重定位仍为 Call26，由调用方同时提供独立片段。
+`fragments::morestack_or_poll` 实现在 `fragments/coroutine.rs`，`entry.rs` 是 rt0。
+入口 marker 必须是唯一的 LIR entry 首指令；非零 runtime frame 即使被叶分类移除 marker
+也自动检查，和 x64/alloc/frame.rs 一致。全部检查都在 SP 修改、save、ABI 参数落位之前。
+
+检查以 x11 = SP - frame.size 为候选，经 x9 acquire-load hot.stack_check；使用和
+StackDescriptor::allows_frame 相同的有符号 >=，相等可用，下溢与 poison 都走慢路。
+BL 前 x10 保存原 LR；morestack 保留 x0-x8/q0-q7，x9-x14 可破坏，但 x10 返回原 LR。
+返回后先恢复 LR，再从当前 SP 和最新 hot 水位重试，不沿用换栈前 candidate。
+此阶段 runtime 入口拒绝普通调用，因此不漏算 unchecked leaf callee 的额外 reserve。
+
+poll 经 x16/x17 acquire-load 当前 processor flags；零直接跳过，非零 BL 到绑定的慢路。
+poll 是共享分配器中的原子 call 点；保守 mask 整个分配池（含 x19-x26），所有跨点标量
+落槽，不能假设普通寄存器跨慢路保留。runtime 恢复的 x27/x28 是当前 mutator 上下文，
+不得用旧 processor 副本覆盖。poll 强制 FP/LR record，并保存全部 x19-x26 来维护当前函数
+向外的 callee-save 义务；CFA 用 SP 而不依赖 poll 后的 x29。
+
+fragment 的 runtime_sites 只登记最终返回 PC、来源和 CFA/root-free 诊断；label 放在 BL
+下一条指令，布局扩展后才解析，lookup 必须精确匹配。MorestackEntry 尚无 frame，CFA=SP、
+原 LR 在 x10；PollResume 的 CFA=SP+frame.size、原 LR 位于 SP+record+8。
+架构中立的空根位图构造从 x64/metadata.rs 提取到 metadata.rs，x64 使用同一实现；
+x64 source section 代码原样移入 metadata/source.rs，以保持修改文件小于 1000 行。
+
+4c.1 不产可供 GC walker 消费的二进制 map/unwind section。带 managed/stack-interior
+根、rooted local、sret、普通调用/Invoke/TailCall 与局部栈地址在 runtime 入口明确报
+4c.2 错误；不靠伪造空 map 放行。4c.2 再完成 schema、root 强制落槽、协程切换与展开消费。
+测试使用已独立测试的 PR24 片段契约替身，验证 retry/换栈、参数/LR、poll 全池破坏与
+processor 迁移、精确 PC/CFA、空函数和大 frame；既有 VM 同时增加 LDAR acquire 读建模。
+这些测试不执行 native 代码、GC 或真实协程调度，不登记目标，不接 plan/frontend。
+
+### A64 stack-map codec 与 walker（4c.2a）
+
+4c.2 再分为 codec/walker 基础与 lowering/协程集成两部分。前者在 runtime-abi 的原有
+stackmap_codec 中增加 encode_for(architecture, ...)，SafepointLayout<R=u16> 保留 x64
+默认输入，A64 用 u32；排序、去重、typed root 与 bitmap 编解码仍是同一实现。
+x64 默认 encode 继续输出相同 v4 section，既有 RuntimeRawContract 不改 schema/指纹；
+A64 v5 显式 tag 与寄存器编号见 stack-maps.md。默认 x64 路径不产生新的 header 字节。
+
+解码表携带 architecture，并检查 A64 frame/PC 对齐、根范围、保留寄存器和强制落槽规则。
+Rust reference walker 的 scan_frame 消费最终 section 表、精确返回 PC、frame words 和
+入口 scratch；frame/寄存器都复用已有 scan_roots，不复制 handle/compression 或五类根算法。
+初始化门控、实际 handle/compressed 引用和 MorestackEntry x0-x8 均由合成 VM snapshot 测试。
+此部分不放宽 compile_runtime：LIR 根集/分配器 force-slot 接线、managed call map、序列化
+unwind/CFA 和 Context switch/restore 仍属下一部分；不声称生产镜像 runtime 已支持 A64。
 
 ### A64 运行时机器片段
 

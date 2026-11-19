@@ -202,13 +202,10 @@ impl Checker<'_, '_> {
                 .expect("语言 trait 已注册"),
             arguments,
         };
-        let selected = self
-            .model
-            .assumptions_at(self.module, span)
-            .and_then(|assumptions| {
-                self.model
-                    .method(self.module, ty, Some(&interface), method, &assumptions)
-            });
+        let selected = self.assumptions(span).and_then(|assumptions| {
+            self.model
+                .method(self.module, ty, Some(&interface), method, &assumptions)
+        });
         let selected = match selected {
             Ok(Some(method)) => method,
             Ok(None) => {
@@ -267,21 +264,18 @@ impl Checker<'_, '_> {
                 .expect("Try 已登记"),
             arguments: Vec::new(),
         };
-        let result = self
-            .model
-            .assumptions_at(self.module, span)
-            .and_then(|assumptions| {
-                self.model.require_trait(&ty, &interface, &assumptions)?;
-                let value = self.model.normalize(
-                    &Ty::Projection(Box::new(ty.clone()), interface.clone(), "Value".into()),
-                    &assumptions,
-                )?;
-                let error = self.model.normalize(
-                    &Ty::Projection(Box::new(ty.clone()), interface, "Error".into()),
-                    &assumptions,
-                )?;
-                Ok((value, error))
-            });
+        let result = self.assumptions(span).and_then(|assumptions| {
+            self.model.require_trait(&ty, &interface, &assumptions)?;
+            let value = self.model.normalize(
+                &Ty::Projection(Box::new(ty.clone()), interface.clone(), "Value".into()),
+                &assumptions,
+            )?;
+            let error = self.model.normalize(
+                &Ty::Projection(Box::new(ty.clone()), interface, "Error".into()),
+                &assumptions,
+            )?;
+            Ok((value, error))
+        });
         match result {
             Ok(parts) => parts,
             Err(error) => {

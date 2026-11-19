@@ -376,6 +376,9 @@ fn child_exec(b: &mut Builder) {
         number(b, Rax, 3);
         syscall(b);
     }
+    reset_sigpipe(b);
+    compare(b, Rax, 0);
+    jump(b, "jl", failed);
     load(b, Rdi, R13, 0);
     load(b, Rsi, R13, 8);
     load(b, Rdx, R13, 16);
@@ -397,4 +400,19 @@ fn child_exec(b: &mut Builder) {
     number(b, Rax, 60);
     syscall(b);
     trap(b);
+}
+
+fn reset_sigpipe(b: &mut Builder) {
+    adjust(b, "sub", Rsp, 32);
+    // kernel_sigaction：SIG_DFL、flags、restorer、mask。
+    for offset in [0, 8, 16, 24] {
+        set(b, Rsp, offset, 0);
+    }
+    number(b, Rdi, 13);
+    rr(b, Rsi, Rsp);
+    number(b, Rdx, 0);
+    number(b, R10, 8);
+    number(b, Rax, 13);
+    syscall(b);
+    adjust(b, "add", Rsp, 32);
 }

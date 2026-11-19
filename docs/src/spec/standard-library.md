@@ -311,6 +311,12 @@ trait UpperExp  { fn upper_exp(self: &Self, out: &Formatter) }
 
 `std.fmt.Formatter` 只写入当前构建中的 string，不执行 I/O。格式 trait 实现可以调用 Formatter 的文本（`write_str` / `write_char`）、padding（`pad` 用于文本、`pad_integral` 用于带符号与前缀的数字）和结构化 debug（`debug_tuple` / `debug_list` / `debug_map` / `debug_struct`）方法，但不能读取或改变已解析的格式说明；`#` 是否生效由这些方法自行体现。f-string 构建失败只可能是 panic（例如内存耗尽或负的动态计数），不返回领域错误。comptime 域中的 f-string 使用同一套解析、兼容规则与内建实现，见[comptime capability registry](#comptime-capability-registry)。
 
+运行时 f-string 通过普通 trait 调用构建字符串；用户定义的 `Print` 实现与标准库实现使用相同的 `&Formatter` 目标。每个插值先求值一次，再读取该插值的动态 width / precision。`Formatter::new()` 建立空目标，`finish()` 返回当前字符串；每个插值的说明由编译器设置，不由用户格式 trait 修改。当前运行时标准库提供 string、char、bool 与全部整数类型的格式实现，以及上述文本和 padding 方法；浮点 `Print`（包括 `print` / `println` 等输出函数的浮点参数）、其它浮点格式与结构化 debug builder 尚未提供运行时实现，comptime 格式化不受此限制。
+
+Formatter 追加文本不复制已有输出；累计追加 n 字节的存储量为 O(n)，`finish()` 线性物化当前内容的独立快照。
+
+`pad` 与 `pad_integral` 的 width 均按 Unicode 标量数计算，不按 UTF-8 字节数计算；后者包括符号、启用的前缀和 digits 的标量数。多字节 fill 每次补一个标量，zero padding 仍在符号与前缀后补 ASCII `0`。
+
 ## 集合与 Hash {#collections-and-hash}
 
 `std.collections` 首批稳定提供：
@@ -499,6 +505,12 @@ fn Buffered.read(self: &Self, destination: &[byte]) Result[int, Error]
 `Read.read` 成功返回写入 destination 的 byte 数；返回 0 表示 EOF，不能用 EOF error 同时返回部分数据。`read_buffer` 向 ByteBuffer 末尾直接追加至多 limit byte，负 limit panic，并允许实现写入 unique spare capacity；返回 0 同样表示 EOF。`Write.write` 可以成功写入短于 source 的前缀，返回 0 且 source 非空是 WriteZero。已经传输的 byte 不因后续错误回滚。取消发生在操作线性化完成前时返回 `Cancelled`；已经提交给对端或文件系统的 byte 仍然生效。
 
 File、TcpStream、进程 pipe 和内存缓冲实现适用 trait。`print` / `println` 在格式化后写 stdout；它们不改变 `Print`/格式 trait 为纯文本构建能力的事实。
+
+`print[Ts: Print...](...args: Ts)`、`println`、`eprint` 和 `eprintln` 均返回 `()`。它们按参数顺序用 `Print` 向一个 `Formatter` 追加文本，不插入分隔符；`println` / `eprintln` 最后追加一个 `\n`，所以空参数调用仍写出换行。`print` / `println` 写 fd 1（stdout），`eprint` / `eprintln` 写 fd 2（stderr）。空的 `print()` / `eprint()` 不发起写入。
+
+这些便捷输出函数通过现有 ReportWrite 边界同步写出 UTF-8 字节，短写后继续写剩余部分；返回错误或零字节时静默停止，不重试错误、不 panic，也不返回 I/O 错误。已经写出的前缀保留，剩余文本丢弃。它们不承诺跨协程的整次调用原子性，也不采用上面通用 I/O trait 的挂起协议；需要错误处理或可取消写入的代码应使用 `Write` 等显式 I/O API。
+
+Linux runtime 启动时将进程的 SIGPIPE disposition 设为 SIG_IGN。因此向读端已关闭的 pipe 输出不会因默认 SIGPIPE 动作终止进程；write 返回 EPIPE，以上便捷输出函数按写入错误静默停止。`Command.spawn` 的子进程在 fork 后、execve 前将 SIGPIPE 恢复为 SIG_DFL，不把 runtime 的忽略设置传给目标程序；恢复失败按子进程启动错误返回。Windows 行为不变。
 
 ## 取消
 

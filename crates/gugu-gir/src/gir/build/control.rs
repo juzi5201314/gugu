@@ -510,6 +510,21 @@ impl Builder<'_> {
         if let Some(result) = self.try_emit_range_for(id, pattern, value, body)? {
             return Ok(result);
         }
+        if crate::mono::packs::element(self.module, self.owner.patterns[pattern.index()].ty)
+            .is_some()
+        {
+            let dest = self.temp(self.primitives.unit);
+            self.assign(
+                Place::local(dest),
+                Rvalue::Intrinsic {
+                    op: IntrinsicOp::PackFor,
+                    operands: Vec::new(),
+                    types: Vec::new(),
+                },
+            );
+            self.set_value(id, dest);
+            return Ok(Some(dest));
+        }
         let Some(iterable) = self.emit_expr(value)? else {
             return Ok(None);
         };

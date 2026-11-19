@@ -27,14 +27,18 @@
 ## 常用条目
 
 ```text
-std.io.print / println / eprint
+std.io.print / println / eprint / eprintln
 std.test.assert / assert_eq / assert_ne
 std.sync.CancelSource / CancelToken / OnceLock / Lazy
-std.fmt.Formatter            // write_str / pad / debug_*
+std.fmt.Formatter            // new / finish / write_str / write_char / pad / pad_integral
 std.runtime.set_parallelism(n)
 std.mem.pin
 std.panic.catch
 std.fs.open -> Result[File, std.fs.Error]
 ```
+
+`print` / `println` 按参数顺序连接 `Print` 文本，不插入分隔符，写 stdout；`eprint` / `eprintln` 写 stderr。两个 `*println` 版本追加换行，包括空参数调用。短写继续写剩余字节；错误或零写入时静默停止。
+
+上述 `Formatter` 方法已提供运行时实现；结构化 `debug_*` builder 尚未实现。当前运行时支持 string、char、bool 和全部整数类型的适用格式，尚不支持浮点 `Print` 或其它浮点格式；comptime 浮点格式化不受此限制。
 
 错误模型（领域错误 vs panic）、可变 COW `string`、`Bytes`/`ByteBuffer` 与集合的完整契约见[标准库](../spec/standard-library.md)各节。

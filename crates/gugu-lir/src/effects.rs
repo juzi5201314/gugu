@@ -235,7 +235,6 @@ impl RuntimeCall {
             Self::Spawn => (false, true, true, true),
             Self::ChannelNew
             | Self::DynamicErase
-            | Self::Format
             | Self::Concat
             | Self::DeferPush
             | Self::ArenaNew

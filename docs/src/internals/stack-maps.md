@@ -69,6 +69,37 @@ signal/APC handler不在任意PC直接扫描用户 stack。它只设置当前 pr
 
 ## 寄存器规则
 
+### 内部 A64 runtime-site 边界（4c.1）
+
+A64 fragment 暂只发布无根运行时站点的最终 BL 返回 PC 与 CFA 诊断，不发布此处二进制
+section。返回 PC 必须精确匹配，不能用最近站点代替；MorestackEntry 的 frame 尚未建立，
+原始 LR 在 x10；PollResume 按 CFA=SP+frame.size，原始 LR 在 SP+record+8 恢复。
+x29 指向 FP/LR record，但 poll 后不能假设 x29 的值有效，因此诊断使用 SP-based CFA。
+
+下表的 v4 寄存器编号仅适用于 x64，不能把 xN 强行解释为同号 x64 bit。4c.2a 的 Rust
+codec/walker 已支持下面的 A64 v5 契约；lowering 的强制根 spill、managed call、序列化
+CFA/unwind 与 coroutine handoff 仍待后续接线，compile_runtime 继续拒绝带根函数。
+空根诊断不是可运行用户镜像的栈图承诺，镜像中的 Gugu runtime decoder 尚未切换到 A64。
+
+### A64 v5 寄存器与布局
+
+v5 header byte 24 的 u32 为架构 tag 183，byte 28 的 u32 仍为零。v4 隐式为 x64，
+两个保留字保持零；编码默认入口与 RuntimeRawContract 的 x64 指纹/输出字节不变。
+只接受 (version=4, tag=0) 与 (version=5, tag=183)，未知组合拒绝。
+
+A64 用五个 u32 register mask，xN 的位号就是 N（0..30）；SP/bit31 不编码。
+x16/x17 scratch、x18 platform、x27/x28 runtime context、x29 FP 与 x30 LR 不得为用户根。
+CallReturn/PollResume/SuspendResume/ForeignBridge 的 mask 全零；MorestackEntry 仅可
+登记 x0-x8 参数根，slot_count=0 且无 typed root。非入口点的根槽与初始化字节必须在 frame 内。
+frame_size 是 16 的倍数，code RVA/size 与非零返回 PC 均须 4 字节对齐，PC 严格小于 code_size。
+
+v5 root record 头为 slot_count:u32 + 五个 u32 mask，共 24 字节，无额外保留字；其后五类
+slot bitmap、4 字节 padding、typed_count/typed root 与 v4 共用同一算法。v4 保持原 16 字节头。
+DecodedSection 携带 architecture，mask 统一扩为内存中的 u32，不把 A64 截成 u16。
+scan_frame 按精确 return PC 找站点，分别扫描 frame words 与调用方提供的入口寄存器 scratch；
+两者复用原有五类 scan_roots、初始化门控、handle 与 compression 处理，寄存器结果 offset
+是该架构的寄存器编号。找不到精确 PC、缺少 frame/register snapshot 均报错，不猜相邻 map。
+
 stack map 的通用寄存器编号固定为：
 
 | bit | 寄存器 | bit | 寄存器 |
@@ -136,13 +167,13 @@ Linux 放入 `.gugu.stackmap`，Windows 放入 `.gugustk`。section 内所有整
 
 ```text
 magic:              [u8; 8] = "GUGUSM01"
-version:            u16 = 4
+version:            u16 = 4 (x64) / 5 (A64)
 pointer_size:       u8 = 8
 endian:             u8 = 1
 function_count:     u32
 safepoint_count:    u32
 map_count:          u32
-reserved:           u32 = 0
+architecture:       u32 = 0 (v4) / 183 (v5)
 reserved2:          u32 = 0
 functions_offset:   u64
 safepoints_offset:  u64
@@ -186,7 +217,7 @@ reserved:           u16 = 0
 
 ### root map record
 
-每条 variable record 开头固定为：
+v4 的每条 variable record 开头固定为（v5 的 mask/header 宽度见上文）：
 
 ```text
 slot_count:             u32

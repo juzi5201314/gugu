@@ -70,34 +70,40 @@ fn check_operands(
             let local = builder.require_value(*amount)?;
             Ok(vec![copy_of(local)])
         }
-        hir::CheckKind::Bounds { .. } => match &builder.owner.expressions[id.index()].kind {
-            hir::ExprKind::Index { base, index, .. } => {
-                let base = builder.emit_place(*base)?;
-                let index = builder.require_value(*index)?;
-                Ok(vec![Operand::Copy(base), copy_of(index)])
+        hir::CheckKind::Bounds { .. } | hir::CheckKind::Utf8Boundary => {
+            match &builder.owner.expressions[id.index()].kind {
+                hir::ExprKind::Index { base, index, .. } => {
+                    let base = builder.emit_place(*base)?;
+                    let index = builder.require_value(*index)?;
+                    Ok(vec![Operand::Copy(base), copy_of(index)])
+                }
+                hir::ExprKind::Slice { base, start, end } => {
+                    let base = builder.emit_place(*base)?;
+                    let start = start
+                        .map(|start| builder.require_value(start))
+                        .transpose()?
+                        .map(copy_of)
+                        .unwrap_or_else(|| {
+                            builder.const_operand(builder.int_ty(), ConstValue::Integer(0))
+                        });
+                    let end = end
+                        .map(|end| builder.require_value(end))
+                        .transpose()?
+                        .map(copy_of)
+                        .unwrap_or_else(|| {
+                            let length = builder.temp(builder.int_ty());
+                            builder.assign(Place::local(length), Rvalue::Len(base.clone()));
+                            copy_of(length)
+                        });
+                    Ok(vec![Operand::Copy(base), start, end])
+                }
+                _ => Ok(Vec::new()),
             }
-            hir::ExprKind::Slice { base, start, end } => {
-                let base = builder.emit_place(*base)?;
-                let start = start
-                    .map(|start| builder.require_value(start))
-                    .transpose()?
-                    .map(copy_of);
-                let end = end
-                    .map(|end| builder.require_value(end))
-                    .transpose()?
-                    .map(copy_of);
-                Ok([Some(Operand::Copy(base)), start, end]
-                    .into_iter()
-                    .flatten()
-                    .collect())
-            }
-            _ => Ok(Vec::new()),
-        },
+        }
         hir::CheckKind::FloatToInt { value, .. } | hir::CheckKind::UnicodeScalar { value } => {
             let local = builder.require_value(*value)?;
             Ok(vec![copy_of(local)])
         }
-        hir::CheckKind::Utf8Boundary => Ok(Vec::new()),
     }
 }
 

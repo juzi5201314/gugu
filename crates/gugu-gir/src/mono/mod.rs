@@ -8,6 +8,7 @@
 pub mod collect;
 pub mod instantiate;
 pub mod keys;
+pub mod packs;
 pub mod roots;
 pub mod storage;
 pub mod summary;

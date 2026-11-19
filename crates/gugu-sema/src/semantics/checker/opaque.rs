@@ -37,7 +37,7 @@ impl Checker<'_, '_> {
         if let Ty::Dyn(interfaces) = expected
             && coercion
         {
-            let assumptions = match self.model.assumptions_at(self.module, span) {
+            let assumptions = match self.assumptions(span) {
                 Ok(assumptions) => assumptions,
                 Err(error) => {
                     self.errors.push(error);
@@ -59,7 +59,7 @@ impl Checker<'_, '_> {
         None
     }
     pub(super) fn enforce_bounds(&mut self, actual: &Ty, mut bounds: Bounds, span: &Span) {
-        let assumptions = match self.model.assumptions_at(self.module, span) {
+        let assumptions = match self.assumptions(span) {
             Ok(assumptions) => assumptions,
             Err(error) => {
                 self.errors.push(error);

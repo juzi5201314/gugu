@@ -377,7 +377,6 @@ pub enum RuntimeCall {
         cases: u32,
         has_default: bool,
     },
-    Format,
     /// 字符串拼接：参数为两组 `(data, len)`，返回新的 `(data, len)`。
     Concat,
     StringCompare,
