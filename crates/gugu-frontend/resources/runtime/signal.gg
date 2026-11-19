@@ -63,6 +63,17 @@ fn arm(extra_mask: uint) uint { unsafe {
     if fd == 0 { put(page + 8, created.value) }
     0
 } }
+#[cfg(os = "macos")]
+fn arm(extra_mask: uint) uint {
+    _ = extra_mask
+    45
+}
+#[cfg(os = "macos")]
+fn pump(page: uint) { _ = page }
+#[cfg(os = "macos")]
+fn harvest(page: uint) { _ = page }
+#[cfg(os = "macos")]
+fn mask_sync(page: uint) { _ = page }
 /* Windows 捕获面：CreateEventW 创建 auto-reset 事件后 signal_install 片段登记
    SetConsoleCtrlHandler；回调是纯机器代码，只把 ctrl 位并入 ctl+72 并 SetEvent。*/
 #[cfg(os = "windows")]

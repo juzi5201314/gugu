@@ -17,7 +17,7 @@ use std.runtime.heap.{heap_word}
 use std.text.{Bytes}
 
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn env_text(name: string) string {
     let base = context.environ()
     if base == 0 { return "" }

@@ -7,7 +7,9 @@
 
 use super::platform::PlatformProfile;
 use super::report::SourceLocation;
-use super::startup_schema::{ExitCategory, FatalKind, ReportEvent, ReportReason, TerminationMode};
+use super::startup_schema::{
+    ExitCategory, FatalKind, GuguSignal, ReportEvent, ReportReason, TerminationMode,
+};
 
 /// 一条待发布报告的描述；发布时才分配单调序号。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -272,6 +274,14 @@ pub fn signal_exit_code(profile: PlatformProfile, reason: ReportReason) -> Resul
             .linux_number()
             .map(|number| 128 + i64::from(number))
             .ok_or_else(|| format!("Linux 不提供信号 {}", reason.name())),
+        PlatformProfile::Macos => match signal {
+            GuguSignal::User1 => Ok(158),
+            GuguSignal::User2 => Ok(159),
+            _ => signal
+                .linux_number()
+                .map(|number| 128 + i64::from(number))
+                .ok_or_else(|| format!("macOS 不提供信号 {}", reason.name())),
+        },
         PlatformProfile::Windows => signal.windows_status().map(i64::from).ok_or_else(|| {
             format!(
                 "Windows 的 {} 由宿主决定，不在报告契约中登记",

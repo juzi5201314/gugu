@@ -34,7 +34,7 @@ pub fn from_string(value: string) Result[OsString, io.Error] {
     OsString::from_string(value)
 }
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn from_bytes(value: Bytes) OsString = OsString::from_bytes(value)
 
 #[cfg(os = "windows")]
@@ -49,7 +49,7 @@ impl OsString {
         Ok(OsString { bytes: bytes })
     }
 
-    #[cfg(os = "linux")]
+    #[cfg(any(os = "linux", os = "macos"))]
     pub fn from_bytes(value: Bytes) OsString = OsString { bytes: value }
 
     #[cfg(os = "windows")]
@@ -60,7 +60,7 @@ impl OsString {
         }
     }
 
-    #[cfg(os = "linux")]
+    #[cfg(any(os = "linux", os = "macos"))]
     pub fn from_units(value: &[u16]) Result[OsString, io.Error] {
         _ = value
         Err(io.Error::Unsupported)
@@ -112,7 +112,7 @@ impl OsString {
 
     pub fn to_string_lossy(self: &Self) string = self.bytes.to_string_lossy()
 
-    #[cfg(os = "linux")]
+    #[cfg(any(os = "linux", os = "macos"))]
     pub fn len(self: &Self) int = self.bytes.len()
 
     #[cfg(os = "windows")]
@@ -132,13 +132,13 @@ impl OsString {
     pub fn is_empty(self: &Self) bool = self.bytes.is_empty()
 }
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn separator(value: byte) bool = value == 47
 
 #[cfg(os = "windows")]
 fn separator(value: byte) bool = value == 47 || value == 92
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn root_parent(data: &[byte], index: int) bool = index == 0
 
 #[cfg(os = "windows")]
@@ -147,7 +147,7 @@ fn root_parent(data: &[byte], index: int) bool {
     index == 1 && separator(data[0])
 }
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn native_separator() byte = 47
 
 #[cfg(os = "windows")]
@@ -264,7 +264,7 @@ impl Path {
 
     pub fn components(self: &Self) [OsString; 0] = []
 
-    #[cfg(os = "linux")]
+    #[cfg(any(os = "linux", os = "macos"))]
     pub fn is_absolute(self: &Self) bool {
         let data = unsafe { self.value.bytes.as_slice() }
         data.len() > 0 && data[0] == 47
@@ -320,7 +320,7 @@ fn encoded_width(first: byte) int {
     4
 }
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn from_native_bytes(bytes: Bytes) Result[OsString, io.Error] = Ok(OsString::from_bytes(bytes))
 
 #[cfg(os = "windows")]
@@ -346,7 +346,7 @@ pub fn from_native_bytes(bytes: Bytes) Result[OsString, io.Error] {
 }
 
 // 返回带终止符的 native 编码快照，fs 必须在提交阻塞调用前复制到 raw payload。
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn native_bytes(path: Path) Result[Bytes, io.Error] {
     let bytes = path.value.bytes
     if has_nul(bytes) { return Err(io.Error::InvalidInput) }

@@ -5,7 +5,7 @@ use std.path.{Path, OsString, native_bytes, from_native_bytes}
 use std.runtime.fs_platform.{raw_allocate, raw_free, FsResult}
 
 use std.runtime.permission as permission
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 use std.runtime.fs_platform.{call, call_cancel}
 #[cfg(os = "windows")]
 use std.runtime.fs_windows.{call, call_cancel}

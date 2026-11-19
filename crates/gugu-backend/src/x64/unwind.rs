@@ -94,7 +94,7 @@ pub fn encode(
         canonical.extend_from_slice(&landing.cleanup.to_le_bytes());
     }
     let platform = match target {
-        TargetName::X86_64Linux => encode_eh_frame(functions, landings)?,
+        TargetName::X86_64Linux | TargetName::X86_64Macos => encode_eh_frame(functions, landings)?,
         TargetName::X86_64Windows => encode_windows(functions, landings, saves)?,
     };
     let mut output = vec![0_u8; HEADER_BYTES];

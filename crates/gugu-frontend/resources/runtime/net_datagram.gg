@@ -10,7 +10,7 @@ use std.net.address.{SocketAddr}
 use std.io.{Bytes, Error}
 use std.text.{alloc_bytes}
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn native_capacity(capacity: uint) uint = capacity
 #[cfg(os = "windows")]
 fn native_capacity(capacity: uint) uint { _ = capacity

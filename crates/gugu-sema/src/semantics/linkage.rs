@@ -160,6 +160,7 @@ impl Model<'_> {
                         section.as_str(),
                         ".pdata" | ".xdata" | ".idata" | ".edata" | ".reloc" | ".tls"
                     ),
+                    TargetName::X86_64Macos => true,
                 };
             if reserved {
                 return Err(self.trait_error(

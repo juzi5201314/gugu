@@ -64,7 +64,7 @@ pub fn close_native(handle: uint) {
     bridge.control_free(request, 88)
     if result.error != 0 { heap_fail() }
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn stack_bytes() uint = 0
 #[cfg(os = "windows")]
 fn stack_bytes() uint = 32
@@ -85,7 +85,7 @@ fn worker(op: uint, a: uint, b: uint) Result[(uint, uint), Error] { unsafe {
     Ok((heap_word(raw + 72), heap_word(raw + 24)))
 } }
 fn os(value: string) OsString = match OsString::from_string(value) { Ok(value) => value, Err(_) => panic("invalid process text") }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn shell(script: string) Configuration {
     let result = configuration(Path::from_string("/bin/sh"))
     result.arguments.push(os("-c"))
@@ -160,7 +160,7 @@ fn environment_bytes(entries: Vec[(OsString, OsString)]) Result[Vec[Bytes], Erro
     }
     Ok(result)
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn encode_arguments(executable: Path, arguments: Vec[OsString], script: Option[string]) Result[Vec[Bytes], Error] {
     _ = script
     let result = Vec[Bytes]::new()
@@ -214,7 +214,7 @@ fn encode_arguments(executable: Path, arguments: Vec[OsString], script: Option[s
     result.push(unsafe { Bytes::from_owned(bytes) })
     Ok(result)
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn table_bytes(count: int) uint = (uint(count) + 1) * 8
 #[cfg(os = "windows")]
 fn table_bytes(count: int) uint { _ = count
@@ -224,7 +224,7 @@ fn sequence_bytes(values: Vec[Bytes], environment: bool) uint {
     for value in values { length = checked_add(length, uint(value.len())) }
     #[cfg(os = "windows")]
     { if environment { length = checked_add(length, if values.is_empty() { 4 } else { 2 }) }; }
-    #[cfg(os = "linux")]
+    #[cfg(any(os = "linux", os = "macos"))]
     { _ = environment }
     length
 }
@@ -232,14 +232,14 @@ fn encode_sequence(raw: uint, values: Vec[Bytes]) {
     let cursor = raw + table_bytes(values.len())
     let index: uint = 0
     for value in values {
-        #[cfg(os = "linux")]
+        #[cfg(any(os = "linux", os = "macos"))]
         heap_store_word(raw + index * 8, cursor)
         copy(cursor, value)
         cursor = cursor + uint(value.len())
         index = index + 1
     }
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn pipe_name() Result[Bytes, Error] = Ok(Bytes::from_string(""))
 #[cfg(os = "windows")]
 fn pipe_name() Result[Bytes, Error] {

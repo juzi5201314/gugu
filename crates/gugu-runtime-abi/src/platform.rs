@@ -26,17 +26,20 @@ pub enum PlatformProfile {
     Linux,
     /// Windows x86_64：薄 IAT 入口，4 KiB 粒度。
     Windows,
+    /// macOS x86_64：libSystem，4 KiB 页。
+    Macos,
 }
 
 impl PlatformProfile {
     /// 全部 profile 的稠密登记顺序。
-    pub const ALL: [Self; 2] = [Self::Linux, Self::Windows];
+    pub const ALL: [Self; 3] = [Self::Linux, Self::Windows, Self::Macos];
 
     /// 返回 profile 名；契约编码与 `ImagePlan` 都使用它。
     pub const fn name(self) -> &'static str {
         match self {
             Self::Linux => "linux",
             Self::Windows => "windows",
+            Self::Macos => "macos",
         }
     }
 
@@ -65,6 +68,10 @@ impl PlatformProfile {
                 dump_policy_default: DumpPolicy::Included,
                 select_scratch_cache_bytes: 65536,
             },
+            Self::Macos => PlatformConstants {
+                profile: self,
+                ..Self::Linux.constants()
+            },
         }
     }
 
@@ -89,6 +96,7 @@ impl From<TargetName> for PlatformProfile {
         match value {
             TargetName::X86_64Linux => Self::Linux,
             TargetName::X86_64Windows => Self::Windows,
+            TargetName::X86_64Macos => Self::Macos,
         }
     }
 }

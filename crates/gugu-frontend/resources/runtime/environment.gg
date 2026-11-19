@@ -8,13 +8,13 @@ use std.runtime.heap.{heap_word, heap_store_word, heap_fail}
 
 pub struct Snapshot { pub cwd: Path, pub entries: Vec[(OsString, OsString)] }
 const PACKET_BYTES: uint = 256
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 const ENVIRON: uint = 0
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 const SET: uint = 1
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 const REMOVE: uint = 2
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 const GET: uint = 3
 #[cfg(os = "windows")]
 const STRINGS: uint = 0
@@ -46,7 +46,7 @@ pub fn copy_bytes(bytes: Bytes) uint {
     }
     raw
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn stack_bytes() uint = 0
 #[cfg(os = "windows")]
 fn stack_bytes() uint = 48
@@ -91,7 +91,7 @@ pub fn remove(name: OsString) Result[(), io.Error] {
     defer { context.unlock() }
     remove_locked(key_raw)
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn changed(result: bridge.FsResult, removing: bool) Result[(), io.Error] {
     _ = removing
     if i32(result.value) == 0 { Ok(()) } else { Err(io.from_native_error(result.error)) }
@@ -101,12 +101,12 @@ fn changed(result: bridge.FsResult, removing: bool) Result[(), io.Error] {
     if u32(result.value) != 0 || (removing && result.error == 203) { Ok(()) }
     else { Err(io.from_native_error(result.error)) }
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn remove_locked(key: uint) Result[(), io.Error] = changed(call(REMOVE, key, 0, 0, 0, 0), true)
 #[cfg(os = "windows")]
 fn remove_locked(key: uint) Result[(), io.Error] = changed(call(SET, key, 0, 0, 0, 0), true)
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn get(name: OsString) Result[Option[OsString], io.Error] {
     validate_name(name)?
     let key = native_bytes(Path::from_os(name))?
@@ -127,7 +127,7 @@ pub fn get(name: OsString) Result[Option[OsString], io.Error] {
     for entry in entries { if compare(entry.0, name)? == 0 { return Ok(Some(entry.1)) }; }
     Ok(None)
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn compare(left: OsString, right: OsString) Result[int, io.Error] {
     let a = unsafe { left.to_bytes().as_slice() }
     let b = unsafe { right.to_bytes().as_slice() }
@@ -162,7 +162,7 @@ fn append_entry(result: Vec[(OsString, OsString)], address: uint, bytes: uint, s
     if system || context.unit(address) != 61 { result.push((name, value)) }
     Ok(())
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn entries_locked(system: bool) Result[Vec[(OsString, OsString)], io.Error] {
     let result = Vec[(OsString, OsString)]::new()
     let cursor = heap_word(unsafe { std.runtime.environment_symbol(ENVIRON) })

@@ -4,10 +4,10 @@ use std::{env, fs, path::PathBuf};
 
 fn main() {
     let source = PathBuf::from(env::args_os().nth(1).expect("源码路径"));
-    let target = if env::args().nth(2).as_deref() == Some("windows") {
-        TargetName::X86_64Windows
-    } else {
-        TargetName::X86_64Linux
+    let target = match env::args().nth(2).as_deref() {
+        Some("windows") => TargetName::X86_64Windows,
+        Some("macos") => TargetName::X86_64Macos,
+        _ => TargetName::X86_64Linux,
     };
     let text = fs::read_to_string(source).expect("读取手工输入");
     let imports = env::args()
@@ -41,10 +41,10 @@ fn main() {
         )
         .expect("写出 LIR dump");
     }
-    let (name, bytes) = if target == TargetName::X86_64Linux {
-        ("/tmp/gugu_fs_image", plan.linux_image())
-    } else {
-        ("/tmp/gugu_fs_image.exe", plan.windows_image())
+    let (name, bytes) = match target {
+        TargetName::X86_64Linux => ("/tmp/gugu_fs_image", plan.linux_image()),
+        TargetName::X86_64Windows => ("/tmp/gugu_fs_image.exe", plan.windows_image()),
+        TargetName::X86_64Macos => ("/tmp/gugu_fs_image.macho", plan.macos_image()),
     };
     fs::write(name, bytes).expect("写出手工验证镜像");
     println!("{name}");
