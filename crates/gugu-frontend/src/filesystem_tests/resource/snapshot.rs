@@ -41,8 +41,8 @@ fn snapshot(
 
 #[test]
 fn memory_snapshot_separates_uncommitted_reservation_and_file_subtotal() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = vec![0; 16384];
     put(&mut memory, HOT + 16, PROCESSOR);
     harness.run(
@@ -264,8 +264,8 @@ fn coroutine_stack_ledger_preserves_failed_commit_and_retires_only_live_bytes() 
 
 #[test]
 fn shutdown_releases_all_cached_worker_stacks() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = request_memory();
     put(&mut memory, REQUEST + 104, 0);
     let bytes = 9 * 65536 + 4096;
@@ -296,8 +296,8 @@ fn shutdown_releases_all_cached_worker_stacks() {
 
 #[test]
 fn retired_stack_trim_respects_byte_budget_across_rounds() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     let mut memory = vec![0; 196608];
     let node = 16384;
     let dead = 17408;

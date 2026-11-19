@@ -12,8 +12,8 @@ const LOAD_BIAS: u64 = 4096;
 
 #[test]
 fn callback_poll_parent_keeps_exact_roots_during_yield() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
     install_caller(&mut memory, 1, false);
@@ -58,8 +58,8 @@ fn foreign_return_maps_preserve_caller_resource_during_native_wait() {
 
 #[test]
 fn parked_stack_preserves_file_until_coroutine_leaves_registry() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();

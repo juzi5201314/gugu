@@ -33,8 +33,8 @@ fn queued_memory(mask: u8) -> Vec<u8> {
 
 #[test]
 fn pressure_admission_keeps_inflight_credit_and_resumes_fifo_after_drain() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.block_budget = 1024;
     let mut memory = queued_memory(0);
     // 一个在途请求、四个排队请求；八个槽中仍有七个可用。

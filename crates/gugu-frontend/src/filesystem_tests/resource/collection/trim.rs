@@ -32,8 +32,8 @@ fn trim(harness: &mut ResourceHarness<'_>, memory: &mut Vec<u8>) -> u64 {
 
 #[test]
 fn pressure_decommit_preserves_failed_mapping_and_recommits_reused_block() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _, record) = empty_block();
@@ -88,8 +88,8 @@ fn pressure_decommit_preserves_failed_mapping_and_recommits_reused_block() {
 
 #[test]
 fn large_object_mapping_charges_heap_partition_without_file_subtotal() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();
@@ -121,8 +121,8 @@ fn large_object_mapping_charges_heap_partition_without_file_subtotal() {
 
 #[test]
 fn region_allocation_commits_data_and_reset_removes_only_payload() {
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     harness.reserve_result = 131072;

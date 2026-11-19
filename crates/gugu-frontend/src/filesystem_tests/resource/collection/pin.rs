@@ -7,8 +7,8 @@ fn pinned_old_field_survives_minor_after_young_store() {
     const OLD: u64 = 2097152;
     const YOUNG: u64 = 4194304;
     const BARRIER: u64 = 98304;
-    let output = compile();
-    let mut harness = ResourceHarness::new(&output);
+    let (hir, bodies) = runtime_bodies();
+    let mut harness = ResourceHarness::from_bodies(&hir, &bodies);
     harness.gc_config = CONFIG;
     harness.block_budget = 32768;
     let (mut memory, _) = graph_memory();

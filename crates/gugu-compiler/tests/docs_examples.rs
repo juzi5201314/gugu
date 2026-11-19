@@ -127,8 +127,10 @@ doc_examples!(
     3,
     999
 );
-doc_examples!(guide_concurrency_examples_1, "guide/concurrency.md", 1, 2);
-doc_examples!(guide_concurrency_examples_2, "guide/concurrency.md", 3, 999);
+doc_examples!(guide_concurrency_examples_1, "guide/concurrency.md", 1, 1);
+doc_examples!(guide_concurrency_examples_2, "guide/concurrency.md", 2, 2);
+doc_examples!(guide_concurrency_examples_3, "guide/concurrency.md", 3, 3);
+doc_examples!(guide_concurrency_examples_4, "guide/concurrency.md", 4, 999);
 doc_examples!(
     guide_comptime_macros_examples_1,
     "guide/comptime-macros.md",
@@ -139,6 +141,12 @@ doc_examples!(
     guide_comptime_macros_examples_2,
     "guide/comptime-macros.md",
     2,
+    2
+);
+doc_examples!(
+    guide_comptime_macros_examples_3,
+    "guide/comptime-macros.md",
+    3,
     999
 );
 doc_examples!(guide_package_build_examples, "guide/package-build.md");
