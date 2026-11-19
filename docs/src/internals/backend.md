@@ -383,6 +383,10 @@ fragment relocation 封闭为：
 
 ### 内部 AArch64 Linux ELF64
 
+`a64_linux_resolver_image <output> [<interpreter> <libc>]` 将可选输入直接传入 `DynamicLink` 和所有 libc 导入；缺省仍为 musl，glibc 验证使用 `/lib/ld-linux-aarch64.so.1 libc.so.6`。外部 QEMU runner 以 `AARCH64_RUNNER_LIBC=musl/glibc` 选择 initramfs 的运行库；glibc 模式装入 Debian arm64 libc6 包的 loader、libc、NSS/files/DNS 与 libresolv，并设置 `hosts: files dns`。此手工验证不改变静态 writer 默认值，也不进入默认测试套件。
+
+`DynamicLink`/`Import` 为同一 writer 增加显式 interpreter 和 Function/Data 的命名库及 GOT 槽；`link_dynamic`、`link_entry_dynamic` 复用原有布局、指令修补和启动数据路径。动态形式增加 PT_INTERP/PT_DYNAMIC、DT_NEEDED、dynstr/dynsym、单 bucket SysV hash 与 eager R_AARCH64_GLOB_DAT（1025）；动态表只读，导入槽在有文件内容的 RW 段。共享 RELA 表按 RELATIVE、GLOB_DAT 顺序写出，DT_RELASZ 覆盖全部记录，启动参数的 RELOC_COUNT 仅计 RELATIVE 前缀。符号名全局唯一、库依声明顺序去重，不支持 Library-only 项、符号版本、导出或 lazy PLT；interpreter/libc 来自调用方而非宿主探测。下面的无 PT_INTERP/自重定位描述指默认静态路径。
+
 `a64::elf` 是不依赖目标注册的纯库 static-PIE writer。`ElfRequest` 给出节、入口、指令重定位和绝对指针槽；复用 `macho` 的 `Section`、`SectionContent`、`Segment` 与 `Location` 容器，但 `DataConst` 在这里从装载开始就只读，RELATIVE 槽只能位于有文件内容的 `Data`。`layout` 按节大小和请求形状计算链接期虚址（同时是文件偏移），`link` 写出确定性的 `ET_DYN`、`EM_AARCH64 = 183` 镜像与 BLAKE3 指纹。此层不接入 target registry、CLI 或闭世界 image planner。
 
 程序头依次为 `PT_PHDR`、RX/R/RW 三个 `PT_LOAD` 与不可执行的 `PT_GNU_STACK`；不写 `PT_INTERP`。三个装载段按 64 KiB 对齐，RX 包含 ELF 和程序头，R 包含 `.rela.dyn` 与节表，RW 的零填充节排在有文件内容的节之后且不增加文件大小。`.rela.dyn` 每项为标准 ELF64 RELA（24 字节）：槽虚址、符号索引为零的 `R_AARCH64_RELATIVE = 1027`、目标链接期地址加 addend；没有重定位时仍保留零长度的表。重复槽、非可写或未对齐的指针槽、越界位置、布局溢出和不支持的指令重定位在写出前报错。
@@ -407,7 +411,7 @@ epoll_ctl 将调用方的打包 12 字节事件展开到原生栈，DEL 不解�
 
 `linux_signal_dispatch` 和 `linux_fd_dispatch` 共享同一信号分派生成器；前者单独处理信号 NativeRequest，后者也路由现有运行时的 14/289。13/14/289 分别调用 134/135/74；39/62/186/200/234 分别调用 172/129/178/130/131。rt_sigaction 将输入复制到 32 字节栈缓冲，清除 SA_RESTORER 位并清零 restorer；成功时才复制旧 action。文件/信号保留原始负 VALUE 并写正 ERROR，与网络 packet 的错误归零约定不同。`linux_syscall` 共享原生栈保存、比较分支、svc 和取负辅助生成器。`signal.gg::arm` 修正 signalfd4 的参数：原先把 524288 放到 sigsetsize、flags 留零；现为 size = 8、flags = 524288，避免 x64 与 arm64 内核返回 EINVAL。
 
-Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。此路径依赖 libc 导入、foreign-call worker，内部 A64 raw-syscall 层暂不实现 resolver_symbol，也不增加另一套 UDP DNS。FP/原子片段不是当前 socket/信号系统调用的依赖；完整 worker 启动、调度、foreign 调用和目标登记仍未接通。
+Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeaddrinfo，再使用 foreign packet 调用 libc；Linux addrinfo 的 sockaddr 在 +24、next 在 +40。取消不提前释放仍被原生调用读取的 host/hints/result；迟到结果仍须 freeaddrinfo。内部 `linux_resolver_imports(library)` 声明两个 C 名字，`linux_resolver_symbol` 将 x0 的 0/1 映射到同名导入桩，越界陷阱；`linux_import_stub` 以 ADRP/ADD 指向 `linux_import_slot_symbol(name)` 的 GOT 槽，LDR 后 BR x16。它与 `foreign_native_worker(Platform::Linux)` 共用同名 C 桩解析；worker 还需 gettid、__errno_location 导入。`examples/a64_linux_resolver_image.rs` 通过真实 A64 packet worker 调用 musl，验证 localhost、/etc/hosts 的 resolver.test、成功结果的 freeaddrinfo 及 AI_NUMERICHOST 错误的空结果，不进入 nextest。完整 worker 线程启动、调度和目标登记仍未接通；没有另一套 UDP DNS，也未改动取消/迟到结果所有权。
 
 `examples/a64_linux_net_signal_image.rs` 手工生成通过适配器在 loopback 上 bind/listen/connect/accept、sendto/epoll/recvfrom，以及 block SIGUSR1、kill 自身、signalfd 读取的镜像；另外通过 sigaction 忽略 SIGUSR2、自发信号并恢复旧 action，同时检查网络 EINVAL/EBADF。默认 nextest 只运行解码/编码往返和确定性 syscall 替身，覆盖布局、完整 data、成功/零事件/错误、信号 action 转换和 signalfd 的运行时参数回归，不运行真实网络或子进程。
 
@@ -719,6 +723,27 @@ CAS 比较不等则 CLREX 后返回 actual/false，不写内存；只对排他�
 字节 VM 用显式 monitor、确定性的失败注入和并发写入替身检查重新读取、窄宽度、
 旧值返回、邻字节保护、顺序指令与有 spill 的寄存器别名情形；不执行 native 线程。
 
+### A64 image/data world（内部）
+
+私有 image/data foundation 由 `a64::codegen::build(BuildRequest)` 围绕同一 compile
+pipeline 构造，不接入 TargetName 或 plan dispatch。`World` 持有 writer 共用的 Section、
+Location、符号、代码重定位和数据指针重定位；ELF writer 已使用同一节容器，调用方可直接
+消费该图。输入 body 与定义按稳定符号排序，常量按字节去重并提升到最大所需对齐，typed
+局部 Data 绑定在选择前传入，不能在汇编后按字符串猜测局部下标。
+
+普通 Global 分配 `8 + bytes` 的零初始化块；coverage 使用独立域的 32-bit 非原子计数器。
+TLS 继续明确拒绝。其余 typed 符号复用 canonical mangler，并要求 compiled body 或显式
+Definition；显式 blob 的 Pointer 保留 offset、target 与 addend。该阶段不从空定义制造
+类型记录、vtable 或适配器别名，也不宣称已连接 frozen universe 的生产元数据生成。
+
+所有 compiled body 仍走 runtime 选择、分配、frame、site 与 metadata 路径。world 将其放进
+同一代码节，用真实函数偏移聚合 `a64_binding::Sections`，追加独立 maps/CFA 节；fragment
+base 是代码节起点，不是 Mach-O image base。`World::macho_request` 先固定全部节、导入、
+fixup 和符号形状，再调用已有 import stubs 与 writer layout，最后原长回填指令重定位。
+native data 的 SymbolAddr 多一次槽读取，blob 中的 native data 指针用 chained bind。
+请求入口目前是所选 managed body；生产 Darwin entry/rt0、payload、调度与平台 VM 绑定仍
+属后续阶段，不能把这个 request 当作已具备启动协议的可执行程序。
+
 ### A64 外调参数包与内部 lowering（4d.3）
 
 runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPacket`
@@ -774,8 +799,10 @@ function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无
 
 - `RuntimeCall`、`RuntimeMachineCall`、`CoroutineSwitch`、allocation/handle/GC/barrier
   与 region/scoped-view 操作：需要 PR 8 的 runtime/glue、异常与证明绑定。
-- `SymbolAddr` 的 global/TLS、adapter、descriptor、type table/name、vtable、data blob，
-  以及 `CoverageCounter`：需要 PR 6/8 的镜像数据布局与绑定；extern 地址只发重定位。
+- 孤立编译入口仍拒绝 global、adapter、descriptor、type table/name、vtable、data blob
+  与 `CoverageCounter`；私有 image world 已绑定常量、普通全局与 coverage，并要求其余
+  typed 符号有真实显式定义。生产类型表生成与适配器构造尚未接入；TLS 仍明确拒绝。
+  Darwin image 的 extern data 地址读取导入槽，function 地址使用已有导入桩。
 - `Vector` 的算术、shuffle、lane 与 reduction：通用 SIMD 尚无 lowering；现有生产
   LIR builder 不生成该 Op，V128 transport/select/load/store/bitcast 已支持。
 - `ForeignLeaf`、可 unwind 或 tail 外调、foreign callback/export adapter：未绑定其

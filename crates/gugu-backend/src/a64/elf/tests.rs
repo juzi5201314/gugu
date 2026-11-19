@@ -1,4 +1,6 @@
 use super::*;
+#[path = "dynamic_tests.rs"]
+mod dynamic_tests;
 use crate::{
     a64::{
         decode, encode,
