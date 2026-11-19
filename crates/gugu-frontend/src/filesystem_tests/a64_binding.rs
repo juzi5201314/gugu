@@ -207,6 +207,175 @@ fn runtime_layouts() -> RuntimeLayouts {
     (hir.clone(), lir.bodies().to_vec(), records)
 }
 
+fn review_image(slot_count: u32, scan_allowed: bool) -> Sections {
+    let code = runtime::CodeLayout {
+        code_rva: 0,
+        code_size: 128,
+        frame_size: 96,
+        unwind_index: 0,
+        runtime_bridge: false,
+        panic_landing: false,
+        has_stack_interior: true,
+    };
+    let point = runtime::SafepointLayout {
+        pc_offset: 16,
+        kind: 1,
+        dirty: false,
+        copy_allowed: true,
+        scan_allowed,
+        slots: std::array::from_fn(|_| vec![0; (slot_count as usize).div_ceil(64).max(1)]),
+        registers: [0_u32; 5],
+        typed: vec![runtime::TypedRoot {
+            word: 4,
+            root_kind: 4,
+            init_byte: 64,
+        }],
+        function: 0,
+        slot_count,
+    };
+    let maps =
+        stackmap_codec::encode_for(StackMapArchitecture::Aarch64, &[code], &[(0, point)]).unwrap();
+    let unwind = a64_unwind::encode(
+        code,
+        80,
+        &[a64_unwind::Site {
+            pc_offset: 16,
+            entry: false,
+        }],
+    )
+    .unwrap();
+    let directory = Sections::encode(&[Function {
+        code_rva: 0,
+        maps: &maps,
+        unwind: &unwind,
+    }])
+    .unwrap();
+    Sections::decode(&maps, directory.unwind()).unwrap()
+}
+
+#[test]
+fn a64_gated_root_beyond_fixed_bitmap_scans_by_frame_bounds() {
+    let (hir, bodies, _) = runtime_layouts();
+    let mut h = Harness::from_bodies(&hir, &bodies);
+    for slots in [0, 4] {
+        let image = review_image(slots, true);
+        assert_eq!(image.frames(BASE).unwrap().len(), 1);
+        let mut memory = vec![0; 262144];
+        install(&mut memory, &image);
+        for initialized in [0, 1] {
+            memory[OUT as usize..OUT as usize + 512].fill(0);
+            memory[FRAME as usize + 64] = initialized;
+            assert_eq!(
+                h.invoke(
+                    MODULE,
+                    "gc_a64_scan_frame",
+                    &[
+                        OUT,
+                        4,
+                        MAPS,
+                        image.maps().len() as u64,
+                        BASE,
+                        FRAME,
+                        BASE + 16,
+                        1,
+                        0,
+                        0
+                    ],
+                    &mut memory
+                ),
+                [u64::from(initialized)],
+                "slot_count={slots}, gate={initialized}"
+            );
+            assert_eq!(word(&memory, OUT + 16), 1);
+            if initialized != 0 {
+                assert_eq!(word(&memory, OUT + 96), FRAME + 32);
+            }
+            memory[OUT as usize..OUT as usize + 512].fill(0);
+            put(&mut memory, SNAP + 152, BASE + 16);
+            put(&mut memory, FRAME + 88, 0);
+            assert_eq!(
+                h.invoke(
+                    MODULE,
+                    "gc_a64_walk_roots",
+                    &[OUT, 4, 256, 0, SNAP, 1, FRAME, FRAME + 96, 1],
+                    &mut memory
+                ),
+                [u64::from(initialized)]
+            );
+            assert_eq!(word(&memory, OUT + 16), 1);
+        }
+    }
+}
+
+#[test]
+fn a64_scan_disallowed_safepoints_reject_both_scan_entries_without_emitting() {
+    let (hir, bodies, _) = runtime_layouts();
+    let mut h = Harness::from_bodies(&hir, &bodies);
+    for allowed in [false, true] {
+        let image = review_image(12, allowed);
+        for initialized in [0, 1] {
+            let mut memory = vec![0; 262144];
+            install(&mut memory, &image);
+            put(&mut memory, SNAP + 152, BASE + 16);
+            put(&mut memory, FRAME + 88, 0);
+            memory[FRAME as usize + 64] = initialized;
+            let direct = h.invoke(
+                MODULE,
+                "gc_a64_scan_frame",
+                &[
+                    OUT,
+                    4,
+                    MAPS,
+                    image.maps().len() as u64,
+                    BASE,
+                    FRAME,
+                    BASE + 16,
+                    1,
+                    0,
+                    0,
+                ],
+                &mut memory,
+            )[0];
+            let direct_counts = [
+                word(&memory, OUT),
+                word(&memory, OUT + 8),
+                word(&memory, OUT + 16),
+            ];
+            memory[OUT as usize..OUT as usize + 512].fill(0);
+            let walk = h.invoke(
+                MODULE,
+                "gc_a64_walk_roots",
+                &[OUT, 4, 256, 0, SNAP, 1, FRAME, FRAME + 96, 1],
+                &mut memory,
+            )[0];
+            let expected = if allowed {
+                u64::from(initialized)
+            } else {
+                NONE
+            };
+            assert_eq!(
+                [direct, walk],
+                [expected; 2],
+                "scan_allowed={allowed}, gate={initialized}"
+            );
+            let counts = if allowed {
+                [u64::from(initialized), u64::from(initialized), 1]
+            } else {
+                [0; 3]
+            };
+            assert_eq!(direct_counts, counts);
+            assert_eq!(
+                [
+                    word(&memory, OUT),
+                    word(&memory, OUT + 8),
+                    word(&memory, OUT + 16)
+                ],
+                counts
+            );
+        }
+    }
+}
+
 fn fragment(roots: bool) -> (Vec<u8>, Vec<u8>) {
     fragment_size(roots, 96)
 }
