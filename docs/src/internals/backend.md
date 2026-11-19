@@ -409,6 +409,8 @@ load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`
 
 `a64::fragments::darwin_net_dispatch` 在原生栈上用 x0 接收操作号，x1 接收 `net_platform.gg` 的请求地址。请求参数从偏移 0 开始，value 与 error 分别位于 72 和 80，入口清零两者并返回 value。操作 0–10、21–28 调用 `darwin_net_imports` 声明的 libSystem 入口；操作 19 给出同一片段内按 C ABI 调用的关闭回调地址。其他操作返回 EINVAL；信号操作 29、30 与 DNS 入口不属于此片段。网络调度、取消和套接字状态仍由 runtime 管理；该片段不接入托管调用、栈切换或目标注册。
 
+`a64::fragments::darwin_process_call` 在原生栈上接收 x0 的操作号和 x1 的 `ProcessRequest` 地址，处理操作 0–4（非阻塞观察、终止、关闭、管道读写）。`darwin_process_worker` 首入口返回同一片段内的 C ABI worker 地址；worker 接收 x0 的 `ProcessRequest` 地址，从请求读取操作 0–3（spawn、pipe、open null、duplicate）。两者用 `darwin_process_imports` 列出的 libSystem 调用桩，并在请求中写回 value 与 error。创建进程时用 `SpawnPacket` 配置标准流和工作目录，写回 PID；文件动作初始化成功后总会销毁，管道配置失败时先保存 errno 再关闭两端。片段不负责 worker 调度、完成发布、托管栈切换或信号订阅。
+
 ## 直接编码与验证
 
 encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcode、ModRM、SIB、displacement和 immediate；两次计算必须一致。每条 instruction记录起止 offset，stack map、branch、relocation和 source table只引用该边界。

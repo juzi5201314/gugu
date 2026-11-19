@@ -11,6 +11,9 @@ use AtomicWidth::*;
 #[path = "context_vm_tests.rs"]
 mod context_vm;
 
+#[path = "darwin_process_tests.rs"]
+mod darwin_process;
+
 fn instructions(fragment: &Fragment) -> Vec<Inst> {
     let (words, remainder) = fragment.bytes.as_chunks::<4>();
     assert!(remainder.is_empty());
