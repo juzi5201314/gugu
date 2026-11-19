@@ -16,9 +16,10 @@ cd hello
 最小可执行入口是 `fn main()`；返回值是 `()`：
 
 ```gugu
+use std.io.println
+
 fn main() {
-    let greeting = "hello, gugu"
-    _ = greeting
+    println("hello, gugu")
 }
 ```
 
@@ -40,6 +41,7 @@ fn main() {
 
 - `if`/`else`、`for i in 0..n`、`loop`、`match` 都是表达式或语句形式，见[表达式与语句](../spec/expressions.md)。
 - 字符串插值写 `f"value={name}"`；输出与断言走标准库 `std.io`/`std.test`，见[标准库](../spec/standard-library.md)。
+- 当前运行时尚未提供浮点 `Print` 实现，不能直接把浮点值传给 `print` / `println` 或放进运行时 f-string；整数、bool、char 和 string 已支持。
 - `use std.fs as fs` 引入模块名，`use std.io.{Error, Read}` 打散导入。规则见[声明与模块](../spec/declarations.md)。
 
 ## 编译与运行
