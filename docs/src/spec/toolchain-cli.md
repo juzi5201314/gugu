@@ -55,7 +55,7 @@
 
 ### `gugu new <path>`
 
-创建新 package 或 workspace。`--lib` 创建 lib package，`--bin` 创建 bin package（默认），`--workspace` 创建 workspace 根。生成的 `gugu.toml` 只含必要字段。
+创建新 package 或 workspace。`--lib` 创建 lib package，`--bin` 创建 bin package（默认），`--workspace` 创建 workspace 根（`members = ["*"]` 且 `exclude = ["target", "vendor"]`）。生成的 `gugu.toml` 只含必要字段。`init` 不覆盖已存在的 `src/main.gg`/`src/lib.gg` 入口；骨架文件一律不覆盖已有路径。
 
 ### `gugu init`
 
@@ -146,6 +146,8 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 更新锁文件：按当前清单重新解析并写回 `gugu.lock`。`-p <owner/name>` 把解析根收窄到指定 package。`--precise <version>` 需要 registry 候选查询；在 registry 协议接入前按用法错误拒绝，退出码 `2`。
 
+执行型收集选择（`test`/`bench` 默认全量、`--all-targets`、`--lib`）在 workspace 中允许成员没有对应 target，该成员被跳过；显式命名选择（`--test <name>`、`--bench <name>`）在成员存在该类 target 但缺名时仍是用法错误。
+
 ### `gugu tree`
 
 打印依赖树。`--depth <n>` 限制深度；`--duplicates` 只显示重复版本；`--invert <package>` 显示反向依赖。
@@ -156,7 +158,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu package`
 
-生成发布归档、文件清单和 package checksum，见[发布与生态](publishing-ecosystem.md)。不改变 registry 状态。归档写到 `<target-dir>/package/<name>-<version>.tar.gz`；workspace 需要用 `-p` 选定唯一 package。
+生成发布归档、文件清单和 package checksum，见[发布与生态](publishing-ecosystem.md)。不改变 registry 状态。归档写到 `<target-dir>/package/<name>-<version>.tar.gz`；workspace 需要用 `-p` 选定唯一 package。归档内容遵守清单 `include`/`exclude`；默认排除 `target/`、`vendor/`、VCS 元数据、`gugu.lock`、编辑器临时文件、系统文件与常见凭据文件，且 `exclude` 不能移除 `gugu.toml`、`build.gg` 或选中 target 的源码。
 
 ### `gugu publish`
 
