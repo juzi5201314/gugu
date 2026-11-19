@@ -225,6 +225,8 @@ u32 masks/24-byte map header 与 CFA。调用方持有已联合验证且不变�
 和输出存储。错误返回 ROOT_NO_ENTRY，调用方必须丢弃整个输出；绝不猜测缺图、调用真实 GC
 或解析 handle/compression。寄存器文件为 31 个 xN 字，入口只允许 x0–x8；x10 仅用于入口
 caller LR，不是根。typed byte gate 为零时跳过，不修改 snapshot/帧内非根和浮点位型。
+typed root 的 word 与初始化字节只受 frame_size 限制，不受固定 slot_count 限制；
+即使 slot_count=0 或 gate 尚未置位，帧内合法的门控项也必须通过结构校验。
 
 整栈扫描受 low/high 与 limit 限制，MorestackEntry 不把尚未分配的 callee frame 算进栈范围；
 其 caller SP 不变，caller PC 来自 x10。普通站点用 CFA 恢复 SP 和保存的 LR。只有零 PC 或

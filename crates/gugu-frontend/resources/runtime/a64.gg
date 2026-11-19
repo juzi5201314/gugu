@@ -146,7 +146,7 @@ pub fn gc_a64_scan_frame(out: uint, capacity: uint, section: uint, length: uint,
     let cursor = map + tail + 4
     let left = count
     while left > 0 {
-        if read32(cursor) >= slots || read32(cursor + 4) >= 5 || read32(cursor + 8) >= size { return ROOT_NO_ENTRY }
+        if read32(cursor) >= size / 8 || read32(cursor + 4) >= 5 || read32(cursor + 8) >= size { return ROOT_NO_ENTRY }
         cursor = cursor + 12
         left = left - 1
     }
