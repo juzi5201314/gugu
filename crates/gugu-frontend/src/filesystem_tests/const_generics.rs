@@ -1,6 +1,27 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn forwarded_const_parameters_shadow_module_constants_in_all_phases() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+const N: int = 9
+fn number[comptime N: int]() int { N }
+fn forward[comptime N: int]() int { number::[N]() }
+const EARLY: int = forward::[3]()
+fn main() { println(forward::[3]())
+    println(EARLY)
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"3\n3\n");
+}
+
+#[test]
 fn source_macros_reject_surplus_explicit_generic_arguments() {
     for call in [
         "number::[2, 3]()",
