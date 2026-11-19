@@ -158,7 +158,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu package`
 
-生成发布归档、文件清单和 package checksum，见[发布与生态](publishing-ecosystem.md)。不改变 registry 状态。归档写到 `<target-dir>/package/<name>-<version>.tar.gz`；workspace 需要用 `-p` 选定唯一 package。归档内容遵守清单 `include`/`exclude`；默认排除 `target/`、`vendor/`、VCS 元数据、`gugu.lock`、编辑器临时文件、系统文件与常见凭据文件。`gugu.toml`、`build.gg` 与选中 target 的源码属于受保护集合：无论 `include`/`exclude` 如何配置都进入归档，保证归档可独立解析。
+生成发布归档、文件清单和 package checksum，见[发布与生态](publishing-ecosystem.md)。不改变 registry 状态。归档写到 `<target-dir>/package/<name>-<version>.tar.gz`；workspace 需要用 `-p` 选定唯一 package。归档内容遵守清单 `include`/`exclude`；默认排除 `target/`、`vendor/`、VCS 元数据、`gugu.lock`、编辑器临时文件、系统文件与常见凭据文件；默认排除始终生效，`include`/`exclude` 均不能恢复这些文件。`gugu.toml`、`build.gg` 与选中 target 的源码属于受保护集合：无论 `include`/`exclude` 如何配置都进入归档，保证归档可独立解析。
 
 ### `gugu publish`
 
