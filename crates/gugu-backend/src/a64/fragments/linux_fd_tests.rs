@@ -1,8 +1,6 @@
 use super::*;
 
-#[path = "linux_fd_vm_tests.rs"]
-mod vm;
-use vm::{REQUEST, Vm};
+use super::linux_vm::{REQUEST, Vm};
 
 fn code() -> Vec<Inst> {
     let fragment = linux_fd_dispatch();

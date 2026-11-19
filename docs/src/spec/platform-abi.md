@@ -359,6 +359,12 @@ macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线�
 
 Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节有效可写原生内存，使用 x86_64 kernel stat 布局；arm64 适配器在系统调用成功后规范化原生 stat，失败不改写调用方缓冲。mode/size 与修改时间秒/纳秒分别位于 +24/+48/+88/+96，运行时由这些偏移构造文件元数据；内核目录项沿用 Linux dirent64 布局，无需转换。内部片段不登记公开目标或接通完整编译路径。
 
+内部 aarch64 Linux 进程层沿用 ProcessRequest（operation +0、arguments +8、value/error +72/+80）和 80 字节 SpawnPacket。process_call 在原生栈上接收 x0 操作号、x1 请求地址，支持 try_wait、kill、close、pipe_read、pipe_write（0–4）；完成/取消操作 5/6 返回 EOPNOTSUPP，操作号与请求不一致或越界为协议错误。worker 首入口返回同片段内的 C ABI worker 地址，worker 接收 x0 请求并处理 spawn/create_pipe/open_null/duplicate_stdio（0–3）。成功写 value、清零 error，失败 value = 0、error 为正 errno。
+
+Linux spawn 以 CLOEXEC 错误管道观察 exec 结果；arm64 使用 clone(SIGCHLD, 0, 0, 0, 0) 取得 fork 语义，不共享 VM、文件表或原生栈。子分支只执行 chdir、dup3、close、rt_sigaction、execve、write、exit 等原始系统调用，不进入 Gugu、分配器或 libc。stdio 临时描述符由 runtime 保证至少为 3，子进程安装 0/1/2 后关闭临时端并恢复 SIGPIPE 默认 disposition；其他捕获面、argv、envp 和 cwd 沿用 SpawnPacket。错误管道 EOF 才发布 PID；exec/setup 失败报告 errno 并回收子进程，错误管道自身失败则 kill/reap，不发布不确定结果。
+
+进程管道使用 pipe2(O_CLOEXEC)，只有 parent 端设为 O_NONBLOCK；direction = 0 时 parent 写、child 读，其余方向相反。pipe_write 仅在线程内暂时屏蔽 SIGPIPE，遇到 EPIPE 只消费本次新产生的 pending SIGPIPE，再恢复原掩码，不修改进程级 disposition。try_wait 使用 WNOHANG，value = 0/1/2 分别为未结束/退出/信号终止，arguments[1] 为退出码或信号编号。此层只提供内部原生片段，不登记目标，也不接通 foreign-call worker、线程启动或进程 runtime 的调度发布。
+
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
 ### 入口、重定位与 TLS {#entry-relocation-tls}
