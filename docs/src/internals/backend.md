@@ -585,8 +585,21 @@ terminator 前写 byte；回边不经过清零代码。byte store 和大偏移�
 入口块存在回边时，A64 保守使用 byte gate，不让回边的初始化事实证明第一次进入已初始化。
 这不改变共享 InitSlots/x64 的现行策略。init-byte 布局、事件推进和 local-root 放置从 x64
 提取到共享 metadata.rs；x64 继续使用原来的静态证明和序列化顺序。
-下一部分仍需实现 fragments::Context switch/restore、完整 context/stack-copy 修复，以及
-生产 Gugu decoder/image 接线；目前这些边界继续拒绝，不新增目标登记。
+4c.2b.2b.1 接通内部 Context/copy 边界；生产 Gugu decoder/image 接线仍留在下一部分，
+不新增目标登记，也不把内部 API 当作可运行的生产协程调度器。
+
+Context、MorestackMailbox、MorestackScratch 现在由 runtime-abi 定义，fragments 复用同一
+布局。直接 managed 挂起调用必须带权威 Suspend 记录，输出 SuspendResume 图，仍通过共享
+pointer_spill 落槽。隔离入口、runtime target 调用、捕获参数、aggregate/sret 与 Invoke 不放宽。
+stack::a64::FrameMetadata::load 配对校验最终 v5 map/CFA，并对 code bias 做对齐与溢出检查；
+Image::capture 只接受 stackless handoff 的完整已用区间、精确 user return PC 和已登记终止 PC。
+Context.pc 是 switch fragment 的恢复位置，不能拿它冒充用户栈图 PC；Morestack 从 scratch
+取得 return_pc、原 caller LR 和入口寄存器。复制逐帧消费 gate/StackInterior，修复结构性 FP
+链和 Context SP/FP，复用 x64 relocation 算术；保存的普通 GPR、浮点位型和代码地址不猜测修复。
+relocate_morestack 成功后才写回 scratch 根参数与 mailbox entry_sp/candidate，随后真实片段
+才重载参数；失败不改源 bytes、Context、mailbox 或 scratch。恢复仍显式提供 x27/x28。
+此边界要求 Context FP 与完整元数据帧链一致，底部 FP 为零；有未登记 runtime frame 的快照拒绝，
+不猜测跳过 helper frame。当前不接生产 runtime 控制块、调度器或镜像加载入口。
 
 poll-free managed leaf 的 map 豁免同时要求不进入 morestack/poll：runtime frame 布局将其
 物理 frame 限制为 4096 字节，并禁止自动入口检查。caller 取直接 poll-free managed callee
@@ -600,8 +613,8 @@ compile_function 仍是由调用者自行保证容量的隔离边界。
 compile_runtime 开始接受五类来源的 64 位标量根，以及直接 Instance managed call。
 compile_leaf/compile_function 的隔离限制不放宽。非 poll-free 调用必须有指向该指令的
 LIR CallReturn 记录；不补造 leaf proof 或逻辑根。入口参数的机器类型/provenance 必须与
-signature 一致。aggregate signature/sret、Invoke、挂起与外部调用仍明确拒绝，
-协程 Context handoff 和镜像内 Gugu runtime decoder 在下一部分接线。
+signature 一致。aggregate signature/sret、Invoke 与外部调用仍明确拒绝；挂起调用使用对应的
+SuspendResume 记录，镜像内 Gugu runtime decoder 仍未接通。
 
 runtime 编译复用 lir::stackmap::anchors/LiveValues；从真实 operands 重建派生 use cache，
 再取权威逻辑根。A64 regalloc adapter 把四类 managed 值标成 HeapPointer、StackInterior

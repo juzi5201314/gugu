@@ -15,6 +15,7 @@ pub enum SiteKind {
     MorestackEntry,
     PollResume,
     CallReturn,
+    SuspendResume,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -313,16 +314,14 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
         }
         if let Op::Call(ref call) = inst.op {
             if call.sret.is_some()
-                || call.may_suspend
-                || (call.poll_free_leaf && (call.may_allocate || call.may_unwind))
+                || (call.poll_free_leaf
+                    && (call.may_allocate || call.may_unwind || call.may_suspend))
             {
-                return Err(fail(
-                    "suspension or inconsistent poll-free proof requires 4c.2b.2",
-                ));
+                return Err(fail("sret or inconsistent poll-free proof is unsupported"));
             }
             if !call.poll_free_leaf && inst.safepoint.is_none() {
                 return Err(fail(
-                    "managed call requires an authoritative CallReturn map",
+                    "managed call requires an authoritative CallReturn/Suspend map",
                 ));
             }
         }
@@ -339,6 +338,8 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 crate::lir::body::SafepointKind::StackCheck
             } else if matches!(inst.op, Op::SafepointPoll { .. }) {
                 crate::lir::body::SafepointKind::Poll
+            } else if matches!(&inst.op, Op::Call(call) if call.may_suspend) {
+                crate::lir::body::SafepointKind::Suspend
             } else {
                 crate::lir::body::SafepointKind::CallReturn
             };
@@ -365,6 +366,7 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
             crate::lir::body::SafepointKind::StackCheck
                 | crate::lir::body::SafepointKind::Poll
                 | crate::lir::body::SafepointKind::CallReturn
+                | crate::lir::body::SafepointKind::Suspend
         ) {
             return Err(super::error("safepoint table requires stack maps (4c.2)"));
         }

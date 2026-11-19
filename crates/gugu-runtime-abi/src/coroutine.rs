@@ -68,6 +68,38 @@ pub struct CoroutineContext {
     pub r13: usize,
 }
 
+/// A64 private switch ABI; x27/x28 are supplied by the restoring runtime.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct A64Context {
+    pub sp: u64,
+    pub pc: u64,
+    pub x19_to_x26: [u64; 8],
+    pub x29: u64,
+    pub d8_to_d15: [u64; 8],
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C)]
+pub struct A64MorestackMailbox {
+    pub hot: u64,
+    pub entry_sp: u64,
+    pub candidate: u64,
+    pub required: u64,
+    pub scratch: u64,
+    pub mutator_context: u64,
+    pub system_context: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(C, align(16))]
+pub struct A64MorestackScratch {
+    pub return_pc: u64,
+    pub caller_lr: u64,
+    pub vector: [[u8; 16]; 8],
+    pub gpr: [u64; 9],
+}
+
 #[derive(Debug)]
 #[repr(C, align(64))]
 pub struct CoroutineHot {

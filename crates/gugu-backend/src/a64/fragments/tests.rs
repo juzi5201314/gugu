@@ -8,6 +8,9 @@ use crate::runtime::{entry::Rt0Payload, processor};
 use super::*;
 use AtomicWidth::*;
 
+#[path = "context_vm_tests.rs"]
+mod context_vm;
+
 fn instructions(fragment: &Fragment) -> Vec<Inst> {
     let (words, remainder) = fragment.bytes.as_chunks::<4>();
     assert!(remainder.is_empty());

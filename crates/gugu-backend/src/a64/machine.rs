@@ -59,6 +59,7 @@ pub enum Item {
         instruction: u32,
     },
     Call {
+        suspend: bool,
         target: String,
         arguments: Vec<u32>,
         results: Vec<u32>,

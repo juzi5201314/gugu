@@ -72,6 +72,73 @@ fn call(callee: &Fixture) -> Call {
 }
 
 #[test]
+fn suspending_calls_use_authoritative_suspend_maps_and_forced_pointer_slots() {
+    let mut callee = Fixture::new(&[], &[]);
+    callee.body.instance = [2; 32];
+    callee.ret(&[]);
+    let mut f = fixture(&[Type::Ptr], &[Type::Ptr]);
+    let p = f.param(0, 0);
+    root(&mut f, p, Provenance::Stack);
+    f.body.signature.results[0] = ValueType::pointer(Provenance::Stack);
+    let mut suspend = call(&callee);
+    suspend.may_suspend = true;
+    let at = f.body.instructions.len();
+    f.op(Op::Call(suspend), &[], &[]);
+    mark(&mut f, at, SafepointKind::Suspend);
+    f.ret(&[p]);
+    let fragment = compile(&f);
+    let decoded = maps(&fragment);
+    let metadata = fragment.metadata.as_ref().unwrap();
+    crate::runtime::stack::a64::FrameMetadata::load(&metadata.stackmaps, &metadata.unwind, 0x1000)
+        .unwrap();
+    let point = decoded
+        .safepoints
+        .iter()
+        .find(|point| point.kind == 2)
+        .unwrap();
+    let map = &decoded.maps[point.map_index as usize];
+    assert!(!map.slots[4].is_empty());
+    assert_eq!(map.registers, [0; 5]);
+    assert!(
+        fragment
+            .runtime_sites
+            .iter()
+            .any(|site| site.kind == sites::SiteKind::SuspendResume)
+    );
+    let callee = codegen::compile_runtime(&callee.body, &bindings()).unwrap();
+    assert_eq!(
+        runtime_vm::run_linked(&fragment, &[&callee], &[0x8000], &mut Harness::default())[0],
+        0x8000
+    );
+    let mut bad = f.body.clone();
+    bad.safepoints[0].kind = SafepointKind::CallReturn;
+    assert!(codegen::compile_runtime(&bad, &bindings()).is_err());
+    let mut bad = f.body.clone();
+    if let Op::Call(call) = &mut bad.instructions[at].op {
+        call.poll_free_leaf = true;
+    }
+    assert!(codegen::compile_runtime(&bad, &bindings()).is_err());
+    let mut empty = fixture(&[], &[]);
+    let mut suspend = call(&Fixture::new(&[], &[]));
+    suspend.may_suspend = true;
+    empty.op(Op::Call(suspend), &[], &[]);
+    mark(&mut empty, 1, SafepointKind::Suspend);
+    empty.ret(&[]);
+    let maps = maps(&compile(&empty));
+    let point = maps
+        .safepoints
+        .iter()
+        .find(|point| point.kind == 2)
+        .unwrap();
+    assert!(
+        maps.maps[point.map_index as usize]
+            .slots
+            .iter()
+            .all(Vec::is_empty)
+    );
+}
+
+#[test]
 fn poll_roots_use_shared_pointer_spills_and_reload_after_modeled_gc() {
     let mut f = fixture(&[Type::Ptr], &[Type::Ptr]);
     let p = f.param(0, 0);
@@ -271,7 +338,7 @@ fn managed_map_admission_rejects_missing_maps_and_suspension() {
         codegen::compile_runtime(&suspended, &bindings())
             .unwrap_err()
             .0
-            .contains("4c.2b.2")
+            .contains("invalid runtime safepoint table reference")
     );
     let mut invalid = f.body.clone();
     invalid.safepoints[0].kind = SafepointKind::Poll;

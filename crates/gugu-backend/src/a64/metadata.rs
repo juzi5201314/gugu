@@ -91,6 +91,7 @@ pub(crate) fn build(
             SiteKind::MorestackEntry => 4,
             SiteKind::PollResume => 1,
             SiteKind::CallReturn => 0,
+            SiteKind::SuspendResume => 2,
         };
         let anchor = logical.iter().find(|a| {
             a.kind == kind
@@ -188,7 +189,7 @@ pub(crate) fn build(
                 }
             }
         } else if !logical.is_empty()
-            || site.kind == SiteKind::CallReturn
+            || matches!(site.kind, SiteKind::CallReturn | SiteKind::SuspendResume)
             || body
                 .values
                 .iter()

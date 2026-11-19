@@ -71,6 +71,8 @@ A64 runtime 中省略 CallReturn map 的 poll-free managed leaf 不得进入 mor
 
 Linux 目标在没有动态 FFI、系统 Resolver 或可达环境 API 需求时不依赖动态解释器或 libc 初始化。闭世界实际可达的系统 Resolver、环境 API 及通过环境快照依赖它的 Command.spawn 自动采用目标工具链登记的 libc、pthread 与解释器。args/current_dir/set_current_dir、普通 fs、数字网络和空程序仍使用静态 syscall 路径。Windows 目标不链接 CRT，通过薄 IAT 使用运行时所需的系统 DLL；可达的网络功能按需加入 Winsock，进程创建遵守 [CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw) 的 application、命令行、环境与继承句柄契约。其它动态库必须通过显式 FFI 构建配置加入，不能由宿主链接器隐式补齐。系统需求与显式配置合并后的库、符号、Function/Data 种类和解释器均进入 action key；同名符号来自冲突库或具有冲突种类时必须拒绝，不能替换调用方配置。详见[程序与编译模型](program-model.md)和[包、依赖与构建模型](packages-builds.md)。
 
+A64 内部挂起调用使用权威 SuspendResume 栈图，跨点指针必须落槽。Context 的 SP、PC、x19–x26、x29 和 d8–d15 使用共享布局；x27/x28 由恢复方提供。stackless handoff 的复制输入必须由配对的精确 PC 栈图与 CFA 元数据产生，修复 StackInterior、保存的 FP 链和 Context FP；非根整数、代码地址和浮点位型不得猜测性修复。这仍不是生产协程调度或 A64 用户镜像已接通的声明。
+
 ### 新目标登记
 
 目标描述符的架构、操作系统、镜像格式、rt0 边界、CPU 基线与指针压缩能力是独立维度。实现可以预先表示 `aarch64`、`macos`、`macho64`、libSystem/dyld 启动边界和 `armv8.0-a` 基线；这些维度值不构成已登记目标，也不使其任意组合成为合法目标名。`armv8.0-a` 不接受任何 x86 CPU 特性；AArch64 指针压缩能力声明采用 48 位虚拟地址、最大 4 GiB cage 与 2 MiB 最小对齐，不表示已有对应后端或运行时。目标注册表及宿主目标选择仍只接受上述两行，`aarch64-linux` 与 `aarch64-macos` 均必须拒绝。
