@@ -17,10 +17,10 @@ use gugu_runtime_abi::{foreign_packet as packet, foreign_schema as schema};
 use probe::{Arg, Arg::*, Probe};
 use std::collections::BTreeMap;
 
-fn imports(p: &mut Probe) -> BTreeMap<String, Location> {
-    let imports: Vec<_> = linux_resolver_imports("libc.so")
+fn imports(p: &mut Probe, interpreter: &str, library: &str) -> BTreeMap<String, Location> {
+    let imports: Vec<_> = linux_resolver_imports(library)
         .into_iter()
-        .chain(["gettid", "__errno_location"].map(|name| NativeImport::function("libc.so", name)))
+        .chain(["gettid", "__errno_location"].map(|name| NativeImport::function(library, name)))
         .map(|native| Import {
             native,
             slot: p.data(vec![0; 8]),
@@ -36,7 +36,7 @@ fn imports(p: &mut Probe) -> BTreeMap<String, Location> {
         symbols.insert(name.clone(), stub);
     }
     p.dynamic(DynamicLink {
-        interpreter: "/lib/ld-musl-aarch64.so.1".into(),
+        interpreter: interpreter.into(),
         imports,
     });
     symbols
@@ -126,11 +126,14 @@ fn error(p: &mut Probe, resolver: Location, worker: Location) {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let path = std::env::args()
-        .nth(1)
-        .ok_or("usage: a64_linux_resolver_image <output>")?;
+    let args: Vec<_> = std::env::args().skip(1).collect();
+    let (path, interpreter, library) = match args.as_slice() {
+        [path] => (path, "/lib/ld-musl-aarch64.so.1", "libc.so"),
+        [path, interpreter, library] => (path, interpreter.as_str(), library.as_str()),
+        _ => return Err("usage: a64_linux_resolver_image <output> [<interpreter> <libc>]".into()),
+    };
     let mut p = Probe::new();
-    let symbols = imports(&mut p);
+    let symbols = imports(&mut p, interpreter, library);
     let resolver = p.symbolic_fragment(linux_resolver_symbol(), &symbols);
     let worker = p.symbolic_fragment(foreign_native_worker(Platform::Linux), &symbols);
     resolve(&mut p, resolver, worker, "localhost", 0x0100_007f);
@@ -139,5 +142,5 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     p.output(b"getaddrinfo /etc/hosts resolver.test: 198.51.100.7; freeaddrinfo: ok\n");
     error(&mut p, resolver, worker);
     p.output(b"getaddrinfo AI_NUMERICHOST not-an-ip: EAI_NONAME=-2, null result\n");
-    p.finish(&path)
+    p.finish(path)
 }

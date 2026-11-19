@@ -405,6 +405,8 @@ Linux resolver 不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 
+内部 aarch64 Linux resolver 验证镜像的生成器接受 `<output> [<interpreter> <libc>]`；不传可选参数时仍使用 musl 的 `/lib/ld-musl-aarch64.so.1` 和 `libc.so`，显式传入 `/lib/ld-linux-aarch64.so.1 libc.so.6` 可验证 glibc。此选择仅作用于该动态验证镜像；fd/net/process/vm 等无导入镜像仍为无 PT_INTERP、无 DT_NEEDED 的 static PIE。
+
 ### 入口、重定位与 TLS {#entry-relocation-tls}
 
 Linux 镜像的入口由 ELF `e_entry` 指向 rt0；`_start` 是默认启动约定。Windows 镜像的 PE 入口同样直接指向 rt0 初始化路径。入口函数不经过 Gugu 普通函数 ABI，也不能触发 GC 或依赖已初始化的 runtime。

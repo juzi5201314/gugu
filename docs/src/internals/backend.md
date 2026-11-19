@@ -383,6 +383,8 @@ fragment relocation 封闭为：
 
 ### 内部 AArch64 Linux ELF64
 
+`a64_linux_resolver_image <output> [<interpreter> <libc>]` 将可选输入直接传入 `DynamicLink` 和所有 libc 导入；缺省仍为 musl，glibc 验证使用 `/lib/ld-linux-aarch64.so.1 libc.so.6`。外部 QEMU runner 以 `AARCH64_RUNNER_LIBC=musl/glibc` 选择 initramfs 的运行库；glibc 模式装入 Debian arm64 libc6 包的 loader、libc、NSS/files/DNS 与 libresolv，并设置 `hosts: files dns`。此手工验证不改变静态 writer 默认值，也不进入默认测试套件。
+
 `DynamicLink`/`Import` 为同一 writer 增加显式 interpreter 和 Function/Data 的命名库及 GOT 槽；`link_dynamic`、`link_entry_dynamic` 复用原有布局、指令修补和启动数据路径。动态形式增加 PT_INTERP/PT_DYNAMIC、DT_NEEDED、dynstr/dynsym、单 bucket SysV hash 与 eager R_AARCH64_GLOB_DAT（1025）；动态表只读，导入槽在有文件内容的 RW 段。共享 RELA 表按 RELATIVE、GLOB_DAT 顺序写出，DT_RELASZ 覆盖全部记录，启动参数的 RELOC_COUNT 仅计 RELATIVE 前缀。符号名全局唯一、库依声明顺序去重，不支持 Library-only 项、符号版本、导出或 lazy PLT；interpreter/libc 来自调用方而非宿主探测。下面的无 PT_INTERP/自重定位描述指默认静态路径。
 
 `a64::elf` 是不依赖目标注册的纯库 static-PIE writer。`ElfRequest` 给出节、入口、指令重定位和绝对指针槽；复用 `macho` 的 `Section`、`SectionContent`、`Segment` 与 `Location` 容器，但 `DataConst` 在这里从装载开始就只读，RELATIVE 槽只能位于有文件内容的 `Data`。`layout` 按节大小和请求形状计算链接期虚址（同时是文件偏移），`link` 写出确定性的 `ET_DYN`、`EM_AARCH64 = 183` 镜像与 BLAKE3 指纹。此层不接入 target registry、CLI 或闭世界 image planner。
