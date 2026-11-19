@@ -3,7 +3,7 @@ use super::{
     Error,
     alloc::Allocation,
     frame::Frame,
-    inst::{Address, AddressMode, Inst, Operand, Shift},
+    inst::{Address, AddressMode, Extend, Inst, Operand, Shift},
     layout,
     machine::{self, Access, Function, Item, MOperand, MReg},
     reg::{Reg, Width},
@@ -94,7 +94,31 @@ fn adjust(
     let low = bytes & 4095;
     let key = if subtract { "sub.X.imm" } else { "add.X.imm" };
     if high > 4095 {
-        return Err(super::error("leaf address adjustment too large"));
+        let scratch = match dest.kind {
+            super::reg::RegKind::Gpr(id) if dest != source => id,
+            _ => {
+                if source == Reg::x(17) {
+                    16
+                } else {
+                    17
+                }
+            }
+        };
+        constant(out, scratch, u64::from(bytes))?;
+        return emit(
+            out,
+            if subtract {
+                "sub.X.extend"
+            } else {
+                "add.X.extend"
+            },
+            vec![
+                Operand::Reg(dest),
+                Operand::Reg(source),
+                Operand::Reg(Reg::x(scratch)),
+                Operand::Extend(Extend::Uxtx, 0),
+            ],
+        );
     }
     let mut base = source;
     if high != 0 {
@@ -130,11 +154,19 @@ fn adjust(
 }
 
 fn stack(out: &mut Vec<layout::Item>, load: bool, reg: u8, offset: u32) -> Result<(), Error> {
-    if !offset.is_multiple_of(8) || offset > 32760 {
-        return Err(super::error(
-            "leaf stack access exceeds unsigned immediate range",
-        ));
-    }
+    let (base, offset) = if offset.is_multiple_of(8) && offset <= 32760 {
+        (Reg::sp(Width::X), offset)
+    } else {
+        let address = if load {
+            reg
+        } else if reg == 17 {
+            16
+        } else {
+            17
+        };
+        adjust(out, Reg::x(address), Reg::sp(Width::X), offset, false)?;
+        (Reg::x(address), 0)
+    };
     emit(
         out,
         if load {
@@ -145,7 +177,7 @@ fn stack(out: &mut Vec<layout::Item>, load: bool, reg: u8, offset: u32) -> Resul
         vec![
             Operand::Reg(Reg::x(reg)),
             Operand::Address(Address {
-                base: Reg::sp(Width::X),
+                base,
                 mode: AddressMode::Unsigned(i64::from(offset)),
             }),
         ],
@@ -157,24 +189,24 @@ fn prologue(out: &mut Vec<layout::Item>, frame: &Frame) -> Result<(), Error> {
         return Ok(());
     }
     adjust(out, Reg::sp(Width::X), Reg::sp(Width::X), frame.size, true)?;
-    stack(out, false, 29, 0)?;
-    stack(out, false, 30, 8)?;
+    stack(out, false, 29, frame.record)?;
+    stack(out, false, 30, frame.record + 8)?;
     for (reg, offset) in &frame.saves {
         stack(out, false, *reg, *offset)?;
     }
-    adjust(out, Reg::x(29), Reg::sp(Width::X), 0, false)
+    adjust(out, Reg::x(29), Reg::sp(Width::X), frame.record, false)
 }
 
-fn epilogue(out: &mut Vec<layout::Item>, frame: &Frame) -> Result<(), Error> {
+fn restore(out: &mut Vec<layout::Item>, frame: &Frame) -> Result<(), Error> {
     if frame.size != 0 {
         for (reg, offset) in &frame.saves {
             stack(out, true, *reg, *offset)?;
         }
-        stack(out, true, 29, 0)?;
-        stack(out, true, 30, 8)?;
+        stack(out, true, 29, frame.record)?;
+        stack(out, true, 30, frame.record + 8)?;
         adjust(out, Reg::sp(Width::X), Reg::sp(Width::X), frame.size, false)?;
     }
-    emit(out, "ret", vec![Operand::Reg(Reg::x(30))])
+    Ok(())
 }
 
 fn location(reg: MReg, allocation: &Allocation) -> Result<Option<Location>, Error> {
@@ -192,6 +224,9 @@ fn location(reg: MReg, allocation: &Allocation) -> Result<Option<Location>, Erro
 }
 
 fn offset(frame: &Frame, slot: u32) -> Result<u32, Error> {
+    if slot == u32::MAX {
+        return Ok(frame.copy_scratch);
+    }
     frame
         .spills
         .get(slot as usize)
@@ -230,8 +265,8 @@ fn move_loc(
     }
 }
 
-struct Policy;
-impl CopyPolicy<Location, ()> for Policy {
+struct Policy<'a>(&'a Frame);
+impl CopyPolicy<Location, ()> for Policy<'_> {
     fn break_cycle(
         &self,
         saved: Location,
@@ -239,11 +274,15 @@ impl CopyPolicy<Location, ()> for Policy {
         _: &[Copy<Location, ()>],
     ) -> CycleBreak<Location, ()> {
         use crate::regalloc::RegisterFile;
-        let holder = Location::Reg(
-            super::abi::A64Registers
-                .copy_scratch(super::abi::GPR)
-                .unwrap_or(PhysReg(16)),
-        );
+        let holder = if self.0.size > 32752 {
+            Location::Slot(u32::MAX)
+        } else {
+            Location::Reg(
+                super::abi::A64Registers
+                    .copy_scratch(super::abi::GPR)
+                    .unwrap_or(PhysReg(16)),
+            )
+        };
         CycleBreak {
             holder,
             saves: vec![Copy {
@@ -312,14 +351,49 @@ fn rewrite_item(
                     moves.push(Copy { src, dst, ty: () });
                 }
             }
-            let plan =
-                parallel::resolve_copies(&moves, &Policy, true).map_err(super::alloc::shared)?;
+            let plan = parallel::resolve_copies(&moves, &Policy(frame), true)
+                .map_err(super::alloc::shared)?;
             for mov in plan.moves {
                 move_loc(out, mov.src, mov.dst, frame)?;
             }
             Ok(())
         }
-        Item::Return => epilogue(out, frame),
+        Item::Call {
+            target,
+            arguments,
+            results,
+        } => {
+            arguments_to_abi(out, arguments, allocation, frame, false)?;
+            out.push(layout::Item::SymbolBranch {
+                target: target.clone(),
+                link: true,
+            });
+            rewrite_item(
+                out,
+                &Item::Copies(
+                    results
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| (MReg::Physical(index as u8), MReg::Virtual(*value)))
+                        .collect(),
+                ),
+                allocation,
+                frame,
+            )
+        }
+        Item::TailCall { target, arguments } => {
+            arguments_to_abi(out, arguments, allocation, frame, true)?;
+            restore(out, frame)?;
+            out.push(layout::Item::SymbolBranch {
+                target: target.clone(),
+                link: false,
+            });
+            Ok(())
+        }
+        Item::Return => {
+            restore(out, frame)?;
+            emit(out, "ret", vec![Operand::Reg(Reg::x(30))])
+        }
         Item::Inst(inst) => {
             let operands = rewrite_operands(out, &inst.operands, allocation, frame)?;
             out.push(layout::Item::Inst(Inst::new(inst.form, operands.operands)));
@@ -345,6 +419,45 @@ fn rewrite_item(
             Ok(())
         }
     }
+}
+
+fn arguments_to_abi(
+    out: &mut Vec<layout::Item>,
+    arguments: &[u32],
+    allocation: &Allocation,
+    frame: &Frame,
+    tail: bool,
+) -> Result<(), Error> {
+    for (index, value) in arguments.iter().enumerate().skip(8) {
+        let src = location(MReg::Virtual(*value), allocation)?
+            .ok_or_else(|| super::error("call reads dead argument"))?;
+        let reg = match src {
+            Location::Reg(reg) => reg.0,
+            Location::Slot(slot) => {
+                stack(out, true, 16, offset(frame, slot)?)?;
+                16
+            }
+        };
+        let at = u32::try_from(index - 8)
+            .ok()
+            .and_then(|index| index.checked_mul(8))
+            .and_then(|offset| offset.checked_add(if tail { frame.size } else { 0 }))
+            .ok_or_else(|| super::error("outgoing argument offset overflow"))?;
+        stack(out, false, reg, at)?;
+    }
+    rewrite_item(
+        out,
+        &Item::Copies(
+            arguments
+                .iter()
+                .take(8)
+                .enumerate()
+                .map(|(index, value)| (MReg::Virtual(*value), MReg::Physical(index as u8)))
+                .collect(),
+        ),
+        allocation,
+        frame,
+    )
 }
 
 struct Operands {

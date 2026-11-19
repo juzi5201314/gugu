@@ -11,11 +11,21 @@ use std::collections::BTreeMap;
 pub enum Item {
     Label(u32),
     Inst(Inst),
+    SymbolBranch {
+        target: String,
+        link: bool,
+    },
     Branch {
         form: FormId,
         operands: Vec<Operand>,
         target: u32,
     },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Relocation {
+    pub offset: u64,
+    pub relocation: super::encode::Relocation,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,7 +63,7 @@ pub fn plan(items: &[Item], base_sizes: &[u64]) -> Result<Plan, Error> {
         || base_sizes.iter().any(|s| s % 4 != 0)
         || items.iter().zip(base_sizes).any(|(item, size)| match item {
             Item::Label(_) => *size != 0,
-            Item::Branch { .. } => *size != 4,
+            Item::Branch { .. } | Item::SymbolBranch { .. } => *size != 4,
             Item::Inst(_) => *size == 0,
         })
     {
@@ -151,16 +161,31 @@ fn inverted(form: FormId, operands: &[Operand]) -> Result<(FormId, Vec<Operand>)
 }
 
 pub fn assemble(items: &[Item]) -> Result<(Vec<u8>, Plan), Error> {
+    let (bytes, plan, relocations) = assemble_function(items)?;
+    if !relocations.is_empty() {
+        return Err(super::error("unresolved symbol in integer leaf"));
+    }
+    Ok((bytes, plan))
+}
+
+pub fn assemble_function(items: &[Item]) -> Result<(Vec<u8>, Plan, Vec<Relocation>), Error> {
     let sizes = items
         .iter()
         .map(|item| if matches!(item, Item::Label(_)) { 0 } else { 4 })
         .collect::<Vec<_>>();
     let plan = plan(items, &sizes)?;
     let mut bytes = Vec::new();
-    let mut emit = |inst: Inst| -> Result<(), Error> {
+    let mut relocations = Vec::new();
+    let mut emit = |inst: Inst, symbolic: bool| -> Result<(), Error> {
         let encoded = super::encode::encode(&inst)?;
-        if !encoded.relocations.is_empty() {
+        if !symbolic && !encoded.relocations.is_empty() {
             return Err(super::error("unresolved symbol in integer leaf"));
+        }
+        for relocation in encoded.relocations {
+            relocations.push(Relocation {
+                offset: bytes.len() as u64,
+                relocation,
+            });
         }
         bytes.extend_from_slice(&encoded.word.to_le_bytes());
         Ok(())
@@ -168,7 +193,19 @@ pub fn assemble(items: &[Item]) -> Result<(Vec<u8>, Plan), Error> {
     for (index, item) in items.iter().enumerate() {
         match item {
             Item::Label(_) => {}
-            Item::Inst(inst) => emit(inst.clone())?,
+            Item::Inst(inst) => emit(inst.clone(), false)?,
+            Item::SymbolBranch { target, link } => {
+                emit(
+                    machine::inst(
+                        if *link { "bl" } else { "b" },
+                        vec![Operand::Target(Target::Symbol {
+                            name: target.clone(),
+                            addend: 0,
+                        })],
+                    )?,
+                    true,
+                )?;
+            }
             Item::Branch {
                 form,
                 operands,
@@ -179,12 +216,12 @@ pub fn assemble(items: &[Item]) -> Result<(Vec<u8>, Plan), Error> {
                 let displacement = i64::try_from(i128::from(target) - i128::from(pc))
                     .map_err(|_| super::error("branch displacement overflow"))?;
                 for inst in resolve_branch(*form, operands, displacement, plan.expanded[index])? {
-                    emit(inst)?;
+                    emit(inst, false)?;
                 }
             }
         }
     }
-    Ok((bytes, plan))
+    Ok((bytes, plan, relocations))
 }
 
 pub(crate) fn resolve_branch(

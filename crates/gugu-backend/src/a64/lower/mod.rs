@@ -1,4 +1,5 @@
 //! Integer-only leaf instruction selection.
+pub(super) mod call;
 mod integer;
 mod memory;
 use super::{
@@ -75,6 +76,9 @@ pub fn bits(ty: Type) -> Result<u32, Error> {
 pub fn lower(body: &Body, instruction: &Instruction, b: &mut Builder<'_>) -> Result<(), Error> {
     let args = body.args(&instruction.arguments);
     let results = body.args(&instruction.results);
+    if let crate::lir::body::Op::Call(call) = &instruction.op {
+        return call::lower(body, call, args, results, false, b);
+    }
     memory::lower(body, &instruction.op, args, results, b).or_else(|error| {
         if matches!(
             instruction.op,
