@@ -444,6 +444,7 @@ dependencies = [
  "gugu-frontend",
  "gugu-runtime-abi",
  "gugu-runtime-builder",
+ "gugu-runtime-world",
 ]
 
 [[package]]

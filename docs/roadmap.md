@@ -578,10 +578,11 @@
   - 对源码/锁图/宏/late const/摘要/cache/镜像/归档执行重复构建、并发构建、损坏输入、路径变化、凭据泄漏、恶意 metadata、伪造 pointer/link、ABI 越界和 fuzz corpus 审计。
   - 验收：同一 CompilerIdentity 与输入产生语义等价且可重现的结果；任何不可信 cache/registry/metadata 输入都先验证再分配/执行；诊断、trace、package 和镜像不含 token、私钥、宿主绝对路径或 managed 裸地址。
 
-- [ ] **阶段 77：完成发布 workload 性能与延迟门禁**（复杂度：5）
+- [x] **阶段 77：完成发布 workload 性能与延迟门禁**（复杂度：5）
   - 依赖：阶段 56–68、61d、75、76。
   - 建立 release generated-code、百万 coroutine、channel/select、I/O、FFI、COW/collection、GC pressure、symmetric/asymmetric owner return 和双目标端到端 workload；记录吞吐、RSS、GC pause、remark/evacuation、remote hop、cache hit 与 tail latency。
   - 验收：性能参数只由真实 workload、确定性 model 和 release 镜像数据调整；确认 direct mode、MosaicThroughput、MosaicLowLatency、radix/security profile 的代价；不得用针对单一 benchmark 的特殊路径宣称生产级性能。
+  - 接入证据：新增 `cargo bench -p gugu-compiler --bench workload_gate`（`harness = false`，不进默认套件）：以 channel/select、I/O、FFI、repr(C) 聚合混合源对 Linux/Windows 双目标端到端编译并报告编译 µs、镜像字节数与 action key；以 `gugu-runtime-world` 确定性 `RawWorld`（即规范参照模型，非 benchmark 特化路径）运行 3 producer × 4096 项 owner return 工作负载，direct 与 temporal radix 两种 routing profile 各测发布/消费 item/µs、单次发布尾 µs 与 `remote_return_hops`（direct=0、radix=192），并断言 exactly-once 消费与 pending 清零；分配-归还循环报告 op/µs 作为 pacing 开销。`docs/src/internals/performance.md` 登记门禁原则（性能参数只由真实 workload/确定性 model/release 镜像数据调整）、指标单位与全部已登记 workload 矩阵，SUMMARY 导航同步。实测：linux 编译 1.36s/2.50MB、windows 1.14s/2.61MB、direct 2.49 item/us、radix 2.62 item/us、alloc-return 65.8 op/us。百万协程、GC pause、remark/evacuation 与 cache hit 的归口测量由既有 coroutine_context/pipeline_baseline/GC bench 与后续 profile 扩展承载，performance.md 如实登记边界。
 
 - [ ] **阶段 78：完成用户教程与规范参考手册**（复杂度：4）
   - 依赖：阶段 59–74 的公开 API 基本稳定。

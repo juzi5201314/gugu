@@ -22,6 +22,7 @@ gugu-frontend = { path = "../gugu-frontend" }
 gugu-backend = { path = "../gugu-backend" }
 gugu-base = { path = "../gugu-base" }
 gugu-runtime-abi = { path = "../gugu-runtime-abi" }
+gugu-runtime-world = { path = "../gugu-runtime-world" }
 
 [build-dependencies]
 gugu-compiler-core = { path = "../gugu-compiler-core" }
@@ -54,4 +55,8 @@ harness = false
 
 [[bench]]
 name = "x64_frame"
+harness = false
+
+[[bench]]
+name = "workload_gate"
 harness = false
