@@ -5,6 +5,7 @@
 //! `Compiler` 的验收 harness 与回归留在上层 driver。
 #![forbid(unsafe_code)]
 
+pub mod macho;
 mod native_link;
 pub mod x64;
 pub use native_link::{NativeImport, NativeImportKind, NativeLink};
