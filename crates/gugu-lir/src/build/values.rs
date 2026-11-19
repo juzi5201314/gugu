@@ -28,6 +28,9 @@ impl Builder<'_> {
         if !matches!(self.kind(reference.ty()), TypeKind::Reference(inner) if *inner == ty) {
             return Err(invalid("Clone 回退的实参必须是结果类型的引用"));
         }
+        if matches!(self.kind(ty), TypeKind::Array { .. }) {
+            return Err(invalid("数组 Clone 回退必须在单态化时绑定逐元素函数"));
+        }
         let address = self.computed_values(reference)?[0];
         if self.layout(ty).passing.has_resource() {
             let descriptor = self.descriptor(ty);

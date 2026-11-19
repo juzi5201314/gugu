@@ -37,8 +37,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。28：具体 impl 选择后降低 Clone 回退。
-pub const SCHEMA: u32 = 28;
+/// LIR query 与 world 的 schema。29：数组 Clone 经逐元素源函数闭合。
+pub const SCHEMA: u32 = 29;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {

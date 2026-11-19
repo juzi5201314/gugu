@@ -11,6 +11,77 @@ impl[T: Clone, comptime N: int] Clone for [T; N] {
 "#;
 
 #[test]
+fn array_clone_fallback_selects_each_nested_element() {
+    let source = r#"
+use std.io.{println}
+impl[T: Clone] Clone for [T; 2] {
+    fn clone(self: &Self) Self { println("inner")
+        [self[1].clone(), self[0].clone()] }
+}
+fn main() {
+    let values = [["a", "b"], ["c", "d"], ["e", "f"]]
+    let copied = values.clone()
+    println(copied[0][0])
+    println(copied[2][1])
+    let empty: [[string; 2]; 0] = []
+    _ = empty.clone()
+}
+"#;
+    let bytes: Vec<_> = output(source, &[])
+        .into_iter()
+        .flat_map(|(_, bytes)| bytes)
+        .collect();
+    assert_eq!(bytes, b"inner\ninner\ninner\nb\ne\n");
+}
+
+#[test]
+fn array_clone_fallback_supports_managed_source_element_impls() {
+    let source = r#"
+use std.io.{println}
+struct Item { text: string }
+impl Clone for Item { fn clone(self: &Self) Self { Item { text: self.text + "!" } } }
+fn main() {
+    let values = [Item { text: "a" }, Item { text: "b" }]
+    let copied = values.clone()
+    println(copied[1].text)
+}
+"#;
+    let bytes: Vec<_> = output(source, &[])
+        .into_iter()
+        .flat_map(|(_, bytes)| bytes)
+        .collect();
+    assert_eq!(bytes, b"b!\n");
+}
+
+#[test]
+fn array_clone_fallback_propagates_element_panic() {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        r#"
+impl[T: Clone] Clone for [T; 2] { fn clone(self: &Self) Self { panic("inner") } }
+fn main() { let values = [["a", "b"], ["c", "d"], ["e", "f"]]
+    _ = values.clone() }
+"#,
+        TargetName::X86_64Linux,
+    ));
+    assert!(
+        compiled.is_success(),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+    let mut harness = super::harness::Harness::new(&compiled);
+    harness.root_frames = Some(Default::default());
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        harness.invoke("main.gg", "main", &[], &mut vec![0; 262144])
+    }));
+    assert!(
+        result
+            .unwrap_err()
+            .is::<super::root_trace::InterpretedPanic>()
+    );
+}
+
+#[test]
 fn array_impl_lengths_use_distinct_const_argument_identities() {
     let source = "trait Length { fn length(self: &Self) int }\nimpl[T, comptime N: int] Length for [T; N] { fn length(self: &Self) int { N } }\nfn main() { _ = [1, 2].length()\n _ = [1, 2, 3].length()\n _ = [1, 2].length() }";
     let queries = crate::QueryEngine::new();

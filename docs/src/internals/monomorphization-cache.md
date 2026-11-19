@@ -19,8 +19,10 @@ coherence 比较先按类型/const 种类分别重命名右侧参数，再统一
 重复长度变量共享绑定，不能把两个声明中同名的变量当作同一变量。
 数组 Clone 的源 impl 通过普通 impl 选择优先于语言回退，回退没有源 impl 表项。
 generic GIR 保留 `Clone` 派发，单态化后先选择具体元素的源方法；只有没有源方法的
-`Protocol::Clone` 才在 LIR 复用值复制、COW snapshot 和资源 acquire 路径，不能提前把
-`T: Clone` 的调用擦成语义复制。`BuildGenericGir` schema 为 21、实例 schema 为 11、LIR schema 为 28。
+数组回退在单态化时绑定 `std.prelude.clone_array`，其初始化循环逐元素保留 Clone 派发，
+复用正常的根有效位与 panic 前缀清理。只有非数组 `Protocol::Clone` 才在 LIR 复用值复制、
+COW snapshot 和资源 acquire 路径，不能提前把 `T: Clone` 的调用擦成语义复制。
+`BuildGenericGir` schema 为 21、实例 schema 为 12、LIR schema 为 29。
 
 编译采用两个互补层次：
 
