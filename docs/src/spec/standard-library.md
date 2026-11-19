@@ -193,6 +193,7 @@ string 不支持单整数 `s[i]`，避免把 byte、Unicode scalar 和用户可�
 
 COW 值语义的用法：
 
+<!-- docs-example: gap string 没有适用的方法 `push` -->
 ```gugu
 fn demo() {
     let original = "gugu"
