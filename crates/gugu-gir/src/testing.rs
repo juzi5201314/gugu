@@ -60,6 +60,11 @@ fn artifact(target: TargetName) -> &'static RuntimeArtifactV1 {
     match target {
         TargetName::X86_64Linux => linux_artifact(),
         TargetName::X86_64Windows => windows_artifact(),
+        TargetName::X86_64Macos => {
+            static MACOS: LazyLock<RuntimeArtifactV1> =
+                LazyLock::new(|| load(TargetName::X86_64Macos));
+            &MACOS
+        }
     }
 }
 

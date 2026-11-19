@@ -35,7 +35,7 @@ pub fn initialize() Result[(), io.Error] {
     Ok(())
 }
 pub fn first_control() uint = heap_word(state + 8)
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn cancel_native(control: uint, hot: uint) bool { _ = control
     _ = hot
     true }
@@ -194,9 +194,77 @@ fn unregister(control: uint) {
     if result.error != 0 { heap_fail() }
     heap_store_word(control + REGISTERED, 0)
 }
-#[cfg(os = "linux")]
+#[cfg(os = "macos")]
+fn create_poller(s: uint) bridge.FsResult {
+    let result = native.request(s + REQUEST, 8, 0, 0, 0, 0, 0, 0)
+    if result.error != 0 { return result }
+    let flags = native.request(s + REQUEST, 26, result.value, 2, 1, 0, 0, 0)
+    if flags.error == 0 { return result }
+    close_poller(result.value)
+    flags
+}
+#[cfg(os = "macos")]
+fn register(control: uint) bridge.FsResult {
+    let result = native.kevent_interest(port(), heap_word(control + 64), control, 0, 1)
+    if result.error == 0 { heap_store_word(control + REGISTERED, 1) }
+    result
+}
+#[cfg(os = "macos")]
+fn unregister(control: uint) {
+    if heap_word(control + REGISTERED) == 0 { return }
+    let result = native.kevent_interest(port(), heap_word(control + 64), control, 1, 0)
+    if result.error != 0 { heap_fail() }
+    heap_store_word(control + REGISTERED, 0)
+}
+#[cfg(os = "macos")]
+fn poll(s: uint) {
+    let timeout = s + 96
+    heap_store_word(timeout, 0)
+    heap_store_word(timeout + 8, 0)
+    let result = native.request(request(), 9, port(), 0, 0, s + 128, 48, timeout)
+    if result.error == 4 { return }
+    if result.error != 0 || result.value > 48 { heap_fail() }
+    let budget = BUDGET
+    for index in 0..int(result.value) {
+        if budget == 0 { break }
+        let control = heap_word(s + 152 + uint(index) * 32)
+        if control & uint(1) != 0 {
+            dispatch.ready(control & ~uint(1))
+            budget = budget - 1
+        } else {
+            budget = accept_ready(control, budget)
+        }
+    }
+}
+#[cfg(os = "macos")]
+fn accept_ready(control: uint, budget: uint) uint {
+    let remaining = budget
+    let hot = heap_word(control + HEAD)
+    while hot != 0 && remaining != 0 {
+        let wait = wait_record(hot)
+        remaining = remaining - 1
+        if closed(control) { complete(control, hot, 0, CLOSED) }
+        else {
+            if waiter_stop(hot) != 0 { complete(control, hot, 0, waiter_stop(hot)) }
+            else {
+                heap_store_word32(wait + 80, 32)
+                let unix = heap_word(control + FAMILY) == 1
+                let accepted = native.request(request(), 4, heap_word(control + 64), if unix { 0 } else { wait + 48 }, if unix { 0 } else { wait + 80 }, 0, 0, 0)
+                if native.would_block(accepted.error) { break }
+                if accepted.error == 0 {
+                    let configured = native.configure(accepted.value)
+                    if configured.error != 0 { close_poller(accepted.value) }
+                    complete(control, hot, accepted.value, configured.error)
+                } else { if accepted.error != 4 { complete(control, hot, 0, accepted.error) }; }
+            }
+        }
+        hot = heap_word(control + HEAD)
+    }
+    remaining
+}
+#[cfg(any(os = "linux", os = "macos"))]
 fn platform_pending() bool = false
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn close_poller(handle: uint) { if native.request(request(), 7, handle, 0, 0, 0, 0, 0).error != 0 { heap_fail() }; }
 #[cfg(os = "linux")]
 fn poll(s: uint) { unsafe {

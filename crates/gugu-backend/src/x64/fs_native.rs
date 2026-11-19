@@ -12,6 +12,7 @@ use crate::lir::body::Symbol;
 use crate::runtime::foreign_schema as bridge;
 use crate::target::TargetName;
 mod callback;
+pub(crate) mod darwin;
 pub(crate) mod environment;
 pub(crate) mod exports;
 mod foreign;
@@ -160,6 +161,14 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
             windows_wall_clock(),
             windows_parallelism_probe(),
         ],
+        TargetName::X86_64Macos => [
+            darwin::start(),
+            darwin::poll(),
+            darwin::worker(true),
+            darwin::clock(6),
+            darwin::clock(0),
+            darwin::parallelism(),
+        ],
     };
     [
         "fs_start",
@@ -182,6 +191,7 @@ pub fn fragments(target: TargetName) -> Vec<FragmentBlob> {
             match target {
                 TargetName::X86_64Linux => linux_file_worker(false),
                 TargetName::X86_64Windows => windows_worker(),
+                TargetName::X86_64Macos => darwin::worker(false),
             },
         ),
         blob("thread_id", thread_id(target)),
@@ -225,6 +235,9 @@ pub(crate) fn required(
     ) || net::required(fragments, glue)
 }
 fn thread_id(target: TargetName) -> Builder {
+    if target == TargetName::X86_64Macos {
+        return darwin::thread_id();
+    }
     let mut b = Builder::new();
     match target {
         TargetName::X86_64Linux => {
@@ -237,6 +250,7 @@ fn thread_id(target: TargetName) -> Builder {
             dword_result(&mut b);
             adjust(&mut b, "add", Rsp, 40);
         }
+        TargetName::X86_64Macos => unreachable!(),
     }
     ret(&mut b);
     b

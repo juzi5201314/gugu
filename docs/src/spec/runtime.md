@@ -44,6 +44,8 @@ GC 控制类 machine intrinsic（`gc_config()` 及后续 GC 协调入口）只�
 
 镜像是闭世界构建：compiler 发出的每一个 runtime glue 符号都必须来自登记的 runtime 定义；迁移期间尚未接管的入口只能出现在 compiler 的显式缺口清单中，并不得作为运行期能力或镜像正确性证明。未知入口在 lowering 阶段即拒绝，不能由 ELF/PE writer 解析为退出桩，也不能由用户源码提供同名替代实现。该内部门禁不扩大 `std.runtime` 的公开调用面；它只保证 compiler、镜像 runtime 与 metadata 使用同一份入口目录。
 写屏障有普通和已预留两种入口。预留入口只可由 compiler 在已验证 permit 后发出，二者都必须保持 `read-old → shade → store → card-mark` 的可观察顺序和固定三参 ABI；预留入口不得在 store 之后临时扩容或停点。当前镜像已落地普通对象的 mark shade、page-cover/card 记账和 processor 固定 edge staging（512 条、满载设 overflow，不静默丢边）；owner-local consume、flush、credit 结算与 edge/candidate 消费仍属于回收阶段。
+Mach-O 镜像也必须在可写文件内容中保存启动 cage 容量；未启用时该字段为零。
+
 GC coordinator 在镜像 runtime 内维护单一 cycle 状态：root snapshot、minor evacuation、major
 mark/trace/sweep、barrier flush、MarkTicket/EdgeDelta consume、pacing debt 与 block return
 必须按固定状态转移完成。compiler 不执行这些算法；它只生成 config、root map、trace program 和

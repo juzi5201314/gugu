@@ -41,7 +41,7 @@ pub(crate) struct PacketLayout {
 fn lane(slot: AbiSlot, target: TargetName) -> Result<u32, LoweringError> {
     Ok(match slot {
         AbiSlot::Integer(register) => {
-            let registers: &[Gpr] = if target == TargetName::X86_64Linux {
+            let registers: &[Gpr] = if target != TargetName::X86_64Windows {
                 &[Gpr::Rdi, Gpr::Rsi, Gpr::Rdx, Gpr::Rcx, Gpr::R8, Gpr::R9]
             } else {
                 &[Gpr::Rcx, Gpr::Rdx, Gpr::R8, Gpr::R9]

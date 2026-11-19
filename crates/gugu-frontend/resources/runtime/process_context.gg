@@ -23,7 +23,7 @@ fn add(left: uint, right: uint) uint {
     if left > ~uint(0) - right { heap_fail() }
     left + right
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 pub fn unit_bytes() uint = 1
 #[cfg(os = "windows")]
 pub fn unit_bytes() uint = 2
@@ -42,7 +42,7 @@ fn fatal_configuration() { unsafe {
     _ = std.runtime.report_write(2, report, 45)
     std.runtime.process_exit(2)
 } }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn valid_native(address: uint, bytes: uint) bool { _ = address
     _ = bytes
     true }
@@ -90,12 +90,12 @@ pub fn boot(argc: uint, argv: uint) {
         capacity = add(capacity, capacity)
     }
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn short_buffer(error: uint) bool = error == 34
 #[cfg(os = "windows")]
 fn short_buffer(error: uint) bool = error == 122
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn boot_args(argc: uint, argv: uint) {
     if argc > (~uint(0) / 8) - 1 { fatal_configuration() }
     let bytes = (argc + 1) * 8

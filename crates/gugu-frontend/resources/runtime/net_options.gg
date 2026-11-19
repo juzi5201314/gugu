@@ -25,6 +25,14 @@ fn option(index: uint, v6: bool) (uint, uint) = match index {
     7 => (if v6 { uint(41) } else { uint(0) }, uint(10)),
     8 => (6, 3), 9 => (6, 17), 10 => (6, 16), _ => panic("socket 选项编号越界"),
 }
+#[cfg(os = "macos")]
+fn option(index: uint, v6: bool) (uint, uint) = match index {
+    0 => (6, 1), 1 => (65535, 8), 2 => (if v6 { uint(41) } else { uint(0) }, uint(4)),
+    3 => (65535, 4098), 4 => (65535, 4097), 5 => (65535, 32),
+    6 => (if v6 { uint(41) } else { uint(0) }, uint(11)),
+    7 => (if v6 { uint(41) } else { uint(0) }, uint(10)),
+    8 => (6, 16), 9 => (6, 257), 10 => (6, 258), _ => panic("socket 选项编号越界"),
+}
 pub fn get(cell: &ResourceCell, index: uint) Result[uint, Error] {
     let handle = resources.begin(cell)
     if handle == ~uint(0) { return Err(Error::Closed) }
@@ -73,7 +81,7 @@ pub fn keepalive(cell: &ResourceCell) Result[Option[KeepAliveConfig], Error] {
 }
 #[cfg(os = "linux")]
 fn membership_option(v6: bool, join: bool) uint = if v6 { if join { uint(20) } else { uint(21) } } else { if join { uint(35) } else { uint(36) } }
-#[cfg(os = "windows")]
+#[cfg(any(os = "windows", os = "macos"))]
 fn membership_option(v6: bool, join: bool) uint { _ = v6
     if join { uint(12) } else { uint(13) } }
 #[cfg(os = "linux")]
@@ -82,7 +90,7 @@ fn interface4(raw: uint, index: uint) uint {
     heap_store_word32(raw + 8, index)
     12
 }
-#[cfg(os = "windows")]
+#[cfg(any(os = "windows", os = "macos"))]
 fn interface4(raw: uint, index: uint) uint {
     // Winsock 的 0.0.0.0/8 编码接口编号，0 表示默认接口。
     heap_store_word32(raw + 4, ((index & uint(255)) << 24) | ((index & uint(65280)) << 8) | ((index & uint(16711680)) >> 8))
@@ -91,7 +99,7 @@ fn interface4(raw: uint, index: uint) uint {
 #[cfg(os = "linux")]
 fn validate_interface(index: uint) Result[(), Error] { _ = index
     Ok(()) }
-#[cfg(os = "windows")]
+#[cfg(any(os = "windows", os = "macos"))]
 fn validate_interface(index: uint) Result[(), Error] {
     if index > 16777215 { Err(Error::Unsupported) } else { Ok(()) }
 }

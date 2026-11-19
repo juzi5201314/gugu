@@ -24,12 +24,21 @@ static WINDOWS: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> = Lazy
         ".gbc"
     )))
 });
+static MACOS: LazyLock<Result<RuntimeArtifactV1, RuntimeArtifactError>> = LazyLock::new(|| {
+    RuntimeArtifactV1::decode(include_bytes!(concat!(
+        env!("OUT_DIR"),
+        "/runtime-x86_64-macos",
+        env!("GUGU_PREBUILT_FLAVOR"),
+        ".gbc"
+    )))
+});
 
 /// 返回目标的 core 目标名。
 const fn core_target(target: TargetName) -> gugu_compiler_core::TargetName {
     match target {
         TargetName::X86_64Linux => gugu_compiler_core::TargetName::X86_64Linux,
         TargetName::X86_64Windows => gugu_compiler_core::TargetName::X86_64Windows,
+        TargetName::X86_64Macos => gugu_compiler_core::TargetName::X86_64Macos,
     }
 }
 
@@ -56,6 +65,7 @@ pub fn embedded_artifact(
     match target {
         TargetName::X86_64Linux => decode(&LINUX, target),
         TargetName::X86_64Windows => decode(&WINDOWS, target),
+        TargetName::X86_64Macos => decode(&MACOS, target),
     }
 }
 

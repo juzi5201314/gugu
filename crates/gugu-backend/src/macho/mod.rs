@@ -7,11 +7,13 @@
 
 mod commands;
 mod fixups;
+mod imports;
 mod layout;
 mod sign;
 #[cfg(test)]
 mod tests;
 
+pub use imports::{ImportSlot, append_native_imports};
 pub use layout::{Layout, PlacedSection};
 
 /// 目标架构；决定 CPU 类型与段页大小。
@@ -144,6 +146,8 @@ pub struct MachORequest {
     /// CodeDirectory identifier，惯例为输出文件名。
     pub identifier: String,
     pub sections: Vec<Section>,
+    /// 额外装载的 dylib（无需有绑定符号）。
+    pub libraries: Vec<String>,
     pub imports: Vec<Import>,
     pub fixups: Vec<Fixup>,
     pub symbols: Vec<Symbol>,
@@ -214,6 +218,9 @@ fn validate(request: &MachORequest) -> Result<(), String> {
     let entry = section_at(request, request.entry, false)?;
     if !matches!(entry.content, SectionContent::Code(_)) {
         return Err("Mach-O entry must be inside a code section".to_owned());
+    }
+    for library in &request.libraries {
+        check_name("dylib path", library)?;
     }
     for import in &request.imports {
         check_name("dylib path", &import.dylib)?;
@@ -290,12 +297,16 @@ fn check_name(what: &str, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// libSystem 在前，其余 dylib 按导入首次出现的顺序；返回值下标加 1 即 dylib 序号。
+/// libSystem 在前，随后是显式依赖和绑定所需的库；返回值下标加 1 即 dylib 序号。
 pub(crate) fn dylibs(request: &MachORequest) -> Vec<&str> {
     let mut out = vec![LIB_SYSTEM];
-    for import in &request.imports {
-        if !out.contains(&import.dylib.as_str()) {
-            out.push(&import.dylib);
+    for path in request
+        .libraries
+        .iter()
+        .chain(request.imports.iter().map(|import| &import.dylib))
+    {
+        if !out.contains(&path.as_str()) {
+            out.push(path);
         }
     }
     out

@@ -49,16 +49,20 @@ fn finish(control: uint, node: uint) {
     heap_store_word(node + 160, 1)
     ready_hot(heap_word(node + 136))
 }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn progress(control: uint, node: uint) bool {
     let result = native.call(heap_word(node), node)
-    if result.error != 4 && result.error != 11 { return true }
+    if result.error != 4 && result.error != would_block() { return true }
     if service.closed(control) { heap_store_word(node + 80, 9)
         return true }
     if service.cancelled(heap_word(node + 144)) { heap_store_word(node + 80, ~uint(0))
         return true }
     false
 }
+#[cfg(os = "linux")]
+fn would_block() uint = 11
+#[cfg(os = "macos")]
+fn would_block() uint = 35
 #[cfg(os = "windows")]
 fn progress(control: uint, node: uint) bool {
     let active = heap_word(node + 168) != 0
