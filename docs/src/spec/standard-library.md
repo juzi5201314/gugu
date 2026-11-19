@@ -1104,9 +1104,9 @@ fn root_publish[T](place: T, value: T)
 enum Signal {
     Interrupt,
     Terminate,
-    #[cfg(os = "linux")] Hangup,
-    #[cfg(os = "linux")] User1,
-    #[cfg(os = "linux")] User2,
+    #[cfg(any(os = "linux", os = "macos"))] Hangup,
+    #[cfg(any(os = "linux", os = "macos"))] User1,
+    #[cfg(any(os = "linux", os = "macos"))] User2,
     #[cfg(os = "windows")] Break,
 }
 
