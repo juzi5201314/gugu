@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::ops::Range;
 
 /// GIR schema revision（见 gir-lir.md「共同表示规则」）。
-pub const GIR_REVISION: u32 = 6;
+pub const GIR_REVISION: u32 = 7;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(
@@ -384,6 +384,7 @@ pub enum Rvalue {
 /// compiler 内部 intrinsic 闭集。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum IntrinsicOp {
+    PackFor,
     SizeOf,
     AlignOf,
     OffsetOf {

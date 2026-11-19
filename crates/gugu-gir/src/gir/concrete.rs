@@ -249,7 +249,70 @@ fn build_body(
     instance: &InstanceSummaryV1,
     body_index: u32,
 ) -> Result<ConcreteBody, Diagnostic> {
-    let mut body = world.bodies[index(body_index)].clone();
+    if let Some(expanded) = crate::mono::packs::expand(
+        context,
+        hir::DefId(instance.definition),
+        &instance.substitutions,
+    )? {
+        let nested = MonoContext::new(
+            context.model,
+            context.checked,
+            context.identities,
+            &expanded.module,
+            context.sources,
+            context.target,
+            context.harness,
+        );
+        let owner = &expanded.module.owners
+            [nested.owner_of[instance.definition as usize].expect("pack owner")];
+        let mut body = super::build::lower(&expanded.module, owner)?;
+        body.expression_locals.truncate(expanded.expressions);
+        for local in &mut body.locals {
+            if local
+                .hir_local
+                .is_some_and(|local| local.index() >= expanded.locals)
+            {
+                local.hir_local = None;
+            }
+        }
+        for scope in &mut body.source_scopes {
+            scope.hir_scope = expanded.scopes[scope.hir_scope.index()];
+        }
+        for record in &mut body.exit_records {
+            record.plan = expanded.plans[record.plan as usize];
+        }
+        for region in &mut body.cleanup_regions {
+            match &mut region.action {
+                hir::CleanupAction::Action { cleanup, .. } => {
+                    *cleanup = expanded.cleanup[*cleanup as usize]
+                }
+                hir::CleanupAction::DrainChain { until } => {
+                    if let Some(cleanup) = until {
+                        *cleanup = expanded.cleanup[*cleanup as usize]
+                    }
+                }
+            }
+        }
+        return finish_body(&nested, mono, digests, instance, body_index, body);
+    }
+    finish_body(
+        context,
+        mono,
+        digests,
+        instance,
+        body_index,
+        world.bodies[index(body_index)].clone(),
+    )
+}
+
+fn finish_body(
+    context: &MonoContext<'_>,
+    mono: &MonoWorldV1,
+    digests: &[[u8; 32]],
+    instance: &InstanceSummaryV1,
+    body_index: u32,
+    mut body: GirBody,
+) -> Result<ConcreteBody, Diagnostic> {
     let mut layouts = layout::Builder::new(context, &instance.substitutions);
     let calls = calls::bind(&body, mono, digests, instance, &mut layouts)?;
     materialize::constants(context, mono, instance, &mut body)?;

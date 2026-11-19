@@ -24,6 +24,7 @@ mod methods;
 pub(super) mod must_use;
 mod opaque;
 mod operations;
+mod packs;
 mod platform;
 mod reflection;
 mod runtime;
@@ -50,6 +51,7 @@ struct Slot {
     range: [u32; 2],
 }
 struct LoopState {
+    pack: bool,
     values: Vec<Ty>,
     exits: Vec<State>,
     value_allowed: bool,
@@ -69,6 +71,7 @@ struct Checker<'m, 'a> {
     errors: Vec<Diagnostic>,
     return_ty: Ty,
     loops: Vec<LoopState>,
+    pack_elements: BTreeMap<String, String>,
     tries: Vec<TryState>,
     vars: Vec<Option<Ty>>,
     number_kinds: Vec<inference::NumberKind>,
@@ -344,6 +347,7 @@ impl<'m, 'a> Checker<'m, 'a> {
             source_literals: Vec::new(),
             embed_literals: Vec::new(),
             format_traits: Vec::new(),
+            pack_elements: BTreeMap::new(),
         }
     }
     fn arena(&self) -> &'a AstArena {

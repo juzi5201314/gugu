@@ -41,6 +41,82 @@ fn runtime_format_literals_and_empty() {
 }
 
 #[test]
+fn heterogeneous_pack_formatting() {
+    assert_eq!(
+        render(
+            r#"
+        use std.fmt.{Formatter}
+        fn total[Ts: Print...](...args: Ts) string {
+            let out = Formatter::new()
+            for a in args { a.print(&out) }
+            out.finish()
+        }
+        fn render() string = total(1, true, "x")
+    "#
+        ),
+        "1truex"
+    );
+}
+
+#[test]
+fn heterogeneous_pack_empty() {
+    assert_eq!(
+        render(
+            r#"
+        use std.fmt.{Formatter}
+        fn total[Ts: Print...](...args: Ts) string {
+            let out = Formatter::new()
+            for a in args { a.print(&out) }
+            out.finish()
+        }
+        fn render() string = total()
+    "#
+        ),
+        ""
+    );
+}
+
+#[test]
+fn heterogeneous_pack_return_exits_the_function() {
+    assert_eq!(
+        render(
+            r#"
+        fn first[Ts: Print...](...args: Ts) string {
+            for a in args { return f"{a}" }
+            "empty"
+        }
+        fn render() string = first(1, true, "x")
+    "#
+        ),
+        "1"
+    );
+}
+
+#[test]
+fn heterogeneous_pack_user_dispatch_and_helpers() {
+    assert_eq!(
+        render(
+            r#"
+        use std.fmt.{Formatter}
+        struct Word {}
+        impl Print for Word { fn print(self: &Self, out: &Formatter) { out.write_str("word") } }
+        fn write[T: Print](value: T, out: &Formatter) { value.print(out) }
+        fn total[Ts: Print...](...args: Ts) string {
+            let out = Formatter::new()
+            for a in args {
+                defer { out.write_str("!") }
+                write(a, &out)
+            }
+            out.finish()
+        }
+        fn render() string = total(1, Word {}, true)
+    "#
+        ),
+        "1!word!true!"
+    );
+}
+
+#[test]
 fn runtime_format_primitives() {
     let expected = [
         oracle("", |f| fmt::format_int(f, -42)),

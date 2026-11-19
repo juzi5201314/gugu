@@ -22,6 +22,9 @@ impl Builder<'_> {
         ty: u32,
     ) -> Result<Computed, Diagnostic> {
         match op {
+            g::IntrinsicOp::PackFor => {
+                Err(invalid("pack loop reached LIR before monomorphization"))
+            }
             g::IntrinsicOp::StringBytes | g::IntrinsicOp::StringFromUtf8Unchecked => {
                 let input = self.operand(&operands[0])?;
                 let values = match input {

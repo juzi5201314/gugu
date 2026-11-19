@@ -366,7 +366,7 @@ impl Checker<'_, '_> {
             return self.invoke(callee, ty, args.to_vec(), None, expected);
         }
         let span = &self.arena().exprs[callee.0 as usize].span;
-        let assumptions = match self.model.assumptions_at(self.module, span) {
+        let assumptions = match self.assumptions(span) {
             Ok(assumptions) => assumptions,
             Err(error) => {
                 self.errors.push(error);
@@ -536,7 +536,7 @@ impl Checker<'_, '_> {
                 vec![right.clone()]
             },
         };
-        let assumptions = match self.model.assumptions_at(self.module, span) {
+        let assumptions = match self.assumptions(span) {
             Ok(assumptions) => assumptions,
             Err(error) => {
                 self.errors.push(error);

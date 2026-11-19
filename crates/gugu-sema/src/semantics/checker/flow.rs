@@ -438,10 +438,17 @@ impl Checker<'_, '_> {
     ) -> Ty {
         let base = self.state.clone();
         let mut natural_exit = cond.map(|cond| self.condition(cond));
+        let mut pack = false;
         if let Some((pat, iter)) = iter {
             let ty = self.expression(iter, None);
             natural_exit = Some(self.state.clone());
             let elem = match ty.strip_refs() {
+                Ty::Param(name) if self.pack_parameter(iter, &ty).is_some() => {
+                    pack = true;
+                    let element = format!("$pack:{}:{name}", iter.0);
+                    self.pack_elements.insert(element.clone(), name.clone());
+                    Ty::Param(element)
+                }
                 Ty::Array(t, _) | Ty::Slice(t) => (**t).clone(),
                 Ty::Range => Ty::int(),
                 _ => self.user_iterator(iter, &ty),
@@ -449,6 +456,7 @@ impl Checker<'_, '_> {
             self.bind(pat, &elem, true, Some(false));
         }
         self.loops.push(LoopState {
+            pack,
             values: Vec::new(),
             exits: Vec::new(),
             value_allowed: cond.is_none() && iter.is_none(),
