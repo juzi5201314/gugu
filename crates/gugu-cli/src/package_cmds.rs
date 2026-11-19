@@ -154,7 +154,7 @@ pub(crate) fn run_tree(
         Ok(target) => target,
         Err(code) => return code,
     };
-    let (context, _packages) = match load_project(options, target) {
+    let (context, _packages) = match load_project(options, target, false) {
         Ok(value) => value,
         Err(code) => return code,
     };
@@ -232,7 +232,8 @@ pub(crate) fn run_update(precise: Option<&str>, options: &GlobalArgs) -> i32 {
     // update 允许改写锁文件：屏蔽 --locked 的只读检查。
     let mut relaxed = options.clone();
     relaxed.locked = false;
-    match load_project(&relaxed, target) {
+    // update 重新抓取索引：锁覆盖不阻止看到新版本候选。
+    match load_project(&relaxed, target, true) {
         Ok(_) => 0,
         Err(code) => code,
     }
@@ -244,7 +245,7 @@ pub(crate) fn run_vendor(options: &GlobalArgs) -> i32 {
         Ok(target) => target,
         Err(code) => return code,
     };
-    let (context, _packages) = match load_project(options, target) {
+    let (context, _packages) = match load_project(options, target, false) {
         Ok(value) => value,
         Err(code) => return code,
     };

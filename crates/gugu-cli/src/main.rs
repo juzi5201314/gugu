@@ -859,12 +859,14 @@ pub(crate) fn compile_package(
     Ok(exit_code)
 }
 
+/// `refresh`：`gugu update` 时即使锁已覆盖也重新抓取索引候选。
 pub(crate) fn resolve_project_lock(
     project: &Project,
     packages: &[&Package],
     options: &GlobalArgs,
     target: TargetName,
     format: OutputFormat,
+    refresh: bool,
 ) -> Result<(LockGraph, Vec<DependencyInput>), ()> {
     let path = project.lock_path();
     let existing = if path.exists() {
@@ -892,7 +894,7 @@ pub(crate) fn resolve_project_lock(
         emit_cli_error(format, &error.to_string());
     })?;
     let fetch = session
-        .gather_candidates(&specs, &registry_packages, options.offline, format)
+        .gather_candidates(&specs, &registry_packages, options.offline, refresh)
         .map_err(|error| {
             emit_cli_error(format, &error.to_string());
         })?;
@@ -920,6 +922,7 @@ pub(crate) fn resolve_project_lock(
             roots,
             root_features,
             root_default_features,
+            registry_aliases: session.aliases(),
             registry_packages,
             git_packages,
             default_registry: fetch.default_identity.clone(),
@@ -957,6 +960,7 @@ pub(crate) fn resolve_project_lock(
         &cache,
         &fetch.yanked,
         options.offline,
+        options.vendor,
         format,
     )
     .map_err(|_| ())?;
@@ -1038,10 +1042,11 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             return 2;
         }
     };
-    let (lock, _inputs) = match resolve_project_lock(&project, &packages, options, target, format) {
-        Ok(resolved) => resolved,
-        Err(()) => return 2,
-    };
+    let (lock, _inputs) =
+        match resolve_project_lock(&project, &packages, options, target, format, false) {
+            Ok(resolved) => resolved,
+            Err(()) => return 2,
+        };
     let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
     let mut exit_code = 0;
     let mut written = BTreeSet::new();
