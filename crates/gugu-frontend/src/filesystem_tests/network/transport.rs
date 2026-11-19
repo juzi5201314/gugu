@@ -427,7 +427,12 @@ fn darwin_datagram_truncation_and_disconnect_follow_native_results() {
             put(memory, message + 40, 16 << 32);
         } else if op == 21 {
             let address = word(memory, request + 8) as usize;
-            assert_eq!(&memory[address..address + 2], &[2, 0]);
+            let family = word(memory, request + 16);
+            if family == 2 {
+                assert_eq!(&memory[address..address + 2], &[2, 0]);
+            } else {
+                assert_eq!(&memory[address..address + 2], &[16, 2]);
+            }
         } else if op == 28 {
             assert_eq!(word(memory, request), 42);
             assert_eq!(word(memory, request + 8), 0);
@@ -447,6 +452,7 @@ fn darwin_datagram_truncation_and_disconnect_follow_native_results() {
     assert_eq!(&memory[BUFFER as usize..BUFFER as usize + 2], b"AA");
 
     check_darwin_ip_disconnect(&mut h, &mut memory);
+    check_darwin_peer_after_failure(&mut h, &mut memory);
     put(&mut memory, CONTROL + 240, 1);
     for (peer_error, connected) in [(0, 1), (57, 0)] {
         put(&mut memory, CONTROL + 1248, 1);
@@ -458,6 +464,39 @@ fn darwin_datagram_truncation_and_disconnect_follow_native_results() {
         assert_eq!(word(&memory, disconnect + 72), connected * 22);
     }
     assert!(h.script.is_empty());
+}
+
+fn check_darwin_peer_after_failure(h: &mut Harness<'_>, memory: &mut Vec<u8>) {
+    put(memory, CONTROL + 240, 2);
+    put(memory, CONTROL + 1304, 1);
+    for (peer_error, connected) in [(0, 1), (57, 0), (4, 1)] {
+        put(memory, CONTROL + 1248, 1);
+        let reconnect = node(h, memory, 7, 0, 0);
+        put(memory, reconnect + 96, 16);
+        put(memory, reconnect + 128, 0x0210);
+        h.script.extend([(21, 0, 49), (6, 0, peer_error)]);
+        submit(h, memory, reconnect);
+        assert_eq!(word(memory, reconnect + 72), 49);
+        assert_eq!(word(memory, CONTROL + 1248), connected);
+        let unconnected = h.invoke(
+            "std/runtime/net_endpoint.gg",
+            "connected",
+            &[CELL, 0],
+            memory,
+        );
+        assert_eq!(unconnected[0] & 255, connected);
+        if connected == 0 {
+            let disconnect = node(h, memory, 8, 0, 0);
+            submit(h, memory, disconnect);
+            assert_eq!(word(memory, disconnect + 72), 0);
+        }
+    }
+    put(memory, CONTROL + 1304, 0);
+    let disconnect = node(h, memory, 8, 0, 0);
+    h.script.extend([(28, 0, 22), (6, 0, 57)]);
+    submit(h, memory, disconnect);
+    assert_eq!(word(memory, disconnect + 72), 22);
+    assert_eq!(word(memory, CONTROL + 1248), 0);
 }
 
 fn check_darwin_ip_disconnect(h: &mut Harness<'_>, memory: &mut Vec<u8>) {

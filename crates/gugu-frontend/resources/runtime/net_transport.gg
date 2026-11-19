@@ -193,37 +193,45 @@ pub fn record_datagram_binding(control: uint, address: SocketAddr) {
 }
 fn udp_control(node: uint) FsResult {
     let control = heap_word(node + 16)
-    let connected = heap_word(node + 48) == UDP_CONNECT
+    let connecting = heap_word(node + 48) == UDP_CONNECT
     let handle = heap_word(control + 64)
-    let result = if connected {
-        native.request(node + SCRATCH, 21, handle, node + ADDRESS, heap_word(node + 96), 0, 0, 0)
-    } else { disconnect_datagram(node, control, handle) }
-    if result.error == 0 { heap_store_word(control + CONNECTED, if connected { 1 } else { 0 }) }
+    let result = datagram_control(node, control, handle, connecting)
+    if result.error == 0 { heap_store_word(control + CONNECTED, if connecting { 1 } else { 0 }) }
     result
 }
-#[cfg(not(os = "macos"))]
-fn disconnect_datagram(node: uint, control: uint, handle: uint) FsResult {
-    _ = control
+fn connect_datagram(node: uint, handle: uint) FsResult =
     native.request(node + SCRATCH, 21, handle, node + ADDRESS, heap_word(node + 96), 0, 0, 0)
+#[cfg(not(os = "macos"))]
+fn datagram_control(node: uint, control: uint, handle: uint, connecting: bool) FsResult {
+    _ = control
+    _ = connecting
+    connect_datagram(node, handle)
 }
 #[cfg(os = "macos")]
-fn disconnect_datagram(node: uint, control: uint, handle: uint) FsResult {
-    if heap_word(control + CONNECTED) == 0 { return FsResult { value: 0, error: 0 } }
-    if heap_word(control + native.FAMILY) != 1 {
+fn datagram_control(node: uint, control: uint, handle: uint, connecting: bool) FsResult {
+    let unix = heap_word(control + native.FAMILY) == 1
+    let result = if connecting { connect_datagram(node, handle) }
+    else if heap_word(control + CONNECTED) == 0 { return FsResult { value: 0, error: 0 } }
+    else if !unix {
         // Darwin 清除本地 IP；同一个 socket 无法重新 bind。
         if heap_word(control + SPECIFIC_BINDING) != 0 { return FsResult { value: 0, error: 45 } }
-        return native.request(node + SCRATCH, 28, handle, 0, 0, 0, 0, 0)
+        native.request(node + SCRATCH, 28, handle, 0, 0, 0, 0, 0)
+    } else {
+        native.put_family(node + ADDRESS, 0, heap_word(node + 96))
+        connect_datagram(node, handle)
     }
-    let address = node + ADDRESS
-    let length = heap_word(node + 96)
-    native.put_family(address, 0, length)
-    let result = native.request(node + SCRATCH, 21, handle, address, length, 0, 0, 0)
-    // Darwin Unix socket 可已解除 peer，却拒绝 AF_UNSPEC。
-    if result.error == 47 || result.error == 22 {
+    if result.error != 0 {
         let size = node + 304
         heap_store_word32(size, 128)
-        let peer = native.request(node + SCRATCH, 6, handle, address, size, 0, 0, 0)
-        if peer.error == native.not_connected() { return FsResult { value: 0, error: 0 } }
+        let peer = native.request(node + SCRATCH, 6, handle, node + ADDRESS, size, 0, 0, 0)
+        if peer.error == 0 { heap_store_word(control + CONNECTED, 1) }
+        if peer.error == native.not_connected() {
+            heap_store_word(control + CONNECTED, 0)
+            // Darwin Unix socket 可已解除 peer，却拒绝 AF_UNSPEC。
+            if !connecting && unix && (result.error == 47 || result.error == 22) {
+                return FsResult { value: 0, error: 0 }
+            };
+        };
     }
     result
 }

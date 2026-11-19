@@ -716,6 +716,8 @@ UdpSocket 的 close 在收发与 connect/disconnect 控制队列中建立关闭�
 
 Darwin 无法保留具体的本地 IP 绑定时，`disconnect` 返回 `Unsupported`，不改变已绑定的地址、端口或已连接的 peer。绑定通配地址的 UDP socket 断开后恢复通配地址，保留原本地端口。
 
+Darwin 的原生 datagram connect/disconnect 失败也可能改变 peer；之后的收发模式以系统确认的 peer 状态为准。例如，重新 connect 失败且系统已移除原 peer 时，仍返回 connect 错误，但恢复无连接收发。
+
 BindOptions.new 固定产生 backlog 1024、reuse_address true、Ipv6BindMode.V6Only。backlog 必须大于 0，宿主内核可以向下钳位；端口 0 请求系统分配端口，并可由 local_addr 查询。reuse_address 只抽象“前一个已关闭 listener 的地址可及时重绑”，不允许两个活 listener 共享同一地址；语义不同的 SO_REUSEPORT 不在 std。ipv6_mode 对 IPv4 地址无作用；DualStack 请求 IPv4-mapped IPv6，平台不支持时返回 Unsupported，不能静默退化为 IPv6-only。UdpSocket.bind 使用不含 backlog 的 DatagramBindOptions，并采用相同 reuse_address 与 ipv6_mode 语义。
 
 TcpStream 允许一个进行中的读与一个进行中的写并行；同方向的多个操作按到达 socket 状态机的顺序排队，不能交错分配同一批 byte。`split()` 返回 TcpReadHalf 与 TcpWriteHalf，它们和原 TcpStream 共享同一 ResourceCell、TCP endpoint、timeout 状态与关闭状态，不复制 OS handle。任一别名 close 都关闭整个 endpoint；只丢弃某个 half 只释放该 lease，最后 lease 才自动关闭。
