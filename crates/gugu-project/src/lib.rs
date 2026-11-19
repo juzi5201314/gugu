@@ -143,8 +143,7 @@ impl Project {
     /// 全部 workspace package 的依赖声明（含 workspace.dependencies 合并），
     /// 用于 registry 候选收集；与 `resolve_dependencies` 使用同一份清单解析。
     pub fn dependency_specs(&self) -> Result<Vec<DependencySpec>, ProjectError> {
-        let metadata =
-            dependencies::workspace_package_metadata(self.workspace.root(), &self.packages)?;
+        let metadata = dependencies::dependency_metadata(self.workspace.root(), &self.packages)?;
         Ok(metadata
             .into_iter()
             .flat_map(|package| package.dependencies)

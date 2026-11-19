@@ -13,8 +13,9 @@ pub use dependency_model::*;
 pub(crate) use resolver::resolve_project;
 pub use semver::{Version, VersionReq};
 
-/// 各 workspace package 的依赖解析元数据（含合并 workspace.dependencies）。
-pub(crate) fn workspace_package_metadata(
+/// 全部 path package（workspace 成员 + 传递外部 path）的依赖解析元数据，
+/// 与 `resolve_project` 使用同一份收集逻辑。
+pub(crate) fn dependency_metadata(
     workspace_root: &std::path::Path,
     packages: &[crate::Package],
 ) -> Result<Vec<PackageMetadata>, crate::ProjectError> {
@@ -25,12 +26,9 @@ pub(crate) fn workspace_package_metadata(
         .as_ref()
         .and_then(|workspace| workspace.dependencies.clone())
         .unwrap_or_default();
-    packages
-        .iter()
-        .map(|package| {
-            dependency_manifest::package_metadata(workspace_root, package, &workspace_dependencies)
-        })
-        .collect()
+    let (path_packages, _roots) =
+        resolver::path_metadata_maps(workspace_root, packages, &workspace_dependencies)?;
+    Ok(path_packages.into_values().collect())
 }
 
 #[cfg(test)]

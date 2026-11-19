@@ -14,10 +14,11 @@ type CandidateChoice = (Option<PackageMetadata>, Option<usize>);
 
 #[derive(Clone, Debug)]
 struct ResolverContext {
-    workspace_root: PathBuf,
     target: String,
     host: String,
     default_registry: String,
+    /// 逻辑 registry 名 → 规范身份；manifest 的 `registry = "<name>"` 由此匹配候选。
+    registry_aliases: BTreeMap<String, String>,
     path_packages: BTreeMap<PathBuf, PackageMetadata>,
     path_roots: BTreeMap<PackageId, PathBuf>,
     registry_packages: Vec<PackageMetadata>,
@@ -162,24 +163,18 @@ pub(crate) fn resolve_project(
         .as_ref()
         .and_then(|workspace| workspace.dependencies.clone())
         .unwrap_or_default();
-    let mut path_packages = BTreeMap::new();
-    let mut path_roots = BTreeMap::new();
-    for package in packages {
-        let metadata = package_metadata(workspace_root, package, &workspace_dependencies)?;
-        path_roots.insert(metadata.id.clone(), package.root().to_path_buf());
-        path_packages.insert(package.root().to_path_buf(), metadata);
-    }
-    let mut context = ResolverContext {
-        workspace_root: workspace_root.to_path_buf(),
+    let (path_packages, path_roots) =
+        path_metadata_maps(workspace_root, packages, &workspace_dependencies)?;
+    let context = ResolverContext {
         target: options.target,
         host: options.host,
         default_registry: options.default_registry,
+        registry_aliases: options.registry_aliases,
         path_packages,
         path_roots,
         registry_packages: unique_candidates(options.registry_packages, "registry")?,
         git_packages: unique_candidates(options.git_packages, "git")?,
     };
-    collect_external_path_packages(&mut context, &workspace_dependencies)?;
     let roots = select_roots(packages, &options.roots)?;
     let mut state = ResolveState::default();
     for package in roots {
@@ -289,12 +284,27 @@ fn select_roots<'packages>(
     Ok(roots)
 }
 
-fn collect_external_path_packages(
-    context: &mut ResolverContext,
+/// workspace 成员 + 传递外部 path package 的依赖元数据闭包；
+/// `resolve_project` 与 `dependency_specs` 共用同一份收集逻辑。
+pub(crate) fn path_metadata_maps(
+    workspace_root: &Path,
+    packages: &[Package],
     workspace_dependencies: &BTreeMap<String, toml::Value>,
-) -> Result<(), ProjectError> {
-    let mut pending = context
-        .path_packages
+) -> Result<
+    (
+        BTreeMap<PathBuf, PackageMetadata>,
+        BTreeMap<PackageId, PathBuf>,
+    ),
+    ProjectError,
+> {
+    let mut path_packages = BTreeMap::new();
+    let mut path_roots = BTreeMap::new();
+    for package in packages {
+        let metadata = package_metadata(workspace_root, package, workspace_dependencies)?;
+        path_roots.insert(metadata.id.clone(), package.root().to_path_buf());
+        path_packages.insert(package.root().to_path_buf(), metadata);
+    }
+    let mut pending = path_packages
         .iter()
         .map(|(root, metadata)| (root.clone(), metadata.clone()))
         .collect::<Vec<_>>();
@@ -304,27 +314,22 @@ fn collect_external_path_packages(
                 .dependencies
                 .iter()
                 .filter_map(|dependency| match &dependency.source {
-                    DependencySource::Path { path } => Some((dependency, path)),
+                    DependencySource::Path { path } => Some(path),
                     _ => None,
                 })
         {
-            let resolved = canonical_path(&root, dependency.1, metadata.id.name())?;
-            if context.path_packages.contains_key(&resolved) {
+            let resolved = canonical_path(&root, dependency, metadata.id.name())?;
+            if path_packages.contains_key(&resolved) {
                 continue;
             }
             let package = manifest::build_package(&resolved.join("gugu.toml"))?;
-            let metadata =
-                package_metadata(&context.workspace_root, &package, workspace_dependencies)?;
-            context
-                .path_roots
-                .insert(metadata.id.clone(), resolved.clone());
-            context
-                .path_packages
-                .insert(resolved.clone(), metadata.clone());
+            let metadata = package_metadata(workspace_root, &package, workspace_dependencies)?;
+            path_roots.insert(metadata.id.clone(), resolved.clone());
+            path_packages.insert(resolved.clone(), metadata.clone());
             pending.push((resolved, metadata));
         }
     }
-    Ok(())
+    Ok((path_packages, path_roots))
 }
 
 fn solve(context: &ResolverContext, state: ResolveState) -> Result<ResolveState, ProjectError> {
@@ -429,7 +434,7 @@ fn source_candidates(
             .registry_packages
             .iter()
             .filter(|candidate| {
-                matches!(candidate.id.source(), PackageSource::Registry { registry: identity } if identity == registry || (registry == "default" && identity == &context.default_registry))
+                matches!(candidate.id.source(), PackageSource::Registry { registry: identity } if identity == registry || (registry == "default" && identity == &context.default_registry) || context.registry_aliases.get(registry).is_some_and(|alias| alias == identity))
             })
             .cloned()
             .collect()),
