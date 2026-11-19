@@ -1,4 +1,5 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
+mod collections;
 mod copy;
 mod formatting;
 mod harness;
@@ -231,6 +232,8 @@ fn interpret_bounded(
             let args: Vec<_> = operands.iter().map(|value| values[value.index()]).collect();
             let value = match instruction.op {
                 Op::StackCheck
+                | Op::ScopedViewBegin { .. }
+                | Op::ScopedViewEnd { .. }
                 | Op::SafepointPoll { .. }
                 | Op::RegionPublish { .. }
                 | Op::RegionReset { .. }
@@ -453,7 +456,7 @@ fn interpret_bounded(
                 memory.truncate(frame_base);
                 return returned;
             }
-            other => panic!("纯函数解释器遇到未登记终结符：{other:?}"),
+            other => panic!("纯函数解释器遇到未登记终结符：{}: {other:?}", body.name),
         };
         let edge = &body.edges[edge.index()];
         let incoming: Vec<_> = body

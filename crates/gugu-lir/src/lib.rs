@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// LIR query 与 world 的 schema。19：进程与环境机器协议。
-pub const SCHEMA: u32 = 19;
+pub const SCHEMA: u32 = 20;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {

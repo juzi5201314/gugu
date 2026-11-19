@@ -381,6 +381,16 @@ impl<'a> Harness<'a> {
                 // `JoinWait` 完成后编译器无条件调用 `join_panic`；解释器调度的协程
                 // 不会 panic（panic 传播即测试失败），因此固定返回 0。
                 Boundary::Call(CallTarget::Runtime(RuntimeCall::JoinPanic)) => vec![0],
+                Boundary::Call(CallTarget::Runtime(RuntimeCall::Panic)) => {
+                    let start = usize::try_from(args[0]).unwrap();
+                    let length = usize::try_from(args[1]).unwrap();
+                    let message = String::from_utf8_lossy(&memory[start..start + length]);
+                    panic!(
+                        "Runtime(Panic): {message} ({}:{})",
+                        args[args.len() - 2],
+                        args[args.len() - 1]
+                    );
+                }
                 Boundary::Call(CallTarget::Runtime(RuntimeCall::StringCompare)) => {
                     self.invoke("std/text.gg", "string_compare", args, memory)
                 }

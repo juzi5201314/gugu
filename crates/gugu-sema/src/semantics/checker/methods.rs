@@ -582,20 +582,20 @@ impl Checker<'_, '_> {
             {
                 self.dependencies.push(definition);
             }
-            self.dispatches.push(super::super::output::Dispatch {
-                expression: id,
-                callable: Some(callable),
-                implementation: selected.implementation,
-                interface: selected.interface.clone(),
-                member: selected.member,
-                self_ty: self.resolve(left),
-                signature: selected.signature.clone(),
-                dereferences: 0,
-                borrow: matches!(params.first(), Some(Ty::Ref(_))),
-                implicit_receiver: true,
-                dynamic: selected.dynamic,
-            });
         }
+        self.dispatches.push(super::super::output::Dispatch {
+            expression: id,
+            callable: selected.callable,
+            implementation: selected.implementation,
+            interface: selected.interface.clone(),
+            member: selected.member,
+            self_ty: self.resolve(left),
+            signature: selected.signature.clone(),
+            dereferences: 0,
+            borrow: matches!(params.first(), Some(Ty::Ref(_))),
+            implicit_receiver: true,
+            dynamic: selected.dynamic,
+        });
         if comparison { Ty::Bool } else { ret.clone() }
     }
 }

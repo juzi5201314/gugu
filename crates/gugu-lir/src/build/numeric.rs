@@ -4,6 +4,44 @@ use crate::body::{Condition, FloatOp, IntOp, Op, Origin, RuntimeCall, Type, Valu
 use crate::gir::body::{BinaryOp, CheckOpKind, CompareOp, Operand, UnaryOp};
 
 impl Builder<'_> {
+    pub(super) fn comparison_protocol(
+        &mut self,
+        protocol: crate::gir::concrete::Protocol,
+        operands: &[Operand],
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
+        let left = self.comparison_argument(&operands[0])?;
+        let right = self.comparison_argument(&operands[1])?;
+        if protocol == crate::gir::concrete::Protocol::Eq {
+            return self.compare_computed(CompareOp::Eq, left, right, ty);
+        }
+        let less = self.compare_computed(CompareOp::Lt, left.clone(), right.clone(), ty)?;
+        let greater = self.compare_computed(CompareOp::Gt, left, right, ty)?;
+        let less = self.computed_values(less)?[0];
+        let greater = self.computed_values(greater)?[0];
+        let less = self.integer_resize(less, Type::I64, false);
+        let greater = self.integer_resize(greater, Type::I64, false);
+        let result = self.emit_one(
+            Op::Integer(IntOp::Sub),
+            &[greater, less],
+            ValueType::scalar(Type::I64),
+            Origin::None,
+        );
+        Ok(Computed::Values {
+            ty,
+            values: vec![result],
+        })
+    }
+
+    fn comparison_argument(&mut self, operand: &Operand) -> Result<Computed, Diagnostic> {
+        let value = self.operand(operand)?;
+        let TypeKind::Reference(ty) = *self.kind(value.ty()) else {
+            return Err(invalid("比较 trait 实参必须是引用"));
+        };
+        let address = self.computed_values(value)?[0];
+        Ok(Computed::Address { ty, address })
+    }
+
     pub(super) fn binary(
         &mut self,
         op: BinaryOp,
@@ -131,6 +169,16 @@ impl Builder<'_> {
     ) -> Result<Computed, Diagnostic> {
         let lhs = self.operand(left)?;
         let rhs = self.operand(right)?;
+        self.compare_computed(op, lhs, rhs, ty)
+    }
+
+    pub(super) fn compare_computed(
+        &mut self,
+        op: CompareOp,
+        lhs: Computed,
+        rhs: Computed,
+        ty: u32,
+    ) -> Result<Computed, Diagnostic> {
         if matches!(self.kind(lhs.ty()), TypeKind::String) {
             let mut arguments = self.explicit_abi_values(lhs)?;
             arguments.extend(self.explicit_abi_values(rhs)?);

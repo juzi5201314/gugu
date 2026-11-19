@@ -121,6 +121,8 @@ trait Ord {
 }
 ```
 
+泛型 `K: Eq` / `K: Ord` 的比较同样派发到具体 K 的实现，而不是比较存储位。`a != b` 是 `eq` 的逻辑取反；`<`、`<=`、`>`、`>=` 分别测试 `cmp` 结果相对零的关系。内建标量与 string 的显式 `eq` / `cmp` 调用与对应运算符一致。
+
 `Hash` 把值的语义字段馈送给调用方选择的 hasher；相等值必须产生相同输入。`Hasher` 与 `Formatter` 都是预导入的标准库名义类型，写入方法随 `std.hash` 与 `std.fmt` 提供。`Hasher::with_seed(uint)` 创建确定性 FoldHash-fast 状态；`write_int`、`write_uint`、`write_bool`、`write_char`、`write_str`、`write_bytes` 追加规范字节流，`finish() uint` 可重复读取且不封闭后续写入。具体编码见[标准库](standard-library.md#collections-and-hash)。用户 `impl Hash` 可调用这些方法，也可通过 `self.field.hash(hasher)` 递归馈送。
 
 ```text

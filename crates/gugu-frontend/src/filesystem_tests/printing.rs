@@ -32,6 +32,14 @@ fn capture(
 }
 
 pub(super) fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<u8>)> {
+    output_with_heap(source, script, 262144)
+}
+
+pub(super) fn output_with_heap(
+    source: &str,
+    script: &[(u64, u64, u64)],
+    heap_bytes: usize,
+) -> Vec<(u64, Vec<u8>)> {
     let compiled = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
@@ -45,7 +53,7 @@ pub(super) fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<
     let mut harness = Harness::new(&compiled);
     harness.machine_hook = Some(capture);
     harness.script.extend(script.iter().copied());
-    harness.invoke("main.gg", "main", &[], &mut vec![0; 262144]);
+    harness.invoke("main.gg", "main", &[], &mut vec![0; heap_bytes]);
     assert!(harness.script.is_empty());
     harness
         .calls
