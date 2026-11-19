@@ -102,6 +102,7 @@ impl<'a, 'm> Builder<'a, 'm> {
             kind,
             passing,
             transparent: matches!(ty, Ty::Named(index, _) if self.context.model.nominal[*index].repr.transparent()),
+            packed: matches!(ty, Ty::Named(index, _) if self.context.model.nominal[*index].repr.packed()),
             c_repr: match ty {
                 Ty::Named(index, _) if self.context.model.nominal[*index].is_enum => {
                     self.context.model.nominal[*index]

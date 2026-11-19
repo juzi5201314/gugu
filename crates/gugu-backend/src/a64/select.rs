@@ -97,7 +97,7 @@ fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error
                         });
                         continue;
                     }
-                    Op::Call(ref call) => {
+                    Op::Call(ref call) | Op::ForeignCall(ref call) => {
                         lower::call::lower_mode(
                             body,
                             call,
@@ -437,7 +437,7 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
         }
     }
     for (index, instruction) in body.instructions.iter().enumerate() {
-        if leaf && matches!(instruction.op, Op::Call(_)) {
+        if leaf && matches!(instruction.op, Op::Call(_) | Op::ForeignCall(_)) {
             return Err(Error(format!("site {index}: compile_leaf rejects calls")));
         }
         if !values(body, &instruction.arguments)
@@ -452,12 +452,18 @@ fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
                 instruction.op
             )));
         }
-        if matches!(instruction.op, Op::Load(_) | Op::Store(_)) && instruction.memory.is_none() {
+        if matches!(
+            instruction.op,
+            Op::Load(_) | Op::Store(_) | Op::Memcpy { .. } | Op::Memmove { .. } | Op::Memset { .. }
+        ) && instruction.memory.is_none()
+        {
             return Err(Error(format!(
                 "site {index}: memory access lacks sequencing token"
             )));
         }
-        if matches!(instruction.op, Op::Call(_)) && instruction.memory.is_none() {
+        if matches!(instruction.op, Op::Call(_) | Op::ForeignCall(_))
+            && instruction.memory.is_none()
+        {
             return Err(Error(format!(
                 "{}: call lacks sequencing token",
                 site_context(body, index)

@@ -37,8 +37,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。23：保留原始 C 签名。
-pub const SCHEMA: u32 = 23;
+/// LIR query 与 world 的 schema。26：C 聚合的自然对齐保留 packed 成员约束。
+pub const SCHEMA: u32 = 26;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {

@@ -1,0 +1,7 @@
+#[repr(C, align(16))] struct Padded { a: f32, b: f32, c: f32 }
+#[ffi(leaf, stack = 128)] unsafe extern "C" fn reg(a: uint, p: Padded, z: uint)
+#[ffi(leaf, stack = 128)] unsafe extern "C" fn stack(a: uint, b: uint, c: uint, d: uint, e: uint, f: uint, g: uint, h: uint, i: uint, p: Padded, z: uint)
+fn main() { unsafe {
+    reg(9, Padded { a: 1.0, b: 2.0, c: 3.0 }, 10)
+    stack(0, 1, 2, 3, 4, 5, 6, 7, 8, Padded { a: 1.0, b: 2.0, c: 3.0 }, 10)
+} }

@@ -35,6 +35,10 @@ pub struct MInst {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Item {
+    Memory(super::memory::Kind),
+    TrapIf {
+        condition: u32,
+    },
     Atomic(super::atomic::Atomic),
     Inst(MInst),
     Constant {
@@ -48,6 +52,10 @@ pub enum Item {
     Incoming {
         dest: u32,
         index: u32,
+    },
+    SymbolAddr {
+        dest: u32,
+        symbol: String,
     },
     Copies(Vec<(MReg, MReg)>),
     RootInit {
@@ -69,6 +77,13 @@ pub enum Item {
     TailCall {
         target: String,
         arguments: Vec<u32>,
+    },
+    ForeignCall {
+        call: Box<crate::lir::body::Call>,
+        platform: super::foreign::Platform,
+        arguments: Vec<u32>,
+        results: Vec<u32>,
+        safepoint: (u32, u32),
     },
     Branch {
         form: FormId,
@@ -132,7 +147,10 @@ impl Item {
     pub fn is_call(&self) -> bool {
         matches!(
             self,
-            Self::Call { .. } | Self::TailCall { .. } | Self::Poll { .. }
+            Self::Call { .. }
+                | Self::ForeignCall { .. }
+                | Self::TailCall { .. }
+                | Self::Poll { .. }
         )
     }
 
@@ -142,10 +160,15 @@ impl Item {
             Self::Atomic(_) => {
                 events.extend((9..=15).map(|id| (MReg::Physical(id), Access::ReadWrite)))
             }
+            Self::Memory(_) => {
+                events.extend((9..=12).map(|id| (MReg::Physical(id), Access::ReadWrite)))
+            }
+            Self::TrapIf { condition } => events.push((MReg::Virtual(*condition), Access::Read)),
             Self::Inst(inst) => operand_events(&inst.operands, &mut events),
             Self::Branch { operands, .. } => operand_events(operands, &mut events),
             Self::Constant { dest, .. }
             | Self::StackAddr { dest, .. }
+            | Self::SymbolAddr { dest, .. }
             | Self::Incoming { dest, .. } => events.push((MReg::Virtual(*dest), Access::Write)),
             Self::Copies(pairs) => {
                 for (src, dst) in pairs {
@@ -154,6 +177,9 @@ impl Item {
                 }
             }
             Self::Call {
+                arguments, results, ..
+            }
+            | Self::ForeignCall {
                 arguments, results, ..
             } => {
                 events.extend(

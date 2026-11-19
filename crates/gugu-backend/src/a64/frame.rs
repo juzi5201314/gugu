@@ -36,13 +36,23 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
         .instructions
         .iter()
         .filter_map(|inst| match &inst.op {
-            crate::lir::body::Op::Call(call) => Some(call),
+            crate::lir::body::Op::Call(call) | crate::lir::body::Op::ForeignCall(call) => {
+                Some(call)
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     let outgoing = calls
         .iter()
         .map(|call| {
+            if matches!(
+                call.kind,
+                crate::gir::body::CallKind::ForeignBridge
+                    | crate::gir::body::CallKind::ForeignBridgeDirtyCpu
+            ) {
+                return super::foreign_packet::plan(call, super::foreign_packet::platform(body)?)
+                    .map(|plan| plan.bytes);
+            }
             super::abi::arguments(call.parameters.iter().map(|p| p.ty)).map(|(_, size)| size)
         })
         .collect::<Result<Vec<_>, _>>()?

@@ -63,6 +63,30 @@ pub(super) fn link(fragments: &[&codegen::LeafFragment]) -> Result<Vec<inst::Ins
             if !pc.is_multiple_of(4) || fixup.offset >= fragment.bytes.len() as u64 {
                 return Err("invalid relocation offset".into());
             }
+            if matches!(
+                relocation.kind,
+                inst::RelocKind::AdrpPage21 | inst::RelocKind::AddLo12
+            ) {
+                let address = (target as i64 + relocation.addend) as u64;
+                let mut patched = instructions[pc / 4].clone();
+                if relocation.kind == inst::RelocKind::AdrpPage21 {
+                    patched.operands[1] = Operand::Target(Target::Offset(
+                        (address & !4095) as i64 - ((pc as u64) & !4095) as i64,
+                    ));
+                } else {
+                    patched.operands[2] = Operand::AddImm {
+                        imm12: (address & 4095) as u16,
+                        shift12: false,
+                    };
+                }
+                instructions[pc / 4] = decode::decode(
+                    encode::encode(&patched)
+                        .map_err(|error| error.to_string())?
+                        .word,
+                )
+                .unwrap();
+                continue;
+            }
             let key = match relocation.kind {
                 inst::RelocKind::Call26 => "bl",
                 inst::RelocKind::Branch26 => "b",
@@ -93,6 +117,15 @@ pub(super) fn execute(
     args: &[u64],
 ) -> ([u64; 2], BTreeMap<u64, u8>) {
     execute_inner(fragment, callees, args, None)
+}
+
+pub(super) fn execute_seeded(
+    fragment: &codegen::LeafFragment,
+    callees: &[&codegen::LeafFragment],
+    args: &[u64],
+    memory: BTreeMap<u64, u8>,
+) -> ([u64; 2], [u128; 32], BTreeMap<u64, u8>) {
+    execute_machine(fragment, callees, args, &[], memory, None, None)
 }
 
 pub(super) fn execute_inner(
@@ -216,7 +249,7 @@ fn execute_machine(
         }
     };
     let mut pc = 0_usize;
-    for _ in 0..1000 {
+    for _ in 0..10_000 {
         let mut base = 0;
         let fragment = *fragments
             .iter()
@@ -234,6 +267,7 @@ fn execute_machine(
         let form = table::get(inst.form).unwrap();
         let key = form.key;
         let op = &inst.operands;
+        assert_ne!(key, "brk", "VM trap");
         assert_eq!(registers[31] % 16, 0, "SP alignment");
         if key == "ret" {
             let target = get(rr(&op[0]), &registers);
@@ -272,7 +306,7 @@ fn execute_machine(
             return ([registers[0], registers[1]], vectors, memory);
         }
         let mut next = pc + 4;
-        if key == "bl" {
+        if key == "bl" || key == "blr" {
             let entry = sites::lookup(&fragment.runtime_sites, (pc - base + 4) as u32)
                 .is_some_and(|site| site.kind == sites::SiteKind::MorestackEntry);
             if let Some(runtime) = runtime.as_mut()
@@ -319,7 +353,18 @@ fn execute_machine(
             continue;
         }
         let read = |index: usize| get(rr(&op[index]), &registers);
-        if key == "bl" || key == "b" || key == "b.cond" || key.starts_with("cb") {
+        if key == "blr" {
+            next = read(0) as usize;
+        } else if key == "adrp" {
+            let Operand::Target(Target::Offset(delta)) = op[1] else {
+                panic!()
+            };
+            put(
+                rr(&op[0]),
+                ((pc as u64) & !4095).wrapping_add_signed(delta),
+                &mut registers,
+            );
+        } else if key == "bl" || key == "b" || key == "b.cond" || key.starts_with("cb") {
             let offset = op
                 .iter()
                 .find_map(|o| match o {
@@ -355,7 +400,11 @@ fn execute_machine(
                 immediate
             };
             put(rr(&op[0]), value, &mut registers);
-        } else if key.starts_with("ldr") || key.starts_with("ldar") || key.starts_with("str") {
+        } else if key.starts_with("ldr")
+            || key.starts_with("ldar")
+            || key.starts_with("str")
+            || key.starts_with("stlr")
+        {
             let Operand::Address(address) = &op[1] else {
                 panic!()
             };

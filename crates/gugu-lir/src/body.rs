@@ -16,7 +16,9 @@ use std::{num::NonZeroU32, ops::Range};
 /// 18：原生 cage 参数按值复制使用登记的 ForeignCopy 入口。
 /// 20：进程与环境机器操作目录。
 /// 24：外调保留原始 C 类型、符号性、HFA 和固定参数边界。
-pub const REVISION: u32 = 24;
+/// 25：C 聚合描述保留区别于对象对齐的自然对齐。
+/// 26：C 聚合的自然对齐保留 packed 成员约束。
+pub const REVISION: u32 = 26;
 
 macro_rules! ids {
     ($($name:ident),* $(,)?) => { $(

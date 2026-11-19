@@ -81,4 +81,5 @@ fn dispatch(frame: uint, bytes: uint, fixups: uint, count: uint, dirty: uint) { 
 // sret and extra-result destinations use the existing raw-copy/fixup transaction;
 // no coroutine-stack address is retained by native. Admission, pinning, cleanup,
 // errno copy-back and dirty/ordinary credit ownership are unchanged. The A64
-// worker/lowering remains unbound until the next stage; this is not target selection.
+// lowering calls explicitly bound dispatchers; its native worker requires platform
+// thread-start/join binding on a system stack. This is not target selection.

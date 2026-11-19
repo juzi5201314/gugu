@@ -11,6 +11,7 @@ pub(super) fn bindings() -> glue::RuntimeBindings {
     glue::RuntimeBindings {
         morestack_or_poll: "__gugu_runtime_morestack_or_poll".into(),
         safepoint_slow: "__gugu_runtime_safepoint_slow".into(),
+        foreign: None,
     }
 }
 
@@ -26,6 +27,7 @@ pub(super) struct Harness {
     pub repeat_polls: bool,
     pub(super) processor: u64,
     pub(super) arguments: [u64; 9],
+    pub foreign: Option<super::foreign_vm::Harness>,
 }
 
 impl Default for Harness {
@@ -42,6 +44,7 @@ impl Default for Harness {
             repeat_polls: false,
             processor: 0x2000,
             arguments: [0; 9],
+            foreign: None,
         }
     }
 }
@@ -61,6 +64,7 @@ impl Harness {
     }
     pub fn initialize(&mut self, registers: &[u64; 32], memory: &mut BTreeMap<u64, u8>) {
         self.arguments.copy_from_slice(&registers[..9]);
+        word(memory, registers[27] + 80, self.expected_sp + 0x1000, 8);
         word(
             memory,
             registers[27] + u64::from(crate::runtime::coroutine_schema::stack_check_offset()),
@@ -112,6 +116,17 @@ impl Harness {
             return false;
         };
         let binding = bindings();
+        if matches!(
+            fixup.relocation.target.as_str(),
+            "ffi_dispatch" | "ffi_dirty_dispatch"
+        ) {
+            self.expected_sp += self
+                .foreign
+                .as_mut()
+                .expect("missing foreign substitute")
+                .dispatch(fragment, pc, registers, memory);
+            return true;
+        }
         if fixup.relocation.target != binding.morestack_or_poll
             && fixup.relocation.target != binding.safepoint_slow
         {
