@@ -113,6 +113,7 @@ pub(crate) fn lower_mode(
         });
     } else {
         b.push(Item::Call {
+            suspend: call.may_suspend,
             target: abi::symbol(key),
             arguments,
             results: results.iter().map(|id| id.0).collect(),

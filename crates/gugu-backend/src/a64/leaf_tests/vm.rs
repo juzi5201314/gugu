@@ -156,6 +156,19 @@ pub(super) fn execute_inner(
     };
     let mut pc = 0_usize;
     for _ in 0..1000 {
+        let mut base = 0;
+        let fragment = *fragments
+            .iter()
+            .find(|fragment| {
+                let end = base + fragment.bytes.len();
+                if pc < end {
+                    true
+                } else {
+                    base = end;
+                    false
+                }
+            })
+            .expect("PC belongs to a linked fragment");
         let inst = &instructions[pc / 4];
         let form = table::get(inst.form).unwrap();
         let key = form.key;
@@ -187,8 +200,9 @@ pub(super) fn execute_inner(
         let mut next = pc + 4;
         if key == "bl" {
             if let Some(runtime) = runtime.as_mut()
-                && runtime.call(fragment, pc, &mut registers, &mut memory, args.len())
+                && runtime.call(fragment, pc - base, &mut registers, &mut memory, args.len())
             {
+                registers[30] = (pc + 4) as u64;
                 pc += 4;
                 continue;
             }
@@ -253,7 +267,13 @@ pub(super) fn execute_inner(
             };
             if key.starts_with("ldr") || key.starts_with("ldar") {
                 if let Some(runtime) = runtime.as_mut() {
-                    runtime.load(fragment, at, &registers, &memory);
+                    runtime.load(
+                        fragment,
+                        at,
+                        &registers,
+                        &memory,
+                        calls.last().map(|(_, entry)| entry),
+                    );
                 }
                 let value = (0..bytes).fold(0_u64, |value, byte| {
                     value | (u64::from(*memory.get(&(at + byte)).unwrap_or(&0)) << (byte * 8))

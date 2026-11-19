@@ -1,8 +1,11 @@
-//! 栈尺寸策略、精确 relocation 传输与迟滞收缩；不解析机器 stack map。
+//! 栈尺寸策略、共享 relocation 传输与迟滞收缩；架构专属消费方位于子模块。
 
 use super::coroutine::{COLD_COMPACTED, CoroutineContext, CoroutineState, StackDescriptor};
 use super::provider::{FaultClass, ProviderError};
 use super::startup_schema::FatalKind;
+
+#[path = "stack_a64.rs"]
+pub mod a64;
 
 pub const STACK_ARENA_BYTES: usize = 256 * 1024 * 1024;
 pub const STACK_SPAN_BYTES: usize = 2 * 1024 * 1024;
@@ -139,57 +142,18 @@ impl StackImage {
         new_low: usize,
         new_capacity: usize,
     ) -> Result<(Self, CoroutineContext), StackError> {
-        let used = old
-            .used(context.rsp)
-            .map_err(|_| StackError::Invariant("复制栈的rsp越界"))?;
-        if used != self.bytes.len() || used > new_capacity || self.stack_registers & !15 != 0 {
+        let relocation = Relocation::new(old, context.rsp, new_low, new_capacity)?;
+        if relocation.used != self.bytes.len() || self.stack_registers & !15 != 0 {
             return Err(StackError::Invariant(
                 "栈复制范围或寄存器map与context不一致",
             ));
         }
-        let high = new_low
-            .checked_add(new_capacity)
-            .ok_or(StackError::Overflow)?;
-        let new_rsp = high - used;
-        let relocate = |value: usize| -> Result<usize, StackError> {
-            if value == 0 {
-                return Ok(0);
-            }
-            if !(old.stack_low..old.stack_high).contains(&value) {
-                return Err(StackError::Invariant("StackInterior不在旧栈allocation内"));
-            }
-            high.checked_sub(old.stack_high - value)
-                .filter(|value| *value >= new_low && *value < high)
-                .ok_or(StackError::Invariant("StackInterior在新栈allocation之外"))
-        };
-        let mut previous_end = 0;
-        for offset in &self.stack_roots {
-            let offset = usize::try_from(*offset).expect("u32 offset适配目标");
-            if offset < previous_end
-                || !offset.is_multiple_of(8)
-                || offset.checked_add(8).is_none_or(|end| end > used)
-            {
-                return Err(StackError::Invariant(
-                    "StackInterior slot越界、重叠或未对齐",
-                ));
-            }
-            previous_end = offset + 8;
-            let word =
-                u64::from_le_bytes(self.bytes[offset..offset + 8].try_into().expect("机器字"));
-            relocate(usize::try_from(word).map_err(|_| StackError::Invariant("指针宽度不匹配"))?)?;
-        }
+        let bytes = relocation.copy(&self.bytes, &self.stack_roots)?;
         let mut saved = [context.rbx, context.rbp, context.r12, context.r13];
         for (index, word) in saved.iter_mut().enumerate() {
             if self.stack_registers & (1 << index) != 0 {
-                *word = relocate(*word)?;
+                *word = relocation.pointer(*word)?;
             }
-        }
-        let mut bytes = self.bytes.clone();
-        for offset in &self.stack_roots {
-            let offset = usize::try_from(*offset).expect("offset适配目标");
-            let word =
-                usize::from_le_bytes(bytes[offset..offset + 8].try_into().expect("x86_64机器字"));
-            bytes[offset..offset + 8].copy_from_slice(&relocate(word)?.to_le_bytes());
         }
         Ok((
             Self {
@@ -198,7 +162,7 @@ impl StackImage {
                 stack_registers: self.stack_registers,
             },
             CoroutineContext {
-                rsp: new_rsp,
+                rsp: relocation.sp,
                 rbx: saved[0],
                 rbp: saved[1],
                 r12: saved[2],
@@ -206,5 +170,79 @@ impl StackImage {
                 ..context
             },
         ))
+    }
+}
+
+struct Relocation<'a> {
+    old: &'a StackDescriptor,
+    low: usize,
+    high: usize,
+    sp: usize,
+    used: usize,
+}
+
+impl<'a> Relocation<'a> {
+    fn new(
+        old: &'a StackDescriptor,
+        sp: usize,
+        low: usize,
+        capacity: usize,
+    ) -> Result<Self, StackError> {
+        let used = old
+            .used(sp)
+            .map_err(|_| StackError::Invariant("复制栈的rsp越界"))?;
+        if used > capacity {
+            return Err(StackError::Invariant(
+                "栈复制范围或寄存器map与context不一致",
+            ));
+        }
+        let high = low.checked_add(capacity).ok_or(StackError::Overflow)?;
+        Ok(Self {
+            old,
+            low,
+            high,
+            sp: high - used,
+            used,
+        })
+    }
+
+    fn pointer(&self, value: usize) -> Result<usize, StackError> {
+        if value == 0 {
+            return Ok(0);
+        }
+        if !(self.old.stack_low..self.old.stack_high).contains(&value) {
+            return Err(StackError::Invariant("StackInterior不在旧栈allocation内"));
+        }
+        self.high
+            .checked_sub(self.old.stack_high - value)
+            .filter(|value| *value >= self.low && *value < self.high)
+            .ok_or(StackError::Invariant("StackInterior在新栈allocation之外"))
+    }
+
+    fn copy(&self, bytes: &[u8], offsets: &[u32]) -> Result<Vec<u8>, StackError> {
+        let mut end = 0;
+        let mut result = bytes.to_vec();
+        if bytes.len() != self.used {
+            return Err(StackError::Invariant(
+                "栈复制范围或寄存器map与context不一致",
+            ));
+        }
+        for offset in offsets {
+            let offset = *offset as usize;
+            if offset < end
+                || !offset.is_multiple_of(8)
+                || offset.checked_add(8).is_none_or(|end| end > bytes.len())
+            {
+                return Err(StackError::Invariant(
+                    "StackInterior slot越界、重叠或未对齐",
+                ));
+            }
+            end = offset + 8;
+            let word = u64::from_le_bytes(bytes[offset..end].try_into().expect("机器字"));
+            let word =
+                usize::try_from(word).map_err(|_| StackError::Invariant("指针宽度不匹配"))?;
+            result[offset..end].copy_from_slice(&(self.pointer(word)? as u64).to_le_bytes());
+        }
+        Ok(result)
     }
 }
