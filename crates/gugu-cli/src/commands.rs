@@ -331,13 +331,22 @@ fn compile_and_exec(
             Ok(selected) => selected,
             Err(error) => {
                 // 收集式选择（test/bench 全量、--all-targets、--lib）在工作区里
-                // 允许成员没有对应 target；只有成员存在该类 target 但选择仍失败
-                // （如显式 --test <name> 缺失）才报错。
-                if exec_kinds.iter().all(|kind| {
-                    package.targets().iter().all(|target| {
-                        target.kind() != *kind || !target.features_enabled(&features)
+                // 允许成员没有对应 target；显式名或单 target 选择（run）必须报错。
+                let collective = matches!(
+                    selection,
+                    TargetSelection::All
+                        | TargetSelection::Lib
+                        | TargetSelection::Test(None)
+                        | TargetSelection::Bench(None)
+                        | TargetSelection::Example(None)
+                );
+                if collective
+                    && exec_kinds.iter().all(|kind| {
+                        package.targets().iter().all(|target| {
+                            target.kind() != *kind || !target.features_enabled(&features)
+                        })
                     })
-                }) {
+                {
                     continue;
                 }
                 return fail(format, 2, error.to_string());
