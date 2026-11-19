@@ -1,6 +1,16 @@
+use std::collections::BTreeMap;
 use std::{env, fs, path::PathBuf};
 
 use serde::Deserialize;
+
+/// `[registries.<name>]` 定义：index 是规范身份来源，token 只允许用户配置写入。
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RegistryDef {
+    pub(crate) index: Option<String>,
+    pub(crate) api: Option<String>,
+    pub(crate) mirror: Option<String>,
+    pub(crate) token: Option<String>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct ConfigValues {
@@ -9,6 +19,14 @@ pub(crate) struct ConfigValues {
     pub(crate) target_dir: Option<PathBuf>,
     pub(crate) require_signature: Option<bool>,
     pub(crate) deny_yanked: Option<bool>,
+    /// `registry.default`：未显式写 `registry` 的依赖使用的 registry 名。
+    pub(crate) registry_default: Option<String>,
+    /// `registry.allowed`：非空时限制可用 registry 名集合。
+    pub(crate) registry_allowed: Vec<String>,
+    /// `registry.trusted-keys`：key_id -> base64url 公钥。
+    pub(crate) trusted_keys: BTreeMap<String, String>,
+    /// `[registries.<name>]` 定义。
+    pub(crate) registries: BTreeMap<String, RegistryDef>,
     pub(crate) permission: Option<bool>,
     pub(crate) read_allows: Vec<PathBuf>,
     pub(crate) write_allows: Vec<PathBuf>,
@@ -23,6 +41,7 @@ pub(crate) struct ConfigFile {
     build: BuildConfig,
     cache: CacheConfig,
     registry: RegistryConfig,
+    registries: BTreeMap<String, RegistryDefConfig>,
     permission: PermissionConfig,
 }
 
@@ -47,6 +66,19 @@ struct RegistryConfig {
     require_signature: Option<bool>,
     #[serde(rename = "deny-yanked")]
     deny_yanked: Option<bool>,
+    default: Option<String>,
+    allowed: Option<Vec<String>>,
+    #[serde(rename = "trusted-keys")]
+    trusted_keys: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct RegistryDefConfig {
+    index: Option<String>,
+    api: Option<String>,
+    mirror: Option<String>,
+    token: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -66,7 +98,8 @@ struct PermissionConfig {
 }
 
 impl ConfigValues {
-    pub(crate) fn apply(&mut self, config: ConfigFile) {
+    /// `allow_token`：只有用户配置文件允许携带 `token`。
+    pub(crate) fn apply(&mut self, config: ConfigFile, allow_token: bool) {
         if config.build.target.is_some() {
             self.target = config.build.target;
         }
@@ -81,6 +114,30 @@ impl ConfigValues {
         }
         if config.registry.deny_yanked.is_some() {
             self.deny_yanked = config.registry.deny_yanked;
+        }
+        if config.registry.default.is_some() {
+            self.registry_default = config.registry.default;
+        }
+        if let Some(allowed) = config.registry.allowed {
+            self.registry_allowed = allowed;
+        }
+        if let Some(keys) = config.registry.trusted_keys {
+            self.trusted_keys.extend(keys);
+        }
+        for (name, def) in config.registries {
+            let entry = self.registries.entry(name).or_default();
+            if def.index.is_some() {
+                entry.index = def.index;
+            }
+            if def.api.is_some() {
+                entry.api = def.api;
+            }
+            if def.mirror.is_some() {
+                entry.mirror = def.mirror;
+            }
+            if allow_token && def.token.is_some() {
+                entry.token = def.token;
+            }
         }
         if config.permission.enabled.is_some() {
             self.permission = config.permission.enabled;
@@ -103,6 +160,14 @@ impl ConfigValues {
     }
 }
 
+impl ConfigValues {
+    /// 兼容旧调用：等价于 `apply(config, false)`。
+    #[cfg(test)]
+    fn apply_test(&mut self, config: ConfigFile) {
+        self.apply(config, false);
+    }
+}
+
 pub(crate) fn load_config(explicit: &[PathBuf]) -> Result<(ConfigValues, Vec<PathBuf>), String> {
     let mut paths = Vec::new();
     if let Some(path) = user_config_file() {
@@ -114,12 +179,21 @@ pub(crate) fn load_config(explicit: &[PathBuf]) -> Result<(ConfigValues, Vec<Pat
     paths.extend(explicit.iter().cloned());
 
     let mut values = ConfigValues::default();
+    let user_path = user_config_file();
     for path in &paths {
         let source = fs::read_to_string(path)
             .map_err(|error| format!("无法读取配置文件 `{}`：{error}", path.display()))?;
         let config = toml::from_str::<ConfigFile>(&source)
             .map_err(|error| format!("配置文件 `{}` 格式错误：{error}", path.display()))?;
-        values.apply(config);
+        if config.registries.values().any(|def| def.token.is_some())
+            && user_path.as_ref() != Some(path)
+        {
+            return Err(format!(
+                "配置文件 `{}` 包含 registry token；token 只能写在用户配置",
+                path.display()
+            ));
+        }
+        values.apply(config, user_path.as_ref() == Some(path));
     }
     Ok((values, paths))
 }
@@ -249,7 +323,7 @@ mod tests {
         )
         .expect("registry config parses");
         let mut values = ConfigValues::default();
-        values.apply(config);
+        values.apply_test(config);
         assert_eq!(values.require_signature, Some(true));
         assert_eq!(values.deny_yanked, Some(true));
     }

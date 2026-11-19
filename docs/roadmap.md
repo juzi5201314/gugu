@@ -555,12 +555,12 @@
   - 接入证据：`std.runtime.build_task` 向 `GUGU_BUILD_RECORD` 按序追加 TAB 分隔记录（`rerun-file`/`rerun-env`/`rerun-always`/`emit`/`define`/`link`/`link-search`/`warning`/`error`/`run-*`）；`std.runtime.permission` 挂在 fs/env/process/net 的 std 层检查点，经 `GUGU_PERM_MODE` 与 `GUGU_PERM_*` 规则在 build task 上下文内做 advisory 检查，fs 规则按目录前缀匹配；CLI 在 target 编译前把 build target 编为 host 镜像并执行（`GUGU_BUILD_*` env 协议），模块闭包只含 `build.gg`；`emit_module` 内容以 `generated.<name>` 逻辑路径注入后续 target 的源码闭包，`define_cfg` 进入 `custom_cfg`，`link` 记录进入 `NativeLink`；指纹（manifest+build.gg+feature+host+target+rerun 声明，未声明时全包树）驱动重跑或复用 record。交互式 TTY 询问与永久授权本版本未实现，规范已如实收窄为非交互拒绝+预授权规则。`std.text.concat` 修复 right 段写到 offset 0 的损坏（`+` 拼接与记录协议依赖）。
   - 验收证据：`gugu-frontend` 单测覆盖 `generated_logical_path` 校验与 `generated.*` 快照注入；手工验证 demo 包：`build.gg` 写出 `out/values.gg` + `emit_module` 后 lib 经 `use generated.values` 编译通过、`define` 的 `#[cfg(edition = "2026")]` 生效、`--permission` 下 `/etc/passwd` 读取被拒且 `--read-allows /etc` 前缀放行、`record`/`inputs` 落盘 `target/build/<pkg>-<key>/`。
 
-- [ ] **阶段 73：完成 CLI 命令端到端编排**（复杂度：5）
+- [x] **阶段 73：完成 CLI 命令端到端编排**（复杂度：5）
   - 依赖：阶段 04–06、09、56、57、69–72。
   - 将 `new/init/build/check/run/test/bench/fmt/doc/clean/add/remove/update/tree/vendor/package/publish/yank/login/cache/explain/version/help` 接入同一 action graph、配置覆盖、日志、目标选择和进程传参。
   - 验收：每条命令的成功/代码错误/用法错误/内部错误退出码符合规范；单文件模式禁用 package 参数；命令不会绕过锁、缓存、权限、诊断或镜像验证。
 
-- [ ] **阶段 74：实现 package 归档、registry Protocol v1 与发布签名**（复杂度：5）
+- [x] **阶段 74：实现 package 归档、registry Protocol v1 与发布签名**（复杂度：5）
   - 依赖：阶段 05、06、71–73。
   - 实现 config/index/download/publish/yank API、HTTPS/TLS、package ID、规范归档内容流、SHA-256 checksum、Ed25519 可选签名、认证脱敏、镜像、allowlist 和稳定 registry 诊断。
   - 验收：归档排除凭据/lock/target/vendor/VCS/未声明生成物；已存在 package ID checksum 不可覆盖；签名严格策略、yank、offline/vendor、redirect/source identity 和损坏缓存行为符合发布规范。

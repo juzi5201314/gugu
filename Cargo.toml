@@ -9,6 +9,7 @@ members = [
     "crates/gugu-gir",
     "crates/gugu-lir",
     "crates/gugu-project",
+    "crates/gugu-registry",
     "crates/gugu-runtime-abi",
     "crates/gugu-runtime-builder",
     "crates/gugu-runtime-world",
@@ -17,14 +18,17 @@ members = [
 resolver = "3"
 
 [workspace.dependencies]
+base64 = "0.22"
 bytes = "1"
 clap = { version = "4.5", features = ["derive"] }
+ed25519-dalek = "3"
 flate2 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tar = "0.4"
 toml = "0.9"
 unicode-width = "0.2"
+ureq = { version = "3", default-features = false, features = ["rustls"] }
 
 [profile.dev]
 # 编译器的规范编解码与分析热路径需要优化；开发与测试共用该配置，避免额外 profile 产物。

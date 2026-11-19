@@ -140,6 +140,16 @@ impl Project {
         &self.packages
     }
 
+    /// 全部 workspace package 的依赖声明（含 workspace.dependencies 合并），
+    /// 用于 registry 候选收集；与 `resolve_dependencies` 使用同一份清单解析。
+    pub fn dependency_specs(&self) -> Result<Vec<DependencySpec>, ProjectError> {
+        let metadata = dependencies::dependency_metadata(self.workspace.root(), &self.packages)?;
+        Ok(metadata
+            .into_iter()
+            .flat_map(|package| package.dependencies)
+            .collect())
+    }
+
     /// 按 target、host、feature 和 source index 解析 workspace 依赖。
     pub fn resolve_dependencies(&self, options: ResolveOptions) -> Result<LockGraph, ProjectError> {
         dependencies::resolve_project(self.workspace.root(), &self.packages, options)

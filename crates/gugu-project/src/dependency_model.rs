@@ -446,6 +446,8 @@ pub struct ResolveOptions {
     pub root_features: BTreeMap<String, Vec<String>>,
     /// root package 是否启用默认 feature；未出现的 root 默认启用。
     pub root_default_features: BTreeMap<String, bool>,
+    /// 逻辑 registry 名 → 规范身份；manifest 依赖写 `registry = "<name>"` 时经此匹配候选。
+    pub registry_aliases: BTreeMap<String, String>,
     /// registry index 中的候选 package。
     pub registry_packages: Vec<PackageMetadata>,
     /// Git source 中的候选 package。
@@ -458,6 +460,7 @@ impl Default for ResolveOptions {
             target: "x86_64-linux".to_owned(),
             host: "x86_64-linux".to_owned(),
             default_registry: "default".to_owned(),
+            registry_aliases: BTreeMap::new(),
             roots: Vec::new(),
             root_features: BTreeMap::new(),
             root_default_features: BTreeMap::new(),

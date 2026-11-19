@@ -210,6 +210,8 @@ X-Gugu-Package-SHA256: 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e730433629
 Authorization: Bearer example-token
 ```
 
+`gugu publish --sign <key>` 另提交 `X-Gugu-Package-Signature` 头，值为单个发布者签名记录的 JSON；私钥只从显式文件读取，不进请求体、日志或事件。
+
 成功返回 `201 Created` 和 JSON `{ "name": "owner/name", "vers": "1.2.3", "cksum": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824" }`。相同 package ID 与相同 checksum 的重试可以返回 `200 OK` 并视为幂等成功；相同 package ID 与不同 checksum 必须返回 `409 Conflict`，客户端报告不可覆盖的发布冲突。清单或归档非法返回 `422 Unprocessable Content`；认证、授权、大小限制和服务暂时不可用分别使用 `401/403`、`413` 和 `5xx`。客户端不得在 `5xx` 后自动换版本或修改清单。
 
 发布命令成功时输出 `publish-result` 事件，至少包含 registry identity、package ID、checksum 和是否为幂等重试；token、私钥和本地绝对路径不能出现在事件中。服务端不接受客户端直接提交索引记录，索引字段必须从已验证归档和服务端拥有权状态产生。
@@ -230,7 +232,7 @@ require-signature = true
 "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925" = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 ```
 
-也可以用全局命令行参数 `--require-signature` 临时要求所有参与解析的 registry package 有受信任签名。严格模式下，缺少签名、算法不支持、key 不受信任、签名消息不匹配或签名验证失败都是解析错误；path package 和显式 Git package 不会因为该开关获得 registry 签名，若策略要求它们签名则必须由外部供应链工具另行阻止。
+也可以用全局命令行参数 `--require-signature` 临时要求解析选定（含已锁定）的 registry package 有受信任签名。严格模式下，缺少签名、算法不支持、key 不受信任、签名消息不匹配或签名验证失败都是解析错误；未选入解析结果的其他版本记录不阻断解析。缓存命中不豁免该检查：严格模式下客户端仍对锁定的每个 registry package 验证索引记录中的签名与 yanked 状态。path package 和显式 Git package 不会因为该开关获得 registry 签名，若策略要求它们签名则必须由外部供应链工具另行阻止。
 
 ### 签名记录与消息
 

@@ -66,11 +66,21 @@ pub(crate) fn dispatch(command: &Command, options: &GlobalArgs) -> i32 {
         } => crate::package_cmds::run_tree(*depth, *duplicates, invert.as_deref(), options),
         Command::Vendor => crate::package_cmds::run_vendor(options),
         Command::Package => crate::package_cmds::run_package(options),
-        Command::Publish { dry_run, .. } => {
-            let _ = dry_run;
-            crate::package_cmds::pending_registry(options, "publish")
-        }
-        Command::Yank { .. } => crate::package_cmds::pending_registry(options, "yank"),
+        Command::Publish {
+            dry_run,
+            registry,
+            sign,
+        } => crate::registry_cmds::run_publish(
+            *dry_run,
+            registry.as_deref(),
+            sign.as_deref(),
+            options,
+        ),
+        Command::Yank {
+            package_name,
+            version,
+            undo,
+        } => crate::registry_cmds::run_yank(package_name, version, *undo, options),
         Command::Login {
             registry,
             token_stdin,
@@ -234,12 +244,13 @@ pub(crate) fn discover(options: &GlobalArgs) -> Result<(Project, Vec<Package>), 
 pub(crate) fn load_project(
     options: &GlobalArgs,
     target: TargetName,
+    refresh: bool,
 ) -> Result<(ProjectContext, Vec<Package>), i32> {
     let format = format_of(options);
     let (project, packages) = discover(options)?;
     let refs = packages.iter().collect::<Vec<_>>();
     let (lock, inputs) =
-        resolve_project_lock(&project, &refs, options, target, format).map_err(|()| 2)?;
+        resolve_project_lock(&project, &refs, options, target, format, refresh).map_err(|()| 2)?;
     Ok((
         ProjectContext {
             project,
@@ -450,7 +461,7 @@ fn run_run(positional: Option<&str>, args: &[OsString], options: &GlobalArgs) ->
     if let Err(code) = host_only(options, target) {
         return code;
     }
-    let (context, packages) = match load_project(options, target) {
+    let (context, packages) = match load_project(options, target, false) {
         Ok(value) => value,
         Err(code) => return code,
     };
@@ -485,7 +496,7 @@ fn run_test_or_bench(test: bool, args: &[OsString], options: &GlobalArgs) -> i32
     if let Err(code) = host_only(options, target) {
         return code;
     }
-    let (context, packages) = match load_project(options, target) {
+    let (context, packages) = match load_project(options, target, false) {
         Ok(value) => value,
         Err(code) => return code,
     };

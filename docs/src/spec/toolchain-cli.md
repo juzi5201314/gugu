@@ -22,7 +22,7 @@
 | `--locked` | 要求锁文件已是最新，否则失败 |
 | `--frozen` | 等价于 `--locked --offline` |
 | `--vendor` | 从 workspace `vendor/` 读取依赖 |
-| `--require-signature` | 要求所有 registry package 具有用户信任配置中的有效签名 |
+| `--require-signature` | 要求解析选定（含已锁定）的 registry package 具有用户信任配置中的有效签名 |
 | `--deny-yanked` | 拒绝解析结果中包含已锁定的 yanked package |
 | `--target <target>` | 目标名，见[平台与 ABI 参考](platform-abi.md)，默认宿主 |
 | `-p <owner/name>`、`--package <owner/name>` | 选择 package |
@@ -144,7 +144,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu update`
 
-更新锁文件：按当前清单重新解析并写回 `gugu.lock`。`-p <owner/name>` 把解析根收窄到指定 package。`--precise <version>` 需要 registry 候选查询；在 registry 协议接入前按用法错误拒绝，退出码 `2`。
+更新锁文件：按当前清单重新抓取 registry 索引候选（不受锁覆盖限制）、重新解析并写回 `gugu.lock`。`-p <owner/name>` 把解析根收窄到指定 package。`--precise <version>` 必须和 `-p` 同用：把指定 package 的 registry 与锁候选收窄到精确版本后重新解析；候选不存在、解析结果不是该版本或清单约束不允许时按错误拒绝。
 
 执行型收集选择（`test`/`bench` 默认全量、`--all-targets`、`--lib`）在 workspace 中允许成员没有对应 target，该成员被跳过；显式或单 target 选择（`run`、`--test <name>`、`--bench <name>`）始终要求匹配：所需 feature 未启用、名称缺失或无任何匹配 target 时按用法错误拒绝，退出码 `2`。
 
@@ -162,7 +162,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu publish`
 
-发布到 registry。`--dry-run` 只执行本地和归档视图检查，不上传；`--registry <name>` 选择 registry；`--sign <key>` 附加可选发布者签名。发布成功后输出 `publish-result`。
+发布到 registry。清单要求 `[package] publish = true`；path 依赖必须同时声明 registry `version` 回退，Git 依赖必须锁定 `rev`。`--dry-run` 只执行本地和归档视图检查，不上传；`--registry <name>` 选择 registry；`--sign <key>` 读取 base64url 32 字节私钥并按 Protocol v1 消息格式生成发布者签名，随 `X-Gugu-Package-Signature` 头提交。bearer token 取自 `GUGU_REGISTRY_TOKEN` 或用户配置 `registries.<name>.token`，缺失时报 `registry-auth`。发布成功后输出 `publish-result`。
 
 ### `gugu yank <owner/name>`
 
@@ -286,9 +286,15 @@ allowed = ["public"]
 require-signature = false
 deny-yanked = false
 
+[registry.trusted-keys]
+"<key-id>" = "<base64url-32-字节公钥>"
+
 [registries.public]
 index = "https://registry.example.com/index/"
 api = "https://registry.example.com/api/v1"
+# 可选：透明镜像与凭据；token 只允许写在用户配置。
+# mirror = "https://mirror.example/index/"
+# token = "..."
 
 [permission]
 enabled = true
@@ -310,6 +316,7 @@ read-allows = ["/usr/include/**"]
 | `GUGU_REGISTRY_ALLOWED` | 允许的 registry 名称，逗号分隔 |
 | `GUGU_REGISTRY_REQUIRE_SIGNATURE` | 非空等价 `--require-signature` |
 | `GUGU_REGISTRY_DENY_YANKED` | 非空等价 `--deny-yanked` |
+| `GUGU_REGISTRY_TOKEN` | registry bearer token，优先于用户配置中的 `registries.<name>.token` |
 | `GUGU_OFFLINE` | 非空等价 `--offline` |
 | `GUGU_LOCKED` | 非空等价 `--locked` |
 | `GUGU_FORMAT` | 默认输出格式 |

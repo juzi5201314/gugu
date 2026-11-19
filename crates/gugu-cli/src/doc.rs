@@ -55,10 +55,11 @@ pub(crate) fn run(options: &GlobalArgs, open: bool, no_deps: bool) -> i32 {
             return 2;
         }
     };
-    let (lock, _inputs) = match resolve_project_lock(&project, &packages, options, target, format) {
-        Ok(resolved) => resolved,
-        Err(()) => return 2,
-    };
+    let (lock, _inputs) =
+        match resolve_project_lock(&project, &packages, options, target, format, false) {
+            Ok(resolved) => resolved,
+            Err(()) => return 2,
+        };
     let workspace_root = project.workspace().root().to_path_buf();
     let doc_root = options
         .target_dir

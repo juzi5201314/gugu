@@ -11,6 +11,7 @@ mod formatting;
 mod materialize;
 mod output;
 mod package_cmds;
+mod registry_cmds;
 
 #[cfg(all(test, feature = "slow-tests"))]
 #[path = "main_tests.rs"]
@@ -858,12 +859,14 @@ pub(crate) fn compile_package(
     Ok(exit_code)
 }
 
+/// `refresh`：`gugu update` 时即使锁已覆盖也重新抓取索引候选。
 pub(crate) fn resolve_project_lock(
     project: &Project,
     packages: &[&Package],
     options: &GlobalArgs,
     target: TargetName,
     format: OutputFormat,
+    refresh: bool,
 ) -> Result<(LockGraph, Vec<DependencyInput>), ()> {
     let path = project.lock_path();
     let existing = if path.exists() {
@@ -880,10 +883,32 @@ pub(crate) fn resolve_project_lock(
         }
         None
     };
-    let (registry_packages, git_packages) = existing
+    let (mut registry_packages, git_packages) = existing
         .as_ref()
         .map(candidates_from_lock)
         .unwrap_or_default();
+    // registry Protocol v1：按清单声明做索引候选的不动点收集；
+    // 锁已覆盖或 --offline 时不产生网络请求。
+    let session = registry_cmds::RegistrySession::load(options).map_err(|_| ())?;
+    let specs = project.dependency_specs().map_err(|error| {
+        emit_cli_error(format, &error.to_string());
+    })?;
+    let fetch = session
+        .gather_candidates(&specs, &registry_packages, options.offline, refresh)
+        .map_err(|error| {
+            emit_cli_error(format, &error.to_string());
+        })?;
+    // refresh 抓取的索引记录覆盖同键锁候选，避免同 ID 两份元数据冲突。
+    registry_packages.retain(|metadata| {
+        !matches!(
+            metadata.id.source(),
+            PackageSource::Registry { registry }
+                if fetch
+                    .refreshed
+                    .contains(&(registry.clone(), metadata.id.name().to_owned()))
+        )
+    });
+    registry_packages.extend(fetch.candidates);
     let mut roots = Vec::with_capacity(packages.len());
     let mut root_features = BTreeMap::new();
     let mut root_default_features = BTreeMap::new();
@@ -907,8 +932,10 @@ pub(crate) fn resolve_project_lock(
             roots,
             root_features,
             root_default_features,
+            registry_aliases: session.aliases(),
             registry_packages,
             git_packages,
+            default_registry: fetch.default_identity.clone(),
             ..ResolveOptions::default()
         })
         .map_err(|error| {
@@ -936,6 +963,17 @@ pub(crate) fn resolve_project_lock(
         locked: options.locked,
         vendor: options.vendor,
     };
+    // 缺失的 registry 归档按锁 checksum 下载入库；--deny-yanked 在此生效。
+    registry_cmds::ensure_registry_inputs(
+        &session,
+        &graph,
+        &cache,
+        &fetch.yanked,
+        options.offline,
+        options.vendor,
+        format,
+    )
+    .map_err(|_| ())?;
     let inputs = prepare_dependency_inputs(
         &graph,
         &cache,
@@ -1014,10 +1052,11 @@ fn run_project_compile(options: &GlobalArgs, target: TargetName, check_only: boo
             return 2;
         }
     };
-    let (lock, _inputs) = match resolve_project_lock(&project, &packages, options, target, format) {
-        Ok(resolved) => resolved,
-        Err(()) => return 2,
-    };
+    let (lock, _inputs) =
+        match resolve_project_lock(&project, &packages, options, target, format, false) {
+            Ok(resolved) => resolved,
+            Err(()) => return 2,
+        };
     let compiler = Compiler::with_artifacts(&EMBEDDED_ARTIFACTS);
     let mut exit_code = 0;
     let mut written = BTreeSet::new();
