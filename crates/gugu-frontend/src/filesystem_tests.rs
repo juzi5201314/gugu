@@ -2,6 +2,7 @@
 mod copy;
 mod formatting;
 mod harness;
+mod hashing;
 mod network;
 mod platform;
 mod printing;
@@ -264,6 +265,12 @@ fn interpret_bounded(
                     continue;
                 }
                 Op::IConst(value) => value,
+                Op::Integer(IntOp::MulWide) => {
+                    let product = u128::from(args[0]) * u128::from(args[1]);
+                    values[range(&instruction.results)]
+                        .copy_from_slice(&[product as u64, (product >> 64) as u64]);
+                    continue;
+                }
                 Op::Integer(op @ (IntOp::AddCarry | IntOp::SubBorrow)) => {
                     let (value, first) = if op == IntOp::AddCarry {
                         args[0].overflowing_add(args[1])
@@ -315,6 +322,7 @@ fn interpret_bounded(
                     IntOp::Or => args[0] | args[1],
                     IntOp::Shl => args[0].wrapping_shl((args[1] % 64) as u32),
                     IntOp::ShrUnsigned => args[0] >> (args[1] % 64),
+                    IntOp::ShrSigned => ((args[0] as i64) >> (args[1] % 64)) as u64,
                     _ => panic!("未登记整数操作：{op:?}"),
                 },
                 Op::Compare { condition, signed } => {

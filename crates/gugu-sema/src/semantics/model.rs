@@ -47,8 +47,6 @@ pub enum Ty {
     Result(Box<Ty>, Box<Ty>),
     /// 格式 trait 的写入目标。载荷方法随 `std.fmt` 提供。
     Formatter,
-    /// `Hash` 接收语义字段的目标。载荷方法随 `std.hash` 提供。
-    Hasher,
     Range,
     Chan(Box<Ty>),
     Join(Box<Ty>),
@@ -133,7 +131,6 @@ impl Ty {
                 bits: 128,
             },
             "Formatter" => Self::Formatter,
-            "Hasher" => Self::Hasher,
             "Range" => Self::Range,
             "ChanClosed" => Self::ChanClosed,
             "TrySendErr" => Self::TrySendErr,
@@ -187,6 +184,17 @@ pub struct Model<'a> {
     function_items: Vec<Vec<Option<ItemId>>>,
 }
 impl<'a> Model<'a> {
+    pub(super) fn hasher_type(&self) -> Ty {
+        self.nominal
+            .iter()
+            .position(|nominal| {
+                nominal.name == "Hasher"
+                    && self.modules[nominal.definition.module].builtin
+                    && self.modules[nominal.definition.module].path == "std.hash"
+            })
+            .map_or(Ty::Error, |index| Ty::Named(index, Vec::new()))
+    }
+
     pub(super) fn formatter_type(&self) -> Ty {
         self.nominal
             .iter()
@@ -296,7 +304,6 @@ impl<'a> Model<'a> {
                 self.traits.interfaces[interface.id].name
             ),
             Ty::Formatter => "Formatter".into(),
-            Ty::Hasher => "Hasher".into(),
             Ty::Range => "Range".into(),
             Ty::Option(t) => format!("Option[{}]", self.describe(t)),
             Ty::Result(t, e) => format!("Result[{}, {}]", self.describe(t), self.describe(e)),

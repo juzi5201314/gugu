@@ -157,7 +157,6 @@ impl Model<'_> {
             | Ty::Ptr(_)
             | Ty::TypeId
             | Ty::Formatter
-            | Ty::Hasher
             | Ty::Range
             | Ty::ChanClosed
             | Ty::TrySendErr
