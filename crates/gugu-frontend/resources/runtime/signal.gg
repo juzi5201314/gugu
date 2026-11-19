@@ -63,7 +63,7 @@ fn arm(extra_mask: uint) uint { unsafe {
     let blocked = native_call(14, 0, word(page + 48), 0, 8, 0, 0, 0, 0, 0)
     if blocked.error != 0 { return blocked.error }
     let fd = word(page + 8)
-    let created = native_call(289, if fd == 0 { ~uint(0) } else { fd }, word(page + 48), 524288, 0, 0, 0, 0, 0, 0)
+    let created = native_call(289, if fd == 0 { ~uint(0) } else { fd }, word(page + 48), 8, 524288, 0, 0, 0, 0, 0)
     if created.error != 0 { return created.error }
     if fd == 0 { put(page + 8, created.value) }
     0

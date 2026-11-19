@@ -98,6 +98,7 @@ pub fn linux_fd_dispatch() -> Fragment {
         exits.push(branch(&mut b));
         b.patch_branch(skip, "b.cond", &[], &[condition(1)]);
     }
+    super::linux_signal::dispatch(&mut b, &mut exits);
     b.memory("str.X.Unsigned", ZERO, REQUEST, NATIVE_REQUEST_VALUE);
     b.emit("movz.X", [reg(Reg::x(0)), movz(22)]);
     b.memory("str.X.Unsigned", Reg::x(0), REQUEST, NATIVE_REQUEST_ERROR);
