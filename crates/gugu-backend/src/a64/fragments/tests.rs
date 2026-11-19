@@ -78,6 +78,7 @@ fn darwin_net_dispatch_uses_the_darwin_socket_and_poller_abi() {
         (26, "fcntl", 2),
         (27, "recvmsg", 3),
         (28, "disconnectx", 3),
+        (29, "sigaction", 3),
     ];
     assert_eq!(
         darwin_net_imports(),
@@ -191,6 +192,21 @@ fn darwin_net_dispatch_uses_the_darwin_socket_and_poller_abi() {
     }
     assert_eq!(at(&code, callback + 20).operands[0], reg(Reg::w(0)));
     assert_eq!(target(&code, callback + 20), callback + 32);
+    let sigaction = calls[methods.len() - 1].offset;
+    let signal_dispatch = target(&code, sigaction - 16);
+    assert_eq!(
+        at(&code, signal_dispatch).operands,
+        [reg(xzr), reg(x0), add_imm(30)]
+    );
+    let adr = signal_dispatch + 8;
+    assert_eq!(form(at(&code, adr)), "adr");
+    assert_eq!(at(&code, adr).operands[0], reg(x0));
+    assert_eq!(target(&code, adr + 4), success);
+    let handler = target(&code, adr);
+    assert_eq!(handler, callback + 48);
+    assert_eq!(handler as usize + 4, fragment.bytes.len());
+    assert_eq!(form(at(&code, handler)), "ret");
+    assert_eq!(at(&code, handler).operands, [reg(LR)]);
 }
 
 #[test]

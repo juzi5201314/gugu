@@ -388,6 +388,8 @@ Darwin datagram 接收使用 `recvmsg` 的返回标志识别 `MSG_TRUNC`，不�
 
 内部 arm64 套接字和 kqueue 适配器在原生栈上通过 libSystem 执行网络请求，使用与 x86_64 Darwin 相同的请求结果和 Darwin errno。网络 `fcntl` 的可变整数实参在栈上传递；`sendto`、`recvfrom` 和 `recvmsg` 的字节计数保留完整的 `ssize_t` 宽度。原生 socket 关闭回调正常返回零，失败返回 Darwin errno。
 
+内部 arm64 信号订阅与 x86_64 Darwin 共用同一运行时协议：用 kqueue 的 `EVFILT_SIGNAL` 收集信号计数，通过 libSystem 的 `sigaction` 安装只返回的原生处理器并保存旧 disposition。最后一个订阅关闭时，运行时同步恢复旧 disposition，不等待调度器下一次轮询。
+
 Darwin 用 `disconnectx` 解除通配地址 UDP socket 的 peer，保留本地端口。Darwin 会清除已连接 UDP socket 的本地 IP，且同一 socket 无法重新绑定；原先绑定具体地址的 UDP socket 在调用原生断开前返回 `Unsupported`，保留绑定和 peer。Unix datagram 的 `AF_UNSPEC` 被拒绝时，只有确认 native socket 已不再关联 peer 才提交断开状态。
 
 Darwin 在 UDP bind 后用 `getsockname` 记录是否绑定具体 IP，以内核返回的地址为准，而非 bind 的请求参数；例如，内核可将带 scope 的 `::` 和双栈的 `::ffff:0.0.0.0` 规范化为通配地址。
