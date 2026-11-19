@@ -38,10 +38,16 @@ pub fn normalize_index_url(raw: &str) -> Result<String, RegistryError> {
     if host.is_empty() || host.contains('%') {
         return Err(config(format!("registry index `{raw}` 主机非法")));
     }
+    // IPv6 主机在 authority 中必须保留方括号。
+    let host_out = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.clone()
+    };
     let authority = match port {
-        Some(port) if port == default_port => host.clone(),
-        Some(port) => format!("{host}:{port}"),
-        None => host.clone(),
+        Some(port) if port == default_port => host_out,
+        Some(port) => format!("{host_out}:{port}"),
+        None => host_out,
     };
     let path = normalize_path(path, raw)?;
     Ok(format!("{scheme}://{authority}{path}"))
@@ -107,16 +113,21 @@ fn normalize_path(path: &str, raw: &str) -> Result<String, RegistryError> {
     Ok(normalized)
 }
 
-/// 主机是否为 loopback：127.0.0.0/8、`localhost` 或 `::1`。
+/// 主机是否为 loopback：完整的 127.x.x.x IPv4、`localhost` 或 `::1`。
+/// 仅前缀为 `127.` 的域名（如 `127.attacker.example`）不算 loopback。
 pub fn is_loopback_host(host: &str) -> bool {
     let host = host.trim_matches(['[', ']']);
-    host == "localhost"
-        || host == "::1"
-        || host
-            .split('.')
-            .next()
-            .and_then(|first| first.parse::<u8>().ok())
-            .is_some_and(|first| first == 127)
+    if host == "localhost" || host == "::1" {
+        return true;
+    }
+    let octets: Vec<&str> = host.split('.').collect();
+    octets.len() == 4
+        && octets[0] == "127"
+        && octets.iter().all(|octet| {
+            !octet.is_empty()
+                && octet.chars().all(|c| c.is_ascii_digit())
+                && octet.parse::<u8>().is_ok()
+        })
 }
 
 /// 规范 URL 的 `scheme://authority` 前缀，用于判断跨 origin 重定向。
@@ -206,6 +217,13 @@ mod tests {
             normalize_index_url("http://localhost:8999/i/").expect("localhost"),
             "http://localhost:8999/i/"
         );
+        assert_eq!(
+            normalize_index_url("http://[::1]:8999/index").expect("ipv6"),
+            "http://[::1]:8999/index/"
+        );
+        // 域名以 `127.` 开头仍不是 loopback。
+        assert!(normalize_index_url("http://127.attacker.example/index/").is_err());
+        assert!(!is_loopback_host("127.attacker.example"));
     }
 
     #[test]
