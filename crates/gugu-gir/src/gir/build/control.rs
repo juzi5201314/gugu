@@ -325,7 +325,11 @@ impl Builder<'_> {
     ) -> Result<Option<LocalId>, Diagnostic> {
         self.switch_to(blocks.then_block);
         if let Some(value) = self.emit_expr(then_value)? {
-            self.assign_copy(Place::local(dest), value);
+            if else_value.is_none() {
+                self.assign_unit(dest);
+            } else {
+                self.assign_copy(Place::local(dest), value);
+            }
             self.goto(blocks.join);
         }
         self.switch_to(blocks.else_block);

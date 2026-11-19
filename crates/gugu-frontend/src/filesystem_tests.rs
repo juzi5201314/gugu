@@ -1,12 +1,16 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
 mod copy;
+mod debug_builders;
+mod float_formatting;
 mod formatting;
 mod harness;
+mod hashing;
 mod network;
 mod platform;
 mod printing;
 mod process;
 mod resource;
+mod signal;
 mod trace;
 
 use crate::lir::body::{Body, Condition, IntOp, Op, Terminator, range};
@@ -262,7 +266,13 @@ fn interpret_bounded(
                     values[range(&instruction.results)].copy_from_slice(&returned);
                     continue;
                 }
-                Op::IConst(value) => value,
+                Op::IConst(value) | Op::FConst(value) => value,
+                Op::Integer(IntOp::MulWide) => {
+                    let product = u128::from(args[0]) * u128::from(args[1]);
+                    values[range(&instruction.results)]
+                        .copy_from_slice(&[product as u64, (product >> 64) as u64]);
+                    continue;
+                }
                 Op::Integer(op @ (IntOp::AddCarry | IntOp::SubBorrow)) => {
                     let (value, first) = if op == IntOp::AddCarry {
                         args[0].overflowing_add(args[1])
@@ -314,6 +324,7 @@ fn interpret_bounded(
                     IntOp::Or => args[0] | args[1],
                     IntOp::Shl => args[0].wrapping_shl((args[1] % 64) as u32),
                     IntOp::ShrUnsigned => args[0] >> (args[1] % 64),
+                    IntOp::ShrSigned => ((args[0] as i64) >> (args[1] % 64)) as u64,
                     _ => panic!("未登记整数操作：{op:?}"),
                 },
                 Op::Compare { condition, signed } => {

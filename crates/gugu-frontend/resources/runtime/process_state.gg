@@ -76,7 +76,7 @@ fn terminate(control: uint) Result[(), Error] {
     let result = native.call(layout.KILL, raw)
     if result.error != 0 {
         // Linux ESRCH 是退出观察与 kill 的合法竞态；仍由 supervisor 收集。
-        #[cfg(os = "linux")]
+        #[cfg(any(os = "linux", os = "macos"))]
         { if result.error == 3 { return Ok(()) }; }
         return Err(io.from_native_error(result.error))
     }
@@ -185,7 +185,7 @@ fn waiters(control: uint) {
 }
 #[cfg(os = "windows")]
 fn release_handle(handle: uint) { native.close_native(handle) }
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn release_handle(handle: uint) { _ = handle }
 fn observe(observer: uint, control: uint) bool {
     if control != 0 && heap_word(control + layout.STATUS_KIND) != 0 { return true }

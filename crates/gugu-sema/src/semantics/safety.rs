@@ -79,6 +79,9 @@ impl Model<'_> {
                 };
                 let value = match self.constant_value(module, value, source) {
                     Ok(super::model::ConstantValue::Float(bits)) => f64::from_bits(bits),
+                    Ok(super::model::ConstantValue::Float32(bits)) => {
+                        f64::from(f32::from_bits(bits))
+                    }
                     Ok(super::model::ConstantValue::Int(value)) => {
                         if *source == Ty::Float(32) {
                             f64::from(value as f32)
@@ -157,7 +160,6 @@ impl Model<'_> {
             | Ty::Ptr(_)
             | Ty::TypeId
             | Ty::Formatter
-            | Ty::Hasher
             | Ty::Range
             | Ty::ChanClosed
             | Ty::TrySendErr

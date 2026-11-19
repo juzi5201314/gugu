@@ -100,8 +100,18 @@ impl Model<'_> {
                     && self.modules[def.module].path == "std.fmt"
                     && matches!(
                         definition.name.as_str(),
-                        "Print" | "Debug" | "Binary" | "Octal" | "LowerHex" | "UpperHex"
+                        "Print"
+                            | "Debug"
+                            | "Binary"
+                            | "Octal"
+                            | "LowerHex"
+                            | "UpperHex"
+                            | "LowerExp"
+                            | "UpperExp"
                     ))
+                && !(self.modules[def.module].builtin
+                    && self.modules[def.module].path == "std.hash"
+                    && definition.name == "Hash")
             {
                 return Err(self.trait_error(def, "用户 impl 不能覆盖编译器提供的语言实现"));
             }

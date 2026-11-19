@@ -172,7 +172,7 @@ pub(super) fn worker(target: TargetName) -> Builder {
     rr(
         &mut b,
         R12,
-        if target == TargetName::X86_64Linux {
+        if target != TargetName::X86_64Windows {
             Rdi
         } else {
             Rcx
@@ -183,6 +183,13 @@ pub(super) fn worker(target: TargetName) -> Builder {
     if target == TargetName::X86_64Linux {
         number(&mut b, Rax, 186);
         syscall(&mut b);
+    } else if target == TargetName::X86_64Macos {
+        adjust(&mut b, "sub", Rsp, 16);
+        number(&mut b, Rdi, 0);
+        rr(&mut b, Rsi, Rsp);
+        darwin::c_call(&mut b, "pthread_threadid_np");
+        load(&mut b, Rax, Rsp, 0);
+        adjust(&mut b, "add", Rsp, 16);
     } else {
         adjust(&mut b, "sub", Rsp, 32);
         win_call(&mut b, "GetCurrentThreadId");
@@ -193,9 +200,12 @@ pub(super) fn worker(target: TargetName) -> Builder {
     if target == TargetName::X86_64Linux {
         c_call(&mut b, "__errno_location");
         rr(&mut b, R15, Rax);
+    } else if target == TargetName::X86_64Macos {
+        darwin::c_call(&mut b, "__error");
+        rr(&mut b, R15, Rax);
     }
     stack_arguments(&mut b);
-    let registers: &[Gpr] = if target == TargetName::X86_64Linux {
+    let registers: &[Gpr] = if target != TargetName::X86_64Windows {
         &[Rdi, Rsi, Rdx, Rcx, R8, R9]
     } else {
         &[Rcx, Rdx, R8, R9]
@@ -218,7 +228,7 @@ pub(super) fn worker(target: TargetName) -> Builder {
         Xmm::Xmm6,
         Xmm::Xmm7,
     ];
-    let count = if target == TargetName::X86_64Linux {
+    let count = if target != TargetName::X86_64Windows {
         8
     } else {
         4
@@ -255,7 +265,7 @@ pub(super) fn worker(target: TargetName) -> Builder {
             Access::Write,
         );
     }
-    if target == TargetName::X86_64Linux {
+    if target != TargetName::X86_64Windows {
         b.emit(
             "mov",
             &[K::Rm32, K::R32],

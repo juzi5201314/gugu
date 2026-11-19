@@ -153,7 +153,7 @@ pub(super) fn sequence(export: &Export, target: TargetName) -> Result<Builder, S
 }
 
 fn assist(b: &mut Builder, target: TargetName) {
-    let argument = if target == TargetName::X86_64Linux {
+    let argument = if target != TargetName::X86_64Windows {
         Rdi
     } else {
         Rcx
@@ -204,6 +204,13 @@ fn wait_thread(b: &mut Builder, target: TargetName, scratch: i32) {
         TargetName::X86_64Windows => {
             number(b, Rcx, 1);
             win_call(b, "Sleep");
+        }
+        TargetName::X86_64Macos => {
+            set(b, R12, scratch, 0);
+            set(b, R12, scratch + 8, 1_000_000);
+            address(b, Rdi, R12, scratch);
+            number(b, Rsi, 0);
+            darwin::c_call(b, "nanosleep");
         }
     }
 }

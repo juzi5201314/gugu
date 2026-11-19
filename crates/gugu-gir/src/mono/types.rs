@@ -103,7 +103,6 @@ impl MonoContext<'_> {
             hir::Type::TryRecvErr => Ty::TryRecvErr,
             hir::Type::Panic => Ty::Panic,
             hir::Type::Formatter => Ty::Formatter,
-            hir::Type::Hasher => Ty::Hasher,
             hir::Type::MaybeUninit(inner) => Ty::MaybeUninit(boxed(*inner)?),
         })
     }
@@ -306,6 +305,7 @@ pub fn encode_constant(
             Value::Tuple(_) => 6,
             Value::Struct(_) => 7,
             Value::Type(_) => 8,
+            Value::Float32(_) => 9,
             Value::ParsedSource(_) | Value::ResultOk(_) | Value::ResultErr(_) => {
                 return Err(invalid("源码宏工作值不能成为单态化实参"));
             }
@@ -315,6 +315,7 @@ pub fn encode_constant(
             Value::Unit => {}
             Value::Int(value) => out.extend_from_slice(&value.to_le_bytes()),
             Value::Float(bits) => out.extend_from_slice(&bits.to_le_bytes()),
+            Value::Float32(bits) => out.extend_from_slice(&bits.to_le_bytes()),
             Value::Bool(value) => out.push(u8::from(*value)),
             Value::String(value) => bytes(out, value.as_bytes()),
             Value::Type(ty) => bytes(out, &context.encode_type(ty)?),

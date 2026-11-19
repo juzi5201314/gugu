@@ -4,9 +4,9 @@ use std.runtime.resource.{ResourceCell, control_address}
 pub enum Signal {
     Interrupt,
     Terminate,
-    #[cfg(os = "linux")] Hangup,
-    #[cfg(os = "linux")] User1,
-    #[cfg(os = "linux")] User2,
+    #[cfg(any(os = "linux", os = "macos"))] Hangup,
+    #[cfg(any(os = "linux", os = "macos"))] User1,
+    #[cfg(any(os = "linux", os = "macos"))] User2,
     #[cfg(os = "windows")] Break,
 }
 
@@ -27,16 +27,16 @@ pub struct SignalSubscription {
     cell: ResourceCell,
 }
 
-/* Linux 按 POSIX signo 编码；Windows 按控制台事件编码（Interrupt=1, Break=2, Terminate=3，
+/* Unix 按宿主 signo 编码；Windows 按控制台事件编码（Interrupt=1, Break=2, Terminate=3，
    即 CTRL_* 事件码 +1，避开 signo=0 的空哨兵）。*/
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn signo(signal: Signal) uint {
     match signal {
         Signal::Interrupt => 2,
         Signal::Terminate => 15,
         Signal::Hangup => 1,
-        Signal::User1 => 10,
-        Signal::User2 => 12,
+        Signal::User1 => user1(),
+        Signal::User2 => user2(),
     }
 }
 #[cfg(os = "windows")]
@@ -48,12 +48,20 @@ fn signo(signal: Signal) uint {
     }
 }
 #[cfg(os = "linux")]
+fn user1() uint = 10
+#[cfg(os = "linux")]
+fn user2() uint = 12
+#[cfg(os = "macos")]
+fn user1() uint = 30
+#[cfg(os = "macos")]
+fn user2() uint = 31
+#[cfg(any(os = "linux", os = "macos"))]
 fn signal_of(value: uint) Signal {
     if value == 2 { return Signal::Interrupt }
     if value == 15 { return Signal::Terminate }
     if value == 1 { return Signal::Hangup }
-    if value == 10 { return Signal::User1 }
-    if value == 12 { return Signal::User2 }
+    if value == user1() { return Signal::User1 }
+    if value == user2() { return Signal::User2 }
     Signal::Interrupt
 }
 #[cfg(os = "windows")]

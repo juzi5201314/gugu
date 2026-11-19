@@ -1,7 +1,7 @@
 use super::{CompileRequest, Compiler, TargetName, harness::Harness};
 use gugu_sema::string::{FormatSpec, ParsedCount, fmt, parse_format};
 
-fn oracle(spec: &str, value: impl FnOnce(&mut fmt::Formatter)) -> String {
+pub(super) fn oracle(spec: &str, value: impl FnOnce(&mut fmt::Formatter)) -> String {
     let spec: FormatSpec<u64> = parse_format(spec)
         .unwrap()
         .try_map(|count| {
@@ -16,7 +16,7 @@ fn oracle(spec: &str, value: impl FnOnce(&mut fmt::Formatter)) -> String {
     formatter.finish()
 }
 
-fn render(source: &str) -> String {
+pub(super) fn render(source: &str) -> String {
     render_with_heap(source).0
 }
 
@@ -61,6 +61,24 @@ fn runtime_format_literals_and_empty() {
         "hello {world}"
     );
     assert_eq!(render(r#"fn render() string = f"""#), "");
+}
+
+#[test]
+fn comptime_float32_preserves_source_width() {
+    assert_eq!(
+        render(
+            r#"
+        const SINGLE: f32 = 0.1
+        const SHORT: string = f"{SINGLE}"
+        const PRECISE: string = f"{SINGLE:.20?}"
+        const SUM: f32 = SINGLE + SINGLE
+        const NEGATIVE: f32 = -SINGLE
+        const OPERATIONS: string = f"{SUM}|{NEGATIVE}"
+        fn render() string = SHORT + "|" + PRECISE + "|" + OPERATIONS
+    "#
+        ),
+        format!("{}|{:.20?}|{}|{}", 0.1f32, 0.1f32, 0.2f32, -0.1f32)
+    );
 }
 
 #[test]

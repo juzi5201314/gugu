@@ -3,6 +3,7 @@ use super::*;
 use crate::runtime::process_schema::{
     REQUEST_ARGUMENTS as A, REQUEST_ERROR as E, REQUEST_VALUE as V,
 };
+mod darwin;
 mod linux;
 mod windows;
 pub(crate) use windows::SYMBOLS as WINDOWS_SYMBOLS;
@@ -12,6 +13,7 @@ pub(super) fn test_call(target: TargetName) -> Builder {
     match target {
         TargetName::X86_64Linux => linux::call(),
         TargetName::X86_64Windows => windows::call(),
+        TargetName::X86_64Macos => darwin::call(),
     }
 }
 #[cfg(test)]
@@ -20,6 +22,7 @@ pub(super) fn test_worker(target: TargetName) -> Builder {
     match target {
         TargetName::X86_64Linux => linux::worker(&mut b),
         TargetName::X86_64Windows => windows::worker(&mut b),
+        TargetName::X86_64Macos => darwin::worker(&mut b),
     }
     b
 }
@@ -30,6 +33,7 @@ pub(super) fn call(target: TargetName) -> FragmentBlob {
         match target {
             TargetName::X86_64Linux => linux::call(),
             TargetName::X86_64Windows => windows::call(),
+            TargetName::X86_64Macos => darwin::call(),
         },
     )
 }
@@ -52,6 +56,7 @@ pub(super) fn worker(target: TargetName) -> FragmentBlob {
     match target {
         TargetName::X86_64Linux => linux::worker(&mut b),
         TargetName::X86_64Windows => windows::worker(&mut b),
+        TargetName::X86_64Macos => darwin::worker(&mut b),
     }
     let encoded = encode::assemble(&b.finish().sequence).expect("进程 worker 片段编码");
     let offset = encoded

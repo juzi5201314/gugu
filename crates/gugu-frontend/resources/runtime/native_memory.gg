@@ -182,7 +182,7 @@ pub fn adopt_boot(owner: uint, stack_reserved: uint, stack_committed: uint, limi
 #[cfg(os = "windows")]
 static aligned_reservations: uint = 0
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn reserve_native(bytes: uint, alignment: uint) (uint, uint, uint) {
     (unsafe { std.platform.reserve_aligned(bytes, alignment) }, page_bytes(bytes), 0)
 }
@@ -216,7 +216,7 @@ fn reserve_native(bytes: uint, alignment: uint) (uint, uint, uint) { unsafe {
     (base, reserved, NATIVE_PAGE_BYTES)
 } }
 
-#[cfg(os = "linux")]
+#[cfg(any(os = "linux", os = "macos"))]
 fn take_native(base: uint, bytes: uint) (uint, uint, uint) = (base, bytes, 0)
 
 #[cfg(os = "windows")]

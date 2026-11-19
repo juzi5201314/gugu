@@ -419,7 +419,6 @@ impl<'a> MonoContext<'a> {
             Ty::TryRecvErr => out.extend_from_slice(&27u16.to_le_bytes()),
             Ty::Panic => out.extend_from_slice(&28u16.to_le_bytes()),
             Ty::Formatter => out.extend_from_slice(&29u16.to_le_bytes()),
-            Ty::Hasher => out.extend_from_slice(&30u16.to_le_bytes()),
         }
         Ok(())
     }

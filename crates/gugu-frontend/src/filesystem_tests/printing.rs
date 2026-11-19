@@ -1,6 +1,7 @@
 use super::{CompileRequest, Compiler, TargetName, harness::Harness};
 use crate::runtime::RuntimeMachineOp;
 
+#[expect(clippy::ptr_arg, reason = "签名需与 machine_hook 一致")]
 fn capture(
     harness: &mut Harness<'_>,
     op: RuntimeMachineOp,
@@ -30,7 +31,7 @@ fn capture(
     vec![written]
 }
 
-fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<u8>)> {
+pub(super) fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<u8>)> {
     let compiled = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
@@ -40,6 +41,13 @@ fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<u8>)> {
         compiled.is_success(),
         "{:?}",
         compiled.diagnostics().items()
+    );
+    assert!(
+        compiled
+            .image_plan()
+            .unwrap()
+            .linux_image()
+            .starts_with(b"\x7fELF")
     );
     let mut harness = Harness::new(&compiled);
     harness.machine_hook = Some(capture);
@@ -62,6 +70,85 @@ fn print_hello_world() {
         ),
         vec![(1, b"hello, gugu\n".to_vec())]
     );
+}
+
+#[test]
+fn print_runtime_floats() {
+    assert_eq!(
+        output(
+            r#"
+        use std.io.{println}
+        fn main() {
+            let single: f32 = 0.1
+            println("float=", 1.5, "/", single, "/", f"{single:.2}")
+        }
+    "#,
+            &[]
+        ),
+        vec![(1, b"float=1.5/0.1/0.10\n".to_vec())]
+    );
+}
+
+fn formatting_fixture_oracle() -> String {
+    use super::formatting::oracle;
+    use gugu_sema::string::fmt;
+    let mut expected = format!(
+        "values: {} {} {} {} {}\nstrings: {:?}\npadding: {:*>6}|{:<6}|{:^7}|{:#x}\n",
+        42, -7, true, 'Z', "hello", "line\n\"\\\t", 42, 42, 42, 42
+    );
+    macro_rules! floats {
+        ($ty:ty, $label:literal) => {{
+            let v: $ty = 0.1;
+            let large: $ty = 1e21;
+            let zero: $ty = -0.0;
+            let nan = <$ty>::NAN;
+            let inf = <$ty>::INFINITY;
+            expected.push_str(&format!(
+                "{}: {v}|{large}|{zero}|{nan}|{inf}|{v:.3}|{v:e}\n",
+                $label
+            ));
+        }};
+    }
+    floats!(f64, "f64");
+    floats!(f32, "f32");
+    expected.push_str("print: ");
+    expected.push_str(&oracle("", |f| {
+        f.write_str("Widget(");
+        fmt::format_int(f, 7);
+        f.write_str(")");
+    }));
+    expected.push('\n');
+    for (label, spec) in [("debug", "?"), ("pretty", "#?")] {
+        expected.push_str(label);
+        expected.push_str(": ");
+        expected.push_str(&oracle(spec, |f| {
+            f.debug_struct("Record")
+                .field(|f| f.write_str("number"), |f| fmt::format_float(f, 0.1))
+                .field(|f| f.write_str("text"), |f| fmt::format_str(f, "field\n"))
+                .finish();
+        }));
+        expected.push('\n');
+    }
+    expected
+}
+
+#[test]
+fn linux_formatting_fixture_matches_oracle_and_interpreter() {
+    let expected = formatting_fixture_oracle();
+    assert_eq!(
+        include_str!("../../../../ci/e2e/fixtures/formatting.stdout"),
+        expected
+    );
+    let calls = output(
+        include_str!("../../../../ci/e2e/fixtures/formatting.gg"),
+        &[],
+    );
+    let mut actual = Vec::new();
+    for (fd, bytes) in calls {
+        assert_eq!(fd, 1);
+        actual.extend(bytes);
+    }
+    assert_eq!(actual, expected.as_bytes());
 }
 
 #[test]

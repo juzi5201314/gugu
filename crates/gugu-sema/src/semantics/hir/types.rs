@@ -83,7 +83,6 @@ impl Builder<'_, '_> {
             Ty::TryRecvErr => hir::Type::TryRecvErr,
             Ty::Panic => hir::Type::Panic,
             Ty::Formatter => hir::Type::Formatter,
-            Ty::Hasher => hir::Type::Hasher,
             Ty::MaybeUninit(inner) => hir::Type::MaybeUninit(self.type_id(inner, owner)?),
         };
         let id = self.intern_type(formed)?;

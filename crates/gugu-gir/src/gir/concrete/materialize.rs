@@ -276,6 +276,9 @@ fn early_value(
         }
         ConstantValue::Bool(value) => ConstValue::Bool(*value),
         ConstantValue::Float(value) => ConstValue::Float(*value),
+        ConstantValue::Float32(value) => {
+            ConstValue::Float(f64::from(f32::from_bits(*value)).to_bits())
+        }
         ConstantValue::String(value) => ConstValue::String(value.clone()),
         ConstantValue::Type(ty) => ConstValue::Type(crate::hash::hash_domain(
             "gugu-mono-v1",

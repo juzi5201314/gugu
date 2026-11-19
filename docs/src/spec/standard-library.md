@@ -307,11 +307,30 @@ trait UpperExp  { fn upper_exp(self: &Self, out: &Formatter) }
 - precision 只适用于浮点（小数位数），以及 `Print` 格式下的 string（按 Unicode 标量截断）；
 - `#` 只适用于 `Debug`（逐行缩进的结构化输出）与 `Binary` / `Octal` / `LowerHex` / `UpperHex`（`0b` / `0o` / `0x` 前缀）。
 
-内建实现的输出固定为：整数 `Print` / `Debug` 是十进制并保留负号，进制格式按 64 位补码写出且不带负号；浮点 `Print` 不带 precision 时是最短往返表示，`Debug` 总是带小数部分，`e` / `E` 是尾数 1 位整数的科学计数，`NaN` / `inf` / `-inf` 不做 zero padding；bool 写 `true` / `false`；char 与 string 的 `Debug` 加引号并转义，string 的 `Debug` 不受 precision 截断。数值默认右对齐，文本默认左对齐；zero padding 在符号与 `#` 前缀之后补零。数组用 `[a, b]`、元组用 `(a, b)`、`Option` / `Result` 用 `Some(..)` / `Ok(..)` / `Err(..)` 的结构化 debug 形状。
+内建实现的输出固定为：整数 `Print` / `Debug` 是十进制并保留负号，进制格式按 64 位补码写出且不带负号；浮点 `Print` 不带 precision 时是源类型的最短往返十进制表示，f32 不扩宽到 f64 后再格式化。浮点格式与 Rust 的同类型格式化一致：`Debug` 无 precision 时选择普通小数或科学计数，普通小数形式的整数保留 `.0`；指定 precision 时输出固定的小数位数，零位允许没有小数点。`e` / `E` 是尾数 1 位整数的科学计数，precision 指尾数的小数位数；显式 precision 按精确值舍入，恰好居中时取偶。保留负零；`NaN` 不带符号，`inf` 可带请求的正号，`NaN` / `inf` / `-inf` 不做 zero padding，但仍支持 width、fill 和 alignment。bool 写 `true` / `false`；char 与 string 的 `Debug` 加引号并转义，string 的 `Debug` 不受 precision 截断。数值默认右对齐，文本默认左对齐；zero padding 在符号与 `#` 前缀之后补零。数组用 `[a, b]`、元组用 `(a, b)`、`Option` / `Result` 用 `Some(..)` / `Ok(..)` / `Err(..)` 的结构化 debug 形状。
 
 `std.fmt.Formatter` 只写入当前构建中的 string，不执行 I/O。格式 trait 实现可以调用 Formatter 的文本（`write_str` / `write_char`）、padding（`pad` 用于文本、`pad_integral` 用于带符号与前缀的数字）和结构化 debug（`debug_tuple` / `debug_list` / `debug_map` / `debug_struct`）方法，但不能读取或改变已解析的格式说明；`#` 是否生效由这些方法自行体现。f-string 构建失败只可能是 panic（例如内存耗尽或负的动态计数），不返回领域错误。comptime 域中的 f-string 使用同一套解析、兼容规则与内建实现，见[comptime capability registry](#comptime-capability-registry)。
 
-运行时 f-string 通过普通 trait 调用构建字符串；用户定义的 `Print` 实现与标准库实现使用相同的 `&Formatter` 目标。每个插值先求值一次，再读取该插值的动态 width / precision。`Formatter::new()` 建立空目标，`finish()` 返回当前字符串；每个插值的说明由编译器设置，不由用户格式 trait 修改。当前运行时标准库提供 string、char、bool 与全部整数类型的格式实现，以及上述文本和 padding 方法；浮点 `Print`（包括 `print` / `println` 等输出函数的浮点参数）、其它浮点格式与结构化 debug builder 尚未提供运行时实现，comptime 格式化不受此限制。
+运行时 f-string 通过普通 trait 调用构建字符串；用户定义的 `Print` 实现与标准库实现使用相同的 `&Formatter` 目标。每个插值先求值一次，再读取该插值的动态 width / precision。`Formatter::new()` 建立空目标，`finish()` 返回当前字符串；每个插值的说明由编译器设置，不由用户格式 trait 修改。当前运行时标准库提供 string、char、bool 与全部整数类型的格式实现，以及 f32 / f64 的 `Print`、`Debug`、`LowerExp`、`UpperExp`；浮点值可直接传给 `print` / `println` 等输出函数。上述文本、padding 和结构化 debug builder 方法均已实现。
+
+结构化 debug API 的签名如下（类型均在 `std.fmt` 中）：
+
+```text
+Formatter.debug_struct(self: &Self, name: string) DebugStruct
+Formatter.debug_tuple(self: &Self, name: string) DebugTuple
+Formatter.debug_list(self: &Self) DebugList
+Formatter.debug_set(self: &Self) DebugSet
+Formatter.debug_map(self: &Self) DebugMap
+DebugStruct.field[T: Debug](self: &Self, name: string, value: &T) &Self
+DebugTuple.entry[T: Debug](self: &Self, value: &T) &Self
+DebugList.entry[T: Debug](self: &Self, value: &T) &Self
+DebugSet.entry[T: Debug](self: &Self, value: &T) &Self
+DebugMap.entry[K: Debug, V: Debug](self: &Self, key: &K, value: &V) &Self
+```
+
+每种 builder 都有 `pub fn finish(self: &Self)`，返回 unit；`field` / `entry` 返回同一 builder 引用，可链式调用。`finish()` 追加结束定界符，重复调用不再追加；结束后追加条目会 panic。空 struct 只输出名字；空 tuple、list、set、map 分别输出 `Name()`、`[]`、`{}`、`{}`。非空 compact 输出依次为 `Name { field: value }`、`Name(a, b)`、`[a, b]`、`{a, b}`、`{key: value}`，按调用顺序排列；struct 字段名原样输出，map 键经 Debug 格式化。
+
+`{:#?}` 的 `#` 传给用户 `impl Debug` 的目标 Formatter。builder 逐行输出、每层缩进四个空格，非空末条目保留逗号；嵌套子项每个换行后的内容再缩进四个空格。子 Formatter 仅继承 `#` 并以 Debug 格式调用值，不继承父级 width、precision、sign、zero、fill 或 alignment。builder 不对整个结构做 padding。
 
 Formatter 追加文本不复制已有输出；累计追加 n 字节的存储量为 O(n)，`finish()` 线性物化当前内容的独立快照。
 
@@ -373,6 +392,27 @@ LinkedList 的节点是具有稳定 GC 身份且不复用代际的对象。`List
 HashMap/HashSet 使用 hashbrown/SwissTable 类的 control-byte group、SIMD lookup 与三角 group probing；具体 group 宽度、装载阈值和内存布局不是稳定 ABI，可以随目标指令集和工具链改变。迭代顺序不保证，也可以在不同进程、不同表和不同工具链间变化。
 
 默认 HashMap/HashSet 使用随机化 FoldHash-fast。它追求整数和 string 键的吞吐，不承诺抵抗能与进程交互并观察行为的 HashDoS 攻击。SecureHashMap/SecureHashSet 使用由 OS CSPRNG 初始化的 SipHash 1-3，供不可信键使用。两组类型的集合语义相同，不能依赖具体 hash 值或迭代顺序。
+
+`std.hash.Hasher` 是预导入的普通名义值类型，当前公开确定性 FoldHash-fast 接口：
+
+```text
+impl Hasher {
+    pub fn with_seed(seed: uint) Hasher
+    pub fn write_int(self: &Self, value: int)
+    pub fn write_uint(self: &Self, value: uint)
+    pub fn write_bool(self: &Self, value: bool)
+    pub fn write_char(self: &Self, value: char)
+    pub fn write_str(self: &Self, value: string)
+    pub fn write_bytes(self: &Self, value: Bytes)
+    pub fn finish(self: &Self) uint
+}
+```
+
+`write_int` / `write_uint` 馈送 64 位小端补码 / 无符号整数；bool 馈送一个 0 或 1 字节，char 馈送 Unicode 标量的 32 位小端值。string 馈送 UTF-8，Bytes 馈送原始字节，两者均先馈送 64 位小端字节长度。所有写入拼成一个字节流，`finish` 等价于 Rust 参照模型对整个流执行一次 FoldHash-fast `FixedState::with_seed(seed)` 写入。重复 `finish` 不改变状态；之后仍可继续写入，下一次 `finish` 覆盖全部新旧输入。空输入也有定义。不承诺此输出跨工具链稳定。
+
+内建 Hash 对不超过 64 位的有符号 / 无符号整数分别调用 `write_int` / `write_uint`（先扩展到 64 位），128 位整数按低、高两个 64 位字馈送；bool、char、string、Bytes 使用对应写入方法，unit 不写入。元组按字段顺序递归馈送；Option 用 64 位标签 0（None）/ 1（Some）后接载荷，Result 用 0（Ok）/ 1（Err）后接载荷。浮点不满足 Hash；数组与 TypeId 暂保留内建 trait 资格，但直接调用 Hash.hash 会明确编译报错。
+
+当前不提供随机化 Hasher 构造器：原生平台尚未实现 entropy 执行片段。以上 seeded API 不替代集合的随机播种要求；集合实现及其默认播种路径单独提供。
 
 `std.hash.Hash` 规定值向 hasher 馈送字段的语义顺序，并要求 `a == b` 蕴含 hash 输入相同。HashMap、SecureHashMap 及对应 Set 进一步要求键实现 `StableHash`：键的 Eq 与 Hash 可观察结果不能被任何外部别名改变。BTreeMap/BTreeSet 对称地要求 `Ord + StableOrd`，比较顺序不能被外部别名改变。string、Bytes、Path、标量以及字段全部满足同一稳定约束的值类型由编译器提供或安全派生这些 marker；插入 COW 键会封存其 backing。Vec、Map、resource 等可变身份句柄不能安全派生。用户只能用 `unsafe impl StableHash` / `unsafe impl StableOrd` 手写其余实现，并承担该类型的稳定性证明，见[接口](traits.md)与[unsafe](unsafe.md)。
 
@@ -620,7 +660,7 @@ OpenOptions 显式设置 read、write、append、truncate、create、create_new 
 
 File 实现 Read、Write 与 Seek，并提供 metadata、set_len、sync_data、sync_all、try_clone 和幂等 close。close 的完成必须建立在平台关闭操作已经执行之上；运行时资源耗尽导致关闭操作无法提交时属于 runtime failure，不能伪造成功关闭。值复制共享同一关闭状态与文件位置；关闭一旦被请求，新操作返回 `Closed`，已开始的操作仍须归还操作租约才能执行平台关闭。后续 close 返回已记录的关闭结果（包括错误），不能重复关闭 OS handle；所有用户租约归还且平台关闭完成后，控制存储才可回收。GC 搬迁不得增加或重复释放资源租约；不可达资源值的同一租约最多释放一次，已转发的旧副本不再承担释放责任。`try_clone` 创建独立可关闭的 OS handle，但文件位置仍按宿主 duplicate 语义共享。`copy` 在截断目的文件前比较 device/inode，源与目的指向同一文件时返回 `InvalidInput`；其它错误可能发生在已经复制部分内容之后。目标打开失败仍关闭已打开的源；传输期间短写只重试未写后缀，零写返回 `WriteZero`，任一读写错误立即停止传输并保留已写内容，不回滚或删除目标。清理错误不得覆盖打开、元数据检查、截断或传输的主错误。传输成功后须检查目标关闭结果，关闭失败返回该错误；只有传输与目标关闭均成功才返回复制字节数。
 
-`read_link` 只从宿主实际返回的有效记录中读取目标；记录截断、名称区间越界或不满足宿主字符单元对齐要求时返回 `InvalidData`，不能把缓冲尾部解释为目标路径。
+`canonicalize` 在宿主接受路径但初始输出缓冲不足时扩容并返回完整路径，不截断或仅因缓冲不足报错。`read_link` 只从宿主实际返回的有效记录中读取目标；记录截断、名称区间越界或不满足宿主字符单元对齐要求时返回 `InvalidData`，不能把缓冲尾部解释为目标路径。
 
 `Metadata` 提供 `len()`、`is_file()`、`is_dir()`、`is_symlink()`，并公开 `size:uint`、`permissions:Permissions`、`kind:uint`、`modified_seconds:int`、`modified_nanoseconds:uint`、`device:uint`、`inode:uint`。kind 为 0 其它、1 普通文件、2 目录、3 链接；修改时间以 Unix epoch 为基准。`Permissions` 公开 `readonly:bool` 与宿主原始 `native:uint`，不提供跨平台权限设置事务。
 
@@ -725,6 +765,10 @@ fn UdpSocket.recv_cancel(self: &Self, destination: &[byte],
 `connect(peer)` 是 UDP endpoint 的共享状态转换，不建立 TCP 连接；成功后 send 只发给 peer，recv 只接收 peer 的 datagram，来自其它来源的 datagram 按内核 connected-UDP 语义过滤。send/recv 与 send_to/recv_from 互斥：connected 期间调用无连接操作返回 InvalidState，disconnect 成功后才恢复；未 connected 时调用 send/recv 返回 NotConnected。connect、disconnect 与收发各有线性化点，已经在线性化点提交的操作使用旧状态，之后的操作使用新状态。connected UDP 的 peer_addr 返回当前 peer；disconnect 后再次返回 NotConnected。
 
 UdpSocket 的 close 在收发与 connect/disconnect 控制队列中建立关闭线性化点，唤醒全部等待中的收发和控制操作返回 Closed；已经在线性化点提交的 datagram 不回滚，之后的调用返回 Closed。close 幂等，所有共享别名观察同一个状态。
+
+Darwin 无法保留具体的本地 IP 绑定时，`disconnect` 返回 `Unsupported`，不改变已绑定的地址、端口或已连接的 peer。绑定通配地址的 UDP socket 断开后恢复通配地址，保留原本地端口。
+
+Darwin 的原生 datagram connect/disconnect 失败也可能改变 peer；之后的收发模式以系统确认的 peer 状态为准。例如，重新 connect 失败且系统已移除原 peer 时，仍返回 connect 错误，但恢复无连接收发。
 
 BindOptions.new 固定产生 backlog 1024、reuse_address true、Ipv6BindMode.V6Only。backlog 必须大于 0，宿主内核可以向下钳位；端口 0 请求系统分配端口，并可由 local_addr 查询。reuse_address 只抽象“前一个已关闭 listener 的地址可及时重绑”，不允许两个活 listener 共享同一地址；语义不同的 SO_REUSEPORT 不在 std。ipv6_mode 对 IPv4 地址无作用；DualStack 请求 IPv4-mapped IPv6，平台不支持时返回 Unsupported，不能静默退化为 IPv6-only。UdpSocket.bind 使用不含 backlog 的 DatagramBindOptions，并采用相同 reuse_address 与 ipv6_mode 语义。
 
@@ -1060,9 +1104,9 @@ fn root_publish[T](place: T, value: T)
 enum Signal {
     Interrupt,
     Terminate,
-    #[cfg(os = "linux")] Hangup,
-    #[cfg(os = "linux")] User1,
-    #[cfg(os = "linux")] User2,
+    #[cfg(any(os = "linux", os = "macos"))] Hangup,
+    #[cfg(any(os = "linux", os = "macos"))] User1,
+    #[cfg(any(os = "linux", os = "macos"))] User2,
     #[cfg(os = "windows")] Break,
 }
 

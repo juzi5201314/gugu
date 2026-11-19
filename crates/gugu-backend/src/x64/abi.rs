@@ -145,7 +145,7 @@ pub fn classify_call(call: &Call, target: TargetName) -> Result<AbiLayout, Lower
         CallKind::ForeignBridge
         | CallKind::ForeignBridgeDirtyCpu
         | CallKind::ForeignLeaf { .. } => match target {
-            TargetName::X86_64Linux => Convention::SysV,
+            TargetName::X86_64Linux | TargetName::X86_64Macos => Convention::SysV,
             TargetName::X86_64Windows => Convention::Win64,
         },
     };

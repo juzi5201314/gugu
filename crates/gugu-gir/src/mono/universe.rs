@@ -400,7 +400,6 @@ impl Collector<'_, '_> {
             | Ty::Panic
             | Ty::TypeId
             | Ty::Formatter
-            | Ty::Hasher
             | Ty::Unit
             | Ty::Bool
             | Ty::Int { .. }

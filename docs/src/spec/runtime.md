@@ -44,6 +44,8 @@ GC 控制类 machine intrinsic（`gc_config()` 及后续 GC 协调入口）只�
 
 镜像是闭世界构建：compiler 发出的每一个 runtime glue 符号都必须来自登记的 runtime 定义；迁移期间尚未接管的入口只能出现在 compiler 的显式缺口清单中，并不得作为运行期能力或镜像正确性证明。未知入口在 lowering 阶段即拒绝，不能由 ELF/PE writer 解析为退出桩，也不能由用户源码提供同名替代实现。该内部门禁不扩大 `std.runtime` 的公开调用面；它只保证 compiler、镜像 runtime 与 metadata 使用同一份入口目录。
 写屏障有普通和已预留两种入口。预留入口只可由 compiler 在已验证 permit 后发出，二者都必须保持 `read-old → shade → store → card-mark` 的可观察顺序和固定三参 ABI；预留入口不得在 store 之后临时扩容或停点。当前镜像已落地普通对象的 mark shade、page-cover/card 记账和 processor 固定 edge staging（512 条、满载设 overflow，不静默丢边）；owner-local consume、flush、credit 结算与 edge/candidate 消费仍属于回收阶段。
+Mach-O 镜像也必须在可写文件内容中保存启动 cage 容量；未启用时该字段为零。
+
 GC coordinator 在镜像 runtime 内维护单一 cycle 状态：root snapshot、minor evacuation、major
 mark/trace/sweep、barrier flush、MarkTicket/EdgeDelta consume、pacing debt 与 block return
 必须按固定状态转移完成。compiler 不执行这些算法；它只生成 config、root map、trace program 和
@@ -224,8 +226,8 @@ JSON 报告使用 schema `gugu-runtime-report-v1`，每个事件一行，字段�
 
 可订阅的跨目标信号集合为：
 
-| Gugu 信号 | Linux | Windows |
-|-----------|-------|---------|
+| Gugu 信号 | Linux / macOS | Windows |
+|-----------|---------------|---------|
 | `Interrupt` | `SIGINT` | console Ctrl+C |
 | `Terminate` | `SIGTERM` | console close、logoff 或 shutdown 的终止通知 |
 | `Hangup` | `SIGHUP` | 不提供 |
@@ -241,9 +243,9 @@ JSON 报告使用 schema `gugu-runtime-report-v1`，每个事件一行，字段�
 enum Signal {
     Interrupt,
     Terminate,
-    #[cfg(os = "linux")] Hangup,
-    #[cfg(os = "linux")] User1,
-    #[cfg(os = "linux")] User2,
+    #[cfg(any(os = "linux", os = "macos"))] Hangup,
+    #[cfg(any(os = "linux", os = "macos"))] User1,
+    #[cfg(any(os = "linux", os = "macos"))] User2,
     #[cfg(os = "windows")] Break,
 }
 
@@ -266,7 +268,7 @@ fn SignalSubscription.dropped(self: &Self) uint
 
 默认订阅队列容量为 16。一个进程可以有多个订阅；每个订阅都收到匹配信号的独立副本。相同信号在同一订阅尚未取走时合并为一个 `SignalEvent`，`occurrences` 递增并在 `uint::MAX` 饱和；计数饱和后的额外到达也计入 `dropped()`。不同信号占用不同队列项。队列满时新信号不阻塞 OS 信号处理路径，计入 `dropped()` 并继续保留已经排队的事件。
 
-`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`。关闭订阅不影响其它订阅；某个信号没有任何订阅者后，runtime 恢复该目标的默认处理动作。订阅的建立和关闭都在线性化点生效，信号处理器绝不直接运行 Gugu 用户代码。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。
+`recv` 只挂起当前协程，`try_recv` 不阻塞；关闭且取尽队列后返回 `signal.Error::Closed`。关闭订阅不影响其它订阅；某个信号没有任何订阅者后，runtime 恢复该目标的默认处理动作。订阅的建立和关闭都在线性化点生效，信号处理器绝不直接运行 Gugu 用户代码。最后一个 `SignalSubscription` 句柄 lease 释放等价于 `close()`。在 macOS 上，若该关闭移除了某个信号的最后一个订阅，信号的原生处理动作在关闭或释放返回前恢复，不等待下一轮调度。
 
 信号到达时如果程序已有订阅，runtime 把事件投递给匹配订阅，不触发隐式取消、panic 或进程退出。用户可以把 `SignalEvent` 映射到 `CancelSource.cancel()`，随后按[并发与调度](concurrency.md)和[资源租约](standard-library.md)规则完成清理。没有订阅者时，普通信号的默认 OS 动作生效；runtime 在能够使用 signal-safe 输出时先尝试一条 `signal` termination 报告，再恢复默认动作。报告失败不得阻止或改变默认动作，也不能把默认终止改成等待用户协程。
 
