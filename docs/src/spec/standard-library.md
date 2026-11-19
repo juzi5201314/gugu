@@ -510,7 +510,7 @@ File、TcpStream、进程 pipe 和内存缓冲实现适用 trait。`print` / `pr
 
 这些便捷输出函数通过现有 ReportWrite 边界同步写出 UTF-8 字节，短写后继续写剩余部分；返回错误或零字节时静默停止，不重试错误、不 panic，也不返回 I/O 错误。已经写出的前缀保留，剩余文本丢弃。它们不承诺跨协程的整次调用原子性，也不采用上面通用 I/O trait 的挂起协议；需要错误处理或可取消写入的代码应使用 `Write` 等显式 I/O API。
 
-Linux runtime 启动时将进程的 SIGPIPE disposition 设为 SIG_IGN。因此向读端已关闭的 pipe 输出不会因默认 SIGPIPE 动作终止进程；write 返回 EPIPE，以上便捷输出函数按写入错误静默停止。Windows 行为不变。
+Linux runtime 启动时将进程的 SIGPIPE disposition 设为 SIG_IGN。因此向读端已关闭的 pipe 输出不会因默认 SIGPIPE 动作终止进程；write 返回 EPIPE，以上便捷输出函数按写入错误静默停止。`Command.spawn` 的子进程在 fork 后、execve 前将 SIGPIPE 恢复为 SIG_DFL，不把 runtime 的忽略设置传给目标程序；恢复失败按子进程启动错误返回。Windows 行为不变。
 
 ## 取消
 

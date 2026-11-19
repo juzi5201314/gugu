@@ -150,6 +150,61 @@ fn linux_stdio_dup_is_cloexec_and_avoids_standard_descriptors() {
 }
 
 #[test]
+fn linux_spawn_child_resets_sigpipe_before_execve() {
+    for reset_error in [false, true] {
+        let mut script = vec![
+            ("syscall:293", 0),
+            ("syscall:57", 0),
+            ("syscall:3", 0),
+            ("syscall:80", 0),
+        ];
+        script.extend([("syscall:33", 0); 3]);
+        script.extend([("syscall:3", 0); 3]);
+        script.push(("syscall:13", if reset_error { (-1i64) as u64 } else { 0 }));
+        if !reset_error {
+            script.push(("syscall:59", (-2i64) as u64));
+        }
+        script.extend([("syscall:1", 4), ("syscall:60", 0)]);
+        let mut m = Machine::new(&script);
+        m.put(REQUEST, 0);
+        m.put(REQUEST + 8, 1024);
+        for (index, value) in [2048, 2200, 2400, 71, 72, 73, 74].into_iter().enumerate() {
+            m.put(1024 + index as u64 * 8, value);
+        }
+        m.after_host = Some(|m, name| {
+            let args = m.calls.last().unwrap().1.clone();
+            match name {
+                "syscall:293" => m.put(args[0], 11 | (12 << 32)),
+                "syscall:13" => {
+                    assert_eq!(args[0], 13, "SIGPIPE");
+                    assert_eq!(&args[2..4], &[0, 8], "no old action, kernel sigset size");
+                    for offset in [0, 8, 16, 24] {
+                        assert_eq!(
+                            m.word(args[1] + offset),
+                            0,
+                            "SIG_DFL, flags, restorer, mask"
+                        );
+                    }
+                }
+                "syscall:59" => {
+                    assert_eq!(&args[..3], &[2048, 2200, 2400]);
+                    assert_eq!(m.calls[m.calls.len() - 2].0, "syscall:13");
+                }
+                _ => (),
+            }
+        });
+        assert_eq!(
+            m.execute(process::test_worker(TargetName::X86_64Linux)),
+            Stop::Exit
+        );
+        let report = &m.calls[m.calls.len() - 2];
+        assert_eq!(&report.1[..3], &[12, m.get(Rsp) + 8, 4]);
+        assert_eq!(m.word(report.1[1]), if reset_error { 1 } else { 2 });
+        assert_eq!(m.calls.last().unwrap().1[0], 127);
+    }
+}
+
+#[test]
 fn windows_spawn_limits_inheritance_and_releases_attribute_storage_on_every_exit() {
     for failure in 0..5 {
         let mut script = vec![
