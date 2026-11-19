@@ -240,6 +240,12 @@ impl C<'_, '_> {
                 rest,
                 suffix,
             } => {
+                if matches!(ty, Ty::Array(_, super::model::ArrayLength::Param(_)))
+                    && (rest.is_none() || prefix.len != 0 || suffix.len != 0)
+                {
+                    self.error("符号长度数组模式只支持无前后缀的 rest", &pat.span);
+                    return P::Any;
+                }
                 let (elem, len) = match ty {
                     Ty::Array(t, n) => (t.as_ref(), n.known()),
                     Ty::Slice(t) => (t.as_ref(), None),

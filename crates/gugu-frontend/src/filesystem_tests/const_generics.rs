@@ -1,6 +1,27 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn symbolic_array_patterns_require_unconditional_rest() {
+    for pattern in ["[]", "[x]", "[x, ..]", "[.., x]"] {
+        let source = format!(
+            "fn empty[comptime N: int](a: [int; N]) bool {{ match a {{ {pattern} => true, _ => false }} }}\nfn main() {{ _ = empty([1, 2]) }}"
+        );
+        let compiled = Compiler::shared().compile(CompileRequest::single_file(
+            "main.gg",
+            &source,
+            TargetName::X86_64Linux,
+        ));
+        assert!(
+            compiled.diagnostics().items().iter().any(|d| d
+                .message()
+                .contains("符号长度数组模式只支持无前后缀的 rest")),
+            "{pattern}: {:?}",
+            compiled.diagnostics().items()
+        );
+    }
+}
+
+#[test]
 fn generic_repeat_length_shadows_module_constant() {
     let actual: Vec<_> = output(
         r#"
