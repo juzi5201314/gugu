@@ -309,12 +309,56 @@ pub fn analyze(body: &Body, selected: &SelectedFunction) -> Result<LiveInfo, All
         ));
     }
 
-    let liveness = liveness(body, &uses, &defs);
-    let bounds = block_bounds(&points, body.blocks.len());
-    intervals(&bounds, &mut values, &liveness);
+    let normalized = crate::regalloc::live::analyze(crate::regalloc::live::Program {
+        successors: (0..body.blocks.len())
+            .map(|index| {
+                layout::successors(body, BlockId(index as u32))
+                    .iter()
+                    .map(|id| id.index())
+                    .collect()
+            })
+            .collect(),
+        predecessors: body
+            .blocks
+            .iter()
+            .map(|block| {
+                body.predecessors[crate::lir::body::range(&block.predecessors)]
+                    .iter()
+                    .map(|edge| body.edges[edge.index()].from.index())
+                    .collect()
+            })
+            .collect(),
+        entry: body.entry.index(),
+        uses,
+        defs,
+        points: points
+            .iter()
+            .map(|point| crate::regalloc::live::BlockPoint {
+                block: point.block,
+                use_slot: point.use_slot,
+                def_slot: point.def_slot,
+                fixed_physical: point.fixed_physical,
+                call: point.kind.is_call_or_bridge(),
+            })
+            .collect(),
+        values: values
+            .iter()
+            .map(|value| crate::regalloc::live::Interval {
+                start: value.start,
+                end: value.end,
+                uses: value.uses.clone(),
+                rematerializable: value.rematerializable,
+                weight: value.weight,
+            })
+            .collect(),
+    })
+    .map_err(|error| AllocError::new(error.to_string()))?;
+    for (value, interval) in values.iter_mut().zip(normalized) {
+        value.start = interval.start;
+        value.end = interval.end;
+        value.weight = interval.weight;
+    }
     anchor_coverage(body, &site_slots, &mut values)?;
-    let depths = loop_depths(body);
-    weights(&points, &depths, &mut values);
     Ok(LiveInfo {
         points,
         sites,
@@ -636,49 +680,6 @@ pub const fn register_bit(reg: Reg) -> Clobbers {
     }
 }
 
-/// 块级活跃定点：`live_in[b] = uses[b] ∪ (live_out[b] \ defs[b])`，`live_out[b] = ∪ live_in[succ]`。
-pub struct Liveness {
-    live_in: Vec<Vec<u64>>,
-    live_out: Vec<Vec<u64>>,
-}
-
-fn liveness(body: &Body, uses: &[Vec<u64>], defs: &[Vec<u64>]) -> Liveness {
-    let words = uses.first().map_or(0, Vec::len);
-    let mut live_in = vec![vec![0_u64; words]; body.blocks.len()];
-    let mut live_out = vec![vec![0_u64; words]; body.blocks.len()];
-    let successors: Vec<Vec<BlockId>> = (0..body.blocks.len())
-        .map(|index| {
-            layout::successors(body, BlockId(u32::try_from(index).expect("块下标适配 u32")))
-        })
-        .collect();
-    loop {
-        let mut changed = false;
-        for (index, succs) in successors.iter().enumerate() {
-            let mut out = vec![0_u64; words];
-            for succ in succs {
-                union_into(&mut out, &live_in[succ.index()]);
-            }
-            let mut entry = out.clone();
-            for (word, def) in defs[index].iter().enumerate() {
-                entry[word] |= uses[index][word];
-                entry[word] &= !def;
-            }
-            if out != live_out[index] {
-                live_out[index] = out;
-                changed = true;
-            }
-            if entry != live_in[index] {
-                live_in[index] = entry;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    Liveness { live_in, live_out }
-}
-
 /// 按 LIR 逻辑根集补齐区间与强制落槽。
 ///
 /// 分配器用「触碰点 + 块边界」造凸区间：值在最后一次触碰之后、但仍处于逻辑活跃集里的点
@@ -738,49 +739,6 @@ fn anchor_coverage(
     }
     Ok(())
 }
-fn union_into(dst: &mut [u64], src: &[u64]) {
-    for (left, right) in dst.iter_mut().zip(src) {
-        *left |= *right;
-    }
-}
-
-/// 区间构造：触碰点加上 `live_in`/`live_out` 的全部块边界。
-fn intervals(bounds: &[BlockBounds], values: &mut [ValueLive], liveness: &Liveness) {
-    for (index, value) in values.iter_mut().enumerate() {
-        if !value.is_live() {
-            continue;
-        }
-        let mut start = value.start;
-        let mut end = value.end;
-        for (bound, (live_in, live_out)) in bounds
-            .iter()
-            .zip(liveness.live_in.iter().zip(&liveness.live_out))
-        {
-            if bit(live_in, index) {
-                start = start.min(bound.first_use);
-            }
-            if bit(live_out, index) {
-                end = end.max(bound.last_def);
-            }
-        }
-        value.start = start;
-        value.end = end;
-    }
-}
-
-/// 位图取位。
-fn bit(bits: &[u64], index: usize) -> bool {
-    bits.get(index / 64)
-        .is_some_and(|word| word & (1_u64 << (index % 64)) != 0)
-}
-
-/// 布局序块的 slot 边界：`live_in`/`live_out` 与点的 slot 区间的换算。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct BlockBounds {
-    first_use: u32,
-    last_def: u32,
-}
-
 /// 终结符的全部出边；与 `layout::successors` 覆盖同一组边，但保留边本身。
 fn terminator_edges(body: &Body, terminator: &Terminator) -> Vec<crate::lir::body::EdgeId> {
     match terminator {
@@ -803,168 +761,6 @@ fn terminator_edges(body: &Body, terminator: &Terminator) -> Vec<crate::lir::bod
         | Terminator::TailCall { .. }
         | Terminator::Trap { .. }
         | Terminator::Unreachable { .. } => Vec::new(),
-    }
-}
-
-/// 布局序块 → slot 边界；空块（无点位）不参与区间扩展。
-fn block_bounds(points: &[Point], blocks: usize) -> Vec<BlockBounds> {
-    let mut bounds = vec![
-        BlockBounds {
-            first_use: u32::MAX,
-            last_def: 0,
-        };
-        blocks
-    ];
-    for point in points {
-        let bound = &mut bounds[point.block as usize];
-        bound.first_use = bound.first_use.min(point.use_slot);
-        bound.last_def = bound.last_def.max(point.def_slot);
-    }
-    for bound in &mut bounds {
-        if bound.first_use == u32::MAX {
-            bound.first_use = 0;
-        }
-    }
-    bounds
-}
-
-/// spill 权重：`u64` 饱和累加，常量/symbol 地址为 0。
-fn weights(points: &[Point], depths: &[u32], values: &mut [ValueLive]) {
-    for value in values.iter_mut() {
-        if value.rematerializable {
-            value.weight = 0;
-            continue;
-        }
-        let mut total = 0_u64;
-        for slot in &value.uses {
-            let Some(point) = points.get((*slot / 2) as usize) else {
-                continue;
-            };
-            let base = if point.fixed_physical || point.kind.is_call_or_bridge() {
-                4_u64
-            } else {
-                1
-            };
-            let depth = depths.get(point.block as usize).copied().unwrap_or(0);
-            let mut weight = base.saturating_mul(loop_factor(depth));
-            if point.use_slot >= 2
-                && points
-                    .get(((point.use_slot - 2) / 2) as usize)
-                    .is_some_and(|previous| {
-                        previous.block == point.block && previous.kind.is_call_or_bridge()
-                    })
-            {
-                weight = weight.saturating_mul(2);
-            }
-            total = total.saturating_add(weight);
-        }
-        value.weight = total;
-    }
-}
-
-/// 循环深度因子：`min(10^d, 1_000_000)`。
-pub fn loop_factor(depth: u32) -> u64 {
-    10_u64.checked_pow(depth).unwrap_or(u64::MAX).min(1_000_000)
-}
-
-/// 自然循环深度：迭代求 dominator，对回边收集循环体；环上未被覆盖的块保守计 1。
-fn loop_depths(body: &Body) -> Vec<u32> {
-    let count = body.blocks.len();
-    let words = count.div_ceil(64);
-    let entry = body.entry.index();
-    let predecessors: Vec<Vec<usize>> = (0..count)
-        .map(|index| {
-            body.predecessors[crate::lir::body::range(&body.blocks[index].predecessors)]
-                .iter()
-                .map(|edge| body.edges[edge.index()].from.index())
-                .collect()
-        })
-        .collect();
-    let mut dominators: Vec<Vec<u64>> = (0..count)
-        .map(|block| {
-            let mut bits = vec![u64::MAX; words];
-            if block == entry {
-                bits = vec![0; words];
-                bits[entry / 64] |= 1_u64 << (entry % 64);
-            }
-            bits
-        })
-        .collect();
-    loop {
-        let mut changed = false;
-        for block in 0..count {
-            if block == entry {
-                continue;
-            }
-            let mut bits = vec![u64::MAX; words];
-            for pred in &predecessors[block] {
-                for (word, value) in bits.iter_mut().zip(&dominators[*pred]) {
-                    *word &= *value;
-                }
-            }
-            bits[block / 64] |= 1_u64 << (block % 64);
-            if bits != dominators[block] {
-                dominators[block] = bits;
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    let mut depth = vec![0_u32; count];
-    for block in 0..count {
-        for pred in &predecessors[block] {
-            if !bit(&dominators[*pred], block) {
-                continue;
-            }
-            // 回边 pred → block：沿前驱回溯到 block 收集循环体。
-            let mut members = vec![*pred];
-            let mut seen = vec![false; count];
-            seen[*pred] = true;
-            let mut cursor = 0;
-            while cursor < members.len() {
-                let member = members[cursor];
-                cursor += 1;
-                for next in &predecessors[member] {
-                    if *next == block || seen[*next] || !bit(&dominators[*next], block) {
-                        continue;
-                    }
-                    seen[*next] = true;
-                    members.push(*next);
-                }
-            }
-            for member in members {
-                depth[member] = depth[member].saturating_add(1);
-            }
-        }
-    }
-    conservative_cycles(&predecessors, &mut depth);
-    depth
-}
-
-/// 不可归约环兜底：位于环上、自然环未覆盖的块深度至少为 1。
-fn conservative_cycles(predecessors: &[Vec<usize>], depth: &mut [u32]) {
-    for block in 0..predecessors.len() {
-        if depth[block] > 0 {
-            continue;
-        }
-        let mut seen = vec![false; predecessors.len()];
-        let mut stack: Vec<usize> = predecessors[block].clone();
-        let mut in_cycle = false;
-        while let Some(node) = stack.pop() {
-            if node == block {
-                in_cycle = true;
-                break;
-            }
-            if std::mem::replace(&mut seen[node], true) {
-                continue;
-            }
-            stack.extend(predecessors[node].iter().copied());
-        }
-        if in_cycle {
-            depth[block] = 1;
-        }
     }
 }
 
