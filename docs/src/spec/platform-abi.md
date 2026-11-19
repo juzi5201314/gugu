@@ -357,7 +357,7 @@ macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线�
 
 内部 aarch64 Linux 文件适配器接收 x0 = `NativeRequest*`，在原生栈上使用现有 Linux 请求协议（x86_64 syscall 编号与参数顺序），不使用 Darwin 的连续操作号。文件请求 0/1/2/3/5/8/72/74/75/77/82/83/84/86/87/88/89/217/262 分别为 read/write/open/close/fstat/lseek/fcntl/fsync/fdatasync/ftruncate/rename/mkdir/rmdir/link/unlink/symlink/readlink/getdents64/newfstatat；另支持 4 = stat、6 = lstat。路径请求按需补入 `AT_FDCWD = -100`，转换为 arm64 的 *at 系统调用；x8 为 asm-generic syscall 编号，以 `svc #0` 调用。open 与 fcntl 的 `F_SETFL`/`F_GETFL` 转换两种架构的 `O_DIRECT`、`O_LARGEFILE`、`O_DIRECTORY`、`O_NOFOLLOW` 位。成功清零 ERROR；失败保留负返回值于 VALUE，并写入正 errno；未支持请求写 VALUE = 0、ERROR = `EINVAL`（22）。此文件适配器不负责线程、调度或发布请求完成，信号请求 14/289 留给信号适配器。
 
-Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节有效可写原生内存，使用 x86_64 kernel stat 布局；arm64 适配器在系统调用成功后规范化原生 stat，失败不改写调用方缓冲。mode/size/blksize/blocks 分别位于 +24/+48/+56/+64，运行时由这些偏移构造文件元数据；内核目录项沿用 Linux dirent64 布局，无需转换。内部片段不登记公开目标或接通完整编译路径。
+Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节有效可写原生内存，使用 x86_64 kernel stat 布局；arm64 适配器在系统调用成功后规范化原生 stat，失败不改写调用方缓冲。mode/size 与修改时间秒/纳秒分别位于 +24/+48/+88/+96，运行时由这些偏移构造文件元数据；内核目录项沿用 Linux dirent64 布局，无需转换。内部片段不登记公开目标或接通完整编译路径。
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 

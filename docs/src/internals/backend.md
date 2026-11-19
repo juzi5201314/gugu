@@ -393,7 +393,7 @@ fragment relocation 封闭为：
 
 `a64::fragments::linux_fd_dispatch` 是无导入、无外部重定位的 Builder 片段，在原生栈上保留 x19/x20/x29/x30，并预留 128 字节 arm64 kernel stat 暂存区。它接收 x0 = `NativeRequest*`，加载 `foreign_schema` 的 operation/arguments，按 Linux x86_64 请求号翻译为 asm-generic syscall：read/write/close/lseek = 63/64/57/62，open→openat 56，stat/lstat/newfstatat→newfstatat 79，fstat→80，fcntl→25，fsync/fdatasync/ftruncate→82/83/46，rename/mkdir/rmdir/link/unlink/symlink/readlink→38/34/35/37/35/36/78，getdents64→61。*at 转换插入 -100、`AT_REMOVEDIR` 或 `AT_SYMLINK_NOFOLLOW`；传入 newfstatat 的 dirfd/flags 原样保留。open 的 flags 与 fcntl 的 `F_SETFL` 输入、`F_GETFL` 输出交换位组 14–15 和 16–17，其他 flags 保持不变。负返回值转成正 errno，原返回值保留在 VALUE；未支持请求为 EINVAL。当前文件片段不实现 Linux 信号 14/289、调度与完成发布。
 
-stat 成功后把暂存区复制为 x86_64 kernel stat：mode/nlink/uid/gid/rdev 调整偏移，32 位 nlink 零扩展、blksize 符号扩展，dev/ino/size/blocks/时间戳保持偏移，填充和保留字段清零。Linux `fs_platform::linux_stat` 的 blksize/blocks 读取使用 +56/+64（而非时间戳字段 +88/+96）。解码往返与确定性 syscall 替身执行测试覆盖请求翻译、flags、完整 stat、负返回、零字节读取/目录 EOF 和不支持请求；不进行真实 I/O。`examples/a64_linux_fd_image.rs` 在默认测试之外生成经 worker 执行 /tmp 文件创建/写/关/stat/重开/读、目录 getdents、unlink 和 errno 检查的镜像；所有检查成功返回 0，失败返回 1。
+stat 成功后把暂存区复制为 x86_64 kernel stat：mode/nlink/uid/gid/rdev 调整偏移，32 位 nlink 零扩展、blksize 符号扩展，dev/ino/size/blocks/时间戳保持偏移，填充和保留字段清零。Linux `fs_platform::linux_stat` 从 +88/+96 读取修改时间秒/纳秒。解码往返与确定性 syscall 替身执行测试覆盖请求翻译、flags、完整 stat、负返回、零字节读取/目录 EOF 和不支持请求；不进行真实 I/O。`examples/a64_linux_fd_image.rs` 在默认测试之外生成经 worker 以 `O_EXCL` 创建 /tmp 文件（已存在则失败，不覆盖或删除已有文件）并写/关/stat/重开/读、目录 getdents、unlink 和 errno 检查的镜像；所有检查成功返回 0，失败返回 1。
 
 ### Windows PE32+
 

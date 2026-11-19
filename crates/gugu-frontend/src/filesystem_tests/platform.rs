@@ -196,7 +196,7 @@ fn linux_metadata_reads_x86_kernel_stat_fields() {
         .iter()
         .map(|word| u64::from_le_bytes(*word))
         .collect();
-    assert_eq!(actual, [123, 0o100640, 1, 4096, 8, 0, 11, 12]);
+    assert_eq!(actual, [123, 0o100640, 1, 999, 888, 0, 11, 12]);
 }
 
 #[test]
