@@ -147,6 +147,16 @@ pub(crate) fn build(
                                 continue;
                             }
                             place_value(allocation, frame, &mut map, class, *value, position)?;
+                            if site.kind == SiteKind::SuspendResume {
+                                let inst = &body.instructions[anchor.instruction as usize];
+                                for (index, argument) in
+                                    body.args(&inst.arguments).iter().enumerate().skip(8)
+                                {
+                                    if argument.0 == *value {
+                                        set_slot(&mut map, class, (index as u32 - 8) * 8)?;
+                                    }
+                                }
+                            }
                         }
                         LogicalRoot::Argument { index } => {
                             let inst = &body.instructions[anchor.instruction as usize];

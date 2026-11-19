@@ -170,6 +170,8 @@ section，按加载 bias 定位精确返回 PC，要求 frame 覆盖整个已用
 引用和 PC 不因数值像栈地址而改变。MorestackEntry 不是普通可复制 frame：顶层先保存 scratch
 参数根，再从 x10 恢复 caller PC，随后只复制有 copy flag 的 caller frames。恢复之前必须先
 修复 scratch 中标记为 StackInterior 的 x0–x8，再更新 mailbox watermark；x27/x28 由恢复方给出。
+Suspend 的权威 LIR 根使用 Value 记录，A64 还需枚举同一值在第九个及以后实参中的传出副本，
+把实际 outgoing slot 登记到同一种类；不能只修复原 spill 而留下失效的传入栈参数。
 底部终止 PC 由调用方显式登记；缺图、未登记 helper frame、非精确 PC 和损坏 FP 链一律拒绝。
 这里仍是内部 Rust copy/VM 契约，不是生产 Gugu decoder/image 已接通的声明。
 

@@ -73,8 +73,12 @@ fn call(callee: &Fixture) -> Call {
 
 #[test]
 fn suspending_calls_use_authoritative_suspend_maps_and_forced_pointer_slots() {
-    let mut callee = Fixture::new(&[], &[]);
+    let mut callee = fixture(&[Type::Ptr; 9], &[]);
     callee.body.instance = [2; 32];
+    for index in 0..9 {
+        let parameter = callee.param(0, index);
+        root(&mut callee, parameter, Provenance::Stack);
+    }
     callee.ret(&[]);
     let mut f = fixture(&[Type::Ptr], &[Type::Ptr]);
     let p = f.param(0, 0);
@@ -83,7 +87,7 @@ fn suspending_calls_use_authoritative_suspend_maps_and_forced_pointer_slots() {
     let mut suspend = call(&callee);
     suspend.may_suspend = true;
     let at = f.body.instructions.len();
-    f.op(Op::Call(suspend), &[], &[]);
+    f.op(Op::Call(suspend), &[p; 9], &[]);
     mark(&mut f, at, SafepointKind::Suspend);
     f.ret(&[p]);
     let fragment = compile(&f);
@@ -98,6 +102,8 @@ fn suspending_calls_use_authoritative_suspend_maps_and_forced_pointer_slots() {
         .unwrap();
     let map = &decoded.maps[point.map_index as usize];
     assert!(!map.slots[4].is_empty());
+    assert!(map.slots[4].contains(&0));
+    assert!(map.slots[4].len() >= 2);
     assert_eq!(map.registers, [0; 5]);
     assert!(
         fragment
@@ -106,10 +112,12 @@ fn suspending_calls_use_authoritative_suspend_maps_and_forced_pointer_slots() {
             .any(|site| site.kind == sites::SiteKind::SuspendResume)
     );
     let callee = codegen::compile_runtime(&callee.body, &bindings()).unwrap();
+    let mut harness = Harness::default();
     assert_eq!(
-        runtime_vm::run_linked(&fragment, &[&callee], &[0x8000], &mut Harness::default())[0],
+        runtime_vm::run_linked(&fragment, &[&callee], &[0x8000], &mut harness)[0],
         0x8000
     );
+    assert_eq!(harness.guard_loads, 2);
     let mut bad = f.body.clone();
     bad.safepoints[0].kind = SafepointKind::CallReturn;
     assert!(codegen::compile_runtime(&bad, &bindings()).is_err());

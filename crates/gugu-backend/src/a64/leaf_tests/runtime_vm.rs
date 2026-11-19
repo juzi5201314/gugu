@@ -80,24 +80,24 @@ impl Harness {
         at: u64,
         registers: &[u64; 32],
         memory: &BTreeMap<u64, u8>,
+        entry: Option<&[u64; 32]>,
     ) {
         if at == 0x1000 + u64::from(crate::runtime::coroutine_schema::stack_check_offset()) {
             self.guard_loads += 1;
-            assert_eq!(
-                registers[31], self.expected_sp,
-                "SP changed before entry check"
-            );
-            let candidate = self
-                .expected_sp
-                .wrapping_sub(u64::from(fragment.frame.required_frame));
+            let expected_sp = entry.map_or(self.expected_sp, |entry| entry[31]);
+            assert_eq!(registers[31], expected_sp, "SP changed before entry check");
+            let candidate = expected_sp.wrapping_sub(u64::from(fragment.frame.required_frame));
             assert_eq!(registers[11], candidate);
             assert!(
                 !memory
                     .keys()
-                    .any(|at| *at >= candidate && *at < self.expected_sp),
+                    .any(|at| *at >= candidate && *at < expected_sp),
                 "frame store before entry check"
             );
-            assert_eq!(&registers[..9], &self.arguments);
+            assert_eq!(
+                &registers[..9],
+                entry.map_or(&self.arguments[..], |entry| &entry[..9])
+            );
         }
     }
     pub fn call(
