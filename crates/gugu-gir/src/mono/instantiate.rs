@@ -471,6 +471,27 @@ fn resolve_dispatch(
                 .insert(context.item_key(implementation));
         }
         let Some(callable) = method.callable else {
+            if context.model.traits.interfaces[interface.id].name == "Hash"
+                && matches!(self_ty, Ty::Tuple(_))
+            {
+                let definition = context
+                    .module
+                    .definitions
+                    .iter()
+                    .position(|definition| {
+                        definition.name == "hash_tuple"
+                            && definition.location.as_ref().is_some_and(|location| {
+                                context.module.sources[location.source as usize].path
+                                    == "std/hash.gg"
+                            })
+                    })
+                    .ok_or_else(|| inconsistency("std.hash 缺少元组 Hash 馈送函数"))?;
+                return Ok(Some(ResolvedCallee {
+                    definition: hir::DefId(definition as u32),
+                    arguments: vec![self_ty],
+                    signature,
+                }));
+            }
             return Ok(None);
         };
         // 接收者与 impl 实参已由具体类型选择。只对方法自身的泛型做签名绑定；

@@ -92,7 +92,7 @@ fn check_operands(
                         .map(copy_of)
                         .unwrap_or_else(|| {
                             let length = builder.temp(builder.int_ty());
-                            builder.assign(Place::local(length), Rvalue::Len(base.clone()));
+                            builder.assign(Place::local(length), Rvalue::Len(base));
                             copy_of(length)
                         });
                     Ok(vec![Operand::Copy(base), start, end])

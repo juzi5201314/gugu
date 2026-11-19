@@ -374,6 +374,27 @@ HashMap/HashSet 使用 hashbrown/SwissTable 类的 control-byte group、SIMD loo
 
 默认 HashMap/HashSet 使用随机化 FoldHash-fast。它追求整数和 string 键的吞吐，不承诺抵抗能与进程交互并观察行为的 HashDoS 攻击。SecureHashMap/SecureHashSet 使用由 OS CSPRNG 初始化的 SipHash 1-3，供不可信键使用。两组类型的集合语义相同，不能依赖具体 hash 值或迭代顺序。
 
+`std.hash.Hasher` 是预导入的普通名义值类型，当前公开确定性 FoldHash-fast 接口：
+
+```text
+impl Hasher {
+    pub fn with_seed(seed: uint) Hasher
+    pub fn write_int(self: &Self, value: int)
+    pub fn write_uint(self: &Self, value: uint)
+    pub fn write_bool(self: &Self, value: bool)
+    pub fn write_char(self: &Self, value: char)
+    pub fn write_str(self: &Self, value: string)
+    pub fn write_bytes(self: &Self, value: Bytes)
+    pub fn finish(self: &Self) uint
+}
+```
+
+`write_int` / `write_uint` 馈送 64 位小端补码 / 无符号整数；bool 馈送一个 0 或 1 字节，char 馈送 Unicode 标量的 32 位小端值。string 馈送 UTF-8，Bytes 馈送原始字节，两者均先馈送 64 位小端字节长度。所有写入拼成一个字节流，`finish` 等价于 Rust 参照模型对整个流执行一次 FoldHash-fast `FixedState::with_seed(seed)` 写入。重复 `finish` 不改变状态；之后仍可继续写入，下一次 `finish` 覆盖全部新旧输入。空输入也有定义。不承诺此输出跨工具链稳定。
+
+内建 Hash 对不超过 64 位的有符号 / 无符号整数分别调用 `write_int` / `write_uint`（先扩展到 64 位），128 位整数按低、高两个 64 位字馈送；bool、char、string、Bytes 使用对应写入方法，unit 不写入。元组按字段顺序递归馈送；Option 用 64 位标签 0（None）/ 1（Some）后接载荷，Result 用 0（Ok）/ 1（Err）后接载荷。浮点不满足 Hash；数组与 TypeId 暂保留内建 trait 资格，但直接调用 Hash.hash 会明确编译报错。
+
+当前不提供随机化 Hasher 构造器：原生平台尚未实现 entropy 执行片段。以上 seeded API 不替代集合的随机播种要求；集合实现及其默认播种路径单独提供。
+
 `std.hash.Hash` 规定值向 hasher 馈送字段的语义顺序，并要求 `a == b` 蕴含 hash 输入相同。HashMap、SecureHashMap 及对应 Set 进一步要求键实现 `StableHash`：键的 Eq 与 Hash 可观察结果不能被任何外部别名改变。BTreeMap/BTreeSet 对称地要求 `Ord + StableOrd`，比较顺序不能被外部别名改变。string、Bytes、Path、标量以及字段全部满足同一稳定约束的值类型由编译器提供或安全派生这些 marker；插入 COW 键会封存其 backing。Vec、Map、resource 等可变身份句柄不能安全派生。用户只能用 `unsafe impl StableHash` / `unsafe impl StableOrd` 手写其余实现，并承担该类型的稳定性证明，见[接口](traits.md)与[unsafe](unsafe.md)。
 
 默认 FoldHash 与 SipHash 输出都不是持久格式。`std.hash.XxHash3_64` 与 `XxHash3_128` 是算法命名的稳定非密码 hash；相同 byte 输入跨进程与工具链产生相同结果。它们只用于缓存键、测试、分片和非对抗内容摘要，不用于认证、签名或密码存储。

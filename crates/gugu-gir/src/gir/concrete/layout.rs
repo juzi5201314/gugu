@@ -131,7 +131,6 @@ impl<'a, 'm> Builder<'a, 'm> {
             Ty::Float(width) => (TypeKind::Float(*width), bits),
             Ty::TypeId => (TypeKind::TypeId, bits),
             Ty::Formatter => (TypeKind::Formatter, bits),
-            Ty::Hasher => (TypeKind::Hasher, bits),
             Ty::String => (TypeKind::String, PassingClass::COW),
             Ty::Ref(inner) => (TypeKind::Reference(self.referent(inner)?), identity),
             Ty::Ptr(inner) => (TypeKind::Pointer(self.referent(inner)?), bits),
