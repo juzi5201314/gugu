@@ -8,6 +8,7 @@ mod darwin_process;
 mod darwin_resolver;
 mod entry;
 mod linux_entry;
+mod linux_fd;
 mod poll;
 
 pub use atomic::{AtomicWidth, atomic};
@@ -22,6 +23,7 @@ pub use darwin_resolver::{darwin_resolver_imports, darwin_resolver_symbol};
 pub(crate) use entry::darwin_main;
 pub use entry::rt0;
 pub(crate) use linux_entry::linux_main;
+pub use linux_fd::linux_fd_dispatch;
 pub use poll::safepoint_slow;
 
 use super::{
