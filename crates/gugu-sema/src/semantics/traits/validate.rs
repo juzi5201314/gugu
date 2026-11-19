@@ -102,6 +102,9 @@ impl Model<'_> {
                         definition.name.as_str(),
                         "Print" | "Debug" | "Binary" | "Octal" | "LowerHex" | "UpperHex"
                     ))
+                && !(self.modules[def.module].builtin
+                    && self.modules[def.module].path == "std.hash"
+                    && definition.name == "Hash")
             {
                 return Err(self.trait_error(def, "用户 impl 不能覆盖编译器提供的语言实现"));
             }

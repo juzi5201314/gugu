@@ -11,6 +11,12 @@ impl Checker<'_, '_> {
             .as_slice(&self.arena().segments);
         let [segment] = segments else { return None };
         let slot = &self.slots[*self.state.names.get(&segment.name)?];
+        if self
+            .current_function
+            .is_some_and(|function| self.is_parameter_pack(function, ty))
+        {
+            return Some(name.clone());
+        }
         self.arena()
             .fns
             .iter()

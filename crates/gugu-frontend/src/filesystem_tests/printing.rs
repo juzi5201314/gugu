@@ -1,6 +1,7 @@
 use super::{CompileRequest, Compiler, TargetName, harness::Harness};
 use crate::runtime::RuntimeMachineOp;
 
+#[expect(clippy::ptr_arg, reason = "签名需与 machine_hook 一致")]
 fn capture(
     harness: &mut Harness<'_>,
     op: RuntimeMachineOp,
@@ -30,7 +31,7 @@ fn capture(
     vec![written]
 }
 
-fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<u8>)> {
+pub(super) fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<u8>)> {
     let compiled = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,

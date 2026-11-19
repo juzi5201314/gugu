@@ -33,7 +33,6 @@ pub enum TypeKind {
     Float(u16),
     TypeId,
     Formatter,
-    Hasher,
     String,
     Reference(u32),
     Pointer(u32),

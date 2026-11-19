@@ -103,7 +103,6 @@ impl MonoContext<'_> {
             hir::Type::TryRecvErr => Ty::TryRecvErr,
             hir::Type::Panic => Ty::Panic,
             hir::Type::Formatter => Ty::Formatter,
-            hir::Type::Hasher => Ty::Hasher,
             hir::Type::MaybeUninit(inner) => Ty::MaybeUninit(boxed(*inner)?),
         })
     }
