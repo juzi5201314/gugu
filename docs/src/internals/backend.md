@@ -407,6 +407,8 @@ load command 依次为各段、`LC_DYLD_CHAINED_FIXUPS`、`LC_DYLD_EXPORTS_TRIE`
 
 `a64::macho::link_entry` 在调用方提供的 arm64 镜像节上添加 Darwin `LC_MAIN`、参数块和共享的 `a64::fragments::rt0`。入口通过 `ADRP/ADD` 定位 `Rt0Params`，减去块中记录的镜像相对地址得到加载基址，并将参数块、基址、`envp`、`argc`、`argv` 放入 x0–x4。共享 rt0 初始化 x27/x28、保存启动参数到可写 `Rt0Payload`，然后调用 `rt0_start`。入口的页、页内偏移和 `BL` 重定位在布局后、签名前解析；退出经 `__gugu_darwin_c_exit`。链接器复用已有的 libSystem `_exit` 导入及其无偏移绑定槽。在添加入口前记录 `append_import_stubs` 已生成的每个调用桩所指的绑定槽，再按最终布局重新编码这些桩。调用方提供 runtime 载荷、初始槽、processor 和 `rt0_start` 位置，仍须负责其余 runtime 元数据；此路径不接入闭世界编译或 4d 的调用方 lowering。
 
+`a64::fragments::darwin_net_dispatch` 在原生栈上用 x0 接收操作号，x1 接收 `net_platform.gg` 的请求地址。请求参数从偏移 0 开始，value 与 error 分别位于 72 和 80，入口清零两者并返回 value。操作 0–10、21–28 调用 `darwin_net_imports` 声明的 libSystem 入口；操作 19 给出同一片段内按 C ABI 调用的关闭回调地址。其他操作返回 EINVAL；信号操作 29、30 与 DNS 入口不属于此片段。网络调度、取消和套接字状态仍由 runtime 管理；该片段不接入托管调用、栈切换或目标注册。
+
 ## 直接编码与验证
 
 encoder 对每个 `X64Inst` 先计算 exact 长度，再写 prefix、REX、opcode、ModRM、SIB、displacement和 immediate；两次计算必须一致。每条 instruction记录起止 offset，stack map、branch、relocation和 source table只引用该边界。
