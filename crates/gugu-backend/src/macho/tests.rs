@@ -180,6 +180,121 @@ fn u32_at(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap())
 }
 
+fn arm64_darwin_entry_fixture() -> (MachORequest, crate::a64::macho::DarwinEntry) {
+    use crate::{a64::macho::DarwinEntry, runtime::entry::Rt0Payload};
+
+    let mut request = request(Arch::Arm64);
+    request.imports.clear();
+    request.fixups.clear();
+    request.sections[3].align = 8;
+    request.sections[3].content = SectionContent::Data(vec![0; 8 + Rt0Payload::bytes() as usize]);
+    request.sections[4].content = SectionContent::ZeroFill(128 + 4096);
+    let entry = DarwinEntry {
+        rt0_start: at(0, 4),
+        payload: at(3, 8),
+        initial_slot: at(4, 0),
+        processor: at(4, 128),
+    };
+    (request, entry)
+}
+
+#[test]
+fn arm64_darwin_entry_resolves_startup_and_exit() {
+    use crate::{
+        a64::macho::link_entry,
+        runtime::entry::{Rt0Payload, rt0_params},
+    };
+    use std::mem::offset_of;
+
+    let (request, entry) = arm64_darwin_entry_fixture();
+    let file = link_entry(request, entry).unwrap().bytes;
+    let (main, main_file) = section_address(&file, "__lc_main");
+    let (params, params_file) = section_address(&file, "__rt0_params");
+    let (boot, boot_file) = section_address(&file, "__rt0");
+    let (body, _) = section_address(&file, "__text");
+    let (exit, _) = section_address(&file, "__stubs");
+    let (payload, payload_file) = section_address(&file, "__data");
+    let (slot, _) = section_address(&file, "__bss");
+
+    assert_eq!(
+        u64_at(&file, command(&file, 0x8000_0028) + 8),
+        main_file as u64
+    );
+    let words = (0..9)
+        .map(|i| u32_at(&file, main_file + i * 4))
+        .collect::<Vec<_>>();
+    assert_eq!(&words[..2], &[0x9100_0024, 0x1100_0003]);
+    assert_eq!(&words[4..6], &[0xf940_0001, 0xcb01_0001]);
+    assert_eq!(words[8], 0xd420_0000);
+    let page = (((words[2] >> 5) & 0x7ffff) << 2) | ((words[2] >> 29) & 3);
+    assert_eq!(words[2] & 0x9f00_001f, 0x9000_0000);
+    assert_eq!(words[3] & 0xffc0_03ff, 0x9100_0000);
+    assert_eq!(
+        (main & !0xfff) + u64::from(page) * 4096 + u64::from((words[3] >> 10) & 0xfff),
+        params
+    );
+    assert_eq!(branch_target(words[6], main + 24), boot);
+    assert_eq!(branch_target(words[7], main + 28), exit);
+    let rt0_call = crate::a64::fragments::rt0("test").relocations[0].offset;
+    assert_eq!(
+        branch_target(
+            u32_at(&file, boot_file + rt0_call as usize),
+            boot + u64::from(rt0_call)
+        ),
+        body + 4
+    );
+    let param = |word| u64_at(&file, params_file + word * 8);
+    assert_eq!(param(rt0_params::BIAS_BASELINE), params - IMAGE_BASE);
+    assert_eq!(param(rt0_params::RT0_START), body + 4 - IMAGE_BASE);
+    assert_eq!(param(rt0_params::PAYLOAD_VA), payload + 8 - IMAGE_BASE);
+    assert_eq!(param(rt0_params::INITIAL_SLOT), slot - IMAGE_BASE);
+    assert_eq!(param(rt0_params::PROCESSOR), slot + 128 - IMAGE_BASE);
+    assert_eq!(
+        u64_at(&file, payload_file + 8 + offset_of!(Rt0Payload, revision)),
+        Rt0Payload::REVISION
+    );
+    assert_eq!(
+        u64_at(
+            &file,
+            payload_file + 8 + offset_of!(Rt0Payload, initial_slot)
+        ),
+        slot - IMAGE_BASE
+    );
+    assert!(
+        file.windows(b"_exit\0".len())
+            .any(|name| name == b"_exit\0")
+    );
+}
+
+#[test]
+fn arm64_darwin_entry_rejects_a_payload_outside_writable_data() {
+    let (request, mut entry) = arm64_darwin_entry_fixture();
+    entry.payload = entry.rt0_start;
+    let error = crate::a64::macho::link_entry(request, entry).unwrap_err();
+    assert!(
+        error.contains("invalid arm64 Mach-O payload location"),
+        "{error}"
+    );
+}
+
+fn section_address(file: &[u8], name: &str) -> (u64, usize) {
+    for (_, _, _, _, _, at) in segments(file) {
+        for i in 0..u32_at(file, at + 64) as usize {
+            let s = at + 72 + 80 * i;
+            if name16(&file[s..s + 16]) == name {
+                return (u64_at(file, s + 32), u32_at(file, s + 48) as usize);
+            }
+        }
+    }
+    panic!("missing Mach-O section {name}");
+}
+
+fn branch_target(word: u32, pc: u64) -> u64 {
+    assert_eq!(word >> 26, 0b100101);
+    let displacement = (((word & 0x03ff_ffff) << 6) as i32) >> 4;
+    pc.checked_add_signed(i64::from(displacement)).unwrap()
+}
+
 fn u64_at(bytes: &[u8], at: usize) -> u64 {
     u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap())
 }

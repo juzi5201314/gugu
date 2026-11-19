@@ -13,6 +13,9 @@ use crate::{
     },
 };
 
+mod entry;
+pub use entry::{DarwinEntry, link_entry};
+
 const STUB_SIZE: usize = 12;
 const PAGE_SHIFT: u32 = 12;
 
