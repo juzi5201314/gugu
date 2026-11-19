@@ -232,7 +232,7 @@ require-signature = true
 "66687aadf862bd776c8fc18b8e9f8e20089714856ee233b3902a591d0d5f2925" = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 ```
 
-也可以用全局命令行参数 `--require-signature` 临时要求所有参与解析的 registry package 有受信任签名。严格模式下，缺少签名、算法不支持、key 不受信任、签名消息不匹配或签名验证失败都是解析错误；path package 和显式 Git package 不会因为该开关获得 registry 签名，若策略要求它们签名则必须由外部供应链工具另行阻止。
+也可以用全局命令行参数 `--require-signature` 临时要求解析选定（含已锁定）的 registry package 有受信任签名。严格模式下，缺少签名、算法不支持、key 不受信任、签名消息不匹配或签名验证失败都是解析错误；未选入解析结果的其他版本记录不阻断解析。缓存命中不豁免该检查：严格模式下客户端仍对锁定的每个 registry package 验证索引记录中的签名与 yanked 状态。path package 和显式 Git package 不会因为该开关获得 registry 签名，若策略要求它们签名则必须由外部供应链工具另行阻止。
 
 ### 签名记录与消息
 

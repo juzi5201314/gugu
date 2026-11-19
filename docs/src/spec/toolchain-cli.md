@@ -22,7 +22,7 @@
 | `--locked` | 要求锁文件已是最新，否则失败 |
 | `--frozen` | 等价于 `--locked --offline` |
 | `--vendor` | 从 workspace `vendor/` 读取依赖 |
-| `--require-signature` | 要求所有 registry package 具有用户信任配置中的有效签名 |
+| `--require-signature` | 要求解析选定（含已锁定）的 registry package 具有用户信任配置中的有效签名 |
 | `--deny-yanked` | 拒绝解析结果中包含已锁定的 yanked package |
 | `--target <target>` | 目标名，见[平台与 ABI 参考](platform-abi.md)，默认宿主 |
 | `-p <owner/name>`、`--package <owner/name>` | 选择 package |
@@ -144,7 +144,7 @@ runtime 契约签名的记录目录不计入 executable mono/GIR/LIR body 数量
 
 ### `gugu update`
 
-更新锁文件：按当前清单重新解析并写回 `gugu.lock`。`-p <owner/name>` 把解析根收窄到指定 package。`--precise <version>` 必须和 `-p` 同用：把指定 package 的 registry 与锁候选收窄到精确版本后重新解析；候选不存在、解析结果不是该版本或清单约束不允许时按错误拒绝。
+更新锁文件：按当前清单重新抓取 registry 索引候选（不受锁覆盖限制）、重新解析并写回 `gugu.lock`。`-p <owner/name>` 把解析根收窄到指定 package。`--precise <version>` 必须和 `-p` 同用：把指定 package 的 registry 与锁候选收窄到精确版本后重新解析；候选不存在、解析结果不是该版本或清单约束不允许时按错误拒绝。
 
 执行型收集选择（`test`/`bench` 默认全量、`--all-targets`、`--lib`）在 workspace 中允许成员没有对应 target，该成员被跳过；显式或单 target 选择（`run`、`--test <name>`、`--bench <name>`）始终要求匹配：所需 feature 未启用、名称缺失或无任何匹配 target 时按用法错误拒绝，退出码 `2`。
 
