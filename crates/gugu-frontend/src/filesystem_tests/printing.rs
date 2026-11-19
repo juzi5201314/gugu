@@ -32,6 +32,14 @@ pub(super) fn capture(
 }
 
 pub(super) fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<u8>)> {
+    output_with_heap(source, script, 262144)
+}
+
+pub(super) fn output_with_heap(
+    source: &str,
+    script: &[(u64, u64, u64)],
+    heap_bytes: usize,
+) -> Vec<(u64, Vec<u8>)> {
     let compiled = Compiler::shared().compile(CompileRequest::single_file(
         "main.gg",
         source,
@@ -52,13 +60,30 @@ pub(super) fn output(source: &str, script: &[(u64, u64, u64)]) -> Vec<(u64, Vec<
     let mut harness = Harness::new(&compiled);
     harness.machine_hook = Some(capture);
     harness.script.extend(script.iter().copied());
-    harness.invoke("main.gg", "main", &[], &mut vec![0; 262144]);
+    harness.invoke("main.gg", "main", &[], &mut vec![0; heap_bytes]);
     assert!(harness.script.is_empty());
     harness
         .calls
         .into_iter()
         .map(|(fd, bytes)| (fd, bytes.into_iter().map(|byte| byte as u8).collect()))
         .collect()
+}
+
+#[test]
+fn print_generic_type_alias() {
+    assert_eq!(
+        output(
+            "use std.io.{println}\n\
+             type Table[K] = Vec[K]\n\
+             type Numbers = Table[int]\n\
+             fn append[T](xs: Table[T], x: T) Vec[T] { xs.push(x)\n xs }\n\
+             fn main() { let xs: Numbers = Vec[int]::new()\n\
+             let ys: Table[int] = append(xs, 42)\n\
+             match ys.get(0) { Some(n) => println(n), None => println(0) } }",
+            &[]
+        ),
+        vec![(1, b"42\n".to_vec())]
+    );
 }
 
 #[test]
