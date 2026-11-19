@@ -1,6 +1,30 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn late_repeats_use_concrete_instance_lengths() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+fn filled[comptime N: int](x: int) [int; N] { [x; N] }
+const THREE: [int; 3] = filled::[3](type_id_count())
+const EMPTY: [int; 0] = filled::[0](type_id_count())
+fn main() {
+    let three = THREE
+    let empty = EMPTY
+    println(three.len())
+    println(empty.len())
+    println(three[0] > 0)
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"3\n0\ntrue\n");
+}
+
+#[test]
 fn explicit_const_method_arguments_survive_dispatch() {
     let actual: Vec<_> = output(
         r#"
