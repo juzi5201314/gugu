@@ -162,6 +162,15 @@ Linux 放入 `.gugu.stackmap`，Windows 放入 `.gugustk`。section 内所有整
 
 ### A64 lowering 到 map/CFA 的接线（4c.2b.1）
 
+4c.2b.2a 同时消费 LiveSlots 的局部槽根和 InitSlots 的逐根 must 证明。一个 union root
+表项对应一个 frame byte；含相同字偏移的不同 provenance 必须有独立 gate，不能同时折叠
+进多个 fixed bitmap。尚未静态证明的根在 PollResume 和 CallReturn 都使用 TypedRoot。
+gate 在帧建立后只清零一次，RootInit 事件保持同位置的源顺序（例如 reset 后 set）；
+未置位、已复位或 lifetime 已结束的项不参与扫描。入口有回边时保守使用 typed gates，
+避免把回边事实当作第一次进入的初始化证明。gate 也计入物理 frame，但不是被扫描的根字。
+确定性 VM 使用真实生成的 STRB、序列化 map 和 reference scan_frame 验证 GC 写回后 reload；
+这不是生产 Gugu decoder 已接通的声明。
+
 CallReturn 的 poll-free leaf 豁免不能与 slow-capable callee 入口检查共存。A64 runtime
 使用 4096 字节的 managed leaf 帧预算：caller 检查自己的 frame 加预算，callee 帧必须不大于
 预算且不发射自动 morestack/poll 入口。reserve 不计入 frame_size/CFA/slot_count，也不新增

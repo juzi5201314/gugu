@@ -30,10 +30,11 @@ fn fail(error: impl std::fmt::Display) -> Error {
 }
 
 pub(crate) fn logical(body: &Body) -> Result<Vec<LogicalSafepoint>, Error> {
-    let needed = body
-        .values
-        .iter()
-        .any(|v| v.kind.provenance.is_some_and(|p| p.root_kind().is_some()))
+    let needed = body.stack_slots.iter().any(|slot| !slot.roots.is_empty())
+        || body
+            .values
+            .iter()
+            .any(|v| v.kind.provenance.is_some_and(|p| p.root_kind().is_some()))
         || body
             .instructions
             .iter()
@@ -77,6 +78,13 @@ pub(crate) fn build(
     logical: &[LogicalSafepoint],
 ) -> Result<Metadata, Error> {
     let mut points = Vec::new();
+    let graph = lir::Graph::new(body).map_err(|error| super::error(error.message()))?;
+    let init = lir::root_init::InitSlots::new(body, &graph);
+    let init = body
+        .edges
+        .iter()
+        .all(|edge| edge.to != body.entry)
+        .then_some(&init);
     for site in sites {
         let entry = site.kind == SiteKind::MorestackEntry;
         let kind = match site.kind {
@@ -150,8 +158,31 @@ pub(crate) fn build(
                                 set_slot(&mut map, class, (*index - 8) * 8)?;
                             }
                         }
-                        LogicalRoot::Slot { .. } => {
-                            return Err(super::error("rooted locals require 4c.2b.2"));
+                        LogicalRoot::Slot { slot, offset } => {
+                            let local = *frame
+                                .locals
+                                .get(*slot as usize)
+                                .ok_or_else(|| super::error("rooted local has no frame offset"))?;
+                            let (word, gate) = crate::metadata::local_root(
+                                body,
+                                anchor,
+                                class,
+                                *slot,
+                                *offset,
+                                local,
+                                frame.init_bases.get(*slot as usize).copied().flatten(),
+                                init,
+                            )
+                            .map_err(super::error)?;
+                            if let Some(init_byte) = gate {
+                                map.typed.push(runtime::TypedRoot {
+                                    word,
+                                    root_kind: class as u32,
+                                    init_byte,
+                                });
+                            } else {
+                                set_slot(&mut map, class, word * 8)?;
+                            }
                         }
                     }
                 }
