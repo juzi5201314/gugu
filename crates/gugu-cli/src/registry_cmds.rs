@@ -34,6 +34,9 @@ pub(crate) struct RegistryFetch {
     pub(crate) yanked: BTreeSet<(String, String, String)>,
     /// resolver 使用的默认 registry 身份。
     pub(crate) default_identity: String,
+    /// refresh 时被索引重新覆盖的 `(identity, name)`；调用方应移除同键锁候选，
+    /// 避免同 ID 两份元数据冲突。
+    pub(crate) refreshed: BTreeSet<(String, String)>,
 }
 
 /// 一次会话的 registry 视图：配置值 + HTTP 传输；client 按 identity 惰性连接。
@@ -250,6 +253,7 @@ impl RegistrySession {
     ) -> Result<RegistryFetch, RegistryError> {
         let default_identity = self.default_identity();
         let mut clients: BTreeMap<String, Client<'_, UreqTransport>> = BTreeMap::new();
+        let mut refreshed: BTreeSet<(String, String)> = BTreeSet::new();
         let mut wanted: BTreeSet<(String, String)> = BTreeSet::new();
         for spec in specs {
             if let DependencySource::Registry { registry } = &spec.source {
@@ -275,7 +279,9 @@ impl RegistrySession {
             for (registry, package) in pending {
                 let identity = self.identity_of(&registry)?;
                 fetched.insert((identity.clone(), package.clone()));
-                let covered = !refresh
+                // offline 下 refresh 不取消锁覆盖：update --offline 仍能复用
+                // 锁文件与缓存，不误报 offline-missing。
+                let covered = (offline || !refresh)
                     && lock_candidates.iter().any(|metadata| {
                         metadata.id.name() == package
                             && matches!(
@@ -298,18 +304,33 @@ impl RegistrySession {
                 if !need_fetch {
                     continue;
                 }
+                if !covered {
+                    refreshed.insert((identity.clone(), package.clone()));
+                }
                 let client = self.client_for(&mut clients, &registry)?;
                 let records = client.index(&package)?;
                 for record in &records {
                     if record.yanked {
                         yanked.insert((identity.clone(), record.name.clone(), record.vers.clone()));
                     }
-                    for dep in &record.deps {
-                        // 传递依赖始终入队：锁覆盖下的子依赖在严格策略下也要检查。
-                        wanted.insert((
-                            dep.registry.clone().unwrap_or_else(|| "default".to_owned()),
-                            dep.package.clone(),
-                        ));
+                    // covered 时只入队锁定版本的依赖：锁定包的传递依赖在严格策略下
+                    // 仍要检查，但未被锁定版本引用其它 registry 不应阻断构建。
+                    let locked_version = covered
+                        && lock_candidates.iter().any(|metadata| {
+                            metadata.id.name() == package
+                                && metadata.id.version().to_string() == record.vers
+                                && matches!(
+                                    metadata.id.source(),
+                                    PackageSource::Registry { registry } if registry == &identity
+                                )
+                        });
+                    if !covered || locked_version {
+                        for dep in &record.deps {
+                            wanted.insert((
+                                dep.registry.clone().unwrap_or_else(|| "default".to_owned()),
+                                dep.package.clone(),
+                            ));
+                        }
                     }
                     if covered {
                         // 锁已覆盖：只收集 yanked 状态，不把其他版本喂给 resolver。
@@ -329,6 +350,7 @@ impl RegistrySession {
             candidates,
             yanked,
             default_identity,
+            refreshed,
         })
     }
 
@@ -516,11 +538,12 @@ pub(crate) fn run_publish(
         Ok(target) => target,
         Err(code) => return code,
     };
-    // 有锁文件时以 --locked 等价解析检查清单与锁图一致；
-    // 无锁文件时正常解析会生成锁图（相当于首轮发布）。
+    // 有锁文件时以 --locked 等价解析检查清单与锁图一致；锁图按整个
+    // workspace 解析，publish -p 也不因其他成员存在而误报不一致。
+    // 无锁文件时正常解析会生成锁图，但用户显式 --locked/--frozen 保持失败语义。
     let mut check = options.clone();
-    check.locked = project.lock_path().exists();
-    let refs = packages.iter().collect::<Vec<_>>();
+    check.locked = options.locked || project.lock_path().exists();
+    let refs = project.packages().iter().collect::<Vec<_>>();
     if crate::resolve_project_lock(&project, &refs, &check, target, format, false).is_err() {
         return 1;
     }
@@ -778,6 +801,16 @@ pub(crate) fn run_update_precise(version: &str, options: &GlobalArgs) -> i32 {
         Err(error) => return registry_fail(format, error),
     };
     let mut registry_candidates = fetch.candidates;
+    // refresh 抓取的索引记录覆盖同键锁候选，避免同 ID 两份元数据冲突。
+    lock_candidates.retain(|metadata| {
+        !matches!(
+            metadata.id.source(),
+            PackageSource::Registry { registry }
+                if fetch
+                    .refreshed
+                    .contains(&(registry.clone(), metadata.id.name().to_owned()))
+        )
+    });
     // 锁定目标 package 到精确版本：其他版本候选全部移除。
     registry_candidates.retain(|metadata| {
         metadata.id.name() != package_name || metadata.id.version().to_string() == version
@@ -874,19 +907,20 @@ pub(crate) fn ensure_registry_inputs(
                 package_yanked(format!("锁图引用已 yank 的版本 `{}`", package.id)),
             ));
         }
+        // 严格策略下先验证索引记录中的 yanked/签名状态：缓存命中与
+        // vendor 输入都不豁免（--offline 无网络可验证，由校验和与锁图兜底）。
+        if !offline && (session.deny_yanked() || session.require_signature()) {
+            session
+                .verify_locked_package(
+                    registry,
+                    package.id.name(),
+                    &package.id.version().to_string(),
+                    &checksum,
+                    format,
+                )
+                .map_err(|error| registry_fail(format, error))?;
+        }
         if cache.load(&package.id, Some(&checksum)).is_ok() {
-            // 严格策略下缓存命中也要验证索引记录中的 yanked/签名状态。
-            if !offline && (session.deny_yanked() || session.require_signature()) {
-                session
-                    .verify_locked_package(
-                        registry,
-                        package.id.name(),
-                        &package.id.version().to_string(),
-                        &checksum,
-                        format,
-                    )
-                    .map_err(|error| registry_fail(format, error))?;
-            }
             continue;
         }
         if vendor {

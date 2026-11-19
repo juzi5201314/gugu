@@ -898,6 +898,16 @@ pub(crate) fn resolve_project_lock(
         .map_err(|error| {
             emit_cli_error(format, &error.to_string());
         })?;
+    // refresh 抓取的索引记录覆盖同键锁候选，避免同 ID 两份元数据冲突。
+    registry_packages.retain(|metadata| {
+        !matches!(
+            metadata.id.source(),
+            PackageSource::Registry { registry }
+                if fetch
+                    .refreshed
+                    .contains(&(registry.clone(), metadata.id.name().to_owned()))
+        )
+    });
     registry_packages.extend(fetch.candidates);
     let mut roots = Vec::with_capacity(packages.len());
     let mut root_features = BTreeMap::new();
