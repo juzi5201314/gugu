@@ -70,6 +70,23 @@ pub(super) fn output_with_heap(
 }
 
 #[test]
+fn print_generic_type_alias() {
+    assert_eq!(
+        output(
+            "use std.io.{println}\n\
+             type Table[K] = Vec[K]\n\
+             type Numbers = Table[int]\n\
+             fn append[T](xs: Table[T], x: T) Vec[T] { xs.push(x)\n xs }\n\
+             fn main() { let xs: Numbers = Vec[int]::new()\n\
+             let ys: Table[int] = append(xs, 42)\n\
+             match ys.get(0) { Some(n) => println(n), None => println(0) } }",
+            &[]
+        ),
+        vec![(1, b"42\n".to_vec())]
+    );
+}
+
+#[test]
 fn print_hello_world() {
     assert_eq!(
         output(

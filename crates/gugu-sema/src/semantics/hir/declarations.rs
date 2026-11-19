@@ -213,9 +213,23 @@ impl Builder<'_, '_> {
                     | ast::ItemKind::Const { value: Some(_), .. } => {
                         Some(self.model.value_type(definition)?)
                     }
-                    ast::ItemKind::Const { ty: Some(ty), .. }
-                    | ast::ItemKind::TypeAlias { ty: Some(ty), .. } => {
+                    ast::ItemKind::Const { ty: Some(ty), .. } => {
                         Some(self.model.form(definition.module, ty)?)
+                    }
+                    ast::ItemKind::TypeAlias {
+                        ty: Some(ty),
+                        generics,
+                    } => {
+                        let mut parameters =
+                            self.model.parameters_at(definition.module, &item.span);
+                        parameters
+                            .extend(self.model.generic_parameters(definition.module, generics));
+                        Some(self.model.form_inner(
+                            definition.module,
+                            ty,
+                            &parameters,
+                            &mut Vec::new(),
+                        )?)
                     }
                     ast::ItemKind::Struct { .. }
                     | ast::ItemKind::Enum { .. }
