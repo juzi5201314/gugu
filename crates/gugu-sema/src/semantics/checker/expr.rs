@@ -38,7 +38,9 @@ impl Checker<'_, '_> {
             ExprKind::Path(path) => self.path_value(id, path, true, expected, AstRange::empty()),
             ExprKind::TypeCallee(ty) => self.type_as_value(id, ty),
             ExprKind::Paren(inner) => self.expression(inner, expected),
-            ExprKind::Block { stmts, tail } => self.block(stmts, tail, expected),
+            ExprKind::Block { stmts, tail } => {
+                self.block(stmts, tail, expected, self.discarded_expression == Some(id))
+            }
             ExprKind::If {
                 cond,
                 then_block,
@@ -50,7 +52,12 @@ impl Checker<'_, '_> {
                 expected,
                 self.discarded_expression != Some(id),
             ),
-            ExprKind::Match { scrutinee, arms } => self.matching(scrutinee, arms, expected),
+            ExprKind::Match { scrutinee, arms } => self.matching(
+                scrutinee,
+                arms,
+                expected,
+                self.discarded_expression == Some(id),
+            ),
             ExprKind::Loop(body) => self.looping(body, None, None),
             ExprKind::While { cond, body } => self.looping(body, Some(cond), None),
             ExprKind::For { pat, iter, body } => self.looping(body, None, Some((pat, iter))),
