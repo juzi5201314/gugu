@@ -57,11 +57,17 @@ fn dual(mode: Ipv6BindMode) bool = match mode { Ipv6BindMode::V6Only => false, I
 fn bind(address: SocketAddr, tcp: bool, backlog: int, reuse: bool, mode: Ipv6BindMode) Result[ResourceCell, Error] {
     permission::check_net(address.to_string())
     let handle = native.bind(address, tcp, backlog, reuse, dual(mode))?
-    match waiting.initialize() {
-        Ok(_) => Ok(endpoint.create(handle, endpoint.family(address))),
-        Err(error) => { _ = native.call(7, handle, 0, 0, 0, 0, 0)
-            Err(error) },
-    }
+    bound_socket(handle, endpoint.family(address), tcp)
+}
+fn bound_socket(handle: uint, family: uint, tcp: bool) Result[ResourceCell, Error] {
+    let retained = false
+    defer { if !retained { _ = native.call(7, handle, 0, 0, 0, 0, 0) }; }
+    let specific = transport.specific_datagram_binding(handle, tcp)?
+    waiting.initialize()?
+    let cell = endpoint.create(handle, family)
+    transport.record_datagram_binding(cell.control, specific)
+    retained = true
+    Ok(cell)
 }
 impl TcpListener {
     pub fn bind(address: SocketAddr, options: BindOptions) Result[Self, Error] {
@@ -127,9 +133,7 @@ impl Write for TcpWriteHalf {
 }
 impl UdpSocket {
     pub fn bind(address: SocketAddr, options: DatagramBindOptions) Result[Self, Error] {
-        let cell = bind(address, false, 0, options.reuse_address, options.ipv6_mode)?
-        transport.record_datagram_binding(cell.control, address)
-        Ok(Self { cell })
+        Ok(Self { cell: bind(address, false, 0, options.reuse_address, options.ipv6_mode)? })
     }
     pub fn local_addr(self: &Self) Result[SocketAddr, Error] = endpoint.address(&self.cell, false)
     pub fn peer_addr(self: &Self) Result[SocketAddr, Error] { endpoint.connected(&self.cell, true)?

@@ -427,8 +427,8 @@ fn darwin_datagram_truncation_and_disconnect_follow_native_results() {
             put(memory, message + 40, 16 << 32);
         } else if op == 21 {
             let address = word(memory, request + 8) as usize;
-            let family = word(memory, request + 16);
-            if family == 2 {
+            let length = word(memory, request + 16);
+            if length == 2 {
                 assert_eq!(&memory[address..address + 2], &[2, 0]);
             } else {
                 assert_eq!(&memory[address..address + 2], &[16, 2]);
@@ -500,19 +500,41 @@ fn check_darwin_peer_after_failure(h: &mut Harness<'_>, memory: &mut Vec<u8>) {
 }
 
 fn check_darwin_ip_disconnect(h: &mut Harness<'_>, memory: &mut Vec<u8>) {
-    for (ipv6, family) in [(0, 2), (1, 30)] {
+    let transport_hook = h.native_hook;
+    let bound_address = |_: &mut Harness<'_>, op, request, memory: &mut Vec<u8>| {
+        if op != 5 {
+            return;
+        }
+        let address = word(memory, request + 8) as usize;
+        let length = word(memory, request + 16);
+        assert_eq!(word(memory, length) & 0xffff_ffff, 32);
+        let family = word(memory, BUFFER);
+        let specific = word(memory, BUFFER + 8) != 0;
+        let size = if family == 2 { 16 } else { 28 };
+        memory[address..address + size as usize].fill(0);
+        memory[address..address + 4].copy_from_slice(&[size, family as u8, 0, 80]);
+        if family == 2 && specific {
+            memory[address + 4..address + 8].copy_from_slice(&[127, 0, 0, 1]);
+        }
+        if family == 30 && specific {
+            memory[address + 23] = 1;
+        }
+        put(memory, length, u64::from(size));
+    };
+    h.native_hook = Some(bound_address);
+    for family in [2, 30] {
+        put(memory, BUFFER, family);
         put(memory, CONTROL + 240, family);
         for (explicit, initial, status, connected) in [(0, 1, 0, 0), (1, 1, 45, 1), (1, 0, 0, 0)] {
             put(memory, CONTROL + 1304, 0);
-            let words = h.invoke("main.gg", "udp_binding", &[ipv6, explicit], memory);
-            let address = h.allocate(memory, words.len() * 8);
-            for (index, value) in words.into_iter().enumerate() {
-                put(memory, address + index as u64 * 8, value);
-            }
+            put(memory, BUFFER + 8, explicit);
+            h.script.push_back((5, 0, 0));
+            let bound = h.invoke(TRANSPORT, "specific_datagram_binding", &[42, 0], memory);
+            assert_eq!(bound[0] & 255, 0);
             h.invoke(
                 TRANSPORT,
                 "record_datagram_binding",
-                &[CONTROL, address],
+                &[CONTROL, bound[1] & 255],
                 memory,
             );
             put(memory, CONTROL + 1248, initial);
@@ -520,12 +542,19 @@ fn check_darwin_ip_disconnect(h: &mut Harness<'_>, memory: &mut Vec<u8>) {
             if explicit == 0 {
                 h.script.push_back((28, 0, 0));
             }
+            h.native_hook = transport_hook;
             submit(h, memory, disconnect);
             assert_eq!(word(memory, CONTROL + 1248), connected);
             assert_eq!(word(memory, disconnect + 72), status);
             assert!(h.script.is_empty());
+            h.native_hook = Some(bound_address);
         }
     }
+    h.script.push_back((5, 0, 9));
+    let failed = h.invoke(TRANSPORT, "specific_datagram_binding", &[42, 0], memory);
+    assert_eq!(failed[0] & 255, 1);
+    assert!(h.script.is_empty());
+    h.native_hook = transport_hook;
 }
 
 #[test]

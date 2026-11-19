@@ -7,7 +7,7 @@ use std.runtime.fs_platform.{FsResult, control_allocate, control_free}
 use std.runtime.heap.{heap_word, heap_store_word, heap_word32, heap_store_word32, heap_fail}
 use std.runtime.scheduler.{park_current, ready_hot}
 use std.io.{Error}
-use std.net.address.{IpAddr, SocketAddr}
+use std.net.address.{IpAddr}
 
 pub const READ: uint = 0
 pub const WRITE: uint = 1
@@ -171,25 +171,31 @@ fn mode_error(node: uint) uint {
 pub const INVALID_STATE: uint = 18446744073709551612
 pub const NOT_CONNECTED: uint = 18446744073709551611
 #[cfg(os = "macos")]
-pub fn record_datagram_binding(control: uint, address: SocketAddr) {
+pub fn specific_datagram_binding(handle: uint, tcp: bool) Result[bool, Error] {
+    if tcp { return Ok(false) }
+    let address = native.address(handle, false)?
     match address.ip() {
         IpAddr::V4(ip) => {
             for octet in ip.octets() {
-                if octet != 0 { heap_store_word(control + SPECIFIC_BINDING, 1) }
+                if octet != 0 { return Ok(true) }
             }
         },
         IpAddr::V6(ip) => {
-            if address.scope_id() != 0 { heap_store_word(control + SPECIFIC_BINDING, 1) }
             for segment in ip.segments() {
-                if segment != 0 { heap_store_word(control + SPECIFIC_BINDING, 1) }
+                if segment != 0 { return Ok(true) }
             }
         },
     };
+    Ok(false)
 }
 #[cfg(not(os = "macos"))]
-pub fn record_datagram_binding(control: uint, address: SocketAddr) {
-    _ = control
-    _ = address
+pub fn specific_datagram_binding(handle: uint, tcp: bool) Result[bool, Error] {
+    _ = handle
+    _ = tcp
+    Ok(false)
+}
+pub fn record_datagram_binding(control: uint, specific: bool) {
+    if specific { heap_store_word(control + SPECIFIC_BINDING, 1) }
 }
 fn udp_control(node: uint) FsResult {
     let control = heap_word(node + 16)

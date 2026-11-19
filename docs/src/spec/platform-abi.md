@@ -353,6 +353,8 @@ Darwin datagram 接收使用 `recvmsg` 的返回标志识别 `MSG_TRUNC`，不�
 
 Darwin 用 `disconnectx` 解除通配地址 UDP socket 的 peer，保留本地端口。Darwin 会清除已连接 UDP socket 的本地 IP，且同一 socket 无法重新绑定；原先绑定具体地址的 UDP socket 在调用原生断开前返回 `Unsupported`，保留绑定和 peer。Unix datagram 的 `AF_UNSPEC` 被拒绝时，只有确认 native socket 已不再关联 peer 才提交断开状态。
 
+Darwin 在 UDP bind 后用 `getsockname` 记录是否绑定具体 IP，以内核返回的地址为准，而非 bind 的请求参数；例如，内核可将带 scope 的 `::` 和双栈的 `::ffff:0.0.0.0` 规范化为通配地址。
+
 ### 外部错误状态
 
 `errno`、Windows last-error 或其它线程局部错误状态属于外部调用的即时结果。`ForeignLeaf` 返回后可在同一 OS thread 上紧接读取；普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 必须在 native 调用返回、协程重新入队之前由执行 worker 捕获该值，并由标准库通过本次调用结果读取。调用方在 `yield`、再次调用外部函数或可能迁移协程之后，不能要求仍是未捕获的原线程状态。
