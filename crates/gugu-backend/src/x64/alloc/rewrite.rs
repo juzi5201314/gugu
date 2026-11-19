@@ -348,13 +348,9 @@ fn drain_init_stores(
     upto: u32,
 ) -> Vec<(u32, bool)> {
     let mut stores = Vec::new();
-    while let Some((position, slot, bit, initialized)) = events.get(*cursor) {
-        if *position > upto {
-            break;
-        }
-        *cursor += 1;
-        if let Some(base) = bases.get(*slot as usize).copied().flatten() {
-            stores.push((base + *bit, *initialized));
+    for &(_, slot, bit, initialized) in crate::metadata::init_events_until(events, cursor, upto) {
+        if let Some(base) = bases.get(slot as usize).copied().flatten() {
+            stores.push((base + bit, initialized));
         }
     }
     stores

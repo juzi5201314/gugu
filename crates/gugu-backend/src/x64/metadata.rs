@@ -576,55 +576,27 @@ fn place_slot(
         .locals
         .get(slot as usize)
         .ok_or_else(|| vec![invalid("栈槽根没有对应的 frame 局部")])?;
-    let byte = local
-        .0
-        .checked_add(u32::try_from(offset).unwrap_or(u32::MAX))
-        .ok_or_else(|| vec![invalid("栈槽根偏移溢出")])?;
-    if byte % 8 != 0 {
-        return Err(vec![invalid("栈槽根没有对齐到机器字")]);
-    }
-    let word = byte / 8;
-    // `slot.roots` 是多变体并集：同一 offset 可在不同变体下登记成不同 Provenance 的独立
-    // 条目，各自的初始化位不同。按 (offset, class↔Provenance) 精确匹配，避免把两种 kind
-    // 压到同一初始化字节上。
-    let bit = body.stack_slots[slot as usize]
-        .roots
-        .iter()
-        .position(|(root, provenance)| {
-            *root == offset && provenance.root_kind() == Some(u32::try_from(class).unwrap_or(0))
-        })
-        .or_else(|| {
-            body.stack_slots[slot as usize]
-                .roots
-                .iter()
-                .position(|(root, _)| *root == offset)
-        })
-        .ok_or_else(|| vec![invalid("栈槽根不在槽 root 表里")])?;
-    // 同一 offset 在多变体下登记了多种根种类时，静态初始化证明分不出当前变体，一律改用
-    // 帧内初始化字节在运行期门控，避免同一个字同时落进两类固定位图。
-    let ambiguous = body.stack_slots[slot as usize]
-        .roots
-        .iter()
-        .filter(|(root, _)| *root == offset)
-        .count()
-        > 1;
-    // 该根字可能在别的变体里是标量：静态证明不了"已写成指针"时不做固定根，改由帧内初始化
-    // 字节在运行期门控——证明已成立才直接登记进位图。
-    let block = crate::lir::body::BlockId(id(anchor.block as usize));
-    if ambiguous || !init.is_initialized(block, anchor.position, slot as usize, bit) {
-        let base = fragment
+    let (word, gate) = crate::metadata::local_root(
+        body,
+        anchor,
+        class,
+        slot,
+        offset,
+        local.0,
+        fragment
             .frame
             .init_bases
             .get(slot as usize)
             .copied()
-            .flatten()
-            .ok_or_else(|| vec![invalid("栈槽根缺少帧内逐根初始化字节")])?;
+            .flatten(),
+        Some(init),
+    )
+    .map_err(|message| vec![invalid(message)])?;
+    if let Some(init_byte) = gate {
         typed.push(TypedRoot {
             word,
             root_kind: u32::try_from(class).expect("根类别适配 u32"),
-            init_byte: base
-                .checked_add(u32::try_from(bit).expect("根下标适配 u32"))
-                .ok_or_else(|| vec![invalid("帧内逐根初始化字节偏移溢出")])?,
+            init_byte,
         });
         return Ok(());
     }
