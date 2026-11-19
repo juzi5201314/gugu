@@ -304,9 +304,13 @@ pub(crate) fn run_package(options: &GlobalArgs) -> i32 {
         );
     }
     let package = &packages[0];
-    let files = match gugu_compiler::PackageFiles::from_directory(package.root()) {
+    let collected = match gugu_compiler::PackageFiles::from_directory(package.root()) {
         Ok(files) => files,
         Err(error) => return fail(format, 1, error.to_string()),
+    };
+    let files = match filter_archive_files(package, &collected) {
+        Ok(files) => files,
+        Err(message) => return fail(format, 1, message),
     };
     let checksum = files.checksum();
     let out_dir = options
@@ -340,6 +344,122 @@ pub(crate) fn run_package(options: &GlobalArgs) -> i32 {
         );
     }
     0
+}
+
+/// 归档内容规则（publishing-ecosystem 规范）：默认排除产物/凭据/锁文件；
+/// `include` 替换候选集合，`exclude` 随后删减，但不能删掉清单、选中 target 或 build task。
+fn filter_archive_files(
+    package: &gugu_compiler::Package,
+    files: &gugu_compiler::PackageFiles,
+) -> Result<gugu_compiler::PackageFiles, String> {
+    let manifest_path = package.root().join("gugu.toml");
+    let raw: toml::Value = toml::from_str(
+        &fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("读取 `{}` 失败：{e}", manifest_path.display()))?,
+    )
+    .map_err(|e| format!("解析 `{}` 失败：{e}", manifest_path.display()))?;
+    let read_list = |key: &str| -> Vec<String> {
+        raw.get("package")
+            .and_then(|package| package.get(key))
+            .and_then(toml::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(toml::Value::as_str)
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let include = read_list("include");
+    let exclude = read_list("exclude");
+    // 受保护集合：清单、build task、所有选中 target 的入口与源码根。
+    let mut protected: Vec<PathBuf> = vec![PathBuf::from("gugu.toml"), PathBuf::from("build.gg")];
+    for target in package.targets() {
+        for absolute in [target.entry(), target.source_root()] {
+            if let Ok(relative) = absolute.strip_prefix(package.root()) {
+                protected.push(relative.to_path_buf());
+            }
+        }
+    }
+    let is_protected = |path: &str| {
+        protected
+            .iter()
+            .any(|guard| Path::new(path) == guard || Path::new(path).starts_with(guard))
+    };
+    let filtered: std::collections::BTreeMap<String, Vec<u8>> = files
+        .files()
+        .iter()
+        .filter(|(path, _)| {
+            if include.is_empty() {
+                !default_excluded(path)
+            } else {
+                include.iter().any(|pattern| glob_match(pattern, path))
+            }
+        })
+        .filter(|(path, _)| is_protected(path) || !exclude.iter().any(|p| glob_match(p, path)))
+        .map(|(path, bytes)| (path.clone(), bytes.clone()))
+        .collect();
+    gugu_compiler::PackageFiles::new(filtered).map_err(|error| error.to_string())
+}
+
+/// 默认排除：锁文件、编辑器临时文件、系统文件与常见凭据文件。
+fn default_excluded(path: &str) -> bool {
+    let name = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default();
+    name == "gugu.lock"
+        || name == ".DS_Store"
+        || name == "Thumbs.db"
+        || name.ends_with('~')
+        || name.ends_with(".swp")
+        || name.ends_with(".swo")
+        || name == ".env"
+        || name.starts_with(".env.")
+        || name.ends_with(".pem")
+        || name.ends_with(".key")
+        || name.ends_with(".p12")
+        || name.ends_with(".pfx")
+        || name == "id_rsa"
+        || name == "id_dsa"
+        || name == "id_ecdsa"
+        || name == "id_ed25519"
+}
+
+/// 组件级 glob：`**` 匹配任意深度，`*`/`?` 匹配组件内字符；pattern 是路径前缀即命中子树。
+fn glob_match(pattern: &str, path: &str) -> bool {
+    let pattern: Vec<&str> = pattern.split('/').collect();
+    let path: Vec<&str> = path.split('/').collect();
+    glob_components(&pattern, &path)
+}
+
+fn glob_components(pattern: &[&str], path: &[&str]) -> bool {
+    if pattern.is_empty() {
+        return true;
+    }
+    if path.is_empty() {
+        return pattern.iter().all(|component| *component == "**");
+    }
+    if pattern[0] == "**" {
+        return glob_components(&pattern[1..], path) || glob_components(pattern, &path[1..]);
+    }
+    glob_component(pattern[0], path[0]) && glob_components(&pattern[1..], &path[1..])
+}
+
+fn glob_component(pattern: &str, name: &str) -> bool {
+    fn inner(pattern: &[u8], name: &[u8]) -> bool {
+        match pattern.first() {
+            None => name.is_empty(),
+            Some(b'*') => {
+                inner(&pattern[1..], name) || (!name.is_empty() && inner(pattern, &name[1..]))
+            }
+            Some(&c) => {
+                !name.is_empty() && (c == b'?' || c == name[0]) && inner(&pattern[1..], &name[1..])
+            }
+        }
+    }
+    inner(pattern.as_bytes(), name.as_bytes())
 }
 
 /// 按规范写规范 tar header：普通文件 0644、mtime 0、无 owner/group。
@@ -437,6 +557,18 @@ pub(crate) fn run_login(registry: &str, token_stdin: bool, options: &GlobalArgs)
                 format,
                 1,
                 format!("写入 `{}` 失败：{error}", path.display()),
+            );
+        }
+    }
+    // token 是 bearer 凭据：配置文件只许属主读写。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = fs::set_permissions(&path, fs::Permissions::from_mode(0o600)) {
+            return fail(
+                format,
+                1,
+                format!("设置 `{}` 权限失败：{error}", path.display()),
             );
         }
     }
@@ -695,6 +827,17 @@ mod tests {
             split_dependency("owner/name@"),
             ("owner/name@".to_owned(), "*".to_owned())
         );
+    }
+
+    #[test]
+    fn glob_match_prefix_and_star() {
+        assert!(glob_match("docs", "docs/guide.md"));
+        assert!(glob_match("*.pem", "cert.pem"));
+        assert!(glob_match("**/*.pem", "keys/a/cert.pem"));
+        assert!(glob_match("src/*.gg", "src/lib.gg"));
+        assert!(!glob_match("*.pem", "keys/cert.pem"));
+        assert!(!glob_match("a*c", "ax"));
+        assert!(glob_match("a*c", "axxxc"));
     }
 
     #[test]
