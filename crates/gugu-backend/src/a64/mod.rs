@@ -15,6 +15,7 @@ pub mod layout;
 mod locals;
 mod lower;
 pub mod machine;
+pub mod macho;
 pub mod metadata;
 mod print;
 pub mod reg;

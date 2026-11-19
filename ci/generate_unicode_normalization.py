@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""Generate Gugu's normalization data from the pinned Unicode Character Database.
+
+Download the three files named in SHA256 from:
+https://www.unicode.org/Public/17.0.0/ucd/
+Then run: python3 ci/generate_unicode_normalization.py /path/to/ucd
+Pass --check to verify the committed outputs without rewriting them.
+"""
+
+import argparse
+import hashlib
+from functools import cache
+from pathlib import Path
+
+VERSION = "17.0.0"
+SHA256 = {
+    "UnicodeData.txt": "2e1efc1dcb59c575eedf5ccae60f95229f706ee6d031835247d843c11d96470c",
+    "DerivedNormalizationProps.txt": "71fd6a206a2c0cdd41feb6b7f656aa31091db45e9cedc926985d718397f9e488",
+    "NormalizationTest.txt": "5019ffd530751a741900c849c0e010332f142a3612234639bd200b82138a87db",
+}
+ROOT = Path(__file__).resolve().parents[1]
+TABLE = ROOT / "crates/gugu-frontend/resources/std/text/normalization_tables.gg"
+FIXTURES = ROOT / "ci/e2e/fixtures"
+ROWS_PER_SHARD = 5000
+
+
+def read_ucd(directory, name):
+    data = (directory / name).read_bytes()
+    if hashlib.sha256(data).hexdigest() != SHA256[name]:
+        raise SystemExit(f"{name}: expected the Unicode {VERSION} release file")
+    return data.decode("utf-8")
+
+
+def uncomment(text):
+    for line in text.splitlines():
+        line = line.partition("#")[0].strip()
+        if line:
+            yield line
+
+
+def codepoints(text):
+    return tuple(int(token, 16) for token in text.split())
+
+
+def parse_unicode_data(text):
+    combining, canonical, compatibility = {}, {}, {}
+    for line in text.splitlines():
+        scalar, name, _, ccc, _, mapping, *_ = line.split(";")
+        scalar = int(scalar, 16)
+        if ccc != "0":
+            if name.endswith((", First>", ", Last>")):
+                raise ValueError("unexpected combining class on a UnicodeData range")
+            combining[scalar] = int(ccc)
+        if mapping.startswith("<"):
+            compatibility[scalar] = codepoints(mapping.split(">", 1)[1])
+        elif mapping:
+            canonical[scalar] = codepoints(mapping)
+    return combining, canonical, compatibility
+
+
+def composition_exclusions(text):
+    excluded = set()
+    for line in uncomment(text):
+        bounds, prop, *_ = map(str.strip, line.split(";"))
+        if prop == "Full_Composition_Exclusion":
+            first, _, last = bounds.partition("..")
+            excluded.update(range(int(first, 16), int(last or first, 16) + 1))
+    return excluded
+
+
+def pack_scalar(number):
+    if not 0 <= number < 1 << 21:
+        raise ValueError("table value needs more than 21 bits")
+    return bytes((number & 127, number >> 7 & 127, number >> 14))
+
+
+def decomposition_tables(canonical, compatibility):
+    @cache
+    def expand(scalar, use_compatibility):
+        mappings = compatible if use_compatibility else canonical
+        if scalar in mappings:
+            return tuple(
+                part
+                for child in mappings[scalar]
+                for part in expand(child, use_compatibility)
+            )
+        if 0xAC00 <= scalar <= 0xD7A3:
+            lv, t = divmod(scalar - 0xAC00, 28)
+            l, v = divmod(lv, 21)
+            return (0x1100 + l, 0x1161 + v) + ((0x11A7 + t,) if t else ())
+        return (scalar,)
+
+    def index(mappings, compatible_form):
+        entries = bytearray()
+        for scalar in sorted(mappings):
+            sequence = expand(scalar, compatible_form)
+            if sequence not in offsets:
+                offsets[sequence] = len(payload) // 3
+                payload.extend(b"".join(map(pack_scalar, sequence)))
+            if len(sequence) > 127:
+                raise ValueError("decomposition is too long")
+            entries.extend(pack_scalar(scalar) + pack_scalar(offsets[sequence]) + bytes([len(sequence)]))
+        return entries
+
+    compatible = canonical | compatibility
+    offsets, payload = {}, bytearray()
+    return index(canonical, False), index(compatible, True), payload
+
+
+def literal(data):
+    return '"' + "".join(
+        chr(value) if 32 <= value <= 126 and value not in (34, 92) else f"\\u{{{value:x}}}"
+        for value in data
+    ) + '"'
+
+
+def generate_tables(unicode_data, normalization_props):
+    combining, canonical, compatibility = parse_unicode_data(unicode_data)
+    excluded = composition_exclusions(normalization_props)
+    pairs = sorted((*value, cp) for cp, value in canonical.items() if cp not in excluded)
+    cindex, kindex, payload = decomposition_tables(canonical, compatibility)
+    tables = {
+        "combining_classes": b"".join(
+            pack_scalar(cp) + bytes([ccc & 127, ccc >> 7]) for cp, ccc in sorted(combining.items())
+        ),
+        "canonical_index": cindex,
+        "compatibility_index": kindex,
+        "decomposed_scalars": payload,
+        "composition_pairs": b"".join(pack_scalar(a) + pack_scalar(b) + pack_scalar(cp) for a, b, cp in pairs),
+    }
+    header = f"""// Generated by ci/generate_unicode_normalization.py from Unicode {VERSION}.
+// UnicodeData.txt and DerivedNormalizationProps.txt; see resources/unicode/LICENSE.txt.
+// Table numbers use 7 bits per byte so they can be stored as static UTF-8.
+// Scalars and offsets use three bytes, least significant first.
+// CCC records: scalar, class (2 bytes). Decomposition index: scalar, offset in
+// decomposed_scalars (in scalars, not bytes), count (1 byte). Pair records:
+// first, second, composed. Each index is sorted by its key.
+// Accessors return immutable image data as strings.
+
+"""
+    return (header + "".join(
+        f"pub fn {name}() string = {literal(data)}\n"
+        for name, data in tables.items()
+    )).encode("ascii")
+
+
+def generate_fixtures(text):
+    # Five columns per row; each column is a one-byte length followed by UTF-8.
+    fixture = bytearray()
+    row = 0
+    for line in uncomment(text):
+        if line.startswith("@"):
+            continue
+        *columns, end = line.split(";")
+        if len(columns) != 5 or end:
+            raise ValueError("expected five semicolon-terminated normalization columns")
+        for column in columns:
+            field = "".join(map(chr, codepoints(column))).encode("utf-8")
+            fixture.extend(bytes([len(field)]) + field)
+        row += 1
+        if row % ROWS_PER_SHARD == 0:
+            yield fixture
+            fixture = bytearray()
+    if fixture:
+        yield fixture
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("ucd", type=Path)
+    parser.add_argument("--check", action="store_true")
+    args = parser.parse_args()
+    outputs = {
+        TABLE: generate_tables(
+            read_ucd(args.ucd, "UnicodeData.txt"),
+            read_ucd(args.ucd, "DerivedNormalizationProps.txt"),
+        ),
+    }
+    for shard, content in enumerate(generate_fixtures(read_ucd(args.ucd, "NormalizationTest.txt"))):
+        outputs[FIXTURES / f"NormalizationTest.{shard}.utf8"] = content
+    for path, content in outputs.items():
+        if args.check:
+            if not path.exists() or path.read_bytes() != content:
+                raise SystemExit(f"out of date: {path.relative_to(ROOT)}")
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+
+
+if __name__ == "__main__":
+    main()

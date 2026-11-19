@@ -11,6 +11,9 @@ use AtomicWidth::*;
 #[path = "context_vm_tests.rs"]
 mod context_vm;
 
+#[path = "darwin_process_tests.rs"]
+mod darwin_process;
+
 fn instructions(fragment: &Fragment) -> Vec<Inst> {
     let (words, remainder) = fragment.bytes.as_chunks::<4>();
     assert!(remainder.is_empty());
@@ -49,6 +52,317 @@ fn target(code: &[Inst], offset: u32) -> u32 {
         })
         .unwrap();
     u32::try_from(i64::from(offset) + displacement).unwrap()
+}
+
+#[test]
+fn darwin_net_dispatch_uses_the_darwin_socket_and_poller_abi() {
+    use crate::{NativeImport, macho::LIB_SYSTEM};
+
+    let methods = [
+        (0, "socket", 3),
+        (1, "setsockopt", 5),
+        (2, "bind", 3),
+        (3, "listen", 2),
+        (4, "accept", 3),
+        (5, "getsockname", 3),
+        (6, "getpeername", 3),
+        (7, "close", 1),
+        (8, "kqueue", 0),
+        (9, "kevent", 6),
+        (10, "poll", 3),
+        (21, "connect", 3),
+        (22, "shutdown", 2),
+        (23, "getsockopt", 5),
+        (24, "recvfrom", 6),
+        (25, "sendto", 6),
+        (26, "fcntl", 2),
+        (27, "recvmsg", 3),
+        (28, "disconnectx", 3),
+        (29, "sigaction", 3),
+    ];
+    assert_eq!(
+        darwin_net_imports(),
+        methods
+            .iter()
+            .map(|&(_, name, _)| name)
+            .chain(["__error"])
+            .map(|name| NativeImport::function(LIB_SYSTEM, name))
+            .collect::<Vec<_>>()
+    );
+    let fragment = darwin_net_dispatch();
+    let code = instructions(&fragment);
+    let request = Reg::x(19);
+    let x0 = Reg::x(0);
+    let xzr = Reg::zr(Width::X);
+    assert_eq!(code[0].operands, [reg(SP), reg(SP), add_imm(32)]);
+    assert_eq!(code[5].operands, [reg(request), reg(Reg::x(1)), add_imm(0)]);
+    assert!(memory(&code[6..7], "str.X.Unsigned", xzr, request, 72));
+    assert!(memory(&code[7..8], "str.X.Unsigned", xzr, request, 80));
+    assert_eq!(code[8].operands, [reg(xzr), reg(x0), add_imm(19)]);
+    assert_eq!(form(&code[10]), "adr");
+    let callback = target(&code, 40);
+    assert_eq!(
+        at(&code, callback).operands,
+        [reg(SP), reg(SP), add_imm(16)]
+    );
+
+    let calls = &fragment.relocations;
+    assert_eq!(calls.len(), methods.len() + 3);
+    let errno = calls[methods.len()].offset;
+    assert!(memory(
+        &code[(errno / 4 + 1) as usize..],
+        "ldr.W.Unsigned",
+        Reg::w(0),
+        x0,
+        0
+    ));
+    assert!(memory(
+        &code[(errno / 4 + 2) as usize..],
+        "str.X.Unsigned",
+        x0,
+        request,
+        80
+    ));
+    let success = target(&code, 44);
+    assert!(memory(
+        &code[(success / 4) as usize..],
+        "str.X.Unsigned",
+        x0,
+        request,
+        72
+    ));
+    assert!(memory(
+        &code[(success / 4 + 1) as usize..],
+        "ldr.X.Unsigned",
+        x0,
+        request,
+        72
+    ));
+    for (&(op, name, argc), site) in methods.iter().zip(calls) {
+        assert_eq!(site.relocation.kind, RelocKind::Call26);
+        assert_eq!(site.relocation.target, format!("__gugu_darwin_c_{name}"));
+        let args = site.offset - 4 * argc - if op == 26 { 8 } else { 0 };
+        assert_eq!(
+            at(&code, args - 8).operands,
+            [reg(xzr), reg(x0), add_imm(op)]
+        );
+        for i in 0..argc {
+            let arg = at(&code, args + 4 * i);
+            assert_eq!(form(arg), "ldr.X.Unsigned");
+            assert_eq!(
+                arg.operands,
+                [
+                    reg(Reg::x(i as u8)),
+                    mem(request, AddressMode::Unsigned(i64::from(i) * 8))
+                ]
+            );
+        }
+        if op == 26 {
+            let n = (site.offset / 4) as usize;
+            assert!(memory(
+                &code[n - 2..n - 1],
+                "ldr.W.Unsigned",
+                Reg::w(10),
+                request,
+                16
+            ));
+            assert!(memory(&code[n - 1..n], "str.W.Unsigned", Reg::w(10), SP, 0));
+        }
+        let compare = site.offset
+            + if matches!(op, 24 | 25 | 27) {
+                4
+            } else {
+                assert_eq!(form(at(&code, site.offset + 4)), "sbfm.X");
+                8
+            };
+        assert_eq!(form(at(&code, compare)), "adds.X.imm");
+        assert_eq!(at(&code, compare).operands, [reg(xzr), reg(x0), add_imm(1)]);
+        assert_eq!(at(&code, compare + 4).operands[1], condition(0));
+        assert_eq!(target(&code, compare + 4), errno);
+        assert_eq!(target(&code, compare + 8), success);
+    }
+    for (site, (name, offset)) in calls[methods.len()..].iter().zip([
+        ("__error", errno),
+        ("close", callback + 16),
+        ("__error", callback + 24),
+    ]) {
+        assert_eq!(site.offset, offset);
+        assert_eq!(site.relocation.kind, RelocKind::Call26);
+        assert_eq!(site.relocation.target, format!("__gugu_darwin_c_{name}"));
+    }
+    assert_eq!(at(&code, callback + 20).operands[0], reg(Reg::w(0)));
+    assert_eq!(target(&code, callback + 20), callback + 32);
+    let sigaction = calls[methods.len() - 1].offset;
+    let signal_dispatch = target(&code, sigaction - 16);
+    assert_eq!(
+        at(&code, signal_dispatch).operands,
+        [reg(xzr), reg(x0), add_imm(30)]
+    );
+    let adr = signal_dispatch + 8;
+    assert_eq!(form(at(&code, adr)), "adr");
+    assert_eq!(at(&code, adr).operands[0], reg(x0));
+    assert_eq!(target(&code, adr + 4), success);
+    let handler = target(&code, adr);
+    assert_eq!(handler, callback + 48);
+    assert_eq!(handler as usize + 4, fragment.bytes.len());
+    assert_eq!(form(at(&code, handler)), "ret");
+    assert_eq!(at(&code, handler).operands, [reg(LR)]);
+}
+
+#[test]
+fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
+    use crate::{NativeImport, macho::LIB_SYSTEM, runtime::foreign_schema::*};
+
+    let names = [
+        "read",
+        "write",
+        "open",
+        "close",
+        "lseek",
+        "stat",
+        "lstat",
+        "fstat",
+        "ftruncate",
+        "fsync",
+        "fcntl",
+        "opendir",
+        "readdir",
+        "closedir",
+        "mkdir",
+        "unlink",
+        "rmdir",
+        "rename",
+        "link",
+        "symlink",
+        "readlink",
+        "realpath",
+        "__error",
+    ];
+    assert_eq!(
+        darwin_fd_imports(),
+        names.map(|name| NativeImport::function(LIB_SYSTEM, name)),
+    );
+    let fragment = darwin_fd_dispatch();
+    let code = instructions(&fragment);
+    let x0 = Reg::x(0);
+    let request = Reg::x(19);
+    assert_eq!(code[0].operands, [reg(SP), reg(SP), add_imm(32)]);
+    assert!(memory(
+        &code,
+        "ldr.X.Unsigned",
+        Reg::x(9),
+        request,
+        NATIVE_REQUEST_OPERATION
+    ));
+    assert!(memory(
+        &code,
+        "str.X.Unsigned",
+        x0,
+        request,
+        NATIVE_REQUEST_VALUE
+    ));
+    assert!(memory(
+        &code,
+        "str.X.Unsigned",
+        x0,
+        request,
+        NATIVE_REQUEST_ERROR
+    ));
+    assert_eq!(fragment.relocations.len(), names.len() + 1);
+    let errno = fragment.relocations.last().unwrap().offset;
+    assert!(memory(
+        &code[(errno / 4) as usize..],
+        "ldr.W.Unsigned",
+        Reg::w(0),
+        x0,
+        0
+    ));
+    let clear_call = &fragment.relocations[12];
+    assert_eq!(clear_call.relocation.kind, RelocKind::Call26);
+    assert_eq!(clear_call.relocation.target, "__gugu_darwin_c___error");
+    let clear = at(&code, clear_call.offset + 4);
+    assert_eq!(form(clear), "str.W.Unsigned");
+    assert_eq!(
+        clear.operands,
+        [reg(Reg::zr(Width::W)), mem(x0, AddressMode::Unsigned(0))]
+    );
+    let calls = fragment
+        .relocations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| (index != 12).then_some(call));
+    for (index, (site, name)) in calls.zip(names).enumerate() {
+        assert_eq!(site.relocation.kind, RelocKind::Call26);
+        assert_eq!(site.relocation.target, format!("__gugu_darwin_c_{name}"));
+        if name == "__error" {
+            break;
+        }
+        let variadic = matches!(name, "open" | "fcntl");
+        let fixed = [
+            3usize, 3, 2, 1, 3, 2, 2, 2, 2, 1, 2, 1, 1, 1, 2, 1, 1, 2, 2, 2, 3, 2,
+        ][index];
+        let end = (site.offset / 4) as usize;
+        let args_start = end - fixed - if variadic { 2 } else { 0 };
+        let args = &code[args_start..end];
+        let dispatch = args_start - if name == "readdir" { 4 } else { 2 };
+        assert_eq!(form(&code[dispatch]), "subs.X.imm");
+        assert_eq!(code[dispatch].operands[2], add_imm(index));
+        for i in 0..fixed {
+            assert!(memory(
+                args,
+                "ldr.X.Unsigned",
+                Reg::x(i as u8),
+                request,
+                NATIVE_REQUEST_ARGUMENTS + i * 8
+            ));
+        }
+        if variadic {
+            let mode = Reg::w(10);
+            assert!(!memory(
+                args,
+                "ldr.X.Unsigned",
+                Reg::x(2),
+                request,
+                NATIVE_REQUEST_ARGUMENTS + 16
+            ));
+            assert!(memory(
+                args,
+                "ldr.W.Unsigned",
+                mode,
+                request,
+                NATIVE_REQUEST_ARGUMENTS + 16
+            ));
+            assert!(memory(args, "str.W.Unsigned", mode, SP, 0));
+        }
+        let wide = matches!(name, "read" | "write" | "lseek" | "readlink");
+        if matches!(name, "opendir" | "readdir" | "realpath") {
+            let readdir = name == "readdir";
+            let compare = end + if readdir { 2 } else { 1 };
+            assert_eq!(form(&code[compare]), "subs.X.imm");
+            assert_eq!(
+                code[compare].operands,
+                [reg(Reg::zr(Width::X)), reg(x0), add_imm(0)]
+            );
+            assert_eq!(target(&code, (compare as u32 + 1) * 4), errno);
+            let store = if readdir { end + 1 } else { end + 3 };
+            assert!(memory(
+                &code[store..=store],
+                "str.X.Unsigned",
+                x0,
+                request,
+                NATIVE_REQUEST_VALUE
+            ));
+            continue;
+        }
+        assert_eq!(
+            form(&code[end + 1]),
+            if wide { "adds.X.imm" } else { "sbfm.X" }
+        );
+        assert_eq!(
+            target(&code, site.offset + if wide { 8 } else { 12 }),
+            errno
+        );
+    }
 }
 
 #[test]

@@ -370,11 +370,25 @@ rt0 和 runtime 通过 PE 导入表调用目标注册表允许的系统 DLL；�
 
 ### macOS（内部验证）
 
+内部 arm64 Mach-O 的 Function 导入通过调用桩跳转到 dyld 绑定的地址；Data 导入没有调用桩。调用桩不负责建立 AAPCS64 调用现场或切换栈。
+
+内部 arm64 Mach-O 的 `LC_MAIN` 将 Darwin 的 `argc`、`argv` 和 `envp` 传给 rt0；`rt0_start` 正常返回时，进程以其返回值调用 libSystem 的 `exit`。如果镜像已导入 libSystem 的 `_exit`，入口复用该导入。添加入口不改变已有调用桩的绑定目标。这一入口不构成目标登记。
+
 rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字、进程和信号订阅使用同一标准库语义，但原生结构、信号编号和错误码不与 Linux 互换。普通信号由 kqueue 收集；订阅期间的原生处理器不执行用户代码，也不把忽略信号的 disposition 传给通过 exec 启动的子进程。
+
+内部 arm64 文件适配器在原生栈上处理描述符、目录和路径请求。传给 `open` 和文件描述符 `fcntl` 的可变整数实参位于栈上，而非固定参数寄存器；`stat`、`lstat`、`fstat`、`opendir` 和 `readdir` 绑定到 arm64 的无后缀 libSystem 导出。失败把 Darwin errno 写回请求；适配器不负责调度或发布请求完成。
+
+每次调用 `readdir` 前清零线程的 errno；返回空指针且 errno 为零表示读完，空指针且 errno 非零表示失败。非空目录项指针借自对应目录流，在下一次读取或关闭该流前有效。
 
 Darwin 的对齐地址预留先将请求长度向上取整为整页，再裁剪对齐所需的额外地址空间；裁剪失败时不得报告预留成功。
 
+内部 arm64 进程适配器在原生栈上通过 libSystem 创建进程及管道，并支持非阻塞观察、终止和管道 I/O。`posix_spawn` 及其文件动作直接返回错误码；其他入口在失败时读取 Darwin errno。管道两端设置 close-on-exec，父进程端设置非阻塞并抑制 SIGPIPE。重定向用的描述符副本也设置 close-on-exec；传给 `fcntl` 的可变整数实参位于栈上。
+
 Darwin datagram 接收使用 `recvmsg` 的返回标志识别 `MSG_TRUNC`，不能将写满缓冲的报文误判为完整报文。
+
+内部 arm64 套接字和 kqueue 适配器在原生栈上通过 libSystem 执行网络请求，使用与 x86_64 Darwin 相同的请求结果和 Darwin errno。网络 `fcntl` 的可变整数实参在栈上传递；`sendto`、`recvfrom` 和 `recvmsg` 的字节计数保留完整的 `ssize_t` 宽度。原生 socket 关闭回调正常返回零，失败返回 Darwin errno。
+
+内部 arm64 信号订阅与 x86_64 Darwin 共用同一运行时协议：用 kqueue 的 `EVFILT_SIGNAL` 收集信号计数，通过 libSystem 的 `sigaction` 安装只返回的原生处理器并保存旧 disposition。最后一个订阅关闭时，运行时同步恢复旧 disposition，不等待调度器下一次轮询。
 
 Darwin 用 `disconnectx` 解除通配地址 UDP socket 的 peer，保留本地端口。Darwin 会清除已连接 UDP socket 的本地 IP，且同一 socket 无法重新绑定；原先绑定具体地址的 UDP socket 在调用原生断开前返回 `Unsupported`，保留绑定和 peer。Unix datagram 的 `AF_UNSPEC` 被拒绝时，只有确认 native socket 已不再关联 peer 才提交断开状态。
 
