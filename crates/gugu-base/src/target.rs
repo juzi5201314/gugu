@@ -8,6 +8,9 @@ pub enum TargetName {
     X86_64Linux,
     /// x86_64 Windows，使用 PE32+ 与 Microsoft x64 ABI。
     X86_64Windows,
+    /// x86_64 macOS internal compiler target; not accepted by the registry.
+    #[doc(hidden)]
+    X86_64Macos,
 }
 
 impl TargetName {
@@ -22,11 +25,22 @@ impl TargetName {
         }
     }
 
+    /// 解码编译器内部产物的目标名，不参与命令行目标注册。
+    #[doc(hidden)]
+    pub fn from_compiler_artifact(value: &str) -> Result<Self, TargetParseError> {
+        if value == Self::X86_64Macos.name() {
+            Ok(Self::X86_64Macos)
+        } else {
+            Self::parse(value)
+        }
+    }
+
     /// 返回规范目标名。
     pub fn name(self) -> &'static str {
         match self {
             Self::X86_64Linux => "x86_64-linux",
             Self::X86_64Windows => "x86_64-windows",
+            Self::X86_64Macos => "x86_64-macos",
         }
     }
 
@@ -41,9 +55,12 @@ impl TargetName {
             std::sync::LazyLock::new(|| TargetName::X86_64Linux.build_descriptor());
         static WINDOWS: std::sync::LazyLock<TargetDescriptor> =
             std::sync::LazyLock::new(|| TargetName::X86_64Windows.build_descriptor());
+        static MACOS: std::sync::LazyLock<TargetDescriptor> =
+            std::sync::LazyLock::new(|| TargetName::X86_64Macos.build_descriptor());
         match self {
             Self::X86_64Linux => *LINUX,
             Self::X86_64Windows => *WINDOWS,
+            Self::X86_64Macos => *MACOS,
         }
     }
 
@@ -56,15 +73,18 @@ impl TargetName {
             os: match self {
                 Self::X86_64Linux => OperatingSystem::Linux,
                 Self::X86_64Windows => OperatingSystem::Windows,
+                Self::X86_64Macos => OperatingSystem::Macos,
             },
             object_format: match self {
                 Self::X86_64Linux => ObjectFormat::Elf64,
                 Self::X86_64Windows => ObjectFormat::Pe32Plus,
+                Self::X86_64Macos => ObjectFormat::MachO64,
             },
             pointer_width: 64,
             rt0: match self {
                 Self::X86_64Linux => Rt0Kind::LinuxSyscall,
                 Self::X86_64Windows => Rt0Kind::WindowsThinImport,
+                Self::X86_64Macos => Rt0Kind::MacosLibSystem,
             },
             page_size: TARGET_PAGE_SIZE,
             cpu_baseline: CpuBaseline::X86_64V1,
@@ -173,6 +193,11 @@ const TARGET_SYSROOTS: &[SysrootEntry] = &[
         name: TargetName::X86_64Windows,
         interpreter: None,
         import_libraries: &["ntdll.dll", "kernel32.dll"],
+    },
+    SysrootEntry {
+        name: TargetName::X86_64Macos,
+        interpreter: None,
+        import_libraries: &["/usr/lib/libSystem.B.dylib"],
     },
 ];
 
@@ -370,7 +395,9 @@ impl PointerCompression {
     /// 按目标名返回能力。
     pub const fn for_target(name: TargetName) -> Self {
         match name {
-            TargetName::X86_64Linux | TargetName::X86_64Windows => Self::x86_64(),
+            TargetName::X86_64Linux | TargetName::X86_64Windows | TargetName::X86_64Macos => {
+                Self::x86_64()
+            }
         }
     }
 }

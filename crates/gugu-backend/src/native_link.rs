@@ -61,6 +61,9 @@ impl NativeLink {
         target: crate::TargetName,
         lir: &crate::lir::Validated,
     ) -> Self {
+        if target == crate::TargetName::X86_64Macos {
+            return self;
+        }
         let network = lir.bodies().iter().any(|body| {
             body.instructions.iter().any(|instruction| {
                 matches!(

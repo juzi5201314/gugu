@@ -631,9 +631,9 @@ impl Validated {
         }
         *hash.finalize().as_bytes()
     }
-    /// LIR world 的目标；world 只由已登记目标构造。
+    /// LIR world 的编译目标。
     pub fn target(&self) -> crate::TargetName {
-        crate::TargetName::parse(&self.world.target).expect("LIR world 目标已登记")
+        crate::TargetName::from_compiler_artifact(&self.world.target).expect("LIR world 目标有效")
     }
     pub fn dump(&self, oracle: &dyn target::TargetOracle) -> String {
         dump::world(&self.world, oracle)

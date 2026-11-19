@@ -4,10 +4,11 @@ use super::{ModuleBindings, ModuleId, ModuleTarget, ParsedModule, PendingImport}
 
 /// 由 std 源码声明的预导入名与其声明模块。语言 trait 等编译器挂钩的预导入名按名字
 /// 直接解析，不经导入表。
-const SOURCE_PRELUDE: [(&str, &str); 7] = [
+const SOURCE_PRELUDE: [(&str, &str); 8] = [
     ("Vec", "std.vec"),
     ("HashMap", "std.collections"),
     ("HashSet", "std.collections"),
+    ("Hasher", "std.hash"),
     ("Path", "std.path"),
     ("Duration", "std.time"),
     ("Read", "std.io"),

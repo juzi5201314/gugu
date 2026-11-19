@@ -132,6 +132,7 @@ impl Machine {
     pub(crate) fn run(&mut self, sequence: &Sequence) -> Stop {
         let mut pc = 0;
         let mut comparison = (0, 0);
+        let mut carry = false;
         for _ in 0..1024 {
             let inst = &sequence.instructions[pc];
             let form = &FORMS[inst.form.index()];
@@ -190,7 +191,11 @@ impl Machine {
                 "add" | "sub" | "and" | "or" | "shl" | "shr" => {
                     let (a, b) = (self.value(&ops[0]), self.value(&ops[1]));
                     let value = match form.mnemonic {
-                        "add" => a.wrapping_add(b),
+                        "add" => {
+                            let (result, overflow) = a.overflowing_add(b);
+                            carry = overflow;
+                            result
+                        }
                         "sub" => a.wrapping_sub(b),
                         "or" => a | b,
                         "shl" => a.wrapping_shl((b & 63) as u32),
@@ -209,14 +214,18 @@ impl Machine {
                 }
                 "neg" => self.store(&ops[0], self.value(&ops[0]).wrapping_neg()),
                 "test" => comparison = (self.value(&ops[0]) & self.value(&ops[1]), 0),
-                "cmp" => comparison = (self.value(&ops[0]), self.value(&ops[1])),
-                "jmp" | "je" | "jne" | "jl" | "jg" | "jge" | "jae" | "jbe" => {
+                "cmp" => {
+                    comparison = (self.value(&ops[0]), self.value(&ops[1]));
+                    carry = comparison.0 < comparison.1;
+                }
+                "jmp" | "je" | "jne" | "jl" | "jg" | "jge" | "jae" | "jb" | "jbe" => {
                     let (a, b) = comparison;
                     let take = match form.mnemonic {
                         "je" => a == b,
                         "jne" => a != b,
                         "jl" => (a as i64) < (b as i64),
                         "jae" => a >= b,
+                        "jb" => carry,
                         "jbe" => a <= b,
                         "jg" => {
                             i64::from_ne_bytes(a.to_ne_bytes())
@@ -291,6 +300,50 @@ impl Machine {
         assert!(self.script.is_empty(), "未消费的宿主调用");
         stop
     }
+}
+
+#[test]
+fn darwin_reservation_trims_whole_pages_and_releases_failed_mapping() {
+    let reserve = |bytes, script: &[(&'static str, u64)]| {
+        let mut machine = Machine::new(script);
+        machine.set_reg(Rax, bytes);
+        machine.set_reg(Rbx, 0x2000);
+        machine.managed = Some(|machine, symbol| {
+            let Symbol::External { name, .. } = symbol else {
+                panic!("预期 Darwin native 调用");
+            };
+            assert_eq!(machine.get(Rsp) % 16, 0);
+            let args = [Rdi, Rsi].map(|reg| machine.get(reg)).to_vec();
+            machine.host(name.strip_prefix(darwin::C_PREFIX).unwrap(), args, false);
+        });
+        let mut builder = Builder::new();
+        darwin::range(&mut builder, crate::runtime::PlatformOp::ReserveAligned);
+        assert_eq!(machine.execute(builder), Stop::Return);
+        assert_eq!(machine.get(Rsp), STACK);
+        (machine.get(Rax), machine.calls)
+    };
+    let (base, calls) = reserve(0x1180, &[("mmap", 0x101000), ("munmap", 0), ("munmap", 0)]);
+    assert_eq!(base, 0x102000);
+    assert_eq!(
+        calls,
+        [
+            ("mmap".into(), vec![0, 0x4000]),
+            ("munmap".into(), vec![0x101000, 0x1000]),
+            ("munmap".into(), vec![0x104000, 0x1000]),
+        ]
+    );
+    let (base, calls) = reserve(
+        0x1180,
+        &[
+            ("mmap", 0x101000),
+            ("munmap", 0),
+            ("munmap", u64::MAX),
+            ("munmap", 0),
+        ],
+    );
+    assert_eq!(base, 0);
+    assert_eq!(calls.last().unwrap().1, [0x101000, 0x4000]);
+    assert_eq!(reserve(u64::MAX, &[]), (0, Vec::new()));
 }
 
 #[test]

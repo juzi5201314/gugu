@@ -14,6 +14,7 @@ pub(super) fn symbols(target: TargetName) -> FragmentBlob {
     let names = match target {
         TargetName::X86_64Linux => LINUX_SYMBOLS,
         TargetName::X86_64Windows => WINDOWS_SYMBOLS,
+        TargetName::X86_64Macos => &["_NSGetEnviron", "setenv", "unsetenv", "getenv"],
     };
     for (op, &name) in names.iter().enumerate() {
         let next = b.label();
@@ -50,6 +51,12 @@ pub(super) fn symbols(target: TargetName) -> FragmentBlob {
             TargetName::X86_64Windows => {
                 b.emit("mov", MOV, Access::Read, vec![iat(name), reg(gpr(Rax))]);
             }
+            TargetName::X86_64Macos if op == 0 => {
+                adjust(&mut b, "sub", Rsp, 8);
+                darwin::c_call(&mut b, name);
+                adjust(&mut b, "add", Rsp, 8);
+            }
+            TargetName::X86_64Macos => darwin::c_address(&mut b, Rax, name),
         }
         ret(&mut b);
         b.define(next);
@@ -70,6 +77,20 @@ pub(super) fn startup(target: TargetName) -> FragmentBlob {
     set(&mut b, R12, 72, 0);
     set(&mut b, R12, 80, 0);
     match target {
+        TargetName::X86_64Macos => {
+            let cwd = b.label();
+            compare(&mut b, Rax, 0);
+            jump(&mut b, "je", cwd);
+            compare(&mut b, Rax, 1);
+            jump(&mut b, "jne", invalid);
+            set(&mut b, R12, 80, 45);
+            jump(&mut b, "jmp", done);
+            b.define(cwd);
+            load(&mut b, Rdi, R12, 8);
+            load(&mut b, Rsi, R12, 16);
+            darwin::c_call(&mut b, "getcwd");
+            darwin::finish_result(&mut b, 72, 80, 0);
+        }
         TargetName::X86_64Linux => {
             let cwd = b.label();
             compare(&mut b, Rax, 0);

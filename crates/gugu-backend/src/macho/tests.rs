@@ -33,6 +33,7 @@ fn request(arch: Arch) -> MachORequest {
             section(Segment::Data, "__data", 8, SectionContent::Data(vec![0; 8])),
             section(Segment::Data, "__bss", 16, SectionContent::ZeroFill(0x40)),
         ],
+        libraries: Vec::new(),
         imports: vec![
             Import {
                 dylib: LIB_SYSTEM.to_owned(),
@@ -71,6 +72,52 @@ fn request(arch: Arch) -> MachORequest {
 
 fn at(section: usize, offset: u64) -> Location {
     Location { section, offset }
+}
+
+#[test]
+fn native_imports_use_dyld_slots_on_both_architectures() {
+    use crate::{NativeImport, NativeImportKind};
+
+    for arch in [Arch::X86_64, Arch::Arm64] {
+        let mut request = request(arch);
+        let slots = append_native_imports(
+            &mut request,
+            &[
+                NativeImport::function(LIB_SYSTEM, "write"),
+                NativeImport::library("/usr/lib/libresolv.9.dylib"),
+                NativeImport::data(LIB_SYSTEM, "environ"),
+            ],
+        )
+        .unwrap();
+        assert_eq!(slots["write"].kind, NativeImportKind::Function);
+        assert_eq!(slots["environ"].kind, NativeImportKind::Data);
+        assert_eq!(slots.len(), 2);
+        assert_eq!(request.imports[2].name, "_write");
+        assert_eq!(request.imports[3].name, "_environ");
+        assert!(dylibs(&request).contains(&"/usr/lib/libresolv.9.dylib"));
+        let stubs = if arch == Arch::X86_64 {
+            let stubs = crate::x64::macho::append_import_stubs(&mut request, &slots).unwrap();
+            assert_eq!(stubs.len(), 1);
+            Some(stubs["write"])
+        } else {
+            None
+        };
+        let layout = layout(&request).unwrap();
+        let file = link(&request).unwrap().bytes;
+        let slot = slots["write"].at;
+        let got = layout.sections[slot.section];
+        assert_eq!(u64_at(&file, (got.fileoff + slot.offset) as usize) >> 63, 1);
+        if let Some(stub) = stubs {
+            let code = layout.sections[stub.section];
+            let pc = (code.fileoff + stub.offset) as usize;
+            assert_eq!(&file[pc..pc + 2], &[0xff, 0x25]);
+            let displacement = u32_at(&file, pc + 2) as i32;
+            assert_eq!(
+                (code.addr + stub.offset + 6).checked_add_signed(i64::from(displacement)),
+                Some(got.addr + slot.offset)
+            );
+        }
+    }
 }
 
 fn u32_at(bytes: &[u8], at: usize) -> u32 {

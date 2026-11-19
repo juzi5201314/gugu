@@ -739,9 +739,6 @@ impl<'a> Model<'a> {
                     if let Some(t) = params.get(parts[0]) {
                         return Ok(t.clone());
                     }
-                    if parts[0] == "Hasher" {
-                        return Ok(self.hasher_type());
-                    }
                     if let Some(t) = Ty::primitive(parts[0]) {
                         return Ok(if t == Ty::Formatter {
                             self.formatter_type()

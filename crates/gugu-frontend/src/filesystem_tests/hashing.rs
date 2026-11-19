@@ -191,3 +191,30 @@ fn unsupported_builtin_hash_has_explicit_diagnostic() {
         compiled.diagnostics().items()
     );
 }
+
+#[test]
+fn prelude_hasher_paths_and_explicit_tuple_hash_impl() {
+    let source = r#"
+        use std.io.{println}
+        struct Wrapper[T] { value: T }
+        impl Wrapper[Hasher] {
+            fn digest(self: &Self) uint = self.value.finish()
+        }
+        struct Opaque { id: int }
+        impl Hash for (Opaque, int) {
+            fn hash(self: &Self, hasher: &Hasher) { hasher.write_int(99) }
+        }
+        fn digest[T: Hash](value: T) uint {
+            let h = Hasher::with_seed(5)
+            value.hash(&h)
+            h.finish()
+        }
+        fn main() {
+            let h = Hasher::with_seed(5)
+            h.write_int(99)
+            let wrapped = Wrapper { value: h }
+            println(wrapped.digest() == digest((Opaque { id: 1 }, 2)))
+        }
+    "#;
+    assert_eq!(printed(source), "true\n");
+}
