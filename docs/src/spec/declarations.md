@@ -111,7 +111,6 @@ fn println[Ts: Print...](...args: Ts) { ... }
 
 ## 结构体、枚举、`const`、`type`、`static`
 
-<!-- docs-example: gap 未解析名称 `K` -->
 ```gugu
 struct Point {
     pub x: int
@@ -146,6 +145,8 @@ static COUNTER: int = 0
 `const` 必须 comptime 可求值；若初始化器不依赖 late 值，则在早期 comptime 完成；若直接或传递依赖 `type_id_count()` 或 comptime `TypeId.as_int()`，则按 late comptime 完成。类型可省略，规则与 `let` 相同。`const` 没有稳定地址，编译器可以内联副本；需要早期结果的位置不能引用 late `const`。
 
 `type Name = T` / `type Name[T] = ...`：若右侧**不是** `impl Trait`，这是透明别名（`Ids` 与 `Vec[int]` 同一类型，不能给别名单独 `impl`）。若右侧是 `impl Trait`（TAIT），这是不透明别名，见 [类型 · impl Trait](types.md)。名义包装用单字段元组结构体 `struct Meters(int)`。
+
+透明别名的类型参数在右侧可见；使用时按声明顺序替换为类型实参，包括嵌套别名与泛型函数中的类型参数。`Table[int]` 在绑定、函数签名与字段等所有类型位置都与 `Vec[int]` 相同，不引入新的类型身份。实参数量必须与别名的参数数量一致；缺少、多余或完全省略泛型别名的实参都是编译错误。无参数别名仍直接以名字使用。
 
 `static NAME: T = expr`：进程寿命、有稳定地址。`T` 与存储形状必须在早期确定，`expr` 必须由早期或 late comptime 求值；late 初始化只能填写规范允许的 late 标量或早期已固定形状的聚合，不能改变定义、布局或可达性。若 `T` 含堆引用，该 static 是 GC 根。读写规则与普通绑定一样（默认可变）。多个协程无同步地写同一 `static` 是数据竞争。禁止模块级 `let`。
 
