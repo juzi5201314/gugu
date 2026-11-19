@@ -42,3 +42,24 @@
 - [调度器](internals/scheduler.md)
 - [x86_64 后端](internals/backend.md)
 - [性能与延迟门禁](internals/performance.md)
+
+# 教程
+
+- [语言入门](guide/getting-started.md)
+- [值、句柄与资源](guide/values-handles.md)
+- [并发与取消](guide/concurrency.md)
+- [comptime 与宏](guide/comptime-macros.md)
+- [包与构建](guide/package-build.md)
+- [FFI 与 unsafe](guide/ffi-unsafe.md)
+- [测试](guide/testing.md)
+- [部署与发布](guide/deployment.md)
+
+# 参考手册
+
+- [语法速查](reference/syntax-cheatsheet.md)
+- [类型与 trait 速查](reference/types-traits.md)
+- [标准库 API](reference/stdlib-api.md)
+- [CLI 命令](reference/cli.md)
+- [诊断码](reference/diagnostics.md)
+- [运行时配置](reference/runtime-config.md)
+- [ABI 与兼容性矩阵](reference/abi-compat.md)
