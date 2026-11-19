@@ -67,6 +67,17 @@ fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
         "ftruncate",
         "fsync",
         "fcntl",
+        "opendir",
+        "readdir",
+        "closedir",
+        "mkdir",
+        "unlink",
+        "rmdir",
+        "rename",
+        "link",
+        "symlink",
+        "readlink",
+        "realpath",
         "__error",
     ];
     assert_eq!(
@@ -99,7 +110,7 @@ fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
         request,
         NATIVE_REQUEST_ERROR
     ));
-    assert_eq!(fragment.relocations.len(), names.len());
+    assert_eq!(fragment.relocations.len(), names.len() + 1);
     let errno = fragment.relocations.last().unwrap().offset;
     assert!(memory(
         &code[(errno / 4) as usize..],
@@ -108,16 +119,36 @@ fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
         x0,
         0
     ));
-    for (index, (site, name)) in fragment.relocations.iter().zip(names).enumerate() {
+    let clear_call = &fragment.relocations[12];
+    assert_eq!(clear_call.relocation.kind, RelocKind::Call26);
+    assert_eq!(clear_call.relocation.target, "__gugu_darwin_c___error");
+    let clear = at(&code, clear_call.offset + 4);
+    assert_eq!(form(clear), "str.W.Unsigned");
+    assert_eq!(
+        clear.operands,
+        [reg(Reg::zr(Width::W)), mem(x0, AddressMode::Unsigned(0))]
+    );
+    let calls = fragment
+        .relocations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, call)| (index != 12).then_some(call));
+    for (index, (site, name)) in calls.zip(names).enumerate() {
         assert_eq!(site.relocation.kind, RelocKind::Call26);
         assert_eq!(site.relocation.target, format!("__gugu_darwin_c_{name}"));
         if name == "__error" {
             break;
         }
         let variadic = matches!(name, "open" | "fcntl");
-        let fixed = [3usize, 3, 2, 1, 3, 2, 2, 2, 2, 1, 2][index];
+        let fixed = [
+            3usize, 3, 2, 1, 3, 2, 2, 2, 2, 1, 2, 1, 1, 1, 2, 1, 1, 2, 2, 2, 3, 2,
+        ][index];
         let end = (site.offset / 4) as usize;
-        let args = &code[end - fixed - if variadic { 2 } else { 0 }..end];
+        let args_start = end - fixed - if variadic { 2 } else { 0 };
+        let args = &code[args_start..end];
+        let dispatch = args_start - if name == "readdir" { 4 } else { 2 };
+        assert_eq!(form(&code[dispatch]), "subs.X.imm");
+        assert_eq!(code[dispatch].operands[2], add_imm(index));
         for i in 0..fixed {
             assert!(memory(
                 args,
@@ -145,7 +176,26 @@ fn darwin_fd_dispatch_uses_native_packet_and_arm64_libsystem_abi() {
             ));
             assert!(memory(args, "str.W.Unsigned", mode, SP, 0));
         }
-        let wide = matches!(name, "read" | "write" | "lseek");
+        let wide = matches!(name, "read" | "write" | "lseek" | "readlink");
+        if matches!(name, "opendir" | "readdir" | "realpath") {
+            let readdir = name == "readdir";
+            let compare = end + if readdir { 2 } else { 1 };
+            assert_eq!(form(&code[compare]), "subs.X.imm");
+            assert_eq!(
+                code[compare].operands,
+                [reg(Reg::zr(Width::X)), reg(x0), add_imm(0)]
+            );
+            assert_eq!(target(&code, (compare as u32 + 1) * 4), errno);
+            let store = if readdir { end + 1 } else { end + 3 };
+            assert!(memory(
+                &code[store..=store],
+                "str.X.Unsigned",
+                x0,
+                request,
+                NATIVE_REQUEST_VALUE
+            ));
+            continue;
+        }
         assert_eq!(
             form(&code[end + 1]),
             if wide { "adds.X.imm" } else { "sbfm.X" }

@@ -16,29 +16,49 @@ struct Method {
     name: &'static str,
     fixed: u8,
     variadic_int: bool,
-    wide_result: bool,
+    result: ResultAbi,
 }
 
-const METHODS: [Method; 11] = [
-    method("read", 3, false, true),
-    method("write", 3, false, true),
-    method("open", 2, true, false),
-    method("close", 1, false, false),
-    method("lseek", 3, false, true),
-    method("stat", 2, false, false),
-    method("lstat", 2, false, false),
-    method("fstat", 2, false, false),
-    method("ftruncate", 2, false, false),
-    method("fsync", 1, false, false),
-    method("fcntl", 2, true, false),
+enum ResultAbi {
+    Int,
+    WideInt,
+    Pointer,
+    DirectoryEntry,
+}
+
+use ResultAbi::{DirectoryEntry, Int, Pointer, WideInt};
+
+const METHODS: [Method; 22] = [
+    method("read", 3, false, WideInt),
+    method("write", 3, false, WideInt),
+    method("open", 2, true, Int),
+    method("close", 1, false, Int),
+    method("lseek", 3, false, WideInt),
+    method("stat", 2, false, Int),
+    method("lstat", 2, false, Int),
+    method("fstat", 2, false, Int),
+    method("ftruncate", 2, false, Int),
+    method("fsync", 1, false, Int),
+    method("fcntl", 2, true, Int),
+    method("opendir", 1, false, Pointer),
+    method("readdir", 1, false, DirectoryEntry),
+    method("closedir", 1, false, Int),
+    method("mkdir", 2, false, Int),
+    method("unlink", 1, false, Int),
+    method("rmdir", 1, false, Int),
+    method("rename", 2, false, Int),
+    method("link", 2, false, Int),
+    method("symlink", 2, false, Int),
+    method("readlink", 3, false, WideInt),
+    method("realpath", 2, false, Pointer),
 ];
 
-const fn method(name: &'static str, fixed: u8, variadic_int: bool, wide_result: bool) -> Method {
+const fn method(name: &'static str, fixed: u8, variadic_int: bool, result: ResultAbi) -> Method {
     Method {
         name,
         fixed,
         variadic_int,
-        wide_result,
+        result,
     }
 }
 
@@ -82,7 +102,9 @@ pub fn darwin_fd_dispatch() -> Fragment {
         let skip = branch_cond(&mut b, NE);
         call_method(&mut b, method);
         errors.push(branch_cond(&mut b, EQ));
-        b.memory("str.X.Unsigned", RESULT, REQUEST, NATIVE_REQUEST_VALUE);
+        if !matches!(method.result, DirectoryEntry) {
+            store_value(&mut b);
+        }
         exits.push(branch(&mut b));
         b.patch_branch(skip, "b.cond", &[], &[condition(NE)]);
     }
@@ -108,6 +130,10 @@ pub fn darwin_fd_dispatch() -> Fragment {
 }
 
 fn call_method(b: &mut Builder, method: &Method) {
+    if matches!(method.result, DirectoryEntry) {
+        b.external_branch("bl", &import_stub_symbol("__error"));
+        b.memory("str.W.Unsigned", Reg::zr(Width::W), RESULT, 0);
+    }
     for i in 0..method.fixed {
         b.memory(
             "ldr.X.Unsigned",
@@ -127,10 +153,20 @@ fn call_method(b: &mut Builder, method: &Method) {
         b.memory("str.W.Unsigned", mode, SP, 0);
     }
     b.external_branch("bl", &import_stub_symbol(method.name));
-    if !method.wide_result {
+    if matches!(method.result, Int) {
         b.emit("sbfm.X", [reg(RESULT), reg(RESULT), imm(0), imm(31)]);
     }
-    b.emit("adds.X.imm", [reg(XZR), reg(RESULT), add_imm(1)]);
+    if matches!(method.result, DirectoryEntry) {
+        store_value(b);
+    }
+    match method.result {
+        Pointer | DirectoryEntry => b.emit("subs.X.imm", [reg(XZR), reg(RESULT), add_imm(0)]),
+        Int | WideInt => b.emit("adds.X.imm", [reg(XZR), reg(RESULT), add_imm(1)]),
+    }
+}
+
+fn store_value(b: &mut Builder) {
+    b.memory("str.X.Unsigned", RESULT, REQUEST, NATIVE_REQUEST_VALUE);
 }
 
 fn branch_cond(b: &mut Builder, cond: u8) -> u32 {
