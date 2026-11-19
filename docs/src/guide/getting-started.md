@@ -16,7 +16,7 @@ cd hello
 最小可执行入口是 `fn main()`；返回值是 `()`：
 
 ```gugu
-use std.io.println
+use std.io.{println}
 
 fn main() {
     println("hello, gugu")
