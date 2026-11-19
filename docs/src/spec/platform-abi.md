@@ -349,6 +349,8 @@ rt0 和运行时通过 libSystem 调用 Darwin 接口；文件系统、套接字
 
 Darwin 的对齐地址预留先将请求长度向上取整为整页，再裁剪对齐所需的额外地址空间；裁剪失败时不得报告预留成功。
 
+Darwin datagram 接收使用 `recvmsg` 的返回标志识别 `MSG_TRUNC`，不能将写满缓冲的报文误判为完整报文。
+
 ### 外部错误状态
 
 `errno`、Windows last-error 或其它线程局部错误状态属于外部调用的即时结果。`ForeignLeaf` 返回后可在同一 OS thread 上紧接读取；普通 `ForeignBridge` 与 `ForeignBridge[DirtyCpu]` 必须在 native 调用返回、协程重新入队之前由执行 worker 捕获该值，并由标准库通过本次调用结果读取。调用方在 `yield`、再次调用外部函数或可能迁移协程之后，不能要求仍是未捕获的原线程状态。

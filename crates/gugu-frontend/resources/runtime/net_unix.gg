@@ -113,7 +113,7 @@ pub fn receive(cell: &ResourceCell, destination: &[byte], cancel: uint, connecte
     let count = if received > capacity { capacity } else { received }
     endpoint.copy_out(raw, destination, int(count))
     let source = if heap_word(node + 96) == 0 { None } else { decode(node + transport.ADDRESS, heap_word(node + 96))? }
-    Ok((int(count), source, received > capacity))
+    Ok((int(count), source, received > capacity || heap_word(node + 88) != 0))
 }
 #[cfg(any(os = "linux", os = "macos"))]
 pub fn datagram_connect(cell: &ResourceCell, address: Option[UnixAddr]) Result[(), Error] {

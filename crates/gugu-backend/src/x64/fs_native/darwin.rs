@@ -180,7 +180,7 @@ pub(super) fn dispatch(
         if failure == -1
             && !matches!(
                 name,
-                "read" | "write" | "lseek" | "readlink" | "recvfrom" | "sendto"
+                "read" | "write" | "lseek" | "readlink" | "recvfrom" | "recvmsg" | "sendto"
             )
         {
             signed_result(b);

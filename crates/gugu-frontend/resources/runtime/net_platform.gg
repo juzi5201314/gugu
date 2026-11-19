@@ -160,7 +160,24 @@ pub fn send_flags() uint = 0
 #[cfg(os = "linux")]
 pub fn receive_flags() uint = 32
 #[cfg(os = "macos")]
-pub fn receive_flags() uint = 0
+pub fn receive_datagram(storage: uint, handle: uint, data: uint, length: uint, address: uint, address_len: uint, truncated: uint) FsResult {
+    let message = storage + REQUEST_BYTES
+    let iovec = message + 48
+    heap_store_word(iovec, data)
+    heap_store_word(iovec + 8, length)
+    heap_store_word(message, address)
+    heap_store_word(message + 8, heap_word32(address_len))
+    heap_store_word(message + 16, iovec)
+    heap_store_word(message + 24, 1)
+    heap_store_word(message + 32, 0)
+    heap_store_word(message + 40, 0)
+    let result = request(storage, 27, handle, message, 0, 0, 0, 0)
+    if result.error == 0 {
+        heap_store_word(address_len, heap_word32(message + 8))
+        heap_store_word(truncated, heap_word32(message + 44) & uint(16))
+    }
+    result
+}
 
 #[cfg(os = "linux")]
 pub fn socket_error(handle: uint, value: uint, size: uint, storage: uint) FsResult = request(storage, 23, handle, 1, 4, value, size, 0)

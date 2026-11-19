@@ -82,7 +82,12 @@ fn listener_and_datagram_bind_link_macos_libsystem() {
         TargetName::X86_64Macos,
     );
     let image = output.image_plan().unwrap().macos_image();
-    for name in [b"_socket\0".as_slice(), b"_bind\0", b"_kevent\0"] {
+    for name in [
+        b"_socket\0".as_slice(),
+        b"_bind\0",
+        b"_kevent\0",
+        b"_recvmsg\0",
+    ] {
         assert!(image.windows(name.len()).any(|value| value == name));
     }
 }
