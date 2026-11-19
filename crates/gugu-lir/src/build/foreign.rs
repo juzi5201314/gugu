@@ -1,4 +1,7 @@
 //! C 类型在具体布局上分类；保留参数分组，内部值表示不参与平台 ABI 判定。
+#[cfg(test)]
+#[path = "foreign_tests.rs"]
+mod tests;
 use super::{Builder, Diagnostic, TypeKind, invalid, storage::integer_type, values::Computed};
 use crate::body::{Conversion, ForeignArgument, Op, Origin, Type, ValueId, ValueType, id};
 use crate::gir::concrete::TypeLayout;
@@ -170,9 +173,10 @@ pub(crate) fn describe(types: &[TypeLayout], ty: u32) -> crate::foreign::Type {
                     bits: 0,
                     offsets: Vec::new(),
                 };
-                let homogeneous = homogeneous(types, ty, 0, &mut hfa) && !hfa.offsets.is_empty();
+                let homogeneous = homogeneous(types, ty, 0, &mut hfa) && hfa.valid_for(layout.size);
                 Kind::Aggregate {
                     hfa: homogeneous.then_some(hfa),
+                    natural_align: natural_alignment(types, ty),
                 }
             }
         }
@@ -182,6 +186,23 @@ pub(crate) fn describe(types: &[TypeLayout], ty: u32) -> crate::foreign::Type {
         align: layout.align as u32,
         kind,
     }
+}
+
+fn natural_alignment(types: &[TypeLayout], ty: u32) -> u32 {
+    if types[ty as usize].packed {
+        return 1;
+    }
+    let alignment = |index: u32| types[index as usize].layout.expect("C 成员布局").align;
+    (match &types[ty as usize].kind {
+        TypeKind::Array { element, .. } => alignment(*element),
+        TypeKind::Aggregate { variants, .. } => variants
+            .iter()
+            .flatten()
+            .map(|field| alignment(field.ty))
+            .max()
+            .unwrap_or(1),
+        _ => alignment(ty),
+    }) as u32
 }
 
 fn homogeneous(types: &[TypeLayout], ty: u32, base: u64, hfa: &mut crate::foreign::Hfa) -> bool {

@@ -38,7 +38,7 @@ pub(crate) fn logical(body: &Body) -> Result<Vec<LogicalSafepoint>, Error> {
         || body
             .instructions
             .iter()
-            .any(|inst| matches!(&inst.op, Op::Call(call) if !call.poll_free_leaf));
+            .any(|inst| matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if !call.poll_free_leaf));
     if !needed {
         return Ok(vec![]);
     }
@@ -92,6 +92,7 @@ pub(crate) fn build(
             SiteKind::PollResume => 1,
             SiteKind::CallReturn => 0,
             SiteKind::SuspendResume => 2,
+            SiteKind::ForeignBridge { .. } => 3,
         };
         let anchor = logical.iter().find(|a| {
             a.kind == kind
@@ -122,6 +123,12 @@ pub(crate) fn build(
         } else if let Some(anchor) = anchor {
             map.copy_allowed = anchor.flags & 1 != 0;
             map.scan_allowed = anchor.flags & 2 != 0;
+            if let SiteKind::ForeignBridge { dirty } = site.kind {
+                if dirty != anchor.dirty {
+                    return Err(super::error("foreign bridge dirty-map mismatch"));
+                }
+                map.dirty = dirty;
+            }
             let position = allocation
                 .site_positions
                 .get(&(anchor.block, anchor.instruction))
@@ -205,7 +212,10 @@ pub(crate) fn build(
                 }
             }
         } else if !logical.is_empty()
-            || matches!(site.kind, SiteKind::CallReturn | SiteKind::SuspendResume)
+            || matches!(
+                site.kind,
+                SiteKind::CallReturn | SiteKind::SuspendResume | SiteKind::ForeignBridge { .. }
+            )
             || body
                 .values
                 .iter()
@@ -296,6 +306,10 @@ fn argument_offset(
     inst: &crate::lir::body::Instruction,
     index: usize,
 ) -> Result<Option<u32>, Error> {
+    if matches!(&inst.op,Op::Call(call) | Op::ForeignCall(call) if call.kind != crate::gir::body::CallKind::Managed)
+    {
+        return Ok(None);
+    }
     let (locations, _) = super::abi::arguments(
         body.args(&inst.arguments)
             .iter()

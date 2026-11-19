@@ -193,7 +193,7 @@ pub fn assemble_function(items: &[Item]) -> Result<(Vec<u8>, Plan, Vec<Relocatio
     for (index, item) in items.iter().enumerate() {
         match item {
             Item::Label(_) => {}
-            Item::Inst(inst) => emit(inst.clone(), false)?,
+            Item::Inst(inst) => emit(inst.clone(), true)?,
             Item::SymbolBranch { target, link } => {
                 emit(
                     machine::inst(

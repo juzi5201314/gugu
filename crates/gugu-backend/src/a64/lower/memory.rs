@@ -15,6 +15,66 @@ pub fn lower(
     b: &mut Builder<'_>,
 ) -> Result<(), Error> {
     match op {
+        Op::Memcpy { bytes } | Op::Memmove { bytes } | Op::Memset { bytes } => {
+            signature(
+                body,
+                args,
+                results,
+                &[
+                    Type::Ptr,
+                    if matches!(op, Op::Memset { .. }) {
+                        Type::I8
+                    } else {
+                        Type::Ptr
+                    },
+                ],
+                &[],
+            )?;
+            let count = b.constant(*bytes)?;
+            b.push(Item::Copies(vec![
+                (MReg::Virtual(args[0].0), MReg::Physical(9)),
+                (MReg::Virtual(args[1].0), MReg::Physical(10)),
+                (MReg::Virtual(count), MReg::Physical(11)),
+            ]));
+            b.push(Item::Memory(match op {
+                Op::Memcpy { .. } => crate::a64::memory::Kind::Copy,
+                Op::Memmove { .. } => crate::a64::memory::Kind::Move,
+                _ => crate::a64::memory::Kind::Set,
+            }));
+            Ok(())
+        }
+        Op::TrapIf => {
+            signature(body, args, results, &[Type::I8], &[])?;
+            b.push(Item::TrapIf {
+                condition: args[0].0,
+            });
+            Ok(())
+        }
+        Op::SymbolAddr(symbol) => {
+            signature(body, args, results, &[], &[Type::Ptr])?;
+            let symbol = match symbol {
+                crate::lir::body::Symbol::Instance(key) => crate::a64::abi::symbol(key),
+                crate::lir::body::Symbol::External { name, .. } => {
+                    if body.values[results[0].index()].kind.provenance
+                        == Some(crate::lir::body::Provenance::Code)
+                    {
+                        crate::a64::foreign_packet::platform(body)?.symbol(name)
+                    } else {
+                        name.clone()
+                    }
+                }
+                _ => {
+                    return Err(crate::a64::error(
+                        "A64 adapter/global/descriptor/blob symbols require image/runtime binding",
+                    ));
+                }
+            };
+            b.push(Item::SymbolAddr {
+                dest: results[0].0,
+                symbol,
+            });
+            Ok(())
+        }
         Op::StackAddr(slot) | Op::RootInitAddr(slot) => {
             signature(body, args, results, &[], &[Type::Ptr])?;
             if slot.index() >= body.stack_slots.len() {
