@@ -87,6 +87,7 @@ v5 header byte 24 的 u32 为架构 tag 183，byte 28 的 u32 仍为零。v4 隐
 只接受 (version=4, tag=0) 与 (version=5, tag=183)，未知组合拒绝。
 
 A64 用五个 u32 register mask，xN 的位号就是 N（0..30）；SP/bit31 不编码。
+A64 函数的 has_stack_interior 标志包含 typed/gated 的 StackInterior 根，即使寄存器掩码和固定槽位图均为空；初始化字节只门控本次扫描，不消除函数的换栈修正义务。
 x16/x17 scratch、x18 platform、x27/x28 runtime context、x29 FP 与 x30 LR 不得为用户根。
 CallReturn/PollResume/SuspendResume/ForeignBridge 的 mask 全零；MorestackEntry 仅可
 登记 x0-x8 参数根，slot_count=0 且无 typed root。非入口点的根槽与初始化字节必须在 frame 内。
@@ -150,6 +151,7 @@ LIR 为每个栈槽维护逐根字段的初始化事件流 `RootInit { slot, pos
 - 整值写入但来源变体不可知时（从别的槽、参数或返回值复制整值），按覆盖范围保守置位全部并集条目。这类动态多变体副本要收窄到实际变体需要类型 trace，属于后续集成变更；
 - 复位：`StorageLive`（建立新值）与 `StorageDead`（结束占用）清空该槽全部位，旧值的位不得被新值继承；
 - 位置顺序是语义的一部分：`Reset` 之后必须有新的 `Set`，该根字才能被当成指针，所以重写 pass 必须用同一份锚点映射精确定位每个事件，不能丢弃或钳位到块尾；
+- 初始化证明使用块内指令位置（安全点 instruction 减去所属块的 instructions.start），不能使用带块排序前缀的 LogicalSafepoint.position；安全点之后的 Set 不得影响当前图；
 - 消费者只追踪置位的根字；未置位的并集条目表示该字在当前值里是标量或尚未写入。
 
 帧内位图已接线：`FrameLayout::init_bases` 为每个带根字的栈槽在 frame 内分配**每根一字节**的区域（`base + bit`），`alloc/rewrite.rs` 在每个站点代码之前按块内位置游标发射 `mov byte [rsp + offset], 1/0`。选一字节一根而不是位图字，是因为置位与复位都不需要读改写、不占用 scratch 寄存器；站点游标保证这些写入落在那次读取位图的安全点之前，块尾把剩余事件全部刷新。每帧位图与普通值存储分开，未初始化 payload 不会被读到。
@@ -161,6 +163,28 @@ LIR 为每个栈槽维护逐根字段的初始化事件流 `RootInit { slot, pos
 Linux 放入 `.gugu.stackmap`，Windows 放入 `.gugustk`。section 内所有整数小端，所有 offset 相对 section 起始，table 按记录自然对齐；padding 必须为 0。
 
 ### A64 lowering 到 map/CFA 的接线（4c.2b.1）
+
+4c.2b.2b.1 的直接 managed 挂起调用使用 LIR Suspend 与 kind=2 的 SuspendResume 图，
+跨点指针与调用实参继续强制落槽，结果不在返回位置提前成为根。Context 与 morestack
+scratch/mailbox 采用 runtime-abi 的权威布局。Rust copy 消费方配对解码每个函数的 v5/CFA
+section，按加载 bias 定位精确返回 PC，要求 frame 覆盖整个已用区间且 FP 链与 Context 一致。
+它保存 typed gate 的判定，只修复 StackInterior 字和结构性 FP；普通 GPR、浮点位型、heap
+引用和 PC 不因数值像栈地址而改变。MorestackEntry 不是普通可复制 frame：顶层先保存 scratch
+参数根，再从 x10 恢复 caller PC，随后只复制有 copy flag 的 caller frames。恢复之前必须先
+修复 scratch 中标记为 StackInterior 的 x0–x8，再更新 mailbox watermark；x27/x28 由恢复方给出。
+Suspend 的权威 LIR 根使用 Value 记录，A64 还需枚举同一值在第九个及以后实参中的传出副本，
+把实际 outgoing slot 登记到同一种类；不能只修复原 spill 而留下失效的传入栈参数。
+底部终止 PC 由调用方显式登记；缺图、未登记 helper frame、非精确 PC 和损坏 FP 链一律拒绝。
+这里仍是内部 Rust copy/VM 契约，不是生产 Gugu decoder/image 已接通的声明。
+
+4c.2b.2a 同时消费 LiveSlots 的局部槽根和 InitSlots 的逐根 must 证明。一个 union root
+表项对应一个 frame byte；含相同字偏移的不同 provenance 必须有独立 gate，不能同时折叠
+进多个 fixed bitmap。尚未静态证明的根在 PollResume 和 CallReturn 都使用 TypedRoot。
+gate 在帧建立后只清零一次，RootInit 事件保持同位置的源顺序（例如 reset 后 set）；
+未置位、已复位或 lifetime 已结束的项不参与扫描。入口有回边时保守使用 typed gates，
+避免把回边事实当作第一次进入的初始化证明。gate 也计入物理 frame，但不是被扫描的根字。
+确定性 VM 使用真实生成的 STRB、序列化 map 和 reference scan_frame 验证 GC 写回后 reload；
+这不是生产 Gugu decoder 已接通的声明。
 
 CallReturn 的 poll-free leaf 豁免不能与 slow-capable callee 入口检查共存。A64 runtime
 使用 4096 字节的 managed leaf 帧预算：caller 检查自己的 frame 加预算，callee 帧必须不大于

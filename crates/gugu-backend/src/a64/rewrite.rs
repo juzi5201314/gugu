@@ -36,6 +36,9 @@ pub(crate) fn rewrite_runtime(
         runtime.entry(&mut out, frame.required_frame)?;
     }
     prologue(&mut out, frame)?;
+    for offset in frame.init_bytes.clone() {
+        init_byte(&mut out, offset, false)?;
+    }
     if function.entry != 0 {
         out.push(layout::Item::Branch {
             form: machine::form("b")?,
@@ -329,6 +332,21 @@ fn rewrite_item(
     runtime: &mut super::sites::Emitter<'_>,
 ) -> Result<(), Error> {
     match item {
+        Item::RootInit {
+            slot,
+            bit,
+            initialized,
+        } => {
+            let offset = frame
+                .init_bases
+                .get(*slot as usize)
+                .copied()
+                .flatten()
+                .and_then(|base| base.checked_add(*bit))
+                .filter(|offset| *offset < frame.size)
+                .ok_or_else(|| super::error("invalid root initialization byte"))?;
+            init_byte(out, offset, *initialized)
+        }
         Item::Poll { .. } => Err(super::error("poll requires runtime bindings")),
         Item::Constant { dest, .. } | Item::StackAddr { dest, .. } => {
             let Some(loc) = location(MReg::Virtual(*dest), allocation)? else {
@@ -387,6 +405,7 @@ fn rewrite_item(
             Ok(())
         }
         Item::Call {
+            suspend,
             target,
             arguments,
             results,
@@ -397,7 +416,11 @@ fn rewrite_item(
                 runtime.call(
                     out,
                     target.clone(),
-                    super::sites::SiteKind::CallReturn,
+                    if *suspend {
+                        super::sites::SiteKind::SuspendResume
+                    } else {
+                        super::sites::SiteKind::CallReturn
+                    },
                     Some(*block),
                     Some(*instruction),
                 )?;
@@ -459,6 +482,27 @@ fn rewrite_item(
             Ok(())
         }
     }
+}
+
+fn init_byte(out: &mut Vec<layout::Item>, offset: u32, initialized: bool) -> Result<(), Error> {
+    constant(out, 16, u64::from(initialized))?;
+    let (base, offset) = if offset <= 4095 {
+        (Reg::sp(Width::X), offset)
+    } else {
+        adjust(out, Reg::x(17), Reg::sp(Width::X), offset, false)?;
+        (Reg::x(17), 0)
+    };
+    emit(
+        out,
+        "strb.W.Unsigned",
+        vec![
+            Operand::Reg(Reg::w(16)),
+            Operand::Address(Address {
+                base,
+                mode: AddressMode::Unsigned(i64::from(offset)),
+            }),
+        ],
+    )
 }
 
 fn arguments_to_abi(

@@ -1,0 +1,225 @@
+use std.hash.{Hasher}
+
+const DEFAULT_SEED: uint = 0
+
+struct Bucket[K, V] { key: K, value: V, next: Option[&Bucket[K, V]] }
+#[allow(large_copy)]
+enum Page[K, V] {
+    Leaf(uint, &Bucket[K, V]),
+    Branch([Option[&Page[K, V]]; 8]),
+}
+struct State[K, V] { root: Option[&Page[K, V]], length: int, views: int, seed: uint }
+pub struct HashMap[K, V] { state: &State[K, V] }
+pub struct Entry[K, V] { map: HashMap[K, V], key: K }
+struct Frame[K, V] { page: &Page[K, V], next: Option[&Frame[K, V]] }
+pub struct HashMapIter[K, V] { stack: Option[&Frame[K, V]], bucket: Option[&Bucket[K, V]] }
+
+fn new_frame[K, V](page: &Page[K, V], next: Option[&Frame[K, V]]) &Frame[K, V] {
+    let result = Frame { page: page, next: next }
+    &result
+}
+fn digest[K: Hash](key: &K, seed: uint) uint {
+    let h = Hasher::with_seed(seed)
+    key.hash(&h)
+    h.finish()
+}
+fn find[K: Eq, V](root: Option[&Page[K, V]], depth: uint, hash: uint, key: &K) Option[&Bucket[K, V]] {
+    let page = match root { Some(page) => page, None => return None }
+    match *page {
+        Page::Leaf(stored, bucket) => {
+            if stored != hash { return None }
+            let cursor = Some(bucket)
+            while let Some(item) = cursor {
+                if item.key == *key { return Some(item) }
+                cursor = item.next
+            }
+            None
+        },
+        Page::Branch(children) => find(children[int(hash >> (depth * 3) & uint(7))], depth + 1, hash, key),
+    }
+}
+fn bucket_edit[K: Eq, V](root: Option[&Bucket[K, V]], key: K, value: Option[V]) Option[&Bucket[K, V]] {
+    match root {
+        None => match value {
+            None => None,
+            Some(value) => { let node = Bucket { key: key, value: value, next: None }
+                Some(&node) },
+        },
+        Some(node) => {
+            if node.key == key {
+                return match value {
+                    None => node.next,
+                    Some(value) => { let updated = Bucket { key: node.key, value: value, next: node.next }
+                        Some(&updated) },
+                }
+            }
+            let updated = Bucket { key: node.key, value: node.value, next: bucket_edit(node.next, key, value) }
+            Some(&updated)
+        },
+    }
+}
+fn edit[K: Eq, V](root: Option[&Page[K, V]], depth: uint, hash: uint, key: K, value: Option[V]) Option[&Page[K, V]] {
+    let page = match root {
+        None => return match bucket_edit(None, key, value) {
+            None => None,
+            Some(bucket) => { let leaf: Page[K, V] = Page::Leaf(hash, bucket)
+                Some(&leaf) },
+        },
+        Some(page) => page,
+    }
+    match *page {
+        Page::Leaf(stored, bucket) => {
+            if depth == 22 || (stored == hash && bucket.key == key) {
+                return match bucket_edit(Some(bucket), key, value) {
+                    None => None,
+                    Some(bucket) => { let leaf: Page[K, V] = Page::Leaf(stored, bucket)
+                        Some(&leaf) },
+                }
+            }
+            let children: [Option[&Page[K, V]]; 8] = [None; 8]
+            children[int(stored >> (depth * 3) & uint(7))] = Some(page)
+            let branch: Page[K, V] = Page::Branch(children)
+            edit(Some(&branch), depth, hash, key, value)
+        },
+        Page::Branch(children) => {
+            let slot = int(hash >> (depth * 3) & uint(7))
+            children[slot] = edit(children[slot], depth + 1, hash, key, value)
+            let occupied = false
+            for index in 0..8 { if let Some(child) = children[index] { occupied = true } }
+            if !occupied { return None }
+            let branch: Page[K, V] = Page::Branch(children)
+            Some(&branch)
+        },
+    }
+}
+fn visit[K, V, F: Fn(&K, &V)](root: Option[&Page[K, V]], f: F) {
+    let page = match root { None => return, Some(page) => page }
+    match *page {
+        Page::Leaf(hash, bucket) => {
+            let cursor = Some(bucket)
+            while let Some(node) = cursor {
+                f(&node.key, &node.value)
+                cursor = node.next
+            }
+        },
+        Page::Branch(children) => { for index in 0..8 { visit(children[index], f) } },
+    }
+}
+impl[K: Eq + Hash + StableHash, V] HashMap[K, V] {
+    pub fn new() Self {
+        let state: State[K, V] = State { root: None, length: 0, views: 0, seed: DEFAULT_SEED }
+        Self { state: &state }
+    }
+    pub fn len(self: &Self) int = self.state.length
+    pub fn is_empty(self: &Self) bool = self.len() == 0
+    fn writable(self: &Self) { if self.state.views != 0 { panic("map write during scoped view") } }
+    pub fn get(self: &Self, key: &K) Option[V] {
+        self.get_hashed(key, digest(key, self.state.seed))
+    }
+    fn get_hashed(self: &Self, key: &K, hash: uint) Option[V] {
+        match find(self.state.root, 0, hash, key) {
+            None => None, Some(node) => Some(node.value),
+        }
+    }
+    pub fn contains_key(self: &Self, key: &K) bool {
+        match find(self.state.root, 0, digest(key, self.state.seed), key) { None => false, Some(node) => true }
+    }
+    pub fn with_ref[R, F: Fn(&V) R](self: &Self, key: &K, f: F) Option[R] {
+        let node = match find(self.state.root, 0, digest(key, self.state.seed), key) {
+            None => return None, Some(node) => node,
+        }
+        self.state.views = self.state.views + 1
+        defer { self.state.views = self.state.views - 1 }
+        Some(f(&node.value))
+    }
+    pub fn for_each_ref[F: Fn(&K, &V)](self: &Self, f: F) {
+        self.state.views = self.state.views + 1
+        defer { self.state.views = self.state.views - 1 }
+        visit(self.state.root, f)
+    }
+    pub fn insert(self: &Self, key: K, value: V) Option[V] {
+        self.writable()
+        let hash = digest(&key, self.state.seed)
+        let old = self.get_hashed(&key, hash)
+        if let None = old {
+            if self.state.length == 9223372036854775807 { panic("map length overflow") }
+            self.state.length = self.state.length + 1
+        }
+        self.state.root = edit(self.state.root, 0, hash, key, Some(value))
+        old
+    }
+    pub fn remove(self: &Self, key: &K) Option[V] {
+        self.writable()
+        let hash = digest(key, self.state.seed)
+        let old = self.get_hashed(key, hash)
+        if let Some(value) = old {
+            self.state.root = edit(self.state.root, 0, hash, *key, None)
+            self.state.length = self.state.length - 1
+        }
+        old
+    }
+    pub fn update[F: Fn(V) V](self: &Self, key: &K, f: F) bool {
+        self.writable()
+        match self.get(key) {
+            None => false,
+            Some(value) => { _ = self.insert(*key, f(value))
+                true },
+        }
+    }
+    pub fn entry(self: &Self, key: K) Entry[K, V] = Entry { map: *self, key: key }
+    pub fn iter(self: &Self) HashMapIter[K, V] {
+        let stack = match self.state.root {
+            None => None,
+            Some(page) => Some(new_frame(page, None)),
+        }
+        HashMapIter { stack: stack, bucket: None }
+    }
+}
+impl[K: Eq + Hash + StableHash, V] Entry[K, V] {
+    pub fn and_modify[F: Fn(V) V](self: &Self, f: F) Self {
+        _ = self.map.update(&self.key, f)
+        *self
+    }
+    pub fn or_insert(self: &Self, value: V) V {
+        self.map.writable()
+        match self.map.get(&self.key) {
+            Some(old) => old,
+            None => { _ = self.map.insert(self.key, value)
+                value },
+        }
+    }
+    pub fn or_insert_with[F: Fn() V](self: &Self, f: F) V {
+        self.map.writable()
+        match self.map.get(&self.key) { Some(old) => old, None => self.or_insert(f()) }
+    }
+}
+impl[K, V] Iter for HashMapIter[K, V] {
+    type Item = (K, V)
+    fn next(self: &Self) Option[(K, V)] {
+        loop {
+            if let Some(node) = self.bucket {
+                self.bucket = node.next
+                return Some((node.key, node.value))
+            }
+            let frame = match self.stack { None => return None, Some(frame) => frame }
+            self.stack = frame.next
+            match *frame.page {
+                Page::Leaf(hash, bucket) => { self.bucket = Some(bucket) },
+                Page::Branch(children) => {
+                    let index = 8
+                    while index > 0 {
+                        index = index - 1
+                        if let Some(page) = children[index] {
+                            self.stack = Some(new_frame(page, self.stack))
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+impl[K: Eq + Hash + StableHash, V] IntoIter for HashMap[K, V] {
+    type Item = (K, V)
+    type Iter = HashMapIter[K, V]
+    fn into_iter(self: Self) HashMapIter[K, V] = self.iter()
+}

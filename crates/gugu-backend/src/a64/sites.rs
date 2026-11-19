@@ -15,6 +15,7 @@ pub enum SiteKind {
     MorestackEntry,
     PollResume,
     CallReturn,
+    SuspendResume,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -220,15 +221,12 @@ fn memory(base: Reg) -> Operand {
 }
 
 pub(crate) fn validate(body: &Body) -> Result<(), Error> {
-    if body.signature.sret.is_some()
-        || !body.signature.by_value.is_empty()
-        || !body.root_inits.is_empty()
-        || body.stack_slots.iter().any(|slot| !slot.roots.is_empty())
-    {
+    if body.signature.sret.is_some() || !body.signature.by_value.is_empty() {
         return Err(super::error(
-            "rooted locals/init gates/sret require 4c.2b.2",
+            "aggregate signature/sret requires coroutine/image integration",
         ));
     }
+    super::locals::validate(body)?;
     let entry = body
         .blocks
         .get(body.entry.index())
@@ -292,21 +290,38 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 return Err(fail("StackCheck must be the single entry marker"));
             }
         }
-        if matches!(inst.op, Op::ForeignCall(_) | Op::StackAddr(_)) {
+        if matches!(inst.op, Op::ForeignCall(_)) {
             return Err(fail("calls/stack addresses require stack maps (4c.2)"));
+        }
+        if let Op::StackAddr(slot) = inst.op
+            && (body.stack_slots.get(slot.index()).is_none()
+                || body
+                    .operands
+                    .get(inst.results.start as usize..inst.results.end as usize)
+                    .is_none_or(|results| {
+                        results.len() != 1
+                            || body.values.get(results[0].index()).is_none_or(|value| {
+                                value.kind
+                                    != crate::lir::body::ValueType::pointer(
+                                        crate::lir::body::Provenance::Stack,
+                                    )
+                            })
+                    }))
+        {
+            return Err(fail(
+                "runtime StackAddr requires a valid slot and Stack provenance",
+            ));
         }
         if let Op::Call(ref call) = inst.op {
             if call.sret.is_some()
-                || call.may_suspend
-                || (call.poll_free_leaf && (call.may_allocate || call.may_unwind))
+                || (call.poll_free_leaf
+                    && (call.may_allocate || call.may_unwind || call.may_suspend))
             {
-                return Err(fail(
-                    "suspension or inconsistent poll-free proof requires 4c.2b.2",
-                ));
+                return Err(fail("sret or inconsistent poll-free proof is unsupported"));
             }
             if !call.poll_free_leaf && inst.safepoint.is_none() {
                 return Err(fail(
-                    "managed call requires an authoritative CallReturn map",
+                    "managed call requires an authoritative CallReturn/Suspend map",
                 ));
             }
         }
@@ -323,6 +338,8 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 crate::lir::body::SafepointKind::StackCheck
             } else if matches!(inst.op, Op::SafepointPoll { .. }) {
                 crate::lir::body::SafepointKind::Poll
+            } else if matches!(&inst.op, Op::Call(call) if call.may_suspend) {
+                crate::lir::body::SafepointKind::Suspend
             } else {
                 crate::lir::body::SafepointKind::CallReturn
             };
@@ -349,6 +366,7 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
             crate::lir::body::SafepointKind::StackCheck
                 | crate::lir::body::SafepointKind::Poll
                 | crate::lir::body::SafepointKind::CallReturn
+                | crate::lir::body::SafepointKind::Suspend
         ) {
             return Err(super::error("safepoint table requires stack maps (4c.2)"));
         }

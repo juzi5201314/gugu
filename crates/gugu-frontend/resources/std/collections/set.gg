@@ -1,0 +1,68 @@
+use std.collections.hashmap.{HashMap, HashMapIter}
+use std.collections.btreemap.{BTreeMap, BTreeMapIter}
+
+pub struct HashSet[T] { map: HashMap[T, ()] }
+pub struct HashSetIter[T] { inner: HashMapIter[T, ()] }
+impl[T: Eq + Hash + StableHash] HashSet[T] {
+    pub fn new() Self {
+        let map = HashMap[T, ()]::new()
+        Self { map: map }
+    }
+    pub fn len(self: &Self) int = self.map.len()
+    pub fn is_empty(self: &Self) bool = self.map.is_empty()
+    pub fn contains(self: &Self, key: &T) bool = self.map.contains_key(key)
+    pub fn insert(self: &Self, key: T) bool {
+        match self.map.insert(key, ()) { None => true, Some(value) => false }
+    }
+    pub fn remove(self: &Self, key: &T) bool {
+        match self.map.remove(key) { None => false, Some(value) => true }
+    }
+    pub fn iter(self: &Self) HashSetIter[T] = HashSetIter { inner: self.map.iter() }
+    pub fn for_each_ref[F: Fn(&T)](self: &Self, f: F) {
+        self.map.for_each_ref(fn(key: &T, value: &()) { f(key) })
+    }
+}
+impl[T] Iter for HashSetIter[T] {
+    type Item = T
+    fn next(self: &Self) Option[T] {
+        match self.inner.next() { None => None, Some((key, value)) => Some(key) }
+    }
+}
+impl[T: Eq + Hash + StableHash] IntoIter for HashSet[T] {
+    type Item = T
+    type Iter = HashSetIter[T]
+    fn into_iter(self: Self) HashSetIter[T] = self.iter()
+}
+
+pub struct BTreeSet[T] { map: BTreeMap[T, ()] }
+pub struct BTreeSetIter[T] { inner: BTreeMapIter[T, ()] }
+impl[T: Ord + StableOrd] BTreeSet[T] {
+    pub fn new() Self {
+        let map = BTreeMap[T, ()]::new()
+        Self { map: map }
+    }
+    pub fn len(self: &Self) int = self.map.len()
+    pub fn is_empty(self: &Self) bool = self.map.is_empty()
+    pub fn contains(self: &Self, key: &T) bool = self.map.contains_key(key)
+    pub fn insert(self: &Self, key: T) bool {
+        match self.map.insert(key, ()) { None => true, Some(value) => false }
+    }
+    pub fn remove(self: &Self, key: &T) bool {
+        match self.map.remove(key) { None => false, Some(value) => true }
+    }
+    pub fn iter(self: &Self) BTreeSetIter[T] = BTreeSetIter { inner: self.map.iter() }
+    pub fn for_each_ref[F: Fn(&T)](self: &Self, f: F) {
+        self.map.for_each_ref(fn(key: &T, value: &()) { f(key) })
+    }
+}
+impl[T] Iter for BTreeSetIter[T] {
+    type Item = T
+    fn next(self: &Self) Option[T] {
+        match self.inner.next() { None => None, Some((key, value)) => Some(key) }
+    }
+}
+impl[T: Ord + StableOrd] IntoIter for BTreeSet[T] {
+    type Item = T
+    type Iter = BTreeSetIter[T]
+    fn into_iter(self: Self) BTreeSetIter[T] = self.iter()
+}

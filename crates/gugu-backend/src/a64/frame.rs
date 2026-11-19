@@ -17,6 +17,8 @@ pub struct Frame {
     pub saves: Vec<(u8, u32)>,
     pub spills: Vec<u32>,
     pub locals: Vec<u32>,
+    pub init_bases: Vec<Option<u32>>,
+    pub init_bytes: std::ops::Range<u32>,
 }
 
 fn align(value: u32, alignment: u32) -> Result<u32, Error> {
@@ -88,6 +90,8 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
             saves: vec![],
             spills: vec![],
             locals: vec![],
+            init_bases: vec![],
+            init_bytes: 0..0,
         });
     }
     let copy_scratch = outgoing
@@ -121,6 +125,17 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
             )
             .ok_or_else(|| super::error("leaf local area overflow"))?;
     }
+    let init_start = offset;
+    let init_bases = crate::metadata::assign_init_bytes(
+        &body
+            .stack_slots
+            .iter()
+            .map(|slot| slot.roots.len())
+            .collect::<Vec<_>>(),
+        &mut offset,
+    )
+    .map_err(super::error)?;
+    let init_bytes = init_start..offset;
     let size = align(offset, 16)?;
     Ok(Frame {
         size,
@@ -133,6 +148,8 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
         saves,
         spills,
         locals,
+        init_bases,
+        init_bytes,
     })
 }
 

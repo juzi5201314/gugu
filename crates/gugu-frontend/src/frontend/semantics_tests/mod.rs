@@ -22,6 +22,7 @@ mod src;
 mod time;
 #[cfg(feature = "slow-tests")]
 mod traits;
+mod type_aliases;
 #[cfg(feature = "slow-tests")]
 mod unsafety;
 

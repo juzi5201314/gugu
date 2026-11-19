@@ -200,20 +200,7 @@ fn frame_regions_are_disjoint(
 /// 进参数 `roots` 与 `body.stack_slots` 同序，元素是该槽的根字数量。返回与之一一对应的基址；
 /// 没有根字的槽为 `None`。`offset` 前进已分配字节数。
 fn assign_init_bytes(roots: &[usize], offset: &mut u32) -> Result<Vec<Option<u32>>, AllocError> {
-    let mut bases = Vec::with_capacity(roots.len());
-    for count in roots {
-        if *count == 0 {
-            bases.push(None);
-            continue;
-        }
-        let bytes =
-            u32::try_from(*count).map_err(|_| AllocError::new("逐根初始化字节数超出 u32"))?;
-        bases.push(Some(*offset));
-        *offset = offset
-            .checked_add(bytes)
-            .ok_or_else(|| AllocError::new("frame 负载溢出"))?;
-    }
-    Ok(bases)
+    crate::metadata::assign_init_bytes(roots, offset).map_err(AllocError::new)
 }
 
 /// 计算 frame 布局并回填 spill slot 偏移。

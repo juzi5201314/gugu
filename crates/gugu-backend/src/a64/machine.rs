@@ -49,11 +49,17 @@ pub enum Item {
         index: u32,
     },
     Copies(Vec<(MReg, MReg)>),
+    RootInit {
+        slot: u32,
+        bit: u32,
+        initialized: bool,
+    },
     Poll {
         block: u32,
         instruction: u32,
     },
     Call {
+        suspend: bool,
         target: String,
         arguments: Vec<u32>,
         results: Vec<u32>,
@@ -160,7 +166,7 @@ impl Item {
                         .map(|id| (MReg::Virtual(*id), Access::Read)),
                 );
             }
-            Self::Return | Self::Poll { .. } => {}
+            Self::Return | Self::Poll { .. } | Self::RootInit { .. } => {}
         }
         events
     }

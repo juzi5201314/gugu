@@ -30,10 +30,11 @@ fn fail(error: impl std::fmt::Display) -> Error {
 }
 
 pub(crate) fn logical(body: &Body) -> Result<Vec<LogicalSafepoint>, Error> {
-    let needed = body
-        .values
-        .iter()
-        .any(|v| v.kind.provenance.is_some_and(|p| p.root_kind().is_some()))
+    let needed = body.stack_slots.iter().any(|slot| !slot.roots.is_empty())
+        || body
+            .values
+            .iter()
+            .any(|v| v.kind.provenance.is_some_and(|p| p.root_kind().is_some()))
         || body
             .instructions
             .iter()
@@ -77,12 +78,20 @@ pub(crate) fn build(
     logical: &[LogicalSafepoint],
 ) -> Result<Metadata, Error> {
     let mut points = Vec::new();
+    let graph = lir::Graph::new(body).map_err(|error| super::error(error.message()))?;
+    let init = lir::root_init::InitSlots::new(body, &graph);
+    let init = body
+        .edges
+        .iter()
+        .all(|edge| edge.to != body.entry)
+        .then_some(&init);
     for site in sites {
         let entry = site.kind == SiteKind::MorestackEntry;
         let kind = match site.kind {
             SiteKind::MorestackEntry => 4,
             SiteKind::PollResume => 1,
             SiteKind::CallReturn => 0,
+            SiteKind::SuspendResume => 2,
         };
         let anchor = logical.iter().find(|a| {
             a.kind == kind
@@ -138,6 +147,16 @@ pub(crate) fn build(
                                 continue;
                             }
                             place_value(allocation, frame, &mut map, class, *value, position)?;
+                            if site.kind == SiteKind::SuspendResume {
+                                let inst = &body.instructions[anchor.instruction as usize];
+                                for (index, argument) in
+                                    body.args(&inst.arguments).iter().enumerate().skip(8)
+                                {
+                                    if argument.0 == *value {
+                                        set_slot(&mut map, class, (index as u32 - 8) * 8)?;
+                                    }
+                                }
+                            }
                         }
                         LogicalRoot::Argument { index } => {
                             let inst = &body.instructions[anchor.instruction as usize];
@@ -150,14 +169,37 @@ pub(crate) fn build(
                                 set_slot(&mut map, class, (*index - 8) * 8)?;
                             }
                         }
-                        LogicalRoot::Slot { .. } => {
-                            return Err(super::error("rooted locals require 4c.2b.2"));
+                        LogicalRoot::Slot { slot, offset } => {
+                            let local = *frame
+                                .locals
+                                .get(*slot as usize)
+                                .ok_or_else(|| super::error("rooted local has no frame offset"))?;
+                            let (word, gate) = crate::metadata::local_root(
+                                body,
+                                anchor,
+                                class,
+                                *slot,
+                                *offset,
+                                local,
+                                frame.init_bases.get(*slot as usize).copied().flatten(),
+                                init,
+                            )
+                            .map_err(super::error)?;
+                            if let Some(init_byte) = gate {
+                                map.typed.push(runtime::TypedRoot {
+                                    word,
+                                    root_kind: class as u32,
+                                    init_byte,
+                                });
+                            } else {
+                                set_slot(&mut map, class, word * 8)?;
+                            }
                         }
                     }
                 }
             }
         } else if !logical.is_empty()
-            || site.kind == SiteKind::CallReturn
+            || matches!(site.kind, SiteKind::CallReturn | SiteKind::SuspendResume)
             || body
                 .values
                 .iter()
@@ -176,9 +218,11 @@ pub(crate) fn build(
         unwind_index: 0,
         runtime_bridge: false,
         panic_landing: false,
-        has_stack_interior: points
-            .iter()
-            .any(|(_, map)| map.registers[4] != 0 || map.slots[4].iter().any(|word| *word != 0)),
+        has_stack_interior: points.iter().any(|(_, map)| {
+            map.registers[4] != 0
+                || map.slots[4].iter().any(|word| *word != 0)
+                || map.typed.iter().any(|root| root.root_kind == 4)
+        }),
     };
     let stackmaps = stackmap_codec::encode_for(StackMapArchitecture::Aarch64, &[code], &points)
         .map_err(fail)?;

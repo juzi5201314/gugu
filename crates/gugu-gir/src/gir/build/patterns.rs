@@ -280,33 +280,17 @@ impl Builder<'_> {
             self.goto(ok);
             return Ok(());
         }
-        let mut next_ok = ok;
-        for (offset, pattern) in patterns.iter().enumerate().rev() {
-            let current = if offset == 0 {
-                self.current
-            } else {
-                let block = self.fresh(false);
-                self.switch_to(block);
-                block
-            };
+        for (offset, pattern) in patterns.iter().enumerate() {
             let ty = self.owner.patterns[pattern.index()].ty;
             let field = self.project(place, projection(offset as u32, ty));
-            if offset == 0 {
-                self.switch_to(current);
-            }
-            let after = if offset + 1 == patterns.len() {
-                next_ok
+            let next = if offset + 1 == patterns.len() {
+                ok
             } else {
-                // 下一字段的测试入口即刚才创建的块；正序时由下一轮写入。
-                next_ok
+                self.fresh(false)
             };
-            if offset + 1 == patterns.len() {
-                self.emit_pattern_test(field, *pattern, ok, fail)?;
-            } else {
-                let cont = self.fresh(false);
-                self.emit_pattern_test(field, *pattern, cont, fail)?;
-                next_ok = cont;
-                let _ = after;
+            self.emit_pattern_test(field, *pattern, next, fail)?;
+            if next != ok {
+                self.switch_to(next);
             }
         }
         Ok(())

@@ -1,5 +1,10 @@
 //! Deterministic substitutes for the already independently tested PR24 fragments.
 use super::*;
+use crate::runtime::{
+    cage::CompressionPlane,
+    compression_schema::{CompressionDemand, CompressionPolicyV1, CompressionRuntimeContract},
+};
+use crate::target::PointerCompression;
 use std::collections::{BTreeMap, VecDeque};
 
 pub(super) fn bindings() -> glue::RuntimeBindings {
@@ -18,6 +23,7 @@ pub(super) struct Harness {
     pub guard_loads: usize,
     pub polls: usize,
     pub gc_direct_delta: u64,
+    pub repeat_polls: bool,
     pub(super) processor: u64,
     pub(super) arguments: [u64; 9],
 }
@@ -33,6 +39,7 @@ impl Default for Harness {
             guard_loads: 0,
             polls: 0,
             gc_direct_delta: 0,
+            repeat_polls: false,
             processor: 0x2000,
             arguments: [0; 9],
         }
@@ -73,24 +80,24 @@ impl Harness {
         at: u64,
         registers: &[u64; 32],
         memory: &BTreeMap<u64, u8>,
+        entry: Option<&[u64; 32]>,
     ) {
         if at == 0x1000 + u64::from(crate::runtime::coroutine_schema::stack_check_offset()) {
             self.guard_loads += 1;
-            assert_eq!(
-                registers[31], self.expected_sp,
-                "SP changed before entry check"
-            );
-            let candidate = self
-                .expected_sp
-                .wrapping_sub(u64::from(fragment.frame.required_frame));
+            let expected_sp = entry.map_or(self.expected_sp, |entry| entry[31]);
+            assert_eq!(registers[31], expected_sp, "SP changed before entry check");
+            let candidate = expected_sp.wrapping_sub(u64::from(fragment.frame.required_frame));
             assert_eq!(registers[11], candidate);
             assert!(
                 !memory
                     .keys()
-                    .any(|at| *at >= candidate && *at < self.expected_sp),
+                    .any(|at| *at >= candidate && *at < expected_sp),
                 "frame store before entry check"
             );
-            assert_eq!(&registers[..9], &self.arguments);
+            assert_eq!(
+                &registers[..9],
+                entry.map_or(&self.arguments[..], |entry| &entry[..9])
+            );
         }
     }
     pub fn call(
@@ -153,8 +160,39 @@ impl Harness {
                     .iter()
                     .find(|p| p.pc_offset == site.pc_offset)
                     .unwrap();
-                for offset in &maps.maps[point.map_index as usize].slots[0] {
-                    let at = registers[31] + u64::from(*offset) * 8;
+                let words = (0..fragment.frame.size / 8)
+                    .map(|offset| {
+                        (0..8).fold(0, |value, byte| {
+                            value
+                                | (u64::from(
+                                    *memory
+                                        .get(&(registers[31] + u64::from(offset) * 8 + byte))
+                                        .unwrap_or(&0),
+                                ) << (byte * 8))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                let roots = crate::runtime::stackmap::scan_frame(
+                    &maps,
+                    u64::from(point.pc_offset),
+                    &words,
+                    registers,
+                    &[],
+                    &mut CompressionPlane::new(
+                        &CompressionRuntimeContract::build(
+                            CompressionDemand::default(),
+                            CompressionPolicyV1::disabled(),
+                            PointerCompression::aarch64(),
+                        )
+                        .unwrap(),
+                    ),
+                )
+                .unwrap();
+                for root in roots.slots {
+                    let crate::runtime::stackmap::ScannedRoot::Direct(offset) = root else {
+                        continue;
+                    };
+                    let at = registers[31] + u64::from(offset) * 8;
                     let pointer = (0..8).fold(0, |value, byte| {
                         value | (u64::from(*memory.get(&(at + byte)).unwrap_or(&0)) << (byte * 8))
                     });
@@ -172,7 +210,7 @@ impl Harness {
             word(
                 memory,
                 self.processor + u64::from(crate::runtime::processor::poll_flags_offset()),
-                0,
+                u64::from(self.repeat_polls),
                 4,
             );
         } else {
