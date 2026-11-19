@@ -8,6 +8,7 @@ mod foreign_vm;
 mod foreign_worker;
 mod fp;
 mod fp_vm;
+mod image;
 mod integer;
 mod layout;
 mod leaf_reserve;

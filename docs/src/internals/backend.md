@@ -723,6 +723,27 @@ CAS 比较不等则 CLREX 后返回 actual/false，不写内存；只对排他�
 字节 VM 用显式 monitor、确定性的失败注入和并发写入替身检查重新读取、窄宽度、
 旧值返回、邻字节保护、顺序指令与有 spill 的寄存器别名情形；不执行 native 线程。
 
+### A64 image/data world（内部）
+
+私有 image/data foundation 由 `a64::codegen::build(BuildRequest)` 围绕同一 compile
+pipeline 构造，不接入 TargetName 或 plan dispatch。`World` 持有 writer 共用的 Section、
+Location、符号、代码重定位和数据指针重定位；ELF writer 已使用同一节容器，调用方可直接
+消费该图。输入 body 与定义按稳定符号排序，常量按字节去重并提升到最大所需对齐，typed
+局部 Data 绑定在选择前传入，不能在汇编后按字符串猜测局部下标。
+
+普通 Global 分配 `8 + bytes` 的零初始化块；coverage 使用独立域的 32-bit 非原子计数器。
+TLS 继续明确拒绝。其余 typed 符号复用 canonical mangler，并要求 compiled body 或显式
+Definition；显式 blob 的 Pointer 保留 offset、target 与 addend。该阶段不从空定义制造
+类型记录、vtable 或适配器别名，也不宣称已连接 frozen universe 的生产元数据生成。
+
+所有 compiled body 仍走 runtime 选择、分配、frame、site 与 metadata 路径。world 将其放进
+同一代码节，用真实函数偏移聚合 `a64_binding::Sections`，追加独立 maps/CFA 节；fragment
+base 是代码节起点，不是 Mach-O image base。`World::macho_request` 先固定全部节、导入、
+fixup 和符号形状，再调用已有 import stubs 与 writer layout，最后原长回填指令重定位。
+native data 的 SymbolAddr 多一次槽读取，blob 中的 native data 指针用 chained bind。
+请求入口目前是所选 managed body；生产 Darwin entry/rt0、payload、调度与平台 VM 绑定仍
+属后续阶段，不能把这个 request 当作已具备启动协议的可执行程序。
+
 ### A64 外调参数包与内部 lowering（4d.3）
 
 runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPacket`
@@ -778,8 +799,10 @@ function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无
 
 - `RuntimeCall`、`RuntimeMachineCall`、`CoroutineSwitch`、allocation/handle/GC/barrier
   与 region/scoped-view 操作：需要 PR 8 的 runtime/glue、异常与证明绑定。
-- `SymbolAddr` 的 global/TLS、adapter、descriptor、type table/name、vtable、data blob，
-  以及 `CoverageCounter`：需要 PR 6/8 的镜像数据布局与绑定；extern 地址只发重定位。
+- 孤立编译入口仍拒绝 global、adapter、descriptor、type table/name、vtable、data blob
+  与 `CoverageCounter`；私有 image world 已绑定常量、普通全局与 coverage，并要求其余
+  typed 符号有真实显式定义。生产类型表生成与适配器构造尚未接入；TLS 仍明确拒绝。
+  Darwin image 的 extern data 地址读取导入槽，function 地址使用已有导入桩。
 - `Vector` 的算术、shuffle、lane 与 reduction：通用 SIMD 尚无 lowering；现有生产
   LIR builder 不生成该 Op，V128 transport/select/load/store/bitcast 已支持。
 - `ForeignLeaf`、可 unwind 或 tail 外调、foreign callback/export adapter：未绑定其
