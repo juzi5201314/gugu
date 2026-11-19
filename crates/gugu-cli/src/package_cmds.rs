@@ -391,13 +391,15 @@ fn filter_archive_files(
         .files()
         .iter()
         .filter(|(path, _)| {
+            // 默认排除（锁文件/临时文件/凭据）优先于保护与 include：
+            // 宽匹配 include 不算显式收编凭据的意图。
+            if default_excluded(path) {
+                return false;
+            }
             if is_protected(path) {
                 return true;
             }
             if !include.is_empty() && !include.iter().any(|p| glob_match(p, path)) {
-                return false;
-            }
-            if include.is_empty() && default_excluded(path) {
                 return false;
             }
             !exclude.iter().any(|p| glob_match(p, path))
