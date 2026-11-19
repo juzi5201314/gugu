@@ -573,12 +573,11 @@ impl Checker<'_, '_> {
             };
             self.unify(&actual, expected, span);
         }
-        if let Some(callable) = selected.callable {
-            if let Some(definition) = self.model.function_definition(callable)
-                && !self.dependencies.contains(&definition)
-            {
-                self.dependencies.push(definition);
-            }
+        if let Some(callable) = selected.callable
+            && let Some(definition) = self.model.function_definition(callable)
+            && !self.dependencies.contains(&definition)
+        {
+            self.dependencies.push(definition);
         }
         self.dispatches.push(super::super::output::Dispatch {
             expression: id,

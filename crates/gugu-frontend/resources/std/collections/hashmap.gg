@@ -1,3 +1,5 @@
+use std.hash.{Hasher}
+
 const DEFAULT_SEED: uint = 0
 
 struct Bucket[K, V] { key: K, value: V, next: Option[&Bucket[K, V]] }
