@@ -4,6 +4,7 @@ mod control;
 mod integer;
 mod layout;
 mod memory;
+mod roots;
 mod runtime;
 mod runtime_vm;
 mod vm;

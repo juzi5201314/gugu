@@ -570,6 +570,33 @@ Rust reference walker 的 scan_frame 消费最终 section 表、精确返回 PC�
 此部分不放宽 compile_runtime：LIR 根集/分配器 force-slot 接线、managed call map、序列化
 unwind/CFA 和 Context switch/restore 仍属下一部分；不声称生产镜像 runtime 已支持 A64。
 
+### A64 标量根、managed call 与 safepoint CFA（4c.2b.1）
+
+compile_runtime 开始接受五类来源的 64 位标量根，以及直接 Instance managed call。
+compile_leaf/compile_function 的隔离限制不放宽。非 poll-free 调用必须有指向该指令的
+LIR CallReturn 记录；不补造 leaf proof 或逻辑根。入口参数的机器类型/provenance 必须与
+signature 一致。rooted local/init gate、aggregate/sret、Invoke、挂起与外部调用仍明确拒绝，
+协程 Context handoff 和镜像内 Gugu runtime decoder 在下一部分接线。
+
+runtime 编译复用 lir::stackmap::anchors/LiveValues；从真实 operands 重建派生 use cache，
+再取权威逻辑根。A64 regalloc adapter 把四类 managed 值标成 HeapPointer、StackInterior
+标成 StackPointer，在 call/poll Point 设置 pointer_spill，由共享 scan/slots 决定落槽与复用。
+五类细分仍来自逻辑根，不以 spill 槽的粗分类猜测。CallReturn 的实参根覆盖 source spill，
+第九个及以后实参还覆盖传出栈区；callee 入口图登记 x0-x7，传入栈实参由 caller map 覆盖。
+跨点活跃根必须覆盖选指后的 use 位置；刚由该调用定义、还没物化的 result 不进返回 PC 图。
+
+BL 后立即放 return label，再做 result copy；branch relaxation 后解析最终 PC。
+fragment.metadata.stackmaps 是 code_rva=0 的逐片段 v5 section，未注册为用户镜像。
+metadata.unwind 与其逐 PC 配对，序列化入口 CFA=SP/LR=x10、建帧后 CFA=SP+frame.size/
+LR=SP+record+8。Rust ABI decoder 校验两表 code range/frame/PC 完全一致，并从调用方
+提供的 frame/register snapshot 恢复 caller SP/PC；不是任意 prologue PC 的平台 EH 表。
+旧 runtime_sites 的空根诊断字段由真实序列化 maps 取代。
+
+确定性 VM 验证 BL/RET、传出栈根、五类 bitmap、GC 替身改写实际 spill 后的 reload；
+StackInterior map 可交给既有 copy_input 生成 fixup 槽表。尚未执行 A64 Context 保存恢复或
+完整换栈修正，也未把 x64 CoroutineContext 当成 A64 context 复用。完整 4c.2b 超过约 2000 行，
+先交付本部分，下一部分完成 gated locals、A64 coroutine/stack-copy 与生产 decoder 集成。
+
 ### A64 运行时机器片段
 
 独立片段通过同一编码表输出字节与片段内重定位；不进入现有 x64 运行时契约，也不登记目标。

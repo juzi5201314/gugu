@@ -150,13 +150,20 @@ fn empty_runtime_body_and_exact_return_pc_cfa_diagnostics() {
         );
         assert!(sites::lookup(&fragment.runtime_sites, site.pc_offset + 1).is_none());
         assert!(sites::lookup(&fragment.runtime_sites, site.pc_offset - 4).is_none());
-        assert!(site.empty_roots.iter().flatten().all(|word| *word == 0));
+        let maps =
+            crate::runtime::decode_tables(&fragment.metadata.as_ref().unwrap().stackmaps).unwrap();
+        assert!(
+            maps.maps
+                .iter()
+                .flat_map(|map| &map.slots)
+                .all(|slots| slots.is_empty())
+        );
         match site.kind {
             sites::SiteKind::MorestackEntry => {
                 assert_eq!(site.cfa_offset, 0);
                 assert_eq!(site.caller_lr, sites::CallerLr::Register(10));
             }
-            sites::SiteKind::PollResume => {
+            sites::SiteKind::PollResume | sites::SiteKind::CallReturn => {
                 assert_eq!(site.cfa_offset, fragment.frame.size);
                 assert_eq!(
                     site.caller_lr,

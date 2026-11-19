@@ -49,7 +49,7 @@ pub(crate) fn rewrite_runtime(
                     .map_err(|e| Error(format!("{}: {e}", site.context)))?;
                 continue;
             }
-            rewrite_item(&mut out, &site.item, allocation, frame)
+            rewrite_item(&mut out, &site.item, allocation, frame, &mut runtime)
                 .map_err(|e| Error(format!("{}: {e}", site.context)))?;
         }
     }
@@ -323,6 +323,7 @@ fn rewrite_item(
     item: &Item,
     allocation: &Allocation,
     frame: &Frame,
+    runtime: &mut super::sites::Emitter<'_>,
 ) -> Result<(), Error> {
     match item {
         Item::Poll { .. } => Err(super::error("poll requires runtime bindings")),
@@ -386,12 +387,23 @@ fn rewrite_item(
             target,
             arguments,
             results,
+            safepoint,
         } => {
-            arguments_to_abi(out, arguments, allocation, frame, false)?;
-            out.push(layout::Item::SymbolBranch {
-                target: target.clone(),
-                link: true,
-            });
+            arguments_to_abi(out, arguments, allocation, frame, false, runtime)?;
+            if let Some((block, instruction)) = safepoint {
+                runtime.call(
+                    out,
+                    target.clone(),
+                    super::sites::SiteKind::CallReturn,
+                    Some(*block),
+                    Some(*instruction),
+                )?;
+            } else {
+                out.push(layout::Item::SymbolBranch {
+                    target: target.clone(),
+                    link: true,
+                });
+            }
             rewrite_item(
                 out,
                 &Item::Copies(
@@ -403,10 +415,11 @@ fn rewrite_item(
                 ),
                 allocation,
                 frame,
+                runtime,
             )
         }
         Item::TailCall { target, arguments } => {
-            arguments_to_abi(out, arguments, allocation, frame, true)?;
+            arguments_to_abi(out, arguments, allocation, frame, true, runtime)?;
             restore(out, frame)?;
             out.push(layout::Item::SymbolBranch {
                 target: target.clone(),
@@ -451,6 +464,7 @@ fn arguments_to_abi(
     allocation: &Allocation,
     frame: &Frame,
     tail: bool,
+    runtime: &mut super::sites::Emitter<'_>,
 ) -> Result<(), Error> {
     for (index, value) in arguments.iter().enumerate().skip(8) {
         let src = location(MReg::Virtual(*value), allocation)?
@@ -481,6 +495,7 @@ fn arguments_to_abi(
         ),
         allocation,
         frame,
+        runtime,
     )
 }
 
