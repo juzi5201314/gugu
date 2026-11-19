@@ -13,6 +13,7 @@ mod linux_net;
 mod linux_process;
 mod linux_signal;
 mod linux_syscall;
+mod linux_vm;
 mod poll;
 
 pub use atomic::{AtomicWidth, atomic};
@@ -31,6 +32,7 @@ pub use linux_fd::linux_fd_dispatch;
 pub use linux_net::linux_net_dispatch;
 pub use linux_process::{linux_process_call, linux_process_worker};
 pub use linux_signal::linux_signal_dispatch;
+pub use linux_vm::{linux_page_size, linux_vm};
 pub use poll::safepoint_slow;
 
 use super::{

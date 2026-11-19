@@ -411,6 +411,12 @@ Linux DNS 的 `net_resolver.gg` 经 `resolver_symbol` 获得 getaddrinfo/freeadd
 
 `examples/a64_linux_net_signal_image.rs` 手工生成通过适配器在 loopback 上 bind/listen/connect/accept、sendto/epoll/recvfrom，以及 block SIGUSR1、kill 自身、signalfd 读取的镜像；另外通过 sigaction 忽略 SIGUSR2、自发信号并恢复旧 action，同时检查网络 EINVAL/EBADF。默认 nextest 只运行解码/编码往返和确定性 syscall 替身，覆盖布局、完整 data、成功/零事件/错误、信号 action 转换和 signalfd 的运行时参数回归，不运行真实网络或子进程。
 
+`a64::fragments::linux_vm(PlatformOp)` 为原生 C ABI 的独立范围片段工厂，不是 NativeRequest worker。reserve 的 x0/x1 对应 x64 reserve_aligned 的 bytes/alignment；其他操作以 x0 接收 NativeExtent 的 base/+8 bytes。使用 mmap 222、munmap 215、mprotect 226、madvise 233，保留负 errno。reserve 检查 bytes/align、二次幂和总长溢出，以 PROT_NONE 和 MAP_PRIVATE|MAP_ANONYMOUS 过量预留，按位对齐并分别 munmap 首尾。任一 trim 失败释放仍拥有的映射范围，返回原错误；成功解除前缀后先推进 owned base/length，再尝试尾部，避免错误清理解除其他线程在已释放前缀新建的映射。Commit/Unprotect 为保护位 3，Guard 为 0，Decommit 为 MADV_DONTNEED 4；未使用 MAP_FIXED 覆盖其他映射。
+
+`linux_page_size()` 用 x0 的 Linux envp 扫描环境终止项与 auxv，返回 AT_PAGESZ，不调用 libc/getauxval，不依赖宿主构建机器页大小，缺少时返回 0。调用方从 `Rt0Payload.boot_environment` 取得入口捕获的 envp，再按该返回值初始化内部 A64 的页舍入与 extent。当前 `native_memory.gg` 的 NATIVE_PAGE_BYTES = 4096 和 platform profile 仍只服务已登记 x64 路径；本次不注册 A64 目标、不改共享 schema，也不宣称完整 GC/allocator 已在 16/64 KiB 内核上接通。接通未来目标时须在该 owning layer 使用 native 页值，而非继续套用 x64 profile。
+
+进程内指令/syscall 脚本覆盖 4/16/64 KiB auxv、缺失值、guard/commit/decommit/release 的原始参数与错误、reserve 的 prefix/tail、空输入/溢出和清理错误；不做真实 I/O。`examples/a64_linux_vm_image.rs` 在默认测试之外从真实 auxv 取得页大小，预留一页、提交、写入、guard/unprotect、验证内容、MADV_DONTNEED 后验证零填充并 munmap，同时检查不对齐 munmap 的 EINVAL。此层不需要 FP、原子或 foreign-call worker。
+
 ### Windows PE32+
 
 PE writer消费[平台 ABI](../spec/platform-abi.md#executable-image-forms)给出的 PE32+、ASLR/NX、入口、逻辑节和导入导出要求。当前私有 writer profile使用 image base `0x0000000140000000`、section alignment 4096、file alignment 512、COFF timestamp/checksum 0和 `WINDOWS_CUI` subsystem；这些字段不扩大平台稳定面。`DllCharacteristics` 固定带 dynamic base、high-entropy VA 和 NX。逻辑节按登记名各写一节，名字长于 8 字节则写出失败。用户片段仍与 `registered_fragments` 登记的机器片段一起按符号名排序、16 字节对齐接在 rt0 之后（栈图 `code_rva` 与 `.pdata` 都取自这次排序，两者必须与放置同源）；栈图 `code_rva` 相对该片段区，`.pdata` 里的 `RUNTIME_FUNCTION` 再加上片段区 RVA。`.xdata` 保留完整 `GUGUUN01` 容器，其平台尾里的 `UNWIND_INFO` 偏移改写成镜像 RVA。
