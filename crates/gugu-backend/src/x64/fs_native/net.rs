@@ -89,27 +89,41 @@ pub(super) fn fragment(target: TargetName) -> FragmentBlob {
             ret(&mut code);
         }
     }
+    let signal_handler = (target == TargetName::X86_64Macos).then(|| {
+        let start = code.instruction_count();
+        ret(&mut code);
+        start
+    });
     let encoded = encode::assemble(&code.finish().sequence).expect("网络片段编码");
-    let offset = encoded
-        .instruction_offsets
-        .iter()
-        .find(|(index, _)| *index == start)
-        .expect("关闭入口偏移")
-        .1;
+    let offset = |start| {
+        encoded
+            .instruction_offsets
+            .iter()
+            .find(|(index, _)| *index == start)
+            .expect("网络入口偏移")
+            .1
+    };
+    let mut entries = vec![
+        FragmentEntry {
+            glue: "net_call",
+            offset: 0,
+        },
+        FragmentEntry {
+            glue: "net_close",
+            offset: offset(start),
+        },
+    ];
+    if let Some(start) = signal_handler {
+        entries.push(FragmentEntry {
+            glue: "darwin_signal_handler",
+            offset: offset(start),
+        });
+    }
     FragmentBlob {
         alignment: 16,
         domain: FragmentDomain::Runtime,
         bytes: encoded.bytes,
-        entries: vec![
-            FragmentEntry {
-                glue: "net_call",
-                offset: 0,
-            },
-            FragmentEntry {
-                glue: "net_close",
-                offset,
-            },
-        ],
+        entries,
         relocations: encoded.relocations,
     }
 }
@@ -125,6 +139,24 @@ fn darwin() -> Builder {
     set(&mut b, R12, FAILURE, 0);
     let done = b.label();
     close_address(&mut b, done);
+    let native = b.label();
+    compare(&mut b, Rax, 30);
+    jump(&mut b, "jne", native);
+    b.emit(
+        "lea",
+        &[K::Mem, K::R64],
+        Access::Address,
+        vec![
+            Operand::Rip(
+                RelocTarget::Lir(mangle::runtime_symbol("darwin_signal_handler")),
+                0,
+            ),
+            reg(gpr(Rax)),
+        ],
+    );
+    store(&mut b, R12, RESULT, Rax);
+    jump(&mut b, "jmp", done);
+    b.define(native);
     let methods = [
         (0, "socket", -1),
         (1, "setsockopt", -1),
@@ -145,6 +177,7 @@ fn darwin() -> Builder {
         (26, "fcntl", -1),
         (27, "recvmsg", -1),
         (28, "disconnectx", -1),
+        (29, "sigaction", -1),
     ];
     let native_done = b.label();
     super::darwin::dispatch(&mut b, &methods, 0, RESULT, FAILURE, native_done);

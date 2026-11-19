@@ -1,4 +1,4 @@
-/* 信号捕获：OS 侧只运行 signalfd 读线程，绝不执行用户代码。*/
+/* OS 信号捕获不执行用户代码。*/
 /* 订阅记录挂在进程级 ctl 页；投递、合并与 dropped 账本由 service 在 worker 循环内驱动。*/
 
 use std.runtime.fs_platform.{control_allocate, control_free, native_call}
@@ -7,6 +7,7 @@ use std.runtime.scheduler.{park_current, ready_hot}
 use std.runtime.counters as counters
 use std.runtime.resource as resource
 use std.runtime.resource_state.{complete_close}
+use std.runtime.net_platform as native
 
 const REQUEST_BYTES: uint = 128
 const REQUEST_VALUE: uint = 64
@@ -19,7 +20,8 @@ const SUB_BYTES: uint = 96
 const NODE_BYTES: uint = 32
 
 /* ctl 页：+0 subs, +8 fd, +16 mask, +24 req, +32 stack, +40 siginfo buf, +48 mask cell, +56 inflight；
-   Windows 专用 +64 事件句柄（signal_install 片段写入）、+72 signo 掩码位图（handler 片段并入）。*/
+   Windows 专用 +64 事件句柄（signal_install 片段写入）、+72 signo 掩码位图（handler 片段并入）。
+   Darwin +8 保存 kqueue fd + 1，+56 标记待解除的订阅，+128 起保存旧 sigaction（每个 signo 16B）。*/
 static ctl: uint = 0
 /* 订阅：+0 next, +8 mask, +16 pending_mask, +24 ring, +32 capacity, +40 head, +48 count, +56 dropped, +64 closed, +72/+80 waiter 链。*/
 /* 等待节点：+0 next, +8 hot, +16 sub。*/
@@ -31,7 +33,10 @@ fn put(p: uint, v: uint) { unsafe { std.ptr.ptr_write[uint](std.mem.transmute[ui
 fn fail() { unsafe { std.runtime.process_exit(2) } }
 fn mask_bit(signo: uint) uint { if signo == 0 || signo > 64 { return 0 } uint(1) << (signo - 1) }
 
+#[cfg(not(os = "macos"))]
 pub fn pending() bool { unsafe { ctl != 0 && word(ctl) != 0 } }
+#[cfg(os = "macos")]
+pub fn pending() bool = ctl != 0 && word(ctl + 16) != 0
 
 fn control() uint {
     if ctl != 0 { return ctl }
@@ -64,16 +69,113 @@ fn arm(extra_mask: uint) uint { unsafe {
     0
 } }
 #[cfg(os = "macos")]
-fn arm(extra_mask: uint) uint {
-    _ = extra_mask
-    45
+fn arm(extra_mask: uint) uint { unsafe {
+    let page = control()
+    disarm_closed()
+    let old = word(page + 16)
+    let extra = extra_mask & ~old
+    if extra == 0 { return 0 }
+    if word(page + 8) == 0 {
+        let queue = native.call(8, 0, 0, 0, 0, 0, 0)
+        if queue.error != 0 { return queue.error }
+        let flags = native.call(26, queue.value, 2, 1, 0, 0, 0)
+        if flags.error != 0 {
+            _ = native.call(7, queue.value, 0, 0, 0, 0, 0)
+            return flags.error
+        }
+        put(page + 8, queue.value + 1)
+    }
+    let handler = native.call(30, 0, 0, 0, 0, 0, 0).value
+    let action = [handler, uint(2) << 32]
+    let address = std.mem.transmute[*[uint; 2], uint](std.ptr.addr_of(action))
+    let bits = extra
+    let signo: uint = 1
+    while bits != 0 {
+        if bits & 1 != 0 {
+            let error = darwin_arm_signal(page, signo, address)
+            if error != 0 { darwin_disarm(page, old)
+                return error }
+            put(page + 16, word(page + 16) | mask_bit(signo))
+        }
+        bits = bits >> 1
+        signo = signo + 1
+    }
+    0
+} }
+#[cfg(os = "macos")]
+fn darwin_change(page: uint, signo: uint, flags: uint) uint { unsafe {
+    let event = [signo, uint(65530) | (flags << 16), uint(0), uint(0)]
+    let address = std.mem.transmute[*[uint; 4], uint](std.ptr.addr_of(event))
+    native.call(9, word(page + 8) - 1, address, 1, 0, 0, 0).error
+} }
+#[cfg(os = "macos")]
+fn darwin_arm_signal(page: uint, signo: uint, action: uint) uint {
+    let added = darwin_change(page, signo, 33)
+    if added != 0 { return added }
+    let installed = native.call(29, signo, action, page + 128 + signo * 16, 0, 0, 0)
+    if installed.error != 0 && darwin_change(page, signo, 2) != 0 { fail() }
+    installed.error
 }
+#[cfg(os = "macos")]
+fn darwin_disarm(page: uint, keep: uint) {
+    let mask = word(page + 16)
+    let removed = mask & ~keep
+    let bits = removed
+    let signo: uint = 1
+    while bits != 0 {
+        if bits & 1 != 0 {
+            let restored = native.call(29, signo, page + 128 + signo * 16, 0, 0, 0, 0)
+            if restored.error != 0 || darwin_change(page, signo, 2) != 0 { fail() }
+        }
+        bits = bits >> 1
+        signo = signo + 1
+    }
+    let remaining = mask & keep
+    put(page + 16, remaining)
+    if remaining == 0 {
+        _ = native.call(7, word(page + 8) - 1, 0, 0, 0, 0, 0)
+        put(page + 8, 0)
+    };
+}
+#[cfg(os = "macos")]
+fn disarm_closed() {
+    if ctl == 0 || word(ctl + 56) == 0 { return }
+    put(ctl + 56, 0)
+    let keep: uint = 0
+    let sub = word(ctl)
+    while sub != 0 {
+        if word(sub + 64) == 0 { keep = keep | word(sub + 8) }
+        sub = word(sub)
+    }
+    if word(ctl + 16) != keep { darwin_disarm(ctl, keep) }
+}
+#[cfg(not(os = "macos"))]
+fn disarm_closed() {}
 #[cfg(os = "macos")]
 fn pump(page: uint) { _ = page }
 #[cfg(os = "macos")]
-fn harvest(page: uint) { _ = page }
+fn harvest(page: uint) { unsafe {
+    if word(page + 8) == 0 { return }
+    let events = [uint(0); 20]
+    let timeout = [uint(0); 2]
+    let event = std.mem.transmute[*[uint; 20], uint](std.ptr.addr_of(events))
+    let time = std.mem.transmute[*[uint; 2], uint](std.ptr.addr_of(timeout))
+    let ready = native.call(9, word(page + 8) - 1, 0, 0, event, 5, time)
+    if ready.error == 4 { return }
+    if ready.error != 0 { fail()
+        return }
+    for i in 0..int(ready.value) {
+        let entry = event + uint(i) * 32
+        deliver_count(word(entry), word(entry + 16))
+    }
+} }
 #[cfg(os = "macos")]
-fn mask_sync(page: uint) { _ = page }
+fn mask_sync(page: uint) { _ = page
+    disarm_closed() }
+#[cfg(os = "macos")]
+fn mark_disarm() { put(ctl + 56, 1) }
+#[cfg(not(os = "macos"))]
+fn mark_disarm() {}
 /* Windows 捕获面：CreateEventW 创建 auto-reset 事件后 signal_install 片段登记
    SetConsoleCtrlHandler；回调是纯机器代码，只把 ctrl 位并入 ctl+72 并 SetEvent。*/
 #[cfg(os = "windows")]
@@ -91,6 +193,7 @@ fn arm(extra_mask: uint) uint { unsafe {
 fn cleanup(control: uint) { unsafe {
     let sub = word(control + 64)
     if sub != 0 { put(sub + 64, 1) }
+    mark_disarm()
     complete_close(control, 0)
 } }
 
@@ -116,6 +219,7 @@ pub fn subscribe(mask: uint, capacity: uint) uint { unsafe {
 pub fn close(control: uint) { unsafe {
     if control == 0 { return }
     resource.close_raw(control)
+    disarm_closed()
 } }
 
 /* 提交一次阻塞读：native worker 线程持有 in-flight 请求直到 signalfd 可读或 fd 关闭。*/
@@ -182,17 +286,18 @@ fn harvest(page: uint) { unsafe {
     }
 } }
 
-fn deliver(signo: uint) { unsafe {
-    if signo == 0 { return }
+fn deliver(signo: uint) { deliver_count(signo, 1) }
+fn deliver_count(signo: uint, count: uint) { unsafe {
+    if signo == 0 || count == 0 { return }
     let bit = mask_bit(signo)
     let sub = word(ctl)
     while sub != 0 {
-        if word(sub + 64) == 0 && word(sub + 8) & bit != 0 { enqueue(sub, signo, bit) }
+        if word(sub + 64) == 0 && word(sub + 8) & bit != 0 { enqueue(sub, signo, bit, count) }
         sub = word(sub)
     }
 } }
 
-fn enqueue(sub: uint, signo: uint, bit: uint) { unsafe {
+fn enqueue(sub: uint, signo: uint, bit: uint, occurrences: uint) { unsafe {
     if word(sub + 16) & bit != 0 {
         /* 已排队同 signo：occurrences 饱和递增，饱和后计入 dropped。*/
         let count = word(sub + 48)
@@ -200,26 +305,30 @@ fn enqueue(sub: uint, signo: uint, bit: uint) { unsafe {
         while i < count {
             let slot = word(sub + 24) + ((word(sub + 40) + i) % word(sub + 32)) * RING_ENTRY_BYTES
             if word(slot) == signo {
-                if word(slot + 8) == ~uint(0) { drop_one(sub) } else { put(slot + 8, word(slot + 8) + 1) }
+                let previous = word(slot + 8)
+                let free = ~uint(0) - previous
+                let added = if occurrences < free { occurrences } else { free }
+                put(slot + 8, previous + added)
+                if added != occurrences { drop_count(sub, occurrences - added) }
                 return
             }
             i = i + 1
         }
         return
     }
-    if word(sub + 48) >= word(sub + 32) { drop_one(sub)
+    if word(sub + 48) >= word(sub + 32) { drop_count(sub, occurrences)
  return }
     let slot = word(sub + 24) + ((word(sub + 40) + word(sub + 48)) % word(sub + 32)) * RING_ENTRY_BYTES
     put(slot, signo)
-    put(slot + 8, 1)
+    put(slot + 8, occurrences)
     put(sub + 48, word(sub + 48) + 1)
     put(sub + 16, word(sub + 16) | bit)
     wake_waiter(sub)
 } }
 
-fn drop_one(sub: uint) { unsafe {
-    put(sub + 56, word(sub + 56) + 1)
-    counters.add(counters.SIGNAL_DROPPED, 1)
+fn drop_count(sub: uint, count: uint) { unsafe {
+    put(sub + 56, word(sub + 56) + count)
+    counters.add(counters.SIGNAL_DROPPED, count)
 } }
 
 /* 唤醒首个等待者：把 signo 留在队列里，recv 醒来后 pop。*/

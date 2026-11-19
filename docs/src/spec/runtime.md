@@ -226,8 +226,8 @@ JSON 报告使用 schema `gugu-runtime-report-v1`，每个事件一行，字段�
 
 可订阅的跨目标信号集合为：
 
-| Gugu 信号 | Linux | Windows |
-|-----------|-------|---------|
+| Gugu 信号 | Linux / macOS | Windows |
+|-----------|---------------|---------|
 | `Interrupt` | `SIGINT` | console Ctrl+C |
 | `Terminate` | `SIGTERM` | console close、logoff 或 shutdown 的终止通知 |
 | `Hangup` | `SIGHUP` | 不提供 |
@@ -243,9 +243,9 @@ JSON 报告使用 schema `gugu-runtime-report-v1`，每个事件一行，字段�
 enum Signal {
     Interrupt,
     Terminate,
-    #[cfg(os = "linux")] Hangup,
-    #[cfg(os = "linux")] User1,
-    #[cfg(os = "linux")] User2,
+    #[cfg(any(os = "linux", os = "macos"))] Hangup,
+    #[cfg(any(os = "linux", os = "macos"))] User1,
+    #[cfg(any(os = "linux", os = "macos"))] User2,
     #[cfg(os = "windows")] Break,
 }
 
