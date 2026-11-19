@@ -519,6 +519,9 @@ fn constant_literal(value: &super::super::model::ConstantValue) -> Option<hir::L
     Some(match value {
         ConstantValue::Int(value) => hir::Literal::Integer(*value as u128),
         ConstantValue::Float(value) => hir::Literal::Float(*value),
+        ConstantValue::Float32(value) => {
+            hir::Literal::Float(f64::from(f32::from_bits(*value)).to_bits())
+        }
         ConstantValue::Bool(value) => hir::Literal::Bool(*value),
         ConstantValue::String(value) => hir::Literal::String(value.clone()),
         // 非字面量常量经成员 definition 的 HIR initializer 消费。

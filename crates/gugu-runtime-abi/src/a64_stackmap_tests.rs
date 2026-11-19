@@ -253,3 +253,90 @@ fn a64_root_bounds_and_layout_deduplication() {
     bad.frame_size = 24;
     assert!(stackmap_codec::encode_for(Arch::Aarch64, &[bad], &[point(0, 0)]).is_err());
 }
+
+#[test]
+fn serialized_a64_cfa_recovers_entry_and_framed_callers() {
+    use stackmap_codec::a64_unwind::{self, Caller, Site};
+    let code = function();
+    let sites = [
+        Site {
+            pc_offset: 8,
+            entry: true,
+        },
+        Site {
+            pc_offset: 12,
+            entry: false,
+        },
+    ];
+    let bytes = a64_unwind::encode(code, 16, &sites).unwrap();
+    let table = a64_unwind::decode(&bytes).unwrap();
+    let mut call = point(0, 8);
+    call.1.pc_offset = 12;
+    let maps = stackmap_codec::decode_tables(
+        &stackmap_codec::encode_for(Arch::Aarch64, &[code], &[point(4, 0), call]).unwrap(),
+    )
+    .unwrap();
+    table.verify_joint(&maps).unwrap();
+    let mut registers = [0; 31];
+    registers[10] = 0x2000;
+    assert_eq!(
+        table.caller(0x1008, 0x8000, &[], &registers).unwrap(),
+        Caller {
+            sp: 0x8000,
+            pc: 0x2000
+        }
+    );
+    let mut frame = [0; 8];
+    frame[3] = 0x3000;
+    assert_eq!(
+        table.caller(0x100c, 0x7fc0, &frame, &[]).unwrap(),
+        Caller {
+            sp: 0x8000,
+            pc: 0x3000
+        }
+    );
+    assert!(table.caller(0x100d, 0x8000, &frame, &registers).is_err());
+    assert!(table.caller(0x1008, 0x8000, &frame, &[]).is_err());
+    assert!(table.caller(0x100c, 0x8000, &[], &registers).is_err());
+    assert!(table.caller(0x100c, u64::MAX, &frame, &registers).is_err());
+    let mut wrong = maps.clone();
+    wrong.architecture = Arch::X86_64;
+    assert!(table.verify_joint(&wrong).is_err());
+}
+
+#[test]
+fn a64_cfa_decoder_rejects_corruption_and_accepts_empty_sites() {
+    use stackmap_codec::a64_unwind::{self, Site};
+    let code = function();
+    let bytes = a64_unwind::encode(
+        code,
+        16,
+        &[
+            Site {
+                pc_offset: 8,
+                entry: true,
+            },
+            Site {
+                pc_offset: 12,
+                entry: false,
+            },
+        ],
+    )
+    .unwrap();
+    for length in [0, 7, 39, bytes.len() - 1] {
+        assert!(a64_unwind::decode(&bytes[..length]).is_err());
+    }
+    for at in [0, 8, 16, 20, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68] {
+        let mut invalid = bytes.clone();
+        invalid[at] ^= 0x80;
+        assert!(
+            a64_unwind::decode(&invalid).is_err(),
+            "accepted corruption at {at}"
+        );
+    }
+    let mut empty_code = code;
+    empty_code.frame_size = 0;
+    let table = a64_unwind::decode(&a64_unwind::encode(empty_code, 0, &[]).unwrap()).unwrap();
+    assert!(table.sites.is_empty());
+    assert!(table.caller(0x1008, 0x8000, &[], &[]).is_err());
+}

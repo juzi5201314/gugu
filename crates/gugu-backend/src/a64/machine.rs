@@ -57,6 +57,7 @@ pub enum Item {
         target: String,
         arguments: Vec<u32>,
         results: Vec<u32>,
+        safepoint: Option<(u32, u32)>,
     },
     TailCall {
         target: String,

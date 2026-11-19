@@ -154,6 +154,11 @@ const SOURCES: &[RuntimeSourceInput<'static>] = &[
         RuntimeSourceRole::StandardLibrary,
     ),
     source(
+        "std/fmt_float.gg",
+        include_str!("../../gugu-frontend/resources/std/fmt_float.gg"),
+        RuntimeSourceRole::StandardLibrary,
+    ),
+    source(
         "std/hash.gg",
         include_str!("../../gugu-frontend/resources/std/hash.gg"),
         RuntimeSourceRole::StandardLibrary,

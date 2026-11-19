@@ -1,6 +1,8 @@
 //! 执行真实文件/资源函数的 LIR；地址是 Vec 下标，外部操作通过显式钩子注入。
 mod collections;
 mod copy;
+mod debug_builders;
+mod float_formatting;
 mod formatting;
 mod harness;
 mod hashing;
@@ -266,7 +268,7 @@ fn interpret_bounded(
                     values[range(&instruction.results)].copy_from_slice(&returned);
                     continue;
                 }
-                Op::IConst(value) => value,
+                Op::IConst(value) | Op::FConst(value) => value,
                 Op::Integer(IntOp::MulWide) => {
                     let product = u128::from(args[0]) * u128::from(args[1]);
                     values[range(&instruction.results)]

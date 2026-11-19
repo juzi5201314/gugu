@@ -27,3 +27,4 @@ run_case() {
 run_case hello 0
 run_case sum 7
 run_case collections 0
+run_case formatting 0

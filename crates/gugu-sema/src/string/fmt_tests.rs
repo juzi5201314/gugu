@@ -56,6 +56,32 @@ fn floats_follow_precision_exponent_and_non_finite_rules() {
 }
 
 #[test]
+fn floats_preserve_source_width_and_rust_debug_precision() {
+    assert_eq!(
+        render(".20", |out| format_float32(out, 0.1)),
+        format!("{:.20}", 0.1f32)
+    );
+    assert_eq!(
+        render(".20", |out| format_float(out, 0.1)),
+        format!("{:.20}", 0.1f64)
+    );
+    assert_eq!(render("", |out| format_float32(out, 0.1)), "0.1");
+    assert_eq!(render(".0?", |out| format_float32(out, 1.0)), "1");
+    assert_eq!(render(".2?", |out| format_float(out, 1.0)), "1.00");
+    assert_eq!(render("?", |out| format_float(out, 1e16)), "1e16");
+    assert_eq!(render("?", |out| format_float32(out, 1e-5)), "1e-5");
+    assert_eq!(
+        render("+08", |out| format_float32(out, f32::INFINITY)),
+        "    +inf"
+    );
+    assert_eq!(
+        render("+08", |out| format_float(out, -f64::NAN)),
+        "     NaN"
+    );
+    assert_eq!(render("", |out| format_float32(out, -0.0)), "-0");
+}
+
+#[test]
 fn text_values_pad_truncate_and_escape() {
     assert_eq!(render("", |out| format_str(out, "gugu")), "gugu");
     assert_eq!(render(".2", |out| format_str(out, "gugu")), "gu");
@@ -128,4 +154,20 @@ fn negative_dynamic_counts_are_faults() {
     assert!(resolve_counts(spec.clone()).is_ok());
     let negative = spec.try_map(|_| Ok::<i64, ()>(-1)).expect("映射成功");
     assert_eq!(resolve_counts(negative), Err(FormatFault::NegativeCount));
+}
+
+#[test]
+fn debug_set_resets_child_flags_and_finishes_once() {
+    let mut flags = spec("#?");
+    flags.width = Some(100);
+    flags.precision = Some(0);
+    flags.sign = Some(crate::string::Sign::Plus);
+    let mut out = Formatter::new(flags);
+    let mut set = out.debug_set();
+    set.entry(|f| format_float(f, 0.1))
+        .entry(|f| format_str(f, "x"));
+    set.finish();
+    set.finish();
+    assert_eq!(out.finish(), "{\n    0.1,\n    \"x\",\n}");
+    assert_eq!(render("?", |f| f.debug_set().finish()), "{}");
 }

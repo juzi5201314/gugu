@@ -49,7 +49,7 @@ runtime/std 源在 compiler build-time 由 `gugu-runtime-builder` 固化为 targ
 - map/set 必须先把键编码为 byte string，再按该 byte string 的无符号字典序写入；
 - optional 值先写 0/1 tag；
 - package/source 路径只使用 package-relative、`/` 分隔的规范 UTF-8；toolchain 文件使用 toolchain-relative逻辑路径加内容 digest；ELF `PT_INTERP` 等目标运行时路径使用目标 namespace 中以 `/` 开头的规范 byte path，不能写构建宿主 sysroot绝对位置；
-- 浮点写 IEEE bit pattern，不做文本转换或 NaN 规范化。
+- 浮点写源类型的 IEEE bit pattern，不做文本转换或 NaN 规范化。早期常量 schema 3 区分 binary32 与 binary64，格式化 oracle 按源类型分派；单态化值树中 binary64 使用 tag 2 与 8 字节，binary32 使用 tag 9 与 4 字节。
 
 跨 session 的定义与类型身份使用稳定键；指针、线程编号和绝对 workspace 路径禁止进入规范编码。冻结 IR payload 保留现有确定性构造顺序下的稠密 arena ID，完整 HIR/world 输入指纹将其绑定到当前定义与类型表；不能把这些局部编号当成跨 world 的定义身份。
 

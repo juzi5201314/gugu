@@ -10,9 +10,19 @@ pub struct Allocation {
     pub values: Vec<regalloc::ValueAllocation>,
     pub slots: regalloc::slots::Slots,
     pub stats: regalloc::scan::Statistics,
+    pub site_positions: std::collections::BTreeMap<(u32, u32), u32>,
 }
 
 pub fn allocate(function: &Function, registers: &impl RegisterFile) -> Result<Allocation, Error> {
+    allocate_roots(function, registers, None)
+}
+
+pub(crate) fn allocate_roots(
+    function: &Function,
+    registers: &impl RegisterFile,
+    body: Option<&crate::lir::body::Body>,
+) -> Result<Allocation, Error> {
+    let mut site_positions = std::collections::BTreeMap::new();
     let count = function.types.len();
     let words = count.div_ceil(64);
     let blocks = function.blocks.len();
@@ -44,6 +54,14 @@ pub fn allocate(function: &Function, registers: &impl RegisterFile) -> Result<Al
                 .and_then(|p| p.checked_mul(2))
                 .ok_or_else(|| super::error("A64 allocation position overflow"))?;
             let call = site.item.is_call();
+            let source = match site.item {
+                super::machine::Item::Poll { block, instruction } => Some((block, instruction)),
+                super::machine::Item::Call { safepoint, .. } => safepoint,
+                _ => None,
+            };
+            if let Some(source) = source {
+                site_positions.insert(source, position);
+            }
             let mut fixed = if matches!(site.item, super::machine::Item::Poll { .. }) {
                 RegSet(
                     abi::POOL
@@ -94,7 +112,7 @@ pub fn allocate(function: &Function, registers: &impl RegisterFile) -> Result<Al
                 use_slot: position,
                 def_slot: position + 1,
                 mask: fixed,
-                pointer_spill: false,
+                pointer_spill: body.is_some() && call,
                 call,
             });
         }
@@ -117,9 +135,18 @@ pub fn allocate(function: &Function, registers: &impl RegisterFile) -> Result<Al
         points: scan_points,
         values: values
             .into_iter()
-            .map(|v| regalloc::Value {
+            .enumerate()
+            .map(|(index, v)| regalloc::Value {
                 class: abi::GPR,
-                root: regalloc::RootClass::NonPointer,
+                root: match body
+                    .and_then(|body| body.values.get(index))
+                    .and_then(|v| v.kind.provenance)
+                    .and_then(|p| p.root_kind())
+                {
+                    Some(4) => regalloc::RootClass::StackPointer,
+                    Some(_) => regalloc::RootClass::HeapPointer,
+                    None => regalloc::RootClass::NonPointer,
+                },
                 allowed: RegSet(u64::MAX),
                 rematerializable: false,
                 range: (v.start, v.end),
@@ -135,6 +162,7 @@ pub fn allocate(function: &Function, registers: &impl RegisterFile) -> Result<Al
         values: scanned.values,
         slots,
         stats: scanned.stats,
+        site_positions,
     })
 }
 
