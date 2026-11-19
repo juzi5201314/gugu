@@ -502,6 +502,10 @@ fn Buffered.read(self: &Self, destination: &[byte]) Result[int, Error]
 
 File、TcpStream、进程 pipe 和内存缓冲实现适用 trait。`print` / `println` 在格式化后写 stdout；它们不改变 `Print`/格式 trait 为纯文本构建能力的事实。
 
+`print[Ts: Print...](...args: Ts)`、`println`、`eprint` 和 `eprintln` 均返回 `()`。它们按参数顺序用 `Print` 向一个 `Formatter` 追加文本，不插入分隔符；`println` / `eprintln` 最后追加一个 `\n`，所以空参数调用仍写出换行。`print` / `println` 写 fd 1（stdout），`eprint` / `eprintln` 写 fd 2（stderr）。空的 `print()` / `eprint()` 不发起写入。
+
+这些便捷输出函数通过现有 ReportWrite 边界同步写出 UTF-8 字节，短写后继续写剩余部分；返回错误或零字节时静默停止，不重试错误、不 panic，也不返回 I/O 错误。已经写出的前缀保留，剩余文本丢弃。它们不承诺跨协程的整次调用原子性，也不采用上面通用 I/O trait 的挂起协议；需要错误处理或可取消写入的代码应使用 `Write` 等显式 I/O API。
+
 ## 取消
 
 `std.sync.CancelSource` 创建共享的 `CancelToken`。取消是显式、幂等和协作式的：

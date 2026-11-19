@@ -1,6 +1,44 @@
 pub use std.text.{Bytes}
 use std.text.{alloc_bytes}
+use std.fmt.{Formatter}
 pub use std.sync.{CancelToken}
+
+pub fn print[Ts: Print...](...args: Ts) {
+    let out = Formatter::new()
+    for a in args { a.print(&out) }
+    write_output(1, out.finish())
+}
+
+pub fn println[Ts: Print...](...args: Ts) {
+    let out = Formatter::new()
+    for a in args { a.print(&out) }
+    out.write_str("\n")
+    write_output(1, out.finish())
+}
+
+pub fn eprint[Ts: Print...](...args: Ts) {
+    let out = Formatter::new()
+    for a in args { a.print(&out) }
+    write_output(2, out.finish())
+}
+
+pub fn eprintln[Ts: Print...](...args: Ts) {
+    let out = Formatter::new()
+    for a in args { a.print(&out) }
+    out.write_str("\n")
+    write_output(2, out.finish())
+}
+
+fn write_output(fd: uint, value: string) {
+    let bytes = unsafe { Bytes::from_string(value).as_slice() }
+    let offset = 0
+    while offset < bytes.len() {
+        let remaining = uint(bytes.len() - offset)
+        let written = unsafe { std.runtime.report_write(fd, std.ptr.addr_of(bytes[offset]), remaining) }
+        if written == uint(0) || written > remaining { return }
+        offset = offset + int(written)
+    }
+}
 
 // 不可变块链让追加为 O(1)，复制缓冲只共享已封存节点；freeze 线性物化一次。
 struct BufferChunk {

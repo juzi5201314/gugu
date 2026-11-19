@@ -4,6 +4,7 @@ mod formatting;
 mod harness;
 mod network;
 mod platform;
+mod printing;
 mod process;
 mod resource;
 mod trace;
