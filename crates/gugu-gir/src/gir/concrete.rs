@@ -266,6 +266,15 @@ fn build_body(
         let owner = &expanded.module.owners
             [nested.owner_of[instance.definition as usize].expect("pack owner")];
         let mut body = super::build::lower(&expanded.module, owner)?;
+        for statement in &mut body.statements {
+            if let super::body::StatementKind::Assign(
+                _,
+                super::body::Rvalue::CheckedOp { check, .. },
+            ) = &mut statement.kind
+            {
+                *check = expanded.checks[*check as usize];
+            }
+        }
         body.expression_locals.truncate(expanded.expressions);
         for local in &mut body.locals {
             if local

@@ -21,6 +21,7 @@ pub struct Expanded {
     pub scopes: Vec<hir::ScopeId>,
     pub cleanup: Vec<u32>,
     pub plans: Vec<u32>,
+    pub checks: Vec<u32>,
 }
 
 pub fn element(module: &hir::Module, ty: hir::TypeId) -> Option<&str> {
@@ -61,6 +62,7 @@ pub fn expand(
             .collect(),
         cleanup: (0..source.cleanup.len() as u32).collect(),
         plans: (0..source.cleanup_plans.len() as u32).collect(),
+        checks: (0..source.checks.len() as u32).collect(),
     };
     let map = Map::identity(source);
     expander.visit(source.body, &map, bindings)?;
@@ -68,6 +70,7 @@ pub fn expand(
     let scopes = expander.scopes;
     let cleanup = expander.cleanup;
     let plans = expander.plans;
+    let checks = expander.checks;
     module.owners[index] = expander.output;
     Ok(Some(Expanded {
         module,
@@ -76,6 +79,7 @@ pub fn expand(
         scopes,
         cleanup,
         plans,
+        checks,
     }))
 }
 
@@ -88,6 +92,7 @@ struct Expander<'a, 'b> {
     scopes: Vec<hir::ScopeId>,
     cleanup: Vec<u32>,
     plans: Vec<u32>,
+    checks: Vec<u32>,
 }
 impl Expander<'_, '_> {
     fn visit(
@@ -475,6 +480,7 @@ impl Expander<'_, '_> {
             }
         }
         macro_rules! append {($($field:ident),*)=>{$(self.output.$field.extend(copy.$field);)*};}
+        self.checks.extend(0..self.source.checks.len() as u32);
         append!(
             expressions,
             expression_types,
@@ -582,6 +588,14 @@ impl Expander<'_, '_> {
                 p.ty = unit;
             }
         }
+        self.checks = self
+            .output
+            .checks
+            .iter()
+            .zip(&self.checks)
+            .filter(|(check, _)| active.contains(&check.expression.0))
+            .map(|(_, original)| *original)
+            .collect();
         self.output
             .checks
             .retain(|p| active.contains(&p.expression.0));

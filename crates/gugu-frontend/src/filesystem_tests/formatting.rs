@@ -99,6 +99,50 @@ fn heterogeneous_pack_empty() {
     );
 }
 
+const PACK_SLICE: &str = r#"
+    use std.fmt.{Formatter}
+    fn total[Ts: Print...](start: int, end: int, ...args: Ts) string {
+        let out = Formatter::new()
+        let text = "a界b"
+        out.write_str(text[..0])
+        for a in args {
+            out.write_str(text[start..end])
+            a.print(&out)
+        }
+        out.finish()
+    }
+"#;
+
+#[test]
+fn heterogeneous_pack_slices() {
+    assert_eq!(
+        render(&format!(
+            "{PACK_SLICE}\nfn render() string = total(1, 4, 1, true)"
+        )),
+        "界1界true"
+    );
+    assert_eq!(
+        render(&format!("{PACK_SLICE}\nfn render() string = total(3, 1)")),
+        ""
+    );
+}
+
+#[test]
+#[should_panic(expected = "Runtime(Panic)")]
+fn heterogeneous_pack_slice_bounds_panic() {
+    render(&format!(
+        "{PACK_SLICE}\nfn render() string = total(3, 1, true)"
+    ));
+}
+
+#[test]
+#[should_panic(expected = "Runtime(Panic)")]
+fn heterogeneous_pack_slice_utf8_panic() {
+    render(&format!(
+        "{PACK_SLICE}\nfn render() string = total(2, 4, true)"
+    ));
+}
+
 #[test]
 fn heterogeneous_pack_return_exits_the_function() {
     assert_eq!(
