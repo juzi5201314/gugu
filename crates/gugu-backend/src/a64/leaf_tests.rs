@@ -3,6 +3,7 @@ mod calls;
 mod control;
 mod integer;
 mod layout;
+mod leaf_reserve;
 mod memory;
 mod roots;
 mod runtime;

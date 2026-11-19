@@ -98,7 +98,10 @@ fn compile(
         } else {
             alloc::allocate(&selected, registers)?
         };
-        let frame = frame::layout(body, &allocation)?;
+        let mut frame = frame::layout(body, &allocation)?;
+        if bindings.is_some() {
+            frame::runtime_policy(body, &mut frame)?;
+        }
         let (rewritten, anchors) =
             super::rewrite::rewrite_runtime(&selected, &allocation, &frame, bindings)?;
         let (bytes, layout, relocations) = layout::assemble_function(&rewritten)?;

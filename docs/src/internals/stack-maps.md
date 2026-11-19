@@ -162,6 +162,11 @@ Linux 放入 `.gugu.stackmap`，Windows 放入 `.gugustk`。section 内所有整
 
 ### A64 lowering 到 map/CFA 的接线（4c.2b.1）
 
+CallReturn 的 poll-free leaf 豁免不能与 slow-capable callee 入口检查共存。A64 runtime
+使用 4096 字节的 managed leaf 帧预算：caller 检查自己的 frame 加预算，callee 帧必须不大于
+预算且不发射自动 morestack/poll 入口。reserve 不计入 frame_size/CFA/slot_count，也不新增
+caller 的调用图；过大的叶帧必须报错。空帧叶同样不检查，非叶的自动检查仍保留。
+
 标量根已从权威 LIR anchors 经共享 pointer_spill 落槽；五类 provenance 逐站点映射，
 不允许用 register 根绕过调用/poll 的强制落槽要求。managed call 的 BL 返回标签必须位于
 结果物化之前；该调用新定义的结果不在该返回 PC 上被当作已有根。实参根登记 source spill，

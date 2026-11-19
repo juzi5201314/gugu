@@ -8,6 +8,9 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Frame {
     pub size: u32,
+    pub required_frame: u32,
+    pub max_leaf_reserve: u32,
+    pub unchecked_leaf: bool,
     pub outgoing: u32,
     pub record: u32,
     pub copy_scratch: u32,
@@ -76,6 +79,9 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
     {
         return Ok(Frame {
             size: 0,
+            required_frame: 0,
+            max_leaf_reserve: 0,
+            unchecked_leaf: false,
             outgoing: 0,
             record: 0,
             copy_scratch: 0,
@@ -118,6 +124,9 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
     let size = align(offset, 16)?;
     Ok(Frame {
         size,
+        required_frame: size,
+        max_leaf_reserve: 0,
+        unchecked_leaf: false,
         outgoing,
         record: outgoing,
         copy_scratch,
@@ -125,4 +134,25 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
         spills,
         locals,
     })
+}
+
+pub const POLL_FREE_LEAF_RESERVE: u32 = 4096;
+
+pub(crate) fn runtime_policy(body: &Body, frame: &mut Frame) -> Result<(), Error> {
+    if body.poll_interface.leaf {
+        if body.instructions.iter().any(|inst| matches!(inst.op, crate::lir::body::Op::StackCheck | crate::lir::body::Op::SafepointPoll { .. } | crate::lir::body::Op::Call(_) | crate::lir::body::Op::ForeignCall(_))) || !body.safepoints.is_empty() {
+            return Err(super::error("poll-free leaf interface contains a checked entry or runtime call/poll"));
+        }
+        if frame.size > POLL_FREE_LEAF_RESERVE {
+            return Err(super::error("poll-free leaf frame exceeds the 4096-byte caller reserve"));
+        }
+        frame.unchecked_leaf = true;
+    } else if body.instructions.iter().any(|inst| matches!(&inst.op, crate::lir::body::Op::Call(call) if call.kind == crate::gir::body::CallKind::Managed && call.poll_free_leaf)) {
+        frame.max_leaf_reserve = POLL_FREE_LEAF_RESERVE;
+    }
+    frame.required_frame = frame
+        .size
+        .checked_add(frame.max_leaf_reserve)
+        .ok_or_else(|| super::error("required frame plus leaf reserve overflow"))?;
+    Ok(())
 }

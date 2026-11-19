@@ -572,6 +572,15 @@ unwind/CFA 和 Context switch/restore 仍属下一部分；不声称生产镜像
 
 ### A64 标量根、managed call 与 safepoint CFA（4c.2b.1）
 
+poll-free managed leaf 的 map 豁免同时要求不进入 morestack/poll：runtime frame 布局将其
+物理 frame 限制为 4096 字节，并禁止自动入口检查。caller 取直接 poll-free managed callee
+的最大预算（固定 4096），入口 candidate=SP-frame.size-max_leaf_reserve；实际 SP 只减
+frame.size。frame/CFA/根偏移不包括 reserve。超限或叶接口含 runtime 操作时报错。
+不把 map-free 调用改为强制建图。此处沿用 x64 的 required_frame 容量记账形状，但 x64
+现有 max_leaf_reserve 只统计 ForeignLeaf 的声明预算；它没有 managed leaf 的 4096 上限，
+本次不改变 x64 行为。所有 runtime callee 必须经过 runtime 编译边界执行该预算契约，
+compile_function 仍是由调用者自行保证容量的隔离边界。
+
 compile_runtime 开始接受五类来源的 64 位标量根，以及直接 Instance managed call。
 compile_leaf/compile_function 的隔离限制不放宽。非 poll-free 调用必须有指向该指令的
 LIR CallReturn 记录；不补造 leaf proof 或逻辑根。入口参数的机器类型/provenance 必须与

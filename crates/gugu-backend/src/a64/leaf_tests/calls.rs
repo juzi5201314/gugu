@@ -84,6 +84,9 @@ fn large_slot_copy_cycles_do_not_clobber_address_scratch() {
     let base = (1 << 24) + 16;
     fragment.frame = frame::Frame {
         size: base + 64,
+        required_frame: base + 64,
+        max_leaf_reserve: 0,
+        unchecked_leaf: false,
         outgoing: base,
         record: base,
         copy_scratch: base + 16,

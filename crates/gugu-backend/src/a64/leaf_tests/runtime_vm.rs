@@ -82,7 +82,7 @@ impl Harness {
             );
             let candidate = self
                 .expected_sp
-                .wrapping_sub(u64::from(fragment.frame.size));
+                .wrapping_sub(u64::from(fragment.frame.required_frame));
             assert_eq!(registers[11], candidate);
             assert!(
                 !memory
@@ -127,7 +127,7 @@ impl Harness {
             }
             registers[31] = self.expected_sp;
             let watermark = if self.growth.is_empty() {
-                self.expected_sp - u64::from(fragment.frame.size)
+                self.expected_sp - u64::from(fragment.frame.required_frame)
             } else {
                 crate::runtime::coroutine::POLL_SENTINEL as u64
             };

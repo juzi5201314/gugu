@@ -248,6 +248,7 @@ fn runtime_site_obligations_remain_strict_and_errors_are_contextual() {
 #[test]
 fn runtime_metadata_references_and_automatic_nonzero_frame_check() {
     let mut f = Fixture::new(&[], &[]);
+    f.body.poll_interface.leaf = false;
     poll(&mut f);
     f.ret(&[]);
     f.body.safepoints.push(Safepoint {

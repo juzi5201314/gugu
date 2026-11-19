@@ -29,8 +29,11 @@ pub(crate) fn rewrite_runtime(
 ) -> Result<(Vec<layout::Item>, Vec<super::sites::Anchor>), Error> {
     let mut out = Vec::new();
     let mut runtime = super::sites::Emitter::new(bindings, function.blocks.len())?;
-    if bindings.is_some() && (function.checked_entry || frame.size != 0) {
-        runtime.entry(&mut out, frame.size)?;
+    if bindings.is_some()
+        && !frame.unchecked_leaf
+        && (function.checked_entry || frame.required_frame != 0)
+    {
+        runtime.entry(&mut out, frame.required_frame)?;
     }
     prologue(&mut out, frame)?;
     if function.entry != 0 {
