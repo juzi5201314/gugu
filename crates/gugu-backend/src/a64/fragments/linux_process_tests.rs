@@ -246,12 +246,7 @@ fn spawn_child_only_uses_raw_syscalls_and_reports_exec_errno() {
 }
 
 fn child_case(low_pipe: bool, low_stdio: bool) {
-    let mut vm = spawn_vm();
-    if low_stdio {
-        for (offset, fd) in [(32, 0), (40, 1), (48, 2)] {
-            vm.put(0x3000 + offset, fd, 8);
-        }
-    }
+    let mut vm = child_request(low_stdio);
     let mut script = child_script(low_pipe, low_stdio);
     let mut duplicate = if low_pipe { 6 } else { 20 };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -285,11 +280,19 @@ fn child_case(low_pipe: bool, low_stdio: bool) {
             };
         })
     }));
-    assert_eq!(
-        result.unwrap_err().downcast_ref::<&str>(),
-        Some(&"child exited 127")
-    );
+    let error = result.unwrap_err();
+    assert_eq!(error.downcast_ref::<&str>(), Some(&"child exited 127"));
     assert!(script.is_empty());
+}
+
+fn child_request(low_stdio: bool) -> Vm {
+    let mut vm = spawn_vm();
+    if low_stdio {
+        for (offset, fd) in [(32, 0), (40, 1), (48, 2)] {
+            vm.put(0x3000 + offset, fd, 8);
+        }
+    }
+    vm
 }
 
 fn child_script(low_pipe: bool, low_stdio: bool) -> VecDeque<u64> {
