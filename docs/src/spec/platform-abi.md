@@ -270,6 +270,8 @@ struct Header {
 窄标量参数按自然大小排列，非 HFA 聚合仍使用至少 8-byte 对齐和占用的栈槽，匿名参数
 默认提升后全部落栈；此内部能力不开放前端 variadic。
 Apple 函数导入使用既有调用桩，Linux 保留原始符号，数据导入不改写成函数调用桩。
+HFA 必须完全由连续、同类型的浮点成员组成，总大小等于成员数乘元素大小；有内部或尾部
+padding 的聚合不能标记为 HFA，包括 16-byte 对齐而只有三个 f32 成员的聚合。
 
 普通与 dirty 外调只能经对应的 Gugu admission dispatcher，调用站点必须有权威挂起栈图。
 按值副本、间接结果和额外 HFA 结果继续使用既有 raw-copy/fixup 事务；native worker

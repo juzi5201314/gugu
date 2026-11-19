@@ -1,4 +1,7 @@
 //! C 类型在具体布局上分类；保留参数分组，内部值表示不参与平台 ABI 判定。
+#[cfg(test)]
+#[path = "foreign_tests.rs"]
+mod tests;
 use super::{Builder, Diagnostic, TypeKind, invalid, storage::integer_type, values::Computed};
 use crate::body::{Conversion, ForeignArgument, Op, Origin, Type, ValueId, ValueType, id};
 use crate::gir::concrete::TypeLayout;
@@ -170,7 +173,7 @@ pub(crate) fn describe(types: &[TypeLayout], ty: u32) -> crate::foreign::Type {
                     bits: 0,
                     offsets: Vec::new(),
                 };
-                let homogeneous = homogeneous(types, ty, 0, &mut hfa) && !hfa.offsets.is_empty();
+                let homogeneous = homogeneous(types, ty, 0, &mut hfa) && hfa.valid_for(layout.size);
                 Kind::Aggregate {
                     hfa: homogeneous.then_some(hfa),
                 }

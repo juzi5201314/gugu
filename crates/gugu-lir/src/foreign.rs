@@ -23,6 +23,20 @@ pub struct Hfa {
     pub offsets: Vec<u64>,
 }
 
+impl Hfa {
+    pub(crate) fn valid_for(&self, bytes: u64) -> bool {
+        let element = u64::from(self.bits / 8);
+        matches!(self.bits, 32 | 64)
+            && (1..=4).contains(&self.offsets.len())
+            && bytes == self.offsets.len() as u64 * element
+            && self
+                .offsets
+                .iter()
+                .enumerate()
+                .all(|(index, offset)| *offset == index as u64 * element)
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Signature {
     /// Original source arguments, including zero-sized values; excludes sret/callee lanes.
@@ -43,23 +57,7 @@ impl Type {
             Kind::Float { bits } => matches!(bits, 32 | 64) && self.bytes == u64::from(*bits / 8),
             Kind::Pointer => self.bytes == 8 && self.align == 8,
             Kind::Aggregate { hfa: None } => true,
-            Kind::Aggregate { hfa: Some(hfa) } => {
-                if !matches!(hfa.bits, 32 | 64) || !(1..=4).contains(&hfa.offsets.len()) {
-                    return false;
-                }
-                let bytes = u64::from(hfa.bits / 8);
-                let mut end = 0;
-                for &offset in &hfa.offsets {
-                    let Some(next) = offset.checked_add(bytes) else {
-                        return false;
-                    };
-                    if offset < end || !offset.is_multiple_of(bytes) || next > self.bytes {
-                        return false;
-                    }
-                    end = next;
-                }
-                true
-            }
+            Kind::Aggregate { hfa: Some(hfa) } => hfa.valid_for(self.bytes),
         }
     }
 }
@@ -154,6 +152,9 @@ mod tests {
         };
         assert!(aggregate(64, vec![0, 8, 16, 24]).valid());
         for (bits, offsets) in [
+            (64, vec![0, 8, 16]),
+            (64, vec![8, 16, 24]),
+            (64, vec![0, 16, 24]),
             (16, vec![0]),
             (32, vec![]),
             (32, vec![0, 4, 8, 12, 16]),

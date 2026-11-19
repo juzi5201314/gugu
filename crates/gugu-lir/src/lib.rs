@@ -37,8 +37,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。23：保留原始 C 签名。
-pub const SCHEMA: u32 = 23;
+/// LIR query 与 world 的 schema。24：HFA 描述排除成员间隙和尾部 padding。
+pub const SCHEMA: u32 = 24;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {
