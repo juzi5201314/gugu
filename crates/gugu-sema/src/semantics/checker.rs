@@ -6,6 +6,7 @@ use super::{
 };
 use crate::{Diagnostic, DiagnosticCode, Span};
 use std::collections::BTreeMap;
+mod array_init;
 mod assembly;
 mod borrow;
 mod calls;
@@ -115,6 +116,8 @@ struct Checker<'m, 'a> {
     source_literals: Vec<super::output::SourceLiteral>,
     embed_literals: Vec<super::output::EmbedLiteral>,
     format_traits: Vec<formatting::PendingFormat>,
+    array_init_loops: Vec<super::output::ArrayInitLoop>,
+    active_array_inits: Vec<array_init::ActiveInit>,
 }
 
 pub(super) fn check(
@@ -224,6 +227,7 @@ pub(super) fn check(
                 must_use: checker.must_use_sites,
                 source_literals: checker.source_literals,
                 embed_literals: checker.embed_literals,
+                array_init_loops: checker.array_init_loops,
             });
             dependencies[module][index] = checker.dependencies;
             errors.extend(checker.errors);
@@ -357,6 +361,8 @@ impl<'m, 'a> Checker<'m, 'a> {
             embed_literals: Vec::new(),
             format_traits: Vec::new(),
             pack_elements: BTreeMap::new(),
+            array_init_loops: Vec::new(),
+            active_array_inits: Vec::new(),
         }
     }
     fn arena(&self) -> &'a AstArena {
@@ -724,6 +730,7 @@ impl<'m, 'a> Checker<'m, 'a> {
         Ty::Function(parameters, Box::new(self.return_ty.clone()))
     }
     fn slot(&mut self, name: Symbol, ty: Ty, initialized: bool, span: &Span) {
+        self.array_init_binding(name);
         let id = self.slots.len();
         self.slots.push(Slot {
             ty,

@@ -24,6 +24,12 @@ struct SavedExecution {
 }
 
 impl Checker<'_, '_> {
+    pub(super) fn array_init_is_local(&self, slot: usize) -> bool {
+        self.capture_frames
+            .last()
+            .is_none_or(|frame| slot >= frame.slots.len())
+    }
+
     fn enter_capture(&mut self, coroutine: bool) -> SavedExecution {
         let saved = SavedExecution {
             state: self.state.clone(),

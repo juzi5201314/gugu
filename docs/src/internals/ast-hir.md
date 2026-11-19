@@ -78,6 +78,12 @@ placement 只写入 `GirWorldV1.placement`，不回写 HIR，也不改写 GIR CF
 重复数组的长度和函数体内的 comptime 参数读取保留符号形式到单态化，不能提前
 请求具体布局。当前只保存独立参数，不保存参数算术表达式树。
 
+规范的数组初始化循环在语义 checker 中证明，结果由 `CheckedBody.array_init_loops`
+交给 HIR `For.initializations`。每个目标数组一份计划，保存数组 local、循环变量 local、唯一元素写入的
+statement 以及已解析的 `ArrayLength`；不在循环体内把整个 local 视为已初始化。
+只有正常循环出口获得完整初始化事实。GIR 必须消费该计划的首次写入语义，区分
+未写元素与已初始化前缀；根有效位和异常清理不能由前端初始化布尔值替代。
+
 前端使用稠密 `u32` 索引和 `Vec`/切片 arena，不使用指针作为节点身份：
 
 | 名称 | 表示 | 作用域 |

@@ -194,6 +194,7 @@ impl Checker<'_, '_> {
                 }
             }
             StmtKind::Assign { op, place, value } => {
+                self.array_init_assignment(place);
                 let discard = matches!(self.arena().exprs[place.0 as usize].kind,ExprKind::Path(path) if self.model.path(self.module,path).as_slice()==["_"]);
                 if discard {
                     if op != AssignOp::Assign {

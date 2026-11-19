@@ -1,6 +1,7 @@
 use super::*;
 impl Checker<'_, '_> {
     pub(super) fn expression(&mut self, id: ExprId, expected: Option<&Ty>) -> Ty {
+        self.array_init_expression(id);
         let expr = &self.arena().exprs[id.0 as usize];
         if self.native_definition().is_some()
             && matches!(
@@ -60,7 +61,7 @@ impl Checker<'_, '_> {
             ),
             ExprKind::Loop(body) => self.looping(body, None, None),
             ExprKind::While { cond, body } => self.looping(body, Some(cond), None),
-            ExprKind::For { pat, iter, body } => self.looping(body, None, Some((pat, iter))),
+            ExprKind::For { pat, iter, body } => self.array_init_for(id, pat, iter, body),
             ExprKind::Tuple(items) => {
                 let mut ts = Vec::new();
                 for &id in items.as_slice(&self.arena().expr_ids) {
@@ -774,7 +775,8 @@ impl Checker<'_, '_> {
                 self.field(&ty, &index.to_string(), &expr.span)
             }
             ExprKind::Index { base, index } => {
-                let ty = self.place(base, true);
+                let read_base = !self.array_init_store(id);
+                let ty = self.place(base, read_base);
                 self.index(id, &ty, index, !read, &expr.span)
             }
             ExprKind::Unary {
