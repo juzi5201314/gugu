@@ -740,6 +740,20 @@ native data 的 SymbolAddr 多一次槽读取，blob 中的 native data 指针�
 请求入口目前是所选 managed body；生产 Darwin entry/rt0、payload、调度与平台 VM 绑定仍
 属后续阶段，不能把这个 request 当作已具备启动协议的可执行程序。
 
+`a64::runtime::Catalog` 复用 canonical `RuntimeGlueBindings` 的源码解析，不另建按函数名
+猜测的 runtime 表。`build_runtime` 校验 body 仍与同一冻结世界一致；CallTarget::Runtime
+在原调用点按 canonical effects、参数/结果 ABI 和 poll-free 证明解析到真实实例，LIR 本身
+不改写，因此 select 的 default 标志、逻辑根和 Allocation 站点身份均保留。x64 仅开放
+既有 pointer-provenance ABI 比较器的 crate 内可见性，算法和生成物不变。
+
+非分配隐含调用复用既有 implied_glue 目录，检查 source prototype 后发普通 A64 call；
+帧、调用破坏、spill 和返回点复用现有路径。最多八个整数参数，额外传出栈参数尚明确拒绝。
+region publish/reset/promote/transfer 合成真实 plan/export 车道；无 map 的入口还必须拥有
+source poll-free 叶证明。隐含调用保留 LR frame，并保守预留同一 4096-byte 叶调用预算。
+冻结 LIR 的 scoped-view/no-safepoint/permit 标记不产指令，不改变验证过的证明。
+尚未登记 A64 machine 实现的入口、专用分配 ABI、生产元数据/适配器生成、TLS、线程与
+Darwin startup/VM 接线仍明确留待后续 review unit；该 catalog 不是已完成的生产调度器。
+
 ### A64 外调参数包与内部 lowering（4d.3）
 
 runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPacket`
@@ -793,8 +807,10 @@ function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无
 已补入无调用 byte-region memcpy/memmove/memset、条件 BRK、实例及外部地址形成。
 下列 LIR 仍不宣称完整支持：
 
-- `RuntimeCall`、`RuntimeMachineCall`、`CoroutineSwitch`、allocation/handle/GC/barrier
-  与 region/scoped-view 操作：需要 PR 8 的 runtime/glue、异常与证明绑定。
+- 孤立入口仍拒绝 `RuntimeCall` 与隐含 runtime 操作；私有 catalog 已按真实源码 body 绑定
+  标量 RuntimeCall、handle/屏障与 region 生命周期，并消去冻结 LIR 的 scoped-view 证明标记。
+  专用 allocation ABI、`RuntimeMachineCall`/`CoroutineSwitch` 的 machine 实现和不具备
+  no-safepoint 叶证明的 reserved 屏障仍拒绝；不把未完成的平台接线伪装为可运行的 runtime。
 - 孤立编译入口仍拒绝 global、adapter、descriptor、type table/name、vtable、data blob
   与 `CoverageCounter`；私有 image world 已绑定常量、普通全局与 coverage，并要求其余
   typed 符号有真实显式定义。生产类型表生成与适配器构造尚未接入；TLS 仍明确拒绝。

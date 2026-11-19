@@ -30,6 +30,7 @@ pub mod reg;
 mod relocation;
 pub mod rewrite;
 mod rows;
+pub mod runtime;
 pub mod select;
 pub mod sites;
 pub mod table;

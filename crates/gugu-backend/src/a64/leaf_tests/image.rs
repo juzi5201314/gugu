@@ -213,7 +213,7 @@ fn coverage_executes_wrapping_u32_updates_without_touching_neighbors() {
     f.op(Op::CoverageCounter(3), &[], &[]);
     f.ret(&[]);
     assert!(codegen::compile_runtime(&f.body, &bindings()).is_err());
-    let fragment = codegen::compile_image(&f.body, &bindings(), &[]).unwrap();
+    let fragment = codegen::compile_image(&f.body, &bindings(), &[], None).unwrap();
     let fragment = resolve(fragment, &crate::a64::world::coverage_symbol(3), 0x4000);
     for initial in [0_u32, u32::MAX] {
         let mut memory = (0..8)
@@ -246,7 +246,7 @@ fn imported_data_symbol_evaluates_to_the_bound_pointer_not_slot_address() {
     );
     f.ret(&[pointer]);
     let fragment = resolve(
-        codegen::compile_image(&f.body, &bindings(), &[]).unwrap(),
+        codegen::compile_image(&f.body, &bindings(), &[], None).unwrap(),
         "environment",
         0x5000,
     );

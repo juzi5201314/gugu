@@ -228,6 +228,21 @@ fn body_symbols(
 }
 
 pub fn build(request: BuildRequest<'_>) -> Result<World, Error> {
+    build_with_catalog(request, None)
+}
+
+pub fn build_runtime(
+    request: BuildRequest<'_>,
+    catalog: &super::runtime::Catalog<'_>,
+) -> Result<World, Error> {
+    catalog.validate_bodies(request.bodies)?;
+    build_with_catalog(request, Some(catalog))
+}
+
+fn build_with_catalog(
+    request: BuildRequest<'_>,
+    catalog: Option<&super::runtime::Catalog<'_>>,
+) -> Result<World, Error> {
     request.bindings.validate()?;
     if !request
         .bodies
@@ -267,7 +282,7 @@ pub fn build(request: BuildRequest<'_>) -> Result<World, Error> {
             return Err(fail("A64 world/LIR platform mismatch"));
         }
         let symbols = body_symbols(body, &pool, &mut definitions, request.imports)?;
-        let fragment = codegen::compile_image(body, request.bindings, &symbols)?;
+        let fragment = codegen::compile_image(body, request.bindings, &symbols, catalog)?;
         requirements.extend(symbols);
         metadata.insert(
             fragment.symbol.clone(),
