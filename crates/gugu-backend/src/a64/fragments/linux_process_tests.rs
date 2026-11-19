@@ -240,29 +240,49 @@ fn spawn_failures_report_errno_and_reap_or_close_as_needed() {
 
 #[test]
 fn spawn_child_only_uses_raw_syscalls_and_reports_exec_errno() {
+    for (low_pipe, low_stdio) in [(false, false), (true, false), (false, true)] {
+        child_case(low_pipe, low_stdio);
+    }
+}
+
+fn child_case(low_pipe: bool, low_stdio: bool) {
     let mut vm = spawn_vm();
-    let mut script = VecDeque::from([59, 220, 57, 49, 24, 24, 24, 57, 57, 57, 134, 221, 64, 93]);
+    if low_stdio {
+        for (offset, fd) in [(32, 0), (40, 1), (48, 2)] {
+            vm.put(0x3000 + offset, fd, 8);
+        }
+    }
+    let mut script = child_script(low_pipe, low_stdio);
+    let mut duplicate = if low_pipe { 6 } else { 20 };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.run(&worker_code(), |vm| {
             let nr = script.pop_front().unwrap();
             assert_eq!(vm.registers[8], nr);
             if nr == 59 {
                 let p = vm.registers[0];
-                vm.put(p, 10, 4);
-                vm.put(p + 4, 11, 4);
+                vm.put(p, if low_pipe { 0 } else { 10 }, 4);
+                vm.put(p + 4, if low_pipe { 1 } else { 11 }, 4);
             }
             if nr == 221 {
                 assert_eq!(&vm.registers[..3], &[0x4000, 0x5000, 0x6000]);
             }
             if nr == 64 {
-                assert_eq!(vm.registers[0], 11);
+                assert_eq!(vm.registers[0], if low_pipe { 6 } else { 11 });
                 assert_eq!(vm.read(vm.registers[1], 4), 2);
             }
             if nr == 93 {
                 assert_eq!(vm.registers[0], 127);
                 panic!("child exited 127");
             }
-            vm.registers[0] = if nr == 221 { (-2_i64) as u64 } else { 0 };
+            vm.registers[0] = if nr == 221 {
+                (-2_i64) as u64
+            } else if nr == 25 {
+                assert_eq!(&vm.registers[1..3], &[1030, 3]);
+                duplicate += 1;
+                duplicate - 1
+            } else {
+                0
+            };
         })
     }));
     assert_eq!(
@@ -270,6 +290,17 @@ fn spawn_child_only_uses_raw_syscalls_and_reports_exec_errno() {
         Some(&"child exited 127")
     );
     assert!(script.is_empty());
+}
+
+fn child_script(low_pipe: bool, low_stdio: bool) -> VecDeque<u64> {
+    let mut script = vec![59, 220, 57];
+    if low_pipe {
+        script.extend([25, 57]);
+    }
+    script.extend([49, 25, 25, 25, 24, 24, 24]);
+    script.extend(std::iter::repeat_n(57, if low_stdio { 3 } else { 6 }));
+    script.extend([134, 221, 64, 93]);
+    script.into()
 }
 
 #[test]

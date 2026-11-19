@@ -152,7 +152,9 @@ fn wait(p: &mut Probe, call: Location) {
 }
 
 fn failure_cases(p: &mut Probe, call: Location, packet: Location) {
+    invoke(p, Some(call), 2, &[N(0)], 0);
     invoke(p, None, 2, &[], 0);
+    p.expect(0, 0);
     p.mov(24, 0);
     p.address(9, packet);
     for offset in [32, 40, 48] {
@@ -164,7 +166,7 @@ fn failure_cases(p: &mut Probe, call: Location, packet: Location) {
     p.store(10, 9, 0);
     invoke(p, None, 0, &[P(packet)], 2);
     invoke(p, Some(call), 2, &[R(24)], 0);
-    p.output(b"missing executable: errno=2\n");
+    p.output(b"missing executable with low stdio: errno=2\n");
     invoke(p, Some(call), 3, &[N(u64::MAX), N(0), N(0)], 9);
     p.output(b"invalid pipe read: errno=9\n");
 }

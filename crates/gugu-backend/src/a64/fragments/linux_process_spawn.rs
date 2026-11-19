@@ -84,22 +84,11 @@ fn reap(b: &mut Builder) {
 }
 
 fn child_exec(b: &mut Builder) {
-    b.memory("ldr.W.Unsigned", Reg::w(0), SP, 0);
-    syscall(b, 57);
+    let mut errors = vec![child_pipe(b)];
     b.memory("ldr.X.Unsigned", Reg::x(0), PACKET, 24);
     syscall(b, 49);
-    let mut errors = vec![negative_result(b)];
-    for (fd, offset) in [(0, 32), (1, 40), (2, 48)] {
-        b.memory("ldr.X.Unsigned", Reg::x(0), PACKET, offset);
-        n(b, 1, fd);
-        n(b, 2, 0);
-        syscall(b, 24);
-        errors.push(negative_result(b));
-    }
-    for offset in [32, 40, 48] {
-        b.memory("ldr.X.Unsigned", Reg::x(0), PACKET, offset);
-        syscall(b, 57);
-    }
+    errors.push(negative_result(b));
+    child_stdio(b, &mut errors);
     for offset in [32, 40, 48, 56] {
         b.memory("str.X.Unsigned", ZERO, SP, offset);
     }
@@ -117,6 +106,51 @@ fn child_exec(b: &mut Builder) {
         patch_cond(b, at, 11);
     }
     child_error(b);
+}
+
+fn child_pipe(b: &mut Builder) -> u32 {
+    b.memory("ldr.W.Unsigned", Reg::w(0), SP, 0);
+    syscall(b, 57);
+    b.memory("ldr.W.Unsigned", Reg::w(0), SP, 4);
+    compare(b, Reg::x(0), 3);
+    let high = branch_cond(b, 10);
+    b.add(OTHER, Reg::x(0), 0);
+    n(b, 1, 1030);
+    n(b, 2, 3);
+    syscall(b, 25);
+    let failed = negative_result(b);
+    b.memory("str.W.Unsigned", Reg::w(0), SP, 4);
+    b.add(Reg::x(0), OTHER, 0);
+    syscall(b, 57);
+    patch_cond(b, high, 10);
+    failed
+}
+
+fn child_stdio(b: &mut Builder, errors: &mut Vec<u32>) {
+    for offset in [32, 40, 48] {
+        b.memory("ldr.X.Unsigned", Reg::x(0), PACKET, offset);
+        n(b, 1, 1030);
+        n(b, 2, 3);
+        syscall(b, 25);
+        errors.push(negative_result(b));
+        b.memory("str.X.Unsigned", Reg::x(0), SP, offset);
+    }
+    for (fd, offset) in [(0, 32), (1, 40), (2, 48)] {
+        b.memory("ldr.X.Unsigned", Reg::x(0), SP, offset);
+        n(b, 1, fd);
+        n(b, 2, 0);
+        syscall(b, 24);
+        errors.push(negative_result(b));
+    }
+    for offset in [32, 40, 48] {
+        b.memory("ldr.X.Unsigned", Reg::x(0), SP, offset);
+        syscall(b, 57);
+        b.memory("ldr.X.Unsigned", Reg::x(0), PACKET, offset);
+        compare(b, Reg::x(0), 3);
+        let low = branch_cond(b, 11);
+        syscall(b, 57);
+        patch_cond(b, low, 11);
+    }
 }
 
 fn negative_result(b: &mut Builder) -> u32 {
