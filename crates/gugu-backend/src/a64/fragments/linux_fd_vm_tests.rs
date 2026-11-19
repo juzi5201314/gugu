@@ -76,6 +76,10 @@ impl Vm {
     }
 
     pub fn run(&mut self, code: &[Inst], mut syscall: impl FnMut(&mut Self)) {
+        assert_eq!(self.run_result(code, &mut syscall), 0);
+    }
+
+    pub fn run_result(&mut self, code: &[Inst], mut syscall: impl FnMut(&mut Self)) -> u64 {
         let mut pc = 0;
         let saved = self.registers[19..31].to_vec();
         for _ in 0..2048 {
@@ -87,11 +91,11 @@ impl Vm {
                 "b.cond" if self.condition(&args[1]) => next = jump(pc, &args[0]),
                 "b.cond" => {}
                 "svc" => syscall(self),
+                "adr" => self.set(&args[0], jump(pc, &args[1]) as u64),
                 "ret" => {
                     assert_eq!(self.registers[19..31], saved);
                     assert_eq!(self.registers[31], STACK);
-                    assert_eq!(self.registers[0], 0);
-                    return;
+                    return self.registers[0];
                 }
                 key if key.starts_with("ldr") || key.starts_with("str") => self.transfer(key, args),
                 key => self.calculate(key, args),
@@ -106,19 +110,19 @@ impl Vm {
             Operand::Condition(0) => self.equal,
             Operand::Condition(1) => !self.equal,
             Operand::Condition(10) => self.nonnegative,
+            Operand::Condition(13) => !self.nonnegative || self.equal,
             _ => panic!("unknown condition"),
         }
     }
 
     fn transfer(&mut self, key: &str, args: &[Operand]) {
-        let Operand::Address(Address {
-            base,
-            mode: AddressMode::Unsigned(offset),
-        }) = args[1]
-        else {
+        let Operand::Address(Address { base, ref mode }) = args[1] else {
             panic!("address")
         };
-        let address = self.get(&reg(base)) + offset as u64;
+        let (AddressMode::Unsigned(offset) | AddressMode::Unscaled(offset)) = mode else {
+            panic!("address mode")
+        };
+        let address = self.get(&reg(base)).wrapping_add(*offset as u64);
         let size = if key.contains(".W.") || key.starts_with("ldrsw.") {
             4
         } else {
@@ -151,6 +155,7 @@ impl Vm {
                 let (left, right) = (self.get(&args[1]), addend(&args[2]));
                 self.equal = left == right;
                 self.nonnegative = (left as i64) >= right as i64;
+                self.set(&args[0], left.wrapping_sub(right));
             }
             "movz.X" | "movn.X" => {
                 let Operand::Wide { imm16, shift } = args[1] else {
@@ -159,7 +164,7 @@ impl Vm {
                 let value = u64::from(imm16) << shift;
                 self.set(&args[0], if key == "movn.X" { !value } else { value });
             }
-            "ubfm.X" | "bfm.X" => self.bitfield(key, args),
+            "ubfm.X" | "bfm.X" | "sbfm.X" => self.bitfield(key, args),
             _ => panic!("unsupported fd instruction {key}"),
         }
     }
@@ -169,8 +174,14 @@ impl Vm {
             panic!("bitfield")
         };
         let source = self.get(&args[1]);
-        let value = if key == "ubfm.X" {
-            (source >> r) & ((1 << (s - r + 1)) - 1)
+        let value = if key != "bfm.X" {
+            let width = s - r + 1;
+            let value = (source >> r) & ((1 << width) - 1);
+            if key == "sbfm.X" {
+                ((value << (64 - width)) as i64 >> (64 - width)) as u64
+            } else {
+                value
+            }
         } else {
             let mask = (1 << (s + 1)) - 1;
             (self.get(&args[0]) & !(mask << (64 - r))) | ((source & mask) << (64 - r))
