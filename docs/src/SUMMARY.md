@@ -38,7 +38,6 @@
 - [栈图](internals/stack-maps.md)
 - [GC 元数据](internals/gc-metadata.md)
 - [内存所有权与消息通道](internals/memory-messaging.md)
-- [镜像 GC 执行边界](internals/gc-metadata.md#image-execution-boundary-block-ledger)
 - [调度器](internals/scheduler.md)
 - [x86_64 后端](internals/backend.md)
 - [性能与延迟门禁](internals/performance.md)
