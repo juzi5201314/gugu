@@ -10,6 +10,7 @@ mod expand;
 mod hir;
 #[cfg(feature = "slow-tests")]
 mod opaque;
+mod prelude;
 #[cfg(feature = "slow-tests")]
 mod runtime;
 #[cfg(feature = "slow-tests")]
