@@ -75,6 +75,58 @@ mod tests {
             assert_eq!(state.masked_runtime_base, None);
         }
     }
+    #[test]
+    fn explicit_const_arguments_keep_runtime_parameter_writes_masked() {
+        let sources = crate::SourceMap::new(vec![crate::source::SourceSnapshot::from_str("main.gg",
+            "fn number[comptime N: int]() int { N }\nfn caller(n: int) int { number::[{ n = 2\n3 }]() }\nfn main() {}"
+        ).unwrap()]).unwrap();
+        let cfg = crate::cfg::CfgContext::target_only(crate::TargetName::X86_64Linux);
+        let modules =
+            crate::modules::parse_modules(&sources, "", &cfg, &Default::default()).unwrap();
+        let names = crate::names::analyze_with_prefix(
+            "tests/const-writes@1",
+            &Default::default(),
+            &modules,
+            None,
+        )
+        .unwrap();
+        let paths = Default::default();
+        let model = Model::new(&modules, &names, &paths).unwrap();
+        let (expression, actual) = modules[0]
+            .arena
+            .exprs
+            .iter()
+            .enumerate()
+            .find_map(|(index, expression)| {
+                let ExprKind::Call { type_args, .. } = expression.kind else {
+                    return None;
+                };
+                Some((
+                    ExprId(index as u32),
+                    *type_args.as_slice(&modules[0].arena.generic_args).first()?,
+                ))
+            })
+            .unwrap();
+        let span = &modules[0].arena.exprs[expression.0 as usize].span;
+        let mut state = EvalState::new(Domain::EARLY_CONST, EvalProfile::default());
+        state.enter("caller", span).unwrap();
+        state.bind("n".to_owned(), ConstantValue::Int(1));
+        state.runtime_parameters.last_mut().unwrap().push(0);
+        let error = model
+            .explicit_const_argument(0, expression, actual, &mut state)
+            .expect_err("runtime parameters remain inaccessible to assignments");
+        assert!(
+            error
+                .diagnostic(span)
+                .message()
+                .contains("comptime 赋值只能写入局部绑定")
+        );
+        assert_eq!(state.masked_runtime_base, None);
+        assert_eq!(
+            state.lookup("n", span).unwrap(),
+            Some(ConstantValue::Int(1))
+        );
+    }
 }
 
 impl Model<'_> {

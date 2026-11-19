@@ -1,6 +1,36 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn explicit_const_argument_assignments_update_live_caller_locals() {
+    let actual: Vec<_> = output(
+        r#"
+use std.io.{println}
+fn number[comptime N: int]() int { N }
+fn increment(value: int) int { value + 1 }
+fn nested() int { number::[increment(number::[2]())]() }
+const TOP_LEVEL: int = number::[increment(2)]()
+const NESTED: int = nested()
+const ANSWER: int = comptime source {
+    let n = 1
+    let value = number::[{ n += 1
+        n
+    }]()
+    std.syntax.parse_source(f"{value} * 10 + {n}")
+}
+fn main() { println(ANSWER)
+    println(TOP_LEVEL)
+    println(NESTED)
+}
+"#,
+        &[],
+    )
+    .into_iter()
+    .flat_map(|(_, bytes)| bytes)
+    .collect();
+    assert_eq!(actual, b"22\n3\n3\n");
+}
+
+#[test]
 fn forwarded_const_parameters_shadow_module_constants_in_all_phases() {
     let actual: Vec<_> = output(
         r#"
