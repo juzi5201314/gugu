@@ -291,13 +291,27 @@ fn arm64_darwin_entry_reuses_existing_exit_binding() {
         request.sections[1].content =
             SectionContent::Data(vec![0; (Arch::Arm64.page_size() - text - 128) as usize]);
         if prebuilt {
-            let slots = std::collections::BTreeMap::from([(
-                "exit".into(),
-                ImportSlot {
-                    at: slot,
-                    kind: NativeImportKind::Function,
-                },
-            )]);
+            request.imports.push(Import {
+                dylib: LIB_SYSTEM.into(),
+                name: "_write".into(),
+                weak: false,
+            });
+            request.fixups.push(Fixup::Bind {
+                at: at(2, 0),
+                import: 1,
+                addend: 0,
+            });
+            let slots = std::collections::BTreeMap::from(
+                [("exit", slot), ("write", at(2, 0))].map(|(name, at)| {
+                    (
+                        name.into(),
+                        ImportSlot {
+                            at,
+                            kind: NativeImportKind::Function,
+                        },
+                    )
+                }),
+            );
             a64_macho::append_import_stubs(&mut request, &slots).unwrap();
         }
         let old_got = layout(&request).unwrap().address(slot).unwrap();
@@ -313,18 +327,28 @@ fn arm64_darwin_entry_reuses_existing_exit_binding() {
             branch_target(u32_at(&file, main_file + 28), main + 28),
             stub
         );
-        let adrp = u32_at(&file, stub_file);
-        let ldr = u32_at(&file, stub_file + 4);
-        let pages = ((((adrp >> 5) & 0x7ffff) << 2) | ((adrp >> 29) & 3)) as i32;
-        let page = (stub & !0xfff)
-            .checked_add_signed(i64::from((pages << 11) >> 11) * 4096)
-            .unwrap();
-        assert_eq!(page + u64::from((ldr >> 10) & 0xfff) * 8, got + slot_offset);
+        assert_eq!(arm64_stub_target(&file, stub_file, stub), got + slot_offset);
+        if prebuilt {
+            assert_eq!(arm64_stub_target(&file, stub_file + 12, stub + 12), got);
+        }
         assert_eq!(u64_at(&file, got_file + slot_offset as usize) >> 63, 1);
         let fixups = u32_at(&file, command(&file, 0x8000_0034) + 8) as usize;
-        assert_eq!(u32_at(&file, fixups + 16), 1);
-        assert_eq!(u32_at(&file, command(&file, 0x2) + 12), 2);
+        assert_eq!(u32_at(&file, fixups + 16), 1 + u32::from(prebuilt));
+        assert_eq!(
+            u32_at(&file, command(&file, 0x2) + 12),
+            2 + u32::from(prebuilt)
+        );
     }
+}
+
+fn arm64_stub_target(file: &[u8], off: usize, stub: u64) -> u64 {
+    let adrp = u32_at(file, off);
+    let ldr = u32_at(file, off + 4);
+    let pages = ((((adrp >> 5) & 0x7ffff) << 2) | ((adrp >> 29) & 3)) as i32;
+    let page = (stub & !0xfff)
+        .checked_add_signed(i64::from((pages << 11) >> 11) * 4096)
+        .unwrap();
+    page + u64::from((ldr >> 10) & 0xfff) * 8
 }
 
 #[test]
