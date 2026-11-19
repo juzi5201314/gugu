@@ -182,6 +182,35 @@ fn linux_cross_device_rename_has_no_copy_fallback() {
 }
 
 #[test]
+fn darwin_canonicalize_reports_required_capacity_without_truncating() {
+    let output = compile(TargetName::X86_64Macos);
+    let mut path = vec![b'a'; 300];
+    path[0] = b'/';
+    path.push(0);
+    for capacity in [256, 512] {
+        let mut adapter = Adapter::new(
+            &output,
+            vec![
+                Reply::new(21, 1, 0)
+                    .argument(1, INPUT)
+                    .write(2, path.clone()),
+            ],
+        );
+        let (result, memory) = adapter.run(
+            "fs_platform",
+            "call",
+            &[21, INPUT, OUTPUT, capacity, 0, 0, 0],
+        );
+        assert_eq!(result, vec![300, 0]);
+        if capacity < 300 {
+            assert_eq!(&memory[OUTPUT as usize..][..64], &[0xa5; 64]);
+        } else {
+            assert_eq!(&memory[OUTPUT as usize..][..300], &path[..300]);
+        }
+    }
+}
+
+#[test]
 fn linux_canonical_failure_closes_handle_and_preserves_primary_error() {
     let output = compile(TargetName::X86_64Linux);
     let mut adapter = Adapter::new(

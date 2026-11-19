@@ -608,7 +608,7 @@ OpenOptions 显式设置 read、write、append、truncate、create、create_new 
 
 File 实现 Read、Write 与 Seek，并提供 metadata、set_len、sync_data、sync_all、try_clone 和幂等 close。close 的完成必须建立在平台关闭操作已经执行之上；运行时资源耗尽导致关闭操作无法提交时属于 runtime failure，不能伪造成功关闭。值复制共享同一关闭状态与文件位置；关闭一旦被请求，新操作返回 `Closed`，已开始的操作仍须归还操作租约才能执行平台关闭。后续 close 返回已记录的关闭结果（包括错误），不能重复关闭 OS handle；所有用户租约归还且平台关闭完成后，控制存储才可回收。GC 搬迁不得增加或重复释放资源租约；不可达资源值的同一租约最多释放一次，已转发的旧副本不再承担释放责任。`try_clone` 创建独立可关闭的 OS handle，但文件位置仍按宿主 duplicate 语义共享。`copy` 在截断目的文件前比较 device/inode，源与目的指向同一文件时返回 `InvalidInput`；其它错误可能发生在已经复制部分内容之后。目标打开失败仍关闭已打开的源；传输期间短写只重试未写后缀，零写返回 `WriteZero`，任一读写错误立即停止传输并保留已写内容，不回滚或删除目标。清理错误不得覆盖打开、元数据检查、截断或传输的主错误。传输成功后须检查目标关闭结果，关闭失败返回该错误；只有传输与目标关闭均成功才返回复制字节数。
 
-`read_link` 只从宿主实际返回的有效记录中读取目标；记录截断、名称区间越界或不满足宿主字符单元对齐要求时返回 `InvalidData`，不能把缓冲尾部解释为目标路径。
+`canonicalize` 在宿主接受路径但初始输出缓冲不足时扩容并返回完整路径，不截断或仅因缓冲不足报错。`read_link` 只从宿主实际返回的有效记录中读取目标；记录截断、名称区间越界或不满足宿主字符单元对齐要求时返回 `InvalidData`，不能把缓冲尾部解释为目标路径。
 
 `Metadata` 提供 `len()`、`is_file()`、`is_dir()`、`is_symlink()`，并公开 `size:uint`、`permissions:Permissions`、`kind:uint`、`modified_seconds:int`、`modified_nanoseconds:uint`、`device:uint`、`inode:uint`。kind 为 0 其它、1 普通文件、2 目录、3 链接；修改时间以 Unix epoch 为基准。`Permissions` 公开 `readonly:bool` 与宿主原始 `native:uint`，不提供跨平台权限设置事务。
 

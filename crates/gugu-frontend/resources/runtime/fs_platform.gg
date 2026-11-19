@@ -456,8 +456,8 @@ pub fn call_cancel(op: uint, a0: uint, a1: uint, a2: uint, a3: uint, a4: uint, a
         if result.error != 0 { return result }
         let length: uint = 0
         while length < 1024 && byte_at(scratch + length) != byte(0) { length = length + 1 }
-        if length == 1024 || length > a2 { return err(63) }
-        copy(a1, scratch, length)
+        if length == 1024 { return err(63) }
+        if length < a2 { copy(a1, scratch, length) }
         return ok(length)
     }
     err(22)
