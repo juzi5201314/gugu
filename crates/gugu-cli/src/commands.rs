@@ -93,7 +93,7 @@ pub(crate) fn fail(format: OutputFormat, code: i32, message: impl std::fmt::Disp
 // new / init
 // ---------------------------------------------------------------------------
 
-/// 目录名转合法 package 名：小写字母、数字、`-`、`_`。
+/// 目录名转合法 package 名：小写字母、数字、`-`（与清单校验一致，不允许下划线）。
 fn package_name_from(path: &Path) -> Option<String> {
     let base = path.file_name()?.to_str()?;
     let name: String = base
@@ -102,15 +102,38 @@ fn package_name_from(path: &Path) -> Option<String> {
             if c.is_ascii_alphanumeric() {
                 c.to_ascii_lowercase()
             } else {
-                '_'
+                '-'
             }
         })
         .collect();
-    let name = name.trim_matches('_');
+    let mut name = name.trim_matches('-').to_owned();
+    // 清单校验要求 name <= 64 字节；截断后重新去掉尾部 `-`。
+    if name.len() > 64 {
+        name.truncate(64);
+        name = name.trim_end_matches('-').to_owned();
+    }
     if name.is_empty() || name.chars().next().is_some_and(|c| c.is_ascii_digit()) {
         return None;
     }
-    Some(name.to_owned())
+    Some(name)
+}
+
+/// 以 create_new 语义写文件：目标已存在（含符号链接）时不覆盖，返回 false。
+fn write_new(path: &Path, body: &str) -> Result<bool, String> {
+    match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            file.write_all(body.as_bytes())
+                .map_err(|e| format!("写入 `{}` 失败：{e}", path.display()))?;
+            Ok(true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(format!("写入 `{}` 失败：{e}", path.display())),
+    }
 }
 
 /// 生成 package 骨架（`--bin`/`--lib`/`--workspace`）。
@@ -121,30 +144,31 @@ fn scaffold(dir: &Path, options: &GlobalArgs) -> Result<Vec<PathBuf>, String> {
     if options.workspace {
         fs::create_dir_all(dir).map_err(|e| format!("创建 `{}` 失败：{e}", dir.display()))?;
         let manifest = dir.join("gugu.toml");
-        fs::write(
+        // `*` 会匹配 target/ 与 vendor/ 子目录，必须显式排除。
+        write_new(
             &manifest,
-            "# Gugu workspace\n[workspace]\nmembers = [\"*\"]\n",
-        )
-        .map_err(|e| format!("写入 `{}` 失败：{e}", manifest.display()))?;
+            "# Gugu workspace\n[workspace]\nmembers = [\"*\"]\nexclude = [\"target\", \"vendor\"]\n",
+        )?;
         written.push(manifest);
         return Ok(written);
     }
     let src = dir.join("src");
     fs::create_dir_all(&src).map_err(|e| format!("创建 `{}` 失败：{e}", src.display()))?;
     let manifest = dir.join("gugu.toml");
-    fs::write(
+    write_new(
         &manifest,
-        format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\n"),
-    )
-    .map_err(|e| format!("写入 `{}` 失败：{e}", manifest.display()))?;
+        &format!("[package]\nname = \"{name}\"\nversion = \"0.0.0\"\n"),
+    )?;
     written.push(manifest);
     let (entry, body) = if options.lib {
         (src.join("lib.gg"), "fn answer() int {\n    return 42\n}\n")
     } else {
         (src.join("main.gg"), "fn main() {\n}\n")
     };
-    fs::write(&entry, body).map_err(|e| format!("写入 `{}` 失败：{e}", entry.display()))?;
-    written.push(entry);
+    // init 进已有源码的目录时不覆盖入口；占位符号链接同样不穿透。
+    if write_new(&entry, body)? {
+        written.push(entry);
+    }
     Ok(written)
 }
 
@@ -494,11 +518,11 @@ mod tests {
     fn package_name_sanitizes_dir_basename() {
         assert_eq!(
             package_name_from(Path::new("/tmp/hello-world")),
-            Some("hello_world".to_owned())
+            Some("hello-world".to_owned())
         );
         assert_eq!(
             package_name_from(Path::new("/tmp/My.Crate")),
-            Some("my_crate".to_owned())
+            Some("my-crate".to_owned())
         );
         assert_eq!(package_name_from(Path::new("/tmp/9lives")), None);
         assert_eq!(package_name_from(Path::new("/tmp/---")), None);
@@ -532,7 +556,6 @@ mod tests {
                     .unwrap()
                     .to_string_lossy()
                     .to_string()
-                    .replace('-', "_")
                     .to_lowercase()
             )
         );
