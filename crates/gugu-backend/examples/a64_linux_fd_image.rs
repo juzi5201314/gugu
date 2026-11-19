@@ -48,7 +48,7 @@ fn file_round_trip(p: &mut Probe) {
     let path = p.data(Segment::DataConst, b"/tmp/gugu-a64-fd-test\0".to_vec());
     p.path = path;
     let message = p.data(Segment::DataConst, b"fd-path\n".to_vec());
-    let open = p.request(2, &[0, 0x80242, 0o600]);
+    let open = p.request(2, &[0, 0x800c2, 0o600]);
     p.pointer(open, 0, path);
     p.invoke(open, 0);
     p.load(22, 21, NATIVE_REQUEST_VALUE);
