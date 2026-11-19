@@ -9,7 +9,7 @@ use crate::{ast, hir};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub const INSTANCE_SCHEMA: u32 = 8;
+pub const INSTANCE_SCHEMA: u32 = 9;
 
 /// 调用位点使用 owner 内的确定性编号，不把定义级 callee 当作实例身份。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
@@ -30,6 +30,7 @@ pub struct CalleeSeed {
     pub key: MonoKey,
     pub definition: hir::DefId,
     pub arguments: Vec<Ty>,
+    pub value_arguments: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -152,7 +153,7 @@ pub fn instantiate(
             interner,
             seed.definition,
             &seed.arguments,
-            seed.key.const_arguments.clone(),
+            seed.value_arguments.clone(),
         )
         .map_err(|error| vec![error])?;
         if rebuilt != seed.key {
@@ -757,7 +758,7 @@ fn add_callee(
         .iter()
         .map(|ty| context.model.normalize(ty, &[]))
         .collect::<Result<Vec<_>, _>>()?;
-    let key = instance_key(context, interner, definition, &arguments, constants)?;
+    let key = instance_key(context, interner, definition, &arguments, constants.clone())?;
     let digest = key.digest();
     if let Some(site) = site {
         edges.call_targets.insert(site, digest);
@@ -766,6 +767,7 @@ fn add_callee(
         key,
         definition,
         arguments,
+        value_arguments: constants,
     });
     Ok(())
 }

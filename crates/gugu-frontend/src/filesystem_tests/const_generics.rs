@@ -1,6 +1,28 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn const_generic_cached_callee_preserves_instance_identity() {
+    let compiler = Compiler::new();
+    let source = "fn length[comptime N: int](a: [int; N]) int { _ = a\n N }\nfn main() { _ = length([1, 2, 3]) }";
+    let cold = compiler.compile(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(cold.is_success(), "{:?}", cold.diagnostics().items());
+    let warm = compiler.compile(CompileRequest::single_file(
+        "main.gg",
+        source,
+        TargetName::X86_64Linux,
+    ));
+    assert!(warm.is_success(), "{:?}", warm.diagnostics().items());
+    assert_eq!(
+        cold.image_plan().unwrap().mono_graph_fingerprint(),
+        warm.image_plan().unwrap().mono_graph_fingerprint()
+    );
+}
+
+#[test]
 fn symbolic_array_patterns_require_unconditional_rest() {
     for pattern in ["[]", "[x]", "[x, ..]", "[.., x]"] {
         let source = format!(
