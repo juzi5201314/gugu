@@ -336,6 +336,22 @@ impl RegistrySession {
                         // 锁已覆盖：只收集 yanked 状态，不把其他版本喂给 resolver。
                         continue;
                     }
+                    // package ID checksum 不可变：索引对锁定版本给出不同
+                    // checksum 属于索引污染，update 也不得接受。
+                    if let Some(locked) = lock_candidates.iter().find(|metadata| {
+                        metadata.id.name() == package
+                            && metadata.id.version().to_string() == record.vers
+                            && matches!(
+                                metadata.id.source(),
+                                PackageSource::Registry { registry } if registry == &identity
+                            )
+                    }) && locked.checksum.as_deref() != Some(record.cksum.as_str())
+                    {
+                        return Err(package_checksum(format!(
+                            "索引记录 `{package}@{}` 的 checksum 与锁图不一致",
+                            record.vers
+                        )));
+                    }
                     let mut metadata = record.to_metadata(&identity)?;
                     for dep in &mut metadata.dependencies {
                         if let DependencySource::Registry { registry } = &mut dep.source {
