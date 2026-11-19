@@ -353,7 +353,11 @@ macOS 的 C 导入声明使用 C 名字，由写出器加一个前导下划线�
 
 内部 aarch64 Linux 镜像使用 ELF64 static PIE：`ET_DYN`、`EM_AARCH64 = 183`，无 `PT_INTERP`，具有 `PT_PHDR` 和分别为 R-X、R、RW 的三个 `PT_LOAD`，段按 64 KiB 对齐以兼容 4 KiB、16 KiB 和 64 KiB 内核页；不存在 W+X 映射。绝对指针槽只允许位于可写数据，登记为 `R_AARCH64_RELATIVE = 1027`，由镜像入口自行加上加载偏移，不依赖内核执行动态重定位。此形式不登记新目标，也不扩大 CLI 或闭世界编译的支持范围。
 
-内部 aarch64 Linux `_start` 从内核初始栈取得 `argc`、`argv`、`envp`，由参数块的运行时地址减去其链接期地址得到加载偏移，完成 RELATIVE 重定位后，以 x0–x4 = 参数块、加载偏移、`envp`、`argc`、`argv` 调用共享 rt0。rt0 初始化 x27/x28 并将原生启动参数写入 `Rt0Payload`，调用 `rt0_start`；正常返回后以 x0 为状态、x8 = 94 执行 `svc #0`（`exit_group`）。调用方提供载荷、初始槽、processor 和 `rt0_start`；入口只补写载荷版本与初始槽指针，其余镜像内载荷指针仍须由调用方登记 RELATIVE 重定位。此路径不声明 Linux 文件、网络、进程或 VM 适配器已接通。
+内部 aarch64 Linux `_start` 从内核初始栈取得 `argc`、`argv`、`envp`，由参数块的运行时地址减去其链接期地址得到加载偏移，完成 RELATIVE 重定位后，以 x0–x4 = 参数块、加载偏移、`envp`、`argc`、`argv` 调用共享 rt0。rt0 初始化 x27/x28 并将原生启动参数写入 `Rt0Payload`，调用 `rt0_start`；正常返回后以 x0 为状态、x8 = 94 执行 `svc #0`（`exit_group`）。调用方提供载荷、初始槽、processor 和 `rt0_start`；入口只补写载荷版本与初始槽指针，其余镜像内载荷指针仍须由调用方登记 RELATIVE 重定位。此路径不声明 Linux 调度器、网络、信号、进程或 VM 适配器已接通。
+
+内部 aarch64 Linux 文件适配器接收 x0 = `NativeRequest*`，在原生栈上使用现有 Linux 请求协议（x86_64 syscall 编号与参数顺序），不使用 Darwin 的连续操作号。文件请求 0/1/2/3/5/8/72/74/75/77/82/83/84/86/87/88/89/217/262 分别为 read/write/open/close/fstat/lseek/fcntl/fsync/fdatasync/ftruncate/rename/mkdir/rmdir/link/unlink/symlink/readlink/getdents64/newfstatat；另支持 4 = stat、6 = lstat。路径请求按需补入 `AT_FDCWD = -100`，转换为 arm64 的 *at 系统调用；x8 为 asm-generic syscall 编号，以 `svc #0` 调用。open 与 fcntl 的 `F_SETFL`/`F_GETFL` 转换两种架构的 `O_DIRECT`、`O_LARGEFILE`、`O_DIRECTORY`、`O_NOFOLLOW` 位。成功清零 ERROR；失败保留负返回值于 VALUE，并写入正 errno；未支持请求写 VALUE = 0、ERROR = `EINVAL`（22）。此文件适配器不负责线程、调度或发布请求完成，信号请求 14/289 留给信号适配器。
+
+Linux 文件请求中的 stat 输出缓冲为调用方提供的至少 144 字节有效可写原生内存，使用 x86_64 kernel stat 布局；arm64 适配器在系统调用成功后规范化原生 stat，失败不改写调用方缓冲。mode/size 与修改时间秒/纳秒分别位于 +24/+48/+88/+96，运行时由这些偏移构造文件元数据；内核目录项沿用 Linux dirent64 布局，无需转换。内部片段不登记公开目标或接通完整编译路径。
 
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
 

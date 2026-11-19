@@ -14,6 +14,9 @@ mod context_vm;
 #[path = "darwin_process_tests.rs"]
 mod darwin_process;
 
+#[path = "linux_fd_tests.rs"]
+mod linux_fd;
+
 fn instructions(fragment: &Fragment) -> Vec<Inst> {
     let (words, remainder) = fragment.bytes.as_chunks::<4>();
     assert!(remainder.is_empty());
