@@ -92,6 +92,15 @@ pub(super) fn execute(
     callees: &[&codegen::LeafFragment],
     args: &[u64],
 ) -> ([u64; 2], BTreeMap<u64, u8>) {
+    execute_inner(fragment, callees, args, None)
+}
+
+pub(super) fn execute_inner(
+    fragment: &codegen::LeafFragment,
+    callees: &[&codegen::LeafFragment],
+    args: &[u64],
+    mut runtime: Option<&mut super::runtime_vm::Harness>,
+) -> ([u64; 2], BTreeMap<u64, u8>) {
     let fragments = std::iter::once(fragment)
         .chain(callees.iter().copied())
         .collect::<Vec<_>>();
@@ -103,6 +112,9 @@ pub(super) fn execute(
         *value = 1000 + id as u64;
     }
     registers[30] = u64::MAX;
+    if let Some(runtime) = runtime.as_mut() {
+        runtime.setup(&mut registers);
+    }
     let saved = registers;
     let mut calls = Vec::new();
     let mut memory = BTreeMap::new();
@@ -112,11 +124,14 @@ pub(super) fn execute(
         } else {
             for byte in 0..8 {
                 memory.insert(
-                    INITIAL_SP + (index as u64 - 8) * 8 + byte,
+                    registers[31] + (index as u64 - 8) * 8 + byte,
                     (value >> (byte * 8)) as u8,
                 );
             }
         }
+    }
+    if let Some(runtime) = runtime.as_mut() {
+        runtime.initialize(&registers, &mut memory);
     }
     let mut flags = (false, false, false, false);
     let condition = |code: u8, (n, z, c, v): (bool, bool, bool, bool)| -> bool {
@@ -158,13 +173,25 @@ pub(super) fn execute(
             }
             assert_eq!(target, u64::MAX);
             for id in 19..31 {
+                if runtime.is_some() && matches!(id, 27 | 28) {
+                    continue;
+                }
                 assert_eq!(registers[id], saved[id], "callee-saved x{id}");
             }
-            assert_eq!(registers[31], INITIAL_SP);
+            assert_eq!(
+                registers[31],
+                runtime.as_ref().map_or(INITIAL_SP, |r| r.expected_sp)
+            );
             return ([registers[0], registers[1]], memory);
         }
         let mut next = pc + 4;
         if key == "bl" {
+            if let Some(runtime) = runtime.as_mut()
+                && runtime.call(fragment, pc, &mut registers, &mut memory, args.len())
+            {
+                pc += 4;
+                continue;
+            }
             calls.push(((pc + 4) as u64, registers));
             registers[30] = (pc + 4) as u64;
         }
@@ -205,12 +232,14 @@ pub(super) fn execute(
                 immediate
             };
             put(rr(&op[0]), value, &mut registers);
-        } else if key.starts_with("ldr") || key.starts_with("str") {
+        } else if key.starts_with("ldr") || key.starts_with("ldar") || key.starts_with("str") {
             let Operand::Address(address) = &op[1] else {
                 panic!()
             };
-            let AddressMode::Unsigned(displacement) = address.mode else {
-                panic!()
+            let displacement = match address.mode {
+                AddressMode::Unsigned(offset) => offset,
+                AddressMode::Base => 0,
+                _ => panic!(),
             };
             let at = get(address.base, &registers).wrapping_add_signed(displacement);
             let bytes = if key.starts_with("ldrb") || key.starts_with("strb") {
@@ -222,7 +251,10 @@ pub(super) fn execute(
             } else {
                 8
             };
-            if key.starts_with("ldr") {
+            if key.starts_with("ldr") || key.starts_with("ldar") {
+                if let Some(runtime) = runtime.as_mut() {
+                    runtime.load(fragment, at, &registers, &memory);
+                }
                 let value = (0..bytes).fold(0_u64, |value, byte| {
                     value | (u64::from(*memory.get(&(at + byte)).unwrap_or(&0)) << (byte * 8))
                 });

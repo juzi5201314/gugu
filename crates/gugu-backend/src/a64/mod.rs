@@ -9,6 +9,7 @@ pub mod decode;
 pub mod encode;
 pub mod fragments;
 pub mod frame;
+pub mod glue;
 pub mod inst;
 pub mod layout;
 mod lower;
@@ -18,6 +19,7 @@ pub mod reg;
 pub mod rewrite;
 mod rows;
 pub mod select;
+pub mod sites;
 pub mod table;
 pub mod verify;
 

@@ -9,19 +9,28 @@ use crate::lir::body::{Body, Op, Terminator, Type, ValueId};
 use std::ops::Range;
 
 pub fn select(body: &Body) -> Result<Function, Error> {
-    select_mode(body, true)
+    select_mode(body, true, false)
 }
 
 pub fn select_function(body: &Body) -> Result<Function, Error> {
-    select_mode(body, false)
+    select_mode(body, false, false)
 }
 
-fn select_mode(body: &Body, leaf: bool) -> Result<Function, Error> {
-    validate(body, leaf).map_err(|e| Error(format!("{} entry: {e}", body.name)))?;
+pub fn select_runtime(body: &Body) -> Result<Function, Error> {
+    select_mode(body, false, true)
+}
+
+fn select_mode(body: &Body, leaf: bool, runtime: bool) -> Result<Function, Error> {
+    validate(body, leaf, runtime).map_err(|e| Error(format!("{} entry: {e}", body.name)))?;
     let count = body.blocks.len();
     let mut function = Function {
         name: body.name.clone(),
         entry: 0,
+        checked_entry: runtime
+            && body
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst.op, Op::StackCheck)),
         types: body.values.iter().map(|v| v.kind.ty).collect(),
         blocks: vec![
             Block {
@@ -56,6 +65,19 @@ fn select_mode(body: &Body, leaf: bool) -> Result<Function, Error> {
                 "{} block {index} site {site} {:?}",
                 body.name, instruction.op
             );
+            if runtime {
+                match instruction.op {
+                    Op::StackCheck => continue,
+                    Op::SafepointPoll { .. } => {
+                        b.push(Item::Poll {
+                            block: index as u32,
+                            instruction: site,
+                        });
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
             lower::lower(body, instruction, &mut b)
                 .map_err(|e| Error(format!("{}: {e}", b.context)))?;
         }
@@ -236,15 +258,19 @@ fn kind(body: &Body, id: ValueId, ty: Type) -> bool {
     body.values.get(id.index()).is_some_and(|v| v.kind.ty == ty)
 }
 
-fn validate(body: &Body, leaf: bool) -> Result<(), Error> {
+fn validate(body: &Body, leaf: bool, runtime: bool) -> Result<(), Error> {
+    if runtime {
+        super::sites::validate(body)?;
+    }
     if leaf && !body.poll_interface.leaf {
         return Err(super::error("requires proven PollFreeLeaf"));
     }
-    if body.poll_summary.entry_stack_check
-        || body.poll_interface.summary.entry_stack_check
-        || body.poll_summary.has_poll_free_cycle
-        || !body.safepoints.is_empty()
-        || !body.root_inits.is_empty()
+    if !runtime
+        && (body.poll_summary.entry_stack_check
+            || body.poll_interface.summary.entry_stack_check
+            || body.poll_summary.has_poll_free_cycle
+            || !body.safepoints.is_empty()
+            || !body.root_inits.is_empty())
     {
         return Err(super::error("requires checked entry / stack maps (4c)"));
     }
@@ -253,9 +279,10 @@ fn validate(body: &Body, leaf: bool) -> Result<(), Error> {
             Op::Call(call) | Op::ForeignCall(call) => lower::call::requires_maps(call),
             _ => false,
         };
-        if needs_maps
-            || matches!(instruction.op, Op::StackCheck | Op::SafepointPoll { .. })
-            || instruction.safepoint.is_some()
+        if !runtime
+            && (needs_maps
+                || matches!(instruction.op, Op::StackCheck | Op::SafepointPoll { .. })
+                || instruction.safepoint.is_some())
         {
             return Err(Error(format!(
                 "{} {:?}: requires checked entry / stack maps (4c)",
@@ -343,7 +370,7 @@ fn validate(body: &Body, leaf: bool) -> Result<(), Error> {
             || instruction.memory.is_some_and(|mem| {
                 !kind(body, mem.input, Type::Mem) || !kind(body, mem.output, Type::Mem)
             })
-            || instruction.safepoint.is_some()
+            || (!runtime && instruction.safepoint.is_some())
         {
             return Err(Error(format!(
                 "site {index} {:?}: invalid operands/memory/safepoint",

@@ -7,6 +7,7 @@
 
 pub mod a64;
 pub mod macho;
+mod metadata;
 mod native_link;
 pub mod regalloc;
 pub mod x64;

@@ -59,12 +59,20 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
             _ => None,
         })
         .collect::<Vec<_>>();
+    let polls = body
+        .instructions
+        .iter()
+        .any(|inst| matches!(inst.op, crate::lir::body::Op::SafepointPoll { .. }));
+    if polls {
+        saved.extend(super::abi::CALLEE_SAVED);
+    }
     saved.sort_unstable();
     saved.dedup();
     if calls.is_empty()
         && saved.is_empty()
         && allocation.slots.slots.is_empty()
         && body.stack_slots.is_empty()
+        && !polls
     {
         return Ok(Frame {
             size: 0,

@@ -4,6 +4,8 @@ mod control;
 mod integer;
 mod layout;
 mod memory;
+mod runtime;
+mod runtime_vm;
 mod vm;
 
 use super::*;
@@ -145,7 +147,10 @@ impl Fixture {
             .collect::<Vec<_>>();
         let arguments = self.args(args);
         let results = self.args(&output);
-        let memory = if matches!(op, Op::Load(_) | Op::Store(_) | Op::Call(_)) {
+        let memory = if matches!(
+            op,
+            Op::Load(_) | Op::Store(_) | Op::Call(_) | Op::StackCheck | Op::SafepointPoll { .. }
+        ) {
             let next = self.value(
                 Type::Mem,
                 Definition::Instruction {
