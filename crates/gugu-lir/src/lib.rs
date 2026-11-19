@@ -37,8 +37,8 @@ use query::{QueryEngine, QueryKey, QueryKind};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// LIR query 与 world 的 schema。23：保留原始 C 签名。24：数组初始化的动态根地址。
-pub const SCHEMA: u32 = 24;
+/// LIR query 与 world 的 schema。27：合并动态根地址与 C 聚合自然对齐。
+pub const SCHEMA: u32 = 27;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct World {

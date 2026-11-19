@@ -7,6 +7,12 @@ use crate::{
 };
 
 pub fn requires_maps(call: &Call) -> bool {
+    if matches!(
+        call.kind,
+        CallKind::ForeignBridge | CallKind::ForeignBridgeDirtyCpu
+    ) {
+        return true;
+    }
     call.kind == CallKind::Managed
         && (!call.poll_free_leaf
             || call.may_unwind
@@ -47,9 +53,48 @@ pub(crate) fn lower_mode(
 ) -> Result<(), Error> {
     let runtime = matches!(mode, Mode::Runtime(_));
     if call.kind != CallKind::Managed {
-        return Err(crate::a64::error(
-            "only internal managed direct calls supported",
-        ));
+        if !matches!(
+            call.kind,
+            CallKind::ForeignBridge | CallKind::ForeignBridgeDirtyCpu
+        ) {
+            return Err(crate::a64::error(
+                "A64 ForeignLeaf requires bounded native-stack leaf integration",
+            ));
+        }
+        let Mode::Runtime(Some(safepoint)) = mode else {
+            return Err(crate::a64::error(
+                "A64 foreign bridge requires an authoritative suspension map",
+            ));
+        };
+        if tail
+            || call.poll_free_leaf
+            || call.may_unwind
+            || call.captures_arguments
+            || args
+                .iter()
+                .map(|id| body.values[id.index()].kind)
+                .collect::<Vec<_>>()
+                != call.parameters
+            || results
+                .iter()
+                .map(|id| body.values[id.index()].kind)
+                .collect::<Vec<_>>()
+                != call.results
+        {
+            return Err(crate::a64::error(
+                "invalid A64 foreign bridge signature/effects",
+            ));
+        }
+        let platform = crate::a64::foreign_packet::platform(body)?;
+        crate::a64::foreign_packet::plan(call, platform)?;
+        b.push(Item::ForeignCall {
+            call: Box::new(call.clone()),
+            platform,
+            arguments: args.iter().map(|id| id.0).collect(),
+            results: results.iter().map(|id| id.0).collect(),
+            safepoint,
+        });
+        return Ok(());
     }
     if requires_maps(call) && !runtime {
         return Err(crate::a64::error(

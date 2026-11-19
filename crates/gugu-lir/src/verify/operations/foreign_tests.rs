@@ -85,7 +85,10 @@ fn foreign_stack_addresses_require_explicit_abi_temporary() {
                 arguments: vec![crate::foreign::Type {
                     bytes: 24,
                     align: 8,
-                    kind: crate::foreign::Kind::Aggregate { hfa: None },
+                    kind: crate::foreign::Kind::Aggregate {
+                        hfa: None,
+                        natural_align: 8,
+                    },
                 }],
                 result: crate::foreign::Type {
                     bytes: 0,

@@ -165,7 +165,8 @@ fn empty_runtime_body_and_exact_return_pc_cfa_diagnostics() {
             }
             sites::SiteKind::PollResume
             | sites::SiteKind::CallReturn
-            | sites::SiteKind::SuspendResume => {
+            | sites::SiteKind::SuspendResume
+            | sites::SiteKind::ForeignBridge { .. } => {
                 assert_eq!(site.cfa_offset, fragment.frame.size);
                 assert_eq!(
                     site.caller_lr,

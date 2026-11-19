@@ -1,5 +1,72 @@
 use super::*;
 
+#[test]
+fn byte_regions_handle_empty_and_overlapping_ranges_without_calls() {
+    for (kind, source, dest, bytes) in [
+        (0, 0, 32, 9),
+        (1, 0, 2, 10),
+        (1, 2, 0, 10),
+        (1, 0, 0, 12),
+        (0, 0, 0, 0),
+        (2, 0, 3, 7),
+    ] {
+        let mut f = Fixture::new(&[Type::Ptr, Type::Ptr, Type::I8], &[]);
+        let op = match kind {
+            0 => Op::Memcpy { bytes },
+            1 => Op::Memmove { bytes },
+            _ => Op::Memset { bytes },
+        };
+        f.op(
+            op,
+            &[f.param(0, 0), f.param(0, if kind == 2 { 2 } else { 1 })],
+            &[],
+        );
+        f.ret(&[]);
+        let fragment = f.compile();
+        assert!(
+            !fragment
+                .selected
+                .blocks
+                .iter()
+                .flat_map(|b| &b.items)
+                .any(|site| site.item.is_call())
+        );
+        let seed = (0..64).map(|index| (0x4000 + index, index as u8)).collect();
+        let (_, _, memory) = vm::execute_seeded(
+            &fragment,
+            &[],
+            &[0x4000 + dest, 0x4000 + source, 0xa5],
+            seed,
+        );
+        let mut expected = (0..64).map(|index| index as u8).collect::<Vec<_>>();
+        if kind == 2 {
+            expected[dest as usize..(dest + bytes) as usize].fill(0xa5);
+        } else {
+            expected.copy_within(source as usize..(source + bytes) as usize, dest as usize);
+        }
+        assert_eq!(
+            (0..64)
+                .map(|index| memory[&(0x4000 + index)])
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+}
+
+#[test]
+fn conditional_trap_is_a_guarded_machine_trap_and_rejects_bad_operands() {
+    let mut f = Fixture::new(&[Type::I8], &[]);
+    f.op(Op::TrapIf, &[f.param(0, 0)], &[]);
+    f.ret(&[]);
+    let fragment = f.compile();
+    vm::run(&fragment, &[0]);
+    assert!(std::panic::catch_unwind(|| vm::run(&fragment, &[1])).is_err());
+    let parameter = f.param(0, 0);
+    f.body.values[parameter.index()].kind.ty = Type::I64;
+    f.body.signature.parameters[0].ty = Type::I64;
+    assert!(codegen::compile_leaf(&f.body).is_err());
+}
+
 fn access() -> crate::lir::body::Access {
     crate::lir::body::Access {
         alias: AliasClass::Stack(SlotId(0)),
