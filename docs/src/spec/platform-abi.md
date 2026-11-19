@@ -287,6 +287,29 @@ coroutine-stack 地址直接留给 native，也不得提前发布线程退出或
 平台线程启动、退出确认与调度绑定仍由平台运行时拥有；缺少显式绑定时必须报错。
 这些内部编译与机器片段接口不登记 A64 目标，也不保证平台镜像或生产调度可运行。
 
+内部 A64 image world 必须将每个函数的局部常量引用绑定到确定性的共享常量池，保留所需
+最大对齐；共享全局存储包含初始化字和值区。coverage 计数器必须拥有独立的可写存储，
+不能与函数局部常量下标混用。描述符、类型表、名称表、vtable 和适配器只能引用真实定义，
+缺失定义、重复符号、代码与数据种类不匹配、不一致的存储布局或越界重定位必须报错，不能虚构地址。TLS 仍需线程
+所有者绑定，不能降为进程全局存储。
+
+Mach-O 适配层必须通过既有 arm64 writer 和导入桩生成器布局、重定位和签名；native data
+地址经导入槽读取，数据中的 native 指针使用加载期绑定而不是导入槽自身的地址。
+栈图与 unwind 的函数位置必须对应最终代码段内真实偏移，共同代码基址由加载方绑定。
+同一 owned section/location/relocation 图允许 ELF 调用方消费，不构成新的 ELF writer。
+这些私有边界尚不绑定启动、调度、分配器或 GC，不构成可运行的 A64 平台或目标登记。
+
+A64 runtime 调用必须由既有 canonical glue resolver 确定唯一源码实例，逐调用点校验
+参数、结果、固定效果与叶证明；不得靠同名符号或未经校验的函数别名绕过绑定。
+编译输入必须仍是同一冻结 LIR 的函数体；绑定调用的被调源码体也必须编译进入同一
+world，不能用同名的任意机器片段顶替。隐含 handle、屏障和 region 调用沿用各自整数
+车道协议，region 编号与 export summary 必须作为真实实参传递。没有 authoritative
+安全点的调用只能进入有界的 poll-free 叶实现，不能凭空补栈图或放任其进入 slow path。
+scoped-view、no-safepoint 和 permit 标记只能在冻结 LIR 已验证的证明范围内消去；不能
+把缺少实现的 runtime、机器原语、分配或平台操作静默当成空操作。
+调用保持原有 LIR Allocation、Barrier 和 Select 安全点身份，后端仅在物理记录层映射到
+CallReturn 或 SuspendResume；尤其不能因解析了 select 的目标而丢掉 default/挂起区别。
+
 ### 总则
 
 ABI 字符串目前只有 `"C"`。无函数体的 `extern` 是导入，有函数体且公开的 `pub extern "C" fn` 是导出；库名、符号和链接方式必须在构建配置中显式登记。导出边界不能把 Gugu panic 展开到 C 帧：未被 `std.panic.catch` 收集的 panic 必须按[运行时](runtime.md)规则终止进程。
@@ -395,13 +418,17 @@ Linux spawn 以 CLOEXEC 错误管道观察 exec 结果；arm64 使用 clone(SIGC
 
 内部 aarch64 Linux 信号适配器接收 `NativeRequest*`，支持 x86_64 请求号 13/14/289 的 rt_sigaction/rt_sigprocmask/signalfd4，以及 39/62/186/200/234 的 getpid/kill/gettid/tkill/tgkill。文件 worker 同样接受并分派这组请求，使现有 signal runtime 的 mask/signalfd 请求无需改变路由。signalfd4 参数为 fd、mask、sigsetsize（8）、flags；rt_sigaction 的 32 字节 kernel action 为 handler、flags、restorer、mask，arm64 不需要 x86_64 的 SA_RESTORER，适配器清除此输入位并使用 arm64 内核返回路径。新 action 和旧 action 缓冲由调用方保证有效；失败不复制旧 action。信号编号和 signalfd_siginfo 与 Linux runtime 一致；订阅、投递队列和 worker 线程管理仍由 runtime 负责。
 
-Linux resolver 当前不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc getaddrinfo/freeaddrinfo 地址，通过 operation = ~uint(0) 的 foreign worker 调用，保留系统地址顺序和取消后释放迟到结果的契约。内部 aarch64 raw-syscall 镜像尚无 libc 导入和 foreign-call worker，因此此阶段不接通 resolver，也不以自建 DNS 或静默返回空结果替代；不新增 resolver 占位入口或公开目标。
+Linux resolver 不是运行时 UDP DNS：它使用 resolver_symbol(0/1) 的 libc getaddrinfo/freeaddrinfo 地址，通过 operation = ~uint(0) 的 foreign worker 调用，保留系统地址顺序和取消后释放迟到结果的契约。内部 aarch64 的 linux_resolver_imports 接收调用方的 libc 库名，linux_resolver_symbol 返回 C ABI 导入桩地址；越界操作陷阱。桩从 loader 填写的 GOT 槽取得函数地址，以 x16 尾调用，不改写参数或 LR。动态 ELF 与 Linux AAPCS64 foreign_native_worker 可组合执行该协议；addrinfo 的 sockaddr/next 位于 +24/+40，状态取返回值低 32 位，errno 从 packet +160 读取。完整线程池、调度器与目标登记仍不接通，也不以自建 DNS 或静默空结果替代 libc。
 
 内部 aarch64 Linux VM 范围片段沿用平台原语协议：reserve_aligned 接收 x0 = bytes、x1 = alignment，其他操作接收 x0 = `(base, bytes)` 描述符地址，返回原始非负结果或负 errno。Reserve 以 mmap(PROT_NONE, MAP_PRIVATE|MAP_ANONYMOUS) 预留 bytes + alignment，修剪对齐范围两侧；空长度、非二次幂或零 alignment、加法溢出返回 -EINVAL，修剪失败释放仍然拥有的映射并保留错误，不触碰已经释放的前缀。Commit/Unprotect 用 mprotect(PROT_READ|PROT_WRITE)，ProtectGuard 用 PROT_NONE，Decommit 用 madvise(MADV_DONTNEED) 丢弃匿名页内容，Release 用 munmap；Decommit 不移除映射或写权限，下一次读取得到零填充。
 
 内部 Linux 页面探测片段接收进程入口的 envp，越过环境指针与终止零后读取 auxv 的 AT_PAGESZ（6）；未找到返回 0，不回退到固定 4096。VM 调用方必须用 OS 页大小舍入长度、提供页对齐的 base 和有效原生描述符，并选择二次幂 alignment；片段中不硬编码 4 KiB，支持 4/16/64 KiB 内核页。该内部库接口尚未接通完整 A64 runtime：已登记 x64 目标的 native_memory 固定页 profile 不因此改变，不能将该 profile 的 4096 舍入结果直接用于未来的 A64 目标。Wait/Wake、Entropy、Zero、dump/hint 等非本次范围操作不由此片段实现，不增加公开目标。
 
+内部 aarch64 Linux 也可显式选择动态 PIE：调用方提供绝对 interpreter 路径、库名、Function/Data 导入及其唯一、八字节对齐且有文件内容的可写槽。沿用同一 ELF writer、64 KiB 段布局与 LinuxEntry，增加 PT_INTERP、PT_DYNAMIC、DT_NEEDED、SysV hash、undefined dynsym 和 eager R_AARCH64_GLOB_DAT（1025），由 loader 解析导入；不使用 lazy PLT/JUMP_SLOT。RELATIVE 记录位于同一 RELA 表前缀，入口只遍历该前缀，不覆盖 loader 填写的导入槽。空导入、重复名字/槽、与 RELATIVE 重叠的槽和无效路径/名字为写出错误；不探测宿主 libc，不登记公开目标。
+
 static PIE自重定位、PE header字段、section排序和 archive编码见[后端内部规范](../internals/backend.md)，不得在该文档扩展本节公开镜像面。
+
+内部 aarch64 Linux resolver 验证镜像的生成器接受 `<output> [<interpreter> <libc>]`；不传可选参数时仍使用 musl 的 `/lib/ld-musl-aarch64.so.1` 和 `libc.so`，显式传入 `/lib/ld-linux-aarch64.so.1 libc.so.6` 可验证 glibc。此选择仅作用于该动态验证镜像；fd/net/process/vm 等无导入镜像仍为无 PT_INTERP、无 DT_NEEDED 的 static PIE。
 
 ### 入口、重定位与 TLS {#entry-relocation-tls}
 

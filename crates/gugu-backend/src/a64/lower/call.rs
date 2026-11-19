@@ -101,10 +101,24 @@ pub(crate) fn lower_mode(
             "requires checked entry / stack maps (4c)",
         ));
     }
-    let CallTarget::Instance(key) = &call.target else {
-        return Err(crate::a64::error("only direct Instance calls supported"));
+    let target = match &call.target {
+        CallTarget::Instance(key) => abi::symbol(key),
+        CallTarget::Runtime(_) => b
+            .runtime_catalog
+            .ok_or_else(|| {
+                crate::a64::error("A64 runtime call requires a canonical source catalog")
+            })?
+            .call_target(call)?,
+        _ => {
+            return Err(crate::a64::error(
+                "only direct Instance or bound runtime calls supported",
+            ));
+        }
     };
-    if call.captures_arguments || !call.by_value.is_empty() || !call.foreign_arguments.is_empty() {
+    if call.captures_arguments && !matches!(call.target, CallTarget::Runtime(_))
+        || !call.by_value.is_empty()
+        || !call.foreign_arguments.is_empty()
+    {
         return Err(crate::a64::error(
             "capturing/aggregate/foreign call unsupported",
         ));
@@ -153,14 +167,11 @@ pub(crate) fn lower_mode(
                 "tail call requires reusable incoming area, matching results and no local stack escape/sret",
             ));
         }
-        b.push(Item::TailCall {
-            target: abi::symbol(key),
-            arguments,
-        });
+        b.push(Item::TailCall { target, arguments });
     } else {
         b.push(Item::Call {
             suspend: call.may_suspend,
-            target: abi::symbol(key),
+            target,
             arguments,
             results: results.iter().map(|id| id.0).collect(),
             safepoint: match mode {

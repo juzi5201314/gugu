@@ -429,7 +429,7 @@ impl RuntimeGlueBindings {
 
 /// runtime glue 的机器 ABI 只携带指针宽度；Stack/GcHeap/Metadata/Raw provenance 在边界处
 /// 不改变寄存器或栈车道，不能把来源标签误当成不同的物理签名。
-fn runtime_abi_types_match(actual: &[ValueType], expected: &[ValueType]) -> bool {
+pub(crate) fn runtime_abi_types_match(actual: &[ValueType], expected: &[ValueType]) -> bool {
     actual.len() == expected.len()
         && actual.iter().zip(expected).all(|(actual, expected)| {
             actual == expected

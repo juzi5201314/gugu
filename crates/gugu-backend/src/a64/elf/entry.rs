@@ -1,8 +1,8 @@
 use std::{collections::BTreeMap, mem::offset_of};
 
 use super::{
-    ElfImage, ElfRequest, Layout, Location, Relative, Section, SectionContent, Segment, layout,
-    link, relocate_fragment, section_at,
+    DynamicLink, ElfImage, ElfRequest, Layout, Location, Relative, Section, SectionContent,
+    Segment, dynamic, link_prepared, prepared_layout, relocate_fragment, section_at,
 };
 use crate::{
     a64::fragments::{linux_main, rt0},
@@ -25,7 +25,23 @@ pub struct LinuxEntry {
     pub processor: Location,
 }
 
-pub fn link_entry(mut request: ElfRequest, entry: LinuxEntry) -> Result<ElfImage, String> {
+pub fn link_entry(request: ElfRequest, entry: LinuxEntry) -> Result<ElfImage, String> {
+    link_entry_impl(request, entry, None)
+}
+
+pub fn link_entry_dynamic(
+    request: ElfRequest,
+    entry: LinuxEntry,
+    imports: &DynamicLink,
+) -> Result<ElfImage, String> {
+    link_entry_impl(request, entry, Some(imports))
+}
+
+fn link_entry_impl(
+    mut request: ElfRequest,
+    entry: LinuxEntry,
+    imports: Option<&DynamicLink>,
+) -> Result<ElfImage, String> {
     validate_entry(&request, entry)?;
     let main = linux_main(PARAMS, RT0);
     let boot = rt0(RT0_START);
@@ -52,7 +68,10 @@ pub fn link_entry(mut request: ElfRequest, entry: LinuxEntry) -> Result<ElfImage
     );
     request.entry = start;
     register_initial_slot(&mut request, entry);
-    let layout = layout(&request)?;
+    let tables = imports
+        .map(|config| dynamic::prepare(&mut request, config))
+        .transpose()?;
+    let layout = prepared_layout(&request, tables.as_ref())?;
     let symbols = BTreeMap::from([
         (PARAMS, params),
         (RT0, rt0_at),
@@ -62,7 +81,7 @@ pub fn link_entry(mut request: ElfRequest, entry: LinuxEntry) -> Result<ElfImage
         relocate_fragment(&mut request, at, fragment, &layout, &symbols)?;
     }
     write_startup_data(&mut request, &layout, params, entry)?;
-    link(&request)
+    link_prepared(&request, tables.as_ref())
 }
 
 fn register_initial_slot(request: &mut ElfRequest, entry: LinuxEntry) {

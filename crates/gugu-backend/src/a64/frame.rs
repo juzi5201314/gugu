@@ -77,12 +77,17 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
         .instructions
         .iter()
         .any(|inst| matches!(inst.op, crate::lir::body::Op::SafepointPoll { .. }));
+    let implicit_calls = body
+        .instructions
+        .iter()
+        .any(|inst| super::runtime::operation_name(&inst.op).is_some());
     if polls {
         saved.extend(super::abi::CALLEE_SAVED);
     }
     saved.sort_unstable();
     saved.dedup();
     if calls.is_empty()
+        && !implicit_calls
         && saved.is_empty()
         && allocation.slots.slots.is_empty()
         && body.stack_slots.is_empty()
@@ -175,15 +180,19 @@ pub fn layout(body: &Body, allocation: &Allocation) -> Result<Frame, Error> {
 pub const POLL_FREE_LEAF_RESERVE: u32 = 4096;
 
 pub(crate) fn runtime_policy(body: &Body, frame: &mut Frame) -> Result<(), Error> {
+    let implicit_calls = body
+        .instructions
+        .iter()
+        .any(|inst| super::runtime::operation_name(&inst.op).is_some());
     if body.poll_interface.leaf {
-        if body.instructions.iter().any(|inst| matches!(inst.op, crate::lir::body::Op::StackCheck | crate::lir::body::Op::SafepointPoll { .. } | crate::lir::body::Op::Call(_) | crate::lir::body::Op::ForeignCall(_))) || !body.safepoints.is_empty() {
+        if implicit_calls || body.instructions.iter().any(|inst| matches!(inst.op, crate::lir::body::Op::StackCheck | crate::lir::body::Op::SafepointPoll { .. } | crate::lir::body::Op::Call(_) | crate::lir::body::Op::ForeignCall(_))) || !body.safepoints.is_empty() {
             return Err(super::error("poll-free leaf interface contains a checked entry or runtime call/poll"));
         }
         if frame.size > POLL_FREE_LEAF_RESERVE {
             return Err(super::error("poll-free leaf frame exceeds the 4096-byte caller reserve"));
         }
         frame.unchecked_leaf = true;
-    } else if body.instructions.iter().any(|inst| matches!(&inst.op, crate::lir::body::Op::Call(call) if call.kind == crate::gir::body::CallKind::Managed && call.poll_free_leaf)) {
+    } else if implicit_calls || body.instructions.iter().any(|inst| matches!(&inst.op, crate::lir::body::Op::Call(call) if call.kind == crate::gir::body::CallKind::Managed && call.poll_free_leaf)) {
         frame.max_leaf_reserve = POLL_FREE_LEAF_RESERVE;
     }
     frame.required_frame = frame

@@ -16,6 +16,7 @@ mod fp;
 pub mod fragments;
 pub mod frame;
 pub mod glue;
+pub mod image;
 pub mod inst;
 pub mod layout;
 mod locals;
@@ -29,10 +30,12 @@ pub mod reg;
 mod relocation;
 pub mod rewrite;
 mod rows;
+pub mod runtime;
 pub mod select;
 pub mod sites;
 pub mod table;
 pub mod verify;
+pub mod world;
 
 #[cfg(test)]
 mod tests;

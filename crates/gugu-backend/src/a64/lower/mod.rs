@@ -4,6 +4,7 @@ pub(super) mod call;
 mod float;
 mod integer;
 mod memory;
+pub(super) mod runtime;
 use super::{
     Error,
     machine::{self, Access, Function, Item, MInst, MOperand, MReg, Site},
@@ -12,6 +13,8 @@ use super::{
 use crate::lir::body::{Body, Instruction, Type, ValueId};
 
 pub struct Builder<'a> {
+    pub runtime_catalog: Option<&'a super::runtime::Catalog<'a>>,
+    pub symbols: Option<&'a [(crate::lir::body::Symbol, String)]>,
     pub function: &'a mut Function,
     pub items: Vec<Site>,
     pub context: String,
