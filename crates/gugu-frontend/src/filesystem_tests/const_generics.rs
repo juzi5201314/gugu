@@ -1,6 +1,31 @@
 use super::{CompileRequest, Compiler, TargetName, printing::output};
 
 #[test]
+fn dependent_value_parameters_reject_implicit_receiver_borrows() {
+    let compiled = Compiler::shared().compile(CompileRequest::single_file(
+        "main.gg",
+        r#"
+trait Change { fn change(self: &Self) }
+impl Change for int { fn change(self: &Self) { *self = 1 } }
+fn f(comptime n: int) [int; n] { n.change()
+    [0; n] }
+fn main() { _ = f(2) }
+"#,
+        TargetName::X86_64Linux,
+    ));
+    assert!(!compiled.is_success());
+    assert!(
+        compiled
+            .diagnostics()
+            .items()
+            .iter()
+            .any(|diagnostic| diagnostic.message().contains("不能赋值或借用")),
+        "{:?}",
+        compiled.diagnostics().items()
+    );
+}
+
+#[test]
 fn dependent_value_parameter_instances_use_values_and_survive_cache_hits() {
     let compile = |n| {
         let source = format!(

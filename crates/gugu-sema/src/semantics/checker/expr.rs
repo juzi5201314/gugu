@@ -767,15 +767,6 @@ impl Checker<'_, '_> {
         }
     }
     pub(super) fn place(&mut self, id: ExprId, read: bool) -> Ty {
-        if matches!(self.symbolic_comptime_argument(id), Some(super::super::model::ArrayLength::Param(name)) if name.starts_with("$value-const:"))
-        {
-            self.error(
-                DiagnosticCode::InvalidExpression,
-                "用于类型的 comptime 值参数不能赋值或借用",
-                self.arena().exprs[id.0 as usize].span.clone(),
-            );
-            return Ty::Error;
-        }
         let expr = &self.arena().exprs[id.0 as usize];
         let ty = match expr.kind {
             ExprKind::Path(path) => self.path_place(id, path, read),
