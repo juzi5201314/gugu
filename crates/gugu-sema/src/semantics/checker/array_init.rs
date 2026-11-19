@@ -88,6 +88,11 @@ impl Checker<'_, '_> {
         let candidates: Vec<_> = stmts
             .as_slice(&self.arena().stmt_ids)
             .iter()
+            .filter(|&&store| {
+                self.model.modules[self.module]
+                    .configured
+                    .stmt_active(store)
+            })
             .filter_map(|&store| {
                 self.array_init_target(store, index, &length)
                     .map(|(array, slot, place)| ActiveInit {

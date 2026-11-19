@@ -168,6 +168,21 @@ fn array_init_loop_plan_survives_cached_hir() {
     assert_eq!(cold, warm);
 }
 
+#[test]
+fn cfg_removed_stores_do_not_count_toward_init_loop_proofs() {
+    for statements in [
+        "a[i] = i\n #[cfg(false)] a[i] = 9",
+        "#[cfg(false)] a[i] = 9\n a[i] = i",
+    ] {
+        accepts(
+            &format!(
+                "fn f() [int; 2] {{ let a: [int; 2]\n for i in 0..2 {{ {statements} }}\n a }}"
+            ),
+            hir::ArrayLength::Known(2),
+        );
+    }
+}
+
 macro_rules! rejects {
     ($($name:ident: $source:literal;)*) => {$ (
         #[test]
@@ -180,6 +195,7 @@ macro_rules! rejects {
 }
 
 rejects! {
+    only_cfg_removed_store: "fn f() [int; 2] { let a: [int; 2]\n for i in 0..2 { #[cfg(false)] a[i] = i }\n a }";
     reused_array_outside_outer_for: "fn f() { let a: [int; 2]\n for round in 0..2 { for i in 0..2 { a[i] = i } } }";
     reused_array_outside_outer_while: "fn f() { let a: [int; 2]\n let round = 0\n while round < 2 { for i in 0..2 { a[i] = i }\n round += 1 } }";
     maybe_initialized_array: "fn f(flag: bool) { let a: [int; 2]\n if flag { a = [1, 2] }\n for i in 0..2 { a[i] = i } }";
