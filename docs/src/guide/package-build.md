@@ -28,7 +28,7 @@ gugu tree                    # 显示依赖图
 
 ## build.gg 与权限门
 
-包可以提供 `build.gg` 构建脚本生成源码模块（`emit_module` 的产物进编译闭包）。构建脚本的操作默认受权限门约束：
+包可以提供 `build.gg` 构建脚本生成源码模块（`emit_module` 的产物进编译闭包）。权限门默认关闭：构建脚本可直接读写宿主文件系统，需显式传 `--permission` 启用检查，再按 `--*-allows` 预授权：
 
 ```text
 gugu build --permission                      # 启用权限门
