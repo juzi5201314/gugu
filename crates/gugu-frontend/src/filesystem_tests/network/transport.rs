@@ -409,6 +409,52 @@ fn transport_deadline_is_captured_and_cancelled_wait_does_not_close() {
 }
 
 #[test]
+fn darwin_datagram_truncation_and_disconnect_follow_native_results() {
+    let output = compile(TargetName::X86_64Macos);
+    let mut h = Harness::new(&output);
+    let mut memory = vec![0; 262144];
+    setup(&mut h, &mut memory);
+    h.native_hook = Some(|_, op, request, memory| {
+        if op == 27 {
+            let message = word(memory, request + 8);
+            let iovec = word(memory, message + 16);
+            assert_eq!(word(memory, iovec + 8), 2);
+            let data = word(memory, iovec) as usize;
+            memory[data..data + 2].copy_from_slice(b"AA");
+            let address = word(memory, message) as usize;
+            memory[address..address + 8].copy_from_slice(&[16, 2, 0, 80, 127, 0, 0, 1]);
+            put(memory, message + 8, 16);
+            put(memory, message + 40, 16 << 32);
+        } else if op == 21 {
+            let address = word(memory, request + 8) as usize;
+            assert_eq!(&memory[address..address + 2], &[16, 0]);
+        }
+    });
+    h.script.push_back((27, 2, 0));
+    let result = h.invoke(
+        "std/runtime/net_datagram.gg",
+        "receive",
+        &[CELL, BUFFER, 2, 0, 0],
+        &mut memory,
+    );
+    assert_eq!(result[0] & 255, 0);
+    assert_eq!(result[1], 2);
+    assert_ne!(result.last().unwrap() & 255, 0);
+    assert_eq!(&memory[BUFFER as usize..BUFFER as usize + 2], b"AA");
+
+    for (peer_error, connected) in [(0, 1), (57, 0)] {
+        put(&mut memory, CONTROL + 1248, 1);
+        let disconnect = node(&mut h, &mut memory, 8, 0, 0);
+        put(&mut memory, disconnect + 96, 16);
+        h.script.extend([(21, 0, 47), (6, 0, peer_error)]);
+        submit(&mut h, &mut memory, disconnect);
+        assert_eq!(word(&memory, CONTROL + 1248), connected);
+        assert_eq!(word(&memory, disconnect + 72), connected * 47);
+    }
+    assert!(h.script.is_empty());
+}
+
+#[test]
 fn linux_datagram_consumes_once_and_rejects_short_sends_and_wrong_mode() {
     let output = compile(TargetName::X86_64Linux);
     let mut h = Harness::new(&output);
