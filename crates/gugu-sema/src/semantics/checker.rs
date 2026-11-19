@@ -10,6 +10,7 @@ mod assembly;
 mod borrow;
 mod calls;
 mod captures;
+mod construct;
 mod conversion;
 mod defer;
 mod expr;
@@ -386,7 +387,8 @@ impl<'m, 'a> Checker<'m, 'a> {
             Ty::Ref(t) => Ty::Ref(Box::new(self.resolve(t))),
             Ty::Ptr(t) => Ty::Ptr(Box::new(self.resolve(t))),
             Ty::Slice(t) => Ty::Slice(Box::new(self.resolve(t))),
-            Ty::Array(t, n) => Ty::Array(Box::new(self.resolve(t)), *n),
+            Ty::Array(t, n) => Ty::Array(Box::new(self.resolve(t)), self.resolve_length(n)),
+            Ty::Const(n) => Ty::Const(self.resolve_length(n)),
             Ty::Option(t) => Ty::Option(Box::new(self.resolve(t))),
             Ty::Result(t, e) => Ty::Result(Box::new(self.resolve(t)), Box::new(self.resolve(e))),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.resolve(t)).collect()),
@@ -507,7 +509,8 @@ impl<'m, 'a> Checker<'m, 'a> {
                 self.relate(e, f, span, false);
                 return self.resolve(&b);
             }
-            (Ty::Array(x, n), Ty::Array(y, m)) if n == m => {
+            (Ty::Array(x, n), Ty::Array(y, m)) => {
+                self.relate(&self.length_type(n), &self.length_type(m), span, false);
                 self.relate(x, y, span, false);
                 return self.resolve(&b);
             }

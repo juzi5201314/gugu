@@ -35,6 +35,17 @@ impl BodyBuilder<'_, '_, '_, '_> {
         let segments = self.arena().paths[path.0 as usize]
             .segments
             .as_slice(&self.arena().segments);
+        let parts = self.compiler.model.path(self.module, path);
+        if parts.len() == 1
+            && !self.names.contains_key(parts[0])
+            && let Some(ty) = self
+                .compiler
+                .model
+                .const_parameter_at(self.module, span, parts[0])
+        {
+            let ty = self.type_id(&ty)?;
+            return Ok((hir::ExprKind::Resolved(hir::Res::ConstParameter(ty)), 0));
+        }
         if !self
             .names
             .contains_key(self.compiler.model.name(self.module, segments[0].name))

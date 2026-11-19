@@ -104,10 +104,11 @@ impl<'p, 'a> Evaluator<'p, 'a> {
                 ))
             }
             ExprKind::Repeat { value, count } => {
-                self.allocate(usize::try_from(*count).map_err(|_| budget())?)?;
+                let count = count.known().ok_or_else(budget)?;
+                self.allocate(usize::try_from(count).map_err(|_| budget())?)?;
                 Ok(Value::Aggregate(vec![
                     self.value(frame, *value)?;
-                    *count as usize
+                    count as usize
                 ]))
             }
             ExprKind::Construct { fields, .. } => {

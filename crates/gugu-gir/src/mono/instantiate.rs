@@ -691,7 +691,7 @@ fn instance_key(
     interner: &mut MonoInterner,
     definition: hir::DefId,
     arguments: &[Ty],
-    const_arguments: Vec<Vec<u8>>,
+    mut const_arguments: Vec<Vec<u8>>,
 ) -> Result<MonoKey, Diagnostic> {
     let declared = context.parameter_context(definition);
     if declared.len() != arguments.len() {
@@ -701,7 +701,17 @@ fn instance_key(
     let mut bindings = BTreeMap::new();
     for (name, argument) in declared.into_keys().zip(arguments) {
         let argument = context.model.normalize(argument, &[])?;
-        type_arguments.push(interner.intern_type(context.encode_type(&argument)?)?);
+        if let Ty::Const(length) = &argument {
+            let value = length
+                .known()
+                .ok_or_else(|| inconsistency("comptime 泛型参数尚未实例化"))?;
+            const_arguments.push(super::types::encode_constant(
+                context,
+                &crate::semantics::comptime::eval::ConstantValue::Int(i128::from(value)),
+            )?);
+        } else {
+            type_arguments.push(interner.intern_type(context.encode_type(&argument)?)?);
+        }
         bindings.insert(name, argument);
     }
     let key = MonoKey {

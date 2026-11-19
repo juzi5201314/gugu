@@ -8,6 +8,8 @@ use super::super::{
 use crate::{Diagnostic, DiagnosticCode};
 use std::collections::BTreeMap;
 mod attributes;
+mod const_generics;
+pub use crate::array_length::ArrayLength;
 pub use attributes::Representation;
 mod lang;
 pub(super) use super::comptime::eval::ConstantValue;
@@ -16,157 +18,10 @@ pub use lang::PlatformIntrinsic;
 pub use lang::RuntimeIntrinsic;
 pub use lang::RuntimeMachineIntrinsic;
 pub(crate) use lang::compiler_owned_item;
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize)]
-pub enum Ty {
-    Error,
-    Var(u32),
-    Never,
-    Unit,
-    Bool,
-    Int {
-        signed: bool,
-        bits: u16,
-    },
-    Float(u16),
-    Char,
-    String,
-    Ref(Box<Ty>),
-    Ptr(Box<Ty>),
-    Slice(Box<Ty>),
-    Array(Box<Ty>, u64),
-    Tuple(Vec<Ty>),
-    Function(Vec<Ty>, Box<Ty>),
-    Callable(CallableId, Vec<Ty>, Box<Ty>),
-    Named(usize, Vec<Ty>),
-    Param(String),
-    Projection(Box<Ty>, super::traits::TraitRef, String),
-    Opaque(u32, Vec<Ty>),
-    Dyn(Vec<super::traits::TraitRef>),
-    TypeId,
-    Option(Box<Ty>),
-    Result(Box<Ty>, Box<Ty>),
-    /// 格式 trait 的写入目标。载荷方法随 `std.fmt` 提供。
-    Formatter,
-    Range,
-    Chan(Box<Ty>),
-    Join(Box<Ty>),
-    ChanClosed,
-    TrySendErr,
-    TryRecvErr,
-    Panic,
-    MaybeUninit(Box<Ty>),
-}
-
-/// 函数项和闭包的身份来自模块内稠密 FnDecl 编号，不使用地址。
-#[derive(
-    Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, serde::Serialize, serde::Deserialize,
-)]
-pub struct CallableId {
-    pub module: usize,
-    pub function: u32,
-}
-impl Ty {
-    pub fn int() -> Self {
-        Self::Int {
-            signed: true,
-            bits: 64,
-        }
-    }
-    pub fn strip_refs(&self) -> &Self {
-        match self {
-            Self::Ref(t) => t.strip_refs(),
-            _ => self,
-        }
-    }
-    pub fn signature(&self) -> Option<(&[Ty], &Ty)> {
-        match self {
-            Self::Function(params, ret) => Some((params, ret)),
-            Self::Callable(_, _, signature) => signature.signature(),
-            _ => None,
-        }
-    }
-    pub fn primitive(name: &str) -> Option<Self> {
-        Some(match name {
-            "bool" => Self::Bool,
-            "char" => Self::Char,
-            "string" => Self::String,
-            "TypeId" => Self::TypeId,
-            "int" | "i64" | "isize" => Self::int(),
-            "uint" | "u64" | "usize" => Self::Int {
-                signed: false,
-                bits: 64,
-            },
-            "byte" | "u8" => Self::Int {
-                signed: false,
-                bits: 8,
-            },
-            "float" | "f64" => Self::Float(64),
-            "f32" => Self::Float(32),
-            "i8" => Self::Int {
-                signed: true,
-                bits: 8,
-            },
-            "i16" => Self::Int {
-                signed: true,
-                bits: 16,
-            },
-            "i32" => Self::Int {
-                signed: true,
-                bits: 32,
-            },
-            "i128" => Self::Int {
-                signed: true,
-                bits: 128,
-            },
-            "u16" => Self::Int {
-                signed: false,
-                bits: 16,
-            },
-            "u32" => Self::Int {
-                signed: false,
-                bits: 32,
-            },
-            "u128" => Self::Int {
-                signed: false,
-                bits: 128,
-            },
-            "Formatter" => Self::Formatter,
-            "Range" => Self::Range,
-            "ChanClosed" => Self::ChanClosed,
-            "TrySendErr" => Self::TrySendErr,
-            "TryRecvErr" => Self::TryRecvErr,
-            "Panic" => Self::Panic,
-            _ => return None,
-        })
-    }
-}
-#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct DefRef {
-    pub module: usize,
-    pub item: ItemId,
-}
-#[derive(Clone, Debug)]
-pub struct FieldInfo {
-    pub name: String,
-    pub ty: Ty,
-    pub public: bool,
-}
-#[derive(Clone, Debug)]
-pub struct Constructor {
-    pub index: usize,
-    pub name: String,
-    pub fields: Vec<FieldInfo>,
-    pub record: bool,
-}
-#[derive(Clone, Debug)]
-pub struct Nominal {
-    pub definition: DefRef,
-    pub name: String,
-    pub params: Vec<String>,
-    pub variants: Vec<Constructor>,
-    pub is_enum: bool,
-    pub repr: Representation,
-}
+mod kinds;
+pub use kinds::{CallableId, Constructor, DefRef, FieldInfo, Nominal, Ty};
+mod substitution;
+pub use substitution::substitute;
 pub struct Model<'a> {
     pub modules: &'a [ParsedModule],
     /// 由 `RuntimeResources` 以 `Runtime` 角色注入的模块下标；GC 控制原语的授权依据。
@@ -275,6 +130,7 @@ impl<'a> Model<'a> {
             Ty::MaybeUninit(t) => format!("MaybeUninit[{}]", self.describe(t)),
             Ty::Slice(t) => format!("[{}]", self.describe(t)),
             Ty::Array(t, n) => format!("[{}; {n}]", self.describe(t)),
+            Ty::Const(n) => n.to_string(),
             Ty::Tuple(ts) => format!("({}{})", list(ts), if ts.len() == 1 { "," } else { "" }),
             Ty::Function(ts, ret) => format!("fn({}) {}", list(ts), self.describe(ret)),
             Ty::Callable(id, arguments, signature) => {
@@ -415,10 +271,17 @@ impl<'a> Model<'a> {
             let def = model.nominal[index].definition;
             let m = &modules[def.module];
             let item = &m.arena.items[def.item.0 as usize];
-            let params = model.nominal[index]
-                .params
+            let params = model.nominal[index].definition;
+            let generics = match item.kind {
+                ItemKind::Struct { generics, .. }
+                | ItemKind::Enum { generics, .. }
+                | ItemKind::Union { generics, .. } => generics,
+                _ => unreachable!(),
+            };
+            let params = generics
+                .as_slice(&m.arena.generic_params)
                 .iter()
-                .map(|s| (s.clone(), Ty::Param(s.clone())))
+                .map(|g| model.generic_binding(params.module, &g.kind))
                 .collect();
             let field = |f: &Field, pos: usize| -> Result<FieldInfo, Diagnostic> {
                 Ok(FieldInfo {
@@ -519,6 +382,9 @@ impl<'a> Model<'a> {
             }
         }
         model.validate_traits().map_err(|error| vec![error])?;
+        model
+            .validate_const_generics()
+            .map_err(|error| vec![error])?;
         Ok(model)
     }
     pub fn name(&self, module: usize, symbol: Symbol) -> &str {
@@ -624,10 +490,8 @@ impl<'a> Model<'a> {
                 params.insert(name.clone(), Ty::Param(name));
             }
             for param in owner.generics.as_slice(&arena.generic_params) {
-                if let GenericParamKind::Type { name, .. } = param.kind {
-                    let name = self.name(module, name).to_owned();
-                    params.insert(name.clone(), Ty::Param(name));
-                }
+                let (name, ty) = self.generic_binding(module, &param.kind);
+                params.insert(name, ty);
             }
         }
         params
@@ -646,21 +510,16 @@ impl<'a> Model<'a> {
         module: usize,
         argument: GenericArg,
     ) -> Result<Ty, Diagnostic> {
-        match argument {
-            GenericArg::Type(ty) => self.form(module, ty),
-            GenericArg::Expr(expression) => {
-                let expression = &self.modules[module].arena.exprs[expression.0 as usize];
-                let ExprKind::Path(path) = expression.kind else {
-                    return Err(self.error(module, "泛型位置要求类型实参"));
-                };
-                self.form_kind(
-                    module,
-                    TyKind::Path(path),
-                    &self.parameters_at(module, &expression.span),
-                    &mut Vec::new(),
-                )
-            }
-        }
+        let span = match argument {
+            GenericArg::Type(ty) => &self.modules[module].arena.tys[ty.0 as usize].span,
+            GenericArg::Expr(expr) => &self.modules[module].arena.exprs[expr.0 as usize].span,
+        };
+        self.form_arg(
+            module,
+            argument,
+            &self.parameters_at(module, span),
+            &mut Vec::new(),
+        )
     }
     pub(super) fn form_inner(
         &self,
@@ -701,8 +560,7 @@ impl<'a> Model<'a> {
             )))),
             TyKind::Array { elem, len } => Ty::Array(
                 Box::new(self.form_inner(module, elem, params, stack)?),
-                u64::try_from(self.constant_int(module, len)?)
-                    .map_err(|_| self.error(module, "数组长度必须非负"))?,
+                self.array_length(module, len, params)?,
             ),
             TyKind::Tuple(ts) => {
                 let ts: Vec<_> = ts
@@ -730,6 +588,9 @@ impl<'a> Model<'a> {
             TyKind::Path(path) => {
                 let parts = self.path(module, path);
                 if let Some(ty) = params.get(&parts.join("::")) {
+                    if matches!(ty, Ty::Const(_)) {
+                        return Err(self.error(module, "comptime 泛型参数不是类型"));
+                    }
                     return Ok(ty.clone());
                 }
                 if let Some(ty) = self.projected_type(module, path, params, stack)? {
@@ -776,6 +637,7 @@ impl<'a> Model<'a> {
                     return Ok(Ty::MaybeUninit(Box::new(inner.clone())));
                 }
                 let def = self.resolve(module, &parts)?;
+                self.check_generic_kinds(def, &args)?;
                 if let Some((i, n)) = self
                     .nominal
                     .iter()
@@ -832,13 +694,30 @@ impl<'a> Model<'a> {
         stack: &mut Vec<DefRef>,
     ) -> Result<Ty, Diagnostic> {
         match arg {
-            GenericArg::Type(t) => self.form_inner(module, t, params, stack),
+            GenericArg::Type(t) => self.form_inner(module, t, params, stack).or_else(|error| {
+                let TyKind::Path(path) = self.modules[module].arena.tys[t.0 as usize].kind else {
+                    return Err(error);
+                };
+                if let Some(value @ Ty::Const(_)) = params.get(&self.path(module, path).join("::"))
+                {
+                    return Ok(value.clone());
+                }
+                let def = self.resolve(module, &self.path(module, path))?;
+                let ItemKind::Const {
+                    value: Some(value), ..
+                } = self.modules[def.module].arena.items[def.item.0 as usize].kind
+                else {
+                    return Err(error);
+                };
+                self.array_length(def.module, value, &BTreeMap::new())
+                    .map(Ty::Const)
+            }),
             GenericArg::Expr(expr) => {
                 match self.modules[module].arena.exprs[expr.0 as usize].kind {
-                    ExprKind::Path(path) => {
-                        self.form_kind(module, TyKind::Path(path), params, stack)
-                    }
-                    _ => Err(self.error(module, "此泛型位置需要类型")),
+                    ExprKind::Path(path) => self
+                        .form_kind(module, TyKind::Path(path), params, stack)
+                        .or_else(|error| self.const_argument(module, expr, params, error)),
+                    _ => self.array_length(module, expr, params).map(Ty::Const),
                 }
             }
         }
@@ -1108,56 +987,5 @@ impl<'a> Model<'a> {
             1 => Ok(candidates.pop()),
             _ => Err(self.error(module, "构造器名称不唯一，必须使用类型限定")),
         }
-    }
-}
-pub fn substitute(ty: &Ty, bindings: &BTreeMap<String, Ty>) -> Ty {
-    match ty {
-        Ty::Param(s) => bindings.get(s).cloned().unwrap_or_else(|| ty.clone()),
-        Ty::Projection(ty, interface, name) => Ty::Projection(
-            Box::new(substitute(ty, bindings)),
-            interface.substitute(bindings),
-            name.clone(),
-        ),
-        Ty::Ref(t) => Ty::Ref(Box::new(substitute(t, bindings))),
-        Ty::Ptr(t) => Ty::Ptr(Box::new(substitute(t, bindings))),
-        Ty::Array(t, n) => Ty::Array(Box::new(substitute(t, bindings)), *n),
-        Ty::Slice(t) => Ty::Slice(Box::new(substitute(t, bindings))),
-        Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| substitute(t, bindings)).collect()),
-        Ty::Named(i, args) => Ty::Named(*i, args.iter().map(|t| substitute(t, bindings)).collect()),
-        Ty::Opaque(id, arguments) => Ty::Opaque(
-            *id,
-            arguments
-                .iter()
-                .map(|ty| substitute(ty, bindings))
-                .collect(),
-        ),
-        Ty::Dyn(interfaces) => Ty::Dyn(
-            interfaces
-                .iter()
-                .map(|interface| interface.substitute(bindings))
-                .collect(),
-        ),
-        Ty::Option(t) => Ty::Option(Box::new(substitute(t, bindings))),
-        Ty::Result(t, e) => Ty::Result(
-            Box::new(substitute(t, bindings)),
-            Box::new(substitute(e, bindings)),
-        ),
-        Ty::Chan(t) => Ty::Chan(Box::new(substitute(t, bindings))),
-        Ty::Join(t) => Ty::Join(Box::new(substitute(t, bindings))),
-        Ty::MaybeUninit(t) => Ty::MaybeUninit(Box::new(substitute(t, bindings))),
-        Ty::ChanClosed | Ty::TrySendErr | Ty::TryRecvErr | Ty::Panic => ty.clone(),
-        Ty::Function(params, ret) => Ty::Function(
-            params.iter().map(|ty| substitute(ty, bindings)).collect(),
-            Box::new(substitute(ret, bindings)),
-        ),
-        Ty::Callable(id, arguments, signature) => Ty::Callable(
-            *id,
-            arguments
-                .iter()
-                .map(|ty| substitute(ty, bindings))
-                .collect(),
-            Box::new(substitute(signature, bindings)),
-        ),
-        _ => ty.clone(),
     }
 }

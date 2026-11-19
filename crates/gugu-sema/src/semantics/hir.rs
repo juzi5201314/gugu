@@ -337,7 +337,13 @@ fn type_references(module: &hir::Module, id: hir::TypeId) -> (Vec<hir::TypeId>, 
         | Type::Chan(inner)
         | Type::Join(inner)
         | Type::MaybeUninit(inner) => types.push(*inner),
-        Type::Array(inner, _) => types.push(*inner),
+        Type::Array(inner, length) => {
+            types.push(*inner);
+            if let hir::ArrayLength::Param((owner, _)) = length {
+                definitions.push(*owner);
+            }
+        }
+        Type::Const(hir::ArrayLength::Param((owner, _))) => definitions.push(*owner),
         Type::Tuple(items) => types.extend(items.iter().copied()),
         Type::Function { parameters, result } => {
             types.extend(parameters.iter().copied());

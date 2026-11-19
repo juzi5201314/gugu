@@ -42,7 +42,10 @@ impl MonoContext<'_> {
             hir::Type::Ref(inner) => Ty::Ref(boxed(*inner)?),
             hir::Type::Ptr(inner) => Ty::Ptr(boxed(*inner)?),
             hir::Type::Slice(inner) => Ty::Slice(boxed(*inner)?),
-            hir::Type::Array(inner, length) => Ty::Array(boxed(*inner)?, *length),
+            hir::Type::Array(inner, length) => {
+                Ty::Array(boxed(*inner)?, self.semantic_length(length)?)
+            }
+            hir::Type::Const(length) => Ty::Const(self.semantic_length(length)?),
             hir::Type::Tuple(parts) => Ty::Tuple(self.semantic_types(parts)?),
             hir::Type::Function { parameters, result } => {
                 Ty::Function(self.semantic_types(parameters)?, boxed(*result)?)
@@ -111,6 +114,19 @@ impl MonoContext<'_> {
         ids.iter()
             .map(|&id| self.semantic_type(id).cloned())
             .collect()
+    }
+
+    pub fn semantic_length(
+        &self,
+        length: &hir::ArrayLength,
+    ) -> Result<crate::semantics::model::ArrayLength, Diagnostic> {
+        use crate::semantics::model::ArrayLength;
+        match length {
+            hir::ArrayLength::Known(value) => Ok(ArrayLength::Known(*value)),
+            hir::ArrayLength::Param((owner, index)) => {
+                Ok(ArrayLength::Param(self.parameter_name(*owner, *index)?))
+            }
+        }
     }
 
     pub fn semantic_trait(&self, interface: &hir::TraitRef) -> Result<TraitRef, Diagnostic> {

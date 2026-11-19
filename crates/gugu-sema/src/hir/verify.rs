@@ -213,10 +213,11 @@ impl Module {
             | Type::Formatter => true,
             Type::Int { bits, .. } => matches!(bits, 8 | 16 | 32 | 64 | 128),
             Type::Float(bits) => matches!(bits, 32 | 64),
+            Type::Const(length) => self.array_length(length),
+            Type::Array(ty, length) => child(*ty) && self.array_length(length),
             Type::Ref(ty)
             | Type::Ptr(ty)
             | Type::Slice(ty)
-            | Type::Array(ty, _)
             | Type::Option(ty)
             | Type::Chan(ty)
             | Type::Join(ty)
@@ -258,6 +259,24 @@ impl Module {
                 .iter()
                 .all(|interface| self.trait_ref(interface) && children(&interface.arguments)),
             Type::Result(value, error) => child(*value) && child(*error),
+        }
+    }
+
+    pub(super) fn array_length(&self, length: &ArrayLength) -> bool {
+        match length {
+            ArrayLength::Known(_) => true,
+            ArrayLength::Param((owner, index)) => {
+                self.definitions
+                    .get(owner.index())
+                    .is_some_and(|definition| {
+                        definition
+                            .parameters
+                            .get(*index as usize)
+                            .is_some_and(|parameter| {
+                                matches!(parameter.kind, ParameterKind::Comptime(_))
+                            })
+                    })
+            }
         }
     }
 }

@@ -12,6 +12,7 @@ use diagnostics::{Diagnostic, DiagnosticCode, Severity};
 use source::{ExpansionId, SourceFileId, SourceMap, Span};
 use target::TargetName;
 
+pub mod array_length;
 pub mod ast;
 pub mod attr;
 pub mod cfg;

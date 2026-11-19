@@ -20,6 +20,11 @@ comptime 宏则运行一段编译期脚本，生成源码文本，再把文本�
 
 ## 值 comptime 语法
 
+当前 `[]` 中的 `int` comptime 泛型参数可直接作为数组长度，支持显式常量实参与
+从数组实参推断长度；参数在函数体中也可作为 `int` 值使用。长度的参数算术暂不支持。
+下例的普通参数表 `comptime n` 依赖返回类型及逐元素循环初始化证明仍待实现；
+这不影响已经支持的普通 comptime 值参数常量检查。
+
 <!-- docs-example: gap 未解析的编译期名称 -->
 ```gugu
 fn repeat[T](comptime n: int, x: T) [T; n] {
