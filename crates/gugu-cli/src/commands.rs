@@ -66,11 +66,21 @@ pub(crate) fn dispatch(command: &Command, options: &GlobalArgs) -> i32 {
         } => crate::package_cmds::run_tree(*depth, *duplicates, invert.as_deref(), options),
         Command::Vendor => crate::package_cmds::run_vendor(options),
         Command::Package => crate::package_cmds::run_package(options),
-        Command::Publish { dry_run, .. } => {
-            let _ = dry_run;
-            crate::package_cmds::pending_registry(options, "publish")
-        }
-        Command::Yank { .. } => crate::package_cmds::pending_registry(options, "yank"),
+        Command::Publish {
+            dry_run,
+            registry,
+            sign,
+        } => crate::registry_cmds::run_publish(
+            *dry_run,
+            registry.as_deref(),
+            sign.as_deref(),
+            options,
+        ),
+        Command::Yank {
+            package_name,
+            version,
+            undo,
+        } => crate::registry_cmds::run_yank(package_name, version, *undo, options),
         Command::Login {
             registry,
             token_stdin,

@@ -1,0 +1,17 @@
+[package]
+name = "gugu-registry"
+version = "0.1.0"
+edition = "2024"
+description = "Gugu registry Protocol v1 client: identities, index records, signatures, transport"
+
+[dependencies]
+base64.workspace = true
+ed25519-dalek.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"
+gugu-project = { path = "../gugu-project" }
+ureq.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

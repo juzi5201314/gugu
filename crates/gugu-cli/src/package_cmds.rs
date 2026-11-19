@@ -5,7 +5,7 @@
 use std::{
     collections::BTreeSet,
     env, fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
 };
 
@@ -17,16 +17,6 @@ use crate::{
     commands::{discover, fail, format_of, load_project, parse_target_or_exit},
     output::OutputFormat,
 };
-
-pub(crate) fn pending_registry(options: &GlobalArgs, name: &str) -> i32 {
-    fail(
-        format_of(options),
-        1,
-        format!(
-            "`gugu {name}` 需要 registry Protocol v1；归档生成已由 `gugu package` 提供，协议接入尚未完成"
-        ),
-    )
-}
 
 // ---------------------------------------------------------------------------
 // explain
@@ -232,13 +222,8 @@ fn reaches(
 }
 
 pub(crate) fn run_update(precise: Option<&str>, options: &GlobalArgs) -> i32 {
-    let format = format_of(options);
-    if precise.is_some() {
-        return fail(
-            format,
-            2,
-            "`gugu update --precise` 需要 registry 候选查询，当前 resolver 不支持",
-        );
+    if let Some(version) = precise {
+        return crate::registry_cmds::run_update_precise(version, options);
     }
     let target = match parse_target_or_exit(options) {
         Ok(target) => target,
@@ -348,7 +333,7 @@ pub(crate) fn run_package(options: &GlobalArgs) -> i32 {
 
 /// 归档内容规则（publishing-ecosystem 规范）：默认排除产物/凭据/锁文件；
 /// `include` 替换候选集合，`exclude` 随后删减，但不能删掉清单、选中 target 或 build task。
-fn filter_archive_files(
+pub(crate) fn filter_archive_files(
     package: &gugu_compiler::Package,
     files: &gugu_compiler::PackageFiles,
 ) -> Result<gugu_compiler::PackageFiles, String> {
@@ -468,12 +453,10 @@ fn glob_component(pattern: &str, name: &str) -> bool {
     inner(pattern.as_bytes(), name.as_bytes())
 }
 
-/// 按规范写规范 tar header：普通文件 0644、mtime 0、无 owner/group。
-fn write_archive(files: &gugu_compiler::PackageFiles, output: &Path) -> Result<(), String> {
+/// 规范归档字节流：普通文件 0644、mtime 0、无 owner/group。
+pub(crate) fn archive_bytes(files: &gugu_compiler::PackageFiles) -> Result<Vec<u8>, String> {
     use flate2::{Compression, write::GzEncoder};
-    let file = fs::File::create(output)
-        .map_err(|error| format!("创建 `{}` 失败：{error}", output.display()))?;
-    let encoder = GzEncoder::new(file, Compression::default());
+    let encoder = GzEncoder::new(Vec::new(), Compression::default());
     let mut builder = tar::Builder::new(encoder);
     for (path, bytes) in files.files() {
         let mut header = tar::Header::new_gnu();
@@ -486,13 +469,17 @@ fn write_archive(files: &gugu_compiler::PackageFiles, output: &Path) -> Result<(
             .append_data(&mut header, path, bytes.as_slice())
             .map_err(|error| format!("写归档 `{path}` 失败：{error}"))?;
     }
-    let encoder = builder
+    builder
         .into_inner()
-        .map_err(|error| format!("写归档失败：{error}"))?;
-    let mut file = encoder
+        .map_err(|error| format!("写归档失败：{error}"))?
         .finish()
-        .map_err(|error| format!("完成 gzip 失败：{error}"))?;
-    file.flush().map_err(|error| format!("写归档失败：{error}"))
+        .map_err(|error| format!("完成 gzip 失败：{error}"))
+}
+
+/// 按规范写规范 tar header：普通文件 0644、mtime 0、无 owner/group。
+fn write_archive(files: &gugu_compiler::PackageFiles, output: &Path) -> Result<(), String> {
+    let bytes = archive_bytes(files)?;
+    fs::write(output, bytes).map_err(|error| format!("写归档 `{}` 失败：{error}", output.display()))
 }
 
 pub(crate) fn run_login(registry: &str, token_stdin: bool, options: &GlobalArgs) -> i32 {

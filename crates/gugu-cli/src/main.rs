@@ -11,6 +11,7 @@ mod formatting;
 mod materialize;
 mod output;
 mod package_cmds;
+mod registry_cmds;
 
 #[cfg(all(test, feature = "slow-tests"))]
 #[path = "main_tests.rs"]
@@ -880,10 +881,22 @@ pub(crate) fn resolve_project_lock(
         }
         None
     };
-    let (registry_packages, git_packages) = existing
+    let (mut registry_packages, git_packages) = existing
         .as_ref()
         .map(candidates_from_lock)
         .unwrap_or_default();
+    // registry Protocol v1：按清单声明做索引候选的不动点收集；
+    // 锁已覆盖或 --offline 时不产生网络请求。
+    let session = registry_cmds::RegistrySession::load(options).map_err(|_| ())?;
+    let specs = project.dependency_specs().map_err(|error| {
+        emit_cli_error(format, &error.to_string());
+    })?;
+    let fetch = session
+        .gather_candidates(&specs, &registry_packages, options.offline, format)
+        .map_err(|error| {
+            emit_cli_error(format, &error.to_string());
+        })?;
+    registry_packages.extend(fetch.candidates);
     let mut roots = Vec::with_capacity(packages.len());
     let mut root_features = BTreeMap::new();
     let mut root_default_features = BTreeMap::new();
@@ -909,6 +922,7 @@ pub(crate) fn resolve_project_lock(
             root_default_features,
             registry_packages,
             git_packages,
+            default_registry: fetch.default_identity.clone(),
             ..ResolveOptions::default()
         })
         .map_err(|error| {
@@ -936,6 +950,16 @@ pub(crate) fn resolve_project_lock(
         locked: options.locked,
         vendor: options.vendor,
     };
+    // 缺失的 registry 归档按锁 checksum 下载入库；--deny-yanked 在此生效。
+    registry_cmds::ensure_registry_inputs(
+        &session,
+        &graph,
+        &cache,
+        &fetch.yanked,
+        options.offline,
+        format,
+    )
+    .map_err(|_| ())?;
     let inputs = prepare_dependency_inputs(
         &graph,
         &cache,
