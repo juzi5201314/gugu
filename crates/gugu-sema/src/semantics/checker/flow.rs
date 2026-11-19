@@ -447,6 +447,13 @@ impl Checker<'_, '_> {
                     pack = true;
                     let element = format!("$pack:{}:{name}", iter.0);
                     self.pack_elements.insert(element.clone(), name.clone());
+                    if let Some(signature) = self.callable_bounds.get(name).cloned() {
+                        let bindings = BTreeMap::from([(name.clone(), Ty::Param(element.clone()))]);
+                        self.callable_bounds.insert(
+                            element.clone(),
+                            super::super::model::substitute(&signature, &bindings),
+                        );
+                    }
                     Ty::Param(element)
                 }
                 Ty::Array(t, _) | Ty::Slice(t) => (**t).clone(),

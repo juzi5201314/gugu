@@ -274,6 +274,32 @@ fn heterogeneous_pack_wildcard_pattern() {
 }
 
 #[test]
+fn heterogeneous_pack_callable_bound() {
+    assert_eq!(
+        render(
+            r#"
+        fn sum[Fs: Fn() int...](...fs: Fs) int {
+            let n = 0
+            for f in fs { n = n + f() }
+            n
+        }
+        fn one() int = 1
+        fn single[F: Fn() int](f: F) int = f()
+        fn render() string {
+            let bias = 2
+            let two = fn() int = bias
+            let mixed = sum(one, two)
+            let empty = sum()
+            let baseline = single(two)
+            f"{mixed}:{empty}:{baseline}"
+        }
+    "#
+        ),
+        "3:0:2"
+    );
+}
+
+#[test]
 fn runtime_format_specs_and_dynamic_counts() {
     let expected = [
         oracle("*>6", |f| fmt::format_int(f, 42)),

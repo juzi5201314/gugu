@@ -8,6 +8,19 @@ fn pack_loop_checks_declared_bounds() {
 }
 
 #[test]
+fn pack_loop_callable_bound_still_checks_signature() {
+    assert!(!accepts(
+        "fn apply[Fs...](...fs: Fs) { for f in fs { f() } }\nfn main() { apply(fn() {}) }"
+    ));
+    assert!(!accepts(
+        "fn apply[Fs: Fn(int)...](...fs: Fs) { for f in fs { f(true) } }\nfn main() { apply(fn(n: int) {}) }"
+    ));
+    assert!(!accepts(
+        "fn apply[Fs: Fn() int...](...fs: Fs) { for f in fs { _ = f() } }\nfn main() { apply(fn() bool = true) }"
+    ));
+}
+
+#[test]
 fn pack_loop_requires_declared_bound_even_for_empty_call() {
     assert!(!accepts(
         "use std.fmt.{Formatter}\nfn total[Ts...](...args: Ts) string { let out = Formatter::new()\n for a in args { a.print(&out) }\n out.finish() }\nfn main() { _ = total() }"
