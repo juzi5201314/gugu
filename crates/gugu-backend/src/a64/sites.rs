@@ -16,6 +16,7 @@ pub enum SiteKind {
     PollResume,
     CallReturn,
     SuspendResume,
+    ForeignBridge { dirty: bool },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -87,6 +88,20 @@ pub(crate) struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
+    pub(super) fn foreign_symbol(&self, dirty: bool) -> Result<String, Error> {
+        let bindings = self
+            .bindings
+            .and_then(|bindings| bindings.foreign.as_ref())
+            .ok_or_else(|| {
+                super::error("A64 foreign bridge requires explicit Gugu dispatcher bindings")
+            })?;
+        Ok(if dirty {
+            &bindings.dirty_dispatch
+        } else {
+            &bindings.ordinary_dispatch
+        }
+        .clone())
+    }
     pub fn new(bindings: Option<&'a RuntimeBindings>, labels: usize) -> Result<Self, Error> {
         Ok(Self {
             bindings,
@@ -290,9 +305,6 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 return Err(fail("StackCheck must be the single entry marker"));
             }
         }
-        if matches!(inst.op, Op::ForeignCall(_)) {
-            return Err(fail("calls/stack addresses require stack maps (4c.2)"));
-        }
         if let Op::StackAddr(slot) = inst.op
             && (body.stack_slots.get(slot.index()).is_none()
                 || body
@@ -312,8 +324,8 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 "runtime StackAddr requires a valid slot and Stack provenance",
             ));
         }
-        if let Op::Call(ref call) = inst.op {
-            if call.sret.is_some()
+        if let Op::Call(ref call) | Op::ForeignCall(ref call) = inst.op {
+            if (call.sret.is_some() && call.kind == crate::gir::body::CallKind::Managed)
                 || (call.poll_free_leaf
                     && (call.may_allocate || call.may_unwind || call.may_suspend))
             {
@@ -328,7 +340,7 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
         if inst.safepoint.is_some()
             && !matches!(
                 inst.op,
-                Op::StackCheck | Op::SafepointPoll { .. } | Op::Call(_)
+                Op::StackCheck | Op::SafepointPoll { .. } | Op::Call(_) | Op::ForeignCall(_)
             )
         {
             return Err(fail("safepoint requires stack maps (4c.2)"));
@@ -338,7 +350,14 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 crate::lir::body::SafepointKind::StackCheck
             } else if matches!(inst.op, Op::SafepointPoll { .. }) {
                 crate::lir::body::SafepointKind::Poll
-            } else if matches!(&inst.op, Op::Call(call) if call.may_suspend) {
+            } else if matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if call.kind==crate::gir::body::CallKind::ForeignBridge)
+            {
+                crate::lir::body::SafepointKind::ForeignBridge
+            } else if matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if call.kind==crate::gir::body::CallKind::ForeignBridgeDirtyCpu)
+            {
+                crate::lir::body::SafepointKind::DirtyCpuBridge
+            } else if matches!(&inst.op, Op::Call(call) | Op::ForeignCall(call) if call.may_suspend)
+            {
                 crate::lir::body::SafepointKind::Suspend
             } else {
                 crate::lir::body::SafepointKind::CallReturn
@@ -367,6 +386,8 @@ pub(crate) fn validate(body: &Body) -> Result<(), Error> {
                 | crate::lir::body::SafepointKind::Poll
                 | crate::lir::body::SafepointKind::CallReturn
                 | crate::lir::body::SafepointKind::Suspend
+                | crate::lir::body::SafepointKind::ForeignBridge
+                | crate::lir::body::SafepointKind::DirtyCpuBridge
         ) {
             return Err(super::error("safepoint table requires stack maps (4c.2)"));
         }

@@ -270,6 +270,13 @@ struct Header {
 窄参数按自然大小排列，匿名参数默认提升后全部落栈；此内部能力不开放前端 variadic。
 Apple 函数导入使用既有调用桩，Linux 保留原始符号，数据导入不改写成函数调用桩。
 
+普通与 dirty 外调只能经对应的 Gugu admission dispatcher，调用站点必须有权威挂起栈图。
+按值副本、间接结果和额外 HFA 结果继续使用既有 raw-copy/fixup 事务；native worker
+只接收 raw 请求，在已进入的独立 system stack 上调用 C 并捕获该线程 errno。不得把
+coroutine-stack 地址直接留给 native，也不得提前发布线程退出或释放 worker credit。
+平台线程启动、退出确认与调度绑定仍由平台运行时拥有；缺少显式绑定时必须报错。
+这些内部编译与机器片段接口不登记 A64 目标，也不保证平台镜像或生产调度可运行。
+
 ### 总则
 
 ABI 字符串目前只有 `"C"`。无函数体的 `extern` 是导入，有函数体且公开的 `pub extern "C" fn` 是导出；库名、符号和链接方式必须在构建配置中显式登记。导出边界不能把 Gugu panic 展开到 C 帧：未被 `std.panic.catch` 收集的 panic 必须按[运行时](runtime.md)规则终止进程。

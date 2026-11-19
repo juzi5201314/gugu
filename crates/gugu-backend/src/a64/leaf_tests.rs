@@ -3,6 +3,8 @@ mod atomic;
 mod atomic_vm;
 mod calls;
 mod control;
+mod foreign;
+mod foreign_vm;
 mod foreign_worker;
 mod fp;
 mod fp_vm;
@@ -159,8 +161,12 @@ impl Fixture {
             op,
             Op::Load(_)
                 | Op::Store(_)
+                | Op::Memcpy { .. }
+                | Op::Memmove { .. }
+                | Op::Memset { .. }
                 | Op::Atomic { .. }
                 | Op::Call(_)
+                | Op::ForeignCall(_)
                 | Op::StackCheck
                 | Op::SafepointPoll { .. }
         ) {

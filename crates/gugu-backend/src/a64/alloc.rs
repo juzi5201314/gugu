@@ -58,6 +58,7 @@ pub(crate) fn allocate_roots(
             let source = match site.item {
                 super::machine::Item::Poll { block, instruction } => Some((block, instruction)),
                 super::machine::Item::Call { safepoint, .. } => safepoint,
+                super::machine::Item::ForeignCall { safepoint, .. } => Some(safepoint),
                 _ => None,
             };
             if let Some(source) = source {

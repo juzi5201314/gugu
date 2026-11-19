@@ -697,7 +697,7 @@ CAS 比较不等则 CLREX 后返回 actual/false，不写内存；只对排他�
 字节 VM 用显式 monitor、确定性的失败注入和并发写入替身检查重新读取、窄宽度、
 旧值返回、邻字节保护、顺序指令与有 spill 的寄存器别名情形；不执行 native 线程。
 
-### A64 外调参数包（4d.3a）
+### A64 外调参数包与内部 lowering（4d.3）
 
 runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPacket`
 前缀：x0–x5 位于 16–56，v0–v7 的低 64 位仍在 64–120，x0/x1 与 d0/d1
@@ -709,13 +709,21 @@ runtime-ABI 的 `A64ForeignCallPacket` 保留完整的 176-byte `ForeignCallPack
 
 `runtime/foreign.gg` 的 `[128,168)` 回写窗口和错误状态位置不变；HFA 的额外结果
 通过普通 output fixup 回写，不另造 admission、credit、pin、cleanup 或 copy-back
-协议。shared prefix 的 reserved 字保持零。此阶段只定义布局和原始 C 签名，尚未把
-A64 worker、栈切换或 LIR 外调 lowering 接入；外调仍显式拒绝，不登记新目标。
+协议。shared prefix 的 reserved 字保持零。不登记新目标。
 
 `foreign::classify` 按 canonical C 类型分别分类 Linux 与 Darwin，不从旧的 SysV/Win64
 车道推断 HFA 或符号性。Darwin 不跳过奇数 GPR；固定窄栈参数紧凑排列，匿名参数
 默认提升后全部使用 8-byte 栈槽；Linux 的 16-byte 对齐参数从偶数 GPR 开始。
 HFA 不能拆分到剩余 FP 寄存器与栈；大于 16-byte 的非 HFA 值通过 raw 副本间接传递。
+
+`machine::ForeignCall` 在分配后展开。先把全部 SSA 输入保存到独立 staging 区，
+再构造 native 参数包，防止固定 scratch 覆盖尚未使用的输入。by-value、sret 与额外
+HFA 结果使用原有 fixup；sret 的协程栈目标保存为 stack-high 相对深度，恢复后重算。
+dispatcher 接收同 x64 一样的四个深度/长度/记录参数，普通与 dirty 符号必须显式绑定。
+调用后的 PC 使用 kind=3、对应 dirty bit 的权威 ForeignBridge 图；参数根来自原始 spill，
+不是仅在进入 dispatcher 前短暂存活的 packet scratch 副本。
+bridge 的调度协议由 CallKind 决定；C callee 的 `may_suspend=false` 不豁免 admission
+或权威挂起图，也不能作为拒绝生产 LIR 外调的条件。
 
 `fragments::foreign_native_worker` 是已获 admission 的 OS native 线程入口，依赖调用方
 提供独立、16-byte 对齐的 system stack；不能直接从协程栈调用。它有界探测栈参数区，
@@ -723,6 +731,30 @@ HFA 不能拆分到剩余 FP 寄存器与栈；大于 16-byte 的非 HFA 值通�
 不清除 thread handle、不发布已 join 或释放 credit。线程启动、join 确认和调度仍需平台绑定。
 Linux C 引用保留 raw 名，Darwin 函数使用 `import_stub_symbol`；Data 符号不加函数桩前缀。
 字节 VM 使用 TLS 函数、admission/copy-back 与栈移动替身，绝不执行 OS FFI 或线程。
+function assembler 同时保留 ADRP/ADD 地址重定位与 call 重定位；无链接的 `assemble`
+入口仍拒绝任何未解析符号。
+
+### A64 剩余显式拒绝清单（未登记目标）
+
+已补入无调用 byte-region memcpy/memmove/memset、条件 BRK、实例及外部地址形成。
+下列 LIR 仍不宣称完整支持：
+
+- `RuntimeCall`、`RuntimeMachineCall`、`CoroutineSwitch`、allocation/handle/GC/barrier
+  与 region/scoped-view 操作：需要 PR 8 的 runtime/glue、异常与证明绑定。
+- `SymbolAddr` 的 global/TLS、adapter、descriptor、type table/name、vtable、data blob，
+  以及 `CoverageCounter`：需要 PR 6/8 的镜像数据布局与绑定；extern 地址只发重定位。
+- `Vector` 的算术、shuffle、lane 与 reduction：通用 SIMD 尚无 lowering；现有生产
+  LIR builder 不生成该 Op，V128 transport/select/load/store/bitcast 已支持。
+- `ForeignLeaf`、可 unwind 或 tail 外调、foreign callback/export adapter：未绑定其
+  system-stack/异常/回调路径；外调当前只接受普通和 dirty bridge，拒绝 coroutine
+  stack 裸地址泄漏、GC 车道、过对齐/过大签名和超 native stack budget。
+- `Invoke`、`ResumePanic` 尚未有专用 terminator lowering；结构化跳转、条件跳转、
+  switch、return、tail managed call、trap 和 unreachable 已支持。
+- 普通 managed 调用仍要求 scalar internal ABI 和直接实例；aggregate/sret、间接/erased
+  调用与捕获环境依赖 runtime/adapter 路径。整数除余仍要求静态非零除数证明；窄宽度
+  的非法 carry/wide、非法转换和超帧范围显式拒绝。
+
+这些拒绝不隐藏为 no-op；特别是泛型 SIMD 与动态除零检查不是已实现的 PR 6/8 能力。
 
 ### A64 生产源与镜像数据绑定
 

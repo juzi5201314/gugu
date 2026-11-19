@@ -360,6 +360,29 @@ fn rewrite_item(
     runtime: &mut super::sites::Emitter<'_>,
 ) -> Result<(), Error> {
     match item {
+        Item::Memory(kind) => super::memory::lower(*kind, out, runtime),
+        Item::TrapIf { condition } => {
+            let reg = match location(MReg::Virtual(*condition), allocation)? {
+                Some(Location::Reg(reg)) => reg.0,
+                Some(Location::Slot(slot)) => {
+                    stack(out, true, 16, offset(frame, slot)?)?;
+                    16
+                }
+                None => return Err(super::error("missing trap condition allocation")),
+            };
+            let done = runtime.label()?;
+            out.push(layout::Item::Branch {
+                form: machine::form("cbz.X")?,
+                operands: vec![Operand::Reg(Reg::x(reg))],
+                target: done,
+            });
+            emit(out, "brk", vec![Operand::Imm(0)])?;
+            out.push(layout::Item::Label(done));
+            Ok(())
+        }
+        Item::ForeignCall { .. } => {
+            super::foreign_emit::lower(item, allocation, frame, runtime, out)
+        }
         Item::Atomic(atomic) => atomic.emit(out, runtime),
         Item::RootInit {
             slot,
@@ -377,7 +400,9 @@ fn rewrite_item(
             init_byte(out, offset, *initialized)
         }
         Item::Poll { .. } => Err(super::error("poll requires runtime bindings")),
-        Item::Constant { dest, .. } | Item::StackAddr { dest, .. } => {
+        Item::Constant { dest, .. }
+        | Item::StackAddr { dest, .. }
+        | Item::SymbolAddr { dest, .. } => {
             let Some(loc) = location(MReg::Virtual(*dest), allocation)? else {
                 return Ok(());
             };
@@ -387,6 +412,17 @@ fn rewrite_item(
             };
             if let Item::Constant { bits, .. } = item {
                 constant(out, reg, *bits)?;
+            } else if let Item::SymbolAddr { symbol, .. } = item {
+                let target = Operand::Target(super::inst::Target::Symbol {
+                    name: symbol.clone(),
+                    addend: 0,
+                });
+                emit(out, "adrp", vec![Operand::Reg(Reg::x(reg)), target.clone()])?;
+                emit(
+                    out,
+                    "add.X.imm",
+                    vec![Operand::Reg(Reg::x(reg)), Operand::Reg(Reg::x(reg)), target],
+                )?;
             } else if let Item::StackAddr { slot, .. } = item {
                 let offset = *frame
                     .locals
