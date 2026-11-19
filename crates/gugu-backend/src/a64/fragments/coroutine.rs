@@ -5,16 +5,10 @@ use crate::runtime::processor::{PROCESSOR_STATE_OFFSET, PROCESSOR_SYSTEM_SLOT_OF
 
 use super::{Builder, Fragment, HOT, LR, PROCESSOR, SP, reg, unshifted};
 
-/// x27/x28 由换入方提供，不保存在 context 中。
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[repr(C)]
-pub struct Context {
-    pub sp: u64,
-    pub pc: u64,
-    pub x19_to_x26: [u64; 8],
-    pub x29: u64,
-    pub d8_to_d15: [u64; 8],
-}
+pub use crate::runtime::coroutine::{
+    A64Context as Context, A64MorestackMailbox as MorestackMailbox,
+    A64MorestackScratch as MorestackScratch,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContextCode {
@@ -70,29 +64,6 @@ fn transfer_context(b: &mut Builder, base: Reg, gpr: &str, fp: &str) {
         );
     }
     b.memory(gpr, Reg::x(29), base, offset_of!(Context, x29));
-}
-
-/// 由 processor 的 state 指针定位；系统侧进入/恢复协程前绑定相应的 scratch。
-/// 地址字段指向非移动 runtime 记录。
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[repr(C)]
-pub struct MorestackMailbox {
-    pub hot: u64,
-    pub entry_sp: u64,
-    pub candidate: u64,
-    pub required: u64,
-    pub scratch: u64,
-    pub mutator_context: u64,
-    pub system_context: u64,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-#[repr(C, align(16))]
-pub struct MorestackScratch {
-    pub return_pc: u64,
-    pub caller_lr: u64,
-    pub vector: [[u8; 16]; 8],
-    pub gpr: [u64; 9],
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

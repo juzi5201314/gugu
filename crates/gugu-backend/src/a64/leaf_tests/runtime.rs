@@ -163,7 +163,9 @@ fn empty_runtime_body_and_exact_return_pc_cfa_diagnostics() {
                 assert_eq!(site.cfa_offset, 0);
                 assert_eq!(site.caller_lr, sites::CallerLr::Register(10));
             }
-            sites::SiteKind::PollResume | sites::SiteKind::CallReturn => {
+            sites::SiteKind::PollResume
+            | sites::SiteKind::CallReturn
+            | sites::SiteKind::SuspendResume => {
                 assert_eq!(site.cfa_offset, fragment.frame.size);
                 assert_eq!(
                     site.caller_lr,

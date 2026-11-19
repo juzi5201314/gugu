@@ -164,6 +164,19 @@ Linux 放入 `.gugu.stackmap`，Windows 放入 `.gugustk`。section 内所有整
 
 ### A64 lowering 到 map/CFA 的接线（4c.2b.1）
 
+4c.2b.2b.1 的直接 managed 挂起调用使用 LIR Suspend 与 kind=2 的 SuspendResume 图，
+跨点指针与调用实参继续强制落槽，结果不在返回位置提前成为根。Context 与 morestack
+scratch/mailbox 采用 runtime-abi 的权威布局。Rust copy 消费方配对解码每个函数的 v5/CFA
+section，按加载 bias 定位精确返回 PC，要求 frame 覆盖整个已用区间且 FP 链与 Context 一致。
+它保存 typed gate 的判定，只修复 StackInterior 字和结构性 FP；普通 GPR、浮点位型、heap
+引用和 PC 不因数值像栈地址而改变。MorestackEntry 不是普通可复制 frame：顶层先保存 scratch
+参数根，再从 x10 恢复 caller PC，随后只复制有 copy flag 的 caller frames。恢复之前必须先
+修复 scratch 中标记为 StackInterior 的 x0–x8，再更新 mailbox watermark；x27/x28 由恢复方给出。
+Suspend 的权威 LIR 根使用 Value 记录，A64 还需枚举同一值在第九个及以后实参中的传出副本，
+把实际 outgoing slot 登记到同一种类；不能只修复原 spill 而留下失效的传入栈参数。
+底部终止 PC 由调用方显式登记；缺图、未登记 helper frame、非精确 PC 和损坏 FP 链一律拒绝。
+这里仍是内部 Rust copy/VM 契约，不是生产 Gugu decoder/image 已接通的声明。
+
 4c.2b.2a 同时消费 LiveSlots 的局部槽根和 InitSlots 的逐根 must 证明。一个 union root
 表项对应一个 frame byte；含相同字偏移的不同 provenance 必须有独立 gate，不能同时折叠
 进多个 fixed bitmap。尚未静态证明的根在 PollResume 和 CallReturn 都使用 TypedRoot。

@@ -405,6 +405,7 @@ fn rewrite_item(
             Ok(())
         }
         Item::Call {
+            suspend,
             target,
             arguments,
             results,
@@ -415,7 +416,11 @@ fn rewrite_item(
                 runtime.call(
                     out,
                     target.clone(),
-                    super::sites::SiteKind::CallReturn,
+                    if *suspend {
+                        super::sites::SiteKind::SuspendResume
+                    } else {
+                        super::sites::SiteKind::CallReturn
+                    },
                     Some(*block),
                     Some(*instruction),
                 )?;
