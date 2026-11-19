@@ -182,10 +182,16 @@ impl Expander<'_, '_> {
                 body,
                 into_iter,
                 next,
+                initializations,
             } => {
                 m.pattern(pattern);
                 m.expr(value);
                 m.expr(body);
+                for plan in initializations {
+                    m.local(&mut plan.array);
+                    m.local(&mut plan.index);
+                    plan.store.0 += m.statements;
+                }
                 for d in into_iter.iter_mut().chain(next) {
                     *d += m.dispatches
                 }

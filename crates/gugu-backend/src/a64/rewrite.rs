@@ -423,11 +423,23 @@ fn rewrite_item(
                     "add.X.imm",
                     vec![Operand::Reg(Reg::x(reg)), Operand::Reg(Reg::x(reg)), target],
                 )?;
-            } else if let Item::StackAddr { slot, .. } = item {
-                let offset = *frame
-                    .locals
-                    .get(*slot as usize)
-                    .ok_or_else(|| super::error("unknown local frame slot"))?;
+            } else if let Item::StackAddr {
+                slot, root_init, ..
+            } = item
+            {
+                let offset = if *root_init {
+                    frame
+                        .init_bases
+                        .get(*slot as usize)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| super::error("unknown root initialization slot"))?
+                } else {
+                    *frame
+                        .locals
+                        .get(*slot as usize)
+                        .ok_or_else(|| super::error("unknown local frame slot"))?
+                };
                 adjust(out, Reg::x(reg), Reg::sp(Width::X), offset, false)?;
             }
             if let Location::Slot(slot) = loc {

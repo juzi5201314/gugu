@@ -157,12 +157,33 @@ impl BodyBuilder<'_, '_, '_, '_> {
                 self.loops.pop();
                 self.names = names;
                 // 迭代器协议派发按被迭代表达式登记，与 checker 的 `user_iterator` 一致。
+                let initializations = self
+                    .facts
+                    .body
+                    .array_init_loops
+                    .iter()
+                    .filter(|plan| plan.expression == source)
+                    .map(|plan| {
+                        Ok::<_, Diagnostic>(hir::ArrayInitLoop {
+                            array: self.slots[plan.array_slot]
+                                .ok_or_else(|| self.error("初始化数组缺少 local"))?,
+                            index: self.slots[plan.index_slot]
+                                .ok_or_else(|| self.error("初始化下标缺少 local"))?,
+                            store: self.statement_map[plan.store.0 as usize]
+                                .ok_or_else(|| self.error("初始化写入缺少 statement"))?,
+                            length: self
+                                .compiler
+                                .array_length(&plan.length, self.output.definition)?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
                 hir::ExprKind::For {
                     pattern,
                     value,
                     body,
                     into_iter: self.selected_dispatch(iter, Some("IntoIter"), Some("into_iter"))?,
                     next: self.selected_dispatch(iter, Some("Iter"), Some("next"))?,
+                    initializations,
                 }
             }
             ast::ExprKind::Try(body) => {

@@ -245,6 +245,7 @@ impl Builder<'_> {
             site: crate::mono::instantiate::CallSite::Expression(id.0),
         });
         self.switch_to(normal);
+        self.mark_written(Place::local(dest));
         self.set_value(id, dest);
         Ok(Some(dest))
     }
@@ -362,6 +363,7 @@ impl Builder<'_> {
             site: crate::mono::instantiate::CallSite::Dispatch(dispatch),
         });
         self.switch_to(normal);
+        self.mark_written(Place::local(dest));
         Ok(dest)
     }
 

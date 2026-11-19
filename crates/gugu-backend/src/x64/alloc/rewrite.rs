@@ -709,6 +709,20 @@ fn rewrite_memory(
 ) -> Result<Operand, AllocError> {
     let mut disp = i64::from(mem.disp);
     let base = match mem.base {
+        Some(Reg::Virtual(id)) if id >= super::super::reg::FRAME_INIT_BASE => {
+            let slot = (id - super::super::reg::FRAME_INIT_BASE) as usize;
+            let offset = emit
+                .frame
+                .init_bases
+                .get(slot)
+                .copied()
+                .flatten()
+                .ok_or_else(|| AllocError::new("根初始化地址缺少帧内字节"))?;
+            disp = disp
+                .checked_add(i64::from(offset))
+                .ok_or_else(|| AllocError::new("根位移溢出"))?;
+            Some(Reg::Gpr(Gpr::Rsp))
+        }
         Some(Reg::Virtual(id)) if id >= FRAME_SLOT_BASE => {
             let slot = usize::try_from(id - FRAME_SLOT_BASE).expect("frame 槽下标适配 usize");
             let local = emit

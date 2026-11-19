@@ -2,6 +2,7 @@ use crate::{CompileRequest, Compiler, TargetName};
 
 #[cfg(feature = "slow-tests")]
 mod arena;
+mod array_init;
 #[cfg(feature = "slow-tests")]
 mod callable;
 #[cfg(feature = "slow-tests")]

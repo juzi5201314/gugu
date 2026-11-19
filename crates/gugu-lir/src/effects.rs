@@ -13,6 +13,7 @@ impl Op {
             | Self::FConst(_)
             | Self::SymbolAddr(_)
             | Self::StackAddr(_)
+            | Self::RootInitAddr(_)
             | Self::PtrOffset
             | Self::Integer(_)
             | Self::Float(_)
@@ -120,6 +121,7 @@ impl Op {
             | Self::DecodeCompressedRef => target.poll_cost(self),
             Self::SymbolAddr(_)
             | Self::StackAddr(_)
+            | Self::RootInitAddr(_)
             | Self::PtrOffset
             | Self::ScopedViewBegin { .. }
             | Self::ScopedViewEnd { .. }
