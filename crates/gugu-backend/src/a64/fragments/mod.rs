@@ -10,6 +10,7 @@ mod entry;
 mod linux_entry;
 mod linux_fd;
 mod linux_net;
+mod linux_process;
 mod linux_signal;
 mod linux_syscall;
 mod poll;
@@ -28,6 +29,7 @@ pub use entry::rt0;
 pub(crate) use linux_entry::linux_main;
 pub use linux_fd::linux_fd_dispatch;
 pub use linux_net::linux_net_dispatch;
+pub use linux_process::{linux_process_call, linux_process_worker};
 pub use linux_signal::linux_signal_dispatch;
 pub use poll::safepoint_slow;
 
