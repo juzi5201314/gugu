@@ -1,19 +1,31 @@
-//! ARMv8.0-A 编码库与独立运行时机器片段；尚未接入目标。
+//! ARMv8.0-A 编码库、独立运行时片段与内部整数叶 lowering；尚未接入目标。
 
+pub mod abi;
+pub mod alloc;
 mod bits;
+pub mod codegen;
 pub mod contract;
 pub mod decode;
 pub mod encode;
 pub mod fragments;
+pub mod frame;
 pub mod inst;
+pub mod layout;
+mod lower;
+pub mod machine;
 mod print;
 pub mod reg;
+pub mod rewrite;
 mod rows;
+pub mod select;
 pub mod table;
 pub mod verify;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod leaf_tests;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Error(pub String);

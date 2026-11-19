@@ -433,7 +433,7 @@ foldhash 固定种子状态，避免每次 emit 使用 SipHash。索引保留表
 
 ### A64 独立编码库
 
-`gugu-backend::a64` 尚未接入任何目标、CLI 或 lowering，不能据此选择
+`gugu-backend::a64` 尚未接入任何目标或 CLI，不能据此选择
 `aarch64` 目标。封闭表目前包含 307 个 ARMv8.0-A base 与 FP/AdvSIMD 标量形式；不包含
 LSE 或 V128 整数向量指令。`FormId` 是固定表序下标，操作数采用汇编顺序；W/X 与
 B/H/S/D/Q 是寄存器视图，SP 与 XZR 是不同寄存器种类，编码号 31 的解释由槽决定。
@@ -463,6 +463,42 @@ revision 并更新测试中的指纹钉值，不能静默沿用身份。
 `clang -c -target arm64-apple-macos` 与 `otool -t`，并非由本编码器生成期望值。
 测试明确引用该 fixture，通过 Rust 构造每个 form 的样本及边界样本，同时比较规范文本、
 字节和解码回环；默认测试不启动 assembler 或任何子进程。
+
+### A64 内部整数叶 lowering
+
+`a64::codegen::compile_leaf(&Body)` 消费已验证的 LIR，再检查 arena/CFG、整数签名与
+`PollFreeLeaf` 接口；不进入 `plan()` 或前端派发。不明确证明为 leaf，仍带 stack check、
+poll、安全点或 managed/root 初始化义务的函数被拒绝，而不是删除这些操作。
+输出为字节、最终标签偏移、frame 与 allocation 诊断，没有镜像、外部重定位或 GC map。
+
+这是私有整数叶 ABI，不是 AAPCS64/Darwin C ABI：参数用 `x0–x7`，其余标量用入口 SP
+以上的 8 字节槽；结果用 `x0–x1`，不支持超过两字结果或 aggregate/sret。
+保留 SP、`x16/x17`（rewrite/copy scratch）、`x18`（平台）、`x29`（FP）、`x30`（LR）；
+`x27 = CoroutineHot*`、`x28 = LogicalProcessor*` 均不分配。分配池为 `x0–x15`、`x19–x26`，
+用到的 `x19–x26` 保存恢复。非零 frame 保存 FP/LR；SP 16 字节对齐，无 red zone。
+尚无 stack-check/morestack prologue，leaf 入口容量是调用方义务；初版 frame 上限为
+32752 字节，超出、槽或偏移溢出均返回明确错误。
+
+`machine` 虚拟操作数显式携带 read/write/read-write 角色，地址基址是 read。
+`select` 与 `lower/{integer,memory}` 负责整数/原始指针、常量、访存与 CFG 选指。
+比较物化为 0/1，窄值为零扩展位模式，有符号运算先扩展；carry/borrow 为两段进位/借位的或。
+除法只接受静态非零除数，不能以 A64 零除结果代替语言 panic。FP/V128、managed/compressed
+引用、调用、异常、原子、runtime 与外部符号操作返回带 body/block/site 的错误。
+显式终止的 Trap/Unreachable 用 BRK，TrapIf 不替代为 BRK。
+
+`alloc` 仅归一化事件，共享 `regalloc` 完成 CFG liveness、加权 scan、slot 复用与并行 copy
+调度，不做 rematerialization，没有第二套分配器。边拆为 copy block，支持同时赋值和环。
+ABI 参数的寄存器/栈搬运与窄值规范化只在独立入口 stub 执行一次；stub 转入 LIR 入口块，
+所有 CFG 边（含指向入口的回边）只指向 LIR 块，不重复读取调用方参数。
+`frame/rewrite` 在 x16/x17 内完成 spill/reload、MOVZ/MOVN/MOVK 常量、SP 地址合法化；
+copy 环用 x16，slot-to-slot 搬运用 x17，不借用活跃分配寄存器。
+`layout` 单调扩展越界 B.cond/CBZ/CBNZ/TBZ/TBNZ 为反条件跳过一条 B，再按最终 PC 回填；
+B 仍越界则报错，不生成 veneer。现有 verifier/encoder 是最终边界，未解决符号被拒绝。
+测试进程内手建 LIR，选指到编码/解码回环，用有限的确定性解释器核对整数、CFG、内存、
+spill 和保存寄存器；距离边界/级联扩展使用合成大小，不分配巨大 padding。
+
+未来站点已约定：poll clobber 所有 caller-saved 寄存器；morestack clobber `x9–x14`，
+保留 `x0–x8/q0–q7`。这里仅记录约束，叶 lowering 尚不调用这些片段。
 
 ### A64 运行时机器片段
 
